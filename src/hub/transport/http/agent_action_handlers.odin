@@ -591,20 +591,6 @@ publish_agent_messages_read :: proc(h:^Agent_Action_Handlers, owner_user_id:stri
 	events.publish_owned(h.event_bus, owner_user_id, messages_read_event_json(c, message_ids, reader_instance_id))
 }
 
-// publish_current_task_changed emits a live resource_changed event on an agent
-// instance's current task pointer so the dashboard updates its work-vs-review
-// banner without a manual refresh (CT-9). Fire-and-forget; no-op without a bus.
-publish_current_task_changed :: proc(h: ^Agent_Action_Handlers, owner_user_id, agent_instance_id, current_task_id, current_task_role: string) {
-	if h == nil || h.event_bus == nil || owner_user_id == "" do return
-	b := strings.builder_make()
-	defer strings.builder_destroy(&b)
-	strings.write_string(&b, `{"agent_instance_id":"`); write_handler_json_string(&b, agent_instance_id)
-	strings.write_string(&b, `","current_task_id":"`); write_handler_json_string(&b, current_task_id)
-	strings.write_string(&b, `","current_task_role":"`); write_handler_json_string(&b, current_task_role)
-	strings.write_string(&b, `"}`)
-	events.publish_resource_changed(h.event_bus, owner_user_id, "agent_instance", agent_instance_id, "current_task_changed", strings.to_string(b))
-}
-
 // publish_agent_action emits a lean, ephemeral "agent_action" event to the acting
 // instance's OWNER connection so the dashboard can show a transient activity
 // bubble of what the agent is doing right now. Best-effort and non-blocking:

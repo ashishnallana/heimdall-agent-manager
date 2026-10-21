@@ -149,6 +149,17 @@ task_engine_on_start_success :: proc(ctx: rawptr, inst: domain.Agent_Instance) {
 	taskv2.on_start_success((^taskv2.Service)(ctx), inst)
 }
 
+// task_engine_on_instance_changed runs after a taskv2 commit that rewrote an
+// instance's current-task pointer; it re-reads the committed row.
+task_engine_on_instance_changed :: proc(ctx: rawptr, instance_id: string) {
+	graph := (^App_Graph)(ctx)
+	if graph == nil do return
+	inst, found, _ := iface.agent_get_instance(&graph.repos.agents, instance_id)
+	if !found do return
+	defer domain.agent_instance_destroy(&inst)
+	http.publish_instance_changed(&graph.event_bus, inst, "current_task_changed")
+}
+
 // agents_on_reconfiguration_changed publishes the reconfiguration hint and, on
 // the advance that committed the destination (agent_instances bridge/provider/
 // model/configuration_revision rewritten by trigger), the instance hint too.
@@ -315,6 +326,8 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 	graph.task_engine.event_bus = &graph.event_bus
 	graph.task_engine.on_tasks_changed = task_engine_on_tasks_changed
 	graph.task_engine.on_tasks_changed_ctx = rawptr(graph)
+	graph.task_engine.on_instance_changed = task_engine_on_instance_changed
+	graph.task_engine.on_instance_changed_ctx = rawptr(graph)
 	taskchain_service.set_engine(&graph.taskchains, &graph.task_engine)
 	taskchain_service.set_uow_factory(&graph.taskchains, &graph.uow_factory)
 	// Instance lifecycle → engine: ONE chokepoint for every death path

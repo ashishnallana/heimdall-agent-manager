@@ -1082,7 +1082,8 @@ relaunch_instance_locked :: proc(service: ^Agent_Service, auth: contracts.Auth_C
 // failed; a successful start or a stop clears it, a retry in flight keeps it.
 // facts: when non-nil the lifecycle hook is NOT called; the fact is appended
 // for the caller to deliver after it releases its locks (review B1).
-apply_bridge_status_report :: proc(service: ^Agent_Service, bridge_id, instance_id: string, state_seq: int, runtime_status, activity_status: string, owner_user_id: string = "", launch_epoch: string = "", error_json: string = "", facts: ^[dynamic]Lifecycle_Fact = nil) -> (domain.Agent_Instance, bool, domain.Domain_Error) {
+apply_bridge_status_report :: proc(service: ^Agent_Service, bridge_id, instance_id: string, state_seq: int, runtime_status, activity_status: string, owner_user_id: string = "", launch_epoch: string = "", error_json: string = "", facts: ^[dynamic]Lifecycle_Fact = nil, changed: ^bool = nil) -> (domain.Agent_Instance, bool, domain.Domain_Error) {
+	if changed != nil do changed^ = false
 	inst, ok, err := iface.agent_get_instance(service.agents, instance_id)
 	if !ok do return domain.Agent_Instance{}, false, err
 	if inst.bridge_id != bridge_id || (owner_user_id != "" && string(inst.owner_user_id) != owner_user_id) {
@@ -1109,6 +1110,9 @@ apply_bridge_status_report :: proc(service: ^Agent_Service, bridge_id, instance_
 			if len(inst.updated_at) > 0 do delete(inst.updated_at)
 			inst.updated_at = strings.clone(now)
 			if activity_status != "" && activity_status != inst.activity_status {
+				// The only user-visible field a liveness refresh can move (REQ-2:
+				// unchanged heartbeats must not fan out events).
+				if changed != nil do changed^ = true
 				if len(inst.activity_status) > 0 do delete(inst.activity_status)
 				inst.activity_status = strings.clone(activity_status)
 			}
@@ -1121,6 +1125,9 @@ apply_bridge_status_report :: proc(service: ^Agent_Service, bridge_id, instance_
 		}
 	}
 	now := platform.clock_now(service.clock)
+	if changed != nil {
+		changed^ = (runtime_status != "" && runtime_status != inst.runtime_status) || (activity_status != "" && activity_status != inst.activity_status) || error_json != ""
+	}
 	inst.last_applied_seq = effective_state_seq
 	if runtime_status != "" {
 		if len(inst.runtime_status) > 0 do delete(inst.runtime_status)

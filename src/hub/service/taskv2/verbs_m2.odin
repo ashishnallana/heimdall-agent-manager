@@ -470,7 +470,7 @@ review_post :: proc(svc: ^Service, auth: contracts.Auth_Context, input: Review_I
 	if strings.trim_space(input.summary) != "" do json_str(&p, "summary", strings.trim_space(input.summary))
 	refolded, _, rok, rerr := record_event(svc, &u, task, actor, EV_REVIEW_POSTED, json_end(&p))
 	if !rok { _, _ = end_uow(svc, &u, false); return {}, false, rerr }
-	mark_instance_idle(svc, inst.agent_instance_id, now)
+	mark_instance_idle(svc, &u, inst.agent_instance_id, now)
 	effect_stop(&u, inst.bridge_id, string(task.chain_id), inst.agent_instance_id)
 	arm_idle_ttl(svc, inst.agent_instance_id, fleet_idle_ttl(svc, task.chain_id, task.owner_user_id, inst.agent_id), now)
 	gate, gok, gerr := evaluate_gate_in_uow(svc, &u, chain, refolded, actor)

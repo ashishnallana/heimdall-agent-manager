@@ -12,6 +12,7 @@ import iface "odin_test:hub/repository/iface"
 import agent_service "odin_test:hub/service/agent"
 import events "odin_test:hub/service/events"
 import project_service "odin_test:hub/service/project"
+import taskv2 "odin_test:hub/service/taskv2"
 import api_http "odin_test:hub/transport/http"
 
 // REQ-2 (refresh_producers): after-write resource hints reach every socket of
@@ -206,4 +207,54 @@ test_refresh_reconfiguration_get_is_pure_and_reaper_times_out :: proc(t: ^testin
 	testing.expect(t, !lost, "stale revision must lose the CAS")
 	_ = stale
 	testing.expect_value(t, f.graph.event_bus.event_seq, seq_before)
+}
+
+@(test)
+test_refresh_instance_writers_publish :: proc(t: ^testing.T) {
+	f: Refresh_Fixture
+	defer refresh_fixture_teardown(&f)
+	if !refresh_fixture_setup(t, &f, "instance") do return
+	tab := refresh_socket_open(t, &f.graph, "alice"); defer refresh_socket_close(&f.graph, tab)
+	bob := refresh_socket_open(t, &f.graph, "bob"); defer refresh_socket_close(&f.graph, bob)
+
+	// taskv2 instance-pointer writes publish only after COMMIT; rollback drops them.
+	flush_ws_socket(tab.client)
+	rolled, began, _ := taskv2.begin_uow(&f.graph.task_engine)
+	if !testing.expect(t, began, "begin_uow") do return
+	taskv2.effect_instance_changed(&rolled, f.inst_id)
+	_, _ = taskv2.end_uow(&f.graph.task_engine, &rolled, false)
+	none, leaked := drain_matching_ws_event(tab.client, `"change":"current_task_changed"`, 300_000_000)
+	defer delete(none)
+	testing.expect(t, !leaked, "rolled-back UoW must not publish")
+
+	committed, began2, _ := taskv2.begin_uow(&f.graph.task_engine)
+	if !testing.expect(t, began2, "begin_uow") do return
+	taskv2.effect_instance_changed(&committed, f.inst_id)
+	taskv2.effect_instance_changed(&committed, f.inst_id)
+	_, _ = taskv2.end_uow(&f.graph.task_engine, &committed, true)
+	frame, got := drain_matching_ws_event(tab.client, `"change":"current_task_changed"`)
+	defer delete(frame)
+	testing.expect(t, got, "committed UoW publishes current_task_changed")
+	testing.expect(t, strings.contains(frame, f.inst_id) && strings.contains(frame, `"current_task_id":`) && strings.contains(frame, `"configuration_revision":`) && strings.contains(frame, `"provider":"claude"`), "instance summary carries task pointer and configuration")
+	testing.expect_value(t, strings.count(frame, `"change":"current_task_changed"`), 1)
+	other, crossed := drain_matching_ws_event(bob.client, f.inst_id, 300_000_000)
+	defer delete(other)
+	testing.expect(t, !crossed, "another owner must not receive alice's instance event")
+
+	// Bridge status reports: a transition reports changed, an identical
+	// liveness beat does not (the digest publishes only on changed).
+	moved := false
+	first, applied, _ := agent_service.apply_bridge_status_report(&f.graph.agents, f.bridge_id, f.inst_id, 1, "running", "idle", changed = &moved)
+	testing.expect(t, applied, "first status report applies")
+	testing.expect(t, moved, "launching -> running is a visible change")
+	domain.agent_instance_destroy(&first)
+	moved = true
+	again, applied2, _ := agent_service.apply_bridge_status_report(&f.graph.agents, f.bridge_id, f.inst_id, 1, "running", "idle", changed = &moved)
+	testing.expect(t, applied2, "liveness beat still refreshes last_seen_at")
+	testing.expect(t, !moved, "an unchanged beat is not a change")
+	domain.agent_instance_destroy(&again)
+	moved = false
+	busy, applied3, _ := agent_service.apply_bridge_status_report(&f.graph.agents, f.bridge_id, f.inst_id, 1, "running", "busy", changed = &moved)
+	testing.expect(t, applied3 && moved, "an activity flip on a liveness beat is a change")
+	domain.agent_instance_destroy(&busy)
 }

@@ -60,6 +60,10 @@ Service :: struct {
 	// notify_observer sees every 1-line coordinator attention notification after commit (tests).
 	notify_observer:     proc(ctx: rawptr, instance_id, trigger, line: string),
 	notify_observer_ctx: rawptr,
+	// on_instance_changed runs after commit for every instance whose current
+	// task pointer or idle stamp changed (wiring publishes agent_instance).
+	on_instance_changed:     proc(ctx: rawptr, instance_id: string),
+	on_instance_changed_ctx: rawptr,
 	// vcs_show_file resolves a file at a commit on a chain directory via the bridge (M3 R2.2).
 	vcs_show_file:       proc(ctx: rawptr, chain_id: domain.Task_Chain_ID, owner: domain.User_ID, directory_id, rev, file_path: string) -> (string, bool, domain.Domain_Error),
 	vcs_show_file_ctx:   rawptr,
@@ -150,6 +154,9 @@ Effects :: struct {
 	keys: [dynamic]string,
 	// Resolved wake selections must survive until the outer commit flushes.
 	owned_strings: [dynamic]string,
+	// instances whose current-task pointer / idle stamp this UoW rewrote
+	// (REQ-2); ids are owned by owned_strings, deduplicated on add.
+	instances: [dynamic]string,
 }
 
 Coordinator_Notification :: struct {
@@ -222,6 +229,7 @@ begin_uow :: proc(svc: ^Service) -> (Uow, bool, domain.Domain_Error) {
 	u.effects.nudges = make([dynamic]Agent_Nudge)
 	u.effects.attention_tasks = make([dynamic]Attention_Effect)
 	u.effects.keys = make([dynamic]string)
+	u.effects.instances = make([dynamic]string)
 	if svc.uow_factory == nil {
 		lockorder.assert_tx_mutex_allowed()
 		return u, true, domain.Domain_Error{}
@@ -316,6 +324,8 @@ move_effects :: proc(dst, src: ^Effects) {
 	append(&dst.attention_tasks, ..src.attention_tasks[:]); delete(src.attention_tasks)
 	append(&dst.keys, ..src.keys[:]); delete(src.keys)
 	append(&dst.owned_strings, ..src.owned_strings[:]); delete(src.owned_strings)
+	for id in src.instances { seen := false; for d in dst.instances do if d == id { seen = true; break }; if !seen do append(&dst.instances, id) }
+	delete(src.instances)
 	src^ = Effects{}
 }
 
@@ -364,6 +374,7 @@ destroy_effects :: proc(e: ^Effects) {
 	delete(e.keys)
 	for s in e.owned_strings do delete(s)
 	delete(e.owned_strings)
+	delete(e.instances)
 }
 
 // agent_notice_command_json: a one-line notice for an agent's terminal, sent as
@@ -422,6 +433,9 @@ flush_effects :: proc(svc: ^Service, e: ^Effects) {
 		if svc.event_bus == nil do continue
 		summary := fmt.tprintf("{{\"%s_id\":\"%s\",\"chain_id\":\"%s\"}}", p.resource, p.resource_id, p.chain_id)
 		events.publish_resource_changed(svc.event_bus, p.owner, p.resource, p.resource_id, p.change, summary)
+	}
+	if svc.on_instance_changed != nil {
+		for id in e.instances do svc.on_instance_changed(svc.on_instance_changed_ctx, id)
 	}
 	for c in e.changed_chains {
 		if svc.on_tasks_changed != nil do svc.on_tasks_changed(svc.on_tasks_changed_ctx, c.chain_id, c.owner)
@@ -498,6 +512,16 @@ effect_publish_task :: proc(u: ^Uow, task: domain.Task, change: string) {
 
 effect_publish_chain :: proc(u: ^Uow, chain_id: domain.Task_Chain_ID, owner: domain.User_ID, change: string) {
 	append(&u.effects.publishes, Publish_Effect{owner = string(owner), resource = "task_chain", resource_id = string(chain_id), change = change, chain_id = string(chain_id)})
+}
+
+// effect_instance_changed queues an after-commit agent_instance hint for an
+// instance row this UoW rewrote; a rollback discards it with the rest.
+effect_instance_changed :: proc(u: ^Uow, instance_id: string) {
+	if u == nil || instance_id == "" do return
+	for id in u.effects.instances do if id == instance_id do return
+	owned := strings.clone(instance_id)
+	append(&u.effects.owned_strings, owned)
+	append(&u.effects.instances, owned)
 }
 
 effect_tasks_changed :: proc(u: ^Uow, chain_id: domain.Task_Chain_ID, owner: domain.User_ID) {

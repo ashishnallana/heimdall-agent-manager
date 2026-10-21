@@ -184,7 +184,7 @@ grant_attempt_in_uow :: proc(svc: ^Service, u: ^Uow, req: Grant_Request) -> (dom
 		json_str(&rt, "ended_at", "")
 		_, _ = save_facet_verbatim(svc, refolded, view.attempt_no, FACET_RUNTIME, json_end(&rt), FACET_WRITER_HUB)
 	}
-	set_instance_pointer(svc, inst.agent_instance_id, string(task.task_id), .Work if req.kind == domain.LEASE_KIND_WORK else .Review)
+	set_instance_pointer(svc, u, inst.agent_instance_id, string(task.task_id), .Work if req.kind == domain.LEASE_KIND_WORK else .Review)
 	arm_lease_timers(svc, saved)
 	metric_lease_granted(saved.kind)
 	if saved.delivery == domain.LEASE_DELIVERY_WAKE do effect_wake_lease(svc, u, saved, refolded)
@@ -207,7 +207,7 @@ release_in_uow :: proc(svc: ^Service, u: ^Uow, lease: domain.Task_Lease, actor: 
 	if !rok do return {}, false, rerr
 	close_attempt(svc, lease, outcome)
 	now := platform.clock_now(svc.clock)
-	mark_instance_idle(svc, lease.holder_instance_id, now)
+	mark_instance_idle(svc, u, lease.holder_instance_id, now)
 	if inst, iok, _ := iface.agent_get_instance(svc.agents, lease.holder_instance_id); iok {
 		// The lease system never stops (or idles out) a chain coordinator — a
 		// solo coordinator keeps its process and pulls its next task (REQ-SOLO-2a).
@@ -266,7 +266,7 @@ expire_lease_in_uow :: proc(svc: ^Service, u: ^Uow, lease: domain.Task_Lease, re
 	metric_lease_expired(reason)
 	if lease.kind == domain.LEASE_KIND_WORK do close_attempt(svc, lease, fmt.tprintf("expired:%s", reason))
 	now := platform.clock_now(svc.clock)
-	mark_instance_idle(svc, lease.holder_instance_id, now)
+	mark_instance_idle(svc, u, lease.holder_instance_id, now)
 	if coordinator do return .Expired // never stopped, may re-pull at once (no recent-expiry window)
 	note_recent_expiry(svc, lease.holder_instance_id, to_ms(now))
 	if inst, iok, _ := iface.agent_get_instance(svc.agents, lease.holder_instance_id); iok {
@@ -762,7 +762,7 @@ close_attempt :: proc(svc: ^Service, lease: domain.Task_Lease, outcome: string) 
 	}
 }
 
-set_instance_pointer :: proc(svc: ^Service, instance_id, task_id: string, role: domain.Current_Task_Role) {
+set_instance_pointer :: proc(svc: ^Service, u: ^Uow, instance_id, task_id: string, role: domain.Current_Task_Role) {
 	inst, ok, _ := iface.agent_get_instance(svc.agents, instance_id)
 	if !ok do return
 	if inst.current_task_id == task_id && inst.current_task_role == role && inst.idle_since == "" do return
@@ -770,23 +770,21 @@ set_instance_pointer :: proc(svc: ^Service, instance_id, task_id: string, role: 
 	inst.current_task_role = role
 	inst.idle_since = "" // holding a lease is not idle
 	inst.updated_at = platform.clock_now(svc.clock)
-	_, _, _ = iface.agent_save_instance(svc.agents, inst)
+	if _, saved, _ := iface.agent_save_instance(svc.agents, inst); saved do effect_instance_changed(u, instance_id)
 }
 
 // mark_instance_idle clears the pointer and stamps idle_since = now (the
 // column the Idle_TTL timer keys on; review S4).
-mark_instance_idle :: proc(svc: ^Service, instance_id, now: string) {
+mark_instance_idle :: proc(svc: ^Service, u: ^Uow, instance_id, now: string) {
 	inst, ok, _ := iface.agent_get_instance(svc.agents, instance_id)
 	if !ok do return
+	// Only the pointer change is user-visible; idle_since alone is a timer key.
+	pointer_changed := inst.current_task_id != "" || inst.current_task_role != .None
 	inst.current_task_id = ""
 	inst.current_task_role = .None
 	inst.idle_since = now
 	inst.updated_at = now
-	_, _, _ = iface.agent_save_instance(svc.agents, inst)
-}
-
-clear_instance_pointer :: proc(svc: ^Service, instance_id: string) {
-	mark_instance_idle(svc, instance_id, platform.clock_now(svc.clock))
+	if _, saved, _ := iface.agent_save_instance(svc.agents, inst); saved && pointer_changed do effect_instance_changed(u, instance_id)
 }
 
 // ---- recently expired holders (lease.next refusal, review S10) ------------------

@@ -1745,6 +1745,7 @@ bridge_ws_upgrade_handler :: proc(ctx: rawptr, req: Request, client: net.TCP_Soc
 		defer domain.agent_instances_destroy(gone)
 		agent_service.notify_instances_terminal(h.agents, gone)
 		for inst in gone {
+			publish_instance_changed(h.event_bus, inst, "status_changed")
 			if h.shell_sessions != nil {
 				shell_session_svc.shell_session_background_runs_for_agent(h.shell_sessions, string(inst.owner_user_id), inst.agent_instance_id)
 			}
@@ -2118,6 +2119,7 @@ bridge_ws_process_frame :: proc(h: ^Bridge_Handlers, bridge_id: string, connecti
 			agent_service.notify_instances_terminal(h.agents, gone)
 			metrics.counter_add(project_service.fleet_metrics.agent_instances_reconciled_gone, u64(len(gone)))
 			for inst in gone {
+				publish_instance_changed(h.event_bus, inst, "status_changed")
 				shell_session_svc.shell_session_background_runs_for_agent(h.shell_sessions, string(inst.owner_user_id), inst.agent_instance_id)
 				reconciled += 1
 			}
@@ -2218,7 +2220,13 @@ bridge_ws_process_frame :: proc(h: ^Bridge_Handlers, bridge_id: string, connecti
 		command_id := json_string(text, "command_id")
 		_ = bridge_runtime_service.runtime_command_result_for_connection(h.bridge_runtime_registry, bridge_id, connection_generation, command_id, text)
 		if type == "command_result" && h.agents != nil do agent_service.apply_reconfiguration_command_result(h.agents, bridge_id, command_id, text)
-		if type == "command_result" && h.agents != nil do _ = agent_service.apply_stop_command_result(h.agents, bridge_id, command_id, text)
+		if type == "command_result" && h.agents != nil {
+			restored: domain.Agent_Instance
+			if agent_service.apply_stop_command_result(h.agents, bridge_id, command_id, text, &restored) {
+				publish_instance_changed(h.event_bus, restored, "status_changed")
+				domain.agent_instance_destroy(&restored)
+			}
+		}
 		if type == "command_result" && command_id == "" {
 			// An id-less failure cannot be matched to any pending command; log it so
 			// hub/bridge protocol drift (e.g. missing_command_id) is visible.
@@ -2437,7 +2445,7 @@ Bridge_Heartbeat_Message :: struct {
 // Serialize durable status writes with retirement. New connections do not finish
 // admission until the old state writer has drained; a delayed old frame cannot
 // save over the new generation's durable state.
-bridge_apply_validated_status :: proc(h: ^Bridge_Handlers, bridge_id: string, generation: int, id: string, seq: int, status, activity: string, launch_epoch: string = "", error_json: string = "") -> (domain.Agent_Instance, bool, domain.Domain_Error) {
+bridge_apply_validated_status :: proc(h: ^Bridge_Handlers, bridge_id: string, generation: int, id: string, seq: int, status, activity: string, launch_epoch: string = "", error_json: string = "", changed: ^bool = nil) -> (domain.Agent_Instance, bool, domain.Domain_Error) {
 	c := project_service.bridge_runtime_connection_acquire(h.bridge_runtime_registry, bridge_id, generation)
 	if c == nil do return {}, false, domain.domain_error(.Bridge_Offline, "stale bridge generation")
 	defer project_service.bridge_runtime_connection_release(h.bridge_runtime_registry, c)
@@ -2450,7 +2458,7 @@ bridge_apply_validated_status :: proc(h: ^Bridge_Handlers, bridge_id: string, ge
 	// unlock: the engine opens a unit of work (tx_mutex), and the allowed lock
 	// order is tx_mutex → state_mutex, never the reverse (review B1).
 	facts := make([dynamic]agent_service.Lifecycle_Fact, context.temp_allocator)
-	instance, applied, err := agent_service.apply_bridge_status_report(h.agents, bridge_id, id, seq, status, activity, owner_user_id = c.owner_id, launch_epoch = launch_epoch, error_json = error_json, facts = &facts)
+	instance, applied, err := agent_service.apply_bridge_status_report(h.agents, bridge_id, id, seq, status, activity, owner_user_id = c.owner_id, launch_epoch = launch_epoch, error_json = error_json, facts = &facts, changed = changed)
 	project_service.connection_state_unlock(c)
 	agent_service.notify_facts(h.agents, facts[:])
 	if applied {
@@ -2480,10 +2488,10 @@ bridge_apply_heartbeat_digest :: proc(h: ^Bridge_Handlers, bridge_id, text: stri
 				_ = bridge_runtime_service.runtime_apply_state_report(h.bridge_runtime_registry, bridge_id, current_generation, report.agent_instance_id, report.state_seq, report.runtime_status, report.activity_status, "")
 			}
 			if h.agents != nil {
-				if inst, applied, _ := bridge_apply_validated_status(h, bridge_id, current_generation, report.agent_instance_id, report.state_seq, report.runtime_status, report.activity_status, report.launch_epoch); applied {
-					summary := agent_instance_status_summary_json(inst.runtime_status, inst.startup_status, inst.activity_status)
-					events.publish_resource_changed(h.event_bus, string(inst.owner_user_id), "agent_instance", inst.agent_instance_id, "status_changed", summary)
-					delete(summary)
+				status_moved := false
+				if inst, applied, _ := bridge_apply_validated_status(h, bridge_id, current_generation, report.agent_instance_id, report.state_seq, report.runtime_status, report.activity_status, report.launch_epoch, changed = &status_moved); applied {
+					// A beat that only refreshed last_seen_at is not news (REQ-2).
+					if status_moved do publish_instance_changed(h.event_bus, inst, "status_changed")
 					domain.agent_instance_destroy(&inst)
 				}
 			}
