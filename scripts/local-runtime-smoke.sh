@@ -99,6 +99,10 @@ out="$("$BRIDGE" start --name nohub 2>&1)" && fail "bridge without hub url start
 grep -q -- "--hub-url or --hub is required" <<<"$out" || fail "missing hub message: $out"
 "$HUB" start --name 'Bad Name' >/dev/null 2>&1 && fail "invalid name accepted"
 ok "bridge requires an explicit hub; invalid instance names refused"
+out="$("$HUB" start --name badorigin --public-origin https://example.test/p/x/ 2>&1)" && fail "origin with a path accepted"
+grep -q -- "--public-origin must be" <<<"$out" || fail "bad origin message: $out"
+[ -e "$HEIMDALL_LOCAL_STATE_ROOT/hubs/badorigin" ] && fail "bad origin created state"
+ok "hub refuses a public origin with a path before creating state"
 "$HUB" status --name nothing >/dev/null 2>&1 && fail "status of missing instance succeeded"
 ok "status reports a missing instance"
 kill "$HOLDER" 2>/dev/null || true; HOLDER=""
@@ -112,7 +116,8 @@ if [ -z "$BIN" ] && { ! command -v nix >/dev/null || (source "$ROOT/scripts/loca
   echo "PASS ($PASS static checks; real smoke skipped)"; exit 0
 fi
 src=(); [ -n "$BIN" ] && src=(--bin-dir "$BIN")
-H=(--name smoke --hub-port "$((PB + 1))" --proxy-port "$((PB + 2))" --ui-port "$((PB + 3))")
+PUB=https://preview.smoke.test
+H=(--name smoke --hub-port "$((PB + 1))" --proxy-port "$((PB + 2))" --ui-port "$((PB + 3))" --public-origin "$PUB/")
 timeout 900 "$HUB" start "${H[@]}" "${src[@]}" > "$TMP/hub1.log" 2>&1 || { cat "$TMP/hub1.log"; fail "fresh hub start"; }
 api="http://127.0.0.1:$((PB + 2))"
 count() { curl -s -m 5 "$api$1" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const d=JSON.parse(s).data||[];console.log(d.filter(x=>(x.name||x.title||"").startsWith(process.argv[1])).length)})' "$2"; }
@@ -126,10 +131,19 @@ grep -q 'approver init: created' "$TMP/hub1.log" || { cat "$TMP/hub1.log"; fail 
 ok "seed approver rooted the hub vault (key 0600 in the instance dir)"
 curl -s -m 5 "$api/api/v1/agents?limit=200" | grep -q '"active_instance_count":[1-9]' && fail "a seeded agent was launched"
 ok "no seeded agent was launched"
+# A state-changing request through the UI as the preview proxy forwards it: the
+# public Origin and no Sec-Fetch-Site. It must pass CSRF; a foreign origin must not.
+csrf() { curl -s -m 5 -X POST -H "Origin: $1" -H 'Content-Type: application/json' -d '{}' "http://127.0.0.1:$((PB + 3))/api/v1/device/pair-salts"; }
+out="$(csrf "$PUB")"; grep -q csrf_rejected <<<"$out" && fail "public origin rejected: $out"
+grep -q candidates <<<"$out" || fail "public-origin request did not reach the hub: $out"
+grep -q csrf_rejected <<<"$(csrf https://evil.test)" || fail "foreign origin accepted"
+grep -q "public  : $PUB" <<<"$("$HUB" status --name smoke)" || fail "status does not show the public origin"
+ok "hub trusts --public-origin (preview) for CSRF and still refuses foreign origins"
 "$HUB" stop --name smoke >/dev/null
 timeout 300 "$HUB" start --name smoke "${src[@]}" > "$TMP/hub2.log" 2>&1 || { cat "$TMP/hub2.log"; fail "hub restart"; }
 grep -q 'seed: 0 created' "$TMP/hub2.log" || fail "restart re-seeded"
 grep -q 'approver init: kept' "$TMP/hub2.log" || { cat "$TMP/hub2.log"; fail "restart did not keep the seed approver"; }
+grep -q csrf_rejected <<<"$(csrf "$PUB")" && fail "restart dropped the recorded public origin"
 [ "$(count '/api/v1/agents?limit=200' 'Sample ')" = 2 ] || fail "duplicate agents after restart"
 ok "restart keeps state and seeds nothing twice"
 timeout 600 "$BRIDGE" start --name smoke --hub smoke --port "$((PB + 4))" --local-endpoint-port "$((PB + 5))" \

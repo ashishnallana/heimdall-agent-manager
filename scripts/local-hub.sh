@@ -9,6 +9,11 @@
 #   --hub-port N       hub API port            (default 18081)
 #   --proxy-port N     ham-dev-proxy port      (default 18080)
 #   --ui-port N        browser UI (Vite) port  (default 15173)
+#   --public-origin URL  origin the browser uses when the UI is reached through a
+#                      reverse proxy (e.g. https://heimdall-preview.example), as
+#                      scheme://host[:port] with no path. The hub trusts it for
+#                      CSRF instead of the local UI origin. Recorded and reused on
+#                      restart; pass --public-origin local to drop it.
 #   --user NAME        local identity the dev proxy signs in as (default: $USER)
 #   --build MODE       nix | odin | none       (default: nix; none = use --bin-dir as is)
 #   --bin-dir DIR      take ham-hub/ham-dev-proxy from DIR instead of building
@@ -33,10 +38,10 @@ LR_TAG=local-hub
 # shellcheck source=local-runtime/lib.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/local-runtime/lib.sh"
 
-usage() { sed -n '2,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,35p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 CMD="${1:-help}"; [ $# -gt 0 ] && shift
-NAME=default HUB_PORT="" PROXY_PORT="" UI_PORT="" DEV_USER="${USER:-local}"
+NAME=default HUB_PORT="" PROXY_PORT="" UI_PORT="" PUBLIC_ORIGIN="" DEV_USER="${USER:-local}"
 BUILD="${HEIMDALL_LOCAL_BUILD:-nix}" BIN_DIR="" UI=1 SEED=1 CODE=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -44,6 +49,7 @@ while [ $# -gt 0 ]; do
     --hub-port) HUB_PORT="$2"; shift 2 ;;
     --proxy-port) PROXY_PORT="$2"; shift 2 ;;
     --ui-port) UI_PORT="$2"; shift 2 ;;
+    --public-origin) PUBLIC_ORIGIN="${2%/}"; shift 2 ;;
     --user) DEV_USER="$2"; shift 2 ;;
     --build) BUILD="$2"; shift 2 ;;
     --bin-dir) BIN_DIR="$2"; BUILD=none; shift 2 ;;
@@ -55,6 +61,9 @@ while [ $# -gt 0 ]; do
   esac
 done
 lr_valid_name "$NAME" || lr_die "invalid --name '$NAME' (lowercase letters, digits, dashes)"
+if [ -n "$PUBLIC_ORIGIN" ] && [ "$PUBLIC_ORIGIN" != local ] && ! [[ "$PUBLIC_ORIGIN" =~ ^https?://[^/[:space:]]+$ ]]; then
+  lr_die "--public-origin must be scheme://host[:port] with no path (got '$PUBLIC_ORIGIN')"
+fi
 DIR="$(lr_instance_dir hub "$NAME")"
 ENV_FILE="$DIR/instance.env"
 APPROVER_KEY="$DIR/approver/device.json"
@@ -93,10 +102,24 @@ start() {
 
   mkdir -p "$DIR"/{bin,logs,run,xdg/data,xdg/config,xdg/state}
   local ui_origin="http://127.0.0.1:$UI_PORT"
+  # Unlike ports, the public origin is no collision resource: an explicit value
+  # replaces the recorded one, "local" clears it, and omitting it keeps it.
+  case "$PUBLIC_ORIGIN" in
+    local) PUBLIC_ORIGIN="" ;;
+    "") PUBLIC_ORIGIN="$(lr_env_get "$ENV_FILE" PUBLIC_ORIGIN)" ;;
+  esac
+  # The hub enforces exactly one browser origin for CSRF (csrf_decide). Behind a
+  # proxy that is the public one; the local UI then still works for REST (browsers
+  # send Sec-Fetch-Site: same-origin) but not for cookie WebSockets.
+  local csrf_origin="${PUBLIC_ORIGIN:-$ui_origin}"
+  # Bridges pair against the hub API URL and browsers against their page origin;
+  # list every one so an approver on any of them does not see a foreign origin.
+  local pairing_origins="http://127.0.0.1:$HUB_PORT,http://127.0.0.1:$PROXY_PORT,$ui_origin${PUBLIC_ORIGIN:+,$PUBLIC_ORIGIN}"
   lr_env_write "$ENV_FILE" \
     "KIND=hub" "NAME=$NAME" "HUB_PORT=$HUB_PORT" "PROXY_PORT=$PROXY_PORT" "UI_PORT=$UI_PORT" \
     "HUB_URL=http://127.0.0.1:$HUB_PORT" "PROXY_URL=http://127.0.0.1:$PROXY_PORT" \
-    "UI_URL=$ui_origin" "UI_ORIGIN=$ui_origin" "DEV_USER=$DEV_USER" "APPROVER_KEY=$APPROVER_KEY" "CHECKOUT=$LR_ROOT"
+    "UI_URL=$ui_origin" "UI_ORIGIN=$csrf_origin" "PUBLIC_ORIGIN=$PUBLIC_ORIGIN" \
+    "DEV_USER=$DEV_USER" "APPROVER_KEY=$APPROVER_KEY" "CHECKOUT=$LR_ROOT"
 
   local bin="${BIN_DIR:-$DIR/bin}"
   [ -z "$BIN_DIR" ] && HEIMDALL_LOCAL_BUILD="$BUILD" lr_build "$bin" hub dev-proxy
@@ -112,7 +135,7 @@ start() {
   lr_log "starting hub on 127.0.0.1:$HUB_PORT (db $DIR/hub.db)"
   lr_spawn "$DIR" hub "$DIR/logs/hub.log" "${iso[@]}" "$hub_bin" \
     --listen "127.0.0.1:$HUB_PORT" --db "$DIR/hub.db" --migrations-dir "$migrations" \
-    --trusted-proxy-cidr 127.0.0.1/32 --ui-origin "$ui_origin"
+    --trusted-proxy-cidr 127.0.0.1/32 --ui-origin "$csrf_origin" --pairing-hub-origins "$pairing_origins"
   if ! lr_wait_http "http://127.0.0.1:$HUB_PORT/api/v1/health" 30 || ! lr_owned_pid "$DIR" hub >/dev/null; then
     tail -20 "$DIR/logs/hub.log" >&2 || true
     stop_all; lr_die "hub did not become healthy"
@@ -169,6 +192,8 @@ status() {
   echo "  hub api : $(lr_env_get "$ENV_FILE" HUB_URL)"
   echo "  proxy   : $(lr_env_get "$ENV_FILE" PROXY_URL)  (bridge enrollment approvals)"
   echo "  ui      : $(lr_env_get "$ENV_FILE" UI_URL)"
+  local pub; pub="$(lr_env_get "$ENV_FILE" PUBLIC_ORIGIN)"
+  [ -n "$pub" ] && echo "  public  : $pub  (trusted browser origin)"
   if [ -s "$APPROVER_KEY" ]; then echo "  approver: $APPROVER_KEY"; else echo "  approver: none (approve bridges in the UI)"; fi
 }
 

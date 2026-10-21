@@ -41,10 +41,16 @@ Instance names match `^[a-z0-9][a-z0-9-]{0,39}$`.
 
 The file has one `KEY=VALUE` per line with no quoting. Write it atomically: write a temporary file, then rename it.
 
-- **Hub:** `KIND=hub NAME HUB_PORT PROXY_PORT UI_PORT HUB_URL PROXY_URL UI_URL UI_ORIGIN DEV_USER APPROVER_KEY CHECKOUT`
+- **Hub:** `KIND=hub NAME HUB_PORT PROXY_PORT UI_PORT HUB_URL PROXY_URL UI_URL UI_ORIGIN PUBLIC_ORIGIN DEV_USER APPROVER_KEY CHECKOUT`. `UI_URL` is always the local Vite URL; `UI_ORIGIN` is the origin the hub trusts for CSRF (`PUBLIC_ORIGIN` when set, else `UI_URL`).
 - **Bridge:** `KIND=bridge NAME HUB_URL HUB_NAME BRIDGE_PORT LOCAL_ENDPOINT_PORT CONFIG TOKEN_FILE CHECKOUT`
 
 The preview integration finds a hub's UI, proxy and API URLs here. Ports are recorded on the first start and reused after that. An explicit port that differs from the recorded one is refused, and so is a bridge `--hub-url` that differs from the one it was enrolled with.
+
+## Public origin (reverse proxies, Heimdall preview)
+
+The hub accepts state-changing browser requests from exactly one origin (`--ui-origin`, enforced by `csrf_decide`). A browser that reaches the UI through a proxy, such as `https://heimdall-preview.<domain>/p/<session>/`, sends that proxy's origin, and the preview proxy does not forward `Sec-Fetch-Site`, so the hub answers `csrf_rejected: Origin does not match the UI origin` and the UI shows "Vault check failed". Start the hub with `--public-origin <scheme://host[:port]>` (no path; the `/p/<session>/` prefix is not part of an origin). It is recorded as `PUBLIC_ORIGIN` and reused on restart; an explicit value replaces it and `--public-origin local` clears it. It is not a collision resource. While it is set, the local `UI_URL` still works for REST (browsers send `Sec-Fetch-Site: same-origin`) but cookie WebSockets from it are refused; use the public URL.
+
+The hub also gets `--pairing-hub-origins <hub-url>,<proxy-url>,<ui-url>[,<public-origin>]`, so a browser on either origin accepts bridges that paired against the hub API URL, and browsers that paired on the other origin.
 
 ## Ports
 
@@ -67,7 +73,7 @@ A launcher holds `<instance>/.lock/` (created with `mkdir`, holder PID inside) f
 
 ## Hub start order
 
-1. Hub with `--db <dir>/hub.db`, `--migrations-dir <checkout>/src/hub/repository/sqlite/migrations`, `--trusted-proxy-cidr 127.0.0.1/32` and `--ui-origin http://127.0.0.1:<ui-port>`. Health is `/api/v1/health`.
+1. Hub with `--db <dir>/hub.db`, `--migrations-dir <checkout>/src/hub/repository/sqlite/migrations`, `--trusted-proxy-cidr 127.0.0.1/32` `--ui-origin <public-origin or http://127.0.0.1:<ui-port>>` and `--pairing-hub-origins` (see Public origin). Health is `/api/v1/health`.
 2. `ham-dev-proxy --listen 127.0.0.1:<proxy> --hub-url <hub> --default-user <user>`.
 3. Seed: `node scripts/local-runtime/seed.mjs --api <proxy-url> --record <dir>/seed.json`, then the seed approver (below): `approver.mjs init`. Exit 3 from `init` means the vault was already rooted by another device; warn and continue.
 4. UI: `vite <checkout> --host 127.0.0.1 --port <ui> --strictPort` with `HEIMDALL_DEV_PROXY_URL=<proxy-url>` and `HEIMDALL_HUB_API_URL=<hub-url>`. If `node_modules` is missing, run `npm ci --legacy-peer-deps` first.
