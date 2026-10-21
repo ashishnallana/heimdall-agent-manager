@@ -78,6 +78,14 @@ Hub_Config :: struct {
 	// `<url>/insert/loki/api/v1/push`. Empty (the default) disables the push;
 	// the SQLite ring and the owner API work regardless.
 	log_push_url: string,
+	// DB latency telemetry (docs/operations/db-telemetry.md). Read once at boot
+	// from HEIMDALL_DB_TELEMETRY ("" / "off" = default off, "basic"; "full" is
+	// not implemented and is rejected), HEIMDALL_DB_SLOW_MS (default 250, 0
+	// disables threshold records) and HEIMDALL_DB_SAMPLE_N (default 1000, 0
+	// disables sampling). -1 = unset (use the default).
+	db_telemetry: string,
+	db_slow_ms: int,
+	db_sample_n: int,
 	// --pairing-hub-origins / HEIMDALL_PAIRING_HUB_ORIGINS (comma-separated): the
 	// OTHER hub addresses a new device may have enrolled against and still be
 	// approved here (an API alias such as https://hub.example next to the UI's own
@@ -125,6 +133,9 @@ default_config :: proc() -> Hub_Config {
 		public_app_origin = "https://heimdall.mundus.in",
 		metrics_addr = "",
 		log_push_url = "",
+		db_telemetry = "",
+		db_slow_ms = -1,
+		db_sample_n = -1,
 	}
 }
 

@@ -4,6 +4,7 @@ import "core:fmt"
 import "core:strings"
 import "core:sync"
 import contracts "odin_test:contracts"
+import dbt "odin_test:hub/platform/dbtelemetry"
 import domain "odin_test:hub/domain"
 import auth_service "odin_test:hub/service/auth"
 import agent_service "odin_test:hub/service/agent"
@@ -62,8 +63,8 @@ create_agent_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	if json_bool(req.body, "favorite") && auth_ctx.kind != .User_Token && auth_ctx.kind != .Trusted_Proxy do return respond_error(domain.domain_error(.Forbidden, "user authentication is required for favorites"), req.request_id)
 	if json_bool(req.body, "favorite") {
 		if h.launch_preferences == nil do return respond_error(domain.domain_error(.Internal_Error, "launch preferences are not configured"), req.request_id)
-		sync.lock(&h.launch_preferences.launch_preferences_mutex)
-		defer sync.unlock(&h.launch_preferences.launch_preferences_mutex)
+		lock_tok := dbt.timed_lock(&h.launch_preferences.launch_preferences_mutex, .Launch_Prefs)
+		defer dbt.timed_unlock(&h.launch_preferences.launch_preferences_mutex, .Launch_Prefs, lock_tok)
 		prefs, pref_err := user_service.get_launch_preferences(h.launch_preferences, auth_ctx)
 		if pref_err.code != .None do return respond_error(pref_err, req.request_id)
 		if len(prefs.favorite_agent_ids) >= user_service.MAX_FAVORITE_AGENTS do return respond_error(domain.domain_error(.Conflict, "You can have up to 6 favorite agents. Remove a favorite before creating another."), req.request_id)
