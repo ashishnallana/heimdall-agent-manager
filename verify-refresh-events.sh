@@ -7,7 +7,7 @@ cd "$(dirname "$0")"
 OUT="$HOME/.cache/heimdall-tests"
 mkdir -p "$OUT"
 BIN="$OUT/refresh-events-hub"
-TESTS="test_refresh_user_send_reaches_every_owner_tab_only,test_refresh_conversation_created_and_updated_summary,test_refresh_reconfiguration_get_is_pure_and_reaper_times_out,test_refresh_instance_writers_publish,test_refresh_identity_bridge_provider_events,test_title_mutation_live_events_and_flat_listing"
+TESTS="test_refresh_user_send_reaches_every_owner_tab_only,test_refresh_conversation_created_and_updated_summary,test_refresh_reconfiguration_get_is_pure_and_reaper_times_out,test_refresh_instance_writers_publish,test_refresh_identity_bridge_provider_events,test_refresh_shell_background_publishes_after_write,test_title_mutation_live_events_and_flat_listing"
 timeout 1200 nix develop -c odin build src/hub -build-mode:test -collection:odin_test=src -out:"$BIN"
 LOG="$OUT/refresh-events-hub.log"
 set +e

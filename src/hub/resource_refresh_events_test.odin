@@ -12,6 +12,7 @@ import iface "odin_test:hub/repository/iface"
 import agent_service "odin_test:hub/service/agent"
 import events "odin_test:hub/service/events"
 import project_service "odin_test:hub/service/project"
+import shell_session_svc "odin_test:hub/service/shell_session"
 import taskv2 "odin_test:hub/service/taskv2"
 import api_http "odin_test:hub/transport/http"
 
@@ -295,4 +296,31 @@ test_refresh_identity_bridge_provider_events :: proc(t: ^testing.T) {
 	defer delete(other)
 	testing.expect(t, !leaked, "another owner must not receive alice's identity/bridge events")
 
+}
+
+@(test)
+test_refresh_shell_background_publishes_after_write :: proc(t: ^testing.T) {
+	f: Refresh_Fixture
+	defer refresh_fixture_teardown(&f)
+	if !refresh_fixture_setup(t, &f, "shell") do return
+	tab := refresh_socket_open(t, &f.graph, "alice"); defer refresh_socket_close(&f.graph, tab)
+	svc := &f.graph.shell_session_service
+	row := domain.Shell_Session{session_id = "sh_refresh_run", owner_user_id = "alice", bridge_id = f.bridge_id, kind = "run", status = domain.Shell_Session_Status_Running, pid = 4242, run_seq = 1, chain_id = "chain_rf", created_at = "2026-10-21T00:00:00Z", started_at = "2026-10-21T00:00:00Z", last_activity_at = "2026-10-21T00:00:00Z"}
+	_, up_err := iface.shell_session_upsert(svc.repo, row)
+	if !testing.expect(t, up_err.code == .None, up_err.message) do return
+
+	flush_ws_socket(tab.client)
+	_, ok, err := shell_session_svc._shell_session_set_background_for_owner(svc, "alice", "sh_refresh_run")
+	testing.expect(t, ok, err.message)
+	frame, got := drain_matching_ws_event(tab.client, `"resource":"shell_session"`)
+	defer delete(frame)
+	testing.expect(t, got, "backgrounding publishes shell_session")
+	testing.expect(t, strings.contains(frame, `"change":"backgrounded"`) && strings.contains(frame, "sh_refresh_run") && strings.contains(frame, `"pid":4242`) && strings.contains(frame, `"run_seq":1`) && strings.contains(frame, `"chain_id":"chain_rf"`), "summary carries change, pid, run_seq and chain")
+
+	// A refused change (already background) writes nothing and publishes nothing.
+	flush_ws_socket(tab.client)
+	seq_before := f.graph.event_bus.event_seq
+	_, again, _ := shell_session_svc._shell_session_set_background_for_owner(svc, "alice", "sh_refresh_run")
+	testing.expect(t, !again, "second background is refused")
+	testing.expect_value(t, f.graph.event_bus.event_seq, seq_before)
 }

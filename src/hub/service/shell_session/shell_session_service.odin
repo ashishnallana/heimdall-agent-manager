@@ -931,7 +931,7 @@ shell_session_create :: proc(svc: ^Shell_Session_Service, auth: contracts.Auth_C
 	}
 
 	session.status          = domain.Shell_Session_Status_Running
-	_, _ = iface.shell_session_upsert(svc.repo, session)
+	if _, up_err := iface.shell_session_upsert(svc.repo, session); up_err.code == .None do _shell_session_publish_changed(svc, session, "running")
 	return session, true, domain.Domain_Error{}
 }
 
@@ -1403,7 +1403,7 @@ shell_session_restart :: proc(svc: ^Shell_Session_Service, auth: contracts.Auth_
 	session.run_seq          = next_run_seq
 	session.finished_at      = ""
 	session.last_activity_at = platform.clock_now(svc.clock)
-	_, _ = iface.shell_session_upsert(svc.repo, session)
+	if _, up_err := iface.shell_session_upsert(svc.repo, session); up_err.code == .None do _shell_session_publish_changed(svc, session, "restarted")
 	return session, true, domain.Domain_Error{}
 }
 
@@ -1493,6 +1493,7 @@ shell_session_set_port :: proc(svc: ^Shell_Session_Service, auth: contracts.Auth
 	if !written do return session, false, domain.domain_error(.Not_Found, "session not found")
 
 	session.server_port = server_port
+	_shell_session_publish_changed(svc, session, "port_changed")
 	return session, true, domain.Domain_Error{}
 }
 
@@ -1872,9 +1873,10 @@ shell_session_handle_exited :: proc(
 		session.exit_code_set = true
 	}
 
-	_, _ = iface.shell_session_upsert(svc.repo, session)
+	_, exit_up_err := iface.shell_session_upsert(svc.repo, session)
 
-	if svc.events != nil {
+	// REQ-2: announce only a terminal state the row actually holds.
+	if svc.events != nil && exit_up_err.code == .None {
 		evt := _shell_exited_event_json(session_id, effective_status, exit_code, exit_code_set)
 		events.publish_owned(svc.events, owner, evt)
 	}
@@ -2252,6 +2254,7 @@ _shell_session_set_background_for_owner :: proc(svc: ^Shell_Session_Service, own
 	session.background       = true
 	session.last_activity_at = platform.clock_now(svc.clock)
 	if _, up_err := iface.shell_session_upsert(svc.repo, session); up_err.code != .None do return session, false, up_err
+	_shell_session_publish_changed(svc, session, "backgrounded")
 
 	cmd_json := _shell_background_command_json(session_id)
 	defer delete(cmd_json)
@@ -2548,6 +2551,22 @@ _json_array_raw :: proc(body, key: string, allocator := context.allocator) -> st
 	res, ok := jsonx.extract_raw_array(body, key, allocator = allocator)
 	if !ok do return strings.clone("[]", allocator)
 	return res
+}
+
+// _shell_session_publish_changed (REQ-2) announces a non-terminal row change the
+// shell list shows - running/pid, restart (run_seq), port, background - as a
+// resource_changed/shell_session the UI already invalidates on. Called only after
+// the write succeeded.
+_shell_session_publish_changed :: proc(svc: ^Shell_Session_Service, session: domain.Shell_Session, change: string) {
+	if svc == nil || svc.events == nil || session.owner_user_id == "" do return
+	b := strings.builder_make()
+	defer strings.builder_destroy(&b)
+	strings.write_string(&b, "{\"status\":\"")
+	contracts.write_json_string(&b, session.status)
+	fmt.sbprintf(&b, "\",\"pid\":%d,\"port\":%d,\"run_seq\":%d,\"background\":%v,\"chain_id\":\"", session.pid, session.server_port, session.run_seq, session.background)
+	contracts.write_json_string(&b, session.chain_id)
+	strings.write_string(&b, "\"}")
+	events.publish_resource_changed(svc.events, session.owner_user_id, "shell_session", session.session_id, change, strings.to_string(b))
 }
 
 // _shell_session_started_event_json builds the CREATION counterpart of
