@@ -8,7 +8,7 @@ import "core:time"
 import dbt "odin_test:hub/platform/dbtelemetry"
 import metrics "odin_test:lib/metrics"
 
-// DB latency telemetry, SQLite side (docs/operations/db-telemetry.md).
+// DB latency telemetry, SQLite side (docs/reference/db-telemetry.md).
 //
 // With HEIMDALL_DB_TELEMETRY=basic every wrapped API call (step, exec,
 // prepare_v2, finalize) splits its time into

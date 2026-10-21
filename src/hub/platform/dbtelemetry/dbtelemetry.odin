@@ -4,7 +4,7 @@ import "core:fmt"
 import "core:sync"
 import metrics "odin_test:lib/metrics"
 
-// DB latency and lock-contention telemetry (docs/operations/db-telemetry.md,
+// DB latency and lock-contention telemetry (docs/reference/db-telemetry.md,
 // plan docs/plans/db-latency-telemetry.md §2).
 //
 // Leaf package: service packages time their DB-guarding mutexes through

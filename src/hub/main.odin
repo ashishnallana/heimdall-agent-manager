@@ -236,7 +236,7 @@ parse_args :: proc(config: ^app.Hub_Config) {
 	if v := os.get_env_alloc("HEIMDALL_LOG_PUSH_URL", context.allocator); v != "" {
 		config.log_push_url = v
 	}
-	// DB telemetry is env-only (boot-time; docs/operations/db-telemetry.md).
+	// DB telemetry is env-only (boot-time; docs/reference/db-telemetry.md).
 	config.db_telemetry = os.get_env_alloc("HEIMDALL_DB_TELEMETRY", context.allocator)
 	if v := os.get_env_alloc("HEIMDALL_DB_SLOW_MS", context.allocator); v != "" {
 		if parsed, ok := strconv.parse_int(v); ok && parsed >= 0 do config.db_slow_ms = int(parsed)
