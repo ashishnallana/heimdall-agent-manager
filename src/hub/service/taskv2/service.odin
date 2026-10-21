@@ -202,6 +202,10 @@ Publish_Effect :: struct {
 	resource_id: string,
 	change:      string,
 	chain_id:    string,
+	// REQ-2: workflow events name their run (and, for stage_changed, the
+	// stage); empty for ordinary task/chain publishes and then omitted.
+	workflow_run_id: string,
+	stage_key:       string,
 }
 
 Changed_Chain :: struct {
@@ -432,6 +436,11 @@ flush_effects :: proc(svc: ^Service, e: ^Effects) {
 	for p in e.publishes {
 		if svc.event_bus == nil do continue
 		summary := fmt.tprintf("{{\"%s_id\":\"%s\",\"chain_id\":\"%s\"}}", p.resource, p.resource_id, p.chain_id)
+		if p.resource == "workflow_run" {
+			summary = fmt.tprintf("{{\"workflow_run_id\":\"%s\",\"chain_id\":\"%s\",\"stage_key\":\"%s\"}}", p.resource_id, p.chain_id, p.stage_key)
+		} else if p.workflow_run_id != "" {
+			summary = fmt.tprintf("{{\"%s_id\":\"%s\",\"chain_id\":\"%s\",\"workflow_run_id\":\"%s\"}}", p.resource, p.resource_id, p.chain_id, p.workflow_run_id)
+		}
 		events.publish_resource_changed(svc.event_bus, p.owner, p.resource, p.resource_id, p.change, summary)
 	}
 	if svc.on_instance_changed != nil {
@@ -528,6 +537,23 @@ effect_instance_changed :: proc(u: ^Uow, instance_id: string, change := "current
 Instance_Effect :: struct {
 	instance_id: string,
 	change:      string, // static literal, never freed
+}
+
+// effect_publish_workflow queues task_chain/workflow_<kind> naming the run, and
+// effect_publish_workflow_stage queues workflow_run/stage_changed (REQ-2). The
+// ids are cloned into owned_strings so they outlive the run rows they came from.
+effect_publish_workflow :: proc(u: ^Uow, chain_id: domain.Task_Chain_ID, owner: domain.User_ID, run_id: domain.Workflow_Run_ID, change: string) {
+	if u == nil do return
+	owned_run := strings.clone(string(run_id)); append(&u.effects.owned_strings, owned_run)
+	owned_change := strings.clone(change); append(&u.effects.owned_strings, owned_change)
+	append(&u.effects.publishes, Publish_Effect{owner = string(owner), resource = "task_chain", resource_id = string(chain_id), change = owned_change, chain_id = string(chain_id), workflow_run_id = owned_run})
+}
+
+effect_publish_workflow_stage :: proc(u: ^Uow, chain_id: domain.Task_Chain_ID, owner: domain.User_ID, run_id: domain.Workflow_Run_ID, stage_key: string) {
+	if u == nil || run_id == "" do return
+	owned_run := strings.clone(string(run_id)); append(&u.effects.owned_strings, owned_run)
+	owned_stage := strings.clone(stage_key); append(&u.effects.owned_strings, owned_stage)
+	append(&u.effects.publishes, Publish_Effect{owner = string(owner), resource = "workflow_run", resource_id = owned_run, change = "stage_changed", chain_id = string(chain_id), stage_key = owned_stage})
 }
 
 effect_tasks_changed :: proc(u: ^Uow, chain_id: domain.Task_Chain_ID, owner: domain.User_ID) {

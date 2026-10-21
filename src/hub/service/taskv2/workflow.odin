@@ -935,6 +935,7 @@ materialize_single_stage_in_uow :: proc(
 				run_id = chain.run.run_id, execution_no = chain.execution.execution_no, stage_key = st.key,
 				chain_id = chain.chain_id, owner_user_id = chain.owner_user_id, item_count = 0, expanded_at = platform.clock_now(svc.clock),
 			})
+			if ok do effect_publish_workflow_stage(u, chain.chain_id, chain.owner_user_id, chain.run.run_id, st.key)
 			return ok, err
 		}
 	} else if st.for_each != "" {
@@ -961,6 +962,7 @@ materialize_single_stage_in_uow :: proc(
 				run_id = chain.run.run_id, execution_no = chain.execution.execution_no, stage_key = st.key,
 				chain_id = chain.chain_id, owner_user_id = chain.owner_user_id, item_count = 0, expanded_at = platform.clock_now(svc.clock),
 			})
+			if ok do effect_publish_workflow_stage(u, chain.chain_id, chain.owner_user_id, chain.run.run_id, st.key)
 			return ok, err
 		}
 		if err := workflow_check_fan_out_size(st.key, st.for_each, len(items_raw), false); err.code != .None do return false, err
@@ -1101,6 +1103,7 @@ materialize_single_stage_in_uow :: proc(
 		run_id = chain.run.run_id, execution_no = chain.execution.execution_no, stage_key = st.key,
 		chain_id = chain.chain_id, owner_user_id = chain.owner_user_id, item_count = total_count, expanded_at = now,
 	})
+	if expanded do effect_publish_workflow_stage(u, chain.chain_id, chain.owner_user_id, chain.run.run_id, st.key)
 	return expanded, expansion_err
 }
 

@@ -324,3 +324,31 @@ test_refresh_shell_background_publishes_after_write :: proc(t: ^testing.T) {
 	testing.expect(t, !again, "second background is refused")
 	testing.expect_value(t, f.graph.event_bus.event_seq, seq_before)
 }
+
+@(test)
+test_refresh_workflow_events_name_run_and_stage :: proc(t: ^testing.T) {
+	f: Refresh_Fixture
+	defer refresh_fixture_teardown(&f)
+	if !refresh_fixture_setup(t, &f, "workflow") do return
+	tab := refresh_socket_open(t, &f.graph, "alice"); defer refresh_socket_close(&f.graph, tab)
+
+	flush_ws_socket(tab.client)
+	rolled, began, _ := taskv2.begin_uow(&f.graph.task_engine)
+	if !testing.expect(t, began, "begin_uow") do return
+	taskv2.effect_publish_workflow_stage(&rolled, "chain_wf", "alice", "wfrun_rolled", "build")
+	_, _ = taskv2.end_uow(&f.graph.task_engine, &rolled, false)
+	none, leaked := drain_matching_ws_event(tab.client, "wfrun_rolled", 300_000_000)
+	defer delete(none)
+	testing.expect(t, !leaked, "rolled-back workflow effects must not publish")
+
+	u, began2, _ := taskv2.begin_uow(&f.graph.task_engine)
+	if !testing.expect(t, began2, "begin_uow") do return
+	taskv2.effect_publish_workflow(&u, "chain_wf", "alice", "wfrun_1", "workflow_started")
+	taskv2.effect_publish_workflow_stage(&u, "chain_wf", "alice", "wfrun_1", "build")
+	_, _ = taskv2.end_uow(&f.graph.task_engine, &u, true)
+	frames, got := drain_matching_ws_event(tab.client, `"change":"stage_changed"`)
+	defer delete(frames)
+	testing.expect(t, got, "committed stage expansion publishes workflow_run/stage_changed")
+	testing.expect(t, strings.contains(frames, `"resource":"workflow_run","resource_id":"wfrun_1"`) && strings.contains(frames, `"stage_key":"build"`), "stage event names run and stage")
+	testing.expect(t, strings.contains(frames, `"change":"workflow_started"`) && strings.contains(frames, `"workflow_run_id":"wfrun_1"`), "chain workflow event carries workflow_run_id")
+}
