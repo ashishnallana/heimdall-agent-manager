@@ -70,6 +70,7 @@ start_metrics_listener :: proc(reg: ^metrics.Registry, metrics_addr: string) -> 
 	state^ = Metrics_Listener{registry = reg, address = address, port = port}
 	fmt.println("ham-hub metrics listening", metrics_addr)
 	// The thread owns `listener` and `state` for the process lifetime.
+	// thread-spawn: startup (caller's allocator is the process heap)
 	thread.run_with_poly_data2(listener, state, serve_metrics_loop)
 	return true
 }

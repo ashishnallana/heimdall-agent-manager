@@ -1219,6 +1219,9 @@ shell_session_schedule_kill_replay :: proc(svc: ^Shell_Session_Service, bridge_i
 	work := new(Shell_Kill_Replay_Work, heap)
 	work.svc = svc
 	work.bridge_id = strings.clone(bridge_id, heap)
+	// Heap-allocate the Thread record as well (see bridge_proxy_relay): the caller
+	// is the bridge WS handshake, whose allocator is reclaimed before this worker ends.
+	context.allocator = heap
 	_ = thread.create_and_start_with_data(rawptr(work), shell_session_kill_replay_worker)
 	return true
 }

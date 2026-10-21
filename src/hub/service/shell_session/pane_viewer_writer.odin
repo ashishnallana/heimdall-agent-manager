@@ -58,6 +58,7 @@ pane_viewer_start_locked :: proc(svc: ^Shell_Session_Service, socket: net.TCP_So
 	if svc.pane_bridge_bytes == nil do svc.pane_bridge_bytes = make(map[string]int, runtime.heap_allocator())
 	w.queue = make([dynamic]Pane_Viewer_Frame, runtime.heap_allocator())
 	_ = net.set_option(socket, .Send_Timeout, 5 * time.Second)
+	context.allocator = runtime.heap_allocator() // the Thread record outlives the caller's arena
 	w.worker = thread.create_and_start_with_data(rawptr(w), pane_viewer_writer_run, self_cleanup = false)
 	if w.worker == nil {
 		delete(w.queue); delete(w.bridge_id, runtime.heap_allocator()); delete(w.session_id, runtime.heap_allocator()); free(w, runtime.heap_allocator()); _ = net.shutdown(socket, .Both); return false

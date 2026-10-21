@@ -452,6 +452,7 @@ fire_blocked_realert :: proc(svc: ^Service, u: ^Uow, t: Timer) -> Fire_Result {
 // start_timer_thread runs fire_due once a second against the service clock. It
 // is a 1 s check of an in-memory heap, not a table sweep.
 start_timer_thread :: proc(svc: ^Service) -> ^thread.Thread {
+	// thread-spawn: startup (caller's allocator is the process heap)
 	t := thread.create(timer_thread_proc)
 	t.data = rawptr(svc)
 	sync.atomic_store(&svc.touch_async, true)

@@ -19,6 +19,7 @@ run :: proc(config: Hub_Config) -> (bool, string) {
 	// graph holds) stays valid — exactly like &graph.router handed to serve below.
 	// A heap COPY would be unsafe: the graph's services store pointers back into
 	// this graph's own fields, so a copy would alias the original anyway.
+	// thread-spawn: startup (caller's allocator is the process heap)
 	thread.run_with_data(rawptr(&graph), reaper_thread_entry)
 	// Task System v2: rebuild timers from the columns, heal lease-less
 	// in_progress rows, match every Active chain once, then run the thin timer

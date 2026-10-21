@@ -49,6 +49,7 @@ serve :: proc(router: ^Router, config: Server_Config) -> bool {
 			time.sleep(10 * time.Millisecond)
 			continue
 		}
+		// thread-spawn: startup (caller's allocator is the process heap)
 		thread.run_with_poly_data3(client, source, &state, handle_client_thread)
 	}
 }

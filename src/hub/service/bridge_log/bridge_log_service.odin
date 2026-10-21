@@ -181,6 +181,7 @@ list :: proc(svc: ^Service, bridge_id: string, limit: int, before_id: i64) -> ([
 start :: proc(svc: ^Service) {
 	if svc == nil || svc.worker != nil do return
 	svc.stop_requested = false
+	// thread-spawn: startup (caller's allocator is the process heap)
 	svc.worker = thread.create_and_start_with_data(rawptr(svc), writer_entry, init_context = context)
 }
 

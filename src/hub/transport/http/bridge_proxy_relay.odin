@@ -227,6 +227,11 @@ bridge_proxy_handle_open :: proc(h: ^Bridge_Handlers, origin_bridge_id, text: st
 		origin_bridge_id = strings.clone(origin_bridge_id, heap),
 		target_bridge_id = strings.clone(session.bridge_id, heap),
 	}
+	// The Thread record must be on the heap too: this runs on the WS reader, whose
+	// context.allocator is a per-frame arena destroyed when the frame returns, and
+	// core:thread allocates the Thread with the ambient allocator. An arena-backed
+	// Thread is unmapped before the new thread's entry stores t.id → SIGSEGV.
+	context.allocator = heap
 	thread.run_with_data(rawptr(relay), bridge_proxy_relay_worker)
 }
 
