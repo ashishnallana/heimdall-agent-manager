@@ -1,15 +1,11 @@
 package sqlite
 
-import "core:fmt"
-import "core:os"
 import "core:testing"
 import domain "odin_test:hub/domain"
 
 billing_test_database :: proc(t: ^testing.T, suffix: string) -> (Conn, string) {
-	path := fmt.tprintf("/tmp/heimdall_billing_%s_%d.db", suffix, os.get_pid())
-	_ = os.remove(path)
-	conn, ok, err := open(path)
-	testing.expect(t, ok && err.code == .None)
+	conn, path, ok := tmpl_open_file_prod(t, suffix)
+	testing.expect(t, ok)
 	migrated, migration_err := run_migrations(&conn, "/nonexistent/billing-migrations")
 	testing.expect(t, migrated && migration_err.code == .None, "embedded migrations include billing")
 	testing.expect(t, exec(&conn, `INSERT INTO users VALUES ('alice', 'alice', 'Alice', 'alice@example.com', 'active', '2026-10-10T10:00:00Z', '2026-10-10T10:00:00Z'); INSERT INTO users VALUES ('bob', 'bob', 'Bob', '', 'active', '2026-10-10T10:00:00Z', '2026-10-10T10:00:00Z');`))
@@ -20,7 +16,7 @@ billing_test_database :: proc(t: ^testing.T, suffix: string) -> (Conn, string) {
 test_billing_persists_effective_parameters_and_custom_overrides :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	conn, path := billing_test_database(t, "persistence")
-	defer _ = os.remove(path)
+	defer tmpl_remove_db(path)
 	defer close(&conn)
 	impl: Billing_Repo_SQLite
 	repo, err := new_billing_repository(&impl, path, "sandbox", "pri_hobbyist", true)
@@ -54,7 +50,7 @@ test_billing_persists_effective_parameters_and_custom_overrides :: proc(t: ^test
 test_billing_webhook_ordering_deduplication_and_parameter_persistence :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	conn, path := billing_test_database(t, "events")
-	defer _ = os.remove(path); defer close(&conn)
+	defer tmpl_remove_db(path); defer close(&conn)
 	impl: Billing_Repo_SQLite
 	repo, _ := new_billing_repository(&impl, path, "sandbox", "pri_hobbyist", true)
 	defer close(&impl.conn)
@@ -97,7 +93,7 @@ test_billing_webhook_ordering_deduplication_and_parameter_persistence :: proc(t:
 test_billing_grace_expiry_does_not_extend_on_updates :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	conn, path := billing_test_database(t, "grace")
-	defer _ = os.remove(path); defer close(&conn)
+	defer tmpl_remove_db(path); defer close(&conn)
 	impl: Billing_Repo_SQLite
 	repo, _ := new_billing_repository(&impl, path, "sandbox", "pri_hobbyist", true)
 	defer close(&impl.conn)
@@ -120,7 +116,7 @@ test_billing_grace_expiry_does_not_extend_on_updates :: proc(t: ^testing.T) {
 test_billing_checkout_reservations_and_environment_guard :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	conn, path := billing_test_database(t, "reservation")
-	defer _ = os.remove(path); defer close(&conn)
+	defer tmpl_remove_db(path); defer close(&conn)
 	impl: Billing_Repo_SQLite
 	repo, _ := new_billing_repository(&impl, path, "sandbox", "pri_hobbyist", true)
 	defer close(&impl.conn)
@@ -144,7 +140,7 @@ test_billing_checkout_reservations_and_environment_guard :: proc(t: ^testing.T) 
 test_free_one_bridge_migration_updates_existing_accounts_preserves_paid_and_custom :: proc(t: ^testing.T) {
     context.allocator = context.temp_allocator
     conn, path := billing_test_database(t, "free_limit_migration")
-    defer _ = os.remove(path); defer close(&conn)
+    defer tmpl_remove_db(path); defer close(&conn)
     testing.expect(t, exec(&conn, `UPDATE billing_plans SET max_bridges = 2 WHERE plan_id = 'free';
         UPDATE account_entitlements SET max_bridges = 2;
         UPDATE account_entitlements SET override_max_bridges = 5 WHERE user_id = 'bob';

@@ -1,22 +1,14 @@
 package sqlite
 
-import "core:fmt"
-import "core:os"
 import "core:testing"
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
 
 @(test)
 test_issue_sqlite_lifecycle :: proc(t: ^testing.T) {
-	db_path := ":memory:"
-	conn, open_ok, open_err := open(db_path)
+	conn, open_ok := tmpl_clone_migrated(t)
 	testing.expect(t, open_ok, "db open ok")
-	testing.expect_value(t, open_err.code, domain.Error_Code.None)
 	defer close(&conn)
-
-	mig_ok, mig_err := run_migrations(&conn)
-	testing.expect(t, mig_ok, "migrations ok")
-	testing.expect_value(t, mig_err.code, domain.Error_Code.None)
 
 	// Verify tables exist
 	testing.expect(t, sqlite_object_exists(&conn, "issues"), "issues table exists")
