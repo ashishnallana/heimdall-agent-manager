@@ -1,7 +1,5 @@
 package sqlite
 
-import "core:fmt"
-import "core:os"
 import "core:testing"
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
@@ -21,13 +19,9 @@ mk_event :: proc(bridge_id: string, i: int, received_at: i64) -> domain.Bridge_L
 
 @(test)
 test_bridge_log_repo_sqlite_batch_cap_page_prune :: proc(t: ^testing.T) {
-	db_path := fmt.tprintf("/tmp/test_bridge_log_repo_%d.db", os.get_pid())
-	defer os.remove(db_path)
-	conn, open_ok, _ := open(db_path)
-	testing.expect(t, open_ok, "db open ok")
+	conn, mig_ok := tmpl_clone_migrated(t)
+	testing.expect(t, mig_ok, "migrated template clone ok")
 	defer close(&conn)
-	mig_ok, _ := run_migrations(&conn)
-	testing.expect(t, mig_ok, "migrations ok")
 	testing.expect(t, table_column_exists(&conn, "bridge_log_events", "fields_json"), "084 applied")
 
 	impl := Bridge_Log_Repo_SQLite{}

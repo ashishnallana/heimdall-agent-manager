@@ -13,15 +13,9 @@ import "core:testing"
 
 @(test)
 test_bridge_vault_status_repo_roundtrip :: proc(t: ^testing.T) {
-	db_path := ":memory:"
-	conn, open_ok, open_err := open(db_path)
-	testing.expect(t, open_ok, "db open ok")
-	testing.expect_value(t, open_err.code, domain.Error_Code.None)
+	conn, mig_ok := tmpl_clone_migrated(t)
+	testing.expect(t, mig_ok, "migrated template clone ok")
 	defer close(&conn)
-
-	mig_ok, mig_err := run_migrations(&conn)
-	testing.expect(t, mig_ok, "migrations ok")
-	testing.expect_value(t, mig_err.code, domain.Error_Code.None)
 	testing.expect(t, table_column_exists(&conn, "bridges", "vault_status"), "migration 056 created bridges.vault_status")
 
 	repo_impl := Bridge_Repo_SQLite{conn = &conn}
@@ -86,15 +80,9 @@ test_bridge_vault_status_repo_roundtrip :: proc(t: ^testing.T) {
 
 @(test)
 test_bridge_version_and_updates_roundtrip :: proc(t: ^testing.T) {
-	db_path := ":memory:"
-	conn, open_ok, open_err := open(db_path)
-	testing.expect(t, open_ok, "db open ok")
-	testing.expect_value(t, open_err.code, domain.Error_Code.None)
+	conn, mig_ok := tmpl_clone_migrated(t)
+	testing.expect(t, mig_ok, "migrated template clone ok")
 	defer close(&conn)
-
-	mig_ok, mig_err := run_migrations(&conn)
-	testing.expect(t, mig_ok, "migrations ok")
-	testing.expect_value(t, mig_err.code, domain.Error_Code.None)
 
 	// Check table columns created by migration 054
 	testing.expect(t, table_column_exists(&conn, "bridges", "version"), "bridges.version column exists")

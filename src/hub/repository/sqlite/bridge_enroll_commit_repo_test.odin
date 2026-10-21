@@ -7,8 +7,6 @@ package sqlite
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
 import "core:fmt"
-import "core:os"
-import "core:sync"
 import "core:testing"
 import "core:thread"
 import "core:time"
@@ -24,11 +22,9 @@ Commit_Fixture :: struct {
 }
 
 fixture_open :: proc(t: ^testing.T, f: ^Commit_Fixture) -> bool {
-	conn, ok, _ := open(":memory:")
-	if !ok do return false
+	conn, mig_ok := tmpl_clone_migrated(t)
+	if !mig_ok do return false
 	f.conn = conn
-	mig_ok, _ := run_migrations(&f.conn)
-	testing.expect(t, mig_ok, "migrations ok")
 	f.repo_impl = Bridge_Repo_SQLite{conn = &f.conn}
 	f.repo = new_bridge_repository(&f.repo_impl, &f.conn)
 	return mig_ok
@@ -214,18 +210,15 @@ File_Fixture :: struct {
 	repo:   iface.Bridge_Repository,
 }
 
-file_counter: int
-
 file_fixture_open :: proc(t: ^testing.T, f: ^File_Fixture, tag: string) -> bool {
-	n := sync.atomic_add(&file_counter, 1)
-	f.path = fmt.aprintf("/tmp/test_ea_commit_%s_%d_%d.db", tag, os.get_pid(), n)
-	_ = os.remove(f.path)
-	conn, ok, _ := open(f.path)
-	if !ok do return false
+	conn, path, mig_ok := tmpl_clone_migrated_into_file(t, tag)
+	f.path = fmt.aprintf("%s", path)
+	if !mig_ok {
+		tmpl_remove_db(f.path)
+		return false
+	}
 	f.main = conn
 	testing.expect(t, exec(&f.main, "PRAGMA busy_timeout = 5000;"), "busy_timeout on the request connection, as wiring sets it")
-	mig_ok, _ := run_migrations(&f.main)
-	testing.expect(t, mig_ok, "migrations ok")
 	c_ok, _ := open_bridge_enroll_commit_conn(&f.commit, f.path)
 	testing.expect(t, c_ok, "commit connection opens")
 	f.impl = Bridge_Repo_SQLite{conn = &f.main, commit = &f.commit}
@@ -237,7 +230,7 @@ file_fixture_open :: proc(t: ^testing.T, f: ^File_Fixture, tag: string) -> bool 
 file_fixture_close :: proc(f: ^File_Fixture) {
 	close(&f.commit.conn)
 	close(&f.main)
-	_ = os.remove(f.path)
+	tmpl_remove_db(f.path)
 	delete(f.path)
 }
 
