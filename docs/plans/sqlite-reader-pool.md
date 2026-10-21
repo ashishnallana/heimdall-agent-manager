@@ -521,25 +521,37 @@ The rule: no lock that a unit-of-work body can take may be held around an autoco
 
 ## 13. Decisions
 
-Recommended resolutions; the user to confirm.
+Decided 2026-10-21.
 
-- **Q1 Not-found:** keep per-method behaviour (§5). *Recommended.*
-- **Q2 Constraint mapping:** per-call default (`db_error(…, default)`), keeping each site's code.
-  *Recommended.*
-- **Q3 `.Unavailable`:** add it, appended at the end. Older peers see Internal_Error.
-  *Recommended.*
-- **Q4 FTS heal:** no inline universal heal. Inline only via try-lock with no tracked lock held;
-  otherwise the reaper repairs. *Recommended.*
-- **Q5 Reader memory:** `cache_size=-4000`, mmap off initially. *Recommended.*
-- **Q6 Lease-leak recovery:** moot; no statement outlives a layer call.
+- **Q1 Not-found: keep each method's current behaviour** (§5). Changing about 100 callers adds
+  risk for no throughput gain. New repository methods follow the documented convention
+  (`found=false`, no error).
+- **Q2 Constraint mapping: per-call default** (`db_error(…, default)`), so each site keeps its
+  current code. Normalising error codes is a separate API change, not part of a storage refactor.
+- **Q3 `.Unavailable`: add it, appended at the end of the enum.** Return HTTP 503 with a
+  `Retry-After: 1` header and a recoverable class; a busy database is a retryable condition, not
+  a conflict or an internal error. Older peers decode it as Internal_Error, which is also
+  retryable.
+- **Q4 FTS heal: no inline universal heal.** Repair inline only if the try-lock succeeds and the
+  thread holds no tracked lock; otherwise queue the repair for the reaper. Count corruption
+  events in `heimdall_sqlite_fts_corrupt_total`; a corrupt index should page, not heal silently.
+- **Q5 Reader memory: `cache_size=-4000`, mmap off at first.** Raise both after measuring RSS
+  and reader hit rate in production.
+- **Q6 Lease-leak recovery:** moot, because no statement outlives a layer call.
 - **Q7 Dynamic-SQL plan cache:** fine. `Sql_Builder` output is keyed by a fragment hash; scans
   of builder SQL validate per call.
-- **Open, needs a decision:** the projector fix in §9.2 (defer projection inside a unit of work
-  to after commit). It changes when a card appears for a verb's change: after commit instead of
-  inside the transaction. Cards are derived state and reconciled by the reaper, so this looks
-  acceptable, but it needs the product owner's OK.
-- **Open:** whether a DB-busy 503 on shell-pane endpoints showing "bridge unreachable" in the UI
-  is acceptable or needs a UI tweak.
+- **Q8 Card projection timing: project after commit.** Register the projection with
+  `unit_of_work_after_commit` (the outbox/after-commit pattern). Cards are derived state, the
+  reaper already reconciles them, and doing side projections inside the writer's critical section
+  is what causes the B2 stall. Add a test that a rolled-back verb produces no card.
+- **Q9 UI 503 message: tweak the UI** (small, in stage 2). `useShellPaneSubscription.ts:174,268`
+  branches on the error `code` in the body, not the bare status. `unavailable` shows "Hub busy,
+  retrying" and retries with backoff; other 503s keep "bridge unreachable". Don't overload one
+  message with two causes.
+- **Q10 Lock audit: mandatory stage-0 exit criterion.** Audit the nine remaining service mutexes
+  against the rule "no lock a UoW body can take may be held around an autocommit write". Each
+  violation is fixed in stage 0 (or listed with an owner), and every audited mutex is registered
+  with `lockorder` so the debug tripwire covers it. Effort is re-estimated after the audit.
 
 ## 14. Review response
 
