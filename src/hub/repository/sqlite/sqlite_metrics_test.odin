@@ -1,7 +1,6 @@
 package sqlite
 
 import "core:fmt"
-import "core:os"
 import "core:strings"
 import "core:testing"
 import metrics "odin_test:lib/metrics"
@@ -41,9 +40,9 @@ test_sqlite_op_from_sql_enum :: proc(t: ^testing.T) {
 @(test)
 test_sqlite_metrics_observe_step_and_exec :: proc(t: ^testing.T) {
 	sqlite_metrics_init(metrics.init_global())
-	db_path := fmt.tprintf("/tmp/test_sqlite_metrics_%d.db", os.get_pid())
-	os.remove(db_path)
-	defer os.remove(db_path)
+	db_path := tmpl_tmp_db_path("sqlite_metrics")
+	tmpl_remove_db(db_path)
+	defer tmpl_remove_db(db_path)
 
 	create_before := metrics.histogram_count(metrics.with(sqlite_metrics.query_duration, "create"))
 	insert_before := metrics.histogram_count(metrics.with(sqlite_metrics.query_duration, "insert"))
@@ -77,9 +76,9 @@ test_sqlite_metrics_observe_step_and_exec :: proc(t: ^testing.T) {
 @(test)
 test_sqlite_busy_counter_on_lock_contention :: proc(t: ^testing.T) {
 	sqlite_metrics_init(metrics.init_global())
-	db_path := fmt.tprintf("/tmp/test_sqlite_busy_%d.db", os.get_pid())
-	os.remove(db_path)
-	defer os.remove(db_path)
+	db_path := tmpl_tmp_db_path("sqlite_busy")
+	tmpl_remove_db(db_path)
+	defer tmpl_remove_db(db_path)
 
 	writer, ok1, _ := open(db_path)
 	testing.expect(t, ok1, "open writer")
@@ -102,9 +101,9 @@ test_sqlite_busy_counter_on_lock_contention :: proc(t: ^testing.T) {
 test_sqlite_size_collector_tracks_open_path :: proc(t: ^testing.T) {
 	reg := metrics.init_global()
 	sqlite_metrics_init(reg)
-	db_path := fmt.tprintf("/tmp/test_sqlite_size_%d.db", os.get_pid())
-	os.remove(db_path)
-	defer os.remove(db_path)
+	db_path := tmpl_tmp_db_path("sqlite_size")
+	tmpl_remove_db(db_path)
+	defer tmpl_remove_db(db_path)
 
 	conn, ok, _ := open(db_path)
 	testing.expect(t, ok, "open")

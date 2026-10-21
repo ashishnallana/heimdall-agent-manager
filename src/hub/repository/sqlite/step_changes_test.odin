@@ -1,7 +1,6 @@
 package sqlite
 
 import "core:fmt"
-import "core:os"
 import "core:sync"
 import "core:testing"
 import "core:thread"
@@ -32,11 +31,9 @@ step_changes_noise_run :: proc(data: rawptr) {
 
 @(test)
 test_step_changes_is_per_statement_under_concurrent_writes :: proc(t: ^testing.T) {
-	db_path := fmt.tprintf("%s/test_step_changes_%d.db", os.get_env("HOME", context.temp_allocator), os.get_pid())
-	os.remove(db_path)
-	defer os.remove(db_path)
-	conn, open_ok, _ := open(db_path)
-	testing.expect(t, open_ok, "open succeeds")
+	conn, db_path, open_ok := tmpl_open_file_prod(t, "step_changes")
+	defer tmpl_remove_db(db_path)
+	if !open_ok do return
 	defer close(&conn)
 
 	ROWS :: 2000

@@ -1,7 +1,6 @@
 package sqlite
 
 import "core:fmt"
-import "core:os"
 import "core:sync"
 import "core:testing"
 import "core:thread"
@@ -10,16 +9,11 @@ import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
 
 @(private = "file")
-tx_test_db :: proc(t: ^testing.T, tag: string) -> (Conn, bool) {
-	home := os.get_env("HOME", context.temp_allocator)
-	dir := fmt.tprintf("%s/.cache/heimdall-tests", home)
-	os.make_directory(dir)
-	db_path := fmt.tprintf("%s/tx_%s_%d.db", dir, tag, os.get_pid())
-	os.remove(db_path)
-	conn, open_ok, _ := open(db_path)
-	if !testing.expect(t, open_ok, "db open ok") do return conn, false
+tx_test_db :: proc(t: ^testing.T, tag: string) -> (Conn, string, bool) {
+	conn, db_path, open_ok := tmpl_open_file_prod(t, fmt.tprintf("tx_%s", tag))
+	if !open_ok do return conn, "", false
 	exec(&conn, "CREATE TABLE IF NOT EXISTS tx_probe (k TEXT PRIMARY KEY, v INTEGER NOT NULL);")
-	return conn, true
+	return conn, db_path, true
 }
 
 Tx_Worker :: struct {
@@ -49,7 +43,8 @@ tx_worker_proc :: proc(t: ^thread.Thread) {
 // within a transaction") or its writes land inside the first transaction.
 @(test)
 test_tx_mutex_serializes_uow :: proc(t: ^testing.T) {
-	conn, ok := tx_test_db(t, "serial")
+	conn, db_path, ok := tx_test_db(t, "serial")
+	defer tmpl_remove_db(db_path)
 	if !ok do return
 	defer close(&conn)
 	factory_impl: SQLite_Unit_Of_Work_Factory
@@ -95,7 +90,8 @@ test_tx_mutex_serializes_uow :: proc(t: ^testing.T) {
 // at the outer commit.
 @(test)
 test_tx_uow_nested_savepoint :: proc(t: ^testing.T) {
-	conn, ok := tx_test_db(t, "nested")
+	conn, db_path, ok := tx_test_db(t, "nested")
+	defer tmpl_remove_db(db_path)
 	if !ok do return
 	defer close(&conn)
 	factory_impl: SQLite_Unit_Of_Work_Factory
