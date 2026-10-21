@@ -2,7 +2,6 @@ package taskv2
 
 import "base:runtime"
 import "core:fmt"
-import "core:mem/virtual"
 import "core:strings"
 import "core:sync"
 import domain "odin_test:hub/domain"
@@ -345,6 +344,9 @@ on_dep_added_in_uow :: proc(svc: ^Service, u: ^Uow, task: domain.Task, actor: Ac
 // instance holding nothing (no-op, no UoW).
 on_instance_terminal :: proc(svc: ^Service, instance_id: string) {
 	if svc == nil || svc.repo == nil || instance_id == "" do return
+	scratch: Scratch
+	context.allocator = scratch_begin(&scratch)
+	defer scratch_end(&scratch)
 	if _, held, _ := iface.taskchain_get_lease_by_holder(svc.repo, instance_id); !held do return
 	// Bridge ABSENCE is not instance death (review B2): an instance marked
 	// `unreachable` because its bridge disconnected keeps its lease; the TTL
@@ -374,6 +376,9 @@ on_instance_terminal :: proc(svc: ^Service, instance_id: string) {
 // instance. The later terminal report finds no lease (no-op).
 on_instance_user_stopped :: proc(svc: ^Service, instance_id: string) {
 	if svc == nil || svc.repo == nil || instance_id == "" do return
+	scratch: Scratch
+	context.allocator = scratch_begin(&scratch)
+	defer scratch_end(&scratch)
 	lease, held, _ := iface.taskchain_get_lease_by_holder(svc.repo, instance_id)
 	if !held do return
 	u, ok, _ := begin_uow(svc)
@@ -387,6 +392,9 @@ on_instance_user_stopped :: proc(svc: ^Service, instance_id: string) {
 // (by moving last_beat_at); `idle` arms idle_grace for a lease holder.
 on_instance_activity :: proc(svc: ^Service, instance_id, activity_status: string) {
 	if svc == nil || svc.repo == nil || instance_id == "" do return
+	scratch: Scratch
+	context.allocator = scratch_begin(&scratch)
+	defer scratch_end(&scratch)
 	lease, held, _ := iface.taskchain_get_lease_by_holder(svc.repo, instance_id)
 	if !held do return
 	switch activity_status {
@@ -457,6 +465,9 @@ touch_lease :: proc(svc: ^Service, lease: domain.Task_Lease) {
 // worker that came up idle gets work (pull).
 on_start_success :: proc(svc: ^Service, inst: domain.Agent_Instance) {
 	if svc == nil || svc.repo == nil do return
+	scratch: Scratch
+	context.allocator = scratch_begin(&scratch)
+	defer scratch_end(&scratch)
 	u, ok, _ := begin_uow(svc)
 	if !ok do return
 	acted := true
@@ -504,19 +515,11 @@ grant_boot_lease_grace :: proc(svc: ^Service) {
 // while the bridge was away); re-plan every chain with a held task.
 on_bridge_hello :: proc(svc: ^Service, bridge_id: string, active_instance_ids: []string) {
 	if svc == nil || svc.repo == nil || bridge_id == "" do return
-	// Everything this pass allocates (lease/task/chain rows, a match context per
-	// held chain, effects) is scratch. It runs on the bridge WS upgrade thread,
-	// which is on the persistent heap with no per-request arena, so without this
-	// scope every bridge (re)connect leaked a full matcher pass over every held
-	// chain. Heap-lived state (timers, recent_expiries, registry, merge jobs)
-	// already clones onto runtime.heap_allocator explicitly, as for the timer
-	// thread. Assign at proc-body scope: a nested-scope assignment would revert.
-	scratch: virtual.Arena
-	scratch_ok := virtual.arena_init_growing(&scratch) == nil
-	defer if scratch_ok do virtual.arena_destroy(&scratch)
-	scratch_allocator := context.allocator
-	if scratch_ok do scratch_allocator = virtual.arena_allocator(&scratch)
-	context.allocator = scratch_allocator
+	// Runs on the bridge WS upgrade thread (persistent heap): without this scope
+	// every bridge (re)connect leaked a full matcher pass over every held chain.
+	scratch: Scratch
+	context.allocator = scratch_begin(&scratch)
+	defer scratch_end(&scratch)
 	u, ok, _ := begin_uow(svc)
 	if !ok do return
 	leases, lerr := iface.taskchain_list_all_leases(svc.repo)

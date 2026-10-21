@@ -1,5 +1,6 @@
 package http
 
+import "base:runtime"
 import "core:strconv"
 import "core:strings"
 import "core:sync"
@@ -60,6 +61,10 @@ bridge_apply_log_frame :: proc(
 	now_unix_ms: i64 = 0,
 	now_tick_ns: i64 = 0,
 ) -> (st: Bridge_Log_Frame_Stats) {
+	// Accepted events are handed to the writer thread, which frees them on the
+	// heap: build them there whatever the caller's allocator (the WS reader runs
+	// each frame on a scratch arena).
+	context.allocator = runtime.heap_allocator()
 	m := &project_service.fleet_metrics
 	if len(text) > contracts.BRIDGE_LOG_MAX_FRAME_BYTES {
 		st.result = .Rejected_Oversize

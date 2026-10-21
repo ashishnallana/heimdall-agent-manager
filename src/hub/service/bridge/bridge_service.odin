@@ -8,6 +8,7 @@ import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
 import ownership "odin_test:hub/service/ownership"
 import platform "odin_test:hub/platform"
+import jsonx "odin_test:lib/jsonx"
 import project_service "odin_test:hub/service/project"
 
 Bridge_Service :: struct {
@@ -205,7 +206,11 @@ bridge_runtime_connect :: proc(service: ^Bridge_Service, token: string, hostname
 	}
 	if os_name != "" { delete(bridge.machine_os); bridge.machine_os = strings.clone(os_name) }
 	if arch != "" { delete(bridge.machine_arch); bridge.machine_arch = strings.clone(arch) }
-	if capabilities_json != "" && strings.contains(capabilities_json, "\"capabilities\"") { delete(bridge.capabilities_json); bridge.capabilities_json = strings.clone(capabilities_json) }
+	if capabilities_json != "" && strings.contains(capabilities_json, "\"capabilities\"") {
+		record := bridge_capabilities_record(bridge.capabilities_json, capabilities_json)
+		delete(bridge.capabilities_json)
+		bridge.capabilities_json = record
+	}
 	if version != "" { delete(bridge.version); bridge.version = strings.clone(version) }
 	if commit_sha != "" { delete(bridge.commit_sha); bridge.commit_sha = strings.clone(commit_sha) }
 	if build_timestamp != "" { delete(bridge.build_timestamp); bridge.build_timestamp = strings.clone(build_timestamp) }
@@ -251,13 +256,82 @@ mark_bridge_offline :: proc(service: ^Bridge_Service, bridge_id: string) -> (dom
 update_runtime_capabilities :: proc(service: ^Bridge_Service, bridge_id, capabilities_json: string) -> (domain.Bridge, bool, domain.Domain_Error) {
 	bridge, bridge_ok, bridge_err := iface.bridge_get_bridge(service.repo, bridge_id)
 	if !bridge_ok do return domain.Bridge{}, false, bridge_err
-	if bridge.status == .Revoked do return domain.Bridge{}, false, domain.domain_error(.Bridge_Revoked, "bridge is revoked")
-	if capabilities_json != "" && strings.contains(capabilities_json, "\"capabilities\"") do bridge.capabilities_json = capabilities_json
+	if bridge.status == .Revoked { domain.bridge_destroy(&bridge); return domain.Bridge{}, false, domain.domain_error(.Bridge_Revoked, "bridge is revoked") }
+	// Every field stays owned (see update_vault_status) so the caller can destroy
+	// the returned row: this runs on every heartbeat, on the WS reader thread, which
+	// has no per-request arena — a dropped row leaked the whole frame each beat.
+	if capabilities_json != "" && strings.contains(capabilities_json, "\"capabilities\"") {
+		record := bridge_capabilities_record(bridge.capabilities_json, capabilities_json)
+		delete(bridge.capabilities_json)
+		bridge.capabilities_json = record
+	}
 	now := platform.clock_now(service.clock)
 	bridge.status = .Online
-	bridge.last_seen_at = now
-	bridge.updated_at = now
-	return iface.bridge_save_bridge(service.repo, bridge)
+	delete(bridge.last_seen_at)
+	bridge.last_seen_at = strings.clone(now)
+	delete(bridge.updated_at)
+	bridge.updated_at = strings.clone(now)
+	saved, saved_ok, save_err := iface.bridge_save_bridge(service.repo, bridge)
+	if !saved_ok { domain.bridge_destroy(&bridge); return domain.Bridge{}, false, save_err }
+	return saved, true, domain.Domain_Error{}
+}
+
+// BRIDGE_RUNTIME_CAPABILITY_KEYS are the top-level fields of a bridge_hello /
+// bridge_heartbeat frame that readers of bridges.capabilities_json use:
+// bridge_capabilities_json (capabilities, provider, default_model), instance
+// reconfiguration and pane capture (features).
+BRIDGE_RUNTIME_CAPABILITY_KEYS :: [?]string{"capabilities", "features"}
+BRIDGE_RUNTIME_CAPABILITY_STRING_KEYS :: [?]string{"provider", "default_model"}
+
+// BRIDGE_ENROLLMENT_RECORD_KEYS are written once, at approval, by
+// device_enroll_capabilities_json: the record of which key the human approved.
+BRIDGE_ENROLLMENT_RECORD_KEYS :: [?]string{"public_key", "enrollment_public_key", "enrollment_key_fingerprint", "os_user", "enrolled_via"}
+
+// bridge_capabilities_record builds the stored capabilities_json from the row's
+// current value and an incoming hello/heartbeat frame. The row used to be
+// replaced by the whole frame — instance lists, stats, search status — so it grew
+// to ~60 KB, was rewritten every 45 s and re-read on every bridge-token auth, and
+// the first frame erased the enrollment record. Now the runtime keys come from the
+// frame and the enrollment keys survive from the row; a key absent from both is
+// omitted. A row with an enrollment record (enrolled_via) keeps its approved
+// public_key; one without (enrolled before device authorization, or already
+// overwritten by an earlier version) keeps tracking the frame's live key.
+bridge_capabilities_record :: proc(existing, frame: string, allocator := context.allocator) -> string {
+	b := strings.builder_make(allocator)
+	strings.write_byte(&b, '{')
+	first := true
+	write_key :: proc(b: ^strings.Builder, first: ^bool, key: string) {
+		if !first^ do strings.write_byte(b, ',')
+		first^ = false
+		strings.write_byte(b, '"')
+		write_service_json_string(b, key)
+		strings.write_string(b, "\":")
+	}
+	write_string_member :: proc(b: ^strings.Builder, first: ^bool, key, value: string) {
+		write_key(b, first, key)
+		strings.write_byte(b, '"')
+		write_service_json_string(b, value)
+		strings.write_byte(b, '"')
+	}
+	for key in BRIDGE_RUNTIME_CAPABILITY_KEYS {
+		if raw, ok := jsonx.extract_raw_array(frame, key, true, context.temp_allocator); ok {
+			write_key(&b, &first, key)
+			strings.write_string(&b, raw)
+		}
+	}
+	for key in BRIDGE_RUNTIME_CAPABILITY_STRING_KEYS {
+		if value, ok := jsonx.extract_string_found(frame, key, true, context.temp_allocator); ok do write_string_member(&b, &first, key, value)
+	}
+	enrolled := jsonx.has_key(existing, "enrolled_via", true)
+	for key in BRIDGE_ENROLLMENT_RECORD_KEYS {
+		value, ok := jsonx.extract_string_found(existing, key, true, context.temp_allocator)
+		if key == "public_key" && !enrolled {
+			if live, live_ok := jsonx.extract_string_found(frame, key, true, context.temp_allocator); live_ok do value, ok = live, true
+		}
+		if ok do write_string_member(&b, &first, key, value)
+	}
+	strings.write_byte(&b, '}')
+	return strings.to_string(b)
 }
 
 // BRIDGE_VAULT_STATUS_VALUES are the only values a bridge may report (REQ-BVS-1),

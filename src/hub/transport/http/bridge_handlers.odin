@@ -6,6 +6,7 @@ import "core:crypto/legacy/sha1"
 import base64 "core:encoding/base64"
 import "core:encoding/json"
 import "core:fmt"
+import "core:mem/virtual"
 import "core:net"
 import "core:strconv"
 import "core:strings"
@@ -2041,9 +2042,30 @@ bridge_ws_process_frame :: proc(h: ^Bridge_Handlers, bridge_id: string, connecti
 			delete(kind)
 		}
 	}
-	defer delete(text)
-	defer delete(type)
+	// text and type belong to the reader's persistent heap, so they are freed
+	// against it explicitly: the deferred deletes run under the scratch allocator
+	// installed below.
+	heap := context.allocator
+	defer delete(text, heap)
+	defer delete(type, heap)
 	metrics.counter_inc(metrics.with(project_service.fleet_metrics.bridge_ws_frames, "rx", project_service.bridge_frame_kind(type)))
+
+	// Per-frame scratch, the reader-thread counterpart of handle_client's
+	// per-request arena. The arms below call the same services request handlers
+	// do, which return owned rows and assume an arena reclaims anything the caller
+	// does not free; on this thread the persistent heap kept all of it, for the
+	// life of the connection (taskv2 hooks, repository rows, heartbeat parses).
+	// Anything that outlives the frame is already cloned onto an explicit
+	// allocator by its owner (runtime registry, viewer writers, event bus writes
+	// synchronously, metrics registry, proxy/tunnel relays), or pinned here on
+	// the heap where ownership crosses to another thread (bridge_log). Assign at
+	// proc-body scope: a nested-scope assignment would revert.
+	scratch: virtual.Arena
+	scratch_ok := virtual.arena_init_growing(&scratch) == nil
+	defer if scratch_ok do virtual.arena_destroy(&scratch)
+	frame_allocator := heap
+	if scratch_ok do frame_allocator = virtual.arena_allocator(&scratch)
+	context.allocator = frame_allocator
 
 	switch type {
 	case "provider_catalog_request":
@@ -2061,7 +2083,10 @@ bridge_ws_process_frame :: proc(h: ^Bridge_Handlers, bridge_id: string, connecti
 			json_bool_value(text, "task_chain_search_ready"), json_bool_value(text, "task_chain_search_stale"),
 			i64(json_int(text, "task_chain_search_revision", 0)),
 		)
-		if strings.contains(text, "\"capabilities\"") { _, _, _ = bridge_service.update_runtime_capabilities(h.bridges, bridge_id, text) }
+		if strings.contains(text, "\"capabilities\"") {
+			// The row is fully owned; free it rather than lean on the frame arena.
+			if saved, saved_ok, _ := bridge_service.update_runtime_capabilities(h.bridges, bridge_id, text); saved_ok { b := saved; domain.bridge_destroy(&b) }
+		}
 		// REQ-BVS-1. Runs AFTER update_runtime_capabilities, which rewrites the row:
 		// this one re-reads it, so it sees the fresh value and its own write is not
 		// clobbered by the capabilities save.

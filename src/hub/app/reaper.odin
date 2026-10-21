@@ -108,16 +108,38 @@ reaper_loop :: proc(graph: ^App_Graph) {
 	if graph == nil do return
 	interval := graph.config.reaper_interval_seconds
 	if interval <= 0 do interval = DEFAULT_REAPER_INTERVAL_SECONDS
-	// Attention cards: reconcile once at startup, then on the sweep cadence below.
-	attention_reconcile_maybe(graph, true)
-	// REQ-EA-3: once at startup, before the first interval, so an enrollment that was
-	// pending when the hub stopped is rolled back as soon as the hub is back.
-	reaper_sweep_pending_enrollments(graph)
+	reaper_with_scratch(graph, proc(graph: ^App_Graph) {
+		// Attention cards: reconcile once at startup, then on the sweep cadence below.
+		attention_reconcile_maybe(graph, true)
+		// REQ-EA-3: once at startup, before the first interval, so an enrollment that
+		// was pending when the hub stopped is rolled back as soon as the hub is back.
+		reaper_sweep_pending_enrollments(graph)
+	})
 	for {
 		time.sleep(time.Duration(interval) * time.Second)
-		reaper_sweep_once(graph)
-		attention_reconcile_maybe(graph, false)
+		reaper_with_scratch(graph, proc(graph: ^App_Graph) {
+			reaper_sweep_once(graph)
+			attention_reconcile_maybe(graph, false)
+		})
 	}
+}
+
+// reaper_with_scratch runs one reaper pass on a scratch arena, as both allocators.
+// This thread lives for the whole process on the persistent heap, and the passes
+// call the same services request handlers do — which return owned rows and rely on
+// an arena to reclaim whatever the caller does not free (taskv2's terminal hook,
+// card reconciliation, repository rows) — and its temp allocator is never reset.
+// Anything a pass hands to another thread or keeps is cloned onto an explicit
+// allocator by its owner (runtime registry, event bus, attention debouncer, kill
+// replay workers), exactly as for a request.
+reaper_with_scratch :: proc(graph: ^App_Graph, pass: proc(graph: ^App_Graph)) {
+	scratch: virtual.Arena
+	scratch_ok := virtual.arena_init_growing(&scratch) == nil
+	defer if scratch_ok do virtual.arena_destroy(&scratch)
+	allocator, temp_allocator := context.allocator, context.temp_allocator
+	if scratch_ok do allocator, temp_allocator = virtual.arena_allocator(&scratch), virtual.arena_allocator(&scratch)
+	context.allocator, context.temp_allocator = allocator, temp_allocator
+	pass(graph)
 }
 
 // ATTENTION_RECONCILE_INTERVAL_SECONDS: how often the attention-card
