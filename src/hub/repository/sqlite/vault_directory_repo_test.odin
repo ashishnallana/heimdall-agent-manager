@@ -20,11 +20,9 @@ Vd_Fixture :: struct {
 }
 
 vd_open :: proc(t: ^testing.T, f: ^Vd_Fixture) -> bool {
-	conn, ok, _ := open(":memory:")
-	if !ok do return false
+	conn, mig_ok := tmpl_clone_migrated(t)
+	if !mig_ok do return false
 	f.conn = conn
-	mig_ok, _ := run_migrations(&f.conn)
-	testing.expect(t, mig_ok, "migrations ok")
 	testing.expect(t, sqlite_object_exists(&f.conn, "vault_wrapped_keyrings"), "092 applied")
 	f.repo = new_vault_directory_repository(&f.impl, &f.conn)
 	return mig_ok
