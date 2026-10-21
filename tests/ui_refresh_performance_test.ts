@@ -221,12 +221,19 @@ async function hiddenPaneRun(register: boolean) {
     const whileHidden = summarize(net.reqs);
     // Pane shown again: the hook (usePaneDeferredRefresh) does exactly this.
     if (register) {
+      // The pane's view of its newest-page request, as useQuery reports it.
+      const request = () => {
+        const q = a.chatEndpoints.endpoints.fetchConversationMessages.select({ conversationId: CONV })(store.getState());
+        return { requestId: q.requestId, isFetching: q.status === 'pending' };
+      };
       a.deferral.updatePane(pane, CONV, true);
-      if (a.deferral.takeDirty(CONV)) subs[3].refetch();
-      // A second show/hide/show does not refetch again without a new event.
+      if (a.deferral.needsCatchUp(CONV, request(), true)) subs[3].refetch();
+      await advance(10);
+      // The catch-up response spends the mark; a second hide/show does not refetch again.
       a.deferral.updatePane(pane, CONV, false);
       a.deferral.updatePane(pane, CONV, true);
-      assert.equal(a.deferral.takeDirty(CONV), false);
+      assert.equal(a.deferral.needsCatchUp(CONV, request(), true), false);
+      assert.equal(a.deferral.isDirty(CONV), false);
     }
     await advance(1000);
     const total = summarize(net.reqs);
@@ -273,7 +280,7 @@ test('a visible pane is never deferred, and a second visible pane keeps refreshi
 });
 
 test('a dirty mark survives unmount and conversation switches until a pane shows it', async () => {
-  const { registerPane, updatePane, deferIfHidden, unregisterPane, isDirty, takeDirty } = await import('../src/ui/api/paneDeferral.ts');
+  const { registerPane, updatePane, deferIfHidden, unregisterPane, isDirty, needsCatchUp } = await import('../src/ui/api/paneDeferral.ts');
   const id = registerPane(CONV, false);
   assert.equal(deferIfHidden({ type: 'Chat', id: CONV }), true);
   assert.equal(deferIfHidden({ type: 'SidebarConversations', id: CONV }), false, 'only Chat:<conversation> defers');
@@ -284,10 +291,16 @@ test('a dirty mark survives unmount and conversation switches until a pane shows
   updatePane(id, 'chat_other', false);
   unregisterPane(id);
   assert.equal(isDirty(CONV), true);
-  // A later pane showing CONV takes it exactly once.
+  // A later pane showing CONV refetches until a newer request settles; a hidden pane
+  // or one with a request in flight does not.
   const again = registerPane(CONV, true);
-  assert.equal(takeDirty(CONV), true);
-  assert.equal(takeDirty(CONV), false);
+  assert.equal(needsCatchUp(CONV, { requestId: 'r_old', isFetching: false }, false), false, 'hidden: wait');
+  assert.equal(needsCatchUp(CONV, { requestId: 'r_old', isFetching: true }, true), false, 'in flight: wait');
+  assert.equal(needsCatchUp(CONV, { requestId: 'r_old', isFetching: false }, true), true, 'stale page: refetch');
+  assert.equal(needsCatchUp(CONV, { requestId: 'r_old', isFetching: false }, true), true, 'still stale until a newer request');
+  assert.equal(needsCatchUp(CONV, { requestId: 'r_new', isFetching: true }, true), false);
+  assert.equal(needsCatchUp(CONV, { requestId: 'r_new', isFetching: false }, true), false, 'newer request settled: spent');
+  assert.equal(isDirty(CONV), false);
   unregisterPane(again);
 });
 

@@ -701,8 +701,9 @@ export function AgentChatPane({
     { skip: !conversationId },
   );
   // Message events that reach only hidden panes are deferred (paneDeferral.ts); the
-  // newest page refetches once when this pane is shown again.
-  usePaneDeferredRefresh(conversationId, paneVisible, messagesQuery.refetch);
+  // newest page refetches once when this pane is shown again (after any older request
+  // still in flight settles).
+  usePaneDeferredRefresh(conversationId, paneVisible, messagesQuery.refetch, messagesQuery);
   const [fetchOlderMessages, olderMessagesState] = useLazyFetchConversationMessagesQuery();
   const [updateConversationTitle, updateTitleState] = useUpdateConversationTitleMutation();
   const [requestPaneCapture, requestPaneCaptureState] = useRequestPaneCaptureMutation();

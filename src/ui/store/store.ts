@@ -1,6 +1,7 @@
 import { combineReducers, configureStore, createAction } from '@reduxjs/toolkit';
 import { heimdallApi, setupHeimdallApiListeners } from '../api/heimdallApi';
 import { vaultCacheInvalidationMiddleware } from '../api/vaultCacheInvalidation';
+import { paneDeferralResetMiddleware } from '../api/wsInvalidation';
 import '../api/endpoints/tasks';
 import '../api/endpoints/chats';
 import '../api/endpoints/agents';
@@ -79,6 +80,9 @@ export const store = configureStore({
     getDefaultMiddleware().concat(
       actionLogger,
       vaultCacheInvalidationMiddleware,
+      // Sees the resetApiState that vaultCacheInvalidationMiddleware or a user switch
+      // dispatches, and drops owner-specific deferral state with it.
+      paneDeferralResetMiddleware,
       heimdallApi.middleware,
     ),
 });

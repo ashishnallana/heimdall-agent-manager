@@ -26,7 +26,7 @@ import { fireNotificationForWsEvent } from '../services/notificationService';
 import { upsertChainTitle, upsertConversationTitle } from '../store/searchTitleSlice';
 import { isVaultArmored, decryptVaultText, getActiveVaultKey } from '../utils/vaultContent';
 import { handleVaultDirectoryEvent } from '../services/deviceVaultEvents';
-import { deferIfHidden } from './paneDeferral';
+import { clearDirtyMarks, deferIfHidden } from './paneDeferral';
 
 // Focus context read at WS-event time (populated by the shell from the live
 // route). Only focusedChainId is consumed — it lets a resource/chat/agent event
@@ -439,12 +439,27 @@ export function flushQueuedInvalidations(): void {
     if (!echoes.has(id)) echoes.set(id, consumeLocalMessageEcho(id));
     return Boolean(echoes.get(id));
   };
+  // The deferral records which requests predate the mark, so it reads the store now.
+  const state = readState(dispatch);
   const tags = entries
     .filter((entry) => entry.unconditional || [...entry.echoGuards].some((id) => !isEcho(id)))
     .map((entry) => entry.tag)
     // A conversation whose panes are all hidden refetches once when one is shown.
-    .filter((tag) => !deferIfHidden(tag));
+    .filter((tag) => !deferIfHidden(tag, state));
   if (tags.length > 0) dispatch(heimdallApi.util.invalidateTags(tags as any));
+}
+
+// The store state via a thunk; undefined when the dispatch is not a thunk-capable store.
+function readState(dispatch: any): unknown {
+  let state: unknown;
+  dispatch((_d: any, getState: () => unknown) => {
+    state = getState();
+  });
+  return state;
+}
+
+export function hasQueuedInvalidations(): boolean {
+  return queuedTags.size > 0 || queuedTimer !== null;
 }
 
 // Tests and teardown: drop anything queued without dispatching it.
@@ -454,6 +469,18 @@ export function resetQueuedInvalidations(): void {
   queuedTags.clear();
   queuedDispatch = null;
 }
+
+// An API reset (user switch, vault lock/unlock: every resetApiState) ends the previous
+// cache owner's state: queued tags and their timer, and hidden-pane dirty marks. Mounted
+// queries refetch from scratch after a reset, so nothing is lost. Keeps the marks from
+// carrying one owner's conversation ids into the next session.
+export const paneDeferralResetMiddleware = () => (next: (action: unknown) => unknown) => (action: unknown) => {
+  if (heimdallApi.util.resetApiState.match(action as any)) {
+    resetQueuedInvalidations();
+    clearDirtyMarks();
+  }
+  return next(action);
+};
 
 // The sidebar lists are a bounded page ordered by last_message_at (/chats?limit=30, the
 // inbox's first page). A row tag reaches only lists that already hold the row; a message
