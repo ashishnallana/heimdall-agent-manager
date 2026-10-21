@@ -483,3 +483,36 @@ test_write_task_json_and_detail_emit_v2_state :: proc(t: ^testing.T) {
 		testing.expectf(t, !strings.contains(out2, `"votes"`), "write_task_detail_json(%v) must not emit votes (got %s)", c.state, out2)
 	}
 }
+
+// The detail wire carries each reviewer's verdict on the CURRENT attempt only.
+@(test)
+test_write_task_detail_emits_current_attempt_reviews :: proc(t: ^testing.T) {
+	f := wire_setup(t, "review_wire")
+	defer wire_teardown(f)
+	owner_auth := contracts.Auth_Context{kind = .User_Token, user_id = string(f.owner)}
+	task := domain.Task{
+		task_id = domain.Task_ID("task_review_wire"), chain_id = f.chain_id, owner_user_id = f.owner,
+		title = "Review Wire Task", publish_state = .Published, state = .In_Review, kind = .Task, priority = .P2,
+		attempt_no = 2, brief_json = `{"goal":"g"}`,
+	}
+	save :: proc(t: ^testing.T, f: ^wire_fixture, task: domain.Task, attempt: int, kind, agent, role, verdict: string) {
+		_, ok, err := iface.taskchain_save_review(&f.tc_repo, domain.Task_Review{
+			task_id = task.task_id, chain_id = task.chain_id, owner_user_id = task.owner_user_id, attempt_no = attempt,
+			role = role, reviewer_kind = kind, reviewer_agent_id = agent, verdict = verdict, created_at = "2026-10-21T00:00:00Z",
+		})
+		testing.expectf(t, ok, "save review: %v", err)
+	}
+	save(t, f, task, 1, "agent", "agt_old", "qa", "request_changes")
+	save(t, f, task, 2, "agent", "agt_qa", "qa", "approve")
+	save(t, f, task, 2, "agent", "agt_sec", "security", "request_changes")
+	save(t, f, task, 2, "user", "", "user", "approve")
+
+	b := strings.builder_make()
+	defer strings.builder_destroy(&b)
+	write_task_detail_json(&b, &f.th, owner_auth, task, nil)
+	out := strings.to_string(b)
+	testing.expectf(t, strings.contains(out, `"reviewer":"agt_qa","reviewer_kind":"agent","reviewer_instance_id":"","role":"qa","verdict":"approve"`), "agent approve (got %s)", out)
+	testing.expectf(t, strings.contains(out, `"reviewer":"agt_sec","reviewer_kind":"agent","reviewer_instance_id":"","role":"security","verdict":"request_changes"`), "agent changes (got %s)", out)
+	testing.expectf(t, strings.contains(out, `"reviewer":"user","reviewer_kind":"user","reviewer_instance_id":"","role":"user","verdict":"approve"`), "user approve (got %s)", out)
+	testing.expectf(t, !strings.contains(out, "agt_old"), "earlier attempt's review is omitted (got %s)", out)
+}

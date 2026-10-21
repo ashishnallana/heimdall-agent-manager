@@ -47,6 +47,17 @@ export interface TaskLeaseWire {
   delivery: string;
 }
 
+/** One reviewer's verdict on the task's current attempt (per review role). */
+export interface TaskReviewWire {
+  /** Agent id of an agent/coordinator reviewer, or 'user' for you. */
+  reviewer: string;
+  reviewer_kind: string;
+  reviewer_instance_id: string;
+  role: string;
+  verdict: 'approve' | 'request_changes' | string;
+  created_at: string;
+}
+
 export interface TaskWire {
   /** Where a done task's worktree branch is (Task System v2 F5). */
   merge?: { state: 'none' | 'pending' | 'merged' | 'conflict' | 'failed'; detail?: string; head?: string };
@@ -78,6 +89,7 @@ export interface TaskWire {
     last_comment_preview: string;
   };
   leases?: TaskLeaseWire[];
+  reviews?: TaskReviewWire[];
   created_at?: string;
   updated_at?: string;
   started_at?: string;

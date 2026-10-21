@@ -9,12 +9,13 @@ import {
   useFetchTaskFacetQuery,
 } from '../../api/endpoints/tasks';
 import { getTaskPeople, normalizeTaskState, taskChangedFiles } from './taskV2Types';
-import { awaitingYourReview, blockedOnYou } from './taskActions';
+import { awaitingYourReview, blockedOnYou, reviewVotes, youApproved, type ReviewVerdict } from './taskActions';
 import type { TaskActionsApi } from './useTaskActions';
 import { EMPTY_TASK_NAMES, instanceAgentsFromEvents, withInstanceAgents, type TaskNames } from './taskNames';
 import { describeTaskEvent } from './taskEvents';
 import { VaultText } from '../vault';
 import { HolderName } from './HolderName';
+import { ReviewVoteMark } from './ReviewVoteMark';
 import { describeEffectivePlacement, taskEffectivePlacement } from './fleetSelection';
 import { TaskComposer } from './TaskComposer';
 import { TaskCommentsThread } from '../taskchain/TaskCommentsThread';
@@ -82,6 +83,17 @@ function Block({
       </summary>
       <div className="space-y-1.5 pl-4">{children}</div>
     </details>
+  );
+}
+
+/** A reviewer with their verdict on the current attempt: ✓ approved, ✗ changes requested. */
+function ReviewerVote({ id, label, verdict }: { id: string; label: string; verdict?: ReviewVerdict }) {
+  const title = verdict === 'approve' ? 'approved' : verdict === 'request_changes' ? 'requested changes' : 'waiting for review';
+  return (
+    <span data-debug-id={`task-detail-reviewer-vote-${id}`} className="inline-flex items-center gap-0.5" title={`${label}: ${title}`}>
+      <ReviewVoteMark verdict={verdict} />
+      {label}
+    </span>
   );
 }
 
@@ -178,15 +190,23 @@ export const TaskDetails: React.FC<TaskDetailsProps> = ({
     : people.workers.length
       ? `Any worker: ${people.workers.map(names.agent).join(', ')}`
       : 'No worker in the fleet';
-  const reviewerText =
-    [
-      people.named.length ? people.named.map(names.agent).join(', ') : '',
-      ...people.reviewersByRole.map(
-        ({ role, agents }) => `${role} role: ${agents.length ? agents.map(names.agent).join(', ') : 'nobody holds it'}`,
-      ),
-    ]
-      .filter(Boolean)
-      .join(' · ') || 'None';
+  const votes = useMemo(() => reviewVotes(task), [task]);
+  // Voters outside the fleet's reviewer list (a coordinator reviewing) still show.
+  const extraVoters = Array.from(votes.keys()).filter((id) => id !== 'user' && !people.reviewers.includes(id));
+  const userApproved = youApproved(task);
+  const pendingReviewers = people.reviewers.filter((id) => votes.get(id) !== 'approve');
+  const vote = (id: string) => <ReviewerVote key={id} id={id} label={names.agent(id)} verdict={votes.get(id)} />;
+  const reviewerGroups: React.ReactNode[] = [
+    ...(people.named.length ? [<span key="named" className="inline-flex flex-wrap gap-x-2">{people.named.map(vote)}</span>] : []),
+    ...people.reviewersByRole.map(({ role, agents }) => (
+      <span key={`role-${role}`} className="inline-flex flex-wrap items-center gap-x-2">
+        <span className="text-muted">{role} role:</span>
+        {agents.length ? agents.map(vote) : <span className="text-muted">nobody holds it</span>}
+      </span>
+    )),
+    ...extraVoters.map((id) => <ReviewerVote key={id} id={id} label={names.instance(id) || names.agent(id)} verdict={votes.get(id)} />),
+    ...(task.requires_user_approval || votes.has('user') ? [<ReviewerVote key="user" id="user" label="you" verdict={votes.get('user')} />] : []),
+  ];
 
   const visibleEvents = showAllEvents ? events : events.slice(-TIMELINE_PREVIEW);
 
@@ -203,7 +223,7 @@ export const TaskDetails: React.FC<TaskDetailsProps> = ({
           <Text as="p" role="body-sm" tone="muted">Check the agent’s bridge, provider, and model settings. Updating its fleet settings retries dispatch.</Text>
         </Block>
       )}
-      {awaitingYourReview(task) && (
+      {(awaitingYourReview(task) || userApproved) && (
         <Block title="Your review" debugId="your-review-block">
           {handoff?.summary && <p className="leading-relaxed text-primary">{handoff.summary}</p>}
           {changedFiles.length > 0 && (
@@ -220,9 +240,16 @@ export const TaskDetails: React.FC<TaskDetailsProps> = ({
             disabled={actions.busy}
             renderActions={({ body, canSend, reset }) => (
               <>
-                <Button size="sm" variant="primary" disabled={actions.busy} onClick={() => void actions.approve()}>
-                  Approve
-                </Button>
+                {userApproved ? (
+                  <Text role="caption" tone="muted" data-debug-id="your-review-approved">
+                    You approved
+                    {pendingReviewers.length ? ` · waiting on ${pendingReviewers.map(names.agent).join(', ')}` : ''}
+                  </Text>
+                ) : (
+                  <Button size="sm" variant="primary" disabled={actions.busy} onClick={() => void actions.approve()}>
+                    Approve
+                  </Button>
+                )}
                 <Button
                   size="sm"
                   variant="secondary"
@@ -321,9 +348,8 @@ export const TaskDetails: React.FC<TaskDetailsProps> = ({
             )}
           </dd>
           <dt className="text-muted">Reviewers</dt>
-          <dd data-debug-id="task-detail-reviewers" className="text-primary">
-            {reviewerText}
-            {task.requires_user_approval ? ' + you' : ''}
+          <dd data-debug-id="task-detail-reviewers" className="flex flex-wrap items-center gap-x-3 gap-y-1 text-primary">
+            {reviewerGroups.length ? reviewerGroups : 'None'}
           </dd>
           <dt className="self-center text-muted">Bridge</dt>
           <dd>
@@ -368,7 +394,7 @@ export const TaskDetails: React.FC<TaskDetailsProps> = ({
         </Block>
       )}
 
-      {handoff && (handoff.summary || handoff.next_steps) && !awaitingYourReview(task) && (
+      {handoff && (handoff.summary || handoff.next_steps) && !awaitingYourReview(task) && !userApproved && (
         <Block title={state === 'done' ? 'Result' : 'Latest handoff'} collapsible debugId="task-details-handoff" aside={<Text role="caption" tone="faint">attempt {handoff.attempt_no || attemptNo}</Text>}>
           {handoff.summary && <p className="leading-relaxed text-primary">{handoff.summary}</p>}
           {handoff.next_steps && <p className="leading-relaxed text-muted">Next: {handoff.next_steps}</p>}

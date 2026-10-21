@@ -228,6 +228,9 @@ Task_Detail_Wire :: struct {
 	comment_summary:        Task_Comment_Summary_Wire `json:"comment_summary"`,
 	// lease: the live work/review lease(s) on this task (M1), empty when none.
 	leases:                 []Task_Lease_Wire         `json:"leases"`,
+	// reviews: each reviewer's latest verdict per role on the current attempt,
+	// empty when nobody has reviewed it yet.
+	reviews:                []Task_Review_Wire        `json:"reviews"`,
 	// merge: where a done task's worktree branch is (F5): none | pending |
 	// merged | conflict | failed.
 	merge:                  Task_Merge_Wire           `json:"merge"`,
@@ -241,6 +244,18 @@ Task_Merge_Wire :: struct {
 	state:  string `json:"state"`,
 	detail: string `json:"detail"`,
 	head:   string `json:"head"`,
+}
+
+// Task_Review_Wire: reviewer is the agent id for an agent or coordinator
+// review and "user" for the owner; reviewer_instance_id names the reviewing
+// instance, if any.
+Task_Review_Wire :: struct {
+	reviewer:             string `json:"reviewer"`,
+	reviewer_kind:        string `json:"reviewer_kind"`,
+	reviewer_instance_id: string `json:"reviewer_instance_id"`,
+	role:                 string `json:"role"`,
+	verdict:              string `json:"verdict"`,
+	created_at:           string `json:"created_at"`,
 }
 
 Task_Lease_Wire :: struct {
@@ -476,6 +491,25 @@ make_task_lease_wires :: proc(h: ^Taskchain_Handlers, t: domain.Task) -> []Task_
 	return out[:]
 }
 
+make_task_review_wires :: proc(h: ^Taskchain_Handlers, t: domain.Task) -> []Task_Review_Wire {
+	out := make([dynamic]Task_Review_Wire, context.temp_allocator)
+	if h == nil || h.taskchains == nil || h.taskchains.repo == nil do return out[:]
+	reviews, err := iface.taskchain_list_reviews_by_task(h.taskchains.repo, t.task_id, t.owner_user_id)
+	if err.code != .None do return out[:]
+	for r in reviews {
+		if r.attempt_no != t.attempt_no do continue
+		// kind is agent | coordinator | user (a coordinator approving on the
+		// user's behalf records kind user).
+		reviewer := "user" if r.reviewer_kind == "user" else r.reviewer_agent_id
+		// One row per (attempt, role, reviewer): a repeat post replaces the verdict.
+		append(&out, Task_Review_Wire{
+			reviewer = reviewer, reviewer_kind = r.reviewer_kind, reviewer_instance_id = r.reviewer_instance_id,
+			role = r.role, verdict = r.verdict, created_at = r.created_at,
+		})
+	}
+	return out[:]
+}
+
 make_task_detail_wire :: proc(h: ^Taskchain_Handlers, auth_ctx: contracts.Auth_Context, t: domain.Task, deps: []domain.Task_Dependency, include_description := true) -> Task_Detail_Wire {
 	is_blocked := false
 	dep_ids := make([dynamic]string, context.temp_allocator)
@@ -520,6 +554,7 @@ make_task_detail_wire :: proc(h: ^Taskchain_Handlers, auth_ctx: contracts.Auth_C
 		depends_on             = dep_ids[:],
 		comment_summary        = summary_wire,
 		leases                 = make_task_lease_wires(h, t),
+		reviews                = make_task_review_wires(h, t),
 		merge                  = make_task_merge_wire(h, t),
 		created_at             = t.created_at,
 		updated_at             = t.updated_at,

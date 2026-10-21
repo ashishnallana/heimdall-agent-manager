@@ -13,7 +13,8 @@ import {
   workLeaseHolder,
   uiToneForPriority,
 } from './taskV2Types';
-import { TASK_ACTION_LABELS, editLock, getTaskActions, isDraft, taskNeedsYou, type TaskActionId } from './taskActions';
+import { TASK_ACTION_LABELS, editLock, getTaskActions, isDraft, reviewVotes, taskNeedsYou, type TaskActionId } from './taskActions';
+import { ReviewVoteMark } from './ReviewVoteMark';
 import { TaskEditModal, type TaskEditField } from './TaskEditModal';
 import { describeEffectivePlacement, taskEffectivePlacement } from './fleetSelection';
 import { useTaskActions } from './useTaskActions';
@@ -94,6 +95,8 @@ export const TaskCard: React.FC<TaskCardProps> = ({
   const badges = getTaskBadges(task, chainFleets, now, names).filter((b) => b.kind !== 'lease' && b.kind !== 'bridge');
   const holderLease = workLeaseHolder(task, now);
   const people = getTaskPeople(task, chainFleets);
+  const votes = reviewVotes(task);
+  const inReview = state === 'in_review';
   // The bridge that will actually be used (plan REQ-UI-12), never "inherit".
   const placement = describeEffectivePlacement(taskEffectivePlacement(task, chainFleets), names.bridge);
   const actions = useTaskActions(chainId, task.task_id, task.title);
@@ -251,9 +254,17 @@ export const TaskCard: React.FC<TaskCardProps> = ({
               <span className="inline-flex items-center gap-1.5">
                 <Icon name="eye" size={12} className="text-faint" title="Reviewers" />
                 {people.reviewers.map((r) => (
-                  <PersonChip key={r} name={names.agent(r)} title="Reviewer" />
+                  <span key={r} data-debug-id={`task-card-reviewer-${task.task_id}-${r}`} className="inline-flex items-center gap-0.5">
+                    <PersonChip name={names.agent(r)} title="Reviewer" />
+                    <ReviewVoteMark verdict={votes.get(r)} waiting={inReview} />
+                  </span>
                 ))}
-                {people.userApproval && <PersonChip name="You" tone="you" title="Needs your approval" />}
+                {people.userApproval && (
+                  <span data-debug-id={`task-card-reviewer-${task.task_id}-user`} className="inline-flex items-center gap-0.5">
+                    <PersonChip name="You" tone="you" title="Needs your approval" />
+                    <ReviewVoteMark verdict={votes.get('user')} waiting={inReview} />
+                  </span>
+                )}
               </span>
             )}
             {deps.length > 0 && (

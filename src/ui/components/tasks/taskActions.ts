@@ -42,9 +42,36 @@ function isGate(task: TaskWire): boolean {
   return task.kind === 'gate';
 }
 
-/** Waiting on a human decision: the reviewer gate is you, or a blocker asks you. */
+export type ReviewVerdict = 'approve' | 'request_changes';
+
+/**
+ * Each reviewer's verdict on the current attempt (`task.reviews`), keyed by
+ * agent id, or 'user' for you. An agent holding several review roles approves
+ * only when every one of its roles approved.
+ */
+export function reviewVotes(task: TaskWire): Map<string, ReviewVerdict> {
+  const out = new Map<string, ReviewVerdict>();
+  for (const r of task.reviews || []) {
+    const reviewer = String(r?.reviewer || '');
+    if (!reviewer) continue;
+    const verdict: ReviewVerdict = r.verdict === 'approve' ? 'approve' : 'request_changes';
+    if (out.get(reviewer) !== 'request_changes') out.set(reviewer, verdict);
+  }
+  return out;
+}
+
+/** You already approved this attempt; the task may still wait on other reviewers. */
+export function youApproved(task: TaskWire): boolean {
+  return normalizeTaskState(task.state) === 'in_review' && reviewVotes(task).get('user') === 'approve';
+}
+
+/**
+ * Waiting on a human decision: the reviewer gate is you, or a blocker asks you.
+ * Once you approved, the rest is up to the other reviewers (as the hub's
+ * awaits_user_review).
+ */
 export function awaitingYourReview(task: TaskWire): boolean {
-  return normalizeTaskState(task.state) === 'in_review' && (Boolean(task.requires_user_approval) || isGate(task));
+  return normalizeTaskState(task.state) === 'in_review' && (Boolean(task.requires_user_approval) || isGate(task)) && !youApproved(task);
 }
 
 export function blockedOnYou(task: TaskWire): boolean {
