@@ -1,4 +1,5 @@
-import { createContext, useContext, useEffect, useState, type ReactNode } from 'react';
+import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
+import { isTerminalQueryError } from '../../api/cookieFetch';
 
 /**
  * Whether a pane is actually on screen. Panes stay MOUNTED when the layout hides
@@ -68,4 +69,56 @@ export function paneShouldMarkRead(input: {
 /** Per-pane poll cadence: hidden panes do not poll; they refetch when shown. */
 export function visiblePollInterval(paneVisible: boolean, intervalMs: number): number {
   return paneVisible ? intervalMs : 0;
+}
+
+/**
+ * Clears unread for a pane's conversation whenever paneShouldMarkRead allows it: on
+ * mount, when new unread arrives, and when a hidden pane is shown again.
+ */
+export function usePaneMarkRead(input: {
+  isActiveTab: boolean;
+  paneVisible: boolean;
+  conversationId: string;
+  agentInstanceId: string;
+  unreadCount: number;
+  markRead: (conversationId: string) => void;
+}): void {
+  const { isActiveTab, paneVisible, conversationId, agentInstanceId, unreadCount } = input;
+  const markReadRef = useRef(input.markRead);
+  markReadRef.current = input.markRead;
+  useEffect(() => {
+    if (paneShouldMarkRead({ isActiveTab, paneVisible, conversationId, agentInstanceId, unreadCount })) {
+      markReadRef.current(conversationId);
+    }
+  }, [isActiveTab, paneVisible, conversationId, agentInstanceId, unreadCount]);
+}
+
+export type PanePollPolicy = {
+  /** Poll interval for the named query: 0 while hidden or after a terminal error. */
+  interval: (key: string, intervalMs: number) => number;
+  isTerminal: (key: string) => boolean;
+  /** Feed each named query's current error; call once per render after the queries. */
+  useReportErrors: (errors: Record<string, unknown>) => void;
+};
+
+/**
+ * Per-pane polling: nothing polls while the pane is hidden, and a query stops polling
+ * once it answers 401/403/404/410 (isTerminalQueryError) because repeating the
+ * request cannot help. Invalidations and refetch-on-show still try once, and a
+ * success clears the flag so polling resumes.
+ */
+export function usePanePollPolicy(paneVisible: boolean): PanePollPolicy {
+  const [terminal, setTerminal] = useState<Record<string, boolean>>({});
+  return {
+    interval: (key, intervalMs) => (terminal[key] ? 0 : visiblePollInterval(paneVisible, intervalMs)),
+    isTerminal: (key) => Boolean(terminal[key]),
+    useReportErrors: (errors) => {
+      const now: Record<string, boolean> = {};
+      for (const [key, error] of Object.entries(errors)) if (isTerminalQueryError(error)) now[key] = true;
+      const signature = Object.keys(now).sort().join(',');
+      useEffect(() => {
+        setTerminal((prev) => (Object.keys(prev).sort().join(',') === signature ? prev : now));
+      }, [signature]);
+    },
+  };
 }

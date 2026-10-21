@@ -93,8 +93,7 @@ import ChatMessageList from '../chat/ChatMessageList';
 import InstanceReconfigurationProgress from '../chat/InstanceReconfigurationProgress';
 import { MessageComposerInput, MessageComposerActions, MessageComposerStatus } from '../chat/MessageComposer';
 import RuntimeConfigurationOptions from '../chat/RuntimeConfigurationOptions';
-import { paneShouldMarkRead, usePaneVisible, visiblePollInterval } from './paneVisibility';
-import { isTerminalQueryError } from '../../api/cookieFetch';
+import { usePaneMarkRead, usePanePollPolicy, usePaneVisible, visiblePollInterval } from './paneVisibility';
 import { type TaskLike } from '../chat/chainTaskInference';
 import { groupTranscriptMessages, isAgentStartMessage } from '../chat/transcriptGrouping';
 import type { ChatDeliveryStatus, ChatMessage, ChatTimestamp } from '../chat/types';
@@ -673,12 +672,9 @@ export function AgentChatPane({
   // On screen (not behind a maximised pane, an off-screen mobile page or a hidden
   // tab). Hidden panes keep their caches but do not poll or mark read.
   const paneVisible = usePaneVisible();
-  // Polls stop once their resource answers 401/403/404/410 (isTerminalQueryError):
-  // repeating the request cannot help. Invalidations and refetch-on-show still retry
-  // once, and a success clears the flag. Keyed by query name.
-  const [terminal, setTerminal] = useState<Record<string, boolean>>({});
-  const pollUnlessTerminal = (key: string, intervalMs: number) =>
-    terminal[key] ? 0 : visiblePollInterval(paneVisible, intervalMs);
+  // Polls pause while hidden and stop on 401/403/404/410 (see usePanePollPolicy).
+  const pollPolicy = usePanePollPolicy(paneVisible);
+  const pollUnlessTerminal = pollPolicy.interval;
 
   const convQuery = useFetchConversationQuery(
     { conversationId: '', agentInstanceId: routeInstanceId },
@@ -1128,7 +1124,7 @@ export function AgentChatPane({
       // A deleted instance (404) has no reconfigurations to poll either.
       skip: !agentInstanceId,
       pollingInterval:
-        terminal.instance || terminal.reconfigurations
+        pollPolicy.isTerminal('instance') || pollPolicy.isTerminal('reconfigurations')
           ? 0
           : acceptedOperation &&
               !['ready', 'failed', 'recovery_required'].includes(acceptedOperation.phase)
@@ -1136,19 +1132,12 @@ export function AgentChatPane({
             : 8000,
     },
   );
-  const terminalNow: Record<string, boolean> = {
-    conversation: isTerminalQueryError(convQuery.error),
-    messages: isTerminalQueryError(messagesQuery.error),
-    instance: isTerminalQueryError(instanceQuery.error),
-    reconfigurations: isTerminalQueryError(operationQuery.error),
-  };
-  const terminalKey = Object.keys(terminalNow).filter((k) => terminalNow[k]).join(',');
-  useEffect(() => {
-    setTerminal((prev) => {
-      const prevKey = Object.keys(prev).filter((k) => prev[k]).join(',');
-      return prevKey === terminalKey ? prev : terminalNow;
-    });
-  }, [terminalKey]);
+  pollPolicy.useReportErrors({
+    conversation: convQuery.error,
+    messages: messagesQuery.error,
+    instance: instanceQuery.error,
+    reconfigurations: operationQuery.error,
+  });
   const serverOperation = operationQuery.data?.operations?.[0];
   const operation =
     acceptedOperation &&
@@ -1292,11 +1281,14 @@ export function AgentChatPane({
     if (!renaming) setTitleDraft(editableTitle);
   }, [editableTitle, renaming]);
   const unreadCount = Number(conversation?.unread_count || conversation?.unreadCount || 0);
-  useEffect(() => {
-    if (paneShouldMarkRead({ isActiveTab, paneVisible, conversationId, agentInstanceId, unreadCount })) {
-      void markRead({ conversationId });
-    }
-  }, [isActiveTab, paneVisible, conversationId, agentInstanceId, unreadCount]);
+  usePaneMarkRead({
+    isActiveTab,
+    paneVisible,
+    conversationId,
+    agentInstanceId,
+    unreadCount,
+    markRead: (id) => void markRead({ conversationId: id }),
+  });
   // A pane that was hidden skipped its polls; catch up once when it is shown again.
   const wasVisibleRef = useRef(paneVisible);
   useEffect(() => {
