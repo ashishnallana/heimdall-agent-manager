@@ -97,6 +97,7 @@ import { usePaneMarkRead, usePanePollPolicy, usePaneVisible, visiblePollInterval
 import {
   CONVERSATION_MESSAGES_READ_EVENT,
   applyReadReceipt,
+  reconcileOlderPages,
   type ConversationMessagesRead,
 } from '../../api/conversationMessageEvents';
 import { type TaskLike } from '../chat/chainTaskInference';
@@ -1352,20 +1353,23 @@ export function AgentChatPane({
     setOlderCursor(String(messagesQuery.data?.nextCursor || ''));
     setOlderHasMore(Boolean(messagesQuery.data?.hasMore));
   }, [messagesQuery.data?.nextCursor, messagesQuery.data?.hasMore, olderMessages.length]);
-  // More than a page arrived while this pane was not receiving (offline, reconnect):
-  // the refetched newest page shares no message with the previous one, so the loaded
-  // older pages no longer join it. Drop them and page back from the new newest page
-  // rather than render a silent hole.
-  const previousBaseIdsRef = useRef<Set<string>>(new Set());
+  // The refetched newest page (after new messages, a reconnect or a show) may have
+  // dropped rows the loaded older pages do not hold: carry them, or re-anchor when the
+  // pages no longer join (reconcileOlderPages).
+  const previousBaseRef = useRef<Message[]>([]);
   useEffect(() => {
-    const ids = new Set(baseMessages.map((message, index) => msgId(message, index)));
-    const previous = previousBaseIdsRef.current;
-    previousBaseIdsRef.current = ids;
-    if (previous.size === 0 || ids.size === 0 || olderMessages.length === 0) return;
-    for (const id of ids) if (previous.has(id)) return;
-    setOlderMessages([]);
-    setOlderCursor(String(messagesQuery.data?.nextCursor || ''));
-    setOlderHasMore(Boolean(messagesQuery.data?.hasMore));
+    const previous = previousBaseRef.current;
+    previousBaseRef.current = baseMessages;
+    if (previous === baseMessages) return;
+    const idOf = (message: Message) => String(message.message_id || message.messageId || message.id || '');
+    const { older, reanchor } = reconcileOlderPages(previous, baseMessages, olderMessages, idOf);
+    if (reanchor) {
+      setOlderMessages([]);
+      setOlderCursor(String(messagesQuery.data?.nextCursor || ''));
+      setOlderHasMore(Boolean(messagesQuery.data?.hasMore));
+    } else if (older !== olderMessages) {
+      setOlderMessages(older);
+    }
   }, [baseMessages]);
   // Read receipts for older pages held in state (RTK pages are patched in wsInvalidation).
   useEffect(() => {

@@ -79,3 +79,31 @@ export function announceConversationMessagesRead(receipt: ConversationMessagesRe
     /* a missing CustomEvent (old test env) must not break cache patching */
   }
 }
+
+// ---- Newest page refetch vs loaded older pages ------------------------------------
+// The pane keeps older pages (fetched from the PREVIOUS newest page's cursor) in state
+// and renders [...older, ...newest] sorted by time. When the newest page is refetched
+// after k new messages, its k oldest rows slide out of it:
+// - some overlap (k < page): carry the rows that slid out into the older pages, so the
+//   transcript stays contiguous;
+// - no overlap (k >= page): the older pages no longer join the newest one; drop them
+//   and page back from the new newest page (reanchor) rather than render a hole.
+// Rows without an id cannot be matched and are not carried.
+export type OlderPagesReconcile<T> = { older: T[]; reanchor: boolean };
+
+export function reconcileOlderPages<T extends Record<string, any>>(
+  previousBase: T[],
+  nextBase: T[],
+  older: T[],
+  idOf: (row: T) => string,
+): OlderPagesReconcile<T> {
+  if (older.length === 0 || previousBase.length === 0 || nextBase.length === 0) return { older, reanchor: false };
+  const nextIds = new Set(nextBase.map(idOf).filter(Boolean));
+  if (!previousBase.some((row) => nextIds.has(idOf(row)))) return { older: [], reanchor: true };
+  const olderIds = new Set(older.map(idOf).filter(Boolean));
+  const slid = previousBase.filter((row) => {
+    const id = idOf(row);
+    return id && !nextIds.has(id) && !olderIds.has(id);
+  });
+  return { older: slid.length > 0 ? [...slid, ...older] : older, reanchor: false };
+}

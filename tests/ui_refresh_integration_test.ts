@@ -154,6 +154,44 @@ test('instance going live/stopped or changing current task refetches the live tr
   } finally { net.restore(); }
 });
 
+test('instance failing refetches that one instance so the failure notice has last_error; plain status never clears it', async () => {
+  let failed = false;
+  const net = installRoutes({
+    [`/agent-instances/${INST}`]: () => ({ body: { data: { agent_instance_id: INST, agent_id: 'agt_1', ...instanceSummary(failed
+      ? { runtime_status: 'failed', updated_at: '2026-10-21T10:02:00Z', last_error: { code: 'spawn_failed', message: 'provider exited 1' } }
+      : {}) } } }),
+  });
+  try {
+    const store = await makeStore();
+    const { agentsApi } = await import('../src/ui/api/endpoints/agents.ts');
+    const { handleUserWsEvent } = await import('../src/ui/api/wsInvalidation.ts');
+    const sub = store.dispatch(agentsApi.endpoints.fetchAgentInstance.initiate({ instanceId: INST }));
+    await sub;
+    net.hits.length = 0;
+    failed = true;
+    // The producer summary carries no last_error (resource_events.odin instance_changed_summary_json).
+    handleUserWsEvent(store.dispatch, { type: 'resource_changed', resource: 'agent_instance', resource_id: INST, change: 'status_changed', summary: instanceSummary({ runtime_status: 'failed', updated_at: '2026-10-21T10:02:00Z' }) });
+    handleUserWsEvent(store.dispatch, { type: 'resource_changed', resource: 'agent_instance', resource_id: INST, change: 'status_changed', summary: instanceSummary({ runtime_status: 'failed', activity_status: 'idle', updated_at: '2026-10-21T10:02:00Z' }) });
+    await settle();
+    assert.deepEqual(net.hits, [`GET /api/v1/agent-instances/${INST}`], `one targeted instance fetch; saw ${net.hits.join(', ')}`);
+    const select = () => agentsApi.endpoints.fetchAgentInstance.select({ instanceId: INST })(store.getState()).data.instance;
+    assert.equal(select().runtime_status, 'failed');
+    assert.ok(select().last_error, 'failure reason present for AgentFailureNotice');
+    // Same-status frames (activity only) neither clear the error nor refetch.
+    net.hits.length = 0;
+    handleUserWsEvent(store.dispatch, { type: 'resource_changed', resource: 'agent_instance', resource_id: INST, change: 'status_changed', summary: instanceSummary({ runtime_status: 'failed', activity_status: 'busy', updated_at: '2026-10-21T10:03:00Z' }) });
+    await settle();
+    assert.equal(net.hits.length, 0, `no request; saw ${net.hits.join(', ')}`);
+    assert.ok(select().last_error, 'summary does not own last_error, so it is not cleared');
+    // Leaving failure (restart) refetches once so the stale error goes away.
+    failed = false;
+    handleUserWsEvent(store.dispatch, { type: 'resource_changed', resource: 'agent_instance', resource_id: INST, change: 'status_changed', summary: instanceSummary({ runtime_status: 'running', run_count: 2, updated_at: '2026-10-21T10:04:00Z' }) });
+    await settle();
+    assert.deepEqual(net.hits, [`GET /api/v1/agent-instances/${INST}`]);
+    sub.unsubscribe();
+  } finally { net.restore(); }
+});
+
 // ------------------------------------------------------------------ messages
 
 test('one message from another tab/CLI: one newest-page fetch + one sidebar fetch, no /agents/live, older pages untouched', async () => {
@@ -186,6 +224,62 @@ test('one message from another tab/CLI: one newest-page fetch + one sidebar fetc
     assert.equal(count(net.hits, (h) => h.startsWith('GET /api/v1/agents')), 0, 'message events never reload the live-agent tree');
     for (const s of subs) s.unsubscribe();
   } finally { net.restore(); }
+});
+
+test('a message in a conversation outside the loaded sidebar page (31st) refetches the sidebar list', async () => {
+  const OUTSIDE = 'chat_31';
+  const net = installRoutes({
+    [`/chats/${OUTSIDE}/messages`]: messagesRoute([userRow('x1', { conversation_id: OUTSIDE })]),
+    '/chats': { body: { data: Array.from({ length: 30 }, (_, i) => ({ conversation_id: `chat_top${i}`, agent_instance_id: `inst_${i}`, unread_count: 0 })) } },
+  });
+  try {
+    const store = await makeStore();
+    const { sidebarApi } = await import('../src/ui/api/endpoints/sidebar.ts');
+    const { handleUserWsEvent } = await import('../src/ui/api/wsInvalidation.ts');
+    const sub = store.dispatch(sidebarApi.endpoints.listSidebarConversations.initiate({ limit: 30 }));
+    await sub;
+    net.hits.length = 0;
+    handleUserWsEvent(store.dispatch, { ...messageCreated('x2'), conversation_id: OUTSIDE });
+    await settle();
+    assert.equal(count(net.hits, (h) => h.startsWith('GET /api/v1/chats?')), 1, `the sidebar page refetches so the row moves to the top; saw ${net.hits.join(', ')}`);
+    // A row already on the page still costs exactly one sidebar fetch.
+    net.hits.length = 0;
+    handleUserWsEvent(store.dispatch, { ...messageCreated('x3'), conversation_id: 'chat_top5' });
+    await settle();
+    assert.equal(count(net.hits, (h) => h.startsWith('GET /api/v1/chats?')), 1, `saw ${net.hits.join(', ')}`);
+    sub.unsubscribe();
+  } finally { net.restore(); }
+});
+
+test('reconcileOlderPages carries rows that slide out of the newest page and re-anchors when pages no longer join', async () => {
+  const { reconcileOlderPages } = await import('../src/ui/api/conversationMessageEvents.ts');
+  const PAGE = 30;
+  const row = (n: number) => ({ message_id: `m${String(n).padStart(3, '0')}` });
+  const range = (from: number, to: number) => Array.from({ length: to - from }, (_, i) => row(from + i));
+  const idOf = (r: any) => String(r.message_id || '');
+  // Loaded: older page m000..m029, newest page m030..m059.
+  const older = range(0, PAGE);
+  const previous = range(PAGE, 2 * PAGE);
+  const ids = (rows: any[]) => rows.map(idOf).sort();
+  // k = 1: newest page m031..m060; m030 slid out and must be kept.
+  const one = reconcileOlderPages(previous, range(PAGE + 1, 2 * PAGE + 1), older, idOf);
+  assert.equal(one.reanchor, false);
+  assert.deepEqual(ids([...one.older, ...range(PAGE + 1, 2 * PAGE + 1)]), ids(range(0, 2 * PAGE + 1)), 'k=1: contiguous, no hole, no duplicate');
+  // k = page - 1: one overlapping row; every slid row carried.
+  const most = reconcileOlderPages(previous, range(2 * PAGE - 1, 3 * PAGE - 1), older, idOf);
+  assert.equal(most.reanchor, false);
+  assert.deepEqual(ids([...most.older, ...range(2 * PAGE - 1, 3 * PAGE - 1)]), ids(range(0, 3 * PAGE - 1)));
+  // k = page: no overlap; older pages no longer join -> re-anchor from the new cursor.
+  const full = reconcileOlderPages(previous, range(2 * PAGE, 3 * PAGE), older, idOf);
+  assert.deepEqual(full, { older: [], reanchor: true });
+  // Same page refetched (read receipt, reconnect with nothing new): identity kept.
+  const same = reconcileOlderPages(previous, range(PAGE, 2 * PAGE), older, idOf);
+  assert.equal(same.older, older);
+  // No older pages loaded: nothing to carry; the pane pages from the new cursor.
+  assert.deepEqual(reconcileOlderPages(previous, range(PAGE + 1, 2 * PAGE + 1), [], idOf), { older: [], reanchor: false });
+  // Repeated refetch does not duplicate rows already carried.
+  const again = reconcileOlderPages(range(PAGE + 1, 2 * PAGE + 1), range(PAGE + 2, 2 * PAGE + 2), one.older, idOf);
+  assert.equal(new Set(again.older.map(idOf)).size, again.older.length);
 });
 
 test('originating tab: send + its WS echo cost one messages fetch, even when the echo beats the POST response', async () => {
@@ -403,7 +497,7 @@ test('bridge provider_status_changed refetches only that bridge provider status,
 
 // ------------------------------------------------------------------ recovery
 
-test('reconnect resync refetches mounted conversation state but not static catalogues', async () => {
+test('reconnect resync refetches mounted conversation state and mounted catalogues', async () => {
   const net = installRoutes({
     [`/chats/${CONV}/messages`]: messagesRoute(Array.from({ length: 30 }, (_, i) => userRow(`n${i}`))),
     '/templates': { body: { data: [] } },
@@ -412,7 +506,7 @@ test('reconnect resync refetches mounted conversation state but not static catal
     const store = await makeStore();
     const { chatEndpoints } = await import('../src/ui/api/endpoints/chats.ts');
     const { agentsApi } = await import('../src/ui/api/endpoints/agents.ts');
-    const { resyncAfterReconnect, RESYNC_EXCLUDED_TAG_TYPES } = await import('../src/ui/api/wsInvalidation.ts');
+    const { resyncAfterReconnect } = await import('../src/ui/api/wsInvalidation.ts');
     const subs = [
       store.dispatch(chatEndpoints.endpoints.fetchConversationMessages.initiate({ conversationId: CONV })),
       store.dispatch(agentsApi.endpoints.listAgentTemplates.initiate(undefined)),
@@ -422,13 +516,16 @@ test('reconnect resync refetches mounted conversation state but not static catal
     resyncAfterReconnect(store.dispatch);
     await tick(60);
     assert.equal(count(net.hits, (h) => h.includes(`/chats/${CONV}/messages`)), 1, 'newest page refetched after >page missed messages');
-    assert.ok(RESYNC_EXCLUDED_TAG_TYPES.has('AgentTemplate'));
-    assert.equal(count(net.hits, (h) => h.includes('template')), 0, `static catalogue not reloaded; saw ${net.hits.join(', ')}`);
+    // A catalogue can change from another tab/device/CLI while disconnected.
+    assert.equal(count(net.hits, (h) => h.includes('template')), 1, `mounted catalogue refetched once; saw ${net.hits.join(', ')}`);
     for (const s of subs) s.unsubscribe();
   } finally { net.restore(); }
 });
 
 // ------------------------------------------------------------------ retired polls (source guard)
+// This checks caller options in source only. The idle before/after figure in the handoff
+// (~43 req/min -> 0) is an ESTIMATE from these intervals, not a fake-timer measurement;
+// the performance follow-up runs the same scenarios under timers.
 
 test('covered steady polls stay retired in their callers', () => {
   const read = (rel: string) => fs.readFileSync(path.join(REPO_ROOT, rel), 'utf8');

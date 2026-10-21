@@ -452,6 +452,33 @@ export function resetQueuedInvalidations(): void {
   queuedDispatch = null;
 }
 
+// The sidebar lists are a bounded page ordered by last_message_at (/chats?limit=30, the
+// inbox's first page). A row tag reaches only lists that already hold the row; a message
+// in a conversation outside one of them must still move it to the top, so that list is
+// refetched as a whole (SidebarConversations:ALL). Older inbox pages do not decide this:
+// a new message lands on the first page.
+function sidebarTagForMessage(state: any, conversationId: string): { type: string; id: string } {
+  const lists: Array<Array<{ conversationId?: string }>> = [];
+  for (const arg of sidebarApi.util.selectCachedArgsForQuery(state, 'listSidebarConversations') as any[]) {
+    const rows = sidebarApi.endpoints.listSidebarConversations.select(arg)(state)?.data;
+    if (Array.isArray(rows)) lists.push(rows);
+  }
+  for (const arg of sidebarApi.util.selectCachedArgsForQuery(state, 'listConversationInbox') as any[]) {
+    if (arg && (arg as any).cursor) continue;
+    const page = sidebarApi.endpoints.listConversationInbox.select(arg)(state)?.data;
+    if (Array.isArray(page?.conversations)) lists.push(page.conversations);
+  }
+  const everywhere = lists.every((rows) => rows.some((row) => row?.conversationId === conversationId));
+  return { type: 'SidebarConversations', id: everywhere ? conversationId : 'ALL' };
+}
+
+function queueMessageInvalidation(dispatch: any, conversationId: string, extra: Array<{ type: string; id: string }>, echoGuard = ''): void {
+  dispatch((_d: any, getState: () => any) => {
+    const sidebarTag = conversationId ? sidebarTagForMessage(getState(), conversationId) : { type: 'SidebarConversations', id: 'ALL' };
+    queueInvalidation(dispatch, [...extra, sidebarTag], echoGuard);
+  });
+}
+
 // messages_read: patch every loaded RTK page of the conversation (newest and older
 // cursors) and tell the pane, which keeps older pages in state. unread_count is the
 // committed value, so the sidebar rows are patched rather than refetched.
@@ -572,10 +599,7 @@ function handleChatEvent(dispatch: any, payload: any, ctx: WsCtx) {
   }
   if (conversationId && !message && payload.fetch_required && String(payload.fetch_kind || '') === 'chat_message') {
     const messageId = String(payload.fetch_id || payload.message_id || '');
-    queueInvalidation(dispatch, [
-      { type: 'Chat', id: conversationId },
-      { type: 'SidebarConversations', id: conversationId },
-    ], messageId);
+    queueMessageInvalidation(dispatch, conversationId, [{ type: 'Chat', id: conversationId }], messageId);
     if (eventChainId) dispatch(wsChainViewRefreshRequested(`chat_event:${focusedChainId || eventChainId}:${messageId}`));
     return;
   }
@@ -610,8 +634,8 @@ function handleChatEvent(dispatch: any, payload: any, ctx: WsCtx) {
     dispatch(heimdallApi.util.invalidateTags([{ type: 'ConversationSummaries', id: 'ALL' }]));
   }
   // UI-14: a legacy inline chat event can still change the sidebar's unread badges.
-  // Scoped to the conversation row when the event names one.
-  queueInvalidation(dispatch, [{ type: 'SidebarConversations', id: conversationId || 'ALL' }]);
+  // Scoped to the conversation row when every loaded sidebar list holds it.
+  queueMessageInvalidation(dispatch, conversationId, []);
 }
 
 // TODO(FIX): Replace any with strict TypeScript interface matching Odin backend schema
@@ -722,7 +746,7 @@ function invalidateShellSession(dispatch: any, sessionId: string, chainId?: stri
 const INSTANCE_SUMMARY_FIELDS = [
   'runtime_status', 'startup_status', 'activity_status', 'display_name', 'bridge_id',
   'provider', 'model', 'configuration_revision', 'run_count', 'started_at',
-  'current_task_id', 'current_task_role', 'chain_id', 'updated_at', 'last_error',
+  'current_task_id', 'current_task_role', 'chain_id', 'updated_at',
 ] as const;
 
 function isNewerOrEqual(next: unknown, current: unknown): boolean {
@@ -734,19 +758,26 @@ function isNewerOrEqual(next: unknown, current: unknown): boolean {
 // Returns false when the frame is older than the cached instance (nothing is patched).
 function patchInstanceCachesFromSummary(dispatch: any, instanceId: string, summary: any): boolean {
   let stale = false;
+  let errorStale = false;
   dispatch(agentsApi.util.updateQueryData('fetchAgentInstance', { instanceId }, (draft: any) => {
     const instance = draft?.instance;
     if (!instance) return;
     if (!isNewerOrEqual(summary.updated_at, instance.updated_at)) { stale = true; return; }
+    // The summary does not carry last_error, so it is never patched or cleared here. A
+    // runtime transition into failure (or out of a state that holds an error) changes
+    // it, and the failure notice needs the reason: refetch that one instance.
+    const nextStatus = summary.runtime_status === undefined ? undefined : String(summary.runtime_status || '');
+    if (nextStatus !== undefined && nextStatus !== String(instance.runtime_status || '') && (nextStatus === 'failed' || instance.last_error)) {
+      errorStale = true;
+    }
     for (const field of INSTANCE_SUMMARY_FIELDS) {
       if (summary[field] !== undefined) instance[field] = summary[field];
     }
-    // last_error is omitted when clear; a successful transition must not keep a stale one.
-    if (summary.last_error === undefined && summary.runtime_status !== undefined && instance.last_error) delete instance.last_error;
   }));
   // The sidebar rows and live tree carry no updated_at; the cached instance is the
   // version reference for them too.
   if (stale) return false;
+  if (errorStale) queueInvalidation(dispatch, [{ type: 'AgentInstances', id: instanceId }]);
   dispatch((d: any, getState: () => any) => {
     const state = getState();
     for (const arg of sidebarApi.util.selectCachedArgsForQuery(state, 'listSidebarConversations') as any[]) {
@@ -1008,15 +1039,14 @@ function handleResourceChanged(dispatch: any, payload: any, ctx: WsCtx) {
 // and dedupes concurrent invalidations. Call this ONLY on a genuine reconnect,
 // not the first connect (initial mounts already fetch their data).
 // TODO(FIX): Replace any with strict TypeScript interface matching Odin backend schema
-// Static catalogues (templates, workflow definitions, LSP configs, experiments) change
-// only through explicit edits and are refetched by their editors; a reconnect does not
-// reload them for every mounted picker.
-export const RESYNC_EXCLUDED_TAG_TYPES: ReadonlySet<string> = new Set(['AgentTemplate', 'WorkflowDefinitions', 'LspServerConfigs', 'Experiments']);
-
+// Every tag type is included, catalogues too: templates, workflow definitions, LSP
+// configs and experiments can be edited from another tab, device or the CLI while this
+// socket was down, and nothing else would tell a mounted picker. Only mounted queries
+// refetch, so an unmounted catalogue costs nothing.
 export function resyncAfterReconnect(dispatch: any) {
   // Anything queued is superseded by the full invalidation below.
   resetQueuedInvalidations();
-  dispatch(heimdallApi.util.invalidateTags(HEIMDALL_TAG_TYPES.filter((type) => !RESYNC_EXCLUDED_TAG_TYPES.has(type))));
+  dispatch(heimdallApi.util.invalidateTags([...HEIMDALL_TAG_TYPES]));
   // Non-RTK consumers: the paged shells list and the chain view refresh on their own
   // signals, which no tag reaches. The conversation pane re-anchors its older pages
   // when the refetched newest page no longer overlaps them (AgentChatPane).
