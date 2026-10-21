@@ -109,6 +109,9 @@ wait_for_hub() {
 }
 # Released ham-bridge binaries restart the legacy service after enrollment.
 # Scope a compatibility shim to this enrollment invocation; never affect the host PATH.
+# `ham-bridge enroll` refuses while a bridge runs on the same config, so a running
+# service is stopped first (also when enroll.sh is run later, after the installer
+# left it started). The shim's restart/kickstart brings it back afterwards.
 # Extra arguments (--new-bridge) are passed to `ham-bridge enroll`. The config is
 # kept as it is: its daemon_id is what ham-bridge offers the approver for reuse.
 enroll() {
@@ -123,7 +126,12 @@ path, real, name, uid = sys.argv[1:]
 if pathlib.Path(path).name == 'systemctl':
     body = 'if [ "$*" = "--user restart heimdall-bridge" ]; then\n  set -- --user restart '+shlex.quote(name)+ '\nfi\n'
 else:
-    body = 'if [ "$*" = "kickstart -k gui/'+uid+'/works.earendil.heimdall-bridge" ]; then\n  set -- kickstart -k '+shlex.quote('gui/'+uid+'/'+name)+'\nfi\n'
+    # kickstart needs a loaded job; enroll() boots it out, so bootstrap it again first.
+    label = shlex.quote('gui/'+uid+'/'+name)
+    plist = shlex.quote(str(pathlib.Path.home()/'Library/LaunchAgents'/(name+'.plist')))
+    body = ('if [ "$*" = "kickstart -k gui/'+uid+'/works.earendil.heimdall-bridge" ]; then\n'
+            '  '+shlex.quote(real)+' print '+label+' >/dev/null 2>&1 || '+shlex.quote(real)+' bootstrap '+shlex.quote('gui/'+uid)+' '+plist+' || exit 1\n'
+            '  set -- kickstart -k '+label+'\nfi\n')
 pathlib.Path(path).write_text('#!/bin/sh\n'+body+'exec '+shlex.quote(real)+' "$@"\n')
 pathlib.Path(path).chmod(0o700)
 PY
@@ -137,6 +145,11 @@ PY
       [ ! -e "$f" ] || mv "$f" "$f.pre-reenroll-$stamp"
     done
     log INFO "Moved legacy credential aside: $token_file.pre-reenroll-$stamp"
+  fi
+  if command -v systemctl >/dev/null && systemctl --user is-active --quiet "$service_name" 2>/dev/null; then
+    systemctl --user stop "$service_name"
+  elif command -v launchctl >/dev/null && launchctl print "gui/$uid/$service_name" >/dev/null 2>&1; then
+    launchctl bootout "gui/$uid/$service_name"
   fi
   local status=0
   # Same tool paths the service's unit/run file exports, so the enrolling
@@ -558,7 +571,7 @@ PY
   # Persist a usable enrollment command even when the installer came from stdin.
   {
     printf '#!/usr/bin/env bash\nset -euo pipefail\n'
-    declare -f fail enroll
+    declare -f log fail enroll
     for file in state_dir bin_dir service_name uid token_file hub_url data_dir bridge_port endpoint_port run_dir; do
       printf '%s=%q\n' "$file" "${!file}"
     done
@@ -566,13 +579,19 @@ PY
   } > "$state_dir/enroll.sh"
   chmod 700 "$state_dir/enroll.sh"
   step '5 / 6 · Register service and enrollment'
+  # Start the service now only when no enrollment runs in this invocation: a
+  # running bridge holds the config and `ham-bridge enroll` refuses to proceed.
+  # Enrollment restarts the service itself; the block after it covers exit 3.
+  local enroll_now=false
+  [ "$enrollment" != yes ] || "$noninteractive" || enroll_now=true
   case "$svc" in
     systemd)
       systemctl --user daemon-reload
-      systemctl --user enable --now "$service_name" ;;
+      if "$enroll_now"; then systemctl --user enable "$service_name"
+      else systemctl --user enable --now "$service_name"; fi ;;
     launchd)
       plutil -lint "$service_file" >/dev/null
-      launchctl bootstrap "gui/$uid" "$service_file" ;;
+      "$enroll_now" || launchctl bootstrap "gui/$uid" "$service_file" ;;
     runit)
       # Give runsvdir (5 s scan) time to attach a runsv before anything uses
       # `sv` on this directory. The service itself stays DOWN until enrollment
@@ -590,6 +609,12 @@ PY
     elif "$new_bridge"; then enroll --new-bridge; log OK 'Browser-approved enrollment complete'
     else enroll; log OK 'Browser-approved enrollment complete'; fi
   else log OK 'Existing enrollment preserved'; fi
+  if "$enroll_now"; then
+    case "$svc" in
+      systemd) systemctl --user start "$service_name" ;;
+      launchd) launchctl print "gui/$uid/$service_name" >/dev/null 2>&1 || launchctl bootstrap "gui/$uid" "$service_file" ;;
+    esac
+  fi
   if [ "$svc" = runit ]; then
     # Enable only now (after enrollment, or at once when none runs): removes the
     # down file for future boots and starts the service if enrollment did not.

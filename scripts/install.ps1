@@ -539,9 +539,11 @@ function Wait-BridgeReady {
 # ham-bridge enroll prints the pairing code (typed at <hub>/device/add on an
 # approved browser) and, on Windows, exits 0 without restarting any service. It
 # gets the same tool paths the task's environment carries, so the enrolling
-# process can start the PTY host and ham-ctl too.
+# process can start the PTY host and ham-ctl too. ham-bridge enroll refuses while
+# a bridge runs on the same config, so this Hub's task is stopped first.
 function Invoke-BridgeEnroll {
   param($C)
+  Stop-BridgeService $C
   $vars = [ordered]@{
     'PATH'                      = $C.BinDir + ';' + $env:PATH
     'HEIMDALL_HAM_PTY_HOST_BIN' = (Join-Path $C.BinDir 'ham-pty-host.exe')
@@ -593,7 +595,6 @@ function New-EnrollScript {
   [void]$sb.AppendLine('}')
   [void]$sb.AppendLine(@'
 try {
-  Stop-BridgeService $C
   Invoke-BridgeEnroll $C
   Write-Log OK 'Browser-approved enrollment complete'
   Start-BridgeService $C
