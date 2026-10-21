@@ -149,6 +149,51 @@ task_engine_on_start_success :: proc(ctx: rawptr, inst: domain.Agent_Instance) {
 	taskv2.on_start_success((^taskv2.Service)(ctx), inst)
 }
 
+// task_engine_on_instance_changed runs after a taskv2 commit that rewrote an
+// instance's current-task pointer; it re-reads the committed row.
+task_engine_on_instance_changed :: proc(ctx: rawptr, instance_id, change: string) {
+	graph := (^App_Graph)(ctx)
+	if graph == nil do return
+	inst, found, _ := iface.agent_get_instance(&graph.repos.agents, instance_id)
+	if !found do return
+	defer domain.agent_instance_destroy(&inst)
+	if change == "created" do http.publish_instance_created(&graph.event_bus, inst)
+	else do http.publish_instance_changed(&graph.event_bus, inst, change)
+}
+
+// agents_on_reconfiguration_changed publishes the reconfiguration hint and, on
+// the advance that committed the destination (agent_instances bridge/provider/
+// model/configuration_revision rewritten by trigger), the instance hint too.
+agents_on_reconfiguration_changed :: proc(ctx: rawptr, op: domain.Instance_Reconfiguration, change: string, config_committed: bool) {
+	graph := (^App_Graph)(ctx)
+	if graph == nil do return
+	http.publish_reconfiguration_changed(&graph.event_bus, op, change)
+	if !config_committed do return
+	inst, found, _ := iface.agent_get_instance(&graph.repos.agents, op.agent_instance_id)
+	if !found do return
+	defer domain.agent_instance_destroy(&inst)
+	http.publish_instance_changed(&graph.event_bus, inst, "config_changed")
+}
+
+// users_on_agent_seeded announces a canonical agent seeded for an owner.
+users_on_agent_seeded :: proc(ctx: rawptr, owner_user_id, agent_id: string) {
+	graph := (^App_Graph)(ctx)
+	if graph == nil do return
+	http.publish_agent_changed(&graph.event_bus, owner_user_id, agent_id, "created")
+}
+
+// service_message_created publishes message_created for a chat row a service
+// saved outside an HTTP handler (card prompt op after its UoW commit, shell-run
+// marker), from the re-read conversation so last_message_at/unread_count are
+// the committed values.
+service_message_created :: proc(ctx: rawptr, m: domain.Chat_Message) {
+	graph := (^App_Graph)(ctx)
+	if graph == nil do return
+	c, found, _ := iface.content_get_conversation(&graph.repos.content, m.conversation_id)
+	if !found do return
+	http.publish_chat_message_created(&graph.event_bus, c, m)
+}
+
 task_engine_on_unobserved_shell_terminal :: proc(ctx: rawptr, session: domain.Shell_Session) {
 	svc := (^taskv2.Service)(ctx)
 	if svc == nil || session.kind != "run" || !strings.has_prefix(session.label, taskv2.VERIFY_LABEL_PREFIX) do return
@@ -272,6 +317,8 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 	graph.vault_directory = vault_directory_service.new_service(&graph.vault_directory_repo, &graph.clock)
 	graph.uow_factory = sqlite.new_unit_of_work_factory(&graph.sqlite_uow_factory, &graph.db, &graph.repos)
 	graph.users = user_service.new_user_service(&graph.repos.users, &graph.repos.agents, &graph.repos.projects, &graph.clock, &graph.ids)
+	graph.users.on_agent_seeded = users_on_agent_seeded
+	graph.users.on_agent_seeded_ctx = rawptr(graph)
 	bridge_command_sink := bridge_runtime_service.new_bridge_command_sink(&graph.bridge_runtime_registry)
 	graph.bridges = bridge_service.new_bridge_service_with_runtime(&graph.repos.bridges, bridge_command_sink, &graph.clock, &graph.ids)
 	// REQ-IMPL-3 / audit F6: revocation must terminate the bridge's LIVE control
@@ -301,6 +348,8 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 	graph.task_engine.event_bus = &graph.event_bus
 	graph.task_engine.on_tasks_changed = task_engine_on_tasks_changed
 	graph.task_engine.on_tasks_changed_ctx = rawptr(graph)
+	graph.task_engine.on_instance_changed = task_engine_on_instance_changed
+	graph.task_engine.on_instance_changed_ctx = rawptr(graph)
 	taskchain_service.set_engine(&graph.taskchains, &graph.task_engine)
 	taskchain_service.set_uow_factory(&graph.taskchains, &graph.uow_factory)
 	// Instance lifecycle → engine: ONE chokepoint for every death path
@@ -311,6 +360,10 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 		on_activity      = task_engine_on_instance_activity,
 		on_start_success = task_engine_on_start_success,
 		on_user_stopped  = task_engine_on_user_stopped,
+	}
+	graph.agents.resource_events = agent_service.Resource_Event_Hooks{
+		ctx                        = rawptr(graph),
+		on_reconfiguration_changed = agents_on_reconfiguration_changed,
 	}
 	graph.search = search_service.new_search_service(&graph.repos.search)
 	graph.push = push_service.new_push_service(&graph.repos.push_subscriptions, &graph.clock, &graph.ids, push_service.Vapid_Config{
@@ -368,6 +421,7 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 	shell_session_svc.shell_metrics_set_service(&graph.shell_session_service)
 	graph.shell_session_service.on_unobserved_terminal = task_engine_on_unobserved_shell_terminal
 	graph.shell_session_service.on_unobserved_terminal_ctx = rawptr(&graph.task_engine)
+	graph.shell_session_service.message_created = content_service.Message_Created_Hook{ctx = rawptr(graph), created = service_message_created}
 	// REQ-SHELL-9 trigger A: a closed chain reaps its servers. Assigned HERE, after the
 	// shell-session service is constructed, rather than next to the other two taskchain
 	// dependencies at their construction above — graph.taskchains is built before this
@@ -439,6 +493,7 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 		ids = &graph.ids,
 		mutex = &graph.action_mutex,
 		bridge_versions = &graph.action_bridge_versions,
+		event_bus = &graph.event_bus,
 	}
 	graph.scheduled_prompt_handlers = graph.action_handlers
 	graph.bridge_handlers.actions = rawptr(&graph.action_handlers)
@@ -466,10 +521,11 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 	content_service.set_attention_notifier(&graph.content, &graph.cards.attention_notifier)
 	events.init_attention_debouncer(&graph.attention_events, &graph.event_bus)
 	graph.cards.card_changed = card_service.Card_Changed_Hook{ctx = rawptr(&graph.attention_events), changed = attention_card_changed}
+	graph.cards.message_created = content_service.Message_Created_Hook{ctx = rawptr(graph), created = service_message_created}
 	graph.experiment_handlers = http.Experiment_Rest_Handlers{auth = &graph.auth, repo = &graph.experiment_repo, clock = &graph.clock}
 	graph.lsp_server_config_handlers = http.Lsp_Server_Config_Rest_Handlers{auth = &graph.auth, repo = &graph.lsp_server_config_repo, clock = &graph.clock, ids = &graph.ids}
 	graph.providers = provider_service.new_provider_service(&graph.provider_repo)
-	graph.provider_handlers = http.Provider_Handlers{auth = &graph.auth, providers = &graph.providers, bridges = &graph.bridges, bridge_runtime_registry = &graph.bridge_runtime_registry, clock = &graph.clock, ids = &graph.ids, agents = &graph.agents}
+	graph.provider_handlers = http.Provider_Handlers{auth = &graph.auth, providers = &graph.providers, bridges = &graph.bridges, bridge_runtime_registry = &graph.bridge_runtime_registry, clock = &graph.clock, ids = &graph.ids, agents = &graph.agents, event_bus = &graph.event_bus}
 	graph.agent_action_handlers.providers = &graph.providers
 	graph.card_handlers = http.Card_Handlers{auth = &graph.auth, cards = &graph.cards, clock = &graph.clock}
 	graph.issue_handlers = http.Issue_Handlers{auth = &graph.auth, issues = &graph.issues, clock = &graph.clock}

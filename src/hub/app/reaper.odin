@@ -114,6 +114,8 @@ reaper_loop :: proc(graph: ^App_Graph) {
 		// REQ-EA-3: once at startup, before the first interval, so an enrollment that
 		// was pending when the hub stopped is rolled back as soon as the hub is back.
 		reaper_sweep_pending_enrollments(graph)
+		// REQ-2: startup recovery for reconfigurations left mid-flight by a restart.
+		agent_service.reconcile_active_reconfigurations(&graph.agents)
 	})
 	for {
 		time.sleep(time.Duration(interval) * time.Second)
@@ -232,6 +234,10 @@ reaper_sweep_once :: proc(graph: ^App_Graph) {
 		provider_service.provider_test_run_destroy(&updated)
 	}
 
+	// REQ-2: reconfiguration progress and confirmation timeouts advance here (and
+	// on bridge transitions), so they complete with no client polling the GET.
+	agent_service.reconcile_active_reconfigurations(&graph.agents)
+
 	reaped := agent_service.reap_stale_instances(&graph.agents, REAPER_STALE_MS)
 	agent_service.notify_instances_terminal(&graph.agents, reaped)
 	defer domain.agent_instances_destroy(reaped)
@@ -242,16 +248,7 @@ reaper_sweep_once :: proc(graph: ^App_Graph) {
 		// is gone becomes a background run, so it stays tracked and reapable instead
 		// of blocking for a caller that no longer exists.
 		shell_session_svc.shell_session_background_runs_for_agent(&graph.shell_session_service, string(inst.owner_user_id), inst.agent_instance_id)
-		summary := http.agent_instance_status_summary_json(inst.runtime_status, inst.startup_status, inst.activity_status)
-		events.publish_resource_changed(
-			&graph.event_bus,
-			string(inst.owner_user_id),
-			"agent_instance",
-			inst.agent_instance_id,
-			"status_changed",
-			summary,
-		)
-		delete(summary)
+		http.publish_instance_changed(&graph.event_bus, inst, "status_changed")
 	}
 }
 

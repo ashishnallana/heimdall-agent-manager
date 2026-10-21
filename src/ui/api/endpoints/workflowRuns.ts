@@ -44,7 +44,13 @@ export const workflowRunsApi = heimdallApi.injectEndpoints({
           return { error: { status: error instanceof ApiError && error.status ? String(error.status) : 'CUSTOM_ERROR', error: error instanceof Error ? error.message : String(error) } };
         }
       },
-      providesTags: (_result, _error, { chainId }) => [{ type: 'Chain', id: chainId }],
+      // Chain:<id> keeps chain-level invalidations (reconnect, chain edits) reaching it;
+      // WorkflowRuns:<chain> and WorkflowRuns:<run> are what workflow events target.
+      providesTags: (result, _error, { chainId }) => [
+        { type: 'Chain', id: chainId },
+        { type: 'WorkflowRuns', id: chainId },
+        ...(result?.runs || []).map((run: any) => ({ type: 'WorkflowRuns' as const, id: String(run?.run_id || run?.workflow_run_id || '') })).filter((tag) => tag.id),
+      ],
     }),
   }),
 });

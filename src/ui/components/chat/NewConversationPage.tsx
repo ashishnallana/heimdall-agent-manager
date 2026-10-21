@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } 
 import { useSelector } from 'react-redux';
 import { Combobox, Icon, Modal } from '@ui';
 import { useCreateAgentMutation, useListAgentIdentitiesQuery, useListAgentTemplatesQuery } from '../../api/endpoints/agents';
-import { useListBridgesQuery, useListAgentBridgeSupportQuery, normalizeBridgeCapabilities } from '../../api/endpoints/bridgeSupport';
+import { useListBridgesQuery, useListAgentBridgeSupportQuery, useBridgeProviderStatus } from '../../api/endpoints/bridgeSupport';
 import { useCreateLaunchConversationMutation } from '../../api/endpoints/chats';
 import { useCreateProjectMutation, useListProjectsQuery } from '../../api/endpoints/projects';
 import { useCreateArtifactMutation } from '../../api/endpoints/artifacts';
@@ -90,7 +90,7 @@ export default function NewConversationPage({ footer, onLaunched, launchIntent }
   const preferences = useGetConversationLaunchPreferencesQuery();
   const agentsQuery = useListAgentIdentitiesQuery({ limit: 200 });
   const projectsQuery = useListProjectsQuery();
-  const bridgesQuery = useListBridgesQuery(undefined, { pollingInterval: 5000, skipPollingIfUnfocused: true, refetchOnMountOrArgChange: true });
+  const bridgesQuery = useListBridgesQuery(undefined, { refetchOnMountOrArgChange: true });
   const templatesQuery = useListAgentTemplatesQuery();
   const [saveSelection] = useSaveConversationLaunchSelectionMutation();
   const [setFavorite, favoriteState] = useSetAgentFavoriteMutation();
@@ -149,8 +149,11 @@ export default function NewConversationPage({ footer, onLaunched, launchIntent }
   const support = useListAgentBridgeSupportQuery({ agentId }, { skip: !agentId });
   const selectedAgent = agents.find(a => a.agent_id === agentId);
   const selectedProject = projects.find((p: any) => p.project_id === projectId);
-  const selectedBridge = bridges.find((b: any) => b.bridge_id === runtime.bridgeId);
-  const capabilities = useMemo(() => normalizeBridgeCapabilities(selectedBridge), [selectedBridge]);
+  const selectedBridgeRow = useMemo(() => bridges.find((b: any) => b.bridge_id === runtime.bridgeId), [bridges, runtime.bridgeId]);
+  // Provider status for the selected bridge only (not every bridge).
+  const selectedProviders = useBridgeProviderStatus(selectedBridgeRow);
+  const selectedBridge = selectedProviders.bridge;
+  const capabilities = selectedProviders.capabilities;
 
   // Writes only originate in this page. One field per PATCH plus a serial client
   // queue preserves rapid selections without replacing unrelated preferences.
@@ -173,7 +176,9 @@ export default function NewConversationPage({ footer, onLaunched, launchIntent }
     const prefs = preferences.data;
     const initialAgent = prefs.agent_id || agents.find(agent => agent.slug === 'coordinator' && prefs.favorite_agent_ids.includes(agent.agent_id))?.agent_id || prefs.favorite_agent_ids?.[0] || '';
     const initialProject = routeProject || prefs.project_id || projects.find((p: any) => p.state === 'active' && (p.is_default_conversations || p.slug === 'conversation'))?.project_id || projects.find((p: any) => p.state === 'active')?.project_id || '';
-    const initialBridge = prefs.bridge_id || bridges.find((b: any) => b.runtime_connected && b.status === 'online' && normalizeBridgeCapabilities(b).length)?.bridge_id || '';
+    // Provider status is fetched per selected bridge, so the default is the first
+    // connected bridge; the issues list below catches one without usable providers.
+    const initialBridge = prefs.bridge_id || bridges.find((b: any) => b.runtime_connected && b.status === 'online')?.bridge_id || '';
     setAgentId(initialAgent); setProjectId(initialProject); setRuntime({ bridgeId: initialBridge, provider: '', model: '' });
     consumeProjectPreselection(); setHydrated(true);
     if (initialAgent !== prefs.agent_id) remember('agent_id', initialAgent);
@@ -200,7 +205,8 @@ export default function NewConversationPage({ footer, onLaunched, launchIntent }
   if (hydrated && (!selectedProject || selectedProject.state !== 'active')) issues.push('Selected project is unavailable or archived. Choose an active project.');
   if (hydrated && (!selectedBridge || selectedBridge.status !== 'online' || selectedBridge.runtime_connected !== true)) issues.push('Choose a connected bridge in Agent settings.');
   if (selectedBridge?.provider_status_error) issues.push('Provider availability could not be verified on this bridge. Refresh its connection.');
-  if (selectedBridge && (!runtime.provider || !capabilities.some(c => c.provider === runtime.provider))) issues.push('Choose a provider available on the selected bridge.');
+  if (selectedBridge && !selectedProviders.loaded) issues.push('Checking provider availability on the selected bridge…');
+  else if (selectedBridge && (!runtime.provider || !capabilities.some(c => c.provider === runtime.provider))) issues.push('Choose a provider available on the selected bridge.');
   else if (selectedBridge && !capabilities.find(c => c.provider === runtime.provider)?.models.includes(runtime.model)) issues.push('Choose a model available for this provider on the selected bridge.');
   if (support.data?.entries?.some((row: any) => String(row.bridgeId || row.bridge_id) === runtime.bridgeId && row.enabled === false)) issues.push('This agent is disabled on the selected bridge. Choose another bridge.');
   if (!vaultUnlocked || !getActiveVaultKey()) issues.push("This device's vault keys are not installed yet.");

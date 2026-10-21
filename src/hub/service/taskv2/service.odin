@@ -60,6 +60,10 @@ Service :: struct {
 	// notify_observer sees every 1-line coordinator attention notification after commit (tests).
 	notify_observer:     proc(ctx: rawptr, instance_id, trigger, line: string),
 	notify_observer_ctx: rawptr,
+	// on_instance_changed runs after commit for every instance whose current
+	// task pointer or idle stamp changed (wiring publishes agent_instance).
+	on_instance_changed:     proc(ctx: rawptr, instance_id, change: string),
+	on_instance_changed_ctx: rawptr,
 	// vcs_show_file resolves a file at a commit on a chain directory via the bridge (M3 R2.2).
 	vcs_show_file:       proc(ctx: rawptr, chain_id: domain.Task_Chain_ID, owner: domain.User_ID, directory_id, rev, file_path: string) -> (string, bool, domain.Domain_Error),
 	vcs_show_file_ctx:   rawptr,
@@ -150,6 +154,9 @@ Effects :: struct {
 	keys: [dynamic]string,
 	// Resolved wake selections must survive until the outer commit flushes.
 	owned_strings: [dynamic]string,
+	// instances this UoW created or whose current-task pointer it rewrote
+	// (REQ-2); ids are owned by owned_strings, deduplicated per (id, change).
+	instances: [dynamic]Instance_Effect,
 }
 
 Coordinator_Notification :: struct {
@@ -195,6 +202,13 @@ Publish_Effect :: struct {
 	resource_id: string,
 	change:      string,
 	chain_id:    string,
+	// REQ-2: workflow events name their run (and, for stage_changed, the
+	// stage); empty for ordinary task/chain publishes and then omitted.
+	workflow_run_id: string,
+	stage_key:       string,
+	// task/facet_changed: which attempt facet was (re)written.
+	attempt_no: int,
+	facet_kind: string,
 }
 
 Changed_Chain :: struct {
@@ -222,6 +236,7 @@ begin_uow :: proc(svc: ^Service) -> (Uow, bool, domain.Domain_Error) {
 	u.effects.nudges = make([dynamic]Agent_Nudge)
 	u.effects.attention_tasks = make([dynamic]Attention_Effect)
 	u.effects.keys = make([dynamic]string)
+	u.effects.instances = make([dynamic]Instance_Effect)
 	if svc.uow_factory == nil {
 		lockorder.assert_tx_mutex_allowed()
 		return u, true, domain.Domain_Error{}
@@ -316,6 +331,8 @@ move_effects :: proc(dst, src: ^Effects) {
 	append(&dst.attention_tasks, ..src.attention_tasks[:]); delete(src.attention_tasks)
 	append(&dst.keys, ..src.keys[:]); delete(src.keys)
 	append(&dst.owned_strings, ..src.owned_strings[:]); delete(src.owned_strings)
+	for e in src.instances { seen := false; for d in dst.instances do if d == e { seen = true; break }; if !seen do append(&dst.instances, e) }
+	delete(src.instances)
 	src^ = Effects{}
 }
 
@@ -364,6 +381,7 @@ destroy_effects :: proc(e: ^Effects) {
 	delete(e.keys)
 	for s in e.owned_strings do delete(s)
 	delete(e.owned_strings)
+	delete(e.instances)
 }
 
 // agent_notice_command_json: a one-line notice for an agent's terminal, sent as
@@ -418,10 +436,25 @@ flush_effects :: proc(svc: ^Service, e: ^Effects) {
 			events.publish_resource_changed(svc.event_bus, n.owner, "coordinator_attention", n.coordinator_instance_id, n.trigger, summary)
 		}
 	}
-	for p in e.publishes {
+	for p, i in e.publishes {
 		if svc.event_bus == nil do continue
+		// REQ-2/E12: a UoW that refolds a task several times (or writes several
+		// facets of one kind) announces each distinct change once.
+		duplicate := false
+		for q in e.publishes[:i] do if q == p { duplicate = true; break }
+		if duplicate do continue
 		summary := fmt.tprintf("{{\"%s_id\":\"%s\",\"chain_id\":\"%s\"}}", p.resource, p.resource_id, p.chain_id)
+		if p.resource == "workflow_run" {
+			summary = fmt.tprintf("{{\"workflow_run_id\":\"%s\",\"chain_id\":\"%s\",\"stage_key\":\"%s\"}}", p.resource_id, p.chain_id, p.stage_key)
+		} else if p.facet_kind != "" {
+			summary = fmt.tprintf("{{\"task_id\":\"%s\",\"chain_id\":\"%s\",\"attempt_no\":%d,\"kind\":\"%s\"}}", p.resource_id, p.chain_id, p.attempt_no, p.facet_kind)
+		} else if p.workflow_run_id != "" {
+			summary = fmt.tprintf("{{\"%s_id\":\"%s\",\"chain_id\":\"%s\",\"workflow_run_id\":\"%s\"}}", p.resource, p.resource_id, p.chain_id, p.workflow_run_id)
+		}
 		events.publish_resource_changed(svc.event_bus, p.owner, p.resource, p.resource_id, p.change, summary)
+	}
+	if svc.on_instance_changed != nil {
+		for i in e.instances do svc.on_instance_changed(svc.on_instance_changed_ctx, i.instance_id, i.change)
 	}
 	for c in e.changed_chains {
 		if svc.on_tasks_changed != nil do svc.on_tasks_changed(svc.on_tasks_changed_ctx, c.chain_id, c.owner)
@@ -498,6 +531,46 @@ effect_publish_task :: proc(u: ^Uow, task: domain.Task, change: string) {
 
 effect_publish_chain :: proc(u: ^Uow, chain_id: domain.Task_Chain_ID, owner: domain.User_ID, change: string) {
 	append(&u.effects.publishes, Publish_Effect{owner = string(owner), resource = "task_chain", resource_id = string(chain_id), change = change, chain_id = string(chain_id)})
+}
+
+// effect_instance_changed queues an after-commit agent_instance hint for an
+// instance row this UoW rewrote; a rollback discards it with the rest.
+// change is "current_task_changed" (pointer) or "created" (JIT instance).
+effect_instance_changed :: proc(u: ^Uow, instance_id: string, change := "current_task_changed") {
+	if u == nil || instance_id == "" do return
+	for e in u.effects.instances do if e.instance_id == instance_id && e.change == change do return
+	owned := strings.clone(instance_id)
+	append(&u.effects.owned_strings, owned)
+	append(&u.effects.instances, Instance_Effect{instance_id = owned, change = change})
+}
+
+Instance_Effect :: struct {
+	instance_id: string,
+	change:      string, // static literal, never freed
+}
+
+// effect_publish_workflow queues task_chain/workflow_<kind> naming the run, and
+// effect_publish_workflow_stage queues workflow_run/stage_changed (REQ-2). The
+// ids are cloned into owned_strings so they outlive the run rows they came from.
+// effect_publish_facet queues task/facet_changed for an attempt facet write.
+effect_publish_facet :: proc(u: ^Uow, task: domain.Task, attempt_no: int, kind: string) {
+	if u == nil do return
+	owned_kind := strings.clone(kind); append(&u.effects.owned_strings, owned_kind)
+	append(&u.effects.publishes, Publish_Effect{owner = string(task.owner_user_id), resource = "task", resource_id = string(task.task_id), change = "facet_changed", chain_id = string(task.chain_id), attempt_no = attempt_no, facet_kind = owned_kind})
+}
+
+effect_publish_workflow :: proc(u: ^Uow, chain_id: domain.Task_Chain_ID, owner: domain.User_ID, run_id: domain.Workflow_Run_ID, change: string) {
+	if u == nil do return
+	owned_run := strings.clone(string(run_id)); append(&u.effects.owned_strings, owned_run)
+	owned_change := strings.clone(change); append(&u.effects.owned_strings, owned_change)
+	append(&u.effects.publishes, Publish_Effect{owner = string(owner), resource = "task_chain", resource_id = string(chain_id), change = owned_change, chain_id = string(chain_id), workflow_run_id = owned_run})
+}
+
+effect_publish_workflow_stage :: proc(u: ^Uow, chain_id: domain.Task_Chain_ID, owner: domain.User_ID, run_id: domain.Workflow_Run_ID, stage_key: string) {
+	if u == nil || run_id == "" do return
+	owned_run := strings.clone(string(run_id)); append(&u.effects.owned_strings, owned_run)
+	owned_stage := strings.clone(stage_key); append(&u.effects.owned_strings, owned_stage)
+	append(&u.effects.publishes, Publish_Effect{owner = string(owner), resource = "workflow_run", resource_id = owned_run, change = "stage_changed", chain_id = string(chain_id), stage_key = owned_stage})
 }
 
 effect_tasks_changed :: proc(u: ^Uow, chain_id: domain.Task_Chain_ID, owner: domain.User_ID) {

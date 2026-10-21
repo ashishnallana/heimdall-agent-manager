@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef } from 'react';
+import { PaneVisibilityProvider } from '../workbench/paneVisibility';
 import type { PaneTreeState, RenderPaneProps } from '../../tiling/types';
 import { getContentPaneIds } from '../../tiling/paneTreeState';
 import { useMobileSwipe } from '../mobileSwipe';
@@ -96,6 +97,7 @@ export function MobileMainPager<T>({
               data-debug-id={`workspace-mobile-page-${paneId}`}
               className="flex h-full min-h-0 w-full min-w-full shrink-0 snap-start snap-always flex-col overflow-hidden"
             >
+              <PaneVisibilityProvider visible={paneId === paneIds[focusedIndex]}>
               {renderPane({
                 paneId,
                 value: pane.value,
@@ -106,6 +108,7 @@ export function MobileMainPager<T>({
                 isTopLeftMost: true,
                 isTopRightMost: true,
               })}
+              </PaneVisibilityProvider>
             </div>
           );
         })}

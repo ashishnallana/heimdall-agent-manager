@@ -95,9 +95,10 @@ function normalizeLiveProject(raw: any): LiveProject {
 
 export const agentsLiveApi = heimdallApi.injectEndpoints({
   endpoints: (build) => ({
-    // The whole projects->live-chains->agents tree in one query. Tagged with the
-    // SidebarConversations id so the same user-WS invalidation path that refreshes
-    // conversation state also refreshes the live tree (project/chain/agent set).
+    // The whole projects->live-chains->agents tree in one query. Tagged AgentsLive, not
+    // SidebarConversations: chat/read events must not reload it. Instance status is
+    // patched in place (patchAgentsLiveFromInstanceSummary); instance create/config/
+    // current-task and chain changes invalidate it (wsInvalidation.ts).
     getAgentsLive: build.query<LiveProject[], void>({
       queryFn: async (_arg, api) => {
         try {
@@ -136,7 +137,7 @@ export const agentsLiveApi = heimdallApi.injectEndpoints({
           return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error || 'Request failed') } as any };
         }
       },
-      providesTags: [{ type: 'SidebarConversations' as const, id: 'ALL' }],
+      providesTags: [{ type: 'AgentsLive' as const, id: 'ALL' }],
     }),
   }),
 });

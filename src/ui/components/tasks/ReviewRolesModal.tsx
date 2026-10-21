@@ -29,7 +29,7 @@ export interface ReviewRolesModalProps {
 export const ReviewRolesModal: React.FC<ReviewRolesModalProps> = ({ chainId, open, onClose, names = EMPTY_TASK_NAMES }) => {
   const { data: roles = [] } = useListChainReviewRolesQuery({ chainId }, { skip: !open });
   const { data: fleets = [] } = useGetTaskChainFleetsQuery({ chainId }, { skip: !open });
-  const { data: identitiesData } = useListAgentIdentitiesQuery();
+  const { data: identitiesData } = useListAgentIdentitiesQuery(undefined, { skip: !open });
   const [upsertRole, upsertState] = useUpsertChainReviewRoleMutation();
   const [deleteRole, deleteState] = useDeleteChainReviewRoleMutation();
   const [updateFleet, fleetState] = useUpdateTaskChainFleetMutation();

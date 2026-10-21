@@ -1305,6 +1305,7 @@ create_task_chain_handler :: proc(ctx: rawptr, req: Request) -> Response {
 		if h.agents == nil do return respond_error(domain.domain_error(.Internal_Error, "agent service is not configured"), req.request_id)
 		inst, inst_created, inst_err := agent_service.create_instance(h.agents, auth_ctx, agent_service.Create_Instance_Input{agent_id = coord_agent_id, bridge_id = json_string(req.body, "bridge_id"), provider = json_string(req.body, "provider"), model = json_string(req.body, "model"), project_id = domain.Project_ID(json_string(req.body, "project_id")), chain_id = string(chain.chain_id)})
 		if !inst_created do return respond_error(inst_err, req.request_id)
+		publish_instance_created(h.event_bus, inst)
 		chain, created, err = taskchain_service.update_chain_coordinator(h.taskchains, auth_ctx, chain.chain_id, inst.agent_instance_id)
 		if !created do return respond_error(err, req.request_id)
 	}
@@ -2064,8 +2065,10 @@ upsert_chain_fleet_handler :: proc(ctx: rawptr, req: Request) -> Response {
 				defer delete(launch_provider)
 				defer delete(launch_model)
 				if inst.provider == launch_provider && inst.model == launch_model do continue
-				if _, relaunched, relaunch_err := agent_service.relaunch_instance(h.agents, auth_ctx, inst, launch_provider, launch_model); relaunched {
+				if relaunched_inst, relaunched, relaunch_err := agent_service.relaunch_instance(h.agents, auth_ctx, inst, launch_provider, launch_model); relaunched {
 					append(&restarted_ids, inst.agent_instance_id)
+					// New provider/model and run state are persisted: refresh the instance.
+					publish_instance_changed(h.event_bus, relaunched_inst, "config_changed")
 				} else {
 					// Clone: relaunch path messages can come from fmt.tprintf (temp memory).
 					append(&restart_failures, Fleet_Restart_Failure{instance_id = inst.agent_instance_id, message = strings.clone(relaunch_err.message)})

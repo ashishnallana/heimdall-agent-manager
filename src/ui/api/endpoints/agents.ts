@@ -29,23 +29,49 @@ function agentTagId(agent: any, fallback = '') {
   return String(agent?.id || agent?.agent_instance_id || agent?.agentInstanceId || fallback || '');
 }
 
+// listAgentIdentities paging: the hub's maximum page, and a cap on pages so a hub that
+// never clears has_more cannot spin the queryFn forever (40 x 200 = 8000 identities).
+const IDENTITY_PAGE_SIZE = 200;
+const IDENTITY_MAX_PAGES = 40;
+
 export const agentsApi = heimdallApi.injectEndpoints({
   endpoints: (build) => ({
     // TODO(FIX): Replace any with strict TypeScript interface matching Odin backend schema
     listAgentIdentities: build.query<{ agents: any[] }, { limit?: number; cursor?: string } | void>({
+      // Callers treat this as THE identity set (pickers, the fleet filter, isSolo), but
+      // the hub pages it (default 50, max 200 per page; agent_handlers.odin
+      // list_agents_handler). Without an explicit cursor the queryFn follows
+      // page.has_more so an owner with more than one page loses no agents; `limit`
+      // is only the page size. Every no-cursor call shares one cache entry.
       queryFn: async (arg) => {
         try {
-          const params = new URLSearchParams();
           const opts = (arg && typeof arg === 'object') ? arg : undefined;
-          if (opts?.limit) params.set('limit', String(opts.limit));
-          if (opts?.cursor) params.set('cursor', opts.cursor);
-          const qs = params.toString() ? `?${params.toString()}` : '';
-          const data = await cookieJsonFetch(`/agents${qs}`);
-          const agents = Array.isArray(data) ? data : (data?.agents || []);
+          const pageSize = String(Math.min(Math.max(opts?.limit || IDENTITY_PAGE_SIZE, 1), IDENTITY_PAGE_SIZE));
+          const agents: any[] = [];
+          const seenCursors = new Set<string>();
+          let cursor = opts?.cursor || '';
+          for (let page = 0; page < IDENTITY_MAX_PAGES; page += 1) {
+            // view=summary: no consumer of this list reads instructions or the per-row
+            // counts (the /agents page and edit form use fetchAgentPage/fetchAgentIdentity,
+            // which keep the full row), so the hub omits them.
+            const params = new URLSearchParams({ limit: pageSize, view: 'summary' });
+            if (cursor) params.set('cursor', cursor);
+            const body = await cookieJsonFetchEnvelope(`/agents?${params.toString()}`);
+            const rows = Array.isArray(body?.data) ? body.data : (Array.isArray(body) ? body : (body?.data?.agents || []));
+            agents.push(...rows);
+            const next = String(body?.page?.next_cursor || '');
+            if (opts?.cursor || !body?.page?.has_more || !next || seenCursors.has(next)) break;
+            seenCursors.add(next);
+            cursor = next;
+          }
           return { data: { agents } };
         } catch (error: any) {
-          return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any };
+          return { error: customQueryError(error) as any };
         }
+      },
+      serializeQueryArgs: ({ endpointName, queryArgs }) => {
+        const cursor = (queryArgs && typeof queryArgs === 'object') ? queryArgs.cursor : '';
+        return cursor ? `${endpointName}(${cursor})` : `${endpointName}(all)`;
       },
       providesTags: [{ type: 'Agents' as const, id: 'LIST' }],
     }),
@@ -105,7 +131,7 @@ export const agentsApi = heimdallApi.injectEndpoints({
           const data = await cookieJsonFetch(`/agents/${encodeURIComponent(agentId)}`);
           return { data: { agent: data || null } };
         } catch (error: any) {
-          return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any };
+          return { error: customQueryError(error) as any };
         }
       },
       providesTags: (_result, _error, { agentId }) => [{ type: 'Agents' as const, id: agentId }],
@@ -303,7 +329,6 @@ export const agentsApi = heimdallApi.injectEndpoints({
         return daemonApi.startAgent({ daemonUrl: session.daemonUrl, agentInstanceId, provider, templateId, projectId, projectIdSet, alias, displayName, model });
       }),
       invalidatesTags: (_result, _error, { agentInstanceId }) => [
-        { type: 'Agents' as const, id: 'LIST' },
         { type: 'Agents' as const, id: agentInstanceId },
       ],
     }),
@@ -313,7 +338,6 @@ export const agentsApi = heimdallApi.injectEndpoints({
         return daemonApi.stopAgent({ daemonUrl: session.daemonUrl, agentInstanceId, timeInSec });
       }),
       invalidatesTags: (_result, _error, { agentInstanceId }) => [
-        { type: 'Agents' as const, id: 'LIST' },
         { type: 'Agents' as const, id: agentInstanceId },
       ],
     }),
@@ -347,7 +371,6 @@ export const agentsApi = heimdallApi.injectEndpoints({
         }
       },
       invalidatesTags: (_result, _error, { chainId }) => [
-        { type: 'Agents' as const, id: 'LIST' },
         { type: 'ChainTasks' as const, id: chainId },
       ],
     }),
@@ -418,7 +441,7 @@ export const agentsApi = heimdallApi.injectEndpoints({
           const data = await cookieJsonFetch(`/agent-instances/${encodeURIComponent(instanceId)}`);
           return { data: { instance: data || null } };
         } catch (error: any) {
-          return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any };
+          return { error: customQueryError(error) as any };
         }
       },
       providesTags: (_result, _error, { instanceId }) => [{ type: 'AgentInstances' as const, id: instanceId }],
@@ -443,7 +466,7 @@ export const agentsApi = heimdallApi.injectEndpoints({
           return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any };
         }
       },
-      invalidatesTags: (_result, _error, { agentId }) => [{ type: 'Agents' as const, id: 'LIST' }, { type: 'Agents' as const, id: agentId }, { type: 'AgentInstances' as const, id: agentId }],
+      invalidatesTags: (_result, _error, { agentId }) => [{ type: 'Agents' as const, id: agentId }, { type: 'AgentInstances' as const, id: agentId }],
     }),
     // TODO(FIX): Replace any with strict TypeScript interface matching Odin backend schema
     stopAgentInstance: build.mutation<any, { agentId: string; instanceId: string; force?: boolean }>({
@@ -456,7 +479,6 @@ export const agentsApi = heimdallApi.injectEndpoints({
         }
       },
       invalidatesTags: (_result, _error, { agentId, instanceId }) => [
-        { type: 'Agents' as const, id: 'LIST' },
         { type: 'Agents' as const, id: agentId },
         { type: 'AgentInstances' as const, id: agentId },
         { type: 'AgentInstances' as const, id: instanceId },
@@ -473,7 +495,6 @@ export const agentsApi = heimdallApi.injectEndpoints({
         }
       },
       invalidatesTags: (_result, _error, { agentId, instanceId }) => [
-        { type: 'Agents' as const, id: 'LIST' },
         ...(agentId ? [{ type: 'Agents' as const, id: agentId }, { type: 'AgentInstances' as const, id: agentId }] : []),
         { type: 'AgentInstances' as const, id: instanceId },
       ],
@@ -489,7 +510,6 @@ export const agentsApi = heimdallApi.injectEndpoints({
         }
       },
       invalidatesTags: (_result, _error, { agentId, instanceId }) => [
-        { type: 'Agents' as const, id: 'LIST' },
         ...(agentId ? [{ type: 'Agents' as const, id: agentId }, { type: 'AgentInstances' as const, id: agentId }] : []),
         { type: 'AgentInstances' as const, id: instanceId },
       ],
@@ -499,9 +519,11 @@ export const agentsApi = heimdallApi.injectEndpoints({
         try {
           const data = await cookieJsonFetch(`/agent-instances/${encodeURIComponent(instanceId)}/reconfigurations`);
           return { data: { operations: (data?.operations || []).map(normalizeInstanceReconfiguration) } };
-        } catch (error: any) { return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any }; }
+        } catch (error: any) { return { error: customQueryError(error) as any }; }
       },
-      providesTags: (_data, _error, { instanceId }) => [{ type: 'AgentInstances' as const, id: instanceId }],
+      // Own tag: agent_instance_reconfiguration events invalidate it; ordinary
+      // instance status events (AgentInstances:<id>) do not refetch it.
+      providesTags: (_data, _error, { instanceId }) => [{ type: 'InstanceReconfigurations' as const, id: instanceId }],
       // When an operation settles, the instance runtime, the conversation header and its
       // messages all change server-side. Invalidate their tags here rather than having
       // views refetch: invalidation only touches started subscriptions, so it is safe
@@ -530,7 +552,8 @@ export const agentsApi = heimdallApi.injectEndpoints({
           return { data: normalizeInstanceReconfiguration(data) };
         } catch (error: any) { return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any }; }
       },
-      invalidatesTags: (_data, _error, { instanceId }) => [{ type: 'AgentInstances' as const, id: instanceId }],
+      // The instance itself changes later and announces it (agent_instance/config_changed).
+      invalidatesTags: (_data, _error, { instanceId }) => [{ type: 'InstanceReconfigurations' as const, id: instanceId }],
     }),
     applyInstanceConfiguration: build.mutation<InstanceReconfiguration, ApplyInstanceConfigurationInput>({
       queryFn: async ({ instanceId, ...body }) => {
@@ -539,7 +562,8 @@ export const agentsApi = heimdallApi.injectEndpoints({
           return { data: normalizeInstanceReconfiguration(data) };
         } catch (error: any) { return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any }; }
       },
-      invalidatesTags: (_data, _error, { instanceId }) => [{ type: 'AgentInstances' as const, id: instanceId }, { type: 'Agents' as const, id: 'LIST' }],
+      // The instance itself changes later and announces it (agent_instance/config_changed).
+      invalidatesTags: (_data, _error, { instanceId }) => [{ type: 'InstanceReconfigurations' as const, id: instanceId }],
     }),
     // TODO(FIX): Replace any with strict TypeScript interface matching Odin backend schema
     reconfigureAgentInstance: build.mutation<any, { agentId: string; instanceId: string; provider?: string; model?: string; bridgeId?: string }>({
@@ -555,7 +579,7 @@ export const agentsApi = heimdallApi.injectEndpoints({
           return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any };
         }
       },
-      invalidatesTags: (_result, _error, { agentId }) => [{ type: 'Agents' as const, id: 'LIST' }, { type: 'Agents' as const, id: agentId }, { type: 'AgentInstances' as const, id: agentId }],
+      invalidatesTags: (_result, _error, { agentId }) => [{ type: 'Agents' as const, id: agentId }, { type: 'AgentInstances' as const, id: agentId }],
     }),
     getAgentPane: build.query<AgentPaneResult, GetAgentPaneArgs>({
       queryFn: async ({ agentInstanceId, sinceHash, width = 80, lineLimit = 120 }) => {
@@ -687,13 +711,15 @@ export function patchAgentCachesFromWs(dispatch: any, payload: any) {
     activity_status: payload?.activity_status ?? summary?.activity_status,
     exec_state: payload?.exec_state,
   };
-  let known = false;
+  // Legacy daemon cache (listAgents/fetchAgent): patched in place where mounted, but it
+  // is NOT the identity catalogue and must not decide whether to refetch one.
+  let legacyKnown = false;
   // TODO(FIX): Replace any with strict TypeScript interface matching Odin backend schema
   dispatch(agentsApi.util.updateQueryData('listAgents', undefined, (draft: any) => {
     const rows = draft?.agents || (draft.agents = []);
     // TODO(FIX): Replace any with strict TypeScript interface matching Odin backend schema
-    known = rows.some((r: any) => r.id === agentId);
-    if (known) applyAgentRuntimeEvent(rows, runtimePatch);
+    legacyKnown = rows.some((r: any) => r.id === agentId);
+    if (legacyKnown) applyAgentRuntimeEvent(rows, runtimePatch);
   }));
   // Also patch the per-instance runtime cache (fetchAgentInstance) used by the
   // conversation page's runtime chip / model switcher / current-task strip, so a
@@ -705,7 +731,7 @@ export function patchAgentCachesFromWs(dispatch: any, payload: any) {
     if (runtimePatch.startup_status != null) draft.instance.startup_status = runtimePatch.startup_status;
     if (runtimePatch.activity_status != null) draft.instance.activity_status = runtimePatch.activity_status;
   }));
-  if (known) {
+  if (legacyKnown) {
     // TODO(FIX): Replace any with strict TypeScript interface matching Odin backend schema
     dispatch(agentsApi.util.updateQueryData('fetchAgent', { agentInstanceId: agentId }, (draft: any) => {
       if (!draft?.agent) return;
@@ -713,13 +739,23 @@ export function patchAgentCachesFromWs(dispatch: any, payload: any) {
       applyAgentRuntimeEvent(rows, runtimePatch);
       draft.agent = rows[0];
     }));
-    return;
   }
-  // An agent id we don't have cached yet (e.g. an instance launched elsewhere):
-  // invalidate the LIST ONCE so it appears. This is the rare case; steady-state
-  // status blips for already-known agents are patched in place above and do NOT
-  // trigger a refetch.
-  dispatch(heimdallApi.util.invalidateTags([{ type: 'Agents', id: 'LIST' }]));
+  // Runtime status never changes an agent IDENTITY, so a status event does not refetch
+  // GET /agents. The only case worth one refetch is an instance whose durable agent we
+  // can name (from the event or the cached instance) and that the LOADED identity
+  // catalogue does not contain: an identity created elsewhere (another tab, ham-ctl).
+  // The status summary carries no agent_id (agent_instance_status_summary_json), so an
+  // instance we have never fetched resolves to no agent and triggers nothing.
+  dispatch((_d: any, getState: () => any) => {
+    const state = getState();
+    const instance = agentsApi.endpoints.fetchAgentInstance.select({ instanceId: agentId })(state)?.data?.instance;
+    const identityAgentId = String(summary?.agent_id || payload?.agent_id || instance?.agent_id || '');
+    if (!identityAgentId) return;
+    const identities = agentsApi.endpoints.listAgentIdentities.select(undefined)(state)?.data?.agents;
+    if (!Array.isArray(identities)) return;
+    if (identities.some((a: any) => String(a?.agent_id || a?.agentId || '') === identityAgentId)) return;
+    dispatch(heimdallApi.util.invalidateTags([{ type: 'Agents', id: 'LIST' }]));
+  });
 }
 
 export const {

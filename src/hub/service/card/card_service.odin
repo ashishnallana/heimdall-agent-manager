@@ -291,6 +291,8 @@ Card_Service :: struct {
 	attention_notifier: contracts.Attention_Notifier,
 	projector_mutex:    sync.Mutex,
 	card_changed:       Card_Changed_Hook,
+	// REQ-2: agent.prompt ops announce their message after the accept commits.
+	message_created:    content_service.Message_Created_Hook,
 }
 
 new_card_service :: proc(
@@ -886,6 +888,7 @@ accept_card :: proc(s: ^Card_Service, auth: contracts.Auth_Context, id: domain.C
 		kind    = .User_Token,
 		user_id = string(card.owner_user_id),
 	}
+	sent_prompts := make([dynamic]domain.Chat_Message, context.temp_allocator)
 
 	for elem in ops_arr {
 		op_obj, is_obj := elem.(json.Object)
@@ -1108,7 +1111,7 @@ accept_card :: proc(s: ^Card_Service, auth: contracts.Auth_Context, id: domain.C
 				if has_uow do iface.unit_of_work_rollback(&uow)
 				return domain.Card{}, false, conv_err
 			}
-			_, snd_ok, snd_err := content_service.send_message(s.content, user_auth, conv.conversation_id, content_service.Message_Input{
+			sent_msg, snd_ok, snd_err := content_service.send_message(s.content, user_auth, conv.conversation_id, content_service.Message_Input{
 				body         = prompt,
 				message_type = "action",
 			})
@@ -1116,6 +1119,9 @@ accept_card :: proc(s: ^Card_Service, auth: contracts.Auth_Context, id: domain.C
 				if has_uow do iface.unit_of_work_rollback(&uow)
 				return domain.Card{}, false, snd_err
 			}
+			// Inside a UoW the row is not durable yet: hold the hint until COMMIT
+			// (a rollback drops it). Without one the send already committed.
+			if has_uow { append(&sent_prompts, sent_msg) } else do content_service.notify_message_created(s.message_created, sent_msg)
 
 		case "agent.update":
 			aid := op_arg_string(op_obj, "agent_id")
@@ -1177,6 +1183,7 @@ accept_card :: proc(s: ^Card_Service, auth: contracts.Auth_Context, id: domain.C
 	if has_uow {
 		commit_ok, commit_err := iface.unit_of_work_commit(&uow)
 		if !commit_ok do return domain.Card{}, false, commit_err
+		for m in sent_prompts do content_service.notify_message_created(s.message_created, m)
 	}
 
 	// Status-only write, re-read after: executing the ops usually changed the

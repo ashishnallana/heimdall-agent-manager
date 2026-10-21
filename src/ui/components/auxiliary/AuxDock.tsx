@@ -44,7 +44,7 @@ import { useMobileSwipe } from '../mobileSwipe';
 import { MobileSwipeDots } from '../MobileSwipeDots';
 
 function AgentStatusDotWithApi({ agentInstanceId }: { agentInstanceId: string }) {
-  const { data } = useGetAgentsLiveQuery(undefined, { pollingInterval: 30000, skipPollingIfUnfocused: true });
+  const { data } = useGetAgentsLiveQuery(undefined);
   const status = useMemo(() => {
     for (const p of data || []) {
       for (const c of p.chains || []) {

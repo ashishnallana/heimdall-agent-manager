@@ -1,5 +1,6 @@
+import { noteLocalMessageSent } from '../conversationMessageEvents';
 import * as daemonApi from '../daemonApi';
-import { apiUrl, cookieJsonFetch, cookieMutation } from '../cookieFetch';
+import { apiUrl, cookieJsonFetch, cookieMutation, customQueryError, errorFromResponse } from '../cookieFetch';
 import { heimdallApi, withSessionQuery } from '../heimdallApi';
 import { isVaultArmored, encryptVaultText, getActiveVaultKey } from '../../utils/vaultContent';
 import { decryptConversationRecord } from '../../utils/vaultChats';
@@ -236,7 +237,8 @@ export const chatEndpoints = heimdallApi.injectEndpoints({
       invalidatesTags: (_result, _error, { agentId }) => [
         { type: 'SidebarConversations' as const, id: 'ALL' },
         { type: 'ConversationSummaries' as const, id: 'LIST' },
-        { type: 'Agents' as const, id: 'LIST' },
+        // Not Agents:LIST: starting a conversation launches an instance but changes no
+        // agent identity, and LIST is provided only by listAgentIdentities.
         { type: 'AgentInstances' as const, id: agentId },
       ],
     }),
@@ -272,7 +274,7 @@ export const chatEndpoints = heimdallApi.injectEndpoints({
           }
           return { data: { conversation } };
         } catch (error: any) {
-          return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any };
+          return { error: customQueryError(error) as any };
         }
       },
       // A lookup by instance passes conversationId '' and only learns the real id from
@@ -294,15 +296,8 @@ export const chatEndpoints = heimdallApi.injectEndpoints({
           const params = new URLSearchParams({ limit: String(limit) });
           if (cursor) params.set('cursor', cursor);
           const res = await fetch(apiUrl(`/chats/${encodeURIComponent(conversationId)}/messages?${params.toString()}`), { credentials: 'include' });
-          if (!res.ok) {
-            let msg = `Request failed (${res.status})`;
-            try {
-              const text = await res.text();
-              const body = JSON.parse(text);
-              msg = String(body?.error?.message || body?.message || msg);
-            } catch (_err) {}
-            throw new Error(msg);
-          }
+          // ApiError keeps the HTTP status and hub code, so a 404/401 is terminal below.
+          if (!res.ok) throw await errorFromResponse(res);
           const body = await res.json();
           const rows = Array.isArray(body) ? body : (Array.isArray(body?.data) ? body.data : (body?.messages || []));
           const page = body?.page || {};
@@ -310,10 +305,15 @@ export const chatEndpoints = heimdallApi.injectEndpoints({
           const hasMore = Boolean(page.has_more ?? page.hasMore ?? body?.has_more ?? body?.hasMore ?? false);
           return { data: { messages: rows, nextCursor, hasMore } };
         } catch (error: any) {
-          return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any };
+          return { error: customQueryError(error) as any };
         }
       },
-      providesTags: (_r, _e, { conversationId }) => [{ type: 'Chat' as const, id: conversationId }],
+      // Only the newest page (no cursor) carries Chat:<conversation>, which a new
+      // message invalidates. Older pages never gain messages; their read receipts are
+      // patched from messages_read, so they must not refetch on every new message.
+      providesTags: (_r, _e, { conversationId, cursor }) => [
+        { type: 'Chat' as const, id: cursor ? `${conversationId}@${cursor}` : conversationId },
+      ],
       // Keep recently-viewed threads cached longer than the 30s global default so
       // switching back to a conversation renders instantly (the page remounts per
       // conversationId). WS/`Chat` tag invalidation still refreshes on new messages.
@@ -369,6 +369,8 @@ export const chatEndpoints = heimdallApi.injectEndpoints({
             encBody = await encryptVaultText(encBody, activeKey);
           }
           const data = await cookieMutation(`/chats/${encodeURIComponent(conversationId)}/messages`, 'POST', { body: encBody, artifact_ids: artifactIds });
+          // invalidatesTags below refreshes this tab; skip the hub's echo of the same id.
+          noteLocalMessageSent(String(data?.message_id || data?.message?.message_id || data?.data?.message_id || ''));
           return { data };
         } catch (error: any) {
           return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any };

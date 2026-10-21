@@ -476,8 +476,8 @@ _apply_inventory_entry :: proc(
 
 	if !changed do return
 	next.last_activity_at = now
-	_, _ = iface.shell_session_upsert(svc.repo, next)
-	_publish_inventory_change(svc, row.owner_user_id, next.session_id, next.status)
+	// REQ-2: publish a correction only once it is durable.
+	if _, up_err := iface.shell_session_upsert(svc.repo, next); up_err.code == .None do _publish_inventory_change(svc, row.owner_user_id, next.session_id, next.status)
 }
 
 // _adopt_inventory_entry creates a row for a session running untracked — invariant
@@ -576,18 +576,21 @@ _reap_inventory_absent :: proc(
 		// exit_code / exit_code_set are left exactly as the row had them: this path
 		// observed nothing and must fabricate nothing. See
 		// SHELL_SESSION_INVENTORY_UNOBSERVED_TERMINAL.
-		_, _ = iface.shell_session_upsert(svc.repo, next)
+		_, term_up_err := iface.shell_session_upsert(svc.repo, next)
 		result.terminated += 1
 
 		// The SAME shape the bridge-reported terminal path uses
 		// (shell_session_handle_exited), not a new one: the owner event, then the
 		// viewer broadcast. A client must not have to learn a second way to hear that a
-		// session ended depending on which mechanism noticed.
-		if svc.events != nil {
-			evt := _shell_exited_event_json(next.session_id, next.status, 0, false)
-			events.publish_owned(svc.events, next.owner_user_id, evt)
+		// session ended depending on which mechanism noticed. REQ-2: only when the
+		// terminal row was actually written.
+		if term_up_err.code == .None {
+			if svc.events != nil {
+				evt := _shell_exited_event_json(next.session_id, next.status, 0, false)
+				events.publish_owned(svc.events, next.owner_user_id, evt)
+			}
+			shell_session_broadcast_status(svc, next.session_id, next.status, 0, false)
 		}
-		shell_session_broadcast_status(svc, next.session_id, next.status, 0, false)
 		if svc.on_unobserved_terminal != nil {
 			svc.on_unobserved_terminal(svc.on_unobserved_terminal_ctx, next)
 		}

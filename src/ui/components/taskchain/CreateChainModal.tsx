@@ -29,15 +29,17 @@ export const CreateChainModal: React.FC<CreateChainModalProps> = ({
   const [coordinatorAgentId, setCoordinatorAgentId] = useState('');
 
   // Workflow template state
-  const { data: templatesData } = useFetchWorkflowTemplatesQuery();
+  // The modal stays mounted while closed (it returns null below), so every query is
+  // skipped until it opens.
+  const { data: templatesData } = useFetchWorkflowTemplatesQuery(undefined, { skip: !isOpen });
   const templates: any[] = templatesData?.templates || [];
-  const { data: defsData } = useFetchWorkflowDefinitionsQuery();
+  const { data: defsData } = useFetchWorkflowDefinitionsQuery(undefined, { skip: !isOpen });
   const definitions: any[] = defsData?.definitions || [];
 
   const [selectedWorkflowRef, setSelectedWorkflowRef] = useState<string>('');
   const [workflowInputs, setWorkflowInputs] = useState<Record<string, string>>({});
 
-  const { data: agentsData } = useListAgentIdentitiesQuery();
+  const { data: agentsData } = useListAgentIdentitiesQuery(undefined, { skip: !isOpen });
   const agents: any[] = agentsData?.agents || [];
 
   const [createTaskChain, { isLoading: isCreatingChain }] = useCreateTaskChainMutation();

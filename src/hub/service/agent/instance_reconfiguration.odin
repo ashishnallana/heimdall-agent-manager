@@ -132,6 +132,7 @@ begin_instance_reconfiguration :: proc(service: ^Agent_Service, auth: contracts.
 	op := domain.Instance_Reconfiguration{operation_id = platform.generate_id(service.ids, "reconfig_"), owner_user_id = string(inst.owner_user_id), agent_instance_id = inst.agent_instance_id, conversation_id = inst.conversation_id, actor_user_id = auth.user_id, idempotency_key = input.idempotency_key, expected_revision = input.expected_revision, revision = 1, phase = .Prepared, source = configuration_snapshot(service, inst), destination = configuration_snapshot(service, next), stop_command_id = platform.generate_id(service.ids, "cmd_reconfig_stop_"), launch_command_id = platform.generate_id(service.ids, "cmd_reconfig_launch_"), launch_epoch = platform.generate_id(service.ids, "launch_"), created_at = now, updated_at = now}
 	stored, saved, save_err := iface.instance_reconfiguration_begin(service.agents, op)
 	if !saved do return {}, false, save_err
+	reconfiguration_notify(service, stored, "created", false)
 	defer domain.instance_reconfiguration_destroy(&stored)
 	return reconfiguration_start_stop(service, stored)
 }
@@ -139,7 +140,26 @@ begin_instance_reconfiguration :: proc(service: ^Agent_Service, auth: contracts.
 reconfiguration_advance :: proc(service: ^Agent_Service, op: domain.Instance_Reconfiguration, phase: domain.Instance_Reconfiguration_Phase, stopped, committed: bool, failure_code: string = "", failure_message: string = "") -> (domain.Instance_Reconfiguration, bool, domain.Domain_Error) {
 	next := op; next.phase = phase; next.revision += 1; next.updated_at = platform.clock_now(service.clock)
 	next.source_stopped = stopped; next.destination_committed = committed; next.failure_code = failure_code; next.failure_message = failure_message
-	return iface.instance_reconfiguration_advance(service.agents, next, op.revision)
+	advanced, accepted, err := iface.instance_reconfiguration_advance(service.agents, next, op.revision)
+	if accepted do reconfiguration_notify(service, advanced, reconfiguration_change_name(advanced.phase), committed && !op.destination_committed)
+	return advanced, accepted, err
+}
+
+// reconfiguration_change_name maps a persisted phase to the stable event change.
+reconfiguration_change_name :: proc(phase: domain.Instance_Reconfiguration_Phase) -> string {
+	#partial switch phase {
+	case .Ready:             return "succeeded"
+	case .Failed:            return "failed"
+	case .Recovery_Required: return "error"
+	}
+	return "progress"
+}
+
+// reconfiguration_notify runs after a successful compare-and-set write, so a
+// lost race (accepted=false) or a failed write never produces an event.
+reconfiguration_notify :: proc(service: ^Agent_Service, op: domain.Instance_Reconfiguration, change: string, config_committed: bool) {
+	if service == nil || service.resource_events.on_reconfiguration_changed == nil do return
+	service.resource_events.on_reconfiguration_changed(service.resource_events.ctx, op, change, config_committed)
 }
 reconfiguration_start_stop :: proc(service: ^Agent_Service, op: domain.Instance_Reconfiguration) -> (domain.Instance_Reconfiguration, bool, domain.Domain_Error) {
 	stopping, accepted, err := reconfiguration_advance(service, op, .Stopping, false, false)
@@ -228,7 +248,33 @@ apply_reconfiguration_command_result :: proc(service: ^Agent_Service, bridge_id,
 	}
 }
 
-reconcile_instance_reconfigurations :: proc(service: ^Agent_Service, bridge_id: string) {
+// reconcile_active_reconfigurations is the autonomous pass (hub reaper, once at
+// startup and every sweep, and start-success): it advances every non-terminal
+// operation on every bridge it touches - timeouts, Prepared/Source_Stopped
+// continuation and Ready/startup-failure detection - without resending stop or
+// launch commands, which stay on bridge connect/hello transitions. Idempotent:
+// every advance is a revision compare-and-set.
+reconcile_active_reconfigurations :: proc(service: ^Agent_Service) -> int {
+	if service == nil || service.agents == nil do return 0
+	ops, err := iface.instance_reconfiguration_list(service.agents, "", "", true)
+	if err.code != .None do return 0
+	bridges := make([dynamic]string, context.temp_allocator)
+	for op in ops {
+		for id in ([]string{op.source.bridge_id, op.destination.bridge_id}) {
+			if id == "" do continue
+			seen := false
+			for b in bridges do if b == id { seen = true; break }
+			if !seen do append(&bridges, strings.clone(id, context.temp_allocator))
+		}
+	}
+	count := len(ops)
+	for &op in ops do domain.instance_reconfiguration_destroy(&op)
+	delete(ops)
+	for id in bridges do reconcile_instance_reconfigurations(service, id, resend = false)
+	return count
+}
+
+reconcile_instance_reconfigurations :: proc(service: ^Agent_Service, bridge_id: string, resend := true) {
 	if service == nil || service.agents == nil do return
 	sync.lock(&service.reconfiguration_mutex)
 	defer sync.unlock(&service.reconfiguration_mutex)
@@ -256,7 +302,7 @@ reconcile_instance_reconfigurations :: proc(service: ^Agent_Service, bridge_id: 
 				} else if inst.runtime_status == "failed" || inst.runtime_status == "blocked" {
 					failed, _, _ := reconfiguration_advance(service, op, .Recovery_Required, true, true, "startup_failed", "Destination startup needs attention; conversation remains read-only."); domain.instance_reconfiguration_destroy(&failed)
 				}
-				if bridge_id == op.destination.bridge_id && inst.launch_epoch == op.launch_epoch && (inst.runtime_status == "launching" || inst.runtime_status == "unreachable") {
+				if resend && bridge_id == op.destination.bridge_id && inst.launch_epoch == op.launch_epoch && (inst.runtime_status == "launching" || inst.runtime_status == "unreachable") {
 					_, _ = project_service.bridge_command_send_runtime(service.bridge_command_sink, project_service.Runtime_Command{bridge_id = bridge_id, command_id = op.launch_command_id, body_json = launch_command_json_full(service, op.launch_command_id, inst)})
 				}
 				domain.agent_instance_destroy(&inst)
@@ -264,13 +310,13 @@ reconcile_instance_reconfigurations :: proc(service: ^Agent_Service, bridge_id: 
 		case .Stopping:
 			// Idempotent source-only stop is safe to resend after Hub restart: no
 			// destination can launch until the acknowledged phase was persisted.
-			if bridge_id == op.source.bridge_id {
+			if resend && bridge_id == op.source.bridge_id {
 				_, _ = project_service.bridge_command_send_runtime(service.bridge_command_sink, project_service.Runtime_Command{bridge_id = bridge_id, command_id = op.stop_command_id, body_json = stop_command_json(op.stop_command_id, op.agent_instance_id, "configuration_change")})
 			}
 		case .Recovery_Required:
 			if op.failure_code == "force_stopping" {
 				target := op.destination.bridge_id if op.destination_committed else op.source.bridge_id
-				if bridge_id == target { _, _ = project_service.bridge_command_send_runtime(service.bridge_command_sink, project_service.Runtime_Command{bridge_id = target, command_id = op.stop_command_id, body_json = stop_command_json(op.stop_command_id, op.agent_instance_id, "recovery_force_stop", force = true)}) }
+				if resend && bridge_id == target { _, _ = project_service.bridge_command_send_runtime(service.bridge_command_sink, project_service.Runtime_Command{bridge_id = target, command_id = op.stop_command_id, body_json = stop_command_json(op.stop_command_id, op.agent_instance_id, "recovery_force_stop", force = true)}) }
 				continue
 			}
 			if op.destination_committed {

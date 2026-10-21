@@ -50,7 +50,7 @@ workflow_event :: proc(svc: ^Service, u: ^Uow, wf: Workflow_Context, actor: Acto
 		ts_ms = now_ms(svc.clock), actor_kind = work_actor_kind(actor), actor_id = actor.id, kind = kind, payload_json = payload,
 	})
 	if !ok do return err
-	effect_publish_chain(u, wf.chain_id, wf.owner_user_id, fmt.tprintf("workflow_%s", kind))
+	effect_publish_workflow(u, wf.chain_id, wf.owner_user_id, wf.run.run_id, fmt.tprintf("workflow_%s", kind))
 	return domain.Domain_Error{}
 }
 

@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { PaneVisibilityProvider } from '../workbench/paneVisibility';
 import { useDispatch, useSelector } from 'react-redux';
 import { Icon } from '@ui';
 import { TilingContainer, calculatePaneLayouts, getOverlayPosition, type RenderPaneProps } from '../../tiling';
@@ -793,6 +794,8 @@ export function Workspace({ focusMessageId, isMobile = false, leading, leadingWi
   }, [pendingDrop]);
 
   const hideMain = auxOpen && isAuxMaximized && !isMobile;
+  // On mobile the open aux dock is a full-width sheet over the main pages.
+  const mainVisible = !hideMain && !(isMobile && auxShown);
 
   return (
     <div
@@ -806,6 +809,7 @@ export function Workspace({ focusMessageId, isMobile = false, leading, leadingWi
           onMouseDownCapture={() => setAuxFocused(false)}
           className={`relative min-h-0 min-w-0 flex-1 flex-col ${hideMain ? 'hidden' : 'flex'}`}
         >
+          <PaneVisibilityProvider visible={mainVisible}>
           {!layoutReady ? null : isMobile ? (
             <MobileMainPager
               tree={tree}
@@ -826,9 +830,11 @@ export function Workspace({ focusMessageId, isMobile = false, leading, leadingWi
               className="h-full w-full flex-1 min-h-0"
             />
           )}
+          </PaneVisibilityProvider>
           {dropOverlay}
         </div>
         {auxMounted && auxTreeId ? (
+          <PaneVisibilityProvider visible={auxShown}>
           <AuxDock
             treeId={auxTreeId}
             ctx={ctx}
@@ -841,6 +847,7 @@ export function Workspace({ focusMessageId, isMobile = false, leading, leadingWi
             mobileLeadingPageCount={mainPageCount}
             mobileTotalPageCount={mobileAuxContinuumPageCount}
           />
+          </PaneVisibilityProvider>
         ) : null}
       </div>
       <div
