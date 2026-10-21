@@ -49,7 +49,7 @@ nix develop -c odin build src/hub -collection:odin_test=src -out:"$OUT/hub_dbt"
 echo "== microbenchmark (off vs basic; budget basic-off <= 300 ns per wrapped call)"
 # Optimised build (production builds are optimised; test builds are not), no
 # memory tracking. Three runs; numbers are reported, the gate is read by a human
-# against docs/operations/db-telemetry.md (shared hosts are too noisy to assert).
+# against docs/reference/db-telemetry.md (shared hosts are too noisy to assert).
 bench_log="$OUT/sqlite_dbt_bench.log"
 nix develop -c odin build src/hub/repository/sqlite -build-mode:test -o:speed -collection:odin_test=src \
 	-define:ODIN_TEST_NAMES=sqlite.test_db_telemetry_bench -define:ODIN_TEST_THREADS=1 -define:DBT_TESTS=true \
