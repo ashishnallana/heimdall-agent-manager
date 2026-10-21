@@ -63,7 +63,10 @@ Refresh_Fixture :: struct {
 }
 
 refresh_fixture_setup :: proc(t: ^testing.T, f: ^Refresh_Fixture, tag: string) -> bool {
-	f.db_path = fmt.aprintf("/tmp/heimdall-hub-test-refresh-%s-%d.db", tag, os.get_pid())
+	// Test outputs live under $HOME/.cache/heimdall-tests (repo convention).
+	cache_dir := fmt.aprintf("%s/.cache/heimdall-tests", os.get_env("HOME", context.temp_allocator))
+	_ = os.make_directory(cache_dir)
+	f.db_path = fmt.aprintf("%s/refresh-events-%s-%d.db", cache_dir, tag, os.get_pid())
 	_ = os.remove(f.db_path)
 	ok, msg := app.build_graph(&f.graph, app.Hub_Config{
 		database_path = f.db_path, migrations_dir = "src/hub/repository/sqlite/migrations",

@@ -230,6 +230,9 @@ agent_action_chat_send_to_user_handler :: proc(ctx: rawptr, req: Request) -> Res
 	// (e.g. start-success banners) are not user-actionable, so skip their preview.
 	if h.event_bus != nil && msg.message_type != "system" {
 		events.publish_owned(h.event_bus, string(inst.owner_user_id), agent_to_user_chat_event_json(inst, msg))
+	} else if h.event_bus != nil {
+		// System rows still move last_message_at/unread_count: id-only hint, no toast.
+		if conv, conv_ok, _ := content_service.get_conversation_by_instance(h.content, auth, inst.agent_instance_id); conv_ok do publish_chat_message_created(h.event_bus, conv, msg)
 	}
 	// Web Push (WP-SEND-2): also deliver an OS notification for backgrounded/
 	// closed PWAs. Mirrors the client notify policy (chat only, never system):
