@@ -546,6 +546,16 @@ When adding any new interactive element to the UI:
 - Wrapper attempts re-registration and WS reconnect after repeated heartbeat failures, allowing it to survive daemon restarts.
 - When creating a new tmux session, wrapper creates the agent window directly and avoids an extra default shell window.
 
+## Git Hooks
+
+- Run `scripts/install-git-hooks.sh` once per clone (worktrees share it). Its pre-commit hook
+  runs `scripts/check-npm-deps-hash.sh --staged` whenever `package-lock.json` or `flake.nix`
+  is staged and fails if `flake.nix`'s `npmDepsHash` no longer matches the lockfile. It skips
+  when `nix` is not on `PATH`.
+- A stale `npmDepsHash` still builds on any machine that has the old deps in its store
+  (fixed-output derivation), so it only breaks on a fresh deploy — do not rely on a local
+  `nix build` to catch it.
+
 ## Running Odin Tests
 
 - Always pass `-collection:odin_test=src` and a unique `-out:` so parallel runs do not
