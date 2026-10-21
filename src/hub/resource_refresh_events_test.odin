@@ -352,3 +352,26 @@ test_refresh_workflow_events_name_run_and_stage :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(frames, `"resource":"workflow_run","resource_id":"wfrun_1"`) && strings.contains(frames, `"stage_key":"build"`), "stage event names run and stage")
 	testing.expect(t, strings.contains(frames, `"change":"workflow_started"`) && strings.contains(frames, `"workflow_run_id":"wfrun_1"`), "chain workflow event carries workflow_run_id")
 }
+
+@(test)
+test_refresh_task_effects_dedupe_and_facet_kind :: proc(t: ^testing.T) {
+	f: Refresh_Fixture
+	defer refresh_fixture_teardown(&f)
+	if !refresh_fixture_setup(t, &f, "facet") do return
+	tab := refresh_socket_open(t, &f.graph, "alice"); defer refresh_socket_close(&f.graph, tab)
+	task := domain.Task{task_id = "task_rf", chain_id = "chain_rf", owner_user_id = "alice"}
+
+	flush_ws_socket(tab.client)
+	u, began, _ := taskv2.begin_uow(&f.graph.task_engine)
+	if !testing.expect(t, began, "begin_uow") do return
+	// Two refolds of one task in one UoW, plus one handoff facet write on attempt 2.
+	taskv2.effect_publish_task(&u, task, "updated")
+	taskv2.effect_publish_task(&u, task, "updated")
+	taskv2.effect_publish_facet(&u, task, 2, "handoff")
+	_, _ = taskv2.end_uow(&f.graph.task_engine, &u, true)
+	frames, got := drain_matching_ws_event(tab.client, `"change":"facet_changed"`)
+	defer delete(frames)
+	testing.expect(t, got, "facet write publishes task/facet_changed")
+	testing.expect(t, strings.contains(frames, `"attempt_no":2`) && strings.contains(frames, `"kind":"handoff"`), "facet event carries attempt and kind")
+	testing.expect_value(t, strings.count(frames, `"change":"updated"`), 1)
+}

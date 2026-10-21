@@ -93,6 +93,10 @@ agent_action_lease_heartbeat_handler :: proc(ctx: rawptr, req: Request) -> Respo
 // ---- M2 lease verbs ------------------------------------------------------------------
 
 // POST /api/v1/agent-actions/lease/submit  params: {lease_id?, summary, handoff?, output?, vcs?, verify?, artifacts?, auto?}
+// E12 (REQ-2): submit/handoff/switch/block publish no task event here. The
+// engine already announces them after COMMIT: refold queues task/updated for
+// every projection change and each facet write queues task/facet_changed, so a
+// handler-level publish only duplicated (and could precede) those.
 agent_action_lease_submit_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Agent_Action_Handlers)(ctx)
 	auth, inst, ok, resp := require_instance_action_auth(h, req)
@@ -110,7 +114,6 @@ agent_action_lease_submit_handler :: proc(ctx: rawptr, req: Request) -> Response
 	})
 	if !sok do return respond_error(err, req.request_id)
 	publish_agent_action(h, inst, "lease_submit", fmt.tprintf("submitted %s (%s)", res.task.task_id, res.outcome))
-	publish_task_event(h.event_bus, string(res.task.owner_user_id), string(res.task.task_id), string(res.task.chain_id), "updated")
 	data, _ := json.marshal(make_simple_task_wire(res.task), JSON_MARSHAL_OPT, allocator = context.temp_allocator)
 	return respond_success(fmt.tprintf("{{\"outcome\":\"%s\",\"task\":%s}}", res.outcome, string(data)), req.request_id, auth_ctx_server_time(req), 200)
 }
@@ -125,7 +128,6 @@ agent_action_lease_handoff_handler :: proc(ctx: rawptr, req: Request) -> Respons
 	task, hok, err := taskv2.lease_handoff(h.task_engine, auth, taskv2.Handoff_Input{lease_id = json_string(params, "lease_id"), summary = json_string(params, "summary"), handoff_json = verbatim_field(params, "handoff"), vcs_json = verbatim_field(params, "vcs")})
 	if !hok do return respond_error(err, req.request_id)
 	publish_agent_action(h, inst, "lease_handoff", fmt.tprintf("handed off %s", task.task_id))
-	publish_task_event(h.event_bus, string(task.owner_user_id), string(task.task_id), string(task.chain_id), "updated")
 	data, _ := json.marshal(make_simple_task_wire(task), JSON_MARSHAL_OPT, allocator = context.temp_allocator)
 	return respond_success(fmt.tprintf("{{\"task\":%s}}", string(data)), req.request_id, auth_ctx_server_time(req), 200)
 }
@@ -143,8 +145,6 @@ agent_action_lease_switch_handler :: proc(ctx: rawptr, req: Request) -> Response
 	res, sok, err := taskv2.lease_switch(h.task_engine, auth, taskv2.Switch_Input{lease_id = json_string(params, "lease_id"), task_id = json_string(params, "task_id"), summary = json_string(params, "summary"), handoff_json = verbatim_field(params, "handoff")})
 	if !sok do return respond_error(err, req.request_id)
 	publish_agent_action(h, inst, "lease_switch", fmt.tprintf("switched from %s to %s", res.left.task_id, res.task.task_id))
-	publish_task_event(h.event_bus, string(res.left.owner_user_id), string(res.left.task_id), string(res.left.chain_id), "updated")
-	publish_task_event(h.event_bus, string(res.task.owner_user_id), string(res.task.task_id), string(res.task.chain_id), "updated")
 	wire := Lease_Next_Wire{status = "granted", lease = make_lease_wire(res.lease), task = make_simple_task_wire(res.task), pack = json_value_or_null(res.pack_json)}
 	data, _ := json.marshal(wire, JSON_MARSHAL_OPT, allocator = context.temp_allocator)
 	return respond_success(string(data), req.request_id, auth_ctx_server_time(req), 200)
@@ -160,7 +160,6 @@ agent_action_lease_block_handler :: proc(ctx: rawptr, req: Request) -> Response 
 	task, bok, err := taskv2.lease_block(h.task_engine, auth, taskv2.Block_Input{lease_id = json_string(params, "lease_id"), waiting_on_json = verbatim_field(params, "waiting_on"), summary = json_string(params, "summary")})
 	if !bok do return respond_error(err, req.request_id)
 	publish_agent_action(h, inst, "lease_block", fmt.tprintf("blocked %s", task.task_id))
-	publish_task_event(h.event_bus, string(task.owner_user_id), string(task.task_id), string(task.chain_id), "updated")
 	data, _ := json.marshal(make_simple_task_wire(task), JSON_MARSHAL_OPT, allocator = context.temp_allocator)
 	return respond_success(fmt.tprintf("{{\"task\":%s}}", string(data)), req.request_id, auth_ctx_server_time(req), 200)
 }

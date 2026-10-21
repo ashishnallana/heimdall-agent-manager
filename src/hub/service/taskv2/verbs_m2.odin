@@ -111,16 +111,16 @@ write_submit_facets :: proc(svc: ^Service, u: ^Uow, task: domain.Task, attempt_n
 		if key != "skip_verify_reason" do json_raw(&handoff, key, raw)
 	}
 	if input.skip_verify do json_str(&handoff, "skip_verify_reason", strings.trim_space(input.skip_verify_reason))
-	if ok, _ := save_facet_verbatim(svc, task, attempt_no, FACET_HANDOFF, handoff_body_json(input.summary, json_end(&handoff)), FACET_WRITER_AGENT); !ok do return false
+	if ok, _ := save_facet_verbatim(svc, task, attempt_no, FACET_HANDOFF, handoff_body_json(input.summary, json_end(&handoff)), FACET_WRITER_AGENT, u); !ok do return false
 	if strings.has_prefix(strings.trim_space(input.vcs_json), "{") {
-		if ok, _ := save_facet_verbatim(svc, task, attempt_no, FACET_VCS, input.vcs_json, FACET_WRITER_BRIDGE); !ok do return false
+		if ok, _ := save_facet_verbatim(svc, task, attempt_no, FACET_VCS, input.vcs_json, FACET_WRITER_BRIDGE, u); !ok do return false
 	}
 	if strings.has_prefix(strings.trim_space(input.output_json), "{") {
-		if ok, _ := save_facet_verbatim(svc, task, attempt_no, FACET_OUTPUT, input.output_json, FACET_WRITER_AGENT); !ok do return false
+		if ok, _ := save_facet_verbatim(svc, task, attempt_no, FACET_OUTPUT, input.output_json, FACET_WRITER_AGENT, u); !ok do return false
 	}
 	if trimmed := strings.trim_space(input.artifacts_json); strings.has_prefix(trimmed, "{") {
 		if norm, aok, _ := validate_artifacts_facet_json(trimmed); aok {
-			if ok, _ := save_facet_verbatim(svc, task, attempt_no, FACET_ARTIFACTS, norm, FACET_WRITER_AGENT); !ok do return false
+			if ok, _ := save_facet_verbatim(svc, task, attempt_no, FACET_ARTIFACTS, norm, FACET_WRITER_AGENT, u); !ok do return false
 		}
 	}
 	return true
@@ -215,12 +215,12 @@ lease_handoff :: proc(svc: ^Service, auth: contracts.Auth_Context, input: Handof
 	if !uok do return {}, false, uerr
 	c, ok, err := work_lease_caller(svc, auth, input.lease_id)
 	if !ok { _, _ = end_uow(svc, &u, false); return {}, false, err }
-	if fok, _ := save_facet_verbatim(svc, c.task, c.lease.attempt_no, FACET_HANDOFF, handoff_body_json(input.summary, input.handoff_json), FACET_WRITER_AGENT); !fok {
+	if fok, _ := save_facet_verbatim(svc, c.task, c.lease.attempt_no, FACET_HANDOFF, handoff_body_json(input.summary, input.handoff_json), FACET_WRITER_AGENT, &u); !fok {
 		_, _ = end_uow(svc, &u, false)
 		return {}, false, domain.domain_error(.Internal_Error, "failed to store the handoff")
 	}
 	if strings.has_prefix(strings.trim_space(input.vcs_json), "{") {
-		_, _ = save_facet_verbatim(svc, c.task, c.lease.attempt_no, FACET_VCS, input.vcs_json, FACET_WRITER_BRIDGE)
+		_, _ = save_facet_verbatim(svc, c.task, c.lease.attempt_no, FACET_VCS, input.vcs_json, FACET_WRITER_BRIDGE, &u)
 	}
 	p := json_begin()
 	json_str(&p, "lease_id", c.lease.lease_id)
@@ -263,7 +263,7 @@ lease_switch :: proc(svc: ^Service, auth: contracts.Auth_Context, input: Switch_
 	if string(c.task.task_id) == strings.trim_space(input.task_id) { _, _ = end_uow(svc, &u, false); return {}, false, domain.domain_error(.Conflict, "already working on that task") }
 	chain, cok, cerr := iface.taskchain_get_chain(svc.repo, c.task.chain_id)
 	if !cok { _, _ = end_uow(svc, &u, false); return {}, false, cerr }
-	if fok, _ := save_facet_verbatim(svc, c.task, c.lease.attempt_no, FACET_HANDOFF, handoff_body_json(input.summary, input.handoff_json), FACET_WRITER_AGENT); !fok {
+	if fok, _ := save_facet_verbatim(svc, c.task, c.lease.attempt_no, FACET_HANDOFF, handoff_body_json(input.summary, input.handoff_json), FACET_WRITER_AGENT, &u); !fok {
 		_, _ = end_uow(svc, &u, false)
 		return {}, false, domain.domain_error(.Internal_Error, "failed to store the handoff")
 	}
@@ -305,7 +305,7 @@ lease_block :: proc(svc: ^Service, auth: contracts.Auth_Context, input: Block_In
 	c, ok, err := work_lease_caller(svc, auth, input.lease_id)
 	if !ok { _, _ = end_uow(svc, &u, false); return {}, false, err }
 	if strings.trim_space(input.summary) != "" {
-		_, _ = save_facet_verbatim(svc, c.task, c.lease.attempt_no, FACET_HANDOFF, handoff_body_json(input.summary, ""), FACET_WRITER_AGENT)
+		_, _ = save_facet_verbatim(svc, c.task, c.lease.attempt_no, FACET_HANDOFF, handoff_body_json(input.summary, ""), FACET_WRITER_AGENT, &u)
 	}
 	p := json_begin()
 	json_str(&p, "lease_id", c.lease.lease_id)
@@ -671,7 +671,7 @@ on_verify_session_exited :: proc(svc: ^Service, exit: Verify_Exit) {
 	json_str(&o, "status", exit.status)
 	json_str(&o, "summary", tail_lines(exit.tail, 40))
 	json_bool(&o, "independent", is_independent)
-	saved, _ := save_facet_verbatim(svc, task, attempt_no, FACET_VERIFY, json_end(&o), FACET_WRITER_HUB)
+	saved, _ := save_facet_verbatim(svc, task, attempt_no, FACET_VERIFY, json_end(&o), FACET_WRITER_HUB, &u)
 	if saved {
 		effect_publish_task(&u, task, "verify")
 		if task.state == .In_Review {

@@ -206,6 +206,9 @@ Publish_Effect :: struct {
 	// stage); empty for ordinary task/chain publishes and then omitted.
 	workflow_run_id: string,
 	stage_key:       string,
+	// task/facet_changed: which attempt facet was (re)written.
+	attempt_no: int,
+	facet_kind: string,
 }
 
 Changed_Chain :: struct {
@@ -433,11 +436,18 @@ flush_effects :: proc(svc: ^Service, e: ^Effects) {
 			events.publish_resource_changed(svc.event_bus, n.owner, "coordinator_attention", n.coordinator_instance_id, n.trigger, summary)
 		}
 	}
-	for p in e.publishes {
+	for p, i in e.publishes {
 		if svc.event_bus == nil do continue
+		// REQ-2/E12: a UoW that refolds a task several times (or writes several
+		// facets of one kind) announces each distinct change once.
+		duplicate := false
+		for q in e.publishes[:i] do if q == p { duplicate = true; break }
+		if duplicate do continue
 		summary := fmt.tprintf("{{\"%s_id\":\"%s\",\"chain_id\":\"%s\"}}", p.resource, p.resource_id, p.chain_id)
 		if p.resource == "workflow_run" {
 			summary = fmt.tprintf("{{\"workflow_run_id\":\"%s\",\"chain_id\":\"%s\",\"stage_key\":\"%s\"}}", p.resource_id, p.chain_id, p.stage_key)
+		} else if p.facet_kind != "" {
+			summary = fmt.tprintf("{{\"task_id\":\"%s\",\"chain_id\":\"%s\",\"attempt_no\":%d,\"kind\":\"%s\"}}", p.resource_id, p.chain_id, p.attempt_no, p.facet_kind)
 		} else if p.workflow_run_id != "" {
 			summary = fmt.tprintf("{{\"%s_id\":\"%s\",\"chain_id\":\"%s\",\"workflow_run_id\":\"%s\"}}", p.resource, p.resource_id, p.chain_id, p.workflow_run_id)
 		}
@@ -542,6 +552,13 @@ Instance_Effect :: struct {
 // effect_publish_workflow queues task_chain/workflow_<kind> naming the run, and
 // effect_publish_workflow_stage queues workflow_run/stage_changed (REQ-2). The
 // ids are cloned into owned_strings so they outlive the run rows they came from.
+// effect_publish_facet queues task/facet_changed for an attempt facet write.
+effect_publish_facet :: proc(u: ^Uow, task: domain.Task, attempt_no: int, kind: string) {
+	if u == nil do return
+	owned_kind := strings.clone(kind); append(&u.effects.owned_strings, owned_kind)
+	append(&u.effects.publishes, Publish_Effect{owner = string(task.owner_user_id), resource = "task", resource_id = string(task.task_id), change = "facet_changed", chain_id = string(task.chain_id), attempt_no = attempt_no, facet_kind = owned_kind})
+}
+
 effect_publish_workflow :: proc(u: ^Uow, chain_id: domain.Task_Chain_ID, owner: domain.User_ID, run_id: domain.Workflow_Run_ID, change: string) {
 	if u == nil do return
 	owned_run := strings.clone(string(run_id)); append(&u.effects.owned_strings, owned_run)

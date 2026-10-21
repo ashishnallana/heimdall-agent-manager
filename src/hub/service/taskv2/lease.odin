@@ -182,7 +182,7 @@ grant_attempt_in_uow :: proc(svc: ^Service, u: ^Uow, req: Grant_Request) -> (dom
 		json_str(&rt, "model", saved.model)
 		json_str(&rt, "started_at", now)
 		json_str(&rt, "ended_at", "")
-		_, _ = save_facet_verbatim(svc, refolded, view.attempt_no, FACET_RUNTIME, json_end(&rt), FACET_WRITER_HUB)
+		_, _ = save_facet_verbatim(svc, refolded, view.attempt_no, FACET_RUNTIME, json_end(&rt), FACET_WRITER_HUB, u)
 	}
 	set_instance_pointer(svc, u, inst.agent_instance_id, string(task.task_id), .Work if req.kind == domain.LEASE_KIND_WORK else .Review)
 	arm_lease_timers(svc, saved)
@@ -205,7 +205,7 @@ release_in_uow :: proc(svc: ^Service, u: ^Uow, lease: domain.Task_Lease, actor: 
 	metric_lease_released(lease.kind)
 	refolded, _, rok, rerr := record_event(svc, u, task, actor, event_kind, payload_json)
 	if !rok do return {}, false, rerr
-	close_attempt(svc, lease, outcome)
+	close_attempt(svc, u, lease, outcome)
 	now := platform.clock_now(svc.clock)
 	mark_instance_idle(svc, u, lease.holder_instance_id, now)
 	if inst, iok, _ := iface.agent_get_instance(svc.agents, lease.holder_instance_id); iok {
@@ -264,7 +264,7 @@ expire_lease_in_uow :: proc(svc: ^Service, u: ^Uow, lease: domain.Task_Lease, re
 	}
 	metric_lease_released(lease.kind)
 	metric_lease_expired(reason)
-	if lease.kind == domain.LEASE_KIND_WORK do close_attempt(svc, lease, fmt.tprintf("expired:%s", reason))
+	if lease.kind == domain.LEASE_KIND_WORK do close_attempt(svc, u, lease, fmt.tprintf("expired:%s", reason))
 	now := platform.clock_now(svc.clock)
 	mark_instance_idle(svc, u, lease.holder_instance_id, now)
 	if coordinator do return .Expired // never stopped, may re-pull at once (no recent-expiry window)
@@ -732,7 +732,7 @@ boot :: proc(svc: ^Service) {
 // ---- helpers ---------------------------------------------------------------------------
 
 @(private = "file")
-close_attempt :: proc(svc: ^Service, lease: domain.Task_Lease, outcome: string) {
+close_attempt :: proc(svc: ^Service, u: ^Uow, lease: domain.Task_Lease, outcome: string) {
 	if lease.kind != domain.LEASE_KIND_WORK do return
 	now := platform.clock_now(svc.clock)
 	attempts, err := iface.taskchain_list_attempts_by_task(svc.repo, lease.task_id, lease.owner_user_id)
@@ -758,7 +758,7 @@ close_attempt :: proc(svc: ^Service, lease: domain.Task_Lease, outcome: string) 
 		json_str(&rt, "model", model)
 		json_str(&rt, "started_at", started_at)
 		json_str(&rt, "ended_at", now)
-		_, _ = save_facet_verbatim(svc, task, lease.attempt_no, FACET_RUNTIME, json_end(&rt), FACET_WRITER_HUB)
+		_, _ = save_facet_verbatim(svc, task, lease.attempt_no, FACET_RUNTIME, json_end(&rt), FACET_WRITER_HUB, u)
 	}
 }
 
