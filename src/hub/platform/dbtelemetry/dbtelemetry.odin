@@ -1,7 +1,6 @@
 package dbtelemetry
 
 import "core:sync"
-import "core:time"
 import metrics "odin_test:lib/metrics"
 
 // DB latency and lock-contention telemetry (docs/operations/db-telemetry.md,
@@ -95,8 +94,12 @@ SCOPE_LABELS := [Scope]string {
 	.Scrape     = "scrape",
 }
 
-LOCK_WAIT_BUCKETS := [?]f64{1e-6, 1e-5, 5e-5, 1e-4, 2.5e-4, 5e-4, 1e-3, 2.5e-3, 5e-3, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5}
-HOLD_BUCKETS := [?]f64{1e-4, 5e-4, 1e-3, 2.5e-3, 5e-3, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30}
+// lib/metrics caps histograms at 10 buckets (cardinality guard), so these are
+// the plan's §2.2 layouts thinned to 10 bounds, keeping the decision points:
+// 1 us floor, the 1 ms "waited" line, and the 5 s busy_timeout ceiling (wait);
+// 30 s for pathological units of work (hold / tx).
+LOCK_WAIT_BUCKETS := [?]f64{1e-6, 1e-5, 1e-4, 5e-4, 1e-3, 5e-3, 0.025, 0.1, 1, 5}
+HOLD_BUCKETS := [?]f64{1e-4, 1e-3, 5e-3, 0.025, 0.1, 0.5, 1, 5, 10, 30}
 
 @(private)
 mode_value: u8 // Mode; read with an atomic load on every hot-path call
@@ -194,12 +197,17 @@ waiters_max_collect :: proc(ctx: rawptr, e: ^metrics.Exposition) {
 	names := []string{"lock"}
 	metrics.expo_header(e, "heimdall_db_lock_waiters_max", "High-water mark of lock waiters since the previous scrape (reset on scrape).", .Gauge)
 	for l in Lock {
-		current := metrics.gauge_value(tm.waiters[l])
-		peak := sync.atomic_exchange(&tm.waiters_max[l], current)
-		if current > peak do peak = current
 		values := []string{LOCK_LABELS[l]}
-		metrics.expo_sample_i64(e, "heimdall_db_lock_waiters_max", names, values, peak)
+		metrics.expo_sample_i64(e, "heimdall_db_lock_waiters_max", names, values, waiters_max_take(l))
 	}
+}
+
+// waiters_max_take returns the high-water mark since the last take and resets
+// it to the current waiter count (what the scrape collector exposes).
+waiters_max_take :: proc "contextless" (l: Lock) -> i64 {
+	current := sync.atomic_load(&tm.waiters[l].gauge) if tm.waiters[l] != nil else 0
+	peak := sync.atomic_exchange(&tm.waiters_max[l], current)
+	return max(peak, current)
 }
 
 // ---------------------------------------------------------------------------
@@ -222,7 +230,7 @@ Top_Call :: struct {
 	op:      string,
 	exec_ns: i64,
 	wait_ns: i64,
-	file:    string, // repository file basename (static string)
+	file:    string, // caller file path (static string; basename taken when formatted)
 	line:    i32,
 }
 
@@ -352,7 +360,7 @@ counter_add :: #force_inline proc "contextless" (s: ^metrics.Series, n: u64) {
 }
 
 Lock_Token :: struct {
-	acquired: time.Tick,
+	acquired: i64, // now_ns at acquisition
 	timed:    bool,
 }
 
@@ -365,21 +373,21 @@ timed_lock :: proc "contextless" (mu: ^sync.Mutex, l: Lock) -> Lock_Token {
 		sync.mutex_lock(mu)
 		return {}
 	}
-	t0 := time.tick_now()
+	t0 := now_ns()
 	if !sync.mutex_try_lock(mu) {
 		begin_wait(l)
 		sync.mutex_lock(mu)
 		end_wait(l)
 	}
-	t1 := time.tick_now()
-	record_wait(l, i64(time.tick_diff(t0, t1)), .App_Lock_Wait)
+	t1 := now_ns()
+	record_wait(l, t1 - t0, .App_Lock_Wait)
 	if s := tm.held[l]; s != nil do sync.atomic_store(&s.gauge, 1)
 	return Lock_Token{acquired = t1, timed = true}
 }
 
 timed_unlock :: proc "contextless" (mu: ^sync.Mutex, l: Lock, token: Lock_Token) {
 	if token.timed {
-		observe_ns(tm.lock_hold[l], i64(time.tick_since(token.acquired)))
+		observe_ns(tm.lock_hold[l], now_ns() - token.acquired)
 		if s := tm.held[l]; s != nil do sync.atomic_store(&s.gauge, 0)
 	}
 	sync.mutex_unlock(mu)

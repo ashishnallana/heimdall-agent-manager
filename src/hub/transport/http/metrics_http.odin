@@ -27,9 +27,11 @@ Http_Metrics :: struct {
 http_metrics: Http_Metrics
 
 HTTP_DURATION_BUCKETS := [?]f64{0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5}
-// With HEIMDALL_DB_TELEMETRY=basic the request histogram also resolves the
-// 1-10 ms band (plan §2.2 G7). Never draw a quantile across that layout change.
-HTTP_DURATION_BUCKETS_FINE := [?]f64{0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5}
+// With HEIMDALL_DB_TELEMETRY=basic the request histogram gains a 2.5 ms bound
+// (plan §2.2 G7). The plan asked for 1/2.5/5 ms, but lib/metrics caps
+// histograms at 10 buckets and every legacy bound is kept so existing le
+// queries keep working. Never draw a quantile across that layout change.
+HTTP_DURATION_BUCKETS_FINE := [?]f64{0.0025, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5}
 
 http_metrics_init :: proc(reg: ^metrics.Registry) {
 	if reg == nil do return
@@ -96,7 +98,9 @@ format_db_slow_request :: proc(route, method, status_class: string, request_ns: 
 	}
 	for top, i in t.top {
 		if top.exec_ns == 0 && top.wait_ns == 0 do continue
-		fmt.sbprintf(&b, " top%d=%s/%s/%s:%d/exec_ns=%d/wait_ns=%d", i + 1, top.conn, top.op, top.file, top.line, top.exec_ns, top.wait_ns)
+		file := top.file
+		if slash := strings.last_index_any(file, "/\\"); slash >= 0 do file = file[slash + 1:]
+		fmt.sbprintf(&b, " top%d=%s/%s/%s:%d/exec_ns=%d/wait_ns=%d", i + 1, top.conn, top.op, file, top.line, top.exec_ns, top.wait_ns)
 	}
 	return strings.to_string(b)
 }

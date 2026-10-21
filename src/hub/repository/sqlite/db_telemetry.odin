@@ -143,7 +143,8 @@ SQLITE_DBSTATUS_CACHE_MISS :: 8
 SQLITE_DBSTATUS_CACHE_WRITE :: 9
 SQLITE_DBSTATUS_CACHE_SPILL :: 12
 
-EXEC_BUCKETS := [?]f64{2.5e-5, 5e-5, 1e-4, 2.5e-4, 5e-4, 1e-3, 2.5e-3, 5e-3, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 5}
+// Thinned to the lib/metrics 10-bucket cap: 25 us floor, resolves 1-10 ms.
+EXEC_BUCKETS := [?]f64{2.5e-5, 1e-4, 5e-4, 1e-3, 2.5e-3, 5e-3, 0.01, 0.05, 0.25, 5}
 
 // ---------------------------------------------------------------------------
 // Connection tagging: open(path, kind) registers the handle in a fixed slot
@@ -366,30 +367,36 @@ Conn_Enter :: struct {
 	mutex:   rawptr,
 	entered: bool, // this call took the mutex and must leave it
 	wait_ns: i64,
+	t_start: i64, // dbt.now_ns() when the call may start (after any wait): exec start
 }
 
 conn_enter :: proc "contextless" (db: sqlite3) -> (ce: Conn_Enter) {
 	ce.slot = slot_of(db)
 	ce.kind = .Other
-	if ce.slot < 0 do return // unregistered: exec-only timing, no wait split
+	if ce.slot < 0 {
+		ce.t_start = dbt.now_ns() // unregistered: exec-only timing, no wait split
+		return
+	}
 	ce.kind = conn_slots[ce.slot].kind
 	if tl_conn_depth[ce.slot] == 0 {
 		ce.mutex = sqlite3_db_mutex(db)
 		if ce.mutex != nil {
 			observe_lock := ce.kind != .Other
 			lock := CONN_LOCKS[ce.kind]
-			t0 := time.tick_now()
+			t0 := dbt.now_ns()
 			if sqlite3_mutex_try(ce.mutex) != SQLITE_OK {
 				if observe_lock do dbt.begin_wait(lock)
 				sqlite3_mutex_enter(ce.mutex)
 				if observe_lock do dbt.end_wait(lock)
 			}
-			ce.wait_ns = i64(time.tick_since(t0))
+			ce.t_start = dbt.now_ns()
+			ce.wait_ns = ce.t_start - t0
 			ce.entered = true
 			if observe_lock do dbt.observe_ns(dbt.tm.lock_wait[lock], ce.wait_ns)
 			dbt.add_component(.Conn_Wait, ce.wait_ns)
 		}
 	}
+	if ce.t_start == 0 do ce.t_start = dbt.now_ns()
 	tl_conn_depth[ce.slot] += 1
 	return
 }
@@ -414,7 +421,7 @@ record_call :: proc(db: sqlite3, ce: Conn_Enter, op: Op, rc: c.int, exec_ns: i64
 		dbt.counter_add(error_series(ce.kind, op, code), 1)
 		if code == .Busy || code == .Busy_Snapshot || code == .Locked do dbt.note_busy_error()
 	}
-	dbt.note_call(CONN_LABELS[ce.kind], OP_LABELS[op], exec_ns, ce.wait_ns, file_basename(loc.file_path), loc.line)
+	dbt.note_call(CONN_LABELS[ce.kind], OP_LABELS[op], exec_ns, ce.wait_ns, loc.file_path, loc.line)
 	// Legacy family keeps its meaning: wall time of one step/exec call
 	// including the connection-mutex wait (prepare/finalize were never in it).
 	if op != .Prepare && op != .Finalize {
@@ -437,9 +444,8 @@ telemetry_step :: proc(stmt: sqlite3_stmt, loc: runtime.Source_Code_Location) ->
 	defer conn_leave(ce)
 	op := op_of(sqlite3_sql(stmt))
 	first := sqlite3_stmt_busy(stmt) == 0
-	t1 := time.tick_now()
 	rc := sqlite3_step_raw(stmt)
-	exec_ns := i64(time.tick_since(t1))
+	exec_ns := dbt.now_ns() - ce.t_start
 	vm := u64(sqlite3_stmt_status(stmt, SQLITE_STMTSTATUS_VM_STEP, 1))
 	fs := u64(sqlite3_stmt_status(stmt, SQLITE_STMTSTATUS_FULLSCAN_STEP, 1))
 	srt := u64(sqlite3_stmt_status(stmt, SQLITE_STMTSTATUS_SORT, 1))
@@ -461,13 +467,12 @@ telemetry_exec :: proc(db: sqlite3, sql: cstring, callback: rawptr, arg: rawptr,
 	ce := conn_enter(db)
 	defer conn_leave(ce)
 	op := op_of(sql)
-	t1 := time.tick_now()
 	rc := sqlite3_exec_raw(db, sql, callback, arg, errmsg)
-	exec_ns := i64(time.tick_since(t1))
+	exec_ns := dbt.now_ns() - ce.t_start
 	dbt.counter_add(conn_op_series(&sqlite_tm.statements, sqlite_tm.statements_f, ce.kind, op), 1)
 	dbt.note_step(true)
 	if tl_uow_active && (op == .Insert || op == .Update || op == .Delete) do tl_uow_wrote = true
-	dedicated_tx_track(ce, op, rc, t1)
+	dedicated_tx_track(ce, op, rc)
 	record_call(db, ce, op, rc, exec_ns, loc)
 	return rc
 }
@@ -491,10 +496,13 @@ dedicated_tx_kind :: proc "contextless" (k: Conn_Kind) -> (Tx_Kind, bool) {
 }
 
 @(private = "file")
-dedicated_tx_track :: proc(ce: Conn_Enter, op: Op, rc: c.int, start: time.Tick) {
-	if ce.slot < 0 do return
+dedicated_tx_track :: proc(ce: Conn_Enter, op: Op, rc: c.int) {
+	if ce.slot < 0 || (op != .Begin && op != .Commit && op != .Rollback) do return
 	tk, ok := dedicated_tx_kind(ce.kind)
 	if !ok do return
+	// Cold path (tx control on dedicated conns only). The tx starts when BEGIN
+	// returns, so BEGIN's own exec time (in exec_seconds{op=begin}) is excluded.
+	start := time.tick_now()
 	t := &tl_dedicated_tx[ce.slot]
 	#partial switch op {
 	case .Begin:
@@ -522,9 +530,8 @@ dedicated_tx_note_write :: #force_inline proc "contextless" (ce: Conn_Enter, op:
 telemetry_prepare :: proc(db: sqlite3, zSql: cstring, nByte: c.int, ppStmt: [^]sqlite3_stmt, pzTail: [^]cstring, loc: runtime.Source_Code_Location) -> c.int {
 	ce := conn_enter(db)
 	defer conn_leave(ce)
-	t1 := time.tick_now()
 	rc := sqlite3_prepare_v2_raw(db, zSql, nByte, ppStmt, pzTail)
-	record_call(db, ce, .Prepare, rc, i64(time.tick_since(t1)), loc)
+	record_call(db, ce, .Prepare, rc, dbt.now_ns() - ce.t_start, loc)
 	return rc
 }
 
@@ -532,11 +539,10 @@ telemetry_finalize :: proc(stmt: sqlite3_stmt, loc: runtime.Source_Code_Location
 	db := sqlite3_db_handle(stmt)
 	ce := conn_enter(db)
 	defer conn_leave(ce)
-	t1 := time.tick_now()
 	rc := sqlite3_finalize_raw(stmt)
 	// finalize echoes the statement's last step error, which that step already
 	// counted: record time only, never a second error.
-	record_call(db, ce, .Finalize, SQLITE_OK, i64(time.tick_since(t1)), loc)
+	record_call(db, ce, .Finalize, SQLITE_OK, dbt.now_ns() - ce.t_start, loc)
 	_ = rc
 	return rc
 }
