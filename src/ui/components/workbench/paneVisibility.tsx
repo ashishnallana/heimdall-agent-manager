@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
+import { useStore } from 'react-redux';
 import { isTerminalQueryError } from '../../api/cookieFetch';
-import { needsCatchUp, registerPane, unregisterPane, updatePane } from '../../api/paneDeferral';
+import { liveRequestState, needsCatchUp, registerPane, unregisterPane, updatePane } from '../../api/paneDeferral';
 
 /**
  * Whether a pane is actually on screen. Panes stay MOUNTED when the layout hides
@@ -129,14 +130,19 @@ export function usePanePollPolicy(paneVisible: boolean): PanePollPolicy {
  * reaching only hidden panes is recorded instead of refetched. When the pane is shown
  * and its conversation missed a refresh, `refresh` runs once (the deferred refetch).
  * `request` is the same query's state: a request still in flight from before the event
- * is waited out first, then one refetch follows (paneDeferral.needsCatchUp).
+ * is waited out first, then one refetch follows (paneDeferral.needsCatchUp). The
+ * effect re-reads that query's entry from the store, since a request can start between
+ * this render and the effect.
  */
 export function usePaneDeferredRefresh(
   conversationId: string,
   paneVisible: boolean,
   refresh: () => void,
-  request: { requestId?: string; isFetching: boolean },
+  request: { requestId?: string; isFetching: boolean; endpointName?: string; originalArgs?: unknown },
 ): void {
+  const store = useStore();
+  const requestRef = useRef(request);
+  requestRef.current = request;
   const refreshRef = useRef(refresh);
   refreshRef.current = refresh;
   const idRef = useRef<number | null>(null);
@@ -157,6 +163,7 @@ export function usePaneDeferredRefresh(
     updatePane(idRef.current, conversationId, paneVisible);
     // Re-checked when the request settles (isFetching/requestId change), so a catch-up
     // waiting on an older request needs no further event.
-    if (needsCatchUp(conversationId, { requestId, isFetching }, paneVisible)) refreshRef.current();
-  }, [conversationId, paneVisible, requestId, isFetching]);
+    const live = liveRequestState(store.getState(), requestRef.current);
+    if (needsCatchUp(conversationId, live, paneVisible)) refreshRef.current();
+  }, [conversationId, paneVisible, requestId, isFetching, store]);
 }

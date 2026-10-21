@@ -120,6 +120,27 @@ export function needsCatchUp(
   return visible;
 }
 
+type RequestState = { requestId?: string; isFetching: boolean };
+
+/**
+ * The query entry's request state as the store holds it NOW. A pane's render values can
+ * be one request behind by the time its effect runs: a request may start and a message
+ * event be marked between commit and the passive effect, and comparing the older
+ * rendered requestId against that mark would clear it. Falls back to `rendered` when
+ * the entry cannot be read (no request yet, or no store).
+ */
+export function liveRequestState(
+  state: unknown,
+  rendered: RequestState & { endpointName?: string; originalArgs?: unknown },
+): RequestState {
+  const { endpointName, originalArgs } = rendered;
+  const endpoint = endpointName ? (heimdallApi.endpoints as Record<string, any>)[endpointName] : undefined;
+  if (!state || !endpoint || originalArgs === undefined) return rendered;
+  const entry = endpoint.select(originalArgs)(state);
+  if (!entry?.requestId) return rendered;
+  return { requestId: entry.requestId, isFetching: entry.status === 'pending' };
+}
+
 export function isDirty(conversationId: string): boolean {
   return dirty.has(conversationId);
 }

@@ -180,14 +180,16 @@ async function mountHarness() {
   (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
   // Fake hub: a GET answers with the messages that existed when it STARTED. holdNext
   // keeps the next GET pending until released; failNext answers it with a 500.
-  const server = { messages: [] as Array<{ message_id: string }>, holdNext: false, failNext: false };
+  // nextSnapshot, when set, is what the next messages GET answers instead.
+  const server = { messages: [] as Array<{ message_id: string }>, holdNext: false, failNext: false, nextSnapshot: null as null | Array<{ message_id: string }> };
   const gates: Gate[] = [];
   const hits: string[] = [];
   (globalThis as any).fetch = async (input: any) => {
     const url = new URL(String(input?.url ?? input), 'http://localhost');
     hits.push(url.pathname);
     const isMessages = url.pathname.endsWith('/messages');
-    const snapshot = server.messages.slice();
+    const snapshot = isMessages && server.nextSnapshot ? server.nextSnapshot : server.messages.slice();
+    if (isMessages) server.nextSnapshot = null;
     const fail = isMessages && server.failNext;
     if (isMessages && server.holdNext) {
       server.holdNext = false;
@@ -211,13 +213,20 @@ async function mountHarness() {
   deferral.resetPaneDeferral();
 
   const shown: Record<string, string[]> = {};
+  // hooks.layout runs in a child's layout effect: after the probe's render commits but
+  // before its passive effects, the window the render-vs-store race lives in.
+  const hooks = { layout: null as null | (() => void) };
+  function Racer() {
+    React.useLayoutEffect(() => { hooks.layout?.(); });
+    return null;
+  }
   function Probe({ name }: { name: string }) {
     const paneVisible = usePaneVisible();
     const messagesQuery = useFetchConversationMessagesQuery({ conversationId: CONV });
     // Exactly AgentChatPane's wiring.
     usePaneDeferredRefresh(CONV, paneVisible, messagesQuery.refetch, messagesQuery);
     shown[name] = (messagesQuery.data?.messages || []).map((m: any) => m.message_id);
-    return null;
+    return React.createElement(Racer);
   }
   const root = createRoot(dom.window.document.getElementById('root')!);
   // panes: name -> visible; omitted panes are unmounted.
@@ -245,7 +254,7 @@ async function mountHarness() {
     (globalThis as any).document = prev.document;
     (globalThis as any).fetch = prev.fetch;
   };
-  return { act, server, store, heimdallApi, ws, deferral, shown, render, settle, event, releaseOldest, messageFetches, teardown, gates };
+  return { act, server, store, heimdallApi, ws, deferral, shown, hooks, render, settle, event, releaseOldest, messageFetches, teardown, gates };
 }
 
 test('catch-up: show while a pre-event GET is pending -> exactly one fresh GET after it settles', async () => {
@@ -276,6 +285,48 @@ test('catch-up: show while a pre-event GET is pending -> exactly one fresh GET a
     await h.render({ a: true });
     await h.settle();
     assert.equal(h.messageFetches(), 2, 'no loop and no refetch on later hide/show');
+  } finally {
+    await h.teardown();
+  }
+});
+
+test('catch-up: a request started between render and effect is read live, not from the render', async () => {
+  const h = await mountHarness();
+  try {
+    h.server.messages.push({ message_id: 'm0' });
+    h.server.holdNext = true;
+    await h.render({ a: false });
+    await h.settle();
+    assert.equal(h.messageFetches(), 1, 'initial GET R0 held');
+
+    // When R0's result commits, before the pane's effect: R1 (a refetch whose snapshot
+    // predates m1) starts and is held, then m1's event is marked against R1.
+    let fired = false;
+    h.hooks.layout = () => {
+      const entry = (h.heimdallApi.endpoints as any).fetchConversationMessages.select({ conversationId: CONV })(h.store.getState());
+      if (fired || entry?.status !== 'fulfilled') return;
+      fired = true;
+      h.server.holdNext = true;
+      h.server.nextSnapshot = [{ message_id: 'm0' }];
+      h.store.dispatch((h.heimdallApi.endpoints as any).fetchConversationMessages.initiate({ conversationId: CONV }, { subscribe: false, forceRefetch: true }));
+      h.server.messages.push({ message_id: 'm1' });
+      assert.equal(h.deferral.deferIfHidden({ type: 'Chat', id: CONV }, h.store.getState()), true);
+    };
+    await h.releaseOldest();
+    assert.equal(fired, true, 'race injected');
+    assert.equal(h.deferral.isDirty(CONV), true, 'the settled R0 seen by the render must not clear a mark taken against R1');
+
+    h.hooks.layout = null;
+    await h.releaseOldest();
+    await h.settle();
+    assert.equal(h.messageFetches(), 2);
+    assert.equal(h.deferral.isDirty(CONV), true, 'R1 predates the mark: still dirty while hidden');
+
+    await h.render({ a: true });
+    await h.settle(100);
+    assert.equal(h.messageFetches(), 3, 'exactly one catch-up GET on show');
+    assert.deepEqual(h.shown.a, ['m0', 'm1']);
+    assert.equal(h.deferral.isDirty(CONV), false);
   } finally {
     await h.teardown();
   }
