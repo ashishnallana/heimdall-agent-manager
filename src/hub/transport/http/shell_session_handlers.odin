@@ -335,11 +335,23 @@ PREVIEW_IDLE_TIMEOUT :: 120 * time.Second
 // liveness; an idle but healthy socket keeps going, an orphaned one is cleaned up.
 PREVIEW_WS_HEARTBEAT :: 30 * time.Second
 
-// ANY /api/v1/preview/{session_id}/**  — preview tunnel proxy; REQ-SH-CONTRACT §6.
-// Registered as an upgrade route so the handler owns the raw TCP socket and can relay
-// bytes to the client as they arrive rather than buffering the full response.
-// XM-2: when the request carries Upgrade: websocket a second goroutine pumps bytes from
-// the client socket to the bridge for full bidirectionality (HMR, WS backends, etc.).
+// Preview_Transport says which public namespace a preview request arrived through.
+// It is decided by WHO calls the relay, never by the request path: only the Host
+// dispatch in handle_client (server.odin) reaches preview_origin_handler, and only
+// the router's /api/v1/preview/** route reaches shell_session_preview_proxy_handler.
+// A "/p/" path on the Hub origin is therefore never treated as the dedicated origin.
+Preview_Transport :: enum {
+	// /api/v1/preview/{sid}/** on the Hub origin: the previewed app shares the Hub's
+	// origin, so it is never trusted with anything beyond the app's own headers.
+	Legacy_Same_Origin,
+	// <preview_origin>/p/{sid}/**: a separate browser origin with its own forward-auth
+	// cookie. Only here do app cookies and vault device signatures reach upstream.
+	Dedicated_Origin,
+}
+
+// <preview_origin>/p/{session_id}/**  — the dedicated preview origin. server.odin
+// dispatches every request whose Host is the preview origin here before any Hub
+// routing, so nothing but the preview relay is reachable on that host.
 preview_origin_handler :: proc(ctx: rawptr, req: Request, client: net.TCP_Socket) {
 	// The preview host has exactly one public namespace. In particular, Hub API,
 	// health and static paths are deliberately unreachable on this Host.
@@ -366,20 +378,38 @@ preview_origin_handler :: proc(ctx: rawptr, req: Request, client: net.TCP_Socket
 		write_http_response(client, Response{status = 404, content_type = "text/plain", body = "not found"})
 		return
 	}
-	shell_session_preview_proxy_handler(ctx, req, client)
+	preview_proxy_relay(ctx, req, client, .Dedicated_Origin)
 }
 
+// preview_legacy_path_allowed is the fail-closed gate for the same-origin route. With
+// no preview origin it is the only preview transport and stays open; once a dedicated
+// origin is configured it is closed unless the operator explicitly opted back in
+// (--preview-legacy-path true), which app.preview_legacy_path_notice flags as unsafe.
 preview_legacy_path_allowed :: proc(preview_origin: string, enabled: bool) -> bool {
 	return preview_origin == "" || enabled
 }
 
+// ANY /api/v1/preview/{session_id}/**  — legacy same-origin preview tunnel proxy;
+// REQ-SH-CONTRACT §6. Registered as a raw upgrade route so the relay owns the TCP socket.
 shell_session_preview_proxy_handler :: proc(ctx: rawptr, req: Request, client: net.TCP_Socket) {
+	preview_proxy_relay(ctx, req, client, .Legacy_Same_Origin)
+}
+
+LEGACY_PREVIEW_PREFIX :: "/api/v1/preview/"
+
+// preview_proxy_relay relays one preview request to the session's upstream port,
+// streaming bytes to the client as they arrive rather than buffering the response.
+// XM-2: when the request carries Upgrade: websocket a second goroutine pumps bytes from
+// the client socket to the bridge for full bidirectionality (HMR, WS backends, etc.).
+preview_proxy_relay :: proc(ctx: rawptr, req: Request, client: net.TCP_Socket, transport: Preview_Transport) {
 	h := (^Shell_Session_Stream_Handlers)(ctx)
 	heap := runtime.heap_allocator()
-	is_preview_origin := strings.has_prefix(req.path, "/p/")
-	if !is_preview_origin && !preview_legacy_path_allowed(h.preview_origin, h.preview_legacy_path) {
-		write_stream_error(client, respond_error(domain.domain_error(.Not_Found, "route not found"), req.request_id))
-		return
+	is_preview_origin := transport == .Dedicated_Origin
+	if !is_preview_origin {
+		if !preview_legacy_path_allowed(h.preview_origin, h.preview_legacy_path) || !strings.has_prefix(req.path, LEGACY_PREVIEW_PREFIX) {
+			write_stream_error(client, respond_error(domain.domain_error(.Not_Found, "route not found"), req.request_id))
+			return
+		}
 	}
 
 	// Preview-host identity comes only from the trusted reverse proxy, leaving an
@@ -489,7 +519,7 @@ shell_session_preview_proxy_handler :: proc(ctx: rawptr, req: Request, client: n
 	defer if !preview_request_counted do preview_note_request(0)
 
 	// Compute forwarded path using the active public namespace.
-	session_prefix := strings.concatenate({"/p/" if is_preview_origin else "/api/v1/preview/", session_id})
+	session_prefix := strings.concatenate({"/p/" if is_preview_origin else LEGACY_PREVIEW_PREFIX, session_id})
 	defer delete(session_prefix)
 	forwarded_path := req.path[len(session_prefix):]
 	if forwarded_path == "" do forwarded_path = "/"
@@ -506,16 +536,7 @@ shell_session_preview_proxy_handler :: proc(ctx: rawptr, req: Request, client: n
 	// XM-2: pass is_ws_upgrade so WebSocket headers are forwarded and Connection:close suppressed.
 	client_addr := _preview_client_addr(req.remote_addr)
 	defer delete(client_addr)
-	forward_context := Preview_Forward_Context{
-		prefix      = session_prefix,
-		host        = header_value(req.headers, "Host"),
-		// The public preview route is HTTPS in supported deployments; no hub config
-		// currently carries the external request scheme.
-		proto       = "https",
-		client_addr = client_addr,
-		forward_cookies = is_preview_origin,
-		add_referrer_policy = is_preview_origin,
-	}
+	forward_context := preview_forward_context(transport, session_prefix, header_value(req.headers, "Host"), client_addr)
 	raw_req := _preview_build_http_request(req.method, forwarded_path, req.query, req.headers, req.body, session.server_port, forward_context, is_ws_upgrade)
 	defer delete(raw_req)
 	raw_bytes := transmute([]byte)raw_req
@@ -997,6 +1018,33 @@ Preview_Forward_Context :: struct {
 	client_addr: string,
 	forward_cookies: bool,
 	add_referrer_policy: bool,
+	// Forward the vault request signature (X-Heimdall-Device-{Id,Ts,Nonce,Sig}) so a
+	// Heimdall hub running as the previewed app can verify its own UI's signed calls.
+	// Set only for the dedicated preview origin, whose browser storage (and so device
+	// keys) is separate from the Hub UI's.
+	forward_device_signature: bool,
+	// Drop "Authorization: Bearer ..." because on the Hub origin require_auth may have
+	// authenticated the caller with exactly that hub token. The dedicated origin
+	// authenticates by trusted-proxy identity only, so its Authorization is the app's.
+	strip_bearer_authorization: bool,
+}
+
+// preview_forward_context is the single place a transport becomes upstream trust:
+// everything the dedicated origin may pass on and the legacy route may not.
+preview_forward_context :: proc(transport: Preview_Transport, prefix, host, client_addr: string) -> Preview_Forward_Context {
+	dedicated := transport == .Dedicated_Origin
+	return Preview_Forward_Context{
+		prefix      = prefix,
+		host        = host,
+		// The public preview route is HTTPS in supported deployments; no hub config
+		// currently carries the external request scheme.
+		proto       = "https",
+		client_addr = client_addr,
+		forward_cookies = dedicated,
+		add_referrer_policy = dedicated,
+		forward_device_signature = dedicated,
+		strip_bearer_authorization = !dedicated,
+	}
 }
 
 _preview_filter_cookie_header :: proc(value: string) -> string {
@@ -1030,6 +1078,13 @@ _preview_client_addr :: proc(remote_addr: string, allocator := context.allocator
 		}
 	}
 	return strings.clone(remote_addr, allocator)
+}
+
+// preview_authorization_is_bearer matches the scheme case-insensitively (RFC 9110
+// §11.1), which is stricter than the hub's own "Bearer " check on purpose.
+preview_authorization_is_bearer :: proc(value: string) -> bool {
+	v := strings.trim_space(value)
+	return len(v) >= len("bearer") && strings.equal_fold(v[:len("bearer")], "bearer") && (len(v) == len("bearer") || v[len("bearer")] == ' ' || v[len("bearer")] == '\t')
 }
 
 // XM-2: is_ws_upgrade=true suppresses the hardcoded "Connection: close" and passes
@@ -1072,10 +1127,12 @@ _preview_build_http_request :: proc(method, fwd_path, query: string, headers: []
 		     "if-unmodified-since", "content-encoding", "user-agent", "referer", "origin",
 		     "x-csrf-token", "x-csrftoken", "x-xsrf-token", "x-requested-with":
 			pass = true
-		// Shared-origin hub auth consumes Bearer credentials before this builder runs,
-		// so this currently benefits non-Bearer schemes such as Basic only.
+		// The app's own credentials. A Bearer value on the Hub origin may be the hub
+		// token require_auth just accepted, so it never leaves the Hub there.
 		case "authorization":
-			pass = true
+			pass = !(forward.strip_bearer_authorization && preview_authorization_is_bearer(hdr.value))
+		case "x-heimdall-device-id", "x-heimdall-device-ts", "x-heimdall-device-nonce", "x-heimdall-device-sig":
+			pass = forward.forward_device_signature
 		// Never forward hub credentials or identity assertions into an untrusted preview.
 		case "cookie":
 			if forward.forward_cookies {

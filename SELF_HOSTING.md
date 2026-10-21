@@ -217,6 +217,19 @@ SPA fallback would swallow `/p/…`. As defense in depth, proxy only `/p/` and r
    is what stops previewed code from acting through your browser session. Keep `--ui-origin` set
    correctly. Keep the Authentik session cookie `HttpOnly` and, if possible, host-only.
 
+**Legacy same-origin route.** Once `--preview-origin` is set, the old `/api/v1/preview/<session-id>/`
+route on the hub origin answers **404** (code served from it could call every hub API as the viewer).
+`--preview-legacy-path true` reopens it for old links; the hub then logs a `WARNING:` line at startup,
+as it does when `--preview-origin` is unset. Prefer migrating links to `preview_url` over the opt-in.
+
+**What reaches the previewed app.** On both routes the hub strips its own identity headers
+(`X-authentik-*`) and Authentik cookies (`authentik_*`). Only the preview origin additionally forwards
+the app's other cookies and the vault request signature headers
+(`X-Heimdall-Device-Id`/`-Ts`/`-Nonce`/`-Sig`, so a Heimdall hub can be previewed and paired). On the
+legacy route `Authorization: Bearer …` is dropped because it may be the hub token the request was
+authenticated with; other schemes (Basic, Digest) pass through. On the preview origin the hub ignores
+`Authorization` for its own auth, so the header belongs to the app and is forwarded unchanged.
+
 **nginx (NixOS) example**
 
 ```nix

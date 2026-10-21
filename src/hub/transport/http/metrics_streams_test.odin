@@ -416,7 +416,7 @@ Tm_Preview_Run :: struct {
 @(private = "file")
 tm_run_preview :: proc(data: rawptr) {
 	r := (^Tm_Preview_Run)(data)
-	shell_session_preview_proxy_handler(rawptr(r.h), r.req, r.sock)
+	preview_origin_handler(rawptr(r.h), r.req, r.sock)
 	sync.atomic_store(&r.finished, true)
 }
 
