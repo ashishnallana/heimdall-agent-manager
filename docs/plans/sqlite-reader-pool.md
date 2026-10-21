@@ -1,564 +1,562 @@
-# SQLite reader pool, isolated writers and a typed query layer
+# SQLite: typed query layer, isolated writers and a reader pool
 
-Status: plan, ready to implement (branch `perf/sqlite-reader-pool`, base `e12b9554` v0.4.21).
-No code has landed yet. A first attempt at stage 1 was reverted so the scope could be widened.
-Its findings are folded in below, marked **(found)**.
+Status: plan, revision 2 (after review), ready to implement. Branch `perf/sqlite-reader-pool`,
+base `e12b9554` (v0.4.21). No code has landed. Findings marked **(found)** come from the code
+audit or the reverted first attempt. The "Review response" section at the end maps each review
+finding to where this revision addresses it.
 
 ## 1. Problem
 
 - **Throughput.** Every query from every request thread runs on ONE shared connection
-  (`App_Graph.db`, `repository/sqlite/conn.odin`). In serialized mode SQLite holds that
-  connection's mutex for each `sqlite3_step`, so request threads take turns. About 99% of
-  statements are reads (prod: ~130–290 SELECT/s against ~0.15 COMMIT/s). WAL has been on since
-  v0.4.17, but one connection cannot read in parallel. Capacity is about 50–60 active users.
-- **Correctness (lost write).** An autocommit statement from thread B, run while thread A
-  holds a unit of work (`tx.odin`), executes INSIDE A's transaction. It is committed or rolled
-  back with A, and B reads A's uncommitted rows. Only taskv2, taskchain and card open units of
-  work (`service/{taskv2/service,taskchain/taskchain_service,card/card_service}.odin`). Every
-  other write is autocommit and exposed to this.
-- **Misuse-prone API.** 28 repository files call the FFI directly: about 217
-  `sqlite3_prepare_v2` sites, a manual `defer sqlite3_finalize` at each one, positional
-  `bind_text`, and rc-integer checks. Any step failure is mapped to `.Conflict` ("could not be
-  saved"), so a busy or I/O failure looks like a conflict to the user.
+  (`App_Graph.db`, `repository/sqlite/conn.odin`), and in serialized mode SQLite holds that
+  connection's mutex for each `sqlite3_step`. About 99% of statements are reads (prod: ~130–290
+  SELECT/s against ~0.15 COMMIT/s). WAL has been on since v0.4.17, but one connection cannot read
+  in parallel. Capacity is about 50–60 active users.
+- **Correctness (lost write).** An autocommit statement from thread B runs INSIDE thread A's open
+  unit of work. It commits or rolls back with A, and B sees A's uncommitted rows. Only taskv2,
+  taskchain (`verb_begin`) and `accept_card` open units of work, so almost every write is exposed
+  (§9.1).
+- **Misuse-prone API.** About 217 `sqlite3_prepare_v2` sites in 28 files, each with a manual
+  `defer sqlite3_finalize`, positional `bind_text` calls and rc-integer checks. Any failed step is
+  reported as `.Conflict`, so a busy or I/O failure looks like a user conflict.
 
-## 2. Target architecture
+## 2. Principles
+
+1. Restructure first, change concurrency last. The typed layer and the error model land on
+   today's single connection. Write isolation and then readers are switched on later, each behind
+   its own kill switch.
+2. Callers never choose a connection and never touch statements or handles.
+3. No lock that a unit of work can take may be held around an autocommit write (B2). This
+   generalises the existing `tx_mutex → state_mutex` rule.
+4. Nothing blocks on `tx_mutex` while it holds another tracked lock (B3).
+
+## 3. Architecture (end state)
 
 ```
-services ──iface.*_Repository (typed domain structs, Domain_Error)──▶ repositories (SQL text only)
-                                                                         │ query_one / query_all / query / exec_write
-                                                                         ▼
-                                                   db.odin  (typed query layer: Arg, scanning, Db_Result)
-                                                                         │ stmt_prepare / stmt_step / stmt_finalize
-                                                                         ▼
-                                    conn.odin (opaque Conn, routing, reader pool, tripwires, ALL conn FFI)
-                                    tx.odin   (unit of work, BEGIN IMMEDIATE on writer)
+services ──iface.*_Repository (domain structs, Domain_Error)──▶ repositories (SQL constants only)
+                                     │ query_one / query_all / query_each / exec_write / with_write_tx / Sql_Builder
+                                     ▼
+              db.odin   typed layer: Arg binding, struct scan, Db_Result, statement FFI (file-private)
+              conn.odin opaque Conn, routing, reader leases, overflow conn, tripwire, connection FFI (file-private)
+              tx.odin   unit of work (BEGIN IMMEDIATE on writer), with_write_tx
 ```
 
-### 2.1 Connections behind one opaque `Conn`
+### 3.1 Connections
 
-| Connection | Count | Opened as | Used by |
+| Connection | Exists when | Opened as | Used by |
 |---|---|---|---|
-| `writer` | 1 | read/write | the thread that owns the unit of work (BEGIN IMMEDIATE … COMMIT), manual transactions (§2.3), migrations |
-| `autocommit` | 1 | read/write | write statements outside a unit of work |
-| `readers` | N (default 4, `HAM_SQLITE_READERS`, max 32, 0 = off) | `SQLITE_OPEN_READONLY` | read-only statements outside a unit of work, leased per thread |
+| `writer` | always | read/write | the unit-of-work owner, `with_write_tx` bodies, migrations at boot; everything when split is off |
+| `autocommit` | `HAM_SQLITE_WRITE_SPLIT=1` | read/write | writes outside a unit of work. A write is prepare → step → finalize in one call under that connection's db mutex, never streamed. **Never reads (M3).** |
+| `readers` ×N | split on and `HAM_SQLITE_READERS=N>0` | `SQLITE_OPEN_READONLY` | read-only statements outside a unit of work, leased per thread inside one layer call |
+| `overflow` | readers on | `SQLITE_OPEN_READONLY`, serialized, shared | reads when a thread has no free lease slot, a reader fails to prepare, or the pool wait exceeds 50 ms (M4) |
 
-- **Readers are off** (only `writer` exists; exactly today's behaviour) for `:memory:`, for
-  `HAM_SQLITE_READERS=0` (the production kill-switch), and for the dedicated connections:
-  billing, `Bridge_Enroll_Commit_Conn`, `Vault_Directory_Write_Conn` and the metrics
-  collector's read-only connection. These open with `open(path, readers = 0)`.
-- **Readers also turn off if the file is not in WAL mode (found).** Under a rollback journal, a
-  reader's open statement holds a SHARED lock. That lock blocks every writer, including the same
-  thread's next write inside its own step loop, which then stalls for busy_timeout. `open`
-  checks `PRAGMA journal_mode` after enabling WAL.
-- `Conn :: struct { _state: rawptr }`. **(found)** A field whose type is `@(private="file")` can
-  still be read from other files in Odin, so only a `rawptr` hides the handles. `Conn_State`
-  (handles, pool, path) is heap-allocated, so copying a `Conn` by value (`graph.db = db`) is
-  safe.
+- **`:memory:` and dedicated connections.** `:memory:` is always writer-only. The dedicated
+  connections pass options: billing, `Bridge_Enroll_Commit_Conn` and `Vault_Directory_Write_Conn`
+  use `{split = false, readers = 0}`. The metrics collector uses
+  `{split = false, readers = 0, query_only = true, busy_timeout_ms = 1000}`; today it sets those
+  pragmas itself (`app/metrics_db_collectors.odin:93-94`).
+- **`Conn :: struct { _state: rawptr }`.** **(found)** A field whose type is file-private can
+  still be read from other files in Odin, so only an opaque pointer hides the handles. The state
+  is heap-allocated, so copying a `Conn` (`graph.db = db`) is safe.
+- **Readers require WAL.** `open` checks `PRAGMA journal_mode` and turns readers off if the file
+  is not in WAL mode. **(found)** Under a rollback journal, a reader's SHARED lock blocks the same
+  thread's next write.
 
-### 2.2 Routing (one place: `stmt_prepare` in conn.odin; callers never choose)
+### 3.2 Routing (inside the layer; no API takes a read/write flag)
 
-1. The calling thread owns the unit of work (or a manual transaction) on this Conn's writer:
-   prepare on `writer`, so it reads its own uncommitted writes. Ownership is
-   `tx_depth > 0 && tx_owner_thread == me && tx_writer == this writer`. The writer check matters
-   because tests open several Conns. **(found)** `sync.current_thread_id()` is a `gettid`
-   syscall on Linux, so `tx_depth` is loaded first and the common path costs one atomic load.
-2. Readers off: prepare on `writer`.
-3. The leading keyword is `SELECT`, `WITH` or `VALUES` and `sqlite3_stmt_readonly` confirms it:
-   prepare on this thread's leased reader. **(found)** `sqlite3_stmt_readonly` is also true for
-   BEGIN, COMMIT, SAVEPOINT, RELEASE, ATTACH and most PRAGMAs. Without the keyword gate those
-   would run on, and change the state of, a pooled reader. The gate also saves writes a second
-   prepare. The keyword scanner honours `nByte`, because Odin strings are not NUL-terminated.
-   If the reader fails to prepare (or the statement is not read-only), the lease is returned
-   and the statement falls through to step 4.
-4. Everything else: `autocommit`.
+1. **Owner.** The calling thread owns the unit of work or the `with_write_tx` on this Conn's
+   writer (`tx_depth > 0 && owner == me && tx_writer == this writer`): run on `writer`, so it
+   reads its own writes. **(found)** `current_thread_id` is a `gettid` syscall, so `tx_depth` is
+   loaded first.
+2. **Split off.** Run on `writer`; this is today's behaviour.
+3. **Read-only.** The leading keyword is `SELECT`, `WITH` or `VALUES` and `sqlite3_stmt_readonly`
+   confirms it: run on the thread's leased reader, else on `overflow`.
+   **(found)** `stmt_readonly` is also true for BEGIN, COMMIT, SAVEPOINT, RELEASE, ATTACH and most
+   PRAGMAs, so the keyword gate runs first. The scanner honours `nByte`, because Odin strings are
+   not NUL-terminated.
+4. **Everything else.** Run on `autocommit`.
 
-`exec(conn, sql)` (DDL, PRAGMA, multi-statement scripts) runs on `writer` for the owner,
-otherwise on `autocommit`, with one exception, the manual transaction in §2.3.
+### 3.3 Reader leases (scoped inside one layer call, M6)
 
-### 2.3 Unit of work (`tx.odin`)
+- **Acquire.** `query_one`, `query_all` and `query_each` take the thread's lease at entry and
+  release it before returning. There is no streaming statement, no statement outlives the call,
+  and nothing leaks across scopes.
+- **Re-entry.** A `query_each` callback that issues another query on the same thread reuses the
+  lease (refcount); it never waits on the pool.
+- **Pool wait.** Bounded at 50 ms, then the read goes to `overflow`. This breaks any
+  `state_mutex` / pool / `tx_mutex` wait cycle (M4).
+- **Snapshots (documented).**
+  - A nested query inside a `query_each` callback shares the outer statement's read transaction,
+    so it sees the same snapshot.
+  - Separate top-level calls get separate snapshots, as today.
+  - A unit-of-work owner sees its own uncommitted writes.
+  - Nobody else sees uncommitted rows. Signal other threads with after-commit hooks.
 
-- `BEGIN IMMEDIATE` on `writer`, never a deferred `BEGIN`. With a second write connection, a
-  deferred transaction that reads and then writes can fail with `SQLITE_BUSY_SNAPSHOT` without
-  retrying. IMMEDIATE takes the write lock up front and waits on busy_timeout.
-- `tx_mutex`, SAVEPOINT nesting, after-commit hooks, the lock order (`tx_mutex` →
-  `state_mutex`) and `lockorder.assert_tx_mutex_allowed` are unchanged. All tx SQL goes through
-  `exec_writer`.
-- **Manual transactions (found).** `fts_repair.repair_fts_indexes` runs `BEGIN IMMEDIATE …
-  COMMIT` through `exec` on the SHARED connection, both at boot and at runtime from
-  `step_write_healing`. Its later statements must see that transaction. The
-  enrollment-commit and vault fallbacks do the same on the main Conn when they have no
-  dedicated connection. Fix: when `exec` sees a leading `BEGIN` from a non-owner on a Conn with
-  readers, it takes the unit-of-work slot (`tx_manual_begin`: lock-order assert,
-  `tx_mutex`, owner = me, depth = 1). The whole transaction then runs on `writer`. The slot is
-  released (`tx_manual_settle`) once `sqlite3_get_autocommit(writer) != 0`, that is after
-  COMMIT, after ROLLBACK, or after a failed BEGIN. Today any thread's statement can join the
-  repair's transaction; this closes that hole too.
-- Migration files 090, 097, 098 and 099 contain `BEGIN … COMMIT` inside ONE `exec` script, so
-  they need no change.
+### 3.4 Write transactions
 
-### 2.4 Reader leasing
+- **Unit of work.** `BEGIN IMMEDIATE` on `writer`. `tx_mutex`, SAVEPOINT nesting, after-commit
+  hooks and the lock-order assert are unchanged.
+- **`verb_begin` fails closed (M1).** It currently returns an empty `Verb_Tx` and the verb runs
+  without a transaction (`taskchain_service.odin:60-65`). Stage 0 makes it return `.Unavailable`
+  instead.
+- **`with_write_tx(conn, ctx, body: proc(ctx) -> bool) -> Db_Result`** is the ONLY way to run a
+  hand-rolled multi-statement transaction outside a unit of work. It replaces the implicit
+  detection of a leading `BEGIN`. It takes the unit-of-work slot (lock-order assert, `tx_mutex`),
+  runs `BEGIN IMMEDIATE` on `writer`, runs the body (whose statements route to `writer` as owner),
+  then COMMITs, or ROLLBACKs if the body returns false.
+  - Users: `bridge_commit_enrollment` and the vault writers when they fall back to the main Conn,
+    and the reaper's FTS repair.
+  - Billing, enrollment and vault keep their dedicated connections and use
+    `with_write_tx` on those Conns, which have split off.
+- **FTS self-heal never blocks on `tx_mutex` (B3).**
+  - On `SQLITE_CORRUPT` from a write, the layer tries `tx_mutex` with `try_lock`, and only when
+    the thread holds no tracked lock (`lockorder` depth 0). If it succeeds, it repairs inline and
+    retries once.
+  - Otherwise it returns `Corrupt` and sets a repair-pending flag. The reaper (20 s) runs
+    `repair_fts_indexes` through `with_write_tx`.
+  - Today's 5 healing sites keep that behaviour. Other writes report Corrupt and the reaper
+    repairs (Q4).
+- **Migrations (one rule).** At boot, before any request thread exists, each migration file runs
+  through one `exec` on `writer`. **(found)** 090, 097, 098 and 099 contain `BEGIN … COMMIT`, and
+  099 creates a TEMP table, which is per connection. Both are fine because the whole script runs
+  on the same connection. If `exec` fails and `get_autocommit(writer) == 0`, the layer issues
+  `ROLLBACK` before returning the error.
+- **Existing bug (corrected statement).** Today `repair_fts_indexes` runs `BEGIN IMMEDIATE …
+  COMMIT` on the shared handle without `tx_mutex` (`fts_repair.odin:56-71`), reached at runtime
+  from `step_write_healing` on the per-heartbeat instance save path. While its transaction is open:
+  - a unit-of-work `BEGIN` on another thread fails ("cannot start a transaction within a
+    transaction")
+  - other threads' autocommit writes join the repair transaction and commit or roll back with it
 
-- The lease is thread-local and reference-counted per statement. A thread's first reader
-  statement takes a reader from the pool, waiting on a condition variable if none is free.
-  Later statements on that thread reuse the same reader (count + 1), so a read prepared inside
-  another read's step loop cannot deadlock the pool. The finalize that brings the count to 0
-  returns the reader. The statement is finalized first, so its read transaction has ended
-  before another thread can take the reader.
-- There are 4 lease slots per thread, because tests open several Conns. If all 4 are taken,
-  the read falls back to `autocommit`: correct, but not parallel.
-- The pool tracks each slot's `leased_at` time and the first 200 bytes of the SQL that took the
-  lease, for the stale-lease report (§3.4).
-- **Deadlock audit.** The unit-of-work owner never needs a reader, so `tx_mutex` holders never
-  wait on the pool. A lease holder can block on `tx_mutex` (finite), on busy_timeout (5 s), or
-  on `state_mutex` (see the §8 inventory). A pool waiter is never the `tx_mutex` holder.
+  Conversely, if a unit of work is open, the repair's BEGIN fails and its error-path `ROLLBACK`
+  (`:65`) rolls back that unit of work. `with_write_tx` plus reaper-only repair closes all three.
 
-### 2.5 Pragmas: single source in `open()` (found: today they live in `app/wiring.odin:192-199`)
+### 3.5 Pragmas: single source in `open()`
 
-| | foreign_keys | busy_timeout | journal_mode | synchronous | other |
+**(found)** Today these are set in `app/wiring.odin:192-199`, and duplicated in
+`bridge_repo_sqlite.odin:34`, `vault_directory_repo_sqlite.odin:38`, `billing_repo_sqlite.odin:46`
+and the `tmpl_open_file_prod` test fixture.
+
+| | foreign_keys | busy_timeout | journal | synchronous | other |
 |---|---|---|---|---|---|
-| writer | ON | 5000 | WAL (persistent; file DBs) | NORMAL | |
-| autocommit | ON | 5000 | (file-level) | NORMAL | |
-| readers | ON | 5000 | (file-level) | — | `query_only`, `mmap_size=256MB`, `cache_size=-16000` |
+| writer | ON | 5000 | WAL (file DBs) + `journal_size_limit=64MB` | NORMAL | |
+| autocommit | ON | 5000 | file-level | NORMAL | |
+| readers / overflow | ON | 5000 | file-level | — | `query_only`, `cache_size=-4000`, mmap off (Q5) |
 
-- Remove the pragmas from `wiring.odin` and from the dedicated-connection openers
-  (`bridge_repo_sqlite.odin:34`, `vault_directory_repo_sqlite.odin:38`,
-  `billing_repo_sqlite.odin:46`), and remove the duplicates in the
-  `tmpl_open_file_prod` test fixture.
-- Setting `synchronous=NORMAL` on the dedicated connections is a small change from today. It is
-  safe in WAL mode.
-- **(found)** `SQLITE_CONFIG_MEMSTATUS` is on by default, so every SQLite malloc takes ONE
-  global mutex. The test fixture already turns it off (in a measured RCA it serialized parallel
-  tests). Parallel readers would hit the same mutex in production. Turn it off in conn.odin
-  `@(init)` for all builds; nothing reads SQLite memory statistics.
-- `PRAGMA` statements sent through `exec` reach ONE connection. Connection state belongs in
-  `open()`; this is documented in AGENTS.md.
-
-## 3. Guardrails
-
-1. **No raw handles.** `Conn` is opaque. All connection-level FFI is `@(private="file")` in
-   conn.odin under `ffi_*` names: open, open_v2, close, prepare_v2, finalize, exec, errmsg,
-   extended_errcode, db_handle, next_stmt, stmt_readonly, get_autocommit, changes, db_mutex,
-   mutex_enter/leave, free, and backup_*. Statement-level FFI (bind, column, step, reset, sql)
-   is `@(private="file")` in db.odin. Each file declares only what it needs; duplicate
-   file-private foreign declarations are fine.
-2. **Automatic finalize.** Statements never leave db.odin. `query_one`, `query_all` and
-   `exec_write` finalize before they return. The streaming `query` returns a `Rows` value
-   marked `@(deferred_out = rows_close)`, so it is finalized at the end of the CALLER's scope on
-   every exit path. It is also finalized as soon as `rows_next` reaches the end or an error.
-   - **(found)** I verified `deferred_out` semantics on our Odin build. It works with `:=` and
-     with `=` assignment, it runs once per loop iteration, and when the call is in an `if`
-     header it runs at the end of the `if`. A deferred proc receives the results BY VALUE, so
-     "finalize at end of iteration" plus "finalize at scope end" needs a guard against
-     finalizing twice. Each `Rows` carries a per-thread generation id held in a thread-local
-     live-statement table of 32 entries. `rows_close` finalizes only if the id is still live,
-     so a recycled `sqlite3_stmt` address cannot be finalized twice. If the table is full, the
-     `Rows` is untracked: the end of iteration only resets it, and the scope end finalizes it.
-3. **Routing is never the caller's decision.** Ownership plus `sqlite3_stmt_readonly` decide.
-   No API takes a read/write flag.
-4. **Runtime tripwires.**
-   - (a) `lockorder.assert_db_thread_clean(site)` is a hook that sqlite installs from
-     `@(init)`, so transport and services need not import sqlite. Call sites:
-     - the end of `handle_client` (`transport/http/server.odin:58`)
-     - each WS frame (bridge WS and user WS)
-     - each reaper pass (`app/app.odin` `reaper_loop`)
-     - each taskv2 timer tick (`service/taskv2/timers.odin:452`)
-     - each merge job (`service/taskv2/merge.odin:102`)
-     - each webpush send (`service/push/webpush_send.odin:93`)
-     - each bridge_log writer batch, each attention-debouncer flush, and each shell-session
-       worker iteration
-
-     The exact iteration points are in §8.
-
-     A thread that still holds a reader lease or an open unit of work is a violation. It is
-     logged with the SQL of the live statements (`next_stmt` on its own reader is safe) and
-     counted in `heimdall_sqlite_thread_leak_total{kind}`. Tests and debug builds panic. Release
-     builds then reset the leaked statements and return the reader, so one leak cannot drain
-     the pool; a later finalize of such a statement is still safe.
-   - (b) A lease held longer than 5 s is logged once, with the SQL that took it. The log comes
-     from pool waiters (1 s `cond_wait_with_timeout`) and from the metrics scrape.
-5. **Source-guard test** (`repository/sqlite/api_guard_test.odin`). It scans `src/hub/**.odin`
-   with `//` comments stripped and fails, with a "use X instead" message, on any of:
-   - an `sqlite3_`, `ffi_`, `stmt_prepare`, `stmt_step` or `stmt_finalize` identifier, or
-     `._state`, `._stmt` or `foreign import`, outside conn.odin, db.odin and tx.odin
-   - an import of `hub/repository/sqlite` outside `repository/sqlite`, `app/wiring.odin`,
-     `app/metrics_listener.odin`, `app/metrics_db_collectors.odin` and `*_test.odin`
-   - `fmt.tprintf`, `fmt.aprintf` or `strings.concatenate` on a line containing SQL keywords
-     (`SELECT|INSERT|UPDATE|DELETE|FROM|WHERE|VALUES`) in `repository/sqlite`, unless that line
-     or the previous one carries `// sql-dynamic: <reason>`. Expected opt-outs: fts_repair
-     (table names), search (fts MATCH builders), bridge_log batch VALUES, and migrations'
-     `PRAGMA table_info(%s)`.
-   - **(found)** Constant SQL fragments (`strings.concatenate({"SELECT ", CHAT_MESSAGE_SELECT,
-     …})` in content_repo) become compile-time constants: `Q :: "SELECT " + COLS + " FROM …"`.
-6. **Docs.** A header comment in conn.odin and db.odin, and an AGENTS.md section "Database
-   access rules" (§10).
+- **WAL growth.** Long readers delay checkpoints. The reaper runs `wal_checkpoint(PASSIVE)` each
+  pass, and `TRUNCATE` when `heimdall_sqlite_wal_bytes` exceeds 256 MB.
+- **Global malloc mutex (found).** `SQLITE_CONFIG_MEMSTATUS` is on by default, which puts one
+  global mutex on every SQLite malloc. The test fixture already turns it off after an RCA showed
+  it serialized parallel tests. Parallel readers would hit the same mutex, so conn.odin turns it
+  off in `@(init)` for all builds; nothing reads SQLite memory statistics.
 
 ## 4. Typed query layer (`repository/sqlite/db.odin`)
 
 ```odin
 Null :: struct {}
-Arg  :: union { string, i64, int, f64, bool, Null }   // nil union binds NULL too
-opt_text :: proc(s: string) -> Arg                     // "" -> NULL (nullable columns, e.g. vault pair_lookup)
-in_list  :: proc(n: int) -> string                     // "?, ?, ?" for a dynamic IN (...); the ONLY sanctioned SQL building helper
+Arg  :: union { string, i64, int, f64, bool, Null }   // bool binds TEXT "1"/"0" (today's storage); nil binds NULL
+opt_text :: proc(s: string) -> Arg                     // "" -> NULL (vault's bind_opt behaviour)
 
-Db_Error_Kind :: enum { None, Not_Found, Unique_Violation, Foreign_Key_Violation,
-                        Constraint_Violation, Busy, Read_Only, Corrupt, Io, Internal }
-Db_Result :: struct {
-	kind:    Db_Error_Kind,
-	ext:     i32,     // sqlite3_extended_errcode, for logs
-	detail:  string,  // e.g. "projects.slug" parsed from the constraint message (temp allocator)
-	message: string,  // sqlite3_errmsg (temp allocator), for logs only
-}
+Db_Error_Kind :: enum { None, Unique_Violation, Foreign_Key_Violation, Constraint_Violation,
+                        Busy, Read_Only, Corrupt, Io, Internal }          // no Not_Found (M9)
+Db_Result :: struct { kind: Db_Error_Kind, ext: i32, message: string }     // message: sqlite3_errmsg, logs only
 
-query_one :: proc(conn: ^Conn, $T: typeid, sql: string, args: ..Arg) -> (T, Db_Result)       // Not_Found when no row
-query_all :: proc(conn: ^Conn, $T: typeid, sql: string, args: ..Arg) -> ([]T, Db_Result)     // context.allocator
-@(deferred_out = rows_close)
-query     :: proc(conn: ^Conn, sql: string, args: ..Arg) -> Rows                              // streaming
-rows_next :: proc(rows: ^Rows) -> bool
-rows_scan :: proc(rows: ^Rows, out: ^$T)                     // struct scan of the current row
-rows_result :: proc(rows: ^Rows) -> Db_Result                // after the loop
-col_text / col_view / col_i64 / col_int / col_f64 / col_bool / col_opt_text / col_is_null  // escape hatch, by index
+query_one  :: proc(conn: ^Conn, $T: typeid, sql: string, args: ..Arg) -> (row: T, found: bool, res: Db_Result)
+query_all  :: proc(conn: ^Conn, $T: typeid, sql: string, args: ..Arg) -> ([]T, Db_Result)          // context.allocator
+query_each :: proc(conn: ^Conn, $T: typeid, sql: string, ctx: rawptr, each: proc(ctx: rawptr, row: ^T) -> bool, args: ..Arg) -> Db_Result
 exec_write :: proc(conn: ^Conn, sql: string, args: ..Arg) -> (changes: int, res: Db_Result)
+exec_script:: proc(conn: ^Conn, sql: string) -> Db_Result                 // DDL / migrations only (guard-test restricted)
+with_write_tx :: proc(conn: ^Conn, ctx: rawptr, body: proc(ctx: rawptr) -> bool) -> Db_Result
 ```
 
-- **Struct scanning.** Columns map to fields by the `db:"col"` tag (falling back to the field
-  name), using `core:reflect`. The column-to-field plan is validated once per `(typeid, sql
-  pointer)` and cached in a small per-thread table, so the per-row cost is one typed column read
-  per field with no lookups. Supported field types:
+- **Struct scanning.** Columns map to fields by the `db:"col"` tag, falling back to the field
+  name. Supported field types:
   - `string` (cloned into `context.allocator`, as `column_text` does today)
   - `Maybe(string)` (NULL → nil)
   - `i64`, `int`, `i32`, `f64`
-  - `bool` (stored as `"1"`/`"0"` text or as an integer)
-  - distinct strings (`domain.User_ID`, `Project_ID`, …)
-  - enums through a per-type converter registered with `register_enum_text($E, from_string)`,
-    because the codebase stores enums as text (`project_state_from_string`, …)
+  - `bool` (`"1"` text or integer 1)
+  - distinct string ids
+  - enums through `register_enum_text($E, from_string)`, because enums are stored as text
 
-  A missing column, an unmatched field or an unsupported type is a programmer error: it panics
-  in tests and debug, and returns `Db_Result{kind = .Internal}` with a logged message in
-  release. Fields tagged `db:"-"` are skipped. Domain structs with derived or JSON fields
-  (Memory's `agent_ids` list and similar) use a flat `*_Row` struct plus a converter in the
-  repository.
-- **Binding preserves today's storage types (found).** The repos bind most integers as TEXT
-  (`bind_text(stmt, i, int_s(x))`) and read them back as text. If the migration switched those to
-  integer binds, comparisons and stored values in columns without INTEGER affinity would
-  change. Rule for the migration: bind exactly the type that was bound before; switching to
-  native types is a follow-up.
-- **`exec_write`** steps under the statement's own connection mutex, so `changes` cannot be
-  overwritten by another thread's write on the shared `autocommit`. This is today's
-  `step_changes`, now with `sqlite3_db_handle(stmt)`. A statement that returns rows is an
-  `.Internal` misuse; use `query_*` for `RETURNING`.
-- **FTS self-heal moves into the layer.** On `SQLITE_CORRUPT` from a write (including `RETURNING`
-  through `query_*`), the layer runs `repair_fts_indexes` and retries once (today's
-  `step_write_healing`). Inside a unit of work the repair is a no-op, as today. This replaces 5
-  explicit call sites and covers every write.
-- **Performance.** Args are a stack slice. Scanning adds no allocation beyond the string
-  clones that repos already make. `col_view` returns a borrowed view for parse-only columns
-  (today's `column_text_unowned`). The plan cache makes reflection a one-time cost.
+  Behaviour:
+  - Fields tagged `db:"-"` are skipped.
+  - Domain structs with derived or JSON fields use a flat `*_Row` struct plus a converter.
+  - The column-to-field plan is validated once per `(typeid, sql data pointer)` and kept in a
+    GLOBAL heap cache behind an RW mutex (not thread-local), so the per-row cost is typed column
+    reads only.
+  - Missing columns, unmatched fields and unsupported types are programmer errors: tests and
+    debug panic; release returns `.Internal` and logs.
+- **Binding preserves storage types (found).** Repos bind most integers as TEXT
+  (`bind_text(i, int_s(x))`). The migration binds exactly what was bound before: a `string` Arg
+  for those, and `bool` as `"1"`/`"0"`. Native types are a follow-up.
+- **`exec_write`.** `changes` is read under the statement's own connection mutex (today's
+  `step_changes`, now with `sqlite3_db_handle(stmt)`). A statement that returns rows is a misuse
+  and returns `.Internal`; use `query_one` for `RETURNING`.
+- **Dynamic SQL: `Sql_Builder` (M8).** **(found)** Today dynamic SQL is built with
+  `strings.Builder`:
+  - `content_repo_sqlite.odin:246-259`, including `ORDER BY` from `sort_col`/`sort_dir`
+  - `issue_repo_sqlite.odin` (10 `write_string`)
+  - `shell_session_repo_sqlite.odin` (48 `write_string`, 9 builders)
+  - `bridge_log_repo_sqlite.odin:53` (batch VALUES)
 
-### Before / after (representative)
+  Replacement:
+  ```odin
+  sb := sql_builder(context.temp_allocator)
+  sql_frag(&sb, "SELECT … FROM artifacts WHERE owner_user_id = ?")   // $frag: string — compile-time constant only
+  sql_arg(&sb, string(owner))
+  if kind != "" { sql_frag(&sb, " AND kind = ?"); sql_arg(&sb, kind) }
+  sql_order_by(&sb, Artifact_Sort.Created_At, .Desc)                 // identifiers only via enums with a fixed SQL spelling
+  sql_in(&sb, " AND bridge_id IN ", ids)                             // emits (?, ?, …) + args
+  rows, res := query_all_built(impl.conn, Artifact_Row, &sb)
+  ```
+  Because `sql_frag` takes `$frag: string`, a runtime string cannot be passed. Values only ever
+  enter as args. The guard test flags `strings.builder*`, `write_string`, `fmt.*printf` and
+  `concatenate` in repository files. Constant fragments become compile-time constants
+  (`Q :: "SELECT " + COLS + " FROM …"`).
+- **Performance.** Args are a stack slice, and scanning allocates only the string clones repos
+  make today. `query_each` with a `^T` scratch row avoids the slice for hot loops. The plan cache
+  makes reflection a one-time cost.
+
+### Before / after
 
 ```odin
 // GET — before (project_repo_sqlite.odin)
-impl := (^Project_Repo_SQLite)(ctx); stmt: sqlite3_stmt = nil
-q := "SELECT project_id, ... FROM projects WHERE project_id = ?;"
 if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(q)), -1, &stmt, nil) != SQLITE_OK do return {}, false, domain.domain_error(.Internal_Error, "failed to prepare project lookup")
 defer sqlite3_finalize(stmt); bind_text(stmt, 1, string(project_id))
 if sqlite3_step(stmt) != SQLITE_ROW do return {}, false, domain.domain_error(.Not_Found, "project not found")
 return project_from_stmt(stmt), true, {}
 
-// GET — after
-Project_Row :: struct { project_id: domain.Project_ID, owner_user_id: domain.User_ID, name, slug, description, repo_url, vcs_kind, default_path: string,
-                        state: domain.Project_State `db:"state"`, created_at, updated_at: string }
-row, res := query_one(impl.conn, Project_Row, "SELECT project_id, ... FROM projects WHERE project_id = ?;", string(project_id))
-if res.kind == .Not_Found do return {}, false, {}                        // convention §5 (see open question Q1)
-if res.kind != .None do return {}, false, db_result_to_domain_error(res, "project lookup")
+// GET — after (per-method not-found behaviour kept: this method returned .Not_Found, so it still does)
+row, found, res := query_one(impl.conn, Project_Row, PROJECT_GET_SQL, string(project_id))
+if res.kind != .None do return {}, false, db_error(res, "project lookup", .Internal_Error)
+if !found do return {}, false, domain.domain_error(.Not_Found, "project not found")
 return project_from_row(row), true, {}
 
-// LIST — after
+// LIST
 rows, res := query_all(impl.conn, Project_Row, PROJECT_LIST_SQL, string(owner), i32_to_string_sqlite(limit))
-if res.kind != .None do return nil, db_result_to_domain_error(res, "project list")
+if res.kind != .None do return nil, db_error(res, "project list", .Internal_Error)
 
-// SAVE with a unique conflict — after
-_, res := exec_write(impl.conn, PROJECT_UPSERT_SQL, ..project_args(project)[:])   // project_args -> [11]Arg on the stack
-if res.kind != .None do return {}, false, db_result_to_domain_error(res, "project could not be saved")
-// Unique_Violation -> .Conflict "project could not be saved"; Busy -> .Unavailable; Io -> .Internal_Error.
+// SAVE (unique conflict)
+args := project_args(project)                                        // [11]Arg on the stack
+_, res := exec_write(impl.conn, PROJECT_UPSERT_SQL, ..args[:])
+if res.kind != .None do return {}, false, db_error(res, "project could not be saved", .Conflict)
+// Unique_Violation -> .Conflict (kept); Busy -> .Unavailable; Io/Corrupt -> .Internal_Error.
 ```
 
 ## 5. Error model
 
-- **`Db_Error_Kind` comes from `sqlite3_extended_errcode`:**
+- **`Db_Error_Kind` from `sqlite3_extended_errcode`:**
 
   | Extended code(s) | Kind |
   |---|---|
   | `CONSTRAINT_UNIQUE`, `CONSTRAINT_PRIMARYKEY` | Unique_Violation |
   | `CONSTRAINT_FOREIGNKEY` | Foreign_Key_Violation |
-  | `CONSTRAINT_NOTNULL`, `CHECK`, `TRIGGER` (RAISE(ABORT)) | Constraint_Violation |
-  | `BUSY*`, `LOCKED*` (busy_timeout expired) | Busy |
-  | `READONLY*` | Read_Only (a routing bug: logged loudly, counted, `.Internal` to callers) |
+  | `CONSTRAINT_NOTNULL`, `CHECK`, `TRIGGER` | Constraint_Violation |
+  | `BUSY*`, `LOCKED*` | Busy |
+  | `READONLY*` | Read_Only (a routing bug: logged, counted, `.Internal` to callers) |
   | `CORRUPT*` | Corrupt |
   | `IOERR*`, `FULL`, `CANTOPEN` | Io |
   | anything else | Internal |
 
-  `query_one` with no row returns Not_Found. `detail` is the `table.column` parsed from the
-  "UNIQUE constraint failed: t.c" message; nothing branches on message text beyond this one
-  parser.
-- **One central mapper:** `db_result_to_domain_error(res, ctx_msg) -> domain.Domain_Error`.
+  Nothing branches on message text.
+- **One mapper with a per-call default (Q2):** `db_error(res, msg, constraint_default:
+  Error_Code) -> domain.Domain_Error`.
 
-  | Kind | Domain code | Notes |
-  |---|---|---|
-  | Unique_Violation | `.Conflict` | |
-  | Foreign_Key_Violation, Constraint_Violation | `.Validation_Failed` | or `.Conflict` where tests pin it; see Q2 |
-  | Not_Found | `.Not_Found` | |
-  | Busy | NEW `.Unavailable` | `{"unavailable", .retriable, 503}` |
-  | Read_Only, Corrupt, Io, Internal | `.Internal_Error` | |
+  | Kind | Domain code |
+  |---|---|
+  | Unique_Violation | `.Conflict` |
+  | Foreign_Key_Violation, Constraint_Violation | `constraint_default` (the site's established code, so tests and clients keep theirs) |
+  | Busy | `.Unavailable` |
+  | everything else | `.Internal_Error` |
 
-  - **`.Unavailable` is new.** None of the existing codes fit: `Bridge_Busy` is about bridges,
-    and `Internal_Error` is not distinguishable from it. Add it to `contracts.Error_Code` and
-    `ERROR_CODE_TABLE` (the table is exhaustive and compile-checked). Then build `src/bridge`
-    and `src/ctl`, because they share contracts, and check the UI's error-code handling for
-    unknown names.
-  - **The message keeps the existing user-facing text** (`ctx_msg`), which keeps the tests
-    that assert messages working.
-  - **`cause` gets a short stable token** (`sqlite_busy`, `sqlite_unique:projects.slug`),
-    never the raw SQLite message. **(found)** `Domain_Error.cause` is relayed on the wire in
-    the error envelope (`contracts/errors.odin`), so raw text there would leak schema
-    details. The full message is logged server-side.
-- **Repository convention** (documented in iface, applied in the migration):
-  - get-style: `(T, found: bool, Domain_Error)`. Not found is `found = false`,
-    `err.code == .None`. A DB failure is `err.code != .None`.
-  - save/delete-style: `(…, ok, Domain_Error)` with `ok == (err.code == .None)`.
-  - **(found)** Today's get procs return `found = false` together with a `.Not_Found` error
-    (e.g. `project_get_sqlite`), and handlers often forward `err` straight to HTTP as a 404.
-    See Q1 before changing this.
-- **Drops the blanket "any step failure → `.Conflict`".** With the mapper, a busy or I/O
-  failure no longer looks like a user conflict.
+  - `message` keeps the site's existing user-facing text.
+  - `cause` gets a schema-free token (`sqlite_unique`, `sqlite_busy`, `sqlite_io`, …).
+    **(found)** `Domain_Error.cause` is relayed on the wire (`contracts/errors.odin`), so no raw
+    SQLite text and no table or column names go there. The full message is logged server-side.
+  - **Fixed:** a busy or I/O failure no longer reports as `.Conflict`.
+- **`.Unavailable`** = `{"unavailable", .retriable, 503}`, APPENDED at the end of
+  `contracts.Error_Code` so existing ordinals do not shift.
+  - The table is exhaustive and compile-checked.
+  - Build `src/bridge` and `src/ctl`, which share contracts.
+  - Older peers parse the unknown name as `Internal_Error`.
+  - **UI note:** `src/ui/hooks/useShellPaneSubscription.ts:174,268` treats any 503 as "bridge
+    unreachable", so a DB-busy 503 on that endpoint would show as unreachable. Acceptable; flagged
+    for the UI owner.
+- **Not-found stays per method (M9, Q1).** `query_one` reports `found`; there is no Not_Found
+  kind. Each migrated method keeps exactly its current contract:
+  - methods that returned `.Not_Found` errors keep returning them
+  - methods that returned `found = false` with no error keep doing that
 
-## 6. Tests (new; temp-file DBs under TMPDIR, removed with -wal/-shm)
+  **(found)** Callers branch on this, for example `card_projector.odin:130/472/576` (`!found &&
+  code != .Not_Found`), 15 production comparisons and about 88 including tests.
+- **Save/delete convention.** `ok == (err.code == .None)`, documented in iface. Signatures do not
+  change.
 
-- **`conn_pool_test.odin`:**
-  - thread B reading during thread A's open unit of work, which holds an uncommitted insert,
-    does not see the row and does not block on `tx_mutex`
-  - an autocommit write from B survives A's rollback (lost-write regression)
-  - read-your-writes inside a unit of work, including nested savepoints
-  - a nested query inside a step loop reuses one lease (count 2 → 0)
-  - N+3 threads reading at once all finish (pool exhaustion, no deadlock)
-  - `exec_write` changes are per statement under concurrent writers (the existing
-    `step_changes_test` scenario, ported)
-  - `HAM_SQLITE_READERS=0` and `:memory:` behave as today
-  - a manual `BEGIN` through `exec` sees its own writes and releases the slot after COMMIT and
-    after ROLLBACK
-  - routing of `BEGIN`, `SAVEPOINT`, `PRAGMA` and `WITH … INSERT` never lands on a reader
-  - the tripwire panics on a leaked lease and on an open unit of work, and does not fire on a
-    clean thread
-  - the stale-lease report fires after 5 s (the threshold is a test seam)
-- **`db_errors_test.odin`:**
-  - unique, FK, NOT NULL and CHECK violations map to their kinds
-  - Busy: a second Conn holds `BEGIN IMMEDIATE` and the first runs with a short busy_timeout
-    (test seam). **(found)** `test_sqlite_busy_counter_on_lock_contention` relies on the second
-    connection having NO busy_timeout; it needs the same seam or it will take 5 s.
-  - Not_Found
-  - every kind round-trips through `db_result_to_domain_error`
-- **`db_scan_test.odin`:**
-  - tags and field-name fallback
-  - `Maybe(string)` with NULL
-  - bool from `"1"` text and from the integer 1
-  - enum converter
-  - a missing column and a wrong type panic (programmer error), and the plan cache is hit on
-    the second call
-- **`api_guard_test.odin`** (§3.5), plus a self-test on fixtures that MUST trip each rule.
-- **`db_bench_test.odin`** (test-only microbenchmark): agent list (about 30 columns × 200 rows),
-  measured before (raw API on the base commit) and after (`query_all` scan), single-threaded
-  and with 4 threads. Report ns/row and allocations per row. Target: within 10%
-  single-threaded, and parallel throughput at or above 3× with 4 readers.
-- **Suites, run one at a time with `-define:ODIN_TEST_THREADS=2`:**
-  - `src/hub/repository/sqlite`
-  - `src/hub/service/taskv2`
-  - `src/hub/service/bridge`
-  - `src/hub/transport/http`
-  - `src/hub/app`
-  - `src/contracts` (new error code)
-  - plus a build of `src/hub`, `src/bridge` and `src/ctl`
+## 6. Guardrails
 
-  Any failure is compared against `origin/main` in a separate `git worktree`.
+1. **Hidden handles and private FFI.**
+   - Connection FFI is `@(private="file")` in conn.odin under `ffi_*` names.
+   - Statement FFI (bind, column, step, reset, sql, extended_errcode) is `@(private="file")` in
+     db.odin. Duplicate file-private foreign declarations are allowed.
+   - **(found)** Where the FFI that exists outside these two files today goes:
+     - `sqlite_metrics.odin`: its `sqlite3_step`/`sqlite3_exec` wrappers move to db.odin and
+       conn.odin. It keeps `sqlite_metrics_record` and the collectors.
+     - `sqlite_file_size_*.odin`: plain OS stat, no SQLite FFI, unchanged.
+     - `migrations.odin` and `fts_repair.odin`: switch to `exec_script`, `query_*`,
+       `with_write_tx` and `Sql_Builder` (table names via an enum of the FTS tables).
+     - The test template fixture: uses `conn_copy_database` (backup API in conn.odin). Its
+       `sqlite3_config` moves into conn.odin's `@(init)`.
+2. **No statement escapes a layer call**, so there is nothing to finalize or leak (M6). The
+   streaming iterator, the live-statement table, the double-finalize guard and leak recovery from
+   revision 1 are dropped.
+3. **Routing is never the caller's decision** (§3.2).
+4. **Runtime tripwires.**
+   - **One assert, `lockorder.assert_db_thread_clean(site)`**, at the end of `handle_client` and
+     at the end of each long-lived loop iteration (§9.3). It checks that the thread holds no
+     reader lease and no unit of work.
+   - **New tracked-lock rule (B2).** `lockorder` tracks `state_mutex`, `projector_mutex` and every
+     other lock the §9.2 audit marks. A debug tripwire fires on "autocommit write while holding a
+     tracked lock", and on "unit-of-work owner writing through a different Conn on the same file"
+     (M2).
+   - Release builds log and count violations
+     (`heimdall_sqlite_lock_rule_violation_total{rule}`); tests and debug builds panic.
+5. **Source-guard test (`api_guard_test.odin`).** It scans `src/hub/**.odin` with comments
+   stripped and fails with a "use X instead" message on:
+   - `sqlite3_`, `ffi_`, `._state` or `foreign import` outside conn.odin, db.odin and tx.odin
+   - an import of the sqlite package outside `repository/sqlite`, `app/wiring.odin`,
+     `app/metrics_listener.odin`, `app/metrics_db_collectors.odin` and `*_test.odin`
+   - in repository files, `strings.builder`, `write_string`, `fmt.*printf` or `concatenate` on
+     anything SQL-like, and `exec_script` outside migrations and fts_repair
 
-## 7. Staged commits and effort
+   It includes a self-test on fixture snippets that must trip each rule.
+6. **Docs.** Header comments in conn.odin and db.odin, and an AGENTS.md "Database access rules"
+   section (§12).
 
-Each commit builds and passes the suites. Effort is focused engineering time.
+## 7. Stages, flags, effort
 
-| # | Commit | Content | Effort |
-|---|---|---|---|
-| 0 | state_mutex DB writes out of the lock | the three §8.2 sites return facts and write after `connection_state_unlock`, with a test that a heartbeat during an open unit of work does not stall | 0.5–1 d |
-| 1 | pool + routing + layer | conn.odin (opaque Conn, pool, routing, manual tx, tripwire hook, pragmas, memstatus), tx.odin (IMMEDIATE, ownership), db.odin (Arg, scan, Db_Result, mapper), sqlite_metrics (lease gauge/wait histogram, stale counter, thread-leak counter), wiring/dedicated conns `readers=0`, new tests from §6 except guard. **A TRANSITIONAL shim** keeps the old surface compiling: `Conn.db` as an opaque `Legacy_Db`, public `sqlite3_prepare_v2/finalize/errmsg/step/bind/column` and `step_changes(db, stmt)` forwarding to the router. So repos are untouched and the old code paths already get pooled reads. | 1.5–2 d |
-| 2 | error code | `contracts.Error_Code.Unavailable` + table + bridge/ctl/UI check | 0.5 d |
-| 3a–3e | migrate repos in batches (file groups below), mapping errors through `db_result_to_domain_error` | about 217 prepare sites, 43 `step_changes`, 5 healing sites, all test helpers that used the raw API, plus `app/metrics_db_collectors.odin` and `service/taskv2/mixed_work_test.odin` (**found**: both use `conn.db`, contradicting "no code outside repository/sqlite touches conn.db") | 4–6 d |
-| 4 | lock down | delete the shim, make all FFI file-private, guard test, tripwires wired at all §8 iteration points, the template fixture via `conn_copy_database`, docs (AGENTS.md + this plan) | 1–1.5 d |
-| 5 | benchmark + report | numbers in this doc | 0.5 d |
+| # | Stage | Content | Flags / behaviour | Effort |
+|---|---|---|---|---|
+| 0 | Lock hygiene + measurement (today's single connection) | **B1:** per-connection `persist_mutex` (§9.2). **B2:** projector fix + `lockorder` tracking of `projector_mutex` + audit worklist. **M1:** `verb_begin` fails closed. **M2:** throttle `last_used` writes (`auth_service.odin:454-457`, at most once per 60 s per token); add `heimdall_sqlite_uow_hold_seconds` and collect a week of prod data before stage 4. | none; ships alone | 2–3 d |
+| 1 | `db.odin` + error model | layer, scanner, `Sql_Builder`, `with_write_tx`, `db_error`, `.Unavailable` (contracts + bridge/ctl build), metrics collector options, tests §8 (layer, errors, scanner) | single conn, no routing change | 3 d |
+| 2 | Migrate repositories in batches (below) | every site to the layer; storage-type parity test per batch; `app/metrics_db_collectors.odin` and `taskv2/mixed_work_test.odin` included. **(found)** Both use `conn.db` directly, contradicting the original plan's "nothing outside the package touches it". | single conn | 4–5 d |
+| 3 | Lock down | opaque `Conn`, file-private FFI, guard test, tripwire assert at end of `handle_client` + loops, AGENTS.md | single conn | 1 d |
+| 4 | Write split | `autocommit` connection, `BEGIN IMMEDIATE`, FTS heal via try-lock/reaper, pragmas in `open()`, WAL checkpointing, test fixture mode (M7) | `HAM_SQLITE_WRITE_SPLIT` (default on after canary) | 1.5 d |
+| 5 | Readers | pool, scoped leases, overflow conn, bounded wait, lease metrics, benchmark | `HAM_SQLITE_READERS=N` (honoured only with split on) | 1.5–2 d |
+| 6 | Benchmark report + rollout | numbers in this doc | | 0.5 d |
 
-**Batches:**
+**Total: about 13–16 days.**
+
+**Stage 2 batches** (each a commit, each followed by the sqlite suite plus the owning service
+suite):
 
 | Batch | Files |
 |---|---|
-| 3a | user, project, provider, lsp_server_config, experiment, push, conversation_launch_preferences |
-| 3b | agent, content, card, attention, issue |
-| 3c | taskchain, taskv2, mixed_work, workflow_run, action, instance_reconfiguration |
-| 3d | bridge, bridge_token, bridge_log, shell_session, vault_directory, billing |
-| 3e | search, search_fts, fts_repair, migrations, test fixtures |
+| 2a | user, project, provider, lsp_server_config, experiment, push, conversation_launch_preferences |
+| 2b | agent, content, card, attention, issue |
+| 2c | taskchain, taskv2, mixed_work, workflow_run, action, instance_reconfiguration |
+| 2d | bridge, bridge_token, bridge_log, shell_session, vault_directory, billing |
+| 2e | search, search_fts, fts_repair, migrations, test fixtures |
 
-Batches can run in parallel in separate git worktrees on top of commit 1, because the shim
-keeps unmigrated files compiling. Compiles are serialized with `flock` to protect the
-production host.
+The old API stays usable until stage 3, so every commit builds.
 
-Total: about 9–12 days.
+**Rollout.**
+1. Stage 0 ships alone; read `uow_hold_seconds` for a week.
+2. Stage 4 on a canary with `HAM_SQLITE_WRITE_SPLIT=1`, then default on.
+3. Stage 5 with `HAM_SQLITE_READERS=4`.
 
-## 8. Inventories (from the code audit)
+`HAM_SQLITE_READERS=0` turns readers off. `HAM_SQLITE_WRITE_SPLIT=0` turns both off, which is
+exactly today's single connection. Neither needs a rebuild.
 
-### 8.1 Autocommit write paths (now isolated on `autocommit`; they wait on busy_timeout while a unit of work holds the write lock)
+## 8. Tests
 
-Units of work exist only in `card_service.odin:912` (`accept_card`), `taskv2/service.odin:229` (`begin_uow`, including the timer thread and merge jobs) and `taskchain_service.odin:62` (`verb_begin`). **Every other repository write is autocommit**, and today each one can be swallowed by another thread's open transaction. Paths below are under `src/hub`; HB = bridge heartbeat (45 s).
+All tests use temp-file DBs under TMPDIR, removed together with `-wal`/`-shm`.
+
+- **Layer (stage 1)**
+  - `db_scan_test.odin`:
+    - tags and field-name fallback
+    - Maybe with NULL
+    - bool from `"1"` and from 1
+    - enum converter
+    - missing column and wrong type panic
+    - plan cache hit
+    - `Sql_Builder` rejects a non-constant fragment (compile-time; documented, not runtime-tested)
+  - `db_errors_test.odin`:
+    - unique, FK, NOT NULL and CHECK map to their kinds
+    - Busy: a second Conn holds `BEGIN IMMEDIATE`, the first has a short busy_timeout (test
+      seam)
+    - every kind maps through `db_error`
+  - **(found)** `test_sqlite_busy_counter_on_lock_contention` relies on the second connection
+    having NO busy_timeout. It needs the same seam, or it will take 5 s once `open()` sets 5000.
+- **Stage 0**
+  - stale generation after reconnect: an old connection's delayed status frame cannot overwrite
+    the new generation's state, and retire waits for in-flight persists (B1)
+  - a heartbeat during an open unit of work does not stall
+  - projector under a unit of work, with a concurrent non-UoW projection
+- **Stage 2:** a storage-type parity test per batch. For each table a batch writes, compare
+  `SELECT typeof(col)…` from rows written by the new code with a snapshot captured from the base
+  commit.
+- **Stage 4/5 (`conn_pool_test.odin`)**
+  - lost-write regression: B's autocommit write survives A's rollback
+  - B does not see A's uncommitted row and does not block on `tx_mutex`
+  - read-your-writes with nested savepoints
+  - nested `query_each` re-entry uses one lease
+  - N+3 readers finish (overflow after 50 ms)
+  - `exec_write` changes are per statement under concurrent writers (ported `step_changes` test)
+  - `with_write_tx` commit and rollback
+  - BEGIN, SAVEPOINT, PRAGMA and `WITH … INSERT` never land on a reader
+  - corrupt-heal with a tracked lock held queues to the reaper instead of blocking
+  - flags off equals today's behaviour
+- **Fixture mode (M7).** A test define switches the shared fixtures to temp-file DBs with split
+  on and 4 readers. Run taskv2, transport/http and app in that mode as well as the default
+  `:memory:` mode.
+- **Guard** (§6.5) and the **benchmark** (`db_bench_test.odin`): agent list, about 30 columns ×
+  200 rows, before (base commit) and after. Measure ns/row and allocations per row,
+  single-threaded and with 4 threads.
+  - Targets: within 10% single-threaded; parallel throughput at or above 3× with 4 readers.
+- **Suites.** Run one at a time with `-define:ODIN_TEST_THREADS=2`: sqlite, taskv2,
+  service/bridge, transport/http, app and contracts, plus builds of `src/hub`, `src/bridge` and
+  `src/ctl`. Compare any failure against `origin/main` in a separate worktree.
+
+## 9. Inventories (from the code audit)
+
+### 9.1 Autocommit write paths (they wait on busy_timeout behind a unit of work once split is on)
+
+Units of work exist only in `card_service.odin:912` (`accept_card`), `taskv2/service.odin:229`
+(`begin_uow`, including the timer thread and merge jobs) and `taskchain_service.odin:62`
+(`verb_begin`). Every other repository write is autocommit. HB = bridge heartbeat (45 s).
 
 | Area | Representative callers → repo proc | Thread | Frequency |
 |---|---|---|---|
-| Bridge row | `bridge_service.odin:274` `update_runtime_capabilities`, `:405` vault status, `:230` connect, `:251` offline, `:971` update progress → `bridge_save_bridge` | WS reader | per HB with capabilities; per connect/disconnect/frame |
-| Agent instances | `agent_service.odin:1232/1256` `reconcile_bridge_heartbeat`, `:1103/1161` status report, `:1379` `reap_stale_instances`, `:1325` unreachable; `instance_failure.odin:109`; `instance_reconfiguration.odin:133/142/391` → `agent_save_instance` (with healing) | WS reader, reaper (20 s), HTTP | **per HB × active instances** |
-| Bridge logs | `bridge_log_service.odin:119` `insert_batch`, `:132` cap; `:145` prune; `:166` delete | bridge_log writer (1 s or 512 rows), reaper (15 min), HTTP | continuous |
-| Push | `push_service.odin:82/103`; `webpush_send.odin:216` `delete_by_id` | HTTP, push worker | per subscribe / dead endpoint |
-| Shell sessions | `shell_session_inventory.odin:479/542/579`, `shell_session_service.odin:1879/2258/1058`, retention `:59` | WS reader, reaper, HTTP | per inventory frame / exit; 20 s |
-| Chat / content | `content_service.odin:213-216` save_message + save_conversation + title nudge + attention notify; `:244/249` pane capture | HTTP, WS reader | per message |
-| Cards / attention | `card_projector.odin:588/598` (synchronous on the source-writer thread, and the reaper's reconcile); `card_service.odin:430/477/654/696` (**writes on list/GET**) | HTTP, WS, reaper (10 min) | per event / per list |
+| Bridge row | `bridge_service.odin:274` capabilities, `:405` vault status, `:230` connect, `:251` offline, `:971` update progress → `bridge_save_bridge` | WS reader | per HB with capabilities; per connect, disconnect or frame |
+| Agent instances | `agent_service.odin:1232/1256` `reconcile_bridge_heartbeat`, `:1103/1161` status report, `:1379` `reap_stale_instances`, `:1325` unreachable; `instance_failure.odin:109`; `instance_reconfiguration.odin:133/142/391` → `agent_save_instance` (healing) | WS reader, reaper (20 s), HTTP | **per HB × active instances** |
+| Bridge logs | `bridge_log_service.odin:119` `insert_batch`, `:132` cap, `:145` prune, `:166` delete | bridge_log writer (1 s or 512 rows), reaper (15 min), HTTP | continuous |
+| Push | `push_service.odin:82/103`; `webpush_send.odin:216` | HTTP, push worker | per subscribe or dead endpoint |
+| Shell sessions | `shell_session_inventory.odin:479/542/579`, `shell_session_service.odin:1879/2258/1058`, retention `:59` | WS reader, reaper, HTTP | per frame or exit; 20 s |
+| Chat / content | `content_service.odin:213-216` (message + conversation + title nudge + attention), `:244/249` pane capture | HTTP, WS | per message |
+| Cards / attention | `card_projector.odin:588/598` (synchronous on the source writer's thread; reaper reconcile); `card_service.odin:430/477/654/696` (**writes on list/GET**) | HTTP, WS, reaper (10 min) | per event or list |
 | Taskchain (outside `verb_begin`) | `taskchain_service.odin:465/479/583/1496/1527/1661/1795/1824/1834`, comments `:1260/1405` | HTTP | per action |
-| Auth | `auth_service.odin:457` `verify_user_api_token` → `user_token_save` (`last_used`, **not throttled**) | HTTP | **every `hut_` bearer request** |
-| Bridge tokens / enrollment | `bridge_token_service.odin:205/222/443/462/483`; `bridge_device_enroll.odin:144-240`; `bridge_enroll_pending.odin:115/149/164`; reaper `sweep_expired_enrollments` | HTTP, reaper | per enroll/refresh |
+| Auth | `auth_service.odin:457` `user_token_save` (`last_used`, **unthrottled**; throttled in stage 0) | HTTP | every `hut_` request |
+| Bridge tokens / enrollment | `bridge_token_service.odin:205/222/443/462/483`; `bridge_device_enroll.odin:144-240`; `bridge_enroll_pending.odin:115/149/164`; reaper `sweep_expired_enrollments` | HTTP, reaper | per enroll or refresh |
 | Other HTTP CRUD | users, launch prefs (healing), projects, issues, providers, experiments, LSP config, actions | HTTP | per request |
 | Boot | `lease.odin:508` `grant_boot_lease_grace` | main | once |
 | Own connection (unchanged) | billing (`get_account` also writes), `bridge_commit_enrollment`, every vault write (incl. `touch_last_seen` per signed GET) | — | — |
 
-**Existing bug, closed by §2.3:** `fts_repair.repair_fts_indexes` runs `BEGIN IMMEDIATE … COMMIT` on the shared handle without `tx_mutex`. It runs at boot and, at runtime, from `step_write_healing` on the per-HB `agent_save_instance` path. If a unit of work is open, the heal's BEGIN fails, and the `ROLLBACK` on its error path (`fts_repair.odin:65`) **rolls back the other thread's unit of work**.
+Follow-up candidate: batch the per-HB instance `last_seen_at` writes into one statement.
 
-**Follow-up candidates** (not required here; noted for the busy-wait budget): throttle `user_token_save` `last_used`, and batch the per-HB instance `last_seen_at` writes into one statement.
+### 9.2 Locks held around DB writes (B1, B2), and the stage 0 fixes
 
-### 8.2 DB access while holding `Bridge_Runtime_Connection.state_mutex`
+The rule: no lock that a unit-of-work body can take may be held around an autocommit write.
 
-All three sites below lock through `connection_state_lock` (`service/project/runtime_registry.odin:709`). All run on the bridge WS thread and use autocommit repository calls. None begins a unit of work, so the lock order holds today.
+| Lock | Sites | Why it matters | Fix |
+|---|---|---|---|
+| `Bridge_Runtime_Connection.state_mutex` (`runtime_registry.odin:709`) | handshake `bridge_handlers.odin:1688` (get + `save_bridge`); disconnect `:1803` (offline + per-instance `agent_save_instance`); status `:2444` (`agent_get/save_instance`, **every HB**) | **(B1, verified)** The lock serialises durable writes with retirement: `bridge_runtime_connection_retire` (`runtime_registry.odin:223-226`) sets `retired` then waits on `connection_state_lock`, and the comment at `bridge_handlers.odin:2440-2442` relies on it, so "write after unlock" would let a stale generation save over a new one. A UoW holder (matcher JIT, `agent_service.odin:276` → `bridge_runtime_instance_apply`) takes `state_mutex` while holding the write lock → 5 s stall then Busy once split is on. | New per-connection **`persist_mutex`**, taken by the three write sites and by retire, never by a UoW. `state_mutex` guards only the in-memory map. Order: `persist_mutex → sqlite write lock` and `persist_mutex → state_mutex`. Writes check `retired` under `persist_mutex`. Test: stale generation after reconnect. |
+| `Card_Service.projector_mutex` (`card_projector.odin:124/376/467`) | held across task reads and card `insert_if_absent`/`compare_and_set` | **(B2, verified)** Reached INSIDE units of work (taskchain verbs → `save_task`/`save_comment` → `attention_notify` → `project_task_card`, synchronous) and also on non-UoW threads around autocommit writes. Non-UoW holder waits for the write lock; the UoW waits for `projector_mutex` → 5 s stall then Busy. | Projection inside a unit of work is deferred to an after-commit hook (the notifier enqueues; the hook projects after `tx_mutex` is released). `projector_mutex` joins `lockorder` tracking, so the debug tripwire catches any regression. |
+| Audit worklist (stage 0) | `agent_service.reconfiguration_mutex`, `user_service.launch_preferences_mutex`, `taskv2 Service.state_mutex`, `taskv2 timers.mutex`, `vault_directory service.mutex`, `action_handlers` mutex, `shell_session_service` `mu`/`tunnel_mu`/`viewer_write_mu` | not yet audited against the rule | Classify each: (a) never held around DB access, (b) held around autocommit writes but never taken by a UoW body (allowed; document), or (c) violates → fix like `projector_mutex`. Record results here. |
 
-| Site (lock) | DB calls under the lock | Frequency |
-|---|---|---|
-| Handshake `bridge_ws_upgrade_handler` (`transport/http/bridge_handlers.odin:1688`) | **Read:** token verify, `bridge_get_bridge`. **Write:** `bridge_save_bridge` (`service/bridge/bridge_service.odin:229`). | per connect |
-| Disconnect `bridge_disconnect_persist` (`bridge_handlers.odin:1803`) | `mark_bridge_offline` (get + `save_bridge`). `mark_bridge_instances_unreachable`: list + one `agent_save_instance` per active instance (`service/agent/agent_service.odin:1304/1323`). | per disconnect |
-| Status `bridge_apply_validated_status` (`bridge_handlers.odin:2444`) | `apply_bridge_status_report`: `agent_get_instance` + `agent_save_instance` (`agent_service.odin:1074/1103/1165`). | **every heartbeat / status frame** |
-
-**This is a NEW hazard and must be fixed before stage 1 ships.** The matcher's JIT path (`agent_service.odin:276` → `bridge_runtime_instance_apply`) holds a unit of work, and with it the SQLite write lock (BEGIN IMMEDIATE), and then waits for `state_mutex`. Meanwhile the WS thread holds `state_mutex` and its autocommit write waits for the write lock. Neither can proceed until busy_timeout (5 s) fails the WS thread's write with Busy.
-
-Today there is no wait: the WS thread's write silently joins the other thread's transaction (the lost-write bug).
-
-**Fix (stage 0, below):** the three sites follow the existing rule for `state_mutex` code. They decide under the lock, return the facts, and write after the unlock (as `notify_facts` / `notify_instances_terminal` already do). Reads under the lock run on readers and are harmless.
-
-### 8.3 Long-lived thread iteration points for the tripwire
+### 9.3 Tripwire points (one assert each)
 
 | Thread | Check point |
 |---|---|
-| HTTP | `transport/http/server.odin` `handle_client` end (after `write_http_response`, :144; the upgrade exits at :126/:134 hand off to the WS loops) |
-| Bridge WS | `transport/http/bridge_handlers.odin:1935` loop, after `bridge_ws_process_frame` (:1963) and on the binary `continue` (:1952) |
-| User WS | `transport/http/user_handlers.odin:157` loop (after :166) |
+| HTTP | `handle_client` end (`transport/http/server.odin`, after `write_http_response` :144) |
+| Bridge WS | per frame (`bridge_handlers.odin:1935` loop, after :1963 and on the binary `continue` :1952) |
+| User WS | `user_handlers.odin:157` |
 | Agent pane WS | `agent_instance_handlers.odin:228` |
 | Shell pane WS | `shell_session_handlers.odin:198` |
-| Reaper | `app/reaper.odin:118` (after `reaper_with_scratch`) |
-| taskv2 timer | `service/taskv2/timers.odin:471` (at `free_all(temp)`, :481) |
-| Merge job | `service/taskv2/merge.odin:107` (defer block :109-113) |
-| Webpush | `service/push/webpush_send.odin:97` (after :101) |
-| bridge_log writer | `service/bridge_log/bridge_log_service.odin:203` (after `flush_once`, :212) |
-| Attention debouncer | `service/events/attention_debouncer.odin:79` |
-| Shell kill replay | `service/shell_session/shell_session_service.odin:1174` (end :1197) |
-| Pane viewer writer | `service/shell_session/pane_viewer_writer.odin:72` (:104) |
+| Reaper | `app/reaper.odin:118` |
+| taskv2 timer | `taskv2/timers.odin:471` |
+| Merge job | `taskv2/merge.odin:107` |
+| Webpush | `push/webpush_send.odin:97` |
+| bridge_log writer | `bridge_log_service.odin:203` |
+| Attention debouncer | `events/attention_debouncer.odin:79` |
+| Shell kill replay | `shell_session_service.odin:1174` |
+| Pane viewer writer | `pane_viewer_writer.odin:72` |
 
-The proxy relay (`bridge_proxy_relay.odin:316`) and the preview pump (`shell_session_handlers.odin:1250`) do no DB work. Give them a check only if a later change adds DB access.
+## 10. Metrics
 
-## 9. Rollout, kill-switch, metrics
+- **Existing families use the `heimdall_` prefix (found).**
+- `heimdall_sqlite_query_duration_seconds` gains `{conn = writer|autocommit|reader|overflow}`.
+- **New:**
+  - `heimdall_sqlite_uow_hold_seconds` (stage 0)
+  - `heimdall_sqlite_reader_leased`
+  - `heimdall_sqlite_reader_wait_seconds`
+  - `heimdall_sqlite_reader_overflow_total`
+  - `heimdall_sqlite_lock_rule_violation_total{rule}`
+  - `heimdall_sqlite_fts_repair_total{mode = inline|reaper}`
+- **Watch:** `busy_total`, `uow_hold_seconds` p99, reader wait p99, the 503 rate, `wal_bytes`,
+  and RSS (readers start at 4 MB of cache each, no mmap).
 
-- **Ship with readers ON.** `HAM_SQLITE_READERS=0` in the nix service env is an instant
-  rollback without a rebuild: there is only `writer`, as today, and the typed layer and error
-  model are unaffected.
-- **New metrics:**
-  - `heimdall_sqlite_reader_leased` (gauge)
-  - `heimdall_sqlite_reader_wait_seconds` (histogram)
-  - `heimdall_sqlite_reader_lease_stale_total`
-  - `heimdall_sqlite_thread_leak_total{kind}`
-  - `heimdall_sqlite_read_only_violation_total`
+## 11. Gotchas (found)
 
-  **(found)** Existing families use the `heimdall_` prefix, not the `ham_` prefix the first
-  draft used.
-- **Watch:** `heimdall_sqlite_busy_total`, the reader wait p99, request p99, the 503 rate
-  (`.Unavailable`), `heimdall_sqlite_wal_bytes` (long readers delay checkpoints), and RSS.
-  Readers add up to 4 × 16 MB of page cache plus mmap'd file pages, which count as shared RSS.
-
-## 10. AGENTS.md "Database access rules" (draft, about 15 lines)
-
-- Repositories call `query_one`, `query_all`, `query` + `rows_next` + `rows_scan`, and
-  `exec_write` in `repository/sqlite/db.odin` with bound `Arg`s. Never format values into SQL.
-  Use `in_list(n)` for IN lists, and mark a genuinely dynamic identifier with
-  `// sql-dynamic: <reason>`.
-- Do not use `sqlite3_*`, handles or `defer finalize`; the layer owns statements.
-  `api_guard_test` enforces this.
-- Routing is automatic. Inside a unit of work you read your own writes. Outside one, writes
-  autocommit on their own connection and reads come from a pooled snapshot, so you never see
-  another thread's uncommitted rows. Use after-commit hooks to signal other threads.
-- Never hold a unit of work across network I/O. Never begin one while holding a `state_mutex`.
-- Errors: branch on `Db_Result.kind`, convert with `db_result_to_domain_error`, follow the
-  found/ok convention.
-- New repository method: write the SQL constant, define a `*_Row` struct with `db` tags (or
-  reuse the domain struct), call the layer, map errors, add a test against a temp-file DB.
-
-## 11. Gotchas found in the code (keep in mind while implementing)
-
-- **`step_changes` must use the statement's own handle.** `sqlite3_changes` is per connection,
-  and `autocommit` is shared by every request thread.
+- **`sqlite3_changes` is per connection.** `exec_write` must use the statement's own handle.
 - **`bind_text("")` binds an empty string, not NULL.** Only vault's `bind_opt` binds NULL. Keep
-  both behaviours (`Arg` string vs `opt_text`).
-- **`column_text` clones and `column_text_unowned` borrows.** Map them to scanned `string` and
-  to `col_view`.
-- **Billing is a separate Conn with its own `BEGIN IMMEDIATE` transactions.** It runs with
-  readers off, and its statements go through the same layer.
-- **A unit-of-work owner that writes through a DIFFERENT Conn on the same file** (billing,
-  enrollment or vault connections) waits up to 5 s on its own write lock and then fails Busy.
-  This already happens today when the unit of work has written. The audit found no such path;
-  re-check in §8.
-- **Statements are finalized on the thread that prepared them.** The layer guarantees it. A
-  `Rows` must not be handed to another thread; this is documented.
-- **`HAM_SQLITE_READERS` parse errors fall back to 4 with a warning.**
+  both (`Arg` string vs `opt_text`).
+- **`column_text` clones; `column_text_unowned` borrows.** Scan into `string`; parse-only fields
+  use typed columns.
+- **A UoW owner writing through a dedicated Conn on the same file** (billing, enrollment, vault)
+  waits on its own write lock and then fails Busy. None was found; the stage 3 tripwire catches
+  new ones.
+- **Odin `deferred_out` semantics** were verified on our build, but are no longer needed (M6).
+- **`HAM_SQLITE_READERS` parse errors** fall back to the default with a warning.
 
-## 12. Open questions / risks
+## 12. AGENTS.md "Database access rules" (draft)
 
-- **Q1 — Not-found convention.** Most get-procs return `.Not_Found` as an error today, and
-  handlers forward it as a 404. Switching to `found=false, err=None` everywhere means auditing
-  every caller (about 100 get sites) so a 404 is not silently lost. Proposal: adopt the
-  convention in iface docs and in new code. Migrate per batch only where every caller is
-  checked, or keep `.Not_Found` errors from the get-procs that already return them and record
-  the exception. Needs a decision.
-- **Q2 — FK/constraint mapping.** Several tests may pin `.Conflict` for constraint failures
-  (for example the RAISE(ABORT) triggers on immutable owner columns). Map to
-  `.Validation_Failed` by default, keep `.Conflict` where a test or a client contract pins it,
-  and list those sites.
-- **Q3 — `.Unavailable`.** It is a new wire code. Bridges and UIs on older versions will see an
-  unknown code name (the parser maps it to Internal_Error). Acceptable?
-- **Q4 — Universal FTS self-heal.** Every write that hits `SQLITE_CORRUPT` would take
-  `tx_mutex` and rebuild all fts indexes. That is correct but heavy. Today only 5 sites do it.
-  OK to make it universal?
-- **Q5 — Reader cache and mmap sizes.** 16 MB of cache and 256 MB of mmap per reader come from
-  the original plan. On a memory-sensitive host (this worktree is the memleak investigation),
-  start with `cache_size=-4000` and `mmap_size=64MB`?
-- **Q6 — Lease-leak recovery in release.** Resetting leaked statements and returning the reader
-  keeps the hub alive, but it lets two threads share one reader (serialized mode keeps that
-  safe). Alternative: log only and let the pool shrink. Recommend recovery.
-- **Q7 — Reflection-based scanning.** The plan cache is keyed by `(typeid, sql data pointer)`.
-  SQL built at runtime (`sql-dynamic`) misses the cache and pays a validation per call. That is
-  acceptable for the few dynamic sites, or they can use the index getters.
-- **Risk — migration size.** About 217 sites. The behaviour-preserving rule (same bind types,
-  same user-facing messages) plus per-batch suite runs keep it reviewable. Store-type
-  normalisation stays out of scope.
-- **Risk — readers break on a non-WAL filesystem.** `open` detects this and turns readers off.
+- Repositories call `query_one`, `query_all`, `query_each`, `exec_write` and `with_write_tx`
+  with SQL constants and bound `Arg`s. Build dynamic SQL only with `Sql_Builder`. Never format
+  values into SQL.
+- Do not use `sqlite3_*`, handles or statements; `api_guard_test` enforces this.
+- Routing is automatic:
+  - Inside a unit of work you read your own writes.
+  - Outside one, writes autocommit on their own connection and reads come from a pooled snapshot.
+  - Signal other threads with after-commit hooks.
+- Never hold a unit of work across network I/O.
+- Never hold a lock that a unit-of-work body can take around a DB write, and never begin a unit
+  of work under a tracked lock.
+- Errors: branch on `Db_Result.kind` and convert with `db_error(res, msg, default)`. Keep each
+  method's not-found contract.
+- New repository method:
+  1. Write an SQL constant.
+  2. Define a `*_Row` struct with `db` tags (or reuse the domain struct).
+  3. Call the layer and map errors.
+  4. Add a temp-file DB test, including the storage-type parity check.
+
+## 13. Decisions
+
+Recommended resolutions; the user to confirm.
+
+- **Q1 Not-found:** keep per-method behaviour (§5). *Recommended.*
+- **Q2 Constraint mapping:** per-call default (`db_error(…, default)`), keeping each site's code.
+  *Recommended.*
+- **Q3 `.Unavailable`:** add it, appended at the end. Older peers see Internal_Error.
+  *Recommended.*
+- **Q4 FTS heal:** no inline universal heal. Inline only via try-lock with no tracked lock held;
+  otherwise the reaper repairs. *Recommended.*
+- **Q5 Reader memory:** `cache_size=-4000`, mmap off initially. *Recommended.*
+- **Q6 Lease-leak recovery:** moot; no statement outlives a layer call.
+- **Q7 Dynamic-SQL plan cache:** fine. `Sql_Builder` output is keyed by a fragment hash; scans
+  of builder SQL validate per call.
+- **Open, needs a decision:** the projector fix in §9.2 (defer projection inside a unit of work
+  to after commit). It changes when a card appears for a verb's change: after commit instead of
+  inside the transaction. Cards are derived state and reconciled by the reaper, so this looks
+  acceptable, but it needs the product owner's OK.
+- **Open:** whether a DB-busy 503 on shell-pane endpoints showing "bridge unreachable" in the UI
+  is acceptable or needs a UI tweak.
+
+## 14. Review response
+
+Each review finding was verified against the code; none was rebutted.
+
+| Finding | Status | Where in this revision |
+|---|---|---|
+| **B1** | Verified: `retire` waits on `connection_state_lock` (`runtime_registry.odin:223-226`), and the comment at `bridge_handlers.odin:2440-2442` relies on that serialisation. Chose `persist_mutex` over a generation CAS: one lock, no schema change, and a natural home for the retire wait. | §9.2, stage 0, §8 |
+| **B2** | Verified: the projector is reached synchronously from verbs via `attention_notify` (`taskchain/attention_notify.odin:19-28`). | §2 principle 3, §9.2 (fix + audit worklist), §6.4 |
+| **B3** | Adopted: try-lock or reaper, and the explicit `with_write_tx`. | §3.4 |
+| **M1–M9** | Adopted. | §3.4 (M1); stage 0 + §10 (M2); §3.1 (M3); §3.3 (M4); §7 flags and rollout (M5); stage order + §3.3 + §6.2 (M6); §8 fixture mode (M7); §4 `Sql_Builder` (M8); §5 (M9) |
+| **Minor** | All adopted. | §3.4 hazard text and migration rule; §4 global plan cache; §3.3 snapshot doc; §5 cause token and appended `.Unavailable` + UI note; §6.1 FFI destinations (the `sqlite_file_size_*` files have no SQLite FFI); §3.1 metrics collector options; §10 `conn` label; §3.5 `journal_size_limit` + checkpoint; §4 bool binding + §8 parity test; §7 effort 13–16 d |
 
 ## Out of scope (follow-ups)
 
-- A prepared-statement cache per connection. The layer makes it easy: the cache key is the SQL
-  pointer.
-- Native integer binding and storage normalisation.
-- Snapshot/ETag responses for UI polling endpoints; shorter unit-of-work sections (cached
-  workflow spec parsing).
+- A prepared-statement cache per connection.
+- Native integer storage.
+- Batching per-heartbeat instance writes.
+- Snapshot/ETag for UI polling endpoints.
+- Cached workflow-spec parsing.
