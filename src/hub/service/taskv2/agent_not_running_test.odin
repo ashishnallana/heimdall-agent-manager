@@ -42,8 +42,11 @@ test_agent_not_running_offline_start_failure_retry_and_dead_holder :: proc(t: ^t
 	task = get_task(fx, "task_anr")
 	testing.expect(t, task.state == .Backlog && strings.contains(task.blocked_on_json, "no credentials"), "failure kept and updated block")
 	fx.svc.bridge_command_sink = {}
-	started, err = start_task_agent(&fx.svc, auth, task.task_id)
-	testing.expect(t, started && err.code == .None, "retry succeeds")
+	started, err = start_task_agent(&fx.svc, contracts.Auth_Context{kind = .Instance_Token, user_id = "u1"}, task.task_id)
+	testing.expect(t, !started && err.code == .Forbidden, "agents cannot start task agents")
+	// The UI behind the auth proxy authenticates as Trusted_Proxy, not a user token.
+	started, err = start_task_agent(&fx.svc, contracts.Auth_Context{kind = .Trusted_Proxy, user_id = "u1"}, task.task_id)
+	testing.expect(t, started && err.code == .None, "browser-session retry succeeds")
 	lease, held := lease_of(fx, "inst_w1")
 	testing.expect(t, held && wake_log_has_run(log, "inst_w1"), "success dispatches")
 	confirm_holder(fx, "inst_w1")
