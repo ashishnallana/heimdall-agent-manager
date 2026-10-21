@@ -63,7 +63,7 @@ import {
   setActiveVaultKey,
 } from '../src/ui/utils/vaultCrypto.ts';
 
-const { handleUserWsEvent } = await import('../src/ui/api/wsInvalidation.ts');
+const { handleUserWsEvent, flushQueuedInvalidations } = await import('../src/ui/api/wsInvalidation.ts');
 
 const TEST_KEY_HEX_RAW = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
 const TEST_KEY_HEX = await keyringFromHex(TEST_KEY_HEX_RAW);
@@ -370,7 +370,9 @@ test('handleUserWsEvent dispatches upsertConversationTitle and invalidates Conve
   assert.equal(upsertAction.payload.rawTitle, 'Renamed Chat Conversation');
   assert.equal(upsertAction.payload.projectId, 'proj_chat');
 
-  // Verify ConversationSummaries cache invalidation was triggered
+  // Verify ConversationSummaries cache invalidation was triggered (coalesced per
+  // burst since refresh_integrate; flush the window instead of waiting it out).
+  flushQueuedInvalidations();
   const invalidateAction = dispatchedActions.find(
     (a) => a.type === 'heimdallApi/invalidateTags',
   );
