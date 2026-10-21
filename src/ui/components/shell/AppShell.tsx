@@ -526,13 +526,13 @@ function normalizeProject(raw: any): ProjectSummary {
 // UI-14: adapt cookie-auth RTK Query sidebar data into the local tree types so
 // server state lives in RTK Query (and is WS-invalidated) while the tree builder
 // keeps its existing typed contract.
-function sidebarConversationToSummary(c: SidebarConversation, agentNamesById: Map<string, string>): ConversationSummary {
+function sidebarConversationToSummary(c: SidebarConversation): ConversationSummary {
   const agentId = c.agentId || 'unknown-agent';
   return {
     conversationId: c.conversationId,
     agentId,
     agentInstanceId: c.agentInstanceId,
-    agentName: displayAgentName(agentId, c.agentName || agentNamesById.get(agentId)),
+    agentName: displayAgentName(agentId, c.agentName),
     projectId: c.projectId || DEFAULT_CONVERSATIONS_PROJECT.projectId,
     title: c.title,
     unreadCount: c.unreadCount,
@@ -1516,21 +1516,12 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
   // list/order (ALL projects, endpoint-fixed alphabetical) and the coordinator set
   // used to gold-highlight a coordinator agent's own name.
   const agentsLiveQuery = useGetAgentsLiveQuery(undefined, { pollingInterval: 10000, skipPollingIfUnfocused: true });
-  const agentIdentitiesQuery = useListAgentIdentitiesQuery();
-  const agentNamesById = useMemo(() => {
-    const map = new Map<string, string>();
-    for (const agent of (agentIdentitiesQuery.data?.agents || [])) {
-      // TODO(FIX): Replace loose fallback chain with canonical typed schema property
-      const id = String(agent?.agent_id || agent?.agentId || agent?.id || '').trim();
-      // TODO(FIX): Replace loose fallback chain with canonical typed schema property
-      const name = String(agent?.name || agent?.display_name || agent?.displayName || '').trim();
-      if (id && name) map.set(id, name);
-    }
-    return map;
-  }, [agentIdentitiesQuery.data]);
+  // The hub already resolves each row's agent name server-side (content_handlers
+  // write_chat_json_with_runtime looks the identity up per row), so no app-wide
+  // GET /agents is needed to fill it in; a row without one renders "Unnamed agent".
   const conversations = useMemo(
-    () => (conversationsQuery.data || []).map((conversation) => sidebarConversationToSummary(conversation, agentNamesById)),
-    [agentNamesById, conversationsQuery.data],
+    () => (conversationsQuery.data || []).map(sidebarConversationToSummary),
+    [conversationsQuery.data],
   );
   const liveProjects = useMemo(() => agentsLiveQuery.data || [], [agentsLiveQuery.data]);
   // REQ-BAR-2: status bar counts. Instances reuse the agents-live poll above; live
