@@ -149,11 +149,26 @@ user_ws_upgrade_handler :: proc(ctx: rawptr, req: Request, client: net.TCP_Socke
 	ws_close_reason := "error"
 	defer project_service.ws_track_close(project_service.WS_KIND_USER, ws_opened, ws_close_reason)
 	ws_rx := ws_bytes_series(project_service.WS_KIND_USER, "rx", "")
-	ws_tx := ws_bytes_series(project_service.WS_KIND_USER, "tx", "")
-	idx := events.user_ws_add(handlers.event_bus, auth_ctx.user_id, client)
-	defer events.user_ws_remove(handlers.event_bus, idx)
-	ready := "{\"type\":\"user_ws_ready\",\"protocol_version\":1}"
-	ws_note_write_ok(project_service.WS_KIND_USER, ws_tx, events.write_ws_text_frame(client, ready), len(ready))
+	// Attach registers the socket and writes user_ws_ready (stream_epoch + watermark) in
+	// one step, so no event can be published between them. A full table is refused with
+	// close 1013 instead of a ready that would never be followed by an event (REQ-3).
+	// The fd stays ours: detach first (it waits out any in-flight fan-out write), and the
+	// server closes the socket after this handler returns.
+	handle, attach := events.user_ws_attach(handlers.event_bus, auth_ctx.user_id, client)
+	switch attach {
+	case .Attached:
+	case .Slots_Full:
+		// Counted as a "limit" rejection (heimdall_ws_connections_total); the close reason
+		// has no slot-specific label and maps to "other".
+		project_service.ws_track_rejected(project_service.WS_KIND_USER, "limit")
+		ws_close_reason = "slots_full"
+		_ = events.user_ws_refuse_full(client)
+		return
+	case .Ready_Failed:
+		ws_close_reason = "write_failed"
+		return
+	}
+	defer events.user_ws_detach(handlers.event_bus, handle)
 	for {
 		// The browser client sends lightweight heartbeat frames every ~25s. Keep the
 		// server idle timeout comfortably above that so normal sockets do not churn,

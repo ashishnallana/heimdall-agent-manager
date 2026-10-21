@@ -15,6 +15,7 @@ package events
 import "core:net"
 import "core:strings"
 import "core:testing"
+import "core:thread"
 import "core:time"
 import ws "odin_test:lib/ws"
 
@@ -109,6 +110,50 @@ split_text_frames :: proc(raw: []byte) -> (payloads: [dynamic]string, ok: bool) 
 @(private = "file")
 OWNER :: "usr_req35"
 
+// stream_seq_of reads the stream_seq the bus stamped on a frame, or -1.
+@(private = "file")
+stream_seq_of :: proc(frame: string) -> int {
+	key :: `"stream_seq":`
+	at := strings.index(frame, key)
+	if at < 0 do return -1
+	n := 0
+	digits := 0
+	for c in transmute([]byte)frame[at + len(key):] {
+		if c < '0' || c > '9' do break
+		n = n * 10 + int(c - '0')
+		digits += 1
+	}
+	if digits == 0 do return -1
+	return n
+}
+
+// stream_epoch_of reads the stamped stream_epoch, or "".
+@(private = "file")
+stream_epoch_of :: proc(frame: string) -> string {
+	key :: `"stream_epoch":"`
+	at := strings.index(frame, key)
+	if at < 0 do return ""
+	rest := frame[at + len(key):]
+	end := strings.index_byte(rest, '"')
+	if end < 0 do return ""
+	return rest[:end]
+}
+
+// unstamped returns the frame without the leading stream stamp, i.e. what the producer
+// published. Allocated on the temp allocator.
+@(private = "file")
+unstamped :: proc(frame: string) -> string {
+	if !strings.has_prefix(frame, `{"stream_epoch":"`) do return frame
+	at := strings.index(frame, `"stream_seq":`)
+	if at < 0 do return frame
+	rest := frame[at + len(`"stream_seq":`):]
+	i := 0
+	for i < len(rest) && rest[i] >= '0' && rest[i] <= '9' do i += 1
+	rest = rest[i:]
+	if strings.has_prefix(rest, ",") do rest = rest[1:]
+	return strings.concatenate({"{", rest}, context.temp_allocator)
+}
+
 // AC1 — THE DEFECT. An event the hub cannot encode at all must cost that one event and
 // nothing else. Sized past WS_MAX_SERVER_PAYLOAD so it is refused by the writer even with
 // the 64-bit arm available, which is now the only way to reach a refusal.
@@ -132,16 +177,24 @@ req35_oversized_event_keeps_the_client_subscribed :: proc(t: ^testing.T) {
 	// AC4 — the drop is counted, not silent.
 	testing.expect_value(t, bus.oversized_events_dropped, 1)
 
-	// Still SUBSCRIBED, not merely still marked connected: the next event arrives, and it
-	// arrives as the only thing on the wire — no fragment of the refused frame preceded it.
+	// REQ-3 — the client is TOLD: the dropped event's stream_seq goes to a resync_required.
+	testing.expect_value(t, bus.resyncs_sent, 1)
+
+	// Still SUBSCRIBED, not merely still marked connected: the next event arrives, after
+	// only the resync hint — no fragment of the refused frame preceded either.
 	publish_raw_to_user(&bus, OWNER, `{"type":"after"}`)
 	raw := drain(pair.peer)
 	defer delete(raw)
 	frames, parse_ok := split_text_frames(raw)
 	defer delete(frames)
 	testing.expect(t, parse_ok, "the stream must be well-formed — a refusal must not put bytes on the wire")
-	testing.expect_value(t, len(frames), 1)
-	testing.expect_value(t, frames[0], `{"type":"after"}`)
+	testing.expect_value(t, len(frames), 2)
+	if len(frames) == 2 {
+		testing.expect_value(t, stream_seq_of(frames[0]), 1)
+		testing.expect_value(t, unstamped(frames[0]), `{"type":"resync_required","reason":"event_too_large"}`)
+		testing.expect_value(t, stream_seq_of(frames[1]), 2)
+		testing.expect_value(t, unstamped(frames[1]), `{"type":"after"}`)
+	}
 }
 
 // AC2 — DELIVERY, not survival. 80 KB is the size the old writer returned false for (and
@@ -241,6 +294,7 @@ req35_one_refused_event_does_not_disturb_the_users_other_connections :: proc(t: 
 	// Counted once per CONNECTION the event could not reach, which is what an operator
 	// reading the warn line sees.
 	testing.expect_value(t, bus.oversized_events_dropped, 2)
+	testing.expect_value(t, bus.resyncs_sent, 2)
 
 	publish_raw_to_user(&bus, OWNER, `{"type":"both"}`)
 	for sock in ([]net.TCP_Socket{a.peer, b.peer}) {
@@ -249,8 +303,8 @@ req35_one_refused_event_does_not_disturb_the_users_other_connections :: proc(t: 
 		frames, parse_ok := split_text_frames(raw)
 		defer delete(frames)
 		testing.expect(t, parse_ok, "each stream must be well-formed")
-		testing.expect_value(t, len(frames), 1)
-		testing.expect_value(t, frames[0], `{"type":"both"}`)
+		testing.expect_value(t, len(frames), 2)
+		if len(frames) == 2 do testing.expect_value(t, unstamped(frames[1]), `{"type":"both"}`)
 	}
 }
 
@@ -293,4 +347,238 @@ req35_the_removal_decision_covers_every_result_arm :: proc(t: ^testing.T) {
 	testing.expect(t, !_publish_write_removes_socket(.Too_Large), "an unencodable frame says NOTHING about the peer — this is the defect")
 	testing.expect(t, _publish_write_removes_socket(.Peer_Gone), "a peer that is gone must be removed")
 	testing.expect(t, _publish_write_removes_socket(.Desynchronised), "half a frame on the wire must end the connection, not be retried on it")
+}
+
+// ---------------------------------------------------------------------------------------
+// REQ-3 — per-connection delivery stream, slot exhaustion, concurrent publishers.
+// ---------------------------------------------------------------------------------------
+
+@(private = "file")
+OTHER_OWNER :: "usr_req3_other"
+
+// Ready carries the epoch and the watermark, and every connection gets its own epoch, so a
+// reconnect can never be mistaken for continuity.
+@(test)
+req3_attach_sends_ready_with_epoch_and_watermark :: proc(t: ^testing.T) {
+	a := make_pair(t)
+	defer close_pair(&a)
+	b := make_pair(t)
+	defer close_pair(&b)
+	bus: User_Event_Bus
+	ha, ra := user_ws_attach(&bus, OWNER, a.hub)
+	hb, rb := user_ws_attach(&bus, OWNER, b.hub)
+	testing.expect_value(t, ra, User_WS_Attach_Result.Attached)
+	testing.expect_value(t, rb, User_WS_Attach_Result.Attached)
+	publish_raw_to_user(&bus, OWNER, `{"type":"x"}`)
+	user_ws_detach(&bus, ha)
+	user_ws_detach(&bus, hb)
+
+	epochs: [2]string
+	for sock, k in ([]net.TCP_Socket{a.peer, b.peer}) {
+		raw := drain(sock)
+		defer delete(raw)
+		frames, ok := split_text_frames(raw)
+		defer delete(frames)
+		testing.expect(t, ok, "well-formed stream")
+		testing.expect_value(t, len(frames), 2)
+		if len(frames) != 2 do continue
+		testing.expect(t, strings.contains(frames[0], `"type":"user_ws_ready"`), "ready comes first")
+		testing.expect(t, strings.contains(frames[0], `"protocol_version":2`), "ready announces protocol 2")
+		testing.expect_value(t, stream_seq_of(frames[0]), 0)
+		testing.expect_value(t, stream_seq_of(frames[1]), 1)
+		testing.expect_value(t, stream_epoch_of(frames[1]), stream_epoch_of(frames[0]))
+		epochs[k] = strings.clone(stream_epoch_of(frames[0]), context.temp_allocator)
+	}
+	testing.expect(t, epochs[0] != "" && epochs[0] != epochs[1], "each connection has its own epoch")
+	testing.expect(t, !bus.connected[ha.idx] && !bus.connected[hb.idx], "detach releases both slots")
+}
+
+// The global event_seq advances for EVERY owner; the per-connection stream must not, or
+// another user's traffic would look like a gap.
+@(test)
+req3_other_owners_events_do_not_advance_the_stream :: proc(t: ^testing.T) {
+	mine := make_pair(t)
+	defer close_pair(&mine)
+	theirs := make_pair(t)
+	defer close_pair(&theirs)
+	bus: User_Event_Bus
+	user_ws_add(&bus, OWNER, mine.hub)
+	user_ws_add(&bus, OTHER_OWNER, theirs.hub)
+
+	publish_resource_changed(&bus, OTHER_OWNER, "task", "t1", "updated", "")
+	publish_resource_changed(&bus, OWNER, "task", "t2", "updated", "")
+	publish_resource_changed(&bus, OTHER_OWNER, "task", "t3", "updated", "")
+	publish_resource_changed(&bus, OTHER_OWNER, "task", "t4", "updated", "")
+	publish_raw_to_user(&bus, OWNER, `{"type":"attention_changed"}`)
+	testing.expect_value(t, bus.event_seq, 4)
+
+	raw := drain(mine.peer)
+	defer delete(raw)
+	frames, ok := split_text_frames(raw)
+	defer delete(frames)
+	testing.expect(t, ok, "well-formed stream")
+	testing.expect_value(t, len(frames), 2)
+	if len(frames) == 2 {
+		testing.expect_value(t, stream_seq_of(frames[0]), 1)
+		testing.expect_value(t, stream_seq_of(frames[1]), 2)
+		testing.expect(t, strings.contains(frames[0], `"resource_id":"t2"`), "only my event")
+		testing.expect(t, strings.contains(frames[1], `"type":"attention_changed"`), "every event type is stamped")
+	}
+	other_raw := drain(theirs.peer)
+	defer delete(other_raw)
+	other_frames, _ := split_text_frames(other_raw)
+	defer delete(other_frames)
+	testing.expect_value(t, len(other_frames), 3)
+	if len(other_frames) == 3 do testing.expect_value(t, stream_seq_of(other_frames[2]), 3)
+}
+
+@(private = "file")
+Publisher_Job :: struct {
+	bus:   ^User_Event_Bus,
+	owner: string,
+	count: int,
+}
+
+@(private = "file")
+REQ3_PUBLISHERS :: 8
+@(private = "file")
+REQ3_PER_PUBLISHER :: 60
+
+// Concurrent publishers on several threads: each connection must receive every event
+// exactly once, as well-formed frames, with stream_seq 1..N in wire order — the
+// write_mutex makes seq assignment and the write one step.
+@(test)
+req3_concurrent_publishers_keep_each_stream_contiguous :: proc(t: ^testing.T) {
+	a := make_pair(t)
+	defer close_pair(&a)
+	b := make_pair(t)
+	defer close_pair(&b)
+	other := make_pair(t)
+	defer close_pair(&other)
+	bus: User_Event_Bus
+	user_ws_add(&bus, OWNER, a.hub)
+	user_ws_add(&bus, OWNER, b.hub)
+	user_ws_add(&bus, OTHER_OWNER, other.hub)
+
+	jobs: [REQ3_PUBLISHERS]Publisher_Job
+	threads: [REQ3_PUBLISHERS]^thread.Thread
+	for k in 0..<REQ3_PUBLISHERS {
+		owner := OWNER
+		if k % 4 == 3 do owner = OTHER_OWNER
+		jobs[k] = Publisher_Job{bus = &bus, owner = owner, count = REQ3_PER_PUBLISHER}
+		threads[k] = thread.create_and_start_with_data(&jobs[k], proc(data: rawptr) {
+			job := (^Publisher_Job)(data)
+			for _ in 0..<job.count do publish_resource_changed(job.bus, job.owner, "task", "t", "updated", `{"pad":"0123456789"}`)
+		})
+	}
+	for th in threads {
+		thread.join(th)
+		thread.destroy(th)
+	}
+	mine_expected := REQ3_PER_PUBLISHER * (REQ3_PUBLISHERS - REQ3_PUBLISHERS / 4)
+	testing.expect_value(t, bus.event_seq, REQ3_PUBLISHERS * REQ3_PER_PUBLISHER)
+
+	for sock in ([]net.TCP_Socket{a.peer, b.peer}) {
+		raw := drain(sock)
+		defer delete(raw)
+		frames, ok := split_text_frames(raw)
+		defer delete(frames)
+		testing.expect(t, ok, "concurrent writers must never interleave bytes inside a frame")
+		testing.expect_value(t, len(frames), mine_expected)
+		in_order := true
+		for f, k in frames do if stream_seq_of(f) != k + 1 do in_order = false
+		testing.expect(t, in_order, "stream_seq must be contiguous in wire order")
+	}
+	other_raw := drain(other.peer)
+	defer delete(other_raw)
+	other_frames, _ := split_text_frames(other_raw)
+	defer delete(other_frames)
+	testing.expect_value(t, len(other_frames), REQ3_PER_PUBLISHER * (REQ3_PUBLISHERS / 4))
+	testing.expect_value(t, bus.sockets_removed, 0)
+}
+
+// Slot exhaustion: the 129th socket is refused (no ready), the refusal is counted, and the
+// 1013 close frame is what reaches the peer — never a ready-deaf subscription.
+@(test)
+req3_slot_exhaustion_refuses_with_1013_not_ready :: proc(t: ^testing.T) {
+	bus: User_Event_Bus
+	for k in 0..<USER_WS_MAX_SLOTS {
+		testing.expect_value(t, user_ws_add(&bus, OWNER, net.TCP_Socket(0)), k)
+	}
+	pair := make_pair(t)
+	defer close_pair(&pair)
+	handle, result := user_ws_attach(&bus, OWNER, pair.hub)
+	testing.expect_value(t, result, User_WS_Attach_Result.Slots_Full)
+	testing.expect_value(t, handle.idx, -1)
+	testing.expect_value(t, bus.slot_exhaustions, 1)
+	testing.expect(t, user_ws_refuse_full(pair.hub), "the close frame is written")
+
+	raw := drain(pair.peer)
+	defer delete(raw)
+	testing.expect(t, len(raw) >= 4, "a close frame reached the peer")
+	if len(raw) >= 4 {
+		testing.expect_value(t, raw[0], 0x88)
+		code := int(raw[2]) << 8 | int(raw[3])
+		testing.expect_value(t, code, USER_WS_CLOSE_TRY_AGAIN_LATER)
+	}
+	testing.expect(t, !strings.contains(string(raw), "user_ws_ready"), "no ready for a refused socket")
+
+	// A freed slot is usable again.
+	user_ws_remove(&bus, 5)
+	h2, r2 := user_ws_attach(&bus, OWNER, pair.hub)
+	testing.expect_value(t, r2, User_WS_Attach_Result.Attached)
+	testing.expect_value(t, h2.idx, 5)
+	user_ws_detach(&bus, h2)
+}
+
+// A reader that exits late holds a STALE handle; detaching it must not release the new
+// connection that reused the slot.
+@(test)
+req3_stale_handle_detach_leaves_a_reused_slot_alone :: proc(t: ^testing.T) {
+	a := make_pair(t)
+	defer close_pair(&a)
+	b := make_pair(t)
+	defer close_pair(&b)
+	bus: User_Event_Bus
+	old, _ := user_ws_attach(&bus, OWNER, a.hub)
+	user_ws_detach(&bus, old)
+	fresh, r := user_ws_attach(&bus, OWNER, b.hub)
+	testing.expect_value(t, r, User_WS_Attach_Result.Attached)
+	testing.expect_value(t, fresh.idx, old.idx)
+	user_ws_detach(&bus, old)
+	testing.expect(t, bus.connected[fresh.idx], "a stale detach must not release the reused slot")
+	user_ws_detach(&bus, fresh)
+	testing.expect(t, !bus.connected[fresh.idx], "the live handle releases it")
+}
+
+// Stamping covers every JSON object shape, and anything that cannot carry the stamp is
+// replaced by resync_required rather than sent unsequenced.
+@(test)
+req3_stamping_and_unstampable_payloads :: proc(t: ^testing.T) {
+	f1, ok1 := stamp_stream_event("e-1", 7, `{}`)
+	testing.expect(t, ok1, "empty object is stampable")
+	testing.expect_value(t, f1, `{"stream_epoch":"e-1","stream_seq":7}`)
+	delete(f1)
+	f2, ok2 := stamp_stream_event("e-1", 8, ` { "type":"x"}`)
+	testing.expect(t, ok2, "leading whitespace is fine")
+	testing.expect_value(t, f2, `{"stream_epoch":"e-1","stream_seq":8,"type":"x"}`)
+	delete(f2)
+	_, ok3 := stamp_stream_event("e-1", 9, `[1,2]`)
+	testing.expect(t, !ok3, "a non-object cannot carry the stamp")
+
+	pair := make_pair(t)
+	defer close_pair(&pair)
+	bus: User_Event_Bus
+	user_ws_add(&bus, OWNER, pair.hub)
+	publish_raw_to_user(&bus, OWNER, `not json`)
+	raw := drain(pair.peer)
+	defer delete(raw)
+	frames, _ := split_text_frames(raw)
+	defer delete(frames)
+	testing.expect_value(t, len(frames), 1)
+	if len(frames) == 1 {
+		testing.expect_value(t, stream_seq_of(frames[0]), 1)
+		testing.expect(t, strings.contains(frames[0], `"type":"resync_required"`), "the client is told to resync")
+	}
+	testing.expect(t, bus.connected[0], "the client stays subscribed")
 }
