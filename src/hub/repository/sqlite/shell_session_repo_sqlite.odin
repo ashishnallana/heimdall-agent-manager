@@ -30,6 +30,7 @@ new_shell_session_repository :: proc(impl: ^Shell_Session_Repo_SQLite, conn: ^Co
 		list_pending_kills = shell_session_list_pending_kills_sqlite,
 		list_live_by_bridge = shell_session_list_live_by_bridge_sqlite,
 		delete_terminal_before = shell_session_delete_terminal_before_sqlite,
+		delete_terminal_before_owners = shell_session_delete_terminal_before_owners_sqlite,
 		list_live_bridge_ids = shell_session_list_live_bridge_ids_sqlite,
 		list_live_by_kind    = shell_session_list_live_by_kind_sqlite,
 	}
@@ -587,13 +588,24 @@ shell_session_delete_sqlite :: proc(ctx: rawptr, owner_user_id, session_id: stri
 // platform.format_rfc3339_utc output: fixed width, zero-padded, always UTC, always
 // Z-suffixed. Lexicographic order is chronological order for that format.
 shell_session_delete_terminal_before_sqlite :: proc(ctx: rawptr, cutoff_rfc3339: string) -> (int, domain.Domain_Error) {
+	owners, err := shell_session_delete_terminal_before_owners_sqlite(ctx, cutoff_rfc3339)
+	defer { for k in owners do delete(k); delete(owners) }
+	total := 0
+	for _, n in owners do total += n
+	return total, err
+}
+
+// shell_session_delete_terminal_before_owners_sqlite is the one retention DELETE;
+// RETURNING owner_user_id reports which owners lost rows in the same statement,
+// so no row can be deleted unreported or reported undeleted.
+shell_session_delete_terminal_before_owners_sqlite :: proc(ctx: rawptr, cutoff_rfc3339: string) -> (map[string]int, domain.Domain_Error) {
 	impl := (^Shell_Session_Repo_SQLite)(ctx)
 	if impl == nil || impl.conn == nil || impl.conn.db == nil {
-		return 0, domain.domain_error(.Internal_Error, "sqlite repository is not open")
+		return nil, domain.domain_error(.Internal_Error, "sqlite repository is not open")
 	}
 	// An empty cutoff would compare greater than nothing and delete nothing, but it
 	// means the caller failed to read a clock — refuse rather than silently no-op.
-	if cutoff_rfc3339 == "" do return 0, domain.domain_error(.Validation_Failed, "shell session row retention requires a cutoff")
+	if cutoff_rfc3339 == "" do return nil, domain.domain_error(.Validation_Failed, "shell session row retention requires a cutoff")
 
 	terminal := domain.SHELL_SESSION_TERMINAL_STATUSES
 	b := strings.builder_make(context.temp_allocator)
@@ -602,23 +614,31 @@ shell_session_delete_terminal_before_sqlite :: proc(ctx: rawptr, cutoff_rfc3339:
 		if i > 0 do strings.write_string(&b, ", ")
 		strings.write_string(&b, "?")
 	}
-	strings.write_string(&b, ") AND COALESCE(NULLIF(finished_at, ''), NULLIF(last_activity_at, ''), started_at) < ?;")
+	strings.write_string(&b, ") AND COALESCE(NULLIF(finished_at, ''), NULLIF(last_activity_at, ''), started_at) < ? RETURNING owner_user_id;")
 	// clone_to_cstring rather than cstring(raw_data(...)): prepare_v2 is given -1 for
 	// the length, so it reads to a NUL that a builder's buffer does not promise.
 	query := strings.clone_to_cstring(strings.to_string(b), context.temp_allocator)
 
 	stmt: sqlite3_stmt = nil
 	if sqlite3_prepare_v2(impl.conn.db, query, -1, &stmt, nil) != SQLITE_OK {
-		return 0, domain.domain_error(.Internal_Error, "failed to prepare shell session row retention delete")
+		return nil, domain.domain_error(.Internal_Error, "failed to prepare shell session row retention delete")
 	}
 	defer sqlite3_finalize(stmt)
 	for st, i in terminal do bind_text(stmt, 1 + i, st)
 	bind_text(stmt, 1 + len(terminal), cutoff_rfc3339)
-	step_rc, row_changes := step_changes(impl.conn.db, stmt)
-	if step_rc != SQLITE_DONE {
-		return 0, domain.domain_error(.Internal_Error, "failed to delete expired shell session rows")
+	owners := make(map[string]int)
+	for {
+		rc := sqlite3_step(stmt)
+		if rc == SQLITE_DONE do break
+		if rc != SQLITE_ROW {
+			for k in owners do delete(k)
+			delete(owners)
+			return nil, domain.domain_error(.Internal_Error, "failed to delete expired shell session rows")
+		}
+		owner := column_text_unowned(stmt, 0)
+		if owner in owners { owners[owner] += 1 } else { owners[strings.clone(owner)] = 1 }
 	}
-	return row_changes, domain.Domain_Error{}
+	return owners, domain.Domain_Error{}
 }
 
 // shell_session_list_live_bridge_ids_sqlite backs REQ-SHELL-14's gone-bridge sweep:

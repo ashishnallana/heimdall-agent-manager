@@ -145,6 +145,13 @@ Shell_Session_List_Live_By_Bridge_Proc :: proc(ctx: rawptr, bridge_id: string, l
 // however old its row is.
 Shell_Session_Delete_Terminal_Before_Proc :: proc(ctx: rawptr, cutoff_rfc3339: string) -> (int, domain.Domain_Error)
 
+// Shell_Session_Delete_Terminal_Before_Owners_Proc is the same delete, reporting
+// how many rows went PER OWNER so the sweep can tell each owner's UI that its
+// session lists shrank (REQ-2). Optional: repositories without it fall back to
+// delete_terminal_before and the sweep publishes nothing. Caller owns the map
+// and its keys.
+Shell_Session_Delete_Terminal_Before_Owners_Proc :: proc(ctx: rawptr, cutoff_rfc3339: string) -> (map[string]int, domain.Domain_Error)
+
 // Shell_Session_List_Live_Bridge_Ids_Proc returns the DISTINCT bridge_ids that
 // currently hold at least one LIVE session. REQ-SHELL-14 needs it to answer "which
 // bridges could possibly have sessions to reap" before asking how old each bridge is.
@@ -219,6 +226,7 @@ Shell_Session_Repository :: struct {
 	list_pending_kills: Shell_Session_List_Pending_Kills_Proc,
 	list_live_by_bridge: Shell_Session_List_Live_By_Bridge_Proc,
 	delete_terminal_before: Shell_Session_Delete_Terminal_Before_Proc,
+	delete_terminal_before_owners: Shell_Session_Delete_Terminal_Before_Owners_Proc,
 	list_live_bridge_ids:   Shell_Session_List_Live_Bridge_Ids_Proc,
 	list_live_by_kind:      Shell_Session_List_Live_By_Kind_Proc,
 }
@@ -274,6 +282,14 @@ shell_session_delete :: proc(repo: ^Shell_Session_Repository, owner_user_id, ses
 shell_session_delete_terminal_before :: proc(repo: ^Shell_Session_Repository, cutoff_rfc3339: string) -> (int, domain.Domain_Error) {
 	if repo == nil || repo.delete_terminal_before == nil do return 0, domain.domain_error(.Internal_Error, "shell session repository is not configured")
 	return repo.delete_terminal_before(repo.ctx, cutoff_rfc3339)
+}
+
+// shell_session_delete_terminal_before_owners: see the Proc. supported is false
+// when the repository has no owner-reporting delete (nothing was deleted then).
+shell_session_delete_terminal_before_owners :: proc(repo: ^Shell_Session_Repository, cutoff_rfc3339: string) -> (owners: map[string]int, supported: bool, err: domain.Domain_Error) {
+	if repo == nil || repo.delete_terminal_before_owners == nil do return nil, false, {}
+	owners, err = repo.delete_terminal_before_owners(repo.ctx, cutoff_rfc3339)
+	return owners, true, err
 }
 
 // shell_session_list_live_bridge_ids is the sweep-side read described on

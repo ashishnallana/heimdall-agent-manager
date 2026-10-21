@@ -327,6 +327,11 @@ agent_action_chat_send_to_agent_handler :: proc(ctx: rawptr, req: Request) -> Re
 	}
 	msg, saved, err := content_service.send_agent_to_agent(h.content, auth, target, content_service.Message_Input{body = json_string(params, "body"), artifact_ids_json = json_array_optional(params, "artifact_ids"), metadata_json = metadata_json})
 	if !saved do return respond_error(err, req.request_id)
+	// E3: the row lands in the TARGET's conversation and moves its preview and
+	// last_message_at; id-only hint from the re-read row (no body, no toast).
+	if h.event_bus != nil {
+		if conv, conv_ok, _ := content_service.get_conversation(h.content, contracts.Auth_Context{kind = .User_Token, user_id = string(inst.owner_user_id)}, msg.conversation_id); conv_ok do publish_chat_message_created(h.event_bus, conv, msg)
+	}
 	// Q3: id-free plain phrase (never resolve the target's name in the emit path).
 	publish_agent_action(h, inst, "chat_send_agent", "messaged another agent")
 	b := strings.builder_make()
@@ -549,13 +554,18 @@ process_agent_chat_fetch_or_read :: proc(ctx: rawptr, req: Request, default_mark
 		ids := make([dynamic]string)
 		defer delete(ids)
 		for row in rows { if row.read_at == "" do append(&ids, row.message_id) }
-		marked_count, _ = content_service.mark_messages_read_by_ids(h.content, auth, ids[:])
+		read_at := ""
+		marked_count, read_at, _ = content_service.mark_messages_read_by_ids_at(h.content, auth, ids[:])
+		// E4: the rows were listed before the mark; report the committed receipt.
+		if marked_count > 0 {
+			for &row in rows { if row.read_at == "" do row.read_at = read_at }
+		}
 		through_message_id = rows[len(rows)-1].message_id
 		through_created_at = rows[len(rows)-1].created_at
 		// Notify the conversation owner (the human) that their agent read these
 		// messages, so the UI can show read receipts on the user's sent bubbles.
 		if marked_count > 0 {
-			publish_agent_messages_read(h, string(conv.owner_user_id), conv, ids[:], inst.agent_instance_id)
+			publish_agent_messages_read(h, string(conv.owner_user_id), conv, ids[:], inst.agent_instance_id, read_at)
 		}
 	}
 
@@ -588,9 +598,9 @@ process_agent_chat_fetch_or_read :: proc(ctx: rawptr, req: Request, default_mark
 // Publish a `messages_read` event when an AGENT reads the user's messages, so
 // the human's UI can show read receipts. Reuses messages_read_event_json from
 // content_handlers (same package). No-op without an event bus (test wiring).
-publish_agent_messages_read :: proc(h:^Agent_Action_Handlers, owner_user_id:string, c:domain.Chat_Conversation, message_ids:[]string, reader_instance_id:string){
+publish_agent_messages_read :: proc(h:^Agent_Action_Handlers, owner_user_id:string, c:domain.Chat_Conversation, message_ids:[]string, reader_instance_id:string, read_at:string){
 	if h==nil || h.event_bus==nil || owner_user_id=="" || len(message_ids)==0 do return
-	events.publish_owned(h.event_bus, owner_user_id, messages_read_event_json(c, message_ids, reader_instance_id))
+	events.publish_owned(h.event_bus, owner_user_id, messages_read_event_json(c, message_ids, reader_instance_id, read_at))
 }
 
 // publish_agent_action emits a lean, ephemeral "agent_action" event to the acting

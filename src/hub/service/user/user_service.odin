@@ -19,6 +19,9 @@ User_Service :: struct {
 	projects: ^iface.Project_Repository,
 	clock:    ^platform.Clock,
 	ids:      ^platform.ID_Generator,
+	// REQ-2: told about each canonical agent seeding saved (nil: no hint).
+	on_agent_seeded:     proc(ctx: rawptr, owner_user_id, agent_id: string),
+	on_agent_seeded_ctx: rawptr,
 }
 
 new_user_service_full :: proc(users: ^iface.User_Repository, agents: ^iface.Agent_Repository, projects: ^iface.Project_Repository, clock: ^platform.Clock, ids: ^platform.ID_Generator) -> User_Service {
@@ -98,7 +101,9 @@ ensure_canonical_resources :: proc(service: ^User_Service, owner: domain.User_ID
 						created_at = now,
 						updated_at = now,
 					}
-					iface.agent_save(service.agents, agent)
+					if _, seeded, _ := iface.agent_save(service.agents, agent); seeded && service.on_agent_seeded != nil {
+						service.on_agent_seeded(service.on_agent_seeded_ctx, string(owner), agent.agent_id)
+					}
 				}
 			}
 		}

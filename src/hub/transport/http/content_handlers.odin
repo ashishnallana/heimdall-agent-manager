@@ -165,12 +165,14 @@ publish_messages_read :: proc(h:^Content_Handlers, owner_user_id:string, c:domai
 	events.publish_owned(h.event_bus, owner_user_id, messages_read_event_json(c, message_ids, reader))
 }
 
-messages_read_event_json :: proc(c:domain.Chat_Conversation, message_ids:[]string, reader:string)->string{
+// read_at is the timestamp the mark wrote; it defaults to the conversation's
+// updated_at, which mark_read_with_receipts sets to that same instant.
+messages_read_event_json :: proc(c:domain.Chat_Conversation, message_ids:[]string, reader:string, read_at:="")->string{
 	b:=strings.builder_make()
 	strings.write_string(&b,"{\"type\":\"chat_event\",\"event\":\"messages_read\",\"conversation_id\":\""); write_handler_json_string(&b,c.conversation_id)
 	strings.write_string(&b,"\",\"agent_instance_id\":\""); write_handler_json_string(&b,c.agent_instance_id)
 	strings.write_string(&b,"\",\"reader\":\""); write_handler_json_string(&b,reader)
-	strings.write_string(&b,"\",\"read_at\":\""); write_handler_json_string(&b,c.updated_at)
+	strings.write_string(&b,"\",\"read_at\":\""); write_handler_json_string(&b,read_at if read_at!="" else c.updated_at)
 	fmt.sbprintf(&b,"\",\"unread_count\":%d",c.unread_count)
 	strings.write_string(&b,",\"message_ids\":[")
 	for id,i in message_ids { if i>0 do strings.write_byte(&b,','); strings.write_byte(&b,'"'); write_handler_json_string(&b,id); strings.write_byte(&b,'"') }
@@ -311,7 +313,7 @@ create_template_handler :: proc(ctx:rawptr, req:Request)->Response{ h:=(^Content
 update_template_handler :: proc(ctx:rawptr, req:Request)->Response{ h:=(^Content_Handlers)(ctx); auth,ok,resp:=require_auth(h.auth,req); if !ok do return resp; t,saved,err:=content_service.update_template(h.content,auth,path_part(req.path,4),template_input(req.body)); if !saved do return respond_error(err,req.request_id); b:=strings.builder_make(); write_template_json(&b,t); return respond_success(strings.to_string(b),req.request_id,auth_ctx_server_time(req)) }
 delete_template_handler :: proc(ctx:rawptr, req:Request)->Response{ h:=(^Content_Handlers)(ctx); auth,ok,resp:=require_auth(h.auth,req); if !ok do return resp; deleted,err:=content_service.delete_template(h.content,auth,path_part(req.path,4)); if !deleted do return respond_error(err,req.request_id); return Response{status=204,content_type="application/json",body=""} }
 
-restart_stopped_conversation_instance :: proc(h:^Content_Handlers, auth:contracts.Auth_Context, cid:string)->(bool,domain.Domain_Error){ c,got,err:=content_service.get_conversation(h.content,auth,cid); if !got do return false,err; if c.agent_instance_id=="" || h.agents==nil do return true,{}; if h.content.agent_configuration_service != nil { if valid, validity_err := agent_service.validate_instance_message_configuration(h.agents,c.owner_user_id,c.agent_instance_id); !valid do return false,validity_err }; inst,inst_ok,inst_err:=agent_service.get_instance(h.agents,auth,c.agent_instance_id); if !inst_ok do return false,inst_err; if inst.runtime_status=="stopped" || inst.runtime_status=="failed" || inst.runtime_status=="unreachable" { _,restarted,restart_err:=agent_service.restart_instance(h.agents,auth,c.agent_instance_id); if !restarted do return false,restart_err }; return true,{} }
+restart_stopped_conversation_instance :: proc(h:^Content_Handlers, auth:contracts.Auth_Context, cid:string)->(bool,domain.Domain_Error){ c,got,err:=content_service.get_conversation(h.content,auth,cid); if !got do return false,err; if c.agent_instance_id=="" || h.agents==nil do return true,{}; if h.content.agent_configuration_service != nil { if valid, validity_err := agent_service.validate_instance_message_configuration(h.agents,c.owner_user_id,c.agent_instance_id); !valid do return false,validity_err }; inst,inst_ok,inst_err:=agent_service.get_instance(h.agents,auth,c.agent_instance_id); if !inst_ok do return false,inst_err; if inst.runtime_status=="stopped" || inst.runtime_status=="failed" || inst.runtime_status=="unreachable" { restarted_inst,restarted,restart_err:=agent_service.restart_instance(h.agents,auth,c.agent_instance_id); if !restarted do return false,restart_err; publish_instance_changed(h.event_bus,restarted_inst,"status_changed") }; return true,{} }
 
 // memory_input reads the memory targeting lists as JSON string arrays:
 // agent_ids/project_ids/template_ids/bridge_ids. An omitted or empty array means

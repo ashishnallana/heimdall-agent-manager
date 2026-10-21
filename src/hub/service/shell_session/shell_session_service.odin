@@ -70,6 +70,8 @@ Shell_Session_Service :: struct {
 	// with exit_code = -1.
 	on_unobserved_terminal:     proc(ctx: rawptr, session: domain.Shell_Session),
 	on_unobserved_terminal_ctx: rawptr,
+	// REQ-2: told about the shell-run marker row once it is saved.
+	message_created: content_service.Message_Created_Hook,
 }
 
 new_shell_session_service :: proc(
@@ -814,7 +816,9 @@ shell_session_create :: proc(svc: ^Shell_Session_Service, auth: contracts.Auth_C
 	// a `shell` is an interactive terminal the user is already looking at; neither is a
 	// run and neither belongs in this transcript (REQ-SHELL-5 §2).
 	if kind_enum == .Run && svc.content != nil && session.conversation_id != "" {
-		_, _ = content_service.record_shell_run_marker(svc.content, session.conversation_id, session_id, session.agent_instance_id)
+		if marker, marked := content_service.record_shell_run_marker(svc.content, session.conversation_id, session_id, session.agent_instance_id); marked {
+			content_service.notify_message_created(svc.message_created, marker)
+		}
 	}
 
 	// THE CREATION PUSH. Placed here for the same reasons as the marker directly above,

@@ -7,9 +7,11 @@ package shell_session
 // the per-bridge list and the chain summary all degraded permanently and could
 // never recover. This is the missing half.
 
+import "core:fmt"
 import "core:time"
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
+import events "odin_test:hub/service/events"
 import "odin_test:hub/platform"
 
 // HUB_SHELL_SESSION_ROW_RETENTION is how long a TERMINAL row survives after it
@@ -56,7 +58,20 @@ shell_session_sweep_terminal_rows :: proc(svc: ^Shell_Session_Service, now_rfc33
 	cutoff := shell_session_row_retention_cutoff(now)
 	if cutoff == "" do return 0, domain.domain_error(.Internal_Error, "shell session row retention could not compute a cutoff")
 
-	return iface.shell_session_delete_terminal_before(svc.repo, cutoff)
+	// REQ-2: one shell_session/pruned hint per owner that lost rows, so open
+	// session lists and chain summaries refetch. Ids are not enumerated: the
+	// rows are terminal, at least 7 days old and gone; the count is enough.
+	owners, supported, del_err := iface.shell_session_delete_terminal_before_owners(svc.repo, cutoff)
+	if !supported do return iface.shell_session_delete_terminal_before(svc.repo, cutoff)
+	defer { for k in owners do delete(k); delete(owners) }
+	total := 0
+	for owner, n in owners {
+		total += n
+		if svc.events == nil do continue
+		summary := fmt.tprintf("{{\"deleted\":%d}}", n)
+		events.publish_resource_changed(svc.events, owner, "shell_session", "", "pruned", summary)
+	}
+	return total, del_err
 }
 
 // shell_session_row_retention_cutoff turns an RFC3339 UTC instant into the instant

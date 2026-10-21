@@ -14,6 +14,7 @@ import events "odin_test:hub/service/events"
 import project_service "odin_test:hub/service/project"
 import shell_session_svc "odin_test:hub/service/shell_session"
 import taskv2 "odin_test:hub/service/taskv2"
+import card_service "odin_test:hub/service/card"
 import api_http "odin_test:hub/transport/http"
 
 // REQ-2 (refresh_producers): after-write resource hints reach every socket of
@@ -59,7 +60,7 @@ Refresh_Fixture :: struct {
 	graph: app.App_Graph,
 	db_path: string,
 	alice: [1]contracts.HTTP_Header,
-	bridge_id, agent_id, inst_id, conv_id: string,
+	bridge_id, bridge_token, agent_id, inst_id, conv_id: string,
 }
 
 refresh_fixture_setup :: proc(t: ^testing.T, f: ^Refresh_Fixture, tag: string) -> bool {
@@ -75,9 +76,10 @@ refresh_fixture_setup :: proc(t: ^testing.T, f: ^Refresh_Fixture, tag: string) -
 	})
 	if !testing.expect(t, ok, msg) do return false
 	f.alice = {{name = "X-authentik-username", value = "alice"}}
-	bridge_id, _, enroll_ok := device_enroll_test_bridge(&f.graph, f.alice[:], "Refresh Bridge")
+	bridge_id, bridge_token, enroll_ok := device_enroll_test_bridge(&f.graph, f.alice[:], "Refresh Bridge")
 	if !testing.expect(t, enroll_ok, "bridge enroll") do return false
 	f.bridge_id = bridge_id
+	f.bridge_token = bridge_token
 	if b, b_ok, _ := iface.bridge_get_bridge(f.graph.bridges.repo, bridge_id); b_ok { b.status = .Online; _, _, _ = iface.bridge_save_bridge(f.graph.bridges.repo, b) }
 	project_service.bridge_runtime_registry_mark_live(f.graph.agents.bridge_runtime_registry, bridge_id, false, "")
 	_, _ = iface.bridge_provider_status_upsert(f.graph.agents.providers, domain.Bridge_Provider_Status{bridge_id = bridge_id, provider = "claude", state = "present", checked_at = "2026-10-01T00:00:00Z"})
@@ -377,4 +379,171 @@ test_refresh_task_effects_dedupe_and_facet_kind :: proc(t: ^testing.T) {
 	testing.expect(t, got, "facet write publishes task/facet_changed")
 	testing.expect(t, strings.contains(frames, `"attempt_no":2`) && strings.contains(frames, `"kind":"handoff"`), "facet event carries attempt and kind")
 	testing.expect_value(t, strings.count(frames, `"change":"updated"`), 1)
+}
+
+// refresh_collect returns every frame that arrives within the window (the
+// sentinel never matches), so a test can count events per change.
+refresh_collect :: proc(sock: net.TCP_Socket) -> string {
+	frames, _ := drain_matching_ws_event(sock, "\x00refresh-never\x00", 400_000_000)
+	return frames
+}
+
+refresh_stop_instance :: proc(f: ^Refresh_Fixture) {
+	if inst, ok, _ := iface.agent_get_instance(&f.graph.repos.agents, f.inst_id); ok {
+		inst.runtime_status = "stopped"
+		_, _, _ = iface.agent_save_instance(&f.graph.repos.agents, inst)
+	}
+}
+
+@(test)
+test_refresh_restart_and_action_sends_publish :: proc(t: ^testing.T) {
+	f: Refresh_Fixture
+	defer refresh_fixture_teardown(&f)
+	if !refresh_fixture_setup(t, &f, "restart") do return
+	tab := refresh_socket_open(t, &f.graph, "alice"); defer refresh_socket_close(&f.graph, tab)
+	bob := refresh_socket_open(t, &f.graph, "bob"); defer refresh_socket_close(&f.graph, bob)
+
+	// Sending to a stopped conversation restarts it: one status_changed for the
+	// restart plus one message_created for the row.
+	refresh_stop_instance(&f)
+	flush_ws_socket(tab.client)
+	res := api_http.router_dispatch(&f.graph.router, api_http.Request{method = "POST", path = fmt.aprintf("/api/v1/chats/%s/messages", f.conv_id), body = `{"body":"wake up"}`, request_id = "req_rf_wake", remote_addr = "127.0.0.1", headers = f.alice[:]})
+	if !testing.expectf(t, res.status == 201, "send to stopped: %d %s", res.status, res.body) do return
+	frames := refresh_collect(tab.client)
+	defer delete(frames)
+	testing.expect_value(t, strings.count(frames, `"change":"status_changed"`), 1)
+	testing.expect(t, strings.contains(frames, f.inst_id) && strings.contains(frames, `"run_count":`), "restart hint names the instance and carries run state")
+	testing.expect_value(t, strings.count(frames, `"event":"message_created"`), 1)
+
+	// Run-now action against the stopped instance: restart + action message.
+	refresh_stop_instance(&f)
+	create := api_http.router_dispatch(&f.graph.router, api_http.Request{method = "POST", path = "/api/v1/actions", body = fmt.aprintf(`{{"name":"Nightly","target_instance_id":"%s","prompt_text":"ACTION-SECRET-99"}}`, f.inst_id), request_id = "req_rf_act", remote_addr = "127.0.0.1", headers = f.alice[:]})
+	if !testing.expectf(t, create.status >= 200 && create.status < 300, "create action: %d %s", create.status, create.body) do return
+	action_id := refresh_json_field(create.body, "action_id")
+	if action_id == "" do action_id = refresh_json_field(create.body, "id")
+	flush_ws_socket(tab.client)
+	run := api_http.router_dispatch(&f.graph.router, api_http.Request{method = "POST", path = fmt.aprintf("/api/v1/actions/%s/run", action_id), body = `{}`, request_id = "req_rf_run", remote_addr = "127.0.0.1", headers = f.alice[:]})
+	if !testing.expectf(t, run.status == 200, "run action: %d %s", run.status, run.body) do return
+	msg_id := refresh_json_field(run.body, "message_id")
+	run_frames := refresh_collect(tab.client)
+	defer delete(run_frames)
+	testing.expect_value(t, strings.count(run_frames, `"change":"status_changed"`), 1)
+	testing.expect_value(t, strings.count(run_frames, `"event":"message_created"`), 1)
+	testing.expect(t, msg_id != "" && strings.contains(run_frames, msg_id) && strings.contains(run_frames, `"message_type":"action"`), "action message hint carries id and type")
+	testing.expect(t, !strings.contains(run_frames, "ACTION-SECRET-99"), "hint must not carry the prompt")
+	other := refresh_collect(bob.client)
+	defer delete(other)
+	testing.expect(t, !strings.contains(other, f.inst_id) && !strings.contains(other, f.conv_id), "another owner hears nothing")
+}
+
+@(test)
+test_refresh_card_prompt_publishes_only_after_commit :: proc(t: ^testing.T) {
+	f: Refresh_Fixture
+	defer refresh_fixture_teardown(&f)
+	if !refresh_fixture_setup(t, &f, "card") do return
+	tab := refresh_socket_open(t, &f.graph, "alice"); defer refresh_socket_close(&f.graph, tab)
+	alice := contracts.Auth_Context{kind = .User_Token, user_id = "alice"}
+
+	// A later op fails, the accept rolls back: the prompt hint is dropped.
+	bad, bad_ok, bad_err := card_service.create_card(&f.graph.cards, alice, card_service.Card_Input{title = "Rolls back", scope = "agent", operations_json = fmt.aprintf(`[{{"op":"agent.prompt","args":{{"instance_id":"%s","prompt":"p1"}}}},{{"op":"agent.update","args":{{"agent_id":"agt_missing","name":"x"}}}}]`, f.inst_id)})
+	if !testing.expect(t, bad_ok, bad_err.message) do return
+	flush_ws_socket(tab.client)
+	_, accepted_bad, _ := card_service.accept_card(&f.graph.cards, alice, bad.card_id)
+	testing.expect(t, !accepted_bad, "accept with a failing op fails")
+	none := refresh_collect(tab.client)
+	defer delete(none)
+	testing.expect_value(t, strings.count(none, `"event":"message_created"`), 0)
+
+	good, good_ok, good_err := card_service.create_card(&f.graph.cards, alice, card_service.Card_Input{title = "Prompts", scope = "agent", operations_json = fmt.aprintf(`[{{"op":"agent.prompt","args":{{"instance_id":"%s","prompt":"CARD-SECRET-7"}}}}]`, f.inst_id)})
+	if !testing.expect(t, good_ok, good_err.message) do return
+	flush_ws_socket(tab.client)
+	_, accepted, acc_err := card_service.accept_card(&f.graph.cards, alice, good.card_id)
+	testing.expect(t, accepted, acc_err.message)
+	frames := refresh_collect(tab.client)
+	defer delete(frames)
+	testing.expect_value(t, strings.count(frames, `"event":"message_created"`), 1)
+	testing.expect(t, strings.contains(frames, f.conv_id) && strings.contains(frames, `"message_type":"action"`) && strings.contains(frames, `"last_message_at":"20`), "hint carries conversation and committed last_message_at")
+	testing.expect(t, !strings.contains(frames, "CARD-SECRET-7"), "hint must not carry the prompt")
+}
+
+@(test)
+test_refresh_agent_to_agent_and_read_receipts :: proc(t: ^testing.T) {
+	f: Refresh_Fixture
+	defer refresh_fixture_teardown(&f)
+	if !refresh_fixture_setup(t, &f, "a2a") do return
+	tab := refresh_socket_open(t, &f.graph, "alice"); defer refresh_socket_close(&f.graph, tab)
+	bridge_auth := fmt.aprintf("Bearer %s", f.bridge_token)
+	headers := []contracts.HTTP_Header{{name = "Authorization", value = bridge_auth}}
+
+	second := api_http.router_dispatch(&f.graph.router, api_http.Request{method = "POST", path = "/api/v1/agent-instances", body = fmt.aprintf(`{{"agent_id":"%s","bridge_id":"%s","provider":"claude","model":"claude-sonnet-5-5"}}`, f.agent_id, f.bridge_id), request_id = "req_rf_inst_b", remote_addr = "127.0.0.1", headers = f.alice[:]})
+	if !testing.expect_value(t, second.status, 201) do return
+	target_inst := refresh_json_field(second.body, "agent_instance_id")
+	target_conv := refresh_json_field(second.body, "conversation_id")
+
+	// E3: agent->agent lands in the TARGET conversation and announces it there.
+	flush_ws_socket(tab.client)
+	a2a := api_http.router_dispatch(&f.graph.router, api_http.Request{method = "POST", path = "/api/v1/agent-actions/chat/send-to-agent", body = fmt.aprintf(`{{"agent_instance_id":"%s","params":{{"to_instance":"%s","body":"A2A-SECRET-5"}}}}`, f.inst_id, target_inst), request_id = "req_rf_a2a", remote_addr = "127.0.0.1", headers = headers})
+	if !testing.expectf(t, a2a.status == 201, "send-to-agent: %d %s", a2a.status, a2a.body) do return
+	frames := refresh_collect(tab.client)
+	defer delete(frames)
+	testing.expect_value(t, strings.count(frames, `"event":"message_created"`), 1)
+	testing.expect(t, strings.contains(frames, target_conv) && strings.contains(frames, `"direction":"agent_to_agent"`), "hint names the target conversation")
+	testing.expect(t, !strings.contains(frames, "A2A-SECRET-5"), "hint must not carry the body")
+
+	// E4: the agent's read reports the committed read_at, in the response rows
+	// and in the messages_read event, and it equals what a refetch returns.
+	sent := api_http.router_dispatch(&f.graph.router, api_http.Request{method = "POST", path = fmt.aprintf("/api/v1/chats/%s/messages", f.conv_id), body = `{"body":"please read"}`, request_id = "req_rf_tobe_read", remote_addr = "127.0.0.1", headers = f.alice[:]})
+	if !testing.expect_value(t, sent.status, 201) do return
+	flush_ws_socket(tab.client)
+	read := api_http.router_dispatch(&f.graph.router, api_http.Request{method = "POST", path = "/api/v1/agent-actions/chat/read", body = fmt.aprintf(`{{"agent_instance_id":"%s","params":{{}}}}`, f.inst_id), request_id = "req_rf_read", remote_addr = "127.0.0.1", headers = headers})
+	if !testing.expectf(t, read.status == 200, "chat read: %d %s", read.status, read.body) do return
+	testing.expect(t, !strings.contains(read.body, `"read_at":""`), "response rows carry the receipt, not the pre-mark state")
+	read_at := refresh_json_field(read.body, "read_at")
+	testing.expect(t, read_at != "", "response carries read_at")
+	evt, got := drain_matching_ws_event(tab.client, `"event":"messages_read"`)
+	defer delete(evt)
+	testing.expect(t, got, "agent read publishes messages_read")
+	testing.expect(t, strings.contains(evt, fmt.aprintf(`"read_at":"%s"`, read_at)), "event read_at equals the committed receipt")
+}
+
+@(test)
+test_refresh_shell_retention_and_seeding_publish :: proc(t: ^testing.T) {
+	f: Refresh_Fixture
+	defer refresh_fixture_teardown(&f)
+	if !refresh_fixture_setup(t, &f, "retention") do return
+	tab := refresh_socket_open(t, &f.graph, "alice"); defer refresh_socket_close(&f.graph, tab)
+	bob := refresh_socket_open(t, &f.graph, "bob"); defer refresh_socket_close(&f.graph, bob)
+	svc := &f.graph.shell_session_service
+	old := domain.Shell_Session{session_id = "sh_refresh_old", owner_user_id = "alice", bridge_id = f.bridge_id, kind = "run", status = "exited", run_seq = 1, created_at = "2026-01-01T00:00:00Z", started_at = "2026-01-01T00:00:00Z", finished_at = "2026-01-01T00:01:00Z", last_activity_at = "2026-01-01T00:01:00Z"}
+	_, up_err := iface.shell_session_upsert(svc.repo, old)
+	if !testing.expect(t, up_err.code == .None, up_err.message) do return
+
+	flush_ws_socket(tab.client)
+	n, sweep_err := shell_session_svc.shell_session_sweep_terminal_rows(svc, "2026-10-21T00:00:00Z")
+	testing.expect(t, sweep_err.code == .None, sweep_err.message)
+	testing.expect_value(t, n, 1)
+	frames := refresh_collect(tab.client)
+	defer delete(frames)
+	testing.expect_value(t, strings.count(frames, `"change":"pruned"`), 1)
+	testing.expect(t, strings.contains(frames, `"deleted":1`), "pruned hint carries the owner's count")
+	other := refresh_collect(bob.client)
+	defer delete(other)
+	testing.expect(t, !strings.contains(other, `"pruned"`), "another owner hears nothing")
+	// Nothing left to delete: no hint.
+	n2, _ := shell_session_svc.shell_session_sweep_terminal_rows(svc, "2026-10-21T00:00:00Z")
+	testing.expect_value(t, n2, 0)
+	quiet := refresh_collect(tab.client)
+	defer delete(quiet)
+	testing.expect(t, !strings.contains(quiet, `"pruned"`), "an empty sweep publishes nothing")
+
+	// Canonical seeding for a newly provisioned owner announces each agent.
+	carol := refresh_socket_open(t, &f.graph, "carol"); defer refresh_socket_close(&f.graph, carol)
+	flush_ws_socket(carol.client)
+	carol_headers := []contracts.HTTP_Header{{name = "X-authentik-username", value = "carol"}}
+	list := api_http.router_dispatch(&f.graph.router, api_http.Request{method = "GET", path = "/api/v1/agents", request_id = "req_rf_carol", remote_addr = "127.0.0.1", headers = carol_headers})
+	testing.expect_value(t, list.status, 200)
+	seeded := refresh_collect(carol.client)
+	defer delete(seeded)
+	testing.expect_value(t, strings.count(seeded, `"resource":"agent"`), 4)
+	testing.expect_value(t, strings.count(seeded, `"change":"created"`), 4)
 }

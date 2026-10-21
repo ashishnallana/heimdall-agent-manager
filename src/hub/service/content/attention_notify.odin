@@ -57,3 +57,17 @@ notify_conversation_attention :: proc(s: ^Content_Service, c: domain.Chat_Conver
 	if s == nil || s.attention == nil do return
 	contracts.attention_notify(s.attention, string(c.owner_user_id), contracts.ATTENTION_SOURCE_AGENT_MESSAGE, c.agent_instance_id)
 }
+
+// Message_Created_Hook lets a service that persists chat rows outside an HTTP
+// handler (card prompt ops, shell-run markers) announce them after they are
+// durable (REQ-2). The app wires it to the owner-scoped message_created hint,
+// which re-reads the conversation; payloads stay ids-only.
+Message_Created_Hook :: struct {
+	ctx:     rawptr,
+	created: proc(ctx: rawptr, m: domain.Chat_Message),
+}
+
+notify_message_created :: proc(h: Message_Created_Hook, m: domain.Chat_Message) {
+	if h.created == nil || m.message_id == "" do return
+	h.created(h.ctx, m)
+}

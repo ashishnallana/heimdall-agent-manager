@@ -2030,8 +2030,10 @@ upsert_chain_fleet_handler :: proc(ctx: rawptr, req: Request) -> Response {
 				defer delete(launch_provider)
 				defer delete(launch_model)
 				if inst.provider == launch_provider && inst.model == launch_model do continue
-				if _, relaunched, relaunch_err := agent_service.relaunch_instance(h.agents, auth_ctx, inst, launch_provider, launch_model); relaunched {
+				if relaunched_inst, relaunched, relaunch_err := agent_service.relaunch_instance(h.agents, auth_ctx, inst, launch_provider, launch_model); relaunched {
 					append(&restarted_ids, inst.agent_instance_id)
+					// New provider/model and run state are persisted: refresh the instance.
+					publish_instance_changed(h.event_bus, relaunched_inst, "config_changed")
 				} else {
 					// Clone: relaunch path messages can come from fmt.tprintf (temp memory).
 					append(&restart_failures, Fleet_Restart_Failure{instance_id = inst.agent_instance_id, message = strings.clone(relaunch_err.message)})

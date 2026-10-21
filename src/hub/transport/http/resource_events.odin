@@ -18,7 +18,10 @@ import events "odin_test:hub/service/events"
 //       unread_count, fetch_required:true, fetch_kind:"chat_message", fetch_id}
 //   resource_changed resource=conversation change=created|updated
 //       summary {agent_instance_id, chain_id, title, last_message_at,
-//       unread_count, updated_at}
+//       unread_count, updated_at} (instance-creation path: ids-only, title "")
+//   messages_read carries read_at = the committed receipt timestamp
+//   resource_changed resource=shell_session resource_id="" change=pruned
+//       summary {deleted} (retention sweep, one per affected owner)
 
 // chat_message_created_event_json describes a message that was just persisted
 // in conversation c (c is the post-write conversation row).
@@ -134,12 +137,13 @@ publish_instance_changed :: proc(bus: ^events.User_Event_Bus, inst: domain.Agent
 // publish_instance_created announces a new instance and the conversation that
 // create_instance/prepare_instance bound to it (every creation path: POST
 // /agent-instances, POST /chats, chain coordinator, action, taskv2 JIT). The
-// conversation summary is built from the instance row: its title is the
-// default run title, and consumers refetch the list anyway.
+// conversation summary on this path is IDS-ONLY (agent_instance_id, chain_id,
+// updated_at; title "" and unread_count 0): the instance row does not hold the
+// conversation's title, so consumers must refetch rather than display it.
 publish_instance_created :: proc(bus: ^events.User_Event_Bus, inst: domain.Agent_Instance) {
 	publish_instance_changed(bus, inst, "created")
 	if inst.conversation_id == "" do return
-	publish_conversation_changed(bus, domain.Chat_Conversation{conversation_id = inst.conversation_id, owner_user_id = inst.owner_user_id, agent_instance_id = inst.agent_instance_id, chain_id = inst.chain_id, title = inst.display_name, updated_at = inst.updated_at}, "created")
+	publish_conversation_changed(bus, domain.Chat_Conversation{conversation_id = inst.conversation_id, owner_user_id = inst.owner_user_id, agent_instance_id = inst.agent_instance_id, chain_id = inst.chain_id, updated_at = inst.updated_at}, "created")
 }
 
 //   resource_changed resource=agent change=created|updated|archived|support_changed
