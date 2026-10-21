@@ -93,7 +93,7 @@ import ChatMessageList from '../chat/ChatMessageList';
 import InstanceReconfigurationProgress from '../chat/InstanceReconfigurationProgress';
 import { MessageComposerInput, MessageComposerActions, MessageComposerStatus } from '../chat/MessageComposer';
 import RuntimeConfigurationOptions from '../chat/RuntimeConfigurationOptions';
-import { usePaneMarkRead, usePanePollPolicy, usePaneVisible, visiblePollInterval } from './paneVisibility';
+import { usePaneDeferredRefresh, usePaneMarkRead, usePanePollPolicy, usePaneVisible, visiblePollInterval } from './paneVisibility';
 import {
   CONVERSATION_MESSAGES_READ_EVENT,
   applyReadReceipt,
@@ -700,6 +700,9 @@ export function AgentChatPane({
     { conversationId },
     { skip: !conversationId },
   );
+  // Message events that reach only hidden panes are deferred (paneDeferral.ts); the
+  // newest page refetches once when this pane is shown again.
+  usePaneDeferredRefresh(conversationId, paneVisible, messagesQuery.refetch);
   const [fetchOlderMessages, olderMessagesState] = useLazyFetchConversationMessagesQuery();
   const [updateConversationTitle, updateTitleState] = useUpdateConversationTitleMutation();
   const [requestPaneCapture, requestPaneCaptureState] = useRequestPaneCaptureMutation();

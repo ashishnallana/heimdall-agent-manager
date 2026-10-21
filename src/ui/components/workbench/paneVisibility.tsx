@@ -1,5 +1,6 @@
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
 import { isTerminalQueryError } from '../../api/cookieFetch';
+import { registerPane, takeDirty, unregisterPane, updatePane } from '../../api/paneDeferral';
 
 /**
  * Whether a pane is actually on screen. Panes stay MOUNTED when the layout hides
@@ -121,4 +122,31 @@ export function usePanePollPolicy(paneVisible: boolean): PanePollPolicy {
       }, [signature]);
     },
   };
+}
+
+/**
+ * Registers the pane's conversation and visibility with paneDeferral, so a new message
+ * reaching only hidden panes is recorded instead of refetched. When the pane is shown
+ * and its conversation missed a refresh, `refresh` runs once (the deferred refetch).
+ */
+export function usePaneDeferredRefresh(conversationId: string, paneVisible: boolean, refresh: () => void): void {
+  const refreshRef = useRef(refresh);
+  refreshRef.current = refresh;
+  const idRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (!conversationId) return undefined;
+    const id = registerPane(conversationId, paneVisible);
+    idRef.current = id;
+    return () => {
+      unregisterPane(id);
+      idRef.current = null;
+    };
+    // Visibility changes are applied below without re-registering the pane.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [conversationId]);
+  useEffect(() => {
+    if (idRef.current === null || !conversationId) return;
+    updatePane(idRef.current, conversationId, paneVisible);
+    if (paneVisible && takeDirty(conversationId)) refreshRef.current();
+  }, [conversationId, paneVisible]);
 }

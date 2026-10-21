@@ -81,7 +81,7 @@ test('listAgentIdentities follows has_more so >1 page of agents is never dropped
     const res = await store.dispatch(agentsApi.endpoints.listAgentIdentities.initiate({ limit: 200 }));
     assert.equal(res.data.agents.length, 260, 'both pages are returned');
     // The repeated cursor 'c1' stops the loop instead of spinning.
-    assert.deepEqual(net.hits, ['GET /api/v1/agents?limit=200', 'GET /api/v1/agents?limit=200&cursor=c1']);
+    assert.deepEqual(net.hits, ['GET /api/v1/agents?limit=200&view=summary', 'GET /api/v1/agents?limit=200&view=summary&cursor=c1']);
     // void and {limit} share ONE cache entry, so a second caller sends nothing.
     await store.dispatch(agentsApi.endpoints.listAgentIdentities.initiate(undefined));
     assert.equal(net.hits.length, 2);

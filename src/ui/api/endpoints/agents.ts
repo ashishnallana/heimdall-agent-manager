@@ -51,7 +51,10 @@ export const agentsApi = heimdallApi.injectEndpoints({
           const seenCursors = new Set<string>();
           let cursor = opts?.cursor || '';
           for (let page = 0; page < IDENTITY_MAX_PAGES; page += 1) {
-            const params = new URLSearchParams({ limit: pageSize });
+            // view=summary: no consumer of this list reads instructions or the per-row
+            // counts (the /agents page and edit form use fetchAgentPage/fetchAgentIdentity,
+            // which keep the full row), so the hub omits them.
+            const params = new URLSearchParams({ limit: pageSize, view: 'summary' });
             if (cursor) params.set('cursor', cursor);
             const body = await cookieJsonFetchEnvelope(`/agents?${params.toString()}`);
             const rows = Array.isArray(body?.data) ? body.data : (Array.isArray(body) ? body : (body?.data?.agents || []));

@@ -26,6 +26,7 @@ import { fireNotificationForWsEvent } from '../services/notificationService';
 import { upsertChainTitle, upsertConversationTitle } from '../store/searchTitleSlice';
 import { isVaultArmored, decryptVaultText, getActiveVaultKey } from '../utils/vaultContent';
 import { handleVaultDirectoryEvent } from '../services/deviceVaultEvents';
+import { deferIfHidden } from './paneDeferral';
 
 // Focus context read at WS-event time (populated by the shell from the live
 // route). Only focusedChainId is consumed — it lets a resource/chat/agent event
@@ -440,7 +441,9 @@ export function flushQueuedInvalidations(): void {
   };
   const tags = entries
     .filter((entry) => entry.unconditional || [...entry.echoGuards].some((id) => !isEcho(id)))
-    .map((entry) => entry.tag);
+    .map((entry) => entry.tag)
+    // A conversation whose panes are all hidden refetches once when one is shown.
+    .filter((tag) => !deferIfHidden(tag));
   if (tags.length > 0) dispatch(heimdallApi.util.invalidateTags(tags as any));
 }
 

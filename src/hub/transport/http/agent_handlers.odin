@@ -33,11 +33,19 @@ list_agents_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	if limit <= 0 do limit = 50
 	if limit > 200 do limit = 200
 	cursor := query_value(req.query, "cursor")
+	// view=summary (opt-in) omits instructions and the per-row bridge/instance counts:
+	// pickers and name lookups read only id/name/slug/template/state. The default stays
+	// the full row so existing callers and edit flows are unchanged.
+	summary := query_value(req.query, "view") == "summary"
 	agents, err := agent_service.list_agents(h.agents, auth_ctx, limit, cursor)
 	if err.code != .None do return respond_error(err, req.request_id)
 	b := strings.builder_make(); strings.write_byte(&b, '[')
 	next_cursor := ""
-	for agent, i in agents { if i > 0 do strings.write_byte(&b, ','); write_agent_json(&b, h.agents, agent); next_cursor = agent.created_at }
+	for agent, i in agents {
+		if i > 0 do strings.write_byte(&b, ',')
+		if summary { write_agent_summary_json(&b, agent) } else { write_agent_json(&b, h.agents, agent) }
+		next_cursor = agent.created_at
+	}
 	strings.write_byte(&b, ']')
 	has_more := len(agents) >= limit
 	return respond_list(strings.to_string(b), contracts.API_Page{limit = limit, next_cursor = next_cursor if has_more else "", has_more = has_more}, req.request_id, auth_ctx_server_time(req))
@@ -374,6 +382,18 @@ write_agent_json :: proc(b: ^strings.Builder, service: ^agent_service.Agent_Serv
 	strings.write_string(b, "\",\"supported_bridge_count\":"); strings.write_string(b, i32_to_string_http(agent_service.supported_bridge_count_for_agent(service, a)))
 	strings.write_string(b, ",\"active_instance_count\":"); strings.write_string(b, i32_to_string_http(agent_service.active_instance_count_for_agent(service, a)))
 	strings.write_string(b, ",\"updated_at\":\""); write_handler_json_string(b, a.updated_at)
+	strings.write_string(b, "\"}")
+}
+
+// write_agent_summary_json is the list_agents view=summary row: the identity fields
+// list clients read, without instructions or the per-row count lookups.
+write_agent_summary_json :: proc(b: ^strings.Builder, a: domain.Agent) {
+	strings.write_string(b, "{\"agent_id\":\""); write_handler_json_string(b, a.agent_id)
+	strings.write_string(b, "\",\"name\":\""); write_handler_json_string(b, a.name)
+	strings.write_string(b, "\",\"slug\":\""); write_handler_json_string(b, a.slug)
+	strings.write_string(b, "\",\"template_id\":\""); write_handler_json_string(b, a.template_id)
+	strings.write_string(b, "\",\"state\":\""); write_handler_json_string(b, domain.agent_state_string(a.state))
+	strings.write_string(b, "\",\"updated_at\":\""); write_handler_json_string(b, a.updated_at)
 	strings.write_string(b, "\"}")
 }
 
