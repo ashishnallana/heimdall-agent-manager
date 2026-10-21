@@ -12,7 +12,7 @@ mkdir -p "$OUT"
 run_tests() { # <pkg dir> <out name> <comma test names>
 	echo "== $1: $3"
 	nix develop -c odin build "$1" -build-mode:test -collection:odin_test=src \
-		-define:ODIN_TEST_NAMES="$3" -define:ODIN_TEST_THREADS=1 -out:"$OUT/$2"
+		-define:ODIN_TEST_NAMES="$3" -define:ODIN_TEST_THREADS=1 -define:DBT_TESTS=true -out:"$OUT/$2"
 	nix develop -c "$OUT/$2"
 }
 
@@ -52,7 +52,7 @@ echo "== microbenchmark (off vs basic; budget basic-off <= 300 ns per wrapped ca
 # against docs/operations/db-telemetry.md (shared hosts are too noisy to assert).
 bench_log="$OUT/sqlite_dbt_bench.log"
 nix develop -c odin build src/hub/repository/sqlite -build-mode:test -o:speed -collection:odin_test=src \
-	-define:ODIN_TEST_NAMES=sqlite.test_db_telemetry_bench -define:ODIN_TEST_THREADS=1 \
+	-define:ODIN_TEST_NAMES=sqlite.test_db_telemetry_bench -define:ODIN_TEST_THREADS=1 -define:DBT_TESTS=true \
 	-define:ODIN_TEST_TRACK_MEMORY=false -out:"$OUT/sqlite_dbt_bench"
 : >"$bench_log"
 for _ in 1 2 3; do nix develop -c "$OUT/sqlite_dbt_bench" >>"$bench_log" 2>&1 || { cat "$bench_log"; exit 1; }; done

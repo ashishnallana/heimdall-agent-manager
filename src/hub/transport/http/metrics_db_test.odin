@@ -7,10 +7,13 @@ import dbt "odin_test:hub/platform/dbtelemetry"
 import metrics "odin_test:lib/metrics"
 
 // Per-request DB accounting (DB telemetry plan §2.3.4, §3). Flips the global
-// telemetry mode: verify-db-telemetry.sh runs these with ODIN_TEST_THREADS=1.
+// telemetry mode, so these run only with -define:DBT_TESTS=true (single
+// threaded, verify-db-telemetry.sh); a plain package run skips them.
+DBT_TESTS :: #config(DBT_TESTS, false)
 
 @(test)
 test_request_db_scope_flush :: proc(t: ^testing.T) {
+	if !DBT_TESTS do return
 	dbt.set_mode(.Basic)
 	defer dbt.set_mode(.Off)
 	reg := metrics.init_global()
@@ -50,6 +53,7 @@ test_request_db_scope_flush :: proc(t: ^testing.T) {
 
 @(test)
 test_slow_request_log_sanitized :: proc(t: ^testing.T) {
+	if !DBT_TESTS do return
 	totals := dbt.Scope_Totals{scope = .Http, steps = 3, statements = 2}
 	totals.component[.Conn_Wait] = 40_000_000
 	totals.top[0] = dbt.Top_Call{conn = "main", op = "select", exec_ns = 5, wait_ns = 40_000_000, file = "task_repo_sqlite.odin", line = 42}

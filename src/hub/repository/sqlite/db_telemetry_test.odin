@@ -12,8 +12,11 @@ import dbt "odin_test:hub/platform/dbtelemetry"
 import metrics "odin_test:lib/metrics"
 
 // DB latency telemetry (plan §4.3). These tests flip the process-global
-// telemetry mode, so verify-db-telemetry.sh runs them with
-// -define:ODIN_TEST_THREADS=1 in their own binary.
+// telemetry mode and assert exact counter deltas on shared series, so they
+// only run single-threaded in their own binary: verify-db-telemetry.sh passes
+// -define:DBT_TESTS=true -define:ODIN_TEST_THREADS=1. In a plain package run
+// they are skipped (concurrent tests would move the shared counters).
+DBT_TESTS :: #config(DBT_TESTS, false)
 
 @(private = "file")
 dbt_enable :: proc() {
@@ -61,6 +64,7 @@ holder_proc :: proc(th: ^thread.Thread) {
 
 @(test)
 test_db_conn_wait_split :: proc(t: ^testing.T) {
+	if !DBT_TESTS do return
 	dbt_enable()
 	conn, path, ok := dbt_open(t, "dbt_wait", .Main)
 	defer tmpl_remove_db(path)
@@ -94,6 +98,7 @@ test_db_conn_wait_split :: proc(t: ^testing.T) {
 
 @(test)
 test_step_changes_single_wait :: proc(t: ^testing.T) {
+	if !DBT_TESTS do return
 	dbt_enable()
 	conn, path, ok := dbt_open(t, "dbt_changes", .Main)
 	defer tmpl_remove_db(path)
@@ -117,6 +122,7 @@ tx_count :: proc(kind: Tx_Kind, wrote: bool, o: Tx_Outcome) -> u64 {
 
 @(test)
 test_uow_wait_hold_outcomes :: proc(t: ^testing.T) {
+	if !DBT_TESTS do return
 	dbt_enable()
 	conn, path, ok := dbt_open(t, "dbt_uow", .Main)
 	defer tmpl_remove_db(path)
@@ -167,6 +173,7 @@ test_uow_wait_hold_outcomes :: proc(t: ^testing.T) {
 
 @(test)
 test_uow_nested_no_double_count :: proc(t: ^testing.T) {
+	if !DBT_TESTS do return
 	dbt_enable()
 	conn, path, ok := dbt_open(t, "dbt_nested", .Main)
 	defer tmpl_remove_db(path)
@@ -211,6 +218,7 @@ lock_worker_proc :: proc(th: ^thread.Thread) {
 
 @(test)
 test_dedicated_mutex_timed :: proc(t: ^testing.T) {
+	if !DBT_TESTS do return
 	dbt_enable()
 	// Dedicated repo mutex helper: one contended acquisition, two holds.
 	mu: sync.Mutex
@@ -250,6 +258,7 @@ test_dedicated_mutex_timed :: proc(t: ^testing.T) {
 
 @(test)
 test_telemetry_off_is_passthrough :: proc(t: ^testing.T) {
+	if !DBT_TESTS do return
 	dbt.set_mode(.Off)
 	defer dbt_enable()
 	reg: metrics.Registry
@@ -283,6 +292,7 @@ test_telemetry_off_is_passthrough :: proc(t: ^testing.T) {
 
 @(test)
 test_labels_bounded :: proc(t: ^testing.T) {
+	if !DBT_TESTS do return
 	dbt_enable()
 	prefixes := []cstring{"SELECT", "/* x */ insert", "-- c\nupdate", "WITH", "explain query plan select", "VACUUM", "'; drop", "\x01\x02", "", "ATTACH 'x' AS y"}
 	for p in prefixes {
@@ -310,6 +320,7 @@ site_value :: proc(f: ^metrics.Family, site: string) -> u64 {
 
 @(test)
 test_site_attribution :: proc(t: ^testing.T) {
+	if !DBT_TESTS do return
 	dbt_enable()
 	conn, path, ok := dbt_open(t, "dbt_site", .Main)
 	defer tmpl_remove_db(path)
@@ -345,6 +356,7 @@ test_site_attribution :: proc(t: ^testing.T) {
 
 @(test)
 test_stmt_status_counters :: proc(t: ^testing.T) {
+	if !DBT_TESTS do return
 	dbt_enable()
 	conn, path, ok := dbt_open(t, "dbt_status", .Main)
 	defer tmpl_remove_db(path)
@@ -363,6 +375,7 @@ test_stmt_status_counters :: proc(t: ^testing.T) {
 
 @(test)
 test_conn_kind_tagging :: proc(t: ^testing.T) {
+	if !DBT_TESTS do return
 	dbt_enable()
 	kinds := []Conn_Kind{.Main, .Billing, .Enroll, .Vault, .Metrics}
 	for k in kinds {
@@ -395,6 +408,7 @@ test_conn_kind_tagging :: proc(t: ^testing.T) {
 
 @(test)
 test_statement_count_reuse :: proc(t: ^testing.T) {
+	if !DBT_TESTS do return
 	dbt_enable()
 	conn, path, ok := dbt_open(t, "dbt_reuse", .Main)
 	defer tmpl_remove_db(path)
@@ -435,6 +449,7 @@ queue_worker_proc :: proc(th: ^thread.Thread) {
 
 @(test)
 test_waiters_max_scrape_reset :: proc(t: ^testing.T) {
+	if !DBT_TESTS do return
 	dbt_enable()
 	_ = dbt.waiters_max_take(.Projector)
 	cont0 := metrics.counter_value(dbt.tm.contended[.Projector])
@@ -461,6 +476,7 @@ test_waiters_max_scrape_reset :: proc(t: ^testing.T) {
 // (timing on shared hosts is noisy); verify-db-telemetry.sh reports the lines.
 @(test)
 test_db_telemetry_bench :: proc(t: ^testing.T) {
+	if !DBT_TESTS do return
 	N :: 200_000
 	run := proc(t: ^testing.T, mode: dbt.Mode, tag: string) -> (step_ns, prep_ns: f64) {
 		dbt.set_mode(mode)

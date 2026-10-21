@@ -11,6 +11,7 @@ import "core:strings"
 import "core:sync"
 import "core:thread"
 import "core:time"
+import dbt "odin_test:hub/platform/dbtelemetry"
 import contracts "odin_test:contracts"
 import content_service "odin_test:hub/service/content"
 import domain "odin_test:hub/domain"
@@ -1178,7 +1179,9 @@ shell_session_replay_kill_intents_paced :: proc(svc: ^Shell_Session_Service, bri
 shell_session_kill_replay_worker :: proc(data: rawptr) {
 	work := (^Shell_Kill_Replay_Work)(data)
 	if work == nil do return
+	dbt.scope_begin(.Shell)
 	delivered, outstanding := shell_session_replay_kill_intents_paced(work.svc, work.bridge_id)
+	dbt.scope_end_background()
 	if outstanding > 0 {
 		fmt.println("shell kill replay", "bridge=", work.bridge_id, "outstanding=", outstanding, "delivered=", delivered)
 	}

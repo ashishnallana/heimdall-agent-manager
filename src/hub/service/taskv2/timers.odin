@@ -6,6 +6,7 @@ import "core:strings"
 import "core:sync"
 import "core:thread"
 import "core:time"
+import dbt "odin_test:hub/platform/dbtelemetry"
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
 import platform "odin_test:hub/platform"
@@ -476,8 +477,10 @@ timer_thread_proc :: proc(t: ^thread.Thread) {
 		// a TTL; TTL fires in this tick may grant the one-shot extension.
 		jump := now - last_tick > LEASE_TTL_SECONDS * 1000
 		last_tick = now
+		dbt.scope_begin(.Timer)
 		_ = fire_due(svc, now, jump)
 		drain_pending_touches(svc)
+		dbt.scope_end_background()
 		// Per-tick scratch (wake keys, JSON) lives on the temp allocator.
 		free_all(context.temp_allocator)
 	}

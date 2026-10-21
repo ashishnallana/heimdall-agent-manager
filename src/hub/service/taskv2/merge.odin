@@ -4,6 +4,7 @@ import "base:runtime"
 import "core:fmt"
 import "core:strings"
 import "core:thread"
+import dbt "odin_test:hub/platform/dbtelemetry"
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
 import project "odin_test:hub/service/project"
@@ -106,6 +107,8 @@ flush_merges :: proc(svc: ^Service, e: ^Effects) {
 @(private = "file")
 merge_job_run :: proc(data: rawptr) {
 	job := (^Merge_Job)(data)
+	dbt.scope_begin(.Merge)
+	defer dbt.scope_end_background()
 	defer {
 		destroy_merge_effect(job.merge)
 		free(job)

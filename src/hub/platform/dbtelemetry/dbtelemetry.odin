@@ -1,5 +1,6 @@
 package dbtelemetry
 
+import "core:fmt"
 import "core:sync"
 import metrics "odin_test:lib/metrics"
 
@@ -216,6 +217,7 @@ waiters_max_take :: proc "contextless" (l: Lock) -> i64 {
 Thread_Acc :: struct {
 	scope:       Scope,
 	scope_depth: int,
+	start_ns:    i64,
 	component:   [Component]i64, // ns inside the current outermost scope
 	steps:       int,
 	statements:  int,
@@ -271,6 +273,7 @@ note_call :: proc "contextless" (conn, op: string, exec_ns, wait_ns: i64, file: 
 
 Scope_Totals :: struct {
 	scope:       Scope,
+	elapsed_ns:  i64,
 	component:   [Component]i64,
 	steps:       int,
 	statements:  int,
@@ -287,6 +290,7 @@ scope_begin :: proc "contextless" (s: Scope) {
 	if tl.scope_depth == 0 {
 		tl = Thread_Acc{}
 		tl.scope = s
+		tl.start_ns = now_ns()
 	}
 	tl.scope_depth += 1
 }
@@ -299,7 +303,7 @@ scope_end :: proc "contextless" () -> (totals: Scope_Totals, ok: bool) {
 	tl.scope_depth -= 1
 	if tl.scope_depth > 0 do return
 	totals = Scope_Totals{
-		scope = tl.scope, component = tl.component, steps = tl.steps, statements = tl.statements,
+		scope = tl.scope, elapsed_ns = now_ns() - tl.start_ns, component = tl.component, steps = tl.steps, statements = tl.statements,
 		tx_count = tl.tx_count, tx_hold_ns = tl.tx_hold_ns, busy_errors = tl.busy_errors, top = tl.top,
 	}
 	for c in Component {
@@ -391,4 +395,22 @@ timed_unlock :: proc "contextless" (mu: ^sync.Mutex, l: Lock, token: Lock_Token)
 		if s := tm.held[l]; s != nil do sync.atomic_store(&s.gauge, 0)
 	}
 	sync.mutex_unlock(mu)
+}
+
+// scope_end_background closes a background scope (timer tick, merge job,
+// bridge-log flush, shell replay) and writes one db_slow_scope line when the
+// pass took >= slow_config.scope_slow_ms (1 s) or was sampled. Same rate limiter
+// and sanitisation rules as db_slow_request: scope enum, timings, counts and
+// file:line of the top-3 calls only.
+scope_end_background :: proc() {
+	totals, ok := scope_end()
+	if !ok do return
+	d := slow_decide(totals.elapsed_ns, slow_config.scope_slow_ms)
+	if !d.emit do return
+	b: [512]u8
+	line := fmt.bprintf(b[:], "db_slow_scope reason=%s scope=%s elapsed_ns=%d app_lock_wait_ns=%d conn_wait_ns=%d exec_ns=%d busy_wait_ns=%d steps=%d statements=%d tx_count=%d tx_hold_ns=%d busy_errors=%d dropped_since_last=%d",
+		SLOW_REASON_LABELS[d.reason], SCOPE_LABELS[totals.scope], totals.elapsed_ns,
+		totals.component[.App_Lock_Wait], totals.component[.Conn_Wait], totals.component[.Exec_Excl_Busy], totals.component[.Busy_Wait],
+		totals.steps, totals.statements, totals.tx_count, totals.tx_hold_ns, totals.busy_errors, d.dropped_since_last)
+	fmt.eprintln(line)
 }
