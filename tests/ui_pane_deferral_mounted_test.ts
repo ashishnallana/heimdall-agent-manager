@@ -2,6 +2,8 @@
 // useFetchConversationMessagesQuery + usePaneDeferredRefresh exactly as AgentChatPane
 // does, under a real PaneVisibilityProvider and store, while the real user-WS consumer
 // receives message events. Asserts what reaches the wire as the pane is hidden/shown.
+// The second test covers the companion change in this pass: the legacy PTY capture
+// poll (AgentPaneComposerPanel) pausing while its tab is hidden by the layout.
 //
 // RUN: node --import ./tests/helpers/vaultEndpointHarness.ts --test tests/ui_pane_deferral_mounted_test.ts
 
@@ -81,6 +83,16 @@ test('mounted pane: events while hidden send no messages fetch; showing refetche
     // Visible pane: an event refetches right away.
     await act(async () => { handleUserWsEvent(store.dispatch, messageCreated('d')); await tick(INVALIDATION_COALESCE_MS + 60); });
     assert.equal(messageFetches(), 3);
+
+    // Hidden, an event defers, then the pane unmounts (tab closed) while the page stays
+    // cached. Reopening the conversation must pick up the missed message.
+    await render(false);
+    await act(async () => { handleUserWsEvent(store.dispatch, messageCreated('e')); await tick(INVALIDATION_COALESCE_MS + 60); });
+    assert.equal(messageFetches(), 3, 'deferred while hidden');
+    await act(async () => { root.render(React.createElement(Provider as any, { store }, null)); });
+    await render(true);
+    await act(async () => { await tick(50); });
+    assert.equal(messageFetches(), 4, 'remount refetches the stale cached page once');
   } finally {
     await act(async () => root.unmount());
     resetQueuedInvalidations();

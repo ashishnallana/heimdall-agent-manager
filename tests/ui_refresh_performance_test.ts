@@ -4,6 +4,11 @@
 // under node:test fake timers (setTimeout/setInterval/Date), so poll cadences are
 // measured, not estimated.
 //
+// Labelling: the idle, identity-picker and aux PTY/chain-overview scenarios are BYTE AND
+// REQUEST BENCHMARKS of the caller poll options / hub row shapes fed in below; they do not
+// guard the component sources (the hub view has its own Odin test; components are typechecked).
+// The hidden-pane, burst and reconnect scenarios exercise real consumer code paths.
+//
 // BASELINE vs FINAL are the same scenario with two configurations:
 //   - idle: query subscriptions with the caller poll options of main 244bedbf
 //     (AppShell, AgentChatPane, AuxDock; provider-status fan-out modelled as one
@@ -267,15 +272,23 @@ test('a visible pane is never deferred, and a second visible pane keeps refreshi
   } finally { net.restore(); }
 });
 
-test('unmounting the last hidden pane drops its dirty mark', async () => {
-  const { registerPane, deferIfHidden, unregisterPane, isDirty } = await import('../src/ui/api/paneDeferral.ts');
+test('a dirty mark survives unmount and conversation switches until a pane shows it', async () => {
+  const { registerPane, updatePane, deferIfHidden, unregisterPane, isDirty, takeDirty } = await import('../src/ui/api/paneDeferral.ts');
   const id = registerPane(CONV, false);
   assert.equal(deferIfHidden({ type: 'Chat', id: CONV }), true);
   assert.equal(deferIfHidden({ type: 'SidebarConversations', id: CONV }), false, 'only Chat:<conversation> defers');
   assert.equal(deferIfHidden({ type: 'Chat', id: 'chat_other' }), false, 'no pane registered: not deferred');
-  assert.equal(isDirty(CONV), true);
+  assert.equal(deferIfHidden({ type: 'Chat', id: `${CONV}@older1` }), false, 'older pages are never deferred');
+  // The pane switches to another conversation, then unmounts: the cached page of CONV
+  // is still stale, so the mark stays.
+  updatePane(id, 'chat_other', false);
   unregisterPane(id);
-  assert.equal(isDirty(CONV), false);
+  assert.equal(isDirty(CONV), true);
+  // A later pane showing CONV takes it exactly once.
+  const again = registerPane(CONV, true);
+  assert.equal(takeDirty(CONV), true);
+  assert.equal(takeDirty(CONV), false);
+  unregisterPane(again);
 });
 
 test('event burst: 20 frames for one conversation inside the window cost one fetch per mounted key', async () => {

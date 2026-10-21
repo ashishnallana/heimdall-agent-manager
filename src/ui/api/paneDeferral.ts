@@ -7,8 +7,12 @@
 //
 // Only that tag is deferred: sidebar rows/unread badges, the conversation header and
 // instance state still refresh immediately, so unread counts stay correct. Mark-read
-// stays gated on visibility (paneShouldMarkRead), so a deferred pane never clears
-// unread for messages it has not loaded.
+// stays gated on visibility (paneShouldMarkRead); on show it fires together with the
+// deferred refetch, so the new message renders a moment after the badge clears.
+//
+// A dirty mark outlives the pane: the newest page stays cached (keepUnusedDataFor) and
+// a remount does not refetch it, so a pane that later shows the conversation again
+// takes the mark and refetches once. Nothing is dropped.
 
 type PaneEntry = { conversationId: string; visible: boolean };
 
@@ -27,16 +31,8 @@ export function updatePane(id: number, conversationId: string, visible: boolean)
 }
 
 export function unregisterPane(id: number): void {
-  const entry = panes.get(id);
+  // The dirty mark is kept (see above): the cached page is still stale.
   panes.delete(id);
-  // The last pane went away: nothing needs the deferred refresh any more, and a
-  // remount fetches anyway (refetchOnMountOrArgChange / cache expiry).
-  if (entry && !hasPane(entry.conversationId)) dirty.delete(entry.conversationId);
-}
-
-function hasPane(conversationId: string): boolean {
-  for (const entry of panes.values()) if (entry.conversationId === conversationId) return true;
-  return false;
 }
 
 /** Every mounted pane for the conversation is hidden (and there is at least one). */
