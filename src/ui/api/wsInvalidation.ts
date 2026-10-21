@@ -2,7 +2,14 @@ import { heimdallApi, HEIMDALL_TAG_TYPES } from './heimdallApi';
 import { tasksApi } from './endpoints/tasks';
 import { normalizeChain, workspaceApi } from './endpoints/workspace';
 import { chatEndpoints } from './endpoints/chats';
-import { patchAgentCachesFromWs } from './endpoints/agents';
+import { agentsApi, patchAgentCachesFromWs } from './endpoints/agents';
+import { agentsLiveApi } from './endpoints/agentsLive';
+import { sidebarApi } from './endpoints/sidebar';
+import {
+  announceConversationMessagesRead,
+  applyReadReceiptToDraft,
+  consumeLocalMessageEcho,
+} from './conversationMessageEvents';
 import { patchMemoryCachesFromWs } from './endpoints/memory';
 import { bridgeSupportApi } from './endpoints/bridgeSupport';
 import { upsertTaskInList, upsertTaskLogEvent } from './taskCache';
@@ -389,6 +396,141 @@ function dispatchSearchTitleUpsert(
   }
 }
 
+
+// ---- Burst coalescing -------------------------------------------------------------
+// One logical change often reaches us as several frames (a send: message_created plus
+// the mutation's own invalidation; a restart: several status transitions). Targeted
+// invalidations are queued per tag key and flushed once per window, so a burst on the
+// same key costs at most one refetch per mounted query. Distinct keys (different
+// conversations, facets, runs) never merge.
+export const INVALIDATION_COALESCE_MS = 150;
+type QueuedTag = { tag: { type: string; id: string }; unconditional: boolean; echoGuards: Set<string> };
+const queuedTags = new Map<string, QueuedTag>();
+let queuedDispatch: any = null;
+let queuedTimer: ReturnType<typeof setTimeout> | null = null;
+
+// echoGuard: the tag is dropped at flush time when the guard is a message this tab sent
+// (its mutation already invalidated the same tags). The hub publishes before it returns
+// the POST response, so the echo can arrive before the tab learns its own message id.
+function queueInvalidation(dispatch: any, tags: Array<{ type: string; id: string }>, echoGuard = ''): void {
+  for (const tag of tags) {
+    if (!tag.id) continue;
+    const key = `${tag.type}\u0000${tag.id}`;
+    const entry = queuedTags.get(key) || { tag, unconditional: false, echoGuards: new Set<string>() };
+    if (echoGuard) entry.echoGuards.add(echoGuard);
+    else entry.unconditional = true;
+    queuedTags.set(key, entry);
+  }
+  queuedDispatch = dispatch;
+  if (queuedTimer) return;
+  queuedTimer = setTimeout(flushQueuedInvalidations, INVALIDATION_COALESCE_MS);
+}
+
+export function flushQueuedInvalidations(): void {
+  if (queuedTimer) clearTimeout(queuedTimer);
+  queuedTimer = null;
+  const dispatch = queuedDispatch;
+  const entries = [...queuedTags.values()];
+  queuedTags.clear();
+  if (!dispatch || entries.length === 0) return;
+  const echoes = new Map<string, boolean>();
+  const isEcho = (id: string) => {
+    if (!echoes.has(id)) echoes.set(id, consumeLocalMessageEcho(id));
+    return Boolean(echoes.get(id));
+  };
+  const tags = entries
+    .filter((entry) => entry.unconditional || [...entry.echoGuards].some((id) => !isEcho(id)))
+    .map((entry) => entry.tag);
+  if (tags.length > 0) dispatch(heimdallApi.util.invalidateTags(tags as any));
+}
+
+// Tests and teardown: drop anything queued without dispatching it.
+export function resetQueuedInvalidations(): void {
+  if (queuedTimer) clearTimeout(queuedTimer);
+  queuedTimer = null;
+  queuedTags.clear();
+  queuedDispatch = null;
+}
+
+// messages_read: patch every loaded RTK page of the conversation (newest and older
+// cursors) and tell the pane, which keeps older pages in state. unread_count is the
+// committed value, so the sidebar rows are patched rather than refetched.
+function applyMessagesRead(dispatch: any, payload: any, conversationId: string): void {
+  const receipt = {
+    conversationId,
+    messageIds: Array.isArray(payload.message_ids) ? payload.message_ids.map(String) : [],
+    readAt: String(payload.read_at || ''),
+  };
+  dispatch((d: any, getState: () => any) => {
+    const state = getState();
+    for (const arg of chatEndpoints.util.selectCachedArgsForQuery(state, 'fetchConversationMessages') as any[]) {
+      if (String(arg?.conversationId || '') !== conversationId) continue;
+      d(chatEndpoints.util.updateQueryData('fetchConversationMessages', arg, (draft: any) => applyReadReceiptToDraft(draft?.messages, receipt)));
+    }
+    if (payload.unread_count === undefined) return;
+    const unread = Number(payload.unread_count || 0);
+    for (const arg of sidebarApi.util.selectCachedArgsForQuery(state, 'listSidebarConversations') as any[]) {
+      d(sidebarApi.util.updateQueryData('listSidebarConversations', arg, (draft: any) => {
+        for (const row of Array.isArray(draft) ? draft : []) if (row?.conversationId === conversationId) row.unreadCount = unread;
+      }));
+    }
+  });
+  announceConversationMessagesRead(receipt);
+}
+
+// Legacy daemon caches (fetchDirectChat/fetchGuideChat/listConversationSummaries and the
+// chat slice). Not mounted by the cookie shell; kept patched for the legacy client path.
+// TODO(FIX): Replace any with strict TypeScript interface matching Odin backend schema
+function applyLegacyStatusPatch(dispatch: any, payload: any, agentId: string): void {
+  // TODO(FIX): Replace loose fallback chain with canonical typed schema property
+  const readUnixMs = Number(payload.read_unix_ms || payload.readUnixMs || 0) || (payload.read_at ? Date.parse(payload.read_at) : 0) || 0;
+  // TODO(FIX): Replace loose fallback chain with canonical typed schema property
+  const deliveredUnixMs = Number(payload.delivered_unix_ms || payload.deliveredUnixMs || 0) || (payload.delivered_at ? Date.parse(payload.delivered_at) : 0) || 0;
+  const messageIds: string[] = Array.isArray(payload.message_ids) ? payload.message_ids.map(String) : (payload.message_id ? [String(payload.message_id)] : []);
+  const statusPatch = {
+    agentId,
+    // TODO(FIX): Replace loose fallback chain with canonical typed schema property
+    messageId: String(payload.message_id || (messageIds.length === 1 ? messageIds[0] : '')),
+    deliveredUnixMs,
+    readUnixMs,
+    // TODO(FIX): Replace loose fallback chain with canonical typed schema property
+    deliveryFailedUnixMs: Number(payload.delivery_failed_unix_ms || payload.deliveryFailedUnixMs || 0),
+    // TODO(FIX): Replace loose fallback chain with canonical typed schema property
+    deliveryError: String(payload.delivery_error || payload.deliveryError || ''),
+  };
+  dispatch(patchChatMessageStatus(statusPatch));
+  // TODO(FIX): Replace any with strict TypeScript interface matching Odin backend schema
+  const patchCache = (draft: any) => {
+    if (!draft?.messages) return;
+    const messageId = statusPatch.messageId;
+    const idSet = new Set(messageIds);
+    for (const message of draft.messages) {
+      const mid = String(message.id || '');
+      const matchesId = (messageId && mid === messageId) || (idSet.size > 0 && idSet.has(mid));
+      const matchesReadWatermark = !messageId && idSet.size === 0 && statusPatch.readUnixMs > 0 && message.author === 'user' && Number(message.createdUnixMs || 0) <= statusPatch.readUnixMs;
+      if (!matchesId && !matchesReadWatermark) continue;
+      if (statusPatch.deliveredUnixMs > 0) message.deliveredUnixMs = Math.max(Number(message.deliveredUnixMs || 0), statusPatch.deliveredUnixMs);
+      if (statusPatch.readUnixMs > 0) message.readUnixMs = Math.max(Number(message.readUnixMs || 0), statusPatch.readUnixMs);
+      if (statusPatch.deliveryFailedUnixMs > 0) message.deliveryFailedUnixMs = Math.max(Number(message.deliveryFailedUnixMs || 0), statusPatch.deliveryFailedUnixMs);
+      if (statusPatch.deliveryError) message.deliveryError = statusPatch.deliveryError;
+      message.sending = false;
+      message.optimistic = false;
+    }
+  };
+  if (agentId === GUIDE_AGENT_ID) dispatch(chatEndpoints.util.updateQueryData('fetchGuideChat', guideChatArgs(), patchCache));
+  else dispatch(chatEndpoints.util.updateQueryData('fetchDirectChat', directChatArgs(agentId), patchCache));
+  // TODO(FIX): Replace any with strict TypeScript interface matching Odin backend schema
+  dispatch(chatEndpoints.util.updateQueryData('listConversationSummaries', undefined, (draft: any) => {
+    const summaries = draft?.summaries || draft;
+    if (summaries?.[agentId] && payload.unread_count !== undefined) {
+      summaries[agentId].unreadCount = Number(payload.unread_count || 0);
+    }
+  }));
+  if (statusPatch.messageId && !statusPatch.deliveredUnixMs && !statusPatch.readUnixMs && !statusPatch.deliveryFailedUnixMs) {
+    dispatch(chatEndpoints.endpoints.fetchChatMessage.initiate({ messageId: statusPatch.messageId }, { subscribe: false, forceRefetch: true })).unwrap().catch(() => undefined);
+  }
+}
+
 // TODO(FIX): Replace any with strict TypeScript interface matching Odin backend schema
 function handleChatEvent(dispatch: any, payload: any, ctx: WsCtx) {
   dispatch(chatEventReceived(payload));
@@ -420,56 +562,25 @@ function handleChatEvent(dispatch: any, payload: any, ctx: WsCtx) {
   const isStatusOnlyEvent = !message && (direction === 'read' || direction === 'delivered' || direction === 'delivery_failed' || payload.event === 'messages_read');
 
   dispatch(wsRefreshRequested(`chat_event:${agentId || payload.message_id || 'unknown'}`));
+  // Cookie shell (the only mounted consumer): caches are keyed by conversation id.
+  // messages_read patches in place; a new message refetches only that conversation's
+  // newest page and the sidebar rows, never /agents/live or the conversation header.
+  if (conversationId && payload.event === 'messages_read') {
+    applyMessagesRead(dispatch, payload, conversationId);
+    if (agentId) applyLegacyStatusPatch(dispatch, payload, agentId);
+    return;
+  }
+  if (conversationId && !message && payload.fetch_required && String(payload.fetch_kind || '') === 'chat_message') {
+    const messageId = String(payload.fetch_id || payload.message_id || '');
+    queueInvalidation(dispatch, [
+      { type: 'Chat', id: conversationId },
+      { type: 'SidebarConversations', id: conversationId },
+    ], messageId);
+    if (eventChainId) dispatch(wsChainViewRefreshRequested(`chat_event:${focusedChainId || eventChainId}:${messageId}`));
+    return;
+  }
   if (isStatusOnlyEvent) {
-    if (agentId) {
-      // TODO(FIX): Replace loose fallback chain with canonical typed schema property
-      const readUnixMs = Number(payload.read_unix_ms || payload.readUnixMs || 0) || (payload.read_at ? Date.parse(payload.read_at) : 0) || 0;
-      // TODO(FIX): Replace loose fallback chain with canonical typed schema property
-      const deliveredUnixMs = Number(payload.delivered_unix_ms || payload.deliveredUnixMs || 0) || (payload.delivered_at ? Date.parse(payload.delivered_at) : 0) || 0;
-      const messageIds: string[] = Array.isArray(payload.message_ids) ? payload.message_ids.map(String) : (payload.message_id ? [String(payload.message_id)] : []);
-      const statusPatch = {
-        agentId,
-        // TODO(FIX): Replace loose fallback chain with canonical typed schema property
-        messageId: String(payload.message_id || (messageIds.length === 1 ? messageIds[0] : '')),
-        deliveredUnixMs,
-        readUnixMs,
-        // TODO(FIX): Replace loose fallback chain with canonical typed schema property
-        deliveryFailedUnixMs: Number(payload.delivery_failed_unix_ms || payload.deliveryFailedUnixMs || 0),
-        // TODO(FIX): Replace loose fallback chain with canonical typed schema property
-        deliveryError: String(payload.delivery_error || payload.deliveryError || ''),
-      };
-      dispatch(patchChatMessageStatus(statusPatch));
-      // TODO(FIX): Replace any with strict TypeScript interface matching Odin backend schema
-      const patchCache = (draft: any) => {
-        if (!draft?.messages) return;
-        const messageId = statusPatch.messageId;
-        const idSet = new Set(messageIds);
-        for (const message of draft.messages) {
-          const mid = String(message.id || '');
-          const matchesId = (messageId && mid === messageId) || (idSet.size > 0 && idSet.has(mid));
-          const matchesReadWatermark = !messageId && idSet.size === 0 && statusPatch.readUnixMs > 0 && message.author === 'user' && Number(message.createdUnixMs || 0) <= statusPatch.readUnixMs;
-          if (!matchesId && !matchesReadWatermark) continue;
-          if (statusPatch.deliveredUnixMs > 0) message.deliveredUnixMs = Math.max(Number(message.deliveredUnixMs || 0), statusPatch.deliveredUnixMs);
-          if (statusPatch.readUnixMs > 0) message.readUnixMs = Math.max(Number(message.readUnixMs || 0), statusPatch.readUnixMs);
-          if (statusPatch.deliveryFailedUnixMs > 0) message.deliveryFailedUnixMs = Math.max(Number(message.deliveryFailedUnixMs || 0), statusPatch.deliveryFailedUnixMs);
-          if (statusPatch.deliveryError) message.deliveryError = statusPatch.deliveryError;
-          message.sending = false;
-          message.optimistic = false;
-        }
-      };
-      if (agentId === GUIDE_AGENT_ID) dispatch(chatEndpoints.util.updateQueryData('fetchGuideChat', guideChatArgs(), patchCache));
-      else dispatch(chatEndpoints.util.updateQueryData('fetchDirectChat', directChatArgs(agentId), patchCache));
-      // TODO(FIX): Replace any with strict TypeScript interface matching Odin backend schema
-      dispatch(chatEndpoints.util.updateQueryData('listConversationSummaries', undefined, (draft: any) => {
-        const summaries = draft?.summaries || draft;
-        if (summaries?.[agentId] && payload.unread_count !== undefined) {
-          summaries[agentId].unreadCount = Number(payload.unread_count || 0);
-        }
-      }));
-      if (statusPatch.messageId && !statusPatch.deliveredUnixMs && !statusPatch.readUnixMs && !statusPatch.deliveryFailedUnixMs) {
-        dispatch(chatEndpoints.endpoints.fetchChatMessage.initiate({ messageId: statusPatch.messageId }, { subscribe: false, forceRefetch: true })).unwrap().catch(() => undefined);
-      }
-    }
+    if (agentId) applyLegacyStatusPatch(dispatch, payload, agentId);
     return;
   }
   if (!message && payload.fetch_required && String(payload.fetch_kind || '') === 'chat_message') {
@@ -498,10 +609,9 @@ function handleChatEvent(dispatch: any, payload: any, ctx: WsCtx) {
     if (conversationId) dispatch(heimdallApi.util.invalidateTags([{ type: 'Chat', id: conversationId }, { type: 'ConversationSummaries', id: conversationId }]));
     dispatch(heimdallApi.util.invalidateTags([{ type: 'ConversationSummaries', id: 'ALL' }]));
   }
-  // UI-14: any chat event (new message, read watermark, unread count) can change
-  // the sidebar tree's unread badges. Invalidate the cookie-auth sidebar tag so the
-  // live shell's project/agent/session rollups refresh through this single path.
-  dispatch(heimdallApi.util.invalidateTags([{ type: 'SidebarConversations', id: 'ALL' }]));
+  // UI-14: a legacy inline chat event can still change the sidebar's unread badges.
+  // Scoped to the conversation row when the event names one.
+  queueInvalidation(dispatch, [{ type: 'SidebarConversations', id: conversationId || 'ALL' }]);
 }
 
 // TODO(FIX): Replace any with strict TypeScript interface matching Odin backend schema
@@ -604,6 +714,89 @@ function invalidateShellSession(dispatch: any, sessionId: string, chainId?: stri
   dispatch(shellSessionEventReceived({ sessionId }));
 }
 
+// agent_instance/<created|status_changed|config_changed|current_task_changed> carry the
+// COMPLETE instance summary (publish_instance_changed, resource_events.odin). Fields
+// present in it are patched in place, guarded by updated_at so a late frame never
+// overwrites a newer fetch. Patched fields are the ones the summary owns; anything else
+// on the cached row (project, agent, timestamps the summary lacks) is left as fetched.
+const INSTANCE_SUMMARY_FIELDS = [
+  'runtime_status', 'startup_status', 'activity_status', 'display_name', 'bridge_id',
+  'provider', 'model', 'configuration_revision', 'run_count', 'started_at',
+  'current_task_id', 'current_task_role', 'chain_id', 'updated_at', 'last_error',
+] as const;
+
+function isNewerOrEqual(next: unknown, current: unknown): boolean {
+  const a = String(next || '');
+  const b = String(current || '');
+  return !a || !b || a >= b;
+}
+
+// Returns false when the frame is older than the cached instance (nothing is patched).
+function patchInstanceCachesFromSummary(dispatch: any, instanceId: string, summary: any): boolean {
+  let stale = false;
+  dispatch(agentsApi.util.updateQueryData('fetchAgentInstance', { instanceId }, (draft: any) => {
+    const instance = draft?.instance;
+    if (!instance) return;
+    if (!isNewerOrEqual(summary.updated_at, instance.updated_at)) { stale = true; return; }
+    for (const field of INSTANCE_SUMMARY_FIELDS) {
+      if (summary[field] !== undefined) instance[field] = summary[field];
+    }
+    // last_error is omitted when clear; a successful transition must not keep a stale one.
+    if (summary.last_error === undefined && summary.runtime_status !== undefined && instance.last_error) delete instance.last_error;
+  }));
+  // The sidebar rows and live tree carry no updated_at; the cached instance is the
+  // version reference for them too.
+  if (stale) return false;
+  dispatch((d: any, getState: () => any) => {
+    const state = getState();
+    for (const arg of sidebarApi.util.selectCachedArgsForQuery(state, 'listSidebarConversations') as any[]) {
+      d(sidebarApi.util.updateQueryData('listSidebarConversations', arg, (draft: any) => {
+        for (const row of Array.isArray(draft) ? draft : []) {
+          if (row?.agentInstanceId !== instanceId) continue;
+          if (summary.runtime_status !== undefined) row.runtimeStatus = String(summary.runtime_status || '') || undefined;
+          if (summary.activity_status !== undefined) row.activityStatus = String(summary.activity_status || '') || undefined;
+          if (summary.bridge_id !== undefined) row.bridgeId = String(summary.bridge_id || '') || undefined;
+        }
+      }));
+    }
+  });
+  // /agents/live lists only chains with a live agent and those chains' live agents, so a
+  // runtime_status change can add or remove rows: that refetches (coalesced). Activity
+  // and display name are patched in place.
+  let liveTreeStale = false;
+  dispatch(agentsLiveApi.util.updateQueryData('getAgentsLive', undefined, (draft: any) => {
+    let found = false;
+    for (const project of Array.isArray(draft) ? draft : []) {
+      for (const chain of project?.chains || []) {
+        for (const agent of [...(chain?.liveAgents || []), ...(chain?.members || [])]) {
+          if (agent?.agentInstanceId !== instanceId) continue;
+          found = true;
+          if (summary.runtime_status !== undefined && String(summary.runtime_status || '') !== agent.runtimeStatus) liveTreeStale = true;
+          if (summary.activity_status !== undefined && 'activityStatus' in agent) agent.activityStatus = String(summary.activity_status || '');
+          if (summary.display_name) agent.displayName = String(summary.display_name);
+        }
+      }
+    }
+    if (!found && summary.chain_id && summary.runtime_status !== undefined) liveTreeStale = true;
+  }));
+  if (liveTreeStale) queueInvalidation(dispatch, [{ type: 'AgentsLive', id: 'ALL' }]);
+  return true;
+}
+
+function handleInstanceChanged(dispatch: any, payload: any, ctx: WsCtx, instanceId: string, change: string, summary: any): void {
+  if (instanceId && !patchInstanceCachesFromSummary(dispatch, instanceId, summary)) return;
+  // Membership/placement of the live tree changes on create, current task (is_live,
+  // role) and config (bridge); plain status is already patched above.
+  if (change === 'created' || change === 'current_task_changed' || change === 'config_changed') {
+    queueInvalidation(dispatch, [{ type: 'AgentsLive', id: 'ALL' }]);
+  }
+  if (change === 'created') {
+    queueInvalidation(dispatch, [{ type: 'AgentInstances', id: 'LIST' }, { type: 'SidebarConversations', id: 'ALL' }]);
+  }
+  // Legacy caches + the "identity missing from the catalogue" check (agents.ts).
+  handleAgentEvent(dispatch, { ...payload, type: 'agent_update', agent_instance_id: instanceId, summary }, ctx);
+}
+
 function handleResourceChanged(dispatch: any, payload: any, ctx: WsCtx) {
   const resource = String(payload.resource || '');
   const resourceId = String(payload.resource_id || '');
@@ -616,6 +809,17 @@ function handleResourceChanged(dispatch: any, payload: any, ctx: WsCtx) {
 
   switch (resource) {
     case 'task': {
+      const change = String(payload.change || '');
+      // A facet write names (task, attempt, kind): refetch that facet only, not the
+      // task, its log or the chain lists.
+      if (change === 'facet_changed' && taskId) {
+        const attemptNo = Number(summary.attempt_no || 0);
+        const kind = String(summary.kind || '');
+        queueInvalidation(dispatch, attemptNo && kind
+          ? [{ type: 'TaskFacet', id: `${taskId}:${attemptNo}:${kind}` }]
+          : [{ type: 'Task', id: taskId }]);
+        return;
+      }
       // Auto-load the specific updated task with in-flight deduplication and patch caches:
       if (taskId) {
         autoLoadTaskFromWs(dispatch, chainId, taskId);
@@ -629,6 +833,8 @@ function handleResourceChanged(dispatch: any, payload: any, ctx: WsCtx) {
         { type: 'Chain', id: 'PINNED_LIST' },
         { type: 'Chain', id: 'GROUPED_LIST' },
       ];
+      // Workflow run views show their tasks' states.
+      if (chainId) tags.push({ type: 'WorkflowRuns', id: chainId });
       if (taskId) {
         tags.push({ type: 'Task', id: taskId });
         tags.push({ type: 'TaskLog', id: taskId });
@@ -651,7 +857,19 @@ function handleResourceChanged(dispatch: any, payload: any, ctx: WsCtx) {
           { type: 'ChainTasks', id: chainId },
         );
       }
-      dispatch(heimdallApi.util.invalidateTags(tags));
+      // Queued with the workflow tags below so one chain change refetches each mounted
+      // chain/run view once (the run list is also tagged Chain:<id>).
+      queueInvalidation(dispatch, tags);
+      // Chain membership/coordinator/title feed the live tree; workflow_* changes carry
+      // workflow_run_id and reach the run views.
+      const chainChange = String(payload.change || '');
+      if (!/^(summary_updated|work_|proposal_|workflow_)/.test(chainChange)) {
+        queueInvalidation(dispatch, [{ type: 'AgentsLive', id: 'ALL' }]);
+      }
+      if (chainChange.startsWith('workflow_') && chainId) {
+        const runId = String(summary.workflow_run_id || '');
+        queueInvalidation(dispatch, [{ type: 'WorkflowRuns', id: chainId }, ...(runId ? [{ type: 'WorkflowRuns', id: runId }] : [])]);
+      }
       if (chainId && ctx.focusedChainId === chainId) {
         dispatch(wsChainViewRefreshRequested(`resource_changed:task_chain:${chainId}`));
       }
@@ -676,12 +894,13 @@ function handleResourceChanged(dispatch: any, payload: any, ctx: WsCtx) {
       return;
     }
     case 'conversation': {
-      dispatch(heimdallApi.util.invalidateTags([
+      // created: a new sidebar row (list-level); updated: title/metadata of one row and
+      // its header. Neither changes the message pages.
+      const change = String(payload.change || '');
+      queueInvalidation(dispatch, [
         { type: 'ConversationSummaries', id: resourceId },
-        { type: 'ConversationSummaries', id: 'ALL' },
-        { type: 'SidebarConversations', id: 'ALL' },
-        { type: 'Chat', id: resourceId },
-      ]));
+        { type: 'SidebarConversations', id: change === 'created' ? 'ALL' : resourceId },
+      ]);
       const rawTitle = String(
         summary.title ||
         payload.title ||
@@ -711,6 +930,24 @@ function handleResourceChanged(dispatch: any, payload: any, ctx: WsCtx) {
       invalidateShellSession(dispatch, resourceId, String(payload?.chain_id || ''));
       return;
     case 'agent_instance':
+      handleInstanceChanged(dispatch, payload, ctx, resourceId, String(payload.change || ''), summary);
+      return;
+    case 'agent_instance_reconfiguration':
+      // resource_id is the INSTANCE id. Every phase advance is announced, so the
+      // operation view needs no client poll; settling invalidates the instance,
+      // header and messages (listInstanceReconfigurations.onQueryStarted).
+      queueInvalidation(dispatch, [{ type: 'InstanceReconfigurations', id: resourceId }]);
+      return;
+    case 'workflow_run': {
+      queueInvalidation(dispatch, [
+        { type: 'WorkflowRuns', id: resourceId },
+        ...(chainId ? [{ type: 'WorkflowRuns', id: chainId }] : []),
+      ]);
+      if (chainId && ctx.focusedChainId === chainId) {
+        dispatch(wsChainViewRefreshRequested(`resource_changed:workflow_run:${resourceId}`));
+      }
+      return;
+    }
     case 'agent_id':
     case 'agent': {
       // Reuse the agent patch/refresh path; patchAgentCachesFromWs tolerates the
@@ -745,9 +982,13 @@ function handleResourceChanged(dispatch: any, payload: any, ctx: WsCtx) {
         { type: 'Bridges', id: 'LIST' },
         { type: 'Bridges', id: resourceId },
       ];
-      // Nothing pushes provider changes yet; a bridge coming online is the one cheap
-      // hint that its providers may have been rediscovered. Only mounted
+      // Provider discovery/enable announce provider_status_changed/capabilities_changed;
+      // a bridge coming online may also have rediscovered them. Only mounted
       // provider-status entries for THIS bridge refetch.
+      if (change === 'provider_status_changed' || change === 'capabilities_changed') {
+        queueInvalidation(dispatch, [{ type: 'BridgeProviders', id: resourceId }]);
+        return;
+      }
       if (change === 'status_changed' && String(summary?.status || '').toLowerCase() === 'online') {
         tags.push({ type: 'BridgeProviders', id: resourceId });
       }
@@ -767,8 +1008,20 @@ function handleResourceChanged(dispatch: any, payload: any, ctx: WsCtx) {
 // and dedupes concurrent invalidations. Call this ONLY on a genuine reconnect,
 // not the first connect (initial mounts already fetch their data).
 // TODO(FIX): Replace any with strict TypeScript interface matching Odin backend schema
+// Static catalogues (templates, workflow definitions, LSP configs, experiments) change
+// only through explicit edits and are refetched by their editors; a reconnect does not
+// reload them for every mounted picker.
+export const RESYNC_EXCLUDED_TAG_TYPES: ReadonlySet<string> = new Set(['AgentTemplate', 'WorkflowDefinitions', 'LspServerConfigs', 'Experiments']);
+
 export function resyncAfterReconnect(dispatch: any) {
-  dispatch(heimdallApi.util.invalidateTags([...HEIMDALL_TAG_TYPES]));
+  // Anything queued is superseded by the full invalidation below.
+  resetQueuedInvalidations();
+  dispatch(heimdallApi.util.invalidateTags(HEIMDALL_TAG_TYPES.filter((type) => !RESYNC_EXCLUDED_TAG_TYPES.has(type))));
+  // Non-RTK consumers: the paged shells list and the chain view refresh on their own
+  // signals, which no tag reaches. The conversation pane re-anchors its older pages
+  // when the refetched newest page no longer overlaps them (AgentChatPane).
+  dispatch(shellSessionEventReceived({ sessionId: '' }));
+  dispatch(wsChainViewRefreshRequested('user_ws_resync'));
 }
 
 // Attention deck: attention_changed is an invalidation hint only ({kinds}, no

@@ -518,7 +518,9 @@ export const agentsApi = heimdallApi.injectEndpoints({
           return { data: { operations: (data?.operations || []).map(normalizeInstanceReconfiguration) } };
         } catch (error: any) { return { error: customQueryError(error) as any }; }
       },
-      providesTags: (_data, _error, { instanceId }) => [{ type: 'AgentInstances' as const, id: instanceId }],
+      // Own tag: agent_instance_reconfiguration events invalidate it; ordinary
+      // instance status events (AgentInstances:<id>) do not refetch it.
+      providesTags: (_data, _error, { instanceId }) => [{ type: 'InstanceReconfigurations' as const, id: instanceId }],
       // When an operation settles, the instance runtime, the conversation header and its
       // messages all change server-side. Invalidate their tags here rather than having
       // views refetch: invalidation only touches started subscriptions, so it is safe
@@ -547,7 +549,8 @@ export const agentsApi = heimdallApi.injectEndpoints({
           return { data: normalizeInstanceReconfiguration(data) };
         } catch (error: any) { return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any }; }
       },
-      invalidatesTags: (_data, _error, { instanceId }) => [{ type: 'AgentInstances' as const, id: instanceId }],
+      // The instance itself changes later and announces it (agent_instance/config_changed).
+      invalidatesTags: (_data, _error, { instanceId }) => [{ type: 'InstanceReconfigurations' as const, id: instanceId }],
     }),
     applyInstanceConfiguration: build.mutation<InstanceReconfiguration, ApplyInstanceConfigurationInput>({
       queryFn: async ({ instanceId, ...body }) => {
@@ -556,7 +559,8 @@ export const agentsApi = heimdallApi.injectEndpoints({
           return { data: normalizeInstanceReconfiguration(data) };
         } catch (error: any) { return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any }; }
       },
-      invalidatesTags: (_data, _error, { instanceId }) => [{ type: 'AgentInstances' as const, id: instanceId }],
+      // The instance itself changes later and announces it (agent_instance/config_changed).
+      invalidatesTags: (_data, _error, { instanceId }) => [{ type: 'InstanceReconfigurations' as const, id: instanceId }],
     }),
     // TODO(FIX): Replace any with strict TypeScript interface matching Odin backend schema
     reconfigureAgentInstance: build.mutation<any, { agentId: string; instanceId: string; provider?: string; model?: string; bridgeId?: string }>({

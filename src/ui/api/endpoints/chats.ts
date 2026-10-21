@@ -1,3 +1,4 @@
+import { noteLocalMessageSent } from '../conversationMessageEvents';
 import * as daemonApi from '../daemonApi';
 import { apiUrl, cookieJsonFetch, cookieMutation, customQueryError, errorFromResponse } from '../cookieFetch';
 import { heimdallApi, withSessionQuery } from '../heimdallApi';
@@ -307,7 +308,12 @@ export const chatEndpoints = heimdallApi.injectEndpoints({
           return { error: customQueryError(error) as any };
         }
       },
-      providesTags: (_r, _e, { conversationId }) => [{ type: 'Chat' as const, id: conversationId }],
+      // Only the newest page (no cursor) carries Chat:<conversation>, which a new
+      // message invalidates. Older pages never gain messages; their read receipts are
+      // patched from messages_read, so they must not refetch on every new message.
+      providesTags: (_r, _e, { conversationId, cursor }) => [
+        { type: 'Chat' as const, id: cursor ? `${conversationId}@${cursor}` : conversationId },
+      ],
       // Keep recently-viewed threads cached longer than the 30s global default so
       // switching back to a conversation renders instantly (the page remounts per
       // conversationId). WS/`Chat` tag invalidation still refreshes on new messages.
@@ -363,6 +369,8 @@ export const chatEndpoints = heimdallApi.injectEndpoints({
             encBody = await encryptVaultText(encBody, activeKey);
           }
           const data = await cookieMutation(`/chats/${encodeURIComponent(conversationId)}/messages`, 'POST', { body: encBody, artifact_ids: artifactIds });
+          // invalidatesTags below refreshes this tab; skip the hub's echo of the same id.
+          noteLocalMessageSent(String(data?.message_id || data?.message?.message_id || data?.data?.message_id || ''));
           return { data };
         } catch (error: any) {
           return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any };

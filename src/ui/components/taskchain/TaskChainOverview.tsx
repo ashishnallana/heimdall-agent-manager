@@ -116,8 +116,8 @@ export const TaskChainOverview: React.FC<TaskChainOverviewProps> = ({
 
   const workflowRunsQuery = useFetchChainWorkflowRunsQuery({ chainId }, {
     skip: !chainId,
-    pollingInterval: 5000,
-    skipPollingIfUnfocused: true,
+    // No poll: workflow_run/stage_changed and task_chain/workflow_* (with run id)
+    // invalidate WorkflowRuns:<chain>/<run>; task events still reach Chain:<id>.
     refetchOnReconnect: true,
   });
   const workflowRuns = workflowRunsQuery.currentData?.runs || [];

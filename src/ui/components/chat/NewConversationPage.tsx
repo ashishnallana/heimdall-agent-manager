@@ -90,7 +90,7 @@ export default function NewConversationPage({ footer, onLaunched, launchIntent }
   const preferences = useGetConversationLaunchPreferencesQuery();
   const agentsQuery = useListAgentIdentitiesQuery({ limit: 200 });
   const projectsQuery = useListProjectsQuery();
-  const bridgesQuery = useListBridgesQuery(undefined, { pollingInterval: 5000, skipPollingIfUnfocused: true, refetchOnMountOrArgChange: true });
+  const bridgesQuery = useListBridgesQuery(undefined, { refetchOnMountOrArgChange: true });
   const templatesQuery = useListAgentTemplatesQuery();
   const [saveSelection] = useSaveConversationLaunchSelectionMutation();
   const [setFavorite, favoriteState] = useSetAgentFavoriteMutation();

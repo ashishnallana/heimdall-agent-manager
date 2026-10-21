@@ -94,6 +94,11 @@ import InstanceReconfigurationProgress from '../chat/InstanceReconfigurationProg
 import { MessageComposerInput, MessageComposerActions, MessageComposerStatus } from '../chat/MessageComposer';
 import RuntimeConfigurationOptions from '../chat/RuntimeConfigurationOptions';
 import { usePaneMarkRead, usePanePollPolicy, usePaneVisible, visiblePollInterval } from './paneVisibility';
+import {
+  CONVERSATION_MESSAGES_READ_EVENT,
+  applyReadReceipt,
+  type ConversationMessagesRead,
+} from '../../api/conversationMessageEvents';
 import { type TaskLike } from '../chat/chainTaskInference';
 import { groupTranscriptMessages, isAgentStartMessage } from '../chat/transcriptGrouping';
 import type { ChatDeliveryStatus, ChatMessage, ChatTimestamp } from '../chat/types';
@@ -116,6 +121,10 @@ export const COMPOSER_DRAFT_KEY = 'heimdall:composer:draft';
  * invalidation. RTK Query throws (error #38) when refetching a query that has not
  * started, e.g. one still skipped while its arguments load.
  */
+// Fallback cadence for an unsettled reconfiguration this pane accepted (focused and on
+// screen only). The hub announces every phase; this only bounds a missed frame.
+export const RECONFIGURATION_ACTIVE_FALLBACK_MS = 15000;
+
 export function refetchIfStarted(query: { isUninitialized: boolean; refetch: () => unknown }) {
   if (!query.isUninitialized) void query.refetch();
 }
@@ -672,13 +681,15 @@ export function AgentChatPane({
   // On screen (not behind a maximised pane, an off-screen mobile page or a hidden
   // tab). Hidden panes keep their caches but do not poll or mark read.
   const paneVisible = usePaneVisible();
-  // Polls pause while hidden and stop on 401/403/404/410 (see usePanePollPolicy).
+  // Steady polls are retired: conversation, messages, instance, live tree, bridges and
+  // chain detail all refresh from owner-scoped user-WS events (wsInvalidation.ts), and
+  // initial/reconnect/gap recovery refetches mounted queries. The policy still tracks
+  // 401/403/404/410 so the active-operation fallback below stops on a gone instance.
   const pollPolicy = usePanePollPolicy(paneVisible);
-  const pollUnlessTerminal = pollPolicy.interval;
 
   const convQuery = useFetchConversationQuery(
     { conversationId: '', agentInstanceId: routeInstanceId },
-    { skip: !routeInstanceId, pollingInterval: pollUnlessTerminal('conversation', 10000), skipPollingIfUnfocused: true },
+    { skip: !routeInstanceId },
   );
   const conversation = convQuery.data?.conversation || null;
   const conversationId = String(
@@ -686,7 +697,7 @@ export function AgentChatPane({
   );
   const messagesQuery = useFetchConversationMessagesQuery(
     { conversationId },
-    { skip: !conversationId, pollingInterval: pollUnlessTerminal('messages', 10000), skipPollingIfUnfocused: true },
+    { skip: !conversationId },
   );
   const [fetchOlderMessages, olderMessagesState] = useLazyFetchConversationMessagesQuery();
   const [updateConversationTitle, updateTitleState] = useUpdateConversationTitleMutation();
@@ -704,9 +715,6 @@ export function AgentChatPane({
   const agentInstanceId = String(
     conversation?.agent_instance_id || conversation?.agentInstanceId || routeInstanceId,
   );
-  const conversationRuntimeStatusForPoll = String(
-    conversation?.runtime_status || conversation?.runtimeStatus || '',
-  );
   const chainId = String(conversation?.chain_id || conversation?.chainId || '');
   const isMultiPane = !isSinglePane;
   const title = conversationDisplayTitle(
@@ -721,7 +729,7 @@ export function AgentChatPane({
   const chainTasksQuery = useFetchChainTasksQuery({ chainId }, { skip: !chainId });
   const chainDetailQuery = useFetchTaskChainDetailQuery(
     { chainId },
-    { skip: !chainId, pollingInterval: visiblePollInterval(paneVisible, 120000) },
+    { skip: !chainId },
   );
   const chainProgress = useMemo(() => {
     const allTasks: TaskLike[] = (chainDetailQuery.data?.chain?.tasks ||
@@ -738,23 +746,14 @@ export function AgentChatPane({
   const editableTitle = rawTitle && !looksLikeInternalId(rawTitle) ? rawTitle : title;
   const chainTitle = String(chainDetailQuery.data?.chain?.title || '').trim();
 
-  const lastInstanceStatusRef = useRef('');
-  const pollHint = lastInstanceStatusRef.current || conversationRuntimeStatusForPoll;
-  const instancePollInterval =
-    runtimeStateFromStatus(pollHint) === 'starting' ? 2500 : 8000;
+  // agent_instance/* events carry the complete instance summary (status, config,
+  // current task, run_count/started_at for restarts) and are patched into this entry.
   const instanceQuery = useFetchAgentInstanceQuery(
     { instanceId: agentInstanceId },
-    {
-      skip: !agentInstanceId,
-      pollingInterval: pollUnlessTerminal('instance', instancePollInterval),
-      skipPollingIfUnfocused: true,
-    },
+    { skip: !agentInstanceId },
   );
   const instance = instanceQuery.data?.instance || null;
-  const { data: liveProjects } = useGetAgentsLiveQuery(undefined, {
-    pollingInterval: visiblePollInterval(paneVisible, 30000),
-    skipPollingIfUnfocused: true,
-  });
+  const { data: liveProjects } = useGetAgentsLiveQuery(undefined);
   const agentIdentityQuery = useFetchAgentIdentityQuery({ agentId }, { skip: !agentId });
   const agentIdentity = agentIdentityQuery.data?.agent || null;
   const agentDisplayName = String(
@@ -766,10 +765,6 @@ export function AgentChatPane({
       agentIdentity?.template_persona ||
       '',
   ).trim();
-  useEffect(() => {
-    const s = String(instance?.runtime_status || instance?.runtimeStatus || '');
-    if (s) lastInstanceStatusRef.current = s;
-  }, [instance?.runtime_status, instance?.runtimeStatus]);
   const instanceProvider = String(instance?.provider || '');
   const instanceModel = String(instance?.model || '');
   const instanceBridgeId = String(instance?.bridge_id || instance?.bridgeId || '');
@@ -818,13 +813,9 @@ export function AgentChatPane({
     stagedBridgeId !== null ||
     Boolean(provider && provider !== instanceProvider) ||
     Boolean(model && model !== instanceModel);
-  const bridgesQuery = useListBridgesQuery(undefined, {
-    pollingInterval: visiblePollInterval(paneVisible, editingRuntime ? 5000 : 30000),
-    skipPollingIfUnfocused: true,
-  });
-  useEffect(() => {
-    if (runtimeMenuOpen) refetchIfStarted(bridgesQuery);
-  }, [runtimeMenuOpen]);
+  // Bridge status/update/revoke events patch or invalidate this list; opening the
+  // runtime picker fetches only the selected bridge's provider status.
+  const bridgesQuery = useListBridgesQuery(undefined);
   const bridges = bridgesQuery.data?.bridges || [];
   const instanceBridgeRow = useMemo(
     () => bridges.find((b: any) => bridgeId(b) === instanceBridgeId),
@@ -1123,13 +1114,18 @@ export function AgentChatPane({
     {
       // A deleted instance (404) has no reconfigurations to poll either.
       skip: !agentInstanceId,
+      // Event-driven: every phase advance publishes agent_instance_reconfiguration and
+      // the hub reaper progresses operations without client reads. While an operation
+      // this pane accepted is unsettled, a slow focused fallback covers a missed frame
+      // between resyncs; idle panes never poll.
       pollingInterval:
         pollPolicy.isTerminal('instance') || pollPolicy.isTerminal('reconfigurations')
           ? 0
           : acceptedOperation &&
               !['ready', 'failed', 'recovery_required'].includes(acceptedOperation.phase)
-            ? 2000
-            : 8000,
+            ? visiblePollInterval(paneVisible, RECONFIGURATION_ACTIVE_FALLBACK_MS)
+            : 0,
+      skipPollingIfUnfocused: true,
     },
   );
   pollPolicy.useReportErrors({
@@ -1289,16 +1285,8 @@ export function AgentChatPane({
     unreadCount,
     markRead: (id) => void markRead({ conversationId: id }),
   });
-  // A pane that was hidden skipped its polls; catch up once when it is shown again.
-  const wasVisibleRef = useRef(paneVisible);
-  useEffect(() => {
-    const becameVisible = paneVisible && !wasVisibleRef.current;
-    wasVisibleRef.current = paneVisible;
-    if (!becameVisible) return;
-    refetchIfStarted(convQuery);
-    refetchIfStarted(messagesQuery);
-    refetchIfStarted(instanceQuery);
-  }, [paneVisible]);
+  // No catch-up refetch on show: nothing polls, and events/resyncs reach a hidden
+  // pane's subscriptions the same as a visible one's.
   useEffect(() => {
     if (settingsEditedRef.current) return;
     setProvider(instanceProvider);
@@ -1364,6 +1352,32 @@ export function AgentChatPane({
     setOlderCursor(String(messagesQuery.data?.nextCursor || ''));
     setOlderHasMore(Boolean(messagesQuery.data?.hasMore));
   }, [messagesQuery.data?.nextCursor, messagesQuery.data?.hasMore, olderMessages.length]);
+  // More than a page arrived while this pane was not receiving (offline, reconnect):
+  // the refetched newest page shares no message with the previous one, so the loaded
+  // older pages no longer join it. Drop them and page back from the new newest page
+  // rather than render a silent hole.
+  const previousBaseIdsRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const ids = new Set(baseMessages.map((message, index) => msgId(message, index)));
+    const previous = previousBaseIdsRef.current;
+    previousBaseIdsRef.current = ids;
+    if (previous.size === 0 || ids.size === 0 || olderMessages.length === 0) return;
+    for (const id of ids) if (previous.has(id)) return;
+    setOlderMessages([]);
+    setOlderCursor(String(messagesQuery.data?.nextCursor || ''));
+    setOlderHasMore(Boolean(messagesQuery.data?.hasMore));
+  }, [baseMessages]);
+  // Read receipts for older pages held in state (RTK pages are patched in wsInvalidation).
+  useEffect(() => {
+    if (!conversationId) return undefined;
+    const onRead = (event: Event) => {
+      const receipt = (event as CustomEvent<ConversationMessagesRead>).detail;
+      if (!receipt || receipt.conversationId !== conversationId) return;
+      setOlderMessages((current) => applyReadReceipt(current, receipt));
+    };
+    window.addEventListener(CONVERSATION_MESSAGES_READ_EVENT, onRead);
+    return () => window.removeEventListener(CONVERSATION_MESSAGES_READ_EVENT, onRead);
+  }, [conversationId]);
 
   const effectiveProvider = provider || instanceProvider;
   const effectiveModel = model || instanceModel;

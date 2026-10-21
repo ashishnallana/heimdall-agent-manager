@@ -374,7 +374,9 @@ export default function ChainOverviewPanel({
   // Queries
   const { data: chainData, isLoading: isChainLoading, refetch: refetchChain } = useFetchTaskChainDetailQuery(
     { chainId },
-    { skip: !chainId, pollingInterval: 15000 }
+    // task/task_chain events invalidate Chain:<id>; artifacts and VCS below have no
+    // events and keep their slow polls.
+    { skip: !chainId }
   );
 
   const { data: artifactsData, isLoading: isArtifactsLoading } = useListArtifactsQuery(

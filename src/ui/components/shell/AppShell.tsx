@@ -1506,16 +1506,18 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
   }, [isVaultUnlocked, dispatch]);
 
   // UI-14: server state for the sidebar lives in RTK Query (cookie-auth), not
-  // component-local state. The single user-WS connection invalidates the
-  // SidebarConversations tag on chat/unread events so badges refresh live.
-  // The rail shows live agents + unread counts; the hub doesn't push all of these
-  // over the user WS, so poll periodically (paused when the tab is unfocused) so a
-  // just-started/stopped agent appears/disappears without a manual refresh.
-  const conversationsQuery = useListSidebarConversationsQuery({ limit: 30 }, { pollingInterval: 10000, skipPollingIfUnfocused: true });
+  // component-local state. No steady poll: every writer the rail reflects publishes an
+  // owner-scoped event (message_created from any tab/CLI/agent, messages_read with
+  // unread_count, conversation/created|updated, agent_instance/* with the full status
+  // summary), patched or invalidated per row in wsInvalidation.ts.
+  const conversationsQuery = useListSidebarConversationsQuery({ limit: 30 });
   // Consolidated project -> live-chains -> agents tree. Drives the rail's project
   // list/order (ALL projects, endpoint-fixed alphabetical) and the coordinator set
   // used to gold-highlight a coordinator agent's own name.
-  const agentsLiveQuery = useGetAgentsLiveQuery(undefined, { pollingInterval: 10000, skipPollingIfUnfocused: true });
+  // Refreshed by instance create/status/config/current-task and chain events. Projects
+  // publish no resource events (remaining uncovered route), so a project created or
+  // renamed elsewhere shows up on window focus rather than on a timer.
+  const agentsLiveQuery = useGetAgentsLiveQuery(undefined, { refetchOnFocus: true });
   // The hub already resolves each row's agent name server-side (content_handlers
   // write_chat_json_with_runtime looks the identity up per row), so no app-wide
   // GET /agents is needed to fill it in; a row without one renders "Unnamed agent".
