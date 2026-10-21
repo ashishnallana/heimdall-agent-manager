@@ -342,7 +342,7 @@ agent_action_conversation_set_title_handler :: proc(ctx: rawptr, req: Request) -
 	c, saved, err := content_service.set_own_conversation_title(h.content, auth, inst.agent_instance_id, json_string(params, "title"))
 	if !saved do return respond_error(err, req.request_id)
 	publish_agent_action(h, inst, "conversation_title", "renamed the conversation")
-	events.publish_resource_changed(h.event_bus, string(c.owner_user_id), "conversation", c.conversation_id, "updated", "{}")
+	publish_conversation_changed(h.event_bus, c, "updated")
 	b := strings.builder_make()
 	write_chat_json(&b, c)
 	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req), 200)
@@ -1232,6 +1232,10 @@ agent_action_start_success_handler :: proc(ctx: rawptr, req: Request) -> Respons
 	if !ok do return resp
 	inst, saved, err := agent_service.mark_instance_start_success(h.agents, auth)
 	if !saved do return respond_error(err, req.request_id)
+	// running/ready was written: tell the owner's UI, and let an in-flight
+	// reconfiguration observe readiness now rather than on the next reaper pass.
+	publish_instance_changed(h.event_bus, inst, "status_changed")
+	agent_service.reconcile_instance_reconfigurations(h.agents, inst.bridge_id, resend = false)
 	if inst.kind == "provider_test" {
 		if h.providers != nil do provider_service.provider_test_mark_instance_ready(h.providers, inst.agent_instance_id)
 		b := strings.builder_make(); strings.write_string(&b, "{\"instance\":"); write_agent_instance_json(&b, inst); strings.write_byte(&b, '}')
@@ -1239,6 +1243,9 @@ agent_action_start_success_handler :: proc(ctx: rawptr, req: Request) -> Respons
 	}
 	startup_note, note_saved, _ := content_service.send_agent_message(h.content, auth, inst.agent_instance_id, content_service.Message_Input{body = "Agent has started and is ready.", artifact_ids_json = "[]", message_type = "system"})
 	conv, conv_ok, _ := content_service.get_conversation_by_instance(h.content, auth, inst.agent_instance_id)
+	// The system banner moves last_message_at/unread_count; it gets the id-only
+	// message_created hint (no preview, no toast) so sidebars stay current.
+	if conv_ok && note_saved do publish_chat_message_created(h.event_bus, conv, startup_note)
 	if conv_ok {
 		// Only re-notify for genuinely unread inbound messages. Scanning all recent
 		// messages and notifying for the first user_to_agent row (regardless of read

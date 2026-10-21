@@ -32,6 +32,18 @@ Agent_Service :: struct {
 	// path funnels into ONE chokepoint (taskv2.on_instance_terminal) without the
 	// agent package importing the engine.
 	hooks: Lifecycle_Hooks,
+	// resource_events: after-write change hints for the owner's UI (REQ-2). Set
+	// by wiring to the user event bus; every field is nil-safe.
+	resource_events: Resource_Event_Hooks,
+}
+
+// Resource_Event_Hooks are invoked only after the write they describe returned
+// success. change for reconfigurations is created|progress|error|succeeded|failed;
+// config_committed is true on the advance that committed the destination (the
+// SQL trigger that rewrites agent_instances bridge/provider/model/revision).
+Resource_Event_Hooks :: struct {
+	ctx:                        rawptr,
+	on_reconfiguration_changed: proc(ctx: rawptr, op: domain.Instance_Reconfiguration, change: string, config_committed: bool),
 }
 
 Lifecycle_Hooks :: struct {

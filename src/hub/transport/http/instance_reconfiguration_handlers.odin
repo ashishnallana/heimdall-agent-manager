@@ -40,8 +40,8 @@ list_instance_reconfigurations_handler :: proc(ctx: rawptr, req: Request) -> Res
 	inst, found, err := agent_service.get_instance(h.agents, auth, instance_id)
 	if !found do return respond_error(err, req.request_id)
 	defer domain.agent_instance_destroy(&inst)
-	// Readiness may be updated through CLI start-success as well as WS reports.
-	agent_service.reconcile_instance_reconfigurations(h.agents, inst.bridge_id)
+	// Reads are side-effect free (REQ-2): readiness and timeouts advance on
+	// bridge transitions, start-success and the hub reaper, never on this GET.
 	ops, list_err := iface.instance_reconfiguration_list(h.agents.agents, string(inst.owner_user_id), instance_id, false)
 	if list_err.code != .None do return respond_error(list_err, req.request_id)
 	defer { for &op in ops do domain.instance_reconfiguration_destroy(&op); delete(ops) }

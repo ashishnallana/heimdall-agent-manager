@@ -114,6 +114,8 @@ reaper_loop :: proc(graph: ^App_Graph) {
 		// REQ-EA-3: once at startup, before the first interval, so an enrollment that
 		// was pending when the hub stopped is rolled back as soon as the hub is back.
 		reaper_sweep_pending_enrollments(graph)
+		// REQ-2: startup recovery for reconfigurations left mid-flight by a restart.
+		agent_service.reconcile_active_reconfigurations(&graph.agents)
 	})
 	for {
 		time.sleep(time.Duration(interval) * time.Second)
@@ -231,6 +233,10 @@ reaper_sweep_once :: proc(graph: ^App_Graph) {
 		updated, _ := provider_service.provider_test_set_state(&graph.providers, run.run_id, run.owner_user_id, state, reason)
 		provider_service.provider_test_run_destroy(&updated)
 	}
+
+	// REQ-2: reconfiguration progress and confirmation timeouts advance here (and
+	// on bridge transitions), so they complete with no client polling the GET.
+	agent_service.reconcile_active_reconfigurations(&graph.agents)
 
 	reaped := agent_service.reap_stale_instances(&graph.agents, REAPER_STALE_MS)
 	agent_service.notify_instances_terminal(&graph.agents, reaped)

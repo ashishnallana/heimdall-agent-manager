@@ -149,6 +149,20 @@ task_engine_on_start_success :: proc(ctx: rawptr, inst: domain.Agent_Instance) {
 	taskv2.on_start_success((^taskv2.Service)(ctx), inst)
 }
 
+// agents_on_reconfiguration_changed publishes the reconfiguration hint and, on
+// the advance that committed the destination (agent_instances bridge/provider/
+// model/configuration_revision rewritten by trigger), the instance hint too.
+agents_on_reconfiguration_changed :: proc(ctx: rawptr, op: domain.Instance_Reconfiguration, change: string, config_committed: bool) {
+	graph := (^App_Graph)(ctx)
+	if graph == nil do return
+	http.publish_reconfiguration_changed(&graph.event_bus, op, change)
+	if !config_committed do return
+	inst, found, _ := iface.agent_get_instance(&graph.repos.agents, op.agent_instance_id)
+	if !found do return
+	defer domain.agent_instance_destroy(&inst)
+	http.publish_instance_changed(&graph.event_bus, inst, "config_changed")
+}
+
 task_engine_on_unobserved_shell_terminal :: proc(ctx: rawptr, session: domain.Shell_Session) {
 	svc := (^taskv2.Service)(ctx)
 	if svc == nil || session.kind != "run" || !strings.has_prefix(session.label, taskv2.VERIFY_LABEL_PREFIX) do return
@@ -311,6 +325,10 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 		on_activity      = task_engine_on_instance_activity,
 		on_start_success = task_engine_on_start_success,
 		on_user_stopped  = task_engine_on_user_stopped,
+	}
+	graph.agents.resource_events = agent_service.Resource_Event_Hooks{
+		ctx                        = rawptr(graph),
+		on_reconfiguration_changed = agents_on_reconfiguration_changed,
 	}
 	graph.search = search_service.new_search_service(&graph.repos.search)
 	graph.push = push_service.new_push_service(&graph.repos.push_subscriptions, &graph.clock, &graph.ids, push_service.Vapid_Config{
