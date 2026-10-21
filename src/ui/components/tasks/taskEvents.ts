@@ -62,7 +62,7 @@ function attempt(p: any): string {
 }
 
 /** Who an id refers to: an instance, an agent template, or the user. */
-function whoById(id: string, names: TaskNames): string {
+export function whoById(id: string, names: TaskNames): string {
   const v = s(id);
   if (!v) return 'Someone';
   if (v.startsWith('inst_')) return names.instance(v) || 'An agent';
@@ -191,4 +191,31 @@ export function describeTaskEvent(ev: TaskEventWire, names: TaskNames): Describe
     default:
       return { text: humanizeKind(kind), known: false };
   }
+}
+
+export interface PostedReview {
+  reviewer: string;
+  verdict: string;
+  findings: unknown;
+  summary: string;
+}
+
+/**
+ * Review findings for one attempt, newest last. The hub keeps them only in
+ * `review_posted` event payloads (verbs_m2.odin); there is no `findings` facet, so
+ * this is the one place the UI can read them without a request of its own.
+ */
+export function reviewsPostedForAttempt(events: TaskEventWire[], attemptNo: number): PostedReview[] {
+  const out: PostedReview[] = [];
+  for (const ev of events) {
+    if (ev?.kind !== 'review_posted') continue;
+    const p = ev.payload && typeof ev.payload === 'object' ? ev.payload : {};
+    if (Number(p.attempt_no || 0) !== attemptNo) continue;
+    const findings = p.findings;
+    const summary = s(p.summary);
+    const empty = findings == null || (Array.isArray(findings) && findings.length === 0);
+    if (empty && !summary) continue;
+    out.push({ reviewer: s(p.reviewer), verdict: s(p.verdict), findings: empty ? null : findings, summary });
+  }
+  return out;
 }

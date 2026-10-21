@@ -43,7 +43,9 @@ export const TaskEditModal: React.FC<TaskEditModalProps> = ({
   names = EMPTY_TASK_NAMES,
 }) => {
   const [updateTask, updateState] = useUpdateTaskDetailMutation();
-  const { data: identitiesData } = useListAgentIdentitiesQuery();
+  // Mounted once per TaskCard while closed: only an open assignee/reviewer picker needs
+  // the identity catalogue.
+  const { data: identitiesData } = useListAgentIdentitiesQuery(undefined, { skip: field !== 'assignee' && field !== 'reviewers' });
   const agents: any[] = identitiesData?.agents || [];
 
   const currentAssignee = String(task.brief?.assignee || '');

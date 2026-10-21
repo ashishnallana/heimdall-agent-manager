@@ -241,16 +241,18 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
 }) => {
   // REQ-FLEET-POLLING-1: fetch once on open — no polling interval. Mutation
   // cache invalidation plus the explicit refetch() after an apply keep this
-  // current; do not reintroduce a timer here.
-  const { data: rawFleets = [], refetch } = useGetTaskChainFleetsQuery(
+  // current; do not reintroduce a timer here. The drawer stays mounted while
+  // closed (it returns null below), so every query is skipped until it opens.
+  const closed = !isOpen || !chainId;
+  const { data: rawFleets = [], refetch, isLoading: fleetsLoading } = useGetTaskChainFleetsQuery(
     { chainId },
-    { skip: !chainId }
+    { skip: closed }
   );
   const chainDetailQuery = useFetchTaskChainDetailQuery(
     { chainId },
-    { skip: !chainId }
+    { skip: closed }
   );
-  const agentIdentitiesQuery = useListAgentIdentitiesQuery();
+  const agentIdentitiesQuery = useListAgentIdentitiesQuery(undefined, { skip: !isOpen });
   const agentIdentities = agentIdentitiesQuery.data?.agents || [];
   const validIdentitiesSet = useMemo(
     () => new Set(agentIdentities.map((a: any) => String(a.agent_id || a.agentId || a.id || ''))),
@@ -262,8 +264,8 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
   const activeTasksByRoleMap = useMemo(() => activeTasksByRole(tasks, members), [tasks, members]);
 
   // Use the same effective bridge as reconciliation for role-wide settings.
-  const allInstancesQuery = useListAgentInstancesQuery({ limit: 1000 });
-  const bridgesQuery = useListBridgesQuery(undefined, { pollingInterval: 120000 });
+  const allInstancesQuery = useListAgentInstancesQuery({ limit: 1000 }, { skip: !isOpen });
+  const bridgesQuery = useListBridgesQuery(undefined, { skip: !isOpen, pollingInterval: 120000 });
   const activeBridges = useMemo(() => {
     return (bridgesQuery.data?.bridges || []).filter((b: any) => !isRevokedBridge(b));
   }, [bridgesQuery.data?.bridges]);
@@ -340,15 +342,24 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
     );
   }, [rawFleets, bridgesToRender, bridgeId, validIdentitiesSet]);
 
-  // Sync drafts when drawer opens
+  // Sync drafts when drawer opens. The queries only start on open, so seeding waits
+  // until the rows they seed from have loaded (cached rows count as loaded).
+  const seededRef = useRef(false);
+  const seedInputsLoading = fleetsLoading || agentIdentitiesQuery.isLoading || bridgesQuery.isLoading;
+  useEffect(() => {
+    if (!isOpen || seededRef.current || seedInputsLoading) return;
+    seededRef.current = true;
+    seedDrafts();
+  }, [isOpen, seedInputsLoading, seedDrafts]);
   useEffect(() => {
     if (isOpen && !prevIsOpenRef.current) {
-      seedDrafts();
       setErrorMsg('');
       setSuccessMsg('');
       setRestartSummary(null);
       setPendingRestart(null);
     } else if (!isOpen && prevIsOpenRef.current) {
+      // Closing resets the seed so the next open seeds from fresh rows.
+      seededRef.current = false;
       setPendingRestart(null);
     }
     prevIsOpenRef.current = isOpen;

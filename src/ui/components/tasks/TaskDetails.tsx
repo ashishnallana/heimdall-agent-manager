@@ -12,7 +12,7 @@ import { getTaskPeople, normalizeTaskState, taskChangedFiles } from './taskV2Typ
 import { awaitingYourReview, blockedOnYou } from './taskActions';
 import type { TaskActionsApi } from './useTaskActions';
 import { EMPTY_TASK_NAMES, instanceAgentsFromEvents, withInstanceAgents, type TaskNames } from './taskNames';
-import { describeTaskEvent } from './taskEvents';
+import { describeTaskEvent, reviewsPostedForAttempt, whoById } from './taskEvents';
 import { VaultText } from '../vault';
 import { HolderName } from './HolderName';
 import { describeEffectivePlacement, taskEffectivePlacement } from './fleetSelection';
@@ -130,7 +130,6 @@ export const TaskDetails: React.FC<TaskDetailsProps> = ({
   const { data: handoffData } = useFetchTaskFacetQuery({ chainId, taskId, attemptNo, kind: 'handoff' }, skip);
   const { data: verifyData } = useFetchTaskFacetQuery({ chainId, taskId, attemptNo, kind: 'verify' }, skip);
   const { data: outputData } = useFetchTaskFacetQuery({ chainId, taskId, attemptNo, kind: 'output' }, skip);
-  const { data: findingsData } = useFetchTaskFacetQuery({ chainId, taskId, attemptNo, kind: 'findings' }, skip);
   const { data: eventsData } = useFetchTaskEventsQuery({ chainId, taskId }, skip);
   const { data: bridgesData } = useListBridgesQuery();
 
@@ -142,7 +141,8 @@ export const TaskDetails: React.FC<TaskDetailsProps> = ({
   const handoff = handoffData?.facet;
   const verify = verifyData?.facet;
   const output = outputData?.facet;
-  const findings = findingsData?.facet;
+  // Review findings ride on review_posted events (there is no findings facet).
+  const reviews = useMemo(() => reviewsPostedForAttempt(events, attemptNo), [events, attemptNo]);
   const changedFiles = taskChangedFiles(vcs);
 
   const [diffFile, setDiffFile] = useState<string | null>(null);
@@ -410,9 +410,19 @@ export const TaskDetails: React.FC<TaskDetailsProps> = ({
         </Block>
       )}
 
-      {findings && (
+      {reviews.length > 0 && (
         <Block title="Review findings" collapsible debugId="task-details-findings">
-          <Findings value={findings} />
+          <div className="space-y-2">
+            {reviews.map((r, i) => (
+              <div key={i} className="space-y-1">
+                <Text role="caption" tone="muted">
+                  {whoById(r.reviewer, names)} · {r.verdict === 'approve' ? 'approved' : 'requested changes'}
+                </Text>
+                {r.summary && <FacetText value={r.summary} />}
+                {r.findings != null && <Findings value={r.findings} />}
+              </div>
+            ))}
+          </div>
         </Block>
       )}
 
