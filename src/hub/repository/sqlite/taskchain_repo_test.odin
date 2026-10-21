@@ -5,7 +5,6 @@ package sqlite
 import domain "odin_test:hub/domain"
 import "core:fmt"
 import iface "odin_test:hub/repository/iface"
-import "core:os"
 import "core:testing"
 
 task_chain_search_changes_destroy_test :: proc(changes: []domain.Task_Chain_Search_Change) {
@@ -18,13 +17,9 @@ task_chain_search_changes_destroy_test :: proc(changes: []domain.Task_Chain_Sear
 
 @(test)
 test_task_chain_search_change_feed_is_monotonic_and_owner_scoped :: proc(t: ^testing.T) {
-	conn, open_ok, open_err := open(":memory:")
-	testing.expect(t, open_ok, "db open ok")
-	testing.expect_value(t, open_err.code, domain.Error_Code.None)
+	conn, open_ok := tmpl_clone_migrated(t)
+	if !open_ok do return
 	defer close(&conn)
-	mig_ok, mig_err := run_migrations(&conn)
-	testing.expect(t, mig_ok, "migrations ok")
-	testing.expect_value(t, mig_err.code, domain.Error_Code.None)
 
 	impl := Taskchain_Repo_SQLite{conn = &conn}
 	repo := new_taskchain_repository(&impl, &conn)
@@ -85,15 +80,9 @@ test_task_chain_search_change_feed_is_monotonic_and_owner_scoped :: proc(t: ^tes
 
 @(test)
 test_task_bridge_id_sqlite_roundtrip :: proc(t: ^testing.T) {
-	db_path := ":memory:"
-	conn, open_ok, open_err := open(db_path)
-	testing.expect(t, open_ok, "db open ok")
-	testing.expect_value(t, open_err.code, domain.Error_Code.None)
+	conn, open_ok := tmpl_clone_migrated(t)
+	if !open_ok do return
 	defer close(&conn)
-
-	mig_ok, mig_err := run_migrations(&conn)
-	testing.expect(t, mig_ok, "migrations ok")
-	testing.expect_value(t, mig_err.code, domain.Error_Code.None)
 
 	// The migration must have added the column.
 	testing.expect(t, table_column_exists(&conn, "tasks", "bridge_id"), "tasks.bridge_id column exists")
@@ -213,15 +202,9 @@ test_task_bridge_id_sqlite_roundtrip :: proc(t: ^testing.T) {
 
 @(test)
 test_taskchain_fleet_sqlite_lifecycle :: proc(t: ^testing.T) {
-	db_path := ":memory:"
-	conn, open_ok, open_err := open(db_path)
-	testing.expect(t, open_ok, "db open ok")
-	testing.expect_value(t, open_err.code, domain.Error_Code.None)
+	conn, open_ok := tmpl_clone_migrated(t)
+	if !open_ok do return
 	defer close(&conn)
-
-	mig_ok, mig_err := run_migrations(&conn)
-	testing.expect(t, mig_ok, "migrations ok")
-	testing.expect_value(t, mig_err.code, domain.Error_Code.None)
 
 	// Verify table exists
 	testing.expect(t, sqlite_object_exists(&conn, "task_chain_fleets"), "task_chain_fleets table exists")
@@ -424,15 +407,9 @@ test_taskchain_fleet_sqlite_lifecycle :: proc(t: ^testing.T) {
 
 @(test)
 test_taskchain_pinned_sqlite_lifecycle :: proc(t: ^testing.T) {
-	db_path := ":memory:"
-	conn, open_ok, open_err := open(db_path)
-	testing.expect(t, open_ok, "db open ok")
-	testing.expect_value(t, open_err.code, domain.Error_Code.None)
+	conn, open_ok := tmpl_clone_migrated(t)
+	if !open_ok do return
 	defer close(&conn)
-
-	mig_ok, mig_err := run_migrations(&conn)
-	testing.expect(t, mig_ok, "migrations ok")
-	testing.expect_value(t, mig_err.code, domain.Error_Code.None)
 
 	// Verify columns exist
 	testing.expect(t, table_column_exists(&conn, "task_chains", "is_pinned"), "is_pinned column exists")
@@ -515,15 +492,9 @@ test_taskchain_pinned_sqlite_lifecycle :: proc(t: ^testing.T) {
 
 @(test)
 test_taskchain_rollup_counts :: proc(t: ^testing.T) {
-	db_path := ":memory:"
-	conn, open_ok, open_err := open(db_path)
-	testing.expect(t, open_ok, "db open ok")
-	testing.expect_value(t, open_err.code, domain.Error_Code.None)
+	conn, open_ok := tmpl_clone_migrated(t)
+	if !open_ok do return
 	defer close(&conn)
-
-	mig_ok, mig_err := run_migrations(&conn)
-	testing.expect(t, mig_ok, "migrations ok")
-	testing.expect_value(t, mig_err.code, domain.Error_Code.None)
 
 	repo_impl := Taskchain_Repo_SQLite{conn = &conn}
 	repo := new_taskchain_repository(&repo_impl, &conn)
@@ -601,12 +572,9 @@ test_taskchain_rollup_counts :: proc(t: ^testing.T) {
 
 @(test)
 test_task_v2_fields_sqlite_roundtrip :: proc(t: ^testing.T) {
-	conn, open_ok, _ := open(":memory:")
-	testing.expect(t, open_ok, "db open ok")
+	conn, open_ok := tmpl_clone_migrated(t)
+	if !open_ok do return
 	defer close(&conn)
-	mig_ok, mig_err := run_migrations(&conn)
-	testing.expect(t, mig_ok, "migrations ok")
-	testing.expect_value(t, mig_err.code, domain.Error_Code.None)
 
 	for col in ([?]string{"state", "kind", "attempt_no", "brief_json", "blocked_on_json", "requires_user_approval", "ready_since", "stage_key", "stage_index", "generated_by_json"}) {
 		testing.expectf(t, table_column_exists(&conn, "tasks", col), "tasks.%s column exists", col)

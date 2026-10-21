@@ -2,17 +2,14 @@
 package sqlite
 
 import "core:fmt"
-import "core:os"
 import "core:testing"
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
 
 // REQ-MW-1/3/9: exercise the actual repository and registered migrations.
-mixed_work_db :: proc(t: ^testing.T, path := ":memory:") -> (Conn, bool) {
-	conn, ok, err := open(path)
-	if !testing.expect(t, ok, err.message) do return conn, false
-	ok, err = run_migrations(&conn)
-	if !testing.expect(t, ok, err.message) do return conn, false
+mixed_work_db :: proc(t: ^testing.T) -> (Conn, bool) {
+	conn, ok := tmpl_clone_migrated(t)
+	if !ok do return conn, false
 	ok = exec(&conn, "INSERT INTO task_chains (chain_id, owner_user_id, title, created_at, updated_at) VALUES ('chain_a', 'owner_a', 'Mixed work', '2026-10-19T00:00:00Z', '2026-10-19T00:00:00Z'), ('chain_b', 'owner_b', 'Other work', '2026-10-19T00:00:00Z', '2026-10-19T00:00:00Z');")
 	return conn, testing.expect(t, ok, "seed chains")
 }
@@ -275,13 +272,13 @@ test_mixed_work_events_and_expansions_are_append_only :: proc(t: ^testing.T) {
 @(test)
 test_mixed_work_records_survive_reopen_and_migration_reentry :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
-	dir := os.get_env("TEMP", context.temp_allocator)
-	if dir == "" do dir = "/tmp"
-	path := fmt.tprintf("%s/ham_mixed_work_%d.db", dir, os.get_pid())
-	os.remove(path)
-	defer os.remove(path)
-	conn, ok := mixed_work_db(t, path)
+	conn, path, ok := tmpl_clone_migrated_into_file(t, "mixed_work")
+	defer tmpl_remove_db(path)
 	if !ok do return
+	if !testing.expect(t, exec(&conn, "INSERT INTO task_chains (chain_id, owner_user_id, title, created_at, updated_at) VALUES ('chain_a', 'owner_a', 'Mixed work', '2026-10-19T00:00:00Z', '2026-10-19T00:00:00Z'), ('chain_b', 'owner_b', 'Other work', '2026-10-19T00:00:00Z', '2026-10-19T00:00:00Z');"), "seed chains") {
+		close(&conn)
+		return
+	}
 	impl: Taskchain_Repo_SQLite
 	repo := new_taskchain_repository(&impl, &conn)
 	run := mixed_work_run("run_a", "request_a")
