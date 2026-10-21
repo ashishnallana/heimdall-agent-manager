@@ -44,6 +44,7 @@ import { useFetchProjectQuery } from '../../api/endpoints/projects';
 import { useGetAgentsLiveQuery } from '../../api/endpoints/agentsLive';
 import {
   normalizeBridgeCapabilities,
+  useBridgeProviderStatus,
   useListBridgesQuery,
   type BridgeCapability,
 } from '../../api/endpoints/bridgeSupport';
@@ -818,10 +819,14 @@ export function AgentChatPane({
     if (runtimeMenuOpen) refetchIfStarted(bridgesQuery);
   }, [runtimeMenuOpen]);
   const bridges = bridgesQuery.data?.bridges || [];
-  const instanceBridge = useMemo(
+  const instanceBridgeRow = useMemo(
     () => bridges.find((b: any) => bridgeId(b) === instanceBridgeId),
     [bridges, instanceBridgeId],
   );
+  // Provider status for this pane's bridge only (it gates sending); polled only while
+  // the runtime is being edited.
+  const instanceProviders = useBridgeProviderStatus(instanceBridgeRow, { live: editingRuntime });
+  const instanceBridge = instanceProviders.bridge;
 
   const baseMessages: Message[] = messagesQuery.data?.messages || [];
   const [olderMessages, setOlderMessages] = useState<Message[]>([]);
@@ -1094,9 +1099,17 @@ export function AgentChatPane({
 
   const destinationBridgeId = stagedBridgeId ?? instanceBridgeId;
   const destinationProjectId = projectId;
-  const destinationBridge = bridges.find(
-    (item: any) => bridgeId(item) === destinationBridgeId,
+  const destinationBridgeRow = useMemo(
+    () => bridges.find((item: any) => bridgeId(item) === destinationBridgeId),
+    [bridges, destinationBridgeId],
   );
+  const stagingOtherBridge = destinationBridgeId !== instanceBridgeId;
+  const destinationProviders = useBridgeProviderStatus(destinationBridgeRow, {
+    skip: !stagingOtherBridge,
+    live: editingRuntime,
+  });
+  const destination = stagingOtherBridge ? destinationProviders : instanceProviders;
+  const destinationBridge = destination.bridge;
   const destinationProjectQuery = projectQuery;
   const operationQuery = useListInstanceReconfigurationsQuery(
     { instanceId: agentInstanceId },
@@ -1348,6 +1361,7 @@ export function AgentChatPane({
     provider: instanceProvider,
     model: instanceModel,
     capabilities: currentCaps,
+    capabilitiesLoaded: !instanceBridge || instanceProviders.loaded,
   };
   const configurationIssues = conversationConfigurationIssues(validityInput);
   const stagedConfigurationIssues = conversationConfigurationIssues({
@@ -1361,6 +1375,7 @@ export function AgentChatPane({
     provider: effectiveProvider,
     model: effectiveModel,
     capabilities: caps,
+    capabilitiesLoaded: !destinationBridge || destination.loaded,
   });
   if (
     destinationBridge &&

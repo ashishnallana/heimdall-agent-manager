@@ -728,18 +728,30 @@ function handleResourceChanged(dispatch: any, payload: any, ctx: WsCtx) {
       return;
     }
     case 'bridge': {
-      // Update progress is frequent and short-lived. Patch the mounted bridge
-      // list immediately from the event, then invalidate detail/list tags so a
-      // reconnect or dropped event still converges on the durable Hub state.
+      // Patch the mounted bridge list from the event's summary first.
+      let patched = false;
       dispatch(bridgeSupportApi.util.updateQueryData('listBridges', undefined, (draft: any) => {
         const rows = Array.isArray(draft?.bridges) ? draft.bridges : [];
         const bridge = rows.find((row: any) => String(row?.bridge_id || row?.id || '') === resourceId);
-        if (bridge) Object.assign(bridge, summary);
+        if (bridge) { Object.assign(bridge, summary); patched = true; }
       }));
-      dispatch(heimdallApi.util.invalidateTags([
+      const change = String(payload.change || '');
+      // update_progress (a burst per update) and vault_status_changed carry every
+      // field they change, so a patched row needs no refetch. status_changed also
+      // moves fields the summary lacks (runtime_connected, last_seen_at), and
+      // enrollment changes add or remove rows, so those refetch the (cheap, plain) list.
+      if (patched && (change === 'update_progress' || change === 'vault_status_changed')) return;
+      const tags: any[] = [
         { type: 'Bridges', id: 'LIST' },
         { type: 'Bridges', id: resourceId },
-      ]));
+      ];
+      // Nothing pushes provider changes yet; a bridge coming online is the one cheap
+      // hint that its providers may have been rediscovered. Only mounted
+      // provider-status entries for THIS bridge refetch.
+      if (change === 'status_changed' && String(summary?.status || '').toLowerCase() === 'online') {
+        tags.push({ type: 'BridgeProviders', id: resourceId });
+      }
+      dispatch(heimdallApi.util.invalidateTags(tags));
       return;
     }
     default:

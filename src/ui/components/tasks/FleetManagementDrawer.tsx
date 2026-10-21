@@ -287,7 +287,7 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
 
   const bridgeSelectOptions = useMemo(() => taskBridgeOptions(bridgesToRender), [bridgesToRender]);
 
-  const providersQuery = useListBridgeProvidersQuery({ bridgeId }, { skip: !bridgeId });
+  const providersQuery = useListBridgeProvidersQuery({ bridgeId }, { skip: !bridgeId || !isOpen });
   const bridgeCapabilities = useMemo(
     () => fleetProviderCapabilities(providersQuery.data),
     [providersQuery.data]
