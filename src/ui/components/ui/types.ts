@@ -26,19 +26,6 @@ export type Size = 'sm' | 'md' | 'lg';
 export type ButtonVariant = 'primary' | 'secondary' | 'ghost' | 'danger';
 
 /**
- * Semantic intent of a status-bearing surface. Never a raw color.
- * Used by: Badge, Alert, Banner, Callout, StatusPill.
- */
-export type StatusVariant = 'neutral' | 'info' | 'success' | 'warning' | 'danger';
-
-/**
- * The union of every `variant` value used across the set. Prefer the specific
- * `ButtonVariant` / `StatusVariant` on a given component; this exists for
- * generic tooling that must accept any variant.
- */
-export type Variant = ButtonVariant | StatusVariant;
-
-/**
  * Status semantics where there is no "weight", only meaning.
  * Used by: StatusPill, StatusDot. (Action buttons use `variant` instead.)
  */
@@ -55,12 +42,6 @@ export type Width = 'content' | 'full';
 
 /** Cross-axis alignment. Used by: Stack, SectionHeader, EmptyState. */
 export type Align = 'start' | 'center' | 'end';
-
-/**
- * A spacing-scale token key (see `docs/ui-audit/02-tokens.md` §3 / `--space-*`).
- * `gap` takes a token, never a px value. Used by: Stack, Inline.
- */
-export type SpacingToken = '0.5' | '1' | '1.5' | '2' | '2.5' | '3' | '4' | '5' | '6' | '8';
 
 /* ------------------------------------------------------------------ *
  * State props — one boolean per state, never per style.
@@ -81,11 +62,6 @@ export interface InvalidatableProps {
   invalid?: boolean;
 }
 
-/** Chosen among siblings (`aria-selected` / `aria-pressed`). */
-export interface SelectableProps {
-  selected?: boolean;
-}
-
 /** Disclosure open (`aria-expanded`). */
 export interface ExpandableProps {
   expanded?: boolean;
@@ -94,11 +70,6 @@ export interface ExpandableProps {
 /** Displayed, not editable. */
 export interface ReadOnlyProps {
   readOnly?: boolean;
-}
-
-/** Overlay visibility (controlled). Paired with `onOpenChange`. */
-export interface OpenableProps {
-  open?: boolean;
 }
 
 /* ------------------------------------------------------------------ *
@@ -114,11 +85,6 @@ export interface ContentProps {
   trailing?: ReactNode;
 }
 
-/** Required accessible name where there is no visible text (icon-only). */
-export interface LabelledProps {
-  label: string;
-}
-
 /** Secondary helper text. Used by: FormField, SectionHeader, EmptyState. */
 export interface DescribableProps {
   description?: ReactNode;
@@ -132,9 +98,6 @@ export interface DescribableProps {
 
 /** Value changed (controlled). Never `onUpdate` / `onInput`. */
 export type ChangeHandler<T> = (value: T) => void;
-
-/** A discrete option was chosen. Used by: Menu, Combobox, CommandPalette. */
-export type SelectHandler<T> = (value: T) => void;
 
 /** Overlay open state changed. Used by: Modal, Menu, Drawer, Popover. */
 export type OpenChangeHandler = (open: boolean) => void;

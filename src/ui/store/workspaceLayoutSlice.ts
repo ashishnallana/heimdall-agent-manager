@@ -504,8 +504,6 @@ function extract(state: any): WorkspaceLayoutState {
 
 export const selectMainTree = (state: any): PaneTreeState<MainPaneValue> => extract(state).tree;
 
-export const selectFocusedMainPaneId = (state: any): string => extract(state).tree.focusedPaneId;
-
 export const selectFocusedMainAgentId = (state: any): string => {
   const tree = extract(state).tree;
   const focused = tree.panes[tree.focusedPaneId];

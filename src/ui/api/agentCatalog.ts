@@ -231,34 +231,6 @@ export function upsertKnownAgentRecord(agents: any[], rawAgent: any) {
   return mapped;
 }
 
-export function applyAgentLifecycleEvent(agents: any[], payload: any) {
-  const normalizedPayload = payload || {};
-  const agentPayload = normalizedPayload.agent || normalizedPayload.record || normalizedPayload;
-  const agentId = agentPayload.agent_instance_id || agentPayload.agentInstanceId || normalizedPayload.agent_instance_id || normalizedPayload.agentInstanceId;
-  if (!agentId) return '';
-  const mapped: any = mapAgent({ ...agentPayload, agent_instance_id: agentId });
-  const existingIndex = agents.findIndex((agent: any) => agent.id === agentId);
-  if (existingIndex >= 0) {
-    const existing: any = agents[existingIndex];
-    const mappedLabelLooksLikeId = !mapped.label || mapped.label === mapped.id;
-    agents[existingIndex] = {
-      ...existing,
-      ...mapped,
-      label: mappedLabelLooksLikeId ? (existing.label || mapped.label) : mapped.label,
-      projectId: mapped.projectId || existing.projectId || '',
-      projectName: mapped.projectName || existing.projectName || '',
-      templateId: mapped.templateId || existing.templateId || '',
-      providerProfile: mapped.providerProfile || existing.providerProfile || '',
-      model: mapped.model || existing.model || 'normal',
-      known: true,
-    };
-  } else {
-    agents.unshift({ ...mapped, known: true });
-    sortAgentsInPlace(agents);
-  }
-  return agentId;
-}
-
 export function applyAgentRuntimeEvent(agents: any[], payload: any) {
   const normalizedPayload = payload || {};
   const agentId = normalizedPayload.agent_instance_id || normalizedPayload.agentInstanceId || '';

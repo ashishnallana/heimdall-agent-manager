@@ -7,7 +7,7 @@
 // the page, detail, and proposal surfaces all render targeting consistently.
 
 import { useMemo } from 'react';
-import { Combobox, type ComboboxOption } from '@ui';
+import { type ComboboxOption } from '@ui';
 import {
   useListAgentIdentitiesQuery,
   useListAgentTemplatesQuery,
@@ -65,8 +65,6 @@ export const SCOPE_DIMS: {
   { key: 'bridgeIds', label: 'Bridges', allLabel: 'All bridges', debug: 'bridge', chip: 'border-info/30 bg-info-soft text-info' },
   { key: 'templateIds', label: 'Templates', allLabel: 'All templates', debug: 'template', chip: 'border-warning/30 bg-warning-soft text-warning' },
 ];
-
-export const MEMORY_TYPES = ['fact', 'habit', 'episode', 'expertise', 'skill'];
 
 export function emptyTargeting(): Targeting {
   return { agentIds: [], projectIds: [], bridgeIds: [], templateIds: [] };
@@ -323,42 +321,3 @@ export function ScopeChips({ targeting, catalog, debugId, max, variant = 'compac
     </div>
   );
 }
-
-// ScopeEditor renders the four targeting dimensions as multi-select Combobox
-// controls (empty = all). Shared by the create modal, proposal review, and the
-// detail edit surface so scope editing behaves identically everywhere.
-export function ScopeEditor({ targeting, catalog, onChange, debugId, disabled = false }: { targeting: Targeting; catalog: ScopeCatalog; onChange: (next: Targeting) => void; debugId: string; disabled?: boolean }) {
-  return (
-    <div data-debug-id={debugId} className="grid gap-4 sm:grid-cols-2">
-      {SCOPE_DIMS.map((dim) => {
-        const entry = catalog[dim.key];
-        const noun = dim.label.toLowerCase();
-        const state = scopeCatalogState(entry, noun);
-        return (
-          <div key={dim.key} className="block">
-            <div className="mb-1 text-label font-medium text-muted">{dim.label}</div>
-            <Combobox
-              multiple
-              options={entry.options}
-              value={targeting[dim.key]}
-              onChange={(next) => onChange({ ...targeting, [dim.key]: next })}
-              debugId={`${debugId}-${dim.debug}`}
-              placeholder={dim.allLabel}
-              chipClassName={dim.chip}
-              loading={entry.loading}
-              // The popup says which of the three states it is in, rather than
-              // showing an empty list that reads as "broken" whatever the cause.
-              emptyLabel={scopeCatalogEmptyLabel(entry, noun)}
-              disabled={disabled || state.kind === 'failed'}
-              searchPlaceholder={`Search ${noun}…`}
-            />
-            <ScopeCatalogNote entry={entry} noun={noun} debugId={`${debugId}-${dim.debug}-state`} />
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-/** EL-023: the unified scope selector, named for the design system. `ScopeField` === `ScopeEditor`. */
-export { ScopeEditor as ScopeField };

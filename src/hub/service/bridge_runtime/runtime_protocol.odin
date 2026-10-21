@@ -49,22 +49,6 @@ runtime_command_cached :: proc(registry: ^project_service.Bridge_Runtime_Registr
 	return "", false
 }
 
-// Returns an owned process-allocator copy for callers that use the result after
-// releasing the cache lock. The borrowed lookup above remains useful for
-// immediate assertions/internal inspection, but must never cross a concurrent
-// eviction point.
-runtime_command_cached_copy :: proc(registry: ^project_service.Bridge_Runtime_Registry, bridge_id: string, generation: int, command_id: string) -> (string, bool) {
-	if registry == nil || bridge_id == "" || generation <= 0 || command_id == "" do return "", false
-	project_service.bridge_runtime_registry_command_lock(registry)
-	defer project_service.bridge_runtime_registry_command_unlock(registry)
-	for i in 0..<registry.command_slots_used {
-		if registry.command_bridge_ids[i] == bridge_id && registry.command_generations[i] == generation && registry.command_ids[i] == command_id && registry.command_results_terminal[i] {
-			return strings.clone(registry.command_results_json[i], runtime.default_allocator()), true
-		}
-	}
-	return "", false
-}
-
 // Efficiently parks an HTTP/RPC waiter until a terminal result is published.
 // The condition may wake spuriously, so the cache predicate and real deadline are
 // checked in a loop under the same mutex used by result insertion.

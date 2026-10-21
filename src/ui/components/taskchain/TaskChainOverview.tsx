@@ -41,22 +41,6 @@ export interface TaskChainOverviewProps {
   onClose?: () => void;
 }
 
-export function agentInstanceOptionLabel(
-  name: string,
-  instanceId: string,
-  suffix = '',
-  runtimeStatus?: string
-): string {
-  const shortId = instanceId.slice(-6);
-  const statusSuffix = runtimeStatus ? ` (${runtimeStatus})` : '';
-  return `${name} [${shortId}]${statusSuffix}${suffix}`;
-}
-
-export function memberInstanceOptionLabel(role: string, name: string, instanceId: string): string {
-  const shortId = instanceId.slice(-6);
-  return `${role}: ${name} [${shortId}]`;
-}
-
 export function InstanceIdLink({ instanceId, displayName }: { instanceId: string; displayName?: string }) {
   const trimmed = String(instanceId || '').trim();
   const openAgentChat = useOpenAgentChat();

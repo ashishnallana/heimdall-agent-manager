@@ -211,5 +211,3 @@ export const bridgesApi = heimdallApi.injectEndpoints({
     }),
   }),
 });
-
-export const { useUnsealBridgeMutation, useGetBridgePublicKeyQuery } = bridgesApi;

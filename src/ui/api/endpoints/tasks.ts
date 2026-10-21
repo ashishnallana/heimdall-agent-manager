@@ -278,7 +278,6 @@ function preciseTaskTags(taskId?: string, chainId?: string, includeComments = tr
   return tags;
 }
 
-
 export type TaskChainDirectory = {
   directoryId: string;
   path: string;
@@ -1566,60 +1565,29 @@ export const tasksApi = heimdallApi.injectEndpoints({
 
 export const {
   useFetchChainTasksQuery,
-  useLazyFetchChainTasksPageQuery,
-  useFetchTaskQuery,
-  useLazyFetchTaskQuery,
-  useFetchTaskCommentsQuery,
-  useLazyFetchTaskCommentsPageQuery,
-  useFetchTaskCommentQuery,
-  useLazyFetchTaskCommentQuery,
-  useFetchTaskLogQuery,
-  useLazyFetchTaskLogPageQuery,
-
   useFetchTaskChainGroupsQuery,
   useFetchTaskChainProjectPageQuery,
   useLazyFetchTaskChainProjectPageQuery,
   useListTaskChainsQuery,
-  useLazyListTaskChainsQuery,
-  useListPinnedTaskChainsQuery,
-  useFetchPinnedTaskChainsQuery,
   useFetchTaskChainDetailQuery,
   useFetchChainTaskDetailQuery,
   useFetchChainTaskCommentsQuery,
-  useLazyFetchChainTaskCommentsQuery,
-  useListChainsByCoordinatorQuery,
   useCreateTaskChainMutation,
   useUpdateTaskChainMutation,
-  useTogglePinTaskChainMutation,
   useUpdateTaskDetailMutation,
   useCancelTaskDetailMutation,
-  useUpdateTaskPriorityMutation,
-  useAddChainMemberMutation,
-  useRemoveChainMemberMutation,
   useAddChainDirectoryMutation,
-
   useCreateTaskMutation,
   usePublishTaskMutation,
   usePublishTaskChainMutation,
-  useDeleteTaskMutation,
   useAddTaskCommentMutation,
-  useResolveTaskCommentMutation,
-  useUpdateTaskMutation,
-  useAssignTaskMutation,
-  useAddTaskParticipantMutation,
-  useRemoveTaskParticipantMutation,
-
-  // Task System v2 (M4) verbs & queries
   useUserReviewTaskMutation,
   useReopenTaskMutation,
   useAnswerTaskBlockerMutation,
   useVerifyTaskMutation,
   useFetchTaskEventsQuery,
-  useLazyFetchTaskEventsQuery,
   useFetchTaskFacetQuery,
-  useLazyFetchTaskFacetQuery,
   useFetchCommitDiffQuery,
-  useLazyFetchCommitDiffQuery,
   useFetchWorkflowTemplatesQuery,
   useFetchWorkflowDefinitionsQuery,
   useDefineWorkflowMutation,

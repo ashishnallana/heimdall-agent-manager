@@ -11,9 +11,6 @@ package contracts
 //      WebSocket channel (bridge_hub_chunk_frames) and the hub's chunk
 //      reassembler.
 
-Daemon_ID :: distinct string
-Bridge_Stream_ID :: distinct string
-Bridge_Frame_ID :: distinct string
 
 BRIDGE_LOOPBACK_CONTRACT_VERSION :: 1
 // 2: PTY output/input are binary frames (pty_wire.odin); shell_pty_output / data_b64 are gone.
@@ -68,7 +65,6 @@ BRIDGE_ERROR_UNSUPPORTED_ROUTE :: "unsupported_route"
 BRIDGE_WS_FRAME_KIND_CHUNK :: "chunk"
 
 BRIDGE_WS_DEFAULT_CHUNK_BYTES :: 65536
-BRIDGE_WS_MAX_CHUNK_PAYLOAD_BYTES :: 45000 // Base64 + JSON wrapper stays below the 65 KiB WS frame cap.
 
 // Safety bounds for the hub-side chunk reassembler (src/hub bridge_handlers.odin)
 // that rebuilds large bridge->hub runtime frames: cap concurrent reassemblies,

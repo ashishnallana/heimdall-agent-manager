@@ -783,18 +783,6 @@ export const {
   useRequestPaneCaptureMutation,
   useSendConversationMessageMutation,
   useMarkConversationReadMutation,
-  useListConversationSummariesQuery,
-  useFetchConversationSummariesPageQuery,
-  useLazyFetchConversationSummariesPageQuery,
-  useFetchDirectChatQuery,
-  useLazyFetchDirectChatPageQuery,
-  useFetchGuideChatQuery,
-  useLazyFetchGuideChatPageQuery,
-  useLazyFetchChatMessageQuery,
-  useSendAgentMessageMutation,
-  useSendGuideMessageMutation,
-  useListAllChatConversationsQuery,
-  useLazyListAllChatConversationsQuery,
 } = chatEndpoints;
 
 export {

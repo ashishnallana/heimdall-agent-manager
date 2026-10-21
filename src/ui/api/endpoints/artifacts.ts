@@ -726,22 +726,12 @@ export function useArtifactContentState({ daemonUrl, clientToken, artifactId, ve
   return state;
 }
 
-export function useArtifactContentUrl({ daemonUrl, clientToken, artifactId, versionNo = null }: { daemonUrl: string; clientToken: string; artifactId: string; versionNo?: number | null }) {
-  return useArtifactContentState({ daemonUrl, clientToken, artifactId, versionNo }).url;
-}
-
 export const {
   useListArtifactsQuery,
-  useLazyFetchArtifactsPageQuery,
   useFetchArtifactMetaQuery,
   useFetchArtifactVersionsQuery,
   useFetchArtifactTextContentQuery,
-  useFetchArtifactAnnotationsQuery,
   useCreateArtifactMutation,
   useUpdateArtifactMutation,
-  useRollbackArtifactMutation,
-  useCreateArtifactAnnotationMutation,
-  useUpdateArtifactAnnotationMutation,
-  useDeleteArtifactAnnotationMutation,
   useDeleteArtifactMutation,
 } = artifactsApi;

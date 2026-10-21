@@ -210,14 +210,6 @@ type InFlightTaskEntry = {
 
 const inFlightTasks = new Map<string, InFlightTaskEntry>();
 
-export function getInFlightTaskCount(): number {
-  return inFlightTasks.size;
-}
-
-export function resetInFlightTasksForTest(): void {
-  inFlightTasks.clear();
-}
-
 // Directly patches a task into RTK Query caches (fetchTask, fetchChainTaskDetail,
 // fetchTaskChainDetail, and fetchChainTasks) so the sidebar task chain overview and
 // thread page progress update in real time without a manual page refresh.

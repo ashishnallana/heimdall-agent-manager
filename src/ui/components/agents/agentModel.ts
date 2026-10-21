@@ -164,11 +164,6 @@ export function isLiveRuntimeStatus(status?: string): boolean {
   return ['running', 'starting', 'launching', 'idle', 'busy', 'ready'].includes(s);
 }
 
-/** Agents have no extra filters beyond tabs, so this is always false. */
-export function hasActiveFilters(_state: AgentListUrlState): boolean {
-  return false;
-}
-
 /* ------------------------------------------------------------------ *
  * Routes and breadcrumbs
  * ------------------------------------------------------------------ */

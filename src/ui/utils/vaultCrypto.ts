@@ -11,11 +11,8 @@ import { ID_VALUE_RE, VAULT_ID_RE, isVaultKeyring, keyFor, currentKey, type Vaul
 
 export type { VaultKeyring } from './vaultKeyring.ts';
 export { currentKey, keyFor } from './vaultKeyring.ts';
-
-export const AES_GCM_KEY_LENGTH = 256;
 export const AES_GCM_NONCE_BYTES = 12;
 export const AES_GCM_TAG_BYTES = 16;
-export const VAULT_KEY_BYTES = 32;
 export const RECOVERY_ENTROPY_BYTES = 16;
 
 export const VAULT_ARMOR_PREFIX = 'vault:v2:';
@@ -58,11 +55,6 @@ let activeVaultKeyring: VaultKeyring | null = null;
 /** The active keyring, or null until this device's keyring is installed. */
 export function getActiveVaultKey(): VaultKeyring | null {
   return activeVaultKeyring;
-}
-
-/** The user id the active keyring belongs to ('' when none is installed). */
-export function getActiveVaultUserId(): string {
-  return activeVaultKeyring?.userId ?? '';
 }
 
 /**

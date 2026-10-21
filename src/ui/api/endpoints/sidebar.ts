@@ -250,4 +250,9 @@ export const sidebarApi = heimdallApi.injectEndpoints({
   }),
 });
 
-export const { useListSidebarConversationsQuery, useLazyListSidebarConversationsQuery, useListConversationInboxQuery, useLazyListConversationInboxQuery, useListSidebarProjectsQuery } = sidebarApi;
+export const {
+  useListSidebarConversationsQuery,
+  useListConversationInboxQuery,
+  useLazyListConversationInboxQuery,
+  useListSidebarProjectsQuery,
+} = sidebarApi;

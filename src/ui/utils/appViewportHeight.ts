@@ -163,11 +163,6 @@ export function readAppViewportHeight(win: AppViewportWindow): number {
   return appViewportHeightFrom(readAppViewport(win));
 }
 
-/** REQ-VIEWPORT-SWEEP-1. The occluded height, for a box pinned to the bottom edge. */
-export function readAppViewportBottomOffset(win: AppViewportWindow): number {
-  return appViewportBottomOffsetFrom(readAppViewport(win));
-}
-
 /**
  * Publish `--app-viewport-height` on `<html>` and keep it current. Returns a teardown.
  *

@@ -386,22 +386,6 @@ issue_device_authorization_token :: proc(service: ^Auth_Service, owner: domain.U
 	return saved, plaintext, true, domain.Domain_Error{}
 }
 
-// revoke_active_user_tokens revokes every non-revoked token owned by user_id.
-// Kept for administrative cleanup flows; normal issuance allows multiple active
-// user/device tokens per user.
-revoke_active_user_tokens :: proc(service: ^Auth_Service, owner_id: domain.User_ID) {
-	if service == nil || service.user_tokens == nil || service.clock == nil do return
-	tokens, list_err := iface.user_token_list_by_owner(service.user_tokens, owner_id)
-	if list_err.code != .None do return
-	now := platform.clock_now(service.clock)
-	for i in 0..<len(tokens) {
-		if tokens[i].revoked_at != "" do continue
-		tokens[i].revoked_at = now
-		tokens[i].updated_at = now
-		_, _, _ = iface.user_token_save(service.user_tokens, tokens[i])
-	}
-}
-
 list_user_api_tokens :: proc(service: ^Auth_Service, owner_user_id: domain.User_ID) -> ([]domain.User_API_Token, domain.Domain_Error) {
 	if service == nil || service.user_tokens == nil do return nil, domain.domain_error(.Internal_Error, "user token service is not configured")
 	owner_id := domain.User_ID(user_service.normalize_user_id(string(owner_user_id)))

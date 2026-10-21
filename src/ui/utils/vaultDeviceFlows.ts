@@ -189,10 +189,6 @@ export async function buildBridgeApproval(approver: DeviceIdentity, chain: Verif
   });
   return { subjectDeviceId: subjectId, statement, vault_approval: { expected_version: chain.version, statement, signature: await sig(approver, statement) } };
 }
-/** The identity fingerprint of a bridge as the approver computes it (sign key only). */
-export async function bridgeIdentityFingerprint(identityPubHex: string): Promise<string> {
-  return fingerprintFor(identityPubHex, '');
-}
 
 /**
  * Revocation of `targetId`: ONE signed `revoke` log op that names the target and

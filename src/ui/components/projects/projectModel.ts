@@ -392,9 +392,6 @@ export type ProjectFormField = 'name' | 'slug' | 'description' | 'repoUrl' | 'vc
  */
 export const CANNOT_CLEAR_MESSAGE = "Heimdall can't clear this field yet — it would keep its previous value. Put something back, or leave it as it was.";
 
-/** Which optional fields are affected by the clear limitation above. */
-export const CLEARABLE_BLOCKED_FIELDS: ProjectFormField[] = ['slug', 'description', 'repoUrl', 'vcsKind'];
-
 export interface MappedServerError {
   field: ProjectFormField;
   message: string;

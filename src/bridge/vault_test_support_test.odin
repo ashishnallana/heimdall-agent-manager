@@ -24,7 +24,6 @@ import vault "odin_test:lib/vault"
 TEST_VAULT_KEY_HEX :: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 TEST_ENC_VAULT_KEY :: "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90"
 KEYSTORE_SEC_TEST_KEY_1 :: TEST_VAULT_KEY_HEX
-KEYSTORE_SEC_TEST_KEY_2 :: "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
 TEST_VAULT_USER_ID :: "usr_bridge_test"
 // test_vault_id is the vault id of every test keyring: the one of the test account
 // root (TEST_ACCOUNT_ROOT_SCALAR) the test chain proofs name.

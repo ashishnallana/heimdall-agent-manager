@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { Suspense, useCallback, useMemo, useState } from 'react';
 import {
   useFetchAgentInstanceQuery,
   useStartInstanceMutation,
@@ -6,8 +6,10 @@ import {
   useRestartAgentInstanceMutation,
 } from '../../api/endpoints/agents';
 import { useGetAgentsLiveQuery } from '../../api/endpoints/agentsLive';
-import AgentPaneComposerPanel from '../chat/AgentPaneComposerPanel';
 import { useAuxTabActions, type AuxTabAction } from '../auxiliary/auxTabActions';
+
+// xterm stays out of the entry chunk until an agent PTY pane mounts.
+const AgentPaneComposerPanel = React.lazy(() => import('../chat/AgentPaneComposerPanel'));
 
 export interface AgentPtyWorkbenchPaneProps {
   agentInstanceId: string;
@@ -78,18 +80,20 @@ export function AgentPtyWorkbenchPane({
       data-debug-id={`workbench-agent-pty-pane-${agentInstanceId}`}
       className="relative flex h-full min-h-0 w-full flex-1 flex-col overflow-hidden bg-surface text-primary"
     >
-      <AgentPaneComposerPanel
-        agentInstanceId={agentInstanceId}
-        isExpanded={true}
-        isActiveTab={isActiveTab}
-        runtimeStatus={rawStatus}
-        isStarting={isStarting}
-        runCount={instance?.run_count}
-        startedAt={instance?.started_at}
-        fillPane={true}
-        hideHeader={true}
-        className="h-full w-full flex-1 min-h-0"
-      />
+      <Suspense fallback={null}>
+        <AgentPaneComposerPanel
+          agentInstanceId={agentInstanceId}
+          isExpanded={true}
+          isActiveTab={isActiveTab}
+          runtimeStatus={rawStatus}
+          isStarting={isStarting}
+          runCount={instance?.run_count}
+          startedAt={instance?.started_at}
+          fillPane={true}
+          hideHeader={true}
+          className="h-full w-full flex-1 min-h-0"
+        />
+      </Suspense>
     </div>
   );
 }

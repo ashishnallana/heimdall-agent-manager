@@ -309,6 +309,70 @@ curl -sI https://hub-preview.example.com/p/anything/     # signed out: 302 to Au
 # In a signed-in browser: https://hub-preview.example.com/api/v1/me must be 404, never hub JSON.
 ```
 
+### 1.6b Serving the web UI (compression and caching)
+
+The hub serves only `/api/v1`; the web UI is the static `dist/` from `npm run build`
+(`$out/share/heimdall/dist` in the Nix package), served by your reverse proxy. Two settings
+decide how fast it loads (the snippets below show only those; keep your TLS and auth directives):
+
+- **Compression.** The JS is text and shrinks about 4× with gzip, more with brotli.
+- **Caching.** Everything under `assets/` has a content hash in its file name, so it can be
+  cached forever; a release ships new names. `index.html`, `notification-sw.js` and
+  `manifest.webmanifest` keep their names and must be revalidated, or browsers keep loading
+  the previous release.
+
+**nginx**
+
+```nginx
+gzip on;
+gzip_types text/css application/javascript application/json image/svg+xml application/manifest+json;
+
+root /usr/share/heimdall/dist;
+
+location /api/v1/ {
+    proxy_pass http://127.0.0.1:8081;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+}
+location /assets/ {
+    add_header Cache-Control "public, max-age=31536000, immutable";
+}
+location / {
+    add_header Cache-Control "no-cache";
+    try_files $uri /index.html;
+}
+```
+
+**Caddy**
+
+```caddy
+hub.example.com {
+    encode zstd gzip
+    handle /api/v1/* {
+        reverse_proxy 127.0.0.1:8081
+    }
+    handle {
+        root * /usr/share/heimdall/dist
+        @hashed path /assets/*
+        @unhashed not path /assets/*
+        header @hashed Cache-Control "public, max-age=31536000, immutable"
+        header @unhashed Cache-Control "no-cache"
+        try_files {path} /index.html
+        file_server
+    }
+}
+```
+
+**Check it**
+
+```bash
+curl -sI -H 'Accept-Encoding: gzip' https://hub.example.com/ | grep -i cache-control    # no-cache
+js=$(curl -s https://hub.example.com/ | grep -o 'assets/index-[^"]*\.js')
+curl -sI -H 'Accept-Encoding: gzip' "https://hub.example.com/$js" | grep -iE 'content-encoding|cache-control'
+# expect: content-encoding: gzip (or br/zstd) and cache-control: ... immutable
+```
+
 ### 1.7 Single-user / VPN setup with dev-proxy (no TLS cert required)
 
 > **When to use this:** You are the only user, the hub is reachable only through a

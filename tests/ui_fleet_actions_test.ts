@@ -995,12 +995,6 @@ test('M3 Fleet Placement UI & API contract: FleetManagementDrawer.tsx and taskCh
     'utf8'
   );
 
-  // Verify FleetSlotChips renders role badge
-  assert.ok(
-    drawerSrc.includes('fleet-slot-chip-roles-'),
-    'FleetSlotChips must render role badge per fleet chip'
-  );
-
   // Verify FleetManagementDrawer renders controls for roles, placement bridge, default provider/model, min_warm, idle_ttl, and remove
   assert.ok(
     drawerSrc.includes('fleet-role-toggle-'),

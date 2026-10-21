@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { Button, Icon } from '@ui';
 import {
   useGetShellSessionQuery,
@@ -8,10 +8,12 @@ import {
   type ShellSession,
 } from '../../api/endpoints/shells';
 import { useAuxTabActions, type AuxTabAction } from '../auxiliary/auxTabActions';
-import { ShellTerminalPane } from '../shells/ShellTerminalPane';
 import { buildInteractiveShellRequest } from '../shells/interactiveShellLaunch';
 import { describeApiError } from '../../utils/bridgeVaultStatus';
 import { isTerminal } from '../shells/shellModel';
+
+// xterm stays out of the entry chunk until a shell pane mounts.
+const ShellTerminalPane = React.lazy(() => import('../shells/ShellTerminalPane').then((m) => ({ default: m.ShellTerminalPane })));
 
 export interface ShellWorkbenchPaneProps {
   /** The ONE interactive shell session this tab is bound to (absent = start a new one). */
@@ -119,7 +121,9 @@ export function ShellWorkbenchPane({
       <div className="relative flex flex-1 min-h-0 w-full flex-col overflow-hidden">
         {activeSession ? (
           <div className="flex flex-1 min-h-0 w-full flex-col overflow-hidden p-2">
-            <ShellTerminalPane key={activeSession.session_id} session={activeSession} />
+            <Suspense fallback={null}>
+              <ShellTerminalPane key={activeSession.session_id} session={activeSession} />
+            </Suspense>
           </div>
         ) : (
           <div

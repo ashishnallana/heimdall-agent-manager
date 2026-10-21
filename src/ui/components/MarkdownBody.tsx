@@ -49,11 +49,6 @@ export async function getMermaid(): Promise<MermaidRenderer | null> {
   return mermaidPromise;
 }
 
-export function resetMermaidForTesting(): void {
-  mermaidPromise = null;
-  mermaidInitialized = false;
-}
-
 export type MarkdownTextSelection = {
   selectedText: string;
 };

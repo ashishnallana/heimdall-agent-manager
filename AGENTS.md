@@ -108,8 +108,6 @@ src/
   lib/
     config/           config parser/defaults
     http_client/      local HTTP client helpers
-    message_provider/ agent-to-agent message provider interface + impl
-    router_envelope/  router envelope helpers
     tmux/             tmux launch/control helpers
     vcs/              git/jj workspace helpers
     ws/               WebSocket client helpers
@@ -126,21 +124,15 @@ src/
 Shared contracts used across binaries.
 
 - `identity.odin`
-  - Core identity/token types such as `Agent_Instance_ID`, `Conversation_ID`, `Ws_Token`, and `Agent_Token`.
+  - Core identity types such as `Agent_Instance_ID`, `Agent_Class`, and the client kind/access-mode/capability enums.
 - `lifecycle.odin`
-  - `/register` and `/reconnect` request/response types, including `conversation_id`, `ws_url`, `ws_token`, and `agent_token`.
+  - The `/register` request type.
 - `protocol.odin`
-  - Base protocol constants (`/health`, `/register`, `/heartbeat`, `/ws`, `/agent-rpc`, `/agents/start`).
-- `messages.odin`
-  - Agent WS/message event types such as `Messages_Available` and `Messages_Read`.
-- `message_provider.odin`
-  - Shared `Message`, status/read receipt, fetch, unread-count, and mark-read contracts.
+  - Build/version constants (`APP_VERSION`, `GIT_COMMIT`, `BUILD_TIMESTAMP`, `PROTOCOL_VERSION`).
 - `memory_provider.odin`
-  - Shared `Memory_Record`, `Memory_Event`, type/status enums, and replay/list/history contracts.
+  - The shared `Memory_Type` enum.
 - `artifacts.odin`
-  - Artifact metadata types, supported kinds, and artifact routes.
-
-`src/contracts/agent_rpc.odin` still covers the minimal shared agent RPC surface. Modern task/chat/memory/project/team flows also go through daemon REST endpoints and `/user-rpc`; do not treat `agent_rpc.odin` as the whole product surface.
+  - The `Artifact_ID` type.
 
 ### `src/daemon`
 
@@ -205,8 +197,6 @@ Shared libraries used by daemon/wrapper/ctl.
 
 - `config` — config structs/defaults/parser for daemon data dirs, wrapper launch/bootstrap settings, provider/model tiers, startup/activity detection, guide agent, and ctl defaults
 - `http_client` — local daemon HTTP calls
-- `message_provider` — agent-to-agent provider interface plus current in-memory implementation
-- `router_envelope` — router envelope helpers
 - `tmux` — tmux lifecycle helpers
 - `vcs` — git/jj workspace helpers
 - `ws` — wrapper-side WebSocket client
@@ -250,15 +240,6 @@ Defined primarily in `src/daemon/task_store.odin`.
 - Storage model
   - Tasks are event-shaped and projected into in-memory arrays plus SQLite tables (`task_db_service.odin`).
   - The daemon also keeps a durable task notification outbox for retryable per-agent notifications.
-
-### Agent-to-agent inbox messages
-
-- Shared wire/data types live in `src/contracts/message_provider.odin`:
-  - `Message`, `Message_Status`, `Message_Direction`, `Send_Message_Request`, `Fetch_Messages_Request`, `Mark_Read_Request`, read receipts.
-- The provider interface lives in `src/lib/message_provider/provider.odin`.
-- The current default provider implementation is `src/lib/message_provider/memory.odin`.
-  - This is a **real** provider, but it is process-memory only today.
-  - That is separate from user/agent chat, which is durable.
 
 ### User/agent chat
 

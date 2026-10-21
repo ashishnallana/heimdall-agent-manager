@@ -1,6 +1,4 @@
 import { createAsyncThunk, createSlice } from '@reduxjs/toolkit';
-import * as daemonApi from '../api/daemonApi';
-import { selectCachedTaskById } from '../api/taskCache';
 import { tasksApi } from '../api/endpoints/tasks';
 import { getRouteSearch } from '../utils/appLocation';
 
@@ -34,37 +32,6 @@ function getActiveTaskId(payload: any): string {
   return params.get('taskId') || '';
 }
 
-function getActiveChainId(payload: any): string {
-  if (payload?.chainId) return payload.chainId;
-  const params = new URLSearchParams(getRouteSearch());
-  return params.get('chainId') || '';
-}
-
-function getSelectedTaskFromCache(state: any, payload: any) {
-  const activeTaskId = getActiveTaskId(payload);
-  const task = selectCachedTaskById(state, activeTaskId);
-  if (!task) throw new Error(`Task ${activeTaskId || '(unknown)'} is not loaded in the RTK Query cache`);
-  return task;
-}
-
-// TODO(rtkq-migration owner=task-19f69e242e4): component compatibility wrapper for unmigrated chain/task-list surfaces. Do not add follow-up refresh chaining around this thunk; prefer RTKQ hooks or endpoint initiate calls.
-export const fetchTasksForChain = createAsyncThunk(
-  'tasks/fetchTasksForChain',
-  async (chainId: string, { dispatch, getState }) => {
-    const { session } = (getState() as any).chat;
-    if (!session.clientToken || !chainId) return { chainId, tasks: [] };
-
-    return await (dispatch as any)(tasksApi.endpoints.fetchChainTasks.initiate({ chainId })).unwrap();
-  },
-  {
-    condition: (chainId, { getState }) => {
-      if (!chainId) return false;
-      const queryState = tasksApi.endpoints.fetchChainTasks.select({ chainId })(getState() as any);
-      return queryState?.status !== 'pending';
-    },
-  },
-);
-
 // TODO(rtkq-migration owner=task-19f69e242e4): compatibility wrapper for older task-log open/load-more callers. The authoritative recurring cache for live task logs is tasksApi.fetchTaskLog/fetchTaskLogPage.
 export const fetchSelectedTaskLog = createAsyncThunk(
   'tasks/fetchSelectedTaskLog',
@@ -95,103 +62,6 @@ export const fetchSelectedTaskLog = createAsyncThunk(
     },
   },
 );
-
-function taskMutationAuth(session: any, agentToken: string) {
-  return {
-    agentToken: agentToken?.trim() || '',
-    clientInstanceId: session.clientInstanceId,
-    clientToken: session.clientToken,
-  };
-}
-
-export const createTaskFromBoard = createAsyncThunk('tasks/createTaskFromBoard', async (payload: any, { getState }) => {
-  const { session } = (getState() as any).chat;
-  const result = await daemonApi.createTask({ daemonUrl: session.daemonUrl, ...taskMutationAuth(session, payload.agentToken), ...payload });
-  return result;
-});
-
-export const createChainFromBoard = createAsyncThunk('tasks/createChainFromBoard', async (payload: any, { getState }) => {
-  const { session } = (getState() as any).chat;
-  const result = await daemonApi.createTaskChain({ daemonUrl: session.daemonUrl, ...taskMutationAuth(session, payload.agentToken), ...payload });
-  return result;
-});
-
-export const addCommentToSelectedTask = createAsyncThunk('tasks/addCommentToSelectedTask', async (payload: any, { dispatch, getState }) => {
-  const state = getState() as any;
-  const task = getSelectedTaskFromCache(state, payload);
-  return await (dispatch as any)(tasksApi.endpoints.addTaskComment.initiate({ taskId: task.taskId, chainId: task.chainId, body: payload.body, agentToken: payload.agentToken, resolveImmediately: payload.resolveImmediately })).unwrap();
-});
-
-export const resolveCommentOnSelectedTask = createAsyncThunk('tasks/resolveCommentOnSelectedTask', async (payload: any, { dispatch, getState }) => {
-  const task = getSelectedTaskFromCache(getState() as any, payload);
-  return await (dispatch as any)(tasksApi.endpoints.resolveTaskComment.initiate({ taskId: task.taskId, chainId: task.chainId, commentId: payload.commentId, agentToken: payload.agentToken })).unwrap();
-});
-
-export const updateSelectedTaskStatus = createAsyncThunk('tasks/updateSelectedTaskStatus', async (payload: any) => {
-  // Task System v2: manual status setting is disabled; state is a fold over task events.
-  return { taskId: payload?.taskId, status: payload?.status };
-});
-
-export const updateSelectedTaskMetadata = createAsyncThunk('tasks/updateSelectedTaskMetadata', async (payload: any, { dispatch, getState }) => {
-  const task = getSelectedTaskFromCache(getState() as any, payload);
-  await (dispatch as any)(tasksApi.endpoints.updateTask.initiate({ taskId: task.taskId, chainId: task.chainId, title: payload.title, description: payload.description, acceptanceCriteria: payload.acceptanceCriteria, dependsOn: payload.dependsOn, agentToken: payload.agentToken })).unwrap();
-  const data = await (dispatch as any)(tasksApi.endpoints.fetchTask.initiate({ taskId: task.taskId }, { subscribe: false, forceRefetch: true })).unwrap();
-  return data.task || null;
-});
-
-export const assignSelectedTask = createAsyncThunk('tasks/assignSelectedTask', async (payload: any, { dispatch, getState }) => {
-  const task = getSelectedTaskFromCache(getState() as any, payload);
-  return await (dispatch as any)(tasksApi.endpoints.assignTask.initiate({ taskId: task.taskId, chainId: task.chainId, agentInstanceId: payload.agentInstanceId, agentToken: payload.agentToken })).unwrap();
-});
-
-export const addParticipantToSelectedTask = createAsyncThunk('tasks/addParticipantToSelectedTask', async (payload: any, { dispatch, getState }) => {
-  const task = getSelectedTaskFromCache(getState() as any, payload);
-  return await (dispatch as any)(tasksApi.endpoints.addTaskParticipant.initiate({ taskId: task.taskId, chainId: task.chainId, agentInstanceId: payload.agentInstanceId, role: payload.role, agentToken: payload.agentToken })).unwrap();
-});
-
-export const removeParticipantFromSelectedTask = createAsyncThunk('tasks/removeParticipantFromSelectedTask', async (payload: any, { dispatch, getState }) => {
-  const task = getSelectedTaskFromCache(getState() as any, payload);
-  return await (dispatch as any)(tasksApi.endpoints.removeTaskParticipant.initiate({ taskId: task.taskId, chainId: task.chainId, agentInstanceId: payload.agentInstanceId, role: payload.role, agentToken: payload.agentToken })).unwrap();
-});
-
-export const voteOnSelectedTask = createAsyncThunk('tasks/voteOnSelectedTask', async (payload: any, { dispatch, getState }) => {
-  const task = getSelectedTaskFromCache(getState() as any, payload);
-  return await (dispatch as any)(tasksApi.endpoints.userReviewTask.initiate({
-    taskId: task.taskId,
-    chainId: task.chainId,
-    verdict: payload.approved ? 'approve' : 'request_changes',
-    findings: payload.comment ? [payload.comment] : undefined,
-  })).unwrap();
-});
-
-export const voteOnAttentionTask = createAsyncThunk('tasks/voteOnAttentionTask', async (payload: { taskId: string; chainId: string; approved: boolean; comment?: string }, { dispatch }) => {
-  await (dispatch as any)(tasksApi.endpoints.userReviewTask.initiate({
-    taskId: payload.taskId,
-    chainId: payload.chainId,
-    verdict: payload.approved ? 'approve' : 'request_changes',
-    findings: payload.comment ? [payload.comment] : undefined,
-  })).unwrap();
-  return { taskId: payload.taskId, chainId: payload.chainId, approved: payload.approved };
-});
-
-export const nudgeSelectedTask = createAsyncThunk('tasks/nudgeSelectedTask', async () => {
-  // Task System v2: manual nudge is disabled; matching is event and timer driven.
-  return { success: true };
-});
-
-export const updateSelectedChainMetadata = createAsyncThunk('tasks/updateSelectedChainMetadata', async (payload: any, { getState }) => {
-  const state = getState() as any;
-  const { session } = state.chat;
-  const chainId = getActiveChainId(payload);
-  await daemonApi.updateTaskChain({ daemonUrl: session.daemonUrl, ...taskMutationAuth(session, payload.agentToken), chainId, title: payload.title, description: payload.description, coordinatorAgentInstanceId: payload.coordinatorAgentInstanceId, defaultReviewerAgentInstanceId: payload.defaultReviewerAgentInstanceId, finalSummary: payload.finalSummary });
-});
-
-export const updateSelectedChainStatus = createAsyncThunk('tasks/updateSelectedChainStatus', async (payload: any, { getState }) => {
-  const state = getState() as any;
-  const { session } = state.chat;
-  const chainId = getActiveChainId(payload);
-  await daemonApi.updateTaskChainStatus({ daemonUrl: session.daemonUrl, ...taskMutationAuth(session, payload.agentToken), chainId, status: payload.status, finalSummary: payload.finalSummary });
-});
 
 export const fetchUnreviewedChains = createAsyncThunk(
   'tasks/fetchUnreviewedChains',

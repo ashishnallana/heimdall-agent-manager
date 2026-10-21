@@ -275,6 +275,3 @@ export async function openRecoveryKey(words: string[], chain: VerifiedChain): Pr
     entropy.fill(0);
   }
 }
-
-/** Test seam: seal a blob with a fixed iv (vectors / negative tests only). */
-export const __test = { sealSecret, openSecret };

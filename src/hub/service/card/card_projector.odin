@@ -104,15 +104,6 @@ attention_message_card_id :: proc(agent_instance_id: string) -> domain.Card_ID {
 // ---------------------------------------------------------------------------
 // task_validation
 
-// task_awaits_user is the single "this task needs the user" rule, shared with
-// the accept-time guard and reconciliation: taskv2.user_attention (a review
-// that is the user's turn, or a block only the user can clear). Without the
-// task engine (bare test services) nothing qualifies.
-task_awaits_user :: proc(s: ^Card_Service, task: domain.Task) -> bool {
-	kind, _ := task_user_attention(s, task)
-	return kind != .None
-}
-
 task_user_attention :: proc(s: ^Card_Service, task: domain.Task) -> (taskv2.User_Attention, string) {
 	if s == nil || s.taskchains == nil || s.taskchains.engine == nil do return .None, ""
 	return taskv2.user_attention(s.taskchains.engine, task)

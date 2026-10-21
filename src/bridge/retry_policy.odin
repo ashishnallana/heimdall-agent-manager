@@ -53,8 +53,6 @@ Bridge_Backoff_Policy :: struct {
 	jitter_pct: int, // delay is spread uniformly over +-jitter_pct% (0 = exact)
 }
 
-BRIDGE_BACKOFF_DEFAULT :: Bridge_Backoff_Policy{base_ms = 1_000, max_ms = 300_000, jitter_pct = 20}
-
 // bridge_backoff_delay_ms is the wait before retry number `failures` (>= 1):
 // base * 2^(failures-1), capped at max_ms, then spread by +-jitter_pct% using
 // jitter_seed (any value; callers pass a random one, tests a fixed one).
@@ -149,11 +147,6 @@ bridge_http_retry_metrics: Bridge_Http_Retry_Metrics
 bridge_http_retry_metrics_json :: proc() -> string {
 	m := &bridge_http_retry_metrics
 	return fmt.aprintf("{{\"retry\":%d,\"recovered\":%d,\"gave_up\":%d,\"deferred\":%d}}", sync.atomic_load(&m.retry), sync.atomic_load(&m.recovered), sync.atomic_load(&m.gave_up), sync.atomic_load(&m.deferred))
-}
-
-// bridge_http_is_terminal reports whether an HTTP response is terminal (not retriable).
-bridge_http_is_terminal :: proc(status: int, ok: bool) -> bool {
-	return !bridge_http_is_retriable(status, ok)
 }
 
 // bridge_http_backoff_sleep sleeps for base_ms * 2^(attempt-1).

@@ -79,10 +79,6 @@ find_project_by_slug :: proc(store: ^Prov_Project_Store, owner: domain.User_ID, 
 	return domain.Project{}, false
 }
 
-count_coordinators :: proc(store: ^Prov_Agent_Store, owner: domain.User_ID) -> int {
-	return count_agents_by_slug(store, owner, COORDINATOR_AGENT_SLUG)
-}
-
 @(test)
 test_provision_seeds_canonical_agents_and_conversation_project :: proc(t: ^testing.T) {
 	ustore: User_Store

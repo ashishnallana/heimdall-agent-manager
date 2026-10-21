@@ -211,8 +211,6 @@ write_action_json :: proc(b: ^strings.Builder, a: domain.Action) {
 	strings.write_string(b, "\"}")
 }
 
-write_scheduled_prompt_json :: write_action_json
-
 list_actions_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Action_Handlers)(ctx)
 	auth_ctx, ok, auth_resp := require_auth(h.auth, req)

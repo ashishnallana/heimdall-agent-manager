@@ -9,7 +9,6 @@ import "core:testing"
 // ── REQ-VAULT-PROJECTS-1 Unit Tests for CLI Projects Encryption & Decryption ──
 
 TEST_PROJECT_VAULT_KEY :: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-ALT_PROJECT_VAULT_KEY  :: "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
 
 @(test)
 test_project_show_transparent_decryption :: proc(t: ^testing.T) {

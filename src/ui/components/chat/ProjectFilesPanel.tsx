@@ -14,9 +14,9 @@
 // currently bounded by the contract's cursor pagination (limit 200 + "Load more"
 // via next_cursor/has_more) inside a scroll container, which keeps the mounted
 // DOM small in practice. True windowing (react-window/equiv) is deferred because
-// the pinned virtualizers require React 19 while this app is on React 18 (the
-// @vimee/* deps hold the React-19 peer); adding one needs either a React-18
-// compatible virtualizer or a React bump. Tracked as a Phase-4 follow-up.
+// the pinned virtualizers require React 19 while this app is on React 18;
+// adding one needs either a React-18 compatible virtualizer or a React bump.
+// Tracked as a Phase-4 follow-up.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';

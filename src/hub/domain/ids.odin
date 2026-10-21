@@ -7,17 +7,12 @@ Agent_Instance_ID :: distinct string
 Project_ID :: distinct string
 Task_Chain_ID :: distinct string
 Task_ID :: distinct string
-Memory_ID :: distinct string
-Chat_Conversation_ID :: distinct string
-Chat_Message_ID :: distinct string
 Artifact_ID :: distinct string
-Template_ID :: distinct string
 
 id_is_empty :: proc(id: string) -> bool {
 	return id == ""
 }
 Action_ID :: distinct string
-Scheduled_Prompt_ID :: Action_ID
 Push_Subscription_ID :: distinct string
 Card_ID :: distinct string
 Issue_ID :: distinct string

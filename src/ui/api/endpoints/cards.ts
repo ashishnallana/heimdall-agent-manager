@@ -344,7 +344,6 @@ export const cardsApi = heimdallApi.injectEndpoints({
 export const {
   useListCardsQuery,
   useGetCardQuery,
-  useCreateCardMutation,
   useAcceptCardMutation,
   useRejectCardMutation,
   useDiscardCardMutation,

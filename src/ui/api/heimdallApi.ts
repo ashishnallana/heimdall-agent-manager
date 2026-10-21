@@ -56,8 +56,6 @@ export const HEIMDALL_TAG_TYPES = [
   'TaskChainFleets',
 ] as const;
 
-export type HeimdallTagType = (typeof HEIMDALL_TAG_TYPES)[number];
-
 type QueryError = {
   status: string;
   error: string;

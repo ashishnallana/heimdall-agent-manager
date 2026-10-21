@@ -621,19 +621,6 @@ export const agentsApi = heimdallApi.injectEndpoints({
 });
 
 // TODO(FIX): Replace any with strict TypeScript interface matching Odin backend schema
-export function upsertAgentInCaches(dispatch: any, rawAgent: any) {
-  const mapped = mapAgent(rawAgent);
-  if (!mapped?.id) return '';
-  // TODO(FIX): Replace any with strict TypeScript interface matching Odin backend schema
-  dispatch(agentsApi.util.updateQueryData('listAgents', undefined, (draft: any) => {
-    const rows = draft?.agents || (draft.agents = []);
-    upsertKnownAgentRecord(rows, mapped);
-  }));
-  dispatch(agentsApi.util.upsertQueryData('fetchAgent', { agentInstanceId: mapped.id }, { agent: mapped }));
-  return mapped.id;
-}
-
-// TODO(FIX): Replace any with strict TypeScript interface matching Odin backend schema
 export function patchAgentCachesFromWs(dispatch: any, payload: any) {
   const type = String(payload?.type || '');
   if (type === 'agent_runtime_changed') {
@@ -735,7 +722,31 @@ export function patchAgentCachesFromWs(dispatch: any, payload: any) {
   dispatch(heimdallApi.util.invalidateTags([{ type: 'Agents', id: 'LIST' }]));
 }
 
-export const { useRetryInstanceConfigurationMutation, useListInstanceReconfigurationsQuery, useApplyInstanceConfigurationMutation, useListAgentIdentitiesQuery, useListAgentTemplatesQuery, useCreateAgentTemplateMutation, useUpdateAgentTemplateMutation, useDeleteAgentTemplateMutation, useFetchAgentIdentityQuery, useUpdateAgentIdentityMutation, useEnableBridgeSupportMutation, useListAgentsQuery, useFetchAgentsPageQuery, useLazyFetchAgentsPageQuery, useFetchAgentQuery, useStartAgentMutation, useStopAgentMutation, useCreateAgentInstanceInChainMutation, useCreateAgentMutation, useArchiveAgentIdentityMutation, useListAgentInstancesQuery, useFetchAgentInstanceQuery, useLaunchAgentInstanceMutation, useStopAgentInstanceMutation, useRestartAgentInstanceMutation, useStartAgentInstanceMutation, useReconfigureAgentInstanceMutation, useGetAgentPaneQuery, useLazyGetAgentPaneQuery, useSendAgentPaneInputMutation, useSendAgentPaneResizeMutation } = agentsApi;
+export const {
+  useRetryInstanceConfigurationMutation,
+  useListInstanceReconfigurationsQuery,
+  useApplyInstanceConfigurationMutation,
+  useListAgentIdentitiesQuery,
+  useListAgentTemplatesQuery,
+  useCreateAgentTemplateMutation,
+  useUpdateAgentTemplateMutation,
+  useDeleteAgentTemplateMutation,
+  useFetchAgentIdentityQuery,
+  useUpdateAgentIdentityMutation,
+  useListAgentsQuery,
+  useCreateAgentMutation,
+  useArchiveAgentIdentityMutation,
+  useListAgentInstancesQuery,
+  useFetchAgentInstanceQuery,
+  useLaunchAgentInstanceMutation,
+  useStopAgentInstanceMutation,
+  useRestartAgentInstanceMutation,
+  useStartAgentInstanceMutation,
+  useGetAgentPaneQuery,
+  useLazyGetAgentPaneQuery,
+  useSendAgentPaneInputMutation,
+  useSendAgentPaneResizeMutation,
+} = agentsApi;
 
 export function useStartInstanceMutation() {
   const [mutate, result] = useStartAgentInstanceMutation();

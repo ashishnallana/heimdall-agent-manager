@@ -146,9 +146,6 @@ const EMPTY_SHOWN: Record<string, number> = {};
 export const selectAgentActivityBuffer = (state: any, instanceId: string): AgentActionItem[] =>
   state?.agentActivity?.byInstance?.[instanceId] || EMPTY_BUFFER;
 
-export const selectAgentLastActionAt = (state: any, instanceId: string): number =>
-  Number(state?.agentActivity?.lastActionAt?.[instanceId] || 0);
-
 // selectAgentShownIds returns the map of action-id → shown-time for an instance
 // (ids already surfaced on screen). Feeds selectReplayableActions so re-opening a
 // conversation never re-shows a bubble the user has already seen.

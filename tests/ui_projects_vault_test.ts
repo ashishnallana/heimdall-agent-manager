@@ -17,9 +17,6 @@ import vaultReducer, {
   selectIsVaultUnlocked,
 } from '../src/ui/store/vaultSlice.ts';
 import {
-  resolveVaultText,
-} from '../src/ui/components/vault/vaultTextHelper.ts';
-import {
   encryptProjectFields,
   decryptProjectRecord,
   decryptProjectList,
@@ -120,7 +117,7 @@ test('decryptProjectRecord preserves armored string when vault is locked or key 
 // Test 4: Legacy plaintext projects render transparently without regression
 // -----------------------------------------------------------------------------
 
-test('decryptProjectRecord and resolveVaultText handle legacy plaintext projects transparently', async () => {
+test('decryptProjectRecord handles legacy plaintext projects transparently', async () => {
   const legacyProject = {
     projectId: 'proj_legacy_789',
     name: 'Legacy Project Frontend',
@@ -131,17 +128,6 @@ test('decryptProjectRecord and resolveVaultText handle legacy plaintext projects
   const decrypted = await decryptProjectRecord(legacyProject, TEST_KEY_HEX);
   assert.equal(decrypted.name, legacyProject.name);
   assert.equal(decrypted.description, legacyProject.description);
-
-  // resolveVaultText returns plaintext mode
-  const nameResolved = resolveVaultText(legacyProject.name, true);
-  assert.equal(nameResolved.mode, 'plaintext');
-  assert.equal(nameResolved.isArmored, false);
-  assert.equal(nameResolved.displayText, legacyProject.name);
-
-  const descResolved = resolveVaultText(legacyProject.description, false);
-  assert.equal(descResolved.mode, 'plaintext');
-  assert.equal(descResolved.isArmored, false);
-  assert.equal(descResolved.displayText, legacyProject.description);
 });
 
 // -----------------------------------------------------------------------------
@@ -173,24 +159,10 @@ test('decryptProjectList decrypts arrays containing mixed encrypted and legacy p
 });
 
 // -----------------------------------------------------------------------------
-// Test 6: Redux vault state transitions and interactive locked placeholder
+// Test 6: Redux vault state transitions
 // -----------------------------------------------------------------------------
 
-test('Vault locked state displays interactive placeholder and triggers unlock modal for project fields', async () => {
-  const armoredName = await encryptVaultText('Classified Project Name', TEST_KEY_HEX);
-
-  // Locked resolution
-  const lockedResolved = resolveVaultText(armoredName, false);
-  assert.equal(lockedResolved.mode, 'locked');
-  assert.equal(lockedResolved.isLocked, true);
-  assert.equal(lockedResolved.dataDebugId, 'vault-locked-placeholder');
-  assert.equal(lockedResolved.displayText, 'Encrypted content');
-
-  // Unlocked resolution
-  const unlockedResolved = resolveVaultText(armoredName, true);
-  assert.equal(unlockedResolved.mode, 'unlocked');
-  assert.equal(unlockedResolved.isLocked, false);
-
+test('Vault slice tracks keyring installed / cleared', () => {
   // Redux state transitions: keyring installed / purged; no key material in state
   let state = vaultReducer(undefined, { type: '@@INIT' });
   assert.equal(selectIsVaultUnlocked({ vault: state }), false);

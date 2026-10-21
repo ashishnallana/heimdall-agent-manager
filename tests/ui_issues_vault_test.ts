@@ -19,15 +19,11 @@ import vaultReducer, {
   selectIsVaultUnlocked,
 } from '../src/ui/store/vaultSlice.ts';
 import {
-  resolveVaultText,
-  decryptVaultTextContent,
-} from '../src/ui/components/vault/vaultTextHelper.ts';
-import {
   encryptIssueFields,
   encryptCommentFields,
   decryptIssueRecord,
   decryptCommentRecord,
-} from '../src/ui/utils/vaultIssues.ts';
+} from '../src/ui/api/endpoints/issues.ts';
 
 const TEST_KEY_HEX_RAW = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
 const TEST_KEY_HEX = await keyringFromHex(TEST_KEY_HEX_RAW);
@@ -35,64 +31,17 @@ const DIFFERENT_KEY_HEX_RAW = 'fedcba9876543210fedcba9876543210fedcba9876543210f
 const DIFFERENT_KEY_HEX = await keyringFromHex(DIFFERENT_KEY_HEX_RAW);
 
 // -----------------------------------------------------------------------------
-// Test 1: <VaultText /> renders plaintext for unencrypted strings
+// Test 4: decryptVaultText decrypts plaintext when vault is unlocked
 // -----------------------------------------------------------------------------
 
-test('<VaultText /> renders plaintext for unencrypted strings and empty fallbacks', () => {
-  // Plain text resolution
-  const resolved = resolveVaultText('Bug: Odin build failure on arm64', false);
-  assert.equal(resolved.mode, 'plaintext');
-  assert.equal(resolved.isArmored, false);
-  assert.equal(resolved.displayText, 'Bug: Odin build failure on arm64');
-  assert.equal(resolved.isLocked, false);
-  assert.equal(resolved.dataDebugId, undefined);
-
-  // Empty string with fallback
-  const resolvedEmpty = resolveVaultText('', false, 'No content provided');
-  assert.equal(resolvedEmpty.mode, 'plaintext');
-  assert.equal(resolvedEmpty.displayText, 'No content provided');
-});
-
-// -----------------------------------------------------------------------------
-// Test 2: <VaultText /> renders interactive placeholder when vault is locked and triggers unlock
-// -----------------------------------------------------------------------------
-
-test('<VaultText /> renders interactive placeholder when vault is locked with data-debug-id="vault-locked-placeholder"', async () => {
-  // Generate an armored string
-  const armoredCiphertext = await encryptVaultText('Sensitive secret issue content', TEST_KEY_HEX);
-  assert.ok(isVaultArmored(armoredCiphertext), 'Must produce valid armored ciphertext');
-
-  // When vault is locked
-  const resolvedLocked = resolveVaultText(armoredCiphertext, false);
-  assert.equal(resolvedLocked.mode, 'locked');
-  assert.equal(resolvedLocked.isArmored, true);
-  assert.equal(resolvedLocked.isLocked, true);
-  assert.equal(resolvedLocked.dataDebugId, 'vault-locked-placeholder');
-  assert.equal(resolvedLocked.displayText, 'Encrypted content');
-});
-
-// -----------------------------------------------------------------------------
-// Test 4: <VaultText /> and decryptVaultText decrypt plaintext when vault is unlocked
-// -----------------------------------------------------------------------------
-
-test('<VaultText /> decrypts and renders plaintext when vault is unlocked', async () => {
+test('decryptVaultText round-trips issue text, passes plaintext through, and rejects a wrong key', async () => {
   const secretTitle = 'Flaky test in bridge process synchronization';
   const armoredTitle = await encryptVaultText(secretTitle, TEST_KEY_HEX);
   assert.ok(isVaultArmored(armoredTitle));
 
-  // Resolved when vault is unlocked
-  const resolvedUnlocked = resolveVaultText(armoredTitle, true);
-  assert.equal(resolvedUnlocked.mode, 'unlocked');
-  assert.equal(resolvedUnlocked.isArmored, true);
-  assert.equal(resolvedUnlocked.isLocked, false);
-
   // Decrypt with correct key
   const decrypted = await decryptVaultText(armoredTitle, TEST_KEY_HEX);
   assert.equal(decrypted, secretTitle, 'Must decrypt cleanly back to original plaintext');
-
-  // Verify helper decryptVaultTextContent
-  const contentDecrypted = await decryptVaultTextContent(armoredTitle, TEST_KEY_HEX);
-  assert.equal(contentDecrypted, secretTitle);
 
   // Verify transparent fallback for unarmored string
   const unarmored = 'Plain text not armored';

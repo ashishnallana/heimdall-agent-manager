@@ -6,8 +6,6 @@ Action_State :: enum {
 	Completed,
 }
 
-Scheduled_Prompt_State :: Action_State
-
 Action_Target_Mode :: enum {
 	Instance,
 	Agent,
@@ -63,6 +61,4 @@ action_target_mode :: proc(action: Action) -> Action_Target_Mode {
 	}
 	return .Agent
 }
-
-Scheduled_Prompt :: Action
 

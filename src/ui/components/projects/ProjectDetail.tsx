@@ -716,5 +716,3 @@ export function ProjectDetailPaneSkeleton() {
     </div>
   );
 }
-
-export { Card as ProjectDetailCard };

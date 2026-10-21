@@ -39,58 +39,6 @@ Provider_Discovery_Report_Wire :: struct {
 	providers:  []Provider_Discovery_Item_Wire `json:"providers"`,
 }
 
-write_provider_model_json :: proc(b: ^strings.Builder, model: domain.Provider_Model) {
-	strings.write_string(b, "{\"model_id\":\"")
-	contracts.write_json_string(b, model.model_id)
-	strings.write_string(b, "\",\"label\":\"")
-	contracts.write_json_string(b, model.label)
-	strings.write_string(b, "\",\"state\":\"")
-	contracts.write_json_string(b, model.state)
-	strings.write_string(b, "\"}")
-}
-
-write_provider_catalog_entry_json :: proc(
-	b: ^strings.Builder,
-	entry: domain.Provider_Catalog_Entry,
-) {
-	strings.write_string(b, "{\"provider\":\"")
-	contracts.write_json_string(b, entry.provider)
-	strings.write_string(b, "\",\"display_name\":\"")
-	contracts.write_json_string(b, entry.display_name)
-	strings.write_string(b, "\",\"icon_url\":\"")
-	contracts.write_json_string(b, entry.icon_url)
-	strings.write_string(b, "\",\"binary\":\"")
-	contracts.write_json_string(b, entry.binary)
-	strings.write_string(b, "\",\"base_args\":")
-	strings.write_string(b, entry.base_args_json)
-	strings.write_string(b, ",\"yolo_args\":")
-	strings.write_string(b, entry.yolo_args_json)
-	strings.write_string(b, ",\"model_flag\":\"")
-	contracts.write_json_string(b, entry.model_flag)
-	strings.write_string(b, "\",\"prompt_args\":")
-	strings.write_string(b, entry.prompt_args_json)
-	strings.write_string(b, ",\"prompt_delivery\":\"")
-	contracts.write_json_string(b, entry.prompt_delivery)
-	strings.write_string(b, "\",\"starter_prompt\":\"")
-	contracts.write_json_string(b, entry.starter_prompt)
-	strings.write_string(b, "\",\"bootstrap_file\":\"")
-	contracts.write_json_string(b, entry.bootstrap_file)
-	strings.write_string(b, "\",\"skill_dir\":\"")
-	contracts.write_json_string(b, entry.skill_dir)
-	strings.write_string(b, "\",\"startup_detection\":")
-	strings.write_string(b, entry.startup_detection_json)
-	strings.write_string(b, ",\"activity_detection\":")
-	strings.write_string(b, entry.activity_detection_json)
-	strings.write_string(b, ",\"state\":\"")
-	contracts.write_json_string(b, entry.state)
-	strings.write_string(b, "\",\"models\":[")
-	for model, i in entry.models {
-		if i > 0 do strings.write_byte(b, ',')
-		write_provider_model_json(b, model)
-	}
-	strings.write_string(b, "]}")
-}
-
 // GET /api/v1/providers
 provider_catalog_list_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Provider_Handlers)(ctx)

@@ -73,8 +73,6 @@ test_input_frame_requires_unambiguous_flag_and_payload :: proc(t: ^testing.T) {
 
 // --- Consolidated from agent_instance_input_golden_vector_test.odin ---
 
-C1_GOLDEN_KEY_HEX :: "4f1c2a9d8e7b6a5c4d3e2f10112233445566778899aabbccddeeff0011223344"
-C1_GOLDEN_PLAINTEXT :: "ls -la\n"
 C1_GOLDEN_ENC_B64 :: "vFQrdD8pfrvPMg80AH82Q+0Ryd+5fD++WZUYiGUzlU+BsSo="
 C1_GOLDEN_FRAME :: `{"type":"input","data_b64":"vFQrdD8pfrvPMg80AH82Q+0Ryd+5fD++WZUYiGUzlU+BsSo=","is_encrypted":true}`
 

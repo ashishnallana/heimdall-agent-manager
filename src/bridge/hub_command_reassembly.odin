@@ -9,20 +9,12 @@ import ws "odin_test:lib/ws"
 Hub_Command_Reassembly :: ws.Chunk_Reassembly
 HUB_COMMAND_REASSEMBLY_TTL :: ws.CHUNK_REASSEMBLY_TTL
 
-hub_command_reassembly_free :: proc(buf: ^[dynamic]Hub_Command_Reassembly, idx: int) {
-	ws.chunk_reassembly_free(buf, idx)
-}
-
 hub_command_reassemblies_free :: proc(buf: ^[dynamic]Hub_Command_Reassembly) {
 	ws.chunk_reassemblies_free(buf)
 }
 
 hub_command_reassembly_sweep :: proc(buf: ^[dynamic]Hub_Command_Reassembly, now_ns: i64) -> int {
 	return ws.chunk_reassembly_sweep(buf, now_ns)
-}
-
-hub_command_reassembly_oldest :: proc(buf: ^[dynamic]Hub_Command_Reassembly) -> int {
-	return ws.chunk_reassembly_oldest(buf)
 }
 
 hub_command_frame_is_chunk :: proc(text: string) -> bool {

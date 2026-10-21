@@ -332,9 +332,7 @@ export const bridgeSupportApi = heimdallApi.injectEndpoints({
 
 export const {
   useListAgentBridgeSupportQuery,
-  usePatchAgentBridgeSupportMutation,
   useListBridgesQuery,
-  useFetchBridgeDetailQuery,
   useRenameBridgeMutation,
   useUpdateBridgeTelemetryMutation,
   useRevokeBridgeMutation,
@@ -342,7 +340,4 @@ export const {
   usePurgeBridgeEventsMutation,
   useUpdateBridgeMutation,
   useListBridgeProvidersQuery,
-  usePutProjectBridgePathMutation,
-  useDeleteProjectBridgePathMutation,
-  useValidateProjectBridgePathMutation,
 } = bridgeSupportApi;

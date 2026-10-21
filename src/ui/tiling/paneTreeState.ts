@@ -155,42 +155,6 @@ export function getContentPaneIds<T>(state: PaneTreeState<T>): string[] {
   return result;
 }
 
-export function getAllContentPanes<T>(state: PaneTreeState<T>): T[] {
-  return getContentPaneIds(state)
-    .map((id) => state.panes[id])
-    .filter((p): p is Extract<PaneState<T>, { kind: 'content' }> => Boolean(p && p.kind === 'content'))
-    .map((p) => p.value);
-}
-
-export function getContentPane<T>(
-  paneId: string,
-  state: PaneTreeState<T>,
-): T | undefined {
-  const pane = state.panes[paneId];
-  if (!pane || pane.kind !== 'content') return undefined;
-  return pane.value;
-}
-
-export function defaultContentPane<T>(
-  state: PaneTreeState<T>,
-): { paneId: string; pane: T } | undefined {
-  if (state.focusedPaneId) {
-    const focused = state.panes[state.focusedPaneId];
-    if (focused && focused.kind === 'content') {
-      return { paneId: state.focusedPaneId, pane: focused.value };
-    }
-  }
-  const ids = getContentPaneIds(state);
-  if (ids.length > 0) {
-    const firstId = ids[0];
-    const first = state.panes[firstId];
-    if (first && first.kind === 'content') {
-      return { paneId: firstId, pane: first.value };
-    }
-  }
-  return undefined;
-}
-
 /**
  * Splits `paneIdToSplit` while strictly preserving `paneIdToSplit` and its entry in `state.panes`.
  * Creates a new parent split node and a new child content pane.
@@ -264,7 +228,6 @@ export function splitPaneInTree<T>(
 }
 
 export const split = splitPaneInTree;
-export const splitPane = splitPaneInTree;
 
 /**
  * Detaches `paneId` from its enclosing parent split without deleting `state.panes[paneId]`.
@@ -559,14 +522,3 @@ export function toggleMaximizePaneInTree<T>(
 }
 
 export const toggleMaximizePane = toggleMaximizePaneInTree;
-
-export function updatePaneContent<T>(
-  state: PaneTreeState<T>,
-  paneId: string,
-  value: T,
-): void {
-  const pane = state.panes[paneId];
-  if (pane && pane.kind === 'content') {
-    pane.value = value;
-  }
-}

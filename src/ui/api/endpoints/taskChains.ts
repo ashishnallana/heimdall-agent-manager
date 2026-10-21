@@ -429,8 +429,5 @@ export const {
   useLazyGetTaskChainFleetsQuery,
   useUpdateTaskChainFleetMutation,
   useDeleteTaskChainFleetMutation,
-  useGetTaskChainQuery,
-  useGetTaskChainsQuery,
   useListFlatTaskChainsQuery,
-  useLazyListFlatTaskChainsQuery,
 } = taskChainsApi;

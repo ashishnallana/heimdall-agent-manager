@@ -131,14 +131,6 @@ test_jsonx_complex_array_with_nested_objects :: proc(t: ^testing.T) {
 }
 
 @(test)
-test_jsonx_unescape_string :: proc(t: ^testing.T) {
-	unescaped, ok := unescape_string(`"test \"value\" \n"`)
-	defer if ok do delete(unescaped)
-	testing.expect(t, ok, "unescape_string should succeed")
-	testing.expect_value(t, unescaped, "test \"value\" \n")
-}
-
-@(test)
 test_jsonx_json_unescape_string_binary_and_surrogates :: proc(t: ^testing.T) {
 	// Test surrogate pair \ud83d\ude00
 	surrogate := json_unescape_string(`\ud83d\ude00`)

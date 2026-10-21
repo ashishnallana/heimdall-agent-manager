@@ -124,27 +124,6 @@ export type {
   MultiScopeSearchResult,
 };
 
-// The bridge's fs causes (WireError.cause), exported for callers that want
-// to branch on specific failures (e.g. friendly "already exists" messaging).
-export const FS_ERROR_CODES = [
-  'path_outside_root',
-  'path_not_found',
-  'path_not_directory',
-  'not_a_file',
-  'file_too_large',
-  'unsupported_type',
-  'path_exists',
-  'dest_exists',
-  'dir_not_empty',
-  'cannot_delete_root',
-  'read_failed',
-  'write_failed',
-  'mkdir_failed',
-  'move_failed',
-  'delete_failed',
-] as const;
-export type FsErrorCode = (typeof FS_ERROR_CODES)[number] | '';
-
 // ---- Cache key helpers ------------------------------------------------------
 
 // Tag id for a directory listing. Keyed by (projectId | chainId+dirId | instance::instanceId, bridgeId, path) so a
@@ -567,7 +546,6 @@ async function decryptSearchMatches(rawMatches: any[], activeKey?: VaultKeyring 
 }
 
 export const {
-  useListProjectDirQuery,
   useLazyListProjectDirQuery,
   useReadProjectFileQuery,
   useLazyReadProjectFileQuery,
@@ -577,12 +555,7 @@ export const {
   useDeleteProjectPathMutation,
   useWriteProjectFileMutation,
   useBatchWriteProjectFilesMutation,
-  useQuickOpenProjectFilesQuery,
   useLazyQuickOpenProjectFilesQuery,
-  useSearchProjectFilesQuery,
-  useLazySearchProjectFilesQuery,
-  useSearchInstanceFilesQuery,
-  useLazySearchInstanceFilesQuery,
 } = projectFsApi;
 
 // ---- Multi-scope search orchestration & deduplication helpers ----------------

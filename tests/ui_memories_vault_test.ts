@@ -13,9 +13,6 @@ import {
   VAULT_ARMOR_PREFIX,
 } from '../src/ui/utils/vaultContent.ts';
 import {
-  resolveVaultText,
-} from '../src/ui/components/vault/vaultTextHelper.ts';
-import {
   encryptMemoryFields,
   decryptMemoryRecord,
 } from '../src/ui/utils/vaultMemories.ts';
@@ -24,43 +21,6 @@ const TEST_KEY_HEX_RAW = '0123456789abcdef0123456789abcdef0123456789abcdef012345
 const TEST_KEY_HEX = await keyringFromHex(TEST_KEY_HEX_RAW);
 const DIFFERENT_KEY_HEX_RAW = 'fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210';
 const DIFFERENT_KEY_HEX = await keyringFromHex(DIFFERENT_KEY_HEX_RAW);
-
-// -----------------------------------------------------------------------------
-// Test 1: <VaultText /> resolution for plaintext and legacy unencrypted memories
-// -----------------------------------------------------------------------------
-
-test('VaultText helper handles plaintext and legacy unencrypted memories without changes', () => {
-  const legacyTitle = 'Project convention: always use Odin collections';
-  const resolved = resolveVaultText(legacyTitle, false);
-  assert.equal(resolved.mode, 'plaintext');
-  assert.equal(resolved.isArmored, false);
-  assert.equal(resolved.displayText, legacyTitle);
-  assert.equal(resolved.isLocked, false);
-  assert.equal(resolved.dataDebugId, undefined);
-
-  // Empty fallback string
-  const resolvedEmpty = resolveVaultText('', false, 'No memory details');
-  assert.equal(resolvedEmpty.mode, 'plaintext');
-  assert.equal(resolvedEmpty.displayText, 'No memory details');
-});
-
-// -----------------------------------------------------------------------------
-// Test 3: <VaultText /> locked placeholder resolution for armored memory content
-// -----------------------------------------------------------------------------
-
-test('VaultText helper renders locked placeholder with data-debug-id for armored memory content', async () => {
-  const secretBody = 'Internal infrastructure secret token: gcloud_auth_xyz123';
-  const armoredBody = await encryptVaultText(secretBody, TEST_KEY_HEX);
-  assert.ok(isVaultArmored(armoredBody), 'Must produce valid armored ciphertext');
-
-  // Vault is locked
-  const resolvedLocked = resolveVaultText(armoredBody, false);
-  assert.equal(resolvedLocked.mode, 'locked');
-  assert.equal(resolvedLocked.isArmored, true);
-  assert.equal(resolvedLocked.isLocked, true);
-  assert.equal(resolvedLocked.dataDebugId, 'vault-locked-placeholder');
-  assert.equal(resolvedLocked.displayText, 'Encrypted content');
-});
 
 // -----------------------------------------------------------------------------
 // Test 4: Memory field encryption encrypts title, description, body, evidence when unlocked

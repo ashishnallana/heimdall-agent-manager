@@ -38,15 +38,6 @@ API_Sort_Field :: struct {
 	direction: API_Sort_Direction,
 }
 
-API_Query :: struct {
-	limit:      int,
-	cursor:     string,
-	search:     string,
-	filters:    []API_Filter,
-	sort:       []API_Sort_Field,
-	expand:     []string,
-}
-
 API_Filter :: struct {
 	name:  string,
 	value: string,
@@ -54,13 +45,6 @@ API_Filter :: struct {
 
 api_meta :: proc(request_id, server_time: string) -> API_Meta {
 	return API_Meta{request_id = request_id, server_time = server_time}
-}
-
-api_page :: proc(limit: int, next_cursor: string, has_more: bool) -> API_Page {
-	clamped := limit
-	if clamped <= 0 do clamped = API_DEFAULT_PAGE_LIMIT
-	if clamped > API_MAX_PAGE_LIMIT do clamped = API_MAX_PAGE_LIMIT
-	return API_Page{limit = clamped, next_cursor = next_cursor, has_more = has_more}
 }
 
 api_success_json :: proc(data_json: string, meta: API_Meta) -> string {
@@ -170,11 +154,4 @@ write_json_string :: proc(builder: ^strings.Builder, value: string) {
 			}
 		}
 	}
-}
-
-parse_int_default :: proc(value: string, default_value: int) -> int {
-	if value == "" do return default_value
-	parsed, ok := strconv.parse_int(value)
-	if !ok do return default_value
-	return int(parsed)
 }

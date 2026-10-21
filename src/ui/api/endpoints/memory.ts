@@ -504,10 +504,8 @@ export function patchMemoryCachesFromWs(dispatch: any, payload: any) {
 }
 
 export const {
-  useListMemoriesQuery,
   useGetMemoryQuery,
   useCreateMemoryMutation,
-  useProposeMemoryMutation,
   useUpdateMemoryMutation,
   useApproveMemoryMutation,
   useRejectMemoryMutation,

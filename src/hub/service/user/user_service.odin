@@ -142,11 +142,6 @@ ensure_canonical_resources :: proc(service: ^User_Service, owner: domain.User_ID
 
 }
 
-// ensure_coordinator_agent seeds canonical resources for owner. Kept for backwards compatibility.
-ensure_coordinator_agent :: proc(service: ^User_Service, owner: domain.User_ID) {
-	ensure_canonical_resources(service, owner)
-}
-
 get_user :: proc(service: ^User_Service, user_id: domain.User_ID) -> (domain.User, bool, domain.Domain_Error) {
 	if service == nil || service.users == nil {
 		return domain.User{}, false, domain.domain_error(.Internal_Error, "user service is not configured")
@@ -155,27 +150,6 @@ get_user :: proc(service: ^User_Service, user_id: domain.User_ID) -> (domain.Use
 		return domain.User{}, false, domain.domain_error(.Validation_Failed, "user_id is required")
 	}
 	return iface.user_get_by_id(service.users, user_id)
-}
-
-create_user_stub :: proc(service: ^User_Service, display_name, email: string) -> (domain.User, bool, domain.Domain_Error) {
-	if service == nil || service.users == nil || service.clock == nil || service.ids == nil {
-		return domain.User{}, false, domain.domain_error(.Internal_Error, "user service is not configured")
-	}
-	if display_name == "" {
-		return domain.User{}, false, domain.domain_error(.Validation_Failed, "display_name is required")
-	}
-	now := platform.clock_now(service.clock)
-	user_id := platform.generate_id(service.ids, "usr_")
-	created := domain.User{
-		user_id = domain.User_ID(user_id),
-		name = user_id,
-		display_name = display_name,
-		email = email,
-		status = .Active,
-		created_at = now,
-		updated_at = now,
-	}
-	return iface.user_save(service.users, created)
 }
 
 Create_User_Input :: struct {

@@ -17,9 +17,6 @@ import vaultReducer, {
   selectIsVaultUnlocked,
 } from '../src/ui/store/vaultSlice.ts';
 import {
-  resolveVaultText,
-} from '../src/ui/components/vault/vaultTextHelper.ts';
-import {
   encryptChainFields,
   decryptChainRecord,
   decryptChainList,
@@ -117,7 +114,7 @@ test('decryptChainRecord preserves armored string when vault is locked or key is
 // Test 4: Legacy plaintext chains render transparently without regression
 // -----------------------------------------------------------------------------
 
-test('decryptChainRecord and resolveVaultText handle legacy plaintext chains transparently', async () => {
+test('decryptChainRecord handles legacy plaintext chains transparently', async () => {
   const legacyChain = {
     chain_id: 'chain_legacy_789',
     title: 'Migrate legacy database schema',
@@ -129,17 +126,6 @@ test('decryptChainRecord and resolveVaultText handle legacy plaintext chains tra
   const decrypted = await decryptChainRecord(legacyChain, TEST_KEY_HEX);
   assert.equal(decrypted.title, legacyChain.title);
   assert.equal(decrypted.description, legacyChain.description);
-
-  // resolveVaultText returns plaintext mode
-  const titleResolved = resolveVaultText(legacyChain.title, true);
-  assert.equal(titleResolved.mode, 'plaintext');
-  assert.equal(titleResolved.isArmored, false);
-  assert.equal(titleResolved.displayText, legacyChain.title);
-
-  const descResolved = resolveVaultText(legacyChain.description, false);
-  assert.equal(descResolved.mode, 'plaintext');
-  assert.equal(descResolved.isArmored, false);
-  assert.equal(descResolved.displayText, legacyChain.description);
 });
 
 // -----------------------------------------------------------------------------
@@ -171,24 +157,10 @@ test('decryptChainList decrypts arrays containing mixed encrypted and legacy cha
 });
 
 // -----------------------------------------------------------------------------
-// Test 6: Redux vault state transitions and interactive locked placeholder
+// Test 6: Redux vault state transitions
 // -----------------------------------------------------------------------------
 
-test('Vault locked state displays interactive placeholder and triggers unlock modal', async () => {
-  const armoredTitle = await encryptVaultText('Classified Chain Title', TEST_KEY_HEX);
-
-  // Locked resolution
-  const lockedResolved = resolveVaultText(armoredTitle, false);
-  assert.equal(lockedResolved.mode, 'locked');
-  assert.equal(lockedResolved.isLocked, true);
-  assert.equal(lockedResolved.dataDebugId, 'vault-locked-placeholder');
-  assert.equal(lockedResolved.displayText, 'Encrypted content');
-
-  // Unlocked resolution
-  const unlockedResolved = resolveVaultText(armoredTitle, true);
-  assert.equal(unlockedResolved.mode, 'unlocked');
-  assert.equal(unlockedResolved.isLocked, false);
-
+test('Vault slice tracks keyring installed / cleared', () => {
   // Redux state transitions: keyring installed / purged; no key material in state
   let state = vaultReducer(undefined, { type: '@@INIT' });
   assert.equal(selectIsVaultUnlocked({ vault: state }), false);

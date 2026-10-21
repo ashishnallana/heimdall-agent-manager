@@ -219,10 +219,6 @@ export async function createDeviceIdentity(store: DeviceKeyValueStore, userId: s
   return hydrate(stored);
 }
 
-export async function loadOrCreateDeviceIdentity(store: DeviceKeyValueStore, userId: string): Promise<DeviceIdentity> {
-  return (await loadDeviceIdentity(store, userId)) ?? createDeviceIdentity(store, userId);
-}
-
 // ── observed vault reset ─────────────────────────────────────────────────────
 //
 // A reset the hub announced in a directory this device VERIFIED (requested_at,

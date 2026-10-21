@@ -34,6 +34,19 @@ export default defineConfig({
       },
     ],
   },
+  build: {
+    rollupOptions: {
+      output: {
+        // React and Redux change far less often than the app, so a separate chunk
+        // stays cached in the browser across most releases.
+        manualChunks(id) {
+          if (/[\\/]node_modules[\\/](react|react-dom|scheduler|react-redux|@reduxjs[\\/]toolkit|redux|immer|reselect|use-sync-external-store)[\\/]/.test(id)) {
+            return 'vendor-react';
+          }
+        },
+      },
+    },
+  },
   server: {
     // Route the trusted-proxy auth surface through ham-dev-proxy in dev.
     proxy: {

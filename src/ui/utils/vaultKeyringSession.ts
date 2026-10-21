@@ -74,10 +74,6 @@ export function getKeyringSession(): Readonly<SessionState> | null {
   return session;
 }
 
-export function keyringSessionGeneration(): number {
-  return generation;
-}
-
 /**
  * Run `fn` with the raw HKR2 bytes of the installed keyring, re-opened from the
  * stored wrap. The buffer is zeroed when `fn` settles; `fn` must not keep it.

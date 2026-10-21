@@ -1,11 +1,5 @@
-Drop screenshots here (PNG, dark theme). Five pairs — a desktop and a phone capture of the same surface:
+Drop screenshots here (PNG, dark theme): desktop captures >=1600px wide, phone captures 9:19-ish and >=720px wide.
 
-| slot   | desktop (>=1600px wide)   | phone (9:19-ish, >=720px wide) |
-|--------|---------------------------|--------------------------------|
-| fleet  | fleet-desktop.png         | fleet-phone.png                |
-| vault  | vault-desktop.png         | vault-phone.png                |
-| chain  | chain-desktop.png         | chain-phone.png                |
-| memory | memory-desktop.png        | memory-phone.png               |
-| shell  | shell-desktop.png         | shell-phone.png                |
+Each slot in `../index.html` lists its images in the frame's `data-src` attribute (comma-separated, cycled in order), so that attribute is the source of truth for which files are used. Add a file here, then reference it from `data-src`; delete it here only after removing it from every `data-src`.
 
 Until a file exists the page shows a labelled placeholder in its slot.

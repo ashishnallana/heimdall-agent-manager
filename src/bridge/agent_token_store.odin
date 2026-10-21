@@ -276,16 +276,6 @@ bridge_agent_token_json_write :: proc(b: ^strings.Builder, value: string) {
 	}
 }
 
-strconv_parse_int_bridge_token :: proc(value: string) -> (i64, bool) {
-	result: i64 = 0
-	if value == "" do return 0, false
-	for ch in value {
-		if ch < '0' || ch > '9' do return 0, false
-		result = result*10 + i64(ch-'0')
-	}
-	return result, true
-}
-
 bridge_local_token_role_string :: proc(role: Bridge_Local_Token_Role) -> string {
 	switch role {
 	case .Agent: return "agent"

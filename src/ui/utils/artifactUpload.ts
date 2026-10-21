@@ -75,20 +75,6 @@ export function artifactIdFromLink(value: string): string {
   return String(value || '').replace(/^artifact:\/\//i, '').trim();
 }
 
-export function artifactIdsFromText(value: string): string[] {
-  const seen = new Set<string>();
-  const out: string[] = [];
-  const re = /artifact:\/\/([A-Za-z0-9._:-]+)/g;
-  let match: RegExpExecArray | null;
-  while ((match = re.exec(String(value || ''))) !== null) {
-    const id = artifactIdFromLink(match[1]).replace(/[),.;:!?]+$/g, '');
-    if (!id || seen.has(id)) continue;
-    seen.add(id);
-    out.push(id);
-  }
-  return out;
-}
-
 export function appendArtifactLinks(body: string, links: string[]): string {
   const cleanLinks = links.map((link) => String(link || '').trim()).filter(Boolean);
   if (!cleanLinks.length) return body;

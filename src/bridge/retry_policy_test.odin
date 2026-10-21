@@ -16,11 +16,9 @@ test_bridge_http_is_retriable_classifier :: proc(t: ^testing.T) {
 	// Retriable: Transport failure (!ok or status == 0)
 	testing.expect(t, bridge_http_is_retriable(0, false), "status=0 ok=false must be retriable")
 	testing.expect(t, bridge_http_is_retriable(0, true), "status=0 ok=true must be retriable")
-	testing.expect(t, !bridge_http_is_terminal(0, false), "status=0 ok=false must not be terminal")
 
 	// Retriable: HTTP 429 (Rate Limit)
 	testing.expect(t, bridge_http_is_retriable(429, true), "HTTP 429 must be retriable")
-	testing.expect(t, !bridge_http_is_terminal(429, true), "HTTP 429 must not be terminal")
 
 	// Retriable: HTTP 5xx (Server Errors)
 	testing.expect(t, bridge_http_is_retriable(500, true), "HTTP 500 must be retriable")
@@ -30,19 +28,14 @@ test_bridge_http_is_retriable_classifier :: proc(t: ^testing.T) {
 
 	// Terminal: HTTP 4xx (Client / Auth / Validation, except 429)
 	testing.expect(t, !bridge_http_is_retriable(400, true), "HTTP 400 must be terminal")
-	testing.expect(t, bridge_http_is_terminal(400, true), "HTTP 400 must be terminal")
 	testing.expect(t, !bridge_http_is_retriable(401, true), "HTTP 401 must be terminal")
-	testing.expect(t, bridge_http_is_terminal(401, true), "HTTP 401 must be terminal")
 	testing.expect(t, !bridge_http_is_retriable(403, true), "HTTP 403 must be terminal")
-	testing.expect(t, bridge_http_is_terminal(403, true), "HTTP 403 must be terminal")
 	testing.expect(t, !bridge_http_is_retriable(404, true), "HTTP 404 must be terminal")
-	testing.expect(t, bridge_http_is_terminal(404, true), "HTTP 404 must be terminal")
 	testing.expect(t, !bridge_http_is_retriable(409, true), "HTTP 409 must be terminal")
 	testing.expect(t, !bridge_http_is_retriable(422, true), "HTTP 422 must be terminal")
 
 	// Terminal: HTTP 2xx / 3xx (Success / Redirect)
 	testing.expect(t, !bridge_http_is_retriable(200, true), "HTTP 200 must be terminal")
-	testing.expect(t, bridge_http_is_terminal(200, true), "HTTP 200 must be terminal")
 	testing.expect(t, !bridge_http_is_retriable(201, true), "HTTP 201 must be terminal")
 	testing.expect(t, !bridge_http_is_retriable(204, true), "HTTP 204 must be terminal")
 	testing.expect(t, !bridge_http_is_retriable(304, true), "HTTP 304 must be terminal")

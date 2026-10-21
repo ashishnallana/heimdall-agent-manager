@@ -50,18 +50,6 @@ format_legacy_inbox_human :: proc(body: string, allocator := context.temp_alloca
 	return strings.to_string(b)
 }
 
-print_inbox_human :: proc(body: string) {
-	messages := parse_legacy_inbox_messages(body, context.temp_allocator)
-	if len(messages) == 0 {
-		fmt.println("No unread messages.")
-		return
-	}
-	for msg in messages {
-		fmt.println(fmt.tprintf("%s from %s:", msg.id, msg.from_agent_instance_id))
-		fmt.println(msg.body)
-	}
-}
-
 @(test)
 test_legacy_inbox_single_message :: proc(t: ^testing.T) {
 	raw := `{"ok":true,"messages":[{"id":"msg_101","from_agent_instance_id":"inst_coord","body":"Hello worker, start task."}]}`

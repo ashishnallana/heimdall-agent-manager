@@ -497,9 +497,3 @@ free_bridge_tokens :: proc(tokens: []domain.Bridge_Token) {
 	}
 	if tokens != nil do delete(tokens)
 }
-
-// bridge_token_strings_unused keeps the `strings` import honest if the helpers above
-// stop needing it; trim_space is used by the refresh handler's input normalisation.
-refresh_token_input_normalised :: proc(value: string) -> string {
-	return strings.trim_space(value)
-}

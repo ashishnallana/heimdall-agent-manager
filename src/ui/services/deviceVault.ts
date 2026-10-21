@@ -532,14 +532,6 @@ function noticePending(c: Ctx, chain: VerifiedChain): void {
   c.lastPendingIds = new Set(chain.pending.map((p) => p.device_id));
 }
 
-/** Pending devices that appeared since the last refresh (for the approval toast). */
-export function takeNewPendingDevices(chain: VerifiedChain): string[] {
-  if (!ctx) return [];
-  const fresh = chain.pending.map((p) => p.device_id).filter((id) => !ctx!.lastPendingIds.has(id));
-  noticePending(ctx, chain);
-  return fresh;
-}
-
 async function runGenesis(c: Ctx): Promise<void> {
   const dispatch = c.dispatch;
   const kv = d().kv;

@@ -14,16 +14,19 @@ import {
   encryptVaultText,
   decryptVaultText,
   decryptEmbeddedVaultTokens,
+  maskVaultArmored,
+  VAULT_MASK_PLACEHOLDER,
 } from '../src/ui/utils/vaultContent.ts';
-import {
-  resolveDecryptedMarkdownContent,
-} from '../src/ui/components/vault/vaultTextHelper.ts';
 
 const TEST_KEY_HEX_RAW = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
 const TEST_KEY_HEX = await keyringFromHex(TEST_KEY_HEX_RAW);
 
 // -----------------------------------------------------------------------------
 // Section 4: DecryptedMarkdown Unit Tests
+//
+// <DecryptedMarkdown> renders useDecryptedText(source): decryptVaultText for a fully
+// armored source, decryptEmbeddedVaultTokens for embedded tokens, and
+// maskVaultArmored while locked. These tests pin those primitives.
 // -----------------------------------------------------------------------------
 
 test('DecryptedMarkdown properly decrypts pure armored markdown when unlocked', async () => {
@@ -36,14 +39,12 @@ test('DecryptedMarkdown properly decrypts pure armored markdown when unlocked', 
   assert.ok(isVaultArmored(armored));
 
   // When unlocked
-  const unlocked = await resolveDecryptedMarkdownContent(armored, TEST_KEY_HEX, true);
-  assert.equal(unlocked.isLocked, false);
-  assert.equal(unlocked.text, secretMarkdown, 'Must decrypt cleanly back to markdown source');
+  const unlocked = await decryptVaultText(armored, TEST_KEY_HEX);
+  assert.equal(unlocked, secretMarkdown, 'Must decrypt cleanly back to markdown source');
 
   // When locked
-  const locked = await resolveDecryptedMarkdownContent(armored, null, false);
-  assert.equal(locked.isLocked, true);
-  assert.equal(locked.text, '[🔒 Encrypted]', 'Must mask armored markdown when locked');
+  const locked = maskVaultArmored(armored);
+  assert.equal(locked, VAULT_MASK_PLACEHOLDER, 'Must mask armored markdown when locked');
 });
 
 test('DecryptedMarkdown properly decrypts embedded vault tokens before markdown rendering', async () => {
@@ -55,41 +56,39 @@ test('DecryptedMarkdown properly decrypts embedded vault tokens before markdown 
 - API Key: \`${tokenB}\`
 - Public Note: Visible to everyone.
 `;
+  assert.ok(!isVaultArmored(markdownWithTokens) && containsVaultArmored(markdownWithTokens));
 
-  // 1. Unlocked resolution -> tokens replaced with plaintext
-  const unlocked = await resolveDecryptedMarkdownContent(markdownWithTokens, TEST_KEY_HEX, true);
-  assert.equal(unlocked.isLocked, false);
+  // 1. Unlocked -> tokens replaced with plaintext
+  const unlocked = await decryptEmbeddedVaultTokens(markdownWithTokens, TEST_KEY_HEX);
   assert.ok(
-    unlocked.text.includes('Database Password: `super-secret-db-pass`'),
+    unlocked.includes('Database Password: `super-secret-db-pass`'),
     'Token A must be decrypted in markdown',
   );
   assert.ok(
-    unlocked.text.includes('API Key: `prod-api-key-999`'),
+    unlocked.includes('API Key: `prod-api-key-999`'),
     'Token B must be decrypted in markdown',
   );
   assert.ok(
-    unlocked.text.includes('Public Note: Visible to everyone.'),
+    unlocked.includes('Public Note: Visible to everyone.'),
     'Unencrypted text must be preserved',
   );
-  assert.ok(!unlocked.text.includes('vault:v2:7e57000000000001:e1:'), 'No raw vault ciphertext should remain');
+  assert.ok(!unlocked.includes('vault:v2:7e57000000000001:e1:'), 'No raw vault ciphertext should remain');
 
-  // 2. Locked resolution -> tokens masked with [🔒 Encrypted]
-  const locked = await resolveDecryptedMarkdownContent(markdownWithTokens, null, false);
-  assert.equal(locked.isLocked, true);
+  // 2. Locked -> tokens masked
+  const locked = maskVaultArmored(markdownWithTokens);
   assert.ok(
-    locked.text.includes('Database Password: `[🔒 Encrypted]`'),
-    'Token A must be shielded with [🔒 Encrypted] when locked',
+    locked.includes(`Database Password: \`${VAULT_MASK_PLACEHOLDER}\``),
+    'Token A must be shielded when locked',
   );
   assert.ok(
-    locked.text.includes('API Key: `[🔒 Encrypted]`'),
-    'Token B must be shielded with [🔒 Encrypted] when locked',
+    locked.includes(`API Key: \`${VAULT_MASK_PLACEHOLDER}\``),
+    'Token B must be shielded when locked',
   );
-  assert.ok(!locked.text.includes('vault:v2:7e57000000000001:e1:'), 'Ciphertext must be completely shielded');
+  assert.ok(!locked.includes('vault:v2:7e57000000000001:e1:'), 'Ciphertext must be completely shielded');
 });
 
 test('DecryptedMarkdown passes through plain markdown unchanged', async () => {
   const plain = '# Normal Markdown\n\nNo encryption used here.';
-  const res = await resolveDecryptedMarkdownContent(plain, null, false);
-  assert.equal(res.isLocked, false);
-  assert.equal(res.text, plain);
+  assert.equal(containsVaultArmored(plain), false);
+  assert.equal(maskVaultArmored(plain), plain);
 });

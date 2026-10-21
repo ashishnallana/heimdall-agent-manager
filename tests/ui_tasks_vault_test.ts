@@ -14,9 +14,6 @@ import {
   VAULT_ARMOR_PREFIX,
 } from '../src/ui/utils/vaultContent.ts';
 import {
-  resolveVaultText,
-} from '../src/ui/components/vault/vaultTextHelper.ts';
-import {
   encryptTaskFields,
   encryptTaskCommentFields,
   decryptTaskRecord,
@@ -27,50 +24,6 @@ const TEST_KEY_HEX_RAW = '0123456789abcdef0123456789abcdef0123456789abcdef012345
 const TEST_KEY_HEX = await keyringFromHex(TEST_KEY_HEX_RAW);
 const DIFFERENT_KEY_HEX_RAW = 'fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210';
 const DIFFERENT_KEY_HEX = await keyringFromHex(DIFFERENT_KEY_HEX_RAW);
-
-// -----------------------------------------------------------------------------
-// Test 2: <VaultText /> resolution for plaintext and legacy unencrypted tasks
-// -----------------------------------------------------------------------------
-
-test('VaultText helper handles plaintext and legacy unencrypted tasks and comments without changes', () => {
-  const legacyTaskTitle = 'Implement Redis caching layer for session tokens';
-  const resolved = resolveVaultText(legacyTaskTitle, false);
-  assert.equal(resolved.mode, 'plaintext');
-  assert.equal(resolved.isArmored, false);
-  assert.equal(resolved.displayText, legacyTaskTitle);
-  assert.equal(resolved.isLocked, false);
-  assert.equal(resolved.dataDebugId, undefined);
-
-  // Plaintext comment body
-  const legacyComment = 'LGTM! Verified with 15 concurrent worker instances.';
-  const resolvedComment = resolveVaultText(legacyComment, false);
-  assert.equal(resolvedComment.mode, 'plaintext');
-  assert.equal(resolvedComment.isArmored, false);
-  assert.equal(resolvedComment.displayText, legacyComment);
-
-  // Empty fallback string
-  const resolvedEmpty = resolveVaultText('', false, 'No task description available');
-  assert.equal(resolvedEmpty.mode, 'plaintext');
-  assert.equal(resolvedEmpty.displayText, 'No task description available');
-});
-
-// -----------------------------------------------------------------------------
-// Test 3: <VaultText /> locked placeholder resolution for armored task content
-// -----------------------------------------------------------------------------
-
-test('VaultText helper renders locked placeholder with data-debug-id for armored task content', async () => {
-  const secretTitle = 'Deploy confidential payment gateway service';
-  const armoredTitle = await encryptVaultText(secretTitle, TEST_KEY_HEX);
-  assert.ok(isVaultArmored(armoredTitle), 'Must produce valid armored ciphertext');
-
-  // Vault is locked
-  const resolvedLocked = resolveVaultText(armoredTitle, false);
-  assert.equal(resolvedLocked.mode, 'locked');
-  assert.equal(resolvedLocked.isArmored, true);
-  assert.equal(resolvedLocked.isLocked, true);
-  assert.equal(resolvedLocked.dataDebugId, 'vault-locked-placeholder');
-  assert.equal(resolvedLocked.displayText, 'Encrypted content');
-});
 
 // -----------------------------------------------------------------------------
 // Test 4: Task field encryption encrypts title and description when unlocked
@@ -296,19 +249,13 @@ Acceptance criteria:
   assert.equal(checklistItems[2].text, 'Raw base64 ciphertext is never rendered in Review Action Gate');
   assert.equal(checklistItems[3].checked, true);
   assert.equal(checklistItems[3].text, 'When vault is locked, renders VaultText / encrypted placeholder');
-
-  // 4. Fallback locked placeholder helper resolves correctly
-  const lockedFallback = resolveVaultText(armoredDescription, false);
-  assert.equal(lockedFallback.isLocked, true);
-  assert.equal(lockedFallback.mode, 'locked');
-  assert.equal(lockedFallback.dataDebugId, 'vault-locked-placeholder');
 });
 
 // -----------------------------------------------------------------------------
-// Test 10: Agent Card Task Titles resolve through VaultText (REQ-AGENT-CARD-VAULT-TITLE)
+// Test 10: Agent Card Task Titles round-trip through the vault (REQ-AGENT-CARD-VAULT-TITLE)
 // -----------------------------------------------------------------------------
 
-test('Agent card task titles resolve through VaultText and raw ciphertext never leaks (REQ-AGENT-CARD-VAULT-TITLE)', async () => {
+test('Agent card task titles round-trip through the vault (REQ-AGENT-CARD-VAULT-TITLE)', async () => {
   const originalTaskTitle = 'Confidential Security Audit Task';
 
   // Encrypt task title
@@ -316,27 +263,9 @@ test('Agent card task titles resolve through VaultText and raw ciphertext never 
   assert.ok(isVaultArmored(armoredTitle));
   assert.ok(armoredTitle.startsWith(VAULT_ARMOR_PREFIX));
 
-  // 3. When vault is locked (isUnlocked = false), resolveVaultText returns locked placeholder and never leaks ciphertext
-  const lockedResolution = resolveVaultText(armoredTitle, false);
-  assert.equal(lockedResolution.isLocked, true);
-  assert.equal(lockedResolution.mode, 'locked');
-  assert.equal(lockedResolution.displayText, 'Encrypted content');
-  assert.equal(lockedResolution.dataDebugId, 'vault-locked-placeholder');
-  assert.ok(!lockedResolution.displayText.includes('vault:v2:7e57000000000001:e1:'), 'Raw ciphertext must never leak when locked');
-
-  // 4. When vault is unlocked, decryptVaultText decrypts and returns original task title
-  const unlockedResolution = resolveVaultText(armoredTitle, true);
-  assert.equal(unlockedResolution.isLocked, false);
-  assert.equal(unlockedResolution.mode, 'unlocked');
+  // When vault is unlocked, decryptVaultText decrypts and returns original task title
   const decryptedTitle = await decryptVaultText(armoredTitle, TEST_KEY_HEX);
   assert.equal(decryptedTitle, originalTaskTitle);
   assert.ok(!decryptedTitle.includes('vault:v2:7e57000000000001:e1:'), 'Decrypted title must not contain armor prefix');
-
-  // 5. Unencrypted task titles pass through without modification
-  const unencryptedTitle = 'Unencrypted Task Title';
-  const plaintextResolution = resolveVaultText(unencryptedTitle, false);
-  assert.equal(plaintextResolution.mode, 'plaintext');
-  assert.equal(plaintextResolution.displayText, unencryptedTitle);
-  assert.equal(plaintextResolution.isLocked, false);
 });
 

@@ -296,7 +296,6 @@ delete_template_handler :: proc(ctx:rawptr, req:Request)->Response{ h:=(^Content
 
 restart_stopped_conversation_instance :: proc(h:^Content_Handlers, auth:contracts.Auth_Context, cid:string)->(bool,domain.Domain_Error){ c,got,err:=content_service.get_conversation(h.content,auth,cid); if !got do return false,err; if c.agent_instance_id=="" || h.agents==nil do return true,{}; if h.content.agent_configuration_service != nil { if valid, validity_err := agent_service.validate_instance_message_configuration(h.agents,c.owner_user_id,c.agent_instance_id); !valid do return false,validity_err }; inst,inst_ok,inst_err:=agent_service.get_instance(h.agents,auth,c.agent_instance_id); if !inst_ok do return false,inst_err; if inst.runtime_status=="stopped" || inst.runtime_status=="failed" || inst.runtime_status=="unreachable" { _,restarted,restart_err:=agent_service.restart_instance(h.agents,auth,c.agent_instance_id); if !restarted do return false,restart_err }; return true,{} }
 
-default_str :: proc(v,d:string)->string{ if v=="" do return d; return v }
 // memory_input reads the memory targeting lists as JSON string arrays:
 // agent_ids/project_ids/template_ids/bridge_ids. An omitted or empty array means
 // "applies to all" for that dimension.
@@ -321,10 +320,6 @@ json_array_present :: proc(body, key: string) -> ([]string, bool) {
 	rest = strings.trim_space(rest[colon + 1:])
 	if len(rest) == 0 || rest[0] != '[' do return nil, false
 	return json_string_array(body, key), true
-}
-// json_unescape_json_string decodes the bytes BETWEEN the quotes of a JSON string literal.
-json_unescape_json_string :: proc(raw: string, allocator := context.allocator) -> string {
-	return jsonx.json_unescape_string(raw, allocator = allocator)
 }
 
 // json_property reports whether `key` is present in `body` and returns its value DECODED.

@@ -3,8 +3,6 @@ import { Select, Spinner } from '@ui';
 import { useListBridgesQuery } from '../../api/endpoints/bridgeSupport';
 import ProviderSetupSurface from '../providers/ProviderSetupSurface';
 
-export const BUILTIN_PROVIDERS = ['claude', 'codex', 'antigravity', 'copilot', 'pi'];
-
 export function ProvidersPanel() {
   const query = useListBridgesQuery(undefined, { pollingInterval: 120000, refetchOnMountOrArgChange: true });
   const bridges = useMemo(() => (query.data?.bridges || []).filter(

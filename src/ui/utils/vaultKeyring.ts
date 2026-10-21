@@ -211,10 +211,3 @@ export function isVaultKeyring(value: unknown): value is VaultKeyring {
     && typeof (value as VaultKeyring).vaultId === 'string'
     && (value as VaultKeyring).keys instanceof Map;
 }
-
-/** Build a keyring around already-imported keys (validates the epoch layout). */
-export function keyringFromKeys(userId: string, vaultId: string, currentEpoch: number, keys: Map<number, CryptoKey>): VaultKeyring {
-  const epochs = Array.from(keys.keys()).sort((a, b) => a - b);
-  validateParsed(userId, vaultId, currentEpoch, epochs.map((epoch) => ({ epoch })));
-  return Object.freeze({ userId, vaultId, currentEpoch, keys: new Map(keys) });
-}

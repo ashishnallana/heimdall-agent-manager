@@ -61,7 +61,6 @@ export function fleetProviderCapabilities(providersPayload: any): FleetProviderC
 }
 
 export const FLEET_ROLES = ['worker', 'reviewer'] as const;
-export type FleetRole = (typeof FLEET_ROLES)[number];
 
 /**
  * A fleet role name: `worker` is the work role; any other name is a REVIEW role a
@@ -95,7 +94,7 @@ export function toggleFleetRole(currentRoles: string[] | undefined, role: string
   return normalizeFleetRoles([...normalized, target]);
 }
 
-/** Format a concise role badge label for FleetSlotChips and role cards (e.g. 'worker + reviewer', 'reviewer + security'). */
+/** Format a concise role badge label for role cards (e.g. 'worker + reviewer', 'reviewer + security'). */
 export function formatFleetRolesBadge(roles?: string[]): string {
   const norm = normalizeFleetRoles(roles);
   return norm.join(' + ') || 'worker';

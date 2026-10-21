@@ -266,27 +266,6 @@ extract_raw_array :: proc(body, key: string, top_level_only := false, allocator 
 	return string(bytes), true
 }
 
-// unescape_string parses a JSON string token (wrapped in quotes if needed) via core:encoding/json.
-unescape_string :: proc(raw_inner_or_quoted: string, allocator := context.allocator) -> (string, bool) {
-	to_parse: string
-	trimmed := strings.trim_space(raw_inner_or_quoted)
-	if len(trimmed) >= 2 && trimmed[0] == '"' && trimmed[len(trimmed) - 1] == '"' {
-		to_parse = trimmed
-	} else {
-		to_parse = strings.concatenate({"\"", raw_inner_or_quoted, "\""}, allocator)
-	}
-	defer if to_parse != trimmed do delete(to_parse, allocator)
-
-	parsed, parse_ok := parse_body(to_parse, allocator)
-	if !parse_ok do return "", false
-	defer json.destroy_value(parsed, allocator)
-
-	if str, ok := parsed.(json.String); ok {
-		return strings.clone(string(str), allocator), true
-	}
-	return "", false
-}
-
 // json_unescape_string decodes a JSON string body (the text BETWEEN quotes) back to original bytes.
 // Preserves raw bytes >= 0x20 verbatim (including 0x80..0xFF) for binary round-trips,
 // and decodes standard escapes (\n, \r, \t, \b, \f, \/, \", \\) and \uXXXX unicode escapes

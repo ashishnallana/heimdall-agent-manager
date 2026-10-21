@@ -262,16 +262,6 @@ bridge_shell_wait_count :: proc(session_id: string) -> int {
 	return 0
 }
 
-bridge_shell_wait_outcome_str :: proc(o: Bridge_Shell_Wait_Outcome) -> string {
-	switch o {
-	case .Exited:       return "exited"
-	case .Backgrounded: return "backgrounded"
-	case .Timed_Out:    return "timeout"
-	case .Unknown:      return "unknown"
-	}
-	return "unknown"
-}
-
 // ---- agent.shell.wait local RPC ------------------------------------------
 
 // bridge_shell_wait_rpc serves `agent.shell.wait {session_id}` — the block that

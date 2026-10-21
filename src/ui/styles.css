@@ -1,4 +1,3 @@
-@import '@vimee/shiki-editor/styles.css';
 @import '@xterm/xterm/css/xterm.css';
 @import './tokens.css';
 @tailwind base;
@@ -957,58 +956,6 @@ body {
   .agent-bubble-dots-in { animation: agent-bubble-dots-in 120ms linear both; }
   .agent-bubble-exit { animation: agent-bubble-collapse-out 120ms linear both; }
   .agent-bubble-dot { animation: none; opacity: 0.6; }
-}
-
-/* Vimee Editor Customization */
-.vimee-editor-container {
-  --sv-font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-  --sv-font-size: 13px;
-  --sv-line-height: 1.6;
-  --sv-gutter-color: var(--color-text-faint);
-  --sv-cursor-color: var(--color-success);
-  --sv-statusline-bg: var(--color-surface);
-  --sv-statusline-fg: var(--color-text-muted);
-  --sv-mode-insert-color: var(--color-accent);
-  --sv-mode-visual-color: var(--color-warning);
-  --sv-selection-bg: color-mix(in oklab, var(--color-success), transparent 78%);
-}
-
-.vimee-editor-container .sv-container {
-  background-color: transparent !important;
-  height: 100%;
-  width: 100%;
-  max-width: 100%;
-}
-
-.vimee-editor-container .sv-code-area {
-  width: 100%;
-  max-width: 100%;
-  overflow-x: hidden;
-  overflow-y: auto;
-  padding: 8px 16px;
-}
-
-.vimee-editor-container .sv-line {
-  align-items: flex-start;
-  min-width: 0;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-
-.vimee-editor-container .sv-line-content {
-  min-width: 0;
-  max-width: 100%;
-}
-
-.vimee-editor-container .sv-cursor {
-  top: var(--cursor-top, calc(var(--cursor-line) * 1lh + 8px)) !important;
-  left: var(--cursor-left, calc(16px + var(--cursor-col) * 1ch)) !important;
-}
-
-.vimee-editor-container .sv-statusline {
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
-  padding: 6px 12px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
 
 /* Markdown Code Blocks / Shiki Highlighting (REQ-UI-MARKDOWN-ENHANCE) */

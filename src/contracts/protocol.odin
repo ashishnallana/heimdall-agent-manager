@@ -6,10 +6,3 @@ GIT_COMMIT :: #config(HAM_GIT_COMMIT, "c20548ca15c4fb662894cac0ff9f35f94e5f51af"
 BUILD_TIMESTAMP :: #config(HAM_BUILD_TIMESTAMP, "2026-10-13T19:42:01Z")
 PROTOCOL_VERSION :: 1
 
-ROUTE_HEALTH :: "/health"
-ROUTE_REGISTER :: "/register"
-ROUTE_RECONNECT :: "/reconnect"
-ROUTE_HEARTBEAT :: "/heartbeat"
-ROUTE_WS_PREFIX :: "/ws"
-ROUTE_AGENT_RPC :: "/agent-rpc"
-ROUTE_AGENTS_START :: "/agents/start"
