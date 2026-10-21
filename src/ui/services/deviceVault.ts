@@ -131,6 +131,14 @@ function baseBrowserLabel(): string {
 const isStatus = (err: unknown, ...codes: number[]) => err instanceof ApiError && codes.includes(Number(err.status));
 const message = (err: unknown) => String((err as Error)?.message || err);
 
+const listsDevice = (dir: VaultDirectory, deviceId: string) => Array.isArray(dir.devices) && dir.devices.some((row) => row?.device_id === deviceId);
+
+function deviceAuthFailedMessage(err: unknown): string {
+  return `The hub refused this device's signed status check (HTTP ${(err as ApiError).status}: ${message(err)}). `
+    + 'If you opened Heimdall through a preview or proxy, it must forward the X-Heimdall-Device-* headers to the hub. '
+    + 'This device was not registered again: its identity and pairing code were kept. Retry once the connection is fixed.';
+}
+
 export function deviceSignerContext(): vaultApi.VaultSignerContext | null {
   if (!ctx?.identity) return null;
   return { userId: ctx.userId, signer: { deviceId: ctx.identity.deviceId, signPrivateKey: ctx.identity.signPrivateKey } };
@@ -361,6 +369,16 @@ async function runRefresh(_reason: string): Promise<void> {
       self = await d().api.fetchVaultSelf(deviceSignerContext()!);
     } catch (err) {
       if (!isStatus(err, 401, 403, 404)) throw err;
+      if (stale()) return;
+      // The hub answers an unknown signer with 403/404: a legitimate first
+      // registration. A 401 (signature missing or refused), or a 403/404 for a device
+      // the directory already lists, is an auth failure: registering again would only
+      // replace this device's pending code on every poll. Keep it and say why.
+      if (isStatus(err, 401) || listsDevice(dir, identity.deviceId)) {
+        stopPolling();
+        dispatch(deviceVaultFailed({ code: 'device_auth_failed', message: deviceAuthFailedMessage(err) }));
+        return;
+      }
     }
     if (stale()) return;
 
@@ -451,7 +469,8 @@ async function runRefresh(_reason: string): Promise<void> {
       dispatch(deviceVaultStatusChanged({ status: 'ready', currentEpoch: chain.currentEpoch, directoryVersion: chain.version }));
       return;
     }
-    await kv.delete(`pending:${c.userId}`);    await advancePins(kv, c.userId, pinsFromChain(chain));
+    await kv.delete(`pending:${c.userId}`);
+    await advancePins(kv, c.userId, pinsFromChain(chain));
     const session = getKeyringSession();
     if (!session || session.keyring.currentEpoch !== chain.currentEpoch || session.identity.deviceId !== identity.deviceId) {
       const keyring = await installKeyringFromWrap(identity, self.wrap, chain);
@@ -570,23 +589,28 @@ async function register(c: Ctx, dir: VaultDirectory): Promise<void> {
   const pending: PendingPairing = { code, pairSalt: generatePairSalt(), hubOrigin: d().api.pairingHubOrigin(), issuedAt, expiresAt: issuedAt + PAIR_CODE_TTL_MS };
   const keys = await derivePairKeys(code, pendingPairContext(c, pending));
   const body = await buildPairedRegistration(identity, d().label(identity), keys, issuedAt);
-  await d().kv.put(`pending:${c.userId}`, pending);
   const res = await d().api.postVaultRegister(body.statement, body.signature, body.pairLookup, body.pairKeyMac, pending.pairSalt, pending.hubOrigin);
   if (res.device_id !== identity.deviceId || res.fingerprint !== identity.fingerprint) {
     throw new Error('The hub registered a different device id or fingerprint than this device computed');
   }
+  // Only a registration the hub accepted for THIS device replaces the stored code: a
+  // failed or rate-limited POST leaves no orphan code (and keeps any earlier one).
+  await d().kv.put(`pending:${c.userId}`, pending);
+  if (ctx !== c) return;
   const reset = resetFrom(dir);
   c.dispatch(deviceVaultStatusChanged({ status: reset ? 'reset-scheduled' : 'pending-approval', reset, userCode: code, codeExpiresAt: new Date(pending.expiresAt).toISOString() }));
   startPolling();
 }
 
-/** Draw a new pairing code (the old one is discarded here and superseded at the hub). */
+/**
+ * Draw a new pairing code. The old one is replaced only once the hub accepted the new
+ * registration (which supersedes it there); a failed attempt keeps it.
+ */
 export async function requestNewDeviceCode(): Promise<void> {
   const c = ctx;
   if (!c?.identity) return;
   await c.dispatch(deviceVaultBusy(true));
   try {
-    await d().kv.delete(`pending:${c.userId}`);
     const dir = await d().api.fetchVaultDirectory();
     if (dir) await register(c, dir);
   } finally {
