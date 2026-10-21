@@ -4,21 +4,21 @@ package sqlite
 
 import "core:c"
 import "core:fmt"
-import "core:os"
 import "core:strings"
 import "core:testing"
 
 // --- Consolidated from migration_048_guard_test.odin ---
 
 @(private = "file")
-m048_db :: proc(t: ^testing.T, tag: string) -> (Conn, bool) {
-	db_path := fmt.tprintf("/tmp/test_mig048_%s_%d.db", tag, os.get_pid())
-	os.remove(db_path)
-	conn, open_ok, _ := open(db_path)
-	if !testing.expect(t, open_ok, "db open ok") do return conn, false
+m048_db :: proc(t: ^testing.T, tag: string) -> (Conn, string, bool) {
+	conn, db_path, open_ok := tmpl_open_file_prod(t, tag)
+	if !open_ok do return conn, db_path, false
 	mig_ok, _ := run_migrations(&conn)
-	if !testing.expect(t, mig_ok, "migrations ok") do return conn, false
-	return conn, true
+	if !testing.expect(t, mig_ok, "migrations ok") {
+		close(&conn)
+		return Conn{}, db_path, false
+	}
+	return conn, db_path, true
 }
 
 // Drops 048's LAST object and forgets the ledger row: the state an apply interrupted
@@ -39,7 +39,8 @@ m048_simulate_partial_apply :: proc(t: ^testing.T, conn: ^Conn) -> bool {
 // "done", leaving the UNIQUE constraint permanently missing with nothing to notice.
 @(test)
 test_m048_partial_apply_is_not_reported_as_applied :: proc(t: ^testing.T) {
-	conn, ok := m048_db(t, "partial")
+	conn, db_path, ok := m048_db(t, "m048_partial")
+	defer tmpl_remove_db(db_path)
 	if !ok do return
 	defer close(&conn)
 
@@ -62,7 +63,8 @@ test_m048_partial_apply_is_not_reported_as_applied :: proc(t: ^testing.T) {
 // finish.
 @(test)
 test_m048_self_heal_restores_the_unique_index_after_a_partial_apply :: proc(t: ^testing.T) {
-	conn, ok := m048_db(t, "selfheal")
+	conn, db_path, ok := m048_db(t, "m048_selfheal")
+	defer tmpl_remove_db(db_path)
 	if !ok do return
 	defer close(&conn)
 
@@ -78,19 +80,13 @@ test_m048_self_heal_restores_the_unique_index_after_a_partial_apply :: proc(t: ^
 
 // --- Consolidated from migration_052_drop_shell_jobs_test.odin ---
 
-@(private = "file")
-m052_db_path :: proc(tag: string) -> string {
-	return fmt.tprintf("/tmp/test_migration_052_%s_%d.db", tag, os.get_pid())
-}
-
 // A fresh database: 039 creates shell_jobs, 052 drops it, and the end state has no
 // table — the ordinary path every new install takes.
 @(test)
 test_migration_052_drops_shell_jobs_on_a_fresh_db :: proc(t: ^testing.T) {
-	db_path := m052_db_path("fresh")
-	os.remove(db_path)
-	conn, open_ok, _ := open(db_path)
-	if !testing.expect(t, open_ok, "db open ok") do return
+	conn, db_path, open_ok := tmpl_open_file_prod(t, "m052_fresh")
+	defer tmpl_remove_db(db_path)
+	if !open_ok do return
 	defer close(&conn)
 
 	mig_ok, mig_err := run_migrations(&conn)
@@ -111,10 +107,9 @@ test_migration_052_drops_shell_jobs_on_a_fresh_db :: proc(t: ^testing.T) {
 // without re-running, and 052 must still drop the populated table rather than erroring.
 @(test)
 test_migration_052_drops_a_populated_shell_jobs_table :: proc(t: ^testing.T) {
-	db_path := m052_db_path("populated")
-	os.remove(db_path)
-	conn, open_ok, _ := open(db_path)
-	if !testing.expect(t, open_ok, "db open ok") do return
+	conn, db_path, open_ok := tmpl_open_file_prod(t, "m052_populated")
+	defer tmpl_remove_db(db_path)
+	if !open_ok do return
 	defer close(&conn)
 
 	// 039's schema, verbatim enough to hold real rows.
@@ -155,19 +150,11 @@ test_migration_052_drops_a_populated_shell_jobs_table :: proc(t: ^testing.T) {
 
 // --- Consolidated from migration_055_expiry_test.odin ---
 
-@(private = "file")
-m055_db_path :: proc(tag: string) -> string {
-	return fmt.tprintf("/tmp/test_migration_055_%s_%d.db", tag, os.get_pid())
-}
-
 @(test)
 test_migration_055_fresh_db_creates_column_and_applies :: proc(t: ^testing.T) {
-	db_path := m055_db_path("fresh")
-	os.remove(db_path)
-	defer os.remove(db_path)
-
-	conn, open_ok, _ := open(db_path)
-	if !testing.expect(t, open_ok, "db open ok") do return
+	conn, db_path, open_ok := tmpl_open_file_prod(t, "m055_fresh")
+	defer tmpl_remove_db(db_path)
+	if !open_ok do return
 	defer close(&conn)
 
 	mig_ok, mig_err := run_migrations(&conn)
@@ -185,12 +172,9 @@ test_migration_055_fresh_db_creates_column_and_applies :: proc(t: ^testing.T) {
 
 @(test)
 test_migration_055_backfills_pending_memories_and_cards :: proc(t: ^testing.T) {
-	db_path := m055_db_path("backfill")
-	os.remove(db_path)
-	defer os.remove(db_path)
-
-	conn, open_ok, _ := open(db_path)
-	if !testing.expect(t, open_ok, "db open ok") do return
+	conn, db_path, open_ok := tmpl_open_file_prod(t, "m055_backfill")
+	defer tmpl_remove_db(db_path)
+	if !open_ok do return
 	defer close(&conn)
 
 	// Run full migrations first to get base schema
