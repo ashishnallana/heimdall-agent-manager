@@ -64,6 +64,7 @@ import {
 } from '../src/ui/utils/vaultCrypto.ts';
 
 const { handleUserWsEvent, flushQueuedInvalidations } = await import('../src/ui/api/wsInvalidation.ts');
+const { heimdallApi } = await import('../src/ui/api/heimdallApi.ts');
 
 const TEST_KEY_HEX_RAW = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
 const TEST_KEY_HEX = await keyringFromHex(TEST_KEY_HEX_RAW);
@@ -388,7 +389,8 @@ test('handleUserWsEvent dispatches upsertConversationTitle on chat_event title u
   const dispatchedActions: any[] = [];
   const mockDispatch = (action: any) => {
     if (typeof action === 'function') {
-      return action(mockDispatch, () => ({ vault: { isUnlocked: false } }));
+      // A real store always carries the api slice; the sidebar-tag lookup reads it.
+      return action(mockDispatch, () => ({ vault: { isUnlocked: false }, [heimdallApi.reducerPath]: heimdallApi.reducer(undefined, { type: 'init' }) }));
     }
     dispatchedActions.push(action);
   };
