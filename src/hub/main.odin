@@ -37,6 +37,7 @@ main :: proc() {
 		os.exit(2)
 	}
 	config.preview_origin = normalized_preview_origin
+	fmt.eprintln(app.preview_legacy_path_notice(config.preview_origin, config.preview_legacy_path))
 	pairing_origins, pairing_ok, pairing_error := app.parse_pairing_hub_origins(config.pairing_hub_origins)
 	if !pairing_ok {
 		fmt.eprintln(pairing_error)

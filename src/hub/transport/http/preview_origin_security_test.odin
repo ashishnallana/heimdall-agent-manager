@@ -158,7 +158,7 @@ preview_owner_handler_response :: proc(t: ^testing.T, h: ^Shell_Session_Stream_H
 	if accept_err != nil do testing.fail_now(t, "could not accept loopback")
 	defer net.close(server_socket)
 	path := strings.concatenate({"/p/", session_id, "/"}, context.temp_allocator)
-	shell_session_preview_proxy_handler(rawptr(h), Request{
+	preview_origin_handler(rawptr(h), Request{
 		method = "GET",
 		path = path,
 		request_id = "req_owner_isolation",
@@ -264,4 +264,120 @@ test_csrf_rejected_body_is_json :: proc(t: ^testing.T) {
 	escaped := csrf_rejected_body(`quote " and \\ backslash`)
 	_, err = json.parse_string(escaped, allocator = context.temp_allocator)
 	testing.expect_value(t, err, json.Error.None)
+}
+
+@(private = "file")
+preview_relay_response :: proc(t: ^testing.T, h: ^Shell_Session_Stream_Handlers, handler: proc(rawptr, Request, net.TCP_Socket), path: string) -> string {
+	listener, listen_err := net.listen_tcp(net.Endpoint{address = net.IP4_Loopback, port = 0})
+	if listen_err != nil do testing.fail_now(t, "could not listen on loopback")
+	defer net.close(listener)
+	endpoint, _ := net.bound_endpoint(listener)
+	client, dial_err := net.dial_tcp(endpoint)
+	if dial_err != nil do testing.fail_now(t, "could not dial loopback")
+	defer net.close(client)
+	server_socket, _, accept_err := net.accept_tcp(listener)
+	if accept_err != nil do testing.fail_now(t, "could not accept loopback")
+	defer net.close(server_socket)
+	handler(rawptr(h), Request{
+		method = "GET",
+		path = path,
+		request_id = "req_preview_transport",
+		remote_addr = "127.0.0.1:4444",
+		headers = []contracts.HTTP_Header{{name = "X-authentik-username", value = "owner"}},
+	}, server_socket)
+	buf: [4096]byte
+	n, _ := net.recv_tcp(client, buf[:])
+	return strings.clone(string(buf[:n]))
+}
+
+// The real preview_origin_handler (not a stub) behind the Host dispatch: no Hub API,
+// SPA/static or legacy preview path is reachable on the preview host, and a hub
+// route registered for the same path is never invoked.
+@(test)
+test_preview_origin_host_serves_no_hub_api_or_static_routes :: proc(t: ^testing.T) {
+	hub_calls := 0
+	router := new_router()
+	defer router_free(&router)
+	hub_paths := []string{"/api/v1/me", "/api/v1/vault/directory", "/", "/index.html", "/assets/app.js", "/healthz"}
+	for path in hub_paths {
+		router_add(&router, "GET", path, rawptr(&hub_calls), preview_dispatch_test_hub_handler)
+	}
+	h := Shell_Session_Stream_Handlers{preview_origin = "https://preview.example"}
+	config := Server_Config{
+		preview_origin = "https://preview.example",
+		ui_origin = "https://hub.example",
+		preview_ctx = rawptr(&h),
+		preview_handler = preview_origin_handler,
+	}
+	requests := []string{
+		"GET /api/v1/me HTTP/1.1\r\nHost: preview.example\r\n\r\n",
+		"GET /api/v1/vault/directory HTTP/1.1\r\nHost: preview.example:443\r\n\r\n",
+		"GET / HTTP/1.1\r\nHost: preview.example\r\n\r\n",
+		"GET /index.html HTTP/1.1\r\nHost: PREVIEW.example\r\n\r\n",
+		"GET /assets/app.js HTTP/1.1\r\nHost: preview.example\r\n\r\n",
+		"GET /healthz HTTP/1.1\r\nHost: preview.example\r\n\r\n",
+		"GET /api/v1/preview/sh_1/ HTTP/1.1\r\nHost: preview.example\r\n\r\n",
+		"GET /p/ HTTP/1.1\r\nHost: preview.example\r\n\r\n",
+	}
+	for request in requests {
+		response := preview_dispatch_test_request(t, &router, config, request)
+		testing.expect(t, strings.has_prefix(response, "HTTP/1.1 404"), request)
+		testing.expect(t, !strings.contains(response, "hub-route"), request)
+		delete(response)
+	}
+	testing.expect_value(t, hub_calls, 0)
+}
+
+@(test)
+test_preview_legacy_route_fails_closed_with_dedicated_origin :: proc(t: ^testing.T) {
+	repo_state := Preview_Owner_Repo_State{foreign_session = domain.Shell_Session{
+		session_id = "sh_owned", owner_user_id = "owner", bridge_id = "brg_1",
+		status = domain.Shell_Session_Status_Running, server_port = 3000,
+	}}
+	shell_repo := iface.Shell_Session_Repository{ctx = rawptr(&repo_state), get = preview_owner_repo_get}
+	user_repo := iface.User_Repository{get_by_id = preview_owner_user_get}
+	clock := platform.real_clock()
+	ids := http_test_id_generator()
+	users := user_service.new_user_service_basic(&user_repo, &clock, &ids)
+	cidrs := []string{"127.0.0.1/32"}
+	auth := auth_service.new_auth_service(auth_service.Trusted_Proxy_Config{
+		username_header = "X-authentik-username",
+		trusted_proxy_cidrs = cidrs,
+	}, &users)
+	tunnel_open_count := 0
+	h := Shell_Session_Stream_Handlers{
+		auth = &auth,
+		shell_repo = &shell_repo,
+		bridge_command_sink = project_service.Bridge_Command_Sink{
+			ctx = rawptr(&tunnel_open_count),
+			send_runtime_command = preview_owner_sink_send,
+		},
+		preview_origin = "https://preview.example",
+		preview_legacy_path = false,
+	}
+	// Secure mode: the owner's own running session is still a 404 on the Hub origin,
+	// decided before authentication, the session lookup or any tunnel_open.
+	closed := preview_relay_response(t, &h, shell_session_preview_proxy_handler, "/api/v1/preview/sh_owned/")
+	defer delete(closed)
+	testing.expect(t, strings.has_prefix(closed, "HTTP/1.1 404"))
+	testing.expect_value(t, repo_state.get_calls, 0)
+	testing.expect_value(t, tunnel_open_count, 0)
+
+	// A "/p/" path on the Hub-origin route is not the dedicated transport, even with
+	// the legacy route explicitly enabled: path prefix alone confers no authority.
+	h.preview_legacy_path = true
+	spoofed := preview_relay_response(t, &h, shell_session_preview_proxy_handler, "/p/sh_owned/")
+	defer delete(spoofed)
+	testing.expect(t, strings.has_prefix(spoofed, "HTTP/1.1 404"))
+	testing.expect_value(t, repo_state.get_calls, 0)
+	testing.expect_value(t, tunnel_open_count, 0)
+
+	// Explicit opt-in reopens the legacy route (it reaches the owner-scoped lookup).
+	h.preview_origin = "https://preview.example"
+	repo_state.foreign_session.owner_user_id = "someone-else"
+	reopened := preview_relay_response(t, &h, shell_session_preview_proxy_handler, "/api/v1/preview/sh_owned/")
+	defer delete(reopened)
+	testing.expect(t, strings.has_prefix(reopened, "HTTP/1.1 404"))
+	testing.expect_value(t, repo_state.get_calls, 1)
+	testing.expect_value(t, tunnel_open_count, 0)
 }

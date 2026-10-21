@@ -36,6 +36,10 @@ Hub_Config :: struct {
 	// Browser-isolated origin used exclusively for shell previews. Empty keeps
 	// the legacy same-origin preview path as the canonical URL.
 	preview_origin: string,
+	// Keep /api/v1/preview/** open even though preview_origin is set. Default false:
+	// configuring a dedicated origin closes the same-origin route, because a previewed
+	// app served from the Hub origin can call every Hub API as the viewer. Ignored when
+	// preview_origin is empty (the legacy route is then the only transport).
 	preview_legacy_path: bool,
 	device_auth_expires_in: int,
 	device_auth_interval: int,
@@ -110,7 +114,7 @@ default_config :: proc() -> Hub_Config {
 		logout_url = "https://auth.example.com/application/o/heimdall/end-session/",
 		ui_origin = "",
 		preview_origin = "",
-		preview_legacy_path = true,
+		preview_legacy_path = false,
 		device_auth_expires_in = 300,
 		device_auth_interval = 5,
 		device_auth_rate_limit = 10,
@@ -232,6 +236,18 @@ normalize_preview_origin :: proc(preview_origin, ui_origin: string) -> (string, 
 		return "", false, "--preview-origin must differ from --ui-origin"
 	}
 	return strings.clone(canonical), true, ""
+}
+
+// preview_legacy_path_notice is the startup line describing how previews are isolated,
+// so an operator can see from the log whether previewed apps share the Hub origin.
+preview_legacy_path_notice :: proc(preview_origin: string, legacy_path: bool) -> string {
+	if preview_origin == "" {
+		return "WARNING: --preview-origin is not set; previews are served from the Hub origin (/api/v1/preview/) and a previewed app can use the Hub API as its viewer"
+	}
+	if legacy_path {
+		return "WARNING: --preview-legacy-path true keeps the same-origin /api/v1/preview/ route open next to --preview-origin; previewed apps reached through it can use the Hub API as their viewer"
+	}
+	return "previews are isolated on --preview-origin; the same-origin /api/v1/preview/ route is closed"
 }
 
 preview_origin_host_valid :: proc(host: string) -> bool {
