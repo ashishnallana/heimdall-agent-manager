@@ -130,3 +130,60 @@ publish_instance_changed :: proc(bus: ^events.User_Event_Bus, inst: domain.Agent
 	defer delete(summary)
 	events.publish_resource_changed(bus, string(inst.owner_user_id), "agent_instance", inst.agent_instance_id, change, summary)
 }
+
+// publish_instance_created announces a new instance and the conversation that
+// create_instance/prepare_instance bound to it (every creation path: POST
+// /agent-instances, POST /chats, chain coordinator, action, taskv2 JIT). The
+// conversation summary is built from the instance row: its title is the
+// default run title, and consumers refetch the list anyway.
+publish_instance_created :: proc(bus: ^events.User_Event_Bus, inst: domain.Agent_Instance) {
+	publish_instance_changed(bus, inst, "created")
+	if inst.conversation_id == "" do return
+	publish_conversation_changed(bus, domain.Chat_Conversation{conversation_id = inst.conversation_id, owner_user_id = inst.owner_user_id, agent_instance_id = inst.agent_instance_id, chain_id = inst.chain_id, title = inst.display_name, updated_at = inst.updated_at}, "created")
+}
+
+//   resource_changed resource=agent change=created|updated|archived|support_changed
+//       summary {agent_id, bridge_id?}
+// publish_agent_changed: owner is the authenticated user (agents are owner-scoped
+// and require_owner already passed in the service call).
+publish_agent_changed :: proc(bus: ^events.User_Event_Bus, owner_user_id, agent_id, change: string, bridge_id := "") {
+	if bus == nil || owner_user_id == "" || agent_id == "" do return
+	b := strings.builder_make()
+	defer strings.builder_destroy(&b)
+	strings.write_string(&b, "{\"agent_id\":\"")
+	write_handler_json_string(&b, agent_id)
+	if bridge_id != "" {
+		strings.write_string(&b, "\",\"bridge_id\":\"")
+		write_handler_json_string(&b, bridge_id)
+	}
+	strings.write_string(&b, "\"}")
+	events.publish_resource_changed(bus, owner_user_id, "agent", agent_id, change, strings.to_string(b))
+}
+
+//   resource_changed resource=bridge change=updated|revoked|capabilities_changed
+//       summary {status, version, update_status}
+//   resource_changed resource=bridge change=provider_status_changed
+//       summary {provider} ("" = every provider of the bridge, e.g. discovery)
+publish_bridge_changed :: proc(bus: ^events.User_Event_Bus, bridge: domain.Bridge, change: string) {
+	if bus == nil || bridge.owner_user_id == "" || bridge.bridge_id == "" do return
+	b := strings.builder_make()
+	defer strings.builder_destroy(&b)
+	strings.write_string(&b, "{\"status\":\"")
+	write_handler_json_string(&b, domain.bridge_status_string(bridge.status))
+	strings.write_string(&b, "\",\"version\":\"")
+	write_handler_json_string(&b, bridge.version)
+	strings.write_string(&b, "\",\"update_status\":\"")
+	write_handler_json_string(&b, bridge.update_status)
+	strings.write_string(&b, "\"}")
+	events.publish_resource_changed(bus, string(bridge.owner_user_id), "bridge", bridge.bridge_id, change, strings.to_string(b))
+}
+
+publish_bridge_provider_status_changed :: proc(bus: ^events.User_Event_Bus, owner_user_id, bridge_id, provider: string) {
+	if bus == nil || owner_user_id == "" || bridge_id == "" do return
+	b := strings.builder_make()
+	defer strings.builder_destroy(&b)
+	strings.write_string(&b, "{\"provider\":\"")
+	write_handler_json_string(&b, provider)
+	strings.write_string(&b, "\"}")
+	events.publish_resource_changed(bus, owner_user_id, "bridge", bridge_id, "provider_status_changed", strings.to_string(b))
+}

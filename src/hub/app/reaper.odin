@@ -248,16 +248,7 @@ reaper_sweep_once :: proc(graph: ^App_Graph) {
 		// is gone becomes a background run, so it stays tracked and reapable instead
 		// of blocking for a caller that no longer exists.
 		shell_session_svc.shell_session_background_runs_for_agent(&graph.shell_session_service, string(inst.owner_user_id), inst.agent_instance_id)
-		summary := http.agent_instance_status_summary_json(inst.runtime_status, inst.startup_status, inst.activity_status)
-		events.publish_resource_changed(
-			&graph.event_bus,
-			string(inst.owner_user_id),
-			"agent_instance",
-			inst.agent_instance_id,
-			"status_changed",
-			summary,
-		)
-		delete(summary)
+		http.publish_instance_changed(&graph.event_bus, inst, "status_changed")
 	}
 }
 

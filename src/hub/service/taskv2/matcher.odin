@@ -415,6 +415,7 @@ jit_prepare :: proc(svc: ^Service, u: ^Uow, ctx: ^Match_Context, fleet: domain.T
 		return {}, false, err.message
 	}
 	if u != nil do append(&u.effects.reservations, Jit_Reservation{bridge_id = inst.bridge_id, generation = generation, instance_id = inst.agent_instance_id})
+	effect_instance_changed(u, inst.agent_instance_id, "created")
 	append(&ctx.instances, inst)
 	return inst, true, ""
 }

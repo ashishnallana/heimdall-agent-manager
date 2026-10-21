@@ -62,6 +62,7 @@ create_agent_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	}
 	agent, created, err := agent_service.create_agent(h.agents, auth_ctx, agent_input_from_body(req.body))
 	if !created do return respond_error(err, req.request_id)
+	publish_agent_changed(h.event_bus, string(agent.owner_user_id), agent.agent_id, "created")
 	if json_bool(req.body, "favorite") {
 		if _, saved, save_err := user_service.set_agent_favorite_locked(h.launch_preferences, auth_ctx, agent.agent_id, true); !saved do return respond_error(save_err, req.request_id)
 	}
@@ -87,6 +88,7 @@ update_agent_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	if !ok do return auth_resp
 	agent, updated, err := agent_service.update_agent(h.agents, auth_ctx, path_part(req.path, 4), agent_input_from_body(req.body))
 	if !updated do return respond_error(err, req.request_id)
+	publish_agent_changed(h.event_bus, string(agent.owner_user_id), agent.agent_id, "updated")
 	b := strings.builder_make(); write_agent_json(&b, h.agents, agent)
 	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req))
 }
@@ -97,6 +99,7 @@ archive_agent_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	if !ok do return auth_resp
 	agent, archived, err := agent_service.archive_agent(h.agents, auth_ctx, path_part(req.path, 4))
 	if !archived do return respond_error(err, req.request_id)
+	publish_agent_changed(h.event_bus, string(agent.owner_user_id), agent.agent_id, "archived")
 	b := strings.builder_make(); write_agent_json(&b, h.agents, agent)
 	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req))
 }
@@ -120,6 +123,7 @@ put_agent_support_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	inputs := support_inputs_from_body(req.body)
 	supports, saved, err := agent_service.replace_supports(h.agents, auth_ctx, path_part(req.path, 4), inputs)
 	if !saved do return respond_error(err, req.request_id)
+	publish_agent_changed(h.event_bus, auth_ctx.user_id, path_part(req.path, 4), "support_changed")
 	b := strings.builder_make(); strings.write_byte(&b, '[')
 	for support, i in supports { if i > 0 do strings.write_byte(&b, ','); write_support_json(&b, support) }
 	strings.write_byte(&b, ']')
@@ -138,6 +142,7 @@ patch_agent_support_common :: proc(ctx: rawptr, req: Request, bridge_id: string)
 	if input.bridge_id == "" do input.bridge_id = bridge_id
 	support, saved, err := agent_service.upsert_support(h.agents, auth_ctx, path_part(req.path, 4), input)
 	if !saved do return respond_error(err, req.request_id)
+	publish_agent_changed(h.event_bus, auth_ctx.user_id, path_part(req.path, 4), "support_changed", input.bridge_id)
 	b := strings.builder_make(); write_support_json(&b, support)
 	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req))
 }
@@ -148,6 +153,7 @@ delete_agent_support_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	if !ok do return auth_resp
 	deleted, err := agent_service.delete_support(h.agents, auth_ctx, path_part(req.path, 4), path_part(req.path, 6))
 	if !deleted do return respond_error(err, req.request_id)
+	publish_agent_changed(h.event_bus, auth_ctx.user_id, path_part(req.path, 4), "support_changed", path_part(req.path, 6))
 	return respond_success("{\"deleted\":true}", req.request_id, auth_ctx_server_time(req))
 }
 
@@ -212,7 +218,7 @@ create_agent_instance_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	}
 	inst, created, err := agent_service.create_instance(h.agents, auth_ctx, input)
 	if !created do return respond_error(err, req.request_id)
-	events.publish_resource_changed(h.event_bus, string(inst.owner_user_id), "agent_instance", inst.agent_instance_id, "created", agent_instance_summary_json(inst))
+	publish_instance_created(h.event_bus, inst)
 	b := strings.builder_make(); write_agent_instance_json(&b, inst)
 	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req), 201)
 }
@@ -266,7 +272,7 @@ stop_agent_instance_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	if !ok do return auth_resp
 	inst, stopped, err := agent_service.stop_instance(h.agents, auth_ctx, path_part(req.path, 4), agent_service.Stop_Instance_Input{reason = json_string(req.body, "reason"), force = json_bool(req.body, "force")})
 	if !stopped do return respond_error(err, req.request_id)
-	events.publish_resource_changed(h.event_bus, string(inst.owner_user_id), "agent_instance", inst.agent_instance_id, "status_changed", agent_instance_summary_json(inst))
+	publish_instance_changed(h.event_bus, inst, "status_changed")
 	b := strings.builder_make(); write_agent_instance_json(&b, inst)
 	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req), 202)
 }
@@ -281,7 +287,7 @@ restart_agent_instance_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	if !ok do return auth_resp
 	inst, restarted, err := agent_service.restart_instance(h.agents, auth_ctx, path_part(req.path, 4))
 	if !restarted do return respond_error(err, req.request_id)
-	events.publish_resource_changed(h.event_bus, string(inst.owner_user_id), "agent_instance", inst.agent_instance_id, "status_changed", agent_instance_summary_json(inst))
+	publish_instance_changed(h.event_bus, inst, "status_changed")
 	b := strings.builder_make(); write_agent_instance_json(&b, inst)
 	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req), 202)
 }
@@ -294,7 +300,7 @@ start_agent_instance_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	if !ok do return auth_resp
 	inst, started, err := agent_service.start_instance(h.agents, auth_ctx, path_part(req.path, 4))
 	if !started do return respond_error(err, req.request_id)
-	events.publish_resource_changed(h.event_bus, string(inst.owner_user_id), "agent_instance", inst.agent_instance_id, "status_changed", agent_instance_summary_json(inst))
+	publish_instance_changed(h.event_bus, inst, "status_changed")
 	b := strings.builder_make(); write_agent_instance_json(&b, inst)
 	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req), 202)
 }
@@ -305,7 +311,7 @@ patch_agent_instance_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	if !ok do return auth_resp
 	inst, updated, err := agent_service.reconfigure_instance(h.agents, auth_ctx, path_part(req.path, 4), reconfigure_input_from_body(req.body))
 	if !updated do return respond_error(err, req.request_id)
-	events.publish_resource_changed(h.event_bus, string(inst.owner_user_id), "agent_instance", inst.agent_instance_id, "status_changed", agent_instance_summary_json(inst))
+	publish_instance_changed(h.event_bus, inst, "status_changed")
 	b := strings.builder_make(); write_agent_instance_json(&b, inst)
 	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req))
 }
@@ -371,16 +377,10 @@ write_agent_json :: proc(b: ^strings.Builder, service: ^agent_service.Agent_Serv
 	strings.write_string(b, "\"}")
 }
 
+// agent_instance_summary_json is the agent_instance event summary; it is the
+// single instance_changed_summary_json shape (REQ-2) so every writer agrees.
 agent_instance_summary_json :: proc(inst: domain.Agent_Instance) -> string {
-	b := strings.builder_make()
-	strings.write_string(&b, "{\"runtime_status\":\""); write_handler_json_string(&b, inst.runtime_status)
-	strings.write_string(&b, "\",\"startup_status\":\""); write_handler_json_string(&b, inst.startup_status)
-	strings.write_string(&b, "\",\"activity_status\":\""); write_handler_json_string(&b, inst.activity_status)
-	strings.write_string(&b, "\",\"display_name\":\""); write_handler_json_string(&b, inst.display_name)
-	strings.write_string(&b, "\"")
-	write_last_error_json(&b, inst.last_error_json)
-	strings.write_string(&b, "}")
-	return strings.to_string(b)
+	return instance_changed_summary_json(inst)
 }
 
 // write_last_error_json appends `,"last_error":{...}` (the bridge's wire error for a

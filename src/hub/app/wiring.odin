@@ -151,13 +151,14 @@ task_engine_on_start_success :: proc(ctx: rawptr, inst: domain.Agent_Instance) {
 
 // task_engine_on_instance_changed runs after a taskv2 commit that rewrote an
 // instance's current-task pointer; it re-reads the committed row.
-task_engine_on_instance_changed :: proc(ctx: rawptr, instance_id: string) {
+task_engine_on_instance_changed :: proc(ctx: rawptr, instance_id, change: string) {
 	graph := (^App_Graph)(ctx)
 	if graph == nil do return
 	inst, found, _ := iface.agent_get_instance(&graph.repos.agents, instance_id)
 	if !found do return
 	defer domain.agent_instance_destroy(&inst)
-	http.publish_instance_changed(&graph.event_bus, inst, "current_task_changed")
+	if change == "created" do http.publish_instance_created(&graph.event_bus, inst)
+	else do http.publish_instance_changed(&graph.event_bus, inst, change)
 }
 
 // agents_on_reconfiguration_changed publishes the reconfiguration hint and, on
@@ -470,6 +471,7 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 		ids = &graph.ids,
 		mutex = &graph.action_mutex,
 		bridge_versions = &graph.action_bridge_versions,
+		event_bus = &graph.event_bus,
 	}
 	graph.scheduled_prompt_handlers = graph.action_handlers
 	graph.bridge_handlers.actions = rawptr(&graph.action_handlers)
@@ -500,7 +502,7 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 	graph.experiment_handlers = http.Experiment_Rest_Handlers{auth = &graph.auth, repo = &graph.experiment_repo, clock = &graph.clock}
 	graph.lsp_server_config_handlers = http.Lsp_Server_Config_Rest_Handlers{auth = &graph.auth, repo = &graph.lsp_server_config_repo, clock = &graph.clock, ids = &graph.ids}
 	graph.providers = provider_service.new_provider_service(&graph.provider_repo)
-	graph.provider_handlers = http.Provider_Handlers{auth = &graph.auth, providers = &graph.providers, bridges = &graph.bridges, bridge_runtime_registry = &graph.bridge_runtime_registry, clock = &graph.clock, ids = &graph.ids, agents = &graph.agents}
+	graph.provider_handlers = http.Provider_Handlers{auth = &graph.auth, providers = &graph.providers, bridges = &graph.bridges, bridge_runtime_registry = &graph.bridge_runtime_registry, clock = &graph.clock, ids = &graph.ids, agents = &graph.agents, event_bus = &graph.event_bus}
 	graph.agent_action_handlers.providers = &graph.providers
 	graph.card_handlers = http.Card_Handlers{auth = &graph.auth, cards = &graph.cards, clock = &graph.clock}
 	graph.issue_handlers = http.Issue_Handlers{auth = &graph.auth, issues = &graph.issues, clock = &graph.clock}

@@ -14,6 +14,7 @@ import agent_service "odin_test:hub/service/agent"
 import auth_service "odin_test:hub/service/auth"
 import bridge_service "odin_test:hub/service/bridge"
 import content_service "odin_test:hub/service/content"
+import events "odin_test:hub/service/events"
 
 Action_Handlers :: struct {
 	auth:            ^auth_service.Auth_Service,
@@ -25,6 +26,8 @@ Action_Handlers :: struct {
 	ids:             ^platform.ID_Generator,
 	mutex:           ^sync.Mutex,
 	bridge_versions: ^map[string]int,
+	// event_bus (nil in test wirings) carries REQ-2 instance-created hints.
+	event_bus:       ^events.User_Event_Bus,
 }
 
 Scheduled_Prompt_Handlers :: Action_Handlers
@@ -527,6 +530,7 @@ run_action_handler :: proc(ctx: rawptr, req: Request) -> Response {
 					project_id = act.target_project_id,
 				})
 				if !created do return respond_error(create_err, req.request_id)
+				publish_instance_created(h.event_bus, new_inst)
 				target_instance_id = new_inst.agent_instance_id
 			}
 		}

@@ -1270,6 +1270,7 @@ create_task_chain_handler :: proc(ctx: rawptr, req: Request) -> Response {
 		if h.agents == nil do return respond_error(domain.domain_error(.Internal_Error, "agent service is not configured"), req.request_id)
 		inst, inst_created, inst_err := agent_service.create_instance(h.agents, auth_ctx, agent_service.Create_Instance_Input{agent_id = coord_agent_id, bridge_id = json_string(req.body, "bridge_id"), provider = json_string(req.body, "provider"), model = json_string(req.body, "model"), project_id = domain.Project_ID(json_string(req.body, "project_id")), chain_id = string(chain.chain_id)})
 		if !inst_created do return respond_error(inst_err, req.request_id)
+		publish_instance_created(h.event_bus, inst)
 		chain, created, err = taskchain_service.update_chain_coordinator(h.taskchains, auth_ctx, chain.chain_id, inst.agent_instance_id)
 		if !created do return respond_error(err, req.request_id)
 	}

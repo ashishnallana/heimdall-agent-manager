@@ -136,6 +136,7 @@ rename_bridge_handler :: proc(ctx: rawptr, req: Request) -> Response {
 
 	bridge, patch_ok, err := bridge_service.patch_bridge(h.bridges, auth_ctx, bridge_id, label, has_label, telemetry_enabled, has_telemetry)
 	if !patch_ok do return respond_error(err, req.request_id)
+	publish_bridge_changed(h.event_bus, bridge, "updated")
 	if has_telemetry && h.bridge_runtime_registry != nil {
 		// Hub-side opt-out for bridge_log frames follows the row, live or not.
 		project_service.bridge_runtime_registry_set_telemetry_enabled(h.bridge_runtime_registry, bridge.bridge_id, bridge.telemetry_enabled != "disabled")
@@ -1872,9 +1873,7 @@ bridge_ws_disconnect :: proc(
 		// destroy in-flight work on a transient blip — and the kill could not be
 		// delivered anyway, to a bridge that has just gone.
 		shell_session_svc.shell_session_background_runs_for_agent(h.shell_sessions, string(inst.owner_user_id), inst.agent_instance_id)
-		summary := agent_instance_status_summary_json(inst.runtime_status, inst.startup_status, inst.activity_status)
-		events.publish_resource_changed(h.event_bus, string(inst.owner_user_id), "agent_instance", inst.agent_instance_id, "status_changed", summary)
-		delete(summary)
+		publish_instance_changed(h.event_bus, inst, "status_changed")
 	}
 }
 
@@ -2086,7 +2085,12 @@ bridge_ws_process_frame :: proc(h: ^Bridge_Handlers, bridge_id: string, connecti
 		)
 		if strings.contains(text, "\"capabilities\"") {
 			// The row is fully owned; free it rather than lean on the frame arena.
-			if saved, saved_ok, _ := bridge_service.update_runtime_capabilities(h.bridges, bridge_id, text); saved_ok { b := saved; domain.bridge_destroy(&b) }
+			caps_changed := false
+			if saved, saved_ok, _ := bridge_service.update_runtime_capabilities(h.bridges, bridge_id, text, &caps_changed); saved_ok {
+				// Only a capability/status diff is news; most beats change last_seen_at only.
+				if caps_changed do publish_bridge_changed(h.event_bus, saved, "capabilities_changed")
+				b := saved; domain.bridge_destroy(&b)
+			}
 		}
 		// REQ-BVS-1. Runs AFTER update_runtime_capabilities, which rewrites the row:
 		// this one re-reads it, so it sees the fresh value and its own write is not
@@ -2132,9 +2136,7 @@ bridge_ws_process_frame :: proc(h: ^Bridge_Handlers, bridge_id: string, connecti
 			agent_service.notify_instances_terminal(h.agents, reaped)
 			for inst in reaped {
 				shell_session_svc.shell_session_background_runs_for_agent(h.shell_sessions, string(inst.owner_user_id), inst.agent_instance_id)
-				summary := agent_instance_status_summary_json(inst.runtime_status, inst.startup_status, inst.activity_status)
-				events.publish_resource_changed(h.event_bus, string(inst.owner_user_id), "agent_instance", inst.agent_instance_id, "status_changed", summary)
-				delete(summary)
+				publish_instance_changed(h.event_bus, inst, "status_changed")
 				reconciled += 1
 			}
 			domain.agent_instances_destroy(reaped)
@@ -2166,9 +2168,7 @@ bridge_ws_process_frame :: proc(h: ^Bridge_Handlers, bridge_id: string, connecti
 		if h.agents != nil {
 			error_json, _ := jsonx.extract_raw_object(text, "error", true, context.temp_allocator)
 			if inst, applied, _ := bridge_apply_validated_status(h, bridge_id, connection_generation, instance_id, state_seq, runtime_status, activity_status, json_string(text, "launch_epoch", context.temp_allocator), error_json); applied {
-				summary := agent_instance_status_summary_json(inst.runtime_status, inst.startup_status, inst.activity_status, inst.last_error_json)
-				events.publish_resource_changed(h.event_bus, string(inst.owner_user_id), "agent_instance", inst.agent_instance_id, "status_changed", summary)
-				delete(summary)
+				publish_instance_changed(h.event_bus, inst, "status_changed")
 				domain.agent_instance_destroy(&inst)
 			}
 		}
@@ -2633,6 +2633,7 @@ revoke_bridge_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	bridge_id := strings.trim_suffix(suffix_after(req.path, "/api/v1/bridges/"), "/revoke")
 	bridge, revoke_ok, err := bridge_service.revoke_bridge(h.bridges, auth_ctx, bridge_id)
 	if !revoke_ok do return respond_error(err, req.request_id)
+	publish_bridge_changed(h.event_bus, bridge, "revoked")
 	// Passwordless vault: the revoked machine's directory identity gets a retirement
 	// HINT (no version, no log op). An approved browser that verifies the identity in
 	// the signed log then signs its real revoke (new epoch + wraps). Credentials are
@@ -2696,6 +2697,8 @@ bridge_update_handler :: proc(ctx: rawptr, req: Request) -> Response {
 		return respond_error(send_err, req.request_id)
 	}
 	defer delete(cmd_id)
+	// send_bridge_update stamped update_status=updating on the row.
+	if updated, got, _ := bridge_service.get_bridge(h.bridges, auth_ctx, bridge.bridge_id); got do publish_bridge_changed(h.event_bus, updated, "updated")
 
 	b := strings.builder_make()
 	defer strings.builder_destroy(&b)
@@ -2919,16 +2922,6 @@ bridge_heartbeat_ack_payload :: proc(reconciled: int, superseded_instance_ids: [
 	return strings.to_string(b)
 }
 
-agent_instance_status_summary_json :: proc(runtime_status, startup_status, activity_status: string, last_error_json := "") -> string {
-	b := strings.builder_make()
-	strings.write_string(&b, "{\"runtime_status\":\""); write_handler_json_string(&b, runtime_status)
-	strings.write_string(&b, "\",\"startup_status\":\""); write_handler_json_string(&b, startup_status)
-	strings.write_string(&b, "\",\"activity_status\":\""); write_handler_json_string(&b, activity_status)
-	strings.write_string(&b, "\"")
-	write_last_error_json(&b, last_error_json)
-	strings.write_string(&b, "}")
-	return strings.to_string(b)
-}
 
 // bridge_apply_vault_status_report stores a bridge's self-reported vault tri-state and
 // publishes the bridge invalidation ONLY when the stored value actually moved

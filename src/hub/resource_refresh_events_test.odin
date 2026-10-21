@@ -258,3 +258,41 @@ test_refresh_instance_writers_publish :: proc(t: ^testing.T) {
 	testing.expect(t, applied3 && moved, "an activity flip on a liveness beat is a change")
 	domain.agent_instance_destroy(&busy)
 }
+
+@(test)
+test_refresh_identity_bridge_provider_events :: proc(t: ^testing.T) {
+	f: Refresh_Fixture
+	defer refresh_fixture_teardown(&f)
+	if !refresh_fixture_setup(t, &f, "identity") do return
+	tab := refresh_socket_open(t, &f.graph, "alice"); defer refresh_socket_close(&f.graph, tab)
+	bob := refresh_socket_open(t, &f.graph, "bob"); defer refresh_socket_close(&f.graph, bob)
+
+	// Instance creation announces the instance AND its conversation.
+	flush_ws_socket(tab.client)
+	inst_res := api_http.router_dispatch(&f.graph.router, api_http.Request{method = "POST", path = "/api/v1/agent-instances", body = fmt.aprintf(`{{"agent_id":"%s","bridge_id":"%s","provider":"claude","model":"claude-opus-5-5"}}`, f.agent_id, f.bridge_id), request_id = "req_rf_inst2", remote_addr = "127.0.0.1", headers = f.alice[:]})
+	testing.expect_value(t, inst_res.status, 201)
+	new_conv := refresh_json_field(inst_res.body, "conversation_id")
+	frames, got_create := drain_matching_ws_event(tab.client, new_conv)
+	defer delete(frames)
+	testing.expect(t, got_create && strings.contains(frames, `"resource":"agent_instance"`) && strings.contains(frames, `"resource":"conversation"`), "instance create publishes agent_instance and conversation created")
+
+	Case :: struct { method, path, body, expect: string }
+	cases := []Case{
+		{"PATCH", fmt.aprintf("/api/v1/agents/%s", f.agent_id), `{"name":"Coder Renamed"}`, `"resource":"agent","resource_id":"`},
+		{"PATCH", fmt.aprintf("/api/v1/agents/%s/bridge-support/%s", f.agent_id, f.bridge_id), `{"enabled":true,"provider":"claude","model":"claude-opus-5-5"}`, `"change":"support_changed"`},
+		{"PATCH", fmt.aprintf("/api/v1/bridges/%s", f.bridge_id), `{"label":"Renamed Bridge"}`, `"resource":"bridge","resource_id":"`},
+		{"PUT", fmt.aprintf("/api/v1/bridges/%s/providers/claude", f.bridge_id), `{"enabled":false}`, `"change":"provider_status_changed"`},
+	}
+	for c, i in cases {
+		flush_ws_socket(tab.client)
+		res := api_http.router_dispatch(&f.graph.router, api_http.Request{method = c.method, path = c.path, body = c.body, request_id = fmt.aprintf("req_rf_id_%d", i), remote_addr = "127.0.0.1", headers = f.alice[:]})
+		testing.expectf(t, res.status >= 200 && res.status < 300, "case %d %s %s: status %d body %s", i, c.method, c.path, res.status, res.body)
+		frame, got := drain_matching_ws_event(tab.client, c.expect)
+		defer delete(frame)
+		testing.expectf(t, got, "case %d %s %s must publish %s, got %s", i, c.method, c.path, c.expect, frame)
+	}
+	other, leaked := drain_matching_ws_event(bob.client, `"resource":"`, 300_000_000)
+	defer delete(other)
+	testing.expect(t, !leaked, "another owner must not receive alice's identity/bridge events")
+
+}

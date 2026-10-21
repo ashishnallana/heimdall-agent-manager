@@ -125,6 +125,7 @@ create_chat_handler :: proc(ctx:rawptr, req:Request)->Response{
 		if !created do return respond_error(create_err,req.request_id)
 		c,found,find_err:=content_service.get_conversation_by_instance(h.content,auth,inst.agent_instance_id)
 		if !found do return respond_error(find_err,req.request_id)
+		publish_instance_changed(h.event_bus,inst,"created")
 		// Send the initial message when present, but do NOT derive the conversation
 		// title from it: seeding the title from the first message discourages long
 		// messages. The per-run default title ('<agent-name> #<n>', title_source=
