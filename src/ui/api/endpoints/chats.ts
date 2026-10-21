@@ -1,5 +1,5 @@
 import * as daemonApi from '../daemonApi';
-import { apiUrl, cookieJsonFetch, cookieMutation } from '../cookieFetch';
+import { apiUrl, cookieJsonFetch, cookieMutation, customQueryError, errorFromResponse } from '../cookieFetch';
 import { heimdallApi, withSessionQuery } from '../heimdallApi';
 import { isVaultArmored, encryptVaultText, getActiveVaultKey } from '../../utils/vaultContent';
 import { decryptConversationRecord } from '../../utils/vaultChats';
@@ -273,7 +273,7 @@ export const chatEndpoints = heimdallApi.injectEndpoints({
           }
           return { data: { conversation } };
         } catch (error: any) {
-          return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any };
+          return { error: customQueryError(error) as any };
         }
       },
       // A lookup by instance passes conversationId '' and only learns the real id from
@@ -295,15 +295,8 @@ export const chatEndpoints = heimdallApi.injectEndpoints({
           const params = new URLSearchParams({ limit: String(limit) });
           if (cursor) params.set('cursor', cursor);
           const res = await fetch(apiUrl(`/chats/${encodeURIComponent(conversationId)}/messages?${params.toString()}`), { credentials: 'include' });
-          if (!res.ok) {
-            let msg = `Request failed (${res.status})`;
-            try {
-              const text = await res.text();
-              const body = JSON.parse(text);
-              msg = String(body?.error?.message || body?.message || msg);
-            } catch (_err) {}
-            throw new Error(msg);
-          }
+          // ApiError keeps the HTTP status and hub code, so a 404/401 is terminal below.
+          if (!res.ok) throw await errorFromResponse(res);
           const body = await res.json();
           const rows = Array.isArray(body) ? body : (Array.isArray(body?.data) ? body.data : (body?.messages || []));
           const page = body?.page || {};
@@ -311,7 +304,7 @@ export const chatEndpoints = heimdallApi.injectEndpoints({
           const hasMore = Boolean(page.has_more ?? page.hasMore ?? body?.has_more ?? body?.hasMore ?? false);
           return { data: { messages: rows, nextCursor, hasMore } };
         } catch (error: any) {
-          return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any };
+          return { error: customQueryError(error) as any };
         }
       },
       providesTags: (_r, _e, { conversationId }) => [{ type: 'Chat' as const, id: conversationId }],

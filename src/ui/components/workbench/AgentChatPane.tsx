@@ -94,6 +94,7 @@ import InstanceReconfigurationProgress from '../chat/InstanceReconfigurationProg
 import { MessageComposerInput, MessageComposerActions, MessageComposerStatus } from '../chat/MessageComposer';
 import RuntimeConfigurationOptions from '../chat/RuntimeConfigurationOptions';
 import { paneShouldMarkRead, usePaneVisible, visiblePollInterval } from './paneVisibility';
+import { isTerminalQueryError } from '../../api/cookieFetch';
 import { type TaskLike } from '../chat/chainTaskInference';
 import { groupTranscriptMessages, isAgentStartMessage } from '../chat/transcriptGrouping';
 import type { ChatDeliveryStatus, ChatMessage, ChatTimestamp } from '../chat/types';
@@ -672,10 +673,16 @@ export function AgentChatPane({
   // On screen (not behind a maximised pane, an off-screen mobile page or a hidden
   // tab). Hidden panes keep their caches but do not poll or mark read.
   const paneVisible = usePaneVisible();
+  // Polls stop once their resource answers 401/403/404/410 (isTerminalQueryError):
+  // repeating the request cannot help. Invalidations and refetch-on-show still retry
+  // once, and a success clears the flag. Keyed by query name.
+  const [terminal, setTerminal] = useState<Record<string, boolean>>({});
+  const pollUnlessTerminal = (key: string, intervalMs: number) =>
+    terminal[key] ? 0 : visiblePollInterval(paneVisible, intervalMs);
 
   const convQuery = useFetchConversationQuery(
     { conversationId: '', agentInstanceId: routeInstanceId },
-    { skip: !routeInstanceId, pollingInterval: visiblePollInterval(paneVisible, 10000), skipPollingIfUnfocused: true },
+    { skip: !routeInstanceId, pollingInterval: pollUnlessTerminal('conversation', 10000), skipPollingIfUnfocused: true },
   );
   const conversation = convQuery.data?.conversation || null;
   const conversationId = String(
@@ -683,7 +690,7 @@ export function AgentChatPane({
   );
   const messagesQuery = useFetchConversationMessagesQuery(
     { conversationId },
-    { skip: !conversationId, pollingInterval: visiblePollInterval(paneVisible, 10000), skipPollingIfUnfocused: true },
+    { skip: !conversationId, pollingInterval: pollUnlessTerminal('messages', 10000), skipPollingIfUnfocused: true },
   );
   const [fetchOlderMessages, olderMessagesState] = useLazyFetchConversationMessagesQuery();
   const [updateConversationTitle, updateTitleState] = useUpdateConversationTitleMutation();
@@ -743,7 +750,7 @@ export function AgentChatPane({
     { instanceId: agentInstanceId },
     {
       skip: !agentInstanceId,
-      pollingInterval: visiblePollInterval(paneVisible, instancePollInterval),
+      pollingInterval: pollUnlessTerminal('instance', instancePollInterval),
       skipPollingIfUnfocused: true,
     },
   );
@@ -1118,14 +1125,30 @@ export function AgentChatPane({
   const operationQuery = useListInstanceReconfigurationsQuery(
     { instanceId: agentInstanceId },
     {
+      // A deleted instance (404) has no reconfigurations to poll either.
       skip: !agentInstanceId,
       pollingInterval:
-        acceptedOperation &&
-        !['ready', 'failed', 'recovery_required'].includes(acceptedOperation.phase)
-          ? 2000
-          : 8000,
+        terminal.instance || terminal.reconfigurations
+          ? 0
+          : acceptedOperation &&
+              !['ready', 'failed', 'recovery_required'].includes(acceptedOperation.phase)
+            ? 2000
+            : 8000,
     },
   );
+  const terminalNow: Record<string, boolean> = {
+    conversation: isTerminalQueryError(convQuery.error),
+    messages: isTerminalQueryError(messagesQuery.error),
+    instance: isTerminalQueryError(instanceQuery.error),
+    reconfigurations: isTerminalQueryError(operationQuery.error),
+  };
+  const terminalKey = Object.keys(terminalNow).filter((k) => terminalNow[k]).join(',');
+  useEffect(() => {
+    setTerminal((prev) => {
+      const prevKey = Object.keys(prev).filter((k) => prev[k]).join(',');
+      return prevKey === terminalKey ? prev : terminalNow;
+    });
+  }, [terminalKey]);
   const serverOperation = operationQuery.data?.operations?.[0];
   const operation =
     acceptedOperation &&

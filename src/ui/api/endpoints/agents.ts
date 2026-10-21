@@ -128,7 +128,7 @@ export const agentsApi = heimdallApi.injectEndpoints({
           const data = await cookieJsonFetch(`/agents/${encodeURIComponent(agentId)}`);
           return { data: { agent: data || null } };
         } catch (error: any) {
-          return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any };
+          return { error: customQueryError(error) as any };
         }
       },
       providesTags: (_result, _error, { agentId }) => [{ type: 'Agents' as const, id: agentId }],
@@ -438,7 +438,7 @@ export const agentsApi = heimdallApi.injectEndpoints({
           const data = await cookieJsonFetch(`/agent-instances/${encodeURIComponent(instanceId)}`);
           return { data: { instance: data || null } };
         } catch (error: any) {
-          return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any };
+          return { error: customQueryError(error) as any };
         }
       },
       providesTags: (_result, _error, { instanceId }) => [{ type: 'AgentInstances' as const, id: instanceId }],
@@ -516,7 +516,7 @@ export const agentsApi = heimdallApi.injectEndpoints({
         try {
           const data = await cookieJsonFetch(`/agent-instances/${encodeURIComponent(instanceId)}/reconfigurations`);
           return { data: { operations: (data?.operations || []).map(normalizeInstanceReconfiguration) } };
-        } catch (error: any) { return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any }; }
+        } catch (error: any) { return { error: customQueryError(error) as any }; }
       },
       providesTags: (_data, _error, { instanceId }) => [{ type: 'AgentInstances' as const, id: instanceId }],
       // When an operation settles, the instance runtime, the conversation header and its
