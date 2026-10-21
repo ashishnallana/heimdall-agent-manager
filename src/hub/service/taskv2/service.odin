@@ -48,6 +48,12 @@ Service :: struct {
 	// recent_expiries: holder → expiry time (ms) for the lease.next refusal
 	// window; guarded by state_mutex, keys heap-owned (lease.odin).
 	recent_expiries:     map[string]i64,
+	// pending_touches: instance ids with a queued implicit heartbeat, drained
+	// by the timer thread; guarded by state_mutex, keys heap-owned. Only used
+	// once touch_async is set (start_timer_thread); otherwise touches are
+	// written inline (unit tests).
+	pending_touches:     map[string]struct{},
+	touch_async:         bool,
 	// wake_observer sees every wake_agent push after commit (tests).
 	wake_observer:       proc(ctx: rawptr, cmd: Wake_Command),
 	wake_observer_ctx:   rawptr,

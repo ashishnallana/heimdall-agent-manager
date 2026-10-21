@@ -208,7 +208,8 @@ test('no brg_mock_dawnstar fallback for the standalone provider route', () => {
 
 test('DeviceApprovalPage: bridge approvals wait for reconnect, then the compact providers step; browsers go straight to done', () => {
   const source = read('../src/ui/components/devices/DeviceApprovalPage.tsx');
-  assert.match(source, /setPhase\(\{ kind: 'reconnecting', bridgeId, label: finalLabel \}\)/);
+  // The reused bridge keeps its own name (approvalLabel), so the label is bridgeLabel.
+  assert.match(source, /setPhase\(\{ kind: 'reconnecting', bridgeId, label: bridgeLabel, approved: bridgeApprovedMessage\(target, bridgeLabel, bridgeId\) \}\)/);
   assert.match(source, /Waiting for the bridge to restart and reconnect…/);
   assert.match(source, /device-approval-reconnect-retry-btn/);
   assert.match(source, /Skip — configure later in Settings → Providers/);

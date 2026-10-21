@@ -627,6 +627,9 @@ parse_verify_label_ex :: proc(label: string) -> (task_id, head: string, attempt_
 // duration, log_ref = session id, heads, dirty, summary (≤ 40 lines), independent.
 on_verify_session_exited :: proc(svc: ^Service, exit: Verify_Exit) {
 	if svc == nil || svc.repo == nil do return
+	scratch: Scratch
+	context.allocator = scratch_begin(&scratch)
+	defer scratch_end(&scratch)
 	task_id, head_start, attempt_no, label_indep, ok := parse_verify_label_ex(exit.label)
 	if !ok do return
 	is_independent := exit.independent || label_indep

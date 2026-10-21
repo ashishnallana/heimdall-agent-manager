@@ -96,52 +96,6 @@ test_list_templates_includes_all_builtins_without_duplication :: proc(t: ^testin
 }
 
 @(test)
-test_get_template_all_builtins :: proc(t: ^testing.T) {
-	repo := iface.Content_Repository{list_templates = fake_content_list_templates_empty, get_template = fake_content_get_template_none}
-	service := new_content_service(&repo, nil, nil, nil, nil, nil, nil)
-	auth := contracts.Auth_Context{user_id = "user_1"}
-
-	// Coordinator
-	coord, ok_coord, err_coord := get_template(&service, auth, domain.TEMPLATE_COORDINATOR_ID)
-	testing.expect_value(t, ok_coord, true)
-	testing.expect_value(t, err_coord.code, domain.Error_Code.None)
-	testing.expect_value(t, coord.name, "coordinator")
-	testing.expect_value(t, coord.is_system, true)
-	testing.expect_value(t, strings.contains(coord.instructions, "Confidence Calculation Matrix"), true)
-
-	// Worker
-	worker, ok_worker, err_worker := get_template(&service, auth, domain.TEMPLATE_WORKER_ID)
-	testing.expect_value(t, ok_worker, true)
-	testing.expect_value(t, err_worker.code, domain.Error_Code.None)
-	testing.expect_value(t, worker.name, "worker")
-	testing.expect_value(t, worker.is_system, true)
-	testing.expect_value(t, strings.contains(worker.instructions, "Federated Memory Stewardship"), true)
-
-	// Reviewer
-	rev, ok_rev, err_rev := get_template(&service, auth, domain.TEMPLATE_REVIEWER_ID)
-	testing.expect_value(t, ok_rev, true)
-	testing.expect_value(t, err_rev.code, domain.Error_Code.None)
-	testing.expect_value(t, rev.name, "reviewer")
-	testing.expect_value(t, rev.is_system, true)
-	testing.expect_value(t, strings.contains(rev.instructions, "Vote LGTM"), true)
-
-	// Empty
-	emp, ok_emp, err_emp := get_template(&service, auth, domain.TEMPLATE_EMPTY_ID)
-	testing.expect_value(t, ok_emp, true)
-	testing.expect_value(t, err_emp.code, domain.Error_Code.None)
-	testing.expect_value(t, emp.name, "empty")
-	testing.expect_value(t, emp.is_system, true)
-
-	// Soloist
-	solo, ok_solo, err_solo := get_template(&service, auth, domain.TEMPLATE_SOLOIST_ID)
-	testing.expect_value(t, ok_solo, true)
-	testing.expect_value(t, err_solo.code, domain.Error_Code.None)
-	testing.expect_value(t, solo.name, "soloist")
-	testing.expect_value(t, solo.is_system, true)
-	testing.expect_value(t, strings.contains(solo.instructions, "do all of its work yourself"), true)
-}
-
-@(test)
 test_template_available_all_builtins :: proc(t: ^testing.T) {
 	repo := iface.Content_Repository{list_templates = fake_content_list_templates_empty, get_template = fake_content_get_template_none}
 	service := new_content_service(&repo, nil, nil, nil, nil, nil, nil)

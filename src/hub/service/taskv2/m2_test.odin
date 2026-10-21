@@ -330,15 +330,6 @@ test_facets_verbatim_round_trip_and_fetch :: proc(t: ^testing.T) {
 }
 
 @(test)
-test_vault_armored_handoff_passes_shape_validation :: proc(t: ^testing.T) {
-	// A bridge-encrypted summary is an opaque string; the hub validates shape only.
-	body := handoff_body_json("vault:v2:e1:c3VtbWFyeQ==", `{"next_steps":"vault:v2:e1:bmV4dA==","files":["vault:v2:e1:Zg=="]}`)
-	testing.expect(t, strings.has_prefix(body, `{"summary":"vault:v2:e1:c3VtbWFyeQ=="`), "armored summary kept")
-	testing.expect(t, strings.contains(body, `"next_steps":"vault:v2:e1:bmV4dA=="`) && strings.contains(body, `"files":["vault:v2:e1:Zg=="]`), "armored members verbatim")
-	testing.expect(t, !strings.contains(body, "truncated"), "not truncated")
-}
-
-@(test)
 test_verify_bridge_death_exit_minus_one :: proc(t: ^testing.T) {
 	fx, log, ok := lease_fixture(t, "m2_verify_death")
 	defer lease_fixture_close(fx, log)

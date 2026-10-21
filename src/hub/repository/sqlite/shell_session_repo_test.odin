@@ -15,6 +15,12 @@ shell_test_db :: proc(t: ^testing.T, tag: string) -> (Conn, bool) {
 	return conn, true
 }
 @(private = "file")
+shell_test_db_migrated :: proc(t: ^testing.T, tag: string) -> (Conn, bool) {
+	conn, open_ok := tmpl_clone_migrated(t)
+	if !open_ok do return conn, false
+	return conn, true
+}
+@(private = "file")
 shell_test_session :: proc(session_id, owner, bridge, kind: string) -> domain.Shell_Session {
 	return domain.Shell_Session{
 		session_id       = session_id,
@@ -90,11 +96,9 @@ test_shell_sessions_migration_rewrites_every_old_kind :: proc(t: ^testing.T) {
 // tenants, since the two rows can belong to different owners.
 @(test)
 test_shell_session_cross_bridge_id_collision_does_not_clobber :: proc(t: ^testing.T) {
-	conn, ok := shell_test_db(t, "collide")
+	conn, ok := shell_test_db_migrated(t, "collide")
 	if !ok do return
 	defer close(&conn)
-	mig_ok, _ := run_migrations(&conn)
-	testing.expect(t, mig_ok, "migrations ok")
 	impl := Shell_Session_Repo_SQLite{}
 	repo := new_shell_session_repository(&impl, &conn)
 	// The SAME session_id on two different bridges, owned by two different users.
@@ -144,11 +148,9 @@ test_shell_session_cross_bridge_id_collision_does_not_clobber :: proc(t: ^testin
 // wrong-row read lands in no net at all.
 @(test)
 test_shell_session_same_owner_id_collision_fails_at_insert :: proc(t: ^testing.T) {
-	conn, ok := shell_test_db(t, "uniqowner")
+	conn, ok := shell_test_db_migrated(t, "uniqowner")
 	if !ok do return
 	defer close(&conn)
-	mig_ok, _ := run_migrations(&conn)
-	testing.expect(t, mig_ok, "migrations ok")
 	impl := Shell_Session_Repo_SQLite{}
 	repo := new_shell_session_repository(&impl, &conn)
 	// Same owner, same session_id, two different bridges.
@@ -177,11 +179,9 @@ test_shell_session_same_owner_id_collision_fails_at_insert :: proc(t: ^testing.T
 // check while enforcing nothing, which is exactly the gap the ruling closed.
 @(test)
 test_shell_sessions_owner_session_index_is_unique :: proc(t: ^testing.T) {
-	conn, ok := shell_test_db(t, "uniqidx")
+	conn, ok := shell_test_db_migrated(t, "uniqidx")
 	if !ok do return
 	defer close(&conn)
-	mig_ok, _ := run_migrations(&conn)
-	testing.expect(t, mig_ok, "migrations ok")
 	is_unique := shell_test_scalar(&conn, "SELECT \"unique\" FROM pragma_index_list('shell_sessions') WHERE name='shell_sessions_owner_session';")
 	defer delete(is_unique)
 	testing.expect_value(t, is_unique, "1")
@@ -193,11 +193,9 @@ test_shell_sessions_owner_session_index_is_unique :: proc(t: ^testing.T) {
 // run and bridge-scoped shell, all of which legitimately have an empty chain_id.
 @(test)
 test_shell_session_list_respects_per_kind_scope :: proc(t: ^testing.T) {
-	conn, ok := shell_test_db(t, "scope")
+	conn, ok := shell_test_db_migrated(t, "scope")
 	if !ok do return
 	defer close(&conn)
-	mig_ok, _ := run_migrations(&conn)
-	testing.expect(t, mig_ok, "migrations ok")
 	impl := Shell_Session_Repo_SQLite{}
 	repo := new_shell_session_repository(&impl, &conn)
 	owner := "user_scope"
@@ -309,11 +307,9 @@ test_shell_session_scope_validation :: proc(t: ^testing.T) {
 // that a hand-written fake cannot get wrong and the SQL can.
 @(test)
 test_shell_session_list_live_by_bridge_is_scoped_and_live_only :: proc(t: ^testing.T) {
-	conn, ok := shell_test_db(t, "livebybridge")
+	conn, ok := shell_test_db_migrated(t, "livebybridge")
 	if !ok do return
 	defer close(&conn)
-	mig_ok, _ := run_migrations(&conn)
-	testing.expect(t, mig_ok, "migrations ok")
 	impl := Shell_Session_Repo_SQLite{}
 	repo := new_shell_session_repository(&impl, &conn)
 	seed :: proc(repo: ^iface.Shell_Session_Repository, id, owner, bridge, status: string) {
@@ -347,9 +343,8 @@ test_shell_session_list_live_by_bridge_is_scoped_and_live_only :: proc(t: ^testi
 // --- Consolidated from shell_session_req2_repo_test.odin ---
 @(private = "file")
 req2_db :: proc(t: ^testing.T, tag: string) -> (Conn, bool) {
-	db_path := ":memory:"
-	conn, open_ok, _ := open(db_path)
-	if !testing.expect(t, open_ok, "db open ok") do return conn, false
+	conn, open_ok := tmpl_clone_migrated(t)
+	if !open_ok do return conn, false
 	return conn, true
 }
 @(private = "file")
@@ -372,8 +367,6 @@ test_req2_port_is_held_while_live_and_released_when_terminal :: proc(t: ^testing
 	conn, ok := req2_db(t, "port")
 	if !ok do return
 	defer close(&conn)
-	migrated, _ := run_migrations(&conn)
-	if !testing.expect(t, migrated, "migrations ran") do return
 	impl: Shell_Session_Repo_SQLite
 	repo := new_shell_session_repository(&impl, &conn)
 	holder := req2_session("sh_holder", "owner_a", "brg_1", domain.Shell_Session_Kind_Server)
@@ -406,8 +399,6 @@ test_req2_port_conflict_is_detected_across_owners :: proc(t: ^testing.T) {
 	conn, ok := req2_db(t, "portcross")
 	if !ok do return
 	defer close(&conn)
-	migrated, _ := run_migrations(&conn)
-	if !testing.expect(t, migrated, "migrations ran") do return
 	impl: Shell_Session_Repo_SQLite
 	repo := new_shell_session_repository(&impl, &conn)
 	holder := req2_session("sh_tenant_b", "owner_b", "brg_1", domain.Shell_Session_Kind_Server)
@@ -424,8 +415,6 @@ test_req2_live_counts_are_per_kind_and_per_scope :: proc(t: ^testing.T) {
 	conn, ok := req2_db(t, "counts")
 	if !ok do return
 	defer close(&conn)
-	migrated, _ := run_migrations(&conn)
-	if !testing.expect(t, migrated, "migrations ran") do return
 	impl: Shell_Session_Repo_SQLite
 	repo := new_shell_session_repository(&impl, &conn)
 	for i in 0 ..< 3 {
@@ -463,8 +452,6 @@ test_req2_live_count_refuses_an_unknown_scope_column :: proc(t: ^testing.T) {
 	conn, ok := req2_db(t, "badcol")
 	if !ok do return
 	defer close(&conn)
-	migrated, _ := run_migrations(&conn)
-	if !testing.expect(t, migrated, "migrations ran") do return
 	impl: Shell_Session_Repo_SQLite
 	repo := new_shell_session_repository(&impl, &conn)
 	_, err := iface.shell_session_count_live(&repo, "owner_a", domain.Shell_Session_Kind_Run, "cmd; DROP TABLE shell_sessions", "x")
@@ -481,8 +468,6 @@ test_req2_the_hub_schema_has_nowhere_to_store_output :: proc(t: ^testing.T) {
 	conn, ok := req2_db(t, "nooutput")
 	if !ok do return
 	defer close(&conn)
-	migrated, _ := run_migrations(&conn)
-	if !testing.expect(t, migrated, "migrations ran") do return
 	for column in ([]string{"output", "stdout", "stderr", "log", "output_tail", "log_text"}) {
 		testing.expect(t, !table_column_exists(&conn, "shell_sessions", column),
 			fmt.tprintf("shell_sessions must have no %q column: output never enters the hub DB", column))
@@ -494,8 +479,6 @@ test_req2_migration_049_adds_its_columns_and_is_idempotent :: proc(t: ^testing.T
 	conn, ok := req2_db(t, "mig049")
 	if !ok do return
 	defer close(&conn)
-	migrated, _ := run_migrations(&conn)
-	if !testing.expect(t, migrated, "migrations ran") do return
 	testing.expect(t, table_column_exists(&conn, "shell_sessions", "background"), "background column added")
 	testing.expect(t, table_column_exists(&conn, "shell_sessions", "conversation_id"), "conversation_id column added")
 	testing.expect(t, sqlite_object_exists(&conn, "shell_sessions_conversation"), "the delivery lookup index exists")
@@ -516,8 +499,6 @@ test_req2_background_is_one_way_through_the_upsert :: proc(t: ^testing.T) {
 	conn, ok := req2_db(t, "bgcol")
 	if !ok do return
 	defer close(&conn)
-	migrated, _ := run_migrations(&conn)
-	if !testing.expect(t, migrated, "migrations ran") do return
 	impl: Shell_Session_Repo_SQLite
 	repo := new_shell_session_repository(&impl, &conn)
 	run := req2_session("sh_bg", "owner_a", "brg_1", domain.Shell_Session_Kind_Run)
@@ -544,9 +525,8 @@ test_req2_background_is_one_way_through_the_upsert :: proc(t: ^testing.T) {
 // --- Consolidated from shell_session_req3_repo_test.odin ---
 @(private = "file")
 req3_db :: proc(t: ^testing.T, tag: string) -> (Conn, bool) {
-	db_path := ":memory:"
-	conn, open_ok, _ := open(db_path)
-	if !testing.expect(t, open_ok, "db open ok") do return conn, false
+	conn, open_ok := tmpl_clone_migrated(t)
+	if !open_ok do return conn, false
 	return conn, true
 }
 @(private = "file")
@@ -565,8 +545,6 @@ req3_session :: proc(session_id, owner, bridge: string) -> domain.Shell_Session 
 }
 @(private = "file")
 req3_repo :: proc(t: ^testing.T, conn: ^Conn, impl: ^Shell_Session_Repo_SQLite) -> (iface.Shell_Session_Repository, bool) {
-	migrated, _ := run_migrations(conn)
-	if !testing.expect(t, migrated, "migrations ran") do return {}, false
 	return new_shell_session_repository(impl, conn), true
 }
 // --- AC1 + AC3: the intent persists, and a second request keeps the first time --
@@ -750,8 +728,6 @@ test_req3_migration_050_adds_its_objects_and_is_idempotent :: proc(t: ^testing.T
 	conn, ok := req3_db(t, "mig050")
 	if !ok do return
 	defer close(&conn)
-	migrated, _ := run_migrations(&conn)
-	if !testing.expect(t, migrated, "migrations ran") do return
 	testing.expect(t, table_column_exists(&conn, "shell_sessions", "kill_requested_at"), "kill_requested_at column added")
 	testing.expect(t, sqlite_object_exists(&conn, "shell_sessions_pending_kill"), "the replay lookup index exists")
 	testing.expect(t, upgrade_shell_sessions_kill_intent_schema(&conn), "the self-heal twin is idempotent")
@@ -779,8 +755,6 @@ test_req3_migration_050_guard_catches_and_repairs_a_partial_apply :: proc(t: ^te
 	conn, ok := req3_db(t, "partial")
 	if !ok do return
 	defer close(&conn)
-	migrated, _ := run_migrations(&conn)
-	if !testing.expect(t, migrated, "migrations ran") do return
 	testing.expect(t, exec(&conn, "DROP INDEX IF EXISTS shell_sessions_pending_kill;"), "index dropped")
 	testing.expect(t, exec(&conn, "DELETE FROM schema_migrations WHERE version='050_shell_sessions_kill_intent.sql';"),
 		"ledger row removed — the pre-ledger recovery path has none either")
@@ -809,11 +783,8 @@ test_req3_migration_050_guard_catches_and_repairs_a_partial_apply :: proc(t: ^te
 // --- Consolidated from shell_session_req9_repo_test.odin ---
 @(private = "file")
 t9_db :: proc(t: ^testing.T, tag: string) -> (Conn, bool) {
-	db_path := ":memory:"
-	conn, open_ok, _ := open(db_path)
-	if !testing.expect(t, open_ok, "db open ok") do return conn, false
-	mig_ok, _ := run_migrations(&conn)
-	if !testing.expect(t, mig_ok, "migrations ok") do return conn, false
+	conn, open_ok := tmpl_clone_migrated(t)
+	if !open_ok do return conn, false
 	return conn, true
 }
 @(private = "file")
@@ -940,11 +911,8 @@ test_t9_by_chain_never_returns_runs :: proc(t: ^testing.T) {
 // --- Consolidated from shell_session_req12_repo_test.odin ---
 @(private = "file")
 t12_db :: proc(t: ^testing.T, tag: string) -> (Conn, bool) {
-	db_path := ":memory:"
-	conn, open_ok, _ := open(db_path)
-	if !testing.expect(t, open_ok, "db open ok") do return conn, false
-	mig_ok, _ := run_migrations(&conn)
-	if !testing.expect(t, mig_ok, "migrations ok") do return conn, false
+	conn, open_ok := tmpl_clone_migrated(t)
+	if !open_ok do return conn, false
 	return conn, true
 }
 @(private = "file")
@@ -1137,11 +1105,8 @@ test_req12_kill_intent_readback_unchanged_when_unambiguous :: proc(t: ^testing.T
 // --- Consolidated from shell_session_req14_repo_test.odin ---
 @(private = "file")
 t14_db :: proc(t: ^testing.T, tag: string) -> (Conn, bool) {
-	db_path := ":memory:"
-	conn, open_ok, _ := open(db_path)
-	if !testing.expect(t, open_ok, "db open ok") do return conn, false
-	mig_ok, _ := run_migrations(&conn)
-	if !testing.expect(t, mig_ok, "migrations ok") do return conn, false
+	conn, open_ok := tmpl_clone_migrated(t)
+	if !open_ok do return conn, false
 	return conn, true
 }
 @(private = "file")
@@ -1278,11 +1243,8 @@ test_req14_live_bridge_ids_limit_bounds_a_stable_prefix :: proc(t: ^testing.T) {
 // --- Consolidated from shell_session_retention_test.odin ---
 @(private = "file")
 retention_db :: proc(t: ^testing.T, tag: string) -> (Conn, bool) {
-	db_path := ":memory:"
-	conn, open_ok, _ := open(db_path)
-	if !testing.expect(t, open_ok, "db open ok") do return conn, false
-	mig_ok, _ := run_migrations(&conn)
-	if !testing.expect(t, mig_ok, "migrations ok") do return conn, false
+	conn, open_ok := tmpl_clone_migrated(t)
+	if !open_ok do return conn, false
 	return conn, true
 }
 @(private = "file")

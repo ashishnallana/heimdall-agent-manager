@@ -55,9 +55,12 @@ workflow_event :: proc(svc: ^Service, u: ^Uow, wf: Workflow_Context, actor: Acto
 }
 
 workflow_run :: proc(svc: ^Service, owner: domain.User_ID, actor: Actor, input: Workflow_Run_Input) -> (domain.Workflow_Run, bool, domain.Domain_Error) {
+	// Parse/validate BEFORE taking the UoW: it is CPU-bound JSON work and the UoW
+	// mutex is global — every agent action queued behind it while it ran.
+	prep := workflow_run_prepare(svc, owner, input)
 	u, ok, err := begin_uow(svc)
 	if !ok do return {}, false, err
-	run, rok, rerr := workflow_run_in_uow(svc, &u, owner, actor, input)
+	run, rok, rerr := workflow_run_in_uow(svc, &u, owner, actor, input, &prep)
 	if rok do rok, rerr = after_chain_change(svc, &u, run.chain_id, owner, .Task_Created)
 	_, cerr := end_uow(svc, &u, rok)
 	if !rok do return {}, false, rerr
@@ -65,18 +68,31 @@ workflow_run :: proc(svc: ^Service, owner: domain.User_ID, actor: Actor, input: 
 	return run, true, domain.Domain_Error{}
 }
 
-workflow_run_in_uow :: proc(svc: ^Service, u: ^Uow, owner: domain.User_ID, actor: Actor, input: Workflow_Run_Input) -> (domain.Workflow_Run, bool, domain.Domain_Error) {
-	chain, cok, cerr := work_control_chain(svc, owner, actor, domain.Task_Chain_ID(input.chain_id))
-	if !cok do return {}, false, cerr
-	if strings.trim_space(input.request_id) == "" do return {}, false, domain.domain_error(.Validation_Failed, "request_id is required")
-    inputs := strings.trim_space(input.inputs_json)
-    if inputs == "" do inputs = "{}"
-    // parse_integers keeps `3` an integer, so snapshots and {{inputs.*}} /
-    // {{item}} placeholders render "3", not a float.
-    value, parse_err := json.parse(inputs, parse_integers = true, allocator = context.temp_allocator)
-    if parse_err != nil do return {}, false, domain.domain_error(.Validation_Failed, "inputs must be a JSON object")
-    if _, object := value.(json.Object); !object do return {}, false, domain.domain_error(.Validation_Failed, "inputs must be a JSON object")
-    inputs = workflow_canonical_json(value)
+// Workflow_Run_Prepared is the transaction-free part of creating a run. A
+// validation failure is carried in `err` rather than returned at once so an
+// idempotent retry still gets its original run back (the request_id lookup
+// runs first, inside the UoW). `inputs` is set whenever `err` is not a request
+// validation error, so the request hash can always be computed.
+Workflow_Run_Prepared :: struct {
+	inputs:         string,
+	request_hash:   string,
+	definition_ref: string,
+	parsed:         Workflow_Parsed_Spec,
+	err:            domain.Domain_Error,
+}
+
+workflow_run_prepare :: proc(svc: ^Service, owner: domain.User_ID, input: Workflow_Run_Input) -> (prep: Workflow_Run_Prepared) {
+	if strings.trim_space(input.request_id) == "" { prep.err = domain.domain_error(.Validation_Failed, "request_id is required"); return }
+	inputs := strings.trim_space(input.inputs_json)
+	if inputs == "" do inputs = "{}"
+	// parse_integers keeps `3` an integer, so snapshots and {{inputs.*}} /
+	// {{item}} placeholders render "3", not a float.
+	value, parse_err := json.parse(inputs, parse_integers = true, allocator = context.temp_allocator)
+	if parse_err != nil { prep.err = domain.domain_error(.Validation_Failed, "inputs must be a JSON object"); return }
+	obj, is_object := value.(json.Object)
+	if !is_object { prep.err = domain.domain_error(.Validation_Failed, "inputs must be a JSON object"); return }
+	inputs = workflow_canonical_json(value)
+	prep.inputs = inputs
 	// Hash the REQUEST, not the resolved mutable latest definition. A retry of
 	// the same creation request must return its original immutable snapshot.
 	body := json_begin()
@@ -87,30 +103,51 @@ workflow_run_in_uow :: proc(svc: ^Service, u: ^Uow, owner: domain.User_ID, actor
 	json_str(&body, "prerequisites", strings.to_string(prereqs))
 	digest: [32]byte
 	hash.hash_string_to_buffer(.SHA256, json_end(&body), digest[:])
-	encoded := hex.encode(digest[:], context.temp_allocator)
-	request_hash := string(encoded)
+	prep.request_hash = string(hex.encode(digest[:], context.temp_allocator))
+	definition_ref, spec, found := resolve_workflow_ref(svc, owner, input.ref)
+	if !found { prep.err = domain.domain_error(.Not_Found, "workflow definition not found"); return }
+	prep.definition_ref = definition_ref
+	parsed, pok, perr := parse_and_validate_workflow_spec(spec)
+	if !pok { prep.err = perr; return }
+	prep.parsed = parsed
+	// Look required inputs up in the object parsed above; re-extracting each
+	// field from the JSON text re-parsed the whole (possibly large) body per field.
+	for field in parsed.inputs {
+		v, supplied := obj[field.name]
+		blank := false
+		if str, is_str := v.(json.String); is_str do blank = strings.trim_space(str) == ""
+		if field.required && !field.has_default && (!supplied || blank) {
+			prep.err = domain.domain_error(.Validation_Failed, fmt.tprintf("missing required input: %s", field.name))
+			return
+		}
+	}
+	prep.err = validate_workflow_run_inputs(parsed, inputs)
+	return
+}
+
+// prepared: workflow_run_prepare's result when the caller ran it before the
+// UoW; nil (nested callers already inside a UoW) prepares here.
+workflow_run_in_uow :: proc(svc: ^Service, u: ^Uow, owner: domain.User_ID, actor: Actor, input: Workflow_Run_Input, prepared: ^Workflow_Run_Prepared = nil) -> (domain.Workflow_Run, bool, domain.Domain_Error) {
+	chain, cok, cerr := work_control_chain(svc, owner, actor, domain.Task_Chain_ID(input.chain_id))
+	if !cok do return {}, false, cerr
+	prep := prepared^ if prepared != nil else workflow_run_prepare(svc, owner, input)
+	if prep.request_hash == "" do return {}, false, prep.err
+	inputs := prep.inputs
 	previous, exists, previous_err := iface.taskchain_get_workflow_run_by_request(svc.repo, chain.chain_id, owner, input.request_id)
 	if exists {
-		if previous.request_hash != request_hash do return {}, false, domain.domain_error(.Conflict, "request_id was already used with different inputs")
+		if previous.request_hash != prep.request_hash do return {}, false, domain.domain_error(.Conflict, "request_id was already used with different inputs")
 		return previous, true, domain.Domain_Error{}
 	}
 	if previous_err.code != .Not_Found do return {}, false, previous_err
-	definition_ref, spec, found := resolve_workflow_ref(svc, owner, input.ref)
-	if !found do return {}, false, domain.domain_error(.Not_Found, "workflow definition not found")
-	parsed, pok, perr := parse_and_validate_workflow_spec(spec)
-	if !pok do return {}, false, perr
+	if prep.err.code != .None do return {}, false, prep.err
+	parsed := prep.parsed
+	definition_ref := prep.definition_ref
+	request_hash := prep.request_hash
 	for stage in parsed.stages {
 		if stage.kind != .Gate {
 			if err := workflow_validate_fleet(svc, chain, stage.brief_raw); err.code != .None do return {}, false, err
 		}
 	}
-	for field in parsed.inputs {
-		val, supplied := extract_scalar_or_raw_string(inputs, field.name)
-		if field.required && !field.has_default && (!supplied || strings.trim_space(val) == "") {
-			return {}, false, domain.domain_error(.Validation_Failed, fmt.tprintf("missing required input: %s", field.name))
-		}
-	}
-	if err := validate_workflow_run_inputs(parsed, inputs); err.code != .None do return {}, false, err
 	now := platform.clock_now(svc.clock)
 	run := domain.Workflow_Run{
 		run_id = domain.Workflow_Run_ID(platform.generate_id(svc.ids, "wrun_")), chain_id = chain.chain_id, owner_user_id = owner,
@@ -423,10 +460,23 @@ trigger_on_output_workflows_in_uow :: proc(svc: ^Service, u: ^Uow, chain: domain
 	return true, domain.Domain_Error{}
 }
 
-workflow_task_max_parallel :: proc(svc: ^Service, task: domain.Task) -> int {
-	wf, ok, _ := workflow_context(svc, task.workflow_run_id, task.owner_user_id)
-	if !ok || wf.execution.execution_no != task.workflow_execution_no do return 0
-	return workflow_stage_max_parallel(wf, task.stage_key)
+// workflow_task_max_parallel_cached returns a workflow task's stage
+// max_parallel (0 = unlimited) for a loop over many tasks (the matcher's work pass, inside the UoW): each run's spec is
+// parsed once per `cache` (key run_id#execution_no → stage_key → max_parallel)
+// instead of once per Ready task — a large spec costs ~0.35 s per parse.
+workflow_task_max_parallel_cached :: proc(svc: ^Service, cache: ^map[string]map[string]int, task: domain.Task) -> int {
+	key := fmt.tprintf("%s#%d", task.workflow_run_id, task.workflow_execution_no)
+	caps, cached := cache[key]
+	if !cached {
+		caps = make(map[string]int, context.temp_allocator)
+		if wf, ok, _ := workflow_context(svc, task.workflow_run_id, task.owner_user_id); ok && wf.execution.execution_no == task.workflow_execution_no {
+			if snap, sok := extract_workflow_snapshot(wf, context.temp_allocator); sok {
+				for st in snap.spec.stages do caps[st.key] = st.max_parallel
+			}
+		}
+		cache[key] = caps
+	}
+	return caps[task.stage_key]
 }
 workflow_proposal_run_in_uow :: proc(svc: ^Service, u: ^Uow, chain_in: domain.Task_Chain, actor: Actor, ref, inputs: string) -> (domain.Task_Chain, bool, domain.Domain_Error) {
  chain := chain_in

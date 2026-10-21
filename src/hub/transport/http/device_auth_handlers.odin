@@ -18,6 +18,7 @@ package http
 import "core:encoding/json"
 import contracts "odin_test:contracts"
 import auth_service "odin_test:hub/service/auth"
+import bridge_service "odin_test:hub/service/bridge"
 import device_auth "odin_test:hub/service/device_auth"
 import push_service "odin_test:hub/service/push"
 import domain "odin_test:hub/domain"
@@ -26,6 +27,7 @@ import vd "odin_test:hub/service/vault_directory"
 import events "odin_test:hub/service/events"
 import vault "odin_test:lib/vault"
 import "core:fmt"
+import "core:slice"
 import "core:strings"
 
 Device_Auth_Handlers :: struct {
@@ -48,6 +50,11 @@ Device_Auth_Handlers :: struct {
 	// on. Served with the pair salts; the approver accepts a declared pairing origin
 	// only if it is its own API origin or one of these.
 	pairing_hub_origins: []string,
+	// REQ-BE-2/3: the approver's bridges, for the "reuse an existing bridge" choice
+	// on a bridge grant's verify (reusable_bridges + the checked previous_bridge_id
+	// hint). Optional: nil serves an empty list and no hint, so approval always
+	// registers a new bridge unless the client names a target itself.
+	bridges:           ^bridge_service.Bridge_Service,
 }
 
 // ── POST /api/v1/device/authorize ───────────────────────────────────────────
@@ -77,6 +84,8 @@ Authorize_Request :: struct {
 	// the canonical hub origin the bridge bound into it (declared; the approver derives with it).
 	pair_salt:                  string,
 	pair_hub_origin:            string,
+	// REQ-BE-2: optional, untrusted hint naming the bridge this machine was before.
+	previous_bridge_id:         string,
 }
 
 Device_Authorize_Wire :: struct {
@@ -107,6 +116,7 @@ device_authorize_handler :: proc(ctx: rawptr, req: Request) -> Response {
 		bridge_identity_proof = vault_sig_text(body.bridge_identity_proof),
 		pair_lookup = body.pair_lookup, pair_key_mac = body.pair_key_mac, pair_salt = body.pair_salt,
 		pair_hub_origin = body.pair_hub_origin,
+		previous_bridge_id = body.previous_bridge_id,
 	}
 	xff := header_value(req.headers, "X-Forwarded-For")
 	result, ok, err := device_auth.authorize(handlers.service, input, req.remote_addr, xff)
@@ -223,6 +233,47 @@ Device_Verify_Grant_Wire :: struct {
 	bridge_public_key:           string,
 	bridge_key_fingerprint:      string,
 	os_user:                     string,
+	// REQ-BE-2: the machine's previous_bridge_id hint, served ONLY when it names a
+	// bridge in reusable_bridges (owned by the approving user, not revoked, not
+	// pending); "" otherwise -- including when it names another user's bridge, which
+	// must be indistinguishable from naming none. Checked, so the UI may preselect it,
+	// but it is still a machine claim: the approver confirms the choice.
+	previous_bridge_id:          string,
+	// REQ-BE-3: the approver's bridges an approval may attach to (target_bridge_id),
+	// most recently seen first. Always an array for a bridge grant ([] when none).
+	reusable_bridges:            []Device_Reusable_Bridge_Wire,
+}
+
+// Device_Reusable_Bridge_Wire is one attach candidate. last_seen is RFC 3339.
+Device_Reusable_Bridge_Wire :: struct {
+	bridge_id:        string,
+	label:            string,
+	machine_hostname: string,
+	status:           string, // "online" | "offline" (revoked bridges are never listed)
+	last_seen:        string,
+}
+
+// device_reusable_bridges lists the approver's bridges an attach may target, and the
+// hint if it names one of them. Same rules as rotate_bridge_for_device_grant's
+// re-check (owned, not revoked, not pending), so the page never offers a target the
+// approval would refuse. Any lookup failure degrades to "no reuse offered".
+@(private = "file")
+device_reusable_bridges :: proc(handlers: ^Device_Auth_Handlers, auth_ctx: contracts.Auth_Context, hint: string) -> (list: []Device_Reusable_Bridge_Wire, previous: string) {
+	out := make([dynamic]Device_Reusable_Bridge_Wire, 0, 4, context.temp_allocator)
+	if handlers.bridges == nil do return out[:], ""
+	bridges, err := bridge_service.list_bridges(handlers.bridges, auth_ctx)
+	if err.code != .None do return out[:], ""
+	for b in bridges {
+		if b.status == .Revoked || domain.bridge_is_pending(b) do continue
+		if string(b.owner_user_id) != auth_ctx.user_id do continue // defense in depth; list_bridges is owner-scoped
+		append(&out, Device_Reusable_Bridge_Wire{
+			bridge_id = b.bridge_id, label = b.label, machine_hostname = b.machine_hostname,
+			status = domain.bridge_status_string(b.status), last_seen = b.last_seen_at,
+		})
+		if hint != "" && b.bridge_id == hint do previous = b.bridge_id
+	}
+	slice.sort_by(out[:], proc(a, b: Device_Reusable_Bridge_Wire) -> bool { return a.last_seen > b.last_seen })
+	return out[:], previous
 }
 
 // Device_Verify_Browser_Wire: a pending BROWSER of the session user. It carries the
@@ -309,6 +360,9 @@ device_verify_handler :: proc(ctx: rawptr, req: Request) -> Response {
 		if !vok do return respond_error(err, req.request_id)
 		info = vinfo
 	}
+	reusable: []Device_Reusable_Bridge_Wire
+	previous_bridge_id := ""
+	if info.is_bridge_enrollment do reusable, previous_bridge_id = device_reusable_bridges(handlers, auth_ctx, info.previous_bridge_id)
 	return vault_respond(Device_Verify_Grant_Wire{
 		device_label = info.device_label, os = info.os, app_version = info.app_version,
 		client = info.client, request_ip = info.request_ip, requested_at = info.requested_at,
@@ -332,6 +386,8 @@ device_verify_handler :: proc(ctx: rawptr, req: Request) -> Response {
 		bridge_public_key = info.bridge_public_key,
 		bridge_key_fingerprint = info.bridge_key_fingerprint,
 		os_user = info.os_user,
+		previous_bridge_id = previous_bridge_id,
+		reusable_bridges = reusable,
 	}, req)
 }
 

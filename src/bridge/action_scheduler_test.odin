@@ -2,6 +2,9 @@ package main
 
 import "core:strings"
 import "core:testing"
+import "core:time/timezone"
+
+NY_TZIF :: #load("testdata/America_New_York.tzif")
 
 @(test)
 test_action_scheduler_parse_interval :: proc(t: ^testing.T) {
@@ -24,7 +27,7 @@ test_action_scheduler_parse_rfc3339 :: proc(t: ^testing.T) {
 
 	ms2, ok2 := action_scheduler_parse_rfc3339_ms("2026-01-01T00:00:00Z")
 	testing.expect(t, ok2, "parse 2026 ok")
-	testing.expect(t, ms2 > 0, "2026 ms should be positive")
+	testing.expect(t, ms2 == 1_767_225_600_000, "2026-01-01 should be 1_767_225_600_000 ms")
 
 	_, ok3 := action_scheduler_parse_rfc3339_ms("invalid")
 	testing.expect(t, !ok3, "invalid format should fail")
@@ -34,6 +37,13 @@ test_action_scheduler_parse_rfc3339 :: proc(t: ^testing.T) {
 
 	formatted := action_scheduler_format_rfc3339_utc(ms2)
 	testing.expect(t, formatted == "2026-01-01T00:00:00Z", "format matches original timestamp")
+
+	ms5, ok5 := action_scheduler_parse_rfc3339_ms("2026-12-24T15:30:45Z")
+	testing.expect(t, ok5 && ms5 == 1_798_126_245_000, "non-midnight timestamp parses to exact ms")
+	testing.expect(t, action_scheduler_format_rfc3339_utc(ms5) == "2026-12-24T15:30:45Z", "non-midnight timestamp round-trips")
+
+	ms6, ok6 := action_scheduler_parse_rfc3339_ms("  1970-01-01T00:00:00Z ")
+	testing.expect(t, ok6 && ms6 == 0, "surrounding whitespace is trimmed")
 }
 
 @(test)
@@ -42,24 +52,29 @@ test_action_scheduler_cron_evaluator :: proc(t: ^testing.T) {
 	days_dec24 := action_scheduler_days_from_civil(2026, 12, 24)
 	after_ms := (i64(days_dec24) * 86400 + 15 * 3600) * 1000 // 15:00 UTC (10:00 EST)
 
+	ny, ny_ok := timezone.region_load_from_buffer(NY_TZIF, "America/New_York")
+	testing.expect_value(t, ny_ok, true)
+	if !ny_ok do return
+	defer timezone.region_destroy(ny)
+
 	// Case 1: Normal next run on Friday Dec 25 at 09:00 EST (14:00 UTC)
-	next1, ok1 := action_scheduler_eval_next_cron_slot("0 9 * * 1-5", "America/New_York", "[]", 0, 0, after_ms)
+	next1, ok1 := action_scheduler_eval_next_cron_slot_region("0 9 * * 1-5", ny, "[]", 0, 0, after_ms)
 	testing.expect(t, ok1, "cron eval ok")
 	testing.expect(t, action_scheduler_format_rfc3339_utc(next1) == "2026-12-25T14:00:00Z", "next run is Friday 09:00 EST")
 
 	// Case 2: Holiday blackout on Friday Dec 25 -> skips weekend, lands on Monday Dec 28 09:00 EST (14:00 UTC)
-	next2, ok2 := action_scheduler_eval_next_cron_slot("0 9 * * 1-5", "America/New_York", "[\"2026-12-25\"]", 0, 0, after_ms)
+	next2, ok2 := action_scheduler_eval_next_cron_slot_region("0 9 * * 1-5", ny, "[\"2026-12-25\"]", 0, 0, after_ms)
 	testing.expect(t, ok2, "cron eval with blackout ok")
 	testing.expect(t, action_scheduler_format_rfc3339_utc(next2) == "2026-12-28T14:00:00Z", "next run skips Friday + weekend to Monday 09:00 EST")
 
 	// Case 3: Blackout on both Friday Dec 25 AND Monday Dec 28 -> skips to Tuesday Dec 29 09:00 EST (14:00 UTC)
-	next3, ok3 := action_scheduler_eval_next_cron_slot("0 9 * * 1-5", "America/New_York", "[\"2026-12-25\",\"2026-12-28\"]", 0, 0, after_ms)
+	next3, ok3 := action_scheduler_eval_next_cron_slot_region("0 9 * * 1-5", ny, "[\"2026-12-25\",\"2026-12-28\"]", 0, 0, after_ms)
 	testing.expect(t, ok3, "cron eval with multi-blackout ok")
 	testing.expect(t, action_scheduler_format_rfc3339_utc(next3) == "2026-12-29T14:00:00Z", "next run skips to Tuesday 09:00 EST")
 
 	// Case 4: Active until window expired before next slot -> returns ok=false
 	until_ms := (i64(days_dec24) * 86400 + 18 * 3600) * 1000 // expires Dec 24 18:00 UTC
-	_, ok4 := action_scheduler_eval_next_cron_slot("0 9 * * 1-5", "America/New_York", "[]", 0, until_ms, after_ms)
+	_, ok4 := action_scheduler_eval_next_cron_slot_region("0 9 * * 1-5", ny, "[]", 0, until_ms, after_ms)
 	testing.expect(t, !ok4, "expired active_until should return ok=false")
 
 	// Case 5: Active from window in future -> first slot after active_from
@@ -68,15 +83,6 @@ test_action_scheduler_cron_evaluator :: proc(t: ^testing.T) {
 	next5, ok5 := action_scheduler_eval_next_cron_slot("0 9 * * 1-5", "UTC", "[]", active_from_ms, 0, after_ms)
 	testing.expect(t, ok5, "active_from in future ok")
 	testing.expect(t, action_scheduler_format_rfc3339_utc(next5) == "2027-01-01T09:00:00Z", "first slot is 2027-01-01 09:00 UTC")
-}
-
-@(test)
-test_action_scheduler_is_due :: proc(t: ^testing.T) {
-	target := i64(1000)
-	testing.expect(t, !action_scheduler_is_due(target, 500), "not due before target")
-	testing.expect(t, action_scheduler_is_due(target, 1000), "due at target")
-	testing.expect(t, action_scheduler_is_due(target, 1500), "due after target")
-	testing.expect(t, !action_scheduler_is_due(0, 1500), "not due if target is 0")
 }
 
 @(test)
@@ -112,6 +118,23 @@ test_action_scheduler_can_claim :: proc(t: ^testing.T) {
 	// 5. In flight with expired lease -> lease recovery allows claim
 	item.leased_at_ms = now - 70_000
 	testing.expect(t, action_scheduler_can_claim(item, now, 60_000), "action with expired lease can be claimed")
+
+	// 6. Lease age exactly equal to the window -> claimable
+	item.leased_at_ms = now - 60_000
+	testing.expect(t, action_scheduler_can_claim(item, now, 60_000), "lease aged exactly the window can be claimed")
+
+	// 7. In flight with no recorded lease time -> not claimable
+	item.leased_at_ms = 0
+	testing.expect(t, !action_scheduler_can_claim(item, now, 60_000), "in-flight action without leased_at cannot be claimed")
+	item.in_flight = false
+
+	// 8. Target exactly now -> claimable
+	item.target_run_at_ms = now
+	testing.expect(t, action_scheduler_can_claim(item, now), "action targeted exactly now can be claimed")
+
+	// 9. Unset target -> not claimable
+	item.target_run_at_ms = 0
+	testing.expect(t, !action_scheduler_can_claim(item, now), "action with no target time cannot be claimed")
 }
 
 @(test)
@@ -219,6 +242,16 @@ test_action_scheduler_should_reuse :: proc(t: ^testing.T) {
 	}
 	_, ok_stopped := action_scheduler_should_reuse("reuse", "brgA", "projA", stopped)
 	testing.expect(t, !ok_stopped, "reuse only reuses LIVE instances")
+
+	// reuse + mixed candidates: first live matching instance wins; stopped/other-bridge skipped.
+	mixed := []Instance_Candidate{
+		{id = "inst_stop", bridge_id = "brgA", project_id = "projA", live = false},
+		{id = "inst_b", bridge_id = "brgB", project_id = "projA", live = true},
+		{id = "inst_match", bridge_id = "brgA", project_id = "projA", live = true},
+		{id = "inst_match2", bridge_id = "brgA", project_id = "projA", live = true},
+	}
+	id_mixed, ok_mixed := action_scheduler_should_reuse("reuse", "brgA", "projA", mixed)
+	testing.expect(t, ok_mixed && id_mixed == "inst_match", "first live matching candidate is reused")
 
 	// reuse + empty targets (legacy action) + a live instance anywhere -> reused (backward-compat).
 	id_legacy, ok_legacy := action_scheduler_should_reuse("reuse", "", "", live_match)

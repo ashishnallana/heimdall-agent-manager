@@ -18,6 +18,8 @@ KEYSTORE_ERR_ENOKEY   :: 126
 KEYCHAIN_SERVICE_KEYRING  :: "works.earendil.heimdall-bridge.vault-keyring.test" when ODIN_TEST else "works.earendil.heimdall-bridge.vault-keyring"
 KEYCHAIN_SERVICE_IDENTITY :: "works.earendil.heimdall-bridge.vault-identity.test" when ODIN_TEST else "works.earendil.heimdall-bridge.vault-identity"
 KEYCHAIN_SERVICE_FLOOR    :: "works.earendil.heimdall-bridge.vault-epoch-floor.test" when ODIN_TEST else "works.earendil.heimdall-bridge.vault-epoch-floor"
+KEYCHAIN_SERVICE_IDENTITY_PREVIOUS :: "works.earendil.heimdall-bridge.vault-identity-previous.test" when ODIN_TEST else "works.earendil.heimdall-bridge.vault-identity-previous"
+KEYCHAIN_SERVICE_FLOOR_PREVIOUS    :: "works.earendil.heimdall-bridge.vault-epoch-floor-previous.test" when ODIN_TEST else "works.earendil.heimdall-bridge.vault-epoch-floor-previous"
 
 // OSStatus values from <Security/SecBase.h>.
 KEYCHAIN_ERR_SEC_SUCCESS        :: 0
@@ -57,6 +59,8 @@ keychain_service :: proc(slot: Keystore_Slot) -> string {
 	case .Keyring:     return KEYCHAIN_SERVICE_KEYRING
 	case .Identity:    return KEYCHAIN_SERVICE_IDENTITY
 	case .Epoch_Floor: return KEYCHAIN_SERVICE_FLOOR
+	case .Identity_Previous:    return KEYCHAIN_SERVICE_IDENTITY_PREVIOUS
+	case .Epoch_Floor_Previous: return KEYCHAIN_SERVICE_FLOOR_PREVIOUS
 	}
 	return KEYCHAIN_SERVICE_IDENTITY
 }

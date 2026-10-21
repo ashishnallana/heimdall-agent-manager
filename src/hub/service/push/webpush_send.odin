@@ -11,6 +11,7 @@ package push
 import "base:runtime"
 import "core:crypto/ecdsa"
 import "core:fmt"
+import "core:mem/virtual"
 import "core:strings"
 import "core:thread"
 import "core:time"
@@ -97,6 +98,21 @@ async_send_entry :: proc(data: rawptr) {
 	job := (^Async_Send_Job)(data)
 	if job == nil do return
 	defer async_send_job_destroy(job)
+	send_to_user_scoped(job)
+}
+
+// send_to_user_scoped runs one fan-out on a scratch arena. The worker is a fresh
+// thread on the persistent heap, and send_to_user's subscription rows, VAPID
+// claims and HTTP responses (one set per subscription) are never freed by it.
+// The job is heap-owned and destroyed by async_send_entry, outside this scope.
+@(private = "file")
+send_to_user_scoped :: proc(job: ^Async_Send_Job) {
+	scratch: virtual.Arena
+	scratch_ok := virtual.arena_init_growing(&scratch) == nil
+	defer if scratch_ok do virtual.arena_destroy(&scratch)
+	allocator, temp_allocator := context.allocator, context.temp_allocator
+	if scratch_ok do allocator, temp_allocator = virtual.arena_allocator(&scratch), virtual.arena_allocator(&scratch)
+	context.allocator, context.temp_allocator = allocator, temp_allocator
 	_ = send_to_user(job.service, job.owner_user_id, job.payload_json)
 }
 

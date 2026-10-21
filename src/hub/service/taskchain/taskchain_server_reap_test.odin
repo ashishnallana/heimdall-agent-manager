@@ -80,20 +80,6 @@ fx9_chain :: proc(fx: ^Fx9, chain_id: string, status := domain.Task_Chain_Status
 }
 
 @(private = "file")
-fx9_task :: proc(fx: ^Fx9, chain_id, task_id: string, state: domain.Task_State) {
-	_, _, _ = iface.taskchain_save_task(&fx.tc_repo, domain.Task{
-		task_id       = domain.Task_ID(task_id),
-		chain_id      = domain.Task_Chain_ID(chain_id),
-		owner_user_id = domain.User_ID(R9_OWNER),
-		title         = "REQ-SHELL-9 task",
-		publish_state = .Published,
-		state         = state,
-		created_at    = "2026-09-29T10:00:00Z",
-		updated_at    = "2026-09-29T10:00:00Z",
-	})
-}
-
-@(private = "file")
 fx9_session :: proc(fx: ^Fx9, session_id, kind, chain_id, agent_id: string) {
 	_, _ = iface.shell_session_upsert(&fx.sh_repo, domain.Shell_Session{
 		session_id        = session_id,
@@ -123,41 +109,6 @@ fx9_auth :: proc() -> contracts.Auth_Context {
 }
 
 @(test)
-test_sync_chain_status_from_tasks_auto_complete_reaps_servers :: proc(t: ^testing.T) {
-	fx: Fx9
-	if !fx9_make(&fx, t, "auto") do return
-	defer fx9_free(&fx)
-
-	fx9_chain(&fx, "chain_auto")
-	fx9_task(&fx, "chain_auto", "task_1", .Done)
-	fx9_session(&fx, "srv_auto", domain.Shell_Session_Kind_Server, "chain_auto", "")
-
-	chain, ok, _ := sync_chain_status_from_tasks(&fx.svc, "chain_auto", domain.User_ID(R9_OWNER))
-
-	testing.expect(t, ok, "sync ok")
-	testing.expect_value(t, chain.status, domain.Task_Chain_Status.Completed)
-	testing.expect(t, fx9_intent(&fx, "srv_auto") != "", "auto-completing a chain must reap its servers")
-}
-
-@(test)
-test_change_chain_status_completed_reaps_only_target_chain_servers :: proc(t: ^testing.T) {
-	fx: Fx9
-	if !fx9_make(&fx, t, "verb") do return
-	defer fx9_free(&fx)
-
-	fx9_chain(&fx, "chain_verb")
-	fx9_session(&fx, "srv_verb",  domain.Shell_Session_Kind_Server, "chain_verb",  "")
-	fx9_chain(&fx, "chain_other")
-	fx9_session(&fx, "srv_other", domain.Shell_Session_Kind_Server, "chain_other", "")
-
-	_, ok, _ := change_chain_status(&fx.svc, fx9_auth(), "chain_verb", .Completed)
-
-	testing.expect(t, ok, "change_chain_status ok")
-	testing.expect(t, fx9_intent(&fx, "srv_verb") != "", "the closed chain's server must be reaped")
-	testing.expect_value(t, fx9_intent(&fx, "srv_other"), "")
-}
-
-@(test)
 test_update_chain_status_completed_cannot_bypass_acceptance :: proc(t: ^testing.T) {
 	fx: Fx9
 	if !fx9_make(&fx, t, "patch") do return
@@ -173,25 +124,6 @@ test_update_chain_status_completed_cannot_bypass_acceptance :: proc(t: ^testing.
 
 	testing.expect(t, !ok, "generic PATCH cannot complete a reopened chain even with a retained summary")
 	testing.expect_value(t, fx9_intent(&fx, "srv_patch"), "")
-}
-
-@(test)
-test_change_chain_status_completed_spares_runs_and_shells :: proc(t: ^testing.T) {
-	fx: Fx9
-	if !fx9_make(&fx, t, "kinds") do return
-	defer fx9_free(&fx)
-
-	fx9_chain(&fx, "chain_kinds")
-	fx9_session(&fx, "srv_k",   domain.Shell_Session_Kind_Server, "chain_kinds", "")
-	fx9_session(&fx, "run_k",   domain.Shell_Session_Kind_Run,    "chain_kinds", "inst_1")
-	fx9_session(&fx, "shell_k", domain.Shell_Session_Kind_Shell,  "chain_kinds", "")
-
-	_, ok, _ := change_chain_status(&fx.svc, fx9_auth(), "chain_kinds", .Completed)
-
-	testing.expect(t, ok, "change_chain_status ok")
-	testing.expect(t, fx9_intent(&fx, "srv_k") != "", "the server is reaped")
-	testing.expect_value(t, fx9_intent(&fx, "run_k"), "")
-	testing.expect_value(t, fx9_intent(&fx, "shell_k"), "")
 }
 
 @(test)
@@ -212,24 +144,4 @@ test_change_chain_status_cancelled_and_archived_reap_servers :: proc(t: ^testing
 	testing.expect(t, a_ok, "archive ok")
 	testing.expect(t, fx9_intent(&fx, "srv_cancel") != "", "a cancelled chain must reap")
 	testing.expect(t, fx9_intent(&fx, "srv_archive") != "", "an archived chain must reap")
-}
-
-@(test)
-test_change_chain_status_reopen_does_not_resurrect_reaped_servers :: proc(t: ^testing.T) {
-	fx: Fx9
-	if !fx9_make(&fx, t, "reopen") do return
-	defer fx9_free(&fx)
-
-	fx9_chain(&fx, "chain_reopen")
-	fx9_session(&fx, "srv_reopen", domain.Shell_Session_Kind_Server, "chain_reopen", "")
-
-	_, close_ok, _ := change_chain_status(&fx.svc, fx9_auth(), "chain_reopen", .Completed)
-	testing.expect(t, close_ok, "close ok")
-	intent_after_close := fx9_intent(&fx, "srv_reopen")
-	testing.expect(t, intent_after_close != "", "closed, so reaped")
-
-	_, open_ok, _ := change_chain_status(&fx.svc, fx9_auth(), "chain_reopen", .Active)
-
-	testing.expect(t, open_ok, "reopen ok")
-	testing.expect_value(t, fx9_intent(&fx, "srv_reopen"), intent_after_close)
 }

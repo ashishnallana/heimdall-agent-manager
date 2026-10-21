@@ -1,8 +1,6 @@
 package sqlite
 
-import "core:fmt"
 import "core:mem"
-import "core:os"
 import "core:strings"
 import "core:testing"
 import domain "odin_test:hub/domain"
@@ -10,15 +8,9 @@ import iface "odin_test:hub/repository/iface"
 
 @(test)
 test_artifact_repo_sqlite_lifecycle_and_pagination :: proc(t: ^testing.T) {
-	db_path := ":memory:"
-	conn, open_ok, open_err := open(db_path)
+	conn, open_ok := tmpl_clone_migrated(t)
 	testing.expect(t, open_ok, "db open ok")
-	testing.expect_value(t, open_err.code, domain.Error_Code.None)
 	defer close(&conn)
-
-	mig_ok, mig_err := run_migrations(&conn)
-	testing.expect(t, mig_ok, "migrations ok")
-	testing.expect_value(t, mig_err.code, domain.Error_Code.None)
 
 	// Verify migration 041 indexes exist
 	testing.expect(t, sqlite_object_exists(&conn, "idx_artifacts_owner_created"), "idx_artifacts_owner_created exists")
@@ -163,13 +155,9 @@ test_artifact_repo_sqlite_lifecycle_and_pagination :: proc(t: ^testing.T) {
 
 @(test)
 test_artifact_repo_sqlite_tracking_allocator :: proc(t: ^testing.T) {
-	db_path := ":memory:"
-	conn, open_ok, _ := open(db_path)
+	conn, open_ok := tmpl_clone_migrated(t)
 	testing.expect(t, open_ok, "db open ok")
 	defer close(&conn)
-
-	mig_ok, _ := run_migrations(&conn)
-	testing.expect(t, mig_ok, "migrations ok")
 
 	repo_impl := Content_Repo_SQLite{conn = &conn}
 	repo := new_content_repository(&repo_impl, &conn)

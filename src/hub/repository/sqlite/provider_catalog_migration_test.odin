@@ -13,11 +13,9 @@ import "core:testing"
 // "Yes, I accept"; the default is "No, exit").
 @(test)
 test_claude_catalog_auto_accepts_bypass_permissions_warning :: proc(t: ^testing.T) {
-	conn, open_ok, _ := open(":memory:")
-	testing.expect(t, open_ok, "db open ok")
+	conn, clone_ok := tmpl_clone_migrated(t)
+	if !clone_ok do return
 	defer close(&conn)
-	mig_ok, _ := run_migrations(&conn)
-	testing.expect(t, mig_ok, "migrations ok")
 
 	impl := Provider_Repo_SQLite{conn = &conn}
 	repo := new_provider_repository(&impl, &conn)
@@ -41,11 +39,9 @@ test_claude_catalog_auto_accepts_bypass_permissions_warning :: proc(t: ^testing.
 // Hub derives from the canonical body so operators inspecting the DB see truth.
 @(test)
 test_provider_catalog_meta_etag_matches_canonical_body :: proc(t: ^testing.T) {
-	conn, open_ok, _ := open(":memory:")
-	testing.expect(t, open_ok, "db open ok")
+	conn, clone_ok := tmpl_clone_migrated(t)
+	if !clone_ok do return
 	defer close(&conn)
-	mig_ok, _ := run_migrations(&conn)
-	testing.expect(t, mig_ok, "migrations ok")
 
 	impl := Provider_Repo_SQLite{conn = &conn}
 	repo := new_provider_repository(&impl, &conn)
@@ -64,11 +60,9 @@ test_provider_catalog_meta_etag_matches_canonical_body :: proc(t: ^testing.T) {
 // openai-codex/, and the GPT-5.6 rows stay for history but are retired.
 @(test)
 test_codex_and_pi_catalog_select_gpt6_models :: proc(t: ^testing.T) {
-	conn, open_ok, _ := open(":memory:")
-	testing.expect(t, open_ok, "db open ok")
+	conn, clone_ok := tmpl_clone_migrated(t)
+	if !clone_ok do return
 	defer close(&conn)
-	mig_ok, _ := run_migrations(&conn)
-	testing.expect(t, mig_ok, "migrations ok")
 
 	impl := Provider_Repo_SQLite{conn = &conn}
 	expect_models :: proc(t: ^testing.T, impl: ^Provider_Repo_SQLite, provider: string, active: []string, deprecated: []string) {

@@ -1,21 +1,16 @@
 package sqlite
 
-import "core:fmt"
-import "core:os"
 import "core:testing"
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
 
 @(test)
 test_lsp_server_config_repo_sqlite_lifecycle :: proc(t: ^testing.T) {
-	db_path := fmt.tprintf("/tmp/test_lsp_server_config_repo_%d.db", os.get_pid())
-	defer os.remove(db_path)
-	conn, open_ok, _ := open(db_path)
+	conn, db_path, open_ok := tmpl_clone_migrated_into_file(t, "lsp_server_config_repo")
+	defer tmpl_remove_db(db_path)
 	testing.expect(t, open_ok, "db open ok")
 	defer close(&conn)
 
-	mig_ok, _ := run_migrations(&conn)
-	testing.expect(t, mig_ok, "migrations ok")
 	testing.expect(t, table_column_exists(&conn, "lsp_server_configs", "dir_prefix"), "dir_prefix column exists")
 	testing.expect(t, table_column_exists(&conn, "lsp_server_configs", "dir_pattern"), "dir_pattern column exists")
 

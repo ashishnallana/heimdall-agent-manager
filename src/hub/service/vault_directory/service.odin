@@ -800,10 +800,13 @@ check_bridge_approval :: proc(svc: ^Service, in_: Bridge_Approval_Input) -> (dom
 }
 
 // commit_bridge_approval appends the bridge's signed approval to the log and inserts
-// the approved identity. If another live (approved, not retired) identity already
-// maps to bridge_id (an attach), it is marked retired — a HINT — in the same
-// transaction, so at most one live identity maps to a bridge_id; an approved browser
-// then signs the old identity's real revoke.
+// the approved identity. It retires nothing. For an attach (another live identity
+// already maps to bridge_id) the old identity must stay live until the enrollment
+// COMMITS (REQ-EA-8): the attach is still pending here, and if it rolls back the
+// old device keeps its credential, so its directory entry must be left as it was.
+// retire_bridge_attach_predecessors performs the supersede once the hub observes
+// the commit. During that window at most two live identities map to bridge_id; a
+// second concurrent attach onto the same bridge is refused.
 commit_bridge_approval :: proc(svc: ^Service, in_: Bridge_Approval_Input, dev: domain.Vault_Device, bridge_id: string) -> (i64, domain.Domain_Error) {
 	if bridge_id == "" do return 0, invalid("bridge_id is required")
 	st, ok := vault.statement_parse(in_.statement)
@@ -820,30 +823,87 @@ commit_bridge_approval :: proc(svc: ^Service, in_: Bridge_Approval_Input, dev: d
 	}
 	devices, err := iface.vault_list_devices(svc.repo, in_.user_id)
 	if err.code != .None do return 0, err
-	for other in devices {
-		if other.status != .Approved || other.bridge_id != bridge_id || other.retired_at != "" do continue
-		if cm.hint_retire_device_id != "" do return 0, domain.domain_error(.Internal_Error, "more than one live identity maps to this bridge")
-		cm.hint_retire_device_id, cm.hint_retire_bridge_id = other.device_id, bridge_id
-	}
+	live := 0
+	for other in devices do if bridge_identity_live(other, bridge_id) do live += 1
+	if live > 1 do return 0, domain.domain_error(.Conflict, "another enrollment onto this bridge is already pending; cancel it or wait for it to finish")
 	return iface.vault_commit(svc.repo, cm)
 }
 
-// retire_bridge_entry marks the live directory identity of bridge_id retired (a
-// HINT: retired_at only) after the bridge was revoked from bridge settings or its
-// enrollment was rolled back. It consumes no directory version and appends nothing
-// to the log: the identity stays approved in the signed log until an approved
-// browser verifies it and signs a real revoke. Returns the hinted device id, or ""
-// when there was nothing to hint.
-retire_bridge_entry :: proc(svc: ^Service, user_id, bridge_id: string) -> (string, domain.Domain_Error) {
-	if user_id == "" || bridge_id == "" do return "", domain.Domain_Error{}
+// bridge_identity_live reports whether d is a live (approved, not retired) directory
+// identity of bridge_id.
+@(private = "file")
+bridge_identity_live :: proc(d: domain.Vault_Device, bridge_id: string) -> bool {
+	return d.status == .Approved && d.retired_at == "" && d.bridge_id != "" && d.bridge_id == bridge_id
+}
+
+// bridge_identity_seq is the directory version d's signed approval created. Versions
+// are contiguous and strictly increasing, so of two identities of one bridge the
+// higher seq is the later approval -- unlike created_at, which ties within a second.
+// An unparsable statement sorts first (never mistaken for the newest).
+@(private = "file")
+bridge_identity_seq :: proc(d: domain.Vault_Device) -> i64 {
+	st, ok := vault.statement_parse(d.approval_statement)
+	if !ok do return -1
+	v, v_ok := strconv.parse_i64(st.seq)
+	return v if v_ok else -1
+}
+
+// Bridge_Retire_Scope selects which live identities of a bridge to hint retired.
+Bridge_Retire_Scope :: enum {
+	Newest,         // a rolled-back enrollment: only the identity approved with it
+	All_But_Newest, // a committed attach: the identities it superseded
+	All,            // the bridge itself was revoked
+}
+
+// retire_bridge_identities marks the selected live identities of bridge_id retired (a
+// HINT: retired_at only). It consumes no directory version and appends nothing to the
+// log: an identity stays approved in the signed log until an approved browser
+// verifies it and signs a real revoke. Returns the hinted device ids (temp-allocated).
+retire_bridge_identities :: proc(svc: ^Service, user_id, bridge_id: string, scope: Bridge_Retire_Scope) -> ([]string, domain.Domain_Error) {
+	if user_id == "" || bridge_id == "" do return nil, domain.Domain_Error{}
 	devices, derr := iface.vault_list_devices(svc.repo, user_id)
-	if derr.code != .None do return "", derr
-	target := ""
-	for d in devices do if d.status == .Approved && d.bridge_id == bridge_id && d.retired_at == "" do target = d.device_id
-	if target == "" do return "", domain.Domain_Error{}
-	changed, err := iface.vault_mark_retired(svc.repo, user_id, target, bridge_id, platform.clock_now(svc.clock))
-	if err.code != .None do return "", err
-	return target if changed else "", domain.Domain_Error{}
+	if derr.code != .None do return nil, derr
+	newest := ""
+	newest_seq := i64(-2)
+	for d in devices {
+		if !bridge_identity_live(d, bridge_id) do continue
+		if seq := bridge_identity_seq(d); seq > newest_seq do newest, newest_seq = d.device_id, seq
+	}
+	if newest == "" do return nil, domain.Domain_Error{}
+	now := platform.clock_now(svc.clock)
+	out := make([dynamic]string, 0, 2, context.temp_allocator)
+	for d in devices {
+		if !bridge_identity_live(d, bridge_id) do continue
+		is_newest := d.device_id == newest
+		switch scope {
+		case .Newest:         if !is_newest do continue
+		case .All_But_Newest: if is_newest do continue
+		case .All:
+		}
+		changed, err := iface.vault_mark_retired(svc.repo, user_id, d.device_id, bridge_id, now)
+		if err.code != .None do return out[:], err
+		if changed do append(&out, strings.clone(d.device_id, context.temp_allocator))
+	}
+	return out[:], domain.Domain_Error{}
+}
+
+// retire_bridge_entry retires the directory identity approved with a rolled-back
+// enrollment of bridge_id: the newest live one. For a rolled-back ATTACH that leaves
+// the target's previous identity live, exactly as the attach found it. Returns the
+// hinted device id, or "" when there was nothing to hint.
+retire_bridge_entry :: proc(svc: ^Service, user_id, bridge_id: string) -> (string, domain.Domain_Error) {
+	ids, err := retire_bridge_identities(svc, user_id, bridge_id, .Newest)
+	if len(ids) == 0 do return "", err
+	return ids[0], err
+}
+
+// retire_bridge_attach_predecessors runs once an enrollment of bridge_id has
+// COMMITTED: every live identity but the newest (the one just enrolled) was
+// superseded by the attach and is hinted retired, so one live identity maps to the
+// bridge again. A committed new bridge has a single identity, so this is a no-op
+// there, and it is idempotent (a retried commit hints nothing twice).
+retire_bridge_attach_predecessors :: proc(svc: ^Service, user_id, bridge_id: string) -> ([]string, domain.Domain_Error) {
+	return retire_bridge_identities(svc, user_id, bridge_id, .All_But_Newest)
 }
 
 // other_approved_for_bridge reports whether a live (approved, not retired) identity

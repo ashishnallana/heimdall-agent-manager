@@ -61,8 +61,26 @@ bridge_config_lock :: proc(config_path: string) -> (lock_path: string, ok: bool)
 	return lock_path, bridge_instance_lock(lock_path)
 }
 
-// bridge_scope_lock locks a (hub, bridge id) scope (keystore_scope_name).
-bridge_scope_lock :: proc(scope_name: string) -> bool {
-	lock_path, ok := bridge_named_lock_path("scope", scope_name)
-	return ok && bridge_instance_lock(lock_path)
+// bridge_scope_lock locks a (hub, bridge id) scope (keystore_scope_name). Returns
+// the lock file path (for bridge_instance_unlock) and false when another instance
+// holds it.
+bridge_scope_lock :: proc(scope_name: string) -> (lock_path: string, ok: bool) {
+	lock_path, ok = bridge_named_lock_path("scope", scope_name)
+	if !ok do return "", false
+	return lock_path, bridge_instance_lock(lock_path)
+}
+
+// bridge_scope_lock_ok is bridge_scope_lock for a holder that keeps the lock for
+// the life of the process.
+bridge_scope_lock_ok :: proc(scope_name: string) -> bool {
+	_, ok := bridge_scope_lock(scope_name)
+	return ok
+}
+
+// bridge_instance_unlock_scope releases the scope lock of bridge_id under the bound
+// hub, if this process holds it.
+bridge_instance_unlock_scope :: proc(bridge_id: string) {
+	name, scoped := keystore_scope_name(bridge_id)
+	if !scoped do return
+	if lock_path, ok := bridge_named_lock_path("scope", name); ok do bridge_instance_unlock(lock_path)
 }

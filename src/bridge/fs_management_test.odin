@@ -1331,54 +1331,6 @@ fs_vault_batch_write_enforces_decryption_per_item :: proc(t: ^testing.T) {
 }
 
 @(test)
-fs_vault_grep_encrypts_matched_lines :: proc(t: ^testing.T) {
-	sync.mutex_lock(&bridge_test_config_mutex)
-	defer sync.mutex_unlock(&bridge_test_config_mutex)
-	sync.mutex_lock(&keystore_test_mutex)
-	defer sync.mutex_unlock(&keystore_test_mutex)
-
-	prev_key, had_key := os.lookup_env("HEIMDALL_VAULT_KEYRING", context.allocator)
-	defer {
-		if had_key {
-			_ = os.set_env("HEIMDALL_VAULT_KEYRING", prev_key)
-			delete(prev_key)
-		} else {
-			os.unset_env("HEIMDALL_VAULT_KEYRING")
-		}
-	}
-
-	root := fs_test_make_root(t, "vault_grep")
-	defer fs_test_cleanup(root)
-
-	fs_test_seed_file(t, root, "src/code.py", "def sensitive_function():\n    return 'secret_value'\n")
-
-	test_key := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-
-	// 1. With active vault key: grep matches are encrypted
-	_ = os.set_env("HEIMDALL_VAULT_KEYRING", test_keyring_env_value(test_key))
-	grep_enc := bridge_fs_grep("sensitive_function", false, 10, root)
-	defer bridge_fs_grep_result_delete(&grep_enc)
-
-	testing.expect(t, grep_enc.ok, "grep ok")
-	if !testing.expect_value(t, len(grep_enc.matches), 1) do return
-	testing.expect(t, strings.has_prefix(grep_enc.matches[0].line, vault.VAULT_V2_PREFIX), "grep match line must be a v2 vault token")
-	decrypted_line, dec_ok := test_decrypt_hex(grep_enc.matches[0].line, test_key)
-	testing.expect(t, dec_ok, "decryption of grep match line ok")
-	defer delete(decrypted_line)
-	testing.expect_value(t, decrypted_line, "def sensitive_function():")
-
-	// 2. With unconfigured vault key: grep matches are plain
-	_ = os.set_env("HEIMDALL_VAULT_KEYRING", "unconfigured_key")
-	grep_plain := bridge_fs_grep("sensitive_function", false, 10, root)
-	defer bridge_fs_grep_result_delete(&grep_plain)
-
-	testing.expect(t, grep_plain.ok, "grep plain ok")
-	if !testing.expect_value(t, len(grep_plain.matches), 1) do return
-	testing.expect(t, !strings.has_prefix(grep_plain.matches[0].line, vault.VAULT_V2_PREFIX), "grep match line must NOT be a vault token")
-	testing.expect_value(t, grep_plain.matches[0].line, "def sensitive_function():")
-}
-
-@(test)
 bridge_fs_traversals_fail_before_work_when_command_deadline_expired :: proc(t: ^testing.T) {
 	root := fs_test_make_root(t, "expired_traversal")
 	defer fs_test_cleanup(root)

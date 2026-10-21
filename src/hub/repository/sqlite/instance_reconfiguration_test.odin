@@ -5,11 +5,9 @@ import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
 
 reconfiguration_test_setup :: proc(t: ^testing.T, conn: ^Conn, impl: ^Agent_Repo_SQLite) -> iface.Agent_Repository {
-	opened, ok, _ := open(":memory:")
+	opened, ok := tmpl_clone_migrated(t)
 	conn^ = opened
-	if !testing.expect(t, ok, "open") do return {}
-	migrated, err := run_migrations(conn)
-	if !testing.expect(t, migrated, err.message) do return {}
+	if !ok do return {}
 	repo := new_agent_repository(impl, conn)
 	_, saved, save_err := iface.agent_save_instance(&repo, domain.Agent_Instance{agent_instance_id = "inst_move", owner_user_id = "owner", agent_id = "agent", bridge_id = "source", provider = "codex", model = "smart", project_id = "project_old", project_path = "/old", conversation_id = "chat_move", runtime_status = "running", created_at = "2026-10-10T10:00:00Z", updated_at = "2026-10-10T10:00:00Z"})
 	testing.expect(t, saved, save_err.message)

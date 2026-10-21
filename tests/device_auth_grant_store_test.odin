@@ -337,7 +337,7 @@ main :: proc() {
 	lres, lok, _ := device_auth.authorize(&lsvc, {
 		client = "ham-bridge", device_label = "dawnstar", os = "linux", app_version = "0.9.1",
 		bridge_public_key = BPK, bridge_identity_public_key = IDP, bridge_identity_proof = IDPROOF, pair_salt = "0123456789abcdef0123456789abcdef", pair_hub_origin = "https://hub.example.test:443", pair_lookup = "4444444444444444444444444444444444444444444444444444444444444444", pair_key_mac = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", os_user = "tanmay",
-		code_challenge = PKCE_CHALLENGE, code_challenge_method = "S256",
+		code_challenge = PKCE_CHALLENGE, code_challenge_method = "S256", previous_bridge_id = "brg_previous",
 	}, "127.0.0.1:1", "203.0.113.70")
 	assert_true(lok, "lifecycle grant created with all new fields")
 	// Approve + set_grant so the grant is re-cloned at least once, then read it
@@ -354,6 +354,7 @@ main :: proc() {
 	assert_eq(reread.code_challenge_method, "S256", "code_challenge_method survives re-clone")
 	assert_eq(reread.minted_bridge_id, "brg_lifecycle", "minted_bridge_id survives re-clone")
 	assert_eq(reread.grant_kind, device_auth.Grant_Kind.Bridge_Enrollment, "grant_kind survives re-clone")
+	assert_eq(reread.previous_bridge_id, "brg_previous", "previous_bridge_id survives re-clone")
 	// Free the store explicitly (not deferred) so a double/bad free on any new
 	// field is attributed to this test rather than to process teardown.
 	device_auth.grant_store_free(&lstore)

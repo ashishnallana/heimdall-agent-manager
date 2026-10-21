@@ -42,6 +42,8 @@ KEY_TYPE_USER         :: "user"
 KEY_DESC_KEYRING_PREFIX  :: "heimdall:vault_keyring:"
 IDENTITY_FILE_NAME :: "identity_key"
 EPOCH_FLOOR_FILE_NAME :: "epoch_floor"
+IDENTITY_PREVIOUS_FILE_NAME :: "identity_key.previous"
+EPOCH_FLOOR_PREVIOUS_FILE_NAME :: "epoch_floor.previous"
 
 KEYSTORE_ERR_EPERM    :: 1
 KEYSTORE_ERR_EACCES   :: 13
@@ -174,7 +176,14 @@ keystore_os_delete_secret :: proc(slot: Keystore_Slot, bridge_id: string) -> boo
 keystore_identity_file_path :: proc(slot: Keystore_Slot, bridge_id: string) -> (path: string, ok: bool) {
 	if !keystore_bridge_id_ok(bridge_id) do return "", false
 	dir := bridge_vault_bridge_dir(bridge_id, context.temp_allocator) or_return
-	name := IDENTITY_FILE_NAME if slot == .Identity else EPOCH_FLOOR_FILE_NAME
+	name: string
+	switch slot {
+	case .Keyring:              return "", false // lives in @u, never a file
+	case .Identity:             name = IDENTITY_FILE_NAME
+	case .Epoch_Floor:          name = EPOCH_FLOOR_FILE_NAME
+	case .Identity_Previous:    name = IDENTITY_PREVIOUS_FILE_NAME
+	case .Epoch_Floor_Previous: name = EPOCH_FLOOR_PREVIOUS_FILE_NAME
+	}
 	return strings.concatenate({dir, name}, context.temp_allocator), true
 }
 

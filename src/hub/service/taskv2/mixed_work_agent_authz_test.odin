@@ -16,11 +16,9 @@ import sqlite "odin_test:hub/repository/sqlite"
 
 authz_fixture :: proc(t: ^testing.T) -> (^Fixture, bool) {
 	fx := new(Fixture)
-	conn, ok, err := sqlite.open(":memory:")
-	if !testing.expect(t, ok, err.message) do return fx, false
+	conn, ok := fixture_clone_migrated(t)
+	if !ok do return fx, false
 	fx.conn = conn
-	ok, err = sqlite.run_migrations(&fx.conn)
-	if !testing.expect(t, ok, err.message) do return fx, false
 	fixture_wire(fx)
 	chain := seed_chain(t, fx, "authz_chain", true)
 	chain.coordinator_agent_instance_id = "coord_instance"

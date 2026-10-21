@@ -477,8 +477,10 @@ bridge_commit :: proc(t: ^testing.T, f: ^Fixture, a, br: ^Dev, version: i64, bri
 	return err
 }
 
-// M3: an attach supersedes the bridge's old identity in the same CAS; a rolled-back
-// enrollment's entry is retired.
+// M3 / REQ-EA-8: an attach does NOT supersede the bridge's old identity at approval
+// (the attach is still pending and may roll back); the commit does, via
+// retire_bridge_attach_predecessors. A rolled-back enrollment retires only the
+// identity approved with it; a bridge revoke retires every live one.
 @(test)
 test_vault_bridge_entry_lifecycle :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
@@ -489,25 +491,64 @@ test_vault_bridge_entry_lifecycle :: proc(t: ^testing.T) {
 	old_id, new_id := make_dev(20, "bridge"), make_dev(21, "bridge")
 	testing.expect_value(t, bridge_commit(t, f, &a, &old_id, 1, "brg_1").code, domain.Error_Code.None)
 	testing.expect_value(t, bridge_commit(t, f, &a, &new_id, 2, "brg_1").code, domain.Error_Code.None)
-	// The superseded identity is only HINTED retired: still approved (the signed log
-	// still trusts it until a browser signs its revoke).
+	// Pending attach: both identities live, the old one untouched.
+	testing.expect_value(t, dev_row(f, old_id.id).retired_at, "")
+	testing.expect_value(t, dev_row(f, new_id.id).retired_at, "")
+	other, _ := other_approved_for_bridge(&f.svc, USER, "brg_1", new_id.id)
+	testing.expect(t, other, "the old identity stays live while the attach is pending")
+	// A second concurrent attach onto the same bridge is refused.
+	third := make_dev(22, "bridge")
+	testing.expect_value(t, bridge_commit(t, f, &a, &third, 3, "brg_1").code, domain.Error_Code.Conflict)
+
+	// Commit: the predecessor is HINTED retired (still approved in the signed log).
+	retired, err := retire_bridge_attach_predecessors(&f.svc, USER, "brg_1")
+	testing.expect(t, err.code == .None && len(retired) == 1 && retired[0] == old_id.id)
 	testing.expect_value(t, dev_row(f, old_id.id).status, domain.Vault_Device_Status.Approved)
 	testing.expect(t, dev_row(f, old_id.id).retired_at != "")
-	testing.expect_value(t, dev_row(f, new_id.id).status, domain.Vault_Device_Status.Approved)
-	other, _ := other_approved_for_bridge(&f.svc, USER, "brg_1", new_id.id)
-	testing.expect(t, !other, "exactly one live identity per bridge")
+	testing.expect_value(t, dev_row(f, new_id.id).retired_at, "")
+	again, _ := retire_bridge_attach_predecessors(&f.svc, USER, "brg_1")
+	testing.expect_value(t, len(again), 0)
+	other, _ = other_approved_for_bridge(&f.svc, USER, "brg_1", new_id.id)
+	testing.expect(t, !other, "exactly one live identity per bridge after the commit")
 
 	// Rollback / settings revoke: a hint, once, and it never consumes a version.
-	retired, err := retire_bridge_entry(&f.svc, USER, "brg_1")
-	testing.expect(t, err.code == .None && retired == new_id.id)
+	gone, rerr := retire_bridge_entry(&f.svc, USER, "brg_1")
+	testing.expect(t, rerr.code == .None && gone == new_id.id)
 	testing.expect_value(t, dev_row(f, new_id.id).status, domain.Vault_Device_Status.Approved)
-	again, _ := retire_bridge_entry(&f.svc, USER, "brg_1")
-	testing.expect_value(t, again, "")
+	twice, _ := retire_bridge_entry(&f.svc, USER, "brg_1")
+	testing.expect_value(t, twice, "")
 	dir, _, _ := iface.vault_get_directory(&f.repo, USER)
 	testing.expect_value(t, dir.version, i64(3))
 	view, _ := get_directory(&f.svc, USER)
 	testing.expect_value(t, len(view.retired_hints), 2)
 	testing.expect_value(t, len(view.log), 3)
+}
+
+// A rolled-back attach retires only the identity approved with it: the bridge's
+// previous identity is left exactly as the attach found it. A bridge revoke during a
+// pending attach retires both.
+@(test)
+test_vault_bridge_attach_rollback_keeps_old_identity :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	f := fixture(t)
+	defer fixture_close(f)
+	a := make_dev(1)
+	do_genesis(t, f, &a)
+	old_id, new_id := make_dev(30, "bridge"), make_dev(31, "bridge")
+	testing.expect_value(t, bridge_commit(t, f, &a, &old_id, 1, "brg_2").code, domain.Error_Code.None)
+	testing.expect_value(t, bridge_commit(t, f, &a, &new_id, 2, "brg_2").code, domain.Error_Code.None)
+	gone, err := retire_bridge_entry(&f.svc, USER, "brg_2")
+	testing.expect(t, err.code == .None && gone == new_id.id, "rollback retires the NEW identity")
+	testing.expect_value(t, dev_row(f, old_id.id).retired_at, "")
+	testing.expect_value(t, dev_row(f, old_id.id).status, domain.Vault_Device_Status.Approved)
+
+	// Revoke during a pending attach: every live identity of the bridge.
+	other_old, other_new := make_dev(32, "bridge"), make_dev(33, "bridge")
+	testing.expect_value(t, bridge_commit(t, f, &a, &other_old, 3, "brg_3").code, domain.Error_Code.None)
+	testing.expect_value(t, bridge_commit(t, f, &a, &other_new, 4, "brg_3").code, domain.Error_Code.None)
+	all, aerr := retire_bridge_identities(&f.svc, USER, "brg_3", .All)
+	testing.expect(t, aerr.code == .None && len(all) == 2)
+	testing.expect(t, dev_row(f, other_old.id).retired_at != "" && dev_row(f, other_new.id).retired_at != "")
 }
 
 // The hub's log is contiguous and hash-linked, and a commit without a signed op is refused.

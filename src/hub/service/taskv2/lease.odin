@@ -2,7 +2,6 @@ package taskv2
 
 import "base:runtime"
 import "core:fmt"
-import "core:mem/virtual"
 import "core:strings"
 import "core:sync"
 import domain "odin_test:hub/domain"
@@ -345,6 +344,9 @@ on_dep_added_in_uow :: proc(svc: ^Service, u: ^Uow, task: domain.Task, actor: Ac
 // instance holding nothing (no-op, no UoW).
 on_instance_terminal :: proc(svc: ^Service, instance_id: string) {
 	if svc == nil || svc.repo == nil || instance_id == "" do return
+	scratch: Scratch
+	context.allocator = scratch_begin(&scratch)
+	defer scratch_end(&scratch)
 	if _, held, _ := iface.taskchain_get_lease_by_holder(svc.repo, instance_id); !held do return
 	// Bridge ABSENCE is not instance death (review B2): an instance marked
 	// `unreachable` because its bridge disconnected keeps its lease; the TTL
@@ -374,6 +376,9 @@ on_instance_terminal :: proc(svc: ^Service, instance_id: string) {
 // instance. The later terminal report finds no lease (no-op).
 on_instance_user_stopped :: proc(svc: ^Service, instance_id: string) {
 	if svc == nil || svc.repo == nil || instance_id == "" do return
+	scratch: Scratch
+	context.allocator = scratch_begin(&scratch)
+	defer scratch_end(&scratch)
 	lease, held, _ := iface.taskchain_get_lease_by_holder(svc.repo, instance_id)
 	if !held do return
 	u, ok, _ := begin_uow(svc)
@@ -387,6 +392,9 @@ on_instance_user_stopped :: proc(svc: ^Service, instance_id: string) {
 // (by moving last_beat_at); `idle` arms idle_grace for a lease holder.
 on_instance_activity :: proc(svc: ^Service, instance_id, activity_status: string) {
 	if svc == nil || svc.repo == nil || instance_id == "" do return
+	scratch: Scratch
+	context.allocator = scratch_begin(&scratch)
+	defer scratch_end(&scratch)
 	lease, held, _ := iface.taskchain_get_lease_by_holder(svc.repo, instance_id)
 	if !held do return
 	switch activity_status {
@@ -398,12 +406,41 @@ on_instance_activity :: proc(svc: ^Service, instance_id, activity_status: string
 }
 
 // touch_instance is the implicit heartbeat for ANY instance-token API call.
-// Cheap when the instance holds nothing (one read, no UoW).
+// Cheap when the instance holds nothing (one read, no UoW). With the timer
+// thread running, a due heartbeat is only queued here and written by
+// drain_pending_touches: the write needs the global UoW mutex, and taking it on
+// the auth path made every agent call (even chat.read) queue behind whatever
+// long transaction held it — and while it was held no heartbeat landed, so
+// every call passed the 30 s throttle and joined the queue.
 touch_instance :: proc(svc: ^Service, instance_id: string) {
 	if svc == nil || svc.repo == nil || instance_id == "" do return
 	lease, held, _ := iface.taskchain_get_lease_by_holder(svc.repo, instance_id)
 	if !held do return
+	if now_ms(svc.clock) - to_ms(lease.last_beat_at) < IMPLICIT_HEARTBEAT_MIN_SECONDS * 1000 do return
+	if sync.atomic_load(&svc.touch_async) {
+		sync.mutex_lock(&svc.state_mutex)
+		defer sync.mutex_unlock(&svc.state_mutex)
+		if svc.pending_touches == nil do svc.pending_touches = make(map[string]struct{}, runtime.heap_allocator())
+		if instance_id not_in svc.pending_touches do svc.pending_touches[strings.clone(instance_id, runtime.heap_allocator())] = {}
+		return
+	}
 	touch_lease(svc, lease)
+}
+
+// drain_pending_touches writes the heartbeats touch_instance queued (timer
+// thread, once per tick). The set is swapped out under state_mutex and the
+// UoWs run after it is released, so state_mutex is never held across one.
+drain_pending_touches :: proc(svc: ^Service) {
+	sync.mutex_lock(&svc.state_mutex)
+	pending := svc.pending_touches
+	svc.pending_touches = nil
+	sync.mutex_unlock(&svc.state_mutex)
+	if pending == nil do return
+	for instance_id in pending {
+		if lease, held, _ := iface.taskchain_get_lease_by_holder(svc.repo, instance_id); held do touch_lease(svc, lease)
+		delete(instance_id, runtime.heap_allocator())
+	}
+	delete(pending)
 }
 
 // IMPLICIT_HEARTBEAT_MIN_SECONDS throttles implicit heartbeats (review S3): a
@@ -428,6 +465,9 @@ touch_lease :: proc(svc: ^Service, lease: domain.Task_Lease) {
 // worker that came up idle gets work (pull).
 on_start_success :: proc(svc: ^Service, inst: domain.Agent_Instance) {
 	if svc == nil || svc.repo == nil do return
+	scratch: Scratch
+	context.allocator = scratch_begin(&scratch)
+	defer scratch_end(&scratch)
 	u, ok, _ := begin_uow(svc)
 	if !ok do return
 	acted := true
@@ -475,19 +515,11 @@ grant_boot_lease_grace :: proc(svc: ^Service) {
 // while the bridge was away); re-plan every chain with a held task.
 on_bridge_hello :: proc(svc: ^Service, bridge_id: string, active_instance_ids: []string) {
 	if svc == nil || svc.repo == nil || bridge_id == "" do return
-	// Everything this pass allocates (lease/task/chain rows, a match context per
-	// held chain, effects) is scratch. It runs on the bridge WS upgrade thread,
-	// which is on the persistent heap with no per-request arena, so without this
-	// scope every bridge (re)connect leaked a full matcher pass over every held
-	// chain. Heap-lived state (timers, recent_expiries, registry, merge jobs)
-	// already clones onto runtime.heap_allocator explicitly, as for the timer
-	// thread. Assign at proc-body scope: a nested-scope assignment would revert.
-	scratch: virtual.Arena
-	scratch_ok := virtual.arena_init_growing(&scratch) == nil
-	defer if scratch_ok do virtual.arena_destroy(&scratch)
-	scratch_allocator := context.allocator
-	if scratch_ok do scratch_allocator = virtual.arena_allocator(&scratch)
-	context.allocator = scratch_allocator
+	// Runs on the bridge WS upgrade thread (persistent heap): without this scope
+	// every bridge (re)connect leaked a full matcher pass over every held chain.
+	scratch: Scratch
+	context.allocator = scratch_begin(&scratch)
+	defer scratch_end(&scratch)
 	u, ok, _ := begin_uow(svc)
 	if !ok do return
 	leases, lerr := iface.taskchain_list_all_leases(svc.repo)

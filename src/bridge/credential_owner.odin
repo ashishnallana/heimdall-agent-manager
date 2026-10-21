@@ -98,10 +98,11 @@ bridge_enroll_default_credential_path :: proc(hub_url, bridge_id: string, alloca
 }
 
 // bridge_enroll_token_file_conflict reports an EXISTING credential file that
-// `ham-bridge enroll` must not overwrite: one owned by another hub or another bridge
-// than `replacing` (the bridge id this config is enrolled as, if any), or one with no
+// `ham-bridge enroll` must not overwrite: one owned by another hub or by another
+// bridge than `replacing` (the bridge id this config is enrolled as, if any) or
+// `reusing` (the bridge id being re-enrolled, when it differs), or one with no
 // owner header at all.
-bridge_enroll_token_file_conflict :: proc(token_file, hub_url, replacing: string) -> (reason: string, conflict: bool) {
+bridge_enroll_token_file_conflict :: proc(token_file, hub_url, replacing: string, reusing: string = "") -> (reason: string, conflict: bool) {
 	hub, id, status := bridge_credential_file_owner(token_file)
 	switch status {
 	case .Missing:
@@ -111,7 +112,7 @@ bridge_enroll_token_file_conflict :: proc(token_file, hub_url, replacing: string
 	case .Owned:
 		want, ok := bridge_hub_canonical_base(hub_url, context.temp_allocator)
 		if !ok || hub != want do return strings.concatenate({"it belongs to a bridge of hub ", hub}, context.temp_allocator), true
-		if id != strings.trim_space(replacing) do return strings.concatenate({"it belongs to bridge ", id, " (a different bridge than this config's)"}, context.temp_allocator), true
+		if id != strings.trim_space(replacing) && id != strings.trim_space(reusing) do return strings.concatenate({"it belongs to bridge ", id, " (a different bridge than this config's)"}, context.temp_allocator), true
 	}
 	return "", false
 }

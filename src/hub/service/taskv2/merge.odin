@@ -111,7 +111,18 @@ merge_job_run :: proc(data: rawptr) {
 		free(job)
 		free_all(context.temp_allocator)
 	}
-	run_merge(job.svc, job.merge)
+	run_merge_scoped(job.svc, job.merge)
+}
+
+// run_merge_scoped runs the merge on a scratch arena: this thread is on the
+// persistent heap and run_merge, like the rest of taskv2, never frees. The job
+// itself is heap-owned and freed by merge_job_run, outside this scope.
+@(private = "file")
+run_merge_scoped :: proc(svc: ^Service, m: Merge_Effect) {
+	scratch: Scratch
+	context.allocator = scratch_begin(&scratch)
+	defer scratch_end(&scratch)
+	run_merge(svc, m)
 }
 
 // merge_command_json renders the bridge command. Pure; temp-allocated.

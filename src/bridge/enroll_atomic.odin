@@ -184,8 +184,10 @@ Bridge_Enrollment_Result :: struct {
 
 // bridge_enroll_stage_promote renames the staging over the live files and removes
 // the marker LAST, so a crash midway is finished by the next recovery. The refresh
-// half goes first for the reason the refresh worker writes it first.
-bridge_enroll_stage_promote :: proc(st: Bridge_Enroll_Stage) -> bool {
+// half goes first for the reason the refresh worker writes it first. A
+// re-enrollment of the same bridge id (reenroll_identity.odin) drops the previous
+// identity's backup before the marker goes: the commit is final.
+bridge_enroll_stage_promote :: proc(st: Bridge_Enroll_Stage, bridge_id: string) -> bool {
 	ok := true
 	for path in ([3]string{st.refresh_file, st.token_file, st.config_path}) {
 		if path == "" || !file_exists(staged(path)) do continue
@@ -194,7 +196,10 @@ bridge_enroll_stage_promote :: proc(st: Bridge_Enroll_Stage) -> bool {
 			ok = false
 		}
 	}
-	if ok do _ = os.remove(st.marker)
+	if ok {
+		_ = bridge_reenroll_resolve(st.config_path, bridge_id, true)
+		_ = os.remove(st.marker)
+	}
 	return ok
 }
 
@@ -205,7 +210,7 @@ bridge_enroll_atomic_discard_locked :: proc() {
 	a := &g_enroll_atomic
 	bridge_enroll_stage_discard(bridge_enroll_stage_for(a.token_file, a.config_path))
 	keystore_lock_and_purge(a.cred.bridge_id)
-	_ = keystore_delete_identity_key(a.cred.bridge_id)
+	bridge_enroll_discard_identity(a.config_path, a.cred.bridge_id)
 }
 
 // bridge_enroll_atomic_on_unseal runs on the hub socket's thread for a bridge_unseal
@@ -249,7 +254,7 @@ bridge_enroll_atomic_on_result :: proc(text: string) {
 	if !a.active do return
 	if committed {
 		if a.state == .Acked {
-			if !bridge_enroll_stage_promote(bridge_enroll_stage_for(a.token_file, a.config_path)) {
+			if !bridge_enroll_stage_promote(bridge_enroll_stage_for(a.token_file, a.config_path), a.cred.bridge_id) {
 				// The hub committed; the marker stays, so the next start finishes this.
 				fmt.eprintln("bridge enroll: committed, but the credential could not be moved into place; the next start will finish it")
 			}
@@ -260,7 +265,13 @@ bridge_enroll_atomic_on_result :: proc(text: string) {
 	// A commit is final at the hub: a later committed:false (a stale or duplicate
 	// verdict) must never undo it.
 	if a.state == .Committed do return
-	if a.state == .Acked do bridge_enroll_atomic_discard_locked()
+	if a.state == .Acked {
+		bridge_enroll_atomic_discard_locked()
+	} else if a.state == .Waiting {
+		// Nothing was staged, but the identity committed at approval goes (or, for a
+		// re-enrollment, the previous one comes back).
+		bridge_enroll_discard_identity(a.config_path, a.cred.bridge_id)
+	}
 	if a.state != .Rolled_Back do fmt.println("bridge enroll: the hub reported this enrollment rolled back")
 	a.state = .Rolled_Back
 }
@@ -304,7 +315,7 @@ bridge_enroll_atomic_recover_paths :: proc(token_file, config_path: string, refr
 	refresh_token, has_refresh := bridge_read_token_file(staged(st.refresh_file))
 	if !has_refresh || !file_exists(staged(st.token_file)) {
 		// Promotion was underway: whatever is still staged is the committed credential.
-		if bridge_enroll_stage_promote(st) do return .Promoted
+		if bridge_enroll_stage_promote(st, marker_bridge_id) do return .Promoted
 		return .Unresolved
 	}
 	defer delete(refresh_token)
@@ -320,7 +331,7 @@ bridge_enroll_atomic_recover_paths :: proc(token_file, config_path: string, refr
 		// Committed at the hub. The staged pair is now spent: stage the rotated one.
 		_ = bridge_write_secret_file(staged(st.refresh_file), rotated.refresh_token)
 		_ = bridge_write_credential_file(staged(st.token_file), marker_hub, marker_bridge_id, rotated.access_token)
-		if bridge_enroll_stage_promote(st) {
+		if bridge_enroll_stage_promote(st, marker_bridge_id) {
 			fmt.printfln("bridge enroll recovery: enrollment of %s was committed; credential moved into place", marker_bridge_id)
 			return .Promoted
 		}
@@ -328,7 +339,7 @@ bridge_enroll_atomic_recover_paths :: proc(token_file, config_path: string, refr
 	case .Revoked:
 		bridge_enroll_stage_discard(st)
 		keystore_lock_and_purge(marker_bridge_id)
-		_ = keystore_delete_identity_key(marker_bridge_id)
+		bridge_enroll_discard_identity(config_path, marker_bridge_id)
 		fmt.printfln("bridge enroll recovery: enrollment of %s was rolled back by the hub; discarded its staged credential and key", marker_bridge_id)
 		return .Discarded
 	case .Retry:
@@ -367,7 +378,7 @@ bridge_enroll_atomic_seed_config :: proc(args: []string, cred: Bridge_Enroll_Cre
 @(private = "file")
 bridge_enroll_atomic_rolled_back :: proc(reason: string) {
 	fmt.eprintfln("bridge enroll FAILED: enrollment rolled back — %s", reason)
-	fmt.eprintln("  Nothing was kept: this machine is not enrolled and no credential or vault key was saved.")
+	fmt.eprintln("  Nothing was kept: no new credential or vault key was saved (a re-enrolled bridge keeps its previous identity and credential).")
 	fmt.eprintln("  Run `ham-bridge enroll --hub <url>` again to retry.")
 }
 
@@ -378,6 +389,7 @@ bridge_enroll_atomic_rolled_back :: proc(reason: string) {
 bridge_enroll_atomic_run :: proc(args: []string, cred: Bridge_Enroll_Credential, token_file, config_path, api_base: string) -> bool {
 	if !bridge_enroll_credential_usable(cred.access_token) {
 		fmt.eprintln("enroll FAILED: the Hub returned an access token this bridge will not accept (empty, unprefixed, or missing its secret half); nothing was written")
+		bridge_enroll_discard_identity(config_path, cred.bridge_id)
 		return false
 	}
 	bridge_enroll_atomic_arm(cred, token_file, config_path, api_base)
@@ -427,6 +439,7 @@ bridge_enroll_atomic_run :: proc(args: []string, cred: Bridge_Enroll_Credential,
 				sync.mutex_lock(&g_enroll_atomic.mu)
 				if g_enroll_atomic.state == .Waiting {
 					keystore_lock_and_purge(cred.bridge_id)
+					bridge_enroll_discard_identity(config_path, cred.bridge_id)
 					g_enroll_atomic.state = .Rolled_Back
 					sync.mutex_unlock(&g_enroll_atomic.mu)
 					bridge_enroll_atomic_rolled_back("the vault key was not delivered in time")

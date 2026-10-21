@@ -14,11 +14,16 @@ import sqlite "odin_test:hub/repository/sqlite"
 // contract. They do not claim coverage of matcher/lease integration (cutover).
 graph_fixture :: proc(t: ^testing.T, path := ":memory:") -> (^Fixture, bool) {
 	fx := new(Fixture)
-	conn, ok, err := sqlite.open(path)
-	if !testing.expect(t, ok, err.message) do return fx, false
-	fx.conn = conn
-	ok, err = sqlite.run_migrations(&fx.conn)
-	if !testing.expect(t, ok, err.message) do return fx, false
+	if path == ":memory:" {
+		conn, ok := fixture_clone_migrated(t)
+		if !ok do return fx, false
+		fx.conn = conn
+	} else {
+		conn, ok, err := sqlite.open(path)
+		if !testing.expect(t, ok, err.message) do return fx, false
+		fx.conn = conn
+		if !fixture_clone_migrated_into(t, &fx.conn) do return fx, false
+	}
 	fixture_wire(fx)
 	chain := seed_chain(t, fx, "mixed_chain", true)
 	chain.coordinator_agent_instance_id = "coord_instance"
@@ -502,11 +507,17 @@ test_mixed_graph_receipt_generation_and_scope_constraints_fail_closed :: proc(t:
 @(test)
 test_mixed_graph_history_survives_restart_and_ledger_recovery :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
-	dir := os.get_env("TEMP", context.temp_allocator)
-	if dir == "" do dir = "/tmp"
-	path := fmt.tprintf("%s/ham_mixed_graph_%d.db", dir, os.get_pid())
+	dir := os.get_env("TMPDIR", context.temp_allocator)
+	if dir == "" do dir = os.get_env("TEMP", context.temp_allocator)
+	if !testing.expect(t, dir != "", "TMPDIR or TEMP must name a scratch directory") do return
+	path := fmt.tprintf("%s/ham_mixed_graph_restart_%d.db", dir, os.get_pid())
+	journal := fmt.tprintf("%s-journal", path)
 	os.remove(path)
-	defer os.remove(path)
+	os.remove(journal)
+	defer {
+		os.remove(path)
+		os.remove(journal)
+	}
 	fx, ok := graph_fixture(t, path)
 	defer sqlite.close(&fx.conn)
 	if !ok do return

@@ -328,11 +328,10 @@ enroll_hub_url_accepts_an_origin_and_rejects_everything_else :: proc(t: ^testing
 	testing.expect(t, ok && origin == "https://hub.example.com", "a trailing slash must be normalised away")
 	plain, plain_ok := bridge_enroll_hub_url("http://127.0.0.1:8190", context.temp_allocator)
 	testing.expect(t, plain_ok && plain == "http://127.0.0.1:8190", "a local http origin must be accepted for the dev stack")
-	// A path is refused rather than trimmed: it most likely means the operator
-	// pasted the approval page, and silently deriving the origin from it would make
-	// a wrong host look like it worked.
-	_, with_path := bridge_enroll_hub_url("https://hub.example.com/enroll", context.temp_allocator)
-	testing.expect(t, !with_path, "a URL with a path must be refused")
+	// A path is a hub behind a reverse proxy: kept as the prefix (trailing slash
+	// trimmed), never dropped.
+	prefixed, with_path := bridge_enroll_hub_url("https://hub.example.com/heimdall/", context.temp_allocator)
+	testing.expect(t, with_path && prefixed == "https://hub.example.com/heimdall", "a path prefix must be kept")
 	_, no_scheme := bridge_enroll_hub_url("hub.example.com", context.temp_allocator)
 	testing.expect(t, !no_scheme, "a bare hostname must be refused")
 	_, empty := bridge_enroll_hub_url("", context.temp_allocator)
@@ -632,4 +631,52 @@ bridge_config_leaves_absolute_data_dir_untouched :: proc(t: ^testing.T) {
 	defer sync.mutex_unlock(&bridge_test_config_mutex)
 	cfg := bridge_config_from_args([]string{"ham-bridge", "--data-dir", "/var/lib/heimdall"})
 	testing.expect_value(t, cfg.data_dir, "/var/lib/heimdall")
+}
+
+// ===== Reusing the previous bridge identity =====
+
+@(test)
+enroll_reuse_hint_defaults_to_the_config_and_honours_the_flags :: proc(t: ^testing.T) {
+	base := []string{"ham-bridge", "enroll", "--hub", "https://hub.example.test"}
+	with :: proc(base: []string, extra: ..string) -> []string {
+		out := make([dynamic]string, 0, len(base) + len(extra), context.temp_allocator)
+		append(&out, ..base)
+		append(&out, ..extra)
+		return out[:]
+	}
+	hint, err, ok := bridge_enroll_reuse_hint(base, "brg_previous1")
+	testing.expect(t, ok && err == "" && hint == "brg_previous1", "the config's bridge id is offered by default")
+	hint, _, ok = bridge_enroll_reuse_hint(base, "")
+	testing.expect(t, ok && hint == "", "a first enrollment offers nothing")
+	hint, _, ok = bridge_enroll_reuse_hint(base, "local-daemon")
+	testing.expect(t, ok && hint == "", "an unenrolled config id is never offered")
+	hint, _, ok = bridge_enroll_reuse_hint(with(base, "--reuse-bridge", "brg_other-2"), "brg_previous1")
+	testing.expect(t, ok && hint == "brg_other-2", "--reuse-bridge overrides the config")
+	hint, _, ok = bridge_enroll_reuse_hint(with(base, "--new-bridge"), "brg_previous1")
+	testing.expect(t, ok && hint == "", "--new-bridge offers nothing")
+	_, err, ok = bridge_enroll_reuse_hint(with(base, "--new-bridge", "--reuse-bridge", "brg_x"), "brg_previous1")
+	testing.expect(t, !ok && strings.contains(err, "mutually exclusive"), err)
+	for bad in ([]string{"", "previous1", "brg_", "brg_a/b", "brg_a b", "brg_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}) {
+		_, _, bad_ok := bridge_enroll_reuse_hint(with(base, "--reuse-bridge", bad), "")
+		testing.expectf(t, !bad_ok, "--reuse-bridge %q must be refused (the hub would answer 400)", bad)
+	}
+	_, _, ok = bridge_enroll_reuse_hint(with(base, "--reuse-bridge"), "")
+	testing.expect(t, !ok, "--reuse-bridge without a value is a usage error")
+	testing.expect(t, bridge_enroll_hint_shape_ok("brg_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), "60 characters after brg_ are allowed")
+}
+
+@(test)
+enroll_authorize_body_carries_the_reuse_hint_only_when_set :: proc(t: ^testing.T) {
+	d := Bridge_Machine_Descriptor{hostname = "dawnstar", os = "Linux", os_user = "tanmay", bridge_version = "1.2.3"}
+	with_hint := bridge_enroll_authorize_body(d, TEST_PUBKEY_HEX, "challenge-value", previous_bridge_id = "brg_previous1", allocator = context.temp_allocator)
+	testing.expect(t, strings.contains(with_hint, "\"previous_bridge_id\":\"brg_previous1\""), with_hint)
+	without := bridge_enroll_authorize_body(d, TEST_PUBKEY_HEX, "challenge-value", allocator = context.temp_allocator)
+	testing.expect(t, !strings.contains(without, "previous_bridge_id"), "no hint, no field (--new-bridge, first enrollment)")
+}
+
+@(test)
+enroll_result_line_names_reuse_or_new :: proc(t: ^testing.T) {
+	testing.expect_value(t, bridge_enroll_result_line("brg_previous1", "brg_previous1"), "Re-enrolled existing bridge brg_previous1")
+	testing.expect_value(t, bridge_enroll_result_line("brg_previous1", "brg_fresh"), "Registered new bridge brg_fresh")
+	testing.expect_value(t, bridge_enroll_result_line("", "brg_fresh"), "Registered new bridge brg_fresh")
 }

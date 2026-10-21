@@ -1,6 +1,5 @@
 package sqlite
 
-import "core:fmt"
 import "core:os"
 import "core:strings"
 import "core:testing"
@@ -15,12 +14,11 @@ import domain "odin_test:hub/domain"
 // Heap-allocated, exactly len bytes — the shape main.odin produces.
 @(test)
 test_open_with_runtime_concatenated_path :: proc(t: ^testing.T) {
-	suffix := fmt.tprintf("%d.db", os.get_pid())
-	db_path := strings.concatenate({"/tmp/test_conn_concat_", suffix})
+	db_path := strings.concatenate({tmpl_tmp_db_path("conn_concat"), "-rt.db"})
 	defer delete(db_path)
 
-	os.remove(db_path)
-	defer os.remove(db_path)
+	tmpl_remove_db(db_path)
+	defer tmpl_remove_db(db_path)
 
 	conn, open_ok, err := open(db_path)
 	testing.expect(t, open_ok, "open succeeds for a runtime-concatenated path")
@@ -36,7 +34,7 @@ test_open_with_runtime_concatenated_path :: proc(t: ^testing.T) {
 // this test fails against the unfixed open() rather than passing by luck.
 @(test)
 test_open_with_non_terminated_path :: proc(t: ^testing.T) {
-	intended := fmt.tprintf("/tmp/test_conn_noterm_%d.db", os.get_pid())
+	intended := tmpl_tmp_db_path("conn_noterm")
 
 	buf := make([]byte, len(intended) + 64)
 	defer delete(buf)
@@ -44,8 +42,8 @@ test_open_with_non_terminated_path :: proc(t: ^testing.T) {
 	copy(buf, transmute([]byte)intended)
 	db_path := string(buf[:len(intended)])
 
-	os.remove(db_path)
-	defer os.remove(db_path)
+	tmpl_remove_db(db_path)
+	defer tmpl_remove_db(db_path)
 
 	conn, open_ok, _ := open(db_path)
 	testing.expect(t, open_ok, "open succeeds for a non-NUL-terminated path")
@@ -57,5 +55,5 @@ test_open_with_non_terminated_path :: proc(t: ^testing.T) {
 	// The overrun path SQLite would have used if the terminator were missing.
 	overrun := string(buf[:])
 	testing.expect(t, !os.exists(overrun), "no file created at the overrun path")
-	if os.exists(overrun) do os.remove(overrun)
+	defer tmpl_remove_db(overrun)
 }

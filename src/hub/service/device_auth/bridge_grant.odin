@@ -265,6 +265,9 @@ validate_bridge_authorize_input :: proc(input: Authorize_Input, allocator := con
 		if input.pair_lookup != "" || input.pair_key_mac != "" || input.pair_salt != "" || input.pair_hub_origin != "" {
 			return "", kind, false, domain.domain_error(.Validation_Failed, "pair_lookup requires bridge_public_key")
 		}
+		if input.previous_bridge_id != "" {
+			return "", kind, false, domain.domain_error(.Validation_Failed, "previous_bridge_id requires bridge_public_key")
+		}
 		return "", kind, true, domain.Domain_Error{}
 	}
 	if !valid_bridge_public_key(input.bridge_public_key) {
@@ -299,6 +302,11 @@ validate_bridge_authorize_input :: proc(input: Authorize_Input, allocator := con
 	if !vault.valid_pair_hub_origin(input.pair_hub_origin) {
 		return "", kind, false, domain.domain_error(.Validation_Failed, "bridge enrollment requires pair_hub_origin (canonical scheme://host:port); update ham-bridge")
 	}
+	// Only the SHAPE of the hint is checked here; whether it names a bridge the
+	// approver may reuse is decided per approver at verify time.
+	if input.previous_bridge_id != "" && !valid_previous_bridge_id(input.previous_bridge_id) {
+		return "", kind, false, domain.domain_error(.Validation_Failed, "previous_bridge_id must be a brg_ id")
+	}
 	fingerprint, fok := bridge_key_fingerprint_for(input.bridge_public_key, allocator)
 	if !fok {
 		return "", kind, false, domain.domain_error(.Validation_Failed, "could not derive a fingerprint for bridge_public_key")
@@ -308,4 +316,21 @@ validate_bridge_authorize_input :: proc(input: Authorize_Input, allocator := con
 		return "", kind, false, domain.domain_error(.Validation_Failed, "bridge_key_fingerprint does not match bridge_public_key")
 	}
 	return fingerprint, kind, true, domain.Domain_Error{}
+}
+
+// PREVIOUS_BRIDGE_ID_MAX bounds the stored hint; real ids are "brg_" + hex nanoseconds.
+PREVIOUS_BRIDGE_ID_MAX :: 64
+
+// valid_previous_bridge_id checks the shape of a host-asserted previous_bridge_id:
+// "brg_" followed by 1..60 characters of [A-Za-z0-9_-]. Shape only -- ownership and
+// liveness are the verify handler's to check, against the approving user.
+valid_previous_bridge_id :: proc(id: string) -> bool {
+	if len(id) <= len("brg_") || len(id) > PREVIOUS_BRIDGE_ID_MAX || !strings.has_prefix(id, "brg_") do return false
+	for c in transmute([]byte)id[len("brg_"):] {
+		switch c {
+		case 'a'..='z', 'A'..='Z', '0'..='9', '_', '-':
+		case: return false
+		}
+	}
+	return true
 }
