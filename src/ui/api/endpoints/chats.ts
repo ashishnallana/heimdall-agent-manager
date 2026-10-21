@@ -236,7 +236,8 @@ export const chatEndpoints = heimdallApi.injectEndpoints({
       invalidatesTags: (_result, _error, { agentId }) => [
         { type: 'SidebarConversations' as const, id: 'ALL' },
         { type: 'ConversationSummaries' as const, id: 'LIST' },
-        { type: 'Agents' as const, id: 'LIST' },
+        // Not Agents:LIST: starting a conversation launches an instance but changes no
+        // agent identity, and LIST is provided only by listAgentIdentities.
         { type: 'AgentInstances' as const, id: agentId },
       ],
     }),
