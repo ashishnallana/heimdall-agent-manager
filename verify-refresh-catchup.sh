@@ -13,7 +13,8 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 echo "== scope: no backend change relative to refresh/performance =="
-OTHER=$(git diff --name-only refresh/performance HEAD -- . ':!src/ui' ':!tests' ':!verify-refresh-catchup.sh')
+BASE=$(git rev-parse --verify -q refresh/performance || echo b7b90e83)
+OTHER=$(git diff --name-only "$BASE" HEAD -- . ':!src/ui' ':!tests' ':!verify-refresh-catchup.sh')
 if [ -n "$OTHER" ]; then
   echo "unexpected non-UI changes; run verify-refresh-performance.sh instead:"
   echo "$OTHER"
@@ -41,6 +42,6 @@ run tests/ui_pane_deferral_mounted_test.ts
 
 echo "== ui: other user-WS flush consumers =="
 run tests/ui_attention_deck_test.ts tests/ui_notification_funnel_integration_test.ts tests/ui_pane_visibility_gate_test.ts
-timeout 300 npx tsx --test tests/search_title_cache_test.ts
+run tests/search_title_cache_test.ts
 
 echo "verify-refresh-catchup: ALL PASS"
