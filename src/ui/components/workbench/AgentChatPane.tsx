@@ -93,6 +93,7 @@ import ChatMessageList from '../chat/ChatMessageList';
 import InstanceReconfigurationProgress from '../chat/InstanceReconfigurationProgress';
 import { MessageComposerInput, MessageComposerActions, MessageComposerStatus } from '../chat/MessageComposer';
 import RuntimeConfigurationOptions from '../chat/RuntimeConfigurationOptions';
+import { paneShouldMarkRead, usePaneVisible, visiblePollInterval } from './paneVisibility';
 import { type TaskLike } from '../chat/chainTaskInference';
 import { groupTranscriptMessages, isAgentStartMessage } from '../chat/transcriptGrouping';
 import type { ChatDeliveryStatus, ChatMessage, ChatTimestamp } from '../chat/types';
@@ -668,10 +669,13 @@ export function AgentChatPane({
   const isMobileHook = useIsMobile();
   const isMobile = explicitIsMobile ?? isMobileHook;
   const isAuxSubagent = variant === 'auxSubagent';
+  // On screen (not behind a maximised pane, an off-screen mobile page or a hidden
+  // tab). Hidden panes keep their caches but do not poll or mark read.
+  const paneVisible = usePaneVisible();
 
   const convQuery = useFetchConversationQuery(
     { conversationId: '', agentInstanceId: routeInstanceId },
-    { skip: !routeInstanceId, pollingInterval: 10000, skipPollingIfUnfocused: true },
+    { skip: !routeInstanceId, pollingInterval: visiblePollInterval(paneVisible, 10000), skipPollingIfUnfocused: true },
   );
   const conversation = convQuery.data?.conversation || null;
   const conversationId = String(
@@ -679,7 +683,7 @@ export function AgentChatPane({
   );
   const messagesQuery = useFetchConversationMessagesQuery(
     { conversationId },
-    { skip: !conversationId, pollingInterval: 10000, skipPollingIfUnfocused: true },
+    { skip: !conversationId, pollingInterval: visiblePollInterval(paneVisible, 10000), skipPollingIfUnfocused: true },
   );
   const [fetchOlderMessages, olderMessagesState] = useLazyFetchConversationMessagesQuery();
   const [updateConversationTitle, updateTitleState] = useUpdateConversationTitleMutation();
@@ -714,7 +718,7 @@ export function AgentChatPane({
   const chainTasksQuery = useFetchChainTasksQuery({ chainId }, { skip: !chainId });
   const chainDetailQuery = useFetchTaskChainDetailQuery(
     { chainId },
-    { skip: !chainId, pollingInterval: 120000 },
+    { skip: !chainId, pollingInterval: visiblePollInterval(paneVisible, 120000) },
   );
   const chainProgress = useMemo(() => {
     const allTasks: TaskLike[] = (chainDetailQuery.data?.chain?.tasks ||
@@ -739,13 +743,13 @@ export function AgentChatPane({
     { instanceId: agentInstanceId },
     {
       skip: !agentInstanceId,
-      pollingInterval: instancePollInterval,
+      pollingInterval: visiblePollInterval(paneVisible, instancePollInterval),
       skipPollingIfUnfocused: true,
     },
   );
   const instance = instanceQuery.data?.instance || null;
   const { data: liveProjects } = useGetAgentsLiveQuery(undefined, {
-    pollingInterval: 30000,
+    pollingInterval: visiblePollInterval(paneVisible, 30000),
     skipPollingIfUnfocused: true,
   });
   const agentIdentityQuery = useFetchAgentIdentityQuery({ agentId }, { skip: !agentId });
@@ -812,7 +816,7 @@ export function AgentChatPane({
     Boolean(provider && provider !== instanceProvider) ||
     Boolean(model && model !== instanceModel);
   const bridgesQuery = useListBridgesQuery(undefined, {
-    pollingInterval: editingRuntime ? 5000 : 30000,
+    pollingInterval: visiblePollInterval(paneVisible, editingRuntime ? 5000 : 30000),
     skipPollingIfUnfocused: true,
   });
   useEffect(() => {
@@ -1264,16 +1268,22 @@ export function AgentChatPane({
   useEffect(() => {
     if (!renaming) setTitleDraft(editableTitle);
   }, [editableTitle, renaming]);
+  const unreadCount = Number(conversation?.unread_count || conversation?.unreadCount || 0);
   useEffect(() => {
-    if (
-      isActiveTab &&
-      agentInstanceId &&
-      conversationId &&
-      (conversation?.unread_count || conversation?.unreadCount)
-    ) {
+    if (paneShouldMarkRead({ isActiveTab, paneVisible, conversationId, agentInstanceId, unreadCount })) {
       void markRead({ conversationId });
     }
-  }, [isActiveTab, conversationId, agentInstanceId, conversation?.unread_count, conversation?.unreadCount]);
+  }, [isActiveTab, paneVisible, conversationId, agentInstanceId, unreadCount]);
+  // A pane that was hidden skipped its polls; catch up once when it is shown again.
+  const wasVisibleRef = useRef(paneVisible);
+  useEffect(() => {
+    const becameVisible = paneVisible && !wasVisibleRef.current;
+    wasVisibleRef.current = paneVisible;
+    if (!becameVisible) return;
+    refetchIfStarted(convQuery);
+    refetchIfStarted(messagesQuery);
+    refetchIfStarted(instanceQuery);
+  }, [paneVisible]);
   useEffect(() => {
     if (settingsEditedRef.current) return;
     setProvider(instanceProvider);
