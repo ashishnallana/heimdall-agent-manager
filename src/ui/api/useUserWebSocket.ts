@@ -1,10 +1,11 @@
 import { apiAbsoluteUrl } from './apiBase';
-import { useEffect, useRef } from 'react';
+import { useEffect } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import { handleUserWsEvent, resyncAfterReconnect } from './wsInvalidation';
 import { heimdallApi } from './heimdallApi';
 import {
   MAX_CONSECUTIVE_FAILURES,
+  STABLE_CONNECTION_MS,
   USER_WS_RESYNC_EVENT,
   UserWsAuthError,
   UserWsStreamTracker,
@@ -131,7 +132,8 @@ export type UserWsConnectionEnv = {
 //   close 4401/4403, or a pre-ready close whose /api/v1/me probe says 401/403, or an
 //   Electron ticket mint answering 401/403: PARK (no more retries)
 //   any other close: retry after a capped, jittered delay; after
-//   MAX_CONSECUTIVE_FAILURES connects without ready: PARK
+//   MAX_CONSECUTIVE_FAILURES connects without a stable ready (one that lasted
+//   STABLE_CONNECTION_MS): PARK
 //   parked: resume on 'online', window focus or the tab becoming visible.
 export function startUserWsConnection(env: UserWsConnectionEnv): () => void {
   const dispatch = env.dispatch;
@@ -148,8 +150,11 @@ export function startUserWsConnection(env: UserWsConnectionEnv): () => void {
   let reconnectTimer: number | undefined;
   let heartbeatTimer: number | undefined;
   let pendingWaitTimer: number | undefined;
-  // Consecutive connects that never reached user_ws_ready. Reset on ready.
+  // Consecutive connects that never reached a STABLE ready: a connect that failed, or
+  // one that closed within STABLE_CONNECTION_MS of user_ws_ready. Reset only once a
+  // connection has stayed ready that long (stableTimer).
   let failures = 0;
+  let stableTimer: number | undefined;
   // Set when retrying stopped on its own (auth, or too many failures); cleared by
   // the online/visibility/focus listeners below.
   let parked = false;
@@ -195,6 +200,11 @@ export function startUserWsConnection(env: UserWsConnectionEnv): () => void {
       };
       sweep();
     });
+  };
+
+  const clearStableTimer = () => {
+    if (stableTimer) window.clearTimeout(stableTimer);
+    stableTimer = undefined;
   };
 
   const clearHeartbeat = () => {
@@ -278,8 +288,9 @@ export function startUserWsConnection(env: UserWsConnectionEnv): () => void {
         // Ready, not open, is "subscribed": the hub registers the socket and then sends
         // ready, so every event after it is delivered.
         ready = true;
-        failures = 0;
         lastReadyAt = Date.now();
+        if (stableTimer) window.clearTimeout(stableTimer);
+        stableTimer = window.setTimeout(() => { stableTimer = undefined; failures = 0; }, STABLE_CONNECTION_MS);
         dispatch(userWsConnected());
         scheduler.trigger(tracker.onReady(payload));
         return;
@@ -295,6 +306,7 @@ export function startUserWsConnection(env: UserWsConnectionEnv): () => void {
 
     socket.onclose = (event) => {
       clearHeartbeat();
+      clearStableTimer();
       socket = null;
       if (stopped) return;
       const kind = classifyClose(event?.code);
@@ -331,6 +343,7 @@ export function startUserWsConnection(env: UserWsConnectionEnv): () => void {
     document.removeEventListener('visibilitychange', resume);
     if (reconnectTimer) window.clearTimeout(reconnectTimer);
     if (pendingWaitTimer) window.clearTimeout(pendingWaitTimer);
+    clearStableTimer();
     clearHeartbeat();
     if (socket) {
       socket.onclose = null;
@@ -345,13 +358,13 @@ export function startUserWsConnection(env: UserWsConnectionEnv): () => void {
 // React hook form: pass a ref-like object whose `.current` is the live ctx.
 export function useUserWebSocket(ctxRef?: { current: UserWsContext }): { status: string; connected: boolean } {
   const dispatch = useDispatch<any>();
-  // One tracker per shell lifetime, so a second ready is known to be a reconnect.
-  const trackerRef = useRef(new UserWsStreamTracker());
-
   // Connect once for the shell's lifetime. ctxRef is read at event time, so it
-  // does not need to be a dependency.
+  // does not need to be a dependency. The stream tracker is created per connection
+  // loop (startUserWsConnection's default), not held in a ref: a ref survives React
+  // StrictMode's dev unmount/remount, which made the remounted loop's first ready look
+  // like a 'reconnect' (full invalidation) instead of 'initial'.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => startUserWsConnection({ dispatch, getCtx: () => ctxRef?.current || {}, tracker: trackerRef.current }), [dispatch]);
+  useEffect(() => startUserWsConnection({ dispatch, getCtx: () => ctxRef?.current || {} }), [dispatch]);
 
   const status = useSelector((state: any) => state?.chat?.session?.wsStatus || 'idle');
   const connected = useSelector((state: any) => Boolean(state?.chat?.session?.wsConnected));

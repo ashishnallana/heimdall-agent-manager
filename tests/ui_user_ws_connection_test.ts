@@ -21,7 +21,7 @@ fakeDocument.visibilityState = 'visible';
 (globalThis as any).document ??= fakeDocument;
 
 const { startUserWsConnection } = await import('../src/ui/api/useUserWebSocket.ts');
-const { UserWsAuthError, UserWsStreamTracker, MAX_CONSECUTIVE_FAILURES, USER_WS_RESYNC_EVENT } = await import('../src/ui/api/userWsRecovery.ts');
+const { UserWsAuthError, UserWsStreamTracker, MAX_CONSECUTIVE_FAILURES, STABLE_CONNECTION_MS, USER_WS_RESYNC_EVENT } = await import('../src/ui/api/userWsRecovery.ts');
 
 class FakeSocket {
   readyState = 0;
@@ -165,6 +165,60 @@ test('outage (probe unavailable) retries with backoff and parks after a bounded 
     window.dispatchEvent(new Event('online'));
     await flush();
     assert.equal(h.sockets.length, MAX_CONSECUTIVE_FAILURES + 2, 'online resumes');
+    h.stop();
+  } finally { mock.timers.reset(); }
+});
+
+test('ready-then-close flap backs off and parks instead of reconnecting forever', async () => {
+  mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] });
+  try {
+    const h = harness();
+    await flush();
+    // Each new socket opens, gets ready, and is dropped at once. Stop when no new socket
+    // appears (parked); the cap guards against a regression looping forever.
+    for (let i = 0; i < MAX_CONSECUTIVE_FAILURES + 5; i++) {
+      const count = h.sockets.length;
+      h.last().open();
+      h.last().frame(ready(`e-${i}`));
+      h.last().drop(1006);
+      await flush();
+      await advance(31000);
+      if (h.sockets.length === count) break;
+    }
+    assert.equal(h.sockets.length, MAX_CONSECUTIVE_FAILURES + 1, 'short-lived ready connections count as failures');
+    // The first ready is the scoped 'initial'; each later one is one full resync.
+    assert.equal(h.fullResyncs, MAX_CONSECUTIVE_FAILURES, 'bounded resyncs');
+    await advance(60 * 60 * 1000);
+    assert.equal(h.sockets.length, MAX_CONSECUTIVE_FAILURES + 1, 'parked, not retrying forever');
+    h.stop();
+  } finally { mock.timers.reset(); }
+});
+
+test('a connection that stays ready clears the failure count', async () => {
+  mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] });
+  try {
+    const h = harness({ probe: async () => 'unavailable' });
+    await flush();
+    // Burn most of the failure budget with connects that never get ready.
+    for (let i = 0; i < MAX_CONSECUTIVE_FAILURES - 1; i++) {
+      h.last().drop(1006);
+      await flush();
+      await advance(31000);
+    }
+    const before = h.sockets.length;
+    h.last().open();
+    h.last().frame(ready('stable'));
+    await advance(STABLE_CONNECTION_MS + 1000);
+    h.last().drop(1006);
+    await flush();
+    // With the budget reset, further failures are retried again rather than parking at once.
+    for (let i = 0; i < 3; i++) {
+      await advance(31000);
+      h.last().drop(1006);
+      await flush();
+    }
+    await advance(31000);
+    assert.equal(h.sockets.length, before + 4, 'stable ready reset the budget; retries continue');
     h.stop();
   } finally { mock.timers.reset(); }
 });

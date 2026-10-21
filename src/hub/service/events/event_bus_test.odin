@@ -14,6 +14,7 @@ package events
 
 import "core:net"
 import "core:strings"
+import "core:sync"
 import "core:testing"
 import "core:thread"
 import "core:time"
@@ -581,4 +582,99 @@ req3_stamping_and_unstampable_payloads :: proc(t: ^testing.T) {
 		testing.expect(t, strings.contains(frames[0], `"type":"resync_required"`), "the client is told to resync")
 	}
 	testing.expect(t, bus.connected[0], "the client stays subscribed")
+}
+
+// A stale handle must never release the slot's NEXT registration: detach after the slot
+// was released and re-granted is a no-op, and the new connection keeps receiving.
+@(test)
+req3_stale_handle_detach_does_not_release_reused_slot :: proc(t: ^testing.T) {
+	first := make_pair(t)
+	defer close_pair(&first)
+	second := make_pair(t)
+	defer close_pair(&second)
+	bus: User_Event_Bus
+	old, r1 := user_ws_attach(&bus, OWNER, first.hub)
+	testing.expect_value(t, r1, User_WS_Attach_Result.Attached)
+	user_ws_detach(&bus, old)
+	fresh, r2 := user_ws_attach(&bus, OWNER, second.hub)
+	testing.expect_value(t, r2, User_WS_Attach_Result.Attached)
+	testing.expect_value(t, fresh.idx, old.idx)
+	testing.expect(t, fresh.generation != old.generation, "a re-granted slot gets a new generation")
+
+	user_ws_detach(&bus, old)
+	testing.expect(t, bus.connected[fresh.idx], "stale detach left the new registration alone")
+	publish_resource_changed(&bus, OWNER, "task", "t1", "updated", "{}")
+
+	raw := drain(second.peer)
+	defer delete(raw)
+	frames, ok := split_text_frames(raw)
+	defer delete(frames)
+	testing.expect(t, ok, "well-formed frames")
+	testing.expect_value(t, len(frames), 2)
+	if len(frames) == 2 {
+		testing.expect(t, strings.contains(frames[0], `"type":"user_ws_ready"`), "ready first")
+		testing.expect_value(t, stream_seq_of(frames[1]), 1)
+	}
+	old_raw := drain(first.peer)
+	defer delete(old_raw)
+	old_frames, _ := split_text_frames(old_raw)
+	defer delete(old_frames)
+	testing.expect_value(t, len(old_frames), 1) // only its own ready
+}
+
+@(private = "file")
+Churn_Publisher :: struct {
+	bus:  ^User_Event_Bus,
+	stop: bool,
+	sent: int,
+}
+
+@(private = "file")
+REQ3_CHURN_CYCLES :: 12
+
+// attach/detach racing a publisher: every connection sees ready first, then a stream_seq
+// that is contiguous from 1 with no frame split or interleaved, and nothing arrives on a
+// socket after user_ws_detach has returned (detach waits out an in-flight write).
+@(test)
+req3_attach_detach_racing_publish_keeps_streams_clean :: proc(t: ^testing.T) {
+	bus: User_Event_Bus
+	job := Churn_Publisher{bus = &bus}
+	th := thread.create_and_start_with_data(&job, proc(data: rawptr) {
+		job := (^Churn_Publisher)(data)
+		for !sync.atomic_load(&job.stop) {
+			publish_resource_changed(job.bus, OWNER, "task", "t", "updated", `{"pad":"0123456789"}`)
+			job.sent += 1
+		}
+	})
+
+	pairs: [REQ3_CHURN_CYCLES]Pair
+	before_detach: [REQ3_CHURN_CYCLES][]byte
+	for k in 0..<REQ3_CHURN_CYCLES {
+		pairs[k] = make_pair(t)
+		handle, result := user_ws_attach(&bus, OWNER, pairs[k].hub)
+		testing.expect_value(t, result, User_WS_Attach_Result.Attached)
+		time.sleep(2 * time.Millisecond)
+		user_ws_detach(&bus, handle)
+		before_detach[k] = drain(pairs[k].peer)
+	}
+	sync.atomic_store(&job.stop, true)
+	thread.join(th)
+	thread.destroy(th)
+	testing.expect(t, job.sent > 0, "the publisher ran")
+
+	for k in 0..<REQ3_CHURN_CYCLES {
+		frames, ok := split_text_frames(before_detach[k])
+		testing.expect(t, ok, "no torn or interleaved frame across attach/detach")
+		testing.expect(t, len(frames) >= 1 && strings.contains(frames[0], `"type":"user_ws_ready"`), "ready is the first frame")
+		in_order := true
+		for f, n in frames[1:] do if stream_seq_of(f) != n + 1 do in_order = false
+		testing.expect(t, in_order, "stream_seq contiguous from 1 on every connection")
+		delete(frames)
+		after := drain(pairs[k].peer)
+		testing.expect_value(t, len(after), 0) // nothing written after detach returned
+		delete(after)
+		delete(before_detach[k])
+		close_pair(&pairs[k])
+	}
+	testing.expect_value(t, bus.sockets_removed, 0)
 }

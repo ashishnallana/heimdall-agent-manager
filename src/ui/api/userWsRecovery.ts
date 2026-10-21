@@ -97,7 +97,10 @@ export function createResyncScheduler(
         return;
       }
       // 'initial' is the only scoped resync; any other reason widens it to a full one.
-      if (pending === null || pending === 'initial') pending = reason;
+      // 'reconnect' wins over gap/resync_required too: the full resync is the same, but
+      // only a 'reconnect' run fires heimdall:user-ws-reconnected, which listeners such
+      // as the shell's identity refresh rely on.
+      if (pending === null || pending === 'initial' || reason === 'reconnect') pending = reason;
       if (timer !== null) return;
       timer = setTimer(() => {
         timer = null;
@@ -120,6 +123,11 @@ export const MAX_BACKOFF_MS = 30000;
 // the browser to come back online, the tab to become visible or the window to regain
 // focus. Transient outages are thus retried with capped delays, never forever.
 export const MAX_CONSECUTIVE_FAILURES = 12;
+// A connection must stay ready this long before it counts as healthy and clears the
+// failure count. Resetting on ready alone let a ready-then-close flap (idle proxy drop,
+// hub restart loop, a slot dropped right after ready) reconnect forever at the minimum
+// delay, with a full resync each cycle.
+export const STABLE_CONNECTION_MS = 30000;
 
 // reconnectDelayMs: exponential, capped, with jitter (half fixed, half random) so many
 // tabs do not reconnect in lockstep after a hub restart.
@@ -173,8 +181,10 @@ export class UserWsAuthError extends Error {
 
 // staleQueriesBefore lists the RTK Query cache entries whose request started before
 // `readyAt` — the only ones that can have missed an event published before the socket
-// was subscribed. The 'initial' resync refetches just these, so first open does not
-// double every request the page just made.
+// was subscribed. The 'initial' resync refetches just these. On a cold load nearly every
+// query starts before ready, so this costs about one extra fetch of the first page's
+// queries, once (bounded, never repeated). It is cheaper than a full invalidation only
+// for queries mounted after ready; refresh_integrate may narrow it to event-covered endpoints.
 export function staleQueriesBefore(queries: Record<string, any> | undefined, readyAt: number): Array<{ endpointName: string; originalArgs: unknown }> {
   const out: Array<{ endpointName: string; originalArgs: unknown }> = [];
   for (const entry of Object.values(queries || {})) {

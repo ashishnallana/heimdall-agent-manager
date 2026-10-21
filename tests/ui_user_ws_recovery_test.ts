@@ -112,6 +112,18 @@ test('resync bursts are coalesced: at most one immediate and one trailing run pe
   assert.deepEqual(runs, ['reconnect', 'gap']);
 });
 
+test('a reconnect inside a pending gap window is not dropped by coalescing', () => {
+  const clock = fakeClock();
+  const runs: string[] = [];
+  const s = createResyncScheduler((r) => runs.push(r), { minIntervalMs: 1000, ...clock });
+  s.trigger('gap');
+  s.trigger('resync_required');
+  s.trigger('reconnect');
+  s.trigger('gap');
+  clock.advance(1000);
+  assert.deepEqual(runs, ['gap', 'reconnect'], 'the trailing run keeps the reconnect reason');
+});
+
 test('a gap during the initial window widens the trailing resync', () => {
   const clock = fakeClock();
   const runs: string[] = [];
