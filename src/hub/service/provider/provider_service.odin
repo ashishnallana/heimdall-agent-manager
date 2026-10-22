@@ -268,6 +268,7 @@ write_catalog_entry_json :: proc(b: ^strings.Builder, entry: domain.Provider_Cat
 	strings.write_string(b, "\",\"binary\":\""); contracts.write_json_string(b, entry.binary)
 	strings.write_string(b, "\",\"base_args\":"); strings.write_string(b, entry.base_args_json)
 	strings.write_string(b, ",\"yolo_args\":"); strings.write_string(b, entry.yolo_args_json)
+	strings.write_string(b, ",\"ask_args\":"); strings.write_string(b, entry.ask_args_json if entry.ask_args_json != "" else "[]")
 	strings.write_string(b, ",\"model_flag\":\""); contracts.write_json_string(b, entry.model_flag)
 	strings.write_string(b, "\",\"prompt_args\":"); strings.write_string(b, entry.prompt_args_json)
 	strings.write_string(

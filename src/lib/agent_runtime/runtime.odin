@@ -9,6 +9,9 @@ Agent_Profile :: struct {
 	command: []string,
 	base_args: []string,
 	yolo_flags: []string,
+	// ask_flags replace yolo_flags for permission_mode "ask" (catalog ask_args),
+	// pinning a prompting mode instead of the provider's user-configured default.
+	ask_flags: []string,
 	prompt_flags: []string,
 	starter_prompt: string,
 	prompt_delivery: string,
@@ -21,8 +24,9 @@ Agent_Profile :: struct {
 
 
 // Per-agent permission modes (REQ-EXT-PERM-2), carried in the launch payload as
-// "permission_mode". Only an explicit "ask" drops the catalog yolo flags; empty or
-// unknown values (older hubs, provider tests) keep the historical yolo launch.
+// "permission_mode". Only an explicit "ask" swaps the catalog yolo flags for its
+// ask flags; empty or unknown values (older hubs, provider tests) keep the
+// historical yolo launch.
 PERMISSION_MODE_YOLO :: "yolo"
 PERMISSION_MODE_ASK :: "ask"
 
@@ -35,7 +39,11 @@ build_agent_command :: proc(profile: Agent_Profile, model, daemon_url, agent_tok
 	argv := make([dynamic]string)
 	append(&argv, ..profile.command)
 	append(&argv, ..profile.base_args)
-	if permission_mode_uses_yolo_flags(permission_mode) do append(&argv, ..profile.yolo_flags)
+	if permission_mode_uses_yolo_flags(permission_mode) {
+		append(&argv, ..profile.yolo_flags)
+	} else {
+		append(&argv, ..profile.ask_flags)
+	}
 	if strings.trim_space(profile.model_flag) == "" { delete(argv); return nil }
 	append(&argv, profile.model_flag)
 	append(&argv, model)
