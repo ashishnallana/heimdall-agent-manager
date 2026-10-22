@@ -280,6 +280,8 @@ HUB_TO_BRIDGE_RUNTIME_FRAME_TYPES := []string{
 	"provider_catalog", "provider_catalog_version",
 	// REQ-EA-4: atomic enrollment verdict (bridge_enroll_ws.odin)
 	"bridge_enrollment_result",
+	// REQ-EXT-PERM-1: user permission decision (extension_permission.odin)
+	"permission_decision",
 	// bridge lifecycle
 	"bridge_unseal", "set_telemetry", "bridge_update", "provider_discover",
 	// agents

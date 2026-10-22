@@ -13,6 +13,7 @@ import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
 import ownership "odin_test:hub/service/ownership"
 import project_service "odin_test:hub/service/project"
+import events "odin_test:hub/service/events"
 import platform "odin_test:hub/platform"
 import jsonx "odin_test:lib/jsonx"
 
@@ -33,6 +34,8 @@ Agent_Service :: struct {
 	// path funnels into ONE chokepoint (taskv2.on_instance_terminal) without the
 	// agent package importing the engine.
 	hooks: Lifecycle_Hooks,
+	// event_bus: realtime UI frames for permission relay requests (optional).
+	event_bus: ^events.User_Event_Bus,
 }
 
 Lifecycle_Hooks :: struct {
@@ -55,7 +58,10 @@ STOPPED_BY_USER :: "user"
 // stopped|failed|unreachable, heartbeat reconcile, bridge disconnect, reaper,
 // delete) calls; the engine expires the instance's lease and re-plans.
 notify_instance_terminal :: proc(service: ^Agent_Service, instance_id: string) {
-	if service == nil || service.hooks.on_terminal == nil || instance_id == "" do return
+	if service == nil || instance_id == "" do return
+	// A dead instance can no longer answer its permission prompts.
+	cancel_instance_permission_requests(service, instance_id)
+	if service.hooks.on_terminal == nil do return
 	service.hooks.on_terminal(service.hooks.ctx, instance_id)
 }
 

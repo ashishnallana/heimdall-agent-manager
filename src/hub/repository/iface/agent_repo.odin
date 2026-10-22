@@ -52,6 +52,12 @@ Agent_Repository :: struct {
 	ext_list_events: Agent_Ext_List_Events_Proc,
 	ext_list_subagents: Agent_Ext_List_Subagents_Proc,
 	ext_list_files: Agent_Ext_List_Files_Proc,
+	// Permission relay; see permission_request_repo.odin.
+	perm_insert: Agent_Perm_Insert_Proc,
+	perm_get: Agent_Perm_Get_Proc,
+	perm_list: Agent_Perm_List_Proc,
+	perm_close: Agent_Perm_Close_Proc,
+	perm_close_pending: Agent_Perm_Close_Pending_Proc,
 }
 
 agent_next_title_counter :: proc(repo: ^Agent_Repository, agent_id: string, owner_user_id: domain.User_ID, now: string) -> (int, bool, domain.Domain_Error) {

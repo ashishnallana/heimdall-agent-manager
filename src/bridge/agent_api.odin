@@ -310,7 +310,7 @@ bridge_agent_method_allowed :: proc(method: string) -> bool {
 	switch method {
 	case "agent.start_success", "agent.activity.report",
 	     "agent.permission.request", "agent.permission.reply",
-	     "agent.extension.event", "agent.extension.status",
+	     "agent.extension.event", "agent.extension.status", "agent.extension.permission",
 	     "agent.rest.request",
 	     // discovery + agents
 	     "agent.bridge.list", "agent.bridge.providers",
