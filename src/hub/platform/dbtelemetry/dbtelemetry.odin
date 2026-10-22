@@ -15,9 +15,12 @@ import metrics "odin_test:lib/metrics"
 // the scope / per-request component totals may be summed. Hold durations
 // contain the holder's waits and execution and are kept in separate families.
 //
-// HEIMDALL_DB_TELEMETRY=off (default) registers nothing, and every proc below
-// reduces to the plain operation it wraps (one atomic load of `mode`).
+// HEIMDALL_DB_TELEMETRY=basic is the default. =off registers nothing, and every
+// proc below reduces to the plain operation it wraps (one atomic load of `mode`).
 
+// Off stays the zero value so test binaries and tools that never run
+// configure_db_telemetry keep the plain wrappers; the hub sets Basic at boot
+// unless HEIMDALL_DB_TELEMETRY=off.
 Mode :: enum u8 {
 	Off,
 	Basic,
@@ -111,14 +114,15 @@ mode :: #force_inline proc "contextless" () -> Mode {
 
 enabled :: #force_inline proc "contextless" () -> bool { return mode() != .Off }
 
-// parse_mode maps HEIMDALL_DB_TELEMETRY. "" means off. "full" (the phase-2 busy
-// handler) is NOT implemented and is rejected explicitly, as is any other value,
-// so a typo never silently enables or disables telemetry.
+// parse_mode maps HEIMDALL_DB_TELEMETRY. "" (unset) means basic, the default;
+// "off" is the explicit opt-out. "full" (the phase-2 busy handler) is NOT
+// implemented and is rejected explicitly, as is any other value, so a typo
+// never silently enables or disables telemetry.
 parse_mode :: proc(value: string) -> (m: Mode, ok: bool, message: string) {
 	switch value {
-	case "", "off":
+	case "off":
 		return .Off, true, ""
-	case "basic":
+	case "", "basic":
 		return .Basic, true, ""
 	case "full":
 		return .Off, false, "HEIMDALL_DB_TELEMETRY=full (busy-handler instrumentation) is not implemented in this release; use off or basic"

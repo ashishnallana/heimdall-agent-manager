@@ -11,31 +11,29 @@ All settings are read once at boot from the environment. Changing one needs a hu
 
 | Variable | Values | Default | Effect |
 |---|---|---|---|
-| `HEIMDALL_DB_TELEMETRY` | `off`, `basic` | `off` | `off`: wrappers behave as before. No new family is registered, and no extra mutex or clock call is made. `basic`: everything in §2. `full` (phase-2 busy handler) is **not implemented**. It and any other value **fail boot** with an explicit message, so a typo never silently changes behaviour. |
+| `HEIMDALL_DB_TELEMETRY` | `off`, `basic` | `basic` (when unset or empty) | `basic`: everything in §2. `off`: explicit opt-out; wrappers behave as before, no new family is registered, and no extra mutex or clock call is made. `full` (phase-2 busy handler) is **not implemented**. It and any other value (case-sensitive) **fail boot** with an explicit message and exit status 1, so a typo never silently changes behaviour. |
 | `HEIMDALL_DB_SLOW_MS` | integer ≥ 0 | `250` | HTTP requests at or over this many ms write a `db_slow_request` line with `reason=slow`. `0` disables threshold records. |
 | `HEIMDALL_DB_SAMPLE_N` | integer ≥ 0 | `1000` | One request in N writes a `reason=sample` baseline line. `0` disables sampling. |
 
-The background-scope (`db_slow_scope`) threshold is fixed at 1 s. Both record kinds share one token bucket of ≤ 10 lines/s.
+The background-scope (`db_slow_scope`) threshold is fixed at 1 s. Both record kinds share one token bucket of ≤ 10 lines/s. Because `basic` is the default, slow and sampled records are emitted by default too (250 ms threshold, 1 in 1000 sample); set `HEIMDALL_DB_SLOW_MS=0` / `HEIMDALL_DB_SAMPLE_N=0` to silence them while keeping the metrics.
 
-### Enable (operator)
+### Default (operator)
+
+A hub built from this release runs `basic` with no configuration. The repository ships no hub unit/env file that sets the variable; the production unit lives outside this repo, so check it does not pin `HEIMDALL_DB_TELEMETRY=off` if you expect telemetry. Optional tuning:
 
 ```bash
-# NixOS/systemd: add to the hub unit environment, then restart (a production change; schedule it)
-Environment=HEIMDALL_DB_TELEMETRY=basic
-# optional
+# NixOS/systemd hub unit environment, then restart (a production change; schedule it)
 Environment=HEIMDALL_DB_SLOW_MS=250
 Environment=HEIMDALL_DB_SAMPLE_N=1000
 ```
 
-Recommended order (plan §4.4):
-1. Deploy with the default `off` and check parity for 24 h.
-2. Set `basic`.
-3. Watch CPU per request and the series count.
-4. Collect the observation windows.
+After deploying (the plan §4.4 parity-first step was skipped by a user decision to ship `basic` on):
+1. Watch CPU per request (`rate(process_cpu_seconds_total)` / `rate(heimdall_http_requests_total)`) against the previous 7 days, RSS, and `heimdall_metrics_series`.
+2. Collect the observation windows.
 
-### Rollback
+### Rollback (opt out)
 
-Unset `HEIMDALL_DB_TELEMETRY`, or set it to `off`, then restart. No schema or data change is involved, and the legacy families (`heimdall_sqlite_query_duration_seconds`, `heimdall_sqlite_busy_total`, HTTP families) keep their meaning in both modes. You can also roll back the Nix generation.
+Set `HEIMDALL_DB_TELEMETRY=off` in the hub environment, then restart. Unsetting it no longer disables telemetry. No schema or data change is involved, and the legacy families (`heimdall_sqlite_query_duration_seconds`, `heimdall_sqlite_busy_total`, HTTP families) keep their meaning in both modes. You can also roll back the Nix generation.
 
 ## 2. Emitted metrics (`basic` only)
 
@@ -161,15 +159,16 @@ rate(process_cpu_seconds_total[1h]) / rate(heimdall_http_requests_total[1h])
 
 ## 5. Overhead (measured)
 
-`verify-db-telemetry.sh` runs `sqlite.test_db_telemetry_bench`: an optimised build (`-o:speed`), 3 runs, 200 k iterations on an in-process `SELECT 1`. On the dev host at commit time it gave:
+`verify-db-telemetry.sh` runs `sqlite.test_db_telemetry_bench`: an optimised build (`-o:speed`), 5 runs, 200 k iterations on an in-process `SELECT 1`. On the dev host (basic-default integration, 5 runs) it gave:
 
 | Loop | off (ns/iter) | basic (ns/iter) | delta |
 |---|---|---|---|
-| step + reset (1 wrapped call + raw reset) | ≈ 690–710 | ≈ 334–336 | **−355 to −377** |
-| prepare + finalize (2 wrapped calls) | ≈ 1 026–1 040 | ≈ 1 236–1 268 | **+198 to +242** (≈ +100–120 per call) |
+| step + reset (1 wrapped call + raw reset) | ≈ 685–698 | ≈ 333–343 | **−347 to −365** |
+| prepare + finalize (2 wrapped calls) | ≈ 1 039–1 053 | ≈ 1 246–1 314 | **+207 to +270** (≈ +104–135 per call) |
 
 - `basic` is *cheaper* than `off` for steps. The legacy wrapper (kept unchanged for `off` parity) calls `metrics.with` per step and reads `time.tick_now`, which on Linux is a raw `clock_gettime(MONOTONIC_RAW)` **syscall**. `basic` uses pre-resolved series and the libc vDSO `clock_gettime(MONOTONIC)` (`platform/dbtelemetry/clock_posix.odin`).
-- These numbers are from a micro loop on the development host, not Dawnstar and not production CPU. They meet the plan's ≤ 300 ns/call gate. The 0.5 % CPU and 2 MB RSS budgets are **unverified** until the post-deploy overhead watch.
+- These numbers are from a micro loop on the development host, not Dawnstar and not production CPU. They meet the plan's ≤ 300 ns/call gate. The 0.5 % CPU and 2 MB RSS budgets are **unverified**: production CPU/RSS overhead has not been measured and needs the post-deploy watch.
+- Exposition size from the startup smoke (fresh DB, no traffic): `basic` 967 samples (382 `heimdall_db_*`), `off` 223. The `heimdall_db_*` count is mostly eager per-lock histogram buckets; per-route/site series grow lazily with traffic.
 - Site table and slot table memory is fixed: 512 site slots plus 16 conn slots, a few tens of KB.
 
 ## 6. Limitations (phase 1)
@@ -187,5 +186,7 @@ rate(process_cpu_seconds_total[1h]) / rate(heimdall_http_requests_total[1h])
 ## 7. Verify
 
 ```bash
-bash verify-db-telemetry.sh   # scoped tests (DBT_TESTS, single thread), lock inventory, hub build, benchmark
+bash verify-db-telemetry.sh   # scoped tests (DBT_TESTS, single thread), default-mode tests, lock inventory,
+                              # hub build, startup smoke (unset/basic -> basic, off -> no families,
+                              # full/unknown -> boot fails), benchmark
 ```

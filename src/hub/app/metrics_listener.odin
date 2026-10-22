@@ -42,7 +42,7 @@ init_metrics :: proc() -> ^metrics.Registry {
 	shell_session_svc.shell_metrics_init(reg)
 	http.streams_metrics_init(reg)
 	sqlite.sqlite_metrics_init(reg)
-	dbt.init(reg) // no-op unless HEIMDALL_DB_TELEMETRY=basic
+	dbt.init(reg) // no-op when HEIMDALL_DB_TELEMETRY=off
 	reaper_metrics_init(reg)
 	db_collectors_init(reg)
 	push_service.push_metrics_init(reg)

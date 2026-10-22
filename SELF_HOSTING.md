@@ -479,6 +479,11 @@ curl -s http://127.0.0.1:9464/metrics | head
   `heimdall_http_accept_errors_total`, the standard `process_*` family from
   `/proc/self`, `heimdall_hub_build_info{version,commit}`, and the lib's own
   `heimdall_metrics_series` / `heimdall_metrics_scrape_duration_seconds`.
+- DB latency / lock-contention telemetry (`heimdall_db_*`, extra
+  `heimdall_sqlite_*` families and `db_slow_request` log lines) is **on by
+  default** (`HEIMDALL_DB_TELEMETRY` unset = `basic`); set
+  `HEIMDALL_DB_TELEMETRY=off` and restart to opt out. Any other value fails
+  boot. See [`docs/reference/db-telemetry.md`](docs/reference/db-telemetry.md).
 - Fleet metrics (`heimdall_bridge_*`, `heimdall_ws_*`, `heimdall_shell_*`,
   `heimdall_preview_*`, `heimdall_lsp_sessions`, SQLite/reaper/auth/billing
   counters) carry `bridge_id` at most; the owner appears only on

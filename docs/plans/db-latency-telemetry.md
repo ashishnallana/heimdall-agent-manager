@@ -340,6 +340,8 @@ What each test must prove:
 
 ### 4.4 Rollout and rollback
 
+> **Update (task_18e0b0eb96f02802):** by user decision the first published release ships `basic` as the default (unset = basic; `off` opts out), so step 1's off-default parity window was skipped. Overhead is watched after deploy instead; see `docs/reference/db-telemetry.md` §1/§5.
+
 1. Release N with `HEIMDALL_DB_TELEMETRY=off` default: verify parity (CPU, latency, existing families) for 24 h.
 2. Enable `basic` on Dawnstar (operator restart). Watch overhead: `rate(process_cpu_seconds_total)` normalised by `rate(heimdall_http_requests_total)` vs the previous 7 days; series count; RSS.
 3. Enable slow log (`HEIMDALL_DB_SLOW_MS=250`) after 24 h clean.

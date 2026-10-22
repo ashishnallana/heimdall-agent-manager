@@ -6,6 +6,7 @@ import "core:strings"
 import "core:testing"
 import "core:thread"
 import "core:time"
+import dbt "odin_test:hub/platform/dbtelemetry"
 import metrics "odin_test:lib/metrics"
 
 @(test)
@@ -22,6 +23,32 @@ test_parse_metrics_addr :: proc(t: ^testing.T) {
 	cfg := default_config()
 	defer delete(cfg.trusted_proxy_cidrs)
 	testing.expect_value(t, cfg.metrics_addr, "")
+}
+
+// The shipped default (HEIMDALL_DB_TELEMETRY unset) boots with basic telemetry
+// and registers its families; full/unknown values fail boot without touching
+// the mode. (The explicit off override is not exercised here: the mode is
+// process-global and other graph tests in this package run in basic.)
+@(test)
+test_db_telemetry_default_basic :: proc(t: ^testing.T) {
+	cfg := default_config()
+	defer delete(cfg.trusted_proxy_cidrs)
+	testing.expect_value(t, cfg.db_telemetry, "")
+	ok, msg := configure_db_telemetry(cfg)
+	testing.expect(t, ok, msg)
+	testing.expect_value(t, dbt.mode(), dbt.Mode.Basic)
+	reg := init_metrics()
+	for name in ([]string{"heimdall_db_lock_wait_seconds", "heimdall_db_scope_seconds_total", "heimdall_db_slow_log_dropped_total"}) {
+		_, found := reg.by_name[name]
+		testing.expectf(t, found, "default basic must register %s", name)
+	}
+	for bad in ([]string{"full", "on", "BASIC"}) {
+		cfg.db_telemetry = bad
+		bad_ok, bad_msg := configure_db_telemetry(cfg)
+		testing.expectf(t, !bad_ok, "expected boot failure for %q", bad)
+		testing.expect(t, strings.contains(bad_msg, "HEIMDALL_DB_TELEMETRY"), "message names the variable")
+		testing.expect_value(t, dbt.mode(), dbt.Mode.Basic)
+	}
 }
 
 @(test)

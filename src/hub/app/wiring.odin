@@ -1046,7 +1046,7 @@ attention_card_changed :: proc(ctx: rawptr, owner_user_id: string, kind: string)
 }
 
 // configure_db_telemetry applies Hub_Config's DB telemetry settings
-// (HEIMDALL_DB_TELEMETRY / _SLOW_MS / _SAMPLE_N). Default: off.
+// (HEIMDALL_DB_TELEMETRY / _SLOW_MS / _SAMPLE_N). Default: basic.
 configure_db_telemetry :: proc(config: Hub_Config) -> (bool, string) {
 	mode, ok, message := dbt.parse_mode(config.db_telemetry)
 	if !ok do return false, message

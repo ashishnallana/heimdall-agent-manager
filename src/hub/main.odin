@@ -52,8 +52,10 @@ main :: proc() {
 	}
 	ok, message := app.run(config)
 	if !ok {
+		// Non-zero so systemd (and scripts) see a failed boot, e.g. an
+		// unsupported HEIMDALL_DB_TELEMETRY value, instead of a clean exit.
 		fmt.eprintln(message)
-		return
+		os.exit(1)
 	}
 	fmt.println(message)
 }

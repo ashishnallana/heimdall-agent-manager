@@ -79,8 +79,8 @@ Hub_Config :: struct {
 	// the SQLite ring and the owner API work regardless.
 	log_push_url: string,
 	// DB latency telemetry (docs/reference/db-telemetry.md). Read once at boot
-	// from HEIMDALL_DB_TELEMETRY ("" / "off" = default off, "basic"; "full" is
-	// not implemented and is rejected), HEIMDALL_DB_SLOW_MS (default 250, 0
+	// from HEIMDALL_DB_TELEMETRY ("" / "basic" = default basic, "off" opts out;
+	// "full" is not implemented and is rejected), HEIMDALL_DB_SLOW_MS (default 250, 0
 	// disables threshold records) and HEIMDALL_DB_SAMPLE_N (default 1000, 0
 	// disables sampling). -1 = unset (use the default).
 	db_telemetry: string,

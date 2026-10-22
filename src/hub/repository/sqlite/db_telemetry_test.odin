@@ -256,6 +256,23 @@ test_dedicated_mutex_timed :: proc(t: ^testing.T) {
 	testing.expect_value(t, metrics.histogram_count(series), before + 1)
 }
 
+// Pure mapping, not gated: unset means basic (the default), "off" is the
+// explicit opt-out, and full / unknown values are rejected.
+@(test)
+test_parse_mode_default_basic :: proc(t: ^testing.T) {
+	m, ok, _ := dbt.parse_mode("")
+	testing.expect(t, ok && m == .Basic, "unset defaults to basic")
+	m, ok, _ = dbt.parse_mode("basic")
+	testing.expect(t, ok && m == .Basic, "basic")
+	m, ok, _ = dbt.parse_mode("off")
+	testing.expect(t, ok && m == .Off, "explicit off override")
+	for bad in ([]string{"full", "on", "Off", " basic", "0"}) {
+		_, bad_ok, msg := dbt.parse_mode(bad)
+		testing.expectf(t, !bad_ok, "expected rejection for %q", bad)
+		testing.expect(t, msg != "", "rejection carries a message")
+	}
+}
+
 @(test)
 test_telemetry_off_is_passthrough :: proc(t: ^testing.T) {
 	if !DBT_TESTS do return
