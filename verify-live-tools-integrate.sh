@@ -38,12 +38,15 @@ node --import ./tests/helpers/vaultEndpointHarness.ts --test \
 npm run build 2>&1 | tee "$LIVE_TOOLS_EVIDENCE/ui-build.log"
 git diff --check
 python3 - <<'PY'
-import os,pathlib,json,hashlib,subprocess
+import os,pathlib,json,hashlib,subprocess,re
 p=pathlib.Path(os.environ['LIVE_TOOLS_EVIDENCE'])
 files=[f for f in p.glob('*.log') if f.name!='verify.log']+list((p/'bin').iterdir())+list(p.glob('*.jsonl'))+[p/'manifest.json',p/'setup.json']
 receipt={'head':subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),
  'command':'bash /home/tanmay/hamwt/live-tools-integrate/verify-live-tools-integrate.sh',
- 'odin_tests':11,'ui_tests':24,'builds':['hub','bridge','ctl','dev-proxy','TypeScript','Vite','Electron'],
+ 'odin_tests':sum(int(n) for f in [p/'bridge.log',p/'agent.log',p/'http.log',p/'tracker.log']
+                  for n in re.findall(r'Finished (\d+) tests?',f.read_text())),
+ 'ui_tests':int(re.findall(r'\btests\s+(\d+)',(p/'ui.log').read_text())[-1]),
+ 'builds':['hub','bridge','ctl','dev-proxy','TypeScript','Vite','Electron'],
  'pty_host_binary':os.environ['LIVE_TOOLS_PTY'],
  'pty_host_sha256':hashlib.sha256(pathlib.Path(os.environ['LIVE_TOOLS_PTY']).read_bytes()).hexdigest(),
  'sha256':{str(f.relative_to(p)):hashlib.sha256(f.read_bytes()).hexdigest() for f in files}}

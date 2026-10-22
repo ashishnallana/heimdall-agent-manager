@@ -22,7 +22,7 @@ bash /home/tanmay/hamwt/live-tools-integrate/verify-live-tools-integrate.sh
 
 The script enters `nix develop`, creates a unique evidence directory under
 `~/.cache/heimdall-tests`, builds integrated Hub/Bridge/CLI/dev-proxy binaries,
-and runs 11 focused Odin regressions, the real-stack harness, 24 UI tests,
+and runs 11 focused Odin regressions, the real-stack harness, 28 UI tests (including subtests),
 TypeScript, and Vite/Electron production builds. It uses the installed
 `ham-pty-host` (or `LIVE_TOOLS_PTY` override), recording its path and SHA-256.
 No Rust sources are changed. The harness needs free loopback ports 18680,
