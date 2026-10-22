@@ -2517,5 +2517,5 @@ require_launch_bridge_enabled :: proc(service: ^Agent_Service, bridge: domain.Br
 	if current.plan_disabled_at == "" do return {}
 	count, count_err := iface.bridge_count_active_by_owner(service.bridges, bridge.owner_user_id)
 	if count_err.code != .None do return count_err
-	return domain.plan_limit_error("max_bridges", entitlements.max_bridges, count, "Current")
+	return domain.entitlement_limit_error(service.entitlements, string(bridge.owner_user_id), "max_bridges", entitlements.max_bridges, count)
 }

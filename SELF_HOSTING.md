@@ -98,6 +98,36 @@ ham-hub \
 The hub binds to `127.0.0.1` by default. Put nginx/Caddy in front to expose it over
 HTTPS. The web UI is served as a static bundle and can be served by the same reverse proxy.
 
+### 1.4a Billing and plan enforcement
+
+A self-hosted hub with no Paddle credentials or price ID is unlimited by default.
+If any Paddle API key, client token, webhook secret, or Hobbyist price ID is set,
+plan limits turn on, even when checkout is not fully configured. Set enforcement
+explicitly to control it independently of checkout:
+
+```bash
+# Enforce catalog plans and account overrides without requiring Paddle.
+export HEIMDALL_BILLING_ENFORCE_PLAN_LIMITS=true
+
+# The flag takes precedence over the environment.
+ham-hub --db /var/lib/heimdall/hub.db --billing-enforce-plan-limits false
+```
+
+With enforcement enabled, Free includes **one bridge**, **view-only agent
+terminals**, **two concurrent terminal streams**, and **no user shells**.
+Hobbyist includes two bridges, terminal input, unlimited streams, and user shells.
+Agent `run`/`serve` automation keeps working. Counts use `-1` for unlimited;
+`0` means zero allowed.
+
+The hub returns `402 plan_limit_reached` with limit details and an Account upgrade
+path. Excess WebSocket streams receive a typed error and close `4402`. Over-limit
+bridges are disabled rather than revoked and can be re-enabled after an upgrade
+or override. Existing sessions are not killed.
+
+For catalog configuration, the entitlement/override table, SQL examples,
+30-second cache behavior, and a manual preview checklist, see
+[Account billing and plan limits](docs/account-billing.md).
+
 ### 1.5 Systemd service (Linux hub)
 
 Create `/etc/systemd/system/heimdall-hub.service`:

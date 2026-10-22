@@ -13,6 +13,8 @@
 #                               headlessly with the seed approver of the --hub
 #                               instance (local-hub.sh seeds it), then start. Without
 #                               a seed approver the approval waits for the hub UI.
+#   --approval-base-url URL     browser UI base, including a preview path prefix;
+#                               only changes the approval link, not the hub API
 #   --user NAME                 with --auto-enroll, approve as that seeded account of
 #                               the --hub (e.g. paid), so the bridge is that user's
 #                               (default: the hub's dev proxy user)
@@ -40,7 +42,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/local-runtime/lib.sh"
 usage() { sed -n '2,34p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 CMD="${1:-help}"; [ $# -gt 0 ] && shift
-NAME=default HUB_URL="" HUB_NAME="" PORT="" EP_PORT="" AUTO=0 APPROVE_URL="" APPROVER_KEY="" APPROVE_USER=""
+NAME=default HUB_URL="" HUB_NAME="" PORT="" EP_PORT="" AUTO=0 APPROVE_URL="" APPROVER_KEY="" APPROVE_USER="" APPROVAL_BASE_URL=""
 BUILD="${HEIMDALL_LOCAL_BUILD:-nix}" BIN_DIR="" PTY_BIN=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -49,6 +51,7 @@ while [ $# -gt 0 ]; do
     --hub) HUB_NAME="$2"; shift 2 ;;
     --port) PORT="$2"; shift 2 ;;
     --local-endpoint-port) EP_PORT="$2"; shift 2 ;;
+    --approval-base-url) APPROVAL_BASE_URL="$2"; shift 2 ;;
     --auto-enroll) AUTO=1; shift ;;
     --user) APPROVE_USER="$2"; shift 2 ;;
     --build) BUILD="$2"; shift 2 ;;
@@ -76,6 +79,7 @@ resolve() {
     # local-hub.sh keeps a seeded account's approver under approver/users/<user>/.
     [ -z "$APPROVE_USER" ] || APPROVER_KEY="$(dirname "$APPROVER_KEY")/users/$APPROVE_USER/device.json"
   fi
+  APPROVAL_BASE_URL="${APPROVAL_BASE_URL:-$(lr_env_get "$ENV_FILE" APPROVAL_BASE_URL)}"
   local rec
   rec="$(lr_env_get "$ENV_FILE" HUB_URL)"
   if [ -n "$rec" ] && [ -n "$HUB_URL" ] && [ "$rec" != "$HUB_URL" ]; then
@@ -96,7 +100,7 @@ prepare() {
   mkdir -p "$DIR"/{bin,logs,run,data,credentials,agent-runs,endpoint,enroll-bin}
   chmod 700 "$DIR/credentials"
   lr_env_write "$ENV_FILE" "KIND=bridge" "NAME=$NAME" "HUB_URL=$HUB_URL" "HUB_NAME=$HUB_NAME" \
-    "BRIDGE_PORT=$PORT" "LOCAL_ENDPOINT_PORT=$EP_PORT" "CONFIG=$CFG" "TOKEN_FILE=$TOKEN" "CHECKOUT=$LR_ROOT"
+    "BRIDGE_PORT=$PORT" "APPROVAL_BASE_URL=$APPROVAL_BASE_URL" "LOCAL_ENDPOINT_PORT=$EP_PORT" "CONFIG=$CFG" "TOKEN_FILE=$TOKEN" "CHECKOUT=$LR_ROOT"
   node "$LR_HELPERS/bridge-config.mjs" --template "$LR_ROOT/config.toml" --out "$CFG" \
     --dir "$DIR" --hub-url "$HUB_URL" --port "$PORT" --name "$NAME"
   BIN="${BIN_DIR:-$DIR/bin}"
@@ -145,7 +149,9 @@ enroll_flow() {
   done
   lr_log "device-flow enrollment against $HUB_URL"
   # Own session, so giving up reaches every process a wrapper started.
-  setsid env -u PREFIX PATH="$DIR/enroll-bin:$PATH" "$BRIDGE_BIN" enroll --hub "$HUB_URL" --headless \
+  local approval_args=()
+  [ -z "$APPROVAL_BASE_URL" ] || approval_args=(--approval-base-url "$APPROVAL_BASE_URL")
+  setsid env -u PREFIX PATH="$DIR/enroll-bin:$PATH" "$BRIDGE_BIN" enroll --hub "$HUB_URL" --headless "${approval_args[@]}" \
     --config "$CFG" --bridge-token-file "$TOKEN" > "$log" 2>&1 &
   local pid=$! prompt="" i
   for i in $(seq 1 60); do
@@ -154,6 +160,8 @@ enroll_flow() {
     kill -0 "$pid" 2>/dev/null || break
     sleep 0.5
   done
+  # Enrollment may exit between the final prompt read and the liveness check.
+  [ -n "$prompt" ] || prompt="$(lr_enroll_prompt "$log")"
   if [ -z "$prompt" ]; then
     kill -- "-$pid" 2>/dev/null || true
     sed 's/^/  /' "$log" >&2; lr_die "ham-bridge enroll printed no approval link and pairing code"

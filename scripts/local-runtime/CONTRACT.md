@@ -120,3 +120,26 @@ These paths are keyed, so separate instances do not collide in them:
 - `~/.config/heimdall/locks/` holds bridge instance locks, keyed by config path and by hub plus bridge id.
 - `~/.config/heimdall/bridges/<bridge-id>/` holds the keystore, keyed by the bridge id that enrollment mints.
 - `<checkout>/node_modules/.vite` is the Vite dependency cache, shared by UIs from the same checkout. It is only a cache.
+
+### Approval links through a preview
+
+`--public-origin` remains an origin-only CSRF setting and does not include the
+`/p/<session>/` preview prefix. To print a usable enrollment link when the UI
+runs under that prefix, pass the full browser base explicitly:
+
+```bash
+scripts/local-bridge.sh enroll --name example --hub plans \
+  --approval-base-url https://preview.example/p/sh_123/
+# Direct binary:
+ham-bridge enroll --hub http://127.0.0.1:18181 --headless \
+  --approval-base-url https://preview.example/p/sh_123/
+```
+
+The bridge validates an HTTP(S) base with no credentials, query, or fragment,
+normalizes trailing slashes, and prints
+`https://preview.example/p/sh_123/api/v1/device/add`. The local launcher records
+`APPROVAL_BASE_URL` in its own bridge `instance.env` and reuses it on later
+enrollments. It changes only the approval link (and the page opened for it),
+never the hub API address, CSRF origin, or pairing origin. Supply a new value
+when the preview session changes. The hub's origin-only verification URL stays
+the default when no override is given.

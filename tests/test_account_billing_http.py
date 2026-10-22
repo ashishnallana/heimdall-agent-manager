@@ -3,7 +3,7 @@
 Uses a temporary database, random loopback port, and fake webhook secret. It
 never contacts Paddle or an existing hub/bridge.
 """
-from contextlib import closing
+from contextlib import ExitStack, closing
 import base64
 import struct
 import hashlib
@@ -24,12 +24,97 @@ import urllib.request
 ROOT = Path(__file__).resolve().parents[1]
 
 
+class WebSocket:
+    """Small RFC 6455 client for real-hub fixtures; no third-party dependency."""
+
+    def __init__(self, port, path, user='alice'):
+        self.sock = socket.create_connection(('127.0.0.1', port), timeout=5)
+        self.reader = self.sock.makefile('rb')
+        key = base64.b64encode(os.urandom(16)).decode()
+        self.sock.sendall((
+            f'GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n'
+            f'Upgrade: websocket\r\nConnection: Upgrade\r\n'
+            f'Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n'
+            f'X-authentik-username: {user}\r\n\r\n'
+        ).encode())
+        self.status = int(self.reader.readline().split()[1])
+        headers = {}
+        while True:
+            line = self.reader.readline()
+            if line == b'\r\n':
+                break
+            if not line:
+                self.close()
+                raise EOFError('hub closed during WebSocket handshake')
+            name, value = line.decode().split(':', 1)
+            headers[name.lower()] = value.strip()
+        if self.status == 101:
+            expected = base64.b64encode(hashlib.sha1(
+                (key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').encode()
+            ).digest()).decode()
+            if headers.get('sec-websocket-accept') != expected:
+                self.close()
+                raise AssertionError('invalid WebSocket accept key')
+            self.body = None
+        else:
+            self.body = json.loads(self.read_exact(int(headers['content-length'])))
+
+    def read_exact(self, count):
+        data = self.reader.read(count)
+        if len(data) != count:
+            raise EOFError('hub closed before the complete WebSocket frame')
+        return data
+
+    def frame(self):
+        first, size = self.read_exact(2)
+        opcode = first & 0x0f
+        size &= 0x7f
+        if size == 126:
+            size = struct.unpack('!H', self.read_exact(2))[0]
+        elif size == 127:
+            size = struct.unpack('!Q', self.read_exact(8))[0]
+        return opcode, self.read_exact(size)
+
+    def json_frame(self):
+        opcode, payload = self.frame()
+        if opcode != 1:
+            raise AssertionError(f'expected text frame; received opcode {opcode}')
+        return json.loads(payload)
+
+    def send(self, opcode, payload):
+        mask = os.urandom(4)
+        size = len(payload)
+        header = bytes([0x80 | opcode])
+        if size < 126:
+            header += bytes([0x80 | size])
+        elif size <= 65535:
+            header += bytes([0x80 | 126]) + struct.pack('!H', size)
+        else:
+            header += bytes([0x80 | 127]) + struct.pack('!Q', size)
+        self.sock.sendall(header + mask + bytes(v ^ mask[i % 4] for i, v in enumerate(payload)))
+
+    def close(self):
+        self.reader.close()
+        self.sock.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.close()
+
+
 class AccountBillingHTTPTest(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory(prefix='heimdall-billing-http-')
+        self.addCleanup(self.directory.cleanup)
         self.hub_bin = os.environ.get('HEIMDALL_BILLING_TEST_BINARY')
         if not self.hub_bin or not Path(self.hub_bin).exists():
-            built = Path(self.directory.name) / 'ham-hub'
+            build_root = Path.home() / '.cache' / 'heimdall-tests'
+            build_root.mkdir(parents=True, exist_ok=True)
+            build_dir = tempfile.TemporaryDirectory(prefix='billing-http-build-', dir=build_root)
+            self.addCleanup(build_dir.cleanup)
+            built = Path(build_dir.name) / 'ham-hub'
             subprocess.run(
                 ['nix', 'develop', '--command', 'odin', 'build', 'src/hub', '-collection:odin_test=src', f'-out:{built}'],
                 cwd=ROOT, check=True, capture_output=True, text=True,
@@ -41,6 +126,8 @@ class AccountBillingHTTPTest(unittest.TestCase):
             self.port = sock.getsockname()[1]
         self.base = f'http://127.0.0.1:{self.port}'
         self.log = open(Path(self.directory.name) / 'hub.log', 'wb')
+        self.addCleanup(self.log.close)
+        self.addCleanup(self.stop_hub)
         self.env = {key: value for key, value in os.environ.items() if not key.startswith('HEIMDALL_PADDLE_') and key != 'HEIMDALL_BILLING_ENFORCE_PLAN_LIMITS'}
         self.env.update(HEIMDALL_PADDLE_WEBHOOK_SECRET='test_only_secret', HEIMDALL_PADDLE_HOBBYIST_PRICE_ID='pri_approved', HEIMDALL_PADDLE_ENVIRONMENT='sandbox')
         self.start_hub()
@@ -55,16 +142,14 @@ class AccountBillingHTTPTest(unittest.TestCase):
             except OSError:
                 pass
             if self.process.poll() is not None:
-                self.fail('hub exited during startup')
+                self.fail('hub exited during startup:\n' + Path(self.log.name).read_text())
             time.sleep(0.05)
         self.fail('hub did not start')
 
-    def tearDown(self):
+    def stop_hub(self):
         if hasattr(self, 'process') and self.process.poll() is None:
             self.process.terminate()
             self.process.wait(timeout=5)
-        self.log.close()
-        self.directory.cleanup()
 
     def request(self, method, path, data=None, user=None, extra=None):
         headers = {'Content-Type': 'application/json'}
@@ -87,6 +172,188 @@ class AccountBillingHTTPTest(unittest.TestCase):
         timestamp = str(int(time.time()))
         signature = hmac.new(b'test_only_secret', timestamp.encode() + b':' + body, hashlib.sha256).hexdigest()
         return self.request('POST', '/api/v1/billing/paddle/webhook', event, extra={'Paddle-Signature': f'ts={timestamp};h1={signature}'})
+
+
+    def seed_terminals(self):
+        """Durable rows only; no provider processes or existing bridges are used."""
+        self.assertEqual(self.request('GET', '/api/v1/me', user='bob')[0], 200)
+        for user in ('alice', 'bob'):
+            status, agent = self.request('POST', '/api/v1/agents', {'name': 'Plan smoke'}, user=user)
+            self.assertEqual(status, 201)
+            with closing(sqlite3.connect(self.database)) as conn, conn:
+                conn.execute("""INSERT INTO bridges(bridge_id, owner_user_id, status, created_at, updated_at)
+                    VALUES (?, ?, 'offline', '2026-10-01T00:00:00Z', '2026-10-01T00:00:00Z')""",
+                    (f'brg_{user}', user))
+                conn.execute("""INSERT INTO agent_instances(agent_instance_id, owner_user_id, agent_id,
+                    bridge_id, runtime_status, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, 'running', '2026-10-01T00:00:00Z', '2026-10-01T00:00:00Z')""",
+                    (f'inst_{user}', user, agent['data']['agent_id'], f'brg_{user}'))
+                for kind in ('run', 'shell', 'server'):
+                    conn.execute("""INSERT INTO shell_sessions(session_id, owner_user_id, bridge_id,
+                        agent_instance_id, kind, cmd, status, started_at, created_at)
+                        VALUES (?, ?, ?, ?, ?, 'test fixture', 'running',
+                        '2026-10-01T00:00:00Z', '2026-10-01T00:00:00Z')""",
+                        (f'sh_{user}_{kind}', user, f'brg_{user}', f'inst_{user}', kind))
+
+    def assert_plan_error(self, result, limit, allowed, current, label='Free'):
+        status, body = result
+        self.assertEqual(status, 402, body)
+        error = body['error']
+        self.assertEqual(error['code'], 'plan_limit_reached')
+        details = error['details']
+        self.assertEqual(details['limit'], limit)
+        self.assertEqual(details['allowed'], allowed)
+        self.assertEqual(details['current'], current)
+        self.assertEqual(details['plan_label'], label)
+        self.assertEqual(details['upgrade_path'], '/settings/account')
+
+    def upgrade(self):
+        with closing(sqlite3.connect(self.database)) as conn, conn:
+            conn.execute("""INSERT INTO billing_checkouts(reference, user_id, plan_id, price_id, expires_at)
+                VALUES ('server_reference', 'alice', 'hobbyist', 'pri_approved', '2099-01-01T00:00:00Z')""")
+        self.assertEqual(self.webhook('evt_smoke_upgrade', 'active', '2026-10-22T01:00:00Z')[0], 200)
+
+    def stream(self, path, user='alice'):
+        return WebSocket(self.port, path, user)
+
+    def assert_ready(self, stream, read_only):
+        self.assertEqual(stream.status, 101, stream.body)
+        frame = stream.json_frame()
+        self.assertEqual(frame['type'], 'ready', frame)
+        self.assertEqual(frame['read_only'], read_only)
+
+    def test_terminal_rest_limits_and_upgrade(self):
+        self.seed_terminals()
+        mutations = [
+            ('/api/v1/agent-instances/inst_alice/input', {'data': 'x'}),
+            ('/api/v1/agent-instances/inst_alice/resize', {'rows': 24, 'cols': 80}),
+            ('/api/v1/bridges/brg_alice/shells/sh_alice_run/input', {'data': 'x'}),
+            ('/api/v1/bridges/brg_alice/shells/sh_alice_run/resize', {'rows': 24, 'cols': 80}),
+            ('/api/v1/shells/sh_alice_run/input', {'data': 'x'}),
+            ('/api/v1/shells/sh_alice_run/resize', {'rows': 24, 'cols': 80}),
+            ('/api/v1/shells/sh_alice_run/signal', {'signal': 2}),
+        ]
+        for path, body in mutations:
+            with self.subTest(path=path, plan='free'):
+                self.assert_plan_error(self.request('POST', path, body, user='alice'),
+                                       'terminal_input_enabled', 0, 1)
+        status, issued = self.request('POST', '/api/v1/me/tokens', {'label': 'plan smoke'}, user='alice')
+        self.assertEqual(status, 201)
+        self.assert_plan_error(self.request('POST', mutations[0][0], mutations[0][1],
+                               extra={'Authorization': 'Bearer ' + issued['data']['plaintext']}),
+                               'terminal_input_enabled', 0, 1)
+        self.upgrade()
+        for path, body in mutations:
+            with self.subTest(path=path, plan='hobbyist'):
+                status, response = self.request('POST', path, body, user='alice')
+                # No live bridge in this fixture: prove the real operation is reached,
+                # rather than treating an arbitrary non-402 (e.g. 500) as success.
+                self.assertEqual(status, 409, response)
+                self.assertEqual(response['error']['code'], 'bridge_offline')
+
+    def test_user_shell_create_restart_and_existing_stream_after_upgrade(self):
+        self.seed_terminals()
+        actions = [
+            ('/api/v1/bridges/brg_alice/shells', {'kind': kind, 'cmd': 'echo plan smoke', **({'chain_id': 'chain_plan_smoke'} if kind == 'server' else {})})
+            for kind in ('shell', 'server')
+        ] + [
+            (f'/api/v1/shells/sh_alice_{kind}/restart', {})
+            for kind in ('shell', 'server')
+        ]
+        for path, body in actions:
+            with self.subTest(path=path, body=body, plan='free'):
+                self.assert_plan_error(self.request('POST', path, body, user='alice'),
+                                       'shells_enabled', 0, 1)
+        with self.stream('/api/v1/shells/sh_alice_shell/stream') as stream:
+            self.assert_plan_error((stream.status, stream.body), 'shells_enabled', 0, 1)
+        self.upgrade()
+        with self.stream('/api/v1/shells/sh_alice_shell/stream') as stream:
+            self.assert_ready(stream, False)
+        for path, body in actions:
+            with self.subTest(path=path, body=body, plan='hobbyist'):
+                status, response = self.request('POST', path, body, user='alice')
+                self.assertEqual(status, 409, response)
+                self.assertEqual(response['error']['code'], 'bridge_offline')
+
+    def test_mixed_stream_cap_owner_isolation_disconnect_and_webhook_upgrade(self):
+        self.seed_terminals()
+        agent_path = '/api/v1/agent-instances/inst_alice/stream'
+        shell_path = '/api/v1/shells/sh_alice_run/stream'
+        with ExitStack() as stack:
+            first = stack.enter_context(self.stream(agent_path))
+            second = stack.enter_context(self.stream(shell_path))
+            self.assert_ready(first, True)
+            self.assert_ready(second, True)
+            for path in (agent_path, shell_path):
+                with self.subTest(path=path), self.stream(path) as refused:
+                    self.assertEqual(refused.status, 101)
+                    frame = refused.json_frame()
+                    self.assertEqual(frame['type'], 'error')
+                    self.assert_plan_error((402, {'error': frame}), 'max_concurrent_streams', 2, 2)
+                    opcode, payload = refused.frame()
+                    self.assertEqual(opcode, 8)
+                    self.assertEqual(struct.unpack('!H', payload[:2])[0], 4402)
+            for path in ('/api/v1/agent-instances/inst_alice/pane', '/api/v1/shells/sh_alice_run/pane'):
+                self.assert_plan_error(self.request('GET', path, user='alice'), 'max_concurrent_streams', 2, 2)
+            with self.stream('/api/v1/agent-instances/inst_bob/stream', user='bob') as other:
+                self.assert_ready(other, True)
+
+            first.close()
+            # Detach runs on the server reader thread; wait for its effect through
+            # the real API rather than sleeping and assuming cleanup has finished.
+            for _ in range(50):
+                replacement = self.stream(agent_path)
+                frame = replacement.json_frame()
+                if frame['type'] == 'ready':
+                    stack.enter_context(replacement)
+                    self.assertTrue(frame['read_only'])
+                    break
+                replacement.close()
+                time.sleep(0.02)
+            else:
+                self.fail('disconnect did not free the user stream slot')
+
+            # Both original slots remain occupied. Webhook invalidation must permit
+            # more than two attaches immediately, without an Account-page refresh.
+            self.upgrade()
+            for path in (agent_path, shell_path, agent_path):
+                upgraded = stack.enter_context(self.stream(path))
+                self.assert_ready(upgraded, False)
+
+
+    def test_paid_override_refusals_keep_the_effective_plan_label(self):
+        self.seed_terminals()
+        self.upgrade()
+        with closing(sqlite3.connect(self.database)) as conn, conn:
+            conn.execute("""UPDATE account_entitlements SET override_terminal_input_enabled = 0,
+                override_shells_enabled = 0, override_max_concurrent_streams = 0 WHERE user_id = 'alice'""")
+        status, billing = self.request('GET', '/api/v1/account/billing', user='alice')
+        self.assertEqual(status, 200)
+        self.assertEqual(billing['data']['plan_label'], 'Hobbyist')
+        for path, body, limit in [
+            ('/api/v1/agent-instances/inst_alice/input', {'data': 'x'}, 'terminal_input_enabled'),
+            ('/api/v1/bridges/brg_alice/shells', {'kind': 'shell'}, 'shells_enabled'),
+        ]:
+            self.assert_plan_error(self.request('POST', path, body, user='alice'),
+                                   limit, 0, 1, label='Hobbyist')
+        with self.stream('/api/v1/agent-instances/inst_alice/stream') as refused:
+            self.assertEqual(refused.status, 101)
+            self.assert_plan_error((402, {'error': refused.json_frame()}),
+                                   'max_concurrent_streams', 0, 0, label='Hobbyist')
+
+    def test_bridge_approval_pending_cap_reuse_and_upgrade(self):
+        # The helper uses the actual UI signing/pairing code against this hub.
+        # Existing bridge smoke below separately covers startup/hello/launch/revoke.
+        with closing(sqlite3.connect(self.database)) as conn, conn:
+            conn.execute("""INSERT INTO billing_checkouts(reference, user_id, plan_id, price_id, expires_at)
+                VALUES ('server_reference', 'alice', 'hobbyist', 'pri_approved', '2099-01-01T00:00:00Z')""")
+        result = subprocess.run(
+            ['node', '--import', './tests/helpers/vaultEndpointHarness.ts',
+             'tests/e2e/plan_bridge_approval.mjs', self.base, self.database],
+            cwd=ROOT, capture_output=True, text=True, timeout=60,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('PASS bridge approval cap, pending count, reuse, upgrade', result.stdout)
 
     def test_billing_persistence_webhooks_and_authentication(self):
         self.assertEqual(self.request('GET', '/api/v1/account/billing')[0], 401)

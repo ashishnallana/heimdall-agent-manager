@@ -62,6 +62,8 @@ Billing_Event :: struct {
 Entitlement_Lookup :: struct {
 	ctx: rawptr,
 	lookup: proc(ctx: rawptr, user_id: string) -> (User_Entitlements, Domain_Error),
+	// Error formatting shares billing's cached effective plan metadata.
+	limit_error: proc(ctx: rawptr, user_id, limit: string, allowed, current: int) -> Domain_Error,
 }
 
 unlimited_entitlements :: proc() -> User_Entitlements {
@@ -72,4 +74,10 @@ unlimited_entitlements :: proc() -> User_Entitlements {
 lookup_entitlements :: proc(source: Entitlement_Lookup, user_id: string) -> (User_Entitlements, Domain_Error) {
 	if source.lookup == nil do return unlimited_entitlements(), {}
 	return source.lookup(source.ctx, user_id)
+}
+
+// Isolated services without billing metadata retain a neutral label.
+entitlement_limit_error :: proc(source: Entitlement_Lookup, user_id, limit: string, allowed, current: int) -> Domain_Error {
+	if source.limit_error != nil do return source.limit_error(source.ctx, user_id, limit, allowed, current)
+	return plan_limit_error(limit, allowed, current, "Current")
 }

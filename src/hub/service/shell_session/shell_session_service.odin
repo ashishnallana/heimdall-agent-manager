@@ -196,7 +196,7 @@ shell_session_attach :: proc(svc: ^Shell_Session_Service, session_id: string, so
 		current := svc.user_viewer_counts[user_id]
 		if user_id != "" && parameters.max_concurrent_streams >= 0 && current >= parameters.max_concurrent_streams {
 			sync.mutex_unlock(&svc.mu)
-			return {.Rejected_Limit, domain.plan_limit_error("max_concurrent_streams", parameters.max_concurrent_streams, current, "Current")}
+			return {.Rejected_Limit, domain.entitlement_limit_error(svc.entitlements, user_id, "max_concurrent_streams", parameters.max_concurrent_streams, current)}
 		}
 		same_bridge := 0
 		for _, w in svc.viewer_writers { if w.bridge_id == bridge_id do same_bridge += 1 }
@@ -632,8 +632,7 @@ shell_session_require_shells :: proc(source: domain.Entitlement_Lookup, auth: co
 	if auth.kind != .User_Token && auth.kind != .Trusted_Proxy do return {}
 	entitlements, err := domain.lookup_entitlements(source, auth.user_id)
 	if err.code != .None do return err
-	// Capabilities may come from overrides, so do not label every refusal Free.
-	if !entitlements.shells_enabled do return domain.plan_limit_error("shells_enabled", 0, 1, "Current")
+	if !entitlements.shells_enabled do return domain.entitlement_limit_error(source, auth.user_id, "shells_enabled", 0, 1)
 	return {}
 }
 

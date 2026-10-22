@@ -27,7 +27,7 @@ shell_session_admit_pane_poll :: proc(svc: ^Shell_Session_Service, auth: contrac
 	defer sync.mutex_unlock(&svc.mu)
 	current := svc.user_viewer_counts[auth.user_id]
 	if current >= parameters.max_concurrent_streams {
-		return domain.plan_limit_error("max_concurrent_streams", parameters.max_concurrent_streams, current, "Current")
+		return domain.entitlement_limit_error(svc.entitlements, auth.user_id, "max_concurrent_streams", parameters.max_concurrent_streams, current)
 	}
 	now := time.tick_now()
 	if svc.pane_poll_now != nil do now = svc.pane_poll_now(svc.pane_poll_clock_ctx)

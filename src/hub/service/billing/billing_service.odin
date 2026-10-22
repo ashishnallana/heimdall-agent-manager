@@ -75,11 +75,7 @@ account_view :: proc(service: ^Service, user_id: string) -> (Account_View, domai
 	if service.on_entitlements != nil {
 		if reconcile_err := service.on_entitlements(service.plan_change_ctx, user_id, entitlements); reconcile_err.code != .None do return {}, reconcile_err
 	}
-	label := account.plan_label
-	entitled := account.status == "active" || account.status == "trialing" || account.status == "custom" || (account.status == "past_due" && account.grace_until > now)
-	if !entitled {
-		for plan in plans { if plan.plan_id == "free" do label = plan.plan_label }
-	}
+	label := effective_plan_label(account, plans, now)
 	offers := make([dynamic]Offer, context.temp_allocator)
 	can_purchase := account.subscription_id == "" || account.status == "canceled"
 	if account.status == "custom" do can_purchase = false
@@ -211,4 +207,14 @@ request_paddle_api :: proc(config: Config, method, path, body: string) -> (strin
 	if !ok do return "", domain.domain_error(.Internal_Error, "could not contact Paddle; retry later")
 	if response.status < 200 || response.status >= 300 do return "", domain.domain_error(.Internal_Error, "Paddle could not complete this request; check billing configuration")
 	return response.body, {}
+}
+
+// The subscription label survives cancellation, but the effective plan becomes
+// Free after cancellation or grace expiry. Share this resolution with gate errors.
+effective_plan_label :: proc(account: domain.Account_Billing, plans: []domain.Billing_Plan, now: string) -> string {
+	entitled := account.status == "active" || account.status == "trialing" || account.status == "custom" || (account.status == "past_due" && account.grace_until > now)
+	if !entitled {
+		for plan in plans { if plan.plan_id == "free" do return plan.plan_label }
+	}
+	return account.plan_label
 }

@@ -188,3 +188,48 @@ test_entitlements_reconciliation_failure_is_retried_before_caching :: proc(t: ^t
 	testing.expect_value(t, refreshed.code, domain.Error_Code.None)
 	testing.expect_value(t, state.calls, 3)
 }
+
+@(test)
+test_plan_limit_errors_use_cached_effective_label_and_survive_invalidation :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	fixture: Fixture; repo: iface.Billing_Repository; clock: platform.Clock
+	service := fixture_setup(&fixture, &repo, &clock)
+	defer service_free(&service)
+	source := entitlement_lookup(&service)
+	now := "2026-10-10T10:00:00Z"
+	clock = {ctx = &now, now = cache_test_clock}
+
+	for status in ([?]string{"free", "active", "custom", "canceled", "past_due"}) {
+		fixture.account.plan_label = "Hobbyist"
+		fixture.account.status = status
+		fixture.account.grace_until = "2026-10-10T10:00:10Z"
+		invalidate_entitlements(&service, "alice")
+		_, err := effective_entitlements(&service, "alice")
+		testing.expect_value(t, err.code, domain.Error_Code.None)
+		calls := fixture.get_calls
+		failure := domain.entitlement_limit_error(source, "alice", "shells_enabled", 0, 1)
+		details: struct {plan_label: string}
+		testing.expect(t, json.unmarshal_string(failure.details_json, &details, .JSON, context.temp_allocator) == nil)
+		expected := "Free" if status == "free" || status == "canceled" else "Hobbyist"
+		testing.expect_value(t, details.plan_label, expected)
+		testing.expect_value(t, fixture.get_calls, calls) // formatting hits the same cache
+		invalidate_entitlements(&service, "alice")
+		// The returned error is request-owned; invalidating its cache cannot free it.
+		testing.expect_value(t, details.plan_label, expected)
+	}
+	fixture.account.status = "past_due"
+	_, _ = effective_entitlements(&service, "alice")
+	now = "2026-10-10T10:00:10Z"
+	expired := domain.entitlement_limit_error(source, "alice", "shells_enabled", 0, 1)
+	details: struct {plan_label: string}
+	testing.expect(t, json.unmarshal_string(expired.details_json, &details, .JSON, context.temp_allocator) == nil)
+	testing.expect_value(t, details.plan_label, "Free")
+
+	fixture.account.status = "custom"
+	fixture.account.plan_label = "Team agreement"
+	fixture.account.entitlements.shells_enabled = false
+	invalidate_entitlements(&service)
+	custom := domain.entitlement_limit_error(source, "alice", "shells_enabled", 0, 1)
+	testing.expect(t, json.unmarshal_string(custom.details_json, &details, .JSON, context.temp_allocator) == nil)
+	testing.expect_value(t, details.plan_label, "Team agreement")
+}

@@ -2,7 +2,7 @@
 // Run: node --test scripts/local-runtime/helpers.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync, mkdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
@@ -170,4 +170,41 @@ test('plans refuses an unknown plan or a user without an account', () => {
     assert.deepEqual({ ...db.row('paid') }, { plan_id: 'free', status: 'free' });
     assert.throws(() => parsePlanArgs(['--db', 'x', '--user', 'paid']), /usage/);
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('local bridge forwards and records the browser approval base without changing the API URL', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'lr-approval-'));
+  try {
+    const bin = join(dir, 'bin');
+    mkdirSync(bin);
+    const argsFile = join(dir, 'args');
+    // This fixture prints a normal enrollment prompt and writes only the two
+    // credentials required by the launcher. It starts no bridge or service.
+    writeFileSync(join(bin, 'ham-bridge'), `#!/usr/bin/env bash
+printf '%s\\n' "$@" > "$LR_APPROVAL_ARGS"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --bridge-token-file) token="$2"; shift 2 ;;
+    --approval-base-url) browser=$(printf %s "$2" | sed "s:/*$::"); shift 2 ;;
+    *) shift ;;
+  esac
+done
+printf '  %s/api/v1/device/add\\n      ABCD-EFGH-IJKL-MN\\n' "$browser"
+printf 'fixture' > "$token"
+printf 'fixture' > "$token.refresh"
+`, { mode: 0o755 });
+    for (const name of ['ham-ctl', 'ham-pty-host']) writeFileSync(join(bin, name), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    const env = { ...process.env, HEIMDALL_LOCAL_STATE_ROOT: join(dir, 'state'), LR_APPROVAL_ARGS: argsFile };
+    const args = [join(ROOT, 'scripts/local-bridge.sh'), 'enroll', '--name', 'preview-link',
+      '--hub-url', 'http://127.0.0.1:18181', '--bin-dir', bin, '--pty-host-bin', join(bin, 'ham-pty-host'),
+      '--approval-base-url', 'https://preview.example/p/sh_123/'];
+    const r = spawnSync('bash', args, { env, encoding: 'utf8', timeout: 10000 });
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    const passed = readFileSync(argsFile, 'utf8').trim().split('\n');
+    assert.equal(passed[passed.indexOf('--hub') + 1], 'http://127.0.0.1:18181');
+    assert.equal(passed[passed.indexOf('--approval-base-url') + 1], 'https://preview.example/p/sh_123/');
+    assert.match(r.stdout + r.stderr, /https:\/\/preview.example\/p\/sh_123\/api\/v1\/device\/add/);
+    assert.match(readFileSync(join(dir, 'state/bridges/preview-link/instance.env'), 'utf8'),
+      /^APPROVAL_BASE_URL=https:\/\/preview.example\/p\/sh_123\/$/m);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

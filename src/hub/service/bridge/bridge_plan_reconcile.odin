@@ -33,7 +33,7 @@ check_bridge_plan :: proc(service: ^Bridge_Service, bridge: domain.Bridge) -> do
 	if current.plan_disabled_at == "" do return {}
 	count, count_err := iface.bridge_count_active_by_owner(service.repo, bridge.owner_user_id)
 	if count_err.code != .None do return count_err
-	return domain.plan_limit_error("max_bridges", entitlements.max_bridges, count, "Current")
+	return domain.entitlement_limit_error(service.entitlements, string(bridge.owner_user_id), "max_bridges", entitlements.max_bridges, count)
 }
 
 bridge_plan_before :: proc(a, b: domain.Bridge) -> bool {
