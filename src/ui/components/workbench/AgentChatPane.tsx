@@ -26,6 +26,7 @@ import {
   useUpdateConversationTitleMutation,
   useRequestPaneCaptureMutation,
   useSendConversationMessageMutation,
+  useAnswerConversationQuestionsMutation,
   useMarkConversationReadMutation,
 } from '../../api/endpoints/chats';
 import {
@@ -591,7 +592,10 @@ function deliveryStatusFor(message: ChatMessage): ChatDeliveryStatus {
 
 function normalizeConversationMessages(rows: Message[], agentLabel: string): ChatMessage[] {
   const seen = new Set<string>();
-  return rows
+  // Newest-page data supersedes carried older rows with the same durable ID,
+  // including answered state and freshness. Display sorting happens afterwards.
+  const canonicalRows = new Map(rows.map((row, index) => [msgId(row, index), row]));
+  return [...canonicalRows.values()]
     .map((message, index) => {
       const id = msgId(message, index);
       const direction = msgDir(message);
@@ -637,6 +641,9 @@ function normalizeConversationMessages(rows: Message[], agentLabel: string): Cha
             (message as any).message_status || (message as any).messageStatus || 'complete',
           ),
           metadata: parseMessageMetadata(message),
+          isLatestMessage: (message as any).is_latest_message === true,
+          optionsRevision: (message as any).optionsRevision,
+          questionAnswer: (message as any).question_answer,
         } satisfies ChatMessage,
       };
     })
@@ -708,6 +715,7 @@ export function AgentChatPane({
   const [updateConversationTitle, updateTitleState] = useUpdateConversationTitleMutation();
   const [requestPaneCapture, requestPaneCaptureState] = useRequestPaneCaptureMutation();
   const [sendMessage] = useSendConversationMessageMutation();
+  const [answerQuestions] = useAnswerConversationQuestionsMutation();
   const [markRead] = useMarkConversationReadMutation();
   const [reconfigureInstance, reconfigureState] = useApplyInstanceConfigurationMutation();
   const [retryConfiguration, retryConfigurationState] =
@@ -3119,6 +3127,7 @@ export function AgentChatPane({
           loadingOlder={olderMessagesState.isFetching}
           onLoadOlder={loadOlderMessages}
           onReply={handleSendReply}
+          onAnswerQuestions={(sourceMessageId, submission) => answerQuestions({ conversationId, sourceMessageId, submission }).unwrap()}
           formatTimestamp={formatMessageTimestamp}
           getDeliveryStatus={deliveryStatusFor}
           agentIsWorking={isWorking}

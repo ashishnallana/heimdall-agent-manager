@@ -2,6 +2,21 @@
 // (AgentChatPane), which keeps older message pages in component state rather than in a
 // mounted RTK entry.
 
+// Freshness is independent of chronological display and loaded history pages. Stamp
+// reads at request start: a response racing a new message cannot revive old controls.
+const optionRevisions = new Map<string, number>();
+const optionListeners = new Set<() => void>();
+export const conversationOptionsRevision = (id: string): number => optionRevisions.get(id) || 0;
+export function subscribeConversationOptions(listener: () => void): () => void {
+  optionListeners.add(listener);
+  return () => { optionListeners.delete(listener); };
+}
+export function expireConversationOptions(id: string): void {
+  if (!id) return;
+  optionRevisions.set(id, conversationOptionsRevision(id) + 1);
+  optionListeners.forEach((listener) => listener());
+}
+
 // ---- Originating-tab echo -------------------------------------------------------
 // A send from this tab already invalidates its conversation through the mutation's
 // invalidatesTags. The hub then announces the same message to every owner socket,

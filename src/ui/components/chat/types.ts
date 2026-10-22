@@ -16,7 +16,16 @@ export type ChatMessage = {
   messageType?: string;
   messageStatus?: string;
   metadata?: any;
+  isLatestMessage?: boolean;
+  optionsRevision?: number;
+  questionAnswer?: { answer_message_id: string; answered_at: string } | null;
 };
+
+export function messageOptionsEligible(message: {
+  isLatestMessage?: boolean; optionsRevision?: number; questionAnswer?: unknown;
+}, revision: number): boolean {
+  return message.isLatestMessage === true && message.optionsRevision === revision && !message.questionAnswer;
+}
 
 export type ChatTimestamp = { label: string; iso: string };
 export type ChatDeliveryStatus = { glyph: string; label: string; tone: string };

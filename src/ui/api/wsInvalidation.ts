@@ -9,6 +9,7 @@ import {
   announceConversationMessagesRead,
   applyReadReceiptToDraft,
   consumeLocalMessageEcho,
+  expireConversationOptions,
 } from './conversationMessageEvents';
 import { patchMemoryCachesFromWs } from './endpoints/memory';
 import { bridgeSupportApi } from './endpoints/bridgeSupport';
@@ -615,7 +616,7 @@ function handleChatEvent(dispatch: any, payload: any, ctx: WsCtx) {
   const focusedChainId = String(ctx.focusedChainId || '');
   const hasInlineMessage = Boolean(payload.message);
   const message = hasInlineMessage ? normalizeChatMessage(payload.message) : null;
-  const direction = String(payload.direction || '');
+  const direction = String(payload.direction || payload.message?.direction || '');
   const isStatusOnlyEvent = !message && (direction === 'read' || direction === 'delivered' || direction === 'delivery_failed' || payload.event === 'messages_read');
 
   dispatch(wsRefreshRequested(`chat_event:${agentId || payload.message_id || 'unknown'}`));
@@ -628,6 +629,7 @@ function handleChatEvent(dispatch: any, payload: any, ctx: WsCtx) {
     return;
   }
   if (conversationId && !message && payload.fetch_required && String(payload.fetch_kind || '') === 'chat_message') {
+    if (!isStatusOnlyEvent && direction !== 'agent_to_agent') expireConversationOptions(conversationId);
     const messageId = String(payload.fetch_id || payload.message_id || '');
     queueMessageInvalidation(dispatch, conversationId, [{ type: 'Chat', id: conversationId }], messageId);
     if (eventChainId) dispatch(wsChainViewRefreshRequested(`chat_event:${focusedChainId || eventChainId}:${messageId}`));
@@ -637,6 +639,7 @@ function handleChatEvent(dispatch: any, payload: any, ctx: WsCtx) {
     if (agentId) applyLegacyStatusPatch(dispatch, payload, agentId);
     return;
   }
+  if (conversationId && direction !== 'agent_to_agent') expireConversationOptions(conversationId);
   if (!message && payload.fetch_required && String(payload.fetch_kind || '') === 'chat_message') {
     // TODO(FIX): Replace loose fallback chain with canonical typed schema property
     const messageId = String(payload.fetch_id || payload.message_id || '');
