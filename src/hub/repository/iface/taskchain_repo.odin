@@ -71,6 +71,7 @@ Taskchain_Repository :: struct {
 	save_member: Task_Chain_Member_Save_Proc,
 	remove_member: Task_Chain_Member_Remove_Proc,
 	list_members_by_chain: Task_Chain_Member_List_By_Chain_Proc,
+	list_tool_members_by_chain: Task_Chain_Member_List_By_Chain_Proc,
 	list_chains_by_coordinator: Task_Chain_List_By_Coordinator_Proc,
 	save_dependency: Task_Dependency_Save_Proc,
 	remove_dependency: Task_Dependency_Remove_Proc,

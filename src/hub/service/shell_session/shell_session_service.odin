@@ -830,8 +830,6 @@ shell_session_create :: proc(svc: ^Shell_Session_Service, auth: contracts.Auth_C
 	svc.session_bridges[strings.clone(session_id, heap)] = strings.clone(input.bridge_id, heap)
 	sync.mutex_unlock(&svc.mu)
 
-	agent_service.tool_live_shell(svc.live_agents, session, true)
-
 	// Notify the operational session lists for all three kinds before the bridge
 	// round trip. A refused start is corrected by the terminal event below.
 	if svc.events != nil {
@@ -885,7 +883,6 @@ shell_session_create :: proc(svc: ^Shell_Session_Service, auth: contracts.Auth_C
 		session.status      = domain.Shell_Session_Status_Failed
 		session.finished_at = platform.clock_now(svc.clock)
 		_, _ = iface.shell_session_upsert(svc.repo, session)
-		agent_service.tool_live_shell(svc.live_agents, session, false)
 		_publish_start_refused(svc, string(owner), session_id, reply_err, session.bridge_id)
 		return session, false, reply_err
 	}
@@ -896,7 +893,6 @@ shell_session_create :: proc(svc: ^Shell_Session_Service, auth: contracts.Auth_C
 		session.finished_at = platform.clock_now(svc.clock)
 		_, _ = iface.shell_session_upsert(svc.repo, session)
 		start_err := _bridge_failure(reply, "bridge failed to start shell session", session.bridge_id)
-		agent_service.tool_live_shell(svc.live_agents, session, false)
 		_publish_start_refused(svc, string(owner), session_id, start_err, session.bridge_id)
 		return session, false, start_err
 	}
@@ -1891,7 +1887,6 @@ shell_session_handle_exited :: proc(
 	}
 
 	_, exit_up_err := iface.shell_session_upsert(svc.repo, session)
-	if exit_up_err.code == .None do agent_service.tool_live_shell(svc.live_agents, session, false)
 
 	// REQ-2: announce only a terminal state the row actually holds.
 	if svc.events != nil && exit_up_err.code == .None {

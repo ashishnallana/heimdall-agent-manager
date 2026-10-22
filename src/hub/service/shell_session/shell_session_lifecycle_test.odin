@@ -2026,28 +2026,17 @@ test_platform_rfc3339_round_trips :: proc(t: ^testing.T) {
 
 
 @(test)
-test_live_shell_background_and_kill_update_projection :: proc(t: ^testing.T) {
+test_live_shell_lifecycle_does_not_create_hub_tool_state :: proc(t: ^testing.T) {
  fx: Fx5
  fx5_make(&fx)
  defer fx5_free(&fx)
  live := agent_service.Agent_Service{}
- agent_service.tool_live_init(&live.tool_live)
  defer agent_service.tool_live_destroy(&live.tool_live)
  fx.svc.live_agents = &live
  row := fx5_start_run(&fx, false)
- inst := domain.Agent_Instance{agent_instance_id = INST_A, owner_user_id = "owner_a"}
- body := agent_service.tool_live_snapshot(&live, inst)
- testing.expect(t, strings.contains(body, row.session_id))
- delete(body)
  _, converted, _ := shell_session_set_background(&fx.svc, agent5_auth(), row.session_id)
  testing.expect(t, converted)
- body = agent_service.tool_live_snapshot(&live, inst)
- testing.expect(t, !strings.contains(body, `"active":[]`), "background conversion keeps the call active")
- delete(body)
  _ = shell_session_handle_exited(&fx.svc, row.session_id, "brg_1", "killed", 137, true)
- body = agent_service.tool_live_snapshot(&live, inst)
- testing.expect(t, strings.contains(body, `"active":[]`))
- testing.expect(t, strings.contains(body, `"status":"killed"`))
- delete(body)
+ for p in live.tool_live.pending do testing.expect(t, !p.used, "Hub retains no tool projection or outstanding request")
  testing.expect_value(t, len(fx.content.messages), 0)
 }

@@ -586,7 +586,6 @@ _reap_inventory_absent :: proc(
 		// session ended depending on which mechanism noticed. REQ-2: only when the
 		// terminal row was actually written.
 		if term_up_err.code == .None {
-			agent_service.tool_live_shell(svc.live_agents, next, false)
 			if svc.events != nil {
 				evt := _shell_exited_event_json(next.session_id, next.status, 0, false)
 				events.publish_owned(svc.events, next.owner_user_id, evt)

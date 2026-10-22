@@ -121,8 +121,7 @@ test_live_provider_shell_and_legacy_endpoint_write_zero_db_messages :: proc(t: ^
 	reader := Agent_Handlers{auth = &auth, agents = &agents}
 	resp = agent_instance_tool_activity_live_handler(&reader, Request{remote_addr = "127.0.0.1", headers = user_headers,
 		path = "/api/v1/agent-instances/live_http/tool-activity-live"})
-	testing.expect_value(t, resp.status, 200)
-	testing.expect(t, strings.contains(resp.body, `"active":[]`))
+	testing.expect_value(t, resp.status, 409)
 	foreign_headers := []contracts.HTTP_Header{{name = "X-authentik-username", value = "foreign_owner"}}
 	resp = agent_instance_tool_activity_live_handler(&reader, Request{remote_addr = "127.0.0.1", headers = foreign_headers,
 		path = "/api/v1/agent-instances/live_http/tool-activity-live"})

@@ -1,178 +1,186 @@
-# Ephemeral tool activity protocol (B1 → B2)
+# Ephemeral live tools: Bridge owner, Hub relay
 
-REQ-LIVE-1..5. This is volatile Hub memory, independent of conversation messages
-and the persisted extension Activity timeline. No historical rows are deleted.
-Historical `tool_activity` / `shell_run` transcript rows must be hidden by B2.
+REQ-LIVE-1..3/5/7/8/9. Bridge alone owns active provider/shell calls and one last
+completion per agent instance. Hub authenticates and forwards frames and proxies
+explicit snapshot requests. It retains no tool-content cache, completed list,
+tombstones, or historical state. No conversation tool_activity/shell_run writes
+occur; the authenticated legacy tool-activity endpoint returns
+{"accepted":true,"persisted":false}. Historical rows are not deleted. Separate
+Activity/file/subagent/permission persistence and shell controls/logs remain.
 
-The machine-readable schema is [tool-activity-live.schema.json](tool-activity-live.schema.json).
-It describes the snapshot data and owner WS frame; HTTP uses the standard envelope.
+## UI protocol
 
-## Reads and authorization
+Authenticate the existing user WebSocket with its ticket/cookie flow. REST uses
+the existing authenticated API envelope. Exact snapshot schema:
+[tool-activity-live.schema.json](tool-activity-live.schema.json).
 
-- `GET /api/v1/agent-instances/{instance_id}/tool-activity-live`: standard
-  user API authentication (trusted proxy session or user API token), same-owner
-  authorization. Foreign owners receive 404. Response uses the standard success
-  envelope; its `data` is the snapshot below.
-- `GET /api/v1/task-chains/{chain_id}/tool-activity-live`: user authentication
-  as above, or the existing bridge + instance assertion authentication.
-  Requires the chain's owner; an instance caller additionally needs its current
-  `chain_id` binding to match, the chain coordinator field, or an explicit
-  coordinator membership in that chain.
-  Foreign owner: 404; unrelated same-owner instance: 403.
-- Chain membership is the current owner-scoped `agent_instances.chain_id`
-  selection used by task dispatch, plus the chain coordinator and explicit
-  coordinator member rows.
-  A coordinator can belong to multiple chains. Worker/reviewer runs are never
-  collapsed by durable agent identity. Each result includes `agent_id`,
-  `instance_id`, `display_name` and that instance's full snapshot.
-- Reads use identity/membership repositories for authorization only. Neither
-  conversations nor historical extension events are read to reconstruct calls.
+GET /api/v1/agent-instances/:instance_id/tool-activity-live performs one bounded
+request over the owning Bridge's existing authenticated command WebSocket.
+No chat, extension history, shell inventory, or cached Hub tool state is read.
+Owner checks use existing get_instance authorization.
 
-## Owner WebSocket frame / instance snapshot
-
-Every change publishes a complete `tool_activity_live` frame on the existing
-owner-authenticated user WebSocket. No additional subscription is needed.
-All fields below are always present; strings may be empty when unavailable.
-
+Example response data and live user-WS frame (stream_epoch/stream_seq are added
+only by the existing user event bus):
 ```json
 {
   "type": "tool_activity_live",
-  "instance_id": "inst_worker_1",
+  "instance_id": "inst_worker",
   "agent_id": "agt_worker",
-  "display_name": "Worker 1",
-  "chain_id": "chain_1",
-  "epoch": "1792670400000000000",
+  "display_name": "Worker",
+  "chain_id": "chain_one",
+  "bridge_id": "brg_one",
+  "epoch": "1792670000000000000",
   "generation": 1,
-  "revision": 1,
+  "revision": 4,
+  "availability": "ready",
   "active": [
     {
-      "call_id": "[\"provider\",\"session_1\",\"child_1\",\"use_1\"]",
+      "call_id": "[\"provider\",\"session\",\"child\",\"tool_1\"]",
       "source": "provider",
-      "provider_session_id": "session_1",
-      "agent_id": "child_1",
-      "tool_use_id": "use_1",
+      "provider_session_id": "session",
+      "agent_id": "child",
+      "tool_use_id": "tool_1",
       "tool_name": "Read",
       "shell_session_id": "",
       "shell_run_seq": 0,
-      "started_at_ms": 1792670401000
+      "started_at_ms": 1792670001000
     }
   ],
   "last_completion": null
 }
 ```
 
-`call_id` is opaque. Sources are `provider` and `shell`. `active[].agent_id`
-is a provider subagent identity; top-level `agent_id` is the durable Heimdall
-identity. Shell keys include session id and run sequence. An optional canonical event
-payload `shell_session_id` plus `shell_run_seq` explicitly links a provider wrapper
-to that exact shell run; no command-text or timing correlation is used.
-A linked provider end does not complete a still-running background shell.
-
-When the final call ends the frame MUST clear the running UI:
-
+Final completion replaces active with [] and sets last_completion to one object:
 ```json
 {
-  "type": "tool_activity_live",
-  "instance_id": "inst_worker_1",
-  "agent_id": "agt_worker",
-  "display_name": "Worker 1",
-  "chain_id": "chain_1",
-  "epoch": "1792670400000000000",
-  "generation": 1,
-  "revision": 2,
-  "active": [],
-  "last_completion": {
-    "call_id": "[\"provider\",\"session_1\",\"child_1\",\"use_1\"]",
-    "source": "provider",
-    "tool_name": "Read",
-    "duration_ms": 1200,
-    "completed_at_ms": 1792670402200,
-    "status": "completed"
-  }
+  "call_id": "[\"provider\",\"session\",\"child\",\"tool_1\"]",
+  "source": "provider",
+  "tool_name": "Read",
+  "duration_ms": 1200,
+  "completed_at_ms": 1792670002200,
+  "status": "completed"
 }
 ```
+Other statuses: failed, killed, exited, interrupted. Missing observed end never
+means successful completion. Returning from an explicitly correlated provider
+wrapper does not finish a background shell.
 
-Render running rows ONLY from `active`. Render `last_completion.duration_ms`
-as the separate last-duration value; never turn that summary into a running row.
-Provider `payload.duration_ms` is used when supplied; otherwise duration is
-computed from canonical timestamps. No completion means `last_completion:null`. Completion status `completed`
-records an observed end, without claiming success. Failure/kill status is retained.
-Missing ends do not fabricate successful completion. There is no completed list.
+Additional owner-scoped WS frames:
+```json
+{"type":"tool_activity_live_unavailable","instance_id":"inst_worker","availability":"unknown"}
+```
+```json
+{"type":"tool_activity_live_resync","bridge_id":"brg_one"}
+```
+Unavailable clears visible state and fences buffered pushes until a fresh
+snapshot succeeds. Existing instance/Bridge terminal lifecycle events also clear
+offline state. Resync is emitted on Bridge reconnect, actual agent launch/relaunch,
+and dirty-queue overflow/rate shedding. It triggers one initial/resync read,
+never a periodic status request.
 
-## Chain snapshot
-
+GET /api/v1/task-chains/:chain_id/tool-activity-live?cursor=:last_instance_id
+returns a lexicographically sorted page of at most eight current same-owner
+instances, including the canonical coordinator and explicit coordinator members.
+Each page independently checks owner/current chain membership. Instance tokens
+must currently belong to the chain or be an explicit/canonical coordinator.
 ```json
 {
-  "chain_id": "chain_1",
-  "epoch": "1792670400000000000",
-  "members": [
-    {
-      "agent_id": "agt_worker",
-      "instance_id": "inst_worker_1",
-      "display_name": "Worker 1",
-      "snapshot": {
-        "type": "tool_activity_live",
-        "instance_id": "inst_worker_1",
-        "agent_id": "agt_worker",
-        "display_name": "Worker 1",
-        "chain_id": "chain_1",
-        "epoch": "1792670400000000000",
-        "generation": 1,
-        "revision": 0,
-        "active": [],
-        "last_completion": null
-      }
-    }
+  "chain_id":"chain_one",
+  "roster_token":"9e72abdf801e0314",
+  "next_cursor":"",
+  "members":[
+    {"agent_id":"agt_worker","instance_id":"inst_worker","display_name":"Worker","availability":"offline","snapshot":null}
   ]
 }
 ```
+Ready members carry the snapshot above. Continue cursor pages only as part of
+initial/reconnect/resync/membership-triggered loading. Replace the roster only
+after the complete page set. Restart loading if roster_token changes across
+pages or a membership-change hint arrives. Token is a bounded non-security FNV
+fingerprint of current sorted instance IDs; all authorization is independent.
+Roster capacity is 256. Over-cap rosters return validation_failed; no silent
+partial roster. One page has an absolute five-second assembly deadline; members
+unavailable within it become null/offline.
 
-The list authoritatively replaces the current chain roster; remove absent members
-and their displayed activity. For live frames, show only instances in that roster.
-The owner WebSocket also carries the owner's other chains: never infer chain
-membership merely from receiving a tool frame. Refetch the chain snapshot on
-existing instance/chain membership resource changes and after reconnect/resync.
-A coordinator explicitly belonging to multiple chains may have a different current
-`snapshot.chain_id`; its roster inclusion is authoritative.
+Errors use shared repository mapping: bridge_offline is HTTP409 (disconnected,
+cancelled or deadline); bridge_busy HTTP503 (bounded request capacity);
+validation_failed HTTP422; owner/auth errors retain existing 403/404 behavior.
+Retries may occur after actual failure with bounded backoff, never on success.
 
-## Snapshot / live ordering and recovery
+## Ordering and recovery
 
-1. Open the user WebSocket and wait for `user_ws_ready`.
-2. Buffer tool frames while fetching the instance or chain snapshot.
-3. Replace local memory with that snapshot. For chain views replace the roster.
-4. Apply buffered/live frames for selected instances only. Within the same epoch,
-   apply only a strictly greater revision. Parallel publishers may deliver revision
-   3 before 2; ignore 2. Every frame replaces the entire active list and summary.
-5. On reconnect, `resync_required`, or stream gaps, repeat this process. The
-   existing connection `stream_epoch`/`stream_seq` detects delivery gaps.
-   The tool `epoch` identifies the Hub boot, and is distinct from stream_epoch.
-   A changed tool epoch requires replacement even when revisions are lower.
-   Do not use chat pagination or Activity history for recovery.
+1. Wait for user_ws_ready, then buffer relevant tool frames while fetching the
+   explicit instance snapshot or complete chain page set.
+2. Replace local state with fresh snapshots. Apply buffered/live frames only for
+   currently selected/authorized instance IDs.
+3. epoch is Bridge boot Unix-nanoseconds as a decimal string. Compare with BigInt
+   or decimal-string ordering; never round through Number. A newer Bridge epoch
+   replaces old state; older epochs are ignored.
+4. Within one epoch accept only strictly newer revision. Every frame completely
+   replaces active and last_completion. generation advances on local lifecycle
+   reset; revision remains monotonic, including inactive reclamation/re-admission.
+5. Reconnect, user-stream gap/resync_required, Bridge resync, and membership changes
+   initiate a fresh one-shot read. There is no polling. A still-live Bridge
+   answers current state after Hub restart; a restarted Bridge starts empty.
+6. Unavailable remains fenced until that read succeeds. A live frame alone
+   cannot undo an offline boundary. A launch/relaunch resync explicitly recovers.
 
-`generation` increments when lifecycle/session cleanup resets activity.
-`revision` never decreases within an instance's Hub epoch, including resets.
-A fresh Hub starts empty at revision 0, without rehydrating persisted shell rows
-or extension history. Snapshots for a chain are copied under one projection lock.
-Membership selection uses the current repository read; membership-change hints
-require a refetch, as with the existing chain UI.
+Hub validates instance-to-Bridge binding, owner and current run_count for every
+snapshot/live frame. Current Bridge socket generation fences replaced sockets.
+Its immutable process epoch is established once on that connection; old epochs
+cannot replace it. Connection-local sequence fences reordered live frames.
+No historical extension or shell rows repopulate Bridge state.
 
-## Lifecycle, identity and bounds
+## Bridge/Hub internal frames
 
-- Canonical provider `tool.start` / `tool.end` use session + subagent + use id.
-  Duplicate starts/ends are no-ops; an early end tombstones a delayed start.
-- Provider hello/session changes, session end, subagent stop, instance terminal
-  status and bridge loss clear affected active calls. Main idle does not complete
-  background subagent calls. Lifecycle resets publish an empty snapshot.
-- Only shell creation adds shell calls. Background conversion and row inventory
-  cannot reconstruct or duplicate them. Refusal, failure, observed exit/kill and
-  unobserved terminal cleanup remove the corresponding call.
-- No commands or input/output bodies are retained in this projection.
-- Provider events need a parseable canonical RFC3339 timestamp newer than the Hub
-  boot/reset cutoff, not more than 60 seconds in the future. Historical or
-  untimestamped events remain available in Activity but do not create live calls.
-  Coarse timestamps at the boot/reset second are conservatively fenced.
-- Memory caps: 2048 instance entries, 128 active calls per instance, 256 recent
-  tombstones per instance; identity fields at most 512 bytes and tool names 128
-  bytes. Tombstone eviction advances a timestamp floor, preventing old starts from
-  reappearing. The projection never accumulates a completed-call list.
+Bridge -> Hub first sends tool_activity_live_reset {epoch,seq}; epoch is immutable
+until a new socket connection. It then sends tool_activity_live_resync. Changes:
+tool_activity_live_snapshot {epoch,seq,run_count,snapshot}; snapshot is the same
+source snapshot, with internal run_count and without Hub-sourced labels.
+Hub overwrites labels/owner routing from current bounded identity metadata.
 
+Hub -> Bridge: tool_activity_live_request {request_id,instance_id,timeout_ms:5000}.
+Bridge -> Hub: tool_activity_live_reply {request_id,epoch,run_count,snapshot}.
+Replies bypass the generic runtime result cache. Only a matching unexpired
+waiter for the current socket generation, instance/run/owner can retain a reply.
+It is freed immediately after the caller consumes it or the request terminates.
+Unsolicited/late replies are dropped. Waiting uses a condition variable, not
+recurring network/RPC queries. Source changes are coalesced by instance; only
+the latest unsent snapshot survives.
+
+## Memory, admission and backpressure
+
+- Bridge: 256 instance entries, 32 active calls and 32 key-only tombstones per
+  instance. Decoded identity fields <=64 bytes; names <=96 bytes; generated keys
+  <=2048 bytes. These field/count/dynamic-capacity bounds give a conservative
+  <=48MiB owned content/backing ceiling (allocator bookkeeping/RSS is external).
+  No input/output/commands are stored. One last completion, never a completed list.
+- Bridge dirty queue: <=256 latest-only entries and <=8MiB encoded bytes, checked
+  for both insertion and replacement. Overflow drops queued copies and sends
+  one explicit resync hint; it does not grow or reconstruct from history.
+- Live frame/reply <=256KiB and depth<=8, with <=4096 string/container tokens,
+  checked before parsing/cloning at the tool boundary. Existing generic WS
+  reader/chunk buffers have their separate transport caps.
+- Hub: eight transient snapshot waiters globally, two per owner, <=256KiB reply
+  each (<=2MiB retained reply content); request ID<=128 bytes, owner<=512 bytes,
+  instance/Bridge IDs<=64 bytes. Five-second absolute deadline, terminal/socket
+  cancellation and cleanup. No permanent tool-content state.
+- Chain: two page assemblies globally, one per owner, eight snapshots/<=2MiB
+  per page; one absolute five-second page deadline. Routing roster SQL LIMIT257
+  detects capacity overflow without reading unbounded instance history.
+- Hub live relay: zero queued tool content. Each Bridge connection admits up to
+  128 frames and 4MiB per one-second window; shedding emits a resync hint.
+  Existing user event bus has 128 socket slots, serialized per-slot writes,
+  five-second write deadlines and failed/slow-socket removal. Existing stream
+  sequence/gap recovery obtains fresh Bridge state.
+- Capacity reclaims the least recently touched inactive Bridge entry; active
+  calls are never evicted. A global admission timestamp floor retains forgotten
+  lifecycle/tombstone fences and a revision floor prevents rollback. Under
+  pressure, delayed legitimate starts at/before that floor are conservatively
+  ignored; future events recover tracking. All-active admission refuses new
+  instances until inactive capacity exists.
+- Canonical provider timestamps must be parseable RFC3339, newer than boot/reset
+  cutoff, and no more than 60 seconds ahead. Coarse cutoff-second events may be
+  conservatively ignored. Lifecycle cleanup retains cutoffs even for unseen
+  instances. Actual successful shell restart retires the old run and starts
+  the new key; failed/refused spawn does not invent a running call.

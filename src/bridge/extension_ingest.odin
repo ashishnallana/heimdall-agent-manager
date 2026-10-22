@@ -14,7 +14,7 @@ package main
 //   4. queues the normalised event JSON in a per-instance outbox that a single
 //      worker forwards to the hub in batches (≥ BRIDGE_EXT_FLUSH_MAX_EVENTS
 //      queued, or BRIDGE_EXT_FLUSH_DELAY_MS after the first queued event);
-// Tool activity is projected ephemerally by the Hub.
+// Tool activity is reduced locally; Hub mirrors authoritative Bridge snapshots.
 //
 // IDENTITY: the instance is ALWAYS the token-verified rec.agent_instance_id.
 // Any instance id inside the payload is ignored — the hub envelope is stamped
@@ -154,6 +154,7 @@ bridge_ext_ingest :: proc(rec: Bridge_Local_Agent_Token_Record, params: string, 
 			continue
 		}
 		defer contracts.ext_event_destroy(&ev)
+		bridge_tool_live_event(rec, ev, raw)
 		if bridge_startup_event(ev) do bridge_startup_accept(rec, now)
 
 		// A later event proves a permission prompt was answered in the terminal.

@@ -44,6 +44,8 @@ Agent_Repository :: struct {
 	list_instances_by_owner: Agent_List_Instances_By_Owner_Proc,
 	list_instances_by_bridge: Agent_List_Instances_By_Bridge_Proc,
 	list_instances_by_chain: Agent_List_Instances_By_Chain_Proc,
+	list_tool_instances_by_chain: Agent_List_Instances_By_Chain_Proc,
+	get_tool_instance: Agent_Get_Instance_Proc,
 	list_active_runtime_instances: Agent_List_Active_Runtime_Instances_Proc,
 	next_title_counter: Agent_Next_Title_Counter_Proc,
 	// Provider extension (ham.ext.v1); see agent_extension_repo.odin.

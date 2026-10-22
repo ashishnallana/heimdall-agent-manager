@@ -2,180 +2,49 @@ package agent
 
 import "base:runtime"
 import "core:net"
-import events "odin_test:hub/service/events"
-import ws "odin_test:lib/ws"
 import "core:encoding/json"
 import "core:fmt"
 import "core:strings"
 import "core:testing"
-import "core:thread"
 import "core:time"
+import events "odin_test:hub/service/events"
+import project_service "odin_test:hub/service/project"
 import contracts "odin_test:contracts"
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
-import platform "odin_test:hub/platform"
+import live "odin_test:lib/tool_live"
+import ws "odin_test:lib/ws"
 
 @(private = "file")
-live_test_inst :: domain.Agent_Instance{agent_instance_id = "live_a", owner_user_id = "owner",
-	agent_id = "agent_worker", display_name = "Worker A", chain_id = "chain_a", provider_session_id = "s1", runtime_status = "running"}
+live_test_inst :: domain.Agent_Instance{agent_instance_id = "live_a", owner_user_id = "owner", bridge_id = "bridge_a",
+ agent_id = "agent_worker", display_name = "Worker A", chain_id = "chain_a", runtime_status = "running"}
 @(private = "file")
-live_test_service :: proc() -> Agent_Service {
-	s := Agent_Service{}
-	s.tool_live.epoch, _ = tool_live_ns("2026-01-01T00:00:00Z")
-	return s
+Live_Relay_Source :: struct { service: ^Agent_Service, active: bool, calls: int }
+@(private = "file")
+live_relay_frame :: proc(id, request_id, kind: string, active: bool, rev: int = 1, epoch := "1000") -> string {
+ v, _ := json.parse_string(`{"instance_id":"live_a","epoch":"1000","generation":1,"revision":1,"active":[],"last_completion":null}`, .JSON, true, context.temp_allocator)
+ snap := v.(json.Object)
+ snap["instance_id"] = json.String(id); snap["epoch"] = json.String(epoch); snap["revision"] = json.Integer(rev)
+ if active {
+  arr, _ := json.parse_string(`[{"call_id":"x","source":"provider","provider_session_id":"s1","agent_id":"","tool_use_id":"x","tool_name":"Read","shell_session_id":"","shell_run_seq":0,"started_at_ms":1000}]`, .JSON, true, context.temp_allocator)
+  snap["active"] = arr
+ } else {
+  last, _ := json.parse_string(`{"call_id":"x","source":"provider","tool_name":"Read","duration_ms":1000,"completed_at_ms":2000,"status":"completed"}`, .JSON, true, context.temp_allocator)
+  snap["last_completion"] = last
+ }
+ frame := struct {type, request_id, epoch: string, run_count: int, snapshot: json.Value}{kind, request_id, epoch, 0, v}
+ data, _ := json.marshal(frame, allocator = context.temp_allocator)
+ return string(data)
 }
 @(private = "file")
-live_ev :: proc(kind, id: string, sec: int, agent := "", session := "s1", payload := "{}") -> domain.Agent_Extension_Event {
-	return domain.Agent_Extension_Event{event = kind, ts = fmt.tprintf("2026-01-01T00:00:%02dZ", sec),
-	session_id = session, agent_id = agent, tool_use_id = id, tool_name = "Read", payload = payload}
+live_relay_send :: proc(ctx: rawptr, command: project_service.Runtime_Command) -> (bool, domain.Domain_Error) {
+ f := (^Live_Relay_Source)(ctx); f.calls += 1
+ root, _ := json.parse_string(command.body_json, .JSON, true, context.temp_allocator)
+ obj := root.(json.Object)
+ reply := live_relay_frame(tool_live_text(obj, "instance_id"), tool_live_text(obj, "request_id"), "tool_activity_live_reply", f.active, f.calls)
+ ok := tool_live_apply_bridge(f.service, command.bridge_id, 0, "1000", reply)
+ return ok, domain.Domain_Error{}
 }
-@(private = "file")
-live_send :: proc(s: ^Agent_Service, ev: domain.Agent_Extension_Event) {
-	tool_live_extension(s, live_test_inst, []domain.Agent_Extension_Event{ev})
-}
-@(private = "file")
-live_obj :: proc(s: ^Agent_Service) -> json.Object {
-	body := tool_live_snapshot(s, live_test_inst)
-	defer delete(body)
-	v, _ := json.parse_string(body, .JSON, true, context.temp_allocator)
-	obj, _ := v.(json.Object)
-	return obj
-}
-
-@(test)
-test_live_parallel_calls_deduplicate_and_final_empty_snapshot :: proc(t: ^testing.T) {
-	s := live_test_service()
-	defer tool_live_destroy(&s.tool_live)
-	live_send(&s, live_ev("tool.start", "x", 1))
-	live_send(&s, live_ev("tool.start", "x", 1))
-	live_send(&s, live_ev("tool.start", "x", 1, "child"))
-	obj := live_obj(&s)
-	testing.expect_value(t, len(obj["active"].(json.Array)), 2)
-	testing.expect_value(t, obj["revision"].(json.Integer), 2)
-	live_send(&s, live_ev("tool.end", "x", 4))
-	live_send(&s, live_ev("tool.end", "x", 4))
-	obj = live_obj(&s)
-	testing.expect_value(t, len(obj["active"].(json.Array)), 1)
-	testing.expect_value(t, obj["revision"].(json.Integer), 3)
-	live_send(&s, live_ev("tool.end", "x", 5, "child", payload = `{"is_error":true}`))
-	obj = live_obj(&s)
-	active, array := obj["active"].(json.Array)
-	testing.expect(t, array, "final snapshot contains an array")
-	testing.expect_value(t, len(active), 0)
-	last := obj["last_completion"].(json.Object)
-	testing.expect_value(t, last["duration_ms"].(json.Integer), 4000)
-	testing.expect_value(t, last["status"].(json.String), "failed")
-	live_send(&s, live_ev("tool.start", "x", 1))
-	testing.expect_value(t, len(live_obj(&s)["active"].(json.Array)), 0)
-}
-
-@(test)
-test_live_end_before_start_and_stale_end_do_not_leave_phantom :: proc(t: ^testing.T) {
-	s := live_test_service()
-	defer tool_live_destroy(&s.tool_live)
-	live_send(&s, live_ev("tool.end", "late", 4))
-	live_send(&s, live_ev("tool.start", "late", 1))
-	testing.expect_value(t, len(live_obj(&s)["active"].(json.Array)), 0)
-	live_send(&s, live_ev("tool.start", "valid", 5))
-	live_send(&s, live_ev("tool.end", "valid", 3))
-	testing.expect_value(t, len(live_obj(&s)["active"].(json.Array)), 1)
-	live_send(&s, live_ev("tool.end", "valid", 6))
-	testing.expect_value(t, len(live_obj(&s)["active"].(json.Array)), 0)
-}
-
-@(test)
-test_live_session_change_terminal_and_restart_fence_history :: proc(t: ^testing.T) {
-	s := live_test_service()
-	defer tool_live_destroy(&s.tool_live)
-	live_send(&s, live_ev("tool.start", "old", 1))
-	live_send(&s, live_ev("session", "", 3, session = "s2"))
-	live_send(&s, live_ev("hello", "", 1, session = "s1"))
-	live_send(&s, live_ev("tool.start", "old", 2))
-	testing.expect_value(t, len(live_obj(&s)["active"].(json.Array)), 0)
-	live_send(&s, live_ev("tool.start", "new", 4, session = "s2"))
-	testing.expect_value(t, len(live_obj(&s)["active"].(json.Array)), 1)
-	live_send(&s, live_ev("session", "", 5, session = "s2", payload = `{"phase":"end"}`))
-	live_send(&s, live_ev("tool.start", "after_end", 6, session = "s2"))
-	testing.expect_value(t, len(live_obj(&s)["active"].(json.Array)), 0)
-	notify_instance_terminal(&s, "live_a")
-	live_send(&s, live_ev("tool.start", "delayed", 6, session = "s2"))
-	obj := live_obj(&s)
-	testing.expect_value(t, len(obj["active"].(json.Array)), 0)
-	_, no_completion := obj["last_completion"].(json.Null)
-	testing.expect(t, no_completion, "unfinished calls never become completed")
-	fresh := Agent_Service{}
-	tool_live_init(&fresh.tool_live)
-	defer tool_live_destroy(&fresh.tool_live)
-	live_send(&fresh, live_ev("tool.start", "historical_outbox", 6))
-	testing.expect_value(t, len(live_obj(&fresh)["active"].(json.Array)), 0)
-	old_epoch := s.tool_live.epoch
-	testing.expect(t, fresh.tool_live.epoch != old_epoch, "new Hub epoch")
-}
-
-@(test)
-test_live_bounds_tombstones_and_subagent_cleanup :: proc(t: ^testing.T) {
-	s := live_test_service()
-	defer tool_live_destroy(&s.tool_live)
-	for i in 0..<TOOL_LIVE_MAX_ACTIVE+10 do live_send(&s, live_ev("tool.start", fmt.tprintf("call_%d", i), 1, "child"))
-	testing.expect_value(t, len(live_obj(&s)["active"].(json.Array)), TOOL_LIVE_MAX_ACTIVE)
-	live_send(&s, live_ev("subagent.stop", "", 3, "child"))
-	live_send(&s, live_ev("tool.start", "unseen_delayed", 2, "child"))
-	testing.expect_value(t, len(live_obj(&s)["active"].(json.Array)), 0)
-	for i in 0..<TOOL_LIVE_MAX_TOMBSTONES+20 do live_send(&s, live_ev("tool.end", fmt.tprintf("missing_%d", i), 5))
-	e := s.tool_live.entries["live_a"]
-	testing.expect_value(t, len(e.tombstones), TOOL_LIVE_MAX_TOMBSTONES)
-	live_send(&s, live_ev("tool.start", "call_0", 1, "child"))
-	testing.expect_value(t, len(live_obj(&s)["active"].(json.Array)), 0)
-}
-
-@(test)
-test_live_shell_completion_and_no_row_resurrection :: proc(t: ^testing.T) {
-	s := live_test_service()
-	defer tool_live_destroy(&s.tool_live)
-	row := domain.Shell_Session{session_id = "sh_1", kind = "run", agent_instance_id = "live_a", owner_user_id = "owner"}
-	tool_live_shell(&s, row, true)
-	tool_live_shell(&s, row, true)
-	testing.expect_value(t, len(live_obj(&s)["active"].(json.Array)), 1)
-	row.status = "killed"
-	tool_live_shell(&s, row, false)
-	tool_live_shell(&s, row, false)
-	obj := live_obj(&s)
-	testing.expect_value(t, len(obj["active"].(json.Array)), 0)
-	last := obj["last_completion"].(json.Object)
-	testing.expect_value(t, last["status"].(json.String), "killed")
-	notify_instance_terminal(&s, "live_a")
-	tool_live_shell(&s, row, false)
-	obj = live_obj(&s)
-	testing.expect_value(t, len(obj["active"].(json.Array)), 0)
-	_, null_last := obj["last_completion"].(json.Null)
-	testing.expect(t, null_last, "late shell exit cannot reconstruct lost activity")
-}
-
-@(test)
-test_live_concurrent_publish_and_snapshot :: proc(t: ^testing.T) {
-	s := live_test_service()
-	defer tool_live_destroy(&s.tool_live)
-	Job :: struct { service: ^Agent_Service, id: int }
-	jobs: [8]Job
-	threads: [8]^thread.Thread
-	for &job, i in jobs {
-		job = Job{&s, i}
-		threads[i] = thread.create_and_start_with_data(&job, proc(data: rawptr) {
-			job := (^Job)(data)
-			for i in 0..<10 {
-				id := fmt.tprintf("t%d_%d", job.id, i)
-				live_send(job.service, live_ev("tool.start", id, 1))
-				body := tool_live_snapshot(job.service, live_test_inst); delete(body)
-				live_send(job.service, live_ev("tool.end", id, 2))
-			}
-		})
-	}
-	for th in threads { thread.join(th); thread.destroy(th) }
-	obj := live_obj(&s)
-	testing.expect_value(t, len(obj["active"].(json.Array)), 0)
-	testing.expect_value(t, obj["revision"].(json.Integer), 160)
-}
-
 // Membership is read from the same repository source used by task dispatch.
 @(private = "file")
 Live_Chain_Test :: struct { rows: []domain.Agent_Instance, members: []domain.Task_Chain_Member, coordinator_id: string }
@@ -198,7 +67,7 @@ live_chain_instance :: proc(ctx: rawptr, id: string) -> (domain.Agent_Instance, 
 }
 @(test)
 test_live_chain_isolation_membership_and_reconnect :: proc(t: ^testing.T) {
-	s := live_test_service()
+	s := Agent_Service{}
 	defer tool_live_destroy(&s.tool_live)
 	rows := [4]domain.Agent_Instance{live_test_inst, live_test_inst, live_test_inst, live_test_inst}
 	rows[1].agent_instance_id = "reviewer_a" // same durable identity; separate run
@@ -208,7 +77,8 @@ test_live_chain_isolation_membership_and_reconnect :: proc(t: ^testing.T) {
 	repo := iface.Agent_Repository{ctx = &fixture, list_instances_by_chain = live_chain_instances, get_instance = live_chain_instance}
 	chains := iface.Taskchain_Repository{ctx = &fixture, get_chain = live_chain_get, list_members_by_chain = live_chain_members}
 	s.agents = &repo; s.taskchains = &chains
-	live_send(&s, live_ev("tool.start", "chain_tool", 1))
+	source := Live_Relay_Source{service = &s, active = true}
+	s.bridge_command_sink = project_service.Bridge_Command_Sink{ctx = &source, send_runtime_command = live_relay_send}
 	auth := contracts.Auth_Context{kind = .User_Token, user_id = "owner"}
 	body, ok, _ := tool_live_chain_snapshot(&s, auth, "chain_a")
 	testing.expect(t, ok)
@@ -218,7 +88,7 @@ test_live_chain_isolation_membership_and_reconnect :: proc(t: ^testing.T) {
 	members := obj["members"].(json.Array)
 	testing.expect_value(t, len(members), 2)
 	testing.expect_value(t, members[0].(json.Object)["instance_id"].(json.String), "live_a")
-	live_send(&s, live_ev("tool.end", "chain_tool", 2))
+	source.active = false
 	body, ok, _ = tool_live_chain_snapshot(&s, auth, "chain_a")
 	testing.expect(t, ok)
 	value, _ = json.parse_string(body, .JSON, true, context.temp_allocator)
@@ -254,61 +124,6 @@ test_live_chain_isolation_membership_and_reconnect :: proc(t: ^testing.T) {
 }
 
 
-@(test)
-test_live_explicit_shell_correlation_and_unrelated_calls :: proc(t: ^testing.T) {
-	s := live_test_service()
-	defer tool_live_destroy(&s.tool_live)
-	row := domain.Shell_Session{session_id = "sh_link", kind = "run", agent_instance_id = "live_a", owner_user_id = "owner", exit_code_set = true}
-	live_send(&s, live_ev("tool.start", "wrapper", 1, payload = `{"shell_session_id":"sh_link","shell_run_seq":0}`))
-	tool_live_shell(&s, row, true)
-	testing.expect_value(t, len(live_obj(&s)["active"].(json.Array)), 1)
-	live_send(&s, live_ev("tool.end", "wrapper", 2))
-	testing.expect_value(t, len(live_obj(&s)["active"].(json.Array)), 1)
-	// Same tool name without explicit shell identity remains a distinct call.
-	live_send(&s, live_ev("tool.start", "unrelated", 2))
-	testing.expect_value(t, len(live_obj(&s)["active"].(json.Array)), 2)
-	row.status = "exited"
-	tool_live_shell(&s, row, false)
-	testing.expect_value(t, len(live_obj(&s)["active"].(json.Array)), 1)
-	live_send(&s, live_ev("tool.end", "unrelated", 3))
-	testing.expect_value(t, len(live_obj(&s)["active"].(json.Array)), 0)
-	// Delayed provider retry cannot resurrect the already-completed explicit shell.
-	live_send(&s, live_ev("tool.start", "wrapper", 1, payload = `{"shell_session_id":"sh_link"}`))
-	testing.expect_value(t, len(live_obj(&s)["active"].(json.Array)), 0)
-	row.session_id = "sh_reverse"
-	tool_live_shell(&s, row, true)
-	live_send(&s, live_ev("tool.start", "reverse", 4, payload = `{"shell_session_id":"sh_reverse"}`))
-	testing.expect_value(t, len(live_obj(&s)["active"].(json.Array)), 1)
-	live_send(&s, live_ev("tool.end", "reverse", 5))
-	testing.expect_value(t, len(live_obj(&s)["active"].(json.Array)), 1)
-	tool_live_shell(&s, row, false)
-	testing.expect_value(t, len(live_obj(&s)["active"].(json.Array)), 0)
-}
-
-@(test)
-test_live_provider_duration_and_error_status :: proc(t: ^testing.T) {
-	s := live_test_service()
-	defer tool_live_destroy(&s.tool_live)
-	live_send(&s, live_ev("tool.start", "duration", 1))
-	live_send(&s, live_ev("tool.end", "duration", 1, payload = `{"status":"error","duration_ms":57}`))
-	last := live_obj(&s)["last_completion"].(json.Object)
-	testing.expect_value(t, last["duration_ms"].(json.Integer), 57)
-	testing.expect_value(t, last["status"].(json.String), "failed")
-}
-
-
-@(test)
-test_live_global_memory_cap :: proc(t: ^testing.T) {
-	s := live_test_service()
-	defer tool_live_destroy(&s.tool_live)
-	// Pin the same store allocator used by production mutation paths.
-	context.allocator = runtime.heap_allocator()
-	for i in 0..<TOOL_LIVE_MAX_INSTANCES+10 {
-		_ = tool_live_entry_locked(&s.tool_live, fmt.tprintf("bounded_%d", i), "owner")
-	}
-	testing.expect_value(t, len(s.tool_live.entries), TOOL_LIVE_MAX_INSTANCES)
-}
-
 
 @(private = "file")
 Live_Pair :: struct { listener, peer, hub: net.TCP_Socket }
@@ -328,95 +143,133 @@ live_pair :: proc(t: ^testing.T) -> Live_Pair {
 live_close_pair :: proc(p: Live_Pair) {
 	net.close(p.hub); net.close(p.peer); net.close(p.listener)
 }
+
 @(test)
-test_live_owner_ws_empty_transition_and_reconnect_snapshot :: proc(t: ^testing.T) {
-	s := live_test_service()
-	defer tool_live_destroy(&s.tool_live)
-	bus: events.User_Event_Bus
-	s.event_bus = &bus
-	mine := live_pair(t); defer live_close_pair(mine)
-	other := live_pair(t); defer live_close_pair(other)
-	my_handle, attached := events.user_ws_attach(&bus, "owner", mine.hub)
-	testing.expect_value(t, attached, events.User_WS_Attach_Result.Attached)
-	defer events.user_ws_detach(&bus, my_handle)
-	other_handle, other_attached := events.user_ws_attach(&bus, "other", other.hub)
-	testing.expect_value(t, other_attached, events.User_WS_Attach_Result.Attached)
-	defer events.user_ws_detach(&bus, other_handle)
-	my_reader := ws.reader_make(); defer ws.reader_destroy(&my_reader)
-	other_reader := ws.reader_make(); defer ws.reader_destroy(&other_reader)
-	_, ready, ready_ok := ws.read_frame(mine.peer, &my_reader, time.Second)
-	testing.expect(t, ready_ok && strings.contains(ready, "user_ws_ready"))
-	first_ready := strings.clone(ready); defer delete(first_ready)
-	delete(ready)
-	_, other_ready, other_ready_ok := ws.read_frame(other.peer, &other_reader, time.Second)
-	testing.expect(t, other_ready_ok)
-	delete(other_ready)
-	live_send(&s, live_ev("tool.start", "ws_1", 1))
-	_, frame, frame_ok := ws.read_frame(mine.peer, &my_reader, time.Second)
-	testing.expect(t, frame_ok && strings.contains(frame, "tool_activity_live"))
-	value, parse_err := json.parse_string(frame, .JSON, true, context.temp_allocator)
-	testing.expect_value(t, parse_err, json.Error.None)
-	obj := value.(json.Object)
-	testing.expect_value(t, len(obj["active"].(json.Array)), 1)
-	_, _, leaked := ws.read_frame(other.peer, &other_reader, 30 * time.Millisecond)
-	testing.expect(t, !leaked, "other owner's socket receives no tool activity")
-	delete(frame)
-	live_send(&s, live_ev("tool.end", "ws_1", 2))
-	_, frame, frame_ok = ws.read_frame(mine.peer, &my_reader, time.Second)
-	testing.expect(t, frame_ok)
-	value, _ = json.parse_string(frame, .JSON, true, context.temp_allocator)
-	obj = value.(json.Object)
-	testing.expect_value(t, len(obj["active"].(json.Array)), 0)
-	testing.expect_value(t, obj["revision"].(json.Integer), 2)
-	testing.expect_value(t, obj["last_completion"].(json.Object)["duration_ms"].(json.Integer), 1000)
-	delete(frame)
-	events.user_ws_detach(&bus, my_handle)
-	live_send(&s, live_ev("tool.start", "missed_while_offline", 3))
-	reconnected := live_pair(t); defer live_close_pair(reconnected)
-	handle2, attached2 := events.user_ws_attach(&bus, "owner", reconnected.hub)
-	testing.expect_value(t, attached2, events.User_WS_Attach_Result.Attached)
-	defer events.user_ws_detach(&bus, handle2)
-	reader2 := ws.reader_make(); defer ws.reader_destroy(&reader2)
-	_, ready2, ready2_ok := ws.read_frame(reconnected.peer, &reader2, time.Second)
-	testing.expect(t, ready2_ok && ready2 != first_ready, "reconnect gets a new stream epoch")
-	delete(ready2)
-	recovered := live_obj(&s)
-	testing.expect_value(t, len(recovered["active"].(json.Array)), 1)
-	testing.expect_value(t, recovered["revision"].(json.Integer), 3)
-	live_send(&s, live_ev("tool.end", "missed_while_offline", 4))
-	_, frame, frame_ok = ws.read_frame(reconnected.peer, &reader2, time.Second)
-	testing.expect(t, frame_ok)
-	value, _ = json.parse_string(frame, .JSON, true, context.temp_allocator)
-	obj = value.(json.Object)
-	testing.expect_value(t, len(obj["active"].(json.Array)), 0)
-	testing.expect_value(t, obj["revision"].(json.Integer), 4)
-	delete(frame)
+test_live_relay_snapshot_is_on_demand_and_retains_no_content :: proc(t: ^testing.T) {
+ rows := [1]domain.Agent_Instance{live_test_inst}
+ f := Live_Chain_Test{rows = rows[:]}
+ repo := iface.Agent_Repository{ctx = &f, get_instance = live_chain_instance}
+ s := Agent_Service{agents = &repo}; defer tool_live_destroy(&s.tool_live)
+ source := Live_Relay_Source{service = &s, active = true}
+ s.bridge_command_sink = {ctx = &source, send_runtime_command = live_relay_send}
+ body, ok, err := tool_live_request_snapshot(&s, rows[0])
+ testing.expect(t, ok, err.message)
+ testing.expect(t, strings.contains(body, `"call_id":"x"`)); delete(body)
+ source.active = false
+ body, ok, err = tool_live_request_snapshot(&s, rows[0])
+ testing.expect(t, ok, err.message)
+ testing.expect(t, strings.contains(body, `"active":[]`))
+ testing.expect(t, strings.contains(body, `"duration_ms":1000`)); delete(body)
+ testing.expect_value(t, source.calls, 2)
+ for p in s.tool_live.pending do testing.expect(t, !p.used && p.reply == "" && p.instance_id == "")
+ // No request/timer runs between explicit calls.
+ testing.expect_value(t, source.calls, 2)
+}
+@(test)
+test_live_relay_owner_socket_isolation_and_final_empty_push :: proc(t: ^testing.T) {
+ rows := [1]domain.Agent_Instance{live_test_inst}
+ f := Live_Chain_Test{rows = rows[:]}
+ repo := iface.Agent_Repository{ctx = &f, get_instance = live_chain_instance}
+ s := Agent_Service{agents = &repo}; defer tool_live_destroy(&s.tool_live)
+ bus: events.User_Event_Bus; s.event_bus = &bus
+ mine := live_pair(t); defer live_close_pair(mine)
+ other := live_pair(t); defer live_close_pair(other)
+ mh, _ := events.user_ws_attach(&bus, "owner", mine.hub); defer events.user_ws_detach(&bus, mh)
+ oh, _ := events.user_ws_attach(&bus, "other", other.hub); defer events.user_ws_detach(&bus, oh)
+ mr := ws.reader_make(); defer ws.reader_destroy(&mr)
+ or := ws.reader_make(); defer ws.reader_destroy(&or)
+ _, ready, _ := ws.read_frame(mine.peer, &mr, time.Second); delete(ready)
+ _, ready, _ = ws.read_frame(other.peer, &or, time.Second); delete(ready)
+ for active, i in ([2]bool{true,false}) {
+  accepted := tool_live_apply_bridge(&s, "bridge_a", 1, "1000", live_relay_frame("live_a", "", "tool_activity_live_snapshot", active, i+1))
+  testing.expect(t, accepted)
+  _, frame, got := ws.read_frame(mine.peer, &mr, time.Second)
+  testing.expect(t, got)
+  if i == 1 do testing.expect(t, strings.contains(frame, `"active":[]`))
+  delete(frame)
+ }
+ _, _, leaked := ws.read_frame(other.peer, &or, 30*time.Millisecond)
+ testing.expect(t, !leaked)
+ for p in s.tool_live.pending do testing.expect(t, !p.used)
+}
+@(test)
+test_live_relay_rejects_binding_launch_epoch_and_unsolicited_reply :: proc(t: ^testing.T) {
+ rows := [1]domain.Agent_Instance{live_test_inst}
+ f := Live_Chain_Test{rows = rows[:]}
+ repo := iface.Agent_Repository{ctx = &f, get_instance = live_chain_instance}
+ s := Agent_Service{agents = &repo}; defer tool_live_destroy(&s.tool_live)
+ raw := live_relay_frame("live_a", "", "tool_activity_live_snapshot", true)
+ testing.expect(t, !tool_live_apply_bridge(&s, "foreign_bridge", 1, "1000", raw))
+ testing.expect(t, !tool_live_apply_bridge(&s, "bridge_a", 1, "2000", raw))
+ rows[0].run_count = 1
+ testing.expect(t, !tool_live_apply_bridge(&s, "bridge_a", 1, "1000", raw))
+ rows[0].run_count = 0; rows[0].runtime_status = "stopped"
+ testing.expect(t, !tool_live_apply_bridge(&s, "bridge_a", 1, "1000", raw))
+ rows[0].runtime_status = "running"
+ late := live_relay_frame("live_a", "expired", "tool_activity_live_reply", true)
+ testing.expect(t, !tool_live_apply_bridge(&s, "bridge_a", 1, "1000", late))
+ for p in s.tool_live.pending do testing.expect(t, p.reply == "")
+}
+@(test)
+test_live_relay_pending_caps_and_terminal_cancellation :: proc(t: ^testing.T) {
+ s := Agent_Service{}; defer tool_live_destroy(&s.tool_live)
+ heap := runtime.heap_allocator()
+ for i in 0..<TOOL_LIVE_PER_OWNER_PENDING {
+  s.tool_live.pending[i] = {used = true, owner = strings.clone("owner", heap), instance_id = strings.clone("live_a", heap)}
+ }
+ _, ok, err := tool_live_request_snapshot(&s, live_test_inst)
+ testing.expect(t, !ok && err.code == .Bridge_Busy)
+ tool_live_cancel(&s, "live_a", "")
+ for p in s.tool_live.pending[:2] do testing.expect(t, p.done && p.cancelled)
+ for &p, i in s.tool_live.pending {
+  tool_live_pending_free(&p)
+  p = {used = true, owner = strings.clone(fmt.tprintf("owner_%d", i), heap)}
+ }
+ _, ok, err = tool_live_request_snapshot(&s, live_test_inst)
+ testing.expect(t, !ok && err.code == .Bridge_Busy)
+ testing.expect(t, !live.wire_shape_ok(strings.repeat("[", 9, context.temp_allocator)))
+ testing.expect(t, !live.wire_shape_ok(strings.repeat("a", live.MAX_FRAME_BYTES+1, context.temp_allocator)))
 }
 
-
-
 @(test)
-test_live_bridge_loss_and_superseded_launch_are_fenced :: proc(t: ^testing.T) {
+test_live_relay_deadline_reclaims_slot_and_late_reply_is_discarded :: proc(t:^testing.T) {
  rows := [1]domain.Agent_Instance{live_test_inst}
- fixture := Live_Chain_Test{rows = rows[:]}
- repo := iface.Agent_Repository{ctx = &fixture, get_instance = live_chain_instance}
- s := live_test_service()
- s.agents = &repo
- defer tool_live_destroy(&s.tool_live)
- live_send(&s, live_ev("tool.start", "before_bridge_loss", 1))
- rows[0].runtime_status = "unreachable"
- notify_instances_terminal(&s, rows[:])
- live_send(&s, live_ev("tool.start", "delayed_after_bridge_loss", 2))
- testing.expect_value(t, len(live_obj(&s)["active"].(json.Array)), 0)
- rows[0].runtime_status = "running"
- rows[0].run_count = 1
- rows[0].launch_epoch = "new_launch"
- ev := live_ev("tool.start", "new_launch_call", 3)
- ev.ts = platform.format_rfc3339_utc(time.time_add(time.now(), time.Second))
- // An authenticated old request that waited on the projection mutex cannot
- // insert after a newer configuration/launch overtakes it.
- tool_live_extension(&s, live_test_inst, []domain.Agent_Extension_Event{ev})
- testing.expect_value(t, len(live_obj(&s)["active"].(json.Array)), 0)
- tool_live_extension(&s, rows[0], []domain.Agent_Extension_Event{ev})
- testing.expect_value(t, len(live_obj(&s)["active"].(json.Array)), 1)
+ f := Live_Chain_Test{rows=rows[:]}
+ repo := iface.Agent_Repository{ctx=&f,get_instance=live_chain_instance}
+ s := Agent_Service{agents=&repo}; defer tool_live_destroy(&s.tool_live)
+ s.bridge_command_sink.send_runtime_command = proc(ctx:rawptr,command:project_service.Runtime_Command)->(bool,domain.Domain_Error){return true,{}}
+ start := time.now()
+ _,ok,_ := tool_live_request_snapshot(&s,rows[0],5*time.Millisecond)
+ testing.expect(t,!ok)
+ testing.expect(t,time.diff(start,time.now())<time.Second)
+ for p in s.tool_live.pending do testing.expect(t,!p.used && p.reply=="")
+ late:=live_relay_frame("live_a","expired","tool_activity_live_reply",true)
+ testing.expect(t,!tool_live_apply_bridge(&s,"bridge_a",0,"1000",late))
+}
+@(test)
+test_live_chain_pages_are_bounded_and_roster_token_changes :: proc(t:^testing.T) {
+ rows:[17]domain.Agent_Instance
+ for &row,i in rows {row=live_test_inst;row.agent_instance_id=fmt.tprintf("member_%02d",i)}
+ f:=Live_Chain_Test{rows=rows[:]}
+ repo:=iface.Agent_Repository{ctx=&f,get_instance=live_chain_instance,list_instances_by_chain=live_chain_instances}
+ chains:=iface.Taskchain_Repository{ctx=&f,get_chain=live_chain_get,list_members_by_chain=live_chain_members}
+ s:=Agent_Service{agents=&repo,taskchains=&chains};defer tool_live_destroy(&s.tool_live)
+ source:=Live_Relay_Source{service=&s}
+ s.bridge_command_sink={ctx=&source,send_runtime_command=live_relay_send}
+ auth:=contracts.Auth_Context{kind=.User_Token,user_id="owner"}
+ cursor:=""; token:=""; count:=0
+ for page in 0..<3 {
+  body,ok,_:=tool_live_chain_snapshot(&s,auth,"chain_a",cursor);testing.expect(t,ok)
+  v,_:=json.parse_string(body,.JSON,true,context.temp_allocator);delete(body)
+  obj:=v.(json.Object); members:=obj["members"].(json.Array)
+  testing.expect(t,len(members)<=8);count+=len(members)
+  if page==0 do token=tool_live_text(obj,"roster_token")
+  testing.expect_value(t,tool_live_text(obj,"roster_token"),token)
+  cursor=tool_live_text(obj,"next_cursor")
+ }
+ testing.expect_value(t,count,17);testing.expect_value(t,cursor,"")
+ rows[0].chain_id="chain_b"
+ body,_,_:=tool_live_chain_snapshot(&s,auth,"chain_a")
+ v,_:=json.parse_string(body,.JSON,true,context.temp_allocator);delete(body)
+ testing.expect(t,tool_live_text(v.(json.Object),"roster_token")!=token)
 }

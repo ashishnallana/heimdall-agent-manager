@@ -583,6 +583,7 @@ bridge_hub_runtime_loop :: proc(conn: ^ws.Connection) {
 	delete(init_hb)
 	// The hub keeps agent blockers in memory only: resend every snapshot on connect.
 	bridge_blockers_mark_all_dirty()
+	bridge_tool_live_drain(conn, true)
 	last_iteration := time.now()
 	for conn.connected {
 		now_iteration := time.now()
@@ -619,6 +620,7 @@ bridge_hub_runtime_loop :: proc(conn: ^ws.Connection) {
 		bridge_pane_capture_drain_outgoing(conn)
 		bridge_shell_output_drain_outgoing(conn)
 		bridge_shell_exited_drain_outgoing(conn)
+		bridge_tool_live_drain(conn)
 		// REQ-SHELL-10: immediately after the exit drain, so the fast path's exits are
 		// on the wire ahead of the snapshot that is meant to be the safety net for
 		// whatever it lost.
@@ -1137,6 +1139,10 @@ bridge_hub_handle_command :: proc(conn: ^ws.Connection, text: string) {
 	}
 	if type == "shell_stream_detach" {
 		bridge_hub_handle_shell_stream_detach(conn, text)
+		return
+	}
+	if type == "tool_activity_live_request" {
+		bridge_tool_live_handle_request(conn, text)
 		return
 	}
 	if type == "shell_start" {
@@ -2552,6 +2558,9 @@ bridge_runtime_get_launch :: proc(instance_id: string) -> (Bridge_Runtime_Launch
 }
 
 bridge_runtime_record_launch :: proc(launch: Bridge_Runtime_Launch) {
+	// The launch registry outlives the RPC/test allocator that reports it.
+	context.allocator = runtime.heap_allocator()
+	defer bridge_tool_live_note_launch(launch.agent_instance_id)
 	sync.mutex_lock(&bridge_runtime_mutex)
 	defer sync.mutex_unlock(&bridge_runtime_mutex)
 	for i in 0..<len(bridge_runtime_launches) {
@@ -2645,6 +2654,9 @@ bridge_runtime_status_snapshot :: proc(instance_id: string) -> (runtime_status, 
 }
 
 bridge_runtime_set_status :: proc(instance_id, runtime_status, activity_status: string) {
+    defer {
+        if runtime_status == "stopped" || runtime_status == "failed" || runtime_status == "unreachable" do bridge_tool_live_clear(instance_id)
+    }
 	if strings.trim_space(instance_id) == "" do return
 	// A stopped/failed agent can no longer act on a permission decision: release
 	// its blocked permission waiters with "none".
@@ -3406,6 +3418,9 @@ bridge_runtime_drain_status_pushes :: proc(conn: ^ws.Connection) {
 		if len(bridge_runtime_status_outgoing) > 0 { id = bridge_runtime_status_outgoing[0]; ordered_remove(&bridge_runtime_status_outgoing, 0) }
 		sync.mutex_unlock(&bridge_runtime_mutex)
 		if id == "" do return
+		if inst, exists := bridge_runtime_instance_snapshot(id); exists {
+			if inst.runtime_status == "stopped" || inst.runtime_status == "failed" || inst.runtime_status == "unreachable" do bridge_tool_live_clear(id)
+		}
 		payload := bridge_instance_status_json(id)
 		defer delete(payload)
 		if payload == "" || payload == "{}" { delete(id, runtime.default_allocator()); continue }
@@ -3917,6 +3932,7 @@ bridge_runtime_write_json_string :: proc(b: ^strings.Builder, value: string) {
 // delivered normally if the process lives long enough. bridge_shell_exited_outbox_write
 // reports the failure itself.
 bridge_shell_exited_enqueue :: proc(raw_event_json: string) {
+	bridge_tool_live_shell_exit(raw_event_json)
 	if strings.trim_space(raw_event_json) == "" do return
 	// Task System v2: a `ham-ctl verify` run's exit carries the repo head/dirty
 	// state and the log tail for the hub-written verify facet. Done here, at the
@@ -4716,6 +4732,10 @@ bridge_hub_handle_shell_start :: proc(conn: ^ws.Connection, text: string) {
 
 	// CONSUMES sess: it is zeroed here and must not be read below.
 	bridge_shell_session_register(&bridge_shell_session_map, &sess)
+	if started, tracked := bridge_shell_session_snapshot(&bridge_shell_session_map, session_id); tracked {
+		bridge_tool_live_shell(started, true)
+		bridge_shell_session_snapshot_destroy(&bridge_shell_session_map, started)
+	}
 
 	bridge_pty_host_events_ensure()
 
@@ -5211,6 +5231,7 @@ bridge_hub_handle_shell_restart :: proc(conn: ^ws.Connection, text: string) {
 		data_dir := bridge_expand_home(bridge_config.data_dir)
 		if strings.trim_space(data_dir) == "" do data_dir = bridge_expand_home("~/.local/share/heimdall")
 		bridge_shell_session_save_spec(data_dir, updated)
+		bridge_tool_live_shell(updated, true, sess.run_seq)
 	}
 	send_result(conn, session_id, command_id, true, int(pid))
 }

@@ -33,6 +33,7 @@ new_taskchain_repository :: proc(impl: ^Taskchain_Repo_SQLite, conn: ^Conn) -> i
 		save_member = taskchain_save_member_sqlite,
 		remove_member = taskchain_remove_member_sqlite,
 		list_members_by_chain = taskchain_list_members_by_chain_sqlite,
+        list_tool_members_by_chain = taskchain_list_tool_members_by_chain_sqlite,
 		list_chains_by_coordinator = taskchain_list_chains_by_coordinator_sqlite,
 		save_dependency = taskchain_save_dependency_sqlite,
 		remove_dependency = taskchain_remove_dependency_sqlite,
@@ -651,3 +652,15 @@ chain_status_string :: proc(status: domain.Task_Chain_Status) -> string { if sta
 chain_status_from_string :: proc(status: string) -> domain.Task_Chain_Status { if status == "completed" do return .Completed; if status == "cancelled" do return .Cancelled; if status == "archived" do return .Archived; return .Active }
 json_or_empty_array :: proc(value: string) -> string { if value == "" do return "[]"; return value }
 json_or_empty_object :: proc(value: string) -> string { if value == "" do return "{}"; return value }
+
+taskchain_list_tool_members_by_chain_sqlite :: proc(ctx: rawptr, chain_id: domain.Task_Chain_ID, owner_user_id: domain.User_ID) -> ([]domain.Task_Chain_Member, domain.Domain_Error) {
+	impl := (^Taskchain_Repo_SQLite)(ctx)
+	stmt: sqlite3_stmt = nil
+	query := "SELECT chain_id, agent_instance_id, agent_id, owner_user_id, role, created_at FROM task_chain_members WHERE chain_id = ? AND owner_user_id = ? ORDER BY created_at ASC LIMIT 257;"
+	if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return nil, domain.domain_error(.Internal_Error, "failed to prepare member list")
+	defer sqlite3_finalize(stmt)
+	bind_text(stmt, 1, string(chain_id)); bind_text(stmt, 2, string(owner_user_id))
+	out := make([dynamic]domain.Task_Chain_Member)
+	for sqlite3_step(stmt) == SQLITE_ROW do append(&out, member_from_stmt(stmt))
+	return out[:], domain.Domain_Error{}
+}

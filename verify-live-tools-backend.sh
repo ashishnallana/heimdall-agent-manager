@@ -27,11 +27,12 @@ run_scope() {
     "-out:$test_dir/$label" -define:ODIN_TEST_FANCY=false -define:ODIN_TEST_THREADS=1
   "$test_dir/$label" "-tests:$selected" 2>&1 | tee "$test_dir/$label.log"
 }
+run_scope tracker src/lib/tool_live "$(names . src/lib/tool_live/tracker_test.odin)"
 run_scope agent src/hub/service/agent "$(names . src/hub/service/agent/tool_activity_live_test.odin src/hub/service/agent/extension_ingest_test.odin)"
-run_scope http src/hub/transport/http "$(names . src/hub/transport/http/tool_activity_live_test.odin)"
+run_scope http src/hub/transport/http "$(names . src/hub/transport/http/tool_activity_live_test.odin src/hub/transport/http/tool_activity_live_relay_test.odin)"
 shell_tests="$(names '^(test_live_|test_req5_|test_req16_|test_req25_|test_t10_(absent_row_goes_terminal|untracked_session_is_adopted|unobserved_terminal_is_revived|observed_terminal_is_not_revived|apply_does_not_free_the_clock_string)$)' src/hub/service/shell_session/shell_session_lifecycle_test.odin src/hub/service/shell_session/shell_session_create_test.odin src/hub/service/shell_session/shell_session_reconcile_test.odin)"
 run_scope shell src/hub/service/shell_session "$shell_tests"
-run_scope bridge src/bridge "$(names . src/bridge/extension_event_test.odin src/bridge/extension_blockers_test.odin src/bridge/extension_permission_test.odin),$(names '^activity_normalize_' src/bridge/pty_host_activity_test.odin)"
+run_scope bridge src/bridge "$(names . src/bridge/tool_activity_live_test.odin src/bridge/extension_event_test.odin src/bridge/extension_blockers_test.odin src/bridge/extension_permission_test.odin),$(names '^activity_normalize_' src/bridge/pty_host_activity_test.odin)"
 python3 - <<'PY'
 import json,pathlib,re
 json.loads(pathlib.Path("docs/tool-activity-live.schema.json").read_text())

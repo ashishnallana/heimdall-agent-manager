@@ -1583,35 +1583,19 @@ test_t14_synthesized_terminal_is_revived :: proc(t: ^testing.T) {
 
 
 @(test)
-test_live_inventory_absence_clears_without_resurrection :: proc(t: ^testing.T) {
+test_live_inventory_does_not_reconstruct_hub_tool_state :: proc(t: ^testing.T) {
  fx: Fx10
  fx10_make(&fx)
  defer fx10_free(&fx)
  live := agent_service.Agent_Service{}
- agent_service.tool_live_init(&live.tool_live)
  defer agent_service.tool_live_destroy(&live.tool_live)
  fx.svc.live_agents = &live
  row := domain.Shell_Session{session_id = "sh_live_missing", owner_user_id = "owner_a", bridge_id = "brg_1",
   kind = "run", agent_instance_id = "live_inventory", status = "running"}
  fx.r.stored[strings.clone(r10_key(row.bridge_id, row.session_id))] = r10_clone(row)
- agent_service.tool_live_shell(&live, row, true)
  frame := inv10({})
  defer delete(frame)
  result := shell_session_apply_inventory(&fx.svc, "brg_1", frame)
  testing.expect_value(t, result.terminated, 1)
- inst := domain.Agent_Instance{agent_instance_id = row.agent_instance_id, owner_user_id = "owner_a"}
- body := agent_service.tool_live_snapshot(&live, inst)
- testing.expect(t, strings.contains(body, `"active":[]`))
- testing.expect(t, !strings.contains(body, `"status":"completed"`))
- delete(body)
- // A later live inventory can correct an operational row, but cannot recreate
- // a live tool call that the projection already cleared.
- entry := entry10(Entry10{session_id = row.session_id, kind = "run"})
- defer delete(entry)
- inventory := inv10([]string{entry})
- defer delete(inventory)
- _ = shell_session_apply_inventory(&fx.svc, "brg_1", inventory)
- body = agent_service.tool_live_snapshot(&live, inst)
- testing.expect(t, strings.contains(body, `"active":[]`))
- delete(body)
+ for p in live.tool_live.pending do testing.expect(t, !p.used)
 }

@@ -154,6 +154,7 @@ main :: proc() {
 		return
 	}
 	bridge_runtime_init()
+	bridge_tool_live_init()
 	// REQ-SHELL-8: reclaim shell output past its retention window. Bridge start is a
 	// trigger rather than a tick — this is the first of three events that already
 	// happen (start, session create, hub reconnect) and between them they age output

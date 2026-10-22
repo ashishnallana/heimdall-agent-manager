@@ -13,7 +13,7 @@ Agent_Repo_SQLite :: struct {
 
 new_agent_repository :: proc(impl: ^Agent_Repo_SQLite, conn: ^Conn) -> iface.Agent_Repository {
 	impl.conn = conn
-	return iface.Agent_Repository{ctx = rawptr(impl), reconfiguration_begin = instance_reconfiguration_begin_sqlite, reconfiguration_get = instance_reconfiguration_get_sqlite, reconfiguration_advance = instance_reconfiguration_advance_sqlite, reconfiguration_list = instance_reconfiguration_list_sqlite, save = agent_save_sqlite, get = agent_get_sqlite, list_by_owner = agent_list_by_owner_sqlite, save_support = agent_save_support_sqlite, get_support = agent_get_support_sqlite, list_support = agent_list_support_sqlite, delete_support = agent_delete_support_sqlite, save_instance = agent_save_instance_sqlite, get_instance = agent_get_instance_sqlite, delete_instance = agent_delete_instance_sqlite, list_instances_by_owner = agent_list_instances_by_owner_sqlite, list_instances_by_bridge = agent_list_instances_by_bridge_sqlite, list_instances_by_chain = agent_list_instances_by_chain_sqlite, list_active_runtime_instances = agent_list_active_runtime_instances_sqlite, next_title_counter = agent_next_title_counter_sqlite, ext_insert_events = agent_ext_insert_events_sqlite, ext_update_instance = agent_ext_update_instance_sqlite, ext_list_events = agent_ext_list_events_sqlite, ext_list_subagents = agent_ext_list_subagents_sqlite, ext_list_files = agent_ext_list_files_sqlite}
+	return iface.Agent_Repository{ctx = rawptr(impl), reconfiguration_begin = instance_reconfiguration_begin_sqlite, reconfiguration_get = instance_reconfiguration_get_sqlite, reconfiguration_advance = instance_reconfiguration_advance_sqlite, reconfiguration_list = instance_reconfiguration_list_sqlite, save = agent_save_sqlite, get = agent_get_sqlite, list_by_owner = agent_list_by_owner_sqlite, save_support = agent_save_support_sqlite, get_support = agent_get_support_sqlite, list_support = agent_list_support_sqlite, delete_support = agent_delete_support_sqlite, save_instance = agent_save_instance_sqlite, get_instance = agent_get_instance_sqlite, delete_instance = agent_delete_instance_sqlite, list_instances_by_owner = agent_list_instances_by_owner_sqlite, list_instances_by_bridge = agent_list_instances_by_bridge_sqlite, list_instances_by_chain = agent_list_instances_by_chain_sqlite, list_tool_instances_by_chain = agent_list_tool_instances_by_chain_sqlite, get_tool_instance = agent_get_tool_instance_sqlite, list_active_runtime_instances = agent_list_active_runtime_instances_sqlite, next_title_counter = agent_next_title_counter_sqlite, ext_insert_events = agent_ext_insert_events_sqlite, ext_update_instance = agent_ext_update_instance_sqlite, ext_list_events = agent_ext_list_events_sqlite, ext_list_subagents = agent_ext_list_subagents_sqlite, ext_list_files = agent_ext_list_files_sqlite}
 }
 
 agent_delete_instance_sqlite :: proc(ctx: rawptr, instance_id: string) -> (bool, domain.Domain_Error) {
@@ -255,3 +255,31 @@ instance_from_stmt :: proc(stmt: sqlite3_stmt) -> domain.Agent_Instance {
 agent_state_from_string :: proc(state: string) -> domain.Agent_State { if state == "archived" do return .Archived; return .Active }
 i32_to_string :: proc(v: int) -> string { return fmt.tprintf("%d", v) }
 string_to_i32 :: proc(v: string) -> int { parsed, ok := strconv.parse_int(v); if !ok do return 0; return int(parsed) }
+
+// Tool relay identity reads deliberately project only bounded routing metadata.
+agent_tool_instance_from_stmt :: proc(stmt: sqlite3_stmt) -> domain.Agent_Instance {
+    return domain.Agent_Instance{agent_instance_id = column_text(stmt,0), owner_user_id = domain.User_ID(column_text(stmt,1)),
+        agent_id = column_text(stmt,2), bridge_id = column_text(stmt,3), display_name = column_text(stmt,4),
+        chain_id = column_text(stmt,5), runtime_status = column_text(stmt,6), run_count = string_to_i32(column_text_unowned(stmt,7))}
+}
+agent_get_tool_instance_sqlite :: proc(ctx: rawptr, id: string) -> (domain.Agent_Instance, bool, domain.Domain_Error) {
+    impl := (^Agent_Repo_SQLite)(ctx)
+    stmt: sqlite3_stmt
+    query := "SELECT CASE WHEN length(cast(agent_instance_id AS BLOB))<=64 THEN agent_instance_id ELSE '' END,CASE WHEN length(cast(owner_user_id AS BLOB))<=512 THEN owner_user_id ELSE '' END,CASE WHEN length(cast(agent_id AS BLOB))<=64 THEN agent_id ELSE '' END,CASE WHEN length(cast(bridge_id AS BLOB))<=64 THEN bridge_id ELSE '' END,substr(display_name,1,128),CASE WHEN length(cast(chain_id AS BLOB))<=64 THEN chain_id ELSE '' END,runtime_status,run_count FROM agent_instances WHERE agent_instance_id=? LIMIT 1;"
+    if sqlite3_prepare_v2(impl.conn.db,cstring(raw_data(query)),-1,&stmt,nil) != SQLITE_OK do return {},false,domain.domain_error(.Internal_Error,"tool routing query failed")
+    defer sqlite3_finalize(stmt)
+    bind_text(stmt,1,id)
+    if sqlite3_step(stmt) != SQLITE_ROW do return {},false,{}
+    return agent_tool_instance_from_stmt(stmt),true,{}
+}
+agent_list_tool_instances_by_chain_sqlite :: proc(ctx: rawptr, owner: domain.User_ID, chain: string) -> ([]domain.Agent_Instance, domain.Domain_Error) {
+    impl := (^Agent_Repo_SQLite)(ctx)
+    stmt: sqlite3_stmt
+    query := "SELECT CASE WHEN length(cast(agent_instance_id AS BLOB))<=64 THEN agent_instance_id ELSE '' END,CASE WHEN length(cast(owner_user_id AS BLOB))<=512 THEN owner_user_id ELSE '' END,CASE WHEN length(cast(agent_id AS BLOB))<=64 THEN agent_id ELSE '' END,CASE WHEN length(cast(bridge_id AS BLOB))<=64 THEN bridge_id ELSE '' END,substr(display_name,1,128),CASE WHEN length(cast(chain_id AS BLOB))<=64 THEN chain_id ELSE '' END,runtime_status,run_count FROM agent_instances WHERE kind='agent' AND owner_user_id=? AND chain_id=? ORDER BY agent_instance_id LIMIT 257;"
+    if sqlite3_prepare_v2(impl.conn.db,cstring(raw_data(query)),-1,&stmt,nil) != SQLITE_OK do return nil,domain.domain_error(.Internal_Error,"tool roster query failed")
+    defer sqlite3_finalize(stmt)
+    bind_text(stmt,1,string(owner)); bind_text(stmt,2,chain)
+    out := make([dynamic]domain.Agent_Instance)
+    for sqlite3_step(stmt) == SQLITE_ROW do append(&out,agent_tool_instance_from_stmt(stmt))
+    return out[:],{}
+}

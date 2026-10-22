@@ -26,7 +26,8 @@
       ],
       "properties": {
         "call_id": {
-          "type": "string"
+          "type": "string",
+          "maxLength": 2048
         },
         "source": {
           "enum": [
@@ -35,19 +36,24 @@
           ]
         },
         "provider_session_id": {
-          "type": "string"
+          "type": "string",
+          "maxLength": 64
         },
         "agent_id": {
-          "type": "string"
+          "type": "string",
+          "maxLength": 64
         },
         "tool_use_id": {
-          "type": "string"
+          "type": "string",
+          "maxLength": 64
         },
         "tool_name": {
-          "type": "string"
+          "type": "string",
+          "maxLength": 96
         },
         "shell_session_id": {
-          "type": "string"
+          "type": "string",
+          "maxLength": 64
         },
         "shell_run_seq": {
           "type": "integer",
@@ -106,7 +112,9 @@
         "generation",
         "revision",
         "active",
-        "last_completion"
+        "last_completion",
+        "bridge_id",
+        "availability"
       ],
       "properties": {
         "type": {
@@ -125,7 +133,8 @@
           "type": "string"
         },
         "epoch": {
-          "type": "string"
+          "type": "string",
+          "pattern": "^[0-9]+$"
         },
         "generation": {
           "type": "integer",
@@ -139,7 +148,8 @@
           "type": "array",
           "items": {
             "$ref": "#/$defs/call"
-          }
+          },
+          "maxItems": 32
         },
         "last_completion": {
           "oneOf": [
@@ -157,6 +167,13 @@
         "stream_seq": {
           "type": "integer",
           "minimum": 0
+        },
+        "bridge_id": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "availability": {
+          "const": "ready"
         }
       }
     },
@@ -167,7 +184,8 @@
         "agent_id",
         "instance_id",
         "display_name",
-        "snapshot"
+        "snapshot",
+        "availability"
       ],
       "properties": {
         "agent_id": {
@@ -180,7 +198,20 @@
           "type": "string"
         },
         "snapshot": {
-          "$ref": "#/$defs/snapshot"
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/snapshot"
+            }
+          ]
+        },
+        "availability": {
+          "enum": [
+            "ready",
+            "offline"
+          ]
         }
       }
     },
@@ -189,21 +220,28 @@
       "additionalProperties": false,
       "required": [
         "chain_id",
-        "epoch",
-        "members"
+        "members",
+        "next_cursor",
+        "roster_token"
       ],
       "properties": {
         "chain_id": {
-          "type": "string"
-        },
-        "epoch": {
           "type": "string"
         },
         "members": {
           "type": "array",
           "items": {
             "$ref": "#/$defs/member"
-          }
+          },
+          "maxItems": 8
+        },
+        "next_cursor": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "roster_token": {
+          "type": "string",
+          "maxLength": 16
         }
       }
     }

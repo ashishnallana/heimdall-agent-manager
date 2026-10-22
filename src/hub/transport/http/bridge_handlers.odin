@@ -1856,7 +1856,10 @@ bridge_ws_disconnect :: proc(
 	// lease runs out via its TTL (review B2).
 	agent_service.notify_instances_terminal(h.agents, cleared)
 	// Blockers live in memory only; the bridge resends them when it reconnects.
-	if still_current do agent_service.clear_bridge_blockers(h.agents, bridge_id)
+	if still_current {
+		agent_service.clear_bridge_blockers(h.agents, bridge_id)
+		agent_service.tool_live_clear_bridge(h.agents, bridge_id)
+	}
 	duration_ms := i64(-1)
 	if connected_at_ns > 0 do duration_ms = (time.now()._nsec - connected_at_ns) / 1_000_000
 	bridge_ws_log_disconnect(bridge_id, reason, connection_generation, duration_ms, still_current)
@@ -2380,6 +2383,9 @@ bridge_ws_process_frame :: proc(h: ^Bridge_Handlers, bridge_id: string, connecti
 	// scope it is confined to must come from the transport, not from its payload.
 	// REQ-EXT-BLK-2: a full per-instance agent blocker snapshot. Scoped to the
 	// authenticated bridge_id; the hub replaces its in-memory list wholesale.
+	case "tool_activity_live_reset", "tool_activity_live_snapshot", "tool_activity_live_reply", "tool_activity_live_resync":
+        bridge_ws_tool_live_frame(h, bridge_id, connection_generation, connection, text)
+
 	case "agent_blockers":
 		if h.agents != nil do _ = agent_service.apply_bridge_blockers_snapshot(h.agents, bridge_id, text)
 	case "shell_inventory":
