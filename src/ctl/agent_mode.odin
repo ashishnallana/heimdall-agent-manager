@@ -1757,6 +1757,7 @@ print_agent_help :: proc(cmd: []string) {
 	case "memory": print_help_memory(); return
 	case "cards", "card", "action", "actions": print_help_cards(); return
 	case "shell":     print_help_shell(); return
+	case "extension", "extensions": print_help_extension(); return
 	case "issue", "issues": print_issues_help(); return
 	case "project", "projects": print_projects_help(); return
 	case "vault": print_vault_help(); return
@@ -1793,6 +1794,7 @@ print_help_overview :: proc() {
 	fmt.println("  verify      Run your task's brief.verify as an attributable Run session (exit code = result)")
 	fmt.println("  review      Post a review verdict on the task you were woken to review (post)")
 	fmt.println("  context     One-shot snapshot of this instance (chain, task, unread)")
+	fmt.println("  extension   Harness extension hooks → Bridge (hook <provider>, event --stdin, status)")
 	fmt.println("  start-success  Signal this instance is ready")
 	fmt.println("")
 	fmt.println("EXAMPLES")

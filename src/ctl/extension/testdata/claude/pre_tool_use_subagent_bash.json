@@ -1,0 +1,19 @@
+{
+ "session_id": "935c3167-dab6-4f7d-a453-c4e9ec710d23",
+ "transcript_path": "/home/dev/.claude/projects/-home-dev--cache-heimdall-spike-work/935c3167-dab6-4f7d-a453-c4e9ec710d23.jsonl",
+ "cwd": "/home/dev/.cache/heimdall-spike/work",
+ "prompt_id": "13400b47-cb50-4025-82a4-99f3e24761a0",
+ "permission_mode": "bypassPermissions",
+ "agent_id": "a214dfca8e8a87ac6",
+ "agent_type": "general-purpose",
+ "effort": {
+  "level": "medium"
+ },
+ "hook_event_name": "PreToolUse",
+ "tool_name": "Bash",
+ "tool_input": {
+  "command": "cat /home/dev/.cache/heimdall-spike/work/c.txt",
+  "description": "Print contents of c.txt file"
+ },
+ "tool_use_id": "toolu_01GDGDiJmHHuKbvcQWyN47MK"
+}

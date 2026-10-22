@@ -1,0 +1,23 @@
+{
+ "session_id": "cf4b17bd-aa1d-4d65-8f7d-63529dbb8b9f",
+ "transcript_path": "/home/dev/.claude/projects/-home-dev--cache-heimdall-spike-work/cf4b17bd-aa1d-4d65-8f7d-63529dbb8b9f.jsonl",
+ "cwd": "/home/dev/.cache/heimdall-spike/work",
+ "prompt_id": "f2ef0f39-12fb-4a72-9ad8-edb330b7a907",
+ "permission_mode": "bypassPermissions",
+ "effort": {
+  "level": "medium"
+ },
+ "hook_event_name": "Stop",
+ "stop_hook_active": false,
+ "last_assistant_message": "Done. Steps 1–3 are complete: `a.txt` now reads `line 1`, `line 2`, `line 3`, and `b.txt` contains `hello`. MultiEdit isn't available here, so I used Edit twice for step 3. The `count lines` subagent is still running in the background. I'll pass along its `wc -l a.txt` result when it reports back.",
+ "background_tasks": [
+  {
+   "id": "adedc1a3cdf12e0cd",
+   "type": "subagent",
+   "status": "running",
+   "description": "count lines",
+   "agent_type": "general-purpose"
+  }
+ ],
+ "session_crons": []
+}
