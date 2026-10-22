@@ -24,6 +24,47 @@ Agent :: struct {
 	state: Agent_State,
 	created_at: string,
 	updated_at: string,
+	// permission_mode is AGENT_PERMISSION_MODE_YOLO (default) or _ASK; always a
+	// static literal (see agent_permission_mode_normalize), never heap-owned.
+	permission_mode: string,
+}
+
+// REQ-EXT-PERM-2: 'yolo' launches the provider with the catalog yolo_args; 'ask'
+// launches without them so the provider prompts for permissions.
+AGENT_PERMISSION_MODE_YOLO :: "yolo"
+AGENT_PERMISSION_MODE_ASK :: "ask"
+
+// agent_permission_mode_valid reports whether mode is an accepted API value.
+agent_permission_mode_valid :: proc(mode: string) -> bool {
+	return mode == AGENT_PERMISSION_MODE_YOLO || mode == AGENT_PERMISSION_MODE_ASK
+}
+
+// agent_permission_mode_normalize maps any stored/legacy value to a static
+// literal: only an explicit "ask" opts out of yolo.
+agent_permission_mode_normalize :: proc(mode: string) -> string {
+	if mode == AGENT_PERMISSION_MODE_ASK do return AGENT_PERMISSION_MODE_ASK
+	return AGENT_PERMISSION_MODE_YOLO
+}
+
+// agent_instance_permission_mode_normalize maps a stored instance override to a
+// static literal: "" (inherit), "yolo" or "ask". Unknown values inherit.
+agent_instance_permission_mode_normalize :: proc(mode: string) -> string {
+	if mode == AGENT_PERMISSION_MODE_ASK do return AGENT_PERMISSION_MODE_ASK
+	if mode == AGENT_PERMISSION_MODE_YOLO do return AGENT_PERMISSION_MODE_YOLO
+	return ""
+}
+
+// effective_permission_mode is the mode a launch uses: the instance override
+// when set, else the agent's mode (yolo when neither says "ask").
+effective_permission_mode :: proc(instance_mode, agent_mode: string) -> string {
+	if override := agent_instance_permission_mode_normalize(instance_mode); override != "" do return override
+	return agent_permission_mode_normalize(agent_mode)
+}
+
+// agent_instance_effective_permission_mode applies effective_permission_mode to
+// an instance row (agent_permission_mode is filled by the repository).
+agent_instance_effective_permission_mode :: proc(inst: Agent_Instance) -> string {
+	return effective_permission_mode(inst.permission_mode, inst.agent_permission_mode)
 }
 
 Agent_Bridge_Support :: struct {
@@ -86,6 +127,69 @@ Agent_Instance :: struct {
 	// the lease matcher never picks such an instance. Cleared on a user
 	// start/restart. "" otherwise.
 	stopped_by: string,
+	// Provider extension (ham.ext.v1). Written only by the extension ingest path.
+	// provider_session_id is the harness's own session id (session/hello events,
+	// overwritten when it changes); extension_capabilities is a JSON string array.
+	provider_session_id: string,
+	provider_transcript_path: string,
+	extension_provider: string,
+	extension_version: string,
+	extension_capabilities: string,
+	extension_last_seen_at: string,
+	// permission_mode is this instance's override of the agent's mode: "" inherits
+	// (agents.permission_mode), "yolo" / "ask" override. agent_permission_mode is
+	// the owning agent's mode, read alongside the row. Both are always static
+	// literals (see agent_instance_permission_mode_normalize), never heap-owned.
+	permission_mode: string,
+	agent_permission_mode: string,
+}
+
+// Agent_Extension_Event is one ingested ham.ext.v1 event. seq is hub-assigned,
+// monotonic per instance; payload is the raw JSON payload object.
+Agent_Extension_Event :: struct {
+	instance_id: string,
+	seq: int,
+	event: string,
+	ts: string,
+	session_id: string,
+	agent_id: string,
+	agent_type: string,
+	tool_name: string,
+	tool_use_id: string,
+	file_path: string,
+	payload: string,
+	created_at: string,
+}
+
+// Agent_Extension_Instance_Update carries the instance-level fields an ingest
+// batch changes. Empty strings leave the stored value untouched.
+Agent_Extension_Instance_Update :: struct {
+	provider_session_id: string,
+	provider_transcript_path: string,
+	extension_provider: string,
+	extension_version: string,
+	extension_capabilities: string,
+	extension_last_seen_at: string,
+}
+
+// Agent_Subagent_Summary groups one subagent's (agent.id) start/stop events.
+Agent_Subagent_Summary :: struct {
+	agent_id: string,
+	agent_type: string,
+	description: string,
+	status: string, // running | stopped
+	started_at: string,
+	stopped_at: string,
+	event_count: int,
+}
+
+// Agent_File_Edit_Summary is one file the instance (or a subagent) edited.
+Agent_File_Edit_Summary :: struct {
+	file_path: string,
+	edit_count: int,
+	last_seq: int,
+	last_at: string,
+	agent_ids: string, // comma-separated distinct agent ids ("" = main agent)
 }
 
 current_task_role_string :: proc(role: Current_Task_Role) -> string {
@@ -138,6 +242,12 @@ agent_instance_destroy :: proc(inst: ^Agent_Instance) {
 	if len(inst.last_seen_at) > 0 do delete(inst.last_seen_at)
 	if len(inst.idle_since) > 0 do delete(inst.idle_since)
 	if len(inst.stopped_by) > 0 do delete(inst.stopped_by)
+	if len(inst.provider_session_id) > 0 do delete(inst.provider_session_id)
+	if len(inst.provider_transcript_path) > 0 do delete(inst.provider_transcript_path)
+	if len(inst.extension_provider) > 0 do delete(inst.extension_provider)
+	if len(inst.extension_version) > 0 do delete(inst.extension_version)
+	if len(inst.extension_capabilities) > 0 do delete(inst.extension_capabilities)
+	if len(inst.extension_last_seen_at) > 0 do delete(inst.extension_last_seen_at)
 	inst^ = {}
 }
 

@@ -2,7 +2,8 @@
 // Migrations 104 (chat FTS update guard) and 105 (full-scan indexes) were renumbered
 // to follow main's 103_plan_enforcement.sql. These tests pin that order: a database
 // stopped at main's latest migration upgrades through both, a fresh database applies
-// every migration, and no number after 102 is shared.
+// every migration, and no number after 102 is shared. Extension migrations follow
+// the deployed main identities 104/105 without renumbering either.
 package sqlite
 
 import "core:strconv"
@@ -42,7 +43,8 @@ rmo_expect_after :: proc(t: ^testing.T, conn: ^Conn, why: string) {
 		testing.expectf(t, sqlite_object_exists(conn, name), "%s: index %s present", why, name)
 	}
 	ledger := rmo_text(conn, "SELECT count(*) FROM schema_migrations;")
-	testing.expectf(t, ledger == "108", "%s: ledger holds every migration (got %s, want 108)", why, ledger)
+	count, count_ok := strconv.parse_int(ledger)
+	testing.expectf(t, count_ok && count == len(migration_order), "%s: ledger holds every migration (got %s, want %d)", why, ledger, len(migration_order))
 }
 
 @(test)
@@ -93,12 +95,15 @@ test_rebased_fresh_database_applies_every_migration :: proc(t: ^testing.T) {
 }
 
 // Older numbers (043, 044, 048, 072) were shared before this rule; anything after
-// 102 must be unique and in ascending order, ending with ours.
+// 102 must be unique and in ascending order, including the extension additions.
 @(test)
 test_rebased_migration_numbers_after_102_are_unique :: proc(t: ^testing.T) {
 	order := migration_order
-	tail := order[len(order) - 4:]
-	testing.expect(t, tail[0] == "102_drop_bridge_enrollments.sql" && tail[1] == RMO_MAIN_TIP && tail[2] == RMO_GUARD && tail[3] == RMO_INDEXES, "order ends 102, 103 plan, 104 guard, 105 indexes")
+	tail := order[len(order) - 9:]
+	expected := [9]string{"102_drop_bridge_enrollments.sql", RMO_MAIN_TIP, RMO_GUARD, RMO_INDEXES,
+		"106_agent_extension_events.sql", "107_provider_extension.sql", "108_agent_permission_mode.sql",
+		"109_instance_permission_mode.sql", "110_provider_ask_args.sql"}
+	for name, i in expected do testing.expect_value(t, tail[i], name)
 	prev := 0
 	for name in order {
 		n, n_ok := strconv.parse_int(name[:3])
@@ -106,4 +111,33 @@ test_rebased_migration_numbers_after_102_are_unique :: proc(t: ^testing.T) {
 		if n > 102 do testing.expectf(t, n > prev, "%s must be numbered after %d", name, prev)
 		prev = max(prev, n)
 	}
+}
+
+
+@(test)
+test_extension_upgrade_from_deployed_main_keeps_migration_identities :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	conn, path, ok := tmpl_open_file_prod(t, "rmo_extension_upgrade")
+	defer tmpl_remove_db(path)
+	if !ok do return
+	defer close(&conn)
+	mig_ok, _ := run_migrations(&conn, stop_before = "106_agent_extension_events.sql")
+	if !testing.expect(t, mig_ok, "migrate through deployed main 105") do return
+	testing.expect(t, migration_applied(&conn, RMO_GUARD) && migration_applied(&conn, RMO_INDEXES), "main migration identities recorded")
+	testing.expect(t, rmo_guarded(&conn), "main FTS guard is installed")
+	testing.expect(t, !table_column_exists(&conn, "agent_instances", "provider_session_id"), "extension not installed yet")
+	testing.expect_value(t, rmo_text(&conn, "SELECT count(*) FROM schema_migrations;"), "108")
+	main_applied_at := rmo_text(&conn, "SELECT applied_at FROM schema_migrations WHERE version='105_full_scan_indexes.sql';")
+	mig_ok, _ = run_migrations(&conn)
+	if !testing.expect(t, mig_ok, "upgrade through extension migrations") do return
+	rmo_expect_after(t, &conn, "extension upgrade")
+	testing.expect_value(t, rmo_text(&conn, "SELECT applied_at FROM schema_migrations WHERE version='105_full_scan_indexes.sql';"), main_applied_at)
+	testing.expect(t, sqlite_object_exists(&conn, "agent_extension_events_instance_agent"), "extension event log exists")
+	testing.expect(t, table_column_exists(&conn, "provider_catalog", "extension"), "provider extension descriptor exists")
+	testing.expect(t, table_column_exists(&conn, "agents", "permission_mode"), "agent permission override exists")
+	testing.expect(t, table_column_exists(&conn, "agent_instances", "permission_mode"), "instance permission override exists")
+	testing.expect(t, sqlite_trigger_mentions(&conn, "instance_reconfiguration_commit", "permission_mode"), "commit applies instance permission mode")
+	testing.expect(t, table_column_exists(&conn, "provider_catalog", "ask_args"), "ask arguments exist")
+	mig_ok, _ = run_migrations(&conn)
+	testing.expect(t, mig_ok, "extension upgrade is idempotent")
 }

@@ -18,6 +18,7 @@ import ArtifactViewer from '../ArtifactViewer';
 
 const ProjectFilesPanel = React.lazy(() => import('../chat/ProjectFilesPanel'));
 const ProjectVcsPanel = React.lazy(() => import('../chat/ProjectVcsPanel'));
+const ActivityTimelinePanel = React.lazy(() => import('../extension/ActivityTimelinePanel'));
 
 export interface AuxTabContentProps {
   tab: AuxTab;
@@ -143,6 +144,21 @@ function renderAuxTabBody({
             openFilePath={c.filePath || null}
             onFileOpened={() => onUpdateTab(tab.id, { filePath: null })}
             onOpenDirectory={(dirPath: string) => onOpenTab({ type: 'files', path: dirPath })}
+          />
+        </Suspense>
+      );
+    case 'activity':
+      if (!ctx.agentInstanceId) {
+        return <EmptyNotice debugId="aux-activity-no-agent">Open an agent conversation to see its activity.</EmptyNotice>;
+      }
+      return (
+        <Suspense fallback={null}>
+          <ActivityTimelinePanel
+            key={ctx.agentInstanceId}
+            instanceId={ctx.agentInstanceId}
+            isMobile={isMobile}
+            openFilePath={c.filePath || null}
+            onFileOpened={() => onUpdateTab(tab.id, { filePath: null })}
           />
         </Suspense>
       );

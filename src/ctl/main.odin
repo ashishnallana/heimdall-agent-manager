@@ -34,6 +34,13 @@ main :: proc() {
 		return
 	}
 
+	// Harness extension hooks run inside the provider's hook processes: dispatch
+	// them before any mode logic so a missing agent context is a silent no-op.
+	if cmd[0] == "extension" || cmd[0] == "extensions" {
+		ctl_extension_command(cmd[:], os.args)
+		return
+	}
+
 	// REQ-CLI-3: `search --help` must reach SEARCH help in BOTH modes. This check
 	// used to live inside the user-mode-only block below, so in an agent context it
 	// was unreachable: search fell through to the agent_ctx switch and ctl_agent_mode

@@ -14,6 +14,7 @@ import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
 import ownership "odin_test:hub/service/ownership"
 import project_service "odin_test:hub/service/project"
+import events "odin_test:hub/service/events"
 import platform "odin_test:hub/platform"
 import jsonx "odin_test:lib/jsonx"
 
@@ -37,6 +38,10 @@ Agent_Service :: struct {
 	// resource_events: after-write change hints for the owner's UI (REQ-2). Set
 	// by wiring to the user event bus; every field is nil-safe.
 	resource_events: Resource_Event_Hooks,
+	// event_bus: realtime UI frames (agent_blockers_changed, ...); optional.
+	event_bus: ^events.User_Event_Bus,
+	// blockers: in-memory agent blockers fed by bridge snapshots (agent_blockers.odin).
+	blockers: Agent_Blocker_Store,
 }
 
 // Resource_Event_Hooks are invoked only after the write they describe returned
@@ -68,7 +73,10 @@ STOPPED_BY_USER :: "user"
 // stopped|failed|unreachable, heartbeat reconcile, bridge disconnect, reaper,
 // delete) calls; the engine expires the instance's lease and re-plans.
 notify_instance_terminal :: proc(service: ^Agent_Service, instance_id: string) {
-	if service == nil || service.hooks.on_terminal == nil || instance_id == "" do return
+	if service == nil || instance_id == "" do return
+	// A dead instance has nothing left to answer: clear its agent blockers.
+	clear_instance_blockers(service, instance_id)
+	if service.hooks.on_terminal == nil do return
 	service.hooks.on_terminal(service.hooks.ctx, instance_id)
 }
 
@@ -114,6 +122,9 @@ Create_Agent_Input :: struct {
 	template_id: string,
 	instructions: string,
 	has_template_id: bool,
+	// permission_mode: "yolo" | "ask" (REQ-EXT-PERM-2); empty keeps the current
+	// value on update and defaults to "yolo" on create.
+	permission_mode: string,
 }
 
 Support_Input :: struct {
@@ -168,7 +179,10 @@ create_agent :: proc(service: ^Agent_Service, auth: contracts.Auth_Context, inpu
 	template_id := strings.trim_space(input.template_id)
 	if template_id == "" do template_id = domain.TEMPLATE_EMPTY_ID
 	now := platform.clock_now(service.clock)
-	agent := domain.Agent{agent_id = platform.generate_id(service.ids, "agt_"), owner_user_id = owner, name = input.name, slug = slug, template_id = template_id, instructions = input.instructions, state = .Active, created_at = now, updated_at = now}
+	permission_mode := strings.trim_space(input.permission_mode)
+	if permission_mode == "" do permission_mode = domain.AGENT_PERMISSION_MODE_YOLO
+	if !domain.agent_permission_mode_valid(permission_mode) do return domain.Agent{}, false, domain.domain_error(.Validation_Failed, "permission_mode must be 'yolo' or 'ask'")
+	agent := domain.Agent{agent_id = platform.generate_id(service.ids, "agt_"), owner_user_id = owner, name = input.name, slug = slug, template_id = template_id, instructions = input.instructions, state = .Active, created_at = now, updated_at = now, permission_mode = domain.agent_permission_mode_normalize(permission_mode)}
 	return iface.agent_save(service.agents, agent)
 }
 
@@ -197,6 +211,10 @@ update_agent :: proc(service: ^Agent_Service, auth: contracts.Auth_Context, agen
 		agent.template_id = template_id
 	}
 	if input.instructions != "" do agent.instructions = input.instructions
+	if permission_mode := strings.trim_space(input.permission_mode); permission_mode != "" {
+		if !domain.agent_permission_mode_valid(permission_mode) do return domain.Agent{}, false, domain.domain_error(.Validation_Failed, "permission_mode must be 'yolo' or 'ask'")
+		agent.permission_mode = domain.agent_permission_mode_normalize(permission_mode)
+	}
 	agent.updated_at = platform.clock_now(service.clock)
 	return iface.agent_save(service.agents, agent)
 }
@@ -1674,6 +1692,8 @@ launch_command_json_full :: proc(service: ^Agent_Service, command_id: string, in
 	coordinator_id := ""
 	chain_title := ""
 	agent_name := ""
+	// REQ-EXT-PERM-2: the instance override wins over the agent's mode.
+	permission_mode := domain.agent_instance_effective_permission_mode(inst)
 	if service != nil {
 		if service.taskchains != nil && inst.chain_id != "" {
 			if chain, chain_ok, _ := iface.taskchain_get_chain(service.taskchains, domain.Task_Chain_ID(inst.chain_id)); chain_ok {
@@ -1685,6 +1705,7 @@ launch_command_json_full :: proc(service: ^Agent_Service, command_id: string, in
 		if service.agents != nil && inst.agent_id != "" {
 			if agent, agent_ok, _ := iface.agent_get(service.agents, inst.agent_id); agent_ok {
 				agent_name = agent.name
+				permission_mode = domain.effective_permission_mode(inst.permission_mode, agent.permission_mode)
 			}
 		}
 	}
@@ -1705,6 +1726,8 @@ launch_command_json_full :: proc(service: ^Agent_Service, command_id: string, in
 	strings.write_string(&b, "\",\"provider\":\""); write_service_json_string(&b, inst.provider)
 	strings.write_string(&b, "\",\"model\":\""); write_service_json_string(&b, inst.model)
 	strings.write_string(&b, "\",\"launch_epoch\":\""); write_service_json_string(&b, inst.launch_epoch)
+	// REQ-EXT-PERM-2: "ask" makes the bridge launch without the catalog yolo flags.
+	strings.write_string(&b, "\",\"permission_mode\":\""); write_service_json_string(&b, permission_mode)
 	token := instance_assertion_token(inst); defer delete(token)
 	strings.write_string(&b, "\",\"instance_token\":\""); write_service_json_string(&b, token)
 	strings.write_string(&b, "\",\"bootstrap_url\":\"/api/v1/bridge/agent-instances/"); write_service_json_string(&b, inst.agent_instance_id)
@@ -1748,6 +1771,9 @@ Wake_Agent_Run_Entry :: struct {
 	// (a JSON object, emitted verbatim). Empty for non-lease wakes.
 	lease_id:          string,
 	pack_json:         string,
+	// REQ-EXT-PERM-2: the durable agent's permission mode ("yolo" | "ask");
+	// omitted when empty so the bridge keeps the yolo launch.
+	permission_mode:   string,
 }
 
 // wake_agent_command_json builds the ephemeral-lifecycle push the reconcile pass
@@ -1806,6 +1832,9 @@ wake_agent_command_json :: proc(command_id, chain_id: string, run: []Wake_Agent_
 		}
 		if entry.lease_id != "" {
 			strings.write_string(&b, ",\"lease_id\":\""); write_service_json_string(&b, entry.lease_id); strings.write_string(&b, "\"")
+		}
+		if entry.permission_mode != "" {
+			strings.write_string(&b, ",\"permission_mode\":\""); write_service_json_string(&b, entry.permission_mode); strings.write_string(&b, "\"")
 		}
 		if strings.has_prefix(strings.trim_space(entry.pack_json), "{") {
 			strings.write_string(&b, ",\"pack\":"); strings.write_string(&b, strings.trim_space(entry.pack_json))
@@ -2191,6 +2220,7 @@ bootstrap_manifest_json_for_bridge :: proc(service: ^Agent_Service, owner: domai
 	// with provider_missing (REQ-ERR-6).
 	strings.write_string(&b, "\",\"provider\":\""); write_service_json_string(&b, inst.provider)
 	strings.write_string(&b, "\",\"model\":\""); write_service_json_string(&b, inst.model)
+	strings.write_string(&b, "\",\"permission_mode\":\""); write_service_json_string(&b, domain.effective_permission_mode(inst.permission_mode, agent.permission_mode))
 	token := instance_assertion_token(inst); defer delete(token)
 	strings.write_string(&b, "\",\"instance_token\":\""); write_service_json_string(&b, token)
 	strings.write_string(&b, "\",\"hub_url\":\""); write_service_json_string(&b, bridge.hub_url)

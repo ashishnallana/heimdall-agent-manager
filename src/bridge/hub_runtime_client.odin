@@ -580,6 +580,8 @@ bridge_hub_runtime_loop :: proc(conn: ^ws.Connection) {
 	init_hb := bridge_hub_heartbeat_json()
 	_ = ws.send_text(conn, init_hb)
 	delete(init_hb)
+	// The hub keeps agent blockers in memory only: resend every snapshot on connect.
+	bridge_blockers_mark_all_dirty()
 	last_iteration := time.now()
 	for conn.connected {
 		now_iteration := time.now()
@@ -642,11 +644,14 @@ bridge_hub_runtime_loop :: proc(conn: ^ws.Connection) {
 		// pty-host ChildExited) so "stopped"/"unreachable" reaches the hub now,
 		// not on the next heartbeat.
 		bridge_runtime_drain_status_pushes(conn)
+		bridge_blockers_drain_outgoing(conn)
 		now := time.to_unix_nanoseconds(time.now())
 		if now - last_heartbeat >= sync.atomic_load(&bridge_hub_heartbeat_interval_ns) {
 			hb := bridge_hub_heartbeat_json()
 			_ = ws.send_text(conn, hb)
 			delete(hb)
+			// Reconcile: the next drain resends every instance's full snapshot.
+			bridge_blockers_mark_all_dirty()
 			hub_command_reassembly_sweep(&reassemblies, now)
 			last_heartbeat = now
 		}
@@ -1237,6 +1242,11 @@ bridge_hub_handle_command :: proc(conn: ^ws.Connection, text: string) {
 	if type == "bridge_enrollment_result" {
 		// REQ-EA-4: the hub's verdict on an atomic enrollment this process acked.
 		bridge_enroll_atomic_on_result(text)
+		return
+	}
+	if type == "permission_decision" {
+		// REQ-EXT-PERM-1: a user's allow/deny for a pending agent.extension.permission.
+		_ = bridge_ext_permission_handle_decision_frame(text)
 		return
 	}
 	if bridge_fs_handle_command(conn, type, text) do return
@@ -2059,6 +2069,7 @@ bridge_hub_handle_wake_agent :: proc(conn: ^ws.Connection, text: string) {
 			// Forwarded verbatim into the synthetic launch so the bootstrap (M3)
 			// can write <run_dir>/TASK.md; the agent's first act is `lease next`.
 			lease_id := extract_json_string(entry, "lease_id", "")
+			permission_mode := extract_json_string(entry, "permission_mode", "")
 			pack_json, _ := bridge_provider_json_extract_object(entry, "pack")
 			defer delete(pack_json)
 
@@ -2071,7 +2082,7 @@ bridge_hub_handle_wake_agent :: proc(conn: ^ws.Connection, text: string) {
 				// bridge_runtime_launch_agent_pty_host already closes any registered
 				// instance before re-spawning, so no separate is_registered check.
 				syn_command_id := fmt.tprintf("wake_restart_%s_%d", instance_id, bridge_runtime_now_ms())
-				command_json := bridge_wake_launch_command_json(syn_command_id, instance_id, task_id, role, provider, model, agent_id, agent_name, chain_id, chain_title, coordinator_id, project_id, project_path, coordinator_display_name, lease_id, pack_json)
+				command_json := bridge_wake_launch_command_json(syn_command_id, instance_id, task_id, role, provider, model, agent_id, agent_name, chain_id, chain_title, coordinator_id, project_id, project_path, coordinator_display_name, lease_id, pack_json, permission_mode)
 				defer delete(command_json)
 				ok, detail, launch_err := bridge_runtime_launch_agent(syn_command_id, command_json, bridge_command_worker_deadline_ns(conn))
 				if ok {
@@ -2089,7 +2100,7 @@ bridge_hub_handle_wake_agent :: proc(conn: ^ws.Connection, text: string) {
 				// resolve it — a top-level-only id aborts the launch at validate. This
 				// mirrors the scheduler sched_wake synthetic launch.
 				syn_command_id := fmt.tprintf("wake_launch_%s_%d", instance_id, bridge_runtime_now_ms())
-				command_json := bridge_wake_launch_command_json(syn_command_id, instance_id, task_id, role, provider, model, agent_id, agent_name, chain_id, chain_title, coordinator_id, project_id, project_path, "", lease_id, pack_json)
+				command_json := bridge_wake_launch_command_json(syn_command_id, instance_id, task_id, role, provider, model, agent_id, agent_name, chain_id, chain_title, coordinator_id, project_id, project_path, "", lease_id, pack_json, permission_mode)
 				defer delete(command_json)
 				ok, detail, launch_err := bridge_runtime_launch_agent(syn_command_id, command_json, bridge_command_worker_deadline_ns(conn))
 				if ok {
@@ -2137,7 +2148,7 @@ bridge_wake_report_failed_status :: proc(conn: ^ws.Connection, instance_id: stri
 // the agent-keyed template bootstrap path rather than the header-only fallback
 // (REQ-37). Free-text fields (agent_name, chain_title) are JSON-escaped. Fields are
 // emitted unconditionally (empty is harmless) so the descriptor is deterministic.
-bridge_wake_launch_command_json :: proc(command_id, instance_id, task_id, role, provider, model, agent_id, agent_name, chain_id, chain_title, coordinator_id, project_id, project_path: string, coordinator_display_name: string = "", lease_id: string = "", pack_json: string = "") -> string {
+bridge_wake_launch_command_json :: proc(command_id, instance_id, task_id, role, provider, model, agent_id, agent_name, chain_id, chain_title, coordinator_id, project_id, project_path: string, coordinator_display_name: string = "", lease_id: string = "", pack_json: string = "", permission_mode: string = "") -> string {
 	b := strings.builder_make()
 	write_field :: proc(b: ^strings.Builder, first: ^bool, key, val: string) {
 		if !first^ do strings.write_byte(b, ',')
@@ -2168,6 +2179,10 @@ bridge_wake_launch_command_json :: proc(command_id, instance_id, task_id, role, 
 	// Task System v2 lease delivery (empty on non-lease wakes).
 	if lease_id != "" {
 		write_field(&b, &first, "lease_id", lease_id)
+	}
+	// REQ-EXT-PERM-2: omitted when the hub did not send one (launch stays yolo).
+	if permission_mode != "" {
+		write_field(&b, &first, "permission_mode", permission_mode)
 	}
 	if strings.has_prefix(strings.trim_space(pack_json), "{") {
 		strings.write_string(&b, ",\"pack\":")
@@ -2252,7 +2267,11 @@ bridge_runtime_launch_agent :: proc(command_id, command_json: string, deadline_n
 		blog_error(.agent_bootstrap_invalid, blog_sym(.stage, blog_bootstrap_stage(boot_res.stage)), blog_int(.hub_status, i64(boot_res.http_status)), blog_provider(provider))
 		return false, detail, bridge_bootstrap_result_error(boot_res)
 	}
-	return bridge_runtime_launch_agent_pty_host(command_id, instance_id, run_dir, endpoint, provider, model, agent_issue.plaintext_token, descriptor.display_name, 0, descriptor.project_path)
+	// REQ-EXT-PERM-2: the agent's permission mode ("ask" drops the catalog yolo
+	// flags). Absent (older hub) means the historical yolo launch.
+	permission_mode := extract_json_string(command_json, "permission_mode", "")
+	defer delete(permission_mode)
+	return bridge_runtime_launch_agent_pty_host(command_id, instance_id, run_dir, endpoint, provider, model, agent_issue.plaintext_token, descriptor.display_name, 0, descriptor.project_path, permission_mode)
 }
 
 bridge_runtime_launch_provider_test :: proc(command_id, command_json: string) -> (ok: bool, detail: string, err: Bridge_Error) {
@@ -2286,7 +2305,7 @@ bridge_runtime_launch_provider_test :: proc(command_id, command_json: string) ->
 // ham-pty-host daemon, and (3) spawn (or restart, if the instance is already
 // registered) the agent under the daemon PTY. Retry/backoff on spawn preserves
 // AC-5 launch resilience.
-bridge_runtime_launch_agent_pty_host :: proc(command_id, instance_id, run_dir, endpoint, provider, model, agent_token, display_name: string, timeout_seconds: u64, project_path: string = "") -> (ok: bool, detail: string, err: Bridge_Error) {
+bridge_runtime_launch_agent_pty_host :: proc(command_id, instance_id, run_dir, endpoint, provider, model, agent_token, display_name: string, timeout_seconds: u64, project_path: string = "", permission_mode: string = "") -> (ok: bool, detail: string, err: Bridge_Error) {
 	// Bootstrap files were already clean-slated + written to run_dir by
 	// bridge_bootstrap_launch_materialize_run_dir in the caller (the bridge is the
 	// sole materializer in the pty-host runtime). Here we only build the agent env.
@@ -2299,7 +2318,7 @@ bridge_runtime_launch_agent_pty_host :: proc(command_id, instance_id, run_dir, e
 		return false, "ham-pty-host daemon unavailable", bridge_error(.pty_host_unreachable)
 	}
 
-	req, req_ok := bridge_pty_host_build_spawn(instance_id, run_dir, provider, model, agent_token, env, display_name, timeout_seconds)
+	req, req_ok := bridge_pty_host_build_spawn(instance_id, run_dir, provider, model, agent_token, env, display_name, timeout_seconds, permission_mode)
 	if !req_ok {
 		bridge_runtime_set_status(instance_id, "failed", "idle")
 		blog_error(.provider_missing, blog_provider(provider))
@@ -2591,7 +2610,14 @@ bridge_runtime_status_snapshot :: proc(instance_id: string) -> (runtime_status, 
 
 bridge_runtime_set_status :: proc(instance_id, runtime_status, activity_status: string) {
 	if strings.trim_space(instance_id) == "" do return
+	// A stopped/failed agent can no longer act on a permission decision: release
+	// its blocked permission waiters with "none".
+	// Its tool aggregation is closed out too, so a killed turn still gets posted.
 	now := bridge_runtime_now_ms()
+	if runtime_status == "stopped" || runtime_status == "failed" {
+		bridge_permission_cancel_instance(instance_id)
+		bridge_ext_instance_terminal(instance_id, now)
+	}
 	sync.mutex_lock(&bridge_runtime_mutex)
 	defer sync.mutex_unlock(&bridge_runtime_mutex)
 	bridge_runtime_set_status_locked(instance_id, runtime_status, activity_status, now, true)
@@ -2604,6 +2630,8 @@ bridge_runtime_note_wrapper_signal :: proc(instance_id, activity_status: string)
 bridge_runtime_note_agent_activity :: proc(instance_id, activity_status, activity_source: string) {
 	source := strings.trim_space(activity_source)
 	if source == "" do source = "agent_extension"
+	// Screen detection drives the terminal_prompt blocker fallback (REQ-EXT-BLK-5).
+	if source == "pane_diff" do bridge_blockers_note_pane_activity(instance_id, activity_status)
 	bridge_runtime_note_activity_signal(instance_id, bridge_runtime_normalize_activity_status(activity_status), source)
 }
 

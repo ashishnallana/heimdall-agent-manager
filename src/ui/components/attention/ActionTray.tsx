@@ -10,25 +10,29 @@ import { acceptCard, assignReviewerAgent, rejectCard, snoozeCard } from '../../s
 import { snoozePresets, toHubTimestamp } from '../../services/attention/snoozePresets';
 import { buildRouteHash, navigateTo } from '../../utils/appLocation';
 import { ActionTaskCard } from './ActionTaskCard';
+import { ActionBlockerCard } from './AgentBlockerCard';
 import { clampIndex, hideKey, reviewerCandidates } from './attentionModel';
-import { TRAY_MODE_COPY, isBlockedItem, needYouLabel, trayItems, type TrayModeKind, type TrayScope } from './actionTrayModel';
+import { TRAY_MODE_COPY, isBlockedItem, needYouLabel, trayItems, type TrayItem, type TrayModeKind, type TrayScope } from './actionTrayModel';
 
-const NO_ITEMS: AttentionTaskItem[] = [];
+const NO_ITEMS: TrayItem[] = [];
 
 /**
- * The task items waiting on the user in one conversation (its chain, or the
- * agent instance when there is no chain), live: the hub's attention_changed
- * hint invalidates the Attention tag, so nothing polls. Cards with a pending or
- * settled attention action are left out at once.
+ * The items waiting on the user in one conversation (its chain, or the agent
+ * instance when there is no chain): live agent blockers first, then tasks. Live:
+ * the hub's attention_changed hint invalidates the Attention tag (blocker
+ * changes fire it too), so nothing polls. Cards with a pending or settled
+ * attention action are left out at once.
  */
-export function useActionTrayItems(scope: TrayScope, { skip = false, scheduler = attentionScheduler }: { skip?: boolean; scheduler?: ActionScheduler } = {}): AttentionTaskItem[] {
+export function useActionTrayItems(scope: TrayScope, { skip = false, scheduler = attentionScheduler }: { skip?: boolean; scheduler?: ActionScheduler } = {}): TrayItem[] {
   const off = skip || (!scope.chainId && !scope.agentInstanceId);
   const query = useGetAttentionQuery({ since: 'all', kind: 'task' }, { skip: off });
+  const blockerQuery = useGetAttentionQuery({ since: 'all', kind: 'agent_blocker' }, { skip: off });
   const snap = useSyncExternalStore(scheduler.subscribe, scheduler.getSnapshot, scheduler.getSnapshot);
   const items = off ? undefined : query.data?.items;
+  const blockers = off ? undefined : blockerQuery.data?.items;
   return useMemo(
-    () => (items ? trayItems(items, scope, snap.hidden) : NO_ITEMS),
-    [items, scope.chainId, scope.agentInstanceId, snap.hidden], // eslint-disable-line react-hooks/exhaustive-deps
+    () => (items || blockers ? trayItems([...(blockers ?? []), ...(items ?? [])], scope, snap.hidden) : NO_ITEMS),
+    [items, blockers, scope.chainId, scope.agentInstanceId, snap.hidden], // eslint-disable-line react-hooks/exhaustive-deps
   );
 }
 
@@ -93,7 +97,7 @@ export function ActionTray({
   scheduler = attentionScheduler,
   nowMs,
 }: {
-  items: AttentionTaskItem[];
+  items: TrayItem[];
   mobile: boolean;
   onShowComposer: () => void;
   onStartMode: (kind: TrayModeKind, item: AttentionTaskItem) => void;
@@ -154,7 +158,7 @@ export function ActionTray({
 
   // Delegate picker: fetched on demand when it opens.
   const delegateItem = panel?.kind === 'delegate' ? items.find((i) => i.card_id === panel.cardId) : undefined;
-  const reviewerChainId = delegateItem?.action_refs.chain_id || '';
+  const reviewerChainId = delegateItem?.kind === 'task' ? delegateItem.action_refs.chain_id : '';
   const fleetQuery = useGetTaskChainFleetsQuery({ chainId: reviewerChainId }, { skip: !reviewerChainId });
   const agentsQuery = useListAgentIdentitiesQuery({ limit: 200 }, { skip: !reviewerChainId });
   const reviewersLoading = !!reviewerChainId && !(fleetQuery.data && agentsQuery.data) && (fleetQuery.isFetching || agentsQuery.isFetching);
@@ -281,7 +285,11 @@ export function ActionTray({
         {items.map((item, i) => (
           <div key={item.card_id} className="flex w-full shrink-0 snap-start snap-always flex-col px-0.5">
             <div className={`flex min-h-0 flex-1 flex-col rounded-[var(--radius-lg)] border border-subtle bg-surface-raised ${mobile ? 'p-3.5' : 'p-5'}`}>
-              <ActionTaskCard item={item} mobile={mobile} active={i === safePage} now={now} footer={renderFooter(item)} />
+              {item.kind === 'agent_blocker' ? (
+                <ActionBlockerCard item={item} mobile={mobile} now={now} scheduler={scheduler} />
+              ) : (
+                <ActionTaskCard item={item} mobile={mobile} active={i === safePage} now={now} footer={renderFooter(item)} />
+              )}
             </div>
           </div>
         ))}

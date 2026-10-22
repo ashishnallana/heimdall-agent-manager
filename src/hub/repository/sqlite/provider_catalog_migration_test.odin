@@ -55,6 +55,37 @@ test_provider_catalog_meta_etag_matches_canonical_body :: proc(t: ^testing.T) {
 	testing.expect_value(t, stored, derived)
 }
 
+// Migration 109: permission_mode 'ask' launches with ask_args instead of
+// yolo_args. Claude needs an explicit --permission-mode default, otherwise it
+// inherits the user's default mode ("auto" auto-approves and never prompts).
+@(test)
+test_provider_catalog_ask_args_claude_only :: proc(t: ^testing.T) {
+	conn, clone_ok := tmpl_clone_migrated(t)
+	if !clone_ok do return
+	defer close(&conn)
+
+	impl := Provider_Repo_SQLite{conn = &conn}
+	repo := new_provider_repository(&impl, &conn)
+	catalog, err := iface.provider_catalog_list(&repo)
+	testing.expect_value(t, err.code, domain.Error_Code.None)
+	defer domain.provider_catalog_destroy(catalog)
+	saw_claude := false
+	for entry in catalog {
+		if entry.provider == "claude" {
+			saw_claude = true
+			testing.expect_value(t, entry.ask_args_json, `["--permission-mode","default"]`)
+		} else {
+			testing.expectf(t, entry.ask_args_json == "[]", "%s has no ask_args, got %s", entry.provider, entry.ask_args_json)
+		}
+	}
+	testing.expect(t, saw_claude, "claude catalog entry exists")
+
+	body := provider_service.catalog_body_json(catalog)
+	defer delete(body)
+	testing.expect(t, strings.contains(body, `"ask_args":["--permission-mode","default"]`), "claude ask_args on the wire")
+	testing.expect(t, strings.contains(body, `"ask_args":[]`), "other providers carry an empty ask_args")
+}
+
 // Migration 101: Codex 0.162 ships the GPT-6 family. gpt-6.1-sol is the
 // default (lowest rank) for codex, Pi exposes the same ids under
 // openai-codex/, and the GPT-5.6 rows stay for history but are retired.

@@ -16,6 +16,7 @@ Bridge_Provider_Profile :: struct {
 	command: []string,
 	base_args: []string,
 	yolo_flags: []string,
+	ask_flags: []string,
 	prompt_flags: []string,
 	starter_prompt: string,
 	prompt_delivery: string,
@@ -133,6 +134,7 @@ bridge_agent_runtime_profile :: proc(profile: Bridge_Provider_Profile) -> agent_
 		command = profile.command,
 		base_args = profile.base_args,
 		yolo_flags = profile.yolo_flags,
+		ask_flags = profile.ask_flags,
 		prompt_flags = profile.prompt_flags,
 		starter_prompt = profile.starter_prompt,
 		prompt_delivery = profile.prompt_delivery,
@@ -144,9 +146,9 @@ bridge_agent_runtime_profile :: proc(profile: Bridge_Provider_Profile) -> agent_
 	}
 }
 
-bridge_runtime_agent_argv_for_profile :: proc(profile: Bridge_Provider_Profile, model, agent_token, agent_instance_id: string) -> []string {
+bridge_runtime_agent_argv_for_profile :: proc(profile: Bridge_Provider_Profile, model, agent_token, agent_instance_id: string, permission_mode := agent_runtime.PERMISSION_MODE_YOLO) -> []string {
 	if strings.trim_space(model) == "" do return nil
-	return agent_runtime.build_agent_command(bridge_agent_runtime_profile(profile), model, bridge_config.daemon_url, agent_token, agent_instance_id)
+	return agent_runtime.build_agent_command(bridge_agent_runtime_profile(profile), model, bridge_config.daemon_url, agent_token, agent_instance_id, permission_mode)
 }
 
 bridge_runtime_shell_command_for_profile :: proc(profile: Bridge_Provider_Profile, model, agent_token, agent_instance_id: string) -> string {

@@ -26,11 +26,12 @@ bridge_provider_status_upsert_sqlite :: proc(ctx: rawptr, value: domain.Bridge_P
 	impl := (^Provider_Repo_SQLite)(ctx)
 	if !provider_repo_ready(impl) do return false, domain.domain_error(.Internal_Error, "sqlite repository is not open")
 	stmt: sqlite3_stmt = nil
-	query := "INSERT INTO bridge_provider_status (bridge_id, provider, binary_path, version_text, state, checked_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(bridge_id, provider) DO UPDATE SET binary_path=excluded.binary_path, version_text=excluded.version_text, state=excluded.state, checked_at=excluded.checked_at;"
+	query := "INSERT INTO bridge_provider_status (bridge_id, provider, binary_path, version_text, state, checked_at, extension_state, extension_version, extension_checked_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(bridge_id, provider) DO UPDATE SET binary_path=excluded.binary_path, version_text=excluded.version_text, state=excluded.state, checked_at=excluded.checked_at, extension_state=excluded.extension_state, extension_version=excluded.extension_version, extension_checked_at=excluded.extension_checked_at;"
 	if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return false, domain.domain_error(.Internal_Error, "failed to prepare provider status upsert")
 	defer sqlite3_finalize(stmt)
 	bind_text(stmt, 1, value.bridge_id); bind_text(stmt, 2, value.provider); bind_text(stmt, 3, value.binary_path)
 	bind_text(stmt, 4, value.version_text); bind_text(stmt, 5, value.state); bind_text(stmt, 6, value.checked_at)
+	bind_text(stmt, 7, value.extension_state); bind_text(stmt, 8, value.extension_version); bind_text(stmt, 9, value.extension_checked_at)
 	if sqlite3_step(stmt) != SQLITE_DONE do return false, domain.domain_error(.Internal_Error, "failed to upsert provider status")
 	return true, {}
 }
@@ -39,11 +40,11 @@ bridge_provider_status_list_sqlite :: proc(ctx: rawptr, bridge_id: string) -> ([
 	impl := (^Provider_Repo_SQLite)(ctx)
 	if !provider_repo_ready(impl) do return nil, domain.domain_error(.Internal_Error, "sqlite repository is not open")
 	stmt: sqlite3_stmt = nil
-	query := "SELECT bridge_id, provider, binary_path, version_text, state, checked_at FROM bridge_provider_status WHERE bridge_id=? ORDER BY provider;"
+	query := "SELECT bridge_id, provider, binary_path, version_text, state, checked_at, extension_state, extension_version, extension_checked_at FROM bridge_provider_status WHERE bridge_id=? ORDER BY provider;"
 	if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return nil, domain.domain_error(.Internal_Error, "failed to prepare provider status list")
 	defer sqlite3_finalize(stmt); bind_text(stmt, 1, bridge_id)
 	items := make([dynamic]domain.Bridge_Provider_Status)
-	for sqlite3_step(stmt) == SQLITE_ROW do append(&items, domain.Bridge_Provider_Status{bridge_id=column_text(stmt,0),provider=column_text(stmt,1),binary_path=column_text(stmt,2),version_text=column_text(stmt,3),state=column_text(stmt,4),checked_at=column_text(stmt,5)})
+	for sqlite3_step(stmt) == SQLITE_ROW do append(&items, domain.Bridge_Provider_Status{bridge_id=column_text(stmt,0),provider=column_text(stmt,1),binary_path=column_text(stmt,2),version_text=column_text(stmt,3),state=column_text(stmt,4),checked_at=column_text(stmt,5),extension_state=column_text(stmt,6),extension_version=column_text(stmt,7),extension_checked_at=column_text(stmt,8)})
 	return items, {}
 }
 
@@ -118,6 +119,8 @@ provider_entry_from_stmt :: proc(impl: ^Provider_Repo_SQLite, stmt: sqlite3_stmt
 		activity_detection_json = column_text(stmt, 13),
 		state = column_text(stmt, 14),
 		rank = provider_rank_from_stmt(stmt, 15),
+		extension_json = column_text(stmt, 16),
+		ask_args_json = column_text(stmt, 17),
 	}
 	models, err := provider_models_for_sqlite(impl, entry.provider)
 	if err.code != .None {
@@ -128,7 +131,7 @@ provider_entry_from_stmt :: proc(impl: ^Provider_Repo_SQLite, stmt: sqlite3_stmt
 	return entry, {}
 }
 
-PROVIDER_SELECT :: "SELECT provider, display_name, icon_url, binary, base_args, yolo_args, model_flag, prompt_args, prompt_delivery, starter_prompt, bootstrap_file, skill_dir, startup_detection, activity_detection, state, rank FROM provider_catalog"
+PROVIDER_SELECT :: "SELECT provider, display_name, icon_url, binary, base_args, yolo_args, model_flag, prompt_args, prompt_delivery, starter_prompt, bootstrap_file, skill_dir, startup_detection, activity_detection, state, rank, COALESCE(extension, ''), ask_args FROM provider_catalog"
 
 provider_catalog_list_sqlite :: proc(ctx: rawptr) -> ([dynamic]domain.Provider_Catalog_Entry, domain.Domain_Error) {
 	impl := (^Provider_Repo_SQLite)(ctx)

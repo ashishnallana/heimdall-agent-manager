@@ -13,6 +13,7 @@ import {
 } from './conversationMessageEvents';
 import { patchMemoryCachesFromWs } from './endpoints/memory';
 import { bridgeSupportApi } from './endpoints/bridgeSupport';
+import { AGENT_BLOCKERS_CHANGE } from '../components/extension/blockersModel';
 import { upsertTaskInList, upsertTaskLogEvent } from './taskCache';
 import { attentionEventReceived } from '../store/attentionSlice';
 import { announcePaneVaultLocked } from '../utils/vaultLockedError';
@@ -895,6 +896,34 @@ function handleInstanceChanged(dispatch: any, payload: any, ctx: WsCtx, instance
   handleAgentEvent(dispatch, { ...payload, type: 'agent_update', agent_instance_id: instanceId, summary }, ctx);
 }
 
+/**
+ * Provider extension frames on an agent instance (REQ-EXT-BLK-1, REQ-EXT-SUB-2):
+ *   'extension_events'       {count, last_seq, provider_session_id, session_changed, events:[tail]}
+ *   'agent_blockers_changed' {agent_instance_id, revision, count}
+ * The timeline refetches only events after the seq it holds; the in-memory
+ * blocker list (permission cards) is refetched. Returns false for any other
+ * change so the generic agent path handles it.
+ */
+function handleAgentInstanceExtensionChange(dispatch: any, instanceId: string, change: string, summary: any): boolean {
+  if (change === AGENT_BLOCKERS_CHANGE) {
+    const id = instanceId || String(summary?.agent_instance_id || '');
+    if (id) queueInvalidation(dispatch, [{ type: 'AgentBlockers', id }]);
+    return true;
+  }
+  if (change === 'extension_events') {
+    const tags: any[] = [{ type: 'ExtensionEvents' as const, id: instanceId }];
+    // hello/session events change the instance's extension info and session id
+    // (the native-signals badge reads them from the instance).
+    const events = Array.isArray(summary?.events) ? summary.events : [];
+    if (summary?.session_changed || events.some((e: any) => e?.event === 'hello' || e?.event === 'session')) {
+      tags.push({ type: 'AgentInstances' as const, id: instanceId });
+    }
+    queueInvalidation(dispatch, tags);
+    return true;
+  }
+  return false;
+}
+
 function handleResourceChanged(dispatch: any, payload: any, ctx: WsCtx) {
   const resource = String(payload.resource || '');
   const resourceId = String(payload.resource_id || '');
@@ -1028,6 +1057,7 @@ function handleResourceChanged(dispatch: any, payload: any, ctx: WsCtx) {
       invalidateShellSession(dispatch, resourceId, { chain_id: stated(payload, 'chain_id') });
       return;
     case 'agent_instance':
+      if (handleAgentInstanceExtensionChange(dispatch, resourceId, String(payload.change || ''), summary)) return;
       handleInstanceChanged(dispatch, payload, ctx, resourceId, String(payload.change || ''), summary);
       return;
     case 'agent_instance_reconfiguration':

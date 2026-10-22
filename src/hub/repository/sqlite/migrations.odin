@@ -455,7 +455,26 @@ MIGRATION_104_GUARD_CHAT_FTS_UPDATES :: #load("migrations/104_guard_chat_fts_upd
 // Plain CREATE INDEX IF NOT EXISTS, so a re-apply is a no-op.
 MIGRATION_105_FULL_SCAN_INDEXES :: #load("migrations/105_full_scan_indexes.sql", string)
 
-migration_order :: [108]string {
+// 106: provider extension event log and per-instance extension identity.
+MIGRATION_106_AGENT_EXTENSION_EVENTS :: #load("migrations/106_agent_extension_events.sql", string)
+
+// 107: provider_catalog.extension descriptor and the measured extension state
+// in bridge_provider_status (REQ-EXT-DET-1).
+MIGRATION_107_PROVIDER_EXTENSION :: #load("migrations/107_provider_extension.sql", string)
+
+// 108: agents.permission_mode ('yolo' default | 'ask'); 'ask' launches without
+// the catalog yolo_args (REQ-EXT-PERM-2).
+MIGRATION_108_AGENT_PERMISSION_MODE :: #load("migrations/108_agent_permission_mode.sql", string)
+
+// 109: agent_instances.permission_mode ('' inherits the agent | 'yolo' | 'ask')
+// and the reconfiguration commit trigger applying $.destination.permission_mode.
+MIGRATION_109_INSTANCE_PERMISSION_MODE :: #load("migrations/109_instance_permission_mode.sql", string)
+
+// 110: provider_catalog.ask_args, appended instead of yolo_args when the
+// effective permission_mode is 'ask' (claude: --permission-mode default).
+MIGRATION_110_PROVIDER_ASK_ARGS :: #load("migrations/110_provider_ask_args.sql", string)
+
+migration_order :: [113]string {
 	"001_foundation.sql",
 	"002_owner_scoped_core.sql",
 	"003_device_tokens.sql",
@@ -564,6 +583,11 @@ migration_order :: [108]string {
 	"103_plan_enforcement.sql",
 	"104_guard_chat_fts_updates.sql",
 	"105_full_scan_indexes.sql",
+	"106_agent_extension_events.sql",
+	"107_provider_extension.sql",
+	"108_agent_permission_mode.sql",
+	"109_instance_permission_mode.sql",
+	"110_provider_ask_args.sql",
 }
 
 // stop_before is a TEST SEAM: when non-empty, the apply loop stops in front of
@@ -923,6 +947,36 @@ run_migrations :: proc(
 			mark_migration_applied(conn, name)
 			continue
 		}
+		// 108 is a single ALTER; a database that already has the column needs nothing.
+		if name == "108_agent_permission_mode.sql" && table_column_exists(conn, "agents", "permission_mode") {
+			mark_migration_applied(conn, name)
+			continue
+		}
+		// 107 commits atomically before its ledger row; its last column proves completion.
+		if name == "107_provider_extension.sql" &&
+		   table_column_exists(conn, "bridge_provider_status", "extension_checked_at") {
+			mark_migration_applied(conn, name)
+			continue
+		}
+		// Keyed on the LAST object 106 creates.
+		if name == "106_agent_extension_events.sql" &&
+		   sqlite_object_exists(conn, "agent_extension_events_instance_agent") {
+			mark_migration_applied(conn, name)
+			continue
+		}
+		// 109 runs inside its own BEGIN/COMMIT; its last statement recreates the
+		// commit trigger, so a trigger that mentions permission_mode proves completion.
+		if name == "109_instance_permission_mode.sql" &&
+		   table_column_exists(conn, "agent_instances", "permission_mode") &&
+		   sqlite_trigger_mentions(conn, "instance_reconfiguration_commit", "permission_mode") {
+			mark_migration_applied(conn, name)
+			continue
+		}
+		// 110 commits atomically before its ledger row; its column proves completion.
+		if name == "110_provider_ask_args.sql" && table_column_exists(conn, "provider_catalog", "ask_args") {
+			mark_migration_applied(conn, name)
+			continue
+		}
 		if name == "099_mixed_work_execution.sql" && sqlite_object_exists(conn, "mixed_work_engine_epoch") {
 			mark_migration_applied(conn, name)
 			continue
@@ -1083,6 +1137,11 @@ migration_sql :: proc(name, migrations_dir: string) -> string {
 	if name == "103_plan_enforcement.sql" do return strings.clone(MIGRATION_103_PLAN_ENFORCEMENT)
 	if name == "104_guard_chat_fts_updates.sql" do return strings.clone(MIGRATION_104_GUARD_CHAT_FTS_UPDATES)
 	if name == "105_full_scan_indexes.sql" do return strings.clone(MIGRATION_105_FULL_SCAN_INDEXES)
+	if name == "108_agent_permission_mode.sql" do return strings.clone(MIGRATION_108_AGENT_PERMISSION_MODE)
+	if name == "107_provider_extension.sql" do return strings.clone(MIGRATION_107_PROVIDER_EXTENSION)
+	if name == "106_agent_extension_events.sql" do return strings.clone(MIGRATION_106_AGENT_EXTENSION_EVENTS)
+	if name == "109_instance_permission_mode.sql" do return strings.clone(MIGRATION_109_INSTANCE_PERMISSION_MODE)
+	if name == "110_provider_ask_args.sql" do return strings.clone(MIGRATION_110_PROVIDER_ASK_ARGS)
 	if name == "100_vault_pair_hub_origin.sql" do return strings.clone(MIGRATION_100_VAULT_PAIR_HUB_ORIGIN)
 	if name == "101_codex_gpt6_models.sql" do return strings.clone(MIGRATION_101_CODEX_GPT6_MODELS)
 	if name == "081_antigravity_models.sql" do return strings.clone(MIGRATION_081_ANTIGRAVITY_MODELS)
@@ -1184,6 +1243,20 @@ sqlite_object_exists :: proc(conn: ^Conn, name: string) -> bool {
 	query := fmt.tprintf(
 		"SELECT 1 FROM sqlite_master WHERE name='%s' LIMIT 1;",
 		escape_sql_literal(name),
+	)
+	if sqlite3_prepare_v2(conn.db, cstring(raw_data(query)), c.int(-1), &stmt, nil) != SQLITE_OK do return false
+	defer sqlite3_finalize(stmt)
+	return sqlite3_step(stmt) == SQLITE_ROW
+}
+
+// sqlite_trigger_mentions reports whether trigger `name` exists and its SQL
+// contains `needle` (a migration that recreates a trigger keys its skip on this).
+sqlite_trigger_mentions :: proc(conn: ^Conn, name, needle: string) -> bool {
+	if conn == nil || conn.db == nil do return false
+	stmt: sqlite3_stmt = nil
+	query := fmt.tprintf(
+		"SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='%s' AND instr(sql, '%s') > 0 LIMIT 1;",
+		escape_sql_literal(name), escape_sql_literal(needle),
 	)
 	if sqlite3_prepare_v2(conn.db, cstring(raw_data(query)), c.int(-1), &stmt, nil) != SQLITE_OK do return false
 	defer sqlite3_finalize(stmt)

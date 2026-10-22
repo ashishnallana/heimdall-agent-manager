@@ -13,6 +13,8 @@ create_instance_reconfiguration_handler :: proc(ctx: rawptr, req: Request) -> Re
 	auth, authorized, auth_response := require_auth(h.auth, req)
 	if !authorized do return auth_response
 	// This is an explicit full destination, unlike the legacy partial PATCH.
+	// permission_mode (yolo|ask) is the one optional field: omitted keeps the
+	// instance's current override.
 	for field in ([]string{"bridge_id", "project_id", "provider", "model", "idempotency_key", "expected_revision"}) {
 		if !jsonx.has_key(req.body, field, true) do return respond_error(domain.domain_error(.Validation_Failed, "full destination and expected revision are required"), req.request_id)
 	}
@@ -20,7 +22,7 @@ create_instance_reconfiguration_handler :: proc(ctx: rawptr, req: Request) -> Re
 	object, is_object := value.(json.Object)
 	if parse_err != nil || !is_object do return respond_error(domain.domain_error(.Validation_Failed, "request must be a JSON object"), req.request_id)
 	for key, _ in object {
-		if key != "bridge_id" && key != "project_id" && key != "provider" && key != "model" && key != "idempotency_key" && key != "expected_revision" do return respond_error(domain.domain_error(.Validation_Failed, "unknown reconfiguration field"), req.request_id)
+		if key != "bridge_id" && key != "project_id" && key != "provider" && key != "model" && key != "idempotency_key" && key != "expected_revision" && key != "permission_mode" do return respond_error(domain.domain_error(.Validation_Failed, "unknown reconfiguration field"), req.request_id)
 	}
 	input: agent_service.Reconfigure_Operation_Input
 	if json.unmarshal_string(req.body, &input, .JSON, context.temp_allocator) != nil do return respond_error(domain.domain_error(.Validation_Failed, "invalid reconfiguration request"), req.request_id)

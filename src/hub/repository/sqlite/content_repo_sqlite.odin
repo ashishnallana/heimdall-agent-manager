@@ -93,7 +93,10 @@ content_list_agent_inbox_messages_sqlite :: proc(ctx:rawptr, cid:string, owner:d
 	// the UI renders as a run indicator, not correspondence addressed to the agent.
 	// The agent learns its background run finished from a transient nudge instead, so
 	// surfacing the marker in its inbox would be the same fact twice, as noise.
-	if !include_debug do append(&filters, "message_type NOT IN ('pane_capture', 'status_update', 'pane_capture_result', 'shell_run')")
+	// 'tool_activity' (REQ-EXT-CONV-1/2) likewise: the bridge posts a summary of the
+	// agent's own tool calls every few seconds while it works; echoing those back
+	// into its history would feed the agent its own actions as correspondence.
+	if !include_debug do append(&filters, "message_type NOT IN ('pane_capture', 'status_update', 'pane_capture_result', 'shell_run', 'tool_activity')")
 	
 	if cursor != "" do append(&filters, "created_at < ?")
 	

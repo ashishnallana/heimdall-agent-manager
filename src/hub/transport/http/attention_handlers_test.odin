@@ -49,7 +49,7 @@ test_attention_item_json_message_golden :: proc(t: ^testing.T) {
 test_attention_counts_json_golden :: proc(t: ^testing.T) {
 	b := strings.builder_make(context.temp_allocator)
 	write_attention_counts_json(&b, iface.Attention_Counts{message = 1, task = 2, memory = 3, older = 4, snoozed = 5})
-	testing.expect_value(t, strings.to_string(b), `{"total":6,"older":4,"message":1,"task":2,"memory":3,"snoozed":5}`)
+	testing.expect_value(t, strings.to_string(b), `{"total":6,"older":4,"message":1,"task":2,"memory":3,"snoozed":5,"agent_blocker":0}`)
 }
 
 @(test)

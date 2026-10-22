@@ -6,6 +6,7 @@ import {
   providerSetupApi,
 } from './providerSetupApi';
 import ProviderTestRunModal, { type ProviderTestTarget } from './ProviderTestRunModal';
+import { ProviderExtensionBadge, ProviderExtensionPill } from '../extension/ExtensionBadges';
 import {
   DISCOVERY_RETRY_MS,
   DISCOVERY_RETRY_TIMEOUT_MS,
@@ -229,6 +230,7 @@ export function ProviderSetupSurface({ bridgeId, mode, variant = 'full', onApply
                     />
                     <img src={provider.icon_url} alt="" className="h-6 w-6 shrink-0 rounded-md" />
                     <span className="min-w-0 flex-1 truncate text-sm font-medium text-primary">{provider.display_name}</span>
+                    <ProviderExtensionPill providerName={provider.provider} extension={provider.extension} />
                     <span data-debug-id={`provider-summary-models-${provider.provider}`} className="shrink-0 text-xs text-muted">{modelCountLabel(provider.models.length)}</span>
                   </label>
                   {rowErrors[provider.provider] ? (
@@ -324,6 +326,7 @@ export function ProviderSetupSurface({ bridgeId, mode, variant = 'full', onApply
                     <div className="flex flex-wrap items-center gap-2">
                       <h2 className="font-semibold text-primary">{provider.display_name}</h2>
                       <StatusPill tone={status.tone}>{status.label}</StatusPill>
+                      {available ? <ProviderExtensionPill providerName={provider.provider} extension={provider.extension} /> : null}
                     </div>
                     <p className="mt-1 truncate text-xs text-muted">
                       {available ? `${provider.binary_path} · ${provider.version_text}` : 'No supported executable found in the bridge service PATH'}
@@ -331,6 +334,7 @@ export function ProviderSetupSurface({ bridgeId, mode, variant = 'full', onApply
                     <p data-debug-id={`provider-setup-summary-${provider.provider}`} className="mt-0.5 text-xs text-faint">{summary}</p>
                   </div>
                 </button>
+
                 <div className="flex shrink-0 items-center gap-2">
                   <label data-debug-id={`provider-setup-enable-label-${provider.provider}`} className={`flex min-h-10 items-center gap-2 rounded-xl border px-3 text-sm font-medium ${available ? 'cursor-pointer border-subtle text-primary' : 'cursor-not-allowed border-subtle text-faint'}`}>
                     <input
@@ -344,6 +348,9 @@ export function ProviderSetupSurface({ bridgeId, mode, variant = 'full', onApply
                   </label>
                 </div>
               </div>
+              {available ? (
+                <ProviderExtensionBadge providerName={provider.provider} extension={provider.extension} className="-mt-2 px-4 pb-3 sm:pl-[4.75rem]" />
+              ) : null}
 
               {!isExpanded ? null : available ? (
                 <div id={detailsId} className="border-t border-subtle bg-surface-raised/30 px-4 py-3">
