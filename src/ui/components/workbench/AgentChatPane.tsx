@@ -50,6 +50,8 @@ import {
 import { useFetchChainTasksQuery, useFetchTaskChainDetailQuery } from '../../api/endpoints/tasks';
 import { selectActiveVaultKey } from '../../store/vaultSlice';
 import type { AuxContent } from '../../store/auxTabId';
+import { InstanceSignalBadge } from '../extension/ExtensionBadges';
+import { InstancePermissionCards } from '../extension/PermissionCards';
 import { buildRouteHash } from '../../utils/appLocation';
 import { useRegisterActions } from '../../services/shortcuts/useRegisterActions';
 import { readComposerDraft, writeComposerDraft } from '../../utils/clientPersistence';
@@ -2882,6 +2884,21 @@ export function AgentChatPane({
             </span>
           ) : null}
 
+          {instance ? (
+            onOpenAuxTab ? (
+              <button
+                type="button"
+                data-debug-id="conversation-signal-badge-btn"
+                aria-label="Open activity timeline"
+                onClick={() => openAux({ type: 'activity' })}
+                className="rounded-full hover:opacity-80"
+              >
+                <InstanceSignalBadge extension={instance.extension} compact={isMobile} />
+              </button>
+            ) : (
+              <InstanceSignalBadge extension={instance.extension} compact={isMobile} />
+            )
+          ) : null}
           {headerTrailing}
           <Menu
             align="end"
@@ -2925,6 +2942,18 @@ export function AgentChatPane({
               <Icon name="gear" size={15} />
               <span>Agent settings</span>
             </Menu.Item>
+            {onOpenAuxTab ? (
+              <Menu.Item
+                data-debug-id="conversation-thread-activity-action"
+                onClick={() => {
+                  setHeaderActionsOpen(false);
+                  openAux({ type: 'activity' });
+                }}
+              >
+                <Icon name="layers" size={15} />
+                <span>Activity timeline</span>
+              </Menu.Item>
+            ) : null}
             <Menu.Separator />
             {onSplitPane || onReplaceWithNew || (isMultiPane && onClosePane) ? (
               <>
@@ -3119,6 +3148,10 @@ export function AgentChatPane({
           <div aria-hidden="true" className="ui-frost-tail" />
           <AgentActivityBubbles instanceId={agentInstanceId} />
           <PinnedShellRuns sessions={pinnedRuns} />
+          <InstancePermissionCards
+            instanceId={agentInstanceId}
+            className={isMobile ? 'w-full px-3 pb-2' : 'mx-auto w-full max-w-4xl px-3 pb-2 sm:px-0'}
+          />
           {trayNotice ? (
             <div className="pointer-events-none mb-2 flex justify-center px-3">
               <div
