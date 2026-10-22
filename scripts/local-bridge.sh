@@ -13,6 +13,9 @@
 #                               headlessly with the seed approver of the --hub
 #                               instance (local-hub.sh seeds it), then start. Without
 #                               a seed approver the approval waits for the hub UI.
+#   --user NAME                 with --auto-enroll, approve as that seeded account of
+#                               the --hub (e.g. paid), so the bridge is that user's
+#                               (default: the hub's dev proxy user)
 #   --build MODE                nix | odin | none (default nix)
 #   --bin-dir DIR               take ham-bridge/ham-ctl/ham-pty-host from DIR
 #   --pty-host-bin PATH         ham-pty-host to run agents with (default: built, else PATH)
@@ -34,10 +37,10 @@ LR_TAG=local-bridge
 # shellcheck source=local-runtime/lib.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/local-runtime/lib.sh"
 
-usage() { sed -n '2,31p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,34p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 CMD="${1:-help}"; [ $# -gt 0 ] && shift
-NAME=default HUB_URL="" HUB_NAME="" PORT="" EP_PORT="" AUTO=0 APPROVE_URL="" APPROVER_KEY=""
+NAME=default HUB_URL="" HUB_NAME="" PORT="" EP_PORT="" AUTO=0 APPROVE_URL="" APPROVER_KEY="" APPROVE_USER=""
 BUILD="${HEIMDALL_LOCAL_BUILD:-nix}" BIN_DIR="" PTY_BIN=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -47,6 +50,7 @@ while [ $# -gt 0 ]; do
     --port) PORT="$2"; shift 2 ;;
     --local-endpoint-port) EP_PORT="$2"; shift 2 ;;
     --auto-enroll) AUTO=1; shift ;;
+    --user) APPROVE_USER="$2"; shift 2 ;;
     --build) BUILD="$2"; shift 2 ;;
     --bin-dir) BIN_DIR="$2"; BUILD=none; shift 2 ;;
     --pty-host-bin) PTY_BIN="$2"; shift 2 ;;
@@ -55,6 +59,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 lr_valid_name "$NAME" || lr_die "invalid --name '$NAME' (lowercase letters, digits, dashes)"
+[ -z "$APPROVE_USER" ] || lr_valid_name "$APPROVE_USER" || lr_die "invalid --user '$APPROVE_USER'"
 DIR="$(lr_instance_dir bridge "$NAME")"
 ENV_FILE="$DIR/instance.env"
 CFG="$DIR/config.toml"
@@ -68,6 +73,8 @@ resolve() {
     HUB_URL="${HUB_URL:-$(lr_env_get "$henv" HUB_URL)}"
     APPROVE_URL="$(lr_env_get "$henv" PROXY_URL)"
     APPROVER_KEY="$(lr_env_get "$henv" APPROVER_KEY)"
+    # local-hub.sh keeps a seeded account's approver under approver/users/<user>/.
+    [ -z "$APPROVE_USER" ] || APPROVER_KEY="$(dirname "$APPROVER_KEY")/users/$APPROVE_USER/device.json"
   fi
   local rec
   rec="$(lr_env_get "$ENV_FILE" HUB_URL)"
@@ -111,9 +118,9 @@ enrolled() { [ -s "$TOKEN" ] && [ -s "$TOKEN.refresh" ]; }
 # seed_approve <code>: headless approval by the hub instance's seed approver
 # (scripts/local-runtime/approver.mjs: the UI's vault modules, real API calls).
 seed_approve() {
-  lr_log "approving pairing code with the seed approver of hub '$HUB_NAME'"
+  lr_log "approving pairing code with the seed approver of hub '$HUB_NAME'${APPROVE_USER:+ as $APPROVE_USER}"
   (cd "$LR_ROOT" && node --import ./tests/helpers/vaultEndpointHarness.ts "$LR_HELPERS/approver.mjs" bridge \
-    --api "$APPROVE_URL" --key "$APPROVER_KEY" --code "$1" --label "local-$NAME") 2>&1 | sed 's/^/  /'
+    --api "$APPROVE_URL" --key "$APPROVER_KEY" --code "$1" --label "local-$NAME" ${APPROVE_USER:+--user "$APPROVE_USER"}) 2>&1 | sed 's/^/  /'
   return "${PIPESTATUS[0]}"
 }
 

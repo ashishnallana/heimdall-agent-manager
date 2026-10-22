@@ -9,6 +9,8 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { seed, FIXTURES } from './seed.mjs';
 import { renderBridgeConfig } from './bridge-config.mjs';
+import { setPlan, parseArgs as parsePlanArgs } from './plans.mjs';
+import { DatabaseSync } from 'node:sqlite';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '../..');
 
@@ -132,4 +134,40 @@ test('CLI entry points run when the checkout is reached through a symlink', () =
     assert.equal(r.status, 0, r.stderr);
     assert.match(readFileSync(out, 'utf8'), /^port = 2000$/m);
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+// The columns plans.mjs touches, as migrations 069/103 define them.
+function billingDb(dir) {
+  const file = join(dir, 'hub.db');
+  const db = new DatabaseSync(file);
+  db.exec(`CREATE TABLE billing_plans (plan_id TEXT PRIMARY KEY);
+    INSERT INTO billing_plans VALUES ('free'), ('hobbyist');
+    CREATE TABLE account_billing (user_id TEXT PRIMARY KEY, plan_id TEXT NOT NULL DEFAULT 'free',
+      status TEXT NOT NULL DEFAULT 'free', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+    INSERT INTO account_billing (user_id, created_at, updated_at) VALUES ('paid', 'x', 'x'), ('tanmay', 'x', 'x');`);
+  return { file, row: (u) => db.prepare('SELECT plan_id, status FROM account_billing WHERE user_id = ?').get(u), close: () => db.close() };
+}
+
+test('plans puts a seeded account on a paid plan, idempotently, and back to free', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'lr-plans-'));
+  const db = billingDb(dir);
+  try {
+    assert.equal(setPlan({ db: db.file, user: 'paid', plan: 'hobbyist' }), 'paid -> hobbyist (custom)');
+    setPlan({ db: db.file, user: 'paid', plan: 'hobbyist' });
+    assert.deepEqual({ ...db.row('paid') }, { plan_id: 'hobbyist', status: 'custom' });
+    assert.deepEqual({ ...db.row('tanmay') }, { plan_id: 'free', status: 'free' }, 'other users stay free');
+    setPlan({ db: db.file, user: 'paid', plan: 'free' });
+    assert.deepEqual({ ...db.row('paid') }, { plan_id: 'free', status: 'free' });
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('plans refuses an unknown plan or a user without an account', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'lr-plans-'));
+  const db = billingDb(dir);
+  try {
+    assert.throws(() => setPlan({ db: db.file, user: 'paid', plan: 'pro' }), /unknown plan 'pro'/);
+    assert.throws(() => setPlan({ db: db.file, user: 'ghost', plan: 'hobbyist' }), /no billing account yet/);
+    assert.deepEqual({ ...db.row('paid') }, { plan_id: 'free', status: 'free' });
+    assert.throws(() => parsePlanArgs(['--db', 'x', '--user', 'paid']), /usage/);
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
