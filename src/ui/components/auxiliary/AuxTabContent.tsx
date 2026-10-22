@@ -153,7 +153,13 @@ function renderAuxTabBody({
       }
       return (
         <Suspense fallback={null}>
-          <ActivityTimelinePanel key={ctx.agentInstanceId} instanceId={ctx.agentInstanceId} isMobile={isMobile} />
+          <ActivityTimelinePanel
+            key={ctx.agentInstanceId}
+            instanceId={ctx.agentInstanceId}
+            isMobile={isMobile}
+            openFilePath={c.filePath || null}
+            onFileOpened={() => onUpdateTab(tab.id, { filePath: null })}
+          />
         </Suspense>
       );
     case 'tasks':

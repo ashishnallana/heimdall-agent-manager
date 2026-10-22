@@ -634,7 +634,11 @@ export const chatEndpoints = heimdallApi.injectEndpoints({
               upsertMessage(draft.messages || (draft.messages = []), message);
             }));
           }
-          dispatch(chatEndpoints.util.updateQueryData('listConversationSummaries', undefined, (draft: any) => patchConversationSummary(draft, agentInstanceId, String(rawMessage.body || ''))));
+          // tool_activity rows are written silently (no preview or last-message bump on
+          // the server), so the sidebar summary must not jump on every flush either.
+          if (message.messageType !== 'tool_activity') {
+            dispatch(chatEndpoints.util.updateQueryData('listConversationSummaries', undefined, (draft: any) => patchConversationSummary(draft, agentInstanceId, String(rawMessage.body || ''))));
+          }
           appendChatMessage(dispatch, agentInstanceId, rawMessage);
         } catch (_error) {
           // noop

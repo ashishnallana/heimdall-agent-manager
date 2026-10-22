@@ -4,7 +4,7 @@
 // tool calls and files), and a "Files edited" list with the shared diff viewer.
 // Grouping lives in extensionTimelineModel.ts; the data is kept live by the
 // realtime 'extension_events' frame (wsInvalidation.ts → 'ExtensionEvents').
-import React, { Suspense, useMemo, useState } from 'react';
+import React, { Suspense, useEffect, useMemo, useState } from 'react';
 import { Icon, Spinner, StatusPill } from '@ui';
 import { apiErrorText } from '../../api/cookieFetch';
 import { useGetExtensionTimelineQuery } from '../../api/endpoints/extension';
@@ -214,9 +214,13 @@ function FileDiff({ file, onBack, agentLabel }: { file: TimelineFileEntry; onBac
 export interface ActivityTimelinePanelProps {
   instanceId: string;
   isMobile?: boolean;
+  /** Transient: open this file's diff (e.g. clicked in a tool_activity message). */
+  openFilePath?: string | null;
+  /** Called once openFilePath has been applied, so the request is not replayed. */
+  onFileOpened?: () => void;
 }
 
-export default function ActivityTimelinePanel({ instanceId, isMobile = false }: ActivityTimelinePanelProps) {
+export default function ActivityTimelinePanel({ instanceId, isMobile = false, openFilePath = null, onFileOpened }: ActivityTimelinePanelProps) {
   const query = useGetExtensionTimelineQuery(instanceId, { skip: !instanceId });
   const timeline = useMemo(
     () => buildActivityTimeline(query.data?.events || [], query.data?.subagents || [], query.data?.files || []),
@@ -225,6 +229,13 @@ export default function ActivityTimelinePanel({ instanceId, isMobile = false }: 
   const [view, setView] = useState<View>('timeline');
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [openFile, setOpenFile] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!openFilePath) return;
+    setView('files');
+    setOpenFile(openFilePath);
+    onFileOpened?.();
+  }, [openFilePath, onFileOpened]);
 
   const agentTypes = useMemo(() => {
     const map = new Map<string, string>();
