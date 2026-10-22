@@ -43,6 +43,8 @@ effective_entitlements :: proc(service: ^Service, user_id: string) -> (domain.Us
 	if service.repo == nil || service.repo.get_account == nil do return {}, domain.domain_error(.Internal_Error, "billing repository is not configured")
 	account, err := service.repo.get_account(service.repo.ctx, user_id, now)
 	if err.code != .None do return {}, err // Do not cache failures or grant access on storage failure.
+	// Lock order: entitlements_mutex -> bridge enrollment commit.mutex.
+	// Never call entitlement lookup/invalidation while holding commit.mutex.
 	if service.on_entitlements != nil {
 		if reconcile_err := service.on_entitlements(service.plan_change_ctx, user_id, account.entitlements); reconcile_err.code != .None do return {}, reconcile_err
 	}

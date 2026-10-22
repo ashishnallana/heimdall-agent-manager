@@ -22,13 +22,12 @@ reconcile_owner_plan :: proc(service: ^Bridge_Service, user_id: string) -> domai
 
 // Refresh entitlements before reading the flag: cache fills may re-enable a bridge.
 // Called before runtime admission, so a refused hello cannot replace a live socket.
-check_bridge_plan :: proc(service: ^Bridge_Service, bridge_id: string) -> domain.Domain_Error {
-	bridge, found, err := iface.bridge_get_bridge(service.repo, bridge_id)
-	if !found do return err
-	defer domain.bridge_destroy(&bridge)
+// Reuse the caller's authenticated row, but re-read the flag after cache refresh.
+// Runtime connect repeats the gate after admission to cover an intervening downgrade.
+check_bridge_plan :: proc(service: ^Bridge_Service, bridge: domain.Bridge) -> domain.Domain_Error {
 	entitlements, lookup_err := domain.lookup_entitlements(service.entitlements, string(bridge.owner_user_id))
 	if lookup_err.code != .None do return lookup_err
-	current, current_ok, current_err := iface.bridge_get_bridge(service.repo, bridge_id)
+	current, current_ok, current_err := iface.bridge_get_bridge(service.repo, bridge.bridge_id)
 	if !current_ok do return current_err
 	defer domain.bridge_destroy(&current)
 	if current.plan_disabled_at == "" do return {}
@@ -38,6 +37,9 @@ check_bridge_plan :: proc(service: ^Bridge_Service, bridge_id: string) -> domain
 }
 
 bridge_plan_before :: proc(a, b: domain.Bridge) -> bool {
+	// Keep retained bridges stable while suspended live sockets keep heartbeating.
+	// Activity/version ordering only selects new suspensions or fills freed slots.
+	if (a.plan_disabled_at == "") != (b.plan_disabled_at == "") do return a.plan_disabled_at == ""
 	a_seen, a_valid := platform.parse_rfc3339_utc(a.last_seen_at)
 	b_seen, b_valid := platform.parse_rfc3339_utc(b.last_seen_at)
 	if a_valid != b_valid do return a_valid

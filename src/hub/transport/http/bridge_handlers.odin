@@ -1671,7 +1671,7 @@ bridge_ws_upgrade_handler :: proc(ctx: rawptr, req: Request, client: net.TCP_Soc
 	if !found { bridge_metrics_connect_result(BRIDGE_ID_UNKNOWN, "auth_failed"); _ = write_ws_text_frame(client, bridge_ws_error_payload(lookup_err.message)); return }
 	defer domain.bridge_destroy(&admitted_bridge)
 	if body_bridge_id != "" && body_bridge_id != admitted_bridge.bridge_id { _ = write_ws_text_frame(client, bridge_ws_error_payload("bridge_id does not match bearer token")); return }
-	if plan_err := bridge_service.check_bridge_plan(h.bridges, admitted_bridge.bridge_id); plan_err.code != .None {
+	if plan_err := bridge_service.check_bridge_plan(h.bridges, admitted_bridge); plan_err.code != .None {
 		bridge_metrics_connect_result(admitted_bridge.bridge_id, "plan_limit")
 		bridge_ws_domain_error(client, plan_err)
 		return

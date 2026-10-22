@@ -285,7 +285,9 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 	graph.billing.plan_change_ctx = graph
 	graph.billing.on_entitlements = reconcile_bridge_entitlements
 	graph.billing.on_plan_change = reconcile_bridge_plans
-	if plan_err := reconcile_bridge_plans(graph); plan_err.code != .None do return false, plan_err.message
+	if plan_err := reconcile_bridge_plans(graph); plan_err.code != .None {
+		fmt.eprintfln("hub: startup bridge plan reconciliation incomplete: %s", plan_err.message)
+	}
 	graph.bridges.catalog = &graph.bridge_update_catalog
 	graph.agents = agent_service.new_agent_service_with_runtime(&graph.repos.agents, &graph.repos.bridges, &graph.repos.projects, &graph.repos.content, &graph.repos.taskchains, bridge_command_sink, &graph.bridge_runtime_registry, &graph.clock, &graph.ids)
 	graph.agents.entitlements = billing_service.entitlement_lookup(&graph.billing)

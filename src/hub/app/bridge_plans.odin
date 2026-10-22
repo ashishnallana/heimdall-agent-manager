@@ -1,5 +1,6 @@
 package app
 
+import "core:fmt"
 import domain "odin_test:hub/domain"
 import billing_service "odin_test:hub/service/billing"
 import bridge_service "odin_test:hub/service/bridge"
@@ -21,13 +22,22 @@ reconcile_bridge_plans :: proc(ctx: rawptr) -> domain.Domain_Error {
 		for owner in owners do delete(owner)
 		delete(owners)
 	}
+	failures := 0
 	for owner in owners {
 		entitlements, lookup_err := billing_service.effective_entitlements(&graph.billing, owner)
-		if lookup_err.code != .None do return lookup_err
+		if lookup_err.code != .None {
+			fmt.eprintfln("hub: bridge plan reconciliation for owner %s failed: %s", owner, lookup_err.message)
+			failures += 1
+			continue
+		}
 		// Disabled enforcement is deliberately unlimited, including old suspensions.
 		if !billing_service.plan_limits_enabled(graph.billing.config) {
-			if reconcile_err := bridge_service.reconcile_plan_limits(&graph.bridges, owner, entitlements.max_bridges); reconcile_err.code != .None do return reconcile_err
+			if reconcile_err := bridge_service.reconcile_plan_limits(&graph.bridges, owner, entitlements.max_bridges); reconcile_err.code != .None {
+				fmt.eprintfln("hub: bridge plan reconciliation for owner %s failed: %s", owner, reconcile_err.message)
+				failures += 1
+			}
 		}
 	}
+	if failures > 0 do return domain.domain_error(.Internal_Error, fmt.tprintf("bridge plan reconciliation failed for %d owner(s); reaper will retry", failures))
 	return {}
 }

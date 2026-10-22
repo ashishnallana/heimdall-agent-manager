@@ -172,6 +172,9 @@ class AccountBillingHTTPTest(unittest.TestCase):
         salt = '02' * 16
         digest = hashlib.sha256((salt + ':' + secret).encode()).hexdigest()
         with closing(sqlite3.connect(self.database)) as conn, conn:
+            # An orphan sorts before alice and cannot acquire billing defaults.
+            # It must neither abort startup nor prevent healthy-owner reconciliation.
+            conn.execute("INSERT INTO bridges(bridge_id, owner_user_id, status, created_at, updated_at) VALUES ('brg_orphan', 'aaa_orphan', 'offline', '2026-10-01T00:00:00Z', '2026-10-01T00:00:00Z')")
             for bridge_id, seen, version in [('brg_plan_old', '2026-10-20T00:00:00Z', '9.0.0'),
                                              ('brg_plan_new', '2026-10-21T00:00:00Z', '1.0.0')]:
                 conn.execute("INSERT INTO bridges(bridge_id, owner_user_id, status, created_at, updated_at, last_seen_at, version) VALUES (?, 'alice', 'offline', '2026-10-01T00:00:00Z', '2026-10-21T00:00:00Z', ?, ?)",

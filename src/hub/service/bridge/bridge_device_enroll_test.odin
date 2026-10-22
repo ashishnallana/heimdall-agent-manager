@@ -423,3 +423,58 @@ test_plan_bridge_reconcile_rolls_back_partial_suspensions :: proc(t: ^testing.T)
 	testing.expect_value(t, reconcile_plan_limits(&f.svc, "rollback_owner", 0).code, domain.Error_Code.None)
 	for id in ([3]string{"a", "b", "c"}) do testing.expect(t, plan_test_disabled(t, f, id), "a later retry succeeds")
 }
+
+@(test)
+test_plan_bridge_suspension_stays_sticky_after_heartbeat :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	f := setup_attach_fixture(t, "plan_sticky")
+	defer teardown_attach_fixture(f)
+	base := domain.Bridge{owner_user_id = domain.User_ID("sticky_owner"), status = .Online, created_at = "2026-01-01T00:00:00Z"}
+	for id, i in ([2]string{"retained", "suspended"}) {
+		row := base; row.bridge_id = id
+		row.last_seen_at = "2026-10-02T00:00:00Z" if i == 0 else "2026-10-01T00:00:00Z"
+		_, ok, _ := iface.bridge_save_bridge(&f.repo, row)
+		testing.expect(t, ok)
+	}
+	testing.expect_value(t, reconcile_plan_limits(&f.svc, "sticky_owner", 1).code, domain.Error_Code.None)
+	before, _, _ := iface.bridge_get_bridge(&f.repo, "suspended")
+	defer domain.bridge_destroy(&before)
+	testing.expect(t, before.plan_disabled_at != "")
+	// A suspended live socket reports newer activity and a newer version.
+	heartbeat := before
+	heartbeat.last_seen_at = "2026-10-03T00:00:00Z"
+	heartbeat.version = "99.0.0"
+	_, saved, _ := iface.bridge_save_bridge(&f.repo, heartbeat)
+	testing.expect(t, saved)
+	testing.expect_value(t, reconcile_plan_limits(&f.svc, "sticky_owner", 1).code, domain.Error_Code.None)
+	after, _, _ := iface.bridge_get_bridge(&f.repo, "suspended")
+	defer domain.bridge_destroy(&after)
+	testing.expect_value(t, after.plan_disabled_at, before.plan_disabled_at)
+	testing.expect(t, !plan_test_disabled(t, f, "retained"))
+	// An upgrade still fills newly available slots.
+	testing.expect_value(t, reconcile_plan_limits(&f.svc, "sticky_owner", 2).code, domain.Error_Code.None)
+	testing.expect(t, !plan_test_disabled(t, f, "suspended"))
+}
+
+@(private = "file")
+plan_test_lookup_failure :: proc(ctx: rawptr, user_id: string) -> (domain.User_Entitlements, domain.Domain_Error) {
+	return {}, domain.domain_error(.Internal_Error, "injected billing lookup failure")
+}
+
+@(test)
+test_plan_bridge_revoke_succeeds_when_reconciliation_fails :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	f := setup_attach_fixture(t, "plan_revoke_failure")
+	defer teardown_attach_fixture(f)
+	row := domain.Bridge{bridge_id = "revoke_failure", owner_user_id = domain.User_ID("revoke_owner"), status = .Online}
+	_, saved, _ := iface.bridge_save_bridge(&f.repo, row)
+	testing.expect(t, saved)
+	f.svc.entitlements = {lookup = plan_test_lookup_failure}
+	revoked, ok, err := revoke_bridge(&f.svc, contracts.Auth_Context{kind = .User_Token, user_id = "revoke_owner"}, row.bridge_id)
+	defer domain.bridge_destroy(&revoked)
+	testing.expect(t, ok)
+	testing.expect_value(t, err.code, domain.Error_Code.None)
+	testing.expect_value(t, revoked.status, domain.Bridge_Status.Revoked)
+	testing.expect(t, revoked.revoked_at != "")
+	testing.expect_value(t, len(f.closed_bridge_ids), 1)
+}
