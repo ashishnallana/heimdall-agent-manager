@@ -172,6 +172,9 @@ bridge_blockers_clear_instance_locked :: proc(instance_id: string) {
 // bridge_blockers_register_permission adds a permission blocker, or refreshes the
 // one with the same (instance, blocker_id): a hook re-registering after a lost
 // socket or a bridge restart. Returns the generation the caller's waiter owns.
+// Ownership: on insert the registry takes every string of `pending`; on refresh
+// the duplicates are freed here (bridge_blockers_allocator), except request_id,
+// which the caller keeps using as its waiter id.
 bridge_blockers_register_permission :: proc(pending: Bridge_Permission_Pending) -> (generation: int, refreshed: bool) {
 	sync.mutex_lock(&bridge_permission_mutex)
 	defer sync.mutex_unlock(&bridge_permission_mutex)
@@ -181,6 +184,11 @@ bridge_blockers_register_permission :: proc(pending: Bridge_Permission_Pending) 
 		if p.request_id != pending.request_id || p.agent_instance_id != pending.agent_instance_id do continue
 		p.generation += 1
 		p.deadline_unix_ms = pending.deadline_unix_ms
+		{
+			context.allocator = bridge_blockers_allocator()
+			delete(pending.agent_instance_id); delete(pending.tool); delete(pending.provider)
+			delete(pending.agent_id); delete(pending.summary); delete(pending.input)
+		}
 		// A decision that landed while the hook was reconnecting is kept for the
 		// new waiter, which returns it at once.
 		if !p.decided do bridge_blockers_touch_locked(p.agent_instance_id)
@@ -227,14 +235,21 @@ bridge_blockers_release_locked :: proc(p: ^Bridge_Permission_Pending, reason: st
 // bridge_blockers_on_extension_event auto-resolves permission blockers the user
 // answered in the provider's own TUI prompt (the hook is not killed then). A
 // later event proves the prompt is gone:
-//   tool.end for the same agent + tool          -> the oldest such blocker
-//   tool.start for the same agent + tool        -> the oldest, after the grace window
+//   tool.end for the same agent + tool + call   -> the oldest such blocker
+//   tool.start for the same agent + tool + call -> the oldest, after the grace window
 //   subagent.stop                               -> every blocker of that subagent
-//   activity idle|active, notification other
-//   than permission_prompt                      -> every blocker of the instance
+//   activity idle|active (turn ended / new turn) -> every blocker of the instance
+// "Same call" compares the one-line summary of the event's tool.input with the
+// blocker's (bridge_blocker_summary: command / file_path / url / ...), because a
+// PermissionRequest carries no tool_use_id. That keeps a PARALLEL auto-allowed
+// call of the same tool (another Bash command) from releasing the pending one.
+// Two parallel calls with an identical summary stay indistinguishable (the
+// oldest is released); an event without tool.input falls back to agent + tool.
+// Notifications are deliberately NOT a trigger: idle_prompt, auth_success and
+// elicitation_dialog can all fire while a permission hook is still blocked.
 // Releasing with "none" is always safe: the hook prints nothing and the provider
 // keeps whatever the terminal decided. Returns how many it released.
-bridge_blockers_on_extension_event :: proc(instance_id: string, ev: contracts.Ext_Event, now: i64) -> int {
+bridge_blockers_on_extension_event :: proc(instance_id: string, ev: contracts.Ext_Event, now: i64, tool_input_json := "") -> int {
 	if instance_id == "" do return 0
 	sync.mutex_lock(&bridge_permission_mutex)
 	defer sync.mutex_unlock(&bridge_permission_mutex)
@@ -243,9 +258,12 @@ bridge_blockers_on_extension_event :: proc(instance_id: string, ev: contracts.Ex
 	#partial switch ev.kind {
 	case .Tool_End, .Tool_Start:
 		if ev.tool_name == "" do return 0
+		call_summary := ""
+		if strings.trim_space(tool_input_json) != "" do call_summary = bridge_blocker_summary(ev.tool_name, tool_input_json, context.temp_allocator)
 		for p, i in bridge_permission_pending {
 			if p.agent_instance_id != instance_id || p.kind != BRIDGE_BLOCKER_KIND_PERMISSION || p.decided do continue
 			if p.tool != ev.tool_name || p.agent_id != ev.agent_id do continue
+			if call_summary != "" && p.summary != "" && p.summary != call_summary do continue
 			if ev.kind == .Tool_Start && now - p.created_unix_ms < BRIDGE_BLOCKER_TOOL_START_GRACE_MS do continue
 			if oldest < 0 || p.created_unix_ms < bridge_permission_pending[oldest].created_unix_ms do oldest = i
 		}
@@ -253,9 +271,8 @@ bridge_blockers_on_extension_event :: proc(instance_id: string, ev: contracts.Ex
 			bridge_blockers_release_locked(&bridge_permission_pending[oldest], BRIDGE_BLOCKER_TERMINAL_REASON)
 			n = 1
 		}
-	case .Subagent_Stop, .Activity, .Notification:
+	case .Subagent_Stop, .Activity:
 		if ev.kind == .Subagent_Stop && ev.agent_id == "" do return 0
-		if ev.kind == .Notification && ev.notification_type == "permission_prompt" do return 0
 		if ev.kind == .Activity {
 			s := strings.to_lower(strings.trim_space(ev.activity_state), context.temp_allocator)
 			if s != "idle" && s != "active" do return 0

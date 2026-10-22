@@ -94,11 +94,16 @@ ext_blk_decide :: proc(instance_id, blocker_id, decision: string) -> bool {
 test_ext_blockers_reregistration_is_idempotent_and_supersedes_old_waiter :: proc(t: ^testing.T) {
 	context.allocator = runtime.heap_allocator()
 	id := "inst_blk_rereg"
-	pending := Bridge_Permission_Pending{request_id = strings.clone("blk_rereg"), agent_instance_id = strings.clone(id), tool = "Bash", created_unix_ms = bridge_runtime_now_ms()}
-	gen1, refreshed1 := bridge_blockers_register_permission(pending)
+	// Like the RPC, each registration hands over its own heap clones; a refresh
+	// frees the duplicates (all but request_id).
+	blocker_id := strings.clone("blk_rereg")
+	fresh := proc(blocker_id, id: string) -> Bridge_Permission_Pending {
+		return Bridge_Permission_Pending{request_id = blocker_id, agent_instance_id = strings.clone(id), tool = strings.clone("Bash"), summary = strings.clone("Bash: ls"), input = strings.clone(`{"command":"ls"}`), created_unix_ms = bridge_runtime_now_ms()}
+	}
+	gen1, refreshed1 := bridge_blockers_register_permission(fresh(blocker_id, id))
 	testing.expect_value(t, gen1, 1)
 	testing.expect(t, !refreshed1)
-	gen2, refreshed2 := bridge_blockers_register_permission(pending)
+	gen2, refreshed2 := bridge_blockers_register_permission(fresh(blocker_id, id))
 	testing.expect_value(t, gen2, 2)
 	testing.expect(t, refreshed2, "same id + instance refreshes")
 	testing.expect_value(t, len(bridge_blockers_list(id)), 1)
@@ -228,10 +233,21 @@ test_ext_blockers_terminal_answer_auto_resolves :: proc(t: ^testing.T) {
 	// The permission_prompt notification is the TUI prompt itself, not an answer.
 	notif := contracts.Ext_Event{kind = .Notification, provider = "claude", notification_type = "permission_prompt"}
 	testing.expect_value(t, bridge_blockers_on_extension_event(id, notif, now), 0)
+	// No notification is an answer: idle_prompt / elicitation_dialog can fire
+	// while the hook is still blocked.
+	for kind in ([]string{"idle_prompt", "elicitation_dialog", "auth_success"}) {
+		n := contracts.Ext_Event{kind = .Notification, provider = "claude", notification_type = kind}
+		testing.expect_value(t, bridge_blockers_on_extension_event(id, n, now), 0)
+	}
+	// A PARALLEL auto-allowed Bash call (another command) ending does not release
+	// the pending one: the call summary differs.
+	par := bridge_ext_ingest(ext_blk_rec(id), `{"schema":"ham.ext.v1","provider":"claude","ext_version":"0.1.0","event":"tool.end","ts":"2026-10-22T06:00:01Z","session_id":"sess-1","agent":{"id":"sub-1"},"tool":{"name":"Bash","use_id":"tu_8","input":{"command":"ls"}}}`, now)
+	bridge_ext_ingest_result_destroy(&par)
+	testing.expect_value(t, bridge_blockers_on_extension_event(id, start, now + BRIDGE_BLOCKER_TOOL_START_GRACE_MS, `{"command":"git status"}`), 0)
 	testing.expect_value(t, len(bridge_blockers_list(id)), 1)
 
-	// A PostToolUse for the blocked tool arrives through agent.extension.event.
-	res := bridge_ext_ingest(ext_blk_rec(id), `{"schema":"ham.ext.v1","provider":"claude","ext_version":"0.1.0","event":"tool.end","ts":"2026-10-22T06:00:01Z","session_id":"sess-1","agent":{"id":"sub-1"},"tool":{"name":"Bash","use_id":"tu_9"}}`, now)
+	// A PostToolUse for the blocked call arrives through agent.extension.event.
+	res := bridge_ext_ingest(ext_blk_rec(id), `{"schema":"ham.ext.v1","provider":"claude","ext_version":"0.1.0","event":"tool.end","ts":"2026-10-22T06:00:01Z","session_id":"sess-1","agent":{"id":"sub-1"},"tool":{"name":"Bash","use_id":"tu_9","input":{"command":"rm -rf build"}}}`, now)
 	bridge_ext_ingest_result_destroy(&res)
 	out := ext_blk_finish(run)
 	testing.expect_value(t, out.decision, "none") // the hook prints nothing

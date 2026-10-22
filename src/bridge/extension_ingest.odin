@@ -20,6 +20,7 @@ package main
 // from rec, never from the event.
 
 import "base:runtime"
+import "core:encoding/json"
 import "core:fmt"
 import "core:strings"
 import "core:sync"
@@ -114,6 +115,21 @@ bridge_ext_enqueue_locked :: proc(s: ^Bridge_Ext_Instance_State, event_json: str
 // bridge_ext_ingest validates, applies and queues the events in params for the
 // token-verified rec. It does no network I/O (the forwarder does), so tests
 // drive it directly.
+// bridge_ext_raw_tool_input returns the event's tool.input object as JSON (temp
+// allocator), or "" when absent. Auto-resolve uses it to tell parallel calls of
+// the same tool apart.
+bridge_ext_raw_tool_input :: proc(raw: string) -> string {
+	value, err := json.parse_string(raw, json.DEFAULT_SPECIFICATION, true, context.temp_allocator)
+	if err != .None do return ""
+	root, _ := value.(json.Object)
+	tool, _ := root["tool"].(json.Object)
+	input, is_obj := tool["input"].(json.Object)
+	if !is_obj do return ""
+	bytes, merr := json.marshal(input, allocator = context.temp_allocator)
+	if merr != nil do return ""
+	return string(bytes)
+}
+
 bridge_ext_ingest :: proc(rec: Bridge_Local_Agent_Token_Record, params: string, now: i64) -> (res: Bridge_Ext_Ingest_Result) {
 	context.allocator = bridge_ext_allocator()
 	instance_id := rec.agent_instance_id
@@ -139,7 +155,9 @@ bridge_ext_ingest :: proc(rec: Bridge_Local_Agent_Token_Record, params: string, 
 		defer contracts.ext_event_destroy(&ev)
 
 		// A later event proves a permission prompt was answered in the terminal.
-		_ = bridge_blockers_on_extension_event(instance_id, ev, now)
+		tool_input := ""
+		if ev.kind == .Tool_Start || ev.kind == .Tool_End do tool_input = bridge_ext_raw_tool_input(raw)
+		_ = bridge_blockers_on_extension_event(instance_id, ev, now, tool_input)
 		if status, ok := contracts.ext_activity_for_event(ev); ok {
 			bridge_runtime_note_agent_activity(instance_id, status, bridge_ext_activity_source(ev.provider))
 		}
