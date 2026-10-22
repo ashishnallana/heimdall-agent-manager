@@ -24,6 +24,26 @@ Agent :: struct {
 	state: Agent_State,
 	created_at: string,
 	updated_at: string,
+	// permission_mode is AGENT_PERMISSION_MODE_YOLO (default) or _ASK; always a
+	// static literal (see agent_permission_mode_normalize), never heap-owned.
+	permission_mode: string,
+}
+
+// REQ-EXT-PERM-2: 'yolo' launches the provider with the catalog yolo_args; 'ask'
+// launches without them so the provider prompts for permissions.
+AGENT_PERMISSION_MODE_YOLO :: "yolo"
+AGENT_PERMISSION_MODE_ASK :: "ask"
+
+// agent_permission_mode_valid reports whether mode is an accepted API value.
+agent_permission_mode_valid :: proc(mode: string) -> bool {
+	return mode == AGENT_PERMISSION_MODE_YOLO || mode == AGENT_PERMISSION_MODE_ASK
+}
+
+// agent_permission_mode_normalize maps any stored/legacy value to a static
+// literal: only an explicit "ask" opts out of yolo.
+agent_permission_mode_normalize :: proc(mode: string) -> string {
+	if mode == AGENT_PERMISSION_MODE_ASK do return AGENT_PERMISSION_MODE_ASK
+	return AGENT_PERMISSION_MODE_YOLO
 }
 
 Agent_Bridge_Support :: struct {

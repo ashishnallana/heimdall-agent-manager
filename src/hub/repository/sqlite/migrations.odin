@@ -453,7 +453,11 @@ MIGRATION_104_AGENT_EXTENSION_EVENTS :: #load("migrations/104_agent_extension_ev
 // in bridge_provider_status (REQ-EXT-DET-1).
 MIGRATION_105_PROVIDER_EXTENSION :: #load("migrations/105_provider_extension.sql", string)
 
-migration_order :: [108]string {
+// 106: agents.permission_mode ('yolo' default | 'ask'); 'ask' launches without
+// the catalog yolo_args (REQ-EXT-PERM-2).
+MIGRATION_106_AGENT_PERMISSION_MODE :: #load("migrations/106_agent_permission_mode.sql", string)
+
+migration_order :: [109]string {
 	"001_foundation.sql",
 	"002_owner_scoped_core.sql",
 	"003_device_tokens.sql",
@@ -562,6 +566,7 @@ migration_order :: [108]string {
 	"103_plan_enforcement.sql",
 	"104_agent_extension_events.sql",
 	"105_provider_extension.sql",
+	"106_agent_permission_mode.sql",
 }
 
 // stop_before is a TEST SEAM: when non-empty, the apply loop stops in front of
@@ -911,6 +916,11 @@ run_migrations :: proc(
 			mark_migration_applied(conn, name)
 			continue
 		}
+		// 106 is a single ALTER; a database that already has the column needs nothing.
+		if name == "106_agent_permission_mode.sql" && table_column_exists(conn, "agents", "permission_mode") {
+			mark_migration_applied(conn, name)
+			continue
+		}
 		// 105 commits atomically before its ledger row; its last column proves completion.
 		if name == "105_provider_extension.sql" &&
 		   table_column_exists(conn, "bridge_provider_status", "extension_checked_at") {
@@ -1081,6 +1091,7 @@ migration_sql :: proc(name, migrations_dir: string) -> string {
 	if name == "099_mixed_work_execution.sql" do return strings.clone(MIGRATION_099_MIXED_WORK_EXECUTION)
 	if name == "102_drop_bridge_enrollments.sql" do return strings.clone(MIGRATION_102_DROP_BRIDGE_ENROLLMENTS)
 	if name == "103_plan_enforcement.sql" do return strings.clone(MIGRATION_103_PLAN_ENFORCEMENT)
+	if name == "106_agent_permission_mode.sql" do return strings.clone(MIGRATION_106_AGENT_PERMISSION_MODE)
 	if name == "105_provider_extension.sql" do return strings.clone(MIGRATION_105_PROVIDER_EXTENSION)
 	if name == "104_agent_extension_events.sql" do return strings.clone(MIGRATION_104_AGENT_EXTENSION_EVENTS)
 	if name == "100_vault_pair_hub_origin.sql" do return strings.clone(MIGRATION_100_VAULT_PAIR_HUB_ORIGIN)

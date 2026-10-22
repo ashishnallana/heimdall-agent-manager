@@ -4,7 +4,8 @@
  * One page serves create and edit (REQ-UI-9).
  *
  * Fields: name (required), slug (optional, auto-derived from name on create),
- * instructions (optional), templateId.
+ * instructions (optional), templateId, requireApprovals (permission_mode
+ * `ask` when on, `yolo` when off — REQ-EXT-PERM-2).
  *
  * No per-bridge paths: agents are not filesystem-bound like projects.
  * No "cannot clear" complexity: agent PATCH accepts empty strings and the
@@ -14,6 +15,7 @@ import React from 'react';
 import {
   Alert,
   Button,
+  Checkbox,
   FormField,
   Icon,
   Input,
@@ -97,6 +99,7 @@ interface FormState {
   slug: string;
   instructions: string;
   templateId: string;
+  requireApprovals: boolean;
 }
 
 const EMPTY_FORM: FormState = {
@@ -104,6 +107,7 @@ const EMPTY_FORM: FormState = {
   slug: '',
   instructions: '',
   templateId: '',
+  requireApprovals: false,
 };
 
 function slugify(name: string): string {
@@ -116,6 +120,7 @@ function formFromRecord(record: AgentRecord): FormState {
     slug: record.slug,
     instructions: record.instructions,
     templateId: record.templateId,
+    requireApprovals: record.permissionMode === 'ask',
   };
 }
 
@@ -197,6 +202,7 @@ export default function AgentFormPage({ agentId }: { agentId?: string } = {}) {
           slug: form.slug || undefined,
           templateId: form.templateId || undefined,
           instructions: form.instructions,
+          permissionMode: form.requireApprovals ? 'ask' : 'yolo',
         }).unwrap();
         navigateTo(agentViewHref(agentId!));
       } else {
@@ -205,6 +211,7 @@ export default function AgentFormPage({ agentId }: { agentId?: string } = {}) {
           slug: form.slug || slugify(form.name) || form.name,
           templateId: form.templateId || undefined,
           instructions: form.instructions,
+          permissionMode: form.requireApprovals ? 'ask' : 'yolo',
         }).unwrap();
         const newId = String(result?.agent_id || result?.agentId || result?.agent?.agent_id || '');
         navigateTo(newId ? agentViewHref(newId) : agentListHref(listState));
@@ -339,6 +346,25 @@ export default function AgentFormPage({ agentId }: { agentId?: string } = {}) {
                 </Select>
               </FormField>
             ) : null}
+          </div>
+        </Panel>
+
+        <Panel className="p-4">
+          <div className="mb-3">
+            <p className="text-title text-primary">Permissions</p>
+          </div>
+          <div className="flex flex-col gap-1">
+            <Checkbox
+              checked={form.requireApprovals}
+              onChange={(next) => setField('requireApprovals', next)}
+              label="Require permission approvals"
+              data-debug-id="agent-form-require-approvals"
+            />
+            <p className="text-body-sm text-muted">
+              Launches the provider without its auto-approve flags, so the agent asks before using tools.
+              Approvals appear in Heimdall when the provider extension is installed, otherwise in the
+              agent&apos;s terminal. Applies from the agent&apos;s next launch.
+            </p>
           </div>
         </Panel>
 

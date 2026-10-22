@@ -51,7 +51,7 @@ agent_next_title_counter_sqlite :: proc(ctx: rawptr, agent_id: string, owner_use
 agent_save_sqlite :: proc(ctx: rawptr, agent: domain.Agent) -> (domain.Agent, bool, domain.Domain_Error) {
 	impl := (^Agent_Repo_SQLite)(ctx)
 	stmt: sqlite3_stmt = nil
-	query := "INSERT INTO agents (agent_id, owner_user_id, name, slug, template_id, instructions, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(agent_id) DO UPDATE SET name=excluded.name, slug=excluded.slug, template_id=excluded.template_id, instructions=excluded.instructions, state=excluded.state, updated_at=excluded.updated_at;"
+	query := "INSERT INTO agents (agent_id, owner_user_id, name, slug, template_id, instructions, state, created_at, updated_at, permission_mode) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(agent_id) DO UPDATE SET name=excluded.name, slug=excluded.slug, template_id=excluded.template_id, instructions=excluded.instructions, state=excluded.state, updated_at=excluded.updated_at, permission_mode=excluded.permission_mode;"
 	if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return domain.Agent{}, false, domain.domain_error(.Internal_Error, "failed to prepare agent save")
 	defer sqlite3_finalize(stmt)
 	bind_agent(stmt, agent)
@@ -65,7 +65,7 @@ agent_save_sqlite :: proc(ctx: rawptr, agent: domain.Agent) -> (domain.Agent, bo
 agent_get_sqlite :: proc(ctx: rawptr, agent_id: string) -> (domain.Agent, bool, domain.Domain_Error) {
 	impl := (^Agent_Repo_SQLite)(ctx)
 	stmt: sqlite3_stmt = nil
-	query := "SELECT agent_id, owner_user_id, name, slug, template_id, instructions, state, created_at, updated_at FROM agents WHERE agent_id = ?;"
+	query := "SELECT agent_id, owner_user_id, name, slug, template_id, instructions, state, created_at, updated_at, permission_mode FROM agents WHERE agent_id = ?;"
 	if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return domain.Agent{}, false, domain.domain_error(.Internal_Error, "failed to prepare agent lookup")
 	defer sqlite3_finalize(stmt)
 	bind_text(stmt, 1, agent_id)
@@ -77,8 +77,8 @@ agent_list_by_owner_sqlite :: proc(ctx: rawptr, owner_user_id: domain.User_ID, l
 	impl := (^Agent_Repo_SQLite)(ctx)
 	stmt: sqlite3_stmt = nil
 	effective_limit := limit; if effective_limit <= 0 do effective_limit = 50
-	query := "SELECT agent_id, owner_user_id, name, slug, template_id, instructions, state, created_at, updated_at FROM agents WHERE owner_user_id = ? ORDER BY created_at DESC, agent_id DESC LIMIT ?;"
-	if cursor != "" do query = "SELECT agent_id, owner_user_id, name, slug, template_id, instructions, state, created_at, updated_at FROM agents WHERE owner_user_id = ? AND created_at < ? ORDER BY created_at DESC, agent_id DESC LIMIT ?;"
+	query := "SELECT agent_id, owner_user_id, name, slug, template_id, instructions, state, created_at, updated_at, permission_mode FROM agents WHERE owner_user_id = ? ORDER BY created_at DESC, agent_id DESC LIMIT ?;"
+	if cursor != "" do query = "SELECT agent_id, owner_user_id, name, slug, template_id, instructions, state, created_at, updated_at, permission_mode FROM agents WHERE owner_user_id = ? AND created_at < ? ORDER BY created_at DESC, agent_id DESC LIMIT ?;"
 	if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return nil, domain.domain_error(.Internal_Error, "failed to prepare agent list")
 	defer sqlite3_finalize(stmt)
 	bind_text(stmt, 1, string(owner_user_id))
@@ -228,7 +228,7 @@ agent_list_active_runtime_instances_sqlite :: proc(ctx: rawptr) -> ([]domain.Age
 }
 
 bind_agent :: proc(stmt: sqlite3_stmt, agent: domain.Agent) {
-	bind_text(stmt, 1, agent.agent_id); bind_text(stmt, 2, string(agent.owner_user_id)); bind_text(stmt, 3, agent.name); bind_text(stmt, 4, agent.slug); bind_text(stmt, 5, agent.template_id); bind_text(stmt, 6, agent.instructions); bind_text(stmt, 7, domain.agent_state_string(agent.state)); bind_text(stmt, 8, agent.created_at); bind_text(stmt, 9, agent.updated_at)
+	bind_text(stmt, 1, agent.agent_id); bind_text(stmt, 2, string(agent.owner_user_id)); bind_text(stmt, 3, agent.name); bind_text(stmt, 4, agent.slug); bind_text(stmt, 5, agent.template_id); bind_text(stmt, 6, agent.instructions); bind_text(stmt, 7, domain.agent_state_string(agent.state)); bind_text(stmt, 8, agent.created_at); bind_text(stmt, 9, agent.updated_at); bind_text(stmt, 10, domain.agent_permission_mode_normalize(agent.permission_mode))
 }
 
 bind_support :: proc(stmt: sqlite3_stmt, s: domain.Agent_Bridge_Support) {
@@ -236,7 +236,7 @@ bind_support :: proc(stmt: sqlite3_stmt, s: domain.Agent_Bridge_Support) {
 }
 
 agent_from_stmt :: proc(stmt: sqlite3_stmt) -> domain.Agent {
-	return domain.Agent{agent_id = column_text(stmt, 0), owner_user_id = domain.User_ID(column_text(stmt, 1)), name = column_text(stmt, 2), slug = column_text(stmt, 3), template_id = column_text(stmt, 4), instructions = column_text(stmt, 5), state = agent_state_from_string(column_text_unowned(stmt, 6)), created_at = column_text(stmt, 7), updated_at = column_text(stmt, 8)}
+	return domain.Agent{agent_id = column_text(stmt, 0), owner_user_id = domain.User_ID(column_text(stmt, 1)), name = column_text(stmt, 2), slug = column_text(stmt, 3), template_id = column_text(stmt, 4), instructions = column_text(stmt, 5), state = agent_state_from_string(column_text_unowned(stmt, 6)), created_at = column_text(stmt, 7), updated_at = column_text(stmt, 8), permission_mode = domain.agent_permission_mode_normalize(column_text_unowned(stmt, 9))}
 }
 
 support_from_stmt :: proc(stmt: sqlite3_stmt) -> domain.Agent_Bridge_Support {
