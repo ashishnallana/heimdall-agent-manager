@@ -81,3 +81,58 @@ startup_transport_requires_matching_host_receipt :: proc(t: ^testing.T) {
 		testing.expect_value(t, string(frame[off:]), text)
 	}
 }
+
+@(test)
+startup_launch_query_rejects_missing_unsupported_and_mismatched_replies :: proc(t: ^testing.T) {
+	path := fmt.tprintf("/tmp/ham_startup_launch_query_%d.sock", os.get_pid())
+	_ = posix.unlink(cstring(raw_data(path)))
+	defer _ = posix.unlink(cstring(raw_data(path)))
+	listener := posix.socket(.UNIX, .STREAM)
+	if !testing.expect(t, listener >= 0) do return
+	defer posix.close(listener)
+	addr: posix.sockaddr_un
+	when ODIN_OS == .Darwin || ODIN_OS == .FreeBSD || ODIN_OS == .NetBSD || ODIN_OS == .OpenBSD { addr.sun_len = c.uchar(size_of(addr)) }
+	addr.sun_family = .UNIX
+	for ch, i in path do addr.sun_path[i] = c.char(ch)
+	if !testing.expect(t, posix.bind(listener, (^posix.sockaddr)(&addr), posix.socklen_t(size_of(addr))) == .OK) do return
+	if !testing.expect(t, posix.listen(listener, 4) == .OK) do return
+	Server :: struct { listener: posix.FD }
+	server := Server{listener = listener}
+	worker := thread.create_and_start_with_data(&server, proc(data: rawptr) {
+		context.allocator = runtime.heap_allocator()
+		s := (^Server)(data)
+		for i in 0..<6 {
+			fd := posix.accept(s.listener, nil, nil)
+			if fd < 0 do return
+			request, ok := pty_host_read_frame(fd)
+			if !ok { posix.close(fd); return }
+			if i > 0 {
+				payload := make([dynamic]byte)
+				if i == 1 {
+					append(&payload, PTY_HOST_T_ERROR)
+					pty_host_put_str(&payload, "inst_query")
+					pty_host_put_str(&payload, "unknown control tag")
+				} else {
+					append(&payload, PTY_HOST_T_STARTUP_LAUNCH_REPLY)
+					pty_host_put_str(&payload, "other-instance" if i == 3 else "inst_query")
+					pty_host_put_i32(&payload, 0 if i == 4 else 42)
+					pty_host_put_str(&payload, "wrong-key" if i == 2 else "launch")
+				}
+				reply := pty_host_frame(payload[:])
+				_ = pty_host_send_all(fd, reply)
+				delete(payload); delete(reply)
+			}
+			delete(request); posix.close(fd)
+		}
+	})
+	defer thread.destroy(worker)
+	for _ in 0..<4 {
+		pid, ok := bridge_pty_host_startup_launch(path, "inst_query", "launch")
+		testing.expect(t, !ok && pid == 0, "missing/old-host/wrong-identity receipt stays retryable")
+	}
+	pid, ok := bridge_pty_host_startup_launch(path, "inst_query", "launch")
+	testing.expect(t, ok && pid == 0, "acknowledged mismatch permits a fresh launch")
+	pid, ok = bridge_pty_host_startup_launch(path, "inst_query", "launch")
+	testing.expect(t, ok && pid == 42, "only matching child receipt confirms a launch")
+	thread.join(worker)
+}

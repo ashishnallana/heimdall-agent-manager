@@ -741,6 +741,17 @@ impl Daemon {
         res
     }
 
+    /// The registry contains a spec only after build_agent successfully spawned
+    /// its child. Never infer this identity from a bridge's persisted credentials.
+    pub fn startup_launch_pid(&self, instance: &str, launch_key: &str) -> i32 {
+        let agents = self.agents.lock().unwrap();
+        let Some(a) = agents.get(instance) else { return 0 };
+        let expected = a.spec.env.iter().rev().find(|(k, _)| k == "HEIMDALL_STARTUP_KEY").map(|(_, v)| v.as_str());
+        if !launch_key.is_empty() && expected == Some(launch_key)
+            && !a.stop.load(Ordering::SeqCst) && a.alive.load(Ordering::SeqCst)
+        { a.pid } else { 0 }
+    }
+
     /// One launch-fenced startup instruction. The receipt and partial byte
     /// progress live with the child, so lost replies/concurrent retries are safe.
     /// Close/restart drops the receipt; both pid and launch key fence old work.
@@ -1448,6 +1459,10 @@ fn handle_ctl(daemon: &Daemon, id: u64, msg: CtlMsg, tx: &ReplySink) {
                 });
             }
         }
+        CtlMsg::StartupLaunch { instance, launch_key } => {
+            let pid = daemon.startup_launch_pid(&instance, &launch_key);
+            let _ = tx.send(CtlReply::StartupLaunch { instance, pid, launch_key });
+        }
         CtlMsg::StartupInput { instance, pid, launch_key, data } => {
             let reply = match daemon.write_startup_input(&instance, pid, &launch_key, &data) {
                 Ok(()) => CtlReply::StartupInputDone { instance, pid, launch_key },
@@ -1638,6 +1653,57 @@ mod tests {
             tee_path: None,
             timeout_seconds: None,
         }
+    }
+
+    #[test]
+    fn startup_launch_confirms_only_actual_child_across_failed_replacement_and_lost_ack() {
+        require_pty!();
+        let Some(sh) = shell() else { return };
+        let sock = tmp_socket("startup_launch");
+        let mut server = DaemonServer::start(&sock).unwrap();
+        let d = server.daemon();
+        let mut old = sh_spec("startup-launch", &sh);
+        old.env.push(("HEIMDALL_STARTUP_KEY".into(), "old-key".into()));
+        let old_pid = d.spawn(old).unwrap();
+        let query = |key: &str| {
+            // A fresh connection models retry/recovery after bridge restart.
+            let mut c = UnixStream::connect(&sock).unwrap();
+            dproto::write_ctl_msg(&mut c, &CtlMsg::StartupLaunch { instance: "startup-launch".into(), launch_key: key.into() }).unwrap();
+            match await_reply(&mut c, |_| true, Duration::from_secs(3)).unwrap() {
+                CtlReply::StartupLaunch { instance, pid, launch_key } => {
+                    assert_eq!(instance, "startup-launch");
+                    assert_eq!(launch_key, key);
+                    pid
+                }
+                reply => panic!("unexpected {reply:?}"),
+            }
+        };
+        // Issuing new credentials or failing bridge bootstrap cannot mutate the
+        // old child's remembered spawn key.
+        assert_eq!(query("new-key"), 0);
+        assert_eq!(query("old-key"), old_pid);
+        assert_eq!(query(""), 0);
+        assert_eq!(d.list().len(), 1);
+        d.close("startup-launch").unwrap();
+        let mut new = sh_spec("startup-launch", &sh);
+        new.env.push(("HEIMDALL_STARTUP_KEY".into(), "new-key".into()));
+        // Successful Spawn with a lost reply. The host remains authoritative.
+        let mut lost = UnixStream::connect(&sock).unwrap();
+        dproto::write_ctl_msg(&mut lost, &CtlMsg::Spawn(new)).unwrap();
+        drop(lost);
+        assert!(wait_for(|| d.startup_launch_pid("startup-launch", "new-key") > 0, Duration::from_secs(3)));
+        let new_pid = query("new-key");
+        assert_ne!(new_pid, old_pid);
+        assert_eq!(query("new-key"), new_pid);
+        assert_eq!(query("old-key"), 0);
+        assert_eq!(d.list().len(), 1);
+        d.write_input("startup-launch", b"exit\n").unwrap();
+        assert!(wait_for(|| !d.list()[0].alive, Duration::from_secs(3)));
+        assert_eq!(query("new-key"), 0);
+        d.close("startup-launch").unwrap();
+        assert_eq!(query("new-key"), 0);
+        assert_eq!(d.startup_launch_pid("missing", "new-key"), 0);
+        server.shutdown();
     }
 
     #[test]

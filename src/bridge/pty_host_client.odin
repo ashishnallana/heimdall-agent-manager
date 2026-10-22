@@ -57,6 +57,8 @@ PTY_HOST_T_WATCH_EVENTS :: 0x38
 PTY_HOST_T_SIGNAL :: 0x39 // Send POSIX signal to a shell's process group (T2/REQ-SH-CONTRACT §4)
 PTY_HOST_T_STARTUP_INPUT :: 0x3A
 PTY_HOST_T_STARTUP_INPUT_DONE :: 0xB1
+PTY_HOST_T_STARTUP_LAUNCH :: 0x3B
+PTY_HOST_T_STARTUP_LAUNCH_REPLY :: 0xB2
 
 PTY_HOST_MAX_FRAME_BYTES :: 64 * 1024 * 1024
 
@@ -150,6 +152,7 @@ Pty_Host_Reply_Kind :: enum {
 	// Reply to Signal: the target had already exited (code = its exit code).
 	Already_Exited,
 	Startup_Input_Done,
+	Startup_Launch,
 }
 
 // One agent's liveness entry inside a Host_Heartbeat reply.
@@ -383,8 +386,8 @@ pty_host_decode_reply :: proc(payload: []byte) -> (Pty_Host_Reply, bool) {
 	off := 0
 	r: Pty_Host_Reply
 	switch tag {
-	case PTY_HOST_T_STARTUP_INPUT_DONE:
-		r.kind = .Startup_Input_Done
+	case PTY_HOST_T_STARTUP_LAUNCH_REPLY, PTY_HOST_T_STARTUP_INPUT_DONE:
+		r.kind = .Startup_Launch if tag == PTY_HOST_T_STARTUP_LAUNCH_REPLY else .Startup_Input_Done
 		inst, ok := pty_host_get_str(rest, &off); if !ok do return {}, false
 		pid, pok := pty_host_get_i32(rest, &off); if !pok { delete(inst); return {}, false }
 		key, kok := pty_host_get_str(rest, &off); if !kok { delete(inst); return {}, false }

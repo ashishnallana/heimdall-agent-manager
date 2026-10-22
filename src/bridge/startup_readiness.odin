@@ -315,3 +315,55 @@ bridge_startup_tick :: proc(now: i64, relay := bridge_startup_relay, deliver := 
 		if report_failure do fmt.eprintln("bridge startup reminder not acknowledged for", job.id, "— retrying; ensure ham-pty-host was updated with the bridge and this launch is still alive")
 	}
 }
+
+// Token persistence proves issuance, not spawn. Ask the surviving PTY host to
+// match the key in its actual child's immutable spec before acknowledging a retry.
+// The I/O gate fences concurrent stop/relaunch; registry locks never cover I/O.
+bridge_startup_confirm_spawned :: proc(socket, instance_id: string, run_count: int) -> (confirmed, queried: bool) {
+	sync.mutex_lock(&bridge_startup_io_mutex)
+	defer sync.mutex_unlock(&bridge_startup_io_mutex)
+	rec: Bridge_Local_Agent_Token_Record
+	sync.mutex_lock(&bridge_local_token_mutex)
+	for i := len(bridge_local_token_records) - 1; i >= 0; i -= 1 {
+		r := bridge_local_token_records[i]
+		if r.agent_instance_id == instance_id && r.role == .Agent && r.invalidated_at_unix_ms == 0 {
+			rec = bridge_startup_clone_rec(r)
+			break
+		}
+	}
+	sync.mutex_unlock(&bridge_local_token_mutex)
+	defer { delete(rec.token_hash); delete(rec.agent_instance_id); delete(rec.instance_token) }
+	if rec.token_hash == "" || (run_count > 0 && rec.run_count != run_count) do return false, false
+	pid, ok := bridge_pty_host_startup_launch(socket, instance_id, rec.token_hash)
+	if !ok do return false, false
+	if !bridge_startup_rec_current(rec) do return false, false
+	if pid == 0 do return false, true
+
+	now := bridge_runtime_now_ms()
+	sync.mutex_lock(&bridge_runtime_mutex)
+	inst, exists := bridge_runtime_instance_snapshot_locked(instance_id)
+	if bridge_runtime_stop_intent_active_locked(instance_id, now) ||
+	   (exists && (inst.stopped_intent_unix_ms != 0 || inst.runtime_status == "stopped" || inst.runtime_status == "stopping")) {
+		sync.mutex_unlock(&bridge_runtime_mutex)
+		return false, false
+	}
+	// Restore startup state after bridge restart or a lost Spawn acknowledgment.
+	// Duplicate delivery must preserve an already-recorded ready/fallback receipt.
+	if !exists || inst.startup.generation == 0 || inst.startup.launch_key != rec.token_hash {
+		bridge_startup_begin_locked(rec, now)
+	}
+	for &current in bridge_runtime_instances {
+		if current.agent_instance_id != instance_id do continue
+		current.pty_process_alive = true
+		current.startup.pty_pid = pid
+		if current.startup.armed_at_ms == 0 do current.startup.armed_at_ms = now
+		ready := current.start_success_seen || current.startup.ready_pending || current.startup.ready_delivered
+		if current.runtime_status == "failed" || current.runtime_status == "unknown" || current.runtime_status == "starting" {
+			bridge_runtime_set_status_locked(instance_id, "running" if ready else "starting", "idle" if ready else "active", now, true)
+		}
+		break
+	}
+	sync.mutex_unlock(&bridge_runtime_mutex)
+	bridge_startup_worker_ensure_started()
+	return true, true
+}

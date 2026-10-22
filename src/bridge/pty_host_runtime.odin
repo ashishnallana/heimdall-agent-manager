@@ -338,7 +338,7 @@ bridge_pty_host_build_spawn_for_profile :: proc(instance_id, run_dir: string, pr
 	delete(agent_argv)
 
 	detect_json := bridge_runtime_startup_detection_arg(profile.startup_detection)
-	// The optional environment key is understood only by StartupInput; existing
+	// The optional environment key fences StartupInput and StartupLaunch; existing
 	// clients and Spawn codecs remain wire-compatible.
 	env_pairs := bridge_pty_host_env_pairs(env)
 	spawn_env := make([dynamic][2]string, len(env_pairs), len(env_pairs) + 1)
@@ -919,4 +919,21 @@ bridge_pty_host_reap_superseded :: proc(socket, instance: string) {
 	if bridge_pty_host_is_registered(socket, instance) {
 		if bridge_pty_host_close(socket, instance) do fmt.println("bridge pty-host: reaped superseded instance", instance)
 	}
+}
+
+// Query actual successful spawn identity. A missing/mismatched/dead child returns
+// pid=0; transport/protocol failures stay retryable and must not trigger replacement.
+bridge_pty_host_startup_launch :: proc(socket, instance, launch_key: string) -> (pid: i32, ok: bool) {
+	payload := make([dynamic]byte)
+	defer delete(payload)
+	append(&payload, PTY_HOST_T_STARTUP_LAUNCH)
+	pty_host_put_str(&payload, instance)
+	pty_host_put_str(&payload, launch_key)
+	frame := pty_host_frame(payload[:])
+	defer delete(frame)
+	reply, received := pty_host_request(socket, frame)
+	if !received do return 0, false
+	defer pty_host_reply_delete(reply)
+	if reply.kind != .Startup_Launch || reply.instance != instance || reply.startup_key != launch_key do return 0, false
+	return reply.pid, reply.pid >= 0
 }

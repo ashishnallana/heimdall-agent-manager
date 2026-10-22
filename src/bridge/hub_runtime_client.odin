@@ -2227,12 +2227,9 @@ bridge_runtime_launch_agent :: proc(command_id, command_json: string, deadline_n
 			if stopped do return false, "startup generation was stopped", bridge_error(.agent_launch_failed, .denied)
 			socket, daemon_ok := bridge_pty_host_ensure_daemon()
 			if !daemon_ok do return false, "ham-pty-host daemon unavailable", bridge_error(.pty_host_unreachable)
-			existing, listed := bridge_pty_host_list(socket)
-			if !listed do return false, "cannot inspect existing runtime", bridge_error(.pty_host_unreachable)
-			alive := false
-			for child in existing.agents do if child.instance_id == instance_id && child.alive { alive = true; break }
-			pty_host_reply_delete(existing)
-			if alive { bridge_task_wake_note_launched(instance_id); return true, "", {} }
+			confirmed, queried := bridge_startup_confirm_spawned(socket, instance_id, run_count)
+			if !queried do return false, "cannot confirm existing launch identity", bridge_error(.pty_host_unreachable)
+			if confirmed { bridge_task_wake_note_launched(instance_id); return true, "", {} }
 		}
 	}
 	if launch_epoch != "" {
@@ -2247,7 +2244,12 @@ bridge_runtime_launch_agent :: proc(command_id, command_json: string, deadline_n
 			assertion := bridge_agent_instance_assertion(instance_id)
 			defer delete(assertion)
 			if assertion == instance_token {
-				if alive && (run_count == 0 || bridge_agent_instance_run_count(instance_id) == run_count) { bridge_task_wake_note_launched(instance_id); return true, "", {} }
+				if alive {
+					confirmed, queried := bridge_startup_confirm_spawned(socket, instance_id, run_count)
+					if !queried do return false, "cannot confirm destination launch identity", bridge_error(.pty_host_unreachable)
+					if confirmed { bridge_task_wake_note_launched(instance_id); return true, "", {} }
+					return false, "destination has an unconfirmed launch identity", bridge_error(.agent_launch_failed, .denied)
+				}
 				if !bridge_pty_host_close(socket, instance_id) do return false, "cannot close exited destination runtime", bridge_error(.agent_launch_failed, .replaced)
 			} else {
 				// Recoverable: the launch may proceed once the other runtime is gone.
