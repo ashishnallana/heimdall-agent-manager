@@ -1,6 +1,7 @@
 package billing
 
 import "core:crypto/hmac"
+import "core:fmt"
 import "core:encoding/hex"
 import "core:encoding/json"
 import "core:strconv"
@@ -39,7 +40,16 @@ receive_webhook :: proc(service: ^Service, signature, body: string) -> domain.Do
 	event_type, result, err := receive_webhook_classified(service, signature, body)
 	m := service.metrics
 	if m == nil do m = &billing_metrics
-	if err.code == .None && result == "ok" do invalidate_entitlements(service)
+	if err.code == .None && result == "ok" {
+		invalidate_entitlements(service)
+		// The event is durable; a per-owner reconciliation failure must not fail
+		// the webhook. Cache fills and the reaper retry failed owners.
+		if service.on_plan_change != nil {
+			if plan_err := service.on_plan_change(service.plan_change_ctx); plan_err.code != .None {
+				fmt.eprintfln("hub: webhook bridge plan reconciliation incomplete: %s", plan_err.message)
+			}
+		}
+	}
 	billing_metrics_record_webhook(m, event_type, result)
 	return err
 }

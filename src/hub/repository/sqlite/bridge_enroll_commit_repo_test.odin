@@ -435,3 +435,50 @@ test_enroll_rollback_racing_a_commit_leaves_the_committed_family_live :: proc(t:
 	testing.expect_value(t, r, 2)
 	testing.expect_value(t, rv, 0)
 }
+
+
+Plan_Approval_Racer :: struct {
+	repo: ^iface.Bridge_Repository,
+	bridge_id: string,
+	ok: bool,
+	code: domain.Error_Code,
+}
+
+plan_approval_racer :: proc(r: ^Plan_Approval_Racer) {
+	_, ok, err := iface.bridge_create_limited(r.repo, domain.Bridge{
+		bridge_id = r.bridge_id, owner_user_id = domain.User_ID("plan_race_owner"),
+		status = .Offline, created_at = NOW, updated_at = NOW,
+		enrollment_pending_until = "2099-01-01T00:00:00Z",
+	}, 1)
+	r.ok = ok
+	r.code = err.code
+}
+
+@(test)
+test_plan_bridge_approval_serializes_across_connections :: proc(t: ^testing.T) {
+	f: File_Fixture
+	if !file_fixture_open(t, &f, "plan_race") do return
+	defer file_fixture_close(&f)
+	other: Bridge_Enroll_Commit_Conn
+	opened, _ := open_bridge_enroll_commit_conn(&other, f.path)
+	testing.expect(t, opened)
+	if !opened do return
+	defer close(&other.conn)
+	other_impl := Bridge_Repo_SQLite{conn = &f.main, commit = &other}
+	other_repo := new_bridge_repository(&other_impl, &f.main)
+	racers := [2]Plan_Approval_Racer{
+		{repo = &f.repo, bridge_id = "brg_plan_race_a"},
+		{repo = &other_repo, bridge_id = "brg_plan_race_b"},
+	}
+	threads: [2]^thread.Thread
+	for i in 0..<2 do threads[i] = thread.create_and_start_with_poly_data(&racers[i], plan_approval_racer)
+	for th in threads { thread.join(th); thread.destroy(th) }
+	testing.expect_value(t, int(racers[0].ok) + int(racers[1].ok), 1)
+	for racer in racers {
+		testing.expect_value(t, racer.code, domain.Error_Code.None if racer.ok else domain.Error_Code.Plan_Limit_Reached)
+	}
+	count, err := iface.bridge_count_active_by_owner(&f.repo, domain.User_ID("plan_race_owner"))
+	testing.expect_value(t, err.code, domain.Error_Code.None)
+	testing.expect(t, count == 1, "pending enrollment occupies exactly one slot")
+	testing.expect(t, exec(&f.main, "BEGIN; COMMIT;"), "no transaction leaked onto shared connection")
+}

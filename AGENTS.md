@@ -508,6 +508,8 @@ All of the following element types must have `data-debug-id`:
 | `RecoveryRestoreForm` | `device-recovery-restore-open-btn`, `device-recovery-restore`, `device-recovery-restore-words-input`, `device-recovery-restore-submit-btn`, `device-recovery-restore-cancel-btn`, `device-recovery-restore-error`, `device-recovery-restore-done`, `device-recovery-restore-devices-link` |
 | `VaultResetBanner` | `vault-reset-banner`, `vault-reset-banner-cancel-btn`, `vault-reset-banner-error`, `vault-stale-head-banner`, `vault-stale-head-confirm-btn`, `vault-stale-head-error`, `vault-pending-devices-banner` |
 | `ShortcutCheatsheetModal` / `ChordHud` | `shortcut-cheatsheet-modal`, `shortcut-cheatsheet-modal-close-btn`, `shortcut-cheatsheet-action-${actionId}`, `shortcut-chord-hud` |
+| `BridgesPanel` | `settings-bridge-plan-upgrade-${bridgeId}` |
+| `RuntimeConfigurationOptions` | `${debugPrefix}-bridge-plan-upgrade` |
 
 ### Shared component: SearchableSelect
 

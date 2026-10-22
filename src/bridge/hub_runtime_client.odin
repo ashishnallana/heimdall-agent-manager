@@ -386,6 +386,7 @@ bridge_hub_runtime_worker :: proc() {
 		ready_deadline := time.to_unix_nanoseconds(time.now()) + i64(5 * time.Second)
 		ready := false
 		got_error := false
+		plan_disabled := false
 		hub_error := ""
 		hub_catalog_etag := ""
 		for time.to_unix_nanoseconds(time.now()) < ready_deadline {
@@ -410,6 +411,9 @@ bridge_hub_runtime_worker :: proc() {
 				if msg_type == "bridge_error" {
 					got_error = true
 					hub_error = bridge_hub_error_log_message(text)
+					code := extract_json_string(text, "code", "")
+					plan_disabled = code == "plan_limit_reached"
+					delete(code)
 					// REQ-EA-4: an atomic enrollment whose credential the hub now refuses
 					// was rolled back (cancel or deadline), whether or not the
 					// bridge_enrollment_result frame arrived first.
@@ -481,6 +485,11 @@ bridge_hub_runtime_worker :: proc() {
 			log_failure(&last_failure, &attempts, "no bridge_ready within 5s after hello — hub didn't accept the session (slow link over the tunnel, or hub-side rejection)", .hub_ready_timeout, blog_sym(.stage, .ready))
 		}
 		bridge_hub_connection_teardown(&conn)
+		if plan_disabled {
+			fmt.println("bridge hub runtime: disabled by plan limits; retrying in 60s")
+			time.sleep(60 * time.Second)
+			continue
+		}
 		bridge_hub_reconnect_sleep(&reconnect_failures)
 	}
 }
@@ -510,6 +519,12 @@ bridge_hub_error_log_message :: proc(text: string) -> string {
 	defer delete(detail)
 	if strings.trim_space(detail) == "" {
 		return strings.clone("hub sent bridge_error after hello without a diagnostic message")
+	}
+	path := extract_json_string(text, "upgrade_path", "")
+	defer delete(path)
+	if path == "/settings/account" {
+		// The UI uses hash routing; accept only the hub-owned account path.
+		return strings.concatenate({"hub rejected bridge session after hello: ", detail, " Upgrade: ", strings.trim_right(bridge_config.daemon_url, "/"), "/#/settings/account"})
 	}
 	return strings.concatenate({"hub rejected bridge session after hello: ", detail})
 }

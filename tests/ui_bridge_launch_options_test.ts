@@ -58,3 +58,12 @@ test('bridgeLaunchOptions pure option derivation for launch/add-agent dropdowns'
   assert.deepEqual(launchProvidersFor({}), []);
   assert.deepEqual(launchModelsFor({}, 'anthropic'), []);
 });
+
+test('a plan-disabled bridge cannot be a launch target even with a live runtime', async () => {
+  const { launchableBridgeRows } = await import('../src/ui/utils/bridgeLaunchOptions.ts');
+  const bridge = { bridge_id: 'suspended', status: 'online', runtime_connected: true,
+    capabilities: { providers: [{ provider: 'openai', models: ['normal'] }] },
+    plan_disabled_at: '2026-10-22T00:00:00Z' };
+  assert.deepEqual(launchableBridgeRows([bridge]), []);
+  assert.equal(launchableBridgeRows([{ ...bridge, plan_disabled_at: '' }]).length, 1);
+});

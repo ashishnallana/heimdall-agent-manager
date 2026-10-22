@@ -341,3 +341,15 @@ hub_runtime_bridge_error_without_message_has_safe_fallback :: proc(t: ^testing.T
 		"malformed Hub errors retain an actionable fallback",
 	)
 }
+
+
+@(test)
+test_bridge_hub_plan_refusal_logs_upgrade_url :: proc(t: ^testing.T) {
+	previous := bridge_config.daemon_url
+	bridge_config.daemon_url = "https://hub.example.test/"
+	defer bridge_config.daemon_url = previous
+	message := bridge_hub_error_log_message(`{"type":"bridge_error","payload":{"code":"plan_limit_reached","message":"Bridge disabled by plan limits","upgrade_path":"/settings/account"}}`)
+	defer delete(message)
+	testing.expect(t, strings.contains(message, "Bridge disabled by plan limits"))
+	testing.expect(t, strings.contains(message, "https://hub.example.test/#/settings/account"))
+}

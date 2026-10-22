@@ -15,5 +15,5 @@ export function statusLabel(bridge: any): string {
 
 export function bridgeReady(bridge: any): boolean {
   const status = statusLabel(bridge);
-  return status === 'online' || status === 'connected';
+  return !bridge?.plan_disabled_at && (status === 'online' || status === 'connected');
 }

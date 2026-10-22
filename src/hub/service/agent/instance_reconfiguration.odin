@@ -79,6 +79,7 @@ begin_instance_reconfiguration :: proc(service: ^Agent_Service, auth: contracts.
 	destination_bridge, bridge_ok, bridge_err := iface.bridge_get_bridge(service.bridges, input.bridge_id)
 	if !bridge_ok do return {}, false, bridge_err
 	if destination_bridge.owner_user_id != inst.owner_user_id do return {}, false, domain.domain_error(.Not_Found, "destination bridge not found")
+	if plan_err := require_launch_bridge_enabled(service, destination_bridge); plan_err.code != .None do return {}, false, plan_err
 	if destination_bridge.status != .Online || !project_service.bridge_runtime_registry_has_live(service.bridge_runtime_registry, input.bridge_id) do return {}, false, domain.domain_error(.Bridge_Offline, "destination bridge must be online")
 	if !reconfiguration_bridge_supported(source_bridge) || !reconfiguration_bridge_supported(destination_bridge) do return {}, false, domain.domain_error(.Conflict, "update source and destination bridges before applying configuration changes")
 	next := inst
@@ -355,6 +356,7 @@ reconfiguration_validate_live_destination :: proc(service: ^Agent_Service, op: d
 	if !found do return false, err
 	defer domain.bridge_destroy(&bridge)
 	if string(bridge.owner_user_id) != op.owner_user_id do return false, domain.domain_error(.Not_Found, "destination bridge not found")
+	if plan_err := require_launch_bridge_enabled(service, bridge); plan_err.code != .None do return false, plan_err
 	if bridge.status != .Online || !project_service.bridge_runtime_registry_has_live(service.bridge_runtime_registry, bridge.bridge_id) do return false, domain.domain_error(.Bridge_Offline, "destination bridge is offline; reconnect it before Apply")
 	if !reconfiguration_bridge_supported(bridge) do return false, domain.domain_error(.Conflict, "destination bridge must be updated before Apply")
 	if op.destination.project_id != "" {

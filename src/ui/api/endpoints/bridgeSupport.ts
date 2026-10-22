@@ -46,6 +46,8 @@ export interface Bridge {
   last_seen_at?: string;
   updated_at?: string;
   revoked_at?: string;
+  /** Hub-owned plan suspension; existing agents are retained. */
+  plan_disabled_at?: string;
   telemetry_enabled?: 'inherit' | 'enabled' | 'disabled' | string;
   public_key?: string;
   bridge_public_key?: string;

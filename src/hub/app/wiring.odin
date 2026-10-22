@@ -281,8 +281,16 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 	// behaviour — the bridge stays connected and fully operational until it next
 	// reconnects, which with proactive refresh may be never.
 	bridge_service.with_connection_closer(&graph.bridges, bridge_runtime_service.new_bridge_connection_closer(&graph.bridge_runtime_registry))
+	graph.bridges.entitlements = billing_service.entitlement_lookup(&graph.billing)
+	graph.billing.plan_change_ctx = graph
+	graph.billing.on_entitlements = reconcile_bridge_entitlements
+	graph.billing.on_plan_change = reconcile_bridge_plans
+	if plan_err := reconcile_bridge_plans(graph); plan_err.code != .None {
+		fmt.eprintfln("hub: startup bridge plan reconciliation incomplete: %s", plan_err.message)
+	}
 	graph.bridges.catalog = &graph.bridge_update_catalog
 	graph.agents = agent_service.new_agent_service_with_runtime(&graph.repos.agents, &graph.repos.bridges, &graph.repos.projects, &graph.repos.content, &graph.repos.taskchains, bridge_command_sink, &graph.bridge_runtime_registry, &graph.clock, &graph.ids)
+	graph.agents.entitlements = billing_service.entitlement_lookup(&graph.billing)
 	graph.agents.providers = &graph.provider_repo
 	graph.projects = project_service.new_project_service_with_command_sink(&graph.repos.projects, &graph.repos.bridges, bridge_command_sink, &graph.clock, &graph.ids)
 	graph.content = content_service.new_content_service_with_runtime(&graph.repos.content, &graph.repos.agents, &graph.repos.bridges, &graph.repos.projects, &graph.repos.taskchains, bridge_command_sink, &graph.clock, &graph.ids)
@@ -975,7 +983,7 @@ device_bridge_minter :: proc(graph_ptr: rawptr, req: device_auth_service.Bridge_
 	if !ok {
 		// Pass ownership/target refusals through (e.g. an attach target that is not
 		// the approver's): they are the approver's to see, not an internal fault.
-		if mint_err.code == .Not_Found || mint_err.code == .Validation_Failed {
+		if mint_err.code == .Not_Found || mint_err.code == .Validation_Failed || mint_err.code == .Plan_Limit_Reached {
 			return device_auth_service.Bridge_Mint_Result{error = mint_err}, false
 		}
 		return device_auth_service.Bridge_Mint_Result{}, false

@@ -155,3 +155,36 @@ test_entitlements_partial_paddle_config_and_explicit_enforcement_overrides :: pr
 	disabled, _ := effective_entitlements(&service, "alice")
 	testing.expect_value(t, disabled, domain.unlimited_entitlements())
 }
+
+
+Reconcile_Test_State :: struct { calls: int, fail: bool }
+reconcile_test_callback :: proc(ctx: rawptr, user_id: string, entitlements: domain.User_Entitlements) -> domain.Domain_Error {
+	state := (^Reconcile_Test_State)(ctx)
+	state.calls += 1
+	if state.fail do return domain.domain_error(.Internal_Error, "reconciliation storage failure")
+	return {}
+}
+
+@(test)
+test_entitlements_reconciliation_failure_is_retried_before_caching :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	fixture: Fixture; repo: iface.Billing_Repository; clock: platform.Clock
+	service := fixture_setup(&fixture, &repo, &clock)
+	defer service_free(&service)
+	state := Reconcile_Test_State{fail = true}
+	service.plan_change_ctx = &state
+	service.on_entitlements = reconcile_test_callback
+	_, failed := effective_entitlements(&service, "alice")
+	testing.expect_value(t, failed.code, domain.Error_Code.Internal_Error)
+	testing.expect_value(t, len(service.entitlements_cache), 0)
+	state.fail = false
+	_, recovered := effective_entitlements(&service, "alice")
+	testing.expect_value(t, recovered.code, domain.Error_Code.None)
+	testing.expect_value(t, state.calls, 2)
+	_, cached := effective_entitlements(&service, "alice")
+	testing.expect_value(t, cached.code, domain.Error_Code.None)
+	testing.expect_value(t, state.calls, 2)
+	_, refreshed := account_view(&service, "alice")
+	testing.expect_value(t, refreshed.code, domain.Error_Code.None)
+	testing.expect_value(t, state.calls, 3)
+}
