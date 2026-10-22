@@ -108,7 +108,7 @@ smoke_boot() {
 		if grep -E '^# TYPE (heimdall_db_|heimdall_sqlite_(exec_seconds|statements_total|errors_total|vm_steps_total|fullscan_steps_total|sort_total|site_|cache_events_total|library_info)|heimdall_http_request_db_)' "$SMOKE/$label.prom"; then
 			echo "[$label] off registered telemetry families"; exit 1
 		fi
-		if grep -q 'le="0.0025"' "$SMOKE/$label.prom"; then echo "[$label] off uses the basic HTTP bucket layout"; exit 1; fi
+		if grep -q '^heimdall_http_request_duration_seconds_bucket{.*le="0.0025"' "$SMOKE/$label.prom"; then echo "[$label] off uses the basic HTTP bucket layout"; exit 1; fi
 	fi
 	echo "[$label] $expect OK: $(grep -c '^heimdall_db_' "$SMOKE/$label.prom") heimdall_db_* samples, $(grep -c '^# TYPE heimdall_db_' "$SMOKE/$label.prom") heimdall_db_* families, $(grep -vc '^#' "$SMOKE/$label.prom") total samples; http_request_db series: $(grep -c '^heimdall_http_request_db_seconds_total' "$SMOKE/$label.prom" || true)"
 }
