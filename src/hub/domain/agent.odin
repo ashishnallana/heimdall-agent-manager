@@ -210,3 +210,35 @@ agent_instances_destroy :: proc(instances: []Agent_Instance) {
 	}
 	delete(instances)
 }
+
+// Permission_Request is one blocking provider permission prompt relayed through
+// the bridge (REQ-EXT-PERM-1). id is the bridge's relay request id. status is
+// pending | allowed | denied | expired | cancelled; only pending rows change.
+Permission_Request :: struct {
+	id: string,
+	owner_user_id: User_ID,
+	instance_id: string,
+	chain_id: string,
+	agent_id: string, // ham.ext.v1 agent.id ("" = the main agent)
+	provider: string,
+	tool_name: string,
+	tool_use_id: string,
+	input: string, // JSON object
+	suggestions: string, // JSON array (provider permission_suggestions)
+	status: string,
+	decided_by: string,
+	message: string,
+	created_at: string,
+	expires_at: string,
+	decided_at: string,
+}
+
+// Permission_Request_Filter selects rows for the owner. Empty fields do not
+// filter; limit <= 0 means the repository default.
+Permission_Request_Filter :: struct {
+	owner_user_id: User_ID,
+	instance_id: string,
+	chain_id: string,
+	status: string,
+	limit: int,
+}

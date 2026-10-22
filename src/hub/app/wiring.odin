@@ -290,6 +290,7 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 	}
 	graph.bridges.catalog = &graph.bridge_update_catalog
 	graph.agents = agent_service.new_agent_service_with_runtime(&graph.repos.agents, &graph.repos.bridges, &graph.repos.projects, &graph.repos.content, &graph.repos.taskchains, bridge_command_sink, &graph.bridge_runtime_registry, &graph.clock, &graph.ids)
+	graph.agents.event_bus = &graph.event_bus
 	graph.agents.entitlements = billing_service.entitlement_lookup(&graph.billing)
 	graph.agents.providers = &graph.provider_repo
 	graph.projects = project_service.new_project_service_with_command_sink(&graph.repos.projects, &graph.repos.bridges, bridge_command_sink, &graph.clock, &graph.ids)
@@ -634,6 +635,9 @@ register_routes :: proc(graph: ^App_Graph) {
 	http.router_add(&graph.router, "GET", "/api/v1/agent-instances/*/extension/events", rawptr(&graph.agent_handlers), http.agent_instance_extension_events_handler)
 	http.router_add(&graph.router, "GET", "/api/v1/agent-instances/*/extension/subagents", rawptr(&graph.agent_handlers), http.agent_instance_extension_subagents_handler)
 	http.router_add(&graph.router, "GET", "/api/v1/agent-instances/*/extension/files", rawptr(&graph.agent_handlers), http.agent_instance_extension_files_handler)
+	http.router_add(&graph.router, "GET", "/api/v1/agent-instances/*/permission-requests", rawptr(&graph.agent_handlers), http.agent_instance_permission_requests_handler)
+	http.router_add(&graph.router, "GET", "/api/v1/permission-requests", rawptr(&graph.agent_handlers), http.permission_requests_list_handler)
+	http.router_add(&graph.router, "POST", "/api/v1/permission-requests/*/decision", rawptr(&graph.agent_handlers), http.permission_request_decision_handler)
 	http.router_add(&graph.router, "GET", "/api/v1/agent-instances/*", rawptr(&graph.agent_handlers), http.agent_instance_detail_handler)
 	http.router_add(&graph.router, "PATCH", "/api/v1/agent-instances/*", rawptr(&graph.agent_handlers), http.patch_agent_instance_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/agent-instances/*/start", rawptr(&graph.agent_handlers), http.start_agent_instance_handler)
@@ -828,6 +832,8 @@ register_routes :: proc(graph: ^App_Graph) {
 	http.router_add(&graph.router, "POST", "/api/v1/agent-actions/cards/accept", rawptr(&graph.agent_action_handlers), http.agent_action_card_accept_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/agent-actions/start-success", rawptr(&graph.agent_action_handlers), http.agent_action_start_success_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/agent-actions/extension-events", rawptr(&graph.agent_action_handlers), http.agent_action_extension_events_handler)
+	http.router_add(&graph.router, "POST", "/api/v1/agent-actions/permission-requests/close", rawptr(&graph.agent_action_handlers), http.agent_action_permission_request_close_handler)
+	http.router_add(&graph.router, "POST", "/api/v1/agent-actions/permission-requests", rawptr(&graph.agent_action_handlers), http.agent_action_permission_request_handler)
 	// REQ-ENROLL-9: the four pre-shared-token enrollment routes are GONE —
 	// POST/GET /api/v1/bridge-enrollments, DELETE /api/v1/bridge-enrollments/*
 	// (enrollment-token minting, listing and revocation) and

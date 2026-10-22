@@ -1239,6 +1239,11 @@ bridge_hub_handle_command :: proc(conn: ^ws.Connection, text: string) {
 		bridge_enroll_atomic_on_result(text)
 		return
 	}
+	if type == "permission_decision" {
+		// REQ-EXT-PERM-1: a user's allow/deny for a pending agent.extension.permission.
+		_ = bridge_ext_permission_handle_decision_frame(text)
+		return
+	}
 	if bridge_fs_handle_command(conn, type, text) do return
 	if bridge_vcs_handle_command(conn, type, text) do return
 	if bridge_taskv2_handle_command(conn, type, text) do return
@@ -2591,6 +2596,9 @@ bridge_runtime_status_snapshot :: proc(instance_id: string) -> (runtime_status, 
 
 bridge_runtime_set_status :: proc(instance_id, runtime_status, activity_status: string) {
 	if strings.trim_space(instance_id) == "" do return
+	// A stopped/failed agent can no longer act on a permission decision: release
+	// its blocked permission waiters with "none".
+	if runtime_status == "stopped" || runtime_status == "failed" do bridge_permission_cancel_instance(instance_id)
 	now := bridge_runtime_now_ms()
 	sync.mutex_lock(&bridge_runtime_mutex)
 	defer sync.mutex_unlock(&bridge_runtime_mutex)
