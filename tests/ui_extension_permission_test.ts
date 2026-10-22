@@ -160,8 +160,8 @@ test('API posts decisions and realtime frames patch the permission caches', () =
   assert.match(ws, /'extension_events'/);
 });
 
-test('cards render in the conversation and the attention surface', () => {
-  assert.match(read('src/ui/components/workbench/AgentChatPane.tsx'), /<InstancePermissionCards/);
+test('cards render only in the attention surface, not in the conversation', () => {
+  assert.doesNotMatch(read('src/ui/components/workbench/AgentChatPane.tsx'), /InstancePermissionCards/);
   assert.match(read('src/ui/components/attention/AttentionDeck.tsx'), /<PendingPermissionCards/);
 });
 

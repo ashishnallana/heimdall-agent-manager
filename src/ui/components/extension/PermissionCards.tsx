@@ -195,7 +195,8 @@ function usePermissionCards(requests: PermissionRequest[] | undefined) {
   return { state, visible, now, onDecide };
 }
 
-/** Cards for one agent conversation (rendered above the composer). */
+/** Cards for one agent instance. Not mounted: by user decision permission prompts appear only in the
+ * 'Needs you' attention surfaces (T10 owns those); kept for reuse there. */
 export function InstancePermissionCards({ instanceId, className = '' }: { instanceId: string; className?: string }) {
   const query = useListInstancePermissionRequestsQuery(instanceId, { skip: !instanceId });
   const { state, visible, now, onDecide } = usePermissionCards(query.data);
