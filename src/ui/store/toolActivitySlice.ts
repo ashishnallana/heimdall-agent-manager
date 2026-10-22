@@ -53,7 +53,7 @@ export function parseLiveSnapshot(raw: any): LiveSnapshot | null {
   const active: LiveCall[] = [];
   const seen = new Set<string>();
   for (const call of raw.active) {
-    if (!text(call?.call_id, 512) || !call.call_id || seen.has(call.call_id) ||
+    if (!text(call?.call_id, 2048) || !call.call_id || seen.has(call.call_id) ||
         !['provider', 'shell'].includes(call.source) || !text(call.tool_name, 96) ||
         !id(call.shell_session_id) || !count(call.started_at_ms)) return null;
     seen.add(call.call_id);

@@ -159,6 +159,40 @@ test('parser enforces active count/field limits, rejects duplicates and negative
   assert.equal(parseLiveSnapshot(snapshot({ active: [{ ...snapshot().active[0], tool_name: 'x'.repeat(97) }] })), null);
 });
 
+test('parser accepts the B1 call ID limit of 2048 characters and rejects 2049', () => {
+  const withCallId = (call_id: string) => snapshot({
+    active: [{ ...snapshot().active[0], call_id }],
+  });
+  const boundary = 'x'.repeat(2048);
+  assert.equal(parseLiveSnapshot(withCallId(boundary))?.active[0].call_id, boundary);
+  assert.equal(parseLiveSnapshot(withCallId(boundary + 'x')), null);
+});
+
+test('escaped provider identities survive REST and repeated WS frames without a resync loop', async () => {
+  installWindowShim();
+  const { handleUserWsEvent } = await import('../src/ui/api/wsInvalidation.ts');
+  // B1 JSON-encodes three identity strings, each allowed up to 64 bytes.
+  const identity = '\u0001'.repeat(64);
+  const call_id = JSON.stringify([identity, identity, identity]);
+  assert.ok(call_id.length > 512 && call_id.length <= 2048);
+  const raw = snapshot({ active: [{ ...snapshot().active[0], call_id }] });
+  const members = await readLiveScope({ instanceId: 'inst_a', chainId: '' }, async () => raw);
+  const h = harness();
+  h.load(members);
+  assert.equal(h.scope().members.inst_a.snapshot!.active[0].call_id, call_id);
+  const refresh = h.store.getState().toolActivity.refresh;
+  for (const revision of [2, 2, 3]) {
+    handleUserWsEvent(h.store.dispatch, { ...raw, revision });
+  }
+  assert.equal(h.scope().members.inst_a.snapshot!.revision, 3);
+  assert.equal(h.scope().members.inst_a.snapshot!.active[0].call_id, call_id);
+  assert.equal(h.store.getState().toolActivity.refresh, refresh);
+  handleUserWsEvent(h.store.dispatch, { ...raw, revision: 4, active: [],
+    last_completion: { duration_ms: 42 } });
+  assert.deepEqual(h.scope().members.inst_a.snapshot!.active, []);
+  assert.deepEqual(h.scope().members.inst_a.snapshot!.last_completion, { duration_ms: 42 });
+});
+
 test('instance handshake uses only the owner REST proxy with no-store and a deadline', async () => {
   const calls: any[] = [];
   const result = await readLiveScope({ instanceId: 'inst_a', chainId: '' }, async (path, init) => {
