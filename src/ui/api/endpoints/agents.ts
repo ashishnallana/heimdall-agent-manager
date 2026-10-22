@@ -115,8 +115,8 @@ export const agentsApi = heimdallApi.injectEndpoints({
       keepUnusedDataFor: 600,
     }),
     // TODO(FIX): Replace any with strict TypeScript interface matching Odin backend schema
-    updateAgentIdentity: build.mutation<any, { agentId: string; name?: string; slug?: string; templateId?: string; instructions?: string }>({
-      queryFn: async ({ agentId, name, slug, templateId, instructions }) => {
+    updateAgentIdentity: build.mutation<any, { agentId: string; name?: string; slug?: string; templateId?: string; instructions?: string; permissionMode?: AgentPermissionMode }>({
+      queryFn: async ({ agentId, name, slug, templateId, instructions, permissionMode }) => {
         try {
           // TODO(FIX): Replace any with strict TypeScript interface matching Odin backend schema
           const payload: any = {};
@@ -129,6 +129,8 @@ export const agentsApi = heimdallApi.injectEndpoints({
           // agent's template unchanged.
           if (templateId !== undefined) payload.template_id = templateId;
           if (instructions !== undefined) payload.instructions = instructions;
+          // Omitted keeps the stored mode (the hub treats an empty value as "no change").
+          if (permissionMode !== undefined) payload.permission_mode = permissionMode;
           const data = await cookieMutation(`/agents/${encodeURIComponent(agentId)}`, 'PATCH', payload);
           return { data };
         } catch (error: any) {
@@ -352,7 +354,7 @@ export const agentsApi = heimdallApi.injectEndpoints({
       ],
     }),
     // TODO(FIX): Replace any with strict TypeScript interface matching Odin backend schema
-    createAgent: build.mutation<any, { name: string; slug?: string; templateId?: string; instructions?: string; favorite?: boolean }>({
+    createAgent: build.mutation<any, { name: string; slug?: string; templateId?: string; instructions?: string; favorite?: boolean; permissionMode?: AgentPermissionMode }>({
       queryFn: async (arg) => {
         try {
           // TODO(FIX): Replace any with strict TypeScript interface matching Odin backend schema
@@ -363,6 +365,7 @@ export const agentsApi = heimdallApi.injectEndpoints({
             ...(arg.favorite !== undefined ? { favorite: arg.favorite } : {}),
             template_id: arg.templateId || '',
             instructions: arg.instructions || '',
+            ...(arg.permissionMode ? { permission_mode: arg.permissionMode } : {}),
           };
           const data = await cookieMutation('/agents', 'POST', payload);
           return { data };
@@ -765,6 +768,17 @@ export function useStartInstanceMutation() {
  */
 
 /** An agent identity as the rebuilt pages use it: camelCase, every field present. */
+/**
+ * Per-agent permission mode (REQ-EXT-PERM-2): `yolo` launches the provider with
+ * its catalog auto-approve flags; `ask` launches without them so every tool
+ * permission needs an approval.
+ */
+export type AgentPermissionMode = 'yolo' | 'ask';
+
+export function normalizePermissionMode(raw: unknown): AgentPermissionMode {
+  return raw === 'ask' ? 'ask' : 'yolo';
+}
+
 export type AgentRecord = {
   agentId: string;
   name: string;
@@ -773,6 +787,7 @@ export type AgentRecord = {
   instructions: string;
   /** `active` | `archived` */
   state: string;
+  permissionMode: AgentPermissionMode;
   supportedBridgeCount: number;
   activeInstanceCount: number;
   updatedAt: string;
@@ -794,6 +809,7 @@ export function normalizeAgent(raw: any): AgentRecord {
     templateId: String(src.template_id || src.templateId || ''),
     instructions: String(src.instructions || ''),
     state: String(src.state || 'active'),
+    permissionMode: normalizePermissionMode(src.permission_mode ?? src.permissionMode),
     supportedBridgeCount: Number(src.supported_bridge_count ?? src.supportedBridgeCount ?? 0),
     activeInstanceCount: Number(src.active_instance_count ?? src.activeInstanceCount ?? 0),
     updatedAt: String(src.updated_at || src.updatedAt || ''),

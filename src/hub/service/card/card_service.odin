@@ -206,8 +206,8 @@ validate_op_required_args :: proc(op_name: string, op_obj: json.Object) -> (bool
 		if op_arg_string(op_obj, "prompt") == "" && op_arg_string(op_obj, "prompt_text") == "" && op_arg_string(op_obj, "body") == "" do return false, op_field_missing("prompt")
 	case "agent.update":
 		if op_arg_string(op_obj, "agent_id") == "" && op_arg_string(op_obj, "id") == "" do return false, op_field_missing("agent_id")
-		if op_arg_string(op_obj, "name") == "" && op_arg_string(op_obj, "slug") == "" && op_arg_string(op_obj, "template_id") == "" && op_arg_string(op_obj, "instructions") == "" {
-			return false, "requires at least one updatable field (name/slug/template_id/instructions)"
+		if op_arg_string(op_obj, "name") == "" && op_arg_string(op_obj, "slug") == "" && op_arg_string(op_obj, "template_id") == "" && op_arg_string(op_obj, "instructions") == "" && op_arg_string(op_obj, "permission_mode") == "" {
+			return false, "requires at least one updatable field (name/slug/template_id/instructions/permission_mode)"
 		}
 	case "agent.delete":
 		if op_arg_string(op_obj, "agent_id") == "" && op_arg_string(op_obj, "id") == "" do return false, op_field_missing("agent_id")
@@ -1134,6 +1134,7 @@ accept_card :: proc(s: ^Card_Service, auth: contracts.Auth_Context, id: domain.C
 				template_id          = template_id,
 				has_template_id      = template_id != "",
 				instructions         = instructions,
+				permission_mode      = op_arg_string(op_obj, "permission_mode"),
 			})
 			if !au_ok {
 				if has_uow do iface.unit_of_work_rollback(&uow)

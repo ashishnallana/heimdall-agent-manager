@@ -569,6 +569,7 @@ export default function AgentListPage({ selectedId = '' }: { selectedId?: string
                   templateId: '',
                   instructions: hit.preview,
                   state: 'active',
+                  permissionMode: 'yolo',
                   supportedBridgeCount: 0,
                   activeInstanceCount: 0,
                   updatedAt: '',

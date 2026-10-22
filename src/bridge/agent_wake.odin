@@ -332,5 +332,7 @@ bridge_wake_fetch_enriched_launch_json :: proc(instance_id, command_id: string) 
 	defer delete(provider)
 	model    := extract_json_string(inst_obj, "model", "")
 	defer delete(model)
-	return bridge_wake_launch_command_json(command_id, instance_id, "", role, provider, model, agent_id, agent_name, chain_id, chain_title, coordinator_id, project_id, project_path, coordinator_display_name), {}, true
+	permission_mode := extract_json_string(inst_obj, "permission_mode", "")
+	defer delete(permission_mode)
+	return bridge_wake_launch_command_json(command_id, instance_id, "", role, provider, model, agent_id, agent_name, chain_id, chain_title, coordinator_id, project_id, project_path, coordinator_display_name, "", "", permission_mode), {}, true
 }

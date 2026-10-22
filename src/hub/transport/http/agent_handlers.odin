@@ -316,7 +316,7 @@ patch_agent_instance_handler :: proc(ctx: rawptr, req: Request) -> Response {
 }
 
 agent_input_from_body :: proc(body: string) -> agent_service.Create_Agent_Input {
-	return agent_service.Create_Agent_Input{name = json_string(body, "name"), slug = json_string(body, "slug"), template_id = json_string(body, "template_id"), instructions = json_string(body, "instructions"), has_template_id = strings.contains(body, "\"template_id\"")}
+	return agent_service.Create_Agent_Input{name = json_string(body, "name"), slug = json_string(body, "slug"), template_id = json_string(body, "template_id"), instructions = json_string(body, "instructions"), has_template_id = strings.contains(body, "\"template_id\""), permission_mode = json_string(body, "permission_mode")}
 }
 
 instance_input_from_body :: proc(body: string) -> agent_service.Create_Instance_Input {
@@ -370,6 +370,7 @@ write_agent_json :: proc(b: ^strings.Builder, service: ^agent_service.Agent_Serv
 	strings.write_string(b, "\",\"template_id\":\""); write_handler_json_string(b, a.template_id)
 	strings.write_string(b, "\",\"instructions\":\""); write_handler_json_string(b, a.instructions)
 	strings.write_string(b, "\",\"state\":\""); write_handler_json_string(b, domain.agent_state_string(a.state))
+	strings.write_string(b, "\",\"permission_mode\":\""); write_handler_json_string(b, domain.agent_permission_mode_normalize(a.permission_mode))
 	strings.write_string(b, "\",\"supported_bridge_count\":"); strings.write_string(b, i32_to_string_http(agent_service.supported_bridge_count_for_agent(service, a)))
 	strings.write_string(b, ",\"active_instance_count\":"); strings.write_string(b, i32_to_string_http(agent_service.active_instance_count_for_agent(service, a)))
 	strings.write_string(b, ",\"updated_at\":\""); write_handler_json_string(b, a.updated_at)

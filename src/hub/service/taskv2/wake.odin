@@ -30,7 +30,11 @@ effect_wake_lease :: proc(svc: ^Service, u: ^Uow, lease: domain.Task_Lease, task
 	chain, cok, _ := iface.taskchain_get_chain(svc.repo, task.chain_id)
 	if !cok do return
 	agent_name := ""
-	if ag, aok, _ := iface.agent_get(svc.agents, inst.agent_id); aok do agent_name = ag.name
+	permission_mode := domain.AGENT_PERMISSION_MODE_YOLO
+	if ag, aok, _ := iface.agent_get(svc.agents, inst.agent_id); aok {
+		agent_name = ag.name
+		permission_mode = domain.agent_permission_mode_normalize(ag.permission_mode)
+	}
 	role := "worker"
 	if lease.kind == domain.LEASE_KIND_REVIEW do role = "reviewer"
 	provider, model := lease_launch_model(svc, Placement{bridge_id = bridge_id, provider = lease.provider, model = lease.model}, inst)
@@ -50,6 +54,7 @@ effect_wake_lease :: proc(svc: ^Service, u: ^Uow, lease: domain.Task_Lease, task
 		project_path      = inst.project_path,
 		lease_id          = lease.lease_id,
 		pack_json         = build_pack_json(svc, chain, task, lease, inst),
+		permission_mode   = permission_mode,
 	}
 	key := effects_key(&u.effects, bridge_id, string(chain.chain_id))
 	entries := u.effects.runs[key]
