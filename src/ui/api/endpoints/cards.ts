@@ -242,6 +242,8 @@ export const cardsApi = heimdallApi.injectEndpoints({
     }),
 
     getCard: build.query<{ card: Card | null }, { id?: string; cardId?: string }>({
+      // Both public aliases resolve to the same wire request.
+      serializeQueryArgs: ({ queryArgs }) => ({ cardId: queryArgs.cardId || queryArgs.id || '' }),
       queryFn: async (arg) => {
         const id = arg.cardId || arg.id;
         if (!id) return { data: { card: null } };

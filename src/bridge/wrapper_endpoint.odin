@@ -411,6 +411,18 @@ bridge_local_handle_agent_method :: proc(request_id, method, params: string, rec
 		}
 		return bridge_local_response_data(request_id, "{\"accepted\":true}")
 	}
+	if method == "agent.extension.event" || method == "agent.extension.status" {
+		// ham.ext.v1 ingest: identity is rec (token-verified), never the payload.
+		return bridge_ext_handle_rpc(request_id, method, params, rec)
+	}
+	if method == "agent.extension.permission.cancel" {
+		return bridge_ext_permission_cancel_rpc(request_id, params, rec)
+	}
+	if method == "agent.extension.permission" {
+		// Blocking: relays a ham.ext.v1 permission.request to the hub and waits for
+		// the user's allow/deny; "none" on timeout (the provider prompts in its TUI).
+		return bridge_ext_permission_handle_rpc(request_id, params, rec)
+	}
 	if method == "agent.permission.request" {
 		// Blocking: registers the request, mirrors it to the wrapper/UI push channel,
 		// and waits for a decision (or fail-safe deny on timeout).
@@ -444,28 +456,10 @@ bridge_local_handle_agent_method :: proc(request_id, method, params: string, rec
 		return bridge_local_response_data(request_id, relay.body)
 	}
 	if method == "agent.start_success" {
-		// Absolute transition: a valid instance token can mark the agent running from
-		// any prior bridge-local state (starting, failed, unreachable, stopped, etc.).
-		bridge_runtime_mark_start_success(rec.agent_instance_id)
-		// start-success is an idempotent liveness signal whose durable effect the
-		// bridge has ALREADY applied locally (mark_start_success above); the WS
-		// status push reconciles the hub independently. So a transient relay failure
-		// must NOT surface as a hard error that makes the agent retry (and
-		// double-deliver) — treat a retried-then-failed relay as accepted-locally.
-		if strings.trim_space(rec.instance_token) == "" do return bridge_local_response_data(request_id, "{\"accepted\":true,\"reconcile\":\"pending_no_instance_token\"}")
-		// Use a longer (10s) timeout than the default 5s for the start-success
-		// relay: the hub does real work on this call (persist status + insert the
-		// "started and is ready" system message + inbox scan + notify), so its
-		// response can lag under load. A premature 5s timeout makes the retry loop
-		// re-send a request the hub already executed, and since the hub's handler is
-		// not idempotent that inserts DUPLICATE system messages. 10s comfortably
-		// covers the hub's normal processing so a legitimately-completed call is not
-		// retried.
-		relay := bridge_local_relay_agent_envelope("/api/v1/agent-actions/start-success", "agent.start_success", params, rec, 10000)
-		if !relay.ok do return bridge_local_response_data(request_id, "{\"accepted\":true,\"reconcile\":\"pending_relay_unavailable\"}")
-		if relay.status < 200 || relay.status >= 300 do return bridge_local_response_error(request_id, "hub_error", relay.body)
-		if strings.trim_space(relay.body) == "" do return bridge_local_response_data(request_id, "{\"accepted\":true}")
-		return bridge_local_response_data(request_id, relay.body)
+		accepted, _ := bridge_startup_accept(rec, bridge_runtime_now_ms())
+		if !accepted do return bridge_local_response_error(request_id, "stale_launch", "Startup signal does not belong to an active launch")
+		bridge_startup_worker_ensure_started()
+		return bridge_local_response_data(request_id, "{\"accepted\":true,\"reconcile\":\"pending\"}")
 	}
 
 	// Agent API v2: everything else resolves through the single route table.

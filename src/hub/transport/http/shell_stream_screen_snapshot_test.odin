@@ -105,12 +105,12 @@ test_req29_attach_reports_late_join_only_for_extra_viewers :: proc(t: ^testing.T
 
 	testing.expect(
 		t,
-		!shell_session_svc.shell_session_attach(&svc, session_id, sock1, bridge_id),
+		shell_session_svc.shell_session_attach(&svc, session_id, sock1, bridge_id).status == .Attached,
 		"0->1 is not a late join: the bridge attach it triggers produces the pty-host catchup",
 	)
 	testing.expect(
 		t,
-		shell_session_svc.shell_session_attach(&svc, session_id, sock2, bridge_id),
+		shell_session_svc.shell_session_attach(&svc, session_id, sock2, bridge_id).status == .Late_Join,
 		"1->2 IS a late join: no bridge attach fires, so nothing repaints this viewer",
 	)
 
@@ -118,7 +118,7 @@ test_req29_attach_reports_late_join_only_for_extra_viewers :: proc(t: ^testing.T
 	// genuinely has viewers — the dedup path must not be mistaken for a first viewer.
 	testing.expect(
 		t,
-		shell_session_svc.shell_session_attach(&svc, session_id, sock2, bridge_id),
+		shell_session_svc.shell_session_attach(&svc, session_id, sock2, bridge_id).status == .Late_Join,
 		"a duplicate attach on a watched session is still a late join",
 	)
 
@@ -128,7 +128,7 @@ test_req29_attach_reports_late_join_only_for_extra_viewers :: proc(t: ^testing.T
 
 	testing.expect(
 		t,
-		!shell_session_svc.shell_session_attach(&svc, session_id, sock1, bridge_id),
+		shell_session_svc.shell_session_attach(&svc, session_id, sock1, bridge_id).status == .Attached,
 		"once the last viewer leaves, the next one is a first viewer again",
 	)
 	shell_session_svc.shell_session_detach(&svc, session_id, sock1, bridge_id)

@@ -279,6 +279,7 @@ status_text :: proc(status: int) -> string {
 	case 304: return "Not Modified"
 	case 400: return "Bad Request"
 	case 401: return "Unauthorized"
+	case 402: return "Payment Required"
 	case 403: return "Forbidden"
 	case 404: return "Not Found"
 	case 409: return "Conflict"

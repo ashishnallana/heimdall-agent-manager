@@ -45,6 +45,7 @@ import { useGetAgentsLiveQuery } from '../../api/endpoints/agentsLive';
 import {
   normalizeBridgeCapabilities,
   useBridgeProviderStatus,
+  useListBridgeProvidersQuery,
   useListBridgesQuery,
   type BridgeCapability,
 } from '../../api/endpoints/bridgeSupport';
@@ -88,6 +89,7 @@ import {
   type ShellRunMarker,
 } from '../shells/ShellRunIndicator';
 import AgentActivityBubbles from '../chat/AgentActivityBubbles';
+import ToolActivityRow, { ToolActivityGroup } from '../extension/ToolActivityRow';
 import AtMentionPopup, { type MentionEntity } from '../chat/AtMentionPopup';
 import ChatMessageList from '../chat/ChatMessageList';
 import InstanceReconfigurationProgress from '../chat/InstanceReconfigurationProgress';
@@ -100,6 +102,7 @@ import {
   reconcileOlderPages,
   type ConversationMessagesRead,
 } from '../../api/conversationMessageEvents';
+import { permissionToggleRequest, permissionToggleState } from './permissionToggleModel';
 import { type TaskLike } from '../chat/chainTaskInference';
 import { groupTranscriptMessages, isAgentStartMessage } from '../chat/transcriptGrouping';
 import type { ChatDeliveryStatus, ChatMessage, ChatTimestamp } from '../chat/types';
@@ -890,9 +893,11 @@ export function AgentChatPane({
     dispatchTray({ type: 'items', ids: trayItemIds, draftEmpty });
   }, [trayItemIdsKey]); // eslint-disable-line react-hooks/exhaustive-deps
   const trayMode = trayState.mode;
-  const trayModeItem = trayMode
+  // Only task items borrow the composer (agent blockers act in place).
+  const trayModeFound = trayMode
     ? trayItemList.find((item) => item.card_id === trayMode.cardId)
     : undefined;
+  const trayModeItem = trayModeFound?.kind === 'task' ? trayModeFound : undefined;
   const showTray = trayVisible(trayState, trayItemList.length);
   useEffect(() => {
     if (!trayNotice) return;
@@ -1226,7 +1231,9 @@ export function AgentChatPane({
     () =>
       chatMessages.reduce(
         (newest, message) =>
-          message.messageType === 'shell_run' || isAgentStartMessage(message)
+          message.messageType === 'shell_run' ||
+          message.messageType === 'tool_activity' ||
+          isAgentStartMessage(message)
             ? newest
             : Math.max(newest, message.createdUnixMs || 0),
         0,
@@ -1261,6 +1268,20 @@ export function AgentChatPane({
     reconfigureState.isLoading ||
     restartState.isLoading ||
     stopState.isLoading;
+  // Composer "Bypass permissions" toggle: the catalog descriptor for the
+  // instance's provider comes from the bridge provider-status (only fetched
+  // while the settings panel is open).
+  const instanceProvidersQuery = useListBridgeProvidersQuery(
+    { bridgeId: instanceBridgeId },
+    { skip: !instanceBridgeId || !runtimeMenuOpen },
+  );
+  const instanceCatalogExtension = useMemo(
+    () =>
+      (instanceProvidersQuery.data?.providers || []).find(
+        (entry: any) => entry?.provider === instanceProvider,
+      )?.extension ?? null,
+    [instanceProvidersQuery.data, instanceProvider],
+  );
   const hasUploadingAttachments = attachments.some((item) => item.status === 'uploading');
   const hasFailedAttachments = attachments.some((item) => item.status === 'error');
   const uploadedAttachments = attachments.filter(
@@ -1779,6 +1800,28 @@ export function AgentChatPane({
       if (!session) return null;
       return <ShellRunRow session={session} />;
     }
+    if (message.messageType === 'tool_activity_group') {
+      const clubbed: ChatMessage[] = message.metadata?.clubbedActivities || [];
+      return (
+        <ToolActivityGroup
+          messageId={message.messageId}
+          messages={clubbed}
+          onOpenFile={(filePath) => openAux({ type: 'activity', filePath })}
+          onOpenActivity={() => openAux({ type: 'activity' })}
+        />
+      );
+    }
+    if (message.messageType === 'tool_activity') {
+      return (
+        <ToolActivityRow
+          messageId={message.messageId}
+          body={message.body}
+          metadata={message.metadata}
+          onOpenFile={(filePath) => openAux({ type: 'activity', filePath })}
+          onOpenActivity={() => openAux({ type: 'activity' })}
+        />
+      );
+    }
     if (message.messageType === 'pane_capture') {
       const metadata = message.metadata || {};
       const status = message.messageStatus || 'complete';
@@ -2038,6 +2081,28 @@ export function AgentChatPane({
     }
   }
 
+  async function togglePermissionBypass(bypass: boolean) {
+    if (!agentInstanceId || !instance || runtimeActionBusy) return;
+    setRuntimeMenuOpen(false);
+    setReconfigStatus(
+      bypass ? 'Restarting with permissions bypassed…' : 'Restarting with permission approvals…',
+    );
+    try {
+      const applied = await reconfigureInstance(
+        permissionToggleRequest(
+          { ...instance, agent_instance_id: agentInstanceId },
+          bypass,
+          globalThis.crypto?.randomUUID?.() ||
+            `perm-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        ),
+      ).unwrap();
+      setAcceptedOperation(applied);
+      setReconfigStatus('');
+    } catch (err: any) {
+      setReconfigStatus(errMsg(err, 'Permission mode change failed'));
+    }
+  }
+
   async function forceStopRuntime() {
     if (
       !agentId ||
@@ -2073,6 +2138,13 @@ export function AgentChatPane({
 
   const pendingReconfig =
     selectionChangesConfig || operation?.phase === 'recovery_required';
+  const permissionToggle = permissionToggleState({
+    catalogExtension: instanceCatalogExtension,
+    instance,
+    busy:
+      runtimeActionBusy || operationBlocksInput || isStarting || runtimeStopping || !agentInstanceId,
+    pendingChanges: pendingReconfig,
+  });
   const runtimeControls = (
     <div data-debug-id="conversation-runtime-controls" className="text-left">
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-subtle p-3">
@@ -2124,6 +2196,43 @@ export function AgentChatPane({
           </button>
         </div>
       </div>
+      {permissionToggle.visible ? (
+        <div
+          data-debug-id="conversation-permission-toggle"
+          className="mb-4 rounded-xl border border-subtle p-3"
+        >
+          <label className="flex min-h-11 items-center justify-between gap-3 text-sm text-primary">
+            <span>
+              <span className="block font-medium">Bypass permissions</span>
+              <span className="block text-xs text-muted">
+                {permissionToggle.bypass
+                  ? 'The agent runs tools without asking.'
+                  : 'The agent asks before running tools; approve them here.'}{' '}
+                Applies to this running agent and restarts it. The agent&apos;s
+                default is set in its settings.
+              </span>
+            </span>
+            <input
+              type="checkbox"
+              role="switch"
+              data-debug-id="conversation-permission-toggle-input"
+              aria-checked={permissionToggle.bypass}
+              checked={permissionToggle.bypass}
+              disabled={permissionToggle.disabled}
+              onChange={(e) => void togglePermissionBypass(e.target.checked)}
+              className="h-5 w-5 shrink-0 accent-accent disabled:opacity-40"
+            />
+          </label>
+          {permissionToggle.hint ? (
+            <p
+              data-debug-id="conversation-permission-toggle-hint"
+              className="mt-1 text-xs text-muted"
+            >
+              {permissionToggle.hint}
+            </p>
+          ) : null}
+        </div>
+      ) : null}
       <div className="mb-4 rounded-xl bg-neutral-soft px-3 py-2 text-xs text-muted">
         Project:{' '}
         {projectId ? (
@@ -2987,6 +3096,18 @@ export function AgentChatPane({
               <Icon name="gear" size={15} />
               <span>Agent settings</span>
             </Menu.Item>
+            {onOpenAuxTab ? (
+              <Menu.Item
+                data-debug-id="conversation-thread-activity-action"
+                onClick={() => {
+                  setHeaderActionsOpen(false);
+                  openAux({ type: 'activity' });
+                }}
+              >
+                <Icon name="layers" size={15} />
+                <span>Activity timeline</span>
+              </Menu.Item>
+            ) : null}
             <Menu.Separator />
             {onSplitPane || onReplaceWithNew || (isMultiPane && onClosePane) ? (
               <>

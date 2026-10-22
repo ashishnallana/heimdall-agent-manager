@@ -12,6 +12,7 @@ import jsonx "odin_test:lib/jsonx"
 import project_service "odin_test:hub/service/project"
 
 Bridge_Service :: struct {
+	entitlements: domain.Entitlement_Lookup,
 	repo: ^iface.Bridge_Repository,
 	clock: ^platform.Clock,
 	ids: ^platform.ID_Generator,
@@ -199,6 +200,7 @@ bridge_runtime_connect :: proc(service: ^Bridge_Service, token: string, hostname
 	bridge, bridge_ok, bridge_err := iface.bridge_get_bridge(service.repo, auth.bridge_id)
 	if !bridge_ok do return domain.Bridge{}, false, bridge_err
 	if bridge.status == .Revoked { domain.bridge_destroy(&bridge); return domain.Bridge{}, false, domain.domain_error(.Bridge_Revoked, "bridge is revoked") }
+	if plan_err := check_bridge_plan(service, bridge); plan_err.code != .None { domain.bridge_destroy(&bridge); return {}, false, plan_err }
 	if hostname != "" {
 		delete(bridge.machine_hostname)
 		bridge.machine_hostname = strings.clone(hostname)
@@ -458,6 +460,10 @@ revoke_bridge :: proc(service: ^Bridge_Service, auth: contracts.Auth_Context, br
 	saved, save_ok, save_err := iface.bridge_save_bridge(service.repo, bridge)
 	if !save_ok do return domain.Bridge{}, false, save_err
 	_ = close_bridge_connection(service, bridge_id)
+	if plan_err := reconcile_owner_plan(service, string(bridge.owner_user_id)); plan_err.code != .None {
+		// Revocation already succeeded. The reaper retries freeing the plan slot.
+		fmt.eprintfln("hub: bridge %s revoked; plan reconciliation failed: %s", bridge_id, plan_err.message)
+	}
 	return saved, true, domain.Domain_Error{}
 }
 

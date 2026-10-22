@@ -102,7 +102,7 @@ main :: proc() {
 			fmt.eprintln("  There is no enrollment token: approval happens in the browser.")
 			fmt.eprintln("  Enrollment is approved in the browser, so no secret is copied to this machine.")
 			fmt.eprintln("")
-			fmt.eprintln("    ham-bridge enroll --hub https://your-hub-url [--bridge-token-file PATH] [--headless] [--reuse-bridge BRIDGE_ID | --new-bridge]")
+			fmt.eprintln("    ham-bridge enroll --hub https://your-hub-url [--bridge-token-file PATH] [--headless] [--approval-base-url URL] [--reuse-bridge BRIDGE_ID | --new-bridge]")
 			os.exit(1)
 		}
 		if !bridge_enroll_device_command(os.args) do os.exit(3 if bridge_enroll_service_start_failed else 1)
@@ -187,7 +187,7 @@ print_usage :: proc() {
 	fmt.println("ham-bridge", contracts.APP_VERSION, "protocol", contracts.PROTOCOL_VERSION)
 	fmt.println("usage: ham-bridge [--config <path>] [--bind-host 127.0.0.1] [--port 49323] [--daemon-url URL|--hub URL] [--daemon-id ID] [--bridge-token TOKEN|--bridge-token-file PATH] [--chunk-bytes N] [--local-endpoint-port PORT] [--local-run-dir DIR] [--no-local-proxy] [--agent-command CMD]")
 	fmt.println("bridge runtime: ham-wrapper bridge-runtime --bridge-endpoint unix:/run/heimdall/bridge.sock --agent-token hlat_... --agent-instance-id inst_... --provider codex --model gpt-6.1-sol --run-dir <dir> -- <agent-command>")
-	fmt.println("enroll: ham-bridge enroll --hub https://hub.example.com [--bridge-token-file PATH] [--headless] [--reuse-bridge BRIDGE_ID | --new-bridge]")
+	fmt.println("enroll: ham-bridge enroll --hub https://hub.example.com [--bridge-token-file PATH] [--headless] [--approval-base-url URL] [--reuse-bridge BRIDGE_ID | --new-bridge]")
 	fmt.println("        opens the approval page when possible; --headless suppresses it; no enrollment token is needed")
 	fmt.println("        asks the approver to reuse this config's bridge id (or --reuse-bridge BRIDGE_ID); --new-bridge asks for a new one")
 	fmt.println("vault:  ham-bridge vault prune [--config PATH [--bridge-token-file PATH] [--remove]] [--remove-scope BRIDGE_ID --hub URL]   (list / prune vault state of bridges whose hub rejects them; never silent)")

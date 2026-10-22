@@ -6,8 +6,8 @@
 
 | Script | Verbs | Options that must behave identically |
 |---|---|---|
-| `local-hub` | `start`, `stop`, `status`, `approve-device`, `help` | `--name`, `--hub-port`, `--proxy-port`, `--ui-port`, `--user`, `--build nix\|odin\|none`, `--bin-dir`, `--no-ui`, `--no-seed`, `--code` |
-| `local-bridge` | `start`, `enroll`, `stop`, `status`, `help` | `--name`, `--hub-url`, `--hub <hub-instance>`, `--port`, `--local-endpoint-port`, `--auto-enroll`, `--build`, `--bin-dir`, `--pty-host-bin` |
+| `local-hub` | `start`, `stop`, `status`, `approve-device`, `help` | `--name`, `--hub-port`, `--proxy-port`, `--ui-port`, `--user`, `--build nix\|odin\|none`, `--bin-dir`, `--no-ui`, `--no-seed`, `--no-plan-limits`, `--code` |
+| `local-bridge` | `start`, `enroll`, `stop`, `status`, `help` | `--name`, `--hub-url`, `--hub <hub-instance>`, `--port`, `--local-endpoint-port`, `--auto-enroll`, `--user`, `--build`, `--bin-dir`, `--pty-host-bin` |
 
 PowerShell spells the options the same way (`-Name` aliases are optional). Exit code 0 means success, and anything else means the launcher refused or failed. The reason goes on stderr.
 
@@ -20,7 +20,9 @@ The state root is `$HEIMDALL_LOCAL_STATE_ROOT`. When that is unset, it is `${XDG
   instance.env      KEY=VALUE record (below)
   hub.db            the hub database (plus -wal/-shm)
   seed.json         seed record: {"version":1,"seeded":{"<fixture-key>":"<id>"}}
-  approver/         device.json: the seed approver's PKCS#8 keys (0700 dir, file 0600)
+  seed-<user>.json  the same record for each seeded paid account (see Accounts)
+  approver/         device.json: the seed approver's PKCS#8 keys (0700 dir, file 0600);
+                    users/<user>/device.json: each seeded account's own approver
   bin/              build outputs (nix result-* links or odin binaries)
   logs/             hub.log dev-proxy.log ui.log
   run/<svc>.pid     process records: hub proxy ui
@@ -73,9 +75,9 @@ A launcher holds `<instance>/.lock/` (created with `mkdir`, holder PID inside) f
 
 ## Hub start order
 
-1. Hub with `--db <dir>/hub.db`, `--migrations-dir <checkout>/src/hub/repository/sqlite/migrations`, `--trusted-proxy-cidr 127.0.0.1/32` `--ui-origin <public-origin or http://127.0.0.1:<ui-port>>` and `--pairing-hub-origins` (see Public origin). Health is `/api/v1/health`.
+1. Hub with `--db <dir>/hub.db`, `--migrations-dir <checkout>/src/hub/repository/sqlite/migrations`, `--trusted-proxy-cidr 127.0.0.1/32` `--ui-origin <public-origin or http://127.0.0.1:<ui-port>>`, `--pairing-hub-origins` (see Public origin) and `--billing-enforce-plan-limits true` (`false` with `--no-plan-limits`). Health is `/api/v1/health`.
 2. `ham-dev-proxy --listen 127.0.0.1:<proxy> --hub-url <hub> --default-user <user>`.
-3. Seed: `node scripts/local-runtime/seed.mjs --api <proxy-url> --record <dir>/seed.json`, then the seed approver (below): `approver.mjs init`. Exit 3 from `init` means the vault was already rooted by another device; warn and continue.
+3. Seed: `node scripts/local-runtime/seed.mjs --api <proxy-url> --record <dir>/seed.json`, then the seed approver (below): `approver.mjs init`. Exit 3 from `init` means the vault was already rooted by another device; warn and continue. Then seed each paid account (see Accounts).
 4. UI: `vite <checkout> --host 127.0.0.1 --port <ui> --strictPort` with `HEIMDALL_DEV_PROXY_URL=<proxy-url>` and `HEIMDALL_HUB_API_URL=<hub-url>`. If `node_modules` is missing, run `npm ci --legacy-peer-deps` first.
 
 If any step fails, stop what has already started and exit non-zero.
@@ -90,6 +92,16 @@ Seeding goes through the public REST API behind the dev proxy:
 
 A fixture is skipped when `seed.json` records its key, or when an item with the same name or title exists. Existing items are adopted into the record. Nothing is ever updated, so user edits, renames and deletions survive a restart. The script prints `seed: N created, M skipped`.
 
+## Accounts
+
+The dev proxy's default user (`--user`) stays on the free plan. Each seeded paid account (today `paid` on `hobbyist`; it must be in the dev proxy's default roster) gets, in order:
+
+1. `seed.mjs --api <proxy-url> --record <dir>/seed-<user>.json --user <user>`. Its first request creates the account.
+2. `node scripts/local-runtime/plans.mjs --db <dir>/hub.db --user <user> --plan <plan>`. It sets `account_billing.plan_id` with status `custom` (`free` resets to the default). This is the only direct database write, because no payment provider runs locally. The hub picks it up within its 30s entitlement cache.
+3. `approver.mjs init --key <dir>/approver/users/<user>/device.json --user <user>`. Exit 3 means: warn and continue.
+
+`--no-seed` skips all three. The browser switches accounts with `/_dev/login?user=<user>`. `local-bridge --hub <name> --auto-enroll --user <user>` approves with that account's approver, so the bridge belongs to that user.
+
 ## Bridge
 
 - **Config.** `node scripts/local-runtime/bridge-config.mjs --template <checkout>/config.toml --out <dir>/config.toml --dir <dir> --hub-url <url> --port <port> --name <name>` rewrites `data_dir`, `credentials_path`, `agent_run_dir`, `tmux_session`, `[wrapper].daemon_url` (this bridge) and `[ctl].daemon_url` (the hub). It drops `[[peer]]` blocks and keeps an enrolled `daemon_id`.
@@ -97,7 +109,7 @@ A fixture is skipped when `seed.json` records its key, or when an item with the 
   - Without `--auto-enroll`, show the URL and code and wait for `ham-bridge enroll` to exit; a human approves on that hub's UI.
   - With `--auto-enroll` and `--hub <name>` whose `APPROVER_KEY` exists, run `approver.mjs bridge --api <proxy-url> --key <APPROVER_KEY> --code <code> --label local-<name>`, then wait for `ham-bridge enroll` (it prints `bridge enroll SUCCESS`). Without a seed approver fall back to the human path.
   - **`ham-bridge enroll` ends by restarting the installed bridge service** (`systemctl --user restart heimdall-bridge`, `sv`, or `launchctl`). Launchers must put no-op `systemctl`/`sv`/`launchctl` shims first on `PATH`, and unset `PREFIX`, for the enroll process only. Windows has no such call.
-- **Seed approver (`approver.mjs`, shared).** Run with `node --import <checkout>/tests/helpers/vaultEndpointHarness.ts scripts/local-runtime/approver.mjs <init|bridge|device> --api <proxy-url> --key <hub>/approver/device.json [--code C] [--label L]` from the checkout (needs `node_modules`, for esbuild). It uses the UI's vault modules and the public API only (`/vault/directory/genesis`, `/device/pair-salts`, `/device/verify`, `/device/approve`, `/bridges/<id>/unseal`, `/vault/devices/<id>/approve`); it never writes the database. `init` creates the vault genesis once and is idempotent (`kept`). `device` approves a browser's pairing code from the UI, because on a seeded hub the browser joins the vault as a second device rather than being its root. Exit 0 success, 3 vault rooted by another device, 1 anything else. The key file is the local hub's account root: keep it in the instance directory, never copy it.
+- **Seed approver (`approver.mjs`, shared).** Run with `node --import <checkout>/tests/helpers/vaultEndpointHarness.ts scripts/local-runtime/approver.mjs <init|bridge|device> --api <proxy-url> --key <hub>/approver/device.json [--code C] [--label L] [--user U]` (`--user` sends `X-Dev-User`, so it acts for that account and needs that account's key) from the checkout (needs `node_modules`, for esbuild). It uses the UI's vault modules and the public API only (`/vault/directory/genesis`, `/device/pair-salts`, `/device/verify`, `/device/approve`, `/bridges/<id>/unseal`, `/vault/devices/<id>/approve`); it never writes the database. `init` creates the vault genesis once and is idempotent (`kept`). `device` approves a browser's pairing code from the UI, because on a seeded hub the browser joins the vault as a second device rather than being its root. Exit 0 success, 3 vault rooted by another device, 1 anything else. The key file is the local hub's account root: keep it in the instance directory, never copy it.
 - **Run.** `HEIMDALL_HAM_CTL_BIN=<ham-ctl> HEIMDALL_BRIDGE_PTY_HOST=1 HEIMDALL_HAM_PTY_HOST_BIN=<pty-host> ham-bridge --config <cfg> --bind-host 127.0.0.1 --port <p> --hub <url> --bridge-token-file <tok> --local-endpoint-port <ep> --local-run-dir <dir>/endpoint`. It is ready when `bridge hub runtime ready` appears in its log.
 - **Providers.** Providers are real installed CLIs, discovered by the bridge's own probe when the hub requests it, and recorded in `data/bridge/provider_paths.json`. The bridge keeps the real `HOME` so provider logins work. Never copy installed bridge credentials, keyrings or provider tokens.
 
@@ -108,3 +120,26 @@ These paths are keyed, so separate instances do not collide in them:
 - `~/.config/heimdall/locks/` holds bridge instance locks, keyed by config path and by hub plus bridge id.
 - `~/.config/heimdall/bridges/<bridge-id>/` holds the keystore, keyed by the bridge id that enrollment mints.
 - `<checkout>/node_modules/.vite` is the Vite dependency cache, shared by UIs from the same checkout. It is only a cache.
+
+### Approval links through a preview
+
+`--public-origin` remains an origin-only CSRF setting and does not include the
+`/p/<session>/` preview prefix. To print a usable enrollment link when the UI
+runs under that prefix, pass the full browser base explicitly:
+
+```bash
+scripts/local-bridge.sh enroll --name example --hub plans \
+  --approval-base-url https://preview.example/p/sh_123/
+# Direct binary:
+ham-bridge enroll --hub http://127.0.0.1:18181 --headless \
+  --approval-base-url https://preview.example/p/sh_123/
+```
+
+The bridge validates an HTTP(S) base with no credentials, query, or fragment,
+normalizes trailing slashes, and prints
+`https://preview.example/p/sh_123/api/v1/device/add`. The local launcher records
+`APPROVAL_BASE_URL` in its own bridge `instance.env` and reuses it on later
+enrollments. It changes only the approval link (and the page opened for it),
+never the hub API address, CSRF origin, or pairing origin. Supply a new value
+when the preview session changes. The hub's origin-only verification URL stays
+the default when no override is given.

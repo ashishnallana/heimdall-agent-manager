@@ -1,3 +1,4 @@
+import { useEntitlements } from '../../hooks/useEntitlements';
 import { useEffect, useMemo, useState } from 'react';
 import {
   type Bridge,
@@ -35,6 +36,7 @@ import PendingEnrollmentsCard from './PendingEnrollmentsCard';
 // inventory and management surface only. Archive maps to the Hub's revocation
 // operation: credentials die, the live socket closes, and the durable row remains.
 export default function BridgesPanel() {
+  const entitlements = useEntitlements();
   const bridgesQuery = useListBridgesQuery(undefined);
   const [renameBridge] = useRenameBridgeMutation();
   const [updateBridgeTelemetry] = useUpdateBridgeTelemetryMutation();
@@ -58,6 +60,7 @@ export default function BridgesPanel() {
   const bridges: Bridge[] = (bridgesQuery.data?.bridges || []).filter((b: Bridge) => String(b?.status || b?.runtime_status || '').toLowerCase() !== 'revoked');
 
   function statusTone(bridge: Bridge): Tone {
+    if (bridge.plan_disabled_at) return 'warning';
     const status = String(bridge?.status || bridge?.runtime_status || '').toLowerCase();
     if (status === 'revoked') return 'danger';
     if (status === 'online' || status === 'connected') return 'success';
@@ -65,6 +68,7 @@ export default function BridgesPanel() {
   }
 
   function statusLabel(bridge: Bridge): string {
+    if (bridge.plan_disabled_at) return 'Disabled — over plan limit';
     const status = String(bridge?.status || bridge?.runtime_status || '').toLowerCase();
     return status || 'offline';
   }
@@ -163,6 +167,7 @@ export default function BridgesPanel() {
       {/* Bridge list */}
       <div data-debug-id="settings-bridges-list" className="mt-4">
         <Text as="div" role="overline" tone="muted" className="mb-2">Bridges ({bridges.length})</Text>
+        <p data-debug-id="settings-bridges-usage" className="mb-2 text-xs text-muted">{bridges.filter((b) => !b.plan_disabled_at).length} of {entitlements.max_bridges < 0 ? 'unlimited' : entitlements.max_bridges} bridges enabled</p>
         {bridgesQuery.isFetching && bridges.length === 0 ? <div className="text-sm text-muted">Loading bridges…</div> : null}
         {bridges.length === 0 && !bridgesQuery.isFetching ? (
           <div data-debug-id="settings-bridges-empty" className="rounded-xl border border-dashed border-subtle bg-surface-raised/30 p-4 text-center text-sm text-muted">No active bridges.</div>
@@ -192,6 +197,10 @@ export default function BridgesPanel() {
                           <span className="truncate text-sm font-medium text-primary">{bridge?.label || bridge?.machine_hostname || bridge?.hostname || id}</span>
                         )}
                         <span data-debug-id={`settings-bridge-ready-${id}`} className={`rounded-full border px-2 py-0.5 text-[10px] whitespace-nowrap ${isReady ? 'border-success/30 bg-success-soft text-success' : status === 'revoked' ? 'border-danger/30 bg-danger-soft text-danger' : 'border-warning/30 bg-warning-soft text-warning'}`}>{isReady ? 'ready' : status}</span>
+
+                        {bridge.plan_disabled_at ? (
+                          <a href="#/settings/account" data-debug-id={`settings-bridge-plan-upgrade-${id}`} className="text-xs font-medium text-accent underline">Upgrade</a>
+                        ) : null}
 
                         {/* Monospace version badge: e.g. v0.1.0 (a57c83d9) */}
                         {hasVersion ? (

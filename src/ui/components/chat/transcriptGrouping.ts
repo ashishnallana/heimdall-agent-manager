@@ -5,6 +5,8 @@ import type { ChatMessage } from './types';
  */
 export function isAgentStartMessage(message: ChatMessage): boolean {
   if (message.messageType === 'agent_start' || message.messageType === 'agent_start_clubbed') return true;
+  // tool_activity bodies are generated counts; never sniff them for "started".
+  if (message.messageType === 'tool_activity') return false;
   if (message.messageType === 'system') return true;
   const body = (message.body || '').toLowerCase();
   return (
@@ -17,8 +19,13 @@ export function isAgentStartMessage(message: ChatMessage): boolean {
 
 /**
  * Groups consecutive shell_run messages (length >= 2) into a clubbed group,
- * and groups consecutive agent start messages (length >= 2) into a clubbed start notice.
+ * consecutive tool_activity messages (length >= 2) into a tool_activity_group,
+ * and consecutive agent start messages (length >= 2) into a clubbed start notice.
  * Filters out runs that are currently pinned above the composer.
+ *
+ * A tool_activity run that ends the transcript keeps its newest message outside
+ * the group, so the live turn stays visible; once any other message follows,
+ * that message folds into the group.
  */
 export function groupTranscriptMessages(
   messages: ChatMessage[],
@@ -75,7 +82,49 @@ export function groupTranscriptMessages(
       }
     }
 
-    // 2. Consecutive agent start/restart system messages (length >= 2) -> REQ-SUBTLE-AGENT-START-14
+    // 2. Consecutive tool_activity messages (length >= 2); the trailing one stays out.
+    if (msg.messageType === 'tool_activity') {
+      let j = i;
+      while (j < unpinned.length && unpinned[j].messageType === 'tool_activity') {
+        j++;
+      }
+      const groupEnd = j === unpinned.length ? j - 1 : j;
+      const activityGroup = unpinned.slice(i, groupEnd);
+      if (activityGroup.length >= 2) {
+        const first = activityGroup[0];
+        const last = activityGroup[activityGroup.length - 1];
+        result.push({
+          // Keyed by the first message only: a trailing row folding in must not
+          // remount the group (and collapse it while the user is reading).
+          key: `clubbed_tools_${first.messageId}`,
+          messageId: `clubbed_tools_${first.messageId}`,
+          body: '',
+          isUser: false,
+          createdUnixMs: first.createdUnixMs,
+          deliveredUnixMs: 0,
+          readUnixMs: 0,
+          deliveryFailedUnixMs: 0,
+          deliveryError: '',
+          sending: false,
+          authorLabel: '',
+          messageType: 'tool_activity_group',
+          messageStatus: 'complete',
+          metadata: {
+            clubbedActivities: activityGroup,
+            count: activityGroup.length,
+            startUnixMs: first.createdUnixMs,
+            endUnixMs: last.createdUnixMs,
+          },
+        });
+      } else {
+        result.push(...activityGroup);
+      }
+      result.push(...unpinned.slice(groupEnd, j));
+      i = j;
+      continue;
+    }
+
+    // 3. Consecutive agent start/restart system messages (length >= 2) -> REQ-SUBTLE-AGENT-START-14
     if (isAgentStartMessage(msg)) {
       let j = i;
       while (j < unpinned.length && isAgentStartMessage(unpinned[j])) {

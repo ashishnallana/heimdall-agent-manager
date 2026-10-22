@@ -394,7 +394,7 @@ fire_idle_ttl :: proc(svc: ^Service, u: ^Uow, t: Timer) -> Fire_Result {
 	inst, iok, _ := iface.agent_get_instance(svc.agents, t.key)
 	if !iok do return .Noop
 	if inst.idle_since == "" || inst.idle_since != t.armed do return .Noop // re-leased and released again: the newer timer owns it (S4)
-	if !instance_is_live(inst) do return .Noop
+	if !instance_is_live(inst) && !instance_is_pending(inst) do return .Noop
 	if inst.chain_id != "" {
 		if chain, cok, _ := iface.taskchain_get_chain(svc.repo, domain.Task_Chain_ID(inst.chain_id)); cok {
 			if is_coordinator(svc, chain, inst.agent_instance_id) do return .Noop

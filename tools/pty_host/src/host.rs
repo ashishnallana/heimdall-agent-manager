@@ -256,6 +256,14 @@ impl PtyHost {
         Ok(())
     }
 
+    /// Startup input keeps byte progress across retries. `Write::write` reports
+    /// the bytes accepted before an error, so resuming never retypes a prefix.
+    pub fn write_startup_input(&self, bytes: &[u8], written: &mut usize) -> Result<()> {
+        let mut guard = self.writer.lock().unwrap();
+        let w = guard.as_mut().ok_or_else(|| anyhow::anyhow!("startup input: session has exited"))?;
+        write_startup_remaining(w, bytes, written).context("startup input: PTY write failed")
+    }
+
     /// Snapshot the current rendered screen.
     pub fn capture(&self) -> Capture {
         self.engine.lock().unwrap().capture()
@@ -419,10 +427,70 @@ impl PtyHost {
     }
 }
 
+fn write_startup_remaining<W: std::io::Write + ?Sized>(writer: &mut W, bytes: &[u8], written: &mut usize) -> std::io::Result<()> {
+    if *written > bytes.len() {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid startup input progress"));
+    }
+    while *written < bytes.len() {
+        match writer.write(&bytes[*written..]) {
+            Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
+            Ok(n) => *written += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    // A failed flush can be retried too, without writing the bytes again.
+    writer.flush()
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn startup_input_resumes_partial_write_and_failed_flush() {
+        struct Flaky { bytes: Vec<u8>, fail_write: bool, fail_flush: bool }
+        impl std::io::Write for Flaky {
+            fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+                if self.bytes.len() == 3 && self.fail_write {
+                    self.fail_write = false;
+                    return Err(std::io::ErrorKind::BrokenPipe.into());
+                }
+                let n = if self.bytes.is_empty() { 3.min(data.len()) } else { data.len() };
+                self.bytes.extend_from_slice(&data[..n]);
+                Ok(n)
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                if self.fail_flush {
+                    self.fail_flush = false;
+                    return Err(std::io::ErrorKind::Interrupted.into());
+                }
+                Ok(())
+            }
+        }
+        let bytes = b"startup command\r";
+        let mut writer = Flaky { bytes: vec![], fail_write: true, fail_flush: true };
+        let mut written = 0;
+        assert!(write_startup_remaining(&mut writer, bytes, &mut written).is_err());
+        assert_eq!(written, 3);
+        assert!(write_startup_remaining(&mut writer, bytes, &mut written).is_err());
+        assert_eq!(written, bytes.len());
+        write_startup_remaining(&mut writer, bytes, &mut written).unwrap();
+        assert_eq!(writer.bytes, bytes, "retry must never retype an accepted prefix");
+    }
+
+    #[test]
+    fn startup_input_zero_write_keeps_progress_retryable() {
+        struct Zero;
+        impl std::io::Write for Zero {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> { Ok(0) }
+            fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+        }
+        let mut written = 0;
+        assert_eq!(write_startup_remaining(&mut Zero, b"x", &mut written).unwrap_err().kind(), std::io::ErrorKind::WriteZero);
+        assert_eq!(written, 0);
+    }
 
     fn wait_for<F: Fn() -> bool>(pred: F, timeout: Duration) -> bool {
         let start = std::time::Instant::now();

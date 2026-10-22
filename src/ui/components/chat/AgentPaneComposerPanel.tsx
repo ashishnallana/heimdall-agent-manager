@@ -1,3 +1,6 @@
+import UpgradePrompt from '../billing/UpgradePrompt';
+import { useEntitlements } from '../../hooks/useEntitlements';
+import { planLimitDetails, type PlanLimitDetails } from '../../utils/planLimit';
 import { isPaneRepaintStart } from '../shells/paneDeliveryQueue.ts';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Terminal as TerminalType } from '@xterm/xterm';
@@ -74,6 +77,10 @@ export function AgentPaneComposerPanel({
   hideHeader = false,
   fillPane,
 }: AgentPaneComposerPanelProps) {
+  const entitlements = useEntitlements();
+  const [planLimit, setPlanLimit] = useState<PlanLimitDetails | null>(null);
+  const reportPlanLimit = (error: unknown) => setPlanLimit(planLimitDetails(error));
+  useEffect(() => { setPlanLimit(null); }, [agentInstanceId]);
   const { theme } = useTheme();
   const [terminalDimensions, setTerminalDimensions] = useState<{ cols: number; rows: number }>({
     cols: 80,
@@ -164,6 +171,7 @@ export function AgentPaneComposerPanel({
   // STREAMING PATH: Low-latency WebSocket streaming without term.reset()
   // --------------------------------------------------------------------------
   const {
+    readOnly: streamReadOnly,
     connected: streamConnected,
     isStreamReady,
     sendInput: sendStreamInput,
@@ -171,7 +179,7 @@ export function AgentPaneComposerPanel({
     reconnect: reconnectStream,
   } = useAgentStream({
     agentInstanceId: (isExpanded || isStarting) && isActiveTab ? agentInstanceId : null,
-    enabled: isStreamingExperimentEnabled && !fallbackToPolling,
+    enabled: isStreamingExperimentEnabled && !fallbackToPolling && !planLimit && entitlements.terminal_streaming_enabled,
     rows: terminalDimensions.rows,
     cols: terminalDimensions.cols,
     onConnect: () => {
@@ -213,6 +221,7 @@ export function AgentPaneComposerPanel({
         setStreamRuntimeStatus(status);
       }
     },
+    onPlanLimit: reportPlanLimit,
     onVaultLocked: (signal) => {
       // A locked vault is not a stream failure: no fallback to polling.
       vaultLock.report(signal);
@@ -231,6 +240,9 @@ export function AgentPaneComposerPanel({
     },
   });
 
+  const readOnly = streamReadOnly || !entitlements.terminal_input_enabled || Boolean(planLimit);
+  const readOnlyRef = useRef(readOnly);
+  readOnlyRef.current = readOnly;
   const isStreamingActive = isStreamingExperimentEnabled && streamConnected && !fallbackToPolling;
 
   // After an unseal: re-attach the stream (it may have been closed for vault_locked),
@@ -279,7 +291,8 @@ export function AgentPaneComposerPanel({
     isFetching,
     refetch,
   } = useAgentPaneSubscription({
-    agentInstanceId: (!isStreamingExperimentEnabled || fallbackToPolling) ? agentInstanceId : null,
+    onPlanLimit: reportPlanLimit,
+    agentInstanceId: !planLimit && entitlements.terminal_streaming_enabled && (!isStreamingExperimentEnabled || fallbackToPolling) ? agentInstanceId : null,
     isExpanded,
     // A tab hidden by the layout (maximised tile, hidden aux dock) is not on screen:
     // the 500 ms capture pauses and resumes with a refetch when it is shown.
@@ -313,6 +326,7 @@ export function AgentPaneComposerPanel({
   // Unified input handler cleanly routing between streaming and legacy polling
   const handleInput = useCallback(
     (data: string) => {
+      if (readOnlyRef.current) return;
       // T10: input is refused while the bridge vault is locked — the overlay says so.
       if (vaultLockedRef.current) return;
       if (isStreamingActive) {
@@ -341,6 +355,10 @@ export function AgentPaneComposerPanel({
     (rows: number, cols: number) => {
       const effectiveCols = Math.max(cols, 80);
       const effectiveRows = Math.max(rows, 1);
+      if (readOnlyRef.current) {
+        setTerminalDimensions({ cols: effectiveCols, rows: effectiveRows });
+        return;
+      }
       if (isStreamingActive) {
         sendStreamResize(effectiveRows, effectiveCols);
       } else {
@@ -414,6 +432,7 @@ export function AgentPaneComposerPanel({
       : 12;
 
     const term = new Terminal({
+      disableStdin: readOnlyRef.current,
       convertEol: !isStreamingActive,
       cursorBlink: false,
       cursorInactiveStyle: 'none',
@@ -608,6 +627,10 @@ export function AgentPaneComposerPanel({
     }
   }, [isExpanded]);
 
+  useEffect(() => {
+    if (terminalRef.current) terminalRef.current.options.disableStdin = readOnly;
+  }, [readOnly]);
+
   return (
     <div
       data-debug-id="agent-pane-composer-panel"
@@ -622,6 +645,7 @@ export function AgentPaneComposerPanel({
           : 'max-h-0 opacity-0 -translate-y-1 pointer-events-none !mb-0 !p-0'
       } ${className}`}
     >
+      {planLimit ? <UpgradePrompt details={planLimit} debugId="agent-pane-plan-limit" onRetry={() => { setPlanLimit(null); reconnectStream(); }} /> : !entitlements.terminal_streaming_enabled ? <UpgradePrompt details={{ limit: 'terminal_streaming_enabled' }} debugId="agent-pane-streaming-upgrade" /> : readOnly ? <UpgradePrompt subtle details={{ limit: 'terminal_input_enabled' }} debugId="agent-pane-read-only" /> : null}
       <div className={fillPane ? 'relative w-full flex-1 min-h-0 flex flex-col' : 'relative w-full'}>
         {/* Interactive xterm terminal container (REQ-PANE-MOBILE-1, REQ-PANE-MOBILE-2) */}
         <div

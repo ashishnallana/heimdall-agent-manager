@@ -9,15 +9,20 @@
 // while the deck is closed, the deck's query while it is open (the deck upserts
 // its counts into the summary cache, so the bar stays current and closing the
 // deck needs no fetch). Opening the deck always revalidates.
+//
+// kind 'agent_blocker' items are LIVE agent blockers (a provider permission
+// prompt, or a prompt detected in the agent terminal) that the hub merges in
+// from its in-memory map at read time. They are the only permission-approval
+// surface: Allow / Deny call POST /agent-instances/{id}/blockers/{id}/resolve.
 import { cookieJsonFetch, customQueryError } from '../cookieFetch';
 import { heimdallApi } from '../heimdallApi';
 
 export type AttentionRange = '6h' | '24h' | '7d' | 'all';
-export type AttentionKind = 'message' | 'task' | 'memory';
+export type AttentionKind = 'message' | 'task' | 'memory' | 'agent_blocker';
 export const ATTENTION_RANGES: readonly AttentionRange[] = ['6h', '24h', '7d', 'all'];
 
-/** total = message + task + memory (the bar pill); snoozed is separate and never in total. */
-export type AttentionCounts = { total: number; older: number; message: number; task: number; memory: number; snoozed: number };
+/** total = message + task + memory + agent_blocker (the bar pill); snoozed is separate and never in total. */
+export type AttentionCounts = { total: number; older: number; message: number; task: number; memory: number; snoozed: number; agent_blocker: number };
 
 export type AttentionExcerpt = { author_name: string; body: string; at: string };
 
@@ -59,7 +64,21 @@ export type AttentionMemoryDetails = {
 /** Who/what a memory applies to, by name (names may be ciphertext). [] = all. */
 export type AttentionScope = { agents: string[]; projects: string[]; bridges: string[]; templates: string[] };
 
+/** A live agent blocker (never stored). input is the capped tool input object. */
+export type AttentionBlockerDetails = {
+  blocker_kind: 'permission' | 'terminal_prompt';
+  tool_name: string;
+  summary: string;
+  input: Record<string, unknown>;
+  agent_id: string;
+  agent_instance_id: string;
+  created_at: string;
+  expires_at: string;
+};
+
 export type AttentionTaskRefs = { chain_id: string; task_id: string };
+/** chain_id is '' for an instance outside any chain. */
+export type AttentionBlockerRefs = { agent_instance_id: string; chain_id: string; blocker_id: string };
 export type AttentionMemoryRefs = { memory_id: string; agent_instance_id: string; chain_id: string };
 export type AttentionMessageRefs = { conversation_id: string; agent_instance_id: string; message_id: string };
 
@@ -84,17 +103,19 @@ type AttentionItemBase = {
 export type AttentionTaskItem = AttentionItemBase & { kind: 'task'; details: AttentionTaskDetails; action_refs: AttentionTaskRefs };
 export type AttentionMessageItem = AttentionItemBase & { kind: 'message'; details: AttentionMessageDetails; action_refs: AttentionMessageRefs };
 export type AttentionMemoryItem = AttentionItemBase & { kind: 'memory'; details: AttentionMemoryDetails; action_refs: AttentionMemoryRefs };
-export type AttentionItem = AttentionTaskItem | AttentionMessageItem | AttentionMemoryItem;
+export type AttentionBlockerItem = AttentionItemBase & { kind: 'agent_blocker'; details: AttentionBlockerDetails; action_refs: AttentionBlockerRefs };
+export type AttentionItem = AttentionTaskItem | AttentionMessageItem | AttentionMemoryItem | AttentionBlockerItem;
 
 export type AttentionSummary = { since: AttentionRange; counts: AttentionCounts };
 export type AttentionResult = AttentionSummary & { items: AttentionItem[] };
 
-const EMPTY_COUNTS: AttentionCounts = { total: 0, older: 0, message: 0, task: 0, memory: 0, snoozed: 0 };
+export const EMPTY_ATTENTION_COUNTS: AttentionCounts = { total: 0, older: 0, message: 0, task: 0, memory: 0, snoozed: 0, agent_blocker: 0 };
+const EMPTY_COUNTS = EMPTY_ATTENTION_COUNTS;
 
 export function normalizeAttentionCounts(raw: any): AttentionCounts {
   const n = (v: any) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? Math.floor(v) : 0);
   if (!raw || typeof raw !== 'object') return { ...EMPTY_COUNTS };
-  return { total: n(raw.total), older: n(raw.older), message: n(raw.message), task: n(raw.task), memory: n(raw.memory), snoozed: n(raw.snoozed) };
+  return { total: n(raw.total), older: n(raw.older), message: n(raw.message), task: n(raw.task), memory: n(raw.memory), snoozed: n(raw.snoozed), agent_blocker: n(raw.agent_blocker) };
 }
 
 /** Keeps only well-formed items of the kinds v1 renders. */
@@ -102,7 +123,7 @@ export function normalizeAttentionItems(raw: any): AttentionItem[] {
   if (!Array.isArray(raw)) return [];
   return raw
     .filter((item: any) =>
-      item && typeof item.card_id === 'string' && (item.kind === 'task' || item.kind === 'message' || item.kind === 'memory') &&
+      item && typeof item.card_id === 'string' && (item.kind === 'task' || item.kind === 'message' || item.kind === 'memory' || item.kind === 'agent_blocker') &&
       item.details && typeof item.details === 'object' && item.action_refs && typeof item.action_refs === 'object')
     .map((item: any) => ({ ...item, snoozed: item.snoozed === true, snooze_until: typeof item.snooze_until === 'string' ? item.snooze_until : '' }));
 }

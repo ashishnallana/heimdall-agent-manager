@@ -383,6 +383,7 @@ test_shell_stream_ticket_and_experiment_gating :: proc(t: ^testing.T) {
 		fake_repo := Fake_Shell_Repo{
 			session = domain.Shell_Session{
 				session_id    = "sh_test",
+				kind          = domain.Shell_Session_Kind_Shell,
 				owner_user_id = "user_test",
 				bridge_id     = "brg_local",
 				status        = domain.Shell_Session_Status_Running,
@@ -765,6 +766,16 @@ test_bridge_shell_pty_stream_closed_forwarding :: proc(t: ^testing.T) {
 // -----------------------------------------------------------------------------
 @(test)
 test_shell_stream_input_and_resize_forwarding :: proc(t: ^testing.T) {
+	shell_stream_check_input_policy(t, false)
+}
+
+@(test)
+test_shell_stream_read_only_input_resize_and_snapshot :: proc(t: ^testing.T) {
+	shell_stream_check_input_policy(t, true)
+}
+
+@(private = "file")
+shell_stream_check_input_policy :: proc(t: ^testing.T, read_only: bool) {
 	pair, ok := make_stream_pair(t)
 	testing.expect(t, ok)
 	defer close_stream_pair(&pair)
@@ -781,6 +792,7 @@ test_shell_stream_input_and_resize_forwarding :: proc(t: ^testing.T) {
 	fake_repo := Fake_Shell_Repo{
 		session = domain.Shell_Session{
 			session_id    = "sh_input_test",
+			kind          = domain.Shell_Session_Kind_Run if read_only else domain.Shell_Session_Kind_Shell,
 			owner_user_id = "user_input",
 			bridge_id     = "brg_input_target",
 			status        = domain.Shell_Session_Status_Running,
@@ -842,6 +854,9 @@ test_shell_stream_input_and_resize_forwarding :: proc(t: ^testing.T) {
 		bridge_command_sink = mock_sink,
 	}
 
+	h.entitlements = {lookup = plan_test_paid_lookup}
+	if read_only do h.entitlements = {lookup = plan_test_read_only_lookup}
+
 	headers := []contracts.HTTP_Header{
 		{name = "Sec-WebSocket-Key", value = "dGhlIHNhbXBsZSBub25jZQ=="},
 	}
@@ -860,7 +875,28 @@ test_shell_stream_input_and_resize_forwarding :: proc(t: ^testing.T) {
 	// Consume upgrade and ready frame
 	frame, read_ok := read_upgrade_and_stream_frame(pair.client, 5 * time.Second)
 	testing.expect(t, read_ok, "handshake must succeed")
-	if read_ok do delete(frame)
+	if read_ok {
+		testing.expect(t, strings.contains(frame, "\"read_only\":true" if read_only else "\"read_only\":false"))
+		delete(frame)
+	}
+	sync.mutex_lock(&shell_svc.mu)
+	testing.expect_value(t, shell_svc.user_viewer_counts["user_input"], 1)
+	sync.mutex_unlock(&shell_svc.mu)
+	defer testing.expect(t, shell_svc.user_viewer_counts["user_input"] == 0, "disconnect releases the user's stream slot")
+	// A cached screen must still be sent in response to the first resize,
+	// without sending any PTY resize command to the bridge.
+	if read_only {
+		shell_session_svc.shell_session_broadcast_output(&shell_svc, "sh_input_test", transmute([]byte)string("live output"))
+		output, got_output := read_server_stream_frame(pair.client, 5 * time.Second)
+		testing.expect(t, got_output, "read-only viewers receive live output")
+		if got_output {
+			testing.expect(t, strings.contains(output, "\"type\":\"output\""))
+			delete(output)
+		}
+		screen := contracts.pty_wire_encode_viewer_frame(contracts.PTY_WIRE_KIND_SCREEN, 0, transmute([]byte)string("cached screen"))
+		shell_session_svc.shell_session_snapshot_cache_store_capture(&shell_svc, "sh_input_test", [][]byte{screen}, 110, 35, net.TCP_Socket(0))
+		delete(screen)
+	}
 
 	// REQ-PTY-NET-3: keystrokes are BINARY pty_wire INPUT viewer frames: plaintext, then
 	// an encrypted one (nonce|tag|ct the hub must relay without touching).
@@ -875,6 +911,26 @@ test_shell_stream_input_and_resize_forwarding :: proc(t: ^testing.T) {
 	// Send a resize frame from client: {"type":"resize","rows":35,"cols":110}
 	resize_json := "{\"type\":\"resize\",\"rows\":35,\"cols\":110}"
 	_ = write_ws_text_frame(pair.client, resize_json)
+
+	if read_only {
+		screen, got := read_server_stream_frame(pair.client, 5 * time.Second)
+		testing.expect(t, got, "read-only first resize still serves a snapshot")
+		if got {
+			testing.expect(t, strings.contains(screen, "screen"))
+			delete(screen)
+		}
+		// The received snapshot proves both earlier binary inputs and resize
+		// have been processed by the same reader.
+		sync.mutex_lock(&sink_state.mu)
+		for cmd in sink_state.commands {
+			testing.expect(t, !strings.contains(cmd.body_json, "\"type\":\"pty_input\""))
+			testing.expect(t, !strings.contains(cmd.body_json, "\"type\":\"shell_pty_resize\""))
+		}
+		sync.mutex_unlock(&sink_state.mu)
+		net.close(pair.client); pair.client = net.TCP_Socket(0)
+		thread.join(th)
+		return
+	}
 
 	// Allow time for reader thread to process frames
 	wait_start := time.now()
@@ -1109,4 +1165,43 @@ test_err_proto_rejected_chunk_frame_gets_protocol_error :: proc(t: ^testing.T) {
 	testing.expect(t, found, frame)
 	testing.expect_value(t, werr.cause, "chunk_rejected")
 	testing.expect_value(t, werr.class, contracts.Bridge_Error_Class.fatal)
+}
+
+@(test)
+test_shell_stream_plan_refuses_existing_shell_before_upgrade :: proc(t: ^testing.T) {
+	for auth_kind in ([]contracts.Auth_Kind{.User_Token, .Trusted_Proxy}) {
+		pair, ok := make_stream_pair(t)
+		testing.expect(t, ok)
+		defer close_stream_pair(&pair)
+		tickets := new_user_ws_ticket_store()
+		defer user_ws_ticket_store_free(&tickets)
+		user_ws_ticket_store_put(&tickets, "plan_ticket", {kind = auth_kind, user_id = "owner"}, 60)
+		fake_exp := Fake_Shell_Experiments{streaming_enabled = true}
+		exp_repo := iface.Experiment_Repository{ctx = &fake_exp, list_by_owner = fake_shell_experiment_list}
+		fake_repo := Fake_Shell_Repo{session = {
+			session_id = "sh_existing", owner_user_id = "owner", bridge_id = "brg",
+			kind = domain.Shell_Session_Kind_Shell, status = domain.Shell_Session_Status_Running,
+		}}
+		repo := iface.Shell_Session_Repository{ctx = &fake_repo, get = fake_shell_repo_get}
+		h := Shell_Session_Stream_Handlers{
+			ws_tickets = &tickets, experiments = &exp_repo, shell_repo = &repo,
+			entitlements = {lookup = plan_test_read_only_lookup},
+		}
+		// No service or bridge is configured: refusal must precede any attach.
+		shell_session_stream_handler(&h, {
+			method = "GET", path = "/api/v1/shells/sh_existing/stream", query = "ticket=plan_ticket",
+			headers = []contracts.HTTP_Header{{name = "Sec-WebSocket-Key", value = "dGhlIHNhbXBsZSBub25jZQ=="}},
+			request_id = "plan-shell-stream",
+		}, pair.hub)
+		resp, read_ok := read_raw_response(pair.client, 5 * time.Second)
+		defer delete(resp)
+		testing.expect(t, read_ok)
+		testing.expect(t, strings.contains(resp, "402 Payment Required"))
+		testing.expect(t, !strings.contains(resp, "101 Switching"))
+		testing.expect(t, strings.contains(resp, `"code":"plan_limit_reached"`))
+		testing.expect(t, strings.contains(resp, `"limit":"shells_enabled"`))
+		testing.expect(t, strings.contains(resp, `"allowed":0`))
+		testing.expect(t, strings.contains(resp, `"current":1`))
+		testing.expect(t, strings.contains(resp, `"upgrade_path":"/settings/account"`))
+	}
 }

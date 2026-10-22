@@ -680,3 +680,17 @@ enroll_result_line_names_reuse_or_new :: proc(t: ^testing.T) {
 	testing.expect_value(t, bridge_enroll_result_line("brg_previous1", "brg_fresh"), "Registered new bridge brg_fresh")
 	testing.expect_value(t, bridge_enroll_result_line("", "brg_fresh"), "Registered new bridge brg_fresh")
 }
+
+@(test)
+enroll_approval_url_preserves_preview_prefix :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	for input in ([?]string{"https://preview.example/p/sh_123", "https://preview.example/p/sh_123/"}) {
+		base, ok := bridge_enroll_approval_base_url(input)
+		testing.expect(t, ok)
+		testing.expect_value(t, bridge_enroll_approval_url(base), "https://preview.example/p/sh_123/api/v1/device/add")
+	}
+	for invalid in ([?]string{"javascript:alert(1)", "https://user:pass@preview.example/p/sh_123", "https://preview.example/p/sh_123?code=secret", "https://preview.example/p/sh_123#fragment", "https://preview.example/../sh_123", "https:///p/sh_123", "https://:/p/sh_123", "http://preview.example:99999/p/sh_123"}) {
+		_, ok := bridge_enroll_approval_base_url(invalid)
+		testing.expect(t, !ok)
+	}
+}

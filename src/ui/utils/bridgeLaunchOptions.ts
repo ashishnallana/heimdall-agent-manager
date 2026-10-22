@@ -17,7 +17,7 @@ export function bridgeIdOf(bridge: any): string {
 }
 
 export function bridgeIsOnline(bridge: any): boolean {
-  return String(bridge?.status || '').toLowerCase() === 'online';
+  return !bridge?.plan_disabled_at && String(bridge?.status || '').toLowerCase() === 'online';
 }
 
 export function bridgeLabel(bridge: any): string {

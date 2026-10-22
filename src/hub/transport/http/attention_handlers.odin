@@ -8,7 +8,10 @@ import card_service "odin_test:hub/service/card"
 // time range, and a counts-only read for the always-visible bar. Served by the
 // card service; mounted on Card_Handlers.
 //
-//   GET /api/v1/attention?since=6h|24h|7d|all&kind=message|task|memory|snoozed
+//   GET /api/v1/attention?since=6h|24h|7d|all&kind=message|task|memory|agent_blocker|snoozed
+//
+// agent_blocker items are live agent blockers (permission prompts / terminal
+// prompts) merged in at read time from the agent service's in-memory map.
 //   GET /api/v1/attention/summary?since=...
 
 attention_handler :: proc(ctx: rawptr, req: Request) -> Response {
@@ -48,7 +51,7 @@ attention_respond :: proc(ctx: rawptr, req: Request, with_items: bool) -> Respon
 write_attention_counts_json :: proc(b: ^strings.Builder, c: iface.Attention_Counts) {
 	// Built piecewise: fmt treats a literal '{' as a format directive.
 	strings.write_string(b, `{"total":`)
-	strings.write_int(b, c.message + c.task + c.memory)
+	strings.write_int(b, c.message + c.task + c.memory + c.agent_blocker)
 	strings.write_string(b, `,"older":`)
 	strings.write_int(b, c.older)
 	strings.write_string(b, `,"message":`)
@@ -59,6 +62,8 @@ write_attention_counts_json :: proc(b: ^strings.Builder, c: iface.Attention_Coun
 	strings.write_int(b, c.memory)
 	strings.write_string(b, `,"snoozed":`)
 	strings.write_int(b, c.snoozed)
+	strings.write_string(b, `,"agent_blocker":`)
+	strings.write_int(b, c.agent_blocker)
 	strings.write_byte(b, '}')
 }
 

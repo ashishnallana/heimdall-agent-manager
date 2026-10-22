@@ -40,16 +40,30 @@ Bridge_Permission_Pending :: struct {
 	reason: string,
 	created_unix_ms: i64,
 	deadline_unix_ms: i64,
+	// Agent blocker metadata (extension_blockers.odin). kind "" keeps an entry
+	// out of the hub snapshot (the legacy agent.permission.request contract).
+	kind: string, // "" | permission | terminal_prompt
+	provider: string,
+	agent_id: string,
+	summary: string,
+	input: string, // JSON object, capped at BRIDGE_BLOCKER_INPUT_MAX
+	// generation counts registrations of the same id. A hook that lost its
+	// socket re-registers; the older waiter sees a newer generation and leaves.
+	generation: int,
 }
 
 bridge_permission_mutex: sync.Mutex
 bridge_permission_pending: [dynamic]Bridge_Permission_Pending
 
 // Normalize a decision string to the canonical set, defaulting unknown/empty to "deny".
+// "none" is kept (no decision); legacy callers map it to their own fail-safe.
 bridge_permission_normalize_decision :: proc(value: string) -> string {
-	switch strings.to_lower(strings.trim_space(value)) {
+	switch strings.to_lower(strings.trim_space(value), context.temp_allocator) {
 	case "allow", "allowed", "approve", "approved", "yes", "ok": return "allow"
 	case "ask", "prompt", "defer": return "ask"
+	// "none": no decision was made (relay timed out or was cancelled). The
+	// extension path hands this back so the provider shows its own TUI prompt.
+	case "none", "cancel", "cancelled", "expired": return "none"
 	case: return "deny"
 	}
 }
@@ -74,14 +88,20 @@ bridge_permission_register :: proc(pending: Bridge_Permission_Pending) -> bool {
 		}
 	}
 	append(&bridge_permission_pending, pending)
+	if pending.kind != "" do bridge_blockers_touch_locked(pending.agent_instance_id)
 	return true
 }
 
-// Reset / clear pending permission requests under lock (for tests).
-bridge_permission_test_reset :: proc() {
+// Clear one instance's pending permission requests and blocker state under lock
+// (for tests). Scoped to an instance because bridge tests run in parallel and
+// share this registry.
+bridge_permission_test_reset :: proc(agent_instance_id: string) {
 	sync.mutex_lock(&bridge_permission_mutex)
 	defer sync.mutex_unlock(&bridge_permission_mutex)
-	clear(&bridge_permission_pending)
+	for i := len(bridge_permission_pending) - 1; i >= 0; i -= 1 {
+		if bridge_permission_pending[i].agent_instance_id == agent_instance_id do ordered_remove(&bridge_permission_pending, i)
+	}
+	if key, _ := delete_key(&bridge_blocker_instances, agent_instance_id); key != "" do delete(key, bridge_blockers_allocator())
 }
 
 // Resolve a pending request by (request_id, instance). Returns true if a match was found.
@@ -93,10 +113,13 @@ bridge_permission_resolve :: proc(agent_instance_id, request_id, decision, reaso
 		p := &bridge_permission_pending[i]
 		if p.request_id != request_id do continue
 		if agent_instance_id != "" && p.agent_instance_id != agent_instance_id do continue
+		// A screen-detected prompt has no waiter: nothing can answer it remotely.
+		if p.kind == BRIDGE_BLOCKER_KIND_TERMINAL_PROMPT do return false
 		if p.decided do return true
 		p.decided = true
 		p.decision = bridge_permission_normalize_decision(decision)
 		p.reason = strings.clone(reason)
+		if p.kind != "" do bridge_blockers_touch_locked(p.agent_instance_id)
 		return true
 	}
 	return false
@@ -105,26 +128,86 @@ bridge_permission_resolve :: proc(agent_instance_id, request_id, decision, reaso
 // Wait (blocking) for a pending request to be resolved or to time out.
 // On timeout the fail-safe decision is "deny". Removes the entry before returning.
 bridge_permission_wait :: proc(agent_instance_id, request_id: string, timeout_ms: int) -> (string, string) {
+	decision, reason, _ := bridge_permission_wait_ex(agent_instance_id, request_id, timeout_ms, "deny", nil)
+	return decision, reason
+}
+
+// Bridge_Permission_Cancelled_Proc reports whether a waiter should give up early
+// (e.g. its instance stopped). Polled about every 250ms.
+Bridge_Permission_Cancelled_Proc :: proc(agent_instance_id: string) -> bool
+
+// bridge_permission_wait_ex is bridge_permission_wait with the timeout outcome
+// chosen by the caller (timeout_decision) and an optional cancellation probe.
+// timed_out is true only when the deadline passed with no decision.
+//
+// generation > 0 ties the waiter to one registration of request_id: when the
+// same id is registered again (a hook re-registering after its socket dropped)
+// this waiter returns "none" and leaves the entry to the newer one.
+bridge_permission_wait_ex :: proc(agent_instance_id, request_id: string, timeout_ms: int, timeout_decision: string, cancelled: Bridge_Permission_Cancelled_Proc, generation := 0) -> (decision: string, reason: string, timed_out: bool) {
 	deadline := bridge_runtime_now_ms() + i64(timeout_ms)
+	polls := 0
 	for bridge_runtime_now_ms() < deadline {
+		polls += 1
+		if cancelled != nil && polls % 25 == 0 && cancelled(agent_instance_id) {
+			bridge_permission_remove(agent_instance_id, request_id)
+			return "none", "permission request cancelled", false
+		}
 		sync.mutex_lock(&bridge_permission_mutex)
 		for i in 0..<len(bridge_permission_pending) {
 			p := bridge_permission_pending[i]
 			if p.request_id != request_id do continue
 			if agent_instance_id != "" && p.agent_instance_id != agent_instance_id do continue
+			if generation > 0 && p.generation != generation {
+				sync.mutex_unlock(&bridge_permission_mutex)
+				return "none", "permission request superseded by a re-registration", false
+			}
 			if p.decided {
 				unordered_remove(&bridge_permission_pending, i)
 				sync.mutex_unlock(&bridge_permission_mutex)
-				return p.decision, p.reason
+				return p.decision, p.reason, false
 			}
 			break
 		}
 		sync.mutex_unlock(&bridge_permission_mutex)
 		time.sleep(10 * time.Millisecond)
 	}
-	// Timed out: remove and fail safe to deny.
-	bridge_permission_remove(agent_instance_id, request_id)
-	return "deny", "permission request timed out"
+	// Timed out: remove and return the caller's timeout outcome. A decision that
+	// landed between the last poll and the removal still wins.
+	sync.mutex_lock(&bridge_permission_mutex)
+	defer sync.mutex_unlock(&bridge_permission_mutex)
+	for i in 0..<len(bridge_permission_pending) {
+		p := bridge_permission_pending[i]
+		if p.request_id != request_id do continue
+		if agent_instance_id != "" && p.agent_instance_id != agent_instance_id do continue
+		if generation > 0 && p.generation != generation do return "none", "permission request superseded by a re-registration", false
+		unordered_remove(&bridge_permission_pending, i)
+		if p.decided do return p.decision, p.reason, false
+		if p.kind != "" do bridge_blockers_after_removal_locked(p.agent_instance_id)
+		break
+	}
+	return timeout_decision, "permission request timed out", true
+}
+
+// bridge_permission_cancel_instance resolves every undecided request of an
+// instance with "none" (the instance stopped; nobody can answer any more).
+// Returns how many waiters it released.
+bridge_permission_cancel_instance :: proc(agent_instance_id: string) -> int {
+	if strings.trim_space(agent_instance_id) == "" do return 0
+	sync.mutex_lock(&bridge_permission_mutex)
+	defer sync.mutex_unlock(&bridge_permission_mutex)
+	n := 0
+	for i in 0..<len(bridge_permission_pending) {
+		p := &bridge_permission_pending[i]
+		if p.agent_instance_id != agent_instance_id || p.decided do continue
+		p.decided = true
+		p.decision = "none"
+		p.reason = "agent instance stopped"
+		n += 1
+	}
+	// The instance's blocker list is now empty: drop screen-detected prompts
+	// (nothing waits on them) and announce the empty snapshot.
+	bridge_blockers_clear_instance_locked(agent_instance_id)
+	return n
 }
 
 bridge_permission_remove :: proc(agent_instance_id, request_id: string) {
@@ -135,6 +218,7 @@ bridge_permission_remove :: proc(agent_instance_id, request_id: string) {
 		if p.request_id != request_id do continue
 		if agent_instance_id != "" && p.agent_instance_id != agent_instance_id do continue
 		unordered_remove(&bridge_permission_pending, i)
+		if p.kind != "" && !p.decided do bridge_blockers_after_removal_locked(p.agent_instance_id)
 		return
 	}
 }
@@ -213,6 +297,8 @@ bridge_permission_handle_request :: proc(agent_instance_id, params: string) -> (
 	_ = bridge_wrapper_push_line(agent_instance_id, bridge_permission_request_push_json(pending, input_json))
 
 	decision, reason = bridge_permission_wait(agent_instance_id, request_id, timeout_ms)
+	// This legacy contract has no "no decision" outcome: keep its fail-safe deny.
+	if decision == "none" do decision = "deny"
 
 	// Restore activity to active now that the gate has resolved; the pane_diff
 	// detector will emit the next authoritative active/idle on its following cycle.

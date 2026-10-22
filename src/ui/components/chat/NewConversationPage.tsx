@@ -178,7 +178,9 @@ export default function NewConversationPage({ footer, onLaunched, launchIntent }
     const initialProject = routeProject || prefs.project_id || projects.find((p: any) => p.state === 'active' && (p.is_default_conversations || p.slug === 'conversation'))?.project_id || projects.find((p: any) => p.state === 'active')?.project_id || '';
     // Provider status is fetched per selected bridge, so the default is the first
     // connected bridge; the issues list below catches one without usable providers.
-    const initialBridge = prefs.bridge_id || bridges.find((b: any) => b.runtime_connected && b.status === 'online')?.bridge_id || '';
+    // Bridges disabled for being over the plan limit are never a default.
+    const preferredBridge = bridges.find((b: any) => b.bridge_id === prefs.bridge_id && !b.plan_disabled_at);
+    const initialBridge = preferredBridge?.bridge_id || bridges.find((b: any) => !b.plan_disabled_at && b.runtime_connected && b.status === 'online')?.bridge_id || '';
     setAgentId(initialAgent); setProjectId(initialProject); setRuntime({ bridgeId: initialBridge, provider: '', model: '' });
     consumeProjectPreselection(); setHydrated(true);
     if (initialAgent !== prefs.agent_id) remember('agent_id', initialAgent);

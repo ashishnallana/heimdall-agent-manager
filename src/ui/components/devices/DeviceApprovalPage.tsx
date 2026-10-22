@@ -1,3 +1,7 @@
+import { useEntitlements } from '../../hooks/useEntitlements';
+import UpgradePrompt from '../billing/UpgradePrompt';
+import { isPlanLimitError, planLimitMessage, planLimitDetails, type PlanLimitDetails } from '../../utils/planLimit';
+import { atPlanLimit } from '../../utils/accountEntitlements';
 // /device/add — the ONE approval surface for new browsers AND new bridges
 // (docs/plans/passwordless-vault.md requirement 2, §1 "Pairing").
 //
@@ -30,12 +34,13 @@ import {
   type BrowserCodeInfo,
   type DeviceCodeInfo,
 } from '../../api/endpoints/vaultDevices';
-import { fetchBridgeEnrollmentStatus, fetchBridgeRow, fetchBridgeUnsealTarget, unsealBridge } from '../../api/endpoints/bridges';
+import { fetchPendingBridgeEnrollments, fetchBridgeEnrollmentStatus, fetchBridgeRow, fetchBridgeUnsealTarget, unsealBridge } from '../../api/endpoints/bridges';
 import { useListBridgesQuery } from '../../api/endpoints/bridgeSupport';
 import { enrollmentPendingOutcome, ENROLLMENT_PENDING_FALLBACK_SECONDS } from '../enrollment/bridgeEnrollmentCompletion';
 import ProviderSetupSurface from '../providers/ProviderSetupSurface';
 import { bridgeReconnectReady, reconnectSecondsLeft, reconnectStage, startReconnectWait } from '../providers/providerSummaryModel';
 import {
+  bridgeChoiceAtLimit,
   approvalLabel,
   bridgeApproveBody,
   bridgeApprovedMessage,
@@ -92,6 +97,7 @@ type Phase =
   | { kind: 'failed'; message: string };
 
 function errText(err: unknown): string {
+  if (isPlanLimitError(err)) return planLimitMessage(planLimitDetails(err));
   if (err instanceof ApiError && err.status === 409) return `The directory changed while approving (${err.message}). Type the code again.`;
   if (err instanceof ApiError && err.status === 404) return NO_MATCH_MESSAGE;
   return String((err as Error)?.message || err);
@@ -241,6 +247,10 @@ function BridgeReconnectWait({ bridgeId, label, onReady, onSkip }: { bridgeId: s
 }
 
 export default function DeviceApprovalPage() {
+  const entitlements = useEntitlements();
+  const { data: bridgesData } = useListBridgesQuery();
+  const [pendingCount, setPendingCount] = useState(0);
+  const [planError, setPlanError] = useState<PlanLimitDetails | null>(null);
   const [code, setCode] = useState('');
   const [phase, setPhase] = useState<Phase>({ kind: 'enter' });
   // The code input is locked once a lookup is in flight or succeeded: approve/deny always
@@ -249,8 +259,23 @@ export default function DeviceApprovalPage() {
   const [label, setLabel] = useState('');
   const [bridgeChoice, setBridgeChoice] = useState<BridgeChoice>({ mode: 'new', targetBridgeId: '' });
 
+  useEffect(() => {
+    if (phase.kind !== 'review' || phase.browser) return;
+    let cancelled = false;
+    void fetchPendingBridgeEnrollments().then((rows) => {
+      if (!cancelled) setPendingCount(rows.length);
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [phase.kind]);
+  const bridgeCount = (bridgesData?.bridges || []).filter((b: any) => !b.revoked_at && b.status !== 'revoked').length + pendingCount;
+  const atCapacity = atPlanLimit(entitlements.max_bridges, bridgeCount);
+  const effectiveBridgeChoice = phase.kind === 'review' && !phase.browser
+    ? bridgeChoiceAtLimit(phase.info as BridgeCodeInfo, bridgeChoice, atCapacity)
+    : bridgeChoice;
+
   const lookUp = useCallback(async (raw: string) => {
     if (!raw.trim()) return;
+    setPlanError(null);
     setPhase({ kind: 'loading' });
     try {
       const review = await lookUpPairing(raw, deviceVaultUserId());
@@ -283,8 +308,8 @@ export default function DeviceApprovalPage() {
         return;
       }
       const bridgeInfo = info as BridgeCodeInfo;
-      const target = reuseTarget(reusableBridgesOf(bridgeInfo), bridgeChoice);
-      if (bridgeChoice.mode === 'reuse' && !target) throw new Error('Pick the bridge identity to reuse.');
+      const target = reuseTarget(reusableBridgesOf(bridgeInfo), effectiveBridgeChoice);
+      if (effectiveBridgeChoice.mode === 'reuse' && !target) throw new Error('Pick the bridge identity to reuse.');
       const bridgeLabel = approvalLabel(target, finalLabel);
       const { vault_approval, statement } = await buildBridgeApproval(identity, chain, bridgeInfo, bridgeLabel);
       const res = await postApproveBridge(bridgeApproveBody(keys.lookup, vault_approval, target, finalLabel));
@@ -305,9 +330,10 @@ export default function DeviceApprovalPage() {
       }, { enrollment: true, identityPublicKey: bridgeInfo.bridge_identity_public_key, expectedPublicKey, extra: { enrollment: true, expected_public_key: expectedPublicKey.trim().toLowerCase(), pair_mac: pairMac } });
       setPhase({ kind: 'reconnecting', bridgeId, label: bridgeLabel, approved: bridgeApprovedMessage(target, bridgeLabel, bridgeId) });
     } catch (err) {
+      if (isPlanLimitError(err)) setPlanError(planLimitDetails(err));
       setPhase({ kind: 'failed', message: errText(err) });
     }
-  }, [phase, label, bridgeChoice]);
+  }, [phase, label, effectiveBridgeChoice]);
 
   const deny = useCallback(async () => {
     if (phase.kind !== 'review') return;
@@ -369,18 +395,19 @@ export default function DeviceApprovalPage() {
               <dd data-debug-id="device-approval-requested-at" className="text-primary">{new Date(String((phase.info as BrowserCodeInfo).created_at)).toLocaleString()}</dd>
             </>) : null}
           </dl>
-          {phase.browser ? null : <BridgeIdentityChoice info={phase.info as BridgeCodeInfo} choice={bridgeChoice} onChange={setBridgeChoice} />}
-          {phase.browser || bridgeChoice.mode === 'new' ? (<>
+          {phase.browser ? null : <BridgeIdentityChoice info={phase.info as BridgeCodeInfo} choice={effectiveBridgeChoice} onChange={setBridgeChoice} atCapacity={atCapacity} />}
+          {phase.browser || effectiveBridgeChoice.mode === 'new' ? (<>
             <label className="mb-1 block text-xs font-medium text-muted" htmlFor="device-approval-label">Name it (signed into the approval)</label>
             <Input id="device-approval-label" data-debug-id="device-approval-label-input" value={label} onChange={setLabel} className="mb-3" />
           </>) : null}
           <div className="flex flex-wrap gap-2">
-            <Button data-debug-id="device-approval-approve-btn" variant="primary" onClick={() => void approve()}>Approve</Button>
+            <Button data-debug-id="device-approval-approve-btn" variant="primary" disabled={!phase.browser && atCapacity && !effectiveBridgeChoice.targetBridgeId} onClick={() => void approve()}>Approve</Button>
             <Button data-debug-id="device-approval-deny-btn" variant="danger" onClick={() => void deny()}>Deny</Button>
           </div>
         </div>
       ) : null}
 
+      {planError ? <UpgradePrompt details={planError} debugId="device-approval-plan-error" /> : null}
       {phase.kind === 'working' ? <p data-debug-id="device-approval-progress" className="text-sm text-muted">{phase.message}</p> : null}
       {phase.kind === 'reconnecting' || phase.kind === 'providers' ? (
         <p data-debug-id="device-approval-bridge-outcome" className="mb-3 text-sm">{phase.approved}</p>
@@ -418,15 +445,16 @@ export default function DeviceApprovalPage() {
 }
 
 /** New vs Reuse for a bridge grant; Reuse is hidden when the approver has no reusable bridge. */
-export function BridgeIdentityChoice({ info, choice, onChange }: { info: BridgeCodeInfo; choice: BridgeChoice; onChange: (c: BridgeChoice) => void }) {
+export function BridgeIdentityChoice({ info, choice, onChange, atCapacity = false }: { info: BridgeCodeInfo; choice: BridgeChoice; onChange: (c: BridgeChoice) => void; atCapacity?: boolean }) {
   const list = reusableBridgesOf(info);
-  if (list.length === 0) return null;
+  if (list.length === 0) return atCapacity ? <UpgradePrompt details={{ limit: 'max_bridges' }} debugId="device-approval-bridge-cap" /> : null;
   const hinted = typeof info.previous_bridge_id === 'string' ? info.previous_bridge_id : '';
   const targetId = choice.targetBridgeId || list[0].bridge_id;
   return (
     <fieldset data-debug-id="device-approval-bridge-mode" className="mb-3 flex flex-col gap-2">
       <legend className="mb-1 text-xs font-medium text-muted">Bridge identity</legend>
-      <Radio name="device-approval-bridge-mode" value="new" data-debug-id="device-approval-mode-new" checked={choice.mode === 'new'} onChange={() => onChange({ mode: 'new', targetBridgeId: targetId })} label="Register as a new bridge" />
+      {atCapacity ? <UpgradePrompt details={{ limit: 'max_bridges' }} debugId="device-approval-bridge-cap" /> : null}
+      <Radio name="device-approval-bridge-mode" value="new" disabled={atCapacity} data-debug-id="device-approval-mode-new" checked={choice.mode === 'new'} onChange={() => onChange({ mode: 'new', targetBridgeId: targetId })} label="Register as a new bridge" />
       <Radio name="device-approval-bridge-mode" value="reuse" data-debug-id="device-approval-mode-reuse" checked={choice.mode === 'reuse'} onChange={() => onChange({ mode: 'reuse', targetBridgeId: targetId })} label="Reuse an existing bridge identity" />
       {choice.mode === 'reuse' ? (<>
         <div data-debug-id="device-approval-reuse-list" role="radiogroup" aria-label="Bridge to reuse" className="ml-6 flex flex-col gap-1">

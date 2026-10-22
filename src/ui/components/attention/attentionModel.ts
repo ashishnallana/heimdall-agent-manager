@@ -1,10 +1,12 @@
 // Pure view-model helpers for the attention deck (no React; unit-tested).
-import type { AttentionCounts, AttentionItem, AttentionKind } from '../../api/endpoints/attention';
+import type { AttentionBlockerItem, AttentionCounts, AttentionItem, AttentionKind } from '../../api/endpoints/attention';
 
 /** Messages and Tasks hold live cards; Snoozed holds cards whose snooze is running. */
 export type DeckTab = AttentionKind | 'snoozed';
 
 export const DECK_TABS: ReadonlyArray<{ id: DeckTab; label: string }> = [
+  // Live agent blockers first: an agent is stalled until someone answers.
+  { id: 'agent_blocker', label: 'Permissions' },
   { id: 'message', label: 'Messages' },
   { id: 'task', label: 'Tasks' },
   { id: 'memory', label: 'Memories' },
@@ -34,6 +36,7 @@ export function visibleItems(items: readonly AttentionItem[], tab: DeckTab, hidd
 export function tabCounts(counts: AttentionCounts, items: readonly AttentionItem[], hidden: ReadonlySet<string>): Record<DeckTab, number> {
   const hiddenOf = (tab: DeckTab) => items.filter((item) => inTab(item, tab) && hidden.has(hideKey(item))).length;
   return {
+    agent_blocker: Math.max(0, (counts.agent_blocker ?? 0) - hiddenOf('agent_blocker')),
     message: Math.max(0, counts.message - hiddenOf('message')),
     task: Math.max(0, counts.task - hiddenOf('task')),
     memory: Math.max(0, counts.memory - hiddenOf('memory')),
@@ -42,7 +45,7 @@ export function tabCounts(counts: AttentionCounts, items: readonly AttentionItem
 }
 
 /** Live tabs, in deck order (Snoozed is never a destination on its own). */
-export const LIVE_TABS: readonly DeckTab[] = ['message', 'task', 'memory'];
+export const LIVE_TABS: readonly DeckTab[] = ['agent_blocker', 'message', 'task', 'memory'];
 
 /** The tab to open on: the first live tab with something in it (never Snoozed). */
 export function defaultTab(counts: Record<DeckTab, number>): DeckTab {
@@ -126,13 +129,25 @@ export const TASK_BADGE_LABELS: Record<string, string> = {
   oscillation: 'Review rounds',
 };
 
+/** A terminal prompt is answered only in the agent terminal (no Allow / Deny). */
+export function isTerminalPromptItem(item: AttentionBlockerItem): boolean {
+  return item.details.blocker_kind === 'terminal_prompt';
+}
+
+/** "Needs your permission" (provider prompt) / "Waiting for input in the terminal". */
+export function blockerReason(item: AttentionBlockerItem): string {
+  return isTerminalPromptItem(item) ? 'Waiting for input in the terminal' : 'Needs your permission';
+}
+
 export function reasonLine(item: AttentionItem, now: number): string {
   if (item.snoozed) {
     const wake = formatWake(item.snooze_until, now);
     return wake ? `Snoozed until ${wake}` : 'Snoozed';
   }
   const age = formatAge(item.attention_since, now);
-  const base = item.kind === 'task' ? taskReason(item.details) : item.kind === 'memory' ? 'Waiting on your approval' : 'Waiting on your reply';
+  const base = item.kind === 'task' ? taskReason(item.details)
+    : item.kind === 'agent_blocker' ? blockerReason(item)
+    : item.kind === 'memory' ? 'Waiting on your approval' : 'Waiting on your reply';
   return age ? `${base} · ${age}` : base;
 }
 

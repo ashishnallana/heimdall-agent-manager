@@ -253,7 +253,17 @@ bridge_enroll_hub_url :: proc(raw: string, allocator := context.allocator) -> (s
 // any signed-in device. It intentionally contains no user code or cryptographic
 // material; the terminal prints those separately for manual entry/comparison.
 bridge_enroll_approval_url :: proc(ui_origin: string, allocator := context.allocator) -> string {
-	return strings.concatenate({ui_origin, BRIDGE_ENROLL_PAGE_PATH}, allocator)
+	return strings.concatenate({strings.trim_right(ui_origin, "/"), BRIDGE_ENROLL_PAGE_PATH}, allocator)
+}
+
+// Validate the optional browser base as strictly as a canonical hub address,
+// while preserving its spelling and path for the displayed approval link.
+bridge_enroll_approval_base_url :: proc(raw: string, allocator := context.allocator) -> (string, bool) {
+	base, ok := bridge_enroll_hub_url(raw, context.temp_allocator)
+	if !ok do return "", false
+	_, canonical := bridge_hub_canonical_base(base, context.temp_allocator)
+	if !canonical do return "", false
+	return strings.clone(base, allocator), true
 }
 
 // ===== The machine descriptor =====
@@ -1080,6 +1090,17 @@ bridge_enroll_device_command :: proc(args: []string) -> bool {
 		fmt.eprintln("ham-bridge enroll --hub requires the Hub API base URL, e.g. --hub https://hub.mundus.in or --hub http://10.0.0.5:8080/heimdall (no query or fragment)")
 		return false
 	}
+	// A preview UI may have a path prefix absent from the Hub's CSRF origin.
+	// This browser-only override never changes API or pairing identity.
+	approval_base := option_value(args, "--approval-base-url", "")
+	if approval_base != "" {
+		validated, valid := bridge_enroll_approval_base_url(approval_base, context.temp_allocator)
+		if !valid {
+			fmt.eprintln("ham-bridge enroll --approval-base-url requires an http(s) browser base URL without credentials, query or fragment")
+			return false
+		}
+		approval_base = validated
+	}
 	// Bind this process's vault state to that hub (multi-bridge isolation): every
 	// keystore item it writes is scoped to (hub, bridge id).
 	if !bridge_keystore_set_hub(api_base) {
@@ -1257,7 +1278,7 @@ bridge_enroll_device_command :: proc(args: []string) -> bool {
 
 	// Step 6 — print a stable, code-free URL and the pairing code. The code is typed
 	// once on an approved device; a link never carries it.
-	approval_url := bridge_enroll_approval_url(ui_origin, context.temp_allocator)
+	approval_url := bridge_enroll_approval_url(approval_base if approval_base != "" else ui_origin, context.temp_allocator)
 	identity_fp, _ := bridge_enroll_fingerprint(identity_hex, context.temp_allocator)
 	fmt.println("")
 	fmt.println("Enroll this machine")

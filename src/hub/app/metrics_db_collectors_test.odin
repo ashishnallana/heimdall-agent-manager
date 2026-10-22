@@ -33,7 +33,7 @@ dbc_fixture :: proc(t: ^testing.T, suffix: string) -> (sqlite.Conn, string) {
 		INSERT INTO user_api_tokens (token_id, owner_user_id, token_hash, created_at, updated_at, last_used_at) VALUES ('tok-c', 'carol', 'sha1:c', '2026-09-01T00:00:00Z', '2026-09-20T12:00:00Z', '2026-09-20T12:00:00Z');
 		-- users_billing_defaults trigger already inserted a free/free row per user.
 		UPDATE account_billing SET plan_id = 'hobbyist', status = 'active' WHERE user_id = 'alice';
-		INSERT INTO billing_plans VALUES ('bespoke', 'Custom', NULL, 9, 1);
+		INSERT INTO billing_plans (plan_id, plan_label, price_id, max_bridges, terminal_streaming_enabled) VALUES ('bespoke', 'Custom', NULL, 9, 1);
 		UPDATE account_billing SET plan_id = 'bespoke', status = 'mystery' WHERE user_id = 'carol';
 	`), "seed fixture rows")
 	return conn, path

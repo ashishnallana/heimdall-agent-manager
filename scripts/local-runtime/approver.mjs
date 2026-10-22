@@ -5,7 +5,10 @@
 // tests/e2e/bridge_real_enroll_e2e.mjs; nothing is written to the database directly.
 //
 //   node --import <checkout>/tests/helpers/vaultEndpointHarness.ts approver.mjs <verb> \
-//     --api <dev-proxy-url> --key <hub-dir>/approver/device.json [--code CODE] [--label NAME]
+//     --api <dev-proxy-url> --key <hub-dir>/approver/device.json [--code CODE] [--label NAME] [--user NAME]
+//
+//   --user  act as that dev-proxy user (X-Dev-User) instead of the proxy's default
+//           user. Each user has its own vault, so each needs its own --key.
 //
 //   init    create the user's vault genesis with a new approver device and save its
 //           key. Idempotent: an existing key that the directory still trusts is kept.
@@ -50,7 +53,7 @@ export function parseArgs(argv) {
   const out = { verb, label: verb === 'device' ? 'Browser' : 'local-bridge' };
   for (let i = 0; i < rest.length; i += 2) {
     const k = rest[i].replace(/^--/, '');
-    if (!['api', 'key', 'code', 'label'].includes(k) || rest[i + 1] === undefined) throw new Refused(`bad argument ${rest[i]}`);
+    if (!['api', 'key', 'code', 'label', 'user'].includes(k) || rest[i + 1] === undefined) throw new Refused(`bad argument ${rest[i]}`);
     out[k] = rest[i + 1];
   }
   if (!out.api || !out.key) throw new Refused('--api and --key are required');
@@ -58,9 +61,12 @@ export function parseArgs(argv) {
   return out;
 }
 
+// The dev-proxy user every request acts as ('' = the proxy's default user).
+let devUser = '';
+
 async function http(api, method, p, { body, headers = {} } = {}) {
   const text = body === undefined ? undefined : JSON.stringify(body);
-  const h = { ...headers, ...(text === undefined ? {} : { 'Content-Type': 'application/json' }) };
+  const h = { ...headers, ...(devUser ? { 'X-Dev-User': devUser } : {}), ...(text === undefined ? {} : { 'Content-Type': 'application/json' }) };
   const res = await fetch(`${api}${p}`, { method, headers: h, body: text });
   const raw = await res.text();
   let json = null;
@@ -110,7 +116,8 @@ async function chainOf(api, userId) {
   return verifyDirectory((await http(api, 'GET', '/api/v1/vault/directory')).data, userId, null);
 }
 
-export async function init({ api, key }) {
+export async function init({ api, key, user = '' }) {
+  devUser = user;
   const userId = await userIdOf(api);
   if (fs.existsSync(key)) {
     const identity = await identityFromFile(key, userId);
@@ -159,7 +166,8 @@ async function lookUp(api, code, kind, userId) {
   return { info: ver.data, keys };
 }
 
-export async function approveBridge({ api, key, code, label }) {
+export async function approveBridge({ api, key, code, label, user = '' }) {
+  devUser = user;
   const ap = await approver(api, key);
   try {
     const { info, keys } = await lookUp(api, code, 'bridge', ap.userId);
@@ -192,7 +200,8 @@ export async function approveBridge({ api, key, code, label }) {
   }
 }
 
-export async function approveDevice({ api, key, code, label }) {
+export async function approveDevice({ api, key, code, label, user = '' }) {
+  devUser = user;
   const ap = await approver(api, key);
   try {
     const { info, keys } = await lookUp(api, code, 'browser', ap.userId);

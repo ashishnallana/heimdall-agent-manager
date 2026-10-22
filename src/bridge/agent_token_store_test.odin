@@ -107,12 +107,18 @@ bridge_token_store_save_load_roundtrip :: proc(t: ^testing.T) {
 	bridge_config.local_endpoint_run_dir = "/tmp/bridgeRT"
 
 	bridge_agent_token_store_init()
-	issue := bridge_agent_token_issue("inst_RT", "hit_inst_RT", .Agent)
+	issue := bridge_agent_token_issue("inst_RT", "hit_inst_RT", .Agent, 4)
 
 	// Fresh init reloads from disk (atomic-written file) and still verifies.
 	bridge_agent_token_store_init()
 	rec, ok := bridge_agent_token_verify(issue.plaintext_token)
 	testing.expect(t, ok && rec.agent_instance_id == "inst_RT" && rec.role == .Agent, "token roundtrips through atomic save + reload")
+	testing.expect_value(t, rec.run_count, 4)
+	rotated, rotated_ok := bridge_agent_token_rotate(issue.plaintext_token)
+	testing.expect(t, rotated_ok)
+	bridge_agent_token_store_init()
+	reloaded, reload_ok := bridge_agent_token_verify(rotated.plaintext_token)
+	testing.expect(t, reload_ok && reloaded.run_count == 4, "generation survives token rotation and reload")
 
 }
 

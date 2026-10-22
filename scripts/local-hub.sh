@@ -18,8 +18,16 @@
 #   --build MODE       nix | odin | none       (default: nix; none = use --bin-dir as is)
 #   --bin-dir DIR      take ham-hub/ham-dev-proxy from DIR instead of building
 #   --no-ui            do not start the browser UI
-#   --no-seed          do not seed sample agents, chains, memories or the approver
+#   --no-seed          do not seed sample agents, chains, memories, the approver or
+#                      the paid account
+#   --no-plan-limits   do not enforce billing plan limits (on by default, so local
+#                      runs behave like the free plan for the default user)
 #   --code CODE        (approve-device) pairing code the hub UI shows a new browser
+#
+# Accounts: the dev proxy signs in as --user, which stays on the free plan.
+# Seeding also creates the dev proxy user "paid" on the hobbyist plan (set in
+# hub.db by local-runtime/plans.mjs), with its own sample data and seed approver.
+# Switch accounts in the browser with /_dev/login?user=paid (or the /_dev/ page).
 #
 # Seeding also creates the hub user's vault with a SEED APPROVER device whose key
 # stays in approver/device.json (0600) of this instance. It lets
@@ -38,11 +46,13 @@ LR_TAG=local-hub
 # shellcheck source=local-runtime/lib.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/local-runtime/lib.sh"
 
-usage() { sed -n '2,35p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,43p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 CMD="${1:-help}"; [ $# -gt 0 ] && shift
 NAME=default HUB_PORT="" PROXY_PORT="" UI_PORT="" PUBLIC_ORIGIN="" DEV_USER="${USER:-local}"
-BUILD="${HEIMDALL_LOCAL_BUILD:-nix}" BIN_DIR="" UI=1 SEED=1 CODE=""
+BUILD="${HEIMDALL_LOCAL_BUILD:-nix}" BIN_DIR="" UI=1 SEED=1 PLAN_LIMITS=true CODE=""
+# Seeded paid accounts as user:plan; each must be in the dev proxy's default roster.
+SEED_PLANS="paid:hobbyist"
 while [ $# -gt 0 ]; do
   case "$1" in
     --name) NAME="$2"; shift 2 ;;
@@ -55,6 +65,7 @@ while [ $# -gt 0 ]; do
     --bin-dir) BIN_DIR="$2"; BUILD=none; shift 2 ;;
     --no-ui) UI=0; shift ;;
     --no-seed) SEED=0; shift ;;
+    --no-plan-limits) PLAN_LIMITS=false; shift ;;
     --code) CODE="$2"; shift 2 ;;
     -h|--help) CMD=help; shift ;;
     *) lr_die "unknown option $1 (see: $0 help)" ;;
@@ -75,11 +86,39 @@ ensure_node_modules() {
   (cd "$LR_ROOT" && npm ci --legacy-peer-deps --no-audit --no-fund)
 }
 
-# approver <verb> [args]: scripts/local-runtime/approver.mjs against this hub's proxy.
+# approver <verb> [args]: scripts/local-runtime/approver.mjs against this hub's proxy,
+# as the default user. Pass --key and --user to act for a seeded account instead.
 approver() {
   local verb="$1"; shift
   (cd "$LR_ROOT" && node --import ./tests/helpers/vaultEndpointHarness.ts "$LR_HELPERS/approver.mjs" \
     "$verb" --api "http://127.0.0.1:$PROXY_PORT" --key "$APPROVER_KEY" "$@")
+}
+
+# init_approver <label> [approver args]: the seed approver; exit 3 means another
+# device (a browser) rooted that vault first, so its bridges are approved in the UI.
+init_approver() {
+  local label="$1" rc=0; shift
+  approver init "$@" 2>&1 | sed "s/^/[$LR_TAG] /" || rc="${PIPESTATUS[0]}"
+  case "$rc" in
+    0) ;;
+    3) lr_log "WARN: no seed approver for $label; --auto-enroll is unavailable for it" ;;
+    *) stop_all; lr_die "seed approver failed for $label" ;;
+  esac
+}
+
+# seed_accounts: each SEED_PLANS user gets sample data (its first request creates the
+# account), its plan in hub.db, and a seed approver under approver/users/<user>/.
+seed_accounts() {
+  local entry user plan
+  for entry in $SEED_PLANS; do
+    user="${entry%%:*}" plan="${entry#*:}"
+    if [ "$user" = "$DEV_USER" ]; then lr_log "WARN: --user $user is a seeded paid account; it stays on $plan"; fi
+    node "$LR_HELPERS/seed.mjs" --api "http://127.0.0.1:$PROXY_PORT" --record "$DIR/seed-$user.json" --user "$user" \
+      | sed "s/^/[$LR_TAG] $user: /" || { stop_all; lr_die "seeding $user failed"; }
+    node "$LR_HELPERS/plans.mjs" --db "$DIR/hub.db" --user "$user" --plan "$plan" \
+      | sed "s/^/[$LR_TAG] /" || { stop_all; lr_die "setting the $plan plan for $user failed"; }
+    init_approver "$user" --key "$DIR/approver/users/$user/device.json" --user "$user"
+  done
 }
 
 # Recorded ports win; a conflicting explicit port is an error, not a silent change.
@@ -135,7 +174,8 @@ start() {
   lr_log "starting hub on 127.0.0.1:$HUB_PORT (db $DIR/hub.db)"
   lr_spawn "$DIR" hub "$DIR/logs/hub.log" "${iso[@]}" "$hub_bin" \
     --listen "127.0.0.1:$HUB_PORT" --db "$DIR/hub.db" --migrations-dir "$migrations" \
-    --trusted-proxy-cidr 127.0.0.1/32 --ui-origin "$csrf_origin" --pairing-hub-origins "$pairing_origins"
+    --trusted-proxy-cidr 127.0.0.1/32 --ui-origin "$csrf_origin" --pairing-hub-origins "$pairing_origins" \
+    --billing-enforce-plan-limits "$PLAN_LIMITS"
   if ! lr_wait_http "http://127.0.0.1:$HUB_PORT/api/v1/health" 30 || ! lr_owned_pid "$DIR" hub >/dev/null; then
     tail -20 "$DIR/logs/hub.log" >&2 || true
     stop_all; lr_die "hub did not become healthy"
@@ -154,15 +194,9 @@ start() {
     node "$LR_HELPERS/seed.mjs" --api "http://127.0.0.1:$PROXY_PORT" --record "$DIR/seed.json" \
       | sed "s/^/[$LR_TAG] /" || { stop_all; lr_die "seeding failed"; }
     ensure_node_modules || { stop_all; lr_die "npm ci failed"; }
-    # Exit 3: the vault was rooted by another device (a browser) first. The hub is
-    # still usable; bridges are then approved in the UI instead of automatically.
-    local rc=0
-    approver init 2>&1 | sed "s/^/[$LR_TAG] /" || rc="${PIPESTATUS[0]}"
-    case "$rc" in
-      0) ;;
-      3) lr_log "WARN: no seed approver; --auto-enroll is unavailable for this hub" ;;
-      *) stop_all; lr_die "seed approver failed" ;;
-    esac
+    # The hub is still usable without a seed approver; bridges are then approved in the UI.
+    init_approver "$DEV_USER"
+    seed_accounts
   fi
 
   if [ "$UI" = 1 ]; then
@@ -195,6 +229,11 @@ status() {
   local pub; pub="$(lr_env_get "$ENV_FILE" PUBLIC_ORIGIN)"
   [ -n "$pub" ] && echo "  public  : $pub  (trusted browser origin)"
   if [ -s "$APPROVER_KEY" ]; then echo "  approver: $APPROVER_KEY"; else echo "  approver: none (approve bridges in the UI)"; fi
+  local entry
+  for entry in $SEED_PLANS; do
+    [ -s "$DIR/seed-${entry%%:*}.json" ] && echo "  account : ${entry%%:*} on ${entry#*:} (/_dev/login?user=${entry%%:*})"
+  done
+  return 0
 }
 
 # approve-device: let a browser join this hub's vault (the UI shows it a pairing code).

@@ -13,7 +13,7 @@ Content_Repo_SQLite :: struct { conn: ^Conn }
 
 new_content_repository :: proc(impl: ^Content_Repo_SQLite, conn: ^Conn) -> iface.Content_Repository {
 	impl.conn = conn
-	return iface.Content_Repository{ctx=rawptr(impl), list_unread_incoming_ids=content_list_unread_incoming_ids_sqlite, save_memory=content_save_memory_sqlite, get_memory=content_get_memory_sqlite, list_memories=content_list_memories_sqlite, save_conversation=content_save_conversation_sqlite, get_conversation=content_get_conversation_sqlite, list_conversations=content_list_conversations_sqlite, save_message=content_save_message_sqlite, get_message=content_get_message_sqlite, update_message=content_update_message_sqlite, list_messages=content_list_messages_sqlite, list_user_visible_messages=content_list_user_visible_messages_sqlite, list_agent_inbox_messages=content_list_agent_inbox_messages_sqlite, mark_messages_read=content_mark_messages_read_sqlite, save_artifact=content_save_artifact_sqlite, get_artifact=content_get_artifact_sqlite, list_artifacts=content_list_artifacts_sqlite, delete_artifact=content_delete_artifact_sqlite, save_template=content_save_template_sqlite, get_template=content_get_template_sqlite, list_templates=content_list_templates_sqlite, delete_template=content_delete_template_sqlite}
+	return iface.Content_Repository{ctx=rawptr(impl), list_unread_incoming_ids=content_list_unread_incoming_ids_sqlite, save_memory=content_save_memory_sqlite, get_memory=content_get_memory_sqlite, list_memories=content_list_memories_sqlite, save_conversation=content_save_conversation_sqlite, get_conversation=content_get_conversation_sqlite, list_conversations=content_list_conversations_sqlite, list_conversation_project_links=content_list_conversation_project_links_sqlite, save_message=content_save_message_sqlite, get_message=content_get_message_sqlite, update_message=content_update_message_sqlite, list_messages=content_list_messages_sqlite, list_user_visible_messages=content_list_user_visible_messages_sqlite, list_agent_inbox_messages=content_list_agent_inbox_messages_sqlite, mark_messages_read=content_mark_messages_read_sqlite, save_artifact=content_save_artifact_sqlite, get_artifact=content_get_artifact_sqlite, list_artifacts=content_list_artifacts_sqlite, delete_artifact=content_delete_artifact_sqlite, save_template=content_save_template_sqlite, get_template=content_get_template_sqlite, list_templates=content_list_templates_sqlite, delete_template=content_delete_template_sqlite}
 }
 
 content_save_memory_sqlite :: proc(ctx: rawptr, m: domain.Memory) -> (domain.Memory, bool, domain.Domain_Error) {
@@ -93,7 +93,10 @@ content_list_agent_inbox_messages_sqlite :: proc(ctx:rawptr, cid:string, owner:d
 	// the UI renders as a run indicator, not correspondence addressed to the agent.
 	// The agent learns its background run finished from a transient nudge instead, so
 	// surfacing the marker in its inbox would be the same fact twice, as noise.
-	if !include_debug do append(&filters, "message_type NOT IN ('pane_capture', 'status_update', 'pane_capture_result', 'shell_run')")
+	// 'tool_activity' (REQ-EXT-CONV-1/2) likewise: the bridge posts a summary of the
+	// agent's own tool calls every few seconds while it works; echoing those back
+	// into its history would feed the agent its own actions as correspondence.
+	if !include_debug do append(&filters, "message_type NOT IN ('pane_capture', 'status_update', 'pane_capture_result', 'shell_run', 'tool_activity')")
 	
 	if cursor != "" do append(&filters, "created_at < ?")
 	
@@ -129,12 +132,14 @@ content_mark_messages_read_sqlite :: proc(ctx:rawptr, owner:domain.User_ID, mess
 	if len(message_ids) == 0 do return 0, {}
 	impl:=(^Content_Repo_SQLite)(ctx); stmt:sqlite3_stmt=nil
 	
+	// Preserve latest-read timestamps and the input-count return contract. Only
+	// suppress exact timestamp repeats; metadata-only changes no longer reindex FTS.
 	// Create an IN clause with enough ?'s
 	qs := make([dynamic]string, context.temp_allocator)
 	for _ in message_ids { append(&qs, "?") }
 	in_clause := strings.join(qs[:], ",", context.temp_allocator)
 	
-	q:=strings.concatenate({"UPDATE chat_messages SET read_at=? WHERE owner_user_id=? AND message_id IN (", in_clause, ");"}, context.temp_allocator)
+	q:=strings.concatenate({"UPDATE chat_messages SET read_at=? WHERE read_at IS NOT ?1 AND owner_user_id=? AND message_id IN (", in_clause, ");"}, context.temp_allocator)
 	// A concatenated string is not NUL-terminated; give sqlite a real cstring.
 	if sqlite3_prepare_v2(impl.conn.db,strings.clone_to_cstring(q, context.temp_allocator),-1,&stmt,nil)!=SQLITE_OK do return 0,domain.domain_error(.Internal_Error,"failed mark messages read")
 	defer sqlite3_finalize(stmt)
@@ -384,5 +389,26 @@ content_list_unread_incoming_ids_sqlite :: proc(ctx: rawptr, cid: string, owner:
 	bind_text(stmt, 1, string(owner)); bind_text(stmt, 2, cid)
 	out := make([dynamic]string)
 	for sqlite3_step(stmt) == SQLITE_ROW do append(&out, column_text(stmt, 0))
+	return out[:], {}
+}
+
+// Same owner, ordering expression, tie break and 200-row boundary as the full
+// conversation listing; association needs no latest-message or count subqueries.
+content_list_conversation_project_links_sqlite :: proc(ctx: rawptr, owner: domain.User_ID) -> ([]domain.Conversation_Project_Link, domain.Domain_Error) {
+	impl := (^Content_Repo_SQLite)(ctx)
+	stmt: sqlite3_stmt
+	q := "SELECT c.conversation_id, c.agent_instance_id, c.project_id, c.chain_id FROM chat_conversations c WHERE c.owner_user_id=? ORDER BY COALESCE(NULLIF(c.last_message_at,''), c.updated_at, c.created_at) DESC, c.conversation_id DESC LIMIT 200;"
+	if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(q)), -1, &stmt, nil) != SQLITE_OK do return nil, domain.domain_error(.Internal_Error, "failed conversation project link list")
+	defer sqlite3_finalize(stmt)
+	bind_text(stmt, 1, string(owner))
+	out := make([dynamic]domain.Conversation_Project_Link)
+	for sqlite3_step(stmt) == SQLITE_ROW {
+		append(&out, domain.Conversation_Project_Link{
+			conversation_id = column_text(stmt, 0),
+			agent_instance_id = column_text(stmt, 1),
+			project_id = domain.Project_ID(column_text(stmt, 2)),
+			chain_id = column_text(stmt, 3),
+		})
+	}
 	return out[:], {}
 }

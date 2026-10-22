@@ -10,6 +10,7 @@ import project_service "odin_test:hub/service/project"
 import shell_session_svc "odin_test:hub/service/shell_session"
 
 Shell_Session_Rest_Handlers :: struct {
+	entitlements: domain.Entitlement_Lookup,
 	auth:           ^auth_service.Auth_Service,
 	shell_sessions: ^shell_session_svc.Shell_Session_Service,
 	// REQ-SHELL-10 work item 3: the live bridge-connection registry, read ONLY to
@@ -393,6 +394,10 @@ shell_session_signal_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Shell_Session_Rest_Handlers)(ctx)
 	auth_ctx, ok, auth_resp := require_auth_any(h.auth, req)
 	if !ok do return auth_resp
+	if err := require_terminal_input(h.entitlements, auth_ctx); err.code != .None {
+		return respond_error(err, req.request_id)
+	}
+
 
 	session_id := path_part(req.path, 4)
 	if session_id == "" {
@@ -546,6 +551,10 @@ shell_session_pane_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	if width <= 0 do width = 80
 	line_limit := query_int(req.query, "line_limit", 120)
 	if line_limit <= 0 do line_limit = 120
+
+	if poll_err := shell_session_svc.shell_session_admit_pane_poll(h.shell_sessions, auth_ctx); poll_err.code != .None {
+		return respond_error(poll_err, req.request_id)
+	}
 
 	reply, got, err := shell_session_svc.shell_session_get_pane(h.shell_sessions, auth_ctx, session_id, since_hash, width, line_limit)
 	if !got do return respond_error(err, req.request_id)

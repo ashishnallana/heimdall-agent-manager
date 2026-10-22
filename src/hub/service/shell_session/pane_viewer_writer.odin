@@ -31,6 +31,7 @@ Pane_Viewer_Writer :: struct {
 	svc: ^Shell_Session_Service,
 	bridge_id: string,
 	session_id: string,
+	user_id: string, // empty for callers exempt from plan limits
 	incremental_bytes: int,
 	control_bytes: int,
 	snapshot_bytes: int,
@@ -45,7 +46,7 @@ Pane_Viewer_Writer :: struct {
 	tx_bytes: ^metrics.Series,
 }
 
-pane_viewer_start_locked :: proc(svc: ^Shell_Session_Service, socket: net.TCP_Socket, bridge_id, session_id: string, ws_kind: string = project_service.WS_KIND_SHELL) -> bool {
+pane_viewer_start_locked :: proc(svc: ^Shell_Session_Service, socket: net.TCP_Socket, bridge_id, session_id: string, ws_kind: string = project_service.WS_KIND_SHELL, user_id: string = "") -> bool {
 	if svc.viewer_writers == nil do svc.viewer_writers = make(map[net.TCP_Socket]^Pane_Viewer_Writer, runtime.heap_allocator())
 	if _, exists := svc.viewer_writers[socket]; exists do return true
 	w := new(Pane_Viewer_Writer, runtime.heap_allocator())
@@ -53,6 +54,7 @@ pane_viewer_start_locked :: proc(svc: ^Shell_Session_Service, socket: net.TCP_So
 	w.svc = svc
 	w.bridge_id = strings.clone(bridge_id, runtime.heap_allocator())
 	w.session_id = strings.clone(session_id, runtime.heap_allocator())
+	w.user_id = strings.clone(user_id, runtime.heap_allocator())
 	w.ws_kind = ws_kind
 	w.tx_bytes = metrics.with(project_service.fleet_metrics.ws_bytes, ws_kind, "tx", bridge_id)
 	if svc.pane_bridge_bytes == nil do svc.pane_bridge_bytes = make(map[string]int, runtime.heap_allocator())
@@ -61,7 +63,7 @@ pane_viewer_start_locked :: proc(svc: ^Shell_Session_Service, socket: net.TCP_So
 	context.allocator = runtime.heap_allocator() // the Thread record outlives the caller's arena
 	w.worker = thread.create_and_start_with_data(rawptr(w), pane_viewer_writer_run, self_cleanup = false)
 	if w.worker == nil {
-		delete(w.queue); delete(w.bridge_id, runtime.heap_allocator()); delete(w.session_id, runtime.heap_allocator()); free(w, runtime.heap_allocator()); _ = net.shutdown(socket, .Both); return false
+		delete(w.queue); delete(w.user_id, runtime.heap_allocator()); delete(w.bridge_id, runtime.heap_allocator()); delete(w.session_id, runtime.heap_allocator()); free(w, runtime.heap_allocator()); _ = net.shutdown(socket, .Both); return false
 	}
 	svc.viewer_writers[socket] = w
 	return true
@@ -178,6 +180,7 @@ pane_viewer_stop :: proc(w: ^Pane_Viewer_Writer) {
 	for item in w.queue do delete(item.text, runtime.heap_allocator())
 	delete(w.bridge_id, runtime.heap_allocator())
 	delete(w.session_id, runtime.heap_allocator())
+	delete(w.user_id, runtime.heap_allocator())
 	delete(w.queue)
 	free(w, runtime.heap_allocator())
 }

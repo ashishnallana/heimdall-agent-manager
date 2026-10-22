@@ -3,6 +3,7 @@ package billing
 import "core:encoding/json"
 import "core:fmt"
 import "core:strings"
+import "core:sync"
 import "core:time"
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
@@ -11,6 +12,8 @@ import device_auth "odin_test:hub/service/device_auth"
 import http_client "odin_test:lib/http_client"
 
 Config :: struct {
+	enforce_plan_limits: Maybe(bool),
+	hobbyist_price_id: string,
 	environment: string,
 	api_key: string,
 	client_token: string,
@@ -18,6 +21,11 @@ Config :: struct {
 	past_due_grace_seconds: int,
 }
 Service :: struct {
+	plan_change_ctx: rawptr,
+	on_entitlements: proc(ctx: rawptr, user_id: string, entitlements: domain.User_Entitlements) -> domain.Domain_Error,
+	on_plan_change: proc(ctx: rawptr) -> domain.Domain_Error,
+	entitlements_mutex: sync.Mutex,
+	entitlements_cache: map[string]Entitlement_Cache_Entry,
 	repo: ^iface.Billing_Repository,
 	clock: ^platform.Clock,
 	config: Config,
@@ -60,11 +68,14 @@ account_view :: proc(service: ^Service, user_id: string) -> (Account_View, domai
 	if err.code != .None do return {}, err
 	plans, plan_err := service.repo.list_plans(service.repo.ctx)
 	if plan_err.code != .None do return {}, plan_err
-	label := account.plan_label
-	entitled := account.status == "active" || account.status == "trialing" || account.status == "custom" || (account.status == "past_due" && account.grace_until > now)
-	if !entitled {
-		for plan in plans { if plan.plan_id == "free" do label = plan.plan_label }
+	// Account settings is a manual refresh; polling this view also bypasses the cache.
+	invalidate_entitlements(service, user_id)
+	entitlements := account.entitlements
+	if !plan_limits_enabled(service.config) do entitlements = domain.unlimited_entitlements()
+	if service.on_entitlements != nil {
+		if reconcile_err := service.on_entitlements(service.plan_change_ctx, user_id, entitlements); reconcile_err.code != .None do return {}, reconcile_err
 	}
+	label := effective_plan_label(account, plans, now)
 	offers := make([dynamic]Offer, context.temp_allocator)
 	can_purchase := account.subscription_id == "" || account.status == "canceled"
 	if account.status == "custom" do can_purchase = false
@@ -76,7 +87,7 @@ account_view :: proc(service: ^Service, user_id: string) -> (Account_View, domai
 		}
 	}
 	return Account_View{user_id = user_id, plan_label = label, subscription_plan_label = account.plan_label, status = account.status,
-		entitlements = account.entitlements, offers = offers[:], checkout_enabled = is_configured(service.config),
+		entitlements = entitlements, offers = offers[:], checkout_enabled = is_configured(service.config),
 		manage_subscription_enabled = service.config.api_key != "" && account.customer_id != "", renews_at = account.renews_at,
 		cancels_at = account.cancels_at, grace_until = account.grace_until, environment = service.config.environment,
 		client_token = service.config.client_token, checkout_pending = account.checkout_pending}, {}
@@ -196,4 +207,14 @@ request_paddle_api :: proc(config: Config, method, path, body: string) -> (strin
 	if !ok do return "", domain.domain_error(.Internal_Error, "could not contact Paddle; retry later")
 	if response.status < 200 || response.status >= 300 do return "", domain.domain_error(.Internal_Error, "Paddle could not complete this request; check billing configuration")
 	return response.body, {}
+}
+
+// The subscription label survives cancellation, but the effective plan becomes
+// Free after cancellation or grace expiry. Share this resolution with gate errors.
+effective_plan_label :: proc(account: domain.Account_Billing, plans: []domain.Billing_Plan, now: string) -> string {
+	entitled := account.status == "active" || account.status == "trialing" || account.status == "custom" || (account.status == "past_due" && account.grace_until > now)
+	if !entitled {
+		for plan in plans { if plan.plan_id == "free" do return plan.plan_label }
+	}
+	return account.plan_label
 }

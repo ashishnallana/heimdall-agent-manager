@@ -23,6 +23,8 @@ Bridge :: struct {
 	updated_at: string,
 	last_seen_at: string,
 	revoked_at: string,
+	// Hub-owned plan suspension; credentials and existing sessions are retained.
+	plan_disabled_at: string,
 	version: string,
 	commit_sha: string,
 	build_timestamp: string,
@@ -78,6 +80,7 @@ bridge_destroy :: proc(b: ^Bridge) {
 	if len(b.updated_at) > 0 do delete(b.updated_at)
 	if len(b.last_seen_at) > 0 do delete(b.last_seen_at)
 	if len(b.revoked_at) > 0 do delete(b.revoked_at)
+	if len(b.plan_disabled_at) > 0 do delete(b.plan_disabled_at)
 	if len(b.version) > 0 do delete(b.version)
 	if len(b.commit_sha) > 0 do delete(b.commit_sha)
 	if len(b.build_timestamp) > 0 do delete(b.build_timestamp)

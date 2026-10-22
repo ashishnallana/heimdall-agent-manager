@@ -16,6 +16,8 @@ Fixture :: struct {
 	applied: domain.Billing_Event,
 	existing: domain.Billing_Checkout,
 	apply_error: domain.Domain_Error,
+	get_error: domain.Domain_Error,
+	get_calls: int,
 }
 FIXTURE_REFERENCE :: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 fixture_reference :: proc() -> (string, bool) { return FIXTURE_REFERENCE, true }
@@ -27,12 +29,14 @@ fixture_reference :: proc() -> (string, bool) { return FIXTURE_REFERENCE, true }
 fixture_clock :: proc(ctx: rawptr) -> string { return "2026-10-10T10:00:00Z" }
 fixture_get :: proc(ctx: rawptr, user_id, now: string) -> (domain.Account_Billing, domain.Domain_Error) {
 	fixture := (^Fixture)(ctx)
+	fixture.get_calls += 1
+	if fixture.get_error.code != .None do return {}, fixture.get_error
 	if user_id != fixture.account.user_id do return {}, domain.domain_error(.Not_Found, "wrong owner")
 	return fixture.account, {}
 }
 fixture_plans :: proc(ctx: rawptr) -> ([]domain.Billing_Plan, domain.Domain_Error) {
 	plans := new([3]domain.Billing_Plan, context.temp_allocator)
-	plans^ = {{plan_id = "free", plan_label = "Free", entitlements = {1, false}}, {plan_id = "hobbyist", plan_label = "Hobbyist", price_id = "pri_approved", entitlements = {2, true}}, {plan_id = "third", plan_label = "Third plan", price_id = "pri_third", entitlements = {8, true}}}
+	plans^ = {{plan_id = "free", plan_label = "Free", entitlements = {max_bridges = 1, terminal_streaming_enabled = true, max_concurrent_streams = 2}}, {plan_id = "hobbyist", plan_label = "Hobbyist", price_id = "pri_approved", entitlements = {max_bridges = 2, terminal_streaming_enabled = true, terminal_input_enabled = true, max_concurrent_streams = -1, shells_enabled = true}}, {plan_id = "third", plan_label = "Third plan", price_id = "pri_third", entitlements = {max_bridges = 8, terminal_streaming_enabled = true, terminal_input_enabled = true, max_concurrent_streams = -1, shells_enabled = true}}}
 	return plans[:], {}
 }
 fixture_reserve :: proc(ctx: rawptr, checkout: domain.Billing_Checkout, now: string) -> (domain.Billing_Checkout, bool, domain.Domain_Error) {
@@ -69,7 +73,7 @@ fixture_setup :: proc(fixture: ^Fixture, repo: ^iface.Billing_Repository, clock:
 	fixture_post_reference = ""
 	fixture_portal_response = `{"data":{"urls":{"general":{"overview":"https://customer-portal.paddle.com/cpl_test?token=temporary"}}}}`
 	fixture_transaction_response = `{"data":{"id":"txn_prepared","checkout":{"url":"https://pay.example.test/checkout?_ptxn=txn_prepared"}}}`
-	fixture.account = domain.Account_Billing{user_id = "alice", plan_id = "free", plan_label = "Free", status = "free", entitlements = {1, false}}
+	fixture.account = domain.Account_Billing{user_id = "alice", plan_id = "free", plan_label = "Free", status = "free", entitlements = {max_bridges = 1, terminal_streaming_enabled = true, max_concurrent_streams = 2}}
 	repo^ = iface.Billing_Repository{ctx = fixture, get_account = fixture_get, list_plans = fixture_plans, reserve_checkout = fixture_reserve, finish_checkout = fixture_finish, apply_event = fixture_apply}
 	clock^ = platform.Clock{now = fixture_clock}
 	return Service{repo = repo, clock = clock, config = Config{environment = "sandbox", api_key = "test_key", client_token = "test_token", webhook_secret = "test_secret", past_due_grace_seconds = 86400}, request = fixture_api, new_reference = fixture_reference}

@@ -214,6 +214,10 @@ bridge_command_spec :: proc(command_type: string) -> (Bridge_Command_Spec, bool)
 	// queued job is dropped as stale when the connection ends.
 	case "bridge_enrollment_result":
 		return Bridge_Command_Spec{priority = .Control, queued = false, timeout_ms = 1000, cost_units = 1}, true
+	// REQ-EXT-PERM-1: resolves an in-memory permission waiter; inline because it
+	// is cheap and a blocked agent is waiting on it.
+	case "permission_decision":
+		return Bridge_Command_Spec{priority = .Control, queued = false, timeout_ms = 1000, cost_units = 1}, true
 	case "provider_catalog":
 		return Bridge_Command_Spec{priority = .Control, key_kind = .Provider_Discovery, queued = false, timeout_ms = 5000, cost_units = 2}, true
 	case "lsp_send":

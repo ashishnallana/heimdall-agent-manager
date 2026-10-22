@@ -279,6 +279,13 @@ parse_args :: proc(config: ^app.Hub_Config) {
 			config.ui_origin = strings.clone(os.args[i + 1]); i += 1
 		} else if arg == "--preview-origin" && i + 1 < len(os.args) {
 			config.preview_origin = strings.clone(os.args[i + 1]); i += 1
+		} else if arg == "--billing-enforce-plan-limits" {
+			if i + 1 >= len(os.args) {
+				fmt.eprintln("--billing-enforce-plan-limits requires true or false")
+				os.exit(2)
+			}
+			config.billing_enforce_plan_limits = parse_plan_limits_setting(os.args[i + 1], "--billing-enforce-plan-limits")
+			i += 1
 		} else if arg == "--preview-legacy-path" && i + 1 < len(os.args) {
 			value := strings.to_lower(os.args[i + 1], context.temp_allocator)
 			if value == "true" {
@@ -383,8 +390,20 @@ split_host_port :: proc(value: string) -> (string, int, bool) {
 	return strings.clone(value[:colon]), int(port_i), true
 }
 
+// Reject malformed overrides rather than silently disabling enforcement.
+parse_plan_limits_setting :: proc(value, source: string) -> bool {
+	normalized := strings.to_lower(value, context.temp_allocator)
+	if normalized == "true" do return true
+	if normalized == "false" do return false
+	fmt.eprintln(source, "must be true or false")
+	os.exit(2)
+}
+
 // Paddle secrets stay on the server and are never printed.
 apply_paddle_env :: proc(config: ^app.Hub_Config) {
+	if v := os.get_env_alloc("HEIMDALL_BILLING_ENFORCE_PLAN_LIMITS", context.allocator); v != "" {
+		config.billing_enforce_plan_limits = parse_plan_limits_setting(v, "HEIMDALL_BILLING_ENFORCE_PLAN_LIMITS")
+	}
 	if v := os.get_env_alloc("HEIMDALL_PADDLE_ENVIRONMENT", context.allocator); v != "" do config.paddle_environment = v
 	config.paddle_api_key = os.get_env_alloc("HEIMDALL_PADDLE_API_KEY", context.allocator)
 	config.paddle_client_token = os.get_env_alloc("HEIMDALL_PADDLE_CLIENT_TOKEN", context.allocator)

@@ -36,6 +36,7 @@ import vault "odin_test:lib/vault"
 import metrics "odin_test:lib/metrics"
 
 Bridge_Handlers :: struct {
+	entitlements: domain.Entitlement_Lookup,
 	auth: ^auth_service.Auth_Service,
 	bridges: ^bridge_service.Bridge_Service,
 	agents: ^agent_service.Agent_Service,
@@ -163,6 +164,9 @@ bridge_shell_input_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Bridge_Handlers)(ctx)
 	auth_ctx, ok, auth_resp := require_auth_any(h.auth, req)
 	if !ok do return auth_resp
+	if err := require_terminal_input(h.entitlements, auth_ctx); err.code != .None {
+		return respond_error(err, req.request_id)
+	}
 
 	if auth_ctx.kind == .Bridge_Token {
 		return respond_error(domain.domain_error(.Forbidden, "bridge cannot send shell input"), req.request_id)
@@ -198,6 +202,9 @@ bridge_shell_resize_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Bridge_Handlers)(ctx)
 	auth_ctx, ok, auth_resp := require_auth_any(h.auth, req)
 	if !ok do return auth_resp
+	if err := require_terminal_input(h.entitlements, auth_ctx); err.code != .None {
+		return respond_error(err, req.request_id)
+	}
 
 	if auth_ctx.kind == .Bridge_Token {
 		return respond_error(domain.domain_error(.Forbidden, "bridge cannot send shell resize"), req.request_id)
@@ -1671,6 +1678,11 @@ bridge_ws_upgrade_handler :: proc(ctx: rawptr, req: Request, client: net.TCP_Soc
 	if !found { bridge_metrics_connect_result(BRIDGE_ID_UNKNOWN, "auth_failed"); _ = write_ws_text_frame(client, bridge_ws_error_payload(lookup_err.message)); return }
 	defer domain.bridge_destroy(&admitted_bridge)
 	if body_bridge_id != "" && body_bridge_id != admitted_bridge.bridge_id { _ = write_ws_text_frame(client, bridge_ws_error_payload("bridge_id does not match bearer token")); return }
+	if plan_err := bridge_service.check_bridge_plan(h.bridges, admitted_bridge); plan_err.code != .None {
+		bridge_metrics_connect_result(admitted_bridge.bridge_id, "plan_limit")
+		bridge_ws_domain_error(client, plan_err)
+		return
+	}
 	hello, hello_ok, hello_err := bridge_runtime_service.runtime_accept_hello(h.bridge_runtime_registry, admitted_bridge.bridge_id, json_int(hello_text, "protocol_version", 1), validation_url, string(admitted_bridge.owner_user_id), bridge_connection_replaced_payload())
 	if !hello_ok {
 		bridge_metrics_connect_result(admitted_bridge.bridge_id, "limit" if hello_err.code == .Bridge_Busy else "hello_rejected")
@@ -1692,7 +1704,7 @@ bridge_ws_upgrade_handler :: proc(ctx: rawptr, req: Request, client: net.TCP_Soc
 	project_service.connection_state_unlock(connection)
 	if !connect_ok {
 		bridge_metrics_connect_result(admitted_bridge.bridge_id, "revoked" if err.code == .Bridge_Revoked else "connect_failed")
-		_ = write_ws_text_frame(client, bridge_ws_error_payload(err.message))
+		bridge_ws_domain_error(client, err)
 		return
 	}
 	defer domain.bridge_destroy(&bridge)
@@ -1843,6 +1855,8 @@ bridge_ws_disconnect :: proc(
 	// treats `unreachable` on an Offline bridge as bridge absence, not death: the
 	// lease runs out via its TTL (review B2).
 	agent_service.notify_instances_terminal(h.agents, cleared)
+	// Blockers live in memory only; the bridge resends them when it reconnects.
+	if still_current do agent_service.clear_bridge_blockers(h.agents, bridge_id)
 	duration_ms := i64(-1)
 	if connected_at_ns > 0 do duration_ms = (time.now()._nsec - connected_at_ns) / 1_000_000
 	bridge_ws_log_disconnect(bridge_id, reason, connection_generation, duration_ms, still_current)
@@ -2364,6 +2378,10 @@ bridge_ws_process_frame :: proc(h: ^Bridge_Handlers, bridge_id: string, connecti
 	// bridge_id is the AUTHENTICATED id of the connection this frame arrived on, never
 	// anything the frame itself names — an inventory mutates many rows at once, so the
 	// scope it is confined to must come from the transport, not from its payload.
+	// REQ-EXT-BLK-2: a full per-instance agent blocker snapshot. Scoped to the
+	// authenticated bridge_id; the hub replaces its in-memory list wholesale.
+	case "agent_blockers":
+		if h.agents != nil do _ = agent_service.apply_bridge_blockers_snapshot(h.agents, bridge_id, text)
 	case "shell_inventory":
 		if h.shell_sessions != nil {
 			_ = shell_session_svc.shell_session_apply_inventory(h.shell_sessions, bridge_id, text)
@@ -2751,6 +2769,7 @@ write_bridge_json :: proc(b: ^strings.Builder, br: domain.Bridge, agents: ^agent
 	strings.write_string(b, ",\"update_error\":\""); write_handler_json_string(b, br.update_error)
 	strings.write_string(b, "\",\"last_seen_at\":\""); write_handler_json_string(b, br.last_seen_at)
 	strings.write_string(b, "\",\"updated_at\":\""); write_handler_json_string(b, br.updated_at)
+	strings.write_string(b, "\",\"plan_disabled_at\":\""); write_handler_json_string(b, br.plan_disabled_at)
 	strings.write_string(b, "\",\"revoked_at\":\""); write_handler_json_string(b, br.revoked_at)
 	update_info := bridge_service.resolve_bridge_update_info(catalog, br)
 	strings.write_string(b, "\",\"target\":\""); write_handler_json_string(b, update_info.target)
@@ -3342,4 +3361,35 @@ bridge_record_verify_exit :: proc(h: ^Bridge_Handlers, bridge_id, session_id, st
 		head_at_end = json_string(vcs, "head"), dirty = dirty, tail = json_string(frame, "tail"),
 		cmd = session.cmd,
 	})
+}
+
+
+// Keep the bridge_error shape understood by older bridges, with a typed code and
+// upgrade path for current bridges. The server owns all values except the escaped message.
+bridge_ws_plan_error_payload :: proc(err: domain.Domain_Error) -> string {
+	b := strings.builder_make(context.temp_allocator)
+	strings.write_string(&b, `{"type":"bridge_error","protocol_version":1,"payload":{"code":"plan_limit_reached","message":"`)
+	write_handler_json_string(&b, err.message)
+	strings.write_string(&b, `","upgrade_path":"/settings/account","details":`)
+	strings.write_string(&b, err.details_json if err.details_json != "" else "{}")
+	strings.write_string(&b, "}}")
+	return strings.to_string(b)
+}
+
+
+// Plan refusals have an application close code as well as the diagnostic frame.
+// These calls happen before registering a command socket, so there is one writer.
+bridge_ws_domain_error :: proc(client: net.TCP_Socket, err: domain.Domain_Error) {
+	if err.code != .Plan_Limit_Reached {
+		_ = write_ws_text_frame(client, bridge_ws_error_payload(err.message))
+		return
+	}
+	_ = write_ws_text_frame(client, bridge_ws_plan_error_payload(err))
+	frame: [22]byte
+	frame[0] = 0x88 // FIN + CLOSE
+	frame[1] = 20
+	frame[2] = 0x11 // 4402, network byte order
+	frame[3] = 0x32
+	copy(frame[4:], "plan_limit_reached")
+	_, _ = net.send_tcp(client, frame[:])
 }

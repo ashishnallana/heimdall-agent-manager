@@ -27,6 +27,8 @@ Content_Get_Template_Proc :: proc(ctx: rawptr, template_id: string) -> (domain.T
 Content_List_Templates_Proc :: proc(ctx: rawptr, owner_user_id: domain.User_ID) -> ([]domain.Template, domain.Domain_Error)
 Content_Delete_Template_Proc :: proc(ctx: rawptr, template_id: string, owner_user_id: domain.User_ID) -> (bool, domain.Domain_Error)
 
+Content_List_Conversation_Project_Links_Proc :: proc(ctx: rawptr, owner_user_id: domain.User_ID) -> ([]domain.Conversation_Project_Link, domain.Domain_Error)
+
 Content_Repository :: struct {
 	ctx: rawptr,
 	save_memory: Content_Save_Memory_Proc,
@@ -35,6 +37,7 @@ Content_Repository :: struct {
 	save_conversation: Content_Save_Conversation_Proc,
 	get_conversation: Content_Get_Conversation_Proc,
 	list_conversations: Content_List_Conversations_Proc,
+	list_conversation_project_links: Content_List_Conversation_Project_Links_Proc,
 	save_message: Content_Save_Message_Proc,
 	get_message: Content_Get_Message_Proc,
 	update_message: Content_Update_Message_Proc,
@@ -81,4 +84,15 @@ content_list_unread_incoming_ids :: proc(r: ^Content_Repository, conversation_id
 	if r == nil || r.list_unread_incoming_ids == nil do return nil, false, domain.Domain_Error{}
 	ids, err = r.list_unread_incoming_ids(r.ctx, conversation_id, owner)
 	return ids, true, err
+}
+
+// The fallback preserves compatibility with alternate/test repositories.
+content_list_conversation_project_links :: proc(r: ^Content_Repository, owner: domain.User_ID) -> ([]domain.Conversation_Project_Link, domain.Domain_Error) {
+	if r != nil && r.list_conversation_project_links != nil do return r.list_conversation_project_links(r.ctx, owner)
+	rows, err := content_list_conversations(r, owner, 200, "")
+	if err.code != .None do return nil, err
+	defer delete(rows)
+	links := make([dynamic]domain.Conversation_Project_Link)
+	for c in rows do append(&links, domain.Conversation_Project_Link{conversation_id=c.conversation_id, agent_instance_id=c.agent_instance_id, project_id=c.project_id, chain_id=c.chain_id})
+	return links[:], {}
 }

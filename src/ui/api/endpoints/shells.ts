@@ -143,7 +143,7 @@ function shellLogReason(err: unknown): ShellLogError {
  */
 export type ShellStatusFilter = ShellSessionStatus | 'live' | 'finished';
 
-type ListShellsArgs = {
+export type ListShellsArgs = {
   chainId?: string;
   bridgeId?: string;
   projectId?: string;
@@ -157,6 +157,63 @@ type ListShellsArgs = {
   cursor?: string;
   limit?: number;
 };
+
+// Keep serialization and the request URL identical; omitted/empty optional filters
+// must not create parallel entries for the same owner-scoped page.
+function shellListPath(args: ListShellsArgs): string {
+  const qs = new URLSearchParams();
+  if (args.chainId) qs.set('chain_id', args.chainId);
+  if (args.bridgeId) qs.set('bridge_id', args.bridgeId);
+  if (args.projectId) qs.set('project_id', args.projectId);
+  if (args.agentInstanceId) qs.set('agent_instance_id', args.agentInstanceId);
+  if (args.status) qs.set('status', args.status);
+  if (args.cursor) qs.set('cursor', args.cursor);
+  if (args.limit) qs.set('limit', String(args.limit));
+  return '/shells' + (qs.size ? `?${qs.toString()}` : '');
+}
+
+/** The per-query tag every `listShells` entry provides, so one entry can be refetched alone. */
+export function shellListTagId(args: ListShellsArgs): string {
+  return 'q:' + shellListPath(args);
+}
+
+/**
+ * Which kinds a list narrowed by each scope column may return — a mirror of
+ * SHELL_SESSION_SCOPE_RULES via shell_session_kinds_scoped_by (shell_session.odin:76,111),
+ * which the repo applies as a `kind IN (...)` clause on every scoped list
+ * (shell_session_repo_sqlite.odin, shell_session_list_by_owner_sqlite). project_id is an
+ * annotation, not a scope column, so it never restricts kind.
+ */
+const SHELL_KINDS_SCOPED_BY = {
+  bridge: ['server', 'shell'],
+  chain: ['server', 'shell'],
+  agentInstance: ['run'],
+} as const;
+
+/**
+ * What is known about a session when its event arrives. A field is `undefined` when it
+ * is unknown; a string (possibly '') is a fact read from the event or a fetched row.
+ */
+export type ShellSessionFacts = Partial<Pick<ShellSession, 'kind' | 'bridge_id' | 'project_id' | 'chain_id' | 'agent_instance_id'>>;
+
+/**
+ * False only when a list with these filters provably cannot hold the session, either
+ * before or after the change: its kind is excluded by a scope filter, or a known scope
+ * value differs. Status, cursor and limit never exclude (a status change moves a row
+ * across a status filter, and a new row can shift a page), so unknown facts or an
+ * unfiltered list always answer true.
+ */
+export function shellListMayContain(args: ListShellsArgs, facts: ShellSessionFacts): boolean {
+  const kind = facts.kind;
+  const excludes = (filter: string | undefined, value: string | undefined, kinds?: readonly string[]) =>
+    Boolean(filter) && ((kind !== undefined && kinds !== undefined && !kinds.includes(kind)) || (value !== undefined && value !== filter));
+  return !(
+    excludes(args.bridgeId, facts.bridge_id, SHELL_KINDS_SCOPED_BY.bridge)
+    || excludes(args.chainId, facts.chain_id, SHELL_KINDS_SCOPED_BY.chain)
+    || excludes(args.agentInstanceId, facts.agent_instance_id, SHELL_KINDS_SCOPED_BY.agentInstance)
+    || excludes(args.projectId, facts.project_id)
+  );
+}
 
 export interface CreateShellArgs {
   bridgeId: string;
@@ -284,18 +341,11 @@ async function fetchBridgeBootId(bridgeId: string): Promise<string> {
 export const shellsApi = heimdallApi.injectEndpoints({
   endpoints: (build) => ({
     listShells: build.query<ShellSessionPage, ListShellsArgs>({
-      queryFn: async ({ chainId, bridgeId, projectId, agentInstanceId, status, cursor, limit }) => {
+      // Equal wire requests share RTK's existing in-flight work and invalidation.
+      serializeQueryArgs: ({ endpointName, queryArgs }) => endpointName + shellListPath(queryArgs),
+      queryFn: async (args) => {
         try {
-          const qs = new URLSearchParams();
-          if (chainId) qs.set('chain_id', chainId);
-          if (bridgeId) qs.set('bridge_id', bridgeId);
-          if (projectId) qs.set('project_id', projectId);
-          if (agentInstanceId) qs.set('agent_instance_id', agentInstanceId);
-          if (status) qs.set('status', status);
-          if (cursor) qs.set('cursor', cursor);
-          if (limit) qs.set('limit', String(limit));
-          const suffix = qs.toString() ? `?${qs.toString()}` : '';
-          const data = await cookieJsonFetch(`/shells${suffix}`);
+          const data = await cookieJsonFetch(shellListPath(args));
           const sessions: ShellSession[] = Array.isArray(data)
             ? data
             : (Array.isArray(data?.sessions) ? data.sessions : []);
@@ -321,6 +371,7 @@ export const shellsApi = heimdallApi.injectEndpoints({
       providesTags: (_result, _err, arg) => [
         { type: 'ShellSessions' as const, id: arg.chainId || 'LIST' },
         { type: 'ShellSessions' as const, id: 'LIST' },
+        { type: 'ShellSessions' as const, id: shellListTagId(arg) },
       ],
     }),
 
@@ -504,7 +555,7 @@ export const shellsApi = heimdallApi.injectEndpoints({
           const data = await cookieJsonFetch(path);
           return { data: await openPaneReplyOutput(data || {}, sessionId) };
         } catch (error: any) {
-          return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any };
+          return { error: customQueryError(error) as any };
         }
       },
       serializeQueryArgs: ({ endpointName, queryArgs }) => {

@@ -1,22 +1,32 @@
 // Pure view-model for the chat pane's action tray (REQ-AT-1/6/7): which task
 // items belong to a conversation, and whether the tray or the composer shows.
 // No React; unit-tested in tests/ui_action_tray_test.ts.
-import type { AttentionItem, AttentionTaskItem } from '../../api/endpoints/attention';
-import { hideKey } from './attentionModel';
+import type { AttentionBlockerItem, AttentionItem, AttentionTaskItem } from '../../api/endpoints/attention';
+import { blockerReason, hideKey } from './attentionModel';
+
+/** What the tray pages through: tasks waiting on the user, and live agent blockers. */
+export type TrayItem = AttentionTaskItem | AttentionBlockerItem;
 
 /** Whose items a pane shows: its task chain, or (no chain) the agent instance holding the task. */
 export type TrayScope = { chainId: string; agentInstanceId: string };
 
 /**
- * The task items that need the user in this conversation: live (not snoozed)
- * task cards that are blocked on the user or waiting on their review, and are
- * not hidden by a pending/settled attention action. Server order is kept.
+ * The items that need the user in this conversation, not hidden by a
+ * pending/settled attention action, server order kept:
+ * - agent blockers (permission / terminal prompts) of the chain, or of this
+ *   agent instance when the pane has no chain — listed first, an agent is stalled;
+ * - live (not snoozed) task cards blocked on the user or waiting on their review.
  */
-export function trayItems(items: readonly AttentionItem[], scope: TrayScope, hidden: ReadonlySet<string> = new Set()): AttentionTaskItem[] {
+export function trayItems(items: readonly AttentionItem[], scope: TrayScope, hidden: ReadonlySet<string> = new Set()): TrayItem[] {
   const chainId = scope.chainId.trim();
   const instanceId = scope.agentInstanceId.trim();
   if (!chainId && !instanceId) return [];
-  return items.filter((item): item is AttentionTaskItem => {
+  const blockers = items.filter((item): item is AttentionBlockerItem => {
+    if (item.kind !== 'agent_blocker' || hidden.has(hideKey(item))) return false;
+    if (chainId) return item.action_refs?.chain_id === chainId;
+    return item.action_refs?.agent_instance_id === instanceId;
+  });
+  const tasks = items.filter((item): item is AttentionTaskItem => {
     if (item.kind !== 'task' || item.snoozed) return false;
     const attention = item.details?.attention;
     if (attention !== 'blocked' && attention !== 'review') return false;
@@ -24,14 +34,16 @@ export function trayItems(items: readonly AttentionItem[], scope: TrayScope, hid
     if (chainId) return item.action_refs?.chain_id === chainId;
     return !!instanceId && item.details?.holder_instance_id === instanceId;
   });
+  return [...blockers, ...tasks];
 }
 
 export function isBlockedItem(item: AttentionTaskItem): boolean {
   return item.details.attention === 'blocked';
 }
 
-/** "Needs your answer" (blocked) / "Needs your approval" (review). */
-export function needLabel(item: AttentionTaskItem): string {
+/** "Needs your answer" (blocked) / "Needs your approval" (review) / "Needs your permission" (blocker). */
+export function needLabel(item: TrayItem): string {
+  if (item.kind === 'agent_blocker') return blockerReason(item);
   if (item.details.badge === 'agent_not_running') return 'Needs you to start the agent';
   return isBlockedItem(item) ? 'Needs your answer' : 'Needs your approval';
 }

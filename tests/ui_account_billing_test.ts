@@ -4,10 +4,11 @@ import { JSDOM } from 'jsdom';
 import { describeEntitlements } from '../src/ui/utils/accountEntitlements.ts';
 import { redirectToCheckout, validateCheckoutUrl, validatePortalUrl } from '../src/ui/services/paddleCheckout.ts';
 
-test('user parameters describe custom bridge counts and explicit streaming grants', () => {
-  assert.equal(describeEntitlements({ max_bridges: 0, terminal_streaming_enabled: false }), '0 bridges · Terminal streaming not included');
-  assert.equal(describeEntitlements({ max_bridges: 1, terminal_streaming_enabled: true }), '1 bridge · Terminal streaming included');
-  assert.equal(describeEntitlements({ max_bridges: 12, terminal_streaming_enabled: true }), '12 bridges · Terminal streaming included');
+test('user parameters describe custom bridge counts and explicit capabilities', () => {
+  const viewOnly = { terminal_input_enabled: false, max_concurrent_streams: 2, shells_enabled: false };
+  assert.equal(describeEntitlements({ ...viewOnly, max_bridges: 0, terminal_streaming_enabled: false }), '0 bridges · Terminal streaming not included · View-only · 2 streams · Shells not included');
+  assert.equal(describeEntitlements({ ...viewOnly, max_bridges: 1, terminal_streaming_enabled: true }), '1 bridge · Terminal streaming included · View-only · 2 streams · Shells not included');
+  assert.equal(describeEntitlements({ max_bridges: -1, terminal_streaming_enabled: true, terminal_input_enabled: true, max_concurrent_streams: -1, shells_enabled: true }), 'Unlimited bridges · Terminal streaming included · Interactive input · Unlimited streams · Shells included');
 });
 
 test('checkout redirects to the validated Paddle URL without loading Paddle.js', () => {

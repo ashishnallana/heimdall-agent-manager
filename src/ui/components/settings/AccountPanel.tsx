@@ -1,13 +1,13 @@
+import { useDispatch } from 'react-redux';
 import React, { useEffect, useRef, useState } from 'react';
 import { Badge, Button } from '@ui';
 import type { SettingsUser } from './SettingsModal';
 import { describeEntitlements } from '../../utils/accountEntitlements';
-import { useGetAccountBillingQuery, useCreateAccountCheckoutMutation, useCreateAccountPortalMutation } from '../../api/endpoints/accountBilling';
+import { accountBillingApi, useCreateAccountCheckoutMutation, useCreateAccountPortalMutation } from '../../api/endpoints/accountBilling';
 import { apiErrorText } from '../../api/cookieFetch';
 import { redirectToCheckout, validatePortalUrl } from '../../services/paddleCheckout';
 
 export default function AccountPanel({ user }: { user: SettingsUser | null }) {
-  const [pollPending, setPollPending] = useState(false);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const activeUser = useRef(user?.user_id);
@@ -17,16 +17,14 @@ export default function AccountPanel({ user }: { user: SettingsUser | null }) {
     activeUser.current = user?.user_id;
     const controller = new AbortController();
     checkoutAbort.current = controller;
-    setPollPending(false); setError(''); setBusy(false);
+    setError(''); setBusy(false);
     return () => { controller.abort(); activeUser.current = undefined; };
   }, [user?.user_id]);
-  const billingQuery = useGetAccountBillingQuery(user?.user_id || '', { skip: !user?.user_id, pollingInterval: pollPending ? 5000 : 0, refetchOnFocus: true, refetchOnMountOrArgChange: true });
+  const billingQuery = accountBillingApi.endpoints.getAccountBilling.useQueryState(user?.user_id || '', { skip: !user?.user_id });
+  const dispatch = useDispatch();
   const [createCheckout] = useCreateAccountCheckoutMutation();
   const [createPortal] = useCreateAccountPortalMutation();
   const subscription = billingQuery.currentData;
-  useEffect(() => {
-    setPollPending(Boolean(subscription?.checkout_pending));
-  }, [subscription]);
 
   async function upgrade(offerId: string) {
     if (!subscription) return;
@@ -40,6 +38,7 @@ export default function AccountPanel({ user }: { user: SettingsUser | null }) {
       // Leave the authenticated origin for Paddle's approved checkout page. On
       // return, checkout_pending keeps this panel polling until the webhook
       // fulfills the subscription.
+      window.sessionStorage.setItem('heimdall:checkout-user', owner || '');
       redirectToCheckout(result);
       leaving = true;
     } catch (err) { if (!signal.aborted && activeUser.current === owner) setError(apiErrorText(err, 'Could not open checkout.')); }
@@ -89,7 +88,7 @@ export default function AccountPanel({ user }: { user: SettingsUser | null }) {
           {subscription?.environment === 'sandbox' && <Badge>Sandbox</Badge>}
         </div>
         {billingQuery.isLoading && <p className="mt-4 text-sm text-muted" role="status">Loading subscription…</p>}
-        {billingQuery.isError && <div className="mt-4 space-y-2"><p className="text-sm text-danger" role="alert">{apiErrorText(billingQuery.error, 'Could not load subscription.')}</p><Button data-debug-id="account-billing-retry" variant="ghost" onClick={() => void billingQuery.refetch()}>Retry</Button></div>}
+        {billingQuery.isError && <div className="mt-4 space-y-2"><p className="text-sm text-danger" role="alert">{apiErrorText(billingQuery.error, 'Could not load subscription.')}</p><Button data-debug-id="account-billing-retry" variant="ghost" onClick={() => dispatch(accountBillingApi.util.invalidateTags(['planLimitReached']))}>Retry</Button></div>}
         {subscription && <>
           <div className="mt-5 flex flex-wrap items-center justify-between gap-3">
             <div><p className="text-lg font-semibold text-primary">{subscription.plan_label}</p><p className="mt-1 text-xs text-muted">{describeEntitlements(subscription.entitlements)}</p></div>

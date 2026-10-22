@@ -16,8 +16,11 @@ Bridge_Provider_Profile :: struct {
 	command: []string,
 	base_args: []string,
 	yolo_flags: []string,
+	ask_flags: []string,
 	prompt_flags: []string,
 	starter_prompt: string,
+	extension: Bridge_Catalog_Extension,
+	extension_expected: bool,
 	prompt_delivery: string,
 	prompt_tmux_delay_ms: int,
 	prompt_tmux_enter: bool,
@@ -133,8 +136,10 @@ bridge_agent_runtime_profile :: proc(profile: Bridge_Provider_Profile) -> agent_
 		command = profile.command,
 		base_args = profile.base_args,
 		yolo_flags = profile.yolo_flags,
+		ask_flags = profile.ask_flags,
 		prompt_flags = profile.prompt_flags,
 		starter_prompt = profile.starter_prompt,
+		extension_expected = profile.extension_expected,
 		prompt_delivery = profile.prompt_delivery,
 		prompt_tmux_delay_ms = profile.prompt_tmux_delay_ms,
 		prompt_tmux_enter = profile.prompt_tmux_enter,
@@ -144,9 +149,9 @@ bridge_agent_runtime_profile :: proc(profile: Bridge_Provider_Profile) -> agent_
 	}
 }
 
-bridge_runtime_agent_argv_for_profile :: proc(profile: Bridge_Provider_Profile, model, agent_token, agent_instance_id: string) -> []string {
+bridge_runtime_agent_argv_for_profile :: proc(profile: Bridge_Provider_Profile, model, agent_token, agent_instance_id: string, permission_mode := agent_runtime.PERMISSION_MODE_YOLO) -> []string {
 	if strings.trim_space(model) == "" do return nil
-	return agent_runtime.build_agent_command(bridge_agent_runtime_profile(profile), model, bridge_config.daemon_url, agent_token, agent_instance_id)
+	return agent_runtime.build_agent_command(bridge_agent_runtime_profile(profile), model, bridge_config.daemon_url, agent_token, agent_instance_id, permission_mode)
 }
 
 bridge_runtime_shell_command_for_profile :: proc(profile: Bridge_Provider_Profile, model, agent_token, agent_instance_id: string) -> string {
