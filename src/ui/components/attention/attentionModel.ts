@@ -36,7 +36,7 @@ export function visibleItems(items: readonly AttentionItem[], tab: DeckTab, hidd
 export function tabCounts(counts: AttentionCounts, items: readonly AttentionItem[], hidden: ReadonlySet<string>): Record<DeckTab, number> {
   const hiddenOf = (tab: DeckTab) => items.filter((item) => inTab(item, tab) && hidden.has(hideKey(item))).length;
   return {
-    agent_blocker: Math.max(0, counts.agent_blocker - hiddenOf('agent_blocker')),
+    agent_blocker: Math.max(0, (counts.agent_blocker ?? 0) - hiddenOf('agent_blocker')),
     message: Math.max(0, counts.message - hiddenOf('message')),
     task: Math.max(0, counts.task - hiddenOf('task')),
     memory: Math.max(0, counts.memory - hiddenOf('memory')),
