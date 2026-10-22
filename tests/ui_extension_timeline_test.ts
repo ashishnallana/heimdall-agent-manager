@@ -252,3 +252,17 @@ test('partial patch snippets retain missing-context metadata', () => {
   assert.equal(deleted.edits[0].diff, '');
   assert.match(deleted.edits[0].diffUnavailableReason!, /preimage/);
 });
+
+test('latest displayable edit selects metadata-only deletion after create or update', () => {
+  for (const operation of ['create', 'update']) {
+    const tl = buildActivityTimeline(normalizeExtensionEvents({ events: [
+      ev(1, 'file.edit', { file_path: 'gone.txt', payload: { operation, diff: DIFF } }),
+      ev(2, 'file.edit', { file_path: 'gone.txt', payload: { operation: 'delete', partial: true, diff: '', diff_unavailable_reason: 'deleted preimage absent from callback' } }),
+    ] }));
+    const selected = latestDiffEdit(tl.files[0]);
+    assert.equal(selected?.seq, 2);
+    assert.equal(selected?.diff, '');
+    assert.equal(selected?.partial, true);
+    assert.equal(selected?.diffUnavailableReason, 'deleted preimage absent from callback');
+  }
+});

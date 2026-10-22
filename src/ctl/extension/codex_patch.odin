@@ -70,7 +70,10 @@ codex_parse_patch :: proc(raw: string) -> (edits: [dynamic]Codex_Patch_Edit, ok:
 					if !saw_hunk || !saw_line || i < len(lines)-1 && !strings.has_prefix(lines[i], "*** ") do return nil, false
 					append(&e.lines, line)
 				} else {
-					if !saw_hunk || len(line) == 0 || (line[0] != '+' && line[0] != '-' && line[0] != ' ') do return nil, false
+					if len(line) == 0 || (line[0] != '+' && line[0] != '-' && line[0] != ' ') do return nil, false
+					// Native 0.162.0 permits an initial chunk without an @@ anchor.
+					// Its offsets remain unknown, just like explicitly anchored chunks.
+					saw_hunk = true
 					saw_line = true
 					append(&e.lines, line)
 				}
@@ -92,9 +95,14 @@ codex_patch_confirmed :: proc(edits: []Codex_Patch_Edit, response: string) -> bo
 	at := strings.index(response, marker)
 	if at < 0 do return false
 	expected := strings.builder_make()
-	for e in edits {
-		op := "A " if e.operation == "create" else "D " if e.operation == "delete" else "M "
-		strings.write_string(&expected, op); strings.write_string(&expected, e.path); strings.write_byte(&expected, '\n')
+	// Native print_summary groups added, modified (including moved), then
+	// deleted paths, preserving input order within each group.
+	for op in ([]string{"A ", "M ", "D "}) {
+		for e in edits {
+			edit_op := "A " if e.operation == "create" else "D " if e.operation == "delete" else "M "
+			if edit_op != op do continue
+			strings.write_string(&expected, op); strings.write_string(&expected, e.path); strings.write_byte(&expected, '\n')
+		}
 	}
 	// Exact complete per-path confirmation: no partial or extra operations.
 	return response[at+len(marker):] == strings.to_string(expected)

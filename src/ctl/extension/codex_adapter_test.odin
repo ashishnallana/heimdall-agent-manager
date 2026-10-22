@@ -81,3 +81,45 @@ test_codex_unknown_invalid_bounded_and_native_decisions :: proc(t: ^testing.T) {
 		testing.expect_value(t, codex_permission_output_from_response(raw), "")
 	}
 }
+
+@(test)
+test_codex_confirmed_callback_markerless_update_and_mixed_native_summary :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+	// Reuse a captured release callback envelope, replacing the patch and
+	// response with release-grammar regression cases, not new live evidence.
+	root: json.Object
+	for row in codex_callbacks() {
+		o, _ := row.(json.Object)
+		if json_get_string(o, "hook_event_name") == "PostToolUse" && json_get_string(o, "tool_name") == "apply_patch" {
+			root = o
+			break
+		}
+	}
+	testing.expect(t, root != nil)
+	if root == nil do return
+	input := make(json.Object)
+	input["command"] = json.String("*** Begin Patch\n*** Update File: b.txt\n-old\n+new\n*** Delete File: gone.txt\n*** Add File: a.txt\n+created\n*** End Patch")
+	root["tool_input"] = input
+	root["tool_response"] = json.String("Exit code: 0\nWall time: 0 seconds\nOutput:\nSuccess. Updated the following files:\nA a.txt\nM b.txt\nD gone.txt\n")
+	b, _ := json.marshal(root)
+	mapped, err := codex_map_hook(string(b), TS)
+	testing.expect_value(t, err, Codex_Error.None)
+	edits := make(map[string]bool)
+	for raw in mapped.events {
+		event, e := contracts.ext_parse_event(raw)
+		testing.expect_value(t, e, contracts.Ext_Error.None)
+		if event.kind != .File_Edit do continue
+		edits[event.file_path] = true
+		v, _ := json.parse_string(raw, json.DEFAULT_SPECIFICATION, true)
+		o, _ := v.(json.Object)
+		payload := json_get_object(o, "payload")
+		if event.file_path == "b.txt" {
+			testing.expect(t, json_get_bool(payload, "partial"))
+			testing.expect(t, !json_get_bool(payload, "line_offsets_known"))
+			testing.expect(t, strings.contains(json_get_string(payload, "diff"), "-old\n+new\n"))
+		}
+	}
+	testing.expect_value(t, len(edits), 3)
+	for path in ([]string{"a.txt", "b.txt", "gone.txt"}) do testing.expect(t, edits[path], path)
+}

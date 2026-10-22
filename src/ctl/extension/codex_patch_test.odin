@@ -2,6 +2,7 @@ package extension
 
 import json "core:encoding/json"
 import "core:strings"
+import "core:fmt"
 import "core:testing"
 
 @(test)
@@ -32,7 +33,7 @@ test_codex_patch_rejects_malformed_binary_duplicate_and_unbounded_inputs :: proc
 	context.allocator = context.temp_allocator
 	defer free_all(context.temp_allocator)
 	for patch in ([]string{"", "*** Begin Patch\n*** End Patch", "*** Begin Patch\n*** Delete File: a\n+bad\n*** End Patch",
-		"*** Begin Patch\n*** Update File: a\n-old\n+new\n*** End Patch",
+		"*** Begin Patch\n*** Update File: a\ninvalid body\n*** End Patch",
 		"*** Begin Patch\n*** Add File: a\n+x\n*** Add File: a\n+y\n*** End Patch",
 		"*** Begin Patch\n*** Add File: a\n+\x00\n*** End Patch",
 		"*** Begin Patch\n*** Update File: a\n@@\n*** End Patch",
@@ -72,5 +73,41 @@ test_codex_delete_has_no_fabricated_preimage :: proc(t: ^testing.T) {
 		testing.expect(t, strings.contains(events[0], `"diff":""`))
 		testing.expect(t, strings.contains(events[0], `"partial":true`))
 		testing.expect(t, strings.contains(events[0], `"diff_unavailable_reason"`))
+	}
+}
+
+// Release parser.rs accepts an initial update chunk without @@.
+@(test)
+test_codex_patch_initial_implicit_chunk :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+	for body in ([]string{"-old\n+new", " context\n-old\n+new\n*** End of File", "-old\n+new\n@@ later\n-tail\n+last"}) {
+		edits, ok := codex_parse_patch(fmt.tprintf("*** Begin Patch\n*** Update File: a\n%s\n*** End Patch", body))
+		testing.expect(t, ok, body)
+		if !ok || len(edits) != 1 do continue
+		testing.expect_value(t, edits[0].operation, "update")
+		testing.expect_value(t, edits[0].lines[0], "-old" if strings.has_prefix(body, "-") else " context")
+	}
+}
+
+@(test)
+test_codex_patch_confirmation_native_group_order :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+	patch := "*** Begin Patch\n*** Delete File: gone\n*** Update File: old\n*** Move to: moved\n-before\n+after\n*** Add File: new\n+hello\n*** Update File: other\n@@\n-x\n+y\n*** End Patch"
+	edits, ok := codex_parse_patch(patch)
+	testing.expect(t, ok)
+	if !ok do return
+	prefix :: "Exit code: 0\nWall time: 0 seconds\nOutput:\nSuccess. Updated the following files:\n"
+	testing.expect(t, codex_patch_confirmed(edits[:], prefix+"A new\nM moved\nM other\nD gone\n"))
+	for summary in ([]string{
+		"D gone\nM moved\nA new\nM other\n", // Patch order is not native summary order.
+		"A new\nM moved\nM moved\nD gone\n", // Duplicate replaces missing path.
+		"A new\nM moved\nD gone\n", // Missing operation.
+		"A new\nM moved\nM other\nD gone\nM extra\n", // Extra operation.
+		"A new\nM old\nM other\nD gone\n", // Move must confirm destination.
+		"M new\nM moved\nM other\nD gone\n", // Wrong operation.
+	}) {
+		testing.expect(t, !codex_patch_confirmed(edits[:], fmt.tprintf("%s%s", prefix, summary)), summary)
 	}
 }

@@ -570,9 +570,12 @@ function sortFiles(files: TimelineFileEntry[]): TimelineFileEntry[] {
   return files.sort((a, b) => b.lastSeq - a.lastSeq || a.filePath.localeCompare(b.filePath));
 }
 
-/** Newest edit of a file that carries a diff, or null. */
+/** Newest displayable edit, including operations with missing diff context. */
 export function latestDiffEdit(file: TimelineFileEntry): TimelineFileEdit | null {
-  for (let i = file.edits.length - 1; i >= 0; i -= 1) if (file.edits[i].diff) return file.edits[i];
+  for (let i = file.edits.length - 1; i >= 0; i -= 1) {
+    const edit = file.edits[i];
+    if (edit.diff || edit.partial || edit.diffUnavailableReason) return edit;
+  }
   return null;
 }
 
