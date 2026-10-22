@@ -21,6 +21,9 @@ Config :: struct {
 	past_due_grace_seconds: int,
 }
 Service :: struct {
+	plan_change_ctx: rawptr,
+	on_entitlements: proc(ctx: rawptr, user_id: string, entitlements: domain.User_Entitlements) -> domain.Domain_Error,
+	on_plan_change: proc(ctx: rawptr) -> domain.Domain_Error,
 	entitlements_mutex: sync.Mutex,
 	entitlements_cache: map[string]Entitlement_Cache_Entry,
 	repo: ^iface.Billing_Repository,
@@ -69,6 +72,9 @@ account_view :: proc(service: ^Service, user_id: string) -> (Account_View, domai
 	invalidate_entitlements(service, user_id)
 	entitlements := account.entitlements
 	if !plan_limits_enabled(service.config) do entitlements = domain.unlimited_entitlements()
+	if service.on_entitlements != nil {
+		if reconcile_err := service.on_entitlements(service.plan_change_ctx, user_id, entitlements); reconcile_err.code != .None do return {}, reconcile_err
+	}
 	label := account.plan_label
 	entitled := account.status == "active" || account.status == "trialing" || account.status == "custom" || (account.status == "past_due" && account.grace_until > now)
 	if !entitled {

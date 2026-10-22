@@ -173,7 +173,7 @@ export default function NewConversationPage({ footer, onLaunched, launchIntent }
     const prefs = preferences.data;
     const initialAgent = prefs.agent_id || agents.find(agent => agent.slug === 'coordinator' && prefs.favorite_agent_ids.includes(agent.agent_id))?.agent_id || prefs.favorite_agent_ids?.[0] || '';
     const initialProject = routeProject || prefs.project_id || projects.find((p: any) => p.state === 'active' && (p.is_default_conversations || p.slug === 'conversation'))?.project_id || projects.find((p: any) => p.state === 'active')?.project_id || '';
-    const initialBridge = prefs.bridge_id || bridges.find((b: any) => b.runtime_connected && b.status === 'online' && normalizeBridgeCapabilities(b).length)?.bridge_id || '';
+    const initialBridge = prefs.bridge_id || bridges.find((b: any) => !b.plan_disabled_at && b.runtime_connected && b.status === 'online' && normalizeBridgeCapabilities(b).length)?.bridge_id || '';
     setAgentId(initialAgent); setProjectId(initialProject); setRuntime({ bridgeId: initialBridge, provider: '', model: '' });
     consumeProjectPreselection(); setHydrated(true);
     if (initialAgent !== prefs.agent_id) remember('agent_id', initialAgent);

@@ -91,6 +91,8 @@ enroll_bridge_from_device_grant :: proc(service: ^Bridge_Service, input: Device_
 	if strings.trim_space(input.target_bridge_id) != "" {
 		return rotate_bridge_for_device_grant(service, owner, input)
 	}
+	entitlements, entitlement_err := domain.lookup_entitlements(service.entitlements, owner)
+	if entitlement_err.code != .None do return {}, false, entitlement_err
 	hostname := strings.trim_space(input.machine_hostname)
 	if hostname == "" do hostname = "unknown-host"
 	label := strings.trim_space(input.new_bridge_label)
@@ -141,7 +143,7 @@ enroll_bridge_from_device_grant :: proc(service: ^Bridge_Service, input: Device_
 		bridge.enrollment_pending_until = pending_until
 		scope = BRIDGE_ENROLL_TOKEN_SCOPE
 	}
-	saved, ok, err := iface.bridge_save_bridge(service.repo, bridge)
+	saved, ok, err := iface.bridge_create_limited(service.repo, bridge, entitlements.max_bridges)
 	if !ok do return Enroll_Bridge_Result{}, false, err
 	// Fail closed when the OS entropy source is unavailable (settled 8): 503 with a
 	// retry hint, never a weaker credential and never `.Internal_Error`. The bridge

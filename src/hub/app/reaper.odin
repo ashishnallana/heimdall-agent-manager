@@ -172,6 +172,10 @@ reaper_sweep_once :: proc(graph: ^App_Graph) {
 	sweep_ok := true
 	defer reaper_metrics_record(sweep_ok)
 	_ = project_service.bridge_runtime_registry_sweep(&graph.bridge_runtime_registry)
+	if plan_err := reconcile_bridge_plans(graph); plan_err.code != .None {
+		sweep_ok = false
+		fmt.eprintfln("hub: bridge plan reconciliation failed: %s", plan_err.message)
+	}
 
 	// REQ-SHELL-8 item 6: terminal shell_sessions rows past their retention window.
 	// It rides THIS sweep rather than bringing its own timer — the loop already runs

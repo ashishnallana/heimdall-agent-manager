@@ -17,6 +17,7 @@ import platform "odin_test:hub/platform"
 import jsonx "odin_test:lib/jsonx"
 
 Agent_Service :: struct {
+	entitlements: domain.Entitlement_Lookup,
 	reconfiguration_mutex: sync.Mutex,
 	agents: ^iface.Agent_Repository,
 	bridges: ^iface.Bridge_Repository,
@@ -307,6 +308,7 @@ prepare_instance :: proc(service: ^Agent_Service, auth: contracts.Auth_Context, 
 	bridge, bridge_ok, bridge_err := iface.bridge_get_bridge(service.bridges, bridge_id)
 	if !bridge_ok do return domain.Agent_Instance{}, 0, false, bridge_err
 	if bridge.owner_user_id != owner || bridge.owner_user_id != agent.owner_user_id do return domain.Agent_Instance{}, 0, false, domain.domain_error(.Not_Found, "bridge not found")
+	if plan_err := require_launch_bridge_enabled(service, bridge); plan_err.code != .None do return {}, 0, false, plan_err
 	if bridge.status != .Online || !project_service.bridge_runtime_registry_has_live(service.bridge_runtime_registry, bridge.bridge_id) do return domain.Agent_Instance{}, 0, false, domain.domain_error(.Bridge_Offline, "bridge is offline")
 	resolved, resolved_ok, resolved_err := resolve_provider_model(service, auth, agent.agent_id, bridge.bridge_id, Run_Request{provider = input.provider, model = input.model})
 	if !resolved_ok do return domain.Agent_Instance{}, 0, false, resolved_err
@@ -372,6 +374,7 @@ create_provider_test_instance :: proc(service: ^Agent_Service, auth: contracts.A
 	if !bridge_ok do return {}, false, bridge_err
 	defer domain.bridge_destroy(&bridge)
 	if bridge.owner_user_id != owner do return {}, false, domain.domain_error(.Not_Found, "bridge not found")
+	if plan_err := require_launch_bridge_enabled(service, bridge); plan_err.code != .None do return {}, false, plan_err
 	if bridge.status != .Online || !project_service.bridge_runtime_registry_has_live(service.bridge_runtime_registry, bridge_id) do return {}, false, domain.domain_error(.Bridge_Offline, "bridge is not connected")
 	now := platform.clock_now(service.clock)
 	instance_id := platform.generate_id(service.ids, "provider-test-")
@@ -468,7 +471,7 @@ supported_bridge_count_for_agent :: proc(service: ^Agent_Service, agent: domain.
 	if err.code != .None do return 0
 	count := 0
 	for bridge in bridges {
-		if bridge.status == .Online && bridge.capabilities_json != "" do count += 1
+		if bridge.plan_disabled_at == "" && bridge.status == .Online && bridge.capabilities_json != "" do count += 1
 	}
 	return count
 }
@@ -1041,6 +1044,7 @@ relaunch_instance_locked :: proc(service: ^Agent_Service, auth: contracts.Auth_C
 	bridge, bridge_ok, bridge_err := iface.bridge_get_bridge(service.bridges, inst.bridge_id)
 	if !bridge_ok do return domain.Agent_Instance{}, false, bridge_err
 	if bridge.owner_user_id != inst.owner_user_id do return domain.Agent_Instance{}, false, domain.domain_error(.Not_Found, "bridge not found")
+	if plan_err := require_launch_bridge_enabled(service, bridge); plan_err.code != .None do return {}, false, plan_err
 	if bridge.status != .Online || !project_service.bridge_runtime_registry_has_live(service.bridge_runtime_registry, inst.bridge_id) do return domain.Agent_Instance{}, false, domain.domain_error(.Bridge_Offline, "pinned bridge is offline")
 	now := platform.clock_now(service.clock)
 	next := inst
@@ -1552,7 +1556,7 @@ select_bridge_for_agent :: proc(service: ^Agent_Service, auth: contracts.Auth_Co
 	for support in supports {
 		if !support.enabled do continue
 		bridge, bridge_ok, _ := iface.bridge_get_bridge(service.bridges, support.bridge_id)
-		if !bridge_ok || bridge.status != .Online || !project_service.bridge_runtime_registry_has_live(service.bridge_runtime_registry, bridge.bridge_id) do continue
+		if !bridge_ok || bridge.plan_disabled_at != "" || bridge.status != .Online || !project_service.bridge_runtime_registry_has_live(service.bridge_runtime_registry, bridge.bridge_id) do continue
 		online_enabled_found = true
 		provider := req.provider
 		model := req.model
@@ -2498,4 +2502,20 @@ bootstrap_memory_applies_agent :: proc(m: domain.Memory, agent: domain.Agent, ow
 	}
 	if !memory_list_matches(m.bridge_ids, bridge_id) do return false
 	return true
+}
+
+
+// A disabled bridge retains its running agents but accepts no new launches.
+// Entitlement refresh can clear a suspension; read the current flag afterwards.
+require_launch_bridge_enabled :: proc(service: ^Agent_Service, bridge: domain.Bridge) -> domain.Domain_Error {
+	if service.entitlements.lookup == nil && bridge.plan_disabled_at == "" do return {}
+	entitlements, err := domain.lookup_entitlements(service.entitlements, string(bridge.owner_user_id))
+	if err.code != .None do return err
+	current, found, current_err := iface.bridge_get_bridge(service.bridges, bridge.bridge_id)
+	if !found do return current_err
+	defer domain.bridge_destroy(&current)
+	if current.plan_disabled_at == "" do return {}
+	count, count_err := iface.bridge_count_active_by_owner(service.bridges, bridge.owner_user_id)
+	if count_err.code != .None do return count_err
+	return domain.plan_limit_error("max_bridges", entitlements.max_bridges, count, "Current")
 }

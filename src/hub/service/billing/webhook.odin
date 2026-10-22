@@ -39,7 +39,11 @@ receive_webhook :: proc(service: ^Service, signature, body: string) -> domain.Do
 	event_type, result, err := receive_webhook_classified(service, signature, body)
 	m := service.metrics
 	if m == nil do m = &billing_metrics
-	if err.code == .None && result == "ok" do invalidate_entitlements(service)
+	if err.code == .None && result == "ok" {
+		invalidate_entitlements(service)
+		// Retry even a duplicate webhook if reconciliation failed after its durable event.
+		if service.on_plan_change != nil do err = service.on_plan_change(service.plan_change_ctx)
+	}
 	billing_metrics_record_webhook(m, event_type, result)
 	return err
 }

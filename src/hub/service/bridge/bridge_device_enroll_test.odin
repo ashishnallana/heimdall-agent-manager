@@ -246,3 +246,180 @@ test_new_device_enrollment_uses_operator_bridge_label :: proc(t: ^testing.T) {
 	testing.expect(t, result.bridge.label_is_user_customized, "operator-entered enrollment label must survive runtime hostname updates")
 	testing.expect_value(t, result.bridge.machine_hostname, "dawnstar")
 }
+
+
+// T2: plan caps are checked only for new identities; attaches reuse a slot.
+@(private = "file")
+plan_test_lookup :: proc(ctx: rawptr, user_id: string) -> (domain.User_Entitlements, domain.Domain_Error) {
+	entitlements := domain.unlimited_entitlements()
+	entitlements.max_bridges = (^int)(ctx)^
+	return entitlements, {}
+}
+
+@(test)
+test_plan_bridge_approval_cap_pending_and_attach :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	f := setup_attach_fixture(t, "plan_cap")
+	defer teardown_attach_fixture(f)
+	limit := 1
+	f.svc.entitlements = {ctx = &limit, lookup = plan_test_lookup}
+	first := attach_enrol(t, f, "plan_owner", "first")
+	_, second_ok, second_err := enroll_bridge_from_device_grant(&f.svc, Device_Enroll_Input{
+		owner_user_id = "plan_owner", bridge_public_key = "04bb", machine_hostname = "second",
+	})
+	testing.expect(t, !second_ok)
+	testing.expect_value(t, second_err.code, domain.Error_Code.Plan_Limit_Reached)
+	testing.expect(t, strings.contains(second_err.details_json, `"allowed":1`))
+	_, attach_ok, attach_err := enroll_bridge_from_device_grant(&f.svc, Device_Enroll_Input{
+		owner_user_id = "plan_owner", bridge_public_key = "04cc", target_bridge_id = first.bridge.bridge_id,
+	})
+	testing.expect(t, attach_ok, "attach still works at the cap")
+	testing.expect_value(t, attach_err.code, domain.Error_Code.None)
+	count, _ := iface.bridge_count_active_by_owner(&f.repo, domain.User_ID("plan_owner"))
+	testing.expect_value(t, count, 1)
+	// A different owner's pending row reserves its sole slot too.
+	_, pending_ok, _ := enroll_bridge_from_device_grant(&f.svc, Device_Enroll_Input{
+		owner_user_id = "pending_owner", bridge_public_key = "04dd", pending = true,
+	})
+	testing.expect(t, pending_ok)
+	_, over_pending, pending_err := enroll_bridge_from_device_grant(&f.svc, Device_Enroll_Input{
+		owner_user_id = "pending_owner", bridge_public_key = "04ee", pending = true,
+	})
+	testing.expect(t, !over_pending)
+	testing.expect_value(t, pending_err.code, domain.Error_Code.Plan_Limit_Reached)
+	limit = 0
+	_, zero_ok, zero_err := enroll_bridge_from_device_grant(&f.svc, Device_Enroll_Input{
+		owner_user_id = "new_owner", bridge_public_key = "04ff",
+	})
+	testing.expect(t, !zero_ok)
+	testing.expect_value(t, zero_err.code, domain.Error_Code.Plan_Limit_Reached)
+	limit = -1
+	_, unlimited_ok, _ := enroll_bridge_from_device_grant(&f.svc, Device_Enroll_Input{
+		owner_user_id = "plan_owner", bridge_public_key = "04ff",
+	})
+	testing.expect(t, unlimited_ok)
+}
+
+@(private = "file")
+plan_test_disabled :: proc(t: ^testing.T, f: ^Attach_Fixture, id: string) -> bool {
+	row, found, err := iface.bridge_get_bridge(&f.repo, id)
+	testing.expect(t, found)
+	testing.expect_value(t, err.code, domain.Error_Code.None)
+	defer domain.bridge_destroy(&row)
+	return row.plan_disabled_at != ""
+}
+
+@(test)
+test_plan_bridge_reconcile_ranking_upgrade_revoke_and_stale_save :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	f := setup_attach_fixture(t, "plan_rank")
+	defer teardown_attach_fixture(f)
+	limit := 2
+	f.svc.entitlements = {ctx = &limit, lookup = plan_test_lookup}
+	base := domain.Bridge{
+		owner_user_id = domain.User_ID("rank_owner"), status = .Online,
+		created_at = "2026-01-01T00:00:00Z", last_seen_at = "2026-10-01T00:00:00Z",
+	}
+	versions := [5]string{"0.1.0", "1.10.0", "1.9.0", "1.9.0", "1.9.0"}
+	for id, i in ([5]string{"recent", "v110", "v19", "tie_new", "tie_old"}) {
+		row := base; row.bridge_id = id
+		row.version = versions[i]
+		if i == 0 do row.last_seen_at = "2026-10-02T00:00:00Z"
+		if id == "tie_new" do row.created_at = "2026-02-01T00:00:00Z"
+		_, ok, _ := iface.bridge_save_bridge(&f.repo, row)
+		testing.expect(t, ok)
+	}
+	testing.expect_value(t, reconcile_plan_limits(&f.svc, "rank_owner", limit).code, domain.Error_Code.None)
+	testing.expect(t, !plan_test_disabled(t, f, "recent"), "activity outranks version")
+	testing.expect(t, !plan_test_disabled(t, f, "v110"), "numeric semver 1.10 outranks 1.9")
+	testing.expect(t, plan_test_disabled(t, f, "v19"))
+	count, count_err := iface.bridge_count_active_by_owner(&f.repo, domain.User_ID("rank_owner"))
+	testing.expect_value(t, count_err.code, domain.Error_Code.None)
+	testing.expect_value(t, count, 5)
+	_, extra_ok, extra_err := enroll_bridge_from_device_grant(&f.svc, Device_Enroll_Input{
+		owner_user_id = "rank_owner", bridge_public_key = "04ff",
+	})
+	testing.expect(t, !extra_ok, "disabled rows still occupy approval slots")
+	testing.expect_value(t, extra_err.code, domain.Error_Code.Plan_Limit_Reached)
+	before, _, _ := iface.bridge_get_bridge(&f.repo, "v19")
+	defer domain.bridge_destroy(&before)
+	testing.expect_value(t, reconcile_plan_limits(&f.svc, "rank_owner", limit).code, domain.Error_Code.None)
+	after, _, _ := iface.bridge_get_bridge(&f.repo, "v19")
+	defer domain.bridge_destroy(&after)
+	testing.expect_value(t, before.plan_disabled_at, after.plan_disabled_at)
+	// An in-flight heartbeat that read before the downgrade cannot erase the flag.
+	stale := base; stale.bridge_id = "v19"; stale.version = "1.9.0"
+	_, saved_ok, _ := iface.bridge_save_bridge(&f.repo, stale)
+	testing.expect(t, saved_ok)
+	testing.expect(t, plan_test_disabled(t, f, "v19"))
+	// Revoking a retained bridge automatically brings the next ranked one back.
+	_, revoked_ok, revoked_err := revoke_bridge(&f.svc, contracts.Auth_Context{kind = .User_Token, user_id = "rank_owner"}, "recent")
+	testing.expect(t, revoked_ok)
+	testing.expect_value(t, revoked_err.code, domain.Error_Code.None)
+	testing.expect(t, !plan_test_disabled(t, f, "tie_new"), "created_at resolves same-version ties")
+	testing.expect(t, plan_test_disabled(t, f, "tie_old"))
+	testing.expect(t, len(f.closed_bridge_ids) == 1, "reconciliation never kills existing sessions")
+	testing.expect_value(t, reconcile_plan_limits(&f.svc, "rank_owner", -1).code, domain.Error_Code.None)
+	for id in ([4]string{"v110", "v19", "tie_new", "tie_old"}) do testing.expect(t, !plan_test_disabled(t, f, id), "upgrade clears suspension")
+	testing.expect_value(t, reconcile_plan_limits(&f.svc, "rank_owner", 0).code, domain.Error_Code.None)
+	for id in ([4]string{"v110", "v19", "tie_new", "tie_old"}) do testing.expect(t, plan_test_disabled(t, f, id), "zero disables all non-revoked bridges")
+}
+
+@(test)
+test_plan_bridge_semver_and_exact_ties :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	testing.expect(t, bridge_plan_compare_version("v1.10.0", "1.9.9") > 0)
+	testing.expect(t, bridge_plan_compare_version("1.2.3", "1.2.3-rc.1") > 0)
+	testing.expect(t, bridge_plan_compare_version("1.2.3-rc.10", "1.2.3-rc.2") > 0)
+	testing.expect(t, bridge_plan_compare_version("1.2.3-alpha.1", "1.2.3-alpha.beta") < 0)
+	testing.expect_value(t, bridge_plan_compare_version("1.2.3+new", "1.2.3+old"), 0)
+	a := domain.Bridge{bridge_id = "a", last_seen_at = "2026-10-01T00:00:00Z"}
+	b := a; b.bridge_id = "b"
+	testing.expect(t, bridge_plan_before(a, b))
+	testing.expect(t, !bridge_plan_before(b, a))
+}
+
+@(test)
+test_plan_bridge_runtime_rejects_before_activity_update :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	f := setup_attach_fixture(t, "plan_runtime")
+	defer teardown_attach_fixture(f)
+	enrolled := attach_enrol(t, f, "runtime_owner", "box")
+	limit := 0
+	f.svc.entitlements = {ctx = &limit, lookup = plan_test_lookup}
+	testing.expect_value(t, reconcile_owner_plan(&f.svc, "runtime_owner").code, domain.Error_Code.None)
+	_, ok, err := bridge_runtime_connect(&f.svc, enrolled.bridge_token, "updated-host", "", "", "{}")
+	testing.expect(t, !ok)
+	testing.expect_value(t, err.code, domain.Error_Code.Plan_Limit_Reached)
+	row, _, _ := iface.bridge_get_bridge(&f.repo, enrolled.bridge.bridge_id)
+	defer domain.bridge_destroy(&row)
+	testing.expect(t, row.machine_hostname == "box", "refused hello does not improve its ranking")
+	limit = 1
+	testing.expect_value(t, reconcile_owner_plan(&f.svc, "runtime_owner").code, domain.Error_Code.None)
+	connected, connected_ok, connected_err := bridge_runtime_connect(&f.svc, enrolled.bridge_token, "updated-host", "", "", "{}")
+	if connected_ok do domain.bridge_destroy(&connected)
+	testing.expect(t, connected_ok, "same credential works after upgrade")
+	testing.expect_value(t, connected_err.code, domain.Error_Code.None)
+}
+
+
+@(test)
+test_plan_bridge_reconcile_rolls_back_partial_suspensions :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	f := setup_attach_fixture(t, "plan_rollback")
+	defer teardown_attach_fixture(f)
+	for id in ([3]string{"a", "b", "c"}) {
+		_, ok, _ := iface.bridge_save_bridge(&f.repo, domain.Bridge{
+			bridge_id = id, owner_user_id = domain.User_ID("rollback_owner"),
+			status = .Offline, created_at = "2026-10-01T00:00:00Z",
+		})
+		testing.expect(t, ok)
+	}
+	testing.expect(t, sqlite.exec(&f.conn, "CREATE TRIGGER reject_plan_update BEFORE UPDATE OF plan_disabled_at ON bridges WHEN NEW.bridge_id = 'b' BEGIN SELECT RAISE(ABORT, 'test write failure'); END;"))
+	err := reconcile_plan_limits(&f.svc, "rollback_owner", 0)
+	testing.expect_value(t, err.code, domain.Error_Code.Internal_Error)
+	for id in ([3]string{"a", "b", "c"}) do testing.expect(t, !plan_test_disabled(t, f, id), "all updates roll back, including the first successful one")
+	testing.expect(t, sqlite.exec(&f.conn, "DROP TRIGGER reject_plan_update;"))
+	testing.expect_value(t, reconcile_plan_limits(&f.svc, "rollback_owner", 0).code, domain.Error_Code.None)
+	for id in ([3]string{"a", "b", "c"}) do testing.expect(t, plan_test_disabled(t, f, id), "a later retry succeeds")
+}

@@ -40,3 +40,10 @@ test('empty / malformed input', () => {
   assert.deepEqual(composerBridgeOptions(undefined), []);
   assert.deepEqual(composerBridgeOptions([{ status: 'online' }]), []);
 });
+
+test('plan-disabled bridges remain visible but cannot be selected', () => {
+  const suspended = { ...online, plan_disabled_at: '2026-10-22T00:00:00Z' };
+  assert.equal(composerBridgeOptions([suspended])[0].disabledReason, 'plan_limit');
+  assert.equal(composerBridgeOptions([{ ...suspended, status: 'offline' }])[0].disabledReason, 'plan_limit');
+  assert.equal(composerBridgeOptions([{ ...suspended, plan_disabled_at: '' }])[0].disabledReason, null);
+});

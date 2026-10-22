@@ -11,7 +11,7 @@
  * Pure and import-free so `node --test` can pin it.
  */
 
-export type ComposerBridgeDisabledReason = 'offline' | 'update_required' | null;
+export type ComposerBridgeDisabledReason = 'offline' | 'update_required' | 'plan_limit' | null;
 
 export interface ComposerBridgeOption {
   id: string;
@@ -29,7 +29,7 @@ export function composerBridgeIsArchived(bridge: any): boolean {
 }
 
 export function composerBridgeIsOnline(bridge: any): boolean {
-  return String(bridge?.status || '').trim().toLowerCase() === 'online' && bridge?.runtime_connected === true;
+  return !bridge?.plan_disabled_at && String(bridge?.status || '').trim().toLowerCase() === 'online' && bridge?.runtime_connected === true;
 }
 
 export function composerBridgeOptions(bridges: any[] | null | undefined, requireReconfiguration = false): ComposerBridgeOption[] {
@@ -37,13 +37,15 @@ export function composerBridgeOptions(bridges: any[] | null | undefined, require
     .filter((bridge) => composerBridgeId(bridge) !== '' && !composerBridgeIsArchived(bridge))
     .map((bridge) => {
       let disabledReason: ComposerBridgeDisabledReason = null;
-      if (!composerBridgeIsOnline(bridge)) disabledReason = 'offline';
+      if (bridge?.plan_disabled_at) disabledReason = 'plan_limit';
+      else if (!composerBridgeIsOnline(bridge)) disabledReason = 'offline';
       else if (requireReconfiguration && !bridge?.reconfiguration_supported) disabledReason = 'update_required';
       return { id: composerBridgeId(bridge), bridge, disabledReason };
     });
 }
 
-export const COMPOSER_BRIDGE_STATUS_LABEL: Record<'offline' | 'update_required' | 'ok', string> = {
+export const COMPOSER_BRIDGE_STATUS_LABEL: Record<Exclude<ComposerBridgeDisabledReason, null> | 'ok', string> = {
+  plan_limit: 'Disabled — over plan limit · Upgrade',
   offline: 'Offline',
   update_required: 'Update required',
   ok: 'Connected',

@@ -47,7 +47,17 @@ Enrollment_Commit_Outcome :: enum {
 Bridge_Commit_Enrollment_Proc :: proc(ctx: rawptr, bridge_id, family_id, from_scope, to_scope: string, attach: bool, now: string) -> (Enrollment_Commit_Outcome, bool, domain.Domain_Error)
 Bridge_List_Live_Tokens_By_Scope_Proc :: proc(ctx: rawptr, scope: string) -> ([]domain.Bridge_Token, domain.Domain_Error)
 
+Bridge_Plan_Rank_Proc :: proc(a, b: domain.Bridge) -> bool
+Bridge_Create_Limited_Proc :: proc(ctx: rawptr, bridge: domain.Bridge, max_bridges: int) -> (domain.Bridge, bool, domain.Domain_Error)
+Bridge_Count_Active_Proc :: proc(ctx: rawptr, owner: domain.User_ID) -> (int, domain.Domain_Error)
+Bridge_Reconcile_Plan_Proc :: proc(ctx: rawptr, owner: domain.User_ID, max_bridges: int, now: string, before: Bridge_Plan_Rank_Proc) -> domain.Domain_Error
+Bridge_List_Owners_Proc :: proc(ctx: rawptr) -> ([]string, domain.Domain_Error)
+
 Bridge_Repository :: struct {
+	create_limited: Bridge_Create_Limited_Proc,
+	count_active_by_owner: Bridge_Count_Active_Proc,
+	reconcile_plan: Bridge_Reconcile_Plan_Proc,
+	list_owners: Bridge_List_Owners_Proc,
 	ctx: rawptr,
 	save_bridge: Bridge_Save_Proc,
 	get_bridge: Bridge_Get_Proc,
@@ -138,4 +148,17 @@ bridge_commit_enrollment :: proc(repo: ^Bridge_Repository, bridge_id, family_id,
 bridge_list_live_tokens_by_scope :: proc(repo: ^Bridge_Repository, scope: string) -> ([]domain.Bridge_Token, domain.Domain_Error) {
 	if repo == nil || repo.list_live_tokens_by_scope == nil do return nil, domain.domain_error(.Internal_Error, "bridge repository is not configured")
 	return repo.list_live_tokens_by_scope(repo.ctx, scope)
+}
+
+
+// Count includes pending and plan-disabled rows: neither may bypass the approval cap.
+bridge_count_active_by_owner :: proc(repo: ^Bridge_Repository, owner: domain.User_ID) -> (int, domain.Domain_Error) {
+	if repo == nil || repo.count_active_by_owner == nil do return 0, domain.domain_error(.Internal_Error, "bridge count is not configured")
+	return repo.count_active_by_owner(repo.ctx, owner)
+}
+
+bridge_create_limited :: proc(repo: ^Bridge_Repository, bridge: domain.Bridge, max_bridges: int) -> (domain.Bridge, bool, domain.Domain_Error) {
+	if max_bridges < 0 do return bridge_save_bridge(repo, bridge)
+	if repo == nil || repo.create_limited == nil do return {}, false, domain.domain_error(.Internal_Error, "limited bridge enrollment is not configured")
+	return repo.create_limited(repo.ctx, bridge, max_bridges)
 }
