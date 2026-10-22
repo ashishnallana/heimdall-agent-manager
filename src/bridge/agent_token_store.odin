@@ -340,7 +340,8 @@ bridge_agent_instance_run_count :: proc(instance_id: string) -> int {
 	defer sync.mutex_unlock(&bridge_local_token_mutex)
 	for i := len(bridge_local_token_records) - 1; i >= 0; i -= 1 {
 		rec := bridge_local_token_records[i]
-		if rec.agent_instance_id == instance_id && rec.invalidated_at_unix_ms == 0 do return rec.run_count
+		// Keep the generation fence after stop invalidates the credentials.
+		if rec.agent_instance_id == instance_id do return rec.run_count
 	}
 	return 0
 }

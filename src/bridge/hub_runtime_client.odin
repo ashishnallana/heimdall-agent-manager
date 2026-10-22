@@ -2211,6 +2211,30 @@ bridge_runtime_launch_agent :: proc(command_id, command_json: string, deadline_n
 		instance_token = bridge_agent_instance_last_assertion(instance_id)
 		if instance_token == "" do instance_token = strings.concatenate({"hit_", instance_id})
 	}
+	// Task wakes carry a persisted generation even without a migration epoch.
+	// A duplicate wake must preserve an already-live child and its local token;
+	// delayed commands must never replace a newer launch or undo its stop.
+	if run_count > 0 && launch_epoch == "" {
+		current := bridge_agent_instance_run_count(instance_id)
+		if run_count < current do return false, "superseded startup generation", bridge_error(.agent_launch_failed, .denied)
+		if run_count == current {
+			assertion := bridge_agent_instance_assertion(instance_id)
+			defer delete(assertion)
+			if assertion == "" do return false, "startup generation was revoked", bridge_error(.agent_launch_failed, .denied)
+			sync.mutex_lock(&bridge_runtime_mutex)
+			stopped := bridge_runtime_stop_intent_active_locked(instance_id, bridge_runtime_now_ms())
+			sync.mutex_unlock(&bridge_runtime_mutex)
+			if stopped do return false, "startup generation was stopped", bridge_error(.agent_launch_failed, .denied)
+			socket, daemon_ok := bridge_pty_host_ensure_daemon()
+			if !daemon_ok do return false, "ham-pty-host daemon unavailable", bridge_error(.pty_host_unreachable)
+			existing, listed := bridge_pty_host_list(socket)
+			if !listed do return false, "cannot inspect existing runtime", bridge_error(.pty_host_unreachable)
+			alive := false
+			for child in existing.agents do if child.instance_id == instance_id && child.alive { alive = true; break }
+			pty_host_reply_delete(existing)
+			if alive { bridge_task_wake_note_launched(instance_id); return true, "", {} }
+		}
+	}
 	if launch_epoch != "" {
 		socket, daemon_ok := bridge_pty_host_ensure_daemon()
 		if !daemon_ok do return false, "ham-pty-host daemon unavailable", bridge_error(.pty_host_unreachable)

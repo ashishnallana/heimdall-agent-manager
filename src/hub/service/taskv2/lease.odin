@@ -184,6 +184,21 @@ grant_attempt_in_uow :: proc(svc: ^Service, u: ^Uow, req: Grant_Request) -> (dom
 		json_str(&rt, "ended_at", "")
 		_, _ = save_facet_verbatim(svc, refolded, view.attempt_no, FACET_RUNTIME, json_end(&rt), FACET_WRITER_HUB)
 	}
+	// A wake grant replaces the child, unlike inline delivery or an inbox nudge.
+	// Persist its generation in the grant transaction, before any bridge effect.
+	// All re-deliveries of this lease then reuse this generation.
+	if saved.delivery == domain.LEASE_DELIVERY_WAKE {
+		current, found, read_err := iface.agent_get_instance(svc.agents, inst.agent_instance_id)
+		if !found do return {}, false, read_err
+		current.run_count += 1
+		current.runtime_status = "launching"
+		current.startup_status = "starting"
+		current.activity_status = "unknown"
+		current.started_at = now
+		current.stopped_at = ""
+		current.updated_at = now
+		if _, stored, store_err := iface.agent_save_instance(svc.agents, current); !stored do return {}, false, store_err
+	}
 	set_instance_pointer(svc, inst.agent_instance_id, string(task.task_id), .Work if req.kind == domain.LEASE_KIND_WORK else .Review)
 	arm_lease_timers(svc, saved)
 	metric_lease_granted(saved.kind)
@@ -270,7 +285,7 @@ expire_lease_in_uow :: proc(svc: ^Service, u: ^Uow, lease: domain.Task_Lease, re
 	if coordinator do return .Expired // never stopped, may re-pull at once (no recent-expiry window)
 	note_recent_expiry(svc, lease.holder_instance_id, to_ms(now))
 	if inst, iok, _ := iface.agent_get_instance(svc.agents, lease.holder_instance_id); iok {
-		if reason != EXPIRE_INSTANCE_LOST && instance_is_live(inst) {
+		if reason != EXPIRE_INSTANCE_LOST && (instance_is_live(inst) || instance_is_pending(inst)) {
 			effect_stop(u, inst.bridge_id, string(task.chain_id), inst.agent_instance_id)
 		}
 		arm_idle_ttl(svc, inst.agent_instance_id, fleet_idle_ttl(svc, task.chain_id, task.owner_user_id, inst.agent_id), now)
@@ -470,6 +485,13 @@ on_start_success :: proc(svc: ^Service, inst: domain.Agent_Instance) {
 	defer scratch_end(&scratch)
 	u, ok, _ := begin_uow(svc)
 	if !ok do return
+	// The ready hook runs after the agent save. A concurrent grant can have
+	// replaced that child before this transaction acquired the lease lock.
+	current, found, _ := iface.agent_get_instance(svc.agents, inst.agent_instance_id)
+	if !found || current.run_count != inst.run_count {
+		_, _ = end_uow(svc, &u, false)
+		return
+	}
 	acted := true
 	if lease, held, _ := iface.taskchain_get_lease_by_holder(svc.repo, inst.agent_instance_id); held {
 		acted = confirm_in_uow(svc, &u, lease)

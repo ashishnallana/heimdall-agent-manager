@@ -1,6 +1,7 @@
 package http
 
 import "core:strings"
+import taskv2 "odin_test:hub/service/taskv2"
 import "core:encoding/json"
 import "core:testing"
 import "core:thread"
@@ -124,4 +125,97 @@ startup_action_concurrent_retries_have_one_note_hook_and_wake :: proc(t: ^testin
 	after, _, _ := iface.agent_get_instance(&f.ag_repo, f.instance_id)
 	testing.expect_value(t, after.runtime_status, "stopped")
 	testing.expect_value(t, counts.hooks, 3)
+}
+
+// This follows the production grant -> committed wake -> ready hook path. A
+// previous durable receipt must not swallow the replacement's lease confirmation.
+@(test)
+startup_task_wake_replacement_has_fresh_receipt_and_confirms_lease :: proc(t: ^testing.T) {
+	f := wire_setup(t, "startup_task_wake")
+	defer wire_teardown(f)
+	content_impl: sqlite.Content_Repo_SQLite
+	content_repo := sqlite.new_content_repository(&content_impl, &f.conn)
+	content := content_service.new_content_service(&content_repo, &f.ag_repo, &f.br_repo, nil, nil, &f.clock, &f.ids)
+	f.ah.content = &content
+	engine := taskv2.new_service(&f.tc_repo, &f.ag_repo, &f.br_repo, &f.clock, &f.ids)
+	repos := iface.Repositories{taskchains = f.tc_repo, agents = f.ag_repo, bridges = f.br_repo}
+	uow_impl: sqlite.SQLite_Unit_Of_Work_Factory
+	uow := sqlite.new_unit_of_work_factory(&uow_impl, &f.conn, &repos)
+	engine.uow_factory = &uow
+	Counts :: struct { hooks, wakes, runs: int, generation: int, engine: ^taskv2.Service }
+	counts := Counts{engine = &engine}
+	f.ag_svc.hooks = agent_service.Lifecycle_Hooks{ctx = &counts, on_start_success = proc(ctx: rawptr, inst: domain.Agent_Instance) {
+		c := (^Counts)(ctx)
+		c.hooks += 1
+		taskv2.on_start_success(c.engine, inst)
+	}}
+	content.bridge_command_sink = project_service.Bridge_Command_Sink{ctx = &counts, send_runtime_command = proc(ctx: rawptr, command: project_service.Runtime_Command) -> (bool, domain.Domain_Error) {
+		if strings.contains(command.body_json, "notify_agent_message") do (^Counts)(ctx).wakes += 1
+		return true, {}
+	}}
+	engine.wake_observer_ctx = &counts
+	engine.wake_observer = proc(ctx: rawptr, command: taskv2.Wake_Command) {
+		c := (^Counts)(ctx)
+		wire: struct { payload: struct { run: []struct { run_count: int } } }
+		if json.unmarshal_string(command.body_json, &wire) == nil {
+			for child in wire.payload.run { c.runs += 1; c.generation = child.run_count }
+		}
+	}
+	_, _, _ = iface.content_save_conversation(&content_repo, domain.Chat_Conversation{conversation_id = "chat_startup_wake", owner_user_id = f.owner, agent_id = "agt_wire_tb2", agent_instance_id = f.instance_id, title = "startup", created_at = "2026-10-22T10:00:00Z", updated_at = "2026-10-22T10:00:00Z"})
+	_, _, _ = iface.content_save_message(&content_repo, domain.Chat_Message{message_id = "msg_startup_wake_unread", conversation_id = "chat_startup_wake", owner_user_id = f.owner, direction = "user_to_agent", body = "Pending work", artifact_ids_json = "[]", message_type = "text", created_at = "2026-10-22T10:00:00Z"})
+	inst, _, _ := iface.agent_get_instance(&f.ag_repo, f.instance_id)
+	inst.run_count = 1
+	inst.provider = "claude"
+	inst.model = "claude-opus-5-5"
+	_, _, _ = iface.agent_save_instance(&f.ag_repo, inst)
+	old_body := strings.concatenate({`{"agent_instance_id":"`, f.instance_id, `","params":{"run_count":1}}`})
+	req := wire_agent_request(f, "start-success", old_body)
+	testing.expect_value(t, agent_action_start_success_handler(&f.ah, req).status, 200)
+	testing.expect_value(t, counts.hooks, 1)
+	testing.expect_value(t, counts.wakes, 1)
+	// Now create a real worker wake grant, after that child's ready receipt exists.
+	chain, _, _ := iface.taskchain_get_chain(&f.tc_repo, f.chain_id)
+	chain.publish_state = .Published
+	_, _, _ = iface.taskchain_save_chain(&f.tc_repo, chain)
+	_, _, _ = iface.taskchain_save_member(&f.tc_repo, domain.Task_Chain_Member{chain_id = f.chain_id, owner_user_id = f.owner, agent_instance_id = f.instance_id, agent_id = inst.agent_id, role = "worker"})
+	bridge, _, _ := iface.bridge_get_bridge(&f.br_repo, f.bridge_pin)
+	bridge.status = .Online
+	_, _, _ = iface.bridge_save_bridge(&f.br_repo, bridge)
+	task := domain.Task{task_id = "task_startup_http_wake", chain_id = f.chain_id, owner_user_id = f.owner, title = "Replacement", kind = .Task, publish_state = .Published, brief_json = `{"goal":"g","review_roles":[]}`}
+	_, _, _ = iface.taskchain_save_task(&f.tc_repo, task)
+	testing.expect_value(t, taskv2.task_created(&engine, task, taskv2.hub_actor()).code, domain.Error_Code.None)
+	task, _, _ = iface.taskchain_get_task(&f.tc_repo, task.task_id)
+	u, begun, begin_err := taskv2.begin_uow(&engine)
+	if !testing.expect(t, begun, begin_err.message) do return
+	lease, granted, grant_err := taskv2.grant_in_uow(&engine, &u, taskv2.Grant_Request{chain = chain, task = task, instance = inst, kind = domain.LEASE_KIND_WORK, delivery = domain.LEASE_DELIVERY_WAKE, placement = taskv2.Placement{bridge_id = f.bridge_pin, provider = inst.provider, model = inst.model}, actor = taskv2.hub_actor()})
+	testing.expect(t, granted, grant_err.message)
+	committed, commit_err := taskv2.end_uow(&engine, &u, granted)
+	if !testing.expect(t, committed && granted, commit_err.message) do return
+	testing.expect_value(t, counts.runs, 1)
+	testing.expect_value(t, counts.generation, 2)
+	current, _, _ := iface.agent_get_instance(&f.ag_repo, f.instance_id)
+	testing.expect_value(t, current.run_count, 2)
+	testing.expect(t, lease.confirmed_at == "")
+	testing.expect(t, agent_action_start_success_handler(&f.ah, req).status != 200, "old relay cannot consume new ready hook")
+	taskv2.on_start_success(&engine, inst)
+	pending, _, _ := iface.taskchain_get_lease(&f.tc_repo, lease.lease_id)
+	testing.expect(t, pending.confirmed_at == "", "delayed old lifecycle hook cannot confirm new child")
+	taskv2.on_bridge_hello(&engine, f.bridge_pin, []string{f.instance_id})
+	testing.expect_value(t, counts.runs, 2)
+	testing.expect_value(t, counts.generation, 2)
+	req.body = strings.concatenate({`{"agent_instance_id":"`, f.instance_id, `","params":{"run_count":2}}`})
+	ready := agent_action_start_success_handler(&f.ah, req)
+	testing.expect(t, ready.status == 200, ready.body)
+	testing.expect_value(t, agent_action_start_success_handler(&f.ah, req).status, 200)
+	testing.expect_value(t, counts.hooks, 2)
+	testing.expect_value(t, counts.wakes, 2)
+	confirmed, _, _ := iface.taskchain_get_lease(&f.tc_repo, lease.lease_id)
+	testing.expect(t, confirmed.confirmed_at != "", "replacement ready action confirms NEW wake lease")
+	rows, _ := iface.content_list_messages(&content_repo, "chat_startup_wake", f.owner, 20, "")
+	testing.expect_value(t, len(rows), 3) // pending inbox + one ready note per child
+	before := counts.runs
+	taskv2.on_bridge_hello(&engine, f.bridge_pin, []string{f.instance_id})
+	current, _, _ = iface.agent_get_instance(&f.ag_repo, f.instance_id)
+	testing.expect_value(t, current.run_count, 2)
+	testing.expect_value(t, counts.runs, before)
 }
