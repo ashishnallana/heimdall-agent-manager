@@ -169,3 +169,121 @@ Compare only like-for-like, calibrated windows with no reboot and similar host I
 - Dead end: the sqlite3 CLI with `.output /dev/null` also suppresses `.stats` and `.print`. Let the rows print and parse them.
 - Dead end: binaries run through `nix develop -c` need a cwd containing `flake.nix`.
 - The task-3 Vite build segfaulted once (Node v26, a known flake from task 3) in the first dry run of `verify-integration.sh`. The final verify result is recorded in the handoff.
+
+## 7. Port onto origin/main 483f5b43 (branch `call-reduction-rebased`, 2026-10-22)
+
+The reviewed work above, ported to the latest `origin/main` so it can merge. Nothing was pushed or deployed and the shared checkout was not touched.
+
+- **Worktree:** `/home/tanmay/hamwt/call-reduction-rebased`, branch `call-reduction-rebased`.
+- **Base:** `origin/main` = `483f5b43197c9d21f75572fae732f69608fe90e6`. Re-fetched at start; main had not moved since task 5. Main's latest migration is `103_plan_enforcement.sql`.
+- **Method:** cherry-picked the ten integration commits `d9479824..448ca6e5` in order, then added three commits.
+
+### 7.1 Commits (oldest first)
+
+| Rebased | From integration | Reviewed origin | How it landed |
+|---|---|---|---|
+| `b4acc6a1` | `d9479824` | `ff7507fb` | clean, same patch-id |
+| `d6fbb942` | `d4225b3a` | `cfe5316d` | clean, same patch-id |
+| `664f31ba` | `16213790` | `da60cae2` | conflict in `migrations.odin` (see 7.3) |
+| `2afaa126` | `f703cee6` | `7a2d5aa4` | conflict in `migrations.odin` (see 7.3) |
+| `fa3a62d7` | `24b16625` | `65419377` | clean, same patch-id |
+| `b5393b18` | `ed2ccadb` | `1b4546e0` | clean (auto-merged `shells.ts`), same patch-id |
+| `61105139` | `cc30dddf` | `a5bb14fb` | clean, same patch-id |
+| `10f0f294` | `bd3521b4` | `0520e022` | auto-merged, but the result was wrong (see 7.3) |
+| `96183a34` | `9e7798f4` | `47c4bb32` | clean, same patch-id |
+| `7cb4f0b1` | `448ca6e5` | task 5 | clean (auto-merged `wiring.odin`), same patch-id |
+| `31a3e633` | — | new | renumber migrations; add upgrade tests |
+| `fe10757f` | — | new | user-approved vault `last_seen` throttle, 300 s → 3600 s |
+| `b6273f2a` | — | new | `verify-rebased.sh`; remove `verify-integration.sh` |
+
+The last commit on the branch appends this section to the report.
+
+### 7.2 Migration renumbering
+
+| Before (integration) | After (rebased) |
+|---|---|
+| `103_guard_chat_fts_updates.sql` / `MIGRATION_103_GUARD_CHAT_FTS_UPDATES` | `104_guard_chat_fts_updates.sql` / `MIGRATION_104_GUARD_CHAT_FTS_UPDATES` |
+| `104_full_scan_indexes.sql` / `MIGRATION_104_FULL_SCAN_INDEXES` | `105_full_scan_indexes.sql` / `MIGRATION_105_FULL_SCAN_INDEXES` |
+| `migration_order :: [107]string` (on ae2728d7) | `migration_order :: [108]string`, ending `102_drop_bridge_enrollments`, `103_plan_enforcement`, `104_guard_chat_fts_updates`, `105_full_scan_indexes` |
+
+- **Where the new numbers are used:**
+  - `migration_sql` branches.
+  - The `run_migrations` skip guard for 104, which now applies only when both chat FTS vtables exist.
+  - `tests/hotpath_writes_test.odin` (`before_104`, `stop_before = "104_guard_chat_fts_updates.sql"`).
+  - `full_scan_indexes_test.odin` (`FSI_MIGRATION`, `test_m105_*`).
+  - `tests/sqlite_index_eval.odin` (`MIGRATION_105_FULL_SCAN_INDEXES`, the "Shipped migration 105" heading) and `verify-sqlite-index.sh`.
+- **Numbers:** no number after 102 is reused. Main's numbers 043, 044, 048 and 072 were already shared before this work.
+- **Earlier reports in `docs/`:** the reports from tasks 2 and 4 still say "migration 103/104". Read those as 104/105 on this branch.
+
+New test file: `src/hub/repository/sqlite/rebased_migration_order_test.odin`.
+- `test_rebased_upgrade_from_main_tip_applies_104_and_105`: migrates with `stop_before = 104_guard_chat_fts_updates.sql`, which is main's tip. It asserts that 103_plan is applied, that ours are not yet applied, that the triggers are unguarded and that the indexes are absent. It then seeds a user and a shell row, upgrades, and asserts: both migrations applied, `bridges.plan_disabled_at` present, guarded triggers, all 3 indexes, 108 ledger rows, the row survives, and a re-run is a no-op.
+- `test_rebased_fresh_database_applies_every_migration`: every `migration_order` name is recorded, plus the same post-conditions.
+- `test_rebased_migration_numbers_after_102_are_unique`: checks the tail order and that numbers after 102 are strictly ascending.
+
+The FTS consistency tests (`hotpath_writes_test`) and the index query-plan tests (`test_m105_repository_reads_plan_onto_the_indexes` and the index harness) are re-run by verify.
+
+### 7.3 Conflicts and source drift
+
+| Site | Result | Rationale |
+|---|---|---|
+| `migrations.odin`: consts, `migration_order`, `migration_sql` (2 conflicts while picking `16213790` and `f703cee6`) | Kept both sides. Main's 103 goes first, then ours. | Main's migration is already numbered and shipped. Ours follow it in their original relative order (FTS guard, then indexes). |
+| `migrations.odin` after `bd3521b4` | Git merged it with no conflict but left `[107]` holding 108 entries, which does not compile. Fixed to `[108]` in the renumber commit. | This was a semantic conflict. `verify-rebased.sh` now asserts the declared size equals the entry count. |
+| `src/hub/app/wiring.odin` | Auto-merged. Main reworked billing and entitlement wiring and did not touch the pragma block. `MAIN_CONN_CACHE_SIZE_PRAGMA` still runs right after `synchronous = NORMAL` on `graph.db`. | Nothing to change. |
+| `src/ui/api/endpoints/shells.ts` | Auto-merged. Main's only change is `customQueryError` in the pane-reply endpoint, which is not one of our `listShells` tags. | Nothing to change. |
+| `vault_directory_repo_sqlite` touch_last_seen, `content_repo_sqlite` mark_messages_read, `shell_session_repo_sqlite` upsert, `taskchain_handlers` search-documents early return, `wsInvalidation.ts`, `conn.odin` | Main did not touch these files since ae2728d7. | No drift. |
+| Callers of GET /shells | The caller set is unchanged. Line numbers moved: `ShellLaunchPanel.tsx:76→81`, `ShellMainPane.tsx:188→192`, `AppShell.tsx:1531→1533`. | These matter for the docs only. Main's `planLimitReached` tag is separate from `ShellSessions`. |
+| `103_plan_enforcement.sql` | It rebuilds `billing_plans` and `account_entitlements` and adds `bridges.plan_disabled_at`. It touches no chat, shell or dependency table. | No interaction with our triggers or indexes. |
+
+No reviewed behaviour changed apart from the approved throttle (7.4).
+
+### 7.4 User-approved change: vault `last_seen` throttle 300 s → 3600 s
+
+- **What changed:**
+  - `vault_touch_last_seen_sqlite` now uses the named constant `VAULT_LAST_SEEN_THROTTLE_SECONDS :: 3600` instead of the literal `300`.
+  - The constant is bound as `?4` and compared as `unixepoch(?1) - CAST(?4 AS INTEGER)`.
+- **What did not change:**
+  - It is still one conditional UPDATE on the dedicated vault writer, with no extra read.
+  - The NULL/invalid branch and the clock-regression branch (`last_seen_at > now`) are as before.
+- **Why it is safe:** `last_seen_at` is read only by Settings → Devices and the revoke confirmation (`DevicesPanel.tsx:66,86`). No auth, expiry or prune logic uses it.
+- **Tests:**
+  - `vault_boundary_owner_clock_and_errors`: no write at +3599 s, a write at +3600 s (`VAULT_NEXT = NOW + 3600`), no write at +3599 s after that.
+  - `concurrent_atomic_guards`, after reopen: no write at NEXT+3599 s, a write at NEXT+3600 s.
+  - Its first run failed at the old +300 s step, which confirms the boundary test exercises the constant.
+- **Comments:** the "five minutes" comments in `domain/vault_directory.odin:92` and `vault_directory_handlers.odin:241` now say one hour.
+- **Expected effect:** each device writes `last_seen` at most once an hour instead of once every five minutes, under steady signed traffic. Only the presence shown in the Devices panel gets coarser.
+
+### 7.5 `verify-rebased.sh`
+
+This is the union of the `verify-integration.sh` checks on the new base. `verify-integration.sh` was removed because it pins base `ae2728d7`, the old migration names and `[107]`.
+
+**Ancestry, adapted:**
+- **Patch-id matches:** `ff7507fb cfe5316d 65419377 1b4546e0 a5bb14fb 47c4bb32 448ca6e5`.
+- **No patch-id match:** `da60cae2` and `7a2d5aa4` (task 2) and `0520e022` (task 4) hit main's 103 in `migrations.odin`, and the renumber edits their files. They are checked by content instead:
+  1. Every file the integration branch changed must equal its content at `448ca6e5` after the scripted renumber rewrite. `docs/` files are compared verbatim. Files touched by the throttle commit are compared at that commit's parent, and the throttle commit may touch only its 4 files.
+  2. For files main also changed (`wiring.odin`, `shells.ts`), the added and removed lines must equal the integration's.
+  3. `migrations.odin` must add exactly the integration lines, renumbered. The only allowed differences are the `[108]` size line and the new two-line 104 comment.
+- **Negative checks:**
+  - A one-line edit committed to `content_repo_sqlite.odin` fails with `content drift`.
+  - A one-line edit committed to `wiring.odin` fails with `changed-line drift`.
+  - Both were reset afterwards.
+
+**Other checks:**
+- Numbering: the `102,103,104,105` tail, `[108]` equal to the entry count, no reused number in `migrations/`, and no stale names.
+- The throttle constant.
+- New tests: the rebased upgrade tests plus main's `billing_repo_test` (103_plan_enforcement upgrade/crash-recovery).
+- REQ-CACHE: test, wiring grep, mmap off.
+- `verify-sqlite-index.sh`, `verify-hotpath-writes.sh` and `verify-api-fetch-dedup.sh`, each re-run in this worktree.
+
+The task-1 baseline replay runs inside those scripts. It is a pass/fail replay; the before/after counts in §4 were not re-measured on this base.
+
+### 7.6 Result
+
+Pre-submit run of `bash verify-rebased.sh` at `b6273f2a` (`ham-ctl shell run` session `sh_6ac77d0d39b2ce1bd788729ce530d78c`, full log at `/home/tanmay/hamwt/call-reduction-rebased-verify-dryrun.log`): exit 0.
+- Ancestry: 7 patch-ids found; 47 files match by content; `migrations.odin` lines match after renumbering. Numbering OK. Throttle OK.
+- Rebased upgrade tests plus billing migration tests: 9/9 pass. Cache test OK.
+- 56 scoped sqlite tests pass. Index harness passes (t1). Baseline replay passes (×3). Hub build succeeds (×3).
+- Hot-path tests: 6/6 pass.
+- Fetch-dedup backend passes. Typecheck passes. The Vite build passes on the first try: no Node v26 segfault in this run.
+- UI suites: 39/39. Shell-list test 1/1, with GET /shells per tab of 6/4/3/6/3, the same as task 3. REQ-SHELL-6: 5/5.
+
+The final `ham-ctl verify` at the submitted head is recorded in the task handoff.
