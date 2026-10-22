@@ -2648,11 +2648,9 @@ bridge_runtime_set_status :: proc(instance_id, runtime_status, activity_status: 
 	if strings.trim_space(instance_id) == "" do return
 	// A stopped/failed agent can no longer act on a permission decision: release
 	// its blocked permission waiters with "none".
-	// Its tool aggregation is closed out too, so a killed turn still gets posted.
 	now := bridge_runtime_now_ms()
 	if runtime_status == "stopped" || runtime_status == "failed" {
 		bridge_permission_cancel_instance(instance_id)
-		bridge_ext_instance_terminal(instance_id, now)
 	}
 	sync.mutex_lock(&bridge_runtime_mutex)
 	defer sync.mutex_unlock(&bridge_runtime_mutex)
@@ -2866,6 +2864,7 @@ bridge_runtime_accept_activity_update :: proc(inst: ^Bridge_Runtime_Instance, so
 
 bridge_runtime_activity_source_rank :: proc(source: string) -> int {
 	s := strings.to_lower(strings.trim_space(source))
+	defer delete(s)
 	// NOTE: the pi_extension==100 fast-path was REMOVED with the pi activity
 	// extension (task_18d129291c6a455d). It was the high-priority source that
 	// suppressed a correct pane_diff 'idle' (the stuck 'working · settling' bug).
@@ -2886,8 +2885,9 @@ bridge_runtime_activity_source_rank :: proc(source: string) -> int {
 	return 1
 }
 
+// The result is borrowed (canonical literal or request-temp normalized text).
 bridge_runtime_normalize_activity_status :: proc(status: string) -> string {
-	s := strings.to_lower(strings.trim_space(status))
+	s := strings.to_lower(strings.trim_space(status), context.temp_allocator)
 	if s == "active" || s == "working" || s == "busy" do return "active"
 	// waiting_user / waiting / waiting_approval: the agent has finished its turn and
 	// is BLOCKED on a human (an empty prompt, a y/n approval, "press enter", …). It

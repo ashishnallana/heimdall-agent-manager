@@ -165,7 +165,6 @@ test_codex_live_bridge_listener_when_explicitly_configured :: proc(t: ^testing.T
 		th := thread.create_and_start_with_data(p, codex_live_connection)
 		append(&workers, th)
 	}
-	for id in ([]string{"inst_codex_live_one","inst_codex_live_two"}) do bridge_ext_instance_terminal(id, bridge_runtime_now_ms())
 	for th in workers { thread.join(th); thread.destroy(th) }
 	delete(workers)
 	for id in ([]string{"inst_codex_live_one","inst_codex_live_two"}) {

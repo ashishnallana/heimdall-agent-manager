@@ -428,15 +428,14 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 		event_bus           = &graph.event_bus,
 		ids                 = &graph.ids,
 		clock               = &graph.clock,
-		// REQ-SHELL-5: writes a run's single `shell_run` marker into the triggering
-		// conversation. graph.content is constructed above, so the order holds.
+		// Used only to resolve the authenticated conversation binding.
 		content             = &graph.content,
 	)
 	graph.shell_session_service.entitlements = billing_service.entitlement_lookup(&graph.billing)
 	shell_session_svc.shell_metrics_set_service(&graph.shell_session_service)
 	graph.shell_session_service.on_unobserved_terminal = task_engine_on_unobserved_shell_terminal
 	graph.shell_session_service.on_unobserved_terminal_ctx = rawptr(&graph.task_engine)
-	graph.shell_session_service.message_created = content_service.Message_Created_Hook{ctx = rawptr(graph), created = service_message_created}
+	graph.shell_session_service.live_agents = &graph.agents
 	// REQ-SHELL-9 trigger A: a closed chain reaps its servers. Assigned HERE, after the
 	// shell-session service is constructed, rather than next to the other two taskchain
 	// dependencies at their construction above — graph.taskchains is built before this
@@ -587,6 +586,7 @@ shutdown_graph :: proc(graph: ^App_Graph) {
 	http.user_ws_ticket_store_free(&graph.user_handlers.ws_tickets)
 	shell_session_svc.shell_metrics_detach_service(&graph.shell_session_service)
 	shell_session_svc.shell_session_service_free(&graph.shell_session_service)
+	agent_service.tool_live_destroy(&graph.agents.tool_live)
 	device_auth_service.grant_store_free(&graph.device_auth_store)
 	delete(graph.action_bridge_versions)
 	billing_service.service_free(&graph.billing)
@@ -695,6 +695,8 @@ register_routes :: proc(graph: ^App_Graph) {
 	http.router_add(&graph.router, "POST", "/api/v1/agent-instances/*/reconfigurations/retry", rawptr(&graph.agent_handlers), http.retry_instance_reconfiguration_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/agent-instances/*/reconfigurations", rawptr(&graph.agent_handlers), http.create_instance_reconfiguration_handler)
 	http.router_add(&graph.router, "GET", "/api/v1/agent-instances/*/reconfigurations", rawptr(&graph.agent_handlers), http.list_instance_reconfigurations_handler)
+	http.router_add(&graph.router, "GET", "/api/v1/task-chains/*/tool-activity-live", rawptr(&graph.taskchain_handlers), http.task_chain_tool_activity_live_handler)
+	http.router_add(&graph.router, "GET", "/api/v1/agent-instances/*/tool-activity-live", rawptr(&graph.agent_handlers), http.agent_instance_tool_activity_live_handler)
 	http.router_add(&graph.router, "GET", "/api/v1/agent-instances/*/extension/events", rawptr(&graph.agent_handlers), http.agent_instance_extension_events_handler)
 	http.router_add(&graph.router, "GET", "/api/v1/agent-instances/*/extension/subagents", rawptr(&graph.agent_handlers), http.agent_instance_extension_subagents_handler)
 	http.router_add(&graph.router, "GET", "/api/v1/agent-instances/*/extension/files", rawptr(&graph.agent_handlers), http.agent_instance_extension_files_handler)

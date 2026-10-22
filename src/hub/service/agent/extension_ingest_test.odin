@@ -64,11 +64,15 @@ ME :: contracts.Auth_Context{kind = .Instance_Token, user_id = "owner", agent_in
 
 @(test)
 test_extension_ingest_batch_stamps_identity_and_session :: proc(t: ^testing.T) {
+	// Match the HTTP request arena used by ingest in production.
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
 	store: Ext_Store
 	repo: iface.Agent_Repository
 	clock: platform.Clock
 	ids: platform.ID_Generator
 	service := ext_service(&store, &repo, &clock, &ids)
+	defer tool_live_destroy(&service.tool_live)
 	defer delete(store.events)
 	defer delete(store.updates)
 
@@ -109,11 +113,15 @@ test_extension_ingest_batch_stamps_identity_and_session :: proc(t: ^testing.T) {
 
 @(test)
 test_extension_ingest_single_event_and_same_session :: proc(t: ^testing.T) {
+	// Match the HTTP request arena used by ingest in production.
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
 	store: Ext_Store
 	repo: iface.Agent_Repository
 	clock: platform.Clock
 	ids: platform.ID_Generator
 	service := ext_service(&store, &repo, &clock, &ids)
+	defer tool_live_destroy(&service.tool_live)
 	defer delete(store.events)
 	defer delete(store.updates)
 
@@ -133,11 +141,15 @@ test_extension_ingest_single_event_and_same_session :: proc(t: ^testing.T) {
 
 @(test)
 test_extension_ingest_requires_instance_token :: proc(t: ^testing.T) {
+	// Match the HTTP request arena used by ingest in production.
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
 	store: Ext_Store
 	repo: iface.Agent_Repository
 	clock: platform.Clock
 	ids: platform.ID_Generator
 	service := ext_service(&store, &repo, &clock, &ids)
+	defer tool_live_destroy(&service.tool_live)
 	defer delete(store.events)
 	defer delete(store.updates)
 
@@ -165,6 +177,7 @@ test_codex_native_hello_reaches_hub_without_trusting_payload_identity :: proc(t:
 	clock: platform.Clock
 	ids: platform.ID_Generator
 	service := ext_service(&store, &repo, &clock, &ids)
+	defer tool_live_destroy(&service.tool_live)
 	native, _ := json.parse_string(#load("../../../ctl/extension/testdata/codex/callbacks.json", string), json.DEFAULT_SPECIFICATION, true)
 	rows, _ := native.(json.Array)
 	raw, _ := json.marshal(rows[0])

@@ -4,7 +4,6 @@ import "core:fmt"
 import "core:strings"
 import domain "odin_test:hub/domain"
 import agent_service "odin_test:hub/service/agent"
-import content_service "odin_test:hub/service/content"
 import events "odin_test:hub/service/events"
 
 // Provider extension (ham.ext.v1) routes. Ingest arrives from the bridge as an
@@ -34,43 +33,24 @@ agent_action_extension_events_handler :: proc(ctx: rawptr, req: Request) -> Resp
 	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req), 200)
 }
 
-// POST /api/v1/agent-actions/tool-activity  params: {message_type:"tool_activity", body, metadata:{…}}
-//
-// One aggregated tool-activity message from the bridge (REQ-EXT-CONV-1/2). See
-// content/tool_activity_message.odin for why this is its own route and why the
-// message is silent: the frame below carries no body_preview and the direction
-// "tool_activity", so the UI refetches the message without a toast or an OS
-// notification (the pane_capture frame does the same).
+// Authenticated compatibility no-op: older bridges cannot create transcript rows.
 agent_action_tool_activity_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Agent_Action_Handlers)(ctx)
-	auth, inst, ok, resp := require_instance_action_auth(h, req)
+	_, _, ok, resp := require_instance_action_auth(h, req)
 	if !ok do return resp
-	params := json_object_raw(req.body, "params")
-	if mt := json_string(params, "message_type"); mt != "" && mt != content_service.TOOL_ACTIVITY_MESSAGE_TYPE {
-		return respond_error(domain.domain_error(.Validation_Failed, "message_type must be tool_activity"), req.request_id)
-	}
-	msg, conv, saved, err := content_service.record_tool_activity_message(h.content, auth, inst.agent_instance_id, json_string(params, "body"), json_object_raw(params, "metadata"))
-	if !saved do return respond_error(err, req.request_id)
-	if h.event_bus != nil {
-		events.publish_owned(h.event_bus, string(conv.owner_user_id), tool_activity_chat_event_json(conv, msg))
-	}
-	b := strings.builder_make()
-	write_message_json(&b, msg, h.content)
-	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req), 201)
+	return respond_success(`{"accepted":true,"persisted":false}`, req.request_id, auth_ctx_server_time(req), 200)
 }
 
-// tool_activity_chat_event_json is the silent user-WS frame for a new
-// tool_activity message: a fetch hint with no body preview.
-tool_activity_chat_event_json :: proc(c: domain.Chat_Conversation, m: domain.Chat_Message) -> string {
-	b := strings.builder_make()
-	strings.write_string(&b, `{"type":"chat_event","event":"chat_updated","direction":"tool_activity","agent_instance_id":"`)
-	write_handler_json_string(&b, c.agent_instance_id)
-	strings.write_string(&b, `","conversation_id":"`); write_handler_json_string(&b, c.conversation_id)
-	strings.write_string(&b, `","message_id":"`); write_handler_json_string(&b, m.message_id)
-	strings.write_string(&b, `","message_type":"`); write_handler_json_string(&b, m.message_type)
-	strings.write_string(&b, `","fetch_required":true,"fetch_kind":"chat_message","fetch_id":"`); write_handler_json_string(&b, m.message_id)
-	strings.write_string(&b, `"}`)
-	return strings.to_string(b)
+// Snapshot reads memory only, never extension/chat history.
+agent_instance_tool_activity_live_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Agent_Handlers)(ctx)
+	auth, ok, resp := require_auth(h.auth, req)
+	if !ok do return resp
+	inst, got, err := agent_service.get_instance(h.agents, auth, extension_instance_path_id(req.path))
+	if !got do return respond_error(err, req.request_id)
+	body := agent_service.tool_live_snapshot(h.agents, inst)
+	defer delete(body)
+	return respond_success(body, req.request_id, auth_ctx_server_time(req))
 }
 
 extension_last_seq :: proc(evs: []domain.Agent_Extension_Event) -> int {
@@ -210,4 +190,15 @@ write_extension_capabilities_json :: proc(b: ^strings.Builder, caps: string) {
 		return
 	}
 	strings.write_string(b, trimmed)
+}
+
+// GET /api/v1/task-chains/{id}/tool-activity-live
+task_chain_tool_activity_live_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Taskchain_Handlers)(ctx)
+	auth, ok, resp := require_auth_any(h.auth, req)
+	if !ok do return resp
+	body, got, err := agent_service.tool_live_chain_snapshot(h.agents, auth, path_part(req.path, 4))
+	if !got do return respond_error(err, req.request_id)
+	defer delete(body)
+	return respond_success(body, req.request_id, auth_ctx_server_time(req))
 }

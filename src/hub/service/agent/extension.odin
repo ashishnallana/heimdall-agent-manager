@@ -163,6 +163,7 @@ ingest_extension_events :: proc(service: ^Agent_Service, auth: contracts.Auth_Co
 		result.session_changed = upd.provider_session_id != "" && upd.provider_session_id != inst.provider_session_id
 		if fresh, ok2, _ := iface.agent_get_instance(service.agents, inst.agent_instance_id); ok2 do inst = fresh
 	}
+	tool_live_extension(service, inst, events[:])
 	result.instance = inst
 	return result, true, {}
 }

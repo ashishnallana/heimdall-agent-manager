@@ -42,6 +42,7 @@ Agent_Service :: struct {
 	event_bus: ^events.User_Event_Bus,
 	// blockers: in-memory agent blockers fed by bridge snapshots (agent_blockers.odin).
 	blockers: Agent_Blocker_Store,
+	tool_live: Tool_Live_Store,
 }
 
 // Resource_Event_Hooks are invoked only after the write they describe returned
@@ -76,6 +77,7 @@ notify_instance_terminal :: proc(service: ^Agent_Service, instance_id: string) {
 	if service == nil || instance_id == "" do return
 	// A dead instance has nothing left to answer: clear its agent blockers.
 	clear_instance_blockers(service, instance_id)
+	tool_live_clear(service, instance_id)
 	if service.hooks.on_terminal == nil do return
 	service.hooks.on_terminal(service.hooks.ctx, instance_id)
 }
@@ -161,11 +163,15 @@ Stop_Instance_Input :: struct { reason: string, force: bool }
 Reconfigure_Instance_Input :: struct { provider, model, agent_id, bridge_id, chain_id, conversation_id, display_name: string, project_id: domain.Project_ID, has_agent_id, has_bridge_id, has_project_id, has_chain_id, has_conversation_id, has_display_name: bool }
 
 new_agent_service :: proc(agents: ^iface.Agent_Repository, bridges: ^iface.Bridge_Repository, clock: ^platform.Clock, ids: ^platform.ID_Generator) -> Agent_Service {
-	return Agent_Service{agents = agents, bridges = bridges, clock = clock, ids = ids}
+	s := Agent_Service{agents = agents, bridges = bridges, clock = clock, ids = ids}
+	tool_live_init(&s.tool_live)
+	return s
 }
 
 new_agent_service_with_runtime :: proc(agents: ^iface.Agent_Repository, bridges: ^iface.Bridge_Repository, projects: ^iface.Project_Repository, content: ^iface.Content_Repository, taskchains: ^iface.Taskchain_Repository, sink: project_service.Bridge_Command_Sink, registry: ^project_service.Bridge_Runtime_Registry, clock: ^platform.Clock, ids: ^platform.ID_Generator) -> Agent_Service {
-	return Agent_Service{agents = agents, bridges = bridges, projects = projects, content = content, taskchains = taskchains, bridge_command_sink = sink, bridge_runtime_registry = registry, clock = clock, ids = ids}
+	s := Agent_Service{agents = agents, bridges = bridges, projects = projects, content = content, taskchains = taskchains, bridge_command_sink = sink, bridge_runtime_registry = registry, clock = clock, ids = ids}
+	tool_live_init(&s.tool_live)
+	return s
 }
 
 create_agent :: proc(service: ^Agent_Service, auth: contracts.Auth_Context, input: Create_Agent_Input) -> (domain.Agent, bool, domain.Domain_Error) {

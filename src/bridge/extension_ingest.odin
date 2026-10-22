@@ -14,9 +14,7 @@ package main
 //   4. queues the normalised event JSON in a per-instance outbox that a single
 //      worker forwards to the hub in batches (≥ BRIDGE_EXT_FLUSH_MAX_EVENTS
 //      queued, or BRIDGE_EXT_FLUSH_DELAY_MS after the first queued event);
-//   5. feeds tool/subagent/activity events to the per-instance tool aggregator
-//      (extension_tool_aggregator.odin), whose `tool_activity` messages the same
-//      worker posts to BRIDGE_EXT_TOOL_ACTIVITY_PATH after the instance's batch.
+// Tool activity is projected ephemerally by the Hub.
 //
 // IDENTITY: the instance is ALWAYS the token-verified rec.agent_instance_id.
 // Any instance id inside the payload is ignored — the hub envelope is stamped
@@ -38,7 +36,6 @@ BRIDGE_EXT_FLUSH_DELAY_MS :: i64(250)
 BRIDGE_EXT_OUTBOX_MAX_EVENTS :: 1000
 BRIDGE_EXT_WORKER_TICK_MS :: 50
 BRIDGE_EXT_HUB_PATH :: "/api/v1/agent-actions/extension-events"
-BRIDGE_EXT_TOOL_ACTIVITY_PATH :: "/api/v1/agent-actions/tool-activity"
 
 Bridge_Ext_Instance_State :: struct {
 	agent_instance_id: string,
@@ -51,7 +48,6 @@ Bridge_Ext_Instance_State :: struct {
 	events_dropped:    int,
 	queue:             [dynamic]string, // normalised ham.ext.v1 JSON, owned
 	first_enqueued_ms: i64, // 0 when queue is empty
-	tools:             Tool_Agg, // tool_activity aggregation (REQ-EXT-CONV-1)
 }
 
 Bridge_Ext_Ingest_Result :: struct {
@@ -185,7 +181,6 @@ bridge_ext_ingest :: proc(rec: Bridge_Local_Agent_Token_Record, params: string, 
 		s.last_event_at_ms = now
 		s.events_accepted += 1
 		bridge_ext_enqueue_locked(s, raw, now)
-		tool_agg_observe(&s.tools, ev, raw, now)
 		sync.mutex_unlock(&bridge_ext_mutex)
 		res.accepted += 1
 	}
@@ -207,22 +202,6 @@ bridge_ext_ingest_result_json :: proc(res: Bridge_Ext_Ingest_Result) -> string {
 	}
 	strings.write_string(&b, "]}")
 	return strings.to_string(b)
-}
-
-// bridge_ext_instance_terminal closes out a stopped/failed agent's tool
-// aggregation: a kill mid-turn sends no Stop or SessionEnd, so without this its
-// unfinished calls would never be posted. Everything left (running calls, live
-// subagent groups) is flushed as a final message for the forwarder to deliver.
-bridge_ext_instance_terminal :: proc(instance_id: string, now: i64) {
-	context.allocator = bridge_ext_allocator()
-	sync.mutex_lock(&bridge_ext_mutex)
-	defer sync.mutex_unlock(&bridge_ext_mutex)
-	for &s in bridge_ext_states {
-		if s.agent_instance_id == instance_id {
-			tool_agg_flush(&s.tools, "agent_stopped", now, final = true)
-			return
-		}
-	}
 }
 
 // bridge_ext_take_batch_locked removes up to BRIDGE_EXT_FLUSH_MAX_EVENTS from
@@ -292,27 +271,20 @@ bridge_ext_forwarder_tick :: proc(now: i64) {
 		instance_id: string,
 		rec:         Bridge_Local_Agent_Token_Record,
 		batch:       [dynamic]string,
-		messages:    [dynamic]Tool_Agg_Message,
 	}
 	pending := make([dynamic]Pending, context.temp_allocator)
 	sync.mutex_lock(&bridge_ext_mutex)
 	for &s in bridge_ext_states {
-		tool_agg_tick(&s.tools, now)
 		batch := bridge_ext_take_batch_locked(&s, now, false)
-		messages := tool_agg_take_ready(&s.tools)
-		if len(batch) == 0 && len(messages) == 0 {
-			delete(messages)
-			continue
-		}
+		if len(batch) == 0 do continue
 		rec := s.rec
 		rec.instance_token = strings.clone(s.rec.instance_token, context.temp_allocator)
 		rec.agent_instance_id = strings.clone(s.rec.agent_instance_id, context.temp_allocator)
-		append(&pending, Pending{instance_id = strings.clone(s.agent_instance_id, context.temp_allocator), rec = rec, batch = batch, messages = messages})
+		append(&pending, Pending{instance_id = strings.clone(s.agent_instance_id, context.temp_allocator), rec = rec, batch = batch})
 	}
 	sync.mutex_unlock(&bridge_ext_mutex)
 
 	for p in pending {
-		bridge_ext_post_tool_activity(p.instance_id, p.rec, p.messages)
 		if len(p.batch) == 0 do continue
 		body := bridge_ext_batch_params(p.batch)
 		relay := bridge_local_relay_agent_envelope(BRIDGE_EXT_HUB_PATH, "agent.extension.event", body, p.rec)
@@ -328,38 +300,6 @@ bridge_ext_forwarder_tick :: proc(now: i64) {
 			for e in p.batch do delete(e)
 			delete(p.batch)
 		}
-	}
-}
-
-// bridge_ext_post_tool_activity posts each aggregated `tool_activity` message
-// (consuming messages). A transport failure or hub 5xx puts the unsent rest
-// back at the head of the instance's ready queue for the next tick; a 4xx
-// drops that message, as for event batches.
-bridge_ext_post_tool_activity :: proc(instance_id: string, rec: Bridge_Local_Agent_Token_Record, messages: [dynamic]Tool_Agg_Message) {
-	context.allocator = bridge_ext_allocator()
-	msgs := messages
-	defer delete(msgs)
-	for i := 0; i < len(msgs); i += 1 {
-		params := tool_agg_params(msgs[i])
-		relay := bridge_local_relay_agent_envelope(BRIDGE_EXT_TOOL_ACTIVITY_PATH, "agent.extension.tool_activity", params, rec)
-		delete(params)
-		if !relay.ok || relay.status >= 500 || relay.status == 0 {
-			sync.mutex_lock(&bridge_ext_mutex)
-			a := &bridge_ext_state_locked(instance_id).tools
-			rest := make([dynamic]Tool_Agg_Message, 0, len(msgs) - i + len(a.ready))
-			for m in msgs[i:] do append(&rest, m)
-			for m in a.ready do append(&rest, m)
-			delete(a.ready)
-			for len(rest) > TOOL_AGG_READY_MAX {
-				tool_agg_message_destroy(&rest[0])
-				ordered_remove(&rest, 0)
-				a.ready_dropped += 1
-			}
-			a.ready = rest
-			sync.mutex_unlock(&bridge_ext_mutex)
-			return
-		}
-		tool_agg_message_destroy(&msgs[i])
 	}
 }
 
