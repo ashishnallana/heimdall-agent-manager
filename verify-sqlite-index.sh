@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Scoped verification for REQ-INDEX (migration 104 full-scan indexes).
-# 1. migration 104 fresh/upgrade/idempotence/query-plan tests plus the existing
+# Scoped verification for REQ-INDEX (migration 105 full-scan indexes).
+# 1. migration 105 fresh/upgrade/idempotence/query-plan tests plus the existing
 #    migration, shell-session and taskchain repository tests (sqlite package, scoped);
 # 2. the index-evaluation harness at task-1 scale (asserts identical results with and
 #    without every candidate index, and nonempty retention deletes);
@@ -24,7 +24,7 @@ nix develop -c "$scratch/sqlite_tests"
 echo "== index evaluation harness (t1 scale)"
 nix develop -c odin build tests/sqlite_index_eval.odin -file -collection:odin_test=src -out:"$scratch/index_eval"
 nix develop -c "$scratch/index_eval" "$scratch/index-eval.db" t1 > "$scratch/index-eval.txt"
-grep -q '^## Shipped migration 104' "$scratch/index-eval.txt"
+grep -q '^## Shipped migration 105' "$scratch/index-eval.txt"
 echo "harness completed; result-equivalence assertions passed"
 
 echo "== task-1 baseline replay"

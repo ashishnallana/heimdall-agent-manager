@@ -29,11 +29,11 @@ text :: proc(c: ^sql.Conn, query: string) -> string {
     must(sql.sqlite3_step(st) == sql.SQLITE_ROW)
     return sql.column_text(st, 0)
 }
-fixture :: proc(c: ^sql.Conn, before_103 := false, path := ":memory:") {
+fixture :: proc(c: ^sql.Conn, before_104 := false, path := ":memory:") {
     opened, ok, e := sql.open(path, .Main)
     good(e); must(ok); c^ = opened
     must(sql.exec(c, "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000;"))
-    migrated, me := sql.run_migrations(c, stop_before = ("103_guard_chat_fts_updates.sql" if before_103 else ""))
+    migrated, me := sql.run_migrations(c, stop_before = ("104_guard_chat_fts_updates.sql" if before_104 else ""))
     good(me); must(migrated)
     u: sql.User_Repo_SQLite
     _ = sql.new_user_repository(&u, c)
@@ -212,7 +212,7 @@ fts_guard_skips_db_without_chat_vtables :: proc(t: ^testing.T) {
     context.allocator = context.temp_allocator
     c: sql.Conn; fixture(&c,true); defer sql.close(&c)
     // A DB first migrated by a non-FTS build has 030/031 applied but no chat
-    // vtables or triggers; a later FTS build must not attach 103 triggers.
+    // vtables or triggers; a later FTS build must not attach 104 triggers.
     must(sql.exec(&c, `DROP TRIGGER chat_messages_fts_ai; DROP TRIGGER chat_messages_fts_ad; DROP TRIGGER chat_messages_fts_au;
         DROP TRIGGER chat_conversations_fts_ai; DROP TRIGGER chat_conversations_fts_ad; DROP TRIGGER chat_conversations_fts_au;
         DROP TABLE chat_messages_fts; DROP TABLE chat_conversations_fts;`))

@@ -380,8 +380,8 @@ main :: proc() {
 	_ = sql.new_shell_session_repository(&shell_impl, &conn)
 	_ = sql.new_content_repository(&content_impl, &conn)
 	_ = sql.new_taskchain_repository(&task_impl, &conn)
-	// Baseline = schema WITHOUT migration 104, so every variant is measured against
-	// the pre-104 state; the shipped migration is re-applied as its own variant below.
+	// Baseline = schema WITHOUT migration 105, so every variant is measured against
+	// the pre-105 state; the shipped migration is re-applied as its own variant below.
 	for name in SHIPPED do exec(fmt.tprintf("DROP INDEX %s;", name))
 	seed(scale)
 	reopen()
@@ -415,8 +415,8 @@ main :: proc() {
 		}
 	}
 
-	fmt.println("\n## Shipped migration 104 applied together (stat-less, as production)")
-	exec(sql.MIGRATION_104_FULL_SCAN_INDEXES); reopen()
+	fmt.println("\n## Shipped migration 105 applied together (stat-less, as production)")
+	exec(sql.MIGRATION_105_FULL_SCAN_INDEXES); reopen()
 	fmt.println("| Call | VM | Fullscan | Sort | Cold us | Warm us | EXPLAIN QUERY PLAN |")
 	fmt.println("|---|---:|---:|---:|---:|---:|---|")
 	for cl in Call {
@@ -436,7 +436,7 @@ main :: proc() {
 	variants := make([dynamic]Candidate)
 	append(&variants, Candidate{name="no new index"})
 	for cand in CANDIDATES do append(&variants, cand)
-	append(&variants, Candidate{name="shipped migration 104 (all three)", ddl=sql.MIGRATION_104_FULL_SCAN_INDEXES})
+	append(&variants, Candidate{name="shipped migration 105 (all three)", ddl=sql.MIGRATION_105_FULL_SCAN_INDEXES})
 	for v in variants {
 		size: i64 = 0
 		if v.ddl != "" {
@@ -449,7 +449,7 @@ main :: proc() {
 		fmt.printf("| %s | %d | %d/%d | %d/%d | %d/%d | %d/%d | %d/%d | %d/%d | %d/%d |\n", v.name, size,
 			sh[0].vm, sh[0].page_writes, sh[1].vm, sh[1].page_writes, sh[2].vm, sh[2].page_writes, sh[3].vm, sh[3].page_writes,
 			cv[0].vm, cv[0].page_writes, cv[1].vm, cv[1].page_writes, dp.vm, dp.page_writes)
-		if v.ddl == sql.MIGRATION_104_FULL_SCAN_INDEXES {
+		if v.ddl == sql.MIGRATION_105_FULL_SCAN_INDEXES {
 			for name in SHIPPED do exec(fmt.tprintf("DROP INDEX %s;", name))
 		} else if v.ddl != "" do exec(fmt.tprintf("DROP INDEX %s;", v.name))
 	}

@@ -1,4 +1,4 @@
--- 104: indexes for three timer/detail reads that were full table scans (REQ-INDEX).
+-- 105: indexes for three timer/detail reads that were full table scans (REQ-INDEX).
 -- Evidence and the rejected candidates: docs/sqlite-index-eval.md. Each index was
 -- kept only where the read saving outweighed the measured write cost.
 

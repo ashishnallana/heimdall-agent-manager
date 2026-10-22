@@ -448,12 +448,14 @@ MIGRATION_101_CODEX_GPT6_MODELS :: #load("migrations/101_codex_gpt6_models.sql",
 MIGRATION_102_DROP_BRIDGE_ENROLLMENTS :: #load("migrations/102_drop_bridge_enrollments.sql", string)
 MIGRATION_103_PLAN_ENFORCEMENT :: #load("migrations/103_plan_enforcement.sql", string)
 
-MIGRATION_103_GUARD_CHAT_FTS_UPDATES :: #load("migrations/103_guard_chat_fts_updates.sql", string)
-// 104: live-by-kind, shell retention and dependency-by-chain indexes (REQ-INDEX).
+// 104: chat FTS update triggers fire only when indexed text changes (read metadata
+// no longer rewrites the FTS rows). Skipped unless both chat vtables exist.
+MIGRATION_104_GUARD_CHAT_FTS_UPDATES :: #load("migrations/104_guard_chat_fts_updates.sql", string)
+// 105: live-by-kind, shell retention and dependency-by-chain indexes (REQ-INDEX).
 // Plain CREATE INDEX IF NOT EXISTS, so a re-apply is a no-op.
-MIGRATION_104_FULL_SCAN_INDEXES :: #load("migrations/104_full_scan_indexes.sql", string)
+MIGRATION_105_FULL_SCAN_INDEXES :: #load("migrations/105_full_scan_indexes.sql", string)
 
-migration_order :: [107]string {
+migration_order :: [108]string {
 	"001_foundation.sql",
 	"002_owner_scoped_core.sql",
 	"003_device_tokens.sql",
@@ -560,8 +562,8 @@ migration_order :: [107]string {
 	"101_codex_gpt6_models.sql",
 	"102_drop_bridge_enrollments.sql",
 	"103_plan_enforcement.sql",
-	"103_guard_chat_fts_updates.sql",
-	"104_full_scan_indexes.sql",
+	"104_guard_chat_fts_updates.sql",
+	"105_full_scan_indexes.sql",
 }
 
 // stop_before is a TEST SEAM: when non-empty, the apply loop stops in front of
@@ -656,8 +658,8 @@ run_migrations :: proc(
 		}
 		// 030/031 can be marked applied without creating the chat vtables (non-FTS
 		// boot), and a trigger naming a missing vtable fails every base-table UPDATE
-		// at compile time, so 103 also requires both vtables to exist.
-		if name == "103_guard_chat_fts_updates.sql" &&
+		// at compile time, so 104 also requires both vtables to exist.
+		if name == "104_guard_chat_fts_updates.sql" &&
 		   (!fts5_available(conn) ||
 		    !sqlite_object_exists(conn, "chat_messages_fts") ||
 		    !sqlite_object_exists(conn, "chat_conversations_fts")) {
@@ -1079,8 +1081,8 @@ migration_sql :: proc(name, migrations_dir: string) -> string {
 	if name == "099_mixed_work_execution.sql" do return strings.clone(MIGRATION_099_MIXED_WORK_EXECUTION)
 	if name == "102_drop_bridge_enrollments.sql" do return strings.clone(MIGRATION_102_DROP_BRIDGE_ENROLLMENTS)
 	if name == "103_plan_enforcement.sql" do return strings.clone(MIGRATION_103_PLAN_ENFORCEMENT)
-	if name == "103_guard_chat_fts_updates.sql" do return strings.clone(MIGRATION_103_GUARD_CHAT_FTS_UPDATES)
-	if name == "104_full_scan_indexes.sql" do return strings.clone(MIGRATION_104_FULL_SCAN_INDEXES)
+	if name == "104_guard_chat_fts_updates.sql" do return strings.clone(MIGRATION_104_GUARD_CHAT_FTS_UPDATES)
+	if name == "105_full_scan_indexes.sql" do return strings.clone(MIGRATION_105_FULL_SCAN_INDEXES)
 	if name == "100_vault_pair_hub_origin.sql" do return strings.clone(MIGRATION_100_VAULT_PAIR_HUB_ORIGIN)
 	if name == "101_codex_gpt6_models.sql" do return strings.clone(MIGRATION_101_CODEX_GPT6_MODELS)
 	if name == "081_antigravity_models.sql" do return strings.clone(MIGRATION_081_ANTIGRAVITY_MODELS)
