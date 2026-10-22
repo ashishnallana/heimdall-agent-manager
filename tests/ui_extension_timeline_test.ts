@@ -142,3 +142,64 @@ test('timeline is an aux tab that reuses the shared diff viewer', () => {
   assert.match(read('src/ui/components/auxiliary/AuxTabContent.tsx'), /<ActivityTimelinePanel/);
   assert.match(read('src/ui/components/extension/ActivityTimelinePanel.tsx'), /MonacoDiffViewer/);
 });
+
+// Shapes exactly as T4's Claude adapter emits them (src/ctl/extension/claude.odin):
+// subagent hooks carry no description; the parent's Agent tool.start has
+// payload.description/subagent_type and its tool.end names payload.subagent_id.
+test('T4 shapes: subagent description comes from the parent Agent call it links to', () => {
+  const events = normalizeExtensionEvents([
+    ev(1, 'tool.start', { tool_name: 'Agent', tool_use_id: 'toolu_a', payload: { description: 'Find auth code', subagent_type: 'Explore', run_in_background: false } }),
+    ev(2, 'subagent.start', { agent_id: 'ag1', agent_type: 'Explore' }),
+    ev(3, 'tool.start', { agent_id: 'ag1', agent_type: 'Explore', tool_name: 'Grep', tool_use_id: 'toolu_g' }),
+    ev(4, 'tool.end', { agent_id: 'ag1', agent_type: 'Explore', tool_name: 'Grep', tool_use_id: 'toolu_g', payload: { status: 'ok' } }),
+    ev(5, 'subagent.stop', { agent_id: 'ag1', agent_type: 'Explore' }),
+    ev(6, 'tool.end', { tool_name: 'Agent', tool_use_id: 'toolu_a', payload: { status: 'ok', subagent_id: 'ag1', subagent_status: 'completed', description: 'Find auth code' } }),
+    // A background launch: its tool.end (async) arrives before the subagent starts.
+    ev(7, 'tool.start', { tool_name: 'Agent', tool_use_id: 'toolu_b', payload: { description: 'Run tests', subagent_type: 'general-purpose', run_in_background: true } }),
+    ev(8, 'tool.end', { tool_name: 'Agent', tool_use_id: 'toolu_b', payload: { status: 'ok', subagent_id: 'ag2', subagent_status: 'async_launched' } }),
+    ev(9, 'subagent.start', { agent_id: 'ag2', agent_type: 'general-purpose' }),
+  ]);
+  const tl = buildActivityTimeline(events);
+  assert.deepEqual(tl.subagents.map((g) => [g.agentId, g.description, g.launchToolUseId]), [
+    ['ag1', 'Find auth code', 'toolu_a'],
+    ['ag2', 'Run tests', 'toolu_b'],
+  ]);
+  // The launching Agent rows fold into their groups, which sit where they were launched.
+  assert.deepEqual(tl.entries.map((e) => e.id), ['subagent:ag1', 'subagent:ag2']);
+  assert.equal(tl.subagents[0].seq, 1);
+  assert.equal(tl.subagents[0].toolCalls[0].status, 'done');
+  assert.equal(tl.subagents[1].status, 'running');
+});
+
+test('T4 shapes: a running foreground subagent borrows the pending launch of its type', () => {
+  const events = normalizeExtensionEvents([
+    ev(1, 'tool.start', { tool_name: 'Agent', tool_use_id: 'toolu_p', payload: { description: 'Plan the change', subagent_type: 'Plan' } }),
+    ev(2, 'tool.start', { tool_name: 'Agent', tool_use_id: 'toolu_e', payload: { description: 'Look around', subagent_type: 'Explore' } }),
+    ev(3, 'subagent.start', { agent_id: 'ag_e', agent_type: 'Explore' }),
+    ev(4, 'subagent.start', { agent_id: 'ag_p', agent_type: 'Plan' }),
+    // A failed earlier launch of the same type must not be claimed.
+    ev(5, 'tool.start', { tool_name: 'Agent', tool_use_id: 'toolu_x', payload: { description: 'Broken', subagent_type: 'Explore' } }),
+    ev(6, 'tool.end', { tool_name: 'Agent', tool_use_id: 'toolu_x', payload: { status: 'error' } }),
+    ev(7, 'subagent.start', { agent_id: 'ag_late', agent_type: 'Explore' }),
+  ]);
+  const tl = buildActivityTimeline(events);
+  const byId = Object.fromEntries(tl.subagents.map((g) => [g.agentId, g]));
+  assert.equal(byId.ag_e.description, 'Look around');
+  assert.equal(byId.ag_p.description, 'Plan the change');
+  assert.equal(byId.ag_late.description, '', 'no running launch left for it');
+  const parentTools = tl.entries.filter((e): e is TimelineToolCall => e.kind === 'tool');
+  assert.deepEqual(parentTools.map((c) => [c.id, c.status]), [['toolu_x', 'failed']]);
+});
+
+test('T4 shapes: PostToolUseFailure without error text still reads as failed', () => {
+  const events = normalizeExtensionEvents([
+    ev(1, 'tool.start', { tool_name: 'Bash', tool_use_id: 'b1' }),
+    ev(2, 'tool.end', { tool_name: 'Bash', tool_use_id: 'b1', payload: { status: 'error' } }),
+    ev(3, 'tool.start', { tool_name: 'Bash', tool_use_id: 'b2' }),
+    ev(4, 'tool.end', { tool_name: 'Bash', tool_use_id: 'b2', payload: { status: 'error', is_interrupt: true } }),
+    ev(5, 'tool.start', { tool_name: 'Read', tool_use_id: 'r1' }),
+    ev(6, 'tool.end', { tool_name: 'Read', tool_use_id: 'r1', payload: { status: 'ok', duration_ms: 3 } }),
+  ]);
+  const calls = buildActivityTimeline(events).entries as TimelineToolCall[];
+  assert.deepEqual(calls.map((c) => c.status), ['failed', 'failed', 'done']);
+});

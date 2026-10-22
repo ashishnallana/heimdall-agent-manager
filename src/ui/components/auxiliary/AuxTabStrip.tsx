@@ -11,7 +11,7 @@ export const AUX_TAB_ICONS: Record<AuxTabKind, IconName> = {
   chainOverview: 'layers',
   files: 'folder',
   vcs: 'git-branch',
-  activity: 'layers',
+  activity: 'zap',
   tasks: 'tasks',
   shell: 'terminal',
   agentPty: 'bot',

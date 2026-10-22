@@ -36,7 +36,9 @@ test('installed extension shows its version and no install hint', () => {
 
 test('disabled, outdated, absent and error map to their labels', () => {
   assert.equal(providerExtensionBadge(ext('disabled'))?.label, 'Extension disabled');
-  assert.match(providerExtensionBadge(ext('disabled'))!.detail, /claude plugin enable heimdall@heimdall/);
+  const disabled = providerExtensionBadge(ext('disabled'))!.detail;
+  assert.match(disabled, /heimdall@heimdall/);
+  assert.doesNotMatch(disabled, /claude plugin/, 'no provider-specific command in the generic UI');
   const update = providerExtensionBadge(ext('outdated', { version: '0.0.9' }))!;
   assert.equal(update.label, 'Update available');
   assert.match(update.detail, /v0\.0\.9.*v0\.1\.0/);

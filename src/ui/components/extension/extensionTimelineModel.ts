@@ -168,6 +168,8 @@ export interface TimelineSubagentGroup {
   startedAt: string;
   stoppedAt: string;
   durationMs: number | null;
+  /** tool_use_id of the parent's Agent/Task call that launched it, if known. */
+  launchToolUseId: string;
   toolCalls: TimelineToolCall[];
   files: TimelineFileEntry[];
 }
@@ -235,6 +237,9 @@ export function toolCallSummary(payload: Record<string, any>): string {
 }
 
 function toolFailed(payload: Record<string, any>): boolean {
+  // PostToolUseFailure arrives as {status:'error', error?, is_interrupt?}; the
+  // error text is omitted when empty, so status alone must mark the failure.
+  if (payload.status === 'error' || payload.is_interrupt === true) return true;
   if (payload.error || payload.is_error === true || payload.success === false) return true;
   const response = obj(payload.response);
   return response.is_error === true || response.success === false;
@@ -243,6 +248,25 @@ function toolFailed(payload: Record<string, any>): boolean {
 function subagentDescription(payload: Record<string, any>): string {
   const input = obj(payload.input);
   return str(payload.description) || str(input.description) || str(payload.prompt).split('\n')[0];
+}
+
+/**
+ * The parent's tool calls that launch a subagent. Subagent hooks carry no
+ * description and no tool_use_id; the description and subagent_type live on
+ * this call's tool.start, and its tool.end names the subagent (subagent_id).
+ */
+function isSubagentLaunch(e: ExtensionEvent): boolean {
+  if (e.agent_id) return false;
+  if (e.tool_name === 'Agent' || e.tool_name === 'Task') return true;
+  return Boolean(str(e.payload.subagent_type) || str(e.payload.subagent_id));
+}
+
+interface SubagentLaunch {
+  call: TimelineToolCall;
+  subagentType: string;
+  description: string;
+  /** Set once a tool.end names the subagent, or a fallback claims it. */
+  agentId: string;
 }
 
 const NOTICE_TEXT: Record<string, (e: ExtensionEvent) => string> = {
@@ -264,6 +288,8 @@ export function buildActivityTimeline(
   const parentEntries: TimelineEntry[] = [];
   const groups = new Map<string, TimelineSubagentGroup>();
   const toolsByUseId = new Map<string, TimelineToolCall>();
+  const launches: SubagentLaunch[] = [];
+  const launchByUseId = new Map<string, SubagentLaunch>();
   const filesByAgent = new Map<string, Map<string, TimelineFileEntry>>();
   const allFiles = new Map<string, TimelineFileEntry>();
   let toolCallCount = 0;
@@ -282,6 +308,7 @@ export function buildActivityTimeline(
         startedAt: eventTime(e),
         stoppedAt: '',
         durationMs: null,
+        launchToolUseId: '',
         toolCalls: [],
         files: [],
       };
@@ -350,11 +377,22 @@ export function buildActivityTimeline(
           durationMs: null,
         };
         if (e.tool_use_id) toolsByUseId.set(e.tool_use_id, call);
+        if (isSubagentLaunch(e)) {
+          const launch = { call, subagentType: str(e.payload.subagent_type), description: subagentDescription(e.payload), agentId: '' };
+          launches.push(launch);
+          if (e.tool_use_id) launchByUseId.set(e.tool_use_id, launch);
+        }
         pushTool(call);
         break;
       }
       case 'tool.end': {
         const existing = e.tool_use_id ? toolsByUseId.get(e.tool_use_id) : undefined;
+        const subagentId = e.agent_id ? '' : str(e.payload.subagent_id);
+        const launch = e.tool_use_id ? launchByUseId.get(e.tool_use_id) : undefined;
+        if (launch && subagentId) {
+          launch.agentId = subagentId;
+          launch.description = launch.description || subagentDescription(e.payload);
+        }
         if (existing) {
           existing.status = toolFailed(e.payload) ? 'failed' : 'done';
           existing.endedAt = eventTime(e);
@@ -362,7 +400,7 @@ export function buildActivityTimeline(
           if (!existing.summary) existing.summary = toolCallSummary(e.payload);
         } else {
           // Its start was trimmed (or never sent): show the call as finished.
-          pushTool({
+          const call: TimelineToolCall = {
             kind: 'tool',
             id: e.tool_use_id || `seq:${e.seq}`,
             seq: e.seq,
@@ -373,7 +411,10 @@ export function buildActivityTimeline(
             startedAt: '',
             endedAt: eventTime(e),
             durationMs: null,
-          });
+          };
+          // The end alone still names the subagent it launched.
+          if (subagentId) launches.push({ call, subagentType: '', description: subagentDescription(e.payload), agentId: subagentId });
+          pushTool(call);
         }
         break;
       }
@@ -428,6 +469,7 @@ export function buildActivityTimeline(
         startedAt: s.started_at,
         stoppedAt: '',
         durationMs: null,
+        launchToolUseId: '',
         toolCalls: [],
         files: [],
       };
@@ -452,12 +494,40 @@ export function buildActivityTimeline(
     for (const aid of f.agent_ids) if (!entry.agentIds.includes(aid)) entry.agentIds.push(aid);
   }
 
+  // Link each subagent to the parent call that launched it: first by the
+  // subagent_id its tool.end reported, then (a foreground subagent's launch
+  // only ends when the subagent does) by the oldest still-running unclaimed
+  // launch of the same subagent_type that precedes it. The linked call folds
+  // into the group instead of showing as a separate parent row.
+  const linked = new Map<string, SubagentLaunch>();
+  for (const l of launches) if (l.agentId && groups.has(l.agentId) && !linked.has(l.agentId)) linked.set(l.agentId, l);
+  const ordered = [...groups.values()].sort((a, b) => a.seq - b.seq);
+  for (const g of ordered) {
+    if (linked.has(g.agentId)) continue;
+    for (const l of launches) {
+      if (l.agentId || l.call.status !== 'running' || l.call.seq > g.seq) continue;
+      if (l.subagentType !== g.agentType) continue;
+      l.agentId = g.agentId;
+      linked.set(g.agentId, l);
+      break;
+    }
+  }
+  const folded = new Set<TimelineToolCall>();
+  for (const [agentId, l] of linked) {
+    const g = groups.get(agentId) as TimelineSubagentGroup;
+    g.description = g.description || l.description || l.call.summary;
+    g.agentType = g.agentType || l.subagentType;
+    g.launchToolUseId = l.call.id.startsWith('seq:') ? '' : l.call.id;
+    if (l.call.seq > 0 && (g.seq === 0 || l.call.seq < g.seq)) g.seq = l.call.seq;
+    folded.add(l.call);
+  }
+
   for (const g of groups.values()) {
     g.durationMs = g.status === 'done' ? durationMs(g.startedAt, g.stoppedAt) : null;
     g.files = sortFiles([...(filesByAgent.get(g.agentId)?.values() || [])]);
   }
 
-  const entries = parentEntries.sort((a, b) => a.seq - b.seq);
+  const entries = parentEntries.filter((e) => !(e.kind === 'tool' && folded.has(e))).sort((a, b) => a.seq - b.seq);
   const subagents = entries.filter((e): e is TimelineSubagentGroup => e.kind === 'subagent');
   return {
     entries,

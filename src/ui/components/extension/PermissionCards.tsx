@@ -6,6 +6,7 @@
 import React, { Suspense, useEffect, useMemo, useReducer, useState } from 'react';
 import { Button, Icon, StatusPill } from '@ui';
 import { apiErrorText } from '../../api/cookieFetch';
+import { useListAllAgentInstancesQuery } from '../../api/endpoints/actions';
 import {
   useDecidePermissionRequestMutation,
   useListInstancePermissionRequestsQuery,
@@ -22,16 +23,6 @@ import {
 } from './permissionCardModel';
 
 const MonacoDiffViewer = React.lazy(() => import('../chat/MonacoDiffViewer'));
-
-function useNow(active: boolean, intervalMs = 1000): number {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    if (!active) return undefined;
-    const handle = setInterval(() => setNow(Date.now()), intervalMs);
-    return () => clearInterval(handle);
-  }, [active, intervalMs]);
-  return now;
-}
 
 export interface PermissionCardProps {
   request: PermissionRequest;
@@ -167,24 +158,38 @@ export function PermissionCard({ request, nowMs, submitting, error, onDecide, ag
 
 /**
  * Keeps a list of cards live: syncs the RTK data into the reducer, ticks the
- * countdown while anything is pending, and runs Allow / Deny.
+ * countdown while any card is up, and runs Allow / Deny.
  */
 function usePermissionCards(requests: PermissionRequest[] | undefined) {
   const [state, dispatch] = useReducer(permissionCardsReducer, initialPermissionCardsState);
   const [decide] = useDecidePermissionRequestMutation();
-  useEffect(() => {
-    if (requests) dispatch({ type: 'loaded', requests });
-  }, [requests]);
-  const anyLive = state.requests.length > 0;
-  const now = useNow(anyLive);
+  // Tick only while some card is up: a pending countdown, or a closed outcome
+  // still inside its keep window. Each tick also prunes cards past it.
+  const [now, setNow] = useState(() => Date.now());
   const visible = visiblePermissionRequests(state, now);
+  const ticking = visible.length > 0;
+  useEffect(() => {
+    if (!ticking) return undefined;
+    const handle = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(handle);
+  }, [ticking]);
+  useEffect(() => {
+    dispatch({ type: 'pruned', nowMs: now });
+  }, [now]);
+  useEffect(() => {
+    if (!requests) return;
+    // The clock may have been idle; refresh it so new countdowns start right.
+    const nowMs = Date.now();
+    setNow(nowMs);
+    dispatch({ type: 'loaded', requests, nowMs });
+  }, [requests]);
   const onDecide = async (request: PermissionRequest, decision: PermissionDecision) => {
     dispatch({ type: 'decision_started', id: request.id, decision });
     const result: any = await decide({ id: request.id, instanceId: request.instance_id, decision });
     if (result?.error) {
       dispatch({ type: 'decision_failed', id: request.id, error: apiErrorText(result.error, 'Could not send the decision.') });
     } else {
-      dispatch({ type: 'decision_succeeded', id: request.id, decision, request: result?.data?.permission_request ?? null });
+      dispatch({ type: 'decision_succeeded', id: request.id, decision, request: result?.data?.permission_request ?? null, nowMs: Date.now() });
     }
   };
   return { state, visible, now, onDecide };
@@ -221,6 +226,19 @@ export function PendingPermissionCards({
 }) {
   const query = useListPendingPermissionRequestsQuery(undefined);
   const { state, visible, now, onDecide } = usePermissionCards(query.data);
+  // Name the agent on each card; fetched only while a card is up.
+  const instancesQuery = useListAllAgentInstancesQuery(undefined, { skip: Boolean(agentLabel) || visible.length === 0 });
+  const instanceNames = useMemo(() => {
+    const names = new Map<string, string>();
+    for (const inst of (instancesQuery.data?.instances || []) as any[]) {
+      const id = String(inst?.agent_instance_id || inst?.id || '');
+      const name = String(inst?.display_name || inst?.agent_name || '');
+      if (id && name) names.set(id, name);
+    }
+    return names;
+  }, [instancesQuery.data]);
+  const labelFor = (request: PermissionRequest) =>
+    agentLabel ? agentLabel(request) : instanceNames.get(request.instance_id) || request.agent_id || request.instance_id;
   if (visible.length === 0) return null;
   return (
     <section data-debug-id="attention-permission-cards" aria-label="Permission requests" className="flex flex-col gap-2">
@@ -235,7 +253,7 @@ export function PendingPermissionCards({
           submitting={state.submitting[request.id]}
           error={state.errors[request.id]}
           onDecide={(decision) => void onDecide(request, decision)}
-          agentLabel={agentLabel ? agentLabel(request) : request.agent_id || request.instance_id}
+          agentLabel={labelFor(request)}
           onOpenAgent={onOpenAgent ? () => onOpenAgent(request) : undefined}
         />
       ))}

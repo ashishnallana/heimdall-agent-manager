@@ -15,6 +15,8 @@ import {
   initialPermissionCardsState,
   normalizePermissionRequest,
   normalizePermissionRequests,
+  PERMISSION_KEEP_CLOSED_MS,
+  permissionCardLive,
   permissionCardView,
   permissionCardsReducer,
   permissionRealtimeFromSummary,
@@ -161,4 +163,32 @@ test('API posts decisions and realtime frames patch the permission caches', () =
 test('cards render in the conversation and the attention surface', () => {
   assert.match(read('src/ui/components/workbench/AgentChatPane.tsx'), /<InstancePermissionCards/);
   assert.match(read('src/ui/components/attention/AttentionDeck.tsx'), /<PendingPermissionCards/);
+});
+
+test('pruning: closed cards leave after the keep window and stop the ticker', () => {
+  let s = permissionCardsReducer(initialPermissionCardsState, { type: 'loaded', requests: [req('p1'), req('p2')] });
+  s = permissionCardsReducer(s, { type: 'decision_started', id: 'p1', decision: 'allow' });
+  // No server copy: the local fallback stamps decided_at so the card can leave.
+  s = permissionCardsReducer(s, { type: 'decision_succeeded', id: 'p1', decision: 'allow', request: null, nowMs: NOW });
+  assert.equal(s.requests.find((r) => r.id === 'p1')?.decided_at, new Date(NOW).toISOString());
+  s = permissionCardsReducer(s, { type: 'decision_failed', id: 'p2', error: 'conflict' });
+  s = permissionCardsReducer(s, { type: 'realtime', action: 'closed', request: req('p2', { status: 'expired', decided_at: new Date(NOW).toISOString() }) });
+  assert.equal(visiblePermissionRequests(s, NOW + 1000).length, 2);
+  const later = NOW + PERMISSION_KEEP_CLOSED_MS + 1;
+  assert.deepEqual(visiblePermissionRequests(s, later), [], 'an error alone does not keep a closed card up');
+  s = permissionCardsReducer(s, { type: 'pruned', nowMs: later });
+  assert.deepEqual(s, { requests: [], submitting: {}, errors: {} });
+  // The RTK cache still holds the closed rows; reloading must not revive them.
+  s = permissionCardsReducer(s, { type: 'loaded', nowMs: later, requests: [req('p1', { status: 'allowed', decided_at: new Date(NOW).toISOString() })] });
+  assert.equal(s.requests.length, 0);
+});
+
+test('pruning: a pending request leaves once its countdown has run out', () => {
+  const r = req('p1');
+  assert.equal(permissionCardLive(r, NOW), true);
+  const expires = Date.parse(r.expires_at);
+  assert.equal(permissionCardLive(r, expires + 1000), true, 'shows "expired" briefly');
+  assert.equal(permissionCardLive(r, expires + PERMISSION_KEEP_CLOSED_MS), false);
+  const s = permissionCardsReducer(permissionCardsReducer(initialPermissionCardsState, { type: 'loaded', requests: [r] }), { type: 'pruned', nowMs: expires + PERMISSION_KEEP_CLOSED_MS });
+  assert.equal(s.requests.length, 0);
 });

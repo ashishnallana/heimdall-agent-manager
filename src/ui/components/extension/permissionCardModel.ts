@@ -203,12 +203,16 @@ export interface PermissionCardsState {
 }
 
 export type PermissionCardsAction =
-  | { type: 'loaded'; requests: PermissionRequest[] }
+  | { type: 'loaded'; requests: PermissionRequest[]; nowMs?: number }
   | { type: 'realtime'; action: string; request: PermissionRequest }
   | { type: 'decision_started'; id: string; decision: PermissionDecision }
-  | { type: 'decision_succeeded'; id: string; request: PermissionRequest | null; decision: PermissionDecision }
+  | { type: 'decision_succeeded'; id: string; request: PermissionRequest | null; decision: PermissionDecision; nowMs?: number }
   | { type: 'decision_failed'; id: string; error: string; request?: PermissionRequest | null }
-  | { type: 'dismissed'; id: string };
+  | { type: 'dismissed'; id: string }
+  | { type: 'pruned'; nowMs: number; keepClosedMs?: number };
+
+/** How long a closed (or timed-out) card stays up so its outcome is visible. */
+export const PERMISSION_KEEP_CLOSED_MS = 8000;
 
 export const initialPermissionCardsState: PermissionCardsState = { requests: [], submitting: {}, errors: {} };
 
@@ -238,7 +242,12 @@ export function permissionCardsReducer(state: PermissionCardsState, action: Perm
   switch (action.type) {
     case 'loaded': {
       let requests: PermissionRequest[] = [];
-      for (const r of action.requests) requests = upsertPermissionRequest(requests, r);
+      for (const r of action.requests) {
+        // The RTK caches keep closed requests the realtime patch upserted;
+        // ones whose outcome has already been shown are not brought back.
+        if (r.status !== 'pending' && action.nowMs != null && !permissionCardLive(r, action.nowMs)) continue;
+        requests = upsertPermissionRequest(requests, r);
+      }
       // Keep closed cards we already show (so the outcome stays visible), and
       // never let a fetch that raced a decision reopen one.
       for (const r of state.requests) {
@@ -265,8 +274,11 @@ export function permissionCardsReducer(state: PermissionCardsState, action: Perm
       };
     case 'decision_succeeded': {
       const fallback = state.requests.find((r) => r.id === action.id);
+      // Without the server's copy, stamp the close time locally so the card
+      // still leaves after the keep window.
+      const decidedAt = fallback?.decided_at || (action.nowMs != null ? new Date(action.nowMs).toISOString() : '');
       const resolved = action.request
-        ?? (fallback ? { ...fallback, status: (action.decision === 'allow' ? 'allowed' : 'denied') as PermissionStatus } : null);
+        ?? (fallback ? { ...fallback, status: (action.decision === 'allow' ? 'allowed' : 'denied') as PermissionStatus, decided_at: decidedAt } : null);
       return {
         requests: resolved ? upsertPermissionRequest(state.requests, resolved) : state.requests,
         submitting: omit(state.submitting, action.id),
@@ -285,19 +297,47 @@ export function permissionCardsReducer(state: PermissionCardsState, action: Perm
         submitting: omit(state.submitting, action.id),
         errors: omit(state.errors, action.id),
       };
+    case 'pruned': {
+      // Drops cards whose outcome has been shown long enough, so the list (and
+      // the countdown ticker) does not live on after the last prompt.
+      const keep = action.keepClosedMs ?? PERMISSION_KEEP_CLOSED_MS;
+      const requests = state.requests.filter((r) => state.submitting[r.id] || permissionCardLive(r, action.nowMs, keep));
+      if (requests.length === state.requests.length) return state;
+      const ids = new Set(requests.map((r) => r.id));
+      const only = <T,>(record: Record<string, T>) => Object.fromEntries(Object.entries(record).filter(([id]) => ids.has(id)));
+      return { requests, submitting: only(state.submitting), errors: only(state.errors) };
+    }
     default:
       return state;
   }
 }
 
-/** Requests worth a card: pending ones plus anything still submitting or errored. */
-export function visiblePermissionRequests(state: PermissionCardsState, nowMs: number, keepClosedMs = 8000): PermissionRequest[] {
-  return state.requests.filter((r) => {
-    if (r.status === 'pending') return true;
-    if (state.submitting[r.id] || state.errors[r.id]) return true;
-    const closedAt = parseTimeMs(r.decided_at);
-    return Number.isFinite(closedAt) && nowMs - closedAt < keepClosedMs;
-  });
+/**
+ * When a card stops being actionable: decided_at for a closed request,
+ * expires_at for one still pending (its countdown runs out there). NaN when
+ * neither is known.
+ */
+export function permissionCardEndMs(r: PermissionRequest): number {
+  if (r.status === 'pending') {
+    const expires = parseTimeMs(r.expires_at);
+    return Number.isFinite(expires) ? expires : Infinity;
+  }
+  return parseTimeMs(r.decided_at || r.expires_at);
+}
+
+/** Whether a card still deserves to be shown at nowMs (pending, or recently ended). */
+export function permissionCardLive(r: PermissionRequest, nowMs: number, keepClosedMs = PERMISSION_KEEP_CLOSED_MS): boolean {
+  const end = permissionCardEndMs(r);
+  return Number.isFinite(end) ? nowMs - end < keepClosedMs : end === Infinity;
+}
+
+/**
+ * Requests worth a card: pending ones (until shortly after they expire),
+ * anything being submitted, and closed ones for keepClosedMs. An error alone
+ * does not keep a closed card up.
+ */
+export function visiblePermissionRequests(state: PermissionCardsState, nowMs: number, keepClosedMs = PERMISSION_KEEP_CLOSED_MS): PermissionRequest[] {
+  return state.requests.filter((r) => Boolean(state.submitting[r.id]) || permissionCardLive(r, nowMs, keepClosedMs));
 }
 
 /** Reads a resource_changed(agent_instance, 'permission_requests') summary. */
