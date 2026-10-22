@@ -54,7 +54,11 @@ export type AuxContent =
     }
   | { type: 'vcs'; filePath?: string | null }
   | { type: 'tasks'; taskId?: string }
-  | { type: 'activity' }
+  | {
+      type: 'activity';
+      /** Transient: a file whose diff to open once the timeline mounts. */
+      filePath?: string | null;
+    }
   | { type: 'shell'; sessionId: string; bridgeId?: string; cwd?: string }
   | { type: 'agentPty'; agentInstanceId: string }
   | { type: 'preview'; sessionId: string; port?: number; path?: string }

@@ -89,6 +89,7 @@ import {
   type ShellRunMarker,
 } from '../shells/ShellRunIndicator';
 import AgentActivityBubbles from '../chat/AgentActivityBubbles';
+import ToolActivityRow from '../extension/ToolActivityRow';
 import AtMentionPopup, { type MentionEntity } from '../chat/AtMentionPopup';
 import ChatMessageList from '../chat/ChatMessageList';
 import InstanceReconfigurationProgress from '../chat/InstanceReconfigurationProgress';
@@ -1198,7 +1199,9 @@ export function AgentChatPane({
     () =>
       chatMessages.reduce(
         (newest, message) =>
-          message.messageType === 'shell_run' || isAgentStartMessage(message)
+          message.messageType === 'shell_run' ||
+          message.messageType === 'tool_activity' ||
+          isAgentStartMessage(message)
             ? newest
             : Math.max(newest, message.createdUnixMs || 0),
         0,
@@ -1718,6 +1721,17 @@ export function AgentChatPane({
       const session = sessionId ? runBySessionId.get(sessionId) : undefined;
       if (!session) return null;
       return <ShellRunRow session={session} />;
+    }
+    if (message.messageType === 'tool_activity') {
+      return (
+        <ToolActivityRow
+          messageId={message.messageId}
+          body={message.body}
+          metadata={message.metadata}
+          onOpenFile={(filePath) => openAux({ type: 'activity', filePath })}
+          onOpenActivity={() => openAux({ type: 'activity' })}
+        />
+      );
     }
     if (message.messageType === 'pane_capture') {
       const metadata = message.metadata || {};

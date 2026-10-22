@@ -5,6 +5,8 @@ import type { ChatMessage } from './types';
  */
 export function isAgentStartMessage(message: ChatMessage): boolean {
   if (message.messageType === 'agent_start' || message.messageType === 'agent_start_clubbed') return true;
+  // tool_activity bodies are generated counts; never sniff them for "started".
+  if (message.messageType === 'tool_activity') return false;
   if (message.messageType === 'system') return true;
   const body = (message.body || '').toLowerCase();
   return (
