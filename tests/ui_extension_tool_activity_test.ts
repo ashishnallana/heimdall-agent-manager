@@ -194,3 +194,12 @@ test('tool activity headlines ("Ran X commands") are left aligned', () => {
   assert.match(row, /truncate text-left" title=\{summary\.headline\}/);
   assert.match(row, /truncate text-left" title=\{headline\}/);
 });
+
+test('unknown completion is not counted as successful, failed, or running', () => {
+  const a = parseToolActivity({ calls: [{ tool: 'Bash', summary: 'exit 7', status: 'completed' }] });
+  assert.equal(a.calls[0].status, 'completed');
+  assert.equal(a.counts.completed, 1);
+  assert.equal(a.counts.ok, 0);
+  assert.equal(a.counts.error, 0);
+  assert.equal(a.counts.running, 0);
+});

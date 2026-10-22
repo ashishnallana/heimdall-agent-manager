@@ -225,3 +225,44 @@ test('a call with no tool.end (denied permission) is interrupted when its agent 
   assert.equal(mainCall().interrupted, true);
   assert.equal(mainCall().endedAt, t(6));
 });
+
+test('stdout-only completion remains neutral with and without its start', () => {
+  for (const start of [true, false]) {
+    const rows = [
+      ...(start ? [ev(1, 'tool.start', { tool_name: 'Bash', tool_use_id: 'unknown' })] : []),
+      ev(2, 'tool.end', { tool_name: 'Bash', tool_use_id: 'unknown', payload: { status: 'completed', outcome: 'unknown' } }),
+    ];
+    const tl = buildActivityTimeline(normalizeExtensionEvents({ events: rows }));
+    const call = tl.entries.find((e) => e.kind === 'tool') as TimelineToolCall;
+    assert.equal(call.status, 'completed');
+    assert.equal(call.interrupted, undefined);
+  }
+});
+
+
+test('partial patch snippets retain missing-context metadata', () => {
+  const tl = buildActivityTimeline(normalizeExtensionEvents({ events: [
+    ev(1, 'file.edit', { file_path: 'new.txt', payload: { partial: true, old_path: 'old.txt', diff: '--- a/old.txt\n+++ b/new.txt\n@@\n-old\n+new\n' } }),
+    ev(2, 'file.edit', { file_path: 'gone.txt', payload: { partial: true, diff: '', diff_unavailable_reason: 'deleted preimage absent from callback' } }),
+  ] }));
+  const moved = tl.files.find((f) => f.filePath === 'new.txt')!;
+  const deleted = tl.files.find((f) => f.filePath === 'gone.txt')!;
+  assert.equal(moved.edits[0].partial, true);
+  assert.equal(moved.edits[0].oldPath, 'old.txt');
+  assert.equal(deleted.edits[0].diff, '');
+  assert.match(deleted.edits[0].diffUnavailableReason!, /preimage/);
+});
+
+test('latest displayable edit selects metadata-only deletion after create or update', () => {
+  for (const operation of ['create', 'update']) {
+    const tl = buildActivityTimeline(normalizeExtensionEvents({ events: [
+      ev(1, 'file.edit', { file_path: 'gone.txt', payload: { operation, diff: DIFF } }),
+      ev(2, 'file.edit', { file_path: 'gone.txt', payload: { operation: 'delete', partial: true, diff: '', diff_unavailable_reason: 'deleted preimage absent from callback' } }),
+    ] }));
+    const selected = latestDiffEdit(tl.files[0]);
+    assert.equal(selected?.seq, 2);
+    assert.equal(selected?.diff, '');
+    assert.equal(selected?.partial, true);
+    assert.equal(selected?.diffUnavailableReason, 'deleted preimage absent from callback');
+  }
+});

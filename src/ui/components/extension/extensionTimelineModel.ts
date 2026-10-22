@@ -129,7 +129,7 @@ export function mergeExtensionEvents(current: ExtensionEvent[], incoming: Extens
 // ---------------------------------------------------------------------------
 // Timeline model
 
-export type ToolCallStatus = 'running' | 'done' | 'failed';
+export type ToolCallStatus = 'running' | 'done' | 'failed' | 'completed';
 
 export interface TimelineToolCall {
   kind: 'tool';
@@ -154,6 +154,9 @@ export interface TimelineFileEdit {
   toolName: string;
   diff: string;
   diffTruncated: boolean;
+  partial?: boolean;
+  diffUnavailableReason?: string;
+  oldPath?: string;
   at: string;
 }
 
@@ -416,7 +419,7 @@ export function buildActivityTimeline(
           launch.description = launch.description || subagentDescription(e.payload);
         }
         if (existing) {
-          existing.status = toolFailed(e.payload) ? 'failed' : 'done';
+          existing.status = toolFailed(e.payload) ? 'failed' : e.payload.status === 'completed' || e.payload.outcome === 'unknown' ? 'completed' : 'done';
           existing.endedAt = eventTime(e);
           existing.durationMs = durationMs(existing.startedAt, existing.endedAt);
           if (!existing.summary) existing.summary = toolCallSummary(e.payload);
@@ -428,7 +431,7 @@ export function buildActivityTimeline(
             seq: e.seq,
             agentId: e.agent_id,
             toolName: e.tool_name || 'tool',
-            status: toolFailed(e.payload) ? 'failed' : 'done',
+            status: toolFailed(e.payload) ? 'failed' : e.payload.status === 'completed' || e.payload.outcome === 'unknown' ? 'completed' : 'done',
             summary: toolCallSummary(e.payload),
             startedAt: '',
             endedAt: eventTime(e),
@@ -450,6 +453,9 @@ export function buildActivityTimeline(
           toolName: e.tool_name,
           diff: str(e.payload.diff),
           diffTruncated: e.payload.diff_truncated === true,
+          partial: e.payload.partial === true,
+          diffUnavailableReason: str(e.payload.diff_unavailable_reason),
+          oldPath: str(e.payload.old_path),
           at: eventTime(e),
         };
         addEdit(fileEntry(allFiles, path), edit);
@@ -564,9 +570,12 @@ function sortFiles(files: TimelineFileEntry[]): TimelineFileEntry[] {
   return files.sort((a, b) => b.lastSeq - a.lastSeq || a.filePath.localeCompare(b.filePath));
 }
 
-/** Newest edit of a file that carries a diff, or null. */
+/** Newest displayable edit, including operations with missing diff context. */
 export function latestDiffEdit(file: TimelineFileEntry): TimelineFileEdit | null {
-  for (let i = file.edits.length - 1; i >= 0; i -= 1) if (file.edits[i].diff) return file.edits[i];
+  for (let i = file.edits.length - 1; i >= 0; i -= 1) {
+    const edit = file.edits[i];
+    if (edit.diff || edit.partial || edit.diffUnavailableReason) return edit;
+  }
   return null;
 }
 

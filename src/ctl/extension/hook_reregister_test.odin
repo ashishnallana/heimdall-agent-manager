@@ -66,6 +66,8 @@ rr_payload_int :: proc(params, key: string) -> int {
 
 @(test)
 test_hook_permission_reregisters_same_blocker_after_disconnect :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
 	raw := #load("testdata/claude/permission_request.json", string)
 	allow := `{"v":1,"id":"1","ok":true,"data":{"request_id":"x","decision":"allow","message":""}}`
 
@@ -124,4 +126,32 @@ test_hook_permission_reregisters_same_blocker_after_disconnect :: proc(t: ^testi
 	env.blocker_id = "blk_pinned"
 	_ = hook_run("claude", raw, env, rr_send)
 	if len(rr_params) == 1 do testing.expect(t, strings.contains(rr_params[0], `"blocker_id":"blk_pinned"`), rr_params[0])
+
+	// Codex uses the same retry contract with its own renderer; no local
+	// ham-ctl exception, even when the native command is a coordination call.
+	codex_raw := `{"session_id":"s","hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"$HEIMDALL_CTL_BIN chat read"}}`
+	codex_script := []string{"", allow}
+	rr_reset(codex_script)
+	env = rr_env(10_000)
+	env.blocker_id = "blk_codex_stable"
+	env.ctl_bin = "/issued/ham-ctl"
+	testing.expect(t, strings.contains(hook_run("codex", codex_raw, env, rr_send), `"behavior":"allow"`))
+	testing.expect_value(t, len(rr_params), 2)
+	for p in rr_params {
+		testing.expect(t, strings.contains(p, `"blocker_id":"blk_codex_stable"`))
+		testing.expect(t, strings.contains(p, `"provider":"codex"`))
+	}
+	rr_reset(nil)
+	testing.expect_value(t, hook_run("codex", codex_raw, rr_env(12_000), rr_send), "")
+	for reply in ([]string{none, bad, `{"ok":true,"data":{"decision":"deny","message":"no"}}`}) {
+		script := []string{reply}
+		rr_reset(script)
+		result := hook_run("codex", codex_raw, rr_env(10_000), rr_send)
+		testing.expect_value(t, len(rr_params), 1)
+		if strings.contains(reply, `"deny"`) {
+			testing.expect(t, strings.contains(result, `"behavior":"deny"`))
+		} else {
+			testing.expect_value(t, result, "")
+		}
+	}
 }

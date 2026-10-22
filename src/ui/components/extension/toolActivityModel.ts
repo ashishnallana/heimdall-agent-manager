@@ -20,7 +20,7 @@ import { formatDuration } from './extensionTimelineModel.ts';
 
 export const TOOL_ACTIVITY_MESSAGE_TYPE = 'tool_activity';
 
-export type ToolActivityStatus = 'ok' | 'error' | 'running';
+export type ToolActivityStatus = 'ok' | 'error' | 'running' | 'completed';
 
 export interface ToolActivityCall {
   tool: string;
@@ -45,6 +45,7 @@ export interface ToolActivitySubagent {
 export interface ToolActivityCounts {
   total: number;
   ok: number;
+  completed: number;
   error: number;
   running: number;
   edits: number;
@@ -82,7 +83,7 @@ export function isToolActivityMessage(message: { messageType?: string } | null |
 
 function normalizeStatus(v: unknown): ToolActivityStatus {
   const s = str(v);
-  return s === 'error' || s === 'running' ? s : 'ok';
+  return s === 'error' || s === 'running' || s === 'completed' ? s : 'ok';
 }
 
 export function normalizeToolActivityCall(raw: unknown): ToolActivityCall | null {
@@ -143,6 +144,7 @@ export function parseToolActivity(metadata: unknown): ToolActivity {
     turnEndedAt: str(m.turn_ended_at),
     counts: {
       total: Math.max(int(c.total), listed),
+      completed: int(c.completed) || all.filter((x) => x.status === 'completed').length,
       ok: int(c.ok) || all.filter((x) => x.status === 'ok').length,
       error: int(c.error) || all.filter((x) => x.status === 'error').length,
       running: int(c.running) || all.filter((x) => x.status === 'running').length,

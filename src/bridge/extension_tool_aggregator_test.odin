@@ -416,3 +416,38 @@ test_tool_agg_instance_terminal_flushes_running_calls :: proc(t: ^testing.T) {
 		testing.expect(t, boolean(calls[0], "interrupted"), "agent stopped: call interrupted")
 	}
 }
+
+@(test)
+test_tool_agg_completed_unknown_is_neither_success_nor_running :: proc(t: ^testing.T) {
+	a: Tool_Agg
+	defer tool_agg_destroy(&a)
+	agg_start(t, &a, "Bash", "stdout-only", `{"command":"exit 7"}`, 1000)
+	agg_end(t, &a, "Bash", "stdout-only", 2000, payload = `{"status":"completed","outcome":"unknown"}`)
+	agg_idle(t, &a, 3000)
+	testing.expect_value(t, len(a.running), 0)
+	testing.expect_value(t, len(a.ready), 1)
+	if len(a.ready) != 1 do return
+	meta := agg_meta(t, a.ready[0])
+	calls := arr(meta, "calls")
+	if len(calls) != 1 { testing.expect_value(t, len(calls), 1); return }
+	testing.expect_value(t, str(calls[0], "status"), "completed")
+	counts := meta["counts"]
+	testing.expect_value(t, num(counts, "ok"), 0)
+	testing.expect_value(t, num(counts, "error"), 0)
+	testing.expect_value(t, num(counts, "running"), 0)
+	testing.expect_value(t, num(counts, "completed"), 1)
+}
+
+
+@(test)
+test_tool_agg_unknown_background_count_preserves_known_child :: proc(t: ^testing.T) {
+	a: Tool_Agg
+	defer tool_agg_destroy(&a)
+	agg_feed(t, &a, agg_event("subagent.start", `,"agent":{"id":"child","type":"default"},"payload":{}`), 1000)
+	agg_start(t, &a, "Bash", "child-live", `{"command":"sleep 2"}`, 1100, agent="child")
+	agg_feed(t, &a, agg_event("activity", `,"payload":{"state":"idle","reason":"stop"}`), 1200)
+	testing.expect_value(t, len(a.running), 1)
+	if len(a.running) == 1 do testing.expect_value(t, a.running[0].agent_id, "child")
+	agg_end(t, &a, "Bash", "child-live", 1300, agent="child", payload=`{"status":"completed"}`)
+	testing.expect_value(t, len(a.running), 0)
+}

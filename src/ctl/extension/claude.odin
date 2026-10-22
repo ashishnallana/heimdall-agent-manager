@@ -33,7 +33,7 @@ CLAUDE_CAPABILITIES :: [?]string{"activity", "subagents", "permissions", "file_e
 CLAUDE_TOOL_STRING_MAX :: 4 * 1024
 CLAUDE_MESSAGE_MAX :: 2 * 1024
 // Hook stdin larger than this is ignored (Write payloads carry whole files).
-CLAUDE_HOOK_INPUT_MAX :: 16 * 1024 * 1024
+CLAUDE_HOOK_INPUT_MAX :: HOOK_INPUT_MAX
 
 Claude_Hook :: enum {
 	Unknown,
@@ -83,131 +83,6 @@ Claude_Error :: enum {
 	Malformed_Json,
 }
 
-// Ext_Event_Builder writes one ham.ext.v1 event in a fixed key order.
-@(private = "file")
-Ext_Event_Builder :: struct {
-	b: strings.Builder,
-}
-
-@(private = "file")
-claude_event_begin :: proc(event: string, ts: string, root: json.Object) -> (eb: Ext_Event_Builder) {
-	eb.b = strings.builder_make()
-	b := &eb.b
-	strings.write_string(b, `{"schema":`); json_write_string(b, contracts.EXT_SCHEMA_V1)
-	strings.write_string(b, `,"provider":`); json_write_string(b, CLAUDE_PROVIDER)
-	strings.write_string(b, `,"ext_version":`); json_write_string(b, CLAUDE_EXT_VERSION)
-	strings.write_string(b, `,"event":`); json_write_string(b, event)
-	strings.write_string(b, `,"ts":`); json_write_string(b, ts)
-	strings.write_string(b, `,"session_id":`); json_write_string(b, json_get_string(root, "session_id"))
-	if tp := json_get_string(root, "transcript_path"); tp != "" {
-		strings.write_string(b, `,"transcript_path":`); json_write_string(b, tp)
-	}
-	strings.write_string(b, `,"agent":{`)
-	if id := json_get_string(root, "agent_id"); id != "" {
-		strings.write_string(b, `"id":`); json_write_string(b, id)
-		if t := json_get_string(root, "agent_type"); t != "" {
-			strings.write_string(b, `,"type":`); json_write_string(b, t)
-		}
-	}
-	strings.write_byte(b, '}')
-	return eb
-}
-
-// claude_event_tool writes tool:{name,use_id?,input?,response?}. input/response
-// are written only when non-nil.
-@(private = "file")
-claude_event_tool :: proc(eb: ^Ext_Event_Builder, root: json.Object, input, response: json.Value) {
-	b := &eb.b
-	strings.write_string(b, `,"tool":{"name":`); json_write_string(b, json_get_string(root, "tool_name"))
-	if id := json_get_string(root, "tool_use_id"); id != "" {
-		strings.write_string(b, `,"use_id":`); json_write_string(b, id)
-	}
-	if input != nil {
-		strings.write_string(b, `,"input":`); json_write_value(b, input)
-	}
-	if response != nil {
-		strings.write_string(b, `,"response":`); json_write_value(b, response)
-	}
-	strings.write_byte(b, '}')
-}
-
-// claude_event_end writes payload (a pre-rendered JSON object) and closes.
-@(private = "file")
-claude_event_end :: proc(eb: ^Ext_Event_Builder, payload: string) -> string {
-	b := &eb.b
-	strings.write_string(b, `,"payload":`)
-	strings.write_string(b, payload if payload != "" else "{}")
-	strings.write_byte(b, '}')
-	return strings.to_string(eb.b)
-}
-
-// Payload_Builder accumulates a flat JSON object.
-@(private = "file")
-Payload_Builder :: struct {
-	b: strings.Builder,
-	n: int,
-}
-
-@(private = "file")
-pb_make :: proc() -> (p: Payload_Builder) {
-	p.b = strings.builder_make()
-	strings.write_byte(&p.b, '{')
-	return p
-}
-
-@(private = "file")
-pb_key :: proc(p: ^Payload_Builder, key: string) {
-	if p.n > 0 do strings.write_byte(&p.b, ',')
-	p.n += 1
-	json_write_string(&p.b, key)
-	strings.write_byte(&p.b, ':')
-}
-
-@(private = "file")
-pb_str :: proc(p: ^Payload_Builder, key, value: string) {
-	pb_key(p, key); json_write_string(&p.b, value)
-}
-
-// pb_str_nonempty writes key only when value is non-empty.
-@(private = "file")
-pb_str_nonempty :: proc(p: ^Payload_Builder, key, value: string) {
-	if value != "" do pb_str(p, key, value)
-}
-
-@(private = "file")
-pb_int :: proc(p: ^Payload_Builder, key: string, value: int) {
-	pb_key(p, key)
-	buf: [32]u8
-	strings.write_string(&p.b, int_text(buf[:], value))
-}
-
-@(private = "file")
-pb_bool :: proc(p: ^Payload_Builder, key: string, value: bool) {
-	pb_key(p, key); strings.write_string(&p.b, "true" if value else "false")
-}
-
-@(private = "file")
-pb_value :: proc(p: ^Payload_Builder, key: string, value: json.Value) {
-	pb_key(p, key); json_write_value(&p.b, value)
-}
-
-@(private = "file")
-pb_done :: proc(p: ^Payload_Builder) -> string {
-	strings.write_byte(&p.b, '}')
-	return strings.to_string(p.b)
-}
-
-@(private = "file")
-int_text :: proc(buf: []u8, n: int) -> string {
-	i := len(buf)
-	neg := n < 0
-	u := u64(-n) if neg else u64(n)
-	if u == 0 { i -= 1; buf[i] = '0' }
-	for u > 0 { i -= 1; buf[i] = u8('0' + u % 10); u /= 10 }
-	if neg { i -= 1; buf[i] = '-' }
-	return string(buf[i:])
-}
-
 // claude_map_hook maps one Claude hook payload. ts is the RFC 3339 event time
 // (injected so tests are deterministic). An unknown hook maps to no events.
 // permission_timeout_ms > 0 is sent as payload.timeout_ms on permission.request
@@ -234,31 +109,31 @@ claude_map_hook :: proc(raw: string, ts: string, permission_timeout_ms := 0, per
 		}
 		strings.write_byte(&p.b, ']')
 		pb_str_nonempty(&p, "source", json_get_string(root, "source"))
-		eb := claude_event_begin("hello", ts, root)
-		append(&out.events, claude_event_end(&eb, pb_done(&p)))
+		eb := ext_event_begin("hello", ts, root, CLAUDE_PROVIDER, CLAUDE_EXT_VERSION)
+		append(&out.events, ext_event_end(&eb, pb_done(&p)))
 
 		s := pb_make()
 		pb_str(&s, "phase", "start")
 		pb_str_nonempty(&s, "source", json_get_string(root, "source"))
 		pb_str_nonempty(&s, "cwd", json_get_string(root, "cwd"))
 		pb_str_nonempty(&s, "model", json_get_string(root, "model"))
-		eb2 := claude_event_begin("session", ts, root)
-		append(&out.events, claude_event_end(&eb2, pb_done(&s)))
+		eb2 := ext_event_begin("session", ts, root, CLAUDE_PROVIDER, CLAUDE_EXT_VERSION)
+		append(&out.events, ext_event_end(&eb2, pb_done(&s)))
 
 	case .Session_End:
 		p := pb_make()
 		pb_str(&p, "phase", "end")
 		pb_str_nonempty(&p, "reason", json_get_string(root, "reason"))
-		eb := claude_event_begin("session", ts, root)
-		append(&out.events, claude_event_end(&eb, pb_done(&p)))
+		eb := ext_event_begin("session", ts, root, CLAUDE_PROVIDER, CLAUDE_EXT_VERSION)
+		append(&out.events, ext_event_end(&eb, pb_done(&p)))
 
 	case .User_Prompt_Submit:
 		p := pb_make()
 		pb_str(&p, "state", "active")
 		pb_str(&p, "reason", "user_prompt")
 		pb_str_nonempty(&p, "prompt_id", json_get_string(root, "prompt_id"))
-		eb := claude_event_begin("activity", ts, root)
-		append(&out.events, claude_event_end(&eb, pb_done(&p)))
+		eb := ext_event_begin("activity", ts, root, CLAUDE_PROVIDER, CLAUDE_EXT_VERSION)
+		append(&out.events, ext_event_end(&eb, pb_done(&p)))
 
 	case .Stop:
 		p := pb_make()
@@ -271,8 +146,8 @@ claude_map_hook :: proc(raw: string, ts: string, permission_timeout_ms := 0, per
 			if obj, ok := t.(json.Object); ok && json_get_string(obj, "status") == "running" do running += 1
 		}
 		pb_int(&p, "background_running", running)
-		eb := claude_event_begin("activity", ts, root)
-		append(&out.events, claude_event_end(&eb, pb_done(&p)))
+		eb := ext_event_begin("activity", ts, root, CLAUDE_PROVIDER, CLAUDE_EXT_VERSION)
+		append(&out.events, ext_event_end(&eb, pb_done(&p)))
 
 	case .Pre_Tool_Use:
 		input := json_clip(root["tool_input"], CLAUDE_TOOL_STRING_MAX)
@@ -284,9 +159,9 @@ claude_map_hook :: proc(raw: string, ts: string, permission_timeout_ms := 0, per
 			pb_str_nonempty(&p, "subagent_type", json_get_string(ti, "subagent_type"))
 			pb_bool(&p, "run_in_background", json_get_bool(ti, "run_in_background"))
 		}
-		eb := claude_event_begin("tool.start", ts, root)
-		claude_event_tool(&eb, root, input, nil)
-		append(&out.events, claude_event_end(&eb, pb_done(&p)))
+		eb := ext_event_begin("tool.start", ts, root, CLAUDE_PROVIDER, CLAUDE_EXT_VERSION)
+		ext_event_tool(&eb, root, input, nil)
+		append(&out.events, ext_event_end(&eb, pb_done(&p)))
 
 	case .Post_Tool_Use:
 		tool := json_get_string(root, "tool_name")
@@ -303,9 +178,9 @@ claude_map_hook :: proc(raw: string, ts: string, permission_timeout_ms := 0, per
 			pb_str_nonempty(&p, "subagent_status", json_get_string(tr, "status"))
 			pb_str_nonempty(&p, "description", json_get_string(json_get_object(root, "tool_input"), "description"))
 		}
-		eb := claude_event_begin("tool.end", ts, root)
-		claude_event_tool(&eb, root, input, response)
-		append(&out.events, claude_event_end(&eb, pb_done(&p)))
+		eb := ext_event_begin("tool.end", ts, root, CLAUDE_PROVIDER, CLAUDE_EXT_VERSION)
+		ext_event_tool(&eb, root, input, response)
+		append(&out.events, ext_event_end(&eb, pb_done(&p)))
 		if ev, ok := claude_file_edit_event(root, ts); ok do append(&out.events, ev)
 
 	case .Post_Tool_Use_Failure:
@@ -314,20 +189,20 @@ claude_map_hook :: proc(raw: string, ts: string, permission_timeout_ms := 0, per
 		pb_str(&p, "status", "error")
 		pb_str_nonempty(&p, "error", clip_string(json_get_string(root, "error"), CLAUDE_MESSAGE_MAX))
 		if json_get_bool(root, "is_interrupt") do pb_bool(&p, "is_interrupt", true)
-		eb := claude_event_begin("tool.end", ts, root)
-		claude_event_tool(&eb, root, input, nil)
-		append(&out.events, claude_event_end(&eb, pb_done(&p)))
+		eb := ext_event_begin("tool.end", ts, root, CLAUDE_PROVIDER, CLAUDE_EXT_VERSION)
+		ext_event_tool(&eb, root, input, nil)
+		append(&out.events, ext_event_end(&eb, pb_done(&p)))
 
 	case .Subagent_Start:
-		eb := claude_event_begin("subagent.start", ts, root)
-		append(&out.events, claude_event_end(&eb, "{}"))
+		eb := ext_event_begin("subagent.start", ts, root, CLAUDE_PROVIDER, CLAUDE_EXT_VERSION)
+		append(&out.events, ext_event_end(&eb, "{}"))
 
 	case .Subagent_Stop:
 		p := pb_make()
 		pb_str_nonempty(&p, "agent_transcript_path", json_get_string(root, "agent_transcript_path"))
 		pb_str_nonempty(&p, "last_assistant_message", clip_string(json_get_string(root, "last_assistant_message"), CLAUDE_MESSAGE_MAX))
-		eb := claude_event_begin("subagent.stop", ts, root)
-		append(&out.events, claude_event_end(&eb, pb_done(&p)))
+		eb := ext_event_begin("subagent.stop", ts, root, CLAUDE_PROVIDER, CLAUDE_EXT_VERSION)
+		append(&out.events, ext_event_end(&eb, pb_done(&p)))
 
 	case .Notification:
 		ntype := json_get_string(root, "notification_type")
@@ -336,8 +211,8 @@ claude_map_hook :: proc(raw: string, ts: string, permission_timeout_ms := 0, per
 		pb_str_nonempty(&p, "notification_type", ntype)
 		pb_str_nonempty(&p, "title", clip_string(json_get_string(root, "title"), CLAUDE_MESSAGE_MAX))
 		pb_str_nonempty(&p, "message", clip_string(json_get_string(root, "message"), CLAUDE_MESSAGE_MAX))
-		eb := claude_event_begin("notification", ts, root)
-		append(&out.events, claude_event_end(&eb, pb_done(&p)))
+		eb := ext_event_begin("notification", ts, root, CLAUDE_PROVIDER, CLAUDE_EXT_VERSION)
+		append(&out.events, ext_event_end(&eb, pb_done(&p)))
 
 	case .Permission_Request:
 		input := json_clip(root["tool_input"], CLAUDE_TOOL_STRING_MAX)
@@ -348,10 +223,10 @@ claude_map_hook :: proc(raw: string, ts: string, permission_timeout_ms := 0, per
 		if sugg := json_get_array(root, "permission_suggestions"); sugg != nil {
 			pb_value(&p, "permission_suggestions", json_clip(sugg, CLAUDE_TOOL_STRING_MAX))
 		}
-		eb := claude_event_begin("permission.request", ts, root)
+		eb := ext_event_begin("permission.request", ts, root, CLAUDE_PROVIDER, CLAUDE_EXT_VERSION)
 		if input == nil do input = json.Object{}
-		claude_event_tool(&eb, root, input, nil)
-		append(&out.events, claude_event_end(&eb, pb_done(&p)))
+		ext_event_tool(&eb, root, input, nil)
+		append(&out.events, ext_event_end(&eb, pb_done(&p)))
 		out.is_permission = true
 	}
 	return out, .None
@@ -423,9 +298,9 @@ claude_file_edit_event :: proc(root: json.Object, ts: string) -> (string, bool) 
 	if res.truncated do pb_bool(&p, "diff_truncated", true)
 	if res.binary do pb_bool(&p, "binary", true)
 	if json_get_bool(resp, "userModified") do pb_bool(&p, "user_modified", true)
-	eb := claude_event_begin("file.edit", ts, root)
-	claude_event_tool(&eb, root, nil, nil)
-	return claude_event_end(&eb, pb_done(&p)), true
+	eb := ext_event_begin("file.edit", ts, root, CLAUDE_PROVIDER, CLAUDE_EXT_VERSION)
+	ext_event_tool(&eb, root, nil, nil)
+	return ext_event_end(&eb, pb_done(&p)), true
 }
 
 // claude_structured_patch converts tool_response.structuredPatch to hunks.
@@ -448,20 +323,6 @@ claude_structured_patch :: proc(arr: json.Array) -> []Diff_Hunk {
 		append(&hunks, h)
 	}
 	return hunks[:]
-}
-
-// claude_event_params is the agent.extension.event params body for events:
-// the single event itself, or {"events":[...]} for several.
-claude_event_params :: proc(events: []string) -> string {
-	if len(events) == 1 do return events[0]
-	b := strings.builder_make()
-	strings.write_string(&b, `{"events":[`)
-	for e, i in events {
-		if i > 0 do strings.write_byte(&b, ',')
-		strings.write_string(&b, e)
-	}
-	strings.write_string(&b, "]}")
-	return strings.to_string(b)
 }
 
 CLAUDE_DENY_DEFAULT_MESSAGE :: "Denied in Heimdall"

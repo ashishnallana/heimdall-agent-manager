@@ -96,3 +96,26 @@ test('conversation header no longer shows the instance signal badge', () => {
   const pane = read('src/ui/components/workbench/AgentChatPane.tsx');
   assert.doesNotMatch(pane, /InstanceSignalBadge/);
 });
+
+test('installed package never asserts trusted or active per-instance hooks', () => {
+  const badge = providerExtensionBadge(normalizeProviderExtension({ state: 'present', version: '0.1.0' }));
+  assert.match(badge!.detail, /review may be required/i);
+  assert.doesNotMatch(badge!.detail, /signals are available/i);
+});
+
+test('Codex tested-release package uses compatibility manifest without portable shadow', () => {
+  const root = new URL('../extensions/codex/', import.meta.url);
+  assert.equal(fs.existsSync(new URL('plugin.json', root)), false);
+  const manifest = JSON.parse(fs.readFileSync(new URL('.codex-plugin/plugin.json', root), 'utf8'));
+  assert.equal(manifest.name, 'heimdall');
+  assert.equal(manifest.hooks, './hooks/hooks.json');
+  const hookConfig = JSON.parse(fs.readFileSync(new URL('hooks/hooks.json', root), 'utf8'));
+  assert.equal(Object.keys(hookConfig.hooks).length, 10);
+  for (const [event, groups] of Object.entries(hookConfig.hooks) as Array<[string, any[]]>) {
+    const hook = groups[0].hooks[0];
+    assert.match(hook.command, /HEIMDALL_CTL_BIN/);
+    assert.match(hook.command, /extension hook codex/);
+    assert.equal(hook.async, undefined);
+    assert.equal(hook.timeout, event === 'PermissionRequest' ? 330 : event === 'SessionEnd' || event === 'Interrupt' ? 3 : 5);
+  }
+});

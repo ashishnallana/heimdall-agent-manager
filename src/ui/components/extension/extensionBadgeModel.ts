@@ -67,7 +67,7 @@ export function providerExtensionBadge(ext: ProviderExtensionStatus | null | und
         kind: 'installed',
         label: ext.version ? `Extension installed v${ext.version}` : 'Extension installed',
         tone: 'success',
-        detail: 'Native activity, subagent and permission signals are available.',
+        detail: 'Package installed. Hook review may be required; signals are confirmed separately for each running agent.',
         installHint: '',
       };
     case 'disabled':

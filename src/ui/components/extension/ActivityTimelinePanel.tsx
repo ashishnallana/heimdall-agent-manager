@@ -27,6 +27,7 @@ const MonacoDiffViewer = React.lazy(() => import('../chat/MonacoDiffViewer'));
 type View = 'timeline' | 'files';
 
 function ToolStatusIcon({ status }: { status: TimelineToolCall['status'] }) {
+  if (status === 'completed') return <span className="text-faint" title="Completed; outcome unknown" aria-label="Completed; outcome unknown">○</span>;
   if (status === 'running') return <Spinner size="sm" />;
   if (status === 'failed') return <Icon name="alert" size={13} className="text-danger" title="Failed" />;
   return <Icon name="check" size={13} className="text-success" title="Done" />;
@@ -160,7 +161,7 @@ function EntryRow(props: {
 }
 
 function FileDiff({ file, onBack, agentLabel }: { file: TimelineFileEntry; onBack: () => void; agentLabel: (id: string) => string }) {
-  const withDiff = file.edits.filter((e) => e.diff);
+  const withDiff = file.edits.filter((e) => e.diff || e.partial || e.diffUnavailableReason);
   const [selectedSeq, setSelectedSeq] = useState<number>(() => latestDiffEdit(file)?.seq ?? 0);
   const edit: TimelineFileEdit | undefined = withDiff.find((e) => e.seq === selectedSeq) || withDiff[withDiff.length - 1];
   const hunks = useMemo(() => (edit ? parseUnifiedDiff(edit.diff) : []), [edit]);
@@ -198,7 +199,14 @@ function FileDiff({ file, onBack, agentLabel }: { file: TimelineFileEntry; onBac
           This diff was too large and is truncated.
         </p>
       ) : null}
-      {edit ? (
+      {edit?.partial ? (
+        <div className="min-h-0 flex-1 overflow-auto p-3 text-xs text-muted">
+          <p>Confirmed file operation. Full file context and line offsets are unavailable.</p>
+          {edit.oldPath ? <p>Moved from {edit.oldPath}</p> : null}
+          {edit.diffUnavailableReason ? <p>{edit.diffUnavailableReason}</p> : null}
+          {edit.diff ? <pre className="mt-2 whitespace-pre-wrap font-mono">{edit.diff}</pre> : null}
+        </div>
+      ) : edit ? (
         <Suspense fallback={<div className="p-3 text-center text-xs text-muted">Loading diff…</div>}>
           <MonacoDiffViewer filePath={file.filePath} hunks={hunks as any} className="min-h-0 flex-1" />
         </Suspense>

@@ -10,7 +10,7 @@ import "core:strings"
 import "core:testing"
 
 @(test)
-test_provider_catalog_extension_descriptor_is_claude_only :: proc(t: ^testing.T) {
+test_provider_catalog_extension_descriptors_preserve_claude_and_add_codex :: proc(t: ^testing.T) {
 	conn, clone_ok := tmpl_clone_migrated(t)
 	if !clone_ok do return
 	defer close(&conn)
@@ -29,6 +29,10 @@ test_provider_catalog_extension_descriptor_is_claude_only :: proc(t: ^testing.T)
 			testing.expect(t, strings.contains(entry.extension_json, `"load_args":["--plugin-dir"]`), "catalog declares the extension loader argv")
 			testing.expect(t, strings.contains(entry.extension_json, `"load_path_suffix":"extensions/claude"`), "loader is restricted to this extension directory")
 			testing.expect(t, strings.contains(entry.extension_json, `"capabilities":["activity","subagents","permissions","file_edits","session_id"]`), "claude capabilities")
+		} else if entry.provider == "codex" {
+			testing.expect(t, strings.contains(entry.extension_json, `"detect_collection":"installed"`))
+			testing.expect(t, strings.contains(entry.extension_json, `"detect_id_key":"pluginId"`))
+			testing.expect(t, strings.contains(entry.extension_json, `"plugin_id":"heimdall@heimdall-codex"`))
 		} else {
 			testing.expectf(t, entry.extension_json == "", "%s has no extension", entry.provider)
 		}
@@ -54,7 +58,7 @@ test_provider_discovery_report_persists_extension_state :: proc(t: ^testing.T) {
 
 	report := []domain.Bridge_Provider_Status{
 		{bridge_id = "brg_ext", provider = "claude", binary_path = "/bin/claude", version_text = "2.1.295", state = "present", checked_at = "2026-10-22T00:00:00Z", extension_state = "outdated", extension_version = "0.0.9", extension_checked_at = "2026-10-22T00:00:01Z"},
-		// The catalog, not the Bridge, decides support: a bogus claim is normalised.
+		// The catalog owns the Codex descriptor; native package probe state persists.
 		{bridge_id = "brg_ext", provider = "codex", binary_path = "/bin/codex", state = "present", checked_at = "2026-10-22T00:00:00Z", extension_state = "present", extension_version = "1.0.0", extension_checked_at = "2026-10-22T00:00:01Z"},
 		// A Bridge that predates extension detection reports nothing.
 		{bridge_id = "brg_ext", provider = "copilot", state = "absent", checked_at = "2026-10-22T00:00:00Z"},
@@ -74,8 +78,8 @@ test_provider_discovery_report_persists_extension_state :: proc(t: ^testing.T) {
 			testing.expect_value(t, view.extension_checked_at, "2026-10-22T00:00:01Z")
 		case "codex":
 			seen += 1
-			testing.expect_value(t, view.extension_state, "unsupported")
-			testing.expect_value(t, view.extension_version, "")
+			testing.expect_value(t, view.extension_state, "present")
+			testing.expect_value(t, view.extension_version, "1.0.0")
 		case "copilot":
 			seen += 1
 			testing.expect_value(t, view.extension_state, "")

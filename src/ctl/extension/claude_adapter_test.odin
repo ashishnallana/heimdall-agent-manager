@@ -67,7 +67,7 @@ test_claude_session_start_maps_hello_and_session :: proc(t: ^testing.T) {
 	testing.expect_value(t, json_get_string(p, "cwd"), "/home/dev/.cache/heimdall-spike/work")
 
 	// Two events go to the bridge as one {"events":[…]} batch.
-	params := claude_event_params(mapped.events[:])
+	params := event_params(mapped.events[:])
 	split, serr := contracts.ext_split_events(params)
 	testing.expect_value(t, serr, contracts.Ext_Error.None)
 	testing.expect_value(t, len(split), 2)
@@ -489,7 +489,7 @@ test_hook_run_unknown_provider_is_noop :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	defer free_all(context.temp_allocator)
 	fake_reset("", true)
-	testing.expect_value(t, hook_run("codex", #load("testdata/claude/stop_background.json", string), ENV, fake_send), "")
+	testing.expect_value(t, hook_run("unknown-provider", #load("testdata/claude/stop_background.json", string), ENV, fake_send), "")
 	testing.expect_value(t, fake_calls, 0)
 }
 

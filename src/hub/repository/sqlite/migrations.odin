@@ -475,8 +475,9 @@ MIGRATION_109_INSTANCE_PERMISSION_MODE :: #load("migrations/109_instance_permiss
 MIGRATION_110_PROVIDER_ASK_ARGS :: #load("migrations/110_provider_ask_args.sql", string)
 
 MIGRATION_111_EXTENSION_STARTUP_LOADING :: #load("migrations/111_extension_startup_loading.sql", string)
+MIGRATION_112_CODEX_EXTENSION :: #load("migrations/112_codex_extension.sql", string)
 
-migration_order :: [114]string {
+migration_order :: [115]string {
 	"001_foundation.sql",
 	"002_owner_scoped_core.sql",
 	"003_device_tokens.sql",
@@ -591,6 +592,7 @@ migration_order :: [114]string {
 	"109_instance_permission_mode.sql",
 	"110_provider_ask_args.sql",
 	"111_extension_startup_loading.sql",
+	"112_codex_extension.sql",
 }
 
 // stop_before is a TEST SEAM: when non-empty, the apply loop stops in front of
@@ -1146,6 +1148,7 @@ migration_sql :: proc(name, migrations_dir: string) -> string {
 	if name == "109_instance_permission_mode.sql" do return strings.clone(MIGRATION_109_INSTANCE_PERMISSION_MODE)
 	if name == "110_provider_ask_args.sql" do return strings.clone(MIGRATION_110_PROVIDER_ASK_ARGS)
 	if name == "111_extension_startup_loading.sql" do return strings.clone(MIGRATION_111_EXTENSION_STARTUP_LOADING)
+	if name == "112_codex_extension.sql" do return strings.clone(MIGRATION_112_CODEX_EXTENSION)
 	if name == "100_vault_pair_hub_origin.sql" do return strings.clone(MIGRATION_100_VAULT_PAIR_HUB_ORIGIN)
 	if name == "101_codex_gpt6_models.sql" do return strings.clone(MIGRATION_101_CODEX_GPT6_MODELS)
 	if name == "081_antigravity_models.sql" do return strings.clone(MIGRATION_081_ANTIGRAVITY_MODELS)
