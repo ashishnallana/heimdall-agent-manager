@@ -1,3 +1,4 @@
+import { useEntitlements } from '../../hooks/useEntitlements';
 import { useEffect, useMemo, useState } from 'react';
 import {
   type Bridge,
@@ -35,6 +36,7 @@ import PendingEnrollmentsCard from './PendingEnrollmentsCard';
 // inventory and management surface only. Archive maps to the Hub's revocation
 // operation: credentials die, the live socket closes, and the durable row remains.
 export default function BridgesPanel() {
+  const entitlements = useEntitlements();
   const bridgesQuery = useListBridgesQuery(undefined);
   const [renameBridge] = useRenameBridgeMutation();
   const [updateBridgeTelemetry] = useUpdateBridgeTelemetryMutation();
@@ -170,6 +172,7 @@ export default function BridgesPanel() {
       {/* Bridge list */}
       <div data-debug-id="settings-bridges-list" className="mt-4">
         <Text as="div" role="overline" tone="muted" className="mb-2">Bridges ({bridges.length})</Text>
+        <p data-debug-id="settings-bridges-usage" className="mb-2 text-xs text-muted">{bridges.filter((b) => !b.plan_disabled_at).length} of {entitlements.max_bridges < 0 ? 'unlimited' : entitlements.max_bridges} bridges enabled</p>
         {bridgesQuery.isFetching && bridges.length === 0 ? <div className="text-sm text-muted">Loading bridges…</div> : null}
         {bridges.length === 0 && !bridgesQuery.isFetching ? (
           <div data-debug-id="settings-bridges-empty" className="rounded-xl border border-dashed border-subtle bg-surface-raised/30 p-4 text-center text-sm text-muted">No active bridges.</div>

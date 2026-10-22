@@ -1,7 +1,9 @@
+import { isPlanLimitError } from '../utils/planLimit';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useLazyGetShellPaneQuery } from '../api/endpoints/shells';
 
 export interface UseShellPaneSubscriptionOptions {
+  onPlanLimit?: (error: unknown) => void;
   sessionId?: string | null;
   isExpanded?: boolean;
   isActiveTab?: boolean;
@@ -11,6 +13,7 @@ export interface UseShellPaneSubscriptionOptions {
 }
 
 export interface UseShellPaneSubscriptionResult {
+  planLimitError: unknown;
   output: string;
   hash: string;
   isLoading: boolean;
@@ -75,6 +78,7 @@ export function computeShellPanePollingInterval(options: {
  * - Cleans up timers and aborts in-flight queries on unmount
  */
 export function useShellPaneSubscription({
+  onPlanLimit,
   sessionId,
   isExpanded = true,
   isActiveTab = true,
@@ -82,6 +86,10 @@ export function useShellPaneSubscription({
   width = 80,
   lineLimit = 120,
 }: UseShellPaneSubscriptionOptions): UseShellPaneSubscriptionResult {
+  const [planLimitError, setPlanLimitError] = useState<unknown>(null);
+  const planBlockedRef = useRef(false);
+  const onPlanLimitRef = useRef(onPlanLimit);
+  onPlanLimitRef.current = onPlanLimit;
   const [output, setOutput] = useState<string>('');
   const [hash, setHash] = useState<string>('');
   const [lastUpdatedAt, setLastUpdatedAt] = useState<number | null>(null);
@@ -114,7 +122,7 @@ export function useShellPaneSubscription({
     };
   }, []);
 
-  const interval = computeShellPanePollingInterval({
+  const interval = planLimitError ? 0 : computeShellPanePollingInterval({
     sessionId,
     isExpanded,
     isActiveTab,
@@ -126,6 +134,10 @@ export function useShellPaneSubscription({
   useEffect(() => {
     if (prevSessionIdRef.current !== sessionId) {
       prevSessionIdRef.current = sessionId;
+      activeRequestRef.current?.abort?.();
+      activeRequestRef.current = null;
+      planBlockedRef.current = false;
+      setPlanLimitError(null);
       lastSeenHashRef.current = '';
       wasActiveRef.current = false;
       setOutput('');
@@ -138,14 +150,15 @@ export function useShellPaneSubscription({
 
   const doFetch = useCallback(
     async (customSinceHash?: string) => {
-      if (!sessionId || isShellTerminalStatus(status)) {
+      if (planBlockedRef.current || activeRequestRef.current || !sessionId || isShellTerminalStatus(status)) {
         return;
       }
 
       const sinceHashToSend = customSinceHash !== undefined ? customSinceHash : lastSeenHashRef.current;
 
+      let request: ReturnType<typeof trigger> | undefined;
       try {
-        const request = trigger({
+        request = trigger({
           sessionId,
           sinceHash: sinceHashToSend,
           width,
@@ -154,6 +167,7 @@ export function useShellPaneSubscription({
         activeRequestRef.current = request;
 
         const res = await request.unwrap();
+        if (prevSessionIdRef.current !== sessionId) return;
         if (res) {
           setIsBridgeUnreachable(false);
           setError(null);
@@ -168,7 +182,15 @@ export function useShellPaneSubscription({
           setLastUpdatedAt(Date.now());
         }
       } catch (err: any) {
+        if (prevSessionIdRef.current !== sessionId) return;
         if (err?.name === 'AbortError') {
+          return;
+        }
+        if (isPlanLimitError(err)) {
+          planBlockedRef.current = true;
+          setPlanLimitError(err);
+          onPlanLimitRef.current?.(err);
+          setError(err);
           return;
         }
         // A shared capture budget can skip a poll; retain the last good screen.
@@ -184,7 +206,7 @@ export function useShellPaneSubscription({
         setError(err);
         // Polling errors do not overwrite the cached screen.
       } finally {
-        activeRequestRef.current = null;
+        if (activeRequestRef.current === request) activeRequestRef.current = null;
       }
     },
     [sessionId, status, width, lineLimit, trigger]
@@ -284,6 +306,7 @@ export function useShellPaneSubscription({
   const effectiveIsBridgeUnreachable = isBridgeUnreachable || queryUnreachable;
 
   return {
+    planLimitError,
     output: currentOutput,
     hash: currentHash,
     isLoading,

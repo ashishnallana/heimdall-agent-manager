@@ -1,3 +1,6 @@
+import { useEntitlements } from '../../hooks/useEntitlements';
+import UpgradePrompt from '../billing/UpgradePrompt';
+import { isPlanLimitError, planLimitDetails } from '../../utils/planLimit';
 import React, { Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { Button, Icon } from '@ui';
 import {
@@ -49,6 +52,7 @@ export function ShellWorkbenchPane({
   onSelectSession,
   onNewShell,
 }: ShellWorkbenchPaneProps) {
+  const entitlements = useEntitlements();
   const [boundSessionId, setBoundSessionId] = useState<string>(sessionId || '');
   useEffect(() => {
     if (sessionId) setBoundSessionId(sessionId);
@@ -68,7 +72,7 @@ export function ShellWorkbenchPane({
   const [autoCreateFailed, setAutoCreateFailed] = useState(false);
 
   const startInteractiveShell = useCallback(async () => {
-    if (!bridgeId || isCreatingShell) return;
+    if (!entitlements.shells_enabled || !bridgeId || isCreatingShell) return;
     setAutoCreateFailed(false);
     try {
       const session = await createShell(
@@ -79,13 +83,13 @@ export function ShellWorkbenchPane({
     } catch {
       setAutoCreateFailed(true);
     }
-  }, [bridgeId, chainId, createShell, defaultCwd, isCreatingShell, onSelectSession, projectId]);
+  }, [entitlements.shells_enabled, bridgeId, chainId, createShell, defaultCwd, isCreatingShell, onSelectSession, projectId]);
 
   useEffect(() => {
-    if (!autoCreate || !cwdReady || sessionId || !bridgeId || autoCreateAttemptedRef.current) return;
+    if (!entitlements.shells_enabled || !autoCreate || !cwdReady || sessionId || !bridgeId || autoCreateAttemptedRef.current) return;
     autoCreateAttemptedRef.current = true;
     void startInteractiveShell();
-  }, [autoCreate, bridgeId, cwdReady, sessionId, startInteractiveShell]);
+  }, [entitlements.shells_enabled, autoCreate, bridgeId, cwdReady, sessionId, startInteractiveShell]);
 
   const actions: AuxTabAction[] = [];
   if (activeSession) {
@@ -94,7 +98,7 @@ export function ShellWorkbenchPane({
         id: 'shell-restart',
         label: 'Restart shell',
         icon: 'refresh',
-        disabled: isRestarting,
+        disabled: isRestarting || !entitlements.shells_enabled,
         onSelect: () => void restartShell({ sessionId: activeSession.session_id }),
       });
     } else {
@@ -109,7 +113,7 @@ export function ShellWorkbenchPane({
     }
   }
   if (onNewShell) {
-    actions.push({ id: 'shell-new', label: 'New shell (new tab)', icon: 'plus', onSelect: onNewShell });
+    actions.push({ id: 'shell-new', label: 'New shell (new tab)', icon: 'plus', disabled: !entitlements.shells_enabled, onSelect: onNewShell });
   }
   useAuxTabActions(actions);
 
@@ -119,7 +123,9 @@ export function ShellWorkbenchPane({
       className="flex h-full min-h-0 w-full flex-col overflow-hidden bg-surface text-primary"
     >
       <div className="relative flex flex-1 min-h-0 w-full flex-col overflow-hidden">
-        {activeSession ? (
+        {!entitlements.shells_enabled || isPlanLimitError(createShellError) ? (
+          <UpgradePrompt details={isPlanLimitError(createShellError) ? planLimitDetails(createShellError) : { limit: 'shells_enabled' }} debugId="workbench-shell-upgrade" />
+        ) : activeSession ? (
           <div className="flex flex-1 min-h-0 w-full flex-col overflow-hidden p-2">
             <Suspense fallback={null}>
               <ShellTerminalPane key={activeSession.session_id} session={activeSession} />

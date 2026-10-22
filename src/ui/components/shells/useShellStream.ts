@@ -1,3 +1,5 @@
+import { useEntitlements } from '../../hooks/useEntitlements';
+import { announcePlanLimit, isPlanLimitError } from '../../utils/planLimit';
 import { PTY_COLOR_RESET, PaneDeliveryQueue, PaneWriteBatcher, normalizeSnapshotText, repaintCapturedScreenText } from './paneDeliveryQueue.ts';
 import { PTY_WIRE_FLAG_ENCRYPTED, PTY_WIRE_KIND_INPUT, PTY_WIRE_KIND_OUTPUT, PTY_WIRE_KIND_SCREEN, PTY_WIRE_VIEWER_HEADER_BYTES, PtyTextDecoder, decodePtyViewerFrame, decryptPtyPayload, PtyOutputReplayGuard, PtyReplayError, encodePtyViewerFrame, encryptPtyPayload, resetPtyInputStream, setPtyBridgeBootId, type PtyDirection, type PtyViewerFrame } from './ptyWire.ts';
 import { decodeBase64Strict, type VaultKeyring } from '../../utils/vaultCrypto.ts';
@@ -45,6 +47,7 @@ export type UseShellStreamOptions = {
    * signal is NOT also reported through onError.
    */
   onVaultLocked?: (signal: unknown) => void;
+  onPlanLimit?: (error: unknown) => void;
   onClose?: () => void;
   /**
    * REQ-SHELL-18 — the pane's CURRENT geometry, read at the moment the socket opens.
@@ -67,6 +70,7 @@ export type UseShellStreamOptions = {
 };
 
 export interface UseShellStreamResult {
+  readOnly: boolean;
   connected: boolean;
   isStreamReady: boolean;
   sendInput: (data: string) => void;
@@ -154,10 +158,23 @@ export function useShellStream({
   onStreamClosed,
   onError,
   onVaultLocked,
+  onPlanLimit,
   onClose,
   getGeometry,
   isVaultUnlocked: propIsVaultUnlocked,
 }: UseShellStreamOptions): UseShellStreamResult {
+  const entitlements = useEntitlements();
+  const [serverReadOnly, setServerReadOnly] = useState(false);
+  const readOnly = !entitlements.terminal_input_enabled || serverReadOnly;
+  const readOnlyRef = useRef(readOnly);
+  readOnlyRef.current = readOnly;
+  const planBlockedRef = useRef(false);
+  const onPlanLimitRef = useRef(onPlanLimit);
+  onPlanLimitRef.current = onPlanLimit;
+  useEffect(() => {
+    planBlockedRef.current = false;
+    setServerReadOnly(false);
+  }, [sessionId]);
   const [connected, setConnected] = useState(false);
   const [isStreamReady, setIsStreamReady] = useState(false);
   const isStreamReadyRef = useRef(false);
@@ -295,9 +312,17 @@ export function useShellStream({
     setConnected(false);
   };
 
+  const refusePlan = (error: unknown) => {
+    if (planBlockedRef.current) return;
+    planBlockedRef.current = true;
+    closeSocket();
+    announcePlanLimit(error);
+    onPlanLimitRef.current?.(error);
+  };
+
   const connect = useCallback(() => {
     console.log('[useShellStream] connect() called:', { sessionId, enabled, stopped: stoppedRef.current });
-    if (!sessionId || !enabled || stoppedRef.current || hiddenPausedRef.current) return;
+    if (!sessionId || !enabled || stoppedRef.current || planBlockedRef.current || hiddenPausedRef.current) return;
     closeSocket();
 
     const connectId = ++activeConnectIdRef.current;
@@ -324,7 +349,7 @@ export function useShellStream({
           resetPtyInputStream(String(sessionId || ''));
           reconnectAttemptsRef.current = 0;
           vaultLockedNoticeShownRef.current = false;
-                inputQueueRef.current = Promise.resolve();
+          inputQueueRef.current = Promise.resolve();
           setConnected(true);
           startHeartbeat(socket);
           sendGeometry(socket);
@@ -410,6 +435,15 @@ export function useShellStream({
 
         const handleControlMessage = (msg: ShellStreamMsg) => {
           if (activeConnectIdRef.current !== connectId) return;
+          if ((msg.type === 'ready' || msg.type === 'stream_ready') && typeof (msg as any).read_only === 'boolean') {
+            const denied = (msg as any).read_only;
+            readOnlyRef.current = readOnlyRef.current || denied;
+            setServerReadOnly(denied);
+            if (denied) {
+              pendingKeyEventsRef.current = [];
+              inputCoalescerRef.current?.reset();
+            }
+          }
           // PTY v2: input is sealed to the bridge's current unseal boot id, announced on
           // ready / stream_ready (so a restarted bridge's re-attach refreshes it).
           if ((msg.type === 'ready' || msg.type === 'stream_ready') && (msg as any).bridge_boot_id) {
@@ -440,7 +474,9 @@ export function useShellStream({
             console.log('[useShellStream] received status frame:', msg.status);
             onStatusRef.current?.(msg.status);
           } else if (msg.type === 'error') {
-            if (isVaultLockedError(msg)) {
+            if (isPlanLimitError(msg)) {
+              refusePlan(msg);
+            } else if (isVaultLockedError(msg)) {
               console.warn('[useShellStream] bridge vault is locked for session:', (msg as any).session_id);
               onVaultLockedRef.current?.(msg);
             } else {
@@ -481,6 +517,11 @@ export function useShellStream({
             console.log('[useShellStream] socket.onclose ignored for stale connectId');
             return;
           }
+          if (event.code === 4402) {
+            refusePlan({ code: 4402, details: { limit: 'max_concurrent_streams' } });
+            return;
+          }
+          if (planBlockedRef.current) return;
           console.warn('[useShellStream] socket.onclose triggered:', {
             code: event.code,
             reason: event.reason,
@@ -590,7 +631,7 @@ export function useShellStream({
    */
   const sendInputChunk = useCallback((data: string) => {
     const s = socketRef.current;
-    if (!s || s.readyState !== WebSocket.OPEN) {
+    if (readOnlyRef.current || planBlockedRef.current || !s || s.readyState !== WebSocket.OPEN) {
       console.warn('[useShellStream] sendInput called but socket is not open, readyState:', s?.readyState);
       return;
     }
@@ -599,10 +640,10 @@ export function useShellStream({
     const bytes = new TextEncoder().encode(data);
     if (isUnlocked && activeKey) {
       inputQueueRef.current = inputQueueRef.current.then(async () => {
-        if (s.readyState !== WebSocket.OPEN) return;
+        if (readOnlyRef.current || planBlockedRef.current || s.readyState !== WebSocket.OPEN) return;
         try {
           const sealed = await encryptPtyPayload(bytes, activeKey, String(streamSessionIdRef.current || ''));
-          if (s.readyState === WebSocket.OPEN) {
+          if (!readOnlyRef.current && !planBlockedRef.current && s.readyState === WebSocket.OPEN) {
             s.send(encodePtyViewerFrame(PTY_WIRE_KIND_INPUT, PTY_WIRE_FLAG_ENCRYPTED, sealed));
           }
         } catch (err) {
@@ -631,6 +672,7 @@ export function useShellStream({
   }, [dispatchInput]);
 
   const sendInput = useCallback((data: string) => {
+    if (readOnlyRef.current || planBlockedRef.current) return;
     if (!isStreamReadyRef.current) {
       console.log('[useShellStream] Buffering early input before stream_ready:', { length: data.length });
       pendingKeyEventsRef.current.push({ data, timestamp: Date.now() });
@@ -642,16 +684,17 @@ export function useShellStream({
   const sendResize = useCallback((rows: number, cols: number) => {
     const s = socketRef.current;
     console.log('[useShellStream] sendResize called:', { rows, cols, readyState: s?.readyState });
-    if (!s || s.readyState !== WebSocket.OPEN) return;
+    if (readOnlyRef.current || planBlockedRef.current || !s || s.readyState !== WebSocket.OPEN) return;
     s.send(JSON.stringify({ type: 'resize', rows, cols }));
   }, []);
 
   const reconnect = useCallback(() => {
     console.log('[useShellStream] reconnect() manually invoked for session:', sessionId);
+    planBlockedRef.current = false;
     reconnectAttemptsRef.current = 0;
     vaultLockedNoticeShownRef.current = false;
     connect();
   }, [connect]);
 
-  return { connected, isStreamReady, sendInput, sendResize, reconnect };
+  return { readOnly, connected, isStreamReady, sendInput, sendResize, reconnect };
 }

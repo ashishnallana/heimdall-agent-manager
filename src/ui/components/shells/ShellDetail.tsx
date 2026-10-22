@@ -1,3 +1,5 @@
+import { useEntitlements } from '../../hooks/useEntitlements';
+import UpgradePrompt from '../billing/UpgradePrompt';
 /**
  * ShellDetail — the shell view's guts, rendered as a full page AND as the two-pane
  * right-hand pane. Modeled after ActionDetail/AgentDetail.
@@ -129,6 +131,7 @@ export interface PendingConfirm {
 export function useShellDetail(sessionId: string, onAfterVerb?: (verb: ShellVerb) => void) {
   // REQ-SHELL-6 §6: no pollingInterval. Repaints when a shell event invalidates this
   // session's `ShellSession` tag (wsInvalidation.ts, invalidateShellSession).
+  const entitlements = useEntitlements();
   const query = useGetShellSessionQuery({ sessionId }, { skip: !sessionId });
   const [killShell] = useKillShellMutation();
   const [restartShell] = useRestartShellMutation();
@@ -145,6 +148,8 @@ export function useShellDetail(sessionId: string, onAfterVerb?: (verb: ShellVerb
   /** Fire a verb that has already cleared whatever confirm it needed. */
   const execute = React.useCallback(
     async (verb: ShellVerb, session: ShellSession) => {
+      if (verb === 'interrupt' && !entitlements.terminal_input_enabled) return;
+      if (verb === 'restart' && !entitlements.shells_enabled) return;
       setBusy(verb);
       setActionError('');
       setNotice('');
@@ -172,7 +177,7 @@ export function useShellDetail(sessionId: string, onAfterVerb?: (verb: ShellVerb
         setBusy('');
       }
     },
-    [killShell, onAfterVerb, restartShell, signalShell],
+    [entitlements.terminal_input_enabled, entitlements.shells_enabled, killShell, onAfterVerb, restartShell, signalShell],
   );
 
   const runVerb = React.useCallback(
@@ -283,12 +288,16 @@ export function ShellDetailActions({
   busy: ShellVerb | '';
   onVerb: (verb: ShellVerb) => void;
 }) {
+  const entitlements = useEntitlements();
+  const planBlocks = (verb: ShellVerb) => (verb === 'interrupt' && !entitlements.terminal_input_enabled)
+    || (verb === 'restart' && !entitlements.shells_enabled);
   const verbs = verbsForSession(record);
   const primary = verbs.includes('preview') ? 'preview' : '';
   const menuVerbs = verbs.filter((verb) => verb !== primary);
 
   return (
     <>
+      {menuVerbs.some(planBlocks) ? <UpgradePrompt details={{ limit: !entitlements.shells_enabled ? 'shells_enabled' : 'terminal_input_enabled' }} debugId="shell-actions-upgrade" /> : null}
       {primary ? (
         <span className="hidden md:contents">
           <ActionButton
@@ -317,6 +326,7 @@ export function ShellDetailActions({
           {menuVerbs.map((verb) => (
             <MenuItem
               key={verb}
+              disabled={planBlocks(verb)}
               danger={isDestructive(verb)}
               data-debug-id={`shell-view-${verb}`}
               onClick={() => onVerb(verb)}

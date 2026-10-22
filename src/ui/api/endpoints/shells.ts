@@ -504,7 +504,7 @@ export const shellsApi = heimdallApi.injectEndpoints({
           const data = await cookieJsonFetch(path);
           return { data: await openPaneReplyOutput(data || {}, sessionId) };
         } catch (error: any) {
-          return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any };
+          return { error: customQueryError(error) as any };
         }
       },
       serializeQueryArgs: ({ endpointName, queryArgs }) => {

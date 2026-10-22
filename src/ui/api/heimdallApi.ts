@@ -1,6 +1,7 @@
 import { createApi, fakeBaseQuery, setupListeners } from '@reduxjs/toolkit/query/react';
 
 export const HEIMDALL_TAG_TYPES = [
+  'planLimitReached',
   'TaskLog',
   'Task',
   'TaskComments',

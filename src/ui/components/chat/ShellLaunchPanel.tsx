@@ -1,3 +1,6 @@
+import { useEntitlements } from '../../hooks/useEntitlements';
+import UpgradePrompt from '../billing/UpgradePrompt';
+import { isPlanLimitError, planLimitDetails } from '../../utils/planLimit';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import { Combobox, Icon, Modal } from '@ui';
@@ -34,6 +37,8 @@ export interface ShellLaunchPanelProps {
  * a bridge directory browser) or attach to / kill a running one.
  */
 export function ShellLaunchPanel({ projects, bridges, projectId, onProjectChange, initialBridgeId, openIds = [], isMobile, disabled, autoFocusStart = false, onOpenShell }: ShellLaunchPanelProps) {
+  const entitlements = useEntitlements();
+  disabled = disabled || !entitlements.shells_enabled;
   const dispatch = useDispatch();
   const vaultUnlocked = useSelector(selectIsVaultUnlocked);
   const usableBridges = useMemo(
@@ -63,7 +68,7 @@ export function ShellLaunchPanel({ projects, bridges, projectId, onProjectChange
   const [browsing, setBrowsing] = useState(false);
 
   const [createShell, createState] = useCreateShellMutation();
-  const blocked = !vaultUnlocked ? 'vault' : !bridge || !composerBridgeIsOnline(bridge) ? 'bridge' : '';
+  const blocked = !entitlements.shells_enabled ? 'plan' : !vaultUnlocked ? 'vault' : !bridge || !composerBridgeIsOnline(bridge) ? 'bridge' : '';
   const startRef = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     if (!autoFocusStart || disabled || blocked || createState.isLoading) return;
@@ -90,6 +95,7 @@ export function ShellLaunchPanel({ projects, bridges, projectId, onProjectChange
 
   return (
     <div data-debug-id="new-convo-shell-panel" className="flex w-full flex-col gap-6">
+      {!entitlements.shells_enabled || isPlanLimitError(createState.error) ? <UpgradePrompt details={isPlanLimitError(createState.error) ? planLimitDetails(createState.error) : { limit: 'shells_enabled' }} debugId="shell-launch-upgrade" /> : null}
       <section className="rounded-2xl border border-subtle bg-surface p-4">
         <h2 className="mb-3 text-sm font-semibold text-primary">Start a new shell</h2>
         <div className={`grid gap-3 ${isMobile ? 'grid-cols-1' : 'grid-cols-2'}`}>
@@ -112,7 +118,7 @@ export function ShellLaunchPanel({ projects, bridges, projectId, onProjectChange
               {usableBridges.length === 0 ? <option value="">No bridges</option> : null}
               {usableBridges.map((b) => (
                 <option key={b.bridge_id} value={b.bridge_id} disabled={!composerBridgeIsOnline(b)}>
-                  {bridgeLabel(b)}{composerBridgeIsOnline(b) ? '' : ' (offline)'}
+                  {bridgeLabel(b)}{b.plan_disabled_at ? ' (disabled — over plan limit)' : composerBridgeIsOnline(b) ? '' : ' (offline)'}
                 </option>
               ))}
             </select>

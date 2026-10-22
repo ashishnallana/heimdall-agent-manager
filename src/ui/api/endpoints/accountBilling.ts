@@ -27,6 +27,8 @@ export interface AccountBilling {
 export const accountBillingApi = heimdallApi.injectEndpoints({
   endpoints: (build) => ({
     getAccountBilling: build.query<AccountBilling, string>({
+      keepUnusedDataFor: Infinity,
+      providesTags: ['planLimitReached'],
       queryFn: async (userId) => {
         try {
           const data: AccountBilling = await cookieJsonFetch('/account/billing');
@@ -37,6 +39,7 @@ export const accountBillingApi = heimdallApi.injectEndpoints({
       },
     }),
     createAccountCheckout: build.mutation<{ transaction_id: string; checkout_url: string }, string>({
+      invalidatesTags: (result) => result ? ['planLimitReached'] : [],
       queryFn: async (offerId) => {
         try { return { data: await cookieMutation('/account/billing/checkout', 'POST', { offer_id: offerId }) }; }
         catch (error) { return { error: { status: 'CUSTOM_ERROR', error: (error as Error).message } }; }

@@ -1,7 +1,9 @@
+import { isPlanLimitError } from '../utils/planLimit';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useLazyGetAgentPaneQuery } from '../api/endpoints/agents';
 
 export interface UseAgentPaneSubscriptionOptions {
+  onPlanLimit?: (error: unknown) => void;
   agentInstanceId?: string | null;
   isExpanded: boolean;
   isActiveTab?: boolean;
@@ -11,6 +13,7 @@ export interface UseAgentPaneSubscriptionOptions {
 }
 
 export interface UseAgentPaneSubscriptionResult {
+  planLimitError: unknown;
   output: string;
   hash: string;
   isLoading: boolean;
@@ -62,6 +65,7 @@ export function computeAgentPanePollingInterval(options: {
  * - Cleans up timers and aborts in-flight queries on component unmount
  */
 export function useAgentPaneSubscription({
+  onPlanLimit,
   agentInstanceId,
   isExpanded,
   isActiveTab = true,
@@ -69,6 +73,10 @@ export function useAgentPaneSubscription({
   width = 80,
   lineLimit = 120,
 }: UseAgentPaneSubscriptionOptions): UseAgentPaneSubscriptionResult {
+  const [planLimitError, setPlanLimitError] = useState<unknown>(null);
+  const planBlockedRef = useRef(false);
+  const onPlanLimitRef = useRef(onPlanLimit);
+  onPlanLimitRef.current = onPlanLimit;
   const [output, setOutput] = useState<string>('');
   const [hash, setHash] = useState<string>('');
   const [lastUpdatedAt, setLastUpdatedAt] = useState<number | null>(null);
@@ -101,7 +109,7 @@ export function useAgentPaneSubscription({
   }, []);
 
   // Compute dynamic interval
-  const interval = computeAgentPanePollingInterval({
+  const interval = planLimitError ? 0 : computeAgentPanePollingInterval({
     agentInstanceId,
     isExpanded,
     isActiveTab,
@@ -113,6 +121,10 @@ export function useAgentPaneSubscription({
   useEffect(() => {
     if (prevInstanceIdRef.current !== agentInstanceId) {
       prevInstanceIdRef.current = agentInstanceId;
+      activeRequestRef.current?.abort?.();
+      activeRequestRef.current = null;
+      planBlockedRef.current = false;
+      setPlanLimitError(null);
       lastSeenHashRef.current = '';
       wasActiveRef.current = false;
       setOutput('');
@@ -124,14 +136,15 @@ export function useAgentPaneSubscription({
   // Execute fetch function
   const doFetch = useCallback(
     async (customSinceHash?: string) => {
-      if (!agentInstanceId || runtimeStatus === 'stopped' || runtimeStatus === 'failed') {
+      if (planBlockedRef.current || activeRequestRef.current || !agentInstanceId || runtimeStatus === 'stopped' || runtimeStatus === 'failed') {
         return;
       }
 
       const sinceHashToSend = customSinceHash !== undefined ? customSinceHash : lastSeenHashRef.current;
 
+      let request: ReturnType<typeof trigger> | undefined;
       try {
-        const request = trigger({
+        request = trigger({
           agentInstanceId,
           sinceHash: sinceHashToSend,
           width,
@@ -140,6 +153,7 @@ export function useAgentPaneSubscription({
         activeRequestRef.current = request;
 
         const res = await request.unwrap();
+        if (prevInstanceIdRef.current !== agentInstanceId) return;
         if (res) {
           if (res.hash) {
             lastSeenHashRef.current = res.hash;
@@ -152,12 +166,19 @@ export function useAgentPaneSubscription({
           setLastUpdatedAt(Date.now());
         }
       } catch (err: any) {
+        if (prevInstanceIdRef.current !== agentInstanceId) return;
         if (err?.name === 'AbortError') {
+          return;
+        }
+        if (isPlanLimitError(err)) {
+          planBlockedRef.current = true;
+          setPlanLimitError(err);
+          onPlanLimitRef.current?.(err);
           return;
         }
         // Polling errors do not overwrite cached output
       } finally {
-        activeRequestRef.current = null;
+        if (activeRequestRef.current === request) activeRequestRef.current = null;
       }
     },
     [agentInstanceId, runtimeStatus, width, lineLimit, trigger]
@@ -237,6 +258,7 @@ export function useAgentPaneSubscription({
     (Boolean(agentInstanceId) && interval > 0 && lastUpdatedAt === null && result.isFetching);
 
   return {
+    planLimitError,
     output: currentOutput,
     hash: currentHash,
     isLoading,
