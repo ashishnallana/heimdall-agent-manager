@@ -670,10 +670,23 @@ bridge_fs_is_within_root :: proc(abs_path: string, sandbox_root: string = "") ->
 	root := sandbox_root if sandbox_root != "" else bridge_fs_root
 	if root == "" do return false
 	if abs_path == root do return true
-	// Must be a strict descendant: root + "/" prefix.
-	prefix := strings.concatenate({root, "/"}, context.allocator)
-	defer delete(prefix)
-	return strings.has_prefix(abs_path, prefix)
+	when ODIN_OS == .Windows {
+		// filepath.clean / os.get_absolute_path yield `\`-separated paths here, and
+		// NTFS paths are case-insensitive, so compare with `/` normalized and folded
+		// case. A hard-coded root + "/" prefix never matched a cleaned descendant,
+		// so every subdirectory was rejected as path_outside_root.
+		p, _ := strings.replace_all(abs_path, "\\", "/", context.temp_allocator)
+		r, _ := strings.replace_all(root, "\\", "/", context.temp_allocator)
+		r = strings.trim_right(r, "/") // drive root "C:\" -> "C:"
+		if strings.equal_fold(strings.trim_right(p, "/"), r) do return true
+		if len(p) <= len(r) || p[len(r)] != '/' do return false
+		return strings.equal_fold(p[:len(r)], r)
+	} else {
+		// Must be a strict descendant: root + "/" prefix.
+		prefix := strings.concatenate({root, "/"}, context.allocator)
+		defer delete(prefix)
+		return strings.has_prefix(abs_path, prefix)
+	}
 }
 
 // bridge_fs_resolve_command_root picks the sandbox root for a filesystem command.
