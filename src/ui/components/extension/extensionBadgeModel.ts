@@ -75,7 +75,9 @@ export function providerExtensionBadge(ext: ProviderExtensionStatus | null | und
         kind: 'disabled',
         label: 'Extension disabled',
         tone: 'warning',
-        detail: ext.plugin_id ? `Enable it with: claude plugin enable ${ext.plugin_id}` : 'Enable the extension in the provider CLI.',
+        detail: ext.plugin_id
+          ? `The extension (${ext.plugin_id}) is installed but disabled. Enable it in the provider CLI.`
+          : 'The extension is installed but disabled. Enable it in the provider CLI.',
         installHint: '',
       };
     case 'outdated':
