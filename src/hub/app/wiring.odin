@@ -631,6 +631,9 @@ register_routes :: proc(graph: ^App_Graph) {
 	http.router_add(&graph.router, "POST", "/api/v1/agent-instances/*/reconfigurations/retry", rawptr(&graph.agent_handlers), http.retry_instance_reconfiguration_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/agent-instances/*/reconfigurations", rawptr(&graph.agent_handlers), http.create_instance_reconfiguration_handler)
 	http.router_add(&graph.router, "GET", "/api/v1/agent-instances/*/reconfigurations", rawptr(&graph.agent_handlers), http.list_instance_reconfigurations_handler)
+	http.router_add(&graph.router, "GET", "/api/v1/agent-instances/*/extension/events", rawptr(&graph.agent_handlers), http.agent_instance_extension_events_handler)
+	http.router_add(&graph.router, "GET", "/api/v1/agent-instances/*/extension/subagents", rawptr(&graph.agent_handlers), http.agent_instance_extension_subagents_handler)
+	http.router_add(&graph.router, "GET", "/api/v1/agent-instances/*/extension/files", rawptr(&graph.agent_handlers), http.agent_instance_extension_files_handler)
 	http.router_add(&graph.router, "GET", "/api/v1/agent-instances/*", rawptr(&graph.agent_handlers), http.agent_instance_detail_handler)
 	http.router_add(&graph.router, "PATCH", "/api/v1/agent-instances/*", rawptr(&graph.agent_handlers), http.patch_agent_instance_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/agent-instances/*/start", rawptr(&graph.agent_handlers), http.start_agent_instance_handler)
@@ -824,6 +827,7 @@ register_routes :: proc(graph: ^App_Graph) {
 	http.router_add(&graph.router, "POST", "/api/v1/agent-actions/cards/discard", rawptr(&graph.agent_action_handlers), http.agent_action_card_discard_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/agent-actions/cards/accept", rawptr(&graph.agent_action_handlers), http.agent_action_card_accept_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/agent-actions/start-success", rawptr(&graph.agent_action_handlers), http.agent_action_start_success_handler)
+	http.router_add(&graph.router, "POST", "/api/v1/agent-actions/extension-events", rawptr(&graph.agent_action_handlers), http.agent_action_extension_events_handler)
 	// REQ-ENROLL-9: the four pre-shared-token enrollment routes are GONE —
 	// POST/GET /api/v1/bridge-enrollments, DELETE /api/v1/bridge-enrollments/*
 	// (enrollment-token minting, listing and revocation) and
