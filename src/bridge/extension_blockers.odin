@@ -238,7 +238,10 @@ bridge_blockers_release_locked :: proc(p: ^Bridge_Permission_Pending, reason: st
 //   tool.end for the same agent + tool + call   -> the oldest such blocker
 //   tool.start for the same agent + tool + call -> the oldest, after the grace window
 //   subagent.stop                               -> every blocker of that subagent
-//   activity idle|active (turn ended / new turn) -> every blocker of the instance
+//   activity idle|active (turn ended / new turn) -> every blocker of that same
+//                                                   agent (main agent = ""); a
+//                                                   background subagent's blocker
+//                                                   outlives the main agent's Stop
 // "Same call" compares the one-line summary of the event's tool.input with the
 // blocker's (bridge_blocker_summary: command / file_path / url / ...), because a
 // PermissionRequest carries no tool_use_id. That keeps a PARALLEL auto-allowed
@@ -279,7 +282,9 @@ bridge_blockers_on_extension_event :: proc(instance_id: string, ev: contracts.Ex
 		}
 		for &p in bridge_permission_pending {
 			if p.agent_instance_id != instance_id || p.kind != BRIDGE_BLOCKER_KIND_PERMISSION || p.decided do continue
-			if ev.kind == .Subagent_Stop && p.agent_id != ev.agent_id do continue
+			// Stop fires while background subagents still run, so a turn
+			// boundary only proves the prompts of the agent it belongs to are gone.
+			if p.agent_id != ev.agent_id do continue
 			bridge_blockers_release_locked(&p, BRIDGE_BLOCKER_TERMINAL_REASON)
 			n += 1
 		}

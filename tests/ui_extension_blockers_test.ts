@@ -25,6 +25,7 @@ import {
   visibleBlockers,
   type AgentBlockersSnapshot,
 } from '../src/ui/components/extension/blockersModel.ts';
+import { createActionScheduler } from '../src/ui/services/attention/actionScheduler.ts';
 
 const NOW = Date.parse('2026-10-22T07:00:00Z');
 
@@ -243,4 +244,32 @@ test('no standalone permission card: only the attention surfaces render blockers
   const card = read('src/ui/components/attention/AgentBlockerCard.tsx');
   assert.match(card, /useResolveAgentBlockerMutation/);
   assert.match(card, /scheduler\.unsettle\(key\)/);
+  assert.match(card, /scheduler\.recheckAfter\(key, BLOCKER_RESOLVE_CONFIRM_MS\)/);
+});
+
+test('a resolved blocker the hub still lists shows again after the recheck window', () => {
+  let now = 0;
+  const due: Array<{ at: number; fn: () => void }> = [];
+  const timers = {
+    setTimeout: (fn: () => void, ms: number) => { due.push({ at: now + ms, fn }); return due.length; },
+    clearTimeout: () => {},
+    now: () => now,
+  };
+  const advance = (ms: number) => { now += ms; for (const t of due.splice(0)) (t.at <= now ? t.fn() : due.push(t)); };
+  const s = createActionScheduler({ timers });
+
+  // Lost decision: the hook re-registered blk:a, so the hub keeps listing it.
+  s.settle('blk:a');
+  s.recheckAfter('blk:a', 15_000);
+  advance(14_999);
+  assert.ok(s.getSnapshot().hidden.has('blk:a'), 'hidden within the window');
+  advance(1);
+  assert.equal(s.getSnapshot().hidden.has('blk:a'), false, 'shown again after the window');
+
+  // Delivered decision: the snapshot drops blk:b, prune forgets it, the recheck is a no-op.
+  s.settle('blk:b');
+  s.recheckAfter('blk:b', 15_000);
+  s.prune([]);
+  advance(15_000);
+  assert.equal(s.getSnapshot().hidden.has('blk:b'), false);
 });

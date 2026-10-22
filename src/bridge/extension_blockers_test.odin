@@ -260,11 +260,40 @@ test_ext_blockers_terminal_answer_auto_resolves :: proc(t: ^testing.T) {
 	testing.expect_value(t, bridge_blockers_on_extension_event(id, start, bridge_runtime_now_ms() + BRIDGE_BLOCKER_TOOL_START_GRACE_MS), 1)
 	testing.expect_value(t, ext_blk_finish(run2).decision, "none")
 
-	run3 := ext_blk_start(id, ext_blk_req(t, `,"timeout_ms":5000`))
+	// A main-agent idle (Stop) releases the main agent's own blocker.
+	main_req := ext_blk_req(t, `,"timeout_ms":5000`)
+	main_req.agent_id = ""
+	run3 := ext_blk_start(id, main_req)
 	testing.expect(t, ext_blk_wait_count(id, 1))
 	idle := contracts.Ext_Event{kind = .Activity, provider = "claude", activity_state = "idle"}
 	testing.expect_value(t, bridge_blockers_on_extension_event(id, idle, bridge_runtime_now_ms()), 1)
 	testing.expect_value(t, ext_blk_finish(run3).message, BRIDGE_BLOCKER_TERMINAL_REASON)
+}
+
+@(test)
+test_ext_blockers_background_subagent_survives_main_idle :: proc(t: ^testing.T) {
+	context.allocator = runtime.heap_allocator()
+	id := "inst_blk_bg_subagent"
+	// sub-1 (a background subagent) is blocked on a permission prompt.
+	run := ext_blk_start(id, ext_blk_req(t, `,"timeout_ms":5000`))
+	testing.expect(t, ext_blk_wait_count(id, 1))
+	now := bridge_runtime_now_ms()
+	// Stop fires for the main agent while sub-1 keeps running: its prompt stays.
+	for state in ([]string{"idle", "active"}) {
+		ev := contracts.Ext_Event{kind = .Activity, provider = "claude", activity_state = state}
+		testing.expect_value(t, bridge_blockers_on_extension_event(id, ev, now), 0)
+	}
+	testing.expect_value(t, len(bridge_blockers_list(id)), 1)
+	// Another subagent stopping does not release it either.
+	other := contracts.Ext_Event{kind = .Subagent_Stop, provider = "claude", agent_id = "sub-2"}
+	testing.expect_value(t, bridge_blockers_on_extension_event(id, other, now), 0)
+	// Its own subagent.stop does.
+	stop := contracts.Ext_Event{kind = .Subagent_Stop, provider = "claude", agent_id = "sub-1"}
+	testing.expect_value(t, bridge_blockers_on_extension_event(id, stop, now), 1)
+	out := ext_blk_finish(run)
+	testing.expect_value(t, out.decision, "none")
+	testing.expect_value(t, out.message, BRIDGE_BLOCKER_TERMINAL_REASON)
+	testing.expect_value(t, len(bridge_blockers_list(id)), 0)
 }
 
 @(test)

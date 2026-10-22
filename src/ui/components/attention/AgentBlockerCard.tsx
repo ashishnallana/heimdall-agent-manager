@@ -4,6 +4,10 @@
 // prompt detected in the agent terminal can only be answered there, so it gets
 // Open terminal. Resolving hides the card at once; the bridge's next snapshot
 // drops it for good (attention_changed refetches), and a failed call brings it back.
+// A decision can still be lost after the hub accepted it (the bridge restarts
+// before its waiter sees the frame); the hook then re-registers the SAME
+// blocker_id, so the hide is lifted after BLOCKER_RESOLVE_CONFIRM_MS and a
+// blocker the hub still lists shows again.
 import { useCallback, useMemo, useState } from 'react';
 import { Button, Icon } from '@ui';
 import { apiErrorText } from '../../api/cookieFetch';
@@ -16,6 +20,9 @@ import type { BlockerDecision } from '../extension/blockersModel';
 import { formatAge, hideKey, isTerminalPromptItem } from './attentionModel';
 import { needLabel } from './actionTrayModel';
 
+/** How long a resolved blocker stays hidden before a still-listed one shows again. */
+export const BLOCKER_RESOLVE_CONFIRM_MS = 15_000;
+
 /** Allow / Deny one blocker: hides it at once, restores it (and returns the error) on failure. */
 export function useResolveBlocker(scheduler: ActionScheduler = attentionScheduler) {
   const [resolve] = useResolveAgentBlockerMutation();
@@ -27,6 +34,7 @@ export function useResolveBlocker(scheduler: ActionScheduler = attentionSchedule
       scheduler.unsettle(key);
       return apiErrorText(result.error, 'Could not send the decision.');
     }
+    scheduler.recheckAfter(key, BLOCKER_RESOLVE_CONFIRM_MS);
     return '';
   }, [resolve, scheduler]);
 }
