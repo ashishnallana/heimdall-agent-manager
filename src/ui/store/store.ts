@@ -16,6 +16,7 @@ import attentionReducer from './attentionSlice';
 import toastReducer from './toastSlice';
 import notificationsReducer from './notificationsSlice';
 import agentActivityReducer from './agentActivitySlice';
+import toolActivityReducer from './toolActivitySlice';
 import cardsReducer from './cardsSlice';
 import themeReducer from './themeSlice';
 import vaultReducer from './vaultSlice';
@@ -54,6 +55,7 @@ const appReducer = combineReducers({
   // of client state on user switch via the priorUserClientStateCleared handling
   // in rootReducer below.
   agentActivity: agentActivityReducer,
+  toolActivity: toolActivityReducer,
   [heimdallApi.reducerPath]: heimdallApi.reducer,
 });
 

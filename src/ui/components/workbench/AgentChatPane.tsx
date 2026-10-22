@@ -80,16 +80,9 @@ import { describeCron, formatInTimeZone, timeZoneLabel } from '../actions/schedu
 import { TaskChainSelectorModal } from '../chains/TaskChainSelectorModal';
 import { useIsMobile } from '../shell/responsive';
 import { chromeIconButtonSizeClass } from '../shell/shellChrome';
-import {
-  ClubbedRunGroup,
-  PinnedShellRuns,
-  pinnedRunSessions,
-  ShellRunRow,
-  useConversationRuns,
-  type ShellRunMarker,
-} from '../shells/ShellRunIndicator';
+import { navigateTo, shellViewHref } from '../shells/shellModel';
+import LiveToolActivity from '../extension/LiveToolActivity';
 import AgentActivityBubbles from '../chat/AgentActivityBubbles';
-import ToolActivityRow, { ToolActivityGroup } from '../extension/ToolActivityRow';
 import AtMentionPopup, { type MentionEntity } from '../chat/AtMentionPopup';
 import ChatMessageList from '../chat/ChatMessageList';
 import InstanceReconfigurationProgress from '../chat/InstanceReconfigurationProgress';
@@ -1212,52 +1205,16 @@ export function AgentChatPane({
     [activeVaultKey, chatMessages],
   );
 
-  const runMarkers: ShellRunMarker[] = useMemo(
-    () =>
-      chatMessages
-        .filter((message) => message.messageType === 'shell_run')
-        .map((message) => ({
-          messageId: message.messageId,
-          sessionId: String(
-            message.metadata?.session_id || message.metadata?.sessionId || '',
-          ),
-          createdUnixMs: message.createdUnixMs || 0,
-        }))
-        .filter((marker) => Boolean(marker.sessionId)),
-    [chatMessages],
-  );
-
-  const lastConversationMessageMs = useMemo(
-    () =>
-      chatMessages.reduce(
-        (newest, message) =>
-          message.messageType === 'shell_run' ||
-          message.messageType === 'tool_activity' ||
-          isAgentStartMessage(message)
-            ? newest
-            : Math.max(newest, message.createdUnixMs || 0),
-        0,
-      ),
-    [chatMessages],
-  );
-
-  const conversationRuns = useConversationRuns(agentInstanceId, conversationId);
-  const pinnedRuns = useMemo(
-    () => pinnedRunSessions(conversationRuns, runMarkers, lastConversationMessageMs),
-    [conversationRuns, runMarkers, lastConversationMessageMs],
-  );
-  const runBySessionId = useMemo(
-    () => new Map(conversationRuns.map((session) => [session.session_id, session])),
-    [conversationRuns],
-  );
-
-  const pinnedSessionIds = useMemo(
-    () => new Set(pinnedRuns.map((session) => session.session_id)),
-    [pinnedRuns],
-  );
   const transcriptMessages = useMemo(
-    () => groupTranscriptMessages(chatMessages, pinnedSessionIds),
-    [chatMessages, pinnedSessionIds],
+    () => groupTranscriptMessages(chatMessages),
+    [chatMessages],
+  );
+  const liveChain = chainDetailQuery.data?.chain;
+  const isChainCoordinator = Boolean(chainId) && (
+    String(liveChain?.coordinatorAgentInstanceId || liveChain?.coordinator_agent_instance_id || '') === agentInstanceId ||
+    (liveChain?.members || []).some((member: any) =>
+      String(member.agentInstanceId || member.agent_instance_id || '') === agentInstanceId &&
+      (member.role === 'coordinator' || member.isCoordinator === true))
   );
 
   const needsStart = runtimeNeedsStart(runtimeStatus);
@@ -1782,46 +1739,6 @@ export function AgentChatPane({
   }
 
   function renderConversationMessageBody(message: ChatMessage) {
-    if (message.messageType === 'shell_run_group') {
-      const clubbedRuns: ChatMessage[] = message.metadata?.clubbedRuns || [];
-      return (
-        <ClubbedRunGroup
-          messages={clubbedRuns}
-          runBySessionId={runBySessionId}
-          formatTimestamp={formatMessageTimestamp}
-        />
-      );
-    }
-    if (message.messageType === 'shell_run') {
-      const sessionId = String(
-        message.metadata?.session_id || message.metadata?.sessionId || '',
-      );
-      const session = sessionId ? runBySessionId.get(sessionId) : undefined;
-      if (!session) return null;
-      return <ShellRunRow session={session} />;
-    }
-    if (message.messageType === 'tool_activity_group') {
-      const clubbed: ChatMessage[] = message.metadata?.clubbedActivities || [];
-      return (
-        <ToolActivityGroup
-          messageId={message.messageId}
-          messages={clubbed}
-          onOpenFile={(filePath) => openAux({ type: 'activity', filePath })}
-          onOpenActivity={() => openAux({ type: 'activity' })}
-        />
-      );
-    }
-    if (message.messageType === 'tool_activity') {
-      return (
-        <ToolActivityRow
-          messageId={message.messageId}
-          body={message.body}
-          metadata={message.metadata}
-          onOpenFile={(filePath) => openAux({ type: 'activity', filePath })}
-          onOpenActivity={() => openAux({ type: 'activity' })}
-        />
-      );
-    }
     if (message.messageType === 'pane_capture') {
       const metadata = message.metadata || {};
       const status = message.messageStatus || 'complete';
@@ -3237,6 +3154,7 @@ export function AgentChatPane({
           debugPrefix="conversation-thread"
           focusMessageId={focusMessageId}
           hasMore={olderHasMore && Boolean(olderCursor)}
+          paginationCursor={olderCursor}
           loadingOlder={olderMessagesState.isFetching}
           onLoadOlder={loadOlderMessages}
           onReply={handleSendReply}
@@ -3301,7 +3219,11 @@ export function AgentChatPane({
         >
           <div aria-hidden="true" className="ui-frost-tail" />
           <AgentActivityBubbles instanceId={agentInstanceId} />
-          <PinnedShellRuns sessions={pinnedRuns} />
+          <LiveToolActivity
+            instanceId={agentInstanceId}
+            chainId={isChainCoordinator ? chainId : ''}
+            onOpenShell={(sessionId) => navigateTo(shellViewHref(sessionId))}
+          />
           {trayNotice ? (
             <div className="pointer-events-none mb-2 flex justify-center px-3">
               <div

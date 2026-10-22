@@ -1,72 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-test('REQ-CLUB-RUN-COMMANDS-13: groupTranscriptMessages clubs consecutive shell_run messages (>= 2) and keeps single runs standalone', async () => {
+test('REQ-LIVE: legacy shell transcript rows are filtered, including pinned sessions', async () => {
   const { groupTranscriptMessages } = await import('../src/ui/components/chat/transcriptGrouping.ts');
-
-  const makeRun = (id: string, sessionId: string, time: number): any => ({
-    key: id,
-    messageId: id,
-    body: '',
-    isUser: false,
-    createdUnixMs: time,
-    deliveredUnixMs: 0,
-    readUnixMs: 0,
-    deliveryFailedUnixMs: 0,
-    deliveryError: '',
-    sending: false,
-    authorLabel: '',
-    messageType: 'shell_run',
-    metadata: { session_id: sessionId },
-  });
-
-  const makeUser = (id: string, text: string): any => ({
-    key: id,
-    messageId: id,
-    body: text,
-    isUser: true,
-    createdUnixMs: 1000,
-    deliveredUnixMs: 0,
-    readUnixMs: 0,
-    deliveryFailedUnixMs: 0,
-    deliveryError: '',
-    sending: false,
-    authorLabel: 'you',
-    messageType: 'text',
-  });
-
-  // 3 consecutive runs -> 1 clubbed group
-  const input1 = [
-    makeRun('r1', 's1', 1000),
-    makeRun('r2', 's2', 2000),
-    makeRun('r3', 's3', 3000),
-  ];
-  const out1 = groupTranscriptMessages(input1);
-  assert.equal(out1.length, 1);
-  assert.equal(out1[0].messageType, 'shell_run_group');
-  assert.equal(out1[0].metadata?.count, 3);
-  assert.equal(out1[0].metadata?.clubbedRuns.length, 3);
-
-  // Single isolated run -> stays 1 shell_run
-  const input2 = [
-    makeUser('u1', 'hello'),
-    makeRun('r1', 's1', 1000),
-    makeUser('u2', 'world'),
-  ];
-  const out2 = groupTranscriptMessages(input2);
-  assert.equal(out2.length, 3);
-  assert.equal(out2[1].messageType, 'shell_run');
-
-  // Consecutive runs with pinned session filtered out
-  const input3 = [
-    makeRun('r1', 's1', 1000),
-    makeRun('r2', 's2', 2000),
-    makeRun('r3', 's3_pinned', 3000),
-  ];
-  const out3 = groupTranscriptMessages(input3, new Set(['s3_pinned']));
-  assert.equal(out3.length, 1);
-  assert.equal(out3[0].messageType, 'shell_run_group');
-  assert.equal(out3[0].metadata?.count, 2);
+  const run = { key: 'r', messageId: 'r', messageType: 'shell_run', body: '', metadata: { session_id: 's' } } as any;
+  const text = { key: 't', messageId: 't', messageType: 'text', body: 'hello' } as any;
+  assert.deepEqual(groupTranscriptMessages([run, run]), []);
+  assert.deepEqual(groupTranscriptMessages([text, run], new Set(['s'])), [text]);
 });
 
 test('REQ-SUBTLE-AGENT-START-14: groupTranscriptMessages clubs consecutive start messages', async () => {
@@ -108,82 +48,10 @@ test('REQ-SUBTLE-AGENT-START-14: groupTranscriptMessages clubs consecutive start
 // and auto-startup capture pane
 // ---------------------------------------------------------------------------
 
-test('REQ-TEST-VERIFICATION-17: Consecutive shell_run messages (>= 2) group with count and formatted start/end time range', async () => {
-  const {
-    groupTranscriptMessages,
-    formatClubbedTimeRange,
-    formatClubbedRunLabel,
-  } = await import('../src/ui/components/chat/transcriptGrouping.ts');
-
-  const makeRun = (id: string, time: number): any => ({
-    key: id,
-    messageId: id,
-    body: '',
-    isUser: false,
-    createdUnixMs: time,
-    deliveredUnixMs: 0,
-    readUnixMs: 0,
-    deliveryFailedUnixMs: 0,
-    deliveryError: '',
-    sending: false,
-    authorLabel: '',
-    messageType: 'shell_run',
-    metadata: { session_id: `sess_${id}` },
-  });
-
-  const mockFormatTimestamp = (ms: number) => {
-    const d = new Date(ms);
-    const hours = d.getUTCHours();
-    const minutes = String(d.getUTCMinutes()).padStart(2, '0');
-    return { label: `${hours}:${minutes} UTC`, iso: d.toISOString() };
-  };
-
-  // 1. Grouping 2 consecutive runs
-  const runs2 = [
-    makeRun('run-1', 1700000000000),
-    makeRun('run-2', 1700000300000),
-  ];
-  const grouped2 = groupTranscriptMessages(runs2);
-  assert.equal(grouped2.length, 1);
-  assert.equal(grouped2[0].messageType, 'shell_run_group');
-  assert.equal(grouped2[0].metadata?.count, 2);
-  assert.equal(grouped2[0].metadata?.startUnixMs, 1700000000000);
-  assert.equal(grouped2[0].metadata?.endUnixMs, 1700000300000);
-  assert.equal(formatClubbedRunLabel(grouped2[0].metadata?.count), 'Ran 2 commands');
-  const timeRange2 = formatClubbedTimeRange(
-    grouped2[0].metadata?.startUnixMs,
-    grouped2[0].metadata?.endUnixMs,
-    mockFormatTimestamp,
-  );
-  assert.equal(timeRange2, '22:13 UTC \u2013 22:18 UTC');
-
-  // 2. Grouping 4 consecutive runs with multiple intervals
-  const runs4 = [
-    makeRun('run-a', 1700000000000),
-    makeRun('run-b', 1700000100000),
-    makeRun('run-c', 1700000200000),
-    makeRun('run-d', 1700000600000),
-  ];
-  const grouped4 = groupTranscriptMessages(runs4);
-  assert.equal(grouped4.length, 1);
-  assert.equal(grouped4[0].messageType, 'shell_run_group');
-  assert.equal(grouped4[0].metadata?.count, 4);
-  assert.equal(grouped4[0].metadata?.clubbedRuns.length, 4);
-  assert.equal(formatClubbedRunLabel(grouped4[0].metadata?.count), 'Ran 4 commands');
-  const timeRange4 = formatClubbedTimeRange(
-    grouped4[0].metadata?.startUnixMs,
-    grouped4[0].metadata?.endUnixMs,
-    mockFormatTimestamp,
-  );
-  assert.equal(timeRange4, '22:13 UTC \u2013 22:23 UTC');
-
-  // 3. Same start and end timestamp returns single time formatted
-  const sameTimeRange = formatClubbedTimeRange(
-    1700000000000,
-    1700000000000,
-    mockFormatTimestamp,
-  );
-  assert.equal(sameTimeRange, '22:13 UTC');
+test('legacy command label/time formatters remain available to separate shell views', async () => {
+  const { formatClubbedTimeRange, formatClubbedRunLabel } = await import('../src/ui/components/chat/transcriptGrouping.ts');
+  assert.equal(formatClubbedRunLabel(2), 'Ran 2 commands');
+  assert.equal(formatClubbedTimeRange(1000, 2000, (ms: number) => ({ label: String(ms) })), '1000 – 2000');
 });
 
 test('REQ-TEST-VERIFICATION-17: Group toggle expands/collapses the full command list', async () => {
@@ -232,42 +100,13 @@ test('REQ-TEST-VERIFICATION-17: Individual commands inside clubbed group can be 
   assert.equal(state.expandedCommandIds.size, 1);
 });
 
-test('REQ-TEST-VERIFICATION-17: Single isolated shell_run message renders as a single row', async () => {
+test('isolated shell markers do not replace or alter neighboring real messages', async () => {
   const { groupTranscriptMessages } = await import('../src/ui/components/chat/transcriptGrouping.ts');
-
-  const makeMsg = (id: string, type: string, body = ''): any => ({
-    key: id,
-    messageId: id,
-    body,
-    isUser: type === 'user',
-    createdUnixMs: 1000,
-    deliveredUnixMs: 0,
-    readUnixMs: 0,
-    deliveryFailedUnixMs: 0,
-    deliveryError: '',
-    sending: false,
-    authorLabel: '',
-    messageType: type,
-    metadata: type === 'shell_run' ? { session_id: `sess_${id}` } : {},
-  });
-
-  // Isolated run between user and assistant messages
-  const input = [
-    makeMsg('u1', 'user', 'Run a command'),
-    makeMsg('r1', 'shell_run'),
-    makeMsg('a1', 'assistant', 'Done!'),
-  ];
-  const output = groupTranscriptMessages(input);
-  assert.equal(output.length, 3, 'Isolated run must not change message count');
-  assert.equal(output[0].messageType, 'user');
-  assert.equal(output[1].messageType, 'shell_run', 'Isolated run must remain shell_run type (not shell_run_group)');
-  assert.equal(output[1].metadata?.clubbedRuns, undefined, 'Isolated run must not have clubbedRuns metadata');
-  assert.equal(output[2].messageType, 'assistant');
-
-  // Single run alone in thread
-  const single = groupTranscriptMessages([makeMsg('r-solo', 'shell_run')]);
-  assert.equal(single.length, 1);
-  assert.equal(single[0].messageType, 'shell_run');
+  const text = (id: string) => ({ key: id, messageId: id, messageType: 'text', body: 'hello' } as any);
+  const before = text('before'), after = text('after');
+  const marker = { ...text('run'), messageType: 'shell_run' };
+  assert.deepEqual(groupTranscriptMessages([before, marker, after]), [before, after]);
+  assert.deepEqual(groupTranscriptMessages([marker]), []);
 });
 
 test('REQ-TEST-VERIFICATION-17: Agent start/restart system messages render as subtle divider indicators with time', async () => {
