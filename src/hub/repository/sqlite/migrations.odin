@@ -449,6 +449,9 @@ MIGRATION_102_DROP_BRIDGE_ENROLLMENTS :: #load("migrations/102_drop_bridge_enrol
 MIGRATION_103_PLAN_ENFORCEMENT :: #load("migrations/103_plan_enforcement.sql", string)
 
 MIGRATION_103_GUARD_CHAT_FTS_UPDATES :: #load("migrations/103_guard_chat_fts_updates.sql", string)
+// 104: live-by-kind, shell retention and dependency-by-chain indexes (REQ-INDEX).
+// Plain CREATE INDEX IF NOT EXISTS, so a re-apply is a no-op.
+MIGRATION_104_FULL_SCAN_INDEXES :: #load("migrations/104_full_scan_indexes.sql", string)
 
 migration_order :: [107]string {
 	"001_foundation.sql",
@@ -558,6 +561,7 @@ migration_order :: [107]string {
 	"102_drop_bridge_enrollments.sql",
 	"103_plan_enforcement.sql",
 	"103_guard_chat_fts_updates.sql",
+	"104_full_scan_indexes.sql",
 }
 
 // stop_before is a TEST SEAM: when non-empty, the apply loop stops in front of
@@ -1076,6 +1080,7 @@ migration_sql :: proc(name, migrations_dir: string) -> string {
 	if name == "102_drop_bridge_enrollments.sql" do return strings.clone(MIGRATION_102_DROP_BRIDGE_ENROLLMENTS)
 	if name == "103_plan_enforcement.sql" do return strings.clone(MIGRATION_103_PLAN_ENFORCEMENT)
 	if name == "103_guard_chat_fts_updates.sql" do return strings.clone(MIGRATION_103_GUARD_CHAT_FTS_UPDATES)
+	if name == "104_full_scan_indexes.sql" do return strings.clone(MIGRATION_104_FULL_SCAN_INDEXES)
 	if name == "100_vault_pair_hub_origin.sql" do return strings.clone(MIGRATION_100_VAULT_PAIR_HUB_ORIGIN)
 	if name == "101_codex_gpt6_models.sql" do return strings.clone(MIGRATION_101_CODEX_GPT6_MODELS)
 	if name == "081_antigravity_models.sql" do return strings.clone(MIGRATION_081_ANTIGRAVITY_MODELS)
