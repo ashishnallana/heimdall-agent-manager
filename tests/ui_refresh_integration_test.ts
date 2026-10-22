@@ -462,13 +462,14 @@ test('shell retention prune (empty resource_id, owner-scoped) refreshes the shel
   const net = installRoutes({ '/shells': { body: { data: { sessions: [] } } } });
   try {
     const store = await makeStore();
-    const { handleUserWsEvent } = await import('../src/ui/api/wsInvalidation.ts');
+    const { handleUserWsEvent, INVALIDATION_COALESCE_MS } = await import('../src/ui/api/wsInvalidation.ts');
     const { shellsApi } = await import('../src/ui/api/endpoints/shells.ts');
     const sub = store.dispatch((shellsApi.endpoints as any).listShells.initiate({}));
     await sub;
     net.hits.length = 0;
     handleUserWsEvent(store.dispatch, { type: 'resource_changed', resource: 'shell_session', resource_id: '', change: 'pruned', summary: { deleted: 3 } });
-    await tick(60);
+    // Shell frames ride the burst window (api-fetch-dedup), so wait it out.
+    await tick(INVALIDATION_COALESCE_MS + 60);
     assert.equal(count(net.hits, (h) => h.startsWith('GET /api/v1/shells')), 1, `saw ${net.hits.join(', ')}`);
     sub.unsubscribe();
   } finally { net.restore(); }
