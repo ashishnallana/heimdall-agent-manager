@@ -233,8 +233,7 @@ test_multi_question_http_latest_only_and_ownership :: proc(t: ^testing.T) {
 	for direction in ([]string{"user_to_agent", "agent_to_user"}) {
 		latest := mq_http_source(t, &f)
 		_, _, _ = iface.content_save_message(&f.repo, domain.Chat_Message{message_id = fmt.tprintf("aaa_%s", direction), conversation_id = "chat_mq", owner_user_id = source.owner_user_id, direction = direction, body = "Newer", created_at = latest.created_at})
-		rows, _ := content_service.list_user_visible_messages(&f.svc, {kind = .User_Token, user_id = f.base.owner_user_id}, "chat_mq", 1, "")
-		if testing.expect_value(t, len(rows), 1) do testing.expect_value(t, rows[0].message_id, fmt.tprintf("aaa_%s", direction))
+		testing.expect(t, !content_service.message_is_latest_visible(&f.svc, latest), "insertion freshness is independent of timestamp/ID sorting")
 		stale := mq_http_answer(&f, latest.message_id, raw)
 		testing.expect_value(t, stale.status, 409)
 		testing.expect(t, strings.contains(stale.body, "question_stale"), "penultimate source is stale with just one newer row")
@@ -349,4 +348,77 @@ test_multi_question_http_parallel_duplicates :: proc(t: ^testing.T) {
 mq_test_replace :: proc(s, old, replacement: string) -> string {
  out, _ := strings.replace_all(s, old, replacement, context.temp_allocator)
  return out
+}
+
+@(test)
+test_multi_question_http_history_pagination :: proc(t: ^testing.T) {
+	f: MQ_HTTP_Fixture
+	mq_http_open(t, &f, "mq_history")
+	defer mq_http_base_close(f.base)
+	// Simulate sends that timestamp before committing: insertion order and
+	// chronological order disagree, with a timestamp tie crossing each page.
+	ids := []string{"msg_b", "msg_c", "msg_d", "msg_a"}
+	times := []string{"2026-10-22T11:00:02Z", "2026-10-22T11:00:01Z", "2026-10-22T11:00:02Z", "2026-10-22T11:00:01Z"}
+	for id, i in ids {
+		_, saved, err := iface.content_save_message(&f.repo, domain.Chat_Message{
+			message_id = id, conversation_id = "chat_mq", owner_user_id = domain.User_ID(f.base.owner_user_id),
+			direction = "agent_to_user" if i % 2 == 0 else "user_to_agent",
+			body = "history", metadata_json = `{"options":["Choice"]}`, created_at = times[i],
+		})
+		testing.expect(t, saved, "fixture message saved")
+		testing.expect_value(t, err.code, domain.Error_Code.None)
+	}
+	// Internal messages and other owners/conversations must not leak or expire
+	// the newest visible source.
+	for row in ([]domain.Chat_Message{
+		{message_id = "msg_internal", conversation_id = "chat_mq", owner_user_id = domain.User_ID(f.base.owner_user_id), direction = "agent_to_agent", created_at = "2026-10-22T12:00:00Z"},
+		{message_id = "msg_foreign", conversation_id = "chat_mq", owner_user_id = "other_owner", direction = "agent_to_user", created_at = "2026-10-22T12:00:00Z"},
+		{message_id = "msg_other_chat", conversation_id = "other_chat", owner_user_id = domain.User_ID(f.base.owner_user_id), direction = "agent_to_user", created_at = "2026-10-22T12:00:00Z"},
+	}) {
+		_, saved, _ := iface.content_save_message(&f.repo, row)
+		testing.expect(t, saved, "excluded row saved")
+	}
+	expected := []string{"msg_d", "msg_b", "msg_c", "msg_a"}
+	// Traverse pages using exactly the opaque token emitted by HTTP, URL-encoded
+	// as the UI's URLSearchParams does. Both page sizes split timestamp ties.
+	for page_size in ([]int{1, 3}) {
+		cursor := ""
+		seen := make(map[string]bool, context.temp_allocator)
+		index := 0
+		for page_number := 0; page_number < 6; page_number += 1 {
+			req := mq_http_req("/api/v1/chats/chat_mq/messages", "")
+			req.method = "GET"
+			encoded_cursor, _ := strings.replace_all(cursor, "|", "%7C", context.temp_allocator)
+			req.query = fmt.tprintf("limit=%d&cursor=%s", page_size, encoded_cursor)
+			response := list_chat_messages_handler(&f.handlers, req)
+			if !testing.expect_value(t, response.status, 200) do return
+			decoded: struct {
+				data: []struct { message_id: string, is_latest_message: bool },
+				page: contracts.API_Page,
+			}
+			parse_err := json.unmarshal(transmute([]byte)response.body, &decoded, allocator = context.temp_allocator)
+			if !testing.expect(t, parse_err == nil, "history response parses") do return
+			for row in decoded.data {
+				if !testing.expect(t, index < len(expected), "no extra history rows") do return
+				testing.expect_value(t, row.message_id, expected[index])
+				testing.expect(t, !seen[row.message_id], "each message appears exactly once")
+				testing.expect_value(t, row.is_latest_message, row.message_id == "msg_a")
+				seen[row.message_id] = true
+				index += 1
+			}
+			if !decoded.page.has_more do break
+			testing.expect(t, strings.contains(decoded.page.next_cursor, "|"), "HTTP emits tie-break cursor")
+			testing.expect(t, decoded.page.next_cursor != cursor, "cursor advances")
+			cursor = decoded.page.next_cursor
+		}
+		testing.expect_value(t, index, len(expected))
+		testing.expect_value(t, len(seen), len(expected))
+	}
+	// Preserve timestamp-only callers' historical strict-before behavior.
+	req := mq_http_req("/api/v1/chats/chat_mq/messages", "")
+	req.query = "limit=10&cursor=2026-10-22T11:00:02Z"
+	legacy := list_chat_messages_handler(&f.handlers, req)
+	testing.expect_value(t, legacy.status, 200)
+	testing.expect(t, strings.contains(legacy.body, "msg_c") && strings.contains(legacy.body, "msg_a"), "legacy cursor returns older rows")
+	testing.expect(t, !strings.contains(legacy.body, "msg_d") && !strings.contains(legacy.body, "msg_b"), "legacy cursor excludes boundary timestamp")
 }

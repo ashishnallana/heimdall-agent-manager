@@ -36,3 +36,17 @@ content_answer_question_sqlite :: proc(ctx: rawptr, source, answer: domain.Chat_
 	} else if err.code != .Not_Found do return {}, false, err
 	return {}, false, domain.domain_error(.Question_Stale, "A newer conversation message has replaced these questions.")
 }
+
+// Eligibility follows commit/insertion order, not timestamps allocated before a
+// concurrent send commits. Keep this independent of the history cursor contract.
+content_latest_user_visible_message_sqlite :: proc(ctx: rawptr, cid: string, owner: domain.User_ID) -> (domain.Chat_Message, bool, domain.Domain_Error) {
+	impl := (^Content_Repo_SQLite)(ctx)
+	stmt: sqlite3_stmt
+	q := strings.concatenate({"SELECT ", CHAT_MESSAGE_SELECT, " FROM chat_messages WHERE conversation_id=? AND owner_user_id=? AND direction != 'agent_to_agent' ORDER BY rowid DESC LIMIT 1;"}, context.temp_allocator)
+	if sqlite3_prepare_v2(impl.conn.db, strings.clone_to_cstring(q, context.temp_allocator), -1, &stmt, nil) != SQLITE_OK do return {}, false, domain.domain_error(.Internal_Error, "failed latest visible message lookup")
+	defer sqlite3_finalize(stmt)
+	bind_text(stmt, 1, cid)
+	bind_text(stmt, 2, string(owner))
+	if sqlite3_step(stmt) != SQLITE_ROW do return {}, false, domain.domain_error(.Not_Found, "visible message not found")
+	return message_from_stmt(stmt), true, {}
+}

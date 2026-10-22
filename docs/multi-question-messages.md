@@ -102,9 +102,13 @@ rows must immediately invalidate an older row's hint in the UI until refetched.
 Only the **last durable user-visible message** in the conversation can show
 interactive flat options or grouped questions. Any newer user or agent message
 expires the controls; the original content stays readable. Agent-to-agent inbox
-rows do not count as user-visible. The first page of visible message reads is
-ordered newest insertion first (SQLite rowid), including equal timestamps; UI-only
-synthetic rows never count. Do not infer eligibility from a paginated subset or
+rows do not count as user-visible. Eligibility follows newest durable insertion (SQLite rowid), including equal or
+out-of-order timestamps; UI-only synthetic rows never count. History display
+retains chronological order (`created_at DESC, message_id DESC`), independently
+of eligibility. Visible history pagination returns an opaque `next_cursor` token
+(`created_at|message_id`); pass it back unchanged in the URL-encoded `cursor`
+query parameter. Timestamp-only legacy cursors remain accepted with their
+original strict-before timestamp semantics. Do not infer eligibility from a paginated subset or
 rendered run grouping; use the newest durable visible row in the conversation.
 
 ## Answer endpoint

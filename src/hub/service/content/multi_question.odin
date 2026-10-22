@@ -35,9 +35,8 @@ validate_question_message :: proc(input: Message_Input) -> string {
 Question_Answer_State :: struct { answer_message_id, answered_at: string }
 
 message_is_latest_visible :: proc(s: ^Content_Service, source: domain.Chat_Message) -> bool {
-	rows, err := iface.content_list_user_visible_messages(s.content, source.conversation_id, source.owner_user_id, 1, "")
-	defer delete(rows)
-	return err.code == .None && len(rows) == 1 && rows[0].message_id == source.message_id
+	latest, found, err := iface.content_latest_user_visible_message(s.content, source.conversation_id, source.owner_user_id)
+	return err.code == .None && found && latest.message_id == source.message_id
 }
 
 question_answer_state :: proc(s: ^Content_Service, source: domain.Chat_Message) -> (Question_Answer_State, domain.Domain_Error) {

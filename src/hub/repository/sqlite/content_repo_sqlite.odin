@@ -13,7 +13,7 @@ Content_Repo_SQLite :: struct { conn: ^Conn }
 
 new_content_repository :: proc(impl: ^Content_Repo_SQLite, conn: ^Conn) -> iface.Content_Repository {
 	impl.conn = conn
-	return iface.Content_Repository{ctx=rawptr(impl), answer_question=content_answer_question_sqlite, list_unread_incoming_ids=content_list_unread_incoming_ids_sqlite, save_memory=content_save_memory_sqlite, get_memory=content_get_memory_sqlite, list_memories=content_list_memories_sqlite, save_conversation=content_save_conversation_sqlite, get_conversation=content_get_conversation_sqlite, list_conversations=content_list_conversations_sqlite, save_message=content_save_message_sqlite, get_message=content_get_message_sqlite, update_message=content_update_message_sqlite, list_messages=content_list_messages_sqlite, list_user_visible_messages=content_list_user_visible_messages_sqlite, list_agent_inbox_messages=content_list_agent_inbox_messages_sqlite, mark_messages_read=content_mark_messages_read_sqlite, save_artifact=content_save_artifact_sqlite, get_artifact=content_get_artifact_sqlite, list_artifacts=content_list_artifacts_sqlite, delete_artifact=content_delete_artifact_sqlite, save_template=content_save_template_sqlite, get_template=content_get_template_sqlite, list_templates=content_list_templates_sqlite, delete_template=content_delete_template_sqlite}
+	return iface.Content_Repository{ctx=rawptr(impl), answer_question=content_answer_question_sqlite, latest_user_visible_message=content_latest_user_visible_message_sqlite, list_unread_incoming_ids=content_list_unread_incoming_ids_sqlite, save_memory=content_save_memory_sqlite, get_memory=content_get_memory_sqlite, list_memories=content_list_memories_sqlite, save_conversation=content_save_conversation_sqlite, get_conversation=content_get_conversation_sqlite, list_conversations=content_list_conversations_sqlite, save_message=content_save_message_sqlite, get_message=content_get_message_sqlite, update_message=content_update_message_sqlite, list_messages=content_list_messages_sqlite, list_user_visible_messages=content_list_user_visible_messages_sqlite, list_agent_inbox_messages=content_list_agent_inbox_messages_sqlite, mark_messages_read=content_mark_messages_read_sqlite, save_artifact=content_save_artifact_sqlite, get_artifact=content_get_artifact_sqlite, list_artifacts=content_list_artifacts_sqlite, delete_artifact=content_delete_artifact_sqlite, save_template=content_save_template_sqlite, get_template=content_get_template_sqlite, list_templates=content_list_templates_sqlite, delete_template=content_delete_template_sqlite}
 }
 
 content_save_memory_sqlite :: proc(ctx: rawptr, m: domain.Memory) -> (domain.Memory, bool, domain.Domain_Error) {
@@ -73,7 +73,43 @@ content_save_message_sqlite :: proc(ctx:rawptr, m:domain.Chat_Message)->(domain.
 content_get_message_sqlite :: proc(ctx:rawptr, id:string)->(domain.Chat_Message,bool,domain.Domain_Error){ impl:=(^Content_Repo_SQLite)(ctx); stmt:sqlite3_stmt=nil; q:=strings.concatenate({"SELECT ",CHAT_MESSAGE_SELECT," FROM chat_messages WHERE message_id=?;"}); if sqlite3_prepare_v2(impl.conn.db,cstring(raw_data(q)),-1,&stmt,nil)!=SQLITE_OK do return {},false,domain.domain_error(.Internal_Error,"failed message lookup"); defer sqlite3_finalize(stmt); bind_text(stmt,1,id); if sqlite3_step(stmt)!=SQLITE_ROW do return {},false,domain.domain_error(.Not_Found,"message not found"); return message_from_stmt(stmt),true,{} }
 content_update_message_sqlite :: proc(ctx:rawptr, owner:domain.User_ID, cid,id,body,status,metadata_json:string)->(domain.Chat_Message,bool,domain.Domain_Error){ impl:=(^Content_Repo_SQLite)(ctx); stmt:sqlite3_stmt=nil; q:="UPDATE chat_messages SET body=?, message_status=?, metadata_json=? WHERE owner_user_id=? AND conversation_id=? AND message_id=?;"; if sqlite3_prepare_v2(impl.conn.db,cstring(raw_data(q)),-1,&stmt,nil)!=SQLITE_OK do return {},false,domain.domain_error(.Internal_Error,"failed message update"); defer sqlite3_finalize(stmt); bind_text(stmt,1,body); bind_text(stmt,2,normalize_message_status(status)); bind_text(stmt,3,json_object_or_empty(metadata_json)); bind_text(stmt,4,string(owner)); bind_text(stmt,5,cid); bind_text(stmt,6,id); if sqlite3_step(stmt)!=SQLITE_DONE do return {},false,domain.domain_error(.Conflict,"message could not be updated"); return content_get_message_sqlite(ctx,id) }
 content_list_messages_sqlite :: proc(ctx:rawptr, cid:string, owner:domain.User_ID, limit:int, cursor:string)->([]domain.Chat_Message,domain.Domain_Error){ impl:=(^Content_Repo_SQLite)(ctx); stmt:sqlite3_stmt=nil; q:=strings.concatenate({"SELECT ",CHAT_MESSAGE_SELECT," FROM chat_messages WHERE conversation_id=? AND owner_user_id=? ORDER BY created_at DESC LIMIT ?;"}); if cursor!="" do q=strings.concatenate({"SELECT ",CHAT_MESSAGE_SELECT," FROM chat_messages WHERE conversation_id=? AND owner_user_id=? AND created_at < ? ORDER BY created_at DESC LIMIT ?;"}); if sqlite3_prepare_v2(impl.conn.db,cstring(raw_data(q)),-1,&stmt,nil)!=SQLITE_OK do return nil,domain.domain_error(.Internal_Error,"failed message list"); defer sqlite3_finalize(stmt); bind_text(stmt,1,cid); bind_text(stmt,2,string(owner)); if cursor!="" {bind_text(stmt,3,cursor); bind_text(stmt,4,int_s(limit))} else {bind_text(stmt,3,int_s(limit))}; out:=make([dynamic]domain.Chat_Message); for sqlite3_step(stmt)==SQLITE_ROW do append(&out,message_from_stmt(stmt)); return out[:],{} }
-content_list_user_visible_messages_sqlite :: proc(ctx:rawptr, cid:string, owner:domain.User_ID, limit:int, cursor:string)->([]domain.Chat_Message,domain.Domain_Error){ impl:=(^Content_Repo_SQLite)(ctx); stmt:sqlite3_stmt=nil; q:=strings.concatenate({"SELECT ",CHAT_MESSAGE_SELECT," FROM chat_messages WHERE conversation_id=? AND owner_user_id=? AND direction != 'agent_to_agent' ORDER BY rowid DESC LIMIT ?;"}); if cursor!="" do q=strings.concatenate({"SELECT ",CHAT_MESSAGE_SELECT," FROM chat_messages WHERE conversation_id=? AND owner_user_id=? AND direction != 'agent_to_agent' AND created_at < ? ORDER BY rowid DESC LIMIT ?;"}); if sqlite3_prepare_v2(impl.conn.db,cstring(raw_data(q)),-1,&stmt,nil)!=SQLITE_OK do return nil,domain.domain_error(.Internal_Error,"failed visible message list"); defer sqlite3_finalize(stmt); bind_text(stmt,1,cid); bind_text(stmt,2,string(owner)); if cursor!="" {bind_text(stmt,3,cursor); bind_text(stmt,4,int_s(limit))} else {bind_text(stmt,3,int_s(limit))}; out:=make([dynamic]domain.Chat_Message); for sqlite3_step(stmt)==SQLITE_ROW do append(&out,message_from_stmt(stmt)); return out[:],{} }
+content_list_user_visible_messages_sqlite :: proc(ctx: rawptr, cid: string, owner: domain.User_ID, limit: int, cursor: string) -> ([]domain.Chat_Message, domain.Domain_Error) {
+	impl := (^Content_Repo_SQLite)(ctx)
+	stmt: sqlite3_stmt
+	cursor_at := cursor
+	cursor_id := ""
+	if sep := strings.index_byte(cursor, '|'); sep >= 0 {
+		cursor_at = cursor[:sep]
+		cursor_id = cursor[sep+1:]
+	}
+	// Preserve chronological history; message_id breaks ties at page boundaries.
+	q := strings.concatenate({"SELECT ", CHAT_MESSAGE_SELECT, " FROM chat_messages WHERE conversation_id=? AND owner_user_id=? AND direction != 'agent_to_agent'"}, context.temp_allocator)
+	if cursor_id != "" {
+		q = strings.concatenate({q, " AND (created_at < ? OR (created_at = ? AND message_id < ?))"}, context.temp_allocator)
+	} else if cursor_at != "" {
+		// Existing clients may still send a timestamp-only cursor.
+		q = strings.concatenate({q, " AND created_at < ?"}, context.temp_allocator)
+	}
+	q = strings.concatenate({q, " ORDER BY created_at DESC, message_id DESC LIMIT ?;"}, context.temp_allocator)
+	if sqlite3_prepare_v2(impl.conn.db, strings.clone_to_cstring(q, context.temp_allocator), -1, &stmt, nil) != SQLITE_OK do return nil, domain.domain_error(.Internal_Error, "failed visible message list")
+	defer sqlite3_finalize(stmt)
+	bind_text(stmt, 1, cid)
+	bind_text(stmt, 2, string(owner))
+	if cursor_id != "" {
+		bind_text(stmt, 3, cursor_at)
+		bind_text(stmt, 4, cursor_at)
+		bind_text(stmt, 5, cursor_id)
+		bind_text(stmt, 6, int_s(limit))
+	} else if cursor_at != "" {
+		bind_text(stmt, 3, cursor_at)
+		bind_text(stmt, 4, int_s(limit))
+	} else {
+		bind_text(stmt, 3, int_s(limit))
+	}
+	out := make([dynamic]domain.Chat_Message)
+	for sqlite3_step(stmt) == SQLITE_ROW do append(&out, message_from_stmt(stmt))
+	return out[:], {}
+}
 
 content_list_agent_inbox_messages_sqlite :: proc(ctx:rawptr, cid:string, owner:domain.User_ID, agent_instance_id: string, unread_only, receiver_only, include_outgoing, include_debug: bool, limit:int, cursor:string)->([]domain.Chat_Message,domain.Domain_Error){
 	impl:=(^Content_Repo_SQLite)(ctx); stmt:sqlite3_stmt=nil

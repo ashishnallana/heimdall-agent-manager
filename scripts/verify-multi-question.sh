@@ -19,4 +19,4 @@ nix develop -c odin build src/hub/repository/sqlite -build-mode:test -collection
 "${mq_test_prefix}-sqlite" -tests:test_multi_question_answer_survives_reopen
 
 nix develop -c odin build src/hub/transport/http -build-mode:test -collection:odin_test=src -out:"${mq_test_prefix}-http"
-"${mq_test_prefix}-http" -tests:test_multi_question_http_roundtrip_and_replay,test_multi_question_http_latest_only_and_ownership,test_multi_question_http_invalid_answers,test_multi_question_http_parallel_duplicates,test_multi_question_http_legacy_metadata_and_types
+"${mq_test_prefix}-http" -tests:test_multi_question_http_roundtrip_and_replay,test_multi_question_http_latest_only_and_ownership,test_multi_question_http_invalid_answers,test_multi_question_http_parallel_duplicates,test_multi_question_http_legacy_metadata_and_types,test_multi_question_http_history_pagination
