@@ -5,6 +5,7 @@ import { chatEndpoints } from './endpoints/chats';
 import { agentsApi, patchAgentCachesFromWs } from './endpoints/agents';
 import { agentsLiveApi } from './endpoints/agentsLive';
 import { sidebarApi } from './endpoints/sidebar';
+import { shellListMayContain, shellListTagId, shellsApi, type ShellSessionFacts } from './endpoints/shells';
 import {
   announceConversationMessagesRead,
   applyReadReceiptToDraft,
@@ -743,29 +744,65 @@ function handleAgentEvent(dispatch: any, payload: any, ctx: WsCtx) {
 /**
  * Repaint everything that reads a shell session, from one event.
  *
- * Three tags, because three different consumers cache a session and REQ-SHELL-6 §6
+ * Two kinds of tag, because several consumers cache a session and REQ-SHELL-6 §6
  * leaves no poller to catch whichever one is missed:
- *   ShellSession:<id>   the detail view, the run indicator and the log viewer
- *   ShellSessions:<chain>  the chain-scoped lists, including the active-servers panel
- *   ShellSessions:LIST  the owner-wide list page and the tab badge
+ *   ShellSession:<id>        the detail view, the run indicator and the log viewer
+ *   ShellSessions:q:<path>   each mounted `listShells` entry that may hold the session
  *
- * `chainId` is OPTIONAL and usually absent: the hub's shell_session_exited frame
- * carries only session_id/status/exit_code/ts (_shell_exited_event_json,
- * shell_session_service.odin:1993). That is not a gap to work around — `listShells`
- * provides BOTH its chain tag and `LIST` (endpoints/shells.ts), so invalidating `LIST`
- * already refetches every chain-scoped list. The chain tag is invalidated as well only
- * when an event happens to name a chain, which costs nothing and keeps the helper
- * correct if a producer starts including it.
+ * One run is three frames (shell_session_started, resource_changed "running",
+ * shell_session_exited) and every tab mounts several list keys (status bar, aux
+ * launcher, one run list per conversation shown). Invalidating `ShellSessions:LIST`
+ * per frame refetched every key three times per run. Instead the frame names only the
+ * cached lists `shellListMayContain` cannot rule out — a run never reaches a chain or
+ * bridge list, and another agent's run never reaches this agent's run list — and the
+ * tags go through the same burst window as every other targeted invalidation, so a
+ * quick start/running/exit costs one refetch per list. Whenever the session or the
+ * cached lists cannot be read, the frame falls back to `ShellSessions:LIST`.
+ *
+ * `facts` are what the frame itself states: shell_session_started carries kind and
+ * chain_id (omitted when empty, _shell_session_started_event_json), the REQ-2 change
+ * frame carries chain_id; shell_session_exited carries neither. The scope columns of a
+ * session never change, so a row already in any cache supplies the rest.
  */
-function invalidateShellSession(dispatch: any, sessionId: string, chainId?: string): void {
-  const tags: any[] = [{ type: 'ShellSessions' as const, id: 'LIST' }];
-  if (chainId) tags.push({ type: 'ShellSessions' as const, id: chainId });
-  if (sessionId) tags.push({ type: 'ShellSession' as const, id: sessionId });
-  dispatch(heimdallApi.util.invalidateTags(tags));
+function invalidateShellSession(dispatch: any, sessionId: string, facts: ShellSessionFacts = {}): void {
+  const tags: Array<{ type: string; id: string }> = [];
+  if (sessionId) tags.push({ type: 'ShellSession', id: sessionId });
+  const lists = sessionId ? shellListTagsFor(readState(dispatch), sessionId, facts) : null;
+  if (lists) tags.push(...lists);
+  else tags.push({ type: 'ShellSessions', id: 'LIST' });
+  queueInvalidation(dispatch, tags);
   // ...and tick the non-RTK consumers. The Shells list page pages through
   // `useInfiniteList` with its own fetch promise, so no tag above can reach it; see
   // shellSlice.ts for why that page needs a separate signal rather than a poller.
   dispatch(shellSessionEventReceived({ sessionId }));
+}
+
+// The per-entry tags of the cached lists that may hold the session; null when the
+// cache cannot be read, which means "refetch them all".
+function shellListTagsFor(state: any, sessionId: string, facts: ShellSessionFacts): Array<{ type: string; id: string }> | null {
+  if (!state?.[heimdallApi.reducerPath]) return null;
+  try {
+    const args = shellsApi.util.selectCachedArgsForQuery(state, 'listShells') as any[];
+    const known: ShellSessionFacts = { ...facts };
+    const rows: any[] = [shellsApi.endpoints.getShellSession.select({ sessionId })(state)?.data];
+    for (const arg of args) rows.push(...(shellsApi.endpoints.listShells.select(arg)(state)?.data?.sessions ?? []));
+    const row = rows.find((r) => r?.session_id === sessionId);
+    if (row) {
+      for (const key of ['kind', 'bridge_id', 'project_id', 'chain_id', 'agent_instance_id'] as const) {
+        if (typeof row[key] === 'string') (known as Record<string, string>)[key] = row[key];
+      }
+    }
+    return args
+      .filter((arg) => shellListMayContain(arg || {}, known))
+      .map((arg) => ({ type: 'ShellSessions', id: shellListTagId(arg || {}) }));
+  } catch {
+    return null;
+  }
+}
+
+// A frame's own statement of a field, or undefined when the frame does not carry it.
+function stated(payload: any, key: string): string | undefined {
+  return payload && typeof payload[key] === 'string' ? payload[key] : undefined;
 }
 
 // agent_instance/<created|status_changed|config_changed|current_task_changed> carry the
@@ -988,7 +1025,7 @@ function handleResourceChanged(dispatch: any, payload: any, ctx: WsCtx) {
     // silently dropped, which is precisely the class of update the deleted pollers
     // were papering over.
     case 'shell_session':
-      invalidateShellSession(dispatch, resourceId, String(payload?.chain_id || ''));
+      invalidateShellSession(dispatch, resourceId, { chain_id: stated(payload, 'chain_id') });
       return;
     case 'agent_instance':
       handleInstanceChanged(dispatch, payload, ctx, resourceId, String(payload.change || ''), summary);
@@ -1182,7 +1219,10 @@ export function handleUserWsEvent(dispatch: any, payload: any, ctx: WsCtx = {}) 
     case 'shell_session_started':
     case 'shell_status':
     case 'shell_session_exited':
-      invalidateShellSession(dispatch, String(payload?.session_id || ''), String(payload?.chain_id || ''));
+      invalidateShellSession(dispatch, String(payload?.session_id || ''), payload?.type === 'shell_session_started'
+        // The started frame omits chain_id when it is empty, so its absence is a fact.
+        ? { kind: stated(payload, 'kind') as ShellSessionFacts['kind'], chain_id: stated(payload, 'chain_id') ?? '' }
+        : { chain_id: stated(payload, 'chain_id') });
       // T10: a start the bridge refused because its vault is locked carries
       // error_code "vault_locked"; route it to the pane showing that session.
       announcePaneVaultLocked(String(payload?.session_id || ''), payload);

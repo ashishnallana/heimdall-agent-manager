@@ -13,7 +13,14 @@
 //   _publish_inventory_change        src/hub/service/shell_session/shell_session_inventory.odin:420-429
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { handleUserWsEvent } from './ws.mjs';
+import { flushQueuedInvalidations, handleUserWsEvent as handleFrame } from './ws.mjs';
+
+// Shell invalidations ride the burst window (INVALIDATION_COALESCE_MS); flush it so
+// each test reads what the frame dispatched.
+function handleUserWsEvent(dispatch, frame) {
+  handleFrame(dispatch, frame);
+  flushQueuedInvalidations();
+}
 
 /** Collect every RTK `invalidateTags` payload a handler dispatches. */
 function record() {

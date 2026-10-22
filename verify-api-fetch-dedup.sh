@@ -13,4 +13,6 @@ if [ ! -d node_modules ]; then npm ci --legacy-peer-deps --no-audit --no-fund; f
 npm run typecheck
 npx vite build --logLevel warn
 node --import ./tests/helpers/vaultEndpointHarness.ts --test tests/ui_api_fetch_dedup_test.ts tests/ui_refresh_request_reduction_test.ts tests/ui_refresh_integration_test.ts tests/ui_refresh_performance_test.ts
+node --import ./tests/helpers/vaultEndpointHarness.ts --test tests/ui_shell_list_invalidation_test.ts
+bash tests/ui_shell_req6_push_test.sh
 echo "verify-api-fetch-dedup: ALL PASS"
