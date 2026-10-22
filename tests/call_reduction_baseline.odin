@@ -5,6 +5,7 @@ import "core:fmt"
 import "core:os"
 import "core:strconv"
 import "core:strings"
+import "core:time"
 import "core:encoding/json"
 import contracts "odin_test:contracts"
 import domain "odin_test:hub/domain"
@@ -24,7 +25,12 @@ OWNER :: "baseline-owner"
 
 Counts :: struct { select, insert, update, delete, begin, commit, vm, fullscan, hits, misses, page_writes, main_locks, vault_locks, vault_mutex: i64 }
 
+// Local-fixture wall time per scenario (snapshot -> show); for before/after tails
+// across repeated runs only, never a production latency figure.
+scenario_started: time.Tick
+
 snapshot :: proc(reg: ^metrics.Registry) -> Counts {
+    defer scenario_started = time.tick_now()
     b := strings.builder_make()
     defer strings.builder_destroy(&b)
     metrics.gather(reg, &b)
@@ -59,7 +65,9 @@ snapshot :: proc(reg: ^metrics.Registry) -> Counts {
 }
 
 show :: proc(reg: ^metrics.Registry, name: string, modeled_http: int, before: Counts) {
+    elapsed := time.tick_since(scenario_started)
     after := snapshot(reg)
+    fmt.printf("Timing [%s]: wall_us=%d\n", name, i64(time.duration_microseconds(elapsed)))
     fmt.printf("Lock acquisitions [%s]: conn_main=%d conn_vault=%d vault_mutex=%d\n", name,
         after.main_locks-before.main_locks, after.vault_locks-before.vault_locks, after.vault_mutex-before.vault_mutex)
     s := after.select-before.select

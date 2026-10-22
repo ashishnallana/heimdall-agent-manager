@@ -246,6 +246,7 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 	// the last commits. An in-memory test db reports "memory" and is unaffected.
 	if !sqlite.exec(&graph.db, "PRAGMA journal_mode = WAL;") do return false, "failed to enable WAL journal mode"
 	if !sqlite.exec(&graph.db, "PRAGMA synchronous = NORMAL;") do return false, "failed to configure database synchronous mode"
+	if !sqlite.exec(&graph.db, sqlite.MAIN_CONN_CACHE_SIZE_PRAGMA) do return false, "failed to configure database cache size"
 
 	migrations_ok, migration_err := sqlite.run_migrations(&graph.db, config.migrations_dir)
 	if !migrations_ok do return false, migration_err.message
