@@ -25,6 +25,7 @@ import "core:fmt"
 import "core:encoding/json"
 import "core:math/rand"
 import "core:os"
+import "core:path/filepath"
 import "core:strconv"
 import "core:strings"
 import "core:time"
@@ -159,31 +160,69 @@ hook_run :: proc(provider, raw: string, env: Hook_Env, send: Send_Proc) -> strin
 }
 
 // is_ham_ctl_command reports whether a shell command is exactly one ham-ctl
-// invocation: `ham-ctl …`, `./.heimdall/bin/ham-ctl …`, `$HEIMDALL_CTL_BIN …`
-// or the absolute ctl_bin path. Any chaining, pipe, background, subshell,
-// substitution, redirect, brace or newline disqualifies it, as does `$` after
-// the program name, so `ham-ctl x && rm -rf ~` never matches.
-is_ham_ctl_command :: proc(command, ctl_bin: string) -> bool {
+// invocation of an allowlisted, side-effect-bounded verb, so it can be approved
+// without asking the user.
+//   - Program: only the bridge-issued ctl_bin (HEIMDALL_CTL_BIN), written as its
+//     absolute path, as $HEIMDALL_CTL_BIN, or as ./.heimdall/bin/ham-ctl when that
+//     resolves (against the hook's cwd) to ctl_bin. A bare `ham-ctl` goes through
+//     PATH and never matches; nothing matches when ctl_bin is unknown.
+//   - Shape: no chaining, pipe, background, subshell, substitution, redirect,
+//     brace or newline, and no `$` after the program, so `ham-ctl x && rm -rf ~`
+//     never matches.
+//   - Verb: HAM_CTL_AUTO_APPROVE_VERBS only. `shell run|serve` (arbitrary command
+//     execution through the hub) and anything that reconfigures agents, bridges or
+//     fleets (hub, agents, bridge, task-chain, ...) always ask.
+is_ham_ctl_command :: proc(command, ctl_bin, cwd: string) -> bool {
 	cmd := strings.trim_space(command)
-	if cmd == "" do return false
+	if cmd == "" || strings.trim_space(ctl_bin) == "" do return false
 	for ch in cmd {
 		switch ch {
 		case ';', '&', '|', '`', '<', '>', '\n', '\r', '(', ')', '{', '}':
 			return false
 		}
 	}
-	// `$` is only allowed as the leading $HEIMDALL_CTL_BIN / ${HEIMDALL_CTL_BIN}.
-	head := cmd
-	rest := ""
-	if i := strings.index_any(cmd, " \t"); i >= 0 {
-		head = cmd[:i]
-		rest = cmd[i:]
+	fields := strings.fields(cmd, context.temp_allocator)
+	if len(fields) < 2 do return false
+	head := fields[0]
+	for f in fields[1:] {
+		if strings.contains_rune(f, '$') do return false
 	}
-	if strings.contains_rune(rest, '$') do return false
-	switch head {
-	case "ham-ctl", "./.heimdall/bin/ham-ctl", ".heimdall/bin/ham-ctl", "$HEIMDALL_CTL_BIN", "\"$HEIMDALL_CTL_BIN\"":
-		return true
+	if !ham_ctl_head_is_ctl_bin(head, ctl_bin, cwd) do return false
+	group := fields[1]
+	verb := fields[2] if len(fields) > 2 else ""
+	for allowed in HAM_CTL_AUTO_APPROVE_VERBS {
+		if allowed.group != group do continue
+		if allowed.verb == "*" || allowed.verb == verb do return true
 	}
-	if ctl_bin != "" && head == ctl_bin do return true
 	return false
+}
+
+Ham_Ctl_Verb :: struct {
+	group, verb: string, // verb "*" = every verb of the group
+}
+
+// HAM_CTL_AUTO_APPROVE_VERBS: the agent's own coordination traffic with Heimdall.
+HAM_CTL_AUTO_APPROVE_VERBS :: [?]Ham_Ctl_Verb{
+	{"chat", "read"}, {"chat", "send"},
+	{"lease", "*"}, {"task", "*"}, {"review", "*"}, {"verify", "*"},
+	{"extension", "*"}, {"search", "*"},
+	{"memory", "propose"}, {"memory", "list"}, {"memory", "show"}, {"memory", "content"},
+	{"agent", "start-success"},
+	{"issue", "list"}, {"issue", "show"}, {"issue", "create"}, {"issue", "vote"},
+}
+
+@(private = "file")
+ham_ctl_head_is_ctl_bin :: proc(head, ctl_bin, cwd: string) -> bool {
+	switch head {
+	case "$HEIMDALL_CTL_BIN", "\"$HEIMDALL_CTL_BIN\"":
+		return true
+	case "./.heimdall/bin/ham-ctl", ".heimdall/bin/ham-ctl":
+		if strings.trim_space(cwd) == "" do return false
+		joined, _ := filepath.join({cwd, head}, context.temp_allocator)
+		clean_bin, _ := filepath.clean(ctl_bin, context.temp_allocator)
+		return joined == clean_bin
+	}
+	clean_head, _ := filepath.clean(head, context.temp_allocator)
+	clean_bin, _ := filepath.clean(ctl_bin, context.temp_allocator)
+	return filepath.is_abs(head) && clean_head == clean_bin
 }

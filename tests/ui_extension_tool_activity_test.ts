@@ -188,3 +188,9 @@ test('tool activity rows use text, not the zap icon', () => {
   const row = read('../src/ui/components/extension/ToolActivityRow.tsx');
   assert.doesNotMatch(row, /name="zap"/);
 });
+
+test('tool activity headlines ("Ran X commands") are left aligned', () => {
+  const row = read('../src/ui/components/extension/ToolActivityRow.tsx');
+  assert.match(row, /truncate text-left" title=\{summary\.headline\}/);
+  assert.match(row, /truncate text-left" title=\{headline\}/);
+});

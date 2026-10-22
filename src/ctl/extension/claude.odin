@@ -505,5 +505,5 @@ claude_permission_is_ham_ctl :: proc(raw, ctl_bin: string) -> bool {
 	if err != .None do return false
 	root, ok := value.(json.Object)
 	if !ok || json_get_string(root, "tool_name") != "Bash" do return false
-	return is_ham_ctl_command(json_get_string(json_get_object(root, "tool_input"), "command"), ctl_bin)
+	return is_ham_ctl_command(json_get_string(json_get_object(root, "tool_input"), "command"), ctl_bin, json_get_string(root, "cwd"))
 }

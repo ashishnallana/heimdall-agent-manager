@@ -77,10 +77,10 @@ export default function ToolActivityRow({ messageId, body, metadata, onOpenFile,
         aria-expanded={open}
         disabled={!hasDetail}
         onClick={() => setOpen((v) => !v)}
-        className="flex min-h-8 w-full min-w-0 items-center gap-2 rounded-lg px-1 py-1 text-xs text-muted hover:bg-neutral-soft disabled:cursor-default disabled:hover:bg-transparent"
+        className="flex min-h-8 w-full min-w-0 items-center justify-start gap-2 rounded-lg px-1 py-1 text-left text-xs text-muted hover:bg-neutral-soft disabled:cursor-default disabled:hover:bg-transparent"
       >
         <Icon name={open ? 'chevron-down' : 'chevron-right'} size={12} className="shrink-0 text-faint" />
-        <span className="min-w-0 flex-1 truncate" title={headline}>{headline}</span>
+        <span className="min-w-0 flex-1 truncate text-left" title={headline}>{headline}</span>
         <span data-debug-id={`${prefix}-badge`} className="shrink-0 text-faint">{toolActivityBadge(activity)}</span>
       </button>
       {open ? (
@@ -154,10 +154,10 @@ export function ToolActivityGroup({ messageId, messages, onOpenFile, onOpenActiv
         data-debug-id={`${prefix}-toggle`}
         aria-expanded={open}
         onClick={() => setOpen((v) => !v)}
-        className="flex min-h-8 w-full min-w-0 items-center gap-2 rounded-lg px-1 py-1 text-xs text-muted hover:bg-neutral-soft"
+        className="flex min-h-8 w-full min-w-0 items-center justify-start gap-2 rounded-lg px-1 py-1 text-left text-xs text-muted hover:bg-neutral-soft"
       >
         <Icon name={open ? 'chevron-down' : 'chevron-right'} size={12} className="shrink-0 text-faint" />
-        <span className="min-w-0 flex-1 truncate" title={summary.headline}>{summary.headline}</span>
+        <span className="min-w-0 flex-1 truncate text-left" title={summary.headline}>{summary.headline}</span>
         {summary.badge ? <span data-debug-id={`${prefix}-badge`} className="shrink-0 text-danger">{summary.badge}</span> : null}
       </button>
       {open ? (

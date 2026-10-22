@@ -94,7 +94,9 @@ export function groupTranscriptMessages(
         const first = activityGroup[0];
         const last = activityGroup[activityGroup.length - 1];
         result.push({
-          key: `clubbed_tools_${first.messageId}_${last.messageId}`,
+          // Keyed by the first message only: a trailing row folding in must not
+          // remount the group (and collapse it while the user is reading).
+          key: `clubbed_tools_${first.messageId}`,
           messageId: `clubbed_tools_${first.messageId}`,
           body: '',
           isUser: false,
