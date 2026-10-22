@@ -471,7 +471,7 @@ agent_stream_check_input_policy :: proc(t: ^testing.T, read_only: bool) {
 		net.close(pair.client); pair.client = net.TCP_Socket(0)
 		thread.join(th)
 		thread.destroy(th)
-		testing.expect_value(t, shell_svc.user_viewer_counts["user_alice"], 0, "disconnect releases the user's stream slot")
+		testing.expect(t, shell_svc.user_viewer_counts["user_alice"] == 0, "disconnect releases the user's stream slot")
 	}
 
 	// Read HTTP 101 Switching Protocols response and ready frame
