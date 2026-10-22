@@ -1,9 +1,10 @@
-import { noteLocalMessageSent } from '../conversationMessageEvents';
+import { noteLocalMessageSent, conversationOptionsRevision, expireConversationOptions } from '../conversationMessageEvents';
 import * as daemonApi from '../daemonApi';
 import { apiUrl, cookieJsonFetch, cookieMutation, customQueryError, errorFromResponse } from '../cookieFetch';
 import { heimdallApi, withSessionQuery } from '../heimdallApi';
 import { isVaultArmored, encryptVaultText, getActiveVaultKey } from '../../utils/vaultContent';
 import { decryptConversationRecord } from '../../utils/vaultChats';
+import type { QuestionSubmission } from '../../components/chat/multiQuestion';
 
 const GUIDE_AGENT_ID = 'guide@heimdall';
 
@@ -293,6 +294,10 @@ export const chatEndpoints = heimdallApi.injectEndpoints({
       queryFn: async ({ conversationId, limit = 30, cursor = '' }) => {
         if (!conversationId) return { data: { messages: [], nextCursor: '', hasMore: false } };
         try {
+          // Reconnect/refresh can reveal messages whose WS event was missed. A new
+          // canonical read also retires hints retained in previously loaded pages.
+          if (!cursor) expireConversationOptions(conversationId);
+          const optionsRevision = conversationOptionsRevision(conversationId);
           const params = new URLSearchParams({ limit: String(limit) });
           if (cursor) params.set('cursor', cursor);
           const res = await fetch(apiUrl(`/chats/${encodeURIComponent(conversationId)}/messages?${params.toString()}`), { credentials: 'include' });
@@ -303,7 +308,7 @@ export const chatEndpoints = heimdallApi.injectEndpoints({
           const page = body?.page || {};
           const nextCursor = String(page.next_cursor ?? page.nextCursor ?? body?.next_cursor ?? body?.nextCursor ?? '');
           const hasMore = Boolean(page.has_more ?? page.hasMore ?? body?.has_more ?? body?.hasMore ?? false);
-          return { data: { messages: rows, nextCursor, hasMore } };
+          return { data: { messages: rows.map((row: any) => ({ ...row, optionsRevision })), nextCursor, hasMore } };
         } catch (error: any) {
           return { error: customQueryError(error) as any };
         }
@@ -369,12 +374,38 @@ export const chatEndpoints = heimdallApi.injectEndpoints({
             encBody = await encryptVaultText(encBody, activeKey);
           }
           const data = await cookieMutation(`/chats/${encodeURIComponent(conversationId)}/messages`, 'POST', { body: encBody, artifact_ids: artifactIds });
+          expireConversationOptions(conversationId);
           // invalidatesTags below refreshes this tab; skip the hub's echo of the same id.
           noteLocalMessageSent(String(data?.message_id || data?.message?.message_id || data?.data?.message_id || ''));
           return { data };
         } catch (error: any) {
           return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any };
         }
+      },
+      invalidatesTags: (_r, _e, { conversationId }) => [
+        { type: 'Chat' as const, id: conversationId },
+        { type: 'ConversationSummaries' as const, id: conversationId },
+        { type: 'SidebarConversations' as const, id: 'ALL' },
+      ],
+    }),
+    answerConversationQuestions: build.mutation<any, { conversationId: string; sourceMessageId: string; submission: QuestionSubmission }>({
+      queryFn: async ({ conversationId, sourceMessageId, submission }, api) => {
+        try {
+          const activeKey = getActiveVaultKey();
+          if (!(api.getState() as any)?.vault?.isUnlocked || !activeKey) throw new Error('Unlock Vault to send answers.');
+          const payload = {
+            ...submission,
+            body: await encryptVaultText(submission.body, activeKey),
+            answers: await Promise.all(submission.answers.map(async (answer) => ({
+              ...answer,
+              ...(answer.custom_text !== undefined ? { custom_text: await encryptVaultText(answer.custom_text, activeKey) } : {}),
+            }))),
+          };
+          const data = await cookieMutation(`/chats/${encodeURIComponent(conversationId)}/messages/${encodeURIComponent(sourceMessageId)}/answers`, 'POST', payload);
+          expireConversationOptions(conversationId);
+          noteLocalMessageSent(String(data?.message?.message_id || ''));
+          return { data };
+        } catch (error) { return { error: customQueryError(error) as any }; }
       },
       invalidatesTags: (_r, _e, { conversationId }) => [
         { type: 'Chat' as const, id: conversationId },
@@ -784,6 +815,7 @@ export const {
   useUpdateConversationTitleMutation,
   useRequestPaneCaptureMutation,
   useSendConversationMessageMutation,
+  useAnswerConversationQuestionsMutation,
   useMarkConversationReadMutation,
 } = chatEndpoints;
 

@@ -1,7 +1,13 @@
 import { StartAgentAction, needsAgentStart, useStartAgent } from './StartAgentAction';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { createPortal } from 'react-dom';
-import { useDispatch } from 'react-redux';
+import { useDispatch, useSelector } from 'react-redux';
+import { useFetchConversationMessagesQuery } from '../../api/endpoints/chats';
+import { conversationOptionsRevision, subscribeConversationOptions } from '../../api/conversationMessageEvents';
+import { messageOptionsEligible, visibleMessageOptions } from '../chat/types';
+import { selectActiveVaultKey, selectIsVaultUnlocked } from '../../store/vaultSlice';
+import { decryptVaultText, isVaultArmored, getActiveVaultKey } from '../../utils/vaultContent';
+import { VaultText } from '../vault/VaultText';
 import { Icon, Spinner, type IconName } from '@ui';
 import { heimdallApi } from '../../api/heimdallApi';
 import {
@@ -219,6 +225,17 @@ export function AttentionDeck({
   const list = useMemo(() => visibleItems(items, tab, snap.hidden), [items, tab, snap.hidden]);
   const safeIndex = clampIndex(index, list.length);
   const current: AttentionItem | undefined = list[safeIndex];
+  // Attention cards can outlive their source. Resolve the canonical conversation
+  // row before offering chips or numeric shortcuts; never trust the excerpt alone.
+  const optionConversationId = current?.kind === 'message' ? current.action_refs.conversation_id : '';
+  const optionPage = useFetchConversationMessagesQuery({ conversationId: optionConversationId }, { skip: !open || !optionConversationId, refetchOnMountOrArgChange: true });
+  const optionRevision = useSyncExternalStore(subscribeConversationOptions, () => conversationOptionsRevision(optionConversationId), () => 0);
+  const isVaultUnlocked = useSelector(selectIsVaultUnlocked);
+  const installedKey = useSelector(selectActiveVaultKey);
+  const vaultKey = isVaultUnlocked ? installedKey : null;
+  const optionSource = current?.kind === 'message' ? optionPage.data?.messages?.find((row: any) => row.message_id === current.action_refs.message_id) : null;
+  const currentOptions: string[] = optionSource && messageOptionsEligible({ isLatestMessage: optionSource.is_latest_message, optionsRevision: optionSource.optionsRevision, questionAnswer: optionSource.question_answer }, optionRevision)
+    ? visibleMessageOptions(optionSource, Boolean(vaultKey)) : [];
 
   // When the list itself changes (a refetch merged in, a card settled), stay on
   // the card that was showing if it is still there; if it left, its neighbour
@@ -305,9 +322,13 @@ export function AttentionDeck({
   };
 
   const sendOption = (item: AttentionMessageItem, i: number) => {
-    const opt = item.details.options[i];
-    if (opt === undefined) return;
-    void replyAndRead(item, opt).catch((err) => say(`Reply failed: ${err?.message || 'error'}`));
+    const opt = currentOptions[i];
+    if (opt === undefined || conversationOptionsRevision(optionConversationId) !== optionRevision) return;
+    void (async () => {
+      const text = isVaultArmored(opt) && vaultKey ? await decryptVaultText(opt, vaultKey) : opt;
+      if (conversationOptionsRevision(optionConversationId) !== optionRevision || (vaultKey && getActiveVaultKey() !== vaultKey)) return;
+      await replyAndRead(item, text);
+    })().catch((err) => say(`Reply failed: ${err?.message || 'error'}`));
   };
 
   const submitReply = async (item: AttentionMessageItem, value: ComposerSubmit) => {
@@ -419,7 +440,7 @@ export function AttentionDeck({
       if (isTyping(e.target) || e.metaKey || e.ctrlKey || e.altKey) return;
       if (e.key === 'ArrowRight') { go(1); e.preventDefault(); return; }
       if (e.key === 'ArrowLeft') { go(-1); e.preventDefault(); return; }
-      if (/^[1-9]$/.test(e.key) && current?.kind === 'message' && Number(e.key) <= current.details.options.length) {
+      if (/^[1-9]$/.test(e.key) && current?.kind === 'message' && Number(e.key) <= currentOptions.length) {
         e.preventDefault();
         sendOption(current, Number(e.key) - 1);
         return;
@@ -661,9 +682,9 @@ export function AttentionDeck({
 
         {/* Quick replies sit outside the scrolling card, just above the arrows, so a
             long message never pushes them out of view. Number keys 1-9 send them. */}
-        {current && current.kind === 'message' && current.details.options.length > 0 && open ? (
+        {current && current.kind === 'message' && currentOptions.length > 0 && open ? (
           <div data-debug-id="attention-card-options" data-no-drag data-attention-options className="flex flex-wrap justify-center gap-2 px-4 pt-3" role="group" aria-label="Quick replies">
-            {current.details.options.map((opt, i) => (
+            {currentOptions.map((opt, i) => (
               <button
                 key={`${i}:${opt}`}
                 type="button"
@@ -673,7 +694,7 @@ export function AttentionDeck({
                 className="inline-flex items-center gap-1.5 rounded-full border border-warning-soft py-1 pl-1.5 pr-3 text-[12px] text-warning hover:bg-warning-soft"
               >
                 {i < 9 ? <kbd className="grid h-4 min-w-4 place-items-center rounded-full bg-warning-soft px-1 text-[10px] font-semibold not-italic">{i + 1}</kbd> : null}
-                <span>{opt}</span>
+                <VaultText value={opt} />
               </button>
             ))}
           </div>
