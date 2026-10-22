@@ -509,6 +509,11 @@ curl -s http://127.0.0.1:9464/metrics | head
   `heimdall_http_accept_errors_total`, the standard `process_*` family from
   `/proc/self`, `heimdall_hub_build_info{version,commit}`, and the lib's own
   `heimdall_metrics_series` / `heimdall_metrics_scrape_duration_seconds`.
+- DB latency / lock-contention telemetry (`heimdall_db_*`, extra
+  `heimdall_sqlite_*` families and `db_slow_request` log lines) is **on by
+  default** (`HEIMDALL_DB_TELEMETRY` unset = `basic`); set
+  `HEIMDALL_DB_TELEMETRY=off` and restart to opt out. Any other value fails
+  boot. See [`docs/reference/db-telemetry.md`](docs/reference/db-telemetry.md).
 - Fleet metrics (`heimdall_bridge_*`, `heimdall_ws_*`, `heimdall_shell_*`,
   `heimdall_preview_*`, `heimdall_lsp_sessions`, SQLite/reaper/auth/billing
   counters) carry `bridge_id` at most; the owner appears only on
@@ -551,7 +556,8 @@ enforces `role_attribute_strict`, so a user outside the group is refused even
 if Authentik lets them through. Alert rules live in
 `tools/telemetry/hub/alerts.yml` (`promtool check rules` clean); import
 Grafana.com dashboard **1860** for host graphs and the provisioned
-**Heimdall / Hub Health** for the hub. Details and non-Nix snippets:
+**Heimdall / Hub Health** for the hub (**Heimdall / Hub DB** for DB latency and lock
+contention). Details, non-Nix snippets and how a dashboard update reaches Grafana:
 [`tools/telemetry/hub/README.md`](tools/telemetry/hub/README.md).
 
 ### 1.9 Bridge error events (why a bridge is failing)

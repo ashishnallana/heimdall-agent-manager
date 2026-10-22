@@ -2,7 +2,7 @@ import { useEntitlements } from '../../hooks/useEntitlements';
 import { useEffect, useMemo, useState } from 'react';
 import {
   type Bridge,
-  normalizeBridgeCapabilities,
+  useBridgeProviderStatus,
   useListBridgesQuery,
   useRenameBridgeMutation,
   useRevokeBridgeMutation,
@@ -71,11 +71,6 @@ export default function BridgesPanel() {
     if (bridge.plan_disabled_at) return 'Disabled — over plan limit';
     const status = String(bridge?.status || bridge?.runtime_status || '').toLowerCase();
     return status || 'offline';
-  }
-
-  function capabilitiesLabel(bridge: Bridge): string {
-    const providers = normalizeBridgeCapabilities(bridge);
-    return providers.length ? providers.map((cap) => `${cap.provider}${cap.models.length ? ` (${cap.models.join('/')})` : ''}`).join(', ') : '—';
   }
 
   // REQ-BRG-1: An enrolled, online bridge is ready regardless of whether provider capabilities are loaded yet.
@@ -257,15 +252,7 @@ export default function BridgesPanel() {
                           </span>
                         ) : null}
 
-                        {normalizeBridgeCapabilities(bridge).length === 0 ? (
-                          <a
-                            href={`#settings/providers?bridge=${encodeURIComponent(id)}`}
-                            data-debug-id={`settings-bridge-no-providers-${id}`}
-                            className="inline-flex items-center gap-1 rounded-full border border-subtle bg-surface-raised/40 px-2 py-0.5 text-[10px] text-muted hover:border-accent hover:text-accent transition-colors whitespace-nowrap"
-                          >
-                            no providers configured
-                          </a>
-                        ) : null}
+                        <BridgeNoProvidersBadge bridge={bridge} id={id} />
                       </div>
                       <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-caption text-muted">
                         <span>status: <span data-debug-id={`settings-bridge-status-label-${id}`} className="text-primary">{statusLabel(bridge)}</span></span>
@@ -273,7 +260,7 @@ export default function BridgesPanel() {
                         <span>os: <span className="text-primary">{bridge?.machine_os || bridge?.os || '—'}</span></span>
                         <span>arch: <span className="text-primary">{bridge?.machine_arch || bridge?.arch || '—'}</span></span>
                         <span>target: <span data-debug-id={`settings-bridge-target-${id}`} className="font-mono text-primary">{bridge?.target || '—'}</span></span>
-                        <span>caps: <span data-debug-id={`settings-bridge-caps-${id}`} className="text-primary">{capabilitiesLabel(bridge)}</span></span>
+                        <span>caps: <BridgeCapabilitiesLabel bridge={bridge} id={id} /></span>
                         <span>instances: <span className="text-primary">{bridge?.active_instance_count ?? bridge?.instance_count ?? bridge?.instances?.length ?? 0}</span></span>
                         <span>last seen: <span className="text-primary">{bridge?.last_seen_at ? new Date(bridge.last_seen_at).toLocaleString() : '—'}</span></span>
                       </div>
@@ -464,4 +451,30 @@ export default function BridgesPanel() {
       </div>
     </PageShell>
   );
+}
+
+// Provider status is per bridge (GET /bridges/{id}/provider-status), fetched for the
+// rows this panel shows. Both pieces read the same cache entry: one request a bridge.
+function BridgeNoProvidersBadge({ bridge, id }: { bridge: Bridge; id: string }) {
+  const { capabilities, loaded } = useBridgeProviderStatus(bridge);
+  if (!loaded || capabilities.length > 0) return null;
+  return (
+    <a
+      href={`#settings/providers?bridge=${encodeURIComponent(id)}`}
+      data-debug-id={`settings-bridge-no-providers-${id}`}
+      className="inline-flex items-center gap-1 rounded-full border border-subtle bg-surface-raised/40 px-2 py-0.5 text-[10px] text-muted hover:border-accent hover:text-accent transition-colors whitespace-nowrap"
+    >
+      no providers configured
+    </a>
+  );
+}
+
+function BridgeCapabilitiesLabel({ bridge, id }: { bridge: Bridge; id: string }) {
+  const { capabilities, loaded } = useBridgeProviderStatus(bridge);
+  const text = !loaded
+    ? '…'
+    : capabilities.length
+      ? capabilities.map((cap) => `${cap.provider}${cap.models.length ? ` (${cap.models.join('/')})` : ''}`).join(', ')
+      : '—';
+  return <span data-debug-id={`settings-bridge-caps-${id}`} className="text-primary">{text}</span>;
 }

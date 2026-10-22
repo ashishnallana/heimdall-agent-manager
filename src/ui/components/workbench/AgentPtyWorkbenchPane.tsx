@@ -27,7 +27,9 @@ export function AgentPtyWorkbenchPane({
 }: AgentPtyWorkbenchPaneProps) {
   const { data: instanceData, refetch } = useFetchAgentInstanceQuery(
     { instanceId: agentInstanceId },
-    { skip: !agentInstanceId, pollingInterval: 10000 },
+    // No steady poll: agent_instance resource events patch this cache (and a failure
+    // refetches it for last_error), as in AgentChatPane; reconnect resync covers gaps.
+    { skip: !agentInstanceId },
   );
   const { data: liveData } = useGetAgentsLiveQuery();
 

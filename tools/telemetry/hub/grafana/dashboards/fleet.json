@@ -4,6 +4,19 @@
   },
   "editable": false,
   "graphTooltip": 1,
+  "links": [
+    {
+      "asDropdown": true,
+      "includeVars": false,
+      "keepTime": true,
+      "tags": [
+        "heimdall"
+      ],
+      "targetBlank": false,
+      "title": "Heimdall dashboards",
+      "type": "dashboards"
+    }
+  ],
   "panels": [
     {
       "collapsed": false,

@@ -44,6 +44,7 @@ import { useFetchProjectQuery } from '../../api/endpoints/projects';
 import { useGetAgentsLiveQuery } from '../../api/endpoints/agentsLive';
 import {
   normalizeBridgeCapabilities,
+  useBridgeProviderStatus,
   useListBridgesQuery,
   type BridgeCapability,
 } from '../../api/endpoints/bridgeSupport';
@@ -92,6 +93,13 @@ import ChatMessageList from '../chat/ChatMessageList';
 import InstanceReconfigurationProgress from '../chat/InstanceReconfigurationProgress';
 import { MessageComposerInput, MessageComposerActions, MessageComposerStatus } from '../chat/MessageComposer';
 import RuntimeConfigurationOptions from '../chat/RuntimeConfigurationOptions';
+import { usePaneDeferredRefresh, usePaneMarkRead, usePanePollPolicy, usePaneVisible, visiblePollInterval } from './paneVisibility';
+import {
+  CONVERSATION_MESSAGES_READ_EVENT,
+  applyReadReceipt,
+  reconcileOlderPages,
+  type ConversationMessagesRead,
+} from '../../api/conversationMessageEvents';
 import { type TaskLike } from '../chat/chainTaskInference';
 import { groupTranscriptMessages, isAgentStartMessage } from '../chat/transcriptGrouping';
 import type { ChatDeliveryStatus, ChatMessage, ChatTimestamp } from '../chat/types';
@@ -114,6 +122,10 @@ export const COMPOSER_DRAFT_KEY = 'heimdall:composer:draft';
  * invalidation. RTK Query throws (error #38) when refetching a query that has not
  * started, e.g. one still skipped while its arguments load.
  */
+// Fallback cadence for an unsettled reconfiguration this pane accepted (focused and on
+// screen only). The hub announces every phase; this only bounds a missed frame.
+export const RECONFIGURATION_ACTIVE_FALLBACK_MS = 15000;
+
 export function refetchIfStarted(query: { isUninitialized: boolean; refetch: () => unknown }) {
   if (!query.isUninitialized) void query.refetch();
 }
@@ -667,10 +679,18 @@ export function AgentChatPane({
   const isMobileHook = useIsMobile();
   const isMobile = explicitIsMobile ?? isMobileHook;
   const isAuxSubagent = variant === 'auxSubagent';
+  // On screen (not behind a maximised pane, an off-screen mobile page or a hidden
+  // tab). Hidden panes keep their caches but do not poll or mark read.
+  const paneVisible = usePaneVisible();
+  // Steady polls are retired: conversation, messages, instance, live tree, bridges and
+  // chain detail all refresh from owner-scoped user-WS events (wsInvalidation.ts), and
+  // initial/reconnect/gap recovery refetches mounted queries. The policy still tracks
+  // 401/403/404/410 so the active-operation fallback below stops on a gone instance.
+  const pollPolicy = usePanePollPolicy(paneVisible);
 
   const convQuery = useFetchConversationQuery(
     { conversationId: '', agentInstanceId: routeInstanceId },
-    { skip: !routeInstanceId, pollingInterval: 10000, skipPollingIfUnfocused: true },
+    { skip: !routeInstanceId },
   );
   const conversation = convQuery.data?.conversation || null;
   const conversationId = String(
@@ -678,8 +698,12 @@ export function AgentChatPane({
   );
   const messagesQuery = useFetchConversationMessagesQuery(
     { conversationId },
-    { skip: !conversationId, pollingInterval: 10000, skipPollingIfUnfocused: true },
+    { skip: !conversationId },
   );
+  // Message events that reach only hidden panes are deferred (paneDeferral.ts); the
+  // newest page refetches once when this pane is shown again (after any older request
+  // still in flight settles).
+  usePaneDeferredRefresh(conversationId, paneVisible, messagesQuery.refetch, messagesQuery);
   const [fetchOlderMessages, olderMessagesState] = useLazyFetchConversationMessagesQuery();
   const [updateConversationTitle, updateTitleState] = useUpdateConversationTitleMutation();
   const [requestPaneCapture, requestPaneCaptureState] = useRequestPaneCaptureMutation();
@@ -696,9 +720,6 @@ export function AgentChatPane({
   const agentInstanceId = String(
     conversation?.agent_instance_id || conversation?.agentInstanceId || routeInstanceId,
   );
-  const conversationRuntimeStatusForPoll = String(
-    conversation?.runtime_status || conversation?.runtimeStatus || '',
-  );
   const chainId = String(conversation?.chain_id || conversation?.chainId || '');
   const isMultiPane = !isSinglePane;
   const title = conversationDisplayTitle(
@@ -713,7 +734,7 @@ export function AgentChatPane({
   const chainTasksQuery = useFetchChainTasksQuery({ chainId }, { skip: !chainId });
   const chainDetailQuery = useFetchTaskChainDetailQuery(
     { chainId },
-    { skip: !chainId, pollingInterval: 120000 },
+    { skip: !chainId },
   );
   const chainProgress = useMemo(() => {
     const allTasks: TaskLike[] = (chainDetailQuery.data?.chain?.tasks ||
@@ -730,23 +751,14 @@ export function AgentChatPane({
   const editableTitle = rawTitle && !looksLikeInternalId(rawTitle) ? rawTitle : title;
   const chainTitle = String(chainDetailQuery.data?.chain?.title || '').trim();
 
-  const lastInstanceStatusRef = useRef('');
-  const pollHint = lastInstanceStatusRef.current || conversationRuntimeStatusForPoll;
-  const instancePollInterval =
-    runtimeStateFromStatus(pollHint) === 'starting' ? 2500 : 8000;
+  // agent_instance/* events carry the complete instance summary (status, config,
+  // current task, run_count/started_at for restarts) and are patched into this entry.
   const instanceQuery = useFetchAgentInstanceQuery(
     { instanceId: agentInstanceId },
-    {
-      skip: !agentInstanceId,
-      pollingInterval: instancePollInterval,
-      skipPollingIfUnfocused: true,
-    },
+    { skip: !agentInstanceId },
   );
   const instance = instanceQuery.data?.instance || null;
-  const { data: liveProjects } = useGetAgentsLiveQuery(undefined, {
-    pollingInterval: 30000,
-    skipPollingIfUnfocused: true,
-  });
+  const { data: liveProjects } = useGetAgentsLiveQuery(undefined);
   const agentIdentityQuery = useFetchAgentIdentityQuery({ agentId }, { skip: !agentId });
   const agentIdentity = agentIdentityQuery.data?.agent || null;
   const agentDisplayName = String(
@@ -758,10 +770,6 @@ export function AgentChatPane({
       agentIdentity?.template_persona ||
       '',
   ).trim();
-  useEffect(() => {
-    const s = String(instance?.runtime_status || instance?.runtimeStatus || '');
-    if (s) lastInstanceStatusRef.current = s;
-  }, [instance?.runtime_status, instance?.runtimeStatus]);
   const instanceProvider = String(instance?.provider || '');
   const instanceModel = String(instance?.model || '');
   const instanceBridgeId = String(instance?.bridge_id || instance?.bridgeId || '');
@@ -810,18 +818,18 @@ export function AgentChatPane({
     stagedBridgeId !== null ||
     Boolean(provider && provider !== instanceProvider) ||
     Boolean(model && model !== instanceModel);
-  const bridgesQuery = useListBridgesQuery(undefined, {
-    pollingInterval: editingRuntime ? 5000 : 30000,
-    skipPollingIfUnfocused: true,
-  });
-  useEffect(() => {
-    if (runtimeMenuOpen) refetchIfStarted(bridgesQuery);
-  }, [runtimeMenuOpen]);
+  // Bridge status/update/revoke events patch or invalidate this list; opening the
+  // runtime picker fetches only the selected bridge's provider status.
+  const bridgesQuery = useListBridgesQuery(undefined);
   const bridges = bridgesQuery.data?.bridges || [];
-  const instanceBridge = useMemo(
+  const instanceBridgeRow = useMemo(
     () => bridges.find((b: any) => bridgeId(b) === instanceBridgeId),
     [bridges, instanceBridgeId],
   );
+  // Provider status for this pane's bridge only (it gates sending); polled only while
+  // the runtime is being edited.
+  const instanceProviders = useBridgeProviderStatus(instanceBridgeRow, { live: editingRuntime });
+  const instanceBridge = instanceProviders.bridge;
 
   const baseMessages: Message[] = messagesQuery.data?.messages || [];
   const [olderMessages, setOlderMessages] = useState<Message[]>([]);
@@ -1094,21 +1102,43 @@ export function AgentChatPane({
 
   const destinationBridgeId = stagedBridgeId ?? instanceBridgeId;
   const destinationProjectId = projectId;
-  const destinationBridge = bridges.find(
-    (item: any) => bridgeId(item) === destinationBridgeId,
+  const destinationBridgeRow = useMemo(
+    () => bridges.find((item: any) => bridgeId(item) === destinationBridgeId),
+    [bridges, destinationBridgeId],
   );
+  const stagingOtherBridge = destinationBridgeId !== instanceBridgeId;
+  const destinationProviders = useBridgeProviderStatus(destinationBridgeRow, {
+    skip: !stagingOtherBridge,
+    live: editingRuntime,
+  });
+  const destination = stagingOtherBridge ? destinationProviders : instanceProviders;
+  const destinationBridge = destination.bridge;
   const destinationProjectQuery = projectQuery;
   const operationQuery = useListInstanceReconfigurationsQuery(
     { instanceId: agentInstanceId },
     {
+      // A deleted instance (404) has no reconfigurations to poll either.
       skip: !agentInstanceId,
+      // Event-driven: every phase advance publishes agent_instance_reconfiguration and
+      // the hub reaper progresses operations without client reads. While an operation
+      // this pane accepted is unsettled, a slow focused fallback covers a missed frame
+      // between resyncs; idle panes never poll.
       pollingInterval:
-        acceptedOperation &&
-        !['ready', 'failed', 'recovery_required'].includes(acceptedOperation.phase)
-          ? 2000
-          : 8000,
+        pollPolicy.isTerminal('instance') || pollPolicy.isTerminal('reconfigurations')
+          ? 0
+          : acceptedOperation &&
+              !['ready', 'failed', 'recovery_required'].includes(acceptedOperation.phase)
+            ? visiblePollInterval(paneVisible, RECONFIGURATION_ACTIVE_FALLBACK_MS)
+            : 0,
+      skipPollingIfUnfocused: true,
     },
   );
+  pollPolicy.useReportErrors({
+    conversation: convQuery.error,
+    messages: messagesQuery.error,
+    instance: instanceQuery.error,
+    reconfigurations: operationQuery.error,
+  });
   const serverOperation = operationQuery.data?.operations?.[0];
   const operation =
     acceptedOperation &&
@@ -1251,16 +1281,17 @@ export function AgentChatPane({
   useEffect(() => {
     if (!renaming) setTitleDraft(editableTitle);
   }, [editableTitle, renaming]);
-  useEffect(() => {
-    if (
-      isActiveTab &&
-      agentInstanceId &&
-      conversationId &&
-      (conversation?.unread_count || conversation?.unreadCount)
-    ) {
-      void markRead({ conversationId });
-    }
-  }, [isActiveTab, conversationId, agentInstanceId, conversation?.unread_count, conversation?.unreadCount]);
+  const unreadCount = Number(conversation?.unread_count || conversation?.unreadCount || 0);
+  usePaneMarkRead({
+    isActiveTab,
+    paneVisible,
+    conversationId,
+    agentInstanceId,
+    unreadCount,
+    markRead: (id) => void markRead({ conversationId: id }),
+  });
+  // No catch-up refetch on show: nothing polls, and events/resyncs reach a hidden
+  // pane's subscriptions the same as a visible one's.
   useEffect(() => {
     if (settingsEditedRef.current) return;
     setProvider(instanceProvider);
@@ -1326,6 +1357,35 @@ export function AgentChatPane({
     setOlderCursor(String(messagesQuery.data?.nextCursor || ''));
     setOlderHasMore(Boolean(messagesQuery.data?.hasMore));
   }, [messagesQuery.data?.nextCursor, messagesQuery.data?.hasMore, olderMessages.length]);
+  // The refetched newest page (after new messages, a reconnect or a show) may have
+  // dropped rows the loaded older pages do not hold: carry them, or re-anchor when the
+  // pages no longer join (reconcileOlderPages).
+  const previousBaseRef = useRef<Message[]>([]);
+  useEffect(() => {
+    const previous = previousBaseRef.current;
+    previousBaseRef.current = baseMessages;
+    if (previous === baseMessages) return;
+    const idOf = (message: Message) => String(message.message_id || message.messageId || message.id || '');
+    const { older, reanchor } = reconcileOlderPages(previous, baseMessages, olderMessages, idOf);
+    if (reanchor) {
+      setOlderMessages([]);
+      setOlderCursor(String(messagesQuery.data?.nextCursor || ''));
+      setOlderHasMore(Boolean(messagesQuery.data?.hasMore));
+    } else if (older !== olderMessages) {
+      setOlderMessages(older);
+    }
+  }, [baseMessages]);
+  // Read receipts for older pages held in state (RTK pages are patched in wsInvalidation).
+  useEffect(() => {
+    if (!conversationId) return undefined;
+    const onRead = (event: Event) => {
+      const receipt = (event as CustomEvent<ConversationMessagesRead>).detail;
+      if (!receipt || receipt.conversationId !== conversationId) return;
+      setOlderMessages((current) => applyReadReceipt(current, receipt));
+    };
+    window.addEventListener(CONVERSATION_MESSAGES_READ_EVENT, onRead);
+    return () => window.removeEventListener(CONVERSATION_MESSAGES_READ_EVENT, onRead);
+  }, [conversationId]);
 
   const effectiveProvider = provider || instanceProvider;
   const effectiveModel = model || instanceModel;
@@ -1348,6 +1408,7 @@ export function AgentChatPane({
     provider: instanceProvider,
     model: instanceModel,
     capabilities: currentCaps,
+    capabilitiesLoaded: !instanceBridge || instanceProviders.loaded,
   };
   const configurationIssues = conversationConfigurationIssues(validityInput);
   const stagedConfigurationIssues = conversationConfigurationIssues({
@@ -1361,6 +1422,7 @@ export function AgentChatPane({
     provider: effectiveProvider,
     model: effectiveModel,
     capabilities: caps,
+    capabilitiesLoaded: !destinationBridge || destination.loaded,
   });
   if (
     destinationBridge &&

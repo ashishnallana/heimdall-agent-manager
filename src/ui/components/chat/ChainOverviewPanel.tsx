@@ -25,6 +25,7 @@ import {
   type VcsChangedFile,
 } from '../../api/endpoints/projectVcs';
 import { useListArtifactsQuery } from '../../api/endpoints/artifacts';
+import { usePaneVisible, visiblePollInterval } from '../workbench/paneVisibility';
 import {
   useStartInstanceMutation,
   useStopAgentInstanceMutation,
@@ -374,22 +375,27 @@ export default function ChainOverviewPanel({
   // Queries
   const { data: chainData, isLoading: isChainLoading, refetch: refetchChain } = useFetchTaskChainDetailQuery(
     { chainId },
-    { skip: !chainId, pollingInterval: 15000 }
+    // task/task_chain events invalidate Chain:<id>; artifacts and VCS below have no
+    // events and keep their slow polls, only while this panel is on screen (a hidden
+    // aux dock or background browser tab does not poll; polling resumes when shown).
+    { skip: !chainId }
   );
+  const panelVisible = usePaneVisible();
+  const slowPoll = visiblePollInterval(panelVisible, 30000);
 
   const { data: artifactsData, isLoading: isArtifactsLoading } = useListArtifactsQuery(
     { chainId, limit: 50 },
-    { skip: !chainId, pollingInterval: 30000 }
+    { skip: !chainId, pollingInterval: slowPoll }
   );
 
   const vcsStatusQuery = useGetProjectVcsStatusQuery(projectId, {
     skip: !projectVcsEnabled || !projectId,
-    pollingInterval: 30000,
+    pollingInterval: slowPoll,
   });
 
   const vcsFilesQuery = useListVcsFilesQuery(
     { projectId, bridgeId, limit: 100 },
-    { skip: !projectVcsEnabled || !projectId, pollingInterval: 30000 }
+    { skip: !projectVcsEnabled || !projectId, pollingInterval: slowPoll }
   );
 
   const [startInstanceMutation] = useStartInstanceMutation();

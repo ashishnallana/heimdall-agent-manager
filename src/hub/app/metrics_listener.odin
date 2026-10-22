@@ -12,6 +12,7 @@ import project_service "odin_test:hub/service/project"
 import push_service "odin_test:hub/service/push"
 import shell_session_svc "odin_test:hub/service/shell_session"
 import billing_service "odin_test:hub/service/billing"
+import dbt "odin_test:hub/platform/dbtelemetry"
 import sqlite "odin_test:hub/repository/sqlite"
 
 // Private Prometheus listener (plan 4.2). Deliberately NOT the public server:
@@ -41,6 +42,7 @@ init_metrics :: proc() -> ^metrics.Registry {
 	shell_session_svc.shell_metrics_init(reg)
 	http.streams_metrics_init(reg)
 	sqlite.sqlite_metrics_init(reg)
+	dbt.init(reg) // no-op when HEIMDALL_DB_TELEMETRY=off
 	reaper_metrics_init(reg)
 	db_collectors_init(reg)
 	push_service.push_metrics_init(reg)

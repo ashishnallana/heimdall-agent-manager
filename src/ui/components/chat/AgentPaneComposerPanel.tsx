@@ -20,6 +20,7 @@ import { useAgentStream } from './useAgentStream';
 import { usePaneVaultLock } from '../shells/usePaneVaultLock';
 import VaultLockedOverlay from '../shells/VaultLockedOverlay';
 import { useTheme } from '../../store/themeSlice';
+import { usePaneVisible } from '../workbench/paneVisibility';
 
 /**
  * Compute fitted font size for terminal container on narrow viewports (<500px).
@@ -278,6 +279,7 @@ export function AgentPaneComposerPanel({
     }
   }, [runCount, startedAt, isStarting, reconnectStream]);
 
+  const paneVisible = usePaneVisible();
   // --------------------------------------------------------------------------
   // LEGACY POLLING PATH: 500ms/5m polled capture with SHA-256 diff & term.reset()
   // Cleanly isolated so that removing legacy polling in the future only requires
@@ -292,7 +294,9 @@ export function AgentPaneComposerPanel({
     onPlanLimit: reportPlanLimit,
     agentInstanceId: !planLimit && entitlements.terminal_streaming_enabled && (!isStreamingExperimentEnabled || fallbackToPolling) ? agentInstanceId : null,
     isExpanded,
-    isActiveTab,
+    // A tab hidden by the layout (maximised tile, hidden aux dock) is not on screen:
+    // the 500 ms capture pauses and resumes with a refetch when it is shown.
+    isActiveTab: isActiveTab && paneVisible,
     runtimeStatus,
     width: terminalDimensions.cols,
     lineLimit: 120,

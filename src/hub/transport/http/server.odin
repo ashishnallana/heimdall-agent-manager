@@ -8,6 +8,7 @@ import "core:strings"
 import "core:thread"
 import "core:time"
 import contracts "odin_test:contracts"
+import dbt "odin_test:hub/platform/dbtelemetry"
 import metrics "odin_test:lib/metrics"
 
 // Allow 50 MiB artifact payloads plus multipart/base64 framing overhead.
@@ -138,9 +139,12 @@ handle_client :: proc(client: net.TCP_Socket, source: net.Endpoint, router: ^Rou
 	// so long-lived WebSocket connections never land in the latency histogram.
 	metrics.gauge_inc(http_metrics.in_flight)
 	defer metrics.gauge_dec(http_metrics.in_flight)
+	dbt.scope_begin(.Http)
 	started := time.tick_now()
 	resp, route := router_dispatch_matched(router, req_obj)
-	http_metrics_observe(route, method, resp.status, time.tick_since(started))
+	elapsed := time.tick_since(started)
+	http_metrics_observe(route, method, resp.status, elapsed)
+	http_request_db_observe(route, method, resp.status, elapsed, req_obj.request_id)
 	write_http_response(client, resp)
 }
 

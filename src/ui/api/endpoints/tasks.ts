@@ -1377,7 +1377,9 @@ export const tasksApi = heimdallApi.injectEndpoints({
           return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any };
         }
       },
-      providesTags: (_result, _error, { taskId }) => [{ type: 'Task' as const, id: taskId }],
+      // Facets stay mutable while an attempt is active: task/facet_changed names
+      // (task, attempt, kind), so only the rewritten facet refetches.
+      providesTags: (_result, _error, { taskId, attemptNo, kind }) => [{ type: 'TaskFacet' as const, id: `${taskId}:${attemptNo}:${kind}` }],
     }),
     fetchCommitDiff: build.query<any, { chainId: string; directoryId: string; base?: string; head?: string; path?: string; listFiles?: boolean; cursor?: string; limit?: number }>({
       queryFn: async ({ chainId, directoryId, base = '', head = '', path = '', listFiles = false, cursor = '', limit = 50 }) => {

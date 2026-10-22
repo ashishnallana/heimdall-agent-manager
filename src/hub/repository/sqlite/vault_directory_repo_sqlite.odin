@@ -3,6 +3,7 @@ package sqlite
 import "core:c"
 import "core:sync"
 import domain "odin_test:hub/domain"
+import dbt "odin_test:hub/platform/dbtelemetry"
 import iface "odin_test:hub/repository/iface"
 
 // Vault device directory repository (docs/plans/passwordless-vault.md §2 P2).
@@ -32,7 +33,7 @@ Vault_Directory_Write_Conn :: struct {
 // database cannot have a second connection; the repository then writes on `conn`
 // (single-connection use only: tests).
 open_vault_directory_write_conn :: proc(w: ^Vault_Directory_Write_Conn, path: string) -> (bool, domain.Domain_Error) {
-	conn, ok, err := open(path)
+	conn, ok, err := open(path, .Vault)
 	if !ok do return false, err
 	w.conn = conn
 	if !exec(&w.conn, "PRAGMA busy_timeout = 5000;") {
@@ -286,8 +287,8 @@ insert_log_on :: proc(conn: ^Conn, e: domain.Vault_Log_Entry) -> bool {
 // the log or the device status (see iface.Vault_Mark_Retired_Proc).
 vault_mark_retired_sqlite :: proc(ctx: rawptr, user_id, device_id, bridge_id, now: string) -> (bool, domain.Domain_Error) {
 	impl := (^Vault_Directory_Repo_SQLite)(ctx)
-	sync.mutex_lock(&impl.mutex)
-	defer sync.mutex_unlock(&impl.mutex)
+	lock_tok := dbt.timed_lock(&impl.mutex, .Vault)
+	defer dbt.timed_unlock(&impl.mutex, .Vault, lock_tok)
 	conn := write_conn(impl)
 	stmt, ok := prepare(conn, "UPDATE vault_devices SET retired_at = ? WHERE device_id = ? AND user_id = ? AND status = 'approved' AND bridge_id = ? AND bridge_id != '' AND retired_at IS NULL;")
 	if !ok do return false, repo_err("failed to prepare the retirement hint")
@@ -361,8 +362,8 @@ vault_register_pending_sqlite :: proc(ctx: rawptr, device: domain.Vault_Device, 
 	if device.status != .Pending || device.pair_lookup == "" || device.pair_key_mac == "" || device.pair_salt == "" || device.pair_hub_origin == "" || device.register_statement == "" || device.code_expires_at == "" {
 		return {}, domain.domain_error(.Validation_Failed, "a registered device must be pending with a pairing lookup")
 	}
-	sync.mutex_lock(&impl.mutex)
-	defer sync.mutex_unlock(&impl.mutex)
+	lock_tok := dbt.timed_lock(&impl.mutex, .Vault)
+	defer dbt.timed_unlock(&impl.mutex, .Vault, lock_tok)
 	conn := write_conn(impl)
 	if !exec(conn, "BEGIN IMMEDIATE;") do return {}, repo_err("failed to begin vault registration")
 	committed := false
@@ -438,8 +439,8 @@ vault_register_pending_sqlite :: proc(ctx: rawptr, device: domain.Vault_Device, 
 
 vault_delete_pending_sqlite :: proc(ctx: rawptr, user_id, device_id: string) -> (bool, domain.Domain_Error) {
 	impl := (^Vault_Directory_Repo_SQLite)(ctx)
-	sync.mutex_lock(&impl.mutex)
-	defer sync.mutex_unlock(&impl.mutex)
+	lock_tok := dbt.timed_lock(&impl.mutex, .Vault)
+	defer dbt.timed_unlock(&impl.mutex, .Vault, lock_tok)
 	conn := write_conn(impl)
 	stmt, ok := prepare(conn, "DELETE FROM vault_devices WHERE device_id = ? AND user_id = ? AND status = 'pending';")
 	if !ok do return false, repo_err("failed to prepare pending delete")
@@ -453,8 +454,8 @@ vault_delete_pending_sqlite :: proc(ctx: rawptr, user_id, device_id: string) -> 
 
 vault_touch_last_seen_sqlite :: proc(ctx: rawptr, user_id, device_id, now: string) -> domain.Domain_Error {
 	impl := (^Vault_Directory_Repo_SQLite)(ctx)
-	sync.mutex_lock(&impl.mutex)
-	defer sync.mutex_unlock(&impl.mutex)
+	lock_tok := dbt.timed_lock(&impl.mutex, .Vault)
+	defer dbt.timed_unlock(&impl.mutex, .Vault, lock_tok)
 	conn := write_conn(impl)
 	stmt, ok := prepare(conn, "UPDATE vault_devices SET last_seen_at = ? WHERE device_id = ? AND user_id = ?;")
 	if !ok do return repo_err("failed to prepare last_seen update")
@@ -495,8 +496,8 @@ upsert_wrap_on :: proc(conn: ^Conn, w: domain.Vault_Wrap_Row) -> bool {
 
 vault_create_genesis_sqlite :: proc(ctx: rawptr, g: domain.Vault_Genesis) -> domain.Domain_Error {
 	impl := (^Vault_Directory_Repo_SQLite)(ctx)
-	sync.mutex_lock(&impl.mutex)
-	defer sync.mutex_unlock(&impl.mutex)
+	lock_tok := dbt.timed_lock(&impl.mutex, .Vault)
+	defer dbt.timed_unlock(&impl.mutex, .Vault, lock_tok)
 	conn := write_conn(impl)
 	if !exec(conn, "BEGIN IMMEDIATE;") do return repo_err("failed to begin vault genesis")
 	committed := false
@@ -558,8 +559,8 @@ vault_commit_sqlite :: proc(ctx: rawptr, cm: domain.Vault_Directory_Commit) -> (
 	if cm.log_statement == "" || cm.log_signature == "" || cm.log_entry_hash == "" || cm.expected_head_hash == "" {
 		return 0, domain.domain_error(.Validation_Failed, "a directory commit must append exactly one signed log op")
 	}
-	sync.mutex_lock(&impl.mutex)
-	defer sync.mutex_unlock(&impl.mutex)
+	lock_tok := dbt.timed_lock(&impl.mutex, .Vault)
+	defer dbt.timed_unlock(&impl.mutex, .Vault, lock_tok)
 	conn := write_conn(impl)
 	if !exec(conn, "BEGIN IMMEDIATE;") do return 0, repo_err("failed to begin vault directory commit")
 	committed := false
@@ -697,8 +698,8 @@ vault_get_reset_sqlite :: proc(ctx: rawptr, user_id: string) -> (domain.Vault_Re
 
 vault_schedule_reset_sqlite :: proc(ctx: rawptr, r: domain.Vault_Reset) -> (domain.Vault_Reset, bool, domain.Domain_Error) {
 	impl := (^Vault_Directory_Repo_SQLite)(ctx)
-	sync.mutex_lock(&impl.mutex)
-	defer sync.mutex_unlock(&impl.mutex)
+	lock_tok := dbt.timed_lock(&impl.mutex, .Vault)
+	defer dbt.timed_unlock(&impl.mutex, .Vault, lock_tok)
 	conn := write_conn(impl)
 	if !exec(conn, "BEGIN IMMEDIATE;") do return {}, false, repo_err("failed to begin vault reset")
 	committed := false
@@ -729,8 +730,8 @@ vault_schedule_reset_sqlite :: proc(ctx: rawptr, r: domain.Vault_Reset) -> (doma
 
 vault_cancel_reset_sqlite :: proc(ctx: rawptr, user_id: string) -> (bool, domain.Domain_Error) {
 	impl := (^Vault_Directory_Repo_SQLite)(ctx)
-	sync.mutex_lock(&impl.mutex)
-	defer sync.mutex_unlock(&impl.mutex)
+	lock_tok := dbt.timed_lock(&impl.mutex, .Vault)
+	defer dbt.timed_unlock(&impl.mutex, .Vault, lock_tok)
 	conn := write_conn(impl)
 	stmt, ok := prepare(conn, "DELETE FROM vault_directory_resets WHERE user_id = ?;")
 	if !ok do return false, repo_err("failed to prepare vault reset cancel")
@@ -768,8 +769,8 @@ VAULT_RESET_DELETES :: [6]string{
 
 vault_execute_reset_sqlite :: proc(ctx: rawptr, user_id, now: string) -> (bool, domain.Domain_Error) {
 	impl := (^Vault_Directory_Repo_SQLite)(ctx)
-	sync.mutex_lock(&impl.mutex)
-	defer sync.mutex_unlock(&impl.mutex)
+	lock_tok := dbt.timed_lock(&impl.mutex, .Vault)
+	defer dbt.timed_unlock(&impl.mutex, .Vault, lock_tok)
 	conn := write_conn(impl)
 	if !exec(conn, "BEGIN IMMEDIATE;") do return false, repo_err("failed to begin vault reset execution")
 	committed := false

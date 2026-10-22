@@ -11,6 +11,7 @@ import agent_service "odin_test:hub/service/agent"
 import auth_service "odin_test:hub/service/auth"
 import bridge_service "odin_test:hub/service/bridge"
 import bridge_runtime_service "odin_test:hub/service/bridge_runtime"
+import events "odin_test:hub/service/events"
 import project_service "odin_test:hub/service/project"
 import provider_service "odin_test:hub/service/provider"
 
@@ -24,6 +25,8 @@ Provider_Handlers :: struct {
 	clock:                   ^platform.Clock,
 	ids:                     ^platform.ID_Generator,
 	agents:                  ^agent_service.Agent_Service,
+	// event_bus (nil in test wirings) carries REQ-2 provider_status_changed hints.
+	event_bus:               ^events.User_Event_Bus,
 }
 
 Provider_Discovery_Item_Wire :: struct {
@@ -280,6 +283,8 @@ bridge_provider_discover_handler :: proc(ctx: rawptr, req: Request) -> Response 
 		}
 	}
 	if apply_err := provider_service.apply_discovery_report(h.providers, bridge.bridge_id, statuses); apply_err.code != .None do return respond_error(apply_err, req.request_id)
+	// One hint after every upsert of the report, not one per provider.
+	publish_bridge_provider_status_changed(h.event_bus, string(bridge.owner_user_id), bridge.bridge_id, "")
 	return bridge_provider_status_response(
 		h,
 		bridge.bridge_id,
@@ -305,6 +310,7 @@ bridge_provider_enable_handler :: proc(ctx: rawptr, req: Request) -> Response {
 		enabled,
 	)
 	if !saved do return respond_error(save_err, req.request_id)
+	publish_bridge_provider_status_changed(h.event_bus, string(bridge.owner_user_id), bridge.bridge_id, setting.provider)
 	b := strings.builder_make()
 	strings.write_string(&b, "{\"bridge_id\":\""); write_handler_json_string(&b, setting.bridge_id)
 	strings.write_string(&b, "\",\"provider\":\""); write_handler_json_string(&b, setting.provider)

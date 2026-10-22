@@ -93,6 +93,10 @@ agent_action_lease_heartbeat_handler :: proc(ctx: rawptr, req: Request) -> Respo
 // ---- M2 lease verbs ------------------------------------------------------------------
 
 // POST /api/v1/agent-actions/lease/submit  params: {lease_id?, summary, handoff?, output?, vcs?, verify?, artifacts?, auto?}
+// E12 (REQ-2): submit/handoff/switch/block publish no task event here. The
+// engine already announces them after COMMIT: refold queues task/updated for
+// every projection change and each facet write queues task/facet_changed, so a
+// handler-level publish only duplicated (and could precede) those.
 agent_action_lease_submit_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Agent_Action_Handlers)(ctx)
 	auth, inst, ok, resp := require_instance_action_auth(h, req)
@@ -110,7 +114,6 @@ agent_action_lease_submit_handler :: proc(ctx: rawptr, req: Request) -> Response
 	})
 	if !sok do return respond_error(err, req.request_id)
 	publish_agent_action(h, inst, "lease_submit", fmt.tprintf("submitted %s (%s)", res.task.task_id, res.outcome))
-	publish_task_event(h.event_bus, string(res.task.owner_user_id), string(res.task.task_id), string(res.task.chain_id), "updated")
 	data, _ := json.marshal(make_simple_task_wire(res.task), JSON_MARSHAL_OPT, allocator = context.temp_allocator)
 	return respond_success(fmt.tprintf("{{\"outcome\":\"%s\",\"task\":%s}}", res.outcome, string(data)), req.request_id, auth_ctx_server_time(req), 200)
 }
@@ -125,7 +128,6 @@ agent_action_lease_handoff_handler :: proc(ctx: rawptr, req: Request) -> Respons
 	task, hok, err := taskv2.lease_handoff(h.task_engine, auth, taskv2.Handoff_Input{lease_id = json_string(params, "lease_id"), summary = json_string(params, "summary"), handoff_json = verbatim_field(params, "handoff"), vcs_json = verbatim_field(params, "vcs")})
 	if !hok do return respond_error(err, req.request_id)
 	publish_agent_action(h, inst, "lease_handoff", fmt.tprintf("handed off %s", task.task_id))
-	publish_task_event(h.event_bus, string(task.owner_user_id), string(task.task_id), string(task.chain_id), "updated")
 	data, _ := json.marshal(make_simple_task_wire(task), JSON_MARSHAL_OPT, allocator = context.temp_allocator)
 	return respond_success(fmt.tprintf("{{\"task\":%s}}", string(data)), req.request_id, auth_ctx_server_time(req), 200)
 }
@@ -143,8 +145,6 @@ agent_action_lease_switch_handler :: proc(ctx: rawptr, req: Request) -> Response
 	res, sok, err := taskv2.lease_switch(h.task_engine, auth, taskv2.Switch_Input{lease_id = json_string(params, "lease_id"), task_id = json_string(params, "task_id"), summary = json_string(params, "summary"), handoff_json = verbatim_field(params, "handoff")})
 	if !sok do return respond_error(err, req.request_id)
 	publish_agent_action(h, inst, "lease_switch", fmt.tprintf("switched from %s to %s", res.left.task_id, res.task.task_id))
-	publish_task_event(h.event_bus, string(res.left.owner_user_id), string(res.left.task_id), string(res.left.chain_id), "updated")
-	publish_task_event(h.event_bus, string(res.task.owner_user_id), string(res.task.task_id), string(res.task.chain_id), "updated")
 	wire := Lease_Next_Wire{status = "granted", lease = make_lease_wire(res.lease), task = make_simple_task_wire(res.task), pack = json_value_or_null(res.pack_json)}
 	data, _ := json.marshal(wire, JSON_MARSHAL_OPT, allocator = context.temp_allocator)
 	return respond_success(string(data), req.request_id, auth_ctx_server_time(req), 200)
@@ -160,7 +160,6 @@ agent_action_lease_block_handler :: proc(ctx: rawptr, req: Request) -> Response 
 	task, bok, err := taskv2.lease_block(h.task_engine, auth, taskv2.Block_Input{lease_id = json_string(params, "lease_id"), waiting_on_json = verbatim_field(params, "waiting_on"), summary = json_string(params, "summary")})
 	if !bok do return respond_error(err, req.request_id)
 	publish_agent_action(h, inst, "lease_block", fmt.tprintf("blocked %s", task.task_id))
-	publish_task_event(h.event_bus, string(task.owner_user_id), string(task.task_id), string(task.chain_id), "updated")
 	data, _ := json.marshal(make_simple_task_wire(task), JSON_MARSHAL_OPT, allocator = context.temp_allocator)
 	return respond_success(fmt.tprintf("{{\"task\":%s}}", string(data)), req.request_id, auth_ctx_server_time(req), 200)
 }
@@ -231,6 +230,9 @@ agent_action_chat_send_to_user_handler :: proc(ctx: rawptr, req: Request) -> Res
 	// (e.g. start-success banners) are not user-actionable, so skip their preview.
 	if h.event_bus != nil && msg.message_type != "system" {
 		events.publish_owned(h.event_bus, string(inst.owner_user_id), agent_to_user_chat_event_json(inst, msg))
+	} else if h.event_bus != nil {
+		// System rows still move last_message_at/unread_count: id-only hint, no toast.
+		if conv, conv_ok, _ := content_service.get_conversation_by_instance(h.content, auth, inst.agent_instance_id); conv_ok do publish_chat_message_created(h.event_bus, conv, msg)
 	}
 	// Web Push (WP-SEND-2): also deliver an OS notification for backgrounded/
 	// closed PWAs. Mirrors the client notify policy (chat only, never system):
@@ -325,6 +327,11 @@ agent_action_chat_send_to_agent_handler :: proc(ctx: rawptr, req: Request) -> Re
 	}
 	msg, saved, err := content_service.send_agent_to_agent(h.content, auth, target, content_service.Message_Input{body = json_string(params, "body"), artifact_ids_json = json_array_optional(params, "artifact_ids"), metadata_json = metadata_json})
 	if !saved do return respond_error(err, req.request_id)
+	// E3: the row lands in the TARGET's conversation and moves its preview and
+	// last_message_at; id-only hint from the re-read row (no body, no toast).
+	if h.event_bus != nil {
+		if conv, conv_ok, _ := content_service.get_conversation(h.content, contracts.Auth_Context{kind = .User_Token, user_id = string(inst.owner_user_id)}, msg.conversation_id); conv_ok do publish_chat_message_created(h.event_bus, conv, msg)
+	}
 	// Q3: id-free plain phrase (never resolve the target's name in the emit path).
 	publish_agent_action(h, inst, "chat_send_agent", "messaged another agent")
 	b := strings.builder_make()
@@ -342,7 +349,7 @@ agent_action_conversation_set_title_handler :: proc(ctx: rawptr, req: Request) -
 	c, saved, err := content_service.set_own_conversation_title(h.content, auth, inst.agent_instance_id, json_string(params, "title"))
 	if !saved do return respond_error(err, req.request_id)
 	publish_agent_action(h, inst, "conversation_title", "renamed the conversation")
-	events.publish_resource_changed(h.event_bus, string(c.owner_user_id), "conversation", c.conversation_id, "updated", "{}")
+	publish_conversation_changed(h.event_bus, c, "updated")
 	b := strings.builder_make()
 	write_chat_json(&b, c)
 	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req), 200)
@@ -547,13 +554,18 @@ process_agent_chat_fetch_or_read :: proc(ctx: rawptr, req: Request, default_mark
 		ids := make([dynamic]string)
 		defer delete(ids)
 		for row in rows { if row.read_at == "" do append(&ids, row.message_id) }
-		marked_count, _ = content_service.mark_messages_read_by_ids(h.content, auth, ids[:])
+		read_at := ""
+		marked_count, read_at, _ = content_service.mark_messages_read_by_ids_at(h.content, auth, ids[:])
+		// E4: the rows were listed before the mark; report the committed receipt.
+		if marked_count > 0 {
+			for &row in rows { if row.read_at == "" do row.read_at = read_at }
+		}
 		through_message_id = rows[len(rows)-1].message_id
 		through_created_at = rows[len(rows)-1].created_at
 		// Notify the conversation owner (the human) that their agent read these
 		// messages, so the UI can show read receipts on the user's sent bubbles.
 		if marked_count > 0 {
-			publish_agent_messages_read(h, string(conv.owner_user_id), conv, ids[:], inst.agent_instance_id)
+			publish_agent_messages_read(h, string(conv.owner_user_id), conv, ids[:], inst.agent_instance_id, read_at)
 		}
 	}
 
@@ -586,23 +598,9 @@ process_agent_chat_fetch_or_read :: proc(ctx: rawptr, req: Request, default_mark
 // Publish a `messages_read` event when an AGENT reads the user's messages, so
 // the human's UI can show read receipts. Reuses messages_read_event_json from
 // content_handlers (same package). No-op without an event bus (test wiring).
-publish_agent_messages_read :: proc(h:^Agent_Action_Handlers, owner_user_id:string, c:domain.Chat_Conversation, message_ids:[]string, reader_instance_id:string){
+publish_agent_messages_read :: proc(h:^Agent_Action_Handlers, owner_user_id:string, c:domain.Chat_Conversation, message_ids:[]string, reader_instance_id:string, read_at:string){
 	if h==nil || h.event_bus==nil || owner_user_id=="" || len(message_ids)==0 do return
-	events.publish_owned(h.event_bus, owner_user_id, messages_read_event_json(c, message_ids, reader_instance_id))
-}
-
-// publish_current_task_changed emits a live resource_changed event on an agent
-// instance's current task pointer so the dashboard updates its work-vs-review
-// banner without a manual refresh (CT-9). Fire-and-forget; no-op without a bus.
-publish_current_task_changed :: proc(h: ^Agent_Action_Handlers, owner_user_id, agent_instance_id, current_task_id, current_task_role: string) {
-	if h == nil || h.event_bus == nil || owner_user_id == "" do return
-	b := strings.builder_make()
-	defer strings.builder_destroy(&b)
-	strings.write_string(&b, `{"agent_instance_id":"`); write_handler_json_string(&b, agent_instance_id)
-	strings.write_string(&b, `","current_task_id":"`); write_handler_json_string(&b, current_task_id)
-	strings.write_string(&b, `","current_task_role":"`); write_handler_json_string(&b, current_task_role)
-	strings.write_string(&b, `"}`)
-	events.publish_resource_changed(h.event_bus, owner_user_id, "agent_instance", agent_instance_id, "current_task_changed", strings.to_string(b))
+	events.publish_owned(h.event_bus, owner_user_id, messages_read_event_json(c, message_ids, reader_instance_id, read_at))
 }
 
 // publish_agent_action emits a lean, ephemeral "agent_action" event to the acting
@@ -1232,6 +1230,10 @@ agent_action_start_success_handler :: proc(ctx: rawptr, req: Request) -> Respons
 	if !ok do return resp
 	inst, saved, err := agent_service.mark_instance_start_success(h.agents, auth)
 	if !saved do return respond_error(err, req.request_id)
+	// running/ready was written: tell the owner's UI, and let an in-flight
+	// reconfiguration observe readiness now rather than on the next reaper pass.
+	publish_instance_changed(h.event_bus, inst, "status_changed")
+	agent_service.reconcile_instance_reconfigurations(h.agents, inst.bridge_id, resend = false)
 	if inst.kind == "provider_test" {
 		if h.providers != nil do provider_service.provider_test_mark_instance_ready(h.providers, inst.agent_instance_id)
 		b := strings.builder_make(); strings.write_string(&b, "{\"instance\":"); write_agent_instance_json(&b, inst); strings.write_byte(&b, '}')
@@ -1239,6 +1241,9 @@ agent_action_start_success_handler :: proc(ctx: rawptr, req: Request) -> Respons
 	}
 	startup_note, note_saved, _ := content_service.send_agent_message(h.content, auth, inst.agent_instance_id, content_service.Message_Input{body = "Agent has started and is ready.", artifact_ids_json = "[]", message_type = "system"})
 	conv, conv_ok, _ := content_service.get_conversation_by_instance(h.content, auth, inst.agent_instance_id)
+	// The system banner moves last_message_at/unread_count; it gets the id-only
+	// message_created hint (no preview, no toast) so sidebars stay current.
+	if conv_ok && note_saved do publish_chat_message_created(h.event_bus, conv, startup_note)
 	if conv_ok {
 		// Only re-notify for genuinely unread inbound messages. Scanning all recent
 		// messages and notifying for the first user_to_agent row (regardless of read

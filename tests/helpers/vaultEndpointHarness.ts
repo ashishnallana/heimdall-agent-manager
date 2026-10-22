@@ -147,7 +147,7 @@ export function installFetchCapture(): FetchCapture {
   };
 }
 
-export async function makeVaultStore(): Promise<any> {
+export async function makeVaultStore(options: { extraMiddleware?: any[] } = {}): Promise<any> {
   const { configureStore } = await import(
     `${REPO_ROOT}/node_modules/@reduxjs/toolkit/dist/redux-toolkit.modern.mjs`
   );
@@ -161,7 +161,7 @@ export async function makeVaultStore(): Promise<any> {
       [heimdallApi.reducerPath]: heimdallApi.reducer,
     },
     middleware: (g: any) =>
-      g({ serializableCheck: false, immutableCheck: false }).concat(heimdallApi.middleware),
+      g({ serializableCheck: false, immutableCheck: false }).concat(...(options.extraMiddleware || []), heimdallApi.middleware),
   });
 }
 

@@ -4,6 +4,7 @@ import "core:c"
 import "core:fmt"
 import "core:sync"
 import "core:time"
+import dbt "odin_test:hub/platform/dbtelemetry"
 import sqlite "odin_test:hub/repository/sqlite"
 import metrics "odin_test:lib/metrics"
 
@@ -88,7 +89,7 @@ db_collectors_init :: proc(reg: ^metrics.Registry) {
 // simply absent from scrapes) if the file cannot be opened.
 db_collectors_attach :: proc(db_path: string) -> bool {
 	if db_path == "" do return false
-	conn, ok, _ := sqlite.open(db_path)
+	conn, ok, _ := sqlite.open(db_path, .Metrics)
 	if !ok do return false
 	_ = sqlite.exec(&conn, "PRAGMA query_only = 1;")
 	_ = sqlite.exec(&conn, "PRAGMA busy_timeout = 1000;")
@@ -120,8 +121,10 @@ db_collectors_invalidate :: proc() {
 
 @(private = "file")
 db_collectors_collect :: proc(ctx: rawptr, e: ^metrics.Exposition) {
-	sync.lock(&db_collectors.mu)
-	defer sync.unlock(&db_collectors.mu)
+	dbt.scope_begin(.Scrape)
+	defer dbt.scope_end()
+	lock_tok := dbt.timed_lock(&db_collectors.mu, .Collector)
+	defer dbt.timed_unlock(&db_collectors.mu, .Collector, lock_tok)
 	s := &db_collectors
 	if !s.attached do return
 	if !s.have_cache || time.tick_since(s.cached_at) >= DB_COLLECTORS_CACHE_TTL {

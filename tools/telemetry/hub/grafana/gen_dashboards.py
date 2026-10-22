@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Generate the Heimdall Grafana dashboards (hub-health, fleet, streams, bridge-events).
+"""Generate the Heimdall Grafana dashboards (hub-health, fleet, streams, bridge-events, hub-db).
 
 Hand-maintaining Grafana JSON is error-prone; this script is the source of
-truth for the Hub Health dashboard. Re-run it and commit the JSON when panels
-change:  python3 tools/telemetry/hub/grafana/gen_dashboards.py
+truth for every dashboard above (task-system-v2.json is still hand-maintained).
+Re-run it and commit the JSON when panels change:
+  python3 tools/telemetry/hub/grafana/gen_dashboards.py
+verify-db-dashboard.sh fails when the committed JSON differs from the output.
 """
 import json
 import os
@@ -33,13 +35,15 @@ def target(expr, legend="", instant=False):
 target.n = 0
 
 
-def panel(title, exprs, x, y, w=12, h=8, unit="short", kind="timeseries", desc="", extra_fc=None, options=None, ds=None):
+def panel(title, exprs, x, y, w=12, h=8, unit="short", kind="timeseries", desc="", extra_fc=None, options=None, ds=None, no_value=None):
     target.n = 0
     targets = [target(*e) if isinstance(e, tuple) else target(e) for e in exprs]
     if ds is not None:
         for t in targets:
             t["datasource"] = ds
     fc = {"defaults": {"unit": unit}, "overrides": []}
+    if no_value is not None:
+        fc["defaults"]["noValue"] = no_value
     if extra_fc:
         fc["defaults"].update(extra_fc)
     p = {
@@ -78,6 +82,17 @@ def row(title, y):
     return {"id": nid(), "type": "row", "title": title, "collapsed": False, "gridPos": {"x": 0, "y": y, "w": 24, "h": 1}, "panels": []}
 
 
+def text_panel(title, content, x, y, w=24, h=8):
+    """A static Markdown panel for caveats and reading guides."""
+    return {
+        "id": nid(),
+        "type": "text",
+        "title": title,
+        "gridPos": {"x": x, "y": y, "w": w, "h": h},
+        "options": {"mode": "markdown", "content": content},
+    }
+
+
 stat_opts = {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": False}, "colorMode": "value", "graphMode": "none", "textMode": "auto"}
 
 panels = [
@@ -101,7 +116,8 @@ panels = [
         ('histogram_quantile(0.50, sum by (le) (rate(heimdall_http_request_duration_seconds_bucket[5m])))', "p50"),
         ('histogram_quantile(0.95, sum by (le) (rate(heimdall_http_request_duration_seconds_bucket[5m])))', "p95"),
         ('histogram_quantile(0.99, sum by (le) (rate(heimdall_http_request_duration_seconds_bucket[5m])))', "p99"),
-    ], 0, 14, unit="s"),
+    ], 0, 14, unit="s",
+          desc="Bucket-interpolated. DB telemetry (basic, the default) adds a 2.5 ms bound to this histogram: do not read a quantile across that deploy. DB share of request time: Heimdall / Hub DB."),
     panel("p95 latency by route (top 10)", [('topk(10, histogram_quantile(0.95, sum by (route, le) (rate(heimdall_http_request_duration_seconds_bucket[5m]))))', "{{route}}")], 12, 14, unit="s"),
     panel("Requests/s by route (top 10)", [('topk(10, sum by (route) (rate(heimdall_http_requests_total[5m])))', "{{route}}")], 0, 22, unit="reqps"),
     panel("Errors by route (4xx / 5xx)", [
@@ -152,6 +168,8 @@ dashboard = {
     "refresh": "30s",
     "templating": {"list": []},
     "annotations": {"list": []},
+    # Every generated dashboard links to the others (Hub Health <-> Hub DB included).
+    "links": [{"title": "Heimdall dashboards", "type": "dashboards", "tags": ["heimdall"], "asDropdown": True, "keepTime": True, "includeVars": False, "targetBlank": False}],
     "panels": panels,
 }
 
@@ -235,7 +253,22 @@ fleet_panels = [
         ('sum(heimdall_bridge_breakers_open{' + BRIDGE_SEL + '})', "breakers open"),
     ], 12, 107, unit="short",
           desc="From bridge heartbeats. http retry/recovered/gave_up/deferred: bridge->hub HTTP retries; shed: commands refused busy; deadline_expired: dropped after the hub stopped waiting."),
+
+    # Task System v2 row: added to fleet.json by hand in 45f4d179, now generated.
+    row("Task System v2", 115),
+    panel("Task Leases & Armed Timers", [('heimdall_task_lease_active', "lease: {{kind}}"), ('heimdall_task_timers_armed', "timers armed")], 0, 116, unit="short",
+          desc="Live task leases by kind and armed timers",
+          extra_fc={"color": {"mode": "palette-classic"}, "custom": {"drawStyle": "line", "fillOpacity": 15, "lineWidth": 2}}),
+    panel("Task Engine Matcher & Transitions", [
+        ('sum by (trigger) (rate(heimdall_task_matcher_runs_total[5m]))', "matcher: {{trigger}}"),
+        ('sum(rate(heimdall_task_transitions_total[5m]))', "all transitions"),
+    ], 12, 116, unit="ops", desc="Rate of matcher execution loops and state transitions",
+          extra_fc={"color": {"mode": "palette-classic"}, "custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 2}}),
 ]
+
+# The Task System v2 row's ids (62-64) were assigned by hand after streams and
+# bridge-events had been generated; rewind so those dashboards keep their ids.
+_id[0] -= 3
 
 fleet = dict(dashboard)
 fleet.update({
@@ -330,3 +363,210 @@ events.update({
     ]},
 })
 write("bridge-events.json", events)
+
+# ---------------------------------------------------------------------------
+# Hub DB: phase-1 DB latency / lock-contention telemetry
+# (docs/reference/db-telemetry.md). Every query is scoped to the selected
+# job + instance so other scrape targets never mix in. No `or vector(0)`:
+# absent telemetry (HEIMDALL_DB_TELEMETRY=off, a pre-telemetry build, or no
+# activity) shows "No data", never a fabricated zero.
+HUB = 'job="$job",instance="$instance"'
+NO_DB = "No data: telemetry off, pre-telemetry hub build, or no matching activity"
+
+
+def sel(extra=""):
+    return "{" + HUB + ("," + extra if extra else "") + "}"
+
+
+# Selectors used inside f-strings (Python < 3.12 cannot nest the quote style).
+S_CONN = sel('conn=~"$conn"')
+S_CONN_READ = sel('conn=~"$conn",op="select"')
+S_CONN_WRITE = sel('conn=~"$conn",op=~"insert|update|delete"')
+S_MAIN = sel('conn="main"')
+S_CONNLOCK = sel('lock=~"conn_.*"')
+S_CONNLOCK_1MS = sel('lock=~"conn_.*",le="0.001"')
+S_NO_BUSY_WAIT = sel('component!="busy_wait"')  # phase 1: busy_wait is always 0
+S_NOT_COMMIT = sel('outcome!="commit"')
+S_BUSY = sel('code=~"busy.*|locked"')
+S_HIT = sel('kind="hit"')
+S_HITMISS = sel('kind=~"hit|miss"')
+
+
+def quantiles(bucket, by, extra="", legend=""):
+    """p50/p95/p99 of one histogram, aggregated by `by` (plus le)."""
+    return [(f'histogram_quantile({q}, sum by (le{", " + by if by else ""}) (rate({bucket}{sel(extra)}[5m])))', f"p{int(q * 100)} {legend}".strip())
+            for q in (0.5, 0.95, 0.99)]
+
+
+DB_GUIDE = """\
+**Phase-1 DB telemetry** (`HEIMDALL_DB_TELEMETRY`, default `basic`). Reference: `docs/reference/db-telemetry.md`.
+
+- **No data ≠ zero.** `off` (explicit opt-out) and hub builds without the telemetry register none of these families, so panels show *No data*. Lazy series (per route, call site, op, tx kind) also appear only after the first matching call.
+- **Disjoint vs containing intervals.** `app_lock_wait`, `conn_wait` and `exec_excl_busy` never overlap on one thread: their *sums* may be stacked and divided by request time (ratio of sums). Lock **hold** and **transaction** durations *contain* the holder's waits and execution: they are never added to wait or request components.
+- **Percentiles are per histogram.** Never subtract one percentile from another (e.g. hold p99 − wait p99); compare `_sum` rates instead. Quantiles interpolate inside buckets: wait buckets top out at 5 s, hold/tx at 30 s, exec at 5 s.
+- **`busy_wait` is unavailable in phase 1** (no busy handler; `full` mode is rejected at boot). Successful `busy_timeout` sleeps are *inside* `exec` on write/tx ops, so `busy_wait` is hidden here rather than shown as a misleading 0.
+- **Waiters:** `heimdall_db_lock_waiters` is sampled at scrape. `_waiters_max` is the high-water mark since the *previous scrape* and is reset by every scrape: exact with one scraper, a lower bound if anything else (e.g. a manual `curl`) also scrapes. Use contention rates for manual checks.
+- **Cardinality:** call-site panels are `topk` over up to 3 × 261 `(conn, site)` series; keep their time range modest. WebSocket-frame DB time lands in scope `other` in phase 1.
+- **Histogram layout change:** in `basic` the HTTP request histogram gains `le="0.0025"`; never take an HTTP quantile across the deploy. This dashboard only uses its `_sum`.
+"""
+
+db_stat = {**stat_opts}
+db_panels = [
+    row("Status and reading guide", 0),
+    panel("DB telemetry", [(f'count(heimdall_sqlite_library_info{sel()})', "telemetry", True)], 0, 1, w=6, h=4, kind="stat", options=db_stat,
+          no_value="off / not deployed",
+          extra_fc={"mappings": [{"type": "range", "options": {"from": 1, "to": 1e9, "result": {"text": "basic (on)"}}}],
+                    "color": {"mode": "fixed", "fixedColor": "green"}},
+          desc="Present when the selected hub exposes heimdall_sqlite_library_info, i.e. runs with HEIMDALL_DB_TELEMETRY=basic (the default since the telemetry release). Absent = explicit off, an older build, or the scrape is down."),
+    panel("Linked SQLite library", [(f'heimdall_sqlite_library_info{sel()}', "{{version}}", True)], 6, 1, w=6, h=4, kind="stat",
+          options={**stat_opts, "textMode": "name"}, extra_fc={"color": {"mode": "fixed", "fixedColor": "text"}}, no_value=NO_DB,
+          desc="sqlite3_libversion() of the library the hub process actually linked (not the sqlite3 CLI on the host)."),
+    panel("Oldest open unit of work", [(f'heimdall_db_uow_oldest_hold_seconds{sel()}', "oldest UoW", True)], 12, 1, w=6, h=4, kind="stat", unit="s",
+          options=stat_opts, no_value=NO_DB,
+          extra_fc={"thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": None}, {"color": "orange", "value": 1}, {"color": "red", "value": 5}]}},
+          desc="Age of the currently open outer unit of work at the last scrape (0 = none open)."),
+    panel("Slow-log records dropped (range)", [(f'sum by (reason) (increase(heimdall_db_slow_log_dropped_total{sel()}[$__range]))', "{{reason}}", True)], 18, 1, w=6, h=4, kind="stat",
+          options={**stat_opts, "textMode": "value_and_name"}, no_value=NO_DB,
+          desc="db_slow_request / db_slow_scope lines dropped by the 10 lines/s limiter over the selected range. reason=slow drops matter for slow-request criteria; the records themselves are in the hub's stderr/journal."),
+    text_panel("How to read this dashboard", DB_GUIDE, 0, 5, w=24, h=11),
+
+    row("Request DB time (disjoint components, ratio of sums)", 16),
+    panel("Share of HTTP dispatch time by DB component", [
+        (f'sum by (component) (rate(heimdall_http_request_db_seconds_total{S_NO_BUSY_WAIT}[5m]))'
+         f' / on() group_left() sum(rate(heimdall_http_request_duration_seconds_sum{sel()}[5m]))', "{{component}}"),
+    ], 0, 17, unit="percentunit", no_value=NO_DB,
+          extra_fc={"min": 0, "custom": {"stacking": {"mode": "normal", "group": "A"}, "fillOpacity": 30}},
+          desc="sum(DB component seconds) / sum(router dispatch seconds) over the same plain-HTTP requests. Components are disjoint per thread, so the stack is the DB share of request time; the rest is non-DB work. Transaction hold is NOT part of this. busy_wait is always 0 in phase 1 and is hidden."),
+    panel("DB time per route, top 10 (DB-seconds per second)", [
+        (f'topk(10, sum by (route) (rate(heimdall_http_request_db_seconds_total{sel()}[5m])))', "{{route}}"),
+    ], 12, 17, unit="short", no_value=NO_DB,
+          desc="Sum of the disjoint DB components per route pattern, in seconds of DB time per wall-clock second (can exceed 1 with concurrent requests). topk is evaluated per point, so more than 10 routes can appear over the range."),
+    panel("DB share of route time (top 10 routes by DB time)", [
+        (f'(sum by (route) (rate(heimdall_http_request_db_seconds_total{sel()}[5m])) / sum by (route) (rate(heimdall_http_request_duration_seconds_sum{sel()}[5m])))'
+         f' and topk(10, sum by (route) (rate(heimdall_http_request_db_seconds_total{sel()}[5m])))', "{{route}}"),
+    ], 0, 25, unit="percentunit", no_value=NO_DB, extra_fc={"min": 0},
+          desc="Per route: sum of DB component seconds / sum of dispatch seconds (ratio of sums, never a ratio of percentiles), for the 10 routes with the most DB time at each point (more than 10 can appear over the range)."),
+    panel("DB time per scope by component (DB-seconds per second)", [
+        (f'sum by (scope, component) (rate(heimdall_db_scope_seconds_total{S_NO_BUSY_WAIT}[5m])) > 0', "{{scope}} {{component}}"),
+    ], 12, 25, unit="short", no_value=NO_DB,
+          desc="All scopes, including background work (timer, merge, bridge_log, shell, scrape) and unscoped work (other, which includes WebSocket frames in phase 1). Series are eager; idle scope/component pairs are filtered out with > 0."),
+
+    row("Lock wait and hold", 33),
+    panel("App lock wait p50 / p95 / p99", quantiles("heimdall_db_lock_wait_seconds_bucket", "lock", 'lock!~"conn_.*"', "{{lock}}"), 0, 34, unit="s", no_value=NO_DB,
+          desc="Wait to acquire a DB-guarding service lock (uow_tx, billing, vault, enroll, collector, projector, reconfig, launch_prefs). Gaps mean no acquisitions in the window."),
+    panel("Connection mutex wait p50 / p95 / p99", quantiles("heimdall_db_lock_wait_seconds_bucket", "lock", 'lock=~"conn_.*"', "{{lock}}"), 12, 34, unit="s", no_value=NO_DB,
+          desc="Wait for the SQLite connection mutex (conn_main, conn_billing, conn_enroll, conn_vault, conn_metrics). Its hold time is the exec histogram below."),
+    panel("App lock hold p50 / p95 / p99", quantiles("heimdall_db_lock_hold_seconds_bucket", "lock", "", "{{lock}}"), 0, 42, unit="s", no_value=NO_DB,
+          desc="Time an app lock was held. Contains the holder's own waits and execution: never add it to wait times or subtract percentiles."),
+    panel("Connection mutex: share of acquisitions waiting > 1 ms", [
+        (f'1 - sum by (lock) (rate(heimdall_db_lock_wait_seconds_bucket{S_CONNLOCK_1MS}[5m]))'
+         f' / sum by (lock) (rate(heimdall_db_lock_wait_seconds_count{S_CONNLOCK}[5m]))', "{{lock}}"),
+    ], 12, 42, unit="percentunit", no_value=NO_DB, extra_fc={"min": 0, "max": 1}),
+    panel("Contended acquisitions/s by lock", [(f'sum by (lock) (rate(heimdall_db_lock_contended_total{sel()}[5m]))', "{{lock}}")], 0, 50, unit="ops", no_value=NO_DB,
+          desc="Acquisitions whose try-lock found the lock already held."),
+    panel("Contended share of acquisitions by lock", [
+        (f'sum by (lock) (rate(heimdall_db_lock_contended_total{sel()}[5m])) / sum by (lock) (rate(heimdall_db_lock_wait_seconds_count{sel()}[5m]))', "{{lock}}"),
+    ], 12, 50, unit="percentunit", no_value=NO_DB, extra_fc={"min": 0, "max": 1}),
+    panel("Lock waiters: sampled at scrape vs high-water between scrapes", [
+        (f'max by (lock) (heimdall_db_lock_waiters{sel()})', "now {{lock}}"),
+        (f'max by (lock) (max_over_time(heimdall_db_lock_waiters_max{sel()}[5m]))', "max {{lock}}"),
+    ], 0, 58, unit="short", no_value=NO_DB,
+          desc="'now' is the instantaneous depth at scrape time. 'max' is the high-water mark since the previous scrape; every scrape resets it, so a second scraper (manual curl) makes it a lower bound."),
+    panel("Connection mutex queueing per second of execution", [
+        (f'sum by (conn) (label_replace(rate(heimdall_db_lock_wait_seconds_sum{S_CONNLOCK}[5m]), "conn", "$1", "lock", "conn_(.*)"))'
+         f' / sum by (conn) (rate(heimdall_sqlite_exec_seconds_sum{sel()}[5m]))', "{{conn}}"),
+    ], 12, 58, unit="short", no_value=NO_DB,
+          desc="sum(conn mutex wait seconds) / sum(exec seconds) for the same connection: 1.0 means callers queue as long as SQLite executes."),
+
+    row("Execution per connection ($conn)", 66),
+    panel("Connection busy: exec seconds per second", [(f'sum by (conn) (rate(heimdall_sqlite_exec_seconds_sum{S_CONN}[5m]))', "{{conn}}")], 0, 67,
+          unit="percentunit", no_value=NO_DB, extra_fc={"min": 0},
+          desc="Fraction of wall time the connection mutex is held by wrapped calls (step, exec, prepare, finalize). conn=other aggregates unregistered handles and can exceed 100 %."),
+    panel("Exec time per step/exec call p50 / p95 / p99", quantiles("heimdall_sqlite_exec_seconds_bucket", "conn", 'conn=~"$conn",op!~"prepare|finalize"', "{{conn}}"), 12, 67, unit="s", no_value=NO_DB,
+          desc="Time inside SQLite with the connection mutex held, per step or sqlite3_exec call (prepare/finalize excluded so cheap calls do not dominate p50; all statement ops incl. begin/commit are merged). Includes successful busy_timeout sleeps (phase 1 has no busy split)."),
+    panel("Exec time by op (seconds per second)", [(f'sum by (conn, op) (rate(heimdall_sqlite_exec_seconds_sum{S_CONN}[5m]))', "{{conn}} {{op}}")], 0, 75,
+          unit="short", no_value=NO_DB, extra_fc={"custom": {"stacking": {"mode": "normal", "group": "A"}, "fillOpacity": 30}}),
+    panel("Statements/s by op", [(f'sum by (conn, op) (rate(heimdall_sqlite_statements_total{S_CONN}[5m]))', "{{conn}} {{op}}")], 12, 75,
+          unit="ops", no_value=NO_DB, desc="Statement executions: the first step of each execution and one per sqlite3_exec call."),
+    panel("Read / write mix of exec time", [
+        (f'sum by (conn) (rate(heimdall_sqlite_exec_seconds_sum{S_CONN_READ}[5m])) / sum by (conn) (rate(heimdall_sqlite_exec_seconds_sum{S_CONN}[5m]))', "read (select) {{conn}}"),
+        (f'sum by (conn) (rate(heimdall_sqlite_exec_seconds_sum{S_CONN_WRITE}[5m])) / sum by (conn) (rate(heimdall_sqlite_exec_seconds_sum{S_CONN}[5m]))', "write (insert/update/delete) {{conn}}"),
+    ], 0, 83, unit="percentunit", no_value=NO_DB, extra_fc={"min": 0, "max": 1},
+          desc="Share of exec seconds. The remainder is begin/commit/rollback/pragma/create/other/prepare/finalize."),
+    panel("VM steps per statement by op", [
+        (f'sum by (conn, op) (rate(heimdall_sqlite_vm_steps_total{S_CONN}[5m])) / sum by (conn, op) (rate(heimdall_sqlite_statements_total{S_CONN}[5m]))', "{{conn}} {{op}}"),
+    ], 12, 83, unit="short", no_value=NO_DB, desc="Mean statement cost (sqlite3_stmt_status VM_STEP deltas per execution)."),
+    panel("Full-scan steps/s and sorts/s by op", [
+        (f'sum by (conn, op) (rate(heimdall_sqlite_fullscan_steps_total{S_CONN}[5m])) > 0', "fullscan {{conn}} {{op}}"),
+        (f'sum by (conn, op) (rate(heimdall_sqlite_sort_total{S_CONN}[5m])) > 0', "sort {{conn}} {{op}}"),
+    ], 0, 91, unit="ops", no_value=NO_DB),
+    panel("Wrapped calls/s by op", [(f'sum by (conn, op) (rate(heimdall_sqlite_exec_seconds_count{S_CONN}[5m]))', "{{conn}} {{op}}")], 12, 91,
+          unit="ops", no_value=NO_DB, desc="Every wrapped step/exec/prepare/finalize call (one statement takes several steps)."),
+
+    row("Transactions", 99),
+    panel("Transactions/s by kind, rw and outcome", [
+        (f'sum by (kind, rw, outcome) (rate(heimdall_db_tx_duration_seconds_count{sel()}[5m]))', "{{kind}} {{rw}} {{outcome}}"),
+        (f'rate(heimdall_db_uow_nested_total{sel()}[5m])', "nested UoW (savepoint)"),
+    ], 0, 100, unit="ops", no_value=NO_DB,
+          desc="Outer transactions only; nested units of work are savepoints, counted separately and never as a second transaction. rw=write when the UoW ran an insert/update/delete step."),
+    panel("Committed transaction duration p50 / p95 / p99 by kind", quantiles("heimdall_db_tx_duration_seconds_bucket", "kind", 'outcome="commit"', "{{kind}}"), 12, 100, unit="s", no_value=NO_DB,
+          desc="outcome=commit only (begin_failed/rollback durations would skew it; read and write units are merged). BEGIN to COMMIT return (excludes after-commit hooks; dedicated conns start when BEGIN returns). Contains waits and exec: never add to request components."),
+    panel("Rolled back / failed transactions/s", [
+        (f'sum by (kind, outcome) (rate(heimdall_db_tx_duration_seconds_count{S_NOT_COMMIT}[5m]))', "{{kind}} {{outcome}}"),
+    ], 0, 108, unit="ops", no_value=NO_DB),
+    panel("Oldest open unit of work (max over 5m)", [(f'max_over_time(heimdall_db_uow_oldest_hold_seconds{sel()}[5m])', "oldest UoW")], 12, 108, unit="s", no_value=NO_DB),
+
+    row("Call sites ($conn, selected time range)", 116),
+    panel("Top 10 call sites by step exec time", [(f'topk(10, sum by (conn, site) (increase(heimdall_sqlite_site_exec_seconds_total{S_CONN}[$__range])))', "{{conn}} {{site}}", True)],
+          0, 117, w=8, h=10, kind="bargauge", unit="s", no_value=NO_DB,
+          options={"orientation": "horizontal", "displayMode": "gradient", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": False}},
+          desc="site = <file>:<procedure> of the caller; step calls only. Up to 3 x 261 series are scanned: keep the range modest."),
+    panel("Top 10 call sites by full-scan steps", [(f'topk(10, sum by (conn, site) (increase(heimdall_sqlite_site_fullscan_steps_total{S_CONN}[$__range])))', "{{conn}} {{site}}", True)],
+          8, 117, w=8, h=10, kind="bargauge", unit="short", no_value=NO_DB,
+          options={"orientation": "horizontal", "displayMode": "gradient", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": False}}),
+    panel("Top 10 call sites by VM steps", [(f'topk(10, sum by (conn, site) (increase(heimdall_sqlite_site_vm_steps_total{S_CONN}[$__range])))', "{{conn}} {{site}}", True)],
+          16, 117, w=8, h=10, kind="bargauge", unit="short", no_value=NO_DB,
+          options={"orientation": "horizontal", "displayMode": "gradient", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": False}}),
+    panel("Top-3 call sites' share of main-connection step time", [
+        (f'sum(topk(3, sum by (site) (increase(heimdall_sqlite_site_exec_seconds_total{S_MAIN}[$__range]))))'
+         f' / sum(increase(heimdall_sqlite_site_exec_seconds_total{S_MAIN}[$__range]))', "top-3 share", True),
+    ], 0, 127, w=24, h=4, kind="stat", unit="percentunit", options=stat_opts, no_value=NO_DB,
+          desc="sum of the 3 largest main-connection call sites / all main-connection step exec time over the selected range."),
+
+    row("Errors, cache and storage", 131),
+    panel("SQLite errors/s by conn, op and code", [(f'sum by (conn, op, code) (rate(heimdall_sqlite_errors_total{sel()}[5m]))', "{{conn}} {{op}} {{code}}")], 0, 132, unit="ops", no_value=NO_DB,
+          desc="Error return codes from wrapped step/exec/prepare calls (finalize never double-counts)."),
+    panel("Busy / locked errors: new family vs legacy counter", [
+        (f'sum by (conn, code) (rate(heimdall_sqlite_errors_total{S_BUSY}[5m]))', "{{conn}} {{code}}"),
+        (f'sum(rate(heimdall_sqlite_busy_total{sel()}[5m]))', "legacy heimdall_sqlite_busy_total"),
+    ], 12, 132, unit="ops", no_value="No data: no busy/locked errors recorded or telemetry absent",
+          desc="Failed busy waits only: successful busy_timeout sleeps are inside exec and invisible in phase 1. The legacy counter exists in both modes."),
+    panel("Page cache events/s by conn and kind", [(f'sum by (conn, kind) (rate(heimdall_sqlite_cache_events_total{sel()}[5m]))', "{{conn}} {{kind}}")], 0, 140, unit="ops", no_value=NO_DB,
+          desc="sqlite3_db_status per open handle, summed per connection kind. Counts restart when a handle closes (rate() treats that as a counter reset)."),
+    panel("Page cache hit ratio by conn", [
+        (f'sum by (conn) (rate(heimdall_sqlite_cache_events_total{S_HIT}[5m])) / sum by (conn) (rate(heimdall_sqlite_cache_events_total{S_HITMISS}[5m]))', "{{conn}}"),
+    ], 12, 140, unit="percentunit", no_value=NO_DB, extra_fc={"min": 0, "max": 1}),
+    panel("Slow-log records dropped/s by reason", [(f'sum by (reason) (rate(heimdall_db_slow_log_dropped_total{sel()}[5m]))', "{{reason}}")], 0, 148, unit="ops", no_value=NO_DB),
+    panel("Database and WAL file size", [
+        (f'heimdall_sqlite_db_bytes{sel()}', "db"),
+        (f'heimdall_sqlite_wal_bytes{sel()}', "wal"),
+    ], 12, 148, unit="bytes", desc="Legacy gauges (present with telemetry off too)."),
+]
+
+hub_db = dict(dashboard)
+hub_db.update({
+    "uid": "heimdall-hub-db",
+    "title": "Heimdall / Hub DB",
+    "tags": ["heimdall", "db"],
+    "panels": db_panels,
+    "templating": {"list": [
+        {"name": "job", "label": "job", "type": "query", "datasource": DS, "query": "label_values(heimdall_hub_build_info, job)", "refresh": 2, "includeAll": False, "multi": False,
+         "current": {"text": "heimdall-hub", "value": "heimdall-hub"}, "sort": 1},
+        {"name": "instance", "label": "hub instance", "type": "query", "datasource": DS, "query": 'label_values(heimdall_hub_build_info{job="$job"}, instance)', "refresh": 2, "includeAll": False, "multi": False, "sort": 1},
+        {"name": "conn", "label": "connection", "type": "custom", "query": "main,billing,enroll,vault,metrics,other", "includeAll": True, "multi": True, "allValue": ".*",
+         "current": {"text": ["main"], "value": ["main"]},
+         "options": [{"text": c, "value": c, "selected": c == "main"} for c in ["All", "main", "billing", "enroll", "vault", "metrics", "other"]]},
+    ]},
+})
+hub_db["templating"]["list"][2]["options"][0]["value"] = "$__all"
+write("hub-db.json", hub_db)

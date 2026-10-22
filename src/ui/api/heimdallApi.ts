@@ -42,6 +42,15 @@ export const HEIMDALL_TAG_TYPES = [
   // UI-14: cookie-auth sidebar data owned by the live shell.
   'SidebarConversations',
   'SidebarProjects',
+  // The /agents/live project->chain->agent tree. Separate from SidebarConversations so
+  // message/read events (which change only conversation rows) never reload it.
+  'AgentsLive',
+  // GET /agent-instances/{id}/reconfigurations, invalidated by
+  // agent_instance_reconfiguration events instead of every instance status blip.
+  'InstanceReconfigurations',
+  // Per-run workflow views and per-(task, attempt, kind) facets.
+  'WorkflowRuns',
+  'TaskFacet',
   'Actions',
   'Action',
   'Cards',

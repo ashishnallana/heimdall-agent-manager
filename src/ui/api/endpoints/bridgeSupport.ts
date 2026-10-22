@@ -1,6 +1,7 @@
 import * as daemonApi from '../daemonApi';
 import { heimdallApi, withSessionQuery } from '../heimdallApi';
-import { cookieJsonFetch, cookieMutation } from '../cookieFetch';
+import { useMemo } from 'react';
+import { cookieJsonFetch, cookieMutation, customQueryError } from '../cookieFetch';
 
 export type AgentBridgeSupportEntry = {
   bridgeId: string;
@@ -177,26 +178,23 @@ export const bridgeSupportApi = heimdallApi.injectEndpoints({
       },
       invalidatesTags: (_result, _error, { agentId }) => [{ type: 'BridgeSupport' as const, id: agentId }, { type: 'Agents' as const, id: 'LIST' }],
     }),
+    // Plain GET /bridges: one request, no per-bridge fan-out. Provider availability is
+    // NOT here: capability consumers read it per bridge, lazily, through
+    // useBridgeProviderStatus (listBridgeProviders). The hub's own row `capabilities`
+    // are dropped because they are not filtered to enabled/present/active providers,
+    // so a consumer reading them would offer providers the bridge cannot run.
     listBridges: build.query<any, void | {}>({
       queryFn: async () => {
         try {
           const data = await cookieJsonFetch('/bridges');
-          const bridges = data?.bridges || data || [];
-          const enriched = await Promise.all(bridges.map(async (bridge: any) => {
-            const id = String(bridge?.bridge_id || bridge?.id || '');
-            if (!id || String(bridge?.status || '').toLowerCase() === 'revoked') return bridge;
-            try {
-              const status = await cookieJsonFetch(`/bridges/${encodeURIComponent(id)}/provider-status`);
-              const providers = Array.isArray(status?.providers) ? status.providers : [];
-              const capabilities = providers
-                .filter((entry: any) => entry?.enabled && entry?.state === 'present' && entry?.catalog_state === 'active')
-                .map((entry: any) => ({ provider: String(entry.provider), models: (entry.models || []).filter((model: any) => model?.state === 'active').map((model: any) => String(model.model_id)) }));
-              return { ...bridge, capabilities, provider_status_error: false };
-            } catch { return { ...bridge, capabilities: [], provider_status_error: true }; }
-          }));
-          return { data: { bridges: enriched } };
+          const rows = data?.bridges || data || [];
+          const bridges = (Array.isArray(rows) ? rows : []).map((bridge: any) => {
+            const { capabilities: _unfiltered, ...rest } = bridge || {};
+            return rest;
+          });
+          return { data: { bridges } };
         } catch (error: any) {
-          return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any };
+          return { error: customQueryError(error) as any };
         }
       },
       providesTags: [{ type: 'Bridges' as const, id: 'LIST' }],
@@ -313,10 +311,12 @@ export const bridgeSupportApi = heimdallApi.injectEndpoints({
             }));
           return { data: { bridge_id: data?.bridge_id || bridgeId, providers } };
         } catch (error: any) {
-          return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any };
+          return { error: customQueryError(error) as any };
         }
       },
       providesTags: (_result, _error, { bridgeId }) => [{ type: 'BridgeProviders' as const, id: bridgeId }],
+      // Shared by every pane/picker on the same bridge; survive brief unmounts.
+      keepUnusedDataFor: 300,
     }),
     putProjectBridgePath: build.mutation<any, { projectId: string; bridgeId: string; path: string }>({
       queryFn: withSessionQuery(async ({ projectId, bridgeId, path }, { session }) => daemonApi.putProjectBridgePath({ daemonUrl: session.daemonUrl, clientToken: session.clientToken, projectId, bridgeId, path })),
@@ -343,3 +343,41 @@ export const {
   useUpdateBridgeMutation,
   useListBridgeProvidersQuery,
 } = bridgeSupportApi;
+
+/** How long a visible, open runtime/provider picker may show provider status. */
+export const PROVIDER_STATUS_LIVE_POLL_MS = 30000;
+
+export type BridgeProviderStatus = {
+  /** The bridge row with `capabilities` and `provider_status_error` filled in. */
+  bridge: any;
+  capabilities: BridgeCapability[];
+  /** Provider status answered (or failed, or cannot exist for this bridge). */
+  loaded: boolean;
+};
+
+/**
+ * Provider availability for ONE bridge, keyed by its id (GET
+ * /bridges/{id}/provider-status). `skip` keeps it lazy: callers pass it until the
+ * capability is needed (a selected bridge, an open runtime picker). `live` adds a
+ * bounded poll while a picker is open and the window is focused; nothing pushes
+ * provider changes yet.
+ */
+export function useBridgeProviderStatus(bridge: any, opts: { skip?: boolean; live?: boolean } = {}): BridgeProviderStatus {
+  const bridgeId = String(bridge?.bridge_id || bridge?.id || '');
+  const revoked = String(bridge?.status || '').toLowerCase() === 'revoked';
+  const query = useListBridgeProvidersQuery({ bridgeId }, {
+    skip: Boolean(opts.skip) || !bridgeId || revoked,
+    pollingInterval: opts.live ? PROVIDER_STATUS_LIVE_POLL_MS : 0,
+    skipPollingIfUnfocused: true,
+  });
+  const { data, isError } = query;
+  return useMemo(() => {
+    if (!bridge) return { bridge, capabilities: [], loaded: false };
+    const capabilities = data ? normalizeBridgeCapabilities(data) : [];
+    return {
+      bridge: { ...bridge, capabilities, provider_status_error: Boolean(isError) },
+      capabilities,
+      loaded: Boolean(data) || Boolean(isError) || revoked,
+    };
+  }, [bridge, data, isError, revoked]);
+}

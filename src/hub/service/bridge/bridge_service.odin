@@ -255,15 +255,20 @@ mark_bridge_offline :: proc(service: ^Bridge_Service, bridge_id: string) -> (dom
 	return saved, true, domain.Domain_Error{}
 }
 
-update_runtime_capabilities :: proc(service: ^Bridge_Service, bridge_id, capabilities_json: string) -> (domain.Bridge, bool, domain.Domain_Error) {
+// changed (optional) reports whether a user-visible field moved: the stored
+// capability record or the status (REQ-2: unchanged beats publish nothing).
+update_runtime_capabilities :: proc(service: ^Bridge_Service, bridge_id, capabilities_json: string, changed: ^bool = nil) -> (domain.Bridge, bool, domain.Domain_Error) {
+	if changed != nil do changed^ = false
 	bridge, bridge_ok, bridge_err := iface.bridge_get_bridge(service.repo, bridge_id)
 	if !bridge_ok do return domain.Bridge{}, false, bridge_err
 	if bridge.status == .Revoked { domain.bridge_destroy(&bridge); return domain.Bridge{}, false, domain.domain_error(.Bridge_Revoked, "bridge is revoked") }
+	moved := bridge.status != .Online
 	// Every field stays owned (see update_vault_status) so the caller can destroy
 	// the returned row: this runs on every heartbeat, on the WS reader thread, which
 	// has no per-request arena — a dropped row leaked the whole frame each beat.
 	if capabilities_json != "" && strings.contains(capabilities_json, "\"capabilities\"") {
 		record := bridge_capabilities_record(bridge.capabilities_json, capabilities_json)
+		if record != bridge.capabilities_json do moved = true
 		delete(bridge.capabilities_json)
 		bridge.capabilities_json = record
 	}
@@ -275,6 +280,7 @@ update_runtime_capabilities :: proc(service: ^Bridge_Service, bridge_id, capabil
 	bridge.updated_at = strings.clone(now)
 	saved, saved_ok, save_err := iface.bridge_save_bridge(service.repo, bridge)
 	if !saved_ok { domain.bridge_destroy(&bridge); return domain.Bridge{}, false, save_err }
+	if changed != nil do changed^ = moved
 	return saved, true, domain.Domain_Error{}
 }
 

@@ -14,6 +14,7 @@ import agent_service "odin_test:hub/service/agent"
 import auth_service "odin_test:hub/service/auth"
 import bridge_service "odin_test:hub/service/bridge"
 import content_service "odin_test:hub/service/content"
+import events "odin_test:hub/service/events"
 
 Action_Handlers :: struct {
 	auth:            ^auth_service.Auth_Service,
@@ -25,6 +26,8 @@ Action_Handlers :: struct {
 	ids:             ^platform.ID_Generator,
 	mutex:           ^sync.Mutex,
 	bridge_versions: ^map[string]int,
+	// event_bus (nil in test wirings) carries REQ-2 instance-created hints.
+	event_bus:       ^events.User_Event_Bus,
 }
 
 Scheduled_Prompt_Handlers :: Action_Handlers
@@ -527,6 +530,7 @@ run_action_handler :: proc(ctx: rawptr, req: Request) -> Response {
 					project_id = act.target_project_id,
 				})
 				if !created do return respond_error(create_err, req.request_id)
+				publish_instance_created(h.event_bus, new_inst)
 				target_instance_id = new_inst.agent_instance_id
 			}
 		}
@@ -537,8 +541,9 @@ run_action_handler :: proc(ctx: rawptr, req: Request) -> Response {
 
 	// Ensure target instance is running (wake/relaunch via existing plumbing if stopped/failed/unreachable)
 	if inst.runtime_status == "stopped" || inst.runtime_status == "failed" || inst.runtime_status == "unreachable" {
-		_, restarted, restart_err := agent_service.restart_instance(h.agents, auth_ctx, target_instance_id)
+		restarted_inst, restarted, restart_err := agent_service.restart_instance(h.agents, auth_ctx, target_instance_id)
 		if !restarted do return respond_error(restart_err, req.request_id)
+		publish_instance_changed(h.event_bus, restarted_inst, "status_changed")
 	}
 
 	conv_id := inst.conversation_id
@@ -560,6 +565,7 @@ run_action_handler :: proc(ctx: rawptr, req: Request) -> Response {
 		},
 	)
 	if !msg_ok do return respond_error(msg_err, req.request_id)
+	publish_action_message_created(h, auth_ctx, msg)
 
 	bump_bridge_version(h, inst.bridge_id)
 
@@ -678,6 +684,7 @@ bridge_execute_action_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	if !msg_ok {
 		return respond_error(msg_err, req.request_id)
 	}
+	publish_action_message_created(h, contracts.Auth_Context{kind = .User_Token, user_id = string(act.owner_user_id)}, msg)
 
 	next_run := json_string(req.body, "target_run_at")
 	if next_run == "" do next_run = json_string(req.body, "next_target_run_at")
@@ -727,3 +734,13 @@ bridge_execute_action_handler :: proc(ctx: rawptr, req: Request) -> Response {
 }
 
 bridge_execute_scheduled_prompt_handler :: bridge_execute_action_handler
+
+// publish_action_message_created announces the user_to_agent 'action' message an
+// action run persisted (run-now and bridge-scheduled), from the re-read
+// conversation so last_message_at matches the committed row. Ids only.
+publish_action_message_created :: proc(h: ^Action_Handlers, auth_ctx: contracts.Auth_Context, msg: domain.Chat_Message) {
+	if h == nil || h.event_bus == nil do return
+	conv, conv_ok, _ := content_service.get_conversation(h.content, auth_ctx, msg.conversation_id)
+	if !conv_ok do conv = domain.Chat_Conversation{conversation_id = msg.conversation_id, owner_user_id = msg.owner_user_id, agent_instance_id = msg.sender_agent_instance_id}
+	publish_chat_message_created(h.event_bus, conv, msg)
+}

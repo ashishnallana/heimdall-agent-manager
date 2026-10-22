@@ -1,6 +1,7 @@
 import * as React from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { calculatePaneLayouts } from './calculatePaneLayout';
+import { PaneVisibilityProvider } from '../components/workbench/paneVisibility';
 import { toStructureOnly } from './paneTreeState';
 import {
   RenderPaneProps,
@@ -249,6 +250,7 @@ export function TilingContainer<T>({
                 overflow: 'hidden',
               }}
             >
+              <PaneVisibilityProvider visible={!isHiddenByMaximize}>
               <PaneWrapper
                 renderPane={renderPane}
                 paneId={layout.paneId}
@@ -259,6 +261,7 @@ export function TilingContainer<T>({
                 isTopLeftMost={layout.top === 0 && layout.left === 0}
                 isTopRightMost={layout.top === 0 && layout.isRightmostOfRow}
               />
+              </PaneVisibilityProvider>
             </div>
           );
         })}

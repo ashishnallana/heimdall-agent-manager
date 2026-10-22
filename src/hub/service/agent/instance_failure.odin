@@ -87,7 +87,9 @@ instance_last_error_record :: proc(prev_last_error_json, error_json: string) -> 
 // bridge names the status it put back (result.runtime_status); the bridge's own
 // status frame normally lands first, so this only matters when the hub's save of
 // "stopping" raced past it.
-apply_stop_command_result :: proc(service: ^Agent_Service, bridge_id, command_id, result: string) -> bool {
+// When out is non-nil the saved row is handed to the caller (who destroys it)
+// so it can announce the restored status (REQ-2).
+apply_stop_command_result :: proc(service: ^Agent_Service, bridge_id, command_id, result: string, out: ^domain.Agent_Instance = nil) -> bool {
 	if !strings.has_prefix(command_id, "cmd_stop_") do return false
 	if jsonx.extract_bool(result, "ok", fallback = true, top_level_only = true) do return false
 	at := strings.index(command_id, "_inst_")
@@ -108,7 +110,8 @@ apply_stop_command_result :: proc(service: ^Agent_Service, bridge_id, command_id
 	// The saved revision shares inst's strings: free exactly one of them.
 	saved, saved_ok, _ := iface.agent_save_instance(service.agents, inst)
 	if saved_ok {
-		domain.agent_instance_destroy(&saved)
+		if out != nil do out^ = saved
+		else do domain.agent_instance_destroy(&saved)
 	} else {
 		domain.agent_instance_destroy(&inst)
 	}

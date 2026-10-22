@@ -44,11 +44,12 @@ export function useAgentAuxContext(agentInstanceId: string | null | undefined): 
   const id = String(agentInstanceId || '');
   const { data: instanceData, isSuccess: instanceLoaded } = useFetchAgentInstanceQuery(
     { instanceId: id },
-    { skip: !id, pollingInterval: 30000 },
+    // Event-driven (agent_instance/* full summary); see wsInvalidation.ts.
+    { skip: !id },
   );
   const { data: convData, isSuccess: convLoaded } = useFetchConversationQuery(
     { conversationId: '', agentInstanceId: id },
-    { skip: !id, pollingInterval: 30000 },
+    { skip: !id },
   );
   const instance: any = instanceData?.instance;
   const conversation: any = convData?.conversation;
@@ -75,7 +76,7 @@ export function useAgentAuxContext(agentInstanceId: string | null | undefined): 
   const { data: experimentsData } = useFetchExperimentsQuery();
   const { data: chainData } = useFetchTaskChainDetailQuery(
     { chainId },
-    { skip: !chainId, pollingInterval: 30000 },
+    { skip: !chainId },
   );
 
   const project: any = projectData?.project;

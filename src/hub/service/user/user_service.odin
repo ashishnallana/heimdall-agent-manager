@@ -2,6 +2,7 @@ package user
 
 import "core:strings"
 import "core:sync"
+import dbt "odin_test:hub/platform/dbtelemetry"
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
 import platform "odin_test:hub/platform"
@@ -19,6 +20,9 @@ User_Service :: struct {
 	projects: ^iface.Project_Repository,
 	clock:    ^platform.Clock,
 	ids:      ^platform.ID_Generator,
+	// REQ-2: told about each canonical agent seeding saved (nil: no hint).
+	on_agent_seeded:     proc(ctx: rawptr, owner_user_id, agent_id: string),
+	on_agent_seeded_ctx: rawptr,
 }
 
 new_user_service_full :: proc(users: ^iface.User_Repository, agents: ^iface.Agent_Repository, projects: ^iface.Project_Repository, clock: ^platform.Clock, ids: ^platform.ID_Generator) -> User_Service {
@@ -98,7 +102,9 @@ ensure_canonical_resources :: proc(service: ^User_Service, owner: domain.User_ID
 						created_at = now,
 						updated_at = now,
 					}
-					iface.agent_save(service.agents, agent)
+					if _, seeded, _ := iface.agent_save(service.agents, agent); seeded && service.on_agent_seeded != nil {
+						service.on_agent_seeded(service.on_agent_seeded_ctx, string(owner), agent.agent_id)
+					}
 				}
 			}
 		}
@@ -135,9 +141,9 @@ ensure_canonical_resources :: proc(service: ^User_Service, owner: domain.User_ID
 	}
 	// Persist seeded identities as pinned independently of their editable names.
 	if service.users != nil && service.users.launch_preferences_get != nil {
-		sync.lock(&service.launch_preferences_mutex)
+		lock_tok := dbt.timed_lock(&service.launch_preferences_mutex, .Launch_Prefs)
 		if prefs, err := launch_preferences_read(service, string(owner)); err.code == .None { _, _ = launch_preferences_write(service, string(owner), prefs) }
-		sync.unlock(&service.launch_preferences_mutex)
+		dbt.timed_unlock(&service.launch_preferences_mutex, .Launch_Prefs, lock_tok)
 	}
 
 }

@@ -528,13 +528,13 @@ function normalizeProject(raw: any): ProjectSummary {
 // UI-14: adapt cookie-auth RTK Query sidebar data into the local tree types so
 // server state lives in RTK Query (and is WS-invalidated) while the tree builder
 // keeps its existing typed contract.
-function sidebarConversationToSummary(c: SidebarConversation, agentNamesById: Map<string, string>): ConversationSummary {
+function sidebarConversationToSummary(c: SidebarConversation): ConversationSummary {
   const agentId = c.agentId || 'unknown-agent';
   return {
     conversationId: c.conversationId,
     agentId,
     agentInstanceId: c.agentInstanceId,
-    agentName: displayAgentName(agentId, c.agentName || agentNamesById.get(agentId)),
+    agentName: displayAgentName(agentId, c.agentName),
     projectId: c.projectId || DEFAULT_CONVERSATIONS_PROJECT.projectId,
     title: c.title,
     unreadCount: c.unreadCount,
@@ -1508,31 +1508,24 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
   }, [isVaultUnlocked, dispatch]);
 
   // UI-14: server state for the sidebar lives in RTK Query (cookie-auth), not
-  // component-local state. The single user-WS connection invalidates the
-  // SidebarConversations tag on chat/unread events so badges refresh live.
-  // The rail shows live agents + unread counts; the hub doesn't push all of these
-  // over the user WS, so poll periodically (paused when the tab is unfocused) so a
-  // just-started/stopped agent appears/disappears without a manual refresh.
-  const conversationsQuery = useListSidebarConversationsQuery({ limit: 30 }, { pollingInterval: 10000, skipPollingIfUnfocused: true });
+  // component-local state. No steady poll: every writer the rail reflects publishes an
+  // owner-scoped event (message_created from any tab/CLI/agent, messages_read with
+  // unread_count, conversation/created|updated, agent_instance/* with the full status
+  // summary), patched or invalidated per row in wsInvalidation.ts.
+  const conversationsQuery = useListSidebarConversationsQuery({ limit: 30 });
   // Consolidated project -> live-chains -> agents tree. Drives the rail's project
   // list/order (ALL projects, endpoint-fixed alphabetical) and the coordinator set
   // used to gold-highlight a coordinator agent's own name.
-  const agentsLiveQuery = useGetAgentsLiveQuery(undefined, { pollingInterval: 10000, skipPollingIfUnfocused: true });
-  const agentIdentitiesQuery = useListAgentIdentitiesQuery();
-  const agentNamesById = useMemo(() => {
-    const map = new Map<string, string>();
-    for (const agent of (agentIdentitiesQuery.data?.agents || [])) {
-      // TODO(FIX): Replace loose fallback chain with canonical typed schema property
-      const id = String(agent?.agent_id || agent?.agentId || agent?.id || '').trim();
-      // TODO(FIX): Replace loose fallback chain with canonical typed schema property
-      const name = String(agent?.name || agent?.display_name || agent?.displayName || '').trim();
-      if (id && name) map.set(id, name);
-    }
-    return map;
-  }, [agentIdentitiesQuery.data]);
+  // Refreshed by instance create/status/config/current-task and chain events. Projects
+  // publish no resource events (remaining uncovered route), so a project created or
+  // renamed elsewhere shows up on window focus rather than on a timer.
+  const agentsLiveQuery = useGetAgentsLiveQuery(undefined, { refetchOnFocus: true });
+  // The hub already resolves each row's agent name server-side (content_handlers
+  // write_chat_json_with_runtime looks the identity up per row), so no app-wide
+  // GET /agents is needed to fill it in; a row without one renders "Unnamed agent".
   const conversations = useMemo(
-    () => (conversationsQuery.data || []).map((conversation) => sidebarConversationToSummary(conversation, agentNamesById)),
-    [agentNamesById, conversationsQuery.data],
+    () => (conversationsQuery.data || []).map(sidebarConversationToSummary),
+    [conversationsQuery.data],
   );
   const liveProjects = useMemo(() => agentsLiveQuery.data || [], [agentsLiveQuery.data]);
   // REQ-BAR-2: status bar counts. Instances reuse the agents-live poll above; live

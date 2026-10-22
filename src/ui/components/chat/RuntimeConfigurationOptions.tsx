@@ -1,14 +1,16 @@
 import { useState } from 'react';
 import { Combobox, Icon } from '@ui';
 import ProviderIcon from '../providers/ProviderIcon';
-import { normalizeBridgeCapabilities } from '../../api/endpoints/bridgeSupport';
+import { useBridgeProviderStatus } from '../../api/endpoints/bridgeSupport';
 import { COMPOSER_BRIDGE_STATUS_LABEL, composerBridgeOptions } from '../../utils/composerBridgeOptions';
 export type RuntimeSelection = { bridgeId: string; provider: string; model: string };
 export default function RuntimeConfigurationOptions({ bridges, selection, onChange, disabled, debugPrefix, requireReconfiguration = false }: { bridges: any[]; selection: RuntimeSelection; onChange: (next: RuntimeSelection) => void; disabled?: boolean; debugPrefix: string; requireReconfiguration?: boolean }) {
   // Archived bridges are not offered at all; offline ones are listed but disabled.
   const bridgeOptions = composerBridgeOptions(bridges, requireReconfiguration);
   const bridge = bridgeOptions.find(o => o.id === selection.bridgeId)?.bridge;
-  const caps = normalizeBridgeCapabilities(bridge);
+  // Mounted only while the picker is open: provider status for the SELECTED bridge,
+  // kept fresh while it stays open.
+  const { capabilities: caps } = useBridgeProviderStatus(bridge, { live: true });
   const providers = Array.from(new Set([...caps.map(c => c.provider), selection.provider].filter(Boolean)));
   const modelsFor = (p: string) => caps.find(c => c.provider === p)?.models || [];
   // Per-provider model picks for rows that are not the active selection, so a

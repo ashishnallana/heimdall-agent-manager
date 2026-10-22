@@ -8,6 +8,7 @@ import "core:sync"
 import "core:crypto/hash"
 import "core:encoding/hex"
 import contracts "odin_test:contracts"
+import dbt "odin_test:hub/platform/dbtelemetry"
 import bootcache "odin_test:hub/bootcache"
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
@@ -33,6 +34,18 @@ Agent_Service :: struct {
 	// path funnels into ONE chokepoint (taskv2.on_instance_terminal) without the
 	// agent package importing the engine.
 	hooks: Lifecycle_Hooks,
+	// resource_events: after-write change hints for the owner's UI (REQ-2). Set
+	// by wiring to the user event bus; every field is nil-safe.
+	resource_events: Resource_Event_Hooks,
+}
+
+// Resource_Event_Hooks are invoked only after the write they describe returned
+// success. change for reconfigurations is created|progress|error|succeeded|failed;
+// config_committed is true on the advance that committed the destination (the
+// SQL trigger that rewrites agent_instances bridge/provider/model/revision).
+Resource_Event_Hooks :: struct {
+	ctx:                        rawptr,
+	on_reconfiguration_changed: proc(ctx: rawptr, op: domain.Instance_Reconfiguration, change: string, config_committed: bool),
 }
 
 Lifecycle_Hooks :: struct {
@@ -761,8 +774,8 @@ write_bootstrap_messages :: proc(b: ^strings.Builder, service: ^Agent_Service, i
 }
 
 stop_instance :: proc(service: ^Agent_Service, auth: contracts.Auth_Context, instance_id: string, input: Stop_Instance_Input) -> (domain.Agent_Instance, bool, domain.Domain_Error) {
-	sync.lock(&service.reconfiguration_mutex)
-	defer sync.unlock(&service.reconfiguration_mutex)
+	lock_tok := dbt.timed_lock(&service.reconfiguration_mutex, .Reconfig)
+	defer dbt.timed_unlock(&service.reconfiguration_mutex, .Reconfig, lock_tok)
 	if input.force {
 		if inst, handled, err := force_stop_instance_reconfiguration_locked(service, auth, instance_id); handled do return inst, err.code == .None, err
 	}
@@ -1009,8 +1022,8 @@ agent_service_send_pty_resize :: proc(service: ^Agent_Service, auth: contracts.A
 send_pty_resize :: agent_service_send_pty_resize
 
 reconfigure_instance :: proc(service: ^Agent_Service, auth: contracts.Auth_Context, instance_id: string, input: Reconfigure_Instance_Input) -> (domain.Agent_Instance, bool, domain.Domain_Error) {
-	sync.lock(&service.reconfiguration_mutex)
-	defer sync.unlock(&service.reconfiguration_mutex)
+	lock_tok := dbt.timed_lock(&service.reconfiguration_mutex, .Reconfig)
+	defer dbt.timed_unlock(&service.reconfiguration_mutex, .Reconfig, lock_tok)
 	if idle, err := reconfiguration_require_idle(service, instance_id); !idle do return {}, false, err
 	inst, ok, err := get_instance(service, auth, instance_id)
 	if !ok do return domain.Agent_Instance{}, false, err
@@ -1028,8 +1041,8 @@ reconfigure_instance :: proc(service: ^Agent_Service, auth: contracts.Auth_Conte
 }
 
 relaunch_instance :: proc(service: ^Agent_Service, auth: contracts.Auth_Context, inst: domain.Agent_Instance, provider, model: string) -> (domain.Agent_Instance, bool, domain.Domain_Error) {
-	sync.lock(&service.reconfiguration_mutex)
-	defer sync.unlock(&service.reconfiguration_mutex)
+	lock_tok := dbt.timed_lock(&service.reconfiguration_mutex, .Reconfig)
+	defer dbt.timed_unlock(&service.reconfiguration_mutex, .Reconfig, lock_tok)
 	return relaunch_instance_locked(service, auth, inst, provider, model)
 }
 
@@ -1074,7 +1087,8 @@ relaunch_instance_locked :: proc(service: ^Agent_Service, auth: contracts.Auth_C
 // failed; a successful start or a stop clears it, a retry in flight keeps it.
 // facts: when non-nil the lifecycle hook is NOT called; the fact is appended
 // for the caller to deliver after it releases its locks (review B1).
-apply_bridge_status_report :: proc(service: ^Agent_Service, bridge_id, instance_id: string, state_seq: int, runtime_status, activity_status: string, owner_user_id: string = "", launch_epoch: string = "", error_json: string = "", facts: ^[dynamic]Lifecycle_Fact = nil) -> (domain.Agent_Instance, bool, domain.Domain_Error) {
+apply_bridge_status_report :: proc(service: ^Agent_Service, bridge_id, instance_id: string, state_seq: int, runtime_status, activity_status: string, owner_user_id: string = "", launch_epoch: string = "", error_json: string = "", facts: ^[dynamic]Lifecycle_Fact = nil, changed: ^bool = nil) -> (domain.Agent_Instance, bool, domain.Domain_Error) {
+	if changed != nil do changed^ = false
 	inst, ok, err := iface.agent_get_instance(service.agents, instance_id)
 	if !ok do return domain.Agent_Instance{}, false, err
 	if inst.bridge_id != bridge_id || (owner_user_id != "" && string(inst.owner_user_id) != owner_user_id) {
@@ -1101,6 +1115,9 @@ apply_bridge_status_report :: proc(service: ^Agent_Service, bridge_id, instance_
 			if len(inst.updated_at) > 0 do delete(inst.updated_at)
 			inst.updated_at = strings.clone(now)
 			if activity_status != "" && activity_status != inst.activity_status {
+				// The only user-visible field a liveness refresh can move (REQ-2:
+				// unchanged heartbeats must not fan out events).
+				if changed != nil do changed^ = true
 				if len(inst.activity_status) > 0 do delete(inst.activity_status)
 				inst.activity_status = strings.clone(activity_status)
 			}
@@ -1113,6 +1130,9 @@ apply_bridge_status_report :: proc(service: ^Agent_Service, bridge_id, instance_
 		}
 	}
 	now := platform.clock_now(service.clock)
+	if changed != nil {
+		changed^ = (runtime_status != "" && runtime_status != inst.runtime_status) || (activity_status != "" && activity_status != inst.activity_status) || error_json != ""
+	}
 	inst.last_applied_seq = effective_state_seq
 	if runtime_status != "" {
 		if len(inst.runtime_status) > 0 do delete(inst.runtime_status)

@@ -180,3 +180,22 @@ export function apiErrorText(err: unknown, fallback = 'Something went wrong'): s
   if (fromError) return fromError;
   return nonBlank(e.message) ?? fallback;
 }
+
+/** HTTP status a query error carries (`customQueryError`'s originalStatus or a fetchBaseQuery status). */
+export function queryErrorStatus(error: unknown): number | undefined {
+  const e = error as any;
+  if (typeof e?.originalStatus === 'number') return e.originalStatus;
+  if (typeof e?.status === 'number') return e.status;
+  return undefined;
+}
+
+/**
+ * A query error that repeating the same request cannot fix: the resource is gone or
+ * not ours (404/410/403), or the session is unauthenticated (401; the fetch observer
+ * and the Electron device gate already route that to sign-in). Polls stop on these;
+ * an explicit refetch or invalidation may still try again.
+ */
+export function isTerminalQueryError(error: unknown): boolean {
+  const status = queryErrorStatus(error);
+  return status === 401 || status === 403 || status === 404 || status === 410;
+}

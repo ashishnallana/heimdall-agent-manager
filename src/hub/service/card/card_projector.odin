@@ -8,6 +8,7 @@ import "core:strings"
 import "core:mem/virtual"
 import "core:sync"
 import contracts "odin_test:contracts"
+import dbt "odin_test:hub/platform/dbtelemetry"
 import domain "odin_test:hub/domain"
 import platform "odin_test:hub/platform"
 import iface "odin_test:hub/repository/iface"
@@ -112,8 +113,8 @@ task_user_attention :: proc(s: ^Card_Service, task: domain.Task) -> (taskv2.User
 project_task_card :: proc(s: ^Card_Service, owner: domain.User_ID, task_id: domain.Task_ID) -> (bool, domain.Domain_Error) {
 	if s == nil || s.attention_repo == nil || s.cards == nil do return true, domain.Domain_Error{}
 	if s.taskchains == nil || s.taskchains.repo == nil do return false, domain.domain_error(.Internal_Error, "taskchain repository is not configured")
-	sync.mutex_lock(&s.projector_mutex)
-	defer sync.mutex_unlock(&s.projector_mutex)
+	lock_tok := dbt.timed_lock(&s.projector_mutex, .Projector)
+	defer dbt.timed_unlock(&s.projector_mutex, .Projector, lock_tok)
 
 	task, found, get_err := iface.taskchain_get_task(s.taskchains.repo, task_id)
 	// Only a definite "no such task" may retire a card; any other read failure
@@ -364,8 +365,8 @@ attention_instance_name :: proc(s: ^Card_Service, agent_instance_id: string) -> 
 project_message_card :: proc(s: ^Card_Service, owner: domain.User_ID, agent_instance_id: string) -> (bool, domain.Domain_Error) {
 	if s == nil || s.attention_repo == nil || s.cards == nil do return true, domain.Domain_Error{}
 	if agent_instance_id == "" do return true, domain.Domain_Error{}
-	sync.mutex_lock(&s.projector_mutex)
-	defer sync.mutex_unlock(&s.projector_mutex)
+	lock_tok := dbt.timed_lock(&s.projector_mutex, .Projector)
+	defer dbt.timed_unlock(&s.projector_mutex, .Projector, lock_tok)
 
 	msg, found, other_unread, err := iface.attention_latest_actionable_message(s.attention_repo, owner, agent_instance_id)
 	if err.code != .None do return false, err
@@ -455,8 +456,8 @@ project_memory_card :: proc(s: ^Card_Service, owner: domain.User_ID, memory_id: 
 	if s == nil || s.attention_repo == nil || s.cards == nil do return true, domain.Domain_Error{}
 	if memory_id == "" do return true, domain.Domain_Error{}
 	if s.content == nil || s.content.content == nil do return false, domain.domain_error(.Internal_Error, "content repository is not configured")
-	sync.mutex_lock(&s.projector_mutex)
-	defer sync.mutex_unlock(&s.projector_mutex)
+	lock_tok := dbt.timed_lock(&s.projector_mutex, .Projector)
+	defer dbt.timed_unlock(&s.projector_mutex, .Projector, lock_tok)
 
 	m, found, get_err := iface.content_get_memory(s.content.content, memory_id)
 	// As for tasks: only a definite "no such memory" may retire a card.

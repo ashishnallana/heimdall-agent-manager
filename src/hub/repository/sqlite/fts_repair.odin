@@ -3,6 +3,7 @@ package sqlite
 import "core:c"
 import "core:fmt"
 import "core:strings"
+import "core:time"
 import domain "odin_test:hub/domain"
 
 // FTS index recovery for the search feature (SEARCH BUG: task/agent-instance UPDATE
@@ -53,7 +54,12 @@ FTS_INDEX_TABLES := [?]Fts_Index{
 repair_fts_indexes :: proc(conn: ^Conn, only_drifted := false) -> (rebuilt: int, ok: bool, err: domain.Domain_Error) {
 	if conn == nil || conn.db == nil do return 0, false, domain.domain_error(.Internal_Error, "database connection is not open")
 	if !fts5_available(conn) do return 0, true, domain.Domain_Error{}
-	if !exec(conn, "BEGIN IMMEDIATE;") do return 0, false, domain.domain_error(.Internal_Error, "failed to begin fts repair transaction")
+	tx_start := time.tick_now()
+	kind := conn_kind_of(conn.db)
+	if !exec(conn, "BEGIN IMMEDIATE;") {
+		tx_observe(kind, .Fts_Repair, true, .Begin_Failed, tx_start)
+		return 0, false, domain.domain_error(.Internal_Error, "failed to begin fts repair transaction")
+	}
 	for idx in FTS_INDEX_TABLES {
 		if !sqlite_object_exists(conn, idx.fts) do continue
 		if only_drifted {
@@ -63,14 +69,17 @@ repair_fts_indexes :: proc(conn: ^Conn, only_drifted := false) -> (rebuilt: int,
 		}
 		if !fts_rebuild_one(conn, idx.fts) {
 			exec(conn, "ROLLBACK;")
+			tx_observe(kind, .Fts_Repair, true, .Rollback, tx_start)
 			return rebuilt, false, domain.domain_error(.Internal_Error, "fts index rebuild failed")
 		}
 		rebuilt += 1
 	}
 	if !exec(conn, "COMMIT;") {
 		exec(conn, "ROLLBACK;")
+		tx_observe(kind, .Fts_Repair, true, .Commit_Failed, tx_start)
 		return rebuilt, false, domain.domain_error(.Internal_Error, "failed to commit fts repair transaction")
 	}
+	tx_observe(kind, .Fts_Repair, true, .Commit, tx_start)
 	return rebuilt, true, domain.Domain_Error{}
 }
 
@@ -117,12 +126,15 @@ scalar_count :: proc(conn: ^Conn, query: string) -> (int, bool) {
 // BEGIN IMMEDIATE, which the repo save procs satisfy (they step in autocommit). If
 // ever called inside an outer transaction the repair is a no-op and the accurate
 // error surfaces; the boot reconcile remains the backstop.
-step_write_healing :: proc(conn: ^Conn, stmt: sqlite3_stmt) -> c.int {
-	rc := sqlite3_step(stmt)
+//
+// `loc` is forwarded so both steps (and the retry) are charged to the caller's
+// telemetry site, not to this helper.
+step_write_healing :: proc(conn: ^Conn, stmt: sqlite3_stmt, loc := #caller_location) -> c.int {
+	rc := sqlite3_step(stmt, loc)
 	if rc == SQLITE_CORRUPT {
 		repair_fts_indexes(conn) // full re-sync; the retry surfaces any residual failure
 		sqlite3_reset(stmt)
-		rc = sqlite3_step(stmt)
+		rc = sqlite3_step(stmt, loc)
 	}
 	return rc
 }

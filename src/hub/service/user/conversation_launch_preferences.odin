@@ -3,6 +3,7 @@ import "core:encoding/json"
 import "core:sync"
 import "core:strings"
 import contracts "odin_test:contracts"
+import dbt "odin_test:hub/platform/dbtelemetry"
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
 
@@ -49,7 +50,7 @@ launch_preferences_write :: proc(service: ^User_Service, owner: string, prefs: C
 }
 set_launch_selection :: proc(service: ^User_Service, auth: contracts.Auth_Context, field, value: string) -> (Conversation_Launch_Preferences, bool, domain.Domain_Error) {
  if auth.kind != .User_Token && auth.kind != .Trusted_Proxy do return {}, false, domain.domain_error(.Forbidden, "user authentication is required")
- sync.lock(&service.launch_preferences_mutex); defer sync.unlock(&service.launch_preferences_mutex)
+ lock_tok := dbt.timed_lock(&service.launch_preferences_mutex, .Launch_Prefs); defer dbt.timed_unlock(&service.launch_preferences_mutex, .Launch_Prefs, lock_tok)
  prefs, err := launch_preferences_read(service, auth.user_id)
  if err.code != .None do return {}, false, err
  switch field {
@@ -85,7 +86,7 @@ set_launch_selection :: proc(service: ^User_Service, auth: contracts.Auth_Contex
 }
 set_agent_favorite :: proc(service: ^User_Service, auth: contracts.Auth_Context, agent_id: string, favorite: bool) -> (Conversation_Launch_Preferences, bool, domain.Domain_Error) {
  if auth.kind != .User_Token && auth.kind != .Trusted_Proxy do return {}, false, domain.domain_error(.Forbidden, "user authentication is required")
- sync.lock(&service.launch_preferences_mutex); defer sync.unlock(&service.launch_preferences_mutex)
+ lock_tok := dbt.timed_lock(&service.launch_preferences_mutex, .Launch_Prefs); defer dbt.timed_unlock(&service.launch_preferences_mutex, .Launch_Prefs, lock_tok)
  return set_agent_favorite_locked(service, auth, agent_id, favorite)
 }
 

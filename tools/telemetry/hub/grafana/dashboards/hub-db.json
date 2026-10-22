@@ -1,0 +1,2100 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": false,
+  "graphTooltip": 1,
+  "links": [
+    {
+      "asDropdown": true,
+      "includeVars": false,
+      "keepTime": true,
+      "tags": [
+        "heimdall"
+      ],
+      "targetBlank": false,
+      "title": "Heimdall dashboards",
+      "type": "dashboards"
+    }
+  ],
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 90,
+      "panels": [],
+      "title": "Status and reading guide",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "heimdall-prometheus"
+      },
+      "description": "Present when the selected hub exposes heimdall_sqlite_library_info, i.e. runs with HEIMDALL_DB_TELEMETRY=basic (the default since the telemetry release). Absent = explicit off, an older build, or the scrape is down.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "green",
+            "mode": "fixed"
+          },
+          "mappings": [
+            {
+              "options": {
+                "from": 1,
+                "result": {
+                  "text": "basic (on)"
+                },
+                "to": 1000000000.0
+              },
+              "type": "range"
+            }
+          ],
+          "noValue": "off / not deployed",
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 1
+      },
+      "id": 91,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "count(heimdall_sqlite_library_info{job=\"$job\",instance=\"$instance\"})",
+          "instant": true,
+          "legendFormat": "telemetry",
+          "refId": "A"
+        }
+      ],
+      "title": "DB telemetry",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "heimdall-prometheus"
+      },
+      "description": "sqlite3_libversion() of the library the hub process actually linked (not the sqlite3 CLI on the host).",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "text",
+            "mode": "fixed"
+          },
+          "noValue": "No data: telemetry off, pre-telemetry hub build, or no matching activity",
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 1
+      },
+      "id": 92,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "name"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "heimdall_sqlite_library_info{job=\"$job\",instance=\"$instance\"}",
+          "instant": true,
+          "legendFormat": "{{version}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Linked SQLite library",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "heimdall-prometheus"
+      },
+      "description": "Age of the currently open outer unit of work at the last scrape (0 = none open).",
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No data: telemetry off, pre-telemetry hub build, or no matching activity",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 5
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 1
+      },
+      "id": 93,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "heimdall_db_uow_oldest_hold_seconds{job=\"$job\",instance=\"$instance\"}",
+          "instant": true,
+          "legendFormat": "oldest UoW",
+          "refId": "A"
+        }
+      ],
+      "title": "Oldest open unit of work",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "heimdall-prometheus"
+      },
+      "description": "db_slow_request / db_slow_scope lines dropped by the 10 lines/s limiter over the selected range. reason=slow drops matter for slow-request criteria; the records themselves are in the hub's stderr/journal.",
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No data: telemetry off, pre-telemetry hub build, or no matching activity",
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 1
+      },
+      "id": 94,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value_and_name"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "sum by (reason) (increase(heimdall_db_slow_log_dropped_total{job=\"$job\",instance=\"$instance\"}[$__range]))",
+          "instant": true,
+          "legendFormat": "{{reason}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Slow-log records dropped (range)",
+      "type": "stat"
+    },
+    {
+      "gridPos": {
+        "h": 11,
+        "w": 24,
+        "x": 0,
+        "y": 5
+      },
+      "id": 95,
+      "options": {
+        "content": "**Phase-1 DB telemetry** (`HEIMDALL_DB_TELEMETRY`, default `basic`). Reference: `docs/reference/db-telemetry.md`.\n\n- **No data \u2260 zero.** `off` (explicit opt-out) and hub builds without the telemetry register none of these families, so panels show *No data*. Lazy series (per route, call site, op, tx kind) also appear only after the first matching call.\n- **Disjoint vs containing intervals.** `app_lock_wait`, `conn_wait` and `exec_excl_busy` never overlap on one thread: their *sums* may be stacked and divided by request time (ratio of sums). Lock **hold** and **transaction** durations *contain* the holder's waits and execution: they are never added to wait or request components.\n- **Percentiles are per histogram.** Never subtract one percentile from another (e.g. hold p99 \u2212 wait p99); compare `_sum` rates instead. Quantiles interpolate inside buckets: wait buckets top out at 5 s, hold/tx at 30 s, exec at 5 s.\n- **`busy_wait` is unavailable in phase 1** (no busy handler; `full` mode is rejected at boot). Successful `busy_timeout` sleeps are *inside* `exec` on write/tx ops, so `busy_wait` is hidden here rather than shown as a misleading 0.\n- **Waiters:** `heimdall_db_lock_waiters` is sampled at scrape. `_waiters_max` is the high-water mark since the *previous scrape* and is reset by every scrape: exact with one scraper, a lower bound if anything else (e.g. a manual `curl`) also scrapes. Use contention rates for manual checks.\n- **Cardinality:** call-site panels are `topk` over up to 3 \u00d7 261 `(conn, site)` series; keep their time range modest. WebSocket-frame DB time lands in scope `other` in phase 1.\n- **Histogram layout change:** in `basic` the HTTP request histogram gains `le=\"0.0025\"`; never take an HTTP quantile across the deploy. This dashboard only uses its `_sum`.\n",
+        "mode": "markdown"
+      },
+      "title": "How to read this dashboard",
+      "type": "text"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 16
+      },
+      "id": 96,
+      "panels": [],
+      "title": "Request DB time (disjoint components, ratio of sums)",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "heimdall-prometheus"
+      },
+      "description": "sum(DB component seconds) / sum(router dispatch seconds) over the same plain-HTTP requests. Components are disjoint per thread, so the stack is the DB share of request time; the rest is non-DB work. Transaction hold is NOT part of this. busy_wait is always 0 in phase 1 and is hidden.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 30,
+            "stacking": {
+              "group": "A",
+              "mode": "normal"
+            }
+          },
+          "min": 0,
+          "noValue": "No data: telemetry off, pre-telemetry hub build, or no matching activity",
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 17
+      },
+      "id": 97,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "sum by (component) (rate(heimdall_http_request_db_seconds_total{job=\"$job\",instance=\"$instance\",component!=\"busy_wait\"}[5m])) / on() group_left() sum(rate(heimdall_http_request_duration_seconds_sum{job=\"$job\",instance=\"$instance\"}[5m]))",
+          "legendFormat": "{{component}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Share of HTTP dispatch time by DB component",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "heimdall-prometheus"
+      },
+      "description": "Sum of the disjoint DB components per route pattern, in seconds of DB time per wall-clock second (can exceed 1 with concurrent requests). topk is evaluated per point, so more than 10 routes can appear over the range.",
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No data: telemetry off, pre-telemetry hub build, or no matching activity",
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 17
+      },
+      "id": 98,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "topk(10, sum by (route) (rate(heimdall_http_request_db_seconds_total{job=\"$job\",instance=\"$instance\"}[5m])))",
+          "legendFormat": "{{route}}",
+          "refId": "A"
+        }
+      ],
+      "title": "DB time per route, top 10 (DB-seconds per second)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "heimdall-prometheus"
+      },
+      "description": "Per route: sum of DB component seconds / sum of dispatch seconds (ratio of sums, never a ratio of percentiles), for the 10 routes with the most DB time at each point (more than 10 can appear over the range).",
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "noValue": "No data: telemetry off, pre-telemetry hub build, or no matching activity",
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 25
+      },
+      "id": 99,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "(sum by (route) (rate(heimdall_http_request_db_seconds_total{job=\"$job\",instance=\"$instance\"}[5m])) / sum by (route) (rate(heimdall_http_request_duration_seconds_sum{job=\"$job\",instance=\"$instance\"}[5m]))) and topk(10, sum by (route) (rate(heimdall_http_request_db_seconds_total{job=\"$job\",instance=\"$instance\"}[5m])))",
+          "legendFormat": "{{route}}",
+          "refId": "A"
+        }
+      ],
+      "title": "DB share of route time (top 10 routes by DB time)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "heimdall-prometheus"
+      },
+      "description": "All scopes, including background work (timer, merge, bridge_log, shell, scrape) and unscoped work (other, which includes WebSocket frames in phase 1). Series are eager; idle scope/component pairs are filtered out with > 0.",
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No data: telemetry off, pre-telemetry hub build, or no matching activity",
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 25
+      },
+      "id": 100,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "sum by (scope, component) (rate(heimdall_db_scope_seconds_total{job=\"$job\",instance=\"$instance\",component!=\"busy_wait\"}[5m])) > 0",
+          "legendFormat": "{{scope}} {{component}}",
+          "refId": "A"
+        }
+      ],
+      "title": "DB time per scope by component (DB-seconds per second)",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 33
+      },
+      "id": 101,
+      "panels": [],
+      "title": "Lock wait and hold",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "heimdall-prometheus"
+      },
+      "description": "Wait to acquire a DB-guarding service lock (uow_tx, billing, vault, enroll, collector, projector, reconfig, launch_prefs). Gaps mean no acquisitions in the window.",
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No data: telemetry off, pre-telemetry hub build, or no matching activity",
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 34
+      },
+      "id": 102,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "histogram_quantile(0.5, sum by (le, lock) (rate(heimdall_db_lock_wait_seconds_bucket{job=\"$job\",instance=\"$instance\",lock!~\"conn_.*\"}[5m])))",
+          "legendFormat": "p50 {{lock}}",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le, lock) (rate(heimdall_db_lock_wait_seconds_bucket{job=\"$job\",instance=\"$instance\",lock!~\"conn_.*\"}[5m])))",
+          "legendFormat": "p95 {{lock}}",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "histogram_quantile(0.99, sum by (le, lock) (rate(heimdall_db_lock_wait_seconds_bucket{job=\"$job\",instance=\"$instance\",lock!~\"conn_.*\"}[5m])))",
+          "legendFormat": "p99 {{lock}}",
+          "refId": "C"
+        }
+      ],
+      "title": "App lock wait p50 / p95 / p99",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "heimdall-prometheus"
+      },
+      "description": "Wait for the SQLite connection mutex (conn_main, conn_billing, conn_enroll, conn_vault, conn_metrics). Its hold time is the exec histogram below.",
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No data: telemetry off, pre-telemetry hub build, or no matching activity",
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 34
+      },
+      "id": 103,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "histogram_quantile(0.5, sum by (le, lock) (rate(heimdall_db_lock_wait_seconds_bucket{job=\"$job\",instance=\"$instance\",lock=~\"conn_.*\"}[5m])))",
+          "legendFormat": "p50 {{lock}}",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le, lock) (rate(heimdall_db_lock_wait_seconds_bucket{job=\"$job\",instance=\"$instance\",lock=~\"conn_.*\"}[5m])))",
+          "legendFormat": "p95 {{lock}}",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "histogram_quantile(0.99, sum by (le, lock) (rate(heimdall_db_lock_wait_seconds_bucket{job=\"$job\",instance=\"$instance\",lock=~\"conn_.*\"}[5m])))",
+          "legendFormat": "p99 {{lock}}",
+          "refId": "C"
+        }
+      ],
+      "title": "Connection mutex wait p50 / p95 / p99",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "heimdall-prometheus"
+      },
+      "description": "Time an app lock was held. Contains the holder's own waits and execution: never add it to wait times or subtract percentiles.",
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No data: telemetry off, pre-telemetry hub build, or no matching activity",
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 42
+      },
+      "id": 104,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "histogram_quantile(0.5, sum by (le, lock) (rate(heimdall_db_lock_hold_seconds_bucket{job=\"$job\",instance=\"$instance\"}[5m])))",
+          "legendFormat": "p50 {{lock}}",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le, lock) (rate(heimdall_db_lock_hold_seconds_bucket{job=\"$job\",instance=\"$instance\"}[5m])))",
+          "legendFormat": "p95 {{lock}}",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "histogram_quantile(0.99, sum by (le, lock) (rate(heimdall_db_lock_hold_seconds_bucket{job=\"$job\",instance=\"$instance\"}[5m])))",
+          "legendFormat": "p99 {{lock}}",
+          "refId": "C"
+        }
+      ],
+      "title": "App lock hold p50 / p95 / p99",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "heimdall-prometheus"
+      },
+      "description": "",
+      "fieldConfig": {
+        "defaults": {
+          "max": 1,
+          "min": 0,
+          "noValue": "No data: telemetry off, pre-telemetry hub build, or no matching activity",
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 42
+      },
+      "id": 105,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "1 - sum by (lock) (rate(heimdall_db_lock_wait_seconds_bucket{job=\"$job\",instance=\"$instance\",lock=~\"conn_.*\",le=\"0.001\"}[5m])) / sum by (lock) (rate(heimdall_db_lock_wait_seconds_count{job=\"$job\",instance=\"$instance\",lock=~\"conn_.*\"}[5m]))",
+          "legendFormat": "{{lock}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Connection mutex: share of acquisitions waiting > 1 ms",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "heimdall-prometheus"
+      },
+      "description": "Acquisitions whose try-lock found the lock already held.",
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No data: telemetry off, pre-telemetry hub build, or no matching activity",
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 50
+      },
+      "id": 106,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "sum by (lock) (rate(heimdall_db_lock_contended_total{job=\"$job\",instance=\"$instance\"}[5m]))",
+          "legendFormat": "{{lock}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Contended acquisitions/s by lock",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "heimdall-prometheus"
+      },
+      "description": "",
+      "fieldConfig": {
+        "defaults": {
+          "max": 1,
+          "min": 0,
+          "noValue": "No data: telemetry off, pre-telemetry hub build, or no matching activity",
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 50
+      },
+      "id": 107,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "sum by (lock) (rate(heimdall_db_lock_contended_total{job=\"$job\",instance=\"$instance\"}[5m])) / sum by (lock) (rate(heimdall_db_lock_wait_seconds_count{job=\"$job\",instance=\"$instance\"}[5m]))",
+          "legendFormat": "{{lock}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Contended share of acquisitions by lock",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "heimdall-prometheus"
+      },
+      "description": "'now' is the instantaneous depth at scrape time. 'max' is the high-water mark since the previous scrape; every scrape resets it, so a second scraper (manual curl) makes it a lower bound.",
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No data: telemetry off, pre-telemetry hub build, or no matching activity",
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 58
+      },
+      "id": 108,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "max by (lock) (heimdall_db_lock_waiters{job=\"$job\",instance=\"$instance\"})",
+          "legendFormat": "now {{lock}}",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "max by (lock) (max_over_time(heimdall_db_lock_waiters_max{job=\"$job\",instance=\"$instance\"}[5m]))",
+          "legendFormat": "max {{lock}}",
+          "refId": "B"
+        }
+      ],
+      "title": "Lock waiters: sampled at scrape vs high-water between scrapes",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "heimdall-prometheus"
+      },
+      "description": "sum(conn mutex wait seconds) / sum(exec seconds) for the same connection: 1.0 means callers queue as long as SQLite executes.",
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No data: telemetry off, pre-telemetry hub build, or no matching activity",
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 58
+      },
+      "id": 109,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "sum by (conn) (label_replace(rate(heimdall_db_lock_wait_seconds_sum{job=\"$job\",instance=\"$instance\",lock=~\"conn_.*\"}[5m]), \"conn\", \"$1\", \"lock\", \"conn_(.*)\")) / sum by (conn) (rate(heimdall_sqlite_exec_seconds_sum{job=\"$job\",instance=\"$instance\"}[5m]))",
+          "legendFormat": "{{conn}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Connection mutex queueing per second of execution",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 66
+      },
+      "id": 110,
+      "panels": [],
+      "title": "Execution per connection ($conn)",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "heimdall-prometheus"
+      },
+      "description": "Fraction of wall time the connection mutex is held by wrapped calls (step, exec, prepare, finalize). conn=other aggregates unregistered handles and can exceed 100 %.",
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "noValue": "No data: telemetry off, pre-telemetry hub build, or no matching activity",
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 67
+      },
+      "id": 111,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "sum by (conn) (rate(heimdall_sqlite_exec_seconds_sum{job=\"$job\",instance=\"$instance\",conn=~\"$conn\"}[5m]))",
+          "legendFormat": "{{conn}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Connection busy: exec seconds per second",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "heimdall-prometheus"
+      },
+      "description": "Time inside SQLite with the connection mutex held, per step or sqlite3_exec call (prepare/finalize excluded so cheap calls do not dominate p50; all statement ops incl. begin/commit are merged). Includes successful busy_timeout sleeps (phase 1 has no busy split).",
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No data: telemetry off, pre-telemetry hub build, or no matching activity",
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 67
+      },
+      "id": 112,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "histogram_quantile(0.5, sum by (le, conn) (rate(heimdall_sqlite_exec_seconds_bucket{job=\"$job\",instance=\"$instance\",conn=~\"$conn\",op!~\"prepare|finalize\"}[5m])))",
+          "legendFormat": "p50 {{conn}}",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le, conn) (rate(heimdall_sqlite_exec_seconds_bucket{job=\"$job\",instance=\"$instance\",conn=~\"$conn\",op!~\"prepare|finalize\"}[5m])))",
+          "legendFormat": "p95 {{conn}}",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "histogram_quantile(0.99, sum by (le, conn) (rate(heimdall_sqlite_exec_seconds_bucket{job=\"$job\",instance=\"$instance\",conn=~\"$conn\",op!~\"prepare|finalize\"}[5m])))",
+          "legendFormat": "p99 {{conn}}",
+          "refId": "C"
+        }
+      ],
+      "title": "Exec time per step/exec call p50 / p95 / p99",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "heimdall-prometheus"
+      },
+      "description": "",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 30,
+            "stacking": {
+              "group": "A",
+              "mode": "normal"
+            }
+          },
+          "noValue": "No data: telemetry off, pre-telemetry hub build, or no matching activity",
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 75
+      },
+      "id": 113,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "sum by (conn, op) (rate(heimdall_sqlite_exec_seconds_sum{job=\"$job\",instance=\"$instance\",conn=~\"$conn\"}[5m]))",
+          "legendFormat": "{{conn}} {{op}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Exec time by op (seconds per second)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "heimdall-prometheus"
+      },
+      "description": "Statement executions: the first step of each execution and one per sqlite3_exec call.",
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No data: telemetry off, pre-telemetry hub build, or no matching activity",
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 75
+      },
+      "id": 114,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "sum by (conn, op) (rate(heimdall_sqlite_statements_total{job=\"$job\",instance=\"$instance\",conn=~\"$conn\"}[5m]))",
+          "legendFormat": "{{conn}} {{op}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Statements/s by op",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "heimdall-prometheus"
+      },
+      "description": "Share of exec seconds. The remainder is begin/commit/rollback/pragma/create/other/prepare/finalize.",
+      "fieldConfig": {
+        "defaults": {
+          "max": 1,
+          "min": 0,
+          "noValue": "No data: telemetry off, pre-telemetry hub build, or no matching activity",
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 83
+      },
+      "id": 115,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "sum by (conn) (rate(heimdall_sqlite_exec_seconds_sum{job=\"$job\",instance=\"$instance\",conn=~\"$conn\",op=\"select\"}[5m])) / sum by (conn) (rate(heimdall_sqlite_exec_seconds_sum{job=\"$job\",instance=\"$instance\",conn=~\"$conn\"}[5m]))",
+          "legendFormat": "read (select) {{conn}}",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "sum by (conn) (rate(heimdall_sqlite_exec_seconds_sum{job=\"$job\",instance=\"$instance\",conn=~\"$conn\",op=~\"insert|update|delete\"}[5m])) / sum by (conn) (rate(heimdall_sqlite_exec_seconds_sum{job=\"$job\",instance=\"$instance\",conn=~\"$conn\"}[5m]))",
+          "legendFormat": "write (insert/update/delete) {{conn}}",
+          "refId": "B"
+        }
+      ],
+      "title": "Read / write mix of exec time",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "heimdall-prometheus"
+      },
+      "description": "Mean statement cost (sqlite3_stmt_status VM_STEP deltas per execution).",
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No data: telemetry off, pre-telemetry hub build, or no matching activity",
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 83
+      },
+      "id": 116,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "sum by (conn, op) (rate(heimdall_sqlite_vm_steps_total{job=\"$job\",instance=\"$instance\",conn=~\"$conn\"}[5m])) / sum by (conn, op) (rate(heimdall_sqlite_statements_total{job=\"$job\",instance=\"$instance\",conn=~\"$conn\"}[5m]))",
+          "legendFormat": "{{conn}} {{op}}",
+          "refId": "A"
+        }
+      ],
+      "title": "VM steps per statement by op",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "heimdall-prometheus"
+      },
+      "description": "",
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No data: telemetry off, pre-telemetry hub build, or no matching activity",
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 91
+      },
+      "id": 117,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "sum by (conn, op) (rate(heimdall_sqlite_fullscan_steps_total{job=\"$job\",instance=\"$instance\",conn=~\"$conn\"}[5m])) > 0",
+          "legendFormat": "fullscan {{conn}} {{op}}",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "sum by (conn, op) (rate(heimdall_sqlite_sort_total{job=\"$job\",instance=\"$instance\",conn=~\"$conn\"}[5m])) > 0",
+          "legendFormat": "sort {{conn}} {{op}}",
+          "refId": "B"
+        }
+      ],
+      "title": "Full-scan steps/s and sorts/s by op",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "heimdall-prometheus"
+      },
+      "description": "Every wrapped step/exec/prepare/finalize call (one statement takes several steps).",
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No data: telemetry off, pre-telemetry hub build, or no matching activity",
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 91
+      },
+      "id": 118,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "sum by (conn, op) (rate(heimdall_sqlite_exec_seconds_count{job=\"$job\",instance=\"$instance\",conn=~\"$conn\"}[5m]))",
+          "legendFormat": "{{conn}} {{op}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Wrapped calls/s by op",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 99
+      },
+      "id": 119,
+      "panels": [],
+      "title": "Transactions",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "heimdall-prometheus"
+      },
+      "description": "Outer transactions only; nested units of work are savepoints, counted separately and never as a second transaction. rw=write when the UoW ran an insert/update/delete step.",
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No data: telemetry off, pre-telemetry hub build, or no matching activity",
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 100
+      },
+      "id": 120,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "sum by (kind, rw, outcome) (rate(heimdall_db_tx_duration_seconds_count{job=\"$job\",instance=\"$instance\"}[5m]))",
+          "legendFormat": "{{kind}} {{rw}} {{outcome}}",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "rate(heimdall_db_uow_nested_total{job=\"$job\",instance=\"$instance\"}[5m])",
+          "legendFormat": "nested UoW (savepoint)",
+          "refId": "B"
+        }
+      ],
+      "title": "Transactions/s by kind, rw and outcome",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "heimdall-prometheus"
+      },
+      "description": "outcome=commit only (begin_failed/rollback durations would skew it; read and write units are merged). BEGIN to COMMIT return (excludes after-commit hooks; dedicated conns start when BEGIN returns). Contains waits and exec: never add to request components.",
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No data: telemetry off, pre-telemetry hub build, or no matching activity",
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 100
+      },
+      "id": 121,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "histogram_quantile(0.5, sum by (le, kind) (rate(heimdall_db_tx_duration_seconds_bucket{job=\"$job\",instance=\"$instance\",outcome=\"commit\"}[5m])))",
+          "legendFormat": "p50 {{kind}}",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le, kind) (rate(heimdall_db_tx_duration_seconds_bucket{job=\"$job\",instance=\"$instance\",outcome=\"commit\"}[5m])))",
+          "legendFormat": "p95 {{kind}}",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "histogram_quantile(0.99, sum by (le, kind) (rate(heimdall_db_tx_duration_seconds_bucket{job=\"$job\",instance=\"$instance\",outcome=\"commit\"}[5m])))",
+          "legendFormat": "p99 {{kind}}",
+          "refId": "C"
+        }
+      ],
+      "title": "Committed transaction duration p50 / p95 / p99 by kind",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "heimdall-prometheus"
+      },
+      "description": "",
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No data: telemetry off, pre-telemetry hub build, or no matching activity",
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 108
+      },
+      "id": 122,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "sum by (kind, outcome) (rate(heimdall_db_tx_duration_seconds_count{job=\"$job\",instance=\"$instance\",outcome!=\"commit\"}[5m]))",
+          "legendFormat": "{{kind}} {{outcome}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Rolled back / failed transactions/s",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "heimdall-prometheus"
+      },
+      "description": "",
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No data: telemetry off, pre-telemetry hub build, or no matching activity",
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 108
+      },
+      "id": 123,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "max_over_time(heimdall_db_uow_oldest_hold_seconds{job=\"$job\",instance=\"$instance\"}[5m])",
+          "legendFormat": "oldest UoW",
+          "refId": "A"
+        }
+      ],
+      "title": "Oldest open unit of work (max over 5m)",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 116
+      },
+      "id": 124,
+      "panels": [],
+      "title": "Call sites ($conn, selected time range)",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "heimdall-prometheus"
+      },
+      "description": "site = <file>:<procedure> of the caller; step calls only. Up to 3 x 261 series are scanned: keep the range modest.",
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No data: telemetry off, pre-telemetry hub build, or no matching activity",
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 8,
+        "x": 0,
+        "y": 117
+      },
+      "id": 125,
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "topk(10, sum by (conn, site) (increase(heimdall_sqlite_site_exec_seconds_total{job=\"$job\",instance=\"$instance\",conn=~\"$conn\"}[$__range])))",
+          "instant": true,
+          "legendFormat": "{{conn}} {{site}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Top 10 call sites by step exec time",
+      "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "heimdall-prometheus"
+      },
+      "description": "",
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No data: telemetry off, pre-telemetry hub build, or no matching activity",
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 8,
+        "x": 8,
+        "y": 117
+      },
+      "id": 126,
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "topk(10, sum by (conn, site) (increase(heimdall_sqlite_site_fullscan_steps_total{job=\"$job\",instance=\"$instance\",conn=~\"$conn\"}[$__range])))",
+          "instant": true,
+          "legendFormat": "{{conn}} {{site}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Top 10 call sites by full-scan steps",
+      "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "heimdall-prometheus"
+      },
+      "description": "",
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No data: telemetry off, pre-telemetry hub build, or no matching activity",
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 8,
+        "x": 16,
+        "y": 117
+      },
+      "id": 127,
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "topk(10, sum by (conn, site) (increase(heimdall_sqlite_site_vm_steps_total{job=\"$job\",instance=\"$instance\",conn=~\"$conn\"}[$__range])))",
+          "instant": true,
+          "legendFormat": "{{conn}} {{site}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Top 10 call sites by VM steps",
+      "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "heimdall-prometheus"
+      },
+      "description": "sum of the 3 largest main-connection call sites / all main-connection step exec time over the selected range.",
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No data: telemetry off, pre-telemetry hub build, or no matching activity",
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 24,
+        "x": 0,
+        "y": 127
+      },
+      "id": 128,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "sum(topk(3, sum by (site) (increase(heimdall_sqlite_site_exec_seconds_total{job=\"$job\",instance=\"$instance\",conn=\"main\"}[$__range])))) / sum(increase(heimdall_sqlite_site_exec_seconds_total{job=\"$job\",instance=\"$instance\",conn=\"main\"}[$__range]))",
+          "instant": true,
+          "legendFormat": "top-3 share",
+          "refId": "A"
+        }
+      ],
+      "title": "Top-3 call sites' share of main-connection step time",
+      "type": "stat"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 131
+      },
+      "id": 129,
+      "panels": [],
+      "title": "Errors, cache and storage",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "heimdall-prometheus"
+      },
+      "description": "Error return codes from wrapped step/exec/prepare calls (finalize never double-counts).",
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No data: telemetry off, pre-telemetry hub build, or no matching activity",
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 132
+      },
+      "id": 130,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "sum by (conn, op, code) (rate(heimdall_sqlite_errors_total{job=\"$job\",instance=\"$instance\"}[5m]))",
+          "legendFormat": "{{conn}} {{op}} {{code}}",
+          "refId": "A"
+        }
+      ],
+      "title": "SQLite errors/s by conn, op and code",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "heimdall-prometheus"
+      },
+      "description": "Failed busy waits only: successful busy_timeout sleeps are inside exec and invisible in phase 1. The legacy counter exists in both modes.",
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No data: no busy/locked errors recorded or telemetry absent",
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 132
+      },
+      "id": 131,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "sum by (conn, code) (rate(heimdall_sqlite_errors_total{job=\"$job\",instance=\"$instance\",code=~\"busy.*|locked\"}[5m]))",
+          "legendFormat": "{{conn}} {{code}}",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "sum(rate(heimdall_sqlite_busy_total{job=\"$job\",instance=\"$instance\"}[5m]))",
+          "legendFormat": "legacy heimdall_sqlite_busy_total",
+          "refId": "B"
+        }
+      ],
+      "title": "Busy / locked errors: new family vs legacy counter",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "heimdall-prometheus"
+      },
+      "description": "sqlite3_db_status per open handle, summed per connection kind. Counts restart when a handle closes (rate() treats that as a counter reset).",
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No data: telemetry off, pre-telemetry hub build, or no matching activity",
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 140
+      },
+      "id": 132,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "sum by (conn, kind) (rate(heimdall_sqlite_cache_events_total{job=\"$job\",instance=\"$instance\"}[5m]))",
+          "legendFormat": "{{conn}} {{kind}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Page cache events/s by conn and kind",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "heimdall-prometheus"
+      },
+      "description": "",
+      "fieldConfig": {
+        "defaults": {
+          "max": 1,
+          "min": 0,
+          "noValue": "No data: telemetry off, pre-telemetry hub build, or no matching activity",
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 140
+      },
+      "id": 133,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "sum by (conn) (rate(heimdall_sqlite_cache_events_total{job=\"$job\",instance=\"$instance\",kind=\"hit\"}[5m])) / sum by (conn) (rate(heimdall_sqlite_cache_events_total{job=\"$job\",instance=\"$instance\",kind=~\"hit|miss\"}[5m]))",
+          "legendFormat": "{{conn}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Page cache hit ratio by conn",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "heimdall-prometheus"
+      },
+      "description": "",
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No data: telemetry off, pre-telemetry hub build, or no matching activity",
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 148
+      },
+      "id": 134,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "sum by (reason) (rate(heimdall_db_slow_log_dropped_total{job=\"$job\",instance=\"$instance\"}[5m]))",
+          "legendFormat": "{{reason}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Slow-log records dropped/s by reason",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "heimdall-prometheus"
+      },
+      "description": "Legacy gauges (present with telemetry off too).",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 148
+      },
+      "id": 135,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "heimdall_sqlite_db_bytes{job=\"$job\",instance=\"$instance\"}",
+          "legendFormat": "db",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "heimdall_sqlite_wal_bytes{job=\"$job\",instance=\"$instance\"}",
+          "legendFormat": "wal",
+          "refId": "B"
+        }
+      ],
+      "title": "Database and WAL file size",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": [
+    "heimdall",
+    "db"
+  ],
+  "templating": {
+    "list": [
+      {
+        "current": {
+          "text": "heimdall-hub",
+          "value": "heimdall-hub"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "heimdall-prometheus"
+        },
+        "includeAll": false,
+        "label": "job",
+        "multi": false,
+        "name": "job",
+        "query": "label_values(heimdall_hub_build_info, job)",
+        "refresh": 2,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "heimdall-prometheus"
+        },
+        "includeAll": false,
+        "label": "hub instance",
+        "multi": false,
+        "name": "instance",
+        "query": "label_values(heimdall_hub_build_info{job=\"$job\"}, instance)",
+        "refresh": 2,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "allValue": ".*",
+        "current": {
+          "text": [
+            "main"
+          ],
+          "value": [
+            "main"
+          ]
+        },
+        "includeAll": true,
+        "label": "connection",
+        "multi": true,
+        "name": "conn",
+        "options": [
+          {
+            "selected": false,
+            "text": "All",
+            "value": "$__all"
+          },
+          {
+            "selected": true,
+            "text": "main",
+            "value": "main"
+          },
+          {
+            "selected": false,
+            "text": "billing",
+            "value": "billing"
+          },
+          {
+            "selected": false,
+            "text": "enroll",
+            "value": "enroll"
+          },
+          {
+            "selected": false,
+            "text": "vault",
+            "value": "vault"
+          },
+          {
+            "selected": false,
+            "text": "metrics",
+            "value": "metrics"
+          },
+          {
+            "selected": false,
+            "text": "other",
+            "value": "other"
+          }
+        ],
+        "query": "main,billing,enroll,vault,metrics,other",
+        "type": "custom"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timezone": "browser",
+  "title": "Heimdall / Hub DB",
+  "uid": "heimdall-hub-db",
+  "version": 1
+}

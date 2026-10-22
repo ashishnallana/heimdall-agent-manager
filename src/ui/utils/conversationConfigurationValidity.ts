@@ -12,6 +12,8 @@ export type ConfigurationValidityInput = {
   provider: string;
   model: string;
   capabilities: { provider: string; models: string[] }[];
+  /** Provider status for `bridge` has answered; omitted means it arrived with the bridge. */
+  capabilitiesLoaded?: boolean;
 };
 
 /** Validate authoritative capabilities, never picker options containing stale values. */
@@ -28,6 +30,7 @@ export function conversationConfigurationIssues(input: ConfigurationValidityInpu
     else if (status !== 'online') issues.push('Bridge is offline or unavailable. Reconnect it or choose an online bridge.');
     else if (input.bridge.runtime_connected === false) issues.push('Bridge command connection is disconnected. Reconnect it or choose a connected bridge.');
     else if (input.bridge.provider_status_error) issues.push('Provider availability could not be verified on this bridge. Refresh its provider status.');
+    else if (input.capabilitiesLoaded === false) issues.push('Checking provider availability on this bridge before allowing messages.');
     else {
       const capability = input.capabilities.find(item => item.provider === input.provider);
       if (!input.provider || !capability) issues.push(`Provider${input.provider ? ` “${input.provider}”` : ''} is unavailable, disabled, or archived on this bridge. Choose an active provider.`);

@@ -33,7 +33,9 @@ FINDING_TEXT_MAX       :: 2000
 
 // save_facet_verbatim stores `body_json` (must be a JSON object) for
 // (task, attempt, kind), bumping v when it replaces an earlier body.
-save_facet_verbatim :: proc(svc: ^Service, task: domain.Task, attempt_no: int, kind, body_json, writer: string) -> (bool, domain.Domain_Error) {
+// u (when non-nil) receives a task/facet_changed effect on success, so the
+// write is announced after COMMIT and never on rollback (REQ-2).
+save_facet_verbatim :: proc(svc: ^Service, task: domain.Task, attempt_no: int, kind, body_json, writer: string, u: ^Uow = nil) -> (bool, domain.Domain_Error) {
 	body := strings.trim_space(body_json)
 	if !strings.has_prefix(body, "{") || !strings.has_suffix(body, "}") {
 		return false, domain.domain_error(.Validation_Failed, fmt.tprintf("facet %s must be a JSON object", kind))
@@ -42,10 +44,12 @@ save_facet_verbatim :: proc(svc: ^Service, task: domain.Task, attempt_no: int, k
 	if facets, err := iface.taskchain_list_facets_by_task(svc.repo, task.task_id, task.owner_user_id); err.code == .None {
 		for f in facets do if f.attempt_no == attempt_no && f.kind == kind && f.v >= v do v = f.v + 1
 	}
-	return iface.taskchain_save_facet(svc.repo, domain.Task_Attempt_Facet{
+	saved, err := iface.taskchain_save_facet(svc.repo, domain.Task_Attempt_Facet{
 		task_id = task.task_id, attempt_no = attempt_no, chain_id = task.chain_id, owner_user_id = task.owner_user_id,
 		kind = kind, v = v, body_json = body, writer = writer, written_at = platform.clock_now(svc.clock),
 	})
+	if saved do effect_publish_facet(u, task, attempt_no, kind)
+	return saved, err
 }
 
 get_facet :: proc(svc: ^Service, task: domain.Task, attempt_no: int, kind: string) -> (domain.Task_Attempt_Facet, bool) {
