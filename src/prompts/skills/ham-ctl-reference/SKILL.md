@@ -351,8 +351,10 @@ Provider plugins call these from their hook processes; agents rarely run them by
   `ham.ext.v1`, and sends it to the Bridge (`agent.extension.event`). Providers: `claude`
   (plugin in `extensions/claude-code`). `PermissionRequest` instead blocks on
   `agent.extension.permission` (up to 300s, or less with `HEIMDALL_EXT_PERMISSION_TIMEOUT_MS`)
-  and prints Claude's allow/deny JSON. It prints nothing when there is no decision. Every other
-  event prints nothing and uses a 500ms socket timeout.
+  and prints Claude's allow/deny JSON. It prints nothing when there is no decision. The hook
+  registers a stable `blocker_id` and re-registers it (250ms→2s backoff) if the Bridge restarts
+  while it waits, so the prompt reappears as an agent blocker. Every other event prints nothing
+  and uses a 500ms socket timeout.
 - `extension event --stdin` — sends canonical `ham.ext.v1` event(s) on stdin (one object or
   `{"events":[…]}`) and prints the Bridge reply.
 - `extension status` — `agent.extension.status` for this instance: provider, version,

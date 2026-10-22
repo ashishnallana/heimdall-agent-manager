@@ -3150,6 +3150,8 @@ export function AgentChatPane({
           <PinnedShellRuns sessions={pinnedRuns} />
           <InstancePermissionCards
             instanceId={agentInstanceId}
+            runtimeStatus={runtimeStatus}
+            onOpenTerminal={handleOpenPtyTab}
             className={isMobile ? 'w-full px-3 pb-2' : 'mx-auto w-full max-w-4xl px-3 pb-2 sm:px-0'}
           />
           {trayNotice ? (

@@ -1,17 +1,16 @@
 // Provider extension (ham.ext.v1) data for the UI: the activity timeline
-// (events, subagent and file rollups) and the permission approval cards.
+// (events, subagent and file rollups) and the agent blockers (permission cards).
 //
 //   GET  /api/v1/agent-instances/{id}/extension/events?after_seq=&limit=
 //   GET  /api/v1/agent-instances/{id}/extension/subagents
 //   GET  /api/v1/agent-instances/{id}/extension/files
-//   GET  /api/v1/agent-instances/{id}/permission-requests?status=pending
-//   GET  /api/v1/permission-requests?status=pending
-//   POST /api/v1/permission-requests/{id}/decision {decision, message?}
+//   GET  /api/v1/agent-instances/{id}/blockers
+//   POST /api/v1/agent-instances/{id}/blockers/{blocker_id}/resolve {decision, message?}
 //
 // Nothing polls. The hub announces changes as resource_changed(agent_instance)
-// with change 'extension_events' or 'permission_requests'; wsInvalidation.ts
+// with change 'extension_events' or 'agent_blockers_changed'; wsInvalidation.ts
 // invalidates 'ExtensionEvents' (the timeline refetches only events after the
-// last seq it holds) and patches the permission caches in place.
+// last seq it holds) and 'AgentBlockers' (the in-memory blocker list).
 import { cookieJsonFetch, cookieMutation, customQueryError } from '../cookieFetch';
 import { heimdallApi } from '../heimdallApi';
 import {
@@ -24,12 +23,10 @@ import {
   type SubagentSummary,
 } from '../../components/extension/extensionTimelineModel';
 import {
-  normalizePermissionRequest,
-  normalizePermissionRequests,
-  upsertPermissionRequest,
-  type PermissionDecision,
-  type PermissionRequest,
-} from '../../components/extension/permissionCardModel';
+  normalizeBlockersSnapshot,
+  type AgentBlockersSnapshot,
+  type BlockerDecision,
+} from '../../components/extension/blockersModel';
 
 export interface ExtensionTimelineData {
   events: ExtensionEvent[];
@@ -89,73 +86,41 @@ export const extensionApi = heimdallApi.injectEndpoints({
       },
       providesTags: (_r, _e, instanceId) => [{ type: 'ExtensionEvents' as const, id: instanceId }],
     }),
-    listInstancePermissionRequests: build.query<PermissionRequest[], string>({
+    getAgentBlockers: build.query<AgentBlockersSnapshot, string>({
       queryFn: async (instanceId) => {
         try {
-          const raw = await cookieJsonFetch(`${instancePath(instanceId, 'permission-requests')}?status=pending`);
-          return { data: normalizePermissionRequests(raw) };
+          const raw = await cookieJsonFetch(instancePath(instanceId, 'blockers'));
+          return { data: normalizeBlockersSnapshot(raw, instanceId) };
         } catch (error) {
           return { error: customQueryError(error) as any };
         }
       },
-      providesTags: (_r, _e, instanceId) => [{ type: 'PermissionRequests' as const, id: instanceId }],
+      providesTags: (_r, _e, instanceId) => [{ type: 'AgentBlockers' as const, id: instanceId }],
     }),
-    listPendingPermissionRequests: build.query<PermissionRequest[], void>({
-      queryFn: async () => {
-        try {
-          const raw = await cookieJsonFetch('/permission-requests?status=pending&limit=50');
-          return { data: normalizePermissionRequests(raw) };
-        } catch (error) {
-          return { error: customQueryError(error) as any };
-        }
-      },
-      providesTags: [{ type: 'PermissionRequests' as const, id: 'LIST' }],
-    }),
-    decidePermissionRequest: build.mutation<
-      { delivered: boolean; permission_request: PermissionRequest | null },
-      { id: string; instanceId: string; decision: PermissionDecision; message?: string }
+    resolveAgentBlocker: build.mutation<
+      { resolved: boolean; delivered: boolean },
+      { instanceId: string; blockerId: string; decision: BlockerDecision; message?: string }
     >({
-      queryFn: async ({ id, decision, message }) => {
+      queryFn: async ({ instanceId, blockerId, decision, message }) => {
         try {
-          const raw = await cookieMutation(`/permission-requests/${encodeURIComponent(id)}/decision`, 'POST', message ? { decision, message } : { decision });
-          return { data: { delivered: Boolean(raw?.delivered), permission_request: normalizePermissionRequest(raw?.permission_request) } };
+          const raw = await cookieMutation(
+            `${instancePath(instanceId, 'blockers')}/${encodeURIComponent(blockerId)}/resolve`,
+            'POST',
+            message ? { decision, message } : { decision },
+          );
+          return { data: { resolved: Boolean(raw?.resolved ?? true), delivered: Boolean(raw?.delivered) } };
         } catch (error) {
           return { error: customQueryError(error) as any };
         }
       },
-      // Patch both caches with the outcome instead of refetching; the realtime
-      // frame lands the same state for other clients.
-      async onQueryStarted({ instanceId }, { dispatch, queryFulfilled }) {
-        try {
-          const { data } = await queryFulfilled;
-          if (data.permission_request) dispatch(applyPermissionRealtime(instanceId, data.permission_request) as any);
-        } catch {
-          /* the card shows the error from the mutation result */
-        }
-      },
+      // The bridge's next snapshot (agent_blockers_changed) drops the blocker; the
+      // card hides it locally until then.
     }),
   }),
 });
 
-/**
- * Upserts one permission request into the per-instance and owner-wide caches
- * (thunk; used by the realtime handler and the decision mutation). A closed
- * request never reopens (see upsertPermissionRequest).
- */
-export function applyPermissionRealtime(instanceId: string, request: PermissionRequest) {
-  return (dispatch: any) => {
-    const patch = (draft: PermissionRequest[]) => {
-      const next = upsertPermissionRequest(draft as PermissionRequest[], request);
-      draft.splice(0, draft.length, ...next);
-    };
-    if (instanceId) dispatch(extensionApi.util.updateQueryData('listInstancePermissionRequests', instanceId, patch as any));
-    dispatch(extensionApi.util.updateQueryData('listPendingPermissionRequests', undefined, patch as any));
-  };
-}
-
 export const {
   useGetExtensionTimelineQuery,
-  useListInstancePermissionRequestsQuery,
-  useListPendingPermissionRequestsQuery,
-  useDecidePermissionRequestMutation,
+  useGetAgentBlockersQuery,
+  useResolveAgentBlockerMutation,
 } = extensionApi;

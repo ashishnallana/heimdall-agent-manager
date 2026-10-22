@@ -1,25 +1,24 @@
-// Permission approval cards (REQ-EXT-PERM-1, UI). A provider permission prompt
-// relayed by the extension shows here with the tool, what it wants to do, an
-// Allow / Deny pair and the time left before the provider falls back to its own
-// terminal prompt. State lives in permissionCardModel.ts; the RTK caches are
-// kept live by the realtime handler (wsInvalidation.ts).
+// Agent blocker cards (REQ-EXT-BLK-1..5, UI). What keeps an agent from
+// progressing: a provider permission prompt relayed by its extension (tool, what
+// it wants to do, Allow / Deny and the time left before the provider falls back
+// to its own terminal prompt), or a prompt screen detection found in the
+// terminal (an "Open terminal" link). The hub holds the list in memory only;
+// state lives in blockersModel.ts and the RTK query is refetched on the
+// agent_blockers_changed realtime frame (wsInvalidation.ts).
 import React, { Suspense, useEffect, useMemo, useReducer, useState } from 'react';
 import { Button, Icon, StatusPill } from '@ui';
 import { apiErrorText } from '../../api/cookieFetch';
+import { useGetAgentBlockersQuery, useResolveAgentBlockerMutation } from '../../api/endpoints/extension';
 import {
-  useDecidePermissionRequestMutation,
-  useListInstancePermissionRequestsQuery,
-  useListPendingPermissionRequestsQuery,
-} from '../../api/endpoints/extension';
-import {
-  initialPermissionCardsState,
-  permissionCardView,
-  permissionCardsReducer,
-  summarizePermissionInput,
-  visiblePermissionRequests,
-  type PermissionDecision,
-  type PermissionRequest,
-} from './permissionCardModel';
+  blockerCardView,
+  blockersReducer,
+  initialBlockersState,
+  instanceCanBeBlocked,
+  visibleBlockers,
+  type AgentBlocker,
+  type BlockerDecision,
+} from './blockersModel';
+import { summarizePermissionInput } from './permissionCardModel';
 
 const MonacoDiffViewer = React.lazy(() => import('../chat/MonacoDiffViewer'));
 
@@ -34,21 +33,19 @@ function useNow(active: boolean, intervalMs = 1000): number {
 }
 
 export interface PermissionCardProps {
-  request: PermissionRequest;
+  request: AgentBlocker;
   nowMs: number;
-  submitting?: PermissionDecision;
+  runtimeStatus: string;
+  submitting?: BlockerDecision;
   error?: string;
-  onDecide: (decision: PermissionDecision) => void;
-  /** Agent name for the owner-wide list ('' inside a conversation). */
-  agentLabel?: string;
-  onOpenAgent?: () => void;
+  onDecide: (decision: BlockerDecision) => void;
 }
 
-export function PermissionCard({ request, nowMs, submitting, error, onDecide, agentLabel, onOpenAgent }: PermissionCardProps) {
-  const view = permissionCardView(request, nowMs);
+export function PermissionCard({ request, nowMs, runtimeStatus, submitting, error, onDecide }: PermissionCardProps) {
+  const view = blockerCardView(request, nowMs, runtimeStatus);
   const summary = useMemo(() => summarizePermissionInput(request.tool_name, request.input), [request.tool_name, request.input]);
   const [showDiff, setShowDiff] = useState(false);
-  const id = request.id;
+  const id = request.blocker_id;
   const busy = Boolean(submitting);
   const urgent = view.phase === 'pending' && view.secondsLeft > 0 && view.secondsLeft <= 30;
   return (
@@ -63,20 +60,7 @@ export function PermissionCard({ request, nowMs, submitting, error, onDecide, ag
         <span className="text-sm font-semibold text-primary">
           {request.tool_name || 'Tool'} <span className="font-normal text-muted">wants permission</span>
         </span>
-        {agentLabel ? (
-          onOpenAgent ? (
-            <button
-              type="button"
-              data-debug-id={`permission-card-agent-btn-${id}`}
-              onClick={onOpenAgent}
-              className="truncate text-xs text-accent hover:underline"
-            >
-              {agentLabel}
-            </button>
-          ) : (
-            <span className="truncate text-xs text-muted">{agentLabel}</span>
-          )
-        ) : null}
+        {request.agent_id ? <span className="truncate text-xs text-muted">subagent {request.agent_id}</span> : null}
         <span className="ml-auto flex items-center gap-2">
           {view.countdown ? (
             <span
@@ -88,7 +72,7 @@ export function PermissionCard({ request, nowMs, submitting, error, onDecide, ag
               {view.countdown}
             </span>
           ) : (
-            <StatusPill tone={view.phase === 'allowed' ? 'success' : view.phase === 'denied' ? 'danger' : 'neutral'}>
+            <StatusPill tone="neutral">
               <span data-debug-id={`permission-card-status-${id}`}>{view.statusLabel}</span>
             </StatusPill>
           )}
@@ -100,7 +84,7 @@ export function PermissionCard({ request, nowMs, submitting, error, onDecide, ag
           className={`overflow-x-auto whitespace-pre-wrap break-all rounded-lg border border-subtle bg-surface-raised px-2 py-1.5 text-xs text-primary ${summary.kind === 'other' ? '' : 'font-mono'}`}
         >
           {summary.kind === 'command' ? <span className="select-none text-faint">$ </span> : null}
-          {summary.text}
+          {Object.keys(request.input).length === 0 && request.summary ? request.summary : summary.text}
         </div>
         {summary.detail ? <p className="mt-1 text-xs text-muted">{summary.detail}</p> : null}
         {summary.diff ? (
@@ -165,80 +149,81 @@ export function PermissionCard({ request, nowMs, submitting, error, onDecide, ag
   );
 }
 
-/**
- * Keeps a list of cards live: syncs the RTK data into the reducer, ticks the
- * countdown while anything is pending, and runs Allow / Deny.
- */
-function usePermissionCards(requests: PermissionRequest[] | undefined) {
-  const [state, dispatch] = useReducer(permissionCardsReducer, initialPermissionCardsState);
-  const [decide] = useDecidePermissionRequestMutation();
-  useEffect(() => {
-    if (requests) dispatch({ type: 'loaded', requests });
-  }, [requests]);
-  const anyLive = state.requests.length > 0;
-  const now = useNow(anyLive);
-  const visible = visiblePermissionRequests(state, now);
-  const onDecide = async (request: PermissionRequest, decision: PermissionDecision) => {
-    dispatch({ type: 'decision_started', id: request.id, decision });
-    const result: any = await decide({ id: request.id, instanceId: request.instance_id, decision });
-    if (result?.error) {
-      dispatch({ type: 'decision_failed', id: request.id, error: apiErrorText(result.error, 'Could not send the decision.') });
-    } else {
-      dispatch({ type: 'decision_succeeded', id: request.id, decision, request: result?.data?.permission_request ?? null });
-    }
-  };
-  return { state, visible, now, onDecide };
-}
-
-/** Cards for one agent conversation (rendered above the composer). */
-export function InstancePermissionCards({ instanceId, className = '' }: { instanceId: string; className?: string }) {
-  const query = useListInstancePermissionRequestsQuery(instanceId, { skip: !instanceId });
-  const { state, visible, now, onDecide } = usePermissionCards(query.data);
-  if (!instanceId || visible.length === 0) return null;
+/** A prompt screen detection found in the agent terminal; answered only there. */
+export function TerminalPromptCard({ blocker, onOpenTerminal }: { blocker: AgentBlocker; onOpenTerminal?: () => void }) {
+  const id = blocker.blocker_id;
   return (
-    <div data-debug-id="conversation-permission-cards" className={`flex max-h-[45vh] flex-col gap-2 overflow-y-auto ${className}`}>
-      {visible.map((request) => (
-        <PermissionCard
-          key={request.id}
-          request={request}
-          nowMs={now}
-          submitting={state.submitting[request.id]}
-          error={state.errors[request.id]}
-          onDecide={(decision) => void onDecide(request, decision)}
-        />
-      ))}
-    </div>
+    <section
+      data-debug-id={`terminal-prompt-card-${id}`}
+      aria-label="Agent is waiting for input in its terminal"
+      className="flex flex-wrap items-center gap-2 rounded-2xl border border-warning/40 bg-surface p-3 shadow-sm"
+    >
+      <Icon name="terminal" size={14} className="shrink-0 text-warning" />
+      <span className="min-w-0 flex-1 text-sm text-primary">{blocker.summary || 'Waiting for input in terminal'}</span>
+      {onOpenTerminal ? (
+        <Button variant="secondary" data-debug-id={`terminal-prompt-open-btn-${id}`} onClick={onOpenTerminal}>
+          Open terminal
+        </Button>
+      ) : null}
+    </section>
   );
 }
 
-/** Owner-wide pending cards for the attention surface. */
-export function PendingPermissionCards({
-  agentLabel,
-  onOpenAgent,
+/**
+ * The blockers of one agent conversation (rendered above the composer). Fetched
+ * on mount and refetched on agent_blockers_changed; empty once the instance
+ * stops. Allow / Deny only for permission blockers while the instance runs.
+ */
+export function InstancePermissionCards({
+  instanceId,
+  runtimeStatus,
+  onOpenTerminal,
+  className = '',
 }: {
-  agentLabel?: (request: PermissionRequest) => string;
-  onOpenAgent?: (request: PermissionRequest) => void;
+  instanceId: string;
+  runtimeStatus: string;
+  onOpenTerminal?: () => void;
+  className?: string;
 }) {
-  const query = useListPendingPermissionRequestsQuery(undefined);
-  const { state, visible, now, onDecide } = usePermissionCards(query.data);
+  const live = Boolean(instanceId) && instanceCanBeBlocked(runtimeStatus);
+  const query = useGetAgentBlockersQuery(instanceId, { skip: !live, refetchOnMountOrArgChange: true });
+  const [state, dispatch] = useReducer(blockersReducer, instanceId, initialBlockersState);
+  const [resolve] = useResolveAgentBlockerMutation();
+  useEffect(() => {
+    if (live && query.data) dispatch({ type: 'loaded', snapshot: query.data });
+  }, [live, query.data]);
+  useEffect(() => {
+    if (!live) dispatch({ type: 'instance_stopped' });
+  }, [live]);
+  const visible = live ? visibleBlockers(state) : [];
+  const now = useNow(visible.some((b) => b.kind === 'permission'));
   if (visible.length === 0) return null;
+  const onDecide = async (blocker: AgentBlocker, decision: BlockerDecision) => {
+    dispatch({ type: 'decision_started', id: blocker.blocker_id, decision });
+    const result: any = await resolve({ instanceId, blockerId: blocker.blocker_id, decision });
+    if (result?.error) {
+      dispatch({ type: 'decision_failed', id: blocker.blocker_id, error: apiErrorText(result.error, 'Could not send the decision.') });
+    } else {
+      dispatch({ type: 'decision_succeeded', id: blocker.blocker_id });
+    }
+  };
   return (
-    <section data-debug-id="attention-permission-cards" aria-label="Permission requests" className="flex flex-col gap-2">
-      <h3 className="px-1 text-xs font-semibold uppercase tracking-wide text-muted">
-        Permission requests <span data-debug-id="attention-permission-count">({visible.filter((r) => r.status === 'pending').length})</span>
-      </h3>
-      {visible.map((request) => (
-        <PermissionCard
-          key={request.id}
-          request={request}
-          nowMs={now}
-          submitting={state.submitting[request.id]}
-          error={state.errors[request.id]}
-          onDecide={(decision) => void onDecide(request, decision)}
-          agentLabel={agentLabel ? agentLabel(request) : request.agent_id || request.instance_id}
-          onOpenAgent={onOpenAgent ? () => onOpenAgent(request) : undefined}
-        />
-      ))}
-    </section>
+    <div data-debug-id="conversation-permission-cards" className={`flex max-h-[45vh] flex-col gap-2 overflow-y-auto ${className}`}>
+      {visible.map((blocker) =>
+        blocker.kind === 'terminal_prompt' ? (
+          <TerminalPromptCard key={blocker.blocker_id} blocker={blocker} onOpenTerminal={onOpenTerminal} />
+        ) : (
+          <PermissionCard
+            key={blocker.blocker_id}
+            request={blocker}
+            nowMs={now}
+            runtimeStatus={runtimeStatus}
+            submitting={state.submitting[blocker.blocker_id]}
+            error={state.errors[blocker.blocker_id]}
+            onDecide={(decision) => void onDecide(blocker, decision)}
+          />
+        ),
+      )}
+    </div>
   );
 }

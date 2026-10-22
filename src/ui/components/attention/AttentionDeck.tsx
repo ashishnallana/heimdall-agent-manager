@@ -27,7 +27,6 @@ import { ATTENTION_RANGE_LABELS } from '../../services/attention/attentionPrefs'
 import { snoozePresets, toHubTimestamp } from '../../services/attention/snoozePresets';
 import { appendArtifactLinks } from '../../utils/artifactUpload';
 import { buildRouteHash, navigateTo } from '../../utils/appLocation';
-import { PendingPermissionCards } from '../extension/PermissionCards';
 import { useDialogA11y } from '../ui/composites/useDialogA11y';
 import { AttentionCardBody } from './AttentionCardBody';
 import { AttentionComposer, type ComposerSubmit } from './AttentionComposer';
@@ -533,17 +532,6 @@ export function AttentionDeck({
             ))}
           </div>
         </header>
-
-        {/* REQ-EXT-PERM-1: live provider permission prompts sit above the card stack;
-            they expire in minutes, so they never wait behind other cards. */}
-        <div data-no-drag className="max-h-[40%] shrink-0 overflow-y-auto px-4 empty:hidden">
-          <PendingPermissionCards
-            onOpenAgent={(request) => {
-              navigateTo(buildRouteHash(`/conversations/${encodeURIComponent(request.instance_id)}`, ''));
-              onClose();
-            }}
-          />
-        </div>
 
         <div className="relative min-h-0 flex-1 px-4" onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerUp}>
           {!data && !query.isError ? (

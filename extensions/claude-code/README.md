@@ -46,7 +46,7 @@ Hooks never block Claude:
 | Hook | Behaviour |
 | --- | --- |
 | All except `PermissionRequest` | One Bridge round trip with a 500ms socket timeout. Prints nothing. Always exits 0. Hook timeout 10s. |
-| `PermissionRequest` | Waits for a decision from Heimdall for up to 300s. Prints Claude's allow/deny JSON. Prints nothing when there is no decision (timeout, Bridge or Hub unreachable), so the terminal prompt decides. Hook timeout 330s, which is longer than the wait. |
+| `PermissionRequest` | Waits for a decision from Heimdall for up to 300s. Prints Claude's allow/deny JSON. Prints nothing when there is no decision (timeout, answered in the terminal, agent stopped), so the terminal prompt decides. If the Bridge restarts during the wait, the hook reconnects and re-registers the same blocker, so the prompt stays visible in Heimdall. Nothing is stored: prompts live in memory as agent blockers. Hook timeout 330s, which is longer than the wait. |
 
 Set `HEIMDALL_EXT_PERMISSION_TIMEOUT_MS` to shorten the permission wait. Values above 300000 are clamped to 300000.
 

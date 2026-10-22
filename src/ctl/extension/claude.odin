@@ -211,8 +211,9 @@ int_text :: proc(buf: []u8, n: int) -> string {
 // claude_map_hook maps one Claude hook payload. ts is the RFC 3339 event time
 // (injected so tests are deterministic). An unknown hook maps to no events.
 // permission_timeout_ms > 0 is sent as payload.timeout_ms on permission.request
-// so the relay always gives up before the plugin's hook timeout.
-claude_map_hook :: proc(raw: string, ts: string, permission_timeout_ms := 0) -> (out: Claude_Mapped, err: Claude_Error) {
+// so the relay always gives up before the plugin's hook timeout, and a non-empty
+// permission_blocker_id as payload.blocker_id (stable across re-registrations).
+claude_map_hook :: proc(raw: string, ts: string, permission_timeout_ms := 0, permission_blocker_id := "") -> (out: Claude_Mapped, err: Claude_Error) {
 	if len(raw) > CLAUDE_HOOK_INPUT_MAX do return out, .Too_Large
 	value, perr := json.parse_string(raw, json.DEFAULT_SPECIFICATION, true)
 	if perr != .None do return out, .Malformed_Json
@@ -343,6 +344,7 @@ claude_map_hook :: proc(raw: string, ts: string, permission_timeout_ms := 0) -> 
 		p := pb_make()
 		pb_str_nonempty(&p, "permission_mode", json_get_string(root, "permission_mode"))
 		if permission_timeout_ms > 0 do pb_int(&p, "timeout_ms", permission_timeout_ms)
+		pb_str_nonempty(&p, "blocker_id", permission_blocker_id)
 		if sugg := json_get_array(root, "permission_suggestions"); sugg != nil {
 			pb_value(&p, "permission_suggestions", json_clip(sugg, CLAUDE_TOOL_STRING_MAX))
 		}

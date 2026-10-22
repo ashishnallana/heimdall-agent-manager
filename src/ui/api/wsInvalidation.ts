@@ -5,8 +5,7 @@ import { chatEndpoints } from './endpoints/chats';
 import { patchAgentCachesFromWs } from './endpoints/agents';
 import { patchMemoryCachesFromWs } from './endpoints/memory';
 import { bridgeSupportApi } from './endpoints/bridgeSupport';
-import { applyPermissionRealtime } from './endpoints/extension';
-import { permissionRealtimeFromSummary } from '../components/extension/permissionCardModel';
+import { AGENT_BLOCKERS_CHANGE } from '../components/extension/blockersModel';
 import { upsertTaskInList, upsertTaskLogEvent } from './taskCache';
 import { attentionEventReceived } from '../store/attentionSlice';
 import { announcePaneVaultLocked } from '../utils/vaultLockedError';
@@ -607,25 +606,17 @@ function invalidateShellSession(dispatch: any, sessionId: string, chainId?: stri
 }
 
 /**
- * Provider extension frames on an agent instance (REQ-EXT-PERM-1, REQ-EXT-SUB-2):
- *   'extension_events'    {count, last_seq, provider_session_id, session_changed, events:[tail]}
- *   'permission_requests' {action: created|decided|closed, permission_request}
- * The timeline refetches only events after the seq it holds; permission cards are
- * patched in place so Allow / Deny resolve live on every client. Returns false
- * for any other change so the generic agent path handles it.
+ * Provider extension frames on an agent instance (REQ-EXT-BLK-1, REQ-EXT-SUB-2):
+ *   'extension_events'       {count, last_seq, provider_session_id, session_changed, events:[tail]}
+ *   'agent_blockers_changed' {agent_instance_id, revision, count}
+ * The timeline refetches only events after the seq it holds; the in-memory
+ * blocker list (permission cards) is refetched. Returns false for any other
+ * change so the generic agent path handles it.
  */
 function handleAgentInstanceExtensionChange(dispatch: any, instanceId: string, change: string, summary: any): boolean {
-  if (change === 'permission_requests') {
-    const parsed = permissionRealtimeFromSummary(summary);
-    if (parsed) dispatch(applyPermissionRealtime(instanceId || parsed.request.instance_id, parsed.request));
-    // A new request may not be in a cached list yet (e.g. the owner-wide list was
-    // never loaded); refetch the subscribed lists to converge.
-    if (!parsed || parsed.action === 'created') {
-      dispatch(heimdallApi.util.invalidateTags([
-        { type: 'PermissionRequests' as const, id: instanceId },
-        { type: 'PermissionRequests' as const, id: 'LIST' },
-      ]));
-    }
+  if (change === AGENT_BLOCKERS_CHANGE) {
+    const id = instanceId || String(summary?.agent_instance_id || '');
+    if (id) dispatch(heimdallApi.util.invalidateTags([{ type: 'AgentBlockers' as const, id }]));
     return true;
   }
   if (change === 'extension_events') {
