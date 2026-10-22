@@ -1,5 +1,7 @@
 package domain
 
+import "core:encoding/json"
+import "core:fmt"
 import "core:strings"
 import contracts "odin_test:contracts"
 
@@ -65,4 +67,15 @@ vault_locked_error :: proc(bridge_id: string) -> Domain_Error {
 	}
 	strings.write_string(&b, "\"}")
 	return domain_error(.Vault_Locked, VAULT_LOCKED_MESSAGE, strings.to_string(b))
+}
+
+// Messages and details use the request temp arena, like other domain errors.
+plan_limit_error :: proc(limit: string, allowed, current: int, plan_label: string) -> Domain_Error {
+	details := struct {limit: string, allowed: int, current: int, plan_label: string, upgrade_path: string}{
+		limit, allowed, current, plan_label, "/settings/account",
+	}
+	encoded, _ := json.marshal(details, allocator = context.temp_allocator)
+	return domain_error(.Plan_Limit_Reached,
+		fmt.tprintf("%s plan limit reached (%s: %d allowed, %d current). Upgrade your plan to continue.", plan_label, limit, allowed, current),
+		string(encoded))
 }

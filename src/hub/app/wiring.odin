@@ -218,7 +218,7 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 
 	if config.paddle_past_due_grace_seconds < 0 do return false, "Paddle grace period must be a nonnegative number of seconds"
 	if config.paddle_environment != "sandbox" && config.paddle_environment != "live" do return false, "Paddle environment must be sandbox or live"
-	billing_config := billing_service.Config{environment = config.paddle_environment, api_key = config.paddle_api_key, client_token = config.paddle_client_token, webhook_secret = config.paddle_webhook_secret, past_due_grace_seconds = config.paddle_past_due_grace_seconds}
+	billing_config := billing_service.Config{enforce_plan_limits = config.billing_enforce_plan_limits, hobbyist_price_id = config.paddle_hobbyist_price_id, environment = config.paddle_environment, api_key = config.paddle_api_key, client_token = config.paddle_client_token, webhook_secret = config.paddle_webhook_secret, past_due_grace_seconds = config.paddle_past_due_grace_seconds}
 	billing_repo, billing_err := sqlite.new_billing_repository(&graph.sqlite_billing, config.database_path, config.paddle_environment, config.paddle_hobbyist_price_id, config.paddle_api_key != "" || config.paddle_webhook_secret != "")
 	if billing_err.code != .None do return false, billing_err.message
 	graph.billing_repo = billing_repo
@@ -365,6 +365,7 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 		// conversation. graph.content is constructed above, so the order holds.
 		content             = &graph.content,
 	)
+	graph.shell_session_service.entitlements = billing_service.entitlement_lookup(&graph.billing)
 	shell_session_svc.shell_metrics_set_service(&graph.shell_session_service)
 	graph.shell_session_service.on_unobserved_terminal = task_engine_on_unobserved_shell_terminal
 	graph.shell_session_service.on_unobserved_terminal_ctx = rawptr(&graph.task_engine)
@@ -374,6 +375,7 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 	// service exists, so wiring it there would store a pointer to a zero value.
 	graph.taskchains.shell_sessions = &graph.shell_session_service
 	graph.shell_session_stream_handlers = http.Shell_Session_Stream_Handlers{
+		entitlements = billing_service.entitlement_lookup(&graph.billing),
 		auth                = &graph.auth,
 		ws_tickets          = &graph.user_handlers.ws_tickets,
 		bridges             = &graph.bridges,
@@ -398,6 +400,7 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 		bridge_command_sink = bridge_command_sink,
 	}
 	graph.shell_session_rest_handlers = http.Shell_Session_Rest_Handlers{
+		entitlements = billing_service.entitlement_lookup(&graph.billing),
 		auth           = &graph.auth,
 		shell_sessions = &graph.shell_session_service,
 		preview_origin = config.preview_origin,
@@ -406,12 +409,29 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 		// state the serializer reports.
 		bridge_runtime_registry = &graph.bridge_runtime_registry,
 	}
-	graph.bridge_handlers = http.Bridge_Handlers{auth = &graph.auth, bridges = &graph.bridges, agents = &graph.agents, content = &graph.content, taskchains = &graph.taskchains, projects = &graph.projects, event_bus = &graph.event_bus, bridge_runtime_registry = &graph.bridge_runtime_registry, shell_sessions = &graph.shell_session_service, lsp_sessions = &graph.lsp_session_registry, providers = &graph.providers, bridge_logs = &graph.bridge_logs, task_engine = &graph.task_engine, vault = &graph.vault_directory}
+	graph.bridge_handlers = http.Bridge_Handlers{
+		entitlements = billing_service.entitlement_lookup(&graph.billing),
+		auth = &graph.auth,
+		bridges = &graph.bridges,
+		agents = &graph.agents,
+		content = &graph.content,
+		taskchains = &graph.taskchains,
+		projects = &graph.projects,
+		event_bus = &graph.event_bus,
+		bridge_runtime_registry = &graph.bridge_runtime_registry,
+		shell_sessions = &graph.shell_session_service,
+		lsp_sessions = &graph.lsp_session_registry,
+		providers = &graph.providers,
+		bridge_logs = &graph.bridge_logs,
+		task_engine = &graph.task_engine,
+		vault = &graph.vault_directory,
+	}
 	graph.task_engine.vcs_show_file = http.bridge_vcs_show_file_callback
 	graph.task_engine.vcs_show_file_ctx = rawptr(&graph.bridge_handlers)
 	bridge_log_service.start(&graph.bridge_logs)
 	graph.agent_handlers = http.Agent_Handlers{
- launch_preferences = &graph.users,
+		entitlements = billing_service.entitlement_lookup(&graph.billing),
+		launch_preferences = &graph.users,
 		auth           = &graph.auth,
 		agents         = &graph.agents,
 		event_bus      = &graph.event_bus,
@@ -497,6 +517,7 @@ shutdown_graph :: proc(graph: ^App_Graph) {
 	shell_session_svc.shell_session_service_free(&graph.shell_session_service)
 	device_auth_service.grant_store_free(&graph.device_auth_store)
 	delete(graph.action_bridge_versions)
+	billing_service.service_free(&graph.billing)
 	sqlite.close(&graph.sqlite_billing.conn)
 	sqlite.close(&graph.sqlite_bridge_commit.conn)
 	vault_directory_service.service_free(&graph.vault_directory)

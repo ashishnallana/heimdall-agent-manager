@@ -75,3 +75,12 @@ test_api_error_json_carries_class_and_cause :: proc(t: ^testing.T) {
 	testing.expect_value(t, got.class, Bridge_Error_Class.recoverable)
 	testing.expect_value(t, got.cause, "vault_locked")
 }
+
+@(test)
+test_plan_limit_error_contract :: proc(t: ^testing.T) {
+	testing.expect_value(t, error_code_http_status(.Plan_Limit_Reached), 402)
+	testing.expect_value(t, error_code_class(.Plan_Limit_Reached), Bridge_Error_Class.recoverable)
+	code, ok := error_code_parse("plan_limit_reached")
+	testing.expect(t, ok)
+	testing.expect_value(t, code, Error_Code.Plan_Limit_Reached)
+}

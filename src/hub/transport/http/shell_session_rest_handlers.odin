@@ -10,6 +10,7 @@ import project_service "odin_test:hub/service/project"
 import shell_session_svc "odin_test:hub/service/shell_session"
 
 Shell_Session_Rest_Handlers :: struct {
+	entitlements: domain.Entitlement_Lookup,
 	auth:           ^auth_service.Auth_Service,
 	shell_sessions: ^shell_session_svc.Shell_Session_Service,
 	// REQ-SHELL-10 work item 3: the live bridge-connection registry, read ONLY to

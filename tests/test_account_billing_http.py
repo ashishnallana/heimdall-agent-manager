@@ -38,12 +38,12 @@ class AccountBillingHTTPTest(unittest.TestCase):
             self.port = sock.getsockname()[1]
         self.base = f'http://127.0.0.1:{self.port}'
         self.log = open(Path(self.directory.name) / 'hub.log', 'wb')
-        self.env = {key: value for key, value in os.environ.items() if not key.startswith('HEIMDALL_PADDLE_')}
+        self.env = {key: value for key, value in os.environ.items() if not key.startswith('HEIMDALL_PADDLE_') and key != 'HEIMDALL_BILLING_ENFORCE_PLAN_LIMITS'}
         self.env.update(HEIMDALL_PADDLE_WEBHOOK_SECRET='test_only_secret', HEIMDALL_PADDLE_HOBBYIST_PRICE_ID='pri_approved', HEIMDALL_PADDLE_ENVIRONMENT='sandbox')
         self.start_hub()
 
     def start_hub(self):
-        self.process = subprocess.Popen([self.hub_bin, '--listen', f'127.0.0.1:{self.port}', '--db', self.database, '--migrations-dir', '/nonexistent/billing-test-migrations', '--ui-origin', 'http://127.0.0.1:5193'], env=self.env, stdout=self.log, stderr=subprocess.STDOUT)
+        self.process = subprocess.Popen([self.hub_bin, '--listen', f'127.0.0.1:{self.port}', '--db', self.database, '--migrations-dir', '/nonexistent/billing-test-migrations', '--ui-origin', 'http://127.0.0.1:5193', *getattr(self, 'hub_args', [])], env=self.env, stdout=self.log, stderr=subprocess.STDOUT)
         for _ in range(100):
             try:
                 status, _ = self.request('GET', '/api/v1/me', user='alice')
@@ -88,10 +88,10 @@ class AccountBillingHTTPTest(unittest.TestCase):
         self.assertEqual(self.request('GET', '/api/v1/account/billing')[0], 401)
         # Authentik provisioning persists defaults before opening Account.
         with sqlite3.connect(self.database) as conn:
-            self.assertEqual(conn.execute("SELECT max_bridges, terminal_streaming_enabled FROM account_entitlements WHERE user_id = 'alice'").fetchone(), (1, 0))
+            self.assertEqual(conn.execute("SELECT max_bridges, terminal_streaming_enabled FROM account_entitlements WHERE user_id = 'alice'").fetchone(), (1, 1))
         status, body = self.request('GET', '/api/v1/account/billing', user='alice')
         self.assertEqual(status, 200)
-        self.assertEqual(body['data']['entitlements'], {'max_bridges': 1, 'terminal_streaming_enabled': False})
+        self.assertEqual(body['data']['entitlements'], {'max_bridges': 1, 'terminal_streaming_enabled': True, 'terminal_input_enabled': False, 'max_concurrent_streams': 2, 'shells_enabled': False})
         self.assertFalse(body['data']['checkout_enabled'])
         self.assertNotIn('api_key', body['data'])
         self.assertEqual(self.request('POST', '/api/v1/account/billing/checkout', {'offer_id': 'hobbyist'}, user='alice', extra={'Origin': 'https://evil.example'})[0], 403)
@@ -113,14 +113,15 @@ class AccountBillingHTTPTest(unittest.TestCase):
         self.assertEqual(active['data']['plan_label'], 'Hobbyist')
         self.assertTrue(active['data']['entitlements']['terminal_streaming_enabled'])
         _, bob = self.request('GET', '/api/v1/account/billing', user='bob')
-        self.assertFalse(bob['data']['entitlements']['terminal_streaming_enabled'])
+        self.assertTrue(bob['data']['entitlements']['terminal_streaming_enabled'])
+        self.assertFalse(bob['data']['entitlements']['terminal_input_enabled'])
         with sqlite3.connect(self.database) as conn:
             conn.execute("UPDATE account_entitlements SET override_max_bridges = 6, override_terminal_streaming_enabled = 0, override_reason = 'test agreement', override_updated_by = 'test' WHERE user_id = 'alice'")
         self.process.terminate()
         self.process.wait(timeout=5)
         self.start_hub()
         _, restarted = self.request('GET', '/api/v1/account/billing', user='alice')
-        self.assertEqual(restarted['data']['entitlements'], {'max_bridges': 6, 'terminal_streaming_enabled': False})
+        self.assertEqual(restarted['data']['entitlements'], {'max_bridges': 6, 'terminal_streaming_enabled': False, 'terminal_input_enabled': True, 'max_concurrent_streams': -1, 'shells_enabled': True})
         self.assertEqual(self.webhook('evt_canceled', 'canceled', '2026-10-10T11:00:00.123456Z')[0], 200)
         _, canceled = self.request('GET', '/api/v1/account/billing', user='alice')
         self.assertEqual(canceled['data']['plan_label'], 'Free')
@@ -128,6 +129,36 @@ class AccountBillingHTTPTest(unittest.TestCase):
         with sqlite3.connect(self.database) as conn:
             self.assertEqual(conn.execute('SELECT COUNT(*) FROM billing_events').fetchone()[0], 3)
             self.assertEqual(conn.execute("SELECT terminal_streaming_enabled FROM account_entitlements WHERE user_id = 'alice'").fetchone()[0], 0)
+
+    def test_explicit_enforcement_config_and_flag_precedence(self):
+        def restart():
+            self.process.terminate()
+            self.process.wait(timeout=5)
+            self.start_hub()
+
+        def entitlements():
+            status, body = self.request('GET', '/api/v1/account/billing', user='alice')
+            self.assertEqual(status, 200)
+            return body['data']['entitlements']
+
+        # The webhook-only default is enforced even though checkout is disabled.
+        self.assertEqual(entitlements()['max_bridges'], 1)
+        self.env = {key: value for key, value in self.env.items() if not key.startswith('HEIMDALL_PADDLE_')}
+        restart()
+        self.assertEqual(entitlements(), {
+            'max_bridges': -1, 'terminal_streaming_enabled': True,
+            'terminal_input_enabled': True, 'max_concurrent_streams': -1, 'shells_enabled': True,
+        })
+        self.env['HEIMDALL_BILLING_ENFORCE_PLAN_LIMITS'] = 'true'
+        restart()
+        self.assertEqual(entitlements()['max_bridges'], 1)
+        self.hub_args = ['--billing-enforce-plan-limits', 'false']
+        restart()
+        self.assertEqual(entitlements()['max_bridges'], -1)
+        self.env['HEIMDALL_BILLING_ENFORCE_PLAN_LIMITS'] = 'false'
+        self.hub_args = ['--billing-enforce-plan-limits', 'true']
+        restart()
+        self.assertEqual(entitlements()['max_bridges'], 1)
 
 
 if __name__ == '__main__':

@@ -6,6 +6,8 @@ import "core:net"
 import vault "odin_test:lib/vault"
 
 Hub_Config :: struct {
+	// Unset: any Paddle credential/price enables limits. Explicit false opts out.
+	billing_enforce_plan_limits: Maybe(bool),
 	paddle_environment: string,
 	paddle_api_key: string,
 	paddle_client_token: string,

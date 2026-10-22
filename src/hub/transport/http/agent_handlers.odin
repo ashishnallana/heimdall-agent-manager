@@ -13,6 +13,7 @@ import iface "odin_test:hub/repository/iface"
 import shell_session_svc "odin_test:hub/service/shell_session"
 
 Agent_Handlers :: struct {
+	entitlements: domain.Entitlement_Lookup,
  launch_preferences: ^user_service.User_Service,
 	auth:           ^auth_service.Auth_Service,
 	agents:         ^agent_service.Agent_Service,

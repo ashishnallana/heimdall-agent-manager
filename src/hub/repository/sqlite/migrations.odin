@@ -446,8 +446,9 @@ MIGRATION_101_CODEX_GPT6_MODELS :: #load("migrations/101_codex_gpt6_models.sql",
 
 // 102: drops the never-used bridge_enrollments table from 002 and its owner trigger.
 MIGRATION_102_DROP_BRIDGE_ENROLLMENTS :: #load("migrations/102_drop_bridge_enrollments.sql", string)
+MIGRATION_103_PLAN_ENFORCEMENT :: #load("migrations/103_plan_enforcement.sql", string)
 
-migration_order :: [105]string {
+migration_order :: [106]string {
 	"001_foundation.sql",
 	"002_owner_scoped_core.sql",
 	"003_device_tokens.sql",
@@ -553,6 +554,7 @@ migration_order :: [105]string {
 	"100_vault_pair_hub_origin.sql",
 	"101_codex_gpt6_models.sql",
 	"102_drop_bridge_enrollments.sql",
+	"103_plan_enforcement.sql",
 }
 
 // stop_before is a TEST SEAM: when non-empty, the apply loop stops in front of
@@ -894,6 +896,14 @@ run_migrations :: proc(
 			mark_migration_applied(conn, name)
 			continue
 		}
+		// 103 commits atomically before its ledger row. Its final column proves
+		// completion if the process exits between those writes.
+		if name == "103_plan_enforcement.sql" &&
+		   table_column_exists(conn, "bridges", "plan_disabled_at") &&
+		   table_column_exists(conn, "account_entitlements", "override_shells_enabled") {
+			mark_migration_applied(conn, name)
+			continue
+		}
 		if name == "099_mixed_work_execution.sql" && sqlite_object_exists(conn, "mixed_work_engine_epoch") {
 			mark_migration_applied(conn, name)
 			continue
@@ -1051,6 +1061,7 @@ migration_sql :: proc(name, migrations_dir: string) -> string {
 	if name == "098_mixed_work_graph.sql" do return strings.clone(MIGRATION_098_MIXED_WORK_GRAPH)
 	if name == "099_mixed_work_execution.sql" do return strings.clone(MIGRATION_099_MIXED_WORK_EXECUTION)
 	if name == "102_drop_bridge_enrollments.sql" do return strings.clone(MIGRATION_102_DROP_BRIDGE_ENROLLMENTS)
+	if name == "103_plan_enforcement.sql" do return strings.clone(MIGRATION_103_PLAN_ENFORCEMENT)
 	if name == "100_vault_pair_hub_origin.sql" do return strings.clone(MIGRATION_100_VAULT_PAIR_HUB_ORIGIN)
 	if name == "101_codex_gpt6_models.sql" do return strings.clone(MIGRATION_101_CODEX_GPT6_MODELS)
 	if name == "081_antigravity_models.sql" do return strings.clone(MIGRATION_081_ANTIGRAVITY_MODELS)

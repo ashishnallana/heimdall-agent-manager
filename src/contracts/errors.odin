@@ -44,6 +44,7 @@ Error_Code :: enum {
 	Not_Implemented,
 	Internal_Error,
 	Vault_Locked,
+	Plan_Limit_Reached,
 }
 
 Error_Code_Info :: struct {
@@ -71,6 +72,7 @@ ERROR_CODE_TABLE :: [Error_Code]Error_Code_Info{
 	.Unprocessable_Entity = {"unprocessable_entity", .fatal,       422},
 	.Not_Implemented      = {"not_implemented",      .fatal,       501},
 	.Internal_Error       = {"internal_error",       .retriable,   500}, // unknown server fault: bounded backoff
+	.Plan_Limit_Reached   = {"plan_limit_reached",   .recoverable, 402},
 	.Vault_Locked         = {"vault_locked",         .recoverable, 423}, // RFC 4918 Locked: retry after unseal
 }
 

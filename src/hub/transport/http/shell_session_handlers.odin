@@ -20,6 +20,7 @@ import shell_session_svc "odin_test:hub/service/shell_session"
 import project_service "odin_test:hub/service/project"
 
 Shell_Session_Stream_Handlers :: struct {
+	entitlements: domain.Entitlement_Lookup,
 	auth:                ^auth_service.Auth_Service,
 	ws_tickets:          ^User_WS_Ticket_Store,
 	bridges:             ^bridge_service.Bridge_Service,

@@ -2,8 +2,11 @@ package domain
 
 // Feature code consumes these account-scoped parameters, never a plan ID.
 User_Entitlements :: struct {
-	max_bridges: int,
+	max_bridges: int, // -1 = unlimited; 0 permits none
 	terminal_streaming_enabled: bool,
+	terminal_input_enabled: bool,
+	max_concurrent_streams: int, // -1 = unlimited; 0 permits none
+	shells_enabled: bool,
 }
 
 Billing_Plan :: struct {
@@ -52,4 +55,21 @@ Billing_Event :: struct {
 	renews_at: string,
 	cancels_at: string,
 	grace_until: string,
+}
+
+// A zero-valued lookup is permissive for self-hosted hubs and isolated tests.
+// Feature code can depend on this seam without importing the billing service.
+Entitlement_Lookup :: struct {
+	ctx: rawptr,
+	lookup: proc(ctx: rawptr, user_id: string) -> (User_Entitlements, Domain_Error),
+}
+
+unlimited_entitlements :: proc() -> User_Entitlements {
+	return {max_bridges = -1, terminal_streaming_enabled = true,
+		terminal_input_enabled = true, max_concurrent_streams = -1, shells_enabled = true}
+}
+
+lookup_entitlements :: proc(source: Entitlement_Lookup, user_id: string) -> (User_Entitlements, Domain_Error) {
+	if source.lookup == nil do return unlimited_entitlements(), {}
+	return source.lookup(source.ctx, user_id)
 }

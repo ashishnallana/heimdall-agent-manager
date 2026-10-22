@@ -36,6 +36,7 @@ import vault "odin_test:lib/vault"
 import metrics "odin_test:lib/metrics"
 
 Bridge_Handlers :: struct {
+	entitlements: domain.Entitlement_Lookup,
 	auth: ^auth_service.Auth_Service,
 	bridges: ^bridge_service.Bridge_Service,
 	agents: ^agent_service.Agent_Service,

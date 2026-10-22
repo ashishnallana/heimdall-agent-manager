@@ -32,6 +32,7 @@ Preview_Tunnel_Stream :: struct {
 }
 
 Shell_Session_Service :: struct {
+	entitlements: domain.Entitlement_Lookup,
 	// WS fan-out registry (T7) — protected by mu.
 	mu:      sync.Mutex,
 	viewers: map[string][dynamic]net.TCP_Socket, // session_id → attached WS client sockets
