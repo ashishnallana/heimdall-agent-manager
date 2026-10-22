@@ -461,7 +461,11 @@ MIGRATION_106_AGENT_PERMISSION_MODE :: #load("migrations/106_agent_permission_mo
 // and the reconfiguration commit trigger applying $.destination.permission_mode.
 MIGRATION_108_INSTANCE_PERMISSION_MODE :: #load("migrations/108_instance_permission_mode.sql", string)
 
-migration_order :: [110]string {
+// 109: provider_catalog.ask_args, appended instead of yolo_args when the
+// effective permission_mode is 'ask' (claude: --permission-mode default).
+MIGRATION_109_PROVIDER_ASK_ARGS :: #load("migrations/109_provider_ask_args.sql", string)
+
+migration_order :: [111]string {
 	"001_foundation.sql",
 	"002_owner_scoped_core.sql",
 	"003_device_tokens.sql",
@@ -572,6 +576,7 @@ migration_order :: [110]string {
 	"105_provider_extension.sql",
 	"106_agent_permission_mode.sql",
 	"108_instance_permission_mode.sql",
+	"109_provider_ask_args.sql",
 }
 
 // stop_before is a TEST SEAM: when non-empty, the apply loop stops in front of
@@ -946,6 +951,11 @@ run_migrations :: proc(
 			mark_migration_applied(conn, name)
 			continue
 		}
+		// 109 commits atomically before its ledger row; its column proves completion.
+		if name == "109_provider_ask_args.sql" && table_column_exists(conn, "provider_catalog", "ask_args") {
+			mark_migration_applied(conn, name)
+			continue
+		}
 		if name == "099_mixed_work_execution.sql" && sqlite_object_exists(conn, "mixed_work_engine_epoch") {
 			mark_migration_applied(conn, name)
 			continue
@@ -1108,6 +1118,7 @@ migration_sql :: proc(name, migrations_dir: string) -> string {
 	if name == "105_provider_extension.sql" do return strings.clone(MIGRATION_105_PROVIDER_EXTENSION)
 	if name == "104_agent_extension_events.sql" do return strings.clone(MIGRATION_104_AGENT_EXTENSION_EVENTS)
 	if name == "108_instance_permission_mode.sql" do return strings.clone(MIGRATION_108_INSTANCE_PERMISSION_MODE)
+	if name == "109_provider_ask_args.sql" do return strings.clone(MIGRATION_109_PROVIDER_ASK_ARGS)
 	if name == "100_vault_pair_hub_origin.sql" do return strings.clone(MIGRATION_100_VAULT_PAIR_HUB_ORIGIN)
 	if name == "101_codex_gpt6_models.sql" do return strings.clone(MIGRATION_101_CODEX_GPT6_MODELS)
 	if name == "081_antigravity_models.sql" do return strings.clone(MIGRATION_081_ANTIGRAVITY_MODELS)

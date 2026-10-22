@@ -15,6 +15,9 @@ Provider_Catalog_Entry :: struct {
 	binary:             string,
 	base_args_json:     string,
 	yolo_args_json:     string,
+	// ask_args_json is appended instead of yolo_args when the effective
+	// permission_mode is 'ask' (JSON array, '[]' when the provider needs none).
+	ask_args_json:      string,
 	model_flag:         string,
 	prompt_args_json:   string,
 	prompt_delivery:    string,
@@ -72,6 +75,7 @@ provider_catalog_entry_destroy :: proc(entry: Provider_Catalog_Entry) {
 	delete(entry.binary)
 	delete(entry.base_args_json)
 	delete(entry.yolo_args_json)
+	delete(entry.ask_args_json)
 	delete(entry.model_flag)
 	delete(entry.prompt_args_json)
 	delete(entry.prompt_delivery)

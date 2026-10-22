@@ -120,6 +120,7 @@ provider_entry_from_stmt :: proc(impl: ^Provider_Repo_SQLite, stmt: sqlite3_stmt
 		state = column_text(stmt, 14),
 		rank = provider_rank_from_stmt(stmt, 15),
 		extension_json = column_text(stmt, 16),
+		ask_args_json = column_text(stmt, 17),
 	}
 	models, err := provider_models_for_sqlite(impl, entry.provider)
 	if err.code != .None {
@@ -130,7 +131,7 @@ provider_entry_from_stmt :: proc(impl: ^Provider_Repo_SQLite, stmt: sqlite3_stmt
 	return entry, {}
 }
 
-PROVIDER_SELECT :: "SELECT provider, display_name, icon_url, binary, base_args, yolo_args, model_flag, prompt_args, prompt_delivery, starter_prompt, bootstrap_file, skill_dir, startup_detection, activity_detection, state, rank, COALESCE(extension, '') FROM provider_catalog"
+PROVIDER_SELECT :: "SELECT provider, display_name, icon_url, binary, base_args, yolo_args, model_flag, prompt_args, prompt_delivery, starter_prompt, bootstrap_file, skill_dir, startup_detection, activity_detection, state, rank, COALESCE(extension, ''), ask_args FROM provider_catalog"
 
 provider_catalog_list_sqlite :: proc(ctx: rawptr) -> ([dynamic]domain.Provider_Catalog_Entry, domain.Domain_Error) {
 	impl := (^Provider_Repo_SQLite)(ctx)
