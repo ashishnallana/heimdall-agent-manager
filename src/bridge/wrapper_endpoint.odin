@@ -411,6 +411,10 @@ bridge_local_handle_agent_method :: proc(request_id, method, params: string, rec
 		}
 		return bridge_local_response_data(request_id, "{\"accepted\":true}")
 	}
+	if method == "agent.extension.event" || method == "agent.extension.status" {
+		// ham.ext.v1 ingest: identity is rec (token-verified), never the payload.
+		return bridge_ext_handle_rpc(request_id, method, params, rec)
+	}
 	if method == "agent.permission.request" {
 		// Blocking: registers the request, mirrors it to the wrapper/UI push channel,
 		// and waits for a decision (or fail-safe deny on timeout).

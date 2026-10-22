@@ -30,6 +30,8 @@ Bridge_Catalog_Provider :: struct {
 	skill_dir:           string `json:"skill_dir"`,
 	startup_detection:  cfg_lib.Startup_Detection_Config `json:"startup_detection"`,
 	activity_detection: cfg_lib.Activity_Detection_Config `json:"activity_detection"`,
+	// Zero value (catalog `null` or a Hub that predates it) means unsupported.
+	extension:          Bridge_Catalog_Extension `json:"extension"`,
 	state:               string `json:"state"`,
 	models:              []Bridge_Catalog_Model `json:"models"`,
 }

@@ -32,6 +32,9 @@ Provider_Discovery_Item_Wire :: struct {
 	version_text: string `json:"version_text"`,
 	state:        string `json:"state"`,
 	checked_at:   string `json:"checked_at"`,
+	extension_state:      string `json:"extension_state"`,
+	extension_version:    string `json:"extension_version"`,
+	extension_checked_at: string `json:"extension_checked_at"`,
 }
 
 Provider_Discovery_Report_Wire :: struct {
@@ -125,10 +128,51 @@ write_bridge_provider_view_json :: proc(
 		b,
 		",\"enabled\":",
 	); strings.write_string(b, "true" if view.enabled else "false")
+	write_bridge_provider_extension_json(b, view)
 	strings.write_string(b, ",\"models\":[")
 	for model, i in view.catalog.models {
 		if i > 0 do strings.write_byte(b, ',')
 		provider_service.write_model_json(b, model)
+	}
+	strings.write_string(b, "]}")
+}
+
+// write_bridge_provider_extension_json emits the measured extension state next to
+// the catalog's install_hint and capabilities (REQ-EXT-DET-1). It is null for a
+// provider whose catalog row has no extension descriptor.
+write_bridge_provider_extension_json :: proc(
+	b: ^strings.Builder,
+	view: provider_service.Bridge_Provider_View,
+) {
+	strings.write_string(b, ",\"extension\":")
+	if view.catalog.extension_json == "" {
+		strings.write_string(b, "null")
+		return
+	}
+	descriptor: struct {
+		plugin_id:    string `json:"plugin_id"`,
+		min_version:  string `json:"min_version"`,
+		install_hint: string `json:"install_hint"`,
+		capabilities: []string `json:"capabilities"`,
+	}
+	if err := json.unmarshal_string(view.catalog.extension_json, &descriptor, json.DEFAULT_SPECIFICATION, context.temp_allocator); err != nil {
+		fmt.eprintfln("ham-hub WARN provider extension descriptor unreadable provider=%s err=%v", view.catalog.provider, err)
+	}
+	strings.write_string(b, "{\"state\":\""); write_handler_json_string(b, view.extension_state)
+	strings.write_string(b, "\",\"version\":\""); write_handler_json_string(b, view.extension_version)
+	strings.write_string(b, "\",\"checked_at\":")
+	if view.extension_checked_at == "" {
+		strings.write_string(b, "null")
+	} else {
+		strings.write_byte(b, '"'); write_handler_json_string(b, view.extension_checked_at); strings.write_byte(b, '"')
+	}
+	strings.write_string(b, ",\"plugin_id\":\""); write_handler_json_string(b, descriptor.plugin_id)
+	strings.write_string(b, "\",\"min_version\":\""); write_handler_json_string(b, descriptor.min_version)
+	strings.write_string(b, "\",\"install_hint\":\""); write_handler_json_string(b, descriptor.install_hint)
+	strings.write_string(b, "\",\"capabilities\":[")
+	for capability, i in descriptor.capabilities {
+		if i > 0 do strings.write_byte(b, ',')
+		strings.write_byte(b, '"'); write_handler_json_string(b, capability); strings.write_byte(b, '"')
 	}
 	strings.write_string(b, "]}")
 }
@@ -277,6 +321,9 @@ bridge_provider_discover_handler :: proc(ctx: rawptr, req: Request) -> Response 
 			version_text = item.version_text,
 			state        = item.state,
 			checked_at   = item.checked_at,
+			extension_state      = item.extension_state,
+			extension_version    = item.extension_version,
+			extension_checked_at = item.extension_checked_at,
 		}
 	}
 	if apply_err := provider_service.apply_discovery_report(h.providers, bridge.bridge_id, statuses); apply_err.code != .None do return respond_error(apply_err, req.request_id)

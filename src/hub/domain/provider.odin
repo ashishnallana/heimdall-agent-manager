@@ -23,6 +23,9 @@ Provider_Catalog_Entry :: struct {
 	skill_dir:           string,
 	startup_detection_json:  string,
 	activity_detection_json: string,
+	// extension_json is the catalog's extension descriptor object, or "" when the
+	// provider has no extension (catalog column NULL, wire value null).
+	extension_json:          string,
 	state:               string,
 	rank:                int,
 	models:              [dynamic]Provider_Model,
@@ -41,6 +44,11 @@ Bridge_Provider_Status :: struct {
 	version_text: string,
 	state: string,
 	checked_at: string,
+	// Extension probe result (REQ-EXT-DET-1). extension_state is one of
+	// present|disabled|outdated|absent|error|unsupported, or "" if never reported.
+	extension_state: string,
+	extension_version: string,
+	extension_checked_at: string,
 }
 
 Bridge_Provider_Setting :: struct {
@@ -72,6 +80,7 @@ provider_catalog_entry_destroy :: proc(entry: Provider_Catalog_Entry) {
 	delete(entry.skill_dir)
 	delete(entry.startup_detection_json)
 	delete(entry.activity_detection_json)
+	delete(entry.extension_json)
 	delete(entry.state)
 	for model in entry.models do provider_model_destroy(model)
 	delete(entry.models)
@@ -91,6 +100,7 @@ provider_icon_destroy :: proc(icon: Provider_Icon) {
 bridge_provider_status_destroy :: proc(value: Bridge_Provider_Status) {
 	delete(value.bridge_id); delete(value.provider); delete(value.binary_path)
 	delete(value.version_text); delete(value.state); delete(value.checked_at)
+	delete(value.extension_state); delete(value.extension_version); delete(value.extension_checked_at)
 }
 
 bridge_provider_statuses_destroy :: proc(values: [dynamic]Bridge_Provider_Status) {

@@ -420,7 +420,14 @@ write_agent_instance_json :: proc(b: ^strings.Builder, inst: domain.Agent_Instan
 	// dashboard can render the work-vs-review banner from persisted state.
 	strings.write_string(b, "\",\"current_task_id\":\""); write_handler_json_string(b, inst.current_task_id)
 	strings.write_string(b, "\",\"current_task_role\":\""); write_handler_json_string(b, domain.current_task_role_string(inst.current_task_role))
-	strings.write_string(b, "\"")
+	// Provider extension (ham.ext.v1) identity; "" until an extension says hello.
+	strings.write_string(b, "\",\"provider_session_id\":\""); write_handler_json_string(b, inst.provider_session_id)
+	strings.write_string(b, "\",\"provider_transcript_path\":\""); write_handler_json_string(b, inst.provider_transcript_path)
+	strings.write_string(b, "\",\"extension\":{\"provider\":\""); write_handler_json_string(b, inst.extension_provider)
+	strings.write_string(b, "\",\"version\":\""); write_handler_json_string(b, inst.extension_version)
+	strings.write_string(b, "\",\"capabilities\":"); write_extension_capabilities_json(b, inst.extension_capabilities)
+	strings.write_string(b, ",\"last_seen_at\":\""); write_handler_json_string(b, inst.extension_last_seen_at)
+	strings.write_string(b, "\"}")
 	write_last_error_json(b, inst.last_error_json)
 	strings.write_string(b, "}")
 }
