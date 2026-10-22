@@ -650,7 +650,13 @@ run_migrations :: proc(
 			mark_migration_applied(conn, name)
 			continue
 		}
-		if name == "103_guard_chat_fts_updates.sql" && !fts5_available(conn) {
+		// 030/031 can be marked applied without creating the chat vtables (non-FTS
+		// boot), and a trigger naming a missing vtable fails every base-table UPDATE
+		// at compile time, so 103 also requires both vtables to exist.
+		if name == "103_guard_chat_fts_updates.sql" &&
+		   (!fts5_available(conn) ||
+		    !sqlite_object_exists(conn, "chat_messages_fts") ||
+		    !sqlite_object_exists(conn, "chat_conversations_fts")) {
 			mark_migration_applied(conn, name)
 			continue
 		}
@@ -1067,9 +1073,9 @@ migration_sql :: proc(name, migrations_dir: string) -> string {
 	if name == "097_workflow_runs.sql" do return strings.clone(MIGRATION_097_WORKFLOW_RUNS)
 	if name == "098_mixed_work_graph.sql" do return strings.clone(MIGRATION_098_MIXED_WORK_GRAPH)
 	if name == "099_mixed_work_execution.sql" do return strings.clone(MIGRATION_099_MIXED_WORK_EXECUTION)
-	if name == "103_guard_chat_fts_updates.sql" do return strings.clone(MIGRATION_103_GUARD_CHAT_FTS_UPDATES)
 	if name == "102_drop_bridge_enrollments.sql" do return strings.clone(MIGRATION_102_DROP_BRIDGE_ENROLLMENTS)
 	if name == "103_plan_enforcement.sql" do return strings.clone(MIGRATION_103_PLAN_ENFORCEMENT)
+	if name == "103_guard_chat_fts_updates.sql" do return strings.clone(MIGRATION_103_GUARD_CHAT_FTS_UPDATES)
 	if name == "100_vault_pair_hub_origin.sql" do return strings.clone(MIGRATION_100_VAULT_PAIR_HUB_ORIGIN)
 	if name == "101_codex_gpt6_models.sql" do return strings.clone(MIGRATION_101_CODEX_GPT6_MODELS)
 	if name == "081_antigravity_models.sql" do return strings.clone(MIGRATION_081_ANTIGRAVITY_MODELS)

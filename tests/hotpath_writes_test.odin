@@ -207,6 +207,25 @@ fts_upgrade_latest_read_counts_search_and_repair :: proc(t: ^testing.T) {
     testing.expect(t,n==0 && me.code != .None)
 }
 
+@(test)
+fts_guard_skips_db_without_chat_vtables :: proc(t: ^testing.T) {
+    context.allocator = context.temp_allocator
+    c: sql.Conn; fixture(&c,true); defer sql.close(&c)
+    // A DB first migrated by a non-FTS build has 030/031 applied but no chat
+    // vtables or triggers; a later FTS build must not attach 103 triggers.
+    must(sql.exec(&c, `DROP TRIGGER chat_messages_fts_ai; DROP TRIGGER chat_messages_fts_ad; DROP TRIGGER chat_messages_fts_au;
+        DROP TRIGGER chat_conversations_fts_ai; DROP TRIGGER chat_conversations_fts_ad; DROP TRIGGER chat_conversations_fts_au;
+        DROP TABLE chat_messages_fts; DROP TABLE chat_conversations_fts;`))
+    r: sql.Content_Repo_SQLite; seed_chat(&c,&r)
+    ok,e:=sql.run_migrations(&c); good(e); must(ok)
+    testing.expect_value(t,scalar(&c,"SELECT count(*) FROM sqlite_master WHERE name LIKE 'chat_%_fts%'"),i64(0))
+    n,me:=sql.content_mark_messages_read_sqlite(&r,"owner",[]string{"message"},NOW)
+    good(me); testing.expect_value(t,n,1)
+    testing.expect_value(t,text(&c,"SELECT read_at FROM chat_messages"),NOW)
+    must(sql.exec(&c,"UPDATE chat_messages SET body='afterbody'; UPDATE chat_conversations SET title='aftertitle', updated_at='later';"))
+    testing.expect_value(t,text(&c,"SELECT title FROM chat_conversations"),"aftertitle")
+}
+
 Race :: struct {
     shell: ^sql.Shell_Session_Repo_SQLite,
     vault: ^sql.Vault_Directory_Repo_SQLite,
