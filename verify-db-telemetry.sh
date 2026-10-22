@@ -61,6 +61,7 @@ smoke_boot() {
 	local label="$1" expect="$2" hub_port metrics_port i
 	shift 2
 	hub_port="$(free_port)"; metrics_port="$(free_port)"
+	while [ "$metrics_port" = "$hub_port" ]; do metrics_port="$(free_port)"; done
 	rm -f "$SMOKE/hub.db"*
 	env -u HEIMDALL_DB_TELEMETRY "$@" HEIMDALL_METRICS_ADDR="127.0.0.1:$metrics_port" \
 		nix develop -c "$OUT/hub_dbt" --listen "127.0.0.1:$hub_port" --db "$SMOKE/hub.db" \
@@ -101,6 +102,14 @@ smoke_boot() {
 			[ "$expect" = off ] || { echo "[$label] basic must register $f"; grep '^# TYPE heimdall_db' "$SMOKE/$label.prom"; exit 1; }
 		fi
 	done
+	if [ "$expect" = off ]; then
+		# Parity: no telemetry family at all (incl. collector-only ones), no
+		# telemetry-only SQLite families and no fine HTTP bucket layout.
+		if grep -E '^# TYPE (heimdall_db_|heimdall_sqlite_(exec_seconds|statements_total|errors_total|vm_steps_total|fullscan_steps_total|sort_total|site_|cache_events_total|library_info)|heimdall_http_request_db_)' "$SMOKE/$label.prom"; then
+			echo "[$label] off registered telemetry families"; exit 1
+		fi
+		if grep -q 'le="0.0025"' "$SMOKE/$label.prom"; then echo "[$label] off uses the basic HTTP bucket layout"; exit 1; fi
+	fi
 	echo "[$label] $expect OK: $(grep -c '^heimdall_db_' "$SMOKE/$label.prom") heimdall_db_* samples, $(grep -c '^# TYPE heimdall_db_' "$SMOKE/$label.prom") heimdall_db_* families, $(grep -vc '^#' "$SMOKE/$label.prom") total samples; http_request_db series: $(grep -c '^heimdall_http_request_db_seconds_total' "$SMOKE/$label.prom" || true)"
 }
 smoke_boot unset basic

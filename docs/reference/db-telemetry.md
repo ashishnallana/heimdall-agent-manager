@@ -12,8 +12,8 @@ All settings are read once at boot from the environment. Changing one needs a hu
 | Variable | Values | Default | Effect |
 |---|---|---|---|
 | `HEIMDALL_DB_TELEMETRY` | `off`, `basic` | `basic` (when unset or empty) | `basic`: everything in §2. `off`: explicit opt-out; wrappers behave as before, no new family is registered, and no extra mutex or clock call is made. `full` (phase-2 busy handler) is **not implemented**. It and any other value (case-sensitive) **fail boot** with an explicit message and exit status 1, so a typo never silently changes behaviour. |
-| `HEIMDALL_DB_SLOW_MS` | integer ≥ 0 | `250` | HTTP requests at or over this many ms write a `db_slow_request` line with `reason=slow`. `0` disables threshold records. |
-| `HEIMDALL_DB_SAMPLE_N` | integer ≥ 0 | `1000` | One request in N writes a `reason=sample` baseline line. `0` disables sampling. |
+| `HEIMDALL_DB_SLOW_MS` | integer ≥ 0 | `250` | HTTP requests at or over this many ms write a `db_slow_request` line with `reason=slow`. `0` disables threshold records. A non-integer or negative value is ignored (default kept), unlike the mode. |
+| `HEIMDALL_DB_SAMPLE_N` | integer ≥ 0 | `1000` | One request in N writes a `reason=sample` baseline line. `0` disables sampling. A non-integer or negative value is ignored (default kept). |
 
 The background-scope (`db_slow_scope`) threshold is fixed at 1 s. Both record kinds share one token bucket of ≤ 10 lines/s. Because `basic` is the default, slow and sampled records are emitted by default too (250 ms threshold, 1 in 1000 sample); set `HEIMDALL_DB_SLOW_MS=0` / `HEIMDALL_DB_SAMPLE_N=0` to silence them while keeping the metrics.
 
@@ -30,6 +30,8 @@ Environment=HEIMDALL_DB_SAMPLE_N=1000
 After deploying (the plan §4.4 parity-first step was skipped by a user decision to ship `basic` on):
 1. Watch CPU per request (`rate(process_cpu_seconds_total)` / `rate(heimdall_http_requests_total)`) against the previous 7 days, RSS, and `heimdall_metrics_series`.
 2. Collect the observation windows.
+
+Any hub boot failure (rejected mode, database open, listen failure) now exits with status 1 rather than 0, so a `Restart=on-failure` unit retries it.
 
 ### Rollback (opt out)
 
@@ -178,6 +180,8 @@ rate(process_cpu_seconds_total[1h]) / rate(heimdall_http_requests_total[1h])
 - **WebSocket and raw-upgrade frames** have no `ws` scope in phase 1. Their DB time is flushed per call into `scope="other"`, so nothing is dropped, but it is not separated from other unscoped work.
 - **Exec start includes a little statement metadata work.** For steps, the exec interval starts at mutex acquisition, so it includes `sqlite3_sql` / `sqlite3_stmt_busy`: tens of ns, under the held mutex.
 - **Dedicated-connection tx durations** (billing/enroll/vault) are tracked by the exec wrapper from a successful `BEGIN` to `COMMIT`/`ROLLBACK`. They exclude BEGIN's own exec time.
+- **Background slow-scope records use wall time.** `db_slow_scope` (≥ 1 s) is decided on the scope's elapsed time, not its DB components, so a background job that sleeps or waits on a bridge inside its scope (e.g. paced shell kill-intent replay, possibly merge jobs) can log `reason=slow` without slow DB work. Read the line's component fields before blaming the DB.
+- **A scrape can wait behind a long statement.** The SQLite collector holds the connection-slot table lock while reading `sqlite3_db_status`, which takes each connection's mutex; a statement stuck in `busy_timeout` (≤ 5 s) delays `/metrics` and any concurrent handle open/close for that long. No deadlock path exists (nothing holds a connection mutex and then takes the slot lock).
 - **Unregistered handles** (more than 16 open, tests only) get exec-only timing with `conn="other"` and no wait split.
 - **Lock inventory is textual.** It covers the eight app locks in the plan §1.5a audit at `2a467a5a`. `verify-db-telemetry.sh` fails if any of them is acquired untimed, but it cannot discover a *new* DB-guarding lock. Re-audit when adding one.
 - **Histogram layouts follow the 10-bucket cap.** `lib/metrics` caps histograms at 10 buckets, so the layouts are thinned from the plan's 16–18. The HTTP layout gains only 2.5 ms, not 1/2.5/5 ms.
