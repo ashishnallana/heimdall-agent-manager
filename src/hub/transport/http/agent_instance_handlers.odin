@@ -18,6 +18,9 @@ agent_instance_input_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Agent_Handlers)(ctx)
 	auth_ctx, ok, auth_resp := require_auth_any(h.auth, req)
 	if !ok do return auth_resp
+	if err := require_terminal_input(h.entitlements, auth_ctx); err.code != .None {
+		return respond_error(err, req.request_id)
+	}
 
 	if auth_ctx.kind == .Bridge_Token {
 		return respond_error(domain.domain_error(.Forbidden, "bridge cannot send instance input"), req.request_id)
@@ -43,6 +46,9 @@ agent_instance_resize_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Agent_Handlers)(ctx)
 	auth_ctx, ok, auth_resp := require_auth_any(h.auth, req)
 	if !ok do return auth_resp
+	if err := require_terminal_input(h.entitlements, auth_ctx); err.code != .None {
+		return respond_error(err, req.request_id)
+	}
 
 	if auth_ctx.kind == .Bridge_Token {
 		return respond_error(domain.domain_error(.Forbidden, "bridge cannot send instance resize"), req.request_id)
@@ -152,6 +158,14 @@ agent_instance_stream_handler :: proc(ctx: rawptr, req: Request, client: net.TCP
 		return
 	}
 
+	// Freeze the stream's capability at attach; REST mutations check on each call.
+	read_only, entitlement_err := terminal_read_only(h.entitlements, auth_ctx)
+	if entitlement_err.code != .None {
+		project_service.ws_track_rejected(project_service.WS_KIND_AGENT_STREAM, "other")
+		write_stream_error(client, respond_error(entitlement_err, req.request_id))
+		return
+	}
+
 	key := header_value(req.headers, "Sec-WebSocket-Key")
 	if key == "" {
 		project_service.ws_track_rejected(project_service.WS_KIND_AGENT_STREAM, "bad_request")
@@ -197,7 +211,9 @@ agent_instance_stream_handler :: proc(ctx: rawptr, req: Request, client: net.TCP
 		strings.write_string(&ready_b, "\",\"bridge_boot_id\":\"")
 		write_handler_json_string(&ready_b, boot_id)
 	}
-	strings.write_string(&ready_b, "\"}")
+	strings.write_string(&ready_b, "\",\"read_only\":")
+	strings.write_string(&ready_b, "true" if read_only else "false")
+	strings.write_string(&ready_b, "}")
 	ready_json := strings.to_string(ready_b)
 	_ = shell_session_svc.shell_session_write_viewer_frame(h.shell_sessions, instance_id, client, ready_json)
 	delete(ready_json)
@@ -237,6 +253,10 @@ agent_instance_stream_handler :: proc(ctx: rawptr, req: Request, client: net.TCP
 		// REQ-PTY-NET-3: same binary, ack-less input relay as the shells pane — the agent
 		// pane shares the pipeline and the bridge keys on shell_id == instance_id.
 		if reader.last_opcode == 0x2 {
+			if read_only {
+				delete(text)
+				continue
+			}
 			kind, flags, payload, _, _, bin_ok := contracts.pty_wire_decode_viewer_frame(transmute([]byte)text)
 			if !bin_ok || kind != contracts.PTY_WIRE_KIND_INPUT {
 				fmt.eprintfln("ham-hub WARN agent pane input frame dropped instance_id=%s reason=not_a_pty_input_frame bytes=%d", instance_id, len(text))
@@ -255,7 +275,9 @@ agent_instance_stream_handler :: proc(ctx: rawptr, req: Request, client: net.TCP
 			rows := json_int(text, "rows", 0)
 			cols := json_int(text, "cols", 0)
 			if rows >= 1 && cols >= 1 {
-				agent_service.agent_service_send_pty_resize(h.agents, auth_ctx, instance_id, rows, cols)
+				if !read_only {
+					agent_service.agent_service_send_pty_resize(h.agents, auth_ctx, instance_id, rows, cols)
+				}
 				// REQ-SHELL-29: the agent pane's SIGWINCH micro-nudge (useAgentStream.ts:194-206)
 				// only repaints FULL-SCREEN programs; a shell sitting at a prompt is not
 				// covered by it, so the snapshot is still required here.

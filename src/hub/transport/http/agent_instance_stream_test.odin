@@ -9,6 +9,7 @@ import "core:testing"
 import "core:thread"
 import "core:time"
 import contracts "odin_test:contracts"
+import ws "odin_test:lib/ws"
 import domain "odin_test:hub/domain"
 import platform "odin_test:hub/platform"
 import iface "odin_test:hub/repository/iface"
@@ -384,6 +385,16 @@ test_agent_instance_stream_validation_and_permissions :: proc(t: ^testing.T) {
 // -----------------------------------------------------------------------------
 @(test)
 test_agent_instance_stream_handshake_and_ready_frame :: proc(t: ^testing.T) {
+	agent_stream_check_input_policy(t, false)
+}
+
+@(test)
+test_agent_stream_read_only_input_resize_and_snapshot :: proc(t: ^testing.T) {
+	agent_stream_check_input_policy(t, true)
+}
+
+@(private = "file")
+agent_stream_check_input_policy :: proc(t: ^testing.T, read_only: bool) {
 	pair, ok := make_agent_stream_pair(t)
 	testing.expect(t, ok)
 	defer close_agent_stream_pair(&pair)
@@ -402,7 +413,7 @@ test_agent_instance_stream_handshake_and_ready_frame :: proc(t: ^testing.T) {
 			agent_instance_id = "inst_handshake",
 			owner_user_id     = domain.User_ID("user_alice"),
 			bridge_id         = "brg_hs",
-			runtime_status    = "running",
+			runtime_status    = "",
 		},
 	}
 	agent_repo := iface.Agent_Repository{
@@ -438,6 +449,9 @@ test_agent_instance_stream_handshake_and_ready_frame :: proc(t: ^testing.T) {
 		shell_sessions = &shell_svc,
 	}
 
+	h.entitlements = {lookup = plan_test_paid_lookup}
+	if read_only do h.entitlements = {lookup = plan_test_read_only_lookup}
+
 	user_ws_ticket_store_put(&tickets, "ticket_hs", contracts.Auth_Context{user_id = "user_alice", kind = .User_Token}, 60)
 
 	headers := make([dynamic]contracts.HTTP_Header)
@@ -464,7 +478,41 @@ test_agent_instance_stream_handshake_and_ready_frame :: proc(t: ^testing.T) {
 	testing.expect(t, f_ok, "client must receive ready frame")
 	testing.expect(t, strings.contains(frame, `"type":"ready"`), "frame type is ready")
 	testing.expect(t, strings.contains(frame, `"agent_instance_id":"inst_handshake"`), "frame contains agent_instance_id")
+	testing.expect(t, strings.contains(frame, "\"read_only\":true" if read_only else "\"read_only\":false"))
 	delete(frame)
+
+	if read_only {
+		shell_session_svc.shell_session_broadcast_output(&shell_svc, "inst_handshake", transmute([]byte)string("live output"))
+		output_reader := bridge_ws_reader_make(pair.client)
+		output, got_output, _ := bridge_ws_read_frame(&output_reader, 5 * time.Second)
+		testing.expect(t, got_output, "read-only viewers receive live output")
+		if got_output {
+			kind, _, payload, _, _, valid := contracts.pty_wire_decode_viewer_frame(transmute([]byte)output)
+			testing.expect(t, valid && kind == contracts.PTY_WIRE_KIND_OUTPUT)
+			testing.expect_value(t, string(payload), "live output")
+			delete(output)
+		}
+		bridge_ws_reader_destroy(&output_reader)
+		screen := contracts.pty_wire_encode_viewer_frame(contracts.PTY_WIRE_KIND_SCREEN, 0, transmute([]byte)string("cached screen"))
+		shell_session_svc.shell_session_snapshot_cache_store_capture(&shell_svc, "inst_handshake", [][]byte{screen}, 80, 24, net.TCP_Socket(0))
+		delete(screen)
+		for flags in ([]u8{0, contracts.PTY_WIRE_FLAG_ENCRYPTED}) {
+			input := contracts.pty_wire_encode_viewer_frame(contracts.PTY_WIRE_KIND_INPUT, flags, transmute([]byte)string("keystrokes"))
+			_ = ws.write_server_opcode(pair.client, 0x2, string(input), false)
+			delete(input)
+		}
+		_ = write_ws_text_frame(pair.client, "{\"type\":\"resize\",\"rows\":24,\"cols\":80}")
+		reader := bridge_ws_reader_make(pair.client)
+		reply, got, _ := bridge_ws_read_frame(&reader, 5 * time.Second)
+		testing.expect(t, got, "read-only first resize still serves a snapshot")
+		if got {
+			kind, _, payload, _, _, valid := contracts.pty_wire_decode_viewer_frame(transmute([]byte)reply)
+			testing.expect(t, valid && kind == contracts.PTY_WIRE_KIND_SCREEN)
+			testing.expect_value(t, string(payload), "cached screen")
+			delete(reply)
+		}
+		bridge_ws_reader_destroy(&reader)
+	}
 
 	// Verify that shell_stream_attach was dispatched to bridge
 	sync.mutex_lock(&sink_state.mu)

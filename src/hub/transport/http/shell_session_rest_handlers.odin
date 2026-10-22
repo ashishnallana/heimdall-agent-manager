@@ -394,6 +394,10 @@ shell_session_signal_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Shell_Session_Rest_Handlers)(ctx)
 	auth_ctx, ok, auth_resp := require_auth_any(h.auth, req)
 	if !ok do return auth_resp
+	if err := require_terminal_input(h.entitlements, auth_ctx); err.code != .None {
+		return respond_error(err, req.request_id)
+	}
+
 
 	session_id := path_part(req.path, 4)
 	if session_id == "" {

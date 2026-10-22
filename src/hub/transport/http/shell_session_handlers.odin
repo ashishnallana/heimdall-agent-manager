@@ -137,6 +137,14 @@ shell_session_stream_handler :: proc(ctx: rawptr, req: Request, client: net.TCP_
 		return
 	}
 
+	// Freeze the stream's capability at attach; REST mutations check on each call.
+	read_only, entitlement_err := terminal_read_only(h.entitlements, auth_ctx)
+	if entitlement_err.code != .None {
+		project_service.ws_track_rejected(project_service.WS_KIND_SHELL, "other")
+		write_stream_error(client, respond_error(entitlement_err, req.request_id))
+		return
+	}
+
 	key := header_value(req.headers, "Sec-WebSocket-Key")
 	if key == "" {
 		project_service.ws_track_rejected(project_service.WS_KIND_SHELL, "bad_request")
@@ -178,7 +186,9 @@ shell_session_stream_handler :: proc(ctx: rawptr, req: Request, client: net.TCP_
 		strings.write_string(&ready_b, "\",\"bridge_boot_id\":\"")
 		write_handler_json_string(&ready_b, boot_id)
 	}
-	strings.write_string(&ready_b, "\"}")
+	strings.write_string(&ready_b, "\",\"read_only\":")
+	strings.write_string(&ready_b, "true" if read_only else "false")
+	strings.write_string(&ready_b, "}")
 	ready_json := strings.to_string(ready_b)
 	_ = shell_session_svc.shell_session_write_viewer_frame(h.shell_sessions, session_id, client, ready_json)
 	delete(ready_json)
@@ -212,6 +222,10 @@ shell_session_stream_handler :: proc(ctx: rawptr, req: Request, client: net.TCP_
 		// a log line (REQ-PANE-INPUT-3: a dropped keystroke is never silent); the JSON
 		// `input` text frame no longer exists on this socket.
 		if reader.last_opcode == 0x2 {
+			if read_only {
+				delete(text)
+				continue
+			}
 			kind, flags, payload, _, _, bin_ok := contracts.pty_wire_decode_viewer_frame(transmute([]byte)text)
 			if !bin_ok || kind != contracts.PTY_WIRE_KIND_INPUT {
 				fmt.eprintfln("ham-hub WARN shell input frame dropped session_id=%s reason=not_a_pty_input_frame bytes=%d", session_id, len(text))
@@ -230,7 +244,9 @@ shell_session_stream_handler :: proc(ctx: rawptr, req: Request, client: net.TCP_
 			rows := json_int(text, "rows", 0)
 			cols := json_int(text, "cols", 0)
 			if rows >= 1 && cols >= 1 {
-				bridge_service.send_shell_resize(h.bridges, auth_ctx, session.bridge_id, session_id, rows, cols, sink_override)
+				if !read_only {
+					bridge_service.send_shell_resize(h.bridges, auth_ctx, session.bridge_id, session_id, rows, cols, sink_override)
+				}
 				// REQ-SHELL-29: capture on the FIRST resize, not on `ready` — this frame
 				// carries the viewer's real geometry (useShellStream.ts sendGeometry), and a
 				// capture rendered at a guessed 80 columns would re-wrap the screen.
@@ -253,6 +269,10 @@ shell_session_input_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Shell_Session_Stream_Handlers)(ctx)
 	auth_ctx, ok, auth_resp := require_auth(h.auth, req)
 	if !ok do return auth_resp
+	if err := require_terminal_input(h.entitlements, auth_ctx); err.code != .None {
+		return respond_error(err, req.request_id)
+	}
+
 	if auth_ctx.kind == .Bridge_Token {
 		return respond_error(domain.domain_error(.Forbidden, "bridge cannot send shell input"), req.request_id)
 	}
@@ -293,6 +313,10 @@ shell_session_resize_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Shell_Session_Stream_Handlers)(ctx)
 	auth_ctx, ok, auth_resp := require_auth(h.auth, req)
 	if !ok do return auth_resp
+	if err := require_terminal_input(h.entitlements, auth_ctx); err.code != .None {
+		return respond_error(err, req.request_id)
+	}
+
 	if auth_ctx.kind == .Bridge_Token {
 		return respond_error(domain.domain_error(.Forbidden, "bridge cannot send shell resize"), req.request_id)
 	}

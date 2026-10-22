@@ -163,6 +163,9 @@ bridge_shell_input_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Bridge_Handlers)(ctx)
 	auth_ctx, ok, auth_resp := require_auth_any(h.auth, req)
 	if !ok do return auth_resp
+	if err := require_terminal_input(h.entitlements, auth_ctx); err.code != .None {
+		return respond_error(err, req.request_id)
+	}
 
 	if auth_ctx.kind == .Bridge_Token {
 		return respond_error(domain.domain_error(.Forbidden, "bridge cannot send shell input"), req.request_id)
@@ -198,6 +201,9 @@ bridge_shell_resize_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Bridge_Handlers)(ctx)
 	auth_ctx, ok, auth_resp := require_auth_any(h.auth, req)
 	if !ok do return auth_resp
+	if err := require_terminal_input(h.entitlements, auth_ctx); err.code != .None {
+		return respond_error(err, req.request_id)
+	}
 
 	if auth_ctx.kind == .Bridge_Token {
 		return respond_error(domain.domain_error(.Forbidden, "bridge cannot send shell resize"), req.request_id)
