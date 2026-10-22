@@ -10,7 +10,7 @@ tmp=$(mktemp -d "${TMPDIR:-/tmp}/db-dashboard-verify.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT
 
 echo "== 1. generator reproducibility"
-python3 -m py_compile $graf/gen_dashboards.py $graf/check_dashboards.py
+PYTHONPYCACHEPREFIX="$tmp/pycache" python3 -m py_compile $graf/gen_dashboards.py $graf/check_dashboards.py
 # Run a copy so the committed JSON is not touched.
 mkdir -p "$tmp/grafana"
 cp $graf/gen_dashboards.py "$tmp/grafana/"

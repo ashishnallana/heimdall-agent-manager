@@ -8,8 +8,9 @@
 2. Every Prometheus target uses the provisioned datasource UID.
 3. Hub DB dashboard: every metric is registered in src/ (non-test code), every
    new DB family is documented in docs/reference/db-telemetry.md, every label
-   in a selector or `by (...)` belongs to one of the expression's families,
-   every literal label value exists in the source, every selector is scoped to
+   matcher belongs to its own metric's family, its values and `le` bounds
+   exist in the source label/bucket tables, every `by (...)` label belongs to
+   one of the expression's families, every selector is scoped to
    the selected job + instance, and no query fabricates zeros (`or vector(0)`).
 4. Writes every Prometheus expression, with the Grafana variables replaced by
    sample values, as a recording-rule file for `promtool check rules` (PromQL
@@ -121,20 +122,41 @@ LABEL_VALUES = {
     "scope": enum_table("SCOPE_LABELS"),
     "outcome": enum_table("TX_OUTCOME_LABELS"),
     "reason": enum_table("SLOW_REASON_LABELS"),
-    # `kind` is the tx kind on heimdall_db_tx_duration_seconds and the cache event kind on cache_events.
-    "kind": enum_table("TX_KIND_LABELS") | cache_kinds,
     "rw": set(re.findall(r'"(\w+)"', rw.group(1))) if rw else set(),
 }
+# `kind` is the tx kind on heimdall_db_tx_duration_seconds and the cache event kind on cache_events.
+TX_KINDS = enum_table("TX_KIND_LABELS")
+CACHE_KINDS = cache_kinds
 if not cache_kinds or not LABEL_VALUES["rw"]:
     err("cache kinds / rw labels not found in src/")
 
 
-def value_ok(label, value):
+def value_ok(fam, label, value):
     """A literal value must be in the label's table; a regex alternative must match one entry."""
     allowed = LABEL_VALUES.get(label)
+    if label == "kind":
+        allowed = CACHE_KINDS if fam == "heimdall_sqlite_cache_events_total" else TX_KINDS
     if allowed is None:
         return f'"{value}"' in src
     return any(re.fullmatch(value, v) for v in allowed)
+
+
+def float_table(name):
+    m = re.search(name + r"\s*:=\s*\[\?\]f64\{([^}]*)\}", src)
+    if not m:
+        err(f"bucket table {name} not found in src/")
+        return set()
+    return {float(x) for x in m.group(1).split(",") if x.strip()}
+
+
+BUCKETS = {
+    "heimdall_db_lock_wait_seconds": float_table("LOCK_WAIT_BUCKETS"),
+    "heimdall_db_lock_hold_seconds": float_table("HOLD_BUCKETS"),
+    "heimdall_db_tx_duration_seconds": float_table("HOLD_BUCKETS"),
+    "heimdall_sqlite_exec_seconds": float_table("EXEC_BUCKETS"),
+    # Either layout may be live (off vs basic); only bounds present in both are always safe.
+    "heimdall_http_request_duration_seconds": float_table("HTTP_DURATION_BUCKETS") & float_table("HTTP_DURATION_BUCKETS_FINE"),
+}
 
 
 HIST_SUFFIX = re.compile(r"_(bucket|sum|count)$")
@@ -159,40 +181,51 @@ else:
             expr = t["expr"]
             if "vector(0)" in expr:
                 err(f"hub-db panel {p['id']}: fabricates zeros with vector(0)")
-            metrics_here = re.findall(r"\b(heimdall_\w+)\s*\{", expr)
             if re.search(r"\bheimdall_\w+\b(?!\s*\{)", expr.replace('"heimdall', "")):
                 err(f"hub-db panel {p['id']}: metric without a job/instance selector: {expr}")
             fams = set()
-            for metric in metrics_here:
+            # Every selector, checked against its own metric's family.
+            for metric, body in re.findall(r"\b(heimdall_\w+)\s*\{([^}]*)\}", expr):
                 fam = family_of(metric)
                 if fam is None:
                     err(f"hub-db panel {p['id']}: {metric} is not registered in src/")
                     continue
                 fams.add(fam)
                 seen.add(fam)
-            for sel in re.findall(r"\{([^}]*)\}", expr):
-                if "$job" not in sel and "$instance" not in sel:
-                    continue  # legendFormat-free; only selectors carry $job
-                if not sel.startswith(SCOPE):
-                    err(f"hub-db panel {p['id']}: selector not scoped to job+instance: {{{sel}}}")
+                if not body.startswith(SCOPE):
+                    err(f"hub-db panel {p['id']}: selector not scoped to job+instance: {metric}{{{body}}}")
+                for label, op, value in re.findall(r'(\w+)\s*(=~|!~|!=|=)\s*"([^"]*)"', body):
+                    if label in ("job", "instance"):
+                        continue
+                    if label == "le":
+                        bounds = BUCKETS.get(fam)
+                        if not metric.endswith("_bucket") or bounds is None:
+                            err(f"hub-db panel {p['id']}: le on non-bucket series {metric}")
+                        elif not any(abs(float(value) - b) < 1e-12 for b in bounds):
+                            err(f"hub-db panel {p['id']}: le={value!r} is not a bound of {fam} {sorted(bounds)}")
+                        continue
+                    if label not in families[fam]:
+                        err(f"hub-db panel {p['id']}: label {label!r} is not a label of {fam}")
+                        continue
+                    if "$" in value:
+                        continue  # Grafana variable; its options are checked below
+                    alts = value.split("|") if "~" in op else [re.escape(value)]
+                    for alt in alts:
+                        if not value_ok(fam, label, alt):
+                            err(f"hub-db panel {p['id']}: {label}{op}{value!r} on {fam} matches no value emitted by src/")
             allowed = set().union(*(families[f] for f in fams)) if fams else set()
-            used = set(re.findall(r'(\w+)\s*(?:=~|!~|!=|=)\s*"', expr))
-            for clause in re.findall(r"\bby\s*\(([^)]*)\)", expr):
-                used |= {x.strip() for x in clause.split(",") if x.strip()}
             # label_replace introduces `conn` from `lock`.
             if "label_replace(" in expr:
                 allowed |= {"conn"}
-            for label in used - SKIP_LABELS - allowed:
-                err(f"hub-db panel {p['id']}: label {label!r} is not a label of {sorted(fams)}")
-            for label, value in re.findall(r'(\w+)\s*(?:=|!=)\s*"([^"$]*)"', expr):
-                if label in SKIP_LABELS or not value:
-                    continue
-                if not value_ok(label, re.escape(value)):
-                    err(f"hub-db panel {p['id']}: label value {label}={value!r} is never emitted by src/")
-            for label, value in re.findall(r'(\w+)\s*(?:=~|!~)\s*"([^"$]*)"', expr):
-                for alt in value.split("|"):
-                    if label not in SKIP_LABELS and not value_ok(label, alt):
-                        err(f"hub-db panel {p['id']}: label regex {label}=~{alt!r} matches no value emitted by src/")
+            for clause in re.findall(r"\bby\s*\(([^)]*)\)", expr):
+                for label in {x.strip() for x in clause.split(",") if x.strip()} - SKIP_LABELS - allowed:
+                    err(f"hub-db panel {p['id']}: by ({label}) is not a label of {sorted(fams)}")
+    # Custom variable options must be real label values too.
+    for v in hub_db.get("templating", {}).get("list", []):
+        if v.get("type") == "custom" and v["name"] in LABEL_VALUES:
+            for opt in v["query"].split(","):
+                if opt not in LABEL_VALUES[v["name"]]:
+                    err(f"hub-db variable {v['name']}: option {opt!r} is not emitted by src/")
     new_db = {f for f in seen if f.startswith(("heimdall_db_", "heimdall_sqlite_", "heimdall_http_request_db"))
               and f not in ("heimdall_sqlite_busy_total", "heimdall_sqlite_db_bytes", "heimdall_sqlite_wal_bytes")}
     for fam in sorted(new_db):

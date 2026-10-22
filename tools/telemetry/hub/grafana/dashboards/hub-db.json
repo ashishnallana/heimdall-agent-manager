@@ -340,7 +340,7 @@
         "type": "prometheus",
         "uid": "heimdall-prometheus"
       },
-      "description": "Sum of the disjoint DB components per route pattern, in seconds of DB time per wall-clock second (can exceed 1 with concurrent requests).",
+      "description": "Sum of the disjoint DB components per route pattern, in seconds of DB time per wall-clock second (can exceed 1 with concurrent requests). topk is evaluated per point, so more than 10 routes can appear over the range.",
       "fieldConfig": {
         "defaults": {
           "noValue": "No data: telemetry off, pre-telemetry hub build, or no matching activity",
@@ -383,7 +383,7 @@
         "type": "prometheus",
         "uid": "heimdall-prometheus"
       },
-      "description": "Per route: sum of DB component seconds / sum of dispatch seconds (ratio of sums, never a ratio of percentiles), for the 10 routes with the most DB time.",
+      "description": "Per route: sum of DB component seconds / sum of dispatch seconds (ratio of sums, never a ratio of percentiles), for the 10 routes with the most DB time at each point (more than 10 can appear over the range).",
       "fieldConfig": {
         "defaults": {
           "min": 0,
@@ -951,7 +951,7 @@
         "type": "prometheus",
         "uid": "heimdall-prometheus"
       },
-      "description": "Time inside SQLite with the connection mutex held, per wrapped API call. Includes successful busy_timeout sleeps (phase 1 has no busy split).",
+      "description": "Time inside SQLite with the connection mutex held, per step or sqlite3_exec call (prepare/finalize excluded so cheap calls do not dominate p50; all statement ops incl. begin/commit are merged). Includes successful busy_timeout sleeps (phase 1 has no busy split).",
       "fieldConfig": {
         "defaults": {
           "noValue": "No data: telemetry off, pre-telemetry hub build, or no matching activity",
@@ -981,7 +981,7 @@
             "type": "prometheus",
             "uid": "heimdall-prometheus"
           },
-          "expr": "histogram_quantile(0.5, sum by (le, conn) (rate(heimdall_sqlite_exec_seconds_bucket{job=\"$job\",instance=\"$instance\",conn=~\"$conn\"}[5m])))",
+          "expr": "histogram_quantile(0.5, sum by (le, conn) (rate(heimdall_sqlite_exec_seconds_bucket{job=\"$job\",instance=\"$instance\",conn=~\"$conn\",op!~\"prepare|finalize\"}[5m])))",
           "legendFormat": "p50 {{conn}}",
           "refId": "A"
         },
@@ -990,7 +990,7 @@
             "type": "prometheus",
             "uid": "heimdall-prometheus"
           },
-          "expr": "histogram_quantile(0.95, sum by (le, conn) (rate(heimdall_sqlite_exec_seconds_bucket{job=\"$job\",instance=\"$instance\",conn=~\"$conn\"}[5m])))",
+          "expr": "histogram_quantile(0.95, sum by (le, conn) (rate(heimdall_sqlite_exec_seconds_bucket{job=\"$job\",instance=\"$instance\",conn=~\"$conn\",op!~\"prepare|finalize\"}[5m])))",
           "legendFormat": "p95 {{conn}}",
           "refId": "B"
         },
@@ -999,12 +999,12 @@
             "type": "prometheus",
             "uid": "heimdall-prometheus"
           },
-          "expr": "histogram_quantile(0.99, sum by (le, conn) (rate(heimdall_sqlite_exec_seconds_bucket{job=\"$job\",instance=\"$instance\",conn=~\"$conn\"}[5m])))",
+          "expr": "histogram_quantile(0.99, sum by (le, conn) (rate(heimdall_sqlite_exec_seconds_bucket{job=\"$job\",instance=\"$instance\",conn=~\"$conn\",op!~\"prepare|finalize\"}[5m])))",
           "legendFormat": "p99 {{conn}}",
           "refId": "C"
         }
       ],
-      "title": "Exec time per wrapped call p50 / p95 / p99",
+      "title": "Exec time per step/exec call p50 / p95 / p99",
       "type": "timeseries"
     },
     {
@@ -1362,7 +1362,7 @@
         "type": "prometheus",
         "uid": "heimdall-prometheus"
       },
-      "description": "BEGIN to COMMIT/ROLLBACK return (excludes after-commit hooks; dedicated conns start when BEGIN returns). Contains waits and exec: never add to request components.",
+      "description": "outcome=commit only (begin_failed/rollback durations would skew it; read and write units are merged). BEGIN to COMMIT return (excludes after-commit hooks; dedicated conns start when BEGIN returns). Contains waits and exec: never add to request components.",
       "fieldConfig": {
         "defaults": {
           "noValue": "No data: telemetry off, pre-telemetry hub build, or no matching activity",
@@ -1392,7 +1392,7 @@
             "type": "prometheus",
             "uid": "heimdall-prometheus"
           },
-          "expr": "histogram_quantile(0.5, sum by (le, kind) (rate(heimdall_db_tx_duration_seconds_bucket{job=\"$job\",instance=\"$instance\"}[5m])))",
+          "expr": "histogram_quantile(0.5, sum by (le, kind) (rate(heimdall_db_tx_duration_seconds_bucket{job=\"$job\",instance=\"$instance\",outcome=\"commit\"}[5m])))",
           "legendFormat": "p50 {{kind}}",
           "refId": "A"
         },
@@ -1401,7 +1401,7 @@
             "type": "prometheus",
             "uid": "heimdall-prometheus"
           },
-          "expr": "histogram_quantile(0.95, sum by (le, kind) (rate(heimdall_db_tx_duration_seconds_bucket{job=\"$job\",instance=\"$instance\"}[5m])))",
+          "expr": "histogram_quantile(0.95, sum by (le, kind) (rate(heimdall_db_tx_duration_seconds_bucket{job=\"$job\",instance=\"$instance\",outcome=\"commit\"}[5m])))",
           "legendFormat": "p95 {{kind}}",
           "refId": "B"
         },
@@ -1410,12 +1410,12 @@
             "type": "prometheus",
             "uid": "heimdall-prometheus"
           },
-          "expr": "histogram_quantile(0.99, sum by (le, kind) (rate(heimdall_db_tx_duration_seconds_bucket{job=\"$job\",instance=\"$instance\"}[5m])))",
+          "expr": "histogram_quantile(0.99, sum by (le, kind) (rate(heimdall_db_tx_duration_seconds_bucket{job=\"$job\",instance=\"$instance\",outcome=\"commit\"}[5m])))",
           "legendFormat": "p99 {{kind}}",
           "refId": "C"
         }
       ],
-      "title": "Transaction duration p50 / p95 / p99 by kind",
+      "title": "Committed transaction duration p50 / p95 / p99 by kind",
       "type": "timeseries"
     },
     {
@@ -1660,7 +1660,7 @@
         "type": "prometheus",
         "uid": "heimdall-prometheus"
       },
-      "description": "",
+      "description": "sum of the 3 largest main-connection call sites / all main-connection step exec time over the selected range.",
       "fieldConfig": {
         "defaults": {
           "noValue": "No data: telemetry off, pre-telemetry hub build, or no matching activity",
@@ -1670,7 +1670,7 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 8,
+        "w": 24,
         "x": 0,
         "y": 127
       },

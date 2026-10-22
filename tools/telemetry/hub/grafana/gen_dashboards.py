@@ -440,12 +440,12 @@ db_panels = [
     panel("DB time per route, top 10 (DB-seconds per second)", [
         (f'topk(10, sum by (route) (rate(heimdall_http_request_db_seconds_total{sel()}[5m])))', "{{route}}"),
     ], 12, 17, unit="short", no_value=NO_DB,
-          desc="Sum of the disjoint DB components per route pattern, in seconds of DB time per wall-clock second (can exceed 1 with concurrent requests)."),
+          desc="Sum of the disjoint DB components per route pattern, in seconds of DB time per wall-clock second (can exceed 1 with concurrent requests). topk is evaluated per point, so more than 10 routes can appear over the range."),
     panel("DB share of route time (top 10 routes by DB time)", [
         (f'(sum by (route) (rate(heimdall_http_request_db_seconds_total{sel()}[5m])) / sum by (route) (rate(heimdall_http_request_duration_seconds_sum{sel()}[5m])))'
          f' and topk(10, sum by (route) (rate(heimdall_http_request_db_seconds_total{sel()}[5m])))', "{{route}}"),
     ], 0, 25, unit="percentunit", no_value=NO_DB, extra_fc={"min": 0},
-          desc="Per route: sum of DB component seconds / sum of dispatch seconds (ratio of sums, never a ratio of percentiles), for the 10 routes with the most DB time."),
+          desc="Per route: sum of DB component seconds / sum of dispatch seconds (ratio of sums, never a ratio of percentiles), for the 10 routes with the most DB time at each point (more than 10 can appear over the range)."),
     panel("DB time per scope by component (DB-seconds per second)", [
         (f'sum by (scope, component) (rate(heimdall_db_scope_seconds_total{S_NO_BUSY_WAIT}[5m])) > 0', "{{scope}} {{component}}"),
     ], 12, 25, unit="short", no_value=NO_DB,
@@ -482,8 +482,8 @@ db_panels = [
     panel("Connection busy: exec seconds per second", [(f'sum by (conn) (rate(heimdall_sqlite_exec_seconds_sum{S_CONN}[5m]))', "{{conn}}")], 0, 67,
           unit="percentunit", no_value=NO_DB, extra_fc={"min": 0},
           desc="Fraction of wall time the connection mutex is held by wrapped calls (step, exec, prepare, finalize). conn=other aggregates unregistered handles and can exceed 100 %."),
-    panel("Exec time per wrapped call p50 / p95 / p99", quantiles("heimdall_sqlite_exec_seconds_bucket", "conn", 'conn=~"$conn"', "{{conn}}"), 12, 67, unit="s", no_value=NO_DB,
-          desc="Time inside SQLite with the connection mutex held, per wrapped API call. Includes successful busy_timeout sleeps (phase 1 has no busy split)."),
+    panel("Exec time per step/exec call p50 / p95 / p99", quantiles("heimdall_sqlite_exec_seconds_bucket", "conn", 'conn=~"$conn",op!~"prepare|finalize"', "{{conn}}"), 12, 67, unit="s", no_value=NO_DB,
+          desc="Time inside SQLite with the connection mutex held, per step or sqlite3_exec call (prepare/finalize excluded so cheap calls do not dominate p50; all statement ops incl. begin/commit are merged). Includes successful busy_timeout sleeps (phase 1 has no busy split)."),
     panel("Exec time by op (seconds per second)", [(f'sum by (conn, op) (rate(heimdall_sqlite_exec_seconds_sum{S_CONN}[5m]))', "{{conn}} {{op}}")], 0, 75,
           unit="short", no_value=NO_DB, extra_fc={"custom": {"stacking": {"mode": "normal", "group": "A"}, "fillOpacity": 30}}),
     panel("Statements/s by op", [(f'sum by (conn, op) (rate(heimdall_sqlite_statements_total{S_CONN}[5m]))', "{{conn}} {{op}}")], 12, 75,
@@ -509,8 +509,8 @@ db_panels = [
         (f'rate(heimdall_db_uow_nested_total{sel()}[5m])', "nested UoW (savepoint)"),
     ], 0, 100, unit="ops", no_value=NO_DB,
           desc="Outer transactions only; nested units of work are savepoints, counted separately and never as a second transaction. rw=write when the UoW ran an insert/update/delete step."),
-    panel("Transaction duration p50 / p95 / p99 by kind", quantiles("heimdall_db_tx_duration_seconds_bucket", "kind", "", "{{kind}}"), 12, 100, unit="s", no_value=NO_DB,
-          desc="BEGIN to COMMIT/ROLLBACK return (excludes after-commit hooks; dedicated conns start when BEGIN returns). Contains waits and exec: never add to request components."),
+    panel("Committed transaction duration p50 / p95 / p99 by kind", quantiles("heimdall_db_tx_duration_seconds_bucket", "kind", 'outcome="commit"', "{{kind}}"), 12, 100, unit="s", no_value=NO_DB,
+          desc="outcome=commit only (begin_failed/rollback durations would skew it; read and write units are merged). BEGIN to COMMIT return (excludes after-commit hooks; dedicated conns start when BEGIN returns). Contains waits and exec: never add to request components."),
     panel("Rolled back / failed transactions/s", [
         (f'sum by (kind, outcome) (rate(heimdall_db_tx_duration_seconds_count{S_NOT_COMMIT}[5m]))', "{{kind}} {{outcome}}"),
     ], 0, 108, unit="ops", no_value=NO_DB),
@@ -530,7 +530,8 @@ db_panels = [
     panel("Top-3 call sites' share of main-connection step time", [
         (f'sum(topk(3, sum by (site) (increase(heimdall_sqlite_site_exec_seconds_total{S_MAIN}[$__range]))))'
          f' / sum(increase(heimdall_sqlite_site_exec_seconds_total{S_MAIN}[$__range]))', "top-3 share", True),
-    ], 0, 127, w=8, h=4, kind="stat", unit="percentunit", options=stat_opts, no_value=NO_DB),
+    ], 0, 127, w=24, h=4, kind="stat", unit="percentunit", options=stat_opts, no_value=NO_DB,
+          desc="sum of the 3 largest main-connection call sites / all main-connection step exec time over the selected range."),
 
     row("Errors, cache and storage", 131),
     panel("SQLite errors/s by conn, op and code", [(f'sum by (conn, op, code) (rate(heimdall_sqlite_errors_total{sel()}[5m]))', "{{conn}} {{op}} {{code}}")], 0, 132, unit="ops", no_value=NO_DB,
