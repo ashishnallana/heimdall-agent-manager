@@ -457,7 +457,15 @@ vault_touch_last_seen_sqlite :: proc(ctx: rawptr, user_id, device_id, now: strin
 	lock_tok := dbt.timed_lock(&impl.mutex, .Vault)
 	defer dbt.timed_unlock(&impl.mutex, .Vault, lock_tok)
 	conn := write_conn(impl)
-	stmt, ok := prepare(conn, "UPDATE vault_devices SET last_seen_at = ? WHERE device_id = ? AND user_id = ?;")
+	// Presence display is approximate within five minutes; this is not an auth or
+	// expiry clock. Keep one atomic statement on the dedicated writer: no read/cache
+	// can race directory mutations. Invalid/regressing clocks retain the old update
+	// behavior. Hub timestamps have whole-second precision.
+	stmt, ok := prepare(conn, `UPDATE vault_devices SET last_seen_at = ?1
+		WHERE device_id = ?2 AND user_id = ?3 AND (
+			unixepoch(last_seen_at) IS NULL OR unixepoch(?1) IS NULL OR
+			unixepoch(last_seen_at) > unixepoch(?1) OR
+			unixepoch(last_seen_at) <= unixepoch(?1) - 300);`)
 	if !ok do return repo_err("failed to prepare last_seen update")
 	defer sqlite3_finalize(stmt)
 	bind_text(stmt, 1, now)

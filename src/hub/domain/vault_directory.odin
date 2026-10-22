@@ -89,6 +89,7 @@ Vault_Device :: struct {
 	created_at:            string,
 	approved_at:           string,
 	revoked_at:            string,
+	// Approximate signed-request presence, coalesced within five minutes. Not an auth/expiry clock.
 	last_seen_at:          string,
 	// retired_at: a hub retirement HINT (see migration 092). The identity stays
 	// approved in the signed log until an approved browser signs its revoke.

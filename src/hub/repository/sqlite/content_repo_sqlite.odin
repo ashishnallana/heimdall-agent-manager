@@ -129,12 +129,14 @@ content_mark_messages_read_sqlite :: proc(ctx:rawptr, owner:domain.User_ID, mess
 	if len(message_ids) == 0 do return 0, {}
 	impl:=(^Content_Repo_SQLite)(ctx); stmt:sqlite3_stmt=nil
 	
+	// Preserve latest-read timestamps and the input-count return contract. Only
+	// suppress exact timestamp repeats; metadata-only changes no longer reindex FTS.
 	// Create an IN clause with enough ?'s
 	qs := make([dynamic]string, context.temp_allocator)
 	for _ in message_ids { append(&qs, "?") }
 	in_clause := strings.join(qs[:], ",", context.temp_allocator)
 	
-	q:=strings.concatenate({"UPDATE chat_messages SET read_at=? WHERE owner_user_id=? AND message_id IN (", in_clause, ");"}, context.temp_allocator)
+	q:=strings.concatenate({"UPDATE chat_messages SET read_at=? WHERE read_at IS NOT ?1 AND owner_user_id=? AND message_id IN (", in_clause, ");"}, context.temp_allocator)
 	// A concatenated string is not NUL-terminated; give sqlite a real cstring.
 	if sqlite3_prepare_v2(impl.conn.db,strings.clone_to_cstring(q, context.temp_allocator),-1,&stmt,nil)!=SQLITE_OK do return 0,domain.domain_error(.Internal_Error,"failed mark messages read")
 	defer sqlite3_finalize(stmt)
