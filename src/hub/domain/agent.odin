@@ -46,6 +46,27 @@ agent_permission_mode_normalize :: proc(mode: string) -> string {
 	return AGENT_PERMISSION_MODE_YOLO
 }
 
+// agent_instance_permission_mode_normalize maps a stored instance override to a
+// static literal: "" (inherit), "yolo" or "ask". Unknown values inherit.
+agent_instance_permission_mode_normalize :: proc(mode: string) -> string {
+	if mode == AGENT_PERMISSION_MODE_ASK do return AGENT_PERMISSION_MODE_ASK
+	if mode == AGENT_PERMISSION_MODE_YOLO do return AGENT_PERMISSION_MODE_YOLO
+	return ""
+}
+
+// effective_permission_mode is the mode a launch uses: the instance override
+// when set, else the agent's mode (yolo when neither says "ask").
+effective_permission_mode :: proc(instance_mode, agent_mode: string) -> string {
+	if override := agent_instance_permission_mode_normalize(instance_mode); override != "" do return override
+	return agent_permission_mode_normalize(agent_mode)
+}
+
+// agent_instance_effective_permission_mode applies effective_permission_mode to
+// an instance row (agent_permission_mode is filled by the repository).
+agent_instance_effective_permission_mode :: proc(inst: Agent_Instance) -> string {
+	return effective_permission_mode(inst.permission_mode, inst.agent_permission_mode)
+}
+
 Agent_Bridge_Support :: struct {
 	agent_id: string,
 	bridge_id: string,
@@ -115,6 +136,12 @@ Agent_Instance :: struct {
 	extension_version: string,
 	extension_capabilities: string,
 	extension_last_seen_at: string,
+	// permission_mode is this instance's override of the agent's mode: "" inherits
+	// (agents.permission_mode), "yolo" / "ask" override. agent_permission_mode is
+	// the owning agent's mode, read alongside the row. Both are always static
+	// literals (see agent_instance_permission_mode_normalize), never heap-owned.
+	permission_mode: string,
+	agent_permission_mode: string,
 }
 
 // Agent_Extension_Event is one ingested ham.ext.v1 event. seq is hub-assigned,

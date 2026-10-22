@@ -13,6 +13,28 @@ import jsonx "odin_test:lib/jsonx"
 Reconfigure_Operation_Input :: struct {
 	bridge_id, project_id, provider, model, idempotency_key: string,
 	expected_revision: int,
+	// permission_mode optionally overrides the instance's permission mode
+	// ("yolo" | "ask"); "" keeps the instance's current override. A change that
+	// touches only this field is a valid operation and restarts the instance.
+	permission_mode: string,
+}
+
+// reconfiguration_destination_permission_mode resolves the destination override
+// for a request: the requested value when given (validated), else the current
+// instance override. Always returns a static literal ("" | "yolo" | "ask").
+// Only a person may change it: an agent cannot lift its own permission gate.
+reconfiguration_destination_permission_mode :: proc(auth: contracts.Auth_Context, inst: domain.Agent_Instance, requested: string) -> (string, bool, domain.Domain_Error) {
+	mode := strings.trim_space(requested)
+	if mode == "" do return domain.agent_instance_permission_mode_normalize(inst.permission_mode), true, {}
+	if auth.kind == .Instance_Token || auth.kind == .Bridge_Token || auth.kind == .Enrollment_Token do return "", false, domain.domain_error(.Forbidden, "only a user can change an instance's permission mode")
+	if !domain.agent_permission_mode_valid(mode) do return "", false, domain.domain_error(.Validation_Failed, "permission_mode must be 'yolo' or 'ask'")
+	return domain.agent_instance_permission_mode_normalize(mode), true, {}
+}
+
+// reconfiguration_same_destination reports whether an existing operation (same
+// idempotency key) targets exactly the requested destination.
+reconfiguration_same_destination :: proc(existing: domain.Instance_Reconfiguration, input: Reconfigure_Operation_Input, permission_mode: string) -> bool {
+	return existing.destination.bridge_id == input.bridge_id && existing.destination.project_id == input.project_id && existing.destination.provider == input.provider && existing.destination.model == input.model && domain.agent_instance_permission_mode_normalize(existing.destination.permission_mode) == permission_mode
 }
 
 instance_assertion_token :: proc(inst: domain.Agent_Instance) -> string {
@@ -34,7 +56,7 @@ reconfiguration_bridge_supported :: proc(bridge: domain.Bridge) -> bool {
 }
 
 configuration_snapshot :: proc(service: ^Agent_Service, inst: domain.Agent_Instance) -> domain.Instance_Configuration {
-	config := domain.Instance_Configuration{bridge_id = inst.bridge_id, project_id = string(inst.project_id), project_path = inst.project_path, provider = inst.provider, model = inst.model}
+	config := domain.Instance_Configuration{bridge_id = inst.bridge_id, project_id = string(inst.project_id), project_path = inst.project_path, provider = inst.provider, model = inst.model, permission_mode = domain.agent_instance_permission_mode_normalize(inst.permission_mode)}
 	if bridge, found, _ := iface.bridge_get_bridge(service.bridges, inst.bridge_id); found {
 		config.bridge_label = bridge.label
 		if config.bridge_label == "" do config.bridge_label = bridge.machine_hostname
@@ -60,8 +82,10 @@ begin_instance_reconfiguration :: proc(service: ^Agent_Service, auth: contracts.
 	if !found do return {}, false, err
 	defer domain.agent_instance_destroy(&inst)
 	if strings.trim_space(input.idempotency_key) == "" || len(input.idempotency_key) > 128 || input.bridge_id == "" || input.provider == "" || input.model == "" do return {}, false, domain.domain_error(.Validation_Failed, "idempotency key, bridge, provider and model are required")
+	permission_mode, mode_ok, mode_err := reconfiguration_destination_permission_mode(auth, inst, input.permission_mode)
+	if !mode_ok do return {}, false, mode_err
 	if existing, exists, _ := iface.instance_reconfiguration_get(service.agents, string(inst.owner_user_id), instance_id, input.idempotency_key); exists {
-		if existing.destination.bridge_id != input.bridge_id || existing.destination.project_id != input.project_id || existing.destination.provider != input.provider || existing.destination.model != input.model {
+		if !reconfiguration_same_destination(existing, input, permission_mode) {
 			domain.instance_reconfiguration_destroy(&existing)
 			return {}, false, domain.domain_error(.Conflict, "idempotency key already belongs to another configuration")
 		}
@@ -85,6 +109,7 @@ begin_instance_reconfiguration :: proc(service: ^Agent_Service, auth: contracts.
 	next := inst
 	next.bridge_id = input.bridge_id; next.project_id = domain.Project_ID(input.project_id)
 	next.provider = input.provider; next.model = input.model; next.project_path = ""
+	next.permission_mode = permission_mode
 	_, provider_ok, provider_err := validate_pinned_provider_model(service, auth, next, input.provider, input.model)
 	if !provider_ok do return {}, false, provider_err
 	if input.project_id != "" {
@@ -121,7 +146,7 @@ begin_instance_reconfiguration :: proc(service: ^Agent_Service, auth: contracts.
 	defer sync.unlock(&service.reconfiguration_mutex)
 	defer project_service.bridge_runtime_instance_cancel_reservation(service.bridge_runtime_registry, next.bridge_id, generation, next.agent_instance_id)
 	if existing, exists, _ := iface.instance_reconfiguration_get(service.agents, string(inst.owner_user_id), instance_id, input.idempotency_key); exists {
-		if existing.destination.bridge_id != input.bridge_id || existing.destination.project_id != input.project_id || existing.destination.provider != input.provider || existing.destination.model != input.model {
+		if !reconfiguration_same_destination(existing, input, permission_mode) {
 			domain.instance_reconfiguration_destroy(&existing)
 			return {}, false, domain.domain_error(.Conflict, "idempotency key already belongs to another configuration")
 		}
@@ -164,6 +189,8 @@ reconfiguration_launch_destination :: proc(service: ^Agent_Service, op: domain.I
 	defer domain.agent_instance_destroy(&inst)
 	next := inst; next.bridge_id = op.destination.bridge_id; next.project_id = domain.Project_ID(op.destination.project_id); next.project_path = op.destination.project_path
 	next.provider = op.destination.provider; next.model = op.destination.model
+	// The commit trigger applies the destination override; launch with it now.
+	next.permission_mode = domain.agent_instance_permission_mode_normalize(op.destination.permission_mode)
 	generation, admitted, _ := reserve_runtime_launch(service, next)
 	if !admitted {
 		failed, _, _ := reconfiguration_advance(service, op, .Recovery_Required, true, false, "destination_capacity", "Source is stopped; destination capacity is unavailable.")

@@ -458,7 +458,11 @@ MIGRATION_105_PROVIDER_EXTENSION :: #load("migrations/105_provider_extension.sql
 // the catalog yolo_args (REQ-EXT-PERM-2).
 MIGRATION_106_AGENT_PERMISSION_MODE :: #load("migrations/106_agent_permission_mode.sql", string)
 
-migration_order :: [110]string {
+// 108: agent_instances.permission_mode ('' inherits the agent | 'yolo' | 'ask')
+// and the reconfiguration commit trigger applying $.destination.permission_mode.
+MIGRATION_108_INSTANCE_PERMISSION_MODE :: #load("migrations/108_instance_permission_mode.sql", string)
+
+migration_order :: [111]string {
 	"001_foundation.sql",
 	"002_owner_scoped_core.sql",
 	"003_device_tokens.sql",
@@ -569,6 +573,7 @@ migration_order :: [110]string {
 	"105_provider_extension.sql",
 	"106_agent_permission_mode.sql",
 	"107_permission_requests.sql",
+	"108_instance_permission_mode.sql",
 }
 
 // stop_before is a TEST SEAM: when non-empty, the apply loop stops in front of
@@ -935,6 +940,14 @@ run_migrations :: proc(
 			mark_migration_applied(conn, name)
 			continue
 		}
+		// 108 runs inside its own BEGIN/COMMIT; its last statement recreates the
+		// commit trigger, so a trigger that mentions permission_mode proves completion.
+		if name == "108_instance_permission_mode.sql" &&
+		   table_column_exists(conn, "agent_instances", "permission_mode") &&
+		   sqlite_trigger_mentions(conn, "instance_reconfiguration_commit", "permission_mode") {
+			mark_migration_applied(conn, name)
+			continue
+		}
 		if name == "107_permission_requests.sql" &&
 		   sqlite_object_exists(conn, "permission_requests_owner_status") {
 			mark_migration_applied(conn, name)
@@ -1102,6 +1115,7 @@ migration_sql :: proc(name, migrations_dir: string) -> string {
 	if name == "105_provider_extension.sql" do return strings.clone(MIGRATION_105_PROVIDER_EXTENSION)
 	if name == "104_agent_extension_events.sql" do return strings.clone(MIGRATION_104_AGENT_EXTENSION_EVENTS)
 	if name == "107_permission_requests.sql" do return strings.clone(MIGRATION_107_PERMISSION_REQUESTS)
+	if name == "108_instance_permission_mode.sql" do return strings.clone(MIGRATION_108_INSTANCE_PERMISSION_MODE)
 	if name == "100_vault_pair_hub_origin.sql" do return strings.clone(MIGRATION_100_VAULT_PAIR_HUB_ORIGIN)
 	if name == "101_codex_gpt6_models.sql" do return strings.clone(MIGRATION_101_CODEX_GPT6_MODELS)
 	if name == "081_antigravity_models.sql" do return strings.clone(MIGRATION_081_ANTIGRAVITY_MODELS)
@@ -1203,6 +1217,20 @@ sqlite_object_exists :: proc(conn: ^Conn, name: string) -> bool {
 	query := fmt.tprintf(
 		"SELECT 1 FROM sqlite_master WHERE name='%s' LIMIT 1;",
 		escape_sql_literal(name),
+	)
+	if sqlite3_prepare_v2(conn.db, cstring(raw_data(query)), c.int(-1), &stmt, nil) != SQLITE_OK do return false
+	defer sqlite3_finalize(stmt)
+	return sqlite3_step(stmt) == SQLITE_ROW
+}
+
+// sqlite_trigger_mentions reports whether trigger `name` exists and its SQL
+// contains `needle` (a migration that recreates a trigger keys its skip on this).
+sqlite_trigger_mentions :: proc(conn: ^Conn, name, needle: string) -> bool {
+	if conn == nil || conn.db == nil do return false
+	stmt: sqlite3_stmt = nil
+	query := fmt.tprintf(
+		"SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='%s' AND instr(sql, '%s') > 0 LIMIT 1;",
+		escape_sql_literal(name), escape_sql_literal(needle),
 	)
 	if sqlite3_prepare_v2(conn.db, cstring(raw_data(query)), c.int(-1), &stmt, nil) != SQLITE_OK do return false
 	defer sqlite3_finalize(stmt)

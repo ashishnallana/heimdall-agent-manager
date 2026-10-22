@@ -30,10 +30,10 @@ effect_wake_lease :: proc(svc: ^Service, u: ^Uow, lease: domain.Task_Lease, task
 	chain, cok, _ := iface.taskchain_get_chain(svc.repo, task.chain_id)
 	if !cok do return
 	agent_name := ""
-	permission_mode := domain.AGENT_PERMISSION_MODE_YOLO
+	permission_mode := domain.agent_instance_effective_permission_mode(inst)
 	if ag, aok, _ := iface.agent_get(svc.agents, inst.agent_id); aok {
 		agent_name = ag.name
-		permission_mode = domain.agent_permission_mode_normalize(ag.permission_mode)
+		permission_mode = domain.effective_permission_mode(inst.permission_mode, ag.permission_mode)
 	}
 	role := "worker"
 	if lease.kind == domain.LEASE_KIND_REVIEW do role = "reviewer"

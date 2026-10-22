@@ -1670,7 +1670,8 @@ launch_command_json_full :: proc(service: ^Agent_Service, command_id: string, in
 	coordinator_id := ""
 	chain_title := ""
 	agent_name := ""
-	permission_mode := domain.AGENT_PERMISSION_MODE_YOLO
+	// REQ-EXT-PERM-2: the instance override wins over the agent's mode.
+	permission_mode := domain.agent_instance_effective_permission_mode(inst)
 	if service != nil {
 		if service.taskchains != nil && inst.chain_id != "" {
 			if chain, chain_ok, _ := iface.taskchain_get_chain(service.taskchains, domain.Task_Chain_ID(inst.chain_id)); chain_ok {
@@ -1682,7 +1683,7 @@ launch_command_json_full :: proc(service: ^Agent_Service, command_id: string, in
 		if service.agents != nil && inst.agent_id != "" {
 			if agent, agent_ok, _ := iface.agent_get(service.agents, inst.agent_id); agent_ok {
 				agent_name = agent.name
-				permission_mode = domain.agent_permission_mode_normalize(agent.permission_mode)
+				permission_mode = domain.effective_permission_mode(inst.permission_mode, agent.permission_mode)
 			}
 		}
 	}
@@ -2197,7 +2198,7 @@ bootstrap_manifest_json_for_bridge :: proc(service: ^Agent_Service, owner: domai
 	// with provider_missing (REQ-ERR-6).
 	strings.write_string(&b, "\",\"provider\":\""); write_service_json_string(&b, inst.provider)
 	strings.write_string(&b, "\",\"model\":\""); write_service_json_string(&b, inst.model)
-	strings.write_string(&b, "\",\"permission_mode\":\""); write_service_json_string(&b, domain.agent_permission_mode_normalize(agent.permission_mode))
+	strings.write_string(&b, "\",\"permission_mode\":\""); write_service_json_string(&b, domain.effective_permission_mode(inst.permission_mode, agent.permission_mode))
 	token := instance_assertion_token(inst); defer delete(token)
 	strings.write_string(&b, "\",\"instance_token\":\""); write_service_json_string(&b, token)
 	strings.write_string(&b, "\",\"hub_url\":\""); write_service_json_string(&b, bridge.hub_url)

@@ -10,6 +10,9 @@ Instance_Configuration :: struct {
 	project_path: string,
 	provider: string,
 	model: string,
+	// permission_mode is the instance override ("" inherit | "yolo" | "ask"); the
+	// move commit trigger copies the destination value onto the instance.
+	permission_mode: string,
 }
 
 Instance_Reconfiguration_Phase :: enum {
@@ -77,13 +80,13 @@ instance_reconfiguration_transition_allowed :: proc(from, to: Instance_Reconfigu
 }
 
 instance_configuration_equal :: proc(a, b: Instance_Configuration) -> bool {
-	return a.bridge_id == b.bridge_id && a.project_id == b.project_id && a.project_path == b.project_path && a.provider == b.provider && a.model == b.model
+	return a.bridge_id == b.bridge_id && a.project_id == b.project_id && a.project_path == b.project_path && a.provider == b.provider && a.model == b.model && a.permission_mode == b.permission_mode
 }
 
 instance_configuration_destroy :: proc(config: ^Instance_Configuration) {
 	delete(config.bridge_id); delete(config.bridge_label)
 	delete(config.project_id); delete(config.project_label); delete(config.project_path)
-	delete(config.provider); delete(config.model)
+	delete(config.provider); delete(config.model); delete(config.permission_mode)
 	config^ = {}
 }
 
