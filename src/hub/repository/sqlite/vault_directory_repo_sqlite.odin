@@ -452,25 +452,30 @@ vault_delete_pending_sqlite :: proc(ctx: rawptr, user_id, device_id: string) -> 
 	return changes == 1, domain.Domain_Error{}
 }
 
+// last_seen_at only feeds the Settings -> Devices panel and the revoke confirmation;
+// no auth, expiry or prune logic reads it, so hour granularity is enough.
+VAULT_LAST_SEEN_THROTTLE_SECONDS :: 3600
+
 vault_touch_last_seen_sqlite :: proc(ctx: rawptr, user_id, device_id, now: string) -> domain.Domain_Error {
 	impl := (^Vault_Directory_Repo_SQLite)(ctx)
 	lock_tok := dbt.timed_lock(&impl.mutex, .Vault)
 	defer dbt.timed_unlock(&impl.mutex, .Vault, lock_tok)
 	conn := write_conn(impl)
-	// Presence display is approximate within five minutes; this is not an auth or
-	// expiry clock. Keep one atomic statement on the dedicated writer: no read/cache
+	// Presence display is approximate within VAULT_LAST_SEEN_THROTTLE_SECONDS; this
+	// is not an auth or expiry clock. Keep one atomic statement on the dedicated writer: no read/cache
 	// can race directory mutations. Invalid/regressing clocks retain the old update
 	// behavior. Hub timestamps have whole-second precision.
 	stmt, ok := prepare(conn, `UPDATE vault_devices SET last_seen_at = ?1
 		WHERE device_id = ?2 AND user_id = ?3 AND (
 			unixepoch(last_seen_at) IS NULL OR unixepoch(?1) IS NULL OR
 			unixepoch(last_seen_at) > unixepoch(?1) OR
-			unixepoch(last_seen_at) <= unixepoch(?1) - 300);`)
+			unixepoch(last_seen_at) <= unixepoch(?1) - CAST(?4 AS INTEGER));`)
 	if !ok do return repo_err("failed to prepare last_seen update")
 	defer sqlite3_finalize(stmt)
 	bind_text(stmt, 1, now)
 	bind_text(stmt, 2, device_id)
 	bind_text(stmt, 3, user_id)
+	bind_text(stmt, 4, int_s(VAULT_LAST_SEEN_THROTTLE_SECONDS))
 	if sqlite3_step(stmt) != SQLITE_DONE do return repo_err("failed to update last_seen")
 	return domain.Domain_Error{}
 }

@@ -12,6 +12,7 @@ import sql "odin_test:hub/repository/sqlite"
 
 NOW :: "2026-10-22T00:00:00Z"
 NEXT :: "2026-10-22T00:05:00Z"
+VAULT_NEXT :: "2026-10-22T01:00:00Z" // NOW + VAULT_LAST_SEEN_THROTTLE_SECONDS
 
 must :: proc(ok: bool) { assert(ok) }
 good :: proc(e: domain.Domain_Error) { assert(e.code == .None, e.message) }
@@ -74,26 +75,27 @@ vault_boundary_owner_clock_and_errors :: proc(t: ^testing.T) {
     testing.expect_value(t, scalar(&c,"SELECT count(*) FROM writes"), i64(0))
     good(sql.vault_touch_last_seen_sqlite(&r, "owner", "missing", NOW))
     good(sql.vault_touch_last_seen_sqlite(&r, "owner", "device", NOW)) // NULL -> first touch
-    for ts in ([]string{NOW,"2026-10-22T00:00:01Z","2026-10-22T00:04:59Z"}) {
+    for ts in ([]string{NOW,"2026-10-22T00:00:01Z","2026-10-22T00:59:59Z"}) { // up to +3599s: no write
         good(sql.vault_touch_last_seen_sqlite(&r, "owner", "device", ts))
     }
     testing.expect_value(t, scalar(&c,"SELECT count(*) FROM writes"), i64(1))
-    good(sql.vault_touch_last_seen_sqlite(&r, "owner", "device", NEXT)) // inclusive 300s
-    testing.expect_value(t, text(&c,"SELECT last_seen_at FROM vault_devices"), NEXT)
+    good(sql.vault_touch_last_seen_sqlite(&r, "owner", "device", VAULT_NEXT)) // inclusive 3600s
+    testing.expect_value(t, text(&c,"SELECT last_seen_at FROM vault_devices"), VAULT_NEXT)
     testing.expect_value(t, scalar(&c,"SELECT count(*) FROM writes"), i64(2))
-    good(sql.vault_touch_last_seen_sqlite(&r, "owner", "device", "2026-10-22T00:09:59Z"))
+    testing.expect_value(t, sql.VAULT_LAST_SEEN_THROTTLE_SECONDS, 3600)
+    good(sql.vault_touch_last_seen_sqlite(&r, "owner", "device", "2026-10-22T01:59:59Z"))
     testing.expect_value(t, scalar(&c,"SELECT count(*) FROM writes"), i64(2))
     // Regressing or invalid timestamps retain previous update behavior, never
     // leave a future value suppressing touches until wall time catches up.
     good(sql.vault_touch_last_seen_sqlite(&r, "owner", "device", NOW))
     good(sql.vault_touch_last_seen_sqlite(&r, "owner", "device", "invalid"))
-    good(sql.vault_touch_last_seen_sqlite(&r, "owner", "device", NEXT))
+    good(sql.vault_touch_last_seen_sqlite(&r, "owner", "device", VAULT_NEXT))
     testing.expect_value(t, scalar(&c,"SELECT count(*) FROM writes"), i64(5))
     testing.expect_value(t, text(&c,"SELECT status FROM vault_devices"), "approved")
     must(sql.exec(&c, "CREATE TRIGGER fail_vault BEFORE UPDATE ON vault_devices BEGIN SELECT RAISE(ABORT,'injected'); END;"))
-    e := sql.vault_touch_last_seen_sqlite(&r, "owner", "device", "2026-10-22T00:10:00Z")
+    e := sql.vault_touch_last_seen_sqlite(&r, "owner", "device", "2026-10-22T02:00:00Z")
     testing.expect(t, e.code != .None)
-    testing.expect_value(t, text(&c,"SELECT last_seen_at FROM vault_devices"), NEXT)
+    testing.expect_value(t, text(&c,"SELECT last_seen_at FROM vault_devices"), VAULT_NEXT)
     must(sql.exec(&c, "DROP TRIGGER fail_vault; DROP TABLE vault_devices;"))
     testing.expect(t, sql.vault_touch_last_seen_sqlite(&r,"owner","device",NOW).code != .None)
 }
@@ -280,9 +282,9 @@ concurrent_atomic_guards :: proc(t: ^testing.T) {
     reopened,rok,re:=sql.open(path,.Main); good(re); must(rok); c=reopened
     testing.expect_value(t,text(&c,"SELECT last_seen_at FROM vault_devices"),NEXT)
     wok,we=sql.open_vault_directory_write_conn(&vw,path); good(we); must(wok)
-    good(sql.vault_touch_last_seen_sqlite(&vr,"owner","device","2026-10-22T00:09:59Z"))
+    good(sql.vault_touch_last_seen_sqlite(&vr,"owner","device","2026-10-22T01:04:59Z")) // NEXT+3599s
     testing.expect_value(t,scalar(&c,"SELECT count(*) FROM writes WHERE kind='vault'"),i64(1))
-    good(sql.vault_touch_last_seen_sqlite(&vr,"owner","device","2026-10-22T00:10:00Z"))
+    good(sql.vault_touch_last_seen_sqlite(&vr,"owner","device","2026-10-22T01:05:00Z")) // NEXT+3600s
     testing.expect_value(t,scalar(&c,"SELECT count(*) FROM writes WHERE kind='vault'"),i64(2))
 }
 
