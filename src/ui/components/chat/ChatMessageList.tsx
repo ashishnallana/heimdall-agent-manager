@@ -123,6 +123,7 @@ export default function ChatMessageList({
   emptyText = 'No chat loaded.',
   emptyState,
   hasMore = false,
+  paginationCursor,
   loadingOlder = false,
   onLoadOlder,
   onScroll: onScrollProp,
@@ -147,6 +148,8 @@ export default function ChatMessageList({
   emptyText?: string;
   emptyState?: ReactNode;
   hasMore?: boolean;
+  /** Raw cursor changes even when an entire server page is hidden. */
+  paginationCursor?: string;
   loadingOlder?: boolean;
   onLoadOlder?: () => void;
   onScroll?: (event: UIEvent<HTMLDivElement>) => void;
@@ -331,12 +334,12 @@ export default function ChatMessageList({
     if (!root || !sentinel || !hasMore || !onLoadOlder || loadingOlder) return;
     if (typeof IntersectionObserver === 'undefined') return;
     const observer = new IntersectionObserver((entries) => {
-      if (!didInitialScrollRef.current) return;
+      if (!didInitialScrollRef.current && messages.length > 0) return;
       if (entries.some((entry) => entry.isIntersecting)) onLoadOlder();
     }, { root, rootMargin: LOAD_OLDER_ROOT_MARGIN });
     observer.observe(sentinel);
     return () => observer.disconnect();
-  }, [hasMore, loadingOlder, onLoadOlder, messages.length]);
+  }, [hasMore, loadingOlder, onLoadOlder, messages.length, paginationCursor]);
 
   // REQ-FROST-1: when the overlay grows (multi-line draft, attachment tray), keep a
   // reader who was at the bottom pinned there instead of letting the overlay cover it.
@@ -368,7 +371,12 @@ export default function ChatMessageList({
               data-debug-id={`${debugPrefix}-load-older-sentinel`}
               className="flex min-h-8 justify-center"
             >
-              {loadingOlder ? <Spinner size="sm" label="Loading older messages…" /> : null}
+              {loadingOlder ? <Spinner size="sm" label="Loading older messages…" /> : (
+                <button type="button" data-debug-id={debugPrefix + '-load-older'}
+                  onClick={onLoadOlder} className="text-xs text-muted hover:text-primary">
+                  Load older messages
+                </button>
+              )}
             </div>
           ) : null}
           {messages.length === 0 ? (

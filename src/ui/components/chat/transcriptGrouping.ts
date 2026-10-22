@@ -17,112 +17,22 @@ export function isAgentStartMessage(message: ChatMessage): boolean {
   );
 }
 
-/**
- * Groups consecutive shell_run messages (length >= 2) into a clubbed group,
- * consecutive tool_activity messages (length >= 2) into a tool_activity_group,
- * and consecutive agent start messages (length >= 2) into a clubbed start notice.
- * Filters out runs that are currently pinned above the composer.
- *
- * A tool_activity run that ends the transcript keeps its newest message outside
- * the group, so the live turn stays visible; once any other message follows,
- * that message folds into the group.
- */
+// Keep raw server pages/cursors intact. Filter only the rendered transcript,
+// including legacy synthetic groups from an older in-memory client cache.
+export function isLegacyToolMessage(message: { messageType?: string; message_type?: string }): boolean {
+  return ['tool_activity', 'shell_run', 'tool_activity_group', 'shell_run_group']
+    .includes(String(message.messageType || message.message_type || ''));
+}
+
 export function groupTranscriptMessages(
   messages: ChatMessage[],
-  pinnedSessionIds: Set<string> = new Set(),
+  _pinnedSessionIds: Set<string> = new Set(),
 ): ChatMessage[] {
-  const unpinned = messages.filter((message) => {
-    if (message.messageType !== 'shell_run') return true;
-    const sessionId = String(message.metadata?.session_id || message.metadata?.sessionId || '');
-    return !pinnedSessionIds.has(sessionId);
-  });
-
+  const unpinned = messages.filter((message) => !isLegacyToolMessage(message));
   const result: ChatMessage[] = [];
   let i = 0;
   while (i < unpinned.length) {
     const msg = unpinned[i];
-
-    // 1. Consecutive shell_run messages (length >= 2) -> REQ-CLUB-RUN-COMMANDS-13
-    if (msg.messageType === 'shell_run') {
-      let j = i;
-      while (j < unpinned.length && unpinned[j].messageType === 'shell_run') {
-        j++;
-      }
-      const runGroup = unpinned.slice(i, j);
-      if (runGroup.length >= 2) {
-        const firstRun = runGroup[0];
-        const lastRun = runGroup[runGroup.length - 1];
-        result.push({
-          key: `clubbed_run_${firstRun.messageId}_${lastRun.messageId}`,
-          messageId: `clubbed_run_${firstRun.messageId}`,
-          body: '',
-          isUser: false,
-          createdUnixMs: firstRun.createdUnixMs,
-          deliveredUnixMs: 0,
-          readUnixMs: 0,
-          deliveryFailedUnixMs: 0,
-          deliveryError: '',
-          sending: false,
-          authorLabel: '',
-          messageType: 'shell_run_group',
-          messageStatus: 'complete',
-          metadata: {
-            clubbedRuns: runGroup,
-            count: runGroup.length,
-            startUnixMs: firstRun.createdUnixMs,
-            endUnixMs: lastRun.createdUnixMs,
-          },
-        });
-        i = j;
-        continue;
-      } else {
-        result.push(msg);
-        i++;
-        continue;
-      }
-    }
-
-    // 2. Consecutive tool_activity messages (length >= 2); the trailing one stays out.
-    if (msg.messageType === 'tool_activity') {
-      let j = i;
-      while (j < unpinned.length && unpinned[j].messageType === 'tool_activity') {
-        j++;
-      }
-      const groupEnd = j === unpinned.length ? j - 1 : j;
-      const activityGroup = unpinned.slice(i, groupEnd);
-      if (activityGroup.length >= 2) {
-        const first = activityGroup[0];
-        const last = activityGroup[activityGroup.length - 1];
-        result.push({
-          // Keyed by the first message only: a trailing row folding in must not
-          // remount the group (and collapse it while the user is reading).
-          key: `clubbed_tools_${first.messageId}`,
-          messageId: `clubbed_tools_${first.messageId}`,
-          body: '',
-          isUser: false,
-          createdUnixMs: first.createdUnixMs,
-          deliveredUnixMs: 0,
-          readUnixMs: 0,
-          deliveryFailedUnixMs: 0,
-          deliveryError: '',
-          sending: false,
-          authorLabel: '',
-          messageType: 'tool_activity_group',
-          messageStatus: 'complete',
-          metadata: {
-            clubbedActivities: activityGroup,
-            count: activityGroup.length,
-            startUnixMs: first.createdUnixMs,
-            endUnixMs: last.createdUnixMs,
-          },
-        });
-      } else {
-        result.push(...activityGroup);
-      }
-      result.push(...unpinned.slice(groupEnd, j));
-      i = j;
-      continue;
-    }
 
     // 3. Consecutive agent start/restart system messages (length >= 2) -> REQ-SUBTLE-AGENT-START-14
     if (isAgentStartMessage(msg)) {

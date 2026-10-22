@@ -1,3 +1,4 @@
+import { liveStreamReady, liveStreamDisconnected, liveResyncRequested } from '../store/toolActivitySlice';
 import { apiAbsoluteUrl } from './apiBase';
 import { useEffect } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
@@ -160,6 +161,8 @@ export function startUserWsConnection(env: UserWsConnectionEnv): () => void {
   let parked = false;
 
   const runResync = (reason: UserWsResyncReason, readyAt: number) => {
+    // Ready already starts the live handshake synchronously, before any frames.
+    if (reason !== 'initial' && reason !== 'reconnect') dispatch(liveResyncRequested());
     if (reason === 'initial') {
       resyncQueriesStartedBefore(readyAt);
     } else {
@@ -225,6 +228,7 @@ export function startUserWsConnection(env: UserWsConnectionEnv): () => void {
   };
 
   const park = (message: string) => {
+    dispatch(liveStreamDisconnected());
     parked = true;
     dispatch(userWsError(message));
   };
@@ -292,6 +296,7 @@ export function startUserWsConnection(env: UserWsConnectionEnv): () => void {
         if (stableTimer) window.clearTimeout(stableTimer);
         stableTimer = window.setTimeout(() => { stableTimer = undefined; failures = 0; }, STABLE_CONNECTION_MS);
         dispatch(userWsConnected());
+        dispatch(liveStreamReady());
         scheduler.trigger(tracker.onReady(payload));
         return;
       }
@@ -301,10 +306,12 @@ export function startUserWsConnection(env: UserWsConnectionEnv): () => void {
     };
 
     socket.onerror = () => {
+      dispatch(liveStreamDisconnected());
       dispatch(userWsError('User WebSocket connection error'));
     };
 
     socket.onclose = (event) => {
+      dispatch(liveStreamDisconnected());
       clearHeartbeat();
       clearStableTimer();
       socket = null;
@@ -337,6 +344,7 @@ export function startUserWsConnection(env: UserWsConnectionEnv): () => void {
 
   return () => {
     stopped = true;
+    dispatch(liveStreamDisconnected());
     scheduler.cancel();
     window.removeEventListener('online', resume);
     window.removeEventListener('focus', resume);
