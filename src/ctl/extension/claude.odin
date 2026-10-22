@@ -497,3 +497,13 @@ claude_permission_output_from_response :: proc(response: string) -> string {
 	if inner := json_get_object(data, "data"); inner != nil && !json_has(data, "decision") do data = inner
 	return claude_permission_output(json_get_string(data, "decision"), json_get_string(data, "message"))
 }
+
+// claude_permission_is_ham_ctl: a PermissionRequest for the Bash tool whose
+// command is one ham-ctl invocation (see is_ham_ctl_command).
+claude_permission_is_ham_ctl :: proc(raw, ctl_bin: string) -> bool {
+	value, err := json.parse_string(raw, json.DEFAULT_SPECIFICATION, true, context.temp_allocator)
+	if err != .None do return false
+	root, ok := value.(json.Object)
+	if !ok || json_get_string(root, "tool_name") != "Bash" do return false
+	return is_ham_ctl_command(json_get_string(json_get_object(root, "tool_input"), "command"), ctl_bin)
+}

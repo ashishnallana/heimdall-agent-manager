@@ -28,6 +28,7 @@ ctl_extension_command :: proc(cmd: []string, args: []string) {
 	env := ext.Hook_Env{
 		endpoint = agent_mode_endpoint(args),
 		token = agent_mode_token(args),
+		ctl_bin = os.get_env_alloc("HEIMDALL_CTL_BIN", context.temp_allocator),
 	}
 	switch verb {
 	case "hook":

@@ -11,6 +11,7 @@ import {
   toolActivityBadge,
   toolActivityCallDuration,
   toolActivityCallFile,
+  toolActivityGroupSummary,
   toolActivityHeadline,
   toolActivityOmittedLabel,
   toolActivitySubagentLabel,
@@ -79,7 +80,6 @@ export default function ToolActivityRow({ messageId, body, metadata, onOpenFile,
         className="flex min-h-8 w-full min-w-0 items-center gap-2 rounded-lg px-1 py-1 text-xs text-muted hover:bg-neutral-soft disabled:cursor-default disabled:hover:bg-transparent"
       >
         <Icon name={open ? 'chevron-down' : 'chevron-right'} size={12} className="shrink-0 text-faint" />
-        <Icon name="zap" size={12} className={`shrink-0 ${activity.counts.error > 0 ? 'text-danger' : 'text-faint'}`} />
         <span className="min-w-0 flex-1 truncate" title={headline}>{headline}</span>
         <span data-debug-id={`${prefix}-badge`} className="shrink-0 text-faint">{toolActivityBadge(activity)}</span>
       </button>
@@ -128,6 +128,50 @@ export default function ToolActivityRow({ messageId, body, metadata, onOpenFile,
               <p data-debug-id={`${prefix}-omitted`} className="mt-1 text-xs text-faint">{omitted}</p>
             )
           ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+export interface ToolActivityGroupProps {
+  messageId: string;
+  /** The clubbed tool_activity messages, oldest first. */
+  messages: Array<{ messageId: string; body: string; metadata?: unknown }>;
+  onOpenFile?: (filePath: string) => void;
+  onOpenActivity?: () => void;
+}
+
+/** A run of consecutive tool_activity messages, collapsed into one line until opened. */
+export function ToolActivityGroup({ messageId, messages, onOpenFile, onOpenActivity }: ToolActivityGroupProps) {
+  const [open, setOpen] = useState(false);
+  const summary = useMemo(() => toolActivityGroupSummary(messages.map((m) => m.metadata)), [messages]);
+  const prefix = `conversation-tool-activity-group-${messageId}`;
+  return (
+    <div data-debug-id={prefix} className="w-full min-w-0 text-left">
+      <button
+        type="button"
+        data-debug-id={`${prefix}-toggle`}
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+        className="flex min-h-8 w-full min-w-0 items-center gap-2 rounded-lg px-1 py-1 text-xs text-muted hover:bg-neutral-soft"
+      >
+        <Icon name={open ? 'chevron-down' : 'chevron-right'} size={12} className="shrink-0 text-faint" />
+        <span className="min-w-0 flex-1 truncate" title={summary.headline}>{summary.headline}</span>
+        {summary.badge ? <span data-debug-id={`${prefix}-badge`} className="shrink-0 text-danger">{summary.badge}</span> : null}
+      </button>
+      {open ? (
+        <div data-debug-id={`${prefix}-items`} className="ml-5 border-l border-subtle pl-2">
+          {messages.map((m) => (
+            <ToolActivityRow
+              key={m.messageId}
+              messageId={m.messageId}
+              body={m.body}
+              metadata={m.metadata}
+              onOpenFile={onOpenFile}
+              onOpenActivity={onOpenActivity}
+            />
+          ))}
         </div>
       ) : null}
     </div>

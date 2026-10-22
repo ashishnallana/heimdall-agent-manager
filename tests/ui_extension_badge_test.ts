@@ -92,7 +92,7 @@ test('provider setup surface renders the extension badge and copyable hint', () 
   assert.match(badges, /copyTextToClipboard/);
 });
 
-test('conversation header shows the instance signal badge', () => {
+test('conversation header no longer shows the instance signal badge', () => {
   const pane = read('src/ui/components/workbench/AgentChatPane.tsx');
-  assert.match(pane, /<InstanceSignalBadge/);
+  assert.doesNotMatch(pane, /InstanceSignalBadge/);
 });

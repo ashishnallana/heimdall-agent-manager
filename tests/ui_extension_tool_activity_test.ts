@@ -143,3 +143,48 @@ test('renderer and wiring: compact row, no card chrome, file click opens the Act
   const panel = read('../src/ui/components/extension/ActivityTimelinePanel.tsx');
   assert.match(panel, /setView\('files'\);\s*setOpenFile\(openFilePath\);\s*onFileOpened\?\.\(\);/);
 });
+
+test('consecutive tool_activity messages club into one group; the trailing one stays out', async () => {
+  const { groupTranscriptMessages } = await import('../src/ui/components/chat/transcriptGrouping.ts');
+  const mk = (id: string, messageType: string, body = '') => ({
+    key: id, messageId: id, body, isUser: false, createdUnixMs: Number(id.replace(/\D/g, '')) || 1,
+    deliveredUnixMs: 0, readUnixMs: 0, deliveryFailedUnixMs: 0, deliveryError: '', sending: false,
+    authorLabel: '', messageType, messageStatus: 'complete', metadata: {},
+  });
+  // Live turn: three tool rows end the transcript -> first two clubbed, newest stays out.
+  const live = groupTranscriptMessages([mk('m1', 'text', 'hi'), mk('t2', 'tool_activity'), mk('t3', 'tool_activity'), mk('t4', 'tool_activity')] as any);
+  assert.deepEqual(live.map((m: any) => m.messageType), ['text', 'tool_activity_group', 'tool_activity']);
+  assert.deepEqual(live[1].metadata.clubbedActivities.map((m: any) => m.messageId), ['t2', 't3']);
+  assert.equal(live[2].messageId, 't4');
+  // A message follows: the newest tool row folds into the group.
+  const settled = groupTranscriptMessages([mk('t2', 'tool_activity'), mk('t3', 'tool_activity'), mk('t4', 'tool_activity'), mk('m5', 'text', 'done')] as any);
+  assert.deepEqual(settled.map((m: any) => m.messageType), ['tool_activity_group', 'text']);
+  assert.equal(settled[0].metadata.count, 3);
+  // A single tool row (trailing or not) is never wrapped.
+  assert.deepEqual(groupTranscriptMessages([mk('t1', 'tool_activity'), mk('m2', 'text')] as any).map((m: any) => m.messageType), ['tool_activity', 'text']);
+  assert.deepEqual(groupTranscriptMessages([mk('t1', 'tool_activity'), mk('t2', 'tool_activity')] as any).map((m: any) => m.messageType), ['tool_activity', 'tool_activity']);
+});
+
+test('tool activity group reads "Ran X commands" with failures only when present', async () => {
+  const { toolActivityGroupSummary } = await import('../src/ui/components/extension/toolActivityModel.ts');
+  const s = toolActivityGroupSummary([
+    { counts: { total: 3, ok: 3, commands: 2, files_edited: 1 } },
+    { counts: { total: 2, ok: 1, error: 1, commands: 1 } },
+  ]);
+  assert.equal(s.headline, 'Ran 5 commands');
+  assert.equal(s.badge, '1 failed');
+  assert.deepEqual(toolActivityGroupSummary([{ counts: { total: 1, ok: 1 } }]), { headline: 'Ran 1 command', badge: '' });
+});
+
+test('conversation renders tool_activity_group without card chrome', () => {
+  const pane = read('../src/ui/components/workbench/AgentChatPane.tsx');
+  assert.match(pane, /messageType === 'tool_activity_group'/);
+  assert.match(pane, /<ToolActivityGroup/);
+  const list = read('../src/ui/components/chat/ChatMessageList.tsx');
+  assert.match(list, /tool_activity_group/);
+});
+
+test('tool activity rows use text, not the zap icon', () => {
+  const row = read('../src/ui/components/extension/ToolActivityRow.tsx');
+  assert.doesNotMatch(row, /name="zap"/);
+});

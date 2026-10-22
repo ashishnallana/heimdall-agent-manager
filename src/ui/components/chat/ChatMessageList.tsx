@@ -379,7 +379,7 @@ export default function ChatMessageList({
             const isDivider = message.messageType === 'configuration_change' || message.messageType === 'agent_start_clubbed' || message.messageType === 'agent_start' || (message.messageType === 'system' && (
               !message.body || message.body.toLowerCase().includes('started') || message.body.toLowerCase().includes('ready') || message.body.toLowerCase().includes('restart')
             ));
-            const isClubbedGroup = message.messageType === 'shell_run_group';
+            const isClubbedGroup = message.messageType === 'shell_run_group' || message.messageType === 'tool_activity_group';
             // tool_activity is a lean marker (REQ-EXT-CONV-2): no copy/time row.
             const hideCardChrome = isDivider || isClubbedGroup || message.messageType === 'tool_activity';
             const options = visibleMessageOptions(message, Boolean(activeKey));

@@ -56,6 +56,7 @@ Hook_Env :: struct {
 	now_ms:     proc() -> i64,
 	sleep_ms:   proc(ms: int),
 	blocker_id: string,
+	ctl_bin:    string, // HEIMDALL_CTL_BIN: its absolute path also counts as ham-ctl
 }
 
 new_blocker_id :: proc() -> string {
@@ -145,9 +146,44 @@ hook_run :: proc(provider, raw: string, env: Hook_Env, send: Send_Proc) -> strin
 		if timeout <= 0 do timeout = PERMISSION_RELAY_TIMEOUT_MS
 		mapped, err := claude_map_hook(raw, env.ts, timeout)
 		if err != .None || len(mapped.events) == 0 do return ""
-		if mapped.is_permission do return relay_permission(env, send, timeout, claude_build_permission, raw)
+		if mapped.is_permission {
+			// A lone ham-ctl invocation is the agent talking to Heimdall itself:
+			// approve it locally, with no blocker and no event.
+			if claude_permission_is_ham_ctl(raw, env.ctl_bin) do return claude_permission_output("allow", "")
+			return relay_permission(env, send, timeout, claude_build_permission, raw)
+		}
 		_, _ = send(env.endpoint, env.token, "agent.extension.event", claude_event_params(mapped.events[:]), EVENT_SOCKET_TIMEOUT_MS)
 		return ""
 	}
 	return ""
+}
+
+// is_ham_ctl_command reports whether a shell command is exactly one ham-ctl
+// invocation: `ham-ctl …`, `./.heimdall/bin/ham-ctl …`, `$HEIMDALL_CTL_BIN …`
+// or the absolute ctl_bin path. Any chaining, pipe, background, subshell,
+// substitution, redirect, brace or newline disqualifies it, as does `$` after
+// the program name, so `ham-ctl x && rm -rf ~` never matches.
+is_ham_ctl_command :: proc(command, ctl_bin: string) -> bool {
+	cmd := strings.trim_space(command)
+	if cmd == "" do return false
+	for ch in cmd {
+		switch ch {
+		case ';', '&', '|', '`', '<', '>', '\n', '\r', '(', ')', '{', '}':
+			return false
+		}
+	}
+	// `$` is only allowed as the leading $HEIMDALL_CTL_BIN / ${HEIMDALL_CTL_BIN}.
+	head := cmd
+	rest := ""
+	if i := strings.index_any(cmd, " \t"); i >= 0 {
+		head = cmd[:i]
+		rest = cmd[i:]
+	}
+	if strings.contains_rune(rest, '$') do return false
+	switch head {
+	case "ham-ctl", "./.heimdall/bin/ham-ctl", ".heimdall/bin/ham-ctl", "$HEIMDALL_CTL_BIN", "\"$HEIMDALL_CTL_BIN\"":
+		return true
+	}
+	if ctl_bin != "" && head == ctl_bin do return true
+	return false
 }

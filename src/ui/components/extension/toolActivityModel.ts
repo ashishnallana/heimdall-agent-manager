@@ -209,3 +209,21 @@ export function toolActivityCallFile(call: ToolActivityCall): string {
   if (!EDIT_TOOLS.has(call.tool.toLowerCase())) return '';
   return call.filePath.trim();
 }
+
+/**
+ * Headline and badge for a clubbed run of consecutive tool_activity messages:
+ * "Ran 9 commands" (every tool call counts), badge "1 failed" only on failures.
+ */
+export function toolActivityGroupSummary(metadatas: unknown[]): { headline: string; badge: string } {
+  let total = 0;
+  let errors = 0;
+  for (const metadata of metadatas) {
+    const { counts } = parseToolActivity(metadata);
+    total += counts.total;
+    errors += counts.error;
+  }
+  return {
+    headline: `Ran ${total} command${total === 1 ? '' : 's'}`,
+    badge: errors > 0 ? `${errors} failed` : '',
+  };
+}

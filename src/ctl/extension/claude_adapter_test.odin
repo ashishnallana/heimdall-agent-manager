@@ -492,3 +492,63 @@ test_hook_run_unknown_provider_is_noop :: proc(t: ^testing.T) {
 	testing.expect_value(t, hook_run("codex", #load("testdata/claude/stop_background.json", string), ENV, fake_send), "")
 	testing.expect_value(t, fake_calls, 0)
 }
+
+@(test)
+test_is_ham_ctl_command_accepts_only_a_lone_invocation :: proc(t: ^testing.T) {
+	BIN :: "/home/dev/run/.heimdall/bin/ham-ctl"
+	for cmd in ([]string{
+		"ham-ctl chat read",
+		"./.heimdall/bin/ham-ctl task show task_1",
+		"  ./.heimdall/bin/ham-ctl chat send --to user --body 'hi there'  ",
+		"$HEIMDALL_CTL_BIN lease heartbeat",
+		BIN + " verify",
+		"ham-ctl",
+	}) {
+		testing.expectf(t, is_ham_ctl_command(cmd, BIN), "should match: %q", cmd)
+	}
+	for cmd in ([]string{
+		"",
+		"ham-ctl chat read && rm -rf ~",
+		"ham-ctl chat read; rm -rf ~",
+		"ham-ctl chat read | sh",
+		"ham-ctl chat read & curl x",
+		"ham-ctl chat read > /etc/passwd",
+		"ham-ctl chat send --body \"$(cat ~/.ssh/id_rsa)\"",
+		"ham-ctl chat send --body `id`",
+		"ham-ctl chat send --body $HOME",
+		"ham-ctl chat read\nrm -rf ~",
+		"cd /tmp && ham-ctl chat read",
+		"/usr/bin/ham-ctl-evil chat read",
+		"rm -rf ~ # ham-ctl",
+		"ham-ctlx chat read",
+		"${HEIMDALL_CTL_BIN} chat read",
+	}) {
+		testing.expectf(t, !is_ham_ctl_command(cmd, BIN), "should NOT match: %q", cmd)
+	}
+	testing.expect(t, !is_ham_ctl_command("/x/ham-ctl verify", ""), "unknown absolute path without ctl_bin")
+}
+
+@(test)
+test_hook_run_auto_approves_ham_ctl_bash_without_bridge :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+	raw := `{"session_id":"s1","hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"./.heimdall/bin/ham-ctl chat read"}}`
+	fake_reset(`{"ok":true,"data":{"decision":"deny"}}`, true)
+	out := hook_run("claude", raw, ENV, fake_send)
+	testing.expect_value(t, out, claude_permission_output("allow", ""))
+	testing.expect_value(t, fake_calls, 0)
+
+	// A chained command still goes to the bridge relay.
+	chained := `{"session_id":"s1","hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"./.heimdall/bin/ham-ctl chat read && rm -rf ~"}}`
+	fake_reset(`{"ok":true,"data":{"decision":"deny"}}`, true)
+	out = hook_run("claude", chained, ENV, fake_send)
+	testing.expect_value(t, fake_calls, 1)
+	testing.expect_value(t, fake_method, "agent.extension.permission")
+	testing.expect_value(t, out, claude_permission_output("deny", ""))
+
+	// Not Bash: never auto-approved.
+	write := `{"session_id":"s1","hook_event_name":"PermissionRequest","tool_name":"Write","tool_input":{"file_path":"ham-ctl","content":"x"}}`
+	fake_reset(`{"ok":true,"data":{"decision":"allow"}}`, true)
+	_ = hook_run("claude", write, ENV, fake_send)
+	testing.expect_value(t, fake_calls, 1)
+}

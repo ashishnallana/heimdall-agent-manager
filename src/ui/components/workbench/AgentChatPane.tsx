@@ -51,7 +51,6 @@ import {
 import { useFetchChainTasksQuery, useFetchTaskChainDetailQuery } from '../../api/endpoints/tasks';
 import { selectActiveVaultKey } from '../../store/vaultSlice';
 import type { AuxContent } from '../../store/auxTabId';
-import { InstanceSignalBadge } from '../extension/ExtensionBadges';
 import { buildRouteHash } from '../../utils/appLocation';
 import { useRegisterActions } from '../../services/shortcuts/useRegisterActions';
 import { readComposerDraft, writeComposerDraft } from '../../utils/clientPersistence';
@@ -89,7 +88,7 @@ import {
   type ShellRunMarker,
 } from '../shells/ShellRunIndicator';
 import AgentActivityBubbles from '../chat/AgentActivityBubbles';
-import ToolActivityRow from '../extension/ToolActivityRow';
+import ToolActivityRow, { ToolActivityGroup } from '../extension/ToolActivityRow';
 import AtMentionPopup, { type MentionEntity } from '../chat/AtMentionPopup';
 import ChatMessageList from '../chat/ChatMessageList';
 import InstanceReconfigurationProgress from '../chat/InstanceReconfigurationProgress';
@@ -1739,6 +1738,17 @@ export function AgentChatPane({
       if (!session) return null;
       return <ShellRunRow session={session} />;
     }
+    if (message.messageType === 'tool_activity_group') {
+      const clubbed: ChatMessage[] = message.metadata?.clubbedActivities || [];
+      return (
+        <ToolActivityGroup
+          messageId={message.messageId}
+          messages={clubbed}
+          onOpenFile={(filePath) => openAux({ type: 'activity', filePath })}
+          onOpenActivity={() => openAux({ type: 'activity' })}
+        />
+      );
+    }
     if (message.messageType === 'tool_activity') {
       return (
         <ToolActivityRow
@@ -2981,21 +2991,6 @@ export function AgentChatPane({
             </span>
           ) : null}
 
-          {instance ? (
-            onOpenAuxTab ? (
-              <button
-                type="button"
-                data-debug-id="conversation-signal-badge-btn"
-                aria-label="Open activity timeline"
-                onClick={() => openAux({ type: 'activity' })}
-                className="rounded-full hover:opacity-80"
-              >
-                <InstanceSignalBadge extension={instance.extension} compact={isMobile} />
-              </button>
-            ) : (
-              <InstanceSignalBadge extension={instance.extension} compact={isMobile} />
-            )
-          ) : null}
           {headerTrailing}
           <Menu
             align="end"
