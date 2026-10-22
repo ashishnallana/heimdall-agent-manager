@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { VaultKeyring } from '../../utils/vaultKeyring';
 import { apiErrorText } from '../../api/cookieFetch';
-import { buildQuestionSubmission, decryptQuestionGroup, type QuestionDraft, type QuestionGroup, type QuestionSubmission } from './multiQuestion';
+import { buildQuestionSubmission, decryptQuestionGroup, readQuestionDraft, type QuestionDraft, type QuestionGroup, type QuestionSubmission } from './multiQuestion';
 
 /** One source owns one draft and retry key. The parent keys this by conversation/source. */
 export default function MultiQuestionForm({ group, eligible, answered, vaultKey, debugPrefix, onSubmit }: {
@@ -54,7 +54,7 @@ export default function MultiQuestionForm({ group, eligible, answered, vaultKey,
   };
   return <form data-debug-id={`${debugPrefix}-form`} className="mt-3 min-w-0 space-y-4 rounded-xl border border-subtle bg-surface p-3 sm:p-4" onSubmit={(event) => { event.preventDefault(); void submit(); }}>
     {plain.questions.map((q) => {
-      const value = draft[q.id] || { optionIds: [], customText: '' };
+      const value = readQuestionDraft(draft, q.id);
       return <fieldset key={q.id} disabled={!interactive || frozen} className="min-w-0 space-y-2">
         <legend className="mb-2 whitespace-pre-wrap font-medium">{q.text}</legend>
         {interactive ? <>

@@ -282,3 +282,51 @@ test('versioned metadata rejects malformed IDs/modes/counts and custom answer li
   for (const malformed of [ { ...group, version: 2 }, { ...group, questions: [] }, { ...group, questions: [group.questions[0], group.questions[0]] }, { ...group, questions: [{ ...group.questions[0], selection_mode: 'all' }] } ]) assert.equal(parseQuestionGroup({ multi_question: malformed }), null);
   assert.throws(() => buildQuestionSubmission(group, { target: { optionIds: [], customText: 'x'.repeat(8193) } }, 'key'), /8192/);
 });
+
+test('prototype-named question IDs render, validate, update and submit without inherited drafts', async () => {
+  const special = { version: 1 as const, questions: ['constructor', 'toString', '__proto__'].map((id, i) => ({
+    ...group.questions[i], id,
+  })) };
+  assert.ok(parseQuestionGroup({ multi_question: special }));
+  for (const q of special.questions) {
+    const single = { version: 1 as const, questions: [q] };
+    assert.throws(() => buildQuestionSubmission(single, {}, 'key'), /Answer every question/);
+    const inherited = Object.create({ [q.id]: { optionIds: [q.options[0].id], customText: '' } });
+    assert.throws(() => buildQuestionSubmission(single, inherited, 'key'), /Answer every question/);
+    const own = { [q.id]: { optionIds: [q.options[0].id], customText: '' } };
+    assert.deepEqual(buildQuestionSubmission(single, own, 'key').answers, [
+      { question_id: q.id, option_ids: [q.options[0].id] },
+    ]);
+  }
+  await withUI(async (h: any) => {
+    const sent: any[] = [];
+    const show = (extra: any = {}) => h.render(form(h.key, async (payload: any) => { sent.push(payload); }, { group: special, ...extra }));
+    await show({ eligible: false });
+    assert.equal(h.q('mq-submit'), null);
+    assert.match(h.text(), /Where should this run/);
+    await show();
+    await h.click('mq-submit');
+    assert.match(h.text(), /Answer every question/);
+    assert.equal(sent.length, 0);
+    await h.click('mq-question-constructor-option-stage');
+    await h.click('mq-question-toString-option-smoke');
+    await h.click('mq-question-toString-option-integration');
+    await h.click('mq-question-__proto__-option-all');
+    await h.type('mq-question-__proto__-custom', 'Special ID answer');
+    assert.equal(h.q('mq-question-__proto__-option-all').checked, false);
+    assert.equal(h.q('mq-question-constructor-option-stage').checked, true);
+    assert.equal(sent.length, 0);
+    await h.click('mq-submit');
+    assert.deepEqual(sent[0].answers, [
+      { question_id: 'constructor', option_ids: ['stage'] },
+      { question_id: 'toString', option_ids: ['smoke', 'integration'] },
+      { question_id: '__proto__', custom_text: 'Special ID answer' },
+    ]);
+    assert.match(h.text(), /Answers submitted/);
+    assert.match(h.text(), /Special ID answer/);
+    assert.equal(h.dom.window.document.querySelector('input,textarea,button'), null);
+    await show({ key: 'reloaded-special-ids', answered: true });
+    assert.match(h.text(), /Answers submitted/);
+    assert.match(h.text(), /Which checks/);
+  });
+});

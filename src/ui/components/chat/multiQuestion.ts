@@ -47,11 +47,15 @@ export async function decryptQuestionGroup(group: QuestionGroup, key: VaultKeyri
 }
 
 export type QuestionDraft = Record<string, { optionIds: string[]; customText: string }>;
+/** Question IDs are untrusted keys and may name Object.prototype properties. */
+export function readQuestionDraft(draft: QuestionDraft, id: string): QuestionDraft[string] {
+  return Object.prototype.hasOwnProperty.call(draft, id) ? draft[id] : { optionIds: [], customText: '' };
+}
 export function buildQuestionSubmission(group: QuestionGroup, draft: QuestionDraft, key: string): QuestionSubmission {
   const answers: QuestionAnswer[] = [];
   const summary: string[] = [];
   for (const q of group.questions) {
-    const value = draft[q.id];
+    const value = readQuestionDraft(draft, q.id);
     const custom = value?.customText.trim() || '';
     const selected = value?.optionIds || [];
     if (!custom && (!selected.length || (q.selection_mode !== 'multiple' && selected.length !== 1))) throw new Error('Answer every question before submitting.');
