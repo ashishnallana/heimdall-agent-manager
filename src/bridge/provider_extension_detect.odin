@@ -3,6 +3,7 @@ package main
 import "core:encoding/json"
 import "core:strconv"
 import "core:strings"
+import "core:sync"
 import "core:time"
 
 // REQ-EXT-DET-1: whether a provider's Heimdall extension is installed. The Hub
@@ -15,6 +16,42 @@ Bridge_Catalog_Extension :: struct {
 	min_version:  string `json:"min_version"`,
 	install_hint: string `json:"install_hint"`,
 	capabilities: []string `json:"capabilities"`,
+	// Exact argv sequence selecting this extension's loader, followed by a
+	// directory whose final components match load_path_suffix (when supplied).
+	load_args: []string `json:"load_args"`,
+	load_path_suffix: string `json:"load_path_suffix"`,
+}
+
+bridge_provider_extension_expected :: proc(profile: Bridge_Provider_Profile, discovery_state: string) -> bool {
+	if discovery_state == "present" do return true
+	ext := profile.extension
+	if len(ext.load_args) == 0 do return false
+	for i in 0..<len(profile.base_args) {
+		if i + len(ext.load_args) > len(profile.base_args) do break
+		matches := true
+		for arg, j in ext.load_args {
+			if profile.base_args[i + j] != arg { matches = false; break }
+		}
+		if !matches do continue
+		if ext.load_path_suffix == "" do return true
+		value_index := i + len(ext.load_args)
+		if value_index >= len(profile.base_args) do continue
+		path := strings.trim_right(profile.base_args[value_index], "/")
+		suffix := strings.trim(ext.load_path_suffix, "/")
+		if suffix != "" && (path == suffix || strings.has_suffix(path, strings.concatenate({"/", suffix}, context.temp_allocator))) do return true
+	}
+	return false
+}
+
+bridge_provider_launch_extension_expected :: proc(profile: Bridge_Provider_Profile) -> bool {
+	state := ""
+	sync.rw_mutex_shared_lock(&bridge_provider_paths_mutex)
+	for p in bridge_provider_paths {
+		if p.provider == profile.name { state = p.extension_state; break }
+	}
+	result := bridge_provider_extension_expected(profile, state)
+	sync.rw_mutex_shared_unlock(&bridge_provider_paths_mutex)
+	return result
 }
 
 BRIDGE_PROVIDER_EXTENSION_TIMEOUT :: 5 * time.Second

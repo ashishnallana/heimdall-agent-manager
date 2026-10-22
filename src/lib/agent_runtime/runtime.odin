@@ -14,6 +14,8 @@ Agent_Profile :: struct {
 	ask_flags: []string,
 	prompt_flags: []string,
 	starter_prompt: string,
+	// Launch-scoped evidence that the provider loads the Heimdall extension.
+	extension_expected: bool,
 	prompt_delivery: string,
 	prompt_tmux_delay_ms: int,
 	prompt_tmux_enter: bool,
@@ -68,6 +70,12 @@ render_starter_prompt_for_agent :: proc(profile: Agent_Profile, daemon_url, agen
 	if strings.trim_space(out) == "" do return ""
 	out, _ = strings.replace_all(out, "{ctl_bin} --token {token} start-success", "{ctl_bin} agent start-success")
 	out, _ = strings.replace_all(out, "{ctl_bin} start-success", "{ctl_bin} agent start-success")
+	if profile.extension_expected {
+		// Strip only the known instruction sentence, never a line containing other
+		// bootstrap instructions or arbitrary occurrences of a command in prose.
+		out, _ = strings.replace_all(out, "First, run: {ctl_bin} agent start-success. ", "")
+		out, _ = strings.replace_all(out, "First, run: ./.heimdall/bin/ham-ctl agent start-success. ", "")
+	}
 	out, _ = strings.replace_all(out, "{token}", agent_token)
 	out, _ = strings.replace_all(out, "{agent_token}", agent_token)
 	out, _ = strings.replace_all(out, "{instance}", agent_instance_id)

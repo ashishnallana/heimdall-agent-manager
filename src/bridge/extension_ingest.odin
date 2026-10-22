@@ -158,6 +158,7 @@ bridge_ext_ingest :: proc(rec: Bridge_Local_Agent_Token_Record, params: string, 
 			continue
 		}
 		defer contracts.ext_event_destroy(&ev)
+		if bridge_startup_event(ev) do bridge_startup_accept(rec, now)
 
 		// A later event proves a permission prompt was answered in the terminal.
 		tool_input := ""
@@ -410,7 +411,10 @@ bridge_ext_handle_rpc :: proc(request_id, method, params: string, rec: Bridge_Lo
 	}
 	res := bridge_ext_ingest(rec, params, bridge_runtime_now_ms())
 	defer bridge_ext_ingest_result_destroy(&res)
-	if res.accepted > 0 do bridge_ext_forwarder_ensure_started()
+	if res.accepted > 0 {
+		bridge_ext_forwarder_ensure_started()
+		bridge_startup_worker_ensure_started()
+	}
 	if res.fatal != .None {
 		return bridge_local_response_error(request_id, "bad_request", contracts.ext_error_message(res.fatal))
 	}

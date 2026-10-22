@@ -47,6 +47,10 @@
 //! | 0xAE | StreamReady | stream attached and ready to accept input/output     |
 //! | 0xAF | StreamClosed| stream closed (child exited or teardown)             |
 //! | 0xB0 | AlreadyExited| Signal target had already exited (instance + code)  |
+//! | 0x3B | StartupLaunch | query actual live child by immutable spawn key   |
+//! | 0xB2 | StartupLaunch | reply with matching live pid, or 0 if absent     |
+//! | 0x3A | StartupInput | launch-fenced, idempotent startup instruction       |
+//! | 0xB1 | StartupInputDone | startup bytes written (instance + pid + key)   |
 
 use std::io::{self, Read, Write};
 
@@ -300,6 +304,12 @@ pub enum CtlMsg {
     // data plane (instance-scoped)
     Attach { instance: String },
     Input { instance: String, data: Vec<u8> },
+    /// REQ-START-3: exactly one startup instruction per child. A repeated request
+    /// returns its receipt; a different launch key/pid is rejected before input.
+    StartupInput { instance: String, pid: i32, launch_key: String, data: Vec<u8> },
+    /// Confirm a successfully spawned, still-live child by its immutable spawn key.
+    /// Unlike bridge token issuance, this evidence survives a bridge restart.
+    StartupLaunch { instance: String, launch_key: String },
     Key { instance: String, key: NamedKey },
     Resize { instance: String, rows: u16, cols: u16 },
     Capture { instance: String },
@@ -321,6 +331,9 @@ pub enum CtlMsg {
 /// daemon -> client.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CtlReply {
+    StartupInputDone { instance: String, pid: i32, launch_key: String },
+    /// pid=0 means no live child was spawned with the requested key.
+    StartupLaunch { instance: String, pid: i32, launch_key: String },
     Spawned { instance: String, pid: i32 },
     Closed { instance: String },
     Restarted { instance: String, pid: i32 },
@@ -388,6 +401,9 @@ const T_PING: u8 = 0x36;
 const T_SHUTDOWN: u8 = 0x37;
 const T_WATCH_EVENTS: u8 = 0x38;
 const T_SIGNAL: u8 = 0x39;
+const T_STARTUP_INPUT: u8 = 0x3A;
+const T_STARTUP_LAUNCH: u8 = 0x3B;
+const T_STARTUP_LAUNCH_REPLY: u8 = 0xB2;
 
 const T_SPAWNED: u8 = 0xA0;
 const T_CLOSED: u8 = 0xA1;
@@ -406,6 +422,7 @@ const T_HOST_HEARTBEAT: u8 = 0xAD;
 pub const T_STREAM_READY: u8 = 0xAE;
 pub const T_STREAM_CLOSED: u8 = 0xAF;
 pub const T_ALREADY_EXITED: u8 = 0xB0;
+const T_STARTUP_INPUT_DONE: u8 = 0xB1;
 
 // ---- primitive codecs ---------------------------------------------------
 
@@ -550,6 +567,8 @@ impl CtlMsg {
             CtlMsg::Restart { instance } => Some(instance),
             CtlMsg::Attach { instance } => Some(instance),
             CtlMsg::Input { instance, .. } => Some(instance),
+            CtlMsg::StartupInput { instance, .. } => Some(instance),
+            CtlMsg::StartupLaunch { instance, .. } => Some(instance),
             CtlMsg::Key { instance, .. } => Some(instance),
             CtlMsg::Resize { instance, .. } => Some(instance),
             CtlMsg::Capture { instance } => Some(instance),
@@ -608,6 +627,18 @@ impl CtlMsg {
                 p.push(T_INPUT);
                 put_str(&mut p, instance);
                 p.extend_from_slice(data);
+            }
+            CtlMsg::StartupInput { instance, pid, launch_key, data } => {
+                p.push(T_STARTUP_INPUT);
+                put_str(&mut p, instance);
+                put_i32(&mut p, *pid);
+                put_str(&mut p, launch_key);
+                p.extend_from_slice(data);
+            }
+            CtlMsg::StartupLaunch { instance, launch_key } => {
+                p.push(T_STARTUP_LAUNCH);
+                put_str(&mut p, instance);
+                put_str(&mut p, launch_key);
             }
             CtlMsg::Key { instance, key } => {
                 p.push(T_KEY);
@@ -704,6 +735,16 @@ impl CtlMsg {
                     data: rest[off..].to_vec(),
                 }
             }
+            T_STARTUP_INPUT => {
+                let instance = get_str(rest, &mut off)?;
+                let pid = get_i32(rest, &mut off)?;
+                let launch_key = get_str(rest, &mut off)?;
+                CtlMsg::StartupInput { instance, pid, launch_key, data: rest[off..].to_vec() }
+            }
+            T_STARTUP_LAUNCH => CtlMsg::StartupLaunch {
+                instance: get_str(rest, &mut off)?,
+                launch_key: get_str(rest, &mut off)?,
+            },
             T_KEY => {
                 let instance = get_str(rest, &mut off)?;
                 let code = *rest.get(off).ok_or_else(|| bad("key missing code"))?;
@@ -755,6 +796,8 @@ impl CtlReply {
             CtlReply::StreamReady { instance } => Some(instance),
             CtlReply::StreamClosed { instance, .. } => Some(instance),
             CtlReply::AlreadyExited { instance, .. } => Some(instance),
+            CtlReply::StartupInputDone { instance, .. } => Some(instance),
+            CtlReply::StartupLaunch { instance, .. } => Some(instance),
             _ => None,
         }
     }
@@ -766,6 +809,18 @@ impl CtlReply {
     pub fn encode(&self) -> Vec<u8> {
         let mut p = Vec::new();
         match self {
+            CtlReply::StartupInputDone { instance, pid, launch_key } => {
+                p.push(T_STARTUP_INPUT_DONE);
+                put_str(&mut p, instance);
+                put_i32(&mut p, *pid);
+                put_str(&mut p, launch_key);
+            }
+            CtlReply::StartupLaunch { instance, pid, launch_key } => {
+                p.push(T_STARTUP_LAUNCH_REPLY);
+                put_str(&mut p, instance);
+                put_i32(&mut p, *pid);
+                put_str(&mut p, launch_key);
+            }
             CtlReply::Spawned { instance, pid } => {
                 p.push(T_SPAWNED);
                 put_str(&mut p, instance);
@@ -1018,6 +1073,16 @@ impl CtlReply {
                     code: get_i32(rest, &mut off)?,
                 }
             }
+            T_STARTUP_LAUNCH_REPLY => CtlReply::StartupLaunch {
+                instance: get_str(rest, &mut off)?,
+                pid: get_i32(rest, &mut off)?,
+                launch_key: get_str(rest, &mut off)?,
+            },
+            T_STARTUP_INPUT_DONE => CtlReply::StartupInputDone {
+                instance: get_str(rest, &mut off)?,
+                pid: get_i32(rest, &mut off)?,
+                launch_key: get_str(rest, &mut off)?,
+            },
             _ => return Err(bad("unknown reply tag")),
         })
     }
@@ -1068,6 +1133,29 @@ pub fn write_ctl_reply<W: Write>(w: &mut W, reply: &CtlReply) -> io::Result<()> 
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    #[test]
+    fn startup_launch_query_roundtrip() {
+        round_msg(CtlMsg::StartupLaunch { instance: "inst".into(), launch_key: "spawn-key".into() });
+        for pid in [0, 42] {
+            round_reply(CtlReply::StartupLaunch { instance: "inst".into(), pid, launch_key: "spawn-key".into() });
+        }
+    }
+
+    #[test]
+    fn startup_input_wire_roundtrips_and_truncation_is_rejected() {
+        let msg = CtlMsg::StartupInput { instance: "inst".into(), pid: 42, launch_key: "launch".into(), data: b"confirm\r".to_vec() };
+        round_msg(msg.clone());
+        round_reply(CtlReply::StartupInputDone { instance: "inst".into(), pid: 42, launch_key: "launch".into() });
+        let encoded = msg.encode();
+        assert_eq!(encoded[4], 0x3A);
+        // Fixed prefix ends after the launch key; missing fields fail parsing.
+        let payload = &encoded[4..];
+        let prefix_len = payload.len() - b"confirm\r".len();
+        for n in 0..prefix_len {
+            assert!(CtlMsg::decode_payload(&payload[..n]).is_err());
+        }
+    }
 
     fn round_msg(m: CtlMsg) {
         let bytes = m.encode();

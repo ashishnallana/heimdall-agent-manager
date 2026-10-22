@@ -323,6 +323,13 @@ bridge_pty_host_build_spawn :: proc(instance_id, run_dir, provider, model, agent
 	if !path_ok do return {}, false
 	defer delete(resolved_path)
 	profile.command = []string{resolved_path}
+	profile.extension_expected = bridge_provider_launch_extension_expected(profile)
+	bridge_startup_set_expectation(instance_id, agent_token, profile.extension_expected)
+	return bridge_pty_host_build_spawn_for_profile(instance_id, run_dir, profile, model, agent_token, env, display_name, timeout_seconds, permission_mode)
+}
+
+// Assemble the launch from the already resolved, immutable catalog profile.
+bridge_pty_host_build_spawn_for_profile :: proc(instance_id, run_dir: string, profile: Bridge_Provider_Profile, model, agent_token: string, env: []string, display_name := "", timeout_seconds: u64 = 0, permission_mode := "") -> (Pty_Host_Spawn_Request, bool) {
 	agent_argv := bridge_runtime_agent_argv_for_profile(profile, model, agent_token, instance_id, permission_mode)
 	if len(agent_argv) == 0 do return {}, false
 
@@ -331,12 +338,19 @@ bridge_pty_host_build_spawn :: proc(instance_id, run_dir, provider, model, agent
 	delete(agent_argv)
 
 	detect_json := bridge_runtime_startup_detection_arg(profile.startup_detection)
+	// The optional environment key fences StartupInput and StartupLaunch; existing
+	// clients and Spawn codecs remain wire-compatible.
+	env_pairs := bridge_pty_host_env_pairs(env)
+	spawn_env := make([dynamic][2]string, len(env_pairs), len(env_pairs) + 1)
+	copy(spawn_env[:], env_pairs)
+	delete(env_pairs)
+	append(&spawn_env, [2]string{strings.clone("HEIMDALL_STARTUP_KEY"), bridge_local_hash_token(agent_token)})
 	req := Pty_Host_Spawn_Request{
 		instance         = strings.clone(instance_id),
 		argv             = cloned_argv,
 		cwd              = strings.clone(run_dir),
 		has_cwd          = true,
-		env              = bridge_pty_host_env_pairs(env),
+		env              = spawn_env[:],
 		detect           = detect_json,
 		has_detect       = strings.trim_space(detect_json) != "",
 		display_name     = strings.clone(display_name),
@@ -346,7 +360,7 @@ bridge_pty_host_build_spawn :: proc(instance_id, run_dir, provider, model, agent
 		rows                = PTY_HOST_DEFAULT_ROWS,
 		cols                = PTY_HOST_DEFAULT_COLS,
 	}
-	bridge_pty_host_track_instance_provider(instance_id, provider)
+	bridge_pty_host_track_instance_provider(instance_id, profile.name)
 	return req, true
 }
 
@@ -905,4 +919,21 @@ bridge_pty_host_reap_superseded :: proc(socket, instance: string) {
 	if bridge_pty_host_is_registered(socket, instance) {
 		if bridge_pty_host_close(socket, instance) do fmt.println("bridge pty-host: reaped superseded instance", instance)
 	}
+}
+
+// Query actual successful spawn identity. A missing/mismatched/dead child returns
+// pid=0; transport/protocol failures stay retryable and must not trigger replacement.
+bridge_pty_host_startup_launch :: proc(socket, instance, launch_key: string) -> (pid: i32, ok: bool) {
+	payload := make([dynamic]byte)
+	defer delete(payload)
+	append(&payload, PTY_HOST_T_STARTUP_LAUNCH)
+	pty_host_put_str(&payload, instance)
+	pty_host_put_str(&payload, launch_key)
+	frame := pty_host_frame(payload[:])
+	defer delete(frame)
+	reply, received := pty_host_request(socket, frame)
+	if !received do return 0, false
+	defer pty_host_reply_delete(reply)
+	if reply.kind != .Startup_Launch || reply.instance != instance || reply.startup_key != launch_key do return 0, false
+	return reply.pid, reply.pid >= 0
 }

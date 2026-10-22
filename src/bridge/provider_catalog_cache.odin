@@ -220,6 +220,7 @@ bridge_provider_profile_from_catalog :: proc(provider: Bridge_Catalog_Provider) 
 		ask_flags = provider.ask_args,
 		prompt_flags = provider.prompt_args,
 		starter_prompt = provider.starter_prompt,
+		extension = provider.extension,
 		prompt_delivery = provider.prompt_delivery,
 		skill_dir = provider.skill_dir,
 		bootstrap_file_name = provider.bootstrap_file,

@@ -122,6 +122,7 @@ Bridge_Runtime_Instance :: struct {
 	start_deadline_unix_ms: i64,
 	start_success_seen: bool,
 	last_start_prompt_unix_ms: i64,
+	startup: Bridge_Startup_State,
 	// stopped_intent_unix_ms is set when an operator-requested stop begins. While it
 	// is recent (< BRIDGE_STOP_INTENT_TTL_MS) a late wrapper liveness/subscribe
 	// signal is IGNORED for status purposes so it cannot resurrect an intentionally
@@ -2070,6 +2071,7 @@ bridge_hub_handle_wake_agent :: proc(conn: ^ws.Connection, text: string) {
 			// can write <run_dir>/TASK.md; the agent's first act is `lease next`.
 			lease_id := extract_json_string(entry, "lease_id", "")
 			permission_mode := extract_json_string(entry, "permission_mode", "")
+			run_count, _ := bridge_provider_json_extract_int(entry, "run_count")
 			pack_json, _ := bridge_provider_json_extract_object(entry, "pack")
 			defer delete(pack_json)
 
@@ -2082,7 +2084,7 @@ bridge_hub_handle_wake_agent :: proc(conn: ^ws.Connection, text: string) {
 				// bridge_runtime_launch_agent_pty_host already closes any registered
 				// instance before re-spawning, so no separate is_registered check.
 				syn_command_id := fmt.tprintf("wake_restart_%s_%d", instance_id, bridge_runtime_now_ms())
-				command_json := bridge_wake_launch_command_json(syn_command_id, instance_id, task_id, role, provider, model, agent_id, agent_name, chain_id, chain_title, coordinator_id, project_id, project_path, coordinator_display_name, lease_id, pack_json, permission_mode)
+				command_json := bridge_wake_launch_command_json(syn_command_id, instance_id, task_id, role, provider, model, agent_id, agent_name, chain_id, chain_title, coordinator_id, project_id, project_path, coordinator_display_name, lease_id, pack_json, permission_mode, run_count)
 				defer delete(command_json)
 				ok, detail, launch_err := bridge_runtime_launch_agent(syn_command_id, command_json, bridge_command_worker_deadline_ns(conn))
 				if ok {
@@ -2100,7 +2102,7 @@ bridge_hub_handle_wake_agent :: proc(conn: ^ws.Connection, text: string) {
 				// resolve it — a top-level-only id aborts the launch at validate. This
 				// mirrors the scheduler sched_wake synthetic launch.
 				syn_command_id := fmt.tprintf("wake_launch_%s_%d", instance_id, bridge_runtime_now_ms())
-				command_json := bridge_wake_launch_command_json(syn_command_id, instance_id, task_id, role, provider, model, agent_id, agent_name, chain_id, chain_title, coordinator_id, project_id, project_path, "", lease_id, pack_json, permission_mode)
+				command_json := bridge_wake_launch_command_json(syn_command_id, instance_id, task_id, role, provider, model, agent_id, agent_name, chain_id, chain_title, coordinator_id, project_id, project_path, "", lease_id, pack_json, permission_mode, run_count)
 				defer delete(command_json)
 				ok, detail, launch_err := bridge_runtime_launch_agent(syn_command_id, command_json, bridge_command_worker_deadline_ns(conn))
 				if ok {
@@ -2148,7 +2150,7 @@ bridge_wake_report_failed_status :: proc(conn: ^ws.Connection, instance_id: stri
 // the agent-keyed template bootstrap path rather than the header-only fallback
 // (REQ-37). Free-text fields (agent_name, chain_title) are JSON-escaped. Fields are
 // emitted unconditionally (empty is harmless) so the descriptor is deterministic.
-bridge_wake_launch_command_json :: proc(command_id, instance_id, task_id, role, provider, model, agent_id, agent_name, chain_id, chain_title, coordinator_id, project_id, project_path: string, coordinator_display_name: string = "", lease_id: string = "", pack_json: string = "", permission_mode: string = "") -> string {
+bridge_wake_launch_command_json :: proc(command_id, instance_id, task_id, role, provider, model, agent_id, agent_name, chain_id, chain_title, coordinator_id, project_id, project_path: string, coordinator_display_name: string = "", lease_id: string = "", pack_json: string = "", permission_mode: string = "", run_count := 0) -> string {
 	b := strings.builder_make()
 	write_field :: proc(b: ^strings.Builder, first: ^bool, key, val: string) {
 		if !first^ do strings.write_byte(b, ',')
@@ -2176,6 +2178,7 @@ bridge_wake_launch_command_json :: proc(command_id, instance_id, task_id, role, 
 	}
 	write_field(&b, &first, "project_id", project_id)
 	write_field(&b, &first, "project_path", project_path)
+	strings.write_string(&b, ",\"run_count\":"); strings.write_string(&b, fmt.tprintf("%d", run_count))
 	// Task System v2 lease delivery (empty on non-lease wakes).
 	if lease_id != "" {
 		write_field(&b, &first, "lease_id", lease_id)
@@ -2200,12 +2203,34 @@ bridge_runtime_launch_agent :: proc(command_id, command_json: string, deadline_n
 	if strings.trim_space(instance_id) == "" do return false, "missing agent_instance_id", bridge_error(.agent_launch_failed, .unsupported)
 	defer if !ok do bridge_runtime_record_failure(instance_id, err)
 	launch_epoch := extract_json_string(command_json, "launch_epoch", "")
+	run_count, _ := bridge_provider_json_extract_int(command_json, "run_count")
 	defer delete(launch_epoch)
 	instance_token := extract_json_string(command_json, "instance_token", "")
 	defer delete(instance_token)
 	if instance_token == "" {
 		instance_token = bridge_agent_instance_last_assertion(instance_id)
 		if instance_token == "" do instance_token = strings.concatenate({"hit_", instance_id})
+	}
+	// Task wakes carry a persisted generation even without a migration epoch.
+	// A duplicate wake must preserve an already-live child and its local token;
+	// delayed commands must never replace a newer launch or undo its stop.
+	if run_count > 0 && launch_epoch == "" {
+		current := bridge_agent_instance_run_count(instance_id)
+		if run_count < current do return false, "superseded startup generation", bridge_error(.agent_launch_failed, .denied)
+		if run_count == current {
+			assertion := bridge_agent_instance_assertion(instance_id)
+			defer delete(assertion)
+			if assertion == "" do return false, "startup generation was revoked", bridge_error(.agent_launch_failed, .denied)
+			sync.mutex_lock(&bridge_runtime_mutex)
+			stopped := bridge_runtime_stop_intent_active_locked(instance_id, bridge_runtime_now_ms())
+			sync.mutex_unlock(&bridge_runtime_mutex)
+			if stopped do return false, "startup generation was stopped", bridge_error(.agent_launch_failed, .denied)
+			socket, daemon_ok := bridge_pty_host_ensure_daemon()
+			if !daemon_ok do return false, "ham-pty-host daemon unavailable", bridge_error(.pty_host_unreachable)
+			confirmed, queried := bridge_startup_confirm_spawned(socket, instance_id, run_count)
+			if !queried do return false, "cannot confirm existing launch identity", bridge_error(.pty_host_unreachable)
+			if confirmed { bridge_task_wake_note_launched(instance_id); return true, "", {} }
+		}
 	}
 	if launch_epoch != "" {
 		socket, daemon_ok := bridge_pty_host_ensure_daemon()
@@ -2219,7 +2244,12 @@ bridge_runtime_launch_agent :: proc(command_id, command_json: string, deadline_n
 			assertion := bridge_agent_instance_assertion(instance_id)
 			defer delete(assertion)
 			if assertion == instance_token {
-				if alive { bridge_task_wake_note_launched(instance_id); return true, "", {} }
+				if alive {
+					confirmed, queried := bridge_startup_confirm_spawned(socket, instance_id, run_count)
+					if !queried do return false, "cannot confirm destination launch identity", bridge_error(.pty_host_unreachable)
+					if confirmed { bridge_task_wake_note_launched(instance_id); return true, "", {} }
+					return false, "destination has an unconfirmed launch identity", bridge_error(.agent_launch_failed, .denied)
+				}
 				if !bridge_pty_host_close(socket, instance_id) do return false, "cannot close exited destination runtime", bridge_error(.agent_launch_failed, .replaced)
 			} else {
 				// Recoverable: the launch may proceed once the other runtime is gone.
@@ -2246,7 +2276,8 @@ bridge_runtime_launch_agent :: proc(command_id, command_json: string, deadline_n
 	// cryptographically distinct from the old one.
 	invalidated := bridge_agent_token_invalidate_instance(instance_id)
 	if invalidated > 0 do fmt.println("bridge launch: invalidated prior local tokens for instance", instance_id, "count", invalidated)
-	agent_issue := bridge_agent_token_issue(instance_id, instance_token, .Agent)
+	agent_issue := bridge_agent_token_issue(instance_id, instance_token, .Agent, run_count)
+	bridge_startup_begin(agent_issue.plaintext_token)
 	provider, model := bridge_runtime_provider_model(command_json)
 	// Conditional, per-hash bootstrap (BRG-1..BRG-4): build the per-instance
 	// descriptor from the enriched launch payload, run one conditional manifest GET
@@ -2291,7 +2322,9 @@ bridge_runtime_launch_provider_test :: proc(command_id, command_json: string) ->
 	_ = bridge_agent_token_invalidate_instance(instance_id)
 	instance_token := strings.concatenate({"hit_", instance_id})
 	defer delete(instance_token)
-	agent_issue := bridge_agent_token_issue(instance_id, instance_token, .Agent)
+	run_count, _ := bridge_provider_json_extract_int(command_json, "run_count")
+	agent_issue := bridge_agent_token_issue(instance_id, instance_token, .Agent, run_count)
+	bridge_startup_begin(agent_issue.plaintext_token)
 	if !bridge_bootstrap_materialize_local_provider_test(run_dir, endpoint, agent_issue.plaintext_token, instance_id, provider) {
 		bridge_runtime_set_status(instance_id, "failed", "idle")
 		return false, "provider test bootstrap failed", bridge_error(.agent_bootstrap_invalid)
@@ -2344,6 +2377,8 @@ bridge_runtime_launch_agent_pty_host :: proc(command_id, instance_id, run_dir, e
 			return false, "failed to close existing instance before respawn", bridge_error(.agent_launch_failed, .replaced)
 		}
 	}
+	// Arm before Spawn: a hook may call the local endpoint before Spawn returns.
+	bridge_startup_arm(instance_id, agent_token, bridge_runtime_now_ms())
 	pid, ok = bridge_pty_host_spawn(socket, req)
 	if !ok {
 		bridge_runtime_set_status(instance_id, "failed", "idle")
@@ -2351,6 +2386,7 @@ bridge_runtime_launch_agent_pty_host :: proc(command_id, instance_id, run_dir, e
 		return false, "ham-pty-host spawn failed", bridge_error(.agent_launch_failed, .spawn)
 	}
 	bridge_runtime_set_pty_process_alive(instance_id, true)
+	bridge_startup_spawned(instance_id, agent_token, pid)
 	bridge_runtime_record_launch(Bridge_Runtime_Launch{agent_instance_id = strings.clone(instance_id), command_id = strings.clone(command_id), run_dir = strings.clone(run_dir), project_path = strings.clone(strings.trim_space(project_path)), pane_id = fmt.tprintf("pty-host:%d", pid), agent_token = strings.clone(agent_token), provider_sym = contracts.bridge_log_provider_sym(provider), launched_at_ns = time.tick_now()._nsec})
 	// BR-3: ensure the event-subscription worker is running so this instance's
 	// ChildExited/StartupReady/StartupBlocked/ScreenChanged events flow to the hub
@@ -2692,6 +2728,10 @@ bridge_runtime_note_activity_signal :: proc(instance_id, activity_status, activi
 // subsequent set_status calls and blocks resurrection by a late wrapper signal.
 bridge_runtime_mark_stop_intent :: proc(instance_id: string) {
 	if strings.trim_space(instance_id) == "" do return
+	// Serialize a stop against an already claimed PTY fallback. The runtime mutex
+	// is never held while waiting for the delivery to finish.
+	sync.mutex_lock(&bridge_startup_io_mutex)
+	defer sync.mutex_unlock(&bridge_startup_io_mutex)
 	now := bridge_runtime_now_ms()
 	sync.mutex_lock(&bridge_runtime_mutex)
 	defer sync.mutex_unlock(&bridge_runtime_mutex)
@@ -2735,6 +2775,10 @@ bridge_runtime_mark_start_success :: proc(instance_id: string) {
 	now := bridge_runtime_now_ms()
 	sync.mutex_lock(&bridge_runtime_mutex)
 	defer sync.mutex_unlock(&bridge_runtime_mutex)
+	if bridge_runtime_stop_intent_active_locked(instance_id, now) do return
+	if inst, ok := bridge_runtime_instance_snapshot_locked(instance_id); ok {
+		if inst.runtime_status == "stopped" || inst.runtime_status == "stopping" do return
+	}
 	bridge_runtime_set_status_locked(instance_id, "running", "idle", now, true)
 }
 
@@ -2743,6 +2787,8 @@ bridge_runtime_set_status_locked :: proc(instance_id, runtime_status, activity_s
 }
 
 bridge_runtime_set_status_with_source_locked :: proc(instance_id, runtime_status, activity_status, activity_source: string, now: i64, touch_seen: bool, force_activity: bool) {
+	// Registry snapshots outlive the RPC/test context that reported the status.
+	context.allocator = runtime.heap_allocator()
 	for i in 0..<len(bridge_runtime_instances) {
 		if bridge_runtime_instances[i].agent_instance_id == instance_id {
 			inst := &bridge_runtime_instances[i]
@@ -2860,6 +2906,8 @@ bridge_runtime_maybe_mark_start_prompt_locked :: proc(instance_id: string, now: 
 	for i in 0..<len(bridge_runtime_instances) {
 		if bridge_runtime_instances[i].agent_instance_id != instance_id do continue
 		inst := &bridge_runtime_instances[i]
+		// Managed PTY launches use the lifecycle-safe timer in startup_readiness.
+		if inst.startup.generation != 0 do return false
 		if inst.start_success_seen do return false
 		if !force {
 			started_at := inst.start_deadline_unix_ms - BRIDGE_START_SUCCESS_TIMEOUT_MS
