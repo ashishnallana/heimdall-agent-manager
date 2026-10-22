@@ -626,6 +626,17 @@ _shell_session_starter_from_auth :: proc(auth: contracts.Auth_Context) -> domain
 	return .User
 }
 
+// User-authenticated shell operations consume the shells capability. Agent run
+// and serve automation bypass billing, including entitlement lookup failures.
+shell_session_require_shells :: proc(source: domain.Entitlement_Lookup, auth: contracts.Auth_Context) -> domain.Domain_Error {
+	if auth.kind != .User_Token && auth.kind != .Trusted_Proxy do return {}
+	entitlements, err := domain.lookup_entitlements(source, auth.user_id)
+	if err.code != .None do return err
+	// Capabilities may come from overrides, so do not label every refusal Free.
+	if !entitlements.shells_enabled do return domain.plan_limit_error("shells_enabled", 0, 1, "Current")
+	return {}
+}
+
 // shell_session_create creates a hub row with status=starting, sends shell_start to
 // the bridge, and updates the row to running/failed based on the bridge reply.
 shell_session_create :: proc(svc: ^Shell_Session_Service, auth: contracts.Auth_Context, input: Shell_Session_Create_Input) -> (domain.Shell_Session, bool, domain.Domain_Error) {
@@ -669,6 +680,12 @@ shell_session_create :: proc(svc: ^Shell_Session_Service, auth: contracts.Auth_C
 	if !domain.shell_session_kind_may_start(kind_enum, starter) {
 		return {}, false, domain.domain_error(.Forbidden, fmt.tprintf(
 			"a %q session may only be started by %s", kind, domain.shell_session_starters_string(kind_enum)))
+	}
+
+	if kind_enum == .Shell || kind_enum == .Server {
+		if plan_err := shell_session_require_shells(svc.entitlements, auth); plan_err.code != .None {
+			return {}, false, plan_err
+		}
 	}
 
 	// An agent's run is scoped to the agent that started it, and the hub knows
@@ -1405,6 +1422,12 @@ shell_session_restart :: proc(svc: ^Shell_Session_Service, auth: contracts.Auth_
 	if !domain.shell_session_kind_may_start(kind_enum, _shell_session_starter_from_auth(auth)) {
 		return {}, false, domain.domain_error(.Forbidden, fmt.tprintf(
 			"a %q session may only be restarted by %s", session.kind, domain.shell_session_starters_string(kind_enum)))
+	}
+
+	if kind_enum == .Shell || kind_enum == .Server {
+		if plan_err := shell_session_require_shells(svc.entitlements, auth); plan_err.code != .None {
+			return {}, false, plan_err
+		}
 	}
 
 	// REQ-SHELL-4: a restart begins a NEW RUN, and the new run's number is sent to the

@@ -1416,3 +1416,138 @@ test_shell_session_create_client_chosen_session_id :: proc(t: ^testing.T) {
 	sync.mutex_unlock(&fx.sink.mu)
 	testing.expect(t, strings.contains(body, `"session_id":"` + ID + `"`), "the bridge is told the client's id verbatim")
 }
+
+// REQ-PLAN-4: the service is the gate for every create/restart transport.
+@(private = "file")
+plan_shell_lookup :: proc(ctx: rawptr, user_id: string) -> (domain.User_Entitlements, domain.Domain_Error) {
+	return (^domain.User_Entitlements)(ctx)^, {}
+}
+
+@(private = "file")
+plan_shell_failing_lookup :: proc(ctx: rawptr, user_id: string) -> (domain.User_Entitlements, domain.Domain_Error) {
+	return {}, domain.domain_error(.Internal_Error, "billing unavailable")
+}
+
+@(test)
+test_shell_plan_create_free_users_refused_without_side_effects :: proc(t: ^testing.T) {
+	for auth_kind in ([]contracts.Auth_Kind{.User_Token, .Trusted_Proxy}) {
+		for kind in ([]string{"", domain.Shell_Session_Kind_Shell, domain.Shell_Session_Kind_Server}) {
+			fx: Fixture
+			fixture_make(&fx)
+			defer fixture_free(&fx)
+			free: domain.User_Entitlements
+			fx.svc.entitlements = {ctx = &free, lookup = plan_shell_lookup}
+			_, ok, err := shell_session_create(&fx.svc,
+				{kind = auth_kind, user_id = "user_clock"},
+				{bridge_id = "brg_1", kind = kind, cmd = "serve", chain_id = "chain_1",
+				 agent_instance_id = "spoofed_agent"})
+			testing.expect(t, !ok)
+			testing.expect_value(t, err.code, domain.Error_Code.Plan_Limit_Reached)
+			testing.expect(t, strings.contains(err.details_json, `"limit":"shells_enabled"`))
+			testing.expect(t, strings.contains(err.details_json, `"upgrade_path":"/settings/account"`))
+			testing.expect_value(t, fx.f.writes, 0)
+			testing.expect_value(t, fx.sink.sends, 0)
+		}
+	}
+}
+
+@(test)
+test_shell_plan_create_paid_override_and_unconfigured_allowed :: proc(t: ^testing.T) {
+	for configured in ([]bool{false, true}) {
+		for kind in ([]string{domain.Shell_Session_Kind_Shell, domain.Shell_Session_Kind_Server}) {
+			fx: Fx24
+			fx24_make(&fx)
+			defer fx24_free(&fx)
+			fx.repo.find_live_by_port = r16_find_live_by_port
+			fx.repo.count_live = r16_count_live
+			// The capability alone suffices, including an override on Free.
+			paid := domain.User_Entitlements{shells_enabled = true}
+			if configured do fx.svc.entitlements = {ctx = &paid, lookup = plan_shell_lookup}
+			_, ok, err := shell_session_create(&fx.svc, user24(),
+				{bridge_id = "brg_1", kind = kind, cmd = "serve",
+				 chain_id = "chain_1" if kind == domain.Shell_Session_Kind_Server else ""})
+			testing.expect(t, ok)
+			testing.expect_value(t, err.code, domain.Error_Code.None)
+			testing.expect_value(t, len(fx.sink.bodies), 1)
+		}
+	}
+}
+
+@(test)
+test_shell_plan_agent_create_run_and_serve_bypass_lookup :: proc(t: ^testing.T) {
+	for kind in ([]string{domain.Shell_Session_Kind_Run, domain.Shell_Session_Kind_Server}) {
+		fx: Fx24
+		fx24_make(&fx)
+		defer fx24_free(&fx)
+		fx.repo.find_live_by_port = r16_find_live_by_port
+		fx.repo.count_live = r16_count_live
+		fx.svc.entitlements = {lookup = plan_shell_failing_lookup}
+		_, ok, err := shell_session_create(&fx.svc, agent24(),
+			{bridge_id = "brg_1", kind = kind, cmd = "serve",
+			 chain_id = "chain_1" if kind == domain.Shell_Session_Kind_Server else ""})
+		testing.expect(t, ok)
+		testing.expect_value(t, err.code, domain.Error_Code.None)
+		testing.expect_value(t, len(fx.sink.bodies), 1)
+	}
+}
+
+@(test)
+test_shell_plan_restart_downgrade_refuses_without_mutating_live_session :: proc(t: ^testing.T) {
+	for auth_kind in ([]contracts.Auth_Kind{.User_Token, .Trusted_Proxy}) {
+		for kind in ([]string{domain.Shell_Session_Kind_Shell, domain.Shell_Session_Kind_Server}) {
+			fx: Fx24
+			fx24_make(&fx)
+			defer fx24_free(&fx)
+			fx24_seed(&fx, kind)
+			free: domain.User_Entitlements
+			fx.svc.entitlements = {ctx = &free, lookup = plan_shell_lookup}
+			auth := contracts.Auth_Context{kind = auth_kind, user_id = "owner_a", agent_instance_id = "spoofed"}
+			_, ok, err := shell_session_restart(&fx.svc, auth, "sh_1")
+			testing.expect(t, !ok)
+			testing.expect_value(t, err.code, domain.Error_Code.Plan_Limit_Reached)
+			testing.expect_value(t, fx.r.writes, 0)
+			testing.expect_value(t, fx.r.stored.run_seq, 0)
+			testing.expect_value(t, fx.r.stored.status, domain.Shell_Session_Status_Running)
+			testing.expect_value(t, len(fx.sink.bodies), 0)
+
+			// The same running session is restartable after an upgrade/override.
+			free.shells_enabled = true
+			_, ok, err = shell_session_restart(&fx.svc, auth, "sh_1")
+			testing.expect(t, ok)
+			testing.expect_value(t, err.code, domain.Error_Code.None)
+			testing.expect_value(t, fx.r.last.run_seq, 1)
+		}
+	}
+}
+
+@(test)
+test_shell_plan_agent_restart_run_and_serve_bypass_lookup :: proc(t: ^testing.T) {
+	for kind in ([]string{domain.Shell_Session_Kind_Run, domain.Shell_Session_Kind_Server}) {
+		fx: Fx24
+		fx24_make(&fx)
+		defer fx24_free(&fx)
+		fx24_seed(&fx, kind)
+		fx.svc.entitlements = {lookup = plan_shell_failing_lookup}
+		_, ok, err := shell_session_restart(&fx.svc, agent24(), "sh_1")
+		testing.expect(t, ok)
+		testing.expect_value(t, err.code, domain.Error_Code.None)
+		testing.expect_value(t, len(fx.sink.bodies), 1)
+	}
+}
+
+@(test)
+test_shell_plan_lookup_failure_fails_closed_for_users :: proc(t: ^testing.T) {
+	fx: Fx24
+	fx24_make(&fx)
+	defer fx24_free(&fx)
+	fx24_seed(&fx, domain.Shell_Session_Kind_Shell)
+	fx.svc.entitlements = {lookup = plan_shell_failing_lookup}
+	_, created, create_err := shell_session_create(&fx.svc, user24(),
+		{bridge_id = "brg_1", kind = domain.Shell_Session_Kind_Shell})
+	_, restarted, restart_err := shell_session_restart(&fx.svc, user24(), "sh_1")
+	testing.expect(t, !created && !restarted)
+	testing.expect_value(t, create_err.code, domain.Error_Code.Internal_Error)
+	testing.expect_value(t, restart_err.code, domain.Error_Code.Internal_Error)
+	testing.expect_value(t, fx.r.writes, 0)
+	testing.expect_value(t, len(fx.sink.bodies), 0)
+}
