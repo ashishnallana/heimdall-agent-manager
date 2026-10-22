@@ -96,7 +96,7 @@ ctl_decrypt_json_value :: proc(v: ^json.Value, kr: ^vault.Vault_Keyring, key_con
 		defer delete(updates)
 		for k, sub_v in val {
 			switch k {
-			case "title", "description", "description_preview", "body", "evidence", "last_comment_preview", "last_message_preview", "name", "content":
+			case "title", "description", "description_preview", "body", "evidence", "last_comment_preview", "last_message_preview", "name", "content", "text", "label", "custom_text":
 				if s, is_str := sub_v.(json.String); is_str {
 					str_val := string(s)
 					if vault.is_armored(str_val) {

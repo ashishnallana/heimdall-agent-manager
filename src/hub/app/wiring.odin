@@ -669,6 +669,7 @@ register_routes :: proc(graph: ^App_Graph) {
 	http.router_add(&graph.router, "PATCH", "/api/v1/chats/*", rawptr(&graph.content_handlers), http.patch_chat_handler)
 	http.router_add(&graph.router, "GET", "/api/v1/chats/*/messages", rawptr(&graph.content_handlers), http.list_chat_messages_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/chats/*/messages", rawptr(&graph.content_handlers), http.send_chat_message_handler)
+	http.router_add(&graph.router, "POST", "/api/v1/chats/*/messages/*/answers", rawptr(&graph.content_handlers), http.answer_chat_questions_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/chats/*/pane-capture", rawptr(&graph.content_handlers), http.pane_capture_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/chats/*/read", rawptr(&graph.content_handlers), http.read_chat_handler)
 	http.router_add(&graph.router, "GET", "/api/v1/artifacts", rawptr(&graph.content_handlers), http.list_artifacts_handler)

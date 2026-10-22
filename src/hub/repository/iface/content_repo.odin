@@ -29,6 +29,9 @@ Content_Delete_Template_Proc :: proc(ctx: rawptr, template_id: string, owner_use
 
 Content_Repository :: struct {
 	ctx: rawptr,
+	// Atomically insert one answer only while source is the last visible row.
+	// A duplicate returns the original row with inserted=false, before freshness.
+	answer_question: proc(ctx: rawptr, source: domain.Chat_Message, answer: domain.Chat_Message) -> (saved: domain.Chat_Message, inserted: bool, err: domain.Domain_Error),
 	save_memory: Content_Save_Memory_Proc,
 	get_memory: Content_Get_Memory_Proc,
 	list_memories: Content_List_Memories_Proc,
@@ -51,6 +54,11 @@ Content_Repository :: struct {
 	list_templates: Content_List_Templates_Proc,
 	delete_template: Content_Delete_Template_Proc,
 	list_unread_incoming_ids: Content_List_Unread_Incoming_IDs_Proc,
+}
+
+content_answer_question :: proc(r: ^Content_Repository, source, answer: domain.Chat_Message) -> (domain.Chat_Message, bool, domain.Domain_Error) {
+	if r == nil || r.answer_question == nil do return {}, false, domain.domain_error(.Internal_Error, "answer repository is not configured")
+	return r.answer_question(r.ctx, source, answer)
 }
 
 content_save_memory :: proc(r: ^Content_Repository, m: domain.Memory) -> (domain.Memory, bool, domain.Domain_Error) { if r == nil || r.save_memory == nil do return {}, false, domain.domain_error(.Internal_Error, "content repository is not configured"); return r.save_memory(r.ctx, m) }

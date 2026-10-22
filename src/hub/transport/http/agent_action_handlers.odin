@@ -222,7 +222,7 @@ agent_action_chat_send_to_user_handler :: proc(ctx: rawptr, req: Request) -> Res
 	} else if meta_str := json_string(params, "metadata_json"); meta_str != "" {
 		metadata_json = meta_str
 	}
-	msg, saved, err := content_service.send_agent_message(h.content, auth, inst.agent_instance_id, content_service.Message_Input{body = json_string(params, "body"), artifact_ids_json = json_array_optional(params, "artifact_ids"), metadata_json = metadata_json})
+	msg, saved, err := content_service.send_agent_message(h.content, auth, inst.agent_instance_id, content_service.Message_Input{body = json_string(params, "body"), artifact_ids_json = json_array_optional(params, "artifact_ids"), message_type = json_string(params, "message_type"), metadata_json = metadata_json})
 	if !saved do return respond_error(err, req.request_id)
 	// Notify the human's UI so it can toast + raise an OS notification. This is a
 	// metadata event with a SHORT body preview (<=140 chars) — the full body is
@@ -325,7 +325,7 @@ agent_action_chat_send_to_agent_handler :: proc(ctx: rawptr, req: Request) -> Re
 	} else if meta_str := json_string(params, "metadata_json"); meta_str != "" {
 		metadata_json = meta_str
 	}
-	msg, saved, err := content_service.send_agent_to_agent(h.content, auth, target, content_service.Message_Input{body = json_string(params, "body"), artifact_ids_json = json_array_optional(params, "artifact_ids"), metadata_json = metadata_json})
+	msg, saved, err := content_service.send_agent_to_agent(h.content, auth, target, content_service.Message_Input{body = json_string(params, "body"), artifact_ids_json = json_array_optional(params, "artifact_ids"), message_type = json_string(params, "message_type"), metadata_json = metadata_json})
 	if !saved do return respond_error(err, req.request_id)
 	// E3: the row lands in the TARGET's conversation and moves its preview and
 	// last_message_at; id-only hint from the re-read row (no body, no toast).
