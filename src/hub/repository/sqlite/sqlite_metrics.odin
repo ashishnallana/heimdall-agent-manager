@@ -5,6 +5,7 @@ import "core:c"
 import "core:strings"
 import "core:sync"
 import "core:time"
+import dbt "odin_test:hub/platform/dbtelemetry"
 import metrics "odin_test:lib/metrics"
 
 // SQLite storage metrics (hub telemetry plan 3.8).
@@ -64,23 +65,40 @@ sqlite_metrics_init :: proc(reg: ^metrics.Registry) {
 		collector_registered = true
 		metrics.registry_add_collector(reg, nil, sqlite_size_collect)
 	}
+	sqlite_telemetry_init(reg)
 }
 
 // ---------------------------------------------------------------------------
 // FFI wrappers. Same signature as the raw symbols so call sites are unchanged.
 
-sqlite3_step :: proc(pStmt: sqlite3_stmt) -> c.int {
+// With HEIMDALL_DB_TELEMETRY=basic they route to db_telemetry.odin, which keeps
+// the legacy families' meaning and adds the conn-wait / exec split. `loc` is the
+// caller (site label and slow-record file:line); call sites never pass it.
+
+sqlite3_step :: proc(pStmt: sqlite3_stmt, loc := #caller_location) -> c.int {
+	if dbt.enabled() do return telemetry_step(pStmt, loc)
 	start := time.tick_now()
 	rc := sqlite3_step_raw(pStmt)
 	sqlite_metrics_record(sqlite3_sql(pStmt), rc, time.tick_since(start))
 	return rc
 }
 
-sqlite3_exec :: proc(db: sqlite3, sql: cstring, callback: rawptr, arg: rawptr, errmsg: [^]cstring) -> c.int {
+sqlite3_exec :: proc(db: sqlite3, sql: cstring, callback: rawptr, arg: rawptr, errmsg: [^]cstring, loc := #caller_location) -> c.int {
+	if dbt.enabled() do return telemetry_exec(db, sql, callback, arg, errmsg, loc)
 	start := time.tick_now()
 	rc := sqlite3_exec_raw(db, sql, callback, arg, errmsg)
 	sqlite_metrics_record(sql, rc, time.tick_since(start))
 	return rc
+}
+
+sqlite3_prepare_v2 :: proc(db: sqlite3, zSql: cstring, nByte: c.int, ppStmt: [^]sqlite3_stmt, pzTail: [^]cstring, loc := #caller_location) -> c.int {
+	if dbt.enabled() do return telemetry_prepare(db, zSql, nByte, ppStmt, pzTail, loc)
+	return sqlite3_prepare_v2_raw(db, zSql, nByte, ppStmt, pzTail)
+}
+
+sqlite3_finalize :: proc(pStmt: sqlite3_stmt, loc := #caller_location) -> c.int {
+	if pStmt != nil && dbt.enabled() do return telemetry_finalize(pStmt, loc)
+	return sqlite3_finalize_raw(pStmt)
 }
 
 // sqlite_metrics_record never touches context.allocator: the metrics package

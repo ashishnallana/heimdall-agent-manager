@@ -5,6 +5,7 @@ import "core:fmt"
 import "core:os"
 import "core:strings"
 import domain "odin_test:hub/domain"
+import dbt "odin_test:hub/platform/dbtelemetry"
 
 // SQLite FFI lives only in hub/repository/sqlite. Higher layers receive Conn through
 // repository interfaces and never import this package except from the app composition root.
@@ -29,12 +30,14 @@ SQLITE_TRANSIENT :: rawptr(~uintptr(0))
 foreign sqlite3_lib {
 	sqlite3_open :: proc(filename: cstring, ppDb: [^]sqlite3) -> c.int ---
 	sqlite3_close :: proc(db: sqlite3) -> c.int ---
-	sqlite3_prepare_v2 :: proc(db: sqlite3, zSql: cstring, nByte: c.int, ppStmt: [^]sqlite3_stmt, pzTail: [^]cstring) -> c.int ---
-	sqlite3_finalize :: proc(pStmt: sqlite3_stmt) -> c.int ---
-	// step/exec are the two choke points every query in this package passes
-	// through, so they are bound under *_raw names and wrapped below with the
-	// timing + busy accounting (sqlite_metrics.odin). Callers keep using the
-	// plain names, which resolve to the wrappers.
+	// step/exec/prepare_v2/finalize are the choke points every query in this
+	// package passes through, so they are bound under *_raw names and wrapped
+	// with the timing + busy accounting (sqlite_metrics.odin, db_telemetry.odin).
+	// Callers keep using the plain names, which resolve to the wrappers.
+	@(link_name="sqlite3_prepare_v2")
+	sqlite3_prepare_v2_raw :: proc(db: sqlite3, zSql: cstring, nByte: c.int, ppStmt: [^]sqlite3_stmt, pzTail: [^]cstring) -> c.int ---
+	@(link_name="sqlite3_finalize")
+	sqlite3_finalize_raw :: proc(pStmt: sqlite3_stmt) -> c.int ---
 	@(link_name="sqlite3_step")
 	sqlite3_step_raw :: proc(pStmt: sqlite3_stmt) -> c.int ---
 	sqlite3_reset :: proc(pStmt: sqlite3_stmt) -> c.int ---
@@ -57,6 +60,14 @@ foreign sqlite3_lib {
 	sqlite3_db_mutex :: proc(db: sqlite3) -> rawptr ---
 	sqlite3_mutex_enter :: proc(mutex: rawptr) ---
 	sqlite3_mutex_leave :: proc(mutex: rawptr) ---
+	// Telemetry-only (db_telemetry.odin).
+	sqlite3_mutex_try :: proc(mutex: rawptr) -> c.int ---
+	sqlite3_db_handle :: proc(pStmt: sqlite3_stmt) -> sqlite3 ---
+	sqlite3_stmt_busy :: proc(pStmt: sqlite3_stmt) -> c.int ---
+	sqlite3_stmt_status :: proc(pStmt: sqlite3_stmt, op: c.int, resetFlg: c.int) -> c.int ---
+	sqlite3_extended_errcode :: proc(db: sqlite3) -> c.int ---
+	sqlite3_libversion :: proc() -> cstring ---
+	sqlite3_db_status :: proc(db: sqlite3, op: c.int, pCur: ^c.int, pHiwtr: ^c.int, resetFlg: c.int) -> c.int ---
 	sqlite3_free :: proc(p: rawptr) ---
 }
 
@@ -65,7 +76,9 @@ Conn :: struct {
 	path: string,
 }
 
-open :: proc(path: string) -> (Conn, bool, domain.Domain_Error) {
+// open opens a handle and, with DB telemetry on, tags it with `kind` for the
+// `conn` label. Production call sites pass their kind; tests keep .Other.
+open :: proc(path: string, kind := Conn_Kind.Other) -> (Conn, bool, domain.Domain_Error) {
 	if path == "" do return Conn{}, false, domain.domain_error(.Validation_Failed, "database path is required")
 	parent := path_dir(path)
 	if parent != "" do os.make_directory(parent)
@@ -74,6 +87,7 @@ open :: proc(path: string) -> (Conn, bool, domain.Domain_Error) {
 	// cstring — SQLite would read past the end of the allocation. Same idiom as exec().
 	c_path := strings.clone_to_cstring(path, context.temp_allocator)
 	rc := sqlite3_open(c_path, &conn.db)
+	if rc == SQLITE_OK do conn_register(conn.db, kind)
 	if rc != SQLITE_OK {
 		close(&conn)
 		return Conn{}, false, domain.domain_error(.Internal_Error, fmt.tprintf("sqlite open failed: %d", rc))
@@ -88,7 +102,11 @@ open :: proc(path: string) -> (Conn, bool, domain.Domain_Error) {
 
 close :: proc(conn: ^Conn) {
 	if conn == nil do return
-	if conn.db != nil do sqlite3_close(conn.db)
+	if conn.db != nil {
+		// Unregister BEFORE close so a reused pointer value never keeps the old kind.
+		conn_unregister(conn.db)
+		sqlite3_close(conn.db)
+	}
 	conn.db = nil
 	if conn.path != "" {
 		sqlite_metrics_untrack_path(conn.path)
@@ -96,11 +114,11 @@ close :: proc(conn: ^Conn) {
 	}
 }
 
-exec :: proc(conn: ^Conn, query: string) -> bool {
+exec :: proc(conn: ^Conn, query: string, loc := #caller_location) -> bool {
 	if conn == nil || conn.db == nil do return false
 	errmsg: cstring = nil
 	c_query := strings.clone_to_cstring(query, context.temp_allocator)
-	rc := sqlite3_exec(conn.db, c_query, nil, nil, &errmsg)
+	rc := sqlite3_exec(conn.db, c_query, nil, nil, &errmsg, loc)
 	if rc != SQLITE_OK {
 		if errmsg != nil {
 			fmt.eprintln("SQLITE EXEC ERROR:", string(errmsg), "FOR QUERY:\n", query)
@@ -120,11 +138,27 @@ exec :: proc(conn: ^Conn, query: string) -> bool {
 // already spent this token" and revoked the bridge's whole token family. Holding the
 // connection's own (recursive) mutex across both calls makes the pair atomic; in
 // single-/multi-thread builds sqlite3_db_mutex is NULL and enter/leave are no-ops.
-step_changes :: proc(db: sqlite3, stmt: sqlite3_stmt) -> (rc: c.int, changes: int) {
+//
+// With DB telemetry on, this acquisition is the timed one (conn_enter); the inner
+// step sees the mutex already held by this thread and records no second wait.
+// `loc` is forwarded so the step is charged to the caller's site, not this helper.
+step_changes :: proc(db: sqlite3, stmt: sqlite3_stmt, loc := #caller_location) -> (rc: c.int, changes: int) {
+	if dbt.enabled() {
+		ce := conn_enter(db)
+		defer conn_leave(ce)
+		// Unregistered handles get no mutex from conn_enter; keep the pair atomic.
+		mutex: rawptr = nil
+		if !ce.entered && ce.slot < 0 do mutex = sqlite3_db_mutex(db)
+		sqlite3_mutex_enter(mutex)
+		defer sqlite3_mutex_leave(mutex)
+		rc = sqlite3_step(stmt, loc)
+		changes = int(sqlite3_changes(db))
+		return
+	}
 	mutex := sqlite3_db_mutex(db)
 	sqlite3_mutex_enter(mutex)
 	defer sqlite3_mutex_leave(mutex)
-	rc = sqlite3_step(stmt)
+	rc = sqlite3_step(stmt, loc)
 	changes = int(sqlite3_changes(db))
 	return
 }

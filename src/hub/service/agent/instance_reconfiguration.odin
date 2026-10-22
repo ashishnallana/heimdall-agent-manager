@@ -4,6 +4,7 @@ import "core:encoding/json"
 import "core:strings"
 import "core:sync"
 import contracts "odin_test:contracts"
+import dbt "odin_test:hub/platform/dbtelemetry"
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
 import platform "odin_test:hub/platform"
@@ -116,8 +117,8 @@ begin_instance_reconfiguration :: proc(service: ^Agent_Service, auth: contracts.
 	if !admitted do return {}, false, quota_err
 	// Path preflight above can wait for a WS reply. Only acquire this lock after
 	// preflight completes; the reader must remain free to deliver that reply.
-	sync.lock(&service.reconfiguration_mutex)
-	defer sync.unlock(&service.reconfiguration_mutex)
+	lock_tok := dbt.timed_lock(&service.reconfiguration_mutex, .Reconfig)
+	defer dbt.timed_unlock(&service.reconfiguration_mutex, .Reconfig, lock_tok)
 	defer project_service.bridge_runtime_instance_cancel_reservation(service.bridge_runtime_registry, next.bridge_id, generation, next.agent_instance_id)
 	if existing, exists, _ := iface.instance_reconfiguration_get(service.agents, string(inst.owner_user_id), instance_id, input.idempotency_key); exists {
 		if existing.destination.bridge_id != input.bridge_id || existing.destination.project_id != input.project_id || existing.destination.provider != input.provider || existing.destination.model != input.model {
@@ -206,8 +207,8 @@ reconfiguration_launch_destination :: proc(service: ^Agent_Service, op: domain.I
 // Called after transport has stored command results. Never waits or joins on the
 // WS reader; it only persists progress and sends the next command.
 apply_reconfiguration_command_result :: proc(service: ^Agent_Service, bridge_id, command_id, result: string) {
-	sync.lock(&service.reconfiguration_mutex)
-	defer sync.unlock(&service.reconfiguration_mutex)
+	lock_tok := dbt.timed_lock(&service.reconfiguration_mutex, .Reconfig)
+	defer dbt.timed_unlock(&service.reconfiguration_mutex, .Reconfig, lock_tok)
 	ops, err := iface.instance_reconfiguration_list(service.agents, "", "", true)
 	if err.code != .None do return
 	defer { for &op in ops do domain.instance_reconfiguration_destroy(&op); delete(ops) }
@@ -276,8 +277,8 @@ reconcile_active_reconfigurations :: proc(service: ^Agent_Service) -> int {
 
 reconcile_instance_reconfigurations :: proc(service: ^Agent_Service, bridge_id: string, resend := true) {
 	if service == nil || service.agents == nil do return
-	sync.lock(&service.reconfiguration_mutex)
-	defer sync.unlock(&service.reconfiguration_mutex)
+	lock_tok := dbt.timed_lock(&service.reconfiguration_mutex, .Reconfig)
+	defer dbt.timed_unlock(&service.reconfiguration_mutex, .Reconfig, lock_tok)
 	ops, err := iface.instance_reconfiguration_list(service.agents, "", "", true)
 	if err.code != .None do return
 	defer { for &op in ops do domain.instance_reconfiguration_destroy(&op); delete(ops) }
@@ -339,8 +340,8 @@ reconfiguration_json :: proc(op: domain.Instance_Reconfiguration) -> string {
 }
 
 retry_instance_reconfiguration :: proc(service: ^Agent_Service, auth: contracts.Auth_Context, instance_id, key: string, expected_revision: int) -> (domain.Instance_Reconfiguration, bool, domain.Domain_Error) {
-	sync.lock(&service.reconfiguration_mutex)
-	defer sync.unlock(&service.reconfiguration_mutex)
+	lock_tok := dbt.timed_lock(&service.reconfiguration_mutex, .Reconfig)
+	defer dbt.timed_unlock(&service.reconfiguration_mutex, .Reconfig, lock_tok)
 	inst, found, err := get_instance(service, auth, instance_id)
 	if !found do return {}, false, err
 	defer domain.agent_instance_destroy(&inst)

@@ -2,6 +2,7 @@ package user
 
 import "core:strings"
 import "core:sync"
+import dbt "odin_test:hub/platform/dbtelemetry"
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
 import platform "odin_test:hub/platform"
@@ -140,9 +141,9 @@ ensure_canonical_resources :: proc(service: ^User_Service, owner: domain.User_ID
 	}
 	// Persist seeded identities as pinned independently of their editable names.
 	if service.users != nil && service.users.launch_preferences_get != nil {
-		sync.lock(&service.launch_preferences_mutex)
+		lock_tok := dbt.timed_lock(&service.launch_preferences_mutex, .Launch_Prefs)
 		if prefs, err := launch_preferences_read(service, string(owner)); err.code == .None { _, _ = launch_preferences_write(service, string(owner), prefs) }
-		sync.unlock(&service.launch_preferences_mutex)
+		dbt.timed_unlock(&service.launch_preferences_mutex, .Launch_Prefs, lock_tok)
 	}
 
 }

@@ -19,6 +19,7 @@ package bridge_log
 import "core:sync"
 import "core:thread"
 import "core:time"
+import dbt "odin_test:hub/platform/dbtelemetry"
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
 import project_service "odin_test:hub/service/project"
@@ -209,7 +210,9 @@ writer_entry :: proc(data: rawptr) {
 		stopping := svc.stop_requested
 		sync.unlock(&svc.mu)
 		if stopping do return
+		dbt.scope_begin(.Bridge_Log)
 		_ = flush_once(svc)
+		dbt.scope_end_background()
 		free_all(context.temp_allocator)
 	}
 }

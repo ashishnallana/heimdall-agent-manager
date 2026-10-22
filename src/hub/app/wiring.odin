@@ -4,6 +4,7 @@ import "core:fmt"
 import "core:strings"
 import "core:sync"
 import "core:time"
+import dbt "odin_test:hub/platform/dbtelemetry"
 import iface "odin_test:hub/repository/iface"
 import sqlite "odin_test:hub/repository/sqlite"
 import auth_service "odin_test:hub/service/auth"
@@ -227,10 +228,13 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 	graph.ids = platform.real_id_generator()
 	// In-process metrics registry + HTTP/process families. Always on (cheap
 	// atomics); only the /metrics listener is gated by config.metrics_addr.
+	// DB telemetry mode must be fixed before any family is registered or any
+	// handle is opened; an unsupported mode fails boot instead of guessing.
+	if ok, message := configure_db_telemetry(config); !ok do return false, message
 	init_metrics()
 	project_service.fleet_metrics_set_registry(&graph.bridge_runtime_registry)
 
-	db, db_ok, db_err := sqlite.open(config.database_path)
+	db, db_ok, db_err := sqlite.open(config.database_path, .Main)
 	if !db_ok do return false, db_err.message
 	graph.db = db
 	// Billing uses its own transactional connection; tolerate brief writer contention.
@@ -1039,4 +1043,15 @@ device_bridge_minter :: proc(graph_ptr: rawptr, req: device_auth_service.Bridge_
 // debounced attention_changed event (one hint per owner per 500ms).
 attention_card_changed :: proc(ctx: rawptr, owner_user_id: string, kind: string) {
 	events.attention_debouncer_note((^events.Attention_Debouncer)(ctx), owner_user_id, kind)
+}
+
+// configure_db_telemetry applies Hub_Config's DB telemetry settings
+// (HEIMDALL_DB_TELEMETRY / _SLOW_MS / _SAMPLE_N). Default: off.
+configure_db_telemetry :: proc(config: Hub_Config) -> (bool, string) {
+	mode, ok, message := dbt.parse_mode(config.db_telemetry)
+	if !ok do return false, message
+	dbt.set_mode(mode)
+	if config.db_slow_ms >= 0 do dbt.slow_config.slow_ms = i64(config.db_slow_ms)
+	if config.db_sample_n >= 0 do dbt.slow_config.sample_n = i64(config.db_sample_n)
+	return true, ""
 }

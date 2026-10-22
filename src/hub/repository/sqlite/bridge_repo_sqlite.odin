@@ -28,7 +28,7 @@ Bridge_Enroll_Commit_Conn :: struct {
 
 // open_bridge_enroll_commit_conn opens the dedicated connection on the hub database.
 open_bridge_enroll_commit_conn :: proc(c: ^Bridge_Enroll_Commit_Conn, path: string) -> (bool, domain.Domain_Error) {
-	conn, ok, err := open(path)
+	conn, ok, err := open(path, .Enroll)
 	if !ok do return false, err
 	c.conn = conn
 	if !exec(&c.conn, "PRAGMA busy_timeout = 5000;") {

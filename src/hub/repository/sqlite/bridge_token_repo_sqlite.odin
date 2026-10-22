@@ -13,6 +13,7 @@ package sqlite
 import "core:strconv"
 import "core:sync"
 import domain "odin_test:hub/domain"
+import dbt "odin_test:hub/platform/dbtelemetry"
 import iface "odin_test:hub/repository/iface"
 
 BRIDGE_TOKEN_COLUMNS :: "token_id, bridge_id, kind, token_hash, family_id, generation, scope, issued_at, expires_at, family_expires_at, rotated_at, revoked_at"
@@ -175,8 +176,8 @@ bridge_commit_enrollment_sqlite :: proc(ctx: rawptr, bridge_id, family_id, from_
 		return .Not_Pending, false, domain.domain_error(.Validation_Failed, "bridge_id, family_id, scopes and now are required")
 	}
 	if impl.commit != nil {
-		sync.mutex_lock(&impl.commit.mutex)
-		defer sync.mutex_unlock(&impl.commit.mutex)
+		lock_tok := dbt.timed_lock(&impl.commit.mutex, .Enroll)
+		defer dbt.timed_unlock(&impl.commit.mutex, .Enroll, lock_tok)
 		return bridge_commit_enrollment_on(&impl.commit.conn, bridge_id, family_id, from_scope, to_scope, attach, now)
 	}
 	// No dedicated connection: only an in-memory database, which a second connection

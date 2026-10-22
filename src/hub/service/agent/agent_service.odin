@@ -8,6 +8,7 @@ import "core:sync"
 import "core:crypto/hash"
 import "core:encoding/hex"
 import contracts "odin_test:contracts"
+import dbt "odin_test:hub/platform/dbtelemetry"
 import bootcache "odin_test:hub/bootcache"
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
@@ -770,8 +771,8 @@ write_bootstrap_messages :: proc(b: ^strings.Builder, service: ^Agent_Service, i
 }
 
 stop_instance :: proc(service: ^Agent_Service, auth: contracts.Auth_Context, instance_id: string, input: Stop_Instance_Input) -> (domain.Agent_Instance, bool, domain.Domain_Error) {
-	sync.lock(&service.reconfiguration_mutex)
-	defer sync.unlock(&service.reconfiguration_mutex)
+	lock_tok := dbt.timed_lock(&service.reconfiguration_mutex, .Reconfig)
+	defer dbt.timed_unlock(&service.reconfiguration_mutex, .Reconfig, lock_tok)
 	if input.force {
 		if inst, handled, err := force_stop_instance_reconfiguration_locked(service, auth, instance_id); handled do return inst, err.code == .None, err
 	}
@@ -1018,8 +1019,8 @@ agent_service_send_pty_resize :: proc(service: ^Agent_Service, auth: contracts.A
 send_pty_resize :: agent_service_send_pty_resize
 
 reconfigure_instance :: proc(service: ^Agent_Service, auth: contracts.Auth_Context, instance_id: string, input: Reconfigure_Instance_Input) -> (domain.Agent_Instance, bool, domain.Domain_Error) {
-	sync.lock(&service.reconfiguration_mutex)
-	defer sync.unlock(&service.reconfiguration_mutex)
+	lock_tok := dbt.timed_lock(&service.reconfiguration_mutex, .Reconfig)
+	defer dbt.timed_unlock(&service.reconfiguration_mutex, .Reconfig, lock_tok)
 	if idle, err := reconfiguration_require_idle(service, instance_id); !idle do return {}, false, err
 	inst, ok, err := get_instance(service, auth, instance_id)
 	if !ok do return domain.Agent_Instance{}, false, err
@@ -1037,8 +1038,8 @@ reconfigure_instance :: proc(service: ^Agent_Service, auth: contracts.Auth_Conte
 }
 
 relaunch_instance :: proc(service: ^Agent_Service, auth: contracts.Auth_Context, inst: domain.Agent_Instance, provider, model: string) -> (domain.Agent_Instance, bool, domain.Domain_Error) {
-	sync.lock(&service.reconfiguration_mutex)
-	defer sync.unlock(&service.reconfiguration_mutex)
+	lock_tok := dbt.timed_lock(&service.reconfiguration_mutex, .Reconfig)
+	defer dbt.timed_unlock(&service.reconfiguration_mutex, .Reconfig, lock_tok)
 	return relaunch_instance_locked(service, auth, inst, provider, model)
 }
 

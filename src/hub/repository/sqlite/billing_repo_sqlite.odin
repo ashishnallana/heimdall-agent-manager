@@ -4,6 +4,7 @@ import "core:c"
 import "core:fmt"
 import "core:sync"
 import domain "odin_test:hub/domain"
+import dbt "odin_test:hub/platform/dbtelemetry"
 import iface "odin_test:hub/repository/iface"
 
 // A dedicated connection and mutex keep billing transactions isolated from
@@ -40,7 +41,7 @@ billing_scalar :: proc(impl: ^Billing_Repo_SQLite, query: string, args: []string
 }
 
 new_billing_repository :: proc(impl: ^Billing_Repo_SQLite, path, environment, hobbyist_price: string, configured: bool) -> (iface.Billing_Repository, domain.Domain_Error) {
-	conn, ok, err := open(path)
+	conn, ok, err := open(path, .Billing)
 	if !ok do return {}, err
 	impl.conn = conn
 	_ = exec(&impl.conn, "PRAGMA busy_timeout = 5000;")
@@ -86,7 +87,7 @@ billing_ensure_account :: proc(impl: ^Billing_Repo_SQLite, user_id, now: string)
 
 billing_get_account :: proc(ctx: rawptr, user_id, now: string) -> (domain.Account_Billing, domain.Domain_Error) {
 	impl := (^Billing_Repo_SQLite)(ctx)
-	sync.mutex_lock(&impl.mutex); defer sync.mutex_unlock(&impl.mutex)
+	lock_tok := dbt.timed_lock(&impl.mutex, .Billing); defer dbt.timed_unlock(&impl.mutex, .Billing, lock_tok)
 	if !exec(&impl.conn, "BEGIN IMMEDIATE;") do return {}, billing_error()
 	committed := false
 	defer if !committed do _ = exec(&impl.conn, "ROLLBACK;")
@@ -105,7 +106,7 @@ billing_get_account :: proc(ctx: rawptr, user_id, now: string) -> (domain.Accoun
 
 billing_list_plans :: proc(ctx: rawptr) -> ([]domain.Billing_Plan, domain.Domain_Error) {
 	impl := (^Billing_Repo_SQLite)(ctx)
-	sync.mutex_lock(&impl.mutex); defer sync.mutex_unlock(&impl.mutex)
+	lock_tok := dbt.timed_lock(&impl.mutex, .Billing); defer dbt.timed_unlock(&impl.mutex, .Billing, lock_tok)
 	stmt := billing_prepare(impl, "SELECT plan_id, plan_label, price_id, max_bridges, terminal_streaming_enabled FROM billing_plans ORDER BY plan_id;")
 	if stmt == nil do return nil, billing_error()
 	defer sqlite3_finalize(stmt)
@@ -121,7 +122,7 @@ billing_list_plans :: proc(ctx: rawptr) -> ([]domain.Billing_Plan, domain.Domain
 
 billing_reserve_checkout :: proc(ctx: rawptr, checkout: domain.Billing_Checkout, now: string) -> (domain.Billing_Checkout, bool, domain.Domain_Error) {
 	impl := (^Billing_Repo_SQLite)(ctx)
-	sync.mutex_lock(&impl.mutex); defer sync.mutex_unlock(&impl.mutex)
+	lock_tok := dbt.timed_lock(&impl.mutex, .Billing); defer dbt.timed_unlock(&impl.mutex, .Billing, lock_tok)
 	if !exec(&impl.conn, "BEGIN IMMEDIATE;") do return {}, false, billing_error()
 	committed := false
 	defer if !committed do _ = exec(&impl.conn, "ROLLBACK;")
@@ -147,14 +148,14 @@ billing_reserve_checkout :: proc(ctx: rawptr, checkout: domain.Billing_Checkout,
 
 billing_finish_checkout :: proc(ctx: rawptr, checkout: domain.Billing_Checkout) -> domain.Domain_Error {
 	impl := (^Billing_Repo_SQLite)(ctx)
-	sync.mutex_lock(&impl.mutex); defer sync.mutex_unlock(&impl.mutex)
+	lock_tok := dbt.timed_lock(&impl.mutex, .Billing); defer dbt.timed_unlock(&impl.mutex, .Billing, lock_tok)
 	if !billing_write(impl, "UPDATE billing_checkouts SET transaction_id = ? WHERE reference = ? AND user_id = ?;", {checkout.transaction_id, checkout.reference, checkout.user_id}) do return billing_error()
 	return {}
 }
 
 billing_apply_event :: proc(ctx: rawptr, event: domain.Billing_Event, now: string) -> domain.Domain_Error {
 	impl := (^Billing_Repo_SQLite)(ctx)
-	sync.mutex_lock(&impl.mutex); defer sync.mutex_unlock(&impl.mutex)
+	lock_tok := dbt.timed_lock(&impl.mutex, .Billing); defer dbt.timed_unlock(&impl.mutex, .Billing, lock_tok)
 	if !exec(&impl.conn, "BEGIN IMMEDIATE;") do return billing_error()
 	committed := false
 	defer if !committed do _ = exec(&impl.conn, "ROLLBACK;")

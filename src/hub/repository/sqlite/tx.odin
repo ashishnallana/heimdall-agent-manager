@@ -1,9 +1,12 @@
 package sqlite
 
 import "core:sync"
+import "core:time"
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
 import lockorder "odin_test:lib/lockorder"
+import metrics "odin_test:lib/metrics"
+import dbt "odin_test:hub/platform/dbtelemetry"
 
 // tx_mutex serialises every unit of work in the process (Task System v2 §2.1).
 //
@@ -50,6 +53,14 @@ tx_depth: int
 // hooks its savepoint registered.
 @(private = "file")
 tx_after_commit: [dynamic]Pending_After_Commit
+// DB telemetry (owner-written): lock token, outer BEGIN start, and the acquire
+// tick for heimdall_db_uow_oldest_hold_seconds (atomic; 0 = no open UoW).
+@(private = "file")
+tx_lock_token: dbt.Lock_Token
+@(private = "file")
+tx_started: time.Tick
+@(private = "file")
+tx_acquired_nsec: i64
 
 @(private = "file")
 Pending_After_Commit :: struct {
@@ -92,12 +103,13 @@ sqlite_uow_begin :: proc(ctx: rawptr) -> (iface.Unit_Of_Work, bool, domain.Domai
 		uow_ctx.repos = factory.repos
 		uow_ctx.depth = depth
 		sync.atomic_store(&tx_depth, depth + 1)
+		if dbt.enabled() do metrics.counter_inc(sqlite_tm.uow_nested)
 		return iface.Unit_Of_Work{ctx = rawptr(uow_ctx), commit = sqlite_uow_commit, rollback = sqlite_uow_rollback, repos = factory.repos, nested = true, after_commit = sqlite_uow_after_commit}, true, domain.Domain_Error{}
 	}
 	lockorder.assert_tx_mutex_allowed()
-	sync.mutex_lock(&tx_mutex)
+	tx_lock(factory.conn)
 	if !exec(factory.conn, "BEGIN;") {
-		sync.mutex_unlock(&tx_mutex)
+		tx_unlock(factory.conn, .Begin_Failed)
 		return iface.Unit_Of_Work{}, false, domain.domain_error(.Internal_Error, "failed to begin transaction")
 	}
 	sync.atomic_store(&tx_owner_thread, me)
@@ -159,6 +171,7 @@ sqlite_uow_commit :: proc(ctx: rawptr) -> (bool, domain.Domain_Error) {
 		if !ok do return false, domain.domain_error(.Internal_Error, "failed to release nested savepoint")
 		return true, domain.Domain_Error{}
 	}
+	uow_ctx_conn := uow_ctx.conn
 	ok := exec(uow_ctx.conn, "COMMIT;")
 	if !ok {
 		// A failed COMMIT leaves the transaction open on the handle; roll it back
@@ -172,7 +185,7 @@ sqlite_uow_commit :: proc(ctx: rawptr) -> (bool, domain.Domain_Error) {
 	tx_after_commit = nil
 	sync.atomic_store(&tx_depth, 0)
 	sync.atomic_store(&tx_owner_thread, 0)
-	sync.mutex_unlock(&tx_mutex)
+	tx_unlock(uow_ctx_conn, .Commit if ok else .Commit_Failed)
 	if ok {
 		for h in hooks do if h.hook.run != nil do h.hook.run(h.hook.ctx)
 	}
@@ -192,13 +205,51 @@ sqlite_uow_rollback :: proc(ctx: rawptr) {
 		free(uow_ctx)
 		return
 	}
+	uow_ctx_conn := uow_ctx.conn
 	exec(uow_ctx.conn, "ROLLBACK;")
 	free(uow_ctx)
 	delete(tx_after_commit)
 	tx_after_commit = nil
 	sync.atomic_store(&tx_depth, 0)
 	sync.atomic_store(&tx_owner_thread, 0)
-	sync.mutex_unlock(&tx_mutex)
+	tx_unlock(uow_ctx_conn, .Rollback)
+}
+
+// tx_lock / tx_unlock take and release tx_mutex for the OUTER unit of work.
+// With DB telemetry on they observe lock wait/hold{uow_tx} and the tx duration
+// (outer BEGIN start -> COMMIT/ROLLBACK return; after-commit hooks run later,
+// outside it). Lock order and semantics are exactly sync.mutex_lock/unlock.
+@(private = "file")
+tx_lock :: proc(conn: ^Conn) {
+	tx_lock_token = dbt.timed_lock(&tx_mutex, .Uow_Tx)
+	if !tx_lock_token.timed do return
+	tx_started = time.tick_now()
+	sync.atomic_store(&tx_acquired_nsec, tx_started._nsec)
+	tl_uow_active = true
+	tl_uow_wrote = false
+}
+
+@(private = "file")
+tx_unlock :: proc(conn: ^Conn, outcome: Tx_Outcome) {
+	token := tx_lock_token
+	tx_lock_token = {}
+	if token.timed {
+		kind := conn_kind_of(conn.db) if conn != nil else Conn_Kind.Other
+		tx_observe(kind, .Uow, tl_uow_wrote, outcome, tx_started)
+		sync.atomic_store(&tx_acquired_nsec, 0)
+		tl_uow_active = false
+		tl_uow_wrote = false
+	}
+	dbt.timed_unlock(&tx_mutex, .Uow_Tx, token)
+}
+
+// uow_oldest_hold_ns is the age of the open outer unit of work (0 if none),
+// read by the scrape collector.
+uow_oldest_hold_ns :: proc() -> i64 {
+	acquired := sync.atomic_load(&tx_acquired_nsec)
+	if acquired == 0 do return 0
+	age := time.tick_now()._nsec - acquired
+	return age if age > 0 else 0
 }
 
 // tx_mutex_try_lock is a TEST SEAM: it reports whether the process-wide unit of
