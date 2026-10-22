@@ -31,8 +31,15 @@ import events "odin_test:hub/service/events"
 //   POST /api/v1/agent-instances/{id}/blockers/{blocker_id}/resolve {decision, message?}
 //   realtime resource_changed(agent_instance, {id}, agent_blockers_changed,
 //                             {agent_instance_id, revision, count})
+//
+// The ONLY approval surface is the 'Needs you' attention deck/tray: the card
+// service merges list_owner_blockers into GET /api/v1/attention (+ /summary) as
+// item kind agent_blocker at read time, and every change also notes an
+// attention_changed hint (kind agent_blocker) on the attention debouncer.
 
 AGENT_BLOCKERS_REALTIME_CHANGE :: "agent_blockers_changed"
+// Attention item kind (and attention_changed kind) for agent blockers.
+AGENT_BLOCKER_ATTENTION_KIND :: "agent_blocker"
 AGENT_BLOCKER_KIND_PERMISSION :: "permission"
 AGENT_BLOCKER_KIND_TERMINAL_PROMPT :: "terminal_prompt"
 // Bounds on what a bridge snapshot may carry (the bridge caps the same way).
@@ -51,6 +58,7 @@ Agent_Blocker :: struct {
 Agent_Blocker_Entry :: struct {
 	bridge_id:     string,
 	owner_user_id: string,
+	chain_id:      string, // the instance's chain ('' when none), for attention scoping
 	revision:      i64,
 	blockers:      [dynamic]Agent_Blocker,
 }
@@ -58,6 +66,8 @@ Agent_Blocker_Entry :: struct {
 Agent_Blocker_Store :: struct {
 	mutex:   sync.Mutex,
 	entries: map[string]Agent_Blocker_Entry,
+	// attention: optional debouncer noted (kind agent_blocker) on every change.
+	attention: ^events.Attention_Debouncer,
 	// record_events keeps every published summary in `events` (tests).
 	record_events: bool,
 	events:        [dynamic]string,
@@ -87,6 +97,7 @@ blocker_entry_destroy :: proc(e: ^Agent_Blocker_Entry) {
 	delete(e.blockers)
 	delete(e.bridge_id)
 	delete(e.owner_user_id)
+	delete(e.chain_id)
 }
 
 @(private = "file")
@@ -141,6 +152,7 @@ blockers_publish :: proc(service: ^Agent_Service, owner, instance_id: string, re
 		sync.mutex_unlock(&service.blockers.mutex)
 	}
 	if service.event_bus != nil do events.publish_resource_changed(service.event_bus, owner, "agent_instance", instance_id, AGENT_BLOCKERS_REALTIME_CHANGE, summary)
+	if service.blockers.attention != nil do events.attention_debouncer_note(service.blockers.attention, owner, AGENT_BLOCKER_ATTENTION_KIND)
 }
 
 // apply_bridge_blockers_snapshot replaces an instance's blockers with the
@@ -196,6 +208,7 @@ apply_bridge_blockers_snapshot :: proc(service: ^Agent_Service, bridge_id, text:
 		service.blockers.entries[strings.clone(instance_id, blockers_allocator())] = Agent_Blocker_Entry{
 			bridge_id = strings.clone(bridge_id, blockers_allocator()),
 			owner_user_id = strings.clone(owner, blockers_allocator()),
+			chain_id = strings.clone(inst.chain_id, blockers_allocator()),
 			revision = revision,
 			blockers = fresh,
 		}
@@ -246,6 +259,38 @@ instance_blocker_count :: proc(service: ^Agent_Service, instance_id: string) -> 
 	defer sync.mutex_unlock(&service.blockers.mutex)
 	if e, ok := service.blockers.entries[instance_id]; ok do return len(e.blockers)
 	return 0
+}
+
+// Owner_Blocker is one blocker as the attention read needs it (temp strings).
+Owner_Blocker :: struct {
+	agent_instance_id: string,
+	chain_id:          string,
+	blocker_id:        string,
+	kind:              string,
+	json:              string, // canonical API object (see blocker_canonical_json)
+}
+
+// list_owner_blockers copies every blocker of the owner's instances into the
+// temp allocator, ordered by instance id then bridge order. Read-time only:
+// this is what the attention deck merges in as kind agent_blocker.
+list_owner_blockers :: proc(service: ^Agent_Service, owner_user_id: string) -> []Owner_Blocker {
+	if service == nil || owner_user_id == "" do return nil
+	out := make([dynamic]Owner_Blocker, context.temp_allocator)
+	sync.mutex_lock(&service.blockers.mutex)
+	for id, e in service.blockers.entries {
+		if e.owner_user_id != owner_user_id do continue
+		for blk in e.blockers {
+			append(&out, Owner_Blocker{
+				agent_instance_id = strings.clone(id, context.temp_allocator),
+				chain_id = strings.clone(e.chain_id, context.temp_allocator),
+				blocker_id = strings.clone(blk.blocker_id, context.temp_allocator),
+				kind = strings.clone(blk.kind, context.temp_allocator),
+				json = strings.clone(blk.json, context.temp_allocator),
+			})
+		}
+	}
+	sync.mutex_unlock(&service.blockers.mutex)
+	return out[:]
 }
 
 // list_instance_blockers renders {agent_instance_id, revision, blockers:[...]} for

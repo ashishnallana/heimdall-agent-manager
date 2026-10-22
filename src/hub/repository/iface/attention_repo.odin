@@ -54,6 +54,8 @@ Attention_Counts :: struct {
 	memory:  int,
 	older:   int,
 	snoozed: int,
+	// Live agent blockers (in memory, never stored); the card service fills it.
+	agent_blocker: int,
 }
 
 // Attention_List_Cards_Proc lists one kind's live cards in range, oldest first

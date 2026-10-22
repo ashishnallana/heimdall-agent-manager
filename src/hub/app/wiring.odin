@@ -494,6 +494,8 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 	graph.task_engine.attention = &graph.cards.attention_notifier
 	content_service.set_attention_notifier(&graph.content, &graph.cards.attention_notifier)
 	events.init_attention_debouncer(&graph.attention_events, &graph.event_bus)
+	// Agent blockers change the 'Needs you' deck too (kind agent_blocker).
+	graph.agents.blockers.attention = &graph.attention_events
 	graph.cards.card_changed = card_service.Card_Changed_Hook{ctx = rawptr(&graph.attention_events), changed = attention_card_changed}
 	graph.experiment_handlers = http.Experiment_Rest_Handlers{auth = &graph.auth, repo = &graph.experiment_repo, clock = &graph.clock}
 	graph.lsp_server_config_handlers = http.Lsp_Server_Config_Rest_Handlers{auth = &graph.auth, repo = &graph.lsp_server_config_repo, clock = &graph.clock, ids = &graph.ids}
