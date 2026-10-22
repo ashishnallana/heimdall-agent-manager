@@ -380,7 +380,8 @@ export default function ChatMessageList({
               !message.body || message.body.toLowerCase().includes('started') || message.body.toLowerCase().includes('ready') || message.body.toLowerCase().includes('restart')
             ));
             const isClubbedGroup = message.messageType === 'shell_run_group';
-            const hideCardChrome = isDivider || isClubbedGroup;
+            // tool_activity is a lean marker (REQ-EXT-CONV-2): no copy/time row.
+            const hideCardChrome = isDivider || isClubbedGroup || message.messageType === 'tool_activity';
             const options = visibleMessageOptions(message, Boolean(activeKey));
             return (
               <div key={message.key} data-debug-id={`${debugPrefix}-message-${message.messageId}`} className={`msg group flex min-w-0 max-w-full rounded-xl outline-none focus-visible:shadow-focus ${reduceMotion ? '' : 'transition-colors duration-500'} ${message.messageId === highlightId ? 'bg-warning-soft ring-1 ring-warning' : ''} ${message.isUser ? 'justify-end' : 'justify-start'}`}>

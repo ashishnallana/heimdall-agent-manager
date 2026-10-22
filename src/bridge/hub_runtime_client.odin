@@ -2612,8 +2612,12 @@ bridge_runtime_set_status :: proc(instance_id, runtime_status, activity_status: 
 	if strings.trim_space(instance_id) == "" do return
 	// A stopped/failed agent can no longer act on a permission decision: release
 	// its blocked permission waiters with "none".
-	if runtime_status == "stopped" || runtime_status == "failed" do bridge_permission_cancel_instance(instance_id)
+	// Its tool aggregation is closed out too, so a killed turn still gets posted.
 	now := bridge_runtime_now_ms()
+	if runtime_status == "stopped" || runtime_status == "failed" {
+		bridge_permission_cancel_instance(instance_id)
+		bridge_ext_instance_terminal(instance_id, now)
+	}
 	sync.mutex_lock(&bridge_runtime_mutex)
 	defer sync.mutex_unlock(&bridge_runtime_mutex)
 	bridge_runtime_set_status_locked(instance_id, runtime_status, activity_status, now, true)

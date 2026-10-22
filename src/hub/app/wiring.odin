@@ -833,6 +833,7 @@ register_routes :: proc(graph: ^App_Graph) {
 	http.router_add(&graph.router, "POST", "/api/v1/agent-actions/cards/accept", rawptr(&graph.agent_action_handlers), http.agent_action_card_accept_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/agent-actions/start-success", rawptr(&graph.agent_action_handlers), http.agent_action_start_success_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/agent-actions/extension-events", rawptr(&graph.agent_action_handlers), http.agent_action_extension_events_handler)
+	http.router_add(&graph.router, "POST", "/api/v1/agent-actions/tool-activity", rawptr(&graph.agent_action_handlers), http.agent_action_tool_activity_handler)
 	// REQ-ENROLL-9: the four pre-shared-token enrollment routes are GONE —
 	// POST/GET /api/v1/bridge-enrollments, DELETE /api/v1/bridge-enrollments/*
 	// (enrollment-token minting, listing and revocation) and
