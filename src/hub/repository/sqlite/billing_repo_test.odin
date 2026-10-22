@@ -182,6 +182,11 @@ test_plan_enforcement_migration_upgrades_snapshots_defaults_and_preserves_overri
 		UPDATE account_billing SET plan_id = 'hobbyist', status = 'past_due', grace_until = '2000-01-01T00:00:00Z' WHERE user_id = 'expired_user';
 		UPDATE account_billing SET plan_id = 'hobbyist', status = 'past_due', grace_until = '2999-01-01T00:00:00Z' WHERE user_id = 'grace_user';
 		UPDATE account_entitlements SET override_max_bridges = 0, override_terminal_streaming_enabled = 0, override_reason = 'keep agreement', override_updated_by = 'operator' WHERE user_id = 'override_user';`))
+	// Parent-table rebuild must retain catalog metadata and all incoming references.
+	testing.expect(t, exec(&conn, `INSERT INTO billing_plans VALUES ('custom', 'Custom agreement', 'pri_custom', 7, 1);
+		INSERT INTO billing_plan_prices VALUES ('pri_historical', 'custom');
+		UPDATE account_billing SET plan_id = 'custom', status = 'custom' WHERE user_id = 'override_user';
+		INSERT INTO billing_checkouts VALUES ('pending', 'paid_user', 'custom', 'pri_custom', 'txn_pending', '2999-01-01T00:00:00Z');`))
 	migrated, migration_err = run_migrations(&conn, "/nonexistent/migrations")
 	testing.expect(t, migrated && migration_err.code == .None)
 	testing.expect(t, table_column_exists(&conn, "bridges", "plan_disabled_at"))
@@ -189,6 +194,18 @@ test_plan_enforcement_migration_upgrades_snapshots_defaults_and_preserves_overri
 	repo, repo_err := new_billing_repository(&impl, path, "sandbox", "pri_hobbyist", true)
 	testing.expect_value(t, repo_err.code, domain.Error_Code.None)
 	defer close(&impl.conn)
+	foreign_keys, _ := billing_scalar(&impl, "PRAGMA foreign_keys;")
+	testing.expect_value(t, foreign_keys, "1")
+	// Check the migration connection too: FK enforcement must be restored there.
+	migration_impl := Billing_Repo_SQLite{conn = conn}
+	migration_foreign_keys, _ := billing_scalar(&migration_impl, "PRAGMA foreign_keys;")
+	testing.expect_value(t, migration_foreign_keys, "1")
+	fk_violations, _ := billing_scalar(&impl, "SELECT COUNT(*) FROM pragma_foreign_key_check;")
+	testing.expect_value(t, fk_violations, "0")
+	catalog, _ := billing_scalar(&impl, "SELECT plan_label || ':' || price_id || ':' || max_bridges FROM billing_plans WHERE plan_id = 'custom';")
+	testing.expect_value(t, catalog, "Custom agreement:pri_custom:7")
+	refs, _ := billing_scalar(&impl, "SELECT (SELECT plan_id FROM billing_plan_prices WHERE price_id = 'pri_historical') || ':' || (SELECT plan_id FROM billing_checkouts WHERE reference = 'pending') || ':' || (SELECT plan_id FROM account_billing WHERE user_id = 'override_user');")
+	testing.expect_value(t, refs, "custom:custom:custom")
 	// Inspect snapshots before get_account can recompute them.
 	paid_snapshot, _ := billing_scalar(&impl, "SELECT terminal_input_enabled || ':' || max_concurrent_streams || ':' || shells_enabled FROM account_entitlements WHERE user_id = 'paid_user';")
 	testing.expect_value(t, paid_snapshot, "1:-1:1")
@@ -228,6 +245,21 @@ test_plan_enforcement_migration_upgrades_snapshots_defaults_and_preserves_overri
 	testing.expect_value(t, unlimited_err.code, domain.Error_Code.None)
 	testing.expect_value(t, unlimited.entitlements.max_concurrent_streams, -1)
 	testing.expect(t, !exec(&conn, "UPDATE account_entitlements SET override_max_concurrent_streams = -2 WHERE user_id = 'paid_user';"))
+	// Both catalog defaults and persisted snapshots accept the unlimited sentinel.
+	testing.expect(t, exec(&conn, "UPDATE billing_plans SET max_bridges = -1 WHERE plan_id = 'custom';"))
+	testing.expect(t, exec(&conn, "UPDATE account_entitlements SET override_max_bridges = -1 WHERE user_id = 'override_user';"))
+	unlimited_bridges, unlimited_bridges_err := repo.get_account(repo.ctx, "override_user", "2026-10-10T10:00:00Z")
+	testing.expect_value(t, unlimited_bridges_err.code, domain.Error_Code.None)
+	testing.expect_value(t, unlimited_bridges.entitlements.max_bridges, -1)
+	bridge_snapshot, _ := billing_scalar(&impl, "SELECT max_bridges || ':' || override_max_bridges FROM account_entitlements WHERE user_id = 'override_user';")
+	testing.expect_value(t, bridge_snapshot, "-1:-1")
+	testing.expect(t, exec(&conn, "UPDATE account_entitlements SET override_max_bridges = NULL WHERE user_id = 'override_user';"))
+	plan_bridges, plan_bridges_err := repo.get_account(repo.ctx, "override_user", "2026-10-10T10:00:00Z")
+	testing.expect_value(t, plan_bridges_err.code, domain.Error_Code.None)
+	testing.expect_value(t, plan_bridges.entitlements.max_bridges, -1)
+	testing.expect(t, !exec(&conn, "UPDATE billing_plans SET max_bridges = -2 WHERE plan_id = 'custom';"))
+	testing.expect(t, !exec(&conn, "UPDATE account_entitlements SET max_bridges = -2 WHERE user_id = 'override_user';"))
+	testing.expect(t, !exec(&conn, "UPDATE account_entitlements SET override_max_bridges = -2 WHERE user_id = 'override_user';"))
 	// Simulate a crash after SQL commit but before the migration ledger write.
 	testing.expect(t, exec(&conn, "DELETE FROM schema_migrations WHERE version = '103_plan_enforcement.sql';"))
 	again, again_err := run_migrations(&conn, "/nonexistent/migrations")

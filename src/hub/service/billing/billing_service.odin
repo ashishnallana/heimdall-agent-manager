@@ -65,6 +65,7 @@ account_view :: proc(service: ^Service, user_id: string) -> (Account_View, domai
 	if err.code != .None do return {}, err
 	plans, plan_err := service.repo.list_plans(service.repo.ctx)
 	if plan_err.code != .None do return {}, plan_err
+	// Account settings is a manual refresh; polling this view also bypasses the cache.
 	invalidate_entitlements(service, user_id)
 	entitlements := account.entitlements
 	if !plan_limits_enabled(service.config) do entitlements = domain.unlimited_entitlements()

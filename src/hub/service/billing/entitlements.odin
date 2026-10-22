@@ -53,6 +53,7 @@ effective_entitlements :: proc(service: ^Service, user_id: string) -> (domain.Us
 		}
 		if len(service.entitlements_cache) >= ENTITLEMENTS_CACHE_CAPACITY do clear_entitlements_locked(service)
 		if service.entitlements_cache == nil do service.entitlements_cache = make(map[string]Entitlement_Cache_Entry, runtime.heap_allocator())
+		// Scan only to reuse the heap-owned key when replacing an expired entry.
 		cache_key := ""
 		for key in service.entitlements_cache {
 			if key == user_id { cache_key = key; break }
