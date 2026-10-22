@@ -30,6 +30,7 @@ test_provider_catalog_extension_descriptors_preserve_claude_and_add_codex :: pro
 			testing.expect(t, strings.contains(entry.extension_json, `"load_path_suffix":"extensions/claude"`), "loader is restricted to this extension directory")
 			testing.expect(t, strings.contains(entry.extension_json, `"capabilities":["activity","subagents","permissions","file_edits","session_id"]`), "claude capabilities")
 		} else if entry.provider == "codex" {
+			testing.expect(t, strings.contains(entry.extension_json, `"detect_argv":["plugin","list","--marketplace","heimdall-codex","--json"]`), "native inventory avoids unrelated remote marketplaces")
 			testing.expect(t, strings.contains(entry.extension_json, `"detect_collection":"installed"`))
 			testing.expect(t, strings.contains(entry.extension_json, `"detect_id_key":"pluginId"`))
 			testing.expect(t, strings.contains(entry.extension_json, `"plugin_id":"heimdall@heimdall-codex"`))
