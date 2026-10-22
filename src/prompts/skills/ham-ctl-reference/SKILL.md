@@ -1,6 +1,6 @@
 ---
 name: ham-ctl-reference
-description: Authoritative command reference for the ham-ctl agent CLI — every group (bridge, agents, task-chain, task, issue, chat, memory, artifact, shell, context, start-success) with exact verbs, flags, and valid values. Also covers shell sessions as a way to put a running process in front of the user — they can watch its stdout live and, if it serves HTTP on a declared port, open its UI as a preview in Heimdall — no inbound port on either machine, and it works when the Hub is on a different host. Includes how two services in separate sessions call each other through the Hub. Load whenever you need the precise ham-ctl syntax for a Heimdall action and want to get flags, positional ids, task/chain statuses, vote results, or memory scopes right the first time.
+description: Authoritative command reference for the ham-ctl agent CLI — every group (bridge, agents, task-chain, task, issue, chat, memory, artifact, shell, extension, context, start-success) with exact verbs, flags, and valid values. Also covers shell sessions as a way to put a running process in front of the user — they can watch its stdout live and, if it serves HTTP on a declared port, open its UI as a preview in Heimdall — no inbound port on either machine, and it works when the Hub is on a different host. Includes how two services in separate sessions call each other through the Hub. Load whenever you need the precise ham-ctl syntax for a Heimdall action and want to get flags, positional ids, task/chain statuses, vote results, or memory scopes right the first time.
 ---
 
 # ham-ctl command reference
@@ -20,7 +20,7 @@ Conventions used below:
   `./.heimdall/bin/ham-ctl --help` lists all groups.
 
 Groups: `bridge`, `agents`, `task-chain`, `task`, `workflow`, `lease`, `verify`, `review`, `issue`, `chat`, `memory`, `artifact`,
-`shell`, `context`, `start-success`.
+`shell`, `extension`, `context`, `start-success`.
 
 ---
 
@@ -344,6 +344,21 @@ ham-ctl issue update iss_18d7a123bc45de67 --status fixed
   agent-to-agent.
 - `chat set-title <title>` — DEPRECATED: conversation titles are no longer used. Do not
   call it; name your work with `task-chain set-title` (coordinator only) instead.
+
+## extension — harness extension hooks (provider hooks → ham.ext.v1)
+Provider plugins call these from their hook processes; agents rarely run them by hand.
+- `extension hook <provider>` — reads the provider's native hook JSON on stdin, maps it to
+  `ham.ext.v1`, and sends it to the Bridge (`agent.extension.event`). Providers: `claude`
+  (plugin in `extensions/claude-code`). `PermissionRequest` instead blocks on
+  `agent.extension.permission` (up to 300s, or less with `HEIMDALL_EXT_PERMISSION_TIMEOUT_MS`)
+  and prints Claude's allow/deny JSON. It prints nothing when there is no decision. Every other
+  event prints nothing and uses a 500ms socket timeout.
+- `extension event --stdin` — sends canonical `ham.ext.v1` event(s) on stdin (one object or
+  `{"events":[…]}`) and prints the Bridge reply.
+- `extension status` — `agent.extension.status` for this instance: provider, version,
+  capabilities, event counters, activity status and source.
+- Without `HEIMDALL_BRIDGE_ENDPOINT` / `HEIMDALL_AGENT_TOKEN`, `hook` and `event` exit 0 with no
+  output, so a provider is never blocked.
 
 ## shell — run commands and long-lived sessions on the Bridge host
 THE THREE KINDS, enforced by the hub:

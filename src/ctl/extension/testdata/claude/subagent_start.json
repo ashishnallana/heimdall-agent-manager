@@ -1,0 +1,9 @@
+{
+ "session_id": "935c3167-dab6-4f7d-a453-c4e9ec710d23",
+ "transcript_path": "/home/dev/.claude/projects/-home-dev--cache-heimdall-spike-work/935c3167-dab6-4f7d-a453-c4e9ec710d23.jsonl",
+ "cwd": "/home/dev/.cache/heimdall-spike/work",
+ "prompt_id": "13400b47-cb50-4025-82a4-99f3e24761a0",
+ "agent_id": "a214dfca8e8a87ac6",
+ "agent_type": "general-purpose",
+ "hook_event_name": "SubagentStart"
+}

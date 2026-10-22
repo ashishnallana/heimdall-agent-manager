@@ -1,0 +1,7 @@
+{
+ "session_id": "cf4b17bd-aa1d-4d65-8f7d-63529dbb8b9f",
+ "transcript_path": "/home/dev/.claude/projects/-home-dev--cache-heimdall-spike-work/cf4b17bd-aa1d-4d65-8f7d-63529dbb8b9f.jsonl",
+ "cwd": "/home/dev/.cache/heimdall-spike/work",
+ "hook_event_name": "SessionStart",
+ "source": "startup"
+}

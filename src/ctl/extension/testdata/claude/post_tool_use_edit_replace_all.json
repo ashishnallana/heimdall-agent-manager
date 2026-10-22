@@ -1,0 +1,43 @@
+{
+ "session_id": "935c3167-dab6-4f7d-a453-c4e9ec710d23",
+ "transcript_path": "/home/dev/.claude/projects/-home-dev--cache-heimdall-spike-work/935c3167-dab6-4f7d-a453-c4e9ec710d23.jsonl",
+ "cwd": "/home/dev/.cache/heimdall-spike/work",
+ "prompt_id": "13400b47-cb50-4025-82a4-99f3e24761a0",
+ "permission_mode": "bypassPermissions",
+ "effort": {
+  "level": "medium"
+ },
+ "hook_event_name": "PostToolUse",
+ "tool_name": "Edit",
+ "tool_input": {
+  "file_path": "/home/dev/.cache/heimdall-spike/work/c.txt",
+  "old_string": "x",
+  "new_string": "z",
+  "replace_all": true
+ },
+ "tool_response": {
+  "filePath": "/home/dev/.cache/heimdall-spike/work/c.txt",
+  "oldString": "x",
+  "newString": "z",
+  "originalFile": "x\ny\nx\n",
+  "structuredPatch": [
+   {
+    "oldStart": 1,
+    "oldLines": 3,
+    "newStart": 1,
+    "newLines": 3,
+    "lines": [
+     "-x",
+     "+z",
+     " y",
+     "-x",
+     "+z"
+    ]
+   }
+  ],
+  "userModified": false,
+  "replaceAll": true
+ },
+ "tool_use_id": "toolu_01GJPif2TLTdp9AnvmmBBpYf",
+ "duration_ms": 1412
+}
