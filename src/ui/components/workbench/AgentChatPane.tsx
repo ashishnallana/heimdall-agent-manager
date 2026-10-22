@@ -883,9 +883,11 @@ export function AgentChatPane({
     dispatchTray({ type: 'items', ids: trayItemIds, draftEmpty });
   }, [trayItemIdsKey]); // eslint-disable-line react-hooks/exhaustive-deps
   const trayMode = trayState.mode;
-  const trayModeItem = trayMode
+  // Only task items borrow the composer (agent blockers act in place).
+  const trayModeFound = trayMode
     ? trayItemList.find((item) => item.card_id === trayMode.cardId)
     : undefined;
+  const trayModeItem = trayModeFound?.kind === 'task' ? trayModeFound : undefined;
   const showTray = trayVisible(trayState, trayItemList.length);
   useEffect(() => {
     if (!trayNotice) return;
