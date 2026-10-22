@@ -510,6 +510,9 @@ All of the following element types must have `data-debug-id`:
 | `ShortcutCheatsheetModal` / `ChordHud` | `shortcut-cheatsheet-modal`, `shortcut-cheatsheet-modal-close-btn`, `shortcut-cheatsheet-action-${actionId}`, `shortcut-chord-hud` |
 | `BridgesPanel` | `settings-bridge-plan-upgrade-${bridgeId}` |
 | `RuntimeConfigurationOptions` | `${debugPrefix}-bridge-plan-upgrade` |
+| `ExtensionBadges` | `provider-extension-badge-${provider}`, `provider-extension-help-${provider}`, `provider-extension-install-hint-${provider}`, `provider-extension-install-copy-btn-${provider}`, `conversation-signal-badge`, `conversation-signal-badge-btn`, `conversation-thread-activity-action` |
+| `PermissionCards` | `conversation-permission-cards`, `attention-permission-cards`, `attention-permission-count`, `permission-card-${id}`, `permission-card-agent-btn-${id}`, `permission-card-countdown-${id}`, `permission-card-status-${id}`, `permission-card-input-${id}`, `permission-card-diff-toggle-${id}`, `permission-card-diff-${id}`, `permission-card-error-${id}`, `permission-card-allow-btn-${id}`, `permission-card-deny-btn-${id}`, `permission-card-expired-${id}` |
+| `ActivityTimelinePanel` | `activity-timeline-panel`, `activity-timeline-loading`, `activity-timeline-error`, `activity-timeline-empty`, `activity-view-timeline-btn`, `activity-view-files-btn`, `activity-running-subagents`, `activity-timeline-list`, `activity-tool-${toolUseId}`, `activity-subagent-${agentId}`, `activity-subagent-toggle-${agentId}`, `activity-notice-${seq}`, `activity-files-list`, `activity-file-${filePath}`, `activity-file-diff`, `activity-file-diff-back-btn`, `activity-file-diff-edit-select`, `activity-file-diff-truncated`, `activity-file-diff-empty`, `aux-activity-no-agent` |
 
 ### Shared component: SearchableSelect
 

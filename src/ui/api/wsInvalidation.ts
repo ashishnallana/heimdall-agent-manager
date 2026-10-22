@@ -5,6 +5,8 @@ import { chatEndpoints } from './endpoints/chats';
 import { patchAgentCachesFromWs } from './endpoints/agents';
 import { patchMemoryCachesFromWs } from './endpoints/memory';
 import { bridgeSupportApi } from './endpoints/bridgeSupport';
+import { applyPermissionRealtime } from './endpoints/extension';
+import { permissionRealtimeFromSummary } from '../components/extension/permissionCardModel';
 import { upsertTaskInList, upsertTaskLogEvent } from './taskCache';
 import { attentionEventReceived } from '../store/attentionSlice';
 import { announcePaneVaultLocked } from '../utils/vaultLockedError';
@@ -604,6 +606,42 @@ function invalidateShellSession(dispatch: any, sessionId: string, chainId?: stri
   dispatch(shellSessionEventReceived({ sessionId }));
 }
 
+/**
+ * Provider extension frames on an agent instance (REQ-EXT-PERM-1, REQ-EXT-SUB-2):
+ *   'extension_events'    {count, last_seq, provider_session_id, session_changed, events:[tail]}
+ *   'permission_requests' {action: created|decided|closed, permission_request}
+ * The timeline refetches only events after the seq it holds; permission cards are
+ * patched in place so Allow / Deny resolve live on every client. Returns false
+ * for any other change so the generic agent path handles it.
+ */
+function handleAgentInstanceExtensionChange(dispatch: any, instanceId: string, change: string, summary: any): boolean {
+  if (change === 'permission_requests') {
+    const parsed = permissionRealtimeFromSummary(summary);
+    if (parsed) dispatch(applyPermissionRealtime(instanceId || parsed.request.instance_id, parsed.request));
+    // A new request may not be in a cached list yet (e.g. the owner-wide list was
+    // never loaded); refetch the subscribed lists to converge.
+    if (!parsed || parsed.action === 'created') {
+      dispatch(heimdallApi.util.invalidateTags([
+        { type: 'PermissionRequests' as const, id: instanceId },
+        { type: 'PermissionRequests' as const, id: 'LIST' },
+      ]));
+    }
+    return true;
+  }
+  if (change === 'extension_events') {
+    const tags: any[] = [{ type: 'ExtensionEvents' as const, id: instanceId }];
+    // hello/session events change the instance's extension info and session id
+    // (the native-signals badge reads them from the instance).
+    const events = Array.isArray(summary?.events) ? summary.events : [];
+    if (summary?.session_changed || events.some((e: any) => e?.event === 'hello' || e?.event === 'session')) {
+      tags.push({ type: 'AgentInstances' as const, id: instanceId });
+    }
+    dispatch(heimdallApi.util.invalidateTags(tags));
+    return true;
+  }
+  return false;
+}
+
 function handleResourceChanged(dispatch: any, payload: any, ctx: WsCtx) {
   const resource = String(payload.resource || '');
   const resourceId = String(payload.resource_id || '');
@@ -711,6 +749,8 @@ function handleResourceChanged(dispatch: any, payload: any, ctx: WsCtx) {
       invalidateShellSession(dispatch, resourceId, String(payload?.chain_id || ''));
       return;
     case 'agent_instance':
+      if (handleAgentInstanceExtensionChange(dispatch, resourceId, String(payload.change || ''), summary)) return;
+    // falls through
     case 'agent_id':
     case 'agent': {
       // Reuse the agent patch/refresh path; patchAgentCachesFromWs tolerates the
