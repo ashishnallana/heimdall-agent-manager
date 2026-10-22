@@ -33,6 +33,10 @@ export const HEIMDALL_TAG_TYPES = [
   'Bridges',
   'BridgeProviders',
   'ProjectBridgePaths',
+  // Provider extension (ham.ext.v1): timeline events/rollups and permission cards, per instance id
+  // ('LIST' = the owner-wide pending permission list).
+  'ExtensionEvents',
+  'PermissionRequests',
   // Project Directory Browser: project-scoped FS listings, keyed by (project, bridge, path).
   'ProjectFs',
   // VCS Integration: project-scoped VCS capabilities/status/changed-files/diff,

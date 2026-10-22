@@ -41,6 +41,7 @@ const LAUNCHER_ORDER: AuxTabKind[] = [
   'files',
   'vcs',
   'tasks',
+  'activity',
   'shell',
   'agentPty',
 ];
@@ -209,6 +210,7 @@ function AuxNewTabLauncherBody({
       case 'files':
       case 'vcs':
       case 'tasks':
+      case 'activity':
         onSelect({ type: kind } as AuxContent);
         return;
       default:
@@ -274,7 +276,7 @@ function AuxNewTabLauncherBody({
               const disabled =
                 ((kind === 'chainOverview' || kind === 'tasks') && !chainId) ||
                 ((kind === 'files' || kind === 'vcs') && !projectId && !ownerAgentId) ||
-                (kind === 'agentPty' && !ownerAgentId) ||
+                ((kind === 'agentPty' || kind === 'activity') && !ownerAgentId) ||
                 (kind === 'shell' && aliveBridges.length === 0);
               const description = kind === 'shell' && aliveBridges.length === 0
                 ? 'No alive bridge is available to start an interactive shell.'
