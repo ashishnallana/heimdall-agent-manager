@@ -13,7 +13,7 @@ Content_Repo_SQLite :: struct { conn: ^Conn }
 
 new_content_repository :: proc(impl: ^Content_Repo_SQLite, conn: ^Conn) -> iface.Content_Repository {
 	impl.conn = conn
-	return iface.Content_Repository{ctx=rawptr(impl), list_unread_incoming_ids=content_list_unread_incoming_ids_sqlite, save_memory=content_save_memory_sqlite, get_memory=content_get_memory_sqlite, list_memories=content_list_memories_sqlite, save_conversation=content_save_conversation_sqlite, get_conversation=content_get_conversation_sqlite, list_conversations=content_list_conversations_sqlite, save_message=content_save_message_sqlite, get_message=content_get_message_sqlite, update_message=content_update_message_sqlite, list_messages=content_list_messages_sqlite, list_user_visible_messages=content_list_user_visible_messages_sqlite, list_agent_inbox_messages=content_list_agent_inbox_messages_sqlite, mark_messages_read=content_mark_messages_read_sqlite, save_artifact=content_save_artifact_sqlite, get_artifact=content_get_artifact_sqlite, list_artifacts=content_list_artifacts_sqlite, delete_artifact=content_delete_artifact_sqlite, save_template=content_save_template_sqlite, get_template=content_get_template_sqlite, list_templates=content_list_templates_sqlite, delete_template=content_delete_template_sqlite}
+	return iface.Content_Repository{ctx=rawptr(impl), list_unread_incoming_ids=content_list_unread_incoming_ids_sqlite, save_memory=content_save_memory_sqlite, get_memory=content_get_memory_sqlite, list_memories=content_list_memories_sqlite, save_conversation=content_save_conversation_sqlite, get_conversation=content_get_conversation_sqlite, list_conversations=content_list_conversations_sqlite, list_conversation_project_links=content_list_conversation_project_links_sqlite, save_message=content_save_message_sqlite, get_message=content_get_message_sqlite, update_message=content_update_message_sqlite, list_messages=content_list_messages_sqlite, list_user_visible_messages=content_list_user_visible_messages_sqlite, list_agent_inbox_messages=content_list_agent_inbox_messages_sqlite, mark_messages_read=content_mark_messages_read_sqlite, save_artifact=content_save_artifact_sqlite, get_artifact=content_get_artifact_sqlite, list_artifacts=content_list_artifacts_sqlite, delete_artifact=content_delete_artifact_sqlite, save_template=content_save_template_sqlite, get_template=content_get_template_sqlite, list_templates=content_list_templates_sqlite, delete_template=content_delete_template_sqlite}
 }
 
 content_save_memory_sqlite :: proc(ctx: rawptr, m: domain.Memory) -> (domain.Memory, bool, domain.Domain_Error) {
@@ -386,5 +386,26 @@ content_list_unread_incoming_ids_sqlite :: proc(ctx: rawptr, cid: string, owner:
 	bind_text(stmt, 1, string(owner)); bind_text(stmt, 2, cid)
 	out := make([dynamic]string)
 	for sqlite3_step(stmt) == SQLITE_ROW do append(&out, column_text(stmt, 0))
+	return out[:], {}
+}
+
+// Same owner, ordering expression, tie break and 200-row boundary as the full
+// conversation listing; association needs no latest-message or count subqueries.
+content_list_conversation_project_links_sqlite :: proc(ctx: rawptr, owner: domain.User_ID) -> ([]domain.Conversation_Project_Link, domain.Domain_Error) {
+	impl := (^Content_Repo_SQLite)(ctx)
+	stmt: sqlite3_stmt
+	q := "SELECT c.conversation_id, c.agent_instance_id, c.project_id, c.chain_id FROM chat_conversations c WHERE c.owner_user_id=? ORDER BY COALESCE(NULLIF(c.last_message_at,''), c.updated_at, c.created_at) DESC, c.conversation_id DESC LIMIT 200;"
+	if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(q)), -1, &stmt, nil) != SQLITE_OK do return nil, domain.domain_error(.Internal_Error, "failed conversation project link list")
+	defer sqlite3_finalize(stmt)
+	bind_text(stmt, 1, string(owner))
+	out := make([dynamic]domain.Conversation_Project_Link)
+	for sqlite3_step(stmt) == SQLITE_ROW {
+		append(&out, domain.Conversation_Project_Link{
+			conversation_id = column_text(stmt, 0),
+			agent_instance_id = column_text(stmt, 1),
+			project_id = domain.Project_ID(column_text(stmt, 2)),
+			chain_id = column_text(stmt, 3),
+		})
+	}
 	return out[:], {}
 }

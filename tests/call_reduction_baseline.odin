@@ -308,6 +308,11 @@ main :: proc() {
     before=snapshot(reg)
     for _ in 0..<10 { rows:=http.enrich_chain_list_items(&handlers,auth,nil,false,true);require(len(rows)==0) }
     show(reg,"empty search delta enrichment helper x10",10,before)
+    before=snapshot(reg)
+    for _ in 0..<10 {
+        links,e:=content.list_conversation_project_links(&svc,auth);check(e);require(len(links)==60)
+    }
+    show(reg,"conversation project links x10",10,before)
     // Reopening drops only SQLite's connection page cache, never the host OS cache.
     sql.close(&conn)
     conn,ok,err=sql.open(os.args[1],.Main);check(err);require(ok)

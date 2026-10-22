@@ -158,6 +158,20 @@ type ListShellsArgs = {
   limit?: number;
 };
 
+// Keep serialization and the request URL identical; omitted/empty optional filters
+// must not create parallel entries for the same owner-scoped page.
+function shellListPath(args: ListShellsArgs): string {
+  const qs = new URLSearchParams();
+  if (args.chainId) qs.set('chain_id', args.chainId);
+  if (args.bridgeId) qs.set('bridge_id', args.bridgeId);
+  if (args.projectId) qs.set('project_id', args.projectId);
+  if (args.agentInstanceId) qs.set('agent_instance_id', args.agentInstanceId);
+  if (args.status) qs.set('status', args.status);
+  if (args.cursor) qs.set('cursor', args.cursor);
+  if (args.limit) qs.set('limit', String(args.limit));
+  return '/shells' + (qs.size ? `?${qs.toString()}` : '');
+}
+
 export interface CreateShellArgs {
   bridgeId: string;
   kind: ShellSessionKind;
@@ -284,18 +298,11 @@ async function fetchBridgeBootId(bridgeId: string): Promise<string> {
 export const shellsApi = heimdallApi.injectEndpoints({
   endpoints: (build) => ({
     listShells: build.query<ShellSessionPage, ListShellsArgs>({
-      queryFn: async ({ chainId, bridgeId, projectId, agentInstanceId, status, cursor, limit }) => {
+      // Equal wire requests share RTK's existing in-flight work and invalidation.
+      serializeQueryArgs: ({ endpointName, queryArgs }) => endpointName + shellListPath(queryArgs),
+      queryFn: async (args) => {
         try {
-          const qs = new URLSearchParams();
-          if (chainId) qs.set('chain_id', chainId);
-          if (bridgeId) qs.set('bridge_id', bridgeId);
-          if (projectId) qs.set('project_id', projectId);
-          if (agentInstanceId) qs.set('agent_instance_id', agentInstanceId);
-          if (status) qs.set('status', status);
-          if (cursor) qs.set('cursor', cursor);
-          if (limit) qs.set('limit', String(limit));
-          const suffix = qs.toString() ? `?${qs.toString()}` : '';
-          const data = await cookieJsonFetch(`/shells${suffix}`);
+          const data = await cookieJsonFetch(shellListPath(args));
           const sessions: ShellSession[] = Array.isArray(data)
             ? data
             : (Array.isArray(data?.sessions) ? data.sessions : []);
