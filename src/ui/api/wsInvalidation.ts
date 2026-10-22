@@ -1183,6 +1183,9 @@ export function handleUserWsEvent(dispatch: any, payload: any, ctx: WsCtx = {}) 
     return;
   }
   if (payload?.type === 'tool_activity_live_resync') {
+    // Bridge launch/relaunch registration also emits this event. Recover
+    // unavailable/offline instances through a fresh authoritative snapshot;
+    // ordinary status changes must not race it with duplicate discovery reads.
     dispatch(liveResyncRequested());
     return;
   }
