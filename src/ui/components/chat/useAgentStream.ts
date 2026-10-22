@@ -1,3 +1,5 @@
+import { useEntitlements } from '../../hooks/useEntitlements';
+import { announcePlanLimit, isPlanLimitError } from '../../utils/planLimit';
 import { PTY_COLOR_RESET, PaneDeliveryQueue, PaneWriteBatcher, normalizeSnapshotText, repaintCapturedScreenText } from '../shells/paneDeliveryQueue.ts';
 import { PTY_WIRE_FLAG_ENCRYPTED, PTY_WIRE_KIND_INPUT, PTY_WIRE_KIND_OUTPUT, PTY_WIRE_KIND_SCREEN, PTY_WIRE_VIEWER_HEADER_BYTES, PtyTextDecoder, decodePtyViewerFrame, decryptPtyPayload, PtyOutputReplayGuard, PtyReplayError, encodePtyViewerFrame, encryptPtyPayload, resetPtyInputStream, setPtyBridgeBootId, type PtyViewerFrame } from '../shells/ptyWire.ts';
 import { createInputCoalescer, type InputCoalescer } from '../shells/ptyInputCoalescer.ts';
@@ -42,11 +44,13 @@ export type UseAgentStreamOptions = {
    * signal is NOT also reported through onError.
    */
   onVaultLocked?: (signal: unknown) => void;
+  onPlanLimit?: (error: unknown) => void;
   onClose?: () => void;
   isVaultUnlocked?: boolean;
 };
 
 export interface UseAgentStreamResult {
+  readOnly: boolean;
   connected: boolean;
   isStreamReady: boolean;
   sendInput: (data: string) => void;
@@ -110,9 +114,22 @@ export function useAgentStream({
   onStreamClosed,
   onError,
   onVaultLocked,
+  onPlanLimit,
   onClose,
   isVaultUnlocked: propIsVaultUnlocked,
 }: UseAgentStreamOptions): UseAgentStreamResult {
+  const entitlements = useEntitlements();
+  const [serverReadOnly, setServerReadOnly] = useState(false);
+  const readOnly = !entitlements.terminal_input_enabled || serverReadOnly;
+  const readOnlyRef = useRef(readOnly);
+  readOnlyRef.current = readOnly;
+  const planBlockedRef = useRef(false);
+  const onPlanLimitRef = useRef(onPlanLimit);
+  onPlanLimitRef.current = onPlanLimit;
+  useEffect(() => {
+    planBlockedRef.current = false;
+    setServerReadOnly(false);
+  }, [agentInstanceId]);
   const [connected, setConnected] = useState(false);
   const [isStreamReady, setIsStreamReady] = useState(false);
   const isStreamReadyRef = useRef(false);
@@ -238,12 +255,20 @@ export function useAgentStream({
 
   const sendResize = useCallback((rows: number, cols: number) => {
     const s = socketRef.current;
-    if (!s || s.readyState !== WebSocket.OPEN) return;
+    if (readOnlyRef.current || planBlockedRef.current || !s || s.readyState !== WebSocket.OPEN) return;
     s.send(JSON.stringify({ type: 'resize', rows, cols }));
   }, []);
 
+  const refusePlan = (error: unknown) => {
+    if (planBlockedRef.current) return;
+    planBlockedRef.current = true;
+    closeSocket();
+    announcePlanLimit(error);
+    onPlanLimitRef.current?.(error);
+  };
+
   const connect = useCallback(() => {
-    if (!agentInstanceId || !enabled || stoppedRef.current || hiddenPausedRef.current) return;
+    if (!agentInstanceId || !enabled || stoppedRef.current || planBlockedRef.current || hiddenPausedRef.current) return;
     closeSocket();
 
     const connectId = ++activeConnectIdRef.current;
@@ -270,29 +295,9 @@ export function useAgentStream({
           onConnectRef.current?.();
           onResetRef.current?.();
 
-          // SIGWINCH micro-nudge for instant full-screen native repaint (REQ-STREAM-REDRAW-2)
-          // Matches tools/pty_host/src/dclient.rs:392-414: resize to cols - 1 then restore after 25ms
-          const targetRows = rowsRef.current ?? 24;
-          const targetCols = colsRef.current ?? 80;
-          if (targetCols > 1) {
-            // REQ-SHELL-29: announce the REAL geometry FIRST, before the nudge.
-            // The hub captures the late-join screen snapshot from the FIRST resize frame
-            // it sees (agent_instance_handlers.odin), and the nudge below deliberately
-            // sends a wrong width. Without this line that wrong width is what the capture
-            // wraps at, so a full-width line breaks one column early and every line after
-            // it shifts — and a shell sitting at a prompt never repaints to correct it.
-            // The shells hook already announces honest geometry on open
-            // (useShellStream.ts:202); this makes the agent pane consistent with it.
-            // ORDER IS LOAD-BEARING: keep this call above the cols - 1 nudge.
-            sendResize(targetRows, targetCols);
-            sendResize(targetRows, targetCols - 1);
-            clearMicroNudgeTimer();
-            microNudgeTimerRef.current = window.setTimeout(() => {
-              if (activeConnectIdRef.current === connectId && socket.readyState === WebSocket.OPEN) {
-                sendResize(targetRows, targetCols);
-              }
-            }, 25);
-          }
+          // The first honest geometry requests a screen snapshot; the hub does
+          // not resize the underlying PTY for read-only viewers.
+          socket.send(JSON.stringify({ type: 'resize', rows: rowsRef.current ?? 24, cols: colsRef.current ?? 80 }));
 
           // Fallback timer: if explicit stream_ready is not received within 750ms, mark ready and drain
           clearStreamReadyFallbackTimer();
@@ -363,10 +368,30 @@ export function useAgentStream({
 
         const handleControlMessage = (msg: AgentStreamMsg) => {
           if (activeConnectIdRef.current !== connectId) return;
+          if ((msg.type === 'ready' || msg.type === 'stream_ready') && typeof (msg as any).read_only === 'boolean') {
+            const denied = (msg as any).read_only;
+            readOnlyRef.current = readOnlyRef.current || denied;
+            setServerReadOnly(denied);
+            if (denied) {
+              pendingKeyEventsRef.current = [];
+              inputCoalescerRef.current?.reset();
+            }
+          }
           // PTY v2: input is sealed to the bridge's current unseal boot id, announced on
           // ready / stream_ready (so a restarted bridge's re-attach refreshes it).
           if ((msg.type === 'ready' || msg.type === 'stream_ready') && (msg as any).bridge_boot_id) {
             setPtyBridgeBootId(String(streamSessionIdRef.current || ''), (msg as any).bridge_boot_id);
+          }
+          if (msg.type === 'ready' && !readOnlyRef.current) {
+            const r = rowsRef.current ?? 24;
+            const c = colsRef.current ?? 80;
+            if (c > 1) {
+              sendResize(r, c - 1);
+              clearMicroNudgeTimer();
+              microNudgeTimerRef.current = window.setTimeout(() => {
+                if (activeConnectIdRef.current === connectId) sendResize(r, c);
+              }, 25);
+            }
           }
           if (msg.type === 'stream_ready') {
             clearStreamReadyFallbackTimer();
@@ -389,7 +414,9 @@ export function useAgentStream({
           } else if (msg.type === 'status') {
             onStatusRef.current?.(msg.status);
           } else if (msg.type === 'error') {
-            if (isVaultLockedError(msg)) {
+            if (isPlanLimitError(msg)) {
+              refusePlan(msg);
+            } else if (isVaultLockedError(msg)) {
               onVaultLockedRef.current?.(msg);
             } else {
               onErrorRef.current?.(msg.message);
@@ -418,6 +445,11 @@ export function useAgentStream({
           paneQueue.cancel();
           writeBatcher.reset();
           if (activeConnectIdRef.current !== connectId) return;
+          if (event.code === 4402) {
+            refusePlan({ code: 4402, details: { limit: 'max_concurrent_streams' } });
+            return;
+          }
+          if (planBlockedRef.current) return;
           if (isVaultLockedError({ reason: event?.reason })) {
             // T10: a locked vault is not a transport failure — no reconnect storm and
             // no fallback to polling; the pane shows its locked overlay instead.
@@ -515,16 +547,16 @@ export function useAgentStream({
   // REQ-PTY-NET-3: binary, coalesced, ack-less input — identical to useShellStream.
   const sendInputChunk = useCallback((data: string) => {
     const s = socketRef.current;
-    if (!s || s.readyState !== WebSocket.OPEN) return;
+    if (readOnlyRef.current || planBlockedRef.current || !s || s.readyState !== WebSocket.OPEN) return;
     const keyToUse = getActiveVaultKey();
     const isUnlocked = isVaultUnlockedRef.current || Boolean(keyToUse);
     const bytes = new TextEncoder().encode(data);
     if (isUnlocked && keyToUse) {
       inputQueueRef.current = inputQueueRef.current.then(async () => {
-        if (s.readyState !== WebSocket.OPEN) return;
+        if (readOnlyRef.current || planBlockedRef.current || s.readyState !== WebSocket.OPEN) return;
         try {
           const sealed = await encryptPtyPayload(bytes, keyToUse, String(streamSessionIdRef.current || ''));
-          if (s.readyState === WebSocket.OPEN) {
+          if (!readOnlyRef.current && !planBlockedRef.current && s.readyState === WebSocket.OPEN) {
             s.send(encodePtyViewerFrame(PTY_WIRE_KIND_INPUT, PTY_WIRE_FLAG_ENCRYPTED, sealed));
           }
         } catch {
@@ -550,6 +582,7 @@ export function useAgentStream({
   }, [dispatchInput]);
 
   const sendInput = useCallback((data: string) => {
+    if (readOnlyRef.current || planBlockedRef.current) return;
     if (!isStreamReadyRef.current) {
       pendingKeyEventsRef.current.push({ data, timestamp: Date.now() });
       return;
@@ -558,9 +591,10 @@ export function useAgentStream({
   }, [dispatchInput]);
 
   const reconnect = useCallback(() => {
+    planBlockedRef.current = false;
     reconnectAttemptsRef.current = 0;
     connect();
   }, [connect]);
 
-  return { connected, isStreamReady, sendInput, sendResize, reconnect };
+  return { readOnly, connected, isStreamReady, sendInput, sendResize, reconnect };
 }

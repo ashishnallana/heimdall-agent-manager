@@ -81,3 +81,11 @@ export function reusableBridgeStatusText(b: ReusableBridge): string {
   const at = Date.parse(b.last_seen);
   return Number.isFinite(at) ? `offline · last seen ${new Date(at).toLocaleString()}` : 'offline';
 }
+
+
+/** At capacity, a new approval must reuse a listed identity (zero also means full). */
+export function bridgeChoiceAtLimit(info: Pick<BridgeCodeInfo, 'reusable_bridges'>, choice: BridgeChoice, atCapacity: boolean): BridgeChoice {
+  if (!atCapacity) return choice;
+  const list = reusableBridgesOf(info);
+  return { mode: 'reuse', targetBridgeId: list.some((b) => b.bridge_id === choice.targetBridgeId) ? choice.targetBridgeId : list[0]?.bridge_id || '' };
+}

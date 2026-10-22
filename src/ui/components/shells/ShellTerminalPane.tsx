@@ -1,3 +1,6 @@
+import UpgradePrompt from '../billing/UpgradePrompt';
+import { useEntitlements } from '../../hooks/useEntitlements';
+import { planLimitDetails, type PlanLimitDetails } from '../../utils/planLimit';
 import { isPaneRepaintStart } from './paneDeliveryQueue.ts';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Terminal as TerminalType } from '@xterm/xterm';
@@ -68,6 +71,10 @@ export function ShellTerminalPane({
   session,
   isBridgeUnreachable: propIsBridgeUnreachable,
 }: ShellTerminalPaneProps) {
+  const entitlements = useEntitlements();
+  const [planLimit, setPlanLimit] = useState<PlanLimitDetails | null>(null);
+  const reportPlanLimit = (error: unknown) => setPlanLimit(planLimitDetails(error));
+  useEffect(() => { setPlanLimit(null); }, [session.session_id]);
   const { theme } = useTheme();
   const terminalContainerRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<TerminalType | null>(null);
@@ -119,13 +126,14 @@ export function ShellTerminalPane({
   // STREAMING PATH: Low-latency WebSocket streaming without term.reset()
   // --------------------------------------------------------------------------
   const {
+    readOnly: streamReadOnly,
     connected: streamConnected,
     sendInput: sendStreamInput,
     sendResize: sendStreamResize,
     reconnect: reconnectStream,
   } = useShellStream({
     sessionId: paneSessionId,
-    enabled: isStreamEnabled,
+    enabled: isStreamEnabled && !planLimit && entitlements.shells_enabled && entitlements.terminal_streaming_enabled,
     // REQ-SHELL-18 & REQ-SHELL-DOCK-NO-VSCROLL-23 — read back by the hook from inside the socket's `onopen`,
     // and again on every reconnect. The mount-time fit below computes the right geometry and pushes it,
     // but the socket is not open yet at that point, so that frame is dropped; this is what makes the PTY
@@ -170,6 +178,7 @@ export function ShellTerminalPane({
       }
       writeStreamBytes(term, bytes);
     },
+    onPlanLimit: reportPlanLimit,
     onVaultLocked: (signal) => {
       // A locked vault is not a stream failure: no fallback to polling.
       vaultLock.report(signal);
@@ -191,6 +200,9 @@ export function ShellTerminalPane({
   });
 
   // REQ-FIX-2 — which transport actually carries input, resize and repaints right now.
+  const readOnly = streamReadOnly || !entitlements.terminal_input_enabled || !entitlements.shells_enabled || Boolean(planLimit);
+  const readOnlyRef = useRef(readOnly);
+  readOnlyRef.current = readOnly;
   const streamingMode = resolveStreamingMode(
     { isStreamingActive, isStreamEnabled },
     streamConnected
@@ -260,9 +272,10 @@ export function ShellTerminalPane({
     isBridgeUnreachable: subIsBridgeUnreachable,
     refetch,
   } = useShellPaneSubscription({
+    onPlanLimit: reportPlanLimit,
     // Live for the whole reconnect window, so a stream drop degrades to a real polled repaint
     // instead of a pane that silently stops updating (REQ-FIX-2).
-    sessionId: pollingSubscriptionSessionId(paneSessionId, streamingMode),
+    sessionId: !planLimit && entitlements.shells_enabled && entitlements.terminal_streaming_enabled ? pollingSubscriptionSessionId(paneSessionId, streamingMode) : null,
     status: session.status,
   });
 
@@ -313,6 +326,7 @@ export function ShellTerminalPane({
   // supplies the two sinks.
   const handleInput = useCallback(
     (data: string) => {
+      if (readOnlyRef.current || !entitlements.shells_enabled) return;
       dispatchShellInput(streamingMode, data, {
         // STREAMING: Send keystrokes directly over WebSocket without debounce
         sendOverStream: sendStreamInput,
@@ -354,6 +368,7 @@ export function ShellTerminalPane({
     (rows: number, cols: number) => {
       const effectiveCols = Math.max(cols, 40);
       const effectiveRows = Math.max(rows, 1);
+      if (readOnlyRef.current || !entitlements.shells_enabled) return;
       dispatchShellResize(streamingMode, effectiveRows, effectiveCols, {
         sendOverStream: sendStreamResize,
         sendOverHttp: (sinkRows, sinkCols) => {
@@ -401,6 +416,7 @@ export function ShellTerminalPane({
       : null;
 
     const term = new Terminal({
+      disableStdin: readOnlyRef.current,
       convertEol: !isStreamingActive,
       cursorBlink: true,
       cursorStyle: 'bar',
@@ -682,12 +698,17 @@ export function ShellTerminalPane({
   const showUnreachableBanner = isBridgeUnreachable && (Boolean(output) || streamConnected);
   const showConnecting = !output && !streamConnected && (session.status === 'starting' || isLoading);
 
+  useEffect(() => {
+    if (terminalRef.current) terminalRef.current.options.disableStdin = readOnly;
+  }, [readOnly]);
+
   return (
     <div
       data-debug-id={`shell-terminal-pane-${session.session_id}`}
       className="relative flex flex-col flex-1 h-full min-h-0 w-full overflow-hidden bg-canvas"
     >
-      {showUnreachableBanner && (
+      {planLimit ? <UpgradePrompt details={planLimit} debugId="shell-pane-plan-limit" onRetry={() => { setPlanLimit(null); reconnectStream(); }} /> : !entitlements.shells_enabled ? <UpgradePrompt details={{ limit: 'shells_enabled' }} debugId="shell-pane-shells-upgrade" /> : readOnly ? <UpgradePrompt subtle details={{ limit: 'terminal_input_enabled' }} debugId="shell-pane-read-only" /> : null}
+      {showUnreachableBanner && !planLimit && (
         <div
           data-debug-id="shell-terminal-unreachable-banner"
           className="z-10 flex shrink-0 items-center justify-between gap-2 border-b border-warning/30 bg-warning-soft px-3 py-1.5 text-xs text-warning"
@@ -708,7 +729,7 @@ export function ShellTerminalPane({
         </div>
       )}
 
-      {showReconnectingBanner && (
+      {showReconnectingBanner && !planLimit && entitlements.shells_enabled && (
         <div
           data-debug-id="shell-terminal-reconnecting-banner"
           className="z-10 flex shrink-0 items-center gap-1.5 border-b border-subtle bg-surface-raised px-3 py-1.5 text-xs text-muted"

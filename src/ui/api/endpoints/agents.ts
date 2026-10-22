@@ -567,7 +567,7 @@ export const agentsApi = heimdallApi.injectEndpoints({
           const data = await cookieJsonFetch(path);
           return { data: await openPaneReplyOutput(data || {}, agentInstanceId) };
         } catch (error: any) {
-          return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any };
+          return { error: customQueryError(error) as any };
         }
       },
       serializeQueryArgs: ({ endpointName, queryArgs }) => {

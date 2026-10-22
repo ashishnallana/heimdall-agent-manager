@@ -6,6 +6,7 @@
 
 import { withApiBase } from './apiBase';
 import type { WireErrorClass } from './wireError';
+import { announcePlanLimit } from '../utils/planLimit';
 
 /**
  * ApiError carries the hub's MACHINE-READABLE error code alongside the message.
@@ -66,7 +67,9 @@ export async function errorFromResponse(res: Response): Promise<ApiError> {
     if (typeof errBody?.error?.cause === 'string') cause = errBody.error.cause;
     if (errBody?.error?.details && typeof errBody.error.details === 'object') details = errBody.error.details;
   } catch (e) { /* non-JSON or unreadable body — the status line is all we have */ }
-  return new ApiError(msg, res.status, code, errorClass, cause, details);
+  const error = new ApiError(msg, res.status, code, errorClass, cause, details);
+  announcePlanLimit(error);
+  return error;
 }
 
 // `withApiBase` is the identity in every normal build; it only does something in a
@@ -133,14 +136,15 @@ export async function cookieMutation(path: string, method: string = 'POST', data
  * them a typed refusal (HTTP 423 `vault_locked`) collapses into free text and the UI
  * can no longer tell a locked bridge from any other failure.
  */
-export function customQueryError(error: unknown): { status: 'CUSTOM_ERROR'; error: string; code?: string; originalStatus?: number } {
+export function customQueryError(error: unknown): { status: 'CUSTOM_ERROR'; error: string; code?: string; originalStatus?: number; details?: any } {
   const e = error as any;
-  const out: { status: 'CUSTOM_ERROR'; error: string; code?: string; originalStatus?: number } = {
+  const out: { status: 'CUSTOM_ERROR'; error: string; code?: string; originalStatus?: number; details?: any } = {
     status: 'CUSTOM_ERROR',
     error: String(e?.message || e),
   };
   if (typeof e?.code === 'string' && e.code) out.code = e.code;
   if (typeof e?.status === 'number') out.originalStatus = e.status;
+  if (e?.details) out.details = e.details;
   return out;
 }
 

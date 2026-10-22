@@ -1,3 +1,6 @@
+import { useEntitlements } from '../../hooks/useEntitlements';
+import UpgradePrompt from '../billing/UpgradePrompt';
+import { isPlanLimitError, planLimitDetails } from '../../utils/planLimit';
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Icon, Menu } from '@ui';
 import {
@@ -37,6 +40,7 @@ export interface ShellMainPaneProps {
  * detaches; killing is an explicit, confirmed menu action.
  */
 export function ShellMainPane({ sessionId, isMobile, isFocused = false, openIds, onSwitch, onClose, headerLeading, headerEnd }: ShellMainPaneProps) {
+  const entitlements = useEntitlements();
   const { data: session } = useGetShellSessionQuery({ sessionId }, { skip: !sessionId });
   const { data: bridgesData } = useListBridgesQuery(undefined);
   const bridge = (bridgesData?.bridges || []).find((b: any) => b.bridge_id === session?.bridge_id);
@@ -98,7 +102,7 @@ export function ShellMainPane({ sessionId, isMobile, isFocused = false, openIds,
             </button>
           }
         >
-          <Menu.Item data-debug-id="shell-main-pane-restart" disabled={!session || restartState.isLoading} onClick={() => void restartShell({ sessionId })}>
+          <Menu.Item data-debug-id="shell-main-pane-restart" disabled={!entitlements.shells_enabled || !session || restartState.isLoading} onClick={() => void restartShell({ sessionId })}>
             <Icon name="refresh" size={15} />
             <span>Restart shell</span>
           </Menu.Item>
@@ -141,7 +145,7 @@ export function ShellMainPane({ sessionId, isMobile, isFocused = false, openIds,
         <div data-debug-id="shell-main-pane-exited" className="flex shrink-0 items-center gap-3 border-b border-subtle bg-neutral-soft px-4 py-2 text-sm text-muted">
           <Icon name="info" size={15} />
           <span className="flex-1">Shell exited{session?.exit_code_set ? ` with code ${session.exit_code}` : ''}.</span>
-          <button type="button" data-debug-id="shell-main-pane-exited-restart" onClick={() => void restartShell({ sessionId })} disabled={restartState.isLoading} className={`rounded-lg bg-accent px-3 font-semibold text-accent-fg disabled:opacity-50 ${isMobile ? 'h-11' : 'h-8'}`}>Restart</button>
+          <button type="button" data-debug-id="shell-main-pane-exited-restart" onClick={() => void restartShell({ sessionId })} disabled={restartState.isLoading || !entitlements.shells_enabled} className={`rounded-lg bg-accent px-3 font-semibold text-accent-fg disabled:opacity-50 ${isMobile ? 'h-11' : 'h-8'}`}>Restart</button>
           <button type="button" data-debug-id="shell-main-pane-exited-close" onClick={onClose} className={`rounded-lg border border-subtle px-3 text-primary ${isMobile ? 'h-11' : 'h-8'}`}>Close</button>
         </div>
       ) : null}
@@ -186,6 +190,7 @@ function ShellSwitcher({
   const [query, setQuery] = useState('');
   const ref = useRef<HTMLDivElement | null>(null);
   const { data } = useListShellsQuery({ status: 'live', limit: 200 });
+  const entitlements = useEntitlements();
   const [createShell, createState] = useCreateShellMutation();
   const list = useMemo(() => attachableShells(data?.sessions, { allProjects: true, query }), [data, query]);
   useEffect(() => {
@@ -240,8 +245,9 @@ function ShellSwitcher({
       <button
         type="button"
         data-debug-id="shell-main-pane-switcher-new"
-        disabled={createState.isLoading}
+        disabled={createState.isLoading || !entitlements.shells_enabled}
         onClick={async () => {
+          if (!entitlements.shells_enabled) return;
           try {
             const created = await createShell(buildInteractiveShellRequest({ bridgeId, cwd, projectId })).unwrap();
             onPick(created.session_id);
@@ -252,6 +258,7 @@ function ShellSwitcher({
         <Icon name="plus" size={15} />
         {createState.isLoading ? 'Starting…' : `New shell on ${bridgeName}`}
       </button>
+      {!entitlements.shells_enabled || isPlanLimitError(createState.error) ? <UpgradePrompt details={isPlanLimitError(createState.error) ? planLimitDetails(createState.error) : { limit: 'shells_enabled' }} debugId="shell-switcher-upgrade" /> : null}
       {createState.error ? <p className="px-3 pb-2 text-xs text-danger">{describeApiError(createState.error) || 'Could not start a shell.'}</p> : null}
     </div>
   );

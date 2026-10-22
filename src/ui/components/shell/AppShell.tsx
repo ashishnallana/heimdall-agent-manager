@@ -1,3 +1,5 @@
+import UpgradePrompt from '../billing/UpgradePrompt';
+import { PLAN_LIMIT_EVENT, type PlanLimitDetails } from '../../utils/planLimit';
 import { Fragment, Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import ConversationsHomePage from '../chat/ConversationsHomePage';
@@ -1614,7 +1616,36 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
   const isMobile = viewport === 'mobile';
   // Subscription tier shown under the account row. Hubs without billing answer
   // with an error, so the row simply stays hidden there.
-  const billingQuery = useGetAccountBillingQuery(user?.user_id || '', { skip: !user?.user_id });
+  const billingQuery = useGetAccountBillingQuery(user?.user_id || '', {
+    skip: !user?.user_id, refetchOnMountOrArgChange: false, refetchOnFocus: false, refetchOnReconnect: false,
+  });
+  const [planLimit, setPlanLimit] = useState<PlanLimitDetails | null>(null);
+  useEffect(() => {
+    const onLimit = (event: Event) => {
+      setPlanLimit((event as CustomEvent<PlanLimitDetails>).detail || {});
+      dispatch(heimdallApi.util.invalidateTags(['planLimitReached']));
+    };
+    const onFocus = () => {
+      // Only a return from this user's checkout should refresh the persistent cache.
+      if (window.sessionStorage.getItem('heimdall:checkout-user') === user.user_id) {
+        window.sessionStorage.removeItem('heimdall:checkout-user');
+        dispatch(heimdallApi.util.invalidateTags(['planLimitReached']));
+      }
+    };
+    window.addEventListener(PLAN_LIMIT_EVENT, onLimit);
+    window.addEventListener('focus', onFocus);
+    onFocus();
+    return () => {
+      window.removeEventListener(PLAN_LIMIT_EVENT, onLimit);
+      window.removeEventListener('focus', onFocus);
+    };
+  }, [dispatch, user.user_id]);
+  useEffect(() => {
+    // A checkout return can precede its webhook; only pending checkouts need retries.
+    if (!billingQuery.data?.checkout_pending) return;
+    const timer = window.setInterval(() => void billingQuery.refetch(), 5000);
+    return () => window.clearInterval(timer);
+  }, [billingQuery.data?.checkout_pending, billingQuery.refetch]);
   const planLabel = billingQuery.data?.plan_label || '';
   // The user row (and its avatar when collapsed) is the sidebar's only Settings entry point.
   const openAccountSettings = () => { if (isMobile) setDrawerOpen(false); setSettingsModalTab('account'); setSettingsModalOpen(true); };
@@ -2098,6 +2129,7 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
         }}
       />
       <VaultResetBanner />
+      {planLimit && <div className="fixed bottom-12 left-4 right-4 z-50 mx-auto max-w-2xl"><UpgradePrompt details={planLimit} debugId="global-plan-limit" onDismiss={() => setPlanLimit(null)} /></div>}
       {settingsModalLoaded && (
         <Suspense fallback={null}>
           <SettingsModal
