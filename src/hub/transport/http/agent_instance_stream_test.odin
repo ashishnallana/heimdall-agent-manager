@@ -471,6 +471,7 @@ agent_stream_check_input_policy :: proc(t: ^testing.T, read_only: bool) {
 		net.close(pair.client); pair.client = net.TCP_Socket(0)
 		thread.join(th)
 		thread.destroy(th)
+		testing.expect_value(t, shell_svc.user_viewer_counts["user_alice"], 0, "disconnect releases the user's stream slot")
 	}
 
 	// Read HTTP 101 Switching Protocols response and ready frame
@@ -480,6 +481,10 @@ agent_stream_check_input_policy :: proc(t: ^testing.T, read_only: bool) {
 	testing.expect(t, strings.contains(frame, `"agent_instance_id":"inst_handshake"`), "frame contains agent_instance_id")
 	testing.expect(t, strings.contains(frame, "\"read_only\":true" if read_only else "\"read_only\":false"))
 	delete(frame)
+
+	sync.mutex_lock(&shell_svc.mu)
+	testing.expect_value(t, shell_svc.user_viewer_counts["user_alice"], 1)
+	sync.mutex_unlock(&shell_svc.mu)
 
 	if read_only {
 		shell_session_svc.shell_session_broadcast_output(&shell_svc, "inst_handshake", transmute([]byte)string("live output"))

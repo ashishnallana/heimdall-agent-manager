@@ -42,6 +42,10 @@ Shell_Session_Service :: struct {
 	viewer_write_mu: map[string]^sync.Mutex,
 	viewer_writers: map[net.TCP_Socket]^Pane_Viewer_Writer,
 	viewer_write_refs: map[string]int,
+	user_viewer_counts: map[string]int, // user_id -> reserved PTY streams, protected by mu
+	pane_poll_budgets: map[string]Pane_Poll_Budget,
+	pane_poll_now: proc(ctx: rawptr) -> time.Tick, // optional monotonic test clock
+	pane_poll_clock_ctx: rawptr,
 	pane_bridge_bytes: map[string]int,
 	// REQ-PTY-NET-4: last repaint per session, see shell_snapshot_cache.odin. Under mu.
 	snapshot_cache: map[string]^Shell_Snapshot_Cache_Entry,
@@ -87,6 +91,7 @@ new_shell_session_service :: proc(
 		viewer_write_mu = make(map[string]^sync.Mutex, heap),
 		viewer_writers = make(map[net.TCP_Socket]^Pane_Viewer_Writer, heap),
 		viewer_write_refs = make(map[string]int, heap),
+		user_viewer_counts = make(map[string]int, heap),
 		pane_bridge_bytes = make(map[string]int, heap),
 		repo            = repo,
 		bridge_command_sink = bridge_command_sink,
@@ -124,6 +129,10 @@ shell_session_service_free :: proc(svc: ^Shell_Session_Service) {
 	}
 	delete(svc.viewer_write_mu)
 	delete(svc.viewer_write_refs)
+	for user_id in svc.user_viewer_counts do delete(user_id, heap)
+	delete(svc.user_viewer_counts)
+	for user_id in svc.pane_poll_budgets do delete(user_id, heap)
+	delete(svc.pane_poll_budgets)
 	for k, v in svc.session_owners { delete(k, heap); delete(v, heap) }
 	delete(svc.session_owners)
 	for k, v in svc.session_bridges { delete(k, heap); delete(v, heap) }
@@ -144,7 +153,10 @@ shell_session_service_free :: proc(svc: ^Shell_Session_Service) {
 
 // --- WS attach/detach (Attach-gated streaming, REQ-STREAM-IMPL-2) ---
 
-// Returns late_join: whether this socket joined a session that ALREADY had viewers.
+Attach_Status :: enum { Attached, Late_Join, Rejected_Limit, Rejected }
+Attach_Result :: struct { status: Attach_Status, err: domain.Domain_Error }
+
+// Late_Join means this socket joined a session that ALREADY had viewers.
 // Equivalently: whether this attach did NOT trigger a bridge attach. Reported from under
 // the lock rather than inferred from a later viewer count, which would race a second
 // viewer attaching concurrently.
@@ -166,18 +178,32 @@ shell_session_service_free :: proc(svc: ^Shell_Session_Service) {
 // ws_kind is the heimdall_ws_* `kind` label for this viewer socket (telemetry only):
 // project_service.WS_KIND_SHELL for the shells pane, WS_KIND_AGENT_STREAM for the
 // agent pane. Pass one of those constants — the value is retained uncloned.
-shell_session_attach :: proc(svc: ^Shell_Session_Service, session_id: string, socket: net.TCP_Socket, bridge_id: string = "", ws_kind: string = project_service.WS_KIND_SHELL) -> (late_join: bool) {
-	if svc == nil || session_id == "" do return false
+shell_session_attach :: proc(svc: ^Shell_Session_Service, session_id: string, socket: net.TCP_Socket, bridge_id: string = "", ws_kind: string = project_service.WS_KIND_SHELL, user_id: string = "") -> Attach_Result {
+	if svc == nil || session_id == "" do return {.Rejected, domain.domain_error(.Internal_Error, "PTY viewer service is unavailable")}
+	parameters := domain.unlimited_entitlements()
+	if user_id != "" {
+		lookup_err: domain.Domain_Error
+		parameters, lookup_err = domain.lookup_entitlements(svc.entitlements, user_id)
+		if lookup_err.code != .None do return {.Rejected, lookup_err}
+	}
 	heap := runtime.heap_allocator()
 	sync.mutex_lock(&svc.mu)
+	if existing, exists := svc.viewer_writers[socket]; exists && (existing.session_id != session_id || existing.user_id != user_id) {
+		sync.mutex_unlock(&svc.mu)
+		return {.Rejected, domain.domain_error(.Conflict, "PTY viewer is already attached to another identity")}
+	}
 	if _, exists := svc.viewer_writers[socket]; !exists {
+		current := svc.user_viewer_counts[user_id]
+		if user_id != "" && parameters.max_concurrent_streams >= 0 && current >= parameters.max_concurrent_streams {
+			sync.mutex_unlock(&svc.mu)
+			return {.Rejected_Limit, domain.plan_limit_error("max_concurrent_streams", parameters.max_concurrent_streams, current, "Current")}
+		}
 		same_bridge := 0
 		for _, w in svc.viewer_writers { if w.bridge_id == bridge_id do same_bridge += 1 }
 		if len(svc.viewer_writers) >= PANE_VIEWER_LIMIT || same_bridge >= PANE_VIEWERS_PER_BRIDGE {
 			sync.mutex_unlock(&svc.mu)
-			_ = net.shutdown(socket, .Both)
 			fmt.eprintln("ham-hub WARN pane viewer admission rejected: active viewer quota")
-			return false
+			return {.Rejected, domain.domain_error(.Rate_Limited, "PTY viewer capacity reached")}
 		}
 	}
 
@@ -193,7 +219,16 @@ shell_session_attach :: proc(svc: ^Shell_Session_Service, session_id: string, so
 		}
 	}
 	if !already_present {
-		if !pane_viewer_start_locked(svc, socket, bridge_id, session_id, ws_kind) { pane_sequence_collect_locked(svc, session_id); sync.mutex_unlock(&svc.mu); return false }
+		if !pane_viewer_start_locked(svc, socket, bridge_id, session_id, ws_kind, user_id) {
+			pane_sequence_collect_locked(svc, session_id)
+			sync.mutex_unlock(&svc.mu)
+			return {.Rejected, domain.domain_error(.Internal_Error, "Could not start PTY viewer")}
+		}
+		if user_id != "" {
+			if svc.user_viewer_counts == nil do svc.user_viewer_counts = make(map[string]int, heap)
+			if _, exists := svc.user_viewer_counts[user_id]; !exists do svc.user_viewer_counts[strings.clone(user_id, heap)] = 0
+			svc.user_viewer_counts[user_id] += 1
+		}
 		// A new attach is never "already painted", even on a reused fd number.
 		_snapshot_cache_forget_viewer_locked(svc, session_id, socket)
 		append(&svc.viewers[session_id], socket)
@@ -248,7 +283,7 @@ shell_session_attach :: proc(svc: ^Shell_Session_Service, session_id: string, so
 			},
 		)
 	}
-	return prev_count > 0
+	return {.Late_Join if prev_count > 0 else .Attached, {}}
 }
 
 shell_session_detach :: proc(
@@ -287,7 +322,17 @@ shell_session_detach :: proc(
 	}
 	remaining := len(viewers^)
 	writer := svc.viewer_writers[socket]
-	if removed do delete_key(&svc.viewer_writers, socket)
+	if removed {
+		delete_key(&svc.viewer_writers, socket)
+		if writer != nil && writer.user_id != "" {
+			svc.user_viewer_counts[writer.user_id] -= 1
+			if svc.user_viewer_counts[writer.user_id] == 0 {
+				for key in svc.user_viewer_counts {
+					if key == writer.user_id { delete_key(&svc.user_viewer_counts, key); delete(key, runtime.heap_allocator()); break }
+				}
+			}
+		}
+	}
 	// The fd may be reused for the next viewer; it must not stay "painted".
 	if removed do _snapshot_cache_forget_viewer_locked(svc, session_id, socket)
 	if remaining == 0 do pane_sequence_collect_locked(svc, session_id)

@@ -92,7 +92,7 @@ test_p4_viewer_one_gets_exactly_one_repaint_from_the_catchup :: proc(t: ^testing
 	defer p4_close(&pair)
 	svc := shell_session_svc.new_shell_session_service()
 	defer shell_session_svc.shell_session_service_free(&svc)
-	late_join := shell_session_svc.shell_session_attach(&svc, "sh_p4_first", pair.hub, "brg")
+	late_join := shell_session_svc.shell_session_attach(&svc, "sh_p4_first", pair.hub, "brg").status == .Late_Join
 	testing.expect(t, !late_join, "this viewer triggers the 0->1 attach")
 
 	// The catch-up lands 60 ms after the viewer's first resize — inside the grace.
@@ -128,7 +128,7 @@ test_p4_late_joiner_is_served_from_cache_and_miss_captures_once :: proc(t: ^test
 	shell_session_svc.shell_session_broadcast_output(&svc, sid, transmute([]byte)screen, false, true)
 
 	// Viewer #2 joins: served from the cache, no capture, exactly one repaint.
-	late := shell_session_svc.shell_session_attach(&svc, sid, second.hub, "brg")
+	late := shell_session_svc.shell_session_attach(&svc, sid, second.hub, "brg").status == .Late_Join
 	testing.expect(t, late)
 	capture := Counting_Capture{reply = "{\"output\":\"hub capture for a miss\",\"cursor_row\":0,\"cursor_col\":0}"}
 	testing.expect(t, shell_stream_serve_screen_snapshot(&svc, sid, second.hub, 24, 80, late, Shell_Screen_Capture{ctx = rawptr(&capture), call = _counting_capture_call}))
@@ -144,7 +144,7 @@ test_p4_late_joiner_is_served_from_cache_and_miss_captures_once :: proc(t: ^test
 	sync.mutex_lock(&svc.mu)
 	svc.snapshot_cache[sid].at = time.Tick{_nsec = time.tick_now()._nsec - i64(shell_session_svc.SHELL_SNAPSHOT_CACHE_FRESH) - 1}
 	sync.mutex_unlock(&svc.mu)
-	late3 := shell_session_svc.shell_session_attach(&svc, sid, third.hub, "brg")
+	late3 := shell_session_svc.shell_session_attach(&svc, sid, third.hub, "brg").status == .Late_Join
 	testing.expect(t, shell_stream_serve_screen_snapshot(&svc, sid, third.hub, 40, 120, late3, Shell_Screen_Capture{ctx = rawptr(&capture), call = _counting_capture_call}))
 	testing.expect_value(t, capture.calls, 1)
 	seq3, _ := p4_repaints(third.client, 200 * time.Millisecond)
@@ -164,7 +164,7 @@ test_p4_viewer_one_falls_back_to_capture_when_no_catchup_arrives :: proc(t: ^tes
 	defer p4_close(&pair)
 	svc := shell_session_svc.new_shell_session_service()
 	defer shell_session_svc.shell_session_service_free(&svc)
-	late_join := shell_session_svc.shell_session_attach(&svc, "sh_p4_fallback", pair.hub, "brg")
+	late_join := shell_session_svc.shell_session_attach(&svc, "sh_p4_fallback", pair.hub, "brg").status == .Late_Join
 	capture := Counting_Capture{reply = "{\"output\":\"only the capture can paint this one\",\"cursor_row\":0,\"cursor_col\":0}"}
 	// Short grace so the test is quick; REQ-SHELL-61: the viewer still gets a screen.
 	ok := shell_stream_serve_screen_snapshot(&svc, "sh_p4_fallback", pair.hub, 24, 80, late_join, Shell_Screen_Capture{ctx = rawptr(&capture), call = _counting_capture_call}, grace = 50 * time.Millisecond)

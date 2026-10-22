@@ -187,11 +187,14 @@ agent_instance_stream_handler :: proc(ctx: rawptr, req: Request, client: net.TCP
 
 	// REQ-SHELL-29: same late-join hole as the shells pane — both consume the identical
 	// `screen` frame and both funnel through shell_session_attach. See the shells handler.
-	late_join := false
-	screen_sent := false
-	if h.shell_sessions != nil {
-		late_join = shell_session_svc.shell_session_attach(h.shell_sessions, instance_id, client, inst.bridge_id, project_service.WS_KIND_AGENT_STREAM)
+	attach := shell_session_svc.shell_session_attach(h.shell_sessions, instance_id, client, inst.bridge_id, project_service.WS_KIND_AGENT_STREAM, pty_stream_user_id(auth_ctx))
+	if attach.status == .Rejected_Limit || attach.status == .Rejected {
+		ws_close_reason = "frame_rejected"
+		write_pty_attach_error(client, attach.err)
+		return
 	}
+	late_join := attach.status == .Late_Join
+	screen_sent := false
 	defer {
 		if h.shell_sessions != nil {
 			// REQ-SHELL-41: ordinary detach on the stream handler's way out.

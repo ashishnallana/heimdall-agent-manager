@@ -171,6 +171,10 @@ export function useShellPaneSubscription({
         if (err?.name === 'AbortError') {
           return;
         }
+        // A shared capture budget can skip a poll; retain the last good screen.
+        if (err?.status === 429 || err?.originalStatus === 429) {
+          return;
+        }
         const is503 = err?.status === 503 || err?.originalStatus === 503;
         const errMsg = String(err?.data?.error || err?.data?.message || err?.message || '').toLowerCase();
         const unreachable = is503 || errMsg.includes('bridge') || errMsg.includes('unreachable') || errMsg.includes('offline');
@@ -264,7 +268,10 @@ export function useShellPaneSubscription({
     result.isLoading ||
     (Boolean(sessionId) && interval > 0 && lastUpdatedAt === null && result.isFetching);
 
-  const queryError = result.error as any;
+  const rawQueryError = result.error as any;
+  const queryError = rawQueryError?.status === 429 || rawQueryError?.originalStatus === 429
+    ? undefined
+    : rawQueryError;
   const isQuery503 = queryError?.status === 503 || queryError?.originalStatus === 503;
   const queryErrMsg = String(queryError?.data?.error || queryError?.data?.message || queryError?.message || '').toLowerCase();
   const queryUnreachable = Boolean(
@@ -284,7 +291,7 @@ export function useShellPaneSubscription({
     lastUpdatedAt,
     polling: interval > 0,
     isBridgeUnreachable: effectiveIsBridgeUnreachable,
-    error: error || result.error,
+    error: error || queryError,
     refetch,
   };
 }

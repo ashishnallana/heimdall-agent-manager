@@ -253,6 +253,10 @@ get_agent_instance_pane_handler :: proc(ctx: rawptr, req: Request) -> Response {
 		return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req))
 	}
 
+	if poll_err := shell_session_svc.shell_session_admit_pane_poll(h.shell_sessions, auth_ctx); poll_err.code != .None {
+		return respond_error(poll_err, req.request_id)
+	}
+
 	reply, reply_ok, reply_err := agent_service.get_instance_pane(h.agents, auth_ctx, instance_id, since_hash, width, line_limit)
 	if !reply_ok do return respond_error(reply_err, req.request_id)
 	return respond_success(reply, req.request_id, auth_ctx_server_time(req))

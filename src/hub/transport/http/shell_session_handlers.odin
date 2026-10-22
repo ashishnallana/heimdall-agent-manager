@@ -171,7 +171,13 @@ shell_session_stream_handler :: proc(ctx: rawptr, req: Request, client: net.TCP_
 	// EVERY attaching viewer. It is still read from the attach (rather than inferred later)
 	// because it remains the one race-free answer to "did this socket trigger a bridge
 	// attach", which is what the first-frame diagnostic below is interpreted against.
-	late_join := shell_session_svc.shell_session_attach(h.shell_sessions, session_id, client, session.bridge_id, project_service.WS_KIND_SHELL)
+	attach := shell_session_svc.shell_session_attach(h.shell_sessions, session_id, client, session.bridge_id, project_service.WS_KIND_SHELL, pty_stream_user_id(auth_ctx))
+	if attach.status == .Rejected_Limit || attach.status == .Rejected {
+		ws_close_reason = "frame_rejected"
+		write_pty_attach_error(client, attach.err)
+		return
+	}
+	late_join := attach.status == .Late_Join
 	// REQ-SHELL-41: the ORDINARY detach — this viewer's own stream handler is returning.
 	defer shell_session_svc.shell_session_detach(h.shell_sessions, session_id, client, session.bridge_id, .Stream_Closed)
 	screen_sent := false

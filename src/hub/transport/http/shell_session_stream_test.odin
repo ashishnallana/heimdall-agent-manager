@@ -877,6 +877,10 @@ shell_stream_check_input_policy :: proc(t: ^testing.T, read_only: bool) {
 		testing.expect(t, strings.contains(frame, "\"read_only\":true" if read_only else "\"read_only\":false"))
 		delete(frame)
 	}
+	sync.mutex_lock(&shell_svc.mu)
+	testing.expect_value(t, shell_svc.user_viewer_counts["user_input"], 1)
+	sync.mutex_unlock(&shell_svc.mu)
+	defer testing.expect_value(t, shell_svc.user_viewer_counts["user_input"], 0, "disconnect releases the user's stream slot")
 	// A cached screen must still be sent in response to the first resize,
 	// without sending any PTY resize command to the bridge.
 	if read_only {

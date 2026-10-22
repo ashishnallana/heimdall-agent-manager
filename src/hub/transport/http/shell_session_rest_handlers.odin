@@ -552,6 +552,10 @@ shell_session_pane_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	line_limit := query_int(req.query, "line_limit", 120)
 	if line_limit <= 0 do line_limit = 120
 
+	if poll_err := shell_session_svc.shell_session_admit_pane_poll(h.shell_sessions, auth_ctx); poll_err.code != .None {
+		return respond_error(poll_err, req.request_id)
+	}
+
 	reply, got, err := shell_session_svc.shell_session_get_pane(h.shell_sessions, auth_ctx, session_id, since_hash, width, line_limit)
 	if !got do return respond_error(err, req.request_id)
 	return respond_success(reply, req.request_id, auth_ctx_server_time(req))
