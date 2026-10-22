@@ -112,8 +112,12 @@ test_m104_upgrade_is_idempotent_and_keeps_rows :: proc(t: ^testing.T) {
 	testing.expect(t, mig_ok, "upgrade applies 104")
 	fsi_expect_indexes(t, &conn, true, "after upgrade")
 	testing.expect(t, migration_applied(&conn, FSI_MIGRATION), "upgrade records 104")
-	row, found, _ := shell_session_get_sqlite(&shell_impl, FSI_OWNER, "sh_m104")
-	testing.expect(t, found && row.status == "running" && row.kind == "server", "existing row survives the upgrade")
+	{
+		// The row's strings are owned clones; temp allocator keeps the test leak-free.
+		context.allocator = context.temp_allocator
+		row, found, _ := shell_session_get_sqlite(&shell_impl, FSI_OWNER, "sh_m104")
+		testing.expect(t, found && row.status == "running" && row.kind == "server", "existing row survives the upgrade")
+	}
 
 	mig_ok, _ = run_migrations(&conn)
 	testing.expect(t, mig_ok, "second run is a no-op")
