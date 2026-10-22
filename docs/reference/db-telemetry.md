@@ -159,6 +159,10 @@ sum by (conn, kind) (rate(heimdall_sqlite_cache_events_total{kind=~"miss|write|s
 rate(process_cpu_seconds_total[1h]) / rate(heimdall_http_requests_total[1h])
 ```
 
+Grafana: these panels, and more, are in the generated **Heimdall / Hub DB** dashboard
+(`tools/telemetry/hub/grafana/dashboards/hub-db.json`, uid `heimdall-hub-db`). The README in
+`tools/telemetry/hub/` explains how to activate it; pushing the repository does not update a live Grafana.
+
 ## 5. Overhead (measured)
 
 `verify-db-telemetry.sh` runs `sqlite.test_db_telemetry_bench`: an optimised build (`-o:speed`), 5 runs, 200 k iterations on an in-process `SELECT 1`. On the dev host (basic-default integration, 5 runs) it gave:
@@ -190,6 +194,8 @@ rate(process_cpu_seconds_total[1h]) / rate(heimdall_http_requests_total[1h])
 ## 7. Verify
 
 ```bash
+bash verify-db-dashboard.sh   # Grafana: generator reproducibility, JSON/UID/panel-id checks,
+                              # metrics and label values against src/, promtool PromQL syntax
 bash verify-db-telemetry.sh   # scoped tests (DBT_TESTS, single thread), default-mode tests, lock inventory,
                               # hub build, startup smoke (unset/basic -> basic, off -> no families,
                               # full/unknown -> boot fails), benchmark

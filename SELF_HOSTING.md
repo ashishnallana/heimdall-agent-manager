@@ -526,7 +526,8 @@ enforces `role_attribute_strict`, so a user outside the group is refused even
 if Authentik lets them through. Alert rules live in
 `tools/telemetry/hub/alerts.yml` (`promtool check rules` clean); import
 Grafana.com dashboard **1860** for host graphs and the provisioned
-**Heimdall / Hub Health** for the hub. Details and non-Nix snippets:
+**Heimdall / Hub Health** for the hub (**Heimdall / Hub DB** for DB latency and lock
+contention). Details, non-Nix snippets and how a dashboard update reaches Grafana:
 [`tools/telemetry/hub/README.md`](tools/telemetry/hub/README.md).
 
 ### 1.9 Bridge error events (why a bridge is failing)

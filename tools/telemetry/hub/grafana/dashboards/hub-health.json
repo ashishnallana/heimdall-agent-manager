@@ -4,6 +4,19 @@
   },
   "editable": false,
   "graphTooltip": 1,
+  "links": [
+    {
+      "asDropdown": true,
+      "includeVars": false,
+      "keepTime": true,
+      "tags": [
+        "heimdall"
+      ],
+      "targetBlank": false,
+      "title": "Heimdall dashboards",
+      "type": "dashboards"
+    }
+  ],
   "panels": [
     {
       "collapsed": false,
@@ -416,7 +429,7 @@
         "type": "prometheus",
         "uid": "heimdall-prometheus"
       },
-      "description": "",
+      "description": "Bucket-interpolated. DB telemetry (basic, the default) adds a 2.5 ms bound to this histogram: do not read a quantile across that deploy. DB share of request time: Heimdall / Hub DB.",
       "fieldConfig": {
         "defaults": {
           "unit": "s"
