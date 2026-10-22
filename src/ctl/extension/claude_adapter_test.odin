@@ -508,9 +508,9 @@ test_is_ham_ctl_command_accepts_only_a_lone_allowlisted_invocation :: proc(t: ^t
 		BIN + " verify",
 		BIN + " memory propose --title x",
 		BIN + " agent start-success",
-		BIN + " review post task_1 --verdict approve",
 		BIN + " task show task_1",
 		BIN + " task comment task_1 --body done",
+		BIN + " chat send --to user --body \"looks good\"",
 	}) {
 		testing.expectf(t, is_ham_ctl_command(cmd, BIN, CWD), "should match: %q", cmd)
 	}
@@ -531,8 +531,15 @@ test_is_ham_ctl_command_accepts_only_a_lone_allowlisted_invocation :: proc(t: ^t
 		BIN + " task create --goal g --verify 'sh /tmp/x'",
 		BIN + " task update task_1 --brief-file /tmp/b.json",
 		BIN + " task publish task_1",
+		// review always asks (it can record a verdict as the user).
+		BIN + " review post task_1 --verdict approve",
 		BIN + " review post task_1 --verdict approve --on-behalf-of user",
 		BIN + " review post task_1 --verdict approve --on-behalf-of=user",
+		BIN + " review post task_1 --verdict approve '--on-behalf-of' user",
+		BIN + " review post task_1 --verdict approve \"--on-behalf-of\" user",
+		BIN + " review post task_1 --verdict approve --on-behalf\"\"-of user",
+		BIN + " review post task_1 --verdict approve \\--on-behalf-of user",
+		BIN + " review post task_1 --verdict approve --on-behalf-o? user",
 		BIN + " chat set-title x",
 		BIN + " --endpoint unix:/x chat read",
 		// Shell shapes.
