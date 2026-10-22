@@ -8,7 +8,9 @@ package main
 // message per flush:
 //
 //   - activity idle (the provider's Stop) or session end — the turn's final
-//     message, including calls that never reported an end (status "running");
+//     message. A call that never reported an end (e.g. its permission was
+//     denied, which emits no PostToolUse) cannot still be running once its
+//     agent stopped: it is filed as status "error" with "interrupted":true;
 //   - subagent.stop — that subagent's group is nested into the next parent
 //     message, which is flushed straight away;
 //   - TOOL_AGG_FLUSH_INTERVAL_MS after the first unflushed call while calls are
@@ -84,6 +86,7 @@ Tool_Agg_Call :: struct {
 	spawn_type:  string, // payload.subagent_type
 	spawn_desc:  string, // description, used to label the subagent group
 	subagent_id: string, // linked subagent (subagent.start FIFO or tool.end payload.subagent_id)
+	interrupted: bool,   // never ended before its agent stopped (denied, cancelled)
 }
 
 Tool_Agg_Tool_Count :: struct {
@@ -475,11 +478,12 @@ tool_agg_observe :: proc(a: ^Tool_Agg, ev: contracts.Ext_Event, raw: string, now
 		if ev.agent_id == "" do return
 		g := subagent_group(a, ev.agent_id, ev.agent_type)
 		g.stopped = true
-		// The subagent's calls that never ended are filed as running.
+		// The subagent stopped, so its calls that never ended are interrupted.
 		for i := len(a.running) - 1; i >= 0; i -= 1 {
 			if a.running[i].agent_id == ev.agent_id {
 				c := a.running[i]
 				ordered_remove(&a.running, i)
+				tool_agg_mark_interrupted(&c, now)
 				group_add(subagent_group(a, c.agent_id, c.agent_type), c)
 			}
 		}
@@ -513,7 +517,7 @@ tool_agg_tick :: proc(a: ^Tool_Agg, now: i64) {
 //
 //   final=false: completed main-agent calls plus every stopped subagent group;
 //                running calls stay for a later message.
-//   final=true:  everything, with unfinished calls as "running"; live subagent
+//   final=true:  everything, with unfinished calls as interrupted; live subagent
 //                groups are kept back when keep_live_subagents (background
 //                subagents outlive the parent's Stop and flush on their own stop).
 tool_agg_flush :: proc(a: ^Tool_Agg, reason: string, now: i64, final := false, ts := "", keep_live_subagents := false) {
@@ -525,6 +529,7 @@ tool_agg_flush :: proc(a: ^Tool_Agg, reason: string, now: i64, final := false, t
 				continue
 			}
 			ordered_remove(&a.running, i)
+			tool_agg_mark_interrupted(&c, now)
 			if c.agent_id == "" do group_add(&a.main, c)
 			else do group_add(subagent_group(a, c.agent_id, c.agent_type), c)
 		}
@@ -574,6 +579,14 @@ write_int :: proc(b: ^strings.Builder, key: string, value: int, comma := true) {
 	strings.write_string(b, fmt.tprintf(`"%s":%d`, key, value))
 }
 
+// tool_agg_mark_interrupted closes a call whose agent stopped before it ended.
+@(private = "file")
+tool_agg_mark_interrupted :: proc(c: ^Tool_Agg_Call, now: i64) {
+	c.status = .Error
+	c.interrupted = true
+	c.duration_ms = max(i64(0), now - c.started_ms)
+}
+
 @(private = "file")
 status_name :: proc(s: Tool_Agg_Status) -> string {
 	switch s {
@@ -596,6 +609,7 @@ render_call :: proc(c: Tool_Agg_Call) -> string {
 	if c.use_id != "" do write_str(&b, "use_id", tool_agg_clip(c.use_id, TOOL_AGG_NAME_MAX_RUNES))
 	if c.file_path != "" do write_str(&b, "file_path", c.file_path)
 	if c.subagent_id != "" do write_str(&b, "subagent_id", tool_agg_clip(c.subagent_id, TOOL_AGG_NAME_MAX_RUNES))
+	if c.interrupted do strings.write_string(&b, `,"interrupted":true`)
 	strings.write_byte(&b, '}')
 	return strings.to_string(b)
 }

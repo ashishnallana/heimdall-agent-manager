@@ -66,6 +66,12 @@ str :: proc(o: json.Value, key: string) -> string {
 }
 
 @(private = "file")
+boolean :: proc(o: json.Value, key: string) -> bool {
+	obj, _ := o.(json.Object)
+	b, _ := obj[key].(json.Boolean)
+	return bool(b)
+}
+
 num :: proc(o: json.Value, key: string) -> i64 {
 	obj, _ := o.(json.Object)
 	n, _ := obj[key].(json.Integer)
@@ -104,9 +110,11 @@ test_tool_agg_pairs_by_use_id_and_fifo_fallback :: proc(t: ^testing.T) {
 	testing.expect_value(t, str(calls[1], "use_id"), "tu_1")
 	testing.expect_value(t, str(calls[2], "summary"), "first")
 	testing.expect_value(t, str(calls[2], "status"), "ok")
-	// The call that never ended is reported as running in the final message.
+	// The call that never ended (e.g. a denied permission: no PostToolUse) is
+	// closed as interrupted once the agent stopped, never left running.
 	testing.expect_value(t, str(calls[3], "summary"), "second")
-	testing.expect_value(t, str(calls[3], "status"), "running")
+	testing.expect_value(t, str(calls[3], "status"), "error")
+	testing.expect(t, boolean(calls[3], "interrupted"), "unended call is marked interrupted")
 	testing.expect_value(t, len(a.running), 0)
 }
 
@@ -403,5 +411,8 @@ test_tool_agg_instance_terminal_flushes_running_calls :: proc(t: ^testing.T) {
 	testing.expect_value(t, str(md, "reason"), "agent_stopped")
 	calls := arr(md, "calls")
 	testing.expect_value(t, len(calls), 1)
-	if len(calls) == 1 do testing.expect_value(t, str(calls[0], "status"), "running")
+	if len(calls) == 1 {
+		testing.expect_value(t, str(calls[0], "status"), "error")
+		testing.expect(t, boolean(calls[0], "interrupted"), "agent stopped: call interrupted")
+	}
 }

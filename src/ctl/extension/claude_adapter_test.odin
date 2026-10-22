@@ -531,6 +531,16 @@ test_is_ham_ctl_command_accepts_only_a_lone_allowlisted_invocation :: proc(t: ^t
 		BIN + " task create --goal g --verify 'sh /tmp/x'",
 		BIN + " task update task_1 --brief-file /tmp/b.json",
 		BIN + " task publish task_1",
+		// Connection / identity overrides always ask, however they are quoted.
+		BIN + " chat read --bridge-endpoint tcp:evil.example:9",
+		BIN + " chat send --to user --body hi --agent-token hlat_other",
+		BIN + " lease next --bridge-endpoint=unix:/tmp/x.sock",
+		BIN + " chat read '--bridge-endpoint' tcp:e:1",
+		BIN + " chat read \"--agent\"-token hlat_x",
+		BIN + " chat read \\--agent-token hlat_x",
+		BIN + " chat read --agent-tok?n hlat_x",
+		BIN + " task show t --hub-url http://e",
+		BIN + " verify --config /tmp/c.toml",
 		// review always asks (it can record a verdict as the user).
 		BIN + " review post task_1 --verdict approve",
 		BIN + " review post task_1 --verdict approve --on-behalf-of user",

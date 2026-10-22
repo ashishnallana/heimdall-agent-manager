@@ -143,6 +143,8 @@ export interface TimelineToolCall {
   startedAt: string;
   endedAt: string;
   durationMs: number | null;
+  /** Never ended before its agent stopped (e.g. a denied permission emits no tool.end). */
+  interrupted?: boolean;
 }
 
 export interface TimelineFileEdit {
@@ -319,7 +321,9 @@ export function buildActivityTimeline(
     return g;
   };
 
+  const toolsInOrder: TimelineToolCall[] = [];
   const pushTool = (call: TimelineToolCall) => {
+    toolsInOrder.push(call);
     toolCallCount += 1;
     if (call.agentId) groupFor({ agent_id: call.agentId, seq: call.seq, agent_type: '', ts: call.startedAt } as ExtensionEvent).toolCalls.push(call);
     else parentEntries.push(call);
@@ -345,8 +349,25 @@ export function buildActivityTimeline(
     if (!entry.agentIds.includes(aid)) entry.agentIds.push(aid);
   };
 
+  // A call that never got tool.end cannot still be running once its agent
+  // stopped (main agent: activity idle = the provider's Stop; a subagent: its
+  // subagent.stop). A denied permission is the common case: no PostToolUse.
+  const interruptOpenCalls = (agentId: string, at: string) => {
+    for (const call of toolsInOrder) {
+      if (call.status !== 'running' || (call.agentId || '') !== agentId) continue;
+      call.status = 'failed';
+      call.interrupted = true;
+      call.endedAt = at;
+      call.durationMs = durationMs(call.startedAt, at);
+    }
+  };
+
   for (const e of sorted) {
     switch (e.event) {
+      case 'activity': {
+        if (!e.agent_id && str(e.payload.state) === 'idle') interruptOpenCalls('', eventTime(e));
+        break;
+      }
       case 'subagent.start': {
         if (!e.agent_id) break;
         const g = groupFor(e);
@@ -357,6 +378,7 @@ export function buildActivityTimeline(
       }
       case 'subagent.stop': {
         if (!e.agent_id) break;
+        interruptOpenCalls(e.agent_id, eventTime(e));
         const g = groupFor(e);
         g.status = 'done';
         g.stoppedAt = eventTime(e);

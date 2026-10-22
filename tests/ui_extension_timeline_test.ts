@@ -203,3 +203,25 @@ test('T4 shapes: PostToolUseFailure without error text still reads as failed', (
   const calls = buildActivityTimeline(events).entries as TimelineToolCall[];
   assert.deepEqual(calls.map((c) => c.status), ['failed', 'failed', 'done']);
 });
+
+test('a call with no tool.end (denied permission) is interrupted when its agent stops, not left running', () => {
+  const evs = normalizeExtensionEvents({ events: [
+    ev(1, 'tool.start', { tool_name: 'Bash', tool_use_id: 'd1', payload: { input: { command: 'rm -rf build' } } }),
+    ev(2, 'permission.request', { tool_name: 'Bash' }),
+    ev(3, 'subagent.start', { agent_id: 'sa1', agent_type: 'Explore' }),
+    ev(4, 'tool.start', { agent_id: 'sa1', tool_name: 'Bash', tool_use_id: 'd2', payload: { input: { command: 'curl x' } } }),
+    ev(5, 'subagent.stop', { agent_id: 'sa1', agent_type: 'Explore' }),
+  ] });
+  // Before the main agent's Stop: the subagent's call is closed, the main one still runs.
+  let tl = buildActivityTimeline(evs);
+  const mainCall = () => tl.entries.find((x: any) => x.kind === 'tool' && x.id === 'd1') as TimelineToolCall;
+  assert.equal(mainCall().status, 'running');
+  const sub = tl.entries.find((x: any) => x.kind === 'subagent') as TimelineSubagentGroup;
+  assert.equal(sub.toolCalls[0].status, 'failed');
+  assert.equal(sub.toolCalls[0].interrupted, true);
+  // The main agent's Stop (activity idle) closes it too.
+  tl = buildActivityTimeline([...evs, ...normalizeExtensionEvents({ events: [ev(6, 'activity', { payload: { state: 'idle', reason: 'stop' } })] })]);
+  assert.equal(mainCall().status, 'failed');
+  assert.equal(mainCall().interrupted, true);
+  assert.equal(mainCall().endedAt, t(6));
+});

@@ -188,6 +188,7 @@ is_ham_ctl_command :: proc(command, ctl_bin, cwd: string) -> bool {
 		if strings.contains_rune(f, '$') do return false
 	}
 	if !ham_ctl_head_is_ctl_bin(head, ctl_bin, cwd) do return false
+	if ham_ctl_args_override_connection(fields[1:]) do return false
 	group := fields[1]
 	verb := fields[2] if len(fields) > 2 else ""
 	for allowed in HAM_CTL_AUTO_APPROVE_VERBS {
@@ -233,4 +234,30 @@ ham_ctl_head_is_ctl_bin :: proc(head, ctl_bin, cwd: string) -> bool {
 	clean_head, _ := filepath.clean(head, context.temp_allocator)
 	clean_bin, _ := filepath.clean(ctl_bin, context.temp_allocator)
 	return filepath.is_abs(head) && clean_head == clean_bin
+}
+
+// HAM_CTL_CONNECTION_FLAGS redirect where ham-ctl connects or whose identity it
+// uses (e.g. `--bridge-endpoint tcp:evil:1` would send the agent token away,
+// `--agent-token` would act as another agent). Never auto-approved.
+HAM_CTL_CONNECTION_FLAGS :: [?]string{
+	"--bridge-endpoint", "--agent-token", "--token", "--user-token",
+	"--hub", "--hub-url", "--daemon-url", "--config", "--agent-mode", "--wrapper-bin",
+}
+
+// ham_ctl_args_override_connection: bash strips quotes and backslashes before
+// ham-ctl sees argv, so each word is unquoted before comparing; a glob in a
+// flag-like word could expand to one of the flags, so it fails safe too.
+@(private = "file")
+ham_ctl_args_override_connection :: proc(args: []string) -> bool {
+	for f in args {
+		word, _ := strings.remove_all(f, "'", context.temp_allocator)
+		word, _ = strings.remove_all(word, "\"", context.temp_allocator)
+		word, _ = strings.remove_all(word, "\\", context.temp_allocator)
+		if !strings.has_prefix(word, "--") do continue
+		if strings.contains_any(word, "*?[") do return true
+		name := word
+		if eq := strings.index_byte(word, '='); eq >= 0 do name = word[:eq]
+		for flag in HAM_CTL_CONNECTION_FLAGS do if name == flag do return true
+	}
+	return false
 }
