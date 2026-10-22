@@ -415,6 +415,9 @@ bridge_local_handle_agent_method :: proc(request_id, method, params: string, rec
 		// ham.ext.v1 ingest: identity is rec (token-verified), never the payload.
 		return bridge_ext_handle_rpc(request_id, method, params, rec)
 	}
+	if method == "agent.extension.permission.cancel" {
+		return bridge_ext_permission_cancel_rpc(request_id, params, rec)
+	}
 	if method == "agent.extension.permission" {
 		// Blocking: relays a ham.ext.v1 permission.request to the hub and waits for
 		// the user's allow/deny; "none" on timeout (the provider prompts in its TUI).

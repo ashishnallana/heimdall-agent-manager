@@ -138,6 +138,8 @@ bridge_ext_ingest :: proc(rec: Bridge_Local_Agent_Token_Record, params: string, 
 		}
 		defer contracts.ext_event_destroy(&ev)
 
+		// A later event proves a permission prompt was answered in the terminal.
+		_ = bridge_blockers_on_extension_event(instance_id, ev, now)
 		if status, ok := contracts.ext_activity_for_event(ev); ok {
 			bridge_runtime_note_agent_activity(instance_id, status, bridge_ext_activity_source(ev.provider))
 		}

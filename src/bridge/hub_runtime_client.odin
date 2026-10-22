@@ -580,6 +580,8 @@ bridge_hub_runtime_loop :: proc(conn: ^ws.Connection) {
 	init_hb := bridge_hub_heartbeat_json()
 	_ = ws.send_text(conn, init_hb)
 	delete(init_hb)
+	// The hub keeps agent blockers in memory only: resend every snapshot on connect.
+	bridge_blockers_mark_all_dirty()
 	last_iteration := time.now()
 	for conn.connected {
 		now_iteration := time.now()
@@ -642,11 +644,14 @@ bridge_hub_runtime_loop :: proc(conn: ^ws.Connection) {
 		// pty-host ChildExited) so "stopped"/"unreachable" reaches the hub now,
 		// not on the next heartbeat.
 		bridge_runtime_drain_status_pushes(conn)
+		bridge_blockers_drain_outgoing(conn)
 		now := time.to_unix_nanoseconds(time.now())
 		if now - last_heartbeat >= sync.atomic_load(&bridge_hub_heartbeat_interval_ns) {
 			hb := bridge_hub_heartbeat_json()
 			_ = ws.send_text(conn, hb)
 			delete(hb)
+			// Reconcile: the next drain resends every instance's full snapshot.
+			bridge_blockers_mark_all_dirty()
 			hub_command_reassembly_sweep(&reassemblies, now)
 			last_heartbeat = now
 		}
@@ -2621,6 +2626,8 @@ bridge_runtime_note_wrapper_signal :: proc(instance_id, activity_status: string)
 bridge_runtime_note_agent_activity :: proc(instance_id, activity_status, activity_source: string) {
 	source := strings.trim_space(activity_source)
 	if source == "" do source = "agent_extension"
+	// Screen detection drives the terminal_prompt blocker fallback (REQ-EXT-BLK-5).
+	if source == "pane_diff" do bridge_blockers_note_pane_activity(instance_id, activity_status)
 	bridge_runtime_note_activity_signal(instance_id, bridge_runtime_normalize_activity_status(activity_status), source)
 }
 

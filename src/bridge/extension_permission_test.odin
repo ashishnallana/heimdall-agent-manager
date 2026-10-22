@@ -6,99 +6,14 @@ import "core:sync"
 import "core:testing"
 
 // REQ-EXT-PERM-1: agent.extension.permission blocks until the hub pushes a user
-// decision; timeout / cancellation / hub-down return "none" (never deny), and the
-// hub row is closed when nobody decided.
-
-// Per-instance stub of the hub forwarder. Tests run in parallel, so each test
-// uses its own instance id and the stub keys everything on it.
-Ext_Perm_Stub_Mode :: enum {
-	Silent, // accept, never decide (-> timeout)
-	Decide, // accept and push a permission_decision frame at once
-	Cancel, // accept, then the instance stops
-	Hub_Down, // refuse (relay failure)
-}
-
-Ext_Perm_Stub :: struct {
-	instance_id: string,
-	mode:        Ext_Perm_Stub_Mode,
-	decision:    string,
-	posts:       [dynamic]string, // "<path> <params>"
-}
-
-@(private = "file")
-ext_perm_stub_mutex: sync.Mutex
-@(private = "file")
-ext_perm_stubs: [dynamic]^Ext_Perm_Stub
-
-@(private = "file")
-ext_perm_stub_register :: proc(instance_id: string, mode: Ext_Perm_Stub_Mode, decision := "") -> ^Ext_Perm_Stub {
-	context.allocator = runtime.heap_allocator()
-	sync.mutex_lock(&ext_perm_stub_mutex)
-	defer sync.mutex_unlock(&ext_perm_stub_mutex)
-	s := new(Ext_Perm_Stub)
-	s.instance_id = strings.clone(instance_id)
-	s.mode = mode
-	s.decision = strings.clone(decision)
-	append(&ext_perm_stubs, s)
-	bridge_ext_permission_forward = ext_perm_stub_forward
-	return s
-}
-
-@(private = "file")
-ext_perm_stub_find :: proc(instance_id: string) -> ^Ext_Perm_Stub {
-	sync.mutex_lock(&ext_perm_stub_mutex)
-	defer sync.mutex_unlock(&ext_perm_stub_mutex)
-	for s in ext_perm_stubs do if s.instance_id == instance_id do return s
-	return nil
-}
-
-@(private = "file")
-ext_perm_stub_posts :: proc(s: ^Ext_Perm_Stub) -> []string {
-	sync.mutex_lock(&ext_perm_stub_mutex)
-	defer sync.mutex_unlock(&ext_perm_stub_mutex)
-	out := make([]string, len(s.posts), context.temp_allocator)
-	copy(out, s.posts[:])
-	return out
-}
-
-ext_perm_stub_forward :: proc(rec: Bridge_Local_Agent_Token_Record, path, params: string) -> bool {
-	s := ext_perm_stub_find(rec.agent_instance_id)
-	if s == nil do return false
-	sync.mutex_lock(&ext_perm_stub_mutex)
-	append(&s.posts, strings.concatenate({path, " ", params}, runtime.heap_allocator()))
-	sync.mutex_unlock(&ext_perm_stub_mutex)
-	if path != BRIDGE_EXT_PERMISSION_HUB_PATH do return true
-	switch s.mode {
-	case .Silent:
-	case .Hub_Down:
-		return false
-	case .Decide:
-		// The pending entry is registered before the hub hears of the request, so
-		// even an instant push (before the waiter starts) must resolve it.
-		request_id := bridge_local_extract_json_string(params, "request_id", "", context.temp_allocator)
-		frame := strings.concatenate({`{"type":"permission_decision","command_id":"cmd_1","agent_instance_id":"`, rec.agent_instance_id, `","request_id":"`, request_id, `","decision":"`, s.decision, `","message":"from test"}`}, context.temp_allocator)
-		_ = bridge_ext_permission_handle_decision_frame(frame)
-	case .Cancel:
-		_ = bridge_permission_cancel_instance(rec.agent_instance_id)
-	}
-	return true
-}
+// decision; timeout and cancellation return "none" (never deny). Nothing is
+// posted to the hub per request: the blocker reaches it as an in-memory
+// agent_blockers snapshot (extension_blockers_test.odin). Helpers ext_blk_* live
+// there.
 
 @(private = "file")
 ext_perm_event :: proc(extra: string) -> string {
-	return strings.concatenate({`{"schema":"ham.ext.v1","provider":"claude","ext_version":"0.1.0","event":"permission.request","ts":"2026-10-22T06:00:00Z","session_id":"sess-1","agent":{"id":"sub-1","type":"Explore"},"tool":{"name":"Bash","use_id":"tu_9","input":{"command":"rm -rf build"}}`, extra, `}`}, context.temp_allocator)
-}
-
-@(private = "file")
-ext_perm_rec :: proc(id: string) -> Bridge_Local_Agent_Token_Record {
-	return Bridge_Local_Agent_Token_Record{agent_instance_id = id, instance_token = "tok_test", role = .Agent}
-}
-
-@(private = "file")
-ext_perm_req :: proc(t: ^testing.T, extra: string) -> Bridge_Ext_Permission_Request {
-	req, msg, ok := bridge_ext_permission_parse(ext_perm_event(extra))
-	testing.expectf(t, ok, "parse failed: %s", msg)
-	return req
+	return ext_blk_event(extra)
 }
 
 @(private = "file")
@@ -128,11 +43,18 @@ test_ext_permission_parse_extracts_tool_and_suggestions :: proc(t: ^testing.T) {
 	testing.expect_value(t, req2.timeout_ms, 2000)
 	testing.expect_value(t, req2.suggestions, "[]")
 
-	// The params the hub ingests carry the bridge request id and the clamped timeout.
-	params := bridge_ext_permission_hub_params("perm_abc", req, 4500)
-	testing.expect(t, strings.contains(params, `"request_id":"perm_abc"`), params)
-	testing.expect(t, strings.contains(params, `"timeout_ms":4500`), params)
-	testing.expect(t, strings.contains(params, `"permission_suggestions":[`), params)
+	testing.expect_value(t, req2.blocker_id, "")
+
+	// A stable blocker_id rides in payload (or top level) and must be a safe id.
+	req3, _, ok3 := bridge_ext_permission_parse(ext_perm_event(`,"payload":{"blocker_id":"blk_00aa"}`))
+	testing.expect(t, ok3)
+	testing.expect_value(t, req3.blocker_id, "blk_00aa")
+	req4, _, ok4 := bridge_ext_permission_parse(ext_perm_event(`,"blocker_id":"blk_top"`))
+	testing.expect(t, ok4)
+	testing.expect_value(t, req4.blocker_id, "blk_top")
+	_, bad_msg, bad_ok := bridge_ext_permission_parse(ext_perm_event(`,"payload":{"blocker_id":"no spaces"}`))
+	testing.expect(t, !bad_ok)
+	testing.expect(t, strings.contains(bad_msg, "blocker_id"), bad_msg)
 }
 
 @(test)
@@ -148,35 +70,27 @@ test_ext_permission_parse_rejects_other_events :: proc(t: ^testing.T) {
 }
 
 @(test)
-test_ext_permission_timeout_returns_none_and_closes_hub_row :: proc(t: ^testing.T) {
+test_ext_permission_timeout_returns_none :: proc(t: ^testing.T) {
 	context.allocator = runtime.heap_allocator()
 	id := "inst_extperm_timeout"
-	stub := ext_perm_stub_register(id, .Silent)
-	req := ext_perm_req(t, `,"timeout_ms":1000`)
-	out := bridge_ext_permission_run(ext_perm_rec(id), req)
+	out := bridge_ext_permission_run(ext_blk_rec(id), ext_blk_req(t, `,"timeout_ms":1000`))
 	testing.expect_value(t, out.decision, "none") // never "deny"
-	testing.expect(t, strings.has_prefix(out.request_id, "perm_"), out.request_id)
-	posts := ext_perm_stub_posts(stub)
-	testing.expect_value(t, len(posts), 2)
-	if len(posts) == 2 {
-		testing.expect(t, strings.has_prefix(posts[0], BRIDGE_EXT_PERMISSION_HUB_PATH + " "), posts[0])
-		testing.expect(t, strings.contains(posts[0], out.request_id), posts[0])
-		testing.expect(t, strings.has_prefix(posts[1], BRIDGE_EXT_PERMISSION_CLOSE_PATH + " "), posts[1])
-		testing.expect(t, strings.contains(posts[1], `"reason":"timeout"`), posts[1])
-	}
+	testing.expect(t, strings.has_prefix(out.request_id, "blk_"), out.request_id)
 	testing.expect_value(t, ext_perm_pending_count(id), 0)
+	json := bridge_ext_permission_outcome_json(out)
+	testing.expect(t, strings.contains(json, `"blocker_id":"blk_`), json)
 }
 
 @(test)
 test_ext_permission_reply_allow :: proc(t: ^testing.T) {
 	context.allocator = runtime.heap_allocator()
 	id := "inst_extperm_allow"
-	stub := ext_perm_stub_register(id, .Decide, "allow")
-	out := bridge_ext_permission_run(ext_perm_rec(id), ext_perm_req(t, `,"timeout_ms":5000`))
+	run := ext_blk_start(id, ext_blk_req(t, `,"timeout_ms":5000,"payload":{"blocker_id":"blk_allow"}`))
+	testing.expect(t, ext_blk_wait_count(id, 1))
+	testing.expect(t, ext_blk_decide(id, "blk_allow", "allow"))
+	out := ext_blk_finish(run)
 	testing.expect_value(t, out.decision, "allow")
 	testing.expect_value(t, out.message, "from test")
-	// A real decision needs no close call.
-	testing.expect_value(t, len(ext_perm_stub_posts(stub)), 1)
 	testing.expect_value(t, ext_perm_pending_count(id), 0)
 	if inst, ok := bridge_runtime_instance_snapshot(id); ok {
 		testing.expect_value(t, inst.activity_source, "claude_extension")
@@ -187,8 +101,10 @@ test_ext_permission_reply_allow :: proc(t: ^testing.T) {
 test_ext_permission_reply_deny :: proc(t: ^testing.T) {
 	context.allocator = runtime.heap_allocator()
 	id := "inst_extperm_deny"
-	_ = ext_perm_stub_register(id, .Decide, "deny")
-	out := bridge_ext_permission_run(ext_perm_rec(id), ext_perm_req(t, `,"timeout_ms":5000`))
+	run := ext_blk_start(id, ext_blk_req(t, `,"timeout_ms":5000,"payload":{"blocker_id":"blk_deny"}`))
+	testing.expect(t, ext_blk_wait_count(id, 1))
+	testing.expect(t, ext_blk_decide(id, "blk_deny", "deny"))
+	out := ext_blk_finish(run)
 	testing.expect_value(t, out.decision, "deny")
 	testing.expect_value(t, ext_perm_pending_count(id), 0)
 	json := bridge_ext_permission_outcome_json(out)
@@ -199,25 +115,12 @@ test_ext_permission_reply_deny :: proc(t: ^testing.T) {
 test_ext_permission_cancellation_returns_none :: proc(t: ^testing.T) {
 	context.allocator = runtime.heap_allocator()
 	id := "inst_extperm_cancel"
-	stub := ext_perm_stub_register(id, .Cancel)
-	out := bridge_ext_permission_run(ext_perm_rec(id), ext_perm_req(t, `,"timeout_ms":5000`))
+	run := ext_blk_start(id, ext_blk_req(t, `,"timeout_ms":5000`))
+	testing.expect(t, ext_blk_wait_count(id, 1))
+	testing.expect_value(t, bridge_permission_cancel_instance(id), 1)
+	out := ext_blk_finish(run)
 	testing.expect_value(t, out.decision, "none")
 	testing.expect_value(t, out.message, "agent instance stopped")
-	posts := ext_perm_stub_posts(stub)
-	testing.expect_value(t, len(posts), 2)
-	if len(posts) == 2 do testing.expect(t, strings.contains(posts[1], `"reason":"cancelled"`), posts[1])
-	testing.expect_value(t, ext_perm_pending_count(id), 0)
-}
-
-@(test)
-test_ext_permission_hub_down_returns_none_immediately :: proc(t: ^testing.T) {
-	context.allocator = runtime.heap_allocator()
-	id := "inst_extperm_hubdown"
-	_ = ext_perm_stub_register(id, .Hub_Down)
-	start := bridge_runtime_now_ms()
-	out := bridge_ext_permission_run(ext_perm_rec(id), ext_perm_req(t, `,"timeout_ms":60000`))
-	testing.expect_value(t, out.decision, "none")
-	testing.expect(t, bridge_runtime_now_ms() - start < 5000, "must not wait for the timeout when the hub is unreachable")
 	testing.expect_value(t, ext_perm_pending_count(id), 0)
 }
 
