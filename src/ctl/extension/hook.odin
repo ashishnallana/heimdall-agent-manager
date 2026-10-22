@@ -192,23 +192,36 @@ is_ham_ctl_command :: proc(command, ctl_bin, cwd: string) -> bool {
 	verb := fields[2] if len(fields) > 2 else ""
 	for allowed in HAM_CTL_AUTO_APPROVE_VERBS {
 		if allowed.group != group do continue
-		if allowed.verb == "*" || allowed.verb == verb do return true
+		if allowed.verb != "*" && allowed.verb != verb do continue
+		for f in fields[2:] {
+			if allowed.deny_flag == "" || !strings.has_prefix(f, allowed.deny_flag) do continue
+			if len(f) == len(allowed.deny_flag) || f[len(allowed.deny_flag)] == '=' do return false
+		}
+		return true
 	}
 	return false
 }
 
 Ham_Ctl_Verb :: struct {
 	group, verb: string, // verb "*" = every verb of the group
+	deny_flag:   string, // this flag anywhere in the arguments disqualifies it
 }
 
 // HAM_CTL_AUTO_APPROVE_VERBS: the agent's own coordination traffic with Heimdall.
+// Nothing here may write a command that something else later executes: task
+// create/update/publish can set brief.verify (which `verify` runs as a bridge
+// shell), so only task read/comment verbs are listed; a review recorded for the
+// user (--on-behalf-of) always asks.
 HAM_CTL_AUTO_APPROVE_VERBS :: [?]Ham_Ctl_Verb{
-	{"chat", "read"}, {"chat", "send"},
-	{"lease", "*"}, {"task", "*"}, {"review", "*"}, {"verify", "*"},
-	{"extension", "*"}, {"search", "*"},
-	{"memory", "propose"}, {"memory", "list"}, {"memory", "show"}, {"memory", "content"},
-	{"agent", "start-success"},
-	{"issue", "list"}, {"issue", "show"}, {"issue", "create"}, {"issue", "vote"},
+	{"chat", "read", ""}, {"chat", "send", ""},
+	{"lease", "*", ""},
+	{"task", "show", ""}, {"task", "fetch", ""}, {"task", "list", ""}, {"task", "comments", ""}, {"task", "comment", ""},
+	{"review", "post", "--on-behalf-of"},
+	{"verify", "*", ""},
+	{"extension", "*", ""}, {"search", "*", ""},
+	{"memory", "propose", ""}, {"memory", "list", ""}, {"memory", "show", ""}, {"memory", "content", ""},
+	{"agent", "start-success", ""},
+	{"issue", "list", ""}, {"issue", "show", ""}, {"issue", "create", ""}, {"issue", "vote", ""},
 }
 
 @(private = "file")
