@@ -40,12 +40,16 @@ Bridge_Provider_View :: struct {
 	detection_state: string,
 	checked_at:      string,
 	enabled:         bool,
+	extension_state:      string,
+	extension_version:    string,
+	extension_checked_at: string,
 }
 
 bridge_provider_view_destroy :: proc(value: Bridge_Provider_View) {
 	domain.provider_catalog_entry_destroy(value.catalog)
 	delete(value.bridge_id); delete(value.binary_path); delete(value.version_text)
 	delete(value.detection_state); delete(value.checked_at)
+	delete(value.extension_state); delete(value.extension_version); delete(value.extension_checked_at)
 }
 
 bridge_provider_views_destroy :: proc(values: [dynamic]Bridge_Provider_View) {
@@ -287,6 +291,9 @@ write_catalog_entry_json :: proc(b: ^strings.Builder, entry: domain.Provider_Cat
 		b,
 		",\"activity_detection\":",
 	); strings.write_string(b, entry.activity_detection_json)
+	// extension is null for a provider without one; a Bridge reports it 'unsupported'.
+	strings.write_string(b, ",\"extension\":")
+	strings.write_string(b, entry.extension_json if entry.extension_json != "" else "null")
 	strings.write_string(b, ",\"state\":\""); contracts.write_json_string(b, entry.state)
 	strings.write_string(b, "\",\"models\":[")
 	for model, i in entry.models {
@@ -351,6 +358,9 @@ list_bridge_providers :: proc(
 			version_text    = strings.clone(""),
 			detection_state = strings.clone("absent"),
 			checked_at      = strings.clone(""),
+			extension_state      = strings.clone(""),
+			extension_version    = strings.clone(""),
+			extension_checked_at = strings.clone(""),
 		}
 		for status in statuses {
 			if status.provider == entry.provider {
@@ -358,6 +368,9 @@ list_bridge_providers :: proc(
 				delete(view.version_text); view.version_text = strings.clone(status.version_text)
 				delete(view.detection_state); view.detection_state = strings.clone(status.state)
 				delete(view.checked_at); view.checked_at = strings.clone(status.checked_at)
+				delete(view.extension_state); view.extension_state = strings.clone(status.extension_state)
+				delete(view.extension_version); view.extension_version = strings.clone(status.extension_version)
+				delete(view.extension_checked_at); view.extension_checked_at = strings.clone(status.extension_checked_at)
 				break
 			}
 		}
@@ -379,13 +392,31 @@ apply_discovery_report :: proc(
 	for status in statuses {
 		if status.bridge_id != bridge_id do return domain.domain_error(.Forbidden, "discovery report bridge does not match the authenticated connection")
 		if status.state != "present" && status.state != "absent" do return domain.domain_error(.Validation_Failed, "provider discovery state must be present or absent")
+		if !extension_state_valid(status.extension_state) do return domain.domain_error(.Validation_Failed, "provider extension state must be present, disabled, outdated, absent, error or unsupported")
 		entry, found, get_err := iface.provider_catalog_get(service.repo, status.provider)
 		if get_err.code != .None do return get_err
 		if !found do return domain.domain_error(.Validation_Failed, "discovery report contains an unknown provider")
+		has_extension := entry.extension_json != ""
 		domain.provider_catalog_entry_destroy(entry)
-		if _, save_err := iface.bridge_provider_status_upsert(service.repo, status); save_err.code != .None do return save_err
+		stored := status
+		// The catalog, not the Bridge, decides whether an extension exists. A report
+		// from a Bridge older than REQ-EXT-DET-1 carries no state and stays "".
+		if !has_extension && stored.extension_state != "" {
+			stored.extension_state = "unsupported"
+			stored.extension_version = ""
+		}
+		if _, save_err := iface.bridge_provider_status_upsert(service.repo, stored); save_err.code != .None do return save_err
 	}
 	return {}
+}
+
+// "" is accepted for Bridges that predate extension detection (REQ-EXT-DET-1).
+extension_state_valid :: proc(state: string) -> bool {
+	switch state {
+	case "", "present", "disabled", "outdated", "absent", "error", "unsupported":
+		return true
+	}
+	return false
 }
 
 set_bridge_provider_enabled :: proc(

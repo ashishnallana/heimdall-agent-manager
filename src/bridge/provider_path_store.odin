@@ -16,13 +16,17 @@ Bridge_Provider_Path :: struct {
 	version_text:  string `json:"version_text"`,
 	probed_at:     string `json:"probed_at"`,
 	state:         string `json:"state"`,
+	// REQ-EXT-DET-1: present|disabled|outdated|absent|error|unsupported.
+	extension_state:   string `json:"extension_state"`,
+	extension_version: string `json:"extension_version"`,
 }
 
 Bridge_Provider_Path_Store_Wire :: struct {
 	providers: []Bridge_Provider_Path `json:"providers"`,
 }
 
-Bridge_Provider_Probe_Target :: struct { provider, binary: string }
+// extension borrows the immutable, process-lifetime catalog snapshot; it is never freed.
+Bridge_Provider_Probe_Target :: struct { provider, binary: string, extension: Bridge_Catalog_Extension }
 
 bridge_provider_paths_mutex: sync.RW_Mutex
 bridge_provider_paths_loaded: bool
@@ -66,6 +70,8 @@ bridge_provider_path_clone :: proc(value: Bridge_Provider_Path, allocator := con
 		version_text = strings.clone(value.version_text, allocator),
 		probed_at = strings.clone(value.probed_at, allocator),
 		state = strings.clone(value.state, allocator),
+		extension_state = strings.clone(value.extension_state, allocator),
+		extension_version = strings.clone(value.extension_version, allocator),
 	}
 }
 
@@ -76,6 +82,8 @@ bridge_provider_path_destroy :: proc(value: ^Bridge_Provider_Path, allocator := 
 	delete(value.version_text, allocator)
 	delete(value.probed_at, allocator)
 	delete(value.state, allocator)
+	delete(value.extension_state, allocator)
+	delete(value.extension_version, allocator)
 	value^ = {}
 }
 
@@ -115,11 +123,13 @@ bridge_provider_probe_version_with_timeout :: proc(path: string, timeout: time.D
 	return strings.clone(text), true
 }
 
-bridge_provider_probe_one :: proc(provider, binary: string) -> Bridge_Provider_Path {
-	return bridge_provider_probe_one_with_timeout(provider, binary, 2 * time.Second)
+bridge_provider_probe_one :: proc(provider, binary: string, extension: Bridge_Catalog_Extension = {}) -> Bridge_Provider_Path {
+	return bridge_provider_probe_one_with_timeout(provider, binary, 2 * time.Second, extension, time.time_add(time.now(), 2 * time.Second + BRIDGE_PROVIDER_EXTENSION_TIMEOUT))
 }
 
-bridge_provider_probe_one_with_timeout :: proc(provider, binary: string, timeout: time.Duration) -> Bridge_Provider_Path {
+// extension_deadline bounds the extension detector (itself capped at 5s); a zero
+// deadline skips it, which reports an unsupported/absent/error state without running.
+bridge_provider_probe_one_with_timeout :: proc(provider, binary: string, timeout: time.Duration, extension: Bridge_Catalog_Extension = {}, extension_deadline: time.Time = {}) -> Bridge_Provider_Path {
 	path := bridge_runtime_find_on_path(binary)
 	if path != "" && !bridge_provider_path_executable(path) {
 		delete(path)
@@ -135,12 +145,17 @@ bridge_provider_probe_one_with_timeout :: proc(provider, binary: string, timeout
 			bridge_dependency_breaker_record(breaker_key, probe_ok)
 		}
 	}
+	extension_timeout: time.Duration = 0
+	if extension_deadline != {} do extension_timeout = time.diff(time.now(), extension_deadline)
+	extension_state, extension_version := bridge_provider_extension_probe(path, extension, extension_timeout)
 	return Bridge_Provider_Path{
 		provider = strings.clone(provider),
 		resolved_path = path,
 		version_text = version,
 		probed_at = bridge_provider_probe_time(),
 		state = strings.clone("present" if path != "" else "absent"),
+		extension_state = strings.clone(extension_state),
+		extension_version = extension_version,
 	}
 }
 
@@ -159,6 +174,7 @@ bridge_provider_probe_targets :: proc(filter: []string) -> [dynamic]Bridge_Provi
 			append(&targets, Bridge_Provider_Probe_Target{
 				provider = strings.clone(provider.provider),
 				binary = strings.clone(provider.binary),
+				extension = provider.extension,
 			})
 		}
 	}
@@ -256,7 +272,9 @@ bridge_provider_discover_execute :: proc(filter: []string) -> [dynamic]Bridge_Pr
 		remaining := time.diff(time.now(), discovery_deadline)
 		probe_timeout := min(2 * time.Second, remaining)
 		if probe_timeout < 0 do probe_timeout = 0
-		append(&results, bridge_provider_probe_one_with_timeout(target.provider, target.binary, probe_timeout))
+		// The extension probe runs after --version and shares the same deadline, so a
+		// whole discovery still answers inside the Hub's 10s wait.
+		append(&results, bridge_provider_probe_one_with_timeout(target.provider, target.binary, probe_timeout, target.extension, discovery_deadline))
 	}
 
 	sync.rw_mutex_lock(&bridge_provider_paths_mutex)
@@ -326,6 +344,10 @@ bridge_provider_discovery_report_json :: proc(request_id: string, results: [dyna
 		strings.write_string(&b, "\",\"version_text\":\""); bridge_runtime_write_json_string(&b, result.version_text)
 		strings.write_string(&b, "\",\"state\":\""); bridge_runtime_write_json_string(&b, result.state)
 		strings.write_string(&b, "\",\"checked_at\":\""); bridge_runtime_write_json_string(&b, result.probed_at)
+		strings.write_string(&b, "\",\"extension_state\":\""); bridge_runtime_write_json_string(&b, result.extension_state)
+		strings.write_string(&b, "\",\"extension_version\":\""); bridge_runtime_write_json_string(&b, result.extension_version)
+		// The extension is measured in the same pass as the binary.
+		strings.write_string(&b, "\",\"extension_checked_at\":\""); bridge_runtime_write_json_string(&b, result.probed_at)
 		strings.write_string(&b, "\"}")
 	}
 	strings.write_string(&b, "]}")

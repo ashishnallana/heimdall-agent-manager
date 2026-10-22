@@ -449,7 +449,11 @@ MIGRATION_102_DROP_BRIDGE_ENROLLMENTS :: #load("migrations/102_drop_bridge_enrol
 MIGRATION_103_PLAN_ENFORCEMENT :: #load("migrations/103_plan_enforcement.sql", string)
 MIGRATION_104_AGENT_EXTENSION_EVENTS :: #load("migrations/104_agent_extension_events.sql", string)
 
-migration_order :: [107]string {
+// 105: provider_catalog.extension descriptor and the measured extension state
+// in bridge_provider_status (REQ-EXT-DET-1).
+MIGRATION_105_PROVIDER_EXTENSION :: #load("migrations/105_provider_extension.sql", string)
+
+migration_order :: [108]string {
 	"001_foundation.sql",
 	"002_owner_scoped_core.sql",
 	"003_device_tokens.sql",
@@ -557,6 +561,7 @@ migration_order :: [107]string {
 	"102_drop_bridge_enrollments.sql",
 	"103_plan_enforcement.sql",
 	"104_agent_extension_events.sql",
+	"105_provider_extension.sql",
 }
 
 // stop_before is a TEST SEAM: when non-empty, the apply loop stops in front of
@@ -906,6 +911,12 @@ run_migrations :: proc(
 			mark_migration_applied(conn, name)
 			continue
 		}
+		// 105 commits atomically before its ledger row; its last column proves completion.
+		if name == "105_provider_extension.sql" &&
+		   table_column_exists(conn, "bridge_provider_status", "extension_checked_at") {
+			mark_migration_applied(conn, name)
+			continue
+		}
 		// Keyed on the LAST object 104 creates.
 		if name == "104_agent_extension_events.sql" &&
 		   sqlite_object_exists(conn, "agent_extension_events_instance_agent") {
@@ -1070,6 +1081,7 @@ migration_sql :: proc(name, migrations_dir: string) -> string {
 	if name == "099_mixed_work_execution.sql" do return strings.clone(MIGRATION_099_MIXED_WORK_EXECUTION)
 	if name == "102_drop_bridge_enrollments.sql" do return strings.clone(MIGRATION_102_DROP_BRIDGE_ENROLLMENTS)
 	if name == "103_plan_enforcement.sql" do return strings.clone(MIGRATION_103_PLAN_ENFORCEMENT)
+	if name == "105_provider_extension.sql" do return strings.clone(MIGRATION_105_PROVIDER_EXTENSION)
 	if name == "104_agent_extension_events.sql" do return strings.clone(MIGRATION_104_AGENT_EXTENSION_EVENTS)
 	if name == "100_vault_pair_hub_origin.sql" do return strings.clone(MIGRATION_100_VAULT_PAIR_HUB_ORIGIN)
 	if name == "101_codex_gpt6_models.sql" do return strings.clone(MIGRATION_101_CODEX_GPT6_MODELS)
