@@ -188,6 +188,22 @@ bridge_ext_ingest_result_json :: proc(res: Bridge_Ext_Ingest_Result) -> string {
 	return strings.to_string(b)
 }
 
+// bridge_ext_instance_terminal closes out a stopped/failed agent's tool
+// aggregation: a kill mid-turn sends no Stop or SessionEnd, so without this its
+// unfinished calls would never be posted. Everything left (running calls, live
+// subagent groups) is flushed as a final message for the forwarder to deliver.
+bridge_ext_instance_terminal :: proc(instance_id: string, now: i64) {
+	context.allocator = bridge_ext_allocator()
+	sync.mutex_lock(&bridge_ext_mutex)
+	defer sync.mutex_unlock(&bridge_ext_mutex)
+	for &s in bridge_ext_states {
+		if s.agent_instance_id == instance_id {
+			tool_agg_flush(&s.tools, "agent_stopped", now, final = true)
+			return
+		}
+	}
+}
+
 // bridge_ext_take_batch_locked removes up to BRIDGE_EXT_FLUSH_MAX_EVENTS from
 // the head of s.queue when a flush is due (or force). The caller owns the result.
 bridge_ext_take_batch_locked :: proc(s: ^Bridge_Ext_Instance_State, now: i64, force: bool) -> [dynamic]string {

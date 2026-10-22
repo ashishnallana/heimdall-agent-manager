@@ -59,6 +59,14 @@ test_tool_activity_message_is_silent_and_scoped :: proc(t: ^testing.T) {
 		testing.expect_value(t, rows[0].metadata_json, meta)
 		testing.expect(t, rows[0].read_at != "", "read_at persisted")
 	}
+	// The agent's own inbox history never echoes tool_activity back to it; only a
+	// debug read (include_debug) sees the row.
+	inbox, _ := iface.content_list_agent_inbox_messages(&content_repo, "chat_ta", TA_OWNER, "inst_ta", false, false, true, false, 10, "")
+	testing.expect_value(t, len(inbox), 0)
+	debug_inbox, _ := iface.content_list_agent_inbox_messages(&content_repo, "chat_ta", TA_OWNER, "inst_ta", false, false, true, true, 10, "")
+	testing.expect_value(t, len(debug_inbox), 1)
+	if len(debug_inbox) == 1 do testing.expect_value(t, debug_inbox[0].message_type, "tool_activity")
+
 	after, _, _ := iface.content_get_conversation(&content_repo, "chat_ta")
 	testing.expect_value(t, after.unread_count, 2)
 	testing.expect_value(t, after.last_message_preview, "real reply")

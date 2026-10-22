@@ -371,3 +371,37 @@ test_tool_agg_ingest_queues_message_and_params :: proc(t: ^testing.T) {
 	md, _ := obj["metadata"].(json.Object)
 	testing.expect_value(t, len(arr(md, "calls")), 1)
 }
+
+@(test)
+test_tool_agg_instance_terminal_flushes_running_calls :: proc(t: ^testing.T) {
+	// A kill mid-turn sends no Stop: the terminal status closes the turn out.
+	rec := Bridge_Local_Agent_Token_Record{agent_instance_id = "inst_tool_agg_terminal", instance_token = "tok_test", role = .Agent}
+	params := strings.concatenate({`{"events":[`,
+		agg_event("tool.start", `,"tool":{"name":"Bash","use_id":"t1","input":{"command":"sleep 100"}},"payload":{}`),
+		`]}`}, context.temp_allocator)
+	res := bridge_ext_ingest(rec, params, 1000)
+	defer bridge_ext_ingest_result_destroy(&res)
+	testing.expect_value(t, res.accepted, 1)
+
+	bridge_ext_instance_terminal(rec.agent_instance_id, 2000)
+	bridge_ext_instance_terminal("inst_tool_agg_unknown", 2000) // no state: no-op
+
+	sync.mutex_lock(&bridge_ext_mutex)
+	msgs: [dynamic]Tool_Agg_Message
+	for &s in bridge_ext_states {
+		if s.agent_instance_id == rec.agent_instance_id do msgs = tool_agg_take_ready(&s.tools)
+	}
+	sync.mutex_unlock(&bridge_ext_mutex)
+	defer {
+		context.allocator = runtime.heap_allocator()
+		for &m in msgs do tool_agg_message_destroy(&m)
+		delete(msgs)
+	}
+	testing.expect_value(t, len(msgs), 1)
+	if len(msgs) != 1 do return
+	md := agg_meta(t, msgs[0])
+	testing.expect_value(t, str(md, "reason"), "agent_stopped")
+	calls := arr(md, "calls")
+	testing.expect_value(t, len(calls), 1)
+	if len(calls) == 1 do testing.expect_value(t, str(calls[0], "status"), "running")
+}
