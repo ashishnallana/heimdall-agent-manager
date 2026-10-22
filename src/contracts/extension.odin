@@ -64,6 +64,7 @@ Ext_Event :: struct {
 	tool_use_id:       string,
 	file_path:         string, // file.edit only
 	activity_state:    string, // activity only (payload.state)
+	session_phase:     string, // session only (payload.phase)
 	notification_type: string, // notification only (payload.type | payload.notification_type)
 	capabilities:      [dynamic]string, // hello only (payload.capabilities)
 }
@@ -108,6 +109,7 @@ ext_event_destroy :: proc(ev: ^Ext_Event) {
 	delete(ev.provider); delete(ev.ext_version); delete(ev.ts); delete(ev.session_id)
 	delete(ev.transcript_path); delete(ev.agent_id); delete(ev.agent_type); delete(ev.tool_name)
 	delete(ev.tool_use_id); delete(ev.file_path); delete(ev.activity_state); delete(ev.notification_type)
+	delete(ev.session_phase)
 	for c in ev.capabilities do delete(c)
 	delete(ev.capabilities)
 	ev^ = {}
@@ -185,6 +187,8 @@ ext_parse_event :: proc(raw: string) -> (ev: Ext_Event, err: Ext_Error) {
 	payload := ext_obj_object(root, "payload")
 
 	#partial switch kind {
+	case .Session:
+		ev.session_phase = ext_obj_string(payload, "phase")
 	case .File_Edit:
 		ev.file_path = ext_obj_string(payload, "file_path")
 		if ev.file_path == "" {

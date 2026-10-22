@@ -55,6 +55,8 @@ PTY_HOST_T_STREAM_CLOSED :: 0xAF
 PTY_HOST_T_ALREADY_EXITED :: 0xB0
 PTY_HOST_T_WATCH_EVENTS :: 0x38
 PTY_HOST_T_SIGNAL :: 0x39 // Send POSIX signal to a shell's process group (T2/REQ-SH-CONTRACT §4)
+PTY_HOST_T_STARTUP_INPUT :: 0x3A
+PTY_HOST_T_STARTUP_INPUT_DONE :: 0xB1
 
 PTY_HOST_MAX_FRAME_BYTES :: 64 * 1024 * 1024
 
@@ -147,6 +149,7 @@ Pty_Host_Reply_Kind :: enum {
 	Stream_Closed,
 	// Reply to Signal: the target had already exited (code = its exit code).
 	Already_Exited,
+	Startup_Input_Done,
 }
 
 // One agent's liveness entry inside a Host_Heartbeat reply.
@@ -161,6 +164,7 @@ Pty_Host_Reply :: struct {
 	pid:              i32,
 	code:             i32, // ChildExited code
 	message:          string, // Error message / StartupBlocked safe_diagnostic
+	startup_key:      string, // StartupInputDone launch fence
 	reason_code:      string, // StartupBlocked reason_code
 	hash:             u64, // ScreenChanged content hash
 	ts_unix_ms:       u64, // HostHeartbeat timestamp
@@ -338,6 +342,17 @@ pty_host_encode_input :: proc(instance: string, data: []byte) -> []byte {
 	return pty_host_frame(p[:])
 }
 
+pty_host_encode_startup_input :: proc(instance: string, pid: i32, launch_key: string, data: []byte) -> []byte {
+	p := make([dynamic]byte)
+	defer delete(p)
+	append(&p, PTY_HOST_T_STARTUP_INPUT)
+	pty_host_put_str(&p, instance)
+	pty_host_put_i32(&p, pid)
+	pty_host_put_str(&p, launch_key)
+	append(&p, ..data)
+	return pty_host_frame(p[:])
+}
+
 pty_host_encode_key :: proc(instance: string, key: Pty_Host_Key) -> []byte {
 	p := make([dynamic]byte)
 	defer delete(p)
@@ -368,6 +383,12 @@ pty_host_decode_reply :: proc(payload: []byte) -> (Pty_Host_Reply, bool) {
 	off := 0
 	r: Pty_Host_Reply
 	switch tag {
+	case PTY_HOST_T_STARTUP_INPUT_DONE:
+		r.kind = .Startup_Input_Done
+		inst, ok := pty_host_get_str(rest, &off); if !ok do return {}, false
+		pid, pok := pty_host_get_i32(rest, &off); if !pok { delete(inst); return {}, false }
+		key, kok := pty_host_get_str(rest, &off); if !kok { delete(inst); return {}, false }
+		r.instance = inst; r.pid = pid; r.startup_key = key
 	case PTY_HOST_T_SPAWNED:
 		r.kind = .Spawned
 		inst, ok := pty_host_get_str(rest, &off); if !ok do return {}, false
@@ -525,6 +546,7 @@ pty_host_free_agents :: proc(agents: []Pty_Host_Agent_Info) {
 
 // pty_host_reply_delete frees an owned reply's heap fields.
 pty_host_reply_delete :: proc(r: Pty_Host_Reply) {
+	delete(r.startup_key)
 	if r.instance != "" do delete(r.instance)
 	if r.message != "" do delete(r.message)
 	if r.reason_code != "" do delete(r.reason_code)

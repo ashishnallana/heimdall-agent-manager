@@ -40,6 +40,7 @@ effect_wake_lease :: proc(svc: ^Service, u: ^Uow, lease: domain.Task_Lease, task
 	provider, model := lease_launch_model(svc, Placement{bridge_id = bridge_id, provider = lease.provider, model = lease.model}, inst)
 	append(&u.effects.owned_strings, provider, model)
 	entry := agent.Wake_Agent_Run_Entry{
+		run_count = inst.run_count,
 		agent_instance_id = inst.agent_instance_id,
 		task_id           = string(task.task_id),
 		role              = role,

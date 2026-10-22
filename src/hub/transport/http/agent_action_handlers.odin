@@ -4,6 +4,7 @@ import "core:fmt"
 import "core:time"
 import "core:strings"
 import "core:strconv"
+import "core:sync"
 import "core:unicode/utf8"
 import internal_b64 "core:encoding/base64"
 import contracts "odin_test:contracts"
@@ -1226,20 +1227,45 @@ agent_action_memory_content_handler :: proc(ctx: rawptr, req: Request) -> Respon
 	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req), 200)
 }
 
+agent_start_success_mutex: sync.Mutex
+
 agent_action_start_success_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Agent_Action_Handlers)(ctx)
-	auth, _, ok, resp := require_instance_action_auth(h, req)
+	// Authenticate after serialization so a queued request is rechecked against
+	// the current launch assertion. Duplicate retries must not rerun ready hooks.
+	sync.mutex_lock(&agent_start_success_mutex)
+	defer sync.mutex_unlock(&agent_start_success_mutex)
+	auth, current, ok, resp := require_instance_action_auth(h, req)
 	if !ok do return resp
-	inst, saved, err := agent_service.mark_instance_start_success(h.agents, auth)
+	params := json_object_raw(req.body, "params")
+	expected, has_generation := jsonx.extract_int_found(params, "run_count")
+	// Legacy/initial runs have no prior generation to confuse with this one.
+	// Relaunches require the fence: omission must not bypass a stale-run check.
+	if expected < 0 || (expected > 0 && expected != current.run_count) || ((!has_generation || expected == 0) && current.run_count > 1) {
+		return respond_error(domain.domain_error(.Conflict, "Startup generation is missing or stale. Update the bridge with the hub, then relaunch this agent."), req.request_id)
+	}
+	if current.kind != "provider_test" {
+		note, exists, read_err := content_service.get_agent_startup_message(h.content, auth, current)
+		if read_err.code != .None && read_err.code != .Not_Found do return respond_error(read_err, req.request_id)
+		if exists {
+			b := strings.builder_make()
+			strings.write_string(&b, "{\"instance\":"); write_agent_instance_json(&b, current)
+			strings.write_string(&b, ",\"startup_message\":"); write_message_json(&b, note, h.content)
+			strings.write_byte(&b, '}')
+			return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req), 200)
+		}
+	}
+	inst, saved, err := agent_service.mark_instance_start_success(h.agents, auth, current.run_count)
 	if !saved do return respond_error(err, req.request_id)
 	if inst.kind == "provider_test" {
 		if h.providers != nil do provider_service.provider_test_mark_instance_ready(h.providers, inst.agent_instance_id)
 		b := strings.builder_make(); strings.write_string(&b, "{\"instance\":"); write_agent_instance_json(&b, inst); strings.write_byte(&b, '}')
 		return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req), 200)
 	}
-	startup_note, note_saved, _ := content_service.send_agent_message(h.content, auth, inst.agent_instance_id, content_service.Message_Input{body = "Agent has started and is ready.", artifact_ids_json = "[]", message_type = "system"})
+	startup_note, note_saved, note_err := content_service.send_agent_startup_message(h.content, auth, inst)
+	if note_err.code != .None do return respond_error(note_err, req.request_id)
 	conv, conv_ok, _ := content_service.get_conversation_by_instance(h.content, auth, inst.agent_instance_id)
-	if conv_ok {
+	if conv_ok && note_saved {
 		// Only re-notify for genuinely unread inbound messages. Scanning all recent
 		// messages and notifying for the first user_to_agent row (regardless of read
 		// state) produced false "New message from user" notifications on every
@@ -1266,7 +1292,7 @@ agent_action_start_success_handler :: proc(ctx: rawptr, req: Request) -> Respons
 	strings.write_string(&b, "{\"instance\":")
 	write_agent_instance_json(&b, inst)
 	strings.write_string(&b, ",\"startup_message\":")
-	if note_saved { write_message_json(&b, startup_note, h.content) } else { strings.write_string(&b, "null") }
+	write_message_json(&b, startup_note, h.content)
 	strings.write_byte(&b, '}')
 	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req), 200)
 }

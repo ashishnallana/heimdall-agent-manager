@@ -211,6 +211,14 @@ struct Agent {
     /// HOST-2: per-agent startup detector + activity-signal thread (only present
     /// when the spec carried a `detect` config).
     detector: Option<JoinHandle<()>>,
+    startup_input: StartupInputState,
+}
+
+#[derive(Default)]
+struct StartupInputState {
+    bytes: Option<Vec<u8>>,
+    written: usize,
+    delivered: bool,
 }
 
 impl Agent {
@@ -565,6 +573,7 @@ impl Daemon {
             pump: Some(pump),
             exit_watch: Some(exit_watch),
             detector,
+            startup_input: StartupInputState::default(),
         })
     }
 
@@ -730,6 +739,35 @@ impl Daemon {
             .ok_or_else(|| anyhow!("input: no such instance {shell_id}"))?;
         let res = a.host.lock().unwrap().write_input(bytes);
         res
+    }
+
+    /// One launch-fenced startup instruction. The receipt and partial byte
+    /// progress live with the child, so lost replies/concurrent retries are safe.
+    /// Close/restart drops the receipt; both pid and launch key fence old work.
+    pub fn write_startup_input(&self, instance: &str, pid: i32, launch_key: &str, bytes: &[u8]) -> Result<()> {
+        if launch_key.is_empty() || bytes.is_empty() || bytes.len() > 4096 {
+            return Err(anyhow!("startup input: invalid key or instruction size"));
+        }
+        let mut agents = self.agents.lock().unwrap();
+        let a = agents.get_mut(instance).ok_or_else(|| anyhow!("startup input: no such instance"))?;
+        let expected_key = a.spec.env.iter().rev().find(|(k, _)| k == "HEIMDALL_STARTUP_KEY").map(|(_, v)| v.as_str());
+        if a.pid != pid || expected_key != Some(launch_key) || a.stop.load(Ordering::SeqCst) || !a.alive.load(Ordering::SeqCst) {
+            return Err(anyhow!("startup input: stale or inactive launch"));
+        }
+        let state = &mut a.startup_input;
+        if let Some(original) = &state.bytes {
+            if original != bytes {
+                return Err(anyhow!("startup input: instruction differs from first attempt"));
+            }
+        } else {
+            state.bytes = Some(bytes.to_vec());
+        }
+        if state.delivered {
+            return Ok(());
+        }
+        a.host.lock().unwrap().write_startup_input(bytes, &mut state.written)?;
+        state.delivered = true;
+        Ok(())
     }
 
     /// Resize an instance/shell's PTY + VT model.
@@ -1410,6 +1448,13 @@ fn handle_ctl(daemon: &Daemon, id: u64, msg: CtlMsg, tx: &ReplySink) {
                 });
             }
         }
+        CtlMsg::StartupInput { instance, pid, launch_key, data } => {
+            let reply = match daemon.write_startup_input(&instance, pid, &launch_key, &data) {
+                Ok(()) => CtlReply::StartupInputDone { instance, pid, launch_key },
+                Err(e) => CtlReply::Error { instance, message: format!("{e:#}") },
+            };
+            let _ = tx.send(reply);
+        }
         CtlMsg::Key { instance, key } => {
             if let Err(e) = daemon.write_input(&instance, key.to_bytes()) {
                 let _ = tx.send(CtlReply::Error {
@@ -1593,6 +1638,57 @@ mod tests {
             tee_path: None,
             timeout_seconds: None,
         }
+    }
+
+    #[test]
+    fn startup_input_lost_ack_concurrent_retries_and_relaunch_are_safe() {
+        require_pty!();
+        let Some(sh) = shell() else { return };
+        let sock = tmp_socket("startup_input");
+        let mut server = DaemonServer::start(&sock).unwrap();
+        let d = server.daemon();
+        let mut spec = sh_spec("startup", &sh);
+        spec.argv = vec![sh, "-c".into(), "stty -echo; printf 'STARTUP_READY\\n'; while IFS= read -r line; do printf 'GOT:%s\\n' \"$line\"; done".into()];
+        spec.env.push(("HEIMDALL_STARTUP_KEY".into(), "launch-1".into()));
+        let pid = d.spawn(spec).unwrap();
+        assert!(capture_contains(d, "startup", "STARTUP_READY", Duration::from_secs(3)));
+        let msg = CtlMsg::StartupInput { instance: "startup".into(), pid, launch_key: "launch-1".into(), data: b"only-once\n".to_vec() };
+        // Drop the connection without reading its ack, then repeat on fresh ones.
+        let mut lost = UnixStream::connect(&sock).unwrap();
+        dproto::write_ctl_msg(&mut lost, &msg).unwrap();
+        drop(lost);
+        assert!(capture_contains(d, "startup", "GOT:only-once", Duration::from_secs(3)));
+        let mut workers = Vec::new();
+        for _ in 0..4 {
+            let sock = sock.clone();
+            let msg = msg.clone();
+            workers.push(std::thread::spawn(move || {
+                let mut stream = UnixStream::connect(sock).unwrap();
+                dproto::write_ctl_msg(&mut stream, &msg).unwrap();
+                let reply = await_reply(&mut stream, |_| true, Duration::from_secs(3));
+                assert!(matches!(reply, Some(CtlReply::StartupInputDone { pid: p, .. }) if p == pid), "{reply:?}");
+            }));
+        }
+        for worker in workers { worker.join().unwrap(); }
+        assert!(d.write_startup_input("startup", pid + 1, "launch-1", b"only-once\n").is_err());
+        assert!(d.write_startup_input("startup", pid, "stale", b"only-once\n").is_err());
+        assert!(d.write_startup_input("startup", pid, "launch-1", b"changed\n").is_err());
+        assert!(d.write_startup_input("missing", pid, "launch-1", b"x\n").is_err());
+        d.write_input("startup", b"barrier\n").unwrap();
+        assert!(capture_contains(d, "startup", "GOT:barrier", Duration::from_secs(3)));
+        let screen = d.capture("startup").unwrap().lines.join("\n");
+        assert_eq!(screen.matches("GOT:only-once").count(), 1, "{screen}");
+        let replacement = d.restart("startup").unwrap();
+        assert!(d.write_startup_input("startup", pid, "launch-1", b"only-once\n").is_err(), "old pid cannot target replacement");
+        assert!(capture_contains(d, "startup", "STARTUP_READY", Duration::from_secs(3)));
+        d.write_startup_input("startup", replacement, "launch-1", b"new-launch\n").unwrap();
+        assert!(capture_contains(d, "startup", "GOT:new-launch", Duration::from_secs(3)));
+        d.signal("startup", 9).unwrap();
+        assert!(wait_for(|| find(&d.list(), "startup").is_some_and(|info| !info.alive), Duration::from_secs(3)));
+        assert!(d.write_startup_input("startup", replacement, "launch-1", b"new-launch\n").is_err(), "exited child cannot receive startup input");
+        d.close("startup").unwrap();
+        assert!(d.write_startup_input("startup", replacement, "launch-1", b"new-launch\n").is_err());
+        server.shutdown();
     }
 
     fn find(list: &[AgentInfo], instance: &str) -> Option<AgentInfo> {

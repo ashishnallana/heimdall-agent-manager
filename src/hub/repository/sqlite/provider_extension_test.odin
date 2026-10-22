@@ -26,6 +26,8 @@ test_provider_catalog_extension_descriptor_is_claude_only :: proc(t: ^testing.T)
 			saw_claude = true
 			testing.expect(t, strings.contains(entry.extension_json, `"detect_argv":["plugin","list","--json"]`), "claude detects via plugin list")
 			testing.expect(t, strings.contains(entry.extension_json, `"plugin_id":"heimdall@heimdall"`), "claude plugin id")
+			testing.expect(t, strings.contains(entry.extension_json, `"load_args":["--plugin-dir"]`), "catalog declares the extension loader argv")
+			testing.expect(t, strings.contains(entry.extension_json, `"load_path_suffix":"extensions/claude"`), "loader is restricted to this extension directory")
 			testing.expect(t, strings.contains(entry.extension_json, `"capabilities":["activity","subagents","permissions","file_edits","session_id"]`), "claude capabilities")
 		} else {
 			testing.expectf(t, entry.extension_json == "", "%s has no extension", entry.provider)
