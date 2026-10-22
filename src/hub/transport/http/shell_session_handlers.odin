@@ -137,6 +137,16 @@ shell_session_stream_handler :: proc(ctx: rawptr, req: Request, client: net.TCP_
 		return
 	}
 
+	// Recheck at attach so shells created before a downgrade stay alive but
+	// cannot be streamed by a user whose plan no longer includes shells.
+	if session.kind == domain.Shell_Session_Kind_Shell {
+		if plan_err := shell_session_svc.shell_session_require_shells(h.entitlements, auth_ctx); plan_err.code != .None {
+			project_service.ws_track_rejected(project_service.WS_KIND_SHELL, "other")
+			write_stream_error(client, respond_error(plan_err, req.request_id))
+			return
+		}
+	}
+
 	// Freeze the stream's capability at attach; REST mutations check on each call.
 	read_only, entitlement_err := terminal_read_only(h.entitlements, auth_ctx)
 	if entitlement_err.code != .None {

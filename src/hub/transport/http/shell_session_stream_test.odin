@@ -383,6 +383,7 @@ test_shell_stream_ticket_and_experiment_gating :: proc(t: ^testing.T) {
 		fake_repo := Fake_Shell_Repo{
 			session = domain.Shell_Session{
 				session_id    = "sh_test",
+				kind          = domain.Shell_Session_Kind_Shell,
 				owner_user_id = "user_test",
 				bridge_id     = "brg_local",
 				status        = domain.Shell_Session_Status_Running,
@@ -791,6 +792,7 @@ shell_stream_check_input_policy :: proc(t: ^testing.T, read_only: bool) {
 	fake_repo := Fake_Shell_Repo{
 		session = domain.Shell_Session{
 			session_id    = "sh_input_test",
+			kind          = domain.Shell_Session_Kind_Run if read_only else domain.Shell_Session_Kind_Shell,
 			owner_user_id = "user_input",
 			bridge_id     = "brg_input_target",
 			status        = domain.Shell_Session_Status_Running,
@@ -1159,4 +1161,43 @@ test_err_proto_rejected_chunk_frame_gets_protocol_error :: proc(t: ^testing.T) {
 	testing.expect(t, found, frame)
 	testing.expect_value(t, werr.cause, "chunk_rejected")
 	testing.expect_value(t, werr.class, contracts.Bridge_Error_Class.fatal)
+}
+
+@(test)
+test_shell_stream_plan_refuses_existing_shell_before_upgrade :: proc(t: ^testing.T) {
+	for auth_kind in ([]contracts.Auth_Kind{.User_Token, .Trusted_Proxy}) {
+		pair, ok := make_stream_pair(t)
+		testing.expect(t, ok)
+		defer close_stream_pair(&pair)
+		tickets := new_user_ws_ticket_store()
+		defer user_ws_ticket_store_free(&tickets)
+		user_ws_ticket_store_put(&tickets, "plan_ticket", {kind = auth_kind, user_id = "owner"}, 60)
+		fake_exp := Fake_Shell_Experiments{streaming_enabled = true}
+		exp_repo := iface.Experiment_Repository{ctx = &fake_exp, list_by_owner = fake_shell_experiment_list}
+		fake_repo := Fake_Shell_Repo{session = {
+			session_id = "sh_existing", owner_user_id = "owner", bridge_id = "brg",
+			kind = domain.Shell_Session_Kind_Shell, status = domain.Shell_Session_Status_Running,
+		}}
+		repo := iface.Shell_Session_Repository{ctx = &fake_repo, get = fake_shell_repo_get}
+		h := Shell_Session_Stream_Handlers{
+			ws_tickets = &tickets, experiments = &exp_repo, shell_repo = &repo,
+			entitlements = {lookup = plan_test_read_only_lookup},
+		}
+		// No service or bridge is configured: refusal must precede any attach.
+		shell_session_stream_handler(&h, {
+			method = "GET", path = "/api/v1/shells/sh_existing/stream", query = "ticket=plan_ticket",
+			headers = []contracts.HTTP_Header{{name = "Sec-WebSocket-Key", value = "dGhlIHNhbXBsZSBub25jZQ=="}},
+			request_id = "plan-shell-stream",
+		}, pair.hub)
+		resp, read_ok := read_raw_response(pair.client, 5 * time.Second)
+		defer delete(resp)
+		testing.expect(t, read_ok)
+		testing.expect(t, strings.contains(resp, "402 Payment Required"))
+		testing.expect(t, !strings.contains(resp, "101 Switching"))
+		testing.expect(t, strings.contains(resp, `"code":"plan_limit_reached"`))
+		testing.expect(t, strings.contains(resp, `"limit":"shells_enabled"`))
+		testing.expect(t, strings.contains(resp, `"allowed":0`))
+		testing.expect(t, strings.contains(resp, `"current":1`))
+		testing.expect(t, strings.contains(resp, `"upgrade_path":"/settings/account"`))
+	}
 }
