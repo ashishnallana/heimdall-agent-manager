@@ -129,7 +129,7 @@ export function mergeExtensionEvents(current: ExtensionEvent[], incoming: Extens
 // ---------------------------------------------------------------------------
 // Timeline model
 
-export type ToolCallStatus = 'running' | 'done' | 'failed';
+export type ToolCallStatus = 'running' | 'done' | 'failed' | 'completed';
 
 export interface TimelineToolCall {
   kind: 'tool';
@@ -154,6 +154,9 @@ export interface TimelineFileEdit {
   toolName: string;
   diff: string;
   diffTruncated: boolean;
+  partial?: boolean;
+  diffUnavailableReason?: string;
+  oldPath?: string;
   at: string;
 }
 
@@ -416,7 +419,7 @@ export function buildActivityTimeline(
           launch.description = launch.description || subagentDescription(e.payload);
         }
         if (existing) {
-          existing.status = toolFailed(e.payload) ? 'failed' : 'done';
+          existing.status = toolFailed(e.payload) ? 'failed' : e.payload.status === 'completed' || e.payload.outcome === 'unknown' ? 'completed' : 'done';
           existing.endedAt = eventTime(e);
           existing.durationMs = durationMs(existing.startedAt, existing.endedAt);
           if (!existing.summary) existing.summary = toolCallSummary(e.payload);
@@ -428,7 +431,7 @@ export function buildActivityTimeline(
             seq: e.seq,
             agentId: e.agent_id,
             toolName: e.tool_name || 'tool',
-            status: toolFailed(e.payload) ? 'failed' : 'done',
+            status: toolFailed(e.payload) ? 'failed' : e.payload.status === 'completed' || e.payload.outcome === 'unknown' ? 'completed' : 'done',
             summary: toolCallSummary(e.payload),
             startedAt: '',
             endedAt: eventTime(e),
@@ -450,6 +453,9 @@ export function buildActivityTimeline(
           toolName: e.tool_name,
           diff: str(e.payload.diff),
           diffTruncated: e.payload.diff_truncated === true,
+          partial: e.payload.partial === true,
+          diffUnavailableReason: str(e.payload.diff_unavailable_reason),
+          oldPath: str(e.payload.old_path),
           at: eventTime(e),
         };
         addEdit(fileEntry(allFiles, path), edit);

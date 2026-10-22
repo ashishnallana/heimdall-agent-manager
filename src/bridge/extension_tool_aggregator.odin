@@ -61,6 +61,7 @@ Tool_Agg_Status :: enum {
 	Running,
 	Ok,
 	Error,
+	Completed, // returned with no reliable success/failure outcome
 }
 
 Tool_Agg_Category :: enum {
@@ -95,7 +96,7 @@ Tool_Agg_Tool_Count :: struct {
 }
 
 Tool_Agg_Tally :: struct {
-	total, ok, error, running:              int,
+	total, ok, error, running, completed:              int,
 	edits, commands, reads, searches, other: int,
 	spawns:                                 int,
 	edited_files:                           [dynamic]string,
@@ -267,6 +268,7 @@ tally_add :: proc(t: ^Tool_Agg_Tally, c: Tool_Agg_Call) {
 	switch c.status {
 	case .Running: t.running += 1
 	case .Ok:      t.ok += 1
+	case .Completed: t.completed += 1
 	case .Error:   t.error += 1
 	}
 	cat := tool_agg_category(c.tool)
@@ -296,6 +298,7 @@ tally_add :: proc(t: ^Tool_Agg_Tally, c: Tool_Agg_Call) {
 // tally_merge folds src into dst (dst keeps its own strings; src is untouched).
 @(private = "file")
 tally_merge :: proc(dst: ^Tool_Agg_Tally, src: Tool_Agg_Tally) {
+	dst.completed += src.completed
 	dst.total += src.total; dst.ok += src.ok; dst.error += src.error; dst.running += src.running
 	dst.edits += src.edits; dst.commands += src.commands; dst.reads += src.reads
 	dst.searches += src.searches; dst.other += src.other; dst.spawns += src.spawns
@@ -389,8 +392,8 @@ tool_agg_observe :: proc(a: ^Tool_Agg, ev: contracts.Ext_Event, raw: string, now
 	case .Activity:
 		state := strings.to_lower(strings.trim_space(ev.activity_state), context.temp_allocator)
 		if state == "idle" {
-			bg, _ := obj_int(payload, "background_running")
-			tool_agg_flush(a, "idle", now, final = true, ts = ev.ts, keep_live_subagents = bg > 0)
+			bg, known_background := obj_int(payload, "background_running")
+			tool_agg_flush(a, "idle", now, final = true, ts = ev.ts, keep_live_subagents = !known_background || bg > 0)
 		} else if state == "active" || state == "working" || state == "busy" {
 			// A new prompt starts a new turn. Anything left from a turn whose
 			// Stop never arrived is flushed first so turns do not blur.
@@ -425,7 +428,12 @@ tool_agg_observe :: proc(a: ^Tool_Agg, ev: contracts.Ext_Event, raw: string, now
 		append(&a.running, c)
 	case .Tool_End:
 		if a.turn_started_at == "" do a.turn_started_at = strings.clone(ev.ts)
-		status := Tool_Agg_Status.Error if obj_text(payload, "status") == "error" else Tool_Agg_Status.Ok
+		status := Tool_Agg_Status.Ok
+		if outcome := obj_text(payload, "status"); outcome == "error" {
+			status = .Error
+		} else if outcome == "completed" || obj_text(payload, "outcome") == "unknown" {
+			status = .Completed
+		}
 		idx := find_running(a, ev.tool_use_id, ev.agent_id, ev.tool_name)
 		c: Tool_Agg_Call
 		if idx >= 0 {
@@ -592,6 +600,7 @@ status_name :: proc(s: Tool_Agg_Status) -> string {
 	switch s {
 	case .Running: return "running"
 	case .Ok:      return "ok"
+	case .Completed: return "completed"
 	case .Error:   return "error"
 	}
 	return "ok"
@@ -618,7 +627,7 @@ render_call :: proc(c: Tool_Agg_Call) -> string {
 render_counts :: proc(b: ^strings.Builder, t: Tool_Agg_Tally, subagents, omitted: int, with_by_tool: bool) {
 	strings.write_byte(b, '{')
 	write_int(b, "total", t.total, comma = false)
-	write_int(b, "ok", t.ok); write_int(b, "error", t.error); write_int(b, "running", t.running)
+	write_int(b, "completed", t.completed); write_int(b, "ok", t.ok); write_int(b, "error", t.error); write_int(b, "running", t.running)
 	write_int(b, "edits", t.edits); write_int(b, "files_edited", len(t.edited_files))
 	write_int(b, "commands", t.commands); write_int(b, "reads", t.reads); write_int(b, "searches", t.searches)
 	write_int(b, "other", t.other); write_int(b, "subagents", subagents); write_int(b, "omitted", omitted)

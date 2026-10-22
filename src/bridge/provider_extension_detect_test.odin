@@ -147,3 +147,31 @@ test_provider_discovery_report_includes_extension_state :: proc(t: ^testing.T) {
 	testing.expect_value(t, wire.providers[0].extension_version, "0.0.9")
 	testing.expect_value(t, wire.providers[0].extension_checked_at, "2026-10-22T00:00:00Z")
 }
+
+@(test)
+test_provider_extension_declarative_installed_collection_and_keys :: proc(t: ^testing.T) {
+	ext := provider_extension_test_descriptor()
+	ext.plugin_id = "heimdall@heimdall-codex"
+	ext.detect_collection = "installed"
+	ext.detect_id_key = "pluginId"
+	ext.detect_version_key = "version"
+	ext.detect_enabled_key = "enabled"
+	cases := [?]struct {raw, state: string}{
+		{`{"installed":[{"pluginId":"heimdall@heimdall-codex","version":"0.1.0","enabled":true}],"available":[]}`, "present"},
+		{`{"installed":[],"available":[{"pluginId":"heimdall@heimdall-codex","version":"0.1.0","enabled":true}]}`, "absent"},
+		{`{"installed":[{"pluginId":"heimdall@elsewhere","version":"1.0.0","enabled":true}]}`, "absent"},
+		{`{"installed":[{"pluginId":"heimdall@heimdall-codex","version":"0.1.0","enabled":false}]}`, "disabled"},
+		{`{"installed":[{"pluginId":"heimdall@heimdall-codex","version":"0.0.9","enabled":true}]}`, "outdated"},
+		{`{"installed":[{"pluginId":"heimdall@heimdall-codex","enabled":true}]}`, "error"},
+		{`{"installed":[{"pluginId":"heimdall@heimdall-codex","version":"unknown","enabled":true}]}`, "error"},
+		{`{"installed":[{"pluginId":"heimdall@heimdall-codex","version":"1garbage","enabled":true}]}`, "error"},
+		{`{"installed":[{"pluginId":"heimdall@heimdall-codex","version":"0.1.0","enabled":"true"}]}`, "error"},
+		{`{"installed":{},"available":[]}`, "error"},
+		{`[]`, "error"},
+	}
+	for c in cases {
+		state, version := bridge_provider_extension_evaluate(ext, c.raw, true)
+		testing.expect_value(t, state, c.state)
+		delete(version)
+	}
+}

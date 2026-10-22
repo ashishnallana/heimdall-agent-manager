@@ -29,6 +29,7 @@ export interface ToolActivityRowProps {
 }
 
 function CallStatusIcon({ status }: { status: ToolActivityCall['status'] }) {
+  if (status === 'completed') return <span className="text-faint" title="Completed; outcome unknown" aria-label="Completed; outcome unknown">○</span>;
   if (status === 'running') return <Spinner size="sm" />;
   if (status === 'error') return <Icon name="alert" size={12} className="text-danger" title="Failed" />;
   return <Icon name="check" size={12} className="text-success" title="Done" />;

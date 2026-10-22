@@ -1,6 +1,8 @@
 package agent
 
 import "core:testing"
+import json "core:encoding/json"
+import ext "odin_test:ctl/extension"
 import contracts "odin_test:contracts"
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
@@ -152,4 +154,31 @@ test_extension_ingest_requires_instance_token :: proc(t: ^testing.T) {
 	testing.expect(t, !ok3, "non-object params rejected")
 	testing.expect_value(t, err3.code, domain.Error_Code.Validation_Failed)
 	testing.expect_value(t, len(store.events), 0)
+}
+
+@(test)
+test_codex_native_hello_reaches_hub_without_trusting_payload_identity :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+	store: Ext_Store
+	repo: iface.Agent_Repository
+	clock: platform.Clock
+	ids: platform.ID_Generator
+	service := ext_service(&store, &repo, &clock, &ids)
+	native, _ := json.parse_string(#load("../../../ctl/extension/testdata/codex/callbacks.json", string), json.DEFAULT_SPECIFICATION, true)
+	rows, _ := native.(json.Array)
+	raw, _ := json.marshal(rows[0])
+	mapped, map_err := ext.codex_map_hook(string(raw), "2026-10-22T10:00:00Z")
+	testing.expect_value(t, map_err, ext.Codex_Error.None)
+	result, ok, err := ingest_extension_events(&service, ME, ext.event_params(mapped.events[:]))
+	testing.expect(t, ok, err.message)
+	testing.expect_value(t, len(result.stored), 2)
+	testing.expect_value(t, store.inserted_for, "inst_me")
+	testing.expect_value(t, result.instance.provider_session_id, "native-id-001")
+	if len(store.updates) == 1 {
+		testing.expect_value(t, store.updates[0].extension_provider, "codex")
+		testing.expect_value(t, store.updates[0].extension_version, "0.1.0")
+	} else {
+		testing.expect_value(t, len(store.updates), 1)
+	}
 }

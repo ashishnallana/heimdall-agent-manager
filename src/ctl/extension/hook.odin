@@ -30,6 +30,8 @@ import "core:strconv"
 import "core:strings"
 import "core:time"
 
+HOOK_INPUT_MAX :: 16 * 1024 * 1024
+
 // EVENT_SOCKET_TIMEOUT_MS bounds a non-permission round trip to the bridge.
 EVENT_SOCKET_TIMEOUT_MS :: 500
 // PERMISSION_RELAY_TIMEOUT_MS is how long the bridge waits for a UI decision.
@@ -99,7 +101,7 @@ permission_reply_kind :: proc(response: string, ok: bool) -> Permission_Reply {
 // relay_permission blocks on agent.extension.permission for one blocker_id,
 // re-registering it after transport failures until the deadline. build renders
 // the event for the remaining timeout.
-relay_permission :: proc(env: Hook_Env, send: Send_Proc, timeout_ms: int, build: proc(remaining_ms: int, blocker_id: string, raw: string, ts: string) -> (string, bool), raw: string) -> string {
+relay_permission :: proc(env: Hook_Env, send: Send_Proc, timeout_ms: int, build: proc(remaining_ms: int, blocker_id: string, raw: string, ts: string) -> (string, bool), raw: string, render: proc(response: string) -> string) -> string {
 	now := env.now_ms if env.now_ms != nil else real_now_ms
 	sleep := env.sleep_ms if env.sleep_ms != nil else real_sleep_ms
 	blocker_id := env.blocker_id if env.blocker_id != "" else new_blocker_id()
@@ -111,7 +113,7 @@ relay_permission :: proc(env: Hook_Env, send: Send_Proc, timeout_ms: int, build:
 		event, ok := build(remaining, blocker_id, raw, env.ts)
 		if !ok do return ""
 		response, sent := send(env.endpoint, env.token, "agent.extension.permission", event, remaining + PERMISSION_SOCKET_MARGIN_MS)
-		if permission_reply_kind(response, sent) == .Final do return claude_permission_output_from_response(response)
+		if permission_reply_kind(response, sent) == .Final do return render(response)
 		if int(deadline - now()) < backoff + PERMISSION_RELAY_TIMEOUT_MIN_MS do return ""
 		sleep(backoff)
 		backoff = min(backoff * 2, PERMISSION_RETRY_BACKOFF_MAX_MS)
@@ -142,6 +144,16 @@ permission_timeout_from_env :: proc() -> int {
 hook_run :: proc(provider, raw: string, env: Hook_Env, send: Send_Proc) -> string {
 	if !env_ready(env) do return ""
 	switch provider {
+	case CODEX_PROVIDER:
+		timeout := env.permission_timeout_ms
+		if timeout <= 0 do timeout = PERMISSION_RELAY_TIMEOUT_MS
+		mapped, err := codex_map_hook(raw, env.ts, timeout)
+		if err != .None || len(mapped.events) == 0 do return ""
+		if mapped.is_permission {
+			return relay_permission(env, send, timeout, codex_build_permission, raw, codex_permission_output_from_response)
+		}
+		_, _ = send(env.endpoint, env.token, "agent.extension.event", event_params(mapped.events[:]), EVENT_SOCKET_TIMEOUT_MS)
+		return ""
 	case CLAUDE_PROVIDER:
 		timeout := env.permission_timeout_ms
 		if timeout <= 0 do timeout = PERMISSION_RELAY_TIMEOUT_MS
@@ -151,9 +163,9 @@ hook_run :: proc(provider, raw: string, env: Hook_Env, send: Send_Proc) -> strin
 			// A lone ham-ctl invocation is the agent talking to Heimdall itself:
 			// approve it locally, with no blocker and no event.
 			if claude_permission_is_ham_ctl(raw, env.ctl_bin) do return claude_permission_output("allow", "")
-			return relay_permission(env, send, timeout, claude_build_permission, raw)
+			return relay_permission(env, send, timeout, claude_build_permission, raw, claude_permission_output_from_response)
 		}
-		_, _ = send(env.endpoint, env.token, "agent.extension.event", claude_event_params(mapped.events[:]), EVENT_SOCKET_TIMEOUT_MS)
+		_, _ = send(env.endpoint, env.token, "agent.extension.event", event_params(mapped.events[:]), EVENT_SOCKET_TIMEOUT_MS)
 		return ""
 	}
 	return ""

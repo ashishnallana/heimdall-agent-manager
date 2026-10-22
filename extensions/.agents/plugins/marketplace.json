@@ -1,0 +1,20 @@
+{
+  "name": "heimdall-codex",
+  "interface": {
+    "displayName": "Heimdall Codex"
+  },
+  "plugins": [
+    {
+      "name": "heimdall",
+      "source": {
+        "source": "local",
+        "path": "./codex"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

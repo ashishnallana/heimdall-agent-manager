@@ -7,9 +7,14 @@ import "core:time"
 
 // REQ-EXT-DET-1: whether a provider's Heimdall extension is installed. The Hub
 // catalog owns the descriptor; this file only runs `<binary> <detect_argv...>`
-// and reads the JSON array it prints. Matching is data-driven (`id`, `enabled`,
+// and reads the JSON collection it prints. Matching is data-driven (`id`, `enabled`,
 // `version`, `errors`), so no provider name appears here.
 Bridge_Catalog_Extension :: struct {
+	// Empty selectors retain legacy flat-array id/version/enabled behavior.
+	detect_collection: string `json:"detect_collection"`,
+	detect_id_key: string `json:"detect_id_key"`,
+	detect_version_key: string `json:"detect_version_key"`,
+	detect_enabled_key: string `json:"detect_enabled_key"`,
 	detect_argv:  []string `json:"detect_argv"`,
 	plugin_id:    string `json:"plugin_id"`,
 	min_version:  string `json:"min_version"`,
@@ -76,7 +81,13 @@ bridge_provider_extension_evaluate :: proc(ext: Bridge_Catalog_Extension, output
 	parsed, parse_err := json.parse_string(output, json.DEFAULT_SPECIFICATION, true, context.temp_allocator)
 	if parse_err != nil do return "error", strings.clone("", allocator)
 	defer json.destroy_value(parsed, context.temp_allocator)
-	items, is_array := parsed.(json.Array)
+	collection := parsed
+	if ext.detect_collection != "" {
+		object, is_object := parsed.(json.Object)
+		if !is_object do return "error", strings.clone("", allocator)
+		collection = object[ext.detect_collection]
+	}
+	items, is_array := collection.(json.Array)
 	if !is_array do return "error", strings.clone("", allocator)
 
 	state = "absent"
@@ -84,15 +95,41 @@ bridge_provider_extension_evaluate :: proc(ext: Bridge_Catalog_Extension, output
 	for item in items {
 		object, is_object := item.(json.Object)
 		if !is_object do continue
-		id, _ := object["id"].(json.String)
+		id_key := ext.detect_id_key if ext.detect_id_key != "" else "id"
+		version_key := ext.detect_version_key if ext.detect_version_key != "" else "version"
+		enabled_key := ext.detect_enabled_key if ext.detect_enabled_key != "" else "enabled"
+		id, _ := object[id_key].(json.String)
 		if id != ext.plugin_id do continue
-		entry_version, _ := object["version"].(json.String)
+		entry_version, _ := object[version_key].(json.String)
 		enabled := true
-		if value, has := object["enabled"].(json.Boolean); has do enabled = bool(value)
+		if value, has := object[enabled_key].(json.Boolean); has do enabled = bool(value)
 		has_errors := false
+		// A descriptor that requests explicit enabled evidence must receive it.
+		if ext.detect_enabled_key != "" {
+			_, has_enabled := object[enabled_key].(json.Boolean)
+			if !has_enabled do has_errors = true
+		}
+		if ext.detect_version_key != "" && ext.min_version != "" {
+			// Unknown or nonnumeric versions are not compatibility evidence.
+			v := string(entry_version)
+			if len(v) > 0 && (v[0] == 'v' || v[0] == 'V') do v = v[1:]
+			if cut := strings.index_any(v, "-+"); cut >= 0 do v = v[:cut]
+			if len(v) == 0 do has_errors = true
+			previous_dot := true
+			for ch in v {
+				if ch == '.' {
+					if previous_dot do has_errors = true
+					previous_dot = true
+				} else {
+					if ch < '0' || ch > '9' do has_errors = true
+					previous_dot = false
+				}
+			}
+			if previous_dot do has_errors = true
+		}
 		#partial switch errors in object["errors"] {
-		case json.Array:  has_errors = len(errors) > 0
-		case json.String: has_errors = strings.trim_space(errors) != ""
+		case json.Array:  has_errors = has_errors || len(errors) > 0
+		case json.String: has_errors = has_errors || strings.trim_space(errors) != ""
 		}
 		entry_state := "present"
 		if has_errors {
