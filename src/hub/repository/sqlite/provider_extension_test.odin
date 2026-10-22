@@ -110,3 +110,30 @@ test_provider_discovery_report_rejects_unknown_extension_state :: proc(t: ^testi
 	}
 	testing.expect_value(t, provider_service.apply_discovery_report(&service, "brg_ext", report).code, domain.Error_Code.Validation_Failed)
 }
+
+@(test)
+test_provider_discovery_report_ignores_stale_catalog_unsupported :: proc(t: ^testing.T) {
+	conn, clone_ok := tmpl_clone_migrated(t)
+	if !clone_ok do return
+	defer close(&conn)
+	impl := Provider_Repo_SQLite{conn = &conn}
+	repo := new_provider_repository(&impl, &conn)
+	service := provider_service.Provider_Service{repo = &repo}
+	// A Bridge whose catalog snapshot predates the claude descriptor reports
+	// "unsupported"; the Hub records "not measured yet" until it resyncs.
+	report := []domain.Bridge_Provider_Status{
+		{bridge_id = "brg_ext", provider = "claude", binary_path = "/bin/claude", state = "present", checked_at = "2026-10-22T00:00:00Z", extension_state = "unsupported", extension_checked_at = "2026-10-22T00:00:01Z"},
+	}
+	testing.expect_value(t, provider_service.apply_discovery_report(&service, "brg_ext", report).code, domain.Error_Code.None)
+	statuses, list_err := iface.bridge_provider_status_list(&repo, "brg_ext")
+	testing.expect_value(t, list_err.code, domain.Error_Code.None)
+	defer domain.bridge_provider_statuses_destroy(statuses)
+	seen := false
+	for status in statuses {
+		if status.provider != "claude" do continue
+		seen = true
+		testing.expect_value(t, status.extension_state, "")
+		testing.expect_value(t, status.extension_version, "")
+	}
+	testing.expect(t, seen, "claude status stored")
+}

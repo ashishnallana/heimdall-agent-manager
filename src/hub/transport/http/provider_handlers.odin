@@ -155,7 +155,9 @@ write_bridge_provider_extension_json :: proc(
 		install_hint: string `json:"install_hint"`,
 		capabilities: []string `json:"capabilities"`,
 	}
-	_ = json.unmarshal_string(view.catalog.extension_json, &descriptor, json.DEFAULT_SPECIFICATION, context.temp_allocator)
+	if err := json.unmarshal_string(view.catalog.extension_json, &descriptor, json.DEFAULT_SPECIFICATION, context.temp_allocator); err != nil {
+		fmt.eprintfln("ham-hub WARN provider extension descriptor unreadable provider=%s err=%v", view.catalog.provider, err)
+	}
 	strings.write_string(b, "{\"state\":\""); write_handler_json_string(b, view.extension_state)
 	strings.write_string(b, "\",\"version\":\""); write_handler_json_string(b, view.extension_version)
 	strings.write_string(b, "\",\"checked_at\":")

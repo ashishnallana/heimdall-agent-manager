@@ -404,6 +404,11 @@ apply_discovery_report :: proc(
 		if !has_extension && stored.extension_state != "" {
 			stored.extension_state = "unsupported"
 			stored.extension_version = ""
+		} else if has_extension && stored.extension_state == "unsupported" {
+			// The Bridge's catalog snapshot predates the descriptor; its claim says
+			// nothing about the extension, so record "not measured yet".
+			stored.extension_state = ""
+			stored.extension_version = ""
 		}
 		if _, save_err := iface.bridge_provider_status_upsert(service.repo, stored); save_err.code != .None do return save_err
 	}

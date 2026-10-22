@@ -258,6 +258,9 @@ bridge_provider_discovery_group_destroy :: proc(group: ^Bridge_Provider_Discover
 	free(group, alloc)
 }
 
+// Time kept back from the extension probe for each provider still to be probed.
+BRIDGE_PROVIDER_VERSION_PROBE_RESERVE :: 1 * time.Second
+
 bridge_provider_discover_execute :: proc(filter: []string) -> [dynamic]Bridge_Provider_Path {
 	bridge_provider_paths_init()
 	if bridge_provider_discovery_test_delay > 0 do time.sleep(bridge_provider_discovery_test_delay)
@@ -268,13 +271,17 @@ bridge_provider_discover_execute :: proc(filter: []string) -> [dynamic]Bridge_Pr
 	}
 	results := make([dynamic]Bridge_Provider_Path)
 	discovery_deadline := time.time_add(time.now(), 8 * time.Second)
-	for target in targets {
+	for target, i in targets {
 		remaining := time.diff(time.now(), discovery_deadline)
 		probe_timeout := min(2 * time.Second, remaining)
 		if probe_timeout < 0 do probe_timeout = 0
 		// The extension probe runs after --version and shares the same deadline, so a
-		// whole discovery still answers inside the Hub's 10s wait.
-		append(&results, bridge_provider_probe_one_with_timeout(target.provider, target.binary, probe_timeout, target.extension, discovery_deadline))
+		// whole discovery still answers inside the Hub's 10s wait. It stops short of
+		// that deadline by a reserve per later target, so a slow detector cannot
+		// starve the --version probes still to come.
+		later := len(targets) - i - 1
+		extension_deadline := time.time_add(discovery_deadline, -time.Duration(later) * BRIDGE_PROVIDER_VERSION_PROBE_RESERVE)
+		append(&results, bridge_provider_probe_one_with_timeout(target.provider, target.binary, probe_timeout, target.extension, extension_deadline))
 	}
 
 	sync.rw_mutex_lock(&bridge_provider_paths_mutex)
