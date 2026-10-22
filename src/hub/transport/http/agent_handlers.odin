@@ -421,6 +421,10 @@ write_agent_instance_json :: proc(b: ^strings.Builder, inst: domain.Agent_Instan
 	// dashboard can render the work-vs-review banner from persisted state.
 	strings.write_string(b, "\",\"current_task_id\":\""); write_handler_json_string(b, inst.current_task_id)
 	strings.write_string(b, "\",\"current_task_role\":\""); write_handler_json_string(b, domain.current_task_role_string(inst.current_task_role))
+	// permission_mode is the instance override ("" inherits the agent's);
+	// effective_permission_mode is what the next launch uses (yolo | ask).
+	strings.write_string(b, "\",\"permission_mode\":\""); write_handler_json_string(b, domain.agent_instance_permission_mode_normalize(inst.permission_mode))
+	strings.write_string(b, "\",\"effective_permission_mode\":\""); write_handler_json_string(b, domain.agent_instance_effective_permission_mode(inst))
 	// Provider extension (ham.ext.v1) identity; "" until an extension says hello.
 	strings.write_string(b, "\",\"provider_session_id\":\""); write_handler_json_string(b, inst.provider_session_id)
 	strings.write_string(b, "\",\"provider_transcript_path\":\""); write_handler_json_string(b, inst.provider_transcript_path)
