@@ -103,13 +103,11 @@ export function AgentPaneComposerPanel({
     expData?.flags?.find((f) => f.key === 'streaming_terminal_pane')?.enabled
   );
 
-  const [fallbackToPolling, setFallbackToPolling] = useState<boolean>(false);
-
   const [streamRuntimeStatus, setStreamRuntimeStatus] = useState<string | null>(null);
 
   useEffect(() => {
     setStreamRuntimeStatus(null);
-  }, [agentInstanceId]);
+  }, [agentInstanceId, runtimeStatus]);
 
   const onStreamOutputRef = useRef(onStreamOutput);
   useEffect(() => {
@@ -168,31 +166,30 @@ export function AgentPaneComposerPanel({
   useEffect(() => { vaultLockedRef.current = vaultLock.locked; }, [vaultLock.locked]);
 
   // --------------------------------------------------------------------------
-  // STREAMING PATH: Low-latency WebSocket streaming without term.reset()
+  // STREAMING PATH: Keep output mounted through transport failures and manual retry.
   // --------------------------------------------------------------------------
+  const streamRuntimeStopped = !isStarting && [runtimeStatus, streamRuntimeStatus].some(
+    (status) => status === 'stopped' || status === 'failed' || status === 'exited'
+  );
+  const streamEnabled = isStreamingExperimentEnabled && !planLimit && entitlements.terminal_streaming_enabled && !streamRuntimeStopped && !vaultLock.locked;
   const {
     readOnly: streamReadOnly,
     connected: streamConnected,
+    disconnected: streamDisconnected,
     isStreamReady,
     sendInput: sendStreamInput,
     sendResize: sendStreamResize,
     reconnect: reconnectStream,
   } = useAgentStream({
     agentInstanceId: (isExpanded || isStarting) && isActiveTab ? agentInstanceId : null,
-    enabled: isStreamingExperimentEnabled && !fallbackToPolling && !planLimit && entitlements.terminal_streaming_enabled,
+    enabled: streamEnabled,
     rows: terminalDimensions.rows,
     cols: terminalDimensions.cols,
-    onConnect: () => {
-      const term = terminalRef.current;
-      if (!term) return;
-      term.reset();
-      term.write('\x1b[H');
-      lastWrittenOutputRef.current = '';
-    },
     onStreamReady: (info) => {
       onStreamReadyRef.current?.(info);
     },
     onStreamClosed: (info) => {
+      setStreamRuntimeStatus('stopped');
       onStreamClosedRef.current?.(info);
     },
     onOutput: (bytes) => {
@@ -226,29 +223,19 @@ export function AgentPaneComposerPanel({
       // A locked vault is not a stream failure: no fallback to polling.
       vaultLock.report(signal);
     },
-    onError: () => {
-      // Graceful fallback: If WebSocket encounters error, fall back to polling
-      if (isStreamingExperimentEnabled) {
-        setFallbackToPolling(true);
-      }
-    },
-    onClose: () => {
-      // Graceful fallback: If WebSocket disconnects, fall back to polling
-      if (isStreamingExperimentEnabled) {
-        setFallbackToPolling(true);
-      }
-    },
   });
 
   const readOnly = streamReadOnly || !entitlements.terminal_input_enabled || Boolean(planLimit);
   const readOnlyRef = useRef(readOnly);
   readOnlyRef.current = readOnly;
-  const isStreamingActive = isStreamingExperimentEnabled && streamConnected && !fallbackToPolling;
+  // Rendering stays in stream mode while disconnected; polling must not erase scrollback.
+  const isStreamingActive = isStreamingExperimentEnabled;
+  const isStreamTransportReady = isStreamingActive && streamConnected;
 
   // After an unseal: re-attach the stream (it may have been closed for vault_locked),
   // or, on the polling path, refetch the pane so it repaints at once.
   resumeAfterUnsealRef.current = () => {
-    if (isStreamingExperimentEnabled && !fallbackToPolling) {
+    if (isStreamingExperimentEnabled) {
       reconnectStream();
     } else {
       refetchRef.current?.();
@@ -270,6 +257,7 @@ export function AgentPaneComposerPanel({
     prevIsStartingRef.current = isStarting;
 
     if (runCountChanged || startedAtChanged || isRestartStarting) {
+      setStreamRuntimeStatus(null);
       streamBufferRef.current = [];
       hasReceivedOutputRef.current = false;
       if (terminalRef.current) {
@@ -292,7 +280,7 @@ export function AgentPaneComposerPanel({
     refetch,
   } = useAgentPaneSubscription({
     onPlanLimit: reportPlanLimit,
-    agentInstanceId: !planLimit && entitlements.terminal_streaming_enabled && (!isStreamingExperimentEnabled || fallbackToPolling) ? agentInstanceId : null,
+    agentInstanceId: !planLimit && entitlements.terminal_streaming_enabled && !isStreamingExperimentEnabled ? agentInstanceId : null,
     isExpanded,
     // A tab hidden by the layout (maximised tile, hidden aux dock) is not on screen:
     // the 500 ms capture pauses and resumes with a refetch when it is shown.
@@ -329,7 +317,7 @@ export function AgentPaneComposerPanel({
       if (readOnlyRef.current) return;
       // T10: input is refused while the bridge vault is locked — the overlay says so.
       if (vaultLockedRef.current) return;
-      if (isStreamingActive) {
+      if (isStreamTransportReady) {
         // STREAMING: Send keystrokes directly over WebSocket without debounce (<10ms latency)
         sendStreamInput(data);
       } else {
@@ -347,7 +335,7 @@ export function AgentPaneComposerPanel({
         }, 50);
       }
     },
-    [isStreamingActive, sendStreamInput, sendAgentPaneInput]
+    [isStreamTransportReady, sendStreamInput, sendAgentPaneInput]
   );
 
   // Unified resize handler routing between streaming and legacy polling
@@ -359,7 +347,7 @@ export function AgentPaneComposerPanel({
         setTerminalDimensions({ cols: effectiveCols, rows: effectiveRows });
         return;
       }
-      if (isStreamingActive) {
+      if (isStreamTransportReady) {
         sendStreamResize(effectiveRows, effectiveCols);
       } else {
         const targetId = agentInstanceIdRef.current;
@@ -369,7 +357,7 @@ export function AgentPaneComposerPanel({
       }
       setTerminalDimensions({ cols: effectiveCols, rows: effectiveRows });
     },
-    [isStreamingActive, sendStreamResize, sendAgentPaneResize]
+    [isStreamTransportReady, sendStreamResize, sendAgentPaneResize]
   );
 
   const handleInputRef = useRef(handleInput);
@@ -646,6 +634,19 @@ export function AgentPaneComposerPanel({
       } ${className}`}
     >
       {planLimit ? <UpgradePrompt details={planLimit} debugId="agent-pane-plan-limit" onRetry={() => { setPlanLimit(null); reconnectStream(); }} /> : !entitlements.terminal_streaming_enabled ? <UpgradePrompt details={{ limit: 'terminal_streaming_enabled' }} debugId="agent-pane-streaming-upgrade" /> : readOnly ? <UpgradePrompt subtle details={{ limit: 'terminal_input_enabled' }} debugId="agent-pane-read-only" /> : null}
+      {streamEnabled && streamDisconnected && (
+        <div data-debug-id="agent-pane-stream-disconnected" role="status" className="flex items-center justify-between gap-3 px-3 py-2 text-sm text-muted">
+          <span>Stream disconnected</span>
+          <button
+            type="button"
+            data-debug-id="agent-pane-retry-connection-btn"
+            onClick={reconnectStream}
+            className="rounded px-3 py-1 text-primary hover:bg-surface focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+          >
+            Retry Connection
+          </button>
+        </div>
+      )}
       <div className={fillPane ? 'relative w-full flex-1 min-h-0 flex flex-col' : 'relative w-full'}>
         {/* Interactive xterm terminal container (REQ-PANE-MOBILE-1, REQ-PANE-MOBILE-2) */}
         <div

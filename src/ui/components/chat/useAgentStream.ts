@@ -52,6 +52,8 @@ export type UseAgentStreamOptions = {
 export interface UseAgentStreamResult {
   readOnly: boolean;
   connected: boolean;
+  /** Automatic reconnect budget exhausted; intentional pauses remain false. */
+  disconnected: boolean;
   isStreamReady: boolean;
   sendInput: (data: string) => void;
   sendResize: (rows: number, cols: number) => void;
@@ -131,6 +133,7 @@ export function useAgentStream({
     setServerReadOnly(false);
   }, [agentInstanceId]);
   const [connected, setConnected] = useState(false);
+  const [disconnected, setDisconnected] = useState(false);
   const [isStreamReady, setIsStreamReady] = useState(false);
   const isStreamReadyRef = useRef(false);
   // PTY v2 AAD binds the stream's session id; read through a ref so callbacks never seal under a stale one.
@@ -167,7 +170,7 @@ export function useAgentStream({
 
   const isVaultUnlockedRef = useRef(isVaultUnlocked);
   isVaultUnlockedRef.current = isVaultUnlocked;
-  const paneQueueRef = useRef<PaneDeliveryQueue | null>(null);
+  const cleanupOutputRef = useRef<(() => void) | null>(null);
   const inputQueueRef = useRef<Promise<void>>(Promise.resolve());
 
   useEffect(() => {
@@ -234,6 +237,8 @@ export function useAgentStream({
 
   const closeSocket = () => {
     activeConnectIdRef.current += 1;
+    cleanupOutputRef.current?.();
+    cleanupOutputRef.current = null;
     clearHeartbeat();
     clearReconnectTimer();
     clearMicroNudgeTimer();
@@ -251,6 +256,7 @@ export function useAgentStream({
       socketRef.current = null;
     }
     setConnected(false);
+    setDisconnected(false);
   };
 
   const sendResize = useCallback((rows: number, cols: number) => {
@@ -274,6 +280,30 @@ export function useAgentStream({
     const connectId = ++activeConnectIdRef.current;
     let socket: WebSocket;
 
+    // Both setup rejection and socket close consume the same bounded retry budget.
+    // Retire this generation before scheduling so duplicate/stale callbacks cannot retry.
+    const handleFailure = () => {
+      if (activeConnectIdRef.current !== connectId) return;
+      closeSocket();
+      if (stoppedRef.current || !enabled || hiddenPausedRef.current || planBlockedRef.current) return;
+      if (reconnectAttemptsRef.current < MAX_RECONNECT_ATTEMPTS) {
+        const delay = Math.min(
+          INITIAL_RECONNECT_DELAY_MS * Math.pow(2, reconnectAttemptsRef.current),
+          MAX_RECONNECT_DELAY_MS
+        );
+        reconnectAttemptsRef.current += 1;
+        const retryId = activeConnectIdRef.current;
+        reconnectTimerRef.current = window.setTimeout(() => {
+          if (activeConnectIdRef.current !== retryId) return;
+          reconnectTimerRef.current = undefined;
+          connect();
+        }, delay);
+      } else {
+        setDisconnected(true);
+        onCloseRef.current?.();
+      }
+    };
+
     agentStreamUrl(agentInstanceId)
       .then((url) => {
         if (activeConnectIdRef.current !== connectId || stoppedRef.current || !enabled) return;
@@ -289,6 +319,7 @@ export function useAgentStream({
           resetPtyInputStream(String(streamSessionIdRef.current || ''));
           reconnectAttemptsRef.current = 0;
           setConnected(true);
+          setDisconnected(false);
           startHeartbeat(socket);
 
           // Purge stale terminal buffer on stream open / reconnect (REQ-STREAM-REDRAW-1)
@@ -319,7 +350,6 @@ export function useAgentStream({
         const paneQueue = new PaneDeliveryQueue(() => {
           try { socket.close(4008, 'pane delivery overloaded'); } catch { /* connection already closed */ }
         });
-        paneQueueRef.current = paneQueue;
         // REQ-PTY-NET-2: identical receive path to useShellStream — the agent pane shares the
         // hub pipeline. Binary frames are pty bytes; JSON text frames are control only.
         socket.binaryType = 'arraybuffer';
@@ -327,6 +357,10 @@ export function useAgentStream({
         let previousWasSnapshot = false;
         // REQ-PTY-NET-7: one term.write per animation frame; a repaint always leads its own write.
         const writeBatcher = new PaneWriteBatcher((text) => onOutputRef.current?.(text));
+        cleanupOutputRef.current = () => {
+          paneQueue.cancel();
+          writeBatcher.reset();
+        };
         // Output frames of this connection: strictly increasing counter per salt.
         const outputReplay = new PtyOutputReplayGuard();
 
@@ -406,10 +440,8 @@ export function useAgentStream({
               }
             }
           } else if (msg.type === 'stream_closed') {
-            clearStreamReadyFallbackTimer();
-            isStreamReadyRef.current = false;
-            setIsStreamReady(false);
-            pendingKeyEventsRef.current = [];
+            // The PTY exited intentionally; a later socket close is not a transport failure.
+            closeSocket();
             onStreamClosedRef.current?.(msg);
           } else if (msg.type === 'status') {
             onStatusRef.current?.(msg.status);
@@ -417,6 +449,7 @@ export function useAgentStream({
             if (isPlanLimitError(msg)) {
               refusePlan(msg);
             } else if (isVaultLockedError(msg)) {
+              closeSocket();
               onVaultLockedRef.current?.(msg);
             } else {
               onErrorRef.current?.(msg.message);
@@ -451,41 +484,12 @@ export function useAgentStream({
           }
           if (planBlockedRef.current) return;
           if (isVaultLockedError({ reason: event?.reason })) {
-            // T10: a locked vault is not a transport failure — no reconnect storm and
-            // no fallback to polling; the pane shows its locked overlay instead.
-            clearHeartbeat();
-            clearMicroNudgeTimer();
-            clearStreamReadyFallbackTimer();
-            isStreamReadyRef.current = false;
-            setIsStreamReady(false);
-            pendingKeyEventsRef.current = [];
-            setConnected(false);
+            // Vault refusal is distinct from an exhausted transport.
+            closeSocket();
             onVaultLockedRef.current?.(event);
             return;
           }
-          clearHeartbeat();
-          clearMicroNudgeTimer();
-          clearStreamReadyFallbackTimer();
-          isStreamReadyRef.current = false;
-          setIsStreamReady(false);
-          pendingKeyEventsRef.current = [];
-          setConnected(false);
-
-          // Auto-reconnect with exponential backoff if not explicitly stopped
-          if (!stoppedRef.current && enabled && reconnectAttemptsRef.current < MAX_RECONNECT_ATTEMPTS) {
-            const delay = Math.min(
-              INITIAL_RECONNECT_DELAY_MS * Math.pow(2, reconnectAttemptsRef.current),
-              MAX_RECONNECT_DELAY_MS
-            );
-            reconnectAttemptsRef.current += 1;
-            reconnectTimerRef.current = window.setTimeout(() => {
-              if (!stoppedRef.current && enabled) {
-                connect();
-              }
-            }, delay);
-          } else {
-            onCloseRef.current?.();
-          }
+          handleFailure();
         };
 
         socket.onerror = () => {
@@ -497,7 +501,15 @@ export function useAgentStream({
       })
       .catch((err) => {
         if (activeConnectIdRef.current !== connectId) return;
-        onErrorRef.current?.(String(err?.message || err || 'Failed to connect to agent instance stream'));
+        if (isPlanLimitError(err)) {
+          refusePlan(err);
+        } else if (isVaultLockedError(err)) {
+          closeSocket();
+          onVaultLockedRef.current?.(err);
+        } else {
+          handleFailure();
+          onErrorRef.current?.(String(err?.message || err || 'Failed to connect to agent instance stream'));
+        }
       });
   }, [agentInstanceId, enabled, sendResize]);
 
@@ -596,5 +608,5 @@ export function useAgentStream({
     connect();
   }, [connect]);
 
-  return { readOnly, connected, isStreamReady, sendInput, sendResize, reconnect };
+  return { readOnly, connected, disconnected, isStreamReady, sendInput, sendResize, reconnect };
 }
