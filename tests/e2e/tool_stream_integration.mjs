@@ -345,7 +345,17 @@ try {
   inject(instances[0], event('tool.start', 'before-bridge-restart'));
   await wait(() => latest(reconnect, a)?.snapshot.active.length === 1, 'Bridge restart active fixture');
   const restartBaseline = states(reconnect, a).filter(f => f.baseline).length;
-  console.log(await launcher('bridge', 'stop'));
+  // The local launcher's stop kills a process group (including provider
+  // fixtures). Simulate an actual Bridge-only crash while preserving PTY-host
+  // children: validate exact executable before signalling the recorded PID.
+  const record = fs.readFileSync(path.join(local, 'bridges/b3/run/bridge.pid'), 'utf8').trim();
+  const bridgePid = Number(record.split(/\s+/)[0]);
+  assert.ok(Number.isSafeInteger(bridgePid) && bridgePid > 1);
+  const executable = fs.realpathSync('/proc/' + bridgePid + '/exe');
+  assert.equal(executable, fs.realpathSync(path.join(bin, 'ham-bridge')));
+  evidence.bridge_process_restart = {pid: bridgePid, executable, signal: 'SIGKILL', scope: 'validated Bridge PID only; provider PTY host preserved'};
+  process.kill(bridgePid, 'SIGKILL');
+  await wait(() => !fs.existsSync('/proc/' + bridgePid + '/exe'), 'isolated Bridge PID exited');
   console.log(await launcher('bridge', 'start', ['--hub', 'b3', '--hub-url', 'http://127.0.0.1:18683', '--bin-dir', bin, '--pty-host-bin', process.env.LIVE_TOOLS_PTY]));
   await wait(() => states(reconnect, a).filter(f => f.baseline).length > restartBaseline, 'Bridge process restart baseline', 30000);
   check('Bridge process restart supplies empty volatile baseline', latest(reconnect, a).snapshot.active.length === 0);
@@ -414,6 +424,20 @@ finally {
   for (const id of enrollmentIds) {
     const socket = '/tmp/heimdall-bridge-local/pty-host-' + id + '.sock';
     try {evidence.pty_cleanup = run(process.env.LIVE_TOOLS_PTY, ['--socket', socket, 'stop']);} catch (error) {console.error(error.message);}
+  }
+  function boundedSocketPath(natural) {
+    if (Buffer.byteLength(natural) <= 103) return natural;
+    let hash = 14695981039346656037n;
+    for (const byte of Buffer.from(natural)) hash = BigInt.asUintN(64, (hash ^ BigInt(byte)) * 1099511628211n);
+    const scratch = process.env.TMPDIR?.startsWith('/') ? process.env.TMPDIR : '/tmp';
+    return path.join(scratch, 'heimdall-' + process.geteuid(), hash.toString(16).padStart(16, '0') + '.sock');
+  }
+  evidence.endpoint_pty_cleanup = [];
+  for (const [name, id] of [['b3', bridge?.bridge_id], ['b3-spoof', extraBridgeIds[0]]]) {
+    if (!id) continue;
+    const socket = boundedSocketPath(path.join(local, 'bridges', name, 'endpoint', 'pty-host-' + id + '.sock'));
+    try {evidence.endpoint_pty_cleanup.push({socket, result: run(process.env.LIVE_TOOLS_PTY, ['--socket', socket, 'stop'])});}
+    catch (error) {console.error(error.message);}
   }
   for (const inst of instances) fs.rmSync(path.join(root, inst.agent_instance_id + '.env.json'), {force: true});
   fs.writeFileSync(path.join(root, 'manifest.json'), JSON.stringify(evidence, null, 2));
