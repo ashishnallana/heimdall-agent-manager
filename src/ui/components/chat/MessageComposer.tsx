@@ -1,4 +1,4 @@
-import { forwardRef, useEffect, useImperativeHandle, useRef, type TextareaHTMLAttributes, type ReactNode } from 'react';
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useRef, type TextareaHTMLAttributes, type ReactNode } from 'react';
 import { Icon, StatusDot, type StatusDotProps } from '@ui';
 import ProviderIcon from '../providers/ProviderIcon';
 import { useSelector } from 'react-redux';
@@ -7,7 +7,34 @@ import { selectUseExternalKeyboard } from '../../store/inputPreferencesSlice';
 export const MessageComposerInput = forwardRef<HTMLTextAreaElement, TextareaHTMLAttributes<HTMLTextAreaElement> & { mobile: boolean; debugId: string }>(function MessageComposerInput({ mobile, debugId, ...props }, forwardedRef) {
   const useExternalKeyboard = useSelector(selectUseExternalKeyboard);
   const ref = useRef<HTMLTextAreaElement>(null);
-  useImperativeHandle(forwardedRef, () => ref.current!, []);
+  const inputMode = useExternalKeyboard ? 'none' : 'text';
+  const previousEditor = useRef<{
+    value: string; start: number; end: number;
+    direction: 'forward' | 'backward' | 'none'; focused: boolean; scrollTop: number;
+  } | null>(null);
+  const attachInput = useCallback((input: HTMLTextAreaElement | null) => {
+    const previous = ref.current;
+    if (!input && previous) {
+      previousEditor.current = {
+        value: previous.value, start: previous.selectionStart, end: previous.selectionEnd,
+        direction: previous.selectionDirection, focused: document.activeElement === previous,
+        scrollTop: previous.scrollTop,
+      };
+    }
+    ref.current = input;
+  }, []);
+  useImperativeHandle(forwardedRef, () => ref.current!, [inputMode]);
+  useLayoutEffect(() => {
+    const input = ref.current;
+    const previous = previousEditor.current;
+    previousEditor.current = null;
+    if (!input || !previous) return;
+    // Controlled drafts live in the caller; also retain native uncontrolled edits.
+    if (props.value === undefined) input.value = previous.value;
+    input.setSelectionRange(previous.start, previous.end, previous.direction);
+    if (previous.focused && !input.disabled) input.focus({ preventScroll: true });
+    input.scrollTop = previous.scrollTop;
+  }, [inputMode, props.value]);
   useEffect(() => {
     const input = ref.current; if (!input) return;
     const resize = () => { input.style.height = mobile ? 'auto' : ''; if (mobile) input.style.height = `${Math.min(72, Math.max(24, input.scrollHeight))}px`; input.style.overflowY = mobile && input.scrollHeight > 72 ? 'auto' : ''; };
@@ -24,8 +51,10 @@ export const MessageComposerInput = forwardRef<HTMLTextAreaElement, TextareaHTML
     });
     observer.observe(input);
     return () => { observer.disconnect(); cancelAnimationFrame(frame); };
-  }, [mobile, props.value]);
-  return <textarea {...props} inputMode={useExternalKeyboard ? 'none' : 'text'} ref={ref} data-debug-id={debugId} rows={mobile ? 1 : 2} className={mobile ? 'block min-h-6 max-h-[72px] w-full resize-none bg-transparent p-0 text-base leading-6 text-primary outline-none placeholder:text-muted' : 'min-h-[44px] w-full resize-none bg-transparent px-1 py-1 text-sm text-primary outline-none placeholder:text-muted'} />;
+  }, [mobile, props.value, inputMode]);
+  // Replace the native editor so a mode change starts a fresh input connection,
+  // just as mounting the original forced-none experiment did.
+  return <textarea {...props} key={inputMode} inputMode={inputMode} ref={attachInput} data-debug-id={debugId} rows={mobile ? 1 : 2} className={mobile ? 'block min-h-6 max-h-[72px] w-full resize-none bg-transparent p-0 text-base leading-6 text-primary outline-none placeholder:text-muted' : 'min-h-[44px] w-full resize-none bg-transparent px-1 py-1 text-sm text-primary outline-none placeholder:text-muted'} />;
 });
 
 export type ComposerActionsProps = {

@@ -42,7 +42,7 @@ test('default is off; touch settings toggle updates both mounted composer contex
   ] })));
   try {
     const checkbox = container.querySelector<HTMLInputElement>('[data-debug-id="settings-external-keyboard-checkbox"]')!;
-    const inputs = [...container.querySelectorAll('textarea')];
+    let inputs = [...container.querySelectorAll('textarea')];
     assert.equal(checkbox.checked, false);
     assert.ok(checkbox.closest('label')?.textContent?.includes('Use external keyboard'));
     assert.match(document.getElementById(checkbox.getAttribute('aria-describedby')!)!.textContent!, /Hide the on-screen keyboard in message composers\. Turn off to type on screen\./);
@@ -52,6 +52,9 @@ test('default is off; touch settings toggle updates both mounted composer contex
     assert.equal(checkbox.checked, true);
     assert.equal(store.getState().inputPreferences.useExternalKeyboard, true);
     assert.deepEqual(JSON.parse(window.localStorage.getItem(key)!), { useExternalKeyboard: true });
+    const oldInputs = inputs;
+    inputs = [...container.querySelectorAll('textarea')];
+    assert.ok(oldInputs.every(input => !input.isConnected));
     assert.deepEqual(inputs.map(input => input.inputMode), ['none', 'none']);
     assert.equal(ref.current, inputs[0]);
     assert.deepEqual(inputs.map(input => input.value), ['draft one', 'draft two']);
@@ -60,8 +63,113 @@ test('default is off; touch settings toggle updates both mounted composer contex
     assert.equal(keyEvents, 1);
     assert.equal(pasted, true);
     await act(async () => checkbox.click());
+    inputs = [...container.querySelectorAll('textarea')];
     assert.deepEqual(inputs.map(input => input.inputMode), ['text', 'text']);
+    assert.equal(ref.current, inputs[0]);
     assert.deepEqual(JSON.parse(window.localStorage.getItem(key)!), { useExternalKeyboard: false });
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test('mode replacement preserves controlled editing, selection, focus, refs and resize ownership', async () => {
+  window.localStorage.clear();
+  const store = makeStore();
+  const container = document.createElement('div');
+  document.body.append(container);
+  const root = createRoot(container);
+  const ref = React.createRef<HTMLTextAreaElement>();
+  const observed: { node?: Element; disconnected: boolean; notify: () => void }[] = [];
+  const originalObserver = globalThis.ResizeObserver;
+  const originalFrame = globalThis.requestAnimationFrame;
+  globalThis.ResizeObserver = class {
+    record: typeof observed[number];
+    constructor(notify: () => void) {
+      this.record = { disconnected: false, notify };
+      observed.push(this.record);
+    }
+    observe(node: Element) { this.record.node = node; }
+    disconnect() { this.record.disconnected = true; }
+  } as unknown as typeof ResizeObserver;
+  globalThis.requestAnimationFrame = callback => { callback(0); return 1; };
+  let edited = '';
+  function Editor() {
+    const [draft, setDraft] = React.useState('controlled draft');
+    return React.createElement(MessageComposerInput, {
+      mobile: true, debugId: 'controlled-editor', ref, value: draft,
+      onChange: event => { edited = event.target.value; setDraft(edited); },
+    });
+  }
+  try {
+    await act(async () => root.render(React.createElement(Provider, { store, children: [
+      React.createElement(Editor, { key: 'editor' }),
+      React.createElement('button', { key: 'button' }, 'Other control'),
+    ] })));
+    let input = ref.current!;
+    input.focus();
+    input.setSelectionRange(2, 8, 'backward');
+    input.scrollTop = 5;
+    for (const enabled of [true, false]) {
+      const previous = input;
+      const oldObserver = observed.at(-1)!;
+      await act(async () => store.dispatch(externalKeyboardSet(enabled)));
+      input = ref.current!;
+      assert.notEqual(input, previous);
+      assert.equal(previous.isConnected, false);
+      assert.equal(input.inputMode, enabled ? 'none' : 'text');
+      assert.equal(input.value, 'controlled draft');
+      assert.equal(document.activeElement, input);
+      assert.deepEqual([input.selectionStart, input.selectionEnd, input.selectionDirection], [2, 8, 'backward']);
+      assert.equal(input.scrollTop, 5);
+      assert.equal(oldObserver.disconnected, true);
+      const observer = observed.at(-1)!;
+      assert.equal(observer.node, input);
+      assert.equal(observer.disconnected, false);
+      Object.defineProperty(input, 'scrollHeight', { configurable: true, value: 120 });
+      Object.defineProperty(input, 'clientWidth', { configurable: true, value: 240 });
+      observer.notify();
+      assert.equal(input.style.height, '72px');
+      assert.equal(input.style.overflowY, 'auto');
+    }
+    // Real DOM input events must still update the caller's controlled draft.
+    const setValue = Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, 'value')!.set!;
+    setValue.call(input, 'hardware typing');
+    await act(async () => input.dispatchEvent(new dom.window.Event('input', { bubbles: true })));
+    assert.equal(edited, 'hardware typing');
+    assert.equal(ref.current, input, 'ordinary draft updates must retain the editor');
+    const button = container.querySelector('button')!;
+    button.focus();
+    await act(async () => store.dispatch(externalKeyboardSet(true)));
+    assert.equal(document.activeElement, button, 'settings changes must not steal focus');
+    assert.equal(ref.current!.value, 'hardware typing');
+    await act(async () => root.unmount());
+    assert.ok(observed.every(observer => observer.disconnected));
+    assert.equal(ref.current, null);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+    globalThis.ResizeObserver = originalObserver;
+    globalThis.requestAnimationFrame = originalFrame;
+  }
+});
+
+test('saved enabled preference initializes new native editors in none mode', async () => {
+  window.localStorage.setItem(key, JSON.stringify({ useExternalKeyboard: true }));
+  const store = makeStore();
+  const container = document.createElement('div');
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(React.createElement(Provider, { store,
+      children: React.createElement(MessageComposerInput, { mobile: true, debugId: 'restored-editor', defaultValue: 'draft' }),
+    })));
+    assert.equal(container.querySelector('textarea')!.inputMode, 'none');
+    const input = container.querySelector('textarea')!;
+    input.value = 'native draft';
+    await act(async () => store.dispatch(externalKeyboardSet(false)));
+    assert.equal(container.querySelector('textarea')!.value, 'native draft');
+    assert.equal(container.querySelector('textarea')!.inputMode, 'text');
   } finally {
     await act(async () => root.unmount());
     container.remove();
