@@ -1,78 +1,125 @@
-# Ephemeral live tools: integrated verification
+# Subscribed tool summaries: integrated verification
 
-This records the earlier REST-based implementation. Its protocol and integration
-script are superseded by [the subscribed tool stream](ephemeral-tool-activity.md);
-the dependent stream integration task updates the full-stack harness.
+The integrated tree contains approved backend `4ad5552b`, freshness follow-up
+`263cdff8`, UI `e8a2fea6`, preview fixes `19200023`, and Activity timeline
+removal `6f2bad61`, with published `fc983f52` ancestry. The S3 integration
+changes add verification and evidence; no production transport changes were
+needed. The canonical protocol is [ephemeral-tool-activity.md](ephemeral-tool-activity.md).
 
-Integration branch: `live-tools-integrate`, based on fetched `origin/main`
-`f4c39179`, with full approved backend `a58451fa` and UI `9feb2ba5`
-ancestry. Merge commit: `38d150dc`.
-
-## Integration fix
-
-The first real-stack run showed owner-scoped live pushes working while every
-one-shot REST snapshot failed after five seconds. The Bridge command dispatcher
-rejected `tool_activity_live_request` before its implemented handler could run.
-Registering it as a known immediate control frame fixes attach, chain reads,
-reconnect, and restart recovery. The bounded memory-only handler performs no
-process or network waits. The dispatcher regression covers this registration;
-the fresh-stack harness exercises the complete request/reply transport.
+The earlier REST snapshot integration is superseded. Display data comes only
+from `GET /api/v1/tool-activity/stream`; REST is used for normal fixture
+setup/lifecycle/authentication, plus two explicit 404 probes of removed tool
+snapshot endpoints. The old standalone harness is historical and is not run.
 
 ## Reproduce
 
 ```bash
-bash /home/tanmay/hamwt/live-tools-integrate/verify-live-tools-integrate.sh
+bash /home/tanmay/hamwt/tool-stream-integrate/verify-tool-stream-integrate.sh
 ```
 
-The script enters `nix develop`, creates a unique evidence directory under
-`~/.cache/heimdall-tests`, builds integrated Hub/Bridge/CLI/dev-proxy binaries,
-and runs 11 focused Odin regressions, the real-stack harness, 28 UI tests (including subtests),
-TypeScript, and Vite/Electron production builds. It uses the installed
-`ham-pty-host` (or `LIVE_TOOLS_PTY` override), recording its path and SHA-256.
-No Rust sources are changed. The harness needs free loopback ports 18680,
-18681, 15673, 49681, and 49682. Local launchers refuse conflicting listeners.
+The script requires a clean committed tree, checks approved ancestry, enters
+`nix develop`, builds Hub/Bridge/CLI/dev-proxy, runs scoped stream/bounds/
+freshness tests, launches a fresh isolated stack, replays actual captured
+dedicated WS frames through the production UI stream consumer and mounted
+React/JSDOM rows, runs related UI/auth/saved-tab regressions, and builds
+TypeScript/Vite/Electron. No full Odin suite or native provider is rerun.
 
-The fresh Hub and enrolled Bridge use their own DB/config/credentials/data.
-Only those named local services are restarted/stopped. Enrollment's installed
-service commands are scoped no-op shims from the existing local launcher.
-No production deployment, live service restart, shared-checkout edits, or
-historical data deletion occurs.
+Each run creates its own directory under `~/.cache/heimdall-tests`. It requires
+free loopback ports 18680, 18681, 18683, 15673, 49681–49684. Local launchers
+refuse conflicting listeners. `HEIMDALL_LOCAL_STATE_ROOT` points inside the
+new evidence directory; DB, credentials, provider fixture, runtime and logs are
+isolated. Only these newly named local Hub/Bridge services and their minted
+PTY hosts are stopped. The separate user preview is preserved.
 
-## Evidence and requirement trace
+## What the harness measures
 
-Each run prints its evidence directory. `manifest.json` records every command
-and outcome, exact source commit, REST snapshots, chain roster, SQL counts,
-historical rows, shell log, permission decision, and individual assertions.
-Owner and foreign-owner WebSocket payloads are saved as JSONL.
-`verification.json` records builds/test counts and evidence/binary checksums;
-`verify.log`, individual Odin logs, `ui.log`, and `ui-build.log` retain output.
+`tests/e2e/tool_stream_integration.mjs` connects actual ticket-authenticated
+dedicated WebSocket viewers to the real built Hub. Two viewers select A; a
+third selects B; a different owner attempts A. Additional viewers exercise
+active baselines and resubscription. Canonical provider events are injected by
+the actual built CLI into the actual Bridge reducer. A synthetic idle provider
+is launched through normal managed identity/bootstrap/token flow.
 
-| Requirement | Direct evidence |
+A test-only TCP pass-through sits between the isolated Bridge and Hub. It
+forwards original bytes without terminating WebSocket connections, changing
+handshakes, rescheduling frames, or manufacturing successful state. Copies of
+actual attach/detach/state/reset/unavailable frames are observed to count
+producer tokens, fan-out and cadence. Non-tool payloads and credentials are
+not retained in the observer log.
+
+Explicitly adversarial probes copy observed source frames and deliberately
+alter retired token, runtime run, revision, epoch, or source identity. These
+are labeled in `rejection_probes`; they are not valid source evidence.
+Increasing the test sequence lets run/revision/token probes reach their
+respective service checks, then an actual disconnect/reconnect resets the
+test source connection. A second normally enrolled Bridge sends a
+transport-valid but binding-invalid copied frame under its own source epoch.
+No accepted display state is generated by the relay.
+
+| Requirement | Evidence |
 | --- | --- |
-| REQ-LIVE-1: running state before completion | Real CLI canonical ingest → Bridge → owner WS start before any end/chat fetch; one-shot REST confirms active; two concurrent calls in A and one in B stay separate |
-| REQ-LIVE-2: completion and one last duration | End removes the call; final 1→0 empties active; duplicate end and delayed original start cannot resurrect; real shell run completion/kill follows the same path |
-| REQ-LIVE-3: no conversation writes/history damage | SQL counts before/after/final show zero new `tool_activity`/`shell_run`; two preseeded historical rows remain exactly unchanged; authenticated legacy POST returns `persisted:false`; UI tests hide markers and preserve raw-page cursors |
-| REQ-LIVE-4: chain/UI/operations | Real two-member chain snapshot and captured actual payloads render in React/JSDOM; delayed initial snapshot loses to newer live completion; collapsible groups/final removal/one last duration; shell log and kill, separate Activity/file/subagent projections and waiting permission-hook allow all work |
-| REQ-LIVE-7/9: Bridge authority, relay-only Hub | Hub restart during an active call recovers it from Bridge memory and does not replay completed tools/shells; recovered call then completes; Bridge process restart starts empty; actual agent stop fences UI and relaunch emits explicit resync |
-| Bounds/security/no polling | Scoped Odin tests exercise binding/run/epoch rejection, unsolicited/late replies, pending caps/deadlines, bounded chain pages, source memory/wire caps, and relay sequence/rate limits; live foreign-owner WS and REST checks reject tool content; UI fake-clock test proves zero recurring reads across ten idle minutes |
+| Shared producer and fan-out | Same token on A's attach/rebaseline controls; no detach on an added viewer; identical summaries delivered to A viewers; B-only viewer sees no A state |
+| Baselines and unsubscribe | Empty initial and active added-viewer baselines; first unsubscribe keeps producer; last unsubscribe sends exactly one detach; no unwatched source data; new token and empty transient batch on resubscribe |
+| One-second coalescing | Multiple completions in one bounded batch; sustained callbacks produce source frames at 1000ms intervals, tolerated 900–2500ms; first batch reaches viewer within 2500ms |
+| Idle/change-only behavior | No source state on unchanged active state or duplicate start; transport pongs excluded from state counts |
+| Freshness | Actual unchanged active refresh at 60 seconds, tolerated 59–63s; same revision/current active state; actual refresh capture consumed by UI |
+| Auth and ordering | Foreign owner gets forbidden and no state; retired token, wrong run, older revision, wrong epoch and duplicate sequence are rejected; second enrolled Bridge cannot spoof original instance |
+| Lifecycle recovery | Actual Bridge socket loss emits unavailable, then reconnect earns baseline; Bridge process restart starts with empty volatile provider state; Hub process restart recovers still-active Bridge source through a fresh subscribed baseline |
+| Slow viewer | Paused receive socket is saturated with bounded request/response traffic and disconnected by per-viewer queue/send bounds; fast viewer still gets pong within 2500ms |
+| Managed shell | Actual background command appears with command summary; completion duration/status, readable shell output and kill clearing are exercised |
+| No content persistence/REST | Before/after tool and shell conversation row counts equal; removed snapshot routes return 404; UI mounted/captured consumption makes zero REST requests |
+| Current UI | Actual active/batched completion/empty/refresh/unavailable frames render through production rows; scoped tests verify flat scroll-tail layout, timers, auth/generation fences, resume and final unmount cleanup |
+| Timeline removal | Saved Activity tabs hydrate away; independent files, subagent and permission paths remain; final integration includes approved removal commit |
 
-## Scope and qualifications
+Burst and cadence checks use observed monotonic receipt times, not provider
+timestamps. Per-frame receipt times and timing tolerances are recorded, so
+scheduling jitter is visible. This is a cosmetic best-effort display: transient
+completion batches are replaced, never accumulated or repaired.
 
-Provider events are **injected canonical `ham.ext.v1` events**, delivered by the
-real built CLI to the actual Bridge. A synthetic idle provider process is
-launched through normal Hub/Bridge launch/bootstrap/token flow; this run claims
-no new provider-native Claude/Codex callback evidence and uses no model quota.
-The permission scenario uses synthetic native-shaped hook input through the
-real hook adapter and waiting transport. Shell commands and output are real.
+## Evidence artifacts
 
-The UI integration uses actual recorded REST/WS payloads with the production
-component/reducer in JSDOM. It is not a newly paired browser or visual screenshot
-run. Existing focused DOM tests additionally verify raw pagination and shell
-navigation. Native provider behavior was covered by approved preceding work;
-broader provider releases, hosted tools, and real-browser visual acceptance are
-not asserted here.
+The final task handoff names the exact committed source, tracked verify session
+and evidence directory. `verification.json` records source hash, scoped test
+counts, builds, PTY host path/hash, and SHA-256 of logs, binaries, frame captures
+and manifest. `manifest.json` has schema version 1, exact backend/UI heads,
+endpoint, individual assertions, observed timings, frame counts, DB counts,
+actual display frames and labeled rejection probes.
 
-Stopped instances can return the documented `bridge_offline` 409 once their
-source identity is retired. The stop check waits for terminal status and an
-owner WS unavailable fence; it does not treat an unavailable source as a ready
-snapshot. Successful relaunch must emit resync and return a fresh empty snapshot.
+- `bridge-wire.jsonl`: actual source/control frames with direction and
+  monotonic receipt times.
+- `viewer-*-ws.jsonl`, `reconnected-viewer-ws.jsonl`,
+  `hub-recovered-viewer-ws.jsonl`: actual dedicated viewer traffic.
+- `foreign-owner-ws.jsonl`: rejected-owner response.
+- `setup.json`: isolated bridge/instance/chain identities.
+- `tracker.log`, `agent.log`, `bridge.log`, `http.log`,
+  `ui.log`, `ui-build.log`, `verify.log`: exact verification output.
+- `prior-native-smoke.json`, when present: copied prior preview evidence,
+  explicitly supplementary and hashed in the receipt.
+
+The mandatory UI wire test fails when supplied evidence is absent, malformed,
+from another endpoint/source, or missing active baseline, completion batch,
+refresh, empty or unavailable coverage. The mounted DOM capture test checks
+actual summary text, row count, clearing, and zero REST reads. Unit/DOM tests
+also exercise 60/120-second freshness with a fake monotonic clock, long calls
+remaining active beyond two minutes under refresh, B expiring while A/pong
+continue, close/error/pong timeout, resume baseline and cleanup.
+
+## Scope and limits
+
+The S3 stack uses **injected canonical provider callbacks**, not a new
+Claude/Codex native callback run. Managed shell commands and shell transport
+are real. The dedicated endpoint, auth, DB, Hub/Bridge reconnect/restart and
+multi-client sockets are real.
+
+The UI uses actual captured dedicated WS payloads with the production
+consumer/reducer and React/JSDOM. This is not a new outer-browser WebSocket,
+visual screenshot, Electron interactive, mobile, or full native-provider
+parity claim. Earlier reviewed native Codex preview smoke may be copied as
+supplementary evidence at its original source commit; it is not rerun or
+relabelled as native verification at S3 head.
+
+The real source refresh is measured at 60s. UI receipt expiry at 120s, suspend/
+resume and >2min active-call freshness are verified using the existing scoped
+fake-clock tests; those tests are explicitly distinct from wall-clock
+transport evidence. Completion batching remains best effort. No production
+state, user preview, push or deployment is touched by verification.

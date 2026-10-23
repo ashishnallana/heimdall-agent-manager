@@ -260,3 +260,41 @@ test('tail resize follows readers at bottom but preserves a scrolled-up reader',
     } finally { (globalThis as any).ResizeObserver = previous; }
   });
 });
+
+test('actual isolated dedicated WS capture renders through mounted production rows', {
+  skip: !process.env.LIVE_TOOLS_EVIDENCE,
+}, async () => {
+  const evidence = JSON.parse(fs.readFileSync(process.env.LIVE_TOOLS_EVIDENCE + '/manifest.json', 'utf8'));
+  assert.equal(evidence.status, 'pass');
+  assert.equal(evidence.capture_source, 'isolated-backend-websocket');
+  const frames = evidence.ui_frames;
+  const ids = [...new Set<string>(frames.map((frame: any) => frame.instance_id))];
+  await withDom(async (env) => {
+    const { render, sockets, q } = env;
+    await render(React.createElement(LiveToolActivity, { instanceId: ids[0],
+      members: ids.map(instanceId => ({instanceId, displayName: instanceId})), onOpenShell() {} }));
+    const socket = sockets[0]; socket.open();
+    let active = 0, batch = 0, empty = 0, unavailable = 0, refresh = 0;
+    for (const frame of frames) {
+      await act(async () => { socket.frame(frame); });
+      if (frame.type === 'unavailable') {
+        assert.match(q('live-tool-activity')!.textContent!, /Tools unavailable/);
+        assert.equal(q('live-tool-activity')!.querySelector('[data-debug-id="live-tools-summary"]'), null);
+        unavailable++; continue;
+      }
+      const rows = [...frame.snapshot.active, ...frame.snapshot.completed_since_last];
+      if (!rows.length) {assert.equal(q('live-tool-activity'), null); empty++; continue;}
+      const content = q('live-tool-activity')!;
+      assert.ok(content, 'actual active/completed snapshot renders');
+      for (const row of rows) {
+        if (row.summary) assert.ok(content.textContent!.includes(row.summary), 'actual sanitized summary is rendered');
+      }
+      assert.equal(content.querySelectorAll('[data-debug-id="live-tools-summary"]').length, rows.length);
+      if (frame.snapshot.active.length) active++;
+      if (frame.snapshot.completed_since_last.length >= 2) batch++;
+      if (frame.refresh) refresh++;
+    }
+    assert.ok(active && batch && empty && unavailable && refresh, 'all actual wire display states exercised');
+    assert.equal(env.requests, 0, 'captured display consumption makes no REST requests');
+  });
+});
