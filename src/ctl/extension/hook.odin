@@ -170,6 +170,7 @@ hook_run :: proc(provider, raw: string, env: Hook_Env, send: Send_Proc) -> strin
 	case ANTIGRAVITY_PROVIDER:
 		timeout := env.permission_timeout_ms
 		if timeout <= 0 do timeout = PERMISSION_RELAY_TIMEOUT_MS
+		else do timeout = min(timeout, PERMISSION_RELAY_TIMEOUT_MS)
 		mapped, err := antigravity_map_hook(raw, env.ts, timeout)
 		if err != .None || len(mapped.events) == 0 do return ""
 		if mapped.is_permission {

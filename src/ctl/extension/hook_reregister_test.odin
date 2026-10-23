@@ -154,4 +154,58 @@ test_hook_permission_reregisters_same_blocker_after_disconnect :: proc(t: ^testi
 			testing.expect_value(t, result, "")
 		}
 	}
+
+	// 5. Antigravity (REQ-EXT-AGY-3): PreToolUse permission relay, stable blocker_id,
+	// backoff retry on disconnect, and fallback to {"decision":"ask"}.
+	agy_raw := `{"hookEventName":"PreToolUse","conversationId":"s_agy","permissionMode":"ask","stepIdx":4,"toolCall":{"name":"run_command","args":{"CommandLine":"curl https://evil.com","Cwd":"/repo"}}}`
+	agy_script := []string{"", "", allow}
+	rr_reset(agy_script)
+	env = rr_env(10_000)
+	env.blocker_id = "blk_agy_stable"
+	env.ctl_bin = "/issued/ham-ctl"
+	agy_out := hook_run("antigravity", agy_raw, env, rr_send)
+	testing.expect_value(t, agy_out, `{"decision":"allow"}`)
+	testing.expect_value(t, len(rr_params), 3)
+	testing.expect_value(t, len(rr_sleeps), 2)
+	if len(rr_sleeps) == 2 {
+		testing.expect_value(t, rr_sleeps[0], 250)
+		testing.expect_value(t, rr_sleeps[1], 500)
+	}
+	for p in rr_params {
+		testing.expect(t, strings.contains(p, `"blocker_id":"blk_agy_stable"`))
+		testing.expect(t, strings.contains(p, `"provider":"antigravity"`))
+	}
+	t0_agy := rr_payload_int(rr_params[0], "timeout_ms")
+	t2_agy := rr_payload_int(rr_params[2], "timeout_ms")
+	testing.expect_value(t, t0_agy, 10_000)
+	testing.expect(t, t2_agy > 0 && t2_agy < t0_agy, "remaining timeout must shrink")
+
+	// Antigravity fallback to {"decision":"ask"} when transport never recovers
+	rr_reset(nil)
+	testing.expect_value(t, hook_run("antigravity", agy_raw, rr_env(12_000), rr_send), `{"decision":"ask"}`)
+
+	// Bridge returns deny with custom reason
+	deny_reply := `{"ok":true,"data":{"decision":"deny","message":"forbidden operation"}}`
+	rr_reset([]string{deny_reply})
+	testing.expect_value(t, hook_run("antigravity", agy_raw, rr_env(10_000), rr_send), `{"decision":"deny","reason":"forbidden operation"}`)
+
+	// Bridge returns deny without message: defaults to "Denied in Heimdall"
+	deny_no_msg := `{"ok":true,"data":{"decision":"deny"}}`
+	rr_reset([]string{deny_no_msg})
+	testing.expect_value(t, hook_run("antigravity", agy_raw, rr_env(10_000), rr_send), `{"decision":"deny","reason":"Denied in Heimdall"}`)
+
+	// Bridge returns none or error: falls back to {"decision":"ask"}
+	for reply in ([]string{none, bad}) {
+		script := []string{reply}
+		rr_reset(script)
+		result := hook_run("antigravity", agy_raw, rr_env(10_000), rr_send)
+		testing.expect_value(t, len(rr_params), 1)
+		testing.expect_value(t, result, `{"decision":"ask"}`)
+	}
+
+	// Local ham-ctl auto-approval: allowlisted coordination command approves locally with 0 bridge calls
+	agy_ham_ctl := `{"hookEventName":"PreToolUse","conversationId":"s_agy","permissionMode":"ask","stepIdx":5,"toolCall":{"name":"run_command","args":{"CommandLine":"$HEIMDALL_CTL_BIN chat read","Cwd":"/repo"}}}`
+	rr_reset([]string{deny_reply})
+	testing.expect_value(t, hook_run("antigravity", agy_ham_ctl, env, rr_send), `{"decision":"allow"}`)
+	testing.expect_value(t, len(rr_params), 0)
 }

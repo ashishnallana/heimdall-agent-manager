@@ -65,7 +65,7 @@ antigravity_hook_from_name :: proc(name: string) -> Antigravity_Hook {
 
 antigravity_is_destructive :: proc(tool_name: string) -> bool {
 	switch tool_name {
-	case "run_command", "write_to_file", "replace_file_content":
+	case "run_command", "write_to_file", "replace_file_content", "runCommand", "writeToFile", "replaceFileContent":
 		return true
 	}
 	return false
@@ -260,8 +260,13 @@ antigravity_map_hook :: proc(raw: string, ts: string, permission_timeout_ms := 0
 			if input == nil do input = json.Object{}
 			p := pb_make()
 			pb_str(&p, "permission_mode", "ask")
-			if permission_timeout_ms > 0 do pb_int(&p, "timeout_ms", permission_timeout_ms)
-			pb_str_nonempty(&p, "blocker_id", permission_blocker_id)
+			timeout := permission_timeout_ms
+			if timeout <= 0 do timeout = PERMISSION_RELAY_TIMEOUT_MS
+			else do timeout = min(timeout, PERMISSION_RELAY_TIMEOUT_MS)
+			pb_int(&p, "timeout_ms", timeout)
+			blocker_id := permission_blocker_id
+			if blocker_id == "" do blocker_id = new_blocker_id()
+			pb_str(&p, "blocker_id", blocker_id)
 			eb := ext_event_begin("permission.request", ts, root, ANTIGRAVITY_PROVIDER, ANTIGRAVITY_EXT_VERSION)
 			ext_event_tool(&eb, root, input, nil)
 			append(&out.events, ext_event_end(&eb, pb_done(&p)))
@@ -300,8 +305,13 @@ antigravity_map_hook :: proc(raw: string, ts: string, permission_timeout_ms := 0
 		if perm_mode == "" do perm_mode = json_get_string(root, "permission_mode")
 		if perm_mode == "" do perm_mode = "ask"
 		pb_str(&p, "permission_mode", perm_mode)
-		if permission_timeout_ms > 0 do pb_int(&p, "timeout_ms", permission_timeout_ms)
-		pb_str_nonempty(&p, "blocker_id", permission_blocker_id)
+		timeout := permission_timeout_ms
+		if timeout <= 0 do timeout = PERMISSION_RELAY_TIMEOUT_MS
+		else do timeout = min(timeout, PERMISSION_RELAY_TIMEOUT_MS)
+		pb_int(&p, "timeout_ms", timeout)
+		blocker_id := permission_blocker_id
+		if blocker_id == "" do blocker_id = new_blocker_id()
+		pb_str(&p, "blocker_id", blocker_id)
 		eb := ext_event_begin("permission.request", ts, root, ANTIGRAVITY_PROVIDER, ANTIGRAVITY_EXT_VERSION)
 		ext_event_tool(&eb, root, input, nil)
 		append(&out.events, ext_event_end(&eb, pb_done(&p)))
@@ -435,11 +445,12 @@ antigravity_permission_is_ham_ctl :: proc(raw, ctl_bin: string) -> bool {
 	}
 	if tool_name == "" do tool_name = json_get_string(root, "tool_name")
 	if tool_name == "" do tool_name = json_get_string(root, "toolName")
-	if tool_name != "run_command" do return false
+	if tool_name != "run_command" && tool_name != "runCommand" do return false
 
 	args: json.Object
 	if tool_call != nil {
 		args = json_get_object(tool_call, "args")
+		if args == nil do args = json_get_object(tool_call, "input")
 	}
 	if args == nil do args = json_get_object(root, "tool_input")
 	if args == nil do args = json_get_object(root, "toolInput")

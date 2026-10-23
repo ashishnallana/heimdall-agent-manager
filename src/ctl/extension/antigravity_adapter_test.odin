@@ -281,6 +281,157 @@ test_hook_run_antigravity_timeout_falls_back_to_ask :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_antigravity_permission_request_timeout_clamping_and_stable_blocker :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+
+	raw := `{"hookEventName":"PreToolUse","conversationId":"s1","permissionMode":"ask","toolCall":{"name":"run_command","args":{"CommandLine":"rm -rf /tmp"}}}`
+
+	// 1. Timeout > 300s is clamped to 300s (300,000ms)
+	mapped_large, err_large := antigravity_map_hook(raw, TS, 500_000, "blk_custom")
+	testing.expect_value(t, err_large, Antigravity_Error.None)
+	testing.expect_value(t, mapped_large.is_permission, true)
+	if len(mapped_large.events) == 1 {
+		v, _ := json.parse_string(mapped_large.events[0], json.DEFAULT_SPECIFICATION, true)
+		p := json_get_object(v.(json.Object), "payload")
+		timeout, _ := json_get_int(p, "timeout_ms")
+		testing.expect_value(t, timeout, 300_000)
+		testing.expect_value(t, json_get_string(p, "blocker_id"), "blk_custom")
+	}
+
+	// 2. Timeout <= 0 defaults to 300s (300,000ms)
+	mapped_zero, err_zero := antigravity_map_hook(raw, TS, 0, "blk_custom2")
+	testing.expect_value(t, err_zero, Antigravity_Error.None)
+	if len(mapped_zero.events) == 1 {
+		v, _ := json.parse_string(mapped_zero.events[0], json.DEFAULT_SPECIFICATION, true)
+		p := json_get_object(v.(json.Object), "payload")
+		timeout, _ := json_get_int(p, "timeout_ms")
+		testing.expect_value(t, timeout, 300_000)
+		testing.expect_value(t, json_get_string(p, "blocker_id"), "blk_custom2")
+	}
+
+	// 3. Empty blocker_id generates a stable blocker_id starting with blk_
+	mapped_gen, err_gen := antigravity_map_hook(raw, TS, 10_000, "")
+	testing.expect_value(t, err_gen, Antigravity_Error.None)
+	if len(mapped_gen.events) == 1 {
+		v, _ := json.parse_string(mapped_gen.events[0], json.DEFAULT_SPECIFICATION, true)
+		p := json_get_object(v.(json.Object), "payload")
+		bid := json_get_string(p, "blocker_id")
+		testing.expect(t, strings.has_prefix(bid, "blk_"))
+	}
+}
+
+@(test)
+test_antigravity_destructive_tools_trigger_permission_in_ask_mode :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+
+	// write_to_file in ask mode triggers permission
+	raw_write := `{"hookEventName":"PreToolUse","conversationId":"s1","permissionMode":"ask","stepIdx":3,"toolCall":{"name":"write_to_file","args":{"TargetFile":"/repo/test.txt","CodeContent":"hello"}}}`
+	mapped_w, err_w := antigravity_map_hook(raw_write, TS)
+	testing.expect_value(t, err_w, Antigravity_Error.None)
+	testing.expect_value(t, mapped_w.is_permission, true)
+	if len(mapped_w.events) == 1 {
+		ev, _ := contracts.ext_parse_event(mapped_w.events[0])
+		testing.expect_value(t, ev.kind, contracts.Ext_Event_Kind.Permission_Request)
+		testing.expect_value(t, ev.tool_name, "write_to_file")
+	}
+
+	// replace_file_content in ask mode triggers permission
+	raw_replace := `{"hookEventName":"PreToolUse","conversationId":"s1","permissionMode":"ask","stepIdx":4,"toolCall":{"name":"replace_file_content","args":{"TargetFile":"/repo/test.txt","TargetContent":"a","ReplacementContent":"b"}}}`
+	mapped_r, err_r := antigravity_map_hook(raw_replace, TS)
+	testing.expect_value(t, err_r, Antigravity_Error.None)
+	testing.expect_value(t, mapped_r.is_permission, true)
+	if len(mapped_r.events) == 1 {
+		ev, _ := contracts.ext_parse_event(mapped_r.events[0])
+		testing.expect_value(t, ev.kind, contracts.Ext_Event_Kind.Permission_Request)
+		testing.expect_value(t, ev.tool_name, "replace_file_content")
+	}
+
+	// Non-destructive view_file in ask mode does NOT trigger permission (emits tool.start)
+	raw_view := `{"hookEventName":"PreToolUse","conversationId":"s1","permissionMode":"ask","stepIdx":5,"toolCall":{"name":"view_file","args":{"AbsolutePath":"/repo/test.txt"}}}`
+	mapped_v, err_v := antigravity_map_hook(raw_view, TS)
+	testing.expect_value(t, err_v, Antigravity_Error.None)
+	testing.expect_value(t, mapped_v.is_permission, false)
+	if len(mapped_v.events) == 1 {
+		ev, _ := contracts.ext_parse_event(mapped_v.events[0])
+		testing.expect_value(t, ev.kind, contracts.Ext_Event_Kind.Tool_Start)
+		testing.expect_value(t, ev.tool_name, "view_file")
+	}
+
+	// Destructive write_to_file when permissionMode is not ask (e.g. empty or allow) does NOT trigger permission
+	raw_write_noask := `{"hookEventName":"PreToolUse","conversationId":"s1","permissionMode":"allow","stepIdx":6,"toolCall":{"name":"write_to_file","args":{"TargetFile":"/repo/test.txt","CodeContent":"hello"}}}`
+	mapped_wna, err_wna := antigravity_map_hook(raw_write_noask, TS)
+	testing.expect_value(t, err_wna, Antigravity_Error.None)
+	testing.expect_value(t, mapped_wna.is_permission, false)
+	if len(mapped_wna.events) == 1 {
+		ev, _ := contracts.ext_parse_event(mapped_wna.events[0])
+		testing.expect_value(t, ev.kind, contracts.Ext_Event_Kind.Tool_Start)
+	}
+}
+
+@(test)
+test_antigravity_ham_ctl_allowlist_coverage_and_security :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+
+	env := ENV
+	env.ctl_bin = "/issued/ham-ctl"
+
+	// All these allowlisted coordination commands must be approved locally (0 bridge calls)
+	allowlisted := []string{
+		"$HEIMDALL_CTL_BIN chat send --to user --body 'update'",
+		"$HEIMDALL_CTL_BIN verify",
+		"$HEIMDALL_CTL_BIN lease heartbeat --note progress",
+		"$HEIMDALL_CTL_BIN lease next",
+		"$HEIMDALL_CTL_BIN lease submit --summary done",
+		"$HEIMDALL_CTL_BIN task comment t4_permission --body working",
+		"$HEIMDALL_CTL_BIN task show t4_permission",
+		"$HEIMDALL_CTL_BIN task list",
+		"$HEIMDALL_CTL_BIN agent start-success",
+		"$HEIMDALL_CTL_BIN memory propose --scope project --title fact --content test",
+	}
+
+	for cmd in allowlisted {
+		agy_fake_reset(`{"ok":true,"data":{"decision":"deny"}}`, true)
+		raw := fmt.tprintf(`{{"hookEventName":"PreToolUse","conversationId":"s1","permissionMode":"ask","toolCall":{{"name":"run_command","args":{{"CommandLine":"%s","Cwd":"/repo"}}}}}}`, cmd)
+		out := hook_run("antigravity", raw, env, agy_fake_send)
+		testing.expectf(t, out == `{"decision":"allow"}`, "expected auto-approval for %s, got %s", cmd, out)
+		testing.expect_value(t, agy_fake_calls, 0)
+	}
+
+	// Commands that MUST NOT be auto-approved (they must go to the bridge relay)
+	rejected := []string{
+		"$HEIMDALL_CTL_BIN shell run --cmd 'ls'",
+		"$HEIMDALL_CTL_BIN shell serve --port 8080",
+		"$HEIMDALL_CTL_BIN review post --on-behalf-of user",
+		"$HEIMDALL_CTL_BIN task update t1 --verify 'evil'",
+		"$HEIMDALL_CTL_BIN task create --title bad",
+		"$HEIMDALL_CTL_BIN chat read && rm -rf /",
+		"$HEIMDALL_CTL_BIN chat read; ls",
+		"$HEIMDALL_CTL_BIN chat read | grep foo",
+		"$HEIMDALL_CTL_BIN chat read --agent-token evil_token",
+		"$HEIMDALL_CTL_BIN chat read --bridge-endpoint tcp:evil:1234",
+	}
+
+	for cmd in rejected {
+		agy_fake_reset(`{"ok":true,"data":{"decision":"allow"}}`, true)
+		raw := fmt.tprintf(`{{"hookEventName":"PreToolUse","conversationId":"s1","permissionMode":"ask","toolCall":{{"name":"run_command","args":{{"CommandLine":"%s","Cwd":"/repo"}}}}}}`, cmd)
+		out := hook_run("antigravity", raw, env, agy_fake_send)
+		testing.expectf(t, agy_fake_calls == 1, "expected bridge call for rejected command %s, calls=%d", cmd, agy_fake_calls)
+		testing.expect_value(t, agy_fake_method, "agent.extension.permission")
+		testing.expect_value(t, out, `{"decision":"allow"}`)
+	}
+
+	// Destructive file tools in ask mode are also NOT auto-approved (they go to the bridge relay)
+	raw_file := `{"hookEventName":"PreToolUse","conversationId":"s1","permissionMode":"ask","toolCall":{"name":"write_to_file","args":{"TargetFile":"/repo/file.txt","CodeContent":"data"}}}`
+	agy_fake_reset(`{"ok":true,"data":{"decision":"deny","message":"cannot touch file"}}`, true)
+	out_file := hook_run("antigravity", raw_file, env, agy_fake_send)
+	testing.expect_value(t, agy_fake_calls, 1)
+	testing.expect_value(t, out_file, `{"decision":"deny","reason":"cannot touch file"}`)
+}
+
+@(test)
 test_antigravity_bounds_and_error_handling :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	defer free_all(context.temp_allocator)
