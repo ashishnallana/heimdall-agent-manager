@@ -1,0 +1,51 @@
+{
+  "browser": "firefox/157.0.1",
+  "fixture": "production ChatMessageList/MultiQuestionForm; ephemeral vault key and mocked delivery",
+  "results": [
+    {
+      "name": "desktop keyboard: native radio arrows, multi-select space, custom text, labeled inputs, Tab to submit, selection never sends",
+      "passed": true,
+      "controls": 10
+    },
+    {
+      "name": "retry preserves draft and submits once; answered questions remain readable",
+      "passed": true
+    },
+    {
+      "name": "reloaded backend answered-state fixture shows read-only questions",
+      "passed": true
+    },
+    {
+      "name": "new user message retires controls and preserves original content",
+      "passed": true
+    },
+    {
+      "name": "new agent message retires controls and preserves original content",
+      "passed": true
+    },
+    {
+      "name": "vault lock hides encrypted labels/controls; unlock restores authenticated questions",
+      "passed": true
+    },
+    {
+      "name": "390px mobile viewport: selections, custom text, explicit submit, no overflow and 44px targets (desktop browser input)",
+      "passed": true,
+      "width": 390,
+      "scrollWidth": 390,
+      "heights": [
+        44,
+        44,
+        66,
+        44,
+        44,
+        66,
+        44,
+        44,
+        66,
+        44
+      ]
+    }
+  ],
+  "apiRequests": [],
+  "errors": []
+}

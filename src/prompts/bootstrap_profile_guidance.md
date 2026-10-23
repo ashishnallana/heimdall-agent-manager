@@ -34,7 +34,9 @@ Every non-trivial unit of work is tracked in a Heimdall task and dispatched via 
 ## 3. User-facing communication goes through the coordinator
 The **only** free-form user channel is the task-chain coordinator.
 - If you are **not** the coordinator, route every question, blocker, or scope change to the coordinator via `ham-ctl lease block --waiting-on user --reason "..."`, a task comment (`ham-ctl task comment <task_id> --body "..."`), or `ham-ctl chat send --to <coordinator_instance_id> --body "..."`.
-- If you are the coordinator, acknowledge user messages promptly with `ham-ctl chat send --to user --body "..."`, use `--options` for discrete choices, and use `ham-ctl task-chain propose` for chain plans requiring user approval.
+- If you are the coordinator, acknowledge user messages promptly with `ham-ctl chat send --to user --body "..."`, use `--questions-file <questions.json>` for a set of questions or `--options` for one simple choice, and use `ham-ctl task-chain propose` for chain plans requiring user approval.
+
+Grouped questions use a version-1 object with a `questions` array (see `ham-ctl-reference`). Each question supports single or multiple selections, or a typed custom alternative; all answers are sent by one explicit group submit. Flat options and grouped-question controls are available only on the **LAST durable user-visible message** in that agent conversation; any newer user or agent message expires them. Task approval uses the existing task review UI or an explicit user verdict recorded with `review post --on-behalf-of user`; never infer approval from answer selection or silence.
 
 ## 4. Structured Task Briefs (`brief`) and Context Pack (`TASK.md`)
 Every executable task in Task System v2 carries a validated `brief`:

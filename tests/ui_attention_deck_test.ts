@@ -221,6 +221,11 @@ async function withDeck(initialItems: any[], run: (h: DeckHarness) => Promise<vo
   // which is closed per test.
   (globalThis as any).requestAnimationFrame = (cb: (t: number) => void) => setTimeout(() => cb(Date.now()), 0);
   (globalThis as any).cancelAnimationFrame = (h: any) => clearTimeout(h);
+  dom.window.requestAnimationFrame = (globalThis as any).requestAnimationFrame;
+  dom.window.cancelAnimationFrame = (globalThis as any).cancelAnimationFrame;
+  // React's jsdom feature detection can retain the legacy input polyfill.
+  (dom.window.HTMLElement.prototype as any).attachEvent = () => {};
+  (dom.window.HTMLElement.prototype as any).detachEvent = () => {};
   (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
   const hits: string[] = [];
   const prevFetch = (globalThis as any).fetch;
@@ -243,6 +248,10 @@ async function withDeck(initialItems: any[], run: (h: DeckHarness) => Promise<vo
         return jsonResponse({ data: body });
       }
     }
+    if (url.pathname.endsWith('/chats/chat_secret_id/messages') && (!init.method || init.method === 'GET')) {
+      const item = items.find((i) => i.kind === 'message');
+      return jsonResponse({ data: item ? [{ message_id: item.action_refs.message_id, body: item.details.excerpt.body, is_latest_message: true, metadata: { options: item.details.options } }] : [] });
+    }
     return jsonResponse({ data: {} });
   };
   const store = await makeVaultStore();
@@ -256,6 +265,9 @@ async function withDeck(initialItems: any[], run: (h: DeckHarness) => Promise<vo
   })));
   try {
     await act(async () => { render(true); });
+    await act(async () => { await new Promise((r) => setTimeout(r, 30)); });
+    // The source freshness query starts only after the attention response has
+    // selected a message card; settle that second request before assertions.
     await act(async () => { await new Promise((r) => setTimeout(r, 30)); });
     await run({
       dom, store, scheduler, act, hits,
@@ -273,6 +285,9 @@ async function withDeck(initialItems: any[], run: (h: DeckHarness) => Promise<vo
       closed: () => closedCount,
     });
   } finally {
+    // Several tests intentionally leave actions pending to inspect the undo
+    // window. Cancel their timers so they cannot send after this fixture closes.
+    await act(async () => { for (const action of scheduler.getSnapshot().pending) scheduler.undo(action.id); });
     await act(async () => root.unmount());
     store.dispatch(heimdallApi.util.resetApiState());
     if (opts.unlocked) await lockVaultFully(store);
@@ -399,6 +414,26 @@ test('deck: a quick-reply option is sent at once, then the conversation is marke
     assert.ok(read > send, 'then the conversation is marked read');
     assert.ok(scheduler.getSnapshot().hidden.has('crd_msg_inst_m'), 'the answered card leaves the deck');
     assert.match(text(), /Reply sent to soloist #7/);
+  });
+});
+
+test('deck: stale canonical source hides chips and numeric shortcuts while preserving the question', async () => {
+  await withDeck([messageItem('m')], async ({ q, text, dom, act, hits }) => {
+    assert.match(text(), /Which approach should I take/);
+    assert.equal(q('[data-debug-id="attention-card-options"]'), null);
+    await act(async () => { dom.window.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: '1', bubbles: true })); });
+    assert.equal(hits.some((h) => h.startsWith('POST /api/v1/chats/')), false);
+  }, { routes: { '/chats/chat_secret_id/messages': [{ message_id: 'msg_secret_id', body: 'Which approach should I take?', is_latest_message: false, metadata: { options: ['Keep it', 'Skip it'] } }] } });
+});
+
+test('deck: new-message invalidation immediately retires options before refetch', async () => {
+  const { expireConversationOptions } = await import('../src/ui/api/conversationMessageEvents.ts');
+  await withDeck([messageItem('m')], async ({ q, dom, act, hits }) => {
+    assert.ok(q('[data-debug-id="attention-card-option-0"]'));
+    await act(async () => expireConversationOptions('chat_secret_id'));
+    assert.equal(q('[data-debug-id="attention-card-options"]'), null);
+    await act(async () => { dom.window.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: '1', bubbles: true })); });
+    assert.equal(hits.some((h) => h.startsWith('POST /api/v1/chats/')), false);
   });
 });
 

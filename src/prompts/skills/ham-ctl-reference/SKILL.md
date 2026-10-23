@@ -339,11 +339,111 @@ ham-ctl issue update iss_18d7a123bc45de67 --status fixed
 
 ## chat — inbox and sending
 - `chat read [--limit N] [--since T] [--include-read] [--transcript]` — read messages.
-- `chat send --to <user|agent-instance-id> --body <t>` (or `--stdin`) — send a message.
+- `chat send --to <user|agent-instance-id> --body <t> [--options <a,b> | --questions-file <path>] [--actions <id,...>]` (or `--stdin` for the body) — send a message.
   `--to` is REQUIRED: `user` for the bound user, or an exact agent-instance-id for
   agent-to-agent.
 - `chat set-title <title>` — DEPRECATED: conversation titles are no longer used. Do not
   call it; name your work with `task-chain set-title` (coordinator only) instead.
+
+### Grouped questions (`chat send --questions-file`)
+Use one grouped message for a set of questions. For one simple choice, flat
+`--options "Option A,Option B"` (or repeated `--option`) remains available.
+
+Write `questions.json` as a UTF-8 JSON **object**, not a bare array:
+```json
+{
+  "version": 1,
+  "questions": [
+    {
+      "id": "target",
+      "text": "Where should the release go?",
+      "selection_mode": "single",
+      "options": [
+        {"id": "staging", "label": "Staging"},
+        {"id": "production", "label": "Production"}
+      ]
+    },
+    {
+      "id": "checks",
+      "text": "Which checks should run?",
+      "selection_mode": "multiple",
+      "options": [
+        {"id": "smoke", "label": "Smoke tests"},
+        {"id": "integration", "label": "Integration tests"}
+      ]
+    }
+  ]
+}
+```
+```bash
+./.heimdall/bin/ham-ctl chat send --to user --body "Choose the release settings." --questions-file questions.json
+```
+
+The CLI validates the file and vault-encrypts the body, question `text`, and option
+`label`; encryption fails closed. Supply plaintext in the local file, not vault
+envelopes. This flag is user-only and cannot be combined with flat `--options`
+or its aliases. Optional `--actions` can accompany the group for unrelated
+operations; task approval uses the normal task review flow.
+
+Schema and validation:
+- `version` is required and must be `1`; `questions` contains 1–12 questions.
+- Each question requires `id`, nonempty `text`, and 1–12 `options`, each with
+  `id` and nonempty `label`. `selection_mode` is optional: `single` (default)
+  accepts one selection; `multiple` accepts one or more.
+- IDs are stable, nonempty, at most 64 ASCII letters, digits, `_`, or `-`.
+  Question IDs are unique in the group; option IDs are unique within a question.
+- Plain question text is limited to 8192 bytes and option labels to 2048 bytes.
+  The JSON group is limited to 256 KiB. Unknown fields are rejected.
+- Every question always offers a typed custom answer **instead of** selections;
+  do not add an "Other" option or a custom-label field to enable it.
+- Every question requires an answer. Selecting an option only updates the draft;
+  the user explicitly submits the entire group once.
+
+**Last-message-only rule:** Flat options and grouped-question controls remain
+available only while their source is the **LAST durable user-visible message**
+in that agent conversation. Any newer user or agent message expires the controls;
+the content remains readable. Agent-to-agent messages do not count. Freshness is
+based on durable insertion order, independent of timestamps, history pagination,
+or synthetic UI rows. Keep related questions in one message and avoid follow-up
+messages while waiting for answers.
+
+### Delivered grouped answers
+`chat read` receives a normal `user_to_agent` inbox message with
+`message_type: "multi_question_answer"`. Its `body` is a readable summary of every
+question and answer; its structured metadata links the source and preserves IDs.
+For the example above, the decrypted relevant fields can be:
+```json
+{
+  "direction": "user_to_agent",
+  "message_type": "multi_question_answer",
+  "body": "Where should the release go? Staging\nWhich checks should run? Run the full release suite.",
+  "metadata": {
+    "multi_question_answer": {
+      "version": 1,
+      "source_message_id": "msg_source",
+      "idempotency_key": "client_generated_uuid_kept_for_retries",
+      "answers": [
+        {"question_id": "target", "option_ids": ["staging"]},
+        {"question_id": "checks", "custom_text": "Run the full release suite."}
+      ]
+    }
+  }
+}
+```
+The summary wording is illustrative. A multiple-choice answer could instead use
+`{"question_id":"checks","option_ids":["smoke","integration"]}`.
+Each question appears exactly once. A custom answer uses nonempty `custom_text`
+with `option_ids` omitted or empty; mixing text and selections is invalid.
+The CLI decrypts structured `text`, `label`, and `custom_text` as well as the body.
+
+On the wire, the summary body and custom text are vault v2 encrypted. The user
+client submits the complete version-1 answer with a stable `idempotency_key`;
+the Hub atomically records one answer per source and delivers one inbox message.
+A same-key retry replays success without a second delivery; a different key after
+success returns `question_answered` (409). An unanswered source superseded by a
+newer visible message returns `question_stale` (409). Preserve drafts on errors.
+Answer selection or silence never constitutes task approval: use the task review
+UI or record an explicit user verdict with `review post --on-behalf-of user`.
 
 ## extension — harness extension hooks (provider hooks → ham.ext.v1)
 Provider plugins call these from their hook processes; agents rarely run them by hand.

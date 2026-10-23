@@ -1439,6 +1439,24 @@ ctl_agentmode_task_update_params :: proc(tid: string, args: []string) -> string 
 }
 
 ctl_agentmode_chat_send_params :: proc(to: string, body: string, args: []string) -> string {
+	if has_flag(args, "--questions-file") {
+		file := option_value(args, "--questions-file", "")
+		if file == "" || strings.has_prefix(file, "--") {
+			fmt.println(`{"ok":false,"message":"--questions-file requires a JSON file path"}`)
+			os.exit(1)
+		}
+		data, err := os.read_entire_file(file, context.temp_allocator)
+		if err != nil {
+			fmt.println(`{"ok":false,"message":"cannot read --questions-file"}`)
+			os.exit(1)
+		}
+		params, invalid := ctl_multi_question_send_params(to, body, string(data), args)
+		if invalid != "" {
+			fmt.println(json_object(json_kv_raw("ok", "false"), json_kv("message", invalid)))
+			os.exit(1)
+		}
+		return params
+	}
 	chat_body := body
 	keyring := ctl_vault_keyring_for_write(args)
 	if chat_body != "" && !is_vault_armored(chat_body) {
@@ -2017,6 +2035,8 @@ print_help_chat :: proc() {
 	fmt.println("  send --to <user|agent-instance-id> --body <t> | --stdin        Send a message.")
 	fmt.println("      [--options <a,b> | --option <opt>] [--expected-answers <...>] [--choices <...>]")
 	fmt.println("      [--actions <a,b> | --action <act>]")
+	fmt.println("      [--questions-file <path.json>]  Version 1 grouped questions (user only; cannot combine with flat options).")
+	fmt.println("      Question text and option labels are vault-encrypted; each question also accepts custom text.")
 	fmt.println("      --to is REQUIRED: `user` for the bound user, or an agent-instance-id.")
 	fmt.println("  set-title <title>                                              DEPRECATED: conversation titles are unused;")
 	fmt.println("                                                                 use `task-chain set-title` (coordinator only).")
@@ -2024,6 +2044,9 @@ print_help_chat :: proc() {
 	fmt.println("EXAMPLES")
 	fmt.println("  ham-ctl chat read")
 	fmt.println("  ham-ctl chat send --to user --body 'Done — ready for review.'")
+	fmt.println("  ham-ctl chat send --to user --body 'Choose the release settings.' --questions-file questions.json")
+	fmt.println(`  questions.json: {"version":1,"questions":[{"id":"target","text":"Where?","options":[{"id":"stage","label":"Staging"},{"id":"prod","label":"Production"}]}]}`)
+	fmt.println("  selection_mode defaults to single; use multiple to select several options. IDs: 1-64 ASCII letters/digits/_/-. Max 12 questions, 12 options each.")
 	fmt.println("  ham-ctl chat send --to inst_reviewer --body 'Can you LGTM inst_task_1?'")
 }
 

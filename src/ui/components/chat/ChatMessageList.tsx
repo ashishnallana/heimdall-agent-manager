@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { ReactNode, UIEvent } from 'react';
 import { useSelector } from 'react-redux';
 import Markdown from '../Markdown';
@@ -11,9 +11,13 @@ import {
   decryptEmbeddedVaultTokens,
   resolveCopyableVaultText,
   maskVaultArmored,
+  getActiveVaultKey,
 } from '../../utils/vaultContent';
-import { selectActiveVaultKey } from '../../store/vaultSlice';
-import { visibleMessageOptions } from './types';
+import { selectActiveVaultKey, selectIsVaultUnlocked } from '../../store/vaultSlice';
+import { visibleMessageOptions, messageOptionsEligible } from './types';
+import { conversationOptionsRevision, subscribeConversationOptions } from '../../api/conversationMessageEvents';
+import { parseQuestionGroup, type QuestionSubmission } from './multiQuestion';
+import MultiQuestionForm from './MultiQuestionForm';
 import type { ChatDeliveryStatus, ChatMessage, ChatTimestamp } from './types';
 import ChatActionCard from './ChatActionCard';
 import { useIsMobile } from '../shell/responsive';
@@ -128,6 +132,7 @@ export default function ChatMessageList({
   onLoadOlder,
   onScroll: onScrollProp,
   onReply,
+  onAnswerQuestions,
   renderMessageTop,
   renderMessageBody,
   formatTimestamp = () => EMPTY_TIMESTAMP,
@@ -154,6 +159,7 @@ export default function ChatMessageList({
   onLoadOlder?: () => void;
   onScroll?: (event: UIEvent<HTMLDivElement>) => void;
   onReply?: (reply: string) => void;
+  onAnswerQuestions?: (sourceMessageId: string, submission: QuestionSubmission) => Promise<unknown>;
   renderMessageTop?: (args: { message: ChatMessage; index: number; messages: ChatMessage[] }) => React.ReactNode;
   renderMessageBody?: (args: { message: ChatMessage; onReply: (reply: string) => void }) => React.ReactNode;
   formatTimestamp?: (unixMs: number) => ChatTimestamp;
@@ -183,8 +189,11 @@ export default function ChatMessageList({
   bottomInset?: number;
 }) {
   const isMobile = useIsMobile();
-  const activeKey = useSelector(selectActiveVaultKey);
+  const isUnlocked = useSelector(selectIsVaultUnlocked);
+  const installedKey = useSelector(selectActiveVaultKey);
+  const activeKey = isUnlocked ? installedKey : null;
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const revision = useSyncExternalStore(subscribeConversationOptions, () => conversationOptionsRevision(conversationKey), () => 0);
   const stickyRef = useRef(true);
   const lastCountRef = useRef(0);
   // First/last keys and scrollHeight as of the previous layout pass, to tell a
@@ -390,7 +399,9 @@ export default function ChatMessageList({
             const isClubbedGroup = message.messageType === 'shell_run_group' || message.messageType === 'tool_activity_group';
             // tool_activity is a lean marker (REQ-EXT-CONV-2): no copy/time row.
             const hideCardChrome = isDivider || isClubbedGroup || message.messageType === 'tool_activity';
-            const options = visibleMessageOptions(message, Boolean(activeKey));
+            const eligible = messageOptionsEligible(message, revision);
+            const options = eligible ? visibleMessageOptions(message, Boolean(activeKey)) : [];
+            const questionGroup = message.messageType === 'multi_question' ? parseQuestionGroup(message.metadata) : null;
             return (
               <div key={message.key} data-debug-id={`${debugPrefix}-message-${message.messageId}`} className={`msg group flex min-w-0 max-w-full rounded-xl outline-none focus-visible:shadow-focus ${reduceMotion ? '' : 'transition-colors duration-500'} ${message.messageId === highlightId ? 'bg-warning-soft ring-1 ring-warning' : ''} ${message.isUser ? 'justify-end' : 'justify-start'}`}>
                 <div className={`flex min-w-0 max-w-full ${message.isUser ? 'max-w-[86%] items-end sm:max-w-[78%]' : 'w-full items-start'} flex-col text-sm`}>
@@ -398,6 +409,12 @@ export default function ChatMessageList({
                   <div className={`min-w-0 max-w-full overflow-hidden break-words [overflow-wrap:anywhere] ${message.isUser ? 'rounded-[15px] border border-subtle bg-surface-raised px-[14px] py-[10px] text-primary' : 'w-full text-primary'}`}>
                     {renderMessageBody ? renderMessageBody({ message, onReply: reply }) : <DefaultMessageBody body={message.body} />}
                     <ChatActionCard message={message} conversationId={conversationKey} onReply={reply} />
+                    {questionGroup && !message.isUser ? <MultiQuestionForm
+                      key={`${conversationKey}-${message.messageId}`} group={questionGroup}
+                      eligible={eligible && Boolean(onAnswerQuestions)} answered={Boolean(message.questionAnswer)} vaultKey={activeKey}
+                      debugPrefix={`${debugPrefix}-questions-${message.messageId}`}
+                      onSubmit={(submission) => onAnswerQuestions!(message.messageId, submission)}
+                    /> : null}
                   </div>
                   {options.length > 0 && !message.isUser && (
                     <div data-debug-id={`${debugPrefix}-message-options-${message.messageId}`} className="mt-2 flex flex-wrap gap-1.5">
@@ -406,10 +423,17 @@ export default function ChatMessageList({
                           key={optIdx}
                           type="button"
                           data-debug-id={`${debugPrefix}-option-chip-${message.messageId}-${optIdx}`}
-                          onClick={() => reply(option)}
+                          onClick={() => {
+                            if (conversationOptionsRevision(conversationKey) !== revision) return;
+                            if (isVaultArmored(option) && activeKey) {
+                              void decryptVaultText(option, activeKey).then((value) => {
+                                if (conversationOptionsRevision(conversationKey) === revision && getActiveVaultKey() === activeKey) reply(value);
+                              }).catch(() => undefined);
+                            } else reply(option);
+                          }}
                           className={`inline-flex items-center rounded-full border border-accent/40 bg-accent/10 ${isMobile ? 'min-h-11 px-4 text-sm' : 'px-3 py-1 text-xs'} font-medium text-accent hover:bg-accent/20 active:scale-95 transition-all cursor-pointer`}
                         >
-                          {option}
+                          <VaultText value={option} />
                         </button>
                       ))}
                     </div>

@@ -45,6 +45,9 @@ Error_Code :: enum {
 	Internal_Error,
 	Vault_Locked,
 	Plan_Limit_Reached,
+	Question_Stale,
+	Question_Answered,
+	Question_Invalid,
 }
 
 Error_Code_Info :: struct {
@@ -73,6 +76,9 @@ ERROR_CODE_TABLE :: [Error_Code]Error_Code_Info{
 	.Not_Implemented      = {"not_implemented",      .fatal,       501},
 	.Internal_Error       = {"internal_error",       .retriable,   500}, // unknown server fault: bounded backoff
 	.Plan_Limit_Reached   = {"plan_limit_reached",   .recoverable, 402},
+	.Question_Stale       = {"question_stale",       .recoverable, 409},
+	.Question_Answered    = {"question_answered",    .recoverable, 409},
+	.Question_Invalid     = {"question_invalid",     .fatal,       400},
 	.Vault_Locked         = {"vault_locked",         .recoverable, 423}, // RFC 4918 Locked: retry after unseal
 }
 
