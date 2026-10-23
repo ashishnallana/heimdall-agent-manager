@@ -1,81 +1,95 @@
 import { useEffect, useState } from 'react';
-import { useDispatch, useSelector } from 'react-redux';
-import {
-  liveScopeKey, liveScopeMounted, liveScopeUnmounted, liveResyncRequested,
-  type LiveScope, type ToolActivityState,
-} from '../../store/toolActivitySlice';
-import { fetchLiveScope } from '../../api/toolActivityLive';
+import { useSelector } from 'react-redux';
+import { useToolActivityStream } from '../../api/useToolActivityStream';
+import { validInstanceId, type ToolActivityState, type ToolSummary } from '../../store/toolActivitySlice';
 
-export const formatToolDuration = (ms: number) =>
-  ms < 1000 ? Math.round(ms) + ' ms' : (ms / 1000).toFixed(1) + ' s';
+export const formatToolDuration = (ms: number) => {
+  ms = Math.max(0, ms);
+  if (ms < 1000) return Math.round(ms) + ' ms';
+  if (ms < 60_000) return (ms / 1000).toFixed(1) + ' s';
+  return Math.floor(ms / 60_000) + 'm ' + Math.floor(ms % 60_000 / 1000) + 's';
+};
+const colors = [
+  'text-sky-700 dark:text-sky-300', 'text-violet-700 dark:text-violet-300',
+  'text-amber-700 dark:text-amber-300', 'text-teal-700 dark:text-teal-300',
+  'text-rose-700 dark:text-rose-300', 'text-indigo-700 dark:text-indigo-300',
+  'text-orange-700 dark:text-orange-300', 'text-cyan-700 dark:text-cyan-300',
+  'text-fuchsia-700 dark:text-fuchsia-300', 'text-lime-700 dark:text-lime-300',
+];
+const commonTools = ['bash', 'read', 'edit', 'write', 'grep', 'glob', 'agent', 'webfetch', 'websearch', 'exec_command'];
+export function toolNameColor(name: string): string {
+  const normalized = name.trim().toLowerCase();
+  const common = commonTools.indexOf(normalized);
+  let hash = 0;
+  for (const char of normalized) hash = (Math.imul(hash, 31) + char.charCodeAt(0)) >>> 0;
+  return colors[common < 0 ? hash % colors.length : common];
+}
+export type ToolMemberLabel = { instanceId: string; displayName: string };
 
-export default function LiveToolActivity({ instanceId, chainId = '', onOpenShell }: {
-  instanceId: string; chainId?: string; onOpenShell: (sessionId: string) => void;
+export default function LiveToolActivity({ instanceId, members, onOpenShell }: {
+  instanceId: string; members?: ToolMemberLabel[]; onOpenShell: (sessionId: string) => void;
 }) {
-  const dispatch = useDispatch<any>();
-  const key = liveScopeKey(instanceId, chainId);
-  const scope = useSelector((state: any): LiveScope | undefined => state.toolActivity?.scopes[key]);
-  const connected = useSelector((state: any) => Boolean(state.toolActivity?.connected));
-  const refresh = useSelector((state: any) => (state.toolActivity as ToolActivityState)?.refresh || 0);
-  const [collapsed, setCollapsed] = useState(false);
-  const [collapsedAgents, setCollapsedAgents] = useState<Record<string, boolean>>({});
+  const roster = (members || [{ instanceId, displayName: '' }]).filter((m) => validInstanceId(m.instanceId));
+  const ids = [...new Set(roster.map((member) => member.instanceId))].sort();
+  useToolActivityStream(ids);
+  const live = useSelector((state: any) => (state.toolActivity as ToolActivityState)?.members);
+  const capacityExceeded = useSelector((state: any) => Boolean(state.toolActivity?.capacityExceeded));
+  const hasActive = ids.some((id) => Boolean(live?.[id]?.snapshot?.active.length));
+  const [now, setNow] = useState(Date.now);
   useEffect(() => {
-    if (!instanceId) return;
-    dispatch(liveScopeMounted({ instanceId, chainId }));
-    return () => { dispatch(liveScopeUnmounted(key)); };
-  }, [dispatch, key, instanceId, chainId]);
-  const mounted = Boolean(scope);
-  useEffect(() => {
-    if (connected && mounted) dispatch(fetchLiveScope(key));
-  }, [dispatch, key, connected, refresh, mounted]);
-  useEffect(() => { setCollapsedAgents({}); }, [key]);
+    if (!hasActive) return;
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [hasActive]);
 
-  useEffect(() => {
-    setCollapsedAgents((prior) => {
-      const next = Object.fromEntries(Object.entries(prior).filter(([id]) => scope?.members[id]));
-      return Object.keys(next).length === Object.keys(prior).length ? prior : next;
-    });
-  }, [scope?.members]);
-  const members = Object.values(scope?.members || {});
-  const count = members.reduce((sum, member) => sum + (member.snapshot?.active.length || 0), 0);
-  const visible = members.filter((member) => member.snapshot &&
-    (member.snapshot.active.length > 0 || member.snapshot.last_completion !== null));
-  if (!instanceId || (!visible.length && !scope?.error)) return null;
-  return <section data-debug-id="live-tool-activity" aria-label="Live tools"
-    className="pointer-events-auto mx-3 mb-2 max-h-64 overflow-y-auto rounded-xl border border-border bg-surface px-3 py-2 text-xs text-muted">
-    <button type="button" data-debug-id="live-tools-toggle" aria-expanded={!collapsed}
-      onClick={() => setCollapsed((value) => !value)} className="flex w-full items-center justify-between text-primary">
-      <span>{collapsed ? '▸' : '▾'} Running tools</span><span>{count} running</span>
-    </button>
-    {!collapsed && <>
-      {scope?.error && <div role="status" className="mt-2 flex items-center justify-between gap-2">
-        <span>Live tools unavailable</span>
-        <button type="button" data-debug-id="live-tools-retry"
-          onClick={() => dispatch(liveResyncRequested())} disabled={!connected}>Retry</button>
-      </div>}
-      {visible.map((member) => {
-        const snapshot = member.snapshot!;
-        const closed = Boolean(collapsedAgents[member.instance_id]);
-        return <div key={member.instance_id} className="mt-2 border-t border-border pt-2">
-          <button type="button" data-debug-id={'live-tools-agent-toggle-' + member.instance_id}
-            aria-expanded={!closed} className="flex w-full items-center justify-between gap-2 text-left"
-            onClick={() => setCollapsedAgents((prior) => ({ ...prior, [member.instance_id]: !closed }))}>
-            <span className="min-w-0 truncate">{closed ? '▸' : '▾'} {member.display_name || 'Agent'} · {member.instance_id}</span>
-            <span className="shrink-0">{snapshot.active.length} running</span>
-          </button>
-          {!closed && <div className="mt-1 space-y-1 pl-3">
-            {snapshot.active.map((call) => <div key={call.call_id} className="flex items-center justify-between gap-2">
-              <span className="truncate">{call.tool_name || (call.source === 'shell' ? 'Shell' : 'Tool')} · running</span>
-              {call.source === 'shell' && call.shell_session_id &&
-                <button type="button" data-debug-id={'live-tools-shell-' + call.shell_session_id}
-                  onClick={() => onOpenShell(call.shell_session_id)} className="shrink-0 text-accent">Open shell</button>}
-            </div>)}
-            {snapshot.last_completion && <div data-debug-id={'live-tools-last-duration-' + member.instance_id}>
-              Last call · {formatToolDuration(snapshot.last_completion.duration_ms)}
-            </div>}
-          </div>}
-        </div>;
-      })}
-    </>}
-  </section>;
+  const row = (id: string, call: ToolSummary, active: boolean, duration: number, shell = '') => {
+    const snapshot = live?.[id]?.snapshot;
+    const name = snapshot?.display_name || roster.find((m) => m.instanceId === id)?.displayName || 'Agent';
+    const content = <>
+      <span aria-label={active ? 'Running' : 'Finished'} className={
+        'h-1.5 w-1.5 shrink-0 rounded-full ' + (active ? 'animate-pulse bg-accent' : 'bg-muted')} />
+      <span className={'max-w-[22%] shrink-0 truncate font-medium ' + toolNameColor(call.tool_name)}
+        title={call.tool_name}>{call.tool_name || 'Tool'}</span>
+      <span data-debug-id="live-tools-summary" className="min-w-0 flex-1 truncate text-muted"
+        title={call.summary + (call.summary_truncated ? '…' : '')}>
+        {call.summary}{call.summary_truncated ? '…' : ''}
+      </span>
+      <span data-debug-id="live-tools-duration" className="shrink-0 tabular-nums text-faint">
+        {formatToolDuration(duration)}
+      </span>
+      <span data-debug-id="live-tools-agent" title={name + ' · ' + id}
+        className="ml-auto max-w-[25%] shrink-0 truncate rounded bg-neutral-soft px-1.5 py-0.5 text-faint">{name}</span>
+    </>;
+    const className = 'flex w-full min-w-0 max-w-full flex-nowrap items-center whitespace-nowrap gap-2 overflow-hidden text-left text-xs';
+    return shell
+      ? <button key={id + ':active:' + call.call_id} type="button" className={className}
+          data-debug-id={'live-tools-shell-' + shell} aria-label={'Open shell: ' + call.summary}
+          onClick={() => onOpenShell(shell)}>{content}</button>
+      : <div key={id + ':' + (active ? 'active:' : 'finished:') + call.call_id}
+          data-debug-id="live-tools-row" className={className}>{content}</div>;
+  };
+
+  const rows = ids.flatMap((id) => {
+    const member = live?.[id];
+    if (member?.availability === 'unavailable') return [
+      <div key={id + ':unavailable'} role="status" className="flex min-w-0 items-center gap-2 text-xs text-muted">
+        <span aria-label="Unknown" className="h-1.5 w-1.5 shrink-0 rounded-full bg-muted" />
+        <span className="min-w-0 flex-1 truncate">Tools unavailable</span>
+        <span data-debug-id="live-tools-agent" className="ml-auto max-w-[25%] shrink-0 truncate rounded bg-neutral-soft px-1.5 py-0.5 text-faint">
+          {roster.find((m) => m.instanceId === id)?.displayName || 'Agent'}
+        </span>
+      </div>,
+    ];
+    const snapshot = member?.snapshot;
+    if (!snapshot) return [];
+    return [
+      ...snapshot.active.map((call) => row(id, call, true, Math.max(0, now - call.started_at_ms),
+        call.source === 'shell' ? call.shell_session_id : '')),
+      ...snapshot.completed_since_last.map((call) => row(id, call, false, call.duration_ms)),
+    ];
+  });
+  if (capacityExceeded) return <div role="status" className="text-xs text-muted">Tools unavailable: too many agents</div>;
+  return rows.length ? <div data-debug-id="live-tool-activity" aria-label="Tool activity"
+    className="min-w-0 max-w-full space-y-1.5">{rows}</div> : null;
 }

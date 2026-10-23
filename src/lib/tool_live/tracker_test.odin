@@ -55,7 +55,7 @@ test_live_parallel_calls_deduplicate_and_final_empty_snapshot :: proc(t: ^testin
 	active, array := obj["active"].(json.Array)
 	testing.expect(t, array, "final snapshot contains an array")
 	testing.expect_value(t, len(active), 0)
-	last := obj["last_completion"].(json.Object)
+	last := live_last(obj)
 	testing.expect_value(t, last["duration_ms"].(json.Integer), 4000)
 	testing.expect_value(t, last["status"].(json.String), "failed")
 	live_send(&s, live_ev("tool.start", "x", 1))
@@ -94,7 +94,7 @@ test_live_session_change_terminal_and_restart_fence_history :: proc(t: ^testing.
 	live_send(&s, live_ev("tool.start", "delayed", 6, session = "s2"))
 	obj := live_obj(&s)
 	testing.expect_value(t, len(obj["active"].(json.Array)), 0)
-	_, no_completion := obj["last_completion"].(json.Null)
+	no_completion := len(obj["completed_since_last"].(json.Array)) == 0
 	testing.expect(t, no_completion, "unfinished calls never become completed")
 	fresh := Tracker{}
 	tool_live_init(&fresh.tool_live)
@@ -134,13 +134,13 @@ test_live_shell_completion_and_no_row_resurrection :: proc(t: ^testing.T) {
 	tool_live_shell(&s, row, false)
 	obj := live_obj(&s)
 	testing.expect_value(t, len(obj["active"].(json.Array)), 0)
-	last := obj["last_completion"].(json.Object)
+	last := live_last(obj)
 	testing.expect_value(t, last["status"].(json.String), "killed")
 	tool_live_clear(&s, "live_a")
 	tool_live_shell(&s, row, false)
 	obj = live_obj(&s)
 	testing.expect_value(t, len(obj["active"].(json.Array)), 0)
-	_, null_last := obj["last_completion"].(json.Null)
+	null_last := len(obj["completed_since_last"].(json.Array)) == 0
 	testing.expect(t, null_last, "late shell exit cannot reconstruct lost activity")
 }
 
@@ -206,7 +206,7 @@ test_live_provider_duration_and_error_status :: proc(t: ^testing.T) {
 	defer tool_live_destroy(&s.tool_live)
 	live_send(&s, live_ev("tool.start", "duration", 1))
 	live_send(&s, live_ev("tool.end", "duration", 1, payload = `{"status":"error","duration_ms":57}`))
-	last := live_obj(&s)["last_completion"].(json.Object)
+	last := live_last(live_obj(&s))
 	testing.expect_value(t, last["duration_ms"].(json.Integer), 57)
 	testing.expect_value(t, last["status"].(json.String), "failed")
 }
@@ -314,7 +314,7 @@ test_live_shell_restart_tracks_only_new_run :: proc(t: ^testing.T) {
 	active := obj["active"].(json.Array)
 	testing.expect_value(t, len(active), 1)
 	if len(active) == 1 do testing.expect_value(t, active[0].(json.Object)["shell_run_seq"].(json.Integer), 1)
-	_, no_inferred_completion := obj["last_completion"].(json.Null)
+	no_inferred_completion := len(obj["completed_since_last"].(json.Array)) == 0
 	testing.expect(t, no_inferred_completion)
 	old := row; old.run_seq = 0; old.status = "exited"; old.exit_code_set = true
 	tool_live_shell(&s, old, false)
@@ -337,10 +337,11 @@ test_live_shell_restart_tracks_only_new_run :: proc(t: ^testing.T) {
 test_live_owned_byte_and_wire_budgets :: proc(t:^testing.T) {
  // Conservative string/content + dynamic backing bounds. This intentionally
  // overcounts fields and capacities; allocator bookkeeping/RSS is platform-owned.
- max_call := MAX_KEY_BYTES + 6*TOOL_LIVE_ID_MAX + TOOL_LIVE_NAME_MAX + 16
+ max_call := MAX_KEY_BYTES + 6*TOOL_LIVE_ID_MAX + TOOL_LIVE_NAME_MAX + TOOL_LIVE_SUMMARY_MAX + 16
  max_entry := 2*TOOL_LIVE_MAX_ACTIVE*size_of(Tool_Live_Call) + 2*TOOL_LIVE_MAX_TOMBSTONES*size_of(Tool_Live_Tombstone) +
-  TOOL_LIVE_MAX_ACTIVE*max_call + TOOL_LIVE_MAX_TOMBSTONES*MAX_KEY_BYTES + MAX_KEY_BYTES + TOOL_LIVE_NAME_MAX + 2048
- testing.expect(t,TOOL_LIVE_MAX_INSTANCES*max_entry<48*1024*1024)
+  TOOL_LIVE_MAX_ACTIVE*max_call + TOOL_LIVE_MAX_TOMBSTONES*MAX_KEY_BYTES +
+  2*TOOL_LIVE_MAX_ACTIVE*size_of(Tool_Live_Completion) + TOOL_LIVE_MAX_ACTIVE*(MAX_KEY_BYTES + TOOL_LIVE_NAME_MAX + TOOL_LIVE_SUMMARY_MAX + 128) + 2048
+ testing.expect(t,TOOL_LIVE_MAX_INSTANCES*max_entry<80*1024*1024)
  escaped:=strings.repeat("\"",TOOL_LIVE_ID_MAX/2,context.temp_allocator)
  key:=tool_live_key("provider",escaped,escaped,escaped)
  testing.expect(t,len(key)<=MAX_KEY_BYTES)
@@ -355,4 +356,74 @@ test_live_owned_byte_and_wire_budgets :: proc(t:^testing.T) {
  body:=tool_live_snapshot(&s,live_test_inst);defer delete(body)
  testing.expect(t,len(body)<=MAX_FRAME_BYTES)
  testing.expect(t,wire_shape_ok(body))
+}
+
+@(private = "file")
+live_last :: proc(obj: json.Object) -> json.Object {
+ a := obj["completed_since_last"].(json.Array)
+ if len(a) == 0 do return nil
+ return a[len(a)-1].(json.Object)
+}
+
+@(test)
+test_tool_stream_summary_selection_and_utf8_bounds :: proc(t: ^testing.T) {
+    cases := [8]struct {name, input, expected: string}{
+        {"Bash", `{"command":"echo hi","description":"ignored"}`, "echo hi"},
+        {"exec_command", `{"cmd":"rg pattern"}`, "rg pattern"},
+        {"Read", `{"file_path":"src/main.odin"}`, "src/main.odin"},
+        {"Write", `{"path":"file.txt","content":"never retained"}`, "file.txt"},
+        {"Grep", `{"pattern":"needle","path":"not the summary"}`, "needle"},
+        {"WebFetch", `{"url":"https://example.test"}`, "https://example.test"},
+        {"Agent", `{"description":"check source"}`, "check source"},
+        {"Unknown", `{"arbitrary":"not retained"}`, "Unknown"},
+    }
+    for c in cases {
+        value,_:=json.parse_string(c.input,.JSON,true,context.temp_allocator)
+        summary,truncated:=tool_live_summary(c.name,value.(json.Object))
+        testing.expect_value(t,summary,c.expected)
+        testing.expect(t,!truncated)
+    }
+    text:=strings.concatenate({strings.repeat("x",511,context.temp_allocator),"€tail"},context.temp_allocator)
+    summary,truncated:=tool_live_bound_summary(text)
+    testing.expect_value(t,len(summary),511)
+    testing.expect(t,truncated)
+    exact:=strings.repeat("x",512,context.temp_allocator)
+    summary,truncated=tool_live_bound_summary(exact)
+    testing.expect_value(t,summary,exact);testing.expect(t,!truncated)
+}
+@(test)
+test_tool_stream_completion_batch_drain_bound_and_demand :: proc(t: ^testing.T) {
+    s:=live_test_service();defer tool_live_destroy(&s.tool_live)
+    s.demand_driven=true
+    publications:=0
+    s.ctx=&publications
+    s.publish=proc(ctx:rawptr,body:string){(^int)(ctx)^ += 1}
+    live_send(&s,live_ev("tool.start","unobserved",1))
+    live_send(&s,live_ev("tool.end","unobserved",2))
+    testing.expect_value(t,publications,0)
+    testing.expect_value(t,len(s.tool_live.entries["live_a"].completed),0)
+    tool_live_watch(&s,"live_a",true)
+    for i in 0..<40 {
+        id:=fmt.tprintf("batch_%d",i)
+        live_send(&s,live_ev("tool.start",id,3+i,payload=`{"input":{"file_path":"src/test.odin"}}`))
+        live_send(&s,live_ev("tool.end",id,4+i))
+    }
+    body:=tool_live_snapshot(&s,live_test_inst,baseline=true)
+    value,_:=json.parse_string(body,.JSON,true,context.temp_allocator);delete(body)
+    testing.expect_value(t,len(value.(json.Object)["completed_since_last"].(json.Array)),0)
+    testing.expect_value(t,len(s.tool_live.entries["live_a"].completed),32)
+    body=tool_live_snapshot(&s,live_test_inst,consume=true)
+    value,_=json.parse_string(body,.JSON,true,context.temp_allocator);delete(body)
+    batch:=value.(json.Object)["completed_since_last"].(json.Array)
+    testing.expect_value(t,len(batch),32)
+    if len(batch)>0 {
+        testing.expect(t,strings.contains(tool_live_text(batch[0].(json.Object),"call_id"),"batch_8"),"oldest completion dropped on overflow")
+        testing.expect_value(t,tool_live_text(batch[0].(json.Object),"summary"),"src/test.odin")
+    }
+    testing.expect_value(t,len(live_obj(&s)["completed_since_last"].(json.Array)),0)
+    tool_live_watch(&s,"live_a",false)
+    count:=publications
+    live_send(&s,live_ev("tool.start","after_detach",50))
+    testing.expect_value(t,publications,count)
+    testing.expect_value(t,len(live_obj(&s)["active"].(json.Array)),1)
 }

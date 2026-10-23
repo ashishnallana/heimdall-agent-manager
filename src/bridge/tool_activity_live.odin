@@ -1,28 +1,36 @@
 package main
 
-// Bridge owns the live reducer. Hooks and observed shell lifecycle enqueue only
-// the latest full snapshot per instance. The existing runtime writer drains
-// changes; an idle connection sends nothing and makes no state requests.
+// Bridge owns the reducer. Hooks and shell lifecycle only mark watched instances
+// dirty. The runtime writer serializes/coalesces visible changes once per second;
+// zero viewers means no snapshot work. Watched active state refreshes every 60s.
 import "base:runtime"
 import "core:encoding/json"
 import "core:fmt"
 import "core:strings"
 import "core:sync"
+import "core:time"
 import live "odin_test:lib/tool_live"
 import contracts "odin_test:contracts"
 import ws "odin_test:lib/ws"
 
 bridge_tool_tracker: live.Tracker
 bridge_tool_out_mutex: sync.Mutex
-bridge_tool_dirty: map[string]string
-bridge_tool_resync: bool
 bridge_tool_wire_seq: u64
-bridge_tool_dirty_bytes: int
+BRIDGE_TOOL_REFRESH_NS :: i64(60 * time.Second)
+Bridge_Tool_Subscription :: struct {
+    token: string,
+    visible: string,
+    dirty, active: bool,
+    last_emit_ns: i64, // monotonic; reset only by a successfully sent state
+}
+bridge_tool_subscriptions: map[string]Bridge_Tool_Subscription
+bridge_tool_last_flush_ns: i64
 
 bridge_tool_live_init :: proc() {
     live.tool_live_init(&bridge_tool_tracker.tool_live)
+    bridge_tool_tracker.demand_driven = true
     bridge_tool_tracker.get_instance = bridge_tool_live_instance
-    bridge_tool_tracker.publish = bridge_tool_live_enqueue
+    bridge_tool_tracker.changed = bridge_tool_live_enqueue
 }
 bridge_tool_live_instance :: proc(ctx: rawptr, id: string) -> (live.Instance, bool) {
     inst, ok := bridge_runtime_instance_snapshot(id)
@@ -38,43 +46,16 @@ bridge_tool_live_instance :: proc(ctx: rawptr, id: string) -> (live.Instance, bo
     return live.Instance{agent_instance_id = id, run_count = run, runtime_status = inst.runtime_status,
         launch_epoch = fmt.tprintf("%d", launch.launched_at_ns if launched else 0)}, true
 }
-bridge_tool_live_enqueue :: proc(ctx: rawptr, body: string) {
+bridge_tool_live_enqueue :: proc(ctx: rawptr, id: string) {
     context.allocator = runtime.heap_allocator()
-    if !live.wire_shape_ok(body) do return
-    v, err := json.parse_string(body, .JSON, true, context.temp_allocator)
-    if err != .None do return
-    obj := v.(json.Object)
-    id := live.tool_live_text(obj, "instance_id")
-    rev, _ := obj["revision"].(json.Integer)
     sync.mutex_lock(&bridge_tool_out_mutex)
     defer sync.mutex_unlock(&bridge_tool_out_mutex)
-    if bridge_tool_resync do return
-    if old, exists := bridge_tool_dirty[id]; exists {
-        old_v, _ := json.parse_string(old, .JSON, true, context.temp_allocator)
-        old_rev, _ := old_v.(json.Object)["revision"].(json.Integer)
-        if rev <= old_rev do return
-        if bridge_tool_dirty_bytes - len(old) + len(body) > live.MAX_DIRTY_BYTES {
-            for key, val in bridge_tool_dirty { delete(key); delete(val) }
-            delete(bridge_tool_dirty); bridge_tool_dirty = nil
-            bridge_tool_resync = true; bridge_tool_dirty_bytes = 0
-            return
-        }
-        bridge_tool_dirty_bytes -= len(old)
-        delete(old)
-        bridge_tool_dirty_bytes += len(body)
-        bridge_tool_dirty[id] = strings.clone(body)
-        return
+    if sub, subscribed := bridge_tool_subscriptions[id]; subscribed {
+        sub.dirty = true
+        bridge_tool_subscriptions[id] = sub
     }
-    if len(bridge_tool_dirty) >= live.TOOL_LIVE_MAX_INSTANCES || bridge_tool_dirty_bytes + len(body) > live.MAX_DIRTY_BYTES {
-        for key, val in bridge_tool_dirty { delete(key); delete(val) }
-        delete(bridge_tool_dirty); bridge_tool_dirty = nil
-        bridge_tool_resync = true; bridge_tool_dirty_bytes = 0
-        return
-    }
-    if bridge_tool_dirty == nil do bridge_tool_dirty = make(map[string]string)
-    bridge_tool_dirty_bytes += len(body)
-    bridge_tool_dirty[strings.clone(id)] = strings.clone(body)
 }
+
 bridge_tool_live_clear :: proc(id: string) {
     if bridge_tool_tracker.get_instance == nil do return
     live.tool_live_clear(&bridge_tool_tracker, id)
@@ -87,7 +68,11 @@ bridge_tool_live_event :: proc(rec: Bridge_Local_Agent_Token_Record, ev: contrac
     value, err := json.parse_string(raw, .JSON, true, context.temp_allocator)
     if err != .None do return
     obj := value.(json.Object)
-    payload, _ := json.marshal(obj["payload"], allocator = context.temp_allocator)
+    po, ok_po := obj["payload"].(json.Object)
+    if !ok_po do po = make(json.Object, context.temp_allocator)
+    tool, _ := obj["tool"].(json.Object)
+    po["input"] = tool["input"]
+    payload, _ := json.marshal(po, allocator = context.temp_allocator)
     e := live.Event{event = contracts.ext_event_kind_name(ev.kind), ts = ev.ts,
         session_id = ev.session_id, agent_id = ev.agent_id, tool_use_id = ev.tool_use_id,
         tool_name = ev.tool_name, payload = string(payload)}
@@ -96,7 +81,7 @@ bridge_tool_live_event :: proc(rec: Bridge_Local_Agent_Token_Record, ev: contrac
 bridge_tool_live_shell :: proc(s: Bridge_Shell_Session, starting: bool, replaced_seq: int = -1) {
     if bridge_tool_tracker.get_instance == nil do return
     row := live.Shell{session_id = s.session_id, kind = "run" if s.kind == .Run else "",
-        agent_instance_id = s.agent_instance_id, run_seq = s.run_seq,
+        agent_instance_id = s.agent_instance_id, run_seq = s.run_seq, command = s.cmd,
         started_at_ms = s.started_unix_ms, finished_at_ms = s.finished_unix_ms,
         status = bridge_shell_session_status_str(s.status), exit_code = s.exit_code, exit_code_set = s.exit_code_set}
     if starting && replaced_seq >= 0 { row.started_at_ms = 0; row.finished_at_ms = 0 }
@@ -124,71 +109,141 @@ bridge_tool_live_shell_exit :: proc(raw: string) {
     }
     bridge_tool_live_shell(session, false)
 }
-bridge_tool_live_send_snapshot :: proc(conn: ^ws.Connection, body: string) -> bool {
-    snapshot, err := json.parse_string(body, .JSON, true, context.temp_allocator)
+
+// Equality deliberately excludes revision: starting and removing a call within
+// an interval may leave only its completion, or no visible change after a reset.
+bridge_tool_live_visible :: proc(body: string, active_only := false) -> string {
+    v, err := json.parse_string(body, .JSON, true, context.temp_allocator)
+    if err != .None do return ""
+    obj, ok := v.(json.Object)
+    if !ok do return ""
+    if active_only do obj["completed_since_last"] = make(json.Array, 0, context.temp_allocator)
+    // Struct fields and sorted nested objects make equality independent of
+    // the JSON parser's per-map iteration order. Revision is intentionally absent.
+    row := struct {active, completed: json.Value, epoch: string, generation, run: json.Value}{
+        obj["active"], obj["completed_since_last"], live.tool_live_text(obj,"epoch"), obj["generation"], obj["run_count"]}
+    bytes, _ := json.marshal(row, {sort_maps_by_key = true})
+    return string(bytes)
+}
+bridge_tool_live_emit :: proc(conn: ^ws.Connection, id: string, sub: ^Bridge_Tool_Subscription, baseline: bool, refresh := false, now_ns: i64 = 0) -> bool {
+    inst, exists := bridge_tool_live_instance(nil, id)
+    if !exists {
+        sub.active = false
+        return bridge_tool_live_unavailable(conn, id, sub.token, "not_found", 0)
+    }
+    body := live.tool_live_snapshot(&bridge_tool_tracker, inst, consume = !baseline, baseline = baseline)
+    defer delete(body)
+    visible := bridge_tool_live_visible(body)
+    defer delete(visible)
+    if !baseline && !refresh && visible == sub.visible do return true
+    snap, err := json.parse_string(body, .JSON, true, context.temp_allocator)
     if err != .None do return false
-    obj := snapshot.(json.Object)
-    run, _ := obj["run_count"].(json.Integer)
     bridge_tool_wire_seq += 1
-    frame := struct {type, epoch: string, seq: u64, run_count: int, snapshot: json.Value}{
-        type = "tool_activity_live_snapshot", epoch = fmt.tprintf("%d", bridge_tool_tracker.tool_live.epoch),
-        seq = bridge_tool_wire_seq, run_count = int(run), snapshot = snapshot}
+    frame := struct {type, epoch, subscription_id: string, seq: u64, run_count: int, baseline, refresh: bool, snapshot: json.Value}{
+        "tool_stream_state", fmt.tprintf("%d", bridge_tool_tracker.tool_live.epoch), sub.token,
+        bridge_tool_wire_seq, inst.run_count, baseline, refresh, snap}
     data, _ := json.marshal(frame, allocator = context.temp_allocator)
-    return bridge_hub_send(conn, string(data))
+    if len(data) > live.MAX_FRAME_BYTES {
+        sub.active = false
+        return bridge_tool_live_unavailable(conn, id, sub.token, "state_too_large", inst.run_count)
+    }
+    if !bridge_hub_send(conn, string(data)) do return false
+    sub.last_emit_ns = now_ns if now_ns != 0 else time.tick_now()._nsec
+    sub.active = len(snap.(json.Object)["active"].(json.Array)) > 0
+    delete(sub.visible)
+    // Completed batches are one-shot. Compare next interval with active-only state,
+    // so no redundant empty follow-up is emitted just to erase the old batch.
+    sub.visible = bridge_tool_live_visible(body, active_only = true)
+    return true
 }
 bridge_tool_live_drain :: proc(conn: ^ws.Connection, reconnect := false) {
+    bridge_tool_live_drain_at(conn, time.tick_now()._nsec, reconnect)
+}
+// Explicit clock keeps scheduling tests deterministic and avoids wall-clock jumps.
+bridge_tool_live_drain_at :: proc(conn: ^ws.Connection, now_ns: i64, reconnect := false) {
     if bridge_tool_tracker.get_instance == nil do return
     context.allocator = runtime.heap_allocator()
     sync.mutex_lock(&bridge_tool_out_mutex)
-    full := reconnect || bridge_tool_resync
-    dirty := bridge_tool_dirty
-    bridge_tool_dirty = nil; bridge_tool_resync = false; bridge_tool_dirty_bytes = 0
-    sync.mutex_unlock(&bridge_tool_out_mutex)
-    defer {
-        for key, val in dirty { delete(key); delete(val) }
-        delete(dirty)
-    }
-    if !full && len(dirty) == 0 do return
-    if reconnect do bridge_tool_wire_seq = 0
-    success := true
-    if full {
-        bridge_tool_wire_seq += 1
-        frame := struct {type, epoch: string, seq: u64}{
-            type = "tool_activity_live_reset", epoch = fmt.tprintf("%d", bridge_tool_tracker.tool_live.epoch), seq = bridge_tool_wire_seq}
+    defer sync.mutex_unlock(&bridge_tool_out_mutex)
+    if reconnect {
+        bridge_tool_live_unwatch_locked()
+        bridge_tool_wire_seq = 0
+        bridge_tool_last_flush_ns = now_ns
+        frame := struct {type, epoch: string}{"tool_stream_reset", fmt.tprintf("%d", bridge_tool_tracker.tool_live.epoch)}
         data, _ := json.marshal(frame, allocator = context.temp_allocator)
-        success = bridge_hub_send(conn, string(data))
-        // Overflow/reconnect recovery is explicitly requested by clients, rather
-        // than broadcasting every instance or polling idle state.
-        if success do success = bridge_hub_send(conn, `{"type":"tool_activity_live_resync"}`)
+        _ = bridge_hub_send(conn, string(data))
+        return
     }
-    for _, body in dirty do if success do success = bridge_tool_live_send_snapshot(conn, body)
-    if !success {
-        sync.mutex_lock(&bridge_tool_out_mutex); bridge_tool_resync = true; sync.mutex_unlock(&bridge_tool_out_mutex)
-        conn.connected = false
+    if len(bridge_tool_subscriptions) == 0 do return
+    batch_due := now_ns - bridge_tool_last_flush_ns >= i64(time.Second)
+    if batch_due do bridge_tool_last_flush_ns = now_ns
+    for id, &sub in bridge_tool_subscriptions {
+        // A freshness deadline is per instance and is not delayed by the
+        // one-second changed-state batch gate. Empty idle state does no work.
+        refresh := sub.active && now_ns - sub.last_emit_ns >= BRIDGE_TOOL_REFRESH_NS
+        if !refresh && !(batch_due && sub.dirty) do continue
+        sub.dirty = false
+        if !bridge_tool_live_emit(conn, id, &sub, false, refresh, now_ns) do conn.connected = false
     }
 }
-
-// A one-shot bounded request, invoked only by UI attach/reconnect/explicit resync.
-bridge_tool_live_handle_request :: proc(conn: ^ws.Connection, raw: string) {
+bridge_tool_live_handle_subscription :: proc(conn: ^ws.Connection, raw: string) {
     if !live.wire_shape_ok(raw) || len(raw) > 4096 do return
+    context.allocator = runtime.heap_allocator()
     id := extract_json_string(raw, "instance_id", ""); defer delete(id)
-    request_id := extract_json_string(raw, "request_id", ""); defer delete(request_id)
-    if len(id) == 0 || len(id) > live.TOOL_LIVE_ID_MAX || len(request_id) == 0 || len(request_id) > 128 do return
-    inst, exists := bridge_tool_live_instance(nil, id)
-    if !exists do return
-    if live.terminal(inst.runtime_status) do bridge_tool_live_clear(id)
-    body := live.tool_live_snapshot(&bridge_tool_tracker, inst); defer delete(body)
-    snapshot, err := json.parse_string(body, .JSON, true, context.temp_allocator)
-    if err != .None do return
-    frame := struct {type, request_id, epoch: string, run_count: int, snapshot: json.Value}{
-        type = "tool_activity_live_reply", request_id = request_id,
-        epoch = fmt.tprintf("%d", bridge_tool_tracker.tool_live.epoch), run_count = inst.run_count, snapshot = snapshot}
-    data, _ := json.marshal(frame, allocator = context.temp_allocator)
-    if len(data) <= live.MAX_FRAME_BYTES && conn != nil do _ = bridge_hub_send(conn, string(data))
+    token := extract_json_string(raw, "subscription_id", ""); defer delete(token)
+    kind := extract_json_string(raw, "type", ""); defer delete(kind)
+    if len(id) == 0 || len(id) > live.TOOL_LIVE_ID_MAX || len(token) == 0 || len(token) > 128 do return
+    sync.mutex_lock(&bridge_tool_out_mutex)
+    defer sync.mutex_unlock(&bridge_tool_out_mutex)
+    sub, exists := bridge_tool_subscriptions[id]
+    if kind == "tool_stream_detach" {
+        if !exists || sub.token != token do return
+        live.tool_live_watch(&bridge_tool_tracker, id, false)
+        for key in bridge_tool_subscriptions {
+            if key == id { delete_key(&bridge_tool_subscriptions, key); delete(key); break }
+        }
+        delete(sub.token); delete(sub.visible)
+        return
+    }
+    if kind != "tool_stream_attach" do return
+    inst, found := bridge_tool_live_instance(nil, id)
+    expected_run := extract_json_int(raw, "run_count", -1)
+    if !found { _ = bridge_tool_live_unavailable(conn, id, token, "not_found", expected_run); return }
+    if expected_run != inst.run_count { _ = bridge_tool_live_unavailable(conn, id, token, "instance_changed", expected_run); return }
+    if !exists {
+        if len(bridge_tool_subscriptions) >= live.TOOL_LIVE_MAX_INSTANCES { _ = bridge_tool_live_unavailable(conn, id, token, "capacity", expected_run); return }
+        if bridge_tool_subscriptions == nil do bridge_tool_subscriptions = make(map[string]Bridge_Tool_Subscription)
+        bridge_tool_subscriptions[strings.clone(id)] = {}
+        live.tool_live_watch(&bridge_tool_tracker, id, true)
+    }
+    if sub.token != token {
+        // A new logical producer starts with no completion history. Rebaselining
+        // the same producer for an additional viewer preserves its pending batch.
+        if exists { live.tool_live_watch(&bridge_tool_tracker, id, false); live.tool_live_watch(&bridge_tool_tracker, id, true) }
+        delete(sub.token); sub.token = strings.clone(token)
+    }
+    if !bridge_tool_live_emit(conn, id, &sub, true) do conn.connected = false
+    bridge_tool_subscriptions[id] = sub
 }
-
-bridge_tool_live_note_launch :: proc(id:string) {
+bridge_tool_live_note_launch :: proc(id: string) {
     bridge_tool_live_clear(id)
-    if bridge_tool_tracker.get_instance == nil do return
-    sync.mutex_lock(&bridge_tool_out_mutex); bridge_tool_resync=true; sync.mutex_unlock(&bridge_tool_out_mutex)
+}
+bridge_tool_live_unwatch_locked :: proc() {
+    for id, sub in bridge_tool_subscriptions {
+        live.tool_live_watch(&bridge_tool_tracker, id, false)
+        delete(id, runtime.heap_allocator()); delete(sub.token, runtime.heap_allocator()); delete(sub.visible, runtime.heap_allocator())
+    }
+    delete(bridge_tool_subscriptions); bridge_tool_subscriptions = nil
+}
+bridge_tool_live_disconnect :: proc() {
+    sync.mutex_lock(&bridge_tool_out_mutex)
+    defer sync.mutex_unlock(&bridge_tool_out_mutex)
+    bridge_tool_live_unwatch_locked()
+}
+bridge_tool_live_unavailable :: proc(conn: ^ws.Connection, id, token, reason: string, run: int) -> bool {
+    bridge_tool_wire_seq += 1
+    frame := struct {type, epoch, subscription_id, instance_id, reason: string, seq: u64, run_count: int}{
+        "tool_stream_unavailable", fmt.tprintf("%d", bridge_tool_tracker.tool_live.epoch), token, id, reason, bridge_tool_wire_seq, run}
+    data, _ := json.marshal(frame, allocator = context.temp_allocator)
+    return bridge_hub_send(conn, string(data))
 }

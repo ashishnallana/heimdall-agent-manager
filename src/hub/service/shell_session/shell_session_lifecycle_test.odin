@@ -2037,6 +2037,6 @@ test_live_shell_lifecycle_does_not_create_hub_tool_state :: proc(t: ^testing.T) 
  _, converted, _ := shell_session_set_background(&fx.svc, agent5_auth(), row.session_id)
  testing.expect(t, converted)
  _ = shell_session_handle_exited(&fx.svc, row.session_id, "brg_1", "killed", 137, true)
- for p in live.tool_live.pending do testing.expect(t, !p.used, "Hub retains no tool projection or outstanding request")
+ testing.expect_value(t, len(live.tool_live.routes), 0)
  testing.expect_value(t, len(fx.content.messages), 0)
 }

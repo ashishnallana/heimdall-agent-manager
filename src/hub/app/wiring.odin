@@ -696,8 +696,6 @@ register_routes :: proc(graph: ^App_Graph) {
 	http.router_add(&graph.router, "POST", "/api/v1/agent-instances/*/reconfigurations/retry", rawptr(&graph.agent_handlers), http.retry_instance_reconfiguration_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/agent-instances/*/reconfigurations", rawptr(&graph.agent_handlers), http.create_instance_reconfiguration_handler)
 	http.router_add(&graph.router, "GET", "/api/v1/agent-instances/*/reconfigurations", rawptr(&graph.agent_handlers), http.list_instance_reconfigurations_handler)
-	http.router_add(&graph.router, "GET", "/api/v1/task-chains/*/tool-activity-live", rawptr(&graph.taskchain_handlers), http.task_chain_tool_activity_live_handler)
-	http.router_add(&graph.router, "GET", "/api/v1/agent-instances/*/tool-activity-live", rawptr(&graph.agent_handlers), http.agent_instance_tool_activity_live_handler)
 	http.router_add(&graph.router, "GET", "/api/v1/agent-instances/*/extension/events", rawptr(&graph.agent_handlers), http.agent_instance_extension_events_handler)
 	http.router_add(&graph.router, "GET", "/api/v1/agent-instances/*/extension/subagents", rawptr(&graph.agent_handlers), http.agent_instance_extension_subagents_handler)
 	http.router_add(&graph.router, "GET", "/api/v1/agent-instances/*/extension/files", rawptr(&graph.agent_handlers), http.agent_instance_extension_files_handler)
@@ -969,6 +967,7 @@ register_routes :: proc(graph: ^App_Graph) {
 	http.router_add(&graph.router, "POST", "/api/v1/issues/*/unvote", rawptr(&graph.issue_handlers), http.unvote_issue_handler)
 
 	// Shell session WS stream + HTTP input/resize fallback (T7).
+	http.router_add_upgrade(&graph.router, "GET", "/api/v1/tool-activity/stream", rawptr(&graph.agent_handlers), http.tool_stream_handler)
 	http.router_add_upgrade(&graph.router, "GET", "/api/v1/shells/*/stream", rawptr(&graph.shell_session_stream_handlers), http.shell_session_stream_handler)
 	http.router_add_upgrade(&graph.router, "GET", "/api/v1/lsp/*/stream", rawptr(&graph.lsp_session_stream_handlers), http.lsp_session_stream_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/shells/*/input", rawptr(&graph.shell_session_stream_handlers), http.shell_session_input_handler)

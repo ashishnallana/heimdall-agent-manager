@@ -1,16 +1,15 @@
-import { liveStreamReady, liveStreamDisconnected, liveResyncRequested } from '../store/toolActivitySlice';
 import { apiAbsoluteUrl } from './apiBase';
+import { authenticatedStreamUrl, hasElectronDeviceAuth } from './userStreamUrl';
 import { useEffect } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import { handleUserWsEvent, resyncAfterReconnect } from './wsInvalidation';
 import { heimdallApi } from './heimdallApi';
 import {
+  UserWsAuthError,
   MAX_CONSECUTIVE_FAILURES,
   STABLE_CONNECTION_MS,
   USER_WS_RESYNC_EVENT,
-  UserWsAuthError,
   UserWsStreamTracker,
-  authProbeResultForStatus,
   classifyClose,
   createResyncScheduler,
   probeUserAuth,
@@ -46,63 +45,6 @@ const HEARTBEAT_INTERVAL_MS = 25000;
 // the socket became ready, then refetches each one once it settles.
 const INITIAL_PENDING_WAIT_MS = 10000;
 const INITIAL_PENDING_POLL_MS = 250;
-
-function hasElectronDeviceAuth(): boolean {
-  return typeof window !== 'undefined' && Boolean((window as any).odinApi?.deviceAuth);
-}
-
-async function electronApiBaseUrl(): Promise<string> {
-  try {
-    const cfg = await (window as any).odinApi?.deviceAuth?.getConfig?.();
-    return String(cfg?.apiBaseUrl || (window as any).odinApi?.hubApiBaseUrl || '').replace(/\/$/, '');
-  } catch (_err) {
-    return String((window as any).odinApi?.hubApiBaseUrl || '').replace(/\/$/, '');
-  }
-}
-
-function httpToWsUrl(base: string, path: string): string {
-  const parsed = new URL(base || window.location.origin);
-  parsed.protocol = parsed.protocol === 'https:' ? 'wss:' : 'ws:';
-  parsed.pathname = path;
-  parsed.search = '';
-  parsed.hash = '';
-  return parsed.toString();
-}
-
-async function electronUserWsUrl(): Promise<string> {
-  const response = await fetch('/api/v1/me/ws-ticket', { method: 'POST', headers: { 'Content-Type': 'application/json' } });
-  const text = await response.text();
-  let body: any = {};
-  if (text) {
-    try { body = JSON.parse(text); } catch (_err) { body = {}; }
-  }
-  const data = body?.data !== undefined ? body.data : body;
-  if (!response.ok) {
-    const message = String(data?.error?.message || data?.message || `WebSocket ticket failed (${response.status})`);
-    // 401/403 on the ticket mint is the Electron equivalent of a refused upgrade:
-    // retrying cannot fix it.
-    const verdict = authProbeResultForStatus(response.status);
-    if (verdict === 'unauthenticated' || verdict === 'forbidden') throw new UserWsAuthError(verdict, message);
-    throw new Error(message);
-  }
-  const ticket = String(data?.ticket || '');
-  if (!ticket) throw new Error('WebSocket ticket response did not include a ticket');
-  const base = await electronApiBaseUrl();
-  const url = new URL(httpToWsUrl(base, '/api/v1/user-ws'));
-  url.searchParams.set('ticket', ticket);
-  return url.toString();
-}
-
-async function userWsUrl(): Promise<string> {
-  if (typeof window === 'undefined') return '';
-  if (hasElectronDeviceAuth()) return electronUserWsUrl();
-  // Built from the API base so a preview build's socket follows the same path
-  // prefix as its fetches, rather than silently attaching to whatever hub happens
-  // to own the origin the preview is framed in.
-  const url = new URL(apiAbsoluteUrl('/api/v1/user-ws'));
-  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
-  return url.toString();
-}
 
 // Focus context read at WS-event time. Only focusedChainId is consumed (targets
 // an extra chain-view refresh for the chain the user is viewing); the shell
@@ -141,7 +83,7 @@ export function startUserWsConnection(env: UserWsConnectionEnv): () => void {
   const getCtx = env.getCtx ?? (() => ({}));
   const tracker = env.tracker ?? new UserWsStreamTracker();
   const createSocket = env.createSocket ?? ((url: string) => new WebSocket(url));
-  const resolveUrl = env.resolveUrl ?? userWsUrl;
+  const resolveUrl = env.resolveUrl ?? (() => authenticatedStreamUrl('/api/v1/user-ws'));
   const probeAuth = env.probeAuth ?? (() => probeUserAuth(apiAbsoluteUrl('/api/v1/me')));
   const isElectron = env.isElectron ?? hasElectronDeviceAuth;
   const handleEvent = env.handleEvent ?? handleUserWsEvent;
@@ -162,7 +104,6 @@ export function startUserWsConnection(env: UserWsConnectionEnv): () => void {
 
   const runResync = (reason: UserWsResyncReason, readyAt: number) => {
     // Ready already starts the live handshake synchronously, before any frames.
-    if (reason !== 'initial' && reason !== 'reconnect') dispatch(liveResyncRequested());
     if (reason === 'initial') {
       resyncQueriesStartedBefore(readyAt);
     } else {
@@ -228,7 +169,6 @@ export function startUserWsConnection(env: UserWsConnectionEnv): () => void {
   };
 
   const park = (message: string) => {
-    dispatch(liveStreamDisconnected());
     parked = true;
     dispatch(userWsError(message));
   };
@@ -296,7 +236,6 @@ export function startUserWsConnection(env: UserWsConnectionEnv): () => void {
         if (stableTimer) window.clearTimeout(stableTimer);
         stableTimer = window.setTimeout(() => { stableTimer = undefined; failures = 0; }, STABLE_CONNECTION_MS);
         dispatch(userWsConnected());
-        dispatch(liveStreamReady());
         scheduler.trigger(tracker.onReady(payload));
         return;
       }
@@ -306,12 +245,10 @@ export function startUserWsConnection(env: UserWsConnectionEnv): () => void {
     };
 
     socket.onerror = () => {
-      dispatch(liveStreamDisconnected());
       dispatch(userWsError('User WebSocket connection error'));
     };
 
     socket.onclose = (event) => {
-      dispatch(liveStreamDisconnected());
       clearHeartbeat();
       clearStableTimer();
       socket = null;
@@ -344,7 +281,6 @@ export function startUserWsConnection(env: UserWsConnectionEnv): () => void {
 
   return () => {
     stopped = true;
-    dispatch(liveStreamDisconnected());
     scheduler.cancel();
     window.removeEventListener('online', resume);
     window.removeEventListener('focus', resume);

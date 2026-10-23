@@ -166,15 +166,8 @@ export default function ChatMessageList({
   getDeliveryStatus?: (message: ChatMessage) => ChatDeliveryStatus;
   agentIsWorking?: boolean;
   /**
-   * REQ-VIEWPORT-SWEEP-1: REMOVED. This rendered its node as the LAST CHILD OF THE
-   * SCROLL CONTAINER, and the composer was what went through it. When the soft keyboard
-   * opens, the scroller's `clientHeight` shrinks and `maxScrollTop` grows by the keyboard's
-   * height (measured 614 -> 1017) while `scrollTop` stays put, so anything at the end of
-   * the scrolled content lands below the fold and has to be scrolled to by hand. The
-   * composer now sits OUTSIDE this component as a `shrink-0` flex sibling of the scroller
-   * (`ConversationThreadPage` › `conversation-thread-composer-dock`). Do not add this back:
-   * a slot that drops caller content into the bottom of a scroller reintroduces the bug for
-   * the next caller. Content that must stay reachable belongs beside the scroller, not in it.
+   * Transient conversation-tail content (e.g. live tools) scrolls with messages.
+   * The composer stays outside this slot so keyboard resizing keeps it reachable.
    */
   children?: ReactNode;
   wrapperClassName?: string;
@@ -193,6 +186,7 @@ export default function ChatMessageList({
   const installedKey = useSelector(selectActiveVaultKey);
   const activeKey = isUnlocked ? installedKey : null;
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const contentRef = useRef<HTMLDivElement | null>(null);
   const revision = useSyncExternalStore(subscribeConversationOptions, () => conversationOptionsRevision(conversationKey), () => 0);
   const stickyRef = useRef(true);
   const lastCountRef = useRef(0);
@@ -356,6 +350,18 @@ export default function ChatMessageList({
     if (stickyRef.current && didInitialScrollRef.current) scrollToBottom('auto');
   }, [bottomInset, scrollToBottom]);
 
+  // Live tail rows change independently of message props. Follow their height
+  // only for readers already at the bottom; preserve a scrolled-up reader.
+  useEffect(() => {
+    const content = contentRef.current;
+    if (!content || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(() => {
+      if (stickyRef.current) scrollToBottom('auto');
+    });
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, [conversationKey, scrollToBottom]);
+
   const onScroll = useCallback((event: UIEvent<HTMLDivElement>) => {
     onScrollProp?.(event);
     const node = scrollRef.current;
@@ -373,7 +379,7 @@ export default function ChatMessageList({
           to screen readers without stealing focus or blocking. */}
       <div data-debug-id={`${debugPrefix}-focus-status`} role="status" aria-live="polite" className="sr-only">{focusAnnouncement}</div>
       <div ref={scrollRef} data-debug-id={`${debugPrefix}-scroll`} onScroll={onScroll} className={`${scrollClassName} [overflow-anchor:none]`}>
-        <div data-debug-id={`${debugPrefix}-messages-container`} className="mx-auto w-full max-w-4xl space-y-3 sm:space-y-4">
+        <div ref={contentRef} data-debug-id={`${debugPrefix}-messages-container`} className="mx-auto w-full max-w-4xl space-y-3 sm:space-y-4">
           {hasMore ? (
             <div
               ref={topSentinelRef}

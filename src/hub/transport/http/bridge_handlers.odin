@@ -2383,7 +2383,7 @@ bridge_ws_process_frame :: proc(h: ^Bridge_Handlers, bridge_id: string, connecti
 	// scope it is confined to must come from the transport, not from its payload.
 	// REQ-EXT-BLK-2: a full per-instance agent blocker snapshot. Scoped to the
 	// authenticated bridge_id; the hub replaces its in-memory list wholesale.
-	case "tool_activity_live_reset", "tool_activity_live_snapshot", "tool_activity_live_reply", "tool_activity_live_resync":
+	case "tool_stream_reset", "tool_stream_state", "tool_stream_unavailable":
         bridge_ws_tool_live_frame(h, bridge_id, connection_generation, connection, text)
 
 	case "agent_blockers":
@@ -3074,6 +3074,7 @@ Bridge_WS_Reader :: struct {
 	// Opcode of the message most recently returned by bridge_ws_take_frame: 0x1 text,
 	// 0x2 binary (REQ-PTY-NET-2: binary = a pty_wire frame, never JSON).
 	last_opcode:       u8,
+	max_buffer_bytes: int, // zero preserves existing default; bounded JSON streams opt in
 	control_context: rawptr,
 	control_writer: proc(rawptr, net.TCP_Socket, string) -> bool,
 }
@@ -3112,7 +3113,7 @@ bridge_ws_take_frame :: proc(reader: ^Bridge_WS_Reader) -> (text: string, ok: bo
 		op, fin, payload, has_frame, ok_frame := ws.take_one_frame_from_pending(
 			&reader.pending,
 			allow_64bit = true,
-			max_buffer_bytes = ws.WS_READER_DEFAULT_MAX_BUFFER_BYTES,
+			max_buffer_bytes = reader.max_buffer_bytes if reader.max_buffer_bytes > 0 else ws.WS_READER_DEFAULT_MAX_BUFFER_BYTES,
 		)
 		if !ok_frame {
 			reader.fatal_reason = .Fatal_Frame
@@ -3176,7 +3177,7 @@ bridge_ws_take_frame :: proc(reader: ^Bridge_WS_Reader) -> (text: string, ok: bo
 				reader.fatal_reason = .Fatal_Frame
 				return "", false, true
 			}
-			if len(reader.fragmented) + len(payload) > ws.WS_CONTINUATION_DEFAULT_MAX_BYTES {
+			if len(reader.fragmented) + len(payload) > (reader.max_buffer_bytes if reader.max_buffer_bytes > 0 else ws.WS_CONTINUATION_DEFAULT_MAX_BYTES) {
 				delete(payload)
 				reader.fatal_reason = .Fatal_Frame
 				return "", false, true

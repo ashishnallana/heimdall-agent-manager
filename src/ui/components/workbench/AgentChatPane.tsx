@@ -3021,18 +3021,6 @@ export function AgentChatPane({
               <Icon name="gear" size={15} />
               <span>Agent settings</span>
             </Menu.Item>
-            {onOpenAuxTab ? (
-              <Menu.Item
-                data-debug-id="conversation-thread-activity-action"
-                onClick={() => {
-                  setHeaderActionsOpen(false);
-                  openAux({ type: 'activity' });
-                }}
-              >
-                <Icon name="layers" size={15} />
-                <span>Activity timeline</span>
-              </Menu.Item>
-            ) : null}
             <Menu.Separator />
             {onSplitPane || onReplaceWithNew || (isMultiPane && onClosePane) ? (
               <>
@@ -3217,7 +3205,19 @@ export function AgentChatPane({
               </div>
             )
           }
-        />
+        >
+          <LiveToolActivity
+            instanceId={agentInstanceId}
+            members={isChainCoordinator ? [
+              { instanceId: agentInstanceId, displayName: agentDisplayName },
+              ...(liveChain?.members || []).map((member: any) => ({
+                instanceId: String(member.agentInstanceId || member.agent_instance_id || ''),
+                displayName: String(member.displayName || member.display_name || ''),
+              })),
+            ] : [{ instanceId: agentInstanceId, displayName: agentDisplayName }]}
+            onOpenShell={(sessionId) => navigateTo(shellViewHref(sessionId))}
+          />
+        </ChatMessageList>
         <div
           ref={composerDockRef}
           data-debug-id="conversation-thread-composer-dock"
@@ -3228,11 +3228,6 @@ export function AgentChatPane({
         >
           <div aria-hidden="true" className="ui-frost-tail" />
           <AgentActivityBubbles instanceId={agentInstanceId} />
-          <LiveToolActivity
-            instanceId={agentInstanceId}
-            chainId={isChainCoordinator ? chainId : ''}
-            onOpenShell={(sessionId) => navigateTo(shellViewHref(sessionId))}
-          />
           {trayNotice ? (
             <div className="pointer-events-none mb-2 flex justify-center px-3">
               <div

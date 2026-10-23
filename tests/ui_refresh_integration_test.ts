@@ -552,9 +552,6 @@ test('covered steady polls stay retired in their callers', () => {
 test('extension bursts coalesce by instance without refetching ordinary instance caches', async () => {
   const net = installRoutes({
     [`/agent-instances/${INST}`]: { body: { data: { agent_instance_id: INST, agent_id: 'agt_1', ...instanceSummary() } } },
-    '/extension/events': { body: { events: [] } },
-    '/extension/subagents': { body: { subagents: [] } },
-    '/extension/files': { body: { files: [] } },
     '/blockers': { body: { agent_instance_id: INST, revision: 2, blockers: [] } },
   });
   try {
@@ -564,7 +561,6 @@ test('extension bursts coalesce by instance without refetching ordinary instance
     const { handleUserWsEvent } = await import('../src/ui/api/wsInvalidation.ts');
     await Promise.all([
       store.dispatch(agentsApi.endpoints.fetchAgentInstance.initiate({ instanceId: INST })),
-      store.dispatch(extensionApi.endpoints.getExtensionTimeline.initiate(INST)),
       store.dispatch(extensionApi.endpoints.getAgentBlockers.initiate(INST)),
     ]);
     net.hits.length = 0;
@@ -576,16 +572,16 @@ test('extension bursts coalesce by instance without refetching ordinary instance
       frame('agent_blockers_changed', { revision: i + 1, count: 0 });
     }
     await settle();
-    assert.equal(count(net.hits, (h) => h.includes('/extension/events?')), 1, 'one timeline refresh per burst');
+    assert.equal(count(net.hits, (h) => h.includes('/extension/')), 0, 'tool events do not fetch retired timeline data');
     assert.equal(count(net.hits, (h) => h.endsWith('/blockers')), 1, 'one blocker refresh per burst');
     assert.equal(count(net.hits, (h) => h.endsWith(`/agent-instances/${INST}`)), 0, 'tool events do not refetch the instance');
-    assert.equal(net.hits.length, 4, 'only timeline events/rollups and blockers refetch');
+    assert.equal(net.hits.length, 1, 'only blockers refetch');
 
     net.hits.length = 0;
     frame('extension_events', { events: [{ event: 'session' }], session_changed: true });
     frame('extension_events', { events: [{ event: 'hello' }] });
     await settle();
     assert.equal(count(net.hits, (h) => h.endsWith(`/agent-instances/${INST}`)), 1, 'session/hello refresh the native-signals badge once');
-    assert.equal(count(net.hits, (h) => h.includes('/extension/events?')), 1);
+    assert.equal(net.hits.length, 1, 'only the native-signals badge refetches');
   } finally { net.restore(); }
 });

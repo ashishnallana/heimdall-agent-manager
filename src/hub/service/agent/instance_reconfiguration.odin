@@ -185,7 +185,11 @@ reconfiguration_change_name :: proc(phase: domain.Instance_Reconfiguration_Phase
 // reconfiguration_notify runs after a successful compare-and-set write, so a
 // lost race (accepted=false) or a failed write never produces an event.
 reconfiguration_notify :: proc(service: ^Agent_Service, op: domain.Instance_Reconfiguration, change: string, config_committed: bool) {
-	if service == nil || service.resource_events.on_reconfiguration_changed == nil do return
+	if service == nil do return
+	// Rebind subscribed viewers after the destination commit, independently of
+	// optional UI event hooks. Ready retries a baseline if attach preceded launch.
+	if config_committed || change == "succeeded" do tool_live_clear(service, op.agent_instance_id)
+	if service.resource_events.on_reconfiguration_changed == nil do return
 	service.resource_events.on_reconfiguration_changed(service.resource_events.ctx, op, change, config_committed)
 }
 reconfiguration_start_stop :: proc(service: ^Agent_Service, op: domain.Instance_Reconfiguration) -> (domain.Instance_Reconfiguration, bool, domain.Domain_Error) {

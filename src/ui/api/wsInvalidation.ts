@@ -1,4 +1,3 @@
-import { liveFrameReceived, liveInstanceUnavailable, liveResyncRequested, parseLiveSnapshot } from '../store/toolActivitySlice';
 import { heimdallApi, HEIMDALL_TAG_TYPES } from './heimdallApi';
 import { tasksApi } from './endpoints/tasks';
 import { normalizeChain, workspaceApi } from './endpoints/workspace';
@@ -904,9 +903,8 @@ function handleInstanceChanged(dispatch: any, payload: any, ctx: WsCtx, instance
  * Provider extension frames on an agent instance (REQ-EXT-BLK-1, REQ-EXT-SUB-2):
  *   'extension_events'       {count, last_seq, provider_session_id, session_changed, events:[tail]}
  *   'agent_blockers_changed' {agent_instance_id, revision, count}
- * The timeline refetches only events after the seq it holds; the in-memory
- * blocker list (permission cards) is refetched. Returns false for any other
- * change so the generic agent path handles it.
+ * Permission cards refetch; hello/session events refresh native-signals badges.
+ * Returns false for other changes so the generic agent path handles them.
  */
 function handleAgentInstanceExtensionChange(dispatch: any, instanceId: string, change: string, summary: any): boolean {
   if (change === AGENT_BLOCKERS_CHANGE) {
@@ -915,14 +913,12 @@ function handleAgentInstanceExtensionChange(dispatch: any, instanceId: string, c
     return true;
   }
   if (change === 'extension_events') {
-    const tags: any[] = [{ type: 'ExtensionEvents' as const, id: instanceId }];
     // hello/session events change the instance's extension info and session id
     // (the native-signals badge reads them from the instance).
     const events = Array.isArray(summary?.events) ? summary.events : [];
     if (summary?.session_changed || events.some((e: any) => e?.event === 'hello' || e?.event === 'session')) {
-      tags.push({ type: 'AgentInstances' as const, id: instanceId });
+      queueInvalidation(dispatch, [{ type: 'AgentInstances' as const, id: instanceId }]);
     }
-    queueInvalidation(dispatch, tags);
     return true;
   }
   return false;
@@ -1174,36 +1170,6 @@ function scheduleAttentionRefetch(dispatch: any) {
 
 // TODO(FIX): Replace any with strict TypeScript interface matching Odin backend schema
 export function handleUserWsEvent(dispatch: any, payload: any, ctx: WsCtx = {}) {
-  if (payload?.type === 'tool_activity_live') {
-    const snapshot = parseLiveSnapshot(payload);
-    if (snapshot) dispatch(liveFrameReceived(snapshot));
-    else dispatch(liveResyncRequested());
-    return;
-  }
-  if (payload?.type === 'tool_activity_live_unavailable') {
-    if (typeof payload.instance_id === 'string' && payload.instance_id.length <= 64)
-      dispatch(liveInstanceUnavailable(payload.instance_id));
-    return;
-  }
-  if (payload?.type === 'tool_activity_live_resync') {
-    // Bridge launch/relaunch registration also emits this event. Recover
-    // unavailable/offline instances through a fresh authoritative snapshot;
-    // ordinary status changes must not race it with duplicate discovery reads.
-    dispatch(liveResyncRequested());
-    return;
-  }
-  // Generic status and extension events are push-only and do not discover
-  // tool state. Only roster/configuration hints can change view membership.
-  if (payload?.type === 'resource_changed') {
-    const resource = String(payload.resource || '');
-    const change = String(payload.change || '');
-    if ((resource === 'task_chain' && ['created', 'updated', 'deleted', 'member_added',
-        'member_removed', 'membership_changed', 'coordinator_changed'].includes(change)) ||
-        (resource === 'task_chain_member') ||
-        (resource === 'agent_instance' && ['created', 'deleted', 'chain_changed', 'config_changed'].includes(change))) {
-      dispatch(liveResyncRequested());
-    }
-  }
   // Native (OS) notifications: fire from this single funnel for the curated
   // event set, gated to open-but-unfocused tabs. Implemented as a thunk so the
   // side-effectful service can read live settings via getState without a

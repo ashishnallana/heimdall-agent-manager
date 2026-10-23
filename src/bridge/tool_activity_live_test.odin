@@ -5,80 +5,135 @@ import "core:encoding/json"
 import "core:fmt"
 import "core:net"
 import "core:strings"
+import "core:sync"
 import "core:testing"
 import "core:time"
+import contracts "odin_test:contracts"
 import live "odin_test:lib/tool_live"
 import ws "odin_test:lib/ws"
 
+@(private = "file") live_bridge_test_mu: sync.Mutex
 @(private = "file")
 live_bridge_cleanup :: proc() {
     live.tool_live_destroy(&bridge_tool_tracker.tool_live)
     bridge_tool_tracker = {}
-    for key, val in bridge_tool_dirty { delete(key, runtime.heap_allocator()); delete(val, runtime.heap_allocator()) }
-    delete(bridge_tool_dirty)
-    bridge_tool_dirty = nil; bridge_tool_dirty_bytes = 0; bridge_tool_resync = false
+    for id, sub in bridge_tool_subscriptions {
+        delete(id, runtime.heap_allocator()); delete(sub.token, runtime.heap_allocator()); delete(sub.visible, runtime.heap_allocator())
+    }
+    delete(bridge_tool_subscriptions)
+    bridge_tool_subscriptions = nil
+    bridge_tool_last_flush_ns = 0
+    bridge_tool_wire_seq = 0
+}
+@(private = "file")
+stream_bridge_event :: proc(id, call: string, ending := false) {
+    ev := contracts.Ext_Event{kind = .Tool_End if ending else .Tool_Start,
+        session_id = "s1", tool_use_id = call, tool_name = "Bash",
+        ts = action_scheduler_format_rfc3339_utc(bridge_now_unix_ms()+1000)}
+    bridge_tool_live_event(Bridge_Local_Agent_Token_Record{agent_instance_id=id, role=.Agent}, ev,
+        `{"tool":{"input":{"command":"echo example","ignored":"not retained"}},"payload":{}}`)
+}
+@(private = "file")
+stream_bridge_read :: proc(t: ^testing.T, peer: net.TCP_Socket, reader: ^ws.Frame_Reader) -> json.Object {
+    _, body, got := ws.read_frame(peer, reader, time.Second)
+    testing.expect(t, got, "expected stream frame")
+    if !got do return nil
+    defer delete(body)
+    value, err := json.parse_string(body, .JSON, true, context.temp_allocator)
+    testing.expect_value(t, err, json.Error.None)
+    obj, _ := value.(json.Object)
+    return obj
 }
 @(test)
-test_live_bridge_push_snapshot_idle_and_reconnect :: proc(t: ^testing.T) {
+test_tool_stream_bridge_demand_baseline_batches_and_coalescing :: proc(t: ^testing.T) {
+    sync.mutex_lock(&live_bridge_test_mu); defer sync.mutex_unlock(&live_bridge_test_mu)
     bridge_tool_live_init(); defer live_bridge_cleanup()
-    id := "inst_live_bridge"
+    id := "inst_stream_bridge"
     bridge_runtime_mark_start_success(id)
-    listener, le := net.listen_tcp({address = net.IP4_Loopback, port = 0})
-    if le != nil do testing.fail_now(t, "listen")
+    listener, le := net.listen_tcp({address=net.IP4_Loopback, port=0})
+    if le != nil do testing.fail_now(t,"listen")
     defer net.close(listener)
-    bound, _ := net.bound_endpoint(listener)
+    bound,_ := net.bound_endpoint(listener)
     peer, pe := net.dial_tcp(bound)
-    if pe != nil do testing.fail_now(t, "dial")
+    if pe != nil do testing.fail_now(t,"dial")
     defer net.close(peer)
-    sock, _, ae := net.accept_tcp(listener)
-    if ae != nil do testing.fail_now(t, "accept")
+    sock,_,ae := net.accept_tcp(listener)
+    if ae != nil do testing.fail_now(t,"accept")
     defer net.close(sock)
-    conn := ws.Connection{socket = sock, connected = true}
+    conn := ws.Connection{socket=sock,connected=true}
     reader := ws.reader_make(); defer ws.reader_destroy(&reader)
-    bridge_tool_live_drain(&conn, true)
-    for _ in 0..<2 { _, frame, got := ws.read_frame(peer, &reader, time.Second); testing.expect(t, got); delete(frame) }
+    bridge_tool_live_drain(&conn,true)
+    reset := stream_bridge_read(t,peer,&reader)
+    testing.expect_value(t,live.tool_live_text(reset,"type"),"tool_stream_reset")
+    stream_bridge_event(id,"x")
+    bridge_tool_last_flush_ns -= i64(time.Second)
     bridge_tool_live_drain(&conn)
-    _, _, unexpected := ws.read_frame(peer, &reader, 30*time.Millisecond)
-    testing.expect(t, !unexpected, "idle connected path emits no tool-state traffic")
-    ts := action_scheduler_format_rfc3339_utc(bridge_now_unix_ms()+1000)
-    raw := fmt.tprintf(`{{"schema":"ham.ext.v1","provider":"claude","event":"tool.start","ts":"%s","session_id":"s1","tool":{{"name":"Read","use_id":"x"}},"payload":{{}}}`, ts)
-    result := bridge_ext_ingest(Bridge_Local_Agent_Token_Record{agent_instance_id=id, role=.Agent}, raw, bridge_now_unix_ms()); bridge_ext_ingest_result_destroy(&result)
+    _,_,unexpected := ws.read_frame(peer,&reader,20*time.Millisecond)
+    testing.expect(t,!unexpected,"no snapshot traffic without listeners")
+    testing.expect_value(t,len(bridge_tool_tracker.tool_live.entries[id].completed),0)
+    attach := fmt.tprintf(`{{"type":"tool_stream_attach","instance_id":"%s","subscription_id":"token1","run_count":0}}`,id)
+    bridge_tool_live_handle_subscription(&conn,attach)
+    baseline := stream_bridge_read(t,peer,&reader)
+    snap := baseline["snapshot"].(json.Object)
+    testing.expect(t,bool(baseline["baseline"].(json.Boolean)))
+    active := snap["active"].(json.Array)
+    testing.expect_value(t,len(active),1)
+    if len(active)>0 do testing.expect_value(t,live.tool_live_text(active[0].(json.Object),"summary"),"echo example")
+    testing.expect_value(t,len(snap["completed_since_last"].(json.Array)),0)
+    // A revision/notification by itself is not a visible net change, including
+    // when active objects have been reparsed into maps with different ordering.
+    bridge_tool_live_enqueue(nil,id)
+    bridge_tool_last_flush_ns -= i64(time.Second)
     bridge_tool_live_drain(&conn)
-    _, frame, got := ws.read_frame(peer, &reader, time.Second)
-    testing.expect(t, got && strings.contains(frame, "tool_activity_live_snapshot"))
-    testing.expect(t, strings.contains(frame, `"tool_use_id":"x"`)); delete(frame)
-    request := fmt.tprintf(`{{"type":"tool_activity_live_request","request_id":"snap_1","instance_id":"%s"}}`,id)
-    bridge_tool_live_handle_request(&conn, request)
-    _, frame, got = ws.read_frame(peer, &reader, time.Second)
-    testing.expect(t, got && strings.contains(frame, "tool_activity_live_reply"))
-    testing.expect(t, strings.contains(frame, `"tool_use_id":"x"`)); delete(frame)
-    raw, _ = strings.replace(raw, "tool.start", "tool.end", 1, allocator = context.temp_allocator)
-    result = bridge_ext_ingest(Bridge_Local_Agent_Token_Record{agent_instance_id=id, role=.Agent}, raw, bridge_now_unix_ms()); bridge_ext_ingest_result_destroy(&result)
+    _,_,unexpected = ws.read_frame(peer,&reader,20*time.Millisecond)
+    testing.expect(t,!unexpected,"unchanged current state is not resent")
+    stream_bridge_event(id,"x",true)
+    stream_bridge_event(id,"y"); stream_bridge_event(id,"y",true)
+    bridge_tool_last_flush_ns = time.tick_now()._nsec
     bridge_tool_live_drain(&conn)
-    _, frame, got = ws.read_frame(peer, &reader, time.Second)
-    testing.expect(t, got && strings.contains(frame, `"active":[]`))
-    testing.expect(t, strings.contains(frame, "last_completion")); delete(frame)
-    // Hub restart/reconnect does not replay completed calls: snapshot stays empty.
-    bridge_tool_live_drain(&conn, true)
-    for _ in 0..<2 { _, reset, received := ws.read_frame(peer, &reader, time.Second); testing.expect(t, received); delete(reset) }
-    bridge_tool_live_handle_request(&conn, request)
-    _, frame, got = ws.read_frame(peer, &reader, time.Second)
-    testing.expect(t, got && strings.contains(frame, `"active":[]`)); delete(frame)
-    testing.expect_value(t, bridge_tool_dirty_bytes, 0)
-    // Actual launch/relaunch produces an explicit ready/resync hint even on
-    // an otherwise unchanged live socket; UI can release its unavailable fence.
-    bridge_runtime_record_launch(Bridge_Runtime_Launch{agent_instance_id=id})
+    _,_,unexpected = ws.read_frame(peer,&reader,20*time.Millisecond)
+    testing.expect(t,!unexpected,"changes coalesce until a one-second boundary")
+    bridge_tool_last_flush_ns -= i64(time.Second)
     bridge_tool_live_drain(&conn)
-    _, reset, reset_ok := ws.read_frame(peer,&reader,time.Second); delete(reset)
-    _, hint, hint_ok := ws.read_frame(peer,&reader,time.Second)
-    testing.expect(t,reset_ok && hint_ok && strings.contains(hint,"tool_activity_live_resync")); delete(hint)
+    update := stream_bridge_read(t,peer,&reader)
+    snap = update["snapshot"].(json.Object)
+    testing.expect_value(t,len(snap["active"].(json.Array)),0)
+    testing.expect_value(t,len(snap["completed_since_last"].(json.Array)),2)
+    testing.expect_value(t,len(bridge_tool_tracker.tool_live.entries[id].completed),0)
+    // A new baseline is empty-completion, without consuming the next interval.
+    stream_bridge_event(id,"z"); stream_bridge_event(id,"z",true)
+    bridge_tool_live_handle_subscription(&conn,attach)
+    baseline=stream_bridge_read(t,peer,&reader)
+    testing.expect_value(t,len(baseline["snapshot"].(json.Object)["completed_since_last"].(json.Array)),0)
+    bridge_tool_last_flush_ns -= i64(time.Second); bridge_tool_live_drain(&conn)
+    update=stream_bridge_read(t,peer,&reader)
+    testing.expect_value(t,len(update["snapshot"].(json.Object)["completed_since_last"].(json.Array)),1)
+    bridge_tool_last_flush_ns -= i64(time.Second); bridge_tool_live_drain(&conn)
+    _,_,unexpected = ws.read_frame(peer,&reader,20*time.Millisecond)
+    testing.expect(t,!unexpected,"idle does not repeat completed batch or send empty ticks")
+    detach := fmt.tprintf(`{{"type":"tool_stream_detach","instance_id":"%s","subscription_id":"token1"}}`,id)
+    bridge_tool_live_handle_subscription(&conn,detach)
+    testing.expect_value(t,len(bridge_tool_subscriptions),0)
+    stream_bridge_event(id,"absent"); stream_bridge_event(id,"absent",true)
+    testing.expect_value(t,len(bridge_tool_tracker.tool_live.entries[id].completed),0)
+    bridge_tool_last_flush_ns -= i64(time.Second); bridge_tool_live_drain(&conn)
+    _,_,unexpected = ws.read_frame(peer,&reader,20*time.Millisecond)
+    testing.expect(t,!unexpected,"last detach stops upstream snapshots")
+    bridge_tool_live_drain(&conn,true)
+    _=stream_bridge_read(t,peer,&reader)
+    bridge_tool_live_handle_subscription(&conn,attach)
+    baseline=stream_bridge_read(t,peer,&reader)
+    snap=baseline["snapshot"].(json.Object)
+    testing.expect_value(t,len(snap["active"].(json.Array)),0)
+    testing.expect_value(t,len(snap["completed_since_last"].(json.Array)),0)
 }
 @(test)
 test_live_bridge_shell_restart_and_late_exit :: proc(t: ^testing.T) {
+    sync.mutex_lock(&live_bridge_test_mu); defer sync.mutex_unlock(&live_bridge_test_mu)
     bridge_tool_live_init(); defer live_bridge_cleanup()
     id := "inst_live_shell"
     bridge_runtime_mark_start_success(id)
-    row := Bridge_Shell_Session{session_id="sh_live_restart", agent_instance_id=id, kind=.Run, status=.Running}
+    row := Bridge_Shell_Session{session_id="sh_live_restart", agent_instance_id=id, kind=.Run, status=.Running, cmd="printf registered-command"}
     bridge_tool_live_shell(row, true)
     row.run_seq = 1
     bridge_tool_live_shell(row, true, 0)
@@ -88,6 +143,8 @@ test_live_bridge_shell_restart_and_late_exit :: proc(t: ^testing.T) {
     body := live.tool_live_snapshot(&bridge_tool_tracker, inst)
     value, _ := json.parse_string(body,.JSON,true,context.temp_allocator); delete(body)
     testing.expect_value(t,len(value.(json.Object)["active"].(json.Array)),1)
+    active := value.(json.Object)["active"].(json.Array)
+    if len(active)>0 do testing.expect_value(t,live.tool_live_text(active[0].(json.Object),"summary"),row.cmd)
     row.status=.Killed; row.exit_code_set=true; row.exit_code=137
     bridge_tool_live_shell(row,false)
     body=live.tool_live_snapshot(&bridge_tool_tracker, inst)
@@ -96,4 +153,93 @@ test_live_bridge_shell_restart_and_late_exit :: proc(t: ^testing.T) {
     bridge_tool_live_shell(row,true,1)
     body=live.tool_live_snapshot(&bridge_tool_tracker, inst)
     testing.expect(t,strings.contains(body,`"shell_run_seq":2`)); delete(body)
+}
+
+// Uses real frames but advances only the scheduling clock; no 60-second sleeps.
+@(test)
+test_tool_stream_bridge_active_freshness_deadlines :: proc(t: ^testing.T) {
+    sync.mutex_lock(&live_bridge_test_mu); defer sync.mutex_unlock(&live_bridge_test_mu)
+    bridge_tool_live_init(); defer live_bridge_cleanup()
+    id := "inst_stream_freshness"
+    bridge_runtime_mark_start_success(id)
+    listener, le := net.listen_tcp({address=net.IP4_Loopback, port=0})
+    testing.expect(t, le == nil); if le != nil do return
+    defer net.close(listener)
+    bound,_ := net.bound_endpoint(listener)
+    peer, pe := net.dial_tcp(bound)
+    testing.expect(t, pe == nil); if pe != nil do return
+    defer net.close(peer)
+    sock,_,ae := net.accept_tcp(listener)
+    testing.expect(t, ae == nil); if ae != nil do return
+    defer net.close(sock)
+    conn := ws.Connection{socket=sock,connected=true}
+    reader := ws.reader_make(); defer ws.reader_destroy(&reader)
+    stream_bridge_event(id,"long")
+    // An arbitrarily late writer turn with no listeners does not even advance
+    // the flush clock; the early return precedes all snapshot construction.
+    bridge_tool_live_drain_at(&conn, 10 * BRIDGE_TOOL_REFRESH_NS)
+    testing.expect_value(t,bridge_tool_wire_seq,0)
+    testing.expect_value(t,bridge_tool_last_flush_ns,0)
+    attach := fmt.tprintf(`{{"type":"tool_stream_attach","instance_id":"%s","subscription_id":"fresh","run_count":0}}`,id)
+    bridge_tool_live_handle_subscription(&conn,attach)
+    baseline := stream_bridge_read(t,peer,&reader)
+    testing.expect(t,!bool(baseline["refresh"].(json.Boolean)))
+    base := bridge_tool_subscriptions[id].last_emit_ns
+    original := baseline["snapshot"].(json.Object)
+    // A batch turn just before the deadline must not defer the 60s refresh.
+    bridge_tool_last_flush_ns = base
+    bridge_tool_live_drain_at(&conn,base+BRIDGE_TOOL_REFRESH_NS-1)
+    _,_,got := ws.read_frame(peer,&reader,10*time.Millisecond)
+    testing.expect(t,!got,"no refresh before 60s")
+    for cycle in 1..=2 {
+        now := base+i64(cycle)*BRIDGE_TOOL_REFRESH_NS
+        bridge_tool_live_drain_at(&conn,now)
+        update := stream_bridge_read(t,peer,&reader)
+        snap := update["snapshot"].(json.Object)
+        testing.expect(t,bool(update["refresh"].(json.Boolean)))
+        testing.expect(t,!bool(update["baseline"].(json.Boolean)))
+        testing.expect_value(t,snap["revision"].(json.Integer),original["revision"].(json.Integer))
+        testing.expect_value(t,len(snap["active"].(json.Array)),1)
+        testing.expect_value(t,len(snap["completed_since_last"].(json.Array)),0)
+        testing.expect_value(t,bridge_tool_subscriptions[id].last_emit_ns,now)
+        testing.expect(t,update["seq"].(json.Integer)>baseline["seq"].(json.Integer))
+        bridge_tool_live_drain_at(&conn,now)
+        _,_,got = ws.read_frame(peer,&reader,10*time.Millisecond)
+        testing.expect(t,!got,"one refresh per deadline")
+    }
+    // Refresh takes current tracker content, including only newly pending
+    // completions. It does not replay the baseline or previous interval bytes.
+    stream_bridge_event(id,"long",true)
+    stream_bridge_event(id,"next")
+    bridge_tool_live_drain_at(&conn,base+3*BRIDGE_TOOL_REFRESH_NS)
+    update := stream_bridge_read(t,peer,&reader)
+    snap := update["snapshot"].(json.Object)
+    testing.expect_value(t,len(snap["active"].(json.Array)),1)
+    testing.expect(t,strings.contains(live.tool_live_text(snap["active"].(json.Array)[0].(json.Object),"call_id"),"next"))
+    testing.expect_value(t,len(snap["completed_since_last"].(json.Array)),1)
+    bridge_tool_live_drain_at(&conn,base+4*BRIDGE_TOOL_REFRESH_NS)
+    update=stream_bridge_read(t,peer,&reader)
+    testing.expect_value(t,len(update["snapshot"].(json.Object)["completed_since_last"].(json.Array)),0)
+    stream_bridge_event(id,"next",true)
+    bridge_tool_live_drain_at(&conn,base+4*BRIDGE_TOOL_REFRESH_NS+i64(time.Second))
+    update=stream_bridge_read(t,peer,&reader)
+    testing.expect_value(t,len(update["snapshot"].(json.Object)["active"].(json.Array)),0)
+    idle_seq := bridge_tool_wire_seq
+    bridge_tool_live_drain_at(&conn,base+10*BRIDGE_TOOL_REFRESH_NS)
+    testing.expect_value(t,bridge_tool_wire_seq,idle_seq)
+    _,_,got=ws.read_frame(peer,&reader,10*time.Millisecond)
+    testing.expect(t,!got,"idle empty state has no periodic refresh")
+    stream_bridge_event(id,"detached")
+    bridge_tool_live_drain_at(&conn,base+10*BRIDGE_TOOL_REFRESH_NS+i64(time.Second))
+    _=stream_bridge_read(t,peer,&reader)
+    detach := fmt.tprintf(`{{"type":"tool_stream_detach","instance_id":"%s","subscription_id":"fresh"}}`,id)
+    bridge_tool_live_handle_subscription(&conn,detach)
+    testing.expect_value(t,len(bridge_tool_tracker.tool_live.watched),0)
+    stopped_seq := bridge_tool_wire_seq
+    stream_bridge_event(id,"detached",true)
+    testing.expect_value(t,len(bridge_tool_tracker.tool_live.entries[id].completed),0)
+    bridge_tool_live_drain_at(&conn,base+20*BRIDGE_TOOL_REFRESH_NS)
+    testing.expect_value(t,bridge_tool_wire_seq,stopped_seq)
+    _,_,got=ws.read_frame(peer,&reader,10*time.Millisecond)
+    testing.expect(t,!got,"last detach stops refresh")
 }

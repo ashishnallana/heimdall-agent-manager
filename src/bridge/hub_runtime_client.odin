@@ -560,6 +560,7 @@ bridge_hub_set_heartbeat_interval :: proc(seconds: int) {
 BRIDGE_HUB_INBOUND_BUDGET :: 32
 
 bridge_hub_runtime_loop :: proc(conn: ^ws.Connection) {
+	defer bridge_tool_live_disconnect()
 	connection_generation := bridge_command_dispatch_begin_connection()
 	last_heartbeat := time.to_unix_nanoseconds(time.now())
 	// PER-CONNECTION inbound chunk reassembly (REQ-SHELL-36). The hub splits any
@@ -1141,8 +1142,8 @@ bridge_hub_handle_command :: proc(conn: ^ws.Connection, text: string) {
 		bridge_hub_handle_shell_stream_detach(conn, text)
 		return
 	}
-	if type == "tool_activity_live_request" {
-		bridge_tool_live_handle_request(conn, text)
+	if type == "tool_stream_attach" || type == "tool_stream_detach" {
+		bridge_tool_live_handle_subscription(conn, text)
 		return
 	}
 	if type == "shell_start" {

@@ -1,182 +1,92 @@
 import { createSlice, type PayloadAction } from '@reduxjs/toolkit';
 
-// Mounted-view state only: never persist or reconstruct from chat/Activity.
+// Ephemeral mounted-view data only. Never persist or reconstruct from Activity/chat.
 export const LIVE_MEMBER_CAP = 256;
-export type LiveCall = {
+export type ToolSummary = {
   call_id: string; source: 'provider' | 'shell'; tool_name: string;
-  shell_session_id: string; started_at_ms: number;
+  summary: string; summary_truncated: boolean;
+};
+export type LiveCall = ToolSummary & { shell_session_id: string; started_at_ms: number };
+export type LiveCompletion = ToolSummary & {
+  duration_ms: number; completed_at_ms: number; status: string;
 };
 export type LiveSnapshot = {
   type: 'tool_activity_live'; instance_id: string; agent_id: string;
   display_name: string; chain_id: string; bridge_id: string; epoch: string;
-  generation: number; revision: number; active: LiveCall[];
-  last_completion: { duration_ms: number } | null; availability: 'ready';
+  run_count: number; generation: number; revision: number; active: LiveCall[];
+  completed_since_last: LiveCompletion[]; availability: 'ready';
 };
 export type LiveMember = {
-  instance_id: string; agent_id: string; display_name: string;
-  snapshot: LiveSnapshot | null; availability: 'ready' | 'offline';
+  snapshot: LiveSnapshot | null; availability: 'loading' | 'ready' | 'unavailable';
 };
-export type LiveScope = {
-  instanceId: string; chainId: string; refs: number; requestId: string;
-  loading: boolean; error: string; members: Record<string, LiveMember>;
-  pending: Record<string, LiveSnapshot | null>; overflow: boolean;
-  unavailable: Record<string, boolean>;
-};
-export type ToolActivityState = {
-  connected: boolean; refresh: number; scopes: Record<string, LiveScope>;
-};
-const initialState: ToolActivityState = { connected: false, refresh: 0, scopes: {} };
-export const liveScopeKey = (instanceId: string, chainId = '') =>
-  chainId ? 'chain:' + chainId : 'instance:' + instanceId;
-
-function decimalCompare(a: string, b: string): number {
-  a = a.replace(/^0+/, '') || '0';
-  b = b.replace(/^0+/, '') || '0';
-  return a.length === b.length ? (a < b ? -1 : a > b ? 1 : 0) : a.length - b.length;
+export type ToolActivityState = { members: Record<string, LiveMember>; capacityExceeded: boolean };
+const initialState: ToolActivityState = { members: {}, capacityExceeded: false };
+const text = (v: unknown, max: number): v is string => typeof v === 'string' && v.length <= max;
+const count = (v: unknown): v is number => Number.isSafeInteger(v) && Number(v) >= 0;
+export const validInstanceId = (v: unknown): v is string =>
+  text(v, 64) && /^inst_[A-Za-z0-9_-]+$/.test(v);
+const encoder = new TextEncoder();
+function summary(raw: any): ToolSummary | null {
+  if (!text(raw?.call_id, 2048) || !raw.call_id ||
+      !['provider', 'shell'].includes(raw.source) || !text(raw.tool_name, 96) ||
+      !text(raw.summary, 512) || encoder.encode(raw.summary).length > 512 ||
+      typeof raw.summary_truncated !== 'boolean') return null;
+  return { call_id: raw.call_id, source: raw.source, tool_name: raw.tool_name,
+    summary: raw.summary, summary_truncated: raw.summary_truncated };
 }
-export function newerSnapshot(next: LiveSnapshot, prior?: LiveSnapshot | null): boolean {
-  if (!prior) return true;
-  const epoch = decimalCompare(next.epoch, prior.epoch);
-  return epoch > 0 || (epoch === 0 && next.generation >= prior.generation && next.revision > prior.revision);
-}
-
-// Pick only live display data; never retain args, outputs or completion details.
+// Validate bounds before retaining display fields; drop all arbitrary args/results.
 export function parseLiveSnapshot(raw: any): LiveSnapshot | null {
-  const text = (v: unknown, max: number) => typeof v === 'string' && v.length <= max;
-  const id = (v: unknown) => text(v, 64);
-  const count = (v: unknown) => Number.isSafeInteger(v) && Number(v) >= 0;
-  if (raw?.type !== 'tool_activity_live' || !id(raw.instance_id) || !raw.instance_id ||
-      !id(raw.agent_id) || !id(raw.chain_id) || !id(raw.bridge_id) ||
+  if (raw?.type !== 'tool_activity_live' || !validInstanceId(raw.instance_id) ||
+      !text(raw.agent_id, 64) || !text(raw.chain_id, 64) || !text(raw.bridge_id, 64) ||
       !text(raw.display_name, 256) || !text(raw.epoch, 24) || !/^[0-9]+$/.test(raw.epoch) ||
-      !count(raw.generation) || !count(raw.revision) ||
-      !Array.isArray(raw.active) || raw.active.length > 32) return null;
-  const active: LiveCall[] = [];
-  const seen = new Set<string>();
+      !count(raw.run_count) || !count(raw.generation) || raw.generation < 1 || !count(raw.revision) ||
+      raw.availability !== 'ready' || !Array.isArray(raw.active) || raw.active.length > 32 ||
+      !Array.isArray(raw.completed_since_last) || raw.completed_since_last.length > 32) return null;
+  const active: LiveCall[] = [], completed: LiveCompletion[] = [];
   for (const call of raw.active) {
-    if (!text(call?.call_id, 2048) || !call.call_id || seen.has(call.call_id) ||
-        !['provider', 'shell'].includes(call.source) || !text(call.tool_name, 96) ||
-        !id(call.shell_session_id) || !count(call.started_at_ms)) return null;
-    seen.add(call.call_id);
-    active.push({ call_id: call.call_id, source: call.source, tool_name: call.tool_name,
-      shell_session_id: call.shell_session_id, started_at_ms: call.started_at_ms });
+    const item = summary(call);
+    if (!item || active.some((v) => v.call_id === item.call_id) ||
+        !text(call.shell_session_id, 64) || !count(call.started_at_ms)) return null;
+    active.push({ ...item, shell_session_id: call.shell_session_id, started_at_ms: call.started_at_ms });
   }
-  const duration = raw.last_completion?.duration_ms;
-  if (raw.last_completion != null && !count(duration)) return null;
+  for (const call of raw.completed_since_last) {
+    const item = summary(call);
+    if (!item || completed.some((v) => v.call_id === item.call_id) ||
+        !count(call.duration_ms) || !count(call.completed_at_ms) || !text(call.status, 64)) return null;
+    completed.push({ ...item, duration_ms: call.duration_ms,
+      completed_at_ms: call.completed_at_ms, status: call.status });
+  }
   return { type: 'tool_activity_live', instance_id: raw.instance_id, agent_id: raw.agent_id,
     display_name: raw.display_name, chain_id: raw.chain_id, bridge_id: raw.bridge_id,
-    epoch: raw.epoch, generation: raw.generation, revision: raw.revision, active,
-    last_completion: raw.last_completion == null ? null : { duration_ms: duration },
-    availability: 'ready' };
+    epoch: raw.epoch, run_count: raw.run_count, generation: raw.generation, revision: raw.revision,
+    active, completed_since_last: completed, availability: 'ready' };
 }
-function invalidate(scope: LiveScope) {
-  scope.requestId = '';
-  scope.loading = true;
-  scope.error = '';
-  scope.members = {};
-  scope.pending = {};
-  scope.unavailable = {};
-  scope.overflow = false;
+export type ToolOrder = Pick<LiveSnapshot, 'epoch' | 'generation' | 'revision'>;
+export function compareToolOrder(next: ToolOrder, prior: ToolOrder): number {
+  const a = next.epoch.replace(/^0+/, '') || '0', b = prior.epoch.replace(/^0+/, '') || '0';
+  return a.length - b.length || (a < b ? -1 : a > b ? 1 : 0) ||
+    next.generation - prior.generation || next.revision - prior.revision;
 }
 const slice = createSlice({
   name: 'toolActivity', initialState,
   reducers: {
-    liveScopeMounted(state, action: PayloadAction<{ instanceId: string; chainId: string }>) {
-      const { instanceId, chainId } = action.payload;
-      const key = liveScopeKey(instanceId, chainId);
-      if (state.scopes[key]) { state.scopes[key].refs++; return; }
-      state.scopes[key] = { instanceId, chainId, refs: 1, requestId: '', loading: true,
-        error: '', members: {}, pending: {}, unavailable: {}, overflow: false };
-    },
-    liveScopeUnmounted(state, action: PayloadAction<string>) {
-      const scope = state.scopes[action.payload];
-      if (scope && --scope.refs === 0) delete state.scopes[action.payload];
-    },
-    liveStreamReady(state) {
-      state.connected = true;
-      state.refresh++;
-      Object.values(state.scopes).forEach(invalidate);
-    },
-    liveStreamDisconnected(state) {
-      state.connected = false;
-      state.refresh++;
-      Object.values(state.scopes).forEach(invalidate);
-    },
-    liveResyncRequested(state) {
-      state.refresh++;
-      Object.values(state.scopes).forEach(invalidate);
-    },
-    liveSnapshotStarted(state, action: PayloadAction<{ key: string; requestId: string }>) {
-      const scope = state.scopes[action.payload.key];
-      if (!scope || !state.connected) return;
-      scope.requestId = action.payload.requestId;
-      scope.loading = true;
-      scope.error = '';
-    },
-    liveSnapshotLoaded(state, action: PayloadAction<{ key: string; requestId: string; members: LiveMember[] }>) {
-      const scope = state.scopes[action.payload.key];
-      if (!state.connected || !scope || scope.requestId !== action.payload.requestId) return;
-      scope.loading = false;
-      if (scope.overflow) {
-        scope.members = {}; scope.pending = {}; scope.error = 'Live snapshot buffer full';
-        return;
-      }
+    toolMembersSelected(state, action: PayloadAction<string[]>) {
+      state.capacityExceeded = false;
       const members: Record<string, LiveMember> = {};
-      for (const member of action.payload.members) {
-        const id = member.instance_id;
-        const pending = scope.pending[id];
-        let snapshot = member.snapshot;
-        if (member.availability === 'ready' && pending && newerSnapshot(pending, snapshot)) snapshot = pending;
-        if (member.availability === 'offline') scope.unavailable[id] = true;
-        if (scope.unavailable[id]) snapshot = null;
-        members[id] = { ...member, snapshot, availability: snapshot ? 'ready' : 'offline' };
-      }
-      scope.members = members;
-      scope.pending = {};
+      for (const id of action.payload) members[id] = state.members[id] ||
+        { snapshot: null, availability: 'loading' };
+      state.members = members;
     },
-    liveSnapshotFailed(state, action: PayloadAction<{ key: string; requestId: string; error: string }>) {
-      const scope = state.scopes[action.payload.key];
-      if (!scope || scope.requestId !== action.payload.requestId) return;
-      scope.members = {}; scope.pending = {}; scope.loading = false;
-      scope.error = action.payload.error;
+    toolCapacityExceeded(state) { state.members = {}; state.capacityExceeded = true; },
+    toolStateReceived(state, action: PayloadAction<LiveSnapshot>) {
+      const id = action.payload.instance_id;
+      if (state.members[id]) state.members[id] = { snapshot: action.payload, availability: 'ready' };
     },
-    liveFrameReceived(state, action: PayloadAction<LiveSnapshot>) {
-      if (!state.connected) return;
-      const snapshot = action.payload, id = snapshot.instance_id;
-      for (const scope of Object.values(state.scopes)) {
-        if (scope.unavailable[id]) continue;
-        if (scope.loading) {
-          // Buffer latest-only until the authoritative roster is complete.
-          if (!scope.chainId && scope.instanceId !== id) continue;
-          if (!scope.pending[id] && Object.keys(scope.pending).length >= LIVE_MEMBER_CAP) {
-            scope.overflow = true; continue;
-          }
-          if (newerSnapshot(snapshot, scope.pending[id])) scope.pending[id] = snapshot;
-          continue;
-        }
-        const member = scope.members[id];
-        if (member && newerSnapshot(snapshot, member.snapshot)) {
-          member.snapshot = snapshot; member.availability = 'ready';
-        }
-      }
-    },
-    liveInstanceUnavailable(state, action: PayloadAction<string>) {
-      for (const scope of Object.values(state.scopes)) {
-        const id = action.payload;
-        if (!scope.members[id] && !scope.pending[id] && scope.instanceId !== id &&
-            !(scope.chainId && scope.loading)) continue;
-        if (!scope.unavailable[id] && Object.keys(scope.unavailable).length >= LIVE_MEMBER_CAP) {
-          scope.overflow = true; continue;
-        }
-        scope.unavailable[id] = true;
-        delete scope.pending[id];
-        if (scope.members[id]) {
-          scope.members[id].snapshot = null; scope.members[id].availability = 'offline';
-        }
-      }
+    toolMembersUnavailable(state, action: PayloadAction<string[]>) {
+      for (const id of action.payload) if (state.members[id])
+        state.members[id] = { snapshot: null, availability: 'unavailable' };
     },
   },
 });
-export const { liveScopeMounted, liveScopeUnmounted, liveStreamReady, liveStreamDisconnected,
-  liveResyncRequested, liveSnapshotStarted, liveSnapshotLoaded, liveSnapshotFailed,
-  liveFrameReceived, liveInstanceUnavailable } = slice.actions;
+export const { toolMembersSelected, toolStateReceived, toolMembersUnavailable, toolCapacityExceeded } = slice.actions;
 export default slice.reducer;

@@ -207,7 +207,7 @@ bridge_command_dispatch_drop_stale_queue_locked :: proc(queue: ^[dynamic]Bridge_
 // deadline, cost, coalescing, and retry contract.
 bridge_command_spec :: proc(command_type: string) -> (Bridge_Command_Spec, bool) {
 	switch command_type {
-	case "bridge_heartbeat_ack", "provider_catalog_version", "agent_instance_status_ack", "connection_replaced", "protocol_error", "tool_activity_live_request":
+	case "bridge_heartbeat_ack", "provider_catalog_version", "agent_instance_status_ack", "connection_replaced", "protocol_error", "tool_stream_attach", "tool_stream_detach":
 		return Bridge_Command_Spec{priority = .Control, queued = false, timeout_ms = 1000, cost_units = 1}, true
 	// REQ-EA-4: the hub's commit/rollback verdict to an atomic enrollment. Inline on
 	// the reader: a rollback is usually followed at once by the socket closing, and a
