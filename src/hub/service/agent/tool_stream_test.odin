@@ -12,15 +12,15 @@ import iface "odin_test:hub/repository/iface"
 import project_service "odin_test:hub/service/project"
 
 @(private = "file")
-Tool_Stream_Test :: struct { svc: Agent_Service, repo: iface.Agent_Repository, a, b: Tool_Stream_Viewer, run: int, bridge: string, registry: project_service.Bridge_Runtime_Registry }
+Tool_Stream_Test :: struct { svc: Agent_Service, repo: iface.Agent_Repository, a, b: Tool_Stream_Viewer, run: int, bridge, status: string, registry: project_service.Bridge_Runtime_Registry }
 @(private = "file")
 tool_stream_test_init :: proc(f: ^Tool_Stream_Test) {
     heap := runtime.heap_allocator()
-    f.run = 1; f.bridge = "brg_a"
+    f.run = 1; f.bridge = "brg_a"; f.status = "running"
     f.repo = {ctx = f, get_tool_instance = proc(ctx: rawptr, id: string) -> (domain.Agent_Instance, bool, domain.Domain_Error) {
         f := (^Tool_Stream_Test)(ctx)
         return domain.Agent_Instance{agent_instance_id = id, bridge_id = f.bridge, owner_user_id = "owner" if id == "inst_a" else "foreign",
-            run_count = f.run, runtime_status = "running"}, true, {}
+            run_count = f.run, runtime_status = f.status}, true, {}
     }}
     f.svc.agents = &f.repo
     s := &f.svc.tool_live
@@ -266,6 +266,7 @@ test_tool_stream_terminal_unavailable_fences_late_producer :: proc(t: ^testing.T
     r:=f.svc.tool_live.routes["inst_a"]
     late:=strings.clone(tool_stream_test_frame(r.token,revision=9)); defer delete(late)
     tool_stream_test_clear(&f.a); tool_stream_test_clear(&f.b)
+    f.status = "stopped"
     notify_instance_terminal(&f.svc,"inst_a")
     detached_token:=strings.clone(f.svc.tool_live.controls[len(f.svc.tool_live.controls)-1].token)
     defer delete(detached_token)
@@ -284,9 +285,67 @@ test_tool_stream_terminal_unavailable_fences_late_producer :: proc(t: ^testing.T
     notify_instance_terminal(&f.svc,"inst_unrelated")
     testing.expect_value(t,len(f.a.queue),0)
     testing.expect_value(t,len(f.b.queue),0)
+    f.status = "running"
     tool_live_clear(&f.svc,"inst_a")
     testing.expect(t,f.svc.tool_live.controls[len(f.svc.tool_live.controls)-1].attach,"existing ready path requests new baseline")
     testing.expect(t,tool_live_apply_bridge(&f.svc,"brg_a",0,"1000",tool_stream_test_baseline(r.token)))
+}
+
+@(test)
+test_tool_stream_terminal_stays_suspended_across_transport_recovery :: proc(t: ^testing.T) {
+    for status in ([3]string{"stopped", "failed", "unreachable"}) {
+        // Both reconnect and changed-generation same-set subscribe previously
+        // reattached a terminal producer before an agent ready transition.
+        for reconnect in ([2]bool{true, false}) {
+            f: Tool_Stream_Test; tool_stream_test_init(&f)
+            a_generation, _ := tool_stream_test_bridges(&f, t)
+            ids := [1]string{"inst_a"}
+            _ = tool_stream_subscribe(&f.svc, &f.a, ids[:])
+            r := f.svc.tool_live.routes["inst_a"]
+            old_token := strings.clone(r.token)
+            testing.expect(t, tool_live_apply_bridge(&f.svc, "brg_a", a_generation, "1000", tool_stream_test_baseline(old_token)))
+            f.status = status
+            notify_instance_terminal(&f.svc, "inst_a")
+            suspended_token := strings.clone(r.token)
+            tool_stream_test_clear(&f.a)
+            _, generation, accepted := project_service.bridge_runtime_registry_accept_live(&f.registry, "brg_a", false, "", "owner")
+            testing.expect(t, accepted && generation != a_generation)
+            if reconnect {
+                tool_stream_bridge_ready(&f.svc, "brg_a", generation)
+            } else {
+                testing.expect_value(t, tool_stream_subscribe(&f.svc, &f.a, ids[:]), "")
+            }
+            testing.expect(t, r.suspended)
+            testing.expect_value(t, r.token, suspended_token)
+            testing.expect_value(t, r.connection_generation, a_generation)
+            testing.expect_value(t, r.viewers, 1)
+            testing.expect_value(t, len(f.svc.tool_live.controls), 1)
+            testing.expect(t, !f.svc.tool_live.controls[0].attach)
+            testing.expect_value(t, f.svc.tool_live.controls[0].token, old_token)
+            testing.expect_value(t, len(f.a.queue), 1 if reconnect else 2)
+            if !reconnect && len(f.a.queue) > 0 do testing.expect(t, strings.contains(f.a.queue[0].text, `"type":"subscribed"`))
+            if len(f.a.queue) > 0 do testing.expect(t, strings.contains(f.a.queue[len(f.a.queue)-1].text, `"type":"unavailable"`))
+            tool_stream_test_clear(&f.a)
+            testing.expect(t, !tool_live_apply_bridge(&f.svc, "brg_a", generation, "1000", tool_stream_test_baseline(r.token)))
+            testing.expect(t, !tool_live_apply_bridge(&f.svc, "brg_a", a_generation, "1000", tool_stream_test_baseline(old_token)))
+            testing.expect_value(t, len(f.a.queue), 0)
+            // A genuine active/ready transition may now bind the current route.
+            f.status = "running"
+            tool_live_clear(&f.svc, "inst_a")
+            testing.expect(t, !r.suspended)
+            testing.expect_value(t, r.connection_generation, generation)
+            testing.expect_value(t, len(f.svc.tool_live.controls), 2)
+            testing.expect(t, !f.svc.tool_live.controls[0].attach && f.svc.tool_live.controls[1].attach)
+            testing.expect_value(t, f.svc.tool_live.controls[0].token, old_token)
+            testing.expect_value(t, f.svc.tool_live.controls[1].token, r.token)
+            tool_stream_test_clear(&f.a)
+            testing.expect(t, tool_live_apply_bridge(&f.svc, "brg_a", generation, "1000", tool_stream_test_baseline(r.token)))
+            testing.expect_value(t, len(f.a.queue), 1)
+            if len(f.a.queue) > 0 do testing.expect(t, strings.contains(f.a.queue[0].text, `"availability":"ready"`))
+            delete(old_token); delete(suspended_token)
+            tool_stream_test_free(&f)
+        }
+    }
 }
 
 @(test)

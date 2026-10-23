@@ -124,7 +124,9 @@ Unavailable clears only the named instance's displayed state. Hub sends it
 immediately on known Bridge disconnect, terminal/removal facts, or failed
 upstream attach delivery. Terminal/removal detaches and rotates the producer
 token so in-flight old state cannot restore the dead display; it does not
-reattach a dead instance. Repeated loss facts preserve the original token-matched
+reattach a dead instance. Bridge reconnect and subscription reconciliation keep
+terminal repository states suspended; an active/ready transition is required
+before a fresh baseline can restore availability. Repeated loss facts preserve the original token-matched
 detach, including when the last viewer leaves. Controls for a retired producer's
 detach are preserved before a replacement token's controls. Existing ready/configuration/reconnect paths request
 a fresh baseline. Hub process death cannot send a notification; S2's watchdog

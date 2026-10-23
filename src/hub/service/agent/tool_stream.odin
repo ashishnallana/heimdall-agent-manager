@@ -203,6 +203,12 @@ tool_stream_unavailable_locked :: proc(s: ^Tool_Live_Store, r: ^Tool_Stream_Rout
 }
 tool_stream_rebind_locked :: proc(svc: ^Agent_Service, r: ^Tool_Stream_Route, inst: domain.Agent_Instance, connection_generation: int) {
     s := &svc.tool_live
+    // A Bridge reconnect is transport recovery, not an agent ready transition.
+    // Keep the retired producer detached until repository state is active again.
+    if !runtime_expected_active(inst.runtime_status) {
+        tool_stream_suspend_locked(s, r, "instance_changed")
+        return
+    }
     if !r.suspended do tool_stream_control_locked(s, r, false)
     delete(r.bridge, runtime.heap_allocator()); delete(r.token, runtime.heap_allocator())
     r.bridge = strings.clone(inst.bridge_id, runtime.heap_allocator())
@@ -219,6 +225,10 @@ tool_stream_reconcile_locked :: proc(svc: ^Agent_Service, r: ^Tool_Stream_Route,
     if string(inst.owner_user_id) != r.owner {
         tool_stream_suspend_locked(s, r, "instance_changed")
         return false
+    }
+    if !runtime_expected_active(inst.runtime_status) {
+        tool_stream_suspend_locked(s, r, "instance_changed")
+        return true // Still authorized to listen for a future ready baseline.
     }
     generation := r.connection_generation
     if svc.bridge_runtime_registry != nil do generation = project_service.bridge_runtime_registry_generation(svc.bridge_runtime_registry, inst.bridge_id)
