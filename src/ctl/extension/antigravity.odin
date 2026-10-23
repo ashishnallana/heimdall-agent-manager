@@ -71,6 +71,64 @@ antigravity_is_destructive :: proc(tool_name: string) -> bool {
 	return false
 }
 
+Antigravity_Subagent_Target :: struct {
+	role:  string,
+	type:  string,
+	model: string,
+}
+
+antigravity_extract_subagents :: proc(args_val: json.Value) -> []Antigravity_Subagent_Target {
+	if args_val == nil do return nil
+	out := make([dynamic]Antigravity_Subagent_Target)
+	#partial switch v in args_val {
+	case json.Object:
+		sub_arr := json_get_array(v, "Subagents")
+		if sub_arr == nil do sub_arr = json_get_array(v, "subagents")
+		if sub_arr != nil {
+			for item in sub_arr {
+				if item_obj, ok := item.(json.Object); ok {
+					role := json_get_string(item_obj, "Role")
+					if role == "" do role = json_get_string(item_obj, "role")
+					type_name := json_get_string(item_obj, "TypeName")
+					if type_name == "" do type_name = json_get_string(item_obj, "typeName")
+					if type_name == "" do type_name = json_get_string(item_obj, "type_name")
+					if type_name == "" do type_name = json_get_string(item_obj, "type")
+					model := json_get_string(item_obj, "Model")
+					if model == "" do model = json_get_string(item_obj, "model")
+					append(&out, Antigravity_Subagent_Target{role = role, type = type_name, model = model})
+				}
+			}
+		} else {
+			role := json_get_string(v, "Role")
+			if role == "" do role = json_get_string(v, "role")
+			type_name := json_get_string(v, "TypeName")
+			if type_name == "" do type_name = json_get_string(v, "typeName")
+			if type_name == "" do type_name = json_get_string(v, "type_name")
+			if type_name == "" do type_name = json_get_string(v, "type")
+			model := json_get_string(v, "Model")
+			if model == "" do model = json_get_string(v, "model")
+			if role != "" || type_name != "" || model != "" {
+				append(&out, Antigravity_Subagent_Target{role = role, type = type_name, model = model})
+			}
+		}
+	case json.Array:
+		for item in v {
+			if item_obj, ok := item.(json.Object); ok {
+				role := json_get_string(item_obj, "Role")
+				if role == "" do role = json_get_string(item_obj, "role")
+				type_name := json_get_string(item_obj, "TypeName")
+				if type_name == "" do type_name = json_get_string(item_obj, "typeName")
+				if type_name == "" do type_name = json_get_string(item_obj, "type_name")
+				if type_name == "" do type_name = json_get_string(item_obj, "type")
+				model := json_get_string(item_obj, "Model")
+				if model == "" do model = json_get_string(item_obj, "model")
+				append(&out, Antigravity_Subagent_Target{role = role, type = type_name, model = model})
+			}
+		}
+	}
+	return out[:]
+}
+
 // antigravity_map_hook maps one Antigravity hook payload to ham.ext.v1 events.
 antigravity_map_hook :: proc(raw: string, ts: string, permission_timeout_ms := 0, permission_blocker_id := "") -> (out: Antigravity_Mapped, err: Antigravity_Error) {
 	if len(raw) > ANTIGRAVITY_HOOK_INPUT_MAX do return out, .Too_Large
@@ -143,7 +201,7 @@ antigravity_map_hook :: proc(raw: string, ts: string, permission_timeout_ms := 0
 
 	tool_use_id := json_get_string(root, "tool_use_id")
 	if tool_use_id == "" do tool_use_id = json_get_string(root, "toolUseId")
-	if tool_use_id == "" && step_idx > 0 {
+	if tool_use_id == "" {
 		tool_use_id = fmt.tprintf("step_%d", step_idx)
 	}
 
@@ -215,6 +273,22 @@ antigravity_map_hook :: proc(raw: string, ts: string, permission_timeout_ms := 0
 			eb := ext_event_begin("tool.start", ts, root, ANTIGRAVITY_PROVIDER, ANTIGRAVITY_EXT_VERSION)
 			ext_event_tool(&eb, root, input, nil)
 			append(&out.events, ext_event_end(&eb, pb_done(&p)))
+
+			if tool_name == "invoke_subagent" || tool_name == "invokeSubagent" || tool_name == "InvokeSubagent" {
+				subagents := antigravity_extract_subagents(tool_args)
+				for sub in subagents {
+					sub_p := pb_make()
+					pb_str_nonempty(&sub_p, "role", sub.role)
+					pb_str_nonempty(&sub_p, "target_role", sub.role)
+					pb_str_nonempty(&sub_p, "type", sub.type)
+					pb_str_nonempty(&sub_p, "target_type", sub.type)
+					pb_str_nonempty(&sub_p, "model", sub.model)
+					pb_str_nonempty(&sub_p, "target_model", sub.model)
+					pb_str_nonempty(&sub_p, "description", sub.role)
+					sub_eb := ext_event_begin("subagent.start", ts, root, ANTIGRAVITY_PROVIDER, ANTIGRAVITY_EXT_VERSION)
+					append(&out.events, ext_event_end(&sub_eb, pb_done(&sub_p)))
+				}
+			}
 		}
 
 	case .Permission_Request:
@@ -246,11 +320,25 @@ antigravity_map_hook :: proc(raw: string, ts: string, permission_timeout_ms := 0
 		if err_str == "" && tool_resp != nil {
 			if tro, ok := tool_resp.(json.Object); ok do err_str = json_get_string(tro, "error")
 		}
+
+		status_str := ""
 		if err_str != "" {
-			pb_str(&p, "status", "error")
+			status_str = "error"
+		} else if tool_resp != nil {
+			if tro, ok := tool_resp.(json.Object); ok {
+				if s := json_get_string(tro, "status"); s != "" {
+					if strings.equal_fold(s, "error") || strings.equal_fold(s, "failed") {
+						status_str = "error"
+					}
+				}
+			}
+		}
+		if status_str == "" do status_str = "completed"
+
+		pb_str(&p, "status", status_str)
+		if status_str == "error" {
 			pb_str_nonempty(&p, "error", clip_string(err_str, ANTIGRAVITY_MESSAGE_MAX))
 		} else {
-			pb_str(&p, "status", "completed")
 			pb_str(&p, "outcome", "unknown")
 		}
 		if d, ok := json_get_int(root, "durationMs"); ok do pb_int(&p, "duration_ms", d)
@@ -258,6 +346,12 @@ antigravity_map_hook :: proc(raw: string, ts: string, permission_timeout_ms := 0
 		eb := ext_event_begin("tool.end", ts, root, ANTIGRAVITY_PROVIDER, ANTIGRAVITY_EXT_VERSION)
 		ext_event_tool(&eb, root, input, response)
 		append(&out.events, ext_event_end(&eb, pb_done(&p)))
+
+		if status_str != "error" {
+			if ev, ok := antigravity_file_edit_event(root, ts); ok {
+				append(&out.events, ev)
+			}
+		}
 
 	case .Stop:
 		term_reason := json_get_string(root, "terminationReason")

@@ -335,3 +335,230 @@ test_antigravity_fail_open_without_env :: proc(t: ^testing.T) {
 	testing.expect_value(t, out, "")
 	testing.expect_value(t, agy_fake_calls, 0)
 }
+
+@(test)
+test_antigravity_pre_tool_use_step_idx_generates_tool_use_id :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+
+	raw := `{"hookEventName":"PreToolUse","conversationId":"s1","stepIdx":7,"toolCall":{"name":"run_command","args":{"CommandLine":"ls -la"}}}`
+	mapped, err := antigravity_map_hook(raw, TS)
+	testing.expect_value(t, err, Antigravity_Error.None)
+	testing.expect_value(t, len(mapped.events), 1)
+	if len(mapped.events) != 1 do return
+
+	ev, e := contracts.ext_parse_event(mapped.events[0])
+	testing.expect_value(t, e, contracts.Ext_Error.None)
+	testing.expect_value(t, ev.kind, contracts.Ext_Event_Kind.Tool_Start)
+	testing.expect_value(t, ev.tool_name, "run_command")
+	testing.expect_value(t, ev.tool_use_id, "step_7")
+
+	// Test step_idx = 0
+	raw0 := `{"hookEventName":"PreToolUse","conversationId":"s1","stepIdx":0,"toolCall":{"name":"view_file"}}`
+	mapped0, err0 := antigravity_map_hook(raw0, TS)
+	testing.expect_value(t, err0, Antigravity_Error.None)
+	if len(mapped0.events) == 1 {
+		ev0, _ := contracts.ext_parse_event(mapped0.events[0])
+		testing.expect_value(t, ev0.tool_use_id, "step_0")
+	}
+}
+
+@(test)
+test_antigravity_invoke_subagent_emits_subagent_start :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+
+	raw := `{"hookEventName":"PreToolUse","conversationId":"s1","stepIdx":3,"toolCall":{"name":"invoke_subagent","args":{"Subagents":[{"Role":"Codebase Researcher","TypeName":"research","Model":"flash","Prompt":"Search code"}]}}}`
+	mapped, err := antigravity_map_hook(raw, TS)
+	testing.expect_value(t, err, Antigravity_Error.None)
+	testing.expect_value(t, len(mapped.events), 2)
+	if len(mapped.events) != 2 do return
+
+	// First event: tool.start for invoke_subagent
+	ev0, e0 := contracts.ext_parse_event(mapped.events[0])
+	testing.expect_value(t, e0, contracts.Ext_Error.None)
+	testing.expect_value(t, ev0.kind, contracts.Ext_Event_Kind.Tool_Start)
+	testing.expect_value(t, ev0.tool_name, "invoke_subagent")
+	testing.expect_value(t, ev0.tool_use_id, "step_3")
+
+	// Second event: subagent.start with target role, type, and model
+	ev1, e1 := contracts.ext_parse_event(mapped.events[1])
+	testing.expect_value(t, e1, contracts.Ext_Error.None)
+	testing.expect_value(t, ev1.kind, contracts.Ext_Event_Kind.Subagent_Start)
+
+	v1, _ := json.parse_string(mapped.events[1], json.DEFAULT_SPECIFICATION, true)
+	o1, _ := v1.(json.Object)
+	p1 := json_get_object(o1, "payload")
+	testing.expect_value(t, json_get_string(p1, "role"), "Codebase Researcher")
+	testing.expect_value(t, json_get_string(p1, "type"), "research")
+	testing.expect_value(t, json_get_string(p1, "model"), "flash")
+
+	// Multiple subagents in one call
+	raw_multi := `{"hookEventName":"PreToolUse","conversationId":"s1","stepIdx":4,"toolCall":{"name":"invoke_subagent","args":{"subagents":[{"role":"Worker A","type":"worker","model":"pro"},{"role":"Worker B","type":"tester","model":"flash_lite"}]}}}`
+	mapped_m, err_m := antigravity_map_hook(raw_multi, TS)
+	testing.expect_value(t, err_m, Antigravity_Error.None)
+	testing.expect_value(t, len(mapped_m.events), 3) // tool.start + 2 subagent.start
+	if len(mapped_m.events) == 3 {
+		ev_sub1, _ := contracts.ext_parse_event(mapped_m.events[1])
+		ev_sub2, _ := contracts.ext_parse_event(mapped_m.events[2])
+		testing.expect_value(t, ev_sub1.kind, contracts.Ext_Event_Kind.Subagent_Start)
+		testing.expect_value(t, ev_sub2.kind, contracts.Ext_Event_Kind.Subagent_Start)
+
+		vm1, _ := json.parse_string(mapped_m.events[1], json.DEFAULT_SPECIFICATION, true)
+		pm1 := json_get_object(vm1.(json.Object), "payload")
+		testing.expect_value(t, json_get_string(pm1, "role"), "Worker A")
+		testing.expect_value(t, json_get_string(pm1, "type"), "worker")
+		testing.expect_value(t, json_get_string(pm1, "model"), "pro")
+
+		vm2, _ := json.parse_string(mapped_m.events[2], json.DEFAULT_SPECIFICATION, true)
+		pm2 := json_get_object(vm2.(json.Object), "payload")
+		testing.expect_value(t, json_get_string(pm2, "role"), "Worker B")
+		testing.expect_value(t, json_get_string(pm2, "type"), "tester")
+		testing.expect_value(t, json_get_string(pm2, "model"), "flash_lite")
+	}
+}
+
+@(test)
+test_antigravity_write_to_file_generates_file_edit_diff :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+
+	raw := `{"hookEventName":"PostToolUse","conversationId":"s1","stepIdx":5,"cwd":"/home/tanmay/heimdall-agent-manager","toolCall":{"name":"write_to_file","args":{"TargetFile":"/home/tanmay/heimdall-agent-manager/src/hello.odin","CodeContent":"package main\n\nmain :: proc() {}\n"}},"toolResult":{"output":"Created file"}}`
+	mapped, err := antigravity_map_hook(raw, TS)
+	testing.expect_value(t, err, Antigravity_Error.None)
+	testing.expect_value(t, len(mapped.events), 2)
+	if len(mapped.events) != 2 do return
+
+	// Event 0: tool.end
+	ev0, e0 := contracts.ext_parse_event(mapped.events[0])
+	testing.expect_value(t, e0, contracts.Ext_Error.None)
+	testing.expect_value(t, ev0.kind, contracts.Ext_Event_Kind.Tool_End)
+	testing.expect_value(t, ev0.tool_use_id, "step_5")
+
+	// Event 1: file.edit
+	ev1, e1 := contracts.ext_parse_event(mapped.events[1])
+	testing.expect_value(t, e1, contracts.Ext_Error.None)
+	testing.expect_value(t, ev1.kind, contracts.Ext_Event_Kind.File_Edit)
+	testing.expect_value(t, ev1.file_path, "/home/tanmay/heimdall-agent-manager/src/hello.odin")
+
+	v1, _ := json.parse_string(mapped.events[1], json.DEFAULT_SPECIFICATION, true)
+	p1 := json_get_object(v1.(json.Object), "payload")
+	testing.expect_value(t, json_get_string(p1, "operation"), "create")
+	testing.expect_value(t, json_get_string(p1, "diff_source"), "content")
+	expected_diff := "--- /dev/null\n+++ b/src/hello.odin\n@@ -0,0 +1,3 @@\n+package main\n+\n+main :: proc() {}\n"
+	testing.expect_value(t, json_get_string(p1, "diff"), expected_diff)
+	adds, _ := json_get_int(p1, "additions")
+	dels, _ := json_get_int(p1, "deletions")
+	testing.expect_value(t, adds, 3)
+	testing.expect_value(t, dels, 0)
+
+	// Append flag sets operation = "append"
+	raw_append := `{"hookEventName":"PostToolUse","conversationId":"s1","stepIdx":6,"cwd":"/home/tanmay/heimdall-agent-manager","toolCall":{"name":"write_to_file","args":{"TargetFile":"/home/tanmay/heimdall-agent-manager/src/hello.odin","CodeContent":"// trailing\n","Append":true}},"toolResult":{"output":"Appended"}}`
+	mapped_app, _ := antigravity_map_hook(raw_append, TS)
+	if len(mapped_app.events) == 2 {
+		v_app, _ := json.parse_string(mapped_app.events[1], json.DEFAULT_SPECIFICATION, true)
+		p_app := json_get_object(v_app.(json.Object), "payload")
+		testing.expect_value(t, json_get_string(p_app, "operation"), "append")
+	}
+
+	// Overwrite flag sets operation = "update"
+	raw_ov := `{"hookEventName":"PostToolUse","conversationId":"s1","stepIdx":7,"cwd":"/home/tanmay/heimdall-agent-manager","toolCall":{"name":"write_to_file","args":{"TargetFile":"/home/tanmay/heimdall-agent-manager/src/hello.odin","CodeContent":"package main\n","Overwrite":true}},"toolResult":{"output":"Overwritten"}}`
+	mapped_ov, _ := antigravity_map_hook(raw_ov, TS)
+	if len(mapped_ov.events) == 2 {
+		v_ov, _ := json.parse_string(mapped_ov.events[1], json.DEFAULT_SPECIFICATION, true)
+		p_ov := json_get_object(v_ov.(json.Object), "payload")
+		testing.expect_value(t, json_get_string(p_ov, "operation"), "update")
+	}
+}
+
+@(test)
+test_antigravity_replace_file_content_generates_file_edit_diff :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+
+	raw := `{"hookEventName":"PostToolUse","conversationId":"s1","stepIdx":8,"cwd":"/home/tanmay/heimdall-agent-manager","toolCall":{"name":"replace_file_content","args":{"TargetFile":"/home/tanmay/heimdall-agent-manager/src/foo.odin","TargetContent":"var count = 0\n","ReplacementContent":"var count = 100\n","StartLine":12,"EndLine":12}},"toolResult":{"output":"Replaced"}}`
+	mapped, err := antigravity_map_hook(raw, TS)
+	testing.expect_value(t, err, Antigravity_Error.None)
+	testing.expect_value(t, len(mapped.events), 2)
+	if len(mapped.events) != 2 do return
+
+	ev1, e1 := contracts.ext_parse_event(mapped.events[1])
+	testing.expect_value(t, e1, contracts.Ext_Error.None)
+	testing.expect_value(t, ev1.kind, contracts.Ext_Event_Kind.File_Edit)
+	testing.expect_value(t, ev1.file_path, "/home/tanmay/heimdall-agent-manager/src/foo.odin")
+
+	v1, _ := json.parse_string(mapped.events[1], json.DEFAULT_SPECIFICATION, true)
+	p1 := json_get_object(v1.(json.Object), "payload")
+	testing.expect_value(t, json_get_string(p1, "operation"), "edit")
+	testing.expect_value(t, json_get_string(p1, "diff_source"), "strings")
+	expected_diff := "--- a/src/foo.odin\n+++ b/src/foo.odin\n@@ -12,1 +12,1 @@\n-var count = 0\n+var count = 100\n"
+	testing.expect_value(t, json_get_string(p1, "diff"), expected_diff)
+	adds, _ := json_get_int(p1, "additions")
+	dels, _ := json_get_int(p1, "deletions")
+	testing.expect_value(t, adds, 1)
+	testing.expect_value(t, dels, 1)
+}
+
+@(test)
+test_antigravity_diff_truncation_capped_at_64kb :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+
+	// Create 70KB text
+	line := "abcdefghijklmnopqrstuvwxyz0123456789\\n" // 38 bytes
+	repeat_count := (70 * 1024) / len(line) + 1
+	huge_content := strings.repeat(line, repeat_count)
+
+	tb := strings.builder_make()
+	strings.write_string(&tb, `{"hookEventName":"PostToolUse","conversationId":"s1","stepIdx":9,"cwd":"/home/tanmay/heimdall-agent-manager","toolCall":{"name":"write_to_file","args":{"TargetFile":"/home/tanmay/heimdall-agent-manager/huge.txt","CodeContent":"`)
+	strings.write_string(&tb, huge_content)
+	strings.write_string(&tb, `"}}}`)
+
+	mapped, err := antigravity_map_hook(strings.to_string(tb), TS)
+	testing.expect_value(t, err, Antigravity_Error.None)
+	testing.expect_value(t, len(mapped.events), 2)
+	if len(mapped.events) != 2 do return
+
+	v1, _ := json.parse_string(mapped.events[1], json.DEFAULT_SPECIFICATION, true)
+	p1 := json_get_object(v1.(json.Object), "payload")
+	testing.expect_value(t, json_get_bool(p1, "diff_truncated"), true)
+	diff_str := json_get_string(p1, "diff")
+	testing.expect(t, strings.has_suffix(diff_str, contracts.EXT_TRUNCATED_MARKER))
+	testing.expect(t, len(diff_str) <= contracts.EXT_DIFF_MAX_BYTES + len(contracts.EXT_TRUNCATED_MARKER))
+}
+
+@(test)
+test_antigravity_diff_binary_handling :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+
+	// Binary file with NUL byte
+	raw := "{\"hookEventName\":\"PostToolUse\",\"conversationId\":\"s1\",\"stepIdx\":10,\"toolCall\":{\"name\":\"write_to_file\",\"args\":{\"TargetFile\":\"/tmp/bin\",\"CodeContent\":\"hello\\u0000world\"}}}"
+	mapped, err := antigravity_map_hook(raw, TS)
+	testing.expect_value(t, err, Antigravity_Error.None)
+	testing.expect_value(t, len(mapped.events), 2)
+	if len(mapped.events) == 2 {
+		v, _ := json.parse_string(mapped.events[1], json.DEFAULT_SPECIFICATION, true)
+		p := json_get_object(v.(json.Object), "payload")
+		testing.expect_value(t, json_get_bool(p, "binary"), true)
+		testing.expect_value(t, json_get_string(p, "diff"), "")
+	}
+}
+
+@(test)
+test_antigravity_failed_file_edit_omits_file_edit_event :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+
+	raw := `{"hookEventName":"PostToolUse","conversationId":"s1","stepIdx":11,"toolCall":{"name":"write_to_file","args":{"TargetFile":"/root/forbidden.txt","CodeContent":"secrets"}},"error":"Permission denied"}`
+	mapped, err := antigravity_map_hook(raw, TS)
+	testing.expect_value(t, err, Antigravity_Error.None)
+	testing.expect_value(t, len(mapped.events), 1) // Only tool.end, no file.edit!
+	if len(mapped.events) == 1 {
+		ev, _ := contracts.ext_parse_event(mapped.events[0])
+		testing.expect_value(t, ev.kind, contracts.Ext_Event_Kind.Tool_End)
+		v, _ := json.parse_string(mapped.events[0], json.DEFAULT_SPECIFICATION, true)
+		p := json_get_object(v.(json.Object), "payload")
+		testing.expect_value(t, json_get_string(p, "status"), "error")
+	}
+}

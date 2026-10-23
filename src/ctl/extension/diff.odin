@@ -148,7 +148,6 @@ Diff_String_Edit :: struct {
 // original is known and contains old_string, the hunk is widened to whole lines
 // and anchored at its real line number; otherwise it starts at line 1 and shows
 // the bare strings.
-@(private = "file")
 diff_string_edit_hunk :: proc(original: string, e: Diff_String_Edit) -> (h: Diff_Hunk) {
 	old_text, new_text := e.old_string, e.new_string
 	start := 1

@@ -473,7 +473,9 @@ test_hook_run_permission_prints_decision :: proc(t: ^testing.T) {
 	testing.expect_value(t, hook_run("claude", raw, ENV, fake_send), "")
 
 	fake_reset("", false)
-	testing.expect_value(t, hook_run("claude", raw, ENV, fake_send), "")
+	env_fail := ENV
+	env_fail.permission_timeout_ms = 1_000
+	testing.expect_value(t, hook_run("claude", raw, env_fail, fake_send), "")
 
 	// A lowered relay timeout travels with the request and shortens the socket wait.
 	fake_reset(`{"ok":true,"data":{"decision":"none"}}`, true)
