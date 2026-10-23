@@ -1,5 +1,6 @@
 package shell_session
 
+import "base:runtime"
 import "core:net"
 import "core:strings"
 import "core:sync"
@@ -173,6 +174,46 @@ test_pane_multiple_bridges_sustain_output_without_queue_growth :: proc(t: ^testi
 }
 
 @(test)
+test_pane_resync_missing_session_is_noop :: proc(t: ^testing.T) {
+	svc := new_shell_session_service()
+	defer shell_session_service_free(&svc)
+	shell_session_resync_viewers(&svc, "missing")
+	shell_session_resync_viewers(&svc, "missing", "bridge")
+	testing.expect_value(t, len(svc.viewers), 0)
+	testing.expect_value(t, len(svc.session_bridges), 0)
+	testing.expect_value(t, len(svc.viewer_writers), 0)
+}
+
+@(test)
+test_pane_resync_known_session_without_viewers_is_noop :: proc(t: ^testing.T) {
+	svc := new_shell_session_service()
+	defer shell_session_service_free(&svc)
+	heap := runtime.heap_allocator()
+	svc.session_bridges[strings.clone("pane", heap)] = strings.clone("bridge", heap)
+	shell_session_resync_viewers(&svc, "pane", "bridge")
+	shell_session_resync_viewers(&svc, "pane")
+	testing.expect_value(t, len(svc.viewers), 0)
+	testing.expect_value(t, svc.session_bridges["pane"], "bridge")
+	testing.expect_value(t, len(svc.viewer_writers), 0)
+}
+
+@(test)
+test_pane_resync_empty_viewers_is_noop :: proc(t: ^testing.T) {
+	svc := new_shell_session_service()
+	defer shell_session_service_free(&svc)
+	heap := runtime.heap_allocator()
+	svc.session_bridges[strings.clone("pane", heap)] = strings.clone("bridge", heap)
+	svc.viewers[strings.clone("pane", heap)] = make([dynamic]net.TCP_Socket, heap)
+	shell_session_resync_viewers(&svc, "pane", "bridge")
+	shell_session_resync_viewers(&svc, "pane")
+	viewers, exists := svc.viewers["pane"]
+	testing.expect(t, exists)
+	testing.expect_value(t, len(viewers), 0)
+	testing.expect_value(t, svc.session_bridges["pane"], "bridge")
+	testing.expect_value(t, len(svc.viewer_writers), 0)
+}
+
+@(test)
 test_pane_resync_is_scoped_to_its_bridge :: proc(t: ^testing.T) {
 	pair := pane_test_pair(t)
 	defer net.close(pair.hub)
@@ -191,6 +232,15 @@ test_pane_resync_is_scoped_to_its_bridge :: proc(t: ^testing.T) {
 	testing.expect(t, !strings.contains(text, "from-B"))
 	shell_session_resync_viewers(&svc, "pane", "bridgeA")
 	testing.expect_value(t, shell_session_viewer_count(&svc, "pane"), 0)
+	sync.mutex_lock(&svc.mu)
+	w := svc.viewer_writers[pair.hub]
+	sync.mutex_lock(&w.mu)
+	testing.expect(t, w.stopped, "matching resync must stop the registered writer")
+	sync.mutex_unlock(&w.mu)
+	sync.mutex_unlock(&svc.mu)
+	buf: [1]byte
+	n, err := net.recv_tcp(pair.peer, buf[:])
+	testing.expect(t, err == nil && n == 0, "matching resync must shut down the viewer socket")
 }
 
 @(test)

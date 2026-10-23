@@ -233,7 +233,9 @@ shell_session_resync_viewers :: proc(svc: ^Shell_Session_Service, session_id: st
 	sync.mutex_lock(&svc.mu)
 	defer sync.mutex_unlock(&svc.mu)
 	if bridge_id != "" && svc.session_bridges[session_id] != bridge_id do return
-	for socket in svc.viewers[session_id] {
+	viewers, exists := svc.viewers[session_id]
+	if !exists do return
+	for socket in viewers {
 		w := svc.viewer_writers[socket]
 		if w == nil do continue
 		sync.mutex_lock(&w.mu)
