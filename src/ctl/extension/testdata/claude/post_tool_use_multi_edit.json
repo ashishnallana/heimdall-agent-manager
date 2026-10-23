@@ -1,0 +1,20 @@
+{
+ "session_id": "cf4b17bd-aa1d-4d65-8f7d-63529dbb8b9f",
+ "transcript_path": "/home/dev/.claude/projects/-home-dev--cache-heimdall-spike-work/cf4b17bd-aa1d-4d65-8f7d-63529dbb8b9f.jsonl",
+ "cwd": "/home/dev/.cache/heimdall-spike/work",
+ "hook_event_name": "PostToolUse",
+ "tool_name": "MultiEdit",
+ "tool_input": {
+  "file_path": "/home/dev/.cache/heimdall-spike/work/a.txt",
+  "edits": [
+   {"old_string": "line one", "new_string": "line 1"},
+   {"old_string": "three", "new_string": "3"}
+  ]
+ },
+ "tool_response": {
+  "filePath": "/home/dev/.cache/heimdall-spike/work/a.txt",
+  "originalFile": "line one\nline two\nline three\n"
+ },
+ "tool_use_id": "toolu_01MULTImultiMULTI0000001",
+ "duration_ms": 12
+}

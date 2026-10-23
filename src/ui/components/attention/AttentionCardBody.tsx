@@ -1,6 +1,7 @@
 import { Icon } from '@ui';
 import { DecryptedMarkdown, VaultText } from '../vault';
 import type { AttentionItem, AttentionMemoryItem, AttentionMessageItem, AttentionTaskItem } from '../../api/endpoints/attention';
+import { AgentBlockerBody } from './AgentBlockerCard';
 import { PRIORITY_LABELS, SCOPE_ROWS, TASK_BADGE_LABELS, expiryLine, formatAge, memoryTypePhrase, reasonLine, urgencyClass } from './attentionModel';
 
 /**
@@ -12,13 +13,13 @@ import { PRIORITY_LABELS, SCOPE_ROWS, TASK_BADGE_LABELS, expiryLine, formatAge, 
  */
 export function AttentionCardBody({ item, now, children }: { item: AttentionItem; now: number; children?: React.ReactNode }) {
   return (
-    <article data-debug-id={`attention-card-${item.kind}`} aria-label={item.kind === 'task' ? (item.details.attention === 'blocked' ? 'Task blocked on you' : 'Task waiting on your review') : item.kind === 'memory' ? 'Memory proposal' : 'Agent question'} className="flex h-full min-h-0 flex-col">
+    <article data-debug-id={`attention-card-${item.kind}`} aria-label={item.kind === 'task' ? (item.details.attention === 'blocked' ? 'Task blocked on you' : 'Task waiting on your review') : item.kind === 'memory' ? 'Memory proposal' : item.kind === 'agent_blocker' ? 'Agent needs your permission' : 'Agent question'} className="flex h-full min-h-0 flex-col">
       <p data-debug-id="attention-card-reason" className={`text-[13px] font-semibold ${urgencyClass(item.urgency)}`}>
         {reasonLine(item, now)}
       </p>
       {item.kind === 'memory' ? <MemoryHeading item={item} /> : (
       <p data-debug-id="attention-card-source" className="mt-1 flex min-w-0 items-center gap-1.5 text-[12px] text-muted">
-        <Icon name={item.kind === 'task' ? 'tasks' : 'chat'} size={14} />
+        <Icon name={item.kind === 'task' ? 'tasks' : item.kind === 'agent_blocker' ? 'bot' : 'chat'} size={14} />
         {item.context.chain_title ? <VaultText value={item.context.chain_title} className="truncate" /> : null}
         {item.context.chain_title && item.context.agent_name ? <span aria-hidden="true" className="text-faint">›</span> : null}
         {item.context.agent_name ? <span className="truncate">{item.context.agent_name}</span> : null}
@@ -27,7 +28,10 @@ export function AttentionCardBody({ item, now, children }: { item: AttentionItem
       {/* touch-pan-y: this is its own scroll container, so it must also leave
           horizontal gestures to the deck's swipe (or the browser claims them). */}
       <div className="mt-3 min-h-0 flex-1 touch-pan-y overflow-y-auto pr-1">
-        {item.kind === 'task' ? <TaskBody item={item} now={now} /> : item.kind === 'memory' ? <MemoryBody item={item} now={now} /> : <MessageBody item={item} now={now} />}
+        {item.kind === 'task' ? <TaskBody item={item} now={now} />
+          : item.kind === 'memory' ? <MemoryBody item={item} now={now} />
+          : item.kind === 'agent_blocker' ? <AgentBlockerBody item={item} />
+          : <MessageBody item={item} now={now} />}
         {children}
       </div>
     </article>

@@ -1,4 +1,5 @@
 import { cookieJsonFetch, cookieMutation } from '../../api/cookieFetch';
+import { normalizeProviderExtension, type ProviderExtensionStatus } from '../extension/extensionBadgeModel';
 
 export type DiscoveryState = 'idle' | 'running' | 'complete' | 'failed';
 export type DetectionState = 'absent' | 'present';
@@ -10,6 +11,8 @@ export interface BridgeProviderStatus {
   display_name: string; icon_url: string; catalog_state: 'active' | 'deprecated';
   state: DetectionState; binary_path: string; version_text: string; checked_at: string | null;
   enabled: boolean; models: ProviderModelStatus[];
+  /** REQ-EXT-DET-1/2: the bridge's probe of the provider's Heimdall extension; null = provider has none. */
+  extension: ProviderExtensionStatus | null;
 }
 export interface ProviderSetupResponse {
   bridge: { bridge_id: string; label: string; machine_hostname: string; status: 'online' | 'offline' };
@@ -29,6 +32,7 @@ function normalizeStatus(raw: any): BridgeProviderStatus {
     state: raw?.state === 'present' ? 'present' : 'absent', binary_path: String(raw?.binary_path || ''),
     version_text: String(raw?.version_text || ''), checked_at: raw?.checked_at ? String(raw.checked_at) : null,
     enabled: Boolean(raw?.enabled),
+    extension: normalizeProviderExtension(raw?.extension),
     models: Array.isArray(raw?.models) ? raw.models.map((model: any) => ({
       model_id: String(model?.model_id || ''), label: String(model?.label || model?.model_id || ''),
       state: model?.state === 'deprecated' ? 'deprecated' : 'active',

@@ -1,0 +1,83 @@
+warning: Git tree '/var/home/tanmay/hamwt/hotpath-writes' is dirty
+warning: Git tree '/var/home/tanmay/hamwt/hotpath-writes' is dirty
+SQLite library: 3.53.3. Scratch DB only; WAL/NORMAL match app/wiring.odin:247-248.
+Fixture: 600 shells (30 live; 200 each run/shell/server), 20 bridges, 60 conversations / 6000 messages, 30 chains / 600 tasks / 570 dependencies, 400 tokens (20 unrevoked).
+HTTP column is modeled triggers; SQL and VM/fullscan are measured from real procs. Writes = executed DML statements, not disk writes.
+| Scenario | HTTP modeled | SELECT | INSERT | UPDATE | DELETE | BEGIN | COMMIT | Writes | VM | Fullscan | Cache hit | Cache miss | Cache page write |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+Lock acquisitions [vault identical touch x30 dedicated conn]: conn_main=0 conn_vault=90 vault_mutex=30
+| vault identical touch x30 dedicated conn | 30 | 0 | 0 | 30 | 0 | 0 | 0 | 30 | 1170 | 0 | 87 | 3 | 0 |
+Lock acquisitions [shell identical registration x92]: conn_main=276 conn_vault=0 vault_mutex=0
+| shell identical registration x92 | 92 | 0 | 92 | 0 | 0 | 0 | 0 | 92 | 12512 | 0 | 549 | 3 | 0 |
+Lock acquisitions [bridge identical save x120]: conn_main=360 conn_vault=0 vault_mutex=0
+| bridge identical save x120 | 0 | 0 | 120 | 0 | 0 | 0 | 0 | 120 | 14040 | 0 | 360 | 0 | 0 |
+Lock acquisitions [bridge heartbeat same state x120 service]: conn_main=720 conn_vault=0 vault_mutex=0
+| bridge heartbeat same state x120 service | 0 | 120 | 120 | 0 | 0 | 0 | 0 | 120 | 18480 | 0 | 720 | 0 | 0 |
+Lock acquisitions [bridge offline repeated x3 service]: conn_main=12 conn_vault=0 vault_mutex=0
+| bridge offline repeated x3 service | 0 | 3 | 1 | 0 | 0 | 0 | 0 | 1 | 228 | 0 | 12 | 0 | 1 |
+Lock acquisitions [bridge vault status same x120 service]: conn_main=363 conn_vault=0 vault_mutex=0
+| bridge vault status same x120 service | 0 | 120 | 1 | 0 | 0 | 0 | 0 | 1 | 4557 | 0 | 363 | 0 | 1 |
+Lock acquisitions [conversation read x21 service]: conn_main=292 conn_vault=0 vault_mutex=0
+| conversation read x21 service | 21 | 42 | 21 | 1 | 0 | 0 | 0 | 22 | 25578 | 0 | 1004 | 23 | 34 |
+Lock acquisitions [conversation already read x20 service]: conn_main=180 conn_vault=0 vault_mutex=0
+| conversation already read x20 service | 20 | 40 | 20 | 0 | 0 | 0 | 0 | 20 | 17100 | 0 | 740 | 0 | 20 |
+Lock acquisitions [conversation already read changing clock x20]: conn_main=180 conn_vault=0 vault_mutex=0
+| conversation already read changing clock x20 | 20 | 40 | 20 | 0 | 0 | 0 | 0 | 20 | 17100 | 0 | 740 | 0 | 40 |
+Lock acquisitions [mark read same 10 ids x21 service]: conn_main=63 conn_vault=0 vault_mutex=0
+| mark read same 10 ids x21 service | 21 | 0 | 0 | 21 | 0 | 0 | 0 | 21 | 3423 | 0 | 309 | 2 | 5 |
+Lock acquisitions [agent already read same 10 ids x20 service]: conn_main=60 conn_vault=0 vault_mutex=0
+| agent already read same 10 ids x20 service | 20 | 0 | 0 | 20 | 0 | 0 | 0 | 20 | 2660 | 0 | 280 | 0 | 0 |
+Lock acquisitions [task comments x30 service engine no projector]: conn_main=330 conn_vault=0 vault_mutex=0
+| task comments x30 service engine no projector | 30 | 30 | 60 | 0 | 0 | 30 | 30 | 60 | 4710 | 0 | 713 | 15 | 300 |
+Lock acquisitions [auth user lookup component x10]: conn_main=30 conn_vault=0 vault_mutex=0
+| auth user lookup component x10 | 10 | 10 | 0 | 0 | 0 | 0 | 0 | 0 | 190 | 0 | 28 | 2 | 0 |
+Lock acquisitions [shell owner list component x10]: conn_main=530 conn_vault=0 vault_mutex=0
+| shell owner list component x10 | 10 | 10 | 0 | 0 | 0 | 0 | 0 | 0 | 202660 | 0 | 283 | 27 | 0 |
+Lock acquisitions [card detail component x10]: conn_main=30 conn_vault=0 vault_mutex=0
+| card detail component x10 | 10 | 10 | 0 | 0 | 0 | 0 | 0 | 0 | 340 | 0 | 28 | 2 | 0 |
+Lock acquisitions [task detail component x10]: conn_main=30 conn_vault=0 vault_mutex=0
+| task detail component x10 | 10 | 10 | 0 | 0 | 0 | 0 | 0 | 0 | 370 | 0 | 50 | 0 | 0 |
+Lock acquisitions [agent identity component x10]: conn_main=30 conn_vault=0 vault_mutex=0
+| agent identity component x10 | 10 | 10 | 0 | 0 | 0 | 0 | 0 | 0 | 210 | 0 | 28 | 2 | 0 |
+Lock acquisitions [chain list component x10]: conn_main=330 conn_vault=0 vault_mutex=0
+| chain list component x10 | 10 | 10 | 0 | 0 | 0 | 0 | 0 | 0 | 14540 | 0 | 28 | 2 | 0 |
+Lock acquisitions [empty search delta enrichment helper x10]: conn_main=960 conn_vault=0 vault_mutex=0
+| empty search delta enrichment helper x10 | 10 | 20 | 0 | 0 | 0 | 0 | 0 | 0 | 642440 | 0 | 84437 | 273 | 0 |
+Lock acquisitions [conversations x10 pass 0]: conn_main=630 conn_vault=0 vault_mutex=0
+| conversations x10 pass 0 | 10 | 10 | 0 | 0 | 0 | 0 | 0 | 0 | 487370 | 0 | 84129 | 261 | 0 |
+Lock acquisitions [live bridge ids x10 pass 0]: conn_main=230 conn_vault=0 vault_mutex=0
+| live bridge ids x10 pass 0 | 0 | 10 | 0 | 0 | 0 | 0 | 0 | 0 | 88440 | 5990 | 470 | 30 | 0 |
+Lock acquisitions [live by kind x10 pass 0]: conn_main=130 conn_vault=0 vault_mutex=0
+| live by kind x10 pass 0 | 0 | 10 | 0 | 0 | 0 | 0 | 0 | 0 | 43230 | 5990 | 260 | 0 | 0 |
+Lock acquisitions [chain dependencies x10 pass 0]: conn_main=220 conn_vault=0 vault_mutex=0
+| chain dependencies x10 pass 0 | 10 | 10 | 0 | 0 | 0 | 0 | 0 | 0 | 20460 | 5690 | 109 | 11 | 0 |
+Lock acquisitions [live enroll tokens x10 pass 0]: conn_main=230 conn_vault=0 vault_mutex=0
+| live enroll tokens x10 pass 0 | 0 | 10 | 0 | 0 | 0 | 0 | 0 | 0 | 22690 | 3990 | 190 | 20 | 0 |
+Lock acquisitions [conversations x10 pass 1]: conn_main=630 conn_vault=0 vault_mutex=0
+| conversations x10 pass 1 | 10 | 10 | 0 | 0 | 0 | 0 | 0 | 0 | 487370 | 0 | 84390 | 0 | 0 |
+Lock acquisitions [live bridge ids x10 pass 1]: conn_main=230 conn_vault=0 vault_mutex=0
+| live bridge ids x10 pass 1 | 0 | 10 | 0 | 0 | 0 | 0 | 0 | 0 | 88440 | 5990 | 500 | 0 | 0 |
+Lock acquisitions [live by kind x10 pass 1]: conn_main=130 conn_vault=0 vault_mutex=0
+| live by kind x10 pass 1 | 0 | 10 | 0 | 0 | 0 | 0 | 0 | 0 | 43230 | 5990 | 260 | 0 | 0 |
+Lock acquisitions [chain dependencies x10 pass 1]: conn_main=220 conn_vault=0 vault_mutex=0
+| chain dependencies x10 pass 1 | 10 | 10 | 0 | 0 | 0 | 0 | 0 | 0 | 20460 | 5690 | 120 | 0 | 0 |
+Lock acquisitions [live enroll tokens x10 pass 1]: conn_main=230 conn_vault=0 vault_mutex=0
+| live enroll tokens x10 pass 1 | 0 | 10 | 0 | 0 | 0 | 0 | 0 | 0 | 22690 | 3990 | 210 | 0 | 0 |
+Lock acquisitions [retention no expired rows x10]: conn_main=30 conn_vault=0 vault_mutex=0
+| retention no expired rows x10 | 0 | 0 | 0 | 0 | 10 | 0 | 0 | 10 | 70860 | 5990 | 260 | 0 | 0 |
+Lock acquisitions [candidate indexes live bridge ids x10]: conn_main=230 conn_vault=0 vault_mutex=0
+| candidate indexes live bridge ids x10 | 0 | 10 | 0 | 0 | 0 | 0 | 0 | 0 | 82430 | 5990 | 60 | 0 | 0 |
+Lock acquisitions [candidate indexes live server kind x10]: conn_main=130 conn_vault=0 vault_mutex=0
+| candidate indexes live server kind x10 | 0 | 10 | 0 | 0 | 0 | 0 | 0 | 0 | 28640 | 0 | 160 | 0 | 0 |
+Lock acquisitions [candidate indexes dependencies x10]: conn_main=220 conn_vault=0 vault_mutex=0
+| candidate indexes dependencies x10 | 0 | 10 | 0 | 0 | 0 | 0 | 0 | 0 | 1850 | 0 | 50 | 0 | 0 |
+Lock acquisitions [candidate indexes live tokens x10]: conn_main=230 conn_vault=0 vault_mutex=0
+| candidate indexes live tokens x10 | 0 | 10 | 0 | 0 | 0 | 0 | 0 | 0 | 3320 | 0 | 240 | 0 | 0 |
+Lock acquisitions [candidate indexes retention x10]: conn_main=30 conn_vault=0 vault_mutex=0
+| candidate indexes retention x10 | 0 | 0 | 0 | 0 | 10 | 0 | 0 | 10 | 690 | 0 | 50 | 0 | 0 |
+Lock acquisitions [vault advancing 4s x30 dedicated conn]: conn_main=0 conn_vault=90 vault_mutex=30
+| vault advancing 4s x30 dedicated conn | 30 | 0 | 0 | 30 | 0 | 0 | 0 | 30 | 1172 | 0 | 91 | 36 | 0 |
+WAL frames [vault advancing 4s x30]: 0
+Lock acquisitions [bridge heartbeat advancing 45s x120 service]: conn_main=720 conn_vault=0 vault_mutex=0
+| bridge heartbeat advancing 45s x120 service | 0 | 120 | 120 | 0 | 0 | 0 | 0 | 120 | 18480 | 0 | 718 | 2 | 120 |
+WAL frames [bridge heartbeat advancing 45s x120]: 120

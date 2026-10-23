@@ -1,0 +1,12 @@
+{
+ "session_id": "cf4b17bd-aa1d-4d65-8f7d-63529dbb8b9f",
+ "transcript_path": "/home/dev/.claude/projects/-home-dev--cache-heimdall-spike-work/cf4b17bd-aa1d-4d65-8f7d-63529dbb8b9f.jsonl",
+ "cwd": "/home/dev/.cache/heimdall-spike/work",
+ "permission_mode": "default",
+ "hook_event_name": "PostToolUseFailure",
+ "tool_name": "Bash",
+ "tool_input": {"command": "false", "description": "Fail"},
+ "tool_use_id": "toolu_01FAILfailFAILfail000001",
+ "error": "Exit code 1",
+ "is_interrupt": false
+}

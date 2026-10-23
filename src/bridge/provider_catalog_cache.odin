@@ -22,6 +22,9 @@ Bridge_Catalog_Provider :: struct {
 	binary:             string `json:"binary"`,
 	base_args:          []string `json:"base_args"`,
 	yolo_args:          []string `json:"yolo_args"`,
+	// Appended instead of yolo_args for permission_mode 'ask'; absent from a Hub
+	// that predates it (nil, so ask mode just omits the yolo flags).
+	ask_args:           []string `json:"ask_args"`,
 	model_flag:         string `json:"model_flag"`,
 	prompt_args:        []string `json:"prompt_args"`,
 	prompt_delivery:    string `json:"prompt_delivery"`,
@@ -30,6 +33,8 @@ Bridge_Catalog_Provider :: struct {
 	skill_dir:           string `json:"skill_dir"`,
 	startup_detection:  cfg_lib.Startup_Detection_Config `json:"startup_detection"`,
 	activity_detection: cfg_lib.Activity_Detection_Config `json:"activity_detection"`,
+	// Zero value (catalog `null` or a Hub that predates it) means unsupported.
+	extension:          Bridge_Catalog_Extension `json:"extension"`,
 	state:               string `json:"state"`,
 	models:              []Bridge_Catalog_Model `json:"models"`,
 }
@@ -200,21 +205,29 @@ bridge_provider_catalog_profile :: proc(name: string) -> (Bridge_Provider_Profil
 	if bridge_provider_catalog_snapshot == nil do return {}, false
 	for provider in bridge_provider_catalog_snapshot.providers {
 		if provider.provider != name || provider.state != "active" do continue
-		return Bridge_Provider_Profile{
-			name = provider.provider,
-			base_args = provider.base_args,
-			yolo_flags = provider.yolo_args,
-			prompt_flags = provider.prompt_args,
-			starter_prompt = provider.starter_prompt,
-			prompt_delivery = provider.prompt_delivery,
-			skill_dir = provider.skill_dir,
-			bootstrap_file_name = provider.bootstrap_file,
-			model_flag = provider.model_flag,
-			startup_detection = provider.startup_detection,
-			activity_detection = provider.activity_detection,
-		}, true
+		return bridge_provider_profile_from_catalog(provider), true
 	}
 	return {}, false
+}
+
+// Projects one catalog entry onto the launch profile. The result aliases the
+// entry's strings, so it lives as long as the snapshot that owns the entry.
+bridge_provider_profile_from_catalog :: proc(provider: Bridge_Catalog_Provider) -> Bridge_Provider_Profile {
+	return Bridge_Provider_Profile{
+		name = provider.provider,
+		base_args = provider.base_args,
+		yolo_flags = provider.yolo_args,
+		ask_flags = provider.ask_args,
+		prompt_flags = provider.prompt_args,
+		starter_prompt = provider.starter_prompt,
+		extension = provider.extension,
+		prompt_delivery = provider.prompt_delivery,
+		skill_dir = provider.skill_dir,
+		bootstrap_file_name = provider.bootstrap_file,
+		model_flag = provider.model_flag,
+		startup_detection = provider.startup_detection,
+		activity_detection = provider.activity_detection,
+	}
 }
 
 bridge_provider_catalog_has_model :: proc(provider_name, model_id: string) -> bool {

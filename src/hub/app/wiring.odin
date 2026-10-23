@@ -246,6 +246,7 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 	// the last commits. An in-memory test db reports "memory" and is unaffected.
 	if !sqlite.exec(&graph.db, "PRAGMA journal_mode = WAL;") do return false, "failed to enable WAL journal mode"
 	if !sqlite.exec(&graph.db, "PRAGMA synchronous = NORMAL;") do return false, "failed to configure database synchronous mode"
+	if !sqlite.exec(&graph.db, sqlite.MAIN_CONN_CACHE_SIZE_PRAGMA) do return false, "failed to configure database cache size"
 
 	migrations_ok, migration_err := sqlite.run_migrations(&graph.db, config.migrations_dir)
 	if !migrations_ok do return false, migration_err.message
@@ -341,6 +342,7 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 	}
 	graph.bridges.catalog = &graph.bridge_update_catalog
 	graph.agents = agent_service.new_agent_service_with_runtime(&graph.repos.agents, &graph.repos.bridges, &graph.repos.projects, &graph.repos.content, &graph.repos.taskchains, bridge_command_sink, &graph.bridge_runtime_registry, &graph.clock, &graph.ids)
+	graph.agents.event_bus = &graph.event_bus
 	graph.agents.entitlements = billing_service.entitlement_lookup(&graph.billing)
 	graph.agents.providers = &graph.provider_repo
 	graph.projects = project_service.new_project_service_with_command_sink(&graph.repos.projects, &graph.repos.bridges, bridge_command_sink, &graph.clock, &graph.ids)
@@ -426,15 +428,14 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 		event_bus           = &graph.event_bus,
 		ids                 = &graph.ids,
 		clock               = &graph.clock,
-		// REQ-SHELL-5: writes a run's single `shell_run` marker into the triggering
-		// conversation. graph.content is constructed above, so the order holds.
+		// Used only to resolve the authenticated conversation binding.
 		content             = &graph.content,
 	)
 	graph.shell_session_service.entitlements = billing_service.entitlement_lookup(&graph.billing)
 	shell_session_svc.shell_metrics_set_service(&graph.shell_session_service)
 	graph.shell_session_service.on_unobserved_terminal = task_engine_on_unobserved_shell_terminal
 	graph.shell_session_service.on_unobserved_terminal_ctx = rawptr(&graph.task_engine)
-	graph.shell_session_service.message_created = content_service.Message_Created_Hook{ctx = rawptr(graph), created = service_message_created}
+	graph.shell_session_service.live_agents = &graph.agents
 	// REQ-SHELL-9 trigger A: a closed chain reaps its servers. Assigned HERE, after the
 	// shell-session service is constructed, rather than next to the other two taskchain
 	// dependencies at their construction above — graph.taskchains is built before this
@@ -552,6 +553,8 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 	graph.task_engine.attention = &graph.cards.attention_notifier
 	content_service.set_attention_notifier(&graph.content, &graph.cards.attention_notifier)
 	events.init_attention_debouncer(&graph.attention_events, &graph.event_bus)
+	// Agent blockers change the 'Needs you' deck too (kind agent_blocker).
+	graph.agents.blockers.attention = &graph.attention_events
 	graph.cards.card_changed = card_service.Card_Changed_Hook{ctx = rawptr(&graph.attention_events), changed = attention_card_changed}
 	graph.cards.message_created = content_service.Message_Created_Hook{ctx = rawptr(graph), created = service_message_created}
 	graph.experiment_handlers = http.Experiment_Rest_Handlers{auth = &graph.auth, repo = &graph.experiment_repo, clock = &graph.clock}
@@ -583,6 +586,7 @@ shutdown_graph :: proc(graph: ^App_Graph) {
 	http.user_ws_ticket_store_free(&graph.user_handlers.ws_tickets)
 	shell_session_svc.shell_metrics_detach_service(&graph.shell_session_service)
 	shell_session_svc.shell_session_service_free(&graph.shell_session_service)
+	agent_service.tool_live_destroy(&graph.agents.tool_live)
 	device_auth_service.grant_store_free(&graph.device_auth_store)
 	delete(graph.action_bridge_versions)
 	billing_service.service_free(&graph.billing)
@@ -692,6 +696,13 @@ register_routes :: proc(graph: ^App_Graph) {
 	http.router_add(&graph.router, "POST", "/api/v1/agent-instances/*/reconfigurations/retry", rawptr(&graph.agent_handlers), http.retry_instance_reconfiguration_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/agent-instances/*/reconfigurations", rawptr(&graph.agent_handlers), http.create_instance_reconfiguration_handler)
 	http.router_add(&graph.router, "GET", "/api/v1/agent-instances/*/reconfigurations", rawptr(&graph.agent_handlers), http.list_instance_reconfigurations_handler)
+	http.router_add(&graph.router, "GET", "/api/v1/task-chains/*/tool-activity-live", rawptr(&graph.taskchain_handlers), http.task_chain_tool_activity_live_handler)
+	http.router_add(&graph.router, "GET", "/api/v1/agent-instances/*/tool-activity-live", rawptr(&graph.agent_handlers), http.agent_instance_tool_activity_live_handler)
+	http.router_add(&graph.router, "GET", "/api/v1/agent-instances/*/extension/events", rawptr(&graph.agent_handlers), http.agent_instance_extension_events_handler)
+	http.router_add(&graph.router, "GET", "/api/v1/agent-instances/*/extension/subagents", rawptr(&graph.agent_handlers), http.agent_instance_extension_subagents_handler)
+	http.router_add(&graph.router, "GET", "/api/v1/agent-instances/*/extension/files", rawptr(&graph.agent_handlers), http.agent_instance_extension_files_handler)
+	http.router_add(&graph.router, "GET", "/api/v1/agent-instances/*/blockers", rawptr(&graph.agent_handlers), http.agent_instance_blockers_handler)
+	http.router_add(&graph.router, "POST", "/api/v1/agent-instances/*/blockers/*/resolve", rawptr(&graph.agent_handlers), http.agent_instance_blocker_resolve_handler)
 	http.router_add(&graph.router, "GET", "/api/v1/agent-instances/*", rawptr(&graph.agent_handlers), http.agent_instance_detail_handler)
 	http.router_add(&graph.router, "PATCH", "/api/v1/agent-instances/*", rawptr(&graph.agent_handlers), http.patch_agent_instance_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/agent-instances/*/start", rawptr(&graph.agent_handlers), http.start_agent_instance_handler)
@@ -885,6 +896,8 @@ register_routes :: proc(graph: ^App_Graph) {
 	http.router_add(&graph.router, "POST", "/api/v1/agent-actions/cards/discard", rawptr(&graph.agent_action_handlers), http.agent_action_card_discard_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/agent-actions/cards/accept", rawptr(&graph.agent_action_handlers), http.agent_action_card_accept_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/agent-actions/start-success", rawptr(&graph.agent_action_handlers), http.agent_action_start_success_handler)
+	http.router_add(&graph.router, "POST", "/api/v1/agent-actions/extension-events", rawptr(&graph.agent_action_handlers), http.agent_action_extension_events_handler)
+	http.router_add(&graph.router, "POST", "/api/v1/agent-actions/tool-activity", rawptr(&graph.agent_action_handlers), http.agent_action_tool_activity_handler)
 	// REQ-ENROLL-9: the four pre-shared-token enrollment routes are GONE —
 	// POST/GET /api/v1/bridge-enrollments, DELETE /api/v1/bridge-enrollments/*
 	// (enrollment-token minting, listing and revocation) and

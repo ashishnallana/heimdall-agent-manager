@@ -13,6 +13,7 @@ import "core:thread"
 import "core:time"
 import dbt "odin_test:hub/platform/dbtelemetry"
 import contracts "odin_test:contracts"
+import agent_service "odin_test:hub/service/agent"
 import content_service "odin_test:hub/service/content"
 import domain "odin_test:hub/domain"
 import events "odin_test:hub/service/events"
@@ -54,10 +55,7 @@ Shell_Session_Service :: struct {
 	repo:                ^iface.Shell_Session_Repository,
 	bridge_command_sink: project_service.Bridge_Command_Sink,
 	events:              ^events.User_Event_Bus,
-	// content — REQ-SHELL-5. Used for ONE thing: writing a run's single `shell_run`
-	// marker into the conversation that triggered it. Optional; nil simply means no
-	// marker is written, which is what every test that does not care about the marker
-	// relies on. It is NOT a general licence for this service to write chat.
+	// Resolves the token-owned conversation binding; never writes messages.
 	content:             ^content_service.Content_Service,
 	ids:                 ^platform.ID_Generator,
 	clock:               ^platform.Clock,
@@ -76,8 +74,7 @@ Shell_Session_Service :: struct {
 	// with exit_code = -1.
 	on_unobserved_terminal:     proc(ctx: rawptr, session: domain.Shell_Session),
 	on_unobserved_terminal_ctx: rawptr,
-	// REQ-2: told about the shell-run marker row once it is saved.
-	message_created: content_service.Message_Created_Hook,
+	live_agents: ^agent_service.Agent_Service,
 }
 
 new_shell_session_service :: proc(
@@ -697,35 +694,13 @@ shell_session_create :: proc(svc: ^Shell_Session_Service, auth: contracts.Auth_C
 	input := input
 	if starter == .Agent && auth.agent_instance_id != "" {
 		if kind_enum == .Run do input.agent_instance_id = auth.agent_instance_id
-		// ...and neither can it be attributed to a different CONVERSATION by asking
-		// (REQ-SHELL-5 §2). conversation_id arrives from the request body
-		// (shell_session_rest_handlers.odin), and REQ-SHELL-5 requires a run to appear
-		// in the conversation of whoever triggered it and NOWHERE ELSE. A body field
-		// cannot carry that guarantee: an agent could name somebody else's conversation
-		// and have its run marker written there.
-		//
-		// So for a run it is RESOLVED FROM THE TOKEN, exactly as agent_instance_id is
-		// one line above and for exactly the same reason. A run is agent-only
-		// (SHELL_SESSION_STARTER_RULES), so "the conversation that triggered it" is
-		// always the starting agent's own conversation — there is no case this
-		// overwrites with a worse answer. ctl no longer offers a way to name one
-		// (REQ-SHELL-5 AC9 deleted its --conversation flag), so for the CLI this is
-		// belt-and-braces; it remains the enforcement point for any other caller.
-		//
-		// Fixed HERE, on the column, rather than at the point the marker is written:
-		// resolving it only at the marker would leave the stored conversation_id
-		// spoofable and hand the same hole to every future reader of that column.
-		//
-		// run ONLY. A `shell` is user-started and a `server` is chain-scoped and may be
-		// started by either — neither has this shape, and neither is touched.
+		// Keep the operational session bound to the token-owned conversation.
+		// This lookup is read-only; live tools never write conversation markers.
 		if kind_enum == .Run && svc.content != nil {
 			if c, conv_ok, _ := content_service.get_conversation_by_instance(svc.content, auth, auth.agent_instance_id); conv_ok {
 				input.conversation_id = c.conversation_id
 			} else {
-				// No conversation for this agent: record none rather than keeping an
-				// unverified one from the body. An empty conversation_id means "no marker",
-				// which is the safe direction; a wrong one means a run showing up in a
-				// conversation it has nothing to do with.
+				// Discard an unverified body binding when no conversation exists.
 				input.conversation_id = ""
 			}
 		}
@@ -855,45 +830,8 @@ shell_session_create :: proc(svc: ^Shell_Session_Service, auth: contracts.Auth_C
 	svc.session_bridges[strings.clone(session_id, heap)] = strings.clone(input.bridge_id, heap)
 	sync.mutex_unlock(&svc.mu)
 
-	// REQ-SHELL-5 §4 — THE RUN'S ONE AND ONLY MARKER MESSAGE.
-	//
-	// Emitted HERE, and this is the only call site in the codebase. Placement is the
-	// whole of how "exactly one message per run, whatever status path is taken" (AC4)
-	// is guaranteed:
-	//
-	//   - AT CREATION, not on status change. Nothing downstream writes a second one,
-	//     so there is no counter to keep and no de-duplication to get right.
-	//   - BEFORE the bridge round trip, so a run whose start FAILS still leaves its
-	//     marker. REQ-SHELL-16 settled that a refused start must leave a trace; a
-	//     failed run that silently had no message would be the same disappearance in a
-	//     different place.
-	//   - ABOVE every one of this proc's remaining early returns (kill-before-start,
-	//     bridge unreachable, bridge refusal), so none of them can skip it.
-	//
-	// A run that is later converted to background writes NOTHING here or anywhere else
-	// — _shell_session_set_background_for_owner flips a flag and emits no message — so
-	// the conversion cannot produce a second marker. Status is not in this message, so
-	// it never needs editing either.
-	//
-	// kind=run ONLY. A `server` is chain-scoped and surfaces in the chain summary, and
-	// a `shell` is an interactive terminal the user is already looking at; neither is a
-	// run and neither belongs in this transcript (REQ-SHELL-5 §2).
-	if kind_enum == .Run && svc.content != nil && session.conversation_id != "" {
-		if marker, marked := content_service.record_shell_run_marker(svc.content, session.conversation_id, session_id, session.agent_instance_id); marked {
-			content_service.notify_message_created(svc.message_created, marker)
-		}
-	}
-
-	// THE CREATION PUSH. Placed here for the same reasons as the marker directly above,
-	// and deliberately for ALL THREE KINDS rather than runs only: the marker is a
-	// transcript entry (runs only), this is a cache invalidation, and a `server` must
-	// reach the chain summary and a `shell` the session list just as promptly.
-	//
-	// BEFORE the bridge round trip, so the row becomes visible while it is starting
-	// rather than only once the bridge has confirmed it. A start that is then REFUSED
-	// is corrected by the exit event on the same channel, which is the ordering
-	// REQ-SHELL-16 already settled for the marker: a trace first, corrected after, in
-	// preference to a silent gap.
+	// Notify the operational session lists for all three kinds before the bridge
+	// round trip. A refused start is corrected by the terminal event below.
 	if svc.events != nil {
 		evt := _shell_session_started_event_json(session_id, session.kind, session.status, session.chain_id)
 		// `owner` is a User_ID here, unlike the exited path where it has already been

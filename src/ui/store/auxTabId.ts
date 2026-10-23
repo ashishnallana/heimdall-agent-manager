@@ -9,6 +9,7 @@
  *   files                    -> 'files'                    (fixed)
  *   vcs                      -> 'vcs'                      (fixed)
  *   tasks                    -> 'tasks'                    (fixed)
+ *   activity                 -> 'activity'                 (fixed; extension activity timeline)
  *   shell {sessionId}        -> 'shell__<sessionId>'       (one interactive shell per tab; a fresh tab
  *                                                           uses a unique provisional 'new-<nonce>' id, rekeyed
  *                                                           to the real session once started, so several new
@@ -30,6 +31,7 @@ export const AUX_TAB_KINDS = [
   'files',
   'vcs',
   'tasks',
+  'activity',
   'shell',
   'agentPty',
   'preview',
@@ -52,6 +54,11 @@ export type AuxContent =
     }
   | { type: 'vcs'; filePath?: string | null }
   | { type: 'tasks'; taskId?: string }
+  | {
+      type: 'activity';
+      /** Transient: a file whose diff to open once the timeline mounts. */
+      filePath?: string | null;
+    }
   | { type: 'shell'; sessionId: string; bridgeId?: string; cwd?: string }
   | { type: 'agentPty'; agentInstanceId: string }
   | { type: 'preview'; sessionId: string; port?: number; path?: string }
@@ -71,6 +78,7 @@ export const OVERVIEW_TAB_ID = 'overview';
 export const FILES_TAB_ID = 'files';
 export const VCS_TAB_ID = 'vcs';
 export const TASKS_TAB_ID = 'tasks';
+export const ACTIVITY_TAB_ID = 'activity';
 
 /** Provisional shell session sentinel: the tab is rekeyed once a session is bound. */
 export const NEW_SHELL_SESSION_ID = 'new';
@@ -104,6 +112,7 @@ const FIXED_TAB_IDS: Record<string, AuxContent> = {
   [FILES_TAB_ID]: { type: 'files' },
   [VCS_TAB_ID]: { type: 'vcs' },
   [TASKS_TAB_ID]: { type: 'tasks' },
+  [ACTIVITY_TAB_ID]: { type: 'activity' },
 };
 
 function clean(value: unknown): string {
@@ -121,6 +130,8 @@ export function auxTabId(content: AuxContent): string {
       return VCS_TAB_ID;
     case 'tasks':
       return TASKS_TAB_ID;
+    case 'activity':
+      return ACTIVITY_TAB_ID;
     case 'shell':
       return `${TAB_ID_PREFIXES.shell}${clean(content.sessionId) || NEW_SHELL_SESSION_ID}`;
     case 'agentPty':
@@ -191,6 +202,7 @@ export function isAuxContent(value: unknown): value is AuxContent {
     case 'files':
     case 'vcs':
     case 'tasks':
+    case 'activity':
       return true;
     case 'shell':
     case 'preview':
@@ -274,6 +286,13 @@ export const AUX_TAB_REGISTRY: Record<AuxTabKind, AuxTabDescriptor> = {
     label: 'Tasks',
     shortLabel: 'Tasks',
     description: 'Inspect and manage tasks, dependencies, and deliverables in the chain.',
+    multiInstance: false,
+  },
+  activity: {
+    kind: 'activity',
+    label: 'Activity Timeline',
+    shortLabel: 'Activity',
+    description: 'Tool calls, subagents and files edited, from the provider extension.',
     multiInstance: false,
   },
   shell: {

@@ -141,7 +141,29 @@ shell_session_upsert_sqlite :: proc(ctx: rawptr, session: domain.Shell_Session) 
 		-- raced a restart would otherwise roll the counter BACK to the run it knew
 		-- about, and the hub would then accept that run's stale exits as current --
 		-- re-opening precisely the hole this column closes.
-		run_seq          = MAX(excluded.run_seq, shell_sessions.run_seq);`, shell_session_terminal_placeholders())
+		run_seq          = MAX(excluded.run_seq, shell_sessions.run_seq)
+		-- Compare the effective merged row, not the incoming event. IS NOT is
+		-- NULL-safe for exit_code. The atomic predicate preserves concurrent MAX,
+		-- preserve-old and terminal kill-intent rules without another read.
+		WHERE (shell_sessions.status, shell_sessions.background,
+			shell_sessions.conversation_id, shell_sessions.exit_code,
+			shell_sessions.pid, shell_sessions.server_port,
+			shell_sessions.finished_at, shell_sessions.last_activity_at,
+			shell_sessions.label, shell_sessions.cwd,
+			shell_sessions.kill_requested_at, shell_sessions.run_seq)
+		IS NOT (excluded.status, MAX(excluded.background, shell_sessions.background),
+			CASE WHEN excluded.conversation_id != '' THEN excluded.conversation_id ELSE shell_sessions.conversation_id END,
+			excluded.exit_code,
+			CASE WHEN excluded.pid != 0 THEN excluded.pid ELSE shell_sessions.pid END,
+			CASE WHEN excluded.server_port != 0 THEN excluded.server_port ELSE shell_sessions.server_port END,
+			CASE WHEN excluded.finished_at != '' THEN excluded.finished_at ELSE shell_sessions.finished_at END,
+			CASE WHEN excluded.last_activity_at != '' THEN excluded.last_activity_at ELSE shell_sessions.last_activity_at END,
+			CASE WHEN excluded.label != '' THEN excluded.label ELSE shell_sessions.label END,
+			CASE WHEN excluded.cwd != '' THEN excluded.cwd ELSE shell_sessions.cwd END,
+			CASE WHEN excluded.status IN (%s) THEN ''
+				WHEN excluded.kill_requested_at != '' THEN excluded.kill_requested_at
+				ELSE shell_sessions.kill_requested_at END,
+			MAX(excluded.run_seq, shell_sessions.run_seq));`, shell_session_terminal_placeholders(), shell_session_terminal_placeholders())
 	// clone_to_cstring, not cstring(raw_data(query)). This query stopped being a
 	// string LITERAL when the terminal set made it interpolated, and a literal is
 	// NUL-terminated while tprintf output is not guaranteed to be — so the (-1,
@@ -183,7 +205,10 @@ shell_session_upsert_sqlite :: proc(ctx: rawptr, session: domain.Shell_Session) 
 	// The terminal set for the kill_requested_at CASE, bound after every value
 	// parameter so adding a status to the domain table shifts nothing above.
 	terminal := domain.SHELL_SESSION_TERMINAL_STATUSES
-	for st, i in terminal do bind_text(stmt, 23 + i, st)
+	for st, i in terminal {
+		bind_text(stmt, 23 + i, st)
+		bind_text(stmt, 23 + len(terminal) + i, st)
+	}
 
 	if sqlite3_step(stmt) != SQLITE_DONE {
 		return false, domain.domain_error(.Internal_Error, "failed to upsert shell session")

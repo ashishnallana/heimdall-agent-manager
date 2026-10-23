@@ -41,6 +41,7 @@ package shell_session
 // get_by_id(bridge_id, session_id) (bridge-scoped SQL), so an inventory from bridge A
 // naming bridge B's session resolves to nothing and changes nothing on B.
 
+import agent_service "odin_test:hub/service/agent"
 import "base:runtime"
 import "core:encoding/json"
 import "core:fmt"

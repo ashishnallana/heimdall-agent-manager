@@ -194,7 +194,7 @@ test('instance failing refetches that one instance so the failure notice has las
 
 // ------------------------------------------------------------------ messages
 
-test('one message from another tab/CLI: one newest-page fetch + one sidebar fetch, no /agents/live, older pages untouched', async () => {
+for (const toolActivity of [false, true]) test((toolActivity ? 'tool activity' : 'another tab/CLI message') + ': one newest-page fetch + one sidebar fetch, no /agents/live, older pages untouched', async () => {
   const net = installRoutes({
     [`/chats/${CONV}/messages`]: (url) => (url.searchParams.get('cursor') ? { body: { data: [userRow('m_old')], page: { has_more: false } } } : messagesRoute([userRow('m1')])),
     '/chats': { body: { data: [{ conversation_id: CONV, agent_instance_id: INST, unread_count: 0 }] } },
@@ -214,9 +214,13 @@ test('one message from another tab/CLI: one newest-page fetch + one sidebar fetc
     ];
     await Promise.all(subs);
     net.hits.length = 0;
-    // The same logical change delivered twice (dedupe across a burst).
-    handleUserWsEvent(store.dispatch, messageCreated('m2'));
-    handleUserWsEvent(store.dispatch, messageCreated('m2'));
+    // The same logical change delivered twice (dedupe across a burst), including
+    // the silent tool-activity shape produced by extension_handlers.odin.
+    const frame = toolActivity
+      ? { ...messageCreated('m2'), event: 'chat_updated', direction: 'tool_activity', message_type: 'tool_activity' }
+      : messageCreated('m2');
+    handleUserWsEvent(store.dispatch, frame);
+    handleUserWsEvent(store.dispatch, frame);
     await settle();
     assert.equal(count(net.hits, (h) => h.startsWith(`GET /api/v1/chats/${CONV}/messages?limit=30`) && !h.includes('cursor')), 1, `one newest-page fetch; saw ${net.hits.join(', ')}`);
     assert.equal(count(net.hits, (h) => h.includes('cursor=')), 0, 'older pages do not refetch on a new message');
@@ -462,13 +466,14 @@ test('shell retention prune (empty resource_id, owner-scoped) refreshes the shel
   const net = installRoutes({ '/shells': { body: { data: { sessions: [] } } } });
   try {
     const store = await makeStore();
-    const { handleUserWsEvent } = await import('../src/ui/api/wsInvalidation.ts');
+    const { handleUserWsEvent, INVALIDATION_COALESCE_MS } = await import('../src/ui/api/wsInvalidation.ts');
     const { shellsApi } = await import('../src/ui/api/endpoints/shells.ts');
     const sub = store.dispatch((shellsApi.endpoints as any).listShells.initiate({}));
     await sub;
     net.hits.length = 0;
     handleUserWsEvent(store.dispatch, { type: 'resource_changed', resource: 'shell_session', resource_id: '', change: 'pruned', summary: { deleted: 3 } });
-    await tick(60);
+    // Shell frames ride the burst window (api-fetch-dedup), so wait it out.
+    await tick(INVALIDATION_COALESCE_MS + 60);
     assert.equal(count(net.hits, (h) => h.startsWith('GET /api/v1/shells')), 1, `saw ${net.hits.join(', ')}`);
     sub.unsubscribe();
   } finally { net.restore(); }
@@ -541,4 +546,46 @@ test('covered steady polls stay retired in their callers', () => {
   assert.doesNotMatch(read('src/ui/components/taskchain/TaskChainOverview.tsx'), /pollingInterval: 5000/);
   assert.doesNotMatch(read('src/ui/components/auxiliary/AuxDock.tsx'), /pollingInterval/);
   assert.doesNotMatch(read('src/ui/components/auxiliary/useAgentAuxContext.ts'), /pollingInterval/);
+});
+
+
+test('extension bursts coalesce by instance without refetching ordinary instance caches', async () => {
+  const net = installRoutes({
+    [`/agent-instances/${INST}`]: { body: { data: { agent_instance_id: INST, agent_id: 'agt_1', ...instanceSummary() } } },
+    '/extension/events': { body: { events: [] } },
+    '/extension/subagents': { body: { subagents: [] } },
+    '/extension/files': { body: { files: [] } },
+    '/blockers': { body: { agent_instance_id: INST, revision: 2, blockers: [] } },
+  });
+  try {
+    const store = await makeStore();
+    const { agentsApi } = await import('../src/ui/api/endpoints/agents.ts');
+    const { extensionApi } = await import('../src/ui/api/endpoints/extension.ts');
+    const { handleUserWsEvent } = await import('../src/ui/api/wsInvalidation.ts');
+    await Promise.all([
+      store.dispatch(agentsApi.endpoints.fetchAgentInstance.initiate({ instanceId: INST })),
+      store.dispatch(extensionApi.endpoints.getExtensionTimeline.initiate(INST)),
+      store.dispatch(extensionApi.endpoints.getAgentBlockers.initiate(INST)),
+    ]);
+    net.hits.length = 0;
+    const frame = (change: string, summary: any) => handleUserWsEvent(store.dispatch, {
+      type: 'resource_changed', resource: 'agent_instance', resource_id: INST, change, summary,
+    });
+    for (let i = 0; i < 20; i++) {
+      frame('extension_events', { events: [{ event: 'tool.end' }], last_seq: i + 1 });
+      frame('agent_blockers_changed', { revision: i + 1, count: 0 });
+    }
+    await settle();
+    assert.equal(count(net.hits, (h) => h.includes('/extension/events?')), 1, 'one timeline refresh per burst');
+    assert.equal(count(net.hits, (h) => h.endsWith('/blockers')), 1, 'one blocker refresh per burst');
+    assert.equal(count(net.hits, (h) => h.endsWith(`/agent-instances/${INST}`)), 0, 'tool events do not refetch the instance');
+    assert.equal(net.hits.length, 4, 'only timeline events/rollups and blockers refetch');
+
+    net.hits.length = 0;
+    frame('extension_events', { events: [{ event: 'session' }], session_changed: true });
+    frame('extension_events', { events: [{ event: 'hello' }] });
+    await settle();
+    assert.equal(count(net.hits, (h) => h.endsWith(`/agent-instances/${INST}`)), 1, 'session/hello refresh the native-signals badge once');
+    assert.equal(count(net.hits, (h) => h.includes('/extension/events?')), 1);
+  } finally { net.restore(); }
 });

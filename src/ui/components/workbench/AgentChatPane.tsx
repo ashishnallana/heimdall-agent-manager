@@ -46,6 +46,7 @@ import { useGetAgentsLiveQuery } from '../../api/endpoints/agentsLive';
 import {
   normalizeBridgeCapabilities,
   useBridgeProviderStatus,
+  useListBridgeProvidersQuery,
   useListBridgesQuery,
   type BridgeCapability,
 } from '../../api/endpoints/bridgeSupport';
@@ -80,14 +81,8 @@ import { describeCron, formatInTimeZone, timeZoneLabel } from '../actions/schedu
 import { TaskChainSelectorModal } from '../chains/TaskChainSelectorModal';
 import { useIsMobile } from '../shell/responsive';
 import { chromeIconButtonSizeClass } from '../shell/shellChrome';
-import {
-  ClubbedRunGroup,
-  PinnedShellRuns,
-  pinnedRunSessions,
-  ShellRunRow,
-  useConversationRuns,
-  type ShellRunMarker,
-} from '../shells/ShellRunIndicator';
+import { navigateTo, shellViewHref } from '../shells/shellModel';
+import LiveToolActivity from '../extension/LiveToolActivity';
 import AgentActivityBubbles from '../chat/AgentActivityBubbles';
 import AtMentionPopup, { type MentionEntity } from '../chat/AtMentionPopup';
 import ChatMessageList from '../chat/ChatMessageList';
@@ -101,6 +96,7 @@ import {
   reconcileOlderPages,
   type ConversationMessagesRead,
 } from '../../api/conversationMessageEvents';
+import { permissionToggleRequest, permissionToggleState } from './permissionToggleModel';
 import { type TaskLike } from '../chat/chainTaskInference';
 import { groupTranscriptMessages, isAgentStartMessage } from '../chat/transcriptGrouping';
 import type { ChatDeliveryStatus, ChatMessage, ChatTimestamp } from '../chat/types';
@@ -898,9 +894,11 @@ export function AgentChatPane({
     dispatchTray({ type: 'items', ids: trayItemIds, draftEmpty });
   }, [trayItemIdsKey]); // eslint-disable-line react-hooks/exhaustive-deps
   const trayMode = trayState.mode;
-  const trayModeItem = trayMode
+  // Only task items borrow the composer (agent blockers act in place).
+  const trayModeFound = trayMode
     ? trayItemList.find((item) => item.card_id === trayMode.cardId)
     : undefined;
+  const trayModeItem = trayModeFound?.kind === 'task' ? trayModeFound : undefined;
   const showTray = trayVisible(trayState, trayItemList.length);
   useEffect(() => {
     if (!trayNotice) return;
@@ -1215,50 +1213,16 @@ export function AgentChatPane({
     [activeVaultKey, chatMessages],
   );
 
-  const runMarkers: ShellRunMarker[] = useMemo(
-    () =>
-      chatMessages
-        .filter((message) => message.messageType === 'shell_run')
-        .map((message) => ({
-          messageId: message.messageId,
-          sessionId: String(
-            message.metadata?.session_id || message.metadata?.sessionId || '',
-          ),
-          createdUnixMs: message.createdUnixMs || 0,
-        }))
-        .filter((marker) => Boolean(marker.sessionId)),
-    [chatMessages],
-  );
-
-  const lastConversationMessageMs = useMemo(
-    () =>
-      chatMessages.reduce(
-        (newest, message) =>
-          message.messageType === 'shell_run' || isAgentStartMessage(message)
-            ? newest
-            : Math.max(newest, message.createdUnixMs || 0),
-        0,
-      ),
-    [chatMessages],
-  );
-
-  const conversationRuns = useConversationRuns(agentInstanceId, conversationId);
-  const pinnedRuns = useMemo(
-    () => pinnedRunSessions(conversationRuns, runMarkers, lastConversationMessageMs),
-    [conversationRuns, runMarkers, lastConversationMessageMs],
-  );
-  const runBySessionId = useMemo(
-    () => new Map(conversationRuns.map((session) => [session.session_id, session])),
-    [conversationRuns],
-  );
-
-  const pinnedSessionIds = useMemo(
-    () => new Set(pinnedRuns.map((session) => session.session_id)),
-    [pinnedRuns],
-  );
   const transcriptMessages = useMemo(
-    () => groupTranscriptMessages(chatMessages, pinnedSessionIds),
-    [chatMessages, pinnedSessionIds],
+    () => groupTranscriptMessages(chatMessages),
+    [chatMessages],
+  );
+  const liveChain = chainDetailQuery.data?.chain;
+  const isChainCoordinator = Boolean(chainId) && (
+    String(liveChain?.coordinatorAgentInstanceId || liveChain?.coordinator_agent_instance_id || '') === agentInstanceId ||
+    (liveChain?.members || []).some((member: any) =>
+      String(member.agentInstanceId || member.agent_instance_id || '') === agentInstanceId &&
+      (member.role === 'coordinator' || member.isCoordinator === true))
   );
 
   const needsStart = runtimeNeedsStart(runtimeStatus);
@@ -1269,6 +1233,20 @@ export function AgentChatPane({
     reconfigureState.isLoading ||
     restartState.isLoading ||
     stopState.isLoading;
+  // Composer "Bypass permissions" toggle: the catalog descriptor for the
+  // instance's provider comes from the bridge provider-status (only fetched
+  // while the settings panel is open).
+  const instanceProvidersQuery = useListBridgeProvidersQuery(
+    { bridgeId: instanceBridgeId },
+    { skip: !instanceBridgeId || !runtimeMenuOpen },
+  );
+  const instanceCatalogExtension = useMemo(
+    () =>
+      (instanceProvidersQuery.data?.providers || []).find(
+        (entry: any) => entry?.provider === instanceProvider,
+      )?.extension ?? null,
+    [instanceProvidersQuery.data, instanceProvider],
+  );
   const hasUploadingAttachments = attachments.some((item) => item.status === 'uploading');
   const hasFailedAttachments = attachments.some((item) => item.status === 'error');
   const uploadedAttachments = attachments.filter(
@@ -1769,24 +1747,6 @@ export function AgentChatPane({
   }
 
   function renderConversationMessageBody(message: ChatMessage) {
-    if (message.messageType === 'shell_run_group') {
-      const clubbedRuns: ChatMessage[] = message.metadata?.clubbedRuns || [];
-      return (
-        <ClubbedRunGroup
-          messages={clubbedRuns}
-          runBySessionId={runBySessionId}
-          formatTimestamp={formatMessageTimestamp}
-        />
-      );
-    }
-    if (message.messageType === 'shell_run') {
-      const sessionId = String(
-        message.metadata?.session_id || message.metadata?.sessionId || '',
-      );
-      const session = sessionId ? runBySessionId.get(sessionId) : undefined;
-      if (!session) return null;
-      return <ShellRunRow session={session} />;
-    }
     if (message.messageType === 'pane_capture') {
       const metadata = message.metadata || {};
       const status = message.messageStatus || 'complete';
@@ -2046,6 +2006,28 @@ export function AgentChatPane({
     }
   }
 
+  async function togglePermissionBypass(bypass: boolean) {
+    if (!agentInstanceId || !instance || runtimeActionBusy) return;
+    setRuntimeMenuOpen(false);
+    setReconfigStatus(
+      bypass ? 'Restarting with permissions bypassed…' : 'Restarting with permission approvals…',
+    );
+    try {
+      const applied = await reconfigureInstance(
+        permissionToggleRequest(
+          { ...instance, agent_instance_id: agentInstanceId },
+          bypass,
+          globalThis.crypto?.randomUUID?.() ||
+            `perm-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        ),
+      ).unwrap();
+      setAcceptedOperation(applied);
+      setReconfigStatus('');
+    } catch (err: any) {
+      setReconfigStatus(errMsg(err, 'Permission mode change failed'));
+    }
+  }
+
   async function forceStopRuntime() {
     if (
       !agentId ||
@@ -2081,6 +2063,13 @@ export function AgentChatPane({
 
   const pendingReconfig =
     selectionChangesConfig || operation?.phase === 'recovery_required';
+  const permissionToggle = permissionToggleState({
+    catalogExtension: instanceCatalogExtension,
+    instance,
+    busy:
+      runtimeActionBusy || operationBlocksInput || isStarting || runtimeStopping || !agentInstanceId,
+    pendingChanges: pendingReconfig,
+  });
   const runtimeControls = (
     <div data-debug-id="conversation-runtime-controls" className="text-left">
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-subtle p-3">
@@ -2132,6 +2121,43 @@ export function AgentChatPane({
           </button>
         </div>
       </div>
+      {permissionToggle.visible ? (
+        <div
+          data-debug-id="conversation-permission-toggle"
+          className="mb-4 rounded-xl border border-subtle p-3"
+        >
+          <label className="flex min-h-11 items-center justify-between gap-3 text-sm text-primary">
+            <span>
+              <span className="block font-medium">Bypass permissions</span>
+              <span className="block text-xs text-muted">
+                {permissionToggle.bypass
+                  ? 'The agent runs tools without asking.'
+                  : 'The agent asks before running tools; approve them here.'}{' '}
+                Applies to this running agent and restarts it. The agent&apos;s
+                default is set in its settings.
+              </span>
+            </span>
+            <input
+              type="checkbox"
+              role="switch"
+              data-debug-id="conversation-permission-toggle-input"
+              aria-checked={permissionToggle.bypass}
+              checked={permissionToggle.bypass}
+              disabled={permissionToggle.disabled}
+              onChange={(e) => void togglePermissionBypass(e.target.checked)}
+              className="h-5 w-5 shrink-0 accent-accent disabled:opacity-40"
+            />
+          </label>
+          {permissionToggle.hint ? (
+            <p
+              data-debug-id="conversation-permission-toggle-hint"
+              className="mt-1 text-xs text-muted"
+            >
+              {permissionToggle.hint}
+            </p>
+          ) : null}
+        </div>
+      ) : null}
       <div className="mb-4 rounded-xl bg-neutral-soft px-3 py-2 text-xs text-muted">
         Project:{' '}
         {projectId ? (
@@ -2995,6 +3021,18 @@ export function AgentChatPane({
               <Icon name="gear" size={15} />
               <span>Agent settings</span>
             </Menu.Item>
+            {onOpenAuxTab ? (
+              <Menu.Item
+                data-debug-id="conversation-thread-activity-action"
+                onClick={() => {
+                  setHeaderActionsOpen(false);
+                  openAux({ type: 'activity' });
+                }}
+              >
+                <Icon name="layers" size={15} />
+                <span>Activity timeline</span>
+              </Menu.Item>
+            ) : null}
             <Menu.Separator />
             {onSplitPane || onReplaceWithNew || (isMultiPane && onClosePane) ? (
               <>
@@ -3124,6 +3162,7 @@ export function AgentChatPane({
           debugPrefix="conversation-thread"
           focusMessageId={focusMessageId}
           hasMore={olderHasMore && Boolean(olderCursor)}
+          paginationCursor={olderCursor}
           loadingOlder={olderMessagesState.isFetching}
           onLoadOlder={loadOlderMessages}
           onReply={handleSendReply}
@@ -3189,7 +3228,11 @@ export function AgentChatPane({
         >
           <div aria-hidden="true" className="ui-frost-tail" />
           <AgentActivityBubbles instanceId={agentInstanceId} />
-          <PinnedShellRuns sessions={pinnedRuns} />
+          <LiveToolActivity
+            instanceId={agentInstanceId}
+            chainId={isChainCoordinator ? chainId : ''}
+            onOpenShell={(sessionId) => navigateTo(shellViewHref(sessionId))}
+          />
           {trayNotice ? (
             <div className="pointer-events-none mb-2 flex justify-center px-3">
               <div

@@ -45,6 +45,14 @@ Runtime_Instance_State :: struct {
 // lookup visibility immediately, but the mutex, strings and state map survive
 // until the final reference is released. Never copy a live connection value.
 Bridge_Runtime_Connection :: struct {
+    // Live-tools routing metadata only, owned by this connection reader.
+    tool_live_epoch: [64]u8,
+    tool_live_epoch_len: int,
+    tool_live_seq: u64,
+    tool_live_tokens: int,
+    tool_live_bytes: int,
+    tool_live_refill_ns: i64,
+    tool_live_rate_notified: bool,
 	bridge_id: string,
 	owner_id: string,
 	generation: int,

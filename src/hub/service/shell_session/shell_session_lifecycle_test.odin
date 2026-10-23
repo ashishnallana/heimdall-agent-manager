@@ -1,4 +1,4 @@
-// Behavioral tests for shell_session_service kill queuing/replay, exit idempotency, background run completion markers, server reaping, and row/output retention.
+// Behavioral tests for shell_session_service kill queuing/replay, exit idempotency, background run completion notifications, server reaping, and row/output retention.
 #+private file
 package shell_session
 
@@ -6,6 +6,7 @@ import "core:strings"
 import "core:sync"
 import "core:testing"
 import "core:time"
+import agent_service "odin_test:hub/service/agent"
 import content_service "odin_test:hub/service/content"
 import contracts "odin_test:contracts"
 import domain "odin_test:hub/domain"
@@ -1209,17 +1210,9 @@ c5_save_message :: proc(ctx: rawptr, m: domain.Chat_Message) -> (domain.Chat_Mes
 c5_markers_in :: proc(c: ^Content5, conversation_id: string) -> int {
 	n := 0
 	for m in c.messages {
-		if m.conversation_id == conversation_id && m.message_type == content_service.SHELL_RUN_MESSAGE_TYPE do n += 1
+		if m.conversation_id == conversation_id && m.message_type == "shell_run" do n += 1
 	}
 	return n
-}
-
-@(private = "file")
-c5_first_marker :: proc(c: ^Content5) -> (domain.Chat_Message, bool) {
-	for m in c.messages {
-		if m.message_type == content_service.SHELL_RUN_MESSAGE_TYPE do return m, true
-	}
-	return domain.Chat_Message{}, false
 }
 
 // --- recording bridge sink ----------------------------------------------------
@@ -1354,7 +1347,7 @@ agent5_auth :: proc() -> contracts.Auth_Context {
 }
 
 // fx5_start_run creates a run through the real service path, so every test exercises
-// the same create the product does — marker emission included.
+// the same create path the product does, including the zero-message contract.
 @(private = "file")
 fx5_start_run :: proc(fx: ^Fx5, background: bool) -> domain.Shell_Session {
 	session, _, _ := shell_session_create(&fx.svc, agent5_auth(), Shell_Session_Create_Input{
@@ -1456,48 +1449,48 @@ test_req5_converted_run_notifies_on_completion :: proc(t: ^testing.T) {
 	testing.expect_value(t, s5_notify_count(&fx.sink, s.session_id), 1)
 }
 
-// --- AC4: exactly ONE marker per run, on every status path ---------------------
+// REQ-LIVE: all shell lifecycle paths leave the conversation unchanged.
 
 @(test)
-test_req5_exactly_one_marker_per_run :: proc(t: ^testing.T) {
+test_live_zero_markers_per_run :: proc(t: ^testing.T) {
 	fx: Fx5
 	fx5_make(&fx)
 	defer fx5_free(&fx)
 
 	s := fx5_start_run(&fx, true)
-	testing.expect_value(t, c5_markers_in(&fx.content, CONV_A), 1)
+	testing.expect_value(t, c5_markers_in(&fx.content, CONV_A), 0)
 
 	// Every subsequent status transition must add nothing. The duplicate exit is not
 	// padding: an at-least-once outbox really does redeliver, and a marker emitted on
 	// status change rather than at creation would show up here as a second message.
 	_ = shell_session_handle_exited(&fx.svc, s.session_id, "brg_1", domain.Shell_Session_Status_Exited, 0, true)
 	_ = shell_session_handle_exited(&fx.svc, s.session_id, "brg_1", domain.Shell_Session_Status_Exited, 0, true)
-	testing.expect_value(t, c5_markers_in(&fx.content, CONV_A), 1)
+	testing.expect_value(t, c5_markers_in(&fx.content, CONV_A), 0)
 }
 
 @(test)
-test_req5_conversion_does_not_add_a_second_marker :: proc(t: ^testing.T) {
+test_live_background_conversion_has_zero_markers :: proc(t: ^testing.T) {
 	fx: Fx5
 	fx5_make(&fx)
 	defer fx5_free(&fx)
 
 	s := fx5_start_run(&fx, false)
-	testing.expect_value(t, c5_markers_in(&fx.content, CONV_A), 1)
+	testing.expect_value(t, c5_markers_in(&fx.content, CONV_A), 0)
 
 	_, ok, _ := shell_session_set_background(&fx.svc, agent5_auth(), s.session_id)
 	testing.expect(t, ok, "the conversion should succeed")
 	// The foreground -> background flip is the path most likely to grow a second
 	// message, since it is the moment the run becomes notifiable.
-	testing.expect_value(t, c5_markers_in(&fx.content, CONV_A), 1)
+	testing.expect_value(t, c5_markers_in(&fx.content, CONV_A), 0)
 
 	_ = shell_session_handle_exited(&fx.svc, s.session_id, "brg_1", domain.Shell_Session_Status_Exited, 0, true)
-	testing.expect_value(t, c5_markers_in(&fx.content, CONV_A), 1)
+	testing.expect_value(t, c5_markers_in(&fx.content, CONV_A), 0)
 }
 
-// --- AC5: the marker lands in the triggering conversation and nowhere else ------
+// The absence of writes applies to every conversation.
 
 @(test)
-test_req5_marker_only_in_triggering_conversation :: proc(t: ^testing.T) {
+test_live_no_markers_in_either_conversation :: proc(t: ^testing.T) {
 	fx: Fx5
 	fx5_make(&fx)
 	defer fx5_free(&fx)
@@ -1505,17 +1498,16 @@ test_req5_marker_only_in_triggering_conversation :: proc(t: ^testing.T) {
 	s := fx5_start_run(&fx, true)
 	_ = shell_session_handle_exited(&fx.svc, s.session_id, "brg_1", domain.Shell_Session_Status_Exited, 0, true)
 
-	testing.expect_value(t, c5_markers_in(&fx.content, CONV_A), 1)
+	testing.expect_value(t, c5_markers_in(&fx.content, CONV_A), 0)
 	// The other agent's conversation exists and is reachable through the same fake
 	// repository, so an accidental fan-out would land here. It must stay empty.
 	testing.expect_value(t, c5_markers_in(&fx.content, CONV_B), 0)
-	testing.expect_value(t, len(fx.content.messages), 1)
+	testing.expect_value(t, len(fx.content.messages), 0)
 }
 
-// AC5's other half: the conversation is resolved from the TOKEN, so naming somebody
-// else's conversation in the request body cannot redirect the marker.
+// The operational conversation binding is still resolved from the token.
 @(test)
-test_req5_body_cannot_redirect_the_marker :: proc(t: ^testing.T) {
+test_live_body_cannot_redirect_shell_conversation :: proc(t: ^testing.T) {
 	fx: Fx5
 	fx5_make(&fx)
 	defer fx5_free(&fx)
@@ -1530,43 +1522,18 @@ test_req5_body_cannot_redirect_the_marker :: proc(t: ^testing.T) {
 	testing.expect(t, session.session_id != "", "the run should still be created")
 	testing.expect_value(t, session.conversation_id, CONV_A)
 	testing.expect_value(t, c5_markers_in(&fx.content, CONV_B), 0)
-	testing.expect_value(t, c5_markers_in(&fx.content, CONV_A), 1)
+	testing.expect_value(t, c5_markers_in(&fx.content, CONV_A), 0)
 }
 
 // --- AC6 + AC7: the marker is lean, and carries no output ----------------------
 
 @(test)
-test_req5_marker_is_lean :: proc(t: ^testing.T) {
-	fx: Fx5
-	fx5_make(&fx)
-	defer fx5_free(&fx)
-
-	session, _, _ := shell_session_create(&fx.svc, agent5_auth(), Shell_Session_Create_Input{
-		bridge_id  = "brg_1",
-		kind       = domain.Shell_Session_Kind_Run,
-		cmd        = "echo SECRET_OUTPUT_MARKER",
-		background = true,
-	})
-	m, found := c5_first_marker(&fx.content)
-	testing.expect(t, found, "a marker should have been written")
-
-	testing.expect_value(t, m.message_type, "shell_run")
-	testing.expect_value(t, m.conversation_id, CONV_A)
-
-	// AC6: metadata_json is the session id and NOTHING else. Asserted as an exact
-	// string rather than by substring, because "contains the session id" would pass
-	// just as well for a metadata blob that had quietly grown a status or an exit code.
-	expected := strings.concatenate({`{"session_id":"`, session.session_id, `"}`}, context.temp_allocator)
-	testing.expect_value(t, m.metadata_json, expected)
-
-	// AC6: the body carries no output, no exit code and no command text.
-	testing.expect_value(t, m.body, content_service.SHELL_RUN_MARKER_BODY)
-	testing.expect(t, !strings.contains(m.body, "SECRET_OUTPUT_MARKER"), "the body must not carry the command")
-
-	// AC7: nothing anywhere in the stored message carries the command or its output —
-	// body and metadata both. Output never reaches the hub DB by this path.
-	testing.expect(t, !strings.contains(m.metadata_json, "SECRET_OUTPUT_MARKER"), "metadata must not carry the command")
-	testing.expect(t, !strings.contains(m.body, "echo"), "the body must not carry command text")
+test_live_no_marker_exposes_command :: proc(t: ^testing.T) {
+ fx: Fx5
+ fx5_make(&fx)
+ defer fx5_free(&fx)
+ _ = fx5_start_run(&fx, true)
+ testing.expect_value(t, len(fx.content.messages), 0)
 }
 
 // AC7's other half: the NOTIFICATION carries no output either. It is the only other
@@ -2055,4 +2022,21 @@ test_platform_rfc3339_round_trips :: proc(t: ^testing.T) {
 
 	_, bad_ok := platform.parse_rfc3339_utc("nonsense")
 	testing.expect(t, !bad_ok, "a malformed instant reports failure rather than the epoch")
+}
+
+
+@(test)
+test_live_shell_lifecycle_does_not_create_hub_tool_state :: proc(t: ^testing.T) {
+ fx: Fx5
+ fx5_make(&fx)
+ defer fx5_free(&fx)
+ live := agent_service.Agent_Service{}
+ defer agent_service.tool_live_destroy(&live.tool_live)
+ fx.svc.live_agents = &live
+ row := fx5_start_run(&fx, false)
+ _, converted, _ := shell_session_set_background(&fx.svc, agent5_auth(), row.session_id)
+ testing.expect(t, converted)
+ _ = shell_session_handle_exited(&fx.svc, row.session_id, "brg_1", "killed", 137, true)
+ for p in live.tool_live.pending do testing.expect(t, !p.used, "Hub retains no tool projection or outstanding request")
+ testing.expect_value(t, len(fx.content.messages), 0)
 }

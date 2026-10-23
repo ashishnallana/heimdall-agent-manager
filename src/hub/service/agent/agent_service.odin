@@ -14,6 +14,7 @@ import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
 import ownership "odin_test:hub/service/ownership"
 import project_service "odin_test:hub/service/project"
+import events "odin_test:hub/service/events"
 import platform "odin_test:hub/platform"
 import jsonx "odin_test:lib/jsonx"
 
@@ -37,6 +38,11 @@ Agent_Service :: struct {
 	// resource_events: after-write change hints for the owner's UI (REQ-2). Set
 	// by wiring to the user event bus; every field is nil-safe.
 	resource_events: Resource_Event_Hooks,
+	// event_bus: realtime UI frames (agent_blockers_changed, ...); optional.
+	event_bus: ^events.User_Event_Bus,
+	// blockers: in-memory agent blockers fed by bridge snapshots (agent_blockers.odin).
+	blockers: Agent_Blocker_Store,
+	tool_live: Tool_Live_Store,
 }
 
 // Resource_Event_Hooks are invoked only after the write they describe returned
@@ -68,7 +74,11 @@ STOPPED_BY_USER :: "user"
 // stopped|failed|unreachable, heartbeat reconcile, bridge disconnect, reaper,
 // delete) calls; the engine expires the instance's lease and re-plans.
 notify_instance_terminal :: proc(service: ^Agent_Service, instance_id: string) {
-	if service == nil || service.hooks.on_terminal == nil || instance_id == "" do return
+	if service == nil || instance_id == "" do return
+	// A dead instance has nothing left to answer: clear its agent blockers.
+	clear_instance_blockers(service, instance_id)
+	tool_live_clear(service, instance_id)
+	if service.hooks.on_terminal == nil do return
 	service.hooks.on_terminal(service.hooks.ctx, instance_id)
 }
 
@@ -114,6 +124,9 @@ Create_Agent_Input :: struct {
 	template_id: string,
 	instructions: string,
 	has_template_id: bool,
+	// permission_mode: "yolo" | "ask" (REQ-EXT-PERM-2); empty keeps the current
+	// value on update and defaults to "yolo" on create.
+	permission_mode: string,
 }
 
 Support_Input :: struct {
@@ -150,11 +163,15 @@ Stop_Instance_Input :: struct { reason: string, force: bool }
 Reconfigure_Instance_Input :: struct { provider, model, agent_id, bridge_id, chain_id, conversation_id, display_name: string, project_id: domain.Project_ID, has_agent_id, has_bridge_id, has_project_id, has_chain_id, has_conversation_id, has_display_name: bool }
 
 new_agent_service :: proc(agents: ^iface.Agent_Repository, bridges: ^iface.Bridge_Repository, clock: ^platform.Clock, ids: ^platform.ID_Generator) -> Agent_Service {
-	return Agent_Service{agents = agents, bridges = bridges, clock = clock, ids = ids}
+	s := Agent_Service{agents = agents, bridges = bridges, clock = clock, ids = ids}
+	tool_live_init(&s.tool_live)
+	return s
 }
 
 new_agent_service_with_runtime :: proc(agents: ^iface.Agent_Repository, bridges: ^iface.Bridge_Repository, projects: ^iface.Project_Repository, content: ^iface.Content_Repository, taskchains: ^iface.Taskchain_Repository, sink: project_service.Bridge_Command_Sink, registry: ^project_service.Bridge_Runtime_Registry, clock: ^platform.Clock, ids: ^platform.ID_Generator) -> Agent_Service {
-	return Agent_Service{agents = agents, bridges = bridges, projects = projects, content = content, taskchains = taskchains, bridge_command_sink = sink, bridge_runtime_registry = registry, clock = clock, ids = ids}
+	s := Agent_Service{agents = agents, bridges = bridges, projects = projects, content = content, taskchains = taskchains, bridge_command_sink = sink, bridge_runtime_registry = registry, clock = clock, ids = ids}
+	tool_live_init(&s.tool_live)
+	return s
 }
 
 create_agent :: proc(service: ^Agent_Service, auth: contracts.Auth_Context, input: Create_Agent_Input) -> (domain.Agent, bool, domain.Domain_Error) {
@@ -168,7 +185,10 @@ create_agent :: proc(service: ^Agent_Service, auth: contracts.Auth_Context, inpu
 	template_id := strings.trim_space(input.template_id)
 	if template_id == "" do template_id = domain.TEMPLATE_EMPTY_ID
 	now := platform.clock_now(service.clock)
-	agent := domain.Agent{agent_id = platform.generate_id(service.ids, "agt_"), owner_user_id = owner, name = input.name, slug = slug, template_id = template_id, instructions = input.instructions, state = .Active, created_at = now, updated_at = now}
+	permission_mode := strings.trim_space(input.permission_mode)
+	if permission_mode == "" do permission_mode = domain.AGENT_PERMISSION_MODE_YOLO
+	if !domain.agent_permission_mode_valid(permission_mode) do return domain.Agent{}, false, domain.domain_error(.Validation_Failed, "permission_mode must be 'yolo' or 'ask'")
+	agent := domain.Agent{agent_id = platform.generate_id(service.ids, "agt_"), owner_user_id = owner, name = input.name, slug = slug, template_id = template_id, instructions = input.instructions, state = .Active, created_at = now, updated_at = now, permission_mode = domain.agent_permission_mode_normalize(permission_mode)}
 	return iface.agent_save(service.agents, agent)
 }
 
@@ -197,6 +217,10 @@ update_agent :: proc(service: ^Agent_Service, auth: contracts.Auth_Context, agen
 		agent.template_id = template_id
 	}
 	if input.instructions != "" do agent.instructions = input.instructions
+	if permission_mode := strings.trim_space(input.permission_mode); permission_mode != "" {
+		if !domain.agent_permission_mode_valid(permission_mode) do return domain.Agent{}, false, domain.domain_error(.Validation_Failed, "permission_mode must be 'yolo' or 'ask'")
+		agent.permission_mode = domain.agent_permission_mode_normalize(permission_mode)
+	}
 	agent.updated_at = platform.clock_now(service.clock)
 	return iface.agent_save(service.agents, agent)
 }
@@ -409,7 +433,8 @@ launch_provider_test_instance :: proc(service: ^Agent_Service, saved: domain.Age
 	strings.write_string(&b, "\",\"agent_instance_id\":\""); write_service_json_string(&b, saved.agent_instance_id)
 	strings.write_string(&b, "\",\"provider\":\""); write_service_json_string(&b, saved.provider)
 	strings.write_string(&b, "\",\"model\":\""); write_service_json_string(&b, saved.model)
-	strings.write_string(&b, "\"}")
+	strings.write_string(&b, "\",\"run_count\":"); strings.write_string(&b, fmt.tprintf("%d", saved.run_count))
+	strings.write_string(&b, "}")
 	command := project_service.Runtime_Command{bridge_id=saved.bridge_id,command_id=command_id,body_json=strings.to_string(b)}
 	if sent, send_err := project_service.bridge_command_send_runtime(service.bridge_command_sink, command); !sent {
 		return send_err
@@ -508,11 +533,22 @@ verify_instance_token :: proc(service: ^Agent_Service, token: string) -> (contra
 	return contracts.Auth_Context{kind = .Instance_Token, user_id = string(inst.owner_user_id), agent_instance_id = inst.agent_instance_id, bridge_id = inst.bridge_id}, inst, true, domain.Domain_Error{}
 }
 
-mark_instance_start_success :: proc(service: ^Agent_Service, auth: contracts.Auth_Context) -> (domain.Agent_Instance, bool, domain.Domain_Error) {
+mark_instance_start_success :: proc(service: ^Agent_Service, auth: contracts.Auth_Context, expected_run_count := -1) -> (domain.Agent_Instance, bool, domain.Domain_Error) {
+	if service == nil do return {}, false, domain.domain_error(.Internal_Error, "agent service is not configured")
+	sync.lock(&service.reconfiguration_mutex)
+	saved, ok, err := mark_instance_start_success_locked(service, auth, expected_run_count)
+	sync.unlock(&service.reconfiguration_mutex)
+	if ok && service.hooks.on_start_success != nil do service.hooks.on_start_success(service.hooks.ctx, saved)
+	return saved, ok, err
+}
+
+mark_instance_start_success_locked :: proc(service: ^Agent_Service, auth: contracts.Auth_Context, expected_run_count: int) -> (domain.Agent_Instance, bool, domain.Domain_Error) {
 	if auth.kind != .Instance_Token || auth.agent_instance_id == "" do return domain.Agent_Instance{}, false, domain.domain_error(.Forbidden, "instance token is required")
 	inst, ok, err := iface.agent_get_instance(service.agents, auth.agent_instance_id)
 	if !ok do return domain.Agent_Instance{}, false, err
 	if inst.owner_user_id != domain.User_ID(auth.user_id) do return domain.Agent_Instance{}, false, domain.domain_error(.Not_Found, "agent instance not found")
+	if expected_run_count >= 0 && inst.run_count != expected_run_count do return {}, false, domain.domain_error(.Conflict, "superseded startup generation")
+	if inst.runtime_status == "stopped" || inst.runtime_status == "stopping" || inst.runtime_status == "failed" do return {}, false, domain.domain_error(.Conflict, "startup signal is for an inactive launch")
 	now := platform.clock_now(service.clock)
 	inst.runtime_status = "running"
 	inst.startup_status = "ready"
@@ -522,7 +558,6 @@ mark_instance_start_success :: proc(service: ^Agent_Service, auth: contracts.Aut
 	inst.stopped_at = ""
 	inst.updated_at = now
 	saved, saved_ok, save_err := iface.agent_save_instance(service.agents, inst)
-	if saved_ok && service.hooks.on_start_success != nil do service.hooks.on_start_success(service.hooks.ctx, saved)
 	return saved, saved_ok, save_err
 }
 
@@ -1674,6 +1709,8 @@ launch_command_json_full :: proc(service: ^Agent_Service, command_id: string, in
 	coordinator_id := ""
 	chain_title := ""
 	agent_name := ""
+	// REQ-EXT-PERM-2: the instance override wins over the agent's mode.
+	permission_mode := domain.agent_instance_effective_permission_mode(inst)
 	if service != nil {
 		if service.taskchains != nil && inst.chain_id != "" {
 			if chain, chain_ok, _ := iface.taskchain_get_chain(service.taskchains, domain.Task_Chain_ID(inst.chain_id)); chain_ok {
@@ -1685,6 +1722,7 @@ launch_command_json_full :: proc(service: ^Agent_Service, command_id: string, in
 		if service.agents != nil && inst.agent_id != "" {
 			if agent, agent_ok, _ := iface.agent_get(service.agents, inst.agent_id); agent_ok {
 				agent_name = agent.name
+				permission_mode = domain.effective_permission_mode(inst.permission_mode, agent.permission_mode)
 			}
 		}
 	}
@@ -1705,6 +1743,9 @@ launch_command_json_full :: proc(service: ^Agent_Service, command_id: string, in
 	strings.write_string(&b, "\",\"provider\":\""); write_service_json_string(&b, inst.provider)
 	strings.write_string(&b, "\",\"model\":\""); write_service_json_string(&b, inst.model)
 	strings.write_string(&b, "\",\"launch_epoch\":\""); write_service_json_string(&b, inst.launch_epoch)
+	strings.write_string(&b, "\",\"run_count\":"); strings.write_string(&b, fmt.tprintf("%d", inst.run_count))
+	// REQ-EXT-PERM-2: "ask" makes the bridge launch without the catalog yolo flags.
+	strings.write_string(&b, ",\"permission_mode\":\""); write_service_json_string(&b, permission_mode)
 	token := instance_assertion_token(inst); defer delete(token)
 	strings.write_string(&b, "\",\"instance_token\":\""); write_service_json_string(&b, token)
 	strings.write_string(&b, "\",\"bootstrap_url\":\"/api/v1/bridge/agent-instances/"); write_service_json_string(&b, inst.agent_instance_id)
@@ -1727,6 +1768,7 @@ stop_command_json :: proc(command_id, instance_id, reason: string, force: bool =
 // the agent instance, the task it is focused on, and its action role ("worker" or
 // "reviewer"). Coordinators are never emitted (the reconcile pass excludes them).
 Wake_Agent_Run_Entry :: struct {
+	run_count:         int,
 	agent_instance_id: string,
 	task_id:           string,
 	role:              string,
@@ -1748,6 +1790,9 @@ Wake_Agent_Run_Entry :: struct {
 	// (a JSON object, emitted verbatim). Empty for non-lease wakes.
 	lease_id:          string,
 	pack_json:         string,
+	// REQ-EXT-PERM-2: the durable agent's permission mode ("yolo" | "ask");
+	// omitted when empty so the bridge keeps the yolo launch.
+	permission_mode:   string,
 }
 
 // wake_agent_command_json builds the ephemeral-lifecycle push the reconcile pass
@@ -1807,6 +1852,10 @@ wake_agent_command_json :: proc(command_id, chain_id: string, run: []Wake_Agent_
 		if entry.lease_id != "" {
 			strings.write_string(&b, ",\"lease_id\":\""); write_service_json_string(&b, entry.lease_id); strings.write_string(&b, "\"")
 		}
+		if entry.permission_mode != "" {
+			strings.write_string(&b, ",\"permission_mode\":\""); write_service_json_string(&b, entry.permission_mode); strings.write_string(&b, "\"")
+		}
+		strings.write_string(&b, ",\"run_count\":"); strings.write_string(&b, fmt.tprintf("%d", entry.run_count))
 		if strings.has_prefix(strings.trim_space(entry.pack_json), "{") {
 			strings.write_string(&b, ",\"pack\":"); strings.write_string(&b, strings.trim_space(entry.pack_json))
 		}
@@ -2191,6 +2240,7 @@ bootstrap_manifest_json_for_bridge :: proc(service: ^Agent_Service, owner: domai
 	// with provider_missing (REQ-ERR-6).
 	strings.write_string(&b, "\",\"provider\":\""); write_service_json_string(&b, inst.provider)
 	strings.write_string(&b, "\",\"model\":\""); write_service_json_string(&b, inst.model)
+	strings.write_string(&b, "\",\"permission_mode\":\""); write_service_json_string(&b, domain.effective_permission_mode(inst.permission_mode, agent.permission_mode))
 	token := instance_assertion_token(inst); defer delete(token)
 	strings.write_string(&b, "\",\"instance_token\":\""); write_service_json_string(&b, token)
 	strings.write_string(&b, "\",\"hub_url\":\""); write_service_json_string(&b, bridge.hub_url)

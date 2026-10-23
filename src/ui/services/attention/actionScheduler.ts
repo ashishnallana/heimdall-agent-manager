@@ -125,6 +125,20 @@ export function createActionScheduler(opts: { delayMs?: number; timers?: Timers 
       settled = next;
       emit();
     },
+    /**
+     * Lift a settle after ms, so a card the server STILL returns by then shows
+     * again (an accepted decision that never reached the agent). Harmless when
+     * the card is gone: prune already dropped the key and unsettle is a no-op.
+     */
+    recheckAfter(cardId: string, ms: number): void {
+      timers.setTimeout(() => {
+        if (!settled.has(cardId)) return;
+        const next = new Set(settled);
+        next.delete(cardId);
+        settled = next;
+        emit();
+      }, ms);
+    },
     /** Forget settled cards the server no longer returns. */
     prune(liveCardIds: Iterable<string>): void {
       const live = new Set(liveCardIds);

@@ -1,0 +1,130 @@
+{
+  "description": "Heimdall: forwards Claude Code activity, subagent, tool, file-edit and permission events to the local Heimdall Bridge via ham-ctl. No-op outside a Heimdall-launched agent.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -x \"${HEIMDALL_CTL_BIN:-}\" ] || exit 0; exec \"$HEIMDALL_CTL_BIN\" extension hook claude",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -x \"${HEIMDALL_CTL_BIN:-}\" ] || exit 0; exec \"$HEIMDALL_CTL_BIN\" extension hook claude",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -x \"${HEIMDALL_CTL_BIN:-}\" ] || exit 0; exec \"$HEIMDALL_CTL_BIN\" extension hook claude",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -x \"${HEIMDALL_CTL_BIN:-}\" ] || exit 0; exec \"$HEIMDALL_CTL_BIN\" extension hook claude",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -x \"${HEIMDALL_CTL_BIN:-}\" ] || exit 0; exec \"$HEIMDALL_CTL_BIN\" extension hook claude",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -x \"${HEIMDALL_CTL_BIN:-}\" ] || exit 0; exec \"$HEIMDALL_CTL_BIN\" extension hook claude",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -x \"${HEIMDALL_CTL_BIN:-}\" ] || exit 0; exec \"$HEIMDALL_CTL_BIN\" extension hook claude",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -x \"${HEIMDALL_CTL_BIN:-}\" ] || exit 0; exec \"$HEIMDALL_CTL_BIN\" extension hook claude",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -x \"${HEIMDALL_CTL_BIN:-}\" ] || exit 0; exec \"$HEIMDALL_CTL_BIN\" extension hook claude",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -x \"${HEIMDALL_CTL_BIN:-}\" ] || exit 0; exec \"$HEIMDALL_CTL_BIN\" extension hook claude",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -x \"${HEIMDALL_CTL_BIN:-}\" ] || exit 0; exec \"$HEIMDALL_CTL_BIN\" extension hook claude",
+            "timeout": 330
+          }
+        ]
+      }
+    ]
+  }
+}

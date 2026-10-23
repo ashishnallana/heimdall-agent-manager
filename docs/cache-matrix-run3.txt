@@ -1,0 +1,15 @@
+fixture $HOME/.cache/heimdall-tests/cache-matrix/fixture-prod.db: 8798208 bytes, 2148 pages of 4096; workload = 5 statements x 10 per pass
+idle CLI connection max RSS (open, no workload, default pragmas): 5252 KiB
+
+| Config | Mode | Pass-1 hits | Pass-1 misses | Pass-1 miss % | Pass-1 ms | Warm (passes 2-5) misses | Warm miss % | Warm ms/pass | Max RSS KiB | RSS over idle KiB |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| default (-2000 = 2 MiB, mmap 0) | warm | 578540 | 8825 | 1.50 | 117.0 | 35072 | 1.49 | 114.1 | 7528 | 2276 |
+| default (-2000 = 2 MiB, mmap 0) | cold | 578540 | 8825 | 1.50 | 137.2 | 35072 | 1.49 | 114.5 | 7364 | 2112 |
+| cache_size=-8000 (8 MiB) | warm | 586339 | 991 | 0.17 | 112.1 | 0 | 0.00 | 105.7 | 9736 | 4484 |
+| cache_size=-8000 (8 MiB) | cold | 586339 | 991 | 0.17 | 125.8 | 0 | 0.00 | 104.5 | 9648 | 4396 |
+| cache_size=-16000 (16 MiB) | warm | 586339 | 991 | 0.17 | 109.0 | 0 | 0.00 | 104.2 | 9876 | 4624 |
+| cache_size=-16000 (16 MiB) | cold | 586339 | 991 | 0.17 | 129.1 | 0 | 0.00 | 104.6 | 9588 | 4336 |
+| mmap_size=64 MiB | warm | 51 | 2 | 3.77 | 110.2 | 0 | 0.00 | 105.8 | 12664 | 7412 |
+| mmap_size=64 MiB | cold | 51 | 2 | 3.77 | 119.3 | 0 | 0.00 | 104.8 | 12432 | 7180 |
+| cache -8000 + mmap 64 MiB | warm | 50 | 0 | 0.00 | 107.0 | 0 | 0.00 | 105.6 | 12472 | 7220 |
+| cache -8000 + mmap 64 MiB | cold | 50 | 0 | 0.00 | 115.6 | 0 | 0.00 | 103.8 | 12212 | 6960 |

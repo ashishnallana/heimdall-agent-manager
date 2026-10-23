@@ -76,6 +76,16 @@ Conn :: struct {
 	path: string,
 }
 
+// MAIN_CONN_CACHE_SIZE_PRAGMA sizes the page cache of the Hub's shared request
+// connection only (app/wiring.odin) to 8 MiB instead of SQLite's 2 MiB default
+// (-2000). The pragma is per connection, so the vault/enroll/billing write conns and
+// the metrics conn keep the default. Measured on the prod-shaped fixture
+// (docs/call-reduction-integrated-results.md): warm miss ratio 1.49% -> 0 and about
+// 8% less local exec time; +2.3 MiB measured, at most +6 MiB RSS. mmap_size stays 0
+// (an I/O error on a mapped page is SIGBUS, not SQLITE_IOERR) and nothing here touches
+// durability (journal_mode, synchronous, checkpoints).
+MAIN_CONN_CACHE_SIZE_PRAGMA :: "PRAGMA cache_size = -8000;"
+
 // open opens a handle and, with DB telemetry on, tags it with `kind` for the
 // `conn` label. Production call sites pass their kind; tests keep .Other.
 open :: proc(path: string, kind := Conn_Kind.Other) -> (Conn, bool, domain.Domain_Error) {

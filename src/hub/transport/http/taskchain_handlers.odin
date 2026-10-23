@@ -979,6 +979,9 @@ Chain_List_Item :: struct {
 // returned dynamic array is caller-owned (delete it); its strings are not.
 enrich_chain_list_items :: proc(h: ^Taskchain_Handlers, auth: contracts.Auth_Context, chains: []domain.Task_Chain, only_with_tasks: bool, include_archived: bool) -> [dynamic]Chain_List_Item {
 	items := make([dynamic]Chain_List_Item)
+	// Empty snapshots/deltas (including tombstones) need no project or task data.
+	// The caller still assembles the feed, revisions and deletion documents.
+	if len(chains) == 0 do return items
 	proj_idx := conversation_project_index(h, auth)
 	defer destroy_conversation_project_index(&proj_idx)
 	meta_by_project := make(map[string]Resolved_Project_Meta); defer delete(meta_by_project)
@@ -1032,7 +1035,7 @@ destroy_conversation_project_index :: proc(idx: ^Conversation_Project_Index) {
 }
 
 // conversation_project_index maps coordinator instance -> project id AND chain id -> project id
-// for the whole request in ONE conversation listing.
+// for the whole request in ONE bounded, message-free conversation projection.
 //
 // This used to be a per-chain lookup (get_conversation_by_instance), memoized by
 // coordinator instance. The memo never hit: coordinator instances are unique per
@@ -1054,7 +1057,7 @@ conversation_project_index :: proc(h: ^Taskchain_Handlers, auth: contracts.Auth_
 		coord_by_chain = make(map[string]string),
 	}
 	if h.content == nil do return idx
-	rows, err := content_service.list_conversations(h.content, auth, 200, "")
+	rows, err := content_service.list_conversation_project_links(h.content, auth)
 	if err.code != .None do return idx
 	defer delete(rows)
 	for c in rows {

@@ -59,7 +59,7 @@ test('model: visible items, per-tab counts, default tab, stepping, swipe', () =>
   const items = [taskItem('a'), taskItem('b'), messageItem('m')];
   const hidden = new Set(['crd_task_a']);
   assert.deepEqual(model.visibleItems(items, 'task', hidden).map((i: any) => i.card_id), ['crd_task_b']);
-  assert.deepEqual(model.tabCounts({ total: 3, older: 0, message: 1, task: 2, memory: 0, snoozed: 0 }, items, hidden), { message: 1, task: 1, memory: 0, snoozed: 0 });
+  assert.deepEqual(model.tabCounts({ total: 3, older: 0, message: 1, task: 2, memory: 0, snoozed: 0 }, items, hidden), { agent_blocker: 0, message: 1, task: 1, memory: 0, snoozed: 0 });
   assert.equal(model.defaultTab({ message: 0, task: 2 }), 'task');
   assert.equal(model.defaultTab({ message: 1, task: 2 }), 'message');
   assert.equal(model.defaultTab({ message: 0, task: 0 }), 'message');
@@ -182,8 +182,8 @@ test('prefs: range persists, falls back to 24h on junk or broken storage', () =>
 });
 
 test('api: counts and items are normalised defensively', () => {
-  assert.deepEqual(api.normalizeAttentionCounts({ total: 3, older: -1, message: '2', task: 1.7 }), { total: 3, older: 0, message: 0, task: 1, memory: 0, snoozed: 0 });
-  assert.deepEqual(api.normalizeAttentionCounts(null), { total: 0, older: 0, message: 0, task: 0, memory: 0, snoozed: 0 });
+  assert.deepEqual(api.normalizeAttentionCounts({ total: 3, older: -1, message: '2', task: 1.7 }), { total: 3, older: 0, message: 0, task: 1, memory: 0, snoozed: 0, agent_blocker: 0 });
+  assert.deepEqual(api.normalizeAttentionCounts(null), { total: 0, older: 0, message: 0, task: 0, memory: 0, snoozed: 0, agent_blocker: 0 });
   const items = api.normalizeAttentionItems([taskItem('a'), { card_id: 'x', kind: 'shell', details: {}, action_refs: {} }, null, { kind: 'task' }]);
   assert.deepEqual(items.map((i: any) => i.card_id), ['crd_task_a']);
 });
@@ -583,7 +583,7 @@ test('model: snoozed tab, hide keys, next live tab, wake time', () => {
   assert.deepEqual(model.visibleItems(items, 'task', new Set()).map((i: any) => i.card_id), ['crd_task_a'], 'snoozed cards stay out of live tabs');
   assert.equal(model.hideKey(snz), 'crd_task_z#snoozed@2026-10-17T09:00:00Z');
   assert.equal(model.hideKey(live), 'crd_task_a');
-  assert.deepEqual(model.tabCounts({ total: 2, older: 0, message: 1, task: 1, memory: 0, snoozed: 1 }, items, new Set(['crd_task_z#snoozed@2026-10-17T09:00:00Z'])), { message: 1, task: 1, memory: 0, snoozed: 0 });
+  assert.deepEqual(model.tabCounts({ total: 2, older: 0, message: 1, task: 1, memory: 0, snoozed: 1 }, items, new Set(['crd_task_z#snoozed@2026-10-17T09:00:00Z'])), { agent_blocker: 0, message: 1, task: 1, memory: 0, snoozed: 0 });
   assert.equal(model.nextLiveTab('message', { message: 0, task: 2, snoozed: 3 }), 'task');
   assert.equal(model.nextLiveTab('task', { message: 0, task: 0, snoozed: 3 }), null, 'never into Snoozed');
   assert.equal(model.nextLiveTab('snoozed', { message: 0, task: 1, snoozed: 0 }), 'task');

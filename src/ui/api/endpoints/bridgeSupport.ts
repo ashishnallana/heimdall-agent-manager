@@ -308,6 +308,9 @@ export const bridgeSupportApi = heimdallApi.injectEndpoints({
                 .filter((model: any) => model?.state === 'active')
                 .map((model: any) => String(model?.model_id || ''))
                 .filter(Boolean),
+              // REQ-EXT-DET-1: the catalog's extension descriptor + measured state
+              // (null when the provider ships no extension).
+              extension: entry?.extension ?? null,
             }));
           return { data: { bridge_id: data?.bridge_id || bridgeId, providers } };
         } catch (error: any) {

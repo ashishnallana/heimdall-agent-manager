@@ -44,8 +44,8 @@ bridge_permission_clamp_timeout_bounds :: proc(t: ^testing.T) {
 bridge_permission_register_rejects_dupes :: proc(t: ^testing.T) {
 	sync.mutex_lock(&bridge_permission_test_mutex)
 	defer sync.mutex_unlock(&bridge_permission_test_mutex)
-	bridge_permission_test_reset()
-	defer bridge_permission_test_reset()
+	bridge_permission_test_reset("inst_a")
+	defer bridge_permission_test_reset("inst_a")
 	now := bridge_runtime_now_ms()
 	p := Bridge_Permission_Pending{request_id = "r1", agent_instance_id = "inst_a", tool = "bash", risk = "risky", created_unix_ms = now, deadline_unix_ms = now + 1000}
 	testing.expect(t, bridge_permission_register(p))
@@ -60,8 +60,8 @@ bridge_permission_register_rejects_dupes :: proc(t: ^testing.T) {
 bridge_permission_wait_resolves_from_reply :: proc(t: ^testing.T) {
 	sync.mutex_lock(&bridge_permission_test_mutex)
 	defer sync.mutex_unlock(&bridge_permission_test_mutex)
-	bridge_permission_test_reset()
-	defer bridge_permission_test_reset()
+	bridge_permission_test_reset("inst_b")
+	defer bridge_permission_test_reset("inst_b")
 	now := bridge_runtime_now_ms()
 	p := Bridge_Permission_Pending{request_id = "r2", agent_instance_id = "inst_b", tool = "write", risk = "risky", created_unix_ms = now, deadline_unix_ms = now + 5000}
 	testing.expect(t, bridge_permission_register(p))
@@ -81,8 +81,8 @@ bridge_permission_wait_resolves_from_reply :: proc(t: ^testing.T) {
 bridge_permission_wait_times_out_to_deny :: proc(t: ^testing.T) {
 	sync.mutex_lock(&bridge_permission_test_mutex)
 	defer sync.mutex_unlock(&bridge_permission_test_mutex)
-	bridge_permission_test_reset()
-	defer bridge_permission_test_reset()
+	bridge_permission_test_reset("inst_c")
+	defer bridge_permission_test_reset("inst_c")
 	now := bridge_runtime_now_ms()
 	p := Bridge_Permission_Pending{request_id = "r3", agent_instance_id = "inst_c", tool = "bash", risk = "risky", created_unix_ms = now, deadline_unix_ms = now + 50}
 	testing.expect(t, bridge_permission_register(p))
@@ -125,8 +125,8 @@ Perm_Integ_Result :: struct {
 bridge_permission_request_reply_roundtrip_via_handler :: proc(t: ^testing.T) {
 	sync.mutex_lock(&bridge_permission_test_mutex)
 	defer sync.mutex_unlock(&bridge_permission_test_mutex)
-	bridge_permission_test_reset()
-	defer bridge_permission_test_reset()
+	bridge_permission_test_reset("inst_integ")
+	defer bridge_permission_test_reset("inst_integ")
 
 	rec := Bridge_Local_Agent_Token_Record{agent_instance_id = "inst_integ", role = .Agent}
 
@@ -182,8 +182,8 @@ bridge_permission_request_reply_roundtrip_via_handler :: proc(t: ^testing.T) {
 bridge_permission_reply_unknown_request_not_accepted :: proc(t: ^testing.T) {
 	sync.mutex_lock(&bridge_permission_test_mutex)
 	defer sync.mutex_unlock(&bridge_permission_test_mutex)
-	bridge_permission_test_reset()
-	defer bridge_permission_test_reset()
+	bridge_permission_test_reset("inst_integ2")
+	defer bridge_permission_test_reset("inst_integ2")
 
 	rec := Bridge_Local_Agent_Token_Record{agent_instance_id = "inst_integ2", role = .Agent}
 	resp := bridge_local_handle_agent_method("id-x", "agent.permission.reply", "{\"request_id\":\"nope\",\"decision\":\"allow\"}", rec)

@@ -54,7 +54,37 @@ ctl_hub_agents :: proc(base, token, action: string, args: []string) {
 		ctl_hub_request(base, token, "POST", "/api/v1/agents", json_object_from_slice(fields[:]))
 		return
 	}
-	fmt.println("usage: ham-ctl hub agents <list|instances|running|live|create>")
+	if action == "update" {
+		// User token only: an agent must not be able to lift its own permission
+		// gate, so the hub PATCH stays user-authenticated (REQ-EXT-PERM-2).
+		agent_id := option_value(args, "--agent-id", option_value(args, "--agent", ""))
+		if agent_id == "" { fmt.println(CTL_HUB_AGENTS_UPDATE_USAGE); return }
+		body, ok, msg := ctl_agents_update_params(args)
+		if !ok { fmt.println(msg); fmt.println(CTL_HUB_AGENTS_UPDATE_USAGE); return }
+		ctl_hub_request(base, token, "PATCH", fmt.tprintf("/api/v1/agents/%s", safe_path_part(agent_id)), body)
+		return
+	}
+	fmt.println("usage: ham-ctl hub agents <list|instances|running|live|create|update>")
+}
+
+CTL_HUB_AGENTS_UPDATE_USAGE :: "usage: ham-ctl hub agents update --agent-id <agt_id> [--name <n>] [--slug <s>] [--template <id>] [--instructions <t>] [--permission-mode yolo|ask]"
+
+// ctl_agents_update_params builds the PATCH /api/v1/agents/<id> body: only the
+// fields passed are sent (the hub keeps the rest). --permission-mode is checked
+// here so a typo fails locally instead of as a hub validation error.
+ctl_agents_update_params :: proc(args: []string) -> (params: string, ok: bool, msg: string) {
+	fields := make([dynamic]string)
+	updates := 0
+	if v := option_value(args, "--name", ""); v != "" { append(&fields, json_kv("name", v)); updates += 1 }
+	if v := option_value(args, "--slug", ""); v != "" { append(&fields, json_kv("slug", v)); updates += 1 }
+	if v := option_value(args, "--template", ""); v != "" { append(&fields, json_kv("template_id", v)); updates += 1 }
+	if v := option_value(args, "--instructions", ""); v != "" { append(&fields, json_kv("instructions", v)); updates += 1 }
+	if v := option_value(args, "--permission-mode", ""); v != "" {
+		if v != "yolo" && v != "ask" do return "", false, "--permission-mode must be 'yolo' or 'ask'"
+		append(&fields, json_kv("permission_mode", v)); updates += 1
+	}
+	if updates == 0 do return "", false, "agents update needs at least one of --name, --slug, --template, --instructions, --permission-mode"
+	return json_object_from_slice(fields[:]), true, ""
 }
 
 ctl_hub_launch :: proc(base, token: string, args: []string) {
@@ -753,7 +783,7 @@ print_hub_help :: proc(cmd: []string) {
 	if len(cmd) > 0 {
 		if cmd[0] == "hub" || cmd[0] == "help" { if len(cmd) > 1 do resource = cmd[1] } else { resource = cmd[0] }
 	}
-	if resource == "agents" { fmt.println("ham-ctl hub agents <list|create>\nPurpose: manage durable Hub agent identities.\nExamples:\n  ham-ctl hub --hub-url http://127.0.0.1:49322 --user-token hut_... agents list\n  ham-ctl hub --hub-url http://127.0.0.1:49322 --user-token hut_... agents create --name reviewer --model normal"); return }
+	if resource == "agents" { fmt.println("ham-ctl hub agents <list|create|update>\nPurpose: manage durable Hub agent identities.\nExamples:\n  ham-ctl hub --hub-url http://127.0.0.1:49322 --user-token hut_... agents list\n  ham-ctl hub --hub-url http://127.0.0.1:49322 --user-token hut_... agents create --name reviewer --model normal\n  ham-ctl hub --hub-url http://127.0.0.1:49322 --user-token hut_... agents update --agent-id agt_123 --permission-mode ask"); return }
 	if resource == "launch" { fmt.println("ham-ctl hub launch --agent-id <id> [--bridge-id <id>] [--model <model>]\nPurpose: start a new agent instance through Hub/Bridge.\nExample:\n  ham-ctl hub --hub-url http://127.0.0.1:49322 --user-token hut_... launch --agent-id reviewer --model normal"); return }
 	if resource == "chats" { fmt.println("ham-ctl hub chats <list|create|send|messages>\nPurpose: read/write user chat conversations.\nExamples:\n  ham-ctl hub --hub-url http://127.0.0.1:49322 --user-token hut_... chats list\n  ham-ctl hub --hub-url http://127.0.0.1:49322 --user-token hut_... chats send --conversation-id chat_123 --body 'Hello'"); return }
 	if resource == "tasks" { fmt.println("ham-ctl hub tasks <list|create|update|publish|cancel|depend|comments> --chain-id <id>\nPurpose: manage Hub task records.\nUser approval:\n  create ... --require-user-approval\n  update ... --require-user-approval | --no-require-user-approval\n  --assignee/--reviewer take durable agent ids (agt_...) only.\nExample:\n  ham-ctl hub --hub-url http://127.0.0.1:49322 --user-token hut_... tasks list --chain-id chain_123"); return }

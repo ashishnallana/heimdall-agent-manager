@@ -237,7 +237,8 @@ vault_announce_directory :: proc(event_bus: ^events.User_Event_Bus, push: ^push_
 
 // ── GET /api/v1/vault/directory ─────────────────────────────────────────────
 // Everything a client (and, relayed by its approver, a bridge) needs to verify the
-// chain. Updates last_seen_at when a (valid) device signature is attached.
+// chain. A valid device signature refreshes approximate presence (coalesced by
+// the repository within one hour); authorization never uses this timestamp.
 vault_directory_get_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Vault_Directory_Handlers)(ctx)
 	auth, ok, resp := require_vault_user(h, req)

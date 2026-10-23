@@ -17,6 +17,7 @@ Bridge_Local_Agent_Token_Record :: struct {
 	token_hash: string,
 	agent_instance_id: string,
 	instance_token: string, // Hub credential: Bridge-held only, never returned to wrapper/agent.
+	run_count: int, // Hub launch generation; zero for records from older hubs.
 	role: Bridge_Local_Token_Role,
 	issued_at_unix_ms: i64,
 	rotated_at_unix_ms: i64,
@@ -41,7 +42,7 @@ bridge_agent_token_store_init :: proc() {
 	bridge_agent_token_store_load()
 }
 
-bridge_agent_token_issue :: proc(agent_instance_id, instance_token: string, role: Bridge_Local_Token_Role) -> Bridge_Local_Token_Issue_Result {
+bridge_agent_token_issue :: proc(agent_instance_id, instance_token: string, role: Bridge_Local_Token_Role, run_count := 0) -> Bridge_Local_Token_Issue_Result {
 	if bridge_local_token_records == nil do bridge_agent_token_store_init()
 	plain := bridge_local_generate_token("hlat_")
 	now := bridge_local_now_unix_ms()
@@ -49,6 +50,7 @@ bridge_agent_token_issue :: proc(agent_instance_id, instance_token: string, role
 		token_hash = bridge_local_hash_token(plain),
 		agent_instance_id = strings.clone(strings.trim_space(agent_instance_id)),
 		instance_token = strings.clone(strings.trim_space(instance_token)),
+		run_count = run_count,
 		role = role,
 		issued_at_unix_ms = now,
 	}
@@ -76,7 +78,8 @@ bridge_agent_token_rotate :: proc(plaintext: string) -> (Bridge_Local_Token_Issu
 	rec, ok := bridge_agent_token_verify(plaintext)
 	if !ok do return {}, false
 	_ = bridge_agent_token_invalidate(plaintext)
-	result := bridge_agent_token_issue(rec.agent_instance_id, rec.instance_token, rec.role)
+	result := bridge_agent_token_issue(rec.agent_instance_id, rec.instance_token, rec.role, rec.run_count)
+	bridge_startup_rotate_token(rec, result.plaintext_token)
 	return result, true
 }
 
@@ -208,6 +211,7 @@ bridge_agent_token_store_load_file :: proc(path: string) {
 			token_hash = bridge_agent_token_json_string(trimmed, "token_hash", ""),
 			agent_instance_id = bridge_agent_token_json_string(trimmed, "agent_instance_id", ""),
 			instance_token = bridge_agent_token_json_string(trimmed, "instance_token", ""),
+			run_count = int(bridge_agent_token_json_i64(trimmed, "run_count", 0)),
 			role = bridge_agent_token_role_from_string(bridge_agent_token_json_string(trimmed, "role", "agent")),
 			issued_at_unix_ms = bridge_agent_token_json_i64(trimmed, "issued_at_unix_ms", 0),
 			rotated_at_unix_ms = bridge_agent_token_json_i64(trimmed, "rotated_at_unix_ms", 0),
@@ -234,6 +238,7 @@ bridge_agent_token_store_save_locked :: proc() {
 		strings.write_string(&b, "\",\"issued_at_unix_ms\":"); strings.write_string(&b, fmt.tprintf("%d", rec.issued_at_unix_ms))
 		strings.write_string(&b, ",\"rotated_at_unix_ms\":"); strings.write_string(&b, fmt.tprintf("%d", rec.rotated_at_unix_ms))
 		strings.write_string(&b, ",\"invalidated_at_unix_ms\":"); strings.write_string(&b, fmt.tprintf("%d", rec.invalidated_at_unix_ms))
+		strings.write_string(&b, ",\"run_count\":"); strings.write_string(&b, fmt.tprintf("%d", rec.run_count))
 		strings.write_string(&b, "}\n")
 	}
 	// S2: atomic write — write to a temp file then rename over the target, so a
@@ -328,6 +333,17 @@ bridge_agent_instance_assertion :: proc(instance_id: string) -> string {
 		if rec.agent_instance_id == instance_id && rec.invalidated_at_unix_ms == 0 do return strings.clone(rec.instance_token)
 	}
 	return ""
+}
+
+bridge_agent_instance_run_count :: proc(instance_id: string) -> int {
+	sync.mutex_lock(&bridge_local_token_mutex)
+	defer sync.mutex_unlock(&bridge_local_token_mutex)
+	for i := len(bridge_local_token_records) - 1; i >= 0; i -= 1 {
+		rec := bridge_local_token_records[i]
+		// Keep the generation fence after stop invalidates the credentials.
+		if rec.agent_instance_id == instance_id do return rec.run_count
+	}
+	return 0
 }
 bridge_agent_instance_last_assertion :: proc(instance_id: string) -> string {
 	sync.mutex_lock(&bridge_local_token_mutex)

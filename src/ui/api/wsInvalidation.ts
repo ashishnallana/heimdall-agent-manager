@@ -1,3 +1,4 @@
+import { liveFrameReceived, liveInstanceUnavailable, liveResyncRequested, parseLiveSnapshot } from '../store/toolActivitySlice';
 import { heimdallApi, HEIMDALL_TAG_TYPES } from './heimdallApi';
 import { tasksApi } from './endpoints/tasks';
 import { normalizeChain, workspaceApi } from './endpoints/workspace';
@@ -5,6 +6,7 @@ import { chatEndpoints } from './endpoints/chats';
 import { agentsApi, patchAgentCachesFromWs } from './endpoints/agents';
 import { agentsLiveApi } from './endpoints/agentsLive';
 import { sidebarApi } from './endpoints/sidebar';
+import { shellListMayContain, shellListTagId, shellsApi, type ShellSessionFacts } from './endpoints/shells';
 import {
   announceConversationMessagesRead,
   applyReadReceiptToDraft,
@@ -13,6 +15,7 @@ import {
 } from './conversationMessageEvents';
 import { patchMemoryCachesFromWs } from './endpoints/memory';
 import { bridgeSupportApi } from './endpoints/bridgeSupport';
+import { AGENT_BLOCKERS_CHANGE } from '../components/extension/blockersModel';
 import { upsertTaskInList, upsertTaskLogEvent } from './taskCache';
 import { attentionEventReceived } from '../store/attentionSlice';
 import { announcePaneVaultLocked } from '../utils/vaultLockedError';
@@ -746,29 +749,65 @@ function handleAgentEvent(dispatch: any, payload: any, ctx: WsCtx) {
 /**
  * Repaint everything that reads a shell session, from one event.
  *
- * Three tags, because three different consumers cache a session and REQ-SHELL-6 §6
+ * Two kinds of tag, because several consumers cache a session and REQ-SHELL-6 §6
  * leaves no poller to catch whichever one is missed:
- *   ShellSession:<id>   the detail view, the run indicator and the log viewer
- *   ShellSessions:<chain>  the chain-scoped lists, including the active-servers panel
- *   ShellSessions:LIST  the owner-wide list page and the tab badge
+ *   ShellSession:<id>        the detail view, the run indicator and the log viewer
+ *   ShellSessions:q:<path>   each mounted `listShells` entry that may hold the session
  *
- * `chainId` is OPTIONAL and usually absent: the hub's shell_session_exited frame
- * carries only session_id/status/exit_code/ts (_shell_exited_event_json,
- * shell_session_service.odin:1993). That is not a gap to work around — `listShells`
- * provides BOTH its chain tag and `LIST` (endpoints/shells.ts), so invalidating `LIST`
- * already refetches every chain-scoped list. The chain tag is invalidated as well only
- * when an event happens to name a chain, which costs nothing and keeps the helper
- * correct if a producer starts including it.
+ * One run is three frames (shell_session_started, resource_changed "running",
+ * shell_session_exited) and every tab mounts several list keys (status bar, aux
+ * launcher, one run list per conversation shown). Invalidating `ShellSessions:LIST`
+ * per frame refetched every key three times per run. Instead the frame names only the
+ * cached lists `shellListMayContain` cannot rule out — a run never reaches a chain or
+ * bridge list, and another agent's run never reaches this agent's run list — and the
+ * tags go through the same burst window as every other targeted invalidation, so a
+ * quick start/running/exit costs one refetch per list. Whenever the session or the
+ * cached lists cannot be read, the frame falls back to `ShellSessions:LIST`.
+ *
+ * `facts` are what the frame itself states: shell_session_started carries kind and
+ * chain_id (omitted when empty, _shell_session_started_event_json), the REQ-2 change
+ * frame carries chain_id; shell_session_exited carries neither. The scope columns of a
+ * session never change, so a row already in any cache supplies the rest.
  */
-function invalidateShellSession(dispatch: any, sessionId: string, chainId?: string): void {
-  const tags: any[] = [{ type: 'ShellSessions' as const, id: 'LIST' }];
-  if (chainId) tags.push({ type: 'ShellSessions' as const, id: chainId });
-  if (sessionId) tags.push({ type: 'ShellSession' as const, id: sessionId });
-  dispatch(heimdallApi.util.invalidateTags(tags));
+function invalidateShellSession(dispatch: any, sessionId: string, facts: ShellSessionFacts = {}): void {
+  const tags: Array<{ type: string; id: string }> = [];
+  if (sessionId) tags.push({ type: 'ShellSession', id: sessionId });
+  const lists = sessionId ? shellListTagsFor(readState(dispatch), sessionId, facts) : null;
+  if (lists) tags.push(...lists);
+  else tags.push({ type: 'ShellSessions', id: 'LIST' });
+  queueInvalidation(dispatch, tags);
   // ...and tick the non-RTK consumers. The Shells list page pages through
   // `useInfiniteList` with its own fetch promise, so no tag above can reach it; see
   // shellSlice.ts for why that page needs a separate signal rather than a poller.
   dispatch(shellSessionEventReceived({ sessionId }));
+}
+
+// The per-entry tags of the cached lists that may hold the session; null when the
+// cache cannot be read, which means "refetch them all".
+function shellListTagsFor(state: any, sessionId: string, facts: ShellSessionFacts): Array<{ type: string; id: string }> | null {
+  if (!state?.[heimdallApi.reducerPath]) return null;
+  try {
+    const args = shellsApi.util.selectCachedArgsForQuery(state, 'listShells') as any[];
+    const known: ShellSessionFacts = { ...facts };
+    const rows: any[] = [shellsApi.endpoints.getShellSession.select({ sessionId })(state)?.data];
+    for (const arg of args) rows.push(...(shellsApi.endpoints.listShells.select(arg)(state)?.data?.sessions ?? []));
+    const row = rows.find((r) => r?.session_id === sessionId);
+    if (row) {
+      for (const key of ['kind', 'bridge_id', 'project_id', 'chain_id', 'agent_instance_id'] as const) {
+        if (typeof row[key] === 'string') (known as Record<string, string>)[key] = row[key];
+      }
+    }
+    return args
+      .filter((arg) => shellListMayContain(arg || {}, known))
+      .map((arg) => ({ type: 'ShellSessions', id: shellListTagId(arg || {}) }));
+  } catch {
+    return null;
+  }
+}
+
+// A frame's own statement of a field, or undefined when the frame does not carry it.
+function stated(payload: any, key: string): string | undefined {
+  return payload && typeof payload[key] === 'string' ? payload[key] : undefined;
 }
 
 // agent_instance/<created|status_changed|config_changed|current_task_changed> carry the
@@ -859,6 +898,34 @@ function handleInstanceChanged(dispatch: any, payload: any, ctx: WsCtx, instance
   }
   // Legacy caches + the "identity missing from the catalogue" check (agents.ts).
   handleAgentEvent(dispatch, { ...payload, type: 'agent_update', agent_instance_id: instanceId, summary }, ctx);
+}
+
+/**
+ * Provider extension frames on an agent instance (REQ-EXT-BLK-1, REQ-EXT-SUB-2):
+ *   'extension_events'       {count, last_seq, provider_session_id, session_changed, events:[tail]}
+ *   'agent_blockers_changed' {agent_instance_id, revision, count}
+ * The timeline refetches only events after the seq it holds; the in-memory
+ * blocker list (permission cards) is refetched. Returns false for any other
+ * change so the generic agent path handles it.
+ */
+function handleAgentInstanceExtensionChange(dispatch: any, instanceId: string, change: string, summary: any): boolean {
+  if (change === AGENT_BLOCKERS_CHANGE) {
+    const id = instanceId || String(summary?.agent_instance_id || '');
+    if (id) queueInvalidation(dispatch, [{ type: 'AgentBlockers', id }]);
+    return true;
+  }
+  if (change === 'extension_events') {
+    const tags: any[] = [{ type: 'ExtensionEvents' as const, id: instanceId }];
+    // hello/session events change the instance's extension info and session id
+    // (the native-signals badge reads them from the instance).
+    const events = Array.isArray(summary?.events) ? summary.events : [];
+    if (summary?.session_changed || events.some((e: any) => e?.event === 'hello' || e?.event === 'session')) {
+      tags.push({ type: 'AgentInstances' as const, id: instanceId });
+    }
+    queueInvalidation(dispatch, tags);
+    return true;
+  }
+  return false;
 }
 
 function handleResourceChanged(dispatch: any, payload: any, ctx: WsCtx) {
@@ -991,9 +1058,10 @@ function handleResourceChanged(dispatch: any, payload: any, ctx: WsCtx) {
     // silently dropped, which is precisely the class of update the deleted pollers
     // were papering over.
     case 'shell_session':
-      invalidateShellSession(dispatch, resourceId, String(payload?.chain_id || ''));
+      invalidateShellSession(dispatch, resourceId, { chain_id: stated(payload, 'chain_id') });
       return;
     case 'agent_instance':
+      if (handleAgentInstanceExtensionChange(dispatch, resourceId, String(payload.change || ''), summary)) return;
       handleInstanceChanged(dispatch, payload, ctx, resourceId, String(payload.change || ''), summary);
       return;
     case 'agent_instance_reconfiguration':
@@ -1106,6 +1174,36 @@ function scheduleAttentionRefetch(dispatch: any) {
 
 // TODO(FIX): Replace any with strict TypeScript interface matching Odin backend schema
 export function handleUserWsEvent(dispatch: any, payload: any, ctx: WsCtx = {}) {
+  if (payload?.type === 'tool_activity_live') {
+    const snapshot = parseLiveSnapshot(payload);
+    if (snapshot) dispatch(liveFrameReceived(snapshot));
+    else dispatch(liveResyncRequested());
+    return;
+  }
+  if (payload?.type === 'tool_activity_live_unavailable') {
+    if (typeof payload.instance_id === 'string' && payload.instance_id.length <= 64)
+      dispatch(liveInstanceUnavailable(payload.instance_id));
+    return;
+  }
+  if (payload?.type === 'tool_activity_live_resync') {
+    // Bridge launch/relaunch registration also emits this event. Recover
+    // unavailable/offline instances through a fresh authoritative snapshot;
+    // ordinary status changes must not race it with duplicate discovery reads.
+    dispatch(liveResyncRequested());
+    return;
+  }
+  // Generic status and extension events are push-only and do not discover
+  // tool state. Only roster/configuration hints can change view membership.
+  if (payload?.type === 'resource_changed') {
+    const resource = String(payload.resource || '');
+    const change = String(payload.change || '');
+    if ((resource === 'task_chain' && ['created', 'updated', 'deleted', 'member_added',
+        'member_removed', 'membership_changed', 'coordinator_changed'].includes(change)) ||
+        (resource === 'task_chain_member') ||
+        (resource === 'agent_instance' && ['created', 'deleted', 'chain_changed', 'config_changed'].includes(change))) {
+      dispatch(liveResyncRequested());
+    }
+  }
   // Native (OS) notifications: fire from this single funnel for the curated
   // event set, gated to open-but-unfocused tabs. Implemented as a thunk so the
   // side-effectful service can read live settings via getState without a
@@ -1185,7 +1283,10 @@ export function handleUserWsEvent(dispatch: any, payload: any, ctx: WsCtx = {}) 
     case 'shell_session_started':
     case 'shell_status':
     case 'shell_session_exited':
-      invalidateShellSession(dispatch, String(payload?.session_id || ''), String(payload?.chain_id || ''));
+      invalidateShellSession(dispatch, String(payload?.session_id || ''), payload?.type === 'shell_session_started'
+        // The started frame omits chain_id when it is empty, so its absence is a fact.
+        ? { kind: stated(payload, 'kind') as ShellSessionFacts['kind'], chain_id: stated(payload, 'chain_id') ?? '' }
+        : { chain_id: stated(payload, 'chain_id') });
       // T10: a start the bridge refused because its vault is locked carries
       // error_code "vault_locked"; route it to the pane showing that session.
       announcePaneVaultLocked(String(payload?.session_id || ''), payload);

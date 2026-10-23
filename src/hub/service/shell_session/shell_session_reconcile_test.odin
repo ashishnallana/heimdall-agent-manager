@@ -2,6 +2,7 @@
 #+private file
 package shell_session
 
+import agent_service "odin_test:hub/service/agent"
 import "core:fmt"
 import "core:mem"
 import "core:net"
@@ -189,7 +190,7 @@ Fx10 :: struct {
 NOW10 :: "2026-09-28T12:00:00Z"
 
 @(private = "file")
-now10 :: proc(ctx: rawptr) -> string { _ = ctx; return strings.clone(NOW10) }
+now10 :: proc(ctx: rawptr) -> string { _ = ctx; return NOW10 }
 
 @(private = "file")
 fx10_make :: proc(fx: ^Fx10) {
@@ -1578,4 +1579,23 @@ test_t14_synthesized_terminal_is_revived :: proc(t: ^testing.T) {
 	row, _ := fx14_row(&fx, "sh_1")
 	testing.expect_value(t, row.status, domain.Shell_Session_Status_Running)
 	testing.expect_value(t, row.finished_at, "")
+}
+
+
+@(test)
+test_live_inventory_does_not_reconstruct_hub_tool_state :: proc(t: ^testing.T) {
+ fx: Fx10
+ fx10_make(&fx)
+ defer fx10_free(&fx)
+ live := agent_service.Agent_Service{}
+ defer agent_service.tool_live_destroy(&live.tool_live)
+ fx.svc.live_agents = &live
+ row := domain.Shell_Session{session_id = "sh_live_missing", owner_user_id = "owner_a", bridge_id = "brg_1",
+  kind = "run", agent_instance_id = "live_inventory", status = "running"}
+ fx.r.stored[strings.clone(r10_key(row.bridge_id, row.session_id))] = r10_clone(row)
+ frame := inv10({})
+ defer delete(frame)
+ result := shell_session_apply_inventory(&fx.svc, "brg_1", frame)
+ testing.expect_value(t, result.terminated, 1)
+ for p in live.tool_live.pending do testing.expect(t, !p.used)
 }

@@ -331,7 +331,7 @@ patch_agent_instance_handler :: proc(ctx: rawptr, req: Request) -> Response {
 }
 
 agent_input_from_body :: proc(body: string) -> agent_service.Create_Agent_Input {
-	return agent_service.Create_Agent_Input{name = json_string(body, "name"), slug = json_string(body, "slug"), template_id = json_string(body, "template_id"), instructions = json_string(body, "instructions"), has_template_id = strings.contains(body, "\"template_id\"")}
+	return agent_service.Create_Agent_Input{name = json_string(body, "name"), slug = json_string(body, "slug"), template_id = json_string(body, "template_id"), instructions = json_string(body, "instructions"), has_template_id = strings.contains(body, "\"template_id\""), permission_mode = json_string(body, "permission_mode")}
 }
 
 instance_input_from_body :: proc(body: string) -> agent_service.Create_Instance_Input {
@@ -385,6 +385,7 @@ write_agent_json :: proc(b: ^strings.Builder, service: ^agent_service.Agent_Serv
 	strings.write_string(b, "\",\"template_id\":\""); write_handler_json_string(b, a.template_id)
 	strings.write_string(b, "\",\"instructions\":\""); write_handler_json_string(b, a.instructions)
 	strings.write_string(b, "\",\"state\":\""); write_handler_json_string(b, domain.agent_state_string(a.state))
+	strings.write_string(b, "\",\"permission_mode\":\""); write_handler_json_string(b, domain.agent_permission_mode_normalize(a.permission_mode))
 	strings.write_string(b, "\",\"supported_bridge_count\":"); strings.write_string(b, i32_to_string_http(agent_service.supported_bridge_count_for_agent(service, a)))
 	strings.write_string(b, ",\"active_instance_count\":"); strings.write_string(b, i32_to_string_http(agent_service.active_instance_count_for_agent(service, a)))
 	strings.write_string(b, ",\"updated_at\":\""); write_handler_json_string(b, a.updated_at)
@@ -441,7 +442,18 @@ write_agent_instance_json :: proc(b: ^strings.Builder, inst: domain.Agent_Instan
 	// dashboard can render the work-vs-review banner from persisted state.
 	strings.write_string(b, "\",\"current_task_id\":\""); write_handler_json_string(b, inst.current_task_id)
 	strings.write_string(b, "\",\"current_task_role\":\""); write_handler_json_string(b, domain.current_task_role_string(inst.current_task_role))
-	strings.write_string(b, "\"")
+	// permission_mode is the instance override ("" inherits the agent's);
+	// effective_permission_mode is what the next launch uses (yolo | ask).
+	strings.write_string(b, "\",\"permission_mode\":\""); write_handler_json_string(b, domain.agent_instance_permission_mode_normalize(inst.permission_mode))
+	strings.write_string(b, "\",\"effective_permission_mode\":\""); write_handler_json_string(b, domain.agent_instance_effective_permission_mode(inst))
+	// Provider extension (ham.ext.v1) identity; "" until an extension says hello.
+	strings.write_string(b, "\",\"provider_session_id\":\""); write_handler_json_string(b, inst.provider_session_id)
+	strings.write_string(b, "\",\"provider_transcript_path\":\""); write_handler_json_string(b, inst.provider_transcript_path)
+	strings.write_string(b, "\",\"extension\":{\"provider\":\""); write_handler_json_string(b, inst.extension_provider)
+	strings.write_string(b, "\",\"version\":\""); write_handler_json_string(b, inst.extension_version)
+	strings.write_string(b, "\",\"capabilities\":"); write_extension_capabilities_json(b, inst.extension_capabilities)
+	strings.write_string(b, ",\"last_seen_at\":\""); write_handler_json_string(b, inst.extension_last_seen_at)
+	strings.write_string(b, "\"}")
 	write_last_error_json(b, inst.last_error_json)
 	strings.write_string(b, "}")
 }

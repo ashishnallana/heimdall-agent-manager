@@ -2,6 +2,10 @@ import { useEffect, useState } from 'react';
 import { VaultText } from '../vault/VaultText';
 import type { InstanceReconfiguration } from '../../api/endpoints/agents';
 
+function permissionLabel(mode: string | undefined): string {
+  return mode === 'ask' ? 'Approvals required' : mode === 'yolo' ? 'Permissions bypassed' : 'Agent default permissions';
+}
+
 export default function InstanceReconfigurationProgress({ operation }: { operation: InstanceReconfiguration }) {
   const ready = operation.phase === 'ready';
   const recoveryStopped = operation.phase === 'failed' && operation.failure_code === 'recovery_stopped';
@@ -19,6 +23,7 @@ export default function InstanceReconfigurationProgress({ operation }: { operati
   // Completed history must not reappear as a runtime banner after reload.
   if (ready && (dismissedCompletion === completionKey || remaining === 0)) return null;
   const failed = operation.phase === 'failed' || operation.phase === 'recovery_required';
+  const permissionChanged = (operation.source?.permission_mode || '') !== (operation.destination?.permission_mode || '');
   const sourceStatus = operation.source_stopped ? 'Stopped' : failed ? 'Stop not confirmed' : operation.phase === 'stopping' ? 'Stopping…' : 'Waiting';
   const destinationStatus = recoveryStopped ? 'Stopped' : forceStopping ? 'Stopping…' : ready ? 'Ready' : !operation.source_stopped ? 'Not started' : failed ? 'Needs attention' : operation.destination_committed ? 'Starting…' : 'Waiting';
   return (
@@ -29,7 +34,7 @@ export default function InstanceReconfigurationProgress({ operation }: { operati
           <div className="min-w-0">
             <div className="text-xs text-muted">{row.title}</div>
             <div className="break-words text-sm font-medium text-primary">{row.config.bridge_label || row.config.bridge_id} · {row.config.project_id ? <VaultText value={row.config.project_label || row.config.project_id} fallback="Project" /> : 'No project'}</div>
-            <div className="break-words text-xs text-muted">{row.config.provider} · {row.config.model}</div>
+            <div className="break-words text-xs text-muted">{row.config.provider} · {row.config.model}{permissionChanged ? ` · ${permissionLabel(row.config.permission_mode)}` : ''}</div>
           </div>
           <span className={`shrink-0 rounded-full px-2 py-1 text-xs ${row.complete ? 'text-success' : failed && ((row.key === 'source' && !operation.source_stopped) || (row.key === 'destination' && operation.source_stopped)) ? 'text-danger' : row.status.endsWith('…') ? 'text-accent' : 'text-muted'}`}>{row.status}</span>
         </div>

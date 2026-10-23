@@ -1,0 +1,9 @@
+{
+ "session_id": "f2e44f82-9d3d-4735-9114-708882c87b12",
+ "transcript_path": "/home/dev/.claude/projects/-home-dev--cache-heimdall-spike-work/f2e44f82-9d3d-4735-9114-708882c87b12.jsonl",
+ "cwd": "/home/dev/.cache/heimdall-spike/work",
+ "scratchpad_dir": "/tmp/claude-1000/-home-dev--cache-heimdall-spike-work/f2e44f82-9d3d-4735-9114-708882c87b12/scratchpad",
+ "prompt_id": "07ac2eac-c270-410f-a387-04e5f76f91cf",
+ "hook_event_name": "SessionEnd",
+ "reason": "clear"
+}

@@ -44,8 +44,16 @@ Agent_Repository :: struct {
 	list_instances_by_owner: Agent_List_Instances_By_Owner_Proc,
 	list_instances_by_bridge: Agent_List_Instances_By_Bridge_Proc,
 	list_instances_by_chain: Agent_List_Instances_By_Chain_Proc,
+	list_tool_instances_by_chain: Agent_List_Instances_By_Chain_Proc,
+	get_tool_instance: Agent_Get_Instance_Proc,
 	list_active_runtime_instances: Agent_List_Active_Runtime_Instances_Proc,
 	next_title_counter: Agent_Next_Title_Counter_Proc,
+	// Provider extension (ham.ext.v1); see agent_extension_repo.odin.
+	ext_insert_events: Agent_Ext_Insert_Events_Proc,
+	ext_update_instance: Agent_Ext_Update_Instance_Proc,
+	ext_list_events: Agent_Ext_List_Events_Proc,
+	ext_list_subagents: Agent_Ext_List_Subagents_Proc,
+	ext_list_files: Agent_Ext_List_Files_Proc,
 }
 
 agent_next_title_counter :: proc(repo: ^Agent_Repository, agent_id: string, owner_user_id: domain.User_ID, now: string) -> (int, bool, domain.Domain_Error) {

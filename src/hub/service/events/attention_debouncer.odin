@@ -20,7 +20,7 @@ import "core:time"
 ATTENTION_EVENT_DELAY :: 500 * time.Millisecond
 
 // Attention kinds the event can name, as a small bit set per owner.
-ATTENTION_KIND_BITS :: [?]string{"message", "task", "approval", "memory"}
+ATTENTION_KIND_BITS :: [?]string{"message", "task", "approval", "memory", "agent_blocker"}
 
 Attention_Publish_Proc :: proc(ctx: rawptr, owner_user_id: string, event_json: string)
 

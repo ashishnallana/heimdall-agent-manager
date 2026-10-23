@@ -1,0 +1,31 @@
+{
+ "session_id": "bf31e1a2-4b45-4ddf-ad46-1ef0cfca35a5",
+ "transcript_path": "/home/dev/.claude/projects/-home-dev--cache-heimdall-spike-work/bf31e1a2-4b45-4ddf-ad46-1ef0cfca35a5.jsonl",
+ "cwd": "/home/dev/.cache/heimdall-spike/work",
+ "scratchpad_dir": "/tmp/claude-1000/-home-dev--cache-heimdall-spike-work/bf31e1a2-4b45-4ddf-ad46-1ef0cfca35a5/scratchpad",
+ "prompt_id": "25eda4bf-bfdb-4e40-818b-4571631102d1",
+ "permission_mode": "default",
+ "effort": {
+  "level": "medium"
+ },
+ "hook_event_name": "PermissionRequest",
+ "tool_name": "Bash",
+ "tool_input": {
+  "command": "touch perm_empty.txt",
+  "description": "Create empty file perm_empty.txt"
+ },
+ "permission_suggestions": [
+  {
+   "type": "addDirectories",
+   "directories": [
+    "/home/dev/.cache/heimdall-spike/work"
+   ],
+   "destination": "session"
+  },
+  {
+   "type": "setMode",
+   "mode": "acceptEdits",
+   "destination": "session"
+  }
+ ]
+}

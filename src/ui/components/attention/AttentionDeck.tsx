@@ -14,6 +14,8 @@ import {
   ATTENTION_RANGES,
   attentionApi,
   useGetAttentionQuery,
+  EMPTY_ATTENTION_COUNTS,
+  type AttentionBlockerItem,
   type AttentionItem,
   type AttentionMessageItem,
   type AttentionRange,
@@ -35,6 +37,7 @@ import { appendArtifactLinks } from '../../utils/artifactUpload';
 import { buildRouteHash, navigateTo } from '../../utils/appLocation';
 import { useDialogA11y } from '../ui/composites/useDialogA11y';
 import { AttentionCardBody } from './AttentionCardBody';
+import { openBlockerAgent, useResolveBlocker } from './AgentBlockerCard';
 import { AttentionComposer, type ComposerSubmit } from './AttentionComposer';
 import { DECK_TABS, clampIndex, defaultTab, hideKey, nextLiveTab, reviewerCandidates, stepIndex, swipeAxis, swipeDelta, tabCounts, visibleItems, type DeckTab } from './attentionModel';
 
@@ -158,7 +161,7 @@ export function AttentionDeck({
   const fresh = !!query.data && !query.isFetching && (query.fulfilledTimeStamp ?? 0) >= openedAt.current;
   const snap = useSyncExternalStore(scheduler.subscribe, scheduler.getSnapshot, scheduler.getSnapshot);
   const items = data?.items ?? NO_ITEMS;
-  const counts = data?.counts ?? { total: 0, older: 0, message: 0, task: 0, memory: 0, snoozed: 0 };
+  const counts = data?.counts ?? EMPTY_ATTENTION_COUNTS;
   const perTab = tabCounts(counts, items, snap.hidden);
 
   const [tab, setTab] = useState<DeckTab>('message');
@@ -383,7 +386,21 @@ export function AttentionDeck({
     setComposer(null);
   };
 
+  // Allow / Deny an agent blocker: immediate (the agent is stalled), not the undo
+  // scheduler; the card hides at once and comes back if the call fails.
+  const resolveBlocker = useResolveBlocker(scheduler);
+  const decideBlocker = (item: AttentionBlockerItem, decision: 'allow' | 'deny') => {
+    setSlide('right');
+    resetCardUi();
+    void resolveBlocker(item, decision).then((err) => say(err ? `Not sent: ${err}` : decision === 'allow' ? 'Allowed' : 'Denied'));
+  };
+
   const openSource = (item: AttentionItem) => {
+    if (item.kind === 'agent_blocker') {
+      openBlockerAgent(item);
+      onClose();
+      return;
+    }
     const path = item.kind === 'task'
       ? `/chains/${encodeURIComponent(item.action_refs.chain_id)}/tasks/${encodeURIComponent(item.action_refs.task_id)}`
       : item.kind === 'memory'
@@ -396,7 +413,13 @@ export function AttentionDeck({
 
   type DockAction = { key: string; label: string; icon: IconName; tone?: 'success' | 'danger'; run: () => void; debug: string };
   // Snoozed cards keep their original actions: acting settles them in place.
-  const dock: DockAction[] = !current ? [] : current.kind === 'task' && current.details.attention === 'blocked' ? [
+  const dock: DockAction[] = !current ? [] : current.kind === 'agent_blocker' ? (current.details.blocker_kind === 'terminal_prompt' ? [
+    { key: 'o', label: 'Open terminal', icon: 'arrow-right', debug: 'open-terminal', run: () => openSource(current) },
+  ] : [
+    { key: 'a', label: 'Allow', icon: 'check', tone: 'success', debug: 'allow', run: () => decideBlocker(current, 'allow') },
+    { key: 'x', label: 'Deny', icon: 'close', tone: 'danger', debug: 'deny', run: () => decideBlocker(current, 'deny') },
+    { key: 'o', label: 'Open', icon: 'arrow-right', debug: 'open', run: () => openSource(current) },
+  ]) : current.kind === 'task' && current.details.attention === 'blocked' ? [
     { key: 'a', label: needsAgentStart(current) ? 'Start agent' : 'Answer', icon: 'chat', tone: 'success', debug: 'answer', run: () => { if (needsAgentStart(current)) { void agentStart.start(current); return; } setPopover(null); setComposer(composer === 'answer' ? null : 'answer'); } },
     { key: 'c', label: 'Comment', icon: 'chat', debug: 'comment', run: () => { setPopover(null); setComposer(composer === 'comment' ? null : 'comment'); } },
     { key: 's', label: 'Snooze', icon: 'clock', debug: 'snooze', run: () => { setComposer(null); setPopover(popover === 'snooze' ? null : 'snooze'); } },
@@ -618,7 +641,7 @@ export function AttentionDeck({
               <Icon name="check" size={28} />
               <p className="text-[15px] font-semibold text-primary">All clear</p>
               <p className="text-[12px] text-muted">
-                {perTab.message + perTab.task > 0 ? 'Nothing here. The other tab still has items.' : 'Nothing in this time range needs you.'}
+                {perTab.agent_blocker + perTab.message + perTab.task > 0 ? 'Nothing here. The other tab still has items.' : 'Nothing in this time range needs you.'}
               </p>
               {showOlder ? (
                 <button type="button" data-debug-id="attention-deck-show-older" className="text-[12px] text-warning underline" onClick={() => onRangeChange('all')}>
