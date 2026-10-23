@@ -112,7 +112,7 @@ tool_live_apply_bridge :: proc(svc: ^Agent_Service, bridge_id: string, connectio
         _ = tool_stream_reconcile_locked(svc, r, inst)
         return false
     }
-    if r.connection_generation != connection_generation do return false
+    if r.suspended || r.connection_generation != connection_generation do return false
     if kind == "tool_stream_unavailable" {
         reason := tool_live_text(root, "reason")
         if reason != "not_found" && reason != "instance_changed" && reason != "capacity" && reason != "state_too_large" do return false
@@ -127,7 +127,8 @@ tool_live_apply_bridge :: proc(svc: ^Agent_Service, bridge_id: string, connectio
     if normalized == "" do return false
     snapshot, _ := json.parse_string(normalized, .JSON, true, context.temp_allocator)
     baseline, _ := root["baseline"].(json.Boolean)
-    frame := struct {type, instance_id: string, baseline: bool, snapshot: json.Value}{"state", id, bool(baseline), snapshot}
+    refresh, _ := root["refresh"].(json.Boolean)
+    frame := struct {type, instance_id: string, baseline, refresh: bool, snapshot: json.Value}{"state", id, bool(baseline), bool(refresh), snapshot}
     data, _ := json.marshal(frame, allocator = context.temp_allocator)
     for _, w in s.viewers {
         if w.owner == r.owner && w.ids[id] do _ = tool_stream_enqueue_locked(w, string(data))

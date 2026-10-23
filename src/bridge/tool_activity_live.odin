@@ -2,7 +2,7 @@ package main
 
 // Bridge owns the reducer. Hooks and shell lifecycle only mark watched instances
 // dirty. The runtime writer serializes/coalesces visible changes once per second;
-// zero viewers means no snapshot work and an idle connection sends nothing.
+// zero viewers means no snapshot work. Watched active state refreshes every 60s.
 import "base:runtime"
 import "core:encoding/json"
 import "core:fmt"
@@ -16,7 +16,13 @@ import ws "odin_test:lib/ws"
 bridge_tool_tracker: live.Tracker
 bridge_tool_out_mutex: sync.Mutex
 bridge_tool_wire_seq: u64
-Bridge_Tool_Subscription :: struct { token: string, visible: string, dirty: bool }
+BRIDGE_TOOL_REFRESH_NS :: i64(60 * time.Second)
+Bridge_Tool_Subscription :: struct {
+    token: string,
+    visible: string,
+    dirty, active: bool,
+    last_emit_ns: i64, // monotonic; reset only by a successfully sent state
+}
 bridge_tool_subscriptions: map[string]Bridge_Tool_Subscription
 bridge_tool_last_flush_ns: i64
 
@@ -119,23 +125,31 @@ bridge_tool_live_visible :: proc(body: string, active_only := false) -> string {
     bytes, _ := json.marshal(row, {sort_maps_by_key = true})
     return string(bytes)
 }
-bridge_tool_live_emit :: proc(conn: ^ws.Connection, id: string, sub: ^Bridge_Tool_Subscription, baseline: bool) -> bool {
+bridge_tool_live_emit :: proc(conn: ^ws.Connection, id: string, sub: ^Bridge_Tool_Subscription, baseline: bool, refresh := false, now_ns: i64 = 0) -> bool {
     inst, exists := bridge_tool_live_instance(nil, id)
-    if !exists do return bridge_tool_live_unavailable(conn, id, sub.token, "not_found", 0)
+    if !exists {
+        sub.active = false
+        return bridge_tool_live_unavailable(conn, id, sub.token, "not_found", 0)
+    }
     body := live.tool_live_snapshot(&bridge_tool_tracker, inst, consume = !baseline, baseline = baseline)
     defer delete(body)
     visible := bridge_tool_live_visible(body)
     defer delete(visible)
-    if !baseline && visible == sub.visible do return true
+    if !baseline && !refresh && visible == sub.visible do return true
     snap, err := json.parse_string(body, .JSON, true, context.temp_allocator)
     if err != .None do return false
     bridge_tool_wire_seq += 1
-    frame := struct {type, epoch, subscription_id: string, seq: u64, run_count: int, baseline: bool, snapshot: json.Value}{
+    frame := struct {type, epoch, subscription_id: string, seq: u64, run_count: int, baseline, refresh: bool, snapshot: json.Value}{
         "tool_stream_state", fmt.tprintf("%d", bridge_tool_tracker.tool_live.epoch), sub.token,
-        bridge_tool_wire_seq, inst.run_count, baseline, snap}
+        bridge_tool_wire_seq, inst.run_count, baseline, refresh, snap}
     data, _ := json.marshal(frame, allocator = context.temp_allocator)
-    if len(data) > live.MAX_FRAME_BYTES do return bridge_tool_live_unavailable(conn, id, sub.token, "state_too_large", inst.run_count)
+    if len(data) > live.MAX_FRAME_BYTES {
+        sub.active = false
+        return bridge_tool_live_unavailable(conn, id, sub.token, "state_too_large", inst.run_count)
+    }
     if !bridge_hub_send(conn, string(data)) do return false
+    sub.last_emit_ns = now_ns if now_ns != 0 else time.tick_now()._nsec
+    sub.active = len(snap.(json.Object)["active"].(json.Array)) > 0
     delete(sub.visible)
     // Completed batches are one-shot. Compare next interval with active-only state,
     // so no redundant empty follow-up is emitted just to erase the old batch.
@@ -143,6 +157,10 @@ bridge_tool_live_emit :: proc(conn: ^ws.Connection, id: string, sub: ^Bridge_Too
     return true
 }
 bridge_tool_live_drain :: proc(conn: ^ws.Connection, reconnect := false) {
+    bridge_tool_live_drain_at(conn, time.tick_now()._nsec, reconnect)
+}
+// Explicit clock keeps scheduling tests deterministic and avoids wall-clock jumps.
+bridge_tool_live_drain_at :: proc(conn: ^ws.Connection, now_ns: i64, reconnect := false) {
     if bridge_tool_tracker.get_instance == nil do return
     context.allocator = runtime.heap_allocator()
     sync.mutex_lock(&bridge_tool_out_mutex)
@@ -150,20 +168,22 @@ bridge_tool_live_drain :: proc(conn: ^ws.Connection, reconnect := false) {
     if reconnect {
         bridge_tool_live_unwatch_locked()
         bridge_tool_wire_seq = 0
-        bridge_tool_last_flush_ns = time.to_unix_nanoseconds(time.now())
+        bridge_tool_last_flush_ns = now_ns
         frame := struct {type, epoch: string}{"tool_stream_reset", fmt.tprintf("%d", bridge_tool_tracker.tool_live.epoch)}
         data, _ := json.marshal(frame, allocator = context.temp_allocator)
         _ = bridge_hub_send(conn, string(data))
         return
     }
     if len(bridge_tool_subscriptions) == 0 do return
-    now := time.to_unix_nanoseconds(time.now())
-    if now - bridge_tool_last_flush_ns < i64(time.Second) do return
-    bridge_tool_last_flush_ns = now
+    batch_due := now_ns - bridge_tool_last_flush_ns >= i64(time.Second)
+    if batch_due do bridge_tool_last_flush_ns = now_ns
     for id, &sub in bridge_tool_subscriptions {
-        if !sub.dirty do continue
+        // A freshness deadline is per instance and is not delayed by the
+        // one-second changed-state batch gate. Empty idle state does no work.
+        refresh := sub.active && now_ns - sub.last_emit_ns >= BRIDGE_TOOL_REFRESH_NS
+        if !refresh && !(batch_due && sub.dirty) do continue
         sub.dirty = false
-        if !bridge_tool_live_emit(conn, id, &sub, false) do conn.connected = false
+        if !bridge_tool_live_emit(conn, id, &sub, false, refresh, now_ns) do conn.connected = false
     }
 }
 bridge_tool_live_handle_subscription :: proc(conn: ^ws.Connection, raw: string) {

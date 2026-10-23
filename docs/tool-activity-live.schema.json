@@ -272,7 +272,8 @@
         "type",
         "instance_id",
         "baseline",
-        "snapshot"
+        "snapshot",
+        "refresh"
       ],
       "properties": {
         "type": {
@@ -286,6 +287,10 @@
         },
         "snapshot": {
           "$ref": "#/$defs/snapshot"
+        },
+        "refresh": {
+          "type": "boolean",
+          "description": "True for a freshly sampled 60s active-state refresh. May have unchanged generation/revision. Never a cached replay; completions contain only the newly pending batch."
         }
       }
     },

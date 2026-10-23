@@ -33,6 +33,7 @@ Tool_Stream_Route :: struct {
     id, owner, bridge, token: string,
     run, connection_generation, viewers: int,
     generation, revision: i64,
+    suspended: bool, // known route loss; reject in-flight state until a new attach
 }
 Tool_Stream_Control :: struct { bridge, id, token: string, run: int, attach: bool }
 Tool_Live_Store :: struct {
@@ -62,6 +63,9 @@ tool_stream_control_locked :: proc(s: ^Tool_Live_Store, r: ^Tool_Stream_Route, a
     c := Tool_Stream_Control{strings.clone(r.bridge, heap), strings.clone(r.id, heap), strings.clone(r.token, heap), r.run, attach}
     for &old in s.controls {
         if old.bridge == c.bridge && old.id == c.id {
+            // A retired producer's detach must precede a replacement token's
+            // controls, even if that replacement is removed before attach sends.
+            if !old.attach && old.token != c.token do continue
             tool_stream_control_free(old); old = c
             sync.cond_signal(&s.control_cond)
             return
@@ -92,7 +96,7 @@ tool_stream_control_run :: proc(raw: rawptr) {
         delete(data)
         if !sent && c.attach {
             sync.mutex_lock(&s.mutex)
-            if r := s.routes[c.id]; r != nil && r.token == c.token do tool_stream_unavailable_locked(s, r, "bridge_offline")
+            if r := s.routes[c.id]; r != nil && r.token == c.token do tool_stream_suspend_locked(s, r, "bridge_offline")
             sync.mutex_unlock(&s.mutex)
         }
         tool_stream_control_free(c)
@@ -165,7 +169,7 @@ tool_stream_remove_id_locked :: proc(s: ^Tool_Live_Store, w: ^Tool_Stream_Viewer
     if r != nil {
         r.viewers -= 1
         if r.viewers == 0 {
-            tool_stream_control_locked(s, r, false)
+            if !r.suspended do tool_stream_control_locked(s, r, false)
             delete_key(&s.routes, r.id)
             tool_stream_route_free(r)
         }
@@ -199,12 +203,13 @@ tool_stream_unavailable_locked :: proc(s: ^Tool_Live_Store, r: ^Tool_Stream_Rout
 }
 tool_stream_rebind_locked :: proc(svc: ^Agent_Service, r: ^Tool_Stream_Route, inst: domain.Agent_Instance, connection_generation: int) {
     s := &svc.tool_live
-    tool_stream_control_locked(s, r, false)
+    if !r.suspended do tool_stream_control_locked(s, r, false)
     delete(r.bridge, runtime.heap_allocator()); delete(r.token, runtime.heap_allocator())
     r.bridge = strings.clone(inst.bridge_id, runtime.heap_allocator())
     r.token = tool_stream_token_locked(s)
     r.run = inst.run_count; r.connection_generation = connection_generation
     r.generation = 0; r.revision = 0
+    r.suspended = false
     tool_stream_control_locked(s, r, true)
 }
 // Resolve the destination generation from its own runtime connection. In
@@ -212,8 +217,7 @@ tool_stream_rebind_locked :: proc(svc: ^Agent_Service, r: ^Tool_Stream_Route, in
 tool_stream_reconcile_locked :: proc(svc: ^Agent_Service, r: ^Tool_Stream_Route, inst: domain.Agent_Instance) -> bool {
     s := &svc.tool_live
     if string(inst.owner_user_id) != r.owner {
-        tool_stream_control_locked(s, r, false)
-        tool_stream_unavailable_locked(s, r, "instance_changed")
+        tool_stream_suspend_locked(s, r, "instance_changed")
         return false
     }
     generation := r.connection_generation
@@ -267,7 +271,12 @@ tool_stream_subscribe :: proc(svc: ^Agent_Service, w: ^Tool_Stream_Viewer, ids: 
         w.ids[strings.clone(id, runtime.heap_allocator())] = true
         r.viewers += 1
         // Additional viewers share the producer but earn a fresh Bridge baseline.
-        tool_stream_control_locked(s, r, true)
+        if !runtime_expected_active(inst.runtime_status) {
+            tool_stream_suspend_locked(s, r, "instance_changed")
+        } else {
+            r.suspended = false
+            tool_stream_control_locked(s, r, true)
+        }
     }
     return ""
 }
@@ -278,19 +287,43 @@ tool_live_clear :: proc(svc: ^Agent_Service, instance_id: string) {
     if r := s.routes[instance_id]; r != nil {
         tool_stream_unavailable_locked(s, r, "instance_changed")
         inst, found, _ := tool_live_instance(svc, instance_id)
-        if !found { tool_stream_control_locked(s, r, false); return }
+        if !found { tool_stream_suspend_locked(s, r, "not_found"); return }
         if tool_stream_reconcile_locked(svc, r, inst) {
+            if !runtime_expected_active(inst.runtime_status) {
+                tool_stream_suspend_locked(s, r, "instance_changed")
+                return
+            }
+            r.suspended = false
             // A launch may not exist at configuration commit. Its ready event
             // earns another baseline, even when bridge/run did not change.
             tool_stream_control_locked(s, r, true)
         }
     }
 }
+// Invalidate a producer exactly once per outage: repeated terminal/Bridge
+// facts must not overwrite its token-matched detach with a new unused token.
+tool_stream_suspend_locked :: proc(s: ^Tool_Live_Store, r: ^Tool_Stream_Route, reason: string) {
+    if !r.suspended {
+        tool_stream_control_locked(s, r, false)
+        delete(r.token, runtime.heap_allocator())
+        r.token = tool_stream_token_locked(s)
+        r.generation = 0; r.revision = 0
+        r.suspended = true
+    }
+    tool_stream_unavailable_locked(s, r, reason)
+}
+// Terminal/removal never requests a baseline from the dead instance.
+tool_stream_terminal :: proc(svc: ^Agent_Service, instance_id: string) {
+    if svc == nil do return
+    s := &svc.tool_live
+    sync.mutex_lock(&s.mutex); defer sync.mutex_unlock(&s.mutex)
+    if r := s.routes[instance_id]; r != nil do tool_stream_suspend_locked(s, r, "instance_changed")
+}
 tool_live_clear_bridge :: proc(svc: ^Agent_Service, bridge_id: string) {
     if svc == nil do return
     s := &svc.tool_live
     sync.mutex_lock(&s.mutex); defer sync.mutex_unlock(&s.mutex)
-    for _, r in s.routes do if r.bridge == bridge_id do tool_stream_unavailable_locked(s, r, "bridge_offline")
+    for _, r in s.routes do if r.bridge == bridge_id do tool_stream_suspend_locked(s, r, "bridge_offline")
 }
 // A new authenticated Bridge connection requests exactly the current subscriptions.
 tool_stream_bridge_ready :: proc(svc: ^Agent_Service, bridge_id: string, generation: int) {
@@ -299,8 +332,7 @@ tool_stream_bridge_ready :: proc(svc: ^Agent_Service, bridge_id: string, generat
     for _, r in s.routes {
         inst, found, _ := tool_live_instance(svc, r.id)
         if !found {
-            tool_stream_control_locked(s, r, false)
-            tool_stream_unavailable_locked(s, r, "instance_changed")
+            tool_stream_suspend_locked(s, r, "not_found")
             continue
         }
         if inst.bridge_id == bridge_id && string(inst.owner_user_id) == r.owner {

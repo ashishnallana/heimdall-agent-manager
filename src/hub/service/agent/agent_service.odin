@@ -77,7 +77,7 @@ notify_instance_terminal :: proc(service: ^Agent_Service, instance_id: string) {
 	if service == nil || instance_id == "" do return
 	// A dead instance has nothing left to answer: clear its agent blockers.
 	clear_instance_blockers(service, instance_id)
-	tool_live_clear(service, instance_id)
+	tool_stream_terminal(service, instance_id)
 	if service.hooks.on_terminal == nil do return
 	service.hooks.on_terminal(service.hooks.ctx, instance_id)
 }
@@ -452,7 +452,8 @@ cleanup_provider_test_instance :: proc(service: ^Agent_Service, auth: contracts.
 		command := project_service.Runtime_Command{bridge_id=inst.bridge_id,command_id=command_id,body_json=stop_command_json(command_id, inst.agent_instance_id, "provider_test_complete")}
 		_, _ = project_service.bridge_command_send_runtime(service.bridge_command_sink, command)
 	}
-	_, delete_err := iface.agent_delete_instance(service.agents, instance_id)
+	deleted, delete_err := iface.agent_delete_instance(service.agents, instance_id)
+	if deleted && delete_err.code == .None do notify_instance_terminal(service, instance_id)
 	return delete_err
 }
 

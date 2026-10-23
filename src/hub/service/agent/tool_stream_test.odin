@@ -6,6 +6,7 @@ import "core:fmt"
 import "core:net"
 import "core:strings"
 import "core:testing"
+import contracts "odin_test:contracts"
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
 import project_service "odin_test:hub/service/project"
@@ -235,4 +236,105 @@ test_tool_stream_relocation_reconnect_and_ready_baseline :: proc(t: ^testing.T) 
     testing.expect_value(t, len(f.svc.tool_live.controls), 1)
     testing.expect(t, f.svc.tool_live.controls[0].attach)
     testing.expect_value(t, f.svc.tool_live.controls[0].bridge, "brg_b")
+}
+
+@(test)
+test_tool_stream_refresh_equal_revision_and_old_state_fence :: proc(t: ^testing.T) {
+    f: Tool_Stream_Test; tool_stream_test_init(&f); defer tool_stream_test_free(&f)
+    ids := [1]string{"inst_a"}
+    _=tool_stream_subscribe(&f.svc,&f.a,ids[:])
+    r:=f.svc.tool_live.routes["inst_a"]
+    testing.expect(t,tool_live_apply_bridge(&f.svc,"brg_a",0,"1000",tool_stream_test_baseline(r.token,revision=4)))
+    tool_stream_test_clear(&f.a)
+    refresh,_:=strings.replace_all(tool_stream_test_baseline(r.token,revision=4),`"baseline":true`,`"baseline":false,"refresh":true`)
+    defer delete(refresh)
+    testing.expect(t,tool_live_apply_bridge(&f.svc,"brg_a",0,"1000",refresh),"equal revision refresh accepted")
+    testing.expect_value(t,len(f.a.queue),1)
+    if len(f.a.queue)>0 {
+        value,_:=json.parse_string(f.a.queue[0].text,.JSON,true,context.temp_allocator)
+        testing.expect(t,bool(value.(json.Object)["refresh"].(json.Boolean)),"refresh marker reaches browser")
+    }
+    testing.expect(t,!tool_live_apply_bridge(&f.svc,"brg_a",0,"1000",tool_stream_test_baseline(r.token,revision=3)),"older state still rejected")
+}
+
+@(test)
+test_tool_stream_terminal_unavailable_fences_late_producer :: proc(t: ^testing.T) {
+    f: Tool_Stream_Test; tool_stream_test_init(&f); defer tool_stream_test_free(&f)
+    ids := [1]string{"inst_a"}
+    _=tool_stream_subscribe(&f.svc,&f.a,ids[:])
+    _=tool_stream_subscribe(&f.svc,&f.b,ids[:])
+    r:=f.svc.tool_live.routes["inst_a"]
+    late:=strings.clone(tool_stream_test_frame(r.token,revision=9)); defer delete(late)
+    tool_stream_test_clear(&f.a); tool_stream_test_clear(&f.b)
+    notify_instance_terminal(&f.svc,"inst_a")
+    detached_token:=strings.clone(f.svc.tool_live.controls[len(f.svc.tool_live.controls)-1].token)
+    defer delete(detached_token)
+    notify_instance_terminal(&f.svc,"inst_a")
+    testing.expect(t,f.svc.tool_live.controls[len(f.svc.tool_live.controls)-1].token == detached_token,"repeated terminal fact preserves original detach token")
+    for w in ([2]^Tool_Stream_Viewer{&f.a,&f.b}) {
+        testing.expect_value(t,len(w.queue),2)
+        if len(w.queue)>0 {
+            testing.expect(t,strings.contains(w.queue[0].text,`"type":"unavailable"`))
+            testing.expect(t,strings.contains(w.queue[0].text,`"instance_id":"inst_a"`))
+        }
+    }
+    testing.expect(t,!f.svc.tool_live.controls[len(f.svc.tool_live.controls)-1].attach,"terminal detaches without reattaching")
+    testing.expect(t,!tool_live_apply_bridge(&f.svc,"brg_a",0,"1000",late),"late producer cannot restore terminal state")
+    tool_stream_test_clear(&f.a); tool_stream_test_clear(&f.b)
+    notify_instance_terminal(&f.svc,"inst_unrelated")
+    testing.expect_value(t,len(f.a.queue),0)
+    testing.expect_value(t,len(f.b.queue),0)
+    tool_live_clear(&f.svc,"inst_a")
+    testing.expect(t,f.svc.tool_live.controls[len(f.svc.tool_live.controls)-1].attach,"existing ready path requests new baseline")
+    testing.expect(t,tool_live_apply_bridge(&f.svc,"brg_a",0,"1000",tool_stream_test_baseline(r.token)))
+}
+
+@(test)
+test_tool_stream_bridge_loss_notifies_affected_listeners :: proc(t: ^testing.T) {
+    f: Tool_Stream_Test; tool_stream_test_init(&f); defer tool_stream_test_free(&f)
+    ids := [1]string{"inst_a"}
+    _=tool_stream_subscribe(&f.svc,&f.a,ids[:])
+    tool_stream_test_clear(&f.a)
+    tool_live_clear_bridge(&f.svc,"brg_unrelated")
+    testing.expect_value(t,len(f.a.queue),0)
+    tool_live_clear_bridge(&f.svc,"brg_a")
+    testing.expect_value(t,len(f.a.queue),1)
+    testing.expect_value(t,len(f.b.queue),0)
+    if len(f.a.queue)>0 do testing.expect(t,strings.contains(f.a.queue[0].text,`"reason":"bridge_offline"`))
+}
+
+@(test)
+test_tool_stream_instance_removal_notifies_subscribers :: proc(t: ^testing.T) {
+    f: Tool_Stream_Test; tool_stream_test_init(&f); defer tool_stream_test_free(&f)
+    f.repo.get_instance = proc(ctx: rawptr,id:string)->(domain.Agent_Instance,bool,domain.Domain_Error) {
+        return domain.Agent_Instance{agent_instance_id=id,owner_user_id="owner",bridge_id="brg_a",kind="provider_test"},true,{}
+    }
+    f.repo.delete_instance = proc(ctx:rawptr,id:string)->(bool,domain.Domain_Error) {return true,{}}
+    ids := [1]string{"inst_a"}
+    _=tool_stream_subscribe(&f.svc,&f.a,ids[:])
+    tool_stream_test_clear(&f.a)
+    err:=cleanup_provider_test_instance(&f.svc,contracts.Auth_Context{kind=.User_Token,user_id="owner"},"inst_a")
+    testing.expect(t,err.code == .None)
+    testing.expect_value(t,len(f.a.queue),1)
+    if len(f.a.queue)>0 do testing.expect(t,strings.contains(f.a.queue[0].text,`"type":"unavailable"`))
+}
+
+@(test)
+test_tool_stream_suspended_last_detach_preserves_old_producer_control :: proc(t: ^testing.T) {
+    f: Tool_Stream_Test; tool_stream_test_init(&f); defer tool_stream_test_free(&f)
+    ids := [1]string{"inst_a"}
+    _=tool_stream_subscribe(&f.svc,&f.a,ids[:])
+    old_token:=strings.clone(f.svc.tool_live.routes["inst_a"].token); defer delete(old_token)
+    tool_stream_terminal(&f.svc,"inst_a")
+    _=tool_stream_subscribe(&f.svc,&f.a,nil)
+    testing.expect_value(t,len(f.svc.tool_live.controls),1)
+    testing.expect(t,!f.svc.tool_live.controls[0].attach)
+    testing.expect_value(t,f.svc.tool_live.controls[0].token,old_token)
+    // A subsequent logical producer must not coalesce away the retired detach.
+    _=tool_stream_subscribe(&f.svc,&f.a,ids[:])
+    testing.expect_value(t,len(f.svc.tool_live.controls),2)
+    _=tool_stream_subscribe(&f.svc,&f.a,nil)
+    testing.expect_value(t,len(f.svc.tool_live.controls),2)
+    testing.expect(t,!f.svc.tool_live.controls[0].attach && !f.svc.tool_live.controls[1].attach)
+    testing.expect_value(t,f.svc.tool_live.controls[0].token,old_token)
 }

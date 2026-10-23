@@ -188,3 +188,40 @@ tool_http_response :: proc(sock: net.TCP_Socket, timeout: time.Duration) -> (str
 	return "", false
 }
 
+
+@(test)
+test_tool_stream_http_failed_upstream_route_is_unavailable :: proc(t: ^testing.T) {
+    pair,ok:=tool_http_pair(t); if !ok do return
+    defer net.close(pair.client)
+    defer net.close(pair.listener)
+    tickets:=new_user_ws_ticket_store(); defer user_ws_ticket_store_free(&tickets)
+    user_ws_ticket_store_put(&tickets,"tool_ticket",{kind=.User_Token,user_id="owner"},60)
+    repo:=iface.Agent_Repository{get_tool_instance=proc(ctx:rawptr,id:string)->(domain.Agent_Instance,bool,domain.Domain_Error) {
+        return domain.Agent_Instance{agent_instance_id=id,owner_user_id="owner",bridge_id="brg_offline",runtime_status="running"},true,{}
+    }}
+    svc:=agent_service.Agent_Service{agents=&repo}
+    defer agent_service.tool_live_destroy(&svc.tool_live)
+    svc.bridge_command_sink={send_runtime_command=proc(ctx:rawptr,c:project_service.Runtime_Command)->(bool,domain.Domain_Error) { return false,{} }}
+    f:=Tool_HTTP_Test{h={agents=&svc,ws_tickets=&tickets},sock=pair.hub}
+    worker:=thread.create_and_start_with_data(&f,tool_http_test_run,self_cleanup=false)
+    testing.expect(t,worker!=nil)
+    if worker==nil {net.close(pair.hub); return}
+    defer {
+        _=net.shutdown(pair.client,.Both)
+        thread.join(worker); thread.destroy(worker)
+    }
+    response,got:=tool_http_response(pair.client,time.Second)
+    testing.expect(t,got&&strings.contains(response,"101 Switching Protocols")); delete(response)
+    conn:=ws.Connection{socket=pair.client,connected=true}
+    reader:=ws.reader_make(); defer ws.reader_destroy(&reader)
+    testing.expect(t,ws.send_text(&conn,`{"type":"subscribe","instance_ids":["inst_a"]}`))
+    ack:=tool_http_test_read(t,pair.client,&reader)
+    testing.expect_value(t,agent_service.tool_live_text(ack,"type"),"subscribed")
+    unavailable:=tool_http_test_read(t,pair.client,&reader)
+    testing.expect_value(t,agent_service.tool_live_text(unavailable,"type"),"unavailable")
+    testing.expect_value(t,agent_service.tool_live_text(unavailable,"instance_id"),"inst_a")
+    testing.expect_value(t,agent_service.tool_live_text(unavailable,"reason"),"bridge_offline")
+    testing.expect(t,ws.send_text(&conn,`{"type":"ping"}`))
+    pong:=tool_http_test_read(t,pair.client,&reader)
+    testing.expect_value(t,agent_service.tool_live_text(pong,"type"),"pong")
+}

@@ -41,6 +41,7 @@ completions. Changed snapshots are coalesced at 1000 ms boundaries:
   "type":"state",
   "instance_id":"inst_one",
   "baseline":false,
+  "refresh":false,
   "snapshot":{
     "type":"tool_activity_live",
     "instance_id":"inst_one",
@@ -73,8 +74,28 @@ to 32 calls completed since the preceding emitted upstream snapshot; oldest drop
 on overflow. It drains once, with identical bytes fanned out to current viewers.
 No replay guarantee, per-client ACK, retransmission, missing-callback repair,
 stale-tool heuristic, or frontend history accumulation. Subsecond calls may
-appear only as completions. Idle intervals send nothing, including after a
+appear only as completions. Empty idle intervals send nothing, including after a
 completion batch; no extra empty tick is sent merely to erase the old batch.
+
+While subscribed with a nonempty active list, Bridge freshly samples current
+state every **60 seconds** since the last successfully emitted state, even if
+nothing changed. The writer checks the per-instance monotonic deadline each
+turn (subject to runtime scheduling/socket delivery delay), independently of the
+1000 ms changed-state gate. Such frames have `refresh:true`, `baseline:false`;
+ordinary changed states and baselines have `refresh:false`. Refreshes may carry
+the **same epoch/generation/revision** as the preceding state. This is valid
+freshness, not an old cached response. The Bridge connection's increasing
+`seq` still fences replay before Hub fan-out; older generations/revisions are
+rejected as before. Equal revisions are allowed. A refresh drains only newly
+pending completions, usually `[]`; it never replays the previous batch.
+Refreshing one instance does not refresh any other's receipt deadline.
+
+S2 must accept a valid same-revision refresh, replace current active state and
+reset that instance's last-state-receipt deadline. Every accepted baseline or
+changed state also resets that deadline; `pong` and other instances' traffic do
+not. The approved UI policy is 120s receipt expiry, 30s ping / 15s pong watchdog,
+and fresh baseline on browser resume. These UI policies belong to the dependent S2 task;
+the backend does not infer tool completion from time elapsed.
 
 Active fields: `call_id`, `source`, `provider_session_id`, `agent_id`,
 `tool_use_id`, `tool_name`, `summary`, `summary_truncated`, `shell_session_id`,
@@ -99,7 +120,15 @@ Unavailable reasons: `bridge_offline`, `instance_changed`, `not_found`,
 `capacity`, `state_too_large`. Error codes: `invalid_frame`,
 `invalid_subscription`, `invalid_instance_id`, `duplicate_instance_id`,
 `too_many_instances`, `forbidden`, `capacity`, `closed`, `unknown_type`.
-Unavailable clears displayed state. Browser reconnect opens a new socket and
+Unavailable clears only the named instance's displayed state. Hub sends it
+immediately on known Bridge disconnect, terminal/removal facts, or failed
+upstream attach delivery. Terminal/removal detaches and rotates the producer
+token so in-flight old state cannot restore the dead display; it does not
+reattach a dead instance. Repeated loss facts preserve the original token-matched
+detach, including when the last viewer leaves. Controls for a retired producer's
+detach are preserved before a replacement token's controls. Existing ready/configuration/reconnect paths request
+a fresh baseline. Hub process death cannot send a notification; S2's watchdog
+and receipt expiry cover that case. Browser reconnect opens a new socket and
 resends the desired set, without REST baseline or polling. Hub reattaches current
 subscriptions after Bridge reconnect. Instance configuration commit also
 reconciles existing viewers immediately: the Hub detaches the old Bridge, rotates
@@ -125,7 +154,7 @@ replacement. A new token discards old pending completions. A sole bounded contro
 worker serializes/coalesces upstream controls, never on the Bridge reader.
 Bridge emits `tool_stream_reset` with its process epoch per connection, then
 `tool_stream_state` carrying `epoch`, increasing `seq`, `subscription_id`,
-`run_count`, `baseline`, `snapshot`. Failure controls are
+`run_count`, `baseline`, `refresh`, `snapshot`. Failure controls are
 `tool_stream_unavailable` with `instance_id`, `reason` and the same routing/order
 fields. Hub rechecks owner, Bridge, run, connection generation and token before
 delivery. Epoch/sequence and per-route generation/revision fence old responses.
@@ -135,6 +164,7 @@ snapshots, collect completions, or deliver tool snapshots without listeners.**
 Last detach/Hub disconnect clears watching, pending completions and comparison
 state. Ingestion only marks watched instances dirty; baseline/flush serializes
 state. Visible equality excludes revision; a completion batch counts as a change.
+Only a due nonempty-active refresh bypasses this equality check.
 
 Bounds: 256 tracker instances, 32 active calls, 32 pending completions, 32 replay
 tombstones per instance; 512-byte summaries; 256 KiB upstream frame cap.
@@ -149,7 +179,7 @@ closes the socket; other threads use shutdown only.
 
 ## Verification
 
-Run `bash verify-tool-stream-backend.sh`. It enters `nix develop`, runs scoped
+Run `bash verify-tool-stream-freshness.sh` for S1b. It enters `nix develop`, runs scoped
 tracker/Bridge/Hub/HTTP regressions, then compiles Hub, Bridge and CLI. Tests cover
 summary selection/UTF-8 bounds, multiple completions/drain/cap, demand gating,
 one-second coalescing, real Bridge frame sockets, real HTTP upgrade/ticket/
@@ -161,3 +191,12 @@ updates, same-set reconciliation, old-source rejection, destination reconnect
 and ready-time baseline retry. Full browser + real Hub + real
 Bridge integration belongs to the dependent integration task; module tests do
 not claim that coverage.
+
+S1b deterministic scheduling coverage advances a monotonic clock through just
+before 60s, exactly 60s, and subsequent deadlines; checks current active content
+and one-shot completion batches; and verifies empty-idle and last-detach silence.
+Hub tests cover equal-revision refresh forwarding, old-revision rejection,
+terminal producer invalidation, removal and affected-Bridge notification.
+A real HTTP WebSocket test exercises failed upstream attach delivery and confirms
+ping/pong remains usable. These are scoped module/socket tests; no live
+deployment or full browser end-to-end coverage is claimed.
