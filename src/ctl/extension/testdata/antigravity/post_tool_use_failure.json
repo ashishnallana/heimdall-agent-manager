@@ -1,0 +1,18 @@
+{
+  "hookEventName": "PostToolUse",
+  "conversationId": "2f93a09c-a72a-41a2-be58-b906858e9794",
+  "workspacePaths": ["/home/tanmay/heimdall-agent-manager"],
+  "transcriptPath": "/home/tanmay/.gemini/antigravity-cli/brain/2f93a09c-a72a-41a2-be58-b906858e9794/.system_generated/logs/transcript.jsonl",
+  "modelName": "gemini-3.8-flash-high",
+  "stepIdx": 7,
+  "invocationNum": 1,
+  "cwd": "/home/tanmay/heimdall-agent-manager",
+  "toolCall": {
+    "name": "view_file",
+    "args": {
+      "AbsolutePath": "/nonexistent/path/missing.txt"
+    }
+  },
+  "error": "File does not exist: /nonexistent/path/missing.txt",
+  "durationMs": 5
+}

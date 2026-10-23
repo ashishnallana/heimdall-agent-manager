@@ -1,0 +1,23 @@
+{
+  "hookEventName": "PostToolUse",
+  "conversationId": "2f93a09c-a72a-41a2-be58-b906858e9794",
+  "workspacePaths": ["/home/tanmay/heimdall-agent-manager"],
+  "transcriptPath": "/home/tanmay/.gemini/antigravity-cli/brain/2f93a09c-a72a-41a2-be58-b906858e9794/.system_generated/logs/transcript.jsonl",
+  "modelName": "gemini-3.8-flash-high",
+  "stepIdx": 5,
+  "invocationNum": 1,
+  "cwd": "/home/tanmay/heimdall-agent-manager",
+  "toolCall": {
+    "name": "write_to_file",
+    "args": {
+      "TargetFile": "/home/tanmay/heimdall-agent-manager/src/hello.odin",
+      "CodeContent": "package main\n\nmain :: proc() {}\n",
+      "Description": "Create entry point",
+      "Overwrite": false
+    }
+  },
+  "toolResult": {
+    "output": "File created successfully."
+  },
+  "durationMs": 15
+}

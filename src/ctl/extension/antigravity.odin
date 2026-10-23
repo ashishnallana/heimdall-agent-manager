@@ -402,11 +402,11 @@ antigravity_build_permission :: proc(remaining_ms: int, blocker_id: string, raw:
 }
 
 antigravity_permission_output :: proc(decision, reason: string) -> string {
-	b := strings.builder_make()
 	switch decision {
 	case "allow":
 		return `{"decision":"allow"}`
 	case "deny":
+		b := strings.builder_make()
 		r := reason if strings.trim_space(reason) != "" else ANTIGRAVITY_DENY_DEFAULT_MESSAGE
 		strings.write_string(&b, `{"decision":"deny","reason":`)
 		json_write_string(&b, clip_string(r, ANTIGRAVITY_MESSAGE_MAX))
@@ -420,7 +420,7 @@ antigravity_permission_output :: proc(decision, reason: string) -> string {
 }
 
 antigravity_permission_output_from_response :: proc(response: string) -> string {
-	value, err := json.parse_string(strings.trim_space(response), json.DEFAULT_SPECIFICATION, true)
+	value, err := json.parse_string(strings.trim_space(response), json.DEFAULT_SPECIFICATION, true, context.temp_allocator)
 	if err != .None do return `{"decision":"ask"}`
 	root, ok := value.(json.Object)
 	if !ok || !json_get_bool(root, "ok") do return `{"decision":"ask"}`

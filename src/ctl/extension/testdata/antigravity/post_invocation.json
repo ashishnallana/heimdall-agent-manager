@@ -1,0 +1,9 @@
+{
+  "hookEventName": "PostInvocation",
+  "conversationId": "2f93a09c-a72a-41a2-be58-b906858e9794",
+  "workspacePaths": ["/home/tanmay/heimdall-agent-manager"],
+  "transcriptPath": "/home/tanmay/.gemini/antigravity-cli/brain/2f93a09c-a72a-41a2-be58-b906858e9794/.system_generated/logs/transcript.jsonl",
+  "modelName": "gemini-3.8-flash-high",
+  "stepIdx": 1,
+  "invocationNum": 1
+}

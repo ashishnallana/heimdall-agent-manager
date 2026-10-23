@@ -2,6 +2,7 @@ package extension
 
 import json "core:encoding/json"
 import "core:fmt"
+import "core:mem"
 import "core:strings"
 import "core:testing"
 import contracts "odin_test:contracts"
@@ -712,4 +713,251 @@ test_antigravity_failed_file_edit_omits_file_edit_event :: proc(t: ^testing.T) {
 		p := json_get_object(v.(json.Object), "payload")
 		testing.expect_value(t, json_get_string(p, "status"), "error")
 	}
+}
+
+@(test)
+test_antigravity_post_invocation_maps_no_events_and_silent_stdout :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+
+	raw := #load("testdata/antigravity/post_invocation.json", string)
+	mapped, err := antigravity_map_hook(raw, TS)
+	testing.expect_value(t, err, Antigravity_Error.None)
+	testing.expect_value(t, mapped.hook, Antigravity_Hook.Post_Invocation)
+	testing.expect_value(t, mapped.is_permission, false)
+	testing.expect_value(t, len(mapped.events), 0)
+
+	// hook_run on PostInvocation produces empty stdout and 0 bridge calls
+	agy_fake_reset(`{"ok":true}`, true)
+	out := hook_run("antigravity", raw, ENV, agy_fake_send)
+	testing.expect_value(t, out, "")
+	testing.expect_value(t, agy_fake_calls, 0)
+}
+
+@(test)
+test_antigravity_fixture_pre_tool_use_subagent :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+
+	raw := #load("testdata/antigravity/pre_tool_use_subagent.json", string)
+	mapped, err := antigravity_map_hook(raw, TS)
+	testing.expect_value(t, err, Antigravity_Error.None)
+	testing.expect_value(t, mapped.hook, Antigravity_Hook.Pre_Tool_Use)
+	testing.expect_value(t, mapped.is_permission, false)
+	testing.expect_value(t, len(mapped.events), 2)
+	if len(mapped.events) != 2 do return
+
+	// Event 0: tool.start
+	ev0, e0 := contracts.ext_parse_event(mapped.events[0])
+	testing.expect_value(t, e0, contracts.Ext_Error.None)
+	testing.expect_value(t, ev0.kind, contracts.Ext_Event_Kind.Tool_Start)
+	testing.expect_value(t, ev0.tool_name, "invoke_subagent")
+	testing.expect_value(t, ev0.tool_use_id, "step_3")
+
+	// Event 1: subagent.start
+	ev1, e1 := contracts.ext_parse_event(mapped.events[1])
+	testing.expect_value(t, e1, contracts.Ext_Error.None)
+	testing.expect_value(t, ev1.kind, contracts.Ext_Event_Kind.Subagent_Start)
+
+	v1, _ := json.parse_string(mapped.events[1], json.DEFAULT_SPECIFICATION, true)
+	o1, _ := v1.(json.Object)
+	p1 := json_get_object(o1, "payload")
+	testing.expect_value(t, json_get_string(p1, "role"), "Codebase Researcher")
+	testing.expect_value(t, json_get_string(p1, "type"), "research")
+	testing.expect_value(t, json_get_string(p1, "model"), "flash")
+}
+
+@(test)
+test_antigravity_fixture_post_tool_use_write_create :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+
+	raw := #load("testdata/antigravity/post_tool_use_write_create.json", string)
+	mapped, err := antigravity_map_hook(raw, TS)
+	testing.expect_value(t, err, Antigravity_Error.None)
+	testing.expect_value(t, mapped.hook, Antigravity_Hook.Post_Tool_Use)
+	testing.expect_value(t, len(mapped.events), 2)
+	if len(mapped.events) != 2 do return
+
+	// Event 0: tool.end
+	ev0, e0 := contracts.ext_parse_event(mapped.events[0])
+	testing.expect_value(t, e0, contracts.Ext_Error.None)
+	testing.expect_value(t, ev0.kind, contracts.Ext_Event_Kind.Tool_End)
+	testing.expect_value(t, ev0.tool_name, "write_to_file")
+	testing.expect_value(t, ev0.tool_use_id, "step_5")
+
+	// Event 1: file.edit
+	ev1, e1 := contracts.ext_parse_event(mapped.events[1])
+	testing.expect_value(t, e1, contracts.Ext_Error.None)
+	testing.expect_value(t, ev1.kind, contracts.Ext_Event_Kind.File_Edit)
+	testing.expect_value(t, ev1.file_path, "/home/tanmay/heimdall-agent-manager/src/hello.odin")
+
+	v1, _ := json.parse_string(mapped.events[1], json.DEFAULT_SPECIFICATION, true)
+	o1, _ := v1.(json.Object)
+	p1 := json_get_object(o1, "payload")
+	testing.expect_value(t, json_get_string(p1, "operation"), "create")
+	testing.expect_value(t, json_get_string(p1, "diff_source"), "content")
+	adds, _ := json_get_int(p1, "additions")
+	dels, _ := json_get_int(p1, "deletions")
+	testing.expect_value(t, adds, 3)
+	testing.expect_value(t, dels, 0)
+	testing.expect(t, strings.contains(json_get_string(p1, "diff"), "+++ b/src/hello.odin"))
+}
+
+@(test)
+test_antigravity_fixture_post_tool_use_replace_file :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+
+	raw := #load("testdata/antigravity/post_tool_use_replace_file.json", string)
+	mapped, err := antigravity_map_hook(raw, TS)
+	testing.expect_value(t, err, Antigravity_Error.None)
+	testing.expect_value(t, mapped.hook, Antigravity_Hook.Post_Tool_Use)
+	testing.expect_value(t, len(mapped.events), 2)
+	if len(mapped.events) != 2 do return
+
+	ev0, e0 := contracts.ext_parse_event(mapped.events[0])
+	testing.expect_value(t, e0, contracts.Ext_Error.None)
+	testing.expect_value(t, ev0.kind, contracts.Ext_Event_Kind.Tool_End)
+	testing.expect_value(t, ev0.tool_name, "replace_file_content")
+	testing.expect_value(t, ev0.tool_use_id, "step_6")
+
+	ev1, e1 := contracts.ext_parse_event(mapped.events[1])
+	testing.expect_value(t, e1, contracts.Ext_Error.None)
+	testing.expect_value(t, ev1.kind, contracts.Ext_Event_Kind.File_Edit)
+	testing.expect_value(t, ev1.file_path, "/home/tanmay/heimdall-agent-manager/src/hello.odin")
+
+	v1, _ := json.parse_string(mapped.events[1], json.DEFAULT_SPECIFICATION, true)
+	o1, _ := v1.(json.Object)
+	p1 := json_get_object(o1, "payload")
+	testing.expect_value(t, json_get_string(p1, "operation"), "edit")
+	testing.expect_value(t, json_get_string(p1, "diff_source"), "strings")
+	diff := json_get_string(p1, "diff")
+	testing.expect(t, strings.contains(diff, "--- a/src/hello.odin"))
+	testing.expect(t, strings.contains(diff, "+++ b/src/hello.odin"))
+	testing.expect(t, strings.contains(diff, "-main :: proc() {}"))
+	testing.expect(t, strings.contains(diff, "+main :: proc() {"))
+}
+
+@(test)
+test_antigravity_fixture_post_tool_use_failure :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+
+	raw := #load("testdata/antigravity/post_tool_use_failure.json", string)
+	mapped, err := antigravity_map_hook(raw, TS)
+	testing.expect_value(t, err, Antigravity_Error.None)
+	testing.expect_value(t, mapped.hook, Antigravity_Hook.Post_Tool_Use)
+	testing.expect_value(t, len(mapped.events), 1)
+	if len(mapped.events) != 1 do return
+
+	ev0, e0 := contracts.ext_parse_event(mapped.events[0])
+	testing.expect_value(t, e0, contracts.Ext_Error.None)
+	testing.expect_value(t, ev0.kind, contracts.Ext_Event_Kind.Tool_End)
+
+	v0, _ := json.parse_string(mapped.events[0], json.DEFAULT_SPECIFICATION, true)
+	o0, _ := v0.(json.Object)
+	p0 := json_get_object(o0, "payload")
+	testing.expect_value(t, json_get_string(p0, "status"), "error")
+	testing.expect_value(t, json_get_string(p0, "error"), "File does not exist: /nonexistent/path/missing.txt")
+}
+
+@(test)
+test_antigravity_child_subagent_events_carry_agent_id_and_type :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+
+	raw := `{"hookEventName":"PreToolUse","conversationId":"s_parent","agentId":"agt_sub123","agentType":"research","stepIdx":2,"toolCall":{"name":"view_file","args":{"AbsolutePath":"/repo/doc.md"}}}`
+	mapped, err := antigravity_map_hook(raw, TS)
+	testing.expect_value(t, err, Antigravity_Error.None)
+	testing.expect_value(t, len(mapped.events), 1)
+	if len(mapped.events) == 1 {
+		ev, e := contracts.ext_parse_event(mapped.events[0])
+		testing.expect_value(t, e, contracts.Ext_Error.None)
+		testing.expect_value(t, ev.agent_id, "agt_sub123")
+		testing.expect_value(t, ev.agent_type, "research")
+		testing.expect_value(t, ev.kind, contracts.Ext_Event_Kind.Tool_Start)
+	}
+}
+
+@(test)
+test_antigravity_all_fixtures_satisfy_contract :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+
+	fixtures := []string{
+		#load("testdata/antigravity/pre_invocation.json", string),
+		#load("testdata/antigravity/post_invocation.json", string),
+		#load("testdata/antigravity/pre_tool_use.json", string),
+		#load("testdata/antigravity/pre_tool_use_subagent.json", string),
+		#load("testdata/antigravity/post_tool_use.json", string),
+		#load("testdata/antigravity/post_tool_use_write_create.json", string),
+		#load("testdata/antigravity/post_tool_use_replace_file.json", string),
+		#load("testdata/antigravity/post_tool_use_failure.json", string),
+		#load("testdata/antigravity/permission_request.json", string),
+		#load("testdata/antigravity/stop.json", string),
+	}
+
+	event_counts := make(map[string]int)
+	total_events := 0
+
+	for raw, idx in fixtures {
+		mapped, err := antigravity_map_hook(raw, TS, 10_000, "blk_fixture_all")
+		testing.expect_value(t, err, Antigravity_Error.None)
+
+		for event_str in mapped.events {
+			total_events += 1
+			testing.expect(t, len(event_str) <= contracts.EXT_EVENT_MAX_BYTES, "event stays within 256KB cap")
+
+			ev, perr := contracts.ext_parse_event(event_str)
+			testing.expectf(t, perr == .None, "fixture %d event failed schema parse: %v", idx, perr)
+			testing.expect_value(t, ev.provider, "antigravity")
+			testing.expect_value(t, ev.ext_version, ANTIGRAVITY_EXT_VERSION)
+			testing.expect_value(t, ev.session_id, "2f93a09c-a72a-41a2-be58-b906858e9794")
+
+			kind_name := contracts.ext_event_kind_name(ev.kind)
+			event_counts[kind_name] += 1
+		}
+	}
+
+	testing.expect(t, total_events >= 13, "expected at least 13 events across fixtures")
+	for required in ([]string{"hello", "session", "activity", "tool.start", "tool.end", "subagent.start", "permission.request", "file.edit"}) {
+		testing.expectf(t, event_counts[required] > 0, "expected event kind %s across fixtures, got %d", required, event_counts[required])
+	}
+}
+
+@(test)
+test_antigravity_tracking_allocator_clean :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+
+	baseline_allocs := len(track.allocation_map)
+
+	// Test zero-leak execution of permission formatting
+	out_allow := antigravity_permission_output("allow", "")
+	testing.expect_value(t, out_allow, `{"decision":"allow"}`)
+
+	out_ask := antigravity_permission_output("ask", "")
+	testing.expect_value(t, out_ask, `{"decision":"ask"}`)
+
+	out_deny := antigravity_permission_output("deny", "Access denied")
+	testing.expect_value(t, out_deny, `{"decision":"deny","reason":"Access denied"}`)
+	delete(out_deny)
+
+	// Test response parsing with temp allocator cleanly
+	resp_out := antigravity_permission_output_from_response(`{"ok":true,"data":{"decision":"allow"}}`)
+	testing.expect_value(t, resp_out, `{"decision":"allow"}`)
+
+	// Test destructive check
+	testing.expect(t, antigravity_is_destructive("run_command"))
+	testing.expect(t, antigravity_is_destructive("write_to_file"))
+	testing.expect(t, antigravity_is_destructive("replace_file_content"))
+	testing.expect(t, !antigravity_is_destructive("view_file"))
+
+	testing.expectf(t, len(track.allocation_map) == baseline_allocs,
+		"leak detected under tracking allocator: %d live allocations, expected baseline %d",
+		len(track.allocation_map), baseline_allocs)
+	testing.expect_value(t, len(track.bad_free_array), 0)
 }

@@ -1,0 +1,27 @@
+{
+  "hookEventName": "PostToolUse",
+  "conversationId": "2f93a09c-a72a-41a2-be58-b906858e9794",
+  "workspacePaths": ["/home/tanmay/heimdall-agent-manager"],
+  "transcriptPath": "/home/tanmay/.gemini/antigravity-cli/brain/2f93a09c-a72a-41a2-be58-b906858e9794/.system_generated/logs/transcript.jsonl",
+  "modelName": "gemini-3.8-flash-high",
+  "stepIdx": 6,
+  "invocationNum": 1,
+  "cwd": "/home/tanmay/heimdall-agent-manager",
+  "toolCall": {
+    "name": "replace_file_content",
+    "args": {
+      "TargetFile": "/home/tanmay/heimdall-agent-manager/src/hello.odin",
+      "TargetContent": "main :: proc() {}\n",
+      "ReplacementContent": "main :: proc() {\n\tprintln(\"hello world\")\n}\n",
+      "StartLine": 3,
+      "EndLine": 3,
+      "Instruction": "Add print line",
+      "Description": "Print hello world",
+      "AllowMultiple": false
+    }
+  },
+  "toolResult": {
+    "output": "File replaced successfully."
+  },
+  "durationMs": 18
+}
