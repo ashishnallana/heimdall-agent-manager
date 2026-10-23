@@ -3021,18 +3021,6 @@ export function AgentChatPane({
               <Icon name="gear" size={15} />
               <span>Agent settings</span>
             </Menu.Item>
-            {onOpenAuxTab ? (
-              <Menu.Item
-                data-debug-id="conversation-thread-activity-action"
-                onClick={() => {
-                  setHeaderActionsOpen(false);
-                  openAux({ type: 'activity' });
-                }}
-              >
-                <Icon name="layers" size={15} />
-                <span>Activity timeline</span>
-              </Menu.Item>
-            ) : null}
             <Menu.Separator />
             {onSplitPane || onReplaceWithNew || (isMultiPane && onClosePane) ? (
               <>

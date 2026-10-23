@@ -247,10 +247,13 @@ test('hydrate sanitizes persisted aux strips (drops bad tabs, duplicates, smuggl
           { id: 'dup', content: { type: 'shell', sessionId: 's1' } },
           { id: NEW_TAB_ID, content: { type: 'bogus' } },
           { content: { type: 'agentPty' } },
+          { id: 'activity', content: { type: 'activity', filePath: '/old/edit.ts' } },
         ],
-        activeTabId: 'gone',
+        activeTabId: 'activity',
         isPaneOpen: true,
       },
+      activityOnly: { tabs: [{ id: 'activity', content: { type: 'activity' } }], activeTabId: 'activity' },
+      derivedActivity: { tabs: [], activeTabId: 'activity' },
       _new: { tabs: [] },
     },
     multiPane: { tabs: [], activeTabId: 'overview' },
@@ -258,6 +261,8 @@ test('hydrate sanitizes persisted aux strips (drops bad tabs, duplicates, smuggl
   } as any);
   assert.deepEqual(clean.agentPanes.a.tabs.map((t) => t.id), ['shell__s1'], 'ids are re-derived from content');
   assert.equal(clean.agentPanes.a.activeTabId, 'shell__s1');
+  assert.deepEqual(clean.agentPanes.activityOnly, { tabs: [], activeTabId: NEW_TAB_ID });
+  assert.deepEqual(clean.agentPanes.derivedActivity, { tabs: [], activeTabId: NEW_TAB_ID });
   assert.equal(clean.isOpen, true, 'a legacy per-strip open flag migrates to the global one');
   assert.equal(clean.agentPanes._new, undefined);
   assert.equal((clean as any).multiPane, undefined, 'the old shared split strip is dropped');

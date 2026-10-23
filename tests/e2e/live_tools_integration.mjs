@@ -162,7 +162,7 @@ try {
   check('separate permission decision reaches waiting hook', permissionOut.includes('allow'));
   const timeline = await api('GET', `/agent-instances/${instances[0].agent_instance_id}/extension/events`);
   evidence.timeline = timeline;
-  check('separate Activity timeline remains available', JSON.stringify(timeline).includes('tool.start'));
+  check('backend extension event history remains available', JSON.stringify(timeline).includes('tool.start'));
   for (const feature of ['files', 'subagents']) check(`separate extension ${feature} endpoint remains available`, !!(await api('GET', `/agent-instances/${instances[0].agent_instance_id}/extension/${feature}`)));
   const bridgeToken = fs.readFileSync(path.join(local, 'bridges/b3/credentials/bridge-token'), 'utf8').trim().split(/\r?\n/).at(-1);
   const legacy = await fetch(hub + '/api/v1/agent-actions/tool-activity', {method: 'POST', headers: {'Content-Type': 'application/json', Authorization: 'Bearer ' + bridgeToken}, body: JSON.stringify({agent_instance_id: instances[0].agent_instance_id, params: {body: 'legacy retry', metadata: {calls: []}}})});

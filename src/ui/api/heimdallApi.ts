@@ -35,7 +35,6 @@ export const HEIMDALL_TAG_TYPES = [
   'ProjectBridgePaths',
   // Provider extension (ham.ext.v1): timeline events/rollups and the in-memory agent
   // blockers (permission cards), per instance id.
-  'ExtensionEvents',
   'AgentBlockers',
   // Project Directory Browser: project-scoped FS listings, keyed by (project, bridge, path).
   'ProjectFs',
