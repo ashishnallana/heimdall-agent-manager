@@ -175,3 +175,62 @@ test_provider_extension_declarative_installed_collection_and_keys :: proc(t: ^te
 		delete(version)
 	}
 }
+
+@(test)
+test_provider_extension_antigravity_detection :: proc(t: ^testing.T) {
+	ext := Bridge_Catalog_Extension{
+		detect_argv = []string{"plugin", "list", "--json"},
+		detect_collection = "installed",
+		detect_id_key = "name",
+		detect_version_key = "version",
+		detect_enabled_key = "enabled",
+		plugin_id = "heimdall",
+		min_version = "0.1.0",
+		install_hint = "agy plugin install <repo>/extensions/antigravity",
+		capabilities = []string{"activity", "subagents", "permissions", "file_edits", "session_id"},
+		load_args = []string{"--add-dir"},
+		load_path_suffix = "extensions/antigravity",
+	}
+	cases := [?]struct {raw, state: string}{
+		{`{"installed":[{"name":"heimdall","version":"0.1.0","enabled":true}],"available":[]}`, "present"},
+		{`{"installed":[{"name":"other","version":"1.0.0","enabled":true}],"available":[]}`, "absent"},
+		{`{"installed":[],"available":[{"name":"heimdall","version":"0.1.0","enabled":true}]}`, "absent"},
+		{`{"installed":[{"name":"heimdall","version":"0.1.0","enabled":false}]}`, "disabled"},
+		{`{"installed":[{"name":"heimdall","version":"0.0.9","enabled":true}]}`, "outdated"},
+		{`{"installed":[{"name":"heimdall","version":"0.2.0","enabled":true}]}`, "present"},
+		{`{"installed":[{"name":"heimdall","enabled":true}]}`, "error"},
+		{`{"installed":[{"name":"heimdall","version":"unknown","enabled":true}]}`, "error"},
+		{`{"installed":[{"name":"heimdall","version":"0.1.0","enabled":"true"}]}`, "error"},
+		{`{"installed":{},"available":[]}`, "error"},
+		{`[]`, "error"},
+	}
+	for c in cases {
+		state, version := bridge_provider_extension_evaluate(ext, c.raw, true)
+		testing.expect_value(t, state, c.state)
+		delete(version)
+	}
+}
+
+@(test)
+test_provider_extension_probe_runs_antigravity_argv :: proc(t: ^testing.T) {
+	ext := Bridge_Catalog_Extension{
+		detect_argv = []string{"plugin", "list", "--json"},
+		detect_collection = "installed",
+		detect_id_key = "name",
+		detect_version_key = "version",
+		detect_enabled_key = "enabled",
+		plugin_id = "heimdall",
+		min_version = "0.1.0",
+		install_hint = "agy plugin install <repo>/extensions/antigravity",
+		capabilities = []string{"activity", "subagents", "permissions", "file_edits", "session_id"},
+		load_args = []string{"--add-dir"},
+		load_path_suffix = "extensions/antigravity",
+	}
+	path := provider_extension_test_fixture(t, "#!/bin/sh\n[ \"$1 $2 $3\" = \"plugin list --json\" ] || exit 3\necho '{\"installed\":[{\"name\":\"heimdall\",\"version\":\"0.1.0\",\"enabled\":true}]}'\n")
+	defer { _ = os.remove(path); delete(path) }
+	state, version := bridge_provider_extension_probe(path, ext, time.Second)
+	defer delete(version)
+	testing.expect_value(t, state, "present")
+	testing.expect_value(t, version, "0.1.0")
+}
+

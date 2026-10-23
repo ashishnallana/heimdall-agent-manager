@@ -99,11 +99,11 @@ test_rebased_fresh_database_applies_every_migration :: proc(t: ^testing.T) {
 @(test)
 test_rebased_migration_numbers_after_102_are_unique :: proc(t: ^testing.T) {
 	order := migration_order
-	tail := order[len(order) - 11:]
-	expected := [11]string{"102_drop_bridge_enrollments.sql", RMO_MAIN_TIP, RMO_GUARD, RMO_INDEXES,
+	tail := order[len(order) - 12:]
+	expected := [12]string{"102_drop_bridge_enrollments.sql", RMO_MAIN_TIP, RMO_GUARD, RMO_INDEXES,
 		"106_agent_extension_events.sql", "107_provider_extension.sql", "108_agent_permission_mode.sql",
 		"109_instance_permission_mode.sql", "110_provider_ask_args.sql",
-		"111_extension_startup_loading.sql", "112_codex_extension.sql"}
+		"111_extension_startup_loading.sql", "112_codex_extension.sql", "113_antigravity_extension.sql"}
 	for name, i in expected do testing.expect_value(t, tail[i], name)
 	prev := 0
 	for name in order {

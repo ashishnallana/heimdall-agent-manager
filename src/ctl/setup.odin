@@ -39,9 +39,9 @@ setup_known_harnesses :: proc() -> []Setup_Harness {
 	})
 	append(&out, Setup_Harness{
 		name = "antigravity", bin = "agy", config_path = j(home, ".gemini/hooks.json"),
-		install_hint = "install antigravity-cli (agy)",
+		install_hint = "install antigravity-cli (agy); extension: agy plugin install <repo>/extensions/antigravity",
 		auth_hint = "Google OAuth: token at ~/.gemini/antigravity-cli/antigravity-oauth-token",
-		wire_hint = "set HEIMDALL_ANTIGRAVITY_HOOKS=1; wrapper writes a hooks.json overlay (never overwrites read-only ~/.gemini symlinks) and exports HEIMDALL_ANTIGRAVITY_HOOKS_CONFIG",
+		wire_hint = "agy plugin install <repo>/extensions/antigravity or load via --add-dir extensions/antigravity; hooks invoke '$HEIMDALL_CTL_BIN' extension hook antigravity",
 	})
 	append(&out, Setup_Harness{
 		name = "claude", bin = "claude", config_path = j(home, ".claude/settings.json"),

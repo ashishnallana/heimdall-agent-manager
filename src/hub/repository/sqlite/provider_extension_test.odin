@@ -21,6 +21,7 @@ test_provider_catalog_extension_descriptors_preserve_claude_and_add_codex :: pro
 	testing.expect_value(t, err.code, domain.Error_Code.None)
 	defer domain.provider_catalog_destroy(catalog)
 	saw_claude := false
+	saw_antigravity := false
 	for entry in catalog {
 		if entry.provider == "claude" {
 			saw_claude = true
@@ -34,11 +35,25 @@ test_provider_catalog_extension_descriptors_preserve_claude_and_add_codex :: pro
 			testing.expect(t, strings.contains(entry.extension_json, `"detect_collection":"installed"`))
 			testing.expect(t, strings.contains(entry.extension_json, `"detect_id_key":"pluginId"`))
 			testing.expect(t, strings.contains(entry.extension_json, `"plugin_id":"heimdall@heimdall-codex"`))
+		} else if entry.provider == "antigravity" {
+			saw_antigravity = true
+			testing.expect(t, strings.contains(entry.extension_json, `"detect_argv":["plugin","list","--json"]`), "antigravity detects via plugin list")
+			testing.expect(t, strings.contains(entry.extension_json, `"detect_collection":"installed"`))
+			testing.expect(t, strings.contains(entry.extension_json, `"detect_id_key":"name"`))
+			testing.expect(t, strings.contains(entry.extension_json, `"detect_version_key":"version"`))
+			testing.expect(t, strings.contains(entry.extension_json, `"detect_enabled_key":"enabled"`))
+			testing.expect(t, strings.contains(entry.extension_json, `"plugin_id":"heimdall"`))
+			testing.expect(t, strings.contains(entry.extension_json, `"min_version":"0.1.0"`))
+			testing.expect(t, strings.contains(entry.extension_json, `"install_hint":"agy plugin install <repo>/extensions/antigravity"`))
+			testing.expect(t, strings.contains(entry.extension_json, `"capabilities":["activity","subagents","permissions","file_edits","session_id"]`))
+			testing.expect(t, strings.contains(entry.extension_json, `"load_args":["--add-dir"]`))
+			testing.expect(t, strings.contains(entry.extension_json, `"load_path_suffix":"extensions/antigravity"`))
 		} else {
 			testing.expectf(t, entry.extension_json == "", "%s has no extension", entry.provider)
 		}
 	}
 	testing.expect(t, saw_claude, "claude catalog entry exists")
+	testing.expect(t, saw_antigravity, "antigravity catalog entry exists")
 
 	// The canonical body (replicated to Bridges and served by /api/v1/providers)
 	// carries the descriptor object, or null for unsupported providers.
