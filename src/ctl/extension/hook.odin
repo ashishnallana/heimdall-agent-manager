@@ -167,6 +167,19 @@ hook_run :: proc(provider, raw: string, env: Hook_Env, send: Send_Proc) -> strin
 		}
 		_, _ = send(env.endpoint, env.token, "agent.extension.event", event_params(mapped.events[:]), EVENT_SOCKET_TIMEOUT_MS)
 		return ""
+	case ANTIGRAVITY_PROVIDER:
+		timeout := env.permission_timeout_ms
+		if timeout <= 0 do timeout = PERMISSION_RELAY_TIMEOUT_MS
+		mapped, err := antigravity_map_hook(raw, env.ts, timeout)
+		if err != .None || len(mapped.events) == 0 do return ""
+		if mapped.is_permission {
+			if antigravity_permission_is_ham_ctl(raw, env.ctl_bin) do return antigravity_permission_output("allow", "")
+			out := relay_permission(env, send, timeout, antigravity_build_permission, raw, antigravity_permission_output_from_response)
+			if out == "" do return `{"decision":"ask"}`
+			return out
+		}
+		_, _ = send(env.endpoint, env.token, "agent.extension.event", event_params(mapped.events[:]), EVENT_SOCKET_TIMEOUT_MS)
+		return ""
 	}
 	return ""
 }

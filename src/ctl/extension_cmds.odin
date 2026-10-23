@@ -34,6 +34,9 @@ ctl_extension_command :: proc(cmd: []string, args: []string) {
 	case "hook":
 		if !ext.env_ready(env) do return
 		provider := cmd[2] if len(cmd) > 2 else ""
+		if provider != ext.CLAUDE_PROVIDER && provider != ext.CODEX_PROVIDER && provider != ext.ANTIGRAVITY_PROVIDER {
+			return
+		}
 		raw, ok := ctl_extension_read_stdin()
 		if !ok do return
 		env.ts = ctl_extension_now_rfc3339()
@@ -123,7 +126,7 @@ print_help_extension :: proc() {
 	fmt.println("")
 	fmt.println("VERBS")
 	fmt.println("  hook <provider>    Read the provider's native hook JSON on stdin, map it to")
-	fmt.println("                     ham.ext.v1 and send it to the local Bridge. Providers: claude, codex.")
+	fmt.println("                     ham.ext.v1 and send it to the local Bridge. Providers: claude, codex, antigravity.")
 	fmt.println("                     PermissionRequest blocks on agent.extension.permission and")
 	fmt.println("                     prints the provider's allow/deny JSON (nothing = no decision).")
 	fmt.println("                     Every other event prints nothing (500ms socket timeout).")
@@ -137,7 +140,7 @@ print_help_extension :: proc() {
 	fmt.println("HEIMDALL_EXT_PERMISSION_TIMEOUT_MS lowers the permission wait (default/max 300000).")
 	fmt.println("")
 	fmt.println("EXAMPLES")
-	fmt.println("  echo \"$HOOK_JSON\" | ham-ctl extension hook <claude|codex>")
+	fmt.println("  echo \"$HOOK_JSON\" | ham-ctl extension hook <claude|codex|antigravity>")
 	fmt.println("  ham-ctl extension event --stdin < event.json")
 	fmt.println("  ham-ctl extension status")
 }

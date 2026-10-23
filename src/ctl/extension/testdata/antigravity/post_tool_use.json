@@ -1,0 +1,19 @@
+{
+  "hookEventName": "PostToolUse",
+  "conversationId": "2f93a09c-a72a-41a2-be58-b906858e9794",
+  "workspacePaths": ["/home/tanmay/heimdall-agent-manager"],
+  "transcriptPath": "/home/tanmay/.gemini/antigravity-cli/brain/2f93a09c-a72a-41a2-be58-b906858e9794/.system_generated/logs/transcript.jsonl",
+  "modelName": "gemini-3.8-flash-high",
+  "stepIdx": 2,
+  "invocationNum": 1,
+  "toolCall": {
+    "name": "view_file",
+    "args": {
+      "AbsolutePath": "/home/tanmay/heimdall-agent-manager/README.md"
+    }
+  },
+  "toolResult": {
+    "output": "# Heimdall Agent Manager\n"
+  },
+  "durationMs": 42
+}
