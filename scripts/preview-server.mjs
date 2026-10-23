@@ -76,7 +76,7 @@ if (!fs.existsSync(path.join(DIST, 'index.html'))) {
 function logRequest(req, res) {
   const startedAt = Date.now();
   res.on('finish', () => {
-    console.log(`[preview] ${req.method} ${req.url} -> ${res.statusCode} (${Date.now() - startedAt}ms)`);
+    console.log(`[preview] ${req.method} ${new URL(req.url, 'http://local').pathname} -> ${res.statusCode} (${Date.now() - startedAt}ms)`);
   });
 }
 
@@ -237,19 +237,19 @@ server.on('upgrade', (req, clientSocket, head) => {
       .map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(', ') : v}`)
       .join('\r\n');
     clientSocket.write(`HTTP/1.1 101 Switching Protocols\r\n${statusLine}\r\n\r\n`);
-    if (upstreamHead?.length) clientSocket.unshift(upstreamHead);
-    console.log(`[preview] WS ${req.url} -> 101`);
+    if (upstreamHead?.length) clientSocket.write(upstreamHead);
+    if (head?.length) upstreamSocket.write(head);
+    console.log(`[preview] WS ${new URL(req.url, 'http://local').pathname} -> 101`);
     upstreamSocket.pipe(clientSocket).pipe(upstreamSocket);
     upstreamSocket.on('error', () => clientSocket.destroy());
     clientSocket.on('error', () => upstreamSocket.destroy());
   });
   upstreamReq.on('response', (upstreamRes) => {
     // Upstream declined the upgrade (auth, wrong path). Pass the refusal on.
-    console.log(`[preview] WS ${req.url} -> ${upstreamRes.statusCode} (no upgrade)`);
+    console.log(`[preview] WS ${new URL(req.url, 'http://local').pathname} -> ${upstreamRes.statusCode} (no upgrade)`);
     clientSocket.end(`HTTP/1.1 ${upstreamRes.statusCode} ${upstreamRes.statusMessage}\r\n\r\n`);
   });
   upstreamReq.on('error', () => clientSocket.destroy());
-  if (head?.length) upstreamReq.write(head);
   upstreamReq.end();
 });
 

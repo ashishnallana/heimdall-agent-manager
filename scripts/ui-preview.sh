@@ -52,7 +52,7 @@ STATE="$REPO/.ui-preview-session"
 log() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 die() { printf '\033[31merror: %s\033[0m\n' "$*" >&2; exit 1; }
 
-json() { python3 -c 'import json,sys;d=json.load(sys.stdin);exec(sys.argv[1])' "$1"; }
+json() { python3 -c 'import json,sys;d,_=json.JSONDecoder().raw_decode(sys.stdin.read().lstrip());exec(sys.argv[1])' "$1"; }
 
 command -v python3 >/dev/null || die "python3 is required (used to read ham-ctl JSON)"
 
@@ -87,19 +87,13 @@ else
 fi
 
 # --- 3. (re)start the shell session ----------------------------------------
-# The state file is a convenience, NOT the source of truth: a `shell start` whose
-# RESPONSE fails (a hub relay hiccup) still leaves a session running, and the script
-# exits before recording it. That orphan keeps $PORT, and the next run's server dies
-# with EADDRINUSE — which surfaces as a confusing 409 from the relay, not as an error
-# naming the port. So ask the Hub what is actually running under our label and kill
-# all of it. `shell list` requires a chain, so without one fall back to the file.
+# Replace only this checkout's recorded server. If a start response fails before
+# recording it, inspect the Hub's sessions and recover that exact session rather
+# than terminating other previews on the same chain.
 prev=""
-if [[ -n "${HEIMDALL_PREVIEW_CHAIN:-}" ]]; then
-  prev="$("$HAM_CTL" shell list --chain "$HEIMDALL_PREVIEW_CHAIN" \
-    | json 'print(" ".join(s["session_id"] for s in d["data"]["data"]["sessions"]
-                           if s.get("status")=="running" and s.get("label")=="'"$LABEL"'"))')"
-fi
-[[ -z "$prev" && -f "$STATE" ]] && prev="$(cat "$STATE")"
+# A chain can contain previews owned by other checkouts. Only replace the session
+# recorded by this checkout, never every server sharing a label in the chain.
+[[ -f "$STATE" ]] && prev="$(cat "$STATE")"
 
 if [[ -n "$prev" ]]; then
   log "killing previous session(s): $prev"
@@ -150,6 +144,8 @@ SID="$(printf '%s' "$START_RESPONSE" | json 'print(d.get("data",{}).get("data",{
 [[ -n "$SID" ]] || die "shell start returned no session_id. Response was:
 $START_RESPONSE"
 echo "$SID" > "$STATE"
+PREVIEW_URL="$(printf '%s' "$START_RESPONSE" | json 'print(d.get("data",{}).get("data",{}).get("session",{}).get("preview_url",""))')"
+[[ -n "$PREVIEW_URL" ]] || die "shell start returned no preview_url for $SID"
 
 BASE="http://127.0.0.1:$ENDPOINT_PORT/proxy/$SID"
 
@@ -188,5 +184,5 @@ else
 fi
 
 log "session:  $SID"
-log "preview:  $BASE/          <- open exactly this, trailing slash included"
+log "preview:  $PREVIEW_URL"
 (( fail == 0 )) || die "verification failed — see above"
