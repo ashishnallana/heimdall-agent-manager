@@ -1597,5 +1597,5 @@ test_live_inventory_does_not_reconstruct_hub_tool_state :: proc(t: ^testing.T) {
  defer delete(frame)
  result := shell_session_apply_inventory(&fx.svc, "brg_1", frame)
  testing.expect_value(t, result.terminated, 1)
- for p in live.tool_live.pending do testing.expect(t, !p.used)
+ testing.expect_value(t, len(live.tool_live.routes), 0)
 }

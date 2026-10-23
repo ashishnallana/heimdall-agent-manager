@@ -1,186 +1,153 @@
-# Ephemeral live tools: Bridge owner, Hub relay
+# Summary-only tool activity stream
 
-REQ-LIVE-1..3/5/7/8/9. Bridge alone owns active provider/shell calls and one last
-completion per agent instance. Hub authenticates and forwards frames and proxies
-explicit snapshot requests. It retains no tool-content cache, completed list,
-tombstones, or historical state. No conversation tool_activity/shell_run writes
-occur; the authenticated legacy tool-activity endpoint returns
-{"accepted":true,"persisted":false}. Historical rows are not deleted. Separate
-Activity/file/subagent/permission persistence and shell controls/logs remain.
+Tools are cosmetic, best-effort display state. Bridge owns bounded current active
+calls and, **only while watched**, a transient completion batch. Hub retains
+subscription routing, refcounts, order metadata, and bounded outgoing queues;
+it has no permanent tool-content cache. This stream never writes conversation
+messages or database history. Activity, files, subagents, permissions, shell
+sessions, logs and terminal streams retain their separate APIs.
 
-## UI protocol
+## Browser contract
 
-Authenticate the existing user WebSocket with its ticket/cookie flow. REST uses
-the existing authenticated API envelope. Exact snapshot schema:
+Open `GET /api/v1/tool-activity/stream` as a WebSocket. Use the existing single-use
+`?ticket=` from `POST /api/v1/me/ws-ticket`, or normal user cookie/header auth.
+Bridge/instance tokens are refused; no experiment flag is required. The old
+instance/chain `tool-activity-live` REST routes, waiters, roster tokens, and
+general user-event tool fan-out are removed. Full JSON schema:
 [tool-activity-live.schema.json](tool-activity-live.schema.json).
 
-GET /api/v1/agent-instances/:instance_id/tool-activity-live performs one bounded
-request over the owning Bridge's existing authenticated command WebSocket.
-No chat, extension history, shell inventory, or cached Hub tool state is read.
-Owner checks use existing get_instance authorization.
+Replace the entire set using **instance** IDs, not durable agent IDs:
 
-Example response data and live user-WS frame (stream_epoch/stream_seq are added
-only by the existing user event bus):
+```json
+{"type":"subscribe","instance_ids":["inst_one","inst_two"]}
+```
+
+At most 256 unique IDs, each at most 64 bytes and beginning `inst_`. Every ID
+must currently belong to the authenticated owner. Invalid/unauthorized replacement
+is rejected atomically, preserving the previous set. Repeated sets are idempotent;
+empty `instance_ids:[]` unsubscribes all. Acknowledgement:
+
+```json
+{"type":"subscribed","instance_ids":["inst_one","inst_two"]}
+```
+
+First and additional viewers earn a Bridge-produced baseline. Additional viewers
+share one producer; a baseline may also reach existing viewers. Baseline has
+current `active` and empty `completed_since_last`, without consuming pending
+completions. Changed snapshots are coalesced at 1000 ms boundaries:
+
 ```json
 {
-  "type": "tool_activity_live",
-  "instance_id": "inst_worker",
-  "agent_id": "agt_worker",
-  "display_name": "Worker",
-  "chain_id": "chain_one",
-  "bridge_id": "brg_one",
-  "epoch": "1792670000000000000",
-  "generation": 1,
-  "revision": 4,
-  "availability": "ready",
-  "active": [
-    {
-      "call_id": "[\"provider\",\"session\",\"child\",\"tool_1\"]",
-      "source": "provider",
-      "provider_session_id": "session",
-      "agent_id": "child",
-      "tool_use_id": "tool_1",
-      "tool_name": "Read",
-      "shell_session_id": "",
-      "shell_run_seq": 0,
-      "started_at_ms": 1792670001000
-    }
-  ],
-  "last_completion": null
+  "type":"state",
+  "instance_id":"inst_one",
+  "baseline":false,
+  "snapshot":{
+    "type":"tool_activity_live",
+    "instance_id":"inst_one",
+    "agent_id":"agt_worker",
+    "display_name":"Worker",
+    "chain_id":"chain_one",
+    "bridge_id":"brg_one",
+    "availability":"ready",
+    "run_count":2,
+    "epoch":"1792670000000000000",
+    "generation":1,
+    "revision":4,
+    "active":[],
+    "completed_since_last":[{
+      "call_id":"[\"provider\",\"s1\",\"\",\"tool_1\"]",
+      "source":"provider",
+      "tool_name":"Bash",
+      "summary":"rg pattern src",
+      "summary_truncated":false,
+      "duration_ms":1200,
+      "completed_at_ms":1792670002200,
+      "status":"completed"
+    }]
+  }
 }
 ```
 
-Final completion replaces active with [] and sets last_completion to one object:
+Replace the entire active list on each snapshot. The completion batch contains up
+to 32 calls completed since the preceding emitted upstream snapshot; oldest drops
+on overflow. It drains once, with identical bytes fanned out to current viewers.
+No replay guarantee, per-client ACK, retransmission, missing-callback repair,
+stale-tool heuristic, or frontend history accumulation. Subsecond calls may
+appear only as completions. Idle intervals send nothing, including after a
+completion batch; no extra empty tick is sent merely to erase the old batch.
+
+Active fields: `call_id`, `source`, `provider_session_id`, `agent_id`,
+`tool_use_id`, `tool_name`, `summary`, `summary_truncated`, `shell_session_id`,
+`shell_run_seq`, `started_at_ms`. Active and completed summaries are at most
+**512 UTF-8 bytes**, cut at a code-point boundary. Bridge selects command/cmd for
+Bash/exec_command; file_path/path for Read/Edit/Write; pattern for Grep/Glob;
+query for WebSearch; url for WebFetch; description for Agent/Task; otherwise a
+recognized readable field or tool name. Managed shell uses its registered real
+command. The tracker retains no arbitrary arguments/results. Explicit shell
+correlation avoids duplicate provider wrappers.
+
+Status and protocol frames:
+
 ```json
-{
-  "call_id": "[\"provider\",\"session\",\"child\",\"tool_1\"]",
-  "source": "provider",
-  "tool_name": "Read",
-  "duration_ms": 1200,
-  "completed_at_ms": 1792670002200,
-  "status": "completed"
-}
+{"type":"unavailable","instance_id":"inst_one","reason":"bridge_offline"}
+{"type":"error","code":"forbidden","message":"subscription replacement rejected"}
+{"type":"ping"}
+{"type":"pong"}
 ```
-Other statuses: failed, killed, exited, interrupted. Missing observed end never
-means successful completion. Returning from an explicitly correlated provider
-wrapper does not finish a background shell.
 
-Additional owner-scoped WS frames:
+Unavailable reasons: `bridge_offline`, `instance_changed`, `not_found`,
+`capacity`, `state_too_large`. Error codes: `invalid_frame`,
+`invalid_subscription`, `invalid_instance_id`, `duplicate_instance_id`,
+`too_many_instances`, `forbidden`, `capacity`, `closed`, `unknown_type`.
+Unavailable clears displayed state. Browser reconnect opens a new socket and
+resends the desired set, without REST baseline or polling. Hub reattaches current
+subscriptions after Bridge reconnect. Completion delivery remains best effort.
+Idle receive timeouts are wakes, not EOF.
+
+## Lifecycle and bounds
+
+Hub asynchronously sends controls over the authenticated Bridge runtime socket:
+
 ```json
-{"type":"tool_activity_live_unavailable","instance_id":"inst_worker","availability":"unknown"}
+{"type":"tool_stream_attach","instance_id":"inst_one","subscription_id":"opaque_token","run_count":2}
+{"type":"tool_stream_detach","instance_id":"inst_one","subscription_id":"opaque_token","run_count":2}
 ```
-```json
-{"type":"tool_activity_live_resync","bridge_id":"brg_one"}
-```
-Unavailable clears visible state and fences buffered pushes until a fresh
-snapshot succeeds. Existing instance/Bridge terminal lifecycle events also clear
-offline state. Resync is emitted on Bridge reconnect, actual agent launch/relaunch,
-and dirty-queue overflow/rate shedding. It triggers one initial/resync read,
-never a periodic status request.
 
-GET /api/v1/task-chains/:chain_id/tool-activity-live?cursor=:last_instance_id
-returns a lexicographically sorted page of at most eight current same-owner
-instances, including the canonical coordinator and explicit coordinator members.
-Each page independently checks owner/current chain membership. Instance tokens
-must currently belong to the chain or be an explicit/canonical coordinator.
-```json
-{
-  "chain_id":"chain_one",
-  "roster_token":"9e72abdf801e0314",
-  "next_cursor":"",
-  "members":[
-    {"agent_id":"agt_worker","instance_id":"inst_worker","display_name":"Worker","availability":"offline","snapshot":null}
-  ]
-}
-```
-Ready members carry the snapshot above. Continue cursor pages only as part of
-initial/reconnect/resync/membership-triggered loading. Replace the roster only
-after the complete page set. Restart loading if roster_token changes across
-pages or a membership-change hint arrives. Token is a bounded non-security FNV
-fingerprint of current sorted instance IDs; all authorization is independent.
-Roster capacity is 256. Over-cap rosters return validation_failed; no silent
-partial roster. One page has an absolute five-second assembly deadline; members
-unavailable within it become null/offline.
+First viewer attaches, additional viewers request a baseline using the same
+producer token, last viewer detaches. Token-matched detach cannot remove a
+replacement. A new token discards old pending completions. A sole bounded control
+worker serializes/coalesces upstream controls, never on the Bridge reader.
+Bridge emits `tool_stream_reset` with its process epoch per connection, then
+`tool_stream_state` carrying `epoch`, increasing `seq`, `subscription_id`,
+`run_count`, `baseline`, `snapshot`. Failure controls are
+`tool_stream_unavailable` with `instance_id`, `reason` and the same routing/order
+fields. Hub rechecks owner, Bridge, run, connection generation and token before
+delivery. Epoch/sequence and per-route generation/revision fence old responses.
 
-Errors use shared repository mapping: bridge_offline is HTTP409 (disconnected,
-cancelled or deadline); bridge_busy HTTP503 (bounded request capacity);
-validation_failed HTTP422; owner/auth errors retain existing 403/404 behavior.
-Retries may occur after actual failure with bounded backoff, never on success.
+Bridge retains bounded active state without viewers. **It does not serialize
+snapshots, collect completions, or deliver tool snapshots without listeners.**
+Last detach/Hub disconnect clears watching, pending completions and comparison
+state. Ingestion only marks watched instances dirty; baseline/flush serializes
+state. Visible equality excludes revision; a completion batch counts as a change.
 
-## Ordering and recovery
+Bounds: 256 tracker instances, 32 active calls, 32 pending completions, 32 replay
+tombstones per instance; 512-byte summaries; 256 KiB upstream frame cap.
+Oversized encoded states produce `state_too_large`, without replay. Tracker owned
+data/array capacities have a conservative 80 MiB ceiling, excluding allocator
+metadata. Bridge retains one active-only comparison per subscription. Hub allows
+64 tool sockets, 1024 instance routes, 2048 coalesced upstream controls, and
+512 frames / 2 MiB per viewer including its in-flight frame. Overflow shuts down
+only that viewer. Each viewer has its own writer; the Bridge reader performs no
+viewer socket writes or joins. The HTTP reader joins its writer before the router
+closes the socket; other threads use shutdown only.
 
-1. Wait for user_ws_ready, then buffer relevant tool frames while fetching the
-   explicit instance snapshot or complete chain page set.
-2. Replace local state with fresh snapshots. Apply buffered/live frames only for
-   currently selected/authorized instance IDs.
-3. epoch is Bridge boot Unix-nanoseconds as a decimal string. Compare with BigInt
-   or decimal-string ordering; never round through Number. A newer Bridge epoch
-   replaces old state; older epochs are ignored.
-4. Within one epoch accept only strictly newer revision. Every frame completely
-   replaces active and last_completion. generation advances on local lifecycle
-   reset; revision remains monotonic, including inactive reclamation/re-admission.
-5. Reconnect, user-stream gap/resync_required, Bridge resync, and membership changes
-   initiate a fresh one-shot read. There is no polling. A still-live Bridge
-   answers current state after Hub restart; a restarted Bridge starts empty.
-6. Unavailable remains fenced until that read succeeds. A live frame alone
-   cannot undo an offline boundary. A launch/relaunch resync explicitly recovers.
+## Verification
 
-Hub validates instance-to-Bridge binding, owner and current run_count for every
-snapshot/live frame. Current Bridge socket generation fences replaced sockets.
-Its immutable process epoch is established once on that connection; old epochs
-cannot replace it. Connection-local sequence fences reordered live frames.
-No historical extension or shell rows repopulate Bridge state.
-
-## Bridge/Hub internal frames
-
-Bridge -> Hub first sends tool_activity_live_reset {epoch,seq}; epoch is immutable
-until a new socket connection. It then sends tool_activity_live_resync. Changes:
-tool_activity_live_snapshot {epoch,seq,run_count,snapshot}; snapshot is the same
-source snapshot, with internal run_count and without Hub-sourced labels.
-Hub overwrites labels/owner routing from current bounded identity metadata.
-
-Hub -> Bridge: tool_activity_live_request {request_id,instance_id,timeout_ms:5000}.
-Bridge -> Hub: tool_activity_live_reply {request_id,epoch,run_count,snapshot}.
-Replies bypass the generic runtime result cache. Only a matching unexpired
-waiter for the current socket generation, instance/run/owner can retain a reply.
-It is freed immediately after the caller consumes it or the request terminates.
-Unsolicited/late replies are dropped. Waiting uses a condition variable, not
-recurring network/RPC queries. Source changes are coalesced by instance; only
-the latest unsent snapshot survives.
-
-## Memory, admission and backpressure
-
-- Bridge: 256 instance entries, 32 active calls and 32 key-only tombstones per
-  instance. Decoded identity fields <=64 bytes; names <=96 bytes; generated keys
-  <=2048 bytes. These field/count/dynamic-capacity bounds give a conservative
-  <=48MiB owned content/backing ceiling (allocator bookkeeping/RSS is external).
-  No input/output/commands are stored. One last completion, never a completed list.
-- Bridge dirty queue: <=256 latest-only entries and <=8MiB encoded bytes, checked
-  for both insertion and replacement. Overflow drops queued copies and sends
-  one explicit resync hint; it does not grow or reconstruct from history.
-- Live frame/reply <=256KiB and depth<=8, with <=4096 string/container tokens,
-  checked before parsing/cloning at the tool boundary. Existing generic WS
-  reader/chunk buffers have their separate transport caps.
-- Hub: eight transient snapshot waiters globally, two per owner, <=256KiB reply
-  each (<=2MiB retained reply content); request ID<=128 bytes, owner<=512 bytes,
-  instance/Bridge IDs<=64 bytes. Five-second absolute deadline, terminal/socket
-  cancellation and cleanup. No permanent tool-content state.
-- Chain: two page assemblies globally, one per owner, eight snapshots/<=2MiB
-  per page; one absolute five-second page deadline. Routing roster SQL LIMIT257
-  detects capacity overflow without reading unbounded instance history.
-- Hub live relay: zero queued tool content. Each Bridge connection admits up to
-  128 frames and 4MiB per one-second window; shedding emits a resync hint.
-  Existing user event bus has 128 socket slots, serialized per-slot writes,
-  five-second write deadlines and failed/slow-socket removal. Existing stream
-  sequence/gap recovery obtains fresh Bridge state.
-- Capacity reclaims the least recently touched inactive Bridge entry; active
-  calls are never evicted. A global admission timestamp floor retains forgotten
-  lifecycle/tombstone fences and a revision floor prevents rollback. Under
-  pressure, delayed legitimate starts at/before that floor are conservatively
-  ignored; future events recover tracking. All-active admission refuses new
-  instances until inactive capacity exists.
-- Canonical provider timestamps must be parseable RFC3339, newer than boot/reset
-  cutoff, and no more than 60 seconds ahead. Coarse cutoff-second events may be
-  conservatively ignored. Lifecycle cleanup retains cutoffs even for unseen
-  instances. Actual successful shell restart retires the old run and starts
-  the new key; failed/refused spawn does not invent a running call.
+Run `bash verify-tool-stream-backend.sh`. It enters `nix develop`, runs scoped
+tracker/Bridge/Hub/HTTP regressions, then compiles Hub, Bridge and CLI. Tests cover
+summary selection/UTF-8 bounds, multiple completions/drain/cap, demand gating,
+one-second coalescing, real Bridge frame sockets, real HTTP upgrade/ticket/
+subscription/baseline sockets, shared routes/last detach, owner isolation, slow
+queue independence and basic reconnect fences. Full browser + real Hub + real
+Bridge integration belongs to the dependent integration task; module tests do
+not claim that coverage.

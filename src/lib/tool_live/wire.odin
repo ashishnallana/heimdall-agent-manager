@@ -1,11 +1,11 @@
 package tool_live
 
 // Enforced BEFORE parsing/clone at each live-tool trust boundary. The tracker
-// contains only bounded identity/name fields; arbitrary tool input/output is
-// never stored. With 256 entries,32 calls,32 tombstones and <=2048-byte generated
-// keys, owned strings + dynamic capacities have a conservative 48 MiB ceiling.
+// contains only bounded identity/name/summary fields; arbitrary tool input/output
+// is never stored. At most 256 entries, 32 active calls, 32 pending completions,
+// 32 tombstones and <=2048-byte generated keys per entry (under 80 MiB owned data
+// and dynamic capacities; allocator metadata/RSS is platform dependent).
 MAX_FRAME_BYTES :: 256 * 1024
-MAX_DIRTY_BYTES :: 8 * 1024 * 1024
 MAX_DEPTH :: 8
 MAX_KEY_BYTES :: 2048
 wire_shape_ok :: proc(raw: string) -> bool {

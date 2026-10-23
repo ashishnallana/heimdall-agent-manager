@@ -17,6 +17,7 @@ TOOL_LIVE_MAX_ACTIVE :: 32
 TOOL_LIVE_MAX_TOMBSTONES :: 32
 TOOL_LIVE_ID_MAX :: 64
 TOOL_LIVE_NAME_MAX :: 96
+TOOL_LIVE_SUMMARY_MAX :: 512
 
 Tool_Live_Call :: struct {
 	call_id: string,
@@ -25,6 +26,8 @@ Tool_Live_Call :: struct {
 	agent_id: string,
 	tool_use_id: string,
 	tool_name: string,
+	summary: string,
+	summary_truncated: bool,
 	shell_session_id: string,
 	shell_run_seq: int,
 	started_at_ms: i64,
@@ -33,6 +36,8 @@ Tool_Live_Completion :: struct {
 	call_id: string,
 	source: string,
 	tool_name: string,
+	summary: string,
+	summary_truncated: bool,
 	duration_ms: i64,
 	completed_at_ms: i64,
 	status: string, // completed, failed, killed; never infer success from silence
@@ -48,8 +53,7 @@ Tool_Live_Entry :: struct {
 	session_closed: bool,
 	active: [dynamic]Tool_Live_Call,
 	tombstones: [dynamic]Tool_Live_Tombstone,
-	last: Tool_Live_Completion,
-	has_last: bool,
+	completed: [dynamic]Tool_Live_Completion,
 	touched: u64,
 	run_count: int,
 }
@@ -57,6 +61,7 @@ Tool_Live_Store :: struct {
 	mutex: sync.Mutex,
 	epoch: i64, // boot epoch, initialized at service construction
 	entries: map[string]^Tool_Live_Entry,
+	watched: map[string]bool,
 	admission_floor_ns: i64, // conservative replay fence after inactive entry reclamation
 	revision_floor: u64, // revisions of forgotten instances must never move backwards
 	next_touch: u64,
@@ -72,16 +77,17 @@ Tool_Live_Snapshot :: struct {
 	generation: u64,
 	revision: u64,
 	active: []Tool_Live_Call,
-	last_completion: union {json.Null, Tool_Live_Completion},
+	completed_since_last: []Tool_Live_Completion,
 }
 
-// Model types deliberately have no Hub/repository dependency. Only Bridge owns
-// a Tracker; Hub imports Snapshot for its authenticated volatile mirror.
+// Model types deliberately have no Hub/repository dependency. Only Bridge owns a Tracker.
 Tracker :: struct {
 	tool_live: Tool_Live_Store,
+	demand_driven: bool,
 	ctx: rawptr,
 	get_instance: proc(ctx: rawptr, id: string) -> (Instance, bool),
 	publish: proc(ctx: rawptr, body: string),
+	changed: proc(ctx: rawptr, instance_id: string),
 }
 Instance :: struct {
 	agent_instance_id, owner_user_id, provider_session_id, agent_id, display_name, chain_id: string,
@@ -90,7 +96,7 @@ Instance :: struct {
 }
 Event :: struct { event, ts, session_id, agent_id, tool_use_id, tool_name, payload: string }
 Shell :: struct {
-	session_id, kind, agent_instance_id, owner_user_id, status: string,
+	session_id, kind, agent_instance_id, owner_user_id, status, command: string,
 	run_seq, exit_code: int,
 	exit_code_set: bool,
 	started_at_ms, finished_at_ms: i64,
@@ -124,24 +130,20 @@ tool_live_call_clone :: proc(c: Tool_Live_Call) -> Tool_Live_Call {
 	out.agent_id = strings.clone(c.agent_id)
 	out.tool_use_id = strings.clone(c.tool_use_id)
 	out.tool_name = strings.clone(c.tool_name)
+	out.summary = strings.clone(c.summary)
 	out.shell_session_id = strings.clone(c.shell_session_id)
 	return out
 }
 tool_live_call_free :: proc(c: Tool_Live_Call) {
 	delete(c.call_id); delete(c.source); delete(c.provider_session_id)
-	delete(c.agent_id); delete(c.tool_use_id); delete(c.tool_name); delete(c.shell_session_id)
-}
-tool_live_last_free :: proc(e: ^Tool_Live_Entry) {
-	if !e.has_last do return
-	delete(e.last.call_id); delete(e.last.source); delete(e.last.tool_name); delete(e.last.status)
-	e.last = {}; e.has_last = false
+	delete(c.agent_id); delete(c.tool_use_id); delete(c.tool_name); delete(c.summary); delete(c.shell_session_id)
 }
 tool_live_reset_locked :: proc(e: ^Tool_Live_Entry, cutoff_ns: i64) {
 	for c in e.active do tool_live_call_free(c)
 	clear(&e.active)
 	for t in e.tombstones do delete(t.key)
 	clear(&e.tombstones)
-	tool_live_last_free(e)
+	tool_live_completed_clear(e)
 	e.floor_ns = max(e.floor_ns, cutoff_ns)
 	e.generation += 1
 	e.revision += 1
@@ -153,7 +155,7 @@ tool_live_publish_eviction :: proc(service: ^Tracker, p: Tool_Live_Publication) 
 }
 tool_live_entry_free :: proc(e: ^Tool_Live_Entry) {
 	tool_live_reset_locked(e, 0)
-	delete(e.active); delete(e.tombstones); delete(e.owner); delete(e.session); free(e)
+	delete(e.active); delete(e.tombstones); delete(e.completed); delete(e.owner); delete(e.session); free(e)
 }
 // Reclaim the least recently touched INACTIVE entry. Active calls are never
 // evicted. A shared admission cutoff remembers forgotten lifecycle/tombstone
@@ -180,7 +182,6 @@ tool_live_entry_locked :: proc(service: ^Tracker, id, owner: string, evicted: ^T
 		if victim == nil do return nil
 		s.admission_floor_ns = max(s.admission_floor_ns, time.to_unix_nanoseconds(time.now()), victim.floor_ns, victim.session_ns)
 		for tomb in victim.tombstones do s.admission_floor_ns = max(s.admission_floor_ns, tomb.ended_ns)
-		if victim.has_last do s.admission_floor_ns = max(s.admission_floor_ns, (victim.last.completed_at_ms + 1) * 1_000_000)
 		s.revision_floor = max(s.revision_floor, victim.revision) + 1
 		inst := Instance{agent_instance_id = victim_id}
 		if service.get_instance != nil {
@@ -189,7 +190,7 @@ tool_live_entry_locked :: proc(service: ^Tracker, id, owner: string, evicted: ^T
 		// Publish the reclaimed empty snapshot with a newer revision, so connected
 		// clients and reconnect readers agree that the old summary was forgotten.
 		evicted.owner = strings.clone(victim.owner)
-		evicted.body = tool_live_json_locked(s, inst, nil)
+		if !service.demand_driven || s.watched[victim_id] do evicted.body = tool_live_publication_locked(service, inst, nil)
 		delete_key(&s.entries, victim_id)
 		tool_live_entry_free(victim); delete(victim_id)
 	}
@@ -209,14 +210,14 @@ tool_live_epoch :: proc(s: ^Tool_Live_Store) -> string {
 tool_live_snapshot_locked :: proc(s: ^Tool_Live_Store, inst: Instance, e: ^Tool_Live_Entry) -> Tool_Live_Snapshot {
 	snap := Tool_Live_Snapshot{type = "tool_activity_live", instance_id = inst.agent_instance_id,
 		agent_id = inst.agent_id, display_name = inst.display_name, chain_id = inst.chain_id, run_count = inst.run_count, epoch = tool_live_epoch(s),
-		generation = s.revision_floor + 1, revision = s.revision_floor, active = make([]Tool_Live_Call, 0, context.temp_allocator)}
+		generation = s.revision_floor + 1, revision = s.revision_floor, active = make([]Tool_Live_Call, 0, context.temp_allocator), completed_since_last = make([]Tool_Live_Completion, 0, context.temp_allocator)}
 	if e != nil {
 		snap.run_count = e.run_count
 		snap.generation = e.generation
 		snap.revision = e.revision
 		// Always emit [] when the last call ends, even if the backing array is nil.
 		if len(e.active) > 0 do snap.active = e.active[:]
-		if e.has_last do snap.last_completion = e.last
+		if len(e.completed) > 0 do snap.completed_since_last = e.completed[:]
 	}
 	return snap
 }
@@ -224,20 +225,28 @@ tool_live_json_locked :: proc(s: ^Tool_Live_Store, inst: Instance, e: ^Tool_Live
 	bytes, _ := json.marshal(tool_live_snapshot_locked(s, inst, e))
 	return string(bytes)
 }
+tool_live_publication_locked :: proc(service: ^Tracker, inst: Instance, e: ^Tool_Live_Entry) -> string {
+    if service.changed != nil do return strings.clone(inst.agent_instance_id)
+    return tool_live_json_locked(&service.tool_live, inst, e)
+}
 // Caller already authorized the instance with get_instance. Reads only memory.
-tool_live_snapshot :: proc(service: ^Tracker, inst: Instance) -> string {
+tool_live_snapshot :: proc(service: ^Tracker, inst: Instance, consume := false, baseline := false) -> string {
 	s := &service.tool_live
 	sync.mutex_lock(&s.mutex)
 	defer sync.mutex_unlock(&s.mutex)
 	if s.epoch == 0 do tool_live_init(s)
 	e, _ := s.entries[inst.agent_instance_id]
 	if e != nil && e.owner != string(inst.owner_user_id) do e = nil
-	return tool_live_json_locked(s, inst, e)
+	snap := tool_live_snapshot_locked(s, inst, e)
+	if baseline do snap.completed_since_last = make([]Tool_Live_Completion, 0, context.temp_allocator)
+	bytes, _ := json.marshal(snap)
+	if consume && e != nil do tool_live_completed_clear(e)
+	return string(bytes)
 }
 tool_live_publish :: proc(service: ^Tracker, owner, body: string) {
 	if body == "" do return
 	defer delete(body)
-	if service.publish != nil do service.publish(service.ctx, body)
+	if service.changed != nil { service.changed(service.ctx, body) } else if service.publish != nil { service.publish(service.ctx, body) }
 }
 tool_live_tombstone_locked :: proc(e: ^Tool_Live_Entry, key: string, ended_ns: i64) {
 	for t in e.tombstones do if t.key == key do return
@@ -256,7 +265,7 @@ tool_live_start_locked :: proc(e: ^Tool_Live_Entry, c: Tool_Live_Call, ns: i64) 
 	e.revision += 1
 	return true
 }
-tool_live_end_locked :: proc(e: ^Tool_Live_Entry, key, status: string, ns: i64, duration_ms: i64 = -1) -> bool {
+tool_live_end_locked :: proc(e: ^Tool_Live_Entry, key, status: string, ns: i64, duration_ms: i64 = -1, collect := true) -> bool {
 	for t in e.tombstones do if t.key == key do return false
 	for c in e.active {
 		if c.call_id == key && ns / 1_000_000 < c.started_at_ms do return false
@@ -266,13 +275,17 @@ tool_live_end_locked :: proc(e: ^Tool_Live_Entry, key, status: string, ns: i64, 
 	for c, i in e.active {
 		if c.call_id != key do continue
 		if ns / 1_000_000 < c.started_at_ms do return false
-		if !e.has_last || ns / 1_000_000 >= e.last.completed_at_ms {
-			tool_live_last_free(e)
-			e.last = Tool_Live_Completion{call_id = strings.clone(key), source = strings.clone(c.source),
-				tool_name = strings.clone(c.tool_name), duration_ms = duration_ms if duration_ms >= 0 else ns / 1_000_000 - c.started_at_ms,
-				completed_at_ms = ns / 1_000_000, status = strings.clone(status)}
-			e.has_last = true
-		}
+		if collect {
+        if len(e.completed) >= TOOL_LIVE_MAX_ACTIVE {
+            tool_live_completion_free(e.completed[0])
+            ordered_remove(&e.completed, 0)
+        }
+        append(&e.completed, Tool_Live_Completion{
+            call_id = strings.clone(key), source = strings.clone(c.source), tool_name = strings.clone(c.tool_name),
+            summary = strings.clone(c.summary), summary_truncated = c.summary_truncated,
+            duration_ms = duration_ms if duration_ms >= 0 else ns / 1_000_000 - c.started_at_ms,
+            completed_at_ms = ns / 1_000_000, status = strings.clone(status)})
+        }
 		tool_live_call_free(c)
 		ordered_remove(&e.active, i)
 		e.revision += 1
@@ -393,20 +406,22 @@ tool_live_extension :: proc(service: ^Tracker, inst: Instance, evs: []Event) {
 			cut := min(len(ev.tool_name), TOOL_LIVE_NAME_MAX)
 			for cut > 0 && cut < len(ev.tool_name) && !utf8.rune_start(ev.tool_name[cut]) do cut -= 1
 			name := ev.tool_name[:cut]
+			input, _ := po["input"].(json.Object)
+			summary, truncated := tool_live_summary(name, input)
 			_ = tool_live_start_locked(e, Tool_Live_Call{call_id = key, source = "provider",
 				provider_session_id = ev.session_id, agent_id = ev.agent_id, tool_use_id = ev.tool_use_id,
-				tool_name = name, shell_session_id = shell_id, shell_run_seq = shell_seq, started_at_ms = ns / 1_000_000}, ns)
+				tool_name = name, summary = summary, summary_truncated = truncated, shell_session_id = shell_id, shell_run_seq = shell_seq, started_at_ms = ns / 1_000_000}, ns)
 		} else if ev.event == "tool.end" {
 			status := "completed"
 			if tool_live_text(po, "status") == "error" do status = "failed"
 			if is_error, _ := po["is_error"].(json.Boolean); bool(is_error) do status = "failed"
 			duration: i64 = -1
 			if d, has := po["duration_ms"].(json.Integer); has && i64(d) >= 0 do duration = i64(d)
-			_ = tool_live_end_locked(e, key, status, ns, duration)
+			_ = tool_live_end_locked(e, key, status, ns, duration, !service.demand_driven || s.watched[inst.agent_instance_id])
 		}
 	}
 	body: string
-	if e.revision != before do body = tool_live_json_locked(s, inst, e)
+	if e.revision != before && (!service.demand_driven || s.watched[inst.agent_instance_id]) do body = tool_live_publication_locked(service, inst, e)
 	sync.mutex_unlock(&s.mutex)
 	tool_live_publish(service, string(inst.owner_user_id), body)
 }
@@ -460,11 +475,15 @@ tool_live_shell :: proc(service: ^Tracker, session: Shell, starting: bool, repla
 			tool_live_tombstone_locked(e, c.call_id, ns)
 			delete(c.call_id); delete(c.source)
 			c.call_id = strings.clone(key); c.source = strings.clone("shell")
+			delete(c.summary)
+			summary, truncated := tool_live_bound_summary(session.command)
+			c.summary = strings.clone(summary); c.summary_truncated = truncated
 			c.started_at_ms = min(c.started_at_ms, ns / 1_000_000)
 			e.revision += 1; changed = true; linked = true
 			break
 		}
-		if !linked do changed = tool_live_start_locked(e, Tool_Live_Call{call_id = key, source = "shell", tool_name = "shell",
+		summary, truncated := tool_live_bound_summary(session.command)
+		if !linked do changed = tool_live_start_locked(e, Tool_Live_Call{call_id = key, source = "shell", tool_name = "shell", summary = summary, summary_truncated = truncated,
 			shell_session_id = session.session_id, shell_run_seq = session.run_seq, started_at_ms = ns / 1_000_000}, ns) || changed
 	} else {
 		status := "interrupted"
@@ -473,10 +492,10 @@ tool_live_shell :: proc(service: ^Tracker, session: Shell, starting: bool, repla
 		// An inventory guess has no observed end. Label it explicitly rather than
 		// presenting a normal completed duration.
 		if !session.exit_code_set && status != "failed" && status != "killed" do status = "interrupted"
-		changed = tool_live_end_locked(e, key, status, ns)
+		changed = tool_live_end_locked(e, key, status, ns, collect = !service.demand_driven || s.watched[inst.agent_instance_id])
 	}
 	body: string
-	if changed do body = tool_live_json_locked(s, inst, e)
+	if changed && (!service.demand_driven || s.watched[inst.agent_instance_id]) do body = tool_live_publication_locked(service, inst, e)
 	sync.mutex_unlock(&s.mutex)
 	tool_live_publish(service, session.owner_user_id, body)
 }
@@ -503,7 +522,8 @@ tool_live_clear :: proc(service: ^Tracker, instance_id: string) {
 	}
 	e.run_count = inst.run_count
 	tool_live_reset_locked(e, now_ns)
-	body := tool_live_json_locked(s, inst, e)
+	body: string
+	if !service.demand_driven || s.watched[instance_id] do body = tool_live_publication_locked(service, inst, e)
 	owner := strings.clone(e.owner)
 	sync.mutex_unlock(&s.mutex)
 	defer delete(owner)
@@ -518,19 +538,59 @@ tool_live_destroy :: proc(store: ^Tool_Live_Store) {
 	}
 	delete(store.entries)
 	store.entries = nil
+	for key in store.watched do delete(key)
+	delete(store.watched); store.watched = nil
 }
 
 
-// An owned coherent copy for a reconnect/full resync. No historical calls.
-tool_live_all :: proc(service: ^Tracker) -> [dynamic]string {
-	context.allocator = runtime.heap_allocator()
-	s := &service.tool_live
-	sync.mutex_lock(&s.mutex)
-	defer sync.mutex_unlock(&s.mutex)
-	out := make([dynamic]string)
-	for id, e in s.entries {
-		inst := Instance{agent_instance_id = id}
-		append(&out, tool_live_json_locked(s, inst, e))
-	}
-	return out
+// Only this selected string is retained by the reducer; raw input is transient.
+tool_live_bound_summary :: proc(text: string) -> (string, bool) {
+    cut := min(len(text), TOOL_LIVE_SUMMARY_MAX)
+    for cut > 0 && cut < len(text) && !utf8.rune_start(text[cut]) do cut -= 1
+    return text[:cut], cut < len(text)
+}
+tool_live_summary :: proc(name: string, input: json.Object) -> (string, bool) {
+    keys: []string
+    switch name {
+    case "Bash", "exec_command", "shell": keys = {"command", "cmd"}
+    case "Read", "Edit", "Write", "read_file", "apply_patch": keys = {"file_path", "path"}
+    case "Grep", "Glob": keys = {"pattern"}
+    case "WebSearch": keys = {"query"}
+    case "WebFetch": keys = {"url"}
+    case "Agent", "Task": keys = {"description"}
+    case: keys = {"command", "cmd", "file_path", "path", "pattern", "query", "url", "description"}
+    }
+    for key in keys {
+        if text := tool_live_text(input, key); text != "" do return tool_live_bound_summary(text)
+    }
+    return tool_live_bound_summary(name)
+}
+
+tool_live_completion_free :: proc(c: Tool_Live_Completion) {
+    heap := runtime.heap_allocator()
+    delete(c.call_id, heap); delete(c.source, heap); delete(c.tool_name, heap); delete(c.summary, heap); delete(c.status, heap)
+}
+tool_live_completed_clear :: proc(e: ^Tool_Live_Entry) {
+    for c in e.completed do tool_live_completion_free(c)
+    clear(&e.completed)
+}
+
+// Watching controls presentation work only. Active state remains current without
+// a viewer; completion batches and snapshot serialization are demand driven.
+tool_live_watch :: proc(service: ^Tracker, id: string, watching: bool) {
+    context.allocator = runtime.heap_allocator()
+    s := &service.tool_live
+    sync.mutex_lock(&s.mutex)
+    defer sync.mutex_unlock(&s.mutex)
+    if watching {
+        if s.watched[id] do return
+        if len(s.watched) >= TOOL_LIVE_MAX_INSTANCES do return
+        if s.watched == nil do s.watched = make(map[string]bool)
+        s.watched[strings.clone(id)] = true
+    } else {
+        for key in s.watched {
+            if key == id { delete_key(&s.watched, key); delete(key); break }
+        }
+        if e := s.entries[id]; e != nil do tool_live_completed_clear(e)
+    }
 }

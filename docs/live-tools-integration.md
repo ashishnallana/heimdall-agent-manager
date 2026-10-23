@@ -1,5 +1,9 @@
 # Ephemeral live tools: integrated verification
 
+This records the earlier REST-based implementation. Its protocol and integration
+script are superseded by [the subscribed tool stream](ephemeral-tool-activity.md);
+the dependent stream integration task updates the full-stack harness.
+
 Integration branch: `live-tools-integrate`, based on fetched `origin/main`
 `f4c39179`, with full approved backend `a58451fa` and UI `9feb2ba5`
 ancestry. Merge commit: `38d150dc`.

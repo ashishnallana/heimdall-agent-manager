@@ -41,19 +41,6 @@ agent_action_tool_activity_handler :: proc(ctx: rawptr, req: Request) -> Respons
 	return respond_success(`{"accepted":true,"persisted":false}`, req.request_id, auth_ctx_server_time(req), 200)
 }
 
-// One-shot authenticated snapshot proxy to Bridge; no Hub tool-content cache.
-agent_instance_tool_activity_live_handler :: proc(ctx: rawptr, req: Request) -> Response {
-	h := (^Agent_Handlers)(ctx)
-	auth, ok, resp := require_auth(h.auth, req)
-	if !ok do return resp
-	inst, got, err := agent_service.get_instance(h.agents, auth, extension_instance_path_id(req.path))
-	if !got do return respond_error(err, req.request_id)
-	body, available, snapshot_err := agent_service.tool_live_request_snapshot(h.agents, inst)
-	if !available do return respond_error(snapshot_err, req.request_id)
-	defer delete(body)
-	return respond_success(body, req.request_id, auth_ctx_server_time(req))
-}
-
 extension_last_seq :: proc(evs: []domain.Agent_Extension_Event) -> int {
 	if len(evs) == 0 do return 0
 	return evs[len(evs) - 1].seq
@@ -191,15 +178,4 @@ write_extension_capabilities_json :: proc(b: ^strings.Builder, caps: string) {
 		return
 	}
 	strings.write_string(b, trimmed)
-}
-
-// GET /api/v1/task-chains/{id}/tool-activity-live
-task_chain_tool_activity_live_handler :: proc(ctx: rawptr, req: Request) -> Response {
-	h := (^Taskchain_Handlers)(ctx)
-	auth, ok, resp := require_auth_any(h.auth, req)
-	if !ok do return resp
-	body, got, err := agent_service.tool_live_chain_snapshot(h.agents, auth, path_part(req.path, 4), query_value(req.query, "cursor"))
-	if !got do return respond_error(err, req.request_id)
-	defer delete(body)
-	return respond_success(body, req.request_id, auth_ctx_server_time(req))
 }

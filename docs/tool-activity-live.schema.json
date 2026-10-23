@@ -1,12 +1,27 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Ephemeral tool activity",
+  "title": "Demand-driven ephemeral tool activity stream",
   "oneOf": [
     {
-      "$ref": "#/$defs/snapshot"
+      "$ref": "#/$defs/subscribe"
     },
     {
-      "$ref": "#/$defs/chain"
+      "$ref": "#/$defs/subscribed"
+    },
+    {
+      "$ref": "#/$defs/state"
+    },
+    {
+      "$ref": "#/$defs/unavailable"
+    },
+    {
+      "$ref": "#/$defs/error"
+    },
+    {
+      "$ref": "#/$defs/ping"
+    },
+    {
+      "$ref": "#/$defs/pong"
     }
   ],
   "$defs": {
@@ -22,7 +37,9 @@
         "tool_name",
         "shell_session_id",
         "shell_run_seq",
-        "started_at_ms"
+        "started_at_ms",
+        "summary",
+        "summary_truncated"
       ],
       "properties": {
         "call_id": {
@@ -62,6 +79,15 @@
         "started_at_ms": {
           "type": "integer",
           "minimum": 0
+        },
+        "summary": {
+          "type": "string",
+          "maxLength": 512,
+          "x-maxUtf8Bytes": 512,
+          "description": "At most512 UTF-8 bytes; cut at a code point boundary."
+        },
+        "summary_truncated": {
+          "type": "boolean"
         }
       }
     },
@@ -74,17 +100,21 @@
         "tool_name",
         "status",
         "duration_ms",
-        "completed_at_ms"
+        "completed_at_ms",
+        "summary",
+        "summary_truncated"
       ],
       "properties": {
         "call_id": {
-          "type": "string"
+          "type": "string",
+          "maxLength": 2048
         },
         "source": {
           "type": "string"
         },
         "tool_name": {
-          "type": "string"
+          "type": "string",
+          "maxLength": 96
         },
         "status": {
           "type": "string"
@@ -96,6 +126,15 @@
         "completed_at_ms": {
           "type": "integer",
           "minimum": 0
+        },
+        "summary": {
+          "type": "string",
+          "maxLength": 512,
+          "x-maxUtf8Bytes": 512,
+          "description": "At most512 UTF-8 bytes; cut at a code point boundary."
+        },
+        "summary_truncated": {
+          "type": "boolean"
         }
       }
     },
@@ -112,9 +151,10 @@
         "generation",
         "revision",
         "active",
-        "last_completion",
         "bridge_id",
-        "availability"
+        "availability",
+        "run_count",
+        "completed_since_last"
       ],
       "properties": {
         "type": {
@@ -151,16 +191,6 @@
           },
           "maxItems": 32
         },
-        "last_completion": {
-          "oneOf": [
-            {
-              "type": "null"
-            },
-            {
-              "$ref": "#/$defs/completion"
-            }
-          ]
-        },
         "stream_epoch": {
           "type": "string"
         },
@@ -174,74 +204,158 @@
         },
         "availability": {
           "const": "ready"
+        },
+        "run_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "completed_since_last": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/completion"
+          },
+          "maxItems": 32,
+          "description": "Transient interval batch, oldest dropped on overflow. Empty on baseline; no replay or acknowledgement."
         }
       }
     },
-    "member": {
+    "subscribe": {
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "agent_id",
-        "instance_id",
-        "display_name",
-        "snapshot",
-        "availability"
+        "type",
+        "instance_ids"
       ],
       "properties": {
-        "agent_id": {
-          "type": "string"
+        "type": {
+          "const": "subscribe"
+        },
+        "instance_ids": {
+          "type": "array",
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^inst_",
+            "maxLength": 64
+          }
+        }
+      }
+    },
+    "subscribed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "instance_ids"
+      ],
+      "properties": {
+        "type": {
+          "const": "subscribed"
+        },
+        "instance_ids": {
+          "type": "array",
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^inst_",
+            "maxLength": 64
+          }
+        }
+      }
+    },
+    "state": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "instance_id",
+        "baseline",
+        "snapshot"
+      ],
+      "properties": {
+        "type": {
+          "const": "state"
         },
         "instance_id": {
           "type": "string"
         },
-        "display_name": {
-          "type": "string"
+        "baseline": {
+          "type": "boolean"
         },
         "snapshot": {
-          "oneOf": [
-            {
-              "type": "null"
-            },
-            {
-              "$ref": "#/$defs/snapshot"
-            }
-          ]
+          "$ref": "#/$defs/snapshot"
+        }
+      }
+    },
+    "unavailable": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "instance_id",
+        "reason"
+      ],
+      "properties": {
+        "type": {
+          "const": "unavailable"
         },
-        "availability": {
+        "instance_id": {
+          "type": "string"
+        },
+        "reason": {
           "enum": [
-            "ready",
-            "offline"
+            "bridge_offline",
+            "instance_changed",
+            "not_found",
+            "capacity",
+            "state_too_large"
           ]
         }
       }
     },
-    "chain": {
+    "error": {
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "chain_id",
-        "members",
-        "next_cursor",
-        "roster_token"
+        "type",
+        "code",
+        "message"
       ],
       "properties": {
-        "chain_id": {
+        "type": {
+          "const": "error"
+        },
+        "code": {
           "type": "string"
         },
-        "members": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/member"
-          },
-          "maxItems": 8
-        },
-        "next_cursor": {
-          "type": "string",
-          "maxLength": 64
-        },
-        "roster_token": {
-          "type": "string",
-          "maxLength": 16
+        "message": {
+          "type": "string"
+        }
+      }
+    },
+    "ping": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type"
+      ],
+      "properties": {
+        "type": {
+          "const": "ping"
+        }
+      }
+    },
+    "pong": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type"
+      ],
+      "properties": {
+        "type": {
+          "const": "pong"
         }
       }
     }
