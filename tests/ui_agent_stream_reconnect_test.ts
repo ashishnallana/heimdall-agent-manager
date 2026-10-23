@@ -355,3 +355,43 @@ test('composer shows accessible retry, preserves terminal and output through two
     assert.match(term.text, /PRESERVED OUTPUT/);
   } finally { await h.cleanup(); }
 });
+
+test('composer clears previous agent output on target change before the new stream connects', async () => {
+  const h = await harness(true);
+  try {
+    const {encodePtyViewerFrame, PTY_WIRE_KIND_OUTPUT} = await import('../src/ui/components/shells/ptyWire.ts');
+    const node = h.dom.window.document.querySelector('[data-debug-id="agent-pane-terminal"]');
+    const term = h.state.terminals[0];
+    await h.step(() => h.latest.open());
+    await h.step(() => h.latest.onmessage({data: encodePtyViewerFrame(
+      PTY_WIRE_KIND_OUTPUT, 0, new TextEncoder().encode('OLD AGENT OUTPUT'),
+    ).buffer}));
+    assert.match(term.text, /OLD AGENT OUTPUT/);
+
+    // Hold the next animation-frame write until after the target has changed.
+    const pendingFrames: Array<() => void> = [];
+    globalThis.requestAnimationFrame = ((fn: () => void) => {
+      pendingFrames.push(fn); return pendingFrames.length;
+    }) as any;
+    await h.step(() => h.latest.onmessage({data: encodePtyViewerFrame(
+      PTY_WIRE_KIND_OUTPUT, 0, new TextEncoder().encode('QUEUED OLD OUTPUT'),
+    ).buffer}));
+    assert.ok(pendingFrames.length > 0, 'old output is pending delivery');
+
+    await h.render({agentInstanceId: 'inst-other'});
+    assert.equal(h.dom.window.document.querySelector('[data-debug-id="agent-pane-terminal"]'), node);
+    assert.equal(h.state.terminals.length, 1, 'target changes reuse the mounted terminal');
+    assert.equal(term.text, '', 'previous agent is cleared even before a new connection succeeds');
+    assert.equal(term.resets, 1);
+    await h.step(() => pendingFrames.splice(0).forEach(fn => fn()));
+    assert.equal(term.text, '', 'pending output from the old stream cannot repaint the terminal');
+
+    await h.step(() => h.latest.open());
+    await h.step(() => h.latest.onmessage({data: encodePtyViewerFrame(
+      PTY_WIRE_KIND_OUTPUT, 0, new TextEncoder().encode('NEW AGENT OUTPUT'),
+    ).buffer}));
+    await h.step(() => pendingFrames.splice(0).forEach(fn => fn()));
+    assert.equal(term.text, 'NEW AGENT OUTPUT');
+    assert.equal(term.disposed, undefined);
+  } finally { await h.cleanup(); }
+});

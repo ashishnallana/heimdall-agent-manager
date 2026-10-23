@@ -134,8 +134,14 @@ export function AgentPaneComposerPanel({
   const pendingReplaysRef = useRef(0);
 
   useEffect(() => {
+    // A mounted pane may switch targets: discard the old agent's scrollback and
+    // buffered output, while same-agent reconnects keep their terminal contents.
     hasReceivedOutputRef.current = false;
     streamBufferRef.current = [];
+    pendingReplaysRef.current = 0;
+    userScrolledUpRef.current = false;
+    lastWrittenOutputRef.current = '';
+    terminalRef.current?.reset();
   }, [agentInstanceId]);
 
   useEffect(() => {
