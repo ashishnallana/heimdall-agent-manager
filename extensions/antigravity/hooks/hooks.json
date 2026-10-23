@@ -1,0 +1,49 @@
+{
+  "heimdall": {
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "\"$HEIMDALL_CTL_BIN\" extension hook antigravity",
+        "timeout": 10
+      }
+    ],
+    "PostInvocation": [
+      {
+        "type": "command",
+        "command": "\"$HEIMDALL_CTL_BIN\" extension hook antigravity",
+        "timeout": 10
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$HEIMDALL_CTL_BIN\" extension hook antigravity",
+            "timeout": 330
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$HEIMDALL_CTL_BIN\" extension hook antigravity",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": "\"$HEIMDALL_CTL_BIN\" extension hook antigravity",
+        "timeout": 10
+      }
+    ]
+  }
+}
