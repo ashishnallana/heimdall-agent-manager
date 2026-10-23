@@ -207,6 +207,23 @@ tool_stream_rebind_locked :: proc(svc: ^Agent_Service, r: ^Tool_Stream_Route, in
     r.generation = 0; r.revision = 0
     tool_stream_control_locked(s, r, true)
 }
+// Resolve the destination generation from its own runtime connection. In
+// particular, a reconnect on the former Bridge must never fence the new one.
+tool_stream_reconcile_locked :: proc(svc: ^Agent_Service, r: ^Tool_Stream_Route, inst: domain.Agent_Instance) -> bool {
+    s := &svc.tool_live
+    if string(inst.owner_user_id) != r.owner {
+        tool_stream_control_locked(s, r, false)
+        tool_stream_unavailable_locked(s, r, "instance_changed")
+        return false
+    }
+    generation := r.connection_generation
+    if svc.bridge_runtime_registry != nil do generation = project_service.bridge_runtime_registry_generation(svc.bridge_runtime_registry, inst.bridge_id)
+    if r.bridge != inst.bridge_id || r.run != inst.run_count || (svc.bridge_runtime_registry != nil && r.connection_generation != generation) {
+        tool_stream_unavailable_locked(s, r, "instance_changed")
+        tool_stream_rebind_locked(svc, r, inst, generation)
+    }
+    return true
+}
 // Validation is atomic: a rejected set leaves existing subscriptions intact.
 tool_stream_subscribe :: proc(svc: ^Agent_Service, w: ^Tool_Stream_Viewer, ids: []string) -> string {
     if len(ids) > live.TOOL_LIVE_MAX_INSTANCES do return "too_many_instances"
@@ -235,9 +252,10 @@ tool_stream_subscribe :: proc(svc: ^Agent_Service, w: ^Tool_Stream_Viewer, ids: 
     ack, _ := json.marshal(struct {type: string, instance_ids: []string}{"subscribed", ids}, allocator = context.temp_allocator)
     _ = tool_stream_enqueue_locked(w, string(ack))
     for id, i in ids {
-        if w.ids[id] do continue
         inst := rows[i]
         r := s.routes[id]
+        if r != nil && !tool_stream_reconcile_locked(svc, r, inst) do continue
+        if w.ids[id] do continue
         if r == nil {
             heap := runtime.heap_allocator()
             r = new(Tool_Stream_Route, heap)
@@ -257,7 +275,16 @@ tool_live_clear :: proc(svc: ^Agent_Service, instance_id: string) {
     if svc == nil do return
     s := &svc.tool_live
     sync.mutex_lock(&s.mutex); defer sync.mutex_unlock(&s.mutex)
-    if r := s.routes[instance_id]; r != nil do tool_stream_unavailable_locked(s, r, "instance_changed")
+    if r := s.routes[instance_id]; r != nil {
+        tool_stream_unavailable_locked(s, r, "instance_changed")
+        inst, found, _ := tool_live_instance(svc, instance_id)
+        if !found { tool_stream_control_locked(s, r, false); return }
+        if tool_stream_reconcile_locked(svc, r, inst) {
+            // A launch may not exist at configuration commit. Its ready event
+            // earns another baseline, even when bridge/run did not change.
+            tool_stream_control_locked(s, r, true)
+        }
+    }
 }
 tool_live_clear_bridge :: proc(svc: ^Agent_Service, bridge_id: string) {
     if svc == nil do return
@@ -270,10 +297,23 @@ tool_stream_bridge_ready :: proc(svc: ^Agent_Service, bridge_id: string, generat
     s := &svc.tool_live
     sync.mutex_lock(&s.mutex); defer sync.mutex_unlock(&s.mutex)
     for _, r in s.routes {
-        if r.bridge != bridge_id do continue
         inst, found, _ := tool_live_instance(svc, r.id)
-        if !found || string(inst.owner_user_id) != r.owner { tool_stream_unavailable_locked(s, r, "instance_changed"); continue }
-        tool_stream_rebind_locked(svc, r, inst, generation)
+        if !found {
+            tool_stream_control_locked(s, r, false)
+            tool_stream_unavailable_locked(s, r, "instance_changed")
+            continue
+        }
+        if inst.bridge_id == bridge_id && string(inst.owner_user_id) == r.owner {
+            current := project_service.bridge_runtime_registry_generation(svc.bridge_runtime_registry, inst.bridge_id)
+            if svc.bridge_runtime_registry != nil && current != generation do continue
+            // Reconnect/reset replaces the producer even when the connection
+            // generation is unchanged (Bridge reducer reset).
+            tool_stream_rebind_locked(svc, r, inst, generation)
+        } else {
+            // The former source reconnecting may discover a move, but only the
+            // destination's registry entry supplies the replacement fence.
+            _ = tool_stream_reconcile_locked(svc, r, inst)
+        }
     }
 }
 tool_live_destroy :: proc(s: ^Tool_Live_Store) {

@@ -101,7 +101,13 @@ Unavailable reasons: `bridge_offline`, `instance_changed`, `not_found`,
 `too_many_instances`, `forbidden`, `capacity`, `closed`, `unknown_type`.
 Unavailable clears displayed state. Browser reconnect opens a new socket and
 resends the desired set, without REST baseline or polling. Hub reattaches current
-subscriptions after Bridge reconnect. Completion delivery remains best effort.
+subscriptions after Bridge reconnect. Instance configuration commit also
+reconciles existing viewers immediately: the Hub detaches the old Bridge, rotates
+the producer token, and attaches the current destination using that Bridge's own
+connection generation. Same-set replacement and additional viewers reconcile
+the binding too. The destination's ready event requests another baseline if the
+first attach arrived before launch. Old-source frames and delayed reconnect
+callbacks cannot restore an obsolete binding. Completion delivery remains best effort.
 Idle receive timeouts are wakes, not EOF.
 
 ## Lifecycle and bounds
@@ -148,6 +154,10 @@ tracker/Bridge/Hub/HTTP regressions, then compiles Hub, Bridge and CLI. Tests co
 summary selection/UTF-8 bounds, multiple completions/drain/cap, demand gating,
 one-second coalescing, real Bridge frame sockets, real HTTP upgrade/ticket/
 subscription/baseline sockets, shared routes/last detach, owner isolation, slow
-queue independence and basic reconnect fences. Full browser + real Hub + real
+queue independence and reconnect fences. Relocation regressions use two live
+runtime registry entries with different connection generations and cover the
+configuration notification, existing/additional/new viewers, empty baseline and
+updates, same-set reconciliation, old-source rejection, destination reconnect
+and ready-time baseline retry. Full browser + real Hub + real
 Bridge integration belongs to the dependent integration task; module tests do
 not claim that coverage.

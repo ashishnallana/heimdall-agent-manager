@@ -109,8 +109,7 @@ tool_live_apply_bridge :: proc(svc: ^Agent_Service, bridge_id: string, connectio
     r := s.routes[id]
     if r == nil || r.bridge != bridge_id || r.owner != string(inst.owner_user_id) || r.token != tool_live_text(root, "subscription_id") do return false
     if r.run != inst.run_count {
-        tool_stream_unavailable_locked(s, r, "instance_changed")
-        tool_stream_rebind_locked(svc, r, inst, connection_generation)
+        _ = tool_stream_reconcile_locked(svc, r, inst)
         return false
     }
     if r.connection_generation != connection_generation do return false
