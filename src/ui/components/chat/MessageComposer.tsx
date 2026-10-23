@@ -1,8 +1,11 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, type TextareaHTMLAttributes, type ReactNode } from 'react';
 import { Icon, StatusDot, type StatusDotProps } from '@ui';
 import ProviderIcon from '../providers/ProviderIcon';
+import { useSelector } from 'react-redux';
+import { selectUseExternalKeyboard } from '../../store/inputPreferencesSlice';
 
 export const MessageComposerInput = forwardRef<HTMLTextAreaElement, TextareaHTMLAttributes<HTMLTextAreaElement> & { mobile: boolean; debugId: string }>(function MessageComposerInput({ mobile, debugId, ...props }, forwardedRef) {
+  const useExternalKeyboard = useSelector(selectUseExternalKeyboard);
   const ref = useRef<HTMLTextAreaElement>(null);
   useImperativeHandle(forwardedRef, () => ref.current!, []);
   useEffect(() => {
@@ -22,7 +25,7 @@ export const MessageComposerInput = forwardRef<HTMLTextAreaElement, TextareaHTML
     observer.observe(input);
     return () => { observer.disconnect(); cancelAnimationFrame(frame); };
   }, [mobile, props.value]);
-  return <textarea {...props} ref={ref} data-debug-id={debugId} rows={mobile ? 1 : 2} className={mobile ? 'block min-h-6 max-h-[72px] w-full resize-none bg-transparent p-0 text-base leading-6 text-primary outline-none placeholder:text-muted' : 'min-h-[44px] w-full resize-none bg-transparent px-1 py-1 text-sm text-primary outline-none placeholder:text-muted'} />;
+  return <textarea {...props} inputMode={useExternalKeyboard ? 'none' : 'text'} ref={ref} data-debug-id={debugId} rows={mobile ? 1 : 2} className={mobile ? 'block min-h-6 max-h-[72px] w-full resize-none bg-transparent p-0 text-base leading-6 text-primary outline-none placeholder:text-muted' : 'min-h-[44px] w-full resize-none bg-transparent px-1 py-1 text-sm text-primary outline-none placeholder:text-muted'} />;
 });
 
 export type ComposerActionsProps = {

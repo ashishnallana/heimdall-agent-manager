@@ -1,9 +1,13 @@
 import React from 'react';
+import { useDispatch, useSelector } from 'react-redux';
+import { externalKeyboardSet, selectUseExternalKeyboard } from '../../store/inputPreferencesSlice';
 import { Badge, Icon } from '@ui';
 import { useTheme } from '../../store/themeSlice';
 import { ThemeDefinition } from '../../theme/registry';
 
 export function AppearanceSettings() {
+  const dispatch = useDispatch();
+  const useExternalKeyboard = useSelector(selectUseExternalKeyboard);
   const { theme: activeTheme, themeId, setTheme, themes } = useTheme();
 
   return (
@@ -103,6 +107,24 @@ export function AppearanceSettings() {
           );
         })}
       </div>
+
+      <section aria-labelledby="appearance-input-heading" className="rounded-xl border border-subtle bg-surface p-4">
+        <h3 id="appearance-input-heading" className="font-semibold text-primary">Input</h3>
+        <label className="mt-2 flex min-h-11 cursor-pointer items-center gap-3 py-2">
+          <input
+            type="checkbox"
+            data-debug-id="settings-external-keyboard-checkbox"
+            checked={useExternalKeyboard}
+            onChange={event => dispatch(externalKeyboardSet(event.target.checked))}
+            aria-describedby="appearance-external-keyboard-help"
+            className="h-5 w-5 shrink-0 accent-accent"
+          />
+          <span className="text-sm font-medium text-primary">Use external keyboard</span>
+        </label>
+        <p id="appearance-external-keyboard-help" className="text-sm text-muted">
+          Hide the on-screen keyboard in message composers. Turn off to type on screen.
+        </p>
+      </section>
 
       <div className="rounded-xl border border-subtle bg-surface p-4 text-sm text-muted">
         <span className="font-medium text-primary">Current Theme:</span>{' '}

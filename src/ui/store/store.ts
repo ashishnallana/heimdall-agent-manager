@@ -19,6 +19,7 @@ import agentActivityReducer from './agentActivitySlice';
 import toolActivityReducer from './toolActivitySlice';
 import cardsReducer from './cardsSlice';
 import themeReducer from './themeSlice';
+import inputPreferencesReducer, { setupInputPreferencesSync } from './inputPreferencesSlice';
 import vaultReducer from './vaultSlice';
 import deviceVaultReducer from './deviceVaultSlice';
 import searchTitleReducer from './searchTitleSlice';
@@ -41,6 +42,7 @@ const appReducer = combineReducers({
   notifications: notificationsReducer,
   cards: cardsReducer,
   theme: themeReducer,
+  inputPreferences: inputPreferencesReducer,
   vault: vaultReducer,
   deviceVault: deviceVaultReducer,
   searchTitle: searchTitleReducer,
@@ -90,3 +92,4 @@ export const store = configureStore({
 });
 
 setupHeimdallApiListeners(store.dispatch);
+setupInputPreferencesSync(store.dispatch);
