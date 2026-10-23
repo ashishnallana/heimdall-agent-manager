@@ -1,4 +1,3 @@
-import { liveFrameReceived, liveInstanceUnavailable, liveResyncRequested, parseLiveSnapshot } from '../store/toolActivitySlice';
 import { heimdallApi, HEIMDALL_TAG_TYPES } from './heimdallApi';
 import { tasksApi } from './endpoints/tasks';
 import { normalizeChain, workspaceApi } from './endpoints/workspace';
@@ -1174,36 +1173,6 @@ function scheduleAttentionRefetch(dispatch: any) {
 
 // TODO(FIX): Replace any with strict TypeScript interface matching Odin backend schema
 export function handleUserWsEvent(dispatch: any, payload: any, ctx: WsCtx = {}) {
-  if (payload?.type === 'tool_activity_live') {
-    const snapshot = parseLiveSnapshot(payload);
-    if (snapshot) dispatch(liveFrameReceived(snapshot));
-    else dispatch(liveResyncRequested());
-    return;
-  }
-  if (payload?.type === 'tool_activity_live_unavailable') {
-    if (typeof payload.instance_id === 'string' && payload.instance_id.length <= 64)
-      dispatch(liveInstanceUnavailable(payload.instance_id));
-    return;
-  }
-  if (payload?.type === 'tool_activity_live_resync') {
-    // Bridge launch/relaunch registration also emits this event. Recover
-    // unavailable/offline instances through a fresh authoritative snapshot;
-    // ordinary status changes must not race it with duplicate discovery reads.
-    dispatch(liveResyncRequested());
-    return;
-  }
-  // Generic status and extension events are push-only and do not discover
-  // tool state. Only roster/configuration hints can change view membership.
-  if (payload?.type === 'resource_changed') {
-    const resource = String(payload.resource || '');
-    const change = String(payload.change || '');
-    if ((resource === 'task_chain' && ['created', 'updated', 'deleted', 'member_added',
-        'member_removed', 'membership_changed', 'coordinator_changed'].includes(change)) ||
-        (resource === 'task_chain_member') ||
-        (resource === 'agent_instance' && ['created', 'deleted', 'chain_changed', 'config_changed'].includes(change))) {
-      dispatch(liveResyncRequested());
-    }
-  }
   // Native (OS) notifications: fire from this single funnel for the curated
   // event set, gated to open-but-unfocused tabs. Implemented as a thunk so the
   // side-effectful service can read live settings via getState without a

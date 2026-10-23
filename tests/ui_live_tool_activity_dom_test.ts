@@ -1,39 +1,43 @@
 import './helpers/vaultEndpointHarness.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import React, { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import { Provider } from 'react-redux';
 import { configureStore } from '@reduxjs/toolkit';
 import { JSDOM } from 'jsdom';
-import reducer, { liveStreamReady, liveFrameReceived, liveStreamDisconnected } from '../src/ui/store/toolActivitySlice.ts';
-import LiveToolActivity from '../src/ui/components/extension/LiveToolActivity.tsx';
+import reducer from '../src/ui/store/toolActivitySlice.ts';
+import LiveToolActivity, { toolNameColor, formatToolDuration } from '../src/ui/components/extension/LiveToolActivity.tsx';
 import ChatMessageList from '../src/ui/components/chat/ChatMessageList.tsx';
 import { heimdallApi } from '../src/ui/api/heimdallApi.ts';
 import { handleUserWsEvent } from '../src/ui/api/wsInvalidation.ts';
-
-const snapshot = (id: string, revision = 1, active = true) => ({
-  type: 'tool_activity_live', instance_id: id, agent_id: 'agt_same', display_name: 'Worker',
-  chain_id: 'chain_a', bridge_id: 'brg_a', epoch: '1792670400000000001',
-  generation: 1, revision, availability: 'ready',
-  active: active ? [{ call_id: id + ':call', source: 'shell', tool_name: 'Shell',
-    shell_session_id: 'sh_' + id, started_at_ms: 1000 }] : [],
-  last_completion: active ? null : { duration_ms: 1250 },
-});
+import { FakeToolSocket, snapshot } from './helpers/toolStreamHarness.ts';
 
 async function withDom(run: (env: any) => Promise<void>) {
   const dom = new JSDOM('<div id="root"></div>', { url: 'https://hub.test/', pretendToBeVisual: true });
   const names = ['window', 'document', 'HTMLElement', 'Node', 'IS_REACT_ACT_ENVIRONMENT',
-    'IntersectionObserver', 'requestAnimationFrame', 'cancelAnimationFrame'];
+    'WebSocket', 'IntersectionObserver', 'requestAnimationFrame', 'cancelAnimationFrame'];
   const previous: any = Object.fromEntries(names.map((name) => [name, (globalThis as any)[name]]));
-  const previousFetch = globalThis.fetch;
+  const previousFetch = globalThis.fetch, previousNow = Date.now;
+  let time = 1000, nextTimer = 0, requests = 0;
+  const timers = new Map<number, () => void>();
+  const sockets: FakeToolSocket[] = [];
   Object.assign(globalThis, { window: dom.window, document: dom.window.document,
     HTMLElement: dom.window.HTMLElement, Node: dom.window.Node, IS_REACT_ACT_ENVIRONMENT: true,
-    requestAnimationFrame: (fn: any) => { fn(); return 0; }, cancelAnimationFrame: () => {} });
+    requestAnimationFrame: (fn: any) => { fn(); return 0; }, cancelAnimationFrame: () => {},
+    WebSocket: class extends FakeToolSocket { constructor(url: string) { super(url); sockets.push(this); } },
+  });
+  Date.now = () => time;
+  dom.window.setInterval = ((fn: () => void) => { timers.set(++nextTimer, fn); return nextTimer; }) as any;
+  dom.window.clearInterval = ((id: number) => timers.delete(id)) as any;
   dom.window.matchMedia = (() => ({ matches: false, addEventListener() {}, removeEventListener() {} })) as any;
   dom.window.HTMLElement.prototype.scrollTo = () => {};
+  globalThis.fetch = async () => { requests++; throw new Error('Unexpected REST request'); };
   const store = configureStore({
-    reducer: { toolActivity: reducer, vault: (s = {}) => s, [heimdallApi.reducerPath]: heimdallApi.reducer },
+    reducer: { toolActivity: reducer, chat: (s = { session: { userId: 'user1' } }, a: any) =>
+      a.type === 'test/user' ? { session: { userId: a.payload } } : s,
+      vault: (s = {}) => s, [heimdallApi.reducerPath]: heimdallApi.reducer },
     middleware: (gdm) => gdm().concat(heimdallApi.middleware),
   });
   const root = createRoot(dom.window.document.getElementById('root')!);
@@ -41,53 +45,162 @@ async function withDom(run: (env: any) => Promise<void>) {
   const render = async (child: React.ReactNode) => {
     await act(async () => { root.render(React.createElement(Provider, { store, children: child })); });
   };
-  try { await run({ dom, store, root, q, render }); }
-  finally {
+  try {
+    await run({ dom, store, root, q, render, sockets, timers,
+      get requests() { return requests; },
+      tick: async () => { time += 1000; await act(async () => { for (const callback of [...timers.values()]) callback(); }); },
+    });
+  } finally {
     await act(async () => root.unmount());
+    assert.equal(timers.size, 0, 'all stream/display timers cleaned after unmount');
+    for (const socket of sockets) assert.equal(socket.readyState, 3, 'every socket closed after unmount');
     store.dispatch(heimdallApi.util.resetApiState());
-    globalThis.fetch = previousFetch;
-    Object.assign(globalThis, previous);
-    dom.window.close();
+    globalThis.fetch = previousFetch; Date.now = previousNow;
+    Object.assign(globalThis, previous); dom.window.close();
   }
 }
 
-test('composer section/groups collapse independently and pushed final completion cleans running rows while collapsed', async () => {
-  await withDom(async ({ dom, store, q, render }) => {
-    let requests = 0;
-    globalThis.fetch = async () => {
-      requests++;
-      return new Response(JSON.stringify({ data: { chain_id: 'chain_a', roster_token: 'v1', next_cursor: '',
-        members: ['inst_a', 'inst_b'].map((id) => ({ instance_id: id, agent_id: 'agt_same', display_name: 'Worker',
-          snapshot: snapshot(id), availability: 'ready' })) } }));
-    };
+test('flat rows render at conversation scroll tail, summaries/colors/badges/durations stay inline and shell rows open', async () => {
+  await withDom(async (env) => {
+    const { dom, sockets, q, render } = env;
     const opened: string[] = [];
-    await render(React.createElement(LiveToolActivity, { instanceId: 'inst_a', chainId: 'chain_a',
-      onOpenShell: (id: string) => opened.push(id) }));
-    assert.equal(requests, 0, 'wait for subscribed WS before snapshot');
-    await act(async () => { store.dispatch(liveStreamReady()); });
-    assert.equal(requests, 1);
-    assert.match(q('live-tools-toggle')!.textContent!, /2 running/);
-    await act(async () => { q('live-tools-shell-sh_inst_b')!.click(); });
-    assert.deepEqual(opened, ['sh_inst_b']);
-    await act(async () => { q('live-tools-agent-toggle-inst_a')!.click(); });
-    assert.equal(q('live-tools-shell-sh_inst_a'), null);
-    assert.ok(q('live-tools-shell-sh_inst_b'), 'other group remains expanded');
-    await act(async () => { store.dispatch(liveFrameReceived(snapshot('inst_a', 2, false) as any)); });
-    assert.match(q('live-tools-toggle')!.textContent!, /1 running/);
-    await act(async () => { q('live-tools-agent-toggle-inst_a')!.click(); });
-    assert.equal(q('live-tools-shell-sh_inst_a'), null);
-    assert.equal(q('live-tools-last-duration-inst_a')!.textContent!.trim(), 'Last call · 1.3 s');
-    await act(async () => { q('live-tools-toggle')!.click(); });
-    assert.equal(q('live-tools-agent-toggle-inst_b'), null);
-    await act(async () => { store.dispatch(liveFrameReceived(snapshot('inst_b', 2, false) as any)); });
-    assert.match(q('live-tools-toggle')!.textContent!, /0 running/);
-    await act(async () => { q('live-tools-toggle')!.click(); });
-    assert.equal(dom.window.document.querySelectorAll('[data-debug-id^="live-tools-shell-"]').length, 0);
-    assert.equal(dom.window.document.querySelectorAll('[data-debug-id^="live-tools-last-duration-"]').length, 2);
-    assert.equal(requests, 1, 'completion/collapse must never fetch');
-    await act(async () => { store.dispatch(liveStreamDisconnected()); });
-    assert.equal(q('live-tool-activity'), null, 'disconnect clears all live claims immediately');
+    const message: any = { key: 'm1', messageId: 'm1', body: 'Real conversation message', isUser: false,
+      createdUnixMs: 1, deliveredUnixMs: 0, readUnixMs: 1, deliveryFailedUnixMs: 0,
+      deliveryError: '', sending: false, authorLabel: 'Worker', messageType: 'text', metadata: {} };
+    await render(React.createElement(ChatMessageList, { conversationKey: 'chat_a', debugPrefix: 'test-thread',
+      messages: [message], renderMessageBody: ({ message }: any) => message.body,
+      children: React.createElement(LiveToolActivity, { instanceId: 'inst_a',
+        members: [{ instanceId: 'inst_a', displayName: 'A' }, { instanceId: 'inst_b', displayName: 'B' }],
+        onOpenShell: (id: string) => opened.push(id) }),
+    }));
+    const s = sockets[0]; s.open();
+    const call = snapshot().active[0];
+    await act(async () => {
+      s.state(snapshot('inst_a', 1, { display_name: 'Agent A',
+        active: [{ ...call, summary: 'x'.repeat(512), summary_truncated: true }] }));
+      s.state(snapshot('inst_b', 1, { display_name: 'Agent B', active: [],
+        completed_since_last: [{ call_id: 'done', source: 'provider', tool_name: 'Bash', summary: 'done',
+          summary_truncated: false, duration_ms: 1250, completed_at_ms: 1, status: 'completed' }] }));
+    });
+    const container = q('live-tool-activity')!;
+    assert.ok(q('test-thread-scroll')!.contains(container), 'inside scrollable conversation');
+    assert.ok(q('test-thread-messages-container')!.lastElementChild === container, 'after conversation messages');
+    assert.match(q('test-thread-scroll')!.className, /overflow-y-auto/);
+    assert.doesNotMatch(container.className, /border|sticky|fixed|absolute/);
+    assert.equal(container.querySelector('header'), null);
+    assert.doesNotMatch(container.textContent!, /Running tools|running|Last call/);
+    assert.equal(q('live-tools-toggle'), null);
+    const shell = q('live-tools-shell-sh_inst_a')!;
+    assert.match(shell.className, /flex-nowrap/); assert.match(shell.className, /whitespace-nowrap/);
+    assert.equal(shell.lastElementChild!.getAttribute('data-debug-id'), 'live-tools-agent');
+    assert.match(shell.lastElementChild!.className, /ml-auto.*max-w-.*shrink-0.*truncate/);
+    const summary = shell.querySelector('[data-debug-id="live-tools-summary"]')!;
+    assert.match(summary.className, /min-w-0 flex-1 truncate text-muted/);
+    assert.equal(summary.getAttribute('title'), 'x'.repeat(512) + '…');
+    assert.equal(dom.window.document.querySelectorAll('[data-debug-id="live-tools-duration"]')[1].textContent, '1.3 s');
+    const toolLabels = container.querySelectorAll('span.font-medium');
+    assert.equal(toolLabels[0].className, toolLabels[1].className, 'same tool same color across agents');
+    await act(async () => shell.click());
+    assert.deepEqual(opened, ['sh_inst_a']);
+    assert.equal(env.requests, 0);
+    // Verify actual caller placement too: DOM test above exercises the real scroll slot.
+    const source = fs.readFileSync('src/ui/components/workbench/AgentChatPane.tsx', 'utf8');
+    const list = source.indexOf('<ChatMessageList');
+    assert.ok(source.indexOf('<LiveToolActivity', list) < source.indexOf('</ChatMessageList>', list));
+    assert.ok(source.indexOf('</ChatMessageList>', list) < source.indexOf('ref={composerDockRef}', list));
   });
+});
+
+test('elapsed time advances locally, never negative; timer stops when active rows finish and batch replaces', async () => {
+  await withDom(async (env) => {
+    const { sockets, q, render, timers } = env;
+    await render(React.createElement(LiveToolActivity, { instanceId: 'inst_a', onOpenShell() {} }));
+    const s = sockets[0]; s.open();
+    await act(async () => { s.state(snapshot()); });
+    assert.equal(q('live-tools-duration')!.textContent, '1.0 s');
+    assert.equal(timers.size, 2, 'one shared watchdog and one local display timer');
+    await env.tick();
+    assert.equal(q('live-tools-duration')!.textContent, '2.0 s');
+    await act(async () => { s.state(snapshot('inst_a', 2, { active: [], completed_since_last: [{
+      call_id: 'done', source: 'provider', tool_name: 'Read', summary: 'file', summary_truncated: false,
+      status: 'completed', duration_ms: 65_000, completed_at_ms: 2000,
+    }] }), false); });
+    assert.equal(q('live-tools-duration')!.textContent, '1m 5s');
+    assert.equal(timers.size, 1, 'local elapsed timer stops once no active calls remain');
+    await env.tick();
+    assert.equal(q('live-tools-duration')!.textContent, '1m 5s');
+    await act(async () => { s.state(snapshot('inst_a', 3, { active: [] }), false); });
+    assert.equal(q('live-tool-activity'), null, 'empty batch clears transient completion rows');
+    assert.equal(formatToolDuration(-10), '0 ms'); assert.equal(env.requests, 0);
+  });
+});
+
+test('own/chain mounts share socket; roster changes update it and old general user events do not affect tools', async () => {
+  await withDom(async (env) => {
+    const { sockets, render, store, q } = env;
+    const own = React.createElement(LiveToolActivity, { key: 'own', instanceId: 'inst_a', onOpenShell() {} });
+    const chain = (ids: string[]) => React.createElement(LiveToolActivity, { key: 'chain', instanceId: 'inst_a',
+      members: ids.map((instanceId) => ({ instanceId, displayName: instanceId })), onOpenShell() {} });
+    await render(React.createElement(React.Fragment, null, own, chain(['inst_a', 'inst_b'])));
+    assert.equal(sockets.length, 1);
+    const s = sockets[0]; s.open();
+    assert.deepEqual(s.sent[0].instance_ids, ['inst_a', 'inst_b']);
+    await act(async () => { s.state(snapshot()); });
+    await render(React.createElement(React.Fragment, null, own, chain(['inst_b', 'inst_c'])));
+    assert.equal(sockets.length, 1); assert.deepEqual(s.sent.at(-1).instance_ids, ['inst_a', 'inst_b', 'inst_c']);
+    await act(async () => {
+      handleUserWsEvent(store.dispatch, { type: 'tool_activity_live_unavailable', instance_id: 'inst_a' });
+    });
+    assert.ok(q('live-tools-shell-sh_inst_a'));
+    await render(own);
+    assert.deepEqual(s.sent.at(-1).instance_ids, ['inst_a']);
+    assert.equal(env.requests, 0);
+  });
+});
+
+test('unavailable/socket error clears row claims; visibility/pageshow/resume request immediate new baseline', async () => {
+  await withDom(async (env) => {
+    const { sockets, render, q, dom } = env;
+    await render(React.createElement(LiveToolActivity, { instanceId: 'inst_a', onOpenShell() {} }));
+    sockets[0].open();
+    await act(async () => { sockets[0].state(snapshot()); });
+    await act(async () => { sockets[0].frame({ type: 'unavailable', instance_id: 'inst_a', reason: 'bridge_offline' }); });
+    assert.equal(q('live-tools-shell-sh_inst_a'), null);
+    assert.match(q('live-tool-activity')!.textContent!, /Tools unavailable/);
+    for (const event of ['visibilitychange', 'pageshow', 'resume']) {
+      await act(async () => {
+        if (event === 'pageshow') dom.window.dispatchEvent(new dom.window.Event(event));
+        else dom.window.document.dispatchEvent(new dom.window.Event(event));
+      });
+      const s = sockets.at(-1)!; s.open();
+      await act(async () => { s.state(snapshot()); });
+      assert.ok(q('live-tools-shell-sh_inst_a'));
+    }
+    assert.equal(sockets.length, 4);
+    await act(async () => { sockets.at(-1)!.onerror?.(); });
+    assert.equal(q('live-tools-shell-sh_inst_a'), null);
+    assert.match(q('live-tool-activity')!.textContent!, /Tools unavailable/);
+    assert.equal(env.requests, 0);
+  });
+});
+
+test('user change closes old socket and clears tool rows before new baseline', async () => {
+  await withDom(async ({ sockets, render, q, store }) => {
+    await render(React.createElement(LiveToolActivity, { instanceId: 'inst_a', onOpenShell() {} }));
+    sockets[0].open();
+    await act(async () => { sockets[0].state(snapshot()); });
+    assert.ok(q('live-tools-shell-sh_inst_a'));
+    await act(async () => { store.dispatch({ type: 'test/user', payload: 'user2' }); });
+    assert.equal(sockets[0].readyState, 3);
+    assert.equal(q('live-tools-shell-sh_inst_a'), null);
+    assert.equal(sockets.length, 2);
+  });
+});
+
+test('common tools have distinct stable colors', () => {
+  const names = ['Bash', 'Read', 'Edit', 'Write', 'Grep', 'Glob', 'Agent', 'WebFetch', 'WebSearch', 'exec_command'];
+  assert.equal(new Set(names.map(toolNameColor)).size, names.length);
+  assert.equal(toolNameColor('custom'), toolNameColor('custom'));
 });
 
 test('hidden-only pages advance raw pagination even before first visible message, with manual fallback', async () => {
@@ -119,69 +232,31 @@ test('hidden-only pages advance raw pagination even before first visible message
   });
 });
 
-// The Bridge emits resync on actual launch/relaunch, including same-instance
-// restarts. Exercise the mounted component's effect, WS funnel and REST read;
-// no remount, user-WS reconnect or status-driven discovery is involved.
-for (const chainId of ['', 'chain_a']) {
-  for (const initiallyOffline of [false, true]) {
-    test((chainId ? 'chain' : 'own') + ' view recovers ' +
-      (initiallyOffline ? 'offline-at-mount start' : 'stop/unavailable/restart') +
-      ' through one authoritative launch resync', async () => {
-      await withDom(async ({ store, q, render }) => {
-        let requests = 0;
-        let finishRecovery!: (response: Response) => void;
-        const restarted = { ...snapshot('inst_a', 10, false), generation: 2, last_completion: null };
-        const response = (value: any) => new Response(JSON.stringify({ data: chainId
-          ? { chain_id: chainId, roster_token: 'v1', next_cursor: '', members: [{
-            instance_id: 'inst_a', agent_id: 'agt_same', display_name: 'Worker',
-            snapshot: value, availability: value ? 'ready' : 'offline',
-          }] } : value }));
-        globalThis.fetch = async (url: any) => {
-          requests++;
-          assert.match(String(url), chainId
-            ? /task-chains\/chain_a\/tool-activity-live$/
-            : /agent-instances\/inst_a\/tool-activity-live$/);
-          if (requests === 1) {
-            if (initiallyOffline && !chainId) return new Response(JSON.stringify({
-              error: { code: 'bridge_offline', message: 'Bridge offline' },
-            }), { status: 409 });
-            return response(initiallyOffline ? null : snapshot('inst_a'));
-          }
-          assert.equal(requests, 2, 'only the explicit launch resync reads again');
-          return new Promise<Response>((resolve) => { finishRecovery = resolve; });
-        };
-        const push = (event: any) => handleUserWsEvent(store.dispatch, event);
-        await render(React.createElement(LiveToolActivity, {
-          instanceId: 'inst_a', chainId, onOpenShell: () => {},
-        }));
-        await act(async () => { store.dispatch(liveStreamReady()); });
-        assert.equal(requests, 1);
-        if (!initiallyOffline) {
-          assert.ok(q('live-tools-shell-sh_inst_a'));
-          await act(async () => { push({
-            type: 'tool_activity_live_unavailable', instance_id: 'inst_a', availability: 'offline',
-          }); });
-        }
-        await act(async () => { push(snapshot('inst_a', 99)); });
-        assert.equal(q('live-tools-shell-sh_inst_a'), null, 'late frames cannot revive an unavailable run');
-        assert.equal(requests, 1, 'unavailable and live frames never discover state');
 
-        await act(async () => { push({ type: 'tool_activity_live_resync', bridge_id: 'brg_a' }); });
-        assert.equal(requests, 2, 'mounted pane reads exactly once after launch resync');
-        await act(async () => { push(snapshot('inst_a', 100)); });
-        assert.equal(q('live-tools-shell-sh_inst_a'), null, 'old push stays hidden while response is pending');
-        await act(async () => { finishRecovery(response(restarted)); });
-        assert.equal(q('live-tools-shell-sh_inst_a'), null, 'new generation beats old buffered revision');
-        assert.equal(q('live-tools-retry'), null, 'successful start clears an initial offline error');
-        await act(async () => { push({ ...snapshot('inst_a', 11), generation: 2 }); });
-        assert.ok(q('live-tools-shell-sh_inst_a'), 'new call appears without remount or reconnect');
-        await act(async () => { push(snapshot('inst_a', 101, false)); });
-        assert.ok(q('live-tools-shell-sh_inst_a'), 'late previous-generation completion is ignored');
-        await act(async () => { push({ ...snapshot('inst_a', 12, false), generation: 2 }); });
-        assert.equal(q('live-tools-shell-sh_inst_a'), null);
-        assert.equal(q('live-tools-last-duration-inst_a')!.textContent!.trim(), 'Last call · 1.3 s');
-        assert.equal(requests, 2, 'new calls and completions use push only');
-      });
-    });
-  }
-}
+test('tail resize follows readers at bottom but preserves a scrolled-up reader', async () => {
+  await withDom(async ({ render, q, dom }) => {
+    const previous = (globalThis as any).ResizeObserver;
+    let resized!: () => void, disconnected = 0, scrolls = 0;
+    (globalThis as any).ResizeObserver = class {
+      constructor(callback: () => void) { resized = callback; }
+      observe() {}
+      disconnect() { disconnected++; }
+    };
+    dom.window.HTMLElement.prototype.scrollTo = () => { scrolls++; };
+    try {
+      await render(React.createElement(ChatMessageList, { conversationKey: 'chat_resize', debugPrefix: 'resize',
+        messages: [], children: React.createElement('div', null, 'Tools tail') }));
+      const scroll = q('resize-scroll')!;
+      Object.defineProperties(scroll, { scrollHeight: { value: 1000, configurable: true },
+        clientHeight: { value: 100, configurable: true } });
+      resized();
+      assert.equal(scrolls, 1, 'tail growth follows bottom reader even without messages');
+      scroll.scrollTop = 0;
+      await act(async () => { scroll.dispatchEvent(new dom.window.Event('scroll')); });
+      resized();
+      assert.equal(scrolls, 1, 'tail growth does not move scrolled-up reader');
+      await render(null);
+      assert.equal(disconnected, 1);
+    } finally { (globalThis as any).ResizeObserver = previous; }
+  });
+});

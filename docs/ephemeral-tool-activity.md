@@ -202,3 +202,65 @@ terminal producer invalidation, removal and affected-Bridge notification.
 A real HTTP WebSocket test exercises failed upstream attach delivery and confirms
 ping/pong remains usable. These are scoped module/socket tests; no live
 deployment or full browser end-to-end coverage is claimed.
+
+## UI consumer and S3 evidence contract
+
+The UI keeps one refcounted tools WebSocket per Redux store/authenticated session.
+Mounted own views select their current instance; coordinator views select the
+current coordinator plus the normal chain-detail member roster. Overlap is
+deduplicated, membership replaces the subscribed set, and the final unmount
+closes the socket and removes its timers/listeners. A union above 256 is shown
+as unavailable rather than silently displaying a partial roster. Empty selections
+hold no transport resources. No live-tool REST loader or general-user-event tool
+route remains.
+
+Accepted state receipt uses client monotonic time for a 120s per-instance expiry.
+Same-revision refreshes reset only their own deadline. Pong is transport-only.
+One mounted-stream watchdog checks expiry, sends ping every30s and requires pong
+within15s. Close/error/protocol error clears all affected active/completed claims;
+unavailable clears the named instance. Reconnect/auth changes fence old callbacks
+and pending ticket resolution. Visibility/pageshow/resume immediately clears old
+claims and reconnects for a fresh baseline, independently of throttled timers.
+A baseline after unavailable/reconnect is authoritative for the current producer;
+old source ordering metadata does not prevent relocation recovery.
+
+Tools render as single-line flat rows at the end of the conversation scroll
+content, before its composer inset. No sticky composer card, headers, counts,
+groups or completion-history accumulation. Each row shows status dot, deterministic
+tool-name color, muted/truncated summary, inline elapsed/duration and far-right
+bounded agent badge. Shell rows are accessible buttons. The local1s display
+timer runs only while active rows exist; it does no network work and does not
+control receipt freshness. Conversation-tail resizing follows only a reader
+already at the bottom.
+
+S2 verification: `bash verify-tool-stream-ui.sh` runs scoped fake-time
+transport/reducer tests, component DOM tests, existing user-WebSocket and relevant
+UI regressions, TypeScript and the UI/Electron build. DOM checks verify structure
+and behavior; they are not visual-browser or full-stack evidence.
+
+S3 may run the same command with `LIVE_TOOLS_EVIDENCE=<absolute capture directory>`.
+When supplied it also executes `tests/ui_live_tool_wire_integration_test.ts`,
+which requires `manifest.json` with this versioned shape:
+
+```json
+{
+  "kind": "tool-stream-ui-evidence",
+  "schema_version": 1,
+  "status": "pass",
+  "capture_source": "isolated-backend-websocket",
+  "endpoint": "/api/v1/tool-activity/stream",
+  "backend_head": "<40 lowercase hex commit>",
+  "ui_head": "<40 lowercase hex commit>",
+  "ui_frames": ["<actual decoded state/unavailable objects in receive order>"]
+}
+```
+
+`ui_frames` contains5–4096 actual dedicated WebSocket frame objects, never
+REST-era snapshots, synthetic fixtures or string-encoded JSON. State frames
+include `type, instance_id, baseline, refresh, snapshot`; unavailable includes
+`type, instance_id, reason`. Collect a current active baseline, a changed
+completion batch of at least two calls, a real refresh, an empty state and an
+unavailable notification. Each instance starts/restarts with its actual baseline;
+the sequence must represent current ordered states accepted by the production UI
+consumer. Missing/invalid supplied evidence fails. S3 owns real capture and full
+browser/backend integration; S2 does not manufacture an integration manifest.
