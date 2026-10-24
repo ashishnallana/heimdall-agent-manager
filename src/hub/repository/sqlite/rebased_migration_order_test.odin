@@ -140,7 +140,7 @@ test_extension_upgrade_from_deployed_main_keeps_migration_identities :: proc(t: 
 	if !testing.expect(t, mig_ok, "upgrade through extension migrations") do return
 	rmo_expect_after(t, &conn, "extension upgrade")
 	testing.expect_value(t, rmo_text(&conn, "SELECT applied_at FROM schema_migrations WHERE version='105_full_scan_indexes.sql';"), main_applied_at)
-	testing.expect(t, sqlite_object_exists(&conn, "agent_extension_events_instance_agent"), "extension event log exists")
+	testing.expect(t, !sqlite_object_exists(&conn, "agent_extension_events_instance_agent"), "transient migration retires extension event log")
 	testing.expect(t, table_column_exists(&conn, "provider_catalog", "extension"), "provider extension descriptor exists")
 	testing.expect(t, table_column_exists(&conn, "agents", "permission_mode"), "agent permission override exists")
 	testing.expect(t, table_column_exists(&conn, "agent_instances", "permission_mode"), "instance permission override exists")

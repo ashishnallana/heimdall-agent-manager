@@ -9,19 +9,29 @@ import "core:sync"
 import "core:thread"
 import "core:time"
 import domain "odin_test:hub/domain"
+import iface "odin_test:hub/repository/iface"
 import project_service "odin_test:hub/service/project"
 import ws "odin_test:lib/ws"
 import live "odin_test:lib/tool_live"
+import jsonx "odin_test:lib/jsonx"
 
 TOOL_STREAM_MAX_VIEWERS :: 64
 TOOL_STREAM_MAX_ROUTES :: 1024
 TOOL_STREAM_QUEUE_BYTES :: 2 * 1024 * 1024
 TOOL_STREAM_QUEUE_FRAMES :: 512
-Tool_Stream_Frame :: struct { text: string, opcode: u8 }
+TOOL_STREAM_LEASE_NS :: i64(15 * time.Second)
+TOOL_STREAM_RENEW_NS :: i64(5 * time.Second)
+TOOL_STREAM_GLOBAL_BYTES :: 64 * 1024 * 1024
+Tool_Stream_Frame :: struct { text: string, opcode: u8, instance_id: string }
 Tool_Stream_Viewer :: struct {
     owner: string,
     socket: net.TCP_Socket,
     ids: map[string]bool,
+    scopes: map[string]string, // member -> authorized open parent conversation
+    expires_ns: i64,
+    external: bool,
+    authorize: proc(ctx: rawptr) -> bool,
+    authorization_ctx: rawptr,
     queue: [dynamic]Tool_Stream_Frame,
     bytes: int, // includes the writer's in-flight frame
     stopped: bool,
@@ -33,9 +43,10 @@ Tool_Stream_Route :: struct {
     id, owner, bridge, token: string,
     run, connection_generation, viewers: int,
     generation, revision: i64,
+    last_renew_ns: i64,
     suspended: bool, // known route loss; reject in-flight state until a new attach
 }
-Tool_Stream_Control :: struct { bridge, id, token: string, run: int, attach: bool }
+Tool_Stream_Control :: struct { bridge, id, token: string, run: int, attach: bool, renew: bool }
 Tool_Live_Store :: struct {
     mutex: sync.Mutex,
     viewers: map[net.TCP_Socket]^Tool_Stream_Viewer,
@@ -43,6 +54,7 @@ Tool_Live_Store :: struct {
     controls: [dynamic]Tool_Stream_Control,
     control_cond: sync.Cond,
     control_worker: ^thread.Thread,
+    expiry_worker: ^thread.Thread,
     stopped: bool,
     nonce: u64,
 }
@@ -58,9 +70,9 @@ tool_stream_control_free :: proc(c: Tool_Stream_Control) {
 }
 // Coalesce controls per bridge/instance. A sole worker preserves attach/detach
 // order without ever writing a socket or waiting on the Bridge reader thread.
-tool_stream_control_locked :: proc(s: ^Tool_Live_Store, r: ^Tool_Stream_Route, attach: bool) {
+tool_stream_control_locked :: proc(s: ^Tool_Live_Store, r: ^Tool_Stream_Route, attach: bool, renew := false) {
     heap := runtime.heap_allocator()
-    c := Tool_Stream_Control{strings.clone(r.bridge, heap), strings.clone(r.id, heap), strings.clone(r.token, heap), r.run, attach}
+    c := Tool_Stream_Control{strings.clone(r.bridge, heap), strings.clone(r.id, heap), strings.clone(r.token, heap), r.run, attach, renew}
     for &old in s.controls {
         if old.bridge == c.bridge && old.id == c.id {
             // A retired producer's detach must precede a replacement token's
@@ -82,38 +94,61 @@ tool_stream_control_run :: proc(raw: rawptr) {
     context = runtime.default_context()
     svc := (^Agent_Service)(raw)
     s := &svc.tool_live
+    Control_Wire :: struct {type, instance_id, subscription_id: string, run_count, lease_ms, version: int, renew: bool}
     for {
         sync.mutex_lock(&s.mutex)
         for len(s.controls) == 0 && !s.stopped do sync.cond_wait(&s.control_cond, &s.mutex)
         if s.stopped { sync.mutex_unlock(&s.mutex); return }
-        c := s.controls[0]; ordered_remove(&s.controls, 0)
+        bridge := strings.clone(s.controls[0].bridge, context.temp_allocator)
+        pending := make([dynamic]Tool_Stream_Control, context.temp_allocator)
+        // Batch bounded controls for one bridge, preserving that bridge's order.
+        i := 0
+        for i < len(s.controls) && len(pending) < 64 {
+            if s.controls[i].bridge != bridge { i += 1; continue }
+            append(&pending, s.controls[i]); ordered_remove(&s.controls, i)
+        }
+        frames := make([dynamic]Control_Wire, context.temp_allocator)
+        for c in pending {
+            r := s.routes[c.id]
+            watching := false
+            if r != nil do for _, w in s.viewers {
+                if w.owner == r.owner && w.ids[r.id] && tool_stream_view_current(svc, w, r.id) { watching = true; break }
+            }
+            valid := !c.attach || (r != nil && r.token == c.token && !r.suspended && watching)
+            if valid do append(&frames, Control_Wire{"tool_stream_attach" if c.attach else "tool_stream_detach", c.id, c.token, c.run, 15_000, 2, c.renew})
+        }
         sync.mutex_unlock(&s.mutex)
-        frame := struct {type, instance_id, subscription_id: string, run_count: int}{
-            "tool_stream_attach" if c.attach else "tool_stream_detach", c.id, c.token, c.run}
-        data, _ := json.marshal(frame)
-        sent, _ := project_service.bridge_command_send_runtime(svc.bridge_command_sink,
-            project_service.Runtime_Command{bridge_id = c.bridge, body_json = string(data)})
-        delete(data)
-        if !sent && c.attach {
+        sent := true
+        if len(frames) > 0 {
+            data, _ := json.marshal(struct {type: string, controls: []Control_Wire}{"tool_stream_batch", frames[:]}, allocator = context.temp_allocator)
+            sent = len(data) <= 32 * 1024
+            if sent do sent, _ = project_service.bridge_command_send_runtime(svc.bridge_command_sink, project_service.Runtime_Command{bridge_id = bridge, body_json = string(data)})
+        }
+        if !sent {
             sync.mutex_lock(&s.mutex)
-            if r := s.routes[c.id]; r != nil && r.token == c.token do tool_stream_suspend_locked(s, r, "bridge_offline")
+            for c in pending do if c.attach {
+                if r := s.routes[c.id]; r != nil && r.token == c.token do tool_stream_suspend_locked(s, r, "bridge_offline")
+            }
             sync.mutex_unlock(&s.mutex)
         }
-        tool_stream_control_free(c)
+        for c in pending do tool_stream_control_free(c)
         free_all(context.temp_allocator)
     }
 }
-tool_stream_enqueue_locked :: proc(w: ^Tool_Stream_Viewer, text: string, opcode: u8 = 0x1) -> bool {
+tool_stream_enqueue_locked :: proc(w: ^Tool_Stream_Viewer, text: string, opcode: u8 = 0x1, instance_id := "") -> bool {
     if w.stopped do return false
-    if len(w.queue) >= TOOL_STREAM_QUEUE_FRAMES || len(text) > TOOL_STREAM_QUEUE_BYTES - w.bytes {
+    frame_bytes := len(text) + len(instance_id)
+    global_bytes := 0
+    if w.service != nil do for _, other in w.service.tool_live.viewers do global_bytes += other.bytes
+    if global_bytes > TOOL_STREAM_GLOBAL_BYTES - frame_bytes || len(w.queue) >= TOOL_STREAM_QUEUE_FRAMES || frame_bytes > TOOL_STREAM_QUEUE_BYTES - w.bytes {
         w.stopped = true
         sync.cond_signal(&w.cond)
         // The HTTP reader owns close. Shutdown only wakes that owner.
         _ = net.shutdown(w.socket, .Both)
         return false
     }
-    append(&w.queue, Tool_Stream_Frame{strings.clone(text, runtime.heap_allocator()), opcode})
-    w.bytes += len(text)
+    append(&w.queue, Tool_Stream_Frame{strings.clone(text, runtime.heap_allocator()), opcode, strings.clone(instance_id, runtime.heap_allocator())})
+    w.bytes += frame_bytes
     sync.cond_signal(&w.cond)
     return true
 }
@@ -126,20 +161,29 @@ tool_stream_writer_run :: proc(raw: rawptr) {
         for len(w.queue) == 0 && !w.stopped do sync.cond_wait(&w.cond, &s.mutex)
         if w.stopped { sync.mutex_unlock(&s.mutex); return }
         f := w.queue[0]; ordered_remove(&w.queue, 0)
+        allowed := f.instance_id == "" || (w.ids[f.instance_id] && tool_stream_view_current(w.service, w, f.instance_id))
+        if !allowed {
+            w.bytes -= len(f.text) + len(f.instance_id)
+            sync.mutex_unlock(&s.mutex)
+            delete(f.text, runtime.heap_allocator()); delete(f.instance_id, runtime.heap_allocator())
+            free_all(context.temp_allocator)
+            continue
+        }
         sync.mutex_unlock(&s.mutex)
         result := ws.write_server_opcode(w.socket, f.opcode, f.text, true)
         sync.mutex_lock(&s.mutex)
-        w.bytes -= len(f.text)
+        w.bytes -= len(f.text) + len(f.instance_id)
         if result != .Ok {
             w.stopped = true
             _ = net.shutdown(w.socket, .Both)
         }
         sync.mutex_unlock(&s.mutex)
-        delete(f.text, runtime.heap_allocator())
+        delete(f.text, runtime.heap_allocator()); delete(f.instance_id, runtime.heap_allocator())
+        free_all(context.temp_allocator)
         if result != .Ok do return
     }
 }
-tool_stream_open :: proc(svc: ^Agent_Service, owner: string, socket: net.TCP_Socket) -> ^Tool_Stream_Viewer {
+tool_stream_open :: proc(svc: ^Agent_Service, owner: string, socket: net.TCP_Socket, authorize: proc(ctx: rawptr) -> bool = nil, authorization_ctx: rawptr = nil) -> ^Tool_Stream_Viewer {
     context.allocator = runtime.heap_allocator()
     s := &svc.tool_live
     sync.mutex_lock(&s.mutex); defer sync.mutex_unlock(&s.mutex)
@@ -149,11 +193,12 @@ tool_stream_open :: proc(svc: ^Agent_Service, owner: string, socket: net.TCP_Soc
         s.control_worker = thread.create_and_start_with_data(svc, tool_stream_control_run, self_cleanup = false)
         if s.control_worker == nil do return nil
     }
+    if s.expiry_worker == nil do s.expiry_worker = thread.create_and_start_with_data(svc, tool_stream_expiry_run, self_cleanup = false)
     if s.viewers == nil do s.viewers = make(map[net.TCP_Socket]^Tool_Stream_Viewer)
     if s.routes == nil do s.routes = make(map[string]^Tool_Stream_Route)
     w := new(Tool_Stream_Viewer)
-    w^ = {owner = strings.clone(owner), socket = socket, service = svc,
-        ids = make(map[string]bool), queue = make([dynamic]Tool_Stream_Frame)}
+    w^ = {owner = strings.clone(owner), socket = socket, service = svc, external = true, authorize = authorize, authorization_ctx = authorization_ctx,
+        ids = make(map[string]bool), expires_ns = time.tick_now()._nsec + TOOL_STREAM_LEASE_NS, queue = make([dynamic]Tool_Stream_Frame)}
     _ = net.set_option(socket, .Send_Timeout, 5 * time.Second)
     w.worker = thread.create_and_start_with_data(w, tool_stream_writer_run, self_cleanup = false)
     if w.worker == nil { delete(w.owner); delete(w.ids); delete(w.queue); free(w); return nil }
@@ -170,6 +215,7 @@ tool_stream_remove_id_locked :: proc(s: ^Tool_Live_Store, w: ^Tool_Stream_Viewer
         r.viewers -= 1
         if r.viewers == 0 {
             if !r.suspended do tool_stream_control_locked(s, r, false)
+            if w.service != nil do _ = clear_instance_blockers(w.service, id)
             delete_key(&s.routes, r.id)
             tool_stream_route_free(r)
         }
@@ -188,8 +234,8 @@ tool_stream_close :: proc(svc: ^Agent_Service, w: ^Tool_Stream_Viewer) {
     sync.mutex_unlock(&s.mutex)
     thread.join(w.worker); thread.destroy(w.worker)
     heap := runtime.heap_allocator()
-    for f in w.queue do delete(f.text, heap)
-    delete(w.queue); delete(w.ids); delete(w.owner, heap); free(w, heap)
+    for f in w.queue { delete(f.text, heap); delete(f.instance_id, heap) }
+    delete(w.queue); delete(w.ids); tool_stream_scopes_free(w.scopes); delete(w.owner, heap); free(w, heap)
 }
 tool_stream_write :: proc(svc: ^Agent_Service, socket: net.TCP_Socket, text: string, opcode: u8 = 0x1) -> bool {
     s := &svc.tool_live
@@ -199,12 +245,16 @@ tool_stream_write :: proc(svc: ^Agent_Service, socket: net.TCP_Socket, text: str
 }
 tool_stream_unavailable_locked :: proc(s: ^Tool_Live_Store, r: ^Tool_Stream_Route, reason: string) {
     data, _ := json.marshal(struct {type, instance_id, reason: string}{"unavailable", r.id, reason}, allocator = context.temp_allocator)
-    for _, w in s.viewers do if w.owner == r.owner && w.ids[r.id] do _ = tool_stream_enqueue_locked(w, string(data))
+    for _, w in s.viewers do if w.owner == r.owner && w.ids[r.id] do _ = tool_stream_enqueue_locked(w, string(data), instance_id = r.id)
 }
 tool_stream_rebind_locked :: proc(svc: ^Agent_Service, r: ^Tool_Stream_Route, inst: domain.Agent_Instance, connection_generation: int) {
     s := &svc.tool_live
     // A Bridge reconnect is transport recovery, not an agent ready transition.
     // Keep the retired producer detached until repository state is active again.
+    if !tool_stream_bridge_supported(svc, inst.bridge_id) {
+        tool_stream_suspend_locked(s, r, "upgrade_required")
+        return
+    }
     if !runtime_expected_active(inst.runtime_status) {
         tool_stream_suspend_locked(s, r, "instance_changed")
         return
@@ -239,11 +289,12 @@ tool_stream_reconcile_locked :: proc(svc: ^Agent_Service, r: ^Tool_Stream_Route,
     return true
 }
 // Validation is atomic: a rejected set leaves existing subscriptions intact.
-tool_stream_subscribe :: proc(svc: ^Agent_Service, w: ^Tool_Stream_Viewer, ids: []string) -> string {
+tool_stream_subscribe :: proc(svc: ^Agent_Service, w: ^Tool_Stream_Viewer, ids: []string, scopes: map[string]string = nil) -> string {
     if len(ids) > live.TOOL_LIVE_MAX_INSTANCES do return "too_many_instances"
     s := &svc.tool_live
     sync.mutex_lock(&s.mutex); defer sync.mutex_unlock(&s.mutex)
     if w.stopped do return "closed"
+    if w.authorize != nil && !w.authorize(w.authorization_ctx) do return "unauthenticated"
     rows := make([]domain.Agent_Instance, len(ids), context.temp_allocator)
     additions := 0
     for id, i in ids {
@@ -251,10 +302,18 @@ tool_stream_subscribe :: proc(svc: ^Agent_Service, w: ^Tool_Stream_Viewer, ids: 
         for earlier in ids[:i] do if earlier == id do return "duplicate_instance_id"
         inst, found, _ := tool_live_instance(svc, id)
         if !found || string(inst.owner_user_id) != w.owner do return "forbidden"
+        if w.external && !tool_stream_bridge_supported(svc, inst.bridge_id) do return "upgrade_required"
         rows[i] = inst
         if s.routes[id] == nil do additions += 1
     }
     if len(s.routes) + additions > TOOL_STREAM_MAX_ROUTES do return "capacity"
+    if w.external {
+        if scopes == nil && len(ids) > 0 do return "upgrade_required"
+        old_scopes := w.scopes
+        w.scopes = scopes
+        w.expires_ns = time.tick_now()._nsec + TOOL_STREAM_LEASE_NS
+        tool_stream_scopes_free(old_scopes)
+    }
     // Save IDs to remove before mutating the map being iterated.
     removed := make([dynamic]string, context.temp_allocator)
     for id in w.ids {
@@ -364,8 +423,114 @@ tool_live_destroy :: proc(s: ^Tool_Live_Store) {
     s.stopped = true; sync.cond_signal(&s.control_cond)
     sync.mutex_unlock(&s.mutex)
     if s.control_worker != nil { thread.join(s.control_worker); thread.destroy(s.control_worker) }
+    if s.expiry_worker != nil { thread.join(s.expiry_worker); thread.destroy(s.expiry_worker) }
     for c in s.controls do tool_stream_control_free(c)
     delete(s.controls)
     for _, r in s.routes do tool_stream_route_free(r)
     delete(s.routes); delete(s.viewers)
+}
+
+// Parent conversation ownership and chain membership are checked on every renewal
+// and again before payload fanout. Instance-only legacy requests never reach this.
+tool_stream_authorized :: proc(svc: ^Agent_Service, owner, conversation, id: string) -> bool {
+    context.allocator = context.temp_allocator
+    if svc == nil || conversation == "" || len(conversation) > live.TOOL_LIVE_ID_MAX || len(id) > live.TOOL_LIVE_ID_MAX do return false
+    conv, got, _ := iface.content_get_conversation(svc.content, conversation)
+    if !got || string(conv.owner_user_id) != owner do return false
+    inst, found, _ := tool_live_instance(svc, id)
+    if !found || string(inst.owner_user_id) != owner do return false
+    if conv.agent_instance_id == id do return true
+    parent, parent_ok, _ := tool_live_instance(svc, conv.agent_instance_id)
+    if !parent_ok || parent.chain_id == "" || parent.chain_id != inst.chain_id || string(parent.owner_user_id) != owner do return false
+    chain, chain_ok, _ := iface.taskchain_get_chain(svc.taskchains, domain.Task_Chain_ID(parent.chain_id))
+    if !chain_ok || string(chain.owner_user_id) != owner || chain.coordinator_agent_instance_id != parent.agent_instance_id do return false
+    members, err := iface.taskchain_list_members_by_chain(svc.taskchains, chain.chain_id, chain.owner_user_id)
+    if err.code != .None do return false
+    for member in members do if member.agent_instance_id == id do return true
+    return false
+}
+tool_stream_scopes_free :: proc(scopes: map[string]string) {
+    for id, conversation in scopes { delete(id, runtime.heap_allocator()); delete(conversation, runtime.heap_allocator()) }
+    delete(scopes)
+}
+tool_stream_view_current :: proc(svc: ^Agent_Service, w: ^Tool_Stream_Viewer, id: string) -> bool {
+    if w.stopped || (w.expires_ns > 0 && time.tick_now()._nsec >= w.expires_ns) do return false
+    if w.authorize != nil && !w.authorize(w.authorization_ctx) do return false
+    // Only internal tests/direct subscribers have no external scope map.
+    if w.scopes == nil do return !w.external
+    inst, found, _ := tool_live_instance(svc, id)
+    return found && tool_stream_bridge_supported(svc, inst.bridge_id) && tool_stream_authorized(svc, w.owner, w.scopes[id], id)
+}
+tool_stream_subscribe_views :: proc(svc: ^Agent_Service, w: ^Tool_Stream_Viewer, views: json.Array) -> string {
+    if len(views) > live.TOOL_LIVE_MAX_INSTANCES do return "invalid_subscription"
+    scopes := make(map[string]string, runtime.heap_allocator())
+    defer if scopes != nil do tool_stream_scopes_free(scopes)
+    ids := make([dynamic]string, context.temp_allocator)
+    total := 0
+    for item in views {
+        view, ok := item.(json.Object)
+        if !ok do return "invalid_subscription"
+        conversation := tool_live_text(view, "conversation_id")
+        members, array_ok := view["instance_ids"].(json.Array)
+        if !array_ok do return "invalid_subscription"
+        for m in members {
+            total += 1
+            if total > 4 * live.TOOL_LIVE_MAX_INSTANCES do return "invalid_subscription"
+            id, string_ok := m.(json.String)
+            if !string_ok || !tool_stream_authorized(svc, w.owner, conversation, string(id)) do return "forbidden"
+            if _, exists := scopes[string(id)]; !exists {
+                if len(scopes) >= live.TOOL_LIVE_MAX_INSTANCES do return "invalid_subscription"
+                key := strings.clone(string(id), runtime.heap_allocator())
+                scopes[key] = strings.clone(conversation, runtime.heap_allocator())
+                append(&ids, key)
+            }
+        }
+    }
+    // Production's HTTP reader serializes replacements for this viewer.
+    code := tool_stream_subscribe(svc, w, ids[:], scopes)
+    if code != "" do return code
+    if w.external do scopes = nil // ownership transferred under the subscription lock
+    return ""
+}
+tool_stream_expire_at :: proc(svc: ^Agent_Service, now: i64) {
+    s := &svc.tool_live
+    sync.mutex_lock(&s.mutex); defer sync.mutex_unlock(&s.mutex)
+    for _, w in s.viewers {
+        if w.stopped || (w.expires_ns > 0 && now >= w.expires_ns) || (w.authorize != nil && !w.authorize(w.authorization_ctx)) {
+            for len(w.ids) > 0 { for id in w.ids { tool_stream_remove_id_locked(s, w, id); break } }
+            w.stopped = true; sync.cond_signal(&w.cond)
+            _ = net.shutdown(w.socket, .Both)
+        }
+    }
+    for _, r in s.routes {
+        if r.viewers > 0 && !r.suspended && now - r.last_renew_ns >= TOOL_STREAM_RENEW_NS {
+            r.last_renew_ns = now
+            tool_stream_control_locked(s, r, true, true)
+        }
+    }
+}
+tool_stream_expiry_run :: proc(raw: rawptr) {
+    context = runtime.default_context()
+    svc := (^Agent_Service)(raw)
+    for {
+        time.sleep(time.Second)
+        sync.mutex_lock(&svc.tool_live.mutex)
+        stopped := svc.tool_live.stopped
+        sync.mutex_unlock(&svc.tool_live.mutex)
+        if stopped do return
+        tool_stream_expire_at(svc, time.tick_now()._nsec)
+        free_all(context.temp_allocator)
+    }
+}
+
+// Old bridges do not implement expiring demand controls. Fail closed rather than
+// silently enabling a legacy producer. Nil repositories occur only in unit fakes.
+tool_stream_bridge_supported :: proc(svc: ^Agent_Service, bridge_id: string) -> bool {
+    if svc.bridges == nil do return true
+    bridge, found, err := iface.bridge_get_bridge(svc.bridges, bridge_id)
+    if !found || err.code != .None do return false
+    features := jsonx.extract_string_array(bridge.capabilities_json, "features")
+    defer { for feature in features do delete(feature); delete(features) }
+    for feature in features do if feature == "tool_stream_demand_v2" do return true
+    return false
 }

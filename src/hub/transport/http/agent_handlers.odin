@@ -446,14 +446,7 @@ write_agent_instance_json :: proc(b: ^strings.Builder, inst: domain.Agent_Instan
 	// effective_permission_mode is what the next launch uses (yolo | ask).
 	strings.write_string(b, "\",\"permission_mode\":\""); write_handler_json_string(b, domain.agent_instance_permission_mode_normalize(inst.permission_mode))
 	strings.write_string(b, "\",\"effective_permission_mode\":\""); write_handler_json_string(b, domain.agent_instance_effective_permission_mode(inst))
-	// Provider extension (ham.ext.v1) identity; "" until an extension says hello.
-	strings.write_string(b, "\",\"provider_session_id\":\""); write_handler_json_string(b, inst.provider_session_id)
-	strings.write_string(b, "\",\"provider_transcript_path\":\""); write_handler_json_string(b, inst.provider_transcript_path)
-	strings.write_string(b, "\",\"extension\":{\"provider\":\""); write_handler_json_string(b, inst.extension_provider)
-	strings.write_string(b, "\",\"version\":\""); write_handler_json_string(b, inst.extension_version)
-	strings.write_string(b, "\",\"capabilities\":"); write_extension_capabilities_json(b, inst.extension_capabilities)
-	strings.write_string(b, ",\"last_seen_at\":\""); write_handler_json_string(b, inst.extension_last_seen_at)
-	strings.write_string(b, "\"}")
+	strings.write_byte(b, 34)
 	write_last_error_json(b, inst.last_error_json)
 	strings.write_string(b, "}")
 }

@@ -21,6 +21,7 @@ Bridge_Tool_Subscription :: struct {
     token: string,
     visible: string,
     dirty, active: bool,
+    lease_until_ns: i64,
     last_emit_ns: i64, // monotonic; reset only by a successfully sent state
 }
 bridge_tool_subscriptions: map[string]Bridge_Tool_Subscription
@@ -126,6 +127,8 @@ bridge_tool_live_visible :: proc(body: string, active_only := false) -> string {
     return string(bytes)
 }
 bridge_tool_live_emit :: proc(conn: ^ws.Connection, id: string, sub: ^Bridge_Tool_Subscription, baseline: bool, refresh := false, now_ns: i64 = 0) -> bool {
+    now := now_ns if now_ns != 0 else time.tick_now()._nsec
+    if sub.lease_until_ns <= now do return true
     inst, exists := bridge_tool_live_instance(nil, id)
     if !exists {
         sub.active = false
@@ -177,6 +180,14 @@ bridge_tool_live_drain_at :: proc(conn: ^ws.Connection, now_ns: i64, reconnect :
     if len(bridge_tool_subscriptions) == 0 do return
     batch_due := now_ns - bridge_tool_last_flush_ns >= i64(time.Second)
     if batch_due do bridge_tool_last_flush_ns = now_ns
+    expired := make([dynamic]string, context.temp_allocator)
+    for id, sub in bridge_tool_subscriptions do if now_ns >= sub.lease_until_ns do append(&expired, id)
+    for id in expired {
+        sub := bridge_tool_subscriptions[id]
+        live.tool_live_watch(&bridge_tool_tracker, id, false)
+        delete_key(&bridge_tool_subscriptions, id)
+        delete(id); delete(sub.token); delete(sub.visible)
+    }
     for id, &sub in bridge_tool_subscriptions {
         // A freshness deadline is per instance and is not delayed by the
         // one-second changed-state batch gate. Empty idle state does no work.
@@ -206,6 +217,9 @@ bridge_tool_live_handle_subscription :: proc(conn: ^ws.Connection, raw: string) 
         return
     }
     if kind != "tool_stream_attach" do return
+    version := extract_json_int(raw, "version", 0)
+    lease_ms := extract_json_int(raw, "lease_ms", 0)
+    if version != 2 || lease_ms <= 0 || lease_ms > 15_000 do return
     inst, found := bridge_tool_live_instance(nil, id)
     expected_run := extract_json_int(raw, "run_count", -1)
     if !found { _ = bridge_tool_live_unavailable(conn, id, token, "not_found", expected_run); return }
@@ -222,8 +236,13 @@ bridge_tool_live_handle_subscription :: proc(conn: ^ws.Connection, raw: string) 
         if exists { live.tool_live_watch(&bridge_tool_tracker, id, false); live.tool_live_watch(&bridge_tool_tracker, id, true) }
         delete(sub.token); sub.token = strings.clone(token)
     }
-    if !bridge_tool_live_emit(conn, id, &sub, true) do conn.connected = false
+    sub.lease_until_ns = time.tick_now()._nsec + i64(lease_ms) * i64(time.Millisecond)
+    renew := strings.contains(raw, `"renew":true`)
+    if !renew || !exists || sub.visible == "" {
+        if !bridge_tool_live_emit(conn, id, &sub, true) do conn.connected = false
+    }
     bridge_tool_subscriptions[id] = sub
+    if !renew do bridge_blockers_mark_all_dirty(id)
 }
 bridge_tool_live_note_launch :: proc(id: string) {
     bridge_tool_live_clear(id)
@@ -246,4 +265,33 @@ bridge_tool_live_unavailable :: proc(conn: ^ws.Connection, id, token, reason: st
         "tool_stream_unavailable", fmt.tprintf("%d", bridge_tool_tracker.tool_live.epoch), token, id, reason, bridge_tool_wire_seq, run}
     data, _ := json.marshal(frame, allocator = context.temp_allocator)
     return bridge_hub_send(conn, string(data))
+}
+
+Bridge_Tool_Demand :: struct { id, token: string, run: int }
+bridge_tool_live_demands :: proc() -> [dynamic]Bridge_Tool_Demand {
+    out := make([dynamic]Bridge_Tool_Demand, context.temp_allocator)
+    sync.mutex_lock(&bridge_tool_out_mutex)
+    defer sync.mutex_unlock(&bridge_tool_out_mutex)
+    now := time.tick_now()._nsec
+    for id, sub in bridge_tool_subscriptions {
+        if sub.lease_until_ns <= now do continue
+        inst, found := bridge_tool_live_instance(nil, id)
+        if found do append(&out, Bridge_Tool_Demand{strings.clone(id, context.temp_allocator), strings.clone(sub.token, context.temp_allocator), inst.run_count})
+    }
+    return out
+}
+
+
+// Frames are authenticated by the hub runtime socket and generation dispatcher.
+bridge_tool_live_handle_batch :: proc(conn: ^ws.Connection, raw: string) {
+    if len(raw) > 32 * 1024 || !live.wire_shape_ok(raw) do return
+    value, err := json.parse_string(raw, .JSON, true, context.temp_allocator)
+    root, obj := value.(json.Object)
+    if err != .None || !obj do return
+    controls, array := root["controls"].(json.Array)
+    if !array || len(controls) > 64 do return
+    for control in controls {
+        data, _ := json.marshal(control, allocator = context.temp_allocator)
+        bridge_tool_live_handle_subscription(conn, string(data))
+    }
 }

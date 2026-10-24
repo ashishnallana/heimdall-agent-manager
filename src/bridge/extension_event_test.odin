@@ -1,13 +1,12 @@
 package main
 
-import "base:runtime"
 import "core:strings"
 import "core:sync"
 import "core:testing"
 import contracts "odin_test:contracts"
 
 // REQ-EXT-CORE-1/2, REQ-EXT-ACT-1: ham.ext.v1 parse/validate, activity mapping,
-// identity stamping and outbox batching on the bridge.
+// identity stamping and transient local reduction on the bridge.
 
 @(private = "file")
 ext_test_event :: proc(event, extra: string) -> string {
@@ -17,16 +16,6 @@ ext_test_event :: proc(event, extra: string) -> string {
 @(private = "file")
 ext_test_rec :: proc(id: string) -> Bridge_Local_Agent_Token_Record {
 	return Bridge_Local_Agent_Token_Record{agent_instance_id = id, instance_token = "tok_test", role = .Agent}
-}
-
-@(private = "file")
-ext_test_queue_len :: proc(id: string) -> int {
-	sync.mutex_lock(&bridge_ext_mutex)
-	defer sync.mutex_unlock(&bridge_ext_mutex)
-	for s in bridge_ext_states {
-		if s.agent_instance_id == id do return len(s.queue)
-	}
-	return 0
 }
 
 @(test)
@@ -149,8 +138,6 @@ test_ext_ingest_stamps_token_instance_and_overrides_pane_diff :: proc(t: ^testin
 	spoof, ok2 := bridge_runtime_instance_snapshot(other)
 	testing.expect(t, ok2, "other instance must exist")
 	testing.expect_value(t, spoof.activity_status, "idle")
-	testing.expect_value(t, ext_test_queue_len(id), 1)
-	testing.expect_value(t, ext_test_queue_len(other), 0)
 
 	// A lower-ranked pane_diff idle within the TTL must not override the extension.
 	bridge_runtime_note_agent_activity(id, "idle", "pane_diff")
@@ -176,7 +163,7 @@ test_ext_ingest_partial_batch_and_status :: proc(t: ^testing.T) {
 	defer delete(status)
 	testing.expect(t, strings.contains(status, `"provider":"claude"`), status)
 	testing.expect(t, strings.contains(status, `"capabilities":["activity","session_id"]`), status)
-	testing.expect(t, strings.contains(status, `"queued":2`), status)
+	testing.expect(t, strings.contains(status, `"queued":0`), status)
 
 	single := bridge_ext_ingest(ext_test_rec(id), `{"schema":"ham.ext.v1","event":"hello"}`, bridge_runtime_now_ms())
 	defer bridge_ext_ingest_result_destroy(&single)
@@ -184,49 +171,18 @@ test_ext_ingest_partial_batch_and_status :: proc(t: ^testing.T) {
 }
 
 @(test)
-test_ext_outbox_should_flush_thresholds :: proc(t: ^testing.T) {
-	testing.expect(t, !ext_outbox_should_flush(0, 0, 1000), "empty never flushes")
-	testing.expect(t, !ext_outbox_should_flush(1, 1000, 1100), "young small batch waits")
-	testing.expect(t, ext_outbox_should_flush(1, 1000, 1000 + BRIDGE_EXT_FLUSH_DELAY_MS), "flush after debounce")
-	testing.expect(t, ext_outbox_should_flush(BRIDGE_EXT_FLUSH_MAX_EVENTS, 1000, 1001), "flush at size cap")
-}
-
-@(test)
-test_ext_outbox_take_requeue_and_cap :: proc(t: ^testing.T) {
-	id := "inst_test_ext_outbox"
-	now := bridge_runtime_now_ms()
-	batch_params := strings.builder_make(context.temp_allocator)
-	strings.write_string(&batch_params, `{"events":[`)
-	for i in 0..<60 {
-		if i > 0 do strings.write_byte(&batch_params, ',')
-		strings.write_string(&batch_params, ext_test_event("tool.end", ""))
-	}
-	strings.write_string(&batch_params, "]}")
-	res := bridge_ext_ingest(ext_test_rec(id), strings.to_string(batch_params), now)
-	bridge_ext_ingest_result_destroy(&res)
-	testing.expect_value(t, ext_test_queue_len(id), 60)
-
-	sync.mutex_lock(&bridge_ext_mutex)
-	s: ^Bridge_Ext_Instance_State
-	for &x in bridge_ext_states do if x.agent_instance_id == id { s = &x; break }
-	first := bridge_ext_take_batch_locked(s, now, false)
-	n_first := len(first)
-	params := bridge_ext_batch_params(first, context.temp_allocator)
-	left := len(s.queue)
-	// Unsent batch goes back to the head.
-	bridge_ext_requeue_head_locked(s, first, now)
-	after := len(s.queue)
-	// Fill past the cap: oldest dropped.
-	for _ in 0..<BRIDGE_EXT_OUTBOX_MAX_EVENTS do append(&s.queue, strings.clone("{}", runtime.heap_allocator()))
-	bridge_ext_requeue_head_locked(s, nil, now)
-	capped := len(s.queue)
-	sync.mutex_unlock(&bridge_ext_mutex)
-
-	testing.expect_value(t, n_first, BRIDGE_EXT_FLUSH_MAX_EVENTS)
-	testing.expect_value(t, left, 10)
-	testing.expect_value(t, after, 60)
-	testing.expect_value(t, capped, BRIDGE_EXT_OUTBOX_MAX_EVENTS)
-	testing.expect(t, strings.has_prefix(params, `{"events":[{`), params)
+test_ext_ingest_volume_keeps_only_current_local_metadata :: proc(t: ^testing.T) {
+    id := "inst_ext_no_outbox"
+    bridge_runtime_mark_start_success(id)
+    for _ in 0..<10_000 {
+        result := bridge_ext_ingest(ext_test_rec(id), ext_test_event("tool.end", ""), bridge_runtime_now_ms())
+        testing.expect_value(t, result.accepted, 1)
+        bridge_ext_ingest_result_destroy(&result)
+    }
+    status := bridge_ext_status_json(id)
+    defer delete(status)
+    testing.expect(t, strings.contains(status, `"queued":0`), status)
+    testing.expect(t, strings.contains(status, `"events_accepted":10000`), status)
 }
 
 @(test)

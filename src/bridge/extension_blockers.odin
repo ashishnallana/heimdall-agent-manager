@@ -13,16 +13,9 @@ package main
 //                    permission blocker: "Waiting for input in terminal". There is
 //                    no waiter and no remote answer; the UI links to the terminal.
 //
-// Sync to the hub: every change to an instance's VISIBLE set (undecided entries
-// with a kind) bumps that instance's revision and marks it dirty. The hub loop
-// drains dirty instances as FULL per-instance snapshots:
-//   {"type":"agent_blockers","protocol_version":1,"agent_instance_id",
-//    "revision","blockers":[...]}
-// On every hub (re)connect and every bridge heartbeat all known instances are
-// re-sent in full (no digest round trip: snapshots are small and the hub
-// replaces its map wholesale). An instance whose empty snapshot was delivered is
-// forgotten. Revisions are max(prev+1, now_ms), so they stay monotonic across a
-// bridge restart.
+// Display snapshots are forwarded only for an authorized, unexpired live-tool
+// demand lease. Local permission state and decisions do not depend on viewers.
+// Reconnect may mark state dirty, but never publishes without fresh demand.
 //
 // All state below is guarded by bridge_permission_mutex.
 
@@ -32,6 +25,7 @@ import "core:fmt"
 import "core:math/rand"
 import "core:strings"
 import "core:sync"
+import "core:time"
 import ws "odin_test:lib/ws"
 import contracts "odin_test:contracts"
 
@@ -424,17 +418,27 @@ bridge_blocker_frames_destroy :: proc(frames: ^[dynamic]Bridge_Blocker_Frame, al
 
 // bridge_blockers_drain_outgoing sends dirty snapshots on the hub connection.
 bridge_blockers_drain_outgoing :: proc(conn: ^ws.Connection) {
-	frames := bridge_blockers_take_snapshots()
-	defer bridge_blocker_frames_destroy(&frames)
-	failed := false
-	for f in frames {
-		sent := !failed && bridge_hub_send(conn, f.json)
-		if !sent && !failed {
-			failed = true
-			conn.connected = false
-		}
-		bridge_blockers_ack(f, sent)
-	}
+    for demand in bridge_tool_live_demands() {
+        frames := bridge_blockers_take_snapshots(demand.id)
+        for f in frames {
+            value, err := json.parse_string(f.json, .JSON, true, context.temp_allocator)
+            root, obj := value.(json.Object)
+            if err != .None || !obj do continue
+            root["subscription_id"] = json.String(demand.token)
+            root["run_count"] = json.Integer(demand.run)
+            data, _ := json.marshal(root, allocator = context.temp_allocator)
+            sync.mutex_lock(&bridge_tool_out_mutex)
+            sub, watching := bridge_tool_subscriptions[demand.id]
+            sent := false
+            if watching && sub.token == demand.token && sub.lease_until_ns > time.tick_now()._nsec {
+                sent = bridge_hub_send(conn, string(data))
+                if !sent do conn.connected = false
+            }
+            sync.mutex_unlock(&bridge_tool_out_mutex)
+            bridge_blockers_ack(f, sent)
+        }
+        bridge_blocker_frames_destroy(&frames)
+    }
 }
 
 // Bridge_Blocker_View is a copy of one visible blocker (tests, status).

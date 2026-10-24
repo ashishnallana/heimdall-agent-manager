@@ -144,54 +144,6 @@ Agent_Instance :: struct {
 	agent_permission_mode: string,
 }
 
-// Agent_Extension_Event is one ingested ham.ext.v1 event. seq is hub-assigned,
-// monotonic per instance; payload is the raw JSON payload object.
-Agent_Extension_Event :: struct {
-	instance_id: string,
-	seq: int,
-	event: string,
-	ts: string,
-	session_id: string,
-	agent_id: string,
-	agent_type: string,
-	tool_name: string,
-	tool_use_id: string,
-	file_path: string,
-	payload: string,
-	created_at: string,
-}
-
-// Agent_Extension_Instance_Update carries the instance-level fields an ingest
-// batch changes. Empty strings leave the stored value untouched.
-Agent_Extension_Instance_Update :: struct {
-	provider_session_id: string,
-	provider_transcript_path: string,
-	extension_provider: string,
-	extension_version: string,
-	extension_capabilities: string,
-	extension_last_seen_at: string,
-}
-
-// Agent_Subagent_Summary groups one subagent's (agent.id) start/stop events.
-Agent_Subagent_Summary :: struct {
-	agent_id: string,
-	agent_type: string,
-	description: string,
-	status: string, // running | stopped
-	started_at: string,
-	stopped_at: string,
-	event_count: int,
-}
-
-// Agent_File_Edit_Summary is one file the instance (or a subagent) edited.
-Agent_File_Edit_Summary :: struct {
-	file_path: string,
-	edit_count: int,
-	last_seq: int,
-	last_at: string,
-	agent_ids: string, // comma-separated distinct agent ids ("" = main agent)
-}
-
 current_task_role_string :: proc(role: Current_Task_Role) -> string {
 	switch role {
 	case .Work: return "work"

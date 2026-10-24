@@ -72,8 +72,8 @@ test_tool_stream_bridge_demand_baseline_batches_and_coalescing :: proc(t: ^testi
     _,_,unexpected := ws.read_frame(peer,&reader,20*time.Millisecond)
     testing.expect(t,!unexpected,"no snapshot traffic without listeners")
     testing.expect_value(t,len(bridge_tool_tracker.tool_live.entries[id].completed),0)
-    attach := fmt.tprintf(`{{"type":"tool_stream_attach","instance_id":"%s","subscription_id":"token1","run_count":0}}`,id)
-    bridge_tool_live_handle_subscription(&conn,attach)
+    attach := fmt.tprintf(`{{"type":"tool_stream_attach","version":2,"lease_ms":15000,"instance_id":"%s","subscription_id":"token1","run_count":0}}`,id)
+    bridge_hub_handle_command(&conn, strings.concatenate({`{"type":"tool_stream_batch","controls":[`, attach, "]}"}, context.temp_allocator))
     baseline := stream_bridge_read(t,peer,&reader)
     snap := baseline["snapshot"].(json.Object)
     testing.expect(t,bool(baseline["baseline"].(json.Boolean)))
@@ -181,11 +181,15 @@ test_tool_stream_bridge_active_freshness_deadlines :: proc(t: ^testing.T) {
     bridge_tool_live_drain_at(&conn, 10 * BRIDGE_TOOL_REFRESH_NS)
     testing.expect_value(t,bridge_tool_wire_seq,0)
     testing.expect_value(t,bridge_tool_last_flush_ns,0)
-    attach := fmt.tprintf(`{{"type":"tool_stream_attach","instance_id":"%s","subscription_id":"fresh","run_count":0}}`,id)
+    attach := fmt.tprintf(`{{"type":"tool_stream_attach","version":2,"lease_ms":15000,"instance_id":"%s","subscription_id":"fresh","run_count":0}}`,id)
     bridge_tool_live_handle_subscription(&conn,attach)
     baseline := stream_bridge_read(t,peer,&reader)
     testing.expect(t,!bool(baseline["refresh"].(json.Boolean)))
     base := bridge_tool_subscriptions[id].last_emit_ns
+    // This test drives a healthy continuously renewed producer with a synthetic clock.
+    renewed := bridge_tool_subscriptions[id]
+    renewed.lease_until_ns = base + 30 * BRIDGE_TOOL_REFRESH_NS
+    bridge_tool_subscriptions[id] = renewed
     original := baseline["snapshot"].(json.Object)
     // A batch turn just before the deadline must not defer the 60s refresh.
     bridge_tool_last_flush_ns = base
@@ -314,4 +318,26 @@ test_codex_large_image_completion_reaches_live_inventory :: proc(t: ^testing.T) 
     bridge_tool_live_event(Bridge_Local_Agent_Token_Record{agent_instance_id=id, role=.Agent}, ev, mapped.events[0])
     testing.expect_value(t, len(entry.active), 0)
     testing.expect_value(t, len(entry.completed), 0)
+}
+
+@(test)
+test_tool_stream_lease_expiry_drops_demand_and_pending_completion :: proc(t: ^testing.T) {
+    sync.mutex_lock(&live_bridge_test_mu); defer sync.mutex_unlock(&live_bridge_test_mu)
+    bridge_tool_live_init(); defer live_bridge_cleanup()
+    id := "inst_lease_expiry"
+    bridge_runtime_mark_start_success(id)
+    // Expired records are removed before any attempt to use the socket.
+    live.tool_live_watch(&bridge_tool_tracker, id, true)
+    bridge_tool_subscriptions = make(map[string]Bridge_Tool_Subscription, runtime.heap_allocator())
+    bridge_tool_subscriptions[strings.clone(id, runtime.heap_allocator())] = {
+        token = strings.clone("leased", runtime.heap_allocator()), lease_until_ns = 10, dirty = true,
+    }
+    conn := ws.Connection{}
+    bridge_tool_live_drain_at(&conn, 10)
+    testing.expect_value(t, len(bridge_tool_subscriptions), 0)
+    testing.expect(t, !bridge_tool_tracker.tool_live.watched[id])
+    testing.expect_value(t, bridge_tool_wire_seq, 0)
+    legacy := fmt.tprintf(`{{"type":"tool_stream_attach","instance_id":"%s","subscription_id":"legacy","run_count":0}}`, id)
+    bridge_tool_live_handle_subscription(&conn, legacy)
+    testing.expect(t, len(bridge_tool_subscriptions) == 0, "legacy demand fails closed")
 }

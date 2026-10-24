@@ -49,18 +49,25 @@ test_tool_stream_http_ticket_json_lifecycle_and_empty_baseline :: proc(t: ^testi
     repo:=iface.Agent_Repository{get_tool_instance=proc(ctx:rawptr,id:string)->(domain.Agent_Instance,bool,domain.Domain_Error){
         return domain.Agent_Instance{agent_instance_id=id,owner_user_id="owner" if id=="inst_a" else "foreign",bridge_id="brg_a",runtime_status="running"},true,{}
     }}
-    svc:=agent_service.Agent_Service{agents=&repo}
+    content := iface.Content_Repository{get_conversation = proc(ctx: rawptr, id: string) -> (domain.Chat_Conversation, bool, domain.Domain_Error) {
+        return domain.Chat_Conversation{conversation_id = id, owner_user_id = "owner", agent_instance_id = "inst_a"}, id == "chat_a", {}
+    }}
+    svc:=agent_service.Agent_Service{agents=&repo, content=&content}
     defer agent_service.tool_live_destroy(&svc.tool_live)
     svc.bridge_command_sink={ctx=&f,send_runtime_command=proc(raw:rawptr,c:project_service.Runtime_Command)->(bool,domain.Domain_Error){
         f:=(^Tool_HTTP_Test)(raw)
         value,_:=json.parse_string(c.body_json,.JSON,true,context.temp_allocator)
-        obj:=value.(json.Object)
+        root:=value.(json.Object)
+        controls, _ := root["controls"].(json.Array)
         sync.mutex_lock(&f.mu);defer sync.mutex_unlock(&f.mu)
+        for item in controls {
+        obj := item.(json.Object)
         if agent_service.tool_live_text(obj,"type")=="tool_stream_attach" {
             f.attached+=1
             delete(f.token,runtime.heap_allocator())
             f.token=strings.clone(agent_service.tool_live_text(obj,"subscription_id"),runtime.heap_allocator())
         } else { f.detached+=1 }
+        }
         sync.cond_signal(&f.cond)
         return true,{}
     }}
@@ -77,6 +84,12 @@ test_tool_stream_http_ticket_json_lifecycle_and_empty_baseline :: proc(t: ^testi
     conn:=ws.Connection{socket=pair.client,connected=true}
     reader:=ws.reader_make();defer ws.reader_destroy(&reader)
     testing.expect(t,ws.send_text(&conn,`{"type":"subscribe","instance_ids":["inst_a"]}`))
+    legacy:=tool_http_test_read(t,pair.client,&reader)
+    testing.expect_value(t,agent_service.tool_live_text(legacy,"code"),"upgrade_required")
+    sync.mutex_lock(&f.mu)
+    testing.expect_value(t,f.attached,0)
+    sync.mutex_unlock(&f.mu)
+    testing.expect(t,ws.send_text(&conn,`{"type":"subscribe","version":2,"views":[{"conversation_id":"chat_a","instance_ids":["inst_a"]}]}`))
     ack:=tool_http_test_read(t,pair.client,&reader)
     testing.expect_value(t,agent_service.tool_live_text(ack,"type"),"subscribed")
     sync.mutex_lock(&f.mu)
@@ -92,13 +105,13 @@ test_tool_stream_http_ticket_json_lifecycle_and_empty_baseline :: proc(t: ^testi
     snap:=baseline["snapshot"].(json.Object)
     testing.expect_value(t,len(snap["active"].(json.Array)),0)
     testing.expect_value(t,len(snap["completed_since_last"].(json.Array)),0)
-    testing.expect(t,ws.send_text(&conn,`{"type":"subscribe","instance_ids":["inst_foreign"]}`))
+    testing.expect(t,ws.send_text(&conn,`{"type":"subscribe","version":2,"views":[{"conversation_id":"chat_a","instance_ids":["inst_foreign"]}]}`))
     denied:=tool_http_test_read(t,pair.client,&reader)
     testing.expect_value(t,agent_service.tool_live_text(denied,"code"),"forbidden")
     testing.expect(t,ws.send_text(&conn,`{"type":"ping"}`))
     pong:=tool_http_test_read(t,pair.client,&reader)
     testing.expect_value(t,agent_service.tool_live_text(pong,"type"),"pong")
-    testing.expect(t,ws.send_text(&conn,`{"type":"subscribe","instance_ids":[]}`))
+    testing.expect(t,ws.send_text(&conn,`{"type":"subscribe","version":2,"views":[]}`))
     ack=tool_http_test_read(t,pair.client,&reader)
     testing.expect_value(t,len(ack["instance_ids"].(json.Array)),0)
     sync.mutex_lock(&f.mu)
@@ -199,7 +212,10 @@ test_tool_stream_http_failed_upstream_route_is_unavailable :: proc(t: ^testing.T
     repo:=iface.Agent_Repository{get_tool_instance=proc(ctx:rawptr,id:string)->(domain.Agent_Instance,bool,domain.Domain_Error) {
         return domain.Agent_Instance{agent_instance_id=id,owner_user_id="owner",bridge_id="brg_offline",runtime_status="running"},true,{}
     }}
-    svc:=agent_service.Agent_Service{agents=&repo}
+    content := iface.Content_Repository{get_conversation = proc(ctx: rawptr, id: string) -> (domain.Chat_Conversation, bool, domain.Domain_Error) {
+        return domain.Chat_Conversation{conversation_id = id, owner_user_id = "owner", agent_instance_id = "inst_a"}, id == "chat_a", {}
+    }}
+    svc:=agent_service.Agent_Service{agents=&repo, content=&content}
     defer agent_service.tool_live_destroy(&svc.tool_live)
     svc.bridge_command_sink={send_runtime_command=proc(ctx:rawptr,c:project_service.Runtime_Command)->(bool,domain.Domain_Error) { return false,{} }}
     f:=Tool_HTTP_Test{h={agents=&svc,ws_tickets=&tickets},sock=pair.hub}
@@ -214,7 +230,7 @@ test_tool_stream_http_failed_upstream_route_is_unavailable :: proc(t: ^testing.T
     testing.expect(t,got&&strings.contains(response,"101 Switching Protocols")); delete(response)
     conn:=ws.Connection{socket=pair.client,connected=true}
     reader:=ws.reader_make(); defer ws.reader_destroy(&reader)
-    testing.expect(t,ws.send_text(&conn,`{"type":"subscribe","instance_ids":["inst_a"]}`))
+    testing.expect(t,ws.send_text(&conn,`{"type":"subscribe","version":2,"views":[{"conversation_id":"chat_a","instance_ids":["inst_a"]}]}`))
     ack:=tool_http_test_read(t,pair.client,&reader)
     testing.expect_value(t,agent_service.tool_live_text(ack,"type"),"subscribed")
     unavailable:=tool_http_test_read(t,pair.client,&reader)
@@ -224,4 +240,18 @@ test_tool_stream_http_failed_upstream_route_is_unavailable :: proc(t: ^testing.T
     testing.expect(t,ws.send_text(&conn,`{"type":"ping"}`))
     pong:=tool_http_test_read(t,pair.client,&reader)
     testing.expect_value(t,agent_service.tool_live_text(pong,"type"),"pong")
+}
+
+@(test)
+test_tool_stream_ticket_preserves_opaque_credential_and_proxy_kind :: proc(t: ^testing.T) {
+    store := new_user_ws_ticket_store()
+    defer user_ws_ticket_store_free(&store)
+    user_ws_ticket_store_put(&store, "opaque_ticket", {kind = .User_Token, user_id = "owner", user_token_id = "utok_public"}, 60)
+    auth, ok := user_ws_ticket_store_consume(&store, "opaque_ticket")
+    testing.expect(t, ok)
+    testing.expect_value(t, auth.user_token_id, "utok_public")
+    user_ws_ticket_store_put(&store, "proxy_ticket", {kind = .Trusted_Proxy, user_id = "owner"}, 60)
+    proxy, proxy_ok := user_ws_ticket_store_consume(&store, "proxy_ticket")
+    testing.expect(t, proxy_ok)
+    testing.expect_value(t, proxy.kind, contracts.Auth_Kind.Trusted_Proxy)
 }

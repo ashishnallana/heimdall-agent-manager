@@ -17,6 +17,8 @@ import project_service "odin_test:hub/service/project"
 import user_service "odin_test:hub/service/user"
 
 User_WS_Ticket :: struct {
+	kind: contracts.Auth_Kind,
+	user_token_id: string,
 	ticket: string,
 	user_id: string,
 	name: string,
@@ -234,6 +236,8 @@ user_ws_ticket_store_put :: proc(store: ^User_WS_Ticket_Store, ticket: string, a
 	}
 	key := strings.clone(ticket, heap)
 	store.tickets[key] = User_WS_Ticket{
+		kind = auth_ctx.kind,
+		user_token_id = strings.clone(auth_ctx.user_token_id, heap),
 		ticket = key,
 		user_id = strings.clone(auth_ctx.user_id, heap),
 		name = strings.clone(auth_ctx.name, heap),
@@ -251,6 +255,7 @@ free_user_ws_ticket :: proc(item: User_WS_Ticket, heap: runtime.Allocator) {
 	delete(item.name, heap)
 	delete(item.display_name, heap)
 	delete(item.email, heap)
+	delete(item.user_token_id, heap)
 }
 
 user_ws_ticket_store_consume :: proc(store: ^User_WS_Ticket_Store, ticket: string) -> (contracts.Auth_Context, bool) {
@@ -262,7 +267,7 @@ user_ws_ticket_store_consume :: proc(store: ^User_WS_Ticket_Store, ticket: strin
 	if !ok do return contracts.Auth_Context{}, false
 	delete_key(&store.tickets, ticket)
 	if item.expires_at <= now do return contracts.Auth_Context{}, false
-	return contracts.Auth_Context{kind = .User_Token, user_id = item.user_id, name = item.name, display_name = item.display_name, email = item.email}, true
+	return contracts.Auth_Context{kind = .Trusted_Proxy if item.kind == .Trusted_Proxy else .User_Token, user_id = item.user_id, name = item.name, display_name = item.display_name, email = item.email, user_token_id = item.user_token_id}, true
 }
 
 write_user_token_json :: proc(builder: ^strings.Builder, token: domain.User_API_Token) {

@@ -114,7 +114,8 @@ test_live_provider_shell_and_legacy_endpoint_write_zero_db_messages :: proc(t: ^
 	testing.expect_value(t, after.last_message_at, conv.last_message_at)
 	testing.expect_value(t, after.updated_at, conv.updated_at)
 	testing.expect_value(t, after.unread_count, conv.unread_count)
-	timeline, timeline_err := iface.agent_ext_list_events(&agents_repo, inst.agent_instance_id, "", 0, 100)
-	testing.expect_value(t, timeline_err.code, domain.Error_Code.None)
-	testing.expect_value(t, len(timeline), 2)
+	testing.expect(t, strings.contains(resp.body, `"persisted":false`))
+    current, found, read_err := iface.agent_get_instance(&agents_repo, inst.agent_instance_id)
+    testing.expect(t, found, read_err.message)
+    testing.expect_value(t, current.provider_session_id, "")
 }

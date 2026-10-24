@@ -1146,7 +1146,11 @@ bridge_hub_handle_command :: proc(conn: ^ws.Connection, text: string) {
 		bridge_hub_handle_shell_stream_detach(conn, text)
 		return
 	}
-	if type == "tool_stream_attach" || type == "tool_stream_detach" {
+	if type == "tool_stream_batch" {
+        bridge_tool_live_handle_batch(conn, text)
+        return
+    }
+    if type == "tool_stream_attach" || type == "tool_stream_detach" {
 		bridge_tool_live_handle_subscription(conn, text)
 		return
 	}
@@ -3869,7 +3873,7 @@ Bridge_Hello_Wire :: struct {
 	active_instance_ids:      []string,
 }
 
-BRIDGE_RUNTIME_FEATURES := [?]string{"capture_agent_pane", "get_agent_pane", "instance_reconfiguration_v1"}
+BRIDGE_RUNTIME_FEATURES := [?]string{"capture_agent_pane", "get_agent_pane", "instance_reconfiguration_v1", "tool_stream_demand_v2"}
 
 bridge_hub_hello_json :: proc() -> string {
 	hello := Bridge_Hello_Wire{

@@ -8,6 +8,7 @@ import "core:time"
 import contracts "odin_test:contracts"
 import domain "odin_test:hub/domain"
 import agent_service "odin_test:hub/service/agent"
+import auth_service "odin_test:hub/service/auth"
 import live "odin_test:lib/tool_live"
 
 tool_stream_pong :: proc(ctx: rawptr, socket: net.TCP_Socket, payload: string) -> bool {
@@ -46,7 +47,15 @@ tool_stream_handler :: proc(ctx: rawptr, req: Request, client: net.TCP_Socket) {
     // The request arena lives for this whole upgraded socket. Reader buffers
     // use the heap; JSON/repository scratch is reclaimed after every frame.
     context.allocator = runtime.heap_allocator()
-    viewer := agent_service.tool_stream_open(h.agents, auth.user_id, client)
+    authorization := struct { service: ^auth_service.Auth_Service, auth: contracts.Auth_Context }{h.auth, auth}
+    authorize: proc(ctx: rawptr) -> bool
+    if h.auth != nil {
+        authorize = proc(ctx: rawptr) -> bool {
+            a := (^struct { service: ^auth_service.Auth_Service, auth: contracts.Auth_Context })(ctx)
+            return auth_service.live_user_authorized(a.service, a.auth)
+        }
+    }
+    viewer := agent_service.tool_stream_open(h.agents, auth.user_id, client, authorize, &authorization)
     if viewer == nil do return
     // The HTTP request reader is the socket owner. Stop/join the sole writer
     // before returning to the router, which closes the descriptor.
@@ -80,17 +89,17 @@ tool_stream_handler :: proc(ctx: rawptr, req: Request, client: net.TCP_Socket) {
         case "ping":
             _ = agent_service.tool_stream_write(h.agents, client, `{"type":"pong"}`)
         case "subscribe":
-            array, is_array := root["instance_ids"].(json.Array)
-            if !is_array || len(array) > live.TOOL_LIVE_MAX_INSTANCES { tool_stream_error(h, client, "invalid_subscription", "instance_ids must contain at most 256 strings"); continue }
-            ids := make([]string, len(array), context.temp_allocator)
-            valid := true
-            for item, i in array {
-                id, is_string := item.(json.String)
-                if !is_string { valid = false; break }
-                ids[i] = string(id)
+            version, _ := root["version"].(json.Integer)
+            views, is_array := root["views"].(json.Array)
+            if version != 2 || !is_array {
+                tool_stream_error(h, client, "upgrade_required", "leased conversation subscriptions require version 2")
+                // Keep the sole writer alive long enough to deliver the error.
+                // Invalid requests do not renew the viewer lease or add demand.
+                continue
             }
-            if !valid { tool_stream_error(h, client, "invalid_subscription", "instance IDs must be strings"); continue }
-            if code := agent_service.tool_stream_subscribe(h.agents, viewer, ids); code != "" do tool_stream_error(h, client, code, "subscription replacement rejected")
+            if code := agent_service.tool_stream_subscribe_views(h.agents, viewer, views); code != "" {
+                tool_stream_error(h, client, code, "subscription replacement rejected")
+            }
         case:
             tool_stream_error(h, client, "unknown_type", "expected subscribe or ping")
         }

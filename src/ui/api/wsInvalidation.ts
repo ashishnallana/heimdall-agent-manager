@@ -901,24 +901,14 @@ function handleInstanceChanged(dispatch: any, payload: any, ctx: WsCtx, instance
 
 /**
  * Provider extension frames on an agent instance (REQ-EXT-BLK-1, REQ-EXT-SUB-2):
- *   'extension_events'       {count, last_seq, provider_session_id, session_changed, events:[tail]}
  *   'agent_blockers_changed' {agent_instance_id, revision, count}
- * Permission cards refetch; hello/session events refresh native-signals badges.
+ * Permission cards refetch current transient state while a conversation is watched.
  * Returns false for other changes so the generic agent path handles them.
  */
 function handleAgentInstanceExtensionChange(dispatch: any, instanceId: string, change: string, summary: any): boolean {
   if (change === AGENT_BLOCKERS_CHANGE) {
     const id = instanceId || String(summary?.agent_instance_id || '');
     if (id) queueInvalidation(dispatch, [{ type: 'AgentBlockers', id }]);
-    return true;
-  }
-  if (change === 'extension_events') {
-    // hello/session events change the instance's extension info and session id
-    // (the native-signals badge reads them from the instance).
-    const events = Array.isArray(summary?.events) ? summary.events : [];
-    if (summary?.session_changed || events.some((e: any) => e?.event === 'hello' || e?.event === 'session')) {
-      queueInvalidation(dispatch, [{ type: 'AgentInstances' as const, id: instanceId }]);
-    }
     return true;
   }
   return false;

@@ -170,7 +170,7 @@ function TailGap({ active, reduced }: { active: boolean; reduced: boolean }) {
 }
 
 export default function LiveToolActivity(props: {
-  instanceId: string; members?: ToolMemberLabel[]; onOpenShell: (sessionId: string) => void;
+  instanceId: string; conversationId?: string; enabled?: boolean; members?: ToolMemberLabel[]; onOpenShell: (sessionId: string) => void;
 }) {
   const auth = useSelector((state: any) => JSON.stringify([
     state.chat?.session?.userId, state.chat?.session?.daemonUrl, state.chat?.session?.clientToken,
@@ -182,13 +182,13 @@ export default function LiveToolActivity(props: {
   return <ToolRows key={JSON.stringify([props.instanceId, idsKey, auth])} {...props} roster={roster} idsKey={idsKey} />;
 }
 
-function ToolRows({ roster, idsKey, onOpenShell }: {
-  roster: ToolMemberLabel[]; idsKey: string; onOpenShell: (sessionId: string) => void;
+function ToolRows({ roster, idsKey, onOpenShell, conversationId = '', enabled = true }: {
+  roster: ToolMemberLabel[]; idsKey: string; conversationId?: string; enabled?: boolean; onOpenShell: (sessionId: string) => void;
 }) {
   const ids: string[] = useMemo(() => JSON.parse(idsKey), [idsKey]);
   const observerKey = useId();
   const dispatch = useDispatch();
-  useToolActivityStream(ids);
+  useToolActivityStream(ids, conversationId, enabled);
   // The shared stream clears the old user's store during its subscription
   // effect. Until that has run, never seed a new view from the previous store.
   const [subscribed, setSubscribed] = useState(false);

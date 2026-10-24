@@ -1,53 +1,26 @@
 package main
 
-// ham.ext.v1 ingest (REQ-EXT-CORE-2, REQ-EXT-ACT-1).
-//
-// A harness extension (via `ham-ctl extension …`) calls the bridge-local RPC
-// `agent.extension.event` with one ham.ext.v1 event or {"events":[...]}. The
-// bridge:
-//   1. validates each event (src/contracts/extension.odin), rejecting bad ones
-//      individually so one malformed hook cannot drop a batch;
-//   2. maps activity-bearing events onto the existing rank/TTL activity path
-//      with source "<provider>_extension" (rank 80 > pane_diff 40, so the
-//      screen-scraper is overridden while events flow and resumes after TTL);
-//   3. records hello capabilities for `agent.extension.status`;
-//   4. queues the normalised event JSON in a per-instance outbox that a single
-//      worker forwards to the hub in batches (≥ BRIDGE_EXT_FLUSH_MAX_EVENTS
-//      queued, or BRIDGE_EXT_FLUSH_DELAY_MS after the first queued event);
-// Tool activity is reduced locally; Hub mirrors authoritative Bridge snapshots.
-//
-// IDENTITY: the instance is ALWAYS the token-verified rec.agent_instance_id.
-// Any instance id inside the payload is ignored — the hub envelope is stamped
-// from rec, never from the event.
+// Local ham.ext.v1 reduction. Only explicitly leased subscriptions publish
+// sanitized current tool and permission state. Raw telemetry stays local.
 
 import "base:runtime"
 import "core:encoding/json"
 import "core:fmt"
 import "core:strings"
 import "core:sync"
-import "core:thread"
-import "core:time"
 import contracts "odin_test:contracts"
 
-BRIDGE_EXT_FLUSH_MAX_EVENTS :: 50
-BRIDGE_EXT_FLUSH_DELAY_MS :: i64(250)
-// BRIDGE_EXT_OUTBOX_MAX_EVENTS bounds one instance's queue while the hub is
-// unreachable; the OLDEST events are dropped first.
-BRIDGE_EXT_OUTBOX_MAX_EVENTS :: 1000
-BRIDGE_EXT_WORKER_TICK_MS :: 50
-BRIDGE_EXT_HUB_PATH :: "/api/v1/agent-actions/extension-events"
+// Local bounded signal metadata. Raw events are never queued or relayed.
+BRIDGE_EXT_MAX_INSTANCES :: 256
 
 Bridge_Ext_Instance_State :: struct {
 	agent_instance_id: string,
-	rec:               Bridge_Local_Agent_Token_Record, // owned clone; latest caller wins
 	provider:          string,
 	ext_version:       string,
 	capabilities:      [dynamic]string,
 	last_event_at_ms:  i64,
 	events_accepted:   int,
 	events_dropped:    int,
-	queue:             [dynamic]string, // normalised ham.ext.v1 JSON, owned
-	first_enqueued_ms: i64, // 0 when queue is empty
 }
 
 Bridge_Ext_Ingest_Result :: struct {
@@ -59,20 +32,12 @@ Bridge_Ext_Ingest_Result :: struct {
 
 bridge_ext_mutex: sync.Mutex
 bridge_ext_states: [dynamic]Bridge_Ext_Instance_State
-bridge_ext_worker_started: bool
 
-// Global outbox state outlives any request (and any test's tracking allocator),
+// Local metadata outlives any request (and any test's tracking allocator),
 // so every proc that allocates into it pins the heap allocator.
 @(private = "file")
 bridge_ext_allocator :: proc() -> runtime.Allocator {
 	return runtime.heap_allocator()
-}
-
-// ext_outbox_should_flush is the pure batching decision.
-ext_outbox_should_flush :: proc(count: int, first_enqueued_ms, now_ms: i64) -> bool {
-	if count <= 0 do return false
-	if count >= BRIDGE_EXT_FLUSH_MAX_EVENTS do return true
-	return first_enqueued_ms > 0 && now_ms - first_enqueued_ms >= BRIDGE_EXT_FLUSH_DELAY_MS
 }
 
 // bridge_ext_activity_source names the activity source for a provider. It must
@@ -88,34 +53,11 @@ bridge_ext_state_locked :: proc(instance_id: string) -> ^Bridge_Ext_Instance_Sta
 	for &s in bridge_ext_states {
 		if s.agent_instance_id == instance_id do return &s
 	}
+	if len(bridge_ext_states) >= BRIDGE_EXT_MAX_INSTANCES do return nil
 	append(&bridge_ext_states, Bridge_Ext_Instance_State{agent_instance_id = strings.clone(instance_id)})
 	return &bridge_ext_states[len(bridge_ext_states) - 1]
 }
 
-@(private = "file")
-bridge_ext_set_rec_locked :: proc(s: ^Bridge_Ext_Instance_State, rec: Bridge_Local_Agent_Token_Record) {
-	if s.rec.instance_token == rec.instance_token && s.rec.agent_instance_id == rec.agent_instance_id do return
-	delete(s.rec.token_hash); delete(s.rec.agent_instance_id); delete(s.rec.instance_token)
-	s.rec = rec
-	s.rec.token_hash = strings.clone(rec.token_hash)
-	s.rec.agent_instance_id = strings.clone(rec.agent_instance_id)
-	s.rec.instance_token = strings.clone(rec.instance_token)
-}
-
-@(private = "file")
-bridge_ext_enqueue_locked :: proc(s: ^Bridge_Ext_Instance_State, event_json: string, now: i64) {
-	if len(s.queue) >= BRIDGE_EXT_OUTBOX_MAX_EVENTS {
-		delete(s.queue[0])
-		ordered_remove(&s.queue, 0)
-		s.events_dropped += 1
-	}
-	append(&s.queue, strings.clone(event_json))
-	if s.first_enqueued_ms == 0 do s.first_enqueued_ms = now
-}
-
-// bridge_ext_ingest validates, applies and queues the events in params for the
-// token-verified rec. It does no network I/O (the forwarder does), so tests
-// drive it directly.
 // bridge_ext_raw_tool_input returns the event's tool.input object as JSON (temp
 // allocator), or "" when absent. Auto-resolve uses it to tell parallel calls of
 // the same tool apart.
@@ -167,7 +109,11 @@ bridge_ext_ingest :: proc(rec: Bridge_Local_Agent_Token_Record, params: string, 
 
 		sync.mutex_lock(&bridge_ext_mutex)
 		s := bridge_ext_state_locked(instance_id)
-		bridge_ext_set_rec_locked(s, rec)
+		if s == nil {
+			sync.mutex_unlock(&bridge_ext_mutex)
+			res.accepted += 1
+			continue
+		}
 		if ev.kind == .Hello {
 			delete(s.provider); delete(s.ext_version)
 			s.provider = strings.clone(ev.provider)
@@ -181,7 +127,6 @@ bridge_ext_ingest :: proc(rec: Bridge_Local_Agent_Token_Record, params: string, 
 		}
 		s.last_event_at_ms = now
 		s.events_accepted += 1
-		bridge_ext_enqueue_locked(s, raw, now)
 		sync.mutex_unlock(&bridge_ext_mutex)
 		res.accepted += 1
 	}
@@ -205,105 +150,6 @@ bridge_ext_ingest_result_json :: proc(res: Bridge_Ext_Ingest_Result) -> string {
 	return strings.to_string(b)
 }
 
-// bridge_ext_take_batch_locked removes up to BRIDGE_EXT_FLUSH_MAX_EVENTS from
-// the head of s.queue when a flush is due (or force). The caller owns the result.
-bridge_ext_take_batch_locked :: proc(s: ^Bridge_Ext_Instance_State, now: i64, force: bool) -> [dynamic]string {
-	context.allocator = bridge_ext_allocator()
-	if len(s.queue) == 0 do return nil
-	if !force && !ext_outbox_should_flush(len(s.queue), s.first_enqueued_ms, now) do return nil
-	n := min(len(s.queue), BRIDGE_EXT_FLUSH_MAX_EVENTS)
-	batch := make([dynamic]string, 0, n)
-	for i in 0..<n do append(&batch, s.queue[i])
-	remove_range(&s.queue, 0, n)
-	s.first_enqueued_ms = now if len(s.queue) > 0 else 0
-	return batch
-}
-
-// bridge_ext_requeue_head_locked puts an unsent batch back in front, honouring
-// the outbox cap (oldest dropped first). Takes ownership of batch's strings.
-bridge_ext_requeue_head_locked :: proc(s: ^Bridge_Ext_Instance_State, batch: [dynamic]string, now: i64) {
-	context.allocator = bridge_ext_allocator()
-	merged := make([dynamic]string, 0, len(batch) + len(s.queue))
-	for e in batch do append(&merged, e)
-	for e in s.queue do append(&merged, e)
-	delete(s.queue)
-	delete(batch)
-	for len(merged) > BRIDGE_EXT_OUTBOX_MAX_EVENTS {
-		delete(merged[0])
-		ordered_remove(&merged, 0)
-		s.events_dropped += 1
-	}
-	s.queue = merged
-	if len(s.queue) > 0 && s.first_enqueued_ms == 0 do s.first_enqueued_ms = now
-}
-
-bridge_ext_batch_params :: proc(batch: [dynamic]string, allocator := context.allocator) -> string {
-	b := strings.builder_make(allocator)
-	strings.write_string(&b, "{\"events\":[")
-	for e, i in batch {
-		if i > 0 do strings.write_byte(&b, ',')
-		strings.write_string(&b, e)
-	}
-	strings.write_string(&b, "]}")
-	return strings.to_string(b)
-}
-
-bridge_ext_forwarder_ensure_started :: proc() {
-	if _, swapped := sync.atomic_compare_exchange_strong(&bridge_ext_worker_started, false, true); swapped {
-		thread.run(bridge_ext_forwarder_worker)
-	}
-}
-
-bridge_ext_forwarder_worker :: proc() {
-	for {
-		time.sleep(BRIDGE_EXT_WORKER_TICK_MS * time.Millisecond)
-		bridge_ext_forwarder_tick(bridge_runtime_now_ms())
-		// This thread lives forever: reclaim the tick's temp allocations.
-		free_all(context.temp_allocator)
-	}
-}
-
-// bridge_ext_forwarder_tick sends at most one due batch per instance. While the
-// hub is down nothing is taken off the queue.
-bridge_ext_forwarder_tick :: proc(now: i64) {
-	context.allocator = bridge_ext_allocator()
-	if !sync.atomic_load(&bridge_hub_runtime_up) do return
-	Pending :: struct {
-		instance_id: string,
-		rec:         Bridge_Local_Agent_Token_Record,
-		batch:       [dynamic]string,
-	}
-	pending := make([dynamic]Pending, context.temp_allocator)
-	sync.mutex_lock(&bridge_ext_mutex)
-	for &s in bridge_ext_states {
-		batch := bridge_ext_take_batch_locked(&s, now, false)
-		if len(batch) == 0 do continue
-		rec := s.rec
-		rec.instance_token = strings.clone(s.rec.instance_token, context.temp_allocator)
-		rec.agent_instance_id = strings.clone(s.rec.agent_instance_id, context.temp_allocator)
-		append(&pending, Pending{instance_id = strings.clone(s.agent_instance_id, context.temp_allocator), rec = rec, batch = batch})
-	}
-	sync.mutex_unlock(&bridge_ext_mutex)
-
-	for p in pending {
-		if len(p.batch) == 0 do continue
-		body := bridge_ext_batch_params(p.batch)
-		relay := bridge_local_relay_agent_envelope(BRIDGE_EXT_HUB_PATH, "agent.extension.event", body, p.rec)
-		delete(body)
-		// Retry later on transport failure or a hub 5xx; a 4xx means the hub will
-		// never accept this batch (bad token/data), so drop rather than wedge.
-		retry := !relay.ok || relay.status >= 500 || relay.status == 0
-		if retry {
-			sync.mutex_lock(&bridge_ext_mutex)
-			bridge_ext_requeue_head_locked(bridge_ext_state_locked(p.instance_id), p.batch, now)
-			sync.mutex_unlock(&bridge_ext_mutex)
-		} else {
-			for e in p.batch do delete(e)
-			delete(p.batch)
-		}
-	}
-}
-
 // bridge_ext_status_json renders agent.extension.status for one instance.
 bridge_ext_status_json :: proc(instance_id: string) -> string {
 	b := strings.builder_make()
@@ -321,7 +167,6 @@ bridge_ext_status_json :: proc(instance_id: string) -> string {
 		last = s.last_event_at_ms
 		accepted = s.events_accepted
 		dropped = s.events_dropped
-		queued = len(s.queue)
 		for c in s.capabilities do append(&caps, strings.clone(c, context.temp_allocator))
 		break
 	}
@@ -353,7 +198,6 @@ bridge_ext_handle_rpc :: proc(request_id, method, params: string, rec: Bridge_Lo
 	res := bridge_ext_ingest(rec, params, bridge_runtime_now_ms())
 	defer bridge_ext_ingest_result_destroy(&res)
 	if res.accepted > 0 {
-		bridge_ext_forwarder_ensure_started()
 		bridge_startup_worker_ensure_started()
 	}
 	if res.fatal != .None {

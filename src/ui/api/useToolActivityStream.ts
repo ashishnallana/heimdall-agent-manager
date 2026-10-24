@@ -1,10 +1,17 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import { authenticatedStreamUrl } from './userStreamUrl';
 import { ToolActivityStream, type ToolSubscription } from './toolActivityStream';
 
 const streams = new WeakMap<object, ToolActivityStream>();
-export function useToolActivityStream(ids: string[]) {
+export function useToolActivityStream(ids: string[], conversationId = '', enabled = true) {
+  const [visible, setVisible] = useState(() => !document.hidden);
+  useEffect(() => {
+    const changed = () => setVisible(!document.hidden);
+    document.addEventListener('visibilitychange', changed);
+    return () => document.removeEventListener('visibilitychange', changed);
+  }, []);
+  const watching = enabled && visible && Boolean(conversationId);
   const dispatch = useDispatch();
   const authKey = useSelector((state: any) => JSON.stringify([
     state.chat?.session?.userId || '', state.chat?.session?.daemonUrl || '',
@@ -35,10 +42,10 @@ export function useToolActivityStream(ids: string[]) {
     streams.set(dispatch, stream);
   }
   const handle = useRef<ToolSubscription | undefined>(undefined);
-  const idsKey = JSON.stringify([...new Set(ids)].sort());
+  const idsKey = JSON.stringify(watching ? [...new Set(ids)].sort() : []);
   useEffect(() => {
-    handle.current = stream.subscribe(authKey, JSON.parse(idsKey));
+    handle.current = stream.subscribe(authKey, JSON.parse(idsKey), conversationId);
     return () => { handle.current?.release(); handle.current = undefined; };
-  }, [stream, authKey]);
+  }, [stream, authKey, conversationId, watching]);
   useEffect(() => { handle.current?.update(JSON.parse(idsKey)); }, [idsKey]);
 }

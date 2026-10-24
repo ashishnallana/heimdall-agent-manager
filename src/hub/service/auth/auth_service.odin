@@ -440,7 +440,7 @@ verify_user_api_token :: proc(service: ^Auth_Service, plaintext: string) -> (con
 		token.updated_at = now
 		_, _, _ = iface.user_token_save(service.user_tokens, token)
 	}
-	return contracts.Auth_Context{kind = .User_Token, user_id = string(user.user_id), name = user.name, display_name = user.display_name, email = user.email}, true, domain.Domain_Error{}
+	return contracts.Auth_Context{kind = .User_Token, user_id = string(user.user_id), name = user.name, display_name = user.display_name, email = user.email, user_token_id = token.token_id}, true, domain.Domain_Error{}
 }
 
 hash_user_api_token :: proc(token: string) -> string {
@@ -574,4 +574,22 @@ ascii_equal_fold :: proc(a, b: string) -> bool {
 		if ca != cb do return false
 	}
 	return true
+}
+
+// Revalidate long-lived display demand without touching last_used_at or saving
+// tokens. The ticket carries only the opaque token ID, never bearer material.
+live_user_authorized :: proc(service: ^Auth_Service, auth: contracts.Auth_Context) -> bool {
+    context.allocator = context.temp_allocator
+    if service == nil || service.users == nil do return false
+    user, found, err := user_service.get_user(service.users, domain.User_ID(auth.user_id))
+    if !found || err.code != .None || user.status == .Disabled do return false
+    if auth.kind == .Trusted_Proxy do return true
+    if auth.kind != .User_Token || auth.user_token_id == "" || service.user_tokens == nil do return false
+    token, token_found, token_err := iface.user_token_get_by_id(service.user_tokens, auth.user_token_id)
+    if !token_found || token_err.code != .None || string(token.owner_user_id) != auth.user_id || token.revoked_at != "" do return false
+    if token.expires_at != "" {
+        if service.clock == nil do return false
+        if token.expires_at <= platform.clock_now(service.clock) do return false
+    }
+    return true
 }

@@ -18,6 +18,8 @@ import "core:time"
 import ext "odin_test:ctl/extension"
 import contracts "odin_test:contracts"
 
+codex_live_fixture_events: [dynamic]string
+
 @(test)
 test_codex_native_fixture_replay_isolated_by_issued_instance :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
@@ -100,6 +102,7 @@ codex_live_connection :: proc(data: rawptr) {
 	response := ""
 	switch method {
 	case "agent.extension.event":
+		if len(codex_live_fixture_events) < 1000 do append(&codex_live_fixture_events, strings.clone(string(params), runtime.heap_allocator()))
 		res := bridge_ext_ingest(rec, string(params), bridge_runtime_now_ms())
 		response = bridge_local_response_data(request_id, bridge_ext_ingest_result_json(res))
 		bridge_ext_ingest_result_destroy(&res)
@@ -115,13 +118,10 @@ codex_live_connection :: proc(data: rawptr) {
 		events := strings.builder_make()
 		strings.write_byte(&events, '[')
 		sync.mutex_lock(&bridge_ext_mutex)
-		for s in bridge_ext_states {
-			if s.agent_instance_id != id do continue
-			for ev, i in s.queue {
-				if i > 0 do strings.write_byte(&events, ',')
-				strings.write_string(&events, ev)
-			}
-		}
+		for ev, i in codex_live_fixture_events {
+            if i > 0 do strings.write_byte(&events, ',')
+            strings.write_string(&events, ev)
+        }
 		sync.mutex_unlock(&bridge_ext_mutex)
 		strings.write_byte(&events, ']')
 		response = fmt.aprintf(`{{"ok":true,"data":{{"extension":%s,"blockers":%s,"events":%s}}}}`,bridge_ext_status_json(id),string(blockers),strings.to_string(events))

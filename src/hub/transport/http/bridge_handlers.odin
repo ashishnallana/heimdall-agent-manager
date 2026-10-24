@@ -2392,7 +2392,7 @@ bridge_ws_process_frame :: proc(h: ^Bridge_Handlers, bridge_id: string, connecti
         bridge_ws_tool_live_frame(h, bridge_id, connection_generation, connection, text)
 
 	case "agent_blockers":
-		if h.agents != nil do _ = agent_service.apply_bridge_blockers_snapshot(h.agents, bridge_id, text)
+		if h.agents != nil do _ = agent_service.apply_bridge_blockers_leased(h.agents, bridge_id, text)
 	case "shell_inventory":
 		if h.shell_sessions != nil {
 			_ = shell_session_svc.shell_session_apply_inventory(h.shell_sessions, bridge_id, text)

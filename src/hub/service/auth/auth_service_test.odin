@@ -114,3 +114,45 @@ test_extract_body_instance_id_tracking_allocator :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(track.allocation_map), 0)
 	testing.expect_value(t, len(track.bad_free_array), 0)
 }
+
+@(private = "file")
+Live_Auth_Test :: struct { token: domain.User_API_Token, disabled: bool, writes: int }
+@(test)
+test_live_user_authorization_rechecks_identity_expiry_revocation_without_writes :: proc(t: ^testing.T) {
+    context.allocator = context.temp_allocator
+    f := Live_Auth_Test{token = {token_id = "utok_a", owner_user_id = "alice", expires_at = "2999-01-01T00:00:00Z"}}
+    repo := iface.User_Repository{ctx = &f,
+        get_by_id = proc(ctx: rawptr, id: domain.User_ID) -> (domain.User, bool, domain.Domain_Error) {
+            f := (^Live_Auth_Test)(ctx)
+            return domain.User{user_id = id, status = .Disabled if f.disabled else .Active}, id == "alice", {}
+        },
+        get_token_by_id = proc(ctx: rawptr, id: string) -> (domain.User_API_Token, bool, domain.Domain_Error) {
+            f := (^Live_Auth_Test)(ctx)
+            return f.token, id == f.token.token_id, {}
+        },
+        save_token = proc(ctx: rawptr, token: domain.User_API_Token) -> (domain.User_API_Token, bool, domain.Domain_Error) {
+            (^Live_Auth_Test)(ctx).writes += 1
+            return token, true, {}
+        }}
+    clock := platform.real_clock()
+    users := user_service.new_user_service_basic(&repo, &clock, nil)
+    service := new_auth_service_with_tokens({}, &users, &repo, &clock, nil)
+    auth := contracts.Auth_Context{kind = .User_Token, user_id = "alice", user_token_id = "utok_a"}
+    testing.expect(t, live_user_authorized(&service, auth))
+    f.token.revoked_at = "2026-01-01T00:00:00Z"
+    testing.expect(t, !live_user_authorized(&service, auth))
+    f.token.revoked_at = ""
+    f.token.expires_at = "2000-01-01T00:00:00Z"
+    testing.expect(t, !live_user_authorized(&service, auth))
+    f.token.expires_at = ""
+    f.token.owner_user_id = "foreign"
+    testing.expect(t, !live_user_authorized(&service, auth))
+    f.token.owner_user_id = "alice"
+    auth.user_token_id = ""
+    testing.expect(t, !live_user_authorized(&service, auth))
+    auth.kind = .Trusted_Proxy
+    testing.expect(t, live_user_authorized(&service, auth))
+    f.disabled = true
+    testing.expect(t, !live_user_authorized(&service, auth))
+    testing.expect_value(t, f.writes, 0)
+}

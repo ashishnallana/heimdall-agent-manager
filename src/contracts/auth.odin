@@ -18,6 +18,7 @@ Auth_Context :: struct {
 	bridge_id: string,
 	agent_instance_id: string,
 	token_scopes: []string,
+	user_token_id: string, // opaque identity for long-lived stream revocation checks
 }
 
 HTTP_Header :: struct {

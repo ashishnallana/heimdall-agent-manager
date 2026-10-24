@@ -8,16 +8,18 @@ import { parseLiveSnapshot, compareToolOrder } from '../src/ui/store/toolActivit
 
 test('shared views deduplicate membership, replace sets, and last unmount cleans all resources', async () => {
   const h = harness();
-  const own = h.stream.subscribe('user1', ['inst_a']);
-  const chain = h.stream.subscribe('user1', ['inst_a', 'inst_b', 'inst_b']);
+  const own = h.stream.subscribe('user1', ['inst_a'], 'chat_a');
+  const chain = h.stream.subscribe('user1', ['inst_a', 'inst_b', 'inst_b'], 'chat_chain');
   await h.flush();
   assert.equal(h.sockets.length, 1);
   const s = h.sockets[0]; s.open();
-  assert.deepEqual(s.sent, [{ type: 'subscribe', instance_ids: ['inst_a', 'inst_b'] }]);
+  assert.deepEqual(s.sent, [{ type: 'subscribe', version: 2, instance_ids: ['inst_a', 'inst_b'],
+    views: [{ conversation_id: 'chat_a', instance_ids: ['inst_a'] },
+      { conversation_id: 'chat_chain', instance_ids: ['inst_a', 'inst_b'] }] }]);
   assert.equal(h.timers.size, 1); assert.equal(h.resumeListeners, 1);
   s.state(snapshot()); s.state(snapshot('inst_b'));
   own.release();
-  assert.equal(s.sent.length, 1, 'shared instance stays subscribed');
+  assert.deepEqual(s.sent.at(-1).instance_ids, ['inst_a', 'inst_b'], 'shared instance stays subscribed');
   chain.update(['inst_b', 'inst_c']);
   assert.deepEqual(s.sent.at(-1).instance_ids, ['inst_b', 'inst_c']);
   assert.equal(h.member('inst_a'), undefined);
@@ -98,7 +100,7 @@ for (const loss of ['close', 'error', 'unavailable', 'pong timeout']) {
       s.frame({ type: 'unavailable', instance_id: 'inst_b', reason: 'bridge_offline' });
     }
     if (loss === 'pong timeout') {
-      h.advance(44_000, false);
+      h.advance(19_000, false);
       assert.equal(h.member().availability, 'ready');
       h.advance(1000, false);
     }
@@ -219,4 +221,21 @@ test('pending socket open times out; server protocol error clears state and sche
   h.sockets[1].frame({ type: 'error', code: 'capacity', message: 'busy' });
   assert.equal(h.member().snapshot, null);
   view.release();
+});
+
+test('leased demand renews explicit per-member conversation scopes and permanent errors stop reconnect', async () => {
+  const h = harness();
+  const parent = h.stream.subscribe('owner', ['inst_a', 'inst_b'], 'chat_chain');
+  const child = h.stream.subscribe('owner', ['inst_b'], 'chat_b');
+  await h.flush(); const socket = h.sockets[0]; socket.open();
+  assert.equal(socket.sent[0].version, 2);
+  assert.deepEqual(socket.sent[0].views.map((view: any) => view.conversation_id), ['chat_chain', 'chat_b']);
+  h.advance(5000);
+  assert.equal(socket.sent.filter((frame: any) => frame.type === 'subscribe').length, 2);
+  parent.release();
+  assert.deepEqual(socket.sent.filter((frame: any) => frame.type === 'subscribe').at(-1).instance_ids, ['inst_b']);
+  socket.frame({ type: 'error', code: 'upgrade_required' });
+  h.advance(300_000); await h.flush();
+  assert.equal(h.sockets.length, 1, 'permanent protocol failure cannot retry');
+  child.release();
 });

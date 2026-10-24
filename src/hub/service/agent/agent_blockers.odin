@@ -21,7 +21,7 @@ import events "odin_test:hub/service/events"
 // NOTHING IS PERSISTED. The hub keeps an in-memory map instance_id → {revision,
 // blockers} that each bridge `agent_blockers` snapshot replaces wholesale. The
 // map is empty on hub start and refills from the bridges' snapshots (sent on
-// connect, on every change and on every heartbeat); a disconnected bridge's
+// change/heartbeat while an authorized demand lease is active); a disconnected bridge's
 // instances are dropped, and a terminal instance is cleared. The blocked hook
 // process re-registers its stable blocker_id after a bridge restart, so a prompt
 // reappears after the bridge AND the hub restart while the agent is still blocked.
@@ -368,4 +368,29 @@ permission_decision_frame_json :: proc(command_id, instance_id, blocker_id, deci
 	strings.write_string(&b, "\",\"message\":\""); contracts.write_json_string(&b, message)
 	strings.write_string(&b, "\"}")
 	return strings.to_string(b)
+}
+
+// External bridge payloads require current authorized conversation demand.
+// The canonical reducer above remains usable for local domain fixtures.
+apply_bridge_blockers_leased :: proc(service: ^Agent_Service, bridge_id, text: string) -> bool {
+    if service == nil || len(text) > 256 * 1024 do return false
+    value, err := json.parse_string(text, .JSON, true, context.temp_allocator)
+    root, obj := value.(json.Object)
+    if err != .None || !obj do return false
+    id := tool_live_text(root, "agent_instance_id")
+    token := tool_live_text(root, "subscription_id")
+    run, run_ok := root["run_count"].(json.Integer)
+    if token == "" || !run_ok do return false
+    inst, found, _ := tool_live_instance(service, id)
+    if !found || inst.bridge_id != bridge_id || inst.run_count != int(run) || !runtime_expected_active(inst.runtime_status) do return false
+    sync.mutex_lock(&service.tool_live.mutex)
+    defer sync.mutex_unlock(&service.tool_live.mutex)
+    route := service.tool_live.routes[id]
+    if route == nil || route.suspended || route.bridge != bridge_id || route.token != token || route.run != int(run) do return false
+    watching := false
+    for _, viewer in service.tool_live.viewers {
+        if viewer.owner == route.owner && viewer.ids[id] && tool_stream_view_current(service, viewer, id) { watching = true; break }
+    }
+    if !watching do return false
+    return apply_bridge_blockers_snapshot(service, bridge_id, text)
 }

@@ -3207,6 +3207,8 @@ export function AgentChatPane({
           }
         >
           <LiveToolActivity
+            conversationId={conversationId}
+            enabled={isActiveTab && paneVisible}
             instanceId={agentInstanceId}
             members={isChainCoordinator ? [
               { instanceId: agentInstanceId, displayName: agentDisplayName },

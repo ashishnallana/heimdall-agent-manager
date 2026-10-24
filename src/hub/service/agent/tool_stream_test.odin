@@ -6,6 +6,7 @@ import "core:fmt"
 import "core:net"
 import "core:strings"
 import "core:testing"
+import "core:time"
 import contracts "odin_test:contracts"
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
@@ -33,7 +34,7 @@ tool_stream_test_init :: proc(f: ^Tool_Stream_Test) {
 }
 @(private = "file")
 tool_stream_test_clear :: proc(w: ^Tool_Stream_Viewer) {
-    for f in w.queue do delete(f.text, runtime.heap_allocator())
+    for f in w.queue { delete(f.text, runtime.heap_allocator()); delete(f.instance_id, runtime.heap_allocator()) }
     clear(&w.queue); w.bytes = 0
 }
 @(private = "file")
@@ -396,4 +397,120 @@ test_tool_stream_suspended_last_detach_preserves_old_producer_control :: proc(t:
     testing.expect_value(t,len(f.svc.tool_live.controls),2)
     testing.expect(t,!f.svc.tool_live.controls[0].attach && !f.svc.tool_live.controls[1].attach)
     testing.expect_value(t,f.svc.tool_live.controls[0].token,old_token)
+}
+
+@(test)
+test_tool_stream_expired_viewer_drops_late_frames_without_eof :: proc(t: ^testing.T) {
+    f: Tool_Stream_Test; tool_stream_test_init(&f); defer tool_stream_test_free(&f)
+    ids := [1]string{"inst_a"}
+    _ = tool_stream_subscribe(&f.svc, &f.a, ids[:])
+    _ = tool_stream_subscribe(&f.svc, &f.b, ids[:])
+    token := strings.clone(f.svc.tool_live.routes["inst_a"].token, context.temp_allocator)
+    f.a.expires_ns = 1
+    f.b.expires_ns = time.tick_now()._nsec + TOOL_STREAM_LEASE_NS
+    tool_stream_expire_at(&f.svc, time.tick_now()._nsec)
+    testing.expect(t, f.a.stopped)
+    testing.expect_value(t, f.svc.tool_live.routes["inst_a"].viewers, 1)
+    tool_stream_test_clear(&f.b)
+    testing.expect(t, tool_live_apply_bridge(&f.svc, "brg_a", 0, "1000", tool_stream_test_frame(token)))
+    testing.expect_value(t, len(f.b.queue), 1)
+    f.b.expires_ns = 1
+    tool_stream_expire_at(&f.svc, time.tick_now()._nsec)
+    testing.expect_value(t, len(f.svc.tool_live.routes), 0)
+    testing.expect(t, !tool_live_apply_bridge(&f.svc, "brg_a", 0, "1000", tool_stream_test_frame(token, revision = 2)))
+}
+
+@(test)
+test_tool_stream_scoped_replacement_requires_authorized_parent :: proc(t: ^testing.T) {
+    f: Tool_Stream_Test; tool_stream_test_init(&f); defer tool_stream_test_free(&f)
+    content := iface.Content_Repository{get_conversation = proc(ctx: rawptr, id: string) -> (domain.Chat_Conversation, bool, domain.Domain_Error) {
+        return domain.Chat_Conversation{conversation_id = id, owner_user_id = "owner", agent_instance_id = "inst_a"}, id == "chat_a", {}
+    }}
+    f.svc.content = &content
+    f.a.external = true
+    testing.expect_value(t, tool_stream_subscribe(&f.svc, &f.a, []string{"inst_a"}), "upgrade_required")
+    value, _ := json.parse_string(`[{"conversation_id":"chat_a","instance_ids":["inst_a"]}]`, .JSON, true, context.temp_allocator)
+    testing.expect_value(t, tool_stream_subscribe_views(&f.svc, &f.a, value.(json.Array)), "")
+    testing.expect(t, f.a.scopes["inst_a"] == "chat_a")
+    bad, _ := json.parse_string(`[{"conversation_id":"chat_foreign","instance_ids":["inst_a"]}]`, .JSON, true, context.temp_allocator)
+    testing.expect_value(t, tool_stream_subscribe_views(&f.svc, &f.a, bad.(json.Array)), "forbidden")
+    testing.expect(t, f.a.ids["inst_a"], "invalid replacement preserves authorized demand")
+    foreign_view, _ := json.parse_string(`[{"conversation_id":"chat_a","instance_ids":["inst_foreign"]}]`, .JSON, true, context.temp_allocator)
+    testing.expect_value(t, tool_stream_subscribe_views(&f.svc, &f.a, foreign_view.(json.Array)), "forbidden")
+    empty, _ := json.parse_string("[]", .JSON, true, context.temp_allocator)
+    testing.expect_value(t, tool_stream_subscribe_views(&f.svc, &f.a, empty.(json.Array)), "")
+    testing.expect_value(t, len(f.svc.tool_live.routes), 0)
+    tool_stream_scopes_free(f.a.scopes); f.a.scopes = nil
+}
+
+@(test)
+test_tool_stream_open_chain_explicitly_authorizes_each_current_member :: proc(t: ^testing.T) {
+    f: Tool_Stream_Test; tool_stream_test_init(&f); defer tool_stream_test_free(&f)
+    f.repo.get_tool_instance = proc(ctx: rawptr, id: string) -> (domain.Agent_Instance, bool, domain.Domain_Error) {
+        return domain.Agent_Instance{agent_instance_id = id, owner_user_id = "owner", bridge_id = "brg_a",
+            chain_id = "chain_a", run_count = 1, runtime_status = "running"}, true, {}
+    }
+    content := iface.Content_Repository{get_conversation = proc(ctx: rawptr, id: string) -> (domain.Chat_Conversation, bool, domain.Domain_Error) {
+        return domain.Chat_Conversation{conversation_id = id, owner_user_id = "owner", agent_instance_id = "inst_parent"}, id == "chat_chain", {}
+    }}
+    chains := iface.Taskchain_Repository{ctx = &f,
+        get_chain = proc(ctx: rawptr, id: domain.Task_Chain_ID) -> (domain.Task_Chain, bool, domain.Domain_Error) {
+            return domain.Task_Chain{chain_id = id, owner_user_id = "owner", coordinator_agent_instance_id = "inst_parent"}, true, {}
+        },
+        list_members_by_chain = proc(ctx: rawptr, id: domain.Task_Chain_ID, owner: domain.User_ID) -> ([]domain.Task_Chain_Member, domain.Domain_Error) {
+            f := (^Tool_Stream_Test)(ctx)
+            if f.run != 1 do return nil, {}
+            members := make([]domain.Task_Chain_Member, 2, context.temp_allocator)
+            members[0].agent_instance_id = "inst_a"; members[1].agent_instance_id = "inst_b"
+            return members, {}
+        },
+    }
+    f.svc.content = &content; f.svc.taskchains = &chains
+    f.a.external = true
+    value, _ := json.parse_string(`[{"conversation_id":"chat_chain","instance_ids":["inst_parent","inst_a","inst_b"]}]`, .JSON, true, context.temp_allocator)
+    testing.expect_value(t, tool_stream_subscribe_views(&f.svc, &f.a, value.(json.Array)), "")
+    testing.expect_value(t, len(f.a.ids), 3)
+    testing.expect(t, tool_stream_view_current(&f.svc, &f.a, "inst_b"))
+    testing.expect(t, !tool_stream_authorized(&f.svc, "owner", "chat_chain", "inst_unlisted"))
+    f.run = 2
+    testing.expect(t, !tool_stream_view_current(&f.svc, &f.a, "inst_b"), "membership revocation fences queued and incoming payload")
+    tool_stream_scopes_free(f.a.scopes); f.a.scopes = nil
+}
+
+@(test)
+test_tool_stream_legacy_bridge_requires_upgrade_without_demand :: proc(t: ^testing.T) {
+    f: Tool_Stream_Test; tool_stream_test_init(&f); defer tool_stream_test_free(&f)
+    bridges := iface.Bridge_Repository{get_bridge = proc(ctx: rawptr, id: string) -> (domain.Bridge, bool, domain.Domain_Error) {
+        return domain.Bridge{bridge_id = id, capabilities_json = `{"features":["get_agent_pane"]}`}, true, {}
+    }}
+    f.svc.bridges = &bridges
+    f.a.external = true
+    scopes := make(map[string]string, runtime.heap_allocator())
+    defer tool_stream_scopes_free(scopes)
+    scopes[strings.clone("inst_a", runtime.heap_allocator())] = strings.clone("chat_a", runtime.heap_allocator())
+    testing.expect_value(t, tool_stream_subscribe(&f.svc, &f.a, []string{"inst_a"}, scopes), "upgrade_required")
+    testing.expect_value(t, len(f.svc.tool_live.routes), 0)
+    testing.expect_value(t, len(f.svc.tool_live.controls), 0)
+    bridges.get_bridge = proc(ctx: rawptr, id: string) -> (domain.Bridge, bool, domain.Domain_Error) {
+        return domain.Bridge{bridge_id = id, capabilities_json = `{"features":["tool_stream_demand_v2"]}`}, true, {}
+    }
+    testing.expect(t, tool_stream_bridge_supported(&f.svc, "brg_a"))
+}
+
+@(test)
+test_tool_stream_revoked_credential_stops_demand_and_late_delivery :: proc(t: ^testing.T) {
+    f: Tool_Stream_Test; tool_stream_test_init(&f); defer tool_stream_test_free(&f)
+    active := true
+    f.a.authorization_ctx = &active
+    f.a.authorize = proc(ctx: rawptr) -> bool { return (^bool)(ctx)^ }
+    testing.expect_value(t, tool_stream_subscribe(&f.svc, &f.a, []string{"inst_a"}), "")
+    token := strings.clone(f.svc.tool_live.routes["inst_a"].token, context.temp_allocator)
+    tool_stream_test_clear(&f.a)
+    active = false
+    testing.expect(t, !tool_stream_view_current(&f.svc, &f.a, "inst_a"))
+    testing.expect_value(t, tool_stream_subscribe(&f.svc, &f.a, []string{"inst_a"}), "unauthenticated")
+    testing.expect(t, !tool_live_apply_bridge(&f.svc, "brg_a", 0, "1000", tool_stream_test_frame(token)))
+    tool_stream_expire_at(&f.svc, time.tick_now()._nsec)
+    testing.expect_value(t, len(f.svc.tool_live.routes), 0)
+    testing.expect(t, f.a.stopped)
 }

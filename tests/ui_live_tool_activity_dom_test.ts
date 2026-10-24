@@ -116,7 +116,7 @@ test('flat rows render at conversation scroll tail, summaries/colors/badges/dura
       deliveryError: '', sending: false, authorLabel: 'Worker', messageType: 'text', metadata: {} };
     await render(React.createElement(ChatMessageList, { conversationKey: 'chat_a', debugPrefix: 'test-thread',
       messages: [message], renderMessageBody: ({ message }: any) => message.body,
-      children: React.createElement(LiveToolActivity, { instanceId: 'inst_a',
+      children: React.createElement(LiveToolActivity, { conversationId: 'chat_a', instanceId: 'inst_a',
         members: [{ instanceId: 'inst_a', displayName: 'A' }, { instanceId: 'inst_b', displayName: 'B' }],
         onOpenShell: (id: string) => opened.push(id) }),
     }));
@@ -160,7 +160,7 @@ test('flat rows render at conversation scroll tail, summaries/colors/badges/dura
 test('final completion exits once with its outcome and duration, even while completed batch persists', async () => {
   await withDom(async (env) => {
     const { sockets, q, render, timers } = env;
-    await render(React.createElement(LiveToolActivity, { instanceId: 'inst_a', onOpenShell() {} }));
+    await render(React.createElement(LiveToolActivity, { conversationId: 'chat_a', instanceId: 'inst_a', onOpenShell() {} }));
     const s = sockets[0]; s.open();
     await act(async () => { s.state(snapshot()); });
     assert.equal(q('live-tools-duration')!.textContent, '1.0 s');
@@ -188,8 +188,8 @@ test('final completion exits once with its outcome and duration, even while comp
 test('own/chain mounts share socket; roster changes update it and old general user events do not affect tools', async () => {
   await withDom(async (env) => {
     const { sockets, render, store, q } = env;
-    const own = React.createElement(LiveToolActivity, { key: 'own', instanceId: 'inst_a', onOpenShell() {} });
-    const chain = (ids: string[]) => React.createElement(LiveToolActivity, { key: 'chain', instanceId: 'inst_a',
+    const own = React.createElement(LiveToolActivity, { conversationId: 'chat_a', key: 'own', instanceId: 'inst_a', onOpenShell() {} });
+    const chain = (ids: string[]) => React.createElement(LiveToolActivity, { conversationId: 'chat_a', key: 'chain', instanceId: 'inst_a',
       members: ids.map((instanceId) => ({ instanceId, displayName: instanceId })), onOpenShell() {} });
     await render(React.createElement(React.Fragment, null, own, chain(['inst_a', 'inst_b'])));
     assert.equal(sockets.length, 1);
@@ -211,7 +211,7 @@ test('own/chain mounts share socket; roster changes update it and old general us
 test('unavailable/socket error clears row claims; visibility/pageshow/resume request immediate new baseline', async () => {
   await withDom(async (env) => {
     const { sockets, render, q, dom } = env;
-    await render(React.createElement(LiveToolActivity, { instanceId: 'inst_a', onOpenShell() {} }));
+    await render(React.createElement(LiveToolActivity, { conversationId: 'chat_a', instanceId: 'inst_a', onOpenShell() {} }));
     sockets[0].open();
     await act(async () => { sockets[0].state(snapshot()); });
     await act(async () => { sockets[0].frame({ type: 'unavailable', instance_id: 'inst_a', reason: 'bridge_offline' }); });
@@ -248,7 +248,7 @@ test('user change closes old socket and clears tool rows before new baseline', a
       return null;
     }
     await render(React.createElement(React.Fragment, null,
-      React.createElement(LiveToolActivity, { instanceId: 'inst_a', onOpenShell() {} }), React.createElement(IdentityProbe)));
+      React.createElement(LiveToolActivity, { conversationId: 'chat_a', instanceId: 'inst_a', onOpenShell() {} }), React.createElement(IdentityProbe)));
     sockets[0].open();
     await act(async () => { sockets[0].state(snapshot()); });
     assert.ok(q('live-tools-shell-sh_inst_a'));
@@ -271,7 +271,7 @@ for (const reduced of [false, true]) {
   test(`fast completion stays fully visible for 1000ms after entry (reduced=${reduced})`, async () => {
     await withDom(async (env) => {
       await env.reduceMotion(reduced);
-      await env.render(React.createElement(LiveToolActivity, { instanceId: 'inst_a', onOpenShell() {} }));
+      await env.render(React.createElement(LiveToolActivity, { conversationId: 'chat_a', instanceId: 'inst_a', onOpenShell() {} }));
       const socket = env.sockets[0]; socket.open();
       await act(async () => socket.state(snapshot()));
       const row = env.dom.window.document.querySelector('[data-tool-key]') as HTMLElement;
@@ -315,7 +315,7 @@ for (const reduced of [false, true]) {
 
 test('a long-visible call begins collapse promptly on completion', async () => {
   await withDom(async (env) => {
-    await env.render(React.createElement(LiveToolActivity, { instanceId: 'inst_a', onOpenShell() {} }));
+    await env.render(React.createElement(LiveToolActivity, { conversationId: 'chat_a', instanceId: 'inst_a', onOpenShell() {} }));
     const socket = env.sockets[0]; socket.open();
     await act(async () => socket.state(snapshot()));
     await env.advanceMotion();
@@ -331,7 +331,7 @@ test('a long-visible call begins collapse promptly on completion', async () => {
 
 test('fresh completed-only deliveries show once across duplicates, baselines, refreshes and shared mounts', async () => {
   await withDom(async (env) => {
-    const view = (key: string) => React.createElement(LiveToolActivity, { key, instanceId: 'inst_a', onOpenShell() {} });
+    const view = (key: string) => React.createElement(LiveToolActivity, { conversationId: 'chat_a', key, instanceId: 'inst_a', onOpenShell() {} });
     await env.render(React.createElement(React.Fragment, null, view('own'), view('chain')));
     const socket = env.sockets[0]; socket.open();
     const done = (id: string, source = 'provider') => ({ ...snapshot().active[0], call_id: id, source,
@@ -371,7 +371,7 @@ test('fresh completed-only deliveries show once across duplicates, baselines, re
 
 test('completion deliveries survive React batching and transient later snapshots until every view observes them', async () => {
   await withDom(async (env) => {
-    await env.render(React.createElement(LiveToolActivity, { instanceId: 'inst_a', onOpenShell() {} }));
+    await env.render(React.createElement(LiveToolActivity, { conversationId: 'chat_a', instanceId: 'inst_a', onOpenShell() {} }));
     const socket = env.sockets[0]; socket.open();
     await act(async () => socket.state(snapshot('inst_a', 1, { active: [] })));
     const done = (id: string) => ({ ...snapshot().active[0], call_id: id, status: 'failed',
@@ -392,7 +392,7 @@ test('completion deliveries survive React batching and transient later snapshots
 
 test('coalesced baseline/refresh identities never replay, while known active completions retain batched metadata', async () => {
   await withDom(async (env) => {
-    await env.render(React.createElement(LiveToolActivity, { instanceId: 'inst_a', onOpenShell() {} }));
+    await env.render(React.createElement(LiveToolActivity, { conversationId: 'chat_a', instanceId: 'inst_a', onOpenShell() {} }));
     const socket = env.sockets[0]; socket.open();
     const call = snapshot().active[0];
     const done = (id: string) => ({ ...call, call_id: id, status: 'failed', duration_ms: 37, completed_at_ms: 1037 });
@@ -430,7 +430,7 @@ test('coalesced baseline/refresh identities never replay, while known active com
 for (const reset of ['epoch', 'generation', 'conversation', 'roster', 'auth']) {
   test(`${reset} reset immediately discards a held completion and cancels scheduled work`, async () => {
     await withDom(async (env) => {
-      const view = (extra = {}) => React.createElement(LiveToolActivity, {
+      const view = (extra = {}) => React.createElement(LiveToolActivity, { conversationId: 'chat_a',
         instanceId: 'inst_a', onOpenShell() {}, ...extra,
       });
       await env.render(view());
@@ -464,7 +464,7 @@ for (const reset of ['epoch', 'generation', 'conversation', 'roster', 'auth']) {
 test('completion-only baselines never create rows; individual success/failure exits preserve remaining identities', async () => {
   await withDom(async (env) => {
     const { render, sockets, q, dom } = env;
-    await render(React.createElement(LiveToolActivity, { instanceId: 'inst_a', onOpenShell() {} }));
+    await render(React.createElement(LiveToolActivity, { conversationId: 'chat_a', instanceId: 'inst_a', onOpenShell() {} }));
     const socket = sockets[0]; socket.open();
     const a = snapshot().active[0], b = { ...a, call_id: 'second', source: 'provider', summary: 'second' };
     const done = (call: any, status: string) => ({ ...call, status, duration_ms: 123, completed_at_ms: 1000 });
@@ -493,7 +493,7 @@ for (const status of ['completed', 'failed']) {
   test(`exiting ${status} retains terminal metadata across rapid snapshots without extending exit`, async () => {
     await withDom(async (env) => {
       const { render, sockets, dom, q, timeouts } = env;
-      await render(React.createElement(LiveToolActivity, { instanceId: 'inst_a', onOpenShell() {} }));
+      await render(React.createElement(LiveToolActivity, { conversationId: 'chat_a', instanceId: 'inst_a', onOpenShell() {} }));
       const socket = sockets[0]; socket.open();
       const a = snapshot().active[0], b = { ...a, call_id: 'second', summary: 'second' };
       await act(async () => socket.state(snapshot('inst_a', 1, { active: [a] })));
@@ -551,7 +551,7 @@ for (const status of ['completed', 'failed']) {
 test('queued entry, rapid exit/reentry, reset and reduced-motion changes cancel stale animation work', async () => {
   await withDom(async (env) => {
     const { render, sockets, q, dom, frames, timeouts } = env;
-    await render(React.createElement(LiveToolActivity, { instanceId: 'inst_a', onOpenShell() {} }));
+    await render(React.createElement(LiveToolActivity, { conversationId: 'chat_a', instanceId: 'inst_a', onOpenShell() {} }));
     const socket = sockets[0]; socket.open();
     await act(async () => socket.state(snapshot()));
     const row = dom.window.document.querySelector('[data-tool-key]') as HTMLElement;
@@ -597,7 +597,7 @@ test('queued entry, rapid exit/reentry, reset and reduced-motion changes cancel 
 test('capacity is silent and instance switches and unmount discard retained summaries and scheduled work', async () => {
   await withDom(async (env) => {
     const { render, sockets, q, store, dom } = env;
-    await render(React.createElement(LiveToolActivity, { instanceId: 'inst_a', onOpenShell() {} }));
+    await render(React.createElement(LiveToolActivity, { conversationId: 'chat_a', instanceId: 'inst_a', onOpenShell() {} }));
     sockets[0].open();
     await act(async () => sockets[0].state(snapshot()));
     await act(async () => store.dispatch({ type: 'toolActivity/toolCapacityExceeded' }));
@@ -608,7 +608,7 @@ test('capacity is silent and instance switches and unmount discard retained summ
     await act(async () => store.dispatch({ type: 'toolActivity/toolMembersSelected', payload: ['inst_a'] }));
     await act(async () => store.dispatch({ type: 'toolActivity/toolStateReceived', payload: snapshot() }));
     await env.flushFrames();
-    await render(React.createElement(LiveToolActivity, { instanceId: 'inst_b', onOpenShell() {} }));
+    await render(React.createElement(LiveToolActivity, { conversationId: 'chat_a', instanceId: 'inst_b', onOpenShell() {} }));
     assert.equal(q('live-tool-activity'), null, 'new identity clears previous summary without decorative exit');
     await render(null);
     assert.equal(env.frames.size, 0); assert.equal(env.timeouts.size, 0);
@@ -723,7 +723,7 @@ test('actual isolated dedicated WS capture renders active-only production rows',
   const ids = [...new Set<string>(frames.map((frame: any) => frame.instance_id))];
   await withDom(async (env) => {
     const { render, sockets, q } = env;
-    await render(React.createElement(LiveToolActivity, { instanceId: ids[0],
+    await render(React.createElement(LiveToolActivity, { conversationId: 'chat_a', instanceId: ids[0],
       members: ids.map(instanceId => ({instanceId, displayName: instanceId})), onOpenShell() {} }));
     const socket = sockets[0]; socket.open();
     let active = 0, batch = 0, empty = 0, unavailable = 0, refresh = 0;
@@ -750,5 +750,22 @@ test('actual isolated dedicated WS capture renders active-only production rows',
     }
     assert.ok(active && batch && empty && unavailable && refresh, 'all actual wire display states exercised');
     assert.equal(env.requests, 0, 'captured display consumption makes no REST requests');
+  });
+});
+
+test('inactive conversation releases its entire member demand and reopens from a fresh baseline', async () => {
+  await withDom(async (env) => {
+    const view = (enabled: boolean) => React.createElement(LiveToolActivity, {
+      conversationId: 'chat_chain', instanceId: 'inst_a', enabled,
+      members: [{ instanceId: 'inst_a', displayName: 'A' }, { instanceId: 'inst_b', displayName: 'B' }],
+      onOpenShell() {},
+    });
+    await env.render(view(true));
+    await act(async () => env.sockets[0].open());
+    assert.deepEqual(env.sockets[0].sent.at(-1).instance_ids, ['inst_a', 'inst_b']);
+    await env.render(view(false));
+    assert.equal(env.sockets[0].readyState, 3);
+    await env.render(view(true));
+    assert.equal(env.sockets.length, 2);
   });
 });

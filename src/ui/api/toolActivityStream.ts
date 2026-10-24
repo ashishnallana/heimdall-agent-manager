@@ -4,7 +4,7 @@ import {
 } from '../store/toolActivitySlice';
 
 export const TOOL_FRESH_MS = 120_000;
-export const TOOL_PING_MS = 30_000;
+export const TOOL_PING_MS = 5_000;
 export const TOOL_PONG_MS = 15_000;
 export interface ToolSocket {
   readyState: number;
@@ -28,7 +28,7 @@ export type ToolSubscription = { update(ids: string[]): void; release(): void };
 // One owner per authenticated UI store, shared by every mounted own/chain view.
 // Transport liveness and per-instance state freshness are deliberately independent.
 export class ToolActivityStream {
-  private views = new Map<symbol, string[]>();
+  private views = new Map<symbol, { ids: string[]; conversationId: string }>();
   private receipts = new Map<string, Receipt>();
   private socket: ToolSocket | null = null;
   private abort: AbortController | null = null;
@@ -37,6 +37,8 @@ export class ToolActivityStream {
   private cancelResume?: () => void;
   private reconnectAt = 0;
   private failures = 0;
+  private failureStartedAt: number | null = null;
+  private exhausted = false;
   private pingAt = 0;
   private pongBy = 0;
   private connectBy = 0;
@@ -44,7 +46,7 @@ export class ToolActivityStream {
 
   constructor(private dispatch: (action: any) => void, private env: ToolStreamEnvironment) {}
 
-  subscribe(authKey: string, ids: string[]): ToolSubscription {
+  subscribe(authKey: string, ids: string[], conversationId = ''): ToolSubscription {
     if (this.authKey !== authKey) {
       this.stop();
       this.views.clear();
@@ -53,13 +55,13 @@ export class ToolActivityStream {
       this.authKey = authKey;
     }
     const token = Symbol();
-    this.views.set(token, ids);
+    this.views.set(token, { ids, conversationId });
     this.reconcile();
     this.ensureRunning();
     return {
       update: (next) => {
         if (!this.views.has(token)) return;
-        this.views.set(token, next);
+        this.views.set(token, { ids: next, conversationId });
         this.reconcile();
         this.ensureRunning();
       },
@@ -81,7 +83,7 @@ export class ToolActivityStream {
   }
 
   private reconcile() {
-    const ids = [...new Set([...this.views.values()].flat().filter(validInstanceId))].sort();
+    const ids = [...new Set([...this.views.values()].flatMap((view) => view.ids).filter(validInstanceId))].sort();
     // Never silently truncate an authorized roster into a misleading partial view.
     if (ids.length > LIVE_MEMBER_CAP) {
       this.invalidate();
@@ -93,6 +95,7 @@ export class ToolActivityStream {
     const prior = [...this.receipts.keys()].sort();
     if (ids.join(',') === prior.join(',')) {
       if (!ids.length) this.dispatch(toolMembersSelected([]));
+      this.sendSubscription();
       return;
     }
     const next = new Map<string, Receipt>();
@@ -110,7 +113,12 @@ export class ToolActivityStream {
   private sendSubscription() {
     if (this.socket?.readyState !== 1) return;
     try {
-      this.socket.send(JSON.stringify({ type: 'subscribe', instance_ids: [...this.receipts.keys()].sort() }));
+      this.socket.send(JSON.stringify({
+        type: 'subscribe', version: 2, instance_ids: [...this.receipts.keys()].sort(),
+        views: [...this.views.values()].filter((view) => view.ids.length).map((view) => ({
+          conversation_id: view.conversationId, instance_ids: [...new Set(view.ids)].sort(),
+        })),
+      }));
     } catch { this.failed(); }
   }
 
@@ -130,15 +138,21 @@ export class ToolActivityStream {
   private failed() {
     this.invalidate();
     this.disconnect();
+    if (this.failureStartedAt === null) this.failureStartedAt = this.env.now();
+    if (this.failures >= 5 || this.env.now() - this.failureStartedAt >= 120_000) {
+      this.exhausted = true;
+      return;
+    }
     this.reconnectAt = this.env.now() + Math.min(1000 * 2 ** Math.min(this.failures++, 5), 30_000);
   }
 
   private async connect() {
-    if (!this.receipts.size) return;
+    if (!this.receipts.size || this.exhausted) return;
     this.disconnect();
+    if (this.failureStartedAt === null) this.failureStartedAt = this.env.now();
     const generation = this.generation;
     const controller = this.abort = new AbortController();
-    this.connectBy = this.env.now() + TOOL_PONG_MS;
+    this.connectBy = Math.min(this.env.now() + TOOL_PONG_MS, this.failureStartedAt + 120_000);
     for (const receipt of this.receipts.values()) { receipt.baseline = true; receipt.order = undefined; }
     try {
       const url = await this.env.url(controller.signal);
@@ -168,7 +182,12 @@ export class ToolActivityStream {
     let frame: any;
     try { frame = JSON.parse(data); } catch { return; }
     if (frame?.type === 'pong') { this.pongBy = 0; return; }
-    if (frame?.type === 'error') { this.failed(); return; }
+    if (frame?.type === 'error') {
+      if (['upgrade_required', 'forbidden', 'invalid_subscription', 'unauthenticated'].includes(frame.code)) {
+        this.invalidate(); this.disconnect(); this.exhausted = true; return;
+      }
+      this.failed(); return;
+    }
     if (frame?.type === 'unavailable' && this.receipts.has(frame.instance_id)) {
       this.invalidate([frame.instance_id]);
       const receipt = this.receipts.get(frame.instance_id)!;
@@ -187,7 +206,7 @@ export class ToolActivityStream {
     // Retain only ordering metadata outside Redux, never old tool content.
     receipt.order = { epoch: snapshot.epoch, generation: snapshot.generation, revision: snapshot.revision };
     receipt.deadline = this.env.now() + TOOL_FRESH_MS;
-    this.failures = 0;
+    this.failures = 0; this.failureStartedAt = null; this.exhausted = false;
     this.dispatch(toolStateReceived(snapshot, { baseline: frame.baseline, refresh: frame.refresh }));
   }
 
@@ -201,12 +220,16 @@ export class ToolActivityStream {
       }
     }
     if (expired.length) this.invalidate(expired);
+    if (this.failureStartedAt !== null && now - this.failureStartedAt >= 120_000 && !this.exhausted) {
+      this.invalidate(); this.disconnect(); this.exhausted = true; return;
+    }
     if ((this.connectBy && now >= this.connectBy) || (this.pongBy && now >= this.pongBy)) {
       this.failed();
       return;
     }
     if (this.socket?.readyState === 1 && !this.pongBy && now >= this.pingAt) {
       try {
+        this.sendSubscription();
         this.socket.send(JSON.stringify({ type: 'ping' }));
         this.pongBy = now + TOOL_PONG_MS;
         this.pingAt = now + TOOL_PING_MS;
@@ -217,8 +240,7 @@ export class ToolActivityStream {
   resume() {
     if (!this.receipts.size) return;
     this.invalidate();
-    // Reconnect earns an immediate fresh baseline even when background timers froze.
-    this.failures = 0;
+    // Resuming cannot renew an exhausted outage budget.
     void this.connect();
   }
 
@@ -227,6 +249,6 @@ export class ToolActivityStream {
     this.cancelTick?.();
     this.cancelResume?.();
     this.cancelTick = this.cancelResume = undefined;
-    this.failures = 0;
+    this.failures = 0; this.failureStartedAt = null; this.exhausted = false;
   }
 }
