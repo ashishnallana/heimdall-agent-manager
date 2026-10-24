@@ -13,6 +13,8 @@ DEFAULT_TIMEOUT_MS :: 20000
 Response :: struct {
 	status: int,
 	body: string,
+    // Strict requests set this on failure once any request bytes may have left.
+    may_have_sent: bool,
 }
 
 Header :: struct {

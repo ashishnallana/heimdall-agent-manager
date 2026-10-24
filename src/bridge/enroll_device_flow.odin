@@ -685,7 +685,7 @@ bridge_credential_refresh_once :: proc(
 	api_base, refresh_token: string,
 	allocator := context.allocator,
 ) -> (Bridge_Enroll_Credential, Bridge_Refresh_Outcome) {
-    cred, ok, err := bridge_credential_refresh_typed(api_base, refresh_token, 10_000)
+    cred, ok, err, _ := bridge_credential_refresh_typed(api_base, refresh_token, 10_000)
     if ok do return cred, .Rotated
     if err.code == .Unauthenticated do return {}, .Revoked
     return {}, .Retry
@@ -763,7 +763,7 @@ bridge_credential_refresh_worker :: proc() {
                 success, err = bridge_refresh_recovery_step(&recovery, pending_path, g_bridge_credential_file, refresh_path, api_base, bridge_id, stored, budget, bridge_operation_timeout_ms(budget, now))
             }
             delete(stored)
-            finished := bridge_retry_finish(key, bridge_runtime_now_ms(), success, err, base_ms = 5000)
+            finished := bridge_retry_finish(key, bridge_runtime_now_ms(), success, err, base_ms = 5000, park_on_failure = recovery.unknown_outcome)
             if success {
                 // Adoption is after both durable writes, so a reconnect cannot
                 // expose a half-committed rotation. Failed parent sync budgets stay.
@@ -1604,15 +1604,26 @@ bridge_credential_snapshot :: proc(allocator := context.allocator) -> string {
     return strings.clone(bridge_config.bridge_token, allocator)
 }
 
-bridge_credential_refresh_typed :: proc(api_base, refresh_token: string, timeout_ms: int) -> (Bridge_Enroll_Credential, bool, contracts.Wire_Error) {
+bridge_credential_refresh_typed :: proc(api_base, refresh_token: string, timeout_ms: int) -> (Bridge_Enroll_Credential, bool, contracts.Wire_Error, bool) {
     headers := [?]http.Header{{name = "Authorization", value = strings.concatenate({"Bearer ", refresh_token}, context.temp_allocator)}}
     resp, ok := http.request_with_headers_deadline("POST", api_base, BRIDGE_ENROLL_REFRESH_PATH, "{}", headers[:], timeout_ms)
     defer delete(resp.body)
+    return bridge_refresh_response_classify(resp, ok, api_base)
+}
+bridge_refresh_response_classify :: proc(resp: http.Response, ok: bool, api_base: string) -> (Bridge_Enroll_Credential, bool, contracts.Wire_Error, bool) {
     err := bridge_operation_http_error(resp, ok, api_base)
-    if !ok || resp.status != 200 do return {}, false, err
+    if !ok do return {}, false, err, resp.may_have_sent
+    if resp.status != 200 {
+        // Retain typed code/class, while independently fencing a POST that
+        // cannot be proved to have been refused before token rotation.
+        uncertain := err.class == .retriable && !bridge_http_attempt_retriable("POST", resp, true)
+        return {}, false, err, uncertain
+    }
     cred := bridge_enroll_credential_from_json(resp.body)
-    if !bridge_enroll_credential_usable(cred.access_token) || !bridge_enroll_credential_usable(cred.refresh_token) do return {}, false, contracts.wire_error(.Bridge_Timeout)
-    return cred, true, {}
+    if !bridge_enroll_credential_usable(cred.access_token) || !bridge_enroll_credential_usable(cred.refresh_token) {
+        return {}, false, contracts.wire_error(.Bridge_Timeout), true
+    }
+    return cred, true, {}, false
 }
 
 Bridge_Refresh_Pending :: struct {
@@ -1624,6 +1635,7 @@ Bridge_Refresh_Pending :: struct {
 Bridge_Refresh_Recovery :: struct {
     pending: Bridge_Refresh_Pending,
     has_pair: bool,
+    unknown_outcome: bool,
 }
 bridge_refresh_pending_save :: proc(path: string, pending: Bridge_Refresh_Pending) -> bool {
     bytes, err := json.marshal(pending, allocator = context.temp_allocator)
@@ -1655,7 +1667,8 @@ bridge_refresh_recovery_step :: proc(
     exchange := bridge_credential_refresh_typed, save_pending := bridge_refresh_pending_save, commit_pair := bridge_refresh_pair_commit,
 ) -> (bool, contracts.Wire_Error) {
     if !recovery.has_pair {
-        cred, ok, err := exchange(api_base, stored, timeout_ms)
+        cred, ok, err, unknown := exchange(api_base, stored, timeout_ms)
+        recovery.unknown_outcome = unknown
         if !ok do return false, err
         recovery.pending.credential = cred
         recovery.pending.first_ms = budget.first_ms

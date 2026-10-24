@@ -170,7 +170,7 @@ bridge_retry_reserve :: proc(key: string, now: i64, duration_ms := BRIDGE_OPERAT
     }
     return b^, reserved
 }
-bridge_retry_finish :: proc(key: string, now: i64, success: bool, err: contracts.Wire_Error, base_ms: i64 = 1000, jitter_seed: u64 = 0) -> Bridge_Operation_Budget {
+bridge_retry_finish :: proc(key: string, now: i64, success: bool, err: contracts.Wire_Error, base_ms: i64 = 1000, jitter_seed: u64 = 0, park_on_failure := false) -> Bridge_Operation_Budget {
     sync.mutex_lock(&bridge_retry_journal_mutex); defer sync.mutex_unlock(&bridge_retry_journal_mutex)
     b := bridge_retry_journal_get_locked(key)
     if b == nil do return {state = .Waiting_Repair}
@@ -178,6 +178,7 @@ bridge_retry_finish :: proc(key: string, now: i64, success: bool, err: contracts
     seed := jitter_seed
     when !ODIN_TEST { if seed == 0 do seed = rand.uint64() }
     bridge_operation_finish(b, now, success, err, base_ms, seed)
+    if !success && park_on_failure do b.state = .Waiting_Repair
     if previous != b.state && bridge_operation_terminal(b^) {
         identity := bridge_local_hash_token(key)
         fmt.eprintfln("RECOVERY_TRANSITION identity=%s state=%v attempts=%d code=%v class=%v", identity, b.state, b.attempts, b.code, b.class)

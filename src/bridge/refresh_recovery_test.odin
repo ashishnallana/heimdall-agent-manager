@@ -1,5 +1,6 @@
 package main
 import "core:testing"
+import http "odin_test:lib/http_client"
 import "base:runtime"
 import "core:fmt"
 import "core:os"
@@ -9,9 +10,9 @@ import contracts "odin_test:contracts"
 
 refresh_test_exchanges: int
 refresh_test_commits: int
-refresh_test_exchange :: proc(api, token: string, timeout_ms: int) -> (Bridge_Enroll_Credential, bool, contracts.Wire_Error) {
+refresh_test_exchange :: proc(api, token: string, timeout_ms: int) -> (Bridge_Enroll_Credential, bool, contracts.Wire_Error, bool) {
     refresh_test_exchanges += 1
-    return {access_token = "new-access", refresh_token = "new-refresh"}, true, {}
+    return {access_token = "new-access", refresh_token = "new-refresh"}, true, {}, false
 }
 refresh_test_save :: proc(path: string, pending: Bridge_Refresh_Pending) -> bool { return true }
 refresh_test_commit :: proc(path, refresh_path, api, bridge_id: string, cred: Bridge_Enroll_Credential) -> bool {
@@ -59,4 +60,29 @@ refresh_pending_pair_survives_disk_restart_and_preserves_parent_budget :: proc(t
     testing.expect_value(t, resumed.attempts, b.attempts)
     testing.expect_value(t, resumed.deadline_ms, b.deadline_ms)
     _ = os.remove(path)
+}
+
+refresh_test_sent: bool
+refresh_test_transport_failure :: proc(api, token: string, timeout_ms: int) -> (Bridge_Enroll_Credential, bool, contracts.Wire_Error, bool) {
+    refresh_test_exchanges += 1
+    return bridge_refresh_response_classify(http.Response{may_have_sent=refresh_test_sent}, false, "http://localhost")
+}
+@(test)
+refresh_lost_response_parks_but_preconnect_outage_keeps_finite_retries :: proc(t: ^testing.T) {
+    context.allocator = runtime.heap_allocator()
+    for sent in ([]bool{false, true}) {
+        bridge_retry_journal = {}
+        recovery: Bridge_Refresh_Recovery
+        refresh_test_exchanges = 0; refresh_test_sent = sent
+        for now: i64 = 1000; now < 3_601_000; now += 1000 {
+            budget, reserved := bridge_retry_reserve("refresh:unknown", now)
+            if !reserved do continue
+            ok, err := bridge_refresh_recovery_step(&recovery, "pending", "access", "refresh", "http://localhost", "b", "old", budget, 1000, refresh_test_transport_failure, refresh_test_save, refresh_test_commit)
+            bridge_retry_finish("refresh:unknown", now, ok, err, park_on_failure=recovery.unknown_outcome)
+        }
+        testing.expect_value(t, refresh_test_exchanges, 1 if sent else 6)
+        testing.expect_value(t, bridge_retry_status("refresh:unknown").state, Bridge_Operation_State.Waiting_Repair if sent else Bridge_Operation_State.Exhausted)
+    }
+    _, _, err, unknown := bridge_refresh_response_classify(http.Response{status=200,body="{}"}, true, "http://localhost")
+    testing.expect(t, unknown && err.class == .retriable)
 }

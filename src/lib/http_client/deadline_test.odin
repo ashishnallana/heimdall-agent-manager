@@ -36,6 +36,7 @@ deadline_bounds_slow_trickle_across_all_reads :: proc(t: ^testing.T) {
     defer delete(resp.body)
     elapsed := time.tick_since(started)
     testing.expect(t, !ok)
+    testing.expect(t, resp.may_have_sent, "a lost/truncated response fences unsafe POST replay")
     testing.expect(t, elapsed >= 50*time.Millisecond && elapsed < 300*time.Millisecond)
 }
 @(test)

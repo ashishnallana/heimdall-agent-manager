@@ -7,13 +7,14 @@ import tls "../tls_stream"
 // This API grants one cumulative monotonic budget to DNS, connect, TLS, writes
 // and every read. There is no detached I/O thread and the caller owns teardown.
 request_with_headers_deadline :: proc(method, base_url, request_path, body: string, headers: []Header, timeout_ms: int) -> (Response, bool) {
-    if timeout_ms <= 0 do return {}, false
+    may_have_sent := false
+    if timeout_ms <= 0 do return Response{may_have_sent=may_have_sent}, false
     started := time.tick_now()
     remaining := proc(started: time.Tick, ms: int) -> time.Duration {
         return max(0, time.Duration(ms)*time.Millisecond - time.tick_since(started))
     }
     host, port, secure, valid := parse_base_url(base_url)
-    if !valid do return {}, false
+    if !valid do return Response{may_have_sent=may_have_sent}, false
     path := request_target(base_url, request_path)
     req := build_http_request(method, host, port, path, body, headers)
     defer delete(req)
@@ -23,65 +24,70 @@ request_with_headers_deadline :: proc(method, base_url, request_path, body: stri
     if secure {
         // The Windows SChannel backend currently has an unbounded system DNS
         // entrypoint. Fail closed instead of pretending to enforce this API.
-        when ODIN_OS == .Windows { return {}, false }
+        when ODIN_OS == .Windows { return Response{may_have_sent=may_have_sent}, false }
         else {
             stream, ok := tls.dial(host, port, remaining(started, timeout_ms))
-            if !ok do return {}, false
+            if !ok do return Response{may_have_sent=may_have_sent}, false
             defer { tls.abort(&stream); tls.close(&stream) }
             left := remaining(started, timeout_ms)
-            if left <= 0 || tls.write_all(&stream, transmute([]byte)req, left) != .Ok do return {}, false
+            if left <= 0 do return Response{may_have_sent=may_have_sent}, false
+            // write_all cannot report its partial byte count; a failure here
+            // must conservatively be treated as an uncertain request.
+            may_have_sent = true
+            if tls.write_all(&stream, transmute([]byte)req, left) != .Ok do return Response{may_have_sent=may_have_sent}, false
             for remaining(started, timeout_ms) > 0 {
                 ready, available := tls.has_data(&stream)
-                if !available do return {}, false
+                if !available do return Response{may_have_sent=may_have_sent}, false
                 if ready {
                     n, read_ok := tls.read(&stream, buf[:])
-                    if !read_ok do return {}, false
-                    if n == 0 do return parse_response_bytes(data[:])
+                    if !read_ok do return Response{may_have_sent=may_have_sent}, false
+                    if n == 0 do return deadline_parse_response(data[:], may_have_sent)
                     append(&data, ..buf[:n])
-                    if response_complete(string(data[:])) do return parse_response_bytes(data[:])
+                    if response_complete(string(data[:])) do return deadline_parse_response(data[:], may_have_sent)
                 } else {
                     // Do not reap here: teardown must kill before reaping, so a
                     // later abort cannot signal a recycled process id.
                     time.sleep(min(time.Millisecond, remaining(started, timeout_ms)))
                 }
             }
-            return {}, false
+            return Response{may_have_sent=may_have_sent}, false
         }
     }
     when ODIN_OS == .Windows {
-        if _, literal := resolve_host_without_dns(host_trim_brackets(host), int(port)); !literal do return {}, false
+        if _, literal := resolve_host_without_dns(host_trim_brackets(host), int(port)); !literal do return Response{may_have_sent=may_have_sent}, false
     }
     left_ms := int(remaining(started, timeout_ms)/time.Millisecond)
-    if left_ms <= 0 do return {}, false
+    if left_ms <= 0 do return Response{may_have_sent=may_have_sent}, false
     endpoint, found := resolve_host_with_timeout(host, int(port), left_ms)
-    if !found do return {}, false
+    if !found do return Response{may_have_sent=may_have_sent}, false
     sock_any, create_err := net.create_socket(net.family_from_endpoint(endpoint), .TCP)
-    if create_err != nil do return {}, false
+    if create_err != nil do return Response{may_have_sent=may_have_sent}, false
     socket := sock_any.(net.TCP_Socket)
     defer net.close(socket)
-    if net.set_blocking(socket, false) != nil do return {}, false
+    if net.set_blocking(socket, false) != nil do return Response{may_have_sent=may_have_sent}, false
     left_ms = int(remaining(started, timeout_ms)/time.Millisecond)
-    if left_ms <= 0 || !connect_with_timeout(socket, endpoint, left_ms) do return {}, false
+    if left_ms <= 0 || !connect_with_timeout(socket, endpoint, left_ms) do return Response{may_have_sent=may_have_sent}, false
     sent := 0
     for sent < len(req) && remaining(started, timeout_ms) > 0 {
         n, err := net.send_tcp(socket, transmute([]byte)req[sent:])
-        if err != nil && err != .Would_Block && err != .Timeout do return {}, false
+        if n > 0 do may_have_sent = true
+        if err != nil && err != .Would_Block && err != .Timeout do return Response{may_have_sent=may_have_sent}, false
         if n > 0 do sent += n
         if n <= 0 do time.sleep(min(time.Millisecond, remaining(started, timeout_ms)))
     }
-    if sent != len(req) do return {}, false
+    if sent != len(req) do return Response{may_have_sent=may_have_sent}, false
     for remaining(started, timeout_ms) > 0 {
         n, err := net.recv_tcp(socket, buf[:])
         if err != nil {
-            if err != .Would_Block && err != .Timeout do return {}, false
+            if err != .Would_Block && err != .Timeout do return Response{may_have_sent=may_have_sent}, false
             time.sleep(min(time.Millisecond, remaining(started, timeout_ms)))
             continue
         }
-        if n == 0 do return parse_response_bytes(data[:])
+        if n == 0 do return deadline_parse_response(data[:], may_have_sent)
         append(&data, ..buf[:n])
-        if response_complete(string(data[:])) do return parse_response_bytes(data[:])
+        if response_complete(string(data[:])) do return deadline_parse_response(data[:], may_have_sent)
     }
-    return {}, false
+    return Response{may_have_sent=may_have_sent}, false
 }
 
 deadline_supported :: proc(base_url: string) -> bool {
@@ -92,4 +98,10 @@ deadline_supported :: proc(base_url: string) -> bool {
         _, literal := resolve_host_without_dns(host_trim_brackets(host), int(port))
         return literal
     } else { return true }
+}
+
+deadline_parse_response :: proc(data: []byte, may_have_sent: bool) -> (Response, bool) {
+    resp, ok := parse_response_bytes(data)
+    resp.may_have_sent = may_have_sent
+    return resp, ok
 }
