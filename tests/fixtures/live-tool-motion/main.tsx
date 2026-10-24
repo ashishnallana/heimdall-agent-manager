@@ -33,6 +33,7 @@ const message = (n: number, own = false) => ({ key: 'm' + n, messageId: 'm' + n,
   body: 'Conversation message ' + n, isUser: own, createdUnixMs: 1, messageType: 'tool_activity', metadata: {} });
 const fixture: any = {
   scrollWrites: [], opened: [],
+  deliveryTimes: [],
   setCalls(ids: number[], status = 'completed') {
     const next = ids.map((id) => ({ ...snapshot('inst_fixture').active[0],
       call_id: 'call_' + id, summary: 'Tool call ' + id + ': rg pattern src', started_at_ms: Date.now() - 1000 }));
@@ -42,6 +43,28 @@ const fixture: any = {
     current = snapshot('inst_fixture', ++revision, { generation, active: next, completed_since_last: completed });
     socket.state(current, needsBaseline);
     needsBaseline = false;
+  },
+  completeOnly(id: number, status = 'completed', baseline = false, refresh = false) {
+    const call = { ...snapshot('inst_fixture').active[0], call_id: 'call_' + id,
+      summary: 'Instant tool call ' + id, status, duration_ms: 17, completed_at_ms: Date.now() };
+    current = snapshot('inst_fixture', ++revision, { generation, active: calls, completed_since_last: [call] });
+    socket.state(current, baseline || needsBaseline, refresh);
+    needsBaseline = false;
+  },
+  replay() { socket.state(current, false); },
+  coalescedHistory(id: number) {
+    fixture.completeOnly(id, 'completed', true);
+    fixture.completeOnly(id);
+    fixture.completeOnly(id + 1, 'completed', false, true);
+    fixture.completeOnly(id + 1);
+  },
+  fastCall(id: number, status = 'completed') {
+    const started = performance.now();
+    fixture.setCalls([id]);
+    setTimeout(() => {
+      fixture.setCalls([], status);
+      fixture.deliveryTimes.push({ id, elapsed: performance.now() - started });
+    }, 20);
   },
   unavailable() {
     socket.frame({ type: 'unavailable', instance_id: 'inst_fixture', reason: 'bridge_offline' });

@@ -188,7 +188,7 @@ export class ToolActivityStream {
     receipt.order = { epoch: snapshot.epoch, generation: snapshot.generation, revision: snapshot.revision };
     receipt.deadline = this.env.now() + TOOL_FRESH_MS;
     this.failures = 0;
-    this.dispatch(toolStateReceived(snapshot));
+    this.dispatch(toolStateReceived(snapshot, { baseline: frame.baseline, refresh: frame.refresh }));
   }
 
   private tick() {
