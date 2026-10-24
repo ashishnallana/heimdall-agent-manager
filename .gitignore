@@ -39,6 +39,7 @@ hub.db-wal
 /content
 /http
 /ws
+/*-llvm-*/
 
 # Local-only VPS deployment runbook (not for the repo)
 /deployment.md
