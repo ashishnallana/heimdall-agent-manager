@@ -116,28 +116,15 @@ main :: proc() {
 	// REQ-EA-4: finish or discard an atomic enrollment a crash left staged, BEFORE the
 	// credential is read: a committed one must start with its new credential, a
 	// rolled-back one must not leave its staging behind.
-	_ = bridge_enroll_atomic_recover(os.args)
+    recovery_command := len(os.args) > 2 && os.args[1] == "recovery" && (os.args[2] == "resume-sync" || os.args[2] == "resume-refresh")
+    // Offline recovery must acquire exclusion before any durable-state repair.
+    if !recovery_command do _ = bridge_enroll_atomic_recover(os.args)
 	bridge_config = bridge_config_from_args(os.args)
 	default_credential_path := bridge_enroll_default_credential_path(bridge_config.daemon_url, strings.trim_space(bridge_config.daemon_id))
 	bridge_adopt_default_credential_if_needed(&bridge_config, default_credential_path)
 	delete(default_credential_path)
-    if len(os.args) > 2 && os.args[1] == "recovery" && (os.args[2] == "resume-sync" || os.args[2] == "resume-refresh") {
-        refresh := os.args[2] == "resume-refresh"
-        if refresh {
-            path := option_value(os.args, "--bridge-token-file", "")
-            if path == "" do path = bridge_enroll_default_credential_path(bridge_config.daemon_url, strings.trim_space(bridge_config.daemon_id))
-            pending := strings.concatenate({path, ".pending-rotation-v1"}, context.temp_allocator)
-            if os.exists(pending) {
-                fmt.eprintln("credential recovery resume refused: reconcile the pending rotated pair first")
-                os.exit(1)
-            }
-        }
-        key := fmt.aprintf("refresh:%s:%s", bridge_config.daemon_url, strings.trim_space(bridge_config.daemon_id)) if refresh else bridge_action_scheduler_sync_key()
-        defer delete(key)
-        if !bridge_retry_operator_resume_sync(key, refresh) {
-            fmt.eprintln("recovery resume refused: journal unavailable or operation in flight")
-            os.exit(1)
-        }
+    if recovery_command {
+        if !bridge_recovery_resume(bridge_config, cfg_lib.config_path_from_args(os.args), os.args[2] == "resume-refresh") do os.exit(1)
         fmt.println("recovery resumed; restart the bridge with the repaired configuration")
         return
     }

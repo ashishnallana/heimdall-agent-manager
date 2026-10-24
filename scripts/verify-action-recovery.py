@@ -40,6 +40,10 @@ def run(*args):
 
 
 run("nix", "build", ".#ham-hub", ".#ham-bridge", ".#ham-ctl", "--no-link")
+bridge_output = subprocess.check_output(
+    ["nix", "build", ".#ham-bridge", "--no-link", "--print-out-paths"], text=True,
+).strip()
+run("python3", "scripts/test-recovery-command.py", Path(bridge_output) / "bin/ham-bridge")
 for package in [
     "src/contracts", "src/lib/http_client", "src/lib/tls_stream", "src/lib/local_socket", "src/bridge",
     "src/hub/repository/sqlite", "src/hub/service/auth", "src/hub/service/bridge", "src/hub/service/agent", "src/hub/transport/http",

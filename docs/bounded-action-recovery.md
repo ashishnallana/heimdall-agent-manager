@@ -44,6 +44,8 @@ ham-bridge recovery resume-sync <the same hub/bridge/config arguments used by th
 
 After re-enrollment/configuration repair, `recovery resume-refresh` likewise starts a new renewal episode for the same bridge identity. It refuses while a pending rotated pair exists, so a spent-token exchange cannot replace local commit recovery.
 
+Each command takes the service config and hub/bridge scope locks before loading or rewriting the journal and holds them through the durable write. A running service/enrollment prevents recovery. Healthy credentials are not required, but refresh recovery requires the same effective credential-file path used by the service (including `HAM_BRIDGE_TOKEN_FILE`) and refuses any pending pair there. Recovery does not perform enrollment repair before acquiring exclusion.
+
 Each command exits after updating its controller receipt. Restart the service normally, without retaining this one-shot command in its service configuration. It refuses to clear readiness/unknown execution fences or a corrupt journal. Automatic reconnects do not invoke it.
 
 ## Verification and rollout
