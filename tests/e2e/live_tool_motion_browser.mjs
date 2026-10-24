@@ -34,7 +34,7 @@ async function sample(name, operations, { bottom = false, stable = false, maxWri
     const markerY = marker?.getBoundingClientRect().top;
     f.scrollWrites = [];
     const frames = [];
-    for (let i = 0; i < 72; i++) {
+    for (let i = 0; i < 120; i++) {
       for (const op of operations.filter((op) => op.at === i)) {
         if (op.kind === 'calls') f.setCalls(op.ids, op.status);
         if (op.kind === 'fast') f.fastCall(op.id, op.status);
@@ -93,8 +93,8 @@ function assertResidence(frames, id, { reduced = false, label = 'Succeeded', dur
   const firstCollapse = frames.find((frame) => frame.at > firstFull.at &&
     !frame.rowDetails.some((row) => key(row) && row.height >= row.fullHeight && row.opacity === 1));
   assert.ok(firstCollapse, `call ${id}: eventual collapse/removal observed`);
-  assert.ok(firstCollapse.at - firstFull.at >= 500,
-    `call ${id}: full geometry held ${firstCollapse.at - firstFull.at}ms, expected >=500ms`);
+  assert.ok(firstCollapse.at - firstFull.at >= 1000,
+    `call ${id}: full geometry held ${firstCollapse.at - firstFull.at}ms, expected >=1000ms`);
   const terminal = frames.flatMap((frame) => frame.rowDetails.filter((row) => key(row) && row.phase !== 'active'));
   assert.ok(terminal.length > 10, 'terminal result stays readable across frames');
   assert.ok(terminal.every((row) => row.label === label && (!duration || row.duration === duration)),
@@ -191,7 +191,7 @@ try {
   const reducedFast = await sample('reduced sub-50ms call earns full residence', [
     { at: 0, kind: 'fast', id: 106 },
   // Three discrete no-animation layouts: entry, active tail-gap removal on
-  // completion, and row removal. None should write during the 500ms hold.
+  // completion, and row removal. None should write during the 1000ms hold.
   ], { bottom: true, maxWrites: 3 });
   assertResidence(reducedFast, 106, { reduced: true, duration: '1.2 s' });
   assert.ok(reducedFast.filter((frame) => frame.rowDetails.some((row) => row.phase === 'holding'))

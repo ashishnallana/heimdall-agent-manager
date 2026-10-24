@@ -43,7 +43,7 @@ function useReducedMotion() {
   return reduced;
 }
 
-const MIN_VISIBLE_MS = 500;
+const MIN_VISIBLE_MS = 1000;
 
 // Activity controls the outcome/actions immediately. Presentation has its own
 // lifecycle so even a call completed before its first paint remains readable.

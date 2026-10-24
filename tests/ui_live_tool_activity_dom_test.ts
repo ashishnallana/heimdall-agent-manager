@@ -75,7 +75,8 @@ async function withDom(run: (env: any) => Promise<void>) {
     }
     time = target;
   };
-  const advanceMotion = async (ms = 1000) => {
+  // Allow entry, the full one-second residence, and exit to finish.
+  const advanceMotion = async (ms = 1600) => {
     for (let elapsed = 0; elapsed < ms; elapsed += 10) {
       await flushFrames();
       await advanceTime(Math.min(10, ms - elapsed));
@@ -267,7 +268,7 @@ test('common tools have distinct stable colors', () => {
 });
 
 for (const reduced of [false, true]) {
-  test(`fast completion stays fully visible for 500ms after entry (reduced=${reduced})`, async () => {
+  test(`fast completion stays fully visible for 1000ms after entry (reduced=${reduced})`, async () => {
     await withDom(async (env) => {
       await env.reduceMotion(reduced);
       await env.render(React.createElement(LiveToolActivity, { instanceId: 'inst_a', onOpenShell() {} }));
@@ -291,16 +292,16 @@ for (const reduced of [false, true]) {
       assert.equal(row.style.height, 'auto');
       assert.equal(row.style.opacity, '1');
       const heldAt = env.now;
-      await env.advanceTime(499);
+      await env.advanceTime(999);
       assert.equal(row.isConnected, true);
       assert.equal(row.getAttribute('data-tool-phase'), 'holding');
-      assert.equal(row.style.height, 'auto', 'no early height collapse at 499ms');
-      assert.equal(row.style.opacity, '1', 'no early fade at 499ms');
+      assert.equal(row.style.height, 'auto', 'no early height collapse at 999ms');
+      assert.equal(row.style.opacity, '1', 'no early fade at 999ms');
       await env.advanceTime(1);
       if (reduced) {
         assert.equal(row.isConnected, false, 'no reduced-motion animation after residence');
       } else {
-        assert.equal(env.now - heldAt, 500);
+        assert.equal(env.now - heldAt, 1000);
         assert.equal(row.getAttribute('data-tool-phase'), 'exiting');
         await env.flushFrames();
         assert.equal(row.style.height, '0px');
@@ -578,7 +579,7 @@ test('queued entry, rapid exit/reentry, reset and reduced-motion changes cancel 
     assert.doesNotMatch(q('live-tool-activity')!.querySelector('[aria-label="Running"]')!.className, /(?:^| )animate-pulse/);
     await act(async () => socket.state(snapshot('inst_a', 5, { generation: 2, active: [] }), false));
     assert.ok(q('live-tool-activity'), 'reduced motion retains the minimum readable residence');
-    await env.advanceTime(499);
+    await env.advanceTime(999);
     assert.ok(q('live-tool-activity'));
     await env.advanceTime(1);
     assert.equal(q('live-tool-activity'), null, 'reduced motion removes without animation at the residence deadline');
