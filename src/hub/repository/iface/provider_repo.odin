@@ -13,6 +13,9 @@ Bridge_Provider_Setting_List_Proc :: proc(ctx: rawptr, bridge_id: string) -> ([d
 
 Provider_Repository :: struct {
 	ctx:      rawptr,
+	create_extension_command: Provider_Extension_Command_Create_Proc,
+	save_extension_command: Provider_Extension_Command_Save_Proc,
+	list_extension_commands: Provider_Extension_Command_List_Proc,
 	list:     Provider_Catalog_List_Proc,
 	get:      Provider_Catalog_Get_Proc,
 	get_icon: Provider_Icon_Get_Proc,
@@ -61,4 +64,51 @@ provider_icon_get :: proc(repo: ^Provider_Repository, provider: string) -> (doma
 provider_catalog_etag :: proc(repo: ^Provider_Repository) -> (string, domain.Domain_Error) {
 	if repo == nil || repo.get_etag == nil do return "", domain.domain_error(.Internal_Error, "provider repository is not configured")
 	return repo.get_etag(repo.ctx)
+}
+
+Provider_Extension_Command_Create_Proc :: proc(
+	ctx: rawptr,
+	command: domain.Provider_Extension_Command,
+) -> (
+	bool,
+	domain.Domain_Error,
+)
+Provider_Extension_Command_Save_Proc :: proc(
+	ctx: rawptr,
+	command: domain.Provider_Extension_Command,
+) -> domain.Domain_Error
+Provider_Extension_Command_List_Proc :: proc(
+	ctx: rawptr,
+	bridge_id: string,
+) -> (
+	[dynamic]domain.Provider_Extension_Command,
+	domain.Domain_Error,
+)
+
+provider_extension_command_create :: proc(
+	repo: ^Provider_Repository,
+	command: domain.Provider_Extension_Command,
+) -> (
+	bool,
+	domain.Domain_Error,
+) {
+	if repo == nil || repo.create_extension_command == nil do return false, domain.domain_error(.Internal_Error, "extension command repository is not configured")
+	return repo.create_extension_command(repo.ctx, command)
+}
+provider_extension_command_save :: proc(
+	repo: ^Provider_Repository,
+	command: domain.Provider_Extension_Command,
+) -> domain.Domain_Error {
+	if repo == nil || repo.save_extension_command == nil do return domain.domain_error(.Internal_Error, "extension command repository is not configured")
+	return repo.save_extension_command(repo.ctx, command)
+}
+provider_extension_command_list :: proc(
+	repo: ^Provider_Repository,
+	bridge_id: string,
+) -> (
+	[dynamic]domain.Provider_Extension_Command,
+	domain.Domain_Error,
+) {
+	if repo == nil || repo.list_extension_commands == nil do return nil, domain.domain_error(.Internal_Error, "extension command repository is not configured")
+	return repo.list_extension_commands(repo.ctx, bridge_id)
 }

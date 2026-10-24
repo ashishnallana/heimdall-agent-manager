@@ -6,6 +6,7 @@ import "core:strings"
 import "core:time"
 import contracts "odin_test:contracts"
 import domain "odin_test:hub/domain"
+import iface "odin_test:hub/repository/iface"
 import platform "odin_test:hub/platform"
 import agent_service "odin_test:hub/service/agent"
 import auth_service "odin_test:hub/service/auth"
@@ -192,6 +193,27 @@ bridge_provider_status_response :: proc(
 	strings.write_string(&b, "\",\"providers\":[")
 	for view, i in views {if i > 0 do strings.write_byte(&b, ',')
 		write_bridge_provider_view_json(&b, view)}
+	strings.write_string(&b, "],\"extension_commands\":[")
+	if h.providers.repo != nil && h.providers.repo.list_extension_commands != nil {
+		commands, command_err := iface.provider_extension_command_list(h.providers.repo, bridge_id)
+		if command_err.code != .None do return respond_error(command_err, request_id)
+		defer domain.provider_extension_commands_destroy(commands)
+		count := 0
+		for command, i in commands {
+			if command.kind != "install" do continue
+			latest := true
+			for j in i + 1 ..< len(commands) {
+				if commands[j].kind == "install" &&
+				   commands[j].provider == command.provider {latest = false; break}
+			}
+			if !latest do continue
+			if count > 0 do strings.write_byte(&b, ',')
+			count += 1
+			payload := extension_command_json(command)
+			strings.write_string(&b, payload)
+			delete(payload)
+		}
+	}
 	strings.write_string(&b, "]}")
 	return respond_success(strings.to_string(b), request_id, server_time)
 }

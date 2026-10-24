@@ -1743,6 +1743,7 @@ bridge_ws_upgrade_handler :: proc(ctx: rawptr, req: Request, client: net.TCP_Soc
 	// the UI learns a bridge came (back) online — e.g. right after enrollment commit
 	// and service restart. The enroll-only socket returned long before this point.
 	bridge_publish_online_status(h, bridge)
+	if ext_err := bridge_extension_reconnected(h, bridge); ext_err.code != .None do fmt.eprintfln("extension reconnect failed bridge=%s: %s", bridge.bridge_id, ext_err.message)
 	if bridge.telemetry_enabled == "enabled" {
 		cmd_id := fmt.tprintf("cmd_tel_%d", time.to_unix_nanoseconds(time.now()))
 		payload := bridge_set_telemetry_payload(cmd_id, true)
@@ -2216,7 +2217,10 @@ bridge_ws_process_frame :: proc(h: ^Bridge_Handlers, bridge_id: string, connecti
 	case "bridge_log":
 		// bridge_logs plan v2 §4.1: validate + count + hand off; never SQLite here.
 		_ = bridge_apply_log_frame(h.bridge_logs, bridge_id, text, connection)
+	case "provider_extension_install_progress":
+		if ext_err := bridge_extension_frame(h, bridge_id, type, text); ext_err.code != .None do fmt.eprintln("extension progress:", ext_err.message)
 	case "bridge_update_progress":
+		if ext_err := bridge_extension_frame(h, bridge_id, type, text); ext_err.code != .None do fmt.eprintln("extension update progress:", ext_err.message)
 		stage := json_string(text, "stage")
 		message := json_string(text, "message")
 		progress := json_int(text, "progress_percent", 0)
@@ -2234,6 +2238,7 @@ bridge_ws_process_frame :: proc(h: ^Bridge_Handlers, bridge_id: string, connecti
 		delete(stage)
 		delete(message)
 	case "command_result", "project_path_validation_result", "provider_discovery_report", "fs_list_dir_result", "fs_stat_result", "fs_make_dir_result", "fs_read_file_result", "fs_create_file_result", "fs_write_file_result", "fs_batch_write_result", "fs_move_result", "fs_delete_result", "vcs_capabilities_result", "vcs_status_result", "vcs_files_result", "vcs_diff_result", "vcs_log_result", "vcs_commit_diff_result", "vcs_show_file_result", "vcs_workspaces_result", "vcs_stage_result", "vcs_unstage_result", "vcs_revert_result", "vcs_save_file_result", "vcs_commit_result", "vcs_upload_result", "vcs_sync_result", "fs_find_files_result", "fs_grep_result", "shell_start_result", "shell_restart_result", "shell_list_result", "shell_logs_result", "shell_capture_result", "shell_set_port_result", "bridge_unseal_result", "task_chain_search_result", "taskv2_merge_worktree_result":
+		if ext_err := bridge_extension_frame(h, bridge_id, type, text); ext_err.code != .None do fmt.eprintln("extension command result:", ext_err.message)
 		command_id := json_string(text, "command_id")
 		_ = bridge_runtime_service.runtime_command_result_for_connection(h.bridge_runtime_registry, bridge_id, connection_generation, command_id, text)
 		if type == "command_result" && h.agents != nil do agent_service.apply_reconfiguration_command_result(h.agents, bridge_id, command_id, text)
@@ -2691,17 +2696,37 @@ bridge_update_handler :: proc(ctx: rawptr, req: Request) -> Response {
 
 	bridge_id := strings.trim_suffix(suffix_after(req.path, "/api/v1/bridges/"), "/update")
 	if strings.trim_space(bridge_id) == "" {
-		return respond_error(domain.domain_error(.Validation_Failed, "bridge_id is required"), req.request_id)
+		return respond_error(
+			domain.domain_error(.Validation_Failed, "bridge_id is required"),
+			req.request_id,
+		)
 	}
 
 	bridge, bridge_ok, err := bridge_service.get_bridge(h.bridges, auth_ctx, bridge_id)
 	if !bridge_ok do return respond_error(err, req.request_id)
 
 	// Validate bridge state and reject offline or not-live bridges with 422
-	if bridge.status != .Online || !project_service.bridge_runtime_registry_has_live(h.bridge_runtime_registry, bridge.bridge_id) {
-		return respond_error(domain.domain_error(.Unprocessable_Entity, fmt.tprintf("Bridge %s is not online", bridge.bridge_id)), req.request_id)
+	if bridge.status != .Online ||
+	   !project_service.bridge_runtime_registry_has_live(
+			   h.bridge_runtime_registry,
+			   bridge.bridge_id,
+		   ) {
+		return respond_error(
+			domain.domain_error(
+				.Unprocessable_Entity,
+				fmt.tprintf("Bridge %s is not online", bridge.bridge_id),
+			),
+			req.request_id,
+		)
 	}
 
+
+	update_extensions := false
+	if jsonx.has_key(req.body, "update_extensions", true) {
+		value, valid := json_bool_literal(req.body, "update_extensions")
+		if !valid do return respond_error(domain.domain_error(.Validation_Failed, "update_extensions must be a JSON boolean"), req.request_id)
+		update_extensions = value
+	}
 	force := json_bool_value(req.body, "force")
 	drain_timeout := json_int(req.body, "drain_timeout_seconds", 60)
 	target_version_raw := json_string(req.body, "target_version")
@@ -2710,13 +2735,34 @@ bridge_update_handler :: proc(ctx: rawptr, req: Request) -> Response {
 
 	active_tasks := agent_service.active_instance_count_for_bridge(h.agents, bridge.bridge_id)
 	if active_tasks > 0 && !force && drain_timeout <= 0 {
-		return respond_error(domain.domain_error(.Conflict, fmt.tprintf("Bridge %s has %d active agent tasks; specify force=true or a positive drain_timeout_seconds", bridge.bridge_id, active_tasks)), req.request_id)
+		return respond_error(
+			domain.domain_error(
+				.Conflict,
+				fmt.tprintf(
+					"Bridge %s has %d active agent tasks; specify force=true or a positive drain_timeout_seconds",
+					bridge.bridge_id,
+					active_tasks,
+				),
+			),
+			req.request_id,
+		)
 	}
 
-	cmd_id, send_ok, send_err := bridge_service.send_bridge_update(h.bridges, auth_ctx, bridge.bridge_id, target_version, force, drain_timeout)
+	cmd_id, send_ok, send_err := bridge_service.send_bridge_update(
+		h.bridges,
+		auth_ctx,
+		bridge.bridge_id,
+		target_version,
+		force,
+		drain_timeout,
+		update_extensions = update_extensions,
+	)
 	if !send_ok {
 		if send_err.code == .Bridge_Offline || send_err.code == .Unprocessable_Entity {
-			return respond_error(domain.domain_error(.Unprocessable_Entity, send_err.message), req.request_id)
+			return respond_error(
+				domain.domain_error(.Unprocessable_Entity, send_err.message),
+				req.request_id,
+			)
 		}
 		return respond_error(send_err, req.request_id)
 	}

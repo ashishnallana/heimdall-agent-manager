@@ -120,3 +120,21 @@ bridge_provider_settings_destroy :: proc(values: [dynamic]Bridge_Provider_Settin
 	for value in values do bridge_provider_setting_destroy(value)
 	delete(values)
 }
+
+// Durable command tracking also carries per-update consent across reconnects.
+Provider_Extension_Command :: struct {
+	command_id, bridge_id, kind, provider, parent_id:                             string,
+	state, message, target_version, target_commit, source_version, source_commit: string,
+	update_extensions:                                                            bool,
+	progress:                                                                     int,
+}
+provider_extension_command_destroy :: proc(value: Provider_Extension_Command) {
+	delete(value.command_id); delete(value.bridge_id); delete(value.kind)
+	delete(value.provider); delete(value.parent_id); delete(value.state)
+	delete(value.message); delete(value.target_version); delete(value.target_commit)
+	delete(value.source_version); delete(value.source_commit)
+}
+provider_extension_commands_destroy :: proc(values: [dynamic]Provider_Extension_Command) {
+	for value in values do provider_extension_command_destroy(value)
+	delete(values)
+}

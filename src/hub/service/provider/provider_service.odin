@@ -24,6 +24,7 @@ Provider_Test_Run :: struct {
 Provider_Service :: struct {
 	repo:       ^iface.Provider_Repository,
 	test_mutex: sync.Mutex,
+	extension_mutex: sync.Mutex,
 	test_runs:  [dynamic]Provider_Test_Run,
 }
 

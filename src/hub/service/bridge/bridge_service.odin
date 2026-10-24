@@ -18,6 +18,7 @@ Bridge_Service :: struct {
 	ids: ^platform.ID_Generator,
 	bridge_command_sink: project_service.Bridge_Command_Sink,
 	catalog: ^Bridge_Update_Catalog,
+	provider_repo: ^iface.Provider_Repository,
 	// connection_closer terminates a bridge's LIVE control WebSocket (audit F6).
 	// A seam rather than a direct registry dependency for two reasons: this package
 	// must not reach into the transport layer that owns the socket, and a test needs
@@ -877,12 +878,20 @@ send_bridge_update :: proc(
 	force: bool = false,
 	drain_timeout_seconds: int = 60,
 	sink_override: project_service.Bridge_Command_Sink = {},
-) -> (string, bool, domain.Domain_Error) {
+	update_extensions: bool = false,
+) -> (
+	string,
+	bool,
+	domain.Domain_Error,
+) {
 	if strings.trim_space(bridge_id) == "" {
 		return "", false, domain.domain_error(.Validation_Failed, "bridge_id is required")
 	}
 	if auth.kind != .User_Token && auth.kind != .Trusted_Proxy {
-		return "", false, domain.domain_error(.Forbidden, "user authentication required to update bridge")
+		return "", false, domain.domain_error(
+			.Forbidden,
+			"user authentication required to update bridge",
+		)
 	}
 	bridge, ok, err := get_bridge(service, auth, bridge_id)
 	if !ok do return "", false, err
@@ -891,14 +900,21 @@ send_bridge_update :: proc(
 		return "", false, domain.domain_error(.Bridge_Revoked, "bridge is revoked")
 	}
 	if bridge.status != .Online {
-		return "", false, domain.domain_error(.Unprocessable_Entity, fmt.tprintf("Bridge %s is not online", bridge.bridge_id))
+		return "", false, domain.domain_error(
+			.Unprocessable_Entity,
+			fmt.tprintf("Bridge %s is not online", bridge.bridge_id),
+		)
 	}
 
 	info := resolve_bridge_update_info(service.catalog, bridge)
 	if !info.artifact_available {
 		return "", false, domain.domain_error(
 			.Validation_Failed,
-			fmt.tprintf("update %s is not available for this target (%s): no verified update artifact", info.latest_version, info.target),
+			fmt.tprintf(
+				"update %s is not available for this target (%s): no verified update artifact",
+				info.latest_version,
+				info.target,
+			),
 		)
 	}
 	effective_version := target_version
@@ -920,18 +936,58 @@ send_bridge_update :: proc(
 		cmd_id = "cmd_upd_default"
 	}
 
-	cmd_json := bridge_update_command_json(cmd_id, effective_version, download_url, sha256, force, drain_timeout_seconds)
+
+	// Save consent BEFORE dispatch: a successful send can immediately restart the Bridge.
+	tracked := domain.Provider_Extension_Command {
+		command_id        = cmd_id,
+		bridge_id         = bridge.bridge_id,
+		kind              = "bridge_update",
+		state             = "dispatched",
+		update_extensions = update_extensions,
+		target_version    = effective_version,
+		target_commit     = info.latest_commit_sha,
+		source_version    = bridge.version,
+		source_commit     = bridge.commit_sha,
+	}
+	if service.provider_repo != nil {
+		created, track_err := iface.provider_extension_command_create(
+			service.provider_repo,
+			tracked,
+		)
+		if !created do return "", false, track_err
+	} else if update_extensions {
+		return "", false, domain.domain_error(
+			.Internal_Error,
+			"extension update tracking is not configured",
+		)
+	}
+	cmd_json := bridge_update_command_json(
+		cmd_id,
+		effective_version,
+		download_url,
+		sha256,
+		force,
+		drain_timeout_seconds,
+	)
 	defer delete(cmd_json)
 
 	sent, send_err := project_service.bridge_command_send_runtime(
 		sink,
-		project_service.Runtime_Command{
+		project_service.Runtime_Command {
 			bridge_id = bridge.bridge_id,
 			command_id = cmd_id,
 			body_json = cmd_json,
 		},
 	)
-	if !sent do return "", false, send_err
+
+	if !sent {
+		if service.provider_repo != nil {
+			tracked.state = "failed"
+			tracked.message = send_err.message
+			_ = iface.provider_extension_command_save(service.provider_repo, tracked)
+		}
+		return "", false, send_err
+	}
 
 	bridge.update_status = "updating"
 	bridge.update_message = "Update command dispatched"

@@ -11,6 +11,9 @@ new_provider_repository :: proc(impl: ^Provider_Repo_SQLite, conn: ^Conn) -> ifa
 	impl.conn = conn
 	return iface.Provider_Repository{
 		ctx = rawptr(impl),
+	create_extension_command = provider_extension_command_create_sqlite,
+	save_extension_command = provider_extension_command_save_sqlite,
+	list_extension_commands = provider_extension_command_list_sqlite,
 		list = provider_catalog_list_sqlite,
 		get = provider_catalog_get_sqlite,
 		get_icon = provider_icon_get_sqlite,
