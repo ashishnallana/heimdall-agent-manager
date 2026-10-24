@@ -1369,3 +1369,20 @@ test_bridge_make_directory_all_creates_missing_tail_only :: proc(t: ^testing.T) 
 	testing.expect_value(t, bridge_make_directory_all(strings.concatenate({base, "/x"}, context.temp_allocator)), nil)
 	testing.expect(t, os.exists(strings.concatenate({base, "/x"}, context.temp_allocator)), "single missing component")
 }
+
+// Windows: cleaned paths are `\`-separated and case-insensitive, so containment must
+// not assume root + "/" (regression: every subdirectory was path_outside_root).
+@(test)
+test_bridge_fs_is_within_root_windows_separators :: proc(t: ^testing.T) {
+	when ODIN_OS == .Windows {
+		root := `C:\Users\ashis`
+		testing.expect(t, bridge_fs_is_within_root(`C:\Users\ashis`, root), "root itself")
+		testing.expect(t, bridge_fs_is_within_root(`C:\Users\ashis\Cisco Packet Tracer 8.2.2`, root), "backslash child")
+		testing.expect(t, bridge_fs_is_within_root(`C:\Users\ashis/desktop/brolabs`, root), "mixed separators")
+		testing.expect(t, bridge_fs_is_within_root(`c:\users\ASHIS\Desktop`, root), "case-insensitive")
+		testing.expect(t, !bridge_fs_is_within_root(`C:\Users\ashisX`, root), "sibling prefix rejected")
+		testing.expect(t, !bridge_fs_is_within_root(`C:\Users`, root), "parent rejected")
+		testing.expect(t, !bridge_fs_is_within_root(`D:\Users\ashis\x`, root), "other drive rejected")
+		testing.expect(t, bridge_fs_is_within_root(`C:\Windows`, `C:\`), "drive root contains children")
+	}
+}
