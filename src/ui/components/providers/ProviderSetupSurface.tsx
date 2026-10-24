@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Button, Icon, Spinner, StatusPill } from '@ui';
 import {
   type BridgeProviderStatus,
@@ -7,6 +7,7 @@ import {
 } from './providerSetupApi';
 import ProviderTestRunModal, { type ProviderTestTarget } from './ProviderTestRunModal';
 import { ProviderExtensionBadge, ProviderExtensionPill } from '../extension/ExtensionBadges';
+import ProviderExtensionInstallAction from '../extension/ProviderExtensionInstallAction';
 import {
   DISCOVERY_RETRY_MS,
   DISCOVERY_RETRY_TIMEOUT_MS,
@@ -70,6 +71,14 @@ export function ProviderSetupSurface({ bridgeId, mode, variant = 'full', onApply
       (error) => { if (!cancelled) setLoadError(String(error?.message || error)); },
     );
     return () => { cancelled = true; };
+  }, [bridgeId]);
+
+  const refreshAfterExtensionInstall = useCallback(() => {
+    if (!bridgeId) return;
+    void providerSetupApi.get(bridgeId).then(
+      (response) => { if (mounted.current) setPayload(response); },
+      () => { if (mounted.current) setNotice('Could not refresh provider details after installation. Scan again to retry.'); },
+    );
   }, [bridgeId]);
 
   const enabledProviders = useMemo(() => {
@@ -350,6 +359,18 @@ export function ProviderSetupSurface({ bridgeId, mode, variant = 'full', onApply
               </div>
               {available ? (
                 <ProviderExtensionBadge providerName={provider.provider} extension={provider.extension} className="-mt-2 px-4 pb-3 sm:pl-[4.75rem]" />
+              ) : null}
+
+              {available ? (
+                <ProviderExtensionInstallAction
+                  key={`${bridge.bridge_id}:${provider.provider}`}
+                  bridgeId={bridge.bridge_id}
+                  provider={provider.provider}
+                  extension={provider.extension}
+                  online={bridge.status === 'online'}
+                  disabled={busy !== ''}
+                  onComplete={refreshAfterExtensionInstall}
+                />
               ) : null}
 
               {!isExpanded ? null : available ? (

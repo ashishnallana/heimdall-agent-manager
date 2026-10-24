@@ -53,6 +53,7 @@ export default function BridgesPanel() {
   // Update modal state
   const [updateModalBridge, setUpdateModalBridge] = useState<Bridge | null>(null);
   const [updateForce, setUpdateForce] = useState(false);
+  const [updateExtensions, setUpdateExtensions] = useState(true);
   const [updateDrainTimeout, setUpdateDrainTimeout] = useState(60);
   const [updateBusy, setUpdateBusy] = useState(false);
   const [updateError, setUpdateError] = useState('');
@@ -124,6 +125,7 @@ export default function BridgesPanel() {
         bridgeId,
         targetVersion: updateModalBridge.latest_version || 'latest',
         force: updateForce,
+        updateExtensions,
         drainTimeoutSeconds: updateDrainTimeout,
       }).unwrap();
       setUpdateModalBridge(null);
@@ -333,6 +335,7 @@ export default function BridgesPanel() {
                             onClick={() => {
                               setUpdateModalBridge(bridge);
                               setUpdateForce(false);
+                              setUpdateExtensions(true);
                               setUpdateDrainTimeout(60);
                               setUpdateError('');
                             }}
@@ -420,6 +423,20 @@ export default function BridgesPanel() {
                 This will stage the latest update bundle on the remote bridge, verify its cryptographic checksum and binary compatibility, and perform an in-situ restart with automated health-checked rollback.
               </div>
             )}
+
+            <label className="flex items-start gap-2 text-sm text-primary">
+              <input
+                type="checkbox"
+                data-debug-id="settings-bridge-update-extensions"
+                checked={updateExtensions}
+                disabled={updateBusy}
+                onChange={(event) => setUpdateExtensions(event.target.checked)}
+              />
+              <span>
+                Also update extensions
+                <span className="block text-xs text-muted">Update installed, enabled provider extensions after the bridge reconnects.</span>
+              </span>
+            </label>
 
             {updateError ? (
               <div data-debug-id="settings-bridge-update-error" className="rounded-xl border border-danger/30 bg-danger-soft p-2.5 text-xs text-danger">

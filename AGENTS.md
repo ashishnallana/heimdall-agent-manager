@@ -537,6 +537,13 @@ All of the following element types must have `data-debug-id`:
 
 `AgentPickerV2` is the store-backed, side-effect-free agent selector. It reads agents + durable identities from `useListAgentsQuery` and owns all filtering/search/grouping; callers only configure `entityTypes` (`agent_id` / `agent_instance_id`), `multiple`, `projectId`, `includeRemoteProxies`, `includeUserProxy`, `filterPredicate`, and `defaultSelected` (an `AgentSelection[]` or `string[]` used to pre-highlight/seed the selection). It emits `AgentSelection[]` via `onChange` (single-mode click, fires immediately) or `onConfirm` (multi-mode OK). It never launches or binds agents. Bound remote proxies appear inline (local ids) with a `remote` tag. It requires a `debugId` and derives child IDs: `${debugId}-close-btn`, `${debugId}-search-input`, `${debugId}-results`, `${debugId}-selected-summary`, `${debugId}-chip-${type}:${id}`, `${debugId}-chip-remove-btn-${type}:${id}`, `${debugId}-clear-all-btn`, `${debugId}-section-agent-ids`, `${debugId}-section-instances`, `${debugId}-row-${type}:${id}`, `${debugId}-row-remote-tag-${type}:${id}`, `${debugId}-loading`, `${debugId}-empty`, and (multi-mode) `${debugId}-footer`, `${debugId}-cancel-btn`, `${debugId}-ok-btn`. Current callers: `task-assignee-agent-picker` (single) and `task-reviewer-agent-picker` (multi).
 
+### Provider extension installation controls
+
+| Component | Debug IDs |
+| --- | --- |
+| `ProviderExtensionInstallAction` | `provider-extension-action-${provider}`, `provider-extension-install-btn-${provider}`, `provider-extension-progress-${provider}` |
+| `BridgesPanel` | `settings-bridge-update-extensions` |
+
 ### Adding new elements
 
 When adding any new interactive element to the UI:

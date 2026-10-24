@@ -2,6 +2,7 @@ import * as daemonApi from '../daemonApi';
 import { heimdallApi, withSessionQuery } from '../heimdallApi';
 import { useMemo } from 'react';
 import { cookieJsonFetch, cookieMutation, customQueryError } from '../cookieFetch';
+import { type ProviderExtensionCommand, isExtensionInstallTerminal } from '../../components/extension/extensionInstallModel';
 
 export type AgentBridgeSupportEntry = {
   bridgeId: string;
@@ -274,12 +275,13 @@ export const bridgeSupportApi = heimdallApi.injectEndpoints({
       },
       invalidatesTags: (_result, _error, { bridgeId }) => [{ type: 'Bridges' as const, id: 'LIST' }, { type: 'Bridges' as const, id: bridgeId }],
     }),
-    updateBridge: build.mutation<any, { bridgeId: string; targetVersion?: string; force?: boolean; drainTimeoutSeconds?: number }>({
-      queryFn: async ({ bridgeId, targetVersion, force, drainTimeoutSeconds }) => {
+    updateBridge: build.mutation<any, { bridgeId: string; targetVersion?: string; force?: boolean; drainTimeoutSeconds?: number; updateExtensions?: boolean }>({
+      queryFn: async ({ bridgeId, targetVersion, force, drainTimeoutSeconds, updateExtensions }) => {
         try {
           const body: Record<string, any> = {};
           if (targetVersion !== undefined) body.target_version = targetVersion;
           if (force !== undefined) body.force = force;
+          if (updateExtensions !== undefined) body.update_extensions = updateExtensions;
           if (drainTimeoutSeconds !== undefined) body.drain_timeout_seconds = drainTimeoutSeconds;
           const data = await cookieMutation(`/bridges/${encodeURIComponent(bridgeId)}/update`, 'POST', body);
           return { data };
@@ -288,6 +290,36 @@ export const bridgeSupportApi = heimdallApi.injectEndpoints({
         }
       },
       invalidatesTags: (_result, _error, { bridgeId }) => [{ type: 'Bridges' as const, id: 'LIST' }, { type: 'Bridges' as const, id: bridgeId }],
+    }),
+    installProviderExtension: build.mutation<ProviderExtensionCommand, { bridgeId: string; provider: string }>({
+      queryFn: async ({ bridgeId, provider }) => {
+        try {
+          const data = await cookieMutation(`/bridges/${encodeURIComponent(bridgeId)}/providers/${encodeURIComponent(provider)}/extension-install`, 'POST', {});
+          return { data };
+        } catch (error: any) {
+          return { error: customQueryError(error) as any };
+        }
+      },
+      invalidatesTags: (_result, _error, { bridgeId }) => [{ type: 'BridgeProviders' as const, id: bridgeId }],
+    }),
+    getProviderExtensionInstall: build.query<ProviderExtensionCommand, { bridgeId: string; provider: string; commandId: string }>({
+      queryFn: async ({ bridgeId, provider, commandId }) => {
+        try {
+          const data = await cookieJsonFetch(`/bridges/${encodeURIComponent(bridgeId)}/providers/${encodeURIComponent(provider)}/extension-install/${encodeURIComponent(commandId)}`);
+          return { data };
+        } catch (error: any) {
+          return { error: customQueryError(error) as any };
+        }
+      },
+      async onQueryStarted({ bridgeId }, { dispatch, queryFulfilled }) {
+        try {
+          const { data } = await queryFulfilled;
+          if (isExtensionInstallTerminal(data.status)) {
+            dispatch(heimdallApi.util.invalidateTags([{ type: 'BridgeProviders', id: bridgeId }]));
+          }
+        } catch { /* Request errors are shown by the caller; retain the tracked command. */ }
+      },
+      keepUnusedDataFor: 0,
     }),
     // The three bridge-enrollment endpoints are DELETED (REQ-ENROLL-9):
     // POST/GET /bridge-enrollments and DELETE /bridge-enrollments/<id>. They minted,
@@ -312,7 +344,8 @@ export const bridgeSupportApi = heimdallApi.injectEndpoints({
               // (null when the provider ships no extension).
               extension: entry?.extension ?? null,
             }));
-          return { data: { bridge_id: data?.bridge_id || bridgeId, providers } };
+          return { data: { bridge_id: data?.bridge_id || bridgeId, providers,
+            extension_commands: Array.isArray(data?.extension_commands) ? data.extension_commands : [] } };
         } catch (error: any) {
           return { error: customQueryError(error) as any };
         }
@@ -344,6 +377,8 @@ export const {
   useListBridgeEventsQuery,
   usePurgeBridgeEventsMutation,
   useUpdateBridgeMutation,
+  useInstallProviderExtensionMutation,
+  useGetProviderExtensionInstallQuery,
   useListBridgeProvidersQuery,
 } = bridgeSupportApi;
 
