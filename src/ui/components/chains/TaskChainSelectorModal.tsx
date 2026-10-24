@@ -31,7 +31,7 @@ import {
   findInitialActiveIndex,
   navigateIndex,
   selectionDirectionForEvent,
-  groupChainsByProject,
+  sortChainSelectorItems,
 } from './taskChainSelectorLogic';
 
 export {
@@ -42,14 +42,13 @@ export {
   findInitialActiveIndex,
   navigateIndex,
   selectionDirectionForEvent,
-  groupChainsByProject,
+  sortChainSelectorItems,
 };
 
 export interface TaskChainSelectorModalProps {
   open: boolean;
   onClose: () => void;
   currentChainId?: string;
-  projectId?: string;
   onNavigate?: (route: string) => void;
   /**
    * When provided, picking a chain calls this INSTEAD of navigating (e.g. a
@@ -63,7 +62,6 @@ export function TaskChainSelectorModal({
   open,
   onClose,
   currentChainId,
-  projectId,
   onNavigate,
   onSelectChain,
   chainGroups: chainGroupsProp,
@@ -166,7 +164,7 @@ export function TaskChainSelectorModal({
 
   // Combine and prepopulate all task chains across projects
   const allChains = useMemo(() => {
-    return prepareChainSelectorItems(resolvedGroups, searchChains, currentChainId);
+    return sortChainSelectorItems(prepareChainSelectorItems(resolvedGroups, searchChains, currentChainId));
   }, [resolvedGroups, searchChains, currentChainId]);
 
   // Search content stays transient: results live only in this modal and selecting
@@ -183,7 +181,7 @@ export function TaskChainSelectorModal({
     setRemoteSearchError('');
     const timer = setTimeout(() => {
       setRemoteSearchState('searching');
-      searchTaskChainsEncrypted(trimmed, authUser.user_id!, { projectId, limit: 40 })
+      searchTaskChainsEncrypted(trimmed, authUser.user_id!, { limit: 40 })
         .then((response) => {
           if (canceled) return;
           const projectNames = new Map(resolvedGroups.map((group) => [group.projectId, group.projectName]));
@@ -217,11 +215,11 @@ export function TaskChainSelectorModal({
         });
     }, 150);
     return () => { canceled = true; clearTimeout(timer); };
-  }, [query, open, isVaultUnlocked, authUser?.user_id, projectId, resolvedGroups, currentChainId]);
+  }, [query, open, isVaultUnlocked, authUser?.user_id, resolvedGroups, currentChainId]);
 
   // Real-time search filter
   const filteredChains = useMemo(() => {
-    if (query.trim().length >= 2 && remoteChains) return remoteChains;
+    if (query.trim().length >= 2 && remoteChains) return sortChainSelectorItems(remoteChains);
     return filterTaskChains(allChains, query);
   }, [allChains, query, remoteChains]);
 
@@ -304,8 +302,8 @@ export function TaskChainSelectorModal({
       event.preventDefault();
       setActiveIndex((prev) => {
         const next = navigateIndex(prev, filteredChains.length, direction);
-        if (direction === 'down' && next >= visibleCount) {
-          setVisibleCount((c) => Math.min(c + 40, filteredChains.length));
+        if (next >= visibleCount) {
+          setVisibleCount((c) => Math.min(Math.max(c + 40, next + 1), filteredChains.length));
         }
         return next;
       });
@@ -325,7 +323,6 @@ export function TaskChainSelectorModal({
   if (!open) return null;
 
   const visibleItems = filteredChains.slice(0, visibleCount);
-  const grouped = groupChainsByProject(visibleItems);
   const qTrim = query.trim();
 
   return (
@@ -398,105 +395,93 @@ export function TaskChainSelectorModal({
                 : `No task chains matching “${qTrim}”.`}
             </div>
           ) : (
-            Array.from(grouped.entries()).map(([projectName, { items: groupItems, indices }]) => (
-              <div key={projectName} role="group" aria-label={projectName} className="mb-2">
+            visibleItems.map((chain, idx) => {
+              const active = idx === activeIndex;
+              const isCurrent = Boolean(chain.isCurrent);
+              const tonePulse = chainStatusDot(chain.status);
+
+              return (
                 <div
-                  aria-hidden="true"
-                  data-debug-id={`chain-selector-group-${projectName.toLowerCase().replace(/\s+/g, '-')}`}
-                  className="px-3 py-1 text-[10.5px] font-semibold uppercase tracking-[0.18em] text-faint"
+                  key={chain.chainId}
+                  role="option"
+                  id={`task-chain-option-${idx}`}
+                  aria-selected={active}
+                  data-debug-id={`chain-selector-item-${chain.chainId}`}
+                  data-chain-id={chain.chainId}
+                  data-chain-index={idx}
+                  data-current={isCurrent ? 'true' : 'false'}
+                  onClick={() => handleSelect(chain)}
+                  onMouseEnter={() => setActiveIndex(idx)}
+                  className={`flex w-full cursor-pointer items-center gap-3 rounded-lg px-3 py-2 text-left text-sm transition-colors ${
+                    active
+                      ? 'bg-neutral-soft text-primary font-semibold'
+                      : 'text-muted hover:bg-neutral-soft hover:text-primary'
+                  }`}
                 >
-                  {projectName}
-                </div>
-                {groupItems.map((chain, i) => {
-                  const idx = indices[i];
-                  const active = idx === activeIndex;
-                  const isCurrent = Boolean(chain.isCurrent);
-                  const tonePulse = chainStatusDot(chain.status);
+                  <span aria-hidden="true" className="grid w-5 shrink-0 place-items-center">
+                    <StatusDot tone={tonePulse.tone} pulse={tonePulse.pulse} label={chain.status || 'Chain'} />
+                  </span>
 
-                  return (
-                    <div
-                      key={chain.chainId}
-                      role="option"
-                      id={`task-chain-option-${idx}`}
-                      aria-selected={active}
-                      data-debug-id={`chain-selector-item-${chain.chainId}`}
-                      data-chain-id={chain.chainId}
-                      data-chain-index={idx}
-                      data-current={isCurrent ? 'true' : 'false'}
-                      onClick={() => handleSelect(chain)}
-                      onMouseEnter={() => setActiveIndex(idx)}
-                      className={`flex w-full cursor-pointer items-center gap-3 rounded-lg px-3 py-2 text-left text-sm transition-colors ${
-                        active
-                          ? 'bg-neutral-soft text-primary font-semibold'
-                          : 'text-muted hover:bg-neutral-soft hover:text-primary'
-                      }`}
-                    >
-                      <span aria-hidden="true" className="grid w-5 shrink-0 place-items-center">
-                        <StatusDot tone={tonePulse.tone} pulse={tonePulse.pulse} label={chain.status || 'Chain'} />
+                  <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+                    <span data-debug-id="chain-title-row" className="flex min-w-0 items-center gap-2">
+                      <span className="min-w-0 flex-1 truncate">
+                        <VaultText value={chain.rawTitle || chain.title} as="span" />
                       </span>
-
-                      <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-                        <span data-debug-id="chain-title-row" className="flex min-w-0 items-center gap-2">
-                          <span className="min-w-0 flex-1 truncate">
-                            <VaultText value={chain.rawTitle || chain.title} as="span" />
-                          </span>
-                          {isCurrent ? (
-                            <span
-                              data-debug-id="chain-current-badge"
-                              className="inline-flex shrink-0 items-center rounded px-1.5 py-0.5 text-[10px] font-bold bg-accent/20 text-accent border border-accent/40"
-                            >
-                              Current
-                            </span>
-                          ) : null}
-                        </span>
-
+                      {isCurrent ? (
                         <span
-                          data-debug-id="chain-secondary-meta"
-                          className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 text-caption text-faint"
+                          data-debug-id="chain-current-badge"
+                          className="inline-flex shrink-0 items-center rounded px-1.5 py-0.5 text-[10px] font-bold bg-accent/20 text-accent border border-accent/40"
                         >
-                          <span className="truncate">
-                            ID: {chain.chainId}
-                          </span>
-                          {chain.status ? (
-                            <span className="inline-flex shrink-0 items-center rounded px-1.5 py-0.5 text-[10px] font-semibold bg-neutral-soft text-muted capitalize sm:hidden">
-                              {chain.status.replace(/_/g, ' ')}
-                            </span>
-                          ) : null}
-                          {chain.taskCount !== undefined ? (
-                            <span className="shrink-0 sm:hidden">
-                              {chain.completedTaskCount ?? 0}/{chain.taskCount} tasks
-                            </span>
-                          ) : null}
-                        </span>
-                      </span>
-
-                      {chain.projectName ? (
-                        <span
-                          data-debug-id="chain-project-badge"
-                          className="ml-2 hidden sm:inline-flex shrink-0 items-center rounded px-1.5 py-0.5 text-[10px] font-medium bg-neutral-soft text-muted truncate max-w-[120px]"
-                        >
-                          {chain.projectName}
+                          Current
                         </span>
                       ) : null}
+                    </span>
 
+                    <span
+                      data-debug-id="chain-secondary-meta"
+                      className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 text-caption text-faint"
+                    >
+                      <span className="truncate">
+                        ID: {chain.chainId}
+                      </span>
                       {chain.status ? (
-                        <span className="ml-2 hidden sm:inline-flex shrink-0 items-center rounded px-1.5 py-0.5 text-[10px] font-semibold bg-neutral-soft text-muted capitalize">
+                        <span className="inline-flex shrink-0 items-center rounded px-1.5 py-0.5 text-[10px] font-semibold bg-neutral-soft text-muted capitalize sm:hidden">
                           {chain.status.replace(/_/g, ' ')}
                         </span>
                       ) : null}
-
                       {chain.taskCount !== undefined ? (
-                        <span className="ml-2 hidden sm:inline shrink-0 text-caption text-faint">
+                        <span className="shrink-0 sm:hidden">
                           {chain.completedTaskCount ?? 0}/{chain.taskCount} tasks
                         </span>
                       ) : null}
+                    </span>
+                  </span>
 
-                      <Icon name="chevron-right" size={14} className="ml-1 shrink-0 text-muted opacity-60" />
-                    </div>
-                  );
-                })}
-              </div>
-            ))
+                  {chain.projectName ? (
+                    <span
+                      data-debug-id="chain-project-badge"
+                      className="ml-2 hidden sm:inline-flex shrink-0 items-center rounded px-1.5 py-0.5 text-[10px] font-medium bg-neutral-soft text-muted truncate max-w-[120px]"
+                    >
+                      {chain.projectName}
+                    </span>
+                  ) : null}
+
+                  {chain.status ? (
+                    <span className="ml-2 hidden sm:inline-flex shrink-0 items-center rounded px-1.5 py-0.5 text-[10px] font-semibold bg-neutral-soft text-muted capitalize">
+                      {chain.status.replace(/_/g, ' ')}
+                    </span>
+                  ) : null}
+
+                  {chain.taskCount !== undefined ? (
+                    <span className="ml-2 hidden sm:inline shrink-0 text-caption text-faint">
+                      {chain.completedTaskCount ?? 0}/{chain.taskCount} tasks
+                    </span>
+                  ) : null}
+
+                  <Icon name="chevron-right" size={14} className="ml-1 shrink-0 text-muted opacity-60" />
+                </div>
+              );
+            })
           )}
 
           {visibleCount < filteredChains.length ? (

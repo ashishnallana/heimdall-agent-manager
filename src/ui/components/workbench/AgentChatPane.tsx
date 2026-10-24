@@ -3366,7 +3366,6 @@ export function AgentChatPane({
         open={chainSelectorOpen}
         onClose={() => setChainSelectorOpen(false)}
         currentChainId={chainId}
-        projectId={projectId}
         // Per-pane: picking a chain swaps THIS pane to its coordinator in place
         // (deduped by the workspace). A chain without a coordinator keeps the
         // default navigation to /chains/<id>.
