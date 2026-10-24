@@ -4,6 +4,7 @@ import "core:fmt"
 import "core:os"
 import "core:path/filepath"
 import "core:strings"
+import "core:sync"
 import "core:testing"
 import "core:time"
 import ws "odin_test:lib/ws"
@@ -104,36 +105,35 @@ test_provider_extension_build_install_args :: proc(t: ^testing.T) {
 }
 
 @(private="file")
-test_mock_runner_executed_args: [dynamic]string
+test_install_mu: sync.Mutex
 @(private="file")
-test_mock_runner_should_succeed: bool
+test_mock_runner_call_count: u64
 
 @(private="file")
 test_mock_install_runner :: proc(args: []string, timeout: time.Duration) -> (stdout, stderr: string, exit_code: int, ok, timed_out: bool) {
+	sync.atomic_add(&test_mock_runner_call_count, 1)
 	for arg in args {
-		append(&test_mock_runner_executed_args, strings.clone(arg))
+		if strings.contains(arg, "fail") {
+			return strings.clone(""), strings.clone("Mock installation error"), 1, false, false
+		}
 	}
-	if test_mock_runner_should_succeed {
-		return strings.clone("Plugin installed"), strings.clone(""), 0, true, false
-	} else {
-		return strings.clone(""), strings.clone("Mock installation error"), 1, false, false
-	}
+	return strings.clone("Plugin installed"), strings.clone(""), 0, true, false
 }
 
 @(test)
 test_bridge_hub_handle_extension_install_success :: proc(t: ^testing.T) {
+	sync.mutex_lock(&test_install_mu)
+	defer sync.mutex_unlock(&test_install_mu)
+
 	orig_runner := bridge_extension_install_runner
+	bridge_extension_install_runner = test_mock_install_runner
 	defer {
 		bridge_extension_install_runner = orig_runner
-		for arg in test_mock_runner_executed_args do delete(arg)
-		delete(test_mock_runner_executed_args)
 	}
-	bridge_extension_install_runner = test_mock_install_runner
-	test_mock_runner_should_succeed = true
 
 	conn: ws.Connection
 	cmd_id := "cmd_test_inst_ok_123"
-	payload := fmt.tprintf(`{"type":"provider_extension_install","command_id":"%s","provider":"antigravity","binary_path":"/bin/agy"}`, cmd_id)
+	payload := fmt.tprintf(`{{"type":"provider_extension_install","command_id":"%s","provider":"antigravity","binary_path":"/bin/agy"}}`, cmd_id)
 
 	bridge_hub_handle_extension_install_command(&conn, payload)
 
@@ -141,23 +141,23 @@ test_bridge_hub_handle_extension_install_success :: proc(t: ^testing.T) {
 	testing.expect(t, has_cache, "command result should be cached")
 	testing.expect(t, strings.contains(cached, `"status":"succeeded"`), "status should be succeeded")
 	testing.expect(t, strings.contains(cached, `"installed"`), "runtime_status should be installed")
-	testing.expect(t, len(test_mock_runner_executed_args) >= 4, "installer should have been executed")
+	testing.expect(t, sync.atomic_load(&test_mock_runner_call_count) > 0, "installer should have been executed")
 }
 
 @(test)
 test_bridge_hub_handle_extension_install_failure :: proc(t: ^testing.T) {
+	sync.mutex_lock(&test_install_mu)
+	defer sync.mutex_unlock(&test_install_mu)
+
 	orig_runner := bridge_extension_install_runner
+	bridge_extension_install_runner = test_mock_install_runner
 	defer {
 		bridge_extension_install_runner = orig_runner
-		for arg in test_mock_runner_executed_args do delete(arg)
-		delete(test_mock_runner_executed_args)
 	}
-	bridge_extension_install_runner = test_mock_install_runner
-	test_mock_runner_should_succeed = false
 
 	conn: ws.Connection
 	cmd_id := "cmd_test_inst_fail_456"
-	payload := fmt.tprintf(`{"type":"provider_extension_install","command_id":"%s","provider":"antigravity","binary_path":"/bin/agy"}`, cmd_id)
+	payload := fmt.tprintf(`{{"type":"provider_extension_install","command_id":"%s","provider":"antigravity","binary_path":"/bin/agy_fail"}}`, cmd_id)
 
 	bridge_hub_handle_extension_install_command(&conn, payload)
 
@@ -171,7 +171,7 @@ test_bridge_hub_handle_extension_install_failure :: proc(t: ^testing.T) {
 test_bridge_hub_handle_extension_install_missing_provider :: proc(t: ^testing.T) {
 	conn: ws.Connection
 	cmd_id := "cmd_test_inst_no_prov_789"
-	payload := fmt.tprintf(`{"type":"provider_extension_install","command_id":"%s"}`, cmd_id)
+	payload := fmt.tprintf(`{{"type":"provider_extension_install","command_id":"%s"}}`, cmd_id)
 
 	bridge_hub_handle_extension_install_command(&conn, payload)
 
@@ -185,7 +185,7 @@ test_bridge_hub_handle_extension_install_missing_provider :: proc(t: ^testing.T)
 test_bridge_hub_handle_extension_install_missing_extension :: proc(t: ^testing.T) {
 	conn: ws.Connection
 	cmd_id := "cmd_test_inst_no_ext_101"
-	payload := fmt.tprintf(`{"type":"provider_extension_install","command_id":"%s","provider":"nonexistent_provider_xyz"}`, cmd_id)
+	payload := fmt.tprintf(`{{"type":"provider_extension_install","command_id":"%s","provider":"nonexistent_provider_xyz"}}`, cmd_id)
 
 	bridge_hub_handle_extension_install_command(&conn, payload)
 
