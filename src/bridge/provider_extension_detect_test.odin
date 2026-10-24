@@ -3,6 +3,7 @@ package main
 import "core:encoding/json"
 import "core:fmt"
 import "core:os"
+import "core:sync"
 import "core:testing"
 import "core:time"
 
@@ -96,10 +97,13 @@ test_provider_extension_catalog_null_is_unsupported :: proc(t: ^testing.T) {
 	testing.expect_value(t, claude.extension.plugin_id, "heimdall@heimdall")
 }
 
+probe_fixture_counter: u64
+
 provider_extension_test_fixture :: proc(t: ^testing.T, body: string) -> string {
 	dir, _ := os.temp_directory(context.allocator)
 	defer delete(dir)
-	path := fmt.aprintf("%s/heimdall-ext-probe-%d", dir, time.to_unix_nanoseconds(time.now()))
+	seq := sync.atomic_add(&probe_fixture_counter, 1)
+	path := fmt.aprintf("%s/heimdall-ext-probe-%p-%d-%d", dir, t, time.to_unix_nanoseconds(time.now()), seq)
 	testing.expect(t, os.write_entire_file(path, body) == nil, "fixture must be writable")
 	testing.expect(t, os.chmod(path, os.Permissions{.Read_User, .Write_User, .Execute_User}) == nil, "fixture must be executable")
 	return path
