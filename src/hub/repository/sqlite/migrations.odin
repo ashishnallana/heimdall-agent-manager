@@ -482,7 +482,9 @@ MIGRATION_115_PROVIDER_EXTENSION_COMMANDS :: #load("migrations/115_provider_exte
 
 MIGRATION_116_EXTENSION_VERSION_SYNC :: #load("migrations/116_extension_version_sync_0_4_33.sql", string)
 
-migration_order :: [119]string {
+MIGRATION_117_EXTENSION_VERSION_SYNC :: #load("migrations/117_extension_version_sync_0_4_34.sql", string)
+
+migration_order :: [120]string {
 	"001_foundation.sql",
 	"002_owner_scoped_core.sql",
 	"003_device_tokens.sql",
@@ -602,6 +604,7 @@ migration_order :: [119]string {
 	"114_extension_version_sync.sql",
 	"115_provider_extension_commands.sql",
 	"116_extension_version_sync_0_4_33.sql",
+	"117_extension_version_sync_0_4_34.sql",
 }
 
 // stop_before is a TEST SEAM: when non-empty, the apply loop stops in front of
@@ -1059,6 +1062,7 @@ migration_sql :: proc(name, migrations_dir: string) -> string {
 			return string(data)
 		}
 	}
+	if name == "117_extension_version_sync_0_4_34.sql" do return strings.clone(MIGRATION_117_EXTENSION_VERSION_SYNC)
 	if name == "116_extension_version_sync_0_4_33.sql" do return strings.clone(MIGRATION_116_EXTENSION_VERSION_SYNC)
 	if name == "001_foundation.sql" do return strings.clone(MIGRATION_001_FOUNDATION)
 	if name == "002_owner_scoped_core.sql" do return strings.clone(MIGRATION_002_OWNER_SCOPED_CORE)
