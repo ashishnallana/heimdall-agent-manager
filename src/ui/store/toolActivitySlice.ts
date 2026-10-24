@@ -18,9 +18,23 @@ export type LiveSnapshot = {
 };
 export type LiveMember = {
   snapshot: LiveSnapshot | null; availability: 'loading' | 'ready' | 'unavailable';
+  // Transport evidence, not producer timestamps: only incremental deliveries
+  // may introduce a completed-only row. Unclassified snapshots are baselines.
+  delivery?: { baseline: boolean; refresh: boolean };
+  // Identities only, scoped to this mounted member's epoch/generation. Record
+  // baseline/refresh identities even when React coalesces their snapshots.
+  completedIdentities?: string[];
 };
-export type ToolActivityState = { members: Record<string, LiveMember>; capacityExceeded: boolean };
-const initialState: ToolActivityState = { members: {}, capacityExceeded: false };
+export type CompletionDelivery = {
+  sequence: number; instanceId: string; epoch: string; generation: number;
+  displayName: string; call: LiveCompletion; fresh: boolean;
+};
+type CompletionObserver = { ids: string[]; sequence: number; pending: CompletionDelivery[] };
+export type ToolActivityState = {
+  members: Record<string, LiveMember>; capacityExceeded: boolean;
+  completionObservers: Record<string, CompletionObserver>;
+};
+const initialState: ToolActivityState = { members: {}, capacityExceeded: false, completionObservers: {} };
 const text = (v: unknown, max: number): v is string => typeof v === 'string' && v.length <= max;
 const count = (v: unknown): v is number => Number.isSafeInteger(v) && Number(v) >= 0;
 export const validInstanceId = (v: unknown): v is string =>
@@ -70,23 +84,67 @@ export function compareToolOrder(next: ToolOrder, prior: ToolOrder): number {
 const slice = createSlice({
   name: 'toolActivity', initialState,
   reducers: {
+    toolCompletionObserverOpened(state, action: PayloadAction<{ key: string; ids: string[] }>) {
+      state.completionObservers[action.payload.key] = { ids: action.payload.ids, sequence: 0, pending: [] };
+    },
+    toolCompletionObserverClosed(state, action: PayloadAction<string>) {
+      delete state.completionObservers[action.payload];
+    },
+    toolCompletionsObserved(state, action: PayloadAction<{ key: string; through: number }>) {
+      const observer = state.completionObservers[action.payload.key];
+      if (observer) observer.pending = observer.pending.filter((item) => item.sequence > action.payload.through);
+    },
     toolMembersSelected(state, action: PayloadAction<string[]>) {
       state.capacityExceeded = false;
       const members: Record<string, LiveMember> = {};
       for (const id of action.payload) members[id] = state.members[id] ||
         { snapshot: null, availability: 'loading' };
       state.members = members;
+      for (const observer of Object.values(state.completionObservers))
+        observer.pending = observer.pending.filter((item) => Boolean(members[item.instanceId]));
     },
-    toolCapacityExceeded(state) { state.members = {}; state.capacityExceeded = true; },
-    toolStateReceived(state, action: PayloadAction<LiveSnapshot>) {
-      const id = action.payload.instance_id;
-      if (state.members[id]) state.members[id] = { snapshot: action.payload, availability: 'ready' };
+    toolCapacityExceeded(state) {
+      state.members = {}; state.capacityExceeded = true;
+      for (const observer of Object.values(state.completionObservers)) observer.pending = [];
+    },
+    toolStateReceived: {
+      prepare(snapshot: LiveSnapshot, delivery = { baseline: true, refresh: false }) {
+        return { payload: snapshot, meta: delivery };
+      },
+      reducer(state, action: PayloadAction<LiveSnapshot, string, { baseline: boolean; refresh: boolean }>) {
+        const id = action.payload.instance_id;
+        if (!state.members[id]) return;
+        const delivery = action.meta || { baseline: true, refresh: false };
+        const snapshot = action.payload;
+        const prior = state.members[id];
+        const known = new Set(prior.snapshot?.epoch === snapshot.epoch && prior.snapshot.generation === snapshot.generation
+          ? prior.completedIdentities : []);
+        const identity = (call: LiveCompletion) => JSON.stringify([call.source, call.call_id]);
+        const fresh = new Set(snapshot.completed_since_last.filter((call) => !known.has(identity(call))).map(identity));
+        for (const call of snapshot.completed_since_last) known.add(identity(call));
+        state.members[id] = { snapshot, availability: 'ready', delivery, completedIdentities: [...known] };
+        for (const observer of Object.values(state.completionObservers)) {
+          // Pending deliveries survive later transient snapshots until each view
+          // has rendered them, then its acknowledgement drops the content. This
+          // prevents React batching from swallowing a fast completion entirely.
+          observer.pending = observer.pending.filter((item) => item.instanceId !== id ||
+            (item.epoch === snapshot.epoch && item.generation === snapshot.generation));
+          if (!observer.ids.includes(id) || delivery.baseline || delivery.refresh) continue;
+          for (const call of snapshot.completed_since_last) observer.pending.push({
+            sequence: ++observer.sequence, instanceId: id, epoch: snapshot.epoch,
+            generation: snapshot.generation, displayName: snapshot.display_name, call, fresh: fresh.has(identity(call)),
+          });
+        }
+      },
     },
     toolMembersUnavailable(state, action: PayloadAction<string[]>) {
       for (const id of action.payload) if (state.members[id])
         state.members[id] = { snapshot: null, availability: 'unavailable' };
+      for (const observer of Object.values(state.completionObservers))
+        observer.pending = observer.pending.filter((item) => !action.payload.includes(item.instanceId));
     },
   },
 });
-export const { toolMembersSelected, toolStateReceived, toolMembersUnavailable, toolCapacityExceeded } = slice.actions;
+export const { toolMembersSelected, toolStateReceived, toolMembersUnavailable, toolCapacityExceeded,
+  toolCompletionObserverOpened, toolCompletionObserverClosed, toolCompletionsObserved } = slice.actions;
 export default slice.reducer;

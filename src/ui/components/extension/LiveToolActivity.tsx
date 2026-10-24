@@ -1,7 +1,8 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { useSelector } from 'react-redux';
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useDispatch, useSelector } from 'react-redux';
 import { useToolActivityStream } from '../../api/useToolActivityStream';
-import { validInstanceId, type LiveCall, type LiveCompletion, type ToolActivityState } from '../../store/toolActivitySlice';
+import { validInstanceId, toolCompletionObserverOpened, toolCompletionObserverClosed, toolCompletionsObserved,
+  type LiveCall, type LiveCompletion, type ToolActivityState } from '../../store/toolActivitySlice';
 
 export const formatToolDuration = (ms: number) => {
   ms = Math.max(0, ms);
@@ -42,8 +43,10 @@ function useReducedMotion() {
   return reduced;
 }
 
-// Only identities that were observed running may have an exit copy. Completion
-// batches are metadata for that copy, never a source of new display rows.
+const MIN_VISIBLE_MS = 500;
+
+// Activity controls the outcome/actions immediately. Presentation has its own
+// lifecycle so even a call completed before its first paint remains readable.
 function ToolRow({ item, active, completion, now, reduced, remove, onOpenShell }: {
   item: DisplayCall; active: boolean; completion?: LiveCompletion; now: number;
   reduced: boolean; remove: (key: string) => void; onOpenShell: (id: string) => void;
@@ -56,32 +59,54 @@ function ToolRow({ item, active, completion, now, reduced, remove, onOpenShell }
   const duration = useRef(0);
   if (active) duration.current = Math.max(0, now - item.call.started_at_ms);
   const [moving, setMoving] = useState(!reduced);
+  const [visibleAt, setVisibleAt] = useState<number | null>(null);
+  const [exiting, setExiting] = useState(false);
+  const collapse = exiting && !active;
+  useLayoutEffect(() => {
+    if (active) { setExiting(false); return; }
+    if (visibleAt === null) return;
+    const remaining = Math.max(0, MIN_VISIBLE_MS - (performance.now() - visibleAt));
+    const timer = window.setTimeout(() => setExiting(true), remaining);
+    return () => window.clearTimeout(timer);
+  }, [active, visibleAt]);
   useLayoutEffect(() => {
     const node = outer.current!, content = inner.current!;
     let frame = 0, timer = 0, cancelled = false;
+    let finished = false;
     const finish = () => {
-      if (cancelled) return;
+      if (cancelled || finished) return;
+      finished = true;
       window.clearTimeout(timer);
       setMoving(false);
-      if (active) node.style.height = 'auto';
-      else remove(item.key);
+      if (collapse) { remove(item.key); return; }
+      node.style.height = 'auto';
+      // Entry time (including opacity/height interpolation) earns no residence.
+      // rAF runs before paint. Cross a full-size paint before starting the
+      // monotonic clock, including when reduced motion skips entry entirely.
+      frame = requestAnimationFrame(() => {
+        if (cancelled) return;
+        frame = requestAnimationFrame(() => {
+          if (!cancelled) setVisibleAt((prior) => prior ?? performance.now());
+        });
+      });
     };
+    if (collapse) setVisibleAt(null);
     if (reduced) {
-      node.style.height = active ? 'auto' : '0px';
-      node.style.opacity = active ? '1' : '0';
+      node.style.height = collapse ? '0px' : 'auto';
+      node.style.opacity = collapse ? '0' : '1';
       finish();
-      return;
+    } else {
+      // Retarget from the current interpolated height when an exit is reversed.
+      node.style.height = node.getBoundingClientRect().height + 'px';
+      void node.offsetHeight;
+      setMoving(true);
+      frame = requestAnimationFrame(() => {
+        if (cancelled) return;
+        node.style.height = (collapse ? 0 : content.getBoundingClientRect().height) + 'px';
+        node.style.opacity = collapse ? '0' : '1';
+        timer = window.setTimeout(finish, 220);
+      });
     }
-    // Retarget from the current interpolated height when an exit is reversed.
-    node.style.height = node.getBoundingClientRect().height + 'px';
-    void node.offsetHeight;
-    setMoving(true);
-    frame = requestAnimationFrame(() => {
-      if (cancelled) return;
-      node.style.height = (active ? content.getBoundingClientRect().height : 0) + 'px';
-      node.style.opacity = active ? '1' : '0';
-      timer = window.setTimeout(finish, 220);
-    });
     const ended = (event: TransitionEvent) => {
       if (event.target === node && event.propertyName === 'height') finish();
     };
@@ -92,7 +117,7 @@ function ToolRow({ item, active, completion, now, reduced, remove, onOpenShell }
       window.clearTimeout(timer);
       node.removeEventListener('transitionend', ended);
     };
-  }, [active, reduced, item.key, remove]);
+  }, [collapse, reduced, item.key, remove]);
 
   const call = item.call;
   const status = active ? 'Running' : completion?.status || 'Finished';
@@ -119,7 +144,7 @@ function ToolRow({ item, active, completion, now, reduced, remove, onOpenShell }
   const className = 'flex w-full min-w-0 max-w-full flex-nowrap items-center whitespace-nowrap gap-2 overflow-hidden text-left text-xs';
   const shell = active && call.source === 'shell' ? call.shell_session_id : '';
   return <div ref={outer} data-tool-motion={moving ? 'true' : undefined} data-tool-key={item.key}
-    data-tool-phase={active ? 'active' : 'exiting'} aria-hidden={!active && !completion ? true : undefined}
+    data-tool-phase={active ? 'active' : collapse ? 'exiting' : 'holding'}
     className="min-w-0 overflow-hidden" style={{ ...initialStyle.current,
       transition: reduced ? 'none' : 'height 200ms ease-out, opacity 120ms ease-out' }}>
     <div ref={inner} style={{ paddingTop: 6 }}>
@@ -161,12 +186,24 @@ function ToolRows({ roster, idsKey, onOpenShell }: {
   roster: ToolMemberLabel[]; idsKey: string; onOpenShell: (sessionId: string) => void;
 }) {
   const ids: string[] = useMemo(() => JSON.parse(idsKey), [idsKey]);
+  const observerKey = useId();
+  const dispatch = useDispatch();
   useToolActivityStream(ids);
   // The shared stream clears the old user's store during its subscription
   // effect. Until that has run, never seed a new view from the previous store.
   const [subscribed, setSubscribed] = useState(false);
-  useEffect(() => setSubscribed(true), []);
+  useEffect(() => {
+    dispatch(toolCompletionObserverOpened({ key: observerKey, ids }));
+    setSubscribed(true);
+    return () => { dispatch(toolCompletionObserverClosed(observerKey)); };
+  }, [dispatch, observerKey, ids]);
   const live = useSelector((state: any) => (state.toolActivity as ToolActivityState)?.members);
+  const pending = useSelector((state: any) =>
+    (state.toolActivity as ToolActivityState)?.completionObservers?.[observerKey]?.pending);
+  const through = pending?.at(-1)?.sequence;
+  useEffect(() => {
+    if (through !== undefined) dispatch(toolCompletionsObserved({ key: observerKey, through }));
+  }, [dispatch, observerKey, through]);
   const capacity = useSelector((state: any) => Boolean(state.toolActivity?.capacityExceeded));
   const reduced = useReducedMotion();
   const desired = new Map<string, DisplayCall>();
@@ -181,6 +218,7 @@ function ToolRows({ roster, idsKey, onOpenShell }: {
     }
   }
   const [retained, setRetained] = useState<DisplayCall[]>(() => [...desired.values()]);
+  const [seen, setSeen] = useState(() => new Set<string>());
   const valid = (item: DisplayCall) => {
     const member = live?.[item.id];
     return member?.availability === 'unavailable' || capacity || Boolean(member?.snapshot &&
@@ -190,9 +228,40 @@ function ToolRows({ roster, idsKey, onOpenShell }: {
   const [previous, setPrevious] = useState(live);
   const [previousCapacity, setPreviousCapacity] = useState(capacity);
   const [previousSubscribed, setPreviousSubscribed] = useState(subscribed);
-  if (previous !== live || previousCapacity !== capacity || previousSubscribed !== subscribed) {
+  const [previousPending, setPreviousPending] = useState(pending);
+  if (previous !== live || previousCapacity !== capacity || previousSubscribed !== subscribed || previousPending !== pending) {
     setPrevious(live); setPreviousCapacity(capacity);
     setPreviousSubscribed(subscribed);
+    setPreviousPending(pending);
+    const observed = new Set(seen);
+    const fresh: DisplayCall[] = [];
+    const completions = new Map<string, LiveCompletion>();
+    for (const event of pending || []) {
+      const { instanceId: id, call } = event;
+      const stream = streamKey(event.epoch, event.generation);
+      const key = JSON.stringify([id, stream, call.source, call.call_id]);
+      const member = live?.[id];
+      completions.set(key, call);
+      if (subscribed && !capacity && member?.availability === 'ready' && member.snapshot &&
+          streamKey(member.snapshot.epoch, member.snapshot.generation) === stream &&
+          event.fresh && !observed.has(key) && !desired.has(key)) {
+        fresh.push({ key, id, stream, name: event.displayName ||
+          roster.find((member) => member.instanceId === id)?.displayName || 'Agent',
+          call: { ...call, shell_session_id: '', started_at_ms: call.completed_at_ms - call.duration_ms },
+          completion: call });
+      }
+      observed.add(key);
+    }
+    for (const id of ids) {
+      const member = live?.[id], snapshot = member?.snapshot;
+      if (!subscribed || capacity || member?.availability !== 'ready' || !snapshot) continue;
+      const stream = streamKey(snapshot.epoch, snapshot.generation);
+      for (const call of [...snapshot.active, ...snapshot.completed_since_last]) {
+        const key = JSON.stringify([id, stream, call.source, call.call_id]);
+        observed.add(key);
+      }
+    }
+    setSeen(observed);
     setRetained((rows) => [
       ...rows.filter(valid).map((item) => {
         // Active snapshots replace the retained copy, clearing any old outcome
@@ -200,11 +269,12 @@ function ToolRows({ roster, idsKey, onOpenShell }: {
         // terminal metadata until this exit ends without restarting its motion.
         const active = desired.get(item.key);
         if (active) return active;
-        const completion = live?.[item.id]?.snapshot?.completed_since_last.find(
+        const completion = completions.get(item.key) || live?.[item.id]?.snapshot?.completed_since_last.find(
           (call) => call.source === item.call.source && call.call_id === item.call.call_id);
         return completion ? { ...item, completion } : item;
       }),
       ...[...desired.values()].filter((item) => !rows.some((old) => old.key === item.key)),
+      ...fresh,
     ]);
   }
   const remove = useMemo(() => (key: string) => setRetained((rows) => rows.filter((item) => item.key !== key)), []);

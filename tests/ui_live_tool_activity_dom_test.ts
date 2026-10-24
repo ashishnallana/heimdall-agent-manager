@@ -20,6 +20,7 @@ async function withDom(run: (env: any) => Promise<void>) {
     'WebSocket', 'IntersectionObserver', 'requestAnimationFrame', 'cancelAnimationFrame'];
   const previous: any = Object.fromEntries(names.map((name) => [name, (globalThis as any)[name]]));
   const previousFetch = globalThis.fetch, previousNow = Date.now;
+  const previousPerformanceNow = Object.getOwnPropertyDescriptor(performance, 'now');
   let time = 1000, nextTimer = 0, requests = 0;
   const timers = new Map<number, () => void>();
   const timeouts = new Map<number, { at: number; callback: () => void }>();
@@ -35,6 +36,7 @@ async function withDom(run: (env: any) => Promise<void>) {
     WebSocket: class extends FakeToolSocket { constructor(url: string) { super(url); sockets.push(this); } },
   });
   Date.now = () => time;
+  Object.defineProperty(performance, 'now', { configurable: true, value: () => time });
   dom.window.setInterval = ((fn: () => void) => { timers.set(++nextTimer, fn); return nextTimer; }) as any;
   dom.window.clearInterval = ((id: number) => timers.delete(id)) as any;
   dom.window.setTimeout = ((callback: () => void, ms = 0) => {
@@ -43,7 +45,7 @@ async function withDom(run: (env: any) => Promise<void>) {
   dom.window.clearTimeout = ((id: number) => timeouts.delete(id)) as any;
   dom.window.matchMedia = (() => media) as any;
   dom.window.HTMLElement.prototype.getBoundingClientRect = function () {
-    const height = this.hasAttribute('data-tool-key') ? parseFloat(this.style.height) || 0
+    const height = this.hasAttribute('data-tool-key') ? (this.style.height === 'auto' ? 26 : parseFloat(this.style.height) || 0)
       : this.parentElement?.hasAttribute('data-tool-key') ? 26 : 0;
     return { height, width: 600, x: 0, y: 0, top: 0, bottom: height, left: 0, right: 600, toJSON() {} };
   };
@@ -63,19 +65,30 @@ async function withDom(run: (env: any) => Promise<void>) {
   const flushFrames = async () => { await act(async () => {
     const queued = [...frames.values()]; frames.clear(); queued.forEach((fn) => fn(time));
   }); };
-  const advanceMotion = async (ms = 240) => {
+  const advanceTime = async (ms: number) => {
+    const target = time + ms;
+    while ([...timeouts.values()].some((timer) => timer.at <= target)) {
+      time = Math.min(...[...timeouts.values()].filter((timer) => timer.at <= target).map((timer) => timer.at));
+      await act(async () => {
+        for (const [id, timer] of [...timeouts]) if (timer.at <= time) { timeouts.delete(id); timer.callback(); }
+      });
+    }
+    time = target;
+  };
+  const advanceMotion = async (ms = 1000) => {
+    for (let elapsed = 0; elapsed < ms; elapsed += 10) {
+      await flushFrames();
+      await advanceTime(Math.min(10, ms - elapsed));
+    }
     await flushFrames();
-    time += ms;
-    await act(async () => {
-      for (const [id, timer] of [...timeouts]) if (timer.at <= time) { timeouts.delete(id); timer.callback(); }
-    });
   };
   try {
-    await run({ dom, store, root, q, render, sockets, timers, frames, timeouts, flushFrames, advanceMotion,
+    await run({ dom, store, root, q, render, sockets, timers, frames, timeouts, flushFrames, advanceMotion, advanceTime,
       reduceMotion: async (value: boolean) => { await act(async () => {
         media.matches = value; mediaListeners.forEach((fn) => fn());
       }); },
       get requests() { return requests; },
+      get now() { return time; },
       tick: async () => { time += 1000; await act(async () => { for (const callback of [...timers.values()]) callback(); }); },
     });
   } finally {
@@ -87,6 +100,8 @@ async function withDom(run: (env: any) => Promise<void>) {
     for (const socket of sockets) assert.equal(socket.readyState, 3, 'every socket closed after unmount');
     store.dispatch(heimdallApi.util.resetApiState());
     globalThis.fetch = previousFetch; Date.now = previousNow;
+    if (previousPerformanceNow) Object.defineProperty(performance, 'now', previousPerformanceNow);
+    else delete (performance as any).now;
     Object.assign(globalThis, previous); dom.window.close();
   }
 }
@@ -251,6 +266,200 @@ test('common tools have distinct stable colors', () => {
   assert.equal(toolNameColor('custom'), toolNameColor('custom'));
 });
 
+for (const reduced of [false, true]) {
+  test(`fast completion stays fully visible for 500ms after entry (reduced=${reduced})`, async () => {
+    await withDom(async (env) => {
+      await env.reduceMotion(reduced);
+      await env.render(React.createElement(LiveToolActivity, { instanceId: 'inst_a', onOpenShell() {} }));
+      const socket = env.sockets[0]; socket.open();
+      await act(async () => socket.state(snapshot()));
+      const row = env.dom.window.document.querySelector('[data-tool-key]') as HTMLElement;
+      await env.flushFrames();
+      await env.advanceTime(30);
+      await act(async () => socket.state(snapshot('inst_a', 2, { active: [], completed_since_last: [{
+        ...snapshot().active[0], status: 'failed', duration_ms: 30, completed_at_ms: 1030,
+      }] }), false));
+      assert.equal(env.q('live-tools-shell-sh_inst_a'), null, 'completion removes action immediately');
+      assert.equal(row.querySelector('[role="img"]')!.getAttribute('aria-label'), 'Failed');
+      assert.equal(env.q('live-tools-duration')!.textContent, '30 ms');
+      if (!reduced) {
+        await env.advanceTime(190); // entry fallback finishes at t=220
+        await env.flushFrames();
+        await env.advanceTime(20); // time before the full-size paint earns no residence
+      }
+      await env.flushFrames(); // cross the first fully expanded paint before residence
+      assert.equal(row.style.height, 'auto');
+      assert.equal(row.style.opacity, '1');
+      const heldAt = env.now;
+      await env.advanceTime(499);
+      assert.equal(row.isConnected, true);
+      assert.equal(row.getAttribute('data-tool-phase'), 'holding');
+      assert.equal(row.style.height, 'auto', 'no early height collapse at 499ms');
+      assert.equal(row.style.opacity, '1', 'no early fade at 499ms');
+      await env.advanceTime(1);
+      if (reduced) {
+        assert.equal(row.isConnected, false, 'no reduced-motion animation after residence');
+      } else {
+        assert.equal(env.now - heldAt, 500);
+        assert.equal(row.getAttribute('data-tool-phase'), 'exiting');
+        await env.flushFrames();
+        assert.equal(row.style.height, '0px');
+        await env.advanceTime(220);
+        assert.equal(row.isConnected, false);
+      }
+      assert.equal(env.frames.size, 0); assert.equal(env.timeouts.size, 0);
+    });
+  });
+}
+
+test('a long-visible call begins collapse promptly on completion', async () => {
+  await withDom(async (env) => {
+    await env.render(React.createElement(LiveToolActivity, { instanceId: 'inst_a', onOpenShell() {} }));
+    const socket = env.sockets[0]; socket.open();
+    await act(async () => socket.state(snapshot()));
+    await env.advanceMotion();
+    await act(async () => socket.state(snapshot('inst_a', 2, { active: [] }), false));
+    await env.advanceTime(0);
+    await env.flushFrames();
+    const row = env.dom.window.document.querySelector('[data-tool-key]') as HTMLElement;
+    assert.equal(row.style.height, '0px', 'earned residence requires no additional hold');
+    await env.advanceTime(220);
+    assert.equal(env.q('live-tool-activity'), null);
+  });
+});
+
+test('fresh completed-only deliveries show once across duplicates, baselines, refreshes and shared mounts', async () => {
+  await withDom(async (env) => {
+    const view = (key: string) => React.createElement(LiveToolActivity, { key, instanceId: 'inst_a', onOpenShell() {} });
+    await env.render(React.createElement(React.Fragment, null, view('own'), view('chain')));
+    const socket = env.sockets[0]; socket.open();
+    const done = (id: string, source = 'provider') => ({ ...snapshot().active[0], call_id: id, source,
+      status: 'completed', duration_ms: 17, completed_at_ms: 1000 });
+    const send = (revision: number, completed: any[], baseline = false, refresh = false, extra = {}) =>
+      act(async () => socket.state(snapshot('inst_a', revision, { active: [], completed_since_last: completed, ...extra }), baseline, refresh));
+    await send(1, [done('history')], true);
+    assert.equal(env.q('live-tool-activity'), null);
+    await send(2, [done('history'), done('fresh')]);
+    assert.equal(env.dom.window.document.querySelectorAll('[data-tool-key]').length, 2, 'one row per mounted view');
+    assert.equal(env.dom.window.document.querySelectorAll('[aria-label="Succeeded"]').length, 2);
+    assert.equal(env.q('live-tools-duration')!.textContent, '17 ms');
+    await env.advanceMotion();
+    assert.equal(env.q('live-tool-activity'), null);
+    await send(2, [done('fresh')]); // duplicate ordinary frame
+    await send(2, [done('refresh-only')], false, true);
+    await send(3, [done('fresh'), done('history'), done('refresh-only')]);
+    assert.equal(env.q('live-tool-activity'), null, 'neither repeated nor refresh/baseline history replays');
+    // A new view over the latest incremental snapshot must not replay it.
+    await env.render(React.createElement(React.Fragment, null, view('own'), view('chain'), view('new')));
+    assert.equal(env.q('live-tool-activity'), null);
+    // Distinct source identities in separate valid deliveries may share an id.
+    await send(5, [done('same-id')]);
+    await send(6, [done('same-id', 'shell')]);
+    assert.equal(env.dom.window.document.querySelectorAll('[data-tool-key]').length, 6);
+    await env.advanceMotion();
+    await act(async () => socket.frame({ type: 'unavailable', instance_id: 'inst_a' }));
+    await send(7, [done('reconnect-history')], true);
+    await send(8, [done('reconnect-history')]);
+    assert.equal(env.q('live-tool-activity'), null);
+    await send(9, [done('fresh')], false, false, { generation: 2 });
+    assert.equal(env.dom.window.document.querySelectorAll('[data-tool-key]').length, 3, 'new generation earns a new identity');
+    await env.render(null);
+    assert.deepEqual(env.store.getState().toolActivity.completionObservers, {}, 'all view delivery queues released');
+  });
+});
+
+test('completion deliveries survive React batching and transient later snapshots until every view observes them', async () => {
+  await withDom(async (env) => {
+    await env.render(React.createElement(LiveToolActivity, { instanceId: 'inst_a', onOpenShell() {} }));
+    const socket = env.sockets[0]; socket.open();
+    await act(async () => socket.state(snapshot('inst_a', 1, { active: [] })));
+    const done = (id: string) => ({ ...snapshot().active[0], call_id: id, status: 'failed',
+      duration_ms: 21, completed_at_ms: 1021 });
+    await act(async () => {
+      socket.state(snapshot('inst_a', 2, { active: [], completed_since_last: [done('fast-a')] }), false);
+      socket.state(snapshot('inst_a', 3, { active: [], completed_since_last: [done('fast-b')] }), false);
+      socket.state(snapshot('inst_a', 4, { active: [] }), false);
+    });
+    assert.equal(env.dom.window.document.querySelectorAll('[data-tool-key]').length, 2);
+    assert.equal(env.dom.window.document.querySelectorAll('[aria-label="Failed"]').length, 2);
+    assert.ok(Object.values(env.store.getState().toolActivity.completionObservers)
+      .every((observer: any) => observer.pending.length === 0), 'observed completion content is promptly released');
+    await env.advanceMotion();
+    assert.equal(env.q('live-tool-activity'), null);
+  });
+});
+
+test('coalesced baseline/refresh identities never replay, while known active completions retain batched metadata', async () => {
+  await withDom(async (env) => {
+    await env.render(React.createElement(LiveToolActivity, { instanceId: 'inst_a', onOpenShell() {} }));
+    const socket = env.sockets[0]; socket.open();
+    const call = snapshot().active[0];
+    const done = (id: string) => ({ ...call, call_id: id, status: 'failed', duration_ms: 37, completed_at_ms: 1037 });
+    await act(async () => {
+      socket.state(snapshot('inst_a', 1, { active: [], completed_since_last: [done('baseline-history')] }));
+      socket.state(snapshot('inst_a', 2, { active: [], completed_since_last: [done('baseline-history')] }), false);
+      socket.state(snapshot('inst_a', 2, { active: [], completed_since_last: [done('refresh-history')] }), false, true);
+      socket.state(snapshot('inst_a', 3, { active: [], completed_since_last: [done('refresh-history')] }), false);
+      socket.state(snapshot('inst_a', 4, { active: [] }), false);
+    });
+    assert.equal(env.q('live-tool-activity'), null, 'baseline evidence survives even without an intervening React render');
+    await act(async () => socket.state(snapshot('inst_a', 5), false));
+    await env.advanceMotion();
+    const completion = { ...call, status: 'failed', duration_ms: 37, completed_at_ms: 1037 };
+    await act(async () => {
+      socket.state(snapshot('inst_a', 6, { active: [], completed_since_last: [completion] }), false);
+      socket.state(snapshot('inst_a', 7, { active: [] }), false);
+    });
+    assert.equal(env.q('live-tools-duration')!.textContent, '37 ms');
+    assert.ok(env.q('live-tools-row')!.querySelector('[aria-label="Failed"]'));
+    await env.advanceMotion();
+    // A genuine active reentry may reuse an already-completed identity. Its
+    // completion still updates metadata even though it cannot seed another row.
+    await act(async () => socket.state(snapshot('inst_a', 8), false));
+    await env.advanceMotion();
+    await act(async () => {
+      socket.state(snapshot('inst_a', 9, { active: [], completed_since_last: [completion] }), false);
+      socket.state(snapshot('inst_a', 10, { active: [] }), false);
+    });
+    assert.equal(env.q('live-tools-duration')!.textContent, '37 ms');
+    assert.ok(env.q('live-tools-row')!.querySelector('[aria-label="Failed"]'));
+  });
+});
+
+for (const reset of ['epoch', 'generation', 'conversation', 'roster', 'auth']) {
+  test(`${reset} reset immediately discards a held completion and cancels scheduled work`, async () => {
+    await withDom(async (env) => {
+      const view = (extra = {}) => React.createElement(LiveToolActivity, {
+        instanceId: 'inst_a', onOpenShell() {}, ...extra,
+      });
+      await env.render(view());
+      const socket = env.sockets[0]; socket.open();
+      await act(async () => socket.state(snapshot('inst_a', 1, { active: [] })));
+      await act(async () => socket.state(snapshot('inst_a', 2, { active: [], completed_since_last: [{
+        ...snapshot().active[0], status: 'completed', duration_ms: 5, completed_at_ms: 1000,
+      }] }), false));
+      await env.advanceMotion(300);
+      assert.ok(env.q('live-tool-activity'));
+      assert.equal(env.dom.window.document.querySelector('[data-tool-key]')!.getAttribute('data-tool-phase'), 'holding');
+      if (reset === 'epoch' || reset === 'generation') {
+        await act(async () => socket.state(snapshot('inst_a', 3, { active: [],
+          ...(reset === 'epoch' ? { epoch: '1792670400000000002' } : { generation: 2 }),
+        }), true));
+      } else if (reset === 'conversation') {
+        await env.render(view({ instanceId: 'inst_other', members: [{ instanceId: 'inst_a', displayName: 'A' }] }));
+      } else if (reset === 'roster') {
+        await env.render(view({ members: [{ instanceId: 'inst_b', displayName: 'B' }] }));
+      } else {
+        await act(async () => env.store.dispatch({ type: 'test/user', payload: 'user2' }));
+      }
+      assert.equal(env.q('live-tool-activity'), null, 'reset overrides residence immediately');
+      assert.equal(env.frames.size, 0); assert.equal(env.timeouts.size, 0);
+      await env.advanceMotion();
+      assert.equal(env.q('live-tool-activity'), null, 'cancelled work cannot resurrect or delay removal');
+    });
+  });
+}
+
 test('completion-only baselines never create rows; individual success/failure exits preserve remaining identities', async () => {
   await withDom(async (env) => {
     const { render, sockets, q, dom } = env;
@@ -312,7 +521,7 @@ for (const status of ['completed', 'failed']) {
       }), false));
       await env.advanceMotion(30);
       assertTerminal();
-      await env.advanceMotion(130);
+      await env.advanceTime(deadline - env.now);
       assert.equal(row.isConnected, false, 'original row removed at its original 220ms deadline');
       assert.ok(q('live-tool-activity'), 'later exit has its own deadline');
       await env.advanceMotion();
@@ -363,15 +572,23 @@ test('queued entry, rapid exit/reentry, reset and reduced-motion changes cancel 
     assert.notEqual(dom.window.document.querySelector('[data-tool-key]'), row, 'new generation discards previous visuals immediately');
     assert.equal(dom.window.document.querySelectorAll('[data-tool-key]').length, 1);
     await env.reduceMotion(true);
+    await env.flushFrames();
+    await env.flushFrames();
     assert.equal(timeouts.size, 0); assert.equal(frames.size, 0);
     assert.doesNotMatch(q('live-tool-activity')!.querySelector('[aria-label="Running"]')!.className, /(?:^| )animate-pulse/);
     await act(async () => socket.state(snapshot('inst_a', 5, { generation: 2, active: [] }), false));
-    assert.equal(q('live-tool-activity'), null, 'reduced motion completes exit synchronously');
+    assert.ok(q('live-tool-activity'), 'reduced motion retains the minimum readable residence');
+    await env.advanceTime(499);
+    assert.ok(q('live-tool-activity'));
+    await env.advanceTime(1);
+    assert.equal(q('live-tool-activity'), null, 'reduced motion removes without animation at the residence deadline');
     await act(async () => socket.state(snapshot('inst_a', 6, { generation: 2 }), false));
     await env.reduceMotion(false);
     await act(async () => socket.state(snapshot('inst_a', 7, { generation: 2, active: [] }), false));
     await env.reduceMotion(true);
-    assert.equal(q('live-tool-activity'), null, 'enabling reduction while exiting removes immediately');
+    assert.ok(q('live-tool-activity'), 'enabling reduction preserves the residence requirement');
+    await env.advanceMotion();
+    assert.equal(q('live-tool-activity'), null);
     assert.equal(timeouts.size, 0); assert.equal(frames.size, 0);
   });
 });
