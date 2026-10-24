@@ -279,6 +279,65 @@ test('completion-only baselines never create rows; individual success/failure ex
   });
 });
 
+for (const status of ['completed', 'failed']) {
+  test(`exiting ${status} retains terminal metadata across rapid snapshots without extending exit`, async () => {
+    await withDom(async (env) => {
+      const { render, sockets, dom, q, timeouts } = env;
+      await render(React.createElement(LiveToolActivity, { instanceId: 'inst_a', onOpenShell() {} }));
+      const socket = sockets[0]; socket.open();
+      const a = snapshot().active[0], b = { ...a, call_id: 'second', summary: 'second' };
+      await act(async () => socket.state(snapshot('inst_a', 1, { active: [a] })));
+      await env.advanceMotion();
+      const row = dom.window.document.querySelector('[data-tool-key]')!;
+      const completion = { ...a, status, duration_ms: 1200, completed_at_ms: 1240 };
+      await act(async () => socket.state(snapshot('inst_a', 2, {
+        active: [], completed_since_last: [completion],
+      }), false));
+      await env.advanceMotion(30);
+      const deadline = [...timeouts.values()][0].at;
+      const assertTerminal = () => {
+        const dot = row.querySelector('[role="img"]')!;
+        assert.equal(dot.getAttribute('aria-label'), status === 'failed' ? 'Failed' : 'Succeeded');
+        assert.match(dot.className, status === 'failed' ? /bg-red-500/ : /bg-green-500/);
+        assert.equal(row.querySelector('[data-debug-id="live-tools-duration"]')!.textContent, '1.2 s');
+        assert.equal(row.querySelector('button'), null);
+      };
+      assertTerminal();
+      await act(async () => socket.state(snapshot('inst_a', 3, { active: [b] }), false));
+      await env.advanceMotion(30);
+      assertTerminal();
+      assert.ok([...timeouts.values()].some((timer: any) => timer.at === deadline), 'original exit deadline retained');
+      await act(async () => socket.state(snapshot('inst_a', 4, {
+        active: [], completed_since_last: [{ ...b, status: 'completed', duration_ms: 800, completed_at_ms: 1300 }],
+      }), false));
+      await env.advanceMotion(30);
+      assertTerminal();
+      await env.advanceMotion(130);
+      assert.equal(row.isConnected, false, 'original row removed at its original 220ms deadline');
+      assert.ok(q('live-tool-activity'), 'later exit has its own deadline');
+      await env.advanceMotion();
+      assert.equal(q('live-tool-activity'), null);
+
+      // Genuine reentry must clear the previous terminal result, even if its
+      // identity returns before the old exit has finished.
+      await act(async () => socket.state(snapshot('inst_a', 5, { active: [a] }), false));
+      await env.advanceMotion();
+      await act(async () => socket.state(snapshot('inst_a', 6, {
+        active: [], completed_since_last: [completion],
+      }), false));
+      await env.advanceMotion(30);
+      await act(async () => socket.state(snapshot('inst_a', 7, { active: [a] }), false));
+      await env.advanceMotion(30);
+      assert.ok(q('live-tool-activity')!.querySelector('[aria-label="Running"]'));
+      await act(async () => socket.state(snapshot('inst_a', 8, { active: [] }), false));
+      assert.equal(q('live-tool-activity')!.querySelector('[aria-label="Succeeded"], [aria-label="Failed"]'), null,
+        'silent disappearance after reentry cannot inherit an old outcome');
+      await act(async () => socket.state(snapshot('inst_a', 9, { generation: 2, active: [] }), true));
+      assert.equal(q('live-tool-activity'), null, 'reset discards retained metadata immediately');
+    });
+  });
+}
+
 test('queued entry, rapid exit/reentry, reset and reduced-motion changes cancel stale animation work', async () => {
   await withDom(async (env) => {
     const { render, sockets, q, dom, frames, timeouts } = env;

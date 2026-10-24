@@ -58,6 +58,11 @@ async function sample(name, operations, { bottom = false, stable = false } = {})
         exitingActions: document.querySelectorAll('[data-tool-phase="exiting"] button').length,
         statuses: [...document.querySelectorAll('[data-tool-key] [role="img"]')].map((el) => ({
           label: el.getAttribute('aria-label'), color: getComputedStyle(el).backgroundColor })),
+        rowDetails: [...document.querySelectorAll('[data-tool-key]')].map((el) => ({
+          key: el.getAttribute('data-tool-key'), phase: el.getAttribute('data-tool-phase'),
+          label: el.querySelector('[role="img"]')?.getAttribute('aria-label'),
+          duration: el.querySelector('[data-debug-id="live-tools-duration"]')?.textContent,
+        })),
         rows: document.querySelectorAll('[data-tool-key]').length, writes: f.scrollWrites.length });
     }
     return frames;
@@ -89,6 +94,22 @@ try {
   assert.equal(exit.at(-1).rows, 0, 'last row removed with persistent completed batch');
   assert.ok(exit.some((frame) => frame.statuses.some((status) => status.label === 'Succeeded' && status.color === 'rgb(34, 197, 94)')));
   assert.equal((await metric()).height, baseline.height, 'no residual tail gap');
+  for (const status of ['completed', 'failed']) {
+    await page.evaluate(() => window.motionFixture.setCalls([1]));
+    await settle();
+    const frames = await sample(`rapid ${status} metadata retention`, [
+      { at: 0, kind: 'calls', ids: [], status },
+      { at: 2, kind: 'calls', ids: [2] },
+      { at: 4, kind: 'calls', ids: [] },
+    ], { bottom: true });
+    const copies = frames.flatMap((frame) => frame.rowDetails.filter((row) =>
+      JSON.parse(row.key).at(-1) === 'call_1' && row.phase === 'exiting'));
+    assert.ok(copies.length > 4, 'observed terminal row across intervening snapshots');
+    assert.ok(copies.every((row) => row.label === (status === 'failed' ? 'Failed' : 'Succeeded') &&
+      row.duration === '1.2 s'), 'terminal outcome and final duration survive later batches');
+    assert.ok(frames.slice(4).some((frame) => frame.rowDetails.some((row) =>
+      JSON.parse(row.key).at(-1) === 'call_1')), 'terminal copy observed after next call completes');
+  }
   await sample('rapid exit and reentry', [{ at: 0, kind: 'calls', ids: [1] }, { at: 2, kind: 'calls', ids: [] },
     { at: 4, kind: 'calls', ids: [1, 2] }, { at: 7, kind: 'calls', ids: [2] }], { bottom: true });
   await sample('unavailable collapse', [{ at: 0, kind: 'unavailable' }], { bottom: true });

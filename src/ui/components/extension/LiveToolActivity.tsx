@@ -26,7 +26,7 @@ export function toolNameColor(name: string): string {
 }
 export type ToolMemberLabel = { instanceId: string; displayName: string };
 
-type DisplayCall = { key: string; id: string; stream: string; name: string; call: LiveCall };
+type DisplayCall = { key: string; id: string; stream: string; name: string; call: LiveCall; completion?: LiveCompletion };
 const streamKey = (epoch: string, generation: number) => JSON.stringify([epoch, generation]);
 
 function useReducedMotion() {
@@ -194,7 +194,16 @@ function ToolRows({ roster, idsKey, onOpenShell }: {
     setPrevious(live); setPreviousCapacity(capacity);
     setPreviousSubscribed(subscribed);
     setRetained((rows) => [
-      ...rows.filter(valid).map((item) => desired.get(item.key) || item),
+      ...rows.filter(valid).map((item) => {
+        // Active snapshots replace the retained copy, clearing any old outcome
+        // on reentry. Completion batches are transient, so keep the latest known
+        // terminal metadata until this exit ends without restarting its motion.
+        const active = desired.get(item.key);
+        if (active) return active;
+        const completion = live?.[item.id]?.snapshot?.completed_since_last.find(
+          (call) => call.source === item.call.source && call.call_id === item.call.call_id);
+        return completion ? { ...item, completion } : item;
+      }),
       ...[...desired.values()].filter((item) => !rows.some((old) => old.key === item.key)),
     ]);
   }
@@ -213,9 +222,7 @@ function ToolRows({ roster, idsKey, onOpenShell }: {
     <TailGap active={hasActive} reduced={reduced} />
     {rows.map((old) => {
       const item = desired.get(old.key) || old;
-      const completion = !desired.has(old.key) ? live?.[old.id]?.snapshot?.completed_since_last.find(
-        (call) => call.source === old.call.source && call.call_id === old.call.call_id) : undefined;
-      return <ToolRow key={item.key} item={item} active={desired.has(item.key)} completion={completion}
+      return <ToolRow key={item.key} item={item} active={desired.has(item.key)} completion={item.completion}
         reduced={reduced} now={now} remove={remove} onOpenShell={onOpenShell} />;
     })}
   </div>;
