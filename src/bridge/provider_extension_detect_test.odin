@@ -202,6 +202,7 @@ test_provider_extension_antigravity_detection :: proc(t: ^testing.T) {
 		{`{"installed":[{"name":"heimdall","version":"0.1.0","enabled":false}]}`, "disabled"},
 		{`{"installed":[{"name":"heimdall","version":"0.0.9","enabled":true}]}`, "outdated"},
 		{`{"installed":[{"name":"heimdall","version":"0.2.0","enabled":true}]}`, "present"},
+		{`{"imports":[{"name":"heimdall","version":"0.2.0","enabled":true,"importedAt":"2026-10-24"}]}`, "present"},
 		{`{"installed":[{"name":"heimdall","enabled":true}]}`, "error"},
 		{`{"installed":[{"name":"heimdall","version":"unknown","enabled":true}]}`, "error"},
 		{`{"installed":[{"name":"heimdall","version":"0.1.0","enabled":"true"}]}`, "error"},
@@ -283,4 +284,56 @@ test_provider_extension_imports_schema_is_antigravity_only :: proc(t: ^testing.T
 	state3, version3 := bridge_provider_extension_evaluate(ext, raw_codex, true)
 	defer delete(version3)
 	testing.expect(t, state3 == "error", "imports timestamps cannot substitute for Codex enabled evidence")
+}
+
+@(test)
+test_provider_extension_antigravity_empty_inventory :: proc(t: ^testing.T) {
+	ext := provider_extension_test_descriptor()
+	ext.plugin_id = "heimdall"
+	ext.detect_id_key = "name"
+	ext.detect_version_key = "version"
+	ext.detect_enabled_key = "enabled"
+	for collection in ([]string{"installed", "imports"}) {
+		ext.detect_collection = collection
+		for output in ([]string{"No imported plugins.", "No imported plugins.\n", " \tNo imported plugins.\r\n"}) {
+			state, version := bridge_provider_extension_evaluate(ext, output, true)
+			testing.expect_value(t, state, "absent")
+			testing.expect_value(t, version, "")
+			delete(version)
+		}
+	}
+	for output in ([]string{"", "No imported plugins", "no imported plugins.", "Warning: No imported plugins.", "No imported plugins.\nerror", "{broken"}) {
+		state, version := bridge_provider_extension_evaluate(ext, output, true)
+		testing.expect_value(t, state, "error")
+		delete(version)
+	}
+	state, version := bridge_provider_extension_evaluate(ext, "No imported plugins.", false)
+	defer delete(version)
+	testing.expect_value(t, state, "error")
+
+	// Claude and Codex must continue to reject this non-JSON response.
+	provider_extension_test_expect(t, "No imported plugins.", "error", "")
+	ext.plugin_id = "heimdall@heimdall-codex"
+	state2, version2 := bridge_provider_extension_evaluate(ext, "No imported plugins.", true)
+	defer delete(version2)
+	testing.expect_value(t, state2, "error")
+}
+
+@(test)
+test_provider_extension_antigravity_empty_probe_exit_status :: proc(t: ^testing.T) {
+	ext := provider_extension_test_descriptor()
+	ext.plugin_id = "heimdall"
+	ext.detect_collection = "installed"
+	ext.detect_id_key = "name"
+	for exit_code in ([]int{0, 1}) {
+		body := fmt.aprintf("#!/bin/sh\n[ \"$1 $2 $3\" = \"plugin list --json\" ] || exit 3\nprintf 'No imported plugins.\\n'\nexit %d\n", exit_code)
+		path := provider_extension_test_fixture(t, body)
+		delete(body)
+		state, version := bridge_provider_extension_probe(path, ext, time.Second)
+		testing.expect_value(t, state, "absent" if exit_code == 0 else "error")
+		testing.expect_value(t, version, "")
+		delete(version)
+		_ = os.remove(path)
+		delete(path)
+	}
 }

@@ -10,8 +10,8 @@ import "core:time"
 
 // REQ-EXT-DET-1: whether a provider's Heimdall extension is installed. The Hub
 // catalog owns the descriptor; this file only runs `<binary> <detect_argv...>`
-// and reads the JSON collection it prints. Matching is data-driven (`id`, `enabled`,
-// `version`, `errors`), so no provider name appears here.
+// and reads its inventory. Matching is data-driven (`id`, `enabled`, `version`,
+// `errors`), with compatibility handling for Antigravity inventory formats.
 Bridge_Catalog_Extension :: struct {
 	// Empty selectors retain legacy flat-array id/version/enabled behavior.
 	detect_collection: string `json:"detect_collection"`,
@@ -192,6 +192,14 @@ bridge_provider_extension_installed_manifest_version :: proc(plugin_id: string, 
 bridge_provider_extension_evaluate :: proc(ext: Bridge_Catalog_Extension, output: string, ran: bool, allocator := context.allocator) -> (state: string, version: string) {
 	if !bridge_provider_extension_supported(ext) do return "unsupported", strings.clone("", allocator)
 	if !ran do return "error", strings.clone("", allocator)
+	// agy 1.2.16 emits this sentence instead of JSON for an empty inventory.
+	// Normalize only surrounding whitespace (including the CLI newline); never
+	// accept diagnostic prefixes/suffixes or another provider's output.
+	if ext.plugin_id == "heimdall" && ext.detect_id_key == "name" &&
+	   (ext.detect_collection == "installed" || ext.detect_collection == "imports") &&
+	   strings.trim_space(output) == "No imported plugins." {
+		return "absent", strings.clone("", allocator)
+	}
 	parsed, parse_err := json.parse_string(output, json.DEFAULT_SPECIFICATION, true, context.temp_allocator)
 	if parse_err != nil do return "error", strings.clone("", allocator)
 	defer json.destroy_value(parsed, context.temp_allocator)

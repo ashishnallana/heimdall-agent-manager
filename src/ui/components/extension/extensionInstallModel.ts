@@ -25,9 +25,11 @@ export function extensionInstallLabel(provider: string, extension: ProviderExten
   return '';
 }
 
-export function extensionInstallProgress(command: ProviderExtensionCommand): string {
+export function extensionInstallProgress(command: ProviderExtensionCommand, extension: ProviderExtensionStatus | null): string {
   switch (command.status) {
-    case 'succeeded': return 'Extension installed and verified.';
+    case 'succeeded': return extension?.state === 'present'
+      ? 'Extension installed and verified.'
+      : 'Previous installation completed. Current extension status needs checking.';
     case 'failed': return command.message || 'Extension installation failed. Try again.';
     case 'cancelled': return command.message || 'Extension installation cancelled.';
     case 'queued': return 'Extension installation queued…';

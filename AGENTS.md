@@ -542,7 +542,7 @@ All of the following element types must have `data-debug-id`:
 
 | Component | Debug IDs |
 | --- | --- |
-| `ProviderExtensionInstallAction` | `provider-extension-action-${provider}`, `provider-extension-install-btn-${provider}`, `provider-extension-progress-${provider}` |
+| `ProviderExtensionInstallAction` | `provider-extension-action-${provider}`, `provider-extension-install-btn-${provider}`, `provider-extension-retry-btn-${provider}`, `provider-extension-progress-${provider}` |
 | `BridgesPanel` | `settings-bridge-update-extensions` |
 
 ### Adding new elements

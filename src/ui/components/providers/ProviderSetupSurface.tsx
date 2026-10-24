@@ -370,6 +370,7 @@ export function ProviderSetupSurface({ bridgeId, mode, variant = 'full', onApply
                   online={bridge.status === 'online'}
                   disabled={busy !== ''}
                   onComplete={refreshAfterExtensionInstall}
+                  onRetryDiscovery={rediscover}
                 />
               ) : null}
 

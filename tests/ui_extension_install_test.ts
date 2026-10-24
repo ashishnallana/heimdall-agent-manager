@@ -14,7 +14,7 @@ const { heimdallApi } = await import('../src/ui/api/heimdallApi.ts');
 const { bridgeSupportApi } = await import('../src/ui/api/endpoints/bridgeSupport.ts');
 const { ProviderSetupSurface } = await import('../src/ui/components/providers/ProviderSetupSurface.tsx');
 const { default: BridgesPanel } = await import('../src/ui/components/settings/BridgesPanel.tsx');
-const { extensionInstallLabel, isExtensionInstallTerminal } = await import('../src/ui/components/extension/extensionInstallModel.ts');
+const { extensionInstallLabel, extensionInstallProgress, isExtensionInstallTerminal } = await import('../src/ui/components/extension/extensionInstallModel.ts');
 const { normalizeProviderExtension } = await import('../src/ui/components/extension/extensionBadgeModel.ts');
 
 test('install actions are limited to supported installers and measured absent/outdated states', () => {
@@ -31,7 +31,7 @@ test('install actions are limited to supported installers and measured absent/ou
   for (const state of ['succeeded', 'failed', 'cancelled'] as const) assert.equal(isExtensionInstallTerminal(state), true);
 });
 
-async function surfaceHarness(options: { state?: string; online?: boolean; cliPresent?: boolean; recover?: boolean } = {}) {
+async function surfaceHarness(options: { state?: string; online?: boolean; cliPresent?: boolean; recover?: boolean; recoverStatus?: ProviderExtensionCommand['status']; commandBridge?: string; commandProvider?: string; providerName?: string } = {}) {
   const dom = new JSDOM('<div id="root"></div>', { url: 'https://hub.example.test/', pretendToBeVisual: true });
   const saved = new Map<string, PropertyDescriptor | undefined>();
   for (const [key, value] of Object.entries({
@@ -45,23 +45,31 @@ async function surfaceHarness(options: { state?: string; online?: boolean; cliPr
   const requests: Array<{ path: string; method: string; body: any }> = [];
   const bridge = { bridge_id: 'bridge-1', label: 'Test bridge', status: options.online === false ? 'offline' : 'online',
     version: '0.4.30', latest_version: '0.4.31', update_available: true, update_artifact_available: true };
-  const provider = { provider: 'codex', display_name: 'Codex', enabled: true,
+  const provider = { provider: options.providerName || 'codex', display_name: 'Test provider', enabled: true,
     state: options.cliPresent === false ? 'absent' : 'present', models: [],
     extension: { state: options.state || 'absent', min_version: '0.4.31', version: '0.1.0' } };
   let command: ProviderExtensionCommand | null = options.recover ? {
-    command_id: 'recovered', bridge_id: bridge.bridge_id, provider: 'codex', status: 'installing',
+    command_id: 'recovered', bridge_id: options.commandBridge || bridge.bridge_id, provider: options.commandProvider || provider.provider, status: options.recoverStatus || 'installing',
     progress_percent: 50, message: 'Installing recovered command', parent_command_id: 'bridge-update',
   } : null;
   let postError = '';
+  let discoveryError = '';
+  let discoveryGate: Promise<void> | null = null;
+  let releaseDiscovery: (() => void) | null = null;
   globalThis.fetch = (async (input: any, init: any = {}) => {
     const path = new URL(String(input), 'https://hub.example.test').pathname;
     const method = init.method || 'GET';
     requests.push({ path, method, body: init.body ? JSON.parse(init.body) : undefined });
     if (path.endsWith('/extension-install') && method === 'POST') {
       if (postError) return new Response(JSON.stringify({ error: { message: postError, code: 'conflict' } }), { status: 409 });
-      command = { command_id: `install-${requests.length}`, bridge_id: bridge.bridge_id, provider: 'codex',
+      command = { command_id: `install-${requests.length}`, bridge_id: bridge.bridge_id, provider: provider.provider,
         status: 'dispatched', progress_percent: 0, message: '', parent_command_id: '' };
       return Response.json({ data: command }, { status: 202 });
+    }
+    if (path.endsWith('/providers/discover') && method === 'POST') {
+      await discoveryGate;
+      if (discoveryError) return Response.json({ error: { message: discoveryError } }, { status: 500 });
+      return Response.json({ data: { providers: [provider] } });
     }
     if (path.includes('/extension-install/')) return Response.json({ data: command });
     if (path.endsWith('/provider-status')) return Response.json({ data: { providers: [provider], extension_commands: command ? [command] : [] } });
@@ -83,6 +91,9 @@ async function surfaceHarness(options: { state?: string; online?: boolean; cliPr
     requests, query, provider,
     text: () => dom.window.document.body.textContent || '',
     rejectPost(message: string) { postError = message; },
+    rejectDiscovery(message: string) { discoveryError = message; },
+    holdDiscovery() { discoveryGate = new Promise<void>((resolve) => { releaseDiscovery = resolve; }); },
+    async finishDiscovery() { await act(async () => { releaseDiscovery?.(); }); },
     async render(panel = false) {
       await act(async () => {
         root.render(React.createElement(Provider, { store, children: panel
@@ -94,14 +105,14 @@ async function surfaceHarness(options: { state?: string; online?: boolean; cliPr
       assert.ok(query(id), `Missing ${id}`);
       await act(async () => query(id)!.click());
     },
-    async progress(status: ProviderExtensionCommand['status'], percent: number, message = '') {
+    async progress(status: ProviderExtensionCommand['status'], percent: number, message = '', updateDiscovery = true) {
       assert.ok(command);
       command = { ...command, status, progress_percent: percent, message };
-      if (status === 'succeeded') provider.extension = { ...provider.extension, state: 'present', version: '0.4.31' };
+      if (status === 'succeeded' && updateDiscovery) provider.extension = { ...provider.extension, state: 'present', version: '0.4.31' };
       // Force the same real query the poll uses, without sleeping for each state.
       await act(async () => {
         await store.dispatch(bridgeSupportApi.endpoints.getProviderExtensionInstall.initiate({
-          bridgeId: bridge.bridge_id, provider: 'codex', commandId: command!.command_id,
+          bridgeId: bridge.bridge_id, provider: provider.provider, commandId: command!.command_id,
         }, { subscribe: false, forceRefetch: true }));
       });
     },
@@ -215,5 +226,91 @@ test('bridge update modal defaults extension updates on, sends explicit consent,
     assert.equal(updates()[1].body.update_extensions, false);
     await h.click('settings-bridge-update-btn-bridge-1');
     assert.equal(checkbox().checked, true, 'a new update starts with the approved default');
+  } finally { await h.close(); }
+});
+
+test('Antigravity error retries actual discovery, disables while scanning, then offers installation', async () => {
+  const h = await surfaceHarness({ providerName: 'antigravity', state: 'error', recover: true, recoverStatus: 'succeeded' });
+  try {
+    await h.render();
+    assert.match(h.text(), /Extension check failed/);
+    assert.doesNotMatch(h.text(), /installed and verified/);
+    assert.match(h.text(), /Previous installation completed/);
+    assert.equal(h.query('provider-extension-install-btn-antigravity'), null);
+    h.holdDiscovery();
+    await h.click('provider-extension-retry-btn-antigravity');
+    assert.equal((h.query('provider-extension-retry-btn-antigravity') as HTMLButtonElement).disabled, true);
+    assert.equal(h.requests.filter((r) => r.method === 'POST' && r.path.endsWith('/providers/discover')).length, 1);
+    assert.equal(h.requests.filter((r) => r.path.endsWith('/extension-install')).length, 0);
+    h.provider.extension.state = 'absent';
+    await h.finishDiscovery();
+    assert.equal(h.query('provider-extension-retry-btn-antigravity'), null);
+    assert.equal((h.query('provider-extension-install-btn-antigravity') as HTMLButtonElement).disabled, false);
+    assert.doesNotMatch(h.text(), /installed and verified/);
+    await h.click('provider-extension-install-btn-antigravity');
+    const install = h.requests.find((r) => r.method === 'POST' && r.path.endsWith('/extension-install'));
+    assert.equal(install?.path, '/api/v1/bridges/bridge-1/providers/antigravity/extension-install');
+    await h.progress('succeeded', 100);
+    assert.match(h.text(), /installed and verified/);
+  } finally { await h.close(); }
+});
+
+test('failed discovery remains retryable and never dispatches installation', async () => {
+  const h = await surfaceHarness({ state: 'error' });
+  try {
+    await h.render();
+    h.rejectDiscovery('Probe unavailable');
+    await h.click('provider-extension-retry-btn-codex');
+    assert.match(h.text(), /Probe unavailable/);
+    assert.equal((h.query('provider-extension-retry-btn-codex') as HTMLButtonElement).disabled, false);
+    h.rejectDiscovery('');
+    h.provider.extension.state = 'absent';
+    await h.click('provider-extension-retry-btn-codex');
+    assert.ok(h.query('provider-extension-install-btn-codex'));
+    assert.equal(h.requests.filter((r) => r.path.endsWith('/extension-install')).length, 0);
+  } finally { await h.close(); }
+});
+
+test('offline and active installations disable discovery retry', async () => {
+  for (const options of [{ online: false }, { recover: true }]) {
+    const h = await surfaceHarness({ state: 'error', ...options });
+    try {
+      await h.render();
+      assert.equal((h.query('provider-extension-retry-btn-codex') as HTMLButtonElement).disabled, true);
+      await h.click('provider-extension-retry-btn-codex');
+      assert.equal(h.requests.filter((r) => r.method === 'POST').length, 0);
+    } finally { await h.close(); }
+  }
+});
+
+test('success text requires present discovery and commands stay scoped to bridge and provider', async () => {
+  const command: ProviderExtensionCommand = {
+    command_id: 'old', bridge_id: 'bridge-1', provider: 'codex', status: 'succeeded',
+    progress_percent: 100, message: '', parent_command_id: '',
+  };
+  for (const state of ['absent', 'outdated', 'disabled', 'error', 'unsupported', '']) {
+    assert.doesNotMatch(extensionInstallProgress(command, normalizeProviderExtension({ state })), /installed and verified/);
+  }
+  assert.doesNotMatch(extensionInstallProgress(command, null), /installed and verified/);
+  assert.match(extensionInstallProgress(command, normalizeProviderExtension({ state: 'present' })), /installed and verified/);
+  for (const options of [{ commandBridge: 'other-bridge' }, { commandProvider: 'antigravity' }]) {
+    const h = await surfaceHarness({ recover: true, ...options });
+    try {
+      await h.render();
+      assert.doesNotMatch(h.text(), /Installing recovered command/);
+      assert.equal((h.query('provider-extension-install-btn-codex') as HTMLButtonElement).disabled, false);
+      assert.equal(h.requests.filter((r) => r.path.includes('/extension-install/')).length, 0);
+    } finally { await h.close(); }
+  }
+});
+
+test('completed command cannot override a disagreeing current discovery result', async () => {
+  const h = await surfaceHarness({ recover: true, state: 'error' });
+  try {
+    await h.render();
+    await h.progress('succeeded', 100, '', false);
+    assert.doesNotMatch(h.text(), /installed and verified/);
+    assert.match(h.text(), /Current extension status needs checking/);
+    assert.equal((h.query('provider-extension-retry-btn-codex') as HTMLButtonElement).disabled, false);
   } finally { await h.close(); }
 });
