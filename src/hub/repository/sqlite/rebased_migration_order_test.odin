@@ -99,7 +99,13 @@ test_rebased_fresh_database_applies_every_migration :: proc(t: ^testing.T) {
 @(test)
 test_rebased_migration_numbers_after_102_are_unique :: proc(t: ^testing.T) {
 	order := migration_order
-	tail := order[len(order) - 14:]
+	// The historical extension sequence stays fixed; future release bumps append
+	// new migrations after it.
+	start := 0
+	for name, i in order {
+		if name == "102_drop_bridge_enrollments.sql" { start = i; break }
+	}
+	tail := order[start:]
 	expected := [14]string{"102_drop_bridge_enrollments.sql", RMO_MAIN_TIP, RMO_GUARD, RMO_INDEXES,
 		"106_agent_extension_events.sql", "107_provider_extension.sql", "108_agent_permission_mode.sql",
 		"109_instance_permission_mode.sql", "110_provider_ask_args.sql",

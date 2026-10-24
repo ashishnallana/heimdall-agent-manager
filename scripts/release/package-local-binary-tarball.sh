@@ -6,7 +6,7 @@ usage() {
 usage: package-local-binary-tarball.sh <target> <version> <out-dir> <ham-bridge-out> <ham-ctl-out> <heimdall-out> [ham-pty-host-out]
 
 Creates dist tarball: <out-dir>/heimdall-local-<target>.tar.gz
-Tarball root contains: bin/ham-bridge, bin/ham-ctl, bin/heimdall, README.md, LICENSE, METADATA.json
+Tarball root contains: bin/ham-bridge, bin/ham-ctl, bin/heimdall, share/heimdall/extensions/, README.md, LICENSE, METADATA.json
 When the optional <ham-pty-host-out> is given, bin/ham-pty-host is also shipped
 (self-contained; PTYH-4).
 USAGE
@@ -44,7 +44,17 @@ for spec in \
   "$heimdall_out/bin/heimdall" \
   "README.md" \
   "LICENSE" \
-  "scripts/apply-bridge-update.sh"
+  "scripts/apply-bridge-update.sh" \
+  "scripts/refresh-provider-extensions.sh" \
+  "extensions/antigravity/plugin.json" \
+  "extensions/claude-code/.claude-plugin/plugin.json" \
+  "extensions/codex/.codex-plugin/plugin.json" \
+  "extensions/.claude-plugin/marketplace.json" \
+  "extensions/.agents/plugins/marketplace.json" \
+  "extensions/antigravity/hooks.json" \
+  "extensions/antigravity/hooks/hooks.json" \
+  "extensions/claude-code/hooks/hooks.json" \
+  "extensions/codex/hooks/hooks.json"
 do
   if [ ! -f "$spec" ]; then
     echo "missing required release input: $spec" >&2
@@ -60,6 +70,9 @@ trap cleanup EXIT
 stage="$work_dir/stage"
 mkdir -p "$stage/bin" "$stage/scripts"
 install -m 0755 scripts/apply-bridge-update.sh "$stage/scripts/apply-bridge-update.sh"
+install -m 0755 scripts/refresh-provider-extensions.sh "$stage/scripts/refresh-provider-extensions.sh"
+mkdir -p "$stage/share/heimdall/extensions"
+cp -R -P -p extensions/. "$stage/share/heimdall/extensions/"
 install -m 0755 "$ham_bridge_out/bin/ham-bridge" "$stage/bin/ham-bridge"
 if [ -f "$ham_bridge_out/bin/openssl" ]; then
   install -m 0755 "$ham_bridge_out/bin/openssl" "$stage/bin/openssl"
@@ -200,13 +213,19 @@ cat > "$stage/METADATA.json" <<META
 META
 
 tarball="$out_dir/heimdall-local-$target.tar.gz"
-tar -C "$stage" -czf "$tarball" bin scripts README.md LICENSE METADATA.json
+tar -C "$stage" -czf "$tarball" bin scripts share README.md LICENSE METADATA.json
 
 required_entries=(
   "bin/ham-bridge"
   "bin/ham-ctl"
   "bin/heimdall"
   "scripts/apply-bridge-update.sh"
+  "scripts/refresh-provider-extensions.sh"
+  "share/heimdall/extensions/.agents/plugins/marketplace.json"
+  "share/heimdall/extensions/.claude-plugin/marketplace.json"
+  "share/heimdall/extensions/antigravity/plugin.json"
+  "share/heimdall/extensions/claude-code/.claude-plugin/plugin.json"
+  "share/heimdall/extensions/codex/.codex-plugin/plugin.json"
   "README.md"
   "LICENSE"
 )

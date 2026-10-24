@@ -461,6 +461,21 @@ start_service() {
   fi
 }
 
+# Prepare assets before stopping anything. Select paths relative to the resolved
+# binary directory so direct, extract/, and Cloudtop archive layouts all work.
+EXTENSION_TRANSACTION=""
+EXTENSION_SOURCE=""
+for candidate in "$STAGE_BIN/../share/heimdall/extensions" "$STAGE_BIN/../share/extensions" "$STAGE_BIN/../extensions" "$STAGE_BIN/share/heimdall/extensions" "$STAGE_BIN/share/extensions" "$STAGE_BIN/extensions"; do
+  if [ -d "$candidate" ]; then EXTENSION_SOURCE="$candidate"; break; fi
+done
+if [ -n "$EXTENSION_SOURCE" ]; then
+  source "$(dirname "${BASH_SOURCE[0]}")/refresh-provider-extensions.sh"
+  mkdir -p "$DATA_DIR"
+  EXTENSION_TRANSACTION="$(mktemp -d "$DATA_DIR/.extensions-update.XXXXXX")"
+  trap 'cleanup_provider_extension_transaction "$EXTENSION_TRANSACTION" "$DATA_DIR/extensions"' EXIT
+  prepare_provider_extensions "$EXTENSION_SOURCE" "$DATA_DIR/extensions" "$EXTENSION_TRANSACTION/new"
+fi
+
 # 1. Stop current service cleanly
 if ! stop_service; then
   log_err "Failed to stop bridge through a scoped mechanism"
@@ -493,6 +508,11 @@ chmod +x "$DATA_DIR/bin.new/"* 2>/dev/null || true
 if [ -d "$STAGE_DIR/share/migrations" ]; then
   mkdir -p "$DATA_DIR/share/migrations"
   cp -R -p "$STAGE_DIR/share/migrations/"* "$DATA_DIR/share/migrations/"
+fi
+
+if [ -n "$EXTENSION_TRANSACTION" ]; then
+  log "Activating provider extensions at $DATA_DIR/extensions"
+  swap_provider_extensions "$EXTENSION_TRANSACTION/new" "$DATA_DIR/extensions" "$EXTENSION_TRANSACTION/old"
 fi
 
 log "Performing atomic directory swap into $DATA_DIR/bin"
@@ -545,6 +565,13 @@ else
     rm -rf "$DATA_DIR/bin.failed"
   else
     log_err "No $DATA_DIR/bin.bak found to restore from!"
+  fi
+
+  if [ -n "$EXTENSION_TRANSACTION" ]; then
+    rm -rf "$DATA_DIR/extensions"
+    if [ -d "$EXTENSION_TRANSACTION/old" ]; then
+      mv "$EXTENSION_TRANSACTION/old" "$DATA_DIR/extensions"
+    fi
   fi
 
   log "Restarting rolled-back service..."

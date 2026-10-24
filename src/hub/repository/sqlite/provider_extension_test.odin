@@ -3,6 +3,7 @@
 // persisted per-Bridge extension probe result.
 package sqlite
 
+import contracts "odin_test:contracts"
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
 import provider_service "odin_test:hub/service/provider"
@@ -17,6 +18,7 @@ test_provider_catalog_extension_descriptors_preserve_claude_and_add_codex :: pro
 	impl := Provider_Repo_SQLite{conn = &conn}
 	repo := new_provider_repository(&impl, &conn)
 
+	expected_min_version := strings.concatenate({`"min_version":"`, contracts.APP_VERSION, `"`}, context.temp_allocator)
 	catalog, err := iface.provider_catalog_list(&repo)
 	testing.expect_value(t, err.code, domain.Error_Code.None)
 	defer domain.provider_catalog_destroy(catalog)
@@ -29,14 +31,14 @@ test_provider_catalog_extension_descriptors_preserve_claude_and_add_codex :: pro
 			testing.expect(t, strings.contains(entry.extension_json, `"plugin_id":"heimdall@heimdall"`), "claude plugin id")
 			testing.expect(t, strings.contains(entry.extension_json, `"load_args":["--plugin-dir"]`), "catalog declares the extension loader argv")
 			testing.expect(t, strings.contains(entry.extension_json, `"load_path_suffix":"extensions/claude"`), "loader is restricted to this extension directory")
-			testing.expect(t, strings.contains(entry.extension_json, `"min_version":"0.4.31"`), "claude min_version")
+			testing.expect(t, strings.contains(entry.extension_json, expected_min_version), "claude min_version")
 			testing.expect(t, strings.contains(entry.extension_json, `"capabilities":["activity","subagents","permissions","file_edits","session_id"]`), "claude capabilities")
 		} else if entry.provider == "codex" {
 			testing.expect(t, strings.contains(entry.extension_json, `"detect_argv":["plugin","list","--marketplace","heimdall-codex","--json"]`), "native inventory avoids unrelated remote marketplaces")
 			testing.expect(t, strings.contains(entry.extension_json, `"detect_collection":"installed"`))
 			testing.expect(t, strings.contains(entry.extension_json, `"detect_id_key":"pluginId"`))
 			testing.expect(t, strings.contains(entry.extension_json, `"plugin_id":"heimdall@heimdall-codex"`))
-			testing.expect(t, strings.contains(entry.extension_json, `"min_version":"0.4.31"`), "codex min_version")
+			testing.expect(t, strings.contains(entry.extension_json, expected_min_version), "codex min_version")
 		} else if entry.provider == "antigravity" {
 			saw_antigravity = true
 			testing.expect(t, strings.contains(entry.extension_json, `"detect_argv":["plugin","list","--json"]`), "antigravity detects via plugin list")
@@ -45,7 +47,7 @@ test_provider_catalog_extension_descriptors_preserve_claude_and_add_codex :: pro
 			testing.expect(t, strings.contains(entry.extension_json, `"detect_version_key":"version"`))
 			testing.expect(t, strings.contains(entry.extension_json, `"detect_enabled_key":"enabled"`))
 			testing.expect(t, strings.contains(entry.extension_json, `"plugin_id":"heimdall"`))
-			testing.expect(t, strings.contains(entry.extension_json, `"min_version":"0.4.31"`), "antigravity min_version")
+			testing.expect(t, strings.contains(entry.extension_json, expected_min_version), "antigravity min_version")
 			testing.expect(t, strings.contains(entry.extension_json, `"install_hint":"agy plugin install <repo>/extensions/antigravity"`))
 			testing.expect(t, strings.contains(entry.extension_json, `"capabilities":["activity","subagents","permissions","file_edits","session_id"]`))
 			testing.expect(t, strings.contains(entry.extension_json, `"load_args":["--add-dir"]`))

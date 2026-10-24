@@ -417,7 +417,7 @@ PY
     download_progress "$base/$archive" "$work_dir/$archive"
   fi
   python3 - "$work_dir" "$archive" <<'PY'
-import hashlib, pathlib, sys, tarfile
+import hashlib, os, pathlib, posixpath, sys, tarfile
 root = pathlib.Path(sys.argv[1]); name = sys.argv[2]
 entries = [line.split() for line in (root/'SHA256SUMS').read_text().splitlines()]
 expected = [a[0] for a in entries if len(a)==2 and a[1].lstrip('*')==name]
@@ -433,6 +433,46 @@ with tarfile.open(root/name) as t:
     if scripts:
         if len(scripts)!=1 or not scripts[0].isfile(): sys.exit('Unsafe update supervisor')
         (root/'apply-bridge-update.sh').write_bytes(t.extractfile(scripts[0]).read())
+
+    # Extract only the extension tree, checking every path and link before
+    # writing anything. Links are created last and cannot have child members.
+    prefix = 'share/heimdall/extensions'
+    assets = {}
+    for member in t.getmembers():
+        name = member.name.removeprefix('./').rstrip('/')
+        if name != prefix and not name.startswith(prefix+'/'): continue
+        path = pathlib.PurePosixPath(name)
+        if '..' in path.parts or path.is_absolute() or str(path) != name or name in assets:
+            sys.exit('Unsafe/duplicate extension path: '+name)
+        if not (member.isdir() or member.isfile() or member.issym()):
+            sys.exit('Unsafe extension member: '+name)
+        if member.issym():
+            target = posixpath.normpath(posixpath.join(posixpath.dirname(name), member.linkname))
+            if member.linkname.startswith('/') or not target.startswith(prefix+'/'):
+                sys.exit('Unsafe extension symlink: '+name)
+        assets[name] = member
+    for name, member in assets.items():
+        for parent in pathlib.PurePosixPath(name).parents:
+            if str(parent) in assets and not assets[str(parent)].isdir():
+                sys.exit('Non-directory extension parent: '+str(parent))
+    if assets:
+        helpers = [m for m in t.getmembers() if m.name.removeprefix('./') == 'scripts/refresh-provider-extensions.sh']
+        if len(helpers) != 1 or not helpers[0].isfile():
+            sys.exit('Missing/unsafe extension staging helper')
+        (root/'refresh-provider-extensions.sh').write_bytes(t.extractfile(helpers[0]).read())
+        for name, member in assets.items():
+            dest = root/name
+            if member.isdir():
+                dest.mkdir(parents=True, exist_ok=True)
+            elif member.isfile():
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(t.extractfile(member).read())
+                dest.chmod(member.mode & 0o777)
+        for name, member in assets.items():
+            if member.issym():
+                dest = root/name
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                os.symlink(member.linkname, dest)
 PY
   log OK 'Release checksum and bundle verified'
   # Preflight through the BRIDGE's own transport (socat/openssl TLS relay),
@@ -456,6 +496,15 @@ PY
   for old in "$cache_dir/$cache_prefix"-*.tar.gz; do
     [ "$old" = "$cache_dir/$archive" ] || rm -f "$old"
   done
+  # Validate and copy the full new generation before stopping a service.
+  local extension_transaction=""
+  if [ -d "$work_dir/share/heimdall/extensions" ]; then
+    source "$work_dir/refresh-provider-extensions.sh"
+    mkdir -p "$data_dir"
+    extension_transaction="$(mktemp -d "$data_dir/.extensions-install.XXXXXX")"
+    trap "$(printf 'cleanup_provider_extension_transaction %q %q; rm -rf %q; rmdir %q' "$extension_transaction" "$data_dir/extensions" "$work_dir" "$lock_dir")" EXIT
+    prepare_provider_extensions "$work_dir/share/heimdall/extensions" "$data_dir/extensions" "$extension_transaction/new"
+  fi
   step '3 / 6 · Replace this Hub’s service'
   remove_service "$service_file" "$service_name"
   if "$migrate"; then remove_service "$legacy_file" "$legacy_name"; fi
@@ -475,6 +524,10 @@ PY
   if [ -f "$work_dir/apply-bridge-update.sh" ]; then
     mkdir -p "$data_dir/updates"
     install -m 0755 "$work_dir/apply-bridge-update.sh" "$data_dir/updates/apply-bridge-update.sh"
+  fi
+  if [ -n "$extension_transaction" ]; then
+    swap_provider_extensions "$extension_transaction/new" "$data_dir/extensions" "$extension_transaction/old"
+    install -m 0755 "$work_dir/refresh-provider-extensions.sh" "$data_dir/updates/refresh-provider-extensions.sh"
   fi
   printf '%s\n' "$hub_url" > "$state_dir/hub-url"
   [ ! -d "$bin_dir" ] || chmod 700 "$bin_dir"
@@ -652,6 +705,9 @@ PY
       log INFO "Logs: $PREFIX/var/log/sv/ham-bridge/current (sv status ham-bridge)" ;;
   esac
   log INFO "Hub-specific CLI: $bin_dir/ham-ctl-$service_name"
+  if [ -n "$extension_transaction" ]; then
+    cleanup_provider_extension_transaction "$extension_transaction" "$data_dir/extensions"
+  fi
   rm -rf "$work_dir"
   rmdir "$lock_dir"
   trap - EXIT

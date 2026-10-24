@@ -76,6 +76,13 @@ else
   echo "    Build Timestamp: $TIMESTAMP"
 fi
 
+# Stamp provider manifests/marketplaces and append a registered forward catalog
+# migration when the release minimum changes. Historical SQL stays immutable.
+if [ -d extensions ]; then
+  python3 scripts/release/stamp-provider-versions.py "$CLEAN_VERSION"
+  echo "    [ok] Synchronized provider packages and catalog release minimum"
+fi
+
 # 1. Update flake.nix appVersion
 if [ -f "flake.nix" ]; then
   sed_i "s/appVersion = \".*\";/appVersion = \"$CLEAN_VERSION\";/" flake.nix

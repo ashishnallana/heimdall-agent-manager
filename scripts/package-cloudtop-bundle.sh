@@ -42,12 +42,13 @@ cp -r src/hub/repository/sqlite/migrations/* "$BUNDLE_DIR/share/migrations/"
 if [ -d "extensions" ]; then
   echo "[bundle] 3.05 Copying bundled extensions..."
   mkdir -p "$BUNDLE_DIR/share/extensions" "$BUNDLE_DIR/extensions"
-  cp -r extensions/* "$BUNDLE_DIR/share/extensions/"
-  cp -r extensions/* "$BUNDLE_DIR/extensions/"
+  cp -R -P -p extensions/. "$BUNDLE_DIR/share/extensions/"
+  cp -R -P -p extensions/. "$BUNDLE_DIR/extensions/"
 fi
 cp systemd/heimdall.service "$BUNDLE_DIR/systemd/heimdall.service"
 cp scripts/install-systemd-service.sh "$BUNDLE_DIR/scripts/install-systemd-service.sh"
 cp scripts/snapshot-hub.sh "$BUNDLE_DIR/scripts/snapshot-hub.sh"
+cp scripts/refresh-provider-extensions.sh "$BUNDLE_DIR/scripts/refresh-provider-extensions.sh"
 cp scripts/install.sh "$BUNDLE_DIR/install.sh"
 chmod +x "$BUNDLE_DIR/install.sh"
 if [ -f "scripts/publish-mpm.sh" ]; then
@@ -148,9 +149,9 @@ fi
 mkdir -p "$DATA_DIR" "$RUN_DIR" "$LOG_DIR" "$DATA_DIR/extensions"
 chmod 0700 "$DATA_DIR"
 if [ -d "$BUNDLE_DIR/share/extensions" ]; then
-  cp -rn "$BUNDLE_DIR/share/extensions/"* "$DATA_DIR/extensions/" 2>/dev/null || true
+  bash "$BUNDLE_DIR/scripts/refresh-provider-extensions.sh" "$BUNDLE_DIR/share/extensions" "$DATA_DIR/extensions"
 elif [ -d "$BUNDLE_DIR/extensions" ]; then
-  cp -rn "$BUNDLE_DIR/extensions/"* "$DATA_DIR/extensions/" 2>/dev/null || true
+  bash "$BUNDLE_DIR/scripts/refresh-provider-extensions.sh" "$BUNDLE_DIR/extensions" "$DATA_DIR/extensions"
 fi
 
 is_ancestor_or_self() {
