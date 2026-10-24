@@ -35,6 +35,7 @@ bridge_dispatch_queue_take_transfers_job_ownership :: proc(t: ^testing.T) {
 bridge_dispatch_classifies_blocking_incident_paths :: proc(t: ^testing.T) {
 	lifecycle, lifecycle_ok := bridge_command_dispatch_class("launch_agent")
 	background, background_ok := bridge_command_dispatch_class("provider_discover")
+	ext_install, ext_install_ok := bridge_command_dispatch_class("provider_extension_install")
 	interactive, interactive_ok := bridge_command_dispatch_class("notify_task_nudge")
 	exclusive, exclusive_ok := bridge_command_dispatch_class("bridge_update")
 	general_io, general_io_ok := bridge_command_dispatch_class("vcs_status")
@@ -43,6 +44,7 @@ bridge_dispatch_classifies_blocking_incident_paths :: proc(t: ^testing.T) {
 	_, tunnel_async := bridge_command_dispatch_class("tunnel_data")
 	testing.expect(t, lifecycle_ok && lifecycle == .Lifecycle, "agent launch must use the isolated lifecycle lane")
 	testing.expect(t, background_ok && background == .Background, "provider discovery must use the shed-first background lane")
+	testing.expect(t, ext_install_ok && ext_install == .Background, "provider extension install must use the background lane")
 	testing.expect(t, interactive_ok && interactive == .Interactive, "notifications must not share the background lane")
 	testing.expect(t, exclusive_ok && exclusive == .Exclusive, "Bridge update must never execute on the reader or lifecycle lane")
 	testing.expect(t, general_io_ok && general_io == .General_IO, "filesystem and VCS work must use a bounded IO lane")
@@ -283,7 +285,7 @@ HUB_TO_BRIDGE_RUNTIME_FRAME_TYPES := []string{
 	// REQ-EXT-PERM-1: user permission decision (extension_permission.odin)
 	"permission_decision",
 	// bridge lifecycle
-	"bridge_unseal", "set_telemetry", "bridge_update", "provider_discover",
+	"bridge_unseal", "set_telemetry", "bridge_update", "provider_discover", "provider_extension_install",
 	// agents
 	"launch_agent", "launch_provider_test", "stop_agent", "wake_agent",
 	"get_agent_pane", "capture_agent_pane",

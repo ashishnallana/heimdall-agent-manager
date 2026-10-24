@@ -757,6 +757,10 @@ bridge_hub_handle_command :: proc(conn: ^ws.Connection, text: string) {
 		bridge_hub_handle_update_command(conn, text)
 		return
 	}
+	if type == "provider_extension_install" {
+		bridge_hub_handle_extension_install_command(conn, text)
+		return
+	}
 	if type == "task_chain_search" {
 		bridge_task_chain_search_handle_command(conn, text)
 		return
