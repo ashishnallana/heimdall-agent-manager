@@ -231,10 +231,10 @@ bridge_retry_resume_pending_rotation :: proc(key: string, first_ms: i64) -> bool
     if b.state == .Succeeded {
         // Both durable writes were already acknowledged; completing their local
         // idempotent replay is safe, but must not exchange a remote token again.
-        b.state = .Backoff
+        return true
     } else if b.state == .Waiting_Repair && (b.code == .None || b.class == .retriable) {
         b.state = .Backoff
-    } else if b.state != .Backoff && b.state != .In_Flight { return false }
+    } else if b.state != .Backoff { return false }
     return bridge_retry_journal_flush_locked()
 }
 

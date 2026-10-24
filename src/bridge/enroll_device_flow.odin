@@ -739,6 +739,18 @@ bridge_credential_refresh_worker :: proc() {
         recovery.pending.version = 1
         recovery.pending.key = key; recovery.pending.api_base = api_base; recovery.pending.bridge_id = bridge_id
         if recovery.has_pair {
+            completed := bridge_retry_status(key)
+            if completed.state == .Succeeded && completed.first_ms == recovery.pending.first_ms {
+                // Both credential files were durable before the success receipt.
+                // A crash before pending-file cleanup needs adoption only, not
+                // another attempt (which may already be the sixth).
+                bridge_refresh_adopt(recovery.pending.credential)
+                _ = os.remove(pending_path)
+                delay = bridge_refresh_delay_seconds(recovery.pending.credential.expires_in, 128)
+                delete(key); delete(refresh_path); delete(pending_path)
+                if delay <= 0 do return
+                continue
+            }
             if !bridge_retry_resume_pending_rotation(key, recovery.pending.first_ms) {
                 fmt.eprintln("bridge credential recovery parked: pending pair has no resumable receipt"); return
             }
@@ -767,13 +779,8 @@ bridge_credential_refresh_worker :: proc() {
             if success {
                 // Adoption is after both durable writes, so a reconnect cannot
                 // expose a half-committed rotation. Failed parent sync budgets stay.
-                sync.mutex_lock(&g_bridge_credential_mu)
-                bridge_config.bridge_token = strings.clone(recovery.pending.credential.access_token, runtime.heap_allocator())
-                sync.mutex_unlock(&g_bridge_credential_mu)
+                bridge_refresh_adopt(recovery.pending.credential)
                 _ = os.remove(pending_path)
-                sync_key := bridge_action_scheduler_sync_key()
-                bridge_retry_credential_repaired(sync_key)
-                delete(sync_key)
                 jitter: [1]byte
                 if !bridge_enroll_entropy(jitter[:]) do jitter[0] = 128
                 delay = bridge_refresh_delay_seconds(recovery.pending.credential.expires_in, jitter[0])
@@ -1677,4 +1684,13 @@ bridge_refresh_recovery_step :: proc(
     if !save_pending(pending_path, recovery.pending) do return false, contracts.wire_error(.Bridge_Timeout)
     if !commit_pair(path, refresh_path, api_base, bridge_id, recovery.pending.credential) do return false, contracts.wire_error(.Bridge_Timeout)
     return true, {}
+}
+
+bridge_refresh_adopt :: proc(cred: Bridge_Enroll_Credential) {
+    sync.mutex_lock(&g_bridge_credential_mu)
+    bridge_config.bridge_token = strings.clone(cred.access_token, runtime.heap_allocator())
+    sync.mutex_unlock(&g_bridge_credential_mu)
+    key := bridge_action_scheduler_sync_key()
+    defer delete(key)
+    bridge_retry_credential_repaired(key)
 }
