@@ -271,8 +271,8 @@ bridge_recovery_status_json :: proc() -> string {
 
 // Explicit local operator command only; ordinary reconnect/version/token events
 // never call this. Corrupt journals and unknown side-effect slots stay fenced.
-bridge_retry_operator_resume_sync :: proc(key: string) -> bool {
-    if !strings.has_prefix(key, "sync:") do return false
+bridge_retry_operator_resume_sync :: proc(key: string, refresh := false) -> bool {
+    if !strings.has_prefix(key, "refresh:" if refresh else "sync:") do return false
     sync.mutex_lock(&bridge_retry_journal_mutex)
     defer sync.mutex_unlock(&bridge_retry_journal_mutex)
     b := bridge_retry_journal_get_locked(key)

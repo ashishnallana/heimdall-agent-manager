@@ -42,7 +42,9 @@ After repairing credentials/configuration, an operator may stop the bridge and e
 ham-bridge recovery resume-sync <the same hub/bridge/config arguments used by the service>
 ```
 
-This command exits after updating the sync receipt. Restart the service normally, without retaining this one-shot command in its service configuration. It refuses to clear readiness/unknown execution fences or a corrupt journal. Automatic reconnects do not invoke it.
+After re-enrollment/configuration repair, `recovery resume-refresh` likewise starts a new renewal episode for the same bridge identity. It refuses while a pending rotated pair exists, so a spent-token exchange cannot replace local commit recovery.
+
+Each command exits after updating its controller receipt. Restart the service normally, without retaining this one-shot command in its service configuration. It refuses to clear readiness/unknown execution fences or a corrupt journal. Automatic reconnects do not invoke it.
 
 ## Verification and rollout
 

@@ -121,14 +121,24 @@ main :: proc() {
 	default_credential_path := bridge_enroll_default_credential_path(bridge_config.daemon_url, strings.trim_space(bridge_config.daemon_id))
 	bridge_adopt_default_credential_if_needed(&bridge_config, default_credential_path)
 	delete(default_credential_path)
-    if len(os.args) > 2 && os.args[1] == "recovery" && os.args[2] == "resume-sync" {
-        key := bridge_action_scheduler_sync_key()
+    if len(os.args) > 2 && os.args[1] == "recovery" && (os.args[2] == "resume-sync" || os.args[2] == "resume-refresh") {
+        refresh := os.args[2] == "resume-refresh"
+        if refresh {
+            path := option_value(os.args, "--bridge-token-file", "")
+            if path == "" do path = bridge_enroll_default_credential_path(bridge_config.daemon_url, strings.trim_space(bridge_config.daemon_id))
+            pending := strings.concatenate({path, ".pending-rotation-v1"}, context.temp_allocator)
+            if os.exists(pending) {
+                fmt.eprintln("credential recovery resume refused: reconcile the pending rotated pair first")
+                os.exit(1)
+            }
+        }
+        key := fmt.aprintf("refresh:%s:%s", bridge_config.daemon_url, strings.trim_space(bridge_config.daemon_id)) if refresh else bridge_action_scheduler_sync_key()
         defer delete(key)
-        if !bridge_retry_operator_resume_sync(key) {
-            fmt.eprintln("action sync resume refused: journal unavailable or operation in flight")
+        if !bridge_retry_operator_resume_sync(key, refresh) {
+            fmt.eprintln("recovery resume refused: journal unavailable or operation in flight")
             os.exit(1)
         }
-        fmt.println("action sync recovery resumed; restart the bridge with the repaired configuration")
+        fmt.println("recovery resumed; restart the bridge with the repaired configuration")
         return
     }
 	// REQ-IMPL-4 / audit F4: an enrolled bridge holding no credential must not run.
