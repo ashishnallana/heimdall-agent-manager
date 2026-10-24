@@ -477,8 +477,9 @@ MIGRATION_110_PROVIDER_ASK_ARGS :: #load("migrations/110_provider_ask_args.sql",
 MIGRATION_111_EXTENSION_STARTUP_LOADING :: #load("migrations/111_extension_startup_loading.sql", string)
 MIGRATION_112_CODEX_EXTENSION :: #load("migrations/112_codex_extension.sql", string)
 MIGRATION_113_ANTIGRAVITY_EXTENSION :: #load("migrations/113_antigravity_extension.sql", string)
+MIGRATION_114_EXTENSION_VERSION_SYNC :: #load("migrations/114_extension_version_sync.sql", string)
 
-migration_order :: [116]string {
+migration_order :: [117]string {
 	"001_foundation.sql",
 	"002_owner_scoped_core.sql",
 	"003_device_tokens.sql",
@@ -595,6 +596,7 @@ migration_order :: [116]string {
 	"111_extension_startup_loading.sql",
 	"112_codex_extension.sql",
 	"113_antigravity_extension.sql",
+	"114_extension_version_sync.sql",
 }
 
 // stop_before is a TEST SEAM: when non-empty, the apply loop stops in front of
@@ -1152,6 +1154,7 @@ migration_sql :: proc(name, migrations_dir: string) -> string {
 	if name == "111_extension_startup_loading.sql" do return strings.clone(MIGRATION_111_EXTENSION_STARTUP_LOADING)
 	if name == "112_codex_extension.sql" do return strings.clone(MIGRATION_112_CODEX_EXTENSION)
 	if name == "113_antigravity_extension.sql" do return strings.clone(MIGRATION_113_ANTIGRAVITY_EXTENSION)
+	if name == "114_extension_version_sync.sql" do return strings.clone(MIGRATION_114_EXTENSION_VERSION_SYNC)
 	if name == "100_vault_pair_hub_origin.sql" do return strings.clone(MIGRATION_100_VAULT_PAIR_HUB_ORIGIN)
 	if name == "101_codex_gpt6_models.sql" do return strings.clone(MIGRATION_101_CODEX_GPT6_MODELS)
 	if name == "081_antigravity_models.sql" do return strings.clone(MIGRATION_081_ANTIGRAVITY_MODELS)
