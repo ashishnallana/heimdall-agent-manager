@@ -2165,7 +2165,8 @@ bridge_ws_process_frame :: proc(h: ^Bridge_Handlers, bridge_id: string, connecti
 		} else if h.scheduled_prompts != nil {
 			schedules_version = get_scheduled_prompts_bridge_version(h.scheduled_prompts, bridge_id)
 		}
-		ack := bridge_heartbeat_ack_payload(reconciled, superseded, schedules_version)
+		epoch, revision := action_schedules_token(h.actions)
+        ack := bridge_heartbeat_ack_payload(reconciled, superseded, schedules_version, epoch, revision)
 		_ = write_ws_text_frame_locked(h, bridge_id, client, ack)
 		delete(ack)
 		if superseded != nil {
@@ -2974,13 +2975,16 @@ bridge_connection_replaced_payload :: proc() -> string {
 	return "{\"type\":\"connection_replaced\",\"protocol_version\":1,\"payload\":{\"reason\":\"newer_bridge_connection\"}}"
 }
 
-bridge_heartbeat_ack_payload :: proc(reconciled: int, superseded_instance_ids: []string = nil, schedules_version: int = 0) -> string {
+bridge_heartbeat_ack_payload :: proc(reconciled: int, superseded_instance_ids: []string = nil, schedules_version: int = 0, schedules_epoch := "", schedules_revision: i64 = -1) -> string {
 	b := strings.builder_make()
 	strings.write_string(&b, "{\"type\":\"bridge_heartbeat_ack\",\"protocol_version\":1,\"payload\":{\"reconciled_unreachable_count\":")
 	strings.write_string(&b, fmt.tprintf("%d", reconciled))
 	strings.write_string(&b, ",\"schedules_version\":")
 	strings.write_string(&b, fmt.tprintf("%d", schedules_version))
-	// H7: instance ids the reporting bridge must reap (relaunched on another
+	if schedules_epoch != "" && schedules_revision >= 0 {
+        strings.write_string(&b, fmt.tprintf(",\"schedules_epoch\":\"%s\",\"schedules_revision\":%d", schedules_epoch, schedules_revision))
+    }
+    // H7: instance ids the reporting bridge must reap (relaunched on another
 	// bridge). The bridge invalidates their local tokens so the stale wrapper exits.
 	strings.write_string(&b, ",\"superseded_instance_ids\":[")
 	for id, i in superseded_instance_ids {

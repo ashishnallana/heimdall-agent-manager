@@ -67,13 +67,17 @@ bridge_task_chain_search_change_parse_failure :: proc(changes: ^[dynamic]Task_Ch
 }
 
 bridge_hub_task_chain_document_fetch :: proc(after_revision: i64) -> (body: string, ok: bool) {
-	if strings.trim_space(bridge_config.daemon_url) == "" || strings.trim_space(bridge_config.bridge_token) == "" do return "", false
+	credential_snapshot_69 := bridge_credential_snapshot()
+	defer delete(credential_snapshot_69)
+	if strings.trim_space(bridge_config.daemon_url) == "" || strings.trim_space(credential_snapshot_69) == "" do return "", false
 	// This value crosses into the HTTP client and is explicitly freed below, so it
 	// must use the heap allocator. fmt.tprintf uses the temporary allocator; deleting
 	// that pointer aborted the live Bridge on its first search refresh.
 	path := fmt.aprintf("/api/v1/bridge/task-chain-search/documents?after_revision=%d&limit=500", after_revision)
 	defer delete(path)
-	auth := strings.concatenate({"Bearer ", bridge_config.bridge_token})
+	credential_snapshot_75 := bridge_credential_snapshot()
+	defer delete(credential_snapshot_75)
+	auth := strings.concatenate({"Bearer ", credential_snapshot_75})
 	defer delete(auth)
 	headers := [?]http.Header{{name = "Authorization", value = auth}}
 	resp, sent := bridge_http_request_retry("GET", bridge_config.daemon_url, path, "", headers[:], http.DEFAULT_TIMEOUT_MS)

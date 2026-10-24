@@ -586,20 +586,31 @@ bridge_list_actions_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	if !bridge_ok do return respond_error(bridge_err, req.request_id)
 
 	bridge_id := bridge_auth.bridge_id
-	version := get_actions_bridge_version(h, bridge_id)
-	etag := fmt.tprintf("W/\"%d\"", version)
 
-	if_none_match := strings.trim_space(header_value(req.headers, "If-None-Match"))
-	if if_none_match != "" && (if_none_match == etag || etag_unquote(if_none_match) == fmt.tprintf("%d", version)) {
-		headers := make([]contracts.HTTP_Header, 1)
-		headers[0] = contracts.HTTP_Header{name = "ETag", value = etag}
-		return Response{status = 304, content_type = "application/json", body = "", headers = headers}
-	}
-
-	actions, _ := h.repo.list_by_bridge(h.repo.ctx, domain.Bridge_ID(bridge_id))
+    epoch := action_schedules_epoch()
+    if epoch == "" || h.repo.snapshot == nil do return respond_error(domain.domain_error(.Internal_Error, "coherent action snapshots unavailable"), req.request_id)
+    known: i64 = -1
+    validator := strings.trim_space(header_value(req.headers, "If-None-Match"))
+    raw_validator := etag_unquote(validator)
+    prefix := fmt.tprintf("%s:", epoch)
+    if strings.has_prefix(raw_validator, prefix) {
+        parsed, valid := strconv.parse_i64(raw_validator[len(prefix):])
+        if valid && parsed >= 0 && validator == fmt.tprintf("W/\"%s:%d\"", epoch, parsed) do known = parsed
+    }
+    revision, actions, unchanged, snapshot_err := h.repo.snapshot(h.repo.ctx, domain.Bridge_ID(bridge_id), known)
+    if snapshot_err.code != .None do return respond_error(snapshot_err, req.request_id)
+    etag := fmt.tprintf("W/\"%s:%d\"", epoch, revision)
+    if unchanged && validator == etag {
+        headers := make([]contracts.HTTP_Header, 1)
+        headers[0] = {name = "ETag", value = etag}
+        return Response{status = 304, content_type = "application/json", headers = headers}
+    }
 
 	b := strings.builder_make()
-	strings.write_string(&b, "{\"data\":[")
+	strings.write_string(&b, fmt.tprintf("{{\"snapshot\":{{\"epoch\":\"%s\",\"revision\":%d,\"etag\":", epoch, revision))
+    strings.write_byte(&b, '"')
+    write_handler_json_string(&b, etag)
+    strings.write_string(&b, "\"},\"data\":[")
 	for act, i in actions {
 		if i > 0 do strings.write_string(&b, ",")
 		write_action_json(&b, act)
@@ -743,4 +754,28 @@ publish_action_message_created :: proc(h: ^Action_Handlers, auth_ctx: contracts.
 	conv, conv_ok, _ := content_service.get_conversation(h.content, auth_ctx, msg.conversation_id)
 	if !conv_ok do conv = domain.Chat_Conversation{conversation_id = msg.conversation_id, owner_user_id = msg.owner_user_id, agent_instance_id = msg.sender_agent_instance_id}
 	publish_chat_message_created(h.event_bus, conv, msg)
+}
+
+action_epoch_mutex: sync.Mutex
+action_epoch: string
+action_epoch_failed: bool
+
+action_schedules_epoch :: proc() -> string {
+    sync.mutex_lock(&action_epoch_mutex)
+    defer sync.mutex_unlock(&action_epoch_mutex)
+    if action_epoch == "" && !action_epoch_failed {
+        value, ok := platform.random_hex(16, runtime.heap_allocator())
+        if !ok { action_epoch_failed = true; return "" }
+        action_epoch = value
+    }
+    return action_epoch
+}
+
+action_schedules_token :: proc(raw: rawptr) -> (string, i64) {
+    if raw == nil do return "", -1
+    h := (^Action_Handlers)(raw)
+    if h.repo == nil || h.repo.revision == nil do return "", -1
+    revision, err := h.repo.revision(h.repo.ctx)
+    if err.code != .None do return "", -1
+    return action_schedules_epoch(), revision
 }

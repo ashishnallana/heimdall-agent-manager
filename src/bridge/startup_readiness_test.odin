@@ -35,6 +35,7 @@ startup_test_launch :: proc(id, token: string, now: i64 = 1000, expected := true
 		}
 	}
 	sync.mutex_unlock(&bridge_runtime_mutex)
+	bridge_retry_journal = {}
 	startup_test_deliveries = 0
 	startup_test_relays = 0
 	startup_test_delivery_ok = true
@@ -43,7 +44,7 @@ startup_test_launch :: proc(id, token: string, now: i64 = 1000, expected := true
 }
 
 @(private = "file")
-startup_test_deliver :: proc(id: string) -> bool {
+startup_test_deliver :: proc(id: string, timeout_ms: int) -> bool {
 	// Taking both registry locks here proves tick releases them around I/O.
 	sync.mutex_lock(&bridge_runtime_mutex); sync.mutex_unlock(&bridge_runtime_mutex)
 	sync.mutex_lock(&bridge_ext_mutex); sync.mutex_unlock(&bridge_ext_mutex)
@@ -52,10 +53,10 @@ startup_test_deliver :: proc(id: string) -> bool {
 }
 
 @(private = "file")
-startup_test_relay :: proc(rec: Bridge_Local_Agent_Token_Record) -> bool {
+startup_test_relay :: proc(rec: Bridge_Local_Agent_Token_Record, timeout_ms: int) -> Bridge_Startup_Relay_Result {
 	sync.mutex_lock(&bridge_runtime_mutex); sync.mutex_unlock(&bridge_runtime_mutex)
 	startup_test_relays += 1
-	return startup_test_relay_ok
+	return {ok = startup_test_relay_ok, error = contracts.wire_error(.Bridge_Timeout)}
 }
 
 @(private = "file")
@@ -302,4 +303,57 @@ startup_watchdog_still_expires_after_fallback :: proc(t: ^testing.T) {
 	testing.expect_value(t, snap.runtime_status, "failed")
 	startup_test_tick(rec.agent_instance_id, 121001)
 	testing.expect_value(t, startup_test_deliveries, 1)
+}
+
+@(test)
+startup_duplicate_signals_cannot_reset_exhausted_launch :: proc(t: ^testing.T) {
+    rec := startup_test_launch("startup_finite", "startup_finite")
+    accepted, _ := bridge_startup_accept(rec, 1001)
+    testing.expect(t, accepted)
+    startup_test_relay_ok = false
+    for now: i64 = 1002; now < 3_601_002; now += 1000 {
+        bridge_startup_accept(rec, now)
+        startup_test_tick(rec.agent_instance_id, now)
+    }
+    testing.expect_value(t, startup_test_relays, 6)
+    key := bridge_startup_receipt_key(rec)
+    defer delete(key)
+    testing.expect_value(t, bridge_retry_status(key).state, Bridge_Operation_State.Exhausted)
+    rotated := rec
+    rotated.token_hash = "rotated-local-token"
+    testing.expect_value(t, bridge_startup_receipt_key(rotated), key)
+}
+
+startup_test_failure_class: contracts.Bridge_Error_Class
+startup_typed_reject :: proc(rec: Bridge_Local_Agent_Token_Record, timeout_ms: int) -> Bridge_Startup_Relay_Result {
+    startup_test_relays += 1
+    err := contracts.wire_error(.Conflict)
+    err.class = startup_test_failure_class
+    return {error = err}
+}
+startup_stop_before_response :: proc(rec: Bridge_Local_Agent_Token_Record, timeout_ms: int) -> Bridge_Startup_Relay_Result {
+    startup_test_relays += 1
+    bridge_runtime_mark_stop_intent(rec.agent_instance_id)
+    return {ok = true}
+}
+@(test)
+startup_typed_terminal_rejection_does_not_retry_and_late_stop_does_not_complete :: proc(t: ^testing.T) {
+    context.allocator = runtime.heap_allocator()
+    for class in ([]contracts.Bridge_Error_Class{.fatal, .recoverable}) {
+        rec := startup_test_launch("typed-startup", "typed-startup")
+        bridge_startup_accept(rec, 1001)
+        startup_test_failure_class = class
+        for now: i64 = 1002; now < 3_601_002; now += 1000 {
+            bridge_startup_tick(now, startup_typed_reject, startup_test_deliver, rec.agent_instance_id)
+        }
+        testing.expect_value(t, startup_test_relays, 1)
+    }
+    rec := startup_test_launch("stopped-startup", "stopped-startup")
+    bridge_startup_accept(rec, 1001)
+    bridge_startup_tick(1002, startup_stop_before_response, startup_test_deliver, rec.agent_instance_id)
+    current, exists := bridge_runtime_instance_snapshot(rec.agent_instance_id)
+    testing.expect(t, exists && !current.startup.ready_delivered)
+    key := bridge_startup_receipt_key(rec)
+    defer delete(key)
+    testing.expect_value(t, bridge_retry_status(key).state, Bridge_Operation_State.Cancelled)
 }

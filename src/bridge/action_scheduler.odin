@@ -1,6 +1,9 @@
 package main
 
 import "core:fmt"
+import "base:runtime"
+import "core:encoding/json"
+import contracts "odin_test:contracts"
 import "core:strconv"
 import "core:strings"
 import "core:sync"
@@ -63,7 +66,13 @@ Bridge_Action_Scheduler_State :: struct {
 	synced_actions_version: int,
 	last_etag:              string,
 	last_full_reconcile_ms: i64,
-	running:                bool,
+    running: bool,
+    wanted_epoch, installed_epoch: string,
+    wanted_revision, installed_revision: i64,
+    connection_generation: u64,
+    validated_ms, last_request_ms: i64,
+    sync_inflight: bool,
+    sync_state: Bridge_Operation_State,
 }
 
 bridge_action_sched_state: Bridge_Action_Scheduler_State
@@ -459,6 +468,29 @@ action_queue_item_free :: proc(item: ^Action_Queue_Item) {
 }
 
 
+action_queue_item_clone :: proc(item: Action_Queue_Item) -> Action_Queue_Item {
+    copy := item
+    copy.id = strings.clone(item.id, runtime.heap_allocator())
+    copy.target_instance_id = strings.clone(item.target_instance_id, runtime.heap_allocator())
+    copy.prompt_text = strings.clone(item.prompt_text, runtime.heap_allocator())
+    copy.cron_expr = strings.clone(item.cron_expr, runtime.heap_allocator())
+    copy.timezone = strings.clone(item.timezone, runtime.heap_allocator())
+    copy.blackout_dates = strings.clone(item.blackout_dates, runtime.heap_allocator())
+    copy.active_from = strings.clone(item.active_from, runtime.heap_allocator())
+    copy.active_until = strings.clone(item.active_until, runtime.heap_allocator())
+    copy.target_run_at = strings.clone(item.target_run_at, runtime.heap_allocator())
+    copy.interval = strings.clone(item.interval, runtime.heap_allocator())
+    copy.state = strings.clone(item.state, runtime.heap_allocator())
+    copy.target_agent_id = strings.clone(item.target_agent_id, runtime.heap_allocator())
+    copy.target_bridge_id = strings.clone(item.target_bridge_id, runtime.heap_allocator())
+    copy.target_provider = strings.clone(item.target_provider, runtime.heap_allocator())
+    copy.target_model = strings.clone(item.target_model, runtime.heap_allocator())
+    copy.target_project_id = strings.clone(item.target_project_id, runtime.heap_allocator())
+    copy.instance_strategy = strings.clone(item.instance_strategy, runtime.heap_allocator())
+    copy.last_spawned_instance_id = strings.clone(item.last_spawned_instance_id, runtime.heap_allocator())
+    return copy
+}
+
 // --- Bridge runtime scheduling engine ---
 
 bridge_action_scheduler_init :: proc() {
@@ -475,7 +507,9 @@ bridge_action_scheduler_init :: proc() {
 
 bridge_action_scheduler_start :: proc() {
 	bridge_action_scheduler_init()
-	if strings.trim_space(bridge_config.bridge_token) == "" || strings.trim_space(bridge_config.daemon_url) == "" do return
+	credential_snapshot_509 := bridge_credential_snapshot()
+	defer delete(credential_snapshot_509)
+	if strings.trim_space(credential_snapshot_509) == "" || strings.trim_space(bridge_config.daemon_url) == "" do return
 	bridge_action_sched_state.running = true
 	thread.run(bridge_action_scheduler_worker)
 }
@@ -496,186 +530,227 @@ bridge_action_scheduler_notify_version :: proc(version: int) {
 	}
 }
 
-bridge_action_scheduler_sync :: proc() -> bool {
-	if strings.trim_space(bridge_config.bridge_token) == "" || strings.trim_space(bridge_config.daemon_url) == "" do return false
-	now_ms := bridge_runtime_now_ms()
+Action_Snapshot_Metadata :: struct { epoch: string, revision: i64, etag: string }
+Action_Snapshot_Wire_Item :: struct {
+    id, target_instance_id, prompt_text, cron_expr, timezone: string,
+    blackout_dates: []string,
+    active_from, active_until, target_run_at, interval, state, leased_at: string,
+    in_flight: bool,
+    target_agent_id, target_bridge_id, target_provider, target_model, target_project_id: string,
+    instance_strategy, last_spawned_instance_id: string,
+}
 
-	sync.mutex_lock(&bridge_action_sched_state.mutex)
-	last_etag := bridge_action_sched_state.last_etag
-	version_to_sync := bridge_action_sched_state.known_actions_version
-	sync.mutex_unlock(&bridge_action_sched_state.mutex)
+// Parse into an owned candidate before taking the install lock. JSON validation
+// includes the complete array; no partial response is allowed to prune good data.
+action_snapshot_candidate :: proc(body: string, now: i64) -> (Action_Snapshot_Metadata, [dynamic]Action_Queue_Item, bool) {
+    wire: struct { snapshot: Action_Snapshot_Metadata, data: [dynamic]Action_Snapshot_Wire_Item }
+    parse_ctx := context
+    context.allocator = context.temp_allocator
+    if json.unmarshal_string(body, &wire) != nil do return {}, nil, false
+    if _, found := bridge_provider_json_extract_array(body, "data"); !found do return {}, nil, false
+    if wire.snapshot.epoch == "" || wire.snapshot.revision < 0 ||
+       wire.snapshot.etag != fmt.tprintf("W/\"%s:%d\"", wire.snapshot.epoch, wire.snapshot.revision) { return {}, nil, false }
+    context = parse_ctx
+    candidate := make([dynamic]Action_Queue_Item, runtime.heap_allocator())
+    valid := false
+    defer if !valid {
+        for &q in candidate do action_queue_item_free(&q)
+        delete(candidate)
+    }
+    for row in wire.data {
+        if row.id == "" || (row.state != "active" && row.state != "in_flight" && row.state != "completed") ||
+           (row.target_instance_id == "" && row.target_agent_id == "") { return {}, nil, false }
+        for q in candidate do if q.id == row.id do return {}, nil, false
+        q := Action_Queue_Item{
+            id = row.id,
+            target_instance_id = row.target_instance_id,
+            prompt_text = row.prompt_text,
+            cron_expr = row.cron_expr,
+            timezone = row.timezone,
+            active_from = row.active_from,
+            active_until = row.active_until,
+            target_run_at = row.target_run_at,
+            interval = row.interval,
+            state = row.state,
+            target_agent_id = row.target_agent_id,
+            target_bridge_id = row.target_bridge_id,
+            target_provider = row.target_provider,
+            target_model = row.target_model,
+            target_project_id = row.target_project_id,
+            instance_strategy = row.instance_strategy,
+            last_spawned_instance_id = row.last_spawned_instance_id,
+            in_flight = row.in_flight,
+        }
+        if q.timezone == "" do q.timezone = "UTC"
+        if q.instance_strategy == "" do q.instance_strategy = "reuse"
+        if q.instance_strategy != "reuse" && q.instance_strategy != "fresh_per_run" do return {}, nil, false
+        bd, bd_err := json.marshal(row.blackout_dates, allocator = context.temp_allocator)
+        if bd_err != nil do return {}, nil, false
+        q.blackout_dates = string(bd)
+        if q.target_run_at != "" {
+            ms, ok := action_scheduler_parse_rfc3339_ms(q.target_run_at)
+            if !ok do return {}, nil, false
+            q.target_run_at_ms = ms
+        }
+        if q.active_from != "" {
+            ms, ok := action_scheduler_parse_rfc3339_ms(q.active_from)
+            if !ok do return {}, nil, false
+            q.active_from_ms = ms
+        }
+        if q.active_until != "" {
+            ms, ok := action_scheduler_parse_rfc3339_ms(q.active_until)
+            if !ok do return {}, nil, false
+            q.active_until_ms = ms
+        }
+        if row.leased_at != "" {
+            ms, ok := action_scheduler_parse_rfc3339_ms(row.leased_at)
+            if !ok do return {}, nil, false
+            q.leased_at_ms = ms
+        }
+        if q.cron_expr != "" {
+            if _, ok := action_scheduler_parse_cron(q.cron_expr); !ok do return {}, nil, false
+        }
+        q.interval_seconds = action_scheduler_parse_interval_seconds(q.interval)
+        if q.interval != "" && q.interval_seconds <= 0 do return {}, nil, false
+        if q.target_run_at_ms <= 0 && q.state != "completed" {
+            ms, ok := action_scheduler_compute_next_run(q, now)
+            if !ok do return {}, nil, false
+            q.target_run_at_ms = ms
+            q.target_run_at = action_scheduler_format_rfc3339_utc(ms)
+        }
+        append(&candidate, action_queue_item_clone(q))
+    }
+    valid = true
+    return wire.snapshot, candidate, true
+}
 
-	headers := make([dynamic]http.Header)
-	defer delete(headers)
-	auth_header := strings.concatenate({"Bearer ", bridge_config.bridge_token})
-	defer delete(auth_header)
-	append(&headers, http.Header{name = "Authorization", value = auth_header})
-	if last_etag != "" {
-		append(&headers, http.Header{name = "If-None-Match", value = last_etag})
-	}
+bridge_action_scheduler_notify_snapshot :: proc(epoch: string, revision: i64, now: i64) {
+    context.allocator = runtime.heap_allocator()
+    sync.mutex_lock(&bridge_action_sched_state.mutex)
+    defer sync.mutex_unlock(&bridge_action_sched_state.mutex)
+    s := &bridge_action_sched_state
+    if epoch == "" || revision < 0 { s.validated_ms = 0; return }
+    if s.wanted_epoch != epoch {
+        delete(s.wanted_epoch)
+        s.wanted_epoch = strings.clone(epoch)
+        s.wanted_revision = revision
+    } else if revision >= s.wanted_revision {
+        s.wanted_revision = revision
+    }
+    if s.installed_epoch == epoch && s.installed_revision == revision do s.validated_ms = now
+}
+bridge_action_scheduler_connection_changed :: proc() {
+    sync.mutex_lock(&bridge_action_sched_state.mutex)
+    defer sync.mutex_unlock(&bridge_action_sched_state.mutex)
+    bridge_action_sched_state.connection_generation += 1
+    bridge_action_sched_state.validated_ms = 0
+}
 
-	resp, ok := bridge_http_request_retry("GET", bridge_config.daemon_url, "/api/v1/bridge/actions", "", headers[:], http.DEFAULT_TIMEOUT_MS)
-	if !ok do return false
-	defer delete(resp.body)
+bridge_action_scheduler_sync_key :: proc() -> string {
+    return fmt.aprintf("sync:%s:%s", bridge_config.daemon_url, bridge_config.daemon_id)
+}
 
-	if resp.status == 304 {
-		sync.mutex_lock(&bridge_action_sched_state.mutex)
-		bridge_action_sched_state.synced_actions_version = version_to_sync
-		bridge_action_sched_state.last_full_reconcile_ms = now_ms
-		sync.mutex_unlock(&bridge_action_sched_state.mutex)
-		return true
-	}
+bridge_action_scheduler_sync :: proc(fetch := http.request_with_headers_deadline, now_override: i64 = 0) -> bool {
+    now := now_override if now_override > 0 else bridge_runtime_now_ms()
+    s := &bridge_action_sched_state
+    sync.mutex_lock(&s.mutex)
+    if s.sync_inflight || (s.last_request_ms != 0 && now - s.last_request_ms < 1000) {
+        sync.mutex_unlock(&s.mutex); return false
+    }
+    s.sync_inflight = true
+    generation := s.connection_generation
+    epoch := strings.clone(s.wanted_epoch)
+    etag := strings.clone(s.last_etag) if s.installed_epoch == epoch else ""
+    version := s.known_actions_version
+    sync.mutex_unlock(&s.mutex)
+    defer {
+        delete(epoch); delete(etag)
+        sync.mutex_lock(&s.mutex); s.sync_inflight = false; sync.mutex_unlock(&s.mutex)
+    }
+    key := bridge_action_scheduler_sync_key()
+    defer delete(key)
+    bridge_retry_reopen_success(key)
+    budget, reserved := bridge_retry_reserve(key, now)
+    if !reserved {
+        sync.mutex_lock(&s.mutex); s.sync_state = budget.state; sync.mutex_unlock(&s.mutex)
+        return false
+    }
+    sync.mutex_lock(&s.mutex); s.last_request_ms = now; sync.mutex_unlock(&s.mutex)
+    credential := bridge_credential_snapshot()
+    defer delete(credential)
+    auth := strings.concatenate({"Bearer ", credential})
+    defer delete(auth)
+    headers := make([dynamic]http.Header, context.temp_allocator)
+    append(&headers, http.Header{name = "Authorization", value = auth})
+    if etag != "" do append(&headers, http.Header{name = "If-None-Match", value = etag})
+    resp, ok := fetch("GET", bridge_config.daemon_url, "/api/v1/bridge/actions", "", headers[:], bridge_operation_timeout_ms(budget, now))
+    defer delete(resp.body)
+    success := false
+    err := bridge_operation_http_error(resp, ok, bridge_config.daemon_url)
+    defer {
+        finished := bridge_retry_finish(key, bridge_runtime_now_ms(), success, err)
+        sync.mutex_lock(&s.mutex); s.sync_state = finished.state; sync.mutex_unlock(&s.mutex)
+    }
+    current_credential := bridge_credential_snapshot()
+    defer delete(current_credential)
+    sync.mutex_lock(&s.mutex)
+    current := generation == s.connection_generation && epoch == s.wanted_epoch && credential == current_credential
+    sync.mutex_unlock(&s.mutex)
+    if !current { err = contracts.wire_error(.Bridge_Offline); return false }
+    if !ok do return false
+    if resp.status == 304 && etag != "" {
+        sync.mutex_lock(&s.mutex)
+        if s.last_etag == etag && s.wanted_epoch == s.installed_epoch && s.wanted_revision == s.installed_revision {
+            s.validated_ms = now; s.last_full_reconcile_ms = now
+            s.synced_actions_version = version
+            success = true
+        }
+        sync.mutex_unlock(&s.mutex)
+        return success
+    }
+    if resp.status != 200 do return false
+    metadata, candidate, parsed := action_snapshot_candidate(resp.body, now)
+    if !parsed {
+        if extract_json_string(resp.body, "epoch", "") == "" do err = contracts.wire_error(.Not_Implemented)
+        return false
+    }
+    installed := false
+    defer if !installed {
+        for &q in candidate do action_queue_item_free(&q)
+        delete(candidate)
+    }
+    sync.mutex_lock(&s.mutex)
+    defer sync.mutex_unlock(&s.mutex)
+    if generation != s.connection_generation || (epoch != "" && metadata.epoch != epoch) ||
+       (s.installed_epoch == metadata.epoch && metadata.revision < s.installed_revision) { return false }
+    for &q in candidate {
+        for old in s.queue {
+            if old.id == q.id && old.target_run_at_ms == q.target_run_at_ms && old.in_flight {
+                q.in_flight = true; q.leased_at_ms = old.leased_at_ms
+            }
+        }
+    }
+    for &q in s.queue do action_queue_item_free(&q)
+    delete(s.queue)
+    s.queue = candidate; installed = true
+    delete(s.last_etag); s.last_etag = strings.clone(metadata.etag, runtime.heap_allocator())
+    delete(s.installed_epoch); s.installed_epoch = strings.clone(metadata.epoch, runtime.heap_allocator())
+    s.installed_revision = metadata.revision
+    if s.wanted_epoch == "" {
+        s.wanted_epoch = strings.clone(metadata.epoch, runtime.heap_allocator())
+        s.wanted_revision = metadata.revision
+    }
+    s.validated_ms = now if s.wanted_epoch == s.installed_epoch && s.wanted_revision == s.installed_revision else 0
+    s.last_full_reconcile_ms = now; s.synced_actions_version = version
+    success = true
+    return true
+}
 
-	if resp.status != 200 do return false
-
-	data_arr, has_data := bridge_provider_json_extract_array(resp.body, "data")
-	if !has_data do return false
-
-	objects := bridge_provider_json_top_level_objects(data_arr)
-	defer {
-		for obj in objects do delete(obj)
-		delete(objects)
-	}
-
-	sync.mutex_lock(&bridge_action_sched_state.mutex)
-	defer sync.mutex_unlock(&bridge_action_sched_state.mutex)
-
-	seen := make(map[string]bool)
-	defer delete(seen)
-
-	for obj in objects {
-		id := extract_json_string(obj, "id", "")
-		if id == "" do continue
-		seen[id] = true
-
-		target := extract_json_string(obj, "target_instance_id", "")
-		prompt := extract_json_string(obj, "prompt_text", "")
-		cron_expr := extract_json_string(obj, "cron_expr", "")
-		timezone_str := extract_json_string(obj, "timezone", "UTC")
-		blackout_dates := extract_json_string(obj, "blackout_dates", "[]")
-		active_from := extract_json_string(obj, "active_from", "")
-		active_until := extract_json_string(obj, "active_until", "")
-		run_at := extract_json_string(obj, "target_run_at", "")
-		interval := extract_json_string(obj, "interval", "")
-		state := extract_json_string(obj, "state", "active")
-		in_flight := strings.contains(obj, "\"in_flight\":true")
-		leased_at := extract_json_string(obj, "leased_at", "")
-		target_agent := extract_json_string(obj, "target_agent_id", "")
-		target_bridge := extract_json_string(obj, "target_bridge_id", "")
-		target_provider := extract_json_string(obj, "target_provider", "")
-		target_model := extract_json_string(obj, "target_model", "")
-		target_project := extract_json_string(obj, "target_project_id", "")
-		instance_strategy := extract_json_string(obj, "instance_strategy", "reuse")
-		last_spawned := extract_json_string(obj, "last_spawned_instance_id", "")
-
-		run_at_ms, _ := action_scheduler_parse_rfc3339_ms(run_at)
-		active_from_ms, _ := action_scheduler_parse_rfc3339_ms(active_from)
-		active_until_ms, _ := action_scheduler_parse_rfc3339_ms(active_until)
-		leased_at_ms, _ := action_scheduler_parse_rfc3339_ms(leased_at)
-		interval_secs := action_scheduler_parse_interval_seconds(interval)
-
-		// If target_run_at was unset and action has a cron or interval, compute the next slot
-		if run_at_ms <= 0 {
-			dummy_item := Action_Queue_Item{
-				cron_expr        = cron_expr,
-				timezone         = timezone_str,
-				blackout_dates   = blackout_dates,
-				active_from_ms   = active_from_ms,
-				active_until_ms  = active_until_ms,
-				interval_seconds = interval_secs,
-				target_run_at_ms = 0,
-			}
-			computed_slot, computed_ok := action_scheduler_compute_next_run(dummy_item, now_ms)
-			if computed_ok {
-				run_at_ms = computed_slot
-				run_at = action_scheduler_format_rfc3339_utc(computed_slot)
-			}
-		}
-
-		found_idx := -1
-		for i in 0..<len(bridge_action_sched_state.queue) {
-			if bridge_action_sched_state.queue[i].id == id {
-				found_idx = i
-				break
-			}
-		}
-
-		if found_idx >= 0 {
-			q := &bridge_action_sched_state.queue[found_idx]
-			is_locally_in_flight := q.in_flight && (now_ms - q.leased_at_ms < ACTION_SCHEDULER_DEFAULT_LEASE_WINDOW_MS)
-			action_queue_item_free(q)
-			q.id = strings.clone(id)
-			q.target_instance_id = strings.clone(target)
-			q.prompt_text = strings.clone(prompt)
-			q.cron_expr = strings.clone(cron_expr)
-			q.timezone = strings.clone(timezone_str)
-			q.blackout_dates = strings.clone(blackout_dates)
-			q.active_from = strings.clone(active_from)
-			q.active_until = strings.clone(active_until)
-			q.active_from_ms = active_from_ms
-			q.active_until_ms = active_until_ms
-			q.target_run_at = strings.clone(run_at)
-			q.target_run_at_ms = run_at_ms
-			q.interval = strings.clone(interval)
-			q.interval_seconds = interval_secs
-			q.state = strings.clone(state)
-			q.target_agent_id = strings.clone(target_agent)
-			q.target_bridge_id = strings.clone(target_bridge)
-			q.target_provider = strings.clone(target_provider)
-			q.target_model = strings.clone(target_model)
-			q.target_project_id = strings.clone(target_project)
-			q.instance_strategy = strings.clone(instance_strategy)
-			q.last_spawned_instance_id = strings.clone(last_spawned)
-			if is_locally_in_flight {
-				q.in_flight = true
-			} else {
-				q.in_flight = in_flight
-				q.leased_at_ms = leased_at_ms
-			}
-		} else {
-			append(&bridge_action_sched_state.queue, Action_Queue_Item{
-				id                 = strings.clone(id),
-				target_instance_id = strings.clone(target),
-				prompt_text        = strings.clone(prompt),
-				cron_expr          = strings.clone(cron_expr),
-				timezone           = strings.clone(timezone_str),
-				blackout_dates     = strings.clone(blackout_dates),
-				active_from        = strings.clone(active_from),
-				active_until       = strings.clone(active_until),
-				active_from_ms     = active_from_ms,
-				active_until_ms    = active_until_ms,
-				target_run_at      = strings.clone(run_at),
-				target_run_at_ms   = run_at_ms,
-				interval           = strings.clone(interval),
-				interval_seconds   = interval_secs,
-				state              = strings.clone(state),
-				in_flight          = in_flight,
-				leased_at_ms       = leased_at_ms,
-				target_agent_id    = strings.clone(target_agent),
-				target_bridge_id   = strings.clone(target_bridge),
-				target_provider    = strings.clone(target_provider),
-				target_model        = strings.clone(target_model),
-				target_project_id  = strings.clone(target_project),
-				instance_strategy        = strings.clone(instance_strategy),
-				last_spawned_instance_id = strings.clone(last_spawned),
-			})
-		}
-	}
-
-	// Prune items deleted on Hub
-	for i := len(bridge_action_sched_state.queue) - 1; i >= 0; i -= 1 {
-		item_id := bridge_action_sched_state.queue[i].id
-		if !seen[item_id] {
-			action_queue_item_free(&bridge_action_sched_state.queue[i])
-			ordered_remove(&bridge_action_sched_state.queue, i)
-		}
-	}
-
-	bridge_action_sched_state.last_etag = fmt.tprintf("W/\"%d\"", version_to_sync)
-	bridge_action_sched_state.synced_actions_version = version_to_sync
-	bridge_action_sched_state.last_full_reconcile_ms = now_ms
-
-	return true
+bridge_action_scheduler_fresh_locked :: proc(now: i64) -> bool {
+    s := &bridge_action_sched_state
+    return s.validated_ms > 0 && now >= s.validated_ms && now - s.validated_ms < BRIDGE_OPERATION_DEADLINE_MS &&
+        s.wanted_epoch != "" && s.wanted_epoch == s.installed_epoch && s.wanted_revision == s.installed_revision &&
+        (s.sync_state == .Succeeded || s.sync_state == .Pending)
 }
 
 bridge_action_scheduler_update_from_execute_response :: proc(action_id, next_run_at: string, next_run_ms: i64, has_next: bool) {
@@ -701,11 +776,13 @@ bridge_action_scheduler_update_from_execute_response :: proc(action_id, next_run
 }
 
 bridge_action_scheduler_execute :: proc(action_id: string, next_target_run_at: string, instance_id: string = "", last_spawned_instance_id: string = "") -> (bool, int, string) {
-	if strings.trim_space(bridge_config.bridge_token) == "" || strings.trim_space(bridge_config.daemon_url) == "" {
+    credential := bridge_credential_snapshot()
+    defer delete(credential)
+	if strings.trim_space(credential) == "" || strings.trim_space(bridge_config.daemon_url) == "" {
 		return false, 0, ""
 	}
 	path := fmt.tprintf("/api/v1/bridge/actions/%s/execute", action_id)
-	auth_header := strings.concatenate({"Bearer ", bridge_config.bridge_token})
+	auth_header := strings.concatenate({"Bearer ", credential})
 	defer delete(auth_header)
 	headers := [?]http.Header{
 		{name = "Authorization", value = auth_header},
@@ -745,7 +822,7 @@ bridge_action_scheduler_execute :: proc(action_id: string, next_target_run_at: s
 	}
 	strings.write_byte(&sb, '}')
 	body := strings.to_string(sb)
-	resp, ok := bridge_http_request_retry("POST", bridge_config.daemon_url, path, body, headers[:], http.DEFAULT_TIMEOUT_MS)
+	resp, ok := http.request_with_headers_deadline("POST", bridge_config.daemon_url, path, body, headers[:], 10_000)
 	if !ok do return false, 0, ""
 	return resp.status == 200, resp.status, resp.body
 }
@@ -811,12 +888,14 @@ action_scheduler_reap_target :: proc(strategy, prev_last_spawned, new_instance_i
 // 3. Launch: if no instance exists, call POST /api/v1/agent-instances with target_agent_id,
 //    target_bridge_id, provider, model, project_id, and await readiness.
 bridge_action_scheduler_resolve_or_launch_instance :: proc(due: Action_Queue_Item, now_ms: i64) -> (string, bool) {
+    credential := bridge_credential_snapshot()
+    defer delete(credential)
 	if due.target_agent_id == "" do return "", false
-	if strings.trim_space(bridge_config.bridge_token) == "" || strings.trim_space(bridge_config.daemon_url) == "" {
+	if strings.trim_space(credential) == "" || strings.trim_space(bridge_config.daemon_url) == "" {
 		return "", false
 	}
 
-	auth_header := strings.concatenate({"Bearer ", bridge_config.bridge_token})
+	auth_header := strings.concatenate({"Bearer ", credential})
 	defer delete(auth_header)
 	headers := [?]http.Header{
 		{name = "Authorization", value = auth_header},
@@ -830,10 +909,11 @@ bridge_action_scheduler_resolve_or_launch_instance :: proc(due: Action_Queue_Ite
 	if !force_create {
 		// 1. Check existing instances via GET /api/v1/agent-instances?agent_id=...
 		list_path := fmt.tprintf("/api/v1/agent-instances?agent_id=%s", due.target_agent_id)
-		resp, ok := bridge_http_request_retry("GET", bridge_config.daemon_url, list_path, "", headers[:], http.DEFAULT_TIMEOUT_MS)
+		resp, ok := http.request_with_headers_deadline("GET", bridge_config.daemon_url, list_path, "", headers[:], 10_000)
 		if ok && resp.status == 200 {
 			defer delete(resp.body)
 			data_arr, has_data := bridge_provider_json_extract_array(resp.body, "data")
+			if !has_data do return "", false
 			if has_data {
 				objects := bridge_provider_json_top_level_objects(data_arr)
 				defer {
@@ -860,18 +940,20 @@ bridge_action_scheduler_resolve_or_launch_instance :: proc(due: Action_Queue_Ite
 				// Otherwise wake a matching (bridge+project) stopped instance.
 				for c in candidates {
 					if !action_scheduler_candidate_matches(c.bridge_id, c.project_id, due.target_bridge_id, due.target_project_id) do continue
-					bridge_task_wake_if_needed(c.id, now_ms)
-					if bridge_action_scheduler_await_ready(c.id, 3000) {
-						return c.id, true
-					}
+					bridge_task_wake_if_needed(c.id, now_ms, (now_ms + BRIDGE_OPERATION_DEADLINE_MS)*i64(time.Millisecond))
+                    // Do not wake every candidate and then mint a fresh instance
+                    // when the first launch outcome is unknown.
+                    if bridge_action_scheduler_await_ready(c.id, 3000) do return c.id, true
+                    return "", false
 				}
 			}
-		} else if ok {
-			delete(resp.body)
-		}
-	}
+        } else {
+            delete(resp.body)
+            return "", false
+        }
+    }
 
-	// 2. No reusable instance (or fresh_per_run); launch a new one via POST /api/v1/agent-instances
+    // 2. No reusable instance (or fresh_per_run); launch a new one via POST /api/v1/agent-instances
 	b := strings.builder_make()
 	strings.write_string(&b, "{\"agent_id\":\"")
 	bridge_runtime_write_json_string(&b, due.target_agent_id)
@@ -900,7 +982,7 @@ bridge_action_scheduler_resolve_or_launch_instance :: proc(due: Action_Queue_Ite
 	payload := strings.to_string(b)
 	defer delete(payload)
 
-	launch_resp, launch_ok := bridge_http_request_retry("POST", bridge_config.daemon_url, "/api/v1/agent-instances", payload, headers[:], http.DEFAULT_TIMEOUT_MS)
+	launch_resp, launch_ok := http.request_with_headers_deadline("POST", bridge_config.daemon_url, "/api/v1/agent-instances", payload, headers[:], 10_000)
 	if !launch_ok do return "", false
 	defer delete(launch_resp.body)
 
@@ -917,14 +999,16 @@ bridge_action_scheduler_resolve_or_launch_instance :: proc(due: Action_Queue_Ite
 	return new_instance_id, true
 }
 
-bridge_action_scheduler_tick :: proc() -> int {
-	now_ms := bridge_runtime_now_ms()
+bridge_action_scheduler_tick :: proc(now_override: i64 = 0, fetch := http.request_with_headers_deadline, execute := bridge_action_scheduler_execute, resolve := bridge_action_scheduler_resolve_or_launch_instance) -> int {
+	now_ms := now_override if now_override > 0 else bridge_runtime_now_ms()
 	actions := 0
 
 	// 1. Sync if version changed, uninitialized, or daily reconcile backstop reached
 	sync_needed := false
 	sync.mutex_lock(&bridge_action_sched_state.mutex)
 	if bridge_action_sched_state.known_actions_version != bridge_action_sched_state.synced_actions_version ||
+       bridge_action_sched_state.wanted_epoch != bridge_action_sched_state.installed_epoch ||
+       bridge_action_sched_state.wanted_revision != bridge_action_sched_state.installed_revision ||
 	   bridge_action_sched_state.synced_actions_version < 0 ||
 	   (bridge_action_sched_state.last_full_reconcile_ms > 0 && now_ms - bridge_action_sched_state.last_full_reconcile_ms >= ACTION_SCHEDULER_RECONCILE_INTERVAL_MS) {
 		sync_needed = true
@@ -932,11 +1016,15 @@ bridge_action_scheduler_tick :: proc() -> int {
 	sync.mutex_unlock(&bridge_action_sched_state.mutex)
 
 	if sync_needed {
-		bridge_action_scheduler_sync()
+		bridge_action_scheduler_sync(fetch, now_ms)
 	}
 
-	// 2. Lease recovery on in-flight items
-	sync.mutex_lock(&bridge_action_sched_state.mutex)
+	// 2. Cached schedules are display-only until current authenticated validation.
+    sync.mutex_lock(&bridge_action_sched_state.mutex)
+    if !bridge_action_scheduler_fresh_locked(now_ms) {
+        sync.mutex_unlock(&bridge_action_sched_state.mutex)
+        return 0
+    }
 	for i in 0..<len(bridge_action_sched_state.queue) {
 		item := &bridge_action_sched_state.queue[i]
 		if action_scheduler_recover_lease(item, now_ms, ACTION_SCHEDULER_DEFAULT_LEASE_WINDOW_MS) {
@@ -946,17 +1034,34 @@ bridge_action_scheduler_tick :: proc() -> int {
 
 	// Collect due items to evaluate
 	due_items := make([dynamic]Action_Queue_Item)
-	defer delete(due_items)
+	defer {
+        for &item in due_items do action_queue_item_free(&item)
+        delete(due_items)
+    }
 	for item in bridge_action_sched_state.queue {
 		if action_scheduler_can_claim(item, now_ms, ACTION_SCHEDULER_DEFAULT_LEASE_WINDOW_MS) {
-			append(&due_items, item)
+			append(&due_items, action_queue_item_clone(item))
 		}
 	}
 	sync.mutex_unlock(&bridge_action_sched_state.mutex)
 
 	// 3. Process due items
 	for due in due_items {
-		target_instance_id := due.target_instance_id
+        sync.mutex_lock(&bridge_action_sched_state.mutex)
+        fresh := bridge_action_scheduler_fresh_locked(bridge_runtime_now_ms())
+        sync.mutex_unlock(&bridge_action_sched_state.mutex)
+        if !fresh do break
+        slot_key := fmt.aprintf("slot:%s:%d", due.id, due.target_run_at_ms)
+        _, reserved := bridge_retry_reserve(slot_key, bridge_runtime_now_ms())
+        if !reserved { delete(slot_key); continue }
+        // This pipeline may launch and POST. Any failure/uncertain completion is
+        // parked, never reminted by a lease timeout or the next one-second tick.
+        slot_success := false
+        defer {
+            bridge_retry_finish(slot_key, bridge_runtime_now_ms(), slot_success, contracts.wire_error(.Conflict))
+            delete(slot_key)
+        }
+        target_instance_id := due.target_instance_id
 		is_ready := false
 		is_fresh := false // fresh_per_run mint on this fire -> persist + reap after execute
 
@@ -966,14 +1071,14 @@ bridge_action_scheduler_tick :: proc() -> int {
 
 			if !is_ready {
 				if !found || !bridge_runtime_status_active(inst.runtime_status) {
-					bridge_task_wake_if_needed(target_instance_id, now_ms)
+					bridge_task_wake_if_needed(target_instance_id, now_ms, (now_ms + BRIDGE_OPERATION_DEADLINE_MS)*i64(time.Millisecond))
 				}
 				if bridge_action_scheduler_await_ready(target_instance_id, 3000) {
 					is_ready = true
 				}
 			}
 		} else if due.target_agent_id != "" {
-			resolved_id, resolved_ok := bridge_action_scheduler_resolve_or_launch_instance(due, now_ms)
+			resolved_id, resolved_ok := resolve(due, now_ms)
 			if resolved_ok && resolved_id != "" {
 				target_instance_id = resolved_id
 				is_ready = true
@@ -990,8 +1095,10 @@ bridge_action_scheduler_tick :: proc() -> int {
 		sync.mutex_lock(&bridge_action_sched_state.mutex)
 		claimed := false
 		for i in 0..<len(bridge_action_sched_state.queue) {
-			if bridge_action_sched_state.queue[i].id == due.id {
-				if action_scheduler_can_claim(bridge_action_sched_state.queue[i], now_ms, ACTION_SCHEDULER_DEFAULT_LEASE_WINDOW_MS) {
+			if bridge_action_sched_state.queue[i].id == due.id &&
+               bridge_action_sched_state.queue[i].target_run_at_ms == due.target_run_at_ms &&
+               bridge_action_scheduler_fresh_locked(bridge_runtime_now_ms()) {
+                if action_scheduler_can_claim(bridge_action_sched_state.queue[i], now_ms, ACTION_SCHEDULER_DEFAULT_LEASE_WINDOW_MS) {
 					action_scheduler_claim(&bridge_action_sched_state.queue[i], now_ms)
 					claimed = true
 				}
@@ -1000,7 +1107,12 @@ bridge_action_scheduler_tick :: proc() -> int {
 		}
 		sync.mutex_unlock(&bridge_action_sched_state.mutex)
 
-		if !claimed do continue
+        if !claimed do continue
+        if !bridge_retry_record_target(slot_key, target_instance_id) do continue
+        sync.mutex_lock(&bridge_action_sched_state.mutex)
+        still_fresh := bridge_action_scheduler_fresh_locked(bridge_runtime_now_ms())
+        sync.mutex_unlock(&bridge_action_sched_state.mutex)
+        if !still_fresh do continue
 
 		// Compute next fire time (skipping blackouts and cron-excluded days)
 		next_run_ms, has_next := action_scheduler_compute_next_run(due, now_ms)
@@ -1010,8 +1122,9 @@ bridge_action_scheduler_tick :: proc() -> int {
 		// last_spawned_instance_id; reuse fires never send it (keeps the row untouched).
 		spawned_to_persist := target_instance_id if is_fresh else ""
 
-		ok, status, body := bridge_action_scheduler_execute(due.id, next_target_run_at, target_instance_id, spawned_to_persist)
+		ok, status, body := execute(due.id, next_target_run_at, target_instance_id, spawned_to_persist)
 		if ok {
+            slot_success = true
 			actions += 1
 			bridge_action_scheduler_update_from_execute_response(due.id, next_target_run_at, next_run_ms, has_next)
 			delete(body)

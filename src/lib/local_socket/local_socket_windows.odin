@@ -166,3 +166,22 @@ close :: proc(s: Socket) {
 remove_path :: proc(path: string) {
 	_ = os.remove(path)
 }
+
+dial_nonblocking :: proc(path: string) -> (Socket, bool) {
+    if !path_fits(path) do return INVALID_SOCKET, false
+    s := new_socket()
+    if s == INVALID_SOCKET do return INVALID_SOCKET, false
+    nonblocking: u32 = 1
+    if win.ioctlsocket(s, transmute(i32)win.FIONBIO, &nonblocking) != 0 { win.closesocket(s); return INVALID_SOCKET, false }
+    addr := make_addr(path)
+    if win.connect(s, (^win.SOCKADDR_STORAGE_LH)(&addr), size_of(addr)) != 0 { win.closesocket(s); return INVALID_SOCKET, false }
+    return s, true
+}
+send_ex :: proc(s: Socket, bytes: []byte) -> (int, Error) {
+    n := send(s, bytes)
+    if n >= 0 do return n, .None
+    code := win.WSAGetLastError()
+    if code == 10035 do return -1, .Would_Block
+    if code == WSAEINTR do return -1, .Interrupted
+    return -1, .Failed
+}

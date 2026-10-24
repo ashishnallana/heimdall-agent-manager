@@ -121,6 +121,16 @@ main :: proc() {
 	default_credential_path := bridge_enroll_default_credential_path(bridge_config.daemon_url, strings.trim_space(bridge_config.daemon_id))
 	bridge_adopt_default_credential_if_needed(&bridge_config, default_credential_path)
 	delete(default_credential_path)
+    if len(os.args) > 2 && os.args[1] == "recovery" && os.args[2] == "resume-sync" {
+        key := bridge_action_scheduler_sync_key()
+        defer delete(key)
+        if !bridge_retry_operator_resume_sync(key) {
+            fmt.eprintln("action sync resume refused: journal unavailable or operation in flight")
+            os.exit(1)
+        }
+        fmt.println("action sync recovery resumed; restart the bridge with the repaired configuration")
+        return
+    }
 	// REQ-IMPL-4 / audit F4: an enrolled bridge holding no credential must not run.
 	// Checked before anything is initialised, so the loopback listener never opens
 	// in the state where its authorizer admits everyone.
@@ -144,8 +154,12 @@ main :: proc() {
 		bridge_endpoint := option_value(os.args, "--bridge-endpoint", os.get_env_alloc("HEIMDALL_BRIDGE_ENDPOINT", context.allocator))
 		agent_token := option_value(os.args, "--agent-token", os.get_env_alloc("HEIMDALL_AGENT_TOKEN", context.allocator))
 		provider := option_value(os.args, "--provider", "")
-		if !bridge_bootstrap_fetch_manifest_and_materialize(bridge_config.daemon_url, bridge_config.bridge_token, instance_id, run_dir, bridge_endpoint, agent_token, provider, &bootstrap_global_cache) {
-			if !bridge_bootstrap_fetch_and_materialize(bridge_config.daemon_url, bridge_config.bridge_token, instance_id, run_dir, bridge_endpoint, agent_token, provider) {
+		credential_snapshot_146 := bridge_credential_snapshot()
+		defer delete(credential_snapshot_146)
+		if !bridge_bootstrap_fetch_manifest_and_materialize(bridge_config.daemon_url, credential_snapshot_146, instance_id, run_dir, bridge_endpoint, agent_token, provider, &bootstrap_global_cache) {
+			credential_snapshot_147 := bridge_credential_snapshot()
+			defer delete(credential_snapshot_147)
+			if !bridge_bootstrap_fetch_and_materialize(bridge_config.daemon_url, credential_snapshot_147, instance_id, run_dir, bridge_endpoint, agent_token, provider) {
 				fmt.eprintln("bootstrap fetch/materialization failed")
 				os.exit(1)
 			}
@@ -631,7 +645,9 @@ handle_bridge_client :: proc(client: net.TCP_Socket) {
 // loopback. That is the correct posture — an unenrolled bridge has no owner, so
 // there is no one whose authority it could be acting on.
 bridge_loopback_authorized :: proc(request: string) -> bool {
-	configured := strings.trim_space(bridge_config.bridge_token)
+	credential_snapshot_633 := bridge_credential_snapshot()
+	defer delete(credential_snapshot_633)
+	configured := strings.trim_space(credential_snapshot_633)
 	if configured == "" do return false
 	auth := extract_header(request, contracts.BRIDGE_LOOPBACK_AUTH_HEADER)
 	// Compared against the TRIMMED token so the blank test above and the equality

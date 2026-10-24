@@ -743,3 +743,47 @@ bridge_pty_host_signal :: proc(client: ^Pty_Host_Client, shell_id: string, signa
 	result, _ := bridge_pty_host_signal_detailed(client, shell_id, signal)
 	return result == .Delivered
 }
+
+// One nonblocking socket, owned entirely by this caller, and one monotonic
+// deadline for all writes and every frame read (including unsolicited frames).
+pty_host_request_deadline :: proc(socket_path: string, request: []byte, timeout_ms: int) -> (Pty_Host_Reply, bool) {
+    if timeout_ms <= 0 do return {}, false
+    start := time.tick_now()
+    fd, dial_ok := local_socket.dial_nonblocking(strings.trim_prefix(socket_path, "unix:"))
+    if !dial_ok do return {}, false
+    defer local_socket.close(fd)
+    duration := time.Duration(timeout_ms)*time.Millisecond
+    sent := 0
+    for sent < len(request) && time.tick_since(start) < duration {
+        n, err := local_socket.send_ex(fd, request[sent:])
+        if err == .Would_Block || err == .Interrupted { time.sleep(time.Millisecond); continue }
+        if err != .None || n <= 0 do return {}, false
+        sent += n
+    }
+    if sent != len(request) do return {}, false
+    read_exact :: proc(fd: local_socket.Socket, bytes: []byte, start: time.Tick, duration: time.Duration) -> bool {
+        got := 0
+        for got < len(bytes) && time.tick_since(start) < duration {
+            n, err := local_socket.recv_ex(fd, bytes[got:])
+            if err == .Would_Block || err == .Interrupted { time.sleep(time.Millisecond); continue }
+            if err != .None || n <= 0 do return false
+            got += n
+        }
+        return got == len(bytes)
+    }
+    for _ in 0..<PTY_HOST_REQUEST_MAX_SKIP {
+        prefix: [4]byte
+        if !read_exact(fd, prefix[:], start, duration) do return {}, false
+        length := u32(prefix[0])<<24 | u32(prefix[1])<<16 | u32(prefix[2])<<8 | u32(prefix[3])
+        if length > PTY_HOST_MAX_FRAME_BYTES do return {}, false
+        payload := make([]byte, int(length))
+        ok := read_exact(fd, payload, start, duration)
+        if !ok { delete(payload); return {}, false }
+        reply, decoded := pty_host_decode_reply(payload)
+        delete(payload)
+        if !decoded do return {}, false
+        if pty_host_reply_is_async(reply.kind) { pty_host_reply_delete(reply); continue }
+        return reply, true
+    }
+    return {}, false
+}

@@ -319,12 +319,13 @@
           # PATH every outbound https call fails at subprocess spawn — the hub never
           # reaches the remote and reports a generic "could not contact" error. Same
           # shared contract as ham-bridge below; keep the two in sync.
-          ham-hub = mkOdinPackageWithRuntime pkgs odin "ham-hub" "src/hub" [ pkgs.sqlite pkgs.openssl pkgs.socat ];
+          ham-hub = mkOdinPackageWithRuntime pkgs odin "ham-hub" "src/hub" ([ pkgs.sqlite pkgs.openssl pkgs.socat ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.glibc.bin ]);
           # SOCAT-1: socat is the DEFAULT bridge->hub TLS transport (HAM_TLS_BACKEND),
           # openssl stays for the s_client fallback (and socat's own OpenSSL engine).
           # curl handles release downloads; all three are runtimeInputs so the
-          # wrapped bridge has deterministic tools on PATH.
-          ham-bridge = mkOdinPackageWithRuntime pkgs odin "ham-bridge" "src/bridge" [ pkgs.sqlite pkgs.curl pkgs.openssl pkgs.socat ];
+          # wrapped bridge has deterministic tools on PATH. glibc.bin supplies
+          # getent for the bounded DNS subprocess used by plain-HTTP recovery.
+          ham-bridge = mkOdinPackageWithRuntime pkgs odin "ham-bridge" "src/bridge" ([ pkgs.sqlite pkgs.curl pkgs.openssl pkgs.socat ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.glibc.bin ]);
           ham-dev-proxy = mkOdinPackage pkgs odin "ham-dev-proxy" "src/dev_proxy";
           ham-ctl = mkOdinCtlPackage pkgs odin;
           ham-test-agent = mkOdinPackage pkgs odin "ham-test-agent" "src/test_agent";

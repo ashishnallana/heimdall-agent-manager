@@ -1,6 +1,8 @@
 package http
 
 import "core:strconv"
+import "core:encoding/json"
+import contracts "odin_test:contracts"
 import "core:strings"
 import "core:sync"
 import "core:time"
@@ -185,7 +187,24 @@ bridge_apply_heartbeat_stats :: proc(bridge_id, text: string, connection: ^proje
 // applied only when all of its fields parse.
 bridge_apply_heartbeat_reliability :: proc(bridge_id, text: string) {
 	m := &project_service.fleet_metrics
-	if obj, found, balanced := stats_raw_container(text, "command_dispatch", '{', '}'); found && balanced && len(obj) <= STATS_MAX_BYTES {
+    if obj, found, balanced := stats_raw_container(text, "operation_recovery", '{', '}'); found && balanced && len(obj) <= STATS_MAX_BYTES {
+        wire: struct { rows: []struct {operation, state, code, class: string, receipts: int} }
+        if json.unmarshal_string(obj, &wire) == nil && len(wire.rows) <= 256 {
+            valid := true
+            for row in wire.rows {
+                op_ok := row.operation == "sync" || row.operation == "readiness" || row.operation == "refresh" || row.operation == "slot"
+                state_ok := row.state == "Pending" || row.state == "In_Flight" || row.state == "Backoff" || row.state == "Succeeded" || row.state == "Waiting_Repair" || row.state == "Exhausted" || row.state == "Cancelled"
+                _, code_ok := contracts.error_code_parse(row.code)
+                _, class_ok := contracts.error_class_parse(row.class)
+                if !op_ok || !state_ok || (!code_ok && row.code != "") || !class_ok || row.receipts < 0 || row.receipts > 4096 { valid = false; break }
+            }
+            if valid {
+                metrics.remove_where(m.bridge_recovery, 0, bridge_id)
+                for row in wire.rows do metrics.gauge_set(metrics.with(m.bridge_recovery, bridge_id, row.operation, row.state, row.code, row.class), i64(row.receipts))
+            }
+        }
+    }
+    if obj, found, balanced := stats_raw_container(text, "command_dispatch", '{', '}'); found && balanced && len(obj) <= STATS_MAX_BYTES {
 		accepted, a_ok := stats_number(obj, "accepted")
 		shed, s_ok := stats_number(obj, "rejected")
 		completed, c_ok := stats_number(obj, "completed")

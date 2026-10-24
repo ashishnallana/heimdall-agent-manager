@@ -33,6 +33,8 @@
 //     boot's ephemeral key.
 package main
 
+import "base:runtime"
+
 import os_random "odin_test:lib/os_random"
 import "core:crypto"
 import "core:crypto/hash"
@@ -597,26 +599,8 @@ bridge_write_secret_file :: proc(path, value: string) -> bool {
 		_ = bridge_make_directory_all(dir)
 		_ = os.chmod(dir, os.Permissions{.Read_User, .Write_User, .Execute_User})
 	}
-	tmp := strings.concatenate({target, ".tmp"}, context.temp_allocator)
-	content := strings.concatenate({strings.trim_space(value), "\n"}, context.temp_allocator)
-	if err := os.write_entire_file(tmp, transmute([]byte)content, os.Permissions{.Read_User, .Write_User}); err != nil {
-		fmt.eprintln("failed to write credential file", tmp)
-		blog_error(.token_persist_failed, blog_sym(.stage, .write))
-		return false
-	}
-	if chmod_err := os.chmod(tmp, os.Permissions{.Read_User, .Write_User}); chmod_err != nil {
-		_ = os.remove(tmp)
-		fmt.eprintln("failed to restrict credential file mode", tmp)
-		blog_error(.token_persist_failed, blog_sym(.stage, .chmod))
-		return false
-	}
-	if rename_err := os.rename(tmp, target); rename_err != nil {
-		_ = os.remove(tmp)
-		fmt.eprintln("failed to install credential file", target)
-		blog_error(.token_persist_failed, blog_sym(.stage, .rename))
-		return false
-	}
-	return true
+    content := strings.concatenate({strings.trim_space(value), "\n"}, context.temp_allocator)
+    return bridge_retry_atomic_write(target, transmute([]byte)content)
 }
 
 // bridge_enroll_persist writes the credential pair and updates config.toml with
@@ -701,17 +685,10 @@ bridge_credential_refresh_once :: proc(
 	api_base, refresh_token: string,
 	allocator := context.allocator,
 ) -> (Bridge_Enroll_Credential, Bridge_Refresh_Outcome) {
-	headers := [?]http.Header{
-		{name = "Authorization", value = strings.concatenate({"Bearer ", refresh_token}, context.temp_allocator)},
-	}
-	resp, ok := http.request_with_headers_timeout(
-		"POST", api_base, BRIDGE_ENROLL_REFRESH_PATH, "{}", headers[:], http.DEFAULT_TIMEOUT_MS)
-	if !ok do return Bridge_Enroll_Credential{}, .Retry
-	if resp.status == 401 do return Bridge_Enroll_Credential{}, .Revoked
-	if resp.status != 200 do return Bridge_Enroll_Credential{}, .Retry
-	cred := bridge_enroll_credential_from_json(resp.body, allocator)
-	if !bridge_enroll_credential_usable(cred.access_token) do return Bridge_Enroll_Credential{}, .Retry
-	return cred, .Rotated
+    cred, ok, err := bridge_credential_refresh_typed(api_base, refresh_token, 10_000)
+    if ok do return cred, .Rotated
+    if err.code == .Unauthenticated do return {}, .Revoked
+    return {}, .Retry
 }
 
 // g_bridge_credential_file is where the running bridge's access token lives, so
@@ -749,74 +726,71 @@ bridge_credential_refresh_start :: proc(credential_file: string) {
 // timestamp against the local wall clock, because REQ-IMPL-3 deliberately returns
 // durations so a box with bad time still renews correctly.
 bridge_credential_refresh_worker :: proc() {
-	failures := 0
-	// The first delay uses the access token's own remaining lifetime, which the
-	// bridge does not know across a restart — so it refreshes once promptly and
-	// then settles onto the 80% schedule from the Hub's reported durations. A
-	// restart is rare; an unnecessary rotation is cheap and self-correcting.
-	delay := BRIDGE_REFRESH_MIN_DELAY_SECONDS
-	for {
-		time.sleep(time.Duration(delay) * time.Second)
-		api_base := bridge_config.daemon_url
-		refresh_path := bridge_enroll_refresh_file_for(g_bridge_credential_file, context.temp_allocator)
-		stored, has_stored := bridge_read_token_file(refresh_path)
-		if !has_stored {
-			fmt.println("bridge credential refresh: no refresh token on disk; stopping (re-enrollment required)")
-			return
-		}
-		cred, outcome := bridge_credential_refresh_once(api_base, stored)
-		switch outcome {
-		case .Rotated:
-			// Write the NEW refresh token before adopting the new access token: if the
-			// process dies between the two, the next start reads a refresh token the
-			// Hub still honours. The reverse order can leave a bridge holding an
-			// access token whose refresh half is the spent generation, which
-			// REQ-IMPL-3 treats as theft and answers by revoking the whole family.
-			if strings.trim_space(cred.refresh_token) != "" {
-				if !bridge_write_secret_file(refresh_path, cred.refresh_token) {
-					fmt.println("bridge credential refresh: could not persist the rotated refresh token; retrying")
-					failures += 1
-					delay = bridge_refresh_backoff_seconds(failures)
-					continue
-				}
-			}
-			if !bridge_write_credential_file(g_bridge_credential_file, api_base, strings.trim_space(bridge_config.daemon_id), cred.access_token) {
-				fmt.println("bridge credential refresh: could not persist the rotated access token; retrying")
-				failures += 1
-				delay = bridge_refresh_backoff_seconds(failures)
-				continue
-			}
-			// The WS worker re-reads bridge_config.bridge_token on every reconnect, so
-			// updating it here is enough for the next reconnect to present the fresh
-			// credential. The live socket keeps running on the old one until it drops,
-			// which is correct: the Hub accepted it when it was presented.
-			sync.mutex_lock(&g_bridge_credential_mu)
-			bridge_config.bridge_token = strings.clone(strings.trim_space(cred.access_token))
-			sync.mutex_unlock(&g_bridge_credential_mu)
-			failures = 0
-			jitter: [1]byte
-			if !bridge_enroll_entropy(jitter[:]) do jitter[0] = 128
-			delay = bridge_refresh_delay_seconds(cred.expires_in, jitter[0])
-			if delay <= 0 do return // non-expiring credential: nothing left to schedule
-			fmt.printfln("bridge credential refreshed; next refresh in %ds", delay)
-		case .Revoked:
-			// DO NOT LOOP. Wipe both halves so nothing retries with a dead credential
-			// and so a stolen copy on this disk stops being useful, say so loudly, and
-			// stop. Re-enrollment is a human at a browser, by design.
-			_ = os.remove(refresh_path)
-			_ = os.remove(g_bridge_credential_file)
-			sync.mutex_lock(&g_bridge_credential_mu)
-			bridge_config.bridge_token = ""
-			sync.mutex_unlock(&g_bridge_credential_mu)
-			fmt.eprintln("bridge credential REVOKED by the hub (invalid_grant): both tokens were wiped. RE-ENROLLMENT REQUIRED — run: ham-bridge enroll --hub <url>")
-			blog_error(.hub_rejected, blog_sym(.stage, .token), blog_sym(.reason, .revoked))
-			return
-		case .Retry:
-			failures += 1
-			delay = bridge_refresh_backoff_seconds(failures)
-			fmt.printfln("bridge credential refresh failed (transport or transient); retrying in %ds", delay)
-		}
-	}
+    delay := BRIDGE_REFRESH_MIN_DELAY_SECONDS
+    for {
+        time.sleep(time.Duration(delay)*time.Second)
+        api_base := bridge_config.daemon_url
+        bridge_id := strings.trim_space(bridge_config.daemon_id)
+        key := fmt.aprintf("refresh:%s:%s", api_base, bridge_id)
+        refresh_path := bridge_enroll_refresh_file_for(g_bridge_credential_file)
+        pending_path := strings.concatenate({g_bridge_credential_file, ".pending-rotation-v1"})
+        recovery, valid := bridge_refresh_pending_load(pending_path, key, api_base, bridge_id)
+        if !valid { fmt.eprintln("bridge credential recovery parked: invalid pending rotation record"); return }
+        recovery.pending.version = 1
+        recovery.pending.key = key; recovery.pending.api_base = api_base; recovery.pending.bridge_id = bridge_id
+        if recovery.has_pair {
+            if !bridge_retry_resume_pending_rotation(key, recovery.pending.first_ms) {
+                fmt.eprintln("bridge credential recovery parked: pending pair has no resumable receipt"); return
+            }
+        } else {
+            bridge_retry_reopen_success(key)
+        }
+        for {
+            now := bridge_runtime_now_ms()
+            budget, reserved := bridge_retry_reserve(key, now)
+            if !reserved {
+                if bridge_operation_terminal(budget) {
+                    fmt.eprintfln("bridge credential recovery stopped: state=%v attempts=%d code=%v class=%v", budget.state, budget.attempts, budget.code, budget.class)
+                    return
+                }
+                time.sleep(time.Duration(max(1, min(budget.next_ms-now, budget.deadline_ms-now)))*time.Millisecond)
+                continue
+            }
+            stored, has_stored := bridge_read_token_file(refresh_path)
+            err := contracts.wire_error(.Unauthenticated)
+            success := false
+            if recovery.has_pair || (has_stored && bridge_enroll_credential_usable(stored)) {
+                success, err = bridge_refresh_recovery_step(&recovery, pending_path, g_bridge_credential_file, refresh_path, api_base, bridge_id, stored, budget, bridge_operation_timeout_ms(budget, now))
+            }
+            delete(stored)
+            finished := bridge_retry_finish(key, bridge_runtime_now_ms(), success, err, base_ms = 5000)
+            if success {
+                // Adoption is after both durable writes, so a reconnect cannot
+                // expose a half-committed rotation. Failed parent sync budgets stay.
+                sync.mutex_lock(&g_bridge_credential_mu)
+                bridge_config.bridge_token = strings.clone(recovery.pending.credential.access_token, runtime.heap_allocator())
+                sync.mutex_unlock(&g_bridge_credential_mu)
+                _ = os.remove(pending_path)
+                sync_key := bridge_action_scheduler_sync_key()
+                bridge_retry_credential_repaired(sync_key)
+                delete(sync_key)
+                jitter: [1]byte
+                if !bridge_enroll_entropy(jitter[:]) do jitter[0] = 128
+                delay = bridge_refresh_delay_seconds(recovery.pending.credential.expires_in, jitter[0])
+                break
+            }
+            if bridge_operation_terminal(finished) {
+                if err.code == .Unauthenticated {
+                    _ = os.remove(refresh_path); _ = os.remove(g_bridge_credential_file)
+                    sync.mutex_lock(&g_bridge_credential_mu); bridge_config.bridge_token = ""; sync.mutex_unlock(&g_bridge_credential_mu)
+                }
+                fmt.eprintfln("bridge credential recovery stopped: state=%v attempts=%d code=%v class=%v", finished.state, finished.attempts, finished.code, finished.class)
+                return
+            }
+        }
+        delete(key); delete(refresh_path); delete(pending_path)
+        if delay <= 0 do return
+    }
 }
 
 // bridge_enroll_run_browser_opener passes the URL as an argv element, never
@@ -972,7 +946,9 @@ bridge_enroll_wait_for_vault_delivery :: proc(args: []string, bridge_id: string)
 	// the one that tells the hub the vault is unlocked. See bridge_hub_vault_status_for_report.
 	bridge_hub_set_enroll_only_runtime(true)
 	bridge_config = bridge_config_from_args(args)
-	if strings.trim_space(bridge_config.bridge_token) == "" || bridge_config.daemon_id != bridge_id {
+	credential_snapshot_963 := bridge_credential_snapshot()
+	defer delete(credential_snapshot_963)
+	if strings.trim_space(credential_snapshot_963) == "" || bridge_config.daemon_id != bridge_id {
 		fmt.eprintln("bridge enroll FAILED: the saved credential could not be loaded for vault delivery")
 		return false
 	}
@@ -1619,4 +1595,73 @@ bridge_enroll_config_conflict :: proc(config_path, api_base: string) -> (other_h
 	wanted, w_ok := bridge_hub_canonical_base(api_base, context.temp_allocator)
 	if !e_ok || !w_ok do return loaded.config.wrapper.daemon_url, true
 	return existing, existing != wanted
+}
+// Return owned credential bytes while holding the writer's mutex. Callers may
+// use the snapshot across I/O without racing rotation or revocation.
+bridge_credential_snapshot :: proc(allocator := context.allocator) -> string {
+    sync.mutex_lock(&g_bridge_credential_mu)
+    defer sync.mutex_unlock(&g_bridge_credential_mu)
+    return strings.clone(bridge_config.bridge_token, allocator)
+}
+
+bridge_credential_refresh_typed :: proc(api_base, refresh_token: string, timeout_ms: int) -> (Bridge_Enroll_Credential, bool, contracts.Wire_Error) {
+    headers := [?]http.Header{{name = "Authorization", value = strings.concatenate({"Bearer ", refresh_token}, context.temp_allocator)}}
+    resp, ok := http.request_with_headers_deadline("POST", api_base, BRIDGE_ENROLL_REFRESH_PATH, "{}", headers[:], timeout_ms)
+    defer delete(resp.body)
+    err := bridge_operation_http_error(resp, ok, api_base)
+    if !ok || resp.status != 200 do return {}, false, err
+    cred := bridge_enroll_credential_from_json(resp.body)
+    if !bridge_enroll_credential_usable(cred.access_token) || !bridge_enroll_credential_usable(cred.refresh_token) do return {}, false, contracts.wire_error(.Bridge_Timeout)
+    return cred, true, {}
+}
+
+Bridge_Refresh_Pending :: struct {
+    version: int,
+    key, api_base, bridge_id: string,
+    first_ms: i64,
+    credential: Bridge_Enroll_Credential,
+}
+Bridge_Refresh_Recovery :: struct {
+    pending: Bridge_Refresh_Pending,
+    has_pair: bool,
+}
+bridge_refresh_pending_save :: proc(path: string, pending: Bridge_Refresh_Pending) -> bool {
+    bytes, err := json.marshal(pending, allocator = context.temp_allocator)
+    if err != nil || len(bytes) > 64*1024 do return false
+    return bridge_retry_atomic_write(path, bytes)
+}
+bridge_refresh_pending_load :: proc(path, key, api_base, bridge_id: string) -> (Bridge_Refresh_Recovery, bool) {
+    if !os.exists(path) do return {}, true
+    info, err := os.stat(path, context.temp_allocator)
+    if err != nil || info.type != .Regular || info.size > 64*1024 ||
+       info.mode & {.Read_Group, .Write_Group, .Execute_Group, .Read_Other, .Write_Other, .Execute_Other} != {} { return {}, false }
+    bytes, read_err := os.read_entire_file(path, context.temp_allocator)
+    if read_err != nil do return {}, false
+    pending: Bridge_Refresh_Pending
+    if json.unmarshal(bytes, &pending) != nil || pending.version != 1 || pending.key != key ||
+       pending.api_base != api_base || pending.bridge_id != bridge_id ||
+       !bridge_enroll_credential_usable(pending.credential.access_token) ||
+       !bridge_enroll_credential_usable(pending.credential.refresh_token) { return {}, false }
+    return {pending = pending, has_pair = true}, true
+}
+bridge_refresh_pair_commit :: proc(path, refresh_path, api_base, bridge_id: string, cred: Bridge_Enroll_Credential) -> bool {
+    // The pending pair remains durable across BOTH file replacements.
+    if !bridge_retry_atomic_write(refresh_path, transmute([]byte)cred.refresh_token) do return false
+    return bridge_write_credential_file(path, api_base, bridge_id, cred.access_token)
+}
+bridge_refresh_recovery_step :: proc(
+    recovery: ^Bridge_Refresh_Recovery, pending_path, path, refresh_path, api_base, bridge_id, stored: string,
+    budget: Bridge_Operation_Budget, timeout_ms: int,
+    exchange := bridge_credential_refresh_typed, save_pending := bridge_refresh_pending_save, commit_pair := bridge_refresh_pair_commit,
+) -> (bool, contracts.Wire_Error) {
+    if !recovery.has_pair {
+        cred, ok, err := exchange(api_base, stored, timeout_ms)
+        if !ok do return false, err
+        recovery.pending.credential = cred
+        recovery.pending.first_ms = budget.first_ms
+        recovery.has_pair = true
+    }
+    if !save_pending(pending_path, recovery.pending) do return false, contracts.wire_error(.Bridge_Timeout)
+    if !commit_pair(path, refresh_path, api_base, bridge_id, recovery.pending.credential) do return false, contracts.wire_error(.Bridge_Timeout)
+    return true, {}
 }

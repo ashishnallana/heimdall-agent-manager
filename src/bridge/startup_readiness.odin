@@ -6,6 +6,7 @@ import "core:strings"
 import "core:sync"
 import "core:thread"
 import "core:time"
+import http "odin_test:lib/http_client"
 import contracts "odin_test:contracts"
 
 // All state belongs to one token issuance/launch, not to an extension session
@@ -22,6 +23,7 @@ Bridge_Startup_State :: struct {
 	fallback_delivered: bool,
 	fallback_error_reported: bool,
 	next_attempt_ms: i64,
+	relay_state, fallback_state: Bridge_Operation_State,
 }
 
 bridge_startup_generation: u64
@@ -170,7 +172,7 @@ bridge_startup_accept :: proc(rec: Bridge_Local_Agent_Token_Record, now: i64) ->
 	for &current in bridge_runtime_instances {
 		if current.agent_instance_id != rec.agent_instance_id do continue
 		if current.startup.rec.token_hash != rec.token_hash do return false, false
-		if current.startup.ready_pending || current.startup.ready_delivered do return true, false
+		if current.startup.ready_pending || current.startup.ready_delivered || bridge_operation_terminal({state = current.startup.relay_state}) do return true, false
 		current.startup.ready_pending = true
 		current.startup.next_attempt_ms = 0
 		bridge_runtime_set_status_locked(rec.agent_instance_id, "running", "idle", now, true)
@@ -201,20 +203,37 @@ bridge_startup_fallback_due :: proc(inst: Bridge_Runtime_Instance, now: i64) -> 
 	s := inst.startup
 	return s.generation != 0 && s.armed_at_ms > 0 && !s.fallback_delivered &&
 	       !inst.start_success_seen && inst.runtime_status == "starting" &&
+           !bridge_operation_terminal({state = s.fallback_state}) &&
 	       inst.stopped_intent_unix_ms == 0 && inst.pty_process_alive &&
 	       now >= s.next_attempt_ms && now - s.armed_at_ms >= BRIDGE_START_SUCCESS_PROMPT_AFTER_MS &&
 	       now - s.armed_at_ms < BRIDGE_START_SUCCESS_TIMEOUT_MS
 }
 
-bridge_startup_relay :: proc(rec: Bridge_Local_Agent_Token_Record) -> bool {
-	if rec.instance_token == "" || !sync.atomic_load(&bridge_hub_runtime_up) do return false
-	params := fmt.tprintf("{{\"run_count\":%d}}", rec.run_count)
-	relay := bridge_local_relay_agent_envelope("/api/v1/agent-actions/start-success", "agent.start_success", params, rec, 10000)
-	defer delete(relay.body)
-	return relay.ok && relay.status >= 200 && relay.status < 300
+Bridge_Startup_Relay_Result :: struct { ok: bool, error: contracts.Wire_Error }
+
+bridge_startup_receipt_key :: proc(rec: Bridge_Local_Agent_Token_Record, fallback := false) -> string {
+    assertion := bridge_local_hash_token(rec.instance_token)
+    defer delete(assertion)
+    return fmt.aprintf("ready:%s:%d:%s:%s", rec.agent_instance_id, rec.run_count, assertion, "fallback" if fallback else "relay")
 }
 
-bridge_startup_deliver :: proc(instance_id: string) -> bool {
+bridge_startup_relay :: proc(rec: Bridge_Local_Agent_Token_Record, timeout_ms: int) -> Bridge_Startup_Relay_Result {
+    if rec.instance_token == "" do return {error = contracts.wire_error(.Unauthenticated)}
+    if !sync.atomic_load(&bridge_hub_runtime_up) do return {error = contracts.wire_error(.Bridge_Offline)}
+    params := fmt.tprintf("{{\"run_count\":%d}}", rec.run_count)
+    body := bridge_local_agent_relay_body("agent.start_success", params, rec.agent_instance_id)
+    defer delete(body)
+    credential := bridge_credential_snapshot()
+    defer delete(credential)
+    auth := strings.concatenate({"Bearer ", credential})
+    defer delete(auth)
+    headers := [?]http.Header{{name = "Authorization", value = auth}, {name = "X-Heimdall-Instance-Token", value = rec.instance_token}}
+    resp, ok := http.request_with_headers_deadline("POST", bridge_config.daemon_url, "/api/v1/agent-actions/start-success", body, headers[:], timeout_ms)
+    defer delete(resp.body)
+    return {ok = ok && resp.status >= 200 && resp.status < 300, error = bridge_operation_http_error(resp, ok, bridge_config.daemon_url)}
+}
+
+bridge_startup_deliver :: proc(instance_id: string, timeout_ms: int) -> bool {
 	socket := pty_host_socket_path()
 	defer delete(socket)
 	inst, exists := bridge_runtime_instance_snapshot(instance_id)
@@ -223,13 +242,13 @@ bridge_startup_deliver :: proc(instance_id: string) -> bool {
 	// replies are safely retried with the same key, payload and expected pid.
 	text := bridge_startup_fallback_input(instance_id)
 	defer delete(text)
-	return bridge_startup_deliver_socket(socket, instance_id, inst.startup.pty_pid, inst.startup.launch_key, text)
+	return bridge_startup_deliver_socket(socket, instance_id, inst.startup.pty_pid, inst.startup.launch_key, text, timeout_ms)
 }
 
-bridge_startup_deliver_socket :: proc(socket, instance_id: string, pid: i32, launch_key, text: string) -> bool {
+bridge_startup_deliver_socket :: proc(socket, instance_id: string, pid: i32, launch_key, text: string, timeout_ms := 10_000) -> bool {
 	frame := pty_host_encode_startup_input(instance_id, pid, launch_key, transmute([]byte)text)
 	defer delete(frame)
-	reply, ok := pty_host_request(socket, frame)
+	reply, ok := pty_host_request_deadline(socket, frame, timeout_ms)
 	if !ok do return false
 	defer pty_host_reply_delete(reply)
 	return reply.kind == .Startup_Input_Done && reply.instance == instance_id && reply.pid == pid && reply.startup_key == launch_key
@@ -254,7 +273,7 @@ bridge_startup_tick :: proc(now: i64, relay := bridge_startup_relay, deliver := 
 	sync.mutex_lock(&bridge_runtime_mutex)
 	for inst in bridge_runtime_instances {
 		if only_instance != "" && inst.agent_instance_id != only_instance do continue
-		if (kind != .Fallback && inst.startup.ready_pending && now >= inst.startup.next_attempt_ms) || (kind != .Readiness && bridge_startup_fallback_due(inst, now)) {
+		if (kind != .Fallback && inst.startup.ready_pending && !bridge_operation_terminal({state = inst.startup.relay_state}) && now >= inst.startup.next_attempt_ms) || (kind != .Readiness && bridge_startup_fallback_due(inst, now)) {
 			append(&jobs, Job{strings.clone(inst.agent_instance_id, context.temp_allocator), inst.startup.generation})
 		}
 	}
@@ -268,33 +287,63 @@ bridge_startup_tick :: proc(now: i64, relay := bridge_startup_relay, deliver := 
 			sync.mutex_unlock(&bridge_startup_io_mutex)
 			continue
 		}
-		ready := inst.startup.ready_pending && now >= inst.startup.next_attempt_ms
+		ready := inst.startup.ready_pending && !bridge_operation_terminal({state = inst.startup.relay_state}) && now >= inst.startup.next_attempt_ms
 		if (kind == .Fallback && ready) || (kind == .Readiness && !ready) {
 			sync.mutex_unlock(&bridge_startup_io_mutex)
 			continue
 		}
-		ok := false
-		attempted := false
+        key := bridge_startup_receipt_key(inst.startup.rec, fallback = !ready)
+        duration := BRIDGE_OPERATION_DEADLINE_MS
+        if !ready do duration = min(duration, inst.startup.armed_at_ms + BRIDGE_START_SUCCESS_TIMEOUT_MS - now)
+        budget, reserved := bridge_retry_reserve(key, now, duration)
+        if !reserved {
+            sync.mutex_lock(&bridge_runtime_mutex)
+            for &current in bridge_runtime_instances {
+                if current.agent_instance_id == job.id && current.startup.generation == job.generation {
+                    if ready { current.startup.relay_state = budget.state }
+                    else { current.startup.fallback_state = budget.state }
+                }
+            }
+            sync.mutex_unlock(&bridge_runtime_mutex)
+            delete(key)
+            sync.mutex_unlock(&bridge_startup_io_mutex)
+            continue
+        }
+        started := time.tick_now()
+        err := contracts.wire_error(.Bridge_Timeout)
+        ok := false
+        attempted := false
 		if ready {
 			attempted = true
 			// HTTP can be slow. Keep it off the fallback timer and lifecycle gate;
 			// the hub authenticates the launch assertion and rejects stopped epochs.
 			rec := bridge_startup_clone_rec(inst.startup.rec, context.temp_allocator)
 			sync.mutex_unlock(&bridge_startup_io_mutex)
-			ok = relay(rec)
+            result := relay(rec, bridge_operation_timeout_ms(budget, now))
+            ok = result.ok; err = result.error
 		} else if bridge_startup_fallback_due(inst, now) {
 			attempted = true
-			ok = deliver(job.id)
+			ok = deliver(job.id, bridge_operation_timeout_ms(budget, now))
 		}
 		if !attempted {
 			sync.mutex_unlock(&bridge_startup_io_mutex)
 			continue
 		}
-		report_failure := false
+        if !bridge_startup_job_current(job.id, job.generation) {
+            ok = false
+            bridge_retry_cancel(key)
+        }
+        finished := bridge_retry_finish(key, bridge_operation_monotonic_finish_ms(now, started), ok, err)
+        delete(key)
+        report_failure := false
 		sync.mutex_lock(&bridge_runtime_mutex)
 		for &current in bridge_runtime_instances {
-			if current.agent_instance_id != job.id || current.startup.generation != job.generation do continue
-			current.startup.next_attempt_ms = now + BRIDGE_STARTUP_RETRY_MS
+			if current.agent_instance_id != job.id || current.startup.generation != job.generation ||
+               current.stopped_intent_unix_ms != 0 || current.runtime_status == "stopped" ||
+               current.runtime_status == "stopping" || current.runtime_status == "failed" { continue }
+			current.startup.next_attempt_ms = finished.next_ms
+            if ready { current.startup.relay_state = finished.state }
+            else { current.startup.fallback_state = finished.state }
 			if !ready && !ok && !current.startup.fallback_error_reported {
 				current.startup.fallback_error_reported = true
 				report_failure = true
@@ -312,7 +361,7 @@ bridge_startup_tick :: proc(now: i64, relay := bridge_startup_relay, deliver := 
 		}
 		sync.mutex_unlock(&bridge_runtime_mutex)
 		if !ready do sync.mutex_unlock(&bridge_startup_io_mutex)
-		if report_failure do fmt.eprintln("bridge startup reminder not acknowledged for", job.id, "— retrying; ensure ham-pty-host was updated with the bridge and this launch is still alive")
+		if report_failure do fmt.eprintln("bridge startup reminder not acknowledged for", job.id, "— bounded recovery pending; inspect readiness status")
 	}
 }
 
@@ -357,7 +406,7 @@ bridge_startup_confirm_spawned :: proc(socket, instance_id: string, run_count: i
 		current.pty_process_alive = true
 		current.startup.pty_pid = pid
 		if current.startup.armed_at_ms == 0 do current.startup.armed_at_ms = now
-		ready := current.start_success_seen || current.startup.ready_pending || current.startup.ready_delivered
+		ready := current.start_success_seen || current.startup.ready_pending || current.startup.ready_delivered || bridge_operation_terminal({state = current.startup.relay_state})
 		if current.runtime_status == "failed" || current.runtime_status == "unknown" || current.runtime_status == "starting" {
 			bridge_runtime_set_status_locked(instance_id, "running" if ready else "starting", "idle" if ready else "active", now, true)
 		}
@@ -366,4 +415,15 @@ bridge_startup_confirm_spawned :: proc(socket, instance_id: string, run_count: i
 	sync.mutex_unlock(&bridge_runtime_mutex)
 	bridge_startup_worker_ensure_started()
 	return true, true
+}
+
+bridge_startup_job_current :: proc(id: string, generation: u64) -> bool {
+    sync.mutex_lock(&bridge_runtime_mutex)
+    inst, exists := bridge_runtime_instance_snapshot_locked(id)
+    current := exists && inst.startup.generation == generation &&
+        inst.stopped_intent_unix_ms == 0 && inst.runtime_status != "stopped" &&
+        inst.runtime_status != "stopping" && inst.runtime_status != "failed"
+    rec := bridge_startup_clone_rec(inst.startup.rec, context.temp_allocator)
+    sync.mutex_unlock(&bridge_runtime_mutex)
+    return current && bridge_startup_rec_current(rec)
 }

@@ -166,7 +166,9 @@ bridge_agent_instance_reconcile_now :: proc() {
 		sync.mutex_unlock(&_bridge_agent_reconcile_mu)
 	}
 
-	if strings.trim_space(bridge_config.daemon_url) == "" || strings.trim_space(bridge_config.bridge_token) == "" {
+	credential_snapshot_168 := bridge_credential_snapshot()
+	defer delete(credential_snapshot_168)
+	if strings.trim_space(bridge_config.daemon_url) == "" || strings.trim_space(credential_snapshot_168) == "" {
 		return
 	}
 
@@ -179,7 +181,9 @@ bridge_agent_instance_reconcile_now :: proc() {
 
 	headers := make([dynamic]http.Header)
 	defer delete(headers)
-	auth_header := strings.concatenate({"Bearer ", bridge_config.bridge_token})
+	credential_snapshot_181 := bridge_credential_snapshot()
+	defer delete(credential_snapshot_181)
+	auth_header := strings.concatenate({"Bearer ", credential_snapshot_181})
 	defer delete(auth_header)
 	append(&headers, http.Header{name = "Authorization", value = auth_header})
 

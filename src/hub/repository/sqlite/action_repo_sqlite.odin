@@ -1,12 +1,16 @@
 package sqlite
 
 import "core:c"
+import "core:fmt"
+import "core:sync"
 import "core:strings"
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
 
 Action_Repo_SQLite :: struct {
-	conn: ^Conn,
+    conn: ^Conn,
+    snapshot_conn: Conn,
+    snapshot_mutex: sync.Mutex,
 }
 
 Scheduled_Prompt_Repo_SQLite :: Action_Repo_SQLite
@@ -15,6 +19,8 @@ new_action_repository :: proc(impl: ^Action_Repo_SQLite, conn: ^Conn) -> iface.A
 	impl.conn = conn
 	return iface.Action_Repository{
 		ctx = rawptr(impl),
+        revision = action_revision_sqlite,
+        snapshot = action_snapshot_sqlite,
 		save = action_save_sqlite,
 		get = action_get_sqlite,
 		delete_action = action_delete_sqlite,
@@ -27,42 +33,42 @@ new_action_repository :: proc(impl: ^Action_Repo_SQLite, conn: ^Conn) -> iface.A
 	}
 }
 
-action_from_stmt :: proc(stmt: sqlite3_stmt) -> domain.Action {
+action_from_stmt :: proc(stmt: sqlite3_stmt, offset := 0) -> domain.Action {
 	action: domain.Action
-	action.id = domain.Action_ID(column_text(stmt, 0))
-	action.owner_user_id = domain.User_ID(column_text(stmt, 1))
-	action.target_instance_id = domain.Agent_Instance_ID(column_text(stmt, 2))
-	action.prompt_text = column_text(stmt, 3)
-	action.cron_expr = column_text(stmt, 4)
-	action.timezone = column_text(stmt, 5)
+	action.id = domain.Action_ID(column_text(stmt, offset + 0))
+	action.owner_user_id = domain.User_ID(column_text(stmt, offset + 1))
+	action.target_instance_id = domain.Agent_Instance_ID(column_text(stmt, offset + 2))
+	action.prompt_text = column_text(stmt, offset + 3)
+	action.cron_expr = column_text(stmt, offset + 4)
+	action.timezone = column_text(stmt, offset + 5)
 	if action.timezone == "" do action.timezone = "UTC"
-	action.blackout_dates = column_text(stmt, 6)
+	action.blackout_dates = column_text(stmt, offset + 6)
 	if action.blackout_dates == "" do action.blackout_dates = "[]"
-	action.active_from = column_text(stmt, 7)
-	action.active_until = column_text(stmt, 8)
-	action.target_run_at = column_text(stmt, 9)
-	action.interval = column_text(stmt, 10)
+	action.active_from = column_text(stmt, offset + 7)
+	action.active_until = column_text(stmt, offset + 8)
+	action.target_run_at = column_text(stmt, offset + 9)
+	action.interval = column_text(stmt, offset + 10)
 
-	state_str := column_text(stmt, 11)
+	state_str := column_text(stmt, offset + 11)
 	switch state_str {
 	case "in_flight": action.state = .In_Flight
 	case "completed": action.state = .Completed
 	case: action.state = .Active
 	}
 
-	action.in_flight = column_text(stmt, 12) == "1"
-	action.leased_at = column_text(stmt, 13)
-	action.deleted_at = column_text(stmt, 14)
-	action.created_at = column_text(stmt, 15)
-	action.updated_at = column_text(stmt, 16)
-	action.target_agent_id = domain.Agent_ID(column_text(stmt, 17))
-	action.target_bridge_id = domain.Bridge_ID(column_text(stmt, 18))
-	action.target_provider = column_text(stmt, 19)
-	action.target_model = column_text(stmt, 20)
-	action.target_project_id = domain.Project_ID(column_text(stmt, 21))
-	action.instance_strategy = column_text(stmt, 22)
+	action.in_flight = column_text(stmt, offset + 12) == "1"
+	action.leased_at = column_text(stmt, offset + 13)
+	action.deleted_at = column_text(stmt, offset + 14)
+	action.created_at = column_text(stmt, offset + 15)
+	action.updated_at = column_text(stmt, offset + 16)
+	action.target_agent_id = domain.Agent_ID(column_text(stmt, offset + 17))
+	action.target_bridge_id = domain.Bridge_ID(column_text(stmt, offset + 18))
+	action.target_provider = column_text(stmt, offset + 19)
+	action.target_model = column_text(stmt, offset + 20)
+	action.target_project_id = domain.Project_ID(column_text(stmt, offset + 21))
+	action.instance_strategy = column_text(stmt, offset + 22)
 	if action.instance_strategy == "" do action.instance_strategy = "reuse"
-	action.last_spawned_instance_id = domain.Agent_Instance_ID(column_text(stmt, 23))
+	action.last_spawned_instance_id = domain.Agent_Instance_ID(column_text(stmt, offset + 23))
 	return action
 }
 
@@ -147,9 +153,9 @@ action_save_sqlite :: proc(ctx: rawptr, action: domain.Action) -> (domain.Action
 	bind_text(stmt, 23, strategy)
 	bind_text(stmt, 24, string(action.last_spawned_instance_id))
 
-	if sqlite3_step(stmt) != SQLITE_DONE {
-		return domain.Action{}, false, domain.domain_error(.Conflict, "action could not be saved")
-	}
+	if rc := sqlite3_step(stmt); rc != SQLITE_DONE {
+        return {}, false, action_write_error(rc)
+    }
 	saved := action
 	saved.timezone = tz
 	saved.blackout_dates = blackout
@@ -277,7 +283,7 @@ action_cas_lease_sqlite :: proc(ctx: rawptr, id: domain.Action_ID, leased_at: st
 
 	step_rc, row_changes := step_changes(impl.conn.db, stmt)
 	if step_rc != SQLITE_DONE {
-		return false, domain.domain_error(.Internal_Error, "failed to execute cas lease")
+		return false, action_write_error(step_rc)
 	}
 	return row_changes > 0, domain.Domain_Error{}
 }
@@ -303,4 +309,76 @@ action_max_updated_at_for_bridge_sqlite :: proc(ctx: rawptr, bridge_id: domain.B
 		return column_text(stmt, 0), domain.Domain_Error{}
 	}
 	return "", domain.Domain_Error{}
+}
+
+// One SQLite cursor on an exclusively owned read connection is one READ
+// transaction. Writers cannot join it or mutate its view between cursor steps.
+// The revision guard bypasses rows for unchanged validators. No registry/HTTP
+// mutex covers DB work; snapshot_mutex owns only this dedicated connection.
+action_snapshot_sqlite :: proc(ctx: rawptr, bridge_id: domain.Bridge_ID, known_revision: i64) -> (i64, []domain.Action, bool, domain.Domain_Error) {
+    impl := (^Action_Repo_SQLite)(ctx)
+    if impl == nil || impl.conn == nil || impl.conn.db == nil do return 0, nil, false, domain.domain_error(.Internal_Error, "action snapshot unavailable")
+    sync.mutex_lock(&impl.snapshot_mutex)
+    defer sync.mutex_unlock(&impl.snapshot_mutex)
+    conn := &impl.snapshot_conn
+    if conn.db == nil {
+        when ODIN_TEST {
+            // Hermetic :memory: fixtures have no second handle. Concurrent
+            // snapshot/write tests must use a file and the production reader.
+            conn = impl.conn
+        } else { return 0, nil, false, domain.domain_error(.Internal_Error, "action snapshot reader unavailable") }
+    }
+    stmt: sqlite3_stmt
+    query := `SELECT r.revision, a.id, a.owner_user_id, a.target_instance_id, a.prompt_text, a.cron_expr, a.timezone, a.blackout_dates, a.active_from, a.active_until, a.target_run_at, a.interval, a.state, a.in_flight, a.leased_at, a.deleted_at, a.created_at, a.updated_at, a.target_agent_id, a.target_bridge_id, a.target_provider, a.target_model, a.target_project_id, a.instance_strategy, a.last_spawned_instance_id
+        FROM action_schedule_revision r LEFT JOIN actions a
+        ON r.revision != ? AND a.deleted_at = '' AND
+        (a.target_bridge_id = ? OR a.target_instance_id IN (SELECT agent_instance_id FROM agent_instances WHERE bridge_id = ?))
+        WHERE r.singleton = 1 ORDER BY a.target_run_at;`
+    if sqlite3_prepare_v2(conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return 0, nil, false, domain.domain_error(.Internal_Error, "action snapshot prepare failed")
+    defer sqlite3_finalize(stmt)
+    sqlite3_bind_int64(stmt, 1, known_revision)
+    bind_text(stmt, 2, string(bridge_id)); bind_text(stmt, 3, string(bridge_id))
+    rows := make([dynamic]domain.Action)
+    revision: i64 = -1
+    for {
+        rc := sqlite3_step(stmt)
+        if rc == SQLITE_DONE do break
+        if rc != SQLITE_ROW do return 0, nil, false, domain.domain_error(.Internal_Error, "action snapshot interrupted")
+        revision = i64(sqlite3_column_int64(stmt, 0))
+        if column_text_unowned(stmt, 1) != "" do append(&rows, action_from_stmt(stmt, 1))
+    }
+    if revision < 0 do return 0, nil, false, domain.domain_error(.Internal_Error, "action revision missing")
+    return revision, rows[:], revision == known_revision, {}
+}
+
+action_revision_sqlite :: proc(ctx: rawptr) -> (i64, domain.Domain_Error) {
+    impl := (^Action_Repo_SQLite)(ctx)
+    if impl == nil || impl.conn == nil || impl.conn.db == nil do return 0, domain.domain_error(.Internal_Error, "action revision unavailable")
+    stmt: sqlite3_stmt
+    query := "SELECT revision FROM action_schedule_revision WHERE singleton = 1;"
+    if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return 0, domain.domain_error(.Internal_Error, "action revision prepare failed")
+    defer sqlite3_finalize(stmt)
+    if sqlite3_step(stmt) != SQLITE_ROW do return 0, domain.domain_error(.Internal_Error, "action revision missing")
+    return i64(sqlite3_column_int64(stmt, 0)), {}
+}
+
+open_action_snapshot_conn :: proc(impl: ^Action_Repo_SQLite, path: string) -> (bool, domain.Domain_Error) {
+    conn, ok, err := open(path)
+    if !ok do return false, err
+    if !exec(&conn, "PRAGMA busy_timeout=1000; PRAGMA query_only=ON;") {
+        close(&conn)
+        return false, domain.domain_error(.Internal_Error, "action snapshot reader configuration failed")
+    }
+    impl.snapshot_conn = conn
+    return true, {}
+}
+
+action_write_error :: proc(rc: c.int) -> domain.Domain_Error {
+    if rc & 0xff == SQLITE_BUSY || rc & 0xff == SQLITE_LOCKED {
+        err := domain.domain_error(.Bridge_Busy, "action database busy")
+        err.details_json = `{"retry_after_ms":1000}`
+        return err
+    }
+    if rc & 0xff == SQLITE_CONSTRAINT do return domain.domain_error(.Validation_Failed, "action constraint rejected")
+    return domain.domain_error(.Internal_Error, "action database write failed")
 }

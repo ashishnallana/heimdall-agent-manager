@@ -64,6 +64,7 @@ Fleet_Metrics :: struct {
 	// (they reset when the bridge restarts) and are removed on disconnect.
 	errors:                   ^metrics.Family, // {code, class}
 	bridge_dispatch:          ^metrics.Family, // {bridge_id, outcome} counter, value pushed
+	bridge_recovery: ^metrics.Family,
 	bridge_http_retries:      ^metrics.Family, // {bridge_id, outcome} counter, value pushed
 	bridge_breakers_open:     ^metrics.Family, // {bridge_id}
 	bridge_breaker_trips:     ^metrics.Family, // {bridge_id} counter, value pushed
@@ -133,7 +134,8 @@ fleet_metrics_init :: proc(reg: ^metrics.Registry) {
 	m.log_push_failures = metrics.with(metrics.new_counter(reg, "heimdall_log_push_failures_total", "Failed pushes of bridge events to the optional log backend (--log-push-url)."))
 	m.errors = metrics.new_counter(reg, "heimdall_errors_total", "API error answers by error code and class (retriable/recoverable/fatal).", {"code", "class"})
 	m.bridge_dispatch = metrics.new_counter(reg, "heimdall_bridge_dispatch_total", "Hub commands the bridge dispatcher accepted, shed under load, completed, or dropped past their deadline (pushed value; resets when the bridge restarts). Removed on disconnect.", {"bridge_id", "outcome"})
-	m.bridge_http_retries = metrics.new_counter(reg, "heimdall_bridge_http_retries_total", "Bridge->hub HTTP retries and how retried requests ended (pushed value; resets when the bridge restarts). Removed on disconnect.", {"bridge_id", "outcome"})
+	m.bridge_recovery = metrics.new_gauge(reg, "heimdall_bridge_recovery_receipts", "Finite operation receipts by bounded operation, state and wire error. Removed on disconnect.", {"bridge_id", "operation", "state", "code", "class"})
+    m.bridge_http_retries = metrics.new_counter(reg, "heimdall_bridge_http_retries_total", "Bridge->hub HTTP retries and how retried requests ended (pushed value; resets when the bridge restarts). Removed on disconnect.", {"bridge_id", "outcome"})
 	m.bridge_breakers_open = metrics.new_gauge(reg, "heimdall_bridge_breakers_open", "Bridge dependency circuit breakers currently open. Removed on disconnect.", {"bridge_id"})
 	m.bridge_breaker_trips = metrics.new_counter(reg, "heimdall_bridge_breaker_trips_total", "Times a bridge dependency circuit breaker opened (pushed value; resets when the bridge restarts). Removed on disconnect.", {"bridge_id"})
 	// Pre-create the per-kind gauges so a zero is exposed from the first scrape.
@@ -159,6 +161,7 @@ fleet_metrics_tombstone_bridge :: proc(bridge_id: string) {
 	metrics.remove_where(m.instance_resident, 0, bridge_id)
 	metrics.remove_where(m.instance_cpu, 0, bridge_id)
 	metrics.remove_where(m.bridge_dispatch, 0, bridge_id)
+	metrics.remove_where(m.bridge_recovery, 0, bridge_id)
 	metrics.remove_where(m.bridge_http_retries, 0, bridge_id)
 	metrics.remove_where(m.bridge_breakers_open, 0, bridge_id)
 	metrics.remove_where(m.bridge_breaker_trips, 0, bridge_id)

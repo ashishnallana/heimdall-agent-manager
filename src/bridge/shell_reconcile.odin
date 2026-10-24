@@ -133,7 +133,9 @@ bridge_shell_orphan_reconcile_now :: proc() {
 		sync.mutex_unlock(&_bridge_shell_orphan_reconcile_mu)
 	}
 
-	if strings.trim_space(bridge_config.daemon_url) == "" || strings.trim_space(bridge_config.bridge_token) == "" {
+	credential_snapshot_135 := bridge_credential_snapshot()
+	defer delete(credential_snapshot_135)
+	if strings.trim_space(bridge_config.daemon_url) == "" || strings.trim_space(credential_snapshot_135) == "" {
 		return
 	}
 
@@ -146,7 +148,9 @@ bridge_shell_orphan_reconcile_now :: proc() {
 
 	headers := make([dynamic]http.Header)
 	defer delete(headers)
-	auth_header := strings.concatenate({"Bearer ", bridge_config.bridge_token})
+	credential_snapshot_148 := bridge_credential_snapshot()
+	defer delete(credential_snapshot_148)
+	auth_header := strings.concatenate({"Bearer ", credential_snapshot_148})
 	defer delete(auth_header)
 	append(&headers, http.Header{name = "Authorization", value = auth_header})
 

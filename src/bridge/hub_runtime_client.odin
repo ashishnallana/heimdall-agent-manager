@@ -335,7 +335,9 @@ bridge_hub_take_replaced_backoff :: proc() -> (backoff_s: int, replaced: bool) {
 }
 
 bridge_hub_runtime_worker :: proc() {
-	if strings.trim_space(bridge_config.daemon_url) == "" || strings.trim_space(bridge_config.bridge_token) == "" {
+	credential_snapshot_337 := bridge_credential_snapshot()
+	defer delete(credential_snapshot_337)
+	if strings.trim_space(bridge_config.daemon_url) == "" || strings.trim_space(credential_snapshot_337) == "" {
 		fmt.println("bridge hub runtime disabled: missing daemon_url or bridge_token (has the bridge enrolled? check the bridge_token/--bridge-token-file)")
 		return
 	}
@@ -365,7 +367,9 @@ bridge_hub_runtime_worker :: proc() {
 			fmt.println("bridge hub runtime disabled: daemon_url must be an http:// or https:// base URL")
 			return
 		}
-		conn, ok := ws.connect_with_bearer(ws_url, bridge_config.bridge_token)
+		credential := bridge_credential_snapshot()
+        conn, ok := ws.connect_with_bearer(ws_url, credential)
+        delete(credential)
 		if !ok {
 			connect_err := ws.last_connect_error()
 			code, stage, why := blog_connect_failure(connect_err)
@@ -455,9 +459,11 @@ bridge_hub_runtime_worker :: proc() {
 			// REQ-REAP-SHELL-1: reconcile surviving shell sessions on pty-host
 			// against Hub's active shells list on reconnect to reap orphaned processes.
 			thread.run(bridge_shell_orphan_reconcile_now)
-			sync.atomic_store(&bridge_hub_runtime_up, true)
+			bridge_action_scheduler_connection_changed()
+            sync.atomic_store(&bridge_hub_runtime_up, true)
 			bridge_hub_runtime_loop(&conn)
-			sync.atomic_store(&bridge_hub_runtime_up, false)
+			bridge_action_scheduler_connection_changed()
+            sync.atomic_store(&bridge_hub_runtime_up, false)
 			// NOT beside the PTY stream teardown, and not inside
 			// bridge_hub_connection_teardown with it, deliberately: this one has no
 			// before-close requirement. It closes stdin fds, SIGTERMs language servers
@@ -729,6 +735,7 @@ bridge_hub_handle_command :: proc(conn: ^ws.Connection, text: string) {
 		}
 		schedules_version := extract_json_int(text, "schedules_version", 0)
 		bridge_action_scheduler_notify_version(schedules_version)
+        bridge_action_scheduler_notify_snapshot(extract_json_string(text, "schedules_epoch", ""), i64(extract_json_int(text, "schedules_revision", -1)), bridge_runtime_now_ms())
 		return
 	}
 	if type == "agent_instance_status_ack" {
@@ -2305,7 +2312,9 @@ bridge_runtime_launch_agent :: proc(command_id, command_json: string, deadline_n
 	// DEL-1: pty-host is the only agent-launch runtime. The bridge clean-slates the
 	// run_dir and WRITES the assembled file set directly (wrapper-free), then spawns
 	// the agent under the ham-pty-host daemon.
-	boot_res := bridge_bootstrap_launch_materialize_run_dir(bridge_config.daemon_url, bridge_config.bridge_token, run_dir, endpoint, agent_issue.plaintext_token, descriptor, &bootstrap_global_cache, deadline_ns)
+	credential_snapshot_2312 := bridge_credential_snapshot()
+	defer delete(credential_snapshot_2312)
+	boot_res := bridge_bootstrap_launch_materialize_run_dir(bridge_config.daemon_url, credential_snapshot_2312, run_dir, endpoint, agent_issue.plaintext_token, descriptor, &bootstrap_global_cache, deadline_ns)
 	if !boot_res.ok {
 		bridge_runtime_set_status(instance_id, "failed", "idle")
 		detail := fmt.tprintf("bootstrap failed at stage=%s http_status=%d: %s", boot_res.stage, boot_res.http_status, boot_res.detail)
@@ -3160,7 +3169,9 @@ bridge_hub_heartbeat_json :: proc() -> string {
 	defer delete(dispatch_metrics)
 	breaker_metrics := bridge_dependency_breaker_metrics_json()
 	defer delete(breaker_metrics)
-	retry_metrics := bridge_http_retry_metrics_json()
+	recovery_status := bridge_recovery_status_json()
+    defer delete(recovery_status)
+    retry_metrics := bridge_http_retry_metrics_json()
 	defer delete(retry_metrics)
 	// REQ-BVS-1: read the vault tri-state BEFORE taking bridge_runtime_mutex.
 	// bridge_vault_status() touches the kernel keyring and the filesystem, and no
@@ -3187,7 +3198,9 @@ bridge_hub_heartbeat_json :: proc() -> string {
 	strings.write_string(&b, breaker_metrics)
 	strings.write_string(&b, ",\"http_retries\":")
 	strings.write_string(&b, retry_metrics)
-	if stats != "" {
+    strings.write_string(&b, ",\"operation_recovery\":")
+    strings.write_string(&b, recovery_status)
+    if stats != "" {
 		strings.write_string(&b, ",\"stats\":")
 		strings.write_string(&b, stats)
 	}
@@ -5586,7 +5599,9 @@ bridge_hub_runtime_start :: proc() {
 	// forever. Must follow init (it appends to the queue init makes) and precede the
 	// worker that drains it.
 	bridge_shell_exited_outbox_restore()
-	if strings.trim_space(bridge_config.bridge_token) != "" && strings.trim_space(bridge_config.daemon_url) != "" {
+	credential_snapshot_5593 := bridge_credential_snapshot()
+	defer delete(credential_snapshot_5593)
+	if strings.trim_space(credential_snapshot_5593) != "" && strings.trim_space(bridge_config.daemon_url) != "" {
 		thread.run(bridge_hub_runtime_worker)
 	}
 }

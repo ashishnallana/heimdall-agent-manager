@@ -1,6 +1,7 @@
 package main
 
 import "core:fmt"
+import "core:time"
 import "core:math/rand"
 import "core:strings"
 import "core:sync"
@@ -201,7 +202,7 @@ bridge_task_wake_note_launched :: proc(instance_id: string, now_ms: i64 = 0) {
 // subject to coalescing (BRIDGE_WAKE_COALESCE_MS), retriable-failure backoff and
 // parking (see Bridge_Wake_State). Returns true if a wake was requested and the
 // launch succeeded.
-bridge_task_wake_if_needed :: proc(instance_id: string, now: i64) -> bool {
+bridge_task_wake_if_needed :: proc(instance_id: string, now: i64, deadline_ns: i64 = 0) -> bool {
 	bridge_agent_wake_init()
 	sync.mutex_lock(&bridge_wake_mutex)
 	// Activity is checked UNDER the wake mutex (lock order: wake ->
@@ -242,11 +243,11 @@ bridge_task_wake_if_needed :: proc(instance_id: string, now: i64) -> bool {
 	// fetched (or lacks agent_id), the wake fails with a classified error rather
 	// than materialize a degraded bootstrap -- a visible failure, never a silent one.
 	command_id := fmt.tprintf("sched_wake_%s_%d", instance_id, now)
-	command_json, enrich_err, enrich_ok := bridge_wake_fetch_enriched_launch_json(instance_id, command_id)
+	command_json, enrich_err, enrich_ok := bridge_wake_fetch_enriched_launch_json(instance_id, command_id, deadline_ns)
 	defer delete(command_json)
 	ok, detail, err := false, "", enrich_err
 	if enrich_ok {
-		ok, detail, err = bridge_runtime_launch_agent(command_id, command_json)
+		ok, detail, err = bridge_runtime_launch_agent(command_id, command_json, deadline_ns)
 	} else {
 		detail = "could not fetch enriched descriptor (agent_id)"
 	}
@@ -295,14 +296,26 @@ bridge_task_wake_record_result :: proc(instance_id: string, generation: u64, ok:
 // agent_id (recoverable), so the caller fails the wake with that class rather than
 // materialize a degraded, header-only CLAUDE.md. Transient extracted strings
 // follow the same no-free convention as bridge_hub_handle_wake_agent.
-bridge_wake_fetch_enriched_launch_json :: proc(instance_id, command_id: string) -> (string, Bridge_Error, bool) {
-	if strings.trim_space(bridge_config.daemon_url) == "" || strings.trim_space(bridge_config.bridge_token) == "" do return "", bridge_error(.hub_connect_failed, .config), false
+bridge_wake_fetch_enriched_launch_json :: proc(instance_id, command_id: string, deadline_ns: i64 = 0) -> (string, Bridge_Error, bool) {
+	credential_snapshot_298 := bridge_credential_snapshot()
+	defer delete(credential_snapshot_298)
+	if strings.trim_space(bridge_config.daemon_url) == "" || strings.trim_space(credential_snapshot_298) == "" do return "", bridge_error(.hub_connect_failed, .config), false
 	path := strings.concatenate({"/api/v1/bridge/agent-instances/", instance_id, "/bootstrap?format=manifest"})
 	defer delete(path)
-	auth := strings.concatenate({"Bearer ", bridge_config.bridge_token})
+	credential_snapshot_301 := bridge_credential_snapshot()
+	defer delete(credential_snapshot_301)
+	auth := strings.concatenate({"Bearer ", credential_snapshot_301})
 	defer delete(auth)
 	headers := [?]http.Header{{name = "Authorization", value = auth}}
-	resp, ok := bridge_http_request_retry("GET", bridge_config.daemon_url, path, "", headers[:], http.DEFAULT_TIMEOUT_MS)
+	resp: http.Response
+    ok: bool
+    if deadline_ns != 0 {
+        left := (deadline_ns - time.to_unix_nanoseconds(time.now())) / i64(time.Millisecond)
+        if left <= 0 do return "", bridge_error(.hub_connect_failed, .transport), false
+        resp, ok = http.request_with_headers_deadline("GET", bridge_config.daemon_url, path, "", headers[:], int(min(10_000, left)))
+    } else {
+        resp, ok = bridge_http_request_retry("GET", bridge_config.daemon_url, path, "", headers[:], http.DEFAULT_TIMEOUT_MS)
+    }
 	if !ok || resp.status != 200 {
 		delete(resp.body)
 		if !ok || resp.status == 0 do return "", bridge_error(.hub_connect_failed, .transport), false

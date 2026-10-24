@@ -153,7 +153,14 @@ agent_save_instance_sqlite :: proc(ctx: rawptr, instance: domain.Agent_Instance)
 	rc := step_write_healing(impl.conn, stmt)
 	if rc != SQLITE_ROW {
 		if rc == SQLITE_CORRUPT do return domain.Agent_Instance{}, false, domain.domain_error(.Internal_Error, "agent instance save failed: search index drift (SQLITE_CORRUPT) — run the FTS reconcile/repair")
-		return domain.Agent_Instance{}, false, domain.domain_error(.Conflict, "agent instance could not be saved")
+		if rc == SQLITE_DONE do return domain.Agent_Instance{}, false, domain.domain_error(.Conflict, "agent instance generation changed")
+        if rc & 0xff == SQLITE_BUSY || rc & 0xff == SQLITE_LOCKED {
+            busy := domain.domain_error(.Bridge_Busy, "agent instance database busy")
+            busy.details_json = `{"retry_after_ms":1000}`
+            return {}, false, busy
+        }
+        if rc & 0xff == SQLITE_CONSTRAINT do return {}, false, domain.domain_error(.Validation_Failed, "agent instance constraint rejected")
+        return domain.Agent_Instance{}, false, domain.domain_error(.Internal_Error, "agent instance save failed")
 	}
 	// Preserve existing string ownership while returning the persisted revision.
 	saved := instance

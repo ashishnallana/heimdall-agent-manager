@@ -117,3 +117,29 @@ close :: proc(s: Socket) {
 remove_path :: proc(path: string) {
 	_ = posix.unlink(strings.clone_to_cstring(path, context.temp_allocator))
 }
+
+// Used by bounded control requests. AF_UNIX connects either complete now or
+// fail (including a full backlog); no blocking connect is allowed.
+dial_nonblocking :: proc(path: string) -> (Socket, bool) {
+    if !path_fits(path) do return INVALID_SOCKET, false
+    fd := posix.socket(.UNIX, .STREAM)
+    if fd < 0 do return INVALID_SOCKET, false
+    flags := posix.fcntl(fd, .GETFL)
+    if flags < 0 || posix.fcntl(fd, .SETFL, flags | posix.O_NONBLOCK) < 0 {
+        posix.close(fd); return INVALID_SOCKET, false
+    }
+    addr := make_addr(path)
+    if posix.connect(fd, (^posix.sockaddr)(&addr), posix.socklen_t(size_of(addr))) != .OK {
+        posix.close(fd); return INVALID_SOCKET, false
+    }
+    return fd, true
+}
+send_ex :: proc(s: Socket, bytes: []byte) -> (int, Error) {
+    n := posix.send(s, raw_data(bytes), c.size_t(len(bytes)), {})
+    if n >= 0 do return int(n), .None
+    #partial switch posix.errno() {
+    case .EAGAIN: return -1, .Would_Block
+    case .EINTR: return -1, .Interrupted
+    }
+    return -1, .Failed
+}

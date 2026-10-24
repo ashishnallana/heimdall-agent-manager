@@ -459,7 +459,13 @@ bridge_local_handle_agent_method :: proc(request_id, method, params: string, rec
 		accepted, _ := bridge_startup_accept(rec, bridge_runtime_now_ms())
 		if !accepted do return bridge_local_response_error(request_id, "stale_launch", "Startup signal does not belong to an active launch")
 		bridge_startup_worker_ensure_started()
-		return bridge_local_response_data(request_id, "{\"accepted\":true,\"reconcile\":\"pending\"}")
+		key := bridge_startup_receipt_key(rec)
+        defer delete(key)
+        budget := bridge_retry_status(key)
+        if budget.state == .Waiting_Repair || budget.state == .Exhausted || budget.state == .Cancelled {
+            return bridge_local_response_error(request_id, "startup_reconciliation_stopped", fmt.tprintf("Startup reconciliation %v after %d attempts (code=%v class=%v)", budget.state, budget.attempts, budget.code, budget.class))
+        }
+        return bridge_local_response_data(request_id, fmt.tprintf("{{\"accepted\":true,\"reconcile\":\"%v\",\"attempts\":%d}}", budget.state, budget.attempts))
 	}
 
 	// Agent API v2: everything else resolves through the single route table.
@@ -501,7 +507,9 @@ bridge_local_handle_agent_method :: proc(request_id, method, params: string, rec
 // {method, agent_instance_id, params} and POSTs it, with AC-5 retry.
 bridge_local_relay_agent_envelope :: proc(path, method, params: string, rec: Bridge_Local_Agent_Token_Record, timeout_ms: int = http.DEFAULT_TIMEOUT_MS) -> Bridge_Local_Relay_Result {
 	body := bridge_local_agent_relay_body(method, params, rec.agent_instance_id)
-	headers := [?]http.Header{{name = "Authorization", value = strings.concatenate({"Bearer ", bridge_config.bridge_token})}, {name = "X-Heimdall-Instance-Token", value = rec.instance_token}}
+	credential_snapshot_509 := bridge_credential_snapshot()
+	defer delete(credential_snapshot_509)
+	headers := [?]http.Header{{name = "Authorization", value = strings.concatenate({"Bearer ", credential_snapshot_509})}, {name = "X-Heimdall-Instance-Token", value = rec.instance_token}}
 	resp, ok := bridge_http_request_retry("POST", bridge_config.daemon_url, path, body, headers[:], timeout_ms)
 	return Bridge_Local_Relay_Result{status = resp.status, body = resp.body, ok = ok}
 }
@@ -509,7 +517,9 @@ bridge_local_relay_agent_envelope :: proc(path, method, params: string, rec: Bri
 // bridge_local_relay_raw issues a direct REST call (GET/POST) with the instance
 // token header, with AC-5 retry. Body is only sent for writes.
 bridge_local_relay_raw :: proc(http_method, path, body: string, rec: Bridge_Local_Agent_Token_Record) -> Bridge_Local_Relay_Result {
-	headers := [?]http.Header{{name = "Authorization", value = strings.concatenate({"Bearer ", bridge_config.bridge_token})}, {name = "X-Heimdall-Instance-Token", value = rec.instance_token}}
+	credential_snapshot_517 := bridge_credential_snapshot()
+	defer delete(credential_snapshot_517)
+	headers := [?]http.Header{{name = "Authorization", value = strings.concatenate({"Bearer ", credential_snapshot_517})}, {name = "X-Heimdall-Instance-Token", value = rec.instance_token}}
 	resp, ok := bridge_http_request_retry(http_method, bridge_config.daemon_url, path, body, headers[:], http.DEFAULT_TIMEOUT_MS)
 	return Bridge_Local_Relay_Result{status = resp.status, body = resp.body, ok = ok}
 }
@@ -523,8 +533,10 @@ bridge_local_relay_rest_request :: proc(params: string, rec: Bridge_Local_Agent_
 	if body == "" do body = bridge_local_extract_json_object(params, "body")
 	if body == "{}" && !strings.contains(params, "\"body\"") do body = ""
 
+	credential_snapshot_532 := bridge_credential_snapshot()
+	defer delete(credential_snapshot_532)
 	headers := [?]http.Header{
-		{name = "Authorization", value = strings.concatenate({"Bearer ", bridge_config.bridge_token})},
+		{name = "Authorization", value = strings.concatenate({"Bearer ", credential_snapshot_532})},
 		{name = "X-Heimdall-Instance-Token", value = rec.instance_token},
 	}
 	resp, ok := http.request_with_headers_timeout(http_method, bridge_config.daemon_url, path, body, headers[:], http.DEFAULT_TIMEOUT_MS)

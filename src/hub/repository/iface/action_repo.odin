@@ -12,7 +12,9 @@ Action_CAS_Lease_Proc :: proc(ctx: rawptr, id: domain.Action_ID, leased_at: stri
 Action_Max_Updated_Proc :: proc(ctx: rawptr, bridge_id: domain.Bridge_ID) -> (string, domain.Domain_Error)
 
 Action_Repository :: struct {
-	ctx: rawptr,
+    ctx: rawptr,
+    revision: proc(ctx: rawptr) -> (i64, domain.Domain_Error),
+    snapshot: proc(ctx: rawptr, bridge_id: domain.Bridge_ID, known_revision: i64) -> (i64, []domain.Action, bool, domain.Domain_Error),
 	save: Action_Save_Proc,
 	get: Action_Get_Proc,
 	delete_action: Action_Delete_Proc,

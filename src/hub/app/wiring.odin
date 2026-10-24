@@ -296,6 +296,9 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 	}
 	graph.repos.search = sqlite.new_search_repository(&graph.sqlite_search, &graph.db, graph.search_skills)
 	graph.repos.actions = sqlite.new_action_repository(&graph.sqlite_actions, &graph.db)
+    if config.database_path != ":memory:" {
+        if ok, err := sqlite.open_action_snapshot_conn(&graph.sqlite_actions, config.database_path); !ok do return false, err.message
+    }
 	graph.repos.scheduled_prompts = graph.repos.actions
 	graph.repos.push_subscriptions = sqlite.new_push_repository(&graph.sqlite_push, &graph.db)
 	graph.repos.cards = sqlite.new_card_repository(&graph.sqlite_cards, &graph.db)
@@ -591,6 +594,7 @@ shutdown_graph :: proc(graph: ^App_Graph) {
 	device_auth_service.grant_store_free(&graph.device_auth_store)
 	delete(graph.action_bridge_versions)
 	billing_service.service_free(&graph.billing)
+	sqlite.close(&graph.sqlite_actions.snapshot_conn)
 	sqlite.close(&graph.sqlite_billing.conn)
 	sqlite.close(&graph.sqlite_bridge_commit.conn)
 	vault_directory_service.service_free(&graph.vault_directory)
