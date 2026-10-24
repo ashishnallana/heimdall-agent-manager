@@ -71,4 +71,3 @@ const manifest = {
 fs.writeFileSync(path.join(evidenceDir, 'artifact-manifest.json'), JSON.stringify(manifest, null, 2) + '\n');
 console.log(JSON.stringify({ head, tests: manifest.tests, manifest: path.join(evidenceDir, 'artifact-manifest.json') }));
 JS
-
