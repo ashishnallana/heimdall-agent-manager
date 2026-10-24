@@ -67,6 +67,7 @@
           # wrapper can inject an absolute --migrations-dir (NRX-1/NRX-4) and
           # `nix run .#hub` works from any CWD.
           ${if name == "ham-hub" then "mkdir -p $out/share/ham-hub && cp -r src/hub/repository/sqlite/migrations $out/share/ham-hub/migrations" else ""}
+          ${if name == "ham-bridge" then "mkdir -p $out/share/heimdall && cp -r extensions $out/share/heimdall/extensions" else ""}
           ${if name == "ham-bridge" then "ln -s ${pkgs.openssl}/bin/openssl $out/bin/openssl" else ""}
           # SOCAT-1: socat is the default bridge->hub TLS transport (HAM_TLS_BACKEND);
           # openssl above stays for the s_client fallback + socat's OpenSSL engine.

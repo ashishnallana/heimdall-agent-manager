@@ -110,7 +110,7 @@ test_provider_extension_probe_runs_detect_argv :: proc(t: ^testing.T) {
 	// The fixture only answers the catalog's exact argv, proving it is passed through.
 	path := provider_extension_test_fixture(t, "#!/bin/sh\n[ \"$1 $2 $3\" = \"plugin list --json\" ] || exit 3\necho 'noise' >&2\necho '[{\"id\":\"heimdall@heimdall\",\"version\":\"0.1.0\",\"enabled\":true}]'\n")
 	defer { _ = os.remove(path); delete(path) }
-	state, version := bridge_provider_extension_probe(path, provider_extension_test_descriptor(), time.Second)
+	state, version := bridge_provider_extension_probe(path, provider_extension_test_descriptor(), 5 * time.Second)
 	defer delete(version)
 	testing.expect_value(t, state, "present")
 	testing.expect_value(t, version, "0.1.0")

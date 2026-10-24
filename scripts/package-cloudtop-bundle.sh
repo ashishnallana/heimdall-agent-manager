@@ -9,7 +9,7 @@ cd "$ROOT"
 DIST_DIR="$ROOT/dist"
 BUNDLE_DIR="$DIST_DIR/heimdall-cloudtop"
 rm -rf "$BUNDLE_DIR"
-mkdir -p "$BUNDLE_DIR/bin" "$BUNDLE_DIR/lib" "$BUNDLE_DIR/share/migrations" "$BUNDLE_DIR/systemd" "$BUNDLE_DIR/scripts" "$BUNDLE_DIR/bridge"
+mkdir -p "$BUNDLE_DIR/bin" "$BUNDLE_DIR/lib" "$BUNDLE_DIR/share/migrations" "$BUNDLE_DIR/share/extensions" "$BUNDLE_DIR/extensions" "$BUNDLE_DIR/systemd" "$BUNDLE_DIR/scripts" "$BUNDLE_DIR/bridge"
 
 echo "[bundle] 1. Building components via nix..."
 nix build .#ham-hub -o result-hub
@@ -39,6 +39,12 @@ chmod +x "$BUNDLE_DIR/bin/"*
 
 echo "[bundle] 3. Copying migrations & configs..."
 cp -r src/hub/repository/sqlite/migrations/* "$BUNDLE_DIR/share/migrations/"
+if [ -d "extensions" ]; then
+  echo "[bundle] 3.05 Copying bundled extensions..."
+  mkdir -p "$BUNDLE_DIR/share/extensions" "$BUNDLE_DIR/extensions"
+  cp -r extensions/* "$BUNDLE_DIR/share/extensions/"
+  cp -r extensions/* "$BUNDLE_DIR/extensions/"
+fi
 cp systemd/heimdall.service "$BUNDLE_DIR/systemd/heimdall.service"
 cp scripts/install-systemd-service.sh "$BUNDLE_DIR/scripts/install-systemd-service.sh"
 cp scripts/snapshot-hub.sh "$BUNDLE_DIR/scripts/snapshot-hub.sh"
@@ -139,8 +145,13 @@ else
   MIGRATIONS_DIR="$DATA_DIR/share/migrations"
 fi
 
-mkdir -p "$DATA_DIR" "$RUN_DIR" "$LOG_DIR"
+mkdir -p "$DATA_DIR" "$RUN_DIR" "$LOG_DIR" "$DATA_DIR/extensions"
 chmod 0700 "$DATA_DIR"
+if [ -d "$BUNDLE_DIR/share/extensions" ]; then
+  cp -rn "$BUNDLE_DIR/share/extensions/"* "$DATA_DIR/extensions/" 2>/dev/null || true
+elif [ -d "$BUNDLE_DIR/extensions" ]; then
+  cp -rn "$BUNDLE_DIR/extensions/"* "$DATA_DIR/extensions/" 2>/dev/null || true
+fi
 
 is_ancestor_or_self() {
   local target_pid="$1"
@@ -543,7 +554,8 @@ else
   echo "[bridge] Starting ham-bridge on 127.0.0.1:$BRIDGE_PORT..."
   export HEIMDALL_HAM_PTY_HOST_BIN="$BIN_DIR/ham-pty-host"
   export HEIMDALL_HAM_CTL_BIN="$BIN_DIR/ham-ctl"
-  nohup "$BIN_DIR/ham-bridge" --daemon-id brg_local --bind-host 127.0.0.1 --port "$BRIDGE_PORT" --local-endpoint-port "$BRIDGE_ENDPOINT_PORT" --hub http://127.0.0.1:49322 --local-run-dir "$BRIDGE_RUN_DIR" --bridge-token-file "$BRIDGE_TOKEN_FILE" >> "$BRIDGE_LOG" 2>&1 &
+  export HEIMDALL_BRIDGE_DATA_DIR="$DATA_DIR"
+  nohup "$BIN_DIR/ham-bridge" --daemon-id brg_local --bind-host 127.0.0.1 --port "$BRIDGE_PORT" --local-endpoint-port "$BRIDGE_ENDPOINT_PORT" --hub http://127.0.0.1:49322 --local-run-dir "$BRIDGE_RUN_DIR" --data-dir "$DATA_DIR" --bridge-token-file "$BRIDGE_TOKEN_FILE" >> "$BRIDGE_LOG" 2>&1 &
   PID=$!
   echo $PID > "$BRIDGE_PID_FILE"
   disown $PID 2>/dev/null || true

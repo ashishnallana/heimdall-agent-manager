@@ -1,5 +1,6 @@
 package main
 
+import "core:fmt"
 import "core:os"
 import "core:strings"
 import "core:sync"
@@ -28,7 +29,10 @@ test_bridge_telemetry_hydration :: proc(t: ^testing.T) {
 test_bridge_telemetry_conf_path :: proc(t: ^testing.T) {
 	p := bridge_telemetry_conf_path("brg/test:special@1")
 	defer delete(p)
-	testing.expect_value(t, p, "/tmp/heimdall-telegraf-brg_test_special@1.conf")
+	root := bridge_scratch_root(context.temp_allocator)
+	expected := fmt.aprintf("%s/heimdall-telegraf-brg_test_special@1.conf", root)
+	defer delete(expected)
+	testing.expect_value(t, p, expected)
 }
 
 @(test)
