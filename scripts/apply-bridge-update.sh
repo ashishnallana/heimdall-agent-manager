@@ -299,11 +299,14 @@ log "  SESSION:        ${HEIMDALL_UPDATE_SUPERVISOR_DETACHED:+detached }pgid $(p
 
 # Locate staged binaries
 STAGE_BIN=""
+STAGE_ROOT="$STAGE_DIR"
 if [ -d "$STAGE_DIR/bin" ]; then
   STAGE_BIN="$STAGE_DIR/bin"
 elif [ -d "$STAGE_DIR/extract/bin" ]; then
+  STAGE_ROOT="$STAGE_DIR/extract"
   STAGE_BIN="$STAGE_DIR/extract/bin"
 elif [ -d "$STAGE_DIR/heimdall-cloudtop/bin" ]; then
+  STAGE_ROOT="$STAGE_DIR/heimdall-cloudtop"
   STAGE_BIN="$STAGE_DIR/heimdall-cloudtop/bin"
 elif [ -f "$STAGE_DIR/ham-bridge" ]; then
   STAGE_BIN="$STAGE_DIR"
@@ -469,7 +472,14 @@ for candidate in "$STAGE_BIN/../share/heimdall/extensions" "$STAGE_BIN/../share/
   if [ -d "$candidate" ]; then EXTENSION_SOURCE="$candidate"; break; fi
 done
 if [ -n "$EXTENSION_SOURCE" ]; then
-  source "$(dirname "${BASH_SOURCE[0]}")/refresh-provider-extensions.sh"
+  # The Bridge copies only this supervisor into DATA_DIR/updates before launch.
+  # Load the matching helper from the resolved bundle, including wrapper layouts.
+  EXTENSION_HELPER="$STAGE_ROOT/scripts/refresh-provider-extensions.sh"
+  if [ ! -f "$EXTENSION_HELPER" ]; then
+    log_err "Update bundle is missing refresh-provider-extensions.sh"
+    exit 1
+  fi
+  source "$EXTENSION_HELPER"
   mkdir -p "$DATA_DIR"
   EXTENSION_TRANSACTION="$(mktemp -d "$DATA_DIR/.extensions-update.XXXXXX")"
   trap 'cleanup_provider_extension_transaction "$EXTENSION_TRANSACTION" "$DATA_DIR/extensions"' EXIT

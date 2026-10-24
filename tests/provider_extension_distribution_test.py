@@ -13,6 +13,7 @@ import sqlite3
 import subprocess
 import tarfile
 import tempfile
+import textwrap
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -162,6 +163,155 @@ class DistributionTests(unittest.TestCase):
         self.apply(stage, data, TEST_HTTP="503")
         self.assertEqual(json.loads((data / "extensions/codex/.codex-plugin/plugin.json").read_text())["version"], "0.1.0")
         self.assertTrue((data / "extensions/codex/stale-file").exists())
+
+    def test_relocated_supervisor_uses_staged_helper_on_old_install(self):
+        for layout in ("", "extract", "heimdall-cloudtop", "flat"):
+            with self.subTest(layout=layout):
+                base = self.root / (layout or "direct")
+                stage = base / "stage"
+                extracted = stage / layout if layout not in ("", "flat") else stage
+                self.extract(self.package(), extracted)
+                if layout == "flat":
+                    for binary in (extracted / "bin").iterdir():
+                        binary.rename(extracted / binary.name)
+                    (extracted / "bin").rmdir()
+                data = base / "data"
+                self.stale(data / "extensions")
+                # Flat layouts must not accidentally load a parent bundle's helper.
+                self.write(base / "scripts/refresh-provider-extensions.sh", "exit 92\n")
+                self.write(data / "bin/ham-bridge", "#!/bin/sh\necho old\n", executable=True)
+                # Match hub_runtime_client.odin: only the supervisor is copied.
+                supervisor = data / "updates/apply-bridge-update.sh"
+                supervisor.parent.mkdir(parents=True)
+                shutil.copy2(extracted / "scripts/apply-bridge-update.sh", supervisor)
+                # A leftover helper from an earlier install must not be sourced.
+                for has_stale_helper in (False, True):
+                    self.run_script(supervisor, "--data-dir", data, "--stage-dir", stage,
+                                    "--restart-hook", self.root / "hook", "--stop-hook", self.root / "hook",
+                                    "--health-timeout", "1")
+                    self.assert_refreshed(data / "extensions")
+                    self.assertFalse(stage.exists())
+                    if not has_stale_helper:
+                        # Rebuild the same layout for a second update.
+                        self.extract(self.package(), extracted)
+                        if layout == "flat":
+                            for binary in (extracted / "bin").iterdir():
+                                binary.rename(extracted / binary.name)
+                            (extracted / "bin").rmdir()
+                        self.write(supervisor.parent / "refresh-provider-extensions.sh", "exit 91\n")
+
+    def test_relocated_supervisor_missing_bundle_helper_fails_before_stop(self):
+        stage = self.root / "stage"
+        self.extract(self.package(), stage)
+        data = self.root / "data"
+        self.stale(data / "extensions")
+        supervisor = data / "updates/apply-bridge-update.sh"
+        supervisor.parent.mkdir(parents=True)
+        shutil.copy2(stage / "scripts/apply-bridge-update.sh", supervisor)
+        (stage / "scripts/refresh-provider-extensions.sh").unlink()
+        marker = self.root / "service-stopped"
+        self.write(self.root / "stop", "#!/bin/sh\ntouch " + shlex.quote(str(marker)) + "\n")
+        result = self.run_script(supervisor, "--data-dir", data, "--stage-dir", stage,
+                                 "--stop-hook", self.root / "stop", "--restart-hook", self.root / "hook",
+                                 success=False)
+        self.assertIn("missing refresh-provider-extensions.sh", result.stdout)
+        self.assertFalse(marker.exists())
+        self.assertTrue((data / "extensions/codex/stale-file").exists())
+
+    def git(self, *args):
+        result = subprocess.run(["git", "-C", str(self.repo), *map(str, args)],
+                                env=self.env, text=True, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout.strip()
+
+    def init_release_git(self):
+        self.git("init", "-b", "main")
+        self.git("config", "user.name", "Release Fixture")
+        self.git("config", "user.email", "fixture@example.invalid")
+        self.git("config", "commit.gpgsign", "false")
+        self.git("config", "core.hooksPath", "/dev/null")
+        self.git("add", ".")
+        self.git("commit", "-m", "fixture baseline")
+
+    def assert_git_release_source(self, version, committed=False):
+        # Nix local Git source uses indexed paths and working-tree contents.
+        # Committed prepare output must also survive a clean build checkout.
+        paths = (self.git("ls-tree", "-r", "--name-only", "HEAD") if committed
+                 else self.git("ls-files")).splitlines()
+        snapshot = self.root / "git-source"
+        if snapshot.exists():
+            shutil.rmtree(snapshot)
+        snapshot.mkdir()
+        for name in paths:
+            dest = snapshot / name
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            if committed:
+                dest.write_bytes(subprocess.check_output(
+                    ["git", "-C", str(self.repo), "show", "HEAD:" + name]))
+            else:
+                shutil.copy2(self.repo / name, dest)
+        registry = (snapshot / "src/hub/repository/sqlite/migrations.odin").read_text()
+        for name in re.findall(r'#load\("(migrations/[^\"]+\.sql)"', registry):
+            self.assertTrue((snapshot / "src/hub/repository/sqlite" / name).is_file(), name)
+        for manifest in MANIFESTS:
+            self.assertEqual(json.loads((snapshot / "extensions" / manifest).read_text())["version"], version)
+        market = json.loads((snapshot / "extensions/.claude-plugin/marketplace.json").read_text())
+        self.assertEqual(market["metadata"]["version"], version)
+        self.assertEqual(market["plugins"][0]["version"], version)
+        self.assertIn(version, (snapshot / "flake.nix").read_text())
+        generated = list((snapshot / "src/hub/repository/sqlite/migrations").glob("*_extension_version_sync_*.sql"))
+        self.assertTrue(any(version in path.read_text() for path in generated))
+
+    def test_release_prepare_commits_complete_version_source(self):
+        self.init_release_git()
+        # Execute the actual workflow prepare block against a local-only remote.
+        remote = self.root / "remote.git"
+        self.git("init", "--bare", remote)
+        self.git("remote", "add", "origin", remote)
+        workflow = (ROOT / ".github/workflows/release-local-binaries.yml").read_text()
+        body = re.search(r"        run: \|\n(.*?)\n  build:", workflow, re.S)[1]
+        prepare = self.root / "prepare.sh"
+        prepare.write_text(textwrap.dedent(body))
+        self.run_script(prepare, env={"REQUESTED_VERSION": self.next_version,
+                                    "GITHUB_REF_TYPE": "branch", "GITHUB_REF_NAME": "main",
+                                    "GITHUB_OUTPUT": str(self.root / "outputs")})
+        self.assertEqual(self.git("status", "--porcelain"), "")
+        self.assert_git_release_source(self.next_version, committed=True)
+        # Build jobs stamp metadata again; no new migration should appear.
+        self.run_script(self.repo / "scripts/release/bump-version.sh", self.next_version,
+                        "abcdef12", "2026-10-24T00:00:00Z")
+        self.assertEqual(self.git("ls-files", "--others", "--exclude-standard"), "")
+        self.assert_git_release_source(self.next_version)
+
+    def test_local_and_tag_build_bumps_include_generated_sql_in_git_source(self):
+        self.init_release_git()
+        self.write(self.repo / "unrelated-user-file", "do not stage\n")
+        for args, version in ((("--version-only",), self.next_version), ((), self.next_prerelease)):
+            with self.subTest(args=args):
+                self.run_script(self.repo / "scripts/release/bump-version.sh", *args, version)
+                self.assert_git_release_source(version)
+                self.assertEqual(self.git("diff", "--cached", "--name-only"), "")
+                self.assertEqual(self.git("ls-files", "--others", "--exclude-standard"), "unrelated-user-file")
+
+    @unittest.skipUnless(shutil.which("nix"), "Nix is required to inspect its actual Git source filter")
+    def test_nix_git_source_contains_generated_migration(self):
+        self.init_release_git()
+        self.run_script(self.repo / "scripts/release/bump-version.sh", self.next_version)
+        expression = ('let source = builtins.fetchGit { url = ' + json.dumps(str(self.repo)) + '; }; '
+                      'in builtins.readFile (source + "/src/hub/repository/sqlite/migrations.odin")')
+        result = subprocess.run(["nix", "eval", "--impure", "--raw", "--expr", expression],
+                                env=self.env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        generated = list((self.sql / "migrations").glob(f"{self.next_migration:03d}_extension_version_sync_*.sql"))
+        self.assertEqual(len(generated), 1)
+        self.assertIn(generated[0].name, result.stdout)
+        expression = ('let source = builtins.fetchGit { url = ' + json.dumps(str(self.repo)) + '; }; '
+                      'in builtins.readFile (source + ' + json.dumps("/" + str(generated[0].relative_to(self.repo))) + ')')
+        result = subprocess.run(["nix", "eval", "--impure", "--raw", "--expr", expression],
+                                env=self.env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, generated[0].read_text())
 
     def cloudtop(self):
         # Real bundle builder; replace only expensive external build tools.
