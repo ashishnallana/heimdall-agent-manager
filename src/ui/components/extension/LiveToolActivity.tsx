@@ -1,7 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useSelector } from 'react-redux';
 import { useToolActivityStream } from '../../api/useToolActivityStream';
-import { validInstanceId, type ToolActivityState, type ToolSummary } from '../../store/toolActivitySlice';
+import { validInstanceId, type LiveCall, type LiveCompletion, type ToolActivityState } from '../../store/toolActivitySlice';
 
 export const formatToolDuration = (ms: number) => {
   ms = Math.max(0, ms);
@@ -26,15 +26,180 @@ export function toolNameColor(name: string): string {
 }
 export type ToolMemberLabel = { instanceId: string; displayName: string };
 
-export default function LiveToolActivity({ instanceId, members, onOpenShell }: {
+type DisplayCall = { key: string; id: string; stream: string; name: string; call: LiveCall };
+const streamKey = (epoch: string, generation: number) => JSON.stringify([epoch, generation]);
+
+function useReducedMotion() {
+  const [reduced, setReduced] = useState(() => window.matchMedia?.('(prefers-reduced-motion: reduce)').matches || false);
+  useEffect(() => {
+    const media = window.matchMedia?.('(prefers-reduced-motion: reduce)');
+    if (!media) return;
+    const update = () => setReduced(media.matches);
+    update();
+    media.addEventListener('change', update);
+    return () => media.removeEventListener('change', update);
+  }, []);
+  return reduced;
+}
+
+// Only identities that were observed running may have an exit copy. Completion
+// batches are metadata for that copy, never a source of new display rows.
+function ToolRow({ item, active, completion, now, reduced, remove, onOpenShell }: {
+  item: DisplayCall; active: boolean; completion?: LiveCompletion; now: number;
+  reduced: boolean; remove: (key: string) => void; onOpenShell: (id: string) => void;
+}) {
+  const outer = useRef<HTMLDivElement>(null);
+  const inner = useRef<HTMLDivElement>(null);
+  // React owns only the initial dimensions. Effects retarget subsequent motion;
+  // changing the OS preference must not reset an already-visible row to zero.
+  const initialStyle = useRef({ height: reduced ? 'auto' : '0px', opacity: reduced ? 1 : 0 });
+  const duration = useRef(0);
+  if (active) duration.current = Math.max(0, now - item.call.started_at_ms);
+  const [moving, setMoving] = useState(!reduced);
+  useLayoutEffect(() => {
+    const node = outer.current!, content = inner.current!;
+    let frame = 0, timer = 0, cancelled = false;
+    const finish = () => {
+      if (cancelled) return;
+      window.clearTimeout(timer);
+      setMoving(false);
+      if (active) node.style.height = 'auto';
+      else remove(item.key);
+    };
+    if (reduced) {
+      node.style.height = active ? 'auto' : '0px';
+      node.style.opacity = active ? '1' : '0';
+      finish();
+      return;
+    }
+    // Retarget from the current interpolated height when an exit is reversed.
+    node.style.height = node.getBoundingClientRect().height + 'px';
+    void node.offsetHeight;
+    setMoving(true);
+    frame = requestAnimationFrame(() => {
+      if (cancelled) return;
+      node.style.height = (active ? content.getBoundingClientRect().height : 0) + 'px';
+      node.style.opacity = active ? '1' : '0';
+      timer = window.setTimeout(finish, 220);
+    });
+    const ended = (event: TransitionEvent) => {
+      if (event.target === node && event.propertyName === 'height') finish();
+    };
+    node.addEventListener('transitionend', ended);
+    return () => {
+      cancelled = true;
+      cancelAnimationFrame(frame);
+      window.clearTimeout(timer);
+      node.removeEventListener('transitionend', ended);
+    };
+  }, [active, reduced, item.key, remove]);
+
+  const call = item.call;
+  const status = active ? 'Running' : completion?.status || 'Finished';
+  const success = ['completed', 'success', 'succeeded', 'exited'].includes(status);
+  const failure = ['failed', 'error', 'failure', 'killed'].includes(status);
+  const label = active ? 'Running' : success ? 'Succeeded' : failure ? 'Failed' : 'Finished';
+  const content = <>
+    <span role="img" aria-label={label} title={label} className={
+      'h-1.5 w-1.5 shrink-0 rounded-full ' + (active
+        ? (reduced ? '' : 'animate-pulse motion-reduce:animate-none ') + 'bg-accent'
+        : success ? 'bg-green-500' : failure ? 'bg-red-500' : 'bg-muted')} />
+    <span className={'max-w-[22%] shrink-0 truncate font-medium ' + toolNameColor(call.tool_name)}
+      title={call.tool_name}>{call.tool_name || 'Tool'}</span>
+    <span data-debug-id="live-tools-summary" className="min-w-0 flex-1 truncate text-muted"
+      title={call.summary + (call.summary_truncated ? '…' : '')}>
+      {call.summary}{call.summary_truncated ? '…' : ''}
+    </span>
+    <span data-debug-id="live-tools-duration" className="shrink-0 tabular-nums text-faint">
+      {formatToolDuration(active ? duration.current : completion?.duration_ms ?? duration.current)}
+    </span>
+    <span data-debug-id="live-tools-agent" title={item.name + ' · ' + item.id}
+      className="ml-auto max-w-[25%] shrink-0 truncate rounded bg-neutral-soft px-1.5 py-0.5 text-faint">{item.name}</span>
+  </>;
+  const className = 'flex w-full min-w-0 max-w-full flex-nowrap items-center whitespace-nowrap gap-2 overflow-hidden text-left text-xs';
+  const shell = active && call.source === 'shell' ? call.shell_session_id : '';
+  return <div ref={outer} data-tool-motion={moving ? 'true' : undefined} data-tool-key={item.key}
+    data-tool-phase={active ? 'active' : 'exiting'} aria-hidden={!active && !completion ? true : undefined}
+    className="min-w-0 overflow-hidden" style={{ ...initialStyle.current,
+      transition: reduced ? 'none' : 'height 200ms ease-out, opacity 120ms ease-out' }}>
+    <div ref={inner} style={{ paddingTop: 6 }}>
+      {shell ? <button type="button" className={className} data-debug-id={'live-tools-shell-' + shell}
+        aria-label={'Open shell: ' + call.summary} onClick={() => { if (active) onOpenShell(shell); }}>{content}</button>
+        : <div data-debug-id="live-tools-row" className={className}>{content}</div>}
+    </div>
+  </div>;
+}
+
+// Keep the inter-message gap independent of row order. Moving it from one row
+// to the next when the first call finishes would otherwise add a layout jump.
+function TailGap({ active, reduced }: { active: boolean; reduced: boolean }) {
+  const [expanded, setExpanded] = useState(false);
+  useLayoutEffect(() => {
+    if (reduced || !active) { setExpanded(active); return; }
+    const frame = requestAnimationFrame(() => setExpanded(true));
+    return () => cancelAnimationFrame(frame);
+  }, [active, reduced]);
+  return <div aria-hidden="true" style={{ height: (reduced ? active : expanded)
+    ? 'max(0px, calc(var(--live-tools-tail-gap, 6px) - 6px))' : 0,
+    transition: reduced ? 'none' : 'height 200ms ease-out' }} />;
+}
+
+export default function LiveToolActivity(props: {
   instanceId: string; members?: ToolMemberLabel[]; onOpenShell: (sessionId: string) => void;
 }) {
-  const roster = (members || [{ instanceId, displayName: '' }]).filter((m) => validInstanceId(m.instanceId));
-  const ids = [...new Set(roster.map((member) => member.instanceId))].sort();
+  const auth = useSelector((state: any) => JSON.stringify([
+    state.chat?.session?.userId, state.chat?.session?.daemonUrl, state.chat?.session?.clientToken,
+  ]));
+  const roster = (props.members || [{ instanceId: props.instanceId, displayName: '' }])
+    .filter((member) => validInstanceId(member.instanceId));
+  const idsKey = JSON.stringify([...new Set(roster.map((member) => member.instanceId))].sort());
+  // Remount retained visuals on conversation/roster/auth changes, before paint.
+  return <ToolRows key={JSON.stringify([props.instanceId, idsKey, auth])} {...props} roster={roster} idsKey={idsKey} />;
+}
+
+function ToolRows({ roster, idsKey, onOpenShell }: {
+  roster: ToolMemberLabel[]; idsKey: string; onOpenShell: (sessionId: string) => void;
+}) {
+  const ids: string[] = useMemo(() => JSON.parse(idsKey), [idsKey]);
   useToolActivityStream(ids);
+  // The shared stream clears the old user's store during its subscription
+  // effect. Until that has run, never seed a new view from the previous store.
+  const [subscribed, setSubscribed] = useState(false);
+  useEffect(() => setSubscribed(true), []);
   const live = useSelector((state: any) => (state.toolActivity as ToolActivityState)?.members);
-  const capacityExceeded = useSelector((state: any) => Boolean(state.toolActivity?.capacityExceeded));
-  const hasActive = ids.some((id) => Boolean(live?.[id]?.snapshot?.active.length));
+  const capacity = useSelector((state: any) => Boolean(state.toolActivity?.capacityExceeded));
+  const reduced = useReducedMotion();
+  const desired = new Map<string, DisplayCall>();
+  for (const id of ids) {
+    const member = live?.[id], snapshot = member?.snapshot;
+    if (!subscribed || capacity || member?.availability !== 'ready' || !snapshot) continue;
+    const stream = streamKey(snapshot.epoch, snapshot.generation);
+    for (const call of snapshot.active) {
+      const key = JSON.stringify([id, stream, call.source, call.call_id]);
+      desired.set(key, { key, id, stream, call,
+        name: snapshot.display_name || roster.find((member) => member.instanceId === id)?.displayName || 'Agent' });
+    }
+  }
+  const [retained, setRetained] = useState<DisplayCall[]>(() => [...desired.values()]);
+  const valid = (item: DisplayCall) => {
+    const member = live?.[item.id];
+    return member?.availability === 'unavailable' || capacity || Boolean(member?.snapshot &&
+      streamKey(member.snapshot.epoch, member.snapshot.generation) === item.stream);
+  };
+  // Reconcile during render so a removed shell link cannot survive until an effect.
+  const [previous, setPrevious] = useState(live);
+  const [previousCapacity, setPreviousCapacity] = useState(capacity);
+  const [previousSubscribed, setPreviousSubscribed] = useState(subscribed);
+  if (previous !== live || previousCapacity !== capacity || previousSubscribed !== subscribed) {
+    setPrevious(live); setPreviousCapacity(capacity);
+    setPreviousSubscribed(subscribed);
+    setRetained((rows) => [
+      ...rows.filter(valid).map((item) => desired.get(item.key) || item),
+      ...[...desired.values()].filter((item) => !rows.some((old) => old.key === item.key)),
+    ]);
+  }
+  const remove = useMemo(() => (key: string) => setRetained((rows) => rows.filter((item) => item.key !== key)), []);
+  const hasActive = desired.size > 0;
   const [now, setNow] = useState(Date.now);
   useEffect(() => {
     if (!hasActive) return;
@@ -42,54 +207,16 @@ export default function LiveToolActivity({ instanceId, members, onOpenShell }: {
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
   }, [hasActive]);
-
-  const row = (id: string, call: ToolSummary, active: boolean, duration: number, shell = '') => {
-    const snapshot = live?.[id]?.snapshot;
-    const name = snapshot?.display_name || roster.find((m) => m.instanceId === id)?.displayName || 'Agent';
-    const content = <>
-      <span aria-label={active ? 'Running' : 'Finished'} className={
-        'h-1.5 w-1.5 shrink-0 rounded-full ' + (active ? 'animate-pulse bg-accent' : 'bg-muted')} />
-      <span className={'max-w-[22%] shrink-0 truncate font-medium ' + toolNameColor(call.tool_name)}
-        title={call.tool_name}>{call.tool_name || 'Tool'}</span>
-      <span data-debug-id="live-tools-summary" className="min-w-0 flex-1 truncate text-muted"
-        title={call.summary + (call.summary_truncated ? '…' : '')}>
-        {call.summary}{call.summary_truncated ? '…' : ''}
-      </span>
-      <span data-debug-id="live-tools-duration" className="shrink-0 tabular-nums text-faint">
-        {formatToolDuration(duration)}
-      </span>
-      <span data-debug-id="live-tools-agent" title={name + ' · ' + id}
-        className="ml-auto max-w-[25%] shrink-0 truncate rounded bg-neutral-soft px-1.5 py-0.5 text-faint">{name}</span>
-    </>;
-    const className = 'flex w-full min-w-0 max-w-full flex-nowrap items-center whitespace-nowrap gap-2 overflow-hidden text-left text-xs';
-    return shell
-      ? <button key={id + ':active:' + call.call_id} type="button" className={className}
-          data-debug-id={'live-tools-shell-' + shell} aria-label={'Open shell: ' + call.summary}
-          onClick={() => onOpenShell(shell)}>{content}</button>
-      : <div key={id + ':' + (active ? 'active:' : 'finished:') + call.call_id}
-          data-debug-id="live-tools-row" className={className}>{content}</div>;
-  };
-
-  const rows = ids.flatMap((id) => {
-    const member = live?.[id];
-    if (member?.availability === 'unavailable') return [
-      <div key={id + ':unavailable'} role="status" className="flex min-w-0 items-center gap-2 text-xs text-muted">
-        <span aria-label="Unknown" className="h-1.5 w-1.5 shrink-0 rounded-full bg-muted" />
-        <span className="min-w-0 flex-1 truncate">Tools unavailable</span>
-        <span data-debug-id="live-tools-agent" className="ml-auto max-w-[25%] shrink-0 truncate rounded bg-neutral-soft px-1.5 py-0.5 text-faint">
-          {roster.find((m) => m.instanceId === id)?.displayName || 'Agent'}
-        </span>
-      </div>,
-    ];
-    const snapshot = member?.snapshot;
-    if (!snapshot) return [];
-    return [
-      ...snapshot.active.map((call) => row(id, call, true, Math.max(0, now - call.started_at_ms),
-        call.source === 'shell' ? call.shell_session_id : '')),
-      ...snapshot.completed_since_last.map((call) => row(id, call, false, call.duration_ms)),
-    ];
-  });
-  if (capacityExceeded) return <div role="status" className="text-xs text-muted">Tools unavailable: too many agents</div>;
-  return rows.length ? <div data-debug-id="live-tool-activity" aria-label="Tool activity"
-    className="min-w-0 max-w-full space-y-1.5">{rows}</div> : null;
+  const rows = retained.filter(valid);
+  if (!rows.length) return null;
+  return <div data-debug-id="live-tool-activity" aria-label="Tool activity" className="!mt-0 min-w-0 max-w-full">
+    <TailGap active={hasActive} reduced={reduced} />
+    {rows.map((old) => {
+      const item = desired.get(old.key) || old;
+      const completion = !desired.has(old.key) ? live?.[old.id]?.snapshot?.completed_since_last.find(
+        (call) => call.source === old.call.source && call.call_id === old.call.call_id) : undefined;
+      return <ToolRow key={item.key} item={item} active={desired.has(item.key)} completion={completion}
+        reduced={reduced} now={now} remove={remove} onOpenShell={onOpenShell} />;
+    })}
+  </div>;
 }

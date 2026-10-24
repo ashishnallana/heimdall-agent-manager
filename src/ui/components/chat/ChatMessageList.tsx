@@ -187,6 +187,8 @@ export default function ChatMessageList({
   const activeKey = isUnlocked ? installedKey : null;
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
+  const bottomAnchorRef = useRef<HTMLDivElement | null>(null);
+  const pendingBottomFrameRef = useRef(0);
   const revision = useSyncExternalStore(subscribeConversationOptions, () => conversationOptionsRevision(conversationKey), () => 0);
   const stickyRef = useRef(true);
   const lastCountRef = useRef(0);
@@ -213,8 +215,9 @@ export default function ChatMessageList({
   const scrollToBottom = useCallback((behavior: ScrollBehavior = 'auto') => {
     const node = scrollRef.current;
     if (!node) return;
-    node.scrollTo({ top: node.scrollHeight, behavior });
+    node.scrollTo({ top: node.scrollHeight, behavior: prefersReducedMotion() ? 'auto' : behavior });
     stickyRef.current = true;
+    if (bottomAnchorRef.current) bottomAnchorRef.current.style.overflowAnchor = 'auto';
     setShowJump(false);
   }, []);
 
@@ -233,6 +236,7 @@ export default function ChatMessageList({
       lastConversationRef.current = conversationKey;
       lastCountRef.current = 0;
       stickyRef.current = true;
+      if (bottomAnchorRef.current) bottomAnchorRef.current.style.overflowAnchor = 'auto';
       didInitialScrollRef.current = false;
       setShowJump(false);
     }
@@ -266,11 +270,14 @@ export default function ChatMessageList({
         // is already near the bottom (stickyRef).
         const ownSend = messages[count - 1]?.isUser === true;
         if (ownSend || SCROLL_TO_BOTTOM_ON_INBOUND || stickyRef.current) {
-          requestAnimationFrame(() => scrollToBottom('smooth'));
+          cancelAnimationFrame(pendingBottomFrameRef.current);
+          pendingBottomFrameRef.current = requestAnimationFrame(() => scrollToBottom('smooth'));
         }
       }
     }
   }, [conversationKey, messages, scrollToBottom]);
+
+  useLayoutEffect(() => () => cancelAnimationFrame(pendingBottomFrameRef.current), [conversationKey]);
 
   // Reset the scroll-to-match bookkeeping whenever the target id changes, so a new
   // search result re-runs the hunt (and re-announces) rather than being suppressed by
@@ -298,19 +305,20 @@ export default function ChatMessageList({
     const el = node.querySelector<HTMLElement>(`[data-debug-id="${debugPrefix}-message-${focusMessageId}"]`);
     if (el) {
       focusedRef.current = focusMessageId;
-      requestAnimationFrame(() => {
+      const frame = requestAnimationFrame(() => {
         el.scrollIntoView({ block: 'center', behavior: reduceMotion ? 'auto' : 'smooth' });
         // Move keyboard/AT focus to the matched message (non-tab-stop) so keyboard and
         // screen-reader users land on it; preventScroll keeps scrollIntoView in charge.
         el.tabIndex = -1;
         el.focus({ preventScroll: true });
         stickyRef.current = false; // we intentionally moved off the bottom
+        if (bottomAnchorRef.current) bottomAnchorRef.current.style.overflowAnchor = 'none';
         setShowJump(true);
       });
       setHighlightId(focusMessageId);
       setFocusAnnouncement('Jumped to the matching message.');
       const timer = window.setTimeout(() => setHighlightId((cur) => (cur === focusMessageId ? null : cur)), HIGHLIGHT_MS);
-      return () => window.clearTimeout(timer);
+      return () => { cancelAnimationFrame(frame); window.clearTimeout(timer); };
     }
 
     // Not loaded yet: walk older pages until the row appears or we exhaust/limit.
@@ -355,8 +363,23 @@ export default function ChatMessageList({
   useEffect(() => {
     const content = contentRef.current;
     if (!content || typeof ResizeObserver === 'undefined') return;
+    let overflowBootstrapped = false;
     const observer = new ResizeObserver(() => {
-      if (stickyRef.current) scrollToBottom('auto');
+      // Keep prepend compensation based on the latest tail height, including
+      // changes while the reader is stationary in history.
+      prevScrollHeightRef.current = scrollRef.current?.scrollHeight ?? 0;
+      // Native anchoring follows the tail during CSS height interpolation. Avoid
+      // forcing scrollTop on every ResizeObserver delivery / animation frame.
+      if (!stickyRef.current) return;
+      const moving = Boolean(content.querySelector('[data-tool-motion="true"]'));
+      const node = scrollRef.current;
+      if (!moving || (node && node.scrollHeight <= node.clientHeight)) overflowBootstrapped = false;
+      // A previously non-scrollable thread has no selected native anchor. Seed
+      // it once when the first overflow appears; subsequent frames use native
+      // anchoring (scrollTop is then positive), including the rest of this entry.
+      const firstOverflow = !overflowBootstrapped && node && node.scrollTop === 0 && node.scrollHeight > node.clientHeight;
+      if (moving && firstOverflow) overflowBootstrapped = true;
+      if (!moving || firstOverflow) scrollToBottom('auto');
     });
     observer.observe(content);
     return () => observer.disconnect();
@@ -368,18 +391,37 @@ export default function ChatMessageList({
     if (!node) return;
     prevScrollHeightRef.current = node.scrollHeight;
     const distance = node.scrollHeight - node.scrollTop - node.clientHeight;
-    const nearBottom = distance < 64;
+    const moving = Boolean(contentRef.current?.querySelector('[data-tool-motion="true"]'));
+    // Native anchor scrolls must not disable follow as the tail is interpolating.
+    if (moving && stickyRef.current) return;
+    const nearBottom = distance < (moving ? 1 : 64);
     stickyRef.current = nearBottom;
+    if (bottomAnchorRef.current) bottomAnchorRef.current.style.overflowAnchor = nearBottom ? 'auto' : 'none';
     setShowJump(!nearBottom && messages.length > 0);
   }, [messages.length, onScrollProp]);
+
+  const cancelTailFollow = () => {
+    cancelAnimationFrame(pendingBottomFrameRef.current);
+    stickyRef.current = false;
+    if (bottomAnchorRef.current) bottomAnchorRef.current.style.overflowAnchor = 'none';
+  };
 
   return (
     <div className={wrapperClassName}>
       {/* Polite live region for scroll-to-match: announces the jump / paging / not-found
           to screen readers without stealing focus or blocking. */}
       <div data-debug-id={`${debugPrefix}-focus-status`} role="status" aria-live="polite" className="sr-only">{focusAnnouncement}</div>
-      <div ref={scrollRef} data-debug-id={`${debugPrefix}-scroll`} onScroll={onScroll} className={`${scrollClassName} [overflow-anchor:none]`}>
-        <div ref={contentRef} data-debug-id={`${debugPrefix}-messages-container`} className="mx-auto w-full max-w-4xl space-y-3 sm:space-y-4">
+      <div ref={scrollRef} data-debug-id={`${debugPrefix}-scroll`} onScroll={onScroll}
+        onWheel={(event) => { if (event.deltaY < 0) cancelTailFollow(); }} onTouchMove={cancelTailFollow}
+        onPointerDown={(event) => { if (event.target === event.currentTarget) cancelTailFollow(); }}
+        onKeyDown={(event) => {
+          if (event.defaultPrevented || (event.target as HTMLElement).closest('input, textarea, select, [contenteditable="true"]')) return;
+          if (['ArrowUp', 'PageUp', 'Home'].includes(event.key) || (event.key === ' ' && event.shiftKey)) cancelTailFollow();
+        }}
+        className={scrollClassName} style={{ overflowAnchor: 'auto' }}>
+        <div ref={contentRef} data-debug-id={`${debugPrefix}-messages-container`}
+          className="mx-auto w-full max-w-4xl space-y-3 sm:space-y-4 [--live-tools-tail-gap:12px] sm:[--live-tools-tail-gap:16px]"
+          style={{ overflowAnchor: 'none' }}>
           {hasMore ? (
             <div
               ref={topSentinelRef}
@@ -471,8 +513,10 @@ export default function ChatMessageList({
           {children}
         </div>
         {bottomInset > 0 ? (
-          <div data-debug-id={`${debugPrefix}-bottom-inset`} aria-hidden="true" className="!mt-0 shrink-0" style={{ height: bottomInset }} />
+          <div data-debug-id={`${debugPrefix}-bottom-inset`} aria-hidden="true" className="!mt-0 shrink-0" style={{ height: bottomInset, overflowAnchor: 'none' }} />
         ) : null}
+        <div ref={bottomAnchorRef} data-debug-id={`${debugPrefix}-bottom-anchor`} aria-hidden="true"
+          className="!mt-0" style={{ height: 1, overflowAnchor: 'auto' }} />
       </div>
       {showJump ? (
         <button
