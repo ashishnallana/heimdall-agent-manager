@@ -1,6 +1,6 @@
 # Native release fixture procedure
 
-Use only a disposable scratch home/workspace and synthetic prompts. The collector omits prompt/transcript text, writes private files, and caps each callback at 1 MiB and its log at 16 MiB. Raw captures remain outside git. The committed corpus replaces native IDs consistently and uses `/workspace` paths; encrypted child instructions are redacted.
+Use only a disposable scratch home/workspace and synthetic prompts. The collector omits prompt/transcript text, writes private files, and caps each callback at 16 MiB and its log at 16 MiB. Raw captures remain outside git. The committed corpus replaces native IDs consistently and uses `/workspace` paths; encrypted child instructions are redacted.
 
 ```sh
 python3 extensions/codex/fixtures/prepare.py init "$HOME/.cache/heimdall-codex-fixtures-new"
@@ -38,3 +38,5 @@ python3 extensions/codex/fixtures/prepare.py cleanup "$HOME/.cache/heimdall-code
 ```
 
 This removes the temporary auth copy and verifies the original store checksums. Sanitize and review any additional fixture before copying it into git. Never represent local native-to-bridge and separate hub ingestion tests as a continuous deployed full-stack E2E.
+
+Image success/failure callback evidence and the bounded completion fix are documented in [IMAGE_EVIDENCE.md](IMAGE_EVIDENCE.md).

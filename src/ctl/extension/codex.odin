@@ -13,7 +13,9 @@ import contracts "odin_test:contracts"
 
 CODEX_PROVIDER :: "codex"
 CODEX_EXT_VERSION :: "0.1.0"
-CODEX_HOOK_INPUT_MAX :: 1024 * 1024
+// Native view_image PostToolUse includes a base64 image, often several MiB.
+// Match the bounded CLI stdin reader; output remains capped independently below.
+CODEX_HOOK_INPUT_MAX :: HOOK_INPUT_MAX
 CODEX_CAPABILITIES :: [?]string{"activity", "subagents", "permissions", "file_edits", "session_id"}
 
 Codex_Error :: enum { None, Too_Large, Malformed_Json }
@@ -73,7 +75,11 @@ codex_map_hook :: proc(raw, ts: string, permission_timeout_ms := 0, permission_b
 		// Never forward prompts or encrypted child instructions.
 		tool_input = json_clip(root["tool_input"], 4096, {"message", "prompt"})
 		if name == "PostToolUse" {
-			tool_response = json_clip(root["tool_response"], 4096)
+			// Image bytes are not activity metadata. Do not clone, clip, or forward
+			// the native data URL; the paired tool identity is sufficient.
+			if json_get_string(root, "tool_name") != "view_image" {
+				tool_response = json_clip(root["tool_response"], 4096)
+			}
 			pb_str(&p, "status", "completed")
 			pb_str(&p, "outcome", "unknown")
 		}
@@ -91,7 +97,10 @@ codex_map_hook :: proc(raw, ts: string, permission_timeout_ms := 0, permission_b
 		return out, .None
 	}
 	eb := ext_event_begin(event, ts, root, CODEX_PROVIDER, CODEX_EXT_VERSION)
-	if tool_input != nil || tool_response != nil do ext_event_tool(&eb, root, tool_input, tool_response)
+	if name == "PreToolUse" || name == "PostToolUse" || name == "PermissionRequest" {
+		// Identity must survive even when no input/response metadata is retained.
+		ext_event_tool(&eb, root, tool_input, tool_response)
+	}
 	append(&out.events, ext_event_end(&eb, pb_done(&p)))
 	if name == "PostToolUse" && json_get_string(root, "tool_name") == "apply_patch" {
 		for edit in codex_patch_events(root, ts) do append(&out.events, edit)

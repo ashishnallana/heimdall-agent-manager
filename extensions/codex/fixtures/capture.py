@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 import sys
 
-MAX_INPUT = 1024 * 1024
+MAX_INPUT = 16 * 1024 * 1024
 MAX_CAPTURE = 16 * 1024 * 1024
 
 def main():

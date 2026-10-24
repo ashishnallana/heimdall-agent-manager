@@ -1,0 +1,121 @@
+[
+  {
+    "session_id": "image-session",
+    "turn_id": "image-turn-1",
+    "cwd": "/workspace",
+    "hook_event_name": "PreToolUse",
+    "model": "gpt-6.1-sol",
+    "permission_mode": "default",
+    "tool_name": "view_image",
+    "tool_input": {
+      "path": "/workspace/tiny.png"
+    },
+    "tool_use_id": "exec-image-1"
+  },
+  {
+    "session_id": "image-session",
+    "turn_id": "image-turn-1",
+    "cwd": "/workspace",
+    "hook_event_name": "PreToolUse",
+    "model": "gpt-6.1-sol",
+    "permission_mode": "default",
+    "tool_name": "view_image",
+    "tool_input": {
+      "path": "/workspace/missing.png"
+    },
+    "tool_use_id": "exec-image-2"
+  },
+  {
+    "session_id": "image-session",
+    "turn_id": "image-turn-1",
+    "cwd": "/workspace",
+    "hook_event_name": "Stop",
+    "model": "gpt-6.1-sol",
+    "permission_mode": "default",
+    "stop_hook_active": false
+  },
+  {
+    "session_id": "image-session",
+    "turn_id": "image-turn-2",
+    "cwd": "/workspace",
+    "hook_event_name": "PreToolUse",
+    "model": "gpt-6.1-sol",
+    "permission_mode": "default",
+    "tool_name": "view_image",
+    "tool_input": {
+      "path": "/workspace/valid.png"
+    },
+    "tool_use_id": "exec-image-3"
+  },
+  {
+    "session_id": "image-session",
+    "turn_id": "image-turn-2",
+    "cwd": "/workspace",
+    "hook_event_name": "PostToolUse",
+    "model": "gpt-6.1-sol",
+    "permission_mode": "default",
+    "tool_name": "view_image",
+    "tool_input": {
+      "path": "/workspace/valid.png"
+    },
+    "tool_response": [
+      {
+        "type": "input_image",
+        "image_url": "data:application/octet-stream;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAF0lEQVR4nGP4z8BAEiJN9aiGUQ1DSgMAkPn/Afnh+ngAAAAASUVORK5CYII=",
+        "detail": "high"
+      }
+    ],
+    "tool_use_id": "exec-image-3"
+  },
+  {
+    "session_id": "image-session",
+    "turn_id": "image-turn-2",
+    "cwd": "/workspace",
+    "hook_event_name": "Stop",
+    "model": "gpt-6.1-sol",
+    "permission_mode": "default",
+    "stop_hook_active": false
+  },
+  {
+    "session_id": "image-session",
+    "turn_id": "image-turn-3",
+    "cwd": "/workspace",
+    "hook_event_name": "PreToolUse",
+    "model": "gpt-6.1-sol",
+    "permission_mode": "default",
+    "tool_name": "view_image",
+    "tool_input": {
+      "path": "/workspace/large.png"
+    },
+    "tool_use_id": "exec-image-4"
+  },
+  {
+    "session_id": "image-session",
+    "turn_id": "image-turn-3",
+    "cwd": "/workspace",
+    "hook_event_name": "PostToolUse",
+    "model": "gpt-6.1-sol",
+    "permission_mode": "default",
+    "tool_name": "view_image",
+    "tool_input": {
+      "path": "/workspace/large.png"
+    },
+    "tool_response": [
+      {
+        "type": "input_image",
+        "image_url": "data:application/octet-stream;base64,[large synthetic image omitted]",
+        "detail": "high"
+      }
+    ],
+    "tool_use_id": "exec-image-4"
+  },
+  {
+    "session_id": "image-session",
+    "turn_id": "image-turn-3",
+    "cwd": "/workspace",
+    "hook_event_name": "Stop",
+    "model": "gpt-6.1-sol",
+    "permission_mode": "default",
+    "stop_hook_active": false
+  }
+]

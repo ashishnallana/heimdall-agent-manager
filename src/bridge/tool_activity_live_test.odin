@@ -9,6 +9,7 @@ import "core:sync"
 import "core:testing"
 import "core:time"
 import contracts "odin_test:contracts"
+import ext "odin_test:ctl/extension"
 import live "odin_test:lib/tool_live"
 import ws "odin_test:lib/ws"
 
@@ -242,4 +243,75 @@ test_tool_stream_bridge_active_freshness_deadlines :: proc(t: ^testing.T) {
     testing.expect_value(t,bridge_tool_wire_seq,stopped_seq)
     _,_,got=ws.read_frame(peer,&reader,10*time.Millisecond)
     testing.expect(t,!got,"last detach stops refresh")
+}
+
+@(test)
+test_codex_large_image_completion_reaches_live_inventory :: proc(t: ^testing.T) {
+    sync.mutex_lock(&live_bridge_test_mu); defer sync.mutex_unlock(&live_bridge_test_mu)
+    context.allocator = context.temp_allocator
+    defer free_all(context.temp_allocator)
+    bridge_tool_live_init(); defer live_bridge_cleanup()
+    bridge_tool_tracker.demand_driven = false
+    id := "inst_live_codex_images"
+    other := "inst_live_codex_images_other"
+    bridge_runtime_mark_start_success(id)
+    bridge_runtime_mark_start_success(other)
+    value, _ := json.parse_string(#load("../ctl/extension/testdata/codex/image_callbacks.json", string), .JSON, true)
+    rows := value.(json.Array)
+    start, end: json.Object
+    for row in rows {
+        root := row.(json.Object)
+        if live.tool_live_text(root, "tool_use_id") != "exec-image-4" do continue
+        if live.tool_live_text(root, "hook_event_name") == "PreToolUse" do start = root
+        if live.tool_live_text(root, "hook_event_name") == "PostToolUse" do end = root
+    }
+    testing.expect(t, start != nil && end != nil)
+    if start == nil || end == nil do return
+    response := end["tool_response"].(json.Array)
+    image := response[0].(json.Object)
+    image["image_url"] = json.String(strings.repeat("A", 2_400_000))
+    now := bridge_now_unix_ms()+1000
+    for target, i in ([]string{id, id, other}) {
+        if i == 1 do start["agent_id"] = json.String("nested-child")
+        else do delete_key(&start, "agent_id")
+        raw, _ := json.marshal(start)
+        mapped, err := ext.codex_map_hook(string(raw), action_scheduler_format_rfc3339_utc(now))
+        testing.expect_value(t, err, ext.Codex_Error.None)
+        res := bridge_ext_ingest(Bridge_Local_Agent_Token_Record{agent_instance_id=target, role=.Agent},
+            ext.event_params(mapped.events[:]), bridge_runtime_now_ms())
+        testing.expect_value(t, res.accepted, 1)
+        bridge_ext_ingest_result_destroy(&res)
+    }
+    testing.expect_value(t, len(bridge_tool_tracker.tool_live.entries[id].active), 2)
+    raw, _ := json.marshal(end)
+    mapped, err := ext.codex_map_hook(string(raw), action_scheduler_format_rfc3339_utc(now+1000))
+    testing.expect_value(t, err, ext.Codex_Error.None)
+    testing.expect_value(t, len(mapped.events), 1)
+    if len(mapped.events) != 1 do return
+    for _ in 0..<2 {
+        res := bridge_ext_ingest(Bridge_Local_Agent_Token_Record{agent_instance_id=id, role=.Agent},
+            ext.event_params(mapped.events[:]), bridge_runtime_now_ms())
+        testing.expect_value(t, res.accepted, 1)
+        bridge_ext_ingest_result_destroy(&res)
+    }
+    entry := bridge_tool_tracker.tool_live.entries[id]
+    testing.expect_value(t, len(entry.active), 1)
+    if len(entry.active) == 1 do testing.expect_value(t, entry.active[0].agent_id, "nested-child")
+    testing.expect_value(t, len(bridge_tool_tracker.tool_live.entries[other].active), 1)
+    testing.expect_value(t, len(entry.completed), 1)
+    if len(entry.completed) == 1 {
+        testing.expect_value(t, entry.completed[0].status, "completed")
+        testing.expect_value(t, entry.completed[0].duration_ms, 1000)
+    }
+    inst, _ := bridge_tool_live_instance(nil,id)
+    baseline := live.tool_live_snapshot(&bridge_tool_tracker, inst, baseline=true)
+    testing.expect(t, strings.contains(baseline, `"completed_since_last":[]`))
+    testing.expect(t, !strings.contains(baseline, "image_url"))
+    delete(baseline)
+    bridge_tool_live_clear(id)
+    ev, parse_err := contracts.ext_parse_event(mapped.events[0])
+    testing.expect_value(t, parse_err, contracts.Ext_Error.None)
+    bridge_tool_live_event(Bridge_Local_Agent_Token_Record{agent_instance_id=id, role=.Agent}, ev, mapped.events[0])
+    testing.expect_value(t, len(entry.active), 0)
+    testing.expect_value(t, len(entry.completed), 0)
 }
