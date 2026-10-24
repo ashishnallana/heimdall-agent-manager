@@ -238,3 +238,49 @@ test_provider_extension_probe_runs_antigravity_argv :: proc(t: ^testing.T) {
 	testing.expect_value(t, version, "0.1.0")
 }
 
+
+@(test)
+test_antigravity_imported_manifest_and_disabled_config :: proc(t: ^testing.T) {
+	path := provider_extension_test_fixture(t, `{"version":"0.4.31"}`)
+	defer { _ = os.remove(path); delete(path) }
+	version := bridge_provider_extension_installed_manifest_version("heimdall", context.temp_allocator, {path})
+	testing.expect_value(t, version, "0.4.31")
+	testing.expect(t, os.write_entire_file_from_string(path, `{"plugins":{"heimdall":{"enabled":false}}}`) == nil)
+	enabled, found := bridge_antigravity_plugin_enabled_state("heimdall", {path})
+	testing.expect(t, found && !enabled, "authoritative config detects disable even though imports still lists the plugin")
+	testing.expect(t, os.write_entire_file_from_string(path, `{"plugins":{"heimdall":{"enabled":true}}}`) == nil)
+	enabled, found = bridge_antigravity_plugin_enabled_state("heimdall", {path})
+	testing.expect(t, found && enabled)
+	testing.expect(t, os.write_entire_file_from_string(path, "{}") == nil)
+	enabled, found = bridge_antigravity_plugin_enabled_state("heimdall", {path})
+	testing.expect(t, enabled && !found)
+	version = bridge_provider_extension_installed_manifest_version("heimdall", context.temp_allocator, {path})
+	testing.expect_value(t, version, "")
+}
+
+@(test)
+test_provider_extension_imports_schema_is_antigravity_only :: proc(t: ^testing.T) {
+	ext := provider_extension_test_descriptor()
+	ext.plugin_id = "heimdall"
+	ext.detect_collection = "installed"
+	ext.detect_id_key = "name"
+	ext.detect_version_key = "version"
+	ext.detect_enabled_key = "enabled"
+	ext.min_version = "0.4.31"
+	// Explicit fields make this independent of the host's installed files.
+	raw := `{"imports":[{"name":"heimdall","version":"0.4.31","enabled":false,"importedAt":"2026-10-24"}]}`
+	state, version := bridge_provider_extension_evaluate(ext, raw, true)
+	defer delete(version)
+	testing.expect_value(t, state, "disabled")
+	testing.expect_value(t, version, "0.4.31")
+
+	ext.plugin_id = "heimdall@heimdall-codex"
+	state2, version2 := bridge_provider_extension_evaluate(ext, raw, true)
+	defer delete(version2)
+	testing.expect(t, state2 == "error", "Codex requires its configured installed collection")
+
+	raw_codex := `{"installed":[{"name":"heimdall@heimdall-codex","version":"0.4.31","importedAt":"2026-10-24"}]}`
+	state3, version3 := bridge_provider_extension_evaluate(ext, raw_codex, true)
+	defer delete(version3)
+	testing.expect(t, state3 == "error", "imports timestamps cannot substitute for Codex enabled evidence")
+}

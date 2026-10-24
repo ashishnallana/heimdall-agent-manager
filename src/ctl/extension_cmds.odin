@@ -11,6 +11,7 @@ package main
 // a 500ms socket timeout without the hub-retry loop, and every failure exits 0.
 // Provider mapping lives in src/ctl/extension/<provider>.odin.
 
+import "core:encoding/json"
 import "core:fmt"
 import "core:net"
 import "core:os"
@@ -71,11 +72,7 @@ ctl_extension_command :: proc(cmd: []string, args: []string) {
 		if path_override == "" do path_override = option_value(args, "--extension-path", "")
 		ok, msg := ctl_extension_install_local(provider, path_override)
 		if has_flag(args, "--json") {
-			if ok {
-				fmt.printfln(`{"ok":true,"provider":"%s","message":"%s"}`, provider, msg)
-			} else {
-				fmt.printfln(`{"ok":false,"provider":"%s","error":"%s"}`, provider, msg)
-			}
+			fmt.println(ctl_extension_install_result_json(provider, ok, msg))
 		} else {
 			if ok {
 				fmt.println(msg)
@@ -176,16 +173,23 @@ print_help_extension :: proc() {
 	fmt.println("  ham-ctl extension install codex")
 }
 
-Ctl_Extension_Install_Runner :: proc(args: []string, allocator := context.temp_allocator) -> (stdout, stderr: string, exit_code: int, ok: bool)
+// One shared deadline covers marketplace registration, installation and upgrade.
+Ctl_Extension_Install_Runner :: proc(args: []string, timeout: time.Duration, allocator := context.temp_allocator) -> (stdout, stderr: string, exit_code: int, ok: bool)
 
 ctl_extension_install_runner: Ctl_Extension_Install_Runner = ctl_default_install_runner
+ctl_extension_install_resolve_binary: proc(string) -> (string, bool) = setup_bin_on_path
 
-ctl_default_install_runner :: proc(args: []string, allocator := context.temp_allocator) -> (stdout, stderr: string, exit_code: int, ok: bool) {
-	state, out, err_out, err := os.process_exec(os.Process_Desc{command = args}, allocator)
-	if err != nil {
-		return "", "", 1, false
-	}
-	return string(out), string(err_out), state.exit_code, state.success
+ctl_extension_install_result_json :: proc(provider: string, ok: bool, message: string) -> string {
+	result := struct {
+		ok: bool,
+		provider: string,
+		message: string `json:"message,omitempty"`,
+		error: string `json:"error,omitempty"`,
+	}{ok = ok, provider = provider}
+	if ok do result.message = message
+	else do result.error = message
+	data, _ := json.marshal(result, {}, context.temp_allocator)
+	return string(data)
 }
 
 ctl_resolve_bundled_extension_path :: proc(provider: string, allocator := context.temp_allocator) -> string {
@@ -259,7 +263,8 @@ ctl_extension_install_local :: proc(provider, path_override: string) -> (bool, s
 	case ext.CODEX_PROVIDER: bin_name = "codex"
 	}
 
-	bin_path, has_bin := setup_bin_on_path(bin_name)
+	bin_path, has_bin := ctl_extension_install_resolve_binary(bin_name)
+	defer delete(bin_path)
 	if !has_bin {
 		return false, fmt.tprintf("provider binary %q not found on PATH", bin_name)
 	}
@@ -277,27 +282,40 @@ ctl_extension_install_local :: proc(provider, path_override: string) -> (bool, s
 		}
 	}
 
+	deadline := time.time_add(time.now(), 55 * time.Second)
+	if prov == ext.CODEX_PROVIDER {
+		root := ext_path
+		metadata := ctl_path_join({root, ".agents", "plugins", "marketplace.json"})
+		if !os.exists(metadata) {
+			root = filepath.dir(ext_path)
+			metadata = ctl_path_join({root, ".agents", "plugins", "marketplace.json"})
+		}
+		if !os.exists(metadata) {
+			return false, fmt.tprintf("missing Codex marketplace metadata for extension directory: %s", ext_path)
+		}
+		_, err_msg, registered := ctl_extension_install_step({bin_path, "plugin", "marketplace", "add", root}, deadline)
+		if !registered do return false, err_msg
+	}
+
 	argv: []string
 	if prov == ext.ANTIGRAVITY_PROVIDER {
 		argv = []string{bin_path, "plugin", "install", ext_path}
 	} else if prov == ext.CLAUDE_PROVIDER || prov == "claude-code" {
-		parent := filepath.dir(ext_path)
-		marketplace_file, _ := filepath.join({parent, ".claude-plugin", "marketplace.json"}, context.temp_allocator)
-		if os.exists(marketplace_file) {
-			argv = []string{bin_path, "plugin", "install", "--marketplace", parent, "heimdall", "-y"}
+		root := filepath.dir(ext_path)
+		if os.exists(ctl_path_join({ext_path, ".claude-plugin", "marketplace.json"})) do root = ext_path
+		if os.exists(ctl_path_join({root, ".claude-plugin", "marketplace.json"})) {
+			argv = []string{bin_path, "plugin", "install", "--marketplace", root, "heimdall", "-y"}
 		} else {
 			argv = []string{bin_path, "plugin", "install", ext_path, "-y"}
 		}
-	} else if prov == ext.CODEX_PROVIDER {
+	} else {
 		argv = []string{bin_path, "plugin", "add", "heimdall@heimdall-codex"}
 	}
-
-	stdout, stderr, exit_code, ok := ctl_extension_install_runner(argv, context.temp_allocator)
-	if !ok {
-		err_msg := strings.trim_space(stderr)
-		if err_msg == "" do err_msg = strings.trim_space(stdout)
-		if err_msg == "" do err_msg = fmt.tprintf("installer process exited with code %d", exit_code)
-		return false, err_msg
+	output, err_msg, installed := ctl_extension_install_step(argv, deadline)
+	if !installed do return false, err_msg
+	if (prov == ext.CLAUDE_PROVIDER || prov == "claude-code") && strings.contains(strings.to_lower(output, context.temp_allocator), "already installed") {
+		_, update_error, updated := ctl_extension_install_step({bin_path, "plugin", "update", "heimdall@heimdall", "-y"}, deadline)
+		if !updated do return false, update_error
 	}
 
 	return true, fmt.tprintf("Extension for %s installed successfully.", prov)
@@ -325,3 +343,16 @@ print_help_extension_install :: proc() {
 	fmt.println("  --json       Output machine-readable JSON")
 }
 
+// Keep provider diagnostics in the failure result, including quotes and newlines.
+ctl_extension_install_step :: proc(argv: []string, deadline: time.Time) -> (output, error_message: string, ok: bool) {
+	remaining := time.diff(time.now(), deadline)
+	if remaining <= 0 do return "", "extension installation timed out", false
+	stdout, stderr, exit_code, ran := ctl_extension_install_runner(argv, min(remaining, 25 * time.Second), context.temp_allocator)
+	if !ran {
+		message := strings.trim_space(stderr)
+		if message == "" do message = strings.trim_space(stdout)
+		if message == "" do message = fmt.tprintf("installer process exited with code %d", exit_code)
+		return "", message, false
+	}
+	return strings.concatenate({stdout, "\n", stderr}, context.temp_allocator), "", true
+}

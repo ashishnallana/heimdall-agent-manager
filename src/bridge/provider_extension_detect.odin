@@ -1,6 +1,8 @@
 package main
 
 import "core:encoding/json"
+import "core:os"
+import "core:path/filepath"
 import "core:strconv"
 import "core:strings"
 import "core:sync"
@@ -108,6 +110,81 @@ bridge_provider_extension_state_rank :: proc(state: string) -> int {
 	return 0
 }
 
+bridge_antigravity_plugin_enabled_state :: proc(plugin_id: string, paths: []string = nil) -> (enabled: bool, has_config: bool) {
+	enabled = true
+	candidates := make([dynamic]string, context.temp_allocator)
+	if paths != nil {
+		append(&candidates, ..paths)
+	} else {
+		if gemini_cfg := os.get_env("GEMINI_CONFIG_DIR", context.temp_allocator); gemini_cfg != "" {
+			c1, _ := filepath.join({gemini_cfg, "config.json"}, context.temp_allocator)
+			append(&candidates, c1)
+			c2, _ := filepath.join({gemini_cfg, "config", "config.json"}, context.temp_allocator)
+			append(&candidates, c2)
+		}
+		home := os.get_env("HOME", context.temp_allocator)
+		if home != "" {
+			c3, _ := filepath.join({home, ".gemini", "config", "config.json"}, context.temp_allocator)
+			append(&candidates, c3)
+			c4, _ := filepath.join({home, ".gemini", "config.json"}, context.temp_allocator)
+			append(&candidates, c4)
+		}
+	}
+	for cand in candidates {
+		if os.exists(cand) {
+			if data, read_err := os.read_entire_file(cand, context.temp_allocator); read_err == nil {
+				if parsed, err := json.parse(data, json.DEFAULT_SPECIFICATION, false, context.temp_allocator); err == nil {
+					if obj, is_obj := parsed.(json.Object); is_obj {
+						if plugins_val, has_plugins := obj["plugins"].(json.Object); has_plugins {
+							if plug_obj, has_plug := plugins_val[plugin_id].(json.Object); has_plug {
+								if en_val, has_en := plug_obj["enabled"].(json.Boolean); has_en {
+									return bool(en_val), true
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	return true, false
+}
+
+bridge_provider_extension_installed_manifest_version :: proc(plugin_id: string, allocator := context.temp_allocator, paths: []string = nil) -> string {
+	candidates := make([dynamic]string, context.temp_allocator)
+	if paths != nil {
+		append(&candidates, ..paths)
+	} else {
+		if gemini_cfg := os.get_env("GEMINI_CONFIG_DIR", context.temp_allocator); gemini_cfg != "" {
+			c1, _ := filepath.join({gemini_cfg, "plugins", plugin_id, "plugin.json"}, context.temp_allocator)
+			append(&candidates, c1)
+			c2, _ := filepath.join({gemini_cfg, "config", "plugins", plugin_id, "plugin.json"}, context.temp_allocator)
+			append(&candidates, c2)
+		}
+		home := os.get_env("HOME", context.temp_allocator)
+		if home != "" {
+			c3, _ := filepath.join({home, ".gemini", "config", "plugins", plugin_id, "plugin.json"}, context.temp_allocator)
+			append(&candidates, c3)
+			c4, _ := filepath.join({home, ".gemini", "plugins", plugin_id, "plugin.json"}, context.temp_allocator)
+			append(&candidates, c4)
+		}
+	}
+	for cand in candidates {
+		if os.exists(cand) {
+			if data, read_err := os.read_entire_file(cand, context.temp_allocator); read_err == nil {
+				if parsed, err := json.parse(data, json.DEFAULT_SPECIFICATION, false, context.temp_allocator); err == nil {
+					if obj, is_obj := parsed.(json.Object); is_obj {
+						if v, ok_v := obj["version"].(json.String); ok_v {
+							return strings.clone(string(v), allocator)
+						}
+					}
+				}
+			}
+		}
+	}
+	return ""
+}
+
 // bridge_provider_extension_evaluate turns detector output into a state and an
 // owned version string. `ran` is false when the command failed, timed out, or was
 // skipped by the circuit breaker. When a plugin is listed more than once (one
@@ -119,10 +196,32 @@ bridge_provider_extension_evaluate :: proc(ext: Bridge_Catalog_Extension, output
 	if parse_err != nil do return "error", strings.clone("", allocator)
 	defer json.destroy_value(parsed, context.temp_allocator)
 	collection := parsed
+	using_antigravity_imports := false
 	if ext.detect_collection != "" {
 		object, is_object := parsed.(json.Object)
 		if !is_object do return "error", strings.clone("", allocator)
 		collection = object[ext.detect_collection]
+		using_antigravity_imports = ext.plugin_id == "heimdall" && ext.detect_collection == "imports"
+		if collection == nil && ext.plugin_id == "heimdall" {
+			if ext.detect_collection == "installed" {
+				if imports_val, has := object["imports"]; has {
+					collection = imports_val
+					using_antigravity_imports = true
+				}
+			} else if ext.detect_collection == "imports" {
+				if inst_val, has := object["installed"]; has {
+					collection = inst_val
+					using_antigravity_imports = false
+				}
+			}
+		}
+	} else if object, is_object := parsed.(json.Object); is_object && ext.plugin_id == "heimdall" {
+		if inst_val, has := object["installed"]; has {
+			collection = inst_val
+		} else if imports_val, has := object["imports"]; has {
+			collection = imports_val
+			using_antigravity_imports = true
+		}
 	}
 	items, is_array := collection.(json.Array)
 	if !is_array do return "error", strings.clone("", allocator)
@@ -137,14 +236,29 @@ bridge_provider_extension_evaluate :: proc(ext: Bridge_Catalog_Extension, output
 		enabled_key := ext.detect_enabled_key if ext.detect_enabled_key != "" else "enabled"
 		id, _ := object[id_key].(json.String)
 		if id != ext.plugin_id do continue
-		entry_version, _ := object[version_key].(json.String)
+		entry_version_val, has_version := object[version_key].(json.String)
+		entry_version := string(entry_version_val)
+		if using_antigravity_imports && (!has_version || entry_version == "") {
+			entry_version = bridge_provider_extension_installed_manifest_version(ext.plugin_id, context.temp_allocator)
+		}
 		enabled := true
-		if value, has := object[enabled_key].(json.Boolean); has do enabled = bool(value)
+		if value, has := object[enabled_key].(json.Boolean); has {
+			enabled = bool(value)
+		} else if using_antigravity_imports {
+			agy_enabled, _ := bridge_antigravity_plugin_enabled_state(ext.plugin_id)
+			enabled = agy_enabled
+		}
 		has_errors := false
 		// A descriptor that requests explicit enabled evidence must receive it.
 		if ext.detect_enabled_key != "" {
 			_, has_enabled := object[enabled_key].(json.Boolean)
-			if !has_enabled do has_errors = true
+			if !has_enabled {
+				// Imports records omit enabled; importedAt proves installation.
+				// The configuration read above supplies the effective enabled flag.
+				if imported_at, has_imported := object["importedAt"].(json.String); !has_imported || imported_at == "" || !using_antigravity_imports {
+					has_errors = true
+				}
+			}
 		}
 		if ext.detect_version_key != "" && ext.min_version != "" {
 			// Unknown or nonnumeric versions are not compatibility evidence.
