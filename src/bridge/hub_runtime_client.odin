@@ -2821,14 +2821,13 @@ bridge_runtime_set_status_with_source_locked :: proc(instance_id, runtime_status
 				inst.runtime_status = runtime_status
 				if accept_activity do inst.activity_status = activity_status
 			}
-			// A runtime-status OR activity-status transition must reach the hub
-			// immediately, not on the next 45s heartbeat. Runtime covers launch/stop/
-			// exit; activity covers the working<->idle indicator (classified from the
-			// pty-host ScreenChanged burst on a background worker that holds no conn) —
-			// without this the working indicator lagged up to ~45s to appear/clear.
-			// Enqueue for the hub loop to drain (~25ms). Idempotent: the drain
-			// coalesces duplicates by re-reading current status at send time.
-			if runtime_changed || activity_changed do bridge_runtime_enqueue_status_push_locked(instance_id)
+			// Independent lifecycle and screen-derived transitions reach the hub
+			// immediately. The drain coalesces IDs and reads current state.
+			// Native extension activity stays local until the normal heartbeat.
+			// Native extension activity is local state, sampled by the normal
+            // heartbeat. An event must never schedule an immediate durable
+            // status/last-seen write, even when no live viewer exists.
+            if (runtime_changed || activity_changed) && !strings.contains(activity_source, "extension") do bridge_runtime_enqueue_status_push_locked(instance_id)
 			if accept_activity {
 				inst.activity_source = strings.clone(activity_source)
 				inst.activity_updated_unix_ms = now
@@ -2863,7 +2862,7 @@ bridge_runtime_set_status_with_source_locked :: proc(instance_id, runtime_status
 	// even if direct agent-actions (like repeated start-success) advanced the DB.
 	if bridge_runtime_instances == nil do bridge_runtime_instances = make([dynamic]Bridge_Runtime_Instance)
 	append(&bridge_runtime_instances, Bridge_Runtime_Instance{agent_instance_id = strings.clone(instance_id), state_seq = bridge_runtime_next_state_seq(0, now), runtime_status = strings.clone(runtime_status), activity_status = strings.clone(activity_status), activity_source = strings.clone(activity_source), activity_updated_unix_ms = now, last_seen_unix_ms = now, start_deadline_unix_ms = deadline, start_success_seen = seen, pty_process_alive = (runtime_status == "running")})
-	bridge_runtime_enqueue_status_push_locked(instance_id)
+	if !strings.contains(activity_source, "extension") do bridge_runtime_enqueue_status_push_locked(instance_id)
 }
 
 bridge_runtime_next_state_seq :: proc(current: int, now: i64) -> int {

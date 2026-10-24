@@ -1,7 +1,10 @@
 # Transient extension signals
 
 Provider extension ingestion performs local readiness, activity, permission and
-live-tool reduction. It does not queue or forward raw events. No lifecycle or
+live-tool reduction. Extension-sourced activity never queues immediate status
+pushes; the normal coalesced control-plane heartbeat samples local activity.
+Explicit readiness and lifecycle status remain independent. It does not queue
+or forward raw events. No lifecycle or
 completion event has a durable exception. The local instance metadata cache is
 bounded to 256 instances; native tool state retains its existing bounded reducer.
 
@@ -66,11 +69,16 @@ It builds hub/bridge/CLI and UI and runs contracts, tool reducers, bridge,
 SQLite, service/HTTP and affected UI tests. Four unrelated baseline failures
 were separately reproduced on unchanged 35622400. The verifier reports their
 names and excludes them only while their containing test source has the exact
-recorded SHA256; changed source restores those tests automatically. SQLite runs
-serially because its transaction tests assert process-global mutex state.
+recorded SHA256; changed source restores those tests automatically. Bridge and SQLite suites run
+serially because fixtures share runtime queues / process-global mutex state.
+Fresh checkouts install dependencies with `npm ci --legacy-peer-deps`.
 
 The ingestion fixture sends 10,000 local events without creating an event
-outbox. Stream fixtures cover explicit member authorization, zero-demand
+outbox. A separate wire-to-hub regression alternates 100 activity signals and
+drains status after each signal: zero event-triggered frames and hub saves,
+while explicit lifecycle controls still save. Removing only the activity guards
+makes that fixture observe 100 saves, demonstrating the regression.
+Stream fixtures cover explicit member authorization, zero-demand
 rejection, sharing, expiry/lost detach, reconnect/run fences, in-flight controls,
 bounded queues and legacy rejection. The SQLite upgrade fixture seeds an old
 event, applies migration 124 and verifies the table and indexes are gone.

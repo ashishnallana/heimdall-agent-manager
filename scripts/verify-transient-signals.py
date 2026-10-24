@@ -61,8 +61,9 @@ for package in [
         if not selected:
             raise RuntimeError(f"No tests selected in {package}")
         flags = ["-define:ODIN_TEST_NAMES=" + ",".join(selected)]
-    if package == "src/hub/repository/sqlite":
-        # tx_test asserts process-global mutex state, shared by every UoW test.
+    if package in {"src/bridge", "src/hub/repository/sqlite"}:
+        # Bridge fixtures share the runtime/outgoing queue; tx_test asserts
+        # process-global mutex state shared by every SQLite UoW test.
         flags.append("-define:ODIN_TEST_THREADS=1")
     run(
         "nix", "develop", ".", "--command", "odin", "test", package,
@@ -71,7 +72,7 @@ for package in [
         *flags,
     )
 if not (ROOT / "node_modules").is_dir():
-    run("npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund")
+    run("npm", "ci", "--legacy-peer-deps", "--ignore-scripts", "--no-audit", "--no-fund")
 run("npm", "run", "build")
 ui = sorted((ROOT / "tests").glob("ui_extension_*_test.ts"))
 ui += [
