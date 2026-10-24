@@ -1,4 +1,4 @@
-import type { ChainProjectGroup } from '../../api/endpoints/tasks';
+import type { ChainListItem, ChainProjectGroup } from '../../api/endpoints/tasks';
 import type { TaskChainSearchHit } from '../../utils/taskChainSearch';
 import { isVaultArmored } from '../../utils/vaultContent';
 
@@ -18,7 +18,51 @@ export const HOME_REMOTE_SEARCH_MIN_CHARS = 2;
 
 function time(value: string): number {
   const t = new Date(value || '').getTime();
-  return Number.isFinite(t) ? t : 0;
+  return Number.isFinite(t) ? t : Number.NEGATIVE_INFINITY;
+}
+
+/** Full flat API snapshot, copied and ordered deterministically; invalid dates last.
+ * Duplicate IDs retain their newest eligible row (first response row on exact ties).
+ */
+export function homeChainsFromFlatList(
+  chains: ChainListItem[] | undefined,
+  archivedProjectIds: ReadonlySet<string> = new Set(),
+): HomeChainItem[] {
+  const sorted = (chains || [])
+    .filter((c) => c.chainId && !archivedProjectIds.has(c.projectId)
+      && String(c.status || '').toLowerCase() !== 'archived' && !(c as ChainListItem & { archived?: boolean }).archived)
+    .map((c) => ({
+      chainId: c.chainId,
+      title: c.title || '',
+      status: String(c.status || '').toLowerCase(),
+      projectId: c.projectId || '',
+      projectName: c.projectName || '',
+      updatedAt: c.updatedAt || '',
+      coordinatorAgentInstanceId: c.coordinatorAgentInstanceId || undefined,
+    }))
+    .sort((a, b) => {
+      const at = time(a.updatedAt), bt = time(b.updatedAt);
+      return at !== bt ? (at > bt ? -1 : 1) : (a.chainId < b.chainId ? -1 : a.chainId > b.chainId ? 1 : 0);
+    });
+  const seen = new Set<string>();
+  return sorted.filter((c) => {
+    if (seen.has(c.chainId)) return false;
+    seen.add(c.chainId);
+    return true;
+  });
+}
+
+/** Zero rows have zero pages; clamp defensively after a snapshot shrinks. */
+export function homeChainPage(chains: HomeChainItem[], index: number) {
+  const pageCount = Math.ceil(chains.length / HOME_RECENT_CHAIN_LIMIT);
+  const pageIndex = Math.max(0, Math.min(Number.isFinite(index) ? Math.trunc(index) : 0, Math.max(0, pageCount - 1)));
+  return {
+    rows: chains.slice(pageIndex * HOME_RECENT_CHAIN_LIMIT, (pageIndex + 1) * HOME_RECENT_CHAIN_LIMIT),
+    pageIndex,
+    pageCount,
+    hasPrevious: pageIndex > 0,
+    hasNext: pageIndex + 1 < pageCount,
+  };
 }
 
 /**

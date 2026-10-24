@@ -90,7 +90,7 @@ export function HomePage({ pane }: HomePageProps = {}) {
     window.history.replaceState(window.history.state, '', buildRouteHash(getRoutePathname(), params.toString()));
   }
 
-  // Task chains: a search bar + the last 10 chains (flat, not grouped).
+  // Task chains: search plus pages of task chains across projects.
   const chainSearch = <HomeChainSearch onOpenAgent={pane?.onOpenAgent} />;
 
   if (pane) {

@@ -471,6 +471,31 @@ async function decryptChainProjectGroup(g: ChainProjectGroup, key: VaultKeyring)
 
 export const tasksApi = heimdallApi.injectEndpoints({
   endpoints: (build) => ({
+    // Home browses the complete owned list; grouped previews omit older chains.
+    // Next/Previous page this shared snapshot locally without further requests.
+    fetchHomeTaskChains: build.query<{ chains: ChainListItem[] }, void>({
+      queryFn: async (_arg, api) => {
+        try {
+          const raw = await cookieJsonFetch('/task-chains?flat=1', { signal: api.signal });
+          const data = unwrapData(raw);
+          const arr = Array.isArray(data) ? data : data?.chains;
+          if (!Array.isArray(arr) || arr.some((c) => !c || typeof c !== 'object'
+            || typeof (c.chain_id ?? c.chainId) !== 'string' || !(c.chain_id ?? c.chainId).trim())) {
+            throw new Error('Invalid task chain list response');
+          }
+          let chains = arr.map(normalizeChainListItem);
+          const state: any = api.getState();
+          const activeKey = getActiveVaultKey();
+          if (state?.vault?.isUnlocked && activeKey) {
+            chains = await Promise.all(chains.map((c) => decryptChainListItem(c, activeKey)));
+          }
+          return { data: { chains } };
+        } catch (error: any) {
+          return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any };
+        }
+      },
+      providesTags: [{ type: 'ChainList' as const, id: 'ALL' }],
+    }),
     // TC-PAGE: default project-grouped task-chains list (no params) -> array of
     // groups, each previewing up to 5 chains with has_more/next_cursor for paging.
     fetchTaskChainGroups: build.query<{ groups: ChainProjectGroup[] }, void | { hasTasks?: boolean; includeArchived?: boolean }>({
@@ -1568,6 +1593,7 @@ export const tasksApi = heimdallApi.injectEndpoints({
 export const {
   useFetchChainTasksQuery,
   useFetchTaskChainGroupsQuery,
+  useFetchHomeTaskChainsQuery,
   useFetchTaskChainProjectPageQuery,
   useLazyFetchTaskChainProjectPageQuery,
   useListTaskChainsQuery,
