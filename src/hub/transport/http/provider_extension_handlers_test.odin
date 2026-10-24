@@ -773,3 +773,138 @@ test_extension_update_reconnect_recovers_lost_restart_progress :: proc(t: ^testi
 		"provider_discover",
 	)
 }
+
+@(test)
+test_extension_manual_auto_overlap_waits_and_rechecks_durably :: proc(t: ^testing.T) {
+	for outcome in ([2]string{"succeeded", "failed"}) {
+		database_path := fmt.aprintf("/tmp/heimdall-overlap-%d-%d.db", os.get_pid(), time.now()._nsec)
+		f := extension_test_setup(t, "overlap", database_path)
+		extension_test_status(t, f, "codex", "present", "outdated")
+		update_id := extension_test_update(t, f, "{\"update_extensions\":true}")
+		extension_test_restart(t, f, update_id)
+		discovery_id := strings.clone(f.sink_rec.last_cmd.command_id)
+		path := fmt.tprintf("/api/v1/bridges/%s/providers/codex/extension-install", f.bridge_id)
+		response := bridge_provider_extension_install_handler(rawptr(&f.ph), extension_test_request(f, path))
+		testing.expect_value(t, response.status, 202)
+		manual_id := json_string(response.body, "command_id")
+		before := f.sink_rec.count
+		outdated := "[{\"provider\":\"codex\",\"state\":\"present\",\"extension_state\":\"outdated\",\"extension_version\":\"0.1.0\"}]"
+		extension_test_report(t, f, discovery_id, outdated)
+		extension_test_report(t, f, discovery_id, outdated)
+		testing.expect_value(t, f.sink_rec.count, before)
+		commands := extension_test_commands(t, f)
+		active, waiting := 0, 0
+		for command in commands {
+			if command.kind == "install" && !extension_command_terminal(command.state) do active += 1
+			if command.kind == "discovery" && command.state == "waiting" do waiting += 1
+		}
+		testing.expect_value(t, active, 1)
+		testing.expect_value(t, waiting, 1)
+		domain.provider_extension_commands_destroy(commands)
+		status := bridge_provider_status_handler(rawptr(&f.ph), extension_test_request(f, fmt.tprintf("/api/v1/bridges/%s/provider-status", f.bridge_id)))
+		testing.expect(t, strings.contains(status.body, manual_id), "active manual command remains visible")
+		// Close the actual SQLite database and rebuild the service projection.
+		sqlite.close(&f.conn)
+		reopened, ok, open_err := sqlite.open(database_path)
+		testing.expect(t, ok)
+		testing.expect_value(t, open_err.code, domain.Error_Code.None)
+		f.conn = reopened
+		f.pr_svc = provider_service.new_provider_service(&f.pr_repo)
+		bridge, _, _ := iface.bridge_get_bridge(&f.br_repo, f.bridge_id)
+		err := bridge_extension_reconnected(&f.bh, bridge)
+		domain.bridge_destroy(&bridge)
+		testing.expect_value(t, err.code, domain.Error_Code.None)
+		testing.expect_value(t, f.sink_rec.count, before + 1) // only manual replay
+		testing.expect_value(t, f.sink_rec.last_cmd.command_id, manual_id)
+		terminal := fmt.tprintf("{{\"command_id\":\"%s\",\"status\":\"%s\"}}", manual_id, outcome)
+		err = bridge_extension_frame(&f.bh, f.bridge_id, "command_result", terminal)
+		testing.expect_value(t, err.code, domain.Error_Code.None)
+		testing.expect_value(t, json_string(f.sink_rec.last_cmd.body_json, "type"), "provider_discover")
+		recheck_id := strings.clone(f.sink_rec.last_cmd.command_id)
+		testing.expect(t, recheck_id != discovery_id)
+		count := f.sink_rec.count
+		_ = bridge_extension_frame(&f.bh, f.bridge_id, "command_result", terminal)
+		testing.expect_value(t, f.sink_rec.count, count)
+		fresh := outdated
+		if outcome == "succeeded" do fresh = "[{\"provider\":\"codex\",\"state\":\"present\",\"extension_state\":\"present\",\"extension_version\":\"0.4.31\"}]"
+		extension_test_report(t, f, recheck_id, fresh)
+		if outcome == "succeeded" {
+			testing.expect_value(t, f.sink_rec.count, count)
+		} else {
+			testing.expect_value(t, f.sink_rec.count, count + 1)
+			testing.expect_value(t, json_string(f.sink_rec.last_cmd.body_json, "type"), "provider_extension_install")
+		}
+		count = f.sink_rec.count
+		extension_test_report(t, f, recheck_id, fresh)
+		extension_test_report(t, f, discovery_id, outdated)
+		_ = bridge_extension_frame(&f.bh, f.bridge_id, "command_result", terminal)
+		testing.expect_value(t, f.sink_rec.count, count)
+		commands = extension_test_commands(t, f)
+		active = 0
+		for command in commands {
+			if command.kind == "install" && !extension_command_terminal(command.state) do active += 1
+		}
+		testing.expect_value(t, active, 0 if outcome == "succeeded" else 1)
+		domain.provider_extension_commands_destroy(commands)
+		delete(update_id); delete(discovery_id); delete(manual_id); delete(recheck_id)
+		extension_test_teardown(f)
+		_ = os.remove(database_path)
+		delete(database_path)
+	}
+}
+
+@(test)
+test_extension_overlap_rechecks_late_reports_and_repeated_manual_installs :: proc(t: ^testing.T) {
+	f := extension_test_setup(t, "late-overlap")
+	defer extension_test_teardown(f)
+	extension_test_status(t, f, "codex", "present", "outdated")
+	update_id := extension_test_update(t, f, "{\"update_extensions\":true}")
+	defer delete(update_id)
+	extension_test_restart(t, f, update_id)
+	discovery_id := strings.clone(f.sink_rec.last_cmd.command_id)
+	defer delete(discovery_id)
+	path := fmt.tprintf("/api/v1/bridges/%s/providers/codex/extension-install", f.bridge_id)
+	response := bridge_provider_extension_install_handler(rawptr(&f.ph), extension_test_request(f, path))
+	testing.expect_value(t, response.status, 202)
+	manual_id := json_string(response.body, "command_id")
+	defer delete(manual_id)
+	// The initial probe was requested before the manual install; its delayed
+	// report remains stale even after that install has finished.
+	err := bridge_extension_frame(&f.bh, f.bridge_id, "command_result", fmt.tprintf("{{\"command_id\":\"%s\",\"status\":\"succeeded\"}}", manual_id))
+	testing.expect_value(t, err.code, domain.Error_Code.None)
+	outdated := "[{\"provider\":\"codex\",\"state\":\"present\",\"extension_state\":\"outdated\",\"extension_version\":\"0.1.0\"}]"
+	extension_test_report(t, f, discovery_id, outdated)
+	testing.expect_value(t, json_string(f.sink_rec.last_cmd.body_json, "type"), "provider_discover")
+	recheck_id := strings.clone(f.sink_rec.last_cmd.command_id)
+	defer delete(recheck_id)
+	// A second manual action can overlap the recheck as well.
+	response = bridge_provider_extension_install_handler(rawptr(&f.ph), extension_test_request(f, path))
+	testing.expect_value(t, response.status, 202)
+	second_id := json_string(response.body, "command_id")
+	defer delete(second_id)
+	count := f.sink_rec.count
+	extension_test_report(t, f, recheck_id, outdated)
+	testing.expect_value(t, f.sink_rec.count, count)
+	// Persist completion while transport dispatch fails, then recover on reconnect.
+	f.sink_rec.fail = true
+	err = bridge_extension_frame(&f.bh, f.bridge_id, "command_result", fmt.tprintf("{{\"command_id\":\"%s\",\"status\":\"failed\"}}", second_id))
+	testing.expect(t, err.code != .None)
+	f.sink_rec.fail = false
+	bridge, _, _ := iface.bridge_get_bridge(&f.br_repo, f.bridge_id)
+	defer domain.bridge_destroy(&bridge)
+	err = bridge_extension_reconnected(&f.bh, bridge)
+	testing.expect_value(t, err.code, domain.Error_Code.None)
+	testing.expect_value(t, f.sink_rec.count, count + 1)
+	testing.expect_value(t, json_string(f.sink_rec.last_cmd.body_json, "type"), "provider_discover")
+	final_recheck := strings.clone(f.sink_rec.last_cmd.command_id)
+	defer delete(final_recheck)
+	testing.expect(t, final_recheck != recheck_id)
+	// Fresh status, rather than the failed outcome, decides whether to install.
+	extension_test_report(t, f, final_recheck, "[{\"provider\":\"codex\",\"state\":\"present\",\"extension_state\":\"present\",\"extension_version\":\"0.4.31\"}]")
+	testing.expect_value(t, f.sink_rec.count, count + 1)
+	commands := extension_test_commands(t, f)
+	defer domain.provider_extension_commands_destroy(commands)
+	installs := 0
+	for command in commands {if command.kind == "install" do installs += 1}
+	testing.expect_value(t, installs, 2) // exactly the two explicit manual requests
+}

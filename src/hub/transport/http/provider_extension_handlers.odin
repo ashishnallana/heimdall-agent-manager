@@ -177,6 +177,28 @@ extension_frame_handlers :: proc(h: ^Bridge_Handlers) -> Provider_Handlers {
 	}
 }
 
+// A discovery with provider set waits for that install command, rather than
+// representing an install itself. A new id avoids replaying the Bridge's cached
+// pre-install discovery. Both the wait and its correlation survive Hub restart.
+extension_resume_waiting_discoveries :: proc(h: ^Bridge_Handlers, bridge_id: string) -> domain.Domain_Error {
+	commands, err := iface.provider_extension_command_list(h.providers.repo, bridge_id)
+	if err.code != .None do return err
+	defer domain.provider_extension_commands_destroy(commands)
+	ph := extension_frame_handlers(h)
+	for &command in commands {
+		if command.kind != "discovery" || command.state != "waiting" do continue
+		for blocker in commands {
+			if blocker.command_id != command.provider || !extension_command_terminal(blocker.state) do continue
+			sent, send_err := extension_command_dispatch(&ph, command)
+			if !sent do return send_err
+			extension_command_set_state(&command, "dispatched", "Rechecking after extension installation", 0)
+			if save_err := iface.provider_extension_command_save(h.providers.repo, command); save_err.code != .None do return save_err
+			break
+		}
+	}
+	return {}
+}
+
 // Runs only after bridge_ready on a new authenticated connection. Target identity
 // confirms restart success; an accepted command ("restarting") alone cannot do so.
 bridge_extension_reconnected :: proc(
@@ -240,7 +262,7 @@ bridge_extension_reconnected :: proc(
 	commands, err = iface.provider_extension_command_list(h.providers.repo, bridge.bridge_id)
 	if err.code != .None do return err
 	for &command in commands {
-		if command.kind == "bridge_update" || extension_command_terminal(command.state) do continue
+		if command.kind == "bridge_update" || command.state == "waiting" || extension_command_terminal(command.state) do continue
 		// Same durable id on replay; the Bridge returns cached acceptance/results.
 		sent, send_err := extension_command_dispatch(&ph, command)
 		if !sent do return send_err
@@ -249,7 +271,7 @@ bridge_extension_reconnected :: proc(
 			if save_err := iface.provider_extension_command_save(h.providers.repo, command); save_err.code != .None do return save_err
 		}
 	}
-	return {}
+	return extension_resume_waiting_discoveries(h, bridge.bridge_id)
 }
 
 // Match only commands durably registered for THIS Bridge. The surrounding WS
@@ -281,7 +303,7 @@ bridge_extension_frame :: proc(
 		if frame_type == "provider_discovery_report" {
 			return extension_apply_report(h, &command, text)
 		}
-		if extension_command_terminal(command.state) do return {}
+		if extension_command_terminal(command.state) do return extension_resume_waiting_discoveries(h, bridge_id)
 		state := json_string(text, "stage" if frame_type != "command_result" else "status")
 		defer delete(state)
 		message := json_string(text, "message")
@@ -321,7 +343,7 @@ bridge_extension_frame :: proc(
 				)
 			}
 		}
-		return {}
+		return extension_resume_waiting_discoveries(h, bridge_id)
 	}
 	return {}
 }
@@ -333,6 +355,7 @@ extension_apply_report :: proc(
 ) -> domain.Domain_Error {
 	if command.kind != "discovery" && command.kind != "install" do return {}
 	if command.kind == "discovery" && extension_command_terminal(command.state) do return {}
+	if command.state == "waiting" do return {} // no report has been requested yet
 	report: Provider_Discovery_Report_Wire
 	if decode_err := json.unmarshal_string(text, &report, json.DEFAULT_SPECIFICATION, context.temp_allocator); decode_err != nil || report.request_id != command.command_id do return domain.domain_error(.Validation_Failed, "invalid extension discovery report")
 	statuses := make(
@@ -368,9 +391,44 @@ extension_apply_report :: proc(
 	views, view_err := provider_service.list_bridge_providers(h.providers, command.bridge_id)
 	if view_err.code != .None do return view_err
 	defer provider_service.bridge_provider_views_destroy(views)
+	commands, list_err := iface.provider_extension_command_list(h.providers.repo, command.bridge_id)
+	if list_err.code != .None do return list_err
+	defer domain.provider_extension_commands_destroy(commands)
 	ph := extension_frame_handlers(h)
 	for view in views {
 		if !view.enabled || !extension_install_supported(view) do continue
+		// A deferred report only resumes the provider whose install it waited on.
+		if command.provider != "" {
+			matches := false
+			for prior in commands {
+				if prior.command_id == command.provider && prior.provider == view.catalog.provider do matches = true
+			}
+			if !matches do continue
+		}
+		already_scheduled := false
+		blocker_id := ""
+		after_discovery := false
+		for prior in commands {
+			if prior.command_id == command.command_id do after_discovery = true
+			if prior.kind != "install" || prior.provider != view.catalog.provider do continue
+			if prior.parent_id == command.parent_id do already_scheduled = true
+			// Even a completed install invalidates a report requested before it.
+			if after_discovery || !extension_command_terminal(prior.state) do blocker_id = prior.command_id
+		}
+		if already_scheduled do continue
+		if blocker_id != "" {
+			waiting := domain.Provider_Extension_Command {
+				command_id = fmt.tprintf("%s_ext_after_%s", command.parent_id, blocker_id),
+				bridge_id = command.bridge_id,
+				kind = "discovery",
+				provider = blocker_id,
+				parent_id = command.parent_id,
+				state = "waiting",
+			}
+			_, create_err := iface.provider_extension_command_create(h.providers.repo, waiting)
+			if create_err.code != .None do return create_err
+			continue
+		}
 		// Eligibility comes from THIS response, never stale rows from an earlier scan.
 		eligible := false
 		for item in report.providers {
@@ -423,5 +481,6 @@ extension_apply_report :: proc(
 		if save_err := iface.provider_extension_command_save(h.providers.repo, install); save_err.code != .None do return save_err
 	}
 	extension_command_set_state(command, "succeeded", "Fresh provider discovery processed", 100)
-	return iface.provider_extension_command_save(h.providers.repo, command^)
+	if save_err := iface.provider_extension_command_save(h.providers.repo, command^); save_err.code != .None do return save_err
+	return extension_resume_waiting_discoveries(h, command.bridge_id)
 }
