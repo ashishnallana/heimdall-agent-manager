@@ -18,12 +18,13 @@ const { createRoot } = await import('react-dom/client');
 const {
   default: inputPreferences,
   externalKeyboardSet,
+  inputPreferencesMiddleware,
   INPUT_PREFERENCES_STORAGE_KEY: key,
   setupInputPreferencesSync,
 } = await import('../src/ui/store/inputPreferencesSlice.ts');
 const { MessageComposerInput } = await import('../src/ui/components/chat/MessageComposer.tsx');
 const { AppearanceSettings } = await import('../src/ui/components/settings/AppearanceSettings.tsx');
-const makeStore = () => configureStore({ reducer: { inputPreferences } });
+const makeStore = () => configureStore({ reducer: { inputPreferences }, middleware: getDefault => getDefault().concat(inputPreferencesMiddleware) });
 after(() => dom.window.close());
 
 test('default is off; touch settings toggle updates both mounted composer contexts and persists', async () => {
@@ -255,5 +256,80 @@ test('cross-tab changes, removal and clear synchronize without rewriting storage
     assert.equal(store.getState().inputPreferences.useExternalKeyboard, false);
   } finally {
     cleanup();
+  }
+});
+
+test('reducer updates are pure; dispatched preference changes persist through middleware', () => {
+  window.localStorage.clear();
+  const initial = { useExternalKeyboard: false };
+  const updated = inputPreferences(initial, externalKeyboardSet(true));
+  assert.equal(updated.useExternalKeyboard, true);
+  assert.equal(initial.useExternalKeyboard, false);
+  assert.equal(window.localStorage.getItem(key), null, 'replaying a reducer must not persist');
+  const store = makeStore();
+  store.dispatch(externalKeyboardSet(true));
+  assert.deepEqual(JSON.parse(window.localStorage.getItem(key)!), { useExternalKeyboard: true });
+});
+
+test('cross-tab preference changes wait for composition and final input without losing caller handlers', async () => {
+  window.localStorage.clear();
+  const store = makeStore();
+  const cleanup = setupInputPreferencesSync(store.dispatch);
+  const container = document.createElement('div');
+  document.body.append(container);
+  const root = createRoot(container);
+  const ref = React.createRef<HTMLTextAreaElement>();
+  const events: string[] = [];
+  function Editor() {
+    const [draft, setDraft] = React.useState('draft');
+    return React.createElement(MessageComposerInput, {
+      mobile: true, debugId: 'ime-editor', ref, value: draft,
+      onCompositionStart: () => events.push('start'),
+      onCompositionEnd: () => events.push('end'),
+      onChange: event => { events.push('input'); setDraft(event.target.value); },
+    });
+  }
+  try {
+    await act(async () => root.render(React.createElement(Provider, { store, children: React.createElement(Editor) })));
+    const original = ref.current!;
+    original.focus();
+    await act(async () => original.dispatchEvent(new dom.window.CompositionEvent('compositionstart', { bubbles: true })));
+    await act(async () => window.dispatchEvent(new dom.window.StorageEvent('storage', {
+      key, newValue: '{"useExternalKeyboard":true}', storageArea: window.localStorage,
+    })));
+    assert.equal(store.getState().inputPreferences.useExternalKeyboard, true);
+    assert.equal(ref.current, original, 'active composition must keep its native editor');
+    assert.equal(original.inputMode, 'text');
+    await act(async () => original.dispatchEvent(new dom.window.CompositionEvent('compositionend', { bubbles: true, data: '完成' })));
+    assert.equal(ref.current, original, 'final input must still target the original editor');
+    const setValue = Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, 'value')!.set!;
+    await act(async () => {
+      setValue.call(original, 'draft 完成');
+      original.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+      original.setSelectionRange(8, 8);
+      await new Promise(resolve => setTimeout(resolve, 5));
+    });
+    assert.notEqual(ref.current, original);
+    assert.equal(ref.current!.inputMode, 'none');
+    assert.equal(ref.current!.value, 'draft 完成');
+    assert.equal(document.activeElement, ref.current);
+    assert.deepEqual(events, ['start', 'end', 'input']);
+
+    const next = ref.current!;
+    await act(async () => next.dispatchEvent(new dom.window.CompositionEvent('compositionstart', { bubbles: true })));
+    await act(async () => store.dispatch(externalKeyboardSet(false)));
+    await act(async () => store.dispatch(externalKeyboardSet(true)));
+    assert.equal(ref.current, next);
+    await act(async () => {
+      next.dispatchEvent(new dom.window.CompositionEvent('compositionend', { bubbles: true }));
+      await new Promise(resolve => setTimeout(resolve, 5));
+    });
+    assert.equal(ref.current, next, 'returning to current mode must avoid replacement');
+    // Unmount with a pending composition timer must not retain the editor.
+    await act(async () => next.dispatchEvent(new dom.window.CompositionEvent('compositionend', { bubbles: true })));
+  } finally {
+    cleanup();
+    await act(async () => root.unmount());
+    container.remove();
   }
 });

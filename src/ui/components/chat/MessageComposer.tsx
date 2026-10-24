@@ -1,4 +1,4 @@
-import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useRef, type TextareaHTMLAttributes, type ReactNode } from 'react';
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState, type TextareaHTMLAttributes, type ReactNode } from 'react';
 import { Icon, StatusDot, type StatusDotProps } from '@ui';
 import ProviderIcon from '../providers/ProviderIcon';
 import { useSelector } from 'react-redux';
@@ -7,7 +7,16 @@ import { selectUseExternalKeyboard } from '../../store/inputPreferencesSlice';
 export const MessageComposerInput = forwardRef<HTMLTextAreaElement, TextareaHTMLAttributes<HTMLTextAreaElement> & { mobile: boolean; debugId: string }>(function MessageComposerInput({ mobile, debugId, ...props }, forwardedRef) {
   const useExternalKeyboard = useSelector(selectUseExternalKeyboard);
   const ref = useRef<HTMLTextAreaElement>(null);
-  const inputMode = useExternalKeyboard ? 'none' : 'text';
+  const requestedMode = useExternalKeyboard ? 'none' : 'text';
+  const [inputMode, setInputMode] = useState<'none' | 'text'>(requestedMode);
+  const composing = useRef(false);
+  const latestMode = useRef<'none' | 'text'>(requestedMode);
+  const compositionTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useLayoutEffect(() => {
+    latestMode.current = requestedMode;
+    if (!composing.current) setInputMode(requestedMode);
+  }, [requestedMode]);
+  useEffect(() => () => clearTimeout(compositionTimer.current), []);
   const previousEditor = useRef<{
     value: string; start: number; end: number;
     direction: 'forward' | 'backward' | 'none'; focused: boolean; scrollTop: number;
@@ -54,7 +63,23 @@ export const MessageComposerInput = forwardRef<HTMLTextAreaElement, TextareaHTML
   }, [mobile, props.value, inputMode]);
   // Replace the native editor so a mode change starts a fresh input connection,
   // just as mounting the original forced-none experiment did.
-  return <textarea {...props} key={inputMode} inputMode={inputMode} ref={attachInput} data-debug-id={debugId} rows={mobile ? 1 : 2} className={mobile ? 'block min-h-6 max-h-[72px] w-full resize-none bg-transparent p-0 text-base leading-6 text-primary outline-none placeholder:text-muted' : 'min-h-[44px] w-full resize-none bg-transparent px-1 py-1 text-sm text-primary outline-none placeholder:text-muted'} />;
+  return <textarea {...props} key={inputMode} inputMode={inputMode} ref={attachInput}
+    onCompositionStart={event => {
+      clearTimeout(compositionTimer.current);
+      composing.current = true;
+      props.onCompositionStart?.(event);
+    }}
+    onCompositionEnd={event => {
+      clearTimeout(compositionTimer.current);
+      props.onCompositionEnd?.(event);
+      // Browsers emit the final input after compositionend. Keep its native editor
+      // alive through that event so the caller receives the committed draft.
+      compositionTimer.current = setTimeout(() => {
+        composing.current = false;
+        setInputMode(latestMode.current);
+      }, 0);
+    }}
+    data-debug-id={debugId} rows={mobile ? 1 : 2} className={mobile ? 'block min-h-6 max-h-[72px] w-full resize-none bg-transparent p-0 text-base leading-6 text-primary outline-none placeholder:text-muted' : 'min-h-[44px] w-full resize-none bg-transparent px-1 py-1 text-sm text-primary outline-none placeholder:text-muted'} />;
 });
 
 export type ComposerActionsProps = {

@@ -1,4 +1,4 @@
-import { createSlice, type PayloadAction } from '@reduxjs/toolkit';
+import { createSlice, type Middleware, type PayloadAction } from '@reduxjs/toolkit';
 
 export const INPUT_PREFERENCES_STORAGE_KEY = 'heimdall:input-preferences:v1';
 
@@ -30,11 +30,6 @@ const inputPreferencesSlice = createSlice({
   reducers: {
     externalKeyboardSet(state, action: PayloadAction<boolean>) {
       state.useExternalKeyboard = action.payload;
-      try {
-        window.localStorage.setItem(INPUT_PREFERENCES_STORAGE_KEY, JSON.stringify({ useExternalKeyboard: action.payload }));
-      } catch {
-        // Keep the in-memory choice usable when browser storage is unavailable.
-      }
     },
     inputPreferencesLoaded(_state, action: PayloadAction<InputPreferencesState>) {
       return action.payload;
@@ -43,6 +38,19 @@ const inputPreferencesSlice = createSlice({
 });
 
 export const { externalKeyboardSet, inputPreferencesLoaded } = inputPreferencesSlice.actions;
+// Persist only dispatched user changes, never reducer initialization or replay.
+export const inputPreferencesMiddleware: Middleware = () => next => action => {
+  const result = next(action);
+  if (externalKeyboardSet.match(action)) {
+    try {
+      window.localStorage.setItem(INPUT_PREFERENCES_STORAGE_KEY, JSON.stringify({ useExternalKeyboard: action.payload }));
+    } catch {
+      // In-memory input preferences remain usable without browser storage.
+    }
+  }
+  return result;
+};
+
 export const selectUseExternalKeyboard = (state: { inputPreferences?: InputPreferencesState }) =>
   state.inputPreferences?.useExternalKeyboard ?? false;
 

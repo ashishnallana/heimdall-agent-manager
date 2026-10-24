@@ -19,7 +19,7 @@ import agentActivityReducer from './agentActivitySlice';
 import toolActivityReducer from './toolActivitySlice';
 import cardsReducer from './cardsSlice';
 import themeReducer from './themeSlice';
-import inputPreferencesReducer, { setupInputPreferencesSync } from './inputPreferencesSlice';
+import inputPreferencesReducer, { inputPreferencesMiddleware, setupInputPreferencesSync } from './inputPreferencesSlice';
 import vaultReducer from './vaultSlice';
 import deviceVaultReducer from './deviceVaultSlice';
 import searchTitleReducer from './searchTitleSlice';
@@ -83,6 +83,7 @@ export const store = configureStore({
     // middleware in the same pass. See api/vaultCacheInvalidation.ts.
     getDefaultMiddleware().concat(
       actionLogger,
+      inputPreferencesMiddleware,
       vaultCacheInvalidationMiddleware,
       // Sees the resetApiState that vaultCacheInvalidationMiddleware or a user switch
       // dispatches, and drops owner-specific deferral state with it.
