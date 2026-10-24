@@ -284,14 +284,14 @@ for (const reduced of [false, true]) {
       assert.equal(env.q('live-tools-duration')!.textContent, '30 ms');
       if (!reduced) {
         await env.advanceTime(190); // entry fallback finishes at t=220
-        await env.flushFrames(); // first fully expanded frame starts residence
+        await env.flushFrames();
+        await env.advanceTime(20); // time before the full-size paint earns no residence
       }
+      await env.flushFrames(); // cross the first fully expanded paint before residence
       assert.equal(row.style.height, 'auto');
       assert.equal(row.style.opacity, '1');
       const heldAt = env.now;
-      // Reduced motion was fully visible before the 30ms completion.
-      const residenceElapsed = reduced ? 30 : 0;
-      await env.advanceTime(499 - residenceElapsed);
+      await env.advanceTime(499);
       assert.equal(row.isConnected, true);
       assert.equal(row.getAttribute('data-tool-phase'), 'holding');
       assert.equal(row.style.height, 'auto', 'no early height collapse at 499ms');
@@ -572,6 +572,7 @@ test('queued entry, rapid exit/reentry, reset and reduced-motion changes cancel 
     assert.notEqual(dom.window.document.querySelector('[data-tool-key]'), row, 'new generation discards previous visuals immediately');
     assert.equal(dom.window.document.querySelectorAll('[data-tool-key]').length, 1);
     await env.reduceMotion(true);
+    await env.flushFrames();
     await env.flushFrames();
     assert.equal(timeouts.size, 0); assert.equal(frames.size, 0);
     assert.doesNotMatch(q('live-tool-activity')!.querySelector('[aria-label="Running"]')!.className, /(?:^| )animate-pulse/);

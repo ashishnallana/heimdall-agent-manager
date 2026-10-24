@@ -81,9 +81,13 @@ function ToolRow({ item, active, completion, now, reduced, remove, onOpenShell }
       if (collapse) { remove(item.key); return; }
       node.style.height = 'auto';
       // Entry time (including opacity/height interpolation) earns no residence.
-      // Wait for a frame at full size before starting the monotonic clock.
+      // rAF runs before paint. Cross a full-size paint before starting the
+      // monotonic clock, including when reduced motion skips entry entirely.
       frame = requestAnimationFrame(() => {
-        if (!cancelled) setVisibleAt((prior) => prior ?? performance.now());
+        if (cancelled) return;
+        frame = requestAnimationFrame(() => {
+          if (!cancelled) setVisibleAt((prior) => prior ?? performance.now());
+        });
       });
     };
     if (collapse) setVisibleAt(null);
