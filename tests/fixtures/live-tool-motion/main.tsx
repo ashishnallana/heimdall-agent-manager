@@ -21,7 +21,8 @@ window.WebSocket = class extends FakeToolSocket {
     super.send(data);
     const frame = JSON.parse(data);
     if (frame.type === 'subscribe') this.state(current);
-    if (frame.type === 'ping') this.frame({ type: 'pong' });
+    // Real WebSocket replies arrive after send returns and the client arms its timeout.
+    if (frame.type === 'ping') setTimeout(() => this.frame({ type: 'pong' }), 0);
   }
 } as any;
 const store = configureStore({
