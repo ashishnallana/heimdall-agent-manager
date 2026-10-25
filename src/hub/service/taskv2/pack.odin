@@ -164,6 +164,17 @@ build_pack_json :: proc(svc: ^Service, chain: domain.Task_Chain, task: domain.Ta
 		break
 	}
 
+	// A coordinator/owner put this leased task on hold (REQ-TV2-5): ask the
+	// holder for a safe checkpoint. The lease is never revoked.
+	// The hold may sit under another block (task_hold_object).
+	if hold, held := task_hold_object(task.blocked_on_json); held {
+		if cp, cpok := jsonx.extract_bool_literal(hold, "checkpoint_requested", true); cpok && cp {
+			c := json_begin()
+			json_str(&c, "reason", jsonx.extract_string(hold, "reason", "", true, context.temp_allocator))
+			json_raw(&o, "checkpoint", json_end(&c))
+		}
+	}
+
 	proto := json_begin()
 	json_int(&proto, "heartbeat_ttl_seconds", LEASE_TTL_SECONDS)
 	json_int(&proto, "hard_cap_seconds", LEASE_HARD_CAP_SECONDS)
@@ -834,7 +845,6 @@ strings_json :: proc(items: []string) -> string {
 }
 
 // truncate_utf8 cuts s to at most max_bytes without splitting a code point.
-@(private = "file")
 truncate_utf8 :: proc(s: string, max_bytes: int) -> string {
 	if len(s) <= max_bytes do return s
 	cut := max_bytes

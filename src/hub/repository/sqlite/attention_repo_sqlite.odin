@@ -110,11 +110,12 @@ attention_list_validation_task_ids_sqlite :: proc(ctx: rawptr, owner_user_id: do
 	stmt: sqlite3_stmt = nil
 	// Candidates only: taskv2.user_attention makes the final call (agent reviews
 	// done, user not yet decided, block not agent-to-agent). In review awaiting
-	// the user (incl. every gate), or blocked on something other than a task —
-	// minus the v2 backfill of legacy paused tasks.
+	// the user (incl. every gate), or blocked on something other than a task or
+	// an operator's own hold (REQ-TV2-5) — minus the v2 backfill of legacy
+	// paused tasks.
 	query := "SELECT task_id FROM tasks WHERE owner_user_id = ? AND state NOT IN ('done','cancelled') AND (" +
 		"(state = 'in_review' AND (requires_user_approval = 1 OR kind = 'gate')) OR " +
-		"(blocked_on_json <> '' AND COALESCE(json_extract(blocked_on_json, '$.kind'), '') <> 'task' " +
+		"(blocked_on_json <> '' AND COALESCE(json_extract(blocked_on_json, '$.kind'), '') NOT IN ('task', 'hold') " +
 		"AND COALESCE(json_extract(blocked_on_json, '$.reason'), '') <> 'paused_before_v2')" +
 		") ORDER BY updated_at ASC, task_id ASC;"
 	if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK {

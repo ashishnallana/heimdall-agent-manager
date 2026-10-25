@@ -23,6 +23,7 @@ All commands use `./.heimdall/bin/ham-ctl`. Exact flags: the `ham-ctl-reference`
 | Context or time running out, not finished | `lease handoff --summary … --next-steps … [--dead-end …]` |
 | Need a user decision or an external system | `lease block --waiting-on user --reason "<question>"` (or `--waiting-on <system>`) |
 | Brief is ambiguous or contradicts itself | `task comment <task-id> --body "<what is unclear>"`, then block if you cannot proceed |
+| TASK.md shows **Checkpoint Requested** (the task was put on hold) | reach a safe point, commit, `lease handoff --summary … --next-steps …`; a reviewer hands off with its review progress instead of posting a verdict. The task stays parked until released |
 | Woken with **Merge Conflict** | merge the directory's branch into yours in the Workdir, resolve, commit, re-run the affected checks, submit |
 | Woken with `changes_requested` | address every Open Finding, re-check what changed, submit |
 | Woken with **Your Block Was Answered** | continue with the answer; no need to ask again |

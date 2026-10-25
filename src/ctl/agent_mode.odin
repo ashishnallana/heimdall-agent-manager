@@ -365,6 +365,26 @@ ctl_v2_task_chain_fleet :: proc(endpoint, token: string, tokens, args: []string)
 		ctl_agent_call(endpoint, token, "agent.rest.request", params)
 		return
 	}
+	if sub == "pause" || sub == "resume" {
+		// REQ-TV2-5: stop/restart NEW dispatch to a row; live leases continue.
+		chain_id := pos(tokens, 1)
+		if chain_id == "" do chain_id = option_value(args, "--chain", option_value(args, "--chain-id", ""))
+		if chain_id == "" {
+			if res, ok := ctl_agent_local_call(endpoint, token, "agent.context.get", "{}"); ok do chain_id = extract_json_string_unescaped(res, "chain_id", "")
+		}
+		agent_id := option_value(args, "--agent", option_value(args, "--agent-id", ""))
+		if chain_id == "" || agent_id == "" {
+			fmt.printfln("usage: ham-ctl task-chain fleet %s [<chain-id>] --agent <agent_id> [--roles <worker,reviewer>]", sub)
+			return
+		}
+		params := json_object(
+			json_kv("http_method", "POST"),
+			json_kv("path", fmt.tprintf("/api/v1/task-chains/%s/fleets/%s/%s", safe_path_part(chain_id), safe_path_part(agent_id), sub)),
+			json_kv("body", ctl_v2_fleet_pause_body(args)),
+		)
+		ctl_agent_call(endpoint, token, "agent.rest.request", params)
+		return
+	}
 	if sub == "set" {
 		chain_id := pos(tokens, 1)
 		if chain_id == "" do chain_id = option_value(args, "--chain", option_value(args, "--chain-id", ""))
@@ -480,6 +500,12 @@ ctl_v2_task :: proc(endpoint, token: string, tokens, args: []string) {
 		tid := pos(tokens, 1)
 		if tid == "" { print_agent_help([]string{"task"}); return }
 		ctl_v2_task_publish(endpoint, token, tid, args, unblock = true)
+	case "hold", "release":
+		// Coordinator/owner (REQ-TV2-5): hold stops new dispatch and asks a
+		// current holder to checkpoint; release lets the task dispatch again.
+		tid := pos(tokens, 1)
+		if tid == "" { print_agent_help([]string{"task"}); return }
+		ctl_v2_task_hold(endpoint, token, tid, args, release = verb == "release")
 	case "fetch":
 		ctl_v2_task_fetch(endpoint, token, tokens, args)
 	case "readiness":
@@ -1906,7 +1932,7 @@ print_help_task_chain :: proc() {
 	fmt.println("                                      published to its tasks — until then nothing in the")
 	fmt.println("                                      chain is scheduled.")
 	fmt.println("  directory <add|update|remove|list>  Manage task chain relevant directories.")
-	fmt.println("  fleet <list|set>                    Manage chain fleet capacities, roles, and placement.")
+	fmt.println("  fleet <list|set|pause|resume>       Manage chain fleet capacities, roles, placement, and dispatch pause.")
 	fmt.println("")
 	fmt.println("MIXED-WORK GRAPH (every chain is mixed_work: tickets and workflow runs share one graph)")
 	fmt.println("  Refs are typed: task:<task-id> (an ordinary ticket) or workflow_run:<run-id> (a whole run;")
@@ -1949,10 +1975,12 @@ print_help_task_chain_fleet :: proc() {
 	fmt.println("VERBS")
 	fmt.println("  list <chain-id>                             List fleet capacities, roles, placement, and active agent counts.")
 	fmt.println("  set <chain-id> --agent <id> --capacity <N>  Set or adjust fleet capacity, roles, and placement for an agent.")
+	fmt.println("  pause [<chain-id>] --agent <id> [--roles …] Stop NEW leases to the agent (all roles or the named ones); current work continues.")
+	fmt.println("  resume [<chain-id>] --agent <id> [--roles …] Allow new leases again.")
 	fmt.println("")
 	fmt.println("FLAGS (set)")
 	fmt.println("  --agent <agent_id>        Durable agent ID (e.g. agt_worker).")
-	fmt.println("  --capacity <N>            Maximum concurrent instances for this agent on the chain.")
+	fmt.println("  --capacity <N>            Maximum concurrent instances for this agent on the chain (>= 1; use pause to stop dispatch).")
 	fmt.println("  --min-warm <N>            Minimum warm idle instances to maintain (optional).")
 	fmt.println("  --idle-ttl <seconds>      Idle TTL before scaling down warm instances (default: 600).")
 	fmt.println("  --roles <worker,reviewer> Roles this fleet row can serve (repeatable or comma-separated).")
@@ -1981,6 +2009,8 @@ print_help_task :: proc() {
 	fmt.println("                                          (count, last_comment_at, author, preview) — not bodies.")
 	fmt.println("  show <task-id>                          Show a task + brief + comment_summary (no bodies).")
 	fmt.println("  unblock <task-id> [--note <reason>]     Coordinator/owner clears a blocker and retries matching.")
+	fmt.println("  hold <task-id> --reason <text>          Coordinator/owner: no new lease until released; a current holder is asked to checkpoint (lease handoff).")
+	fmt.println("  release <task-id>                       Coordinator/owner: clear a hold so the task can dispatch again.")
 	fmt.println("                                          Dispatch failures do not spend attempts; fix the cause first.")
 	fmt.println("  comments <task-id> [--last N]           Fetch comment bodies; --last N = newest N (max 100).")
 	fmt.println("  fetch <task-id> <ref>                   Fetch one event (#<event_id>), output (output:<task_id>),")

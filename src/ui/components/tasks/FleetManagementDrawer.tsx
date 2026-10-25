@@ -985,6 +985,15 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
                       <div className="min-w-0">
                         <h4 className="text-xs font-bold text-primary flex min-w-0 flex-wrap items-center gap-x-1.5">
                           <span className="min-w-0 break-words" title={agentId}>{roleName}</span>
+                          {fleet.paused && (
+                            <span
+                              data-debug-id={`fleet-paused-badge-${agentId}`}
+                              className="rounded bg-warning-soft px-1.5 py-0.5 text-[10px] font-semibold text-warning"
+                              title={`No new leases for: ${(fleet.paused_roles || []).join(', ') || 'all roles'}. Current work continues. Resume with task-chain fleet resume.`}
+                            >
+                              Paused{fleet.paused_roles && fleet.paused_roles.length > 0 && !fleetRolesEqual(fleet.paused_roles, fleet.roles) ? `: ${fleet.paused_roles.join(', ')}` : ''}
+                            </span>
+                          )}
                         </h4>
                         <div className="flex flex-wrap items-center gap-1 text-[11px] text-muted font-mono mt-0.5">
                           <span>{activeCount}/{effectiveCapacity} active</span>

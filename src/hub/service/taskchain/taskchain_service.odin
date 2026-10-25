@@ -1856,8 +1856,10 @@ upsert_fleet_impl :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Cont
 	chain, ok, err := get_chain(service, auth, input.chain_id)
 	if !ok do return domain.Task_Chain_Fleet{}, err
 
+	// REQ-TV2-5: no silent normalization. Stopping new dispatch is an explicit
+	// pause, not capacity 0.
 	capacity := input.capacity
-	if capacity < 1 do capacity = 1
+	if capacity < 1 do return domain.Task_Chain_Fleet{}, domain.domain_error(.Validation_Failed, "capacity must be at least 1; to stop new dispatch to this agent use `task-chain fleet pause --agent <agent>`")
 	min_warm := input.min_warm
 	if min_warm < 0 do min_warm = 0
 	idle_ttl := input.idle_ttl_seconds
@@ -1920,6 +1922,7 @@ upsert_fleet_impl :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Cont
 		model             = input.model,
 		roles_json       = roles_json,
 		bridge_id        = bridge_id,
+		paused_roles_json = existing.paused_roles_json,
 		created_at       = existing.created_at if existing.created_at != "" else now,
 		updated_at       = now,
 	}
@@ -1933,6 +1936,102 @@ upsert_fleet_impl :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Cont
 }
 
 upsert_chain_fleet :: upsert_fleet
+
+// fleet_roles_warning (REQ-TV2-5): a role set with no built-in role (worker,
+// reviewer) whose custom roles no brief in the chain requests is almost
+// certainly a mistake (e.g. `checkpoint` used to park an agent). Advisory
+// only; "" when there is nothing to say.
+fleet_roles_warning :: proc(service: ^Taskchain_Service, chain_id: domain.Task_Chain_ID, owner: domain.User_ID, roles: []string) -> string {
+	if len(roles) == 0 do return ""
+	for r in roles {
+		role := strings.trim_space(r)
+		if role == domain.FLEET_ROLE_WORKER || role == domain.FLEET_ROLE_REVIEWER do return ""
+	}
+	tasks, terr := iface.taskchain_list_tasks_by_chain(service.repo, chain_id, owner)
+	if terr.code != .None do return ""
+	defer delete(tasks)
+	unrequested := make([dynamic]string, context.temp_allocator)
+	for r in roles {
+		role := strings.trim_space(r)
+		requested := false
+		for t in tasks {
+			for br in taskv2.brief_review_roles(t.brief_json, context.temp_allocator) do if br == role { requested = true; break }
+			if requested do break
+		}
+		if !requested do append(&unrequested, role)
+	}
+	if len(unrequested) == 0 do return ""
+	return fmt.tprintf("roles %s include no built-in role (worker, reviewer) and no task brief requests them, so this agent will never be granted work; to stop dispatch use `task-chain fleet pause`", strings.join(unrequested[:], ", ", context.temp_allocator))
+}
+
+Fleet_Pause_Input :: struct {
+	chain_id: domain.Task_Chain_ID,
+	agent_id: string,
+	// roles: the roles to pause/resume; empty = every role of the row.
+	roles:    []string,
+	paused:   bool,
+}
+
+// set_fleet_pause_impl (REQ-TV2-5): pause or resume new dispatch to a fleet row,
+// for all its roles or the named ones. Live leases are never touched; the
+// matcher simply grants no new lease of a paused role.
+set_fleet_pause_impl :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, input: Fleet_Pause_Input) -> (domain.Task_Chain_Fleet, domain.Domain_Error) {
+	trimmed_agent := strings.trim_space(input.agent_id)
+	if trimmed_agent == "" do return {}, domain.domain_error(.Validation_Failed, "agent_id is required")
+	chain, ok, err := get_chain(service, auth, input.chain_id)
+	if !ok do return {}, err
+	rows, rerr := iface.taskchain_list_fleets_by_chain(service.repo, chain.chain_id, chain.owner_user_id)
+	if rerr.code != .None do return {}, rerr
+	defer delete(rows)
+	row := domain.Task_Chain_Fleet{}
+	found := false
+	for f in rows do if f.agent_id == trimmed_agent { row = f; found = true; break }
+	if !found do return {}, domain.domain_error(.Not_Found, "fleet not found")
+	row_roles := jsonx.decode_string_array(row.roles_json if row.roles_json != "" else domain.FLEET_ROLES_DEFAULT_JSON, context.temp_allocator)
+	for r in input.roles {
+		role := strings.trim_space(r)
+		in_row := false
+		for rr in row_roles do if rr == role { in_row = true; break }
+		if !in_row do return {}, domain.domain_error(.Validation_Failed, fmt.tprintf("role %s is not one of this fleet row's roles", role))
+	}
+	// Normalise to the explicit set of paused roles of this row.
+	paused := make(map[string]bool, context.temp_allocator)
+	for rr in row_roles do if domain.fleet_role_paused(row, rr) do paused[rr] = true
+	if len(input.roles) == 0 {
+		for rr in row_roles do paused[rr] = input.paused
+	} else {
+		for r in input.roles do paused[strings.trim_space(r)] = input.paused
+	}
+	b := strings.builder_make()
+	n, all := 0, true
+	strings.write_byte(&b, '[')
+	for rr in row_roles {
+		if !paused[rr] { all = false; continue }
+		if n > 0 do strings.write_byte(&b, ',')
+		strings.write_byte(&b, '"'); contracts.write_json_string(&b, rr); strings.write_byte(&b, '"')
+		n += 1
+	}
+	strings.write_byte(&b, ']')
+	switch {
+	case n == 0: row.paused_roles_json = ""
+	case all: row.paused_roles_json = domain.FLEET_PAUSED_ALL_JSON
+	case: row.paused_roles_json = strings.to_string(b)
+	}
+	row.updated_at = platform.clock_now(service.clock)
+	saved, save_err := iface.taskchain_upsert_fleet(service.repo, row)
+	if save_err.code != .None do return saved, save_err
+	// A resume may make ready work dispatchable again; a pause needs no
+	// re-evaluation of live leases (they are untouched).
+	if service.engine != nil do _ = taskv2.fleet_changed(service.engine, chain, trimmed_agent)
+	return saved, domain.Domain_Error{}
+}
+
+set_fleet_pause :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, input: Fleet_Pause_Input) -> (domain.Task_Chain_Fleet, domain.Domain_Error) {
+	v := verb_begin(service)
+	out, err := set_fleet_pause_impl(service, auth, input)
+	if cerr := verb_end(&v, err.code == .None); cerr.code != .None do return domain.Task_Chain_Fleet{}, cerr
+	return out, err
+}
 
 delete_fleet_impl :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, chain_id: domain.Task_Chain_ID, agent_id: string) -> (bool, domain.Domain_Error) {
 	trimmed_agent := strings.trim_space(agent_id)

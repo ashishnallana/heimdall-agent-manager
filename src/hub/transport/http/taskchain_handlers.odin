@@ -310,6 +310,11 @@ Task_Chain_Fleet_Wire :: struct {
 	model:                   string                         `json:"model"`,
 	roles:                  json.Value                     `json:"roles"`,
 	bridge_id:              string                         `json:"bridge_id"`,
+	// REQ-TV2-5: the row's roles that get no new lease; [] when not paused.
+	paused_roles:           []string                       `json:"paused_roles"`,
+	paused:                 bool                           `json:"paused"`,
+	// warning: advisory text from fleet set (e.g. only unrequested custom roles).
+	warning:                string                         `json:"warning,omitempty"`,
 	restarted_instance_ids: Maybe([]string)                `json:"restarted_instance_ids,omitempty"`,
 	restart_failures:       Maybe([]Fleet_Restart_Failure) `json:"restart_failures,omitempty"`,
 	// What the matcher would apply for this row (plan REQ-UI-12); list only.
@@ -654,6 +659,15 @@ make_chain_directory_wire :: proc(dir: domain.Task_Chain_Directory) -> Task_Chai
 	}
 }
 
+// fleet_paused_roles lists the row's paused roles (`["*"]` expanded).
+fleet_paused_roles :: proc(f: domain.Task_Chain_Fleet) -> []string {
+	out := make([dynamic]string, context.temp_allocator)
+	for r in jsonx.decode_string_array(f.roles_json if f.roles_json != "" else domain.FLEET_ROLES_DEFAULT_JSON, context.temp_allocator) {
+		if domain.fleet_role_paused(f, r) do append(&out, r)
+	}
+	return out[:]
+}
+
 make_chain_fleet_wire :: proc(
 	f: domain.Task_Chain_Fleet,
 	active_count: int = 0,
@@ -684,6 +698,8 @@ make_chain_fleet_wire :: proc(
 		model                   = f.model,
 		roles                  = json_value_or_empty_array(f.roles_json if f.roles_json != "" else domain.FLEET_ROLES_DEFAULT_JSON),
 		bridge_id              = f.bridge_id,
+		paused_roles           = fleet_paused_roles(f),
+		paused                 = domain.fleet_paused_any(f),
 		restarted_instance_ids = restarted_ids_maybe,
 		restart_failures       = restart_failures_maybe,
 	}
@@ -1645,6 +1661,42 @@ answer_task_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req))
 }
 
+// POST …/tasks/{id}/hold {reason} | …/tasks/{id}/release {}  (REQ-TV2-5):
+// coordinator or owner. A hold on a leased task requests a checkpoint from its
+// holder; a no-op (already held / not held) succeeds with changed=false.
+hold_task_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Taskchain_Handlers)(ctx)
+	auth_ctx, ok, auth_resp := require_auth_any(h.auth, req)
+	if !ok do return auth_resp
+	if h.task_engine == nil do return respond_error(domain.domain_error(.Internal_Error, "task engine is not configured"), req.request_id)
+	chain_id := domain.Task_Chain_ID(path_part(req.path, 4))
+	task_id := domain.Task_ID(path_part(req.path, 6))
+	verb := path_part(req.path, 7)
+	if matched, mismatch_resp := require_task_path_scope(h, auth_ctx, chain_id, task_id, req); !matched do return mismatch_resp
+	task, tok, terr := taskchain_service.get_task(h.taskchains, auth_ctx, task_id)
+	if !tok do return respond_error(terr, req.request_id)
+	res: taskv2.Hold_Result
+	hok: bool
+	err: domain.Domain_Error
+	if verb == "hold" {
+		res, hok, err = taskv2.task_hold(h.task_engine, task, taskv2.actor_from_auth(auth_ctx), json_string(req.body, "reason"))
+	} else {
+		res, hok, err = taskv2.task_release(h.task_engine, task, taskv2.actor_from_auth(auth_ctx))
+	}
+	if !hok do return respond_error(err, req.request_id)
+	if res.changed {
+		publish_task_changed(h, string(res.task.owner_user_id), string(res.task.task_id), string(res.task.chain_id), "updated")
+		publish_chain_changed(h, string(res.task.owner_user_id), string(res.task.chain_id), "updated")
+	}
+	b := strings.builder_make()
+	strings.write_string(&b, `{"task":`)
+	write_task_json(&b, res.task)
+	fmt.sbprintf(&b, `,"changed":%v,"checkpoint_requested":%v,"message":"`, res.changed, res.checkpoint_requested)
+	contracts.write_json_string(&b, res.message)
+	strings.write_string(&b, `"}`)
+	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req))
+}
+
 // GET …/tasks/{id}/readiness  (REQ-TV2-3b): per-edge prerequisite state, merge
 // state and the reason an edge is unsatisfied. Read-only.
 task_readiness_handler :: proc(ctx: rawptr, req: Request) -> Response {
@@ -1957,8 +2009,10 @@ write_fleet_json :: proc(
 	active_count: int = 0,
 	restarted_instance_ids: ^[]string = nil,
 	restart_failures: ^[]Fleet_Restart_Failure = nil,
+	warning: string = "",
 ) {
 	wire := make_chain_fleet_wire(f, active_count, restarted_instance_ids, restart_failures)
+	wire.warning = warning
 	data, _ := json.marshal(wire, JSON_MARSHAL_OPT, allocator = context.temp_allocator)
 	strings.write_string(b, string(data))
 }
@@ -2125,7 +2179,31 @@ upsert_chain_fleet_handler :: proc(ctx: rawptr, req: Request) -> Response {
 		restarted_ptr = &restarted_out
 		failures_ptr = &failures_out
 	}
-	write_fleet_json(&b, fleet, 0, restarted_ptr, failures_ptr)
+	warning := ""
+	if has_roles do warning = taskchain_service.fleet_roles_warning(h.taskchains, fleet.task_chain_id, domain.User_ID(auth_ctx.user_id), roles[:])
+	write_fleet_json(&b, fleet, 0, restarted_ptr, failures_ptr, warning)
+	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req), 200)
+}
+
+// POST …/fleets/{agent}/pause|resume  {roles?:[…]}  (REQ-TV2-5): stop or
+// restart new dispatch to the row (all roles, or the named ones). Live leases
+// are untouched.
+pause_chain_fleet_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Taskchain_Handlers)(ctx)
+	auth_ctx, ok, auth_resp := require_auth_any(h.auth, req)
+	if !ok do return auth_resp
+	chain_id := domain.Task_Chain_ID(path_part(req.path, 4))
+	agent_id := path_part(req.path, 6)
+	verb := path_part(req.path, 7)
+	if verb != "pause" && verb != "resume" do return respond_error(domain.domain_error(.Not_Found, "unknown fleet action"), req.request_id)
+	roles := jsonx.extract_string_array(req.body, "roles", true, context.temp_allocator)
+	fleet, err := taskchain_service.set_fleet_pause(h.taskchains, auth_ctx, taskchain_service.Fleet_Pause_Input{
+		chain_id = chain_id, agent_id = agent_id, roles = roles[:], paused = verb == "pause",
+	})
+	if err.code != .None do return respond_error(err, req.request_id)
+	publish_chain_changed(h, auth_ctx.user_id, string(chain_id), "updated")
+	b := strings.builder_make()
+	write_fleet_json(&b, fleet)
 	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req), 200)
 }
 

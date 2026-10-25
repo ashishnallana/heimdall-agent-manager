@@ -68,6 +68,10 @@ Task_View :: struct {
 	in_review:          bool,
 	done:               bool,
 	cancelled:          bool,
+	// held: a coordinator/owner hold (REQ-TV2-5). hold_json is its blocked_on
+	// object; while a work or review lease is live it carries checkpoint_requested.
+	held:               bool,
+	hold_json:          string,
 	// last_event_id is the id of the last event folded (0 for an empty list).
 	last_event_id:      i64,
 }
@@ -174,6 +178,12 @@ fold_task :: proc(events: []domain.Task_Event, input: Fold_Input) -> Task_View {
 			// fifth block parks the task for a human exactly like a fifth expiry.
 			if !dispatch && !infrastructure do apply_budget(&v, max_attempts, ev.ts_ms)
 		case EV_HANDOFF:
+			// A review holder's checkpoint handoff on a held task (REQ-TV2-5)
+			// frees only that review lease; the attempt and its reviews stand.
+			if jsonx.extract_string(ev.payload_json, "kind", "", true, context.temp_allocator) == domain.LEASE_KIND_REVIEW {
+				if v.review_lease_count > 0 do v.review_lease_count -= 1
+				continue
+			}
 			v.has_work_lease = false
 			v.last_release = .Handoff
 		case EV_LEASE_EXPIRED:
@@ -227,6 +237,13 @@ fold_task :: proc(events: []domain.Task_Event, input: Fold_Input) -> Task_View {
 			v.cancelled = true
 			v.has_work_lease = false
 			v.in_review = false
+		case EV_HELD:
+			v.held = true
+			reason := jsonx.extract_string(ev.payload_json, "reason", "", true, context.temp_allocator)
+			v.hold_json = hold_block(reason, ev.ts_ms)
+		case EV_HOLD_RELEASED:
+			v.held = false
+			v.hold_json = ""
 		case EV_REOPENED:
 			v.done = false
 			v.cancelled = false
@@ -256,8 +273,78 @@ fold_task :: proc(events: []domain.Task_Event, input: Fold_Input) -> Task_View {
 		}
 	}
 
+	// A hold is an overlay, applied last so a block answered while held (or a
+	// handoff, which clears nothing) leaves the hold standing: the task parks
+	// in backlog as blocked_on {kind: hold} instead of being re-dispatched
+	// (REQ-TV2-5). Another live block (e.g. a failed reviewer's
+	// agent_not_running) stays the primary blocked_on so it remains visible,
+	// and the hold rides along as its `hold` member; task_hold_object reads
+	// either form, so every hold guard sees the hold whatever else blocks.
+	if v.held && !v.done && !v.cancelled {
+		hold := v.hold_json
+		if v.has_work_lease || v.review_lease_count > 0 do hold = hold_checkpoint_block(v.hold_json)
+		if v.blocked_on_json == "" {
+			v.blocked_on_json = hold
+		} else {
+			v.blocked_on_json = with_hold_member(v.blocked_on_json, hold)
+		}
+	}
 	v.state = derive_state(v, input)
 	return v
+}
+
+// hold_block is the blocked_on object of a held task. Temp-allocated.
+@(private = "file")
+hold_block :: proc(reason: string, since_ms: i64) -> string {
+	p := json_begin()
+	json_str(&p, "kind", "hold")
+	json_str(&p, "reason", reason)
+	json_int(&p, "since_ms", since_ms)
+	return json_end(&p)
+}
+
+// hold_checkpoint_block marks a hold set on a leased task: the holder is asked
+// to checkpoint (lease handoff); the lease is never revoked.
+@(private = "file")
+hold_checkpoint_block :: proc(hold_json: string) -> string {
+	body := strings.trim_space(hold_json)
+	return fmt.tprintf(`%s,"checkpoint_requested":true}}`, body[:len(body)-1])
+}
+
+// with_hold_member appends the hold object to another block as its last
+// member, `hold`. Temp-allocated.
+@(private = "file")
+with_hold_member :: proc(block_json, hold_json: string) -> string {
+	body := strings.trim_space(block_json)
+	return fmt.tprintf(`%s,"hold":%s}`, body[:len(body)-1], hold_json)
+}
+
+// task_is_held: the task carries a hold, either as its primary blocked_on
+// (kind == "hold") or nested under another block's `hold` member.
+task_is_held :: proc(task: domain.Task) -> bool {
+	_, held := task_hold_object(task.blocked_on_json)
+	return held
+}
+
+// task_hold_object returns the hold object of a blocked_on: blocked_on itself
+// when its kind is hold, else its nested `hold` member (see fold_task).
+task_hold_object :: proc(blocked_on_json: string) -> (string, bool) {
+	if strings.trim_space(blocked_on_json) == "" do return "", false
+	if jsonx.extract_string(blocked_on_json, "kind", "", true, context.temp_allocator) == "hold" do return blocked_on_json, true
+	return raw_object_field(blocked_on_json, "hold")
+}
+
+// blocked_on_without_hold drops the nested `hold` member that fold_task
+// appends to another block, so a hold or release does not read as a change
+// of that block (no duplicate attention, stale agent-failure cards stay valid).
+// A primary hold is returned unchanged. Temp-allocated.
+blocked_on_without_hold :: proc(blocked_on_json: string) -> string {
+	hold, ok := raw_object_field(blocked_on_json, "hold")
+	if !ok do return blocked_on_json
+	body := strings.trim_space(blocked_on_json)
+	suffix := fmt.tprintf(`,"hold":%s}`, hold)
+	if !strings.has_suffix(body, suffix) do return blocked_on_json
+	return fmt.tprintf("%s}", body[:len(body)-len(suffix)])
 }
 
 // OSCILLATION_ROUNDS: changes_requested count at which the task stops bouncing
