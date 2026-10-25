@@ -1225,11 +1225,15 @@ bridge_action_scheduler_suspend_locked :: proc() {
 // (re-)enabled Actions, so re-enable never replays fires missed while suspended. A
 // one-shot whose time passed while disabled is dropped from the local queue (its Hub
 // definition is kept). Hub-side target_run_at advances on the next real fire.
+// eligible_since has one-second resolution (the Hub clock), so the real re-enable
+// instant lies anywhere in [since, since+1s): the cutoff covers that whole second, so
+// a slot missed in a sub-second disable is never replayed. Fail closed: a slot due
+// within that second after the re-enable is rolled forward too.
 action_scheduler_skip_missed_fires :: proc(queue: ^[dynamic]Action_Queue_Item, eligible_since: string, now_ms: i64) {
     if eligible_since == "" do return
     since_ms, ok := action_scheduler_parse_rfc3339_ms(eligible_since)
     if !ok do return
-    cutoff := min(since_ms, now_ms)
+    cutoff := min(since_ms + 1000, now_ms)
     for i := len(queue) - 1; i >= 0; i -= 1 {
         q := &queue[i]
         if q.state == "completed" || q.in_flight || q.target_run_at_ms <= 0 || q.target_run_at_ms >= cutoff do continue

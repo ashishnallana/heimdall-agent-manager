@@ -46,8 +46,10 @@ export const EXPERIMENTAL_FLAGS: ReadonlyArray<{ key: string; label: string; des
   },
   {
     key: PROJECT_VCS_EXPERIMENT_KEY,
-    label: 'Project/VCS',
-    description: 'Experimental Project and version-control features in conversations and chain overviews.',
+    // Named like the Hub's refusal ("Project Explorer is experimental. Enable it in
+    // Settings > Experimental…") so users can find the toggle it points to.
+    label: 'Project Explorer (Files & VCS)',
+    description: 'Experimental file and version-control explorer for projects and chain directories in conversations and chain overviews. Projects management is unaffected.',
   },
   {
     key: ACTIONS_EXPERIMENT_KEY,

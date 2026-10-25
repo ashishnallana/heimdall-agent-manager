@@ -2,6 +2,8 @@ package http
 
 import "core:fmt"
 import "core:strings"
+import "core:sync"
+import "core:time"
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
 import auth_service "odin_test:hub/service/auth"
@@ -48,6 +50,21 @@ experiment_list_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	return respond_success(body, req.request_id, auth_ctx_server_time(req))
 }
 
+experiment_set_mutex: sync.Mutex
+
+// experiment_next_updated_at stamps a flag write strictly after the key's previous
+// write (REQ-EXP-GATE-4). clock_now has one-second resolution, and the Actions snapshot
+// epoch and eligible_since are derived from updated_at: an on/off/on inside one second
+// would otherwise reuse the earlier on-epoch, so a bridge that suspended on that epoch
+// would never see a token change and stay suspended. Returns now unchanged when it is
+// already later, or when either value does not parse (request temp arena).
+experiment_next_updated_at :: proc(now: string, previous: string) -> string {
+	now_ms, now_ok := platform.rfc3339_to_unix_ms(now)
+	prev_ms, prev_ok := platform.rfc3339_to_unix_ms(previous)
+	if !now_ok || !prev_ok || now_ms > prev_ms do return now
+	return platform.format_rfc3339_utc(time.unix(prev_ms/1000 + 1, 0))
+}
+
 // PUT /api/v1/me/experiments/{key}
 // Sets (creates or updates) a single experiment flag for the authenticated user.
 // Body: {"enabled": true|false}
@@ -68,13 +85,29 @@ experiment_set_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	if !enabled_ok {
 		return respond_error(domain.domain_error(.Validation_Failed, "enabled must be a JSON boolean (true or false)"), req.request_id)
 	}
-	now := platform.clock_now(h.clock)
+	// Read-modify-write of updated_at below; serialize so two toggles of one key can
+	// never be stamped with the same instant.
+	sync.mutex_lock(&experiment_set_mutex)
+	defer sync.mutex_unlock(&experiment_set_mutex)
+
+	previous := ""
+	exps, list_err := iface.experiment_list_by_owner(h.repo, auth_ctx.user_id)
+	defer {
+		for e in exps {
+			delete(e.owner_user_id)
+			delete(e.key)
+			delete(e.updated_at)
+		}
+		delete(exps)
+	}
+	if list_err.code != .None do return respond_error(list_err, req.request_id)
+	for e in exps do if e.key == key do previous = e.updated_at
 
 	exp := domain.Experiment{
 		owner_user_id = auth_ctx.user_id,
 		key           = key,
 		enabled       = enabled,
-		updated_at    = now,
+		updated_at    = experiment_next_updated_at(platform.clock_now(h.clock), previous),
 	}
 
 	_, set_err := iface.experiment_set(h.repo, exp)

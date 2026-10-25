@@ -27,6 +27,13 @@ test('Settings > Experimental lists an Actions toggle and keeps existing toggles
   assert.ok(actions?.description);
 });
 
+test('Settings labels name the features the Hub and UI unavailable notices point to', () => {
+  // Hub 403: "<Feature> is experimental. Enable it in Settings > Experimental to use it."
+  const label = (key: string) => EXPERIMENTAL_FLAGS.find((f) => f.key === key)?.label ?? '';
+  assert.match(label(PROJECT_VCS_EXPERIMENT_KEY), /^Project Explorer\b/);
+  assert.match(label(ACTIONS_EXPERIMENT_KEY), /^Actions\b/);
+});
+
 test('Actions is loading until flags load, then disabled when absent or false', () => {
   assert.equal(resolveActionsExperiment(undefined), 'loading');
   assert.equal(resolveActionsExperiment([]), 'disabled');

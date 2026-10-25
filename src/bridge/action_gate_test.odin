@@ -181,3 +181,38 @@ test_action_gate_reenable_restores_without_replaying_missed_fires :: proc(t: ^te
     testing.expect_value(t, gate_mints, 0)
     testing.expect_value(t, gate_executes, 0)
 }
+
+// REQ-EXP-GATE-4: eligible_since is floored to the Hub's one-second clock. A slot that
+// fell due inside a sub-second disable (same second as the re-enable) is still a missed
+// fire and must roll forward, not stay due for the next tick.
+@(test)
+test_action_gate_reenable_skips_fire_missed_within_eligible_second :: proc(t: ^testing.T) {
+    context.allocator = runtime.heap_allocator()
+    sync.mutex_lock(&action_sched_test_mutex)
+    defer sync.mutex_unlock(&action_sched_test_mutex)
+    base := bridge_runtime_now_ms()
+    gate_fresh_state(base)
+    gate_fetch_status = 403
+    bridge_action_scheduler_tick(base, gate_fetch, gate_execute, gate_resolve)
+    testing.expect(t, bridge_action_sched_state.suspended)
+
+    second := (base / 1000 + 120) * 1000 // whole second, as the Hub stamps updated_at
+    since := action_scheduler_format_rfc3339_utc(second) // temp arena
+    missed_ms := second + 400 // fell due while disabled, inside the re-enable second
+    missed := action_scheduler_format_rfc3339_utc(missed_ms)
+    now := second + 900
+    gate_fetch_body = strings.concatenate({
+        `{"snapshot":{"epoch":"e.on3","revision":0,"etag":"W/\"e.on3:0\"","eligible_since":"`, since, `"},"data":[`,
+        `{"id":"act_gate","target_agent_id":"agent","state":"active","interval":"60s","target_run_at":"`, missed, `","blackout_dates":[]}]}`,
+    })
+    defer delete(gate_fetch_body)
+    gate_fetch_status = 200
+    bridge_action_scheduler_notify_snapshot("e.on3", 0, now)
+    testing.expect_value(t, bridge_action_scheduler_tick(now, gate_fetch, gate_execute, gate_resolve), 0)
+    s := &bridge_action_sched_state
+    testing.expect(t, !s.suspended, "re-enable installs the snapshot")
+    testing.expect_value(t, len(s.queue), 1)
+    if len(s.queue) == 1 do testing.expect(t, s.queue[0].target_run_at_ms > now, "slot missed inside the eligible second rolled forward")
+    testing.expect_value(t, gate_mints, 0)
+    testing.expect_value(t, gate_executes, 0)
+}
