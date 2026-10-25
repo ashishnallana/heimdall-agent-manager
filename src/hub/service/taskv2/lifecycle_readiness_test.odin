@@ -256,3 +256,75 @@ test_waiting_gate_with_nothing_owed_raises_review_stalled :: proc(t: ^testing.T)
 	_ = fire_due(&fx.svc, now_ms(&fx.clock))
 	testing.expect(t, count_events(fx, "task_1", EV_REVIEW_STALLED) >= 2, "re-alerts while stalled")
 }
+
+// Failure injection for the Done-time merge snapshot (thread-local: tests run
+// in parallel threads, each with its own fixture repository).
+@(thread_local) snap_inject_orig_append: iface.Task_Event_Append_Proc
+@(thread_local) snap_inject_fail_dirs: bool
+@(thread_local) snap_inject_fail_write: bool
+@(thread_local) snap_inject_orig_dirs: iface.Task_Chain_Directory_List_By_Chain_Proc
+
+snap_inject_dirs :: proc(ctx: rawptr, chain_id: domain.Task_Chain_ID, owner_user_id: domain.User_ID) -> ([]domain.Task_Chain_Directory, domain.Domain_Error) {
+	if snap_inject_fail_dirs do return nil, domain.domain_error(.Internal_Error, "injected directory read failure")
+	return snap_inject_orig_dirs(ctx, chain_id, owner_user_id)
+}
+
+snap_inject_append :: proc(ctx: rawptr, event: domain.Task_Event) -> (domain.Task_Event, bool, domain.Domain_Error) {
+	if snap_inject_fail_write && event.kind == EV_MERGE_SNAPSHOT do return domain.Task_Event{}, false, domain.domain_error(.Internal_Error, "injected snapshot write failure")
+	return snap_inject_orig_append(ctx, event)
+}
+
+// The Done-time snapshot fails closed: when the chain's directories cannot be
+// read, or the snapshot event cannot be written, the submit that would make
+// the task Done is rolled back (no Done without a snapshot, and never a
+// snapshot of `none` for a git-backed task). Once the repository recovers the
+// same submit commits Done with a pending merge.
+@(test)
+test_done_merge_snapshot_fails_closed :: proc(t: ^testing.T) {
+	fx, log, ok := lease_fixture(t, "t6_snapfail")
+	defer lease_fixture_close(fx, log)
+	if !ok do return
+	snap_inject_orig_dirs = fx.repo.list_directories_by_chain
+	snap_inject_orig_append = fx.repo.append_event
+	fx.repo.list_directories_by_chain = snap_inject_dirs
+	fx.repo.append_event = snap_inject_append
+	defer {
+		snap_inject_fail_dirs, snap_inject_fail_write = false, false
+		fx.repo.list_directories_by_chain = snap_inject_orig_dirs
+		fx.repo.append_event = snap_inject_orig_append
+	}
+	chain := seed_live_chain(t, fx, "chain_snapfail")
+	seed_directory(fx, chain, "dir_git", "br_1", "git")
+	seed_fleet(fx, chain, "agt_w")
+	seed_instance(fx, chain, "inst_w1", "agt_w", "br_1", "idle")
+	_ = publish_task(t, fx, chain, "task_a")
+	confirm_holder(fx, "inst_w1")
+	submit :: proc(fx: ^Fixture) -> (bool, domain.Domain_Error) {
+		_, sok, serr := lease_submit(&fx.svc, inst_auth("inst_w1"), Submit_Input{summary = "a", vcs_json = `{"head":"ha","dirty":false}`})
+		return sok, serr
+	}
+	for mode in ([]string{"dirs", "write"}) {
+		snap_inject_fail_dirs, snap_inject_fail_write = mode == "dirs", mode == "write"
+		sok, serr := submit(fx)
+		testing.expect(t, !sok && serr.code != .None, fmt.tprintf("%s failure refuses the submit: %v", mode, sok))
+		testing.expect(t, get_task(fx, "task_a").state != .Done, fmt.tprintf("%s failure: Done rolled back", mode))
+		testing.expect_value(t, count_events(fx, "task_a", EV_MERGE_SNAPSHOT), 0)
+		testing.expect_value(t, count_events(fx, "task_a", EV_SUBMITTED), 0)
+	}
+	snap_inject_fail_dirs, snap_inject_fail_write = false, false
+	sok, serr := submit(fx)
+	if !testing.expect(t, sok, fmt.tprintf("submit after recovery: %s", serr.message)) do return
+	done_a := get_task(fx, "task_a")
+	testing.expect_value(t, done_a.state, domain.Task_State.Done)
+	testing.expect_value(t, count_events(fx, "task_a", EV_MERGE_SNAPSHOT), 1)
+	testing.expect_value(t, task_merge_status(&fx.svc, done_a).state, "pending")
+	// boot backfill of a legacy Done history (snapshot stripped) reports a
+	// failed read and records nothing, so the next boot retries
+	evs, _ := iface.taskchain_list_events_by_task(&fx.repo, "task_a", "u1")
+	legacy := make([dynamic]domain.Task_Event, context.temp_allocator)
+	for e in evs do if e.kind != EV_MERGE_SNAPSHOT do append(&legacy, e)
+	snap_inject_fail_dirs = true
+	berr := backfill_merge_snapshot(&fx.svc, done_a, legacy[:])
+	testing.expect(t, berr.code != .None, "backfill reports the failed read")
+	testing.expect_value(t, count_events(fx, "task_a", EV_MERGE_SNAPSHOT), 1)
+}

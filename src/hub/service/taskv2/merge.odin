@@ -319,8 +319,10 @@ task_merge_status :: proc(svc: ^Service, task: domain.Task) -> Merge_Status {
 			applicable := snapshot_applicable
 			if !snapshot_seen {
 				// Legacy Done (before snapshots existed, not yet backfilled at
-				// boot): derive from the current directory rows.
-				applicable = len(git_directories_at(svc, task, ev.ts_ms)) > 0
+				// boot): derive from the current directory rows. An unreadable
+				// directory list fails closed (pending), never open (none).
+				dirs, derr := git_directories_at(svc, task, ev.ts_ms)
+				applicable = derr.code != .None || len(dirs) > 0
 			}
 			if applicable do st.state = "pending"
 			return st
@@ -335,11 +337,12 @@ task_ran_work :: proc(evs: []domain.Task_Event) -> bool {
 }
 
 // git_directories_at lists the chain's git directories; with before_ms > 0
-// only those created at or before it (the legacy derivation).
-git_directories_at :: proc(svc: ^Service, task: domain.Task, before_ms: i64 = 0) -> [dynamic]string {
+// only those created at or before it (the legacy derivation). A failed read is
+// returned, never reported as "no git directory".
+git_directories_at :: proc(svc: ^Service, task: domain.Task, before_ms: i64 = 0) -> ([dynamic]string, domain.Domain_Error) {
 	out := make([dynamic]string, context.temp_allocator)
 	dirs, derr := iface.taskchain_list_directories_by_chain(svc.repo, task.chain_id, task.owner_user_id)
-	if derr.code != .None do return out
+	if derr.code != .None do return out, derr
 	for d in dirs {
 		if d.vcs_kind != "git" do continue
 		if before_ms > 0 {
@@ -347,7 +350,7 @@ git_directories_at :: proc(svc: ^Service, task: domain.Task, before_ms: i64 = 0)
 		}
 		append(&out, string(d.directory_id))
 	}
-	return out
+	return out, domain.Domain_Error{}
 }
 
 // record_merge_snapshot (REQ-TV2-3b) appends the immutable Done-time record of
@@ -355,12 +358,16 @@ git_directories_at :: proc(svc: ^Service, task: domain.Task, before_ms: i64 = 0)
 // never change it: a task Done with no git directory stays merge none, and a
 // task Done with one stays pending until a merge outcome even if the directory
 // goes away. Recorded on every transition into Done (so a reopen re-snapshots).
-record_merge_snapshot :: proc(svc: ^Service, task: domain.Task) {
-	if svc == nil || svc.repo == nil || !PER_LEASE_WORKTREES_ENABLED do return
-	append_merge_snapshot(svc, task, git_directories_at(svc, task)[:], false)
+// Fails closed: a directory-read or event-write error is returned so the
+// caller's UoW rolls back and Done never commits without its snapshot.
+record_merge_snapshot :: proc(svc: ^Service, task: domain.Task) -> domain.Domain_Error {
+	if svc == nil || svc.repo == nil || !PER_LEASE_WORKTREES_ENABLED do return domain.Domain_Error{}
+	dirs, derr := git_directories_at(svc, task)
+	if derr.code != .None do return derr
+	return append_merge_snapshot(svc, task, dirs[:], false)
 }
 
-append_merge_snapshot :: proc(svc: ^Service, task: domain.Task, dirs: []string, backfilled: bool) {
+append_merge_snapshot :: proc(svc: ^Service, task: domain.Task, dirs: []string, backfilled: bool) -> domain.Domain_Error {
 	ids := strings.builder_make(context.temp_allocator)
 	strings.write_byte(&ids, '[')
 	for id, i in dirs {
@@ -374,23 +381,32 @@ append_merge_snapshot :: proc(svc: ^Service, task: domain.Task, dirs: []string, 
 	json_bool(&p, "applicable", len(dirs) > 0)
 	json_raw(&p, "git_directories", strings.to_string(ids))
 	if backfilled do json_bool(&p, "backfilled", true)
-	append_event(svc.repo, svc.clock, task, hub_actor(), EV_MERGE_SNAPSHOT, json_end(&p))
+	_, ok, err := append_event(svc.repo, svc.clock, task, hub_actor(), EV_MERGE_SNAPSHOT, json_end(&p))
+	if !ok {
+		if err.code == .None do err = domain.domain_error(.Internal_Error, "merge snapshot was not recorded")
+		return err
+	}
+	return domain.Domain_Error{}
 }
 
 // backfill_merge_snapshot (boot): a legacy Done task with a pending merge and
 // no snapshot gets one from the legacy derivation, so from then on its merge
-// applicability no longer follows mutable directory rows.
-backfill_merge_snapshot :: proc(svc: ^Service, task: domain.Task, evs: []domain.Task_Event) {
-	if !PER_LEASE_WORKTREES_ENABLED do return
+// applicability no longer follows mutable directory rows. On a failed read or
+// write nothing is recorded and the error is returned; the task keeps the
+// fail-closed legacy derivation and the next boot retries.
+backfill_merge_snapshot :: proc(svc: ^Service, task: domain.Task, evs: []domain.Task_Event) -> domain.Domain_Error {
+	if !PER_LEASE_WORKTREES_ENABLED do return domain.Domain_Error{}
 	for i := len(evs) - 1; i >= 0; i -= 1 {
 		switch evs[i].kind {
-		case EV_MERGE_SNAPSHOT, EV_MERGED, EV_MERGE_CONFLICT, EV_MERGE_FAILED: return
+		case EV_MERGE_SNAPSHOT, EV_MERGED, EV_MERGE_CONFLICT, EV_MERGE_FAILED: return domain.Domain_Error{}
 		case EV_APPROVED, EV_SUBMITTED:
-			if !task_ran_work(evs) do return
-			append_merge_snapshot(svc, task, git_directories_at(svc, task, evs[i].ts_ms)[:], true)
-			return
+			if !task_ran_work(evs) do return domain.Domain_Error{}
+			dirs, derr := git_directories_at(svc, task, evs[i].ts_ms)
+			if derr.code != .None do return derr
+			return append_merge_snapshot(svc, task, dirs[:], true)
 		}
 	}
+	return domain.Domain_Error{}
 }
 
 // Generation changes are refused while merges are pending, so a job authorized

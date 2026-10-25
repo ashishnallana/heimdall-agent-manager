@@ -240,7 +240,9 @@ rebuild_timers :: proc(svc: ^Service) {
 		for t in done {
 			evs, eerr := iface.taskchain_list_events_by_task(svc.repo, t.task_id, t.owner_user_id)
 			if eerr.code != .None || !merge_pending(evs) do continue
-			backfill_merge_snapshot(svc, t, evs)
+			if berr := backfill_merge_snapshot(svc, t, evs); berr.code != .None {
+				fmt.eprintfln("[taskv2] merge snapshot backfill for %s failed (%s); retried next boot", t.task_id, berr.message)
+			}
 			arm_task_timers(svc, t)
 		}
 	}

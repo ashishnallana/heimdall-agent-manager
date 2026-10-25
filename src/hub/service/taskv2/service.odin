@@ -625,7 +625,9 @@ refold_task :: proc(svc: ^Service, u: ^Uow, task: domain.Task, tasks: []domain.T
 		metric_task_transition(task.state, saved.state)
 	}
 	// Merge applicability is fixed at Done, before any later directory change.
-	if saved.state == .Done && task.state != .Done do record_merge_snapshot(svc, saved)
+	if saved.state == .Done && task.state != .Done {
+		if serr := record_merge_snapshot(svc, saved); serr.code != .None do return task, view, false, serr
+	}
 	// Column-backed alerts: ready_unclaimed (ready_since) and blocked-on-human
 	// re-alert (blocked_on_json) are armed whenever the column they key on moves.
 	if saved.ready_since != task.ready_since || saved.blocked_on_json != task.blocked_on_json || saved.state != task.state {
