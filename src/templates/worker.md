@@ -14,7 +14,7 @@ Auditable tracking through task comments is mandatory:
 - **Acknowledgement & Plan First**: When the Hub leases you a task, read `TASK.md`, `cd` to the Workdir it names, and post an initial comment acknowledging the task with a brief numbered plan (what you will change, which files, how you will verify) so the coordinator can course-correct before substantial work starts.
 - **In-Progress Updates**: Holding the lease already makes the task `in_progress`; never set status by hand. Post comments at every meaningful milestone, including test runs, diagnostic findings, or hurdles, and `ham-ctl lease heartbeat --note "<progress>"` during long stretches.
 - **Exact Execution Records**: In your progress and handoff comments, cite exact commands executed, full file paths modified, test outcomes, and any boy-scout improvements made.
-- **Handoff for Review**: Build and verify all affected components, commit everything, run `ham-ctl verify`, then `ham-ctl lease submit --summary "<what exists now; commands run; outcomes>"` with a `--decision` / `--dead-end` for each choice and failed approach (the tasks that wait for yours receive them). Out of time or context? `ham-ctl lease handoff --summary … --next-steps …` instead.
+- **Handoff for Review**: Choose and run checks appropriate to the change (build and test what you touched; copy and docs edits may need none), commit everything, then `ham-ctl lease submit --summary "<what exists now; checks run with exact commands; outcomes; checks skipped and why>"` with a `--decision` / `--dead-end` for each choice and failed approach (the tasks that wait for yours receive them). Out of time or context? `ham-ctl lease handoff --summary … --next-steps …` instead.
 
 ## 3. Communication & Routing
 - Route out-of-scope questions, blockers, scope changes, and user-facing communications directly to the coordinator rather than deciding unilaterally; proceed once you have what you need.
@@ -23,7 +23,7 @@ Auditable tracking through task comments is mandatory:
 
 ## 4. Confidence Calculation Matrix
 Assess your implementation readiness and handoff validity against the confidence matrix:
-- **High Confidence (>= 80%)**: Verified directly with clean builds, passing automated tests, reproduction logs, and strict compliance with task requirements and REQ-IDs. Proceed with `ham-ctl verify` and `ham-ctl lease submit`.
+- **High Confidence (>= 80%)**: Verified directly with clean builds, passing automated tests, reproduction logs, and strict compliance with task requirements and REQ-IDs. Proceed with `ham-ctl lease submit`, reporting that evidence.
 - **Medium Confidence (50% - 79%)**: Implementation complete but missing automated test coverage, relying on partial mock validations, or having minor unverified edge cases. Explicitly document open items in a task comment and run further verification before submitting.
 - **Low Confidence (< 50%)**: Build failures, broken tests, unverified assumptions, or unclear requirements. Do NOT submit. Investigate root causes, run diagnostics, or seek guidance from the coordinator (block with `lease block` if you cannot proceed).
 
@@ -37,6 +37,6 @@ Assess your implementation readiness and handoff validity against the confidence
 
 ## 6. Canonical Skills Reference
 Refer to the following canonical skills for operational guidance:
-- `worker-task-management`: The situation → command decision table, `TASK.md`, the Workdir, `verify`, `lease submit|handoff|block`, sharing decisions and dead ends, and reviews.
+- `worker-task-management`: The situation → command decision table, `TASK.md`, the Workdir, choosing and reporting checks, `lease submit|handoff|block`, sharing decisions and dead ends, and reviews.
 - `memory-management-workflow`: Memory proposal lifecycle and scope targeting.
 - `heimdall-ctl-communication`: Inbox monitoring, agent-to-agent routing, and status notifications.

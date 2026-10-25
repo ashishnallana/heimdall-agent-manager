@@ -22,7 +22,7 @@ Configure shared fleet roles before starting a recipe; runs never widen the flee
 ```bash
 ./.heimdall/bin/ham-ctl workflow templates
 ./.heimdall/bin/ham-ctl workflow run fix_flaky_tests --chain <chain-id> --request-id <stable-key> \
-  --input suite=src/auth --input test_command="make test-auth" --input verify_cmd="make test" \
+  --input suite=src/auth --input test_command="make test-auth" \
   --after task:<investigation-id>
 ./.heimdall/bin/ham-ctl workflow list --chain <chain-id>
 ./.heimdall/bin/ham-ctl workflow status <run-id>
@@ -65,12 +65,11 @@ cat > proposal.json <<'EOF'
   "tasks": [
     {"id": "t_api", "title": "Commit-diff endpoint", "priority": "p1",
      "brief": {"goal": "Expose paginated commit-diff for chain directories.",
-               "acceptance": ["GET …/vcs/commit-diff returns <= 200 hunks", "unit tests pass"],
-               "verify": "odin test src/hub/service/taskchain -collection:odin_test=src -out:$HOME/.cache/heimdall-tests/tc",
+               "acceptance": ["GET …/vcs/commit-diff returns <= 200 hunks", "taskchain unit tests cover pagination and pass"],
                "assignee": "agt_worker_odin", "review_roles": ["reviewer"]}},
     {"id": "t_ui", "title": "Diff viewer", "depends_on": ["t_api"],
-     "brief": {"goal": "Render the commit diff in the task panel.", "acceptance": ["npm test passes"],
-               "verify": "npm test", "assignee": "agt_worker_ui", "requires_user_approval": true}}
+     "brief": {"goal": "Render the commit diff in the task panel.", "acceptance": ["diff renders per file with hunk headers", "UI tests for the viewer pass"],
+               "assignee": "agt_worker_ui", "requires_user_approval": true}}
   ]
 }
 EOF
@@ -79,10 +78,10 @@ EOF
 ```
 - Per-task fields: `id`, `title`, `description`, `priority`, `depends_on`, `brief`. **Put `assignee`, `reviewers` and `requires_user_approval` inside `brief`**; top-level copies are ignored.
 - Without `--auto-approve` the proposal waits for an explicit decision. Existing work continues.
-- Single tasks: `task create --title … --goal … --acceptance … (repeat) --verify … [--assignee agt_…] [--reviewer agt_…] [--review-role <role>] [--require-user-approval] [--input <ref>] [--depends-on <ids>] [--auto-submit] [--require-independent-verify]`, then `task publish <task-id>` or `task-chain publish <chain-id>`.
+- Single tasks: `task create --title … --goal … --acceptance … (repeat) [--assignee agt_…] [--reviewer agt_…] [--review-role <role>] [--require-user-approval] [--input <ref>] [--depends-on <ids>]`, then `task publish <task-id>` or `task-chain publish <chain-id>`.
 - Publish refuses incomplete briefs with `422 brief_incomplete` listing what is missing per task, including `review_role:<r>` when no fleet row holds a role the brief asks for.
 
-**A good brief** is self-contained: a goal a newcomer can act on, checkable acceptance items, an optional verify command that exits non-zero on failure. Add `inputs` (`output:<task>`, `<path>@<rev>`) only for context beyond what dependencies already bring: a task automatically receives the handoff of every task it waits for.
+**A good brief** is self-contained: a goal a newcomer can act on, checkable acceptance items (a ticket needs a non-empty goal and at least one acceptance item; nothing else is required). Do not prescribe a verification command: the worker chooses and reports checks appropriate to the change, and reviewers judge correctness from the diff and that evidence. Add `inputs` (`output:<task>`, `<path>@<rev>`) only for context beyond what dependencies already bring: a task automatically receives the handoff of every task it waits for.
 
 ## 3. Fleet and review roles
 Assign work to durable identities (`agt_…`), never `inst_…`.
@@ -121,7 +120,7 @@ Routine events stay quiet. You get one line, `[taskv2] <trigger>: …`, only whe
 |---|---|
 | `proposal_decided` (approved / rejected) | approved: tasks are dispatching, keep the user posted. Rejected: read the reason, revise, propose again |
 | `blocked_on human` | a worker ran `lease block --waiting-on user`. Read the question (`task show <id>`), ask the user with `chat send --questions-file <questions.json>` for a set of questions, or `--options` for one simple choice. Their answer (given in the task's UI) re-readies the task and appears in the worker's `TASK.md` |
-| `budget_exhausted` | read the attempts (`task fetch <id> facet:<id>:<n>:handoff` and `…:verify`), then sharpen or split the brief (`task update`) or `workflow retry` |
+| `budget_exhausted` | read the attempts (`task fetch <id> facet:<id>:<n>:handoff`), then sharpen or split the brief (`task update`) or `workflow retry` |
 | `oscillation` | review rounds keep bouncing: read the open findings (`task show`) and the handoff, make `acceptance` unambiguous |
 | `ready_unclaimed` | no eligible worker: check `task-chain fleet list` and `bridge list`, fix capacity, roles or bridge |
 | `agent_not_running` | A ready task cannot obtain a running agent, or a leased holder exited/lost its heartbeat. `task show <id>` shows `blocked_on.kind=agent_not_running` (legacy `dispatch` is equivalent), with agent/provider/model/bridge/error. The user can choose **Start agent** in the attention deck or chat tray; a failed start stays blocked and shows its error inline for retry. Fix the cause, then use the card or `task unblock <id> [--note <reason>]`; editing the affected fleet row also clears the block. No work attempt budget is spent. Full fleet rows remain queued without blocking |
@@ -159,5 +158,3 @@ The chain is solo when you are the Soloist or hold a worker fleet row yourself. 
 - You never review your own work (`403 solo_self_review`).
 - `[taskv2] solo: task … is ready for you` means pull it with `lease next`.
 - Urgent request mid-task: create the task, then `lease switch <task_id> --summary "<where you left off>"`.
-
-Task verification commands are optional: omit `brief.verify` (or use an empty value or `"none"`) when no command applies. Publishing and submission do not require a verify result or an output contract in that case. If a command is configured, run it before submitting, or explicitly use `lease submit --skip-verify --skip-verify-reason "<why>"` with a non-empty written reason. The skip is recorded on the attempt and shown as a warning to reviewers. Tasks with `require_independent_verify: true` cannot skip. `--verify none` alone does not bypass a configured command. The coordinator/owner can correct `verify` or `acceptance` on a leased task using a brief containing only those fields; other brief fields are preserved, and the next verify invocation uses the new command. `ham-ctl verify` reports success with nothing to run when no command is configured.

@@ -19,7 +19,7 @@ Conventions used below:
 - Run `./.heimdall/bin/ham-ctl <group> --help` for the built-in reference of any group;
   `./.heimdall/bin/ham-ctl --help` lists all groups.
 
-Groups: `bridge`, `agents`, `task-chain`, `task`, `workflow`, `lease`, `verify`, `review`, `issue`, `chat`, `memory`, `artifact`,
+Groups: `bridge`, `agents`, `task-chain`, `task`, `workflow`, `lease`, `review`, `issue`, `chat`, `memory`, `artifact`,
 `shell`, `extension`, `context`, `start-success`.
 
 ---
@@ -163,7 +163,7 @@ ham-ctl task-chain fleet set chain_18d711c5384a0119 --agent agt_worker --capacit
 ham-ctl task-chain fleet set chain_18d711c5384a0119 --agent agt_reviewer --capacity 2 --min-warm 1 --idle-ttl 600 --roles reviewer
 ```
 
-## task, lease, verify, review — Task System v2
+## task, lease, review — Task System v2
 A positional `<task-id>` identifies the task and is enough on its own (task ids are
 globally unique — you rarely need `--chain`).
 
@@ -171,23 +171,22 @@ globally unique — you rarely need `--chain`).
   (count, last_comment_at, author, preview) — NOT full comment bodies.
 - `task show <task-id> [--chain <id>]` — a task + its `brief` + `comment_summary` + facets.
 - `task comments <task-id> [--last N]` — fetch comment BODIES; `--last N` = newest N (max 100).
-- `task create --title <t> [--description <d>] [--priority p0|p1|p2] [--assignee <agt_id>] [--reviewer <agt_id,agt_id,...>] [--depends-on <id,id>] [--bridge <bridge-id>] [--chain <id>] [--goal <g>] [--acceptance <a>]... [--verify <cmd>] [--input <ref>]... [--review-role <r>]... [--output-schema <task_list.v1|findings.v1>] [--on-output-workflow <name>] [--auto-submit] [--require-independent-verify] [--require-user-approval] [--brief-file <path.json>]` — create a task.
+- `task create --title <t> [--description <d>] [--priority p0|p1|p2] [--assignee <agt_id>] [--reviewer <agt_id,agt_id,...>] [--depends-on <id,id>] [--bridge <bridge-id>] [--chain <id>] [--goal <g>] [--acceptance <a>]... [--input <ref>]... [--review-role <r>]... [--output-schema <task_list.v1|findings.v1>] [--on-output-workflow <name>] [--require-user-approval] [--brief-file <path.json>]` — create a task.
   `--assignee` and `--reviewer` take durable agent IDs (`agt_...`) only.
-- `task update <task-id> [--title <t>] [--description <d>] [--priority p0|p1|p2] [--assignee <agt_id>] [--reviewer <agt_id,agt_id,...>] [--depends-on <id,id>] [--bridge <bridge-id>] [--goal <g>] [--acceptance <a>]... [--verify <cmd>] [--input <ref>]... [--review-role <r>]... [--output-schema <task_list.v1|findings.v1>] [--on-output-workflow <name>] [--auto-submit] [--require-independent-verify] [--require-user-approval | --no-require-user-approval] [--brief-file <path.json>]` — edit an existing task.
-- `task publish <task-id>` — validate the task's brief and publish it (`422 brief_incomplete` lists any missing fields).
+- `task update <task-id> [--title <t>] [--description <d>] [--priority p0|p1|p2] [--assignee <agt_id>] [--reviewer <agt_id,agt_id,...>] [--depends-on <id,id>] [--bridge <bridge-id>] [--goal <g>] [--acceptance <a>]... [--input <ref>]... [--review-role <r>]... [--output-schema <task_list.v1|findings.v1>] [--on-output-workflow <name>] [--require-user-approval | --no-require-user-approval] [--brief-file <path.json>]` — edit an existing task.
+- `task publish <task-id>` — validate the task's brief and publish it. A brief needs a non-empty `goal` and at least one `acceptance` item; nothing else is required (`422 brief_incomplete` lists what is missing).
 - `task unblock <task-id> [--note <reason>]` — coordinator/owner clears a block and retries matching. Unavailable agents carry `blocked_on.kind=agent_not_running` (legacy `dispatch` is supported) and an agent/provider/model/bridge/error reason. Fix the cause first. The user can click **Start agent** (`agent.start {task_id}`) on the attention card or chat tray; failures keep the block, update its reason and show the error inline for retry. Updating the affected fleet row also clears its blocks. Infrastructure failures do not consume work attempt budget; a full fleet row is normal queueing. A solo coordinator remains pull-only: an explicit user Start launches it before clearing the block, then it pulls the ready task.
 - `task comment <task-id> --body <t>` (or `--stdin`) `[--notify <id,id>]` — add a comment.
 - `task depend <task-id> --on <task-id>|task:<task-id>|workflow_run:<run-id> [--chain <id>]` — add one prerequisite to a ticket. A `workflow_run:` prerequisite becomes a chain-level graph edge on the whole run (the ticket stays ineligible until that run succeeds). Other typed refs (stage keys, `workflow:` names, issues) are rejected with guidance; use `task-chain depend` for run-on-ticket or run-on-run edges. `--depends-on` on `task create`/`task update` takes ticket ids only (`task:<id>` accepted) and `update --depends-on` replaces the whole list.
 - `task fetch <task-id> <ref>` — fetch one event (`#<event_id>`), output (`output:<task_id>`), facet (`facet:<task_id>:<attempt_no>:<kind>`), or file-at-commit (`dir:<dir_id>:<rev>:<path>`, `<path>@<rev>`, or `<path>`) referenced by `TASK.md`.
 - `lease next` — inspect the lease you hold (status `current`) or claim the next ready task inline (status `granted`), updating `<run_dir>/TASK.md`; returns `none` when idle.
 - `lease heartbeat [--note <text>]` — extend the lease TTL and optionally record a progress note. On `409 lease_lost`, stop immediately without touching the working tree.
-- `lease submit --summary <s> [handoff flags] [--output-file <json>] [--artifacts-file <json>] [--artifacts <json>] [--verify none] [--skip-verify --skip-verify-reason <why>] [--lease <id>]` — finish the attempt (task → `in_review`, or `done` with no review gates). Requires a passing `ham-ctl verify` at the current head, or an explicit `--skip-verify --skip-verify-reason "<why>"` exception (forbidden for independent-verify tasks), when `brief.verify` configures a command (omitted, blank, or `"none"` skips verification) (`409 verify_required|verify_failed|verify_stale|verify_dirty`). Validates `output` against the brief's output contract (`task_list.v1`, `findings.v1`).
+- `lease submit --summary <s> [handoff flags] [--output-file <json>] [--artifacts-file <json>] [--artifacts <json>] [--lease <id>]` — finish the attempt (task → `in_review`, or `done` with no review gates). Nothing is executed or gated on a command: report the checks you chose, their exact commands and outcomes in `--summary`. Validates `output` against the brief's output contract (`task_list.v1`, `findings.v1`).
 - `lease handoff --summary <s> [handoff flags] [--lease <id>]` — stop without finishing; the task returns to `ready` and the next holder gets your handoff.
 - `lease switch <task_id> --summary <s> [handoff flags]` — solo mode: hand off the current task (attempt not counted) and take `<task_id>` (must be `ready`) in one step.
 - **Handoff flags** (submit, handoff, switch): `--decision <text>` and `--dead-end <text>` (repeat per item), `--next-steps <text>`; or `--handoff-file <json>` (`{"decisions":[…],"dead_ends":[…],"next_steps":"…"}`) instead, not both. Decisions and dead ends reach every task that waits for this one and the next attempt; dead ends also go into the chain summary for all tasks.
 - `lease block --waiting-on <kind> --reason <text> [--ref <id>] [--summary <s>]` — park the task in `backlog` on a blocker. `<kind>` is free text: `user` (the user must answer; the answer appears in `TASK.md`), `task`, or an external system.
-- `verify [<task-id>] [--independent] [--bridge <id>]` — run `brief.verify` as a Run session labelled for this attempt (`verify <task_id> #<attempt_no> @<head> [independent]`), heartbeating while it runs. With `--independent`, runs inside an ephemeral detached git worktree at `vcs.head` and records `"independent": true` on the `verify` facet. When `brief.auto_submit` is `true` and a normal `verify` exits `0` on a clean working tree, automatically submits the lease (`auto: true`).
-- `review post [<task-id>] --verdict approve|request_changes [--summary <reason>] [--findings-file <json>] [--task <id>] [--on-behalf-of user]` — record a review verdict. Findings: `[{"path","line","severity","text"}]`. `request_changes` needs `--summary` or findings. Response: `gate: waiting|approved|changes_requested`. Coordinators pass `--on-behalf-of user` to record the user's verdict on tasks that require user approval (or gates whose approver is `user`); refused in solo mode for your own work.
+- `review post [<task-id>] --verdict approve|request_changes [--summary <reason>] [--findings-file <json>] [--task <id>] [--on-behalf-of user]` — record a review verdict. Findings: `[{"path","line","severity","text"}]`. `request_changes` needs `--summary` or findings. Response: `gate: waiting|approved|changes_requested`. The verdict is your judgment and needs no command evidence; `--summary` is optional on approve. Coordinators pass `--on-behalf-of user` to record the user's verdict on tasks that require user approval (or gates whose approver is `user`); refused in solo mode for your own work.
 
 ### Task states
 A task carries a `state`: `backlog`, `ready`, `in_progress`, `in_review`, `done`, `cancelled`.
@@ -656,5 +655,3 @@ caller's own agent. "Global" scope = omit the scope flags. Repeatable or comma-s
 
 ## start-success — startup signal
 - `start-success` — signal this instance is ready. Run once at startup; idempotent.
-
-Task verification commands are optional: omit `brief.verify` (or use an empty value or `"none"`) when no command applies. Publishing and submission do not require a verify result or an output contract in that case. If a command is configured, run it before submitting, or explicitly use `lease submit --skip-verify --skip-verify-reason "<why>"` with a non-empty written reason. The skip is recorded on the attempt and shown as a warning to reviewers. Tasks with `require_independent_verify: true` cannot skip. `--verify none` alone does not bypass a configured command. The coordinator/owner can correct `verify` or `acceptance` on a leased task using a brief containing only those fields; other brief fields are preserved, and the next verify invocation uses the new command. `ham-ctl verify` reports success with nothing to run when no command is configured.
