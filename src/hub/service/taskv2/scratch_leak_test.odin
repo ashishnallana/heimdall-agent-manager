@@ -61,10 +61,6 @@ test_instance_hooks_leave_nothing_on_the_caller_heap :: proc(t: ^testing.T) {
 	expect_no_residue(t, "on_bridge_hello", proc(fx: ^Fixture, _: rawptr) {
 		on_bridge_hello(&fx.svc, "br_1", []string{"inst_w1", "inst_w2"})
 	}, fx, nil)
-	verify_exit := Verify_Exit{session_id = "sh_x", label = fmt.tprintf("%s%s", VERIFY_LABEL_PREFIX, "task_scratch_a"), owner_user_id = "u1", exit_code = 0, exit_code_set = true}
-	expect_no_residue(t, "on_verify_session_exited", proc(fx: ^Fixture, exit: rawptr) {
-		on_verify_session_exited(&fx.svc, (^Verify_Exit)(exit)^)
-	}, fx, &verify_exit)
 	expect_no_residue(t, "on_instance_user_stopped", proc(fx: ^Fixture, _: rawptr) {
 		on_instance_user_stopped(&fx.svc, "inst_w2")
 	}, fx, nil)

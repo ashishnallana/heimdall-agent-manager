@@ -6,24 +6,25 @@ import iface "odin_test:hub/repository/iface"
 import jsonx "odin_test:lib/jsonx"
 
 // Review gate (plan §2.5). Evaluated inside the UoW after every review post,
-// independent verify exit, and fleet change, for a task in `in_review`:
+// reviewer/fleet change, and once at boot after a gate-affecting migration,
+// for a task in `in_review`:
 //
 //   needed = required_review_pairs: { (agent, "named") : agent ∈ brief.reviewers }
 //            ∪ { (fleet row, role) : role ∈ brief.review_roles ∧ row has role },
 //            minus the attempt's author template
 //   gate   = every needed pair has an `approve` review on THIS attempt
 //            ∧ no `request_changes` on this attempt
-//            ∧ (independent verify passed on this attempt, if require_independent_verify)
 //            ∧ (user approved on this attempt, if requires_user_approval)
 //
-// Strict AND per fleet row: two reviewer templates both review. Any
+// A verdict is the reviewer's judgment; no command evidence is required
+// (REQ-TV2-2). Strict AND per fleet row: two reviewer templates both review. Any
 // request_changes → EV_CHANGES_REQUESTED (task → ready, other review leases
 // expired); the oscillation guard (fold) parks the task after 3 rounds. A new
 // attempt invalidates prior reviews because reviews are keyed by attempt_no.
 
 // Rejected: a request_changes on a GATE task (it is cancelled). Explicit-verdict
 // callers (review_post, user_review) then run gate_replan_in_uow; the fleet
-// change and verify paths keep the plain cancel (F1).
+// change and boot paths keep the plain cancel (F1).
 Gate_Result :: enum { Waiting, Approved, Changes_Requested, Rejected }
 
 gate_approver_policy :: proc(task: domain.Task) -> string {
@@ -90,8 +91,8 @@ evaluate_gate_in_uow :: proc(svc: ^Service, u: ^Uow, chain: domain.Task_Chain, t
 		metric_gate_evaluated(.Approved)
 		return .Approved, true, domain.Domain_Error{}
 	}
-	// 2-3. every required agent (role) pair approved and the independent verify
-	//      passed — shared with awaits_user_review (attention deck).
+	// 2. every required agent (role) pair approved — shared with
+	//    awaits_user_review (attention deck).
 	if sat, serr := agent_review_satisfied(svc, chain.chain_id, chain.owner_user_id, task, reviews); serr.code != .None {
 		return .Waiting, false, serr
 	} else if !sat {
@@ -120,10 +121,9 @@ evaluate_gate_in_uow :: proc(svc: ^Service, u: ^Uow, chain: domain.Task_Chain, t
 	return .Approved, true, domain.Domain_Error{}
 }
 
-// agent_review_satisfied: steps 2-3 of the gate for a non-gate task — every
+// agent_review_satisfied: step 2 of the gate for a non-gate task — every
 // required (agent, role) pair approved this attempt (named reviewers and holders
-// of each review role, review_pairs.odin) and, if the brief asks for one, a
-// passing independent verify on this attempt. Read-only.
+// of each review role, review_pairs.odin). Read-only.
 agent_review_satisfied :: proc(svc: ^Service, chain_id: domain.Task_Chain_ID, owner: domain.User_ID, task: domain.Task, reviews: []domain.Task_Review) -> (bool, domain.Domain_Error) {
 	author_agent := ""
 	if holder := last_attempt_holder(svc, task); holder != "" {
@@ -138,13 +138,6 @@ agent_review_satisfied :: proc(svc: ^Service, chain_id: domain.Task_Chain_ID, ow
 		}
 		if !approved do return false, domain.Domain_Error{}
 	}
-	if brief_require_independent_verify(task.brief_json) {
-		vf, vok := get_facet(svc, task, task.attempt_no, FACET_VERIFY)
-		if !vok do return false, domain.Domain_Error{}
-		code, cok := jsonx.extract_int_found(vf.body_json, "exit_code", true)
-		ind, iok := jsonx.extract_bool_literal(vf.body_json, "independent", true)
-		if !cok || code != 0 || !iok || !ind do return false, domain.Domain_Error{}
-	}
 	return true, domain.Domain_Error{}
 }
 
@@ -157,8 +150,8 @@ User_Attention :: enum { None, Review, Blocked }
 //
 //   Review   — in_review and it is the user's turn: a gate the user may approve
 //              (approver user | user_or_coordinator) with no decision yet, or a
-//              requires_user_approval task whose agent reviews / independent
-//              verify have passed (the moment the coordinator is told
+//              requires_user_approval task whose agent reviews have passed
+//              (the moment the coordinator is told
 //              review_requested_from_user) and the user has not approved this
 //              attempt.
 //   Blocked  — blocked_on set and the user can resolve it: every system block

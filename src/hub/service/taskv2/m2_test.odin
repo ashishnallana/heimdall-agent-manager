@@ -7,7 +7,7 @@ import contracts "odin_test:contracts"
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
 
-// M2 tests: submit / handoff / block / review gate / facets / verify.
+// M2 tests: submit / handoff / block / review gate / facets.
 
 inst_auth :: proc(id: string) -> contracts.Auth_Context {
 	return contracts.Auth_Context{kind = .Instance_Token, user_id = "u1", agent_instance_id = id}
@@ -17,72 +17,41 @@ user_auth :: proc() -> contracts.Auth_Context {
 	return contracts.Auth_Context{kind = .User_Token, user_id = "u1"}
 }
 
-// write_verify simulates the hub-written verify facet for a finished verify run.
-write_verify :: proc(fx: ^Fixture, task_id: string, attempt_no: int, head: string, exit_code: int, dirty := "false", status := "exited", head_end := "", cmd := "") {
-	on_verify_session_exited(&fx.svc, Verify_Exit{
-		session_id = fmt.tprintf("sh_%s_%d", task_id, attempt_no), label = fmt.tprintf("verify %s #%d @%s", task_id, attempt_no, head),
-		owner_user_id = "u1", status = status, exit_code = exit_code, exit_code_set = status != "failed", duration_ms = 1200,
-		head_at_end = head_end if head_end != "" else head, dirty = dirty, tail = "ok\n", cmd = cmd,
-	})
-}
-
 @(test)
-test_submit_requires_green_verify_at_head :: proc(t: ^testing.T) {
-	fx, log, ok := lease_fixture(t, "m2_verify")
+test_submit_needs_no_command_evidence :: proc(t: ^testing.T) {
+	fx, log, ok := lease_fixture(t, "m2_submit")
 	defer lease_fixture_close(fx, log)
 	if !ok do return
 	chain := seed_live_chain(t, fx, "chain_v")
 	seed_fleet(fx, chain, "agt_w")
 	seed_instance(fx, chain, "inst_w1", "agt_w", "br_1", "idle")
-	task := publish_task(t, fx, chain, "task_1", brief = `{"goal":"g","acceptance":["a"],"verify":"make test","review_roles":[]}`)
+	task := publish_task(t, fx, chain, "task_1", brief = `{"goal":"g","acceptance":["a"],"review_roles":[]}`)
 	confirm_holder(fx, "inst_w1")
 	lease, held := lease_of(fx, "inst_w1")
 	if !testing.expect(t, held, "leased") do return
 	auth := inst_auth("inst_w1")
-	// no verify facet → verify_required
-	_, sok, serr := lease_submit(&fx.svc, auth, Submit_Input{summary = "done"})
-	testing.expect(t, !sok && serr.code == .Conflict && strings.contains(serr.details_json, "verify_required"), "verify_required")
-	// empty summary → 422
+	// empty summary → 422, and the lease survives the refusal
 	_, eok, eerr := lease_submit(&fx.svc, auth, Submit_Input{summary = "  "})
 	testing.expect(t, !eok && eerr.code == .Validation_Failed, "summary required")
-	// red verify → verify_failed
-	write_verify(fx, "task_1", lease.attempt_no, "abc", 1)
-	_, fok, ferr := lease_submit(&fx.svc, auth, Submit_Input{summary = "done", vcs_json = `{"head":"abc","dirty":false,"files":[]}`})
-	testing.expect(t, !fok && strings.contains(ferr.details_json, "verify_failed"), "verify_failed")
-	// green at another head → verify_stale
-	write_verify(fx, "task_1", lease.attempt_no, "abc", 0)
-	_, stok, sterr := lease_submit(&fx.svc, auth, Submit_Input{summary = "done", vcs_json = `{"head":"def","dirty":false,"files":[]}`})
-	testing.expect(t, !stok && strings.contains(sterr.details_json, "verify_stale"), "verify_stale")
-	// green on a dirty tree → verify_dirty
-	write_verify(fx, "task_1", lease.attempt_no, "abc", 0, dirty = "true")
-	_, dok, derr := lease_submit(&fx.svc, auth, Submit_Input{summary = "done", vcs_json = `{"head":"abc","dirty":false,"files":[]}`})
-	testing.expect(t, !dok && strings.contains(derr.details_json, "verify_dirty"), "verify_dirty")
-	// green verify, but working tree dirtied before submit → verify_dirty (M2-M1)
-	write_verify(fx, "task_1", lease.attempt_no, "abc", 0, dirty = "false")
-	_, sdok, sderr := lease_submit(&fx.svc, auth, Submit_Input{summary = "done", vcs_json = `{"head":"abc","dirty":true,"files":[]}`})
-	testing.expect(t, !sdok && strings.contains(sderr.details_json, "verify_dirty"), "submit dirty tree → verify_dirty")
-	// green verify with mismatched command → verify_required (M2-C3)
-	write_verify(fx, "task_1", lease.attempt_no, "abc", 0, dirty = "false", cmd = "true")
-	_, cmok, cmerr := lease_submit(&fx.svc, auth, Submit_Input{summary = "done", vcs_json = `{"head":"abc","dirty":false,"files":[]}`})
-	testing.expect(t, !cmok && strings.contains(cmerr.details_json, "verify_required"), "mismatched verify command rejected")
-	// verify:none without an output contract → refused
-	_, nok, nerr := lease_submit(&fx.svc, auth, Submit_Input{summary = "done", verify = "none"})
-	testing.expect(t, !nok && strings.contains(nerr.details_json, "verify_required"), "verify:none needs an output contract")
-	// the lease survived every refusal
 	still, sh := lease_of(fx, "inst_w1")
 	testing.expect(t, sh && still.lease_id == lease.lease_id, "refusals do not touch the lease")
-	// green, clean, same head → submitted; no reviewers & no user approval → done
-	write_verify(fx, "task_1", lease.attempt_no, "abc", 0)
+	// no verify facet, no command: the summary is the evidence; no reviewers & no user approval → done
 	wake_log_reset(log)
-	res, gok, gerr := lease_submit(&fx.svc, auth, Submit_Input{summary = "done it", handoff_json = `{"next_steps":"none","decisions":["x"]}`, vcs_json = `{"head":"abc","dirty":false,"files":[{"path":"a.odin","status":"M","add":3,"del":1}]}`})
+	res, gok, gerr := lease_submit(&fx.svc, auth, Submit_Input{summary = "done it; ran odin test src/x (pass)", handoff_json = `{"next_steps":"none","decisions":["x"]}`, vcs_json = `{"head":"abc","dirty":false,"files":[{"path":"a.odin","status":"M","add":3,"del":1}]}`})
 	if !testing.expect(t, gok, fmt.tprintf("submit: %s", gerr.message)) do return
 	testing.expect_value(t, res.outcome, "done")
 	testing.expect_value(t, get_task(fx, "task_1").state, domain.Task_State.Done)
 	testing.expect(t, wake_log_has_stop(log, "inst_w1"), "holder stopped (fresh context)")
 	h, hok := get_facet(&fx.svc, task, lease.attempt_no, FACET_HANDOFF)
-	testing.expect(t, hok && strings.contains(h.body_json, `"summary":"done it"`) && strings.contains(h.body_json, `"decisions":["x"]`), "handoff facet verbatim members")
+	testing.expect(t, hok && strings.contains(h.body_json, `"summary":"done it; ran odin test src/x (pass)"`) && strings.contains(h.body_json, `"decisions":["x"]`), "handoff facet verbatim members")
 	v, vok := get_facet(&fx.svc, task, lease.attempt_no, FACET_VCS)
 	testing.expect(t, vok && strings.contains(v.body_json, `"path":"a.odin"`) && v.writer == FACET_WRITER_BRIDGE, "vcs facet stored verbatim")
+	_, has_verify := get_facet(&fx.svc, task, lease.attempt_no, FACET_VERIFY)
+	testing.expect(t, !has_verify, "no verify facet is written")
+	evs, _ := iface.taskchain_list_events_by_task(&fx.repo, task.task_id, "u1")
+	for e in evs do if e.kind == EV_SUBMITTED {
+		testing.expect(t, !strings.contains(e.payload_json, "verify") && !strings.contains(e.payload_json, `"auto"`), "submitted event carries no verify fields")
+	}
 	// a second submit from the old process is lease_lost
 	_, again, aerr := lease_submit(&fx.svc, auth, Submit_Input{summary = "again"})
 	testing.expect(t, !again && aerr.code == .Conflict && strings.contains(aerr.message, "lease_lost"), "second submit 409 lease_lost")
@@ -97,10 +66,9 @@ test_submit_after_expiry_409 :: proc(t: ^testing.T) {
 	chain := seed_live_chain(t, fx, "chain_e409")
 	seed_fleet(fx, chain, "agt_w")
 	seed_instance(fx, chain, "inst_w1", "agt_w", "br_1", "idle")
-	_ = publish_task(t, fx, chain, "task_1", brief = `{"goal":"g","acceptance":["a"],"verify":"true","review_roles":[]}`)
+	_ = publish_task(t, fx, chain, "task_1", brief = `{"goal":"g","acceptance":["a"],"review_roles":[]}`)
 	confirm_holder(fx, "inst_w1")
 	lease, _ := lease_of(fx, "inst_w1")
-	write_verify(fx, "task_1", lease.attempt_no, "abc", 0)
 	fixture_advance(fx, LEASE_TTL_SECONDS + 1)
 	_ = fire_due(&fx.svc, now_ms(&fx.clock))
 	// the old process submits with its old lease id
@@ -122,13 +90,12 @@ test_review_gate_strict_and_request_changes_user_approval :: proc(t: ^testing.T)
 	seed_instance(fx, chain, "inst_w1", "agt_w", "br_1", "idle")
 	seed_instance(fx, chain, "inst_r1", "agt_r", "br_1", "idle")
 	seed_instance(fx, chain, "inst_r2", "agt_r2", "br_1", "idle")
-	task := publish_task(t, fx, chain, "task_1", brief = `{"goal":"g","acceptance":["a"],"verify":"true","review_roles":["reviewer"]}`)
+	task := publish_task(t, fx, chain, "task_1", brief = `{"goal":"g","acceptance":["a"],"review_roles":["reviewer"]}`)
 	t_row := get_task(fx, "task_1")
 	t_row.requires_user_approval = true
 	_, _, _ = iface.taskchain_save_task(&fx.repo, t_row)
 	confirm_holder(fx, "inst_w1")
 	l1, _ := lease_of(fx, "inst_w1")
-	write_verify(fx, "task_1", 1, "h1", 0)
 	res, sok, serr := lease_submit(&fx.svc, inst_auth("inst_w1"), Submit_Input{summary = "v1", vcs_json = `{"head":"h1","dirty":false}`})
 	if !testing.expect(t, sok, fmt.tprintf("submit: %s", serr.message)) do return
 	testing.expect_value(t, res.outcome, "in_review")
@@ -152,7 +119,6 @@ test_review_gate_strict_and_request_changes_user_approval :: proc(t: ^testing.T)
 	for l in leases do testing.expect(t, l.kind != domain.LEASE_KIND_REVIEW, "no review lease lingers after request_changes")
 	// attempt 2: prior reviews do not count — both must approve again, plus the user
 	confirm_holder(fx, "inst_w1")
-	write_verify(fx, "task_1", 2, "h2", 0)
 	_, s2ok, _ := lease_submit(&fx.svc, inst_auth("inst_w1"), Submit_Input{summary = "v2", vcs_json = `{"head":"h2","dirty":false}`})
 	testing.expect(t, s2ok, "submit attempt 2")
 	_, ra, _ := review_post(&fx.svc, inst_auth("inst_r1"), Review_Input{verdict = "approve"})
@@ -180,12 +146,11 @@ test_oscillation_guard_parks_after_three_rounds :: proc(t: ^testing.T) {
 	seed_fleet(fx, chain, "agt_r", roles = `["reviewer"]`)
 	seed_instance(fx, chain, "inst_w1", "agt_w", "br_1", "idle")
 	seed_instance(fx, chain, "inst_r1", "agt_r", "br_1", "idle")
-	_ = publish_task(t, fx, chain, "task_1", brief = `{"goal":"g","acceptance":["a"],"verify":"true","review_roles":["reviewer"],"budget":{"max_attempts":9}}`)
+	_ = publish_task(t, fx, chain, "task_1", brief = `{"goal":"g","acceptance":["a"],"review_roles":["reviewer"],"budget":{"max_attempts":9}}`)
 	for round in 1..=3 {
 		confirm_holder(fx, "inst_w1")
 		l, h := lease_of(fx, "inst_w1")
 		if !testing.expect(t, h, fmt.tprintf("round %d leased", round)) do return
-		write_verify(fx, "task_1", l.attempt_no, fmt.tprintf("h%d", round), 0)
 		_, sok, serr := lease_submit(&fx.svc, inst_auth("inst_w1"), Submit_Input{summary = "try", vcs_json = fmt.tprintf(`{{"head":"h%d","dirty":false}}`, round)})
 		if !testing.expect(t, sok, fmt.tprintf("submit %d: %s", round, serr.message)) do return
 		if round == 1 {
@@ -207,7 +172,6 @@ test_oscillation_guard_parks_after_three_rounds :: proc(t: ^testing.T) {
 	testing.expect_value(t, get_task(fx, "task_1").state, domain.Task_State.In_Progress)
 	confirm_holder(fx, "inst_w1")
 	l4, _ := lease_of(fx, "inst_w1")
-	write_verify(fx, "task_1", l4.attempt_no, "h4", 0)
 	_, s4ok, _ := lease_submit(&fx.svc, inst_auth("inst_w1"), Submit_Input{summary = "try 4", vcs_json = `{"head":"h4","dirty":false}`})
 	testing.expect(t, s4ok, "submit 4")
 	_, r4ok, _ := review_post(&fx.svc, inst_auth("inst_r1"), Review_Input{verdict = "request_changes", summary = "round 4"})
@@ -229,9 +193,8 @@ test_fleet_delete_reevaluates_gate :: proc(t: ^testing.T) {
 	seed_instance(fx, chain, "inst_w1", "agt_w", "br_1", "idle")
 	seed_instance(fx, chain, "inst_r1", "agt_r", "br_1", "idle")
 	// agt_r2 has no instance and br_1 cannot JIT (no agent service) → its review never arrives
-	_ = publish_task(t, fx, chain, "task_1", brief = `{"goal":"g","acceptance":["a"],"verify":"true","review_roles":["reviewer"]}`)
+	_ = publish_task(t, fx, chain, "task_1", brief = `{"goal":"g","acceptance":["a"],"review_roles":["reviewer"]}`)
 	confirm_holder(fx, "inst_w1")
-	write_verify(fx, "task_1", 1, "h1", 0)
 	_, sok, _ := lease_submit(&fx.svc, inst_auth("inst_w1"), Submit_Input{summary = "v", vcs_json = `{"head":"h1","dirty":false}`})
 	testing.expect(t, sok, "submit")
 	_, rok, _ := review_post(&fx.svc, inst_auth("inst_r1"), Review_Input{verdict = "approve"})
@@ -252,7 +215,7 @@ test_handoff_keeps_attempt_and_block_parks :: proc(t: ^testing.T) {
 	seed_fleet(fx, chain, "agt_w", capacity = 2)
 	seed_instance(fx, chain, "inst_w1", "agt_w", "br_1", "idle")
 	seed_instance(fx, chain, "inst_w2", "agt_w", "br_1", "idle")
-	task := publish_task(t, fx, chain, "task_1", brief = `{"goal":"g","acceptance":["a"],"verify":"true","review_roles":[]}`)
+	task := publish_task(t, fx, chain, "task_1", brief = `{"goal":"g","acceptance":["a"],"review_roles":[]}`)
 	confirm_holder(fx, "inst_w1")
 	l1, _ := lease_of(fx, "inst_w1")
 	testing.expect_value(t, l1.attempt_no, 1)
@@ -330,34 +293,6 @@ test_facets_verbatim_round_trip_and_fetch :: proc(t: ^testing.T) {
 }
 
 @(test)
-test_verify_bridge_death_exit_minus_one :: proc(t: ^testing.T) {
-	fx, log, ok := lease_fixture(t, "m2_verify_death")
-	defer lease_fixture_close(fx, log)
-	if !ok do return
-	chain := seed_live_chain(t, fx, "chain_vd")
-	seed_fleet(fx, chain, "agt_w")
-	seed_instance(fx, chain, "inst_w1", "agt_w", "br_1", "idle")
-	task := publish_task(t, fx, chain, "task_1", brief = `{"goal":"g","acceptance":["a"],"verify":"sleep 300","review_roles":[]}`)
-	confirm_holder(fx, "inst_w1")
-	// the bridge died: the session inventory lands `failed` with no exit code
-	write_verify(fx, "task_1", 1, "h1", 0, dirty = "", status = "failed")
-	f, fok := get_facet(&fx.svc, task, 1, FACET_VERIFY)
-	if !testing.expect(t, fok, "verify facet written by the hub") do return
-	testing.expect(t, strings.contains(f.body_json, `"exit_code":-1`), "exit_code -1 on bridge death")
-	testing.expect(t, strings.contains(f.body_json, `"dirty":null`) && strings.contains(f.body_json, `"log_ref":"sh_task_1_1"`), "unknown dirty, log_ref = session")
-	testing.expect_value(t, f.writer, FACET_WRITER_HUB)
-	// submit is refused on it
-	_, sok, serr := lease_submit(&fx.svc, inst_auth("inst_w1"), Submit_Input{summary = "x", vcs_json = `{"head":"h1","dirty":false}`})
-	testing.expect(t, !sok && strings.contains(serr.details_json, "verify_failed"), "a −1 verify never passes the gate")
-	// labels that are not verify labels are ignored
-	on_verify_session_exited(&fx.svc, Verify_Exit{session_id = "sh_x", label = "build", owner_user_id = "u1", status = "exited", exit_code = 0, exit_code_set = true})
-	tid, head, n, pok := parse_verify_label("verify task_9 #3 @deadbeef")
-	testing.expect(t, pok && tid == "task_9" && n == 3 && head == "deadbeef", "label parse")
-	_, _, _, bad := parse_verify_label("verify task_9")
-	testing.expect(t, !bad, "incomplete label rejected")
-}
-
-@(test)
 test_reopen_starts_new_noncounting_attempt :: proc(t: ^testing.T) {
 	fx, log, ok := lease_fixture(t, "m2_reopen")
 	defer lease_fixture_close(fx, log)
@@ -365,7 +300,7 @@ test_reopen_starts_new_noncounting_attempt :: proc(t: ^testing.T) {
 	chain := seed_live_chain(t, fx, "chain_ro")
 	seed_fleet(fx, chain, "agt_w")
 	seed_instance(fx, chain, "inst_w1", "agt_w", "br_1", "idle")
-	task := publish_task(t, fx, chain, "task_1", brief = `{"goal":"g","acceptance":["a"],"verify":"true","review_roles":[]}`)
+	task := publish_task(t, fx, chain, "task_1", brief = `{"goal":"g","acceptance":["a"],"review_roles":[]}`)
 	_, bad, berr := task_reopen(&fx.svc, get_task(fx, "task_1"), Actor{kind = ACTOR_USER, id = "u1"})
 	testing.expect(t, !bad && berr.code == .Conflict, "only terminal tasks reopen")
 	_ = cancel_task(&fx.svc, get_task(fx, "task_1"), Actor{kind = ACTOR_USER, id = "u1"}, "oops")
@@ -381,7 +316,7 @@ test_reopen_starts_new_noncounting_attempt :: proc(t: ^testing.T) {
 }
 
 @(test)
-test_m2_review_fixes_verify_none_peek_and_vault_caps :: proc(t: ^testing.T) {
+test_m2_review_fixes_peek_and_vault_caps :: proc(t: ^testing.T) {
 	fx, log, ok := lease_fixture(t, "m2_rvfix")
 	defer lease_fixture_close(fx, log)
 	if !ok do return
@@ -392,7 +327,7 @@ test_m2_review_fixes_verify_none_peek_and_vault_caps :: proc(t: ^testing.T) {
 	t_draft := domain.Task{
 		task_id = "task_peek", chain_id = chain.chain_id, owner_user_id = "u1",
 		title = "t", kind = .Task, state = .Ready, publish_state = .Published, priority = .P1,
-		brief_json = `{"goal":"g","acceptance":["a"],"verify":"make test","output":{"schema":"v1"},"review_roles":[]}`,
+		brief_json = `{"goal":"g","acceptance":["a"],"output":{"schema":"v1"},"review_roles":[]}`,
 		ready_since = "2026-03-01T00:00:00Z", created_at = "2026-03-01T00:00:00Z", updated_at = "2026-03-01T00:00:00Z",
 	}
 	_, _, _ = iface.taskchain_save_task(&fx.repo, t_draft)
@@ -403,22 +338,7 @@ test_m2_review_fixes_verify_none_peek_and_vault_caps :: proc(t: ^testing.T) {
 	claim_res, cok, _ := lease_next(&fx.svc, inst_auth("inst_w1"), Lease_Next_Input{vcs_base = "abc"})
 	testing.expect(t, cok && claim_res.status == "granted", "peek=false claims the ready task")
 
-	// 2. M2-C2: task has output contract AND brief.verify != "none" → verify="none" is REJECTED
-	_, vn_ok, vn_err := lease_submit(&fx.svc, inst_auth("inst_w1"), Submit_Input{
-		summary = "try bypass", output_json = `{"ok":true}`, verify = "none",
-	})
-	testing.expect(t, !vn_ok && strings.contains(vn_err.details_json, "verify_required"), "verify:none rejected when brief.verify != none even with output contract")
-
-	// 3. M2-C3: verify exit for wrong attempt_no is ignored
-	on_verify_session_exited(&fx.svc, Verify_Exit{
-		session_id = "sh_stale", label = "verify task_peek #99 @abc",
-		owner_user_id = "u1", status = "exited", exit_code = 0, exit_code_set = true,
-		head_at_end = "abc", dirty = "false",
-	})
-	_, has_v := get_facet(&fx.svc, get_task(fx, "task_peek"), 1, FACET_VERIFY)
-	testing.expect(t, !has_v, "stale attempt verify exit ignored")
-
-	// 4. M2-M5: oversized vault-armored strings are not truncated in handoff_body_json or findings_json_capped
+	// 2. M2-M5: oversized vault-armored strings are not truncated in handoff_body_json or findings_json_capped
 	big_cipher := strings.concatenate({"vault:v2:e1:", strings.repeat("A", HANDOFF_SUMMARY_MAX + 500, context.temp_allocator)}, context.temp_allocator)
 	hb := handoff_body_json(big_cipher, fmt.tprintf(`{{"next_steps":"%s"}}`, big_cipher))
 	testing.expect(t, !strings.contains(hb, `"truncated":true`) && strings.contains(hb, big_cipher), "vault:v2:e1: handoff never byte-sliced")
@@ -470,11 +390,14 @@ test_m3_r1_r2_r3_end_to_end :: proc(t: ^testing.T) {
 		kind        = "task",
 		rationale   = "initial 2-task plan",
 		alternative = "single monolith task",
-		tasks_json  = `[{"id":"t_base","title":"Base task","brief":{"goal":"produce output","acceptance":["ok"],"verify":"make test","output":{"v":1},"review_roles":[]}},{"id":"t_indep","title":"Indep verify task","depends_on":["t_base"],"brief":{"goal":"verify indep","acceptance":["ok"],"verify":"make test","require_independent_verify":true,"requires_user_approval":true,"inputs":["output:t_base","src/main.odin@abc1234"],"review_roles":[]}}]`,
+		tasks_json  = `[{"id":"t_base","title":"Base task","brief":{"goal":"produce output","acceptance":["ok"],"output":{"v":1},"review_roles":[]}},{"id":"t_indep","title":"Indep task","depends_on":["t_base"],"brief":{"goal":"integrate","acceptance":["ok"],"require_independent_verify":true,"auto_submit":true,"requires_user_approval":true,"inputs":["output:t_base","src/main.odin@abc1234"],"review_roles":[]}}]`,
 	})
 	if !testing.expect(t, pok, fmt.tprintf("chain_propose: %s", perr.message)) do return
 	testing.expect(t, strings.contains(chain_proposal_json(prop_chain), `"status":"pending"`), "proposal stored")
 	testing.expect(t, strings.contains(chain_proposal_json(prop_chain), `"alternative":"single monolith task"`), "alternative stored")
+	// M2: the legacy verify keys are dropped before the proposal is stored
+	stored_prop := chain_proposal_json(prop_chain)
+	testing.expect(t, !strings.contains(stored_prop, `"verify"`) && !strings.contains(stored_prop, "require_independent_verify") && !strings.contains(stored_prop, "auto_submit"), "stored proposal carries no verify keys")
 
 	dec_chain, mat_tasks, dok, derr := chain_proposal_decide(&fx.svc, chain.chain_id, "u1", Actor{kind = ACTOR_USER, id = "u1"}, "approve")
 	if !testing.expect(t, dok && len(mat_tasks) == 2, fmt.tprintf("proposal decide: %s", derr.message)) do return
@@ -483,6 +406,9 @@ test_m3_r1_r2_r3_end_to_end :: proc(t: ^testing.T) {
 	chain = dec_chain
 	t_base := mat_tasks[0]
 	t_indep := mat_tasks[1]
+	for mt in mat_tasks {
+		testing.expect(t, !strings.contains(mt.brief_json, `"verify"`) && !strings.contains(mt.brief_json, "require_independent_verify") && !strings.contains(mt.brief_json, "auto_submit"), "materialized briefs carry no verify keys")
+	}
 	testing.expect_value(t, t_base.publish_state, domain.Publish_State.Published)
 	testing.expect_value(t, t_base.state, domain.Task_State.In_Progress) // auto-granted to inst_w1!
 	testing.expect_value(t, t_indep.state, domain.Task_State.Backlog)   // waiting on t_base
@@ -493,7 +419,6 @@ test_m3_r1_r2_r3_end_to_end :: proc(t: ^testing.T) {
 
 	// Submit t_base with output + artifacts (using spec {kind, ref, label} schema for file, url, preview_port)
 	confirm_holder(fx, "inst_w1")
-	write_verify(fx, string(t_base.task_id), 1, "abc1234", 0)
 	sub1, sok1, serr1 := lease_submit(&fx.svc, inst_auth("inst_w1"), Submit_Input{
 		summary        = "base complete",
 		output_json    = `{"result":"forty-two"}`,
@@ -529,24 +454,21 @@ test_m3_r1_r2_r3_end_to_end :: proc(t: ^testing.T) {
 	pack := build_pack_json(&fx.svc, chain, get_task(fx, string(t_indep.task_id)), l_indep, inst_w1)
 	testing.expect(t, strings.contains(pack, `"where_you_are"`) && strings.contains(pack, `"forty-two"`) && strings.contains(pack, "package main // src/main.odin@abc1234"), "pack resolves output:<task> and path@rev inputs")
 
-	// R2: submit t_indep -> enters In_Review because require_independent_verify=true & requires_user_approval=true
+	// R2: submit t_indep -> enters In_Review because requires_user_approval=true
 	confirm_holder(fx, "inst_w1")
-	write_verify(fx, string(t_indep.task_id), 1, "def5678", 0)
 	sub2, sok2, serr2 := lease_submit(&fx.svc, inst_auth("inst_w1"), Submit_Input{
 		summary  = "indep ready",
 		vcs_json = `{"head":"def5678","dirty":false}`,
-		auto     = true,
 	})
 	if !testing.expect(t, sok2 && sub2.outcome == "in_review", fmt.tprintf("submit t_indep: %s", serr2.message)) do return
 
-	// R3: coordinator proxy review on_behalf_of="user" approves user part, records actor_kind="coordinator", and gate waits for independent verify!
+	// R3: coordinator proxy review on_behalf_of="user" approves, records actor_kind="coordinator", and — with no command gate — completes the task
 	rev_res, rok, rerr := review_post(&fx.svc, inst_auth("inst_coord"), Review_Input{
 		task_id      = string(t_indep.task_id),
 		verdict      = "approve",
 		on_behalf_of = "user",
 	})
-	if !testing.expect(t, rok && rev_res.gate == .Waiting, fmt.tprintf("proxy review: %s", rerr.message)) do return
-	testing.expect_value(t, get_task(fx, string(t_indep.task_id)).state, domain.Task_State.In_Review)
+	if !testing.expect(t, rok && rev_res.gate == .Approved, fmt.tprintf("proxy review: %s", rerr.message)) do return
 	indep_evs, _ := iface.taskchain_list_events_by_task(&fx.repo, t_indep.task_id, "u1")
 	found_coord_rev := false
 	for ev in indep_evs {
@@ -556,20 +478,6 @@ test_m3_r1_r2_r3_end_to_end :: proc(t: ^testing.T) {
 	}
 	testing.expect(t, found_coord_rev, "proxy review event records actor_kind == coordinator and on_behalf_of == user")
 
-	// R2: independent verify session exits 0 -> gate approves and task transitions to Done!
-	on_verify_session_exited(&fx.svc, Verify_Exit{
-		session_id    = "sh_indep_1",
-		label         = fmt.tprintf("verify %s #1 @def5678 independent", t_indep.task_id),
-		owner_user_id = "u1",
-		status        = "exited",
-		exit_code     = 0,
-		exit_code_set = true,
-		duration_ms   = 120,
-		head_at_end   = "def5678",
-		dirty         = "false",
-		cmd           = "make test",
-		independent   = true,
-	})
 	testing.expect_value(t, get_task(fx, string(t_indep.task_id)).state, domain.Task_State.Done)
 	// Settle the last bridge merge before expecting the batch-finished notice.
 	final_uow, final_began, _ := begin_uow(&fx.svc)
@@ -615,7 +523,7 @@ test_chain_propose_validation_and_auto_approve :: proc(t: ^testing.T) {
 		chain_id = chain.chain_id, agent_instance_id = "inst_coord", agent_id = "coordinator", owner_user_id = "u1", role = "coordinator", created_at = "2026-03-01T00:00:00Z",
 	})
 
-	valid_tasks := `[{"id":"tp_1","title":"Task 1","brief":{"goal":"build 1","acceptance":["a1"],"verify":"make test","review_roles":[]}}]`
+	valid_tasks := `[{"id":"tp_1","title":"Task 1","brief":{"goal":"build 1","acceptance":["a1"],"review_roles":[]}}]`
 
 	// 1. Non-coordinator agent rejected with 403 Forbidden (not_coordinator)
 	_, pok1, perr1 := chain_propose(&fx.svc, chain.chain_id, "u1", Actor{kind = ACTOR_AGENT, id = "inst_worker"}, Propose_Input{
@@ -629,7 +537,7 @@ test_chain_propose_validation_and_auto_approve :: proc(t: ^testing.T) {
 	_, pok2, perr2 := chain_propose(&fx.svc, chain.chain_id, "u1", Actor{kind = ACTOR_AGENT, id = "inst_coord"}, Propose_Input{
 		kind       = "task",
 		rationale  = "bad brief",
-		tasks_json = `[{"id":"tp_bad","title":"Bad task","brief":{"goal":"","acceptance":[],"verify":""}}]`,
+		tasks_json = `[{"id":"tp_bad","title":"Bad task","brief":{"goal":"","acceptance":[]}}]`,
 	})
 	testing.expect(t, !pok2 && perr2.code == .Validation_Failed && strings.contains(perr2.details_json, "brief_incomplete"), "incomplete brief rejected with brief_incomplete")
 
@@ -640,7 +548,8 @@ test_chain_propose_validation_and_auto_approve :: proc(t: ^testing.T) {
 		tasks_json = valid_tasks,
 	})
 	if !testing.expect(t, pok3, fmt.tprintf("valid propose: %s", perr3.message)) do return
-	testing.expect(t, strings.contains(prop_chain.defaults_json, `"custom_flag":"keep_me"`) && strings.contains(prop_chain.defaults_json, `"auto_submit":true`), "defaults_json keys preserved on propose")
+	testing.expect(t, strings.contains(prop_chain.defaults_json, `"custom_flag":"keep_me"`), "defaults_json keys preserved on propose")
+	testing.expect(t, !strings.contains(prop_chain.defaults_json, "auto_submit"), "the removed auto_submit default is dropped when defaults are rewritten")
 
 	// 4. Reject clears proposal while keeping custom_flag, leaving chain in Draft
 	rej_chain, _, rok, _ := chain_proposal_decide(&fx.svc, chain.chain_id, "u1", Actor{kind = ACTOR_USER, id = "u1"}, "reject", "try auto_approve")
@@ -678,9 +587,8 @@ test_pack_full_sections_and_field_safe_cap :: proc(t: ^testing.T) {
 	_ = seed_instance(fx, chain, "inst_r1", "agt_r", "br_1", "idle")
 
 	// 1. Complete an upstream task t_up so we have an event id and output:<task>
-	t_up := publish_task(t, fx, chain, "t_up", brief = `{"goal":"upstream","acceptance":["ok"],"verify":"make test","output":{"v":1},"review_roles":[]}`)
+	t_up := publish_task(t, fx, chain, "t_up", brief = `{"goal":"upstream","acceptance":["ok"],"output":{"v":1},"review_roles":[]}`)
 	confirm_holder(fx, "inst_w1")
-	write_verify(fx, "t_up", 1, "111aaaa", 0)
 	_, sok_up, _ := lease_submit(&fx.svc, inst_auth("inst_w1"), Submit_Input{
 		summary     = "upstream finished",
 		output_json = `{"endpoint":"/api/v2"}`,
@@ -691,11 +599,10 @@ test_pack_full_sections_and_field_safe_cap :: proc(t: ^testing.T) {
 	ev_ref := fmt.tprintf("#%d", up_evs[0].event_id)
 
 	// 2. Publish task_pf with inputs referencing #<event_id>, output:t_up, and facet:task_pf:1:handoff
-	brief_pf := fmt.tprintf(`{{"goal":"full pack goal","acceptance":["a1"],"verify":"make test","inputs":["%s","output:t_up","facet:task_pf:1:handoff"],"review_roles":["reviewer"]}}`, ev_ref)
+	brief_pf := fmt.tprintf(`{{"goal":"full pack goal","acceptance":["a1"],"inputs":["%s","output:t_up","facet:task_pf:1:handoff"],"review_roles":["reviewer"]}}`, ev_ref)
 	task := publish_task(t, fx, chain, "task_pf", brief = brief_pf)
 	confirm_holder(fx, "inst_w1")
 	_, _, _ = lease_heartbeat(&fx.svc, inst_auth("inst_w1"), Lease_Heartbeat_Input{note = "halfway through attempt 1"})
-	write_verify(fx, "task_pf", 1, "222bbbb", 0)
 	_, sok_pf1, _ := lease_submit(&fx.svc, inst_auth("inst_w1"), Submit_Input{
 		summary      = "attempt 1 summary",
 		handoff_json = `{"summary":"attempt 1 summary","decisions":["use sqlite"],"dead_ends":["avoided polling"],"next_steps":"fix edge case"}`,
@@ -725,12 +632,14 @@ test_pack_full_sections_and_field_safe_cap :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(pack, `"/api/v2"`), "pack resolves output:t_up input")
 	testing.expect(t, strings.contains(pack, `"where_you_are"`), "pack has where_you_are")
 	testing.expect(t, strings.contains(pack, `"protocol"`), "pack has protocol")
+	testing.expect(t, !strings.contains(pack, `"verify"`) && !strings.contains(pack, "ham-ctl verify"), "pack has no verify section, verb or rule")
+	testing.expect(t, strings.contains(pack, "Choose and run checks appropriate to the change"), "protocol rule 4 asks for worker-chosen checks")
 
-	// 4. Test 32 KiB field-safe cap (cap_pack_json_field_safe): drops inputs -> verify -> handoff, preserving brief, dead_ends, findings
+	// 4. Test 32 KiB field-safe cap (cap_pack_json_field_safe): drops inputs -> handoff, preserving brief, dead_ends, findings
 	big_chunk := strings.repeat("X", 14000, context.temp_allocator)
 	huge_pack := fmt.tprintf(
-		`{{"lease_id":"lse_cap","task_id":"task_pf","attempt_no":2,"brief":{{"goal":"full pack goal"}},"inputs":[{{"ref":"output:t_up","resolved":true,"data":"%s"}}],"previous_attempt":{{"attempt_no":1,"outcome":"changes_requested","handoff":{{"summary":"%s","dead_ends":["keep_dead_end_1"]}},"verify":{{"exit_code":0,"summary":"%s"}}}},"findings":[{{"role":"reviewer","reviewer":"inst_r1","path":"src/a.odin","line":42,"severity":"blocking","text":"keep_finding_1"}}]}}`,
-		big_chunk, big_chunk, big_chunk,
+		`{{"lease_id":"lse_cap","task_id":"task_pf","attempt_no":2,"brief":{{"goal":"full pack goal"}},"inputs":[{{"ref":"output:t_up","resolved":true,"data":"%s"}}],"previous_attempt":{{"attempt_no":1,"outcome":"changes_requested","handoff":{{"summary":"%s","dead_ends":["keep_dead_end_1"]}}}},"findings":[{{"role":"reviewer","reviewer":"inst_r1","path":"src/a.odin","line":42,"severity":"blocking","text":"keep_finding_1"}}]}}`,
+		big_chunk, big_chunk,
 	)
 	capped := cap_pack_json_field_safe(huge_pack, "task_pf")
 	testing.expect(t, len(capped) <= PACK_MAX_BYTES, fmt.tprintf("capped pack <= 32 KiB (got %d)", len(capped)))
@@ -742,23 +651,22 @@ test_pack_full_sections_and_field_safe_cap :: proc(t: ^testing.T) {
 
 
 @(test)
-test_optional_verify_publish_and_submit :: proc(t: ^testing.T) {
- fx, log, ok := lease_fixture(t, "optional_verify")
+test_command_free_publish_and_submit :: proc(t: ^testing.T) {
+ fx, log, ok := lease_fixture(t, "command_free")
  defer lease_fixture_close(fx, log)
  if !ok do return
- chain := seed_live_chain(t, fx, "chain_optional_verify")
+ chain := seed_live_chain(t, fx, "chain_command_free")
  seed_fleet(fx, chain, "agt_w")
  seed_instance(fx, chain, "inst_w1", "agt_w", "br_1", "idle")
  briefs := []string{
   `{"goal":"Document findings","acceptance":["Findings recorded"],"review_roles":[]}`,
-  `{"goal":"Document findings","acceptance":["Findings recorded"],"verify":"","review_roles":[]}`,
-  `{"goal":"Document findings","acceptance":["Findings recorded"],"verify":"none","review_roles":[]}`,
+  `{"goal":"Research options","acceptance":["Options compared","Recommendation stated"]}`,
  }
  for brief, i in briefs {
-  id := fmt.tprintf("optional_verify_%d", i)
+  id := fmt.tprintf("command_free_%d", i)
   _ = publish_task(t, fx, chain, id, brief = brief)
   claim, cok, _ := lease_next(&fx.svc, inst_auth("inst_w1"), Lease_Next_Input{})
-  testing.expect(t, cok && (claim.status == "granted" || claim.status == "current"), "task without a verify command is publishable and leasable")
+  testing.expect(t, cok && (claim.status == "granted" || claim.status == "current"), "a goal + acceptance ticket is publishable and leasable")
   _, sok, serr := lease_submit(&fx.svc, inst_auth("inst_w1"), Submit_Input{summary = "Findings recorded"})
   testing.expect(t, sok && serr.code == .None, "submission needs neither a verify facet nor an output contract")
  }

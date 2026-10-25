@@ -38,7 +38,7 @@ build_pack_json :: proc(svc: ^Service, chain: domain.Task_Chain, task: domain.Ta
 	placement_obj := json_begin()
 	json_str(&placement_obj, "bridge_id", bridge_id)
 	json_str(&placement_obj, "directory_id", dir_id)
-	// The directory's path on that bridge, so `ham-ctl verify` / submit run in the
+	// The directory's path on that bridge, so the agent's checks and submit run in the
 	// task's repository even when the agent's own cwd is its instance dir.
 	dir_path := ""
 	workdir, branch := "", ""
@@ -132,7 +132,7 @@ build_pack_json :: proc(svc: ^Service, chain: domain.Task_Chain, task: domain.Ta
 	json_str(&o, "why", pack_why(pre, lease, prev_outcome))
 	// The task was done but its branch did not merge into the directory: this
 	// attempt reconciles the branch (merge the directory's branch in, resolve,
-	// verify, resubmit). Only while no later approval has cleared it.
+	// check, resubmit). Only while no later approval has cleared it.
 	for i := len(evs) - 1; i >= 0; i -= 1 {
 		if evs[i].kind == EV_APPROVED || evs[i].kind == EV_MERGED do break
 		if evs[i].kind == EV_MERGE_CONFLICT {
@@ -167,7 +167,7 @@ build_pack_json :: proc(svc: ^Service, chain: domain.Task_Chain, task: domain.Ta
 	proto := json_begin()
 	json_int(&proto, "heartbeat_ttl_seconds", LEASE_TTL_SECONDS)
 	json_int(&proto, "hard_cap_seconds", LEASE_HARD_CAP_SECONDS)
-	json_raw(&proto, "verbs", `["lease next","lease heartbeat","lease submit","lease handoff","lease block","verify","review post","task fetch","task comment"]`)
+	json_raw(&proto, "verbs", `["lease next","lease heartbeat","lease submit","lease handoff","lease block","review post","task fetch","task comment"]`)
 	json_raw(&proto, "rules", protocol_rules_json())
 	json_raw(&o, "protocol", json_end(&proto))
 	return cap_pack_json_field_safe(json_end(&o), string(task.task_id))
@@ -176,7 +176,7 @@ build_pack_json :: proc(svc: ^Service, chain: domain.Task_Chain, task: domain.Ta
 PACK_MAX_BYTES :: 32 * 1024
 
 // cap_pack_json_field_safe applies the field-safe 32 KiB cap to a pack JSON object,
-// dropping in order: 1. resolved input bodies -> 2. previous_attempt.verify ->
+// dropping in order: 1. resolved input bodies -> 2. work input outputs ->
 // 3. previous_attempt.handoff.summary (replaced with ham-ctl task fetch pointers),
 // while preserving brief, dead_ends, and open findings intact.
 cap_pack_json_field_safe :: proc(pack_json: string, task_id: string, max_bytes: int = PACK_MAX_BYTES) -> string {
@@ -225,17 +225,6 @@ cap_pack_json_field_safe :: proc(pack_json: string, task_id: string, max_bytes: 
     }
     if len(cur) <= max_bytes do return cur
 
-	// Step 2: drop previous_attempt.verify body, replacing with ham-ctl task fetch pointer
-	if prev_raw, has_prev := jsonx.extract_raw_object(cur, "previous_attempt", true, context.temp_allocator); has_prev && strings.has_prefix(strings.trim_space(prev_raw), "{") {
-		prev_att := jsonx.extract_int(prev_raw, "attempt_no", jsonx.extract_int(prev_raw, "attempt", 1, true), true)
-		vo := json_begin()
-		json_bool(&vo, "omitted", true)
-		json_str(&vo, "fetch", fmt.tprintf("ham-ctl task fetch %s facet:%s:%d:verify", task_id, task_id, prev_att))
-		new_prev := replace_top_level_member_raw(prev_raw, "verify", json_end(&vo))
-		cur = replace_top_level_member_raw(cur, "previous_attempt", new_prev)
-	}
-	if len(cur) <= max_bytes do return cur
-
 	// Step 3: drop previous_attempt.handoff.summary while keeping dead_ends intact
 	if prev_raw, has_prev := jsonx.extract_raw_object(cur, "previous_attempt", true, context.temp_allocator); has_prev && strings.has_prefix(strings.trim_space(prev_raw), "{") {
 		prev_att := jsonx.extract_int(prev_raw, "attempt_no", jsonx.extract_int(prev_raw, "attempt", 1, true), true)
@@ -273,7 +262,7 @@ replace_top_level_member_raw :: proc(obj_json, target_key, new_raw_val: string) 
 
 @(private = "file")
 protocol_rules_json :: proc() -> string {
-	return `["1. Read TASK.md first; it is your authoritative lease context pack. When it names a Workdir, cd there and do ALL work and commits in it (your own branch); the hub merges it when the task is done.","2. Confirm or inspect your lease with: ham-ctl lease next","3. Send a heartbeat every <15m during long work: ham-ctl lease heartbeat --note \"<progress>\"","4. Run verification at the exact commit you will submit: ham-ctl verify","5. Submit completed work on a clean working tree: ham-ctl lease submit --summary \"<what exists now>\" --decision \"<choice and why>\" --dead-end \"<what did not work>\" (repeat --decision/--dead-end per item)","6. Hand off unfinished work for a fresh context window: ham-ctl lease handoff --summary \"<summary>\" --next-steps \"<steps>\" [--decision ...] [--dead-end ...]","7. Block when waiting on a human or external dependency: ham-ctl lease block --waiting-on user --reason \"<question>\"","8. Reviewers post verdicts with: ham-ctl review post --verdict approve|request_changes [--findings-file <json>]","9. Fetch omitted or referenced context on demand: ham-ctl task fetch <task_id> <ref>","10. On 409 lease_lost, stop immediately; the hub will re-wake you with a fresh pack if needed.","11. Share what you learned: every decision others might re-open and every dead end goes in --decision/--dead-end, not only in the summary text; tasks that wait for yours and later attempts receive them."]`
+	return `["1. Read TASK.md first; it is your authoritative lease context pack. When it names a Workdir, cd there and do ALL work and commits in it (your own branch); the hub merges it when the task is done.","2. Confirm or inspect your lease with: ham-ctl lease next","3. Send a heartbeat every <15m during long work: ham-ctl lease heartbeat --note \"<progress>\"","4. Choose and run checks appropriate to the change; report the commands and their outcomes in your submit summary","5. Submit completed work on a clean working tree: ham-ctl lease submit --summary \"<what exists now>\" --decision \"<choice and why>\" --dead-end \"<what did not work>\" (repeat --decision/--dead-end per item)","6. Hand off unfinished work for a fresh context window: ham-ctl lease handoff --summary \"<summary>\" --next-steps \"<steps>\" [--decision ...] [--dead-end ...]","7. Block when waiting on a human or external dependency: ham-ctl lease block --waiting-on user --reason \"<question>\"","8. Reviewers post verdicts with: ham-ctl review post --verdict approve|request_changes [--findings-file <json>]","9. Fetch omitted or referenced context on demand: ham-ctl task fetch <task_id> <ref>","10. On 409 lease_lost, stop immediately; the hub will re-wake you with a fresh pack if needed.","11. Share what you learned: every decision others might re-open and every dead end goes in --decision/--dead-end, not only in the summary text; tasks that wait for yours and later attempts receive them."]`
 }
 
 // resolve_brief_inputs_json resolves each ref in `brief.inputs` into a JSON array:
@@ -306,7 +295,8 @@ resolve_brief_inputs_json :: proc(svc: ^Service, task: domain.Task) -> string {
 }
 
 // previous_attempt_and_vcs_json returns:
-// 1. previous_attempt JSON (`{attempt_no, outcome, holder_instance_id, handoff, vcs, verify, output, artifacts, runtime, last_heartbeat_note, note}` or `"null"`),
+// 1. previous_attempt JSON (`{attempt_no, outcome, holder_instance_id, handoff, vcs, output, artifacts, runtime, last_heartbeat_note, note}` or `"null"`),
+//    (legacy verify facets are history only and never enter a pack, D2),
 // 2. where_you_are JSON (the `vcs` facet of the previous/current attempt, or `"null"`),
 // 3. the previous attempt's outcome string.
 @(private = "file")
@@ -328,7 +318,6 @@ previous_attempt_and_vcs_json :: proc(svc: ^Service, task: domain.Task, lease: d
 	json_str(&o, "holder_instance_id", prev.holder_instance_id)
 	handoff := "null"
 	vcs := "null"
-	verify := "null"
 	output := "null"
 	artifacts := "null"
 	runtime_facet := "null"
@@ -338,7 +327,6 @@ previous_attempt_and_vcs_json :: proc(svc: ^Service, task: domain.Task, lease: d
 			switch f.kind {
 			case FACET_HANDOFF:   handoff = f.body_json
 			case FACET_VCS:       vcs = f.body_json
-			case FACET_VERIFY:    verify = f.body_json
 			case FACET_OUTPUT:    output = f.body_json
 			case FACET_ARTIFACTS: artifacts = f.body_json
 			case FACET_RUNTIME:   runtime_facet = f.body_json
@@ -348,7 +336,6 @@ previous_attempt_and_vcs_json :: proc(svc: ^Service, task: domain.Task, lease: d
 	last_note := last_heartbeat_note_for_attempt(evs, prev.attempt_no)
 	json_raw(&o, "handoff", handoff)
 	json_raw(&o, "vcs", vcs)
-	json_raw(&o, "verify", verify)
 	json_raw(&o, "output", output)
 	json_raw(&o, "artifacts", artifacts)
 	json_raw(&o, "runtime", runtime_facet)
@@ -734,8 +721,7 @@ answered_question :: proc(evs: []domain.Task_Event, at: int, input: Fold_Input) 
 
 // ---- Dependency handoffs -------------------------------------------------------------
 // A task that waits for others gets each one's latest handoff (summary,
-// decisions, dead ends, next steps), structured output, last commit and
-// verify result, the way workflow stages get upstream outputs. Without this a
+// decisions, dead ends, next steps), structured output and last commit, the way workflow stages get upstream outputs. Without this a
 // dependent ticket only saw the merged code and one chain-summary line.
 
 DEP_SUMMARY_MAX_BYTES :: 2 * 1024
@@ -779,15 +765,14 @@ dependencies_pack_json :: proc(svc: ^Service, task: domain.Task) -> string {
 
 @(private = "file")
 dependency_entry_json :: proc(svc: ^Service, dep: domain.Task, input_refs: []string) -> string {
-	handoff, output, vcs, verify := "", "", "", ""
-	handoff_at, output_at, vcs_at, verify_at := -1, -1, -1, -1
+	handoff, output, vcs := "", "", ""
+	handoff_at, output_at, vcs_at := -1, -1, -1
 	if facets, ferr := iface.taskchain_list_facets_by_task(svc.repo, dep.task_id, dep.owner_user_id); ferr.code == .None {
 		for f in facets {
 			switch f.kind {
 			case FACET_HANDOFF: if f.attempt_no >= handoff_at { handoff, handoff_at = f.body_json, f.attempt_no }
 			case FACET_OUTPUT:  if f.attempt_no >= output_at { output, output_at = f.body_json, f.attempt_no }
 			case FACET_VCS:     if f.attempt_no >= vcs_at { vcs, vcs_at = f.body_json, f.attempt_no }
-			case FACET_VERIFY:  if f.attempt_no >= verify_at { verify, verify_at = f.body_json, f.attempt_no }
 			}
 		}
 	}
@@ -795,7 +780,7 @@ dependency_entry_json :: proc(svc: ^Service, dep: domain.Task, input_refs: []str
 	json_str(&o, "task_id", string(dep.task_id))
 	json_str(&o, "title", dep.title)
 	json_str(&o, "state", domain.task_state_string(dep.state))
-	json_int(&o, "attempt_no", i64(max(handoff_at, output_at, vcs_at, verify_at, dep.attempt_no)))
+	json_int(&o, "attempt_no", i64(max(handoff_at, output_at, vcs_at, dep.attempt_no)))
 	summary := jsonx.extract_string(handoff, "summary", "", true, context.temp_allocator)
 	json_str(&o, "summary", truncate_utf8(summary, DEP_SUMMARY_MAX_BYTES))
 	for key in ([]string{"decisions", "dead_ends", "next_steps"}) {
@@ -820,13 +805,6 @@ dependency_entry_json :: proc(svc: ^Service, dep: domain.Task, input_refs: []str
 	// work is committed), not what the task changed, so only the head is
 	// passed; the agent reads the change with `git show --stat <head>`.
 	if vcs != "" do json_str(&o, "head", jsonx.extract_string(vcs, "head", "", true, context.temp_allocator))
-	if verify != "" {
-		v := json_begin()
-		// The hub writes `command`; older facets used `cmd`.
-		json_str(&v, "cmd", jsonx.extract_string(verify, "command", jsonx.extract_string(verify, "cmd", "", true, context.temp_allocator), true, context.temp_allocator))
-		if code, found := jsonx.extract_int_found(verify, "exit_code", true); found do json_int(&v, "exit_code", i64(code))
-		json_raw(&o, "verify", json_end(&v))
-	}
 	return json_end(&o)
 }
 

@@ -195,25 +195,6 @@ service_message_created :: proc(ctx: rawptr, m: domain.Chat_Message) {
 	http.publish_chat_message_created(&graph.event_bus, c, m)
 }
 
-task_engine_on_unobserved_shell_terminal :: proc(ctx: rawptr, session: domain.Shell_Session) {
-	svc := (^taskv2.Service)(ctx)
-	if svc == nil || session.kind != "run" || !strings.has_prefix(session.label, taskv2.VERIFY_LABEL_PREFIX) do return
-	duration := i64(0)
-	if s_ms, sok := platform.rfc3339_to_unix_ms(session.started_at); sok {
-		if e_ms, eok := platform.rfc3339_to_unix_ms(session.finished_at); eok && e_ms >= s_ms do duration = e_ms - s_ms
-	}
-	taskv2.on_verify_session_exited(svc, taskv2.Verify_Exit{
-		session_id    = session.session_id,
-		label         = session.label,
-		owner_user_id = session.owner_user_id,
-		status        = session.status,
-		exit_code     = -1,
-		exit_code_set = false,
-		duration_ms   = duration,
-		cmd           = session.cmd,
-	})
-}
-
 build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 	graph.bridge_runtime_registry.limits = project_service.Runtime_Registry_Limits{
 		live_bridges = config.runtime_max_live_bridges,
@@ -436,8 +417,6 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 	)
 	graph.shell_session_service.entitlements = billing_service.entitlement_lookup(&graph.billing)
 	shell_session_svc.shell_metrics_set_service(&graph.shell_session_service)
-	graph.shell_session_service.on_unobserved_terminal = task_engine_on_unobserved_shell_terminal
-	graph.shell_session_service.on_unobserved_terminal_ctx = rawptr(&graph.task_engine)
 	graph.shell_session_service.live_agents = &graph.agents
 	// REQ-SHELL-9 trigger A: a closed chain reaps its servers. Assigned HERE, after the
 	// shell-session service is constructed, rather than next to the other two taskchain
@@ -785,7 +764,6 @@ register_routes :: proc(graph: ^App_Graph) {
 	http.router_add(&graph.router, "POST", "/api/v1/task-chains/*/tasks/*/review", rawptr(&graph.taskchain_handlers), http.user_review_task_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/task-chains/*/tasks/*/reopen", rawptr(&graph.taskchain_handlers), http.reopen_task_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/task-chains/*/tasks/*/answer", rawptr(&graph.taskchain_handlers), http.answer_task_handler)
-	http.router_add(&graph.router, "POST", "/api/v1/task-chains/*/tasks/*/verify", rawptr(&graph.taskchain_handlers), http.verify_task_handler)
 	http.router_add(&graph.router, "GET", "/api/v1/task-chains/*/tasks/*/fetch", rawptr(&graph.taskchain_handlers), http.fetch_task_ref_handler)
 	http.router_add(&graph.router, "GET", "/api/v1/task-chains/*/tasks/*/events", rawptr(&graph.taskchain_handlers), http.list_task_events_handler)
 	http.router_add(&graph.router, "GET", "/api/v1/task-chains/*/tasks/*/attempts/*/facets/*", rawptr(&graph.taskchain_handlers), http.get_task_facet_handler)

@@ -68,12 +68,6 @@ Shell_Session_Service :: struct {
 	// Tunnel stream registry (T8) — protected by tunnel_mu.
 	tunnel_streams: map[string]^Preview_Tunnel_Stream, // stream_id → live stream
 	tunnel_mu:      sync.Mutex,
-	// Task System v2 (§4d): optional hook notified when an unobserved terminal
-	// status is landed on a live row by inventory absence or gone-bridge reap
-	// (_reap_inventory_absent) so verify Run sessions still get a verify facet
-	// with exit_code = -1.
-	on_unobserved_terminal:     proc(ctx: rawptr, session: domain.Shell_Session),
-	on_unobserved_terminal_ctx: rawptr,
 	live_agents: ^agent_service.Agent_Service,
 }
 
@@ -2641,12 +2635,3 @@ _shell_exited_event_json :: proc(session_id, status: string, exit_code: int, exi
 	return strings.to_string(b)
 }
 
-// shell_session_get_row is the TRUSTED by-id lookup for hub-internal consumers
-// of a bridge event that was already applied (Task System v2 verify facets):
-// scoped by the reporting bridge like handle_exited's fallback, never by user.
-shell_session_get_row :: proc(svc: ^Shell_Session_Service, bridge_id, session_id: string) -> (domain.Shell_Session, bool) {
-	if svc == nil || svc.repo == nil || session_id == "" do return {}, false
-	session, found, err := iface.shell_session_get_by_id(svc.repo, bridge_id, session_id)
-	if !found || err.code != .None do return {}, false
-	return session, true
-}

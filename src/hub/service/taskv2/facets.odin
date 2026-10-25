@@ -163,7 +163,6 @@ jsonx_top_level_array_items :: proc(arr: string) -> []string {
 	return out[:]
 }
 
-@(private = "file")
 json_value_end :: proc(s: string, start, limit: int) -> int {
 	i := start
 	if i >= limit do return limit

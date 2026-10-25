@@ -105,7 +105,7 @@ test_chain_status_sync_create_task_requires_explicit_reopen :: proc(t: ^testing.
 		title = "New Reactivating Task",
 		owner_user_id = owner,
 		// a task created on a LIVE chain is published at once → needs a full brief (M2)
-		brief_json = `{"goal":"reactivate","acceptance":["chain active again"],"verify":"true","review_roles":[]}`,
+		brief_json = `{"goal":"reactivate","acceptance":["chain active again"],"review_roles":[]}`,
 	})
 	testing.expect(t, !created, "completed chain rejects new work until reopened")
 

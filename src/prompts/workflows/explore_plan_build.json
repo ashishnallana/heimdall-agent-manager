@@ -5,21 +5,14 @@
   "v": 1,
   "id": "tpl_explore_plan_build",
   "name": "explore_plan_build",
-  "title": "Explore -> Plan -> Approve -> Build -> Verify",
-  "description": "Explore the codebase, produce a structured task_list.v1 plan, pause at a human/coordinator gate, then fan out across planned items and run a final integration verification.",
+  "title": "Explore -> Plan -> Approve -> Build -> Integrate",
+  "description": "Explore the codebase, produce a structured task_list.v1 plan, pause at a human/coordinator gate, then fan out across planned items and finish with an integration review of the combined result.",
   "inputs": [
     {
       "name": "goal",
       "type": "string",
       "required": true,
       "description": "High-level objective for the feature or change"
-    },
-    {
-      "name": "verify_cmd",
-      "type": "string",
-      "required": false,
-      "default": "true",
-      "description": "Verification command to run on each built item and final integration"
     }
   ],
   "defaults": {
@@ -36,7 +29,6 @@
         "acceptance": [
           "Summary of relevant modules, entry points, and risks submitted as JSON output"
         ],
-        "verify": "none",
         "output": {
           "schema": "inline",
           "required_fields": ["summary"]
@@ -49,11 +41,10 @@
       "title": "Plan tasks for: {{inputs.goal}}",
       "depends_on": ["explore"],
       "brief": {
-        "goal": "Based on exploration ({{stage.explore.output.summary}}), decompose '{{inputs.goal}}' into concrete, verifiable work items.",
+        "goal": "Based on exploration ({{stage.explore.output.summary}}), decompose '{{inputs.goal}}' into concrete work items, each with a goal and checkable acceptance criteria.",
         "acceptance": [
-          "Structured task_list.v1 output with non-empty goal, acceptance, and verify per item"
+          "Structured task_list.v1 output with a non-empty goal and acceptance criteria per item"
         ],
-        "verify": "none",
         "output": {
           "schema": "task_list.v1"
         }
@@ -79,22 +70,20 @@
       "brief": {
         "goal": "{{item.goal}}",
         "acceptance": [
-          "Implementation complete and verification passes for {{item.key}}"
-        ],
-        "verify": "{{inputs.verify_cmd}}"
+          "Implementation for {{item.key}} is complete and meets its acceptance criteria; the checks run and their outcomes are reported in the submit summary"
+        ]
       }
     },
     {
-      "key": "verify_all",
+      "key": "integrate",
       "kind": "task",
-      "title": "Final integration verification",
+      "title": "Final integration review",
       "depends_on": ["build"],
       "brief": {
-        "goal": "Run full integration verification across all built items for: {{inputs.goal}}",
+        "goal": "Integrate all built items for {{inputs.goal}} and check that they work together",
         "acceptance": [
-          "Full verification command exits 0 and all changes integrate cleanly"
-        ],
-        "verify": "{{inputs.verify_cmd}}"
+          "All changes integrate cleanly; the integration checks chosen and their outcomes are reported in the submit summary"
+        ]
       }
     }
   ]

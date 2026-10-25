@@ -27,7 +27,6 @@ Fold_Input :: struct {
 	deps_done:                  bool,
 	kind:                       domain.Task_Kind,
 	requires_user_approval:     bool,
-	require_independent_verify: bool,
 	// review_roles_count: len(brief.review_roles) + len(brief.reviewers).
 	review_roles_count:         int,
 	// max_attempts: brief.budget.max_attempts, 0 → TASK_MAX_ATTEMPTS.
@@ -144,7 +143,7 @@ fold_task :: proc(events: []domain.Task_Event, input: Fold_Input) -> Task_View {
 			v.has_work_lease = false
 			v.last_release = .Submitted
 			is_gate := input.kind == .Gate || payload_bool(ev.payload_json, "gate")
-			if !is_gate && input.review_roles_count == 0 && !input.requires_user_approval && !input.require_independent_verify {
+			if !is_gate && input.review_roles_count == 0 && !input.requires_user_approval {
 				v.done = true
 				v.in_review = false
 			} else {
@@ -333,15 +332,9 @@ fold_input_for_task :: proc(task: domain.Task, deps_done: bool) -> Fold_Input {
 		deps_done = deps_done,
 		kind = task.kind,
 		requires_user_approval = task.requires_user_approval,
-		require_independent_verify = brief_require_independent_verify(task.brief_json),
 		review_roles_count = brief_review_roles_count(task.brief_json),
 		max_attempts = brief_max_attempts(task.brief_json),
 	}
-}
-
-brief_require_independent_verify :: proc(brief_json: string) -> bool {
-	if b, ok := jsonx.extract_bool_literal(brief_json, "require_independent_verify", true); ok do return b
-	return false
 }
 
 // brief_review_roles_count: how many agent review requirements the brief has,

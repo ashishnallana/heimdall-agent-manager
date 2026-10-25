@@ -1513,7 +1513,7 @@ create_task_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	chain_deps, _ := taskchain_service.list_chain_dependencies(h.taskchains, auth_ctx, domain.Task_Chain_ID(chain_id))
 	b := strings.builder_make()
 	write_task_detail_json(&b, h, auth_ctx, task, chain_deps)
-	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req), 201)
+	return respond_success(with_verify_removed_warnings(strings.to_string(b), brief_verify_removed_fields(req.body)), req.request_id, auth_ctx_server_time(req), 201)
 }
 
 patch_task_handler :: proc(ctx: rawptr, req: Request) -> Response {
@@ -1549,11 +1549,12 @@ patch_task_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	publish_task_changed(h, string(task.owner_user_id), string(task.task_id), string(task.chain_id), "updated")
 	publish_chain_changed(h, string(task.owner_user_id), string(task.chain_id), "updated")
 	b := strings.builder_make(); write_task_json(&b, task)
-	body := strings.to_string(b)
 	// F5: an edit to a done/cancelled task is saved but never runs; say so.
-	if domain.task_state_is_terminal(task.state) && strings.has_suffix(body, "}") {
-		body = strings.concatenate({body[:len(body) - 1], `,"warnings":["task_done_edit_has_no_effect"]}`}, context.temp_allocator)
-	}
+	// M2: removed verify keys in the brief were dropped; say so too.
+	done_warning := `"task_done_edit_has_no_effect"` if domain.task_state_is_terminal(task.state) else ""
+	verify_warning := taskv2.verify_removed_warnings_json(brief_verify_removed_fields(req.body))
+	if verify_warning != "" do verify_warning = verify_warning[1:len(verify_warning) - 1]
+	body := with_response_warnings(strings.to_string(b), done_warning, verify_warning)
 	return respond_success(body, req.request_id, auth_ctx_server_time(req))
 }
 
@@ -2665,7 +2666,8 @@ propose_task_chain_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	prop_json := taskv2.chain_proposal_json(updated)
 	if prop_json == "" do prop_json = "{}"
 	pub_state := "published" if updated.publish_state == .Published else "draft"
-	return respond_success(fmt.tprintf("{{\"chain_id\":\"%s\",\"publish_state\":\"%s\",\"proposal\":%s}}", updated.chain_id, pub_state, prop_json), req.request_id, auth_ctx_server_time(req))
+	body := with_verify_removed_warnings(fmt.tprintf("{{\"chain_id\":\"%s\",\"publish_state\":\"%s\",\"proposal\":%s}}", updated.chain_id, pub_state, prop_json), task_specs_verify_removed_fields(tasks_json))
+	return respond_success(body, req.request_id, auth_ctx_server_time(req))
 }
 
 // POST /api/v1/task-chains/{cid}/proposal/decide  {decision: approve|reject, note?}
@@ -2691,85 +2693,6 @@ decide_task_chain_proposal_handler :: proc(ctx: rawptr, req: Request) -> Respons
 		write_task_json(&b, t)
 	}
 	strings.write_string(&b, "]}")
-	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req))
-}
-
-// POST /api/v1/task-chains/{cid}/tasks/{tid}/verify  {independent?: bool}
-verify_task_handler :: proc(ctx: rawptr, req: Request) -> Response {
-	h := (^Taskchain_Handlers)(ctx)
-	auth_ctx, ok, auth_resp := require_auth_any(h.auth, req)
-	if !ok do return auth_resp
-	if h.task_engine == nil do return respond_error(domain.domain_error(.Internal_Error, "task engine is not configured"), req.request_id)
-	chain_id := domain.Task_Chain_ID(path_part(req.path, 4))
-	task_id := domain.Task_ID(path_part(req.path, 6))
-	if matched, mismatch_resp := require_task_path_scope(h, auth_ctx, chain_id, task_id, req); !matched do return mismatch_resp
-	task, tok, terr := taskchain_service.get_task_for_read(h.taskchains, auth_ctx, task_id)
-	if !tok do return respond_error(terr, req.request_id)
-	cmd := strings.trim_space(jsonx.extract_string(task.brief_json, "verify", "", true, context.temp_allocator))
-	if cmd == "" || cmd == "none" {
-		return respond_error(domain.domain_error(.Validation_Failed, "task brief.verify is empty or 'none'"), req.request_id)
-	}
-	attempt_no := task.attempt_no
-	if attempt_no <= 0 do attempt_no = 1
-	head_rev := ""
-	cwd := ""
-	bridge_id := task.bridge_id
-	if facets, ferr := iface.taskchain_list_facets_by_task(h.task_engine.repo, task.task_id, task.owner_user_id); ferr.code == .None {
-		best_v := -1
-		for f in facets {
-			if f.attempt_no == attempt_no && f.kind == taskv2.FACET_VCS && f.v > best_v {
-				best_v = f.v
-				head_rev = jsonx.extract_string(f.body_json, "head", "", true, context.temp_allocator)
-				dir_id := jsonx.extract_string(f.body_json, "directory_id", "", true, context.temp_allocator)
-				if dir_id != "" {
-					if dir, dok, _ := iface.taskchain_get_directory(h.task_engine.repo, dir_id, task.chain_id, task.owner_user_id); dok {
-						cwd = dir.path
-						if bridge_id == "" do bridge_id = dir.bridge_id
-					}
-				}
-			}
-		}
-	}
-	if cwd == "" {
-		if dirs, derr := iface.taskchain_list_directories_by_chain(h.task_engine.repo, task.chain_id, task.owner_user_id); derr.code == .None && len(dirs) > 0 {
-			cwd = dirs[0].path
-			if bridge_id == "" do bridge_id = dirs[0].bridge_id
-		}
-	}
-	if bridge_id == "" && h.task_engine.bridges != nil {
-		if bridges, berr := iface.bridge_list_by_owner(h.task_engine.bridges, task.owner_user_id); berr.code == .None && len(bridges) > 0 {
-			bridge_id = bridges[0].bridge_id
-		}
-	}
-	independent := jsonx.extract_bool(req.body, "independent", true, true)
-	label := fmt.tprintf("verify %s #%d @%s%s", task.task_id, attempt_no, head_rev if head_rev != "" else "HEAD", " independent" if independent else "")
-	shell_cmd := cmd
-	if independent && head_rev != "" && cwd != "" {
-		home := strings.trim_space(os.get_env("HOME", context.temp_allocator))
-		if home == "" do home = "."
-		wt_base := fmt.tprintf("%s/.cache/heimdall-tests/verify-wt", home)
-		wt_dir := fmt.tprintf("%s/ham-verify-%s-%d-%d", wt_base, task.task_id, attempt_no, time.now()._nsec)
-		shell_cmd = fmt.tprintf("mkdir -p %q && git -C %q worktree add --detach --force %q %q >/dev/null 2>&1 && (cd %q && (%s)); rc=$?; git -C %q worktree remove --force %q >/dev/null 2>&1 || rm -rf %q; exit $rc", wt_base, cwd, wt_dir, head_rev, wt_dir, cmd, cwd, wt_dir, wt_dir)
-	}
-	if h.shell_sessions == nil {
-		return respond_error(domain.domain_error(.Internal_Error, "shell session service is not configured"), req.request_id)
-	}
-	session, created, serr := shell_session_svc.shell_session_create(h.shell_sessions, auth_ctx, shell_session_svc.Shell_Session_Create_Input{
-		bridge_id  = bridge_id,
-		kind       = "run",
-		cmd        = shell_cmd,
-		cwd        = cwd,
-		label      = label,
-		chain_id   = string(task.chain_id),
-		background = true,
-	})
-	if !created do return respond_error(serr, req.request_id)
-	b := strings.builder_make()
-	strings.write_string(&b, "{\"ok\":true,\"label\":\"")
-	write_handler_json_string(&b, label)
-	strings.write_string(&b, "\",\"session\":")
-	write_shell_session_json(&b, session)
-	strings.write_string(&b, "}")
 	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req))
 }
 
@@ -2898,7 +2821,7 @@ workflow_define_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	strings.write_string(&b, `","spec":`)
 	strings.write_string(&b, def.body_json)
 	strings.write_byte(&b, '}')
-	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req), 201)
+	return respond_success(with_verify_removed_warnings(strings.to_string(b), workflow_spec_verify_removed_fields(spec_json)), req.request_id, auth_ctx_server_time(req), 201)
 }
 
 // ---- chain review roles (hybrid review model) ---------------------------------------

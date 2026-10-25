@@ -596,7 +596,7 @@ test_task_v2_fields_sqlite_roundtrip :: proc(t: ^testing.T) {
 		publish_state          = .Published,
 		status                 = .Active,
 		kind                   = domain.CHAIN_KIND_MIXED_WORK,
-		defaults_json          = `{"auto_submit":true}`,
+		defaults_json          = `{"custom_flag":true}`,
 		created_at             = "2026-10-01T10:00:00Z",
 		updated_at             = "2026-10-01T10:00:00Z",
 		published_at           = "2026-10-01T10:00:00Z",
@@ -607,7 +607,7 @@ test_task_v2_fields_sqlite_roundtrip :: proc(t: ^testing.T) {
 	got_chain, gc_ok, _ := iface.taskchain_get_chain(&repo, cid)
 	testing.expect(t, gc_ok, "get chain ok")
 	testing.expect_value(t, got_chain.kind, domain.CHAIN_KIND_MIXED_WORK)
-	testing.expect_value(t, got_chain.defaults_json, `{"auto_submit":true}`)
+	testing.expect_value(t, got_chain.defaults_json, `{"custom_flag":true}`)
 
 	// Every Task_State / Task_Kind value survives the string mapping.
 	for state in domain.Task_State {
@@ -632,7 +632,7 @@ COMMIT;`), "seed current workflow execution for generated gate")
 		kind                   = .Gate,
 		priority               = .P0,
 		attempt_no             = 3,
-		brief_json             = `{"goal":"ship it","acceptance":["a"],"verify":"make test","inputs":[],"review_roles":["reviewer"],"assignee":"agt_w","budget":{"max_attempts":2}}`,
+		brief_json             = `{"goal":"ship it","acceptance":["a"],"inputs":[],"review_roles":["reviewer"],"assignee":"agt_w","budget":{"max_attempts":2}}`,
 		blocked_on_json        = `{"kind":"human","reason":"needs decision","since":"2026-10-01T10:05:00Z"}`,
 		requires_user_approval = true,
 		ready_since            = "2026-10-01T10:02:00Z",
@@ -656,7 +656,7 @@ COMMIT;`), "seed current workflow execution for generated gate")
 		testing.expectf(t, got.kind == .Gate, "%s: kind %v", label, got.kind)
 		testing.expectf(t, got.priority == .P0, "%s: priority %v", label, got.priority)
 		testing.expectf(t, got.attempt_no == 3, "%s: attempt_no %d", label, got.attempt_no)
-		testing.expectf(t, got.brief_json == `{"goal":"ship it","acceptance":["a"],"verify":"make test","inputs":[],"review_roles":["reviewer"],"assignee":"agt_w","budget":{"max_attempts":2}}`, "%s: brief_json %s", label, got.brief_json)
+		testing.expectf(t, got.brief_json == `{"goal":"ship it","acceptance":["a"],"inputs":[],"review_roles":["reviewer"],"assignee":"agt_w","budget":{"max_attempts":2}}`, "%s: brief_json %s", label, got.brief_json)
 		testing.expectf(t, got.blocked_on_json == `{"kind":"human","reason":"needs decision","since":"2026-10-01T10:05:00Z"}`, "%s: blocked_on_json %s", label, got.blocked_on_json)
 		testing.expectf(t, got.requires_user_approval, "%s: requires_user_approval", label)
 		testing.expectf(t, got.ready_since == "2026-10-01T10:02:00Z", "%s: ready_since %s", label, got.ready_since)

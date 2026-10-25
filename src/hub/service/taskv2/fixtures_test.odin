@@ -10,7 +10,6 @@ import jsonx "odin_test:lib/jsonx"
 // fields must survive the hub verbatim.
 FIXTURE_HANDOFF   :: #load("../../../../tests/fixtures/facets/handoff.json", string)
 FIXTURE_VCS       :: #load("../../../../tests/fixtures/facets/vcs.json", string)
-FIXTURE_VERIFY    :: #load("../../../../tests/fixtures/facets/verify.json", string)
 FIXTURE_OUTPUT    :: #load("../../../../tests/fixtures/facets/output.json", string)
 FIXTURE_RUNTIME   :: #load("../../../../tests/fixtures/facets/runtime.json", string)
 FIXTURE_ARTIFACTS :: #load("../../../../tests/fixtures/facets/artifacts.json", string)
@@ -26,14 +25,6 @@ test_facet_fixtures_decode :: proc(t: ^testing.T) {
 	testing.expect(t, dirty_ok, "vcs.dirty is a boolean")
 	files, files_ok := jsonx.extract_raw_array(FIXTURE_VCS, "files", true, context.temp_allocator)
 	testing.expect(t, files_ok && strings.has_prefix(files, "["), "vcs.files is an array")
-	// verify
-	_, ec_ok := jsonx.extract_int_found(FIXTURE_VERIFY, "exit_code", true)
-	_, dur_ok := jsonx.extract_int_found(FIXTURE_VERIFY, "duration_ms", true)
-	testing.expect(t, ec_ok && dur_ok, "verify.exit_code / duration_ms are integers")
-	testing.expect(t, jsonx.extract_string(FIXTURE_VERIFY, "log_ref", "", true, context.temp_allocator) != "", "verify.log_ref")
-	testing.expect(t, jsonx.extract_string(FIXTURE_VERIFY, "head_at_start", "", true, context.temp_allocator) != "" && jsonx.extract_string(FIXTURE_VERIFY, "head_at_end", "", true, context.temp_allocator) != "", "verify heads")
-	_, vdirty_ok := jsonx.extract_bool_literal(FIXTURE_VERIFY, "dirty", true)
-	testing.expect(t, vdirty_ok || strings.contains(FIXTURE_VERIFY, `"dirty": null`) || strings.contains(FIXTURE_VERIFY, `"dirty":null`), "verify.dirty is bool|null")
 	// output
 	testing.expect(t, strings.has_prefix(strings.trim_space(FIXTURE_OUTPUT), "{"), "output is an object")
 	// runtime
@@ -43,7 +34,7 @@ test_facet_fixtures_decode :: proc(t: ^testing.T) {
 	_, aok, _ := validate_artifacts_facet_json(FIXTURE_ARTIFACTS)
 	testing.expect(t, aok, "artifacts fixture validates")
 	// all parse as JSON
-	for fx in ([]string{FIXTURE_HANDOFF, FIXTURE_VCS, FIXTURE_VERIFY, FIXTURE_OUTPUT, FIXTURE_RUNTIME, FIXTURE_ARTIFACTS, FIXTURE_UNKNOWN}) {
+	for fx in ([]string{FIXTURE_HANDOFF, FIXTURE_VCS, FIXTURE_OUTPUT, FIXTURE_RUNTIME, FIXTURE_ARTIFACTS, FIXTURE_UNKNOWN}) {
 		v, err := json.parse_string(fx, allocator = context.temp_allocator)
 		testing.expect(t, err == nil, "fixture parses")
 		_, is_obj := v.(json.Object)

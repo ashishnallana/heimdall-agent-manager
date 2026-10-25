@@ -10,8 +10,8 @@ import iface "odin_test:hub/repository/iface"
 
 @(private = "file")
 FANOUT_SPEC :: `{"schema":"workflow.v1","name":"fanout_inputs","inputs":{"subtopics":{"type":"array","required":true}},"stages":[
-	{"key":"write","title":"Write {{item.title}}{{item}}","for_each":"inputs.subtopics","brief":{"goal":"Write {{item.title}} #{{stage.index}}/{{stage.count}}","acceptance":["done"],"verify":"none","review_roles":[]}},
-	{"key":"merge","depends_on":["write"],"title":"Merge","brief":{"goal":"Merge","acceptance":["merged"],"verify":"none","review_roles":[]}}
+	{"key":"write","title":"Write {{item.title}}{{item}}","for_each":"inputs.subtopics","brief":{"goal":"Write {{item.title}} #{{stage.index}}/{{stage.count}}","acceptance":["done"],"review_roles":[]}},
+	{"key":"merge","depends_on":["write"],"title":"Merge","brief":{"goal":"Merge","acceptance":["merged"],"review_roles":[]}}
 ]}`
 
 @(private = "file")
@@ -39,22 +39,22 @@ test_workflow_input_fan_out_definition_validation :: proc(t: ^testing.T) {
 	_, dok, derr := workflow_define(&fx.svc, "u1", FANOUT_SPEC)
 	testing.expect(t, dok, fmt.tprintf("inputs.<array> for_each accepted at define: %s", derr.message))
 	// Undeclared inputs are accepted (validated at run time) when no inputs are declared.
-	_, uok, uerr := workflow_define(&fx.svc, "u1", `{"schema":"workflow.v1","name":"undeclared","stages":[{"key":"w","for_each":"inputs.topics","brief":{"goal":"{{item}}","acceptance":["a"],"verify":"none"}}]}`)
+	_, uok, uerr := workflow_define(&fx.svc, "u1", `{"schema":"workflow.v1","name":"undeclared","stages":[{"key":"w","for_each":"inputs.topics","brief":{"goal":"{{item}}","acceptance":["a"]}}]}`)
 	testing.expect(t, uok, uerr.message)
-	_, aok, aerr := workflow_define(&fx.svc, "u1", `{"schema":"workflow.v1","name":"alias","inputs":[{"name":"topics","type":"list"}],"stages":[{"key":"w","for_each":"workflow.input.topics","brief":{"goal":"{{item}}","acceptance":["a"],"verify":"none"}}]}`)
+	_, aok, aerr := workflow_define(&fx.svc, "u1", `{"schema":"workflow.v1","name":"alias","inputs":[{"name":"topics","type":"list"}],"stages":[{"key":"w","for_each":"workflow.input.topics","brief":{"goal":"{{item}}","acceptance":["a"]}}]}`)
 	testing.expect(t, aok, aerr.message)
 
 	bad := [?]string{
 		// declared scalar type
-		`{"schema":"workflow.v1","name":"b1","inputs":{"topics":{"type":"string"}},"stages":[{"key":"w","for_each":"inputs.topics","brief":{"goal":"g","acceptance":["a"],"verify":"none"}}]}`,
+		`{"schema":"workflow.v1","name":"b1","inputs":{"topics":{"type":"string"}},"stages":[{"key":"w","for_each":"inputs.topics","brief":{"goal":"g","acceptance":["a"]}}]}`,
 		// shorthand scalar type
-		`{"schema":"workflow.v1","name":"b2","inputs":{"topics":"string"},"stages":[{"key":"w","for_each":"inputs.topics","brief":{"goal":"g","acceptance":["a"],"verify":"none"}}]}`,
+		`{"schema":"workflow.v1","name":"b2","inputs":{"topics":"string"},"stages":[{"key":"w","for_each":"inputs.topics","brief":{"goal":"g","acceptance":["a"]}}]}`,
 		// undeclared while other inputs are declared
-		`{"schema":"workflow.v1","name":"b3","inputs":{"goal":"string"},"stages":[{"key":"w","for_each":"inputs.topics","brief":{"goal":"g","acceptance":["a"],"verify":"none"}}]}`,
+		`{"schema":"workflow.v1","name":"b3","inputs":{"goal":"string"},"stages":[{"key":"w","for_each":"inputs.topics","brief":{"goal":"g","acceptance":["a"]}}]}`,
 		// nested path
-		`{"schema":"workflow.v1","name":"b4","stages":[{"key":"w","for_each":"inputs.a.b","brief":{"goal":"g","acceptance":["a"],"verify":"none"}}]}`,
+		`{"schema":"workflow.v1","name":"b4","stages":[{"key":"w","for_each":"inputs.a.b","brief":{"goal":"g","acceptance":["a"]}}]}`,
 		// non-array default
-		`{"schema":"workflow.v1","name":"b5","inputs":{"topics":{"type":"array","default":"x"}},"stages":[{"key":"w","for_each":"inputs.topics","brief":{"goal":"g","acceptance":["a"],"verify":"none"}}]}`,
+		`{"schema":"workflow.v1","name":"b5","inputs":{"topics":{"type":"array","default":"x"}},"stages":[{"key":"w","for_each":"inputs.topics","brief":{"goal":"g","acceptance":["a"]}}]}`,
 		// gate cannot fan out
 		`{"schema":"workflow.v1","name":"b6","stages":[{"key":"w","kind":"gate","for_each":"inputs.topics","approver":"user"}]}`,
 	}
@@ -64,8 +64,8 @@ test_workflow_input_fan_out_definition_validation :: proc(t: ^testing.T) {
 	}
 	// Stage-output fan-out keeps parsing.
 	_, sok, serr := workflow_define(&fx.svc, "u1", `{"schema":"workflow.v1","name":"stage_out","stages":[
-		{"key":"scan","brief":{"goal":"g","acceptance":["a"],"verify":"none","output":{"schema":"task_list.v1"}}},
-		{"key":"fix","depends_on":["scan"],"for_each":"scan.outputs[0].tasks","brief":{"goal":"{{item.goal}}","acceptance":["a"],"verify":"none"}}]}`)
+		{"key":"scan","brief":{"goal":"g","acceptance":["a"],"output":{"schema":"task_list.v1"}}},
+		{"key":"fix","depends_on":["scan"],"for_each":"scan.outputs[0].tasks","brief":{"goal":"{{item.goal}}","acceptance":["a"]}}]}`)
 	testing.expect(t, sok, serr.message)
 }
 
@@ -150,8 +150,8 @@ test_workflow_input_fan_out_invalid_and_empty_inputs :: proc(t: ^testing.T) {
 	user := Actor{kind = ACTOR_USER, id = "u1"}
 	workflow_example_definition(t, fx, "fanout_inputs", FANOUT_SPEC)
 	workflow_example_definition(t, fx, "fanout_optional", `{"schema":"workflow.v1","name":"fanout_optional","stages":[
-		{"key":"prep","brief":{"goal":"Prep","acceptance":["a"],"verify":"none","review_roles":[]}},
-		{"key":"write","depends_on":["prep"],"for_each":"inputs.topics","brief":{"goal":"{{item}}","acceptance":["a"],"verify":"none","review_roles":[]}}]}`)
+		{"key":"prep","brief":{"goal":"Prep","acceptance":["a"],"review_roles":[]}},
+		{"key":"write","depends_on":["prep"],"for_each":"inputs.topics","brief":{"goal":"{{item}}","acceptance":["a"],"review_roles":[]}}]}`)
 
 	cases := [?]struct{ref, inputs: string}{
 		{"fanout_inputs", `{}`},
@@ -220,7 +220,7 @@ test_workflow_input_fan_out_item_rendering_and_defaults :: proc(t: ^testing.T) {
 	user := Actor{kind = ACTOR_USER, id = "u1"}
 	workflow_example_definition(t, fx, "fanout_inputs", FANOUT_SPEC)
 	workflow_example_definition(t, fx, "fanout_default", `{"schema":"workflow.v1","name":"fanout_default","inputs":{"topics":{"type":"array","required":false,"default":["a","b"]}},"stages":[
-		{"key":"w","title":"T {{item}}","for_each":"inputs.topics","brief":{"goal":"All {{inputs.topics}}","acceptance":["a"],"verify":"none","review_roles":[]}}]}`)
+		{"key":"w","title":"T {{item}}","for_each":"inputs.topics","brief":{"goal":"All {{inputs.topics}}","acceptance":["a"],"review_roles":[]}}]}`)
 
 	// A string item renders decoded, not as escaped JSON; scalar items have no
 	// fields, so a "priority"-looking string does not override and item_key is positional.

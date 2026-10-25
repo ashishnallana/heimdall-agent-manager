@@ -27,7 +27,7 @@ test_task_wire_escaped_characters_and_markdown :: proc(t: ^testing.T) {
 		priority               = .P1,
 		attempt_no             = 2,
 		bridge_id              = "brg_123",
-		brief_json             = `{"goal":"g","acceptance":[],"verify":"","inputs":[],"review_roles":["reviewer"],"assignee":"agt_worker_1"}`,
+		brief_json             = `{"goal":"g","acceptance":[],"inputs":[],"review_roles":["reviewer"],"assignee":"agt_worker_1"}`,
 		blocked_on_json        = `{"kind":"human","reason":"decide"}`,
 		requires_user_approval = true,
 		ready_since            = "2026-10-03T11:59:00Z",
@@ -493,7 +493,7 @@ test_write_chain_json_pinned :: proc(t: ^testing.T) {
 		status                        = .Active,
 		kind                          = domain.CHAIN_KIND_MIXED_WORK,
 		coordinator_agent_instance_id = "inst_coord",
-		defaults_json                 = `{"auto_submit":false}`,
+		defaults_json                 = `{"review_roles":{}}`,
 		created_at                    = "2026-09-21T09:00:00Z",
 		updated_at                    = "2026-09-21T09:10:00Z",
 		is_pinned                     = true,
@@ -506,6 +506,6 @@ test_write_chain_json_pinned :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(out, `"is_pinned":true`), "must serialize is_pinned true")
 	testing.expect(t, strings.contains(out, `"pinned_at":"2026-09-21T09:10:00Z"`), "must serialize pinned_at")
 	testing.expect(t, strings.contains(out, `"kind":"mixed_work"`), "must serialize kind")
-	testing.expect(t, strings.contains(out, `"defaults":{"auto_submit":false}`), "must splice defaults as an object")
+	testing.expect(t, strings.contains(out, `"defaults":{"review_roles":{}}`), "must splice defaults as an object")
 	testing.expect(t, !strings.contains(out, `default_reviewer_refs`), "v2 chain wire must not carry default_reviewer_refs")
 }

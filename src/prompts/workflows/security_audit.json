@@ -13,13 +13,6 @@
       "type": "string",
       "required": true,
       "description": "Target directory or component to audit"
-    },
-    {
-      "name": "verify_cmd",
-      "type": "string",
-      "required": false,
-      "default": "true",
-      "description": "Verification command for remediation tasks"
     }
   ],
   "defaults": {
@@ -36,7 +29,6 @@
         "acceptance": [
           "Structured findings.v1 output listing discovered issues with severity, summary, and location"
         ],
-        "verify": "none",
         "output": {
           "schema": "findings.v1"
         }
@@ -62,9 +54,8 @@
       "brief": {
         "goal": "Remediate {{item.severity}} security finding at {{item.location}}: {{item.summary}} ({{item.recommendation}})",
         "acceptance": [
-          "Vulnerability remediated and verification passes"
+          "Vulnerability remediated; the checks showing it is fixed are reported in the submit summary"
         ],
-        "verify": "{{inputs.verify_cmd}}",
         "review_roles": ["reviewer"]
       }
     }

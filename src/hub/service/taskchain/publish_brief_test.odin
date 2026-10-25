@@ -9,9 +9,11 @@ import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
 import platform "odin_test:hub/platform"
 import sqlite "odin_test:hub/repository/sqlite"
+import taskv2 "odin_test:hub/service/taskv2"
 
-// M2: publishing validates every brief; a review role without a fleet row, a
-// missing goal/acceptance/verify, each name the task and the missing field.
+// REQ-TV2-2: publishing validates every brief; a review role without a fleet
+// row, a missing goal/acceptance, each name the task and the missing field. No
+// verify command or output contract is ever required.
 @(test)
 test_publish_rejects_review_role_without_fleet_row :: proc(t: ^testing.T) {
 	home := os.get_env("HOME", context.temp_allocator)
@@ -38,9 +40,9 @@ test_publish_rejects_review_role_without_fleet_row :: proc(t: ^testing.T) {
 	now := platform.clock_now(&clock)
 	_, _ = iface.taskchain_upsert_fleet(&tc_repo, domain.Task_Chain_Fleet{task_chain_id = chain.chain_id, agent_id = "agt_w", capacity = 1, roles_json = `["worker"]`, created_at = now, updated_at = now})
 
-	complete, ok1, e1 := create_task(&svc, auth, Create_Task_Input{chain_id = chain.chain_id, title = "ok", brief_json = `{"goal":"do it","acceptance":["tests pass"],"verify":"make test","review_roles":[]}`})
+	complete, ok1, e1 := create_task(&svc, auth, Create_Task_Input{chain_id = chain.chain_id, title = "ok", brief_json = `{"goal":"do it","acceptance":["tests pass"],"review_roles":[]}`})
 	testing.expect(t, ok1, fmt.tprintf("create ok task: %s", e1.message))
-	bad_role, ok2, _ := create_task(&svc, auth, Create_Task_Input{chain_id = chain.chain_id, title = "needs security", brief_json = `{"goal":"g","acceptance":["a"],"verify":"true","review_roles":["security"]}`})
+	bad_role, ok2, _ := create_task(&svc, auth, Create_Task_Input{chain_id = chain.chain_id, title = "needs security", brief_json = `{"goal":"g","acceptance":["a"],"review_roles":["security"]}`})
 	testing.expect(t, ok2, "create task with an uncovered review role (allowed until publish)")
 	empty, ok3, _ := create_task(&svc, auth, Create_Task_Input{chain_id = chain.chain_id, title = "bare", description = "just a title"})
 	testing.expect(t, ok3, "create bare task")
@@ -51,20 +53,20 @@ test_publish_rejects_review_role_without_fleet_row :: proc(t: ^testing.T) {
 	testing.expect_value(t, perr.code, domain.Error_Code.Validation_Failed)
 	testing.expect(t, strings.contains(perr.details_json, `"code":"brief_incomplete"`), "details code")
 	testing.expect(t, strings.contains(perr.details_json, fmt.tprintf(`"task_id":"%s"`, bad_role.task_id)) && strings.contains(perr.details_json, `"review_role:security"`), "review role without fleet row named")
-	testing.expect(t, strings.contains(perr.details_json, fmt.tprintf(`"task_id":"%s"`, empty.task_id)) && strings.contains(perr.details_json, `"acceptance"`) && strings.contains(perr.details_json, `"verify"`), "bare task missing acceptance + verify")
+	testing.expect(t, strings.contains(perr.details_json, fmt.tprintf(`"task_id":"%s"`, empty.task_id)) && strings.contains(perr.details_json, `"acceptance"`) && !strings.contains(perr.details_json, `"verify"`), "bare task missing acceptance (never verify)")
 	testing.expect(t, !strings.contains(perr.details_json, string(complete.task_id)), "complete task not listed")
 	persisted, _, _ := iface.taskchain_get_chain(&tc_repo, chain.chain_id)
 	testing.expect_value(t, persisted.publish_state, domain.Publish_State.Draft)
 
 	// fix: add the security fleet row, give the bare task a brief → publish succeeds
 	_, _ = iface.taskchain_upsert_fleet(&tc_repo, domain.Task_Chain_Fleet{task_chain_id = chain.chain_id, agent_id = "agt_sec", capacity = 1, roles_json = `["security"]`, created_at = now, updated_at = now})
-	_, uok, uerr := update_task(&svc, auth, empty.task_id, Update_Task_Input{brief_json = `{"goal":"g","acceptance":["a"],"verify":"true"}`})
+	_, uok, uerr := update_task(&svc, auth, empty.task_id, Update_Task_Input{brief_json = `{"goal":"g","acceptance":["a"]}`})
 	testing.expect(t, uok, fmt.tprintf("update bare task: %s", uerr.message))
 	_, pok2, perr2 := publish_chain(&svc, auth, chain.chain_id)
 	testing.expect(t, pok2, fmt.tprintf("chain publish: %s %s", perr2.message, perr2.details_json))
 	// a task created on the LIVE chain is published at once → validated at create
-	long_goal := strings.repeat("g", BRIEF_GOAL_MAX + 1, context.temp_allocator)
-	_, ok4, e4 := create_task(&svc, auth, Create_Task_Input{chain_id = chain.chain_id, title = "long", brief_json = fmt.tprintf(`{"goal":"%s","acceptance":["a"],"verify":"true"}`, long_goal)})
+	long_goal := strings.repeat("g", taskv2.BRIEF_GOAL_MAX + 1, context.temp_allocator)
+	_, ok4, e4 := create_task(&svc, auth, Create_Task_Input{chain_id = chain.chain_id, title = "long", brief_json = fmt.tprintf(`{"goal":"%s","acceptance":["a"]}`, long_goal)})
 	testing.expect(t, !ok4 && e4.code == .Validation_Failed && strings.contains(e4.details_json, `"goal"`), "goal > 2k refused on a live chain")
 	_, ok5, e5 := create_task(&svc, auth, Create_Task_Input{chain_id = chain.chain_id, title = "bare live", description = "no brief"})
 	testing.expect(t, !ok5 && e5.code == .Validation_Failed && strings.contains(e5.details_json, `"acceptance"`), "bare task refused on a live chain")
@@ -118,7 +120,7 @@ test_fleet_custom_review_roles_and_reviewers_keep_brief_roles :: proc(t: ^testin
 	// reviewer agents in brief.reviewers (hybrid model: named reviewers are not
 	// folded into a "reviewer" role any more)
 	task, tok, terr := create_task(&svc, auth, Create_Task_Input{chain_id = chain.chain_id, title = "rotate",
-		brief_json = `{"goal":"g","acceptance":["a"],"verify":"true","review_roles":["security"]}`,
+		brief_json = `{"goal":"g","acceptance":["a"],"review_roles":["security"]}`,
 		reviewer_agent_ids = []string{"agt_rev"}})
 	if !testing.expect(t, tok, fmt.tprintf("create: %s", terr.message)) do return
 	testing.expect(t, strings.contains(task.brief_json, `"review_roles":["security"]`), fmt.tprintf("brief keeps its security role: %s", task.brief_json))

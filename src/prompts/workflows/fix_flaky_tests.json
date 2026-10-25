@@ -6,7 +6,7 @@
   "id": "tpl_fix_flaky_tests",
   "name": "fix_flaky_tests",
   "title": "Reproduce -> Diagnose -> Fix Flaky Tests",
-  "description": "Scan a test suite for flaky tests, produce a task_list.v1 of reproducers/fixes, and fix each flaky test in parallel with verification.",
+  "description": "Scan a test suite for flaky tests, produce a task_list.v1 of reproducers/fixes, and fix each flaky test in parallel, reporting the checks that show it is stable.",
   "inputs": [
     {
       "name": "suite",
@@ -20,14 +20,7 @@
       "type": "string",
       "required": false,
       "default": "true",
-      "description": "Test command to reproduce and verify flaky tests"
-    },
-    {
-      "name": "verify_cmd",
-      "type": "string",
-      "required": false,
-      "default": "true",
-      "description": "Command to verify the test suite passes reliably"
+      "description": "Test command used to reproduce flaky tests"
     }
   ],
   "defaults": {
@@ -42,9 +35,8 @@
       "brief": {
         "goal": "Identify flaky tests in {{inputs.suite}} (using {{inputs.test_command}}), determine root causes, and emit a task_list.v1 of isolated fixes.",
         "acceptance": [
-          "Structured task_list.v1 listing each flaky test with root-cause goal and verification command"
+          "Structured task_list.v1 listing each flaky test with a root-cause goal and acceptance criteria"
         ],
-        "verify": "none",
         "output": {
           "schema": "task_list.v1"
         }
@@ -60,9 +52,8 @@
       "brief": {
         "goal": "{{item.goal}}",
         "acceptance": [
-          "Flake eliminated and test passes deterministically"
-        ],
-        "verify": "{{inputs.verify_cmd}}"
+          "Flake eliminated and the test passes deterministically; the repeated runs used to show this are reported in the submit summary"
+        ]
       }
     },
     {
@@ -71,11 +62,10 @@
       "title": "Confirm suite stability: {{inputs.suite}}",
       "depends_on": ["fix"],
       "brief": {
-        "goal": "Run the full suite verification for {{inputs.suite}} after all flake fixes.",
+        "goal": "Check that the full {{inputs.suite}} suite is stable after all flake fixes (using {{inputs.test_command}}).",
         "acceptance": [
-          "Suite verification command exits 0 without flakes"
-        ],
-        "verify": "{{inputs.verify_cmd}}"
+          "The suite passes repeatedly without flakes; the runs and their outcomes are reported in the submit summary"
+        ]
       }
     }
   ]

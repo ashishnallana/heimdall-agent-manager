@@ -10,7 +10,7 @@ import jsonx "odin_test:lib/jsonx"
 
 // M2 verbs (plan §2.5/§3): lease.submit, lease.handoff, lease.block,
 // review.post (agent) + user review, task.fetch, reopen/answer (human), and
-// the hub-written verify facet. Each verb is ONE unit of work: validate →
+// Each verb is ONE unit of work: validate →
 // facets → event(s) → refold → gate → match → commit → effects.
 
 // ---- shared ---------------------------------------------------------------------------
@@ -47,10 +47,6 @@ Submit_Input :: struct {
 	output_json:    string, // optional object: the brief's output contract
 	vcs_json:       string, // bridge .Local enrichment: {head, dirty, files:[…]}
 	artifacts_json: string, // optional object: {items:[{kind,title,uri?,path?,mime?,bytes?,sha256?}]}
-	verify:         string, // "" | "none"
-	skip_verify:    bool,   // explicit exception, always accompanied by a written reason
-	skip_verify_reason: string,
-	auto:           bool,   // true when submitted automatically by `ham-ctl verify` under `brief.auto_submit`
 }
 
 Submit_Result :: struct {
@@ -58,9 +54,11 @@ Submit_Result :: struct {
 	outcome: string, // in_review | done
 }
 
-// lease_submit (plan §2.5): hard rejects = summary empty · verify gate
-// unsatisfied · output missing when the brief requires one; everything else is
-// truncated with truncated:true. Releases the lease and stops the holder.
+// lease_submit (plan §2.5): hard rejects = summary empty · output missing when
+// the brief requires one; everything else is truncated with truncated:true.
+// The worker reports the checks it chose in the summary/handoff; the review
+// gate (not a command result) decides the task. Releases the lease and stops
+// the holder.
 lease_submit :: proc(svc: ^Service, auth: contracts.Auth_Context, input: Submit_Input) -> (Submit_Result, bool, domain.Domain_Error) {
 	if strings.trim_space(input.summary) == "" do return {}, false, domain.domain_error(.Validation_Failed, "summary is required")
 	if strings.trim_space(input.artifacts_json) != "" {
@@ -77,11 +75,6 @@ lease_submit :: proc(svc: ^Service, auth: contracts.Auth_Context, input: Submit_
 		_, _ = end_uow(svc, &u, false)
 		return {}, false, oerr
 	}
-	// verify gate (plan §4d)
-	if gerr := verify_gate(svc, c.task, c.lease.attempt_no, input); gerr.code != .None {
-		_, _ = end_uow(svc, &u, false)
-		return {}, false, gerr
-	}
 	actor := Actor{kind = ACTOR_AGENT, id = c.inst.agent_instance_id}
 	if !write_submit_facets(svc, &u, c.task, c.lease.attempt_no, input) {
 		_, _ = end_uow(svc, &u, false)
@@ -90,9 +83,6 @@ lease_submit :: proc(svc: ^Service, auth: contracts.Auth_Context, input: Submit_
 	p := json_begin()
 	json_str(&p, "lease_id", c.lease.lease_id)
 	json_int(&p, "attempt_no", i64(c.lease.attempt_no))
-	if input.verify == "none" do json_str(&p, "verify", "none")
-	if input.skip_verify do json_str(&p, "skip_verify_reason", strings.trim_space(input.skip_verify_reason))
-	if input.auto do json_bool(&p, "auto", true)
 	task, rok, rerr := release_in_uow(svc, &u, c.lease, actor, EV_SUBMITTED, json_end(&p), "submitted")
 	if rok do rok, rerr = after_chain_change(svc, &u, c.task.chain_id, c.task.owner_user_id, .Lease_Released)
 	_, cerr := end_uow(svc, &u, rok)
@@ -104,14 +94,7 @@ lease_submit :: proc(svc: ^Service, auth: contracts.Auth_Context, input: Submit_
 
 @(private = "file")
 write_submit_facets :: proc(svc: ^Service, u: ^Uow, task: domain.Task, attempt_no: int, input: Submit_Input) -> bool {
-	// This field is authoritative submit metadata; don't accept a handoff object
-	// that claims a skip independently of the validated submit flags.
-	handoff := json_begin()
-	for key, raw in jsonx_top_level_members(input.handoff_json) {
-		if key != "skip_verify_reason" do json_raw(&handoff, key, raw)
-	}
-	if input.skip_verify do json_str(&handoff, "skip_verify_reason", strings.trim_space(input.skip_verify_reason))
-	if ok, _ := save_facet_verbatim(svc, task, attempt_no, FACET_HANDOFF, handoff_body_json(input.summary, json_end(&handoff)), FACET_WRITER_AGENT, u); !ok do return false
+	if ok, _ := save_facet_verbatim(svc, task, attempt_no, FACET_HANDOFF, handoff_body_json(input.summary, input.handoff_json), FACET_WRITER_AGENT, u); !ok do return false
 	if strings.has_prefix(strings.trim_space(input.vcs_json), "{") {
 		if ok, _ := save_facet_verbatim(svc, task, attempt_no, FACET_VCS, input.vcs_json, FACET_WRITER_BRIDGE, u); !ok do return false
 	}
@@ -124,78 +107,6 @@ write_submit_facets :: proc(svc: ^Service, u: ^Uow, task: domain.Task, attempt_n
 		}
 	}
 	return true
-}
-
-// verify_gate (plan §4d): outcome=submitted requires a `verify` facet on this
-// attempt with exit_code==0 ∧ head_at_start==head_at_end==submit.head ∧
-// dirty==false (and submit's own working tree not dirty). `dirty` may be null
-// when the chain has no VCS directory; the facet must then postdate the
-// attempt's last handoff/note. Verification is optional when brief.verify is
-// omitted, blank, or "none"; an explicit skip requires a reason and is forbidden
-// for tasks whose review policy requires independent verification.
-@(private = "file")
-verify_gate :: proc(svc: ^Service, task: domain.Task, attempt_no: int, input: Submit_Input) -> domain.Domain_Error {
-	if input.skip_verify {
-		if strings.trim_space(input.skip_verify_reason) == "" {
-			return domain.domain_error(.Validation_Failed, "--skip-verify requires a non-empty --skip-verify-reason", `{"code":"verify_skip_reason_required"}`)
-		}
-		if brief_require_independent_verify(task.brief_json) {
-			return domain.domain_error(.Conflict, "tasks requiring independent verification cannot skip verify", `{"code":"verify_skip_forbidden"}`)
-		}
-		return domain.Domain_Error{}
-	}
-	if input.skip_verify_reason != "" {
-		return domain.domain_error(.Validation_Failed, "skip_verify_reason requires skip_verify", `{"code":"verify_skip_flag_required"}`)
-	}
-	bverify := strings.trim_space(jsonx.extract_string(task.brief_json, "verify", "", true, context.temp_allocator))
-	if bverify == "" || bverify == "none" do return domain.Domain_Error{}
-	if input.verify == "none" {
-		return domain.domain_error(.Conflict, "brief.verify requires a command: run `ham-ctl verify`", `{"code":"verify_required"}`)
-	}
-	f, ok := get_facet(svc, task, attempt_no, FACET_VERIFY)
-	if !ok do return domain.domain_error(.Conflict, "no verify result on this attempt: run `ham-ctl verify` (brief.verify) at the head you are submitting", `{"code":"verify_required"}`)
-	if n, nok := jsonx.extract_int_found(f.body_json, "exit_code", true); !nok || n != 0 {
-		return domain.domain_error(.Conflict, "last verify run did not pass (exit_code != 0)", `{"code":"verify_failed"}`)
-	}
-	fcmd := strings.trim_space(jsonx.extract_string(f.body_json, "command", "", true, context.temp_allocator))
-	if fcmd != "" && bverify != "" && fcmd != bverify {
-		return domain.domain_error(.Conflict, "verify ran a command different from brief.verify: re-run `ham-ctl verify`", `{"code":"verify_required"}`)
-	}
-	head_start := jsonx.extract_string(f.body_json, "head_at_start", "", true, context.temp_allocator)
-	head_end := jsonx.extract_string(f.body_json, "head_at_end", "", true, context.temp_allocator)
-	submit_head := ""
-	submit_has_vcs := strings.has_prefix(strings.trim_space(input.vcs_json), "{")
-	if submit_has_vcs do submit_head = jsonx.extract_string(input.vcs_json, "head", "", true, context.temp_allocator)
-	if head_start != head_end || (head_end != "" && submit_head != head_end) {
-		return domain.domain_error(.Conflict, "verify ran at a different head than the one being submitted: re-run `ham-ctl verify`", `{"code":"verify_stale"}`)
-	}
-	if submit_has_vcs {
-		if sdirty, sdok := jsonx.extract_bool_literal(input.vcs_json, "dirty", true); sdok && sdirty {
-			return domain.domain_error(.Conflict, "working tree is dirty at submit time: commit or clean, then re-run `ham-ctl verify`", `{"code":"verify_dirty"}`)
-		}
-	}
-	if dirty, dok := jsonx.extract_bool_literal(f.body_json, "dirty", true); dok {
-		if dirty do return domain.domain_error(.Conflict, "verify ran on a dirty tree: commit, then re-run `ham-ctl verify`", `{"code":"verify_dirty"}`)
-	} else {
-		// no VCS truth: the verify must postdate the attempt's last handoff/note
-		if h, hok := get_facet(svc, task, attempt_no, FACET_HANDOFF); hok && h.written_at > f.written_at {
-			return domain.domain_error(.Conflict, "verify predates the latest handoff on this attempt: re-run `ham-ctl verify`", `{"code":"verify_stale"}`)
-		}
-		if last_note := last_heartbeat_note_at(svc, task, attempt_no); last_note != "" && last_note > f.written_at {
-			return domain.domain_error(.Conflict, "verify predates your latest progress note: re-run `ham-ctl verify`", `{"code":"verify_stale"}`)
-		}
-	}
-	return domain.Domain_Error{}
-}
-
-@(private = "file")
-last_heartbeat_note_at :: proc(svc: ^Service, task: domain.Task, attempt_no: int) -> string {
-	evs, err := iface.taskchain_list_events_by_task(svc.repo, task.task_id, task.owner_user_id)
-	if err.code != .None do return ""
-	latest := i64(0)
-	for e in evs do if e.kind == EV_HEARTBEAT && e.ts_ms > latest do latest = e.ts_ms
-	if latest == 0 do return ""
-	return platform.format_rfc3339_utc({_nsec = latest * 1_000_000})
 }
 
 // ---- lease.handoff ---------------------------------------------------------------------
@@ -576,122 +487,6 @@ task_answer :: proc(svc: ^Service, task: domain.Task, actor: Actor, note: string
 	return fresh, true, domain.Domain_Error{}
 }
 
-// ---- verify facet (hub-written from shell_exited) -------------------------------------
-
-// VERIFY_LABEL_PREFIX: `ham-ctl verify` starts a Run session labelled
-//   "verify <task_id> #<attempt_no> @<head_at_start>[ independent]"
-// so the hub can attribute its exit without a metadata column.
-VERIFY_LABEL_PREFIX :: "verify "
-
-Verify_Exit :: struct {
-	session_id:    string,
-	label:         string,
-	owner_user_id: string,
-	status:        string,
-	exit_code:     int,
-	exit_code_set: bool,
-	duration_ms:   i64,
-	head_at_end:   string, // bridge enrichment on the exit frame, "" when unknown
-	dirty:         string, // "true" | "false" | "" (unknown / no VCS)
-	tail:          string, // last lines of the log (≤ 40), optional
-	cmd:           string, // session command when known (checked against brief.verify)
-	independent:   bool,   // true when run in a clean detached worktree (`--independent`)
-}
-
-parse_verify_label :: proc(label: string) -> (task_id, head: string, attempt_no: int, ok: bool) {
-	tid, h, att, _, parsed_ok := parse_verify_label_ex(label)
-	return tid, h, att, parsed_ok
-}
-
-parse_verify_label_ex :: proc(label: string) -> (task_id, head: string, attempt_no: int, independent: bool, ok: bool) {
-	if !strings.has_prefix(label, VERIFY_LABEL_PREFIX) do return "", "", 0, false, false
-	rest := strings.trim_space(label[len(VERIFY_LABEL_PREFIX):])
-	parts := strings.fields(rest, context.temp_allocator)
-	if len(parts) < 2 do return "", "", 0, false, false
-	task_id = parts[0]
-	if !strings.has_prefix(parts[1], "#") do return "", "", 0, false, false
-	attempt_no = jsonx.extract_int(fmt.tprintf(`{{"n":%s}}`, parts[1][1:]), "n", -1, true)
-	if attempt_no < 0 do return "", "", 0, false, false
-	for p in parts[2:] {
-		if strings.has_prefix(p, "@") {
-			head = p[1:]
-		} else if p == "independent" || p == "--independent" {
-			independent = true
-		}
-	}
-	return task_id, head, attempt_no, independent, true
-}
-
-// on_verify_session_exited writes the `verify` facet for a terminal verify Run
-// session: exit_code (−1 when the session died without one: bridge death),
-// duration, log_ref = session id, heads, dirty, summary (≤ 40 lines), independent.
-on_verify_session_exited :: proc(svc: ^Service, exit: Verify_Exit) {
-	if svc == nil || svc.repo == nil do return
-	scratch: Scratch
-	context.allocator = scratch_begin(&scratch)
-	defer scratch_end(&scratch)
-	task_id, head_start, attempt_no, label_indep, ok := parse_verify_label_ex(exit.label)
-	if !ok do return
-	is_independent := exit.independent || label_indep
-	u, uok, _ := begin_uow(svc)
-	if !uok do return
-	task, tok, _ := iface.taskchain_get_task(svc.repo, domain.Task_ID(task_id))
-	if !tok || string(task.owner_user_id) != exit.owner_user_id || attempt_no != task.attempt_no {
-		_, _ = end_uow(svc, &u, false)
-		return
-	}
-	code := exit.exit_code if exit.exit_code_set else -1
-	if exit.status == "killed" || exit.status == "failed" {
-		if !exit.exit_code_set || exit.status == "failed" do code = -1
-	}
-	// Don't let an unobserved inventory reap overwrite an already-observed verify facet.
-	if !exit.exit_code_set {
-		if existing, has := get_facet(svc, task, attempt_no, FACET_VERIFY); has {
-			if prev_code := jsonx.extract_int(existing.body_json, "exit_code", -1, true); prev_code != -1 {
-				_, _ = end_uow(svc, &u, false)
-				return
-			}
-		}
-	}
-	metric_verify_run(code, exit.exit_code_set, exit.status)
-	cmd := strings.trim_space(exit.cmd)
-	if cmd == "" do cmd = strings.trim_space(jsonx.extract_string(task.brief_json, "verify", "", true, context.temp_allocator))
-	o := json_begin()
-	if cmd != "" do json_str(&o, "command", cmd)
-	json_int(&o, "exit_code", i64(code))
-	json_int(&o, "duration_ms", exit.duration_ms)
-	json_str(&o, "log_ref", exit.session_id)
-	json_str(&o, "head_at_start", head_start)
-	json_str(&o, "head_at_end", exit.head_at_end)
-	switch exit.dirty {
-	case "true": json_bool(&o, "dirty", true)
-	case "false": json_bool(&o, "dirty", false)
-	case: json_raw(&o, "dirty", "null")
-	}
-	json_str(&o, "status", exit.status)
-	json_str(&o, "summary", tail_lines(exit.tail, 40))
-	json_bool(&o, "independent", is_independent)
-	saved, _ := save_facet_verbatim(svc, task, attempt_no, FACET_VERIFY, json_end(&o), FACET_WRITER_HUB, &u)
-	if saved {
-		effect_publish_task(&u, task, "verify")
-		if task.state == .In_Review {
-			if chain, cok, _ := iface.taskchain_get_chain(svc.repo, task.chain_id); cok {
-				_, _, _ = evaluate_gate_in_uow(svc, &u, chain, task, Actor{kind = ACTOR_HUB, id = "verify"})
-				_, _ = after_chain_change(svc, &u, task.chain_id, task.owner_user_id, .Review_Posted)
-			}
-		}
-	}
-	_, _ = end_uow(svc, &u, saved)
-}
-
-@(private = "file")
-tail_lines :: proc(text: string, max_lines: int) -> string {
-	if text == "" do return ""
-	lines := strings.split_lines(text, context.temp_allocator)
-	if len(lines) <= max_lines do return text
-	return strings.join(lines[len(lines)-max_lines:], "\n", context.temp_allocator)
-}
-
 // ---- task.fetch -------------------------------------------------------------------------
 
 // task_fetch: read-only; the caller must be able to read the task (owner, or
@@ -731,6 +526,10 @@ set_chain_proposal_json :: proc(defaults_json: string, proposal_obj_json: string
 	if strings.has_prefix(strings.trim_space(defaults_json), "{") {
 		for key, raw in jsonx_top_level_members(defaults_json) {
 			if key == "proposal" do continue
+			// M2: a removed brief default (auto_submit, …) is never re-persisted.
+			removed := false
+			for k in REMOVED_VERIFY_BRIEF_KEYS do if key == k { removed = true; break }
+			if removed do continue
 			json_raw(&o, key, raw)
 		}
 	}
@@ -740,8 +539,13 @@ set_chain_proposal_json :: proc(defaults_json: string, proposal_obj_json: string
 	return json_end(&o)
 }
 
-@(private = "file")
-brief_missing_fields_for_publish :: proc(svc: ^Service, chain: domain.Task_Chain, kind: domain.Task_Kind, brief: string) -> []string {
+// brief_publish_missing is THE publish validator (REQ-TV2-2), shared by
+// chain.propose/decide, workflow-free ticket publish and the taskchain
+// service: a worked ticket needs a non-empty goal (≤2k) and 1..20 acceptance
+// items (≤200 chars each). Nothing else is required — no verify command and no
+// output contract. Every review role must also have a fleet row to hold it, or
+// the task could never pass its gate. Gates are exempt (decided, not worked).
+brief_publish_missing :: proc(repo: ^iface.Taskchain_Repository, chain: domain.Task_Chain, kind: domain.Task_Kind, brief: string) -> []string {
 	out := make([dynamic]string, context.temp_allocator)
 	if kind == .Gate do return out[:]
 	goal := strings.trim_space(jsonx.extract_string(brief, "goal", "", true, context.temp_allocator))
@@ -751,8 +555,8 @@ brief_missing_fields_for_publish :: proc(svc: ^Service, chain: domain.Task_Chain
 	for a in acceptance do if strings.trim_space(a) == "" || (len(a) > BRIEF_ACCEPTANCE_ITEM && !is_vault_armored(a)) do acc_ok = false
 	if !acc_ok do append(&out, "acceptance")
 	roles := jsonx.extract_string_array(brief, "review_roles", true, context.temp_allocator)
-	if len(roles) > 0 && svc != nil && svc.repo != nil {
-		fleets, ferr := iface.taskchain_list_fleets_by_chain(svc.repo, chain.chain_id, chain.owner_user_id)
+	if len(roles) > 0 && repo != nil {
+		fleets, ferr := iface.taskchain_list_fleets_by_chain(repo, chain.chain_id, chain.owner_user_id)
 		for r in roles {
 			covered := false
 			if ferr.code == .None do for f in fleets do if fleet_row_has_role(f, r) { covered = true; break }
@@ -763,7 +567,7 @@ brief_missing_fields_for_publish :: proc(svc: ^Service, chain: domain.Task_Chain
 }
 
 // validate_brief_for_publish verifies that all draft tasks on the chain and all
-// proposed task specs satisfy publishable brief requirements (goal, acceptance, verify, review_roles).
+// proposed task specs satisfy brief_publish_missing.
 validate_brief_for_publish :: proc(svc: ^Service, chain: domain.Task_Chain, existing_tasks: []domain.Task, specs: []Proposed_Task_Item) -> (bool, domain.Domain_Error) {
 	b := strings.builder_make(context.temp_allocator)
 	strings.write_string(&b, `{"code":"brief_incomplete","tasks":[`)
@@ -771,7 +575,7 @@ validate_brief_for_publish :: proc(svc: ^Service, chain: domain.Task_Chain, exis
 	has_problem := false
 	for t in existing_tasks {
 		if t.publish_state == .Published || t.workflow_run_id != "" do continue
-		missing := brief_missing_fields_for_publish(svc, chain, t.kind, t.brief_json)
+		missing := brief_publish_missing(svc.repo if svc != nil else nil, chain, t.kind, t.brief_json)
 		if len(missing) > 0 {
 			has_problem = true
 			if !first do strings.write_byte(&b, ',')
@@ -785,7 +589,7 @@ validate_brief_for_publish :: proc(svc: ^Service, chain: domain.Task_Chain, exis
 		}
 	}
 	for spec, idx in specs {
-		missing := brief_missing_fields_for_publish(svc, chain, .Task, spec.brief_json)
+		missing := brief_publish_missing(svc.repo if svc != nil else nil, chain, .Task, spec.brief_json)
 		if len(missing) > 0 {
 			has_problem = true
 			if !first do strings.write_byte(&b, ',')
@@ -801,7 +605,7 @@ validate_brief_for_publish :: proc(svc: ^Service, chain: domain.Task_Chain, exis
 	}
 	strings.write_string(&b, "]}")
 	if has_problem {
-		return false, domain.domain_error(.Validation_Failed, "brief incomplete: every published task needs goal (≤2k), ≥1 acceptance item (≤20×200), an optional verify command, and a fleet row per review role", strings.to_string(b))
+		return false, domain.domain_error(.Validation_Failed, "brief incomplete: every published task needs a goal (≤2k), ≥1 acceptance item (≤20×200) and a fleet row per review role", strings.to_string(b))
 	}
 	return true, domain.Domain_Error{}
 }
@@ -935,6 +739,8 @@ chain_propose :: proc(svc: ^Service, chain_id: domain.Task_Chain_ID, owner_user_
 	tasks_raw := strings.trim_space(input.tasks_json)
 	specs: []Proposed_Task_Item = nil
 	if tasks_raw != "" {
+		// M2: legacy verify keys are dropped before the proposal is stored.
+		tasks_raw, _ = strip_removed_verify_keys_in_task_specs(tasks_raw)
 		if !strings.has_prefix(tasks_raw, "[") {
 			return {}, false, domain.domain_error(.Validation_Failed, "tasks must be a JSON array")
 		}
@@ -1161,7 +967,6 @@ parse_proposed_tasks_json :: proc(raw_array: string) -> ([]Proposed_Task_Item, b
 		if !has_brief || strings.trim_space(brief_raw) == "" {
 			goal := strings.trim_space(jsonx.extract_string(item, "goal", title, true, context.temp_allocator))
 			role := strings.trim_space(jsonx.extract_string(item, "role", "coder", true, context.temp_allocator))
-			verify := strings.trim_space(jsonx.extract_string(item, "verify", "true", true, context.temp_allocator))
 			b := json_begin()
 			json_str(&b, "goal", goal)
 			if acc_raw, has_acc := jsonx.extract_raw_array(item, "acceptance", true, context.temp_allocator); has_acc {
@@ -1176,8 +981,9 @@ parse_proposed_tasks_json :: proc(raw_array: string) -> ([]Proposed_Task_Item, b
 				json_raw(&b, "acceptance", "[]")
 			}
 			json_str(&b, "role", role)
-			json_str(&b, "verify", verify)
 			brief_raw = json_end(&b)
+		} else {
+			brief_raw, _ = strip_removed_verify_keys(brief_raw)
 		}
 		raw_id := strings.trim_space(jsonx.extract_string(item, "id", "", true, context.temp_allocator))
 		if raw_id == "" do raw_id = strings.trim_space(jsonx.extract_string(item, "task_id", "", true, context.temp_allocator))

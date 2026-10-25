@@ -109,7 +109,7 @@ Update_Chain_Input :: struct {
 	has_is_pinned: bool,
 }
 
-// Create_Task_Input (Task System v2). The brief carries goal/acceptance/verify/
+// Create_Task_Input (Task System v2). The brief carries goal/acceptance/
 // inputs/review_roles/assignee/budget; the convenience fields below are merged
 // into it so ctl/UI callers that only know assignee + reviewers keep working.
 Create_Task_Input :: struct {
@@ -794,8 +794,8 @@ sync_chain_status_from_tasks :: proc(service: ^Taskchain_Service, chain_id: doma
 
 // build_brief_json merges the convenience fields of a create/update into a
 // brief object. An explicit brief_json wins; otherwise goal defaults to the
-// description (or the title), acceptance/verify stay empty until M2's publish
-// validator requires them.
+// description (or the title) and acceptance stays empty until the publish
+// validator requires it. The removed verify keys are never carried over.
 build_brief_json :: proc(existing_brief, title, description, assignee_agent_id: string, has_assignee: bool, review_roles: []string, has_review_roles: bool, reviewers: []string = nil, has_reviewers := false) -> string {
 	goal := jsonx.extract_string(existing_brief, "goal", "", true)
 	if goal == "" do goal = strings.trim_space(description)
@@ -809,7 +809,6 @@ build_brief_json :: proc(existing_brief, title, description, assignee_agent_id: 
 	}
 	acceptance, acc_ok := jsonx.extract_raw_array(existing_brief, "acceptance", true)
 	if !acc_ok do acceptance = "[]"
-	verify := jsonx.extract_string(existing_brief, "verify", "", true)
 	inputs, in_ok := jsonx.extract_raw_array(existing_brief, "inputs", true)
 	if !in_ok do inputs = "[]"
 	budget, b_ok := jsonx.extract_raw_object(existing_brief, "budget", true)
@@ -817,7 +816,6 @@ build_brief_json :: proc(existing_brief, title, description, assignee_agent_id: 
 	o := taskv2.json_begin()
 	taskv2.json_str(&o, "goal", goal)
 	taskv2.json_raw(&o, "acceptance", acceptance)
-	taskv2.json_str(&o, "verify", verify)
 	taskv2.json_raw(&o, "inputs", inputs)
 	rb := strings.builder_make()
 	defer strings.builder_destroy(&rb)
@@ -854,52 +852,21 @@ build_brief_json :: proc(existing_brief, title, description, assignee_agent_id: 
 		taskv2.json_str(&o, "output", output_str)
 	}
 	if on_output, onok := jsonx.extract_raw_object(existing_brief, "on_output", true); onok do taskv2.json_raw(&o, "on_output", on_output)
-	if auto, aok := jsonx.extract_bool_literal(existing_brief, "auto_submit", true); aok do taskv2.json_bool(&o, "auto_submit", auto)
-	if req_indep, riok := jsonx.extract_bool_literal(existing_brief, "require_independent_verify", true); riok do taskv2.json_bool(&o, "require_independent_verify", req_indep)
 	return taskv2.json_end(&o)
 }
 
-// ---- brief validation at publish (plan §2.4 / M2) ----------------------------------
-BRIEF_GOAL_MAX        :: 2000
-BRIEF_ACCEPTANCE_MAX  :: 20
-BRIEF_ACCEPTANCE_ITEM :: 200
+// ---- brief validation at publish (plan §2.4, REQ-TV2-2) ---------------------------
 
-// brief_publish_problems lists what a task's brief is missing for publish:
-// "goal" (empty or > 2k), "acceptance" (none, > 20, or an item > 200 chars),
-// "verify" (empty unless verify:"none" with an output contract),
-// "review_role:<r>" (no fleet row in the chain carries the role). Gates are
-// exempt (decided, not worked).
 is_brief_armored :: proc(s: string) -> bool {
 	t := strings.trim_space(s)
 	return domain.is_vault_armored(t)
 }
 
+// brief_publish_problems lists what a task's brief is missing for publish. It
+// is taskv2.brief_publish_missing — the single publish validator (goal, ≥1
+// acceptance item, a fleet row per review role) — applied to a stored task.
 brief_publish_problems :: proc(service: ^Taskchain_Service, chain: domain.Task_Chain, task: domain.Task) -> []string {
-	out := make([dynamic]string, context.temp_allocator)
-	if task.kind == .Gate do return out[:]
-	brief := task.brief_json
-	goal := strings.trim_space(jsonx.extract_string(brief, "goal", "", true, context.temp_allocator))
-	if goal == "" || (len(goal) > BRIEF_GOAL_MAX && !is_brief_armored(goal)) do append(&out, "goal")
-	acceptance := jsonx.extract_string_array(brief, "acceptance", true, context.temp_allocator)
-	acc_ok := len(acceptance) >= 1 && len(acceptance) <= BRIEF_ACCEPTANCE_MAX
-	for a in acceptance do if strings.trim_space(a) == "" || (len(a) > BRIEF_ACCEPTANCE_ITEM && !is_brief_armored(a)) do acc_ok = false
-	if !acc_ok do append(&out, "acceptance")
-	verify := strings.trim_space(jsonx.extract_string(brief, "verify", "", true, context.temp_allocator))
-	_, has_output := jsonx.extract_raw_object(brief, "output", true, context.temp_allocator)
-	if !has_output {
-		has_output = strings.trim_space(jsonx.extract_string(brief, "output", "", true, context.temp_allocator)) != ""
-	}
-	if verify == "" || (verify == "none" && !has_output) do append(&out, "verify")
-	roles := jsonx.extract_string_array(brief, "review_roles", true, context.temp_allocator)
-	if len(roles) > 0 {
-		fleets, ferr := iface.taskchain_list_fleets_by_chain(service.repo, chain.chain_id, chain.owner_user_id)
-		for r in roles {
-			covered := false
-			if ferr.code == .None do for f in fleets do if fleet_has_role(f, r) { covered = true; break }
-			if !covered do append(&out, fmt.tprintf("review_role:%s", r))
-		}
-	}
-	return out[:]
+	return taskv2.brief_publish_missing(service.repo, chain, task.kind, task.brief_json)
 }
 
 @(private = "file")
@@ -918,7 +885,7 @@ publish_problems_error :: proc(problems: map[string][]string) -> domain.Domain_E
 		strings.write_string(&b, "]}")
 	}
 	strings.write_string(&b, "]}")
-	return domain.domain_error(.Validation_Failed, "brief incomplete: every published task needs goal (≤2k), ≥1 acceptance item (≤20×200), verify (or verify:none with an output contract) and a fleet row per review role", strings.to_string(b))
+	return domain.domain_error(.Validation_Failed, "brief incomplete: every published task needs a goal (≤2k), ≥1 acceptance item (≤20×200) and a fleet row per review role", strings.to_string(b))
 }
 
 // ensure_fleet_role guarantees a fleet row for `agent_id` in the chain carrying
@@ -1016,7 +983,8 @@ create_task_impl :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Conte
 		if !dup do append(&named, id)
 	}
 	has_named := len(input.reviewer_agent_ids) > 0
-	brief := input.brief_json
+	// M2: legacy verify keys are accepted and dropped (the handler warns).
+	brief, _ := taskv2.strip_removed_verify_keys(input.brief_json)
 	if strings.trim_space(brief) == "" || strings.trim_space(brief) == "{}" {
 		brief = build_brief_json("{}", input.title, input.description, input.assignee_agent_id, input.assignee_agent_id != "", review_roles[:], true, named[:], has_named)
 	} else if input.assignee_agent_id != "" || len(review_roles) > 0 || has_named {
@@ -1090,25 +1058,19 @@ task_has_work_lease :: proc(service: ^Taskchain_Service, task_id: domain.Task_ID
 	return false
 }
 
-// A verify/acceptance-only brief is a patch, not a replacement. In particular,
-// `task update --verify ...` must not erase the goal, assignee or review policy.
-// Keep this allowlist narrow while a holder is working from its context pack.
-verification_brief_patch :: proc(existing, incoming: string) -> (string, bool, domain.Domain_Error) {
+// An acceptance-only brief is a patch, not a replacement: it must not erase the
+// goal, assignee or review policy. Keep this allowlist narrow while a holder is
+// working from its context pack.
+acceptance_brief_patch :: proc(existing, incoming: string) -> (string, bool, domain.Domain_Error) {
 	parsed, err := json.parse_string(incoming, allocator = context.temp_allocator)
 	if err != nil do return "", false, domain.domain_error(.Validation_Failed, "brief must be a JSON object")
 	patch, ok := parsed.(json.Object)
 	if !ok do return "", false, domain.domain_error(.Validation_Failed, "brief must be a JSON object")
 	if len(patch) == 0 do return "", false, domain.Domain_Error{}
-	for key in patch do if key != "verify" && key != "acceptance" do return "", false, domain.Domain_Error{}
-	for key, value in patch {
-		if key == "verify" {
-			if _, valid := value.(json.String); !valid do return "", false, domain.domain_error(.Validation_Failed, "brief.verify must be a string")
-		} else {
-			items, valid := value.(json.Array)
-			if !valid do return "", false, domain.domain_error(.Validation_Failed, "brief.acceptance must be an array of strings")
-			for item in items do if _, valid := item.(json.String); !valid do return "", false, domain.domain_error(.Validation_Failed, "brief.acceptance must be an array of strings")
-		}
-	}
+	for key in patch do if key != "acceptance" do return "", false, domain.Domain_Error{}
+	items, valid := patch["acceptance"].(json.Array)
+	if !valid do return "", false, domain.domain_error(.Validation_Failed, "brief.acceptance must be an array of strings")
+	for item in items do if _, valid := item.(json.String); !valid do return "", false, domain.domain_error(.Validation_Failed, "brief.acceptance must be an array of strings")
 	base, berr := json.parse_string(existing if strings.trim_space(existing) != "" else "{}", allocator = context.temp_allocator)
 	if berr != nil do return "", false, domain.domain_error(.Internal_Error, "stored brief is not valid JSON")
 	root, root_ok := base.(json.Object)
@@ -1133,26 +1095,28 @@ update_task_impl :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Conte
 	}
 
 	changed := make([dynamic]string, context.temp_allocator)
+	// M2: legacy verify keys are accepted and dropped (the handler warns). A
+	// brief that carried nothing else (`task update --verify …` from an old
+	// ham-ctl) is no brief edit at all — never a replacement with "{}".
+	incoming_brief, dropped := taskv2.strip_removed_verify_keys(input.brief_json)
+	if len(dropped) > 0 && strings.trim_space(incoming_brief) == "{}" do incoming_brief = ""
 	patched_brief := ""
-	verification_patch := false
-	if input.brief_json != "" {
+	acceptance_patch := false
+	if incoming_brief != "" {
 		patch_err: domain.Domain_Error
-		patched_brief, verification_patch, patch_err = verification_brief_patch(task.brief_json, input.brief_json)
+		patched_brief, acceptance_patch, patch_err = acceptance_brief_patch(task.brief_json, incoming_brief)
 		if patch_err.code != .None do return {}, false, patch_err
 	}
-	brief_edit := (input.brief_json != "" && !verification_patch) || input.has_assignee || input.has_review_roles || input.has_reviewers || len(input.reviewer_agent_ids) > 0 || input.bridge_id != nil || input.title != "" || input.description != ""
+	brief_edit := (incoming_brief != "" && !acceptance_patch) || input.has_assignee || input.has_review_roles || input.has_reviewers || len(input.reviewer_agent_ids) > 0 || input.bridge_id != nil || input.title != "" || input.description != ""
 	if brief_edit && task_has_work_lease(service, task.task_id) {
-		return domain.Task{}, false, domain.domain_error(.Conflict, "task is leased: only verify/acceptance brief patches, priority and dependencies can be edited; cancel the lease or wait before editing scope or placement")
+		return domain.Task{}, false, domain.domain_error(.Conflict, "task is leased: only acceptance brief patches, priority and dependencies can be edited; cancel the lease or wait before editing scope or placement")
 	}
 
 	if input.title != "" { task.title = input.title; append(&changed, "title") }
 	if input.description != "" { task.description = input.description; append(&changed, "description") }
-	if input.brief_json != "" {
-		task.brief_json = patched_brief if verification_patch else input.brief_json
-		if verification_patch {
-			if _, has := jsonx.extract_string_found(input.brief_json, "verify", true, context.temp_allocator); has do append(&changed, "brief.verify")
-			if _, has := jsonx.extract_raw_array(input.brief_json, "acceptance", true, context.temp_allocator); has do append(&changed, "brief.acceptance")
-		} else { append(&changed, "brief") }
+	if incoming_brief != "" {
+		task.brief_json = patched_brief if acceptance_patch else incoming_brief
+		append(&changed, "brief.acceptance" if acceptance_patch else "brief")
 	}
 	review_roles := make([dynamic]string, context.temp_allocator)
 	for r in input.review_roles do append(&review_roles, r)

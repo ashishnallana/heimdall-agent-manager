@@ -44,7 +44,7 @@ test_solo_coordinator_pulls_inline_and_is_never_woken_or_stopped :: proc(t: ^tes
 	chain := solo_chain(t, fx, "chain_solo_pull")
 	testing.expect(t, chain_is_solo(&fx.svc, chain), "worker row for the coordinator's agent → solo")
 	wake_log_reset(log)
-	task := publish_solo_task(t, fx, chain, "task_1", brief = `{"goal":"g","verify":"make test","review_roles":[]}`)
+	task := publish_solo_task(t, fx, chain, "task_1", brief = `{"goal":"g","review_roles":[]}`)
 	testing.expect_value(t, task.state, domain.Task_State.Ready)
 	testing.expect(t, !wake_log_has_run(log, "inst_coord"), "the matcher never wake-grants the soloist")
 	_, held := lease_of(fx, "inst_coord")
@@ -57,7 +57,6 @@ test_solo_coordinator_pulls_inline_and_is_never_woken_or_stopped :: proc(t: ^tes
 	testing.expect_value(t, res.status, "granted")
 	testing.expect_value(t, res.task.task_id, task.task_id)
 	// submit → in_review for the user; the soloist is not stopped
-	write_verify(fx, "task_1", res.lease.attempt_no, "abc", 0)
 	wake_log_reset(log)
 	sub, sok, serr := lease_submit(&fx.svc, auth, Submit_Input{summary = "done", vcs_json = GREEN_VCS})
 	if !testing.expect(t, sok, fmt.tprintf("submit: %s", serr.message)) do return
@@ -118,7 +117,6 @@ test_solo_lease_switch_hands_off_and_grants_atomically :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(last_event_payload(fx, "task_a", EV_HANDOFF), `"switched_to":"task_b"`), "handoff names the next task")
 	testing.expect(t, !wake_log_has_stop(log, "inst_coord") && !wake_log_has_run(log, "inst_coord"), "switch never stops or wakes the soloist")
 	// back to A: same attempt number (the handoff did not count), handoff in the pack
-	write_verify(fx, "task_b", b_lease.attempt_no, "abc", 0)
 	_, bsok, bserr := lease_submit(&fx.svc, auth, Submit_Input{summary = "B done", vcs_json = GREEN_VCS})
 	if !testing.expect(t, bsok, fmt.tprintf("submit B: %s", bserr.message)) do return
 	back, bok, _ := lease_next(&fx.svc, auth, Lease_Next_Input{})
@@ -175,11 +173,10 @@ test_solo_self_review_refused_and_request_changes_needs_reason :: proc(t: ^testi
 	defer lease_fixture_close(fx, log)
 	if !ok do return
 	chain := solo_chain(t, fx, "chain_solo_review")
-	_ = publish_solo_task(t, fx, chain, "task_1", brief = `{"goal":"g","verify":"make test","review_roles":[]}`)
+	_ = publish_solo_task(t, fx, chain, "task_1", brief = `{"goal":"g","review_roles":[]}`)
 	auth := inst_auth("inst_coord")
 	res, nok, _ := lease_next(&fx.svc, auth, Lease_Next_Input{})
 	if !testing.expect(t, nok && res.status == "granted", "pulled") do return
-	write_verify(fx, "task_1", res.lease.attempt_no, "abc", 0)
 	_, sok, serr := lease_submit(&fx.svc, auth, Submit_Input{summary = "done", vcs_json = GREEN_VCS})
 	if !testing.expect(t, sok, fmt.tprintf("submit: %s", serr.message)) do return
 	// the soloist cannot approve on the user's behalf (REQ-SOLO-5)

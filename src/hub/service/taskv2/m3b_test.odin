@@ -39,7 +39,6 @@ test_workflow_define_and_cycle_check :: proc(t: ^testing.T) {
 				"brief": {
 					"goal": "Scan {{inputs.target}}",
 					"acceptance": ["Produce task_list.v1"],
-					"verify": "none",
 					"output": {"schema": "task_list.v1"}
 				}
 			},
@@ -51,8 +50,7 @@ test_workflow_define_and_cycle_check :: proc(t: ^testing.T) {
 				"for_each": "scan.outputs[0].tasks",
 				"brief": {
 					"goal": "{{item.goal}}",
-					"acceptance": ["Fixed"],
-					"verify": "true"
+					"acceptance": ["Fixed"]
 				}
 			}
 		]
@@ -73,8 +71,8 @@ test_workflow_define_and_cycle_check :: proc(t: ^testing.T) {
 		"schema": "workflow.v1",
 		"name": "bad_cycle",
 		"stages": [
-			{"key": "a", "kind": "task", "depends_on": ["b"], "brief": {"goal": "g", "acceptance": ["a"], "verify": "true"}},
-			{"key": "b", "kind": "task", "depends_on": ["a"], "brief": {"goal": "g", "acceptance": ["a"], "verify": "true"}}
+			{"key": "a", "kind": "task", "depends_on": ["b"], "brief": {"goal": "g", "acceptance": ["a"]}},
+			{"key": "b", "kind": "task", "depends_on": ["a"], "brief": {"goal": "g", "acceptance": ["a"]}}
 		]
 	}`
 	_, cok, cerr := workflow_define(&fx.svc, "u1", cycle_spec)
@@ -85,8 +83,8 @@ test_workflow_define_and_cycle_check :: proc(t: ^testing.T) {
 		"schema": "workflow.v1",
 		"name": "bad_fe",
 		"stages": [
-			{"key": "a", "kind": "task", "brief": {"goal": "g", "acceptance": ["a"], "verify": "none", "output": {"schema": "task_list.v1"}}},
-			{"key": "b", "kind": "task", "for_each": "a.outputs[0].tasks", "brief": {"goal": "g", "acceptance": ["a"], "verify": "true"}}
+			{"key": "a", "kind": "task", "brief": {"goal": "g", "acceptance": ["a"], "output": {"schema": "task_list.v1"}}},
+			{"key": "b", "kind": "task", "for_each": "a.outputs[0].tasks", "brief": {"goal": "g", "acceptance": ["a"]}}
 		]
 	}`
 	_, feok, feerr := workflow_define(&fx.svc, "u1", bad_fe_spec)
@@ -97,7 +95,7 @@ test_workflow_define_and_cycle_check :: proc(t: ^testing.T) {
 		"schema": "workflow.v1",
 		"name": "bad_item",
 		"stages": [
-			{"key": "a", "kind": "task", "title": "Fix {{item.key}}", "brief": {"goal": "g", "acceptance": ["a"], "verify": "true"}}
+			{"key": "a", "kind": "task", "title": "Fix {{item.key}}", "brief": {"goal": "g", "acceptance": ["a"]}}
 		]
 	}`
 	_, iok, ierr := workflow_define(&fx.svc, "u1", bad_item_spec)
@@ -120,7 +118,7 @@ test_workflow_runs_share_chain_but_not_stage_identity :: proc(t: ^testing.T) {
 	if !ok do return
 	chain := seed_chain(t,fx,"chain_runs",true)
     seed_fleet(fx, chain, "agt_w")
-	workflow_example_definition(t,fx,"simple",`{"schema":"workflow.v1","name":"simple","stages":[{"key":"build","brief":{"goal":"Build","verify":"none","output":{"schema":"inline"},"review_roles":[]}}]}`)
+	workflow_example_definition(t,fx,"simple",`{"schema":"workflow.v1","name":"simple","stages":[{"key":"build","brief":{"goal":"Build","output":{"schema":"inline"},"review_roles":[]}}]}`)
 	first,aok,aerr := workflow_run(&fx.svc,"u1",Actor{kind=ACTOR_USER,id="u1"},Workflow_Run_Input{chain_id=string(chain.chain_id),ref="simple",request_id="one",inputs_json="{}"})
 	second,bok,berr := workflow_run(&fx.svc,"u1",Actor{kind=ACTOR_USER,id="u1"},Workflow_Run_Input{chain_id=string(chain.chain_id),ref="simple",request_id="two",inputs_json="{}"})
 	testing.expect(t,aok && bok,fmt.tprintf("%s / %s",aerr.message,berr.message))
@@ -141,7 +139,7 @@ test_workflow_retry_creates_fresh_generation_and_preserves_history :: proc(t: ^t
 	if !ok do return
 	chain := seed_chain(t,fx,"chain_retry",true)
     seed_fleet(fx, chain, "agt_w")
-	workflow_example_definition(t,fx,"retryable",`{"schema":"workflow.v1","name":"retryable","stages":[{"key":"build","brief":{"goal":"Build","verify":"none","output":{"schema":"inline"},"review_roles":[]}}]}`)
+	workflow_example_definition(t,fx,"retryable",`{"schema":"workflow.v1","name":"retryable","stages":[{"key":"build","brief":{"goal":"Build","output":{"schema":"inline"},"review_roles":[]}}]}`)
 	run,rok,rerr := workflow_run(&fx.svc,"u1",Actor{kind=ACTOR_USER,id="u1"},Workflow_Run_Input{chain_id=string(chain.chain_id),ref="retryable",request_id="one",inputs_json="{}"})
 	if !testing.expect(t,rok,rerr.message) do return
 	_,cancelled,cerr := workflow_cancel(&fx.svc,run.run_id,"u1",Actor{kind=ACTOR_USER,id="u1"},"change approach",1)
@@ -174,7 +172,7 @@ test_workflow_run_creation_request_is_idempotent :: proc(t: ^testing.T) {
 	if !ok do return
 	chain := seed_chain(t,fx,"chain_request",true)
     seed_fleet(fx, chain, "agt_w")
-	workflow_example_definition(t,fx,"once",`{"schema":"workflow.v1","name":"once","stages":[{"key":"build","brief":{"goal":"Build","verify":"none","output":{"schema":"inline"},"review_roles":[]}}]}`)
+	workflow_example_definition(t,fx,"once",`{"schema":"workflow.v1","name":"once","stages":[{"key":"build","brief":{"goal":"Build","output":{"schema":"inline"},"review_roles":[]}}]}`)
 	input := Workflow_Run_Input{chain_id=string(chain.chain_id),ref="once",request_id="same",inputs_json="{}"}
 	first,aok,_ := workflow_run(&fx.svc,"u1",Actor{kind=ACTOR_USER,id="u1"},input)
 	second,bok,_ := workflow_run(&fx.svc,"u1",Actor{kind=ACTOR_USER,id="u1"},input)
@@ -232,7 +230,7 @@ test_workflow_cancel_waits_for_pending_merge :: proc(t: ^testing.T) {
  chain := seed_chain(t,fx,"merge_fence",true)
  seed_fleet(fx,chain,"worker")
  seed_directory(fx,chain,"git_dir","br_1","git")
- workflow_example_definition(t,fx,"mergeable",`{"schema":"workflow.v1","name":"mergeable","stages":[{"key":"build","brief":{"goal":"Build","verify":"none","output":{"schema":"inline"},"review_roles":[]}}]}`)
+ workflow_example_definition(t,fx,"mergeable",`{"schema":"workflow.v1","name":"mergeable","stages":[{"key":"build","brief":{"goal":"Build","output":{"schema":"inline"},"review_roles":[]}}]}`)
  run, created, err := workflow_run(&fx.svc,"u1",Actor{kind=ACTOR_USER,id="u1"},Workflow_Run_Input{chain_id=string(chain.chain_id),ref="mergeable",request_id="one",inputs_json="{}"})
  if !testing.expect(t,created,err.message) do return
  wf, _, _ := workflow_context(&fx.svc,run.run_id,"u1")

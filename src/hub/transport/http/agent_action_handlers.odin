@@ -93,7 +93,9 @@ agent_action_lease_heartbeat_handler :: proc(ctx: rawptr, req: Request) -> Respo
 
 // ---- M2 lease verbs ------------------------------------------------------------------
 
-// POST /api/v1/agent-actions/lease/submit  params: {lease_id?, summary, handoff?, output?, vcs?, verify?, artifacts?, auto?}
+// POST /api/v1/agent-actions/lease/submit  params: {lease_id?, summary, handoff?, output?, vcs?, artifacts?}
+// The removed verify params (verify, skip_verify, skip_verify_reason, auto) are
+// accepted and ignored for one release, with a verify_removed warning (M2).
 // E12 (REQ-2): submit/handoff/switch/block publish no task event here. The
 // engine already announces them after COMMIT: refold queues task/updated for
 // every projection change and each facet write queues task/facet_changed, so a
@@ -109,14 +111,13 @@ agent_action_lease_submit_handler :: proc(ctx: rawptr, req: Request) -> Response
 	res, sok, err := taskv2.lease_submit(h.task_engine, auth, taskv2.Submit_Input{
 		lease_id = json_string(params, "lease_id"), summary = json_string(params, "summary"),
 		handoff_json = verbatim_field(params, "handoff"), output_json = verbatim_field(params, "output"),
-		vcs_json = verbatim_field(params, "vcs"), verify = json_string(params, "verify"),
-		skip_verify = jsonx.extract_bool(params, "skip_verify", false, true), skip_verify_reason = json_string(params, "skip_verify_reason"),
-		artifacts_json = verbatim_field(params, "artifacts"), auto = jsonx.extract_bool(params, "auto", false, true),
+		vcs_json = verbatim_field(params, "vcs"), artifacts_json = verbatim_field(params, "artifacts"),
 	})
 	if !sok do return respond_error(err, req.request_id)
 	publish_agent_action(h, inst, "lease_submit", fmt.tprintf("submitted %s (%s)", res.task.task_id, res.outcome))
 	data, _ := json.marshal(make_simple_task_wire(res.task), JSON_MARSHAL_OPT, allocator = context.temp_allocator)
-	return respond_success(fmt.tprintf("{{\"outcome\":\"%s\",\"task\":%s}}", res.outcome, string(data)), req.request_id, auth_ctx_server_time(req), 200)
+	body := with_verify_removed_warnings(fmt.tprintf("{{\"outcome\":\"%s\",\"task\":%s}}", res.outcome, string(data)), submit_verify_removed_fields(params))
+	return respond_success(body, req.request_id, auth_ctx_server_time(req), 200)
 }
 
 // POST /api/v1/agent-actions/lease/handoff  params: {lease_id?, summary, handoff?, vcs?}
@@ -498,7 +499,8 @@ agent_action_chain_propose_handler :: proc(ctx: rawptr, req: Request) -> Respons
 	prop_json := taskv2.chain_proposal_json(updated_chain)
 	if prop_json == "" do prop_json = "{}"
 	pub_state := "published" if updated_chain.publish_state == .Published else "draft"
-	return respond_success(fmt.tprintf("{{\"chain_id\":\"%s\",\"publish_state\":\"%s\",\"proposal\":%s}}", updated_chain.chain_id, pub_state, prop_json), req.request_id, auth_ctx_server_time(req), 200)
+	body := with_verify_removed_warnings(fmt.tprintf("{{\"chain_id\":\"%s\",\"publish_state\":\"%s\",\"proposal\":%s}}", updated_chain.chain_id, pub_state, prop_json), task_specs_verify_removed_fields(tasks_json))
+	return respond_success(body, req.request_id, auth_ctx_server_time(req), 200)
 }
 
 agent_action_chat_fetch_handler :: proc(ctx: rawptr, req: Request) -> Response {
@@ -821,7 +823,7 @@ agent_action_task_create_handler :: proc(ctx: rawptr, req: Request) -> Response 
 	publish_chain_event(h.event_bus, string(task.owner_user_id), string(task.chain_id), "updated")
 	b := strings.builder_make()
 	write_task_json(&b, task)
-	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req), 201)
+	return respond_success(with_verify_removed_warnings(strings.to_string(b), brief_verify_removed_fields(params)), req.request_id, auth_ctx_server_time(req), 201)
 }
 
 // agent_action_task_update_handler edits an already-created task: title,
@@ -885,7 +887,7 @@ agent_action_task_update_handler :: proc(ctx: rawptr, req: Request) -> Response 
 	publish_chain_event(h.event_bus, string(task.owner_user_id), string(task.chain_id), "updated")
 	b := strings.builder_make()
 	write_task_json(&b, task)
-	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req), 200)
+	return respond_success(with_verify_removed_warnings(strings.to_string(b), brief_verify_removed_fields(params)), req.request_id, auth_ctx_server_time(req), 200)
 }
 
 agent_action_task_depend_handler :: proc(ctx: rawptr, req: Request) -> Response {
@@ -1574,7 +1576,7 @@ agent_action_workflow_define_handler :: proc(ctx: rawptr, req: Request) -> Respo
 	strings.write_string(&b, `","spec":`)
 	strings.write_string(&b, def.body_json)
 	strings.write_byte(&b, '}')
-	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req), 200)
+	return respond_success(with_verify_removed_warnings(strings.to_string(b), workflow_spec_verify_removed_fields(spec_json)), req.request_id, auth_ctx_server_time(req), 200)
 }
 
 @(private = "file")

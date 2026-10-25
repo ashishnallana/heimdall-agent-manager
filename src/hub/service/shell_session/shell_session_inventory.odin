@@ -592,9 +592,6 @@ _reap_inventory_absent :: proc(
 			}
 			shell_session_broadcast_status(svc, next.session_id, next.status, 0, false)
 		}
-		if svc.on_unobserved_terminal != nil {
-			svc.on_unobserved_terminal(svc.on_unobserved_terminal_ctx, next)
-		}
 	}
 }
 

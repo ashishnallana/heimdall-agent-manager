@@ -31,8 +31,8 @@ workflow_builtin_templates :: proc(allocator := context.temp_allocator) -> []Wor
 	append(&out, Workflow_Template{
 		id          = "tpl_explore_plan_build",
 		name        = "explore_plan_build",
-		title       = "Explore -> Plan -> Approve -> Build -> Verify",
-		description = "Explore the codebase, produce a structured task_list.v1 plan, pause at a human/coordinator gate, then fan out across planned items and run a final integration verification.",
+		title       = "Explore -> Plan -> Approve -> Build -> Integrate",
+		description = "Explore the codebase, produce a structured task_list.v1 plan, pause at a human/coordinator gate, then fan out across planned items and finish with an integration review of the combined result.",
 		source      = "builtin",
 		spec_json   = BUILTIN_WORKFLOW_EXPLORE_PLAN_BUILD,
 	})
@@ -40,7 +40,7 @@ workflow_builtin_templates :: proc(allocator := context.temp_allocator) -> []Wor
 		id          = "tpl_fix_flaky_tests",
 		name        = "fix_flaky_tests",
 		title       = "Reproduce -> Diagnose -> Fix Flaky Tests",
-		description = "Scan a test suite for flaky tests, produce a task_list.v1 of reproducers/fixes, and fix each flaky test in parallel with verification.",
+		description = "Scan a test suite for flaky tests, produce a task_list.v1 of reproducers/fixes, and fix each flaky test in parallel, reporting the checks that show it is stable.",
 		source      = "builtin",
 		spec_json   = BUILTIN_WORKFLOW_FIX_FLAKY_TESTS,
 	})
@@ -122,6 +122,9 @@ parse_and_validate_workflow_spec :: proc(raw_spec: string, name_override := "", 
 	if !strings.has_prefix(trimmed, "{") || !strings.has_suffix(trimmed, "}") {
 		return {}, false, domain.domain_error(.Validation_Failed, "workflow spec must be a JSON object", `{"code":"workflow_invalid"}`)
 	}
+	// M2: legacy verify keys in defaults / stage briefs are dropped, so neither
+	// stored definitions, run snapshots nor materialised briefs carry them.
+	trimmed, _ = strip_removed_verify_keys_in_workflow_spec(trimmed, allocator)
 	schema_str := strings.trim_space(jsonx.extract_string(trimmed, "schema", "", true, allocator))
 	kind_str := strings.trim_space(jsonx.extract_string(trimmed, "kind", "", true, allocator))
 	if schema_str != "" && schema_str != "workflow.v1" && schema_str != "workflow" {
@@ -222,15 +225,11 @@ parse_and_validate_workflow_spec :: proc(raw_spec: string, name_override := "", 
 		}
 		if skind == .Task {
 			bgoal := strings.trim_space(jsonx.extract_string(brief_raw, "goal", "", true, allocator))
+			// A stage needs a goal and something checkable: acceptance items or a
+			// structured output contract. No command is ever required.
 			bacc := jsonx.extract_string_array(brief_raw, "acceptance", true, allocator)
-			bver := strings.trim_space(jsonx.extract_string(brief_raw, "verify", "", true, allocator))
-			has_out := brief_has_output_contract(brief_raw)
-			if bgoal == "" || (len(bacc) == 0 && bver == "") {
-				return {}, false, domain.domain_error(.Validation_Failed, fmt.tprintf("stage %s brief requires non-empty goal and acceptance or a verify command", skey), `{"code":"workflow_invalid"}`)
-			}
-			if bver == "" do bver = "none"
-			if bver == "none" && !has_out && len(bacc) == 0 {
-				return {}, false, domain.domain_error(.Validation_Failed, fmt.tprintf("stage %s brief requires non-empty acceptance or verify", skey), `{"code":"workflow_invalid"}`)
+			if bgoal == "" || (len(bacc) == 0 && !brief_has_output_contract(brief_raw)) {
+				return {}, false, domain.domain_error(.Validation_Failed, fmt.tprintf("stage %s brief requires a non-empty goal and acceptance items or an output contract", skey), `{"code":"workflow_invalid"}`)
 			}
 		}
 
@@ -1462,7 +1461,7 @@ workflow_define :: proc(
 		owner_user_id = owner_user_id,
 		name          = parsed.name,
 		version       = ver,
-		body_json     = spec_json,
+		body_json     = parsed.normalized_json,
 		created_at    = now,
 	}
 	saved, sok, serr := iface.taskchain_save_workflow_definition(svc.repo, def)

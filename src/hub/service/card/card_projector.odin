@@ -218,15 +218,6 @@ build_task_card :: proc(s: ^Card_Service, task: domain.Task, kind: taskv2.User_A
 	} else {
 		strings.write_string(&details, `null`)
 	}
-	if kind == .Review && s.taskchains.engine != nil {
-		if handoff, ok := taskv2.get_facet(s.taskchains.engine, task, task.attempt_no, taskv2.FACET_HANDOFF); ok {
-			if reason := jsonx.extract_string(handoff.body_json, "skip_verify_reason", "", true, context.temp_allocator); reason != "" {
-				strings.write_string(&details, `,"skip_verify_reason":"`)
-				contracts.write_json_string(&details, reason)
-				strings.write_byte(&details, '"')
-			}
-		}
-	}
 	strings.write_string(&details, `}`)
 
 	rationale := "Waiting on your review"

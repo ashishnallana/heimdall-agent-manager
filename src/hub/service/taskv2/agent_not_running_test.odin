@@ -236,15 +236,13 @@ test_agent_not_running_reviewer_restart_preserves_rounds :: proc(t: ^testing.T) 
 	seed_fleet(fx, chain, "agt_r", roles = `["reviewer"]`)
 	seed_instance(fx, chain, "inst_w1", "agt_w", "br_1", "idle")
 	seed_instance(fx, chain, "inst_r1", "agt_r", "br_1", "idle")
-	task := publish_task(t, fx, chain, "task_review_restart", brief = `{"goal":"g","acceptance":["a"],"verify":"true","review_roles":["reviewer"]}`)
+	task := publish_task(t, fx, chain, "task_review_restart", brief = `{"goal":"g","acceptance":["a"],"review_roles":["reviewer"]}`)
 	confirm_holder(fx, "inst_w1")
-	write_verify(fx, string(task.task_id), 1, "h1", 0)
 	_, submitted, _ := lease_submit(&fx.svc, inst_auth("inst_w1"), Submit_Input{summary = "v1", vcs_json = `{"head":"h1","dirty":false}`})
 	if !testing.expect(t, submitted, "first submission") do return
 	_, reviewed, _ := review_post(&fx.svc, inst_auth("inst_r1"), Review_Input{verdict = "request_changes", findings_json = `[{"path":"a","line":1,"severity":"major","text":"fix"}]`})
 	if !testing.expect(t, reviewed, "first review") do return
 	confirm_holder(fx, "inst_w1")
-	write_verify(fx, string(task.task_id), 2, "h2", 0)
 	_, submitted, _ = lease_submit(&fx.svc, inst_auth("inst_w1"), Submit_Input{summary = "v2", vcs_json = `{"head":"h2","dirty":false}`})
 	if !testing.expect(t, submitted, "second submission") do return
 	confirm_holder(fx, "inst_r1")
@@ -351,9 +349,8 @@ test_agent_not_running_reviewer_long_backoff_retries :: proc(t: ^testing.T) {
 	inst.stopped_at = platform.clock_now(&fx.clock)
 	inst.last_error_json = `{"code":"bridge_busy","class":"retriable","message":"rate limited","retry_after_ms":900000,"attempt":1}`
 	_, _, _ = iface.agent_save_instance(&fx.agents, inst)
-	task := publish_task(t, fx, chain, "task_review_backoff", brief = `{"goal":"g","verify":"true","review_roles":["reviewer"]}`)
+	task := publish_task(t, fx, chain, "task_review_backoff", brief = `{"goal":"g","review_roles":["reviewer"]}`)
 	confirm_holder(fx, "inst_w1")
-	write_verify(fx, string(task.task_id), 1, "h1", 0)
 	_, submitted, _ := lease_submit(&fx.svc, inst_auth("inst_w1"), Submit_Input{summary = "v1", vcs_json = `{"head":"h1","dirty":false}`})
 	if !testing.expect(t, submitted, "submit for review") do return
 	fixture_advance(fx, 899)

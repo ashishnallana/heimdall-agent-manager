@@ -61,7 +61,7 @@ test_pack_dependencies_carry_handoffs :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(deps, `"next_steps":["wire rotation"]`), "a single-string list becomes an array")
 	testing.expect(t, strings.contains(deps, `"output":{"tables":["refresh_tokens"]}`), "output inline")
 	testing.expect(t, strings.contains(deps, `"head":"abc123"`) && !strings.contains(deps, "changed_files"), "vcs: head only (files is the uncommitted list)")
-	testing.expect(t, strings.contains(deps, `"verify":{"cmd":"pytest -q","exit_code":0}`), "verify reads the hub's `command` key")
+	testing.expect(t, !strings.contains(deps, `"verify"`) && !strings.contains(deps, "pytest -q"), "a legacy verify facet is history only and never enters the pack (D2)")
 	testing.expect(t, strings.contains(deps, `"task_id":"task_c"`) && strings.contains(deps, `"state":"cancelled"`) && strings.contains(deps, `"summary":""`), "cancelled dependency is listed with its state")
 	testing.expect(t, strings.contains(build_pack_dependencies_probe(fx, chain, b), `"dependencies":[`), "build_pack_json splices the field")
 
