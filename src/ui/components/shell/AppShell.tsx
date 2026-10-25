@@ -81,8 +81,8 @@ import { ActionsRouteGate } from '../actions/ActionsRouteGate';
 import { filterActionsNavEntries } from '../actions/actionsExperiment';
 import { useActionsAccess } from '../actions/useActionsAccess';
 import type { LauncherIntent } from '../../store/workspaceLayoutSlice';
-import { buildConversationHash } from '../../utils/conversationUrl';
-import { chainConversationRoute, chainTargetId } from '../../utils/paneTarget';
+import { buildConversationHash, parseConversationIdsFromRoute } from '../../utils/conversationUrl';
+import { chainConversationRoute, chainIdFromTargetId, chainTargetId } from '../../utils/paneTarget';
 
 // Pages off the boot path (home, conversations and the workspace stay eager) load
 // on first visit, so they stay out of the entry chunk.
@@ -359,9 +359,15 @@ function routeBreadcrumbs(path: string, conversations: ConversationSummary[] = [
   if (path === '/home' || path.startsWith('/home') || path === '/cards' || path.startsWith('/cards')) return [{ label: 'Home' }];
   if (path === '/conversations/new') return [{ label: 'Conversations', href: '/conversations' }, { label: 'New Conversation' }];
   if (path.startsWith('/conversations/')) {
-    const agentInstanceId = decodeSegment(path.slice('/conversations/'.length));
-    const convo = conversations.find((item) => item.agentInstanceId === agentInstanceId);
-    return [{ label: 'Conversations', href: '/conversations' }, { label: convo?.agentId || 'Conversation' }, { label: convo?.agentInstanceId || agentInstanceId }];
+    // Conversation routes render the Workspace, whose panes carry their own
+    // breadcrumbs (a chain pane shows the chain title), so this trail is only a
+    // fallback. It names the FIRST pane target (`<inst>` or `chain:<chain_id>`),
+    // never the raw multi-pane segment.
+    const target = parseConversationIdsFromRoute(path).ids[0] || '';
+    const chainId = chainIdFromTargetId(target);
+    if (chainId) return [{ label: 'Task Chains', href: '/chains' }, { label: chainId }, { label: 'Coordinator' }];
+    const convo = conversations.find((item) => item.agentInstanceId === target);
+    return [{ label: 'Conversations', href: '/conversations' }, { label: convo?.agentId || 'Conversation' }, { label: convo?.agentInstanceId || target }];
   }
   if (path === '/agents/new') return [{ label: 'Agents', href: '/agents' }, { label: 'New Agent' }];
   if (path.startsWith('/agents/')) return [{ label: 'Agents', href: '/agents' }, { label: decodeSegment(path.slice('/agents/'.length)) }];

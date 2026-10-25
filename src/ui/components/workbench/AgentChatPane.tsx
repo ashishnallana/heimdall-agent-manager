@@ -59,6 +59,7 @@ import { chainTargetId } from '../../utils/paneTarget';
 import { selectActiveVaultKey } from '../../store/vaultSlice';
 import type { AuxContent } from '../../store/auxTabId';
 import { buildRouteHash } from '../../utils/appLocation';
+import { buildConversationHash } from '../../utils/conversationUrl';
 import { useRegisterActions } from '../../services/shortcuts/useRegisterActions';
 import { readComposerDraft, writeComposerDraft } from '../../utils/clientPersistence';
 import { conversationConfigurationIssues } from '../../utils/conversationConfigurationValidity';
@@ -798,7 +799,7 @@ export function AgentChatPane({
     if (!target) return;
     if (onSwitchAgent) onSwitchAgent(target);
     else if (typeof window !== 'undefined') {
-      window.location.hash = buildRouteHash(`/conversations/${target}`, '');
+      window.location.hash = buildConversationHash([target]);
     }
   };
 
@@ -3400,10 +3401,7 @@ export function AgentChatPane({
                     // already open elsewhere is focused instead) and syncs the URL.
                     onSwitchAgent(memberTarget, member.title);
                   } else if (typeof window !== 'undefined') {
-                    window.location.hash = buildRouteHash(
-                      `/conversations/${encodeURIComponent(memberTarget).replace(/%3A/gi, ':')}`,
-                      '',
-                    );
+                    window.location.hash = buildConversationHash([memberTarget]);
                   }
                 }}
                 className={`flex min-h-14 w-full items-center gap-3 rounded-xl border px-3 py-3 text-left ${

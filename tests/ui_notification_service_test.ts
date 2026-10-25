@@ -148,6 +148,63 @@ const chatByAgent = {
 plan = fireNotificationForWsEvent(() => enabledState(), chatByAgent);
 assert.equal(plan, null, 'suppressed when the open conversation matches by agent_instance_id');
 assert.equal(created.length, 0, 'no Notification for the open thread matched via agent id');
+
+// REQ-TV2-7: chain-addressed panes (#/conversations/chain:<cid>) count as their
+// RESOLVED coordinator, read from the pane's fetchTaskChainConversation cache.
+function chainState(coordinator: string, conversationId = '') {
+  return {
+    ...enabledState(),
+    heimdallApi: {
+      queries: {
+        'fetchTaskChainConversation({"chainId":"chain_1"})': {
+          endpointName: 'fetchTaskChainConversation',
+          originalArgs: { chainId: 'chain_1' },
+          status: 'fulfilled',
+          data: { chainId: 'chain_1', title: 'T', coordinatorAgentInstanceId: coordinator, conversationId, replacedCoordinatorInstanceIds: [] },
+        },
+      },
+    },
+  };
+}
+const coordChat = {
+  type: 'chat_event', direction: 'agent_to_user',
+  conversation_id: 'conv_coord', agent_instance_id: 'inst_coord', chain_id: 'chain_1',
+  message: { direction: 'agent_to_user', body: 'coordinator update' },
+};
+const workerChat = {
+  type: 'chat_event', direction: 'agent_to_user',
+  conversation_id: 'conv_worker', agent_instance_id: 'inst_worker', chain_id: 'chain_1',
+  message: { direction: 'agent_to_user', body: 'worker update' },
+};
+
+created.length = 0;
+state.hash = '#/conversations/chain:chain_1';
+plan = fireNotificationForWsEvent(() => chainState('inst_coord'), coordChat);
+assert.equal(plan, null, 'chain pane suppresses its resolved coordinator\'s messages');
+plan =fireNotificationForWsEvent(() => chainState('inst_coord', 'conv_coord'), { ...coordChat, agent_instance_id: '' });
+assert.equal(plan, null, 'chain pane suppresses by the resolved conversation_id too');
+created.length = 0;
+plan = fireNotificationForWsEvent(() => chainState('inst_coord'), workerChat);
+assert.ok(plan, 'a worker in the same chain is not on screen -> notify (no bare chain-id match)');
+await flush();
+assert.equal(created.length, 1, 'one Notification for the off-screen worker');
+
+// Unresolved chain pane (no cache entry yet) suppresses nothing.
+created.length = 0;
+plan = fireNotificationForWsEvent(() => enabledState(), coordChat);
+assert.ok(plan, 'unresolved chain pane never suppresses');
+await flush();
+assert.equal(created.length, 1, 'one Notification while the chain pane is unresolved');
+
+// A split view counts every visible pane target, chain or instance, and any
+// ?focused= target among them.
+created.length = 0;
+state.hash = '#/conversations/agent_1+chain:chain_1?focused=agent_1';
+plan = fireNotificationForWsEvent(() => chainState('inst_coord'), coordChat);
+assert.equal(plan, null, 'unfocused chain pane in a split view still suppresses');
+plan = fireNotificationForWsEvent(() => chainState('inst_coord'), chatByAgent);
+assert.equal(plan, null, 'instance pane in a split view suppresses');
+assert.equal(created.length, 0, 'no Notification for either visible pane');
 state.hash = '';
 
 // REQ-N1: unfocused tab + enabled => exactly one native notification.
