@@ -77,12 +77,24 @@ INSERT OR IGNORE INTO taskv2_boot_regate (singleton, reason) VALUES (1, 'verify_
 -- M1: strip the removed keys from persisted briefs, chain defaults (including
 -- a pending proposal's task specs) and stored workflow definitions.
 -- ---------------------------------------------------------------------------
+-- Workflow-generated task definitions are immutable (099). Like the
+-- workflow_definitions guard below, this one-shot data migration lifts that
+-- guard for its own brief rewrite and restores it unchanged (text identical
+-- to 099). Without this, any workflow task whose brief still carries a removed
+-- key aborts the whole migration and the hub cannot start.
+DROP TRIGGER IF EXISTS tasks_workflow_definition_immutable;
+
 UPDATE tasks
 SET brief_json = json_remove(brief_json, '$.verify', '$.auto_submit', '$.require_independent_verify')
 WHERE json_valid(brief_json)
   AND (json_type(brief_json, '$.verify') IS NOT NULL
     OR json_type(brief_json, '$.auto_submit') IS NOT NULL
     OR json_type(brief_json, '$.require_independent_verify') IS NOT NULL);
+
+CREATE TRIGGER tasks_workflow_definition_immutable BEFORE UPDATE ON tasks
+WHEN OLD.workflow_run_id != '' AND (NEW.title IS NOT OLD.title OR NEW.description IS NOT OLD.description
+ OR NEW.brief_json IS NOT OLD.brief_json OR NEW.kind IS NOT OLD.kind OR NEW.generated_by_json IS NOT OLD.generated_by_json)
+BEGIN SELECT RAISE(ABORT,'workflow-generated task definition is immutable'); END;
 
 UPDATE task_chains
 SET defaults_json = json_remove(defaults_json, '$.verify', '$.auto_submit', '$.require_independent_verify')
