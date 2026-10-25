@@ -394,9 +394,8 @@ Phase 3 (delete trusted proxy + `hut_`, preview-origin auth):
   prints a warning. There is no other bypass.
 - **User tokens.** Deleted: issue/verify/list/revoke, `/api/v1/me/tokens*`, `ham-hub tokens`
   (now exits with a removal message), `users create` token output, `domain.User_API_Token` and the
-  repository procs. Migration `135_drop_user_api_tokens.sql` drops the table, its trigger and its
-  index (no other table references it); `upgrade_user_api_tokens_schema` is a no-op once it is
-  gone. Device authorization: the user-token grant kind became `Grant_Kind.Unsupported` (the zero
+  repository procs. Migration `135_clear_user_api_tokens.sql` empties the table (see the phase 3
+  review follow-up: the table itself is kept for rollback safety). Device authorization: the user-token grant kind became `Grant_Kind.Unsupported` (the zero
   value); authorize without `bridge_public_key` is refused; the user token minter seam was removed.
   Bridge enrollment/approval is unchanged and is approved by a session (or OIDC) user. The legacy
   `/api/v1/device` HTML page redirects a browser without a session to the OIDC login.
@@ -461,3 +460,40 @@ Phase 4 (UI):
 - `scripts/oidc-smoke/smoke.sh` is a browser-less end-to-end check: mock OIDC + hub + a static
   front (like Caddy) serving `dist/`. It runs login → callback (cookie attributes) → `/me` and the
   UI's first calls → ws-ticket → CSRF refusal → logout → 401.
+
+Phase 3 review follow-up:
+- **Rollback safety:** migration 135 now runs `DELETE FROM user_api_tokens;` and keeps the
+  table. Binaries from the deployed native-v0445 lineage run `upgrade_user_api_tokens_schema`
+  (an `ALTER TABLE user_api_tokens …`) after every migration pass, so a dropped table would
+  crash-loop on rollback. Emptying it also kills any `hut_` token if an old binary returns.
+  **TODO (later release, once rollback to pre-OIDC binaries is no longer possible):** drop
+  `user_api_tokens`, its trigger and its index. The new code tolerates the table being present
+  or absent.
+- **Login state is stateless:** an unauthenticated `/auth/login` creates no row. State, nonce,
+  PKCE verifier, `return_to` and expiry are sealed into `__Host-heimdall_login` with
+  XChaCha20-Poly1305 (`core:crypto/chacha20poly1305`) under a per-process random key; AAD is
+  `heimdall-login-v1`.
+  - The callback opens the cookie and requires query `state` == sealed state (constant time).
+  - Each state is single use: hashes of consumed states are kept in memory until they expire,
+    bounded at 16 384 entries with oldest-first eviction.
+  - A hub restart invalidates in-flight logins.
+  - `oidc_login_states` was removed from the (unreleased) migration 134, together with every
+    repository method that used it.
+  - The per-IP limit stays (20 per minute). When the per-IP window map is full it evicts the
+    oldest windows instead of refusing.
+- **Client IP:** `resolve_client_ip`, which device-auth shares, now takes the **right-most**
+  X-Forwarded-For hop that is not inside a trusted CIDR, not the first hop. That matches nginx
+  `$proxy_add_x_forwarded_for` behind a Caddy that trusts 127.0.0.1. A client-supplied left part
+  can no longer choose the IP.
+- **Preview handoff is bound to the browser:**
+  - A preview-host bounce sets `__Host-heimdall_preview_bind` (random; HttpOnly, Secure,
+    SameSite=Lax, host-only, 300 s) and passes `bind=sha256(value)` to the start route.
+  - The ticket stores the bind hash. Redeem requires the matching bind cookie and clears it.
+  - A start request without `bind` first goes to `<preview>/__heimdall/preview-bind`, which sets
+    the cookie and comes back, so direct links still work.
+  - A navigation with a valid preview cookie for a session the user doesn't own is re-routed
+    through start instead of getting a 404.
+  - Normal bounces are no longer counted as auth failures.
+- **Preview WebSockets** (HMR) run the stream auth guard; they close (`auth_revoked`) once the
+  user session behind them is logged out or expires.
+- **Per-parent cap:** at most 32 preview sessions per parent session; the oldest is replaced.

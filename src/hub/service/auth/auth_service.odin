@@ -28,6 +28,8 @@ Auth_Service :: struct {
 	web: Web_Login_Config,
 	sessions: ^iface.Session_Repository,
 	login_limiter: Login_Rate_Limiter,
+	// Sealing key + consumed-state set for the stateless login cookie.
+	login_seal: Login_Seal,
 	// Preview-origin handoff tickets and preview sessions (process memory).
 	preview: Preview_Auth_Store,
 	vault: ^vd.Service,

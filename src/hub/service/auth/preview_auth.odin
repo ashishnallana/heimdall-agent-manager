@@ -28,19 +28,27 @@ import user_service "odin_test:hub/service/user"
 // preview navigation simply bounces through step 1 again.
 
 PREVIEW_COOKIE :: "__Host-heimdall_preview"
+// Browser binding for the handoff: set on the preview host when it starts a
+// sign-in bounce; the ticket carries sha256(bind) and is only redeemable by the
+// browser holding the bind cookie (stops a planted ticket — login CSRF).
+PREVIEW_BIND_COOKIE :: "__Host-heimdall_preview_bind"
+PREVIEW_BIND_TTL_S :: 300
+// At most this many preview sessions per parent session (oldest replaced).
+PREVIEW_MAX_PER_PARENT :: 32
 PREVIEW_TICKET_TTL_MS :: 60_000
 PREVIEW_PARENT_RECHECK_MS :: 15_000
 PREVIEW_MAX_TICKETS :: 4096
 PREVIEW_MAX_SESSIONS :: 16384
 
 Preview_Ticket :: struct {
-	user_id, parent_session_hash, shell_session_id, return_to: string,
+	user_id, parent_session_hash, shell_session_id, return_to, bind_hash: string,
 	expires_ms: i64,
 }
 
 Preview_Session :: struct {
 	user_id, parent_session_hash: string,
 	expires_ms: i64,
+	created_ms: i64,
 	parent_checked_until_ms: i64,
 }
 
@@ -53,7 +61,7 @@ Preview_Auth_Store :: struct {
 @(private = "file")
 preview_free_ticket :: proc(key: string, t: Preview_Ticket) {
 	a := runtime.heap_allocator()
-	delete(key, a); delete(t.user_id, a); delete(t.parent_session_hash, a); delete(t.shell_session_id, a); delete(t.return_to, a)
+	delete(key, a); delete(t.user_id, a); delete(t.parent_session_hash, a); delete(t.shell_session_id, a); delete(t.return_to, a); delete(t.bind_hash, a)
 }
 
 @(private = "file")
@@ -92,8 +100,15 @@ preview_return_to_ok :: proc(return_to, shell_session_id: string) -> bool {
 
 // preview_ticket_mint issues a handoff ticket for a browser Session principal.
 // The caller has already checked that `shell_session_id` belongs to the user.
-preview_ticket_mint :: proc(service: ^Auth_Service, principal: contracts.Auth_Context, shell_session_id, return_to: string) -> (string, domain.Domain_Error) {
+preview_bind_hash_ok :: proc(bind_hash: string) -> bool {
+	if len(bind_hash) != 64 do return false
+	for c in transmute([]byte)bind_hash do if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) do return false
+	return true
+}
+
+preview_ticket_mint :: proc(service: ^Auth_Service, principal: contracts.Auth_Context, shell_session_id, return_to, bind_hash: string) -> (string, domain.Domain_Error) {
 	if principal.kind != .Session || principal.session_id == "" do return "", domain.domain_error(.Forbidden, "a browser session is required to open a preview")
+	if !preview_bind_hash_ok(bind_hash) do return "", domain.domain_error(.Validation_Failed, "invalid preview bind")
 	if shell_session_id == "" || strings.contains_any(shell_session_id, "/?#%\\") do return "", domain.domain_error(.Validation_Failed, "invalid preview session")
 	if !preview_return_to_ok(return_to, shell_session_id) do return "", domain.domain_error(.Validation_Failed, "return_to must be a path inside the preview")
 	now, now_ok := now_unix_ms(service)
@@ -112,6 +127,7 @@ preview_ticket_mint :: proc(service: ^Auth_Service, principal: contracts.Auth_Co
 		parent_session_hash = strings.clone(principal.session_id, a),
 		shell_session_id = strings.clone(shell_session_id, a),
 		return_to = strings.clone(return_to, a),
+		bind_hash = strings.clone(bind_hash, a),
 		expires_ms = now + PREVIEW_TICKET_TTL_MS,
 	}
 	return raw, {}
@@ -120,7 +136,7 @@ preview_ticket_mint :: proc(service: ^Auth_Service, principal: contracts.Auth_Co
 // preview_ticket_redeem consumes a ticket (single use, even on failure) and
 // creates a preview session bound to the ticket's parent session. Returns the
 // raw preview session id (cookie value), its max age and the return_to path.
-preview_ticket_redeem :: proc(service: ^Auth_Service, raw_ticket: string) -> (preview_id: string, max_age_s: i64, return_to: string, stage: string, ok: bool) {
+preview_ticket_redeem :: proc(service: ^Auth_Service, raw_ticket, bind_raw: string) -> (preview_id: string, max_age_s: i64, return_to: string, stage: string, ok: bool) {
 	if raw_ticket == "" || len(raw_ticket) > 128 do return "", 0, "", "ticket_missing", false
 	now, now_ok := now_unix_ms(service)
 	if !now_ok do return "", 0, "", "clock", false
@@ -140,8 +156,11 @@ preview_ticket_redeem :: proc(service: ^Auth_Service, raw_ticket: string) -> (pr
 	t := context.temp_allocator
 	user_id, parent, target := strings.clone(ticket.user_id, t), strings.clone(ticket.parent_session_hash, t), strings.clone(ticket.return_to, t)
 	expired := ticket.expires_ms <= now
+	bound := bind_raw != "" && len(bind_raw) <= 128 && oidc_constant_time_equal(sha256_hex(bind_raw), ticket.bind_hash)
 	preview_free_ticket(key, ticket)
 	if expired do return "", 0, "", "ticket_expired", false
+	// Only the browser that started this sign-in may redeem the ticket.
+	if !bound do return "", 0, "", "bind_mismatch", false
 	row, live := session_lookup_live(service, parent, now)
 	if !live || row.user_id != user_id do return "", 0, "", "parent_session", false
 	raw, raw_ok := random_token(32)
@@ -152,10 +171,25 @@ preview_ticket_redeem :: proc(service: ^Auth_Service, raw_ticket: string) -> (pr
 	if store.sessions == nil do store.sessions = make(map[string]Preview_Session, a)
 	preview_prune(store, now)
 	if len(store.sessions) >= PREVIEW_MAX_SESSIONS do return "", 0, "", "capacity", false
+	// Bound per parent session: replace the oldest beyond the cap.
+	for {
+		count := 0
+		oldest_key := ""
+		oldest := max(i64)
+		for k, ps in store.sessions {
+			if ps.parent_session_hash != parent do continue
+			count += 1
+			if ps.created_ms < oldest {oldest = ps.created_ms; oldest_key = k}
+		}
+		if count < PREVIEW_MAX_PER_PARENT do break
+		k2, ps2 := delete_key(&store.sessions, oldest_key)
+		preview_free_session(k2, ps2)
+	}
 	store.sessions[strings.clone(sha256_hex(raw), a)] = Preview_Session{
 		user_id = strings.clone(user_id, a),
 		parent_session_hash = strings.clone(parent, a),
 		expires_ms = row.expires_at_ms,
+		created_ms = now,
 		parent_checked_until_ms = now + PREVIEW_PARENT_RECHECK_MS,
 	}
 	return raw, max((row.expires_at_ms - now) / 1000, 1), target, "", true
@@ -224,4 +258,8 @@ preview_end_for_parent :: proc(service: ^Auth_Service, parent_session_hash: stri
 
 preview_cookie_header :: proc(raw: string, max_age_s: i64) -> string {
 	return fmt.tprintf("%s=%s; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=%d", PREVIEW_COOKIE, raw, max_age_s)
+}
+
+preview_bind_cookie_header :: proc(raw: string) -> string {
+	return fmt.tprintf("%s=%s; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=%d", PREVIEW_BIND_COOKIE, raw, PREVIEW_BIND_TTL_S)
 }

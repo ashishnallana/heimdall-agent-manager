@@ -16,10 +16,7 @@ new_session_repository :: proc(impl: ^Session_Repo_SQLite, conn: ^Conn) -> iface
 		get_session = session_get_sqlite,
 		touch_session = session_touch_sqlite,
 		delete_session = session_delete_sqlite,
-		save_login_state = login_state_save_sqlite,
-		take_login_state = login_state_take_sqlite,
 		purge_expired = session_purge_expired_sqlite,
-		count_login_states = login_state_count_sqlite,
 		delete_user_sessions = session_delete_user_sqlite,
 	}
 }
@@ -108,38 +105,12 @@ session_delete_sqlite :: proc(ctx: rawptr, session_id_hash: string) -> (iface.Us
 	return {}, false, {}
 }
 
-login_state_save_sqlite :: proc(ctx: rawptr, state_hash: string, state: iface.OIDC_Login_State) -> domain.Domain_Error {
-	impl := (^Session_Repo_SQLite)(ctx)
-	stmt, ok := session_prepare(impl, "INSERT INTO oidc_login_states(state_hash,nonce,code_verifier,return_to,expires_at_ms) VALUES(?,?,?,?,?);")
-	if !ok do return session_err("failed to prepare login state insert")
-	defer sqlite3_finalize(stmt)
-	bind_text(stmt, 1, state_hash); bind_text(stmt, 2, state.nonce); bind_text(stmt, 3, state.code_verifier)
-	bind_text(stmt, 4, state.return_to); sqlite3_bind_int64(stmt, 5, state.expires_at_ms)
-	if sqlite3_step(stmt) != SQLITE_DONE do return session_err("failed to save login state")
-	return {}
-}
 
-login_state_take_sqlite :: proc(ctx: rawptr, state_hash: string) -> (iface.OIDC_Login_State, bool, domain.Domain_Error) {
-	impl := (^Session_Repo_SQLite)(ctx)
-	stmt, ok := session_prepare(impl, "DELETE FROM oidc_login_states WHERE state_hash=? RETURNING nonce,code_verifier,return_to,expires_at_ms;")
-	if !ok do return {}, false, session_err("failed to prepare login state take")
-	defer sqlite3_finalize(stmt)
-	bind_text(stmt, 1, state_hash)
-	rc := sqlite3_step(stmt)
-	if rc == SQLITE_ROW {
-		row := iface.OIDC_Login_State{nonce = column_text(stmt, 0), code_verifier = column_text(stmt, 1), return_to = column_text(stmt, 2), expires_at_ms = sqlite3_column_int64(stmt, 3)}
-		for sqlite3_step(stmt) == SQLITE_ROW {}
-		return row, true, {}
-	}
-	if rc != SQLITE_DONE do return {}, false, session_err("failed to take login state")
-	return {}, false, {}
-}
 
 session_purge_expired_sqlite :: proc(ctx: rawptr, now_ms: i64) -> (int, domain.Domain_Error) {
 	impl := (^Session_Repo_SQLite)(ctx)
 	queries := [?]string{
 		"DELETE FROM user_sessions WHERE expires_at_ms <= ? OR idle_expires_at_ms <= ?;",
-		"DELETE FROM oidc_login_states WHERE expires_at_ms <= ? OR ? < 0;",
 		"DELETE FROM vault_request_nonces WHERE expires_ms < ? OR ? < 0;",
 	}
 	total := 0
@@ -155,15 +126,6 @@ session_purge_expired_sqlite :: proc(ctx: rawptr, now_ms: i64) -> (int, domain.D
 	return total, {}
 }
 
-login_state_count_sqlite :: proc(ctx: rawptr, now_ms: i64) -> (int, domain.Domain_Error) {
-	impl := (^Session_Repo_SQLite)(ctx)
-	stmt, ok := session_prepare(impl, "SELECT count(*) FROM oidc_login_states WHERE expires_at_ms > ?;")
-	if !ok do return 0, session_err("failed to prepare login state count")
-	defer sqlite3_finalize(stmt)
-	sqlite3_bind_int64(stmt, 1, now_ms)
-	if sqlite3_step(stmt) != SQLITE_ROW do return 0, session_err("failed to count login states")
-	return int(sqlite3_column_int64(stmt, 0)), {}
-}
 
 session_delete_user_sqlite :: proc(ctx: rawptr, user_id: string) -> (int, domain.Domain_Error) {
 	impl := (^Session_Repo_SQLite)(ctx)

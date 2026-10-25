@@ -407,6 +407,10 @@ preview_origin_handler :: proc(ctx: rawptr, req: Request, client: net.TCP_Socket
 		write_http_response(client, preview_auth_redeem(ctx, req))
 		return
 	}
+	if req.path == PREVIEW_BIND_PATH {
+		write_http_response(client, preview_auth_bind(ctx, req))
+		return
+	}
 	// The preview host has exactly one public namespace. In particular, Hub API,
 	// health and static paths are deliberately unreachable on this Host.
 	if !strings.has_prefix(req.path, "/p/") {
@@ -496,6 +500,12 @@ preview_proxy_relay :: proc(ctx: rawptr, req: Request, client: net.TCP_Socket, t
 		return
 	}
 	if !found {
+		// A preview cookie of another user (or a stale one): re-authenticate this
+		// navigation through the start route instead of a dead-end 404.
+		if is_preview_origin && preview_is_navigation(req) && h.ui_origin != "" {
+			write_http_response(client, preview_bounce(h, session_id, preview_request_target(req)))
+			return
+		}
 		write_stream_error(client, respond_error(domain.domain_error(.Not_Found, "session not found"), req.request_id))
 		return
 	}
@@ -678,7 +688,14 @@ preview_proxy_relay :: proc(ctx: rawptr, req: Request, client: net.TCP_Socket, t
 	response_head_pending := make([dynamic]byte, 0, 4096, heap)
 	defer delete(response_head_pending)
 	response_head_done := false
+	// Long-lived preview WebSockets (HMR) end when the user's session (or, on the
+	// preview origin, the preview session's parent) is logged out or expires.
+	ws_guard := stream_auth_guard_make(h.auth, auth_ctx)
 	for {
+		if is_ws_upgrade && !stream_auth_still_valid(&ws_guard) {
+			preview_ws_close_revoked(h, ws_ctrl, stream_id, session.bridge_id)
+			return
+		}
 		sync.mutex_lock(&stream.mu)
 		for len(stream.chunks) == 0 && !stream.closed {
 			if is_ws_upgrade {
@@ -701,7 +718,11 @@ preview_proxy_relay :: proc(ctx: rawptr, req: Request, client: net.TCP_Socket, t
 						}
 						return
 					}
-					// Bridge is alive — just an idle socket; re-lock and keep waiting.
+					// Bridge is alive — just an idle socket. Re-check the user's session too.
+					if !stream_auth_still_valid(&ws_guard) {
+						preview_ws_close_revoked(h, ws_ctrl, stream_id, session.bridge_id)
+						return
+					}
 					sync.mutex_lock(&stream.mu)
 				}
 			} else {
@@ -1348,6 +1369,7 @@ _preview_client_to_bridge_pump :: proc(data_ptr: rawptr) {
 
 PREVIEW_AUTH_PATH :: "/__heimdall/preview-auth"
 PREVIEW_AUTH_START_PATH :: "/api/v1/preview-auth/start"
+PREVIEW_BIND_PATH :: "/__heimdall/preview-bind"
 
 // preview_is_navigation: a top-level/frame document load the browser can follow
 // a redirect for (as opposed to fetch/XHR/subresource requests).
@@ -1358,32 +1380,48 @@ preview_is_navigation :: proc(req: Request) -> bool {
 	return strings.contains(header_value(req.headers, "Accept"), "text/html")
 }
 
+// preview_bounce starts a preview sign-in from the preview host: it binds the
+// browser (a host-only __Host-heimdall_preview_bind cookie) and sends it to the
+// UI-origin start route with bind=sha256(cookie), so only this browser can
+// redeem the resulting ticket.
+preview_bounce :: proc(h: ^Shell_Session_Stream_Handlers, session_id, return_to: string) -> Response {
+	bind, bind_ok := auth_service.random_token(32)
+	if !bind_ok || h.ui_origin == "" do return plain_response(503, "preview sign-in unavailable", {"Cache-Control", "no-store"})
+	location := strings.concatenate({
+		strings.trim_right(h.ui_origin, "/"), PREVIEW_AUTH_START_PATH,
+		"?session=", auth_service.form_encode(session_id),
+		"&return_to=", auth_service.form_encode(return_to),
+		"&bind=", auth_service.sha256_hex(bind),
+	}, context.temp_allocator)
+	return plain_response(302, "", {"Location", location}, {"Set-Cookie", auth_service.preview_bind_cookie_header(bind)}, {"Cache-Control", "no-store"})
+}
+
+preview_request_target :: proc(req: Request) -> string {
+	if req.query == "" do return req.path
+	return strings.concatenate({req.path, "?", req.query}, context.temp_allocator)
+}
+
 // preview_origin_auth authenticates a preview-origin request by its preview
-// cookie. A navigation without one is redirected through the UI-origin start
-// route, which mints a handoff ticket when the browser has a Hub session.
+// cookie. A navigation without one is bounced through the UI-origin start route
+// (a normal step, not counted as an auth failure); anything else gets 401.
 preview_origin_auth :: proc(h: ^Shell_Session_Stream_Handlers, req: Request) -> (contracts.Auth_Context, bool, Response) {
 	ctx, ok, err := auth_service.resolve_preview_auth(h.auth, req.headers)
 	if ok do return ctx, true, {}
-	auth_metrics_record_failure(h.auth, req)
 	session_id := path_part(req.path, 2)
 	if preview_is_navigation(req) && session_id != "" && h.ui_origin != "" {
-		target := req.path
-		if req.query != "" do target = strings.concatenate({req.path, "?", req.query}, context.temp_allocator)
-		location := strings.concatenate({
-			strings.trim_right(h.ui_origin, "/"), PREVIEW_AUTH_START_PATH,
-			"?session=", auth_service.form_encode(session_id),
-			"&return_to=", auth_service.form_encode(target),
-		}, context.temp_allocator)
-		return {}, false, plain_response(302, "", {"Location", location}, {"Cache-Control", "no-store"})
+		return {}, false, preview_bounce(h, session_id, preview_request_target(req))
 	}
+	auth_metrics_record_failure(h.auth, req)
 	return {}, false, respond_error(err, req.request_id)
 }
 
-// GET <ui_origin>/api/v1/preview-auth/start?session=<sid>&return_to=/p/<sid>/...
+// GET <ui_origin>/api/v1/preview-auth/start?session=<sid>&return_to=/p/<sid>/...&bind=<sha256>
 // Requires the Hub browser session (SameSite=Lax rides top-level and same-site
-// navigations). Without one, sign in first and come back here. A GET is safe:
-// the ticket only ever travels in a redirect to the Hub-handled preview sign-in
-// endpoint, for a preview session the signed-in user already owns.
+// navigations). Without one, sign in first and come back here. Without a bind,
+// first visit the preview host to bind this browser. A GET is safe: the ticket
+// only ever travels in a redirect to the Hub-handled preview sign-in endpoint,
+// for a preview session the signed-in user owns, and only the bound browser can
+// redeem it.
 preview_auth_start_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Shell_Session_Stream_Handlers)(ctx)
 	if h.preview_origin == "" do return respond_error(domain.domain_error(.Not_Found, "no dedicated preview origin is configured"), req.request_id)
@@ -1392,6 +1430,15 @@ preview_auth_start_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	if return_to == "" do return_to = strings.concatenate({"/p/", session_id, "/"}, context.temp_allocator)
 	if session_id == "" || !auth_service.preview_return_to_ok(return_to, session_id) {
 		return respond_error(domain.domain_error(.Validation_Failed, "session and a return_to inside the preview are required"), req.request_id)
+	}
+	bind := query_value(req.query, "bind")
+	if !auth_service.preview_bind_hash_ok(bind) {
+		location := strings.concatenate({
+			strings.trim_right(h.preview_origin, "/"), PREVIEW_BIND_PATH,
+			"?session=", auth_service.form_encode(session_id),
+			"&return_to=", auth_service.form_encode(return_to),
+		}, context.temp_allocator)
+		return plain_response(302, "", {"Location", location}, {"Cache-Control", "no-store"})
 	}
 	principal, ok, _ := require_auth(h.auth, req)
 	if !ok || principal.kind != .Session {
@@ -1404,21 +1451,43 @@ preview_auth_start_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	if repo_err.code != .None do return respond_error(repo_err, req.request_id)
 	if !found do return respond_error(domain.domain_error(.Not_Found, "session not found"), req.request_id)
 	domain.shell_session_destroy(session)
-	ticket, mint_err := auth_service.preview_ticket_mint(h.auth, principal, session_id, return_to)
+	ticket, mint_err := auth_service.preview_ticket_mint(h.auth, principal, session_id, return_to, bind)
 	if mint_err.code != .None do return respond_error(mint_err, req.request_id)
 	location := strings.concatenate({strings.trim_right(h.preview_origin, "/"), PREVIEW_AUTH_PATH, "?ticket=", ticket}, context.temp_allocator)
 	return plain_response(302, "", {"Location", location}, {"Cache-Control", "no-store"}, {"Referrer-Policy", "no-referrer"})
 }
 
+// GET <preview_origin>/__heimdall/preview-bind?session=<sid>&return_to=... binds
+// this browser (direct links to the start route arrive here first).
+preview_auth_bind :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Shell_Session_Stream_Handlers)(ctx)
+	if !ascii_equal_fold(req.method, "GET") do return plain_response(404, "not found")
+	session_id := query_value(req.query, "session")
+	return_to := query_value(req.query, "return_to")
+	if session_id == "" || !auth_service.preview_return_to_ok(return_to, session_id) do return plain_response(400, "invalid preview sign-in request", {"Cache-Control", "no-store"})
+	return preview_bounce(h, session_id, return_to)
+}
+
 // GET <preview_origin>/__heimdall/preview-auth?ticket=... redeems a handoff
-// ticket, sets the preview cookie and returns to the preview path.
+// ticket (only with this browser's bind cookie), sets the preview cookie, clears
+// the bind cookie and returns to the preview path.
 preview_auth_redeem :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Shell_Session_Stream_Handlers)(ctx)
-	if !ascii_equal_fold(req.method, "GET") do return Response{status = 404, content_type = "text/plain", body = "not found"}
-	raw, max_age, return_to, stage, ok := auth_service.preview_ticket_redeem(h.auth, query_value(req.query, "ticket"))
+	if !ascii_equal_fold(req.method, "GET") do return plain_response(404, "not found")
+	bind, _ := auth_service.cookie_value(req.headers, auth_service.PREVIEW_BIND_COOKIE)
+	clear_bind := auth_service.expired_cookie_header(auth_service.PREVIEW_BIND_COOKIE)
+	raw, max_age, return_to, stage, ok := auth_service.preview_ticket_redeem(h.auth, query_value(req.query, "ticket"), bind)
 	if !ok {
 		fmt.printfln("ham-hub preview_auth_rejected stage=%s", stage)
-		return plain_response(403, "preview sign-in failed; reopen the preview from Heimdall", {"Cache-Control", "no-store"})
+		return plain_response(403, "preview sign-in failed; reopen the preview from Heimdall", {"Set-Cookie", clear_bind}, {"Cache-Control", "no-store"})
 	}
-	return plain_response(302, "", {"Location", return_to}, {"Set-Cookie", auth_service.preview_cookie_header(raw, max_age)}, {"Cache-Control", "no-store"}, {"Referrer-Policy", "no-referrer"})
+	return plain_response(302, "", {"Location", return_to}, {"Set-Cookie", auth_service.preview_cookie_header(raw, max_age)}, {"Set-Cookie", clear_bind}, {"Cache-Control", "no-store"}, {"Referrer-Policy", "no-referrer"})
+}
+
+// preview_ws_close_revoked tears down a preview WebSocket whose user session ended.
+preview_ws_close_revoked :: proc(h: ^Shell_Session_Stream_Handlers, ws_ctrl: ^Preview_Ws_Ctrl, stream_id, bridge_id: string) {
+	if !_preview_ws_ctrl_try_close(ws_ctrl) do return
+	revoked := _preview_tunnel_close_json(stream_id, "auth_revoked")
+	project_service.bridge_command_send_runtime(h.bridge_command_sink, project_service.Runtime_Command{bridge_id = bridge_id, body_json = revoked})
+	delete(revoked)
 }

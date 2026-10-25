@@ -217,7 +217,9 @@ session_begin :: proc(t: ^testing.T, f: ^Session_Fixture, return_to := "%2F%23%2
 	cookie := session_header(resp, "Set-Cookie")
 	for attr in ([]string{"__Host-heimdall_login=", "Path=/", "Secure", "HttpOnly", "SameSite=Lax", "Max-Age=600"}) do testing.expect(t, strings.contains(cookie, attr), attr)
 	login.login_cookie = session_cookie_pair(cookie)
-	testing.expect_value(t, login.login_cookie, strings.concatenate({"__Host-heimdall_login=", login.state}, context.temp_allocator))
+	// The pending login is sealed into the cookie: it never contains the state,
+	// nonce or verifier in the clear.
+	testing.expect(t, !strings.contains(login.login_cookie, login.state) && !strings.contains(login.login_cookie, login.nonce), "login cookie is sealed")
 	return login
 }
 
@@ -293,12 +295,19 @@ test_session_callback_rejections :: proc(t: ^testing.T) {
 	}
 	// Unknown state.
 	expect_error(t, session_callback(f, "unknown-state", "the-code", "__Host-heimdall_login=unknown-state"), "unknown state")
-	// Missing / mismatched login cookie: rejected AND the state is consumed.
+	// Missing / forged / another login's cookie: rejected (login CSRF). The
+	// state lives only in the victim's sealed cookie, so an attacker who has
+	// only the state can never complete it.
 	login := session_begin(t, f)
 	expect_error(t, session_callback(f, login.state, "the-code"), "missing login cookie")
-	expect_error(t, session_callback(f, login.state, "the-code", login.login_cookie), "state was consumed by the failed attempt")
-	login = session_begin(t, f)
-	expect_error(t, session_callback(f, login.state, "the-code", "__Host-heimdall_login=other"), "mismatched login cookie")
+	expect_error(t, session_callback(f, login.state, "the-code", "__Host-heimdall_login=forged"), "forged login cookie")
+	other := session_begin(t, f)
+	expect_error(t, session_callback(f, login.state, "the-code", other.login_cookie), "another login's cookie")
+	// Tampering with the sealed cookie is detected.
+	tampered := strings.concatenate({other.login_cookie[:len(other.login_cookie) - 2], "AA" if !strings.has_suffix(other.login_cookie, "AA") else "BB"}, context.temp_allocator)
+	expect_error(t, session_callback(f, other.state, "the-code", tampered), "tampered login cookie")
+	// No server-side rows exist for pending logins at all.
+	testing.expect(t, !sqlite.sqlite_object_exists(&f.conn, "oidc_login_states"), "no login state table")
 	// Replay of a successful state.
 	login = session_begin(t, f)
 	ok_resp := session_callback(f, login.state, "the-code", login.login_cookie)
@@ -393,12 +402,11 @@ test_session_expiry_touch_and_purge :: proc(t: ^testing.T) {
 	f.now = "2026-10-20T10:01:00Z"
 	_, idle_ok, _ := require_auth(&f.auth, session_get("/api/v1/me", "", cookie))
 	testing.expect(t, !idle_ok, "idle-expired session rejected")
-	// Purge removes the expired session, stale login states and v2 nonces.
-	_ = session_begin(t, f) // a login state created now, expiring in 10 min
+	// Purge removes the expired session and stale v2 nonces.
 	testing.expect(t, sqlite.exec(&f.conn, "INSERT INTO vault_request_nonces VALUES ('alice','device','old-nonce',1);"))
 	f.now = "2026-10-20T10:20:00Z"
 	removed, purge_err := auth_service.purge_expired_auth_rows(&f.auth)
-	testing.expect(t, purge_err.code == .None && removed == 3, fmt.tprintf("removed %d", removed))
+	testing.expect(t, purge_err.code == .None && removed == 2, fmt.tprintf("removed %d", removed))
 	_, exists, _ := f.session_repo.get_session(f.session_repo.ctx, hash)
 	testing.expect(t, !exists)
 	// Absolute expiry: a session used continuously still ends after the TTL.
@@ -491,36 +499,30 @@ test_session_confidential_client_and_auth_config :: proc(t: ^testing.T) {
 	testing.expect_value(t, off.status, 404)
 }
 
-// Review: unauthenticated /login is rate limited per client IP and by a global
-// cap on live login states; over the limit it answers 429 and stores nothing.
+// Review: unauthenticated /login is rate limited per client IP (light limit; it
+// stores nothing server-side), and a full client map evicts instead of refusing.
 @(test)
 test_session_login_rate_limits :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	f := session_fixture(t)
 	defer session_close(f)
-	count_states :: proc(f: ^Session_Fixture) -> int {
-		n, _ := f.session_repo.count_login_states(f.session_repo.ctx, (SESSION_TEST_BASE_S) * 1000)
-		return n
-	}
 	for i in 0 ..< auth_service.LOGIN_STARTS_PER_IP_PER_WINDOW {
 		resp := auth_login_handler(&f.handlers, session_get("/api/v1/auth/login", ""))
 		testing.expectf(t, resp.status == 302, "start %d", i)
 	}
-	before := count_states(f)
 	over := auth_login_handler(&f.handlers, session_get("/api/v1/auth/login", ""))
 	testing.expect_value(t, over.status, 429)
-	testing.expect_value(t, count_states(f), before)
 	// Another client IP is unaffected; the window resets after a minute.
 	other := session_get("/api/v1/auth/login", "")
 	other.remote_addr = "198.51.100.7"
 	testing.expect_value(t, auth_login_handler(&f.handlers, other).status, 302)
 	f.now = "2026-10-19T10:01:00Z"
 	testing.expect_value(t, auth_login_handler(&f.handlers, session_get("/api/v1/auth/login", "")).status, 302)
-	// Global cap on live login states.
-	testing.expect(t, sqlite.exec(&f.conn, "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i < 10000) INSERT INTO oidc_login_states SELECT 'filler-'||i, 'n', 'v', '/', 9999999999999 FROM n;"))
-	fresh := session_get("/api/v1/auth/login", "")
-	fresh.remote_addr = "192.0.2.44"
-	testing.expect_value(t, auth_login_handler(&f.handlers, fresh).status, 429)
+	// A burst of distinct clients never locks a new client out.
+	limiter := &f.auth.login_limiter
+	for i in 0 ..< 5000 do _ = auth_service.login_rate_allow(limiter, fmt.tprintf("10.%d.%d.%d", i / 65536, (i / 256) % 256, i % 256), (SESSION_TEST_BASE_S + 60) * 1000)
+	testing.expect(t, auth_service.login_rate_allow(limiter, "192.0.2.44", (SESSION_TEST_BASE_S + 60) * 1000), "new client admitted when the map is full")
+	testing.expect(t, len(limiter.windows) <= 4096)
 }
 
 // Review: a WS ticket minted before logout cannot open a stream afterwards.

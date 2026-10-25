@@ -545,6 +545,7 @@ oidc_cache_put :: proc(state: ^OIDC_State, key: string, entry: OIDC_Cache_Entry)
 }
 oidc_free :: proc(service: ^Auth_Service) {
 	login_rate_limiter_free(&service.login_limiter)
+	login_seal_free(&service.login_seal)
 	preview_auth_free(&service.preview)
 	sync.mutex_lock(&service.oidc_state.mutex)
 	defer sync.mutex_unlock(&service.oidc_state.mutex)

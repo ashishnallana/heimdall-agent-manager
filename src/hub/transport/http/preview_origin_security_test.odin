@@ -432,11 +432,15 @@ preview_flow_start :: proc(f: ^Preview_Flow_Fixture, query: string, headers: []c
 	return preview_auth_start_handler(&f.h, Request{method = "GET", path = PREVIEW_AUTH_START_PATH, query = query, request_id = "req_preview_start", headers = headers})
 }
 
-// preview_flow_ticket runs the start route as `user` and returns the ticket.
+PREVIEW_FLOW_BIND :: "browser-bind-secret-0123456789abcdef"
+
+// preview_flow_ticket runs the start route as `user` (bound to the test
+// browser's bind secret) and returns the ticket.
 @(private = "file")
 preview_flow_ticket :: proc(t: ^testing.T, f: ^Preview_Flow_Fixture, user: string) -> (string, []contracts.HTTP_Header) {
 	session := http_test_login(t, &f.auth, user)
-	resp := preview_flow_start(f, "session=sh_owned&return_to=%2Fp%2Fsh_owned%2Fapp%3Fx%3D1", session)
+	query := strings.concatenate({"session=sh_owned&return_to=%2Fp%2Fsh_owned%2Fapp%3Fx%3D1&bind=", auth_service.sha256_hex(PREVIEW_FLOW_BIND)}, context.temp_allocator)
+	resp := preview_flow_start(f, query, session)
 	testing.expect_value(t, resp.status, 302)
 	location := preview_flow_header(resp, "Location")
 	prefix := "https://preview.example/__heimdall/preview-auth?ticket="
@@ -446,8 +450,16 @@ preview_flow_ticket :: proc(t: ^testing.T, f: ^Preview_Flow_Fixture, user: strin
 }
 
 @(private = "file")
-preview_flow_redeem :: proc(f: ^Preview_Flow_Fixture, ticket: string) -> Response {
-	return preview_auth_redeem(&f.h, Request{method = "GET", path = PREVIEW_AUTH_PATH, query = strings.concatenate({"ticket=", ticket}, context.temp_allocator), request_id = "req_preview_redeem"})
+preview_flow_redeem :: proc(f: ^Preview_Flow_Fixture, ticket: string, bind := PREVIEW_FLOW_BIND) -> Response {
+	headers: []contracts.HTTP_Header
+	if bind != "" do headers = []contracts.HTTP_Header{{"Cookie", strings.concatenate({auth_service.PREVIEW_BIND_COOKIE, "=", bind}, context.temp_allocator)}}
+	return preview_auth_redeem(&f.h, Request{method = "GET", path = PREVIEW_AUTH_PATH, query = strings.concatenate({"ticket=", ticket}, context.temp_allocator), request_id = "req_preview_redeem", headers = headers})
+}
+
+@(private = "file")
+preview_flow_set_cookie :: proc(resp: Response, name: string) -> string {
+	for h in resp.headers do if strings.equal_fold(h.name, "Set-Cookie") && strings.has_prefix(h.value, strings.concatenate({name, "="}, context.temp_allocator)) do return h.value
+	return ""
 }
 
 @(test)
@@ -456,27 +468,27 @@ test_preview_auth_start_requires_session_and_owned_target :: proc(t: ^testing.T)
 	f := preview_flow_fixture(t)
 	defer auth_service.oidc_free(&f.auth)
 	// No Hub session: sign in first, then come back to exactly this start URL.
-	anonymous := preview_flow_start(f, "session=sh_owned&return_to=%2Fp%2Fsh_owned%2F", nil)
+	anonymous := preview_flow_start(f, "session=sh_owned&return_to=%2Fp%2Fsh_owned%2F&bind=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", nil)
 	testing.expect_value(t, anonymous.status, 302)
-	testing.expect_value(t, preview_flow_header(anonymous, "Location"), "/api/v1/auth/login?return_to=%2Fapi%2Fv1%2Fpreview-auth%2Fstart%3Fsession%3Dsh_owned%26return_to%3D%252Fp%252Fsh_owned%252F")
+	testing.expect_value(t, preview_flow_header(anonymous, "Location"), "/api/v1/auth/login?return_to=%2Fapi%2Fv1%2Fpreview-auth%2Fstart%3Fsession%3Dsh_owned%26return_to%3D%252Fp%252Fsh_owned%252F%26bind%3D0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
 	// A preview session the user does not own (owner-scoped lookup): 404, no ticket.
 	intruder := http_test_login(t, &f.auth, "intruder")
-	foreign_resp := preview_flow_start(f, "session=sh_owned&return_to=%2Fp%2Fsh_owned%2F", intruder)
+	foreign_resp := preview_flow_start(f, "session=sh_owned&return_to=%2Fp%2Fsh_owned%2F&bind=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", intruder)
 	testing.expect_value(t, foreign_resp.status, 404)
 	testing.expect_value(t, preview_flow_header(foreign_resp, "Location"), "")
 	// return_to must stay inside /p/<sid>/.
 	owner := http_test_login(t, &f.auth, "owner")
 	for bad in ([]string{"%2Fp%2Fother%2F", "%2F%2Fevil.example%2Fp%2Fsh_owned%2F", "https%3A%2F%2Fevil.example%2F", "%2Fapi%2Fv1%2Fme"}) {
-		resp := preview_flow_start(f, strings.concatenate({"session=sh_owned&return_to=", bad}, context.temp_allocator), owner)
+		resp := preview_flow_start(f, strings.concatenate({"session=sh_owned&return_to=", bad, "&bind=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}, context.temp_allocator), owner)
 		testing.expect(t, resp.status == 400, bad)
 	}
 	// Default return_to is the preview root.
-	ok := preview_flow_start(f, "session=sh_owned", owner)
+	ok := preview_flow_start(f, "session=sh_owned&bind=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", owner)
 	testing.expect_value(t, ok.status, 302)
 	testing.expect(t, strings.has_prefix(preview_flow_header(ok, "Location"), "https://preview.example/__heimdall/preview-auth?ticket="))
 	testing.expect_value(t, preview_flow_header(ok, "Referrer-Policy"), "no-referrer")
 	// A bearer principal (no browser session) cannot mint preview tickets.
-	_, bearer_err := auth_service.preview_ticket_mint(&f.auth, contracts.Auth_Context{kind = .OIDC, user_id = "owner"}, "sh_owned", "/p/sh_owned/")
+	_, bearer_err := auth_service.preview_ticket_mint(&f.auth, contracts.Auth_Context{kind = .OIDC, user_id = "owner"}, "sh_owned", "/p/sh_owned/", auth_service.sha256_hex(PREVIEW_FLOW_BIND))
 	testing.expect_value(t, bearer_err.code, domain.Error_Code.Forbidden)
 }
 
@@ -489,13 +501,14 @@ test_preview_auth_ticket_single_use_expiry_and_cookie :: proc(t: ^testing.T) {
 	resp := preview_flow_redeem(f, ticket)
 	testing.expect_value(t, resp.status, 302)
 	testing.expect_value(t, preview_flow_header(resp, "Location"), "/p/sh_owned/app?x=1")
-	cookie := preview_flow_header(resp, "Set-Cookie")
+	cookie := preview_flow_set_cookie(resp, auth_service.PREVIEW_COOKIE)
+	testing.expect(t, strings.contains(preview_flow_set_cookie(resp, auth_service.PREVIEW_BIND_COOKIE), "Max-Age=0"), "bind cookie cleared on redeem")
 	for attr in ([]string{"__Host-heimdall_preview=", "Path=/", "Secure", "HttpOnly", "SameSite=Lax", "Max-Age="}) do testing.expect(t, strings.contains(cookie, attr), attr)
 	testing.expect(t, !strings.contains(cookie, "Domain="), "host-only cookie")
 	// Single use.
 	again := preview_flow_redeem(f, ticket)
 	testing.expect_value(t, again.status, 403)
-	testing.expect_value(t, preview_flow_header(again, "Set-Cookie"), "")
+	testing.expect_value(t, preview_flow_set_cookie(again, auth_service.PREVIEW_COOKIE), "")
 	// Unknown ticket.
 	testing.expect_value(t, preview_flow_redeem(f, "not-a-real-ticket-not-a-real-ticket").status, 403)
 	// Expiry: tickets live 60 s.
@@ -514,7 +527,7 @@ test_preview_cookie_authenticates_and_dies_with_parent_session :: proc(t: ^testi
 	defer auth_service.oidc_free(&f.auth)
 	ticket, session := preview_flow_ticket(t, f, "owner")
 	resp := preview_flow_redeem(f, ticket)
-	set_cookie := preview_flow_header(resp, "Set-Cookie")
+	set_cookie := preview_flow_set_cookie(resp, auth_service.PREVIEW_COOKIE)
 	pair := set_cookie[:strings.index_byte(set_cookie, ';')]
 	preview_headers := []contracts.HTTP_Header{{"Cookie", pair}, {"Authorization", "Bearer app-owned-token"}}
 	nav := Request{method = "GET", path = "/p/sh_owned/index.html", request_id = "r", headers = preview_headers}
@@ -528,7 +541,9 @@ test_preview_cookie_authenticates_and_dies_with_parent_session :: proc(t: ^testi
 	_, hub_ok, bounce := preview_origin_auth(&f.h, hub_only)
 	testing.expect(t, !hub_ok)
 	testing.expect_value(t, bounce.status, 302)
-	testing.expect_value(t, preview_flow_header(bounce, "Location"), "https://hub.example/api/v1/preview-auth/start?session=sh_owned&return_to=%2Fp%2Fsh_owned%2Findex.html")
+	bounce_location := preview_flow_header(bounce, "Location")
+	testing.expect(t, strings.has_prefix(bounce_location, "https://hub.example/api/v1/preview-auth/start?session=sh_owned&return_to=%2Fp%2Fsh_owned%2Findex.html&bind="), bounce_location)
+	testing.expect(t, strings.contains(preview_flow_set_cookie(bounce, auth_service.PREVIEW_BIND_COOKIE), "HttpOnly"), "bounce binds the browser")
 	xhr := Request{method = "GET", path = "/p/sh_owned/api", request_id = "r", headers = []contracts.HTTP_Header{session[0], {"Sec-Fetch-Mode", "cors"}}}
 	_, xhr_ok, denied := preview_origin_auth(&f.h, xhr)
 	testing.expect(t, !xhr_ok)
@@ -545,7 +560,7 @@ test_preview_cookie_authenticates_and_dies_with_parent_session :: proc(t: ^testi
 	// Parent expiry (not just logout) is observed on the next re-check.
 	ticket2, _ := preview_flow_ticket(t, f, "owner")
 	resp2 := preview_flow_redeem(f, ticket2)
-	cookie2 := preview_flow_header(resp2, "Set-Cookie")
+	cookie2 := preview_flow_set_cookie(resp2, auth_service.PREVIEW_COOKIE)
 	nav.headers = []contracts.HTTP_Header{{"Cookie", cookie2[:strings.index_byte(cookie2, ';')]}}
 	_, alive, _ := preview_origin_auth(&f.h, nav)
 	testing.expect(t, alive)
@@ -572,11 +587,55 @@ test_preview_origin_handler_serves_sign_in_path :: proc(t: ^testing.T) {
 	server_socket, _, accept_err := net.accept_tcp(listener)
 	if accept_err != nil do testing.fail_now(t, "could not accept loopback")
 	defer net.close(server_socket)
-	preview_origin_handler(rawptr(&f.h), Request{method = "GET", path = PREVIEW_AUTH_PATH, query = strings.concatenate({"ticket=", ticket}), request_id = "r"}, server_socket)
+	bind_header := []contracts.HTTP_Header{{"Cookie", strings.concatenate({auth_service.PREVIEW_BIND_COOKIE, "=", PREVIEW_FLOW_BIND})}}
+	preview_origin_handler(rawptr(&f.h), Request{method = "GET", path = PREVIEW_AUTH_PATH, query = strings.concatenate({"ticket=", ticket}), request_id = "r", headers = bind_header}, server_socket)
 	buf: [4096]byte
 	n, _ := net.recv_tcp(client, buf[:])
 	raw := string(buf[:n])
 	testing.expect(t, strings.has_prefix(raw, "HTTP/1.1 302"), raw)
 	testing.expect(t, strings.contains(raw, "Set-Cookie: __Host-heimdall_preview="), raw)
 	testing.expect_value(t, f.repo_state.get_calls, 1) // only the start route's ownership check
+}
+
+// Review: a ticket is bound to the browser that started the sign-in, so a
+// ticket minted for user A and planted in a victim's browser is useless there.
+@(test)
+test_preview_ticket_bound_to_starting_browser :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	f := preview_flow_fixture(t)
+	defer auth_service.oidc_free(&f.auth)
+	ticket, _ := preview_flow_ticket(t, f, "owner")
+	testing.expect_value(t, preview_flow_redeem(f, ticket, "").status, 403) // victim browser: no bind cookie
+	planted, _ := preview_flow_ticket(t, f, "owner")
+	testing.expect_value(t, preview_flow_redeem(f, planted, "some-other-browser-bind-secret-000").status, 403)
+	good, _ := preview_flow_ticket(t, f, "owner")
+	testing.expect_value(t, preview_flow_redeem(f, good).status, 302)
+
+	// Direct link to start without a bind: bounce to the preview host to bind first.
+	owner := http_test_login(t, &f.auth, "owner")
+	unbound := preview_flow_start(f, "session=sh_owned&return_to=%2Fp%2Fsh_owned%2Fx", owner)
+	testing.expect_value(t, unbound.status, 302)
+	testing.expect_value(t, preview_flow_header(unbound, "Location"), "https://preview.example/__heimdall/preview-bind?session=sh_owned&return_to=%2Fp%2Fsh_owned%2Fx")
+	// The bind endpoint sets the bind cookie and returns to start with bind=sha256(cookie).
+	bound := preview_auth_bind(&f.h, Request{method = "GET", path = PREVIEW_BIND_PATH, query = "session=sh_owned&return_to=%2Fp%2Fsh_owned%2Fx", request_id = "r"})
+	testing.expect_value(t, bound.status, 302)
+	bind_cookie := preview_flow_set_cookie(bound, auth_service.PREVIEW_BIND_COOKIE)
+	for attr in ([]string{"Path=/", "Secure", "HttpOnly", "SameSite=Lax", "Max-Age=300"}) do testing.expect(t, strings.contains(bind_cookie, attr), attr)
+	raw_bind := bind_cookie[len(auth_service.PREVIEW_BIND_COOKIE) + 1:strings.index_byte(bind_cookie, ';')]
+	location := preview_flow_header(bound, "Location")
+	testing.expect(t, strings.has_suffix(location, strings.concatenate({"&bind=", auth_service.sha256_hex(raw_bind)}, context.temp_allocator)), location)
+	// ... and the full direct-link flow then completes in that browser.
+	query := location[strings.index_byte(location, '?') + 1:]
+	started := preview_flow_start(f, query, owner)
+	ticket_location := preview_flow_header(started, "Location")
+	prefix := "https://preview.example/__heimdall/preview-auth?ticket="
+	testing.expect(t, strings.has_prefix(ticket_location, prefix), ticket_location)
+	if strings.has_prefix(ticket_location, prefix) {
+		redeemed := preview_flow_redeem(f, ticket_location[len(prefix):], raw_bind)
+		testing.expect_value(t, redeemed.status, 302)
+		testing.expect_value(t, preview_flow_header(redeemed, "Location"), "/p/sh_owned/x")
+	}
+	// The bind endpoint refuses targets outside the preview session.
+	bad := preview_auth_bind(&f.h, Request{method = "GET", path = PREVIEW_BIND_PATH, query = "session=sh_owned&return_to=%2F%2Fevil.example", request_id = "r"})
+	testing.expect_value(t, bad.status, 400)
 }

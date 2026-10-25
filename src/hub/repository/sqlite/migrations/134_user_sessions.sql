@@ -13,12 +13,5 @@ CREATE TABLE IF NOT EXISTS user_sessions (
 CREATE INDEX IF NOT EXISTS user_sessions_user ON user_sessions(user_id);
 CREATE INDEX IF NOT EXISTS user_sessions_expiry ON user_sessions(expires_at_ms);
 
--- Pending authorization-code logins. Keyed by SHA-256 (hex) of `state`; single use.
-CREATE TABLE IF NOT EXISTS oidc_login_states (
- state_hash TEXT PRIMARY KEY,
- nonce TEXT NOT NULL,
- code_verifier TEXT NOT NULL,
- return_to TEXT NOT NULL,
- expires_at_ms INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS oidc_login_states_expiry ON oidc_login_states(expires_at_ms);
+-- Pending logins are not stored: they travel in the sealed __Host-heimdall_login
+-- cookie (docs/plans/oidc-only-auth.md).

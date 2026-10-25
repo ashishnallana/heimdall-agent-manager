@@ -102,18 +102,24 @@ main :: proc() {
 
 	// AC4: resolve_client_ip trusted-XFF semantics.
 	TRUSTED := []string{"127.0.0.1/32"}
-	// Trusted peer + XFF -> first XFF hop.
-	got := device_auth.resolve_client_ip("127.0.0.1:54321", "203.0.113.9, 10.0.0.1", TRUSTED)
-	assert_eq(got, "203.0.113.9", "trusted peer uses first XFF hop")
+	// Trusted peer + XFF -> the right-most hop that is not a trusted proxy.
+	got := device_auth.resolve_client_ip("127.0.0.1:54321", "203.0.113.9", TRUSTED)
+	assert_eq(got, "203.0.113.9", "trusted peer uses the XFF hop it appended")
+	// A client-supplied left part cannot choose the IP: the proxy-appended hop wins.
+	got = device_auth.resolve_client_ip("127.0.0.1:54321", "6.6.6.6, 203.0.113.9", TRUSTED)
+	assert_eq(got, "203.0.113.9", "forged left-most XFF hop is ignored")
 	// Trusted peer, no XFF -> peer IP (stripped of port).
 	got = device_auth.resolve_client_ip("127.0.0.1:54325", "", TRUSTED)
 	assert_eq(got, "127.0.0.1", "trusted peer, no XFF -> peer IP")
 	// Untrusted peer + spoofed XFF -> IGNORED, peer IP used (AC4 spoofing guard).
 	got = device_auth.resolve_client_ip("198.51.100.7:9999", "203.0.113.999", TRUSTED)
 	assert_eq(got, "198.51.100.7", "untrusted peer ignores spoofed XFF")
-	// Multiple XFF hops -> first (original client).
-	got = device_auth.resolve_client_ip("127.0.0.1:1", "203.0.113.10, 10.0.0.1, 10.0.0.2", TRUSTED)
-	assert_eq(got, "203.0.113.10", "first XFF hop wins among many")
+	// Chained trusted proxies are skipped from the right.
+	CHAIN := []string{"127.0.0.1/32", "10.0.0.0/8"}
+	got = device_auth.resolve_client_ip("127.0.0.1:1", "6.6.6.6, 203.0.113.10, 10.0.0.1, 10.0.0.2", CHAIN)
+	assert_eq(got, "203.0.113.10", "right-most untrusted hop behind a proxy chain")
+	got = device_auth.resolve_client_ip("127.0.0.1:1", "10.0.0.7, 10.0.0.1", CHAIN)
+	assert_eq(got, "10.0.0.7", "all hops trusted -> left-most hop")
 	fmt.println("resolve_client_ip: trusted-XFF + spoofing guard OK")
 
 	// AC5 + AC3 + AC1: grant store, rate limit, authorize end-to-end.

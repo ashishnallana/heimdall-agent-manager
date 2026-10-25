@@ -35,13 +35,13 @@ auth_login_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	handlers := (^User_Handlers)(ctx)
 	if !auth_service.web_login_enabled(handlers.auth) do return respond_error(domain.domain_error(.Not_Found, "browser login is not configured"), req.request_id)
 	client_ip := device_auth.resolve_client_ip(req.remote_addr, header_value(req.headers, "X-Forwarded-For"), handlers.forwarded_for_cidrs)
-	url, state, ok, err := auth_service.web_login_begin(handlers.auth, query_value(req.query, "return_to"), client_ip)
+	url, sealed, ok, err := auth_service.web_login_begin(handlers.auth, query_value(req.query, "return_to"), client_ip)
 	if !ok {
 		if err.code == .Validation_Failed || err.code == .Rate_Limited do return respond_error(err, req.request_id)
 		fmt.printfln("ham-hub oidc_login_rejected stage=begin")
 		return redirect_response(AUTH_ERROR_REDIRECT)
 	}
-	return redirect_response(url, auth_service.login_cookie_header(state))
+	return redirect_response(url, auth_service.login_cookie_header(sealed))
 }
 
 // GET /api/v1/auth/callback?code=...&state=...
@@ -50,15 +50,15 @@ auth_callback_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	if !auth_service.web_login_enabled(handlers.auth) do return respond_error(domain.domain_error(.Not_Found, "browser login is not configured"), req.request_id)
 	clear_login := auth_service.expired_cookie_header(auth_service.LOGIN_COOKIE)
 	query_state := query_value(req.query, "state")
-	cookie_state, _ := auth_service.cookie_value(req.headers, auth_service.LOGIN_COOKIE)
+	login_cookie, _ := auth_service.cookie_value(req.headers, auth_service.LOGIN_COOKIE)
 	if query_value(req.query, "error") != "" {
 		// The provider refused (user cancelled, consent denied, ...). Consume the
 		// state so it cannot be used later; never echo the provider's text.
-		_, _, _, _ = auth_service.web_login_complete(handlers.auth, query_state, "", "", "")
+		auth_service.web_login_abort(handlers.auth, query_state, login_cookie)
 		fmt.printfln("ham-hub oidc_login_rejected stage=provider_error")
 		return redirect_response(AUTH_ERROR_REDIRECT, clear_login)
 	}
-	raw_session, return_to, failure, stage := auth_service.web_login_complete(handlers.auth, query_state, cookie_state, query_value(req.query, "code"), header_value(req.headers, "User-Agent"))
+	raw_session, return_to, failure, stage := auth_service.web_login_complete(handlers.auth, query_state, login_cookie, query_value(req.query, "code"), header_value(req.headers, "User-Agent"))
 	switch failure {
 	case .None:
 	case .Forbidden:

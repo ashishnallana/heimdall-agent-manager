@@ -15,7 +15,6 @@ import user_service "odin_test:hub/service/user"
 Memory_Session_Store :: struct {
 	mutex:    sync.Mutex,
 	sessions: map[string]iface.User_Session,
-	states:   map[string]iface.OIDC_Login_State,
 	repo:     iface.Session_Repository,
 }
 
@@ -35,25 +34,17 @@ memory_store_free_session :: proc(s: iface.User_Session) {
 	delete(s.session_id_hash, a); delete(s.user_id, a); delete(s.id_token, a); delete(s.user_agent, a)
 }
 
-@(private = "file")
-memory_store_free_state :: proc(s: iface.OIDC_Login_State) {
-	a := runtime.heap_allocator()
-	delete(s.nonce, a); delete(s.code_verifier, a); delete(s.return_to, a)
-}
 
 new_memory_session_store :: proc() -> ^Memory_Session_Store {
 	a := runtime.heap_allocator()
 	store := new(Memory_Session_Store, a)
 	store.sessions = make(map[string]iface.User_Session, a)
-	store.states = make(map[string]iface.OIDC_Login_State, a)
 	store.repo = iface.Session_Repository{
 		ctx = store,
 		create_session = memory_session_create,
 		get_session = memory_session_get,
 		touch_session = memory_session_touch,
 		delete_session = memory_session_delete,
-		save_login_state = memory_login_state_save,
-		take_login_state = memory_login_state_take,
 		purge_expired = memory_session_purge,
 	}
 	return store
@@ -63,9 +54,7 @@ free_memory_session_store :: proc(store: ^Memory_Session_Store) {
 	if store == nil do return
 	a := runtime.heap_allocator()
 	for k, v in store.sessions {delete(k, a); memory_store_free_session(v)}
-	for k, v in store.states {delete(k, a); memory_store_free_state(v)}
 	delete(store.sessions)
-	delete(store.states)
 	free(store, a)
 }
 
@@ -111,28 +100,7 @@ memory_session_delete :: proc(ctx: rawptr, hash: string) -> (iface.User_Session,
 	return out, true, {}
 }
 
-@(private = "file")
-memory_login_state_save :: proc(ctx: rawptr, hash: string, state: iface.OIDC_Login_State) -> domain.Domain_Error {
-	store := (^Memory_Session_Store)(ctx)
-	sync.mutex_lock(&store.mutex); defer sync.mutex_unlock(&store.mutex)
-	if _, exists := store.states[hash]; exists do return domain.domain_error(.Conflict, "login state exists")
-	a := runtime.heap_allocator()
-	store.states[strings.clone(hash, a)] = iface.OIDC_Login_State{strings.clone(state.nonce, a), strings.clone(state.code_verifier, a), strings.clone(state.return_to, a), state.expires_at_ms}
-	return {}
-}
 
-@(private = "file")
-memory_login_state_take :: proc(ctx: rawptr, hash: string) -> (iface.OIDC_Login_State, bool, domain.Domain_Error) {
-	store := (^Memory_Session_Store)(ctx)
-	sync.mutex_lock(&store.mutex); defer sync.mutex_unlock(&store.mutex)
-	if _, found := store.states[hash]; !found do return {}, false, {}
-	key, row := delete_key(&store.states, hash)
-	t := context.temp_allocator
-	out := iface.OIDC_Login_State{strings.clone(row.nonce, t), strings.clone(row.code_verifier, t), strings.clone(row.return_to, t), row.expires_at_ms}
-	delete(key, runtime.heap_allocator())
-	memory_store_free_state(row)
-	return out, true, {}
-}
 
 @(private = "file")
 memory_session_purge :: proc(ctx: rawptr, now_ms: i64) -> (int, domain.Domain_Error) {
@@ -144,12 +112,6 @@ memory_session_purge :: proc(ctx: rawptr, now_ms: i64) -> (int, domain.Domain_Er
 	for k in expired {
 		key, row := delete_key(&store.sessions, k)
 		delete(key, runtime.heap_allocator()); memory_store_free_session(row); removed += 1
-	}
-	clear(&expired)
-	for k, v in store.states do if v.expires_at_ms <= now_ms do append(&expired, k)
-	for k in expired {
-		key, row := delete_key(&store.states, k)
-		delete(key, runtime.heap_allocator()); memory_store_free_state(row); removed += 1
 	}
 	return removed, {}
 }

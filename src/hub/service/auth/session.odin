@@ -14,6 +14,7 @@ import platform "odin_test:hub/platform"
 import user_service "odin_test:hub/service/user"
 import http_client "odin_test:lib/http_client"
 import os_random "odin_test:lib/os_random"
+import chacha20poly1305 "core:crypto/chacha20poly1305"
 import vault "odin_test:lib/vault"
 
 // Browser login (docs/plans/oidc-only-auth.md, "Browser session flow"): the Hub
@@ -34,7 +35,107 @@ RETURN_TO_MAX_BYTES :: 2048
 // and globally so it cannot be used to fill the database.
 LOGIN_STARTS_PER_IP_PER_WINDOW :: 20
 LOGIN_RATE_WINDOW_MS :: 60_000
-LOGIN_STATES_MAX_LIVE :: 10_000
+// Consumed login states remembered (by hash, until their expiry) so a sealed
+// login cookie is single use. Bounded; the oldest entries are evicted.
+LOGIN_CONSUMED_MAX :: 16384
+LOGIN_SEAL_AAD :: "heimdall-login-v1"
+
+// Pending logins are NOT stored server-side: state, nonce, PKCE verifier,
+// return_to and expiry travel in the __Host-heimdall_login cookie, sealed with
+// XChaCha20-Poly1305 under a per-process random key. An unauthenticated
+// /auth/login therefore creates no row; a Hub restart invalidates in-flight
+// logins (the user simply signs in again).
+Login_Seal :: struct {
+	mutex:    sync.Mutex,
+	key:      [chacha20poly1305.KEY_SIZE]byte,
+	ready:    bool,
+	consumed: map[string]i64, // sha256(state) -> expires_ms
+}
+
+Login_Payload :: struct {
+	s, n, v, r: string,
+	e:          i64,
+}
+
+@(private = "file")
+login_seal_key :: proc(seal: ^Login_Seal) -> ([chacha20poly1305.KEY_SIZE]byte, bool) {
+	sync.mutex_lock(&seal.mutex)
+	defer sync.mutex_unlock(&seal.mutex)
+	if !seal.ready {
+		if !os_random.fill(seal.key[:]) do return {}, false
+		seal.ready = true
+	}
+	return seal.key, true
+}
+
+// login_cookie_seal returns base64url(nonce || ciphertext || tag).
+login_cookie_seal :: proc(service: ^Auth_Service, payload: Login_Payload) -> (string, bool) {
+	key, key_ok := login_seal_key(&service.login_seal)
+	if !key_ok do return "", false
+	plain, merr := json.marshal(payload, allocator = context.temp_allocator)
+	if merr != nil do return "", false
+	out := make([]byte, chacha20poly1305.XIV_SIZE + len(plain) + chacha20poly1305.TAG_SIZE, context.temp_allocator)
+	iv := out[:chacha20poly1305.XIV_SIZE]
+	if !os_random.fill(iv) do return "", false
+	ct := out[chacha20poly1305.XIV_SIZE:chacha20poly1305.XIV_SIZE + len(plain)]
+	tag := out[chacha20poly1305.XIV_SIZE + len(plain):]
+	ctx: chacha20poly1305.Context
+	chacha20poly1305.init_xchacha(&ctx, key[:])
+	defer chacha20poly1305.reset(&ctx)
+	chacha20poly1305.seal(&ctx, ct, tag, iv, transmute([]byte)string(LOGIN_SEAL_AAD), plain)
+	return base64url_encode(out), true
+}
+
+login_cookie_open :: proc(service: ^Auth_Service, sealed: string) -> (Login_Payload, bool) {
+	if sealed == "" || len(sealed) > 4096 do return {}, false
+	raw, decoded := oidc_decode(sealed)
+	if !decoded || len(raw) < chacha20poly1305.XIV_SIZE + chacha20poly1305.TAG_SIZE + 2 do return {}, false
+	key, key_ok := login_seal_key(&service.login_seal)
+	if !key_ok do return {}, false
+	iv := raw[:chacha20poly1305.XIV_SIZE]
+	ct := raw[chacha20poly1305.XIV_SIZE:len(raw) - chacha20poly1305.TAG_SIZE]
+	tag := raw[len(raw) - chacha20poly1305.TAG_SIZE:]
+	plain := make([]byte, len(ct), context.temp_allocator)
+	ctx: chacha20poly1305.Context
+	chacha20poly1305.init_xchacha(&ctx, key[:])
+	defer chacha20poly1305.reset(&ctx)
+	if !chacha20poly1305.open(&ctx, plain, iv, transmute([]byte)string(LOGIN_SEAL_AAD), ct, tag) do return {}, false
+	payload: Login_Payload
+	if json.unmarshal(plain, &payload, .JSON, context.temp_allocator) != nil do return {}, false
+	return payload, true
+}
+
+// login_state_consume marks a state used. False if it was already consumed.
+login_state_consume :: proc(seal: ^Login_Seal, state: string, expires_ms, now_ms: i64) -> bool {
+	sync.mutex_lock(&seal.mutex)
+	defer sync.mutex_unlock(&seal.mutex)
+	a := runtime.heap_allocator()
+	if seal.consumed == nil do seal.consumed = make(map[string]i64, a)
+	hash := sha256_hex(state)
+	if _, used := seal.consumed[hash]; used do return false
+	if len(seal.consumed) >= LOGIN_CONSUMED_MAX {
+		dead := make([dynamic]string, context.temp_allocator)
+		for k, e in seal.consumed do if e <= now_ms do append(&dead, k)
+		for k in dead {key, _ := delete_key(&seal.consumed, k); delete(key, a)}
+		for len(seal.consumed) >= LOGIN_CONSUMED_MAX {
+			oldest_key := ""
+			oldest := max(i64)
+			for k, e in seal.consumed do if e < oldest {oldest = e; oldest_key = k}
+			key, _ := delete_key(&seal.consumed, oldest_key)
+			delete(key, a)
+		}
+	}
+	seal.consumed[strings.clone(hash, a)] = expires_ms
+	return true
+}
+
+login_seal_free :: proc(seal: ^Login_Seal) {
+	sync.mutex_lock(&seal.mutex)
+	defer sync.mutex_unlock(&seal.mutex)
+	for k in seal.consumed do delete(k, runtime.heap_allocator())
+	delete(seal.consumed)
+	seal.consumed = nil
+}
 
 Login_Rate_Window :: struct {
 	start_ms: i64,
@@ -59,7 +160,15 @@ login_rate_allow :: proc(limiter: ^Login_Rate_Limiter, client_ip: string, now_ms
 			key, _ := delete_key(&limiter.windows, k)
 			delete(key, a)
 		}
-		if len(limiter.windows) >= 4096 do return false // too many distinct clients in one window
+		// Still full (a burst of distinct clients): evict the oldest windows
+		// rather than refusing everyone.
+		for len(limiter.windows) >= 4096 {
+			oldest_key := ""
+			oldest := max(i64)
+			for k, w in limiter.windows do if w.start_ms < oldest {oldest = w.start_ms; oldest_key = k}
+			key, _ := delete_key(&limiter.windows, oldest_key)
+			delete(key, a)
+		}
 	}
 	key := client_ip if client_ip != "" else "unknown"
 	w, found := limiter.windows[key]
@@ -275,27 +384,21 @@ hex_nibble :: proc(c: byte) -> (byte, bool) {
 
 // web_login_begin creates a single-use login state (state, nonce, PKCE verifier)
 // and returns the provider authorization URL plus the state (for the login cookie).
-web_login_begin :: proc(service: ^Auth_Service, return_to: string, client_ip := "") -> (redirect_url: string, state: string, ok: bool, err: domain.Domain_Error) {
+// web_login_begin starts a sign-in: it returns the provider authorization URL
+// and the sealed login cookie value (no server-side row is created).
+web_login_begin :: proc(service: ^Auth_Service, return_to: string, client_ip := "") -> (redirect_url: string, login_cookie: string, ok: bool, err: domain.Domain_Error) {
 	if !web_login_enabled(service) do return "", "", false, domain.domain_error(.Not_Found, "browser login is not configured")
 	target, target_ok := safe_return_to(return_to)
 	if !target_ok do return "", "", false, domain.domain_error(.Validation_Failed, "return_to must be a same-origin relative path")
 	now, now_ok := now_unix_ms(service)
 	if !now_ok do return "", "", false, domain.domain_error(.Internal_Error, "clock unavailable")
-	rate_limited := domain.domain_error(.Rate_Limited, "too many sign-in attempts; retry shortly")
-	if !login_rate_allow(&service.login_limiter, client_ip, now) do return "", "", false, rate_limited
-	if service.sessions.count_login_states != nil {
-		live, count_err := service.sessions.count_login_states(service.sessions.ctx, now)
-		if count_err.code != .None do return "", "", false, count_err
-		if live >= LOGIN_STATES_MAX_LIVE do return "", "", false, rate_limited
-	}
+	if !login_rate_allow(&service.login_limiter, client_ip, now) do return "", "", false, domain.domain_error(.Rate_Limited, "too many sign-in attempts; retry shortly")
 	state_value, s_ok := random_token(32)
 	nonce, n_ok := random_token(32)
 	verifier, v_ok := random_token(48) // 64 base64url chars (RFC 7636: 43..128)
 	if !s_ok || !n_ok || !v_ok do return "", "", false, domain.domain_error(.Internal_Error, "random source unavailable")
-	repo := service.sessions
-	if save_err := repo.save_login_state(repo.ctx, sha256_hex(state_value), iface.OIDC_Login_State{nonce = nonce, code_verifier = verifier, return_to = target, expires_at_ms = now + LOGIN_STATE_TTL_MS}); save_err.code != .None {
-		return "", "", false, save_err
-	}
+	sealed, sealed_ok := login_cookie_seal(service, Login_Payload{s = state_value, n = nonce, v = verifier, r = target, e = now + LOGIN_STATE_TTL_MS})
+	if !sealed_ok do return "", "", false, domain.domain_error(.Internal_Error, "could not seal the login state")
 	sep := "&" if strings.contains(service.web.authorize_url, "?") else "?"
 	url := strings.concatenate({
 		service.web.authorize_url, sep,
@@ -308,7 +411,17 @@ web_login_begin :: proc(service: ^Auth_Service, return_to: string, client_ip := 
 		"&code_challenge=", pkce_challenge_s256(verifier),
 		"&code_challenge_method=S256",
 	}, context.temp_allocator)
-	return url, state_value, true, {}
+	return url, sealed, true, {}
+}
+
+// web_login_abort consumes the login state of a callback that will not complete
+// (the provider returned an error), so the same state can never be used later.
+web_login_abort :: proc(service: ^Auth_Service, query_state, login_cookie: string) {
+	if !web_login_enabled(service) do return
+	login, opened := login_cookie_open(service, login_cookie)
+	if !opened || query_state == "" || !oidc_constant_time_equal(login.s, query_state) do return
+	now, _ := now_unix_ms(service)
+	_ = login_state_consume(&service.login_seal, login.s, login.e, now)
 }
 
 OIDC_Token_Response :: struct {
@@ -350,7 +463,7 @@ oidc_exchange_code :: proc(service: ^Auth_Service, form, basic: string) -> (stri
 // On success returns the raw session id (for the cookie only) and return_to.
 web_login_complete :: proc(
 	service: ^Auth_Service,
-	query_state, cookie_state, code, user_agent: string,
+	query_state, login_cookie, code, user_agent: string,
 ) -> (
 	session_id: string,
 	return_to: string,
@@ -360,15 +473,18 @@ web_login_complete :: proc(
 	if !web_login_enabled(service) do return "", "", .Failed, "disabled"
 	if query_state == "" || len(query_state) > 512 do return "", "", .Failed, "state_missing"
 	repo := service.sessions
-	// Consume first: a replayed or mismatched state can never be used again.
-	login, found, take_err := repo.take_login_state(repo.ctx, sha256_hex(query_state))
-	if take_err.code != .None do return "", "", .Failed, "state_store"
-	if !found do return "", "", .Failed, "state_unknown"
-	if cookie_state == "" || !oidc_constant_time_equal(cookie_state, query_state) do return "", "", .Failed, "state_cookie_mismatch"
+	// The login state lives only in this browser's sealed cookie; the query state
+	// must equal it (login CSRF), and it is consumed before anything else so a
+	// replayed callback can never be used again.
+	sealed, opened := login_cookie_open(service, login_cookie)
+	if !opened do return "", "", .Failed, "state_cookie_invalid"
+	if !oidc_constant_time_equal(sealed.s, query_state) do return "", "", .Failed, "state_cookie_mismatch"
 	now, now_ok := now_unix_ms(service)
 	if !now_ok do return "", "", .Failed, "clock"
-	if login.expires_at_ms <= now do return "", "", .Failed, "state_expired"
+	if sealed.e <= now do return "", "", .Failed, "state_expired"
+	if !login_state_consume(&service.login_seal, sealed.s, sealed.e, now) do return "", "", .Failed, "state_replayed"
 	if code == "" || len(code) > 4096 do return "", "", .Failed, "code_missing"
+	login := iface.OIDC_Login_State{nonce = sealed.n, code_verifier = sealed.v, return_to = sealed.r, expires_at_ms = sealed.e}
 
 	form := strings.concatenate({
 		"grant_type=authorization_code",
@@ -499,8 +615,8 @@ session_cookie_header :: proc(raw_session: string, max_age_seconds: i64) -> stri
 	return fmt.tprintf("%s=%s; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=%d", SESSION_COOKIE, raw_session, max_age_seconds)
 }
 
-login_cookie_header :: proc(state: string) -> string {
-	return fmt.tprintf("%s=%s; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=%d", LOGIN_COOKIE, state, LOGIN_STATE_TTL_MS / 1000)
+login_cookie_header :: proc(sealed: string) -> string {
+	return fmt.tprintf("%s=%s; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=%d", LOGIN_COOKIE, sealed, LOGIN_STATE_TTL_MS / 1000)
 }
 
 expired_cookie_header :: proc(name: string) -> string {

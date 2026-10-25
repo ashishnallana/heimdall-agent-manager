@@ -3,7 +3,7 @@ package iface
 import domain "odin_test:hub/domain"
 
 // Browser session and pending-login persistence (docs/plans/oidc-only-auth.md).
-// Only hashes of the session id / login state are ever stored or queried.
+// Only hashes of the session id are ever stored or queried.
 
 User_Session :: struct {
 	session_id_hash: string,
@@ -13,6 +13,8 @@ User_Session :: struct {
 	user_agent: string,
 }
 
+// OIDC_Login_State is a pending login (carried in the sealed login cookie; it is
+// never stored server-side).
 OIDC_Login_State :: struct {
 	nonce, code_verifier, return_to: string,
 	expires_at_ms: i64,
@@ -26,15 +28,9 @@ Session_Repository :: struct {
 	touch_session: proc(ctx: rawptr, session_id_hash: string, now_ms, idle_expires_at_ms: i64) -> domain.Domain_Error,
 	// delete_session returns the removed row (for the logout id_token_hint).
 	delete_session: proc(ctx: rawptr, session_id_hash: string) -> (User_Session, bool, domain.Domain_Error),
-	save_login_state: proc(ctx: rawptr, state_hash: string, state: OIDC_Login_State) -> domain.Domain_Error,
-	// take_login_state deletes and returns the row atomically: single use, even if
-	// the caller then rejects it.
-	take_login_state: proc(ctx: rawptr, state_hash: string) -> (OIDC_Login_State, bool, domain.Domain_Error),
-	// purge_expired drops expired sessions (absolute or idle), login states and
-	// v2 device-proof nonces. Returns the number of rows removed.
+	// purge_expired drops expired sessions (absolute or idle) and v2
+	// device-proof nonces. Returns the number of rows removed.
 	purge_expired: proc(ctx: rawptr, now_ms: i64) -> (int, domain.Domain_Error),
-	// count_login_states counts unexpired pending logins (global cap).
-	count_login_states: proc(ctx: rawptr, now_ms: i64) -> (int, domain.Domain_Error),
 	// delete_user_sessions ends every session of a user (unlink, disable, logout).
 	delete_user_sessions: proc(ctx: rawptr, user_id: string) -> (int, domain.Domain_Error),
 }

@@ -183,7 +183,7 @@ test_bridge_enrollment_end_to_end :: proc() {
 		_ = os.remove(db_path)
 	}
 
-	trusted_headers := sm_session_headers(&graph, "approving-human", "203.0.113.88, 10.0.0.1", "ApprovalPage/1.0")
+	trusted_headers := sm_session_headers(&graph, "approving-human", "6.6.6.6, 203.0.113.88", "ApprovalPage/1.0")
 
 	// --- authorize over HTTP, as an unauthenticated bridge would ---
 	// Passwordless vault: the grant carries the bridge's identity key and its proof.
@@ -533,10 +533,10 @@ test_trusted_xff_and_verify_bruteforce :: proc() {
 	defer device_auth.grant_store_free(store)
 
 	trusted_in := sm_bridge_input("Trusted XFF")
-	trusted_res, trusted_ok, _ := device_auth.authorize(&svc, trusted_in, "127.0.0.1:1111", "203.0.113.5, 10.0.0.1")
+	trusted_res, trusted_ok, _ := device_auth.authorize(&svc, trusted_in, "127.0.0.1:1111", "6.6.6.6, 203.0.113.5")
 	assert_true(trusted_ok, "trusted authorize succeeds")
 	trusted_grant, _ := device_auth.get_grant(store, trusted_res.device_code)
-	assert_eq(trusted_grant.request_ip, "203.0.113.5", "trusted peer honors first XFF hop at authorize")
+	assert_eq(trusted_grant.request_ip, "203.0.113.5", "trusted peer honors the proxy-appended (right-most untrusted) XFF hop at authorize")
 
 	untrusted_res, untrusted_ok, _ := device_auth.authorize(&svc, sm_bridge_input("Spoofed XFF"), "198.51.100.9:4444", "203.0.113.99")
 	assert_true(untrusted_ok, "untrusted authorize succeeds")
@@ -628,7 +628,7 @@ test_http_owner_spoof_and_audit_queryability :: proc() {
 	// Owner spoof + audit on a bridge grant decided over HTTP by a session user.
 	// (A full approve needs a vault approval; test_bridge_enrollment_end_to_end
 	// covers it. Deny exercises the same owner binding and audit fields.)
-	trusted_headers := sm_session_headers(&graph, "real-owner", "203.0.113.88, 10.0.0.1", "SecurityMatrix/1.0")
+	trusted_headers := sm_session_headers(&graph, "real-owner", "6.6.6.6, 203.0.113.88", "SecurityMatrix/1.0")
 	deny_in := sm_bridge_input("Denied Laptop")
 	deny_res, deny_auth_ok, deny_auth_err := device_auth.authorize(&graph.device_auth, deny_in, "198.51.100.21:5555", "203.0.113.250")
 	assert_true(deny_auth_ok, deny_auth_err.message)
