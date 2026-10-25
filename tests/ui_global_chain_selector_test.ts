@@ -286,9 +286,10 @@ test('agent-chat project A searches globally, keeps project B after remote compl
     await c.press('ArrowDown');
     assert.equal(c.active(), 'middle');
     await c.press('Enter');
-    await c.wait(() => layout.findPaneByAgent(c.store.getState().workspaceLayout.tree, 'coord-middle') === originalPane);
-    assert.deepEqual(layout.selectMainAgentIds(c.store.getState()), ['coord-middle', 'b']);
-    assert.equal(c.dom.window.location.hash, '#/conversations/coord-middle+b?focused=coord-middle');
+    // REQ-TV2-7: the originating pane's TARGET becomes the chain; pane b is untouched.
+    await c.wait(() => layout.findPaneByAgent(c.store.getState().workspaceLayout.tree, 'chain:middle') === originalPane);
+    assert.deepEqual(layout.selectMainAgentIds(c.store.getState()), ['chain:middle', 'b']);
+    assert.equal(c.dom.window.location.hash, '#/conversations/chain:middle+b?focused=chain:middle');
   });
 });
 
@@ -301,7 +302,7 @@ test('unscoped standalone picker sorts remote rows; click resolves missing coord
     await c.render({ onSelectChain: undefined, onNavigate: (route: string) => c.routes.push(route) });
     await c.click(c.el('chain-selector-item-remote-detail'));
     await c.wait(() => c.routes.length === 1);
-    assert.equal(c.routes[0], '/conversations/coord-detail');
+    assert.equal(c.routes[0], '/conversations/chain:remote-detail', 'a chain with a coordinator opens by chain');
     assert.ok(c.details.includes('remote-detail'));
     await c.render({ onSelectChain: undefined, onNavigate: undefined });
     await c.click(c.el('chain-selector-item-no-coord'));

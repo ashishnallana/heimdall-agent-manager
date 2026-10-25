@@ -2610,6 +2610,59 @@ get_task_chain_summary_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	return respond_success(taskv2.json_end(&o), req.request_id, auth_ctx_server_time(req))
 }
 
+// Task_Chain_Conversation_Wire is the body of GET /task-chains/{cid}/conversation.
+// Empty coordinator/conversation ids mean the chain has no coordinator (or it has
+// no conversation yet); the UI then falls back to the chain page.
+Task_Chain_Conversation_Wire :: struct {
+	chain_id: string,
+	title: string,
+	coordinator_agent_instance_id: string,
+	conversation_id: string,
+	// Instances demoted from coordinator by a replacement (set_chain_coordinator
+	// is the only writer of the "member" role), so a legacy instance link can be
+	// offered the chain-addressed URL.
+	replaced_coordinator_instance_ids: []string,
+}
+
+// GET /api/v1/task-chains/{cid}/conversation (REQ-TV2-7)
+// Resolves the chain's CURRENT coordinator instance and its conversation, so a
+// `chain:<cid>` pane target keeps working after the coordinator is replaced.
+get_task_chain_conversation_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Taskchain_Handlers)(ctx)
+	auth_ctx, ok, auth_resp := require_auth_any(h.auth, req)
+	if !ok do return auth_resp
+	chain_id := domain.Task_Chain_ID(path_part(req.path, 4))
+	// READ (REQ-SEC-3): owner-scoped, like the chain detail.
+	chain, got, err := taskchain_service.get_chain_for_read(h.taskchains, auth_ctx, chain_id)
+	if !got do return respond_error(err, req.request_id)
+	members, _ := taskchain_service.list_chain_members(h.taskchains, auth_ctx, chain.chain_id)
+	defer delete(members)
+	coordinator := ""
+	replaced := make([dynamic]string, context.temp_allocator)
+	// Members are ordered by created_at ASC; the earliest coordinator is the
+	// primary one (same rule as coordinator_primary_instance).
+	for m in members {
+		if m.role == "coordinator" && coordinator == "" do coordinator = m.agent_instance_id
+		if m.role == "member" do append(&replaced, m.agent_instance_id)
+	}
+	if coordinator == "" do coordinator = chain.coordinator_agent_instance_id
+	conversation_id := ""
+	if coordinator != "" && h.content != nil {
+		if c, found, _ := content_service.get_conversation_by_instance(h.content, auth_ctx, coordinator); found {
+			conversation_id = c.conversation_id
+		}
+	}
+	wire := Task_Chain_Conversation_Wire{
+		chain_id = string(chain.chain_id),
+		title = chain.title,
+		coordinator_agent_instance_id = coordinator,
+		conversation_id = conversation_id,
+		replaced_coordinator_instance_ids = replaced[:],
+	}
+	data, _ := json.marshal(wire, JSON_MARSHAL_OPT, allocator = context.temp_allocator)
+	return respond_success(string(data), req.request_id, auth_ctx_server_time(req))
+}
+
 // PUT /api/v1/task-chains/{cid}/summary  {summary}
 put_task_chain_summary_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Taskchain_Handlers)(ctx)

@@ -10,7 +10,10 @@
 // policy: when the window is NOT focused it always notifies; when it IS focused
 // it notifies only for a thread other than the one currently open on screen.
 
-import { buildRouteHash, getRoutePathname } from '../utils/appLocation.ts';
+import { buildRouteHash, getRoutePathname, getRouteSearch } from '../utils/appLocation.ts';
+import { NEW_PANE_URL_ID, parseConversationIdsFromRoute } from '../utils/conversationUrl.ts';
+import { chainIdFromTargetId } from '../utils/paneTarget.ts';
+import { heimdallApi } from '../api/heimdallApi.ts';
 import { notificationForWsEvent, type NotificationMapperCtx, type NotificationPlan } from '../api/notificationMapper.ts';
 import {
   categoryEnabled,
@@ -260,24 +263,44 @@ export async function showNativeNotification(plan: NotificationPlan): Promise<bo
   }
 }
 
-// The conversation/thread the user is actively viewing, derived from the live
-// hash route ('/conversations/<agentInstanceId>') and, when supplied, an explicit
-// ctx override. Empty when no conversation is open (e.g. a board, settings, or the
-// new-conversation composer) — in which case we never suppress. A conversation is
-// reachable by its agent_instance_id (the route segment) or its conversation_id
-// (the ctx override), so both are collected.
-function openConversationKeys(ctx: NotificationMapperCtx): string[] {
+// The conversations/threads the user is actively viewing, derived from the live
+// hash route and, when supplied, an explicit ctx override. Empty when no
+// conversation is open (e.g. a board, settings, or the new-conversation
+// composer) — in which case we never suppress. The route holds one pane target
+// per visible Main pane ('/conversations/<target>+<target>?focused=<target>'):
+// an agent_instance_id, or `chain:<chain_id>` for a chain's coordinator pane
+// (REQ-TV2-7). A chain target counts as its RESOLVED coordinator instance and
+// conversation (read from the pane's own fetchTaskChainConversation cache), never
+// the bare chain id: a plan's chainId key is also set for workers' messages in
+// that chain, which are not on screen. An unresolved chain pane suppresses
+// nothing. A conversation_id may arrive via the ctx override, so both are kept.
+function openConversationKeys(ctx: NotificationMapperCtx, state?: any): string[] {
   const keys: string[] = [];
   try {
     if (ctx && ctx.visibleConversationId) keys.push(String(ctx.visibleConversationId));
-    const path = getRoutePathname();
-    if (path.startsWith('/conversations/') && path !== '/conversations/new') {
-      keys.push(decodeURIComponent(path.slice('/conversations/'.length)));
+    const { ids } = parseConversationIdsFromRoute(getRoutePathname(), getRouteSearch());
+    for (const id of ids) {
+      const chainId = chainIdFromTargetId(id);
+      if (chainId) keys.push(...resolvedChainConversationKeys(state, chainId));
+      else if (id !== NEW_PANE_URL_ID) keys.push(id);
     }
   } catch (_err) {
     /* treat as "no conversation open" -> never suppress */
   }
   return keys.filter(Boolean);
+}
+
+// The coordinator instance + conversation a `chain:<id>` pane currently shows,
+// taken from the RTK Query cache entry that ChainCoordinatorPane subscribes to.
+function resolvedChainConversationKeys(state: any, chainId: string): string[] {
+  const queries = state?.[heimdallApi.reducerPath]?.queries || {};
+  for (const entry of Object.values(queries) as any[]) {
+    if (entry?.endpointName !== 'fetchTaskChainConversation') continue;
+    if (String(entry?.originalArgs?.chainId || '') !== chainId) continue;
+    const data = entry?.data;
+    return [String(data?.coordinatorAgentInstanceId || ''), String(data?.conversationId || '')].filter(Boolean);
+  }
+  return [];
 }
 
 // Extract the trailing id from a '/conversations/<id>' or '/chains/<id>' route,
@@ -293,8 +316,8 @@ function routeThreadId(route: string): string {
 
 // True when the event targets the exact conversation currently on screen, so a
 // focused user is already looking at it and an OS popup would be redundant.
-function isViewingPlanThread(plan: NotificationPlan, ctx: NotificationMapperCtx): boolean {
-  const open = openConversationKeys(ctx);
+function isViewingPlanThread(plan: NotificationPlan, ctx: NotificationMapperCtx, state?: any): boolean {
+  const open = openConversationKeys(ctx, state);
   if (open.length === 0) return false;
   const target = (plan.conversationKeys && plan.conversationKeys.length)
     ? plan.conversationKeys
@@ -337,9 +360,9 @@ export function fireNotificationForWsEvent(
   // - Window NOT focused (behind another app) or tab hidden: ALWAYS notify.
   // - Window focused: notify UNLESS the event targets the conversation the user
   //   is currently viewing — they can already see it (REQ-N2).
-  if (!isTabBackgrounded() && isViewingPlanThread(plan, ctx)) return null;
-
   const rawState = typeof getState === 'function' ? getState() : undefined;
+  if (!isTabBackgrounded() && isViewingPlanThread(plan, ctx, rawState)) return null;
+
   const isUnlocked = rawState ? Boolean(selectIsVaultUnlocked(rawState)) : false;
   const activeKey = getActiveVaultKey();
 

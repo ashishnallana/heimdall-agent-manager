@@ -74,6 +74,9 @@ import { AuxDock } from '../auxiliary/AuxDock';
 import { useAgentAuxContext } from '../auxiliary/useAgentAuxContext';
 import { AgentChatPane } from '../workbench/AgentChatPane';
 import { ShellMainPane } from './ShellMainPane';
+import { ChainCoordinatorPane } from './ChainCoordinatorPane';
+import { useFetchTaskChainConversationQuery } from '../../api/endpoints/tasks';
+import { chainIdFromTargetId, chainTargetId } from '../../utils/paneTarget';
 import { getContentPaneIds } from '../../tiling';
 import { MainPaneFrame } from './MainPaneFrame';
 import { MobileMainPager } from './MobileMainPager';
@@ -150,16 +153,20 @@ function useRouteLocation() {
 /**
  * The Workspace for `#/conversations/<id1>+<id2>?focused=<id>` (Jetski
  * `MainContent`): a Main split tree of agent chats plus ONE aux dock on the
- * right, toggled from the chat header's [≡].
+ * right, toggled from the chat header's [≡]. Ids are pane TARGETS: an agent
+ * instance id, or `chain:<chain_id>` for a chain's current coordinator
+ * (REQ-TV2-7, utils/paneTarget.ts).
  *
  * - URL -> layout (RouteToReduxSync): the URL's pane set drives the tree via
  *   `setLayoutFromUrl`; a single-id URL for an agent in a saved split group
  *   opens the whole group focused on it.
  * - Layout -> URL (ReduxToUrlSyncer): in-app edits replace the URL, only when
  *   the URL was stable since the last run (no ping-pong).
- * - The aux dock shows the FOCUSED pane's agent strip; whether it is open is
- *   one global state, so switching conversations never opens or closes it.
- * - Split geometry/groups persist per id set; nothing is keyed by task chain.
+ * - The aux dock shows the FOCUSED pane's strip, keyed by that pane's target;
+ *   focus only picks which pane's dock shows and never changes another pane's
+ *   target. Whether it is open is one global state, so switching conversations
+ *   never opens or closes it.
+ * - Split geometry/groups persist per target set (store/splitGroups.ts).
  */
 export function Workspace({ focusMessageId, isMobile = false, leading, leadingWidth = 0, trailing }: WorkspaceProps) {
   const dispatch = useDispatch();
@@ -184,9 +191,18 @@ export function Workspace({ focusMessageId, isMobile = false, leading, leadingWi
     placement: ResourcePlacement;
   } | null>(null);
 
-  // Aux context agent = the focused Main pane's agent (single or split view).
-  const ctxAgentId = auxTreeId?.agentInstanceId || '';
-  const ctx = useAgentAuxContext(ctxAgentId);
+  // Aux context = the focused Main pane's target (single or split view). A chain
+  // target supplies its chain directly and shows its CURRENT coordinator.
+  const auxChainId = auxTreeId?.kind === 'chain' ? auxTreeId.chainId : '';
+  const auxChainConversation = useFetchTaskChainConversationQuery(
+    { chainId: auxChainId },
+    { skip: !auxChainId },
+  );
+  const ctxAgentId =
+    auxTreeId?.kind === 'agent'
+      ? auxTreeId.agentInstanceId
+      : auxChainConversation.data?.coordinatorAgentInstanceId || '';
+  const ctx = useAgentAuxContext(ctxAgentId, auxChainId);
   const hasChain = ctx.isResolved ? Boolean(ctx.chainId) : true;
   // One dock state for every agent conversation: switching conversations (or
   // focus within a split) never opens or closes it.
@@ -669,7 +685,8 @@ export function Workspace({ focusMessageId, isMobile = false, leading, leadingWi
       category: 'Workspace',
       sequence: ['s', 'a', 'a'],
       isEnabled: () => Boolean(auxTreeId && isAgentPaneId(focusedAgentId)),
-      run: () => toggleAuxContent({ type: 'agentPty', agentInstanceId: focusedAgentId }),
+      // The focused pane's resolved agent (a chain target's coordinator).
+      run: () => toggleAuxContent({ type: 'agentPty', agentInstanceId: ctx.agentInstanceId || focusedAgentId }),
     },
     {
       id: 'workspace.toggle-maximize',
@@ -686,8 +703,32 @@ export function Workspace({ focusMessageId, isMobile = false, leading, leadingWi
 
   const renderPane = useCallback(
     ({ paneId, value, isFocused, isSinglePane, isTopLeftMost, isTopRightMost }: RenderPaneProps<MainPaneValue>) => {
+      // The pane's target id: an agent instance, `chain:<id>`, a shell or `_new`.
       const agentId = value.agentInstanceId;
       const isPicker = !isRealAgentId(agentId);
+      const chatProps = (
+        instanceId: string,
+        chainTarget?: { chainId: string; title?: string },
+      ): React.ComponentProps<typeof AgentChatPane> => ({
+        agentInstanceId: instanceId,
+        chainTarget,
+        paneId,
+        focusMessageId: agentId === routeAgentInstanceId ? focusMessageId : undefined,
+        isSinglePane,
+        isMobile,
+        projectVcsEnabled: ctx.projectVcsEnabled,
+        onOpenAuxTab: (content, title) => openAuxFromPane(instanceId, content, title),
+        onSwitchAgent: (nextTargetId) =>
+          dispatch(assignMainPaneAgent({ paneId, agentInstanceId: nextTargetId })),
+        onOpenAgentInSplit: (nextTargetId, direction) =>
+          dispatch(splitMainPane({ targetPaneId: paneId, direction, agentInstanceId: nextTargetId })),
+        onSplitPane: (direction) => dispatch(splitMainPane({ targetPaneId: paneId, direction })),
+        onReplaceWithNew: () => dispatch(assignMainPaneAgent({ paneId, agentInstanceId: NEW_PANE_AGENT_ID })),
+        onClosePane: () => closePane(paneId),
+        isFocusedPane: isFocused,
+        headerLeading: isTopLeftMost ? leading : null,
+        headerEnd: isTopRightMost && !dockOccupiesTopRight ? topRightSpacer : null,
+      });
       return (
         <MainPaneFrame
           paneId={paneId}
@@ -725,31 +766,19 @@ export function Workspace({ focusMessageId, isMobile = false, leading, leadingWi
               headerLeading={isTopLeftMost ? leading : null}
               headerEnd={isTopRightMost && !dockOccupiesTopRight ? topRightSpacer : null}
             />
+          ) : chainIdFromTargetId(agentId) ? (
+            // REQ-TV2-7: a chain-addressed pane resolves its CURRENT coordinator;
+            // a replacement remounts the chat while the target stays put.
+            <ChainCoordinatorPane chainId={chainIdFromTargetId(agentId)}>
+              {(coordinatorId, chainTitle) => (
+                <AgentChatPane
+                  key={`${agentId}|${coordinatorId}`}
+                  {...chatProps(coordinatorId, { chainId: chainIdFromTargetId(agentId), title: chainTitle })}
+                />
+              )}
+            </ChainCoordinatorPane>
           ) : (
-            <AgentChatPane
-              key={agentId}
-              agentInstanceId={agentId}
-              paneId={paneId}
-              focusMessageId={agentId === routeAgentInstanceId ? focusMessageId : undefined}
-              isSinglePane={isSinglePane}
-              isMobile={isMobile}
-              projectVcsEnabled={ctx.projectVcsEnabled}
-              onOpenAuxTab={(content, title) => openAuxFromPane(agentId, content, title)}
-              onSwitchAgent={(nextAgentId) =>
-                dispatch(assignMainPaneAgent({ paneId, agentInstanceId: nextAgentId }))
-              }
-              onOpenAgentInSplit={(nextAgentId, direction) =>
-                dispatch(splitMainPane({ targetPaneId: paneId, direction, agentInstanceId: nextAgentId }))
-              }
-              onSplitPane={(direction) => dispatch(splitMainPane({ targetPaneId: paneId, direction }))}
-              onReplaceWithNew={() =>
-                dispatch(assignMainPaneAgent({ paneId, agentInstanceId: NEW_PANE_AGENT_ID }))
-              }
-              onClosePane={() => closePane(paneId)}
-              isFocusedPane={isFocused}
-              headerLeading={isTopLeftMost ? leading : null}
-              headerEnd={isTopRightMost && !dockOccupiesTopRight ? topRightSpacer : null}
-            />
+            <AgentChatPane key={agentId} {...chatProps(agentId)} />
           )}
         </MainPaneFrame>
       );
@@ -872,7 +901,7 @@ export function Workspace({ focusMessageId, isMobile = false, leading, leadingWi
         open={resourcePickerRequest?.resource === 'task-chain'}
         onClose={() => setResourcePickerRequest(null)}
         onSelectChain={(chain) => {
-          if (chain.coordinatorAgentInstanceId) placeResource(chain.coordinatorAgentInstanceId);
+          if (chain.coordinatorAgentInstanceId) placeResource(chainTargetId(chain.chainId));
           else setResourcePickerRequest(null);
         }}
       />

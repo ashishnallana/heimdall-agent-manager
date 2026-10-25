@@ -24,6 +24,7 @@ import { decryptChainList } from '../../utils/vaultChains';
 import { isVaultArmored } from '../../utils/vaultContent';
 import { VaultText } from '../vault/VaultText';
 import { replaceVaultTokens } from '../../utils/vaultCrypto.ts';
+import { chainConversationRoute } from '../../utils/paneTarget.ts';
 
 interface TaskChainsPageProps {
   chainId?: string;
@@ -74,19 +75,20 @@ function formatUpdatedAt(value: string): string {
 
 /**
  * What a click on a chain row does (Task v2 plan REQ-UI-5, supersedes REQ-TCUI-2):
- * a chain with a coordinator opens that coordinator's conversation, where the
- * aux Tasks tab already shows the chain. On desktop it goes to `?panel=tasks`;
- * on mobile it goes to the plain conversation route and the sidebar closes. A
- * chain without a coordinator has no chat to open, so the row selects it into
- * the detail pane.
+ * a chain with a coordinator opens its chain-addressed conversation
+ * (`/conversations/chain:<id>`, REQ-TV2-7), where the aux Tasks tab already
+ * shows the chain. On desktop it goes to `?panel=tasks`; on mobile it goes to the
+ * plain conversation route and the sidebar closes. A chain without a coordinator
+ * has no chat to open, so the row selects it into the detail pane.
  */
 export function chainRowPrimaryAction(
+  chainId: string,
   coordinatorInstanceId: string,
   isMobile: boolean,
 ): { kind: 'conversation'; href: string; closeSidebar: boolean } | { kind: 'select' } {
   const id = String(coordinatorInstanceId || '').trim();
-  if (!id) return { kind: 'select' };
-  const route = `/conversations/${encodeURIComponent(id)}`;
+  if (!id || !String(chainId || '').trim()) return { kind: 'select' };
+  const route = chainConversationRoute(chainId);
   return isMobile
     ? { kind: 'conversation', href: shellHash(route), closeSidebar: true }
     : { kind: 'conversation', href: shellHash(`${route}?panel=tasks`), closeSidebar: false };
@@ -150,7 +152,7 @@ function ChainRow({
     </>
   );
 
-  const primary = chainRowPrimaryAction(coordinator, isMobile);
+  const primary = chainRowPrimaryAction(chain.chainId, coordinator, isMobile);
   const openRow = () => {
     if (primary.kind === 'conversation') {
       window.location.hash = primary.href;

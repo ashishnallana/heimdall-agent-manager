@@ -15,11 +15,20 @@ import {
   getGroupsToEvict,
   loadSavedLayout,
   persistSplitLayout,
+  migrateLegacySplitStorage,
   readGroupIndex,
   resolveOpenAgentIds,
   writeGroupIndex,
 } from '../src/ui/store/splitGroups.ts';
 import { buildDefaultSplitTree } from '../src/ui/store/workspaceLayoutSlice.ts';
+import {
+  chainConversationRoute,
+  chainIdFromTargetId,
+  chainTargetId,
+  parsePaneTargetId,
+  paneTargetId,
+  resolvePaneTargetAgent,
+} from '../src/ui/utils/paneTarget.ts';
 
 function withStorage(fn: (store: Record<string, string>) => void) {
   const store: Record<string, string> = {};
@@ -29,6 +38,8 @@ function withStorage(fn: (store: Record<string, string>) => void) {
       getItem: (k: string) => store[k] ?? null,
       setItem: (k: string, v: string) => { store[k] = String(v); },
       removeItem: (k: string) => { delete store[k]; },
+      key: (i: number) => Object.keys(store)[i] ?? null,
+      get length() { return Object.keys(store).length; },
     },
   };
   try {
@@ -96,7 +107,7 @@ test('layout persistence: geometry per sorted id set, group index updates on set
     let key = persistSplitLayout(ab, null);
     assert.equal(key, 'a+b');
     assert.deepEqual(readGroupIndex(), [['a', 'b']]);
-    assert.ok(store['heimdall:split-layout:v1:a+b']);
+    assert.ok(store['heimdall:split-layout:v2:a+b']);
     assert.ok(loadSavedLayout(['b', 'a']), 'restorable for the same set in any order');
     assert.equal(loadSavedLayout(['a', 'c']), null);
 
@@ -108,7 +119,84 @@ test('layout persistence: geometry per sorted id set, group index updates on set
     // New intersecting set evicts {a,b} and its geometry.
     key = persistSplitLayout(buildDefaultSplitTree(['b', 'c']), key);
     assert.deepEqual(readGroupIndex(), [['x', 'y'], ['b', 'c']]);
-    assert.equal(store['heimdall:split-layout:v1:a+b'], undefined);
-    assert.ok(store['heimdall:split-layout:v1:b+c']);
+    assert.equal(store['heimdall:split-layout:v2:a+b'], undefined);
+    assert.ok(store['heimdall:split-layout:v2:b+c']);
+  });
+});
+
+// ---- REQ-TV2-7: chain-addressed pane targets ------------------------------
+
+test('pane targets: chain:<id> and instance ids round-trip; empty ids are not chain targets', () => {
+  assert.equal(chainTargetId('chain_a'), 'chain:chain_a');
+  assert.equal(chainTargetId('  '), '');
+  assert.equal(chainIdFromTargetId('chain:chain_a'), 'chain_a');
+  assert.equal(chainIdFromTargetId('chain:'), '', 'a bare prefix is not a chain target');
+  assert.equal(chainIdFromTargetId('inst_1'), '');
+  assert.deepEqual(parsePaneTargetId('chain:chain_a'), { kind: 'chain_coordinator', chainId: 'chain_a' });
+  assert.deepEqual(parsePaneTargetId('inst_1'), { kind: 'agent', agentInstanceId: 'inst_1' });
+  assert.equal(paneTargetId({ kind: 'chain_coordinator', chainId: 'chain_a' }), 'chain:chain_a');
+  assert.equal(paneTargetId({ kind: 'agent', agentInstanceId: 'inst_1' }), 'inst_1');
+  // A chain target shows its CURRENT coordinator; an agent target shows itself.
+  assert.equal(resolvePaneTargetAgent('chain:chain_a', { chain_a: 'inst_new' }), 'inst_new');
+  assert.equal(resolvePaneTargetAgent('chain:chain_a', {}), '');
+  assert.equal(resolvePaneTargetAgent('inst_1', { chain_a: 'inst_new' }), 'inst_1');
+  assert.equal(chainConversationRoute('chain a/b'), '/conversations/chain:chain%20a%2Fb');
+});
+
+test('URL grammar: #/conversations/chain:<id>+<inst>?focused=chain:<id> parses and builds verbatim', () => {
+  const hash = buildConversationHash(['chain:chain_a', 'inst_2'], { focusedId: 'chain:chain_a' });
+  assert.equal(hash, '#/conversations/chain:chain_a+inst_2?focused=chain:chain_a');
+  const [path, search] = hash.slice(1).split('?');
+  assert.deepEqual(parseConversationIdsFromRoute(path, `?${search}`), {
+    ids: ['chain:chain_a', 'inst_2'],
+    focused: 'chain:chain_a',
+  });
+  // Percent-encoded separators (an older copy of the link) parse identically.
+  assert.deepEqual(
+    parseConversationIdsFromRoute('/conversations/chain%3Achain_a+inst_2', '?focused=chain%3Achain_a'),
+    { ids: ['chain:chain_a', 'inst_2'], focused: 'chain:chain_a' },
+  );
+  // Two chains are two panes even when the same durable agent coordinates both.
+  assert.equal(
+    buildConversationHash(['chain:chain_a', 'chain:chain_b'], { focusedId: 'chain:chain_b' }),
+    '#/conversations/chain:chain_a+chain:chain_b?focused=chain:chain_b',
+  );
+  assert.equal(buildConversationHash(['chain:chain_a']), '#/conversations/chain:chain_a');
+  // Legacy instance links keep their shape.
+  assert.equal(buildConversationHash(['inst_coord']), '#/conversations/inst_coord');
+});
+
+test('split groups: keyed by target list; a chain target opens its saved group', () => {
+  withStorage((store) => {
+    const tree = buildDefaultSplitTree(['chain:chain_a', 'chain:chain_b']);
+    tree.panes['split-1'] = { ...(tree.panes['split-1'] as any), ratio: 30 };
+    persistSplitLayout(tree, null);
+    assert.ok(store['heimdall:split-layout:v2:chain:chain_a+chain:chain_b']);
+    assert.deepEqual(readGroupIndex(), [['chain:chain_a', 'chain:chain_b']]);
+    assert.deepEqual(resolveOpenAgentIds('chain:chain_b'), {
+      ids: ['chain:chain_a', 'chain:chain_b'],
+      focusedId: 'chain:chain_b',
+    });
+    const restored = loadSavedLayout(['chain:chain_b', 'chain:chain_a']);
+    assert.equal((restored?.panes['split-1'] as any)?.ratio, 30, 'workspace restore keeps the geometry');
+  });
+});
+
+test('split groups: v1 instance-keyed entries migrate once to v2 and the v1 keys are removed', () => {
+  withStorage((store) => {
+    const legacyTree = buildDefaultSplitTree(['inst_a', 'inst_b']);
+    store['heimdall:split-groups:v1'] = JSON.stringify([['inst_a', 'inst_b']]);
+    store['heimdall:split-layout:v1:inst_a+inst_b'] = JSON.stringify(legacyTree);
+    store['heimdall:split-layout:v1:orphan+x'] = '{}';
+    assert.deepEqual(readGroupIndex(), [['inst_a', 'inst_b']]);
+    assert.ok(loadSavedLayout(['inst_b', 'inst_a']), 'migrated geometry restores');
+    assert.equal(store['heimdall:split-groups:v1'], undefined);
+    assert.equal(store['heimdall:split-layout:v1:inst_a+inst_b'], undefined);
+    assert.equal(store['heimdall:split-layout:v1:orphan+x'], undefined);
+    // Idempotent; a later v1 write never clobbers v2.
+    store['heimdall:split-groups:v1'] = JSON.stringify([['old', 'stale']]);
+    migrateLegacySplitStorage();
+    assert.deepEqual(readGroupIndex(), [['inst_a', 'inst_b']]);
+    assert.equal(store['heimdall:split-groups:v1'], undefined);
   });
 });

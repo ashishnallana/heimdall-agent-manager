@@ -103,8 +103,8 @@ test('taskChainRoute navigates to conversation when coordinator is present or ov
   };
   assert.equal(
     taskChainRoute(chainWithCoordinator),
-    '/conversations/inst_coord_456',
-    'Must navigate to coordinator conversation when coordinator agent instance id exists',
+    '/conversations/chain:chain_123',
+    'Must navigate to the chain-addressed coordinator conversation (REQ-TV2-7) when a coordinator exists',
   );
 
   // Without coordinatorAgentInstanceId: navigates to chain overview
@@ -302,7 +302,7 @@ test('Task chain results include project labels, status indicators, and correct 
   };
 
   // Route calculation
-  assert.equal(taskChainRoute(chain1), '/conversations/inst_alpha_coord');
+  assert.equal(taskChainRoute(chain1), '/conversations/chain:ch_alpha');
   assert.equal(taskChainRoute(chain2), '/chains/ch_beta');
 
   // Status dot indicators

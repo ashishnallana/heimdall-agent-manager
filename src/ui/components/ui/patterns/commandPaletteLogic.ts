@@ -6,6 +6,7 @@ import type { Tone } from '../types';
 import type { IconName } from '../primitives';
 import { THEMES } from '../../../theme/registry.ts';
 import { isVaultArmored } from '../../../utils/vaultContent.ts';
+import { chainConversationRoute } from '../../../utils/paneTarget.ts';
 
 export type PaletteConversation = {
   conversationId: string;
@@ -71,9 +72,13 @@ export function chainStatusDot(status?: string): { tone: Tone; pulse: boolean } 
   }
 }
 
+/**
+ * A chain with a coordinator opens its chain-addressed conversation
+ * (`/conversations/chain:<id>`, REQ-TV2-7); one without opens the chain page.
+ */
 export function taskChainRoute(chain: { chainId: string; coordinatorAgentInstanceId?: string }): string {
   return chain.coordinatorAgentInstanceId
-    ? `/conversations/${encodeURIComponent(chain.coordinatorAgentInstanceId)}`
+    ? chainConversationRoute(chain.chainId)
     : `/chains/${encodeURIComponent(chain.chainId)}`;
 }
 

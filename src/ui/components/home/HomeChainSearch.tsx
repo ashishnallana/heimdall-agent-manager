@@ -7,6 +7,7 @@ import { selectIsVaultUnlocked } from '../../store/vaultSlice';
 import { buildRouteHash } from '../../utils/appLocation';
 import { buildConversationHash, navigateToHash } from '../../utils/conversationUrl';
 import { resolveChainConversationAgent } from '../../utils/chainConversation';
+import { chainTargetId } from '../../utils/paneTarget';
 import {
   searchTaskChainsEncrypted,
   taskChainSearchErrorMessage,
@@ -44,6 +45,7 @@ export interface HomeChainSearchProps {
    * split group if it has one, else its single view). A Main new-chat pane
    * passes a handler that puts the coordinator into THAT pane.
    */
+  /** Opens a pane target (an agent instance id or `chain:<id>`) in the hosting pane. */
   onOpenAgent?: (agentInstanceId: string) => void;
 }
 
@@ -133,14 +135,16 @@ export function HomeChainSearch({ onOpenAgent }: HomeChainSearchProps) {
   const remoteState = activeRemote?.state || 'idle';
   const remoteError = activeRemote?.error || '';
 
-  // A chain opens as its coordinator's conversation (resolved from the chain
-  // detail when the list row lacks it); only a chain without any coordinator
-  // falls back to the chain page.
+  // A chain opens as its chain-addressed coordinator conversation
+  // (`chain:<id>`, REQ-TV2-7); whether it has a coordinator is resolved from the
+  // chain detail when the list row lacks it. Only a chain without any
+  // coordinator falls back to the chain page.
   const open = async (chain: HomeChainItem) => {
     const coordinator = await resolveChainConversationAgent(dispatch, chain.chainId, chain.coordinatorAgentInstanceId);
     if (coordinator) {
-      if (onOpenAgent) onOpenAgent(coordinator);
-      else navigateToHash(buildConversationHash([coordinator]));
+      const target = chainTargetId(chain.chainId);
+      if (onOpenAgent) onOpenAgent(target);
+      else navigateToHash(buildConversationHash([target]));
       return;
     }
     navigateToHash(buildRouteHash(`/chains/${encodeURIComponent(chain.chainId)}`, ''));

@@ -460,8 +460,8 @@ test('Keyboard navigation handles ArrowDown, ArrowUp with wrapping and Enter rou
   };
   assert.equal(
     taskChainRoute(chainWithCoord),
-    '/conversations/inst_engineer_99',
-    'Selecting chain with coordinator navigates to conversation',
+    '/conversations/chain:chain_test_coord',
+    'Selecting chain with coordinator navigates to its chain-addressed conversation',
   );
 
   const chainWithoutCoord = {

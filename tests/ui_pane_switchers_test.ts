@@ -10,7 +10,14 @@ import { blurInactiveMainPaneFocus } from '../src/ui/components/mainWorkspace/pa
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 // Agents: a/a2 (chain-1), b (chain-2), coord-3 (coordinator of chain-3), chain-4 has no coordinator.
+// chain-5 / chain-6 are coordinated by two instances of ONE durable agent (agt_shared),
+// and chain-6's coordinator can be replaced (coord-6x -> coord-6y) via COORDINATORS.
+const COORDINATORS: Record<string, string> = { 'chain-5': 'coord-5x', 'chain-6': 'coord-6x' };
+const REPLACED: Record<string, string[]> = {};
 const CONVERSATIONS: Record<string, any> = {
+  'coord-5x': { conversation_id: 'conv-5x', agent_id: 'agt_shared', agent_instance_id: 'coord-5x', chain_id: 'chain-5', project_id: 'p1', title: 'Shared on Five' },
+  'coord-6x': { conversation_id: 'conv-6x', agent_id: 'agt_shared', agent_instance_id: 'coord-6x', chain_id: 'chain-6', project_id: 'p1', title: 'Shared on Six' },
+  'coord-6y': { conversation_id: 'conv-6y', agent_id: 'agt_shared', agent_instance_id: 'coord-6y', chain_id: 'chain-6', project_id: 'p1', title: 'Replacement on Six' },
   a: { conversation_id: 'conv-a', agent_instance_id: 'a', chain_id: 'chain-1', project_id: 'p1', title: 'Agent A' },
   a2: { conversation_id: 'conv-a2', agent_instance_id: 'a2', chain_id: 'chain-1', project_id: 'p1', title: 'Agent A2' },
   b: { conversation_id: 'conv-b', agent_instance_id: 'b', chain_id: 'chain-2', project_id: 'p1', title: 'Agent B' },
@@ -33,6 +40,8 @@ const GROUPS = [
       { chain_id: 'chain-2', title: 'Chain Two', status: 'active', coordinator_agent_instance_id: 'b', project_id: 'p1' },
       { chain_id: 'chain-3', title: 'Chain Three', status: 'active', coordinator_agent_instance_id: 'coord-3', project_id: 'p1' },
       { chain_id: 'chain-4', title: 'Chain Four', status: 'active', coordinator_agent_instance_id: '', project_id: 'p1' },
+      { chain_id: 'chain-5', title: 'Chain Five', status: 'active', coordinator_agent_instance_id: 'coord-5x', project_id: 'p1' },
+      { chain_id: 'chain-6', title: 'Chain Six', status: 'active', coordinator_agent_instance_id: 'coord-6x', project_id: 'p1' },
     ],
   },
 ];
@@ -87,6 +96,19 @@ async function withDom<T>(hash: string, fn: (dom: any) => Promise<T>): Promise<T
     if (/\/agents(\?|$)/.test(url)) return json({ data: [] });
     if (/\/bridges(\?|$)/.test(url)) return json({ data: [] });
     if (/\/task-chains\/[^/?]+\/fleets(\?|$)/.test(url)) return json({ data: [] });
+    const chainConversation = url.match(/\/task-chains\/([^/?]+)\/conversation(?:\?|$)/);
+    if (chainConversation) {
+      const chainId = decodeURIComponent(chainConversation[1]);
+      const summary = GROUPS.flatMap((group) => group.chains).find((chain) => chain.chain_id === chainId);
+      const coordinator = COORDINATORS[chainId] || summary?.coordinator_agent_instance_id || (chainId === 'chain-1' ? 'a' : '');
+      return json({ data: {
+        chain_id: chainId,
+        title: summary?.title || (chainId === 'chain-1' ? 'Chain One' : chainId),
+        coordinator_agent_instance_id: coordinator,
+        conversation_id: CONVERSATIONS[coordinator]?.conversation_id || '',
+        replaced_coordinator_instance_ids: REPLACED[chainId] || [],
+      } });
+    }
     const chainDetail = url.match(/\/task-chains\/([^/?]+)(?:\?|$)/);
     if (chainDetail) {
       const chainId = decodeURIComponent(chainDetail[1]);
@@ -240,22 +262,32 @@ test('per-pane chain switcher swaps THAT pane to the chain coordinator in place 
       assert.match(frame(aPane).textContent || '', /Agent A/);
       assert.match(frame(bPane).textContent || '', /Agent B/);
 
-      // 1. Pick chain-3 in pane A -> A's pane now shows coord-3, in place.
+      // 1. Pick chain-3 in pane A -> A's pane now targets chain:chain-3 (showing
+      //    coord-3), in place; pane B is untouched (REQ-TV2-7).
       await openChainSelector(aPane);
       await pickChain('chain-3');
-      assert.equal(paneOf('coord-3'), aPane, 'swapped in place (same pane id)');
-      assert.deepEqual(layout.selectMainAgentIds(store.getState()), ['coord-3', 'b']);
-      assert.equal(layout.selectFocusedMainAgentId(store.getState()), 'coord-3');
-      assert.equal(dom.window.location.hash, '#/conversations/coord-3+b?focused=coord-3', 'URL pane set replaced, not collapsed');
-      assert.deepEqual(selectCurrentAuxTreeId(store.getState()), { kind: 'agent', agentInstanceId: 'coord-3' });
-      assert.deepEqual(readGroupIndex(), [['coord-3', 'b']], 'old agent evicted from the group, new one added');
+      assert.equal(paneOf('chain:chain-3'), aPane, 'swapped in place (same pane id)');
+      assert.deepEqual(layout.selectMainAgentIds(store.getState()), ['chain:chain-3', 'b']);
+      assert.equal(layout.selectFocusedMainAgentId(store.getState()), 'chain:chain-3');
+      assert.equal(dom.window.location.hash, '#/conversations/chain:chain-3+b?focused=chain:chain-3', 'URL pane set replaced, not collapsed');
+      assert.deepEqual(selectCurrentAuxTreeId(store.getState()), { kind: 'chain', chainId: 'chain-3' });
+      assert.deepEqual(readGroupIndex(), [['chain:chain-3', 'b']], 'old target evicted from the group, new one added');
+      // The breadcrumb names the addressed chain.
+      await waitFor(() => /Chain Three/.test(frame(aPane)?.querySelector('[data-debug-id="conversation-thread-title"]')?.textContent || ''), act);
 
-      // 2. Picking a chain whose coordinator is already in the split focuses that pane.
+      // 2. Picking chain-2 in pane A retargets pane A only, even though pane B
+      //    holds chain-2's coordinator by instance: one leaf per TARGET.
       await openChainSelector(aPane);
       await pickChain('chain-2');
-      assert.deepEqual(layout.selectMainAgentIds(store.getState()), ['coord-3', 'b'], 'no duplicate');
-      assert.equal(layout.selectFocusedMainAgentId(store.getState()), 'b');
-      assert.equal(dom.window.location.hash, '#/conversations/coord-3+b?focused=b');
+      assert.deepEqual(layout.selectMainAgentIds(store.getState()), ['chain:chain-2', 'b'], 'pane B never changes');
+      assert.equal(paneOf('b'), bPane);
+      assert.equal(layout.selectFocusedMainAgentId(store.getState()), 'chain:chain-2');
+      // Picking the same chain from pane B focuses the pane that already targets it.
+      await openChainSelector(bPane);
+      await pickChain('chain-2');
+      assert.deepEqual(layout.selectMainAgentIds(store.getState()), ['chain:chain-2', 'b'], 'no duplicate target');
+      assert.equal(layout.selectFocusedMainAgentId(store.getState()), 'chain:chain-2');
+      assert.equal(dom.window.location.hash, '#/conversations/chain:chain-2+b?focused=chain:chain-2');
 
       // 3. A chain without a coordinator keeps the fallback navigation to /chains/<id>.
       await openChainSelector(bPane);
@@ -319,10 +351,10 @@ test('task-chain chords replace the focused pane or open the selection right/bel
 
         const tree = layout.selectMainTree(store.getState());
         if (scenario.placement === 'replace') {
-          assert.deepEqual(layout.selectMainAgentIds(store.getState()), ['coord-3']);
-          assert.equal(layout.findPaneByAgent(tree, 'coord-3'), paneId, 'replacement keeps the focused pane id');
+          assert.deepEqual(layout.selectMainAgentIds(store.getState()), ['chain:chain-3']);
+          assert.equal(layout.findPaneByAgent(tree, 'chain:chain-3'), paneId, 'replacement keeps the focused pane id');
         } else {
-          assert.deepEqual(layout.selectMainAgentIds(store.getState()), ['a', 'coord-3']);
+          assert.deepEqual(layout.selectMainAgentIds(store.getState()), ['a', 'chain:chain-3']);
           const rootPane = tree.panes[tree.rootPaneId];
           assert.equal(rootPane.kind === 'split' && rootPane.axis, scenario.axis);
         }
@@ -557,7 +589,9 @@ test('s o a opens only the focused pane same-chain agent switcher and reuses in-
 test('header switchers are wired to the pane (no route navigation for coordinators / chain members)', () => {
   const chat = fs.readFileSync(path.join(REPO_ROOT, 'src/ui/components/workbench/AgentChatPane.tsx'), 'utf8');
   const agentOption = chat.slice(chat.indexOf('conversation-chain-agent-option-'), chat.indexOf('conversation-chain-agent-option-') + 1200);
-  assert.match(agentOption, /onSwitchAgent\(member\.agentInstanceId, member\.title\)/);
+  assert.match(agentOption, /onSwitchAgent\(memberTarget, member\.title\)/);
+  // The coordinator member is addressed by chain (REQ-TV2-7).
+  assert.match(agentOption, /member\.isCoordinator && chainId \? chainTargetId\(chainId\) : member\.agentInstanceId/);
   assert.match(chat, /onSelectChain=\{\s*onSwitchAgent/);
   const modal = fs.readFileSync(path.join(REPO_ROOT, 'src/ui/components/chains/TaskChainSelectorModal.tsx'), 'utf8');
   assert.match(modal, /if \(onSelectChain\) \{\s*onSelectChain\(/);
@@ -875,4 +909,140 @@ test('inside the aux dock, agent links open the agent chat as an aux tab instead
   assert.match(content, /onOpenTab\(\{ type: 'subagentChat', agentInstanceId \}, title\)/);
   assert.match(content, /onOpenAgentChat=\{\(agentInstanceId, title\) => \{\s*openAgentChat\(agentInstanceId, title\);/);
   assert.match(content, /<OpenAgentChatContext\.Provider value=\{openAgentChat\}>/);
+});
+
+// REQ-TV2-7 acceptance: two chains coordinated by the SAME durable agent
+// (agt_shared) open side by side and each keeps its own chain context through
+// focus switching, coordinator replacement, reload/workspace restore, a copied
+// deep link in a new tab and hash navigation; a legacy link to the replaced
+// coordinator still opens and offers the chain-addressed conversation.
+test('two chain panes with the same durable coordinator agent keep their own chain context', async () => {
+  const deepLink = '#/conversations/chain:chain-5+chain:chain-6?focused=chain:chain-5';
+  const { heimdallApi } = await import('../src/ui/api/heimdallApi.ts');
+  const layout = await import('../src/ui/store/workspaceLayoutSlice.ts');
+  const { selectCurrentAuxTreeId } = await import('../src/ui/store/auxPanesSlice.ts');
+  const { readGroupIndex } = await import('../src/ui/store/splitGroups.ts');
+  const { Workspace } = await import('../src/ui/components/mainWorkspace/Workspace.tsx');
+  const { ShortcutProvider } = await import('../src/ui/services/shortcuts/ShortcutContext.tsx');
+  const { createRoot } = await import('react-dom/client');
+  const { act } = await import('react');
+  const { Provider } = await import('react-redux');
+
+  const mount = async (dom: any) => {
+    const store = await makeStore();
+    const root = createRoot(dom.window.document.getElementById('root')!);
+    await act(async () => {
+      root.render(React.createElement(Provider, { store },
+        React.createElement(ShortcutProvider, {}, React.createElement(Workspace, {}))));
+      await new Promise((r) => setTimeout(r, 40));
+    });
+    const doc = dom.window.document;
+    const paneOf = (target: string) => layout.findPaneByAgent(store.getState().workspaceLayout.tree, target)!;
+    const frame = (target: string) => doc.querySelector(`[data-debug-id="main-pane-frame-${paneOf(target)}"]`) as any;
+    const coordinatorIn = (target: string) =>
+      frame(target)?.querySelector('[data-coordinator-instance-id]')?.getAttribute('data-coordinator-instance-id') || '';
+    const crumb = (target: string) =>
+      frame(target)?.querySelector('[data-debug-id="conversation-thread-title"]')?.textContent || '';
+    const unmount = async () => {
+      await act(async () => root.unmount());
+      store.dispatch(heimdallApi.util.resetApiState());
+    };
+    return { store, doc, paneOf, frame, coordinatorIn, crumb, unmount };
+  };
+
+  COORDINATORS['chain-6'] = 'coord-6x';
+  delete REPLACED['chain-6'];
+  try {
+    await withDom(deepLink, async (dom) => {
+      let ui = await mount(dom);
+      try {
+        // Both panes open, each resolved to ITS chain's coordinator, breadcrumbs per chain.
+        assert.deepEqual(layout.selectMainAgentIds(ui.store.getState()), ['chain:chain-5', 'chain:chain-6']);
+        await waitFor(() => ui.coordinatorIn('chain:chain-5') === 'coord-5x' && ui.coordinatorIn('chain:chain-6') === 'coord-6x', act);
+        await waitFor(() => /Chain Five/.test(ui.crumb('chain:chain-5')) && /Chain Six/.test(ui.crumb('chain:chain-6')), act);
+        assert.deepEqual(selectCurrentAuxTreeId(ui.store.getState()), { kind: 'chain', chainId: 'chain-5' });
+
+        // Focus switching selects which pane's dock shows; it never retargets a pane.
+        await act(async () => {
+          ui.store.dispatch(layout.setFocusedMainPane(ui.paneOf('chain:chain-6')));
+          await new Promise((r) => setTimeout(r, 40));
+        });
+        assert.deepEqual(selectCurrentAuxTreeId(ui.store.getState()), { kind: 'chain', chainId: 'chain-6' });
+        assert.deepEqual(layout.selectMainAgentIds(ui.store.getState()), ['chain:chain-5', 'chain:chain-6']);
+        assert.equal(dom.window.location.hash, '#/conversations/chain:chain-5+chain:chain-6?focused=chain:chain-6');
+        assert.equal(ui.coordinatorIn('chain:chain-5'), 'coord-5x');
+
+        // Replacing chain-6's coordinator re-resolves pane B only; the URL is unchanged.
+        COORDINATORS['chain-6'] = 'coord-6y';
+        REPLACED['chain-6'] = ['coord-6x'];
+        await act(async () => {
+          ui.store.dispatch(heimdallApi.util.invalidateTags([{ type: 'Chain', id: 'chain-6' }]));
+        });
+        await waitFor(() => ui.coordinatorIn('chain:chain-6') === 'coord-6y', act);
+        assert.equal(ui.coordinatorIn('chain:chain-5'), 'coord-5x');
+        assert.equal(dom.window.location.hash, '#/conversations/chain:chain-5+chain:chain-6?focused=chain:chain-6');
+        assert.deepEqual(readGroupIndex(), [['chain:chain-5', 'chain:chain-6']]);
+
+        // Hash navigation (as back/forward does): a single chain-6 link restores the saved group.
+        await act(async () => {
+          dom.window.location.hash = '#/conversations/chain:chain-6';
+          await new Promise((r) => setTimeout(r, 60));
+        });
+        await waitFor(() => dom.window.location.hash === '#/conversations/chain:chain-5+chain:chain-6?focused=chain:chain-6', act);
+
+        // Reload (fresh store, same URL + storage) restores the same targets.
+        await ui.unmount();
+        ui = await mount(dom);
+        assert.deepEqual(layout.selectMainAgentIds(ui.store.getState()), ['chain:chain-5', 'chain:chain-6']);
+        assert.equal(layout.selectFocusedMainAgentId(ui.store.getState()), 'chain:chain-6');
+        await waitFor(() => ui.coordinatorIn('chain:chain-6') === 'coord-6y' && ui.coordinatorIn('chain:chain-5') === 'coord-5x', act);
+      } finally {
+        await ui.unmount();
+      }
+    });
+
+    // A copied deep link in a new tab (no shared storage) opens the same chain panes.
+    await withDom(deepLink, async (dom) => {
+      const ui = await mount(dom);
+      try {
+        assert.deepEqual(layout.selectMainAgentIds(ui.store.getState()), ['chain:chain-5', 'chain:chain-6']);
+        await waitFor(() => ui.coordinatorIn('chain:chain-5') === 'coord-5x' && ui.coordinatorIn('chain:chain-6') === 'coord-6y', act);
+      } finally {
+        await ui.unmount();
+      }
+    });
+
+    // The legacy link to the replaced coordinator still opens, and offers the chain URL.
+    await withDom('#/conversations/coord-6x', async (dom) => {
+      const ui = await mount(dom);
+      try {
+        assert.deepEqual(layout.selectMainAgentIds(ui.store.getState()), ['coord-6x']);
+        const banner = () => ui.frame('coord-6x')?.querySelector('[data-debug-id="conversation-open-chain-coordinator-btn"]');
+        await waitFor(() => Boolean(banner()), act);
+        await act(async () => {
+          banner().click();
+          await new Promise((r) => setTimeout(r, 40));
+        });
+        assert.deepEqual(layout.selectMainAgentIds(ui.store.getState()), ['chain:chain-6']);
+        assert.equal(dom.window.location.hash, '#/conversations/chain:chain-6');
+      } finally {
+        await ui.unmount();
+      }
+    });
+
+    // A legacy link to a CURRENT coordinator gets no banner.
+    await withDom('#/conversations/coord-5x', async (dom) => {
+      const ui = await mount(dom);
+      try {
+        await waitFor(() => Boolean(ui.frame('coord-5x')?.querySelector('[data-debug-id="conversation-thread-title"]')), act);
+        await new Promise((r) => setTimeout(r, 100));
+        assert.equal(ui.frame('coord-5x').querySelector('[data-debug-id="conversation-replaced-coordinator"]'), null);
+      } finally {
+        await ui.unmount();
+      }
+    });
+  } finally {
+    COORDINATORS['chain-6'] = 'coord-6x';
+    delete REPLACED['chain-6'];
+  }
 });

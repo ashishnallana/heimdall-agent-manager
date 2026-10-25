@@ -18,7 +18,8 @@ export interface AuxChainMember {
 /**
  * Everything an aux tab needs about the agent that owns the shown strip (the
  * focused Main pane's agent): chain, project, bridge, shell cwd, chain
- * participants. The chain is CONTEXT only; it never keys the layout.
+ * participants. An agent pane's chain is inferred CONTEXT; a chain pane's chain
+ * is its target (the strip is keyed by that target).
  */
 export interface AgentAuxContext {
   agentInstanceId: string;
@@ -43,7 +44,15 @@ export interface AgentAuxContext {
   isResolved: boolean;
 }
 
-export function useAgentAuxContext(agentInstanceId: string | null | undefined): AgentAuxContext {
+/**
+ * `targetChainId` is set for a chain-addressed pane (`chain:<id>`, REQ-TV2-7):
+ * the chain then comes from the pane's target instead of being inferred from
+ * the agent, and the context is resolved even before the coordinator loads.
+ */
+export function useAgentAuxContext(
+  agentInstanceId: string | null | undefined,
+  targetChainId?: string,
+): AgentAuxContext {
   const id = String(agentInstanceId || '');
   const { data: instanceData, isSuccess: instanceLoaded } = useFetchAgentInstanceQuery(
     { instanceId: id },
@@ -58,7 +67,12 @@ export function useAgentAuxContext(agentInstanceId: string | null | undefined): 
   const conversation: any = convData?.conversation;
 
   const chainId = String(
-    conversation?.chain_id || conversation?.chainId || instance?.chain_id || instance?.chainId || '',
+    targetChainId ||
+      conversation?.chain_id ||
+      conversation?.chainId ||
+      instance?.chain_id ||
+      instance?.chainId ||
+      '',
   );
   const projectId = String(
     conversation?.project_id || conversation?.projectId || instance?.project_id || instance?.projectId || '',
