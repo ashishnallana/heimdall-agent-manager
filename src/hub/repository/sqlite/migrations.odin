@@ -501,9 +501,11 @@ MIGRATION_123_EXTENSION_VERSION_SYNC :: #load("migrations/123_extension_version_
 MIGRATION_124_EXTENSION_VERSION_SYNC :: #load("migrations/124_extension_version_sync_0_4_41.sql", string)
 
 MIGRATION_127_EXTENSION_VERSION_SYNC :: #load("migrations/127_extension_version_sync_0_4_42.sql", string)
-MIGRATION_128_REMOVE_TASK_VERIFY :: #load("migrations/128_remove_task_verify.sql", string)
+MIGRATION_128_EXTENSION_VERSION_SYNC :: #load("migrations/128_extension_version_sync_0_4_43.sql", string)
 
-migration_order :: [131]string {
+MIGRATION_129_REMOVE_TASK_VERIFY :: #load("migrations/129_remove_task_verify.sql", string)
+
+migration_order :: [132]string {
 	"001_foundation.sql",
 	"002_owner_scoped_core.sql",
 	"003_device_tokens.sql",
@@ -634,7 +636,8 @@ migration_order :: [131]string {
 	"125_transient_extension_signals.sql",
 	"126_action_schedule_revision.sql",
 	"127_extension_version_sync_0_4_42.sql",
-	"128_remove_task_verify.sql",
+	"128_extension_version_sync_0_4_43.sql",
+	"129_remove_task_verify.sql",
 }
 
 // stop_before is a TEST SEAM: when non-empty, the apply loop stops in front of
@@ -1092,7 +1095,8 @@ migration_sql :: proc(name, migrations_dir: string) -> string {
 			return string(data)
 		}
 	}
-	if name == "128_remove_task_verify.sql" do return strings.clone(MIGRATION_128_REMOVE_TASK_VERIFY)
+	if name == "129_remove_task_verify.sql" do return strings.clone(MIGRATION_129_REMOVE_TASK_VERIFY)
+	if name == "128_extension_version_sync_0_4_43.sql" do return strings.clone(MIGRATION_128_EXTENSION_VERSION_SYNC)
 	if name == "127_extension_version_sync_0_4_42.sql" do return strings.clone(MIGRATION_127_EXTENSION_VERSION_SYNC)
 	if name == "124_extension_version_sync_0_4_41.sql" do return strings.clone(MIGRATION_124_EXTENSION_VERSION_SYNC)
 	if name == "123_extension_version_sync_0_4_40.sql" do return strings.clone(MIGRATION_123_EXTENSION_VERSION_SYNC)
@@ -1237,6 +1241,14 @@ migration_applied :: proc(conn: ^Conn, version: string) -> bool {
 	if sqlite3_step(stmt) == SQLITE_ROW do return true
 	if version == "046_task_chain_fleets.sql" {
 		return migration_applied(conn, "044_task_chain_fleets.sql")
+	}
+	// The verify removal shipped to some databases as 128 before release 0.4.43
+	// took that number, so it was renumbered 129. Such a database already has the
+	// removal, and its boot may have consumed the taskv2_boot_regate marker;
+	// re-running it would re-create the marker and re-evaluate every in-review
+	// gate a second time.
+	if version == "129_remove_task_verify.sql" {
+		return migration_applied(conn, "128_remove_task_verify.sql")
 	}
 	if version == "048_task_subscriptions.sql" || version == "049_task_subscriptions.sql" {
 		return sqlite_object_exists(conn, "task_subscriptions")
