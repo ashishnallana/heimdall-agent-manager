@@ -1,20 +1,23 @@
 package main
 
-// ── Task System v2 (M2): brief flags, lease verbs, review, fetch, verify ──────
+// ── Task System v2 (M2): brief flags, lease verbs, review, fetch ──────────────
 //
 // Everything here talks to the local Bridge endpoint over the same JSONL client
 // the rest of agent mode uses (ctl_agent_local_call). The hub contract is the
 // M2 wire contract:
 //
-//   agent.lease.submit   {lease_id?, summary, handoff?, output?, verify?:"none", skip_verify?, skip_verify_reason?}   (bridge adds vcs)
+//   agent.lease.submit   {lease_id?, summary, handoff?, output?, artifacts?}       (bridge adds vcs)
 //   agent.lease.handoff  {lease_id?, summary, handoff?}                            (bridge adds vcs)
 //   agent.lease.block    {lease_id?, waiting_on:{kind, ref?, reason}, summary?}
 //   agent.review.post    {task_id?, verdict: approve|request_changes, findings?}
 //   agent.task.fetch     {task_id, ref}   ref = "#<event_id>" | "facet:<task>:<attempt>:<kind>"
 //
-// `ham-ctl verify` runs the task brief's verify command as a Run shell session
-// labelled `verify <task_id> #<attempt_no> @<head>`; the hub attributes the exit
-// (and the bridge's vcs/tail enrichment of it) to the attempt by that label.
+// Configured verification commands were removed (REQ-TV2-1): workers choose and
+// report their own checks, and an independent reviewer judges them. For one
+// release `ham-ctl verify` is an inert stub, and the old brief flags
+// (--verify/--auto-submit/--require-independent-verify) and submit flags
+// (--verify/--skip-verify/--skip-verify-reason/--auto) are accepted, dropped and
+// reported on stderr; nothing is sent or executed.
 //
 // The lease verbs also send `cwd` (ham-ctl's own working directory, which is the
 // agent's) so the bridge can find the repository for its vcs enrichment; the hub
@@ -25,7 +28,7 @@ import "core:fmt"
 import "core:os"
 import "core:strconv"
 import "core:strings"
-import vcs "odin_test:lib/vcs"
+import jsonx "odin_test:lib/jsonx"
 
 // ---- brief ------------------------------------------------------------------
 
@@ -47,7 +50,7 @@ ctl_collect_repeated :: proc(args: []string, names: ..string) -> [dynamic]string
 // ctl_task_brief_flags_present reports whether any brief flag was given, so
 // `task update` without them does not send an (empty) brief.
 ctl_task_brief_flags_present :: proc(args: []string) -> bool {
-	for f in ([?]string{"--goal", "--acceptance", "--verify", "--input", "--inputs", "--review-role", "--review-roles", "--auto-submit", "--require-independent-verify", "--on-output-workflow", "--output-schema", "--brief-file"}) {
+	for f in ([?]string{"--goal", "--acceptance", "--input", "--inputs", "--review-role", "--review-roles", "--on-output-workflow", "--output-schema", "--brief-file"}) {
 		if has_flag(args, f) do return true
 	}
 	return false
@@ -57,8 +60,8 @@ ctl_task_brief_flags_present :: proc(args: []string) -> bool {
 // body (the base) and the brief flags (which override the file's fields).
 // Pure: the file's text is passed in. Returns ("", false) when there is nothing
 // to send. Only the brief keys the hub documents are carried from the file
-// (goal, acceptance, verify, inputs, review_roles, assignee, budget, output,
-// on_output, auto_submit, require_independent_verify); flags win field by field.
+// (goal, acceptance, inputs, review_roles, assignee, budget, output, on_output);
+// flags win field by field. The removed verify keys are never carried.
 ctl_task_brief_json :: proc(args: []string, brief_file_text: string) -> (string, bool) {
 	file := strings.trim_space(brief_file_text)
 	fields := make([dynamic]string)
@@ -76,10 +79,6 @@ ctl_task_brief_json :: proc(args: []string, brief_file_text: string) -> (string,
 		if raw, ok := ctl_extract_json_array_raw(file, "acceptance"); ok do append(&fields, json_kv_raw("acceptance", raw))
 	}
 
-	verify := option_value(args, "--verify", "")
-	if verify == "" && file != "" do verify = extract_json_string_unescaped(file, "verify", "", context.temp_allocator)
-	if verify != "" do append(&fields, json_kv("verify", verify))
-
 	inputs := collect_multi_values(args, "--input", "--inputs")
 	defer delete(inputs)
 	if len(inputs) > 0 {
@@ -94,18 +93,6 @@ ctl_task_brief_json :: proc(args: []string, brief_file_text: string) -> (string,
 		append(&fields, json_string_array_field("review_roles", roles[:]))
 	} else if file != "" {
 		if raw, ok := ctl_extract_json_array_raw(file, "review_roles"); ok do append(&fields, json_kv_raw("review_roles", raw))
-	}
-
-	if has_flag(args, "--auto-submit") {
-		append(&fields, `"auto_submit":true`)
-	} else if file != "" {
-		if v, ok := ctl_extract_json_bool_raw(file, "auto_submit"); ok do append(&fields, json_kv_raw("auto_submit", "true" if v else "false"))
-	}
-
-	if has_flag(args, "--require-independent-verify") {
-		append(&fields, `"require_independent_verify":true`)
-	} else if file != "" {
-		if v, ok := ctl_extract_json_bool_raw(file, "require_independent_verify"); ok do append(&fields, json_kv_raw("require_independent_verify", "true" if v else "false"))
 	}
 
 	if file != "" {
@@ -135,25 +122,55 @@ ctl_task_brief_json :: proc(args: []string, brief_file_text: string) -> (string,
 	return json_object_from_slice(fields[:]), true
 }
 
+// CTL_REMOVED_BRIEF_KEYS / CTL_REMOVED_BRIEF_FLAGS: the verification brief
+// fields that were removed. They are accepted for one release and dropped.
+CTL_REMOVED_BRIEF_KEYS :: [?]string{"verify", "auto_submit", "require_independent_verify"}
+CTL_REMOVED_BRIEF_FLAGS :: [?]string{"--verify", "--auto-submit", "--require-independent-verify"}
+
+// ctl_task_brief_removed_fields names the removed verification fields the
+// caller passed, as flags or as --brief-file keys. Pure.
+ctl_task_brief_removed_fields :: proc(args: []string, brief_file_text: string) -> []string {
+	out := make([dynamic]string, context.temp_allocator)
+	keys := CTL_REMOVED_BRIEF_KEYS
+	for f, i in CTL_REMOVED_BRIEF_FLAGS {
+		if has_flag(args, f) do append(&out, keys[i])
+	}
+	if file := strings.trim_space(brief_file_text); file != "" {
+		for k in keys {
+			if !jsonx.has_key(file, k, top_level_only = true) do continue
+			dup := false
+			for o in out { if o == k { dup = true; break } }
+			if !dup do append(&out, k)
+		}
+	}
+	return out[:]
+}
+
+// ctl_warn_removed prints the one-release compatibility warning for dropped
+// verification flags on stderr, so stdout stays the command's JSON.
+ctl_warn_removed :: proc(what: string, fields: []string) {
+	if len(fields) == 0 do return
+	fmt.eprintfln("ham-ctl: warning: %s %s ignored: verification commands were removed; choose and report your own checks", what, strings.join(fields, ", ", context.temp_allocator))
+}
+
 // ctl_task_brief_field returns the `"brief":{...}` field for create/update from
 // the flags and --brief-file, or ("", false) when no brief was given. Exits 1
-// when --brief-file cannot be read or is not a JSON object.
+// when --brief-file cannot be read or is not a JSON object. Removed verification
+// fields are dropped with a stderr warning.
 ctl_task_brief_field :: proc(args: []string) -> (string, bool) {
 	file_text := ""
 	if path := option_value(args, "--brief-file", ""); path != "" {
 		data, err := os.read_entire_file(path, context.allocator)
 		if err != nil {
-			fmt.printfln(`{"ok":false,"message":"--brief-file %s: cannot read"}`, path)
-			os.exit(1)
+			ctl_print_error_exit(fmt.tprintf("--brief-file %s: cannot read", path))
 		}
 		file_text = string(data)
 		if t := strings.trim_space(file_text); t == "" || t[0] != '{' {
-			fmt.printfln(`{"ok":false,"message":"--brief-file %s: must contain a JSON object"}`, path)
-			os.exit(1)
+			ctl_print_error_exit(fmt.tprintf("--brief-file %s: must contain a JSON object", path))
 		}
-	} else if !ctl_task_brief_flags_present(args) {
-		return "", false
 	}
+	ctl_warn_removed("brief", ctl_task_brief_removed_fields(args, file_text))
+	if file_text == "" && !ctl_task_brief_flags_present(args) do return "", false
 	brief, ok := ctl_task_brief_json(args, file_text)
 	if !ok do return "", false
 	return json_kv_raw("brief", brief), true
@@ -186,19 +203,6 @@ ctl_extract_json_array_raw :: proc(body, key: string) -> (string, bool) {
 		if ch == ']' { depth -= 1; if depth == 0 do return rest[:i + 1], true }
 	}
 	return "", false
-}
-
-ctl_extract_json_bool_raw :: proc(body, key: string) -> (bool, bool) {
-	probe := strings.concatenate({"\"", key, "\""}, context.temp_allocator)
-	idx := strings.index(body, probe)
-	if idx < 0 do return false, false
-	rest := body[idx + len(probe):]
-	colon := strings.index_byte(rest, ':')
-	if colon < 0 do return false, false
-	rest = strings.trim_left_space(rest[colon + 1:])
-	if strings.has_prefix(rest, "true") do return true, true
-	if strings.has_prefix(rest, "false") do return false, true
-	return false, false
 }
 
 // ---- publish: brief_incomplete rendering -------------------------------------
@@ -250,7 +254,7 @@ ctl_brief_incomplete_render :: proc(response: string) -> (string, bool) {
 			strings.write_byte(&b, '\n')
 		}
 	}
-	strings.write_string(&b, "rules: goal (≤2000 chars); 1..20 acceptance items (≤200 chars each); optional verify command; every review_role needs a fleet row carrying that role.\n")
+	strings.write_string(&b, "rules: goal (≤2000 chars); 1..20 acceptance items (≤200 chars each); every review_role needs a fleet row carrying that role.\n")
 	return strings.to_string(b), true
 }
 
@@ -335,14 +339,12 @@ ctl_read_json_file_flag :: proc(args: []string, flag: string) -> (string, bool) 
 	if path == "" do return "", false
 	data, err := os.read_entire_file(path, context.allocator)
 	if err != nil {
-		fmt.printfln(`{"ok":false,"message":"%s %s: cannot read"}`, flag, path)
-		os.exit(1)
+		ctl_print_error_exit(fmt.tprintf("%s %s: cannot read", flag, path))
 	}
 	text := strings.trim_space(string(data))
 	parsed, perr := json.parse(transmute([]byte)text, json.DEFAULT_SPECIFICATION, false, context.temp_allocator)
 	if perr != nil {
-		fmt.printfln(`{"ok":false,"message":"%s %s: not valid JSON"}`, flag, path)
-		os.exit(1)
+		ctl_print_error_exit(fmt.tprintf("%s %s: not valid JSON", flag, path))
 	}
 	_ = parsed
 	return text, true
@@ -371,13 +373,26 @@ ctl_lease_work_dir :: proc(endpoint, token: string) -> string {
 	cwd := ctl_agent_cwd()
 	resp, ok := ctl_agent_local_call(endpoint, token, "agent.lease.next", json_object(json_kv("cwd", cwd), json_kv_raw("peek", "true")))
 	if !ok do return cwd
-	lease, parsed := ctl_verify_parse_lease(resp)
+	lease, parsed := ctl_lease_peek_parse(resp)
 	if !parsed do return cwd
 	return ctl_lease_dir_or(lease.directory_path, cwd)
 }
 
 ctl_agent_cwd_field :: proc() -> string {
 	return json_kv("cwd", ctl_agent_cwd())
+}
+
+// CTL_REMOVED_SUBMIT_FLAGS: the verification flags `lease submit` no longer
+// sends. They are accepted for one release with a stderr warning.
+CTL_REMOVED_SUBMIT_FLAGS :: [?]string{"--verify", "--skip-verify", "--skip-verify-reason", "--auto"}
+
+// ctl_lease_submit_removed_flags names the removed submit flags present. Pure.
+ctl_lease_submit_removed_flags :: proc(args: []string) -> []string {
+	out := make([dynamic]string, context.temp_allocator)
+	for f in CTL_REMOVED_SUBMIT_FLAGS {
+		if has_flag(args, f) do append(&out, f)
+	}
+	return out[:]
 }
 
 ctl_v2_lease_submit_params :: proc(args: []string, handoff_json := "", output_json := "", artifacts_json := "", cwd_override := "") -> (string, bool) {
@@ -390,18 +405,6 @@ ctl_v2_lease_submit_params :: proc(args: []string, handoff_json := "", output_js
 	if handoff_json != "" do append(&fields, json_kv_raw("handoff", handoff_json))
 	if output_json != "" do append(&fields, json_kv_raw("output", output_json))
 	if artifacts_json != "" do append(&fields, json_kv_raw("artifacts", artifacts_json))
-	if v := strings.trim_space(option_value(args, "--verify", "")); v != "" {
-		if v != "none" do return "", false
-		append(&fields, json_kv("verify", "none"))
-	}
-	skip_verify := has_flag(args, "--skip-verify")
-	skip_reason := strings.trim_space(option_value(args, "--skip-verify-reason", ""))
-	if skip_verify != (skip_reason != "") do return "", false
-	if has_flag(args, "--skip-verify-reason") && !skip_verify do return "", false
-	if skip_verify {
-		append(&fields, `"skip_verify":true`, json_kv("skip_verify_reason", skip_reason))
-	}
-	if has_flag(args, "--auto") do append(&fields, `"auto":true`)
 	if v := option_value(args, "--vcs-base", ""); v != "" do append(&fields, json_kv("vcs_base", v))
 	cwd := cwd_override if cwd_override != "" else ctl_agent_cwd()
 	append(&fields, json_kv("cwd", cwd))
@@ -411,10 +414,7 @@ ctl_v2_lease_submit_params :: proc(args: []string, handoff_json := "", output_js
 ctl_v2_lease_submit :: proc(endpoint, token: string, args: []string) {
 	summary := strings.trim_space(option_value(args, "--summary", ""))
 	if summary == "" { fmt.println(`{"ok":false,"message":"lease submit requires --summary <text>"}`); os.exit(1) }
-	if v := strings.trim_space(option_value(args, "--verify", "")); v != "" && v != "none" {
-		fmt.println(`{"ok":false,"message":"lease submit --verify accepts only 'none'; to skip a configured command use --skip-verify --skip-verify-reason <why>"}`)
-		os.exit(1)
-	}
+	ctl_warn_removed("lease submit", ctl_lease_submit_removed_flags(args))
 	h, _ := ctl_handoff_flags(args)
 	o, _ := ctl_read_json_file_flag(args, "--output-file")
 	a, a_ok := ctl_read_json_file_flag(args, "--artifacts-file")
@@ -428,7 +428,7 @@ ctl_v2_lease_submit :: proc(endpoint, token: string, args: []string) {
 		}
 	}
 	params, ok := ctl_v2_lease_submit_params(args, h, o, a, ctl_lease_work_dir(endpoint, token))
-	if !ok { fmt.println(`{"ok":false,"message":"lease submit invalid arguments: --skip-verify and a non-empty --skip-verify-reason must be used together"}`); os.exit(1) }
+	if !ok { fmt.println(`{"ok":false,"message":"lease submit requires --summary <text>"}`); os.exit(1) }
 	ctl_agent_call_task(endpoint, token, "agent.lease.submit", params, args)
 }
 
@@ -548,8 +548,7 @@ ctl_v2_task_chain_summary :: proc(endpoint, token: string, tokens, args: []strin
 	if path := option_value(args, "--file", ""); path != "" {
 		data, err := os.read_entire_file(path, context.allocator)
 		if err != nil {
-			fmt.printfln(`{"ok":false,"message":"--file %s: cannot read"}`, path)
-			os.exit(1)
+			ctl_print_error_exit(fmt.tprintf("--file %s: cannot read", path))
 		}
 		file_text = string(data)
 	} else if has_flag(args, "--stdin") {
@@ -631,8 +630,7 @@ ctl_v2_task_chain_propose :: proc(endpoint, token: string, tokens, args: []strin
 	if path != "" {
 		data, err := os.read_entire_file(path, context.allocator)
 		if err != nil {
-			fmt.printfln(`{"ok":false,"message":"--file %s: cannot read"}`, path)
-			os.exit(1)
+			ctl_print_error_exit(fmt.tprintf("--file %s: cannot read", path))
 		}
 		file_text = string(data)
 	} else if has_flag(args, "--stdin") {
@@ -708,28 +706,23 @@ ctl_v2_task_fetch :: proc(endpoint, token: string, tokens, args: []string) {
 	ctl_agent_call_task(endpoint, token, "agent.task.fetch", json_object(json_kv("task_id", tid), json_kv("ref", ref)), args)
 }
 
-// ---- verify -----------------------------------------------------------------------
+// ---- lease peek -------------------------------------------------------------------
 
-CTL_VERIFY_WAIT_SLICE_MS :: 300_000
-
-// Ctl_Verify_Lease is what `verify` needs from `lease next` or `task show`.
-Ctl_Verify_Lease :: struct {
-	status:      string,
-	lease_id:    string,
-	task_id:     string,
-	attempt_no:  int,
-	verify_cmd:  string,
-	auto_submit: bool,
-	vcs_base:    string,
-	vcs_head:    string,
-	// Where the task's work lives: placement.workdir (the task's own git
-	// worktree) when the hub names one, else placement.directory_path.
+// Ctl_Lease_Peek is what the lease verbs need from a `lease next` peek: where
+// the leased task's work lives, for the bridge's vcs enrichment.
+Ctl_Lease_Peek :: struct {
+	status:     string,
+	lease_id:   string,
+	task_id:    string,
+	attempt_no: int,
+	// placement.workdir (the task's own git worktree) when the hub names one,
+	// else placement.directory_path.
 	directory_path: string,
 }
 
-// ctl_verify_parse_lease reads status / task_id / attempt_no / brief.verify /
-// brief.auto_submit / vcs_base / vcs_head out of a lease.next or task.show response.
-ctl_verify_parse_lease :: proc(response: string) -> (Ctl_Verify_Lease, bool) {
+// ctl_lease_peek_parse reads a lease.next (or task.show) response. The
+// placement may sit on the lease, at the top level, or in the context pack.
+ctl_lease_peek_parse :: proc(response: string) -> (Ctl_Lease_Peek, bool) {
 	parsed, perr := json.parse(transmute([]byte)response, json.DEFAULT_SPECIFICATION, false, context.temp_allocator)
 	if perr != nil do return {}, false
 	obj, is_obj := parsed.(json.Object)
@@ -743,23 +736,21 @@ ctl_verify_parse_lease :: proc(response: string) -> (Ctl_Verify_Lease, bool) {
 		if !got do break
 		node = inner
 	}
-	out: Ctl_Verify_Lease
+	placement_dir :: proc(out: ^Ctl_Lease_Peek, holder: json.Object) {
+		if out.directory_path != "" do return
+		pl, ok := holder["placement"].(json.Object)
+		if !ok do return
+		if dp, dok := pl["directory_path"].(json.String); dok do out.directory_path = strings.clone(string(dp))
+		if wd, wok := pl["workdir"].(json.String); wok && string(wd) != "" do out.directory_path = strings.clone(string(wd))
+	}
+	out: Ctl_Lease_Peek
 	if v, ok := node["status"].(json.String); ok do out.status = strings.clone(string(v))
 	if lease, ok := node["lease"].(json.Object); ok {
 		if l, lok := lease["lease_id"].(json.String); lok do out.lease_id = strings.clone(string(l))
 		if n, nok := lease["attempt_no"].(json.Float); nok do out.attempt_no = int(n)
 		if n, nok := lease["attempt_no"].(json.Integer); nok do out.attempt_no = int(n)
 		if t, tok := lease["task_id"].(json.String); tok do out.task_id = strings.clone(string(t))
-		if b, bok := lease["vcs_base"].(json.String); bok do out.vcs_base = strings.clone(string(b))
-		if h, hok := lease["vcs_head"].(json.String); hok do out.vcs_head = strings.clone(string(h))
-		if pl, pok := lease["placement"].(json.Object); pok {
-			if dp, dok := pl["directory_path"].(json.String); dok do out.directory_path = strings.clone(string(dp))
-			if wd, wok := pl["workdir"].(json.String); wok && string(wd) != "" do out.directory_path = strings.clone(string(wd))
-		}
-		if vcs_obj, vok := lease["vcs"].(json.Object); vok {
-			if b, bok := vcs_obj["base"].(json.String); bok && out.vcs_base == "" do out.vcs_base = strings.clone(string(b))
-			if h, hok := vcs_obj["head"].(json.String); hok && out.vcs_head == "" do out.vcs_head = strings.clone(string(h))
-		}
+		placement_dir(&out, lease)
 	}
 	task_obj, has_task := node["task"].(json.Object)
 	if !has_task {
@@ -774,281 +765,36 @@ ctl_verify_parse_lease :: proc(response: string) -> (Ctl_Verify_Lease, bool) {
 			if n, nok := task_obj["attempt_no"].(json.Float); nok do out.attempt_no = int(n)
 			if n, nok := task_obj["attempt_no"].(json.Integer); nok do out.attempt_no = int(n)
 		}
-		if brief, bok := task_obj["brief"].(json.Object); bok {
-			if v, vok := brief["verify"].(json.String); vok do out.verify_cmd = strings.clone(string(v))
-			if a, aok := brief["auto_submit"].(json.Boolean); aok do out.auto_submit = bool(a)
-		}
 	}
-	if out.directory_path == "" {
-		if pl, pok := node["placement"].(json.Object); pok {
-			if dp, dok := pl["directory_path"].(json.String); dok do out.directory_path = strings.clone(string(dp))
-			if wd, wok := pl["workdir"].(json.String); wok && string(wd) != "" do out.directory_path = strings.clone(string(wd))
-		}
-	}
+	placement_dir(&out, node)
 	if pack, pok := node["pack"].(json.Object); pok {
 		// lease.next returns {status, lease, task, pack}; the placement (with the
 		// chain directory's path) lives in the pack, at its top level and under
 		// pack.lease.
-		if out.directory_path == "" {
-			if pl, plok := pack["placement"].(json.Object); plok {
-				if dp, dok := pl["directory_path"].(json.String); dok do out.directory_path = strings.clone(string(dp))
-				if wd, wok := pl["workdir"].(json.String); wok && string(wd) != "" do out.directory_path = strings.clone(string(wd))
-			}
-		}
-		if out.directory_path == "" {
-			if pl_lease, lok := pack["lease"].(json.Object); lok {
-				if pl, plok := pl_lease["placement"].(json.Object); plok {
-					if dp, dok := pl["directory_path"].(json.String); dok do out.directory_path = strings.clone(string(dp))
-					if wd, wok := pl["workdir"].(json.String); wok && string(wd) != "" do out.directory_path = strings.clone(string(wd))
-				}
-			}
-		}
-		if wya, wok := pack["where_you_are"].(json.Object); wok {
-			if h, hok := wya["head"].(json.String); hok && out.vcs_head == "" do out.vcs_head = strings.clone(string(h))
-			if b, bok := wya["base"].(json.String); bok && out.vcs_base == "" do out.vcs_base = strings.clone(string(b))
-		}
-		if prev, pvok := pack["previous_attempt"].(json.Object); pvok {
-			if vcs_obj, vok := prev["vcs"].(json.Object); vok {
-				if h, hok := vcs_obj["head"].(json.String); hok && out.vcs_head == "" do out.vcs_head = strings.clone(string(h))
-				if b, bok := vcs_obj["base"].(json.String); bok && out.vcs_base == "" do out.vcs_base = strings.clone(string(b))
-			}
-		}
+		placement_dir(&out, pack)
+		if pl_lease, lok := pack["lease"].(json.Object); lok do placement_dir(&out, pl_lease)
 	}
 	return out, out.task_id != ""
 }
 
-// ctl_verify_label is the exact label the hub attributes a verify exit by:
-// `verify <task_id> #<attempt_no> @<head>` (or with ` independent` suffix).
-ctl_verify_label :: proc(task_id: string, attempt_no: int, head: string, independent := false) -> string {
-	if independent {
-		return fmt.aprintf("verify %s #%d @%s independent", task_id, attempt_no, head)
-	}
-	return fmt.aprintf("verify %s #%d @%s", task_id, attempt_no, head)
+// ---- verify (removed; one-release stub) -------------------------------------------
+
+// ctl_verify_removed_json is the M3 stub's whole output. Pure.
+ctl_verify_removed_json :: proc() -> string {
+	return json_object(
+		json_kv_raw("ok", "true"),
+		json_kv("verify", "removed"),
+		json_kv("message", "Verification commands were removed; choose and report your own checks"),
+	)
 }
 
-// Ctl_Verify_Wait is one agent.shell.wait answer reduced to what verify acts on.
-Ctl_Verify_Wait :: struct {
-	ok:        bool,
-	timed_out: bool,
-	finished:  bool,
-	status:    string,
-	exit_code: int,
-	has_code:  bool,
-	output:    string,
-}
-
-ctl_verify_parse_wait :: proc(response: string) -> Ctl_Verify_Wait {
-	parsed, perr := json.parse(transmute([]byte)response, json.DEFAULT_SPECIFICATION, false, context.temp_allocator)
-	if perr != nil do return {}
-	obj, is_obj := parsed.(json.Object)
-	if !is_obj do return {}
-	if okv, has := obj["ok"].(json.Boolean); has && !bool(okv) do return {}
-	node := obj
-	for _ in 0 ..< 4 {
-		if _, has := node["session_id"]; has do break
-		inner, got := node["data"].(json.Object)
-		if !got do break
-		node = inner
-	}
-	w := Ctl_Verify_Wait{ok = true}
-	if v, ok := node["timed_out"].(json.Boolean); ok && bool(v) { w.timed_out = true; return w }
-	if v, ok := node["status"].(json.String); ok do w.status = strings.clone(string(v))
-	if n, ok := node["exit_code"].(json.Float); ok { w.exit_code = int(n); w.has_code = true }
-	if n, ok := node["exit_code"].(json.Integer); ok { w.exit_code = int(n); w.has_code = true }
-	if v, ok := node["output"].(json.String); ok do w.output = strings.clone(string(v))
-	w.finished = w.status != "" && w.status != "running" && w.status != "starting"
-	return w
-}
-
-ctl_verify_fetch_vcs_head :: proc(endpoint, token, task_id: string, attempt_no: int) -> string {
-	if task_id == "" || attempt_no <= 0 do return ""
-	ref := fmt.tprintf("facet:%s:%d:vcs", task_id, attempt_no)
-	resp, ok := ctl_agent_local_call(endpoint, token, "agent.task.fetch", json_object(json_kv("task_id", task_id), json_kv("ref", ref)))
-	if !ok do return ""
-	return extract_json_string_unescaped(resp, "head", "", context.temp_allocator)
-}
-
+// ctl_v2_verify is the inert `ham-ctl verify` kept for one release so old
+// instructions do not fail: it runs nothing, records nothing, never submits,
+// and exits 0.
 ctl_v2_verify :: proc(endpoint, token: string, tokens, args: []string) {
+	_, _ = endpoint, token
 	if pos(tokens, 0) == "help" || has_flag(args, "--help") || has_flag(args, "-h") { print_help_verify(); return }
-	independent := has_flag(args, "--independent")
-	explicit_tid := option_value(args, "--task", option_value(args, "--task-id", pos(tokens, 0)))
-	cwd := ctl_agent_cwd(context.allocator)
-
-	// 1. the lease (status current) carries the task + brief.verify.
-	//    peek:true ensures `ham-ctl verify` inspects an existing lease without
-	//    implicitly claiming a new ready task.
-	lease_resp, lok := ctl_agent_local_call(endpoint, token, "agent.lease.next", json_object(json_kv("cwd", cwd), json_kv_raw("peek", "true")))
-	if !lok { fmt.println(`{"ok":false,"message":"local Bridge endpoint is not reachable"}`); os.exit(1) }
-	lease, parsed := ctl_verify_parse_lease(lease_resp)
-	if (!parsed || (lease.status != "current" && lease.status != "granted") || (explicit_tid != "" && lease.task_id != explicit_tid)) && explicit_tid != "" {
-		if show_resp, sok := ctl_agent_local_call(endpoint, token, "agent.task.show", json_object(json_kv("task_id", explicit_tid))); sok {
-			if task_lease, tok := ctl_verify_parse_lease(show_resp); tok {
-				task_lease.status = "current"
-				lease = task_lease
-				parsed = true
-			}
-		}
-	}
-	if !parsed || (lease.status != "current" && lease.status != "granted") {
-		fmt.println(`{"ok":false,"message":"verify: you hold no lease (lease next did not return a current task)"}`)
-		fmt.println(lease_resp)
-		os.exit(1)
-	}
-	if has_flag(args, "--cmd") {
-		fmt.println(`{"ok":false,"message":"verify: --cmd is not supported; verify always runs brief.verify from your current task"}`)
-		os.exit(1)
-	}
-	verify_cmd := strings.trim_space(lease.verify_cmd)
-	if verify_cmd == "" || verify_cmd == "none" {
-		fmt.printfln(`{"ok":true,"task_id":"%s","verify":"none","message":"No verification command configured; nothing to run"}`, lease.task_id)
-		return
-	}
-
-	// The task's work lives in the chain directory from the lease placement; an
-	// agent launched without a project path sits in its instance dir, where
-	// brief.verify would find nothing.
-	cwd = ctl_lease_dir_or(lease.directory_path, cwd)
-
-	// 2. head of cwd ("" when not a repo). For --independent, prefer the attempt's
-	//    submitted vcs.head and run inside an ephemeral detached git worktree.
-	head := ""
-	if sha, ok, _ := vcs.git_repo_head_sha(cwd); ok do head = sha
-	run_cwd := cwd
-	wt_path := ""
-	if independent {
-		if lease.vcs_head == "" {
-			lease.vcs_head = ctl_verify_fetch_vcs_head(endpoint, token, lease.task_id, lease.attempt_no)
-		}
-		if lease.vcs_head != "" do head = lease.vcs_head
-		if head != "" && cwd != "" {
-			home := os.get_env_alloc("HOME", context.temp_allocator)
-			base_wt := strings.concatenate({home, "/.cache/heimdall-tests/verify-wt"}, context.temp_allocator) if home != "" else strings.concatenate({cwd, "/.git/heimdall-verify-wt"}, context.temp_allocator)
-			wt_path = fmt.aprintf("%s/%s-%d-%d", base_wt, safe_path_part(lease.task_id), lease.attempt_no, os.get_pid())
-			if wt_ok, wt_msg := vcs.git_worktree_add_detached(cwd, wt_path, head); wt_ok {
-				run_cwd = wt_path
-			} else {
-				fmt.printfln("verify: warning: could not create detached worktree at %s (%s); running in cwd", head, wt_msg)
-				wt_path = ""
-			}
-		}
-	}
-	cleanup_wt :: proc(repo, wt: string) {
-		if wt != "" {
-			_, _ = vcs.git_worktree_remove_force(repo, wt)
-		}
-	}
-
-	// 3. start the Run session with the attributable label.
-	label := ctl_verify_label(lease.task_id, lease.attempt_no, head, independent)
-	ctx, ctx_ok := ctl_shell_context(endpoint, token)
-	bridge_id := option_value(args, "--bridge", ctx.bridge_id)
-	if bridge_id == "" || !ctx_ok {
-		cleanup_wt(cwd, wt_path)
-		fmt.println(`{"ok":false,"message":"verify could not resolve your bridge/agent instance; pass --bridge <bridge_id>"}`)
-		os.exit(1)
-	}
-	fields := make([dynamic]string, context.temp_allocator)
-	append(&fields, json_kv("kind", "run"))
-	// cmd and cwd go only inside the sealed enc_spec (never in clear to the hub).
-	append(&fields, json_kv("agent_instance_id", ctx.agent_instance_id))
-	if ctx.conversation_id != "" do append(&fields, json_kv("conversation_id", ctx.conversation_id))
-	if v := option_value(args, "--project", ctx.project_id); v != "" do append(&fields, json_kv("project_id", v))
-	append(&fields, json_kv("label", label))
-	ctl_shell_attach_enc_spec(endpoint, token, bridge_id, "run", args, verify_cmd, run_cwd, &fields)
-	create_resp, cok := ctl_agent_local_call(endpoint, token, "agent.rest.request", json_object(
-		json_kv("http_method", "POST"),
-		json_kv("path", fmt.tprintf("/api/v1/bridges/%s/shells", safe_path_part(bridge_id))),
-		json_kv("body", json_object_from_slice(fields[:])),
-	))
-	if !cok {
-		cleanup_wt(cwd, wt_path)
-		fmt.println(`{"ok":false,"message":"local Bridge endpoint is not reachable"}`)
-		os.exit(1)
-	}
-	session_id := ctl_shell_session_id_from_response(create_resp)
-	if session_id == "" {
-		cleanup_wt(cwd, wt_path)
-		fmt.println(create_resp)
-		os.exit(1)
-	}
-	fmt.printfln("verify: task %s attempt #%d session %s head %s%s", lease.task_id, lease.attempt_no, session_id, head if head != "" else "(no repo)", " (independent worktree)" if independent else "")
-	fmt.printfln("verify: $ %s", verify_cmd)
-
-	// 4. wait in ≤300 s slices, heartbeating between slices so the lease TTL
-	//    cannot expire under a long verify.
-	call_fn :: proc(ctx: rawptr, method, params_json: string) -> (string, bool) {
-		pair := (^([2]string))(ctx)
-		return ctl_agent_local_call(pair[0], pair[1], method, params_json)
-	}
-	pair := [2]string{endpoint, token}
-	w, wait_err := ctl_verify_wait_with_heartbeats(session_id, CTL_VERIFY_WAIT_SLICE_MS, &pair, call_fn)
-	cleanup_wt(cwd, wt_path)
-	if wait_err != "" {
-		fmt.println(wait_err)
-		os.exit(1)
-	}
-	// 5. print the log tail and exit with the run's code.
-	if w.output != "" {
-		fmt.print(w.output)
-		if !strings.has_suffix(w.output, "\n") do fmt.println()
-	}
-	code := w.exit_code if w.has_code else 1
-	fmt.printfln("verify: %s exit %d (session %s)", w.status, code, session_id)
-
-	// 6. R2 auto_submit: when brief.auto_submit is true and non-independent verify
-	//    passes on a clean tree at the current head, automatically submit the lease.
-	if !independent && lease.auto_submit && code == 0 && head != "" {
-		cur_head, h_ok, _ := vcs.git_repo_head_sha(cwd)
-		if h_ok && cur_head == head && vcs.git_repo_is_clean(cwd) {
-			summary := "auto-submitted after passing verify"
-			if lease.vcs_base != "" {
-				if subj, s_ok := vcs.git_commit_subjects_since(cwd, lease.vcs_base); s_ok && subj != "" {
-					summary = subj
-				}
-			}
-			sub_fields := make([dynamic]string, context.temp_allocator)
-			if lease.lease_id != "" do append(&sub_fields, json_kv("lease_id", lease.lease_id))
-			append(&sub_fields, json_kv("summary", summary))
-			append(&sub_fields, `"auto":true`)
-			if lease.vcs_base != "" do append(&sub_fields, json_kv("vcs_base", lease.vcs_base))
-			append(&sub_fields, json_kv("cwd", cwd))
-			if sub_resp, sub_ok := ctl_agent_local_call(endpoint, token, "agent.lease.submit", json_object_from_slice(sub_fields[:])); sub_ok {
-				keyring, key_ok := ctl_read_vault_keyring(args, context.temp_allocator)
-				dec_sub := ctl_decrypt_json_string(sub_resp, keyring, key_ok)
-				defer delete(dec_sub)
-				fmt.println(dec_sub)
-			}
-		}
-	}
-
-	os.exit(code)
-}
-
-ctl_verify_wait_with_heartbeats :: proc(
-	session_id: string,
-	slice_ms: int,
-	ctx: rawptr,
-	call: proc(ctx: rawptr, method, params_json: string) -> (string, bool),
-) -> (Ctl_Verify_Wait, string) {
-	first := true
-	for {
-		wait_resp, wok := call(ctx, "agent.shell.wait", json_object(
-			json_kv("session_id", session_id),
-			json_kv_raw("timeout_ms", fmt.tprintf("%d", slice_ms)),
-		))
-		if !wok do return {}, `{"ok":false,"message":"local Bridge endpoint is not reachable while waiting on the verify run"}`
-		w := ctl_verify_parse_wait(wait_resp)
-		if !w.ok do return {}, wait_resp
-		if w.timed_out {
-			hb := "{}"
-			if first do hb = json_object(json_kv("note", "verify running"))
-			first = false
-			_, _ = call(ctx, "agent.lease.heartbeat", hb)
-			continue
-		}
-		if !w.finished do return {}, wait_resp
-		return w, ""
-	}
+	fmt.println(ctl_verify_removed_json())
 }
 
 // ---- help ------------------------------------------------------------------------
@@ -1072,26 +818,15 @@ print_help_review :: proc() {
 }
 
 print_help_verify :: proc() {
-	fmt.println("ham-ctl verify — run your task's verify command as an attributable Run session")
+	fmt.println("ham-ctl verify — removed")
 	fmt.println("")
-	fmt.println("  ham-ctl verify [<task-id>] [--independent] [--bridge <id>]")
+	fmt.println("Configured verification commands were removed. Choose the checks that fit your")
+	fmt.println("task, run them yourself (for example with `ham-ctl shell run`), and report the")
+	fmt.println("exact commands and outcomes in your `lease submit` summary; an independent")
+	fmt.println("reviewer judges correctness.")
 	fmt.println("")
-	fmt.println("Reads brief.verify from your current lease, runs it in your cwd as a shell Run")
-	fmt.println("labelled `verify <task_id> #<attempt_no> @<head>`, heartbeats your lease while it")
-	fmt.println("runs, prints the log tail and exits with the run's exit code. The hub records the")
-	fmt.println("exit (plus repo head/dirty state) as the attempt's verify facet; `lease submit`")
-	fmt.println("requires a passing verify at the current head unless no command is configured or an explicit")
-	fmt.println("--skip-verify --skip-verify-reason <why> is used (forbidden for independent-verify tasks).")
-	fmt.println("When brief.auto_submit is true and verify exits 0 on a clean tree at head,")
-	fmt.println("`ham-ctl verify` automatically submits the lease.")
-	fmt.println("  --independent   run brief.verify in an ephemeral detached git worktree at the")
-	fmt.println("                  attempt's submitted vcs.head and record independent:true on the")
-	fmt.println("                  verify facet (cleaned up on exit).")
-	fmt.println("")
-	fmt.println("EXAMPLES")
-	fmt.println("  ham-ctl verify")
-	fmt.println("  ham-ctl verify --independent")
-	fmt.println("  ham-ctl verify && ham-ctl lease submit --summary 'tests green'")
+	fmt.println("For one release `ham-ctl verify` still exists as a stub: it prints")
+	fmt.println("{\"ok\":true,\"verify\":\"removed\",…}, runs nothing, never submits, and exits 0.")
 }
 
 // ---- workflow (M3b) --------------------------------------------------------------
@@ -1212,7 +947,7 @@ ctl_v2_workflow_output_params :: proc(tokens, args: []string) -> (run_id, stage_
  id, base := ctl_v2_workflow_status_params(tokens, args)
  stage := option_value(args, "--stage", pos(tokens, 2))
  if id == "" || stage == "" do return "", "", "", false
- return id, stage, strings.clone(fmt.tprintf("%s,%s}", base[:len(base)-1], json_kv("stage_key", stage))), true
+ return id, stage, strings.concatenate({base[:len(base)-1], ",", json_kv("stage_key", stage), "}"}), true
 }
 
 ctl_v2_workflow_retry_params :: proc(tokens, args: []string) -> (run_id, target, params: string, ok: bool) {
@@ -1251,8 +986,7 @@ ctl_v2_workflow :: proc(endpoint, token: string, tokens, args: []string) {
 		if path != "" {
 			data, err := os.read_entire_file(path, context.allocator)
 			if err != nil {
-				fmt.printfln(`{"ok":false,"message":"--file %s: cannot read"}`, path)
-				os.exit(1)
+				ctl_print_error_exit(fmt.tprintf("--file %s: cannot read", path))
 			}
 			file_text = string(data)
 		} else if has_flag(args, "--stdin") {
@@ -1339,8 +1073,7 @@ ctl_workflow_user_mode :: proc(cmd, args: []string) {
 		if path != "" {
 			data, err := os.read_entire_file(path, context.allocator)
 			if err != nil {
-				fmt.printfln(`{"ok":false,"message":"--file %s: cannot read"}`, path)
-				os.exit(1)
+				ctl_print_error_exit(fmt.tprintf("--file %s: cannot read", path))
 			}
 			file_text = string(data)
 		} else if has_flag(args, "--stdin") {
@@ -1371,14 +1104,14 @@ ctl_workflow_user_mode :: proc(cmd, args: []string) {
 			fmt.println(`{"ok":false,"message":"workflow status requires <run_id>"}`)
 			os.exit(1)
 		}
-		ctl_tasks_request_and_decrypt(transport, "GET", fmt.tprintf("/api/v1/workflow-runs/%s?execution_no=%s", safe_path_part(cid), safe_path_part(option_value(args, "--execution", "0"))), "", args)
+		ctl_tasks_request_and_decrypt(transport, "GET", fmt.tprintf("/api/v1/workflow-runs/%s?execution_no=%s", safe_path_part(cid), query_escape(option_value(args, "--execution", "0"))), "", args)
 	case "output":
 		cid, stage, _, ok := ctl_v2_workflow_output_params(tokens, args)
 		if !ok || cid == "" {
 			fmt.println(`{"ok":false,"message":"workflow output requires <run_id> <stage_key>"}`)
 			os.exit(1)
 		}
-		ctl_tasks_request_and_decrypt(transport, "GET", fmt.tprintf("/api/v1/workflow-runs/%s/output?stage_key=%s&execution_no=%s", safe_path_part(cid), safe_path_part(stage), safe_path_part(option_value(args, "--execution", "0"))), "", args)
+		ctl_tasks_request_and_decrypt(transport, "GET", fmt.tprintf("/api/v1/workflow-runs/%s/output?stage_key=%s&execution_no=%s", safe_path_part(cid), query_escape(stage), query_escape(option_value(args, "--execution", "0"))), "", args)
 	case "retry":
 		cid, _, params, ok := ctl_v2_workflow_retry_params(tokens, args)
 		if !ok || cid == "" {

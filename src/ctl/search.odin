@@ -290,27 +290,6 @@ append_search_param :: proc(b: ^strings.Builder, key, value: string) {
 	write_query_escaped(b, value)
 }
 
-// write_query_escaped percent-encodes per RFC 3986 (unreserved chars pass through,
-// everything else is %XX). Operates byte-wise so UTF-8 is encoded correctly.
-write_query_escaped :: proc(b: ^strings.Builder, s: string) {
-	for i in 0..<len(s) {
-		ch := s[i]
-		switch ch {
-		case 'A'..='Z', 'a'..='z', '0'..='9', '-', '_', '.', '~':
-			strings.write_byte(b, ch)
-		case:
-			strings.write_byte(b, '%')
-			strings.write_byte(b, hex_upper_digit(ch >> 4))
-			strings.write_byte(b, hex_upper_digit(ch & 0x0F))
-		}
-	}
-}
-
-hex_upper_digit :: proc(n: byte) -> byte {
-	if n < 10 do return '0' + n
-	return 'A' + (n - 10)
-}
-
 ctl_search_fetch :: proc(base, token, path: string) -> (string, bool) {
 	full_path := hub_url_path_prefix_join(base, path)
 	headers := [?]http.Header{{name = "Authorization", value = strings.concatenate({"Bearer ", token})}}

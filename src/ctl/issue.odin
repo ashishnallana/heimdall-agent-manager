@@ -95,14 +95,14 @@ ctl_issues_command :: proc(cmd: []string, args: []string) {
 	if action == "" || action == "list" {
 		query := make([dynamic]string)
 		defer delete(query)
-		if s := option_value(args, "--status", ""); s != "" do append(&query, fmt.tprintf("status=%s", s))
-		if sc := option_value(args, "--scope", option_value(args, "--scope-type", "")); sc != "" do append(&query, fmt.tprintf("scope_type=%s", sc))
-		if t := option_value(args, "--target-id", option_value(args, "--target", "")); t != "" do append(&query, fmt.tprintf("target_id=%s", t))
-		if cid := option_value(args, "--chain-id", option_value(args, "--chain", "")); cid != "" do append(&query, fmt.tprintf("chain_id=%s", cid))
-		if q := option_value(args, "--query", option_value(args, "-q", "")); q != "" do append(&query, fmt.tprintf("query=%s", q))
-		if vid := option_value(args, "--voter-id", option_value(args, "--voter", "")); vid != "" do append(&query, fmt.tprintf("voter_id=%s", vid))
-		if l := option_value(args, "--limit", ""); l != "" do append(&query, fmt.tprintf("limit=%s", l))
-		if off := option_value(args, "--offset", ""); off != "" do append(&query, fmt.tprintf("offset=%s", off))
+		if s := option_value(args, "--status", ""); s != "" do query_param(&query, "status", s)
+		if sc := option_value(args, "--scope", option_value(args, "--scope-type", "")); sc != "" do query_param(&query, "scope_type", sc)
+		if t := option_value(args, "--target-id", option_value(args, "--target", "")); t != "" do query_param(&query, "target_id", t)
+		if cid := option_value(args, "--chain-id", option_value(args, "--chain", "")); cid != "" do query_param(&query, "chain_id", cid)
+		if q := option_value(args, "--query", option_value(args, "-q", "")); q != "" do query_param(&query, "query", q)
+		if vid := option_value(args, "--voter-id", option_value(args, "--voter", "")); vid != "" do query_param(&query, "voter_id", vid)
+		if l := option_value(args, "--limit", ""); l != "" do query_param(&query, "limit", l)
+		if off := option_value(args, "--offset", ""); off != "" do query_param(&query, "offset", off)
 
 		path := "/api/v1/issues"
 		if len(query) > 0 {
@@ -121,7 +121,7 @@ ctl_issues_command :: proc(cmd: []string, args: []string) {
 		}
 		path := fmt.tprintf("/api/v1/issues/%s", safe_path_part(issue_id))
 		if vid := option_value(args, "--voter-id", option_value(args, "--voter", "")); vid != "" {
-			path = fmt.tprintf("/api/v1/issues/%s?voter_id=%s", safe_path_part(issue_id), vid)
+			path = fmt.tprintf("/api/v1/issues/%s?voter_id=%s", safe_path_part(issue_id), query_escape(vid))
 		}
 		ctl_issue_request_and_decrypt(transport, "GET", path, "", args)
 		return
@@ -256,5 +256,5 @@ ctl_issues_command :: proc(cmd: []string, args: []string) {
 		return
 	}
 
-	fmt.printfln(`{"ok":false,"message":"unknown issue action '%s'"}`, action)
+	fmt.println(ctl_error_json(fmt.tprintf("unknown issue action '%s'", action)))
 }

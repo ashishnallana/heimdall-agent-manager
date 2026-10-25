@@ -65,6 +65,17 @@ json_object_from_slice :: proc(fields: []string) -> string {
 	return strings.concatenate({"{", strings.join(fields, ","), "}"})
 }
 
+// ctl_error_json is the CLI's `{"ok":false,"message":…}` envelope; `extra` are
+// further pre-serialized fields. Build error output with this (or json_kv), never
+// with a printf format holding literal braces: core:fmt reads `{` as a
+// placeholder and prints `%!(MISSING CLOSE BRACE)` instead of JSON.
+ctl_error_json :: proc(message: string, extra: ..string) -> string {
+	fields := make([dynamic]string, 0, 2 + len(extra), context.temp_allocator)
+	append(&fields, json_kv_raw("ok", "false"), json_kv("message", message))
+	append(&fields, ..extra)
+	return json_object_from_slice(fields[:])
+}
+
 json_write_string :: proc(builder: ^strings.Builder, value: string) {
 	for ch in value {
 		switch ch {

@@ -590,13 +590,13 @@ ctl_shell_list :: proc(endpoint, token: string, tokens, args: []string) {
 
 	qparts := make([dynamic]string)
 	defer delete(qparts)
-	if bridge_id != ""  do append(&qparts, strings.concatenate({"bridge_id=", bridge_id}))
-	if project_id != "" do append(&qparts, strings.concatenate({"project_id=", project_id}))
-	if chain_id != ""   do append(&qparts, strings.concatenate({"chain_id=", chain_id}))
-	if agent_id != ""   do append(&qparts, strings.concatenate({"agent_instance_id=", agent_id}))
-	if status != ""     do append(&qparts, strings.concatenate({"status=", status}))
-	if v := ctl_shell_uint_flag(args, "--limit", ""); v != "" do append(&qparts, strings.concatenate({"limit=", v}))
-	if v := option_value(args, "--cursor", ""); v != "" do append(&qparts, strings.concatenate({"cursor=", v}))
+	if bridge_id != ""  do query_param(&qparts, "bridge_id", bridge_id)
+	if project_id != "" do query_param(&qparts, "project_id", project_id)
+	if chain_id != ""   do query_param(&qparts, "chain_id", chain_id)
+	if agent_id != ""   do query_param(&qparts, "agent_instance_id", agent_id)
+	if status != ""     do query_param(&qparts, "status", status)
+	if v := ctl_shell_uint_flag(args, "--limit", ""); v != "" do query_param(&qparts, "limit", v)
+	if v := option_value(args, "--cursor", ""); v != "" do query_param(&qparts, "cursor", v)
 	qs := ""
 	if len(qparts) > 0 do qs = strings.concatenate({"?", strings.join(qparts[:], "&")})
 	ctl_shell_rest(endpoint, token, "GET", strings.concatenate({"/api/v1/shells", qs}), "")
@@ -613,9 +613,9 @@ ctl_shell_log :: proc(endpoint, token: string, tokens, args: []string) {
 	}
 	qparts := make([dynamic]string)
 	defer delete(qparts)
-	if v := ctl_shell_uint_flag(args, "--offset", ""); v != "" do append(&qparts, strings.concatenate({"offset=", v}))
-	if v := ctl_shell_uint_flag(args, "--limit", "");  v != "" do append(&qparts, strings.concatenate({"limit=", v}))
-	if v := option_value(args, "--grep", ""); v != "" do append(&qparts, strings.concatenate({"grep=", v}))
+	if v := ctl_shell_uint_flag(args, "--offset", ""); v != "" do query_param(&qparts, "offset", v)
+	if v := ctl_shell_uint_flag(args, "--limit", "");  v != "" do query_param(&qparts, "limit", v)
+	if v := option_value(args, "--grep", ""); v != "" do query_param(&qparts, "grep", v)
 	qs := ""
 	if len(qparts) > 0 do qs = strings.concatenate({"?", strings.join(qparts[:], "&")})
 	ctl_shell_rest(endpoint, token, "GET",

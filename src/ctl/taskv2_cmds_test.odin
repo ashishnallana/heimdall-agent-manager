@@ -14,32 +14,29 @@ test_task_brief_json_from_flags :: proc(t: ^testing.T) {
 		"--goal", "Retry transient 5xx",
 		"--acceptance", "retries 3x, with backoff", // comma kept: acceptance is prose
 		"--acceptance", "unit test covers 503",
-		"--verify", "make test",
 		"--input", "#evt_1,facet:t1:1:handoff",
 		"--review-role", "reviewer", "--review-role", "security",
-		"--auto-submit",
 	}
 	brief, ok := ctl_task_brief_json(args, "")
 	defer delete(brief)
 	testing.expect(t, ok, "brief present")
-	testing.expect_value(t, brief, `{"goal":"Retry transient 5xx","acceptance":["retries 3x, with backoff","unit test covers 503"],"verify":"make test","inputs":["#evt_1","facet:t1:1:handoff"],"review_roles":["reviewer","security"],"auto_submit":true}`)
+	testing.expect_value(t, brief, `{"goal":"Retry transient 5xx","acceptance":["retries 3x, with backoff","unit test covers 503"],"inputs":["#evt_1","facet:t1:1:handoff"],"review_roles":["reviewer","security"]}`)
 }
 
 @(test)
 test_task_brief_json_file_base_flags_override :: proc(t: ^testing.T) {
-	file := `{"goal":"from file","acceptance":["a1","a2"],"verify":"go test ./...","inputs":["#e9"],"review_roles":["reviewer"],"auto_submit":false,"assignee":"agt_w","budget":{"max_attempts":3},"output":{"schema":"x"},"unknown":1}`
+	file := `{"goal":"from file","acceptance":["a1","a2"],"inputs":["#e9"],"review_roles":["reviewer"],"assignee":"agt_w","budget":{"max_attempts":3},"output":{"schema":"x"},"unknown":1}`
 	// no flags: the file is carried (known keys only)
 	base, ok := ctl_task_brief_json([]string{"ham-ctl"}, file)
 	defer delete(base)
 	testing.expect(t, ok, "file alone is a brief")
-	testing.expect_value(t, base, `{"goal":"from file","acceptance":["a1","a2"],"verify":"go test ./...","inputs":["#e9"],"review_roles":["reviewer"],"auto_submit":false,"assignee":"agt_w","budget":{"max_attempts":3},"output":{"schema":"x"}}`)
+	testing.expect_value(t, base, `{"goal":"from file","acceptance":["a1","a2"],"inputs":["#e9"],"review_roles":["reviewer"],"assignee":"agt_w","budget":{"max_attempts":3},"output":{"schema":"x"}}`)
 
 	// flags override field by field; untouched file fields survive
-	over, ok2 := ctl_task_brief_json([]string{"ham-ctl", "--goal", "from flag", "--acceptance", "only this", "--auto-submit"}, file)
+	over, ok2 := ctl_task_brief_json([]string{"ham-ctl", "--goal", "from flag", "--acceptance", "only this"}, file)
 	defer delete(over)
 	testing.expect(t, ok2, "brief present")
-	testing.expect(t, strings.has_prefix(over, `{"goal":"from flag","acceptance":["only this"],"verify":"go test ./...",`), "flags win, file fills the rest")
-	testing.expect(t, strings.contains(over, `"auto_submit":true`), "--auto-submit overrides the file's false")
+	testing.expect(t, strings.has_prefix(over, `{"goal":"from flag","acceptance":["only this"],"inputs":["#e9"],`), "flags win, file fills the rest")
 	testing.expect(t, strings.contains(over, `"review_roles":["reviewer"]`), "file review_roles kept")
 }
 
@@ -48,7 +45,8 @@ test_task_brief_json_absent :: proc(t: ^testing.T) {
 	_, ok := ctl_task_brief_json([]string{"ham-ctl", "task", "update", "t1", "--title", "only title"}, "")
 	testing.expect(t, !ok, "no brief flags, no file -> no brief")
 	testing.expect(t, !ctl_task_brief_flags_present([]string{"--title", "x", "--priority", "p1"}), "no brief flags")
-	testing.expect(t, ctl_task_brief_flags_present([]string{"--verify", "make"}), "verify is a brief flag")
+	testing.expect(t, ctl_task_brief_flags_present([]string{"--goal", "g"}), "goal is a brief flag")
+	testing.expect(t, !ctl_task_brief_flags_present([]string{"--verify", "make"}), "verify is no longer a brief flag")
 }
 
 @(test)
@@ -84,63 +82,22 @@ test_brief_incomplete_render_user_envelope_and_negative :: proc(t: ^testing.T) {
 }
 
 @(test)
-test_verify_label_and_lease_parse :: proc(t: ^testing.T) {
-	label := ctl_verify_label("task_1", 3, "deadbeef")
-	defer delete(label)
-	testing.expect_value(t, label, "verify task_1 #3 @deadbeef")
-	empty := ctl_verify_label("task_1", 1, "")
-	defer delete(empty)
-	testing.expect_value(t, empty, "verify task_1 #1 @")
-
-	resp := `{"v":1,"id":"ham-ctl-agent","ok":true,"data":{"data":{"status":"current","lease":{"lease_id":"lse_1","task_id":"task_1","attempt_no":2},"task":{"task_id":"task_1","brief":{"goal":"g","verify":"make test"}},"pack":{}}}}`
-	lease, ok := ctl_verify_parse_lease(resp)
+test_lease_peek_parse :: proc(t: ^testing.T) {
+	resp := `{"v":1,"id":"ham-ctl-agent","ok":true,"data":{"data":{"status":"current","lease":{"lease_id":"lse_1","task_id":"task_1","attempt_no":2},"task":{"task_id":"task_1","brief":{"goal":"g"}},"pack":{"placement":{"directory_path":"/repo","workdir":"/repo/.heimdall/worktrees/task_1"}}}}}`
+	lease, ok := ctl_lease_peek_parse(resp)
 	testing.expect(t, ok, "lease parsed")
 	testing.expect_value(t, lease.status, "current")
+	testing.expect_value(t, lease.lease_id, "lse_1")
 	testing.expect_value(t, lease.task_id, "task_1")
 	testing.expect_value(t, lease.attempt_no, 2)
-	testing.expect_value(t, lease.verify_cmd, "make test")
+	testing.expect_value(t, lease.directory_path, "/repo/.heimdall/worktrees/task_1")
 
-	w := ctl_verify_parse_wait(`{"v":1,"id":"x","ok":true,"data":{"session_id":"sh_1","status":"running","timed_out":true}}`)
-	testing.expect(t, w.ok && w.timed_out && !w.finished, "timeout slice")
-	d := ctl_verify_parse_wait(`{"v":1,"id":"x","ok":true,"data":{"exec_id":"sh_1","session_id":"sh_1","status":"exited","exit_code":2,"output":"FAIL\n","truncated":false}}`)
-	testing.expect(t, d.ok && d.finished && d.has_code, "finished")
-	testing.expect_value(t, d.exit_code, 2)
-	testing.expect_value(t, d.output, "FAIL\n")
-	e := ctl_verify_parse_wait(`{"v":1,"id":"x","ok":false,"error":{"code":"not_found","message":"no"}}`)
-	testing.expect(t, !e.ok, "error envelope")
-}
+	on_lease, ok2 := ctl_lease_peek_parse(`{"data":{"status":"current","lease":{"task_id":"t2","placement":{"directory_path":"/d"}},"pack":{"placement":{"directory_path":"/other"}}}}`)
+	testing.expect(t, ok2, "lease parsed")
+	testing.expect_value(t, on_lease.directory_path, "/d")
 
-@(test)
-test_verify_slices_heartbeat :: proc(t: ^testing.T) {
-	State :: struct {
-		wait_calls: int,
-		hb_notes:   [dynamic]string,
-	}
-	st := State{hb_notes = make([dynamic]string, context.temp_allocator)}
-	fake_call :: proc(ctx: rawptr, method, params_json: string) -> (string, bool) {
-		s := (^State)(ctx)
-		if method == "agent.shell.wait" {
-			s.wait_calls += 1
-			if s.wait_calls <= 2 {
-				return `{"v":1,"id":"x","ok":true,"data":{"session_id":"sh_1","status":"running","timed_out":true}}`, true
-			}
-			return `{"v":1,"id":"x","ok":true,"data":{"session_id":"sh_1","status":"exited","exit_code":0,"output":"ALL PASS\n"}}`, true
-		}
-		if method == "agent.lease.heartbeat" {
-			append(&s.hb_notes, strings.clone(params_json, context.temp_allocator))
-			return `{"v":1,"id":"x","ok":true,"data":{}}`, true
-		}
-		return "", false
-	}
-	w, err := ctl_verify_wait_with_heartbeats("sh_1", 300_000, &st, fake_call)
-	testing.expect_value(t, err, "")
-	testing.expect(t, w.ok && w.finished && w.has_code && w.exit_code == 0, "finished after 3 wait slices")
-	testing.expect_value(t, st.wait_calls, 3)
-	testing.expect_value(t, len(st.hb_notes), 2)
-	if len(st.hb_notes) == 2 {
-		testing.expect_value(t, st.hb_notes[0], `{"note":"verify running"}`)
-		testing.expect_value(t, st.hb_notes[1], "{}")
-	}
+	_, none := ctl_lease_peek_parse(`{"data":{"status":"none"}}`)
+	testing.expect(t, !none, "no lease -> not parsed")
 }
 
 @(test)
@@ -165,12 +122,12 @@ test_command_tokens_skips_handoff_flag_values :: proc(t: ^testing.T) {
 }
 
 @(test)
-test_m3_ctl_params_and_verify_helpers :: proc(t: ^testing.T) {
-	// 1. --require-independent-verify in brief
+test_m3_ctl_params :: proc(t: ^testing.T) {
+	// 1. --require-independent-verify was removed: dropped from the brief
 	brief, ok := ctl_task_brief_json([]string{"ham-ctl", "task", "create", "--goal", "g", "--require-independent-verify"}, "")
 	defer delete(brief)
 	testing.expect(t, ok, "brief present")
-	testing.expect(t, strings.contains(brief, `"require_independent_verify":true`), "require_independent_verify flag")
+	testing.expect_value(t, brief, `{"goal":"g"}`)
 
 	// 2. lease submit --artifacts-file
 	sub_p, sub_ok := ctl_v2_lease_submit_params(
@@ -254,18 +211,6 @@ test_m3_ctl_params_and_verify_helpers :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(fleet_b, `"roles":["worker","reviewer"]`), "roles")
 	testing.expect(t, strings.contains(fleet_b, `"bridge_id":"br_main"`), "bridge_id")
 	testing.expect(t, strings.contains(fleet_b, `"bridge_models":{"br_main":`), "bridge_models")
-
-	// 7. verify independent label & lease parse (auto_submit + vcs.head/base)
-	ind_lbl := ctl_verify_label("task_1", 2, "abc1234", true)
-	defer delete(ind_lbl)
-	testing.expect_value(t, ind_lbl, "verify task_1 #2 @abc1234 independent")
-
-	resp := `{"v":1,"id":"x","ok":true,"data":{"data":{"status":"current","lease":{"lease_id":"l1","task_id":"t1","attempt_no":1,"vcs":{"base":"b000","head":"h111"}},"task":{"task_id":"t1","brief":{"goal":"g","verify":"make test","auto_submit":true}},"pack":{}}}}`
-	lse, lok := ctl_verify_parse_lease(resp)
-	testing.expect(t, lok, "lease parsed")
-	testing.expect(t, lse.auto_submit, "auto_submit parsed")
-	testing.expect_value(t, lse.vcs_base, "b000")
-	testing.expect_value(t, lse.vcs_head, "h111")
 }
 
 @(test)
@@ -293,7 +238,7 @@ test_m3b_workflow_ctl_params :: proc(t: ^testing.T) {
 	// 3. workflow run params (merges --inputs-file with repeated --input k=v)
 	run_p, run_ok := ctl_v2_workflow_run_params(
 		[]string{"run", "explore_plan_build"},
-		[]string{"ham-ctl", "workflow", "run", "explore_plan_build", "--chain", "ch_wf", "--request-id", "stable-key", "--input", "goal=Add auth", "--input", "verify_cmd=make test"},
+		[]string{"ham-ctl", "workflow", "run", "explore_plan_build", "--chain", "ch_wf", "--request-id", "stable-key", "--input", "goal=Add auth", "--input", "target=src/auth"},
 		`{"goal":"from_file","extra":"kept"}`,
 	)
 	defer delete(run_p)
@@ -302,7 +247,7 @@ test_m3b_workflow_ctl_params :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(run_p, `"chain_id":"ch_wf"`), "chain_id included")
 	testing.expect(t, strings.contains(run_p, `"goal":"Add auth"`), "--input overrides --inputs-file key")
 	testing.expect(t, strings.contains(run_p, `"extra":"kept"`), "untouched --inputs-file key preserved")
-	testing.expect(t, strings.contains(run_p, `"verify_cmd":"make test"`), "second --input included")
+	testing.expect(t, strings.contains(run_p, `"target":"src/auth"`), "second --input included")
 
 	// 4. workflow output params (1 positional vs 2 positionals)
 	cid1, stg1, out1, ok1 := ctl_v2_workflow_output_params(

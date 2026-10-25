@@ -79,7 +79,7 @@ ctl_mixed_work_command :: proc(transport: Ctl_Transport, action: string, args: [
 }
 
 ctl_print_error_exit :: proc(message: string) -> ! {
-	fmt.println(json_object(json_kv_raw("ok", "false"), json_kv("message", message)))
+	fmt.println(ctl_error_json(message))
 	os.exit(1)
 }
 

@@ -9,11 +9,10 @@ import http "odin_test:lib/http_client"
 
 // Task_Brief_Wire is the Task System v2 brief object carried under `brief` on
 // every task read. Only the fields ham-ctl renders are typed; the hub stores the
-// brief verbatim, so unknown keys (inputs, budget, auto_submit, …) are ignored.
+// brief verbatim, so unknown keys (inputs, budget, output, …) are ignored.
 Task_Brief_Wire :: struct {
 	goal:         string   `json:"goal"`,
 	acceptance:   []string `json:"acceptance"`,
-	verify:       string   `json:"verify"`,
 	review_roles: []string `json:"review_roles"`,
 	assignee:     string   `json:"assignee"`,
 }
@@ -300,7 +299,7 @@ print_tasks_help :: proc(action: string) {
 	fmt.println("  update <task-id> [--assignee <agt_id>] [--reviewer <agt_id>]... [--require-user-approval | --no-require-user-approval]")
 	fmt.println("  depend <task-id> --chain <id> --on <task-id>|task:<id>|workflow_run:<run-id>   (workflow runs become chain-level graph edges)")
 	fmt.println("  --assignee/--reviewer take durable agent ids (agt_...) only; instance pins (inst_...) were removed in Task System v2")
-	fmt.println("  (status/done/vote/votes/nudge/subscribe/unsubscribe were removed in Task System v2; use lease/verify/review)")
+	fmt.println("  (status/done/vote/votes/nudge/subscribe/unsubscribe were removed in Task System v2; use lease/review)")
 }
 
 ctl_task_chain_request_and_decrypt :: proc(transport: Ctl_Transport, method, path, body_json: string, args: []string = nil) {
@@ -364,8 +363,7 @@ ctl_task_chains_command :: proc(cmd: []string, args: []string) {
 		if path != "" {
 			data, err := os.read_entire_file(path, context.allocator)
 			if err != nil {
-				fmt.printfln(`{"ok":false,"message":"--file %s: cannot read"}`, path)
-				os.exit(1)
+				ctl_print_error_exit(fmt.tprintf("--file %s: cannot read", path))
 			}
 			file_text = string(data)
 		} else if has_flag(args, "--stdin") {
@@ -411,7 +409,7 @@ ctl_task_chains_command :: proc(cmd: []string, args: []string) {
 	// an agent can fetch "chains I coordinate" with only its agent token.
 	if action == "coordinated" {
 		agent_id := option_value(args, "--agent-id", option_value(args, "--agent", ""))
-		ctl_task_chain_request_and_decrypt(transport, "GET", fmt.tprintf("/api/v1/task-chains?coordinated_by=%s", safe_path_part(agent_id)), "", args)
+		ctl_task_chain_request_and_decrypt(transport, "GET", fmt.tprintf("/api/v1/task-chains?coordinated_by=%s", query_escape(agent_id)), "", args)
 		return
 	}
 
@@ -775,7 +773,7 @@ ctl_tasks_command :: proc(cmd: []string, args: []string) {
 			fmt.println(`{"ok":false,"message":"tasks fetch requires --ref <ref> or positional <ref>"}`)
 			os.exit(1)
 		}
-		ctl_tasks_request_and_decrypt(transport, "GET", fmt.tprintf("/api/v1/task-chains/%s/tasks/%s/fetch?ref=%s", safe_path_part(chain_id), safe_path_part(task_id), safe_path_part(ref)), "", args)
+		ctl_tasks_request_and_decrypt(transport, "GET", ctl_task_fetch_path(chain_id, task_id, ref), "", args)
 		return
 	}
 
