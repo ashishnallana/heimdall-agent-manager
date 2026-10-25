@@ -1,5 +1,5 @@
-// UI-14/UI-15: shared cookie-authenticated JSON fetch helper for rewrite endpoints
-// served behind the trusted proxy. The rewrite app uses the SAME cookie auth
+// UI-14/UI-15: shared cookie-authenticated JSON fetch helper. The browser holds
+// only the Hub's OIDC session cookie (HttpOnly); the rewrite app uses the SAME cookie auth
 // session as `/api/v1/me` (`credentials: 'include'`), NOT the legacy per-client
 // token session (`withSessionQuery` + `session.clientToken`). Centralizing this
 // stops each new cookie endpoint from reinventing its own apiUrl/fetch wrapper.

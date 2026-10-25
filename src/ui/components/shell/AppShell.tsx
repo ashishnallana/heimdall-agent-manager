@@ -1,3 +1,14 @@
+import {
+  LOGIN_PATH,
+  authErrorMessage,
+  isTransientAuthStatus,
+  loginHref,
+  postLogout,
+  readAuthError,
+  readLastLoginRedirect,
+  recordLoginRedirect,
+  shouldAutoRedirect,
+} from '../../auth/oidcSession';
 import UpgradePrompt from '../billing/UpgradePrompt';
 import { PLAN_LIMIT_EVENT, type PlanLimitDetails } from '../../utils/planLimit';
 import { Fragment, Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -106,7 +117,6 @@ const ShellViewPage = lazy(() => import('../shells/ShellViewPage'));
 const AgentListPage = lazy(() => import('../agents/AgentListPage'));
 const AgentViewPage = lazy(() => import('../agents/AgentViewPage'));
 const AgentFormPage = lazy(() => import('../agents/AgentFormPage'));
-const UserTokensPanel = lazy(() => import('../settings/UserTokensPanel'));
 const MemoryListPage = lazy(() => import('../memory/MemoryListPage'));
 const MemoryViewPage = lazy(() => import('../memory/MemoryViewPage'));
 const MemoryFormPage = lazy(() => import('../memory/MemoryFormPage'));
@@ -132,13 +142,13 @@ type ShellRoute = {
 
 type AuthUser = AuthUserIdentity;
 
-type AuthStatus = 'checking' | 'authenticated' | 'unauthenticated' | 'forbidden' | 'error';
+// 'unavailable': the identity check answered 429/503 (Hub saturated or the OIDC
+// provider unreachable). Not a sign-out: the gate retries without redirecting.
+type AuthStatus = 'checking' | 'authenticated' | 'unauthenticated' | 'forbidden' | 'unavailable' | 'error';
 
 type AuthState = {
   status: AuthStatus;
   user: AuthUser | null;
-  loginUrl: string;
-  logoutUrl: string;
   error: string;
 };
 
@@ -298,7 +308,6 @@ function routeTitle(path: string): string {
   if (path.startsWith('/skills/')) return 'Skill';
   if (path.startsWith('/settings/bridges')) return 'Bridge settings';
   if (path.startsWith('/settings/appearance')) return 'Appearance settings';
-  if (path.startsWith('/settings/user-tokens')) return 'User token settings';
   if (path.startsWith('/settings/projects')) return 'Project settings';
   if (path.startsWith('/settings/providers')) return 'Provider settings';
   if (path.startsWith('/settings/templates')) return 'Templates';
@@ -340,7 +349,6 @@ const SETTINGS_NAV = [
   { path: '/settings/bridges', label: 'Bridges' },
   { path: '/settings/providers', label: 'Providers' },
   { path: '/settings/appearance', label: 'Appearance' },
-  { path: '/settings/user-tokens', label: 'User tokens' },
   { path: '/settings/devices', label: 'Devices' },
   { path: '/settings/projects', label: 'Projects' },
   { path: '/settings/templates', label: 'Templates' },
@@ -424,53 +432,6 @@ function apiUrl(path: string): string {
   return withApiBase(path.startsWith('/api/v1') ? path : `/api/v1${path.startsWith('/') ? path : `/${path}`}`);
 }
 
-function authRuntimeConfig(): Record<string, any> {
-  if (typeof window === 'undefined') return {};
-  return (window as any).__HEIMDALL_AUTH_CONFIG__ || (window as any).__HEIMDALL_UI_CONFIG__?.auth || {};
-}
-
-function metaContent(name: string): string {
-  if (typeof document === 'undefined') return '';
-  return document.querySelector<HTMLMetaElement>(`meta[name="${name}"]`)?.content || '';
-}
-
-function usableAuthUrl(value: string): string {
-  const trimmed = String(value || '').trim();
-  if (!trimmed || (trimmed.startsWith('%') && trimmed.endsWith('%'))) return '';
-  return trimmed;
-}
-
-function configuredAuthUrl(kind: 'login' | 'logout'): string {
-  const cfg = authRuntimeConfig();
-  const snake = `${kind}_url`;
-  const camel = `${kind}Url`;
-  const fromConfig = usableAuthUrl(String(cfg?.[snake] || cfg?.[camel] || ''));
-  if (fromConfig) return fromConfig;
-  return usableAuthUrl(metaContent(`heimdall-${kind}-url`));
-}
-
-async function fetchPublicAuthConfig(): Promise<{ loginUrl: string; logoutUrl: string }> {
-  let loginUrl = configuredAuthUrl('login');
-  let logoutUrl = configuredAuthUrl('logout');
-  try {
-    const response = await fetch(apiUrl('/auth/config'), { credentials: 'include' });
-    if (response.ok) {
-      const body = await response.json();
-      const data = body?.data || body || {};
-      loginUrl = usableAuthUrl(data.login_url || data.loginUrl || loginUrl) || loginUrl;
-      logoutUrl = usableAuthUrl(data.logout_url || data.logoutUrl || logoutUrl) || logoutUrl;
-    }
-  } catch (_err) {}
-  return { loginUrl, logoutUrl };
-}
-
-function loginUrlWithReturn(loginUrl: string): string {
-  if (!loginUrl || typeof window === 'undefined') return loginUrl;
-  if (loginUrl.includes('{return_to}')) return loginUrl.replace('{return_to}', encodeURIComponent(window.location.href));
-  if (loginUrl.includes('{returnTo}')) return loginUrl.replace('{returnTo}', encodeURIComponent(window.location.href));
-  return loginUrl;
-}
-
 function isApiV1Url(input: RequestInfo | URL): boolean {
   const value = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
   try {
@@ -509,18 +470,24 @@ function installApiAuthObserver() {
   };
 }
 
+// Sign out: the Hub deletes the session and expires the cookie, then the browser
+// continues to the provider's end-session URL (or "/").
+async function signOut(): Promise<void> {
+  const next = await postLogout(window.fetch.bind(window), apiUrl('/auth/logout'));
+  window.location.assign(next);
+}
+
 async function bootstrapAuth(): Promise<AuthState> {
-  const authConfig = await fetchPublicAuthConfig();
-  const loginUrl = authConfig.loginUrl;
   try {
     const me = await fetch(apiUrl('/me'), { credentials: 'include' });
-    if (me.status === 401) return { status: 'unauthenticated', user: null, loginUrl, logoutUrl: authConfig.logoutUrl, error: '' };
-    if (me.status === 403) return { status: 'forbidden', user: null, loginUrl, logoutUrl: authConfig.logoutUrl, error: 'Access denied' };
-    if (!me.ok) return { status: 'error', user: null, loginUrl, logoutUrl: authConfig.logoutUrl, error: `Auth check failed (${me.status})` };
+    if (me.status === 401) return { status: 'unauthenticated', user: null, error: '' };
+    if (me.status === 403) return { status: 'forbidden', user: null, error: 'Access denied' };
+    if (isTransientAuthStatus(me.status)) return { status: 'unavailable', user: null, error: '' };
+    if (!me.ok) return { status: 'error', user: null, error: `Auth check failed (${me.status})` };
     const meBody = await me.json();
-    return { status: 'authenticated', user: meBody?.data || {}, loginUrl, logoutUrl: authConfig.logoutUrl, error: '' };
+    return { status: 'authenticated', user: meBody?.data || {}, error: '' };
   } catch (error: any) {
-    return { status: 'error', user: null, loginUrl, logoutUrl: configuredAuthUrl('logout'), error: String(error?.message || error || 'Auth check failed') };
+    return { status: 'error', user: null, error: String(error?.message || error || 'Auth check failed') };
   }
 }
 
@@ -977,7 +944,9 @@ function clearPriorUserClientState(dispatch: any, nextUserId: string) {
 
 function AuthGate() {
   const dispatch = useDispatch<any>();
-  const [auth, setAuth] = useState<AuthState>({ status: 'checking', user: null, loginUrl: configuredAuthUrl('login'), logoutUrl: configuredAuthUrl('logout'), error: '' });
+  const [auth, setAuth] = useState<AuthState>({ status: 'checking', user: null, error: '' });
+  const authStatusRef = useRef<AuthStatus>('checking');
+  authStatusRef.current = auth.status;
   const lastSeenUserRef = useRef(readLastSeenUserId());
 
   useEffect(() => {
@@ -1006,19 +975,23 @@ function AuthGate() {
         }
         setAuth(next);
       } catch (err: any) {
-        if (!cancelled) setAuth({ status: 'error', user: null, loginUrl: configuredAuthUrl('login'), logoutUrl: configuredAuthUrl('logout'), error: String(err?.message || err || 'The app could not reach /api/v1/me.') });
+        if (!cancelled) setAuth({ status: 'error', user: null, error: String(err?.message || err || 'The app could not reach /api/v1/me.') });
       } finally {
         refreshing = false;
         void reason;
       }
     }
 
-    const onUnauthenticated = () => setAuth((prev) => ({ ...prev, status: 'unauthenticated', user: null, loginUrl: prev.loginUrl || configuredAuthUrl('login') }));
+    const onUnauthenticated = () => setAuth((prev) => ({ ...prev, status: 'unauthenticated', user: null }));
     const onForbidden = () => setAuth((prev) => ({ ...prev, status: 'forbidden', error: 'Access denied' }));
     const onFocus = () => { void refreshIdentity('focus'); };
     const onVisibility = () => { if (document.visibilityState === 'visible') void refreshIdentity('visibilitychange'); };
     const onUserWsReconnect = () => { void refreshIdentity('user-ws-reconnect'); };
 
+    // While the provider is unavailable (429/503), keep re-checking quietly.
+    const retryTimer = window.setInterval(() => {
+      if (authStatusRef.current === 'unavailable') void refreshIdentity('unavailable-retry');
+    }, 5000);
     void refreshIdentity('initial');
     window.addEventListener('heimdall:api-unauthenticated', onUnauthenticated);
     window.addEventListener('heimdall:api-forbidden', onForbidden);
@@ -1028,6 +1001,7 @@ function AuthGate() {
     return () => {
       cancelled = true;
       refreshing = false;
+      window.clearInterval(retryTimer);
       window.removeEventListener('heimdall:api-unauthenticated', onUnauthenticated);
       window.removeEventListener('heimdall:api-forbidden', onForbidden);
       window.removeEventListener('focus', onFocus);
@@ -1036,14 +1010,15 @@ function AuthGate() {
     };
   }, [dispatch]);
 
-  if (auth.status === 'checking') return <AuthStatusScreen debugId="auth-checking" title="Checking session…" body="Verifying trusted-proxy identity with /api/v1/me." />;
-  if (auth.status === 'unauthenticated') return <UnauthenticatedLanding loginUrl={auth.loginUrl} />;
+  if (auth.status === 'checking') return <AuthStatusScreen debugId="auth-checking" title="Checking session…" body="Verifying your Heimdall session." />;
+  if (auth.status === 'unavailable') return <AuthStatusScreen debugId="auth-unavailable" title="Sign-in provider unavailable" body="Heimdall could not reach its sign-in provider. Retrying…" />;
+  if (auth.status === 'unauthenticated') return <UnauthenticatedLanding />;
   if (auth.status === 'forbidden') return <AccessDenied />;
   if (auth.status === 'error') return <AuthStatusScreen debugId="auth-error" title="Unable to verify session" body={auth.error || 'The app could not reach /api/v1/me.'} />;
   return (
     <AuthUserProvider value={auth.user}>
       <DeviceVaultGate>
-        <AuthenticatedShell key={authUserId(auth.user) || 'authenticated'} user={auth.user || {}} logoutUrl={auth.logoutUrl} />
+        <AuthenticatedShell key={authUserId(auth.user) || 'authenticated'} user={auth.user || {}} />
       </DeviceVaultGate>
     </AuthUserProvider>
   );
@@ -1061,24 +1036,33 @@ function AuthStatusScreen({ debugId, title, body }: { debugId: string; title: st
   );
 }
 
-function UnauthenticatedLanding({ loginUrl }: { loginUrl: string }) {
-  const target = loginUrlWithReturn(loginUrl);
+function UnauthenticatedLanding() {
+  const authError = typeof window === 'undefined' ? null : readAuthError(window.location.search);
+  const target = typeof window === 'undefined' ? LOGIN_PATH : loginHref(window.location);
+  const [autoRedirect] = useState(() => {
+    if (typeof window === 'undefined') return false;
+    let storage: Storage | null = null;
+    try { storage = window.sessionStorage; } catch (_err) { storage = null; }
+    const allowed = shouldAutoRedirect(Date.now(), readLastLoginRedirect(storage), authError);
+    if (allowed) recordLoginRedirect(storage, Date.now());
+    return allowed;
+  });
   useEffect(() => {
-    if (!target) return;
+    if (!autoRedirect) return;
     const timer = window.setTimeout(() => window.location.assign(target), 350);
     return () => window.clearTimeout(timer);
-  }, [target]);
+  }, [autoRedirect, target]);
   return (
     <main data-debug-id="unauthenticated-landing" className="grid app-viewport-min-height place-items-center bg-canvas px-6 text-primary">
       <section className="w-full max-w-lg rounded-[2rem] border border-subtle bg-surface p-8 text-center shadow-2xl">
-        <p className="text-xs font-semibold uppercase tracking-[0.22em] text-accent">Trusted-proxy sign in</p>
-        <h1 className="mt-3 text-3xl font-semibold tracking-tight">Redirecting to sign in…</h1>
-        <p className="mt-3 text-sm leading-6 text-muted">Your session is unauthenticated. Heimdall uses the configured external identity provider; no local credentials are collected.</p>
-        {target ? (
-          <a data-debug-id="auth-login-link" href={target} className="mt-6 inline-flex rounded-2xl bg-accent px-5 py-3 text-sm font-bold text-accent-fg hover:opacity-90">Sign in</a>
+        <p className="text-xs font-semibold uppercase tracking-[0.22em] text-accent">Sign in</p>
+        <h1 className="mt-3 text-3xl font-semibold tracking-tight">{autoRedirect ? 'Redirecting to sign in…' : authError === 'forbidden' ? 'Account not linked' : authError ? 'Sign-in failed' : 'Signed out'}</h1>
+        {authError ? (
+          <div data-debug-id={`auth-error-${authError}`} className={`mt-4 rounded-2xl border px-4 py-3 text-sm ${authError === 'forbidden' ? 'border-danger/30 bg-danger-soft text-danger' : 'border-warning/30 bg-warning-soft text-warning'}`}>{authErrorMessage(authError)}</div>
         ) : (
-          <div data-debug-id="auth-login-missing-config" className="mt-6 rounded-2xl border border-warning/30 bg-warning-soft px-4 py-3 text-sm text-warning">Login URL is missing from UI auth config.</div>
+          <p className="mt-3 text-sm leading-6 text-muted">Heimdall signs you in with your organisation's identity provider; no local credentials are collected.</p>
         )}
+        <a data-debug-id="auth-login-link" href={target} onClick={() => { try { recordLoginRedirect(window.sessionStorage, Date.now()); } catch (_err) {} }} className="mt-6 inline-flex rounded-2xl bg-accent px-5 py-3 text-sm font-bold text-accent-fg hover:opacity-90">Sign in</a>
       </section>
     </main>
   );
@@ -1180,7 +1164,6 @@ function RouteOutlet({
       path.startsWith('/c/') ||
       path.startsWith('/settings/bridges') ||
       path.startsWith('/settings/appearance') ||
-      path.startsWith('/settings/user-tokens') ||
       path.startsWith('/projects/') ||
       path.startsWith('/settings/projects') ||
       path.startsWith('/settings/providers') ||
@@ -1286,8 +1269,6 @@ function RouteOutlet({
           <AppearanceSettings />
         ) : path === '/settings/providers' ? (
           <ProvidersPanel />
-        ) : path === '/settings/user-tokens' ? (
-          <UserTokensPanel />
         ) : path === '/settings/devices' || path.startsWith('/settings/devices/') ? (
           <DevicesPanel />
         ) : path === '/settings/providers/new' ? (
@@ -1356,7 +1337,7 @@ function RouteOutlet({
   );
 }
 
-function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: string }) {
+function AuthenticatedShell({ user }: { user: AuthUser }) {
   // REQ-UI-SIDEBAR-PERSISTENCE: Left sidebar collapsed state persisted in localStorage ('heimdall:shell:sidebar-collapsed')
   const [collapsed, setCollapsed] = useState<boolean>(() => {
     try {
@@ -2065,7 +2046,7 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
                 <div className={`truncate text-muted ${isMobile ? 'text-[12px]' : 'text-[10.5px]'}`}>{user.email || user.user_id || ''}</div>
               </button>
             )}
-            {logoutUrl && <a data-debug-id="auth-logout-link" href={logoutUrl} title="Sign out" className={`grid shrink-0 place-items-center text-muted hover:bg-neutral-soft hover:text-primary ${isMobile ? 'h-11 w-11 rounded-full' : 'rounded-lg p-1.5'}`}><Icon name="close" size={isMobile ? 18 : 14} /></a>}
+            <button type="button" data-debug-id="auth-logout-link" onClick={() => { void signOut(); }} title="Sign out" aria-label="Sign out" className={`grid shrink-0 place-items-center text-muted hover:bg-neutral-soft hover:text-primary ${isMobile ? 'h-11 w-11 rounded-full' : 'rounded-lg p-1.5'}`}><Icon name="close" size={isMobile ? 18 : 14} /></button>
           </div>
           {planLabel ? (
             <button type="button" data-debug-id="shell-subscription-tier" aria-label={`Subscription: ${planLabel}. Open account settings`} onClick={openAccountSettings} className="mt-1 flex w-full items-center gap-2 rounded-lg px-2 py-1 text-left text-[11px] text-muted hover:bg-neutral-soft hover:text-primary focus-visible:outline-none focus-visible:shadow-focus">

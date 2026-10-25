@@ -31,11 +31,12 @@ import {
 // invalidates the smallest relevant RTK Query cache entries. There is no second
 // connection and no durable full-data stream.
 //
-// Auth model: browsers use the trusted-proxy/cookie-auth `/api/v1/user-ws`
-// handshake. Electron cannot set Authorization on WebSocket handshakes, so it
-// first mints a short-lived `/api/v1/me/ws-ticket` over bearer-authenticated
-// fetch, then connects with `?ticket=...`. The long-lived `hut_...` token is
-// never placed in the WebSocket URL.
+// Auth model: browsers open `/api/v1/user-ws` with the Hub session cookie (the
+// Hub checks Origin == ui_origin on cookie WebSocket upgrades and re-validates the
+// session while the socket lives). Other streams mint a short-lived single-use
+// ticket with a same-origin `POST /api/v1/me/ws-ticket` (cookie) and connect with
+// `?ticket=...`. Electron's legacy bearer path is not supported by the OIDC-only
+// Hub yet (no user tokens); see ElectronDeviceAuthGate.
 
 // Hub keeps user WebSockets open by waiting for occasional client frames. Send a
 // lightweight heartbeat well below the server idle timeout so healthy browser

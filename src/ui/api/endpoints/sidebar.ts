@@ -5,7 +5,7 @@ import { decryptConversationRecord } from '../../utils/vaultChats';
 import { getActiveVaultKey } from '../../utils/vaultContent';
 
 // UI-14: cookie-authenticated sidebar data for the live shell. The shell serves
-// the rewrite behind the trusted proxy, so these use `credentials: 'include'`
+// the rewrite with the Hub session cookie, so these use `credentials: 'include'`
 // (same auth session as `/api/v1/me`) — not the legacy per-client token session.
 // Server state lives in RTK Query; WS events invalidate the tags below so the
 // sidebar's unread badges refresh through the single user-WS invalidation path.

@@ -31,11 +31,9 @@ test('AppShell routing integration ensures settings routes resolve without crash
   assert.equal(resolveSettingsTab('/settings/experimental'), 'experimental');
   assert.equal(resolveSettingsTab('/settings/vault'), 'vault');
   assert.equal(resolveSettingsTab('/settings/lsp'), 'lsp');
-  assert.equal(resolveSettingsTab('/settings/user-tokens'), 'user-tokens');
   assert.equal(resolveSettingsTab('/settings/templates'), 'templates');
   assert.equal(resolveSettingsTab('#/settings/vault'), 'vault');
   assert.equal(resolveSettingsTab('#/settings/lsp'), 'lsp');
-  assert.equal(resolveSettingsTab('#/settings/user-tokens'), 'user-tokens');
   assert.equal(resolveSettingsTab('#/settings/templates'), 'templates');
   assert.equal(resolveSettingsTab('#/settings/projects'), 'projects');
   assert.equal(resolveSettingsTab('#/settings/experimental'), 'experimental');
@@ -47,7 +45,6 @@ test('AppShell routing integration ensures settings routes resolve without crash
   assert.equal(normalizeSettingsTab('experimental'), 'experimental');
   assert.equal(normalizeSettingsTab('vault'), 'vault');
   assert.equal(normalizeSettingsTab('lsp'), 'lsp');
-  assert.equal(normalizeSettingsTab('user-tokens'), 'user-tokens');
   assert.equal(normalizeSettingsTab('templates'), 'templates');
   assert.equal(normalizeSettingsTab('projects'), 'projects');
   assert.equal(normalizeSettingsTab('browser'), 'appearance');

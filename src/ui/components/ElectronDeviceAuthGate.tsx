@@ -213,7 +213,10 @@ function DeviceAuthShell({ title, body, children }: { title: string; body: strin
 function ElectronDeviceAuthScreen({ onAuthenticated }: { onAuthenticated: () => void }) {
   const [status, setStatus] = useState<DeviceScreenState>('manual');
   const [flow, setFlow] = useState<FlowState | null>(null);
-  const [message, setMessage] = useState('Paste a user token from Settings → User tokens to unlock the Electron app.');
+  // TODO(oidc): the desktop app needs its own OIDC sign-in. The Hub no longer
+  // issues user tokens or user device-authorization grants, so neither path below
+  // can succeed against an OIDC-only Hub.
+  const [message, setMessage] = useState('The desktop app cannot sign in to this Hub yet: Heimdall now uses OIDC sign-in and no longer issues user tokens. Use Heimdall in your browser for now.');
   const [tokenDraft, setTokenDraft] = useState('');
   const [manualError, setManualError] = useState('');
   const [manualBusy, setManualBusy] = useState(false);

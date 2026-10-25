@@ -92,7 +92,7 @@ export interface GenesisBody {
   wrap: SignedKeyringWrap;
 }
 
-/** Browser (trusted-proxy) auth only; self-signed statements in the body. */
+/** Browser session (cookie) auth only; self-signed statements in the body. */
 export async function postVaultGenesis(body: GenesisBody): Promise<{ directory_version: number; current_epoch: number }> {
   return vaultRequest('POST', '/vault/directory/genesis', { body });
 }

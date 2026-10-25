@@ -350,7 +350,7 @@ export const agentsApi = heimdallApi.injectEndpoints({
     createAgentInstanceInChain: build.mutation<any, { agentId: string; chainId: string; bridgeId?: string; providerProfile?: string; model?: string; projectId?: string; displayName?: string; templateId?: string }>({
       // Launch a new instance of a durable agent, bound to a chain. Uses the cookie
       // path (POST /agent-instances) like launchAgentInstance, so it works in the
-      // trusted-proxy/cookie-auth shell. The previous token-based path required a
+      // session-cookie shell. The previous token-based path required a
       // session.clientToken that the cookie shell never has, so "Launch new" from
       // the Add-Member dialog always failed with "Missing agentId/chainId" even
       // with an agent selected. The hub create endpoint reads provider/model (not

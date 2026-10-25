@@ -12,7 +12,6 @@ import BridgesPanel from './BridgesPanel';
 import ExperimentalPanel from './ExperimentalPanel';
 import DevicesPanel from './DevicesPanel';
 import LspPanel from './LspPanel';
-import UserTokensPanel from './UserTokensPanel';
 import TemplatesPanel from './TemplatesPanel';
 import AccountPanel from './AccountPanel';
 import { normalizeSettingsTab } from '../../utils/settingsRouting';
@@ -66,12 +65,6 @@ export const SETTINGS_CATEGORIES: SettingsCategory[] = [
     label: 'Language Servers',
     title: 'Language Servers (LSP)',
     description: 'Configure Language Server Protocol servers and diagnostics.',
-  },
-  {
-    id: 'user-tokens',
-    label: 'User Tokens',
-    title: 'User Tokens',
-    description: 'Manage user access tokens for Heimdall CLI and external integrations.',
   },
   {
     id: 'templates',
@@ -219,8 +212,6 @@ export function SettingsModal({
             <AppearanceSettings />
           </div>
         );
-      case 'user-tokens':
-        return <UserTokensPanel />;
       case 'templates':
         return <TemplatesPanel />;
       case 'experimental':

@@ -431,3 +431,33 @@ Phase 3 (delete trusted proxy + `hut_`, preview-origin auth):
 - `ham-hub users unlink-oidc/logout/disable` run in a separate process, so they cannot drop the
   server's in-memory preview sessions directly. They delete the parent session rows, and preview
   sessions die at their next parent re-check (≤ 15 s).
+
+Phase 4 (UI):
+- `src/ui/auth/oidcSession.ts` holds the pure helpers, with unit tests in `tests/ui_oidc_session_test.ts`:
+  - The sign-in link is `/api/v1/auth/login?return_to=<path+search+hash>`. `auth_error` is
+    stripped from it, and protocol-relative paths are refused.
+  - `auth_error` is read and turned into a message.
+  - Loop protection: at most one automatic redirect per 30 s, stored in `sessionStorage`. There
+    is never an automatic redirect after a failed sign-in.
+  - Logout POSTs `/api/v1/auth/logout` and the browser then follows `logout_url`.
+- `AppShell`:
+  - The `login_url`/`logout_url` config fields, meta tags and the `/auth/config` fetch are
+    removed.
+  - A 401 from a user API (vault/device routes excluded) shows the sign-in landing.
+  - A 429/503 from `/api/v1/me` shows "Sign-in provider unavailable — Retrying…" and re-checks
+    every 5 s without redirecting.
+  - `?auth_error=1` shows "Sign-in did not complete". `?auth_error=forbidden` shows "Your account
+    isn't linked to a Heimdall user; ask the operator to run ham-hub users link-oidc".
+  - The logout control is now a button that POSTs logout.
+- The token-management UI (`UserTokensPanel`, the `/me/tokens` endpoints, the settings tab and
+  route) is removed. Trusted-proxy wording is removed from `src/ui`.
+- The WebSocket ticket flow (`POST /api/v1/me/ws-ticket` with the cookie, same origin) is
+  unchanged and works for Session principals. The user WS opens with the cookie, and the Origin is
+  checked.
+- Electron (out of scope): its sign-in screen now says that desktop sign-in is unavailable on an
+  OIDC-only hub (TODO(oidc)). No other Electron behaviour was changed.
+- Vite dev: `vite.config.js` proxies `/api/v1` to the dev proxy / hub, which uses
+  `tools/mock-oidc`, and never fakes identity (done with the phase 3 tooling).
+- `scripts/oidc-smoke/smoke.sh` is a browser-less end-to-end check: mock OIDC + hub + a static
+  front (like Caddy) serving `dist/`. It runs login → callback (cookie attributes) → `/me` and the
+  UI's first calls → ws-ticket → CSRF refusal → logout → 401.

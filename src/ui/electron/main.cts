@@ -229,12 +229,10 @@ app.whenReady().then(async () => {
   app.setAboutPanelOptions?.({ applicationName: APP_DISPLAY_NAME });
   installAppMenu();
 
-  // Trusted-proxy identity for the rewrite `/api/v1` path comes from
-  // `ham-dev-proxy` (the reverse proxy inside --trusted-proxy-cidr), NEVER
-  // from the client. In dev the renderer runs at the Vite dev-server origin,
-  // and Vite's `server.proxy` (see vite.config.js) forwards `/api/v1`,
-  // `/_dev/login`, and `/_dev/logout` to `ham-dev-proxy` (127.0.0.1:8080),
-  // which injects trusted identity headers server-side from the `ham_dev_user` cookie.
+  // In dev the renderer runs at the Vite dev-server origin, and Vite's
+  // `server.proxy` (see vite.config.js) forwards `/api/v1` to the local Hub,
+  // which authenticates users only with its OIDC session cookie (local dev uses
+  // tools/mock-oidc). TODO(oidc): desktop sign-in is not implemented yet.
   const daemonUrl = process.env.HEIMDALL_DAEMON_URL || 'http://127.0.0.1:49322';
   pruneAndRegister(daemonUrl);
   updatePort(0); // Explicitly 0 since disabled by default
