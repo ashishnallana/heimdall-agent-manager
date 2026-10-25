@@ -13,7 +13,7 @@ import { awaitingYourReview, blockedOnYou, reviewVotes, youApproved, type Review
 import type { TaskActionsApi } from './useTaskActions';
 import { EMPTY_TASK_NAMES, instanceAgentsFromEvents, withInstanceAgents, type TaskNames } from './taskNames';
 import { describeTaskEvent, reviewsPostedForAttempt, whoById } from './taskEvents';
-import { VaultText } from '../vault';
+import { DecryptedMarkdown, VaultText } from '../vault';
 import { HolderName } from './HolderName';
 import { ReviewVoteMark } from './ReviewVoteMark';
 import { describeEffectivePlacement, taskEffectivePlacement } from './fleetSelection';
@@ -32,18 +32,28 @@ export interface TaskDetailsProps {
 
 const TIMELINE_PREVIEW = 6;
 
-/**
- * A titled block inside an expanded card: a heading, no border, no nested card.
- * Decisions (Your review, Answer) stay open; the informational blocks are
- * collapsible and closed by default (plan REQ-UI-8), so an expanded card stays
- * calm until you open what you want to read.
- */
 /** What the blocked agent asked: hubs and agents use reason, question or message. */
 function blockerQuestion(task: TaskWire): string {
   const b: any = task.blocked_on || {};
   return String(b.question || b.reason || b.message || '').trim();
 }
 
+/**
+ * Text an agent or person wrote (goal, acceptance, handoff, findings): rendered
+ * through the shared safe Markdown renderer so headings, paragraphs, lists and
+ * code survive instead of collapsing into one line. Vault tokens are decrypted
+ * (or masked) first.
+ */
+function AuthoredText({ value, debugId }: { value: string; debugId?: string }) {
+  return <DecryptedMarkdown source={value} compact copyAll={false} data-debug-id={debugId} />;
+}
+
+/**
+ * A titled block inside an expanded card: a heading, no border, no nested card.
+ * Decisions (Review decision, Answer) stay open; the informational blocks are
+ * collapsible and closed by default (plan REQ-UI-8), so an expanded card stays
+ * calm until you open what you want to read.
+ */
 function Block({
   title,
   aside,
@@ -99,7 +109,7 @@ function ReviewerVote({ id, label, verdict }: { id: string; label: string; verdi
 
 function FacetText({ value }: { value: unknown }) {
   if (value == null) return null;
-  if (typeof value === 'string') return <p className="whitespace-pre-wrap text-xs leading-relaxed text-primary">{value}</p>;
+  if (typeof value === 'string') return <AuthoredText value={value} />;
   return (
     <pre className="max-h-48 overflow-auto rounded-md bg-canvas p-2 font-mono text-[11px] leading-relaxed text-primary">
       {JSON.stringify(value, null, 2)}
@@ -114,7 +124,9 @@ function Findings({ value }: { value: any }) {
   return (
     <ul className="list-disc space-y-1 pl-4 text-xs text-primary">
       {list.map((f: any, i) => (
-        <li key={i}>{typeof f === 'string' ? f : f?.message || f?.text || f?.title || JSON.stringify(f)}</li>
+        <li key={i}>
+          <AuthoredText value={typeof f === 'string' ? f : String(f?.message || f?.text || f?.title || JSON.stringify(f))} />
+        </li>
       ))}
     </ul>
   );
@@ -224,8 +236,8 @@ export const TaskDetails: React.FC<TaskDetailsProps> = ({
         </Block>
       )}
       {(awaitingYourReview(task) || userApproved) && (
-        <Block title="Your review" debugId="your-review-block">
-          {handoff?.summary && <p className="leading-relaxed text-primary">{handoff.summary}</p>}
+        <Block title="Review decision" debugId="your-review-block">
+          {handoff?.summary && <AuthoredText value={handoff.summary} debugId="your-review-summary" />}
           {changedFiles.length > 0 && (
             <Text role="caption" tone="muted">
               {changedFiles.length} file{changedFiles.length === 1 ? '' : 's'} changed
@@ -270,7 +282,7 @@ export const TaskDetails: React.FC<TaskDetailsProps> = ({
         <Block title="Waiting on your answer" debugId="answer-blocker-block">
           {blockerQuestion(task) ? (
             <blockquote data-debug-id="answer-question" className="rounded-md border-l-2 border-accent bg-accent-soft px-3 py-2 text-body-sm text-primary">
-              {blockerQuestion(task)}
+              <AuthoredText value={blockerQuestion(task)} />
             </blockquote>
           ) : (
             <Text as="p" role="body-sm" tone="muted">
@@ -301,7 +313,7 @@ export const TaskDetails: React.FC<TaskDetailsProps> = ({
 
       <Block title="Brief" collapsible debugId="task-details-brief">
         {task.brief?.goal || task.description ? (
-          <p className="min-w-0 break-words leading-relaxed text-primary [overflow-wrap:anywhere]">{task.brief?.goal || task.description}</p>
+          <AuthoredText value={String(task.brief?.goal || task.description)} debugId="task-details-goal" />
         ) : (
           <Text role="caption" tone="faint">
             No goal yet.
@@ -310,7 +322,9 @@ export const TaskDetails: React.FC<TaskDetailsProps> = ({
         {task.brief?.acceptance && task.brief.acceptance.length > 0 && (
           <ul className="list-disc space-y-0.5 pl-4 text-primary">
             {task.brief.acceptance.map((item, i) => (
-              <li key={i}>{item}</li>
+              <li key={i}>
+                <AuthoredText value={String(item)} />
+              </li>
             ))}
           </ul>
         )}
@@ -396,8 +410,15 @@ export const TaskDetails: React.FC<TaskDetailsProps> = ({
 
       {handoff && (handoff.summary || handoff.next_steps) && !awaitingYourReview(task) && !userApproved && (
         <Block title={state === 'done' ? 'Result' : 'Latest handoff'} collapsible debugId="task-details-handoff" aside={<Text role="caption" tone="faint">attempt {handoff.attempt_no || attemptNo}</Text>}>
-          {handoff.summary && <p className="leading-relaxed text-primary">{handoff.summary}</p>}
-          {handoff.next_steps && <p className="leading-relaxed text-muted">Next: {handoff.next_steps}</p>}
+          {handoff.summary && <AuthoredText value={handoff.summary} debugId="task-details-handoff-summary" />}
+          {handoff.next_steps && (
+            <div className="space-y-0.5">
+              <Text as="p" role="caption" tone="muted">
+                Next
+              </Text>
+              <AuthoredText value={handoff.next_steps} />
+            </div>
+          )}
         </Block>
       )}
 

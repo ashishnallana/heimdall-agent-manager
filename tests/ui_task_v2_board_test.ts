@@ -506,3 +506,41 @@ test('workflow inputs: long context is previewed, full text stays intact, disclo
   const small = renderToStaticMarkup(React.createElement(WorkflowInputsSummary, { name: 'W', inputs: { a: 'b' } }));
   assert.ok(!small.includes('Show details'), 'no toggle when nothing is hidden');
 });
+
+test('task details: review panel is "Review decision" and authored Markdown keeps its structure', async () => {
+  const React = (await import('react')).default;
+  const { Provider } = await import('react-redux');
+  const { renderToStaticMarkup } = await import('react-dom/server');
+  const { makeVaultStore } = await import('./helpers/vaultEndpointHarness.ts');
+  const { tasksApi } = await import('../src/ui/api/endpoints/tasks.ts');
+  const { TaskDetails } = await import('../src/ui/components/tasks/TaskDetails.tsx');
+
+  const store = await makeVaultStore();
+  const facet = { chainId: 'chain-test-1', taskId: 'task-test-1', attemptNo: 1 };
+  const summary = '### Result\n\nDiscovery complete.\n\nSecond paragraph.\n\n- first point\n- second point\n\n```bash\nham-ctl verify\n```';
+  await store.dispatch(tasksApi.util.upsertQueryData('fetchTaskFacet', { ...facet, kind: 'handoff' }, { facet: { summary } }));
+  await store.dispatch(tasksApi.util.upsertQueryData('fetchTaskEvents', { chainId: 'chain-test-1', taskId: 'task-test-1' }, { events: [] }));
+  const task = makeTask({
+    state: 'in_review',
+    requires_user_approval: true,
+    brief: { goal: '## Goal\n\nLine one.\n\nLine two.', acceptance: ['Uses `code`'], verify: '' },
+  });
+  const actions: any = { busy: false, approve: async () => true, requestChanges: async () => true, comment: async () => true };
+  const html = renderToStaticMarkup(
+    React.createElement(Provider, { store, children: React.createElement(TaskDetails, { chainId: 'chain-test-1', task, actions }) }),
+  );
+  store.dispatch(tasksApi.util.resetApiState());
+
+  assert.match(html, />Review decision</);
+  assert.doesNotMatch(html, />Your review</);
+  assert.match(html, />Approve</);
+  assert.match(html, />Request changes</);
+  const review = html.slice(html.indexOf('data-debug-id="your-review-summary"'));
+  assert.match(review, /<h3[^>]*>Result<\/h3>/, 'heading survives');
+  assert.match(review, /<p[^>]*>Discovery complete\.<\/p>[\s\S]*<p[^>]*>Second paragraph\.<\/p>/, 'paragraphs stay separate');
+  assert.match(review, /<li[^>]*>first point<\/li>[\s\S]*<li[^>]*>second point<\/li>/, 'list items survive');
+  assert.match(review, /<pre[\s\S]*ham-ctl verify/, 'code block survives');
+  const goal = html.slice(html.indexOf('data-debug-id="task-details-goal"'));
+  assert.match(goal, /<h2[^>]*>Goal<\/h2>/);
+  assert.match(html, /<code[^>]*>code<\/code>/, 'acceptance items render inline Markdown');
+});
