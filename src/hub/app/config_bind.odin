@@ -354,9 +354,11 @@ validate_oidc_config :: proc(config: Hub_Config) -> (bool, string) {
 		if config.oidc_authorize_url == "" || config.oidc_token_url == "" || config.oidc_web_client_id == "" {
 			return false, "browser login needs oidc_authorize_url, oidc_token_url and oidc_web_client_id (HAM_OIDC_AUTHORIZE_URL, HAM_OIDC_TOKEN_URL, HAM_OIDC_WEB_CLIENT_ID)"
 		}
-		if strings.trim_space(config.ui_origin) == "" do return false, "browser login needs ui_origin (--ui-origin): it is the CSRF origin and the default redirect URI base"
+		ui := strings.trim_space(config.ui_origin)
+		if ui == "" do return false, "browser login needs ui_origin (--ui-origin): it is the CSRF origin and the default redirect URI base"
+		if !strings.has_prefix(ui, "https://") && !loopback_http_url(ui) do return false, "ui_origin must be an https:// origin (http only for localhost/127.0.0.1/[::1])"
 		redirect := web_redirect_uri(config)
-		if !strings.has_prefix(redirect, "https://") && !strings.has_prefix(redirect, "http://localhost") && !strings.has_prefix(redirect, "http://127.0.0.1") {
+		if !strings.has_prefix(redirect, "https://") && !loopback_http_url(redirect) {
 			return false, "oidc_redirect_uri must be an https:// URL"
 		}
 	}
@@ -396,4 +398,36 @@ parse_bool_setting :: proc(value: string) -> (bool, bool) {
 	if normalized == "true" do return true, true
 	if normalized == "false" do return false, true
 	return false, false
+}
+
+// loopback_http_url reports whether `url` is http:// with a host that is exactly
+// localhost, 127.0.0.1 or [::1] (an optional port and path may follow).
+loopback_http_url :: proc(url: string) -> bool {
+	if !strings.has_prefix(url, "http://") do return false
+	rest := url[len("http://"):]
+	end := len(rest)
+	for c, i in rest {
+		if c == '/' || c == '?' || c == '#' {end = i; break}
+	}
+	authority := rest[:end]
+	if strings.contains_rune(authority, '@') do return false
+	host := authority
+	if strings.has_prefix(authority, "[") {
+		close := strings.index_byte(authority, ']')
+		if close < 0 do return false
+		host = authority[:close + 1]
+		tail := authority[close + 1:]
+		if tail != "" && !loopback_port_ok(tail) do return false
+	} else if colon := strings.index_byte(authority, ':'); colon >= 0 {
+		host = authority[:colon]
+		if !loopback_port_ok(authority[colon:]) do return false
+	}
+	return host == "localhost" || host == "127.0.0.1" || host == "[::1]"
+}
+
+@(private = "file")
+loopback_port_ok :: proc(tail: string) -> bool {
+	if len(tail) < 2 || tail[0] != ':' do return false
+	for c in tail[1:] do if c < '0' || c > '9' do return false
+	return len(tail) <= 6
 }

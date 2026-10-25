@@ -19,6 +19,8 @@ new_session_repository :: proc(impl: ^Session_Repo_SQLite, conn: ^Conn) -> iface
 		save_login_state = login_state_save_sqlite,
 		take_login_state = login_state_take_sqlite,
 		purge_expired = session_purge_expired_sqlite,
+		count_login_states = login_state_count_sqlite,
+		delete_user_sessions = session_delete_user_sqlite,
 	}
 }
 
@@ -151,4 +153,33 @@ session_purge_expired_sqlite :: proc(ctx: rawptr, now_ms: i64) -> (int, domain.D
 		total += changes
 	}
 	return total, {}
+}
+
+login_state_count_sqlite :: proc(ctx: rawptr, now_ms: i64) -> (int, domain.Domain_Error) {
+	impl := (^Session_Repo_SQLite)(ctx)
+	stmt, ok := session_prepare(impl, "SELECT count(*) FROM oidc_login_states WHERE expires_at_ms > ?;")
+	if !ok do return 0, session_err("failed to prepare login state count")
+	defer sqlite3_finalize(stmt)
+	sqlite3_bind_int64(stmt, 1, now_ms)
+	if sqlite3_step(stmt) != SQLITE_ROW do return 0, session_err("failed to count login states")
+	return int(sqlite3_column_int64(stmt, 0)), {}
+}
+
+session_delete_user_sqlite :: proc(ctx: rawptr, user_id: string) -> (int, domain.Domain_Error) {
+	impl := (^Session_Repo_SQLite)(ctx)
+	if impl == nil do return 0, session_err("session repository unavailable")
+	return delete_user_sessions_sqlite(impl.conn, user_id)
+}
+
+// delete_user_sessions_sqlite ends every browser session of `user_id`.
+delete_user_sessions_sqlite :: proc(conn: ^Conn, user_id: string) -> (int, domain.Domain_Error) {
+	if conn == nil || conn.db == nil do return 0, session_err("session repository unavailable")
+	stmt: sqlite3_stmt = nil
+	query := "DELETE FROM user_sessions WHERE user_id=?;"
+	if sqlite3_prepare_v2(conn.db, cstring(raw_data(query)), c.int(len(query)), &stmt, nil) != SQLITE_OK do return 0, session_err("failed to prepare session delete")
+	defer sqlite3_finalize(stmt)
+	bind_text(stmt, 1, user_id)
+	rc, changes := step_changes(conn.db, stmt)
+	if rc != SQLITE_DONE do return 0, session_err("failed to delete sessions")
+	return changes, {}
 }

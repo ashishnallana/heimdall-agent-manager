@@ -32,6 +32,9 @@ User_WS_Ticket :: struct {
 User_WS_Ticket_Store :: struct {
 	mutex: sync.Mutex,
 	tickets: map[string]User_WS_Ticket,
+	// When set, a consumed ticket is re-validated (live_user_authorized) so a ticket
+	// minted before logout or expiry cannot open a stream.
+	auth: ^auth_service.Auth_Service,
 }
 
 User_Handlers :: struct {
@@ -39,6 +42,8 @@ User_Handlers :: struct {
 	auth: ^auth_service.Auth_Service,
 	event_bus: ^events.User_Event_Bus,
 	ws_tickets: User_WS_Ticket_Store,
+	// Reverse-proxy CIDRs whose X-Forwarded-For is trusted for client-IP rate limits.
+	forwarded_for_cidrs: []string,
 }
 
 auth_config_handler :: proc(ctx: rawptr, req: Request) -> Response {
@@ -283,7 +288,7 @@ free_user_ws_ticket :: proc(item: User_WS_Ticket, heap: runtime.Allocator) {
 	delete(item.session_id, heap)
 }
 
-user_ws_ticket_store_consume :: proc(store: ^User_WS_Ticket_Store, ticket: string) -> (contracts.Auth_Context, bool) {
+user_ws_ticket_store_consume_raw :: proc(store: ^User_WS_Ticket_Store, ticket: string) -> (contracts.Auth_Context, bool) {
 	if store == nil || store.tickets == nil || ticket == "" do return contracts.Auth_Context{}, false
 	now := time.to_unix_seconds(time.now())
 	sync.mutex_lock(&store.mutex)
@@ -297,6 +302,13 @@ user_ws_ticket_store_consume :: proc(store: ^User_WS_Ticket_Store, ticket: strin
 	kind := contracts.Auth_Kind.User_Token
 	if item.kind == .Trusted_Proxy || item.kind == .Session do kind = item.kind
 	return contracts.Auth_Context{kind = kind, user_id = item.user_id, name = item.name, display_name = item.display_name, email = item.email, user_token_id = item.user_token_id, session_id = item.session_id, expires_ms = item.auth_expires_ms}, true
+}
+
+user_ws_ticket_store_consume :: proc(store: ^User_WS_Ticket_Store, ticket: string) -> (contracts.Auth_Context, bool) {
+	principal, ok := user_ws_ticket_store_consume_raw(store, ticket)
+	if !ok do return {}, false
+	if store.auth != nil && !auth_service.live_user_authorized(store.auth, principal) do return {}, false
+	return principal, true
 }
 
 write_user_token_json :: proc(builder: ^strings.Builder, token: domain.User_API_Token) {

@@ -31,6 +31,7 @@ Auth_Service :: struct {
 	// Browser login + server-side sessions (nil sessions: cookie auth disabled).
 	web: Web_Login_Config,
 	sessions: ^iface.Session_Repository,
+	login_limiter: Login_Rate_Limiter,
 	vault: ^vd.Service,
 	config: Trusted_Proxy_Config,
 	users: ^user_service.User_Service,

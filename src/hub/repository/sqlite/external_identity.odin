@@ -167,3 +167,16 @@ user_unlink_external_sqlite :: proc(conn: ^Conn, user_id, issuer: string) -> (in
 	if rc != SQLITE_DONE do return 0, domain.domain_error(.Internal_Error, "identity delete failed")
 	return int(changes), {}
 }
+
+// user_set_status_sqlite activates/disables a user (operator CLI).
+user_set_status_sqlite :: proc(conn: ^Conn, user_id: string, active: bool, now: string) -> (bool, domain.Domain_Error) {
+	if conn == nil || conn.db == nil do return false, domain.domain_error(.Internal_Error, "user repository unavailable")
+	stmt: sqlite3_stmt
+	query := "UPDATE users SET status=?, updated_at=? WHERE user_id=?;"
+	if sqlite3_prepare_v2(conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return false, domain.domain_error(.Internal_Error, "user update failed")
+	defer sqlite3_finalize(stmt)
+	bind_text(stmt, 1, "active" if active else "disabled"); bind_text(stmt, 2, now); bind_text(stmt, 3, user_id)
+	rc, changes := step_changes(conn.db, stmt)
+	if rc != SQLITE_DONE do return false, domain.domain_error(.Internal_Error, "user update failed")
+	return changes == 1, {}
+}

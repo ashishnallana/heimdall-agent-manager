@@ -103,7 +103,7 @@ run_users_command :: proc(config: ^app.Hub_Config) -> (bool, string) {
 	if !ok do return false, message
 	defer app.shutdown_graph(&graph)
 	switch action {
-	case "link-oidc", "unlink-oidc":
+	case "link-oidc", "unlink-oidc", "logout", "disable", "enable":
 		return run_users_oidc_link_command(&graph, action)
 	case "create":
 		name := arg_value("--name")
@@ -122,7 +122,7 @@ run_users_command :: proc(config: ^app.Hub_Config) -> (bool, string) {
 	return false, USERS_USAGE
 }
 
-USERS_USAGE :: "usage: ham-hub users create --name <name> --email <email> [--label <label>] [--expires-in 90d] | users link-oidc --user <user_id> [--issuer <iss>] --subject <sub> | users unlink-oidc --user <user_id> [--issuer <iss>]"
+USERS_USAGE :: "usage: ham-hub users create --name <name> --email <email> [--label <label>] [--expires-in 90d] | users link-oidc --user <user_id> [--issuer <iss>] --subject <sub> | users unlink-oidc --user <user_id> [--issuer <iss>] | users logout --user <user_id> | users disable|enable --user <user_id>"
 
 // run_users_oidc_link_command binds/unbinds an OIDC (issuer, subject) to an
 // existing Hub user. This is how an operator maps an existing account to its

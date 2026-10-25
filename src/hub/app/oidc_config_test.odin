@@ -90,3 +90,27 @@ test_web_login_config_validation :: proc(t: ^testing.T) {
 	ok, msg = validate_oidc_config(bad_redirect)
 	testing.expect(t, !ok && strings.contains(msg, "oidc_redirect_uri"), "redirect must be https")
 }
+
+@(test)
+test_loopback_http_url_is_exact :: proc(t: ^testing.T) {
+	for url in ([]string{"http://localhost", "http://localhost:5173/api/v1/auth/callback", "http://127.0.0.1:8081", "http://[::1]:9000/x"}) {
+		testing.expect(t, loopback_http_url(url), url)
+	}
+	for url in ([]string{"http://localhost.evil.example", "http://127.0.0.1.nip.io/cb", "http://localhost@evil.example/", "https://localhost", "http://[::1]evil", "http://localhost:80a", "http://evil.example/localhost"}) {
+		testing.expect(t, !loopback_http_url(url), url)
+	}
+	config := oidc_test_hub_config()
+	config.oidc_authorize_url = "https://auth.example.test/application/o/authorize/"
+	config.oidc_token_url = "https://auth.example.test/application/o/token/"
+	config.oidc_web_client_id = "heimdall-web"
+	config.ui_origin = "http://hub.example.test"
+	ok, msg := validate_oidc_config(config)
+	testing.expect(t, !ok && strings.contains(msg, "ui_origin must be an https"), msg)
+	config.ui_origin = "http://localhost:8081"
+	ok, msg = validate_oidc_config(config)
+	testing.expect(t, ok, msg)
+	config.ui_origin = "https://hub.example.test"
+	config.oidc_redirect_uri = "http://localhost.evil.example/api/v1/auth/callback"
+	ok, msg = validate_oidc_config(config)
+	testing.expect(t, !ok, "prefix-matching localhost host is refused")
+}

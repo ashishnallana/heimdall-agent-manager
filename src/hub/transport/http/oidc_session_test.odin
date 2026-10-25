@@ -95,10 +95,10 @@ session_mint_id_token :: proc(f: ^Session_Fixture) -> string {
 	return strings.concatenate({signing_input, ".", session_rs256_sign(f.key, signing_input)}, context.temp_allocator)
 }
 
-session_test_fetch :: proc(ctx: rawptr, url, token: string) -> (string, bool) {
+session_test_fetch :: proc(ctx: rawptr, url, token: string) -> (string, int, bool) {
 	f := (^Session_Fixture)(ctx)
-	if strings.has_suffix(url, "/jwks/") do return f.jwks, token == ""
-	return "", false
+	if strings.has_suffix(url, "/jwks/") do return f.jwks, 200 if token == "" else 400, true
+	return "", 0, false
 }
 
 session_test_exchange :: proc(ctx: rawptr, url, form, basic: string) -> (string, bool) {
@@ -355,7 +355,8 @@ test_session_return_to_is_same_origin_only :: proc(t: ^testing.T) {
 	f := session_fixture(t)
 	defer session_close(f)
 	bad := [?]string{"%2F%2Fevil.example", "%2F%5Cevil.example", "https%3A%2F%2Fevil.example", "evil.example", "%2F%252F%252Fevil.example",
-		"%2F%2F%2Fevil", "%2F%255Cevil", "javascript%3Aalert(1)", "%2Fa%0D%0ASet-Cookie%3Ax", "%2F%25%32%46%25%32%46evil"}
+		"%2F%2F%2Fevil", "%2F%255Cevil", "javascript%3Aalert(1)", "%2Fa%0D%0ASet-Cookie%3Ax", "%2F%25%32%46%25%32%46evil",
+		"%2Fok%252525252Fdeep"} // still percent-encoded after the last decode pass
 	for value in bad {
 		resp := auth_login_handler(&f.handlers, session_get("/api/v1/auth/login", strings.concatenate({"return_to=", value}, context.temp_allocator)))
 		testing.expect(t, resp.status == 400, value)
@@ -489,4 +490,58 @@ test_session_confidential_client_and_auth_config :: proc(t: ^testing.T) {
 	f.auth.web.enabled = false
 	off := auth_login_handler(&f.handlers, session_get("/api/v1/auth/login", ""))
 	testing.expect_value(t, off.status, 404)
+}
+
+// Review: unauthenticated /login is rate limited per client IP and by a global
+// cap on live login states; over the limit it answers 429 and stores nothing.
+@(test)
+test_session_login_rate_limits :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	f := session_fixture(t)
+	defer session_close(f)
+	count_states :: proc(f: ^Session_Fixture) -> int {
+		n, _ := f.session_repo.count_login_states(f.session_repo.ctx, (SESSION_TEST_BASE_S) * 1000)
+		return n
+	}
+	for i in 0 ..< auth_service.LOGIN_STARTS_PER_IP_PER_WINDOW {
+		resp := auth_login_handler(&f.handlers, session_get("/api/v1/auth/login", ""))
+		testing.expectf(t, resp.status == 302, "start %d", i)
+	}
+	before := count_states(f)
+	over := auth_login_handler(&f.handlers, session_get("/api/v1/auth/login", ""))
+	testing.expect_value(t, over.status, 429)
+	testing.expect_value(t, count_states(f), before)
+	// Another client IP is unaffected; the window resets after a minute.
+	other := session_get("/api/v1/auth/login", "")
+	other.remote_addr = "198.51.100.7"
+	testing.expect_value(t, auth_login_handler(&f.handlers, other).status, 302)
+	f.now = "2026-10-19T10:01:00Z"
+	testing.expect_value(t, auth_login_handler(&f.handlers, session_get("/api/v1/auth/login", "")).status, 302)
+	// Global cap on live login states.
+	testing.expect(t, sqlite.exec(&f.conn, "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i < 10000) INSERT INTO oidc_login_states SELECT 'filler-'||i, 'n', 'v', '/', 9999999999999 FROM n;"))
+	fresh := session_get("/api/v1/auth/login", "")
+	fresh.remote_addr = "192.0.2.44"
+	testing.expect_value(t, auth_login_handler(&f.handlers, fresh).status, 429)
+}
+
+// Review: a WS ticket minted before logout cannot open a stream afterwards.
+@(test)
+test_session_ws_ticket_dies_with_session :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	f := session_fixture(t)
+	defer session_close(f)
+	f.handlers.ws_tickets.auth = &f.auth
+	login := session_begin(t, f)
+	resp := session_callback(f, login.state, "the-code", login.login_cookie)
+	cookie := session_cookie_pair(session_header(resp, "Set-Cookie", 0))
+	principal, ok, _ := require_auth(&f.auth, session_get("/api/v1/me", "", cookie))
+	testing.expect(t, ok)
+	user_ws_ticket_store_put(&f.handlers.ws_tickets, "uwst_before_logout", principal, 30)
+	user_ws_ticket_store_put(&f.handlers.ws_tickets, "uwst_still_valid", principal, 30)
+	_, live := user_ws_ticket_store_consume(&f.handlers.ws_tickets, "uwst_still_valid")
+	testing.expect(t, live, "ticket valid while the session lives")
+	_ = auth_logout_handler(&f.handlers, Request{method = "POST", path = "/api/v1/auth/logout", request_id = "l", headers = session_get("", "", cookie).headers})
+	_, after := user_ws_ticket_store_consume(&f.handlers.ws_tickets, "uwst_before_logout")
+	testing.expect(t, !after, "ticket minted before logout is refused")
+	user_ws_ticket_store_free(&f.handlers.ws_tickets)
 }

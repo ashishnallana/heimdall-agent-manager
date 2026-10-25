@@ -40,10 +40,10 @@ oidc_http_identity :: proc(
 	if subject != "subject-1" do return {}, false, domain.domain_error(.Unauthenticated, "unknown subject")
 	return domain.User{user_id = "alice", name = "alice", status = .Active}, true, {}
 }
-oidc_http_fetch :: proc(ctx: rawptr, url, token: string) -> (string, bool) {
+oidc_http_fetch :: proc(ctx: rawptr, url, token: string) -> (string, int, bool) {
 	f := (^OIDC_HTTP_Fixture)(ctx)
-	if strings.has_suffix(url, "/jwks/") do return f.jwks, token == ""
-	return `{"sub":"subject-1","preferred_username":"alice"}`, token == f.token
+	if strings.has_suffix(url, "/jwks/") do return f.jwks, 200 if token == "" else 400, true
+	return `{"sub":"subject-1","preferred_username":"alice"}`, 200 if token == f.token else 401, true
 }
 oidc_http_devices :: proc(
 	ctx: rawptr,

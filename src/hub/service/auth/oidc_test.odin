@@ -27,8 +27,9 @@ OIDC_Test_Fetch :: struct {
 	// Concurrency tests: exact per-endpoint counts (atomic) and artificial latency.
 	jwks_hits, userinfo_hits: int,
 	jwks_delay_ms, userinfo_delay_ms: int,
+	userinfo_status: int, // non-zero: UserInfo answers with this HTTP status
 }
-oidc_test_fetch :: proc(ctx: rawptr, url, token: string) -> (string, bool) {
+oidc_test_fetch :: proc(ctx: rawptr, url, token: string) -> (string, int, bool) {
 	f := (^OIDC_Test_Fetch)(ctx)
 	sync.atomic_add(&f.calls, 1)
 	is_jwks := strings.has_suffix(url, "/jwks/")
@@ -36,14 +37,15 @@ oidc_test_fetch :: proc(ctx: rawptr, url, token: string) -> (string, bool) {
 	else do sync.atomic_add(&f.userinfo_hits, 1)
 	delay := f.jwks_delay_ms if is_jwks else f.userinfo_delay_ms
 	if delay > 0 do time.sleep(time.Duration(delay) * time.Millisecond)
-	if f.fail do return "", false
+	if f.fail do return "", 0, false
 	if is_jwks {
-		if token != "" do return "", false // JWT bearer must never be sent to JWKS.
-		return f.data.jwks, true
+		if token != "" do return "", 400, true // JWT bearer must never be sent to JWKS.
+		return f.data.jwks, 200, true
 	}
 	sync.atomic_add(&f.userinfo_calls, 1)
-	if token == "" do return "", false
-	return f.info, true
+	if f.userinfo_status != 0 do return "", f.userinfo_status, true
+	if token == "" do return "", 401, true
+	return f.info, 200, true
 }
 oidc_test_config :: proc(t: ^testing.T, f: ^OIDC_Test_Fetch) -> OIDC_Config {
 	testing.expect(
@@ -740,4 +742,34 @@ test_oidc_operator_link_refuses_disabled_user :: proc(t: ^testing.T) {
 	testing.expect(t, saved)
 	linked, err := sqlite.user_link_external_sqlite(&f.conn, "carol", f.auth.oidc.issuer, "subject-c", f.now)
 	testing.expect(t, !linked && err.code == .Forbidden, err.message)
+}
+
+// Review: UserInfo 401/403 means the provider rejected the token (re-auth, 401);
+// only no response, 5xx or 429 is a retryable outage (503).
+@(test)
+test_oidc_userinfo_status_mapping :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	cases := [?]struct{status: int, code: domain.Error_Code}{
+		{401, .Unauthenticated}, {403, .Unauthenticated}, {404, .Unauthenticated},
+		{500, .Provider_Unavailable}, {503, .Provider_Unavailable}, {429, .Provider_Unavailable},
+	}
+	for c in cases {
+		f := oidc_test_repo(t)
+		f.fetch.userinfo_status = c.status
+		_, ok, err := resolve_auth(&f.auth, oidc_test_request(f.fetch.data.tokens["valid"]))
+		testing.expectf(t, !ok && err.code == c.code, "status %d -> %v (%s)", c.status, err.code, err.message)
+		oidc_test_close(f)
+	}
+}
+
+// Review: an unknown kid met while the JWKS refresh is refused by the cap is a
+// retryable 429, not a 401.
+@(test)
+test_oidc_unknown_kid_while_busy_is_429 :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	f := oidc_test_repo(t)
+	defer oidc_test_close(f)
+	f.auth.oidc_state.inflight = OIDC_MAX_INFLIGHT_FETCHES
+	_, ok, err := resolve_auth(&f.auth, oidc_test_request(f.fetch.data.tokens["unknown_kid"]))
+	testing.expect(t, !ok && err.code == .Rate_Limited, err.message)
 }

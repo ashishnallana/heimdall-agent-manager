@@ -450,7 +450,8 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 	// `brg_` identity, never a user token with the machine as a label.
 	device_auth_service.with_bridge_token_minter(&graph.device_auth, device_bridge_minter, rawptr(graph))
 	graph.users.bridges = &graph.repos.bridges
-	graph.user_handlers = http.User_Handlers{launch_preferences = &graph.users, auth = &graph.auth, event_bus = &graph.event_bus, ws_tickets = http.new_user_ws_ticket_store()}
+	graph.user_handlers = http.User_Handlers{launch_preferences = &graph.users, auth = &graph.auth, event_bus = &graph.event_bus, ws_tickets = http.new_user_ws_ticket_store(), forwarded_for_cidrs = config.trusted_proxy_cidrs}
+	graph.user_handlers.ws_tickets.auth = &graph.auth
 	graph.shell_session_service = shell_session_svc.new_shell_session_service(
 		repo                = &graph.shell_session_repo,
 		bridge_command_sink = bridge_command_sink,

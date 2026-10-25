@@ -24,13 +24,8 @@ OIDC_Config :: struct {
 	// `ham-hub users link-oidc` instead.
 	claim_existing_users: bool,
 	// Injectable transport for deterministic tests; production always uses TLS.
-	fetch:                                    proc(
-		ctx: rawptr,
-		url, token: string,
-	) -> (
-		string,
-		bool,
-	),
+	// Returns the body and HTTP status; transport_ok=false when no response arrived.
+	fetch: proc(ctx: rawptr, url, token: string) -> (body: string, status: int, transport_ok: bool),
 	fetch_ctx:                                rawptr,
 }
 OIDC_Identity :: struct {
@@ -92,35 +87,29 @@ oidc_log_rejected :: proc(stage: string) {
 	fmt.printfln("ham-hub oidc_rejected stage=%s", stage)
 }
 
-oidc_http_get :: proc(url, token: string) -> (string, bool) {
-	if !strings.has_prefix(url, "https://") do return "", false
+// oidc_http_get performs one https GET. The status is returned for every
+// response; only a 200 body is ever used, and error bodies are never logged.
+oidc_http_get :: proc(url, token: string) -> (body: string, status: int, transport_ok: bool) {
+	if !strings.has_prefix(url, "https://") do return "", 0, false
 	fmt.printfln("ham-hub oidc_http_request method=GET target=%s authorization=%t", url, token != "")
 	headers := make([dynamic]http_client.Header, context.temp_allocator)
 	if token != "" do append(&headers, http_client.Header{"Authorization", strings.concatenate({"Bearer ", token}, context.temp_allocator)})
 	request_path := "/" if strings.has_suffix(url, "/") else ""
-	res, ok := http_client.request_with_headers_timeout(
-		"GET",
-		url,
-		request_path,
-		"",
-		headers[:],
-		5000,
-		omit_default_port = true,
-	)
+	res, ok := http_client.request_with_headers_timeout("GET", url, request_path, "", headers[:], 5000, omit_default_port = true)
 	if !ok {
 		fmt.printfln("ham-hub oidc_http_rejected reason=request_failed")
-		return "", false
+		return "", 0, false
 	}
 	fmt.printfln("ham-hub oidc_http_response status=%d bytes=%d", res.status, len(res.body))
 	if res.status != 200 {
 		fmt.printfln("ham-hub oidc_http_rejected reason=http_status status=%d", res.status)
-		return "", false
+		return "", res.status, true
 	}
 	if len(res.body) > 1_048_576 {
 		fmt.printfln("ham-hub oidc_http_rejected reason=body_too_large")
-		return "", false
+		return "", 0, false
 	}
-	return res.body, true
+	return res.body, 200, true
 }
 // oidc_outbound_acquire takes an outbound-request slot, failing fast past the
 // limit instead of queueing behind a slow provider. `reserved` (JWKS only) may
@@ -141,15 +130,14 @@ oidc_outbound_release :: proc(state: ^OIDC_State) {
 
 // oidc_fetch performs one bounded outbound GET. busy = refused by the cap (no
 // request was sent).
-oidc_fetch :: proc(config: OIDC_Config, state: ^OIDC_State, url, token: string, reserved := false) -> (body: string, ok: bool, busy: bool) {
-	if !oidc_outbound_acquire(state, reserved) do return "", false, true
+oidc_fetch :: proc(config: OIDC_Config, state: ^OIDC_State, url, token: string, reserved := false) -> (body: string, ok: bool, busy: bool, status: int) {
+	if !oidc_outbound_acquire(state, reserved) do return "", false, true, 0
 	defer oidc_outbound_release(state)
-	if config.fetch != nil {
-		body, ok = config.fetch(config.fetch_ctx, url, token)
-		return body, ok, false
-	}
-	body, ok = oidc_http_get(url, token)
-	return body, ok, false
+	transport_ok: bool
+	if config.fetch != nil do body, status, transport_ok = config.fetch(config.fetch_ctx, url, token)
+	else do body, status, transport_ok = oidc_http_get(url, token)
+	if !transport_ok do status = 0
+	return body, transport_ok && status == 200, false, status
 }
 
 // oidc_stage_error maps a rejection stage to the client-visible error. Provider
@@ -332,7 +320,7 @@ oidc_jwks_refresh :: proc(config: OIDC_Config, state: ^OIDC_State, now_ms: i64) 
 	state.jwks_attempt_ms = now_ms
 	sync.mutex_unlock(&state.jwks_mutex)
 
-	jwks_text, fetched, busy := oidc_fetch(config, state, config.jwks_url, "", reserved = true)
+	jwks_text, fetched, busy, _ := oidc_fetch(config, state, config.jwks_url, "", reserved = true)
 	parsed: OIDC_JWKS
 	ok := fetched && json.unmarshal_string(jwks_text, &parsed, .JSON, context.temp_allocator) == nil
 	if busy do oidc_log_rejected("jwks_busy")
@@ -483,10 +471,15 @@ oidc_validate_token_with_stage :: proc(
 	if !scope_ok do return {}, 0, "scope", false
 	if sig_stage, sig_ok := oidc_jwt_verify_signature(config, state, token, parts, header.kid, sig, now_ms); !sig_ok do return {}, 0, sig_stage, false
 	// UserInfo only after the signature verifies.
-	info_text, info_ok, info_busy := oidc_fetch(config, state, config.userinfo_url, token)
+	info_text, info_ok, info_busy, info_status := oidc_fetch(config, state, config.userinfo_url, token)
 	info: OIDC_Identity
 	if info_busy do return {}, 0, OIDC_STAGE_FETCH_BUSY, false
-	if !info_ok do return {}, 0, "userinfo_transport", false
+	if !info_ok {
+		// The provider rejected this token (revoked, wrong client): re-authenticate.
+		// Only no response, a 5xx or provider throttling is a retryable outage.
+		if info_status == 0 || info_status >= 500 || info_status == 429 do return {}, 0, "userinfo_transport", false
+		return {}, 0, "userinfo_rejected", false
+	}
 	if json.unmarshal_string(info_text, &info, .JSON, context.temp_allocator) != nil do return {}, 0, "userinfo_decode", false
 	if info.sub == "" do return {}, 0, "userinfo_subject_missing", false
 	if info.sub != claims.sub do return {}, 0, "userinfo_subject_mismatch", false
@@ -549,6 +542,7 @@ oidc_cache_put :: proc(state: ^OIDC_State, key: string, entry: OIDC_Cache_Entry)
 	}
 }
 oidc_free :: proc(service: ^Auth_Service) {
+	login_rate_limiter_free(&service.login_limiter)
 	sync.mutex_lock(&service.oidc_state.mutex)
 	defer sync.mutex_unlock(&service.oidc_state.mutex)
 	for k, e in service.oidc_state.entries do oidc_free_entry(k, e)

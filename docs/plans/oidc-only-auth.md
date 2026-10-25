@@ -356,3 +356,21 @@ Availability follow-up (after phase 1 approval):
   is not counted against the 60 s window. A request that meets an in-flight refresh waits for it
   (bounded by the 5 s fetch timeout) and re-runs its key lookup once.
 - `ham-hub users link-oidc` refuses inactive users.
+
+Phase 2 review follow-up:
+- No commit on this branch is to be tagged before phase 3 lands: phases 2 and 3 are only safe
+  together (phase 2 still lets an invalid session cookie fall through to trusted-proxy identity).
+- UserInfo 401/403 (and other 4xx) → 401 re-authenticate; only no response, 5xx or a provider 429
+  → 503. The injectable fetch now returns the HTTP status.
+- `GET /api/v1/auth/login` is limited to 20 starts per client IP per minute (client IP via the
+  forwarded-for resolver and its trusted CIDRs) and refused while 10 000 unexpired login states
+  exist; both answer 429 and create no row.
+- `return_to` that is still percent-encoded after the last decode pass is refused.
+- WS tickets are re-validated when consumed (a ticket minted before logout is dead); the LSP stream
+  also runs the stream auth guard.
+- `ham-hub users unlink-oidc` ends the user's sessions; new `users logout --user <id>` and
+  `users disable|enable --user <id>` (disable also ends sessions). There was no other disable path.
+- Redirect URI / `ui_origin`: https, or http only when the host is exactly `localhost`,
+  `127.0.0.1` or `[::1]`.
+- **Migration number:** `134_user_sessions.sql` must be renumbered if `main` gains its own 134
+  before this branch merges (and its registry/fixture references updated).

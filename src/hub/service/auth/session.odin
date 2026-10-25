@@ -4,7 +4,9 @@ import "core:crypto/sha2"
 import "core:encoding/base64"
 import "core:encoding/json"
 import "core:fmt"
+import "base:runtime"
 import "core:strings"
+import "core:sync"
 import contracts "odin_test:contracts"
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
@@ -28,6 +30,57 @@ DEFAULT_SESSION_TTL_HOURS :: 7 * 24
 DEFAULT_SESSION_IDLE_HOURS :: 24
 // Upper bound on a single return_to path.
 RETURN_TO_MAX_BYTES :: 2048
+// Unauthenticated GET /api/v1/auth/login creates a row; bound it per client IP
+// and globally so it cannot be used to fill the database.
+LOGIN_STARTS_PER_IP_PER_WINDOW :: 20
+LOGIN_RATE_WINDOW_MS :: 60_000
+LOGIN_STATES_MAX_LIVE :: 10_000
+
+Login_Rate_Window :: struct {
+	start_ms: i64,
+	count: int,
+}
+
+Login_Rate_Limiter :: struct {
+	mutex: sync.Mutex,
+	windows: map[string]Login_Rate_Window,
+}
+
+// login_rate_allow counts one login start for `client_ip` (fixed window).
+login_rate_allow :: proc(limiter: ^Login_Rate_Limiter, client_ip: string, now_ms: i64) -> bool {
+	sync.mutex_lock(&limiter.mutex)
+	defer sync.mutex_unlock(&limiter.mutex)
+	a := runtime.heap_allocator()
+	if limiter.windows == nil do limiter.windows = make(map[string]Login_Rate_Window, a)
+	if len(limiter.windows) >= 4096 {
+		stale := make([dynamic]string, context.temp_allocator)
+		for k, w in limiter.windows do if now_ms - w.start_ms >= LOGIN_RATE_WINDOW_MS do append(&stale, k)
+		for k in stale {
+			key, _ := delete_key(&limiter.windows, k)
+			delete(key, a)
+		}
+		if len(limiter.windows) >= 4096 do return false // too many distinct clients in one window
+	}
+	key := client_ip if client_ip != "" else "unknown"
+	w, found := limiter.windows[key]
+	if !found || now_ms - w.start_ms >= LOGIN_RATE_WINDOW_MS {
+		if !found do key = strings.clone(key, a)
+		limiter.windows[key] = Login_Rate_Window{start_ms = now_ms, count = 1}
+		return true
+	}
+	if w.count >= LOGIN_STARTS_PER_IP_PER_WINDOW do return false
+	w.count += 1
+	limiter.windows[key] = w
+	return true
+}
+
+login_rate_limiter_free :: proc(limiter: ^Login_Rate_Limiter) {
+	sync.mutex_lock(&limiter.mutex)
+	defer sync.mutex_unlock(&limiter.mutex)
+	for k in limiter.windows do delete(k, runtime.heap_allocator())
+	delete(limiter.windows)
+	limiter.windows = nil
+}
 
 Web_Login_Config :: struct {
 	enabled: bool,
@@ -165,6 +218,9 @@ safe_return_to :: proc(value: string) -> (string, bool) {
 		if !ok do return "", false
 		candidate = decoded
 	}
+	// Anything still percent-encoded after the last pass is too deeply nested to
+	// be a real path: refuse rather than guess what a later decoder will see.
+	if !return_to_shape_ok(candidate) || strings.index_byte(candidate, '%') >= 0 do return "", false
 	return value, true
 }
 
@@ -215,12 +271,19 @@ hex_nibble :: proc(c: byte) -> (byte, bool) {
 
 // web_login_begin creates a single-use login state (state, nonce, PKCE verifier)
 // and returns the provider authorization URL plus the state (for the login cookie).
-web_login_begin :: proc(service: ^Auth_Service, return_to: string) -> (redirect_url: string, state: string, ok: bool, err: domain.Domain_Error) {
+web_login_begin :: proc(service: ^Auth_Service, return_to: string, client_ip := "") -> (redirect_url: string, state: string, ok: bool, err: domain.Domain_Error) {
 	if !web_login_enabled(service) do return "", "", false, domain.domain_error(.Not_Found, "browser login is not configured")
 	target, target_ok := safe_return_to(return_to)
 	if !target_ok do return "", "", false, domain.domain_error(.Validation_Failed, "return_to must be a same-origin relative path")
 	now, now_ok := now_unix_ms(service)
 	if !now_ok do return "", "", false, domain.domain_error(.Internal_Error, "clock unavailable")
+	rate_limited := domain.domain_error(.Rate_Limited, "too many sign-in attempts; retry shortly")
+	if !login_rate_allow(&service.login_limiter, client_ip, now) do return "", "", false, rate_limited
+	if service.sessions.count_login_states != nil {
+		live, count_err := service.sessions.count_login_states(service.sessions.ctx, now)
+		if count_err.code != .None do return "", "", false, count_err
+		if live >= LOGIN_STATES_MAX_LIVE do return "", "", false, rate_limited
+	}
 	state_value, s_ok := random_token(32)
 	nonce, n_ok := random_token(32)
 	verifier, v_ok := random_token(48) // 64 base64url chars (RFC 7636: 43..128)

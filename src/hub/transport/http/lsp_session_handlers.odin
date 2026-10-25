@@ -704,10 +704,16 @@ lsp_session_stream_handler :: proc(ctx: rawptr, req: Request, client: net.TCP_So
 		}
 	}
 
+	guard := stream_auth_guard_make(h.ws_tickets.auth if h.ws_tickets != nil else nil, auth_ctx)
 	for {
 		text, ok := lsp_read_ws_text_blocking(&reader, LSP_IDLE_TIMEOUT)
 		if !ok {
 			ws_close_reason = lsp_ws_close_reason(h.sessions, wire_id, reader.disconnect_reason)
+			return
+		}
+		// Logout / session expiry ends the language-server stream at the next frame.
+		if !stream_auth_still_valid(&guard) {
+			ws_close_reason = "auth_revoked"
 			return
 		}
 		defer delete(text)

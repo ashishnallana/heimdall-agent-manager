@@ -5,6 +5,7 @@ import "core:strings"
 import contracts "odin_test:contracts"
 import domain "odin_test:hub/domain"
 import auth_service "odin_test:hub/service/auth"
+import device_auth "odin_test:hub/service/device_auth"
 
 // Browser login routes (docs/plans/oidc-only-auth.md, "Browser session flow").
 // All are public. Cookies use the __Host- prefix (Secure, Path=/, no Domain) so
@@ -26,9 +27,10 @@ redirect_response :: proc(location: string, cookies: ..string) -> Response {
 auth_login_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	handlers := (^User_Handlers)(ctx)
 	if !auth_service.web_login_enabled(handlers.auth) do return respond_error(domain.domain_error(.Not_Found, "browser login is not configured"), req.request_id)
-	url, state, ok, err := auth_service.web_login_begin(handlers.auth, query_value(req.query, "return_to"))
+	client_ip := device_auth.resolve_client_ip(req.remote_addr, header_value(req.headers, "X-Forwarded-For"), handlers.forwarded_for_cidrs)
+	url, state, ok, err := auth_service.web_login_begin(handlers.auth, query_value(req.query, "return_to"), client_ip)
 	if !ok {
-		if err.code == .Validation_Failed do return respond_error(err, req.request_id)
+		if err.code == .Validation_Failed || err.code == .Rate_Limited do return respond_error(err, req.request_id)
 		fmt.printfln("ham-hub oidc_login_rejected stage=begin")
 		return redirect_response(AUTH_ERROR_REDIRECT)
 	}

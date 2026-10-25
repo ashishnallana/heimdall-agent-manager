@@ -1,5 +1,6 @@
 package app
 
+import "core:strings"
 import "core:testing"
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
@@ -77,4 +78,48 @@ contains_all :: proc(s: string, parts: ..string) -> bool {
 		if !found do return false
 	}
 	return true
+}
+
+// Review: unlink/logout/disable end the user's browser sessions.
+@(test)
+test_users_commands_end_sessions :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	conn, opened, _ := sqlite.open(":memory:")
+	if !testing.expect(t, opened) do return
+	defer sqlite.close(&conn)
+	migrated, _ := sqlite.run_migrations(&conn)
+	testing.expect(t, migrated)
+	impl: sqlite.User_Repo_SQLite
+	repo := sqlite.new_user_repository(&impl, &conn)
+	_, saved, _ := iface.user_save(&repo, domain.User{user_id = "alice", name = "alice", status = .Active, created_at = "now", updated_at = "now"})
+	testing.expect(t, saved)
+	add_session :: proc(conn: ^sqlite.Conn, hash: string) {
+		_ = sqlite.exec(conn, strings.concatenate({"INSERT INTO user_sessions(session_id_hash,user_id,created_at_ms,last_seen_at_ms,expires_at_ms,idle_expires_at_ms) VALUES('", hash, "','alice',1,1,9999999999999,9999999999999);"}, context.temp_allocator))
+	}
+	sessions :: proc(conn: ^sqlite.Conn) -> int {
+		s_impl: sqlite.Session_Repo_SQLite
+		srepo := sqlite.new_session_repository(&s_impl, conn)
+		_, a, _ := srepo.get_session(srepo.ctx, "s1")
+		_, b, _ := srepo.get_session(srepo.ctx, "s2")
+		return int(a) + int(b)
+	}
+	issuer :: "https://auth.example.test/"
+	add_session(&conn, "s1"); add_session(&conn, "s2")
+	ok, message := users_oidc_link_command(&conn, issuer, "now", "logout", "alice", "", "")
+	testing.expect(t, ok && sessions(&conn) == 0, message)
+	add_session(&conn, "s1")
+	ok, message = users_oidc_link_command(&conn, issuer, "now", "link-oidc", "alice", "", "sub-1")
+	testing.expect(t, ok, message)
+	ok, message = users_oidc_link_command(&conn, issuer, "now", "unlink-oidc", "alice", "", "")
+	testing.expect(t, ok && sessions(&conn) == 0, message)
+	add_session(&conn, "s2")
+	ok, message = users_oidc_link_command(&conn, issuer, "now", "disable", "alice", "", "")
+	testing.expect(t, ok && sessions(&conn) == 0, message)
+	user, _, _ := iface.user_get_by_id(&repo, "alice")
+	testing.expect_value(t, user.status, domain.User_Status.Disabled)
+	ok, message = users_oidc_link_command(&conn, issuer, "now", "enable", "alice", "", "")
+	user, _, _ = iface.user_get_by_id(&repo, "alice")
+	testing.expect(t, ok && user.status == .Active, message)
+	ok, _ = users_oidc_link_command(&conn, issuer, "now", "disable", "nobody", "", "")
+	testing.expect(t, !ok)
 }

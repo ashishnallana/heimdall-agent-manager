@@ -33,4 +33,8 @@ Session_Repository :: struct {
 	// purge_expired drops expired sessions (absolute or idle), login states and
 	// v2 device-proof nonces. Returns the number of rows removed.
 	purge_expired: proc(ctx: rawptr, now_ms: i64) -> (int, domain.Domain_Error),
+	// count_login_states counts unexpired pending logins (global cap).
+	count_login_states: proc(ctx: rawptr, now_ms: i64) -> (int, domain.Domain_Error),
+	// delete_user_sessions ends every session of a user (unlink, disable, logout).
+	delete_user_sessions: proc(ctx: rawptr, user_id: string) -> (int, domain.Domain_Error),
 }
