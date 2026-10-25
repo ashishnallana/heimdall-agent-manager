@@ -382,7 +382,6 @@ test_antigravity_ham_ctl_allowlist_coverage_and_security :: proc(t: ^testing.T) 
 	// All these allowlisted coordination commands must be approved locally (0 bridge calls)
 	allowlisted := []string{
 		"$HEIMDALL_CTL_BIN chat send --to user --body 'update'",
-		"$HEIMDALL_CTL_BIN verify",
 		"$HEIMDALL_CTL_BIN lease heartbeat --note progress",
 		"$HEIMDALL_CTL_BIN lease next",
 		"$HEIMDALL_CTL_BIN lease submit --summary done",

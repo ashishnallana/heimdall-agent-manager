@@ -507,7 +507,6 @@ test_is_ham_ctl_command_accepts_only_a_lone_allowlisted_invocation :: proc(t: ^t
 		"  ./.heimdall/bin/ham-ctl chat send --to user --body 'hi there'  ",
 		".heimdall/bin/ham-ctl lease heartbeat",
 		"$HEIMDALL_CTL_BIN lease submit --summary done",
-		BIN + " verify",
 		BIN + " memory propose --title x",
 		BIN + " agent start-success",
 		BIN + " task show task_1",
@@ -543,6 +542,8 @@ test_is_ham_ctl_command_accepts_only_a_lone_allowlisted_invocation :: proc(t: ^t
 		BIN + " chat read --agent-tok?n hlat_x",
 		BIN + " task show t --hub-url http://e",
 		BIN + " verify --config /tmp/c.toml",
+		// The removed verify stub is no longer allowlisted.
+		BIN + " verify",
 		// review always asks (it can record a verdict as the user).
 		BIN + " review post task_1 --verdict approve",
 		BIN + " review post task_1 --verdict approve --on-behalf-of user",

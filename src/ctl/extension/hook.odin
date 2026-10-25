@@ -230,16 +230,15 @@ Ham_Ctl_Verb :: struct {
 }
 
 // HAM_CTL_AUTO_APPROVE_VERBS: the agent's own coordination traffic with Heimdall.
-// Nothing here may write a command that something else later executes: task
-// create/update/publish can set brief.verify (which `verify` runs as a bridge
-// shell), so only task read/comment verbs are listed. `review` always asks:
+// Nothing here may write something that later acts on the agent's behalf, so
+// only task read/comment verbs are listed (create/update/publish change what
+// other agents are asked to do). `review` always asks:
 // `review post --on-behalf-of user` records a verdict as the user, and shell
 // quoting makes a flag deny-list unreliable.
 HAM_CTL_AUTO_APPROVE_VERBS :: [?]Ham_Ctl_Verb{
 	{"chat", "read"}, {"chat", "send"},
 	{"lease", "*"},
 	{"task", "show"}, {"task", "fetch"}, {"task", "list"}, {"task", "comments"}, {"task", "comment"},
-	{"verify", "*"},
 	{"extension", "*"}, {"search", "*"},
 	{"memory", "propose"}, {"memory", "list"}, {"memory", "show"}, {"memory", "content"},
 	{"agent", "start-success"},

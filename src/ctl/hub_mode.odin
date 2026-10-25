@@ -456,18 +456,18 @@ ctl_hub_artifacts :: proc(base, token: string, tokens, args: []string) {
 	if action == "" || action == "list" {
 		query := make([dynamic]string)
 		defer delete(query)
-		if p := option_value(args, "--project-id", option_value(args, "--project", "")); p != "" do append(&query, fmt.tprintf("project_id=%s", p))
-		if ai := option_value(args, "--agent-instance-id", option_value(args, "--agent-instance", "")); ai != "" do append(&query, fmt.tprintf("agent_instance_id=%s", ai))
-		if a := option_value(args, "--agent-id", option_value(args, "--agent", "")); a != "" do append(&query, fmt.tprintf("agent_id=%s", a))
-		if t := option_value(args, "--task-id", option_value(args, "--task", "")); t != "" do append(&query, fmt.tprintf("task_id=%s", t))
-		if c := option_value(args, "--chain-id", option_value(args, "--chain", "")); c != "" do append(&query, fmt.tprintf("chain_id=%s", c))
-		if k := option_value(args, "--kind", ""); k != "" do append(&query, fmt.tprintf("kind=%s", k))
-		if s := option_value(args, "--since", ""); s != "" do append(&query, fmt.tprintf("since=%s", s))
-		if u := option_value(args, "--until", ""); u != "" do append(&query, fmt.tprintf("until=%s", u))
-		if s := option_value(args, "--sort", option_value(args, "--sort-field", "")); s != "" do append(&query, fmt.tprintf("sort=%s", s))
-		if o := option_value(args, "--order", option_value(args, "--sort-order", "")); o != "" do append(&query, fmt.tprintf("order=%s", o))
-		if l := option_value(args, "--limit", ""); l != "" do append(&query, fmt.tprintf("limit=%s", l))
-		if cur := option_value(args, "--cursor", ""); cur != "" do append(&query, fmt.tprintf("cursor=%s", cur))
+		if p := option_value(args, "--project-id", option_value(args, "--project", "")); p != "" do query_param(&query, "project_id", p)
+		if ai := option_value(args, "--agent-instance-id", option_value(args, "--agent-instance", "")); ai != "" do query_param(&query, "agent_instance_id", ai)
+		if a := option_value(args, "--agent-id", option_value(args, "--agent", "")); a != "" do query_param(&query, "agent_id", a)
+		if t := option_value(args, "--task-id", option_value(args, "--task", "")); t != "" do query_param(&query, "task_id", t)
+		if c := option_value(args, "--chain-id", option_value(args, "--chain", "")); c != "" do query_param(&query, "chain_id", c)
+		if k := option_value(args, "--kind", ""); k != "" do query_param(&query, "kind", k)
+		if s := option_value(args, "--since", ""); s != "" do query_param(&query, "since", s)
+		if u := option_value(args, "--until", ""); u != "" do query_param(&query, "until", u)
+		if s := option_value(args, "--sort", option_value(args, "--sort-field", "")); s != "" do query_param(&query, "sort", s)
+		if o := option_value(args, "--order", option_value(args, "--sort-order", "")); o != "" do query_param(&query, "order", o)
+		if l := option_value(args, "--limit", ""); l != "" do query_param(&query, "limit", l)
+		if cur := option_value(args, "--cursor", ""); cur != "" do query_param(&query, "cursor", cur)
 		if has_flag(args, "--include-deleted") do append(&query, "include_deleted=true")
 
 		path := "/api/v1/artifacts"
@@ -506,21 +506,21 @@ ctl_hub_memories :: proc(base, token: string, tokens, args: []string) {
 	if action == "" || action == "list" {
 		query := make([dynamic]string)
 		defer delete(query)
-		if s := option_value(args, "--status", ""); s != "" do append(&query, fmt.tprintf("status=%s", s))
-		if t := option_value(args, "--type", ""); t != "" do append(&query, fmt.tprintf("type=%s", t))
-		if l := option_value(args, "--limit", ""); l != "" do append(&query, fmt.tprintf("limit=%s", l))
+		if s := option_value(args, "--status", ""); s != "" do query_param(&query, "status", s)
+		if t := option_value(args, "--type", ""); t != "" do query_param(&query, "type", t)
+		if l := option_value(args, "--limit", ""); l != "" do query_param(&query, "limit", l)
 
 		agent_ids := collect_multi_values(args, "--agent-id", "--agent-ids", "--agent", "--agents"); defer delete(agent_ids)
-		if len(agent_ids) > 0 do append(&query, fmt.tprintf("agent_ids=%s", strings.join(agent_ids[:], ",")))
+		if len(agent_ids) > 0 do query_param(&query, "agent_ids", strings.join(agent_ids[:], ","))
 
 		project_ids := collect_multi_values(args, "--project-id", "--project-ids", "--project", "--projects"); defer delete(project_ids)
-		if len(project_ids) > 0 do append(&query, fmt.tprintf("project_ids=%s", strings.join(project_ids[:], ",")))
+		if len(project_ids) > 0 do query_param(&query, "project_ids", strings.join(project_ids[:], ","))
 
 		bridge_ids := collect_multi_values(args, "--bridge-id", "--bridge-ids", "--bridge", "--bridges"); defer delete(bridge_ids)
-		if len(bridge_ids) > 0 do append(&query, fmt.tprintf("bridge_ids=%s", strings.join(bridge_ids[:], ",")))
+		if len(bridge_ids) > 0 do query_param(&query, "bridge_ids", strings.join(bridge_ids[:], ","))
 
 		template_ids := collect_multi_values(args, "--template-id", "--template-ids", "--template", "--templates"); defer delete(template_ids)
-		if len(template_ids) > 0 do append(&query, fmt.tprintf("template_ids=%s", strings.join(template_ids[:], ",")))
+		if len(template_ids) > 0 do query_param(&query, "template_ids", strings.join(template_ids[:], ","))
 
 		path := "/api/v1/memories"
 		if len(query) > 0 {
@@ -579,11 +579,11 @@ ctl_hub_cards :: proc(base, token: string, tokens, args: []string) {
 	if action == "" || action == "list" {
 		query := make([dynamic]string)
 		defer delete(query)
-		if s := option_value(args, "--status", ""); s != "" do append(&query, fmt.tprintf("status=%s", s))
-		if sc := option_value(args, "--scope", ""); sc != "" do append(&query, fmt.tprintf("scope=%s", sc))
-		if p := option_value(args, "--provider", ""); p != "" do append(&query, fmt.tprintf("provider=%s", p))
-		if pid := option_value(args, "--project", option_value(args, "--project-id", "")); pid != "" do append(&query, fmt.tprintf("project_id=%s", pid))
-		if l := option_value(args, "--limit", ""); l != "" do append(&query, fmt.tprintf("limit=%s", l))
+		if s := option_value(args, "--status", ""); s != "" do query_param(&query, "status", s)
+		if sc := option_value(args, "--scope", ""); sc != "" do query_param(&query, "scope", sc)
+		if p := option_value(args, "--provider", ""); p != "" do query_param(&query, "provider", p)
+		if pid := option_value(args, "--project", option_value(args, "--project-id", "")); pid != "" do query_param(&query, "project_id", pid)
+		if l := option_value(args, "--limit", ""); l != "" do query_param(&query, "limit", l)
 
 		path := "/api/v1/cards"
 		if len(query) > 0 {
@@ -648,7 +648,7 @@ ctl_hub_actions :: proc(base, token: string, tokens, args: []string) {
 		query := make([dynamic]string)
 		defer delete(query)
 		if inst := option_value(args, "--instance", option_value(args, "--instance-id", option_value(args, "--target-instance-id", ""))); inst != "" {
-			append(&query, fmt.tprintf("instance_id=%s", inst))
+			query_param(&query, "instance_id", inst)
 		}
 		path := "/api/v1/actions"
 		if len(query) > 0 {

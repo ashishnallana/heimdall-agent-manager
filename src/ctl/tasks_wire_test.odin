@@ -23,7 +23,7 @@ test_task_created_wire_valid_populated :: proc(t: ^testing.T) {
 	testing.expect_value(t, envelope.data.data.attempt_no, 0)
 	testing.expect_value(t, envelope.data.data.brief.goal, "ship it")
 	testing.expect_value(t, len(envelope.data.data.brief.acceptance), 2)
-	testing.expect_value(t, envelope.data.data.brief.verify, "make test")
+	// A legacy row's removed `verify` key is ignored by the typed read.
 	testing.expect_value(t, envelope.data.data.brief.assignee, "agt_worker_1")
 	testing.expect_value(t, len(envelope.data.data.brief.review_roles), 1)
 	testing.expect_value(t, envelope.data.data.blocked_on.kind, "task")
