@@ -28,6 +28,9 @@ Action_Handlers :: struct {
 	bridge_versions: ^map[string]int,
 	// event_bus (nil in test wirings) carries REQ-2 instance-created hints.
 	event_bus:       ^events.User_Event_Bus,
+	// experiments gates Actions per owner (REQ-EXP-GATE-3/4) via
+	// require_experiment_enabled / experiment_gate_error with domain.ACTIONS_EXPERIMENT_KEY.
+	experiments:     ^iface.Experiment_Repository,
 }
 
 Scheduled_Prompt_Handlers :: Action_Handlers

@@ -1,29 +1,13 @@
 import { useState } from 'react';
 import { useFetchExperimentsQuery, useSetExperimentMutation } from '../../api/endpoints/settings';
 import { apiErrorText } from '../../api/cookieFetch';
-import { PROJECT_VCS_EXPERIMENT_KEY } from '../chat/projectVcsExperiment';
+import { EXPERIMENTAL_FLAGS } from './experimentFlags';
 import { PageShell, Panel, Toggle } from '@ui';
 
 // REQ-EXP-2: Experimental flags panel. Absent key from the API means disabled —
 // we never treat absence as indeterminate or as an error. Default-on flags (today:
 // streaming_terminal_pane) are listed by the hub as enabled until the user turns them off.
-const KNOWN_FLAGS: Array<{ key: string; label: string; description: string }> = [
-  {
-    key: 'lsp',
-    label: 'Language Server Protocol (LSP) support',
-    description: 'Experimental LSP integration. Enables in-editor diagnostics and completions. Requires a restart of any active agent session.',
-  },
-  {
-    key: 'streaming_terminal_pane',
-    label: 'Streaming Terminal Pane',
-    description: 'Real-time WebSocket streaming for interactive shell and agent terminal panes. Reduces interaction latency from 500ms to sub-10ms with native VT100 scrollback. On by default; turn off to fall back to polling.',
-  },
-  {
-    key: PROJECT_VCS_EXPERIMENT_KEY,
-    label: 'Project/VCS',
-    description: 'Experimental Project and version-control features in conversations and chain overviews.',
-  },
-];
+const KNOWN_FLAGS = EXPERIMENTAL_FLAGS;
 
 export default function ExperimentalPanel() {
   const { data, isLoading, isError } = useFetchExperimentsQuery();

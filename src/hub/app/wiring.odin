@@ -495,6 +495,7 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 		bridge_logs = &graph.bridge_logs,
 		task_engine = &graph.task_engine,
 		vault = &graph.vault_directory,
+		experiments = &graph.experiment_repo,
 	}
 	graph.task_engine.vcs_show_file = http.bridge_vcs_show_file_callback
 	graph.task_engine.vcs_show_file_ctx = rawptr(&graph.bridge_handlers)
@@ -530,6 +531,7 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 		mutex = &graph.action_mutex,
 		bridge_versions = &graph.action_bridge_versions,
 		event_bus = &graph.event_bus,
+		experiments = &graph.experiment_repo,
 	}
 	graph.scheduled_prompt_handlers = graph.action_handlers
 	graph.bridge_handlers.actions = rawptr(&graph.action_handlers)

@@ -47,6 +47,9 @@ Bridge_Handlers :: struct {
 	bridge_runtime_registry: ^project_service.Bridge_Runtime_Registry,
 	actions: rawptr,
 	scheduled_prompts: rawptr,
+	// experiments gates explorer relays (domain.PROJECT_VCS_EXPERIMENT_KEY) and Actions
+	// bridge routes (domain.ACTIONS_EXPERIMENT_KEY) per owner (REQ-EXP-GATE-3).
+	experiments: ^iface.Experiment_Repository,
 	shell_sessions: ^shell_session_svc.Shell_Session_Service,
 	// REQ-LSP-RLY-1: live LSP relays, so lsp_* frames can be fanned out to the
 	// browser socket that owns each session.
