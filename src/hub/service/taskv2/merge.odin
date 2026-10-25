@@ -232,8 +232,43 @@ requeue_pending_merges :: proc(svc: ^Service, u: ^Uow, bridge_id: string) {
 	for t in tasks {
 		evs, eerr := iface.taskchain_list_events_by_task(svc.repo, t.task_id, t.owner_user_id)
 		if eerr.code != .None || !merge_pending(evs) do continue
+		// Done before any git directory existed → merge none for good.
+		if task_merge_status(svc, t).state == "none" do continue
 		effect_merge_worktree(svc, u, t, evs, bridge_id)
 	}
+}
+
+// directory_added (REQ-TV2-3b): a chain directory was attached. Requeue the
+// chain's pending merges on that directory's bridge (as on bridge hello) and
+// refold the chain, so readiness that depends on merge state is recomputed.
+// Tasks that reached Done before the directory existed stay merge none.
+directory_added :: proc(svc: ^Service, dir: domain.Task_Chain_Directory) -> (bool, domain.Domain_Error) {
+	if svc == nil || svc.uow_factory == nil do return true, domain.Domain_Error{}
+	u, uok, uerr := begin_uow(svc)
+	if !uok do return false, uerr
+	ok, err := directory_added_in_uow(svc, &u, dir)
+	_, cerr := end_uow(svc, &u, ok)
+	if !ok do return false, err
+	if cerr.code != .None do return false, cerr
+	return true, domain.Domain_Error{}
+}
+
+directory_added_in_uow :: proc(svc: ^Service, u: ^Uow, dir: domain.Task_Chain_Directory) -> (bool, domain.Domain_Error) {
+	chain, cok, cerr := iface.taskchain_get_chain(svc.repo, dir.chain_id)
+	if !cok do return false, cerr
+	if PER_LEASE_WORKTREES_ENABLED && dir.bridge_id != "" {
+		tasks, terr := iface.taskchain_list_tasks_by_chain(svc.repo, chain.chain_id, chain.owner_user_id)
+		if terr.code != .None do return false, terr
+		for t in tasks {
+			if t.state != .Done do continue
+			evs, eerr := iface.taskchain_list_events_by_task(svc.repo, t.task_id, t.owner_user_id)
+			if eerr.code != .None || !merge_pending(evs) do continue
+			if task_merge_status(svc, t).state == "none" do continue
+			effect_merge_worktree(svc, u, t, evs, dir.bridge_id)
+		}
+	}
+	if chain.status != .Active || chain.publish_state != .Published do return true, domain.Domain_Error{}
+	return after_chain_change(svc, u, chain.chain_id, chain.owner_user_id, .Task_Updated)
 }
 
 // ---- F5: merge status for the task projection --------------------------------------

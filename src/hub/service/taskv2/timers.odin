@@ -37,6 +37,9 @@ Timer_Kind :: enum {
 	// of the right kind re-runs the matcher for its chain, so a missed trigger
 	// (e.g. a hub restart or re-fold racing the bridge reconnect) self-heals.
 	Rematch,           // key = task_id,     armed = task state when armed
+	// Dependency_Stalled: a Done prerequisite whose merge never settled keeps
+	// its backlog dependents waiting; alert after a bounded delay (REQ-TV2-3b).
+	Dependency_Stalled, // key = prerequisite task_id, armed = "done"
 }
 
 Timer :: struct {
@@ -68,6 +71,9 @@ REMATCH_DELAYS_SECONDS      :: [3]i64{60, 180, 600}
 CLOCK_JUMP_SEEN_WITHIN_SECONDS :: 120
 // review_stalled re-alerts while the stall holds (re-armed from fire_rematch).
 REVIEW_STALLED_REALERT_SECONDS :: 60 * 60
+// dependency_stalled: first alert this long after the prerequisite reached
+// Done, then re-alerted at this interval while the merge stays unresolved.
+DEPENDENCY_STALLED_SECONDS     :: 10 * 60
 
 // timers_arm schedules a fire at due_ms. Thread-safe; O(log n).
 timers_arm :: proc(svc: ^Service, kind: Timer_Kind, key: string, due_ms: i64, armed: string) {
@@ -204,6 +210,9 @@ arm_task_timers :: proc(svc: ^Service, task: domain.Task) {
 	if task.blocked_on_json != "" && strings.contains(task.blocked_on_json, `"human"`) {
 		timers_arm(svc, .Blocked_Realert, string(task.task_id), now_ms(svc.clock) + BLOCKED_REALERT_SECONDS * 1000, task.blocked_on_json)
 	}
+	if task.state == .Done && task.kind == .Task && task.stage_key == "" {
+		timers_arm(svc, .Dependency_Stalled, string(task.task_id), now_ms(svc.clock) + DEPENDENCY_STALLED_SECONDS * 1000, "done")
+	}
 }
 
 // rebuild_timers (boot): arm from the columns — every lease, every ready task,
@@ -224,6 +233,14 @@ rebuild_timers :: proc(svc: ^Service) {
 	in_review, irerr := iface.taskchain_list_tasks_by_state(svc.repo, .In_Review)
 	if irerr.code == .None {
 		for t in in_review do arm_task_timers(svc, t)
+	}
+	// Done tasks whose merge never settled (dependency_stalled); the same scan
+	// bridge hello does for requeue_pending_merges.
+	if done, derr := iface.taskchain_list_tasks_by_state(svc.repo, .Done); derr.code == .None {
+		for t in done {
+			evs, eerr := iface.taskchain_list_events_by_task(svc.repo, t.task_id, t.owner_user_id)
+			if eerr.code == .None && merge_pending(evs) do arm_task_timers(svc, t)
+		}
 	}
 	// Idle_TTL from agent_instances.idle_since (live, lease-free instances).
 	if insts, ierr := iface.agent_list_active_runtime_instances(svc.agents); ierr.code == .None {
@@ -271,6 +288,7 @@ fire_timer :: proc(svc: ^Service, t: Timer, now_ms: i64, jump_detected: bool) {
 	case .Ready_Unclaimed:  r = fire_ready_unclaimed(svc, &u, t)
 	case .Blocked_Realert:  r = fire_blocked_realert(svc, &u, t)
 	case .Rematch:          r = fire_rematch(svc, &u, t)
+	case .Dependency_Stalled: r = fire_dependency_stalled(svc, &u, t)
 	}
 	if r == .Failed {
 		fmt.eprintfln("[taskv2] timer %v for %s failed; rolled back", t.kind, t.key)
@@ -463,6 +481,58 @@ check_review_stalled :: proc(svc: ^Service, u: ^Uow, task_in: domain.Task) {
 	effect_publish_task(u, task, "review_stalled")
 	effect_notify_coordinator(svc, u, task.chain_id, task.owner_user_id, "review_stalled", fmt.tprintf("[taskv2] review_stalled: task %s (%s) gate is waiting with no live lease and no review owed; unmet=%s. Recover with: ham-ctl review post %s --verdict approve|request_changes --on-behalf-of user, re-run the reviewer (task show %s), or adjust brief reviewers/review_roles", task.task_id, task.title, gate_unmet_json(unmet), task.task_id, task.task_id))
 	timers_arm(svc, .Rematch, string(task.task_id), now_ms(svc.clock) + REVIEW_STALLED_REALERT_SECONDS * 1000, domain.task_state_string(task.state))
+}
+
+// fire_dependency_stalled: the prerequisite is Done but its merge is pending,
+// conflicted or failed. Every backlog dependent whose readiness is false ONLY
+// because of that merge (all its other edges are satisfied) gets a
+// dependency_stalled event and the coordinator is told the offending
+// prerequisite, its merge state and the recovery. Re-armed while it holds.
+@(private = "file")
+fire_dependency_stalled :: proc(svc: ^Service, u: ^Uow, t: Timer) -> Fire_Result {
+	prereq, ok, _ := iface.taskchain_get_task(svc.repo, domain.Task_ID(t.key))
+	if !ok || prereq.state != .Done do return .Noop
+	merge := task_merge_status(svc, prereq)
+	if merge.state == "none" || merge.state == "merged" do return .Noop
+	edges, eerr := iface.taskchain_list_work_dependencies(svc.repo, prereq.chain_id, prereq.owner_user_id)
+	if eerr.code != .None do return .Noop
+	prereq_ref := domain.Work_Item_Ref{kind = domain.WORK_ITEM_TASK, id = string(prereq.task_id)}
+	stalled := 0
+	for edge in edges {
+		if edge.removed_at != "" || edge.prerequisite != prereq_ref || edge.dependent.kind != domain.WORK_ITEM_TASK do continue
+		dep, dok, _ := iface.taskchain_get_task(svc.repo, domain.Task_ID(edge.dependent.id))
+		if !dok || dep.state != .Backlog || dep.blocked_on_json != "" do continue
+		if !only_merge_blocks(svc, dep, prereq_ref, edges) do continue
+		p := json_begin()
+		json_str(&p, "prerequisite", string(prereq.task_id))
+		json_str(&p, "merge", merge.state)
+		if merge.detail != "" do json_str(&p, "detail", merge.detail)
+		if _, aok, _ := append_event(svc.repo, svc.clock, dep, hub_actor(), EV_DEPENDENCY_STALLED, json_end(&p)); !aok do return .Failed
+		effect_publish_task(u, dep, "dependency_stalled")
+		effect_notify_coordinator(svc, u, dep.chain_id, dep.owner_user_id, "dependency_stalled", fmt.tprintf("[taskv2] dependency_stalled: task %s (%s) waits only on the merge of %s (merge %s). Inspect with: ham-ctl task readiness %s. Recover: resolve the merge conflict / bring the bridge online so the merge is retried, or remove the dependency.", dep.task_id, dep.title, prereq.task_id, merge.state, dep.task_id))
+		stalled += 1
+	}
+	if stalled == 0 do return .Noop
+	timers_arm(svc, .Dependency_Stalled, string(prereq.task_id), now_ms(svc.clock) + DEPENDENCY_STALLED_SECONDS * 1000, "done")
+	return .Acted
+}
+
+// only_merge_blocks: every other dependency of `dep` is satisfied, so the
+// merge state of `prereq` is the only thing keeping it in backlog.
+@(private = "file")
+only_merge_blocks :: proc(svc: ^Service, dep: domain.Task, prereq: domain.Work_Item_Ref, edges: []domain.Work_Dependency) -> bool {
+	tasks, terr := iface.taskchain_list_tasks_by_chain(svc.repo, dep.chain_id, dep.owner_user_id)
+	if terr.code != .None do return false
+	deps, derr := iface.taskchain_list_dependencies_by_chain(svc.repo, dep.chain_id, dep.owner_user_id)
+	if derr.code != .None do return false
+	if !deps_done_for(dep.task_id, tasks, deps) do return false
+	self := domain.Work_Item_Ref{kind = domain.WORK_ITEM_TASK, id = string(dep.task_id)}
+	for edge in edges {
+		if edge.removed_at != "" || edge.dependent != self || edge.prerequisite == prereq do continue
+		snap, sok, _ := work_item_snapshot(svc, dep.chain_id, dep.owner_user_id, edge.prerequisite)
+		if !sok || !snap.succeeded do return false
+	}
+	return true
 }
 
 @(private = "file")

@@ -207,6 +207,23 @@ agent_action_task_fetch_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	return respond_success(raw, req.request_id, auth_ctx_server_time(req), 200)
 }
 
+// POST /api/v1/agent-actions/task/readiness  params: {task_id}  (read-only,
+// owner-scoped like task show; REQ-TV2-3b)
+agent_action_task_readiness_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Agent_Action_Handlers)(ctx)
+	auth, _, ok, resp := require_instance_action_auth(h, req)
+	if !ok do return resp
+	if h.task_engine == nil do return respond_error(domain.domain_error(.Internal_Error, "task engine is not configured"), req.request_id)
+	params := json_object_raw(req.body, "params")
+	task_id := domain.Task_ID(json_string(params, "task_id"))
+	if strings.trim_space(string(task_id)) == "" do return respond_error(domain.domain_error(.Validation_Failed, "task_id is required"), req.request_id)
+	task, tok, terr := taskchain_service.get_task_for_read(h.taskchains, auth, task_id)
+	if !tok do return respond_error(terr, req.request_id)
+	raw, err := taskv2.task_readiness_json(h.task_engine, task)
+	if err.code != .None do return respond_error(err, req.request_id)
+	return respond_success(raw, req.request_id, auth_ctx_server_time(req), 200)
+}
+
 agent_action_chat_send_to_user_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Agent_Action_Handlers)(ctx)
 	auth, inst, ok, resp := require_instance_action_auth(h, req)

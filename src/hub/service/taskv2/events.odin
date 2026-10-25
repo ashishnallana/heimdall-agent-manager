@@ -38,6 +38,7 @@ EV_REVIEW_POSTED     :: "review_posted"      // {attempt_no, role, verdict, revi
 EV_COMMENT           :: "comment"            // {comment_id}
 EV_READY_UNCLAIMED   :: "ready_unclaimed"    // {since}  — alert
 EV_REVIEW_STALLED    :: "review_stalled"     // {unmet}  — gate waiting, no lease, nothing owed (re-armed)
+EV_DEPENDENCY_STALLED :: "dependency_stalled" // {prerequisite, merge, detail?} — backlog only on a merge (re-armed)
 EV_BLOCKED_REALERT   :: "blocked_realert"    // {since}  — 24 h re-alert
 EV_SUMMARY_OVERFLOW  :: "summary_overflow"
 EV_STARTED_WORKFLOW  :: "started_workflow"   // {chain_id}

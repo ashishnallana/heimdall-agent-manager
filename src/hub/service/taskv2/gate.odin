@@ -326,7 +326,8 @@ gate_unmet_json :: proc(unmet: []Gate_Unmet) -> string {
 }
 
 // agent_owes_review_in_chain: whether `agent_id` still owes a review pair on
-// any in_review task of the chain (the reviewer lifecycle invariant, REQ-TV2-3a).
+// any in_review task of the chain that no live review lease of that agent
+// already covers (the reviewer lifecycle invariant, REQ-TV2-3a).
 agent_owes_review_in_chain :: proc(svc: ^Service, chain_id: domain.Task_Chain_ID, owner: domain.User_ID, agent_id: string) -> bool {
 	tasks, terr := iface.taskchain_list_tasks_by_chain(svc.repo, chain_id, owner)
 	if terr.code != .None do return false
@@ -343,7 +344,15 @@ agent_owes_review_in_chain :: proc(svc: ^Service, chain_id: domain.Task_Chain_ID
 		if len(pairs) == 0 do continue
 		reviews, rerr := iface.taskchain_list_reviews_by_task(svc.repo, t.task_id, t.owner_user_id)
 		if rerr.code != .None do continue
-		if len(owed_review_roles(pairs, reviews, t, agent_id)) > 0 do return true
+		if len(owed_review_roles(pairs, reviews, t, agent_id)) == 0 do continue
+		covered := false
+		if leases, lerr := iface.taskchain_list_leases_by_task(svc.repo, t.task_id); lerr.code == .None {
+			for l in leases {
+				if l.kind != domain.LEASE_KIND_REVIEW do continue
+				if inst, iok, _ := iface.agent_get_instance(svc.agents, l.holder_instance_id); iok && inst.agent_id == agent_id { covered = true; break }
+			}
+		}
+		if !covered do return true
 	}
 	return false
 }

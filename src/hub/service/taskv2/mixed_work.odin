@@ -402,3 +402,76 @@ first_unsatisfied_prerequisite :: proc(svc: ^Service, chain_id: domain.Task_Chai
 	}
 	return ""
 }
+
+// task_readiness_json (REQ-TV2-3b, `task readiness <id>`): read-only. For every
+// edge into the task it reports the prerequisite's state and merge state,
+// whether the edge is satisfied and, when not, why. `ready` is the shared
+// predicate (task_dependencies_ready), so it agrees with the engine.
+task_readiness_json :: proc(svc: ^Service, task: domain.Task) -> (string, domain.Domain_Error) {
+	context.allocator = context.temp_allocator
+	ready, rerr := task_dependencies_ready(svc, task)
+	if rerr.code != .None do return "", rerr
+	edges := make([dynamic]string)
+	tasks, terr := iface.taskchain_list_tasks_by_chain(svc.repo, task.chain_id, task.owner_user_id)
+	if terr.code != .None do return "", terr
+	deps, derr := iface.taskchain_list_dependencies_by_chain(svc.repo, task.chain_id, task.owner_user_id)
+	if derr.code != .None do return "", derr
+	for d in deps {
+		if d.task_id != task.task_id do continue
+		state, merge := "missing", ""
+		for t in tasks do if t.task_id == d.depends_on_task_id {
+			state = domain.task_state_string(t.state)
+			merge = task_merge_status(svc, t).state
+			break
+		}
+		satisfied := state == "done"
+		reason := "" if satisfied else ("prerequisite_missing" if state == "missing" else "prerequisite_not_done")
+		append(&edges, readiness_edge_json("depends_on", domain.WORK_ITEM_TASK, string(d.depends_on_task_id), state, merge, satisfied, reason))
+	}
+	if task.stage_key == "" && task.kind == .Task {
+		item := domain.Work_Item_Ref{kind = domain.WORK_ITEM_TASK, id = string(task.task_id)}
+		work_edges, werr := iface.taskchain_list_work_dependencies(svc.repo, task.chain_id, task.owner_user_id)
+		if werr.code != .None do return "", werr
+		for edge in work_edges {
+			if edge.removed_at != "" || edge.dependent != item do continue
+			state, merge, reason := "missing", "", ""
+			satisfied := false
+			if snapshot, sok, _ := work_item_snapshot(svc, task.chain_id, task.owner_user_id, edge.prerequisite); sok {
+				satisfied = snapshot.succeeded
+				if edge.prerequisite.kind == domain.WORK_ITEM_TASK {
+					if t, tok, _ := iface.taskchain_get_task(svc.repo, domain.Task_ID(edge.prerequisite.id)); tok {
+						state = domain.task_state_string(t.state)
+						merge = task_merge_status(svc, t).state
+					}
+				} else {
+					state = run_state_label(snapshot)
+				}
+				if !satisfied {
+					reason = "prerequisite_not_succeeded"
+					if state == "done" do reason = fmt.tprintf("merge_%s", merge)
+				}
+			} else {
+				reason = "prerequisite_missing"
+			}
+			append(&edges, readiness_edge_json("work_dependency", edge.prerequisite.kind, edge.prerequisite.id, state, merge, satisfied, reason))
+		}
+	}
+	p := json_begin()
+	json_str(&p, "task_id", string(task.task_id))
+	json_str(&p, "state", domain.task_state_string(task.state))
+	json_bool(&p, "ready", ready)
+	json_raw(&p, "edges", fmt.tprintf("[%s]", strings.join(edges[:], ",")))
+	return json_end(&p), domain.Domain_Error{}
+}
+
+readiness_edge_json :: proc(edge_kind, kind, id, state, merge: string, satisfied: bool, reason: string) -> string {
+	p := json_begin()
+	json_str(&p, "edge", edge_kind)
+	json_str(&p, "kind", kind)
+	json_str(&p, "id", id)
+	json_str(&p, "state", state)
+	if merge != "" do json_str(&p, "merge", merge)
+	json_bool(&p, "satisfied", satisfied)
+	if reason != "" do json_str(&p, "reason", reason)
+	return json_end(&p)
+}

@@ -1644,6 +1644,23 @@ answer_task_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req))
 }
 
+// GET …/tasks/{id}/readiness  (REQ-TV2-3b): per-edge prerequisite state, merge
+// state and the reason an edge is unsatisfied. Read-only.
+task_readiness_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Taskchain_Handlers)(ctx)
+	auth_ctx, ok, auth_resp := require_auth_any(h.auth, req)
+	if !ok do return auth_resp
+	if h.task_engine == nil do return respond_error(domain.domain_error(.Internal_Error, "task engine is not configured"), req.request_id)
+	chain_id := domain.Task_Chain_ID(path_part(req.path, 4))
+	task_id := domain.Task_ID(path_part(req.path, 6))
+	if matched, mismatch_resp := require_task_path_scope(h, auth_ctx, chain_id, task_id, req); !matched do return mismatch_resp
+	task, tok, terr := taskchain_service.get_task_for_read(h.taskchains, auth_ctx, task_id)
+	if !tok do return respond_error(terr, req.request_id)
+	raw, err := taskv2.task_readiness_json(h.task_engine, task)
+	if err.code != .None do return respond_error(err, req.request_id)
+	return respond_success(raw, req.request_id, auth_ctx_server_time(req))
+}
+
 // GET …/tasks/{id}/fetch?ref=…  (human read of an event or facet)
 fetch_task_ref_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Taskchain_Handlers)(ctx)
@@ -1856,6 +1873,10 @@ add_chain_directory_handler :: proc(ctx: rawptr, req: Request) -> Response {
 		vcs_info_json = vcs_info_json,
 	})
 	if !added do return respond_error(err, req.request_id)
+	// Refold the chain and requeue its pending merges (REQ-TV2-3b). The
+	// directory is already saved; a failure here is retried by bridge hello and
+	// the rematch timers, so it does not fail the request.
+	if h.task_engine != nil do _, _ = taskv2.directory_added(h.task_engine, dir)
 	publish_chain_changed(h, string(dir.owner_user_id), string(dir.chain_id), "updated")
 	b := strings.builder_make()
 	write_directory_json(&b, dir)
