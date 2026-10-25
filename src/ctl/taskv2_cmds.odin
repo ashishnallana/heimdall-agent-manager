@@ -26,6 +26,7 @@ package main
 import "core:encoding/json"
 import "core:fmt"
 import "core:os"
+import "core:slice"
 import "core:strconv"
 import "core:strings"
 import jsonx "odin_test:lib/jsonx"
@@ -47,79 +48,105 @@ ctl_collect_repeated :: proc(args: []string, names: ..string) -> [dynamic]string
 	return out
 }
 
+// CTL_BRIEF_KEYS is the one brief schema create, update and propose share
+// (REQ-TV2-4), in the order ham-ctl writes them. The hub owns validation: keys
+// outside it are forwarded and the hub rejects them with unknown_brief_fields
+// instead of ham-ctl dropping them silently.
+CTL_BRIEF_KEYS :: [?]string{"goal", "acceptance", "inputs", "review_roles", "assignee", "reviewers", "budget", "output", "on_output", "requires_user_approval", "approver", "gate"}
+
+// ctl_brief_clear_flag: `--clear-<field>` sends `"<field>":null`, which the
+// hub's top-level merge reads as "remove this key".
+ctl_brief_clear_flag :: proc(key: string) -> string {
+	flag, _ := strings.replace_all(key, "_", "-", context.temp_allocator)
+	return strings.concatenate({"--clear-", flag}, context.temp_allocator)
+}
+
 // ctl_task_brief_flags_present reports whether any brief flag was given, so
 // `task update` without them does not send an (empty) brief.
 ctl_task_brief_flags_present :: proc(args: []string) -> bool {
 	for f in ([?]string{"--goal", "--acceptance", "--input", "--inputs", "--review-role", "--review-roles", "--on-output-workflow", "--output-schema", "--brief-file"}) {
 		if has_flag(args, f) do return true
 	}
+	for k in CTL_BRIEF_KEYS do if has_flag(args, ctl_brief_clear_flag(k)) do return true
 	return false
 }
 
 // ctl_task_brief_json builds the `brief` object from an optional --brief-file
 // body (the base) and the brief flags (which override the file's fields).
 // Pure: the file's text is passed in. Returns ("", false) when there is nothing
-// to send. Only the brief keys the hub documents are carried from the file
-// (goal, acceptance, inputs, review_roles, assignee, budget, output, on_output);
-// flags win field by field. The removed verify keys are never carried.
+// to send; an explicitly empty `{}` file returns ("{}", true). Every key of the file is carried (explicit nulls included, so they
+// clear the key on update); flags win field by field and `--clear-<field>`
+// sends null. The removed verify keys are never carried.
 ctl_task_brief_json :: proc(args: []string, brief_file_text: string) -> (string, bool) {
 	file := strings.trim_space(brief_file_text)
-	fields := make([dynamic]string)
-	defer delete(fields)
+	values := make(map[string]string, allocator = context.temp_allocator)
+	// An explicitly empty `{}` file is a brief of its own (with --replace-brief it
+	// clears every field); a file of only removed verify keys stays no brief.
+	explicit_empty := false
+	if file != "" {
+		parsed, perr := json.parse_string(file, json.DEFAULT_SPECIFICATION, true, context.temp_allocator)
+		if obj, is_obj := parsed.(json.Object); perr == nil && is_obj {
+			explicit_empty = len(obj) == 0
+			for key, value in obj {
+				removed := false
+				for k in CTL_REMOVED_BRIEF_KEYS do if k == key { removed = true; break }
+				if removed do continue
+				if raw, merr := json.marshal(value, allocator = context.temp_allocator); merr == nil do values[key] = string(raw)
+			}
+		}
+	}
 
-	goal := option_value(args, "--goal", "")
-	if goal == "" && file != "" do goal = extract_json_string_unescaped(file, "goal", "", context.temp_allocator)
-	if goal != "" do append(&fields, json_kv("goal", goal))
-
+	if goal := option_value(args, "--goal", ""); goal != "" do values["goal"] = ctl_json_quote(goal)
 	acceptance := ctl_collect_repeated(args, "--acceptance")
 	defer delete(acceptance)
-	if len(acceptance) > 0 {
-		append(&fields, json_string_array_field("acceptance", acceptance[:]))
-	} else if file != "" {
-		if raw, ok := ctl_extract_json_array_raw(file, "acceptance"); ok do append(&fields, json_kv_raw("acceptance", raw))
-	}
-
+	if len(acceptance) > 0 do values["acceptance"] = ctl_json_string_array_raw(acceptance[:])
 	inputs := collect_multi_values(args, "--input", "--inputs")
 	defer delete(inputs)
-	if len(inputs) > 0 {
-		append(&fields, json_string_array_field("inputs", inputs[:]))
-	} else if file != "" {
-		if raw, ok := ctl_extract_json_array_raw(file, "inputs"); ok do append(&fields, json_kv_raw("inputs", raw))
-	}
-
+	if len(inputs) > 0 do values["inputs"] = ctl_json_string_array_raw(inputs[:])
 	roles := collect_multi_values(args, "--review-role", "--review-roles")
 	defer delete(roles)
-	if len(roles) > 0 {
-		append(&fields, json_string_array_field("review_roles", roles[:]))
-	} else if file != "" {
-		if raw, ok := ctl_extract_json_array_raw(file, "review_roles"); ok do append(&fields, json_kv_raw("review_roles", raw))
-	}
+	if len(roles) > 0 do values["review_roles"] = ctl_json_string_array_raw(roles[:])
+	if out_schema := strings.trim_space(option_value(args, "--output-schema", "")); out_schema != "" do values["output"] = ctl_json_quote(out_schema)
+	if on_wf := strings.trim_space(option_value(args, "--on-output-workflow", "")); on_wf != "" do values["on_output"] = json_object(json_kv("start_workflow", on_wf))
+	for k in CTL_BRIEF_KEYS do if has_flag(args, ctl_brief_clear_flag(k)) do values[k] = "null"
 
-	if file != "" {
-		if a := extract_json_string_unescaped(file, "assignee", "", context.temp_allocator); a != "" do append(&fields, json_kv("assignee", a))
-		if raw, ok := extract_json_object_raw(file, "budget", context.temp_allocator); ok do append(&fields, json_kv_raw("budget", raw))
+	if len(values) == 0 {
+		if explicit_empty do return strings.clone("{}"), true
+		return "", false
 	}
-
-	if out_schema := strings.trim_space(option_value(args, "--output-schema", "")); out_schema != "" {
-		append(&fields, json_kv("output", out_schema))
-	} else if file != "" {
-		if raw, ok := extract_json_object_raw(file, "output", context.temp_allocator); ok {
-			append(&fields, json_kv_raw("output", raw))
-		} else if out_s := extract_json_string_unescaped(file, "output", "", context.temp_allocator); out_s != "" {
-			append(&fields, json_kv("output", out_s))
-		}
+	fields := make([dynamic]string)
+	defer delete(fields)
+	for k in CTL_BRIEF_KEYS {
+		if v, ok := values[k]; ok do append(&fields, json_kv_raw(k, v))
 	}
-
-	if on_wf := strings.trim_space(option_value(args, "--on-output-workflow", "")); on_wf != "" {
-		append(&fields, json_kv_raw("on_output", json_object(json_kv("start_workflow", on_wf))))
-	} else if file != "" {
-		if raw, ok := extract_json_object_raw(file, "on_output", context.temp_allocator); ok {
-			append(&fields, json_kv_raw("on_output", raw))
-		}
+	extra := make([dynamic]string, context.temp_allocator)
+	for k in values {
+		known := false
+		for b in CTL_BRIEF_KEYS do if b == k { known = true; break }
+		if !known do append(&extra, k)
 	}
-
-	if len(fields) == 0 do return "", false
+	slice.sort(extra[:])
+	for k in extra do append(&fields, json_kv_raw(k, values[k]))
 	return json_object_from_slice(fields[:]), true
+}
+
+// ctl_json_quote renders one JSON string literal.
+ctl_json_quote :: proc(v: string) -> string {
+	b := strings.builder_make(context.temp_allocator)
+	strings.write_byte(&b, '"'); json_write_string(&b, v); strings.write_byte(&b, '"')
+	return strings.to_string(b)
+}
+
+// ctl_json_string_array_raw renders `["a","b"]`.
+ctl_json_string_array_raw :: proc(items: []string) -> string {
+	b := strings.builder_make(context.temp_allocator)
+	strings.write_byte(&b, '[')
+	for item, i in items {
+		if i > 0 do strings.write_byte(&b, ',')
+		strings.write_string(&b, ctl_json_quote(item))
+	}
+	strings.write_byte(&b, ']')
+	return strings.to_string(b)
 }
 
 // CTL_REMOVED_BRIEF_KEYS / CTL_REMOVED_BRIEF_FLAGS: the verification brief
@@ -173,6 +200,8 @@ ctl_task_brief_field :: proc(args: []string) -> (string, bool) {
 	if file_text == "" && !ctl_task_brief_flags_present(args) do return "", false
 	brief, ok := ctl_task_brief_json(args, file_text)
 	if !ok do return "", false
+	// --replace-brief: the hub swaps the whole brief instead of merging keys.
+	if has_flag(args, "--replace-brief") do return strings.concatenate({json_kv_raw("brief", brief), `,"replace_brief":true`}), true
 	return json_kv_raw("brief", brief), true
 }
 

@@ -329,6 +329,8 @@ review_post :: proc(svc: ^Service, auth: contracts.Auth_Context, input: Review_I
 		json_str(&p, "role", rev_role)
 		json_str(&p, "verdict", input.verdict)
 		json_str(&p, "reviewer", rev_role if rev_role == "user" else inst.agent_instance_id)
+		json_str(&p, "reviewer_agent_id", inst.agent_id)
+		json_str(&p, "reviewer_instance_id", inst.agent_instance_id)
 		json_str(&p, "actor_kind", ACTOR_COORDINATOR)
 		if strings.trim_space(input.on_behalf_of) == "user" {
 			json_str(&p, "on_behalf_of", "user")
@@ -379,6 +381,8 @@ review_post :: proc(svc: ^Service, auth: contracts.Auth_Context, input: Review_I
 	json_str(&p, "role", lease.review_role)
 	json_str(&p, "verdict", input.verdict)
 	json_str(&p, "reviewer", inst.agent_id)
+	json_str(&p, "reviewer_agent_id", inst.agent_id)
+	json_str(&p, "reviewer_instance_id", inst.agent_instance_id)
 	json_raw(&p, "findings", findings)
 	if strings.trim_space(input.summary) != "" do json_str(&p, "summary", strings.trim_space(input.summary))
 	refolded, _, rok, rerr := record_event(svc, &u, task, actor, EV_REVIEW_POSTED, json_end(&p))
@@ -441,6 +445,10 @@ user_review :: proc(svc: ^Service, auth: contracts.Auth_Context, task_id: domain
 	json_str(&p, "role", "user")
 	json_str(&p, "verdict", input.verdict)
 	json_str(&p, "reviewer", "user")
+	// A user review has no agent; the keys are present (empty) so every
+	// review_posted payload has the same shape.
+	json_str(&p, "reviewer_agent_id", "")
+	json_str(&p, "reviewer_instance_id", "")
 	json_raw(&p, "findings", findings)
 	if strings.trim_space(input.summary) != "" do json_str(&p, "summary", strings.trim_space(input.summary))
 	refolded, _, rok, rerr := record_event(svc, &u, task, actor, EV_REVIEW_POSTED, json_end(&p))
@@ -592,6 +600,15 @@ brief_publish_missing :: proc(repo: ^iface.Taskchain_Repository, chain: domain.T
 // validate_brief_for_publish verifies that all draft tasks on the chain and all
 // proposed task specs satisfy brief_publish_missing.
 validate_brief_for_publish :: proc(svc: ^Service, chain: domain.Task_Chain, existing_tasks: []domain.Task, specs: []Proposed_Task_Item) -> (bool, domain.Domain_Error) {
+	// REQ-TV2-4: proposed briefs meet the same schema and reviewer identity
+	// contract as taskchain create/update, before a proposal is stored or
+	// materialized (pending, auto-approved and approved alike).
+	for spec in specs {
+		if spec.explicit_brief {
+			if serr := validate_brief_schema(spec.brief_json); serr.code != .None do return false, serr
+		}
+		if rerr := validate_reviewer_agent_ids(svc.agents if svc != nil else nil, brief_named_reviewers(spec.brief_json, context.temp_allocator)[:]); rerr.code != .None do return false, rerr
+	}
 	b := strings.builder_make(context.temp_allocator)
 	strings.write_string(&b, `{"code":"brief_incomplete","tasks":[`)
 	first := true
@@ -974,6 +991,9 @@ Proposed_Task_Item :: struct {
 	priority:    string,
 	brief_json:  string,
 	depends_on:  []domain.Task_ID,
+	// explicit_brief: the spec carried its own `brief` object (schema-checked);
+	// otherwise brief_json was synthesized from the shorthand fields.
+	explicit_brief: bool,
 }
 
 @(private = "file")
@@ -1025,6 +1045,7 @@ parse_proposed_tasks_json :: proc(raw_array: string) -> ([]Proposed_Task_Item, b
 			priority    = prio,
 			brief_json  = brief_raw,
 			depends_on  = deps[:],
+			explicit_brief = has_brief && strings.trim_space(brief_raw) != "",
 		})
 	}
 	return out[:], true, domain.Domain_Error{}
