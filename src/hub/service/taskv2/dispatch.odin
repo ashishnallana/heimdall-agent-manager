@@ -36,9 +36,14 @@ agent_not_running_in_uow :: proc(svc: ^Service, u: ^Uow, lease: domain.Task_Leas
 			break
 		}
 	}
-	provider, model, bridge, agent_id := lease.provider, lease.model, lease.bridge_id, ""
+	provider, model, bridge, agent_id, cause := lease.provider, lease.model, lease.bridge_id, "", ""
 	if inst, ok, _ := iface.agent_get_instance(svc.agents, lease.holder_instance_id); ok {
 		agent_id = inst.agent_id
+		// Only bridge absence: no failure report, error or user stop explains
+		// the loss. The bridge hello then answers this block and rematches.
+		if !bridge_online(svc, inst.bridge_id) && inst.runtime_status != "failed" && inst.stopped_by == "" && jsonx.extract_string(inst.last_error_json, "message", "", true, context.temp_allocator) == "" {
+			cause = "bridge_offline"
+		}
 		if provider == "" do provider = inst.provider
 		if model == "" && (lease.provider == "" || lease.provider == inst.provider) do model = inst.model
 		if bridge == "" do bridge = inst.bridge_id
@@ -53,6 +58,7 @@ agent_not_running_in_uow :: proc(svc: ^Service, u: ^Uow, lease: domain.Task_Leas
 	json_str(&waiting, "kind", "agent_not_running")
 	json_str(&waiting, "agent_id", agent_id)
 	json_str(&waiting, "bridge_id", bridge)
+	if cause != "" do json_str(&waiting, "cause", cause)
 	json_str(&waiting, "provider", provider)
 	json_str(&waiting, "model", model)
 	json_str(&waiting, "reason", fmt.tprintf("Agent %s (%s/%s) on bridge %s is not running: %s", agent_id, provider, model, bridge, detail))

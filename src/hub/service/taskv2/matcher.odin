@@ -256,6 +256,8 @@ grant_reviews :: proc(svc: ^Service, u: ^Uow, ctx: ^Match_Context, task: domain.
 	pairs := required_review_pairs(task, ctx.fleets[:], author_agent)
 	if len(pairs) == 0 do return
 	reviews, _ := iface.taskchain_list_reviews_by_task(svc.repo, task.task_id, task.owner_user_id)
+	failure, failed_agent := "", ""
+	failed_placement: Placement
 	// One review lease per AGENT covering every pair it still owes (hybrid model);
 	// the gate is a strict AND over the same pairs (gate.odin).
 	for agent_id in distinct_review_agents(pairs) {
@@ -265,10 +267,14 @@ grant_reviews :: proc(svc: ^Service, u: ^Uow, ctx: ^Match_Context, task: domain.
 		if len(owed) == 0 do continue
 		if review_lease_live_for(ctx, svc, task.task_id, agent_id, "") do continue
 		placement, pok := resolve_placement(ctx, task, fleet, false)
-		if !pok do continue
-		if !bridge_online(svc, placement.bridge_id) do continue
-		inst, found, _ := pick_instance(svc, u, ctx, task, fleet, placement, domain.FLEET_ROLE_REVIEWER, "")
-		if !found do continue
+		if !pok { failure, failed_agent, failed_placement = "no bridge placement can be resolved", agent_id, {}; continue }
+		if !bridge_online(svc, placement.bridge_id) do continue // the bridge hello rematches
+		inst, found, why := pick_instance(svc, u, ctx, task, fleet, placement, domain.FLEET_ROLE_REVIEWER, "")
+		if !found {
+			// Capacity and retriable backoff report no reason and simply wait.
+			if why != "" do failure, failed_agent, failed_placement = why, agent_id, placement
+			continue
+		}
 		lease, gok, gerr := grant_in_uow(svc, u, Grant_Request{
 			chain = ctx.chain, task = task, instance = inst,
 			kind = domain.LEASE_KIND_REVIEW, review_role = join_review_roles(owed), delivery = domain.LEASE_DELIVERY_WAKE,
@@ -281,6 +287,13 @@ grant_reviews :: proc(svc: ^Service, u: ^Uow, ctx: ^Match_Context, task: domain.
 		append(&ctx.leases, lease)
 		ctx.held[inst.agent_instance_id] = true
 	}
+	// An owed reviewer that cannot be placed would otherwise starve silently.
+	// Surface it as the work path does (the same Start agent card); the block
+	// takes the task out of the matcher's In_Review scan, so it is raised once.
+	// While another review lease runs, its release rematches and decides then.
+	if failure == "" do return
+	for l in ctx.leases do if l.task_id == task.task_id && l.kind == domain.LEASE_KIND_REVIEW do return
+	block_ready_agent_in_uow(svc, u, task, failed_agent, failed_placement, failure)
 }
 
 // review_lease_live_for: an instance of `agent_id` already holds a review

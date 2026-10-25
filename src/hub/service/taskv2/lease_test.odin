@@ -545,6 +545,74 @@ test_instance_terminal_blocks_until_explicit_retry :: proc(t: ^testing.T) {
 	assert_projection_matches_fold(t, fx, chain.chain_id, "u1", "term")
 }
 
+// A generic user start/restart: the agent's own start-success recovers the
+// parked task with no second ticket answer; a duplicate signal is a no-op.
+@(test)
+test_start_success_recovers_matching_agent_block :: proc(t: ^testing.T) {
+	fx, log, ok := lease_fixture(t, "c_ready")
+	defer lease_fixture_close(fx, log)
+	if !ok do return
+	chain := seed_live_chain(t, fx, "chain_ready")
+	seed_fleet(fx, chain, "agt_w")
+	seed_instance(fx, chain, "inst_w1", "agt_w", "br_1", "idle")
+	_ = publish_task(t, fx, chain, "task_1")
+	confirm_holder(fx, "inst_w1")
+	inst, _, _ := iface.agent_get_instance(&fx.agents, "inst_w1")
+	inst.runtime_status = "stopped"
+	_, _, _ = iface.agent_save_instance(&fx.agents, inst)
+	on_instance_terminal(&fx.svc, "inst_w1")
+	if !testing.expect(t, is_agent_not_running_block(get_task(fx, "task_1").blocked_on_json), "dead holder parks") do return
+	// Not yet ready: a launching instance answers nothing.
+	inst.runtime_status = "starting"
+	_, _, _ = iface.agent_save_instance(&fx.agents, inst)
+	on_start_success(&fx.svc, inst)
+	testing.expect(t, is_agent_not_running_block(get_task(fx, "task_1").blocked_on_json), "no recovery before readiness")
+	inst.runtime_status = "running"
+	_, _, _ = iface.agent_save_instance(&fx.agents, inst)
+	on_start_success(&fx.svc, inst)
+	_, held := lease_of(fx, "inst_w1")
+	testing.expect(t, held && get_task(fx, "task_1").blocked_on_json == "", "readiness answers and regrants")
+	on_start_success(&fx.svc, inst)
+	leases, _ := iface.taskchain_list_leases_by_chain(&fx.repo, chain.chain_id)
+	testing.expect_value(t, len(leases), 1)
+	testing.expect_value(t, count_events(fx, "task_1", EV_ANSWERED), 1)
+	assert_projection_matches_fold(t, fx, chain.chain_id, "u1", "ready")
+}
+
+// An owed reviewer whose only instance the user stopped is surfaced once as an
+// agent_not_running block (no silent starvation, no replacement launch); the
+// user's later start of that instance recovers the review with no answer.
+@(test)
+test_unplaceable_reviewer_blocks_until_ready :: proc(t: ^testing.T) {
+	fx, log, ok := lease_fixture(t, "c_rev_block")
+	defer lease_fixture_close(fx, log)
+	if !ok do return
+	chain := seed_live_chain(t, fx, "chain_rev_block")
+	seed_fleet(fx, chain, "agt_w")
+	seed_fleet(fx, chain, "agt_r", roles = `["reviewer"]`)
+	seed_instance(fx, chain, "inst_w1", "agt_w", "br_1", "idle")
+	r := seed_instance(fx, chain, "inst_r1", "agt_r", "br_1", "stopped")
+	r.stopped_by = agent.STOPPED_BY_USER
+	_, _, _ = iface.agent_save_instance(&fx.agents, r)
+	_ = publish_task(t, fx, chain, "task_1", brief = `{"goal":"g","acceptance":["a"],"review_roles":["reviewer"]}`)
+	confirm_holder(fx, "inst_w1")
+	_, sok, serr := lease_submit(&fx.svc, inst_auth("inst_w1"), Submit_Input{summary = "v1", vcs_json = `{"head":"h1","dirty":false}`})
+	if !testing.expect(t, sok, fmt.tprintf("submit: %s", serr.message)) do return
+	parked := get_task(fx, "task_1")
+	testing.expect(t, parked.state == .Backlog && strings.contains(parked.blocked_on_json, `"agent_id":"agt_r"`), "unplaceable reviewer is surfaced")
+	_, r_held := lease_of(fx, "inst_r1")
+	testing.expect(t, !r_held, "user-stopped reviewer is not granted")
+	// The user starts it (clears the stop); its readiness resumes the review.
+	r.stopped_by = ""
+	r.runtime_status = "running"
+	_, _, _ = iface.agent_save_instance(&fx.agents, r)
+	on_start_success(&fx.svc, r)
+	rl, rh := lease_of(fx, "inst_r1")
+	testing.expect(t, rh && rl.kind == domain.LEASE_KIND_REVIEW, "review re-granted on readiness")
+	testing.expect_value(t, count_events(fx, "task_1", EV_BLOCKED), 1)
+	assert_projection_matches_fold(t, fx, chain.chain_id, "u1", "rev_block")
+}
+
 @(test)
 test_bridge_hello_stops_orphan_without_lease :: proc(t: ^testing.T) {
 	fx, log, ok := lease_fixture(t, "c_hello")
@@ -568,6 +636,7 @@ test_bridge_hello_stops_orphan_without_lease :: proc(t: ^testing.T) {
 	wake_log_reset(log)
 	_ = fire_due(&fx.svc, now_ms(&fx.clock))
 	testing.expect(t, strings.contains(get_task(fx, "task_1").blocked_on_json, "ttl"), "heartbeat loss while away")
+	testing.expect(t, strings.contains(get_task(fx, "task_1").blocked_on_json, `"cause":"bridge_offline"`), "outage loss is tagged for reconnect")
 	testing.expect_value(t, get_task(fx, "task_1").state, domain.Task_State.Backlog)
 	leases_mid, _ := iface.taskchain_list_leases_by_chain(&fx.repo, chain.chain_id)
 	testing.expect_value(t, len(leases_mid), 0)
@@ -576,9 +645,10 @@ test_bridge_hello_stops_orphan_without_lease :: proc(t: ^testing.T) {
 	wake_log_reset(log)
 	bridge_reconnect(fx, "br_1", []string{"inst_coord", "inst_w1", "inst_w2"})
 	on_bridge_hello(&fx.svc, "br_1", []string{"inst_coord", "inst_w1", "inst_w2"})
-	// Reconnection alone keeps the user block; explicit retry resumes dispatch.
-	started, _ := start_task_agent(&fx.svc, contracts.Auth_Context{kind = .User_Token, user_id = "u1"}, "task_1")
-	testing.expect(t, started, "retry repaired bridge")
+	// The proven outage block is answered by the hello itself; a duplicate
+	// hello finds nothing to answer and grants no second lease.
+	testing.expect_value(t, get_task(fx, "task_1").blocked_on_json, "")
+	on_bridge_hello(&fx.svc, "br_1", []string{"inst_coord", "inst_w1", "inst_w2"})
 	// exactly one holder, the other stopped; never the coordinator
 	holder := ""
 	if l, h := lease_of(fx, "inst_w1"); h && l.task_id == "task_1" do holder = "inst_w1"

@@ -499,10 +499,40 @@ on_start_success :: proc(svc: ^Service, inst: domain.Agent_Instance) {
 		acted = confirm_in_uow(svc, &u, lease)
 	} else if inst.chain_id != "" {
 		if chain, cok, _ := iface.taskchain_get_chain(svc.repo, domain.Task_Chain_ID(inst.chain_id)); cok {
-			acted, _ = match_chain_in_uow(svc, &u, chain, .Start_Success)
+			answered: bool
+			answered, acted = answer_ready_agent_blocks_in_uow(svc, &u, chain, current)
+			if acted && answered {
+				acted, _ = after_chain_change(svc, &u, chain.chain_id, chain.owner_user_id, .Start_Success)
+			} else if acted {
+				acted, _ = match_chain_in_uow(svc, &u, chain, .Start_Success)
+			}
 		}
 	}
 	_, _ = end_uow(svc, &u, acted)
+}
+
+// answer_ready_agent_blocks_in_uow: a lease-free instance proved it is running,
+// so its agent is no longer "not running" on that bridge. Answer exactly the
+// agent_not_running blocks naming this agent and bridge (work or review); every
+// other block, a hold overlay and paused roles are left to their own paths. A
+// user stop was already cleared by the explicit start that launched it. Reads
+// the projections inside the UoW, so duplicate start-success is a no-op.
+answer_ready_agent_blocks_in_uow :: proc(svc: ^Service, u: ^Uow, chain: domain.Task_Chain, inst: domain.Agent_Instance) -> (answered: bool, ok: bool) {
+	if !instance_is_live(inst) || inst.stopped_by != "" || inst.agent_id == "" || inst.bridge_id == "" do return false, true
+	tasks, terr := iface.taskchain_list_tasks_by_chain(svc.repo, chain.chain_id, chain.owner_user_id)
+	if terr.code != .None do return false, false
+	for task in tasks {
+		if !is_agent_not_running_block(task.blocked_on_json) do continue
+		if jsonx.extract_string(task.blocked_on_json, "agent_id", "", true, context.temp_allocator) != inst.agent_id do continue
+		if jsonx.extract_string(task.blocked_on_json, "bridge_id", "", true, context.temp_allocator) != inst.bridge_id do continue
+		p := json_begin()
+		json_bool(&p, "auto", true)
+		json_str(&p, "reason", "agent_ready")
+		json_str(&p, "agent_instance_id", inst.agent_instance_id)
+		if _, _, rok, _ := record_event(svc, u, task, hub_actor(), EV_ANSWERED, json_end(&p)); !rok do return answered, false
+		answered = true
+	}
+	return answered, true
 }
 
 // BOOT_LEASE_GRACE_SECONDS: after a hub restart every lease gets at least this
