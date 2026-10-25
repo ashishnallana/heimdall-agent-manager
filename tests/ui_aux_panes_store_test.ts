@@ -302,7 +302,10 @@ test('sub-agent chat tabs are limited to participants of the owning agent chain'
   assert.equal(isAuxContentAllowed({ type: 'agentPty', agentInstanceId: 'x' }, { ...ctx, participantIds: new Set() }), true);
   assert.equal(isAuxContentAllowed({ type: 'agentPty', agentInstanceId: 'x' }, { ownerAgentId: 'owner' }), false);
   assert.equal(isAuxContentAllowed({ type: 'agentPty', agentInstanceId: 'owner' }, { ownerAgentId: 'owner' }), true);
-  assert.equal(isAuxContentAllowed({ type: 'files' }, {}), true);
+  assert.equal(isAuxContentAllowed({ type: 'tasks' }, {}), true);
+  // Project Explorer tabs fail closed unless the experiment is enabled.
+  assert.equal(isAuxContentAllowed({ type: 'files' }, {}), false);
+  assert.equal(isAuxContentAllowed({ type: 'files' }, { explorerEnabled: true }), true);
 });
 
 test('multiple interactive shell tabs coexist: each "New shell" opens its own tab, rekeyed to its own session', async () => {

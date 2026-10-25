@@ -8,7 +8,7 @@ import {
   type AuxContent,
   type AuxTab,
 } from '../../store/auxTabId';
-import { isAuxContentAllowed } from '../../store/auxTabGuards';
+import { explorerSafeActiveTab, filterExplorerAuxTabs, isAuxContentAllowed } from '../../store/auxTabGuards';
 import {
   auxTreeKey,
   closeAuxTab,
@@ -138,8 +138,13 @@ export function AuxDock({
   const publishComments = usePublishComments(ctx);
   const { actions, setActions } = useAuxTabActionsHost();
 
-  const tabs = visibleAuxTabs(pane);
-  const activeTab = resolveActiveAuxTab(pane);
+  // REQ-EXP-GATE-2: restored explorer tabs leave the strip while the explorer is
+  // not enabled; an active one renders AuxTabContent's unavailable notice instead.
+  const tabs = useMemo(
+    () => filterExplorerAuxTabs(visibleAuxTabs(pane), ctx.projectVcsEnabled),
+    [ctx.projectVcsEnabled, pane],
+  );
+  const activeTab = explorerSafeActiveTab(resolveActiveAuxTab(pane), pane?.tabs ?? [], ctx.projectVcsEnabled);
   const activeTabId = activeTab?.id ?? NEW_TAB_ID;
   const hasChain = Boolean(ctx.chainId);
   const [tabMotion, setTabMotion] = useState<'forward' | 'backward' | null>(null);
@@ -150,6 +155,7 @@ export function AuxDock({
         ownerAgentId: ctx.agentInstanceId,
         chainId: ctx.chainId,
         participantIds: ctx.participantIds,
+        explorerEnabled: ctx.projectVcsEnabled,
       });
       if (!allowed) return;
       // Materialising the active New Tab is a rekey, not movement to another
@@ -158,7 +164,7 @@ export function AuxDock({
       setTabMotion(null);
       dispatch(openAuxTab({ treeId, content, title, hasChain }));
     },
-    [ctx.agentInstanceId, ctx.chainId, ctx.participantIds, dispatch, hasChain, treeId],
+    [ctx.agentInstanceId, ctx.chainId, ctx.participantIds, ctx.projectVcsEnabled, dispatch, hasChain, treeId],
   );
 
   const fullView = useCallback(

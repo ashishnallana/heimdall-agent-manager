@@ -666,6 +666,7 @@ export function AgentChatPane({
   isMobile: explicitIsMobile,
   isSinglePane = true,
   variant = 'main',
+  projectVcsEnabled = false,
   onOpenAuxTab,
   onSwitchAgent,
   onOpenAgentInSplit,
@@ -2550,12 +2551,15 @@ export function AgentChatPane({
                   {projectId && !isAuxSubagent ? (
                     <>
                       <span className="shrink-0 opacity-40">·</span>
+                      {/* The chip opens Project Explorer files only while it is enabled
+                          (REQ-EXP-GATE-2); otherwise it just names the project. */}
                       <button
                         type="button"
                         data-debug-id="conversation-composer-project-chip"
-                        onClick={() => openAux({ type: 'files' })}
-                        title={`Open project files — ${projectName}`}
-                        className="inline-flex min-w-0 max-w-[50%] shrink items-center gap-1.5 rounded-md px-1 py-0.5 hover:bg-neutral-soft hover:text-primary"
+                        disabled={!projectVcsEnabled}
+                        onClick={projectVcsEnabled ? () => openAux({ type: 'files' }) : undefined}
+                        title={projectVcsEnabled ? `Open project files — ${projectName}` : `Project — ${projectName}`}
+                        className="inline-flex min-w-0 max-w-[50%] shrink items-center gap-1.5 rounded-md px-1 py-0.5 enabled:hover:bg-neutral-soft enabled:hover:text-primary disabled:cursor-default"
                       >
                         <Icon name="folder" size={13} className="shrink-0" />
                         <span className="min-w-0 truncate font-semibold text-muted">

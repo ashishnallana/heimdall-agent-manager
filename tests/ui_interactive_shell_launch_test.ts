@@ -153,7 +153,7 @@ test('successful auto-start creates once and reports the real session for tab re
   const ctx = {
     agentInstanceId: 'agent-a', conversationId: '', title: 'A', chainId: 'chain-a', projectId: 'project-a',
     projectName: '', bridgeId: 'bridge-a', defaultCwd: '', shellDefaultCwd: undefined, shellCwdReady: true,
-    projectVcsEnabled: false, directories: [], members: [], participantIds: null, isResolved: true,
+    projectVcsEnabled: false, projectExplorerAccess: 'disabled', directories: [], members: [], participantIds: null, isResolved: true,
   };
   try {
     await act(async () => {

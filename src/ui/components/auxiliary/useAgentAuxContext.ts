@@ -5,7 +5,7 @@ import { useFetchProjectQuery } from '../../api/endpoints/projects';
 import { useFetchExperimentsQuery } from '../../api/endpoints/settings';
 import { useFetchTaskChainDetailQuery } from '../../api/endpoints/tasks';
 import { chainParticipantIdsFromMembers } from '../../store/auxTabGuards';
-import { resolveProjectVcsExperiment } from '../chat/projectVcsExperiment';
+import { resolveProjectExplorerAccess, type ProjectExplorerAccess } from '../chat/projectVcsExperiment';
 import { resolveProjectBridgeShellCwd } from '../shells/interactiveShellLaunch';
 
 export interface AuxChainMember {
@@ -31,7 +31,10 @@ export interface AgentAuxContext {
   defaultCwd: string;
   shellDefaultCwd?: string;
   shellCwdReady: boolean;
+  /** True only when projectExplorerAccess is 'enabled'. */
   projectVcsEnabled: boolean;
+  /** Project Explorer (files/VCS) access; anything but 'enabled' hides it. */
+  projectExplorerAccess: ProjectExplorerAccess;
   directories: string[];
   members: AuxChainMember[];
   /** Participant ids once the chain detail has loaded; null otherwise. */
@@ -73,7 +76,7 @@ export function useAgentAuxContext(agentInstanceId: string | null | undefined): 
     isLoading: isProjectLoading,
     isFetching: isProjectFetching,
   } = useFetchProjectQuery({ projectId }, { skip: !projectId });
-  const { data: experimentsData } = useFetchExperimentsQuery();
+  const { data: experimentsData, isError: isExperimentsError } = useFetchExperimentsQuery();
   const { data: chainData } = useFetchTaskChainDetailQuery(
     { chainId },
     { skip: !chainId },
@@ -86,10 +89,11 @@ export function useAgentAuxContext(agentInstanceId: string | null | undefined): 
   );
   const shellDefaultCwd = resolveProjectBridgeShellCwd(project, bridgeId);
   const shellCwdReady = !projectId || (!isProjectLoading && !isProjectFetching);
-  const projectVcsEnabled = useMemo(
-    () => resolveProjectVcsExperiment(experimentsData?.flags) === 'enabled',
-    [experimentsData?.flags],
+  const projectExplorerAccess = useMemo(
+    () => resolveProjectExplorerAccess(experimentsData?.flags, isExperimentsError),
+    [experimentsData?.flags, isExperimentsError],
   );
+  const projectVcsEnabled = projectExplorerAccess === 'enabled';
 
   const directories = useMemo<string[]>(() => {
     const raw = (chainData?.chain as any)?.directories || project?.directories || [];
@@ -131,6 +135,7 @@ export function useAgentAuxContext(agentInstanceId: string | null | undefined): 
     shellDefaultCwd,
     shellCwdReady,
     projectVcsEnabled,
+    projectExplorerAccess,
     directories,
     members,
     participantIds,

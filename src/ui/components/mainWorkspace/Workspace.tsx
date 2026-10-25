@@ -324,13 +324,14 @@ export function Workspace({ focusMessageId, isMobile = false, leading, leadingWi
           ownerAgentId: ctx.agentInstanceId,
           chainId: ctx.chainId,
           participantIds: ctx.participantIds,
+          explorerEnabled: ctx.projectVcsEnabled,
         })
       ) {
         return;
       }
       dispatch(openAuxTab({ treeId: auxTreeId, content, title, hasChain }));
     },
-    [auxTreeId, ctx.agentInstanceId, ctx.chainId, ctx.participantIds, dispatch, hasChain],
+    [auxTreeId, ctx.agentInstanceId, ctx.chainId, ctx.participantIds, ctx.projectVcsEnabled, dispatch, hasChain],
   );
 
   const toggleAux = useCallback(() => {
@@ -416,11 +417,14 @@ export function Workspace({ focusMessageId, isMobile = false, leading, leadingWi
   );
 
   // 7. Keyboard: Cmd/Ctrl+P (files palette), Cmd/Ctrl+Shift+F (search), Cmd/Ctrl+\ (split right).
+  // The two explorer shortcuts exist only while Project Explorer is enabled
+  // (REQ-EXP-GATE-2); otherwise the browser default is left alone.
+  const explorerEnabled = ctx.projectVcsEnabled;
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (!(event.metaKey || event.ctrlKey) || event.altKey) return;
       const key = event.key.toLowerCase();
-      if (key === 'p' && !event.shiftKey && auxTreeId) {
+      if (key === 'p' && !event.shiftKey && auxTreeId && explorerEnabled) {
         event.preventDefault();
         dispatch(openAuxTab({ treeId: auxTreeId, content: { type: 'files', openCommandPalette: true }, hasChain }));
       } else if (event.key === '\\' && !event.shiftKey) {
@@ -431,7 +435,7 @@ export function Workspace({ focusMessageId, isMobile = false, leading, leadingWi
     // Capture phase so a mounted files panel cannot swallow Cmd+Shift+F.
     const onSearchKeyDown = (event: KeyboardEvent) => {
       if (!(event.metaKey || event.ctrlKey) || event.altKey || !event.shiftKey) return;
-      if (event.key.toLowerCase() !== 'f' || !auxTreeId) return;
+      if (event.key.toLowerCase() !== 'f' || !auxTreeId || !explorerEnabled) return;
       event.preventDefault();
       dispatch(openAuxTab({ treeId: auxTreeId, content: { type: 'files', openSearch: true }, hasChain }));
     };
@@ -441,7 +445,7 @@ export function Workspace({ focusMessageId, isMobile = false, leading, leadingWi
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('keydown', onSearchKeyDown, true);
     };
-  }, [auxTreeId, dispatch, hasChain, tree.focusedPaneId]);
+  }, [auxTreeId, dispatch, explorerEnabled, hasChain, tree.focusedPaneId]);
 
   const focusPane = useCallback((paneId: string) => dispatch(setFocusedMainPane(paneId)), [dispatch]);
   // Main pane close animation: fade the pane out, then remove it.

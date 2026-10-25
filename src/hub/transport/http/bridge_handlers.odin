@@ -647,6 +647,16 @@ bridge_public_key_handler :: proc(ctx: rawptr, req: Request) -> Response {
 // as bridge_fs_relay. Request paths are RELATIVE to the project root. The bridge
 // result JSON is returned verbatim (already the flat {ok,...,error} envelope).
 
+// explorer_gate_error is the Project Explorer guard (REQ-EXP-GATE-3/5) shared by the
+// project and chain-directory fs/vcs relays, so every route and alias that reaches a
+// relay is covered. It runs right after authentication and before any project/directory
+// lookup, bridge lookup or relay, against the authenticated owner's project_vcs flag
+// (agent instance credentials resolve to their owner user). Fails closed on repository
+// errors.
+explorer_gate_error :: proc(h: ^Bridge_Handlers, auth_ctx: contracts.Auth_Context) -> domain.Domain_Error {
+	return experiment_gate_error(h.experiments, auth_ctx.user_id, domain.PROJECT_VCS_EXPERIMENT_KEY)
+}
+
 Project_Fs_Command :: struct {
 	command_type: string,
 	path:         string, // primary path (relative to project root)
@@ -684,6 +694,7 @@ Project_Fs_Command :: struct {
 project_fs_relay :: proc(h: ^Bridge_Handlers, req: Request, cmd: Project_Fs_Command) -> (string, bool, domain.Domain_Error) {
 	auth_ctx, auth_ok, _ := require_auth(h.auth, req)
 	if !auth_ok do return "", false, domain.domain_error(.Unauthenticated, "authentication required")
+	if gate_err := explorer_gate_error(h, auth_ctx); gate_err.code != .None do return "", false, gate_err
 	project_id := domain.Project_ID(path_part(req.path, 4))
 	bridge_hint := query_value(req.query, "bridge_id")
 	target, target_ok, target_err := project_service.resolve_fs_target(h.projects, auth_ctx, project_id, bridge_hint)
@@ -848,6 +859,7 @@ delete_project_path_handler :: proc(ctx: rawptr, req: Request) -> Response {
 directory_fs_relay :: proc(h: ^Bridge_Handlers, req: Request, cmd: Project_Fs_Command) -> (string, bool, domain.Domain_Error) {
 	auth_ctx, auth_ok, _ := require_auth_any(h.auth, req)
 	if !auth_ok do return "", false, domain.domain_error(.Unauthenticated, "authentication required")
+	if gate_err := explorer_gate_error(h, auth_ctx); gate_err.code != .None do return "", false, gate_err
 	chain_id := domain.Task_Chain_ID(path_part(req.path, 4))
 	dir_id := path_part(req.path, 6)
 	if string(chain_id) == "" || dir_id == "" {
@@ -1052,6 +1064,7 @@ Project_Vcs_Command :: struct {
 project_vcs_relay :: proc(h: ^Bridge_Handlers, req: Request, cmd: Project_Vcs_Command) -> (string, bool, domain.Domain_Error) {
 	auth_ctx, auth_ok, _ := require_auth(h.auth, req)
 	if !auth_ok do return "", false, domain.domain_error(.Unauthenticated, "authentication required")
+	if gate_err := explorer_gate_error(h, auth_ctx); gate_err.code != .None do return "", false, gate_err
 	project_id := domain.Project_ID(path_part(req.path, 4))
 	bridge_hint := query_value(req.query, "bridge_id")
 	target, target_ok, target_err := project_service.resolve_fs_target(h.projects, auth_ctx, project_id, bridge_hint)
@@ -1350,6 +1363,11 @@ project_handle_vcs_sync :: proc(ctx: rawptr, req: Request) -> Response {
 directory_vcs_relay :: proc(h: ^Bridge_Handlers, req: Request, cmd: Project_Vcs_Command) -> (string, bool, domain.Domain_Error) {
 	auth_ctx, auth_ok, _ := require_auth_any(h.auth, req)
 	if !auth_ok do return "", false, domain.domain_error(.Unauthenticated, "authentication required")
+	// Task review (TaskDetails) reads an attempt's commit diff through this relay; that
+	// is a core chain workflow, not the explorer, so only vcs_commit_diff is exempt.
+	if cmd.command_type != "vcs_commit_diff" {
+		if gate_err := explorer_gate_error(h, auth_ctx); gate_err.code != .None do return "", false, gate_err
+	}
 	chain_id := domain.Task_Chain_ID(path_part(req.path, 4))
 	dir_id := path_part(req.path, 6)
 	if string(chain_id) == "" || dir_id == "" {

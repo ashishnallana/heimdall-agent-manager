@@ -7,6 +7,11 @@ import {
 } from '../../store/auxTabId';
 import { isAuxContentAllowed } from '../../store/auxTabGuards';
 import ChainOverviewPanel from '../chat/ChainOverviewPanel';
+import {
+  EXPERIMENTAL_SETTINGS_HREF,
+  projectExplorerUnavailableMessage,
+  type ProjectExplorerAccess,
+} from '../chat/projectVcsExperiment';
 import TaskChainOverview from '../taskchain/TaskChainOverview';
 import { AgentChatPane } from '../workbench/AgentChatPane';
 import { AgentPtyWorkbenchPane } from '../workbench/AgentPtyWorkbenchPane';
@@ -37,6 +42,30 @@ function EmptyNotice({ debugId, children }: { debugId: string; children: React.R
     >
       {children}
     </div>
+  );
+}
+
+/**
+ * REQ-EXP-GATE-2: shown in place of a restored or still-active Files/VCS tab while
+ * the Project Explorer is loading, disabled or failed to load; the explorer panels
+ * (and their file/VCS/search queries) are never mounted behind it.
+ */
+function ExplorerUnavailableNotice({ access }: { access: Exclude<ProjectExplorerAccess, 'enabled'> }) {
+  return (
+    <EmptyNotice debugId={`aux-explorer-unavailable-${access}`}>
+      <div className="space-y-2">
+        <p>{projectExplorerUnavailableMessage(access)}</p>
+        {access === 'loading' ? null : (
+          <a
+            href={EXPERIMENTAL_SETTINGS_HREF}
+            data-debug-id="aux-explorer-unavailable-settings-link"
+            className="font-semibold text-accent underline"
+          >
+            Open Experimental settings
+          </a>
+        )}
+      </div>
+    </EmptyNotice>
   );
 }
 
@@ -81,6 +110,9 @@ function renderAuxTabBody({
   openAgentChat,
 }: AuxTabContentProps & { openAgentChat: (agentInstanceId: string, title?: string) => boolean }) {
   const c = tab.content;
+  if ((c.type === 'files' || c.type === 'vcs') && ctx.projectExplorerAccess !== 'enabled') {
+    return <ExplorerUnavailableNotice access={ctx.projectExplorerAccess ?? 'loading'} />;
+  }
   switch (c.type) {
     case 'chainOverview':
       if (!ctx.chainId) {

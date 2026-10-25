@@ -140,6 +140,7 @@ const CTX = {
   shellDefaultCwd: undefined,
   shellCwdReady: true,
   projectVcsEnabled: false,
+  projectExplorerAccess: 'disabled' as const,
   directories: [],
   members: [],
   participantIds: null,

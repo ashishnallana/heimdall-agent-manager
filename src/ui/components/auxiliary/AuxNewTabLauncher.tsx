@@ -97,6 +97,7 @@ function AuxNewTabLauncherBody({
   ownerAgentId,
   chainId,
   projectId,
+  projectVcsEnabled = false,
   members = [],
   onSelect,
   shellsData,
@@ -267,6 +268,8 @@ function AuxNewTabLauncherBody({
           <h4 className="text-[11px] font-semibold uppercase tracking-wider text-muted">Open a surface</h4>
           <div data-debug-id="aux-launcher-surface-grid" className="grid grid-cols-1 gap-2 sm:grid-cols-2">
             {LAUNCHER_ORDER.filter((kind) => {
+              // REQ-EXP-GATE-2: no Files/VCS entry unless Project Explorer is enabled.
+              if ((kind === 'files' || kind === 'vcs') && !projectVcsEnabled) return false;
               const meta = AUX_TAB_REGISTRY[kind];
               return matchesSearch(normalizedQuery, meta.label, meta.description);
             }).map((kind) => {
