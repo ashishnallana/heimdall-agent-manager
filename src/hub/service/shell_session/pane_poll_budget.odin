@@ -17,7 +17,7 @@ Pane_Poll_Budget :: struct {
 // One sliding window across agent and shell pane captures. Stream reservations and
 // this check share mu so a capture cannot bypass a stream allowance already at cap.
 shell_session_admit_pane_poll :: proc(svc: ^Shell_Session_Service, auth: contracts.Auth_Context) -> domain.Domain_Error {
-	if auth.kind != .User_Token && auth.kind != .Trusted_Proxy do return {}
+	if auth.kind != .OIDC && auth.kind != .User_Token && auth.kind != .Trusted_Proxy do return {}
 	if svc == nil do return domain.domain_error(.Internal_Error, "PTY viewer service is unavailable")
 	parameters, err := domain.lookup_entitlements(svc.entitlements, auth.user_id)
 	if err.code != .None do return err

@@ -511,8 +511,14 @@ MIGRATION_131_FLEET_PAUSE :: #load("migrations/131_fleet_pause.sql", string)
 MIGRATION_132_EXTENSION_VERSION_SYNC :: #load("migrations/132_extension_version_sync_0_4_45.sql", string)
 
 MIGRATION_133_EXTENSION_VERSION_SYNC :: #load("migrations/133_extension_version_sync_0_4_46.sql", string)
+// Native-app OIDC identities and durable v2 device-proof nonces. It lives in its
+// own namespace: deployed native hubs recorded it as 113_oidc_identities.sql,
+// 115_oidc_identities.sql or native_001_oidc_identities.sql, and upstream later
+// reused 113/115 for unrelated files. See the alias handling in run_migrations.
+MIGRATION_NATIVE_001_OIDC_IDENTITIES :: #load("migrations/native_001_oidc_identities.sql", string)
 
-migration_order :: [136]string {
+// Native identities have their own namespace; upstream numbers remain untouched.
+migration_order :: [137]string {
 	"001_foundation.sql",
 	"002_owner_scoped_core.sql",
 	"003_device_tokens.sql",
@@ -649,6 +655,7 @@ migration_order :: [136]string {
 	"131_fleet_pause.sql",
 	"132_extension_version_sync_0_4_45.sql",
 	"133_extension_version_sync_0_4_46.sql",
+	"native_001_oidc_identities.sql",
 }
 
 // stop_before is a TEST SEAM: when non-empty, the apply loop stops in front of
@@ -671,6 +678,19 @@ run_migrations :: proc(
 		if stop_before != "" && name == stop_before do return true, domain.Domain_Error{}
 		if name == "016_memory_workflow_skill_memory.sql" {
 			if !upgrade_memory_target_scope_schema(conn) do return false, domain.domain_error(.Internal_Error, "memory target scope schema upgrade failed")
+		}
+		// Deployed native 113/115 are immutable historical aliases. Preserve them;
+		// acknowledge the namespaced identity only with the entire native schema.
+		if name == "native_001_oidc_identities.sql" &&
+		   (migration_applied(conn, "113_oidc_identities.sql") ||
+		    migration_applied(conn, "115_oidc_identities.sql") ||
+		    migration_applied(conn, name) || sqlite_object_exists(conn, "user_external_identities") ||
+		    sqlite_object_exists(conn, "vault_request_nonces")) {
+			if !native_oidc_schema_complete(conn) {
+				return false, domain.domain_error(.Internal_Error, "native OIDC migration schema is incomplete or incompatible; repair before upgrade")
+			}
+			mark_migration_applied(conn, name)
+			continue
 		}
 		if migration_applied(conn, name) do continue
 		if name == "003_device_tokens.sql" &&
@@ -1106,6 +1126,7 @@ migration_sql :: proc(name, migrations_dir: string) -> string {
 			return string(data)
 		}
 	}
+	if name == "native_001_oidc_identities.sql" do return strings.clone(MIGRATION_NATIVE_001_OIDC_IDENTITIES)
 	if name == "133_extension_version_sync_0_4_46.sql" do return strings.clone(MIGRATION_133_EXTENSION_VERSION_SYNC)
 	if name == "132_extension_version_sync_0_4_45.sql" do return strings.clone(MIGRATION_132_EXTENSION_VERSION_SYNC)
 	if name == "131_fleet_pause.sql" do return strings.clone(MIGRATION_131_FLEET_PAUSE)

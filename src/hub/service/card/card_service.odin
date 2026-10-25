@@ -862,7 +862,7 @@ accept_card :: proc(s: ^Card_Service, auth: contracts.Auth_Context, id: domain.C
 	// Start runs its own transaction: failed launch reasons must survive.
 	if len(ops_arr) == 1 {
 		if obj, valid := ops_arr[0].(json.Object); valid && json_obj_string(obj, "op") == "agent.start" {
-			if auth.kind != .User_Token && auth.kind != .Trusted_Proxy do return {}, false, domain.domain_error(.Forbidden, "only the user may start a task agent")
+			if auth.kind != .OIDC && auth.kind != .User_Token && auth.kind != .Trusted_Proxy do return {}, false, domain.domain_error(.Forbidden, "only the user may start a task agent")
 			if s.taskchains == nil || s.taskchains.engine == nil do return {}, false, domain.domain_error(.Internal_Error, "task engine is not configured")
 			task, found, task_err := iface.taskchain_get_task(s.taskchains.repo, domain.Task_ID(op_arg_string(obj, "task_id")))
 			if !found do return {}, false, task_err

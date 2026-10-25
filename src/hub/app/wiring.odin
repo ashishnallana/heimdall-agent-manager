@@ -40,6 +40,7 @@ App_Graph :: struct {
 	// attention_events coalesces card writes into attention_changed hints.
 	attention_events: events.Attention_Debouncer,
 	db: sqlite.Conn,
+	oidc_identity_db: sqlite.Conn,
 	sqlite_billing: sqlite.Billing_Repo_SQLite,
 	billing_repo: iface.Billing_Repository,
 	billing: billing_service.Service,
@@ -204,6 +205,7 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 		terminal_instances_per_bridge = config.runtime_terminal_entries_per_bridge,
 		terminal_retention = time.Duration(config.runtime_terminal_retention_seconds) * time.Second,
 	}
+	if oidc_ok, oidc_err := validate_oidc_config(config); !oidc_ok do return false, oidc_err
 	graph.config = config
 	graph.clock = platform.real_clock()
 	graph.ids = platform.real_id_generator()
@@ -257,6 +259,15 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 	graph.billing_handlers = http.Billing_Handlers{auth = &graph.auth, billing = &graph.billing, ui_origin = config.ui_origin}
 
 	graph.repos.users = sqlite.new_user_repository(&graph.sqlite_users, &graph.db)
+	// External identity claiming is atomic on an isolated connection so its
+	// transaction cannot commit or roll back an unrelated repository's writes.
+	if oidc_configured(config) && config.database_path != ":memory:" {
+		conn, ok, err := sqlite.open(config.database_path)
+		if !ok do return false, err.message
+		graph.oidc_identity_db = conn
+		if !sqlite.exec(&graph.oidc_identity_db, "PRAGMA busy_timeout = 5000;") do return false, "failed to configure the OIDC identity connection"
+		graph.sqlite_users.identity_conn = &graph.oidc_identity_db
+	}
 	graph.repos.bridges = sqlite.new_bridge_repository(&graph.sqlite_bridges, &graph.db)
 	// REQ-EA-2: the enrollment commit runs on its own connection (see
 	// Bridge_Enroll_Commit_Conn). An in-memory database has no second connection.
@@ -378,6 +389,10 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 		login_url = config.login_url,
 		logout_url = config.logout_url,
 	}, &graph.users, &graph.repos.users, &graph.clock, &graph.ids)
+	// OIDC bearer authentication is enabled whenever an issuer is configured.
+	graph.auth.oidc_mode = oidc_configured(config)
+	graph.auth.oidc = auth_service.OIDC_Config{issuer = config.oidc_issuer, audience = config.oidc_api_audience, scope = config.oidc_api_scope, userinfo_url = config.oidc_userinfo_url, jwks_url = config.oidc_jwks_url}
+	graph.auth.vault = &graph.vault_directory
 	graph.auth.bridges = &graph.bridges
 	graph.auth.agents = &graph.agents
 	// Bridge-token authorization is ALWAYS enforced; there is nothing to wire.
@@ -578,6 +593,8 @@ shutdown_graph :: proc(graph: ^App_Graph) {
 	sqlite.close(&graph.sqlite_actions.snapshot_conn)
 	sqlite.close(&graph.sqlite_billing.conn)
 	sqlite.close(&graph.sqlite_bridge_commit.conn)
+	auth_service.oidc_free(&graph.auth)
+	sqlite.close(&graph.oidc_identity_db)
 	vault_directory_service.service_free(&graph.vault_directory)
 	sqlite.close(&graph.sqlite_vault_directory_write.conn)
 	sqlite.close(&graph.db)
@@ -605,9 +622,9 @@ register_routes :: proc(graph: ^App_Graph) {
 	http.router_add(&graph.router, "GET", "/api/v1/auth/config", rawptr(&graph.user_handlers), http.auth_config_handler)
 	http.router_add(&graph.router, "GET", "/api/v1/me", rawptr(&graph.user_handlers), http.me_handler)
 	http.router_add(&graph.router, "GET", "/api/v1/me/logout-url", rawptr(&graph.user_handlers), http.logout_url_handler)
-	http.router_add(&graph.router, "GET", "/api/v1/me/tokens", rawptr(&graph.user_handlers), http.list_my_tokens_handler)
-	http.router_add(&graph.router, "POST", "/api/v1/me/tokens", rawptr(&graph.user_handlers), http.issue_my_token_handler)
-	http.router_add(&graph.router, "POST", "/api/v1/me/tokens/*/revoke", rawptr(&graph.user_handlers), http.revoke_my_token_handler)
+	if !graph.auth.oidc_mode { http.router_add(&graph.router, "GET", "/api/v1/me/tokens", rawptr(&graph.user_handlers), http.list_my_tokens_handler) }
+	if !graph.auth.oidc_mode { http.router_add(&graph.router, "POST", "/api/v1/me/tokens", rawptr(&graph.user_handlers), http.issue_my_token_handler) }
+	if !graph.auth.oidc_mode { http.router_add(&graph.router, "POST", "/api/v1/me/tokens/*/revoke", rawptr(&graph.user_handlers), http.revoke_my_token_handler) }
 	http.router_add(&graph.router, "GET", "/api/v1/me/experiments", rawptr(&graph.experiment_handlers), http.experiment_list_handler)
 	http.router_add(&graph.router, "PUT", "/api/v1/me/experiments/*", rawptr(&graph.experiment_handlers), http.experiment_set_handler)
 	http.router_add(&graph.router, "GET", "/api/v1/providers", rawptr(&graph.provider_handlers), http.provider_catalog_list_handler)

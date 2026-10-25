@@ -16,7 +16,7 @@ require_auth :: proc(auth: ^auth_service.Auth_Service, req: Request) -> (contrac
 		auth_metrics_record_failure(auth, req)
 		return contracts.Auth_Context{}, false, respond_error(err, req.request_id)
 	}
-	return ctx, true, Response{}
+	return oidc_device_gate(auth, ctx, req)
 }
 
 require_trusted_proxy_auth :: proc(auth: ^auth_service.Auth_Service, req: Request) -> (contracts.Auth_Context, bool, Response) {
@@ -30,7 +30,7 @@ require_trusted_proxy_auth :: proc(auth: ^auth_service.Auth_Service, req: Reques
 		auth_metrics_record_failure(auth, req, proxy_only = true)
 		return contracts.Auth_Context{}, false, respond_error(err, req.request_id)
 	}
-	return ctx, true, Response{}
+	return oidc_device_gate(auth, ctx, req)
 }
 
 csrf_origin_equal :: proc(left, right: string) -> bool {
@@ -113,7 +113,7 @@ require_auth_any :: proc(auth: ^auth_service.Auth_Service, req: Request) -> (con
 		auth_metrics_record_failure(auth, req)
 		return contracts.Auth_Context{}, false, respond_error(err, req.request_id)
 	}
-	return ctx, true, Response{}
+	return oidc_device_gate(auth, ctx, req)
 }
 
 // bare_bridge_bearer_without_instance reports whether this request presented a
@@ -143,5 +143,5 @@ require_auth_or_bridge_token :: proc(auth: ^auth_service.Auth_Service, req: Requ
 		auth_metrics_record_failure(auth, req)
 		return contracts.Auth_Context{}, false, respond_error(err, req.request_id)
 	}
-	return ctx, true, Response{}
+	return oidc_device_gate(auth, ctx, req)
 }

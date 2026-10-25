@@ -312,7 +312,7 @@ device_verify_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	if len(lookups) > 0 {
 		// A user principal only: a bridge, enrollment or instance credential carries a
 		// user id too, but must never resolve (and so learn the keys of) a pending device.
-		if auth_ctx.kind != .Trusted_Proxy && auth_ctx.kind != .User_Token {
+		if auth_ctx.kind != .OIDC && auth_ctx.kind != .Trusted_Proxy && auth_ctx.kind != .User_Token {
 			return respond_error(domain.domain_error(.Forbidden, "resolving a pairing code requires a user session"), req.request_id)
 		}
 		if !device_auth.rate_check(handlers.service, "", request_ip) {
@@ -431,7 +431,7 @@ device_pair_salts_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	auth_ctx, ok, auth_resp := require_auth(handlers.auth, req)
 	if !ok do return auth_resp
 	// Like a lookup: a bridge, enrollment or instance credential never lists pending requests.
-	if auth_ctx.kind != .Trusted_Proxy && auth_ctx.kind != .User_Token {
+	if auth_ctx.kind != .OIDC && auth_ctx.kind != .Trusted_Proxy && auth_ctx.kind != .User_Token {
 		return respond_error(domain.domain_error(.Forbidden, "listing pairing requests requires a user session"), req.request_id)
 	}
 	request_ip := device_auth.resolve_client_ip(req.remote_addr, header_value(req.headers, "X-Forwarded-For"), handlers.service.trusted_cidrs)

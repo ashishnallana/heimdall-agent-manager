@@ -623,7 +623,7 @@ _shell_session_starter_from_auth :: proc(auth: contracts.Auth_Context) -> domain
 // User-authenticated shell operations consume the shells capability. Agent run
 // and serve automation bypass billing, including entitlement lookup failures.
 shell_session_require_shells :: proc(source: domain.Entitlement_Lookup, auth: contracts.Auth_Context) -> domain.Domain_Error {
-	if auth.kind != .User_Token && auth.kind != .Trusted_Proxy do return {}
+	if auth.kind != .OIDC && auth.kind != .User_Token && auth.kind != .Trusted_Proxy do return {}
 	entitlements, err := domain.lookup_entitlements(source, auth.user_id)
 	if err.code != .None do return err
 	if !entitlements.shells_enabled do return domain.entitlement_limit_error(source, auth.user_id, "shells_enabled", 0, 1)

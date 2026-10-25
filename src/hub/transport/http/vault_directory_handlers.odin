@@ -1,5 +1,7 @@
 // HTTP handlers for the passwordless vault device directory
-// (docs/plans/passwordless-vault.md §2 P2). Cookie (trusted-proxy) or user-token auth;
+// (docs/plans/passwordless-vault.md §2 P2). OIDC, trusted-proxy or user-token auth;
+// OIDC requests pass the central v2 gate before reaching these handlers, which
+// reuse the verified signer without consuming the same nonce a second time.
 // every mutation except register/genesis/reset also needs the device request
 // signature headers X-Heimdall-Device-{Id,Ts,Nonce,Sig}, verified by the service.
 // register, genesis and reset are the unsigned entry points, so they accept ONLY an
@@ -43,7 +45,7 @@ require_vault_user :: proc(h: ^Vault_Directory_Handlers, req: Request) -> (contr
 	ctx, ok, resp := require_auth(h.auth, req)
 	if !ok do return ctx, false, resp
 	// A user principal only: never a bridge, enrollment or instance credential.
-	if ctx.kind != .Trusted_Proxy && ctx.kind != .User_Token {
+	if ctx.kind != .OIDC && ctx.kind != .Trusted_Proxy && ctx.kind != .User_Token {
 		return ctx, false, respond_error(domain.domain_error(.Forbidden, "vault directory requires a user session"), req.request_id)
 	}
 	return ctx, true, Response{}
@@ -55,16 +57,19 @@ require_vault_user :: proc(h: ^Vault_Directory_Handlers, req: Request) -> (contr
 require_interactive_user :: proc(h: ^Vault_Directory_Handlers, req: Request) -> (contracts.Auth_Context, bool, Response) {
 	ctx, ok, resp := require_auth(h.auth, req)
 	if !ok do return ctx, false, resp
-	if ctx.kind != .Trusted_Proxy {
+	if ctx.kind != .Trusted_Proxy && ctx.kind != .OIDC {
 		return ctx, false, respond_error(domain.domain_error(.Forbidden, "this vault action requires an interactive browser session"), req.request_id)
 	}
 	return ctx, true, Response{}
 }
 
-@(private = "file")
 signed_request :: proc(req: Request) -> vd.Signed_Request {
+	version := header_value(req.headers, "X-Heimdall-Device-Sig-Version")
+	target := req.path
+	if version == "2" do target = request_signature_target(req)
 	return vd.Signed_Request{
-		method = req.method, path = req.path, body = req.body,
+		method = req.method, path = target, body = req.body,
+		version = version,
 		device_id = header_value(req.headers, "X-Heimdall-Device-Id"),
 		ts = header_value(req.headers, "X-Heimdall-Device-Ts"),
 		nonce = header_value(req.headers, "X-Heimdall-Device-Nonce"),
@@ -249,7 +254,7 @@ vault_directory_get_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	// know (a browser whose directory was reset, or one that has not registered
 	// yet) still gets the directory -- or the not-configured 404 -- so it can
 	// recover, instead of a 403 that strands it.
-	if vd.has_signature_headers(sreq) {
+	if auth.kind != .OIDC && vd.has_signature_headers(sreq) {
 		signer, err := vd.verify_request(h.vault, auth.user_id, sreq, .Self)
 		if err.code == .None do vd.touch_last_seen(h.vault, auth.user_id, signer.device_id)
 	}
@@ -380,7 +385,7 @@ vault_self_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Vault_Directory_Handlers)(ctx)
 	auth, ok, resp := require_vault_user(h, req)
 	if !ok do return resp
-	signer, err := vd.verify_request(h.vault, auth.user_id, signed_request(req), .Self)
+	signer, err := vault_request_signer(h, auth, req, .Self)
 	if err.code != .None do return respond_error(err, req.request_id)
 	view, verr := vd.get_self(h.vault, auth.user_id, signer)
 	if verr.code != .None do return respond_error(verr, req.request_id)
@@ -416,7 +421,7 @@ vault_approve_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Vault_Directory_Handlers)(ctx)
 	auth, ok, resp := require_vault_user(h, req)
 	if !ok do return resp
-	signer, serr := vd.verify_request(h.vault, auth.user_id, signed_request(req), .Approver)
+	signer, serr := vault_request_signer(h, auth, req, .Approver)
 	if serr.code != .None do return respond_error(serr, req.request_id)
 	body: Approve_Request
 	if !vault_decode(req, &body) do return bad_request(req, "body must be a JSON object")
@@ -456,7 +461,7 @@ vault_recovery_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Vault_Directory_Handlers)(ctx)
 	auth, ok, resp := require_vault_user(h, req)
 	if !ok do return resp
-	signer, serr := vd.verify_request(h.vault, auth.user_id, signed_request(req), .Approver)
+	signer, serr := vault_request_signer(h, auth, req, .Approver)
 	if serr.code != .None do return respond_error(serr, req.request_id)
 	body: Recovery_Request
 	if !vault_decode(req, &body) do return bad_request(req, "body must be a JSON object")
@@ -484,7 +489,7 @@ vault_deny_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Vault_Directory_Handlers)(ctx)
 	auth, ok, resp := require_vault_user(h, req)
 	if !ok do return resp
-	_, serr := vd.verify_request(h.vault, auth.user_id, signed_request(req), .Approver)
+	_, serr := vault_request_signer(h, auth, req, .Approver)
 	if serr.code != .None do return respond_error(serr, req.request_id)
 	device_id := device_id_from_path(req)
 	if err := vd.deny(h.vault, auth.user_id, device_id); err.code != .None do return respond_error(err, req.request_id)
@@ -512,7 +517,7 @@ vault_revoke_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Vault_Directory_Handlers)(ctx)
 	auth, ok, resp := require_vault_user(h, req)
 	if !ok do return resp
-	signer, serr := vd.verify_request(h.vault, auth.user_id, signed_request(req), .Approver)
+	signer, serr := vault_request_signer(h, auth, req, .Approver)
 	if serr.code != .None do return respond_error(serr, req.request_id)
 	body: Revoke_Request
 	if !vault_decode(req, &body) do return bad_request(req, "body must be a JSON object")
@@ -561,7 +566,7 @@ vault_rotate_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Vault_Directory_Handlers)(ctx)
 	auth, ok, resp := require_vault_user(h, req)
 	if !ok do return resp
-	signer, serr := vd.verify_request(h.vault, auth.user_id, signed_request(req), .Approver)
+	signer, serr := vault_request_signer(h, auth, req, .Approver)
 	if serr.code != .None do return respond_error(serr, req.request_id)
 	body: Rotate_Request
 	if !vault_decode(req, &body) do return bad_request(req, "body must be a JSON object")
@@ -633,7 +638,7 @@ vault_reset_cancel_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Vault_Directory_Handlers)(ctx)
 	auth, ok, resp := require_vault_user(h, req)
 	if !ok do return resp
-	_, serr := vd.verify_request(h.vault, auth.user_id, signed_request(req), .Approver)
+	_, serr := vault_request_signer(h, auth, req, .Approver)
 	if serr.code != .None do return respond_error(serr, req.request_id)
 	cancelled, err := vd.cancel_reset(h.vault, auth.user_id)
 	if err.code != .None do return respond_error(err, req.request_id)

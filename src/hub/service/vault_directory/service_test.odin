@@ -18,6 +18,96 @@ OTHER :: "usr_vault_other"
 T0    :: "2026-10-19T10:00:00Z"
 T0_MS :: i64(1_792_404_000_000)
 
+v2_signed_req :: proc(d: ^Dev, method, path, body: string, index := 1, ts := T0_MS, user := USER) -> Signed_Request {
+	nonce := strings.concatenate({"00000000-0000-4000-8000-", itoa(100000000000 + i64(index))}, context.temp_allocator)
+	ts_s := itoa(ts)
+	msg := request_v2_canonical(method, path, user, ts_s, nonce, body, context.temp_allocator)
+	return Signed_Request{version = "2", method = method, path = path, body = body, device_id = d.id, ts = ts_s, nonce = nonce, signature = sign(d, msg)}
+}
+
+@(test)
+test_vault_v2_fields_reads_and_full_replay_window :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	f := fixture(t)
+	defer fixture_close(f)
+	a := make_dev(1)
+	do_genesis(t, f, &a)
+	for i in 0..<8 {
+		original := v2_signed_req(&a, "POST", "/api/v1/x/%2f?q=a%20b&b=2", `{"a":1}`, i)
+		changed := original
+		switch i {
+		case 0: changed.method = "GET"
+		case 1: changed.path = "/api/v1/x/%2F?q=a%20b&b=2"
+		case 2: changed.path = "/api/v1/x/%2f?b=2&q=a%20b"
+		case 3: changed.ts = itoa(T0_MS+1)
+		case 4: changed.nonce = "00000000-0000-4000-8000-999999999999"
+		case 5: changed.body = `{"a":1} `
+		case 6: changed.version = "3"
+		case 7: changed.signature = "invalid"
+		}
+		_, bad := verify_request(&f.svc, USER, changed, .Approved)
+		testing.expect(t, bad.code != .None)
+		_, good := verify_request(&f.svc, USER, original, .Approved)
+		testing.expect_value(t, good.code, domain.Error_Code.None)
+	}
+	wrong_user := v2_signed_req(&a, "GET", "/api/v1/me", "", 20, user = OTHER)
+	_, cross := verify_request(&f.svc, USER, wrong_user, .Approved)
+	testing.expect(t, cross.code != .None)
+	read := v2_signed_req(&a, "GET", "/api/v1/vault/devices/self", "", 21)
+	_, first := verify_request(&f.svc, USER, read, .Self)
+	_, replay := verify_request(&f.svc, USER, read, .Self)
+	testing.expect_value(t, first.code, domain.Error_Code.None)
+	testing.expect_value(t, replay.code, domain.Error_Code.Unauthenticated)
+	// Losing the in-memory cache must not allow a captured proof after restart.
+	service_free(&f.svc)
+	f.svc = new_service(&f.repo, &f.clock)
+	_, restart_replay := verify_request(&f.svc, USER, read, .Self)
+	testing.expect_value(t, restart_replay.code, domain.Error_Code.Unauthenticated)
+	for ts, i in ([]i64{T0_MS-300001, T0_MS+300001}) {
+		_, outside := verify_request(&f.svc, USER, v2_signed_req(&a, "GET", "/api/v1/me", "", 30+i, ts), .Approved)
+		testing.expect_value(t, outside.code, domain.Error_Code.Unauthenticated)
+	}
+	future := v2_signed_req(&a, "GET", "/api/v1/me", "", 40, T0_MS+300000)
+	_, future_ok := verify_request(&f.svc, USER, future, .Approved)
+	testing.expect_value(t, future_ok.code, domain.Error_Code.None)
+	f.now = "2026-10-19T10:10:00Z"
+	service_free(&f.svc)
+	f.svc = new_service(&f.repo, &f.clock)
+	_, late_replay := verify_request(&f.svc, USER, future, .Approved)
+	testing.expect_value(t, late_replay.code, domain.Error_Code.Unauthenticated)
+}
+
+@(test)
+test_vault_v2_pending_approved_revoked_lifecycle :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	f := fixture(t)
+	defer fixture_close(f)
+	a, b, rk := make_dev(1), make_dev(2), make_dev(3, "recovery")
+	do_genesis(t, f, &a)
+	do_register(t, f, &b)
+	pending, self_err := verify_request(&f.svc, USER, v2_signed_req(&b, "GET", "/api/v1/vault/devices/self", ""), .Self)
+	testing.expect(t, self_err.code == .None && pending.status == .Pending)
+	_, pending_err := verify_request(&f.svc, USER, v2_signed_req(&b, "GET", "/api/v1/me", "", 2), .Approved)
+	testing.expect_value(t, pending_err.code, domain.Error_Code.Forbidden)
+	_, aerr := approve_b(t, f, &a, &b, 1)
+	testing.expect_value(t, aerr.code, domain.Error_Code.None)
+	approved, approved_err := verify_request(&f.svc, USER, v2_signed_req(&b, "GET", "/api/v1/vault/devices/self", "", 3), .Self)
+	testing.expect_value(t, approved_err.code, domain.Error_Code.None)
+	view, view_err := get_self(&f.svc, USER, approved)
+	testing.expect(t, view_err.code == .None && view.has_wrap)
+	_, rk_err := add_recovery_by(f, &a, &rk, 2, 1)
+	testing.expect_value(t, rk_err.code, domain.Error_Code.None)
+	r := statement("revoke", &a, &b, "4", "2", prev = head(f))
+	_, rerr := revoke(&f.svc, Revoke_Input{user_id = USER, device_id = b.id, expected_version = 3, revoke_statement = r, signature = sign(&a, r), wraps = {wrap_for(&a, &a, 4, 2), wrap_for(&a, &rk, 4, 2)}, signer = dev_row(f, a.id)})
+	testing.expect_value(t, rerr.code, domain.Error_Code.None)
+	revoked, revoked_err := verify_request(&f.svc, USER, v2_signed_req(&b, "GET", "/api/v1/vault/devices/self", "", 4), .Self)
+	testing.expect(t, revoked_err.code == .None && revoked.status == .Revoked)
+	revoked_view, revoked_view_err := get_self(&f.svc, USER, revoked)
+	testing.expect(t, revoked_view_err.code == .None && !revoked_view.has_wrap)
+	_, protected_err := verify_request(&f.svc, USER, v2_signed_req(&b, "GET", "/api/v1/me", "", 5), .Approved)
+	testing.expect_value(t, protected_err.code, domain.Error_Code.Forbidden)
+}
+
 Fixture :: struct {
 	conn:  sqlite.Conn,
 	impl:  sqlite.Vault_Directory_Repo_SQLite,

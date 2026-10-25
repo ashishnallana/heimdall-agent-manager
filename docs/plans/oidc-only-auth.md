@@ -184,3 +184,32 @@ Inspect each with `git diff v0.4.45 repair/native-v0445 -- <file>`.
 2. User configures Mundus Authentik web client (instructions provided at that point).
 3. Backup Mundus DB, deploy via deployd, verify UI login, native bearer probe, bridge approval,
    confirm or roll back.
+
+## Deviations
+
+Phase 1 (native OIDC port):
+- **Bridge credentials in OIDC mode.** The native branch sent every `Authorization` header on a
+  user route to `resolve_oidc_auth`, so a misrouted `hba_`/`hbr_`/`hbf_` got the generic 401
+  "invalid OIDC access token". `resolve_auth` now keeps today's explicit 403 "bridge token cannot
+  call user APIs" for those shapes before OIDC resolution (matches "bridge-shaped tokens rejected
+  as today" in Request resolution). `hut_` stays rejected by OIDC resolution (401) as on the
+  native branch; phase 3 gives it the dedicated message.
+- **API scope is configuration.** The native branch hard-coded the `heimdall.api` scope; it is now
+  `oidc_api_scope` (required when OIDC is enabled). Bearer validation fails closed (`stage=config`)
+  if issuer, audience, scope, JWKS or UserInfo URL is empty.
+- **`oidc_mode` = issuer configured.** `HAM_AUTH_MODE` is gone; `Auth_Service.oidc_mode` is set
+  iff `oidc_issuer` is non-empty (`app.oidc_configured`). `app.validate_oidc_config` runs in
+  `main` and `build_graph`: OIDC settings without an issuer, or an issuer without JWKS/UserInfo/
+  audience/scope, or a non-https provider endpoint, is a startup error. The web-client keys
+  (`authorize/token/end_session/web_client_id/web_client_secret_file/redirect_uri`) are accepted
+  now and only URL-checked; phase 2 enforces them.
+- **Migration constant renamed** `MIGRATION_115_OIDC_IDENTITIES` → `MIGRATION_NATIVE_001_OIDC_IDENTITIES`
+  (same file, same alias logic). `native_001_oidc_identities.sql` is ordered after
+  `133_extension_version_sync_0_4_46.sql`.
+- **`multi_question.answer_questions`** (not touched on the native branch) also accepts `.OIDC`,
+  like every other user-only check. `tool_stream_handler` was left as on the native branch
+  (no OIDC: its live re-authorization, `live_user_authorized`, has no OIDC notion yet) — revisit
+  with sessions in phase 2/3.
+- Skipped from the native diff as unrelated: `bridge_handlers.odin` (search-v2 relay parsing),
+  `provider_extension_handlers_test.odin` (catalog min-version fixture), task-chain search tests,
+  `tests/*search*`, `native-integration.json`, `docs/heimdall-native-oidc.md` (phase 5).

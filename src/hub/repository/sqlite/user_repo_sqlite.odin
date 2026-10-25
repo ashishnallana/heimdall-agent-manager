@@ -2,16 +2,19 @@ package sqlite
 
 import "core:c"
 import "core:strings"
+import "core:sync"
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
 
 User_Repo_SQLite :: struct {
+	identity_mutex: sync.Mutex,
+	identity_conn: ^Conn, // Dedicated transaction connection in production.
 	conn: ^Conn,
 }
 
 new_user_repository :: proc(impl: ^User_Repo_SQLite, conn: ^Conn) -> iface.User_Repository {
 	impl.conn = conn
-	return iface.User_Repository{ctx = rawptr(impl), launch_preferences_get = launch_preferences_get_sqlite, launch_preferences_save = launch_preferences_save_sqlite, get_by_id = user_get_by_id_sqlite, save = user_save_sqlite, save_token = user_token_save_sqlite, get_token_by_id = user_token_get_by_id_sqlite, get_token_by_hash = user_token_get_by_hash_sqlite, list_tokens_by_owner = user_token_list_by_owner_sqlite}
+	return iface.User_Repository{resolve_external = user_resolve_external_sqlite, ctx = rawptr(impl), launch_preferences_get = launch_preferences_get_sqlite, launch_preferences_save = launch_preferences_save_sqlite, get_by_id = user_get_by_id_sqlite, save = user_save_sqlite, save_token = user_token_save_sqlite, get_token_by_id = user_token_get_by_id_sqlite, get_token_by_hash = user_token_get_by_hash_sqlite, list_tokens_by_owner = user_token_list_by_owner_sqlite}
 }
 
 user_get_by_id_sqlite :: proc(ctx: rawptr, user_id: domain.User_ID) -> (domain.User, bool, domain.Domain_Error) {

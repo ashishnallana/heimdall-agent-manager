@@ -6,6 +6,21 @@ import "core:net"
 import vault "odin_test:lib/vault"
 
 Hub_Config :: struct {
+	// OIDC provider settings (docs/plans/oidc-only-auth.md). Explicit endpoints, no
+	// discovery fetch at startup. Setting oidc_issuer enables OIDC bearer
+	// authentication for native clients; see validate_oidc_config.
+	oidc_issuer: string, // exact `iss`, trailing slash preserved
+	oidc_jwks_url: string,
+	oidc_userinfo_url: string,
+	oidc_api_audience: string, // bearer `aud` required for native access tokens
+	oidc_api_scope: string, // bearer scope required for native access tokens
+	// Browser (web client) flow settings, consumed by the session login flow.
+	oidc_authorize_url: string,
+	oidc_token_url: string,
+	oidc_end_session_url: string,
+	oidc_web_client_id: string,
+	oidc_web_client_secret_file: string, // a path; the secret itself is never in env/argv
+	oidc_redirect_uri: string,
 	// Unset: any Paddle credential/price enables limits. Explicit false opts out.
 	billing_enforce_plan_limits: Maybe(bool),
 	paddle_environment: string,
@@ -281,4 +296,48 @@ preview_origin_host_valid :: proc(host: string) -> bool {
 	}
 	label_len := len(host) - label_start
 	return !numeric_address && label_len > 0 && label_len <= 63 && host[label_start] != '-' && host[len(host)-1] != '-'
+}
+
+// oidc_configured reports whether OIDC bearer authentication is enabled.
+oidc_configured :: proc(config: Hub_Config) -> bool {
+	return config.oidc_issuer != ""
+}
+
+// validate_oidc_config fails closed on a partial OIDC configuration: an issuer
+// without the endpoints and API audience/scope needed to validate bearers, or
+// OIDC settings with no issuer. Provider endpoints must be https.
+validate_oidc_config :: proc(config: Hub_Config) -> (bool, string) {
+	if !oidc_configured(config) {
+		others := [?]string{
+			config.oidc_jwks_url, config.oidc_userinfo_url, config.oidc_api_audience, config.oidc_api_scope,
+			config.oidc_authorize_url, config.oidc_token_url, config.oidc_end_session_url,
+			config.oidc_web_client_id, config.oidc_web_client_secret_file, config.oidc_redirect_uri,
+		}
+		for value in others {
+			if value != "" do return false, "OIDC settings are present but oidc_issuer (HAM_OIDC_ISSUER / --oidc-issuer) is not set"
+		}
+		return true, ""
+	}
+	Required :: struct { value, name: string, url: bool }
+	required := [?]Required{
+		{config.oidc_issuer, "oidc_issuer (HAM_OIDC_ISSUER / --oidc-issuer)", true},
+		{config.oidc_jwks_url, "oidc_jwks_url (HAM_OIDC_JWKS_URL / --oidc-jwks-url)", true},
+		{config.oidc_userinfo_url, "oidc_userinfo_url (HAM_OIDC_USERINFO_URL / --oidc-userinfo-url)", true},
+		{config.oidc_api_audience, "oidc_api_audience (HAM_OIDC_API_AUDIENCE / --oidc-api-audience)", false},
+		{config.oidc_api_scope, "oidc_api_scope (HAM_OIDC_API_SCOPE / --oidc-api-scope)", false},
+	}
+	for r in required {
+		if strings.trim_space(r.value) == "" do return false, strings.concatenate({r.name, " is required when OIDC is enabled"})
+		if strings.trim_space(r.value) != r.value || strings.contains_any(r.value, " \t\r\n") do return false, strings.concatenate({r.name, " must not contain whitespace"})
+		if r.url && !strings.has_prefix(r.value, "https://") do return false, strings.concatenate({r.name, " must be an https:// URL"})
+	}
+	optional_urls := [?]Required{
+		{config.oidc_authorize_url, "oidc_authorize_url (HAM_OIDC_AUTHORIZE_URL / --oidc-authorize-url)", true},
+		{config.oidc_token_url, "oidc_token_url (HAM_OIDC_TOKEN_URL / --oidc-token-url)", true},
+		{config.oidc_end_session_url, "oidc_end_session_url (HAM_OIDC_END_SESSION_URL / --oidc-end-session-url)", true},
+	}
+	for r in optional_urls {
+		if r.value != "" && !strings.has_prefix(r.value, "https://") do return false, strings.concatenate({r.name, " must be an https:// URL"})
+	}
+	return true, ""
 }

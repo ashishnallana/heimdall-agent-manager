@@ -24,13 +24,14 @@ import os_random "odin_test:lib/os_random"
 
 REQUEST_HEADER       :: "heimdall-device-request/v1"
 REQUEST_SKEW_MS      :: 60_000
+REQUEST_V2_HEADER    :: "heimdall-device-request/v2"
+REQUEST_V2_SKEW_MS   :: 300_000
 // A nonce stays recorded until its timestamp can no longer pass the skew check:
 // ts may be up to 60 s ahead of the hub clock, and stays acceptable for 60 s after.
 NONCE_TTL_MS         :: 2 * REQUEST_SKEW_MS + 5_000
-// Per-device budget of live nonces. Nonces are recorded only for MUTATIONS, which
-// only approved approver-capable devices may sign, so the budget is per signing
-// device and one device (or one account) can never exhaust anyone else's.
-NONCE_DEVICE_QUOTA   :: 64
+// Per-device budget of live nonces. V2 records reads as well as writes; each
+// signing device has its own budget, so one account cannot exhaust another's.
+NONCE_DEVICE_QUOTA   :: 4096
 
 Service :: struct {
 	repo:  ^iface.Vault_Directory_Repository,
@@ -59,10 +60,10 @@ service_free :: proc(svc: ^Service) {
 // mutation is REFUSED rather than evicting one (an evicted nonce could be replayed
 // inside its window). Other devices and other accounts are unaffected.
 //
-// Reads (GET /vault/devices/self, GET /vault/directory) are NOT recorded: they need a
-// fresh, valid signature but change nothing, so a replayed read only re-reads.
+// V1 reads retain their legacy behavior. V2 records every authenticated proof,
+// including reads, and also consumes a durable SQLite nonce before admitting it.
 //
-// RESTART: the cache is in memory only. A hub restart forgets the nonces of the last
+// RESTART (v1 only): the cache is in memory only. A hub restart forgets the nonces of the last
 // ~2 minutes, so a captured mutation could be replayed once inside its remaining
 // ±60 s window after a restart. That replay still has to pass the directory CAS:
 // every mutation's statements are bound to `directory_version`, which the original
@@ -280,15 +281,37 @@ check_wrap :: proc(svc: ^Service, in_wrap: Wrap_Input, user_id: string, recipien
 Signed_Request :: struct {
 	method, path, body: string,
 	device_id, ts, nonce, signature: string,
+	version: string,
 }
 
 Signer_Requirement :: enum {
 	// An approved device whose kind may approve (never a bridge). Every mutation.
 	Approver,
 	// The device itself in any status (pending, approved or revoked). READ-ONLY
-	// endpoints only (GET self, GET directory): no nonce is recorded. Bridges are
+// endpoints only (GET self, GET directory). V2 consumes a nonce. Bridges are
 	// never accepted.
 	Self,
+	// An approved user device, for ordinary protected reads and writes.
+	Approved,
+}
+
+request_v2_canonical :: proc(method, path, user_id, ts, nonce, body: string, allocator := context.allocator) -> string {
+	digest: [32]byte
+	hash: sha2.Context_256
+	sha2.init_256(&hash)
+	sha2.update(&hash, transmute([]byte)body)
+	sha2.final(&hash, digest[:])
+	return strings.concatenate({REQUEST_V2_HEADER, "\n", strings.to_upper(method, context.temp_allocator), "\n", path, "\n", user_id, "\n", ts, "\n", nonce, "\n", vault.hex_encode_lower(digest[:], context.temp_allocator)}, allocator)
+}
+
+valid_v2_nonce :: proc(s: string) -> bool {
+	if len(s) != 36 do return false
+	for c, i in transmute([]byte)s {
+		if i == 8 || i == 13 || i == 18 || i == 23 {
+			if c != '-' do return false
+		} else if !(c >= '0' && c <= '9') && !(c >= 'a' && c <= 'f') { return false }
+	}
+	return true
 }
 
 request_canonical :: proc(method, path, user_id, ts, nonce, body: string, allocator := context.allocator) -> string {
@@ -301,7 +324,7 @@ request_canonical :: proc(method, path, user_id, ts, nonce, body: string, alloca
 }
 
 has_signature_headers :: proc(r: Signed_Request) -> bool {
-	return r.device_id != "" || r.ts != "" || r.nonce != "" || r.signature != ""
+	return r.version != "" || r.device_id != "" || r.ts != "" || r.nonce != "" || r.signature != ""
 }
 
 @(private)
@@ -318,16 +341,21 @@ valid_nonce :: proc(s: string) -> bool {
 
 // verify_request authenticates a device-signed request for `user_id` and returns
 // the signing device. Order: shape, freshness, signer lookup + policy, signature,
-// THEN — for a mutation (.Approver) only — the nonce is recorded in the signer's own
-// bucket (an unauthenticated request never consumes a slot).
+// THEN the nonce is consumed for every v2 request, or a v1 mutation. An
+// unauthenticated request never consumes a slot. V2 also records it durably.
 verify_request :: proc(svc: ^Service, user_id: string, r: Signed_Request, need: Signer_Requirement) -> (domain.Vault_Device, domain.Domain_Error) {
+	if svc == nil || svc.repo == nil do return {}, unauth("device verification unavailable")
+	if r.version != "" && r.version != "2" do return {}, unauth("unsupported device signature version")
+	v2 := r.version == "2"
 	if r.device_id == "" || r.ts == "" || r.nonce == "" || r.signature == "" do return {}, unauth("device request signature required")
 	if !vault.valid_device_id(r.device_id) || !valid_nonce(r.nonce) do return {}, unauth("malformed device signature headers")
+	if v2 && !valid_v2_nonce(r.nonce) do return {}, unauth("v2 nonce must be a lowercase UUID")
 	ts, ts_ok := vault.decimal_u64(r.ts)
 	now, now_ok := now_ms(svc)
-	if !ts_ok || !now_ok do return {}, unauth("malformed device request timestamp")
+	if !ts_ok || !now_ok || ts > 9_000_000_000_000_000 do return {}, unauth("malformed device request timestamp")
 	skew := i64(ts) - now
-	if skew > REQUEST_SKEW_MS || skew < -REQUEST_SKEW_MS do return {}, unauth("device request timestamp outside the allowed window")
+	allowed_skew := i64(REQUEST_V2_SKEW_MS) if v2 else i64(REQUEST_SKEW_MS)
+	if skew > allowed_skew || skew < -allowed_skew do return {}, unauth("device request timestamp outside the allowed window")
 	devices, err := iface.vault_list_devices(svc.repo, user_id)
 	if err.code != .None do return {}, err
 	dev, found := find_device(devices, r.device_id)
@@ -340,18 +368,30 @@ verify_request :: proc(svc: ^Service, user_id: string, r: Signed_Request, need: 
 		if !policy.can_approve do return {}, forbidden("signing device kind may not approve")
 	case .Self:
 		if dev.kind == "bridge" || !domain.vault_kind_valid(dev.kind) do return {}, forbidden("signing device kind may not use this endpoint")
+	case .Approved:
+		if dev.status != .Approved || dev.kind == "bridge" || !domain.vault_kind_valid(dev.kind) do return {}, forbidden("approved user device required")
 	}
 	msg := request_canonical(r.method, r.path, user_id, r.ts, r.nonce, r.body, context.temp_allocator)
+	if v2 {
+		if dev.sign_alg != "ecdsa-p256-sha256" do return {}, unauth("v2 requires P-256")
+		msg = request_v2_canonical(r.method, r.path, user_id, r.ts, r.nonce, r.body, context.temp_allocator)
+	}
 	if !vault.verify(dev.sign_alg, dev.sign_public_key, transmute([]byte)msg, r.signature) do return {}, unauth("device request signature does not verify")
 	// Only mutations consume a nonce (see the cache comment): .Self is read-only.
-	if need == .Self do return dev, domain.Domain_Error{}
+	if need == .Self && !v2 do return dev, domain.Domain_Error{}
 	bucket := strings.concatenate({user_id, "|", dev.device_id}, context.temp_allocator)
-	switch nonce_cache_insert(&svc.nonces, bucket, r.nonce, now, NONCE_TTL_MS) {
+	ttl := i64(2*REQUEST_V2_SKEW_MS+5_000) if v2 else i64(NONCE_TTL_MS)
+	switch nonce_cache_insert(&svc.nonces, bucket, r.nonce, now, ttl) {
 	case .Inserted:
 	case .Replay:
 		return {}, unauth("device request nonce was already used")
 	case .Full:
 		return {}, domain.domain_error(.Rate_Limited, "too many signed requests from this device; retry shortly")
+	}
+	if v2 && svc.repo.consume_request_nonce != nil {
+		consumed, err := svc.repo.consume_request_nonce(svc.repo.ctx, user_id, dev.device_id, r.nonce, now, now+ttl)
+		if err.code != .None do return {}, err
+		if !consumed do return {}, unauth("device request nonce was already used or the device quota is full")
 	}
 	return dev, domain.Domain_Error{}
 }

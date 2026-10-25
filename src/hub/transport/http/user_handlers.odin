@@ -115,6 +115,7 @@ issue_user_ws_ticket_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	handlers := (^User_Handlers)(ctx)
 	auth_ctx, ok, auth_resp := require_auth(handlers.auth, req)
 	if !ok do return auth_resp
+	if auth_ctx.kind == .OIDC do return respond_error(domain.domain_error(.Forbidden, "OIDC WebSockets require a bearer and v2 device proof"), req.request_id)
 	raw_ticket, ticket_ok := device_auth.generate_device_code()
 	if !ticket_ok do return respond_error(domain.domain_error(.Internal_Error, "failed to generate websocket ticket"), req.request_id)
 	defer delete(raw_ticket)
@@ -129,19 +130,20 @@ issue_user_ws_ticket_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	return respond_success(strings.to_string(builder), req.request_id, auth_ctx_server_time(req))
 }
 
-user_ws_upgrade_handler :: proc(ctx: rawptr, req: Request, client: net.TCP_Socket) {
-	handlers := (^User_Handlers)(ctx)
-	auth_ctx: contracts.Auth_Context
-	auth_ok := false
-	auth_err := domain.Domain_Error{}
+user_ws_authenticate :: proc(handlers: ^User_Handlers, req: Request) -> (contracts.Auth_Context, bool, Response) {
 	ticket := query_value(req.query, "ticket")
 	if ticket != "" {
-		auth_ctx, auth_ok = user_ws_ticket_store_consume(&handlers.ws_tickets, ticket)
-		if !auth_ok do auth_err = domain.domain_error(.Unauthenticated, "websocket ticket is invalid or expired")
-	} else {
-		auth_ctx, auth_ok, auth_err = auth_service.resolve_auth(handlers.auth, auth_service.Auth_Request{remote_addr = req.remote_addr, query = req.query, body = req.body, headers = req.headers})
+		principal, ok := user_ws_ticket_store_consume(&handlers.ws_tickets, ticket)
+		if !ok do return {}, false, respond_error(domain.domain_error(.Unauthenticated, "websocket ticket is invalid or expired"), req.request_id)
+		return principal, true, {}
 	}
-	if !auth_ok { project_service.ws_track_rejected(project_service.WS_KIND_USER, "auth_failed"); write_http_response(client, respond_error(auth_err, req.request_id)); return }
+	return require_auth(handlers.auth, req)
+}
+
+user_ws_upgrade_handler :: proc(ctx: rawptr, req: Request, client: net.TCP_Socket) {
+	handlers := (^User_Handlers)(ctx)
+	auth_ctx, auth_ok, auth_resp := user_ws_authenticate(handlers, req)
+	if !auth_ok { project_service.ws_track_rejected(project_service.WS_KIND_USER, "auth_failed"); write_http_response(client, auth_resp); return }
 	key := header_value(req.headers, "Sec-WebSocket-Key")
 	if key == "" { project_service.ws_track_rejected(project_service.WS_KIND_USER, "bad_request"); write_http_response(client, respond_error(domain.domain_error(.Validation_Failed, "missing websocket key"), req.request_id)); return }
 	if !write_user_ws_upgrade_response(client, user_ws_accept_key(key)) { project_service.ws_track_rejected(project_service.WS_KIND_USER, "other"); return }

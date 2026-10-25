@@ -61,7 +61,7 @@ create_agent_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	// create agents for its own owner.
 	auth_ctx, ok, auth_resp := require_auth_any(h.auth, req)
 	if !ok do return auth_resp
-	if json_bool(req.body, "favorite") && auth_ctx.kind != .User_Token && auth_ctx.kind != .Trusted_Proxy do return respond_error(domain.domain_error(.Forbidden, "user authentication is required for favorites"), req.request_id)
+	if json_bool(req.body, "favorite") && auth_ctx.kind != .OIDC && auth_ctx.kind != .User_Token && auth_ctx.kind != .Trusted_Proxy do return respond_error(domain.domain_error(.Forbidden, "user authentication is required for favorites"), req.request_id)
 	if json_bool(req.body, "favorite") {
 		if h.launch_preferences == nil do return respond_error(domain.domain_error(.Internal_Error, "launch preferences are not configured"), req.request_id)
 		lock_tok := dbt.timed_lock(&h.launch_preferences.launch_preferences_mutex, .Launch_Prefs)

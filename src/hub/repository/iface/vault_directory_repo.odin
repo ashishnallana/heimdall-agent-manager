@@ -47,6 +47,7 @@ Vault_List_Due_Resets_Proc :: proc(ctx: rawptr, now: string) -> ([]string, domai
 Vault_Execute_Reset_Proc :: proc(ctx: rawptr, user_id, now: string) -> (bool, domain.Domain_Error)
 
 Vault_Directory_Repository :: struct {
+	consume_request_nonce: proc(ctx: rawptr, user_id, device_id, nonce: string, now_ms, expires_ms: i64) -> (bool, domain.Domain_Error),
 	ctx:                  rawptr,
 	get_directory:        Vault_Get_Directory_Proc,
 	list_devices:         Vault_List_Devices_Proc,

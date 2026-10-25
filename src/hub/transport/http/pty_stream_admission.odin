@@ -9,7 +9,7 @@ import ws "odin_test:lib/ws"
 
 // Agent automation does not consume the user's plan allowance.
 pty_stream_user_id :: proc(auth: contracts.Auth_Context) -> string {
-	if auth.kind == .User_Token || auth.kind == .Trusted_Proxy do return auth.user_id
+	if auth.kind == .OIDC || auth.kind == .User_Token || auth.kind == .Trusted_Proxy do return auth.user_id
 	return ""
 }
 

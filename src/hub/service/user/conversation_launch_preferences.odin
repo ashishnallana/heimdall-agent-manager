@@ -40,7 +40,7 @@ launch_preferences_read :: proc(service: ^User_Service, owner: string) -> (Conve
  return prefs, {}
 }
 get_launch_preferences :: proc(service: ^User_Service, auth: contracts.Auth_Context) -> (Conversation_Launch_Preferences, domain.Domain_Error) {
- if auth.kind != .User_Token && auth.kind != .Trusted_Proxy do return {}, domain.domain_error(.Forbidden, "user authentication is required")
+	if auth.kind != .OIDC && auth.kind != .User_Token && auth.kind != .Trusted_Proxy do return {}, domain.domain_error(.Forbidden, "user authentication is required")
  return launch_preferences_read(service, auth.user_id)
 }
 launch_preferences_write :: proc(service: ^User_Service, owner: string, prefs: Conversation_Launch_Preferences) -> (bool, domain.Domain_Error) {
@@ -49,7 +49,7 @@ launch_preferences_write :: proc(service: ^User_Service, owner: string, prefs: C
  return iface.launch_preferences_save(service.users, owner, string(payload))
 }
 set_launch_selection :: proc(service: ^User_Service, auth: contracts.Auth_Context, field, value: string) -> (Conversation_Launch_Preferences, bool, domain.Domain_Error) {
- if auth.kind != .User_Token && auth.kind != .Trusted_Proxy do return {}, false, domain.domain_error(.Forbidden, "user authentication is required")
+	if auth.kind != .OIDC && auth.kind != .User_Token && auth.kind != .Trusted_Proxy do return {}, false, domain.domain_error(.Forbidden, "user authentication is required")
  lock_tok := dbt.timed_lock(&service.launch_preferences_mutex, .Launch_Prefs); defer dbt.timed_unlock(&service.launch_preferences_mutex, .Launch_Prefs, lock_tok)
  prefs, err := launch_preferences_read(service, auth.user_id)
  if err.code != .None do return {}, false, err
@@ -85,7 +85,7 @@ set_launch_selection :: proc(service: ^User_Service, auth: contracts.Auth_Contex
  return prefs, saved, save_err
 }
 set_agent_favorite :: proc(service: ^User_Service, auth: contracts.Auth_Context, agent_id: string, favorite: bool) -> (Conversation_Launch_Preferences, bool, domain.Domain_Error) {
- if auth.kind != .User_Token && auth.kind != .Trusted_Proxy do return {}, false, domain.domain_error(.Forbidden, "user authentication is required")
+	if auth.kind != .OIDC && auth.kind != .User_Token && auth.kind != .Trusted_Proxy do return {}, false, domain.domain_error(.Forbidden, "user authentication is required")
  lock_tok := dbt.timed_lock(&service.launch_preferences_mutex, .Launch_Prefs); defer dbt.timed_unlock(&service.launch_preferences_mutex, .Launch_Prefs, lock_tok)
  return set_agent_favorite_locked(service, auth, agent_id, favorite)
 }

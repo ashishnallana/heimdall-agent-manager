@@ -887,11 +887,8 @@ send_bridge_update :: proc(
 	if strings.trim_space(bridge_id) == "" {
 		return "", false, domain.domain_error(.Validation_Failed, "bridge_id is required")
 	}
-	if auth.kind != .User_Token && auth.kind != .Trusted_Proxy {
-		return "", false, domain.domain_error(
-			.Forbidden,
-			"user authentication required to update bridge",
-		)
+	if auth.kind != .OIDC && auth.kind != .User_Token && auth.kind != .Trusted_Proxy {
+		return "", false, domain.domain_error(.Forbidden, "user authentication required to update bridge")
 	}
 	bridge, ok, err := get_bridge(service, auth, bridge_id)
 	if !ok do return "", false, err

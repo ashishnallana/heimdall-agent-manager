@@ -47,6 +47,7 @@ new_vault_directory_repository :: proc(impl: ^Vault_Directory_Repo_SQLite, conn:
 	impl.conn = conn
 	impl.write = write
 	return iface.Vault_Directory_Repository{
+		consume_request_nonce = vault_consume_request_nonce_sqlite,
 		ctx                  = rawptr(impl),
 		get_directory        = vault_get_directory_sqlite,
 		list_devices         = vault_list_devices_sqlite,
@@ -66,6 +67,30 @@ new_vault_directory_repository :: proc(impl: ^Vault_Directory_Repo_SQLite, conn:
 		list_due_resets      = vault_list_due_resets_sqlite,
 		execute_reset        = vault_execute_reset_sqlite,
 	}
+}
+
+vault_consume_request_nonce_sqlite :: proc(ctx: rawptr, user_id, device_id, nonce: string, now_ms, expires_ms: i64) -> (bool, domain.Domain_Error) {
+	impl := (^Vault_Directory_Repo_SQLite)(ctx)
+	lock_tok := dbt.timed_lock(&impl.mutex, .Vault)
+	defer dbt.timed_unlock(&impl.mutex, .Vault, lock_tok)
+	conn := write_conn(impl)
+	purge, purge_ok := prepare(conn, "DELETE FROM vault_request_nonces WHERE expires_ms < ?;")
+	if !purge_ok do return false, repo_err("failed to prepare nonce expiry")
+	sqlite3_bind_int64(purge, 1, now_ms)
+	purged := sqlite3_step(purge)
+	sqlite3_finalize(purge)
+	if purged != SQLITE_DONE do return false, repo_err("failed to expire request nonces")
+	// The conditional insert and uniqueness check are atomic across connections.
+	query := "INSERT INTO vault_request_nonces(user_id,device_id,nonce,expires_ms) SELECT ?,?,?,? WHERE (SELECT COUNT(*) FROM vault_request_nonces WHERE user_id=? AND device_id=?) < 4096 ON CONFLICT(user_id,device_id,nonce) DO NOTHING;"
+	stmt, ok := prepare(conn, query)
+	if !ok do return false, repo_err("failed to prepare nonce consumption")
+	defer sqlite3_finalize(stmt)
+	bind_text(stmt, 1, user_id); bind_text(stmt, 2, device_id); bind_text(stmt, 3, nonce)
+	sqlite3_bind_int64(stmt, 4, expires_ms)
+	bind_text(stmt, 5, user_id); bind_text(stmt, 6, device_id)
+	rc, changes := step_changes(conn.db, stmt)
+	if rc != SQLITE_DONE do return false, repo_err("failed to consume request nonce")
+	return changes == 1, {}
 }
 
 @(private = "file")

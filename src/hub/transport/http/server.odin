@@ -93,6 +93,7 @@ handle_client :: proc(client: net.TCP_Socket, source: net.Endpoint, router: ^Rou
 		method = method,
 		path = path,
 		query = query,
+		raw_target = target,
 		body = body,
 		request_id = request_id,
 		remote_addr = net.address_to_string_allocator(source.address),

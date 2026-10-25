@@ -14,6 +14,7 @@ import user_service "odin_test:hub/service/user"
 main :: proc() {
 	crashlog.install("ham-hub")
 	config := app.default_config()
+	apply_oidc_env(&config)
 	if is_users_command() {
 		ok, message := run_users_command(&config)
 		if !ok {
@@ -23,6 +24,7 @@ main :: proc() {
 		return
 	}
 	if is_tokens_command() {
+		if app.oidc_configured(config) { fmt.eprintln("Heimdall user tokens are disabled when OIDC is configured"); os.exit(1) }
 		ok, message := run_tokens_command(&config)
 		if !ok {
 			fmt.eprintln(message)
@@ -31,6 +33,10 @@ main :: proc() {
 		return
 	}
 	parse_args(&config)
+	if oidc_ok, oidc_error := app.validate_oidc_config(config); !oidc_ok {
+		fmt.eprintln(oidc_error)
+		os.exit(2)
+	}
 	normalized_preview_origin, preview_ok, preview_error := app.normalize_preview_origin(config.preview_origin, config.ui_origin)
 	if !preview_ok {
 		fmt.eprintln(preview_error)
@@ -271,6 +277,28 @@ parse_args :: proc(config: ^app.Hub_Config) {
 			cidrs[0] = strings.clone(os.args[i + 1])
 			config.trusted_proxy_cidrs = cidrs
 			i += 1
+		} else if arg == "--oidc-issuer" && i + 1 < len(os.args) {
+			config.oidc_issuer = strings.clone(os.args[i + 1]); i += 1
+		} else if arg == "--oidc-jwks-url" && i + 1 < len(os.args) {
+			config.oidc_jwks_url = strings.clone(os.args[i + 1]); i += 1
+		} else if arg == "--oidc-userinfo-url" && i + 1 < len(os.args) {
+			config.oidc_userinfo_url = strings.clone(os.args[i + 1]); i += 1
+		} else if arg == "--oidc-api-audience" && i + 1 < len(os.args) {
+			config.oidc_api_audience = strings.clone(os.args[i + 1]); i += 1
+		} else if arg == "--oidc-api-scope" && i + 1 < len(os.args) {
+			config.oidc_api_scope = strings.clone(os.args[i + 1]); i += 1
+		} else if arg == "--oidc-authorize-url" && i + 1 < len(os.args) {
+			config.oidc_authorize_url = strings.clone(os.args[i + 1]); i += 1
+		} else if arg == "--oidc-token-url" && i + 1 < len(os.args) {
+			config.oidc_token_url = strings.clone(os.args[i + 1]); i += 1
+		} else if arg == "--oidc-end-session-url" && i + 1 < len(os.args) {
+			config.oidc_end_session_url = strings.clone(os.args[i + 1]); i += 1
+		} else if arg == "--oidc-web-client-id" && i + 1 < len(os.args) {
+			config.oidc_web_client_id = strings.clone(os.args[i + 1]); i += 1
+		} else if arg == "--oidc-web-client-secret-file" && i + 1 < len(os.args) {
+			config.oidc_web_client_secret_file = strings.clone(os.args[i + 1]); i += 1
+		} else if arg == "--oidc-redirect-uri" && i + 1 < len(os.args) {
+			config.oidc_redirect_uri = strings.clone(os.args[i + 1]); i += 1
 		} else if arg == "--login-url" && i + 1 < len(os.args) {
 			config.login_url = strings.clone(os.args[i + 1]); i += 1
 		} else if arg == "--logout-url" && i + 1 < len(os.args) {
@@ -351,6 +379,23 @@ parse_args :: proc(config: ^app.Hub_Config) {
 			config.vapid_subject = strings.clone(os.args[i + 1]); i += 1
 		}
 	}
+}
+
+// apply_oidc_env seeds OIDC provider settings from HAM_OIDC_* (flags parsed
+// later override these). It runs before the users/tokens subcommands so they see
+// whether OIDC is configured. No issuer, endpoint or audience is hard-coded.
+apply_oidc_env :: proc(config: ^app.Hub_Config) {
+	if v := os.get_env_alloc("HAM_OIDC_ISSUER", context.allocator); v != "" do config.oidc_issuer = v
+	if v := os.get_env_alloc("HAM_OIDC_JWKS_URL", context.allocator); v != "" do config.oidc_jwks_url = v
+	if v := os.get_env_alloc("HAM_OIDC_USERINFO_URL", context.allocator); v != "" do config.oidc_userinfo_url = v
+	if v := os.get_env_alloc("HAM_OIDC_API_AUDIENCE", context.allocator); v != "" do config.oidc_api_audience = v
+	if v := os.get_env_alloc("HAM_OIDC_API_SCOPE", context.allocator); v != "" do config.oidc_api_scope = v
+	if v := os.get_env_alloc("HAM_OIDC_AUTHORIZE_URL", context.allocator); v != "" do config.oidc_authorize_url = v
+	if v := os.get_env_alloc("HAM_OIDC_TOKEN_URL", context.allocator); v != "" do config.oidc_token_url = v
+	if v := os.get_env_alloc("HAM_OIDC_END_SESSION_URL", context.allocator); v != "" do config.oidc_end_session_url = v
+	if v := os.get_env_alloc("HAM_OIDC_WEB_CLIENT_ID", context.allocator); v != "" do config.oidc_web_client_id = v
+	if v := os.get_env_alloc("HAM_OIDC_WEB_CLIENT_SECRET_FILE", context.allocator); v != "" do config.oidc_web_client_secret_file = v
+	if v := os.get_env_alloc("HAM_OIDC_REDIRECT_URI", context.allocator); v != "" do config.oidc_redirect_uri = v
 }
 
 // apply_vapid_env seeds VAPID config from the environment:

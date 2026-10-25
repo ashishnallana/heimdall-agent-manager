@@ -7,6 +7,7 @@ Auth_Kind :: enum {
 	Bridge_Token,
 	Enrollment_Token,
 	Instance_Token,
+	OIDC,
 }
 
 Auth_Context :: struct {
@@ -18,6 +19,8 @@ Auth_Context :: struct {
 	bridge_id: string,
 	agent_instance_id: string,
 	token_scopes: []string,
+	// Set only after transport verifies the device request proof. Never from headers alone.
+	device_id: string,
 	user_token_id: string, // opaque identity for long-lived stream revocation checks
 }
 

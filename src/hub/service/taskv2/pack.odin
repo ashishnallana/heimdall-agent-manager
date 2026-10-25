@@ -663,7 +663,7 @@ chain_summary_set :: proc(svc: ^Service, auth: contracts.Auth_Context, chain_id_
 		if !is_coordinator(svc, chain, inst.agent_instance_id) {
 			return {}, false, domain.domain_error(.Forbidden, "only the chain coordinator or owner can set the chain summary")
 		}
-	} else if auth.kind == .User_Token || auth.kind == .Trusted_Proxy {
+	} else if auth.kind == .OIDC || auth.kind == .User_Token || auth.kind == .Trusted_Proxy {
 		if chain_id == "" do return {}, false, domain.domain_error(.Validation_Failed, "chain_id is required")
 		chain, cok, _ := iface.taskchain_get_chain(svc.repo, chain_id)
 		if !cok || string(chain.owner_user_id) != auth.user_id do return {}, false, domain.domain_error(.Not_Found, "task chain not found")

@@ -10,6 +10,7 @@ User_Token_Get_By_Hash_Proc :: proc(ctx: rawptr, token_hash: string) -> (domain.
 User_Token_List_By_Owner_Proc :: proc(ctx: rawptr, owner_user_id: domain.User_ID) -> ([]domain.User_API_Token, domain.Domain_Error)
 
 User_Repository :: struct {
+	resolve_external: proc(ctx: rawptr, issuer, subject, username, display_name, email, now: string, provision: bool) -> (domain.User, bool, domain.Domain_Error),
  launch_preferences_get: Launch_Preferences_Get_Proc,
  launch_preferences_save: Launch_Preferences_Save_Proc,
 	ctx: rawptr,

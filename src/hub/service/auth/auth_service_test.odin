@@ -137,7 +137,7 @@ test_live_user_authorization_rechecks_identity_expiry_revocation_without_writes 
     clock := platform.real_clock()
     users := user_service.new_user_service_basic(&repo, &clock, nil)
     service := new_auth_service_with_tokens({}, &users, &repo, &clock, nil)
-    auth := contracts.Auth_Context{kind = .User_Token, user_id = "alice", user_token_id = "utok_a"}
+    auth := contracts.Auth_Context{kind = .User_Token, user_id = "alice", user_token_id = "utok_a", device_id = "verified-device"}
     testing.expect(t, live_user_authorized(&service, auth))
     f.token.revoked_at = "2026-01-01T00:00:00Z"
     testing.expect(t, !live_user_authorized(&service, auth))

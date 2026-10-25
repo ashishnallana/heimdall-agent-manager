@@ -9,6 +9,7 @@ import contracts "odin_test:contracts"
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
 import platform "odin_test:hub/platform"
+import vd "odin_test:hub/service/vault_directory"
 import user_service "odin_test:hub/service/user"
 import agent_service "odin_test:hub/service/agent"
 import bridge_service "odin_test:hub/service/bridge"
@@ -24,6 +25,10 @@ Trusted_Proxy_Config :: struct {
 }
 
 Auth_Service :: struct {
+	oidc_mode: bool,
+	oidc: OIDC_Config,
+	oidc_state: OIDC_State,
+	vault: ^vd.Service,
 	config: Trusted_Proxy_Config,
 	users: ^user_service.User_Service,
 	user_tokens: ^iface.User_Repository,
@@ -285,6 +290,22 @@ extract_body_instance_id :: proc(body: string) -> string {
 }
 
 resolve_auth :: proc(service: ^Auth_Service, req: Auth_Request) -> (contracts.Auth_Context, bool, domain.Domain_Error) {
+	// OIDC mode (an issuer is configured): every Authorization header on a user
+	// route is an OIDC bearer; Hub user tokens (hut_) are not accepted. Bridge
+	// credentials keep their explicit 403 so a misrouted bridge learns which rule
+	// it broke. Bridge/instance routes resolve their credentials before reaching
+	// here (resolve_auth_any, resolve_auth_or_bridge_token).
+	if service != nil && service.oidc_mode {
+		if header_present(req.headers, "Authorization") {
+			authz := header_value(req.headers, "Authorization")
+			if strings.has_prefix(authz, "Bearer ") {
+				token := strings.trim_space(authz[len("Bearer "):])
+				if is_bridge_bearer(token) || strings.has_prefix(token, "hbf_") do return contracts.Auth_Context{}, false, domain.domain_error(.Forbidden, "bridge token cannot call user APIs")
+			}
+			return resolve_oidc_auth(service, req)
+		}
+		return resolve_trusted_proxy_auth(service, req)
+	}
 	if service == nil || service.users == nil {
 		return contracts.Auth_Context{}, false, domain.domain_error(.Internal_Error, "auth service is not configured")
 	}
@@ -336,6 +357,7 @@ resolve_trusted_proxy_auth :: proc(service: ^Auth_Service, req: Auth_Request) ->
 }
 
 issue_user_api_token :: proc(service: ^Auth_Service, input: Issue_User_API_Token_Input) -> (Issue_User_API_Token_Result, bool, domain.Domain_Error) {
+	if service != nil && service.oidc_mode do return Issue_User_API_Token_Result{}, false, domain.domain_error(.Forbidden, "Heimdall user tokens are disabled in OIDC mode")
 	if service == nil || service.users == nil || service.user_tokens == nil || service.clock == nil || service.ids == nil do return Issue_User_API_Token_Result{}, false, domain.domain_error(.Internal_Error, "user token service is not configured")
 	owner_id := domain.User_ID(user_service.normalize_user_id(string(input.owner_user_id)))
 	if string(owner_id) == "" do return Issue_User_API_Token_Result{}, false, domain.domain_error(.Validation_Failed, "user_id is required")
@@ -361,6 +383,7 @@ issue_user_api_token :: proc(service: ^Auth_Service, input: Issue_User_API_Token
 // device_label for provenance. `owner` is the Auth_Context.user_id bound at
 // approve time (never client-supplied). Returns (token, plaintext, ok, err).
 issue_device_authorization_token :: proc(service: ^Auth_Service, owner: domain.User_ID, device_label: string) -> (domain.User_API_Token, string, bool, domain.Domain_Error) {
+	if service != nil && service.oidc_mode do return {}, "", false, domain.domain_error(.Forbidden, "Heimdall user tokens are disabled in OIDC mode")
 	if service == nil || service.users == nil || service.user_tokens == nil || service.clock == nil || service.ids == nil do return domain.User_API_Token{}, "", false, domain.domain_error(.Internal_Error, "user token service is not configured")
 	owner_id := domain.User_ID(user_service.normalize_user_id(string(owner)))
 	if string(owner_id) == "" do return domain.User_API_Token{}, "", false, domain.domain_error(.Validation_Failed, "user_id is required")
@@ -387,6 +410,7 @@ issue_device_authorization_token :: proc(service: ^Auth_Service, owner: domain.U
 }
 
 list_user_api_tokens :: proc(service: ^Auth_Service, owner_user_id: domain.User_ID) -> ([]domain.User_API_Token, domain.Domain_Error) {
+	if service != nil && service.oidc_mode do return nil, domain.domain_error(.Forbidden, "Heimdall user tokens are disabled in OIDC mode")
 	if service == nil || service.user_tokens == nil do return nil, domain.domain_error(.Internal_Error, "user token service is not configured")
 	owner_id := domain.User_ID(user_service.normalize_user_id(string(owner_user_id)))
 	if string(owner_id) == "" do return nil, domain.domain_error(.Validation_Failed, "user_id is required")
@@ -506,6 +530,13 @@ header_value :: proc(headers: []contracts.HTTP_Header, name: string) -> string {
 		if ascii_equal_fold(h.name, name) do return strings.trim_space(h.value)
 	}
 	return ""
+}
+
+header_present :: proc(headers: []contracts.HTTP_Header, name: string) -> bool {
+	for h in headers {
+		if ascii_equal_fold(h.name, name) do return true
+	}
+	return false
 }
 
 remote_addr_trusted :: proc(remote_addr: string, cidrs: []string) -> bool {

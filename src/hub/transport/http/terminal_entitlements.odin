@@ -6,7 +6,7 @@ import domain "odin_test:hub/domain"
 // Only user-authenticated requests consume plan capabilities. Agent automation
 // keeps its existing authorization rules, even when its owner has a free plan.
 terminal_read_only :: proc(source: domain.Entitlement_Lookup, auth: contracts.Auth_Context) -> (bool, domain.Domain_Error) {
-	if auth.kind != .User_Token && auth.kind != .Trusted_Proxy do return false, {}
+	if auth.kind != .OIDC && auth.kind != .User_Token && auth.kind != .Trusted_Proxy do return false, {}
 	entitlements, err := domain.lookup_entitlements(source, auth.user_id)
 	if err.code != .None do return false, err
 	return !entitlements.terminal_input_enabled, {}

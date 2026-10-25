@@ -12,6 +12,8 @@ Request :: struct {
 	method:     string,
 	path:       string,
 	query:      string,
+	// Exact HTTP request target, including an empty '?' and original percent encoding.
+	raw_target: string,
 	body:       string,
 	request_id: string,
 	remote_addr: string,
