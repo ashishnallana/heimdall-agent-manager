@@ -155,3 +155,122 @@ test_fleet_role_paused_helpers :: proc(t: ^testing.T) {
 	kept := unpaused_review_roles(domain.Task_Chain_Fleet{paused_roles_json = `["security"]`}, []string{"security", "style"})
 	testing.expect(t, len(kept) == 1 && kept[0] == "style", "paused review roles are not owed")
 }
+
+// Review holders get the checkpoint too: a hold on an in-review task nudges
+// every live review lease, a review holder may hand off (no verdict, reviews
+// kept), the held task gets no new review lease, and the gate does not move
+// until release re-evaluates it.
+@(test)
+test_hold_review_lease_handoff_parks_until_release :: proc(t: ^testing.T) {
+	fx, log, ok := lease_fixture(t, "hold_review")
+	defer lease_fixture_close(fx, log)
+	if !ok do return
+	chain := seed_live_chain(t, fx, "chain_hold_review")
+	seed_agent(fx, "agt_r2")
+	seed_fleet(fx, chain, "agt_w")
+	seed_fleet(fx, chain, "agt_r", roles = `["reviewer"]`)
+	seed_fleet(fx, chain, "agt_r2", roles = `["reviewer"]`)
+	seed_instance(fx, chain, "inst_w1", "agt_w", "br_1", "idle")
+	seed_instance(fx, chain, "inst_r1", "agt_r", "br_1", "idle")
+	seed_instance(fx, chain, "inst_r2", "agt_r2", "br_1", "idle")
+	_ = publish_task(t, fx, chain, "task_1", brief = `{"goal":"g","acceptance":["a"],"review_roles":["reviewer"]}`)
+	confirm_holder(fx, "inst_w1")
+	_, sok, serr := lease_submit(&fx.svc, inst_auth("inst_w1"), Submit_Input{summary = "v1", vcs_json = `{"head":"h1","dirty":false}`})
+	if !testing.expect(t, sok, fmt.tprintf("submit: %s", serr.message)) do return
+	rl1, r1 := lease_of(fx, "inst_r1")
+	_, r2 := lease_of(fx, "inst_r2")
+	if !testing.expect(t, r1 && r2, "both reviewers leased") do return
+	owner := actor_from_auth(user_auth())
+
+	hr, hok, herr := task_hold(&fx.svc, get_task(fx, "task_1"), owner, "fix the brief")
+	if !testing.expect(t, hok, fmt.tprintf("hold: %s", herr.message)) do return
+	testing.expect(t, hr.checkpoint_requested, "hold on a review-leased task requests a checkpoint")
+	row := get_task(fx, "task_1")
+	testing.expect_value(t, row.state, domain.Task_State.In_Review)
+	testing.expect(t, strings.contains(row.blocked_on_json, `"checkpoint_requested":true`), "checkpoint visible while review leases are live")
+	inst_r1, _, _ := iface.agent_get_instance(&fx.agents, "inst_r1")
+	pack := build_pack_json(&fx.svc, chain, row, rl1, inst_r1)
+	testing.expect(t, strings.contains(pack, `"checkpoint":{"reason":"fix the brief"}`), "review pack carries the checkpoint request")
+
+	// r1 checkpoints: lease released with no verdict, no new review lease.
+	_, dok, derr := lease_handoff(&fx.svc, inst_auth("inst_r1"), Handoff_Input{summary = "half reviewed"})
+	if !testing.expect(t, dok, fmt.tprintf("review handoff: %s", derr.message)) do return
+	_, r1 = lease_of(fx, "inst_r1")
+	testing.expect(t, !r1, "held task gets no new review lease")
+	reviews, _ := iface.taskchain_list_reviews_by_task(&fx.repo, "task_1", "u1")
+	testing.expect_value(t, len(reviews), 0)
+	testing.expect_value(t, get_task(fx, "task_1").state, domain.Task_State.In_Review)
+
+	// r2 still finishes its review; the gate cannot advance while held.
+	g2, g2ok, _ := review_post(&fx.svc, inst_auth("inst_r2"), Review_Input{verdict = "approve"})
+	testing.expect(t, g2ok && g2.gate == .Waiting, "verdict recorded, gate waits")
+
+	// Release: r1 is re-granted its owed review.
+	_, rok, rerr := task_release(&fx.svc, get_task(fx, "task_1"), owner)
+	if !testing.expect(t, rok, fmt.tprintf("release: %s", rerr.message)) do return
+	rl1b, r1b := lease_of(fx, "inst_r1")
+	testing.expect(t, r1b && rl1b.kind == domain.LEASE_KIND_REVIEW, "released task re-dispatches the owed review")
+	// Off-hold, a review lease still ends only with review post.
+	_, hok2, herr2 := lease_handoff(&fx.svc, inst_auth("inst_r1"), Handoff_Input{summary = "x"})
+	testing.expect(t, !hok2 && herr2.code == .Conflict, "review handoff refused on an unheld task")
+
+	// Hold again; the last approval lands while held: still in review until release.
+	_, hok3, _ := task_hold(&fx.svc, get_task(fx, "task_1"), owner, "one more fix")
+	testing.expect(t, hok3, "hold again")
+	g1, g1ok, _ := review_post(&fx.svc, inst_auth("inst_r1"), Review_Input{verdict = "approve"})
+	testing.expect(t, g1ok && g1.gate == .Waiting, "all approvals in, gate held")
+	testing.expect_value(t, get_task(fx, "task_1").state, domain.Task_State.In_Review)
+	_, rok2, _ := task_release(&fx.svc, get_task(fx, "task_1"), owner)
+	testing.expect(t, rok2, "release")
+	testing.expect_value(t, get_task(fx, "task_1").state, domain.Task_State.Done)
+	assert_projection_matches_fold(t, fx, chain.chain_id, "u1", "review hold/release")
+}
+
+// Pause names FLEET roles; review leases carry lease roles. One mapping
+// (review_role_paused) serves wake and inline grants: a custom role is paused
+// only by its own name, a named review by reviewer / named-reviewer.
+@(test)
+test_fleet_pause_review_role_mapping :: proc(t: ^testing.T) {
+	f := domain.Task_Chain_Fleet{roles_json = `["worker","reviewer","security"]`, paused_roles_json = `["reviewer"]`}
+	testing.expect(t, review_role_paused(f, NAMED_REVIEW_ROLE), "reviewer pause covers named reviews")
+	testing.expect(t, review_role_paused(f, "reviewer") && !review_role_paused(f, "security"), "reviewer pause leaves security")
+	f.paused_roles_json = `["named-reviewer"]`
+	testing.expect(t, review_role_paused(f, NAMED_REVIEW_ROLE) && !review_role_paused(f, "reviewer"), "named-reviewer pause covers named only")
+	f.paused_roles_json = domain.FLEET_PAUSED_ALL_JSON
+	testing.expect(t, review_role_paused(f, NAMED_REVIEW_ROLE) && review_role_paused(f, "security"), "* pauses every review")
+
+	fx, log, ok := lease_fixture(t, "pause_review_roles")
+	defer lease_fixture_close(fx, log)
+	if !ok do return
+	chain := seed_live_chain(t, fx, "chain_pause_review")
+	seed_fleet(fx, chain, "agt_w")
+	seed_fleet(fx, chain, "agt_r", roles = `["reviewer","security"]`)
+	now := platform.clock_now(&fx.clock)
+	set_r :: proc(fx: ^Fixture, chain: domain.Task_Chain, paused, now: string) {
+		_, _ = iface.taskchain_upsert_fleet(&fx.repo, domain.Task_Chain_Fleet{task_chain_id = chain.chain_id, agent_id = "agt_r", capacity = 1, roles_json = `["reviewer","security"]`, paused_roles_json = paused, created_at = now, updated_at = now})
+		_ = fleet_changed(&fx.svc, chain)
+	}
+	set_r(fx, chain, `["reviewer"]`, now)
+	seed_instance(fx, chain, "inst_w1", "agt_w", "br_1", "idle")
+	seed_instance(fx, chain, "inst_r1", "agt_r", "br_1", "idle")
+	_ = publish_task(t, fx, chain, "task_1", brief = `{"goal":"g","acceptance":["a"],"review_roles":["security"],"reviewers":["agt_r"]}`)
+	confirm_holder(fx, "inst_w1")
+	_, sok, serr := lease_submit(&fx.svc, inst_auth("inst_w1"), Submit_Input{summary = "v1", vcs_json = `{"head":"h1","dirty":false}`})
+	if !testing.expect(t, sok, fmt.tprintf("submit: %s", serr.message)) do return
+	// Wake grant: security is not paused, the named review is.
+	rl, rheld := lease_of(fx, "inst_r1")
+	if !testing.expect(t, rheld, "reviewer pause does not suppress the security review (wake)") do return
+	testing.expect_value(t, rl.review_role, "security")
+	_, pok, _ := review_post(&fx.svc, inst_auth("inst_r1"), Review_Input{verdict = "approve"})
+	testing.expect(t, pok, "security approved")
+	// The owed named review stays undispatched: wake and inline pull.
+	_, rheld = lease_of(fx, "inst_r1")
+	testing.expect(t, !rheld, "paused named review gets no wake grant")
+	res, nok, _ := lease_next(&fx.svc, inst_auth("inst_r1"), Lease_Next_Input{})
+	testing.expect(t, nok && res.status == "none", fmt.tprintf("paused named review gets no inline grant: %s", res.status))
+	testing.expect_value(t, get_task(fx, "task_1").state, domain.Task_State.In_Review)
+	// Resume: the named review is dispatched.
+	set_r(fx, chain, "", now)
+	rl, rheld = lease_of(fx, "inst_r1")
+	testing.expect(t, rheld && rl.review_role == NAMED_REVIEW_ROLE, "resume dispatches the named review")
+}

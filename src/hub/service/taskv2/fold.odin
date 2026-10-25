@@ -69,7 +69,7 @@ Task_View :: struct {
 	done:               bool,
 	cancelled:          bool,
 	// held: a coordinator/owner hold (REQ-TV2-5). hold_json is its blocked_on
-	// object; while a work lease is live it carries checkpoint_requested.
+	// object; while a work or review lease is live it carries checkpoint_requested.
 	held:               bool,
 	hold_json:          string,
 	// last_event_id is the id of the last event folded (0 for an empty list).
@@ -178,6 +178,12 @@ fold_task :: proc(events: []domain.Task_Event, input: Fold_Input) -> Task_View {
 			// fifth block parks the task for a human exactly like a fifth expiry.
 			if !dispatch && !infrastructure do apply_budget(&v, max_attempts, ev.ts_ms)
 		case EV_HANDOFF:
+			// A review holder's checkpoint handoff on a held task (REQ-TV2-5)
+			// frees only that review lease; the attempt and its reviews stand.
+			if jsonx.extract_string(ev.payload_json, "kind", "", true, context.temp_allocator) == domain.LEASE_KIND_REVIEW {
+				if v.review_lease_count > 0 do v.review_lease_count -= 1
+				continue
+			}
 			v.has_work_lease = false
 			v.last_release = .Handoff
 		case EV_LEASE_EXPIRED:
@@ -273,7 +279,7 @@ fold_task :: proc(events: []domain.Task_Event, input: Fold_Input) -> Task_View {
 	// (REQ-TV2-5). Another live block keeps precedence until it is answered.
 	if v.held && !v.done && !v.cancelled && v.blocked_on_json == "" {
 		v.blocked_on_json = v.hold_json
-		if v.has_work_lease do v.blocked_on_json = hold_checkpoint_block(v.hold_json)
+		if v.has_work_lease || v.review_lease_count > 0 do v.blocked_on_json = hold_checkpoint_block(v.hold_json)
 	}
 	v.state = derive_state(v, input)
 	return v

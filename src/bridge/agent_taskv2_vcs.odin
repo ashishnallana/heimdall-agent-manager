@@ -608,7 +608,7 @@ bridge_taskv2_render_task_md :: proc(pack_json: string, max_bytes: int = BRIDGE_
 		reason := bridge_taskv2_decrypt_field(jsonx.extract_string(cp, "reason", "", true, context.temp_allocator), context.temp_allocator)
 		cb := strings.builder_make(context.temp_allocator)
 		strings.write_string(&cb, "\n## Checkpoint Requested\n")
-		strings.write_string(&cb, "This task was put on hold. Reach a safe stopping point, commit your work, then run `ham-ctl lease handoff --summary … --next-steps …`. The task stays parked until it is released; your lease is not revoked meanwhile.\n")
+		strings.write_string(&cb, "This task was put on hold. Reach a safe stopping point, commit your work, then run `ham-ctl lease handoff --summary … --next-steps …`. The task stays parked until it is released; your lease is not revoked meanwhile. Holding a review lease? Do not post a verdict: run `ham-ctl lease handoff --summary <review progress>`; your review is re-dispatched after the release.\n")
 		if strings.trim_space(reason) != "" do fmt.sbprintf(&cb, "**Reason**: %s\n", reason)
 		answer_section = strings.concatenate({strings.to_string(cb), answer_section}, context.temp_allocator)
 	}

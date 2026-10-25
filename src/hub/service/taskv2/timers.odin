@@ -494,6 +494,7 @@ fire_rematch :: proc(svc: ^Service, u: ^Uow, t: Timer) -> Fire_Result {
 check_review_stalled :: proc(svc: ^Service, u: ^Uow, task_in: domain.Task) {
 	task, ok, _ := iface.taskchain_get_task(svc.repo, task_in.task_id)
 	if !ok || task.state != .In_Review || task.kind == .Gate do return
+	if task_is_held(task) do return // waiting on its release, not stalled
 	if leases, lerr := iface.taskchain_list_leases_by_task(svc.repo, task.task_id); lerr.code != .None || len(leases) > 0 do return
 	unmet, uerr := gate_unmet_components(svc, task)
 	if uerr.code != .None || len(unmet) == 0 do return

@@ -247,6 +247,8 @@ grant_work :: proc(svc: ^Service, u: ^Uow, ctx: ^Match_Context, task: domain.Tas
 
 @(private = "file")
 grant_reviews :: proc(svc: ^Service, u: ^Uow, ctx: ^Match_Context, task: domain.Task, trigger: Trigger) {
+	// A held task gets no new review lease (REQ-TV2-5).
+	if task_is_held(task) do return
 	author_agent := ""
 	if holder := last_attempt_holder(svc, task); holder != "" {
 		if inst, iok, _ := iface.agent_get_instance(svc.agents, holder); iok do author_agent = inst.agent_id
@@ -322,8 +324,10 @@ pick_instance :: proc(svc: ^Service, u: ^Uow, ctx: ^Match_Context, task: domain.
 	// takes work through `lease next`, never by a wake grant, and a JIT copy of
 	// it is never spawned (REQ-SOLO-2).
 	if ctx.has_coordinator && fleet.agent_id == ctx.coordinator.agent_id do return {}, false, ""
-	// A paused row gets no new lease of the paused role (REQ-TV2-5).
-	if domain.fleet_role_paused(fleet, role) do return {}, false, ""
+	// Pause (REQ-TV2-5) is decided by the callers before a pick: grant_work
+	// checks the worker role and grant_reviews filters the owed review roles
+	// with unpaused_review_roles. `role` here is only the JIT spawn role, so a
+	// pause check on it would let a paused `reviewer` suppress `security`.
 	failure := ""
 	live_count := 0
 	live_free := domain.Agent_Instance{}
@@ -449,7 +453,7 @@ grant_inline_for_instance :: proc(svc: ^Service, u: ^Uow, chain: domain.Task_Cha
 	// the user (REQ-SOLO-5).
 	for task in ctx.sorted {
 		if coordinator do break
-		if task.state != .In_Review || task.kind == .Gate do continue
+		if task.state != .In_Review || task.kind == .Gate || task_is_held(task) do continue
 		author_agent := ""
 		if holder := last_attempt_holder(svc, task); holder != "" {
 			if h, hok, _ := iface.agent_get_instance(svc.agents, holder); hok do author_agent = h.agent_id
@@ -546,11 +550,25 @@ puller_fleet_row :: proc(ctx: ^Match_Context, inst: domain.Agent_Instance, coord
 
 // ---- helpers -----------------------------------------------------------------------------
 
-// unpaused_review_roles drops the review roles paused on `fleet` (REQ-TV2-5).
+// review_role_paused maps a LEASE review role onto the FLEET role namespace
+// that pause uses (REQ-TV2-5). Review roles from brief.review_roles are fleet
+// roles verbatim (`reviewer`, `security`, …), so each is paused only by its own
+// name. A named review (NAMED_REVIEW_ROLE, a lease-only role) is paused by the
+// row's generic review roles: `reviewer` or `named-reviewer`. `["*"]` pauses all.
+review_role_paused :: proc(fleet: domain.Task_Chain_Fleet, lease_role: string) -> bool {
+	if lease_role == NAMED_REVIEW_ROLE {
+		return domain.fleet_role_paused(fleet, domain.FLEET_ROLE_REVIEWER) || domain.fleet_role_paused(fleet, FLEET_ROLE_NAMED_REVIEWER)
+	}
+	return domain.fleet_role_paused(fleet, lease_role)
+}
+
+// unpaused_review_roles drops the owed lease review roles paused on `fleet`.
+// The single pause rule for review grants: wake (grant_reviews) and inline
+// (grant_inline_for_instance) dispatch both filter through it.
 unpaused_review_roles :: proc(fleet: domain.Task_Chain_Fleet, owed: []string) -> []string {
 	if !domain.fleet_paused_any(fleet) do return owed
 	kept := make([dynamic]string, context.temp_allocator)
-	for r in owed do if !domain.fleet_role_paused(fleet, r) do append(&kept, r)
+	for r in owed do if !review_role_paused(fleet, r) do append(&kept, r)
 	return kept[:]
 }
 
