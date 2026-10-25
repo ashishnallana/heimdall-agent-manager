@@ -13,7 +13,7 @@ import {
   workLeaseHolder,
   uiToneForPriority,
 } from './taskV2Types';
-import { TASK_ACTION_LABELS, editLock, getTaskActions, isDraft, reviewVotes, taskNeedsYou, voteFor, type TaskActionId } from './taskActions';
+import { TASK_ACTION_LABELS, editLock, getTaskActions, isDraft, reviewParticipantIds, reviewVotes, taskNeedsYou, voteFor, type TaskActionId } from './taskActions';
 import { ReviewVoteMark } from './ReviewVoteMark';
 import { TaskEditModal, type TaskEditField } from './TaskEditModal';
 import { describeEffectivePlacement, taskEffectivePlacement } from './fleetSelection';
@@ -21,7 +21,7 @@ import { useTaskActions } from './useTaskActions';
 import { TaskDetails } from './TaskDetails';
 import { HolderName } from './HolderName';
 import { PersonChip } from './PersonChip';
-import { useParticipantLabel } from './ParticipantName';
+import { useLookupNames, useParticipantLabel } from './ParticipantName';
 import { EMPTY_TASK_NAMES, type TaskNames } from './taskNames';
 
 /** Left-rail color per state (needs-you overrides it with the accent). */
@@ -96,7 +96,9 @@ export const TaskCard: React.FC<TaskCardProps> = ({
   const badges = getTaskBadges(task, chainFleets, now, names).filter((b) => b.kind !== 'lease' && b.kind !== 'bridge');
   const holderLease = workLeaseHolder(task, now);
   const people = getTaskPeople(task, chainFleets);
-  const votes = reviewVotes(task, names);
+  // Instance ids nothing maps yet are looked up, so votes match by durable id (REQ-TV2-6).
+  const reviewNames = useLookupNames(names, reviewParticipantIds(task, people.reviewers));
+  const votes = reviewVotes(task, reviewNames);
   const inReview = state === 'in_review';
   // The bridge that will actually be used (plan REQ-UI-12), never "inherit".
   const placement = describeEffectivePlacement(taskEffectivePlacement(task, chainFleets), names.bridge);
@@ -254,8 +256,8 @@ export const TaskCard: React.FC<TaskCardProps> = ({
                 <Icon name="eye" size={12} className="text-faint" title="Reviewers" />
                 {people.reviewers.map((r) => (
                   <span key={r} data-debug-id={`task-card-reviewer-${task.task_id}-${r}`} className="inline-flex items-center gap-0.5">
-                    <ReviewerChip id={r} names={names} />
-                    <ReviewVoteMark verdict={voteFor(votes, r, names)} waiting={inReview} />
+                    <ReviewerChip id={r} names={reviewNames} />
+                    <ReviewVoteMark verdict={voteFor(votes, r, reviewNames)} waiting={inReview} />
                   </span>
                 ))}
                 {people.userApproval && (

@@ -9,10 +9,10 @@ import {
   useFetchTaskFacetQuery,
 } from '../../api/endpoints/tasks';
 import { getTaskPeople, normalizeTaskState, taskChangedFiles } from './taskV2Types';
-import { awaitingYourReview, blockedOnYou, reviewVotes, sameReviewer, voteFor, youApproved, type ReviewVerdict } from './taskActions';
+import { awaitingYourReview, blockedOnYou, reviewParticipantIds, reviewVotes, sameReviewer, voteFor, youApproved, type ReviewVerdict } from './taskActions';
 import type { TaskActionsApi } from './useTaskActions';
 import { EMPTY_TASK_NAMES, instanceAgentsFromEvents, participantLabel, withInstanceAgents, type TaskNames } from './taskNames';
-import { useParticipantLabel } from './ParticipantName';
+import { useLookupNames, useParticipantLabel } from './ParticipantName';
 import { describeTaskEvent, reviewsPostedForAttempt, whoById } from './taskEvents';
 import { DecryptedMarkdown, VaultText } from '../vault';
 import { HolderName } from './HolderName';
@@ -207,8 +207,11 @@ export const TaskDetails: React.FC<TaskDetailsProps> = ({
   const { data: bridgesData } = useListBridgesQuery();
 
   const events: any[] = eventsData?.events || [];
-  const names = useMemo(() => withInstanceAgents(chainNames, instanceAgentsFromEvents(events)), [chainNames, events]);
+  const eventNames = useMemo(() => withInstanceAgents(chainNames, instanceAgentsFromEvents(events)), [chainNames, events]);
   const people = getTaskPeople(task, chainFleets);
+  // Instance ids that members and events do not map are looked up, so votes,
+  // pending reviewers and extra voters all match by durable id (REQ-TV2-6).
+  const names = useLookupNames(eventNames, reviewParticipantIds(task, people.reviewers));
 
   const vcs = vcsData?.facet;
   const handoff = handoffData?.facet;

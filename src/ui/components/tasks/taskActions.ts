@@ -1,4 +1,4 @@
-import type { TaskWire } from '../../api/taskWire';
+import type { TaskReviewWire, TaskWire } from '../../api/taskWire';
 import { normalizeTaskState } from './taskV2Types';
 import type { TaskNames } from './taskNames';
 
@@ -51,15 +51,28 @@ export type ReviewVerdict = 'approve' | 'request_changes';
  * assignment that carries an instance id still finds the vote through
  * voteFor() while each reviewer is listed once. An agent holding several
  * review roles approves only when every one of its roles approved.
+ * Superseded (D1) approvals are skipped: they are history, not votes.
  */
 export class ReviewVoteMap extends Map<string, ReviewVerdict> {
   /** instance id → the durable key its vote is stored under. */
   readonly aliases = new Map<string, string>();
 }
 
+/**
+ * Role prefix of an approval superseded when verification commands were
+ * removed (D1). The migration re-keys the old vote under this role so the same
+ * reviewer owes a fresh review; the row is audit history, never a current vote.
+ */
+export const SUPERSEDED_REVIEW_ROLE_PREFIX = 'legacy-verify:';
+
+export function isSupersededReview(r: Pick<TaskReviewWire, 'role'> | null | undefined): boolean {
+  return String(r?.role || '').startsWith(SUPERSEDED_REVIEW_ROLE_PREFIX);
+}
+
 export function reviewVotes(task: TaskWire, names?: Pick<TaskNames, 'durableId'>): ReviewVoteMap {
   const out = new ReviewVoteMap();
   for (const r of task.reviews || []) {
+    if (isSupersededReview(r)) continue;
     const raw = String(r?.reviewer || '').trim();
     const inst = String(r?.reviewer_instance_id || '').trim();
     if (!raw && !inst) continue;
@@ -69,6 +82,20 @@ export function reviewVotes(task: TaskWire, names?: Pick<TaskNames, 'durableId'>
     for (const alias of [raw, inst]) if (alias && alias !== key) out.aliases.set(alias, key);
   }
   return out;
+}
+
+/**
+ * Every participant id a task's review rows and assigned reviewers mention
+ * (superseded rows excluded), for useLookupNames() to resolve the instance
+ * ids among them before votes are matched.
+ */
+export function reviewParticipantIds(task: TaskWire, reviewers: readonly string[] = []): string[] {
+  const out = new Set<string>(reviewers);
+  for (const r of task.reviews || []) {
+    if (isSupersededReview(r)) continue;
+    for (const id of [r?.reviewer, r?.reviewer_instance_id]) if (id) out.add(String(id));
+  }
+  return Array.from(out);
 }
 
 /** The verdict for a participant id (`agt_`, `inst_` or `user`), matched by durable id. */

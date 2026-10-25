@@ -17,7 +17,7 @@ import {
   GENERIC_AGENT_LABEL,
 } from '../src/ui/components/tasks/taskNames.ts';
 import { describeTaskEvent, EXPIRE_REASON_TEXT, reviewsPostedForAttempt, whoById } from '../src/ui/components/tasks/taskEvents.ts';
-import { reviewVotes, voteFor } from '../src/ui/components/tasks/taskActions.ts';
+import { reviewParticipantIds, reviewVotes, voteFor } from '../src/ui/components/tasks/taskActions.ts';
 import { getTaskBadges, getTaskStatusLines } from '../src/ui/components/tasks/taskV2Types.ts';
 import type { TaskWire } from '../src/ui/api/taskWire.ts';
 
@@ -225,6 +225,88 @@ test('task details: an instance-id reviewer shows the agent name with its vote; 
   // The approving agent is not listed a second time as an "extra" voter.
   assert.equal((html.match(/task-detail-reviewer-vote-/g) || []).length, 2);
   assert.doesNotMatch(html, /An agent|Inst [0-9a-f]{4,}/);
+});
+
+test('superseded (D1) approvals are history, not current votes', () => {
+  const legacy = { reviewer: 'agt_18df385df494b971', reviewer_kind: 'agent', reviewer_instance_id: 'inst_rev01', role: 'legacy-verify:named', verdict: 'approve' };
+  // Only the superseded row: the reviewer still owes a fresh review.
+  const only = reviewVotes({ reviews: [legacy] } as unknown as TaskWire, names);
+  assert.equal(only.size, 0);
+  assert.equal(voteFor(only, 'agt_18df385df494b971', names), undefined);
+  assert.equal(voteFor(only, 'inst_rev01', names), undefined, 'its instance id is no alias either');
+  // A fresh review next to its historical row decides on its own.
+  const fresh = (verdict: string) =>
+    reviewVotes({ reviews: [legacy, { ...legacy, reviewer_instance_id: 'inst_rev02', role: 'named', verdict }] } as unknown as TaskWire, names);
+  assert.equal(voteFor(fresh('request_changes'), 'agt_18df385df494b971', names), 'request_changes');
+  const approved = fresh('approve');
+  assert.equal(voteFor(approved, 'agt_18df385df494b971', names), 'approve');
+  assert.deepEqual(Array.from(approved.keys()), ['agt_18df385df494b971']);
+  assert.equal(voteFor(approved, 'inst_rev01', names), undefined, 'the superseded row adds no alias');
+  assert.deepEqual(reviewParticipantIds({ reviews: [legacy] } as unknown as TaskWire, ['agt_x']), ['agt_x']);
+});
+
+async function renderReviewDetails(task: TaskWire, seed: (store: any) => Promise<void> | void) {
+  const React = (await import('react')).default;
+  const { Provider } = await import('react-redux');
+  const { renderToStaticMarkup } = await import('react-dom/server');
+  const { makeVaultStore } = await import('./helpers/vaultEndpointHarness.ts');
+  const { tasksApi } = await import('../src/ui/api/endpoints/tasks.ts');
+  const { TaskDetails } = await import('../src/ui/components/tasks/TaskDetails.tsx');
+  const store = await makeVaultStore();
+  await store.dispatch(tasksApi.util.upsertQueryData('fetchTaskEvents', { chainId: task.chain_id, taskId: task.task_id }, { events: [] }));
+  await seed(store);
+  const html = renderToStaticMarkup(
+    React.createElement(Provider, { store, children: React.createElement(TaskDetails, { chainId: task.chain_id, task, actions: { busy: false } as any, names }) }),
+  );
+  store.dispatch(tasksApi.util.resetApiState());
+  return html;
+}
+
+function reviewerRowTitles(html: string): string[] {
+  return Array.from(html.matchAll(/data-debug-id="task-detail-reviewer-vote-[^"]*"[^>]*title="([^"]*)"/g), (m) => m[1]);
+}
+
+test('task details: a superseded-only approval leaves the reviewer waiting', async () => {
+  const task = {
+    task_id: 'task_d1',
+    chain_id: 'chain_d1',
+    title: 'Superseded',
+    state: 'in_review',
+    attempt_no: 1,
+    requires_user_approval: true,
+    brief: { goal: 'g', acceptance: ['a'], reviewers: ['agt_18df385df494b971'] },
+    reviews: [
+      { reviewer: 'agt_18df385df494b971', reviewer_kind: 'agent', reviewer_instance_id: 'inst_rev01', role: 'legacy-verify:named', verdict: 'approve', created_at: '' },
+      { reviewer: 'user', reviewer_kind: 'user', reviewer_instance_id: '', role: 'user', verdict: 'approve', created_at: '' },
+    ],
+  } as unknown as TaskWire;
+  const html = await renderReviewDetails(task, () => {});
+  assert.deepEqual(reviewerRowTitles(html), ['Security Reviewer: waiting for review', 'you: approved']);
+  assert.match(html, /waiting on Security Reviewer/);
+});
+
+test('task details: a stopped-instance assignment matches the fresh vote of its looked-up agent', async () => {
+  const { agentsApi } = await import('../src/ui/api/endpoints/agents.ts');
+  const task = {
+    task_id: 'task_old',
+    chain_id: 'chain_old',
+    title: 'Stopped reviewer',
+    state: 'in_review',
+    attempt_no: 1,
+    requires_user_approval: true,
+    // Legacy assignment: a stopped instance no member or lease fact maps.
+    brief: { goal: 'g', acceptance: ['a'], reviewers: ['inst_old77'] },
+    reviews: [
+      { reviewer: 'agt_18df385df494b971', reviewer_kind: 'agent', reviewer_instance_id: 'inst_new88', role: 'named', verdict: 'approve', created_at: '' },
+      { reviewer: 'user', reviewer_kind: 'user', reviewer_instance_id: '', role: 'user', verdict: 'approve', created_at: '' },
+    ],
+  } as unknown as TaskWire;
+  const html = await renderReviewDetails(task, async (store) => {
+    await store.dispatch(agentsApi.util.upsertQueryData('fetchAgentInstance', { instanceId: 'inst_old77' }, { instance: { agent_instance_id: 'inst_old77', agent_id: 'agt_18df385df494b971', status: 'stopped' } }));
+  });
+  // One approved row for the reviewer (no duplicate extra voter), nobody pending.
+  assert.deepEqual(reviewerRowTitles(html), ['Security Reviewer: approved', 'you: approved']);
+  assert.doesNotMatch(html, /waiting on/);
 });
 
 test('timeline sentences use names, never raw ids', () => {
