@@ -97,7 +97,11 @@ def stamp(root, version):
     if len(names) != int(order[2]) or len(names) != len(set(names)):
         raise ValueError("Inconsistent migration_order registry")
     numbered = {p.name for p in directory.glob("[0-9]*_*.sql")}
-    if numbered != set(names):
+    # Namespaced migrations (e.g. native_001_*.sql) are registered but carry no
+    # number; they only need to exist. Numbered files must match the registry.
+    registered_numbered = {n for n in names if n[:1].isdigit()}
+    namespaced = set(names) - registered_numbered
+    if numbered != registered_numbered or any(not (directory / n).is_file() for n in namespaced):
         raise ValueError("Unregistered/missing migrations; resolve numbering collisions before bumping")
 
     with closing(catalog_database(directory, names)) as db:
