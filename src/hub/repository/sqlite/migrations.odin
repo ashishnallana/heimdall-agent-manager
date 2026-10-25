@@ -505,7 +505,9 @@ MIGRATION_128_EXTENSION_VERSION_SYNC :: #load("migrations/128_extension_version_
 
 MIGRATION_129_REMOVE_TASK_VERIFY :: #load("migrations/129_remove_task_verify.sql", string)
 
-migration_order :: [132]string {
+MIGRATION_130_EXTENSION_VERSION_SYNC :: #load("migrations/130_extension_version_sync_0_4_44.sql", string)
+
+migration_order :: [133]string {
 	"001_foundation.sql",
 	"002_owner_scoped_core.sql",
 	"003_device_tokens.sql",
@@ -638,6 +640,7 @@ migration_order :: [132]string {
 	"127_extension_version_sync_0_4_42.sql",
 	"128_extension_version_sync_0_4_43.sql",
 	"129_remove_task_verify.sql",
+	"130_extension_version_sync_0_4_44.sql",
 }
 
 // stop_before is a TEST SEAM: when non-empty, the apply loop stops in front of
@@ -1095,6 +1098,7 @@ migration_sql :: proc(name, migrations_dir: string) -> string {
 			return string(data)
 		}
 	}
+	if name == "130_extension_version_sync_0_4_44.sql" do return strings.clone(MIGRATION_130_EXTENSION_VERSION_SYNC)
 	if name == "129_remove_task_verify.sql" do return strings.clone(MIGRATION_129_REMOVE_TASK_VERIFY)
 	if name == "128_extension_version_sync_0_4_43.sql" do return strings.clone(MIGRATION_128_EXTENSION_VERSION_SYNC)
 	if name == "127_extension_version_sync_0_4_42.sql" do return strings.clone(MIGRATION_127_EXTENSION_VERSION_SYNC)
