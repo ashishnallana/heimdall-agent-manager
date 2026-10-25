@@ -38,7 +38,8 @@ import {
 } from '../tasks/FleetManagementDrawer';
 import ArtifactViewer from '../ArtifactViewer';
 import { HolderName } from '../tasks/HolderName';
-import { EMPTY_TASK_NAMES } from '../tasks/taskNames';
+import { buildTaskNames } from '../tasks/taskNames';
+import { ParticipantName } from '../tasks/ParticipantName';
 import Markdown from '../Markdown';
 import { buildRouteHash } from '../../utils/appLocation';
 import {
@@ -470,6 +471,13 @@ export default function ChainOverviewPanel({
     return map;
   }, [members]);
 
+  // One names resolver for this chain (REQ-TV2-6): reviewers resolve through
+  // members → identities → an instance lookup, with an explicit fallback.
+  const names = useMemo(
+    () => buildTaskNames({ tasks, members, identities: agentIdentities }),
+    [tasks, members, agentIdentities],
+  );
+
   // Resolve human-friendly agent/user display name
   const resolveAgentName = useCallback(
     (ref: any, fallback: string): string => {
@@ -496,6 +504,22 @@ export default function ChainOverviewPanel({
       return fallback;
     },
     [memberNameMap, agentIdentities, username]
+  );
+
+  // A task's reviewer ref: an agt_/inst_/user id string or a legacy ref object.
+  const renderReviewer = useCallback(
+    (ref: any): React.ReactNode => {
+      if (!ref) return 'None';
+      if (typeof ref === 'object' && ref.type === 'user') return resolveAgentName(ref, 'None');
+      const id =
+        typeof ref === 'string'
+          ? ref.trim()
+          : String(ref.agentId || ref.agent_id || ref.agentInstanceId || ref.agent_instance_id || '').trim();
+      if (!id) return typeof ref === 'object' && (ref.displayName || ref.display_name) ? String(ref.displayName || ref.display_name) : 'None';
+      if (id.toLowerCase() === 'user') return resolveAgentName({ type: 'user' }, 'None');
+      return <ParticipantName id={id} names={names} />;
+    },
+    [names, resolveAgentName],
   );
 
   // Handle start agent instance
@@ -751,7 +775,7 @@ export default function ChainOverviewPanel({
                   task.reviewerAgentInstanceId ||
                   task.reviewer_agent_instance_id ||
                   (task.reviewers?.[0] ? String(task.reviewers[0]) : null);
-                const reviewer = resolveAgentName(reviewerRef, 'None');
+                const reviewer = renderReviewer(reviewerRef);
 
                 return (
                   <div
@@ -789,7 +813,7 @@ export default function ChainOverviewPanel({
                         <div className="mt-1 flex items-center justify-between text-[11px] text-muted">
                           <span className="truncate max-w-[140px]">
                             Worker:{' '}{workHolder(task) ? (
-                          <HolderName instanceId={workHolder(task)} names={EMPTY_TASK_NAMES} className="text-primary" />
+                          <HolderName instanceId={workHolder(task)} names={names} className="text-primary" />
                         ) : (
                           <strong className="text-primary font-normal">{assignee}</strong>
                         )}
@@ -874,7 +898,7 @@ export default function ChainOverviewPanel({
                   task.reviewerAgentInstanceId ||
                   task.reviewer_agent_instance_id ||
                   (task.reviewers?.[0] ? String(task.reviewers[0]) : null);
-                const reviewer = resolveAgentName(reviewerRef, 'None');
+                const reviewer = renderReviewer(reviewerRef);
 
                 return (
                   <div
@@ -910,7 +934,7 @@ export default function ChainOverviewPanel({
                     <div className="mt-1.5 flex items-center justify-between text-[11px] text-muted">
                       <span className="truncate max-w-[140px]">
                         Worker:{' '}{workHolder(task) ? (
-                          <HolderName instanceId={workHolder(task)} names={EMPTY_TASK_NAMES} className="text-primary" />
+                          <HolderName instanceId={workHolder(task)} names={names} className="text-primary" />
                         ) : (
                           <strong className="text-primary font-normal">{assignee}</strong>
                         )}

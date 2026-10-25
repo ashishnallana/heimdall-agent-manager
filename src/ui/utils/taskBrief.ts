@@ -1,6 +1,7 @@
 // Task System v2 (M2): pure helpers for the task brief — the create-modal payload
-// builder, client-side validation that mirrors the hub's publish rules
-// (brief_publish_problems in src/hub/service/taskchain/taskchain_service.odin),
+// builder, client-side validation that mirrors the hub's single publish
+// validator (taskv2.brief_publish_missing: a goal and at least one acceptance
+// item, nothing else; REQ-TV2-2),
 // and the wording of a 422 `brief_incomplete` publish error.
 //
 // Deliberately free of ANY import so it loads under plain `node --test`
@@ -16,12 +17,11 @@ export interface TaskBriefFormInput {
   goal: string;
   /** One acceptance item per line (blank lines ignored). */
   acceptanceText: string;
-  verify: string;
   /** Comma / newline separated review roles. */
   reviewRolesText?: string;
   /** Durable agent template id (agt_…) or ''. */
   assignee?: string;
-  /** Optional output contract; lets verify be "none". */
+  /** Optional output contract. Never required to publish. */
   output?: Record<string, unknown>;
 }
 
@@ -29,7 +29,7 @@ export interface TaskBriefBuildResult {
   brief: TaskBriefWire;
   /** Human-readable problems, empty when the brief is publishable. */
   errors: string[];
-  /** Hub-style missing keys: goal | acceptance | verify. */
+  /** Hub-style missing keys: goal | acceptance. */
   missing: string[];
 }
 
@@ -60,7 +60,6 @@ export function parseCommaList(text: string | undefined | null): string[] {
 export function buildTaskBrief(input: TaskBriefFormInput): TaskBriefBuildResult {
   const goal = String(input.goal ?? '').trim();
   const acceptance = parseLineList(input.acceptanceText);
-  const verify = String(input.verify ?? '').trim();
   const reviewRoles = parseCommaList(input.reviewRolesText);
   const assignee = String(input.assignee ?? '').trim();
   const hasOutput = Boolean(input.output && typeof input.output === 'object' && !Array.isArray(input.output));
@@ -90,15 +89,7 @@ export function buildTaskBrief(input: TaskBriefFormInput): TaskBriefBuildResult 
     }
   }
 
-  if (!verify) {
-    errors.push('Verify command is required.');
-    missing.push('verify');
-  } else if (verify === 'none' && !hasOutput) {
-    errors.push('Verify "none" is only allowed when the brief declares an output contract.');
-    missing.push('verify');
-  }
-
-  const brief: TaskBriefWire = { goal, acceptance, verify, review_roles: reviewRoles };
+  const brief: TaskBriefWire = { goal, acceptance, review_roles: reviewRoles };
   if (assignee) brief.assignee = assignee;
   if (hasOutput) brief.output = input.output;
 

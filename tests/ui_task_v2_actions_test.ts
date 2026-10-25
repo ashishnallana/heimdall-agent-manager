@@ -19,7 +19,7 @@ function task(overrides: Partial<TaskWire> & Record<string, unknown> = {}): Task
     kind: 'task',
     attempt_no: 0,
     priority: 'p2',
-    brief: { goal: 'g', acceptance: ['a'], verify: 'npm test' },
+    brief: { goal: 'g', acceptance: ['a'] },
     ...overrides,
   } as unknown as TaskWire;
 }
@@ -51,13 +51,15 @@ test('review awaiting the user (or a gate) offers Approve and Request changes', 
   assert.ok(!taskNeedsYou(agentReview));
 });
 
-test('running work has no primary action; verify re-run and cancel live in More', () => {
+test('running work has no primary action; cancel lives in More and there is no verify re-run', () => {
   const t = task({ state: 'in_progress', attempt_no: 2 });
   const { primary, more } = getTaskActions(t);
   assert.deepEqual(primary, []);
-  assert.deepEqual(more, ['rerun_verify', 'cancel', 'copy_id']);
-  // verify: none has nothing to re-run
-  assert.ok(!getTaskActions(task({ state: 'in_progress', attempt_no: 1, brief: { goal: 'g', acceptance: ['a'], verify: 'none' } as any })).more.includes('rerun_verify'));
+  assert.deepEqual(more, ['cancel', 'copy_id']);
+  // A legacy brief that still carries a verify command offers no re-run either.
+  const legacy = getTaskActions(task({ state: 'in_review', attempt_no: 1, brief: { goal: 'g', acceptance: ['a'], verify: 'npm test' } as any }));
+  assert.ok(!(legacy.more as string[]).includes('rerun_verify'));
+  assert.ok(!(legacy.primary as string[]).includes('rerun_verify'));
 });
 
 test('finished tasks can only be reopened; gates are never cancelled from a card', () => {

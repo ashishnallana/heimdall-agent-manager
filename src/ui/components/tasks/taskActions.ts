@@ -1,10 +1,11 @@
-import type { TaskWire } from '../../api/taskWire';
+import type { TaskReviewWire, TaskWire } from '../../api/taskWire';
 import { normalizeTaskState } from './taskV2Types';
+import type { TaskNames } from './taskNames';
 
 /**
  * Which human actions a task offers, and which one is primary (plan REQ-UI-7).
  *
- * Agents drive the work (lease, verify, submit, review) and the Hub schedules it,
+ * Agents drive the work (lease, submit, review) and the Hub schedules it,
  * so there is no Start / Pause / Reconcile here. A card shows only the action
  * that matters now as a button; everything else sits in its More menu.
  */
@@ -15,7 +16,6 @@ export type TaskActionId =
   | 'request_changes'
   | 'reopen'
   | 'cancel'
-  | 'rerun_verify'
   | 'copy_id';
 
 export interface TaskActionSet {
@@ -30,7 +30,6 @@ export const TASK_ACTION_LABELS: Record<TaskActionId, string> = {
   request_changes: 'Request changes',
   reopen: 'Reopen',
   cancel: 'Cancel task',
-  rerun_verify: 'Re-run verify',
   copy_id: 'Copy task id',
 };
 
@@ -46,18 +45,76 @@ export type ReviewVerdict = 'approve' | 'request_changes';
 
 /**
  * Each reviewer's verdict on the current attempt (`task.reviews`), keyed by
- * agent id, or 'user' for you. An agent holding several review roles approves
- * only when every one of its roles approved.
+ * durable agent id, or 'user' for you (REQ-TV2-6). A legacy row whose reviewer
+ * is an instance id is re-keyed through `names.durableId`. Instance ids a row
+ * names (its reviewer_instance_id) are kept as aliases, not keys, so an
+ * assignment that carries an instance id still finds the vote through
+ * voteFor() while each reviewer is listed once. An agent holding several
+ * review roles approves only when every one of its roles approved.
+ * Superseded (D1) approvals are skipped: they are history, not votes.
  */
-export function reviewVotes(task: TaskWire): Map<string, ReviewVerdict> {
-  const out = new Map<string, ReviewVerdict>();
+export class ReviewVoteMap extends Map<string, ReviewVerdict> {
+  /** instance id → the durable key its vote is stored under. */
+  readonly aliases = new Map<string, string>();
+}
+
+/**
+ * Role prefix of an approval superseded when verification commands were
+ * removed (D1). The migration re-keys the old vote under this role so the same
+ * reviewer owes a fresh review; the row is audit history, never a current vote.
+ */
+export const SUPERSEDED_REVIEW_ROLE_PREFIX = 'legacy-verify:';
+
+export function isSupersededReview(r: Pick<TaskReviewWire, 'role'> | null | undefined): boolean {
+  return String(r?.role || '').startsWith(SUPERSEDED_REVIEW_ROLE_PREFIX);
+}
+
+export function reviewVotes(task: TaskWire, names?: Pick<TaskNames, 'durableId'>): ReviewVoteMap {
+  const out = new ReviewVoteMap();
   for (const r of task.reviews || []) {
-    const reviewer = String(r?.reviewer || '');
-    if (!reviewer) continue;
+    if (isSupersededReview(r)) continue;
+    const raw = String(r?.reviewer || '').trim();
+    const inst = String(r?.reviewer_instance_id || '').trim();
+    if (!raw && !inst) continue;
     const verdict: ReviewVerdict = r.verdict === 'approve' ? 'approve' : 'request_changes';
-    if (out.get(reviewer) !== 'request_changes') out.set(reviewer, verdict);
+    const key = names ? names.durableId(raw || inst) : raw || inst;
+    if (out.get(key) !== 'request_changes') out.set(key, verdict);
+    for (const alias of [raw, inst]) if (alias && alias !== key) out.aliases.set(alias, key);
   }
   return out;
+}
+
+/**
+ * Every participant id a task's review rows and assigned reviewers mention
+ * (superseded rows excluded), for useLookupNames() to resolve the instance
+ * ids among them before votes are matched.
+ */
+export function reviewParticipantIds(task: TaskWire, reviewers: readonly string[] = []): string[] {
+  const out = new Set<string>(reviewers);
+  for (const r of task.reviews || []) {
+    if (isSupersededReview(r)) continue;
+    for (const id of [r?.reviewer, r?.reviewer_instance_id]) if (id) out.add(String(id));
+  }
+  return Array.from(out);
+}
+
+/** The verdict for a participant id (`agt_`, `inst_` or `user`), matched by durable id. */
+export function voteFor(votes: Map<string, ReviewVerdict>, id: string, names?: Pick<TaskNames, 'durableId'>): ReviewVerdict | undefined {
+  const v = String(id || '').trim();
+  if (!v) return undefined;
+  if (votes.has(v)) return votes.get(v);
+  const alias = votes instanceof ReviewVoteMap ? votes.aliases.get(v) : undefined;
+  if (alias) return votes.get(alias);
+  return names ? votes.get(names.durableId(v)) : undefined;
+}
+
+/** True when `id` names the same reviewer as the vote key `key` (directly, by alias or by durable id). */
+export function sameReviewer(votes: ReviewVoteMap, key: string, id: string, names?: Pick<TaskNames, 'durableId'>): boolean {
+  const v = String(id || '').trim();
+  if (!v) return false;
+  if (v === key) return true;
+  if (votes.aliases.get(v) === key) return true;
+  return Boolean(names && names.durableId(v) === key);
 }
 
 /** You already approved this attempt; the task may still wait on other reviewers. */
@@ -103,10 +160,6 @@ export function getTaskActions(task: TaskWire): TaskActionSet {
     primary.push('approve', 'request_changes');
   }
 
-  const hasVerify = Boolean(task.brief?.verify) && String(task.brief?.verify).trim() !== 'none';
-  if (!closed && hasVerify && (task.attempt_no || 0) > 0 && (state === 'in_progress' || state === 'in_review')) {
-    more.push('rerun_verify');
-  }
   if (!closed && !isGate(task)) more.push('cancel');
   more.push('copy_id');
   return { primary, more };

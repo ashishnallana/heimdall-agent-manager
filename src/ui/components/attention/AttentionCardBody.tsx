@@ -56,11 +56,6 @@ function TaskBody({ item, now }: { item: AttentionTaskItem; now: number }) {
         {d.attempt_no && d.attempt_no > 1 ? <li className="rounded-[var(--radius-sm)] bg-surface-raised px-1.5 py-0.5 text-[11px] text-muted">attempt {d.attempt_no}</li> : null}
         {d.assignee_name ? <li className="rounded-[var(--radius-sm)] bg-surface-raised px-1.5 py-0.5 text-[11px] text-muted">by {d.assignee_name}</li> : null}
       </ul>
-      {d.attention === 'review' && d.skip_verify_reason ? (
-        <p data-debug-id="attention-card-verify-skipped" className="mt-3 rounded-md bg-warning-soft p-2 text-[13px] text-warning">
-          Verify skipped: <VaultText value={d.skip_verify_reason} />
-        </p>
-      ) : null}
       {d.badge === 'agent_not_running' ? (
         <p role="alert" className="mt-3 text-[13px] text-danger">{item.rationale}</p>
       ) : d.excerpt ? (

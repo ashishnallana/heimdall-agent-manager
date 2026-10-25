@@ -43,7 +43,6 @@ export const CreateTaskModal: React.FC<CreateTaskModalProps> = ({
   // rules (utils/taskBrief) so a human-created task is publishable as-is.
   const [goal, setGoal] = useState('');
   const [acceptanceText, setAcceptanceText] = useState('');
-  const [verify, setVerify] = useState('');
   const [reviewRolesText, setReviewRolesText] = useState('');
   const [assigneeMode, setAssigneeMode] = useState<'agent' | 'unassigned' | 'user'>('agent');
   // REQ-TB-5: '' = Inherit (coordinator bridge) — the default create pins nothing.
@@ -123,15 +122,12 @@ export const CreateTaskModal: React.FC<CreateTaskModalProps> = ({
     const briefBuild = buildTaskBrief({
       goal,
       acceptanceText,
-      verify,
       reviewRolesText,
       assignee: assigneeMode === 'agent' ? assigneeAgentId : '',
     });
     // Allow draft creation when brief fields are still being sketched; reject only
-    // when provided values exceed hub caps or violate verify:"none" rules.
-    const hardBriefError = briefBuild.errors.find(
-      (msg) => msg.includes('exceeds') || msg.includes('at most') || msg.includes('output contract'),
-    );
+    // when provided values exceed hub caps.
+    const hardBriefError = briefBuild.errors.find((msg) => msg.includes('exceeds') || msg.includes('at most'));
     if (hardBriefError) {
       setErrorMsg(hardBriefError);
       return;
@@ -163,7 +159,6 @@ export const CreateTaskModal: React.FC<CreateTaskModalProps> = ({
       setDesc('');
       setGoal('');
       setAcceptanceText('');
-      setVerify('');
       setReviewRolesText('');
       setAssigneeMode('agent');
       setAssigneeAgentId('');
@@ -180,7 +175,7 @@ export const CreateTaskModal: React.FC<CreateTaskModalProps> = ({
 
   // Typed work is never thrown away silently: Esc, the backdrop and the close
   // button all ask first when the form has content (audit finding).
-  const dirty = Boolean(title.trim() || desc.trim() || goal.trim() || acceptanceText.trim() || verify.trim() || reviewRolesText.trim());
+  const dirty = Boolean(title.trim() || desc.trim() || goal.trim() || acceptanceText.trim() || reviewRolesText.trim());
   const requestClose = (next: boolean) => {
     if (next) return;
     if (dirty && !window.confirm('Discard this new task?')) return;
@@ -190,7 +185,7 @@ export const CreateTaskModal: React.FC<CreateTaskModalProps> = ({
   return (
     <Modal open={isOpen} onOpenChange={requestClose} title="New task" size="lg" data-debug-id="create-task-modal">
       <ModalBody>
-        <p className="mb-4 text-caption text-muted">A goal, acceptance checks and a verify command make it publishable as-is.</p>
+        <p className="mb-4 text-caption text-muted">A goal and acceptance criteria make it publishable as-is.</p>
         <form id="create-task-form" onSubmit={handleSubmit} className="space-y-4 text-xs">
           {/* Title */}
           <FormField label="Title" required>
@@ -221,7 +216,7 @@ export const CreateTaskModal: React.FC<CreateTaskModalProps> = ({
             <div>
               <label className="block font-semibold text-primary">Brief</label>
               <p className="text-[11px] text-muted mt-0.5">
-                Required to publish: a goal, at least one acceptance criterion, and a verify command.
+                Required to publish: a goal and at least one acceptance criterion.
               </p>
             </div>
 
@@ -248,20 +243,6 @@ export const CreateTaskModal: React.FC<CreateTaskModalProps> = ({
                 onChange={setAcceptanceText}
                 rows={3}
                 placeholder={'Endpoint returns 201 on success\nUnit tests cover the error path'}
-                width="full"
-              />
-            </FormField>
-
-            <FormField
-              label="Verify command"
-              required
-              hint="Runs in the chain directory. The task can't be submitted until it passes."
-            >
-              <Input
-                data-debug-id="create-task-verify-input"
-                value={verify}
-                onChange={setVerify}
-                placeholder="e.g. npm test"
                 width="full"
               />
             </FormField>

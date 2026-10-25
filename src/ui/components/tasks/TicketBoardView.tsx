@@ -184,7 +184,7 @@ export const TicketBoardView: React.FC<TicketBoardViewProps> = ({
         <EmptyState
           icon="tasks"
           title="No tasks yet"
-          description="Add a task with a goal, acceptance checks and a verify command."
+          description="Add a task with a goal and acceptance criteria."
           action={
             onNewTask ? (
               <Button size="sm" variant="primary" data-debug-id="task-board-empty-new-task-btn" onClick={onNewTask}>

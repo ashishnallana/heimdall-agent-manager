@@ -1412,17 +1412,6 @@ export const tasksApi = heimdallApi.injectEndpoints({
         { type: 'Chain' as const, id: chainId },
       ],
     }),
-    verifyTask: build.mutation<any, { chainId: string; taskId: string }>({
-      queryFn: async ({ chainId, taskId }) => {
-        try {
-          const data = await cookieMutation(`/task-chains/${encodeURIComponent(chainId)}/tasks/${encodeURIComponent(taskId)}/verify`, 'POST', {});
-          return { data };
-        } catch (error: any) {
-          return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any };
-        }
-      },
-      invalidatesTags: (_result, _error, { taskId, chainId }) => preciseTaskTags(taskId, chainId, true),
-    }),
     fetchTaskEvents: build.query<{ events: any[] }, { chainId: string; taskId: string; beforeId?: number; limit?: number }>({
       queryFn: async ({ chainId, taskId, beforeId, limit = 50 }) => {
         try {
@@ -1661,7 +1650,6 @@ export const {
   useUserReviewTaskMutation,
   useReopenTaskMutation,
   useAnswerTaskBlockerMutation,
-  useVerifyTaskMutation,
   useFetchTaskEventsQuery,
   useFetchTaskFacetQuery,
   useFetchCommitDiffQuery,

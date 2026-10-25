@@ -36,7 +36,6 @@ function makeTask(overrides: Partial<TaskWire> = {}): TaskWire {
     brief: {
       goal: 'Test goal',
       acceptance: ['Item 1'],
-      verify: 'npm test',
     },
     ...overrides,
   };
@@ -143,7 +142,7 @@ test('getTaskBadges derives TTL countdown and tone for in-progress lease', () =>
   assert.equal(ttlBadge2m?.tone, 'danger');
 });
 
-test('getTaskBadges derives bridge pin, attempt count, review roles, blocked on you, and verified', async () => {
+test('getTaskBadges derives bridge pin, attempt count, review roles, blocked on you, and no verified badge', async () => {
   const nowMs = 1700000000000;
 
   // Gate badge
@@ -174,7 +173,6 @@ test('getTaskBadges derives bridge pin, attempt count, review roles, blocked on 
     brief: {
       goal: 'review goal',
       acceptance: ['ok'],
-      verify: 'npm test',
       review_roles: ['reviewer', 'security'],
     },
   });
@@ -200,7 +198,7 @@ test('getTaskBadges derives bridge pin, attempt count, review roles, blocked on 
   // Done state
   const doneTask = makeTask({ state: 'done' });
   const doneBadges = getTaskBadges(doneTask, [], nowMs);
-  assert.ok(doneBadges.some((b) => b.label === 'Verified' && b.tone === 'ok'));
+  assert.ok(!doneBadges.some((b) => /verif/i.test(`${b.label} ${b.title || ''}`)), 'a done task carries no verification badge');
 });
 
 test('getTaskStatusLines generates human-readable status sentences for each state', () => {
@@ -257,7 +255,7 @@ test('getTaskStatusLines generates human-readable status sentences for each stat
   // Done
   const doneTask = makeTask({ state: 'done', attempt_no: 1 });
   const [dLine1, dLine2] = getTaskStatusLines(doneTask, [], nowMs);
-  assert.equal(dLine1, 'Done · completed and verified');
+  assert.equal(dLine1, 'Done · completed');
   assert.equal(dLine2, '1 attempt');
 });
 
@@ -339,10 +337,9 @@ test('Invariant: legacy v1 hooks and endpoints are removed and v2 hooks are pres
     endpointsContent.includes('useAnswerTaskBlockerMutation'),
     'useAnswerTaskBlockerMutation must exist'
   );
-  assert.ok(
-    endpointsContent.includes('useVerifyTaskMutation'),
-    'useVerifyTaskMutation must exist'
-  );
+  // REQ-TV2-1: the verify re-run mutation and its /verify route are gone.
+  assert.ok(!endpointsContent.includes('useVerifyTaskMutation'), 'useVerifyTaskMutation must not exist');
+  assert.ok(!/\/tasks\/[^`'"]*\/verify[`'"]/.test(endpointsContent), 'no client calls POST …/tasks/{id}/verify');
   assert.ok(
     endpointsContent.includes('useFetchTaskEventsQuery'),
     'useFetchTaskEventsQuery must exist'
@@ -391,7 +388,7 @@ test('chain detail normalizer keeps the v2 wire fields the board and detail view
     ready_since: '2026-10-17T04:38:42Z',
     blocked_on: null,
     requires_user_approval: true,
-    brief: { goal: 'Create the table', acceptance: ['migration applies'], verify: 'true' },
+    brief: { goal: 'Create the table', acceptance: ['migration applies'] },
     leases: [],
     comment_summary: { count: 1, last_comment_at: '', last_comment_author_agent_instance_id: '', last_comment_preview: 'hi' },
   };
@@ -420,14 +417,14 @@ test('getTaskPeople resolves the assignee pin, fleet workers, role reviewers and
     { agent_id: 'agt_sec', roles: ['security'] },
   ];
   // Pinned assignee: only that template may take the work lease.
-  const pinned = getTaskPeople(makeTask({ brief: { goal: 'g', acceptance: ['a'], verify: 'v', assignee: 'agt_backend', review_roles: ['reviewer', 'security'] }, requires_user_approval: true }), fleets);
+  const pinned = getTaskPeople(makeTask({ brief: { goal: 'g', acceptance: ['a'], assignee: 'agt_backend', review_roles: ['reviewer', 'security'] }, requires_user_approval: true }), fleets);
   assert.equal(pinned.assignee, 'agt_backend');
   assert.deepEqual(pinned.workers, ['agt_backend']);
   assert.deepEqual(pinned.reviewers, ['agt_rev', 'agt_sec']);
   assert.deepEqual(pinned.reviewersByRole, [{ role: 'reviewer', agents: ['agt_rev'] }, { role: 'security', agents: ['agt_sec'] }]);
   assert.equal(pinned.userApproval, true);
   // Unpinned: every worker row is eligible; no review roles -> no reviewers.
-  const open = getTaskPeople(makeTask({ brief: { goal: 'g', acceptance: ['a'], verify: 'v' } }), fleets);
+  const open = getTaskPeople(makeTask({ brief: { goal: 'g', acceptance: ['a'] } }), fleets);
   assert.equal(open.assignee, '');
   assert.deepEqual(open.workers, ['agt_coder', 'agt_backend']);
   assert.deepEqual(open.reviewers, []);
@@ -517,13 +514,13 @@ test('task details: review panel is "Review decision" and authored Markdown keep
 
   const store = await makeVaultStore();
   const facet = { chainId: 'chain-test-1', taskId: 'task-test-1', attemptNo: 1 };
-  const summary = '### Result\n\nDiscovery complete.\n\nSecond paragraph.\n\n- first point\n- second point\n\n```bash\nham-ctl verify\n```';
+  const summary = '### Result\n\nDiscovery complete.\n\nSecond paragraph.\n\n- first point\n- second point\n\n```bash\nnpm test\n```';
   await store.dispatch(tasksApi.util.upsertQueryData('fetchTaskFacet', { ...facet, kind: 'handoff' }, { facet: { summary } }));
   await store.dispatch(tasksApi.util.upsertQueryData('fetchTaskEvents', { chainId: 'chain-test-1', taskId: 'task-test-1' }, { events: [] }));
   const task = makeTask({
     state: 'in_review',
     requires_user_approval: true,
-    brief: { goal: '## Goal\n\nLine one.\n\nLine two.', acceptance: ['Uses `code`'], verify: '' },
+    brief: { goal: '## Goal\n\nLine one.\n\nLine two.', acceptance: ['Uses `code`'] },
   });
   const actions: any = { busy: false, approve: async () => true, requestChanges: async () => true, comment: async () => true };
   const html = renderToStaticMarkup(
@@ -539,7 +536,7 @@ test('task details: review panel is "Review decision" and authored Markdown keep
   assert.match(review, /<h3[^>]*>Result<\/h3>/, 'heading survives');
   assert.match(review, /<p[^>]*>Discovery complete\.<\/p>[\s\S]*<p[^>]*>Second paragraph\.<\/p>/, 'paragraphs stay separate');
   assert.match(review, /<li[^>]*>first point<\/li>[\s\S]*<li[^>]*>second point<\/li>/, 'list items survive');
-  assert.match(review, /<pre[\s\S]*ham-ctl verify/, 'code block survives');
+  assert.match(review, /<pre[\s\S]*npm test/, 'code block survives');
   const goal = html.slice(html.indexOf('data-debug-id="task-details-goal"'));
   assert.match(goal, /<h2[^>]*>Goal<\/h2>/);
   assert.match(html, /<code[^>]*>code<\/code>/, 'acceptance items render inline Markdown');

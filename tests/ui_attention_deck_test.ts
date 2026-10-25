@@ -359,17 +359,17 @@ test('deck: locked vault shows the lock placeholder instead of ciphertext', asyn
   });
 });
 
-test('deck: review card displays a verify skip as a warning', async () => {
+test('deck: a legacy verify skip on a review card is not shown (verification removed)', async () => {
   const item = taskItem('skip');
   item.details.attention = 'review';
   item.details.skip_verify_reason = 'Test runner unavailable; reviewer must run the suite.';
   await withDeck([item], async ({ text, q }) => {
-    assert.match(text(), /Verify skipped: Test runner unavailable; reviewer must run the suite\./);
-    assert.ok(q('[data-debug-id="attention-card-verify-skipped"]')?.classList.contains('text-warning'));
+    assert.doesNotMatch(text(), /verif/i);
+    assert.equal(q('[data-debug-id="attention-card-verify-skipped"]'), null);
   });
 });
 
-test('task detail: skipped verify stays visible above prior passing evidence', async () => {
+test('task detail: a legacy verify facet renders as a collapsed, read-only record (D2)', async () => {
   const { Provider } = await import('react-redux');
   const { renderToStaticMarkup } = await import('react-dom/server');
   const { TaskDetails } = await import('../src/ui/components/tasks/TaskDetails.tsx');
@@ -377,16 +377,29 @@ test('task detail: skipped verify stays visible above prior passing evidence', a
   const store = await makeVaultStore();
   const args = { chainId: 'chain_skip', taskId: 'task_skip', attemptNo: 2 };
   await store.dispatch(tasksApi.util.upsertQueryData('fetchTaskFacet', { ...args, kind: 'handoff' }, { facet: { summary: 'ready', skip_verify_reason: 'Suite could not run on this host.' } }));
-  await store.dispatch(tasksApi.util.upsertQueryData('fetchTaskFacet', { ...args, kind: 'verify' }, { facet: { exit_code: 0, summary: 'old pass' } }));
+  await store.dispatch(tasksApi.util.upsertQueryData('fetchTaskFacet', { ...args, kind: 'verify' }, { facet: { exit_code: 0, command: 'npm run check', summary: 'old pass' } }));
+  await store.dispatch(tasksApi.util.upsertQueryData('fetchTaskEvents', { chainId: args.chainId, taskId: args.taskId }, {
+    events: [{ event_id: 1, kind: 'submitted', actor_kind: 'agent', actor_id: 'inst_w', ts_ms: 1, payload: { attempt_no: 2, skip_verify_reason: 'Suite could not run on this host.' } }],
+  }));
   const html = renderToStaticMarkup(React.createElement(Provider, { store, children: React.createElement(TaskDetails, {
     chainId: args.chainId,
-    task: { task_id: args.taskId, chain_id: args.chainId, title: 'work', state: 'done', attempt_no: 2, brief: { verify: 'make test' } },
+    task: { task_id: args.taskId, chain_id: args.chainId, title: 'work', state: 'in_review', attempt_no: 2, brief: { goal: 'g', acceptance: ['a'], verify: 'make test' } as any },
     actions: { busy: false } as any,
   }) }));
-  assert.match(html, /Verify skipped: .*Suite could not run on this host\./);
-  assert.match(html, /data-debug-id="task-details-verify-skipped" class="[^"]*text-warning/);
-  assert.match(html, /Skipped at submit/);
+  // Collapsed: a <details> without the open attribute, titled as legacy history.
+  assert.match(html, /<details data-debug-id="task-details-legacy-verify"(?![^>]*\bopen\b)[^>]*>/);
+  assert.match(html, /Legacy verification record/);
+  assert.match(html, /npm run check/);
+  assert.match(html, /Suite could not run on this host\./);
+  // Never an active surface: no pass/fail badge, no warning banner, no re-run.
   assert.doesNotMatch(html, />Passed</);
+  assert.doesNotMatch(html, /Verify skipped/);
+  assert.doesNotMatch(html, /task-details-verify-skipped/);
+  assert.doesNotMatch(html, /Re-run/);
+  // A legacy brief.verify is not rendered as the task's command.
+  assert.doesNotMatch(html, /make test/);
+  // The legacy submit event is history inside the collapsed event details.
+  assert.match(html, /data-debug-id="task-timeline-legacy-verify"/);
   store.dispatch(tasksApi.util.resetApiState());
 });
 
