@@ -74,15 +74,19 @@ ctl_task_brief_flags_present :: proc(args: []string) -> bool {
 // ctl_task_brief_json builds the `brief` object from an optional --brief-file
 // body (the base) and the brief flags (which override the file's fields).
 // Pure: the file's text is passed in. Returns ("", false) when there is nothing
-// to send. Every key of the file is carried (explicit nulls included, so they
+// to send; an explicitly empty `{}` file returns ("{}", true). Every key of the file is carried (explicit nulls included, so they
 // clear the key on update); flags win field by field and `--clear-<field>`
 // sends null. The removed verify keys are never carried.
 ctl_task_brief_json :: proc(args: []string, brief_file_text: string) -> (string, bool) {
 	file := strings.trim_space(brief_file_text)
 	values := make(map[string]string, allocator = context.temp_allocator)
+	// An explicitly empty `{}` file is a brief of its own (with --replace-brief it
+	// clears every field); a file of only removed verify keys stays no brief.
+	explicit_empty := false
 	if file != "" {
 		parsed, perr := json.parse_string(file, json.DEFAULT_SPECIFICATION, true, context.temp_allocator)
 		if obj, is_obj := parsed.(json.Object); perr == nil && is_obj {
+			explicit_empty = len(obj) == 0
 			for key, value in obj {
 				removed := false
 				for k in CTL_REMOVED_BRIEF_KEYS do if k == key { removed = true; break }
@@ -106,7 +110,10 @@ ctl_task_brief_json :: proc(args: []string, brief_file_text: string) -> (string,
 	if on_wf := strings.trim_space(option_value(args, "--on-output-workflow", "")); on_wf != "" do values["on_output"] = json_object(json_kv("start_workflow", on_wf))
 	for k in CTL_BRIEF_KEYS do if has_flag(args, ctl_brief_clear_flag(k)) do values[k] = "null"
 
-	if len(values) == 0 do return "", false
+	if len(values) == 0 {
+		if explicit_empty do return strings.clone("{}"), true
+		return "", false
+	}
 	fields := make([dynamic]string)
 	defer delete(fields)
 	for k in CTL_BRIEF_KEYS {
