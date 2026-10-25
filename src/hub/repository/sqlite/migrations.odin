@@ -524,7 +524,10 @@ MIGRATION_136_EXTENSION_VERSION_SYNC :: #load("migrations/136_extension_version_
 
 MIGRATION_137_EXTENSION_VERSION_SYNC :: #load("migrations/137_extension_version_sync_0_5_1.sql", string)
 
-migration_order :: [141]string {
+// MIGRATION_138: bridge_tokens.rotation_request_hash (refresh retry identity).
+MIGRATION_138_BRIDGE_TOKEN_ROTATION_REQUEST :: #load("migrations/138_bridge_token_rotation_request.sql", string)
+
+migration_order :: [142]string {
 	"001_foundation.sql",
 	"002_owner_scoped_core.sql",
 	"003_device_tokens.sql",
@@ -666,6 +669,7 @@ migration_order :: [141]string {
 	"135_clear_user_api_tokens.sql",
 	"136_extension_version_sync_0_5_0.sql",
 	"137_extension_version_sync_0_5_1.sql",
+	"138_bridge_token_rotation_request.sql",
 }
 
 // stop_before is a TEST SEAM: when non-empty, the apply loop stops in front of
@@ -1136,6 +1140,7 @@ migration_sql :: proc(name, migrations_dir: string) -> string {
 			return string(data)
 		}
 	}
+	if name == "138_bridge_token_rotation_request.sql" do return strings.clone(MIGRATION_138_BRIDGE_TOKEN_ROTATION_REQUEST)
 	if name == "137_extension_version_sync_0_5_1.sql" do return strings.clone(MIGRATION_137_EXTENSION_VERSION_SYNC)
 	if name == "136_extension_version_sync_0_5_0.sql" do return strings.clone(MIGRATION_136_EXTENSION_VERSION_SYNC)
 	if name == "135_clear_user_api_tokens.sql" do return strings.clone(MIGRATION_135_CLEAR_USER_API_TOKENS)
@@ -1305,6 +1310,11 @@ migration_applied :: proc(conn: ^Conn, version: string) -> bool {
 	// before release 0.4.44 took 130) also has it, so the renumbered file is marked
 	// applied there without re-executing; that database still runs 130's sync,
 	// because the ledger is keyed by full file name.
+	// The column is the whole migration; a database that already has it (an
+	// ALTER that ran under another number on a development branch) is applied.
+	if version == "138_bridge_token_rotation_request.sql" {
+		return table_column_exists(conn, "bridge_tokens", "rotation_request_hash")
+	}
 	if version == "131_fleet_pause.sql" {
 		return table_column_exists(conn, "task_chain_fleets", "paused_roles_json")
 	}

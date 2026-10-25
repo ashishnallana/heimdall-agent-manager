@@ -16,7 +16,10 @@ import domain "odin_test:hub/domain"
 import dbt "odin_test:hub/platform/dbtelemetry"
 import iface "odin_test:hub/repository/iface"
 
-BRIDGE_TOKEN_COLUMNS :: "token_id, bridge_id, kind, token_hash, family_id, generation, scope, issued_at, expires_at, family_expires_at, rotated_at, revoked_at"
+// rotation_request_hash arrived in migration 138. An older hub reading a migrated
+// database names its columns explicitly and never sees it, which is what keeps a
+// rollback able to start.
+BRIDGE_TOKEN_COLUMNS :: "token_id, bridge_id, kind, token_hash, family_id, generation, scope, issued_at, expires_at, family_expires_at, rotated_at, revoked_at, rotation_request_hash"
 
 bridge_save_token_sqlite :: proc(ctx: rawptr, token: domain.Bridge_Token) -> (domain.Bridge_Token, bool, domain.Domain_Error) {
 	impl := (^Bridge_Repo_SQLite)(ctx)
@@ -26,7 +29,7 @@ bridge_save_token_sqlite :: proc(ctx: rawptr, token: domain.Bridge_Token) -> (do
 	// written: a save that could rewrite a token's hash or move it between families
 	// would let a bug relabel a credential instead of issuing one, and rotation
 	// already works by INSERTing the next generation rather than mutating this row.
-	query := "INSERT INTO bridge_tokens (" + BRIDGE_TOKEN_COLUMNS + ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(token_id) DO UPDATE SET expires_at=excluded.expires_at, rotated_at=excluded.rotated_at, revoked_at=excluded.revoked_at;"
+	query := "INSERT INTO bridge_tokens (" + BRIDGE_TOKEN_COLUMNS + ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(token_id) DO UPDATE SET expires_at=excluded.expires_at, rotated_at=excluded.rotated_at, revoked_at=excluded.revoked_at, rotation_request_hash=CASE WHEN excluded.rotation_request_hash != '' THEN excluded.rotation_request_hash ELSE bridge_tokens.rotation_request_hash END;"
 	if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return domain.Bridge_Token{}, false, domain.domain_error(.Internal_Error, "failed to prepare bridge token save")
 	defer sqlite3_finalize(stmt)
 	bind_text(stmt, 1, token.token_id)
@@ -42,6 +45,7 @@ bridge_save_token_sqlite :: proc(ctx: rawptr, token: domain.Bridge_Token) -> (do
 	bind_text(stmt, 10, token.family_expires_at)
 	bind_text(stmt, 11, token.rotated_at)
 	bind_text(stmt, 12, token.revoked_at)
+	bind_text(stmt, 13, token.rotation_request_hash)
 	if sqlite3_step(stmt) != SQLITE_DONE do return domain.Bridge_Token{}, false, domain.domain_error(.Conflict, "bridge token could not be saved")
 	return token, true, domain.Domain_Error{}
 }
@@ -141,15 +145,16 @@ bridge_revoke_tokens_for_bridge_sqlite :: proc(ctx: rawptr, bridge_id, revoked_a
 // caller treats 0 changed rows as "someone else already spent it", which is exactly
 // the reuse signal — so the race resolves into the detection path instead of minting
 // two live generations from one token.
-bridge_mark_token_rotated_sqlite :: proc(ctx: rawptr, token_id, rotated_at: string) -> (bool, domain.Domain_Error) {
+bridge_mark_token_rotated_sqlite :: proc(ctx: rawptr, token_id, rotated_at, request_hash: string) -> (bool, domain.Domain_Error) {
 	impl := (^Bridge_Repo_SQLite)(ctx)
 	if token_id == "" || rotated_at == "" do return false, domain.domain_error(.Validation_Failed, "token_id and rotated_at are required")
 	stmt: sqlite3_stmt = nil
-	query := "UPDATE bridge_tokens SET rotated_at = ? WHERE token_id = ? AND rotated_at = '';"
+	query := "UPDATE bridge_tokens SET rotated_at = ?, rotation_request_hash = ? WHERE token_id = ? AND rotated_at = '';"
 	if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return false, domain.domain_error(.Internal_Error, "failed to prepare bridge token rotate")
 	defer sqlite3_finalize(stmt)
 	bind_text(stmt, 1, rotated_at)
-	bind_text(stmt, 2, token_id)
+	bind_text(stmt, 2, request_hash)
+	bind_text(stmt, 3, token_id)
 	step_rc, row_changes := step_changes(impl.conn.db, stmt)
 	if step_rc != SQLITE_DONE do return false, domain.domain_error(.Internal_Error, "bridge token could not be marked rotated")
 	return row_changes > 0, domain.Domain_Error{}
@@ -283,5 +288,6 @@ bridge_token_from_stmt :: proc(stmt: sqlite3_stmt) -> domain.Bridge_Token {
 		family_expires_at = column_text(stmt, 9),
 		rotated_at = column_text(stmt, 10),
 		revoked_at = column_text(stmt, 11),
+		rotation_request_hash = column_text(stmt, 12),
 	}
 }

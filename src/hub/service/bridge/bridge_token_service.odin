@@ -128,6 +128,43 @@ BRIDGE_TOKEN_CLOCK_SKEW_SECONDS :: 60
 // the newest, and for all but 30 seconds of that one.
 BRIDGE_REFRESH_REUSE_GRACE_SECONDS :: 30
 
+// BRIDGE_REFRESH_RETRY_GRACE_SECONDS bounds the SECOND, narrower hole: a retry of
+// one exact rotation, identified by the request id the bridge sent with it
+// (BRIDGE_REFRESH_REQUEST_ID_HEADER), whose reply was lost.
+//
+// WHY IT EXISTS. The 30-second grace above assumes the retry comes at once. A lost
+// reply does not work like that: the bridge backs off, may be restarted (an update,
+// a crash), and only then retries. Past 30s its retry used to be read as theft and
+// revoked the family, or, before the bridge retried at all, it parked forever. Either
+// way the machine needed a human (incident, 2026-10-25).
+//
+// WHAT BOUNDS IT, all required:
+//   - the presented token was spent by a request carrying THIS request id (its salted
+//     digest is on the spent row; the id is 128 random bits, sent only with the
+//     token, and never logged);
+//   - at most 10 minutes since that spend;
+//   - no descendant refresh token has been redeemed, i.e. the pair minted for the
+//     lost reply was demonstrably never used. Once any descendant is used, the old
+//     token is plain reuse again.
+// Every grant revokes the never-used descendants (both kinds), so a graced retry
+// never leaves two live generations; and a replay with the wrong or no request id,
+// or after the window, or of an older token, still revokes the family.
+BRIDGE_REFRESH_RETRY_GRACE_SECONDS :: 600
+
+// BRIDGE_REFRESH_REQUEST_ID_HEADER carries the bridge's per-rotation request id.
+BRIDGE_REFRESH_REQUEST_ID_HEADER :: "X-Heimdall-Refresh-Request-Id"
+
+// refresh_request_id_valid: 16-128 chars of [A-Za-z0-9_-]. Anything else is ignored
+// (treated as absent), never an error, so a malformed header cannot change a
+// refresh that would otherwise succeed.
+refresh_request_id_valid :: proc(id: string) -> bool {
+	if len(id) < 16 || len(id) > 128 do return false
+	for c in transmute([]byte)id {
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-') do return false
+	}
+	return true
+}
+
 // Bridge_Token_Pair is what a mint or a rotation hands back. The two plaintexts
 // exist ONLY in this value and in the response built from it — the Hub stores
 // salted digests and can never reproduce them, which is why a rotation cannot
@@ -352,8 +389,9 @@ verify_access_token_scoped :: proc(service: ^Bridge_Service, token: string, scop
 // bridge's required response to all four is identical (§7.5: stop, wipe both tokens,
 // require re-enrollment, DO NOT LOOP), so distinguishing them on the wire would add
 // an oracle and no capability. The server log distinguishes them.
-refresh_bridge_token :: proc(service: ^Bridge_Service, presented: string) -> (Bridge_Token_Pair, bool, domain.Domain_Error) {
+refresh_bridge_token :: proc(service: ^Bridge_Service, presented: string, request_id := "") -> (Bridge_Token_Pair, bool, domain.Domain_Error) {
 	invalid_grant := domain.domain_error(.Unauthenticated, "invalid_grant")
+	request_id := request_id if refresh_request_id_valid(request_id) else ""
 	if service == nil || service.repo == nil do return Bridge_Token_Pair{}, false, domain.domain_error(.Internal_Error, "bridge service is not configured")
 	token_id, presented_secret, split_ok := split_credential(REFRESH_TOKEN_PREFIX, presented)
 	if !split_ok do return Bridge_Token_Pair{}, false, invalid_grant
@@ -382,15 +420,16 @@ refresh_bridge_token :: proc(service: ^Bridge_Service, presented: string) -> (Br
 	if row.family_expires_at != "" && token_is_expired(row.family_expires_at, now) do return Bridge_Token_Pair{}, false, invalid_grant
 
 	if row.rotated_at != "" {
-		// SPENT. Either a crash-recovery replay inside the grace window, or theft.
-		if refresh_within_grace(service, row, now) {
+		// SPENT. A retry of this exact rotation, a crash-recovery replay inside the
+		// grace window, or theft.
+		if refresh_is_retry_of_rotation(service, row, request_id, now) || refresh_within_grace(service, row, now) {
 			return rotate_from(service, row, now, revoke_newer_generations = true)
 		}
 		// THEFT (§7.4.3): revoke the whole lineage, both kinds, every generation.
 		_, _, _ = revoke_token_family(service, row.family_id, now)
 		return Bridge_Token_Pair{}, false, invalid_grant
 	}
-	return rotate_from(service, row, now, revoke_newer_generations = false)
+	return rotate_from(service, row, now, revoke_newer_generations = false, request_id = request_id)
 }
 
 // refresh_within_grace decides whether a SPENT refresh token is the crash-recovery
@@ -418,6 +457,23 @@ refresh_within_grace :: proc(service: ^Bridge_Service, row: domain.Bridge_Token,
 	return newest <= row.generation + 1
 }
 
+// refresh_is_retry_of_rotation decides the BRIDGE_REFRESH_RETRY_GRACE_SECONDS case:
+// see that constant for the three conditions, all of which are checked here.
+refresh_is_retry_of_rotation :: proc(service: ^Bridge_Service, row: domain.Bridge_Token, request_id, now: string) -> bool {
+	if request_id == "" || row.rotation_request_hash == "" do return false
+	if !verify_credential(row.rotation_request_hash, request_id) do return false
+	rotated_ms, rot_ok := platform.rfc3339_to_unix_ms(row.rotated_at)
+	now_ms, now_ok := platform.rfc3339_to_unix_ms(now)
+	if !rot_ok || !now_ok do return false
+	if now_ms - rotated_ms > i64(BRIDGE_REFRESH_RETRY_GRACE_SECONDS) * 1000 do return false
+	family, _ := iface.bridge_list_tokens_by_family(service.repo, row.family_id)
+	defer free_bridge_tokens(family)
+	for t in family {
+		if t.generation > row.generation && t.kind == .Refresh && t.rotated_at != "" do return false
+	}
+	return true
+}
+
 // rotate_from mints the next generation for a family.
 //
 // `revoke_newer_generations` is set only on the grace path, and it is what keeps
@@ -425,7 +481,7 @@ refresh_within_grace :: proc(service: ^Bridge_Service, row: domain.Bridge_Token,
 // which the bridge demonstrably never persisted, or it would not be presenting the
 // old one) is revoked, so it cannot be redeemed by whoever else may hold it. Without
 // that, a graced rotation would leave TWO live generations from one token.
-rotate_from :: proc(service: ^Bridge_Service, row: domain.Bridge_Token, now: string, revoke_newer_generations: bool) -> (Bridge_Token_Pair, bool, domain.Domain_Error) {
+rotate_from :: proc(service: ^Bridge_Service, row: domain.Bridge_Token, now: string, revoke_newer_generations: bool, request_id := "") -> (Bridge_Token_Pair, bool, domain.Domain_Error) {
 	invalid_grant := domain.domain_error(.Unauthenticated, "invalid_grant")
 	// The bridge must still exist and still be allowed to connect. Checked before
 	// minting so a revoked bridge cannot renew its way back in.
@@ -440,7 +496,16 @@ rotate_from :: proc(service: ^Bridge_Service, row: domain.Bridge_Token, now: str
 		// reuse path rather than minting a second live generation. This is why
 		// single-use is enforced in the UPDATE's WHERE clause and not by the
 		// read-then-check above, which every caller would pass.
-		changed, mark_err := iface.bridge_mark_token_rotated(service.repo, row.token_id, now)
+		// The request id is recorded as a salted digest beside the spend, so only a
+		// caller holding both the token and the id can claim the retry grace.
+		request_hash := ""
+		if request_id != "" {
+			hashed, hash_ok := hash_credential_secret(request_id)
+			if !hash_ok do return Bridge_Token_Pair{}, false, domain.domain_error(.Provider_Unavailable, "secure random source unavailable; no bridge credential was issued, retry")
+			request_hash = hashed
+		}
+		defer if request_hash != "" do delete(request_hash)
+		changed, mark_err := iface.bridge_mark_token_rotated(service.repo, row.token_id, now, request_hash)
 		if mark_err.code != .None do return Bridge_Token_Pair{}, false, mark_err
 		if !changed {
 			_, _, _ = revoke_token_family(service, row.family_id, now)

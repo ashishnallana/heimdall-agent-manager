@@ -208,6 +208,23 @@ bridge_retry_reopen_success :: proc(key: string) {
     }
 }
 
+// bridge_retry_reopen_retriable gives a renewal receipt that ended TERMINAL for a
+// retriable reason a fresh, bounded budget. Only `refresh:` keys: every refresh
+// attempt carries its rotation's request id, which the hub honours for a retry, so
+// repeating it cannot mint a second credential. Unauthenticated and cancelled
+// receipts are left alone.
+bridge_retry_reopen_retriable :: proc(key: string) -> bool {
+    if !strings.has_prefix(key, "refresh:") do return false
+    sync.mutex_lock(&bridge_retry_journal_mutex)
+    defer sync.mutex_unlock(&bridge_retry_journal_mutex)
+    b := bridge_retry_journal_get_locked(key)
+    if b == nil || !(b.state == .Waiting_Repair || b.state == .Exhausted) do return false
+    if !(b.class == .retriable || b.code == .None) do return false
+    b^ = {}
+    if !bridge_retry_journal_flush_locked() { b.state = .Waiting_Repair; return false }
+    return true
+}
+
 bridge_retry_record_target :: proc(key, target: string) -> bool {
     sync.mutex_lock(&bridge_retry_journal_mutex)
     defer sync.mutex_unlock(&bridge_retry_journal_mutex)

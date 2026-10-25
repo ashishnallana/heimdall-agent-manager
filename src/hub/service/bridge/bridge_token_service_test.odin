@@ -475,3 +475,92 @@ test_token_expiry_edge_cases :: proc(t: ^testing.T) {
 	testing.expect(t, !token_is_expired("2026-01-01T00:00:00Z", "2026-01-01T00:00:30Z"), "inside the skew grace is not expired")
 	testing.expect(t, token_is_expired("2026-01-01T00:00:00Z", "2026-01-01T00:02:00Z"), "beyond the skew grace is expired")
 }
+
+// ===== Refresh retry of one exact rotation (incident, 2026-10-25) =====
+//
+// The hub rotated (the 200 left the hub) but the bridge never got a usable reply.
+// The bridge retries the SAME refresh token with the SAME request id, after a
+// backoff and possibly a restart, well past the 30s crash grace. That retry must
+// recover the rotation; anything else presenting the spent token must still be
+// treated as theft.
+
+@(private = "file")
+TEST_REQUEST_ID :: "rrq_00112233445566778899aabbccddeeff"
+
+@(test)
+test_refresh_retry_with_same_request_id_recovers_a_lost_reply :: proc(t: ^testing.T) {
+	f := setup_token_fixture(t, "retry_ok")
+	defer teardown_token_fixture(f)
+	enrolled := enrol_one(t, f, "retry-host")
+
+	lost, ok, err := refresh_bridge_token(&f.svc, enrolled.refresh_token, TEST_REQUEST_ID)
+	testing.expect(t, ok, err.message) // this reply is "lost": the bridge never sees `lost`
+
+	// A restart later, past the 30s crash grace and inside the retry window.
+	advance(f, BRIDGE_REFRESH_REUSE_GRACE_SECONDS + 240)
+	again, again_ok, again_err := refresh_bridge_token(&f.svc, enrolled.refresh_token, TEST_REQUEST_ID)
+	testing.expect(t, again_ok, again_err.message)
+	testing.expect_value(t, again.family_id, lost.family_id)
+	_, use_ok, use_err := verify_bridge_token(&f.svc, again.access_token)
+	testing.expect(t, use_ok, use_err.message)
+
+	// The pair minted for the lost reply is revoked: one token never yields two
+	// live generations.
+	_, lost_ok, _ := verify_bridge_token(&f.svc, lost.access_token)
+	testing.expect(t, !lost_ok, "the never-delivered pair is dead")
+	_, lost_refresh_ok, _ := refresh_bridge_token(&f.svc, lost.refresh_token)
+	testing.expect(t, !lost_refresh_ok)
+
+	// A second lost reply in a row is also recoverable inside the window, since no
+	// descendant was ever redeemed...
+	advance(f, 30)
+	third, third_ok, third_err := refresh_bridge_token(&f.svc, enrolled.refresh_token, TEST_REQUEST_ID)
+	testing.expect(t, third_ok, third_err.message)
+	// ...and the lineage continues normally from the recovered pair.
+	advance(f, 60)
+	next, next_ok, next_err := refresh_bridge_token(&f.svc, third.refresh_token)
+	testing.expect(t, next_ok, next_err.message)
+	testing.expect(t, next.generation > third.generation)
+}
+
+@(test)
+test_refresh_retry_without_matching_request_id_or_after_window_is_theft :: proc(t: ^testing.T) {
+	cases := [?]struct{ tag, request_id: string, wait: i64 }{
+		{"no_id", "", BRIDGE_REFRESH_REUSE_GRACE_SECONDS + 5},
+		{"wrong_id", "rrq_ffffffffffffffffffffffffffffffff", BRIDGE_REFRESH_REUSE_GRACE_SECONDS + 5},
+		{"too_late", TEST_REQUEST_ID, BRIDGE_REFRESH_RETRY_GRACE_SECONDS + 5},
+	}
+	for c in cases {
+		f := setup_token_fixture(t, c.tag)
+		enrolled := enrol_one(t, f, "replay-host")
+		_, ok, err := refresh_bridge_token(&f.svc, enrolled.refresh_token, TEST_REQUEST_ID)
+		testing.expect(t, ok, err.message)
+		advance(f, c.wait)
+		_, replay_ok, replay_err := refresh_bridge_token(&f.svc, enrolled.refresh_token, c.request_id)
+		testing.expectf(t, !replay_ok, "%s: a replay outside the exact retry is refused", c.tag)
+		testing.expect_value(t, replay_err.message, "invalid_grant")
+		// Reuse detection fired: the whole family is gone.
+		family, _ := iface.bridge_list_tokens_by_family(f.svc.repo, enrolled.family_id)
+		for tok in family do testing.expectf(t, tok.revoked_at != "", "%s: every token of the family is revoked", c.tag)
+		free_bridge_tokens(family)
+		teardown_token_fixture(f)
+	}
+}
+
+@(test)
+test_refresh_retry_refused_once_the_recovered_pair_was_used :: proc(t: ^testing.T) {
+	f := setup_token_fixture(t, "retry_used")
+	defer teardown_token_fixture(f)
+	enrolled := enrol_one(t, f, "used-host")
+	first, ok, err := refresh_bridge_token(&f.svc, enrolled.refresh_token, TEST_REQUEST_ID)
+	testing.expect(t, ok, err.message)
+	// The bridge DID get the reply and moved on: it redeemed the descendant.
+	advance(f, 60)
+	_, used_ok, used_err := refresh_bridge_token(&f.svc, first.refresh_token, "rrq_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	testing.expect(t, used_ok, used_err.message)
+	// Now an old-token replay, even with the right request id and inside the window,
+	// is an older token: theft.
+	advance(f, 60)
+	_, replay_ok, _ := refresh_bridge_token(&f.svc, enrolled.refresh_token, TEST_REQUEST_ID)
+	testing.expect(t, !replay_ok, "an older token is refused once its descendant was used")
+}

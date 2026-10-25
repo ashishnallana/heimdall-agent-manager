@@ -1,5 +1,6 @@
 package http
 
+import "core:encoding/json"
 import "core:fmt"
 import contracts "odin_test:contracts"
 import domain "odin_test:hub/domain"
@@ -20,6 +21,16 @@ respond_success :: proc(data_json: string, request_id, server_time: string, stat
 		content_type = "application/json",
 		body = contracts.api_success_json(data_json, contracts.api_meta(request_id, server_time)),
 	}
+}
+
+// respond_success_typed marshals `value` with json.marshal as the envelope's data.
+// Use it for every reply that carries a credential (tokens, tickets, session ids):
+// such a reply is never assembled by string concatenation. A marshal failure is an
+// internal error, never a malformed 200.
+respond_success_typed :: proc(value: $T, request_id, server_time: string, status := 200) -> Response {
+	data, err := json.marshal(value, allocator = context.temp_allocator)
+	if err != nil do return respond_error(domain.domain_error(.Internal_Error, "failed to encode the response"), request_id)
+	return respond_success(string(data), request_id, server_time, status)
 }
 
 respond_list :: proc(data_json: string, page: contracts.API_Page, request_id, server_time: string) -> Response {

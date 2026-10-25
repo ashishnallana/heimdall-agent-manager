@@ -37,11 +37,15 @@ request_with_headers_deadline :: proc(method, base_url, request_path, body: stri
             if tls.write_all(&stream, transmute([]byte)req, left) != .Ok do return Response{may_have_sent=may_have_sent}, false
             for remaining(started, timeout_ms) > 0 {
                 ready, available := tls.has_data(&stream)
-                if !available do return Response{may_have_sent=may_have_sent}, false
+                // The relay closing its stdout (POLLHUP with nothing left to read)
+                // is how a TLS peer's close arrives here. It ends a close-delimited
+                // or already-whole response; os.pipe_has_data reports it as an
+                // error, which used to turn a complete chunked 200 into a failure.
+                if !available do return deadline_finish_eof(data[:], may_have_sent)
                 if ready {
                     n, read_ok := tls.read(&stream, buf[:])
                     if !read_ok do return Response{may_have_sent=may_have_sent}, false
-                    if n == 0 do return deadline_parse_response(data[:], may_have_sent)
+                    if n == 0 do return deadline_finish_eof(data[:], may_have_sent)
                     append(&data, ..buf[:n])
                     if response_complete(string(data[:])) do return deadline_parse_response(data[:], may_have_sent)
                 } else {
@@ -83,7 +87,7 @@ request_with_headers_deadline :: proc(method, base_url, request_path, body: stri
             time.sleep(min(time.Millisecond, remaining(started, timeout_ms)))
             continue
         }
-        if n == 0 do return deadline_parse_response(data[:], may_have_sent)
+        if n == 0 do return deadline_finish_eof(data[:], may_have_sent)
         append(&data, ..buf[:n])
         if response_complete(string(data[:])) do return deadline_parse_response(data[:], may_have_sent)
     }
@@ -98,6 +102,13 @@ deadline_supported :: proc(base_url: string) -> bool {
         _, literal := resolve_host_without_dns(host_trim_brackets(host), int(port))
         return literal
     } else { return true }
+}
+
+// deadline_finish_eof parses what a closed peer sent, but only if it is a whole
+// response: a truncated Content-Length or chunk stream is still a failure.
+deadline_finish_eof :: proc(data: []byte, may_have_sent: bool) -> (Response, bool) {
+    if !response_complete_at_eof(string(data)) do return Response{may_have_sent=may_have_sent}, false
+    return deadline_parse_response(data, may_have_sent)
 }
 
 deadline_parse_response :: proc(data: []byte, may_have_sent: bool) -> (Response, bool) {

@@ -47,13 +47,30 @@ User_Handlers :: struct {
 
 // auth_config_handler: users sign in only through the Hub's OIDC browser login.
 // Field names the UI already reads (login_url, logout_url) are kept.
+// Credential-bearing and auth replies are typed and marshalled (respond_success_typed).
+// Field order is the historical wire order.
+Auth_Config_Reply :: struct {
+	mode:       string,
+	login_url:  string,
+	logout_url: string,
+	logout:     string,
+}
+User_WS_Ticket_Reply :: struct {
+	ticket:     string,
+	expires_in: int,
+}
+Auth_Logout_Reply :: struct {
+	logout_url: string,
+}
+
 auth_config_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	handlers := (^User_Handlers)(ctx)
-	builder := strings.builder_make()
-	strings.write_string(&builder, "{\"mode\":\"oidc\",\"login_url\":\"/api/v1/auth/login\",\"logout_url\":\"")
-	write_handler_json_string(&builder, handlers.auth.web.end_session_url if handlers.auth != nil else "")
-	strings.write_string(&builder, "\",\"logout\":\"POST /api/v1/auth/logout\"}")
-	return respond_success(strings.to_string(builder), req.request_id, auth_ctx_server_time(req))
+	return respond_success_typed(Auth_Config_Reply{
+		mode = "oidc",
+		login_url = "/api/v1/auth/login",
+		logout_url = handlers.auth.web.end_session_url if handlers.auth != nil else "",
+		logout = "POST /api/v1/auth/logout",
+	}, req.request_id, auth_ctx_server_time(req))
 }
 
 me_handler :: proc(ctx: rawptr, req: Request) -> Response {
@@ -87,11 +104,7 @@ issue_user_ws_ticket_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	defer delete(ticket)
 	expires_in := 30
 	user_ws_ticket_store_put(&handlers.ws_tickets, ticket, auth_ctx, i64(expires_in))
-	builder := strings.builder_make()
-	strings.write_string(&builder, "{\"ticket\":\"")
-	write_handler_json_string(&builder, ticket)
-	strings.write_string(&builder, fmt.tprintf("\",\"expires_in\":%d}", expires_in))
-	return respond_success(strings.to_string(builder), req.request_id, auth_ctx_server_time(req))
+	return respond_success_typed(User_WS_Ticket_Reply{ticket = ticket, expires_in = expires_in}, req.request_id, auth_ctx_server_time(req))
 }
 
 user_ws_authenticate :: proc(handlers: ^User_Handlers, req: Request) -> (contracts.Auth_Context, bool, Response) {
