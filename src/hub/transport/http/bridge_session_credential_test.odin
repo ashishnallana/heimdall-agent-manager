@@ -387,7 +387,7 @@ test_refreshed_session_keeps_working_after_reauth :: proc(t: ^testing.T) {
 	defer session_finish(&socks, th, &stream)
 	delete(ready)
 
-	pair, ok, err := bridge_service.refresh_bridge_token(&f.br_svc, f.enrolled.refresh_token, "rrq_0123456789abcdef0123")
+	pair, ok, err := bridge_service.refresh_bridge_token(&f.br_svc, f.enrolled.refresh_token, "rrq_0123456789abcdef0123456789abcdef")
 	testing.expect(t, ok, err.message)
 	session_send(socks.client, fmt.tprintf(`{{"type":"bridge_reauth","access_token":"%s"}}`, pair.access_token))
 	renewed, frames := session_wait_for(&stream, `"bridge_reauth_result"`, 2 * time.Second)

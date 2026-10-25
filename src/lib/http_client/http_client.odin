@@ -326,7 +326,7 @@ response_decode_chunked_body :: proc(body: string) -> string {
 		size_line := strings.trim_space(body[pos:pos + line_end])
 		if semi := strings.index(size_line, ";"); semi >= 0 do size_line = size_line[:semi]
 		size, ok := parse_hex_size(size_line)
-		if !ok do break
+		if !ok || size < 0 do break
 		pos += line_end + 2
 		if size == 0 do break
 		if pos + size > len(body) do break
@@ -337,9 +337,11 @@ response_decode_chunked_body :: proc(body: string) -> string {
 	return strings.to_string(b)
 }
 
+// At most 15 hex digits (< 2^60), so the value can never overflow an int into a
+// negative or wrapped chunk size.
 parse_hex_size :: proc(text: string) -> (int, bool) {
 	trimmed := strings.trim_space(text)
-	if trimmed == "" do return 0, false
+	if trimmed == "" || len(trimmed) > 15 do return 0, false
 	value := 0
 	for i in 0..<len(trimmed) {
 		ch := trimmed[i]

@@ -44,6 +44,7 @@
 //     or the keyring (threat T1).
 package bridge
 
+import "core:strconv"
 import "core:strings"
 import contracts "odin_test:contracts"
 import domain "odin_test:hub/domain"
@@ -154,11 +155,12 @@ BRIDGE_REFRESH_RETRY_GRACE_SECONDS :: 600
 // BRIDGE_REFRESH_REQUEST_ID_HEADER carries the bridge's per-rotation request id.
 BRIDGE_REFRESH_REQUEST_ID_HEADER :: "X-Heimdall-Refresh-Request-Id"
 
-// refresh_request_id_valid: 16-128 chars of [A-Za-z0-9_-]. Anything else is ignored
+// refresh_request_id_valid: 32-128 chars of [A-Za-z0-9_-] (the bridge sends `rrq_`
+// + 32 hex, 128 random bits). Anything else is ignored
 // (treated as absent), never an error, so a malformed header cannot change a
 // refresh that would otherwise succeed.
 refresh_request_id_valid :: proc(id: string) -> bool {
-	if len(id) < 16 || len(id) > 128 do return false
+	if len(id) < 32 || len(id) > 128 do return false
 	for c in transmute([]byte)id {
 		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-') do return false
 	}
@@ -375,6 +377,11 @@ verify_access_token_scoped :: proc(service: ^Bridge_Service, token: string, scop
 	// checked: revoke_bridge stamps both, but a token row written before that change
 	// (or by a future path that forgets) must not outlive its bridge.
 	if bridge.status == .Revoked do return contracts.Auth_Context{}, "", false, domain.domain_error(.Forbidden, "bridge is revoked")
+	// First authentication with this access token: record it. It proves the reply
+	// that carried the token was delivered, which ends the retry grace of the
+	// refresh token it was minted from (family_descendant_delivered). Once per
+	// token; the steady state reads the stamp and writes nothing.
+	if row.first_used_at == "" do _, _ = iface.bridge_mark_token_used(service.repo, row.token_id, now)
 	return contracts.Auth_Context{kind = .Bridge_Token, user_id = string(bridge.owner_user_id), bridge_id = bridge.bridge_id}, row.family_id, true, domain.Domain_Error{}
 }
 
@@ -430,6 +437,9 @@ session_credential_state :: proc(service: ^Bridge_Service, token_id: string) -> 
 	defer domain.bridge_destroy(&bridge)
 	if bridge.status == .Revoked do return .Revoked
 	now := platform.clock_now(service.clock)
+	// token_is_expired applies BRIDGE_TOKEN_CLOCK_SKEW_SECONDS, exactly as
+	// verify_access_token does, so the re-check never ends a session that verify
+	// would still accept.
 	if token_is_expired(row.expires_at, now) do return .Expired
 	if row.family_expires_at != "" && token_is_expired(row.family_expires_at, now) do return .Expired
 	return .Valid
@@ -513,7 +523,7 @@ refresh_within_grace :: proc(service: ^Bridge_Service, row: domain.Bridge_Token,
 	for t in family {
 		if t.generation > newest do newest = t.generation
 	}
-	return newest <= row.generation + 1
+	return newest <= row.generation + 1 && !family_descendant_delivered(family, row.generation)
 }
 
 // refresh_is_retry_of_rotation decides the BRIDGE_REFRESH_RETRY_GRACE_SECONDS case:
@@ -527,10 +537,21 @@ refresh_is_retry_of_rotation :: proc(service: ^Bridge_Service, row: domain.Bridg
 	if now_ms - rotated_ms > i64(BRIDGE_REFRESH_RETRY_GRACE_SECONDS) * 1000 do return false
 	family, _ := iface.bridge_list_tokens_by_family(service.repo, row.family_id)
 	defer free_bridge_tokens(family)
+	return !family_descendant_delivered(family, row.generation)
+}
+
+// family_descendant_delivered reports whether any generation minted from (after)
+// `generation` has demonstrably reached its holder: its access token authenticated
+// something (first_used_at: WS upgrade, bridge_reauth or any API call), or its
+// refresh token was redeemed. Revoked descendants count too: whoever used one held
+// it. Once true, re-presenting the older refresh token is reuse, never a retry.
+family_descendant_delivered :: proc(family: []domain.Bridge_Token, generation: int) -> bool {
 	for t in family {
-		if t.generation > row.generation && t.kind == .Refresh && t.rotated_at != "" do return false
+		if t.generation <= generation do continue
+		if t.kind == .Access && t.first_used_at != "" do return true
+		if t.kind == .Refresh && t.rotated_at != "" do return true
 	}
-	return true
+	return false
 }
 
 // rotate_from mints the next generation for a family.
@@ -568,6 +589,7 @@ rotate_from :: proc(service: ^Bridge_Service, row: domain.Bridge_Token, now: str
 		if mark_err.code != .None do return Bridge_Token_Pair{}, false, mark_err
 		if !changed {
 			_, _, _ = revoke_token_family(service, row.family_id, now)
+			_ = close_bridge_connection(service, row.bridge_id)
 			return Bridge_Token_Pair{}, false, invalid_grant
 		}
 	}
@@ -579,6 +601,27 @@ rotate_from :: proc(service: ^Bridge_Service, row: domain.Bridge_Token, now: str
 		if t.generation > newest do newest = t.generation
 	}
 	if revoke_newer_generations {
+		// A GRACED RE-GRANT (crash grace or request-id retry) is claimed atomically
+		// before anything is revoked or minted. The claim is the generation this grant
+		// will mint, compare-and-set from the claim observed when the row was read, and
+		// it must move forward: two concurrent presentations of the same spent token
+		// read the same claim, so exactly one wins; a racer that read the row after the
+		// winner claimed but before it minted sees no forward move. Every loser is
+		// treated as a second holder of the token: theft. Without this, both racers
+		// minted generation N+1 and two live lineages existed with no reuse signal.
+		claim_ok := true
+		if prev, has_prev := strconv.parse_int(row.regrant_claim); row.regrant_claim != "" && (!has_prev || newest + 1 <= prev) do claim_ok = false
+		if claim_ok {
+			buf: [24]byte
+			claimed, claim_err := iface.bridge_claim_regrant(service.repo, row.token_id, row.regrant_claim, strconv.write_int(buf[:], i64(newest + 1), 10))
+			claim_ok = claimed && claim_err.code == .None
+		}
+		if !claim_ok {
+			free_bridge_tokens(family)
+			_, _, _ = revoke_token_family(service, row.family_id, now)
+			_ = close_bridge_connection(service, row.bridge_id)
+			return Bridge_Token_Pair{}, false, invalid_grant
+		}
 		for t in family {
 			if t.generation <= row.generation || t.revoked_at != "" do continue
 			r := t

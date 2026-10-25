@@ -872,7 +872,7 @@ bridge_refresh_request_ensure :: proc(path, key, api_base, bridge_id: string) ->
     return id, true
 }
 bridge_refresh_request_id_valid :: proc(id: string) -> bool {
-    if len(id) < 16 || len(id) > 128 do return false
+    if len(id) < 32 || len(id) > 128 do return false
     for c in transmute([]byte)id {
         if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-') do return false
     }

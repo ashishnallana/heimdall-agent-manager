@@ -20,6 +20,7 @@ import "core:fmt"
 import "core:os"
 import "core:strings"
 import "core:sync"
+import "core:thread"
 import "core:testing"
 import "core:time"
 import contracts "odin_test:contracts"
@@ -501,27 +502,130 @@ test_refresh_retry_with_same_request_id_recovers_a_lost_reply :: proc(t: ^testin
 	again, again_ok, again_err := refresh_bridge_token(&f.svc, enrolled.refresh_token, TEST_REQUEST_ID)
 	testing.expect(t, again_ok, again_err.message)
 	testing.expect_value(t, again.family_id, lost.family_id)
-	_, use_ok, use_err := verify_bridge_token(&f.svc, again.access_token)
-	testing.expect(t, use_ok, use_err.message)
-	testing.expect(t, len(f.closed_bridge_ids) == 0, "a recovered retry does not end the live session")
-
-	// The pair minted for the lost reply is revoked: one token never yields two
-	// live generations.
-	_, lost_ok, _ := verify_bridge_token(&f.svc, lost.access_token)
-	testing.expect(t, !lost_ok, "the never-delivered pair is dead")
-	_, lost_refresh_ok, _ := refresh_bridge_token(&f.svc, lost.refresh_token)
-	testing.expect(t, !lost_refresh_ok)
 
 	// A second lost reply in a row is also recoverable inside the window, since no
-	// descendant was ever redeemed...
+	// descendant was ever used...
 	advance(f, 30)
 	third, third_ok, third_err := refresh_bridge_token(&f.svc, enrolled.refresh_token, TEST_REQUEST_ID)
 	testing.expect(t, third_ok, third_err.message)
-	// ...and the lineage continues normally from the recovered pair.
+	_, use_ok, use_err := verify_bridge_token(&f.svc, third.access_token)
+	testing.expect(t, use_ok, use_err.message)
+	testing.expect(t, len(f.closed_bridge_ids) == 0, "a recovered retry does not end the live session")
+
+	// ...and the pairs minted for the lost replies are revoked: one token never
+	// yields two live generations.
+	for dead in ([]Bridge_Token_Pair{lost, again}) {
+		_, dead_ok, _ := verify_bridge_token(&f.svc, dead.access_token)
+		testing.expect(t, !dead_ok, "a never-delivered pair is dead")
+	}
+	// The lineage continues normally from the recovered pair.
 	advance(f, 60)
 	next, next_ok, next_err := refresh_bridge_token(&f.svc, third.refresh_token)
 	testing.expect(t, next_ok, next_err.message)
 	testing.expect(t, next.generation > third.generation)
+}
+
+// Review finding 2: the reply WAS delivered and the bridge is using the new access
+// token. Re-presenting the spent refresh token, even with the right request id and
+// inside the window, is then reuse: refused, family revoked, session ended. Without
+// this, R1 + the request id could take the bridge's lineage over for 10 minutes.
+@(test)
+test_refresh_retry_refused_once_the_new_access_token_was_used :: proc(t: ^testing.T) {
+	for use in ([]string{"verify", "none"}) {
+		f := setup_token_fixture(t, "retry_delivered")
+		enrolled := enrol_one(t, f, "delivered-host")
+		delivered, ok, err := refresh_bridge_token(&f.svc, enrolled.refresh_token, TEST_REQUEST_ID)
+		testing.expect(t, ok, err.message)
+		if use == "verify" {
+			// Any authentication counts: WS upgrade, bridge_reauth and API calls all
+			// go through verify_bridge_token.
+			_, v_ok, v_err := verify_bridge_token(&f.svc, delivered.access_token)
+			testing.expect(t, v_ok, v_err.message)
+		}
+		advance(f, 60)
+		_, retry_ok, _ := refresh_bridge_token(&f.svc, enrolled.refresh_token, TEST_REQUEST_ID)
+		if use == "verify" {
+			testing.expect(t, !retry_ok, "a retry after the new access token was used is refused")
+			family, _ := iface.bridge_list_tokens_by_family(f.svc.repo, enrolled.family_id)
+			for tok in family do testing.expect(t, tok.revoked_at != "", "the family is revoked")
+			free_bridge_tokens(family)
+			testing.expect_value(t, len(f.closed_bridge_ids), 1)
+		} else {
+			testing.expect(t, retry_ok, "an unused delivered pair still allows the retry")
+		}
+		teardown_token_fixture(f)
+	}
+}
+
+// The 30s crash grace honours the same proof of delivery.
+@(test)
+test_crash_grace_refused_once_the_new_access_token_was_used :: proc(t: ^testing.T) {
+	f := setup_token_fixture(t, "grace_delivered")
+	defer teardown_token_fixture(f)
+	enrolled := enrol_one(t, f, "grace-host")
+	delivered, ok, err := refresh_bridge_token(&f.svc, enrolled.refresh_token)
+	testing.expect(t, ok, err.message)
+	_, v_ok, v_err := verify_bridge_token(&f.svc, delivered.access_token)
+	testing.expect(t, v_ok, v_err.message)
+	advance(f, 5)
+	_, replay_ok, _ := refresh_bridge_token(&f.svc, enrolled.refresh_token)
+	testing.expect(t, !replay_ok, "inside 30s, but the pair was delivered: reuse")
+}
+
+@(private = "file")
+Concurrent_Retry :: struct {
+	svc:     ^Bridge_Service,
+	token:   string,
+	start:   bool, // atomic
+	ok:      bool,
+}
+
+@(private = "file")
+concurrent_retry_run :: proc(data: rawptr) {
+	c := (^Concurrent_Retry)(data)
+	for !sync.atomic_load(&c.start) {}
+	_, c.ok, _ = refresh_bridge_token(c.svc, c.token, TEST_REQUEST_ID)
+}
+
+// Review finding 1: concurrent presentations of the same spent token with the right
+// request id. At most one may get a credential, and the family must never hold two
+// live refresh tokens (or two rows of one generation and kind).
+@(test)
+test_concurrent_retries_never_mint_two_live_generations :: proc(t: ^testing.T) {
+	for round in 0 ..< 5 {
+		f := setup_token_fixture(t, fmt.tprintf("retry_race_%d", round))
+		enrolled := enrol_one(t, f, "race-host")
+		_, ok, err := refresh_bridge_token(&f.svc, enrolled.refresh_token, TEST_REQUEST_ID)
+		testing.expect(t, ok, err.message)
+		advance(f, 60)
+		jobs: [8]Concurrent_Retry
+		threads: [8]^thread.Thread
+		for i in 0 ..< len(jobs) {
+			jobs[i] = Concurrent_Retry{svc = &f.svc, token = enrolled.refresh_token}
+			threads[i] = thread.create_and_start_with_data(rawptr(&jobs[i]), concurrent_retry_run)
+		}
+		time.sleep(20 * time.Millisecond)
+		for i in 0 ..< len(jobs) do sync.atomic_store(&jobs[i].start, true)
+		winners := 0
+		for i in 0 ..< len(jobs) {
+			thread.join(threads[i])
+			thread.destroy(threads[i])
+			if jobs[i].ok do winners += 1
+		}
+		family, _ := iface.bridge_list_tokens_by_family(f.svc.repo, enrolled.family_id)
+		live_refresh := 0
+		seen := make(map[string]bool, context.temp_allocator)
+		for tok in family {
+			if tok.kind == .Refresh && tok.revoked_at == "" && tok.rotated_at == "" do live_refresh += 1
+			key := fmt.tprintf("%v:%d", tok.kind, tok.generation)
+			testing.expectf(t, !seen[key], "round %d: generation %s minted twice", round, key)
+			seen[key] = true
+		}
+		free_bridge_tokens(family)
+		testing.expectf(t, winners <= 1, "round %d: %d concurrent retries were granted", round, winners)
+		testing.expectf(t, live_refresh <= 1, "round %d: %d live refresh tokens in one family", round, live_refresh)
+		teardown_token_fixture(f)
+	}
 }
 
 @(test)

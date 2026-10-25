@@ -16,10 +16,10 @@ import domain "odin_test:hub/domain"
 import dbt "odin_test:hub/platform/dbtelemetry"
 import iface "odin_test:hub/repository/iface"
 
-// rotation_request_hash arrived in migration 138. An older hub reading a migrated
+// rotation_request_hash arrived in migration 138, first_used_at and regrant_claim in 139. An older hub reading a migrated
 // database names its columns explicitly and never sees it, which is what keeps a
 // rollback able to start.
-BRIDGE_TOKEN_COLUMNS :: "token_id, bridge_id, kind, token_hash, family_id, generation, scope, issued_at, expires_at, family_expires_at, rotated_at, revoked_at, rotation_request_hash"
+BRIDGE_TOKEN_COLUMNS :: "token_id, bridge_id, kind, token_hash, family_id, generation, scope, issued_at, expires_at, family_expires_at, rotated_at, revoked_at, rotation_request_hash, first_used_at, regrant_claim"
 
 bridge_save_token_sqlite :: proc(ctx: rawptr, token: domain.Bridge_Token) -> (domain.Bridge_Token, bool, domain.Domain_Error) {
 	impl := (^Bridge_Repo_SQLite)(ctx)
@@ -29,7 +29,7 @@ bridge_save_token_sqlite :: proc(ctx: rawptr, token: domain.Bridge_Token) -> (do
 	// written: a save that could rewrite a token's hash or move it between families
 	// would let a bug relabel a credential instead of issuing one, and rotation
 	// already works by INSERTing the next generation rather than mutating this row.
-	query := "INSERT INTO bridge_tokens (" + BRIDGE_TOKEN_COLUMNS + ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(token_id) DO UPDATE SET expires_at=excluded.expires_at, rotated_at=excluded.rotated_at, revoked_at=excluded.revoked_at, rotation_request_hash=CASE WHEN excluded.rotation_request_hash != '' THEN excluded.rotation_request_hash ELSE bridge_tokens.rotation_request_hash END;"
+	query := "INSERT INTO bridge_tokens (" + BRIDGE_TOKEN_COLUMNS + ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(token_id) DO UPDATE SET expires_at=excluded.expires_at, rotated_at=excluded.rotated_at, revoked_at=excluded.revoked_at, rotation_request_hash=CASE WHEN excluded.rotation_request_hash != '' THEN excluded.rotation_request_hash ELSE bridge_tokens.rotation_request_hash END;"
 	if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return domain.Bridge_Token{}, false, domain.domain_error(.Internal_Error, "failed to prepare bridge token save")
 	defer sqlite3_finalize(stmt)
 	bind_text(stmt, 1, token.token_id)
@@ -46,6 +46,10 @@ bridge_save_token_sqlite :: proc(ctx: rawptr, token: domain.Bridge_Token) -> (do
 	bind_text(stmt, 11, token.rotated_at)
 	bind_text(stmt, 12, token.revoked_at)
 	bind_text(stmt, 13, token.rotation_request_hash)
+	// first_used_at / regrant_claim are written only by their dedicated
+	// compare-and-set statements; a save never moves them (the UPDATE half omits them).
+	bind_text(stmt, 14, token.first_used_at)
+	bind_text(stmt, 15, token.regrant_claim)
 	if sqlite3_step(stmt) != SQLITE_DONE do return domain.Bridge_Token{}, false, domain.domain_error(.Conflict, "bridge token could not be saved")
 	return token, true, domain.Domain_Error{}
 }
@@ -135,6 +139,40 @@ bridge_revoke_tokens_for_bridge_sqlite :: proc(ctx: rawptr, bridge_id, revoked_a
 	step_rc, row_changes := step_changes(impl.conn.db, stmt)
 	if step_rc != SQLITE_DONE do return 0, false, domain.domain_error(.Internal_Error, "bridge tokens could not be revoked")
 	return row_changes, true, domain.Domain_Error{}
+}
+
+// bridge_mark_token_used_sqlite stamps an access token's first authentication.
+// `AND first_used_at = ''` keeps the first stamp and makes repeats no-ops.
+bridge_mark_token_used_sqlite :: proc(ctx: rawptr, token_id, used_at: string) -> (bool, domain.Domain_Error) {
+	impl := (^Bridge_Repo_SQLite)(ctx)
+	if token_id == "" || used_at == "" do return false, domain.domain_error(.Validation_Failed, "token_id and used_at are required")
+	stmt: sqlite3_stmt = nil
+	query := "UPDATE bridge_tokens SET first_used_at = ? WHERE token_id = ? AND first_used_at = '';"
+	if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return false, domain.domain_error(.Internal_Error, "failed to prepare bridge token use stamp")
+	defer sqlite3_finalize(stmt)
+	bind_text(stmt, 1, used_at)
+	bind_text(stmt, 2, token_id)
+	step_rc, row_changes := step_changes(impl.conn.db, stmt)
+	if step_rc != SQLITE_DONE do return false, domain.domain_error(.Internal_Error, "bridge token use could not be recorded")
+	return row_changes > 0, domain.Domain_Error{}
+}
+
+// bridge_claim_regrant_sqlite is the single-winner claim for a graced re-grant of a
+// spent refresh token: the WHERE clause on the observed claim makes concurrent
+// re-grants resolve in the database, like mark_token_rotated does for first use.
+bridge_claim_regrant_sqlite :: proc(ctx: rawptr, token_id, expected, claim: string) -> (bool, domain.Domain_Error) {
+	impl := (^Bridge_Repo_SQLite)(ctx)
+	if token_id == "" || claim == "" do return false, domain.domain_error(.Validation_Failed, "token_id and claim are required")
+	stmt: sqlite3_stmt = nil
+	query := "UPDATE bridge_tokens SET regrant_claim = ? WHERE token_id = ? AND regrant_claim = ? AND rotated_at != '' AND revoked_at = '';"
+	if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return false, domain.domain_error(.Internal_Error, "failed to prepare bridge token regrant claim")
+	defer sqlite3_finalize(stmt)
+	bind_text(stmt, 1, claim)
+	bind_text(stmt, 2, token_id)
+	bind_text(stmt, 3, expected)
+	step_rc, row_changes := step_changes(impl.conn.db, stmt)
+	if step_rc != SQLITE_DONE do return false, domain.domain_error(.Internal_Error, "bridge token regrant could not be claimed")
+	return row_changes > 0, domain.Domain_Error{}
 }
 
 // bridge_mark_token_rotated_sqlite spends a refresh token.
@@ -289,5 +327,7 @@ bridge_token_from_stmt :: proc(stmt: sqlite3_stmt) -> domain.Bridge_Token {
 		rotated_at = column_text(stmt, 10),
 		revoked_at = column_text(stmt, 11),
 		rotation_request_hash = column_text(stmt, 12),
+		first_used_at = column_text(stmt, 13),
+		regrant_claim = column_text(stmt, 14),
 	}
 }
