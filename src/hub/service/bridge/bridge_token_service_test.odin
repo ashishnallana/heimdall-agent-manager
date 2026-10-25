@@ -503,6 +503,7 @@ test_refresh_retry_with_same_request_id_recovers_a_lost_reply :: proc(t: ^testin
 	testing.expect_value(t, again.family_id, lost.family_id)
 	_, use_ok, use_err := verify_bridge_token(&f.svc, again.access_token)
 	testing.expect(t, use_ok, use_err.message)
+	testing.expect(t, len(f.closed_bridge_ids) == 0, "a recovered retry does not end the live session")
 
 	// The pair minted for the lost reply is revoked: one token never yields two
 	// live generations.
@@ -539,10 +540,11 @@ test_refresh_retry_without_matching_request_id_or_after_window_is_theft :: proc(
 		_, replay_ok, replay_err := refresh_bridge_token(&f.svc, enrolled.refresh_token, c.request_id)
 		testing.expectf(t, !replay_ok, "%s: a replay outside the exact retry is refused", c.tag)
 		testing.expect_value(t, replay_err.message, "invalid_grant")
-		// Reuse detection fired: the whole family is gone.
+		// Reuse detection fired: the whole family is gone and the session is ended.
 		family, _ := iface.bridge_list_tokens_by_family(f.svc.repo, enrolled.family_id)
 		for tok in family do testing.expectf(t, tok.revoked_at != "", "%s: every token of the family is revoked", c.tag)
 		free_bridge_tokens(family)
+		testing.expectf(t, len(f.closed_bridge_ids) == 1, "%s: theft ends the bridge's live session", c.tag)
 		teardown_token_fixture(f)
 	}
 }

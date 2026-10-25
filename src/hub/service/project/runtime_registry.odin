@@ -108,6 +108,51 @@ Bridge_Runtime_Connection :: struct {
 	log_tokens_tick_ns: i64,
 	terminal_count: int,
 	next_sweep_ns: i64,
+	// SESSION CREDENTIAL BOUND. The bridge WebSocket is authenticated once, at the
+	// upgrade, by an `hba_` access token that lives one hour. Without a bound the
+	// session outlived its credential: a bridge whose token had expired (or been
+	// revoked) kept receiving launch_agent and PTY traffic for as long as the socket
+	// stayed up (incident, 2026-10-25). auth_expires_unix_ms is the WALL-CLOCK
+	// instant (unix ms) the presented token stops authenticating; 0 = no bound
+	// recorded (unit fixtures that drive frames without an upgrade). Atomic: the
+	// reader writes it (upgrade, in-band bridge_reauth), command senders read it.
+	auth_expires_unix_ms: i64,
+	// The token row backing the session, for the reader's periodic revocation
+	// re-check. Reader-thread only.
+	auth_token_id: [64]u8,
+	auth_token_id_len: int,
+}
+
+// bridge_runtime_wall_ms is the clock the session bound is compared against.
+bridge_runtime_wall_ms :: proc() -> i64 {
+	return time.to_unix_nanoseconds(time.now()) / 1_000_000
+}
+
+// bridge_runtime_connection_set_auth records the credential backing a session:
+// its token id and how long it remains valid from now (`valid_for_ms`, computed by
+// the caller against the hub clock so a test's fake clock and the wall clock never
+// mix). valid_for_ms <= 0 bounds the session at now.
+bridge_runtime_connection_set_auth :: proc(c: ^Bridge_Runtime_Connection, token_id: string, valid_for_ms: i64) {
+	if c == nil do return
+	n := min(len(token_id), len(c.auth_token_id))
+	copy(c.auth_token_id[:], token_id[:n])
+	c.auth_token_id_len = n
+	sync.atomic_store(&c.auth_expires_unix_ms, bridge_runtime_wall_ms() + max(valid_for_ms, 0))
+}
+
+bridge_runtime_connection_auth_token_id :: proc(c: ^Bridge_Runtime_Connection) -> string {
+	if c == nil do return ""
+	return string(c.auth_token_id[:c.auth_token_id_len])
+}
+
+// bridge_runtime_connection_auth_expired reports whether the session's credential
+// has run out. A connection with no recorded bound is not expired.
+bridge_runtime_connection_auth_expired :: proc(c: ^Bridge_Runtime_Connection, now_ms: i64 = 0) -> bool {
+	if c == nil do return false
+	expires := sync.atomic_load(&c.auth_expires_unix_ms)
+	if expires <= 0 do return false
+	now := now_ms if now_ms > 0 else bridge_runtime_wall_ms()
+	return now >= expires
 }
 
 Bridge_Runtime_Registry :: struct {

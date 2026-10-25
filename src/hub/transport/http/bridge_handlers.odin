@@ -1752,6 +1752,16 @@ bridge_ws_upgrade_handler :: proc(ctx: rawptr, req: Request, client: net.TCP_Soc
 		return
 	}
 	defer domain.bridge_destroy(&bridge)
+	// Bind the session to the credential that opened it, for its whole lifetime:
+	// the reader closes it at expiry (unless renewed in-band with bridge_reauth) or
+	// on revocation, and command senders refuse it once expired.
+	session_cred, session_ok := bridge_service.access_token_session_credential(h.bridges, token)
+	if !session_ok {
+		bridge_metrics_connect_result(admitted_bridge.bridge_id, "auth_failed")
+		_ = write_ws_text_frame(client, bridge_ws_session_error_payload(BRIDGE_WS_TOKEN_EXPIRED_CODE, "bridge access token could not be bound to the session"))
+		return
+	}
+	project_service.bridge_runtime_connection_set_auth(connection, session_cred.token_id, session_cred.valid_for_ms)
 	// Inbound bytes for this connection land on the registry-owned series.
 	reader.bytes_series = connection.rx_bytes
 	project_service.bridge_runtime_registry_set_command_socket(h.bridge_runtime_registry, bridge.bridge_id, client, hello.generation)
@@ -1994,15 +2004,51 @@ bridge_ws_runtime_loop :: proc(
 	// buffer needs no lock; it is freed on loop return / disconnect.
 	reassemblies := make([dynamic]Bridge_Chunk_Reassembly)
 	defer bridge_chunk_reassemblies_free(&reassemblies)
+	connection := (^project_service.Bridge_Runtime_Connection)(reader.control_context)
+	last_frame := time.tick_now()
+	next_revalidate := time.tick_add(time.tick_now(), bridge_ws_revalidate_interval)
 	for {
 		// 120s read deadline decoupled from the bridge's idle heartbeat cadence
 		// (BRIDGE_HEARTBEAT_INTERVAL_SECONDS = 45s): a single delayed/dropped heartbeat
 		// still leaves a full extra beat of margin before we treat the bridge as
 		// gone, so we never tear down a healthy connection at the cadence edge.
-		text, ok, read_reason := bridge_ws_read_frame(reader, 120 * time.Second)
+		//
+		// The read also wakes EARLY, at the session credential's expiry and at each
+		// revocation re-check, so an idle session is ended on time. An early wake is
+		// not idleness: the 120s idle rule still counts from the last frame.
+		wait := BRIDGE_WS_IDLE_DEADLINE - time.tick_since(last_frame)
+		wait = min(wait, max(time.Duration(0), time.tick_diff(time.tick_now(), next_revalidate)))
+		if connection != nil {
+			if expires := sync.atomic_load(&connection.auth_expires_unix_ms); expires > 0 {
+				wait = min(wait, time.Duration(max(expires - project_service.bridge_runtime_wall_ms(), 0)) * time.Millisecond)
+			}
+		}
+		wait = max(wait, BRIDGE_WS_MIN_READ_WAIT)
+		text, ok, read_reason := bridge_ws_read_frame(reader, wait)
+		if !ok && read_reason == .Read_Deadline && time.tick_since(last_frame) < BRIDGE_WS_IDLE_DEADLINE {
+			if end := bridge_ws_session_check(h, connection, bridge_id, client, &next_revalidate); end != .None {
+				reason = end
+				return
+			}
+			continue
+		}
 		if !ok {
 			reason = read_reason
+			// A command sender that found the credential expired wakes this reader with
+			// shutdown(.Receive), which reads as a clean close. Report it as what it is,
+			// and still tell the bridge why (the write side is open).
+			if reason == .Clean_Close && project_service.bridge_runtime_connection_auth_expired(connection) {
+				reason = bridge_ws_session_check(h, connection, bridge_id, client, &next_revalidate)
+			}
 			if reason == .Fatal_Frame do metrics.counter_inc(metrics.with(project_service.fleet_metrics.bridge_frames_rejected, "fatal_frame"))
+			return
+		}
+		last_frame = time.tick_now()
+		// Inbound half of the bound: a frame that arrives after the credential ran out
+		// is refused, never dispatched, so nothing slips in between timed checks.
+		if end := bridge_ws_session_check(h, connection, bridge_id, client, &next_revalidate); end != .None {
+			delete(text)
+			reason = end
 			return
 		}
 		if reader.last_opcode == 0x2 {
@@ -2013,7 +2059,11 @@ bridge_ws_runtime_loop :: proc(
 			}
 			continue
 		}
-		if !bridge_ws_process_frame(h, bridge_id, connection_generation, client, &reassemblies, text, (^project_service.Bridge_Runtime_Connection)(reader.control_context)) {
+		if bridge_ws_try_reauth(h, connection, bridge_id, client, text) {
+			delete(text)
+			continue
+		}
+		if !bridge_ws_process_frame(h, bridge_id, connection_generation, client, &reassemblies, text, connection) {
 			// process_frame refuses a frame either because a newer connection replaced
 			// this one (it says so on the wire via bridge_connection_replaced_payload)
 			// or because dispatch rejected it. Distinguish the two: a replacement is
@@ -2023,6 +2073,145 @@ bridge_ws_runtime_loop :: proc(
 			return
 		}
 	}
+}
+
+BRIDGE_WS_IDLE_DEADLINE :: 120 * time.Second
+// Floor on one read's wait, so a bound that is already due is handled by the next
+// check rather than by spinning on zero-length reads.
+BRIDGE_WS_MIN_READ_WAIT :: 50 * time.Millisecond
+// How often a live session re-reads its token row for revocation. Bridge revocation
+// itself closes the socket at once (close_bridge_connection); this catches every
+// other way a credential dies (family reuse detection, an attach that retires the
+// old device, a revocation on another hub process sharing the database).
+// A variable only so a test can shorten it; production never writes it.
+bridge_ws_revalidate_interval := 60 * time.Second
+
+// Wire codes the bridge recognises on a session that is being ended for its
+// credential. Sent as bridge_error.payload.code and as the WS close reason.
+BRIDGE_WS_TOKEN_EXPIRED_CODE :: "bridge_token_expired"
+BRIDGE_WS_CREDENTIAL_REVOKED_CODE :: "bridge_credential_revoked"
+
+// bridge_ws_session_check enforces the session credential bound: expired (wall
+// clock against the bound recorded at upgrade or bridge_reauth), or revoked /
+// expired per the token row (re-read every bridge_ws_revalidate_interval). On
+// either it tells the bridge why, sends a close frame, and returns the teardown
+// reason; the caller returns and the reader closes the socket.
+bridge_ws_session_check :: proc(h: ^Bridge_Handlers, connection: ^project_service.Bridge_Runtime_Connection, bridge_id: string, client: net.TCP_Socket, next_revalidate: ^time.Tick) -> Bridge_WS_Disconnect_Reason {
+	if connection == nil do return .None
+	if project_service.bridge_runtime_connection_auth_expired(connection) {
+		bridge_ws_end_session(h, bridge_id, client, BRIDGE_WS_TOKEN_EXPIRED_CODE, "bridge access token has expired; reconnect with the refreshed credential")
+		return .Credential_Expired
+	}
+	if time.tick_diff(next_revalidate^, time.tick_now()) < 0 do return .None
+	next_revalidate^ = time.tick_add(time.tick_now(), bridge_ws_revalidate_interval)
+	// The reader is a persistent heap loop: scope every allocation of the row
+	// re-read to a temp region so a once-a-minute check never accumulates.
+	temp := runtime.default_temp_allocator_temp_begin()
+	defer runtime.default_temp_allocator_temp_end(temp)
+	context.allocator = context.temp_allocator
+	token_id := project_service.bridge_runtime_connection_auth_token_id(connection)
+	if token_id == "" || h.bridges == nil do return .None
+	switch bridge_service.session_credential_state(h.bridges, token_id) {
+	case .Valid:
+		return .None
+	case .Expired:
+		bridge_ws_end_session(h, bridge_id, client, BRIDGE_WS_TOKEN_EXPIRED_CODE, "bridge access token has expired; reconnect with the refreshed credential")
+		return .Credential_Expired
+	case .Revoked:
+		bridge_ws_end_session(h, bridge_id, client, BRIDGE_WS_CREDENTIAL_REVOKED_CODE, "bridge credential is revoked")
+		return .Credential_Revoked
+	}
+	return .None
+}
+
+// bridge_ws_end_session sends the typed reason and a WS close (4401) under the
+// connection's writer lock. Best effort: the socket is closing either way.
+bridge_ws_end_session :: proc(h: ^Bridge_Handlers, bridge_id: string, client: net.TCP_Socket, code, message: string) {
+	fmt.printfln("ham-hub bridge session ended bridge=%s reason=%s", bridge_id, code)
+	payload := bridge_ws_session_error_payload(code, message, context.temp_allocator)
+	connection := project_service.bridge_runtime_connection_acquire(h.bridge_runtime_registry, bridge_id)
+	if connection == nil do return
+	defer project_service.bridge_runtime_connection_release(h.bridge_runtime_registry, connection)
+	project_service.bridge_runtime_connection_lock_writer(connection)
+	defer sync.unlock(&connection.writer_mutex)
+	if connection.socket != client do return
+	_ = ws.write_server_text(client, payload, false)
+	frame: [2 + 2 + 32]byte
+	n := min(len(code), 32)
+	frame[0] = 0x88 // FIN + CLOSE
+	frame[1] = u8(2 + n)
+	frame[2] = 0x11 // 4401, network byte order
+	frame[3] = 0x31
+	copy(frame[4:], code[:n])
+	_, _ = net.send_tcp(client, frame[:4 + n])
+}
+
+Bridge_WS_Session_Error_Payload :: struct {
+	code:    string,
+	message: string,
+}
+Bridge_WS_Session_Error :: struct {
+	type:             string,
+	protocol_version: int,
+	payload:          Bridge_WS_Session_Error_Payload,
+}
+
+// bridge_ws_session_error_payload is a bridge_error frame with a machine-readable
+// code. Older bridges log `message`; newer ones act on `code`.
+bridge_ws_session_error_payload :: proc(code, message: string, allocator := context.temp_allocator) -> string {
+	data, err := json.marshal(Bridge_WS_Session_Error{type = "bridge_error", protocol_version = 1, payload = {code = code, message = message}}, allocator = allocator)
+	if err != nil do return `{"type":"bridge_error","protocol_version":1,"payload":{"code":"internal_error"}}`
+	return string(data)
+}
+
+Bridge_Reauth_Result_Payload :: struct {
+	ok:         bool,
+	expires_in: int,
+	code:       string,
+	message:    string,
+}
+Bridge_Reauth_Result :: struct {
+	type:             string,
+	protocol_version: int,
+	payload:          Bridge_Reauth_Result_Payload,
+}
+
+// bridge_ws_try_reauth handles an in-band `bridge_reauth` frame: the bridge renews
+// the session's credential after a refresh instead of reconnecting. The new token
+// must verify and belong to THIS bridge; the session is then re-bound to it. A
+// failed reauth changes nothing (the old bound still applies) and is answered
+// ok:false. Returns false for any other frame. Advertised in bridge_ready as
+// credential_reauth:true; a bridge that never sends it simply reconnects with its
+// refreshed token when the session ends.
+bridge_ws_try_reauth :: proc(h: ^Bridge_Handlers, connection: ^project_service.Bridge_Runtime_Connection, bridge_id: string, client: net.TCP_Socket, text: string) -> bool {
+	if !strings.contains(text, `"bridge_reauth"`) do return false
+	temp := runtime.default_temp_allocator_temp_begin()
+	defer runtime.default_temp_allocator_temp_end(temp)
+	context.allocator = context.temp_allocator
+	frame: struct {
+		type:         string,
+		access_token: string,
+	}
+	if json.unmarshal_string(text, &frame, json.Specification.JSON, context.temp_allocator) != nil || frame.type != "bridge_reauth" do return false
+	result := Bridge_Reauth_Result{type = "bridge_reauth_result", protocol_version = 1}
+	auth, ok, err := bridge_service.verify_bridge_token(h.bridges, frame.access_token)
+	cred: bridge_service.Session_Credential
+	cred_ok := false
+	if ok && auth.bridge_id == bridge_id {
+		cred, cred_ok = bridge_service.access_token_session_credential(h.bridges, frame.access_token)
+	}
+	if cred_ok && connection != nil {
+		project_service.bridge_runtime_connection_set_auth(connection, cred.token_id, cred.valid_for_ms)
+		result.payload = {ok = true, expires_in = int(cred.valid_for_ms / 1000)}
+	} else {
+		message := err.message if !ok else "the credential does not belong to this bridge"
+		result.payload = {ok = false, code = BRIDGE_WS_CREDENTIAL_REVOKED_CODE if err.code == .Forbidden else BRIDGE_WS_TOKEN_EXPIRED_CODE, message = message}
+		fmt.printfln("ham-hub bridge reauth refused bridge=%s: %s", bridge_id, message)
+	}
+	if data, merr := json.marshal(result, allocator = context.temp_allocator); merr == nil {
+		_ = write_ws_text_frame_locked(h, bridge_id, client, string(data))
+	}
+	return true
 }
 
 // bridge_ws_process_binary_frame routes one bridge->hub BINARY frame (REQ-PTY-NET-2).
@@ -2969,6 +3158,9 @@ bridge_ready_payload :: proc(bridge_id: string, generation: int, replaced: bool,
 	strings.write_string(&b, "\"")
 	strings.write_string(&b, ",\"heartbeat_stats\":")
 	strings.write_string(&b, "true" if heartbeat_stats else "false")
+	// This hub bounds the session by its credential and accepts in-band
+	// bridge_reauth after a refresh (bridge_ws_try_reauth).
+	strings.write_string(&b, ",\"credential_reauth\":true")
 	strings.write_string(&b, "}}")
 	return strings.to_string(b)
 }

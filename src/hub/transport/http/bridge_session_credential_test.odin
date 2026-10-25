@@ -279,6 +279,201 @@ free_frames :: proc(frames: [dynamic]string) {
 	delete(frames)
 }
 
+// A session whose access token expires mid-connection is closed with
+// bridge_token_expired, and no command reaches it afterwards.
+@(test)
+test_bridge_session_is_closed_when_its_token_expires :: proc(t: ^testing.T) {
+	f := setup_session_fixture(t)
+	defer teardown_session_fixture(f)
+	age_token_to(f, 2)
+	socks := session_socks(t)
+	runner: Session_Runner
+	stream := Session_Stream{sock = socks.client}
+	th, ready := session_connect(t, f, &socks, &runner, &stream, f.enrolled.bridge_token)
+	defer session_finish(&socks, th, &stream)
+	testing.expect(t, strings.contains(ready, `"credential_reauth":true`), "the hub advertises in-band renewal")
+	delete(ready)
+
+	found, frames := session_wait_for(&stream, `"bridge_token_expired"`, 6 * time.Second)
+	defer free_frames(frames)
+	testing.expect(t, found, "the expired session is told why it ends")
+	for _ in 0 ..< 100 {
+		if sync.atomic_load(&runner.returned) do break
+		time.sleep(20 * time.Millisecond)
+	}
+	testing.expect(t, sync.atomic_load(&runner.returned), "the session ended at its credential's expiry")
+
+	// No command can be delivered to it any more.
+	sent, send_err := bridge_runtime_service.send_runtime_command(rawptr(&f.registry), project_service.Runtime_Command{
+		bridge_id = f.enrolled.bridge.bridge_id, command_id = "cmd_after_expiry",
+		body_json = `{"type":"launch_agent","command_id":"cmd_after_expiry"}`,
+	})
+	testing.expect(t, !sent, "launch_agent is not dispatched to an expired session")
+	testing.expect_value(t, send_err.code, domain.Error_Code.Bridge_Offline)
+}
+
+// The send-side gate on its own: a session whose bound has passed refuses every
+// command before the reader has even noticed, and wakes the reader instead.
+@(test)
+test_expired_session_refuses_commands_before_the_reader_notices :: proc(t: ^testing.T) {
+	registry: project_service.Bridge_Runtime_Registry
+	socks := session_socks(t)
+	defer { net.close(socks.client); net.close(socks.hub); net.close(socks.listener) }
+	project_service.bridge_runtime_registry_mark_live(&registry, "brg_gate", false, "")
+	project_service.bridge_runtime_registry_set_command_socket(&registry, "brg_gate", socks.hub)
+	connection := project_service.bridge_runtime_connection_acquire(&registry, "brg_gate")
+	project_service.bridge_runtime_connection_set_auth(connection, "btk_gate", -1)
+	project_service.bridge_runtime_connection_release(&registry, connection)
+
+	ok, err := bridge_runtime_service.send_runtime_command(rawptr(&registry), project_service.Runtime_Command{bridge_id = "brg_gate", command_id = "c1", body_json = `{"type":"launch_agent","command_id":"c1"}`})
+	testing.expect(t, !ok)
+	testing.expect(t, strings.contains(err.message, "expired"), err.message)
+	bin_ok, _ := bridge_runtime_service.send_runtime_binary(rawptr(&registry), "brg_gate", []byte{1, 2, 3})
+	testing.expect(t, !bin_ok, "PTY input is not delivered either")
+	// Nothing reached the bridge end.
+	_ = net.set_option(socks.client, .Receive_Timeout, 200 * time.Millisecond)
+	buf: [64]byte
+	n, _ := net.recv_tcp(socks.client, buf[:])
+	testing.expect(t, n <= 0, "no bytes were written to the expired session")
+	// And the hub-side reader was woken: its receive side is shut down.
+	_ = net.set_option(socks.hub, .Receive_Timeout, 2 * time.Second)
+	m, rerr := net.recv_tcp(socks.hub, buf[:])
+	testing.expect(t, m == 0 && rerr == nil, "the reader wakes to a clean EOF and closes the session itself")
+}
+
+// An inbound frame that arrives after expiry is refused, not dispatched: the
+// heartbeat below would otherwise be answered with bridge_heartbeat_ack.
+@(test)
+test_inbound_frame_after_expiry_is_refused :: proc(t: ^testing.T) {
+	f := setup_session_fixture(t)
+	defer teardown_session_fixture(f)
+	socks := session_socks(t)
+	defer { net.close(socks.client); net.close(socks.hub); net.close(socks.listener) }
+	bridge_id := f.enrolled.bridge.bridge_id
+	_, generation, live_ok := project_service.bridge_runtime_registry_accept_live(&f.registry, bridge_id, false, "", f.owner_user_id)
+	testing.expect(t, live_ok)
+	project_service.bridge_runtime_registry_set_command_socket(&f.registry, bridge_id, socks.hub, generation)
+	connection := project_service.bridge_runtime_connection_acquire(&f.registry, bridge_id, generation)
+	defer project_service.bridge_runtime_connection_release(&f.registry, connection)
+	project_service.bridge_runtime_connection_set_auth(connection, "btk_inbound", -1)
+
+	// The frame is already waiting when the loop reads.
+	session_send(socks.client, `{"type":"bridge_heartbeat","protocol_version":1,"active_instance_ids":[]}`)
+	time.sleep(50 * time.Millisecond)
+	reader := bridge_ws_reader_make(socks.hub)
+	defer bridge_ws_reader_destroy(&reader)
+	reader.control_context = rawptr(connection)
+	bridge_ws_runtime_loop(&f.bh, bridge_id, generation, &reader)
+
+	stream := Session_Stream{sock = socks.client}
+	defer delete(stream.pending)
+	found, frames := session_wait_for(&stream, `"bridge_token_expired"`, 2 * time.Second)
+	defer free_frames(frames)
+	testing.expect(t, found, "the session is ended with bridge_token_expired")
+	for fr in frames do testing.expect(t, !strings.contains(fr, "bridge_heartbeat_ack"), "the post-expiry frame was not dispatched")
+}
+
+// A bridge that refreshes on schedule renews its live session in-band and keeps
+// working past the old token's expiry: a healthy bridge is never disconnected.
+@(test)
+test_refreshed_session_keeps_working_after_reauth :: proc(t: ^testing.T) {
+	f := setup_session_fixture(t)
+	defer teardown_session_fixture(f)
+	age_token_to(f, 3)
+	socks := session_socks(t)
+	runner: Session_Runner
+	stream := Session_Stream{sock = socks.client}
+	th, ready := session_connect(t, f, &socks, &runner, &stream, f.enrolled.bridge_token)
+	defer session_finish(&socks, th, &stream)
+	delete(ready)
+
+	pair, ok, err := bridge_service.refresh_bridge_token(&f.br_svc, f.enrolled.refresh_token, "rrq_0123456789abcdef0123")
+	testing.expect(t, ok, err.message)
+	session_send(socks.client, fmt.tprintf(`{{"type":"bridge_reauth","access_token":"%s"}}`, pair.access_token))
+	renewed, frames := session_wait_for(&stream, `"bridge_reauth_result"`, 2 * time.Second)
+	defer free_frames(frames)
+	testing.expect(t, renewed && strings.contains(frames[len(frames) - 1], `"ok":true`), "the refreshed credential renews the session")
+
+	// Well past the ORIGINAL token's end: still up, still answering.
+	time.sleep(4 * time.Second)
+	testing.expect(t, !sync.atomic_load(&runner.returned), "the renewed session was not closed at the old expiry")
+	session_send(socks.client, `{"type":"bridge_heartbeat","protocol_version":1,"active_instance_ids":[]}`)
+	acked, frames2 := session_wait_for(&stream, "bridge_heartbeat_ack", 3 * time.Second)
+	defer free_frames(frames2)
+	testing.expect(t, acked, "the renewed session keeps working")
+	for fr in frames2 do testing.expect(t, !strings.contains(fr, "bridge_token_expired"))
+}
+
+// A reauth with a credential that is not this bridge's is refused and changes
+// nothing; the session still ends at its own expiry.
+@(test)
+test_reauth_with_a_foreign_or_bogus_token_is_refused :: proc(t: ^testing.T) {
+	f := setup_session_fixture(t)
+	defer teardown_session_fixture(f)
+	other, o_ok, _ := bridge_service.enroll_bridge_from_device_grant(&f.br_svc, bridge_service.Device_Enroll_Input{
+		owner_user_id = f.owner_user_id, bridge_public_key = "04ccdd", bridge_key_fingerprint = "cccc dddd eeee ffff", machine_hostname = "other-box",
+	})
+	testing.expect(t, o_ok)
+	age_token_to(f, 3)
+	socks := session_socks(t)
+	runner: Session_Runner
+	stream := Session_Stream{sock = socks.client}
+	th, ready := session_connect(t, f, &socks, &runner, &stream, f.enrolled.bridge_token)
+	defer session_finish(&socks, th, &stream)
+	delete(ready)
+	session_send(socks.client, fmt.tprintf(`{{"type":"bridge_reauth","access_token":"%s"}}`, other.bridge_token))
+	_, frames := session_wait_for(&stream, `"bridge_reauth_result"`, 2 * time.Second)
+	defer free_frames(frames)
+	testing.expect(t, len(frames) > 0 && strings.contains(frames[len(frames) - 1], `"ok":false`), "another bridge's token cannot renew this session")
+	ended, frames2 := session_wait_for(&stream, `"bridge_token_expired"`, 6 * time.Second)
+	defer free_frames(frames2)
+	testing.expect(t, ended, "the session still ends at its own credential's expiry")
+}
+
+// Refresh-token reuse detection revokes the family; the live session (whose access
+// token is in that family) is ended promptly, not at its expiry.
+@(test)
+test_refresh_token_reuse_ends_the_live_session :: proc(t: ^testing.T) {
+	f := setup_session_fixture(t)
+	defer teardown_session_fixture(f)
+	socks := session_socks(t)
+	runner: Session_Runner
+	stream := Session_Stream{sock = socks.client}
+	th, ready := session_connect(t, f, &socks, &runner, &stream, f.enrolled.bridge_token)
+	defer session_finish(&socks, th, &stream)
+	delete(ready)
+	_, ok, err := bridge_service.refresh_bridge_token(&f.br_svc, f.enrolled.refresh_token)
+	testing.expect(t, ok, err.message)
+	sync.atomic_add(&f.fake.unix_seconds, i64(bridge_service.BRIDGE_REFRESH_REUSE_GRACE_SECONDS + 5))
+	_, replay_ok, _ := bridge_service.refresh_bridge_token(&f.br_svc, f.enrolled.refresh_token)
+	testing.expect(t, !replay_ok, "the replayed token is refused")
+	for _ in 0 ..< 150 {
+		if sync.atomic_load(&runner.returned) do break
+		time.sleep(20 * time.Millisecond)
+	}
+	testing.expect(t, sync.atomic_load(&runner.returned), "reuse detection tore the live session down")
+}
+
+// Any other revocation of the session's token (here, the family revoked directly,
+// with no closer involved) is caught by the reader's periodic re-check.
+@(test)
+test_revoked_family_is_caught_by_the_session_recheck :: proc(t: ^testing.T) {
+	f := setup_session_fixture(t)
+	defer teardown_session_fixture(f)
+	bridge_ws_revalidate_interval = 300 * time.Millisecond
+	socks := session_socks(t)
+	runner: Session_Runner
+	stream := Session_Stream{sock = socks.client}
+	th, ready := session_connect(t, f, &socks, &runner, &stream, f.enrolled.bridge_token)
+	defer session_finish(&socks, th, &stream)
+	delete(ready)
+	_, revoked_ok, _ := iface.bridge_revoke_token_family(&f.br_repo, f.enrolled.family_id, platform.clock_now(&f.hub_clock))
+	testing.expect(t, revoked_ok)
+	found, frames := session_wait_for(&stream, `"bridge_credential_revoked"`, 3 * time.Second)
+	defer free_frames(frames)
+	testing.expect(t, found, "the revoked session is told why it ends")
+}
+
 // ===== Refresh reply: typed marshal, decoded by the bridge's real decoder =====
 
 @(test)

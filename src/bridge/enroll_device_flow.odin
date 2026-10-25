@@ -1788,6 +1788,9 @@ bridge_refresh_adopt :: proc(cred: Bridge_Enroll_Credential) {
     sync.mutex_lock(&g_bridge_credential_mu)
     bridge_config.bridge_token = strings.clone(cred.access_token, runtime.heap_allocator())
     sync.mutex_unlock(&g_bridge_credential_mu)
+    // Renew the live hub session in-band with the new access token
+    // (bridge_credential_reauth_drain, on the hub runtime loop).
+    sync.atomic_store(&bridge_credential_reauth_pending, true)
     key := bridge_action_scheduler_sync_key()
     defer delete(key)
     bridge_retry_credential_repaired(key)

@@ -75,6 +75,7 @@ send_runtime_binary :: proc(ctx: rawptr, bridge_id: string, frame: []byte) -> (b
 	defer sync.unlock(&connection.writer_mutex)
 	socket := connection.socket
 	if socket == net.TCP_Socket(0) || sync.atomic_load(&connection.retired) do return false, domain.domain_error(.Bridge_Offline, "bridge websocket command path is not connected")
+	if connection_refuse_if_expired(connection, socket) do return false, command_write_error(.Auth_Expired)
 	result := ws.write_server_opcode(socket, 0x2, string(frame), false)
 	if result == .Peer_Gone || result == .Desynchronised do _ = net.shutdown(net.Any_Socket(socket), .Both)
 	if result != .Ok do return false, command_write_error(.Send_Failed if result != .Too_Large else .Too_Large)
@@ -282,6 +283,20 @@ Command_Write_Result :: enum {
 	Send_Failed,
 	// The connection was retired or has no socket (write_ws_command_on_connection).
 	Not_Connected,
+	// The session's credential has expired: no command is delivered to it, and its
+	// reader is woken to close it (see Bridge_Runtime_Connection.auth_expires_unix_ms).
+	Auth_Expired,
+}
+
+// connection_refuse_if_expired is the outbound half of the session credential
+// bound: nothing is sent on a session whose token has expired, so work cannot leak
+// through between the reader's checks. The reader is WOKEN with shutdown(.Receive)
+// and closes the socket itself (AGENTS.md: the reader owns the fd). Caller holds
+// writer_mutex, so the socket is still the connection's.
+connection_refuse_if_expired :: proc(connection: ^project_service.Bridge_Runtime_Connection, socket: net.TCP_Socket) -> bool {
+	if !project_service.bridge_runtime_connection_auth_expired(connection) do return false
+	_ = net.shutdown(net.Any_Socket(socket), .Receive)
+	return true
 }
 
 // write_ws_command writes one hub->bridge command, CHUNKING it when it does not fit in
@@ -356,6 +371,7 @@ write_ws_command_on_connection :: proc(connection: ^project_service.Bridge_Runti
 		defer sync.unlock(&connection.writer_mutex)
 		socket := connection.socket
 		if socket == net.TCP_Socket(0) || sync.atomic_load(&connection.retired) do return .Not_Connected
+		if connection_refuse_if_expired(connection, socket) do return .Auth_Expired
 		wrote := write_ws_command(socket, text)
 		if wrote == .Send_Failed do _ = net.shutdown(net.Any_Socket(socket), .Both)
 		return wrote
@@ -371,8 +387,10 @@ write_ws_command_on_connection :: proc(connection: ^project_service.Bridge_Runti
 	defer sync.unlock(&connection.chunk_sequence_mutex)
 	sync.lock(&connection.writer_mutex)
 	socket := connection.socket
+	expired := socket != net.TCP_Socket(0) && connection_refuse_if_expired(connection, socket)
 	sync.unlock(&connection.writer_mutex)
 	if socket == net.TCP_Socket(0) || sync.atomic_load(&connection.retired) do return .Not_Connected
+	if expired do return .Auth_Expired
 	for f, i in frames {
 		// Let waiting single-frame writers (acks, pongs, small commands) go first, but
 		// only for CHUNK_YIELD_MAX: a steady stream of small frames must not starve the
@@ -417,6 +435,8 @@ command_write_error :: proc(result: Command_Write_Result) -> domain.Domain_Error
 		return domain.domain_error(.Bridge_Offline, "bridge websocket command send failed")
 	case .Not_Connected:
 		return domain.domain_error(.Bridge_Offline, "bridge websocket command path is not connected")
+	case .Auth_Expired:
+		return domain.domain_error(.Bridge_Offline, "bridge credential has expired; its session is closing")
 	}
 	return domain.domain_error(.Internal_Error, "unknown bridge command write result")
 }

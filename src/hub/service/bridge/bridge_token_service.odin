@@ -378,6 +378,63 @@ verify_access_token_scoped :: proc(service: ^Bridge_Service, token: string, scop
 	return contracts.Auth_Context{kind = .Bridge_Token, user_id = string(bridge.owner_user_id), bridge_id = bridge.bridge_id}, row.family_id, true, domain.Domain_Error{}
 }
 
+// Session_Credential is what a live bridge session is bound to: the token row that
+// authenticated it and how long, from now on the hub clock, it keeps
+// authenticating. The bridge WebSocket checks it for the whole session (expiry) and
+// re-reads the row periodically (revocation); see bridge_ws_runtime_loop.
+Session_Credential :: struct {
+	token_id:     string, // temp-allocated
+	valid_for_ms: i64,
+}
+
+// access_token_session_credential resolves an ALREADY VERIFIED `hba_` token to its
+// session bound. valid_for_ms runs to the same instant verify_access_token stops
+// accepting it: expires_at plus the clock-skew grace, never past the family cap.
+access_token_session_credential :: proc(service: ^Bridge_Service, token: string) -> (Session_Credential, bool) {
+	if service == nil || service.repo == nil do return {}, false
+	token_id, _, split_ok := split_credential(ACCESS_TOKEN_PREFIX, token)
+	if !split_ok do return {}, false
+	row, ok, _ := iface.bridge_get_token(service.repo, token_id)
+	if !ok || row.kind != .Access do return {}, false
+	defer domain.bridge_token_destroy(&row)
+	now_ms, now_ok := platform.rfc3339_to_unix_ms(platform.clock_now(service.clock))
+	exp_ms, exp_ok := platform.rfc3339_to_unix_ms(row.expires_at)
+	if !now_ok || !exp_ok do return {}, false
+	until := exp_ms + i64(BRIDGE_TOKEN_CLOCK_SKEW_SECONDS) * 1000
+	if row.family_expires_at != "" {
+		if cap_ms, cap_ok := platform.rfc3339_to_unix_ms(row.family_expires_at); cap_ok {
+			until = min(until, cap_ms + i64(BRIDGE_TOKEN_CLOCK_SKEW_SECONDS) * 1000)
+		}
+	}
+	return Session_Credential{token_id = strings.clone(token_id, context.temp_allocator), valid_for_ms = until - now_ms}, true
+}
+
+// Session_Credential_State is the outcome of re-checking a live session's token row.
+Session_Credential_State :: enum {
+	Valid,
+	Revoked,
+	Expired,
+}
+
+// session_credential_state re-reads a live session's token row: revoked (token,
+// family or bridge) or expired by the hub clock ends the session. A row that has
+// vanished is treated as revoked.
+session_credential_state :: proc(service: ^Bridge_Service, token_id: string) -> Session_Credential_State {
+	if service == nil || service.repo == nil || token_id == "" do return .Revoked
+	row, ok, _ := iface.bridge_get_token(service.repo, token_id)
+	if !ok do return .Revoked
+	defer domain.bridge_token_destroy(&row)
+	if row.revoked_at != "" do return .Revoked
+	bridge, bridge_ok, _ := iface.bridge_get_bridge(service.repo, row.bridge_id)
+	if !bridge_ok do return .Revoked
+	defer domain.bridge_destroy(&bridge)
+	if bridge.status == .Revoked do return .Revoked
+	now := platform.clock_now(service.clock)
+	if token_is_expired(row.expires_at, now) do return .Expired
+	if row.family_expires_at != "" && token_is_expired(row.family_expires_at, now) do return .Expired
+	return .Valid
+}
+
 // refresh_bridge_token rotates a refresh token (design §7.4).
 //
 // THE ORDER OF THE CHECKS BELOW IS THE SECURITY PROPERTY. Reuse detection must come
@@ -425,8 +482,10 @@ refresh_bridge_token :: proc(service: ^Bridge_Service, presented: string, reques
 		if refresh_is_retry_of_rotation(service, row, request_id, now) || refresh_within_grace(service, row, now) {
 			return rotate_from(service, row, now, revoke_newer_generations = true)
 		}
-		// THEFT (§7.4.3): revoke the whole lineage, both kinds, every generation.
+		// THEFT (§7.4.3): revoke the whole lineage, both kinds, every generation,
+		// and end the bridge's live session: its access token is one of them.
 		_, _, _ = revoke_token_family(service, row.family_id, now)
+		_ = close_bridge_connection(service, row.bridge_id)
 		return Bridge_Token_Pair{}, false, invalid_grant
 	}
 	return rotate_from(service, row, now, revoke_newer_generations = false, request_id = request_id)
