@@ -1540,7 +1540,8 @@ patch_task_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	brief_json, _ := jsonx.extract_raw_object(req.body, "brief", top_level_only = true, allocator = context.temp_allocator)
 	task, updated, err := taskchain_service.update_task(h.taskchains, auth_ctx, task_id, taskchain_service.Update_Task_Input{
 		title = json_string(req.body, "title"), description = json_string(req.body, "description"), brief_json = brief_json,
-		assignee_agent_id = assignee, has_assignee = json_key_present(req.body, "assignee") || json_key_present(req.body, "assignee_ref"),
+		replace_brief = jsonx.extract_bool_literal(req.body, "replace_brief", true) or_else false,
+		assignee_agent_id = assignee, has_assignee = jsonx.has_key(req.body, "assignee", top_level_only = true) || jsonx.has_key(req.body, "assignee_ref", top_level_only = true),
 		review_roles = review_roles, has_review_roles = has_roles, reviewer_agent_ids = reviewers,
 		has_reviewers = jsonx.has_key(req.body, "reviewers", top_level_only = true) || jsonx.has_key(req.body, "reviewer_refs", top_level_only = true),
 		requires_user_approval = requires_user_approval, has_requires_user_approval = has_requires_user_approval, priority = priority, has_priority = has_priority, depends_on = deps, has_depends_on = has_deps, bridge_id = bridge_pin,
@@ -2542,8 +2543,8 @@ task_actor_fields_from_body :: proc(body: string) -> (assignee: string, reviewer
 					if t, tok := obj["type"].(json.String); tok && string(t) == "user" {
 						return "", nil, nil, false, domain.domain_error(.Validation_Failed, "user reviewer refs are not accepted; use requires_user_approval")
 					}
-					if _, iok := obj["agent_instance_id"].(json.String); iok {
-						return "", nil, nil, false, domain.domain_error(.Validation_Failed, "reviewers must be agent template ids (agent_id); instance refs were removed in Task System v2")
+					if iid, iok := obj["agent_instance_id"].(json.String); iok {
+						return "", nil, nil, false, taskv2.reviewer_must_be_agent_id_error(string(iid))
 					}
 					if a, aok := obj["agent_id"].(json.String); aok && string(a) != "" do append(&revs, strings.clone(string(a)))
 				}

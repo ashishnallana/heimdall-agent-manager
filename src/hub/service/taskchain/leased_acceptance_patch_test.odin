@@ -66,7 +66,7 @@ test_leased_task_acceptance_patch_preserves_scope_and_refreshes_lease :: proc(t:
 	testing.expectf(t, aok, "owner can correct acceptance: %s", aerr.message)
 	for input in ([]Update_Task_Input{
 		{brief_json = `{"goal":"changed scope","verify":"true"}`},
-		{title = "renamed"}, {has_reviewers = true}, {has_assignee = true},
+		{title = "renamed"}, {has_reviewers = true, reviewer_agent_ids = []string{"agt_rev"}}, {has_assignee = true, assignee_agent_id = "other"},
 	}) {
 		_, bad_ok, bad_err := update_task(&svc, owner, task.task_id, input)
 		testing.expect(t, !bad_ok && bad_err.code == .Conflict, "leased scope/assignment edits still refused")

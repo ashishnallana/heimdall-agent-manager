@@ -49,6 +49,8 @@ evaluate_gate_in_uow :: proc(svc: ^Service, u: ^Uow, chain: domain.Task_Chain, t
 		json_int(&p, "attempt_no", i64(task.attempt_no))
 		json_str(&p, "role", r.role)
 		json_str(&p, "reviewer", r.reviewer_agent_id if r.reviewer_kind == "agent" else "user")
+		json_str(&p, "reviewer_agent_id", r.reviewer_agent_id)
+		json_str(&p, "reviewer_instance_id", r.reviewer_instance_id)
 		if _, _, ok, err := record_event(svc, u, task, actor, EV_CHANGES_REQUESTED, json_end(&p)); !ok do return .Waiting, false, err
 		if task.kind == .Gate {
 			cp := json_begin()

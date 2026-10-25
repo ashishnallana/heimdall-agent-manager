@@ -326,6 +326,8 @@ review_post :: proc(svc: ^Service, auth: contracts.Auth_Context, input: Review_I
 		json_str(&p, "role", rev_role)
 		json_str(&p, "verdict", input.verdict)
 		json_str(&p, "reviewer", rev_role if rev_role == "user" else inst.agent_instance_id)
+		json_str(&p, "reviewer_agent_id", inst.agent_id)
+		json_str(&p, "reviewer_instance_id", inst.agent_instance_id)
 		json_str(&p, "actor_kind", ACTOR_COORDINATOR)
 		if strings.trim_space(input.on_behalf_of) == "user" {
 			json_str(&p, "on_behalf_of", "user")
@@ -377,6 +379,8 @@ review_post :: proc(svc: ^Service, auth: contracts.Auth_Context, input: Review_I
 	json_str(&p, "role", lease.review_role)
 	json_str(&p, "verdict", input.verdict)
 	json_str(&p, "reviewer", inst.agent_id)
+	json_str(&p, "reviewer_agent_id", inst.agent_id)
+	json_str(&p, "reviewer_instance_id", inst.agent_instance_id)
 	json_raw(&p, "findings", findings)
 	if strings.trim_space(input.summary) != "" do json_str(&p, "summary", strings.trim_space(input.summary))
 	refolded, _, rok, rerr := record_event(svc, &u, task, actor, EV_REVIEW_POSTED, json_end(&p))
@@ -417,6 +421,10 @@ user_review :: proc(svc: ^Service, auth: contracts.Auth_Context, task_id: domain
 	json_str(&p, "role", "user")
 	json_str(&p, "verdict", input.verdict)
 	json_str(&p, "reviewer", "user")
+	// A user review has no agent; the keys are present (empty) so every
+	// review_posted payload has the same shape.
+	json_str(&p, "reviewer_agent_id", "")
+	json_str(&p, "reviewer_instance_id", "")
 	json_raw(&p, "findings", findings)
 	if strings.trim_space(input.summary) != "" do json_str(&p, "summary", strings.trim_space(input.summary))
 	refolded, _, rok, rerr := record_event(svc, &u, task, actor, EV_REVIEW_POSTED, json_end(&p))

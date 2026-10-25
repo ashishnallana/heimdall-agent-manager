@@ -145,8 +145,11 @@ Create_Task_Input :: struct {
 Update_Task_Input :: struct {
 	title: string,
 	description: string,
-	// brief_json replaces the whole brief when non-empty (409 while leased).
+	// brief_json is a top-level key merge into the stored brief (an explicit
+	// null removes a key); replace_brief swaps the whole brief instead. Keys
+	// outside BRIEF_KEYS are rejected. While leased only acceptance may change.
 	brief_json: string,
+	replace_brief: bool,
 	assignee_agent_id: string,
 	has_assignee: bool,
 	review_roles: []string,
@@ -852,6 +855,10 @@ build_brief_json :: proc(existing_brief, title, description, assignee_agent_id: 
 		taskv2.json_str(&o, "output", output_str)
 	}
 	if on_output, onok := jsonx.extract_raw_object(existing_brief, "on_output", true); onok do taskv2.json_raw(&o, "on_output", on_output)
+	// Gate-policy keys are not convenience fields; carry them over untouched.
+	if rua, present := jsonx.extract_bool_literal(existing_brief, "requires_user_approval", true); present do taskv2.json_raw(&o, "requires_user_approval", "true" if rua else "false")
+	if approver := jsonx.extract_string(existing_brief, "approver", "", true); approver != "" do taskv2.json_str(&o, "approver", approver)
+	if gate, gok := jsonx.extract_raw_object(existing_brief, "gate", true); gok do taskv2.json_raw(&o, "gate", gate)
 	return taskv2.json_end(&o)
 }
 
@@ -985,11 +992,13 @@ create_task_impl :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Conte
 	has_named := len(input.reviewer_agent_ids) > 0
 	// M2: legacy verify keys are accepted and dropped (the handler warns).
 	brief, _ := taskv2.strip_removed_verify_keys(input.brief_json)
+	if serr := validate_brief_schema(brief); serr.code != .None do return domain.Task{}, false, serr
 	if strings.trim_space(brief) == "" || strings.trim_space(brief) == "{}" {
 		brief = build_brief_json("{}", input.title, input.description, input.assignee_agent_id, input.assignee_agent_id != "", review_roles[:], true, named[:], has_named)
 	} else if input.assignee_agent_id != "" || len(review_roles) > 0 || has_named {
 		brief = build_brief_json(brief, input.title, input.description, input.assignee_agent_id, input.assignee_agent_id != "", review_roles[:], len(review_roles) > 0, named[:], has_named)
 	}
+	if verr := validate_named_reviewers(service, taskv2.brief_named_reviewers(brief, context.temp_allocator)[:]); verr.code != .None do return domain.Task{}, false, verr
 	// Fleet rows for every template the task names: worker for the assignee, a
 	// quiet named-reviewer row (placement only) for each named reviewer.
 	if a := taskv2.brief_assignee(brief); a != "" {
@@ -1058,29 +1067,6 @@ task_has_work_lease :: proc(service: ^Taskchain_Service, task_id: domain.Task_ID
 	return false
 }
 
-// An acceptance-only brief is a patch, not a replacement: it must not erase the
-// goal, assignee or review policy. Keep this allowlist narrow while a holder is
-// working from its context pack.
-acceptance_brief_patch :: proc(existing, incoming: string) -> (string, bool, domain.Domain_Error) {
-	parsed, err := json.parse_string(incoming, allocator = context.temp_allocator)
-	if err != nil do return "", false, domain.domain_error(.Validation_Failed, "brief must be a JSON object")
-	patch, ok := parsed.(json.Object)
-	if !ok do return "", false, domain.domain_error(.Validation_Failed, "brief must be a JSON object")
-	if len(patch) == 0 do return "", false, domain.Domain_Error{}
-	for key in patch do if key != "acceptance" do return "", false, domain.Domain_Error{}
-	items, valid := patch["acceptance"].(json.Array)
-	if !valid do return "", false, domain.domain_error(.Validation_Failed, "brief.acceptance must be an array of strings")
-	for item in items do if _, valid := item.(json.String); !valid do return "", false, domain.domain_error(.Validation_Failed, "brief.acceptance must be an array of strings")
-	base, berr := json.parse_string(existing if strings.trim_space(existing) != "" else "{}", allocator = context.temp_allocator)
-	if berr != nil do return "", false, domain.domain_error(.Internal_Error, "stored brief is not valid JSON")
-	root, root_ok := base.(json.Object)
-	if !root_ok do return "", false, domain.domain_error(.Internal_Error, "stored brief is not an object")
-	for key, value in patch do root[key] = value
-	encoded, merr := json.marshal(root, allocator = context.temp_allocator)
-	if merr != nil do return "", false, domain.domain_error(.Internal_Error, "could not encode brief")
-	return string(encoded), true, domain.Domain_Error{}
-}
-
 update_task_impl :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, task_id: domain.Task_ID, input: Update_Task_Input) -> (domain.Task, bool, domain.Domain_Error) {
 	task, ok, err := get_task(service, auth, task_id)
 	if !ok do return domain.Task{}, false, err
@@ -1100,35 +1086,60 @@ update_task_impl :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Conte
 	// ham-ctl) is no brief edit at all — never a replacement with "{}".
 	incoming_brief, dropped := taskv2.strip_removed_verify_keys(input.brief_json)
 	if len(dropped) > 0 && strings.trim_space(incoming_brief) == "{}" do incoming_brief = ""
-	patched_brief := ""
-	acceptance_patch := false
+	if serr := validate_brief_schema(incoming_brief); serr.code != .None do return {}, false, serr
+	// REQ-TV2-4: the brief is a top-level key merge (null removes a key) unless
+	// the caller asked to replace it whole.
+	new_brief := task.brief_json
 	if incoming_brief != "" {
-		patch_err: domain.Domain_Error
-		patched_brief, acceptance_patch, patch_err = acceptance_brief_patch(task.brief_json, incoming_brief)
-		if patch_err.code != .None do return {}, false, patch_err
+		if input.replace_brief {
+			new_brief = incoming_brief
+		} else {
+			merged, merr := brief_merge_patch(task.brief_json, incoming_brief)
+			if merr.code != .None do return {}, false, merr
+			new_brief = merged
+		}
 	}
-	brief_edit := (incoming_brief != "" && !acceptance_patch) || input.has_assignee || input.has_review_roles || input.has_reviewers || len(input.reviewer_agent_ids) > 0 || input.bridge_id != nil || input.title != "" || input.description != ""
-	if brief_edit && task_has_work_lease(service, task.task_id) {
-		return domain.Task{}, false, domain.domain_error(.Conflict, "task is leased: only acceptance brief patches, priority and dependencies can be edited; cancel the lease or wait before editing scope or placement")
-	}
-
-	if input.title != "" { task.title = input.title; append(&changed, "title") }
-	if input.description != "" { task.description = input.description; append(&changed, "description") }
-	if incoming_brief != "" {
-		task.brief_json = patched_brief if acceptance_patch else incoming_brief
-		append(&changed, "brief.acceptance" if acceptance_patch else "brief")
-	}
+	new_title := input.title if input.title != "" else task.title
+	new_description := input.description if input.description != "" else task.description
 	review_roles := make([dynamic]string, context.temp_allocator)
 	for r in input.review_roles do append(&review_roles, r)
 	has_roles := input.has_review_roles
 	// `reviewers` REPLACES the task's named reviewers (an empty list clears them).
 	has_named := input.has_reviewers || len(input.reviewer_agent_ids) > 0
+	// The convenience fields go through build_brief_json on top of the merged
+	// brief, so a flag and a brief-file key land in the same stored shape.
 	if input.has_assignee || has_roles || has_named || input.title != "" || input.description != "" {
-		task.brief_json = build_brief_json(task.brief_json, task.title, task.description, input.assignee_agent_id, input.has_assignee, review_roles[:], has_roles, input.reviewer_agent_ids, has_named)
-		if input.has_assignee do append(&changed, "assignee")
-		if has_roles do append(&changed, "review_roles")
-		if has_named do append(&changed, "reviewers")
+		new_brief = build_brief_json(new_brief, new_title, new_description, input.assignee_agent_id, input.has_assignee, review_roles[:], has_roles, input.reviewer_agent_ids, has_named)
 	}
+	brief_keys := brief_changed_keys(task.brief_json, new_brief)
+
+	// Leased: only edits that leave the in-flight work unchanged are allowed.
+	if task_has_work_lease(service, task.task_id) {
+		offending := make([dynamic]string, context.temp_allocator)
+		if new_title != task.title do append(&offending, "title")
+		if new_description != task.description do append(&offending, "description")
+		for k in brief_keys {
+			allowed := false
+			for a in LEASED_BRIEF_EDIT_KEYS do if a == k { allowed = true; break }
+			if !allowed do append(&offending, strings.concatenate({"brief.", k}, context.temp_allocator))
+		}
+		if input.bridge_id != nil && input.bridge_id^ != task.bridge_id do append(&offending, "bridge_id")
+		if len(offending) > 0 do return {}, false, leased_edit_error(offending[:])
+	}
+	if verr := validate_named_reviewers(service, taskv2.brief_named_reviewers(new_brief, context.temp_allocator)[:]); verr.code != .None do return {}, false, verr
+
+	if new_title != task.title { task.title = new_title; append(&changed, "title") }
+	if new_description != task.description { task.description = new_description; append(&changed, "description") }
+	if len(brief_keys) > 0 {
+		only_acceptance := len(brief_keys) == 1 && brief_keys[0] == "acceptance"
+		append(&changed, "brief.acceptance" if only_acceptance else "brief")
+		for k in brief_keys {
+			if k == "assignee" do append(&changed, "assignee")
+			if k == "review_roles" do append(&changed, "review_roles")
+			if k == "reviewers" do append(&changed, "reviewers")
+		}
+	}
+	task.brief_json = new_brief
 	if input.has_requires_user_approval {
 		task.requires_user_approval = input.requires_user_approval
 		append(&changed, "requires_user_approval")
