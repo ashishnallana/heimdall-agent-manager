@@ -175,9 +175,9 @@ test_oidc_cache_is_bounded_and_does_not_extend_ttl :: proc(t: ^testing.T) {
 		sub                = "stable-subject",
 		preferred_username = "alice",
 	}
-	oidc_cache_put(state, "first", OIDC_Cache_Entry{identity, 30000})
-	oidc_cache_put(state, "first", OIDC_Cache_Entry{identity, 60000})
-	for i in 0 ..< OIDC_CACHE_LIMIT do oidc_cache_put(state, fmt.tprintf("token-hash-%d", i), OIDC_Cache_Entry{identity, 30000})
+	oidc_cache_put(state, "first", OIDC_Cache_Entry{identity, 30000, 30000})
+	oidc_cache_put(state, "first", OIDC_Cache_Entry{identity, 60000, 60000})
+	for i in 0 ..< OIDC_CACHE_LIMIT do oidc_cache_put(state, fmt.tprintf("token-hash-%d", i), OIDC_Cache_Entry{identity, 30000, 30000})
 	testing.expect_value(t, len(state.entries), OIDC_CACHE_LIMIT)
 	entry, cached := oidc_cache_get(state, "first", 29999)
 	testing.expect(t, cached)

@@ -39,6 +39,7 @@ OIDC_Identity :: struct {
 OIDC_Cache_Entry :: struct {
 	identity: OIDC_Identity,
 	until_ms: i64,
+	expires_ms: i64, // token exp + leeway: bounds long-lived streams
 }
 OIDC_State :: struct {
 	mutex:   sync.Mutex,
@@ -309,6 +310,69 @@ oidc_resolve_key :: proc(config: OIDC_Config, state: ^OIDC_State, kid: string, n
 	return key, "", true
 }
 
+// oidc_jwt_verify_signature checks an RS256 JWS against the shared JWKS before any
+// network call; only a missing/stale set or an unknown kid may trigger a
+// (rate-limited, single-flight) JWKS fetch.
+oidc_jwt_verify_signature :: proc(config: OIDC_Config, state: ^OIDC_State, token: string, parts: []string, kid: string, sig: []byte, now_ms: i64) -> (string, bool) {
+	key, key_stage, key_ok := oidc_resolve_key(config, state, kid, now_ms)
+	if !key_ok do return key_stage, false
+	if key.kty != "RSA" || (key.alg != "" && key.alg != "RS256") || (key.use != "" && key.use != "sig") do return "signature", false
+	message := token[:len(parts[0]) + 1 + len(parts[1])]
+	if !oidc_rs256_verify(key.n, key.e, transmute([]byte)message, sig) do return "signature", false
+	return "", true
+}
+
+OIDC_ID_Token_Claims :: struct {
+	iss, sub, azp, nonce:            string,
+	preferred_username, name, email: string,
+	exp, nbf, iat:                   i64,
+	aud:                             json.Value,
+}
+
+// oidc_validate_id_token validates an ID token from the authorization-code
+// exchange: RS256 via the shared JWKS cache, `iss == issuer`, `aud` contains the
+// web client id (with `azp == client id` when several audiences are present),
+// exp/nbf/iat with leeway, and `nonce` equal to the login's nonce. The identity
+// comes from the ID token's own claims (no UserInfo call).
+oidc_validate_id_token :: proc(
+	config: OIDC_Config,
+	state: ^OIDC_State,
+	client_id, expected_nonce, token: string,
+	now_ms: i64,
+) -> (
+	OIDC_Identity,
+	string,
+	bool,
+) {
+	if config.issuer == "" || config.jwks_url == "" || client_id == "" || expected_nonce == "" do return {}, "config", false
+	if len(token) > 32768 do return {}, "token_length", false
+	parts := strings.split(token, ".", context.temp_allocator)
+	if len(parts) != 3 do return {}, "token_segments", false
+	h, hok := oidc_decode(parts[0])
+	c, cok := oidc_decode(parts[1])
+	sig, sok := oidc_decode(parts[2])
+	if !hok || !cok || !sok do return {}, "token_encoding", false
+	header: OIDC_JWT_Header
+	claims: OIDC_ID_Token_Claims
+	if json.unmarshal(h, &header, .JSON, context.temp_allocator) != nil || json.unmarshal(c, &claims, .JSON, context.temp_allocator) != nil do return {}, "token_json", false
+	if header.alg != "RS256" || header.kid == "" || len(header.crit) != 0 do return {}, "header", false
+	now_s := now_ms / 1000
+	if claims.iss != config.issuer || claims.sub == "" || claims.exp + OIDC_CLOCK_LEEWAY_SECONDS <= now_s || claims.exp > 9_000_000_000 || claims.nbf > now_s + OIDC_CLOCK_LEEWAY_SECONDS || claims.iat > now_s + OIDC_CLOCK_LEEWAY_SECONDS || claims.iat == 0 do return {}, "claims", false
+	if !oidc_has_audience(claims.aud, client_id) do return {}, "audience", false
+	if audiences, many := claims.aud.(json.Array); many && len(audiences) > 1 && claims.azp != client_id do return {}, "audience", false
+	if claims.azp != "" && claims.azp != client_id do return {}, "audience", false
+	if !oidc_constant_time_equal(claims.nonce, expected_nonce) do return {}, "nonce", false
+	if sig_stage, sig_ok := oidc_jwt_verify_signature(config, state, token, parts, header.kid, sig, now_ms); !sig_ok do return {}, sig_stage, false
+	return OIDC_Identity{sub = claims.sub, preferred_username = claims.preferred_username, name = claims.name, email = claims.email}, "", true
+}
+
+oidc_constant_time_equal :: proc(a, b: string) -> bool {
+	if len(a) != len(b) do return false
+	diff: byte
+	for i in 0 ..< len(a) do diff |= a[i] ~ b[i]
+	return diff == 0
+}
+
 oidc_validate_token_with_stage :: proc(
 	config: OIDC_Config,
 	token: string,
@@ -344,13 +408,7 @@ oidc_validate_token_with_stage :: proc(
 		context.temp_allocator,
 	) {if scope == config.scope do scope_ok = true}
 	if !scope_ok do return {}, 0, "scope", false
-	// The signature is checked against the shared JWKS before any network call;
-	// only a missing/stale set or an unknown kid may trigger a (rate-limited) fetch.
-	key, key_stage, key_ok := oidc_resolve_key(config, state, header.kid, now_ms)
-	if !key_ok do return {}, 0, key_stage, false
-	if key.kty != "RSA" || (key.alg != "" && key.alg != "RS256") || (key.use != "" && key.use != "sig") do return {}, 0, "signature", false
-	message := token[:len(parts[0]) + 1 + len(parts[1])]
-	if !oidc_rs256_verify(key.n, key.e, transmute([]byte)message, sig) do return {}, 0, "signature", false
+	if sig_stage, sig_ok := oidc_jwt_verify_signature(config, state, token, parts, header.kid, sig, now_ms); !sig_ok do return {}, 0, sig_stage, false
 	// UserInfo only after the signature verifies.
 	info_text, info_ok := oidc_fetch(config, state, config.userinfo_url, token)
 	info: OIDC_Identity
@@ -413,6 +471,7 @@ oidc_cache_put :: proc(state: ^OIDC_State, key: string, entry: OIDC_Cache_Entry)
 	state.entries[strings.clone(key, a)] = OIDC_Cache_Entry {
 		oidc_clone_identity(entry.identity, a),
 		entry.until_ms,
+		entry.expires_ms,
 	}
 }
 oidc_free :: proc(service: ^Auth_Service) {
@@ -464,10 +523,27 @@ resolve_oidc_auth :: proc(
 		entry = OIDC_Cache_Entry {
 			identity = identity,
 			until_ms = min(now + 30_000, expires),
+			expires_ms = expires,
 		}
 		oidc_cache_put(&service.oidc_state, token_hash, entry)
 	}
-	identity := entry.identity
+	user, ok, err := oidc_resolve_identity(service, entry.identity)
+	if !ok do return {}, false, err
+	users.ensure_canonical_resources(service.users, user.user_id)
+	return contracts.Auth_Context {
+		kind = .OIDC,
+		user_id = string(user.user_id),
+		name = user.name,
+		display_name = user.display_name,
+		email = user.email,
+		expires_ms = entry.expires_ms,
+	}, true, {}
+}
+
+// oidc_resolve_identity maps a validated OIDC identity (bearer or ID token) to a
+// Hub user under the configured link/claim/provision policy.
+oidc_resolve_identity :: proc(service: ^Auth_Service, identity: OIDC_Identity) -> (domain.User, bool, domain.Domain_Error) {
+	if service == nil || service.users == nil || service.users.users == nil || service.users.users.resolve_external == nil do return {}, false, oidc_failure()
 	username := strings.trim_space(identity.preferred_username)
 	// Refuse lossy normalization which could silently claim another username.
 	normalized := users.normalize_user_id(username)
@@ -488,12 +564,5 @@ resolve_oidc_auth :: proc(
 		oidc_log_rejected("identity_resolution")
 		return {}, false, err
 	}
-	users.ensure_canonical_resources(service.users, user.user_id)
-	return contracts.Auth_Context {
-		kind = .OIDC,
-		user_id = string(user.user_id),
-		name = user.name,
-		display_name = user.display_name,
-		email = user.email,
-	}, true, {}
+	return user, true, {}
 }

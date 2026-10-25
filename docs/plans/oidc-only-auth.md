@@ -272,3 +272,73 @@ Carried over to later phases (from the phase 1 review):
   revalidation above in phase 2/3.
 - Remaining informational review notes (log redaction review of provider responses, metrics labels
   `oidc`/`session`, the `ham-hub tokens` OIDC guard only seeing env) are handled in phases 3/5.
+
+Phase 2 (browser sessions):
+- **Config.** New: `session_ttl_hours` / `HAM_SESSION_TTL_HOURS` / `--session-ttl-hours` (default 168)
+  and `session_idle_hours` / `HAM_SESSION_IDLE_HOURS` / `--session-idle-hours` (default 24, capped
+  at the TTL). Browser login is enabled iff `oidc_issuer` + `oidc_authorize_url` + `oidc_token_url`
+  + `oidc_web_client_id` are set (`app.web_login_configured`); any web key without the rest, or
+  without `ui_origin` (the CSRF origin), is a startup error. `oidc_web_client_id` must be set
+  explicitly: the Hub has no other way to learn the provider's client id (the native app's client id
+  is not Hub config) — for Mundus it is the `heimdall-native` provider's client id.
+  `oidc_redirect_uri` defaults to `<ui_origin>/api/v1/auth/callback` and must be https (localhost
+  http allowed for dev). The client secret file is read once at startup; unreadable/empty → error.
+- **Session store.** Migration `134_user_sessions.sql` (registered after `native_001_…`), times as
+  integer Unix ms rather than text. Session id: 32 random bytes (base64url) from the OS CSPRNG;
+  only `sha256_hex` is stored. Login state: 32-byte state, 32-byte nonce, 48-byte PKCE verifier
+  (64 chars); keyed by `sha256_hex(state)`, 10 min TTL, consumed with `DELETE … RETURNING` before any
+  other check (single use even on failure). The login cookie's value is the state itself and must
+  equal the query `state` (constant-time).
+- **Cookies.** `__Host-heimdall_session` (Path=/, Secure, HttpOnly, SameSite=Lax, Max-Age = TTL) and
+  `__Host-heimdall_login` (same, Max-Age=600, cleared on every callback outcome). A cookie name that
+  appears more than once in the request is treated as absent.
+- **Resolution order** (`resolve_auth`, both modes): query/body token rejection → `Authorization`
+  (OIDC mode: bridge 403, else OIDC + device gate; legacy: bridge 403, `hut_`) → session cookie →
+  trusted proxy. An invalid/expired session cookie falls through to trusted proxy (still present
+  until phase 3) and thus to 401 without proxy identity.
+- **Auth kinds.** `.Session` added; `contracts.is_user_auth` (Session/OIDC/User_Token/Trusted_Proxy)
+  and `contracts.is_interactive_browser_auth` (Session/Trusted_Proxy) replace every explicit kind
+  list. `require_interactive_user` = interactive browser OR OIDC (native app, as before); billing's
+  Origin check applies to interactive browser principals. Device approval/pairing stays "any user"
+  (it accepted user tokens before, so it was never interactive-only). `tool_stream_handler` now
+  accepts any user principal.
+- **CSRF.** No middleware change was needed: `csrf_decide` already runs for every non-preview
+  request in `handle_client` and refuses cookie-bearing state-changing requests unless
+  `Sec-Fetch-Site: same-origin` or `Origin == ui_origin`, and cookie-bearing WebSocket upgrades
+  unless `Origin == ui_origin`. What was missing was the guarantee that `ui_origin` is set — browser
+  login now requires it. Tests cover cross-origin, same-site and metadata-less cookie POSTs and
+  cookie upgrades.
+- **WS tickets.** Session principals get user WebSocket tickets (the UI depends on them); a ticket
+  carries kind, `session_id` and expiry so the stream it opens keeps the session's revalidation.
+  OIDC bearer principals still get none.
+- **Streams (item 7).** `live_user_authorized` now checks Session (row exists and is within
+  absolute/idle expiry) and OIDC (`now < expires_ms`, the token exp + leeway carried on the
+  context). A `Stream_Auth_Guard` re-checks every 30 s on the user WS, shell PTY and agent PTY read
+  loops (the tool stream already re-checked via `live_user_authorized`), and enforces the hard
+  `expires_ms` on every frame. Gap: the check runs when the client sends a frame (heartbeats every
+  ~25 s; idle sockets time out at 120 s), so logout ends a stream within roughly 30-60 s, not
+  instantly.
+- **Preview isolation.** The preview origin still authenticates only via trusted proxy (never the
+  session cookie); `__Host-heimdall_*` (and `heimdall_*`) cookies are stripped from anything
+  forwarded upstream, alongside the existing `authentik_*` stripping. NOTE for phase 3: deleting
+  trusted proxy leaves the dedicated preview origin with no auth path — it needs its own design
+  (e.g. a short-lived preview ticket minted by a Session principal).
+- **Callback outcomes.** Protocol/validation failures → `302 /?auth_error=1`; identity-policy
+  refusals (unlinked / not provisioned / disabled / link conflict) → `302 /?auth_error=forbidden`
+  so the UI can say "ask the operator to link your account". Logs carry only
+  `oidc_login_rejected stage=<stage>`; provider error text and token-endpoint error bodies are never
+  echoed or logged. Token exchange uses the bounded outbound path (same 8-slot cap), https only,
+  `client_id` always in the form and HTTP Basic (form-encoded id/secret) only when a secret is set.
+- **ID token.** RS256 via the shared JWKS cache, `iss == oidc_issuer`, `aud` contains the web
+  client id (`azp` must equal it when present or when several audiences are listed), exp/nbf/iat
+  with the 60 s leeway (iat required), nonce (constant-time). Identity comes from the ID token
+  claims (no UserInfo call) and goes through the same link/claim/provision policy.
+- **Logout.** `POST /api/v1/auth/logout` always 200: deletes the session row, expires the cookie and
+  returns `{logout_url}` = end-session URL with `post_logout_redirect_uri=<ui_origin>/` and
+  `id_token_hint` (when stored), else `/`. `GET /api/v1/me/logout-url` returns the end-session URL
+  (no hint). `GET /api/v1/auth/config` adds `mode` (`oidc`/`trusted_proxy`) and `logout`.
+- **Reaper.** Every sweep purges expired sessions, login states and `vault_request_nonces`; the
+  session store is wired even without browser login so v2 nonces are always purged.
+- **Tests.** ID tokens are minted at test time with a new TEST-ONLY RSA key
+  (`testdata/oidc_rs256_signing.json`, generator alongside): the existing fixture's private key was
+  discarded, and the nonce/aud/exp must vary per test.

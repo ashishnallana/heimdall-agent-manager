@@ -1,6 +1,7 @@
 package app
 
 import "core:fmt"
+import "core:os"
 import "core:strings"
 import "core:sync"
 import "core:time"
@@ -46,6 +47,8 @@ App_Graph :: struct {
 	billing: billing_service.Service,
 	billing_handlers: http.Billing_Handlers,
 	sqlite_users: sqlite.User_Repo_SQLite,
+	sqlite_sessions: sqlite.Session_Repo_SQLite,
+	session_repo: iface.Session_Repository,
 	sqlite_bridges: sqlite.Bridge_Repo_SQLite,
 	sqlite_bridge_commit: sqlite.Bridge_Enroll_Commit_Conn,
 	sqlite_agents: sqlite.Agent_Repo_SQLite,
@@ -392,6 +395,33 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 	// OIDC bearer authentication is enabled whenever an issuer is configured.
 	graph.auth.oidc_mode = oidc_configured(config)
 	graph.auth.oidc = auth_service.OIDC_Config{issuer = config.oidc_issuer, audience = config.oidc_api_audience, scope = config.oidc_api_scope, claim_existing_users = config.oidc_claim_existing_users, userinfo_url = config.oidc_userinfo_url, jwks_url = config.oidc_jwks_url}
+	// The session store is always wired: the reaper purges expired v2 device-proof
+	// nonces through it. Cookie sessions are honoured only with browser login.
+	graph.session_repo = sqlite.new_session_repository(&graph.sqlite_sessions, &graph.db)
+	graph.auth.sessions = &graph.session_repo
+	// Browser login (Hub-side OIDC authorization code + PKCE) and its sessions.
+	if web_login_configured(config) {
+		client_secret := ""
+		if config.oidc_web_client_secret_file != "" {
+			secret, secret_ok := read_secret_file(config.oidc_web_client_secret_file)
+			if !secret_ok do return false, "could not read oidc_web_client_secret_file (HAM_OIDC_WEB_CLIENT_SECRET_FILE)"
+			client_secret = secret
+		}
+		ttl_hours := config.session_ttl_hours if config.session_ttl_hours > 0 else auth_service.DEFAULT_SESSION_TTL_HOURS
+		idle_hours := config.session_idle_hours if config.session_idle_hours > 0 else auth_service.DEFAULT_SESSION_IDLE_HOURS
+		graph.auth.web = auth_service.Web_Login_Config{
+			enabled = true,
+			authorize_url = config.oidc_authorize_url,
+			token_url = config.oidc_token_url,
+			end_session_url = config.oidc_end_session_url,
+			client_id = config.oidc_web_client_id,
+			client_secret = client_secret,
+			redirect_uri = strings.clone(web_redirect_uri(config)),
+			ui_origin = config.ui_origin,
+			session_ttl_ms = i64(ttl_hours) * 3_600_000,
+			session_idle_ms = i64(min(idle_hours, ttl_hours)) * 3_600_000,
+		}
+	}
 	graph.auth.vault = &graph.vault_directory
 	graph.auth.bridges = &graph.bridges
 	graph.auth.agents = &graph.agents
@@ -620,6 +650,9 @@ register_routes :: proc(graph: ^App_Graph) {
 	// bridge_handlers because the credential is bridge-service state, not grant state.
 	http.router_add(&graph.router, "POST", "/api/v1/device/bridge-refresh", rawptr(&graph.bridge_handlers), http.bridge_refresh_handler)
 	http.router_add(&graph.router, "GET", "/api/v1/auth/config", rawptr(&graph.user_handlers), http.auth_config_handler)
+	http.router_add(&graph.router, "GET", "/api/v1/auth/login", rawptr(&graph.user_handlers), http.auth_login_handler)
+	http.router_add(&graph.router, "GET", "/api/v1/auth/callback", rawptr(&graph.user_handlers), http.auth_callback_handler)
+	http.router_add(&graph.router, "POST", "/api/v1/auth/logout", rawptr(&graph.user_handlers), http.auth_logout_handler)
 	http.router_add(&graph.router, "GET", "/api/v1/me", rawptr(&graph.user_handlers), http.me_handler)
 	http.router_add(&graph.router, "GET", "/api/v1/me/logout-url", rawptr(&graph.user_handlers), http.logout_url_handler)
 	if !graph.auth.oidc_mode { http.router_add(&graph.router, "GET", "/api/v1/me/tokens", rawptr(&graph.user_handlers), http.list_my_tokens_handler) }
@@ -1107,4 +1140,14 @@ configure_db_telemetry :: proc(config: Hub_Config) -> (bool, string) {
 	if config.db_slow_ms >= 0 do dbt.slow_config.slow_ms = i64(config.db_slow_ms)
 	if config.db_sample_n >= 0 do dbt.slow_config.sample_n = i64(config.db_sample_n)
 	return true, ""
+}
+
+// read_secret_file reads a secret from a file (trailing whitespace trimmed). The
+// contents are never logged.
+read_secret_file :: proc(path: string) -> (string, bool) {
+	data, err := os.read_entire_file(path, context.allocator)
+	if err != nil do return "", false
+	secret := strings.clone(strings.trim_space(string(data)))
+	delete(data)
+	return secret, secret != ""
 }

@@ -34,7 +34,7 @@ tool_stream_handler :: proc(ctx: rawptr, req: Request, client: net.TCP_Socket) {
         if !ok { write_stream_error(client, resp); return }
         auth = c
     }
-    if auth.user_id == "" || (auth.kind != .Trusted_Proxy && auth.kind != .User_Token) {
+    if auth.user_id == "" || !contracts.is_user_auth(auth) {
         write_stream_error(client, respond_error(domain.domain_error(.Forbidden, "user authentication required"), req.request_id))
         return
     }

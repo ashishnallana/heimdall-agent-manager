@@ -21,6 +21,9 @@ Hub_Config :: struct {
 	oidc_web_client_id: string,
 	oidc_web_client_secret_file: string, // a path; the secret itself is never in env/argv
 	oidc_redirect_uri: string,
+	// Browser session lifetime (absolute / idle), hours. <=0 → 168 / 24.
+	session_ttl_hours: int,
+	session_idle_hours: int,
 	// Opt-in: an unlinked OIDC subject may claim the existing user whose name
 	// equals its preferred_username. Default false (operator links instead).
 	oidc_claim_existing_users: bool,
@@ -345,7 +348,30 @@ validate_oidc_config :: proc(config: Hub_Config) -> (bool, string) {
 	for r in optional_urls {
 		if r.value != "" && !strings.has_prefix(r.value, "https://") do return false, strings.concatenate({r.name, " must be an https:// URL"})
 	}
+	// Browser login is all-or-nothing: any web-client key requires the rest.
+	web_keys := config.oidc_authorize_url != "" || config.oidc_token_url != "" || config.oidc_web_client_id != "" || config.oidc_web_client_secret_file != "" || config.oidc_redirect_uri != ""
+	if web_keys {
+		if config.oidc_authorize_url == "" || config.oidc_token_url == "" || config.oidc_web_client_id == "" {
+			return false, "browser login needs oidc_authorize_url, oidc_token_url and oidc_web_client_id (HAM_OIDC_AUTHORIZE_URL, HAM_OIDC_TOKEN_URL, HAM_OIDC_WEB_CLIENT_ID)"
+		}
+		if strings.trim_space(config.ui_origin) == "" do return false, "browser login needs ui_origin (--ui-origin): it is the CSRF origin and the default redirect URI base"
+		redirect := web_redirect_uri(config)
+		if !strings.has_prefix(redirect, "https://") && !strings.has_prefix(redirect, "http://localhost") && !strings.has_prefix(redirect, "http://127.0.0.1") {
+			return false, "oidc_redirect_uri must be an https:// URL"
+		}
+	}
 	return true, ""
+}
+
+// web_login_configured reports whether the Hub runs the browser OIDC login.
+web_login_configured :: proc(config: Hub_Config) -> bool {
+	return oidc_configured(config) && config.oidc_authorize_url != "" && config.oidc_token_url != "" && config.oidc_web_client_id != ""
+}
+
+// web_redirect_uri is oidc_redirect_uri, defaulting to <ui_origin>/api/v1/auth/callback.
+web_redirect_uri :: proc(config: Hub_Config) -> string {
+	if config.oidc_redirect_uri != "" do return config.oidc_redirect_uri
+	return strings.concatenate({strings.trim_right(strings.trim_space(config.ui_origin), "/"), "/api/v1/auth/callback"}, context.temp_allocator)
 }
 
 // effective_auto_provision_users: an explicit setting wins; otherwise unknown

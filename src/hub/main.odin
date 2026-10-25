@@ -318,6 +318,16 @@ parse_args :: proc(config: ^app.Hub_Config) {
 			config.oidc_web_client_secret_file = strings.clone(os.args[i + 1]); i += 1
 		} else if arg == "--oidc-redirect-uri" && i + 1 < len(os.args) {
 			config.oidc_redirect_uri = strings.clone(os.args[i + 1]); i += 1
+		} else if arg == "--session-ttl-hours" && i + 1 < len(os.args) {
+			parsed, ok := strconv.parse_int(os.args[i + 1])
+			if !ok || parsed <= 0 { fmt.eprintln("--session-ttl-hours must be a positive integer"); os.exit(2) }
+			config.session_ttl_hours = int(parsed)
+			i += 1
+		} else if arg == "--session-idle-hours" && i + 1 < len(os.args) {
+			parsed, ok := strconv.parse_int(os.args[i + 1])
+			if !ok || parsed <= 0 { fmt.eprintln("--session-idle-hours must be a positive integer"); os.exit(2) }
+			config.session_idle_hours = int(parsed)
+			i += 1
 		} else if arg == "--oidc-claim-existing-users" && i + 1 < len(os.args) {
 			parsed, ok := app.parse_bool_setting(os.args[i + 1])
 			if !ok { fmt.eprintln("--oidc-claim-existing-users must be true or false"); os.exit(2) }
@@ -425,6 +435,16 @@ apply_oidc_env :: proc(config: ^app.Hub_Config) {
 	if v := os.get_env_alloc("HAM_OIDC_WEB_CLIENT_ID", context.allocator); v != "" do config.oidc_web_client_id = v
 	if v := os.get_env_alloc("HAM_OIDC_WEB_CLIENT_SECRET_FILE", context.allocator); v != "" do config.oidc_web_client_secret_file = v
 	if v := os.get_env_alloc("HAM_OIDC_REDIRECT_URI", context.allocator); v != "" do config.oidc_redirect_uri = v
+	if v := os.get_env_alloc("HAM_SESSION_TTL_HOURS", context.allocator); v != "" {
+		parsed, ok := strconv.parse_int(v)
+		if !ok || parsed <= 0 { fmt.eprintln("HAM_SESSION_TTL_HOURS must be a positive integer"); os.exit(2) }
+		config.session_ttl_hours = int(parsed)
+	}
+	if v := os.get_env_alloc("HAM_SESSION_IDLE_HOURS", context.allocator); v != "" {
+		parsed, ok := strconv.parse_int(v)
+		if !ok || parsed <= 0 { fmt.eprintln("HAM_SESSION_IDLE_HOURS must be a positive integer"); os.exit(2) }
+		config.session_idle_hours = int(parsed)
+	}
 	if v := os.get_env_alloc("HAM_OIDC_CLAIM_EXISTING_USERS", context.allocator); v != "" {
 		parsed, ok := app.parse_bool_setting(v)
 		if !ok { fmt.eprintln("HAM_OIDC_CLAIM_EXISTING_USERS must be true or false"); os.exit(2) }

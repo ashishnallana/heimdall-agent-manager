@@ -51,7 +51,7 @@ question_answer_state :: proc(s: ^Content_Service, source: domain.Chat_Message) 
 }
 
 answer_questions :: proc(s: ^Content_Service, auth: contracts.Auth_Context, cid, source_id: string, submission: contracts.Multi_Question_Submission) -> (answer: domain.Chat_Message, inserted: bool, err: domain.Domain_Error) {
-	if auth.kind != .OIDC && auth.kind != .User_Token && auth.kind != .Trusted_Proxy do return {}, false, domain.domain_error(.Forbidden, "user authentication is required to answer questions")
+	if !contracts.is_user_auth(auth) do return {}, false, domain.domain_error(.Forbidden, "user authentication is required to answer questions")
 	c, found, conv_err := get_conversation(s, auth, cid)
 	if !found do return {}, false, conv_err
 	source, source_found, source_err := iface.content_get_message(s.content, source_id)

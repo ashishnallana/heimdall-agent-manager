@@ -16,13 +16,13 @@ Billing_Handlers :: struct {
 billing_require_user :: proc(handlers: ^Billing_Handlers, req: Request, mutation: bool) -> (contracts.Auth_Context, bool, Response) {
 	auth, ok, resp := require_auth(handlers.auth, req)
 	if !ok do return {}, false, resp
-	if auth.kind != .OIDC && auth.kind != .Trusted_Proxy && auth.kind != .User_Token do return {}, false, respond_error(domain.domain_error(.Forbidden, "account billing requires user authentication"), req.request_id)
+	if !contracts.is_user_auth(auth) do return {}, false, respond_error(domain.domain_error(.Forbidden, "account billing requires user authentication"), req.request_id)
 	if mutation {
 		// JSON-only mutations cannot be submitted by cross-site HTML forms.
 		content_type := strings.trim_space(strings.split(header_value(req.headers, "Content-Type"), ";")[0])
 		if content_type != "application/json" do return {}, false, respond_error(domain.domain_error(.Validation_Failed, "billing requests require application/json"), req.request_id)
 		origin := header_value(req.headers, "Origin")
-		if auth.kind == .Trusted_Proxy && (header_value(req.headers, "Sec-Fetch-Site") == "cross-site" || (origin != "" && origin != handlers.ui_origin)) do return {}, false, respond_error(domain.domain_error(.Forbidden, "billing request origin is not allowed"), req.request_id)
+		if contracts.is_interactive_browser_auth(auth) && (header_value(req.headers, "Sec-Fetch-Site") == "cross-site" || (origin != "" && origin != handlers.ui_origin)) do return {}, false, respond_error(domain.domain_error(.Forbidden, "billing request origin is not allowed"), req.request_id)
 	}
 	return auth, true, {}
 }

@@ -28,6 +28,9 @@ Auth_Service :: struct {
 	oidc_mode: bool,
 	oidc: OIDC_Config,
 	oidc_state: OIDC_State,
+	// Browser login + server-side sessions (nil sessions: cookie auth disabled).
+	web: Web_Login_Config,
+	sessions: ^iface.Session_Repository,
 	vault: ^vd.Service,
 	config: Trusted_Proxy_Config,
 	users: ^user_service.User_Service,
@@ -304,6 +307,7 @@ resolve_auth :: proc(service: ^Auth_Service, req: Auth_Request) -> (contracts.Au
 			}
 			return resolve_oidc_auth(service, req)
 		}
+		if ctx, ok, err, attempted := resolve_session_cookie(service, req); attempted && ok do return ctx, ok, err
 		return resolve_trusted_proxy_auth(service, req)
 	}
 	if service == nil || service.users == nil {
@@ -326,12 +330,25 @@ resolve_auth :: proc(service: ^Auth_Service, req: Auth_Request) -> (contracts.Au
 		if strings.has_prefix(token, "hut_") do return verify_user_api_token(service, token)
 		return contracts.Auth_Context{}, false, domain.domain_error(.Unauthenticated, "unsupported bearer token")
 	}
+	if ctx, ok, err, attempted := resolve_session_cookie(service, req); attempted && ok do return ctx, ok, err
 	return resolve_trusted_proxy_auth(service, req)
 }
 
 // resolve_trusted_proxy_auth intentionally ignores Authorization. Preview-host
 // applications own that header; identity comes exclusively from the trusted
 // reverse proxy and its configured username header.
+// resolve_session_cookie authenticates the Hub session cookie when browser login
+// is enabled. `attempted` is false when there is no usable cookie. An invalid or
+// expired cookie falls through to trusted-proxy identity (still present until
+// phase 3), which fails with 401 when no proxy identity is present either.
+resolve_session_cookie :: proc(service: ^Auth_Service, req: Auth_Request) -> (ctx: contracts.Auth_Context, ok: bool, err: domain.Domain_Error, attempted: bool) {
+	if !web_login_enabled(service) do return {}, false, {}, false
+	raw, present := cookie_value(req.headers, SESSION_COOKIE)
+	if !present do return {}, false, {}, false
+	ctx, ok, err = resolve_session_auth(service, raw)
+	return ctx, ok, err, true
+}
+
 resolve_trusted_proxy_auth :: proc(service: ^Auth_Service, req: Auth_Request) -> (contracts.Auth_Context, bool, domain.Domain_Error) {
 	if service == nil || service.users == nil {
 		return contracts.Auth_Context{}, false, domain.domain_error(.Internal_Error, "auth service is not configured")
@@ -615,6 +632,20 @@ live_user_authorized :: proc(service: ^Auth_Service, auth: contracts.Auth_Contex
     user, found, err := user_service.get_user(service.users, domain.User_ID(auth.user_id))
     if !found || err.code != .None || user.status == .Disabled do return false
     if auth.kind == .Trusted_Proxy do return true
+    // Session: the session row must still exist (logout deletes it) and be inside
+    // both its absolute and idle expiry.
+    if auth.kind == .Session {
+        now, now_ok := now_unix_ms(service)
+        if !now_ok do return false
+        _, live := session_lookup_live(service, auth.session_id, now)
+        return live
+    }
+    // OIDC bearer: bounded by the access token's expiry (plus leeway).
+    if auth.kind == .OIDC {
+        if auth.expires_ms <= 0 do return false
+        now, now_ok := now_unix_ms(service)
+        return now_ok && now < auth.expires_ms
+    }
     if auth.kind != .User_Token || auth.user_token_id == "" || service.user_tokens == nil do return false
     token, token_found, token_err := iface.user_token_get_by_id(service.user_tokens, auth.user_token_id)
     if !token_found || token_err.code != .None || string(token.owner_user_id) != auth.user_id || token.revoked_at != "" do return false

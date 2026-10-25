@@ -45,7 +45,7 @@ require_vault_user :: proc(h: ^Vault_Directory_Handlers, req: Request) -> (contr
 	ctx, ok, resp := require_auth(h.auth, req)
 	if !ok do return ctx, false, resp
 	// A user principal only: never a bridge, enrollment or instance credential.
-	if ctx.kind != .OIDC && ctx.kind != .Trusted_Proxy && ctx.kind != .User_Token {
+	if !contracts.is_user_auth(ctx) {
 		return ctx, false, respond_error(domain.domain_error(.Forbidden, "vault directory requires a user session"), req.request_id)
 	}
 	return ctx, true, Response{}
@@ -57,7 +57,8 @@ require_vault_user :: proc(h: ^Vault_Directory_Handlers, req: Request) -> (contr
 require_interactive_user :: proc(h: ^Vault_Directory_Handlers, req: Request) -> (contracts.Auth_Context, bool, Response) {
 	ctx, ok, resp := require_auth(h.auth, req)
 	if !ok do return ctx, false, resp
-	if ctx.kind != .Trusted_Proxy && ctx.kind != .OIDC {
+	// The native app (OIDC bearer + verified v2 device proof) keeps this path.
+	if !contracts.is_interactive_browser_auth(ctx) && ctx.kind != .OIDC {
 		return ctx, false, respond_error(domain.domain_error(.Forbidden, "this vault action requires an interactive browser session"), req.request_id)
 	}
 	return ctx, true, Response{}

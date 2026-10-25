@@ -58,3 +58,35 @@ test_oidc_config_validation :: proc(t: ^testing.T) {
 	ok, msg = validate_oidc_config(spaced)
 	testing.expect(t, !ok && strings.contains(msg, "whitespace"), "a single scope value is required")
 }
+
+@(test)
+test_web_login_config_validation :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	full := oidc_test_hub_config()
+	full.ui_origin = "https://hub.example.test"
+	full.oidc_authorize_url = "https://auth.example.test/application/o/authorize/"
+	full.oidc_token_url = "https://auth.example.test/application/o/token/"
+	full.oidc_web_client_id = "heimdall-web"
+	ok, msg := validate_oidc_config(full)
+	testing.expect(t, ok && web_login_configured(full), msg)
+	testing.expect_value(t, web_redirect_uri(full), "https://hub.example.test/api/v1/auth/callback")
+
+	bearer_only := oidc_test_hub_config()
+	ok, msg = validate_oidc_config(bearer_only)
+	testing.expect(t, ok && !web_login_configured(bearer_only), "bearer-only OIDC stays valid without browser login")
+
+	partial := full
+	partial.oidc_web_client_id = ""
+	ok, msg = validate_oidc_config(partial)
+	testing.expect(t, !ok && strings.contains(msg, "browser login needs"), "partial web client config fails closed")
+
+	no_ui := full
+	no_ui.ui_origin = ""
+	ok, msg = validate_oidc_config(no_ui)
+	testing.expect(t, !ok && strings.contains(msg, "ui_origin"), "browser login requires ui_origin (CSRF origin)")
+
+	bad_redirect := full
+	bad_redirect.oidc_redirect_uri = "http://hub.example.test/api/v1/auth/callback"
+	ok, msg = validate_oidc_config(bad_redirect)
+	testing.expect(t, !ok && strings.contains(msg, "oidc_redirect_uri"), "redirect must be https")
+}

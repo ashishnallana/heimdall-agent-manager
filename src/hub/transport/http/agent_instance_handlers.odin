@@ -244,6 +244,7 @@ agent_instance_stream_handler :: proc(ctx: rawptr, req: Request, client: net.TCP
 	reader.control_writer = pane_reader_write_pong
 	defer bridge_ws_reader_destroy(&reader)
 
+	guard := stream_auth_guard_make(h.auth, auth_ctx)
 	for {
 		// Same read as read_ws_text_blocking; the reason feeds ws_disconnects_total only.
 		text, ok, why := bridge_ws_read_frame(&reader, 120 * time.Second)
@@ -252,6 +253,10 @@ agent_instance_stream_handler :: proc(ctx: rawptr, req: Request, client: net.TCP
 			return
 		}
 		ws_note_rx(ws_rx, len(text))
+		if !stream_auth_still_valid(&guard) {
+			ws_close_reason = "auth_revoked"
+			return
+		}
 
 		// REQ-PTY-NET-3: same binary, ack-less input relay as the shells pane — the agent
 		// pane shares the pipeline and the bridge keys on shell_id == instance_id.

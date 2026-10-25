@@ -6,6 +6,7 @@ import "core:time"
 import contracts "odin_test:contracts"
 import domain "odin_test:hub/domain"
 import agent_service "odin_test:hub/service/agent"
+import auth_service "odin_test:hub/service/auth"
 import events "odin_test:hub/service/events"
 import http "odin_test:hub/transport/http"
 import bridge_service "odin_test:hub/service/bridge"
@@ -206,6 +207,13 @@ reaper_sweep_once :: proc(graph: ^App_Graph) {
 
 	// Passwordless vault: owner resets whose 72 h delay has passed.
 	reaper_sweep_vault_resets(graph)
+
+	// Browser sessions (absolute/idle expiry), pending OIDC logins and v2
+	// device-proof nonces past their window.
+	if _, purge_err := auth_service.purge_expired_auth_rows(&graph.auth); purge_err.code != .None {
+		sweep_ok = false
+		fmt.eprintfln("[reaper] auth expiry purge failed: %s", purge_err.message)
+	}
 
 	// bridge_log relay (plan §4.3): the 7-day time prune of bridge_log_events
 	// rides this sweep but runs only every 15 min (by the received_at index);

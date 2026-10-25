@@ -222,12 +222,17 @@ shell_session_stream_handler :: proc(ctx: rawptr, req: Request, client: net.TCP_
 	defer bridge_ws_reader_destroy(&reader)
 
 	sink_override := h.bridge_command_sink
+	guard := stream_auth_guard_make(h.auth, auth_ctx)
 	for {
 		// Same read as read_ws_text_blocking; the reason is kept only for the
 		// ws_disconnects_total label (REQ-SHELL-41 made it available for exactly this).
 		text, ok, why := bridge_ws_read_frame(&reader, 120 * time.Second)
 		if !ok {
 			ws_close_reason = bridge_ws_reason_string(why)
+			return
+		}
+		if !stream_auth_still_valid(&guard) {
+			ws_close_reason = "auth_revoked"
 			return
 		}
 		ws_note_rx(ws_rx, len(text))
@@ -1096,7 +1101,10 @@ _preview_filter_cookie_header :: proc(value: string) -> string {
 		cookie := strings.trim_space(part)
 		name := cookie
 		if eq := strings.index_byte(cookie, '='); eq >= 0 do name = strings.trim_space(cookie[:eq])
-		if strings.has_prefix(strings.to_lower(name, context.temp_allocator), "authentik_") do continue
+		lower_name := strings.to_lower(name, context.temp_allocator)
+		if strings.has_prefix(lower_name, "authentik_") do continue
+		// Hub session/login cookies never reach a previewed app.
+		if strings.has_prefix(lower_name, "__host-heimdall_") || strings.has_prefix(lower_name, "heimdall_") do continue
 		if !first do strings.write_string(&b, "; ")
 		strings.write_string(&b, cookie)
 		first = false

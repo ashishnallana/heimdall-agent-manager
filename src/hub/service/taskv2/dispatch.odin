@@ -128,7 +128,7 @@ block_ready_agent_in_uow :: proc(svc: ^Service, u: ^Uow, task: domain.Task, agen
 // after commit. Re-read afterwards so synchronous launch/send failures are
 // returned to the card as well as persisted in its newly projected reason.
 start_task_agent :: proc(svc: ^Service, auth: contracts.Auth_Context, task_id: domain.Task_ID, expected_waiting_on := "") -> (bool, domain.Domain_Error) {
-	if auth.kind != .OIDC && auth.kind != .User_Token && auth.kind != .Trusted_Proxy do return false, domain.domain_error(.Forbidden, "only the user may start a task agent")
+	if !contracts.is_user_auth(auth) do return false, domain.domain_error(.Forbidden, "only the user may start a task agent")
 	u, ok, err := begin_uow(svc)
 	if !ok do return false, err
 	task, found, _ := iface.taskchain_get_task(svc.repo, task_id)
