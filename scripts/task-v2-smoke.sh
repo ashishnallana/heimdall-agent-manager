@@ -11,26 +11,28 @@
 #   1 bring-up: build, hub :18080, bridge :18081 (local endpoint :18082), device-flow
 #     enrolment, user token, fake `claude`/`pi` on the bridge PATH, temp git repo
 #     registered as the chain directory, two agents (worker, reviewer) + fleet rows.
-#   2 happy path: brief → publish → ready → matcher wake-grants the worker →
-#     fake worker confirms → verify (exit 0 at head) → submit → in_review →
-#     reviewer wake-granted → review post approve → done.
-#   3 negatives: submit without verify → 409 verify_required; submit when the
-#     caller holds no lease (after done) → 409 lease_lost; cancel-then-submit →
-#     409 lease_lost.
+#   2 happy path: brief (goal + acceptance, no command) → publish → ready →
+#     matcher wake-grants the worker → fake worker confirms → submit (summary
+#     reports its checks) → in_review → reviewer wake-granted → review post
+#     approve → done.
+#   3 negatives: a legacy brief carrying verify/auto_submit/require_independent_verify
+#     is accepted with a verify_removed warning; submit when the caller holds no
+#     lease (after done) → 409 lease_lost; cancel-then-submit → 409 lease_lost.
 #   4 worker death: kill -9 the fake worker → bridge reports stopped → lease
 #     expired(instance_lost) → re-grant attempt 2 to a re-woken instance.
 #   5 bridge pause < TTL: SIGSTOP the bridge ~20 s → SIGCONT → lease unchanged.
 #     (> TTL = 15 min is NOT exercised; see the note printed by the step.)
-#   6 verify dies with the bridge: long `sleep 300` verify, kill -9 the bridge,
-#     restart it → verify facet exit_code -1 once the session inventory reconciles.
+#   6 workflow chains: templates → run → immutability → status → cancel.
 #   7 teardown (trap EXIT): kill hub/bridge/pty-host/fake agents, keep logs.
+# (Verification commands were removed, so the old verify-gate, independent-verify,
+# auto-submit and verify-dies-with-the-bridge checks are gone.)
 #
 # HOW THE WORKER IS DRIVEN. The bridge launches scripts/task-v2-smoke/fake-provider.sh
 # as the provider binary (real wake_agent → pty-host → bootstrap → hlat token →
 # run_dir shim). The fake calls `ham-ctl agent start-success` + `lease next` and then
-# idles. The smoke drives verify/submit/review AS that instance through the same
+# idles. The smoke drives submit/review AS that instance through the same
 # shim (scripts/task-v2-smoke/agentcall.py reads HEIMDALL_BRIDGE_ENDPOINT/TOKEN from
-# <run_dir>/.heimdall/bin/ham-ctl). When ham-ctl grows `lease submit` / `verify` /
+# <run_dir>/.heimdall/bin/ham-ctl). When ham-ctl grows `lease submit` /
 # `review post` the smoke switches to the ctl verbs automatically (ctl is rebuilt on
 # every run and probed with `ham-ctl help lease`); until then the M2 verbs go through
 # the bridge's agent.rest.request relay to the hub agent-actions paths (same token).
@@ -74,7 +76,7 @@ cleanup() {
   [ -n "$HUB_PID" ] && kill "$HUB_PID" 2>/dev/null || true
   sleep 1
   # the pty-host daemon the bridge lazily started under OUR run dir, and any
-  # verify `sleep` / fake-provider loops that survived their parent
+  # fake-provider loops that survived their parent
   for pid in $(pgrep -f "$WORK" 2>/dev/null || true); do [ "$pid" != "$$" ] && kill -9 "$pid" 2>/dev/null || true; done
   for pid in "${PIDS[@]:-}"; do [ -n "$pid" ] && kill -9 "$pid" 2>/dev/null || true; done
   for p in "$HUB_PORT" "$B_PORT" "$B_LOCAL"; do
@@ -245,16 +247,14 @@ coord_running() { [ "$(inst_status "$COORD")" = "running" ]; }
 wait_for 90 "coordinator start-success" coord_running || { note "coordinator status: $(inst_status "$COORD")"; grep -n "launch\|bootstrap\|wake" "$LOGS/bridge.log" | tail -10 >&2; fail "coordinator instance never reached running (fake provider launch path broken?)"; }
 pass "coordinator $COORD launched via the real bridge launch path and reported start-success"
 
-CTL_SUBMIT=0; CTL_VERIFY=0; CTL_REVIEW=0
+CTL_SUBMIT=0; CTL_REVIEW=0
 ctl_has lease submit && CTL_SUBMIT=1
-ctl_has_top verify && CTL_VERIFY=1
 ctl_has review post && CTL_REVIEW=1
-note "ctl verbs available: lease submit=$CTL_SUBMIT verify=$CTL_VERIFY review post=$CTL_REVIEW (missing ones are driven via agent.rest.request)"
+note "ctl verbs available: lease submit=$CTL_SUBMIT review post=$CTL_REVIEW (missing ones are driven via agent.rest.request)"
 
 # ------------------------------------------------------------ task helpers ----
-make_task() { # make_task <title> [verify-cmd] -> task_id
-  local verify="${2:-true}"
-  api_ok POST "/api/v1/task-chains/$CHAIN/tasks" "{\"title\":\"$1\",\"brief\":{\"goal\":\"smoke: $1\",\"acceptance\":[\"the verify command exits 0\"],\"verify\":\"$verify\",\"review_roles\":[\"reviewer\"]}}" | jqr .data.task_id
+make_task() { # make_task <title> -> task_id (goal + acceptance is the whole contract)
+  api_ok POST "/api/v1/task-chains/$CHAIN/tasks" "{\"title\":\"$1\",\"brief\":{\"goal\":\"smoke: $1\",\"acceptance\":[\"README.md exists at the submitted head\"],\"review_roles\":[\"reviewer\"]}}" | jqr .data.task_id
 }
 publish_chain() { api_ok POST "/api/v1/task-chains/$CHAIN/publish" '{}' >/dev/null; }
 publish_task() { api_ok POST "/api/v1/task-chains/$CHAIN/tasks/$1/publish" '{}' >/dev/null; }
@@ -284,21 +284,6 @@ wait_state() { # wait_state <task> <state> [secs]
     sleep 1
   done
 }
-# run_verify <shim> <task> <attempt> <cmd> [bg] -> prints session_id; label per the wire contract
-run_verify() {
-  local shim="$1" task="$2" attempt="$3" cmd="$4" bg="${5:-}"
-  local head; head="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || true)"
-  if [ "$CTL_VERIFY" = 1 ] && [ -z "$bg" ]; then
-    ( cd "$REPO" && "$shim" verify ) >"$LOGS/verify-$task-$attempt.log" 2>&1; echo "ctl:$?"; return 0
-  fi
-  local body; body="$(jq -nc --arg cmd "$cmd" --arg cwd "$REPO" --arg label "verify $task #$attempt @$head" --arg inst "$HOLDER" --argjson bg "${bg:-false}" \
-     '{kind:"run", cmd:$cmd, cwd:$cwd, label:$label, agent_instance_id:$inst} + (if $bg then {background:true} else {} end)')"
-  local resp; resp="$(acall "$shim" agent.rest.request "$(jq -nc --arg p "/api/v1/bridges/$BRIDGE_ID/shells" --argjson b "$body" '{http_method:"POST", path:$p, body:$b}')")"
-  local sid; sid="$(printf '%s' "$resp" | jq -r '.data.data.session.session_id // .data.session.session_id // .data.data.session_id // .data.session_id // empty')"
-  [ -n "$sid" ] || { echo "verify session create failed: $resp" >&2; return 1; }
-  if [ -z "$bg" ]; then acall "$shim" agent.shell.wait "{\"session_id\":\"$sid\"}" >"$LOGS/verify-$task-$attempt.log" 2>&1 || true; fi
-  echo "$sid"
-}
 submit_as() { # submit_as <shim> <summary> -> response json (exit = ok)
   if [ "$CTL_SUBMIT" = 1 ]; then ( cd "$REPO" && "$1" lease submit --summary "$2" ); else acall "$1" agent.lease.submit "{\"summary\":\"$2\"}"; fi
 }
@@ -311,7 +296,7 @@ err_code() {
 
 # ============================================================ 2. happy path ====
 if want 2; then
-section "2. happy path: publish → grant → verify → submit → review → done"
+section "2. happy path: publish → grant → submit → review → done"
 T1="$(make_task "smoke-happy")" || fail "create task"
 [ -n "$T1" ] && [ "$T1" != null ] || fail "create task (no id)"
 pass "task $T1 created with full brief (draft, state=$(task_state "$T1"))"
@@ -333,22 +318,7 @@ RT_FACET="$(facet "$T1" "$ATTEMPT" runtime | jq -c '.data.body // empty')"
 printf '%s' "$RT_FACET" | jq -e '(.bridge_id | length > 0) and (.started_at | length > 0)' >/dev/null 2>&1 \
   && pass "M3: runtime facet written on lease grant: $RT_FACET" || fail "M3: runtime facet missing on grant: $RT_FACET"
 
-# 3a lives here because it needs an unverified live lease
-if want 3; then
-  R="$(submit_as "$WSHIM" "premature submit" || true)"
-  [ "$(printf '%s' "$R" | err_code)" = "verify_required" ] && pass "3a submit without verify → 409 verify_required" || fail "3a expected verify_required, got: $R"
-fi
-
-SID="$(run_verify "$WSHIM" "$T1" "$ATTEMPT" "true")" || fail "verify run"
-note "verify session: $SID"
-verify_ok() { facet "$1" "$2" verify | jq -e '.data.body.exit_code == 0' >/dev/null 2>&1; }
-wait_for 30 "verify facet exit_code 0" verify_ok "$T1" "$ATTEMPT" || { facet "$T1" "$ATTEMPT" verify >&2; echo; fail "verify facet not written with exit_code 0"; }
-F="$(facet "$T1" "$ATTEMPT" verify | jq -c '.data.body | {exit_code, head_at_start, head_at_end, dirty, status, log_ref, independent}')"
-pass "verify facet written by hub: $F"
-printf '%s' "$F" | jq -e --arg h "$HEAD_SHA" '.head_at_start == $h' >/dev/null && pass "verify facet head_at_start == repo HEAD ${HEAD_SHA:0:8}" || note "head_at_start != repo HEAD (label head: $(printf '%s' "$F" | jqr .head_at_start))"
-[ "$(printf '%s' "$F" | jqr .dirty)" = "false" ] && pass "bridge enriched shell_exited with vcs.dirty=false" || note "vcs.dirty not enriched by bridge yet (dirty=$(printf '%s' "$F" | jqr .dirty)); hub falls back to handoff/note ordering"
-
-R="$(submit_as "$WSHIM" "done: README added")" || fail "submit: $R"
+R="$(submit_as "$WSHIM" "done: README added; checks: test -f README.md (pass)")" || fail "submit: $R"
 OUTCOME="$(printf '%s' "$R" | jq -r '.data.data.outcome // .data.outcome // .outcome // empty')"
 [ "$OUTCOME" = "in_review" ] && pass "submit → outcome in_review" || fail "submit outcome '$OUTCOME': $R"
 RT_END="$(facet "$T1" "$ATTEMPT" runtime | jq -r '.data.body.ended_at // empty')"
@@ -361,43 +331,27 @@ pass "review lease $LEASE_ID role=$(task_lease "$T1" review review_role) granted
 wait_confirmed "$T1" review || fail "fake reviewer never confirmed"
 RSHIM="$(shim_of "$RHOLDER")"
 pass "reviewer confirmed (shim=$RSHIM)"
-# M3: reviewer independent verify & auto_submit check
-if [ "$CTL_VERIFY" = 1 ]; then
-  ( cd "$REPO" && "$RSHIM" verify --independent "$T1" ) >"$LOGS/verify-ind-$T1-$ATTEMPT.log" 2>&1 \
-    && pass "M3: reviewer verify --independent succeeded" \
-    || { cat "$LOGS/verify-ind-$T1-$ATTEMPT.log" >&2; fail "M3: verify --independent returned non-zero"; }
-  ind_verify_ok() { facet "$1" "$2" verify | jq -e '.data.body.independent == true and .data.body.exit_code == 0' >/dev/null 2>&1; }
-  wait_for 30 "verify facet independent=true" ind_verify_ok "$T1" "$ATTEMPT" \
-    && pass "M3: verify facet recorded independent=true" \
-    || { facet "$T1" "$ATTEMPT" verify >&2; fail "M3: verify facet did not record independent=true"; }
-fi
 R="$(review_as "$RSHIM" approve)" || fail "review post: $R"
 GATE="$(printf '%s' "$R" | jq -r '.data.data.gate // .data.gate // .gate // empty')"
 [ "$GATE" = "approved" ] && pass "review post approve → gate approved" || fail "gate '$GATE': $R"
 wait_state "$T1" done 15 || fail "task not done after approval"
 pass "task $T1 is DONE"
 
-# M3: brief.auto_submit = true E2E check
-if [ "$CTL_VERIFY" = 1 ]; then
-  T_AUTO="$(api_ok POST "/api/v1/task-chains/$CHAIN/tasks" '{"title":"smoke-auto-submit","brief":{"goal":"smoke: auto_submit","acceptance":["verify exits 0 and auto-submits"],"verify":"true","auto_submit":true,"review_roles":[]}}' | jqr .data.task_id)" || fail "create auto_submit task"
-  wait_lease "$T_AUTO" work 120 || fail "no grant for $T_AUTO"
-  wait_confirmed "$T_AUTO" work || fail "worker never confirmed $T_AUTO"
-  WASHIM="$(shim_of "$HOLDER")"
-  ( cd "$REPO" && "$WASHIM" verify ) >"$LOGS/verify-auto-$T_AUTO.log" 2>&1 \
-    || { cat "$LOGS/verify-auto-$T_AUTO.log" >&2; fail "M3: verify on auto_submit task failed"; }
-  wait_state "$T_AUTO" done 20 || fail "M3: auto_submit did not transition $T_AUTO to done"
-  api GET "/api/v1/task-chains/$CHAIN/tasks/$T_AUTO/events" | jq -e '.data[]? | select(.kind=="submitted" and (.payload.auto == true))' >/dev/null 2>&1 \
-    && pass "M3: brief.auto_submit=true automatically submitted $T_AUTO to DONE with submitted.payload.auto=true" \
-    || { api GET "/api/v1/task-chains/$CHAIN/tasks/$T_AUTO/events" >&2; fail "M3: submitted event on $T_AUTO missing payload.auto=true"; }
-fi
 else
-  # scenarios 3-6 need the published chain and a known worker
+  # scenarios 3-5 need the published chain and a known worker
   publish_chain || true
 fi
 
 # ============================================================ 3. negatives ====
 if want 3 && want 2; then
 section "3. negatives"
+# 3a legacy brief keys: accepted and dropped with a verify_removed warning (one release)
+R="$(api POST "/api/v1/task-chains/$CHAIN/tasks" '{"title":"smoke-legacy-brief","brief":{"goal":"smoke: legacy keys","acceptance":["keys are dropped"],"verify":"true","auto_submit":true,"require_independent_verify":true,"review_roles":["reviewer"]}}' || true)"
+printf '%s' "$R" | jq -e '[.. | objects | select(.code? == "verify_removed")] | length > 0' >/dev/null 2>&1 \
+  && pass "3a legacy verify/auto_submit/require_independent_verify brief → created with a verify_removed warning" \
+  || fail "3a expected a verify_removed warning, got: $R"
+T_LEGACY="$(printf '%s' "$R" | jqr .data.task_id)"
+[ -n "$T_LEGACY" ] && [ "$T_LEGACY" != null ] && api POST "/api/v1/task-chains/$CHAIN/tasks/$T_LEGACY/cancel" '{"reason":"smoke"}' >/dev/null 2>&1 || true
 R="$(submit_as "$WSHIM" "ghost submit" || true)"
 [ "$(printf '%s' "$R" | err_code)" = "unauthenticated" ] && R="$(submit_as "$(shim_of "$COORD")" "ghost submit" || true)"
 [ "$(printf '%s' "$R" | err_code)" = "lease_lost" ] && pass "3b submit with no live lease (after done) → 409 lease_lost" || fail "3b expected lease_lost, got: $R"
@@ -449,41 +403,9 @@ note "bridge status after resume: $B_STATUS; runtime-ready lines before=$READY_B
 skip "bridge disconnect > TTL (15 min) not exercised in the smoke — covered by hub unit tests (lease_test.odin); no hub flag shortens LEASE_TTL_SECONDS today"
 fi
 
-# ====================================== 6. verify dies with the bridge ====
+# =============================================== 6. workflow chains (M3b) ====
 if want 6; then
-section "6. long verify + kill -9 bridge + restart → verify facet exit_code -1"
-[ -n "${T3:-}" ] || { T3="$(make_task "smoke-bridge-death")"; wait_lease "$T3" work 150 || fail "no grant"; wait_confirmed "$T3" work || fail "no confirm"; }
-HOLDER="$(task_lease "$T3" work holder_instance_id)"; ATTEMPT="$(task_lease "$T3" work attempt_no)"
-VSHIM="$(shim_of "$HOLDER")"
-SID6="$(run_verify "$VSHIM" "$T3" "$ATTEMPT" "sleep 300" true)" || fail "start long verify"
-sleep 2
-S6="$(api GET "/api/v1/bridges/$BRIDGE_ID/shells/$SID6" | jqr '.data.session.status // .data.status')"
-pass "long verify session $SID6 running (status=$S6)"
-T_KILL=$(date +%s)
-kill -9 "$BRIDGE_PID"; wait "$BRIDGE_PID" 2>/dev/null || true
-# Simulate the verify process dying while the bridge is down (otherwise pty-host
-# keeps `sleep 300` alive across a bridge restart by design).
-VPID6="$(jq -r '.pid // empty' "$WORK/bridge-data/shell_sessions/$SID6.json" 2>/dev/null || true)"
-[ -n "$VPID6" ] && [ "$VPID6" -gt 0 ] 2>/dev/null && { kill -9 "$VPID6" 2>/dev/null || true; pkill -9 -P "$VPID6" 2>/dev/null || true; }
-pkill -9 -f "sleep 300" 2>/dev/null || true
-pass "bridge killed -9 (and verify sleep pid=${VPID6:-?} killed while bridge down)"
-sleep 2
-start_bridge
-wait_for 60 "bridge reconnect" sh -c "[ \$(grep -c 'runtime ready' '$LOGS/bridge.log') -ge 2 ]" || fail "restarted bridge never reconnected"
-pass "bridge restarted (pid $BRIDGE_PID) and reconnected after $(( $(date +%s) - T_KILL ))s"
-v6() { facet "$T3" "$ATTEMPT" verify | jq -e '.data.body.exit_code == -1' >/dev/null 2>&1; }
-if wait_for 90 "verify facet exit_code -1" v6; then
-  pass "verify facet exit_code -1 written $(( $(date +%s) - T_KILL ))s after the bridge death: $(facet "$T3" "$ATTEMPT" verify | jq -c '.data.body | {exit_code,status,duration_ms}')"
-else
-  note "session $SID6 now: $(api GET "/api/v1/bridges/$BRIDGE_ID/shells/$SID6" | jq -c '.data.session | {status, exit_code, finished_at}' 2>/dev/null)"
-  note "facet: $(facet "$T3" "$ATTEMPT" verify | jq -c '.data // .error' 2>/dev/null)"
-  fail "verify facet did not reach exit_code -1 within 90 s of the bridge restart"
-fi
-fi
-
-# =============================================== 7. workflow chains (M3b) ====
-if want 7; then
-section "7. workflow chains: templates → run → lazy materialisation → status → cancel"
+section "6. workflow chains: templates → run → lazy materialisation → status → cancel"
 
 # 7a. Templates
 TEMPLATES_RESP="$(api GET "/api/v1/workflows/templates")"
@@ -492,12 +414,12 @@ echo "$TEMPLATES_RESP" | jq -e '.data.templates[] | select(.name == "explore_pla
   || fail "7a explore_plan_build template missing from templates response: $TEMPLATES_RESP"
 
 # 7b. Run workflow
-WF_RUN_RESP="$(api_ok POST "/api/v1/workflows/run" "{\"ref\":\"explore_plan_build\",\"title\":\"Smoke Workflow Run\",\"inputs\":{\"goal\":\"smoke test goal\",\"verify\":\"true\"},\"bridge_id\":\"$BRIDGE_ID\"}")"
+WF_RUN_RESP="$(api_ok POST "/api/v1/workflows/run" "{\"ref\":\"explore_plan_build\",\"title\":\"Smoke Workflow Run\",\"inputs\":{\"goal\":\"smoke test goal\"},\"bridge_id\":\"$BRIDGE_ID\"}")"
 WF_CHAIN="$(printf '%s' "$WF_RUN_RESP" | jqr '.data.chain_id // .chain_id')"
 [ -n "$WF_CHAIN" ] && pass "7b started workflow run (chain_id=$WF_CHAIN)" || fail "7b failed to start workflow: $WF_RUN_RESP"
 
 # 7c. Immutability: manual task create on workflow chain rejected with 403
-CREATE_ATTEMPT="$(api POST "/api/v1/task-chains/$WF_CHAIN/tasks" '{"title":"manual task","goal":"should fail","verify":"true"}' || true)"
+CREATE_ATTEMPT="$(api POST "/api/v1/task-chains/$WF_CHAIN/tasks" '{"title":"manual task","brief":{"goal":"should fail","acceptance":["rejected"]}}' || true)"
 [ "$(printf '%s' "$CREATE_ATTEMPT" | err_code)" = "workflow_immutable" ] \
   && pass "7c manual task.create on workflow chain rejected with 403 workflow_immutable" \
   || fail "7c expected workflow_immutable 403, got: $CREATE_ATTEMPT"
