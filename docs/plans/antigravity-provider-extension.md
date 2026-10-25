@@ -155,7 +155,7 @@ The extension is governed by four core requirements: `REQ-EXT-AGY-1` through `RE
 1. **Permission Interception via `PreToolUse`**:
    - In `permission_mode: ask`, before executing potentially destructive tools (`run_command`, `write_to_file`, `replace_file_content`), the hook checks whether user approval is required.
 2. **Local Auto-Approval of Coordination Commands**:
-   - Agents coordinate with Heimdall via `ham-ctl` (`chat send`, `task comment`, `verify`, `lease heartbeat`, etc.).
+   - Agents coordinate with Heimdall via `ham-ctl` (`chat send`, `task comment`, `lease heartbeat`, etc.).
    - If `toolCall.name == "run_command"` and `toolCall.args.CommandLine` is an allowlisted `ham-ctl` command verified by `is_ham_ctl_command`, the hook must approve it locally at once.
    - The hook immediately prints `{"decision": "allow"}` and exits 0, generating neither an agent blocker nor a bridge permission RPC round-trip.
 3. **Bridge Permission Relay (`agent.extension.permission`)**:

@@ -286,4 +286,4 @@ Pre-submit run of `bash verify-rebased.sh` at `b6273f2a` (`ham-ctl shell run` se
 - Fetch-dedup backend passes. Typecheck passes. The Vite build passes on the first try: no Node v26 segfault in this run.
 - UI suites: 39/39. Shell-list test 1/1, with GET /shells per tab of 6/4/3/6/3, the same as task 3. REQ-SHELL-6: 5/5.
 
-The final `ham-ctl verify` at the submitted head is recorded in the task handoff.
+The final check at the submitted head is recorded in the task handoff.
