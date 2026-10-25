@@ -51,6 +51,8 @@ fake_clock_now :: proc(ctx: rawptr) -> string {
 Token_Fixture :: struct {
 	db_path: string,
 	conn:    sqlite.Conn,
+	// The re-grant transaction's own connection, as production wires it.
+	commit:  sqlite.Bridge_Enroll_Commit_Conn,
 	impl:    sqlite.Bridge_Repo_SQLite,
 	repo:    iface.Bridge_Repository,
 	clock:   platform.Clock,
@@ -85,7 +87,9 @@ setup_token_fixture :: proc(t: ^testing.T, tag: string) -> ^Token_Fixture {
 	mig_ok, mig_err := sqlite.run_migrations(&f.conn)
 	testing.expect(t, mig_ok, "migrations ok")
 	testing.expect_value(t, mig_err.code, domain.Error_Code.None)
+	_ = sqlite.exec(&f.conn, "PRAGMA busy_timeout = 5000;")
 	f.repo = sqlite.new_bridge_repository(&f.impl, &f.conn)
+	if commit_ok, _ := sqlite.open_bridge_enroll_commit_conn(&f.commit, f.db_path); commit_ok do f.impl.commit = &f.commit
 	// 2026-01-01T00:00:00Z, chosen only for being a round readable number.
 	f.fake = Fake_Clock{unix_seconds = 1767225600}
 	f.clock = platform.Clock{ctx = rawptr(&f.fake), now = fake_clock_now}
@@ -99,6 +103,7 @@ setup_token_fixture :: proc(t: ^testing.T, tag: string) -> ^Token_Fixture {
 @(private = "file")
 teardown_token_fixture :: proc(f: ^Token_Fixture) {
 	if f == nil do return
+	if f.impl.commit != nil do sqlite.close(&f.commit.conn)
 	sqlite.close(&f.conn)
 	os.remove(f.db_path)
 	for s in f.closed_bridge_ids do delete(s)
@@ -669,4 +674,44 @@ test_refresh_retry_refused_once_the_recovered_pair_was_used :: proc(t: ^testing.
 	advance(f, 60)
 	_, replay_ok, _ := refresh_bridge_token(&f.svc, enrolled.refresh_token, TEST_REQUEST_ID)
 	testing.expect(t, !replay_ok, "an older token is refused once its descendant was used")
+}
+
+// Re-review finding: a failure after the claim and before the new rows are written
+// (crash, SQLITE_BUSY, a unique conflict) must not strand the bridge. The re-grant is
+// one transaction, so the claim rolls back and the next retry still recovers.
+@(private = "file")
+regrant_fail_token_id: string
+@(private = "file")
+regrant_fail_once :: proc(spent_token_id: string) -> bool {
+	if spent_token_id != regrant_fail_token_id do return true
+	regrant_fail_token_id = "" // fail exactly once
+	return false
+}
+
+@(test)
+test_regrant_failure_after_claim_rolls_back_and_the_retry_recovers :: proc(t: ^testing.T) {
+	f := setup_token_fixture(t, "regrant_fail")
+	defer teardown_token_fixture(f)
+	enrolled := enrol_one(t, f, "regrant-fail-host")
+	_, ok, err := refresh_bridge_token(&f.svc, enrolled.refresh_token, TEST_REQUEST_ID)
+	testing.expect(t, ok, err.message)
+	advance(f, 60)
+	spent_id, _, _ := split_credential(REFRESH_TOKEN_PREFIX, enrolled.refresh_token)
+	regrant_fail_token_id = spent_id
+	sqlite.bridge_regrant_test_hook = regrant_fail_once
+	_, failed_ok, failed_err := refresh_bridge_token(&f.svc, enrolled.refresh_token, TEST_REQUEST_ID)
+	testing.expect(t, !failed_ok, "the injected failure fails this attempt")
+	testing.expect(t, failed_err.message != "invalid_grant", "a failed re-grant is a retriable error, not theft")
+	row, _, _ := iface.bridge_get_token(f.svc.repo, spent_id)
+	testing.expect_value(t, row.regrant_claim, "") // the claim rolled back
+	family, _ := iface.bridge_list_tokens_by_family(f.svc.repo, enrolled.family_id)
+	for tok in family do testing.expect(t, tok.generation <= 1, "no row of the failed generation was written")
+	free_bridge_tokens(family)
+	testing.expect(t, len(f.closed_bridge_ids) == 0, "no theft response")
+
+	advance(f, 10)
+	recovered, retry_ok, retry_err := refresh_bridge_token(&f.svc, enrolled.refresh_token, TEST_REQUEST_ID)
+	testing.expect(t, retry_ok, retry_err.message)
+	_, use_ok, use_err := verify_bridge_token(&f.svc, recovered.access_token)
+	testing.expect(t, use_ok, use_err.message)
 }

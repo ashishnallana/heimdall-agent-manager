@@ -35,5 +35,11 @@ test_bridge_token_retry_migrations_fresh_and_with_duplicates :: proc(t: ^testing
 	ok, err = run_migrations(&dup)
 	testing.expect(t, ok, "a database with pre-existing duplicates still starts")
 	testing.expect(t, !sqlite_object_exists(&dup, BTM_INDEX), "the backstop index is skipped there")
+	testing.expect(t, !migration_applied(&dup, "140_bridge_tokens_unique_generation.sql"), "skipped, not recorded, so it is retried")
+	// Once the data is clean, the next start installs it.
+	testing.expect(t, exec(&dup, "DELETE FROM bridge_tokens WHERE token_id = 'd2';"))
+	ok, err = run_migrations(&dup)
+	testing.expect(t, ok, err.message)
+	testing.expect(t, sqlite_object_exists(&dup, BTM_INDEX), "the index is installed after the duplicates are gone")
 	testing.expect(t, migration_applied(&dup, "140_bridge_tokens_unique_generation.sql"))
 }

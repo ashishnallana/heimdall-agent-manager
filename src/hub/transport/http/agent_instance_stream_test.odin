@@ -51,10 +51,12 @@ make_agent_stream_pair :: proc(t: ^testing.T) -> (Agent_Stream_Sock_Pair, bool) 
 }
 
 @(private = "file")
+// Skips zeroed sockets: net.close(0) would close the test process's STDIN (see
+// close_telemetry_sock_pair).
 close_agent_stream_pair :: proc(p: ^Agent_Stream_Sock_Pair) {
-	net.close(p.hub)
-	net.close(p.client)
-	net.close(p.listener)
+	if int(p.hub) > 0 do net.close(p.hub)
+	if int(p.client) > 0 do net.close(p.client)
+	if int(p.listener) > 0 do net.close(p.listener)
 }
 
 // Read raw response string until timeout

@@ -996,11 +996,11 @@ run_migrations :: proc(
 		// marked done — the same reasoning as 050's twin.
 		// 140's unique index would fail on rows that already break it (only the
 		// pre-fix grace race could produce them). Refusing to start over that would
-		// be worse than running without the backstop, so log and mark it applied;
-		// the service-level claim still serializes new rotations.
+		// be worse than running without the backstop, so log and skip it WITHOUT
+		// marking it applied: every start re-checks and installs the index once the
+		// data is clean. The atomic re-grant still serializes new rotations.
 		if name == "140_bridge_tokens_unique_generation.sql" && bridge_tokens_generation_duplicates(conn) > 0 {
-			fmt.eprintfln("hub: bridge_tokens has duplicate (family_id, kind, generation) rows; skipping unique index %s", name)
-			mark_migration_applied(conn, name)
+			fmt.eprintfln("hub: bridge_tokens has duplicate (family_id, kind, generation) rows; skipping unique index %s until they are gone", name)
 			continue
 		}
 		if name == "057_bridge_tokens.sql" && sqlite_object_exists(conn, "bridge_tokens_family") {
