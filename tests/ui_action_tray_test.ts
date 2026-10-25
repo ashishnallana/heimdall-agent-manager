@@ -23,30 +23,26 @@ function taskItem(id: string, details: any = {}, extra: any = {}): any {
 
 const SCOPE = { chainId: 'chain_a', agentInstanceId: 'inst_me' };
 
-test('review tray warns about skipped verify from card metadata or the attempt handoff', async () => {
+test('review tray shows no verification surface, even for legacy verify records', async () => {
   const React = await import('react');
   const { Provider } = await import('react-redux');
   const { renderToStaticMarkup } = await import('react-dom/server');
   const { makeVaultStore } = await import('./helpers/vaultEndpointHarness.ts');
   const { tasksApi } = await import('../src/ui/api/endpoints/tasks.ts');
   const { ActionTaskCard } = await import('../src/ui/components/attention/ActionTaskCard.tsx');
-  for (const source of ['card', 'handoff']) {
-    const store = await makeVaultStore();
-    const reason = 'Runner unavailable; manual review needed.';
-    const item = taskItem('skip', source === 'card' ? { skip_verify_reason: reason } : {});
-    if (source === 'handoff') {
-      const args = { chainId: 'chain_a', taskId: 'task_skip', attemptNo: 1 };
-      await store.dispatch(tasksApi.util.upsertQueryData('fetchTaskFacet', { ...args, kind: 'handoff' }, { facet: { skip_verify_reason: reason } }));
-      await store.dispatch(tasksApi.util.upsertQueryData('fetchTaskFacet', { ...args, kind: 'verify' }, { facet: { exit_code: 0 } }));
-    }
-    const html = renderToStaticMarkup(React.createElement(Provider, { store, children: React.createElement(ActionTaskCard, {
-      item, mobile: true, active: source === 'handoff', now: Date.now(), footer: null,
-    }) }));
-    assert.match(html, /Verify skipped: .*Runner unavailable; manual review needed\./);
-    assert.match(html, /data-debug-id="action-tray-review-verify-skipped" class="[^"]*text-warning/);
-    assert.doesNotMatch(html, /Verify passed/);
-    store.dispatch(tasksApi.util.resetApiState());
-  }
+  const store = await makeVaultStore();
+  // A card and attempt recorded before removal: skip reason and a verify facet.
+  const item = taskItem('legacy', { skip_verify_reason: 'Runner unavailable.' });
+  const args = { chainId: 'chain_a', taskId: 'task_legacy', attemptNo: 1 };
+  await store.dispatch(tasksApi.util.upsertQueryData('fetchTaskFacet', { ...args, kind: 'handoff' }, { facet: { summary: 'Implemented the endpoint.', skip_verify_reason: 'Runner unavailable.' } }));
+  await store.dispatch(tasksApi.util.upsertQueryData('fetchTaskFacet', { ...args, kind: 'verify' }, { facet: { exit_code: 0, command: 'npm test' } }));
+  const html = renderToStaticMarkup(React.createElement(Provider, { store, children: React.createElement(ActionTaskCard, {
+    item, mobile: true, active: true, now: Date.now(), footer: null,
+  }) }));
+  assert.match(html, /Implemented the endpoint\./);
+  assert.doesNotMatch(html, /verif/i);
+  assert.doesNotMatch(html, /npm test/);
+  store.dispatch(tasksApi.util.resetApiState());
 });
 
 test('trayItems keeps blocked and review task items of this chain, in server order', () => {

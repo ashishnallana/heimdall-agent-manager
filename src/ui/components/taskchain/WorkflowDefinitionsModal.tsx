@@ -30,7 +30,6 @@ const STARTER_TEMPLATE = JSON.stringify(
         brief: {
           goal: 'Run static analysis and tests against {{inputs.target}}',
           acceptance: ['Exit with 0 failures', 'Produce report output'],
-          verify: 'none',
           output: { schema: 'analysis_report.v1' },
         },
       },
@@ -50,9 +49,8 @@ const STARTER_TEMPLATE = JSON.stringify(
         title: 'Deploy Changes',
         needs: ['gate_approval'],
         brief: {
-          goal: 'Deploy verified artifacts',
+          goal: 'Deploy the reviewed artifacts',
           acceptance: ['Health check passes'],
-          verify: 'none',
         },
       },
     ],

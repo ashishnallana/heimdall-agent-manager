@@ -32,7 +32,7 @@ export const TASK_STATE_COLORS: Record<string, string> = {
 
 export interface TaskBadge {
   /** What the badge is about, so views can drop ones they show elsewhere. */
-  kind?: 'gate' | 'lease' | 'bridge' | 'attempt' | 'review' | 'blocked' | 'verified' | 'merge';
+  kind?: 'gate' | 'lease' | 'bridge' | 'attempt' | 'review' | 'blocked' | 'merge';
   label: string;
   tone?: 'accent' | 'ok' | 'warn' | 'danger' | 'info' | 'neutral';
   title?: string;
@@ -125,14 +125,8 @@ export function getTaskBadges(task: TaskWire, _chainFleets?: any[], nowMs: numbe
     });
   }
 
-  if (state === 'done') {
-    badges.push({
-      kind: 'verified',
-      label: 'Verified',
-      tone: 'ok',
-      title: 'Task completed and verified',
-    });
-  }
+  // No "Verified" badge for a done task: verification commands were removed
+  // (REQ-TV2-1) and the state pill already says Done.
 
   // Worktree merge-back of a done task (F5). A conflict already shows as blocked.
   const merge = task.merge;
@@ -222,7 +216,7 @@ export function getTaskStatusLines(task: TaskWire, _chainFleets?: any[], nowMs: 
 
   if (state === 'done') {
     return [
-      'Done · completed and verified',
+      'Done · completed',
       `${task.attempt_no || 1} attempt${task.attempt_no === 1 ? '' : 's'}`,
     ];
   }

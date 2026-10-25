@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { Badge, Button, Icon, Select, Text } from '@ui';
+import { Button, Icon, Select, Text } from '@ui';
 import type { TaskWire } from '../../api/taskWire';
 import type { TaskChainFleet } from '../../api/endpoints/taskChains';
 import { useListBridgesQuery } from '../../api/endpoints/bridgeSupport';
@@ -9,9 +9,10 @@ import {
   useFetchTaskFacetQuery,
 } from '../../api/endpoints/tasks';
 import { getTaskPeople, normalizeTaskState, taskChangedFiles } from './taskV2Types';
-import { awaitingYourReview, blockedOnYou, reviewVotes, youApproved, type ReviewVerdict } from './taskActions';
+import { awaitingYourReview, blockedOnYou, reviewVotes, sameReviewer, voteFor, youApproved, type ReviewVerdict } from './taskActions';
 import type { TaskActionsApi } from './useTaskActions';
-import { EMPTY_TASK_NAMES, instanceAgentsFromEvents, withInstanceAgents, type TaskNames } from './taskNames';
+import { EMPTY_TASK_NAMES, instanceAgentsFromEvents, participantLabel, withInstanceAgents, type TaskNames } from './taskNames';
+import { useParticipantLabel } from './ParticipantName';
 import { describeTaskEvent, reviewsPostedForAttempt, whoById } from './taskEvents';
 import { DecryptedMarkdown, VaultText } from '../vault';
 import { HolderName } from './HolderName';
@@ -96,8 +97,54 @@ function Block({
   );
 }
 
+/**
+ * A verify result recorded before verification commands were removed (D2).
+ * Read-only history: collapsed, neutral (no pass/fail badge), no re-run. Gates,
+ * packs and alerts never read it.
+ */
+export function LegacyVerifyRecord({ facet, skipReason }: { facet: any; skipReason?: unknown }) {
+  const command = typeof facet?.command === 'string' ? facet.command : '';
+  const exitCode = typeof facet?.exit_code === 'number' ? facet.exit_code : null;
+  const output = String(facet?.output || facet?.summary || '');
+  const skipped = typeof skipReason === 'string' ? skipReason.trim() : '';
+  return (
+    <Block title="Legacy verification record" collapsible debugId="task-details-legacy-verify">
+      <Text as="p" role="caption" tone="faint">
+        Recorded before verification commands were removed. Kept as history only; it does not affect review.
+      </Text>
+      <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">
+        {command && (
+          <>
+            <dt className="text-muted">Command</dt>
+            <dd className="min-w-0 break-all font-mono text-[11px] text-primary">{command}</dd>
+          </>
+        )}
+        {exitCode !== null && (
+          <>
+            <dt className="text-muted">Exit code</dt>
+            <dd className="font-mono text-[11px] text-primary">{exitCode}</dd>
+          </>
+        )}
+        {skipped && (
+          <>
+            <dt className="text-muted">Skipped at submit</dt>
+            <dd className="text-primary">
+              <VaultText value={skipped} />
+            </dd>
+          </>
+        )}
+      </dl>
+      {output && (
+        <pre className="max-h-48 overflow-auto whitespace-pre-wrap rounded-md bg-canvas p-2 font-mono text-[11px] text-muted">{output}</pre>
+      )}
+    </Block>
+  );
+}
+
 /** A reviewer with their verdict on the current attempt: ✓ approved, ✗ changes requested. */
-function ReviewerVote({ id, label, verdict }: { id: string; label: string; verdict?: ReviewVerdict }) {
+function ReviewerVote({ id, names, label: fixedLabel, verdict }: { id: string; names: TaskNames; label?: string; verdict?: ReviewVerdict }) {
+  const resolved = useParticipantLabel(id, names);
+  const label = fixedLabel || resolved;
   const title = verdict === 'approve' ? 'approved' : verdict === 'request_changes' ? 'requested changes' : 'waiting for review';
   return (
     <span data-debug-id={`task-detail-reviewer-vote-${id}`} className="inline-flex items-center gap-0.5" title={`${label}: ${title}`}>
@@ -152,7 +199,9 @@ export const TaskDetails: React.FC<TaskDetailsProps> = ({
 
   const { data: vcsData } = useFetchTaskFacetQuery({ chainId, taskId, attemptNo, kind: 'vcs' }, skip);
   const { data: handoffData } = useFetchTaskFacetQuery({ chainId, taskId, attemptNo, kind: 'handoff' }, skip);
-  const { data: verifyData } = useFetchTaskFacetQuery({ chainId, taskId, attemptNo, kind: 'verify' }, skip);
+  // Legacy only (D2): attempts from before verification commands were removed
+  // may carry a verify facet. Nothing writes it any more; it renders read-only.
+  const { data: legacyVerifyData } = useFetchTaskFacetQuery({ chainId, taskId, attemptNo, kind: 'verify' }, skip);
   const { data: outputData } = useFetchTaskFacetQuery({ chainId, taskId, attemptNo, kind: 'output' }, skip);
   const { data: eventsData } = useFetchTaskEventsQuery({ chainId, taskId }, skip);
   const { data: bridgesData } = useListBridgesQuery();
@@ -163,7 +212,7 @@ export const TaskDetails: React.FC<TaskDetailsProps> = ({
 
   const vcs = vcsData?.facet;
   const handoff = handoffData?.facet;
-  const verify = verifyData?.facet;
+  const legacyVerify = legacyVerifyData?.facet;
   const output = outputData?.facet;
   // Review findings ride on review_posted events (there is no findings facet).
   const reviews = useMemo(() => reviewsPostedForAttempt(events, attemptNo), [events, attemptNo]);
@@ -202,12 +251,14 @@ export const TaskDetails: React.FC<TaskDetailsProps> = ({
     : people.workers.length
       ? `Any worker: ${people.workers.map(names.agent).join(', ')}`
       : 'No worker in the fleet';
-  const votes = useMemo(() => reviewVotes(task), [task]);
+  // Votes and assignments meet on the durable agent id (REQ-TV2-6): a legacy
+  // assignment or vote that carries an instance id still lines up.
+  const votes = useMemo(() => reviewVotes(task, names), [task, names]);
   // Voters outside the fleet's reviewer list (a coordinator reviewing) still show.
-  const extraVoters = Array.from(votes.keys()).filter((id) => id !== 'user' && !people.reviewers.includes(id));
+  const extraVoters = Array.from(votes.keys()).filter((key) => key !== 'user' && !people.reviewers.some((id) => sameReviewer(votes, key, id, names)));
   const userApproved = youApproved(task);
-  const pendingReviewers = people.reviewers.filter((id) => votes.get(id) !== 'approve');
-  const vote = (id: string) => <ReviewerVote key={id} id={id} label={names.agent(id)} verdict={votes.get(id)} />;
+  const pendingReviewers = people.reviewers.filter((id) => voteFor(votes, id, names) !== 'approve');
+  const vote = (id: string) => <ReviewerVote key={id} id={id} names={names} verdict={voteFor(votes, id, names)} />;
   const reviewerGroups: React.ReactNode[] = [
     ...(people.named.length ? [<span key="named" className="inline-flex flex-wrap gap-x-2">{people.named.map(vote)}</span>] : []),
     ...people.reviewersByRole.map(({ role, agents }) => (
@@ -216,19 +267,14 @@ export const TaskDetails: React.FC<TaskDetailsProps> = ({
         {agents.length ? agents.map(vote) : <span className="text-muted">nobody holds it</span>}
       </span>
     )),
-    ...extraVoters.map((id) => <ReviewerVote key={id} id={id} label={names.instance(id) || names.agent(id)} verdict={votes.get(id)} />),
-    ...(task.requires_user_approval || votes.has('user') ? [<ReviewerVote key="user" id="user" label="you" verdict={votes.get('user')} />] : []),
+    ...extraVoters.map((id) => <ReviewerVote key={id} id={id} names={names} verdict={voteFor(votes, id, names)} />),
+    ...(task.requires_user_approval || votes.has('user') ? [<ReviewerVote key="user" id="user" names={names} label="you" verdict={votes.get('user')} />] : []),
   ];
 
   const visibleEvents = showAllEvents ? events : events.slice(-TIMELINE_PREVIEW);
 
   return (
     <div data-debug-id={`task-details-${taskId}`} className="space-y-4 border-t border-subtle pb-4 pl-5 pr-3 pt-3 text-xs">
-      {handoff?.skip_verify_reason && (
-        <p data-debug-id="task-details-verify-skipped" className="rounded-md bg-warning-soft p-3 text-warning">
-          Verify skipped: <VaultText value={handoff.skip_verify_reason} />
-        </p>
-      )}
       {(task.blocked_on?.kind === 'dispatch' || task.blocked_on?.kind === 'agent_not_running') && (
         <Block title="Agent not running">
           <p className="leading-relaxed text-primary">{task.blocked_on.reason}</p>
@@ -255,7 +301,7 @@ export const TaskDetails: React.FC<TaskDetailsProps> = ({
                 {userApproved ? (
                   <Text role="caption" tone="muted" data-debug-id="your-review-approved">
                     You approved
-                    {pendingReviewers.length ? ` · waiting on ${pendingReviewers.map(names.agent).join(', ')}` : ''}
+                    {pendingReviewers.length ? ` · waiting on ${pendingReviewers.map((id) => participantLabel(names, id)).join(', ')}` : ''}
                   </Text>
                 ) : (
                   <Button size="sm" variant="primary" disabled={actions.busy} onClick={() => void actions.approve()}>
@@ -328,9 +374,6 @@ export const TaskDetails: React.FC<TaskDetailsProps> = ({
             ))}
           </ul>
         )}
-        {task.brief?.verify && (
-          <code className="block rounded-md bg-canvas px-2 py-1 font-mono text-[11px] text-primary">{task.brief.verify}</code>
-        )}
         {task.depends_on && task.depends_on.length > 0 && (
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
             <Text role="caption" tone="muted">
@@ -343,7 +386,7 @@ export const TaskDetails: React.FC<TaskDetailsProps> = ({
             ))}
             {/* The hub puts each one's latest handoff in this task's pack. */}
             <Text as="p" role="caption" tone="faint" className="w-full" data-debug-id="task-details-receives-handoffs">
-              The agent receives their handoffs: summary, decisions, dead ends, output, last commit and verify result.
+              The agent receives their handoffs: summary, decisions, dead ends, output and last commit.
             </Text>
           </div>
         )}
@@ -379,34 +422,7 @@ export const TaskDetails: React.FC<TaskDetailsProps> = ({
         </dl>
       </Block>
 
-      {verify && (
-        <Block
-          title="Verify"
-          collapsible
-          debugId="task-details-verify"
-          aside={
-            <div className="flex items-center gap-2">
-              <Badge tone={handoff?.skip_verify_reason ? 'warning' : verify.exit_code === 0 ? 'success' : 'danger'}>
-                {handoff?.skip_verify_reason ? 'Skipped at submit' : verify.exit_code === 0 ? 'Passed' : `Failed (exit ${verify.exit_code})`}
-              </Badge>
-              {state !== 'done' && state !== 'cancelled' && (
-                <Button size="sm" variant="ghost" disabled={actions.busy} onClick={() => void actions.rerunVerify()}>
-                  Re-run
-                </Button>
-              )}
-            </div>
-          }
-        >
-          {(verify.output || verify.summary) && (
-            <details>
-              <summary className="cursor-pointer text-muted hover:text-primary">Output</summary>
-              <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap rounded-md bg-canvas p-2 font-mono text-[11px] text-primary">
-                {verify.output || verify.summary}
-              </pre>
-            </details>
-          )}
-        </Block>
-      )}
+      {legacyVerify && <LegacyVerifyRecord facet={legacyVerify} skipReason={handoff?.skip_verify_reason} />}
 
       {handoff && (handoff.summary || handoff.next_steps) && !awaitingYourReview(task) && !userApproved && (
         <Block title={state === 'done' ? 'Result' : 'Latest handoff'} collapsible debugId="task-details-handoff" aside={<Text role="caption" tone="faint">attempt {handoff.attempt_no || attemptNo}</Text>}>
@@ -502,12 +518,18 @@ export const TaskDetails: React.FC<TaskDetailsProps> = ({
                   <summary className="cursor-pointer list-none text-primary [&::-webkit-details-marker]:hidden">
                     {description.text}
                     <span className="ml-1.5 text-[11px] text-faint underline decoration-dotted">Details</span>
-                    {description.verifySkipReason && (
-                      <span className="mt-1 block rounded-md bg-warning-soft p-2 text-warning">
-                        Verify skipped: <VaultText value={description.verifySkipReason} />
+                  </summary>
+                    {description.legacyVerify && (
+                      <span data-debug-id="task-timeline-legacy-verify" className="mt-1 block text-[11px] text-muted">
+                        Legacy verification record: {description.legacyVerify.auto ? 'submitted automatically' : 'skipped at submit'}
+                        {description.legacyVerify.skipReason ? (
+                          <>
+                            {' '}
+                            (<VaultText value={description.legacyVerify.skipReason} />)
+                          </>
+                        ) : null}
                       </span>
                     )}
-                  </summary>
                   <pre className="mt-1 max-h-40 overflow-auto rounded-md bg-canvas p-2 font-mono text-[11px] text-muted">
                     {JSON.stringify({ kind: e.kind, actor: e.actor_kind, ...(e.payload && typeof e.payload === 'object' ? { payload: e.payload } : {}) }, null, 2)}
                   </pre>

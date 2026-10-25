@@ -77,8 +77,8 @@ test('workflow specification validator catches invalid schemas, missing stages, 
     title: 'Test Pipeline',
     inputs: [{ name: 'target', type: 'string', required: true }],
     stages: [
-      { key: 'build', kind: 'task', brief: { goal: 'build', verify: 'none' } },
-      { key: 'deploy', kind: 'task', needs: ['build'], brief: { goal: 'deploy', verify: 'none' } },
+      { key: 'build', kind: 'task', brief: { goal: 'build', acceptance: ['the build succeeds'] } },
+      { key: 'deploy', kind: 'task', needs: ['build'], brief: { goal: 'deploy', acceptance: ['the service is healthy'] } },
     ],
   });
   assert.strictEqual(validateWorkflowSpec(validSpec).valid, true);

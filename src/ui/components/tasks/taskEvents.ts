@@ -1,4 +1,4 @@
-import type { TaskNames } from './taskNames';
+import { unknownReviewerLabel, type TaskNames } from './taskNames';
 
 /**
  * One timeline line per task event, in plain words with names instead of ids
@@ -17,7 +17,11 @@ export interface TaskEventWire {
 
 export interface DescribedEvent {
   text: string;
-  verifySkipReason?: string;
+  /**
+   * Set on a submission recorded before verification commands were removed
+   * (D2): shown collapsed as a read-only "Legacy verification record".
+   */
+  legacyVerify?: { auto: boolean; skipReason: string };
   /** false when the kind is unknown and the text is a humanised kind name. */
   known: boolean;
 }
@@ -61,13 +65,25 @@ function attempt(p: any): string {
   return n > 0 ? ` (attempt ${n})` : '';
 }
 
-/** Who an id refers to: an instance, an agent template, or the user. */
+/**
+ * Who a reviewer/participant id refers to (`agt_`, `inst_` or `user`), through
+ * the single resolver names.participant() (REQ-TV2-6). An id nothing names is
+ * "Unknown reviewer (<id>)", never "An agent".
+ */
 export function whoById(id: string, names: TaskNames): string {
   const v = s(id);
   if (!v) return 'Someone';
-  if (v.startsWith('inst_')) return names.instance(v) || 'An agent';
-  if (v.startsWith('agt_')) return names.agent(v);
-  return 'You';
+  if (v.toLowerCase() === 'user') return 'You';
+  return names.participant(v) || unknownReviewerLabel(v);
+}
+
+/**
+ * The reviewer a review_posted / changes_requested payload names, durable id
+ * first: `reviewer_agent_id`, then `reviewer` (an agent id, `user`, or an
+ * instance id on legacy rows), then `reviewer_instance_id`.
+ */
+export function reviewerIdFromPayload(p: any): string {
+  return s(p?.reviewer_agent_id) || s(p?.reviewer) || s(p?.reviewer_instance_id);
 }
 
 function actorName(ev: TaskEventWire, names: TaskNames): string {
@@ -134,8 +150,14 @@ export function describeTaskEvent(ev: TaskEventWire, names: TaskNames): Describe
       return known(s(p.note) ? `${who}: ${s(p.note)}` : `${who} is still working`);
     case 'submitted':
       if (p.gate) return known(`Gate is waiting for a decision${attempt(p)}`);
-      if (s(p.skip_verify_reason)) return { ...known(`${who} submitted the work for review${attempt(p)}`), verifySkipReason: s(p.skip_verify_reason) };
-      if (p.auto) return known(`Verify passed, submitted for review automatically${attempt(p)}`);
+      // Legacy rows may carry auto / skip_verify_reason (D2): history only.
+      if (p.auto || s(p.skip_verify_reason)) {
+        const text = p.auto ? `The work was submitted for review${attempt(p)}` : `${who} submitted the work for review${attempt(p)}`;
+        return {
+          ...known(text),
+          legacyVerify: { auto: Boolean(p.auto), skipReason: s(p.skip_verify_reason) },
+        };
+      }
       return known(`${who} submitted the work for review${attempt(p)}`);
     case 'blocked': {
       const w = p.waiting_on || {};
@@ -156,12 +178,12 @@ export function describeTaskEvent(ev: TaskEventWire, names: TaskNames): Describe
       return known(`${what} stopped because ${reason}${attempt(p)}`);
     }
     case 'review_posted': {
-      const reviewer = whoById(s(p.reviewer), names);
+      const reviewer = whoById(reviewerIdFromPayload(p), names);
       const verdict = s(p.verdict) === 'approve' || s(p.verdict) === 'approved' ? 'approved' : 'requested changes';
       return known(`${reviewer} ${verdict}${roleSuffix(p.role)}`);
     }
     case 'changes_requested':
-      return known(`${whoById(s(p.reviewer), names)} requested changes${roleSuffix(p.role)}${attempt(p)}`);
+      return known(`${whoById(reviewerIdFromPayload(p), names)} requested changes${roleSuffix(p.role)}${attempt(p)}`);
     case 'approved':
       return known(`Approved${attempt(p)}`);
     case 'cancelled':
@@ -215,7 +237,7 @@ export function reviewsPostedForAttempt(events: TaskEventWire[], attemptNo: numb
     const summary = s(p.summary);
     const empty = findings == null || (Array.isArray(findings) && findings.length === 0);
     if (empty && !summary) continue;
-    out.push({ reviewer: s(p.reviewer), verdict: s(p.verdict), findings: empty ? null : findings, summary });
+    out.push({ reviewer: reviewerIdFromPayload(p), verdict: s(p.verdict), findings: empty ? null : findings, summary });
   }
   return out;
 }

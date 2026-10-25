@@ -12,9 +12,12 @@ import {
   instanceAgentsFromEvents,
   readableAgentFallback,
   withInstanceAgents,
+  participantLabel,
+  unknownReviewerLabel,
   GENERIC_AGENT_LABEL,
 } from '../src/ui/components/tasks/taskNames.ts';
-import { describeTaskEvent, EXPIRE_REASON_TEXT } from '../src/ui/components/tasks/taskEvents.ts';
+import { describeTaskEvent, EXPIRE_REASON_TEXT, reviewsPostedForAttempt, whoById } from '../src/ui/components/tasks/taskEvents.ts';
+import { reviewVotes, voteFor } from '../src/ui/components/tasks/taskActions.ts';
 import { getTaskBadges, getTaskStatusLines } from '../src/ui/components/tasks/taskV2Types.ts';
 import type { TaskWire } from '../src/ui/api/taskWire.ts';
 
@@ -97,11 +100,131 @@ test('describeTaskEvent explains every lease-expiry reason in events.odin', () =
   }
 });
 
-test('submission timeline keeps the skip reason tied to its attempt', () => {
-  const d = describeTaskEvent({ kind: 'submitted', payload: { attempt_no: 2, skip_verify_reason: 'Runner unavailable' } }, names);
-  assert.match(d.text, /attempt 2/);
-  assert.equal(d.verifySkipReason, 'Runner unavailable');
-  assert.equal(describeTaskEvent({ kind: 'submitted', payload: {} }, names).verifySkipReason, undefined);
+test('a legacy verify submission is read-only history tied to its attempt (D2)', () => {
+  const skipped = describeTaskEvent({ kind: 'submitted', payload: { attempt_no: 2, skip_verify_reason: 'Runner unavailable' } }, names);
+  assert.match(skipped.text, /attempt 2/);
+  assert.doesNotMatch(skipped.text, /verif/i);
+  assert.deepEqual(skipped.legacyVerify, { auto: false, skipReason: 'Runner unavailable' });
+  const auto = describeTaskEvent({ kind: 'submitted', payload: { attempt_no: 1, auto: true } }, names);
+  assert.doesNotMatch(auto.text, /verif/i, 'no "Verify passed" sentence for an old auto-submit');
+  assert.deepEqual(auto.legacyVerify, { auto: true, skipReason: '' });
+  assert.equal(describeTaskEvent({ kind: 'submitted', payload: {} }, names).legacyVerify, undefined);
+});
+
+// ---- REQ-TV2-6: one reviewer/participant resolver ---------------------------
+
+test('participant resolver: agt_, inst_ and user ids name the durable agent', () => {
+  const facts = withInstanceAgents(names, { inst_rev01: 'agt_18df385df494b971' });
+  assert.equal(facts.participant('agt_18df385df494b971'), 'Security Reviewer');
+  // An instance resolves to its durable agent's name (member → lease fact → identity).
+  assert.equal(facts.participant('inst_rev01'), 'Security Reviewer');
+  assert.equal(facts.participant('inst_member02'), 'Backend Dev');
+  assert.equal(facts.durableId('inst_rev01'), 'agt_18df385df494b971');
+  assert.equal(facts.durableId('agt_18df385df494b971'), 'agt_18df385df494b971');
+  assert.equal(facts.participant('user'), 'you');
+  // A member whose agent has no readable name keeps its member display name.
+  assert.equal(facts.participant('inst_coord01'), 'soloist #20');
+  // An agents/instances lookup names a stopped instance that is not a member.
+  const withLookup = buildTaskNames({
+    identities: [{ agent_id: 'agt_18df385df494b971', name: 'Security Reviewer' }],
+    instances: [{ agent_instance_id: 'inst_stopped9', agent_id: 'agt_18df385df494b971' }],
+  });
+  assert.equal(withLookup.participant('inst_stopped9'), 'Security Reviewer');
+});
+
+test('participant resolver: an unknown id gets the explicit fallback, never "Inst <hex>" or "An agent"', () => {
+  assert.equal(names.participant('inst_ffff00001111'), null);
+  assert.equal(participantLabel(names, 'inst_ffff00001111'), 'Unknown reviewer (inst_ffff00001111)');
+  assert.equal(participantLabel(names, 'agt_18df9999ffff0000'), 'Unknown reviewer (agt_18df9999ffff0000)');
+  assert.equal(unknownReviewerLabel('inst_x'), 'Unknown reviewer (inst_x)');
+  for (const id of ['inst_ffff00001111', 'agt_18df9999ffff0000']) {
+    const who = whoById(id, names);
+    assert.equal(who, `Unknown reviewer (${id})`);
+    assert.doesNotMatch(who, /^(Inst [0-9a-f]+|An agent|)$/);
+  }
+  assert.equal(whoById('user', names), 'You');
+});
+
+test('review events name the reviewer by durable id, then instance id', () => {
+  const facts = withInstanceAgents(names, { inst_rev01: 'agt_18df385df494b971' });
+  // Both ids on the payload (backend contract): the durable agent id wins.
+  const both = describeTaskEvent({ kind: 'review_posted', payload: { reviewer_agent_id: 'agt_18df385df494b971', reviewer_instance_id: 'inst_rev01', verdict: 'approve' } }, names);
+  assert.equal(both.text, 'Security Reviewer approved');
+  // A legacy row carrying only an instance id still names the agent.
+  const legacy = describeTaskEvent({ kind: 'changes_requested', payload: { reviewer: 'inst_rev01', attempt_no: 1 } }, facts);
+  assert.equal(legacy.text, 'Security Reviewer requested changes (attempt 1)');
+  const unknown = describeTaskEvent({ kind: 'review_posted', payload: { reviewer_instance_id: 'inst_ghost42', verdict: 'approve' } }, names);
+  assert.equal(unknown.text, 'Unknown reviewer (inst_ghost42) approved');
+  const posted = reviewsPostedForAttempt([{ kind: 'review_posted', payload: { attempt_no: 1, reviewer_agent_id: 'agt_18df385df494b971', reviewer: 'inst_rev01', summary: 'ok' } }], 1);
+  assert.equal(posted[0].reviewer, 'agt_18df385df494b971');
+});
+
+test('votes match assignments by durable agent id, even when either side carries an instance id', () => {
+  const facts = withInstanceAgents(names, { inst_rev01: 'agt_18df385df494b971' });
+  // Vote row with both ids; assignment carries the instance id (legacy).
+  const t1 = { reviews: [{ reviewer: 'agt_18df385df494b971', reviewer_instance_id: 'inst_rev01', verdict: 'approve' }] } as unknown as TaskWire;
+  const v1 = reviewVotes(t1, facts);
+  assert.equal(voteFor(v1, 'inst_rev01', facts), 'approve');
+  assert.equal(voteFor(v1, 'agt_18df385df494b971', facts), 'approve');
+  assert.deepEqual(Array.from(v1.keys()), ['agt_18df385df494b971'], 'one entry per durable reviewer');
+  // Even without an instance fact, the row's own reviewer_instance_id matches.
+  assert.equal(voteFor(reviewVotes(t1, names), 'inst_rev01', names), 'approve');
+  // Legacy vote row keyed by instance id; assignment is the agent id.
+  const t2 = { reviews: [{ reviewer: 'inst_rev01', verdict: 'request_changes' }] } as unknown as TaskWire;
+  const v2 = reviewVotes(t2, facts);
+  assert.equal(voteFor(v2, 'agt_18df385df494b971', facts), 'request_changes');
+  assert.deepEqual(Array.from(v2.keys()), ['agt_18df385df494b971']);
+  // request_changes on any role wins over an approve on another.
+  const t3 = { reviews: [
+    { reviewer: 'agt_18df385df494b971', role: 'a', verdict: 'approve' },
+    { reviewer: 'inst_rev01', role: 'b', verdict: 'request_changes' },
+  ] } as unknown as TaskWire;
+  assert.equal(voteFor(reviewVotes(t3, facts), 'agt_18df385df494b971', facts), 'request_changes');
+});
+
+test('task details: an instance-id reviewer shows the agent name with its vote; an unknown id shows the fallback', async () => {
+  const React = (await import('react')).default;
+  const { Provider } = await import('react-redux');
+  const { renderToStaticMarkup } = await import('react-dom/server');
+  const { makeVaultStore } = await import('./helpers/vaultEndpointHarness.ts');
+  const { tasksApi } = await import('../src/ui/api/endpoints/tasks.ts');
+  const { TaskDetails } = await import('../src/ui/components/tasks/TaskDetails.tsx');
+
+  const store = await makeVaultStore();
+  const chainId = 'chain_rev';
+  const taskId = 'task_rev';
+  // The reviewer instance is not a chain member; its lease_granted fact names its agent.
+  await store.dispatch(tasksApi.util.upsertQueryData('fetchTaskEvents', { chainId, taskId }, {
+    events: [{ event_id: 1, kind: 'lease_granted', actor_kind: 'hub', ts_ms: 1, payload: { kind: 'review', instance_id: 'inst_rev01', agent_id: 'agt_18df385df494b971', attempt_no: 1 } }],
+  }));
+  const task = {
+    task_id: taskId,
+    chain_id: chainId,
+    title: 'Review me',
+    state: 'in_review',
+    attempt_no: 1,
+    // Legacy assignment rows carry instance ids.
+    brief: { goal: 'g', acceptance: ['a'], reviewers: ['inst_rev01', 'inst_ghost42'] },
+    reviews: [{ reviewer: 'agt_18df385df494b971', reviewer_kind: 'agent', reviewer_instance_id: 'inst_rev01', role: 'named', verdict: 'approve', created_at: '' }],
+  } as unknown as TaskWire;
+  const html = renderToStaticMarkup(
+    React.createElement(Provider, { store, children: React.createElement(TaskDetails, { chainId, task, actions: { busy: false } as any, names }) }),
+  );
+  store.dispatch(tasksApi.util.resetApiState());
+
+  const row = (id: string) => {
+    const m = html.match(new RegExp(`<span data-debug-id="task-detail-reviewer-vote-${id}"[^>]*title="([^"]*)"[^>]*>([\\s\\S]*?)</span>(?=<|$)`));
+    return m ? { title: m[1], body: m[2] } : null;
+  };
+  const named = row('inst_rev01');
+  assert.ok(named, 'instance-id reviewer row renders');
+  assert.equal(named.title, 'Security Reviewer: approved', 'agent name and its vote on its own row');
+  const ghost = row('inst_ghost42');
+  assert.ok(ghost, 'unknown reviewer row renders');
+  assert.equal(ghost.title, 'Unknown reviewer (inst_ghost42): waiting for review');
+  // The approving agent is not listed a second time as an "extra" voter.
+  assert.equal((html.match(/task-detail-reviewer-vote-/g) || []).length, 2);
+  assert.doesNotMatch(html, /An agent|Inst [0-9a-f]{4,}/);
 });
 
 test('timeline sentences use names, never raw ids', () => {

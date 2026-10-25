@@ -7,7 +7,6 @@ import {
   useReopenTaskMutation,
   useUpdateTaskDetailMutation,
   useUserReviewTaskMutation,
-  useVerifyTaskMutation,
 } from '../../api/endpoints/tasks';
 
 /** Readable text for a failed mutation (RTK error, hub envelope or thrown Error). */
@@ -27,7 +26,6 @@ export function useTaskActions(chainId: string, taskId: string, taskTitle = '') 
   const [answerBlocker, answer] = useAnswerTaskBlockerMutation();
   const [reopenTask, reopen] = useReopenTaskMutation();
   const [cancelTask, cancel] = useCancelTaskDetailMutation();
-  const [verifyTask, verify] = useVerifyTaskMutation();
   const [updateTask, update] = useUpdateTaskDetailMutation();
   const [addComment, comment] = useAddTaskCommentMutation();
   const [publishTask, publish] = usePublishTaskMutation();
@@ -52,7 +50,6 @@ export function useTaskActions(chainId: string, taskId: string, taskTitle = '') 
       answer.isLoading ||
       reopen.isLoading ||
       cancel.isLoading ||
-      verify.isLoading ||
       update.isLoading ||
       comment.isLoading ||
       publish.isLoading,
@@ -69,7 +66,6 @@ export function useTaskActions(chainId: string, taskId: string, taskTitle = '') 
     answer: (note: string) => run(() => answerBlocker({ chainId, taskId, note }).unwrap()),
     reopen: () => run(() => reopenTask({ chainId, taskId }).unwrap()),
     cancel: () => run(() => cancelTask({ chainId, taskId }).unwrap()),
-    rerunVerify: () => run(() => verifyTask({ chainId, taskId }).unwrap()),
     pinBridge: (bridgeId: string) => run(() => updateTask({ chainId, taskId, bridgeId }).unwrap()),
     comment: (body: string) => run(() => addComment({ chainId, taskId, body: body.trim() }).unwrap()),
   };

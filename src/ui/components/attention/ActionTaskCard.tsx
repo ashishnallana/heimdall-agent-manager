@@ -22,7 +22,7 @@ const MAX_FILES = 6;
  *
  * A blocked card's ask is the agent's question (the card excerpt). A review
  * card shows the worker's result, fetched lazily once `active` (the page is
- * showing): handoff summary + decisions, verify, commit/files, artifact
+ * showing): handoff summary + decisions, commit/files, artifact
  * thumbnails (tap for full size). Until it loads, or when the attempt recorded
  * none of it, the excerpt stands in.
  */
@@ -93,24 +93,21 @@ function ReviewResult({ item, mobile, active }: { item: AttentionTaskItem; mobil
   const [seen, setSeen] = useState(active);
   useEffect(() => { if (active) setSeen(true); }, [active]);
   const handoff = useFacet(item, 'handoff', seen);
-  const verify = useFacet(item, 'verify', seen);
   const vcs = useFacet(item, 'vcs', seen);
   const artifacts = useFacet(item, 'artifacts', seen);
   const [shot, setShot] = useState<string | null>(null);
 
   const summary = typeof handoff.facet?.summary === 'string' ? handoff.facet.summary : '';
-  const skipReason = handoff.facet?.skip_verify_reason || item.details.skip_verify_reason;
   const decisions = handoffDecisions(handoff.facet);
   const files = taskChangedFiles(vcs.facet);
-  const head = String(vcs.facet?.head || verify.facet?.head_at_end || '').slice(0, 8);
+  const head = String(vcs.facet?.head || '').slice(0, 8);
   const branch = String(vcs.facet?.branch || '');
   const shots = artifactIdsFrom(artifacts.facet, summary);
   const links = artifactLinksFrom(artifacts.facet);
-  const exitCode = typeof verify.facet?.exit_code === 'number' ? verify.facet.exit_code : null;
   const textSize = mobile ? 'text-[16px] leading-[1.5]' : 'text-[17px] leading-[1.55]';
   const excerpt = item.details.excerpt;
-  const nothing = !skipReason && !summary && !decisions.length && exitCode === null && !files.length && !head && !shots.length && !links.length;
-  const loading = handoff.loading || verify.loading || vcs.loading || artifacts.loading;
+  const nothing = !summary && !decisions.length && !files.length && !head && !shots.length && !links.length;
+  const loading = handoff.loading || vcs.loading || artifacts.loading;
 
   if (nothing) {
     if (excerpt?.body) return <DecryptedMarkdown source={excerpt.body} compact copyAll={false} className={textSize} data-debug-id="action-tray-review-excerpt" />;
@@ -119,11 +116,6 @@ function ReviewResult({ item, mobile, active }: { item: AttentionTaskItem; mobil
 
   return (
     <div data-debug-id="action-tray-review-result" className="space-y-4">
-      {skipReason ? (
-        <p data-debug-id="action-tray-review-verify-skipped" className="rounded-md bg-warning-soft p-2 text-[13px] text-warning">
-          Verify skipped: <VaultText value={String(skipReason)} />
-        </p>
-      ) : null}
       {summary ? <DecryptedMarkdown source={summary} compact copyAll={false} className={`${textSize} text-primary`} data-debug-id="action-tray-review-summary" /> : null}
       {decisions.length ? (
         <section aria-label="Decisions" data-debug-id="action-tray-review-decisions">
@@ -132,15 +124,6 @@ function ReviewResult({ item, mobile, active }: { item: AttentionTaskItem; mobil
             {decisions.map((d, i) => <li key={i}><VaultText value={d} /></li>)}
           </ul>
         </section>
-      ) : null}
-      {exitCode !== null && !skipReason ? (
-        <p data-debug-id="action-tray-review-verify" className="flex min-w-0 items-center gap-2 text-[13px]">
-          <span className={`grid h-5 w-5 shrink-0 place-items-center rounded-full ${exitCode === 0 ? 'bg-success-soft text-success' : 'bg-danger-soft text-danger'}`}>
-            <Icon name={exitCode === 0 ? 'check' : 'close'} size={12} />
-          </span>
-          <span className={exitCode === 0 ? 'text-success' : 'text-danger'}>{exitCode === 0 ? 'Verify passed' : `Verify failed (exit ${exitCode})`}</span>
-          {verify.facet?.command ? <code className="min-w-0 truncate font-mono text-[12px] text-muted">{String(verify.facet.command)}</code> : null}
-        </p>
       ) : null}
       {shots.length ? (
         <section aria-label="Screenshots" data-debug-id="action-tray-review-shots">
