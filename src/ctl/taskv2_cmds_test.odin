@@ -26,11 +26,18 @@ test_task_brief_json_from_flags :: proc(t: ^testing.T) {
 @(test)
 test_task_brief_json_file_base_flags_override :: proc(t: ^testing.T) {
 	file := `{"goal":"from file","acceptance":["a1","a2"],"inputs":["#e9"],"review_roles":["reviewer"],"assignee":"agt_w","budget":{"max_attempts":3},"output":{"schema":"x"},"unknown":1}`
-	// no flags: the file is carried (known keys only)
+	// no flags: the whole file is carried; the unknown key is forwarded so the
+	// hub rejects it (unknown_brief_fields) instead of ham-ctl dropping it.
 	base, ok := ctl_task_brief_json([]string{"ham-ctl"}, file)
 	defer delete(base)
 	testing.expect(t, ok, "file alone is a brief")
-	testing.expect_value(t, base, `{"goal":"from file","acceptance":["a1","a2"],"inputs":["#e9"],"review_roles":["reviewer"],"assignee":"agt_w","budget":{"max_attempts":3},"output":{"schema":"x"}}`)
+	testing.expect_value(t, base, `{"goal":"from file","acceptance":["a1","a2"],"inputs":["#e9"],"review_roles":["reviewer"],"assignee":"agt_w","budget":{"max_attempts":3},"output":{"schema":"x"},"unknown":1}`)
+
+	// reviewers and explicit nulls from the file survive; --clear-<field> sends null.
+	rev, rok := ctl_task_brief_json([]string{"ham-ctl", "--clear-review-roles"}, `{"reviewers":["agt_r"],"budget":null}`)
+	defer delete(rev)
+	testing.expect(t, rok, "reviewers file is a brief")
+	testing.expect_value(t, rev, `{"review_roles":null,"reviewers":["agt_r"],"budget":null}`)
 
 	// flags override field by field; untouched file fields survive
 	over, ok2 := ctl_task_brief_json([]string{"ham-ctl", "--goal", "from flag", "--acceptance", "only this"}, file)
