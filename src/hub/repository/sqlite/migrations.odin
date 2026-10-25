@@ -504,9 +504,11 @@ MIGRATION_127_EXTENSION_VERSION_SYNC :: #load("migrations/127_extension_version_
 MIGRATION_128_EXTENSION_VERSION_SYNC :: #load("migrations/128_extension_version_sync_0_4_43.sql", string)
 
 MIGRATION_129_REMOVE_TASK_VERIFY :: #load("migrations/129_remove_task_verify.sql", string)
-MIGRATION_130_FLEET_PAUSE :: #load("migrations/130_fleet_pause.sql", string)
+MIGRATION_130_EXTENSION_VERSION_SYNC :: #load("migrations/130_extension_version_sync_0_4_44.sql", string)
 
-migration_order :: [133]string {
+MIGRATION_131_FLEET_PAUSE :: #load("migrations/131_fleet_pause.sql", string)
+
+migration_order :: [134]string {
 	"001_foundation.sql",
 	"002_owner_scoped_core.sql",
 	"003_device_tokens.sql",
@@ -639,7 +641,8 @@ migration_order :: [133]string {
 	"127_extension_version_sync_0_4_42.sql",
 	"128_extension_version_sync_0_4_43.sql",
 	"129_remove_task_verify.sql",
-	"130_fleet_pause.sql",
+	"130_extension_version_sync_0_4_44.sql",
+	"131_fleet_pause.sql",
 }
 
 // stop_before is a TEST SEAM: when non-empty, the apply loop stops in front of
@@ -1097,7 +1100,8 @@ migration_sql :: proc(name, migrations_dir: string) -> string {
 			return string(data)
 		}
 	}
-	if name == "130_fleet_pause.sql" do return strings.clone(MIGRATION_130_FLEET_PAUSE)
+	if name == "131_fleet_pause.sql" do return strings.clone(MIGRATION_131_FLEET_PAUSE)
+	if name == "130_extension_version_sync_0_4_44.sql" do return strings.clone(MIGRATION_130_EXTENSION_VERSION_SYNC)
 	if name == "129_remove_task_verify.sql" do return strings.clone(MIGRATION_129_REMOVE_TASK_VERIFY)
 	if name == "128_extension_version_sync_0_4_43.sql" do return strings.clone(MIGRATION_128_EXTENSION_VERSION_SYNC)
 	if name == "127_extension_version_sync_0_4_42.sql" do return strings.clone(MIGRATION_127_EXTENSION_VERSION_SYNC)
@@ -1253,8 +1257,12 @@ migration_applied :: proc(conn: ^Conn, version: string) -> bool {
 	if version == "129_remove_task_verify.sql" {
 		return migration_applied(conn, "128_remove_task_verify.sql")
 	}
-	// The column may already exist (upgrade_task_v2_schema ensures it too).
-	if version == "130_fleet_pause.sql" {
+	// The column may already exist (upgrade_task_v2_schema ensures it too). A
+	// database that ran this file under its pre-release number (130_fleet_pause.sql,
+	// before release 0.4.44 took 130) also has it, so the renumbered file is marked
+	// applied there without re-executing; that database still runs 130's sync,
+	// because the ledger is keyed by full file name.
+	if version == "131_fleet_pause.sql" {
 		return table_column_exists(conn, "task_chain_fleets", "paused_roles_json")
 	}
 	if version == "048_task_subscriptions.sql" || version == "049_task_subscriptions.sql" {
