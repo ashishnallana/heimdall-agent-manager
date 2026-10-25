@@ -147,7 +147,7 @@ Update_Task_Input :: struct {
 	description: string,
 	// brief_json is a top-level key merge into the stored brief (an explicit
 	// null removes a key); replace_brief swaps the whole brief instead. Keys
-	// outside BRIEF_KEYS are rejected. While leased only acceptance may change.
+	// outside taskv2.BRIEF_KEYS are rejected. While leased only acceptance may change.
 	brief_json: string,
 	replace_brief: bool,
 	assignee_agent_id: string,
@@ -1106,10 +1106,13 @@ update_task_impl :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Conte
 	has_roles := input.has_review_roles
 	// `reviewers` REPLACES the task's named reviewers (an empty list clears them).
 	has_named := input.has_reviewers || len(input.reviewer_agent_ids) > 0
-	// The convenience fields go through build_brief_json on top of the merged
-	// brief, so a flag and a brief-file key land in the same stored shape.
-	if input.has_assignee || has_roles || has_named || input.title != "" || input.description != "" {
-		new_brief = build_brief_json(new_brief, new_title, new_description, input.assignee_agent_id, input.has_assignee, review_roles[:], has_roles, input.reviewer_agent_ids, has_named)
+	// The convenience fields set their own keys on the merged brief and touch
+	// nothing else: no create-time defaults (goal from title, empty
+	// acceptance/inputs), so an explicit null clear in the same update stands.
+	if input.has_assignee || has_roles || has_named {
+		applied, aerr := brief_apply_actor_fields(new_brief, input.assignee_agent_id, input.has_assignee, review_roles[:], has_roles, input.reviewer_agent_ids, has_named)
+		if aerr.code != .None do return {}, false, aerr
+		new_brief = applied
 	}
 	brief_keys := brief_changed_keys(task.brief_json, new_brief)
 

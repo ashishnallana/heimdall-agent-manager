@@ -1217,8 +1217,9 @@ workflow_validate_fleet :: proc(svc: ^Service, chain: domain.Task_Chain, brief: 
  if !worker do return domain.domain_error(.Validation_Failed, "configure an eligible worker fleet row with positive capacity before starting the run")
  for reviewer in brief_named_reviewers(brief, context.temp_allocator) {
   if strings.contains(reviewer, "{{") do continue
-  // Rendered reviewers are checked here, after template substitution.
-  if strings.has_prefix(strings.trim_space(reviewer), "inst_") do return reviewer_must_be_agent_id_error(strings.trim_space(reviewer))
+  // Rendered reviewers get the same identity check as create/update (inst_ or
+  // unknown id -> reviewer_must_be_agent_id), then the fleet-eligibility check.
+  if ierr := validate_reviewer_agent_ids(svc.agents, {reviewer}); ierr.code != .None do return ierr
   covered := false
   for fleet in fleets do if fleet.agent_id == reviewer && fleet.agent_id != coordinator && fleet.capacity > 0 do covered = true
   if !covered do return domain.domain_error(.Validation_Failed, fmt.tprintf("configure eligible fleet row for named workflow reviewer %s before starting the run", reviewer))

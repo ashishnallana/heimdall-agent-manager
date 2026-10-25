@@ -168,3 +168,33 @@ test_brief_leased_edit_lists_fields :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(jsonx.extract_string_array(same.brief_json, "acceptance", true)), 1)
 	testing.expect_value(t, jsonx.extract_string(same.brief_json, "assignee", "", true, context.temp_allocator), "agt_worker")
 }
+
+// A convenience field (reviewer/assignee flag) in the same update as an
+// explicit null clear must not resurrect the cleared key or add defaults.
+@(test)
+test_brief_null_clear_survives_convenience_fields :: proc(t: ^testing.T) {
+	f: Brief_Contract_Fixture
+	if !brief_contract_open(t, &f, "clear_with_flags") do return
+	defer brief_contract_close(&f)
+	task, ok, err := create_task(&f.svc, f.owner, Create_Task_Input{chain_id = f.chain.chain_id, title = "title text", description = "description text", brief_json = FULL_BRIEF})
+	if !testing.expectf(t, ok, "create: %s", err.message) do return
+	// task update --clear-goal --reviewer agt_rev2
+	g, gok, gerr := update_task(&f.svc, f.owner, task.task_id, Update_Task_Input{brief_json = `{"goal":null}`, reviewer_agent_ids = []string{"agt_rev2"}, has_reviewers = true})
+	if !testing.expectf(t, gok, "clear goal + reviewer: %s", gerr.message) do return
+	testing.expect(t, !jsonx.has_key(g.brief_json, "goal", top_level_only = true), g.brief_json)
+	testing.expect_value(t, taskv2.brief_named_reviewers(g.brief_json, context.temp_allocator)[0], "agt_rev2")
+	// task update --clear-inputs --assignee agt_rev
+	i, iok, ierr := update_task(&f.svc, f.owner, task.task_id, Update_Task_Input{brief_json = `{"inputs":null}`, assignee_agent_id = "agt_rev", has_assignee = true})
+	if !testing.expectf(t, iok, "clear inputs + assignee: %s", ierr.message) do return
+	testing.expect(t, !jsonx.has_key(i.brief_json, "inputs", top_level_only = true), i.brief_json)
+	testing.expect(t, !jsonx.has_key(i.brief_json, "goal", top_level_only = true), "goal stays cleared")
+	testing.expect_value(t, jsonx.extract_string(i.brief_json, "assignee", "", true, context.temp_allocator), "agt_rev")
+	testing.expect_value(t, jsonx.extract_string(i.brief_json, "output", "", true, context.temp_allocator), "findings.v1")
+	// A title-only update leaves the brief alone; an empty reviewer list clears them.
+	r, rok, rerr := update_task(&f.svc, f.owner, task.task_id, Update_Task_Input{title = "renamed", has_reviewers = true})
+	if !testing.expectf(t, rok, "title + clear reviewers: %s", rerr.message) do return
+	testing.expect(t, !jsonx.has_key(r.brief_json, "goal", top_level_only = true), "title does not synthesize goal")
+	testing.expect(t, !jsonx.has_key(r.brief_json, "reviewers", top_level_only = true), r.brief_json)
+	stored, _, _ := iface.taskchain_get_task(&f.repo, task.task_id)
+	testing.expect_value(t, stored.brief_json, r.brief_json)
+}

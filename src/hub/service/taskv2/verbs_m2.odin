@@ -577,6 +577,15 @@ brief_publish_missing :: proc(repo: ^iface.Taskchain_Repository, chain: domain.T
 // validate_brief_for_publish verifies that all draft tasks on the chain and all
 // proposed task specs satisfy brief_publish_missing.
 validate_brief_for_publish :: proc(svc: ^Service, chain: domain.Task_Chain, existing_tasks: []domain.Task, specs: []Proposed_Task_Item) -> (bool, domain.Domain_Error) {
+	// REQ-TV2-4: proposed briefs meet the same schema and reviewer identity
+	// contract as taskchain create/update, before a proposal is stored or
+	// materialized (pending, auto-approved and approved alike).
+	for spec in specs {
+		if spec.explicit_brief {
+			if serr := validate_brief_schema(spec.brief_json); serr.code != .None do return false, serr
+		}
+		if rerr := validate_reviewer_agent_ids(svc.agents if svc != nil else nil, brief_named_reviewers(spec.brief_json, context.temp_allocator)[:]); rerr.code != .None do return false, rerr
+	}
 	b := strings.builder_make(context.temp_allocator)
 	strings.write_string(&b, `{"code":"brief_incomplete","tasks":[`)
 	first := true
@@ -959,6 +968,9 @@ Proposed_Task_Item :: struct {
 	priority:    string,
 	brief_json:  string,
 	depends_on:  []domain.Task_ID,
+	// explicit_brief: the spec carried its own `brief` object (schema-checked);
+	// otherwise brief_json was synthesized from the shorthand fields.
+	explicit_brief: bool,
 }
 
 @(private = "file")
@@ -1010,6 +1022,7 @@ parse_proposed_tasks_json :: proc(raw_array: string) -> ([]Proposed_Task_Item, b
 			priority    = prio,
 			brief_json  = brief_raw,
 			depends_on  = deps[:],
+			explicit_brief = has_brief && strings.trim_space(brief_raw) != "",
 		})
 	}
 	return out[:], true, domain.Domain_Error{}
