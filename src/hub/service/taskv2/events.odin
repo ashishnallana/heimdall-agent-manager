@@ -24,6 +24,8 @@ EV_CANCELLED         :: "cancelled"          // {reason}
 EV_REOPENED          :: "reopened"           // {}
 EV_ANSWERED          :: "answered"           // {}
 EV_MERGE_CONFLICT    :: "merge_conflict"     // {branch, workdir, detail}  — done → blocked on a human
+EV_HELD              :: "held"               // {reason, by}  — coordinator/owner hold (REQ-TV2-5): no new lease until released
+EV_HOLD_RELEASED     :: "hold_released"      // {}
 // Audit-only kinds (no fold effect):
 EV_CREATED           :: "created"
 EV_UPDATED           :: "updated"            // {fields:[…]}

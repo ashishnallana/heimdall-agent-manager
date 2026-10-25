@@ -204,6 +204,7 @@ grant_work :: proc(svc: ^Service, u: ^Uow, ctx: ^Match_Context, task: domain.Tas
 		if ctx.has_coordinator && fleet.agent_id == ctx.coordinator.agent_id do continue
 		if !fleet_row_has_role(fleet, domain.FLEET_ROLE_WORKER) do continue
 		if assignee != "" && fleet.agent_id != assignee do continue
+		if domain.fleet_role_paused(fleet, domain.FLEET_ROLE_WORKER) { queued = true; continue }
 		placement, pok := resolve_placement(ctx, task, fleet, true)
 		if !pok { failure, failed_agent, failure_cause = "no bridge placement can be resolved", fleet.agent_id, ""; continue }
 		if placement.directory_id != "" && directory_has_work_lease_ctx(ctx, placement.directory_id) { queued = true; continue }
@@ -246,6 +247,8 @@ grant_work :: proc(svc: ^Service, u: ^Uow, ctx: ^Match_Context, task: domain.Tas
 
 @(private = "file")
 grant_reviews :: proc(svc: ^Service, u: ^Uow, ctx: ^Match_Context, task: domain.Task, trigger: Trigger) {
+	// A held task gets no new review lease (REQ-TV2-5).
+	if task_is_held(task) do return
 	author_agent := ""
 	if holder := last_attempt_holder(svc, task); holder != "" {
 		if inst, iok, _ := iface.agent_get_instance(svc.agents, holder); iok do author_agent = inst.agent_id
@@ -256,11 +259,11 @@ grant_reviews :: proc(svc: ^Service, u: ^Uow, ctx: ^Match_Context, task: domain.
 	// One review lease per AGENT covering every pair it still owes (hybrid model);
 	// the gate is a strict AND over the same pairs (gate.odin).
 	for agent_id in distinct_review_agents(pairs) {
-		owed := owed_review_roles(pairs, reviews, task, agent_id)
-		if len(owed) == 0 do continue
-		if review_lease_live_for(ctx, svc, task.task_id, agent_id, "") do continue
 		fleet, has_row := fleet_row_for_agent(ctx.fleets[:], agent_id)
 		if !has_row do continue
+		owed := unpaused_review_roles(fleet, owed_review_roles(pairs, reviews, task, agent_id))
+		if len(owed) == 0 do continue
+		if review_lease_live_for(ctx, svc, task.task_id, agent_id, "") do continue
 		placement, pok := resolve_placement(ctx, task, fleet, false)
 		if !pok do continue
 		if !bridge_online(svc, placement.bridge_id) do continue
@@ -321,6 +324,10 @@ pick_instance :: proc(svc: ^Service, u: ^Uow, ctx: ^Match_Context, task: domain.
 	// takes work through `lease next`, never by a wake grant, and a JIT copy of
 	// it is never spawned (REQ-SOLO-2).
 	if ctx.has_coordinator && fleet.agent_id == ctx.coordinator.agent_id do return {}, false, ""
+	// Pause (REQ-TV2-5) is decided by the callers before a pick: grant_work
+	// checks the worker role and grant_reviews filters the owed review roles
+	// with unpaused_review_roles. `role` here is only the JIT spawn role, so a
+	// pause check on it would let a paused `reviewer` suppress `security`.
 	failure := ""
 	live_count := 0
 	live_free := domain.Agent_Instance{}
@@ -380,13 +387,17 @@ pick_instance :: proc(svc: ^Service, u: ^Uow, ctx: ^Match_Context, task: domain.
 		}
 		if free && prefer != "" && inst.agent_instance_id == prefer { preferred = inst; have_pref = true }
 	}
-	if have_pref do return preferred, true, ""
-	if have_live do return live_free, true, ""
-	if have_warm do return warm, true, ""
-	if have_stopping do return stopping_free, true, ""
+	// Capacity bounds every pick that starts a process: a stopped previous
+	// holder or warm instance is re-bootstrapped by the wake, so it may only be
+	// chosen below capacity, exactly like a JIT (REQ-TV2-5).
 	capacity := fleet.capacity
 	if capacity < 1 do capacity = 1
-	if live_count >= capacity do return {}, false, ""
+	below_capacity := live_count < capacity
+	if have_pref && (instance_is_live(preferred) || instance_is_pending(preferred) || below_capacity) do return preferred, true, ""
+	if have_live do return live_free, true, ""
+	if have_warm && below_capacity do return warm, true, ""
+	if have_stopping do return stopping_free, true, ""
+	if !below_capacity do return {}, false, ""
 	if failure != "" do return {}, false, failure
 	return jit_prepare(svc, u, ctx, fleet, placement, role)
 }
@@ -442,7 +453,7 @@ grant_inline_for_instance :: proc(svc: ^Service, u: ^Uow, chain: domain.Task_Cha
 	// the user (REQ-SOLO-5).
 	for task in ctx.sorted {
 		if coordinator do break
-		if task.state != .In_Review || task.kind == .Gate do continue
+		if task.state != .In_Review || task.kind == .Gate || task_is_held(task) do continue
 		author_agent := ""
 		if holder := last_attempt_holder(svc, task); holder != "" {
 			if h, hok, _ := iface.agent_get_instance(svc.agents, holder); hok do author_agent = h.agent_id
@@ -451,7 +462,7 @@ grant_inline_for_instance :: proc(svc: ^Service, u: ^Uow, chain: domain.Task_Cha
 		pairs := required_review_pairs(task, ctx.fleets[:], author_agent)
 		if len(pairs) == 0 do continue
 		reviews, _ := iface.taskchain_list_reviews_by_task(svc.repo, task.task_id, task.owner_user_id)
-		owed := owed_review_roles(pairs, reviews, task, inst.agent_id)
+		owed := unpaused_review_roles(fleet, owed_review_roles(pairs, reviews, task, inst.agent_id))
 		if len(owed) == 0 do continue
 		if review_lease_live_for(&ctx, svc, task.task_id, inst.agent_id, "") do continue
 		placement, pok := resolve_placement(&ctx, task, fleet, false)
@@ -470,6 +481,7 @@ grant_inline_for_instance :: proc(svc: ^Service, u: ^Uow, chain: domain.Task_Cha
 	}
 	// Work pass.
 	if !fleet_row_has_role(fleet, domain.FLEET_ROLE_WORKER) do return {}, {}, false
+	if domain.fleet_role_paused(fleet, domain.FLEET_ROLE_WORKER) do return {}, {}, false
 	for task in ctx.sorted {
 		if task.state != .Ready || task.kind == .Gate do continue
 		if task_has_live_lease(&ctx, task.task_id, domain.LEASE_KIND_WORK) do continue
@@ -502,6 +514,7 @@ grant_inline_task_for_instance :: proc(svc: ^Service, u: ^Uow, chain: domain.Tas
 	defer destroy_match_context(&ctx)
 	fleet, has_fleet := puller_fleet_row(&ctx, inst, is_coordinator(svc, chain, inst.agent_instance_id))
 	if !has_fleet || !fleet_row_has_role(fleet, domain.FLEET_ROLE_WORKER) do return {}, {}, false, domain.domain_error(.Conflict, "this agent is not a worker on the chain")
+	if domain.fleet_role_paused(fleet, domain.FLEET_ROLE_WORKER) do return {}, {}, false, domain.domain_error(.Conflict, "this agent's worker role is paused on the chain")
 	for task in ctx.sorted {
 		if task.task_id != task_id do continue
 		if task.state != .Ready || task.kind == .Gate do return {}, {}, false, domain.domain_error(.Conflict, "task is not ready")
@@ -536,6 +549,28 @@ puller_fleet_row :: proc(ctx: ^Match_Context, inst: domain.Agent_Instance, coord
 }
 
 // ---- helpers -----------------------------------------------------------------------------
+
+// review_role_paused maps a LEASE review role onto the FLEET role namespace
+// that pause uses (REQ-TV2-5). Review roles from brief.review_roles are fleet
+// roles verbatim (`reviewer`, `security`, …), so each is paused only by its own
+// name. A named review (NAMED_REVIEW_ROLE, a lease-only role) is paused by the
+// row's generic review roles: `reviewer` or `named-reviewer`. `["*"]` pauses all.
+review_role_paused :: proc(fleet: domain.Task_Chain_Fleet, lease_role: string) -> bool {
+	if lease_role == NAMED_REVIEW_ROLE {
+		return domain.fleet_role_paused(fleet, domain.FLEET_ROLE_REVIEWER) || domain.fleet_role_paused(fleet, FLEET_ROLE_NAMED_REVIEWER)
+	}
+	return domain.fleet_role_paused(fleet, lease_role)
+}
+
+// unpaused_review_roles drops the owed lease review roles paused on `fleet`.
+// The single pause rule for review grants: wake (grant_reviews) and inline
+// (grant_inline_for_instance) dispatch both filter through it.
+unpaused_review_roles :: proc(fleet: domain.Task_Chain_Fleet, owed: []string) -> []string {
+	if !domain.fleet_paused_any(fleet) do return owed
+	kept := make([dynamic]string, context.temp_allocator)
+	for r in owed do if !review_role_paused(fleet, r) do append(&kept, r)
+	return kept[:]
+}
 
 fleet_row_has_role :: proc(f: domain.Task_Chain_Fleet, role: string) -> bool {
 	roles := jsonx.decode_string_array(f.roles_json if f.roles_json != "" else domain.FLEET_ROLES_DEFAULT_JSON, context.temp_allocator)

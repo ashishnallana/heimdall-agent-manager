@@ -435,10 +435,35 @@ fire_ready_unclaimed :: proc(svc: ^Service, u: ^Uow, t: Timer) -> Fire_Result {
 	if task.state != .Ready || task.ready_since != t.armed do return .Noop
 	p := json_begin()
 	json_str(&p, "since", task.ready_since)
+	paused := paused_worker_agents(svc, task)
+	reason := ""
+	if paused != "" {
+		reason = fmt.tprintf("worker fleet paused: %s", paused)
+		json_str(&p, "reason", reason)
+	}
 	if _, aok, _ := append_event(svc.repo, svc.clock, task, hub_actor(), EV_READY_UNCLAIMED, json_end(&p)); !aok do return .Failed
 	effect_publish_task(u, task, "ready_unclaimed")
-	effect_notify_coordinator(svc, u, task.chain_id, task.owner_user_id, "ready_unclaimed", fmt.tprintf("[taskv2] ready_unclaimed: task %s (%s) ready since %s", task.task_id, task.title, task.ready_since))
+	line := fmt.tprintf("[taskv2] ready_unclaimed: task %s (%s) ready since %s", task.task_id, task.title, task.ready_since)
+	if reason != "" do line = fmt.tprintf("%s (%s; resume with task-chain fleet resume)", line, reason)
+	effect_notify_coordinator(svc, u, task.chain_id, task.owner_user_id, "ready_unclaimed", line)
 	return .Acted
+}
+
+// paused_worker_agents: the fleet agents that could work `task` (worker role,
+// matching any brief assignee) whose worker role is paused, comma-joined.
+@(private = "file")
+paused_worker_agents :: proc(svc: ^Service, task: domain.Task) -> string {
+	fleets, ferr := iface.taskchain_list_fleets_by_chain(svc.repo, task.chain_id, task.owner_user_id)
+	if ferr.code != .None do return ""
+	defer delete(fleets)
+	assignee := brief_assignee(task.brief_json)
+	names := make([dynamic]string, context.temp_allocator)
+	for f in fleets {
+		if !fleet_row_has_role(f, domain.FLEET_ROLE_WORKER) do continue
+		if assignee != "" && f.agent_id != assignee do continue
+		if domain.fleet_role_paused(f, domain.FLEET_ROLE_WORKER) do append(&names, f.agent_id)
+	}
+	return strings.join(names[:], ", ", context.temp_allocator)
 }
 
 // fire_rematch: the task is still Ready / In review (same state as when armed)
@@ -469,6 +494,7 @@ fire_rematch :: proc(svc: ^Service, u: ^Uow, t: Timer) -> Fire_Result {
 check_review_stalled :: proc(svc: ^Service, u: ^Uow, task_in: domain.Task) {
 	task, ok, _ := iface.taskchain_get_task(svc.repo, task_in.task_id)
 	if !ok || task.state != .In_Review || task.kind == .Gate do return
+	if task_is_held(task) do return // waiting on its release, not stalled
 	if leases, lerr := iface.taskchain_list_leases_by_task(svc.repo, task.task_id); lerr.code != .None || len(leases) > 0 do return
 	unmet, uerr := gate_unmet_components(svc, task)
 	if uerr.code != .None || len(unmet) == 0 do return

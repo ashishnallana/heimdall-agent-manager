@@ -43,6 +43,11 @@ export interface TaskChainFleet {
   provider?: string;
   model?: string;
   roles?: string[];
+  /** REQ-TV2-5: roles that get no new lease (`task-chain fleet pause`); live work continues. */
+  paused_roles?: string[];
+  paused?: boolean;
+  /** Advisory text from a fleet PUT (e.g. only unrequested custom roles). */
+  warning?: string;
   /** What the matcher would apply for this row (hub-resolved, plan REQ-UI-12). */
   effective?: EffectivePlacement | null;
   bridge_id?: string;
@@ -103,6 +108,9 @@ export function normalizeFleet(f: any): TaskChainFleet {
     roles,
     bridge_id: bridgeId,
     bridgeId,
+    paused_roles: Array.isArray(f?.paused_roles) ? f.paused_roles.map((r: any) => String(r)) : [],
+    paused: f?.paused === true,
+    warning: typeof f?.warning === 'string' && f.warning ? f.warning : undefined,
     effective: f?.effective && typeof f.effective === 'object' ? (f.effective as EffectivePlacement) : null,
     restarted_instance_ids: Array.isArray(f?.restarted_instance_ids)
       ? f.restarted_instance_ids.map((id: any) => String(id))
