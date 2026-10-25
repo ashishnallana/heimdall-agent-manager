@@ -49,7 +49,7 @@ const names = buildTaskNames({
 
 test('buildTaskNames resolves titles, agents, bridges and member instances', () => {
   assert.equal(names.task('task_bbb222'), 'Rotate refresh token');
-  assert.equal(names.task('task_missing'), 'Untitled task');
+  assert.equal(names.task('task_missing'), 'Untitled ticket');
   assert.equal(names.agent('agt_18df385deeb91f7c'), 'Backend Dev');
   assert.equal(names.bridge('brg_dawn01'), 'dawnstar');
   assert.equal(names.bridge('brg_gone'), 'unknown bridge');

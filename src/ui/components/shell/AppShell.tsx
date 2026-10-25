@@ -275,7 +275,7 @@ function routeTitle(path: string): string {
   if (path.startsWith('/actions/')) return 'Action detail';
   if (path.startsWith('/actions')) return 'Actions';
   if (path === '/chains/new') return 'New task chain';
-  if (path.startsWith('/chains/') && path.includes('/tasks/')) return 'Task detail';
+  if (path.startsWith('/chains/') && path.includes('/tasks/')) return 'Ticket detail';
   if (path.startsWith('/chains/')) return 'Task chain';
   if (path === '/agents/new') return 'New agent';
   if (path.startsWith('/agents/')) return 'Agent detail';
@@ -318,7 +318,7 @@ function routeDescription(path: string): string {
   if (path.startsWith('/actions/') && path.endsWith('/edit')) return 'Update the prompt or schedule for this action.';
   if (path.startsWith('/actions/')) return 'One action: its prompt, its schedule and the agent it targets.';
   if (path.startsWith('/actions')) return 'Scheduled and on-demand prompts sent to your agents.';
-  if (path.startsWith('/chains/')) return 'Creation-ordered task list and task-detail route outlet. No graph editor or global inspector is present.';
+  if (path.startsWith('/chains/')) return 'Creation-ordered ticket list and ticket-detail route outlet. No graph editor or global inspector is present.';
   if (path.startsWith('/agents/')) return 'Agent overview, sessions, Bridges, and memory tabs will attach to this route.';
   if (path.startsWith('/library/artifacts/')) return 'Fullscreen artifact viewer route owned by the Library surface.';
   if (path.startsWith('/library')) return 'Filterable artifact list/grid route.';

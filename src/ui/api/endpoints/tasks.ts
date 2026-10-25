@@ -134,7 +134,7 @@ export function normalizeTask(task: any) {
 
   // TODO(FIX): Replace any with strict TypeScript interface matching Odin backend schema
   const result: any = {
-    // Task System v2: the board/detail components read the raw snake_case wire
+    // Tickets: the board/detail components read the raw snake_case wire
     // (TaskWire: task_id, attempt_no, comment_summary, …), so keep every wire field
     // and layer the legacy camelCase projection on top.
     ...task,
@@ -146,7 +146,7 @@ export function normalizeTask(task: any) {
     title: task.title || '',
     description: task.description || '',
     priority: task.priority || 'p2',
-    // Task System v2: `state` is the five-state projection; the legacy `status`
+    // Tickets: `state` is the five-state projection; the legacy `status`
     // reader falls back to it until the M4 board rework retires `status`.
     status: task.status || task.state || 'pending',
     state: String(task.state || ''),
@@ -910,7 +910,7 @@ export const tasksApi = heimdallApi.injectEndpoints({
           if (encDesc !== undefined) body.description = encDesc;
           if (assigneeRef !== undefined) body.assignee_ref = assigneeRef;
           if (reviewerRefs !== undefined) body.reviewer_refs = reviewerRefs;
-          // Task v2: fleet roles that must approve (brief.review_roles), e.g. ['reviewer', 'security'].
+          // Tickets: fleet roles that must approve (brief.review_roles), e.g. ['reviewer', 'security'].
           if (reviewRoles !== undefined) body.review_roles = reviewRoles;
           if (requiresUserApproval !== undefined) body.requires_user_approval = requiresUserApproval;
           if (dependsOn !== undefined) body.depends_on = dependsOn;
@@ -1264,7 +1264,7 @@ export const tasksApi = heimdallApi.injectEndpoints({
           if (reviewerRefs !== undefined) body.reviewer_refs = reviewerRefs;
           if (requiresUserApproval !== undefined) body.requires_user_approval = requiresUserApproval;
           if (dependsOn !== undefined) body.depends_on = dependsOn;
-          // Task System v2 (M2): the brief travels verbatim; the hub normalises it
+          // Tickets (M2): the brief travels verbatim; the hub normalises it
           // and validates it at publish (422 brief_incomplete).
           if (brief !== undefined) body.brief = brief;
           const data = await cookieMutation(`/task-chains/${encodeURIComponent(chainId)}/tasks`, 'POST', body);
@@ -1281,7 +1281,7 @@ export const tasksApi = heimdallApi.injectEndpoints({
         { type: 'TaskChainFleets' as const, id: chainId },
       ] : [],
     }),
-    // Task System v2 (M2): POST …/tasks/{t}/publish. A 422 `brief_incomplete`
+    // Tickets (M2): POST …/tasks/{t}/publish. A 422 `brief_incomplete`
     // is reworded per task ("Task <title>: missing goal, acceptance") from
     // error.details.tasks[]; `taskTitles` (task_id → title) is optional and the
     // raw task_id is the fallback label. The structured details ride along as
@@ -1300,7 +1300,7 @@ export const tasksApi = heimdallApi.injectEndpoints({
         { type: 'ChainList' as const, id: 'ALL' },
       ],
     }),
-    // Task System v2 (M2): POST /task-chains/{c}/publish — publishes every draft
+    // Tickets (M2): POST /task-chains/{c}/publish — publishes every draft
     // task; the 422 lists each offending task, surfaced the same way as above.
     publishTaskChain: build.mutation<any, { chainId: string; taskTitles?: Record<string, string> }>({
       queryFn: async ({ chainId, taskTitles }) => {
@@ -1365,7 +1365,7 @@ export const tasksApi = heimdallApi.injectEndpoints({
       }),
       invalidatesTags: (_result, _error, { taskId, chainId }) => preciseTaskTags(taskId, chainId, true),
     }),
-    // Task System v2 (M4): human action verbs replacing legacy set-status/vote/nudge.
+    // Tickets (M4): human action verbs replacing legacy set-status/vote/nudge.
     userReviewTask: build.mutation<any, { chainId: string; taskId: string; verdict: 'approve' | 'request_changes'; findings?: any; summary?: string }>({
       queryFn: async ({ chainId, taskId, verdict, findings, summary }) => {
         try {

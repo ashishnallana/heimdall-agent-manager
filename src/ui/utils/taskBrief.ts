@@ -1,4 +1,4 @@
-// Task System v2 (M2): pure helpers for the task brief — the create-modal payload
+// Tickets (M2): pure helpers for the task brief — the create-modal payload
 // builder, client-side validation that mirrors the hub's single publish
 // validator (taskv2.brief_publish_missing: a goal and at least one acceptance
 // item, nothing else; REQ-TV2-2),
@@ -118,7 +118,7 @@ export function briefIncompleteMessage(details: BriefIncompleteDetails, titles: 
   const lines = (details.tasks || []).map((t) => {
     const label = titles[t.task_id] || t.task_id;
     const missing = (t.missing || []).map(wordMissing).join(', ') || 'brief';
-    return `Task ${label}: missing ${missing}`;
+    return `Ticket ${label}: missing ${missing}`;
   });
   return lines.length > 0 ? lines.join('\n') : 'Brief incomplete';
 }

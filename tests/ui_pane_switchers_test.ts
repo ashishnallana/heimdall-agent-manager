@@ -413,7 +413,7 @@ test('auxiliary content chords toggle Tasks, Chat overview, and the focused agen
 
       await press('s', 'a');
       let hud = doc.querySelector('[data-debug-id="shortcut-chord-hud"]');
-      assert.match(hud?.textContent || '', /Tasks/);
+      assert.match(hud?.textContent || '', /Tickets/);
       assert.match(hud?.textContent || '', /Chat overview/);
       assert.match(hud?.textContent || '', /Agent PTY/);
       assert.match(hud?.textContent || '', /esc close/i);

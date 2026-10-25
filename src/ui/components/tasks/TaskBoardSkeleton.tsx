@@ -12,7 +12,7 @@ function Bar({ className }: { className: string }) {
  */
 export function TaskBoardSkeleton({ cards = 3, stepper = false }: { cards?: number; stepper?: boolean }) {
   return (
-    <div data-debug-id="task-board-skeleton" role="status" aria-label="Loading tasks" className="flex flex-col gap-5 p-4 motion-safe:animate-pulse sm:p-5">
+    <div data-debug-id="task-board-skeleton" role="status" aria-label="Loading tickets" className="flex flex-col gap-5 p-4 motion-safe:animate-pulse sm:p-5">
       <div className="space-y-3">
         <div className="flex items-center gap-2">
           <Bar className="h-7 w-32 rounded-full" />

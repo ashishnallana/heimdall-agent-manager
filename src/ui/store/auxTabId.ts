@@ -252,7 +252,7 @@ export const AUX_TAB_REGISTRY: Record<AuxTabKind, AuxTabDescriptor> = {
     kind: 'chainOverview',
     label: 'Chain Overview',
     shortLabel: 'Overview',
-    description: 'Task chain agents, attention, tasks, artifacts and changes.',
+    description: 'Task chain agents, attention, tickets, artifacts and changes.',
     multiInstance: false,
   },
   files: {
@@ -271,9 +271,9 @@ export const AUX_TAB_REGISTRY: Record<AuxTabKind, AuxTabDescriptor> = {
   },
   tasks: {
     kind: 'tasks',
-    label: 'Tasks',
-    shortLabel: 'Tasks',
-    description: 'Inspect and manage tasks, dependencies, and deliverables in the chain.',
+    label: 'Tickets',
+    shortLabel: 'Tickets',
+    description: 'Inspect and manage tickets, dependencies, and deliverables in the chain.',
     multiInstance: false,
   },
   shell: {

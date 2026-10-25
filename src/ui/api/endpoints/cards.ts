@@ -141,7 +141,7 @@ export function formatOpLabel(op: CardOperation, opts: { withIds?: boolean } = {
     case 'task.vote': {
       const tid = getArg('task_id');
       const result = (getArg('result') || 'lgtm').toUpperCase();
-      return tid ? `Vote ${result} on task ${tid}` : `Cast task vote (${result})`;
+      return tid ? `Vote ${result} on ticket ${tid}` : `Cast ticket vote (${result})`;
     }
     case 'task_chain.set_status': {
       const cid = getArg('chain_id') || getArg('id');

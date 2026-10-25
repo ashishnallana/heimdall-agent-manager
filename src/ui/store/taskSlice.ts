@@ -120,7 +120,7 @@ const taskSlice = createSlice({
         }
       })
       .addCase(fetchSelectedTaskLog.rejected, (state: any, action) => {
-        state.error = action.error.message || 'Failed to load task log';
+        state.error = action.error.message || 'Failed to load ticket log';
       })
       .addCase(fetchUnreviewedChains.fulfilled, (state: any, action) => {
         state.unreviewedChains = action.payload;

@@ -1,9 +1,9 @@
 ---
 name: worker-task-management
-description: How a WORKER or REVIEWER agent works a Task System v2 lease with ham-ctl — read TASK.md, work in the per-task Workdir, heartbeat, choose and report your own checks, submit / hand off / block (`lease submit|handoff|block`) with decisions and dead ends, fetch referenced context (`task fetch`), and post structured reviews (`review post`). Also how to share what you learned with the tasks that come after yours. Load whenever you are a worker or reviewer on a chain.
+description: How a WORKER or REVIEWER agent works a ticket lease with ham-ctl — read TASK.md, work in the per-task Workdir, heartbeat, choose and report your own checks, submit / hand off / block (`lease submit|handoff|block`) with decisions and dead ends, fetch referenced context (`task fetch`), and post structured reviews (`review post`). Also how to share what you learned with the tasks that come after yours. Load whenever you are a worker or reviewer on a chain.
 ---
 
-# Worker & reviewer task management (Task System v2)
+# Worker & reviewer task management (Tickets)
 
 The Hub hands you work as a **lease** on one task. You never set task status: holding a work lease *is* `in_progress`; `lease submit` moves the task to `in_review` (or `done` when nobody reviews it). Work only on the leased task; route scope questions to the coordinator (task comment, or `ham-ctl chat send --to <coordinator-instance-id>`).
 

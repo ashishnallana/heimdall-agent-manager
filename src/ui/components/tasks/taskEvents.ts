@@ -36,7 +36,7 @@ export const EXPIRE_REASON_TEXT: Record<string, string> = {
   replaced: 'its placement changed, so it is restarting',
   dep_added: 'a new dependency was added',
   chain_closed: 'the chain was closed',
-  cancelled: 'the task was cancelled',
+  cancelled: 'the ticket was cancelled',
   changes_requested: 'changes were requested',
   hub_restart_no_lease: 'Heimdall restarted',
   user_stopped: 'a person stopped the agent',
@@ -168,7 +168,7 @@ export function describeTaskEvent(ev: TaskEventWire, names: TaskNames): Describe
       return known('Still blocked and waiting on you');
     case 'answered':
       // The hub answers a block on another task once that task is done (C3-2).
-      if (p.auto) return known(`Unblocked automatically: ${s(p.note) || 'the task it waited on is done'}`);
+      if (p.auto) return known(`Unblocked automatically: ${s(p.note) || 'the ticket it waited on is done'}`);
       return known(`${who} answered the blocker`);
     case 'handoff':
       return known(`${who} handed the work off${attempt(p)}`);

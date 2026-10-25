@@ -130,7 +130,7 @@ export const TaskChainOverview: React.FC<TaskChainOverviewProps> = ({
   const fleets = Array.isArray(fleetsData) ? fleetsData : [];
   const bridges = bridgesData?.bridges || [];
   const { data: identitiesData } = useListAgentIdentitiesQuery();
-  // Solo mode (Task System v2): the coordinator also does the work — it is the
+  // Solo mode: the coordinator also does the work — it is the
   // built-in Soloist, or its own agent has a worker row in the fleet.
   const coordinatorId = String(chain?.coordinator_agent_instance_id || chain?.coordinatorAgentInstanceId || '');
   const { data: coordinatorData } = useFetchAgentInstanceQuery({ instanceId: coordinatorId }, { skip: !coordinatorId });
@@ -200,7 +200,7 @@ export const TaskChainOverview: React.FC<TaskChainOverviewProps> = ({
             <Badge tone="neutral">Mixed work</Badge>
             {chainIsDraft && <Badge tone="neutral">Draft</Badge>}
             {isSolo && (
-              <span title="Solo mode: the coordinator works the tasks itself (pulling them one at a time) and you review each one.">
+              <span title="Solo mode: the coordinator works the tickets itself (pulling them one at a time) and you review each one.">
                 <Badge tone="info">Solo</Badge>
               </span>
             )}

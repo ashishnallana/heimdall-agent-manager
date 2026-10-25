@@ -163,7 +163,8 @@ ham-ctl task-chain fleet set chain_18d711c5384a0119 --agent agt_worker --capacit
 ham-ctl task-chain fleet set chain_18d711c5384a0119 --agent agt_reviewer --capacity 2 --min-warm 1 --idle-ttl 600 --roles reviewer
 ```
 
-## task, lease, review — Task System v2
+## task, lease, review — Tickets
+Tickets are the work items in a chain. The CLI, API and events keep the technical name `task`: `ham-ctl task …` verbs, `task_…` ids, `/tasks/` routes and `[taskv2]` notifications.
 A positional `<task-id>` identifies the task and is enough on its own (task ids are
 globally unique — you rarely need `--chain`).
 

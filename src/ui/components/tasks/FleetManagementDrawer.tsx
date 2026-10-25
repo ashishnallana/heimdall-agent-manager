@@ -1004,7 +1004,7 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
                         {isSaturated ? 'Saturated' : 'Available'}
                       </Badge>
                       {isImplicit && (
-                        <span title="Solo mode: the coordinator works the tasks itself without a stored fleet row.">
+                        <span title="Solo mode: the coordinator works the tickets itself without a stored fleet row.">
                           <Badge tone="info" className="shrink-0 whitespace-nowrap">Solo</Badge>
                         </span>
                       )}
@@ -1016,7 +1016,7 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
                           data-debug-id={`fleet-delete-role-btn-${agentId}`}
                           onClick={() => {
                             // Deleting a saved row stops its agents getting work: ask first.
-                            if (isPersisted && !window.confirm(`Remove ${roleName} from this chain's fleet? Its agents stop getting new tasks.`)) return;
+                            if (isPersisted && !window.confirm(`Remove ${roleName} from this chain's fleet? Its agents stop getting new tickets.`)) return;
                             void handleRemoveFleet(agentId, isPersisted);
                           }}
                           disabled={isUpdating || isApplying || isDeleting}
@@ -1337,7 +1337,7 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
                   <div className="space-y-1">
                     <div className="flex items-center justify-between text-[11px] text-muted">
                       <span>Live Instances ({liveInstances.length})</span>
-                      <span>Active Tasks ({activeTasks.length})</span>
+                      <span>Active Tickets ({activeTasks.length})</span>
                     </div>
                     {liveInstances.length === 0 ? (
                       <p className="text-[11px] text-faint italic py-0.5">No warm instances spawned yet.</p>

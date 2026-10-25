@@ -367,8 +367,8 @@ function ComposerDemo() {
         <button
           type="button"
           data-debug-id="composer-demo-tasks-btn"
-          aria-label="Open tasks"
-          onClick={() => showStubToast('Would open Tasks tab')}
+          aria-label="Open tickets"
+          onClick={() => showStubToast('Would open Tickets tab')}
           className="grid h-9 w-9 place-items-center rounded-xl text-muted hover:bg-neutral-soft"
         >
           <Icon name="tasks" size={18} />

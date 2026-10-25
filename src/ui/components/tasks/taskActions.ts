@@ -29,8 +29,8 @@ export const TASK_ACTION_LABELS: Record<TaskActionId, string> = {
   approve: 'Approve',
   request_changes: 'Request changes',
   reopen: 'Reopen',
-  cancel: 'Cancel task',
-  copy_id: 'Copy task id',
+  cancel: 'Cancel ticket',
+  copy_id: 'Copy ticket id',
 };
 
 export function isDraft(task: TaskWire): boolean {
@@ -181,7 +181,7 @@ export function editLock(task: TaskWire, chainKind = ''): EditLock {
   if (chainKind === 'workflow' || String(task.stage_key || '').trim()) {
     return { locked: true, reason: 'Workflow tasks are set by the run and cannot be edited.' };
   }
-  if (state === 'done' || state === 'cancelled') return { locked: true, reason: 'Reopen the task to change it.' };
+  if (state === 'done' || state === 'cancelled') return { locked: true, reason: 'Reopen the ticket to change it.' };
   const working = (task.leases || []).some((l: any) => (l?.kind || 'work') === 'work');
   if (working || state === 'in_progress') {
     return { locked: true, reason: 'An agent is working on it. Wait, or cancel the current attempt first.' };

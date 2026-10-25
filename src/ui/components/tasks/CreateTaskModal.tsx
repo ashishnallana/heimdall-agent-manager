@@ -39,7 +39,7 @@ export const CreateTaskModal: React.FC<CreateTaskModalProps> = ({
 
   const [title, setTitle] = useState('');
   const [desc, setDesc] = useState('');
-  // Task System v2 (M2): the brief. Validated client-side with the hub's publish
+  // Tickets (M2): the brief. Validated client-side with the hub's publish
   // rules (utils/taskBrief) so a human-created task is publishable as-is.
   const [goal, setGoal] = useState('');
   const [acceptanceText, setAcceptanceText] = useState('');
@@ -95,7 +95,7 @@ export const CreateTaskModal: React.FC<CreateTaskModalProps> = ({
     setErrorMsg('');
     const trimmedTitle = title.trim();
     if (!trimmedTitle) {
-      setErrorMsg('Please enter a task title.');
+      setErrorMsg('Please enter a ticket title.');
       return;
     }
 
@@ -169,7 +169,7 @@ export const CreateTaskModal: React.FC<CreateTaskModalProps> = ({
       onSuccess?.();
       onClose();
     } catch (err: any) {
-      setErrorMsg(String(err?.data?.error?.message || err?.message || 'Failed to create task'));
+      setErrorMsg(String(err?.data?.error?.message || err?.message || 'Failed to create ticket'));
     }
   };
 
@@ -178,12 +178,12 @@ export const CreateTaskModal: React.FC<CreateTaskModalProps> = ({
   const dirty = Boolean(title.trim() || desc.trim() || goal.trim() || acceptanceText.trim() || reviewRolesText.trim());
   const requestClose = (next: boolean) => {
     if (next) return;
-    if (dirty && !window.confirm('Discard this new task?')) return;
+    if (dirty && !window.confirm('Discard this new ticket?')) return;
     onClose();
   };
 
   return (
-    <Modal open={isOpen} onOpenChange={requestClose} title="New task" size="lg" data-debug-id="create-task-modal">
+    <Modal open={isOpen} onOpenChange={requestClose} title="New ticket" size="lg" data-debug-id="create-task-modal">
       <ModalBody>
         <p className="mb-4 text-caption text-muted">A goal and acceptance criteria make it publishable as-is.</p>
         <form id="create-task-form" onSubmit={handleSubmit} className="space-y-4 text-xs">
@@ -211,7 +211,7 @@ export const CreateTaskModal: React.FC<CreateTaskModalProps> = ({
             />
           </FormField>
 
-          {/* Brief (Task System v2) — what the hub validates at publish. */}
+          {/* Ticket brief — what the hub validates at publish. */}
           <div data-debug-id="create-task-brief" className="space-y-2.5 border-t border-subtle pt-3">
             <div>
               <label className="block font-semibold text-primary">Brief</label>
@@ -272,7 +272,7 @@ export const CreateTaskModal: React.FC<CreateTaskModalProps> = ({
               options={bridgeOptions}
             />
             <p className="text-[11px] text-muted mt-1">
-              Pin this task to a specific bridge, or leave it on the coordinator&apos;s bridge.
+              Pin this ticket to a specific bridge, or leave it on the coordinator&apos;s bridge.
             </p>
           </div>
 
@@ -322,7 +322,7 @@ export const CreateTaskModal: React.FC<CreateTaskModalProps> = ({
                   options={agentOptions}
                 />
                 <p className="text-[11px] text-muted mt-1">
-                  The task will automatically dispatch to an idle worker or JIT-provision up to fleet capacity.
+                  The ticket will automatically dispatch to an idle worker or JIT-provision up to fleet capacity.
                 </p>
               </div>
             )}
@@ -467,7 +467,7 @@ export const CreateTaskModal: React.FC<CreateTaskModalProps> = ({
           disabled={isCreating || !username}
           loading={isCreating}
         >
-          Create task
+          Create ticket
         </Button>
       </ModalFooter>
     </Modal>

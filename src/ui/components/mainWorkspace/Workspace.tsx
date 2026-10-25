@@ -665,7 +665,7 @@ export function Workspace({ focusMessageId, isMobile = false, leading, leadingWi
     },
     {
       id: 'workspace.toggle-aux-tasks',
-      title: 'Toggle Tasks in auxiliary pane',
+      title: 'Toggle Tickets in auxiliary pane',
       category: 'Workspace',
       sequence: ['s', 'a', 't'],
       isEnabled: () => Boolean(auxTreeId && isAgentPaneId(focusedAgentId) && ctx.isResolved && ctx.chainId),

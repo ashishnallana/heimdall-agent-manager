@@ -105,7 +105,7 @@ export const ReviewRolesModal: React.FC<ReviewRolesModalProps> = ({ chainId, ope
             variant="ghost"
             tone="danger"
             disabled={busy || role.openTaskCount > 0}
-            title={role.openTaskCount > 0 ? 'Open tasks still require this role' : undefined}
+            title={role.openTaskCount > 0 ? 'Open tickets still require this role' : undefined}
             onClick={() => {
               if (window.confirm(`Delete the ${role.name} role? Agents holding it lose it.`)) void run(() => deleteRole({ chainId, name: role.name }).unwrap());
             }}
@@ -162,7 +162,7 @@ export const ReviewRolesModal: React.FC<ReviewRolesModalProps> = ({ chainId, ope
     <Modal open={open} onOpenChange={(o) => !o && onClose()} title="Review roles" size="md">
       <ModalBody className="space-y-4 text-xs">
         <Text as="p" role="caption" tone="muted">
-          Optional. Name reviewer agents on each task for most work. A role asks every agent holding it to review, which
+          Optional. Name reviewer agents on each ticket for most work. A role asks every agent holding it to review, which
           suits templates and coordinators. Its description tells the reviewer what to check.
         </Text>
         <ul className="space-y-3">

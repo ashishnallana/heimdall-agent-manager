@@ -1,9 +1,9 @@
 # Heimdall Tooling
 - Use `{{ctl_bin}} ...` (`./.heimdall/bin/ham-ctl`) for Heimdall task, lease, review, chat, project, and memory workflows.
-- Track all work in Heimdall Task System v2 tasks; read `TASK.md` in your run directory on every wake, choose and run checks appropriate to the change, and submit with `ham-ctl lease submit`, reporting the commands and their outcomes in the summary.
+- Track all work as Heimdall tickets (the `ham-ctl task` and `lease` commands); read `TASK.md` in your run directory on every wake, choose and run checks appropriate to the change, and submit with `ham-ctl lease submit`, reporting the commands and their outcomes in the summary.
 
-# Agent Operating Rules (Task System v2)
-These rules govern how you work in Heimdall Task System v2. Follow them every session.
+# Agent Operating Rules (Tickets)
+These rules govern how you work with Heimdall tickets. Follow them every session.
 
 ## 1. Always track work in Heimdall tasks and read `TASK.md`
 Every non-trivial unit of work is tracked in a Heimdall task and dispatched via a hub-managed lease:
@@ -39,7 +39,7 @@ The **only** free-form user channel is the task-chain coordinator.
 Grouped questions use a version-1 object with a `questions` array (see `ham-ctl-reference`). Each question supports single or multiple selections, or a typed custom alternative; all answers are sent by one explicit group submit. Flat options and grouped-question controls are available only on the **LAST durable user-visible message** in that agent conversation; any newer user or agent message expires them. Task approval uses the existing task review UI or an explicit user verdict recorded with `review post --on-behalf-of user`; never infer approval from answer selection or silence.
 
 ## 4. Structured Task Briefs (`brief`) and Context Pack (`TASK.md`)
-Every executable task in Task System v2 carries a validated `brief`:
+Every executable ticket carries a validated `brief`:
 - `goal`: One-paragraph statement of the outcome.
 - `acceptance`: Non-empty array of concrete, independently checkable criteria. A goal and at least one acceptance item are all a brief needs to publish.
 - `inputs`: Optional array of references (`#<event_id>`, `output:<task_id>`, `facet:<task_id>:<attempt_no>:<kind>`, `<path>@<rev>`) resolved into `TASK.md`. Tasks listed in `depends_on` already pass their handoff automatically; use `inputs` only for extra context.
@@ -59,7 +59,7 @@ Supported `<ref>` formats for `ham-ctl task fetch <task_id> <ref>`:
 - `dir:<directory_id>:<rev>:<path>` — fetch a file at a specific revision from a chain directory.
 - `<path>@<rev>` or `<path>` — fetch a file at `<rev>` or at the task's latest `vcs.head`.
 
-## 5. `ham-ctl` Task System v2 Cheatsheet
+## 5. `ham-ctl` Tickets Cheatsheet
 - `ham-ctl lease next` — inspect current lease (`status: "current"`) or claim next ready task (`status: "granted"`); updates `<run_dir>/TASK.md`.
 - `ham-ctl lease heartbeat [--note "<text>"]` — extend lease TTL and optionally record a progress note.
 - `ham-ctl lease submit --summary "<text>" [--decision <t>]... [--dead-end <t>]... [--next-steps <t>] [--output-file <json>] [--artifacts-file <json>]` — submit the current attempt for review (or direct completion if no review gates apply). `--handoff-file <json>` replaces the inline handoff flags.

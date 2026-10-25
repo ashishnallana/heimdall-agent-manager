@@ -121,7 +121,7 @@ export function getTaskBadges(task: TaskWire, _chainFleets?: any[], nowMs: numbe
       kind: 'blocked',
       label: (waitingKind === 'dispatch' || waitingKind === 'agent_not_running') ? 'Agent not running' : onYou ? 'Blocked on you' : `Blocked: waiting on ${waitingKind.replace(/_/g, ' ')}`,
       tone: onYou ? 'danger' : 'warn',
-      title: String(task.blocked_on.reason || (onYou ? 'Waiting for your answer' : 'Waiting on another task or system')),
+      title: String(task.blocked_on.reason || (onYou ? 'Waiting for your answer' : 'Waiting on another ticket or system')),
     });
   }
 
@@ -131,7 +131,7 @@ export function getTaskBadges(task: TaskWire, _chainFleets?: any[], nowMs: numbe
   // Worktree merge-back of a done task (F5). A conflict already shows as blocked.
   const merge = task.merge;
   if (merge && merge.state === 'pending') {
-    badges.push({ kind: 'merge', label: 'Merging…', tone: 'info', title: 'The task branch is being merged into its directory' });
+    badges.push({ kind: 'merge', label: 'Merging…', tone: 'info', title: 'The ticket branch is being merged into its directory' });
   } else if (merge && merge.state === 'failed') {
     badges.push({ kind: 'merge', label: 'Merge failed – retrying', tone: 'warn', title: merge.detail ? `Merge did not run: ${merge.detail}. Retried when the bridge reconnects.` : 'Merge did not run; retried when the bridge reconnects.' });
   } else if (merge && merge.state === 'merged' && merge.head) {
@@ -211,7 +211,7 @@ export function getTaskStatusLines(task: TaskWire, _chainFleets?: any[], nowMs: 
     if (String(task.publish_state || '').toLowerCase() === 'draft') {
       return ['Draft, not visible to agents until you publish it', deps.length > 0 ? `then waits for ${depList}` : ''];
     }
-    return deps.length > 0 ? ['Waiting for other tasks', `needs ${depList}`] : ['In the backlog', 'not ready to start yet'];
+    return deps.length > 0 ? ['Waiting for other tickets', `needs ${depList}`] : ['In the backlog', 'not ready to start yet'];
   }
 
   if (state === 'done') {
@@ -221,7 +221,7 @@ export function getTaskStatusLines(task: TaskWire, _chainFleets?: any[], nowMs: 
     ];
   }
 
-  return ['Cancelled', 'Task was cancelled'];
+  return ['Cancelled', 'Ticket was cancelled'];
 }
 
 export interface TaskPeople {

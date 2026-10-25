@@ -254,8 +254,8 @@ fleet_panels = [
     ], 12, 107, unit="short",
           desc="From bridge heartbeats. http retry/recovered/gave_up/deferred: bridge->hub HTTP retries; shed: commands refused busy; deadline_expired: dropped after the hub stopped waiting."),
 
-    # Task System v2 row: added to fleet.json by hand in 45f4d179, now generated.
-    row("Task System v2", 115),
+    # Tickets (formerly "Task System v2") row: added to fleet.json by hand in 45f4d179, now generated.
+    row("Tickets", 115),
     panel("Task Leases & Armed Timers", [('heimdall_task_lease_active', "lease: {{kind}}"), ('heimdall_task_timers_armed', "timers armed")], 0, 116, unit="short",
           desc="Live task leases by kind and armed timers",
           extra_fc={"color": {"mode": "palette-classic"}, "custom": {"drawStyle": "line", "fillOpacity": 15, "lineWidth": 2}}),
@@ -266,7 +266,7 @@ fleet_panels = [
           extra_fc={"color": {"mode": "palette-classic"}, "custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 2}}),
 ]
 
-# The Task System v2 row's ids (62-64) were assigned by hand after streams and
+# The Tickets row's ids (62-64) were assigned by hand after streams and
 # bridge-events had been generated; rewind so those dashboards keep their ids.
 _id[0] -= 3
 

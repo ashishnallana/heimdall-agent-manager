@@ -896,7 +896,7 @@ export function detectLiveInstanceRuntimeMismatch(
 }
 
 const BRIDGE_SOURCE_TEXT: Record<string, string> = {
-  task_pin: 'pinned on the task',
+  task_pin: 'pinned on the ticket',
   fleet: 'set on this fleet row',
   chain_directory: "from the chain's directory",
   coordinator: "the coordinator's bridge",

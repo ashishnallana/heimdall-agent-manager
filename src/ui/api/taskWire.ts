@@ -1,4 +1,4 @@
-// Task System v2 wire types (M2). Mirrors Simple_Task_Wire / Task_Detail_Wire in
+// Ticket wire types (M2). Mirrors Simple_Task_Wire / Task_Detail_Wire in
 // src/hub/transport/http/taskchain_handlers.odin. Legacy fields (status, votes,
 // allowed_transitions, …) stay optional so the M4 board rework can drop them
 // without a flag day. `brief` and `blocked_on` are stored verbatim by the hub —
@@ -57,7 +57,7 @@ export interface TaskReviewWire {
 }
 
 export interface TaskWire {
-  /** Where a done task's worktree branch is (Task System v2 F5). */
+  /** Where a done task's worktree branch is (Tickets F5). */
   merge?: { state: 'none' | 'pending' | 'merged' | 'conflict' | 'failed'; detail?: string; head?: string };
   task_id: string;
   chain_id: string;

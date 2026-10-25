@@ -118,7 +118,7 @@ export const TaskEditModal: React.FC<TaskEditModalProps> = ({
           <>
             <Select value={assignee} onChange={setAssignee} options={agentOptions} width="full" aria-label="Assignee" />
             <Text as="p" role="caption" tone="warning">
-              Assigning an agent adds it to this chain's fleet. If the task is ready, the agent may start right away.
+              Assigning an agent adds it to this chain's fleet. If the ticket is ready, the agent may start right away.
             </Text>
           </>
         )}
@@ -127,7 +127,7 @@ export const TaskEditModal: React.FC<TaskEditModalProps> = ({
           <>
             <div className="space-y-1.5">
               <Text as="p" role="caption" tone="muted">
-                Reviewers of this task (each must approve):
+                Reviewers of this ticket (each must approve):
               </Text>
               <div className="max-h-48 space-y-1 overflow-y-auto">
                 {agents.map((a) => {
@@ -182,7 +182,7 @@ export const TaskEditModal: React.FC<TaskEditModalProps> = ({
         {field === 'deps' &&
           (depCandidates.length === 0 ? (
             <Text as="p" role="caption" tone="faint">
-              There are no other tasks in this chain.
+              There are no other tickets in this chain.
             </Text>
           ) : (
             <div className="max-h-64 space-y-1 overflow-y-auto">

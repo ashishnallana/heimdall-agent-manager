@@ -423,7 +423,7 @@ export function AttentionDeck({
     { key: 'a', label: needsAgentStart(current) ? 'Start agent' : 'Answer', icon: 'chat', tone: 'success', debug: 'answer', run: () => { if (needsAgentStart(current)) { void agentStart.start(current); return; } setPopover(null); setComposer(composer === 'answer' ? null : 'answer'); } },
     { key: 'c', label: 'Comment', icon: 'chat', debug: 'comment', run: () => { setPopover(null); setComposer(composer === 'comment' ? null : 'comment'); } },
     { key: 's', label: 'Snooze', icon: 'clock', debug: 'snooze', run: () => { setComposer(null); setPopover(popover === 'snooze' ? null : 'snooze'); } },
-    { key: 'x', label: 'Cancel task', icon: 'stop', tone: 'danger', debug: 'cancel-task', run: () => schedule(current, 'Task cancelled', (k) => cancelTask((current as AttentionTaskItem).action_refs, k)) },
+    { key: 'x', label: 'Cancel ticket', icon: 'stop', tone: 'danger', debug: 'cancel-task', run: () => schedule(current, 'Ticket cancelled', (k) => cancelTask((current as AttentionTaskItem).action_refs, k)) },
     { key: 'o', label: 'Open', icon: 'arrow-right', debug: 'open', run: () => openSource(current) },
   ] : current.kind === 'task' ? [
     { key: 'a', label: 'Approve', icon: 'check', tone: 'success', debug: 'approve', run: () => schedule(current, 'Approved', (k) => acceptCard(current.card_id, k)) },
@@ -433,7 +433,7 @@ export function AttentionDeck({
     ]),
     { key: 's', label: 'Snooze', icon: 'clock', debug: 'snooze', run: () => { setComposer(null); setPopover(popover === 'snooze' ? null : 'snooze'); } },
     // Cancels the task itself (the card resolves with it), so it says so.
-    { key: 'x', label: 'Cancel task', icon: 'stop', tone: 'danger', debug: 'cancel-task', run: () => schedule(current, 'Task cancelled', (k) => cancelTask((current as AttentionTaskItem).action_refs, k)) },
+    { key: 'x', label: 'Cancel ticket', icon: 'stop', tone: 'danger', debug: 'cancel-task', run: () => schedule(current, 'Ticket cancelled', (k) => cancelTask((current as AttentionTaskItem).action_refs, k)) },
     { key: 'o', label: 'Open', icon: 'arrow-right', debug: 'open', run: () => openSource(current) },
   ] : current.kind === 'memory' ? [
     { key: 'a', label: 'Approve', icon: 'check', tone: 'success', debug: 'approve', run: () => schedule(current, 'Memory approved', (k) => acceptCard(current.card_id, k)) },
@@ -531,7 +531,7 @@ export function AttentionDeck({
         <header data-attention-top className="px-4 pb-3 pt-4">
           <div data-attention-title className="min-w-0">
             <h2 className="truncate text-[18px] font-semibold text-primary">What needs you</h2>
-            <p className="text-[12px] text-muted">Questions from agents and tasks waiting on your review, across all chains.</p>
+            <p className="text-[12px] text-muted">Questions from agents and tickets waiting on your review, across all chains.</p>
           </div>
           <div data-attention-actions className="flex items-center gap-2">
             {data && query.isError && !query.isFetching ? (

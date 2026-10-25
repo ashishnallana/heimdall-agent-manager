@@ -171,7 +171,7 @@ export const TaskSummaryBar: React.FC<TaskSummaryBarProps> = ({
           aria-pressed={needsYouActive}
           onClick={onToggleNeedsYou}
         >
-          {needsYouActive ? 'Show all tasks' : `${needsYou} ${needsYou === 1 ? 'task needs' : 'tasks need'} you`}
+          {needsYouActive ? 'Show all tickets' : `${needsYou} ${needsYou === 1 ? 'ticket needs' : 'tickets need'} you`}
         </Button>
       ) : (
         <Text role="label" tone="accent">

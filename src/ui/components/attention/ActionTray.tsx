@@ -257,11 +257,11 @@ export function ActionTray({
         </h2>
         {items.length > 1 ? (
           <div data-debug-id="action-tray-pager" className="flex shrink-0 items-center text-[13px] tabular-nums text-muted">
-            <button type="button" aria-label="Previous task" data-debug-id="action-tray-prev" disabled={safePage === 0} onClick={() => go(-1)} className="grid h-9 w-9 place-items-center rounded-full hover:text-primary disabled:opacity-30">
+            <button type="button" aria-label="Previous ticket" data-debug-id="action-tray-prev" disabled={safePage === 0} onClick={() => go(-1)} className="grid h-9 w-9 place-items-center rounded-full hover:text-primary disabled:opacity-30">
               <Icon name="chevron-left" size={18} />
             </button>
             <span data-debug-id="action-tray-page">{safePage + 1} / {items.length}</span>
-            <button type="button" aria-label="Next task" data-debug-id="action-tray-next" disabled={safePage >= items.length - 1} onClick={() => go(1)} className="grid h-9 w-9 place-items-center rounded-full hover:text-primary disabled:opacity-30">
+            <button type="button" aria-label="Next ticket" data-debug-id="action-tray-next" disabled={safePage >= items.length - 1} onClick={() => go(1)} className="grid h-9 w-9 place-items-center rounded-full hover:text-primary disabled:opacity-30">
               <Icon name="chevron-right" size={18} />
             </button>
           </div>
@@ -394,7 +394,7 @@ function OverflowMenu({ onSnooze, onOpen }: { onSnooze: () => void; onOpen: () =
       </Menu.Item>
       <Menu.Item data-debug-id="action-tray-open" onClick={() => { setOpen(false); onOpen(); }}>
         <Icon name="arrow-right" size={16} />
-        <span>Open task</span>
+        <span>Open ticket</span>
       </Menu.Item>
     </Menu>
   );

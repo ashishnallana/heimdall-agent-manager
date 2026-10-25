@@ -157,7 +157,7 @@ export const TicketBoardView: React.FC<TicketBoardViewProps> = ({
         menuItems={[
           ...(onOpenFleetDrawer ? [{ label: 'Fleet', onClick: onOpenFleetDrawer, debugId: 'task-board-fleet-btn' }] : []),
           ...(onOpenReviewRoles ? [{ label: 'Review roles', onClick: onOpenReviewRoles, debugId: 'task-board-review-roles-btn' }] : []),
-          ...(onPublishChain && onNewTask ? [{ label: 'New task', onClick: onNewTask, debugId: 'task-board-new-task-menu' }] : []),
+          ...(onPublishChain && onNewTask ? [{ label: 'New ticket', onClick: onNewTask, debugId: 'task-board-new-task-menu' }] : []),
         ]}
         primaryAction={
           onPublishChain ? (
@@ -166,7 +166,7 @@ export const TicketBoardView: React.FC<TicketBoardViewProps> = ({
             </Button>
           ) : onNewTask ? (
             <Button size="sm" variant="primary" leading={<Icon name="plus" size="sm" />} onClick={onNewTask} data-debug-id="task-board-new-task-btn">
-              New task
+              New ticket
             </Button>
           ) : undefined
         }
@@ -183,12 +183,12 @@ export const TicketBoardView: React.FC<TicketBoardViewProps> = ({
       {tasks.length === 0 ? hasWorkflowRuns ? null : (
         <EmptyState
           icon="tasks"
-          title="No tasks yet"
-          description="Add a task with a goal and acceptance criteria."
+          title="No tickets yet"
+          description="Add a ticket with a goal and acceptance criteria."
           action={
             onNewTask ? (
               <Button size="sm" variant="primary" data-debug-id="task-board-empty-new-task-btn" onClick={onNewTask}>
-                New task
+                New ticket
               </Button>
             ) : undefined
           }

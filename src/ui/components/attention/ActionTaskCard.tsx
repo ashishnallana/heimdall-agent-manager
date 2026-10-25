@@ -33,12 +33,12 @@ export function ActionTaskCard({ item, mobile, active, now, footer }: { item: At
   return (
     <article
       data-debug-id={`action-tray-card-${blocked ? 'blocked' : 'review'}`}
-      aria-label={blocked ? 'Task blocked on you' : 'Task waiting on your review'}
+      aria-label={blocked ? 'Ticket blocked on you' : 'Ticket waiting on your review'}
       className="flex h-full min-h-0 min-w-0 flex-col gap-3"
     >
       <header className="min-w-0 space-y-1">
         <h3 data-debug-id="action-tray-card-title" className={`font-semibold leading-snug text-primary ${mobile ? 'text-[16px]' : 'text-[17px]'}`}>
-          <VaultText value={item.title} fallback="Untitled task" />
+          <VaultText value={item.title} fallback="Untitled ticket" />
         </h3>
         <div className="flex min-w-0 items-center gap-2 text-[13px] text-muted">
           <span aria-hidden="true" className="grid h-5 w-5 shrink-0 place-items-center rounded-full bg-neutral-soft text-muted">
@@ -72,7 +72,7 @@ function BlockedAsk({ item, mobile }: { item: AttentionTaskItem; mobile: boolean
   if (!excerpt?.body) {
     return (
       <p data-debug-id="action-tray-card-no-ask" className="text-[15px] text-muted">
-        The agent is waiting on you but did not say what it needs. Open the task to see its latest comments.
+        The agent is waiting on you but did not say what it needs. Open the ticket to see its latest comments.
       </p>
     );
   }

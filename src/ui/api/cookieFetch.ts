@@ -34,7 +34,7 @@ export class ApiError extends Error {
   // fine-grained cause, when the hub sent them.
   readonly errorClass?: WireErrorClass;
   readonly errorCause?: string;
-  // Task System v2 (M2): the hub's structured `error.details` object when sent
+  // Tickets (M2): the hub's structured `error.details` object when sent
   // (e.g. 422 publish → {code:'brief_incomplete', tasks:[{task_id, missing}]}).
   readonly details?: any;
   constructor(message: string, status?: number, code?: string, errorClass?: WireErrorClass, errorCause?: string, details?: any) {

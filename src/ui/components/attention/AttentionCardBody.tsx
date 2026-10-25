@@ -13,7 +13,7 @@ import { PRIORITY_LABELS, SCOPE_ROWS, TASK_BADGE_LABELS, expiryLine, formatAge, 
  */
 export function AttentionCardBody({ item, now, children }: { item: AttentionItem; now: number; children?: React.ReactNode }) {
   return (
-    <article data-debug-id={`attention-card-${item.kind}`} aria-label={item.kind === 'task' ? (item.details.attention === 'blocked' ? 'Task blocked on you' : 'Task waiting on your review') : item.kind === 'memory' ? 'Memory proposal' : item.kind === 'agent_blocker' ? 'Agent needs your permission' : 'Agent question'} className="flex h-full min-h-0 flex-col">
+    <article data-debug-id={`attention-card-${item.kind}`} aria-label={item.kind === 'task' ? (item.details.attention === 'blocked' ? 'Ticket blocked on you' : 'Ticket waiting on your review') : item.kind === 'memory' ? 'Memory proposal' : item.kind === 'agent_blocker' ? 'Agent needs your permission' : 'Agent question'} className="flex h-full min-h-0 flex-col">
       <p data-debug-id="attention-card-reason" className={`text-[13px] font-semibold ${urgencyClass(item.urgency)}`}>
         {reasonLine(item, now)}
       </p>
@@ -43,7 +43,7 @@ function TaskBody({ item, now }: { item: AttentionTaskItem; now: number }) {
   return (
     <>
       <h3 data-debug-id="attention-card-title" className="text-[17px] font-semibold leading-snug text-primary">
-        <VaultText value={item.title} fallback="Untitled task" />
+        <VaultText value={item.title} fallback="Untitled ticket" />
       </h3>
       <ul data-debug-id="attention-card-facts" className="mt-2 flex flex-wrap gap-1.5">
         <li className="rounded-[var(--radius-sm)] bg-surface-raised px-1.5 py-0.5 text-[11px] text-muted">{PRIORITY_LABELS[d.priority] || 'Normal priority'}</li>

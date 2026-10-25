@@ -8,7 +8,7 @@ export const DECK_TABS: ReadonlyArray<{ id: DeckTab; label: string }> = [
   // Live agent blockers first: an agent is stalled until someone answers.
   { id: 'agent_blocker', label: 'Permissions' },
   { id: 'message', label: 'Messages' },
-  { id: 'task', label: 'Tasks' },
+  { id: 'task', label: 'Tickets' },
   { id: 'memory', label: 'Memories' },
   { id: 'snoozed', label: 'Snoozed' },
 ];
@@ -104,7 +104,7 @@ export function formatAge(sinceIso: string, now: number): string {
 }
 
 /** Human reason line, e.g. "Waiting on your review · 2h". Never shows ids. */
-/** Why a task card is in the deck (Task System v2 attention kind + badge). */
+/** Why a task card is in the deck (ticket attention kind + badge). */
 export function taskReason(d: { attention?: string; badge?: string }): string {
   if (d.attention === 'blocked') {
     switch (d.badge) {

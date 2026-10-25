@@ -32,7 +32,7 @@ export type AttentionTaskDetails = {
   bridge_id: string;
   assignee_name: string;
   excerpt: AttentionExcerpt | null;
-  /** Task System v2: why the task needs the user. */
+  /** Tickets: why the task needs the user. */
   attention?: 'review' | 'blocked';
   /** review | gate | question | agent_not_running | merge_conflict | budget_exhausted | oscillation */
   badge?: string;

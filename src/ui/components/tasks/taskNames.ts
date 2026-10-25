@@ -121,7 +121,7 @@ export function buildTaskNames(src: TaskNameSources): TaskNames {
   };
 
   const names: TaskNames = {
-    task: (taskId) => taskTitles.get(str(taskId)) || 'Untitled task',
+    task: (taskId) => taskTitles.get(str(taskId)) || 'Untitled ticket',
     agent,
     bridge: (bridgeId) => bridgeLabels.get(str(bridgeId)) || 'unknown bridge',
     instance: (instanceId) => {

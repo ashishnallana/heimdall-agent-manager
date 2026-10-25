@@ -47,7 +47,7 @@ import {
   writeChainOverviewCollapsedState,
 } from '../../utils/clientPersistence';
 
-// The running instance holding a task's work lease (Task System v2), if any.
+// The running instance holding a task's work lease, if any.
 function workHolder(task: any): string {
   const lease = (Array.isArray(task?.leases) ? task.leases : []).find((l: any) => (l?.kind || 'work') === 'work');
   return String(lease?.holder_instance_id || '');
@@ -247,7 +247,7 @@ function AttentionTaskReviewCard({
       {isDetailLoading ? (
         <div className="flex items-center gap-2 text-xs text-muted py-2">
           <Spinner size="sm" />
-          <span>Loading task details & acceptance criteria…</span>
+          <span>Loading ticket details & acceptance criteria…</span>
         </div>
       ) : (
         <>
@@ -278,7 +278,7 @@ function AttentionTaskReviewCard({
               <Markdown source={effectiveDescription} compact copyAll={false} />
             </div>
           ) : (
-            <p className="text-xs italic text-muted">No description provided for this task.</p>
+            <p className="text-xs italic text-muted">No description provided for this ticket.</p>
           )}
         </>
       )}
@@ -666,12 +666,12 @@ export default function ChainOverviewPanel({
                     </span>
                     <span
                       className="min-w-0 flex-1 truncate text-[11px] text-muted"
-                      title={currentTask ? String(currentTask.title || currentTask.id || '') : 'No task'}
+                      title={currentTask ? String(currentTask.title || currentTask.id || '') : 'No ticket'}
                     >
                       {currentTask ? (
                         <VaultText value={currentTask.title || currentTask.id} as="span" className="truncate" />
                       ) : (
-                        <span className="text-faint">No task</span>
+                        <span className="text-faint">No ticket</span>
                       )}
                     </span>
 
@@ -883,7 +883,7 @@ export default function ChainOverviewPanel({
 
         {!isCollapsed('ongoingTasks') && (
           ongoingTasks.length === 0 ? (
-            <p className="text-xs text-muted py-1">No active in_progress or in_validation tasks.</p>
+            <p className="text-xs text-muted py-1">No active in_progress or in_validation tickets.</p>
           ) : (
             <div className="grid gap-2">
               {ongoingTasks.map((task) => {

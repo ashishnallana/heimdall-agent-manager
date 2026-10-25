@@ -74,7 +74,7 @@ function formatUpdatedAt(value: string): string {
 }
 
 /**
- * What a click on a chain row does (Task v2 plan REQ-UI-5, supersedes REQ-TCUI-2):
+ * What a click on a chain row does (Tickets plan REQ-UI-5, supersedes REQ-TCUI-2):
  * a chain with a coordinator opens its chain-addressed conversation
  * (`/conversations/chain:<id>`, REQ-TV2-7), where the aux Tasks tab already
  * shows the chain. On desktop it goes to `?panel=tasks`; on mobile it goes to the
@@ -195,7 +195,7 @@ function ChainRow({
         {coordinator ? (
           <IconButton
             icon="tasks"
-            label="Open task board"
+            label="Open ticket board"
             variant="ghost"
             size={isMobile ? 'md' : 'sm'}
             data-debug-id={`task-chains-row-board-btn-${chain.chainId}`}
@@ -673,7 +673,7 @@ export const TaskChainsPage: React.FC<TaskChainsPageProps> = ({ chainId: initial
             onChange={(e) => setOnlyWithTasks(e.target.checked)}
             className="h-4 w-4 accent-accent"
           />
-          Only chains with tasks
+          Only chains with tickets
         </label>
 
         <label
@@ -789,7 +789,7 @@ export const TaskChainsPage: React.FC<TaskChainsPageProps> = ({ chainId: initial
           </div>
         </div>
       }
-      description="Multi-agent workflows grouped by project. Select a chain to follow its tasks, dependencies, and reviews."
+      description="Multi-agent workflows grouped by project. Select a chain to follow its tickets, dependencies, and reviews."
       breadcrumbs={[{ label: 'Task Chains' }]}
       selectedId={selectedChainId}
       detailTitle="Task Chain"

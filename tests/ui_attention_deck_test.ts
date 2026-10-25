@@ -308,7 +308,7 @@ test('deck: message card shows the question, options and unread count -- never a
     assert.match(text(), /\+2 more unread messages/);
     assert.match(text(), /Waiting on your reply · 30 min/);
     assert.match(text(), /Messages1/);
-    assert.match(text(), /Tasks1/);
+    assert.match(text(), /Tickets1/);
     assert.doesNotMatch(text(), /secret|crd_|chat_|inst_|task_|msg_|chain_/, 'no ids rendered');
     assert.match(text(), /\+1 older/);
     assert.equal(q('[data-markdown-copy-all="true"]'), null, 'no copy button on the card (it added an empty line)');
@@ -630,7 +630,7 @@ test('deck: Snoozed tab keeps the original actions; approving a snoozed card wor
     assert.match(text(), /Review z/);
     assert.match(text(), /Snoozed until tomorrow/);
     assert.equal(q('[data-debug-id="attention-action-wake"]'), null, 'no separate wake step');
-    assert.match(text(), /Cancel task/, 'says what it does: cancels the task');
+    assert.match(text(), /Cancel ticket/, 'says what it does: cancels the ticket');
     assert.doesNotMatch(text(), /Discard/);
     for (const a of ['approve', 'comment', 'reviewer', 'snooze', 'cancel-task', 'open']) assert.ok(q(`[data-debug-id="attention-action-${a}"]`), `${a} offered`);
     await act(async () => { dom.window.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'a', bubbles: true })); });

@@ -102,7 +102,7 @@ export function MessageComposerActions({ debugPrefix: p, mobile, compactModel, p
     {!pendingActions && !readOnly ? <div className="flex shrink-0 items-center gap-0.5 sm:gap-1.5">
       <button type="button" data-debug-id={`${p}-attach-btn`} disabled={uploadDisabled} aria-label="Upload attachment" onClick={onUpload} className={`grid ${btn} place-items-center text-muted hover:bg-neutral-soft disabled:opacity-40`}><Icon name="plus" size={mobile ? 22 : 19} /></button>
       {onPaneToggle ? <button type="button" data-debug-id={`${p}-request-pane-btn`} aria-label="Open terminal" aria-pressed={paneExpanded} onClick={onPaneToggle} className={`grid ${btn} place-items-center ${paneExpanded ? 'bg-accent/20 text-accent' : 'text-muted hover:bg-neutral-soft'}`}><Icon name="terminal" size={iconSize} /></button> : null}
-      {onOpenTasks ? <button type="button" data-debug-id={`${p}-tasks-btn`} aria-label="Open tasks" onClick={onOpenTasks} className={`grid ${btn} place-items-center text-muted hover:bg-neutral-soft`}><Icon name="tasks" size={iconSize} /></button> : null}
+      {onOpenTasks ? <button type="button" data-debug-id={`${p}-tasks-btn`} aria-label="Open tickets" onClick={onOpenTasks} className={`grid ${btn} place-items-center text-muted hover:bg-neutral-soft`}><Icon name="tasks" size={iconSize} /></button> : null}
       {extraActions}
     </div> : <span />}
     <div className="ml-auto flex min-w-0 items-center justify-end gap-1.5 sm:gap-2">

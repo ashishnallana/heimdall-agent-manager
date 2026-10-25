@@ -1,9 +1,9 @@
 ---
 name: coordinator-task-management
-description: How a task-chain COORDINATOR runs a Task System v2 chain with ham-ctl — choose tickets or workflow runs within one mixed-work chain, propose and publish tasks with complete briefs (`task-chain propose|decide|publish`, `task create`), run workflows (`ham-ctl workflow …`), set up the fleet and review roles (`task-chain fleet set`), curate the chain summary so learnings reach every agent, react to `[taskv2]` notifications (blocked_on human, budget_exhausted, oscillation, ready_unclaimed, review_requested_from_user, merge_conflict, gate_rejected, work_batch_finished, workflow_complete, …), record user verdicts (`review post --on-behalf-of user`), and close the chain. Covers Solo mode, where the coordinator also does the work. Load whenever you coordinate a chain.
+description: How a task-chain COORDINATOR runs a chain of tickets with ham-ctl — choose tickets or workflow runs within one mixed-work chain, propose and publish tasks with complete briefs (`task-chain propose|decide|publish`, `task create`), run workflows (`ham-ctl workflow …`), set up the fleet and review roles (`task-chain fleet set`), curate the chain summary so learnings reach every agent, react to `[taskv2]` notifications (blocked_on human, budget_exhausted, oscillation, ready_unclaimed, review_requested_from_user, merge_conflict, gate_rejected, work_batch_finished, workflow_complete, …), record user verdicts (`review post --on-behalf-of user`), and close the chain. Covers Solo mode, where the coordinator also does the work. Load whenever you coordinate a chain.
 ---
 
-# Coordinator task management (Task System v2)
+# Coordinator task management (Tickets)
 
 You plan, triage, publish and steer. Leased **workers** and **reviewers** do the work, unless the chain runs in **Solo mode** (§8), where you are also the worker and the user reviews.
 

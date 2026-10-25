@@ -219,7 +219,7 @@ export const CreateChainModal: React.FC<CreateChainModalProps> = ({
                 <textarea
                   value={description}
                   onChange={(e) => setDescription(e.target.value)}
-                  placeholder="Overview of the tasks, objectives, and acceptance guidelines…"
+                  placeholder="Overview of the tickets, objectives, and acceptance guidelines…"
                   rows={2}
                   className="rounded-lg border border-subtle bg-canvas p-2.5 text-primary text-xs outline-none focus:border-accent"
                 />

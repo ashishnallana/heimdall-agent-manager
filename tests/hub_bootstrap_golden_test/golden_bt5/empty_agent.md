@@ -112,7 +112,7 @@ work starts, regardless of size. There is no carve-out for "quick fixes."
    workflow run must succeed, with no active leases or pending proposal. Then use
    `ham-ctl task-chain complete --chain <id> --expected-work-revision <n> --summary "<final acceptance>"`.
 
-> Task System v2: Read `TASK.md` in your run directory on every wake. Use `task-chain propose`,
+> Tickets: Read `TASK.md` in your run directory on every wake. Use `task-chain propose`,
 > `task-chain summary set`, `task create/update/publish`, `lease next/heartbeat/submit/handoff/block`,
 > `review post [--on-behalf-of user]`, and `task fetch`.
 

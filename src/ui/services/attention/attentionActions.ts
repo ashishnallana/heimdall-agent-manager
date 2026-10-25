@@ -50,7 +50,7 @@ export const markConversationRead = (conversationId: string, keepalive: boolean)
 
 /**
  * Hands the review to a durable agent: it becomes the task's named reviewer and
- * the user's approval is no longer required. Task System v2 re-gates the task on
+ * the user's approval is no longer required. The hub re-gates the task on
  * that edit (stale review leases are replaced, the reviewer is matched), so no
  * separate reconcile is needed; the user's card retires server-side.
  */

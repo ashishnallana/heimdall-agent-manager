@@ -95,7 +95,7 @@ test('briefIncompleteMessage words each task with its title, falling back to the
   };
   assert.equal(
     briefIncompleteMessage(details, { tsk_1: 'Ship endpoint' }),
-    'Task Ship endpoint: missing goal, acceptance\nTask tsk_2: missing no fleet row for review role "security"',
+    'Ticket Ship endpoint: missing goal, acceptance\nTicket tsk_2: missing no fleet row for review role "security"',
   );
 });
 
@@ -122,7 +122,7 @@ test('publishErrorMessage uses the 422 details from a real cookieMutation failur
     assert.ok(caught instanceof ApiError);
     assert.equal(caught.status, 422);
     assert.deepEqual(caught.details, { code: 'brief_incomplete', tasks: [{ task_id: 'tsk_9', missing: ['acceptance'] }] });
-    assert.equal(publishErrorMessage(caught, { tsk_9: 'Write docs' }), 'Task Write docs: missing acceptance');
+    assert.equal(publishErrorMessage(caught, { tsk_9: 'Write docs' }), 'Ticket Write docs: missing acceptance');
     // Non-brief errors keep the hub sentence.
     assert.equal(publishErrorMessage(new ApiError('nope', 409, 'conflict')), 'nope');
   } finally {
