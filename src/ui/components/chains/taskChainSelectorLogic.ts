@@ -44,7 +44,7 @@ export function prepareChainSelectorItems(
         coordinatorAgentInstanceId: ch.coordinatorAgentInstanceId,
         taskCount: ch.taskCount,
         completedTaskCount: ch.completedTaskCount,
-        updatedAt: ch.updatedAt,
+        updatedAt: latestUpdatedAt(ch.updatedAt, searchItem?.updatedAt),
         isCurrent: Boolean(currentChainId && id === currentChainId),
       });
     }
@@ -63,6 +63,7 @@ export function prepareChainSelectorItems(
         status: item.status || '',
         projectId: item.projectId || '',
         projectName: '',
+        updatedAt: item.updatedAt,
         isCurrent: Boolean(currentChainId && id === currentChainId),
       });
     } else {
@@ -138,21 +139,24 @@ export function selectionDirectionForEvent(event: SelectionKeyEvent): 'up' | 'do
   return null;
 }
 
-export function groupChainsByProject(
-  items: ChainSelectorItem[],
-): Map<string, { items: ChainSelectorItem[]; indices: number[] }> {
-  const groups = new Map<string, { items: ChainSelectorItem[]; indices: number[] }>();
+/** Newest available metadata wins; a missing/invalid preview must not lose cache recency. */
+function latestUpdatedAt(preview?: string, cached?: string): string | undefined {
+  const previewTime = updatedAtTime(preview);
+  const cachedTime = updatedAtTime(cached);
+  return cachedTime > previewTime ? cached : preview;
+}
 
-  items.forEach((item, index) => {
-    const key = item.projectName || 'Other';
-    let entry = groups.get(key);
-    if (!entry) {
-      entry = { items: [], indices: [] };
-      groups.set(key, entry);
-    }
-    entry.items.push(item);
-    entry.indices.push(index);
+function updatedAtTime(value?: string): number {
+  const parsed = value ? Date.parse(value) : NaN;
+  return Number.isFinite(parsed) ? parsed : -Infinity;
+}
+
+/** Sort displayed matches only: the remote search still returns bounded relevance-ranked hits. */
+export function sortChainSelectorItems(items: readonly ChainSelectorItem[]): ChainSelectorItem[] {
+  return [...items].sort((a, b) => {
+    const aTime = updatedAtTime(a.updatedAt);
+    const bTime = updatedAtTime(b.updatedAt);
+    if (aTime !== bTime) return aTime > bTime ? -1 : 1;
+    return a.chainId < b.chainId ? -1 : a.chainId > b.chainId ? 1 : 0;
   });
-
-  return groups;
 }

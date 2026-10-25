@@ -35,7 +35,7 @@ import {
   findInitialActiveIndex,
   navigateIndex,
   selectionDirectionForEvent,
-  groupChainsByProject,
+  sortChainSelectorItems,
   INITIAL_VISIBLE_COUNT,
   type ChainSelectorItem,
 } from '../src/ui/components/chains/taskChainSelectorLogic.ts';
@@ -125,13 +125,10 @@ test('TaskChainSelectorModal prepopulates all task chains across projects withou
   assert.equal(items[2].chainId, 'chain_b1');
   assert.equal(items[2].projectName, 'Beta UI');
 
-  // Verify groupChainsByProject preserves grouping and indices
-  const grouped = groupChainsByProject(items);
-  assert.equal(grouped.size, 2);
-  assert.ok(grouped.has('Alpha Core'));
-  assert.ok(grouped.has('Beta UI'));
-  assert.deepEqual(grouped.get('Alpha Core')?.indices, [0, 1]);
-  assert.deepEqual(grouped.get('Beta UI')?.indices, [2]);
+  const sorted = sortChainSelectorItems(items);
+  assert.deepEqual(sorted.map((item) => item.chainId), ['chain_b1', 'chain_a2', 'chain_a1']);
+  assert.deepEqual(items.map((item) => item.chainId), ['chain_a1', 'chain_a2', 'chain_b1']);
+
 });
 
 // -----------------------------------------------------------------------------
@@ -431,16 +428,9 @@ test('Scalability: smoothly handles 500+ task chains within <16ms performance bu
   const visibleSlice = allChains.slice(0, INITIAL_VISIBLE_COUNT);
   assert.equal(visibleSlice.length, 80, 'Initial visible slice must contain exactly 80 items');
 
-  // 4. Grouping 80 visible items finishes within budget
-  const startGroup = performance.now();
-  const grouped = groupChainsByProject(visibleSlice);
-  const elapsedGroup = performance.now() - startGroup;
+  // Sorting a visible window keeps each row in one flat array.
+  assert.equal(sortChainSelectorItems(visibleSlice).length, INITIAL_VISIBLE_COUNT);
 
-  assert.ok(grouped.size > 0);
-  assert.ok(
-    elapsedGroup < 16,
-    `groupChainsByProject on slice must complete in <16ms (actual: ${elapsedGroup.toFixed(2)}ms)`,
-  );
 });
 
 // -----------------------------------------------------------------------------

@@ -22,7 +22,7 @@ Keep the journal, marker and any pending pair together during backup/recovery. D
 
 ## Coherent snapshots and freshness
 
-Migration 125 adds a singleton durable global action revision. Action writes and instance bridge/ID membership changes update it in the same database transaction through triggers; runtime-status/last-seen updates do not. The hub also creates a random process epoch.
+Migration 126 adds a singleton durable global action revision. Action writes and instance bridge/ID membership changes update it in the same database transaction through triggers; runtime-status/last-seen updates do not. The hub also creates a random process epoch.
 
 The action-list handler authenticates first. A serialized, dedicated read connection reads revision and scoped rows in one SQLite read statement/transaction. A matching canonical validator bypasses the action rows and returns 304; any other validator receives a full snapshot. Read errors return errors, never empty successful lists. Heartbeats add one scalar revision read, with no action scan or schedule-related write. Numeric legacy versions remain additive compatibility fields.
 
@@ -60,4 +60,4 @@ It builds hub, bridge and CLI, and tests contracts, transport libraries, bridge,
 
 Required deployment order is hub migration/additive metadata first, then bridges. Inspect version inventory and operation state, action GET rate, DB busy/transaction metrics and revision/write budgets before and after. No live load test or deployment is part of this change.
 
-For rollback, retain migration 125 and its triggers and all local receipt schemas. Use a bounded-retry-capable binary; an older unbounded scheduler/readiness relay must be stopped rather than reintroducing the incident loop. Restart the hub after database restore so a new epoch invalidates old validators. Unknown newer receipt versions park safely.
+For rollback, retain migration 126 and its triggers and all local receipt schemas. Use a bounded-retry-capable binary; an older unbounded scheduler/readiness relay must be stopped rather than reintroducing the incident loop. Restart the hub after database restore so a new epoch invalidates old validators. Unknown newer receipt versions park safely.

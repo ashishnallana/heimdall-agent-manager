@@ -52,7 +52,7 @@ without subscription/run fencing are rejected. There is no safe-data forwarding
 fallback. An old bridge may continue attempting its legacy POST until upgraded;
 the new hub never writes those payloads.
 
-Migration 124 drops the event table and its indexes, and clears old event-fed
+Migration 125 drops the event table and its indexes, and clears old event-fed
 provider/transcript/extension metadata from instances. It does not archive events
 or run VACUUM. Cleared session metadata can be rebuilt locally by providers.
 
@@ -81,5 +81,5 @@ makes that fixture observe 100 saves, demonstrating the regression.
 Stream fixtures cover explicit member authorization, zero-demand
 rejection, sharing, expiry/lost detach, reconnect/run fences, in-flight controls,
 bounded queues and legacy rejection. The SQLite upgrade fixture seeds an old
-event, applies migration 124 and verifies the table and indexes are gone.
+event, applies migration 125 and verifies the table and indexes are gone.
 These are local tests, not production traffic or load measurements.
