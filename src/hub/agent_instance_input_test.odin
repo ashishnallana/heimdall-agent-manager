@@ -24,24 +24,18 @@ test_agent_instance_input_route_registered_and_dispatches :: proc(t: ^testing.T)
 	_ = os.remove(db_path)
 	defer _ = os.remove(db_path)
 
-	cidrs := [?]string{"127.0.0.1/32"}
 	graph: app.App_Graph
 	ok, msg := app.build_graph(&graph, app.Hub_Config{
 		database_path = db_path,
 		migrations_dir = "src/hub/repository/sqlite/migrations",
-		username_header = "X-authentik-username",
-		display_name_header = "X-authentik-name",
-		email_header = "X-authentik-email",
-		trusted_proxy_cidrs = cidrs[:],
 		auto_provision_users = true,
-		logout_url = "/_dev/logout",
 		paddle_environment = "sandbox",
 	})
 	testing.expect(t, ok, msg)
 	defer app.shutdown_graph(&graph)
 
-	alice := [?]contracts.HTTP_Header{{name = "X-authentik-username", value = "alice"}}
-	bob := [?]contracts.HTTP_Header{{name = "X-authentik-username", value = "bob"}}
+	alice := hub_test_user_headers(&graph, "alice")
+	bob := hub_test_user_headers(&graph, "bob")
 
 	bridge_id, bridge_token, enroll_ok := device_enroll_test_bridge(&graph, alice[:], "Alice Bridge")
 	testing.expect(t, enroll_ok, "device-flow bridge provisioning failed")
@@ -181,24 +175,18 @@ test_agent_instance_resize_route_registered_and_dispatches :: proc(t: ^testing.T
 	_ = os.remove(db_path)
 	defer _ = os.remove(db_path)
 
-	cidrs := [?]string{"127.0.0.1/32"}
 	graph: app.App_Graph
 	ok, msg := app.build_graph(&graph, app.Hub_Config{
 		database_path = db_path,
 		migrations_dir = "src/hub/repository/sqlite/migrations",
-		username_header = "X-authentik-username",
-		display_name_header = "X-authentik-name",
-		email_header = "X-authentik-email",
-		trusted_proxy_cidrs = cidrs[:],
 		auto_provision_users = true,
-		logout_url = "/_dev/logout",
 		paddle_environment = "sandbox",
 	})
 	testing.expect(t, ok, msg)
 	defer app.shutdown_graph(&graph)
 
-	alice := [?]contracts.HTTP_Header{{name = "X-authentik-username", value = "alice"}}
-	bob := [?]contracts.HTTP_Header{{name = "X-authentik-username", value = "bob"}}
+	alice := hub_test_user_headers(&graph, "alice")
+	bob := hub_test_user_headers(&graph, "bob")
 
 	bridge_id, bridge_token, enroll_ok := device_enroll_test_bridge(&graph, alice[:], "Alice Bridge")
 	testing.expect(t, enroll_ok, "device-flow bridge provisioning failed")

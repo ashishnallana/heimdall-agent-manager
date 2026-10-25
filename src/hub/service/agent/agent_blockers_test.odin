@@ -53,7 +53,7 @@ blk_service :: proc(store: ^Blk_Store, repo: ^iface.Agent_Repository, clock: ^pl
 
 @(private = "file")
 blk_user :: proc(user := "owner") -> contracts.Auth_Context {
-	return contracts.Auth_Context{kind = .User_Token, user_id = user}
+	return contracts.Auth_Context{kind = .Session, user_id = user}
 }
 
 @(private = "file")

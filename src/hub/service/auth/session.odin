@@ -108,7 +108,11 @@ web_login_enabled :: proc(service: ^Auth_Service) -> bool {
 }
 
 now_unix_ms :: proc(service: ^Auth_Service) -> (i64, bool) {
-	if service == nil || service.clock == nil do return 0, false
+	if service == nil do return 0, false
+	if service.clock == nil {
+		clock := platform.real_clock()
+		return platform.rfc3339_to_unix_ms(platform.clock_now(&clock))
+	}
 	return platform.rfc3339_to_unix_ms(platform.clock_now(service.clock))
 }
 
@@ -322,7 +326,7 @@ oidc_exchange_code :: proc(service: ^Auth_Service, form, basic: string) -> (stri
 	defer oidc_outbound_release(state)
 	url := service.web.token_url
 	if service.web.exchange != nil do return service.web.exchange(service.web.exchange_ctx, url, form, basic)
-	if !strings.has_prefix(url, "https://") do return "", false
+	if !oidc_endpoint_allowed(url, service.oidc.allow_insecure_localhost) do return "", false
 	headers := make([dynamic]http_client.Header, context.temp_allocator)
 	append(&headers, http_client.Header{"Content-Type", "application/x-www-form-urlencoded"})
 	append(&headers, http_client.Header{"Accept", "application/json"})
@@ -468,8 +472,10 @@ web_logout :: proc(service: ^Auth_Service, headers: []contracts.HTTP_Header) -> 
 	if web_login_enabled(service) {
 		if raw, present := cookie_value(headers, SESSION_COOKIE); present {
 			repo := service.sessions
-			row, found, _ := repo.delete_session(repo.ctx, sha256_hex(raw))
+			hash := sha256_hex(raw)
+			row, found, _ := repo.delete_session(repo.ctx, hash)
 			if found do id_token = row.id_token
+			preview_end_for_parent(service, hash)
 		}
 	}
 	if service != nil && service.web.end_session_url != "" {
@@ -485,7 +491,6 @@ web_logout :: proc(service: ^Auth_Service, headers: []contracts.HTTP_Header) -> 
 		}
 		return strings.to_string(b)
 	}
-	if service != nil && service.config.logout_url != "" && !web_login_enabled(service) do return service.config.logout_url
 	return "/"
 }
 

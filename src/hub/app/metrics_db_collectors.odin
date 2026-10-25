@@ -3,6 +3,7 @@ package app
 import "core:c"
 import "core:fmt"
 import "core:sync"
+import "core:strconv"
 import "core:time"
 import dbt "odin_test:hub/platform/dbtelemetry"
 import sqlite "odin_test:hub/repository/sqlite"
@@ -24,10 +25,10 @@ import metrics "odin_test:lib/metrics"
 //     string and the snapshot is a fixed-size struct. The collector runs on the
 //     metrics thread, which never resets a temp arena.
 //   - users_active counts DISTINCT owners seen in the window via either a
-//     bridge heartbeat (bridges.last_seen_at) or a user API token use
-//     (user_api_tokens.last_used_at); `users` has no last-seen column of its
-//     own. Timestamps are the hub's fixed-width RFC3339 UTC form, so a string
-//     compare against a formatted cutoff is a correct ordering.
+//     bridge heartbeat (bridges.last_seen_at, fixed-width RFC3339 UTC, compared
+//     as strings) or browser-session activity (user_sessions.last_seen_at_ms,
+//     Unix ms, touched at most once a minute); `users` has no last-seen column
+//     of its own.
 
 DB_COLLECTORS_CACHE_TTL :: 60 * time.Second
 
@@ -147,10 +148,13 @@ db_collectors_query :: proc(conn: ^sqlite.Conn, out: ^Db_Collector_Snapshot, now
 
 	for window, i in ACTIVE_WINDOW_SECONDS {
 		cutoff_buf: [32]u8
-		cutoff := format_rfc3339_into(cutoff_buf[:], time.time_add(now, time.Duration(-window) * time.Second))
+		cutoff_at := time.time_add(now, time.Duration(-window) * time.Second)
+		cutoff := format_rfc3339_into(cutoff_buf[:], cutoff_at)
+		cutoff_ms_buf: [24]u8
+		cutoff_ms := strconv.write_int(cutoff_ms_buf[:], time.to_unix_nanoseconds(cutoff_at) / 1_000_000, 10)
 		active, active_ok := db_scalar_i64(conn,
-			"SELECT COUNT(*) FROM (SELECT owner_user_id FROM bridges WHERE last_seen_at >= ?1 UNION SELECT owner_user_id FROM user_api_tokens WHERE last_used_at >= ?1);",
-			cutoff)
+			"SELECT COUNT(*) FROM (SELECT owner_user_id FROM bridges WHERE last_seen_at >= ?1 UNION SELECT user_id FROM user_sessions WHERE last_seen_at_ms >= CAST(?2 AS INTEGER));",
+			cutoff, cutoff_ms)
 		if !active_ok do return false
 		snap.users_active[i] = active
 	}

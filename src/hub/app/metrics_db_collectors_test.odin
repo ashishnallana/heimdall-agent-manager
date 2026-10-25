@@ -25,12 +25,12 @@ dbc_fixture :: proc(t: ^testing.T, suffix: string) -> (sqlite.Conn, string) {
 		INSERT INTO users VALUES ('alice', 'alice', 'Alice', 'a@example.com', 'active', '2026-10-01T10:00:00Z', '2026-10-01T10:00:00Z');
 		INSERT INTO users VALUES ('bob',   'bob',   'Bob',   '',              'active', '2026-10-01T10:00:00Z', '2026-10-01T10:00:00Z');
 		INSERT INTO users VALUES ('carol', 'carol', 'Carol', '',              'active', '2026-10-01T10:00:00Z', '2026-10-01T10:00:00Z');
-		-- alice: bridge seen 2h ago (1d/7d/30d); bob: bridge seen 3 days ago (7d/30d); carol: token used 20 days ago (30d).
+		-- alice: bridge seen 2h ago (1d/7d/30d); bob: bridge seen 3 days ago (7d/30d); carol: browser session seen 20 days ago (30d).
 		INSERT INTO bridges (bridge_id, owner_user_id, status, created_at, updated_at, last_seen_at) VALUES ('br-a', 'alice', 'online',  '2026-09-01T00:00:00Z', '2026-10-10T10:00:00Z', '2026-10-10T10:00:00Z');
 		INSERT INTO bridges (bridge_id, owner_user_id, status, created_at, updated_at, last_seen_at) VALUES ('br-b', 'bob',   'offline', '2026-09-01T00:00:00Z', '2026-10-07T12:00:00Z', '2026-10-07T12:00:00Z');
 		INSERT INTO bridges (bridge_id, owner_user_id, status, created_at, updated_at, last_seen_at, revoked_at) VALUES ('br-c', 'bob', 'revoked', '2026-09-01T00:00:00Z', '2026-09-02T00:00:00Z', '2026-09-01T12:00:00Z', '2026-09-02T00:00:00Z');
 		INSERT INTO bridges (bridge_id, owner_user_id, status, created_at, updated_at, last_seen_at) VALUES ('br-d', 'alice', 'weird',   '2026-09-01T00:00:00Z', '2026-09-01T00:00:00Z', '');
-		INSERT INTO user_api_tokens (token_id, owner_user_id, token_hash, created_at, updated_at, last_used_at) VALUES ('tok-c', 'carol', 'sha1:c', '2026-09-01T00:00:00Z', '2026-09-20T12:00:00Z', '2026-09-20T12:00:00Z');
+		INSERT INTO user_sessions (session_id_hash, user_id, created_at_ms, last_seen_at_ms, expires_at_ms, idle_expires_at_ms) VALUES ('sess-c', 'carol', 1789560000000, 1789905600000, 1789992000000, 1789992000000);
 		-- users_billing_defaults trigger already inserted a free/free row per user.
 		UPDATE account_billing SET plan_id = 'hobbyist', status = 'active' WHERE user_id = 'alice';
 		INSERT INTO billing_plans (plan_id, plan_label, price_id, max_bridges, terminal_streaming_enabled) VALUES ('bespoke', 'Custom', NULL, 9, 1);
@@ -50,7 +50,7 @@ test_db_collectors_query_snapshot :: proc(t: ^testing.T) {
 	testing.expect_value(t, snap.users, i64(3))
 	testing.expect_value(t, snap.users_active[0], i64(1)) // 1d: alice
 	testing.expect_value(t, snap.users_active[1], i64(2)) // 7d: alice, bob
-	testing.expect_value(t, snap.users_active[2], i64(3)) // 30d: + carol via token
+	testing.expect_value(t, snap.users_active[2], i64(3)) // 30d: + carol via browser session
 	testing.expect_value(t, snap.bridges[.Online], i64(1))
 	testing.expect_value(t, snap.bridges[.Offline], i64(1))
 	testing.expect_value(t, snap.bridges[.Revoked], i64(1))

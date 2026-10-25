@@ -172,7 +172,7 @@ deliver_title_nudge :: proc(s: ^Content_Service, inst: domain.Agent_Instance, ch
 	if s == nil || s.bridge_command_sink.send_runtime_command == nil do return false
 	if inst.bridge_id == "" || inst.agent_instance_id == "" do return false
 	conversation_id := ""
-	if c, ok, _ := get_conversation_by_instance(s, contracts.Auth_Context{kind = .User_Token, user_id = string(inst.owner_user_id)}, inst.agent_instance_id); ok do conversation_id = c.conversation_id
+	if c, ok, _ := get_conversation_by_instance(s, contracts.Auth_Context{kind = .Internal_User, user_id = string(inst.owner_user_id)}, inst.agent_instance_id); ok do conversation_id = c.conversation_id
 	command_id := platform.generate_id(s.ids, "cmd_")
 	b := strings.builder_make()
 	defer strings.builder_destroy(&b)

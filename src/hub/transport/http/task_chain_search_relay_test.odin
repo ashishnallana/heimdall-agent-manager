@@ -50,16 +50,13 @@ Search_Relay_Fixture :: struct {
 	bridges: bridge_service.Bridge_Service,
 	users: user_service.User_Service,
 	auth: auth_service.Auth_Service,
+	user_headers: []contracts.HTTP_Header, // session cookie for the fixture owner
 	registry: project.Bridge_Runtime_Registry,
 	h: Bridge_Handlers,
 	owner, bridge_id: string,
 	generation: int,
 }
 
-@(private = "file")
-SEARCH_HEADERS := [1]contracts.HTTP_Header{{name = "X-authentik-username", value = "search_fixture_owner"}}
-@(private = "file")
-SEARCH_CIDRS := [1]string{"127.0.0.1/32"}
 
 @(private = "file")
 search_relay_fixture :: proc(t: ^testing.T) -> ^Search_Relay_Fixture {
@@ -75,9 +72,10 @@ search_relay_fixture :: proc(t: ^testing.T) -> ^Search_Relay_Fixture {
 	f.ids = http_test_id_generator()
 	f.bridges = bridge_service.new_bridge_service(&f.br_repo, &f.clock, &f.ids)
 	f.users = user_service.new_user_service_basic(&f.us_repo, &f.clock, &f.ids)
-	f.auth = auth_service.new_auth_service({username_header = "X-authentik-username", trusted_proxy_cidrs = SEARCH_CIDRS[:], auto_provision_users = true}, &f.users)
+	f.auth = auth_service.new_auth_service(auth_service.Auth_Config{auto_provision_users = true}, &f.users)
 	f.auth.clock, f.auth.ids, f.auth.bridges = &f.clock, &f.ids, &f.bridges
-	owner, authenticated, _ := auth_service.resolve_auth_any(&f.auth, {remote_addr = "127.0.0.1:4444", headers = SEARCH_HEADERS[:]})
+	f.user_headers = http_test_login(t, &f.auth, "search_fixture_owner")
+	owner, authenticated, _ := auth_service.resolve_auth_any(&f.auth, {remote_addr = "127.0.0.1:4444", headers = f.user_headers})
 	if !authenticated do testing.fail_now(t, "fixture owner authentication")
 	f.owner = strings.clone(owner.user_id)
 	enrolled, enrolled_ok, _ := bridge_service.enroll_bridge_from_device_grant(&f.bridges, {owner_user_id = f.owner, bridge_public_key = "04aabb", bridge_key_fingerprint = "fixture", machine_hostname = "search-fixture"})
@@ -106,8 +104,8 @@ search_relay_body :: proc(bridge_id, request_id, envelope: string, expires: i64)
 }
 
 @(private = "file")
-search_relay_request :: proc(body: string) -> Request {
-	return {method = "POST", path = "/api/v1/task-chains/search/relay", request_id = "http_correlation", remote_addr = "127.0.0.1:4444", headers = SEARCH_HEADERS[:], body = body}
+search_relay_request :: proc(f: ^Search_Relay_Fixture, body: string) -> Request {
+	return {method = "POST", path = "/api/v1/task-chains/search/relay", request_id = "http_correlation", remote_addr = "127.0.0.1:4444", headers = f.user_headers, body = body}
 }
 
 @(private = "file")
@@ -173,7 +171,7 @@ task_chain_search_relay_handler_v2_encrypted_roundtrip :: proc(t: ^testing.T) {
 	testing.expect(t, sealed, "fixture v2 seal")
 	job := Search_Relay_Peer{f = f, socket = peer, expected_envelope = envelope, expires = expires, key = key}
 	worker := thread.create_and_start_with_data(&job, search_relay_peer)
-	response := task_chain_search_relay_handler(&f.h, search_relay_request(search_relay_body(f.bridge_id, "req_fixture", envelope, expires)))
+	response := task_chain_search_relay_handler(&f.h, search_relay_request(f, search_relay_body(f.bridge_id, "req_fixture", envelope, expires)))
 	defer delete(response.body)
 	thread.join(worker); thread.destroy(worker)
 	defer delete(job.response_envelope, runtime.default_allocator())
@@ -201,17 +199,17 @@ task_chain_search_relay_handler_rejects_malformed_and_unauthorized :: proc(t: ^t
 	// invalid alphabet/padding/trailing bits and the envelope byte cap.
 	bad_envelopes := []string{"", "search:v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==", "search:v3:e4:AAAA", "search:v2:e0:AAAA", "search:v2:e04:AAAA", "search:v2:e4294967296:AAAA", "search:v2:e-1:AAAA", "search:v2:e4:", "search:v2:e4:AA==", "search:v2:e4:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "search:v2:e4:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB==", "search:v2:e4:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA-A==", "search:v2:e4:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA===", "search:v2:e4:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==:extra", strings.repeat("A", 32_769, context.temp_allocator)}
 	for envelope in bad_envelopes {
-		r := task_chain_search_relay_handler(&f.h, search_relay_request(search_relay_body(f.bridge_id, "req_fixture", envelope, expires)))
+		r := task_chain_search_relay_handler(&f.h, search_relay_request(f, search_relay_body(f.bridge_id, "req_fixture", envelope, expires)))
 		testing.expect_value(t, r.status, 400); delete(r.body)
 	}
 	for body in ([]string{"", "{}", "null", "[]", `{"bridge_id":4}`, `{"request_id":true}`, `{"expires_at_ms":"1"}`, fmt.tprintf("%strailing", search_relay_body(f.bridge_id, "req_fixture", valid, expires)), strings.repeat(" ", 36_001, context.temp_allocator)}) {
-		r := task_chain_search_relay_handler(&f.h, search_relay_request(body))
+		r := task_chain_search_relay_handler(&f.h, search_relay_request(f, body))
 		testing.expect_value(t, r.status, 400); delete(r.body)
 	}
 	good_body := search_relay_body(f.bridge_id, "req_fixture", valid, expires)
 	for replacement in ([]string{fmt.tprintf(`"expires_at_ms":%d.5`, expires), fmt.tprintf(`"expires_at_ms":"%d"`, expires), `"expires_at_ms":null`}) {
 		bad_body, _ := strings.replace_all(good_body, fmt.tprintf(`"expires_at_ms":%d`, expires), replacement, context.temp_allocator)
-		r := task_chain_search_relay_handler(&f.h, search_relay_request(bad_body))
+		r := task_chain_search_relay_handler(&f.h, search_relay_request(f, bad_body))
 		testing.expect_value(t, r.status, 400); delete(r.body)
 	}
 	for body in ([]string{
@@ -221,31 +219,28 @@ task_chain_search_relay_handler_rejects_malformed_and_unauthorized :: proc(t: ^t
 		fmt.tprintf("%s%c", good_body, byte(0xff)),
 		search_relay_body(f.bridge_id, "req_fixture", fmt.tprintf("search:v2:e4:%s", strings.repeat("A", 32_760, context.temp_allocator)), expires),
 	}) {
-		r := task_chain_search_relay_handler(&f.h, search_relay_request(body))
+		r := task_chain_search_relay_handler(&f.h, search_relay_request(f, body))
 		testing.expect_value(t, r.status, 400); delete(r.body)
 	}
 	for id in ([]string{"", "bad|aad", strings.repeat("r", 129, context.temp_allocator)}) {
-		r := task_chain_search_relay_handler(&f.h, search_relay_request(search_relay_body(f.bridge_id, id, valid, expires)))
+		r := task_chain_search_relay_handler(&f.h, search_relay_request(f, search_relay_body(f.bridge_id, id, valid, expires)))
 		testing.expect_value(t, r.status, 400); delete(r.body)
 	}
 	for deadline in ([]i64{0, expires - 10_000, expires + 10_000}) {
-		r := task_chain_search_relay_handler(&f.h, search_relay_request(search_relay_body(f.bridge_id, "req_fixture", valid, deadline)))
+		r := task_chain_search_relay_handler(&f.h, search_relay_request(f, search_relay_body(f.bridge_id, "req_fixture", valid, deadline)))
 		testing.expect_value(t, r.status, 400); delete(r.body)
 	}
-	req := search_relay_request(search_relay_body(f.bridge_id, "req_fixture", valid, expires))
+	req := search_relay_request(f, search_relay_body(f.bridge_id, "req_fixture", valid, expires))
 	req.headers = nil
 	r := task_chain_search_relay_handler(&f.h, req)
 	testing.expect_value(t, r.status, 401); delete(r.body)
-	req.headers = SEARCH_HEADERS[:]
-	req.remote_addr = "192.0.2.1:4444"
+	req.headers = []contracts.HTTP_Header{{"Cookie", "__Host-heimdall_session=forged-session-id-forged-session-id"}}
 	r = task_chain_search_relay_handler(&f.h, req)
-	testing.expect_value(t, r.status, 401); delete(r.body) // spoofed proxy header
-	req.remote_addr = "127.0.0.1:4444"
-	other_headers := [1]contracts.HTTP_Header{{name = "X-authentik-username", value = "search_other_owner"}}
-	req.headers = other_headers[:]
+	testing.expect_value(t, r.status, 401); delete(r.body) // unknown session
+	req.headers = http_test_login(t, &f.auth, "search_other_owner")
 	r = task_chain_search_relay_handler(&f.h, req)
 	testing.expect_value(t, r.status, 404); delete(r.body) // owner anti-enumeration
-	req.headers = SEARCH_HEADERS[:]
+	req.headers = f.user_headers
 	project.bridge_runtime_registry_mark_offline(&f.registry, f.bridge_id, f.generation)
 	r = task_chain_search_relay_handler(&f.h, req)
 	testing.expect_value(t, r.status, status_for_error(.Bridge_Offline)); delete(r.body)

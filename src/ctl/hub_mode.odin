@@ -16,6 +16,7 @@ ctl_hub_user_mode :: proc(cmd: []string, args: []string) {
 	if action == "help" { print_hub_help(cmd[idx:]); return }
 	hub_url := hub_user_mode_url(args)
 	user_token := hub_user_mode_token(args)
+	if ctl_user_token_removed(user_token) do return
 	if hub_url == "" || user_token == "" { fmt.println(`{"ok":false,"message":"hub mode requires --hub-url and --user-token (or HAM_HUB_URL/HEIMDALL_HUB_URL and HAM_HUB_USER_TOKEN/HEIMDALL_USER_TOKEN)"}`); return }
 	base := strings.trim_right(hub_url, "/")
 	if resource == "me" { ctl_hub_request(base, user_token, "GET", "/api/v1/me", ""); return }

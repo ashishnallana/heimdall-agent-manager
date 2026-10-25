@@ -260,7 +260,7 @@ main :: proc() {
     sequence := 0
     generator := platform.ID_Generator{ctx=&sequence,generate=next_id}
     svc := content.Content_Service{content=&content_repo,clock=&clock,ids=&generator}
-    auth := contracts.Auth_Context{kind=.User_Token,user_id=OWNER}
+    auth := contracts.Auth_Context{kind = .Session,user_id=OWNER}
     before=snapshot(reg)
     for iteration in 0..<21 {
         _,receipts,saved,e := content.mark_read_with_receipts(&svc,auth,"chat_1");check(e);require(saved)

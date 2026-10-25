@@ -32,7 +32,7 @@ test_publish_rejects_review_role_without_fleet_row :: proc(t: ^testing.T) {
 	clock := platform.real_clock()
 	ids := platform.real_id_generator()
 	svc := new_taskchain_service(&tc_repo, &ag_repo, &clock, &ids)
-	auth := contracts.Auth_Context{kind = .User_Token, user_id = "user_pub"}
+	auth := contracts.Auth_Context{kind = .Session, user_id = "user_pub"}
 
 	chain, cok, _ := create_chain(&svc, auth, Create_Chain_Input{title = "publish validation"})
 	if !testing.expect(t, cok, "chain created") do return
@@ -97,7 +97,7 @@ test_fleet_custom_review_roles_and_reviewers_keep_brief_roles :: proc(t: ^testin
 	clock := platform.real_clock()
 	ids := platform.real_id_generator()
 	svc := new_taskchain_service(&tc_repo, &ag_repo, &clock, &ids)
-	auth := contracts.Auth_Context{kind = .User_Token, user_id = "user_roles"}
+	auth := contracts.Auth_Context{kind = .Session, user_id = "user_roles"}
 	now := platform.clock_now(&clock)
 	for id in ([]string{"agt_rev", "agt_sec"}) {
 		_, sok, _ := iface.agent_save(&ag_repo, domain.Agent{agent_id = id, owner_user_id = "user_roles", name = id, slug = id, created_at = now, updated_at = now})

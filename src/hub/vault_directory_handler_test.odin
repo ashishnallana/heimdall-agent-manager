@@ -38,17 +38,10 @@ vt_db_path :: proc(tag: string) -> string {
 @(private = "file")
 vt_graph :: proc(t: ^testing.T, graph: ^app.App_Graph, db_path: string, now: ^string = nil) -> bool {
 	// The config keeps the slice: it must outlive this proc.
-	cidrs := new([1]string)
-	cidrs[0] = "127.0.0.1/32"
 	_ = os.remove(db_path)
 	ok, msg := app.build_graph(graph, app.Hub_Config{
 		database_path        = db_path,
-		username_header      = "X-authentik-username",
-		display_name_header  = "X-authentik-name",
-		email_header         = "X-authentik-email",
-		trusted_proxy_cidrs  = cidrs[:],
 		auto_provision_users = true,
-		logout_url           = "/_dev/logout",
 		paddle_environment   = "sandbox",
 	})
 	testing.expect(t, ok, msg)
@@ -69,7 +62,8 @@ test_vault_directory_http_flow :: proc(t: ^testing.T) {
 	defer for suffix in ([]string{"", "-wal", "-shm"}) do _ = os.remove(strings.concatenate({db_path, suffix}))
 	if !vt_graph(t, &graph, db_path) do return
 	defer app.shutdown_graph(&graph)
-	alice := []contracts.HTTP_Header{{name = "X-authentik-username", value = "alice"}}
+	alice_arr := hub_test_user_headers(&graph, "alice")
+	alice := alice_arr[:]
 
 	// No directory yet: 404 {configured:false}; a bridge cannot enroll.
 	none := dispatch(&graph, "GET", "/api/v1/vault/directory", "", alice)
@@ -105,7 +99,8 @@ test_vault_directory_http_flow :: proc(t: ^testing.T) {
 	as_grant := dispatch(&graph, "POST", "/api/v1/device/approve", strings.concatenate({`{"pair_lookup":"`, code, `","approve":true}`}), alice)
 	testing.expect_value(t, as_grant.status, 404)
 	// Another account cannot resolve alice's lookup.
-	bob := []contracts.HTTP_Header{{name = "X-authentik-username", value = "bob"}}
+	bob_arr := hub_test_user_headers(&graph, "bob")
+	bob := bob_arr[:]
 	bob_ver := dispatch(&graph, "POST", "/api/v1/device/verify", strings.concatenate({`{"pair_lookup":"`, code, `"}`}), bob)
 	testing.expect_value(t, bob_ver.status, 404)
 	// Pairing stretch: the approver fetches the public pair_salt first; only the
@@ -214,24 +209,16 @@ test_vault_directory_reset_and_session_kinds :: proc(t: ^testing.T) {
 	now := VT_NOW
 	if !vt_graph(t, &graph, db_path, &now) do return
 	defer app.shutdown_graph(&graph)
-	alice := []contracts.HTTP_Header{{name = "X-authentik-username", value = "alice"}}
+	alice_arr := hub_test_user_headers(&graph, "alice")
+	alice := alice_arr[:]
 	user_id := vt_user_id(&graph, alice)
 	root := vt_make_dev(VT_ROOT_SEED)
 
-	// A user API token (ham-ctl / script credential) may neither genesis nor register
-	// nor reset.
-	tok := dispatch(&graph, "POST", "/api/v1/me/tokens", `{"label":"ctl"}`, alice)
-	testing.expect_value(t, tok.status, 201)
-	bearer := []contracts.HTTP_Header{{name = "Authorization", value = strings.concatenate({"Bearer ", device_test_json_string(tok.body, "plaintext")})}}
-	testing.expect_value(t, dispatch(&graph, "POST", "/api/v1/vault/directory/genesis", vt_genesis_body(user_id, &root), bearer).status, 403)
-	b := vt_make_dev(2)
-	reg_st := vt_statement("register", user_id, &b, &b, "", "")
-	reg_body := strings.concatenate({`{"statement":"`, vt_escape(reg_st), `","proof_signature":`, vt_sign(&b, reg_st), "}"})
-	testing.expect_value(t, dispatch(&graph, "POST", "/api/v1/vault/devices/register", reg_body, bearer).status, 403)
-
+	// (The former "a Hub user token may not genesis/register/reset" checks were
+	// removed with user tokens; interactive-vs-bearer gating is covered by the
+	// transport tests.)
 	_, _, vok := vt_ensure_vault(&graph, alice)
 	testing.expect(t, vok)
-	testing.expect_value(t, dispatch(&graph, "POST", "/api/v1/vault/directory/reset", "{}", bearer).status, 403)
 
 	// Schedule: 201, then idempotent 200 with the same due time.
 	sched := dispatch(&graph, "POST", "/api/v1/vault/directory/reset", "{}", alice)
@@ -257,9 +244,12 @@ test_vault_directory_reset_and_session_kinds :: proc(t: ^testing.T) {
 	testing.expect(t, before_found)
 	testing.expect_value(t, dispatch(&graph, "POST", "/api/v1/vault/directory/reset", "{}", alice).status, 201)
 	now = "2026-10-22T09:59:59Z"
+	// The 72 h delay outlives the 24 h idle session window: sign in again.
+	alice_arr = hub_test_user_headers(&graph, "alice")
 	testing.expect_value(t, app.reaper_sweep_vault_resets(&graph), 0)
 	testing.expect_value(t, dispatch(&graph, "GET", "/api/v1/vault/directory", "", alice).status, 200)
 	now = "2026-10-22T10:00:00Z"
+	alice_arr = hub_test_user_headers(&graph, "alice")
 	testing.expect_value(t, app.reaper_sweep_vault_resets(&graph), 1)
 	testing.expect_value(t, dispatch(&graph, "GET", "/api/v1/vault/directory", "", alice).status, 404)
 	_ = bridge_token

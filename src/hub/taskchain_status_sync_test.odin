@@ -15,16 +15,10 @@ import hub_http "odin_test:hub/transport/http"
 open_sync_test_graph :: proc(t: ^testing.T, graph: ^app.App_Graph, tag: string) -> string {
 	db_path := fmt.tprintf("/tmp/heimdall-hub-test-sync-%s-%d.db", tag, os.get_pid())
 	_ = os.remove(db_path)
-	cidrs := [?]string{"127.0.0.1/32"}
 	ok, msg := app.build_graph(graph, app.Hub_Config{
 		database_path        = db_path,
 		migrations_dir       = "src/hub/repository/sqlite/migrations",
-		username_header      = "X-authentik-username",
-		display_name_header  = "X-authentik-name",
-		email_header         = "X-authentik-email",
-		trusted_proxy_cidrs  = cidrs[:],
 		auto_provision_users = true,
-		logout_url           = "/_dev/logout",
 		paddle_environment   = "sandbox",
 	})
 	testing.expect(t, ok, msg)
@@ -99,7 +93,7 @@ test_chain_status_sync_create_task_requires_explicit_reopen :: proc(t: ^testing.
 	chain := create_sync_test_chain(&graph, owner, chain_id, .Completed)
 	testing.expect_value(t, chain.status, domain.Task_Chain_Status.Completed)
 
-	auth := contracts.Auth_Context{kind = .User_Token, user_id = owner}
+	auth := contracts.Auth_Context{kind = .Session, user_id = owner}
 	_, created, _ := taskchain_service.create_task(&graph.taskchains, auth, taskchain_service.Create_Task_Input{
 		chain_id = chain_id,
 		title = "New Reactivating Task",
@@ -263,7 +257,7 @@ test_chain_status_sync_publishes_websocket_resource_changed :: proc(t: ^testing.
 
     testing.expect_value(t, graph.event_bus.event_seq, seq_before)
     current, _, _ := iface.taskchain_get_chain(graph.taskchains.repo, chain_id)
-    accepted, complete, err := taskchain_service.complete_chain(&graph.taskchains, contracts.Auth_Context{kind = .User_Token, user_id = owner}, chain_id, current.work_revision, "All included work accepted")
+    accepted, complete, err := taskchain_service.complete_chain(&graph.taskchains, contracts.Auth_Context{kind = .Session, user_id = owner}, chain_id, current.work_revision, "All included work accepted")
     testing.expect(t, complete, err.message)
     testing.expect_value(t, accepted.status, domain.Task_Chain_Status.Completed)
     testing.expect(t, graph.event_bus.event_seq > seq_before, "explicit acceptance publishes a chain update")

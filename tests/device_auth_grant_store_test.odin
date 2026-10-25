@@ -125,11 +125,12 @@ main :: proc() {
 	svc := device_auth.new_device_auth_service(&store, fake_clock(), TRUSTED)
 
 	// AC3 + AC1: authorize captures request_ip and returns the full contract.
-	res, ok, err := device_auth.authorize(&svc, {client = "electron"}, "127.0.0.1:5555", "203.0.113.42")
+	res, ok, err := device_auth.authorize(&svc, bridge_input("electron"), "127.0.0.1:5555", "203.0.113.42")
 	assert_true(ok, "authorize succeeds (trusted peer)")
 	assert_eq(err.code, domain.Error_Code.None, "no error on success")
 	assert_true(len(res.device_code) == 64, "authorize returns 64-char device_code")
-	assert_true(len(res.user_code) == 9, "authorize returns 9-char user_code")
+	// Bridge grants are indexed by the bridge-derived pair_lookup; no user_code is echoed.
+	assert_eq(res.user_code, "", "bridge authorize echoes no user_code (pair_lookup indexes the grant)")
 	assert_eq(res.verification_uri, "https://auth.example.com/device/", "verification_uri returned")
 	assert_eq(res.interval, 5, "interval returned")
 	assert_true(res.expires_in <= 600, "expires_in <= 600 (ELDA-1 cap)")
@@ -145,25 +146,25 @@ main :: proc() {
 	assert_eq(verr.code, domain.Error_Code.Validation_Failed, "missing client -> Validation_Failed (400)")
 
 	// AC5: per-IP rate limit. We already used 1 of 3 for IP 203.0.113.42.
-	_, r2, _ := device_auth.authorize(&svc, {client = "electron"}, "127.0.0.1:1", "203.0.113.42")
-	_, r3, _ := device_auth.authorize(&svc, {client = "electron"}, "127.0.0.1:1", "203.0.113.42")
-	_, r4, r4err := device_auth.authorize(&svc, {client = "electron"}, "127.0.0.1:1", "203.0.113.42")
+	_, r2, _ := device_auth.authorize(&svc, bridge_input("electron"), "127.0.0.1:1", "203.0.113.42")
+	_, r3, _ := device_auth.authorize(&svc, bridge_input("electron"), "127.0.0.1:1", "203.0.113.42")
+	_, r4, r4err := device_auth.authorize(&svc, bridge_input("electron"), "127.0.0.1:1", "203.0.113.42")
 	assert_true(r2 && r3, "rate limit allows up to N")
 	assert_true(!r4, "rate limit denies over N (AC5)")
 	assert_eq(r4err.code, domain.Error_Code.Rate_Limited, "over-limit -> Rate_Limited (429)")
 	// Different IP is not affected by another IP's limit.
-	_, other_ok, _ := device_auth.authorize(&svc, {client = "electron"}, "127.0.0.1:1", "203.0.113.99")
+	_, other_ok, _ := device_auth.authorize(&svc, bridge_input("electron"), "127.0.0.1:1", "203.0.113.99")
 	assert_true(other_ok, "rate limit is per-IP (different IP unaffected)")
 	fmt.println("rate limit: per-IP allow/deny OK (AC5)")
 
 	// Rate window reset: advance fake clock past the window, limit clears.
 	FAKE_NOW += 61
-	_, after_ok, _ := device_auth.authorize(&svc, {client = "electron"}, "127.0.0.1:1", "203.0.113.42")
+	_, after_ok, _ := device_auth.authorize(&svc, bridge_input("electron"), "127.0.0.1:1", "203.0.113.42")
 	assert_true(after_ok, "rate limit resets after window elapses")
 
 	// TTL/sweep: a grant past expires_at is evicted.
 	FAKE_NOW = 2_000_000
-	expired_res, eok, _ := device_auth.authorize(&svc, {client = "electron"}, "127.0.0.1:1", "203.0.113.250")
+	expired_res, eok, _ := device_auth.authorize(&svc, bridge_input("electron"), "127.0.0.1:1", "203.0.113.250")
 	assert_true(eok, "created grant for sweep test")
 	FAKE_NOW += 601 // past its 600s TTL
 	removed := device_auth.sweep(&store, FAKE_NOW)
@@ -255,17 +256,16 @@ main :: proc() {
 	assert_eq(bgrant.code_challenge, PKCE_CHALLENGE, "code_challenge persisted")
 	assert_eq(bgrant.code_challenge_method, "S256", "code_challenge_method persisted")
 
-	// An ELDA grant stays User_Token — the zero value — and carries none of the
-	// bridge fields. This is the pairing the coordinator asked for: a grant
-	// authorized WITHOUT a key can never be a bridge enrollment.
-	eres, eok2, _ := device_auth.authorize(&bsvc, {client = "electron", device_label = "MBP"}, "127.0.0.1:1", "203.0.113.43")
-	assert_true(eok2, "electron authorize succeeds")
-	egrant, egok := device_auth.get_grant(&bstore, eres.device_code)
-	assert_true(egok, "electron grant stored")
-	assert_eq(egrant.grant_kind, device_auth.Grant_Kind.User_Token, "grant_kind defaults to User_Token")
-	assert_true(!device_auth.is_bridge_grant(egrant), "is_bridge_grant false for an electron grant")
-	assert_eq(egrant.bridge_public_key, "", "electron grant carries no bridge key")
-	assert_eq(eres.bridge_key_fingerprint, "", "electron authorize echoes no fingerprint")
+	// A grant authorized WITHOUT a bridge key used to mint a Hub user token. That
+	// path was removed (users sign in with OIDC): authorize refuses it outright
+	// and stores nothing, so it can never become a bridge enrollment either.
+	eres, eok2, eerr := device_auth.authorize(&bsvc, {client = "electron", device_label = "MBP"}, "127.0.0.1:1", "203.0.113.43")
+	assert_true(!eok2, "user (no bridge key) authorize is refused")
+	assert_eq(eerr.code, domain.Error_Code.Validation_Failed, "user authorize -> Validation_Failed")
+	assert_eq(eerr.message, device_auth.DEVICE_AUTH_USER_GRANT_REMOVED, "user authorize names the removal")
+	_, egok := device_auth.get_grant(&bstore, eres.device_code)
+	assert_true(!egok, "no grant stored for a refused user authorize")
+	assert_eq(device_auth.Grant_Kind(0), device_auth.Grant_Kind.Unsupported, "zero Grant_Kind is the never-approvable Unsupported")
 	fmt.println("REQ-IMPL-2 OK: grant_kind derived once and persisted, both directions")
 
 	// --- Authorize-time validation, each rule in its own case ---
@@ -365,6 +365,24 @@ main :: proc() {
 	} else {
 		fmt.printfln("{} FAILURES", FAILURES)
 		os.exit(1)
+	}
+}
+
+// A complete, valid bridge-enrollment authorize request. Generic grant mechanics
+// (codes, rate limits, TTL) are exercised through bridge grants now that the user
+// (no bridge key) grant was removed. pair_lookup is unique per call.
+BRIDGE_TEST_PUB :: "04030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bc"
+BRIDGE_TEST_CHALLENGE :: "ZtNPunH49FD35FWYhT5Tv8I7vRKQJ8uxMaL0_9eHjNA"
+bridge_input_seq := 0
+bridge_input :: proc(client := "ham-bridge") -> device_auth.Authorize_Input {
+	idp, proof := test_bridge_identity(BRIDGE_TEST_PUB, BRIDGE_TEST_CHALLENGE)
+	bridge_input_seq += 1
+	return device_auth.Authorize_Input{
+		client = client,
+		bridge_public_key = BRIDGE_TEST_PUB, bridge_identity_public_key = idp, bridge_identity_proof = proof,
+		pair_salt = "0123456789abcdef0123456789abcdef", pair_hub_origin = "https://hub.example.test:443",
+		pair_lookup = fmt.aprintf("%064x", bridge_input_seq), pair_key_mac = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+		code_challenge = BRIDGE_TEST_CHALLENGE, code_challenge_method = "S256",
 	}
 }
 

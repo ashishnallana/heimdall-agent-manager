@@ -38,6 +38,7 @@ Fleet_Fixture :: struct {
 	us_svc:         user_service.User_Service,
 	ag_svc:         agent_service.Agent_Service,
 	auth_svc:       auth_service.Auth_Service,
+	user_headers: []contracts.HTTP_Header, // session cookie for the fixture owner
 	registry:       project_service.Bridge_Runtime_Registry,
 	bh:             Bridge_Handlers,
 	owner_user_id:  string,
@@ -45,10 +46,6 @@ Fleet_Fixture :: struct {
 	bridge_token:   string,
 }
 
-@(private = "file")
-FLEET_TEST_HEADERS := [1]contracts.HTTP_Header{{name = "X-authentik-username", value = "fleet-owner"}}
-@(private = "file")
-FLEET_TEST_CIDRS := [1]string{"127.0.0.1/32"}
 
 @(private = "file")
 fleet_fixture_setup :: proc(t: ^testing.T) -> ^Fleet_Fixture {
@@ -66,17 +63,14 @@ fleet_fixture_setup :: proc(t: ^testing.T) -> ^Fleet_Fixture {
 	f.br_svc = bridge_service.new_bridge_service(&f.br_repo, &f.clock, &f.ids)
 	f.us_svc = user_service.new_user_service_basic(&f.us_repo, &f.clock, &f.ids)
 	f.ag_svc = agent_service.new_agent_service(&f.ag_repo, &f.br_repo, &f.clock, &f.ids)
-	f.auth_svc = auth_service.new_auth_service(auth_service.Trusted_Proxy_Config{
-		username_header = "X-authentik-username",
-		trusted_proxy_cidrs = FLEET_TEST_CIDRS[:],
-		auto_provision_users = true,
-	}, &f.us_svc)
+	f.auth_svc = auth_service.new_auth_service(auth_service.Auth_Config{auto_provision_users = true}, &f.us_svc)
 	f.auth_svc.clock = &f.clock
 	f.auth_svc.ids = &f.ids
 	f.auth_svc.bridges = &f.br_svc
 	f.auth_svc.agents = &f.ag_svc
 	f.bh = Bridge_Handlers{auth = &f.auth_svc, bridges = &f.br_svc, agents = &f.ag_svc, bridge_runtime_registry = &f.registry}
-	owner_ctx, owner_ok, _ := auth_service.resolve_auth_any(&f.auth_svc, auth_service.Auth_Request{remote_addr = "127.0.0.1:4444", headers = FLEET_TEST_HEADERS[:]})
+	f.user_headers = http_test_login(t, &f.auth_svc, "fleet-owner")
+	owner_ctx, owner_ok, _ := auth_service.resolve_auth_any(&f.auth_svc, auth_service.Auth_Request{remote_addr = "127.0.0.1:4444", headers = f.user_headers})
 	testing.expect(t, owner_ok, "owner resolved")
 	f.owner_user_id = strings.clone(owner_ctx.user_id)
 	enrolled, e_ok, _ := bridge_service.enroll_bridge_from_device_grant(&f.br_svc, bridge_service.Device_Enroll_Input{

@@ -3,7 +3,7 @@ package http
 // REQ-EXP-GATE-3/5/6: every project and chain-directory fs/vcs/search route (the
 // Project Explorer) is refused for an owner without project_vcs BEFORE any project or
 // directory lookup, bridge lookup or relay. These drive the production handlers with
-// real trusted-proxy auth and counting fake project/taskchain repositories: a refusal
+// real session-cookie auth and counting fake project/taskchain repositories: a refusal
 // leaves both counters at zero, and an opt-in reaches the existing ownership lookup
 // (the fakes answer not_found, so nothing is relayed and no bridge is needed).
 
@@ -113,8 +113,6 @@ explorer_chain_get :: proc(ctx: rawptr, chain_id: domain.Task_Chain_ID) -> (doma
 	return domain.Task_Chain{}, false, domain.domain_error(.Not_Found, "task chain not found")
 }
 
-@(private = "file")
-EXPLORER_CIDRS := [1]string{"127.0.0.1/32"}
 
 @(private = "file")
 Explorer_Fixture :: struct {
@@ -148,11 +146,7 @@ setup_explorer_fixture :: proc(t: ^testing.T) -> ^Explorer_Fixture {
 	f.clock = platform.real_clock()
 	f.ids = http_test_id_generator()
 	f.us_svc = user_service.new_user_service_basic(&f.us_repo, &f.clock, &f.ids)
-	f.auth_svc = auth_service.new_auth_service(auth_service.Trusted_Proxy_Config{
-		username_header = "X-authentik-username",
-		trusted_proxy_cidrs = EXPLORER_CIDRS[:],
-		auto_provision_users = true,
-	}, &f.us_svc)
+	f.auth_svc = auth_service.new_auth_service(auth_service.Auth_Config{auto_provision_users = true}, &f.us_svc)
 	f.auth_svc.clock = &f.clock
 	f.auth_svc.ids = &f.ids
 
@@ -176,18 +170,18 @@ teardown_explorer_fixture :: proc(f: ^Explorer_Fixture) {
 	free(f)
 }
 
-// Resolves (auto-provisioning) the user a trusted-proxy request for `username` maps to.
+// Resolves (auto-provisioning) the user a browser session for `username` maps to.
 @(private = "file")
 explorer_user_id :: proc(t: ^testing.T, f: ^Explorer_Fixture, username: string) -> string {
-	headers := []contracts.HTTP_Header{{name = "X-authentik-username", value = username}}
+	headers := http_test_login(t, &f.auth_svc, username)
 	ctx, ok, _ := auth_service.resolve_auth_any(&f.auth_svc, auth_service.Auth_Request{remote_addr = "127.0.0.1:4444", headers = headers})
-	testing.expect(t, ok, "trusted proxy user resolved")
+	testing.expect(t, ok, "session user resolved")
 	return strings.clone(ctx.user_id)
 }
 
 @(private = "file")
 explorer_call :: proc(f: ^Explorer_Fixture, route: Explorer_Route, username: string) -> Response {
-	headers := []contracts.HTTP_Header{{name = "X-authentik-username", value = username}}
+	headers := http_test_session_headers(&f.auth_svc, username)
 	return route.handler(rawptr(&f.bh), Request{
 		method = route.method, path = route.path, query = route.query, body = route.body,
 		request_id = "req_explorer_gate", remote_addr = "127.0.0.1:4444", headers = headers,

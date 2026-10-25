@@ -23,10 +23,6 @@ import iface "odin_test:hub/repository/iface"
 import api_http "odin_test:hub/transport/http"
 import bridge_service "odin_test:hub/service/bridge"
 
-// File-scope, not a local: build_graph keeps the slice, and the graph outlives
-// attach_test_graph's frame.
-@(private = "file")
-attach_test_cidrs := [?]string{"127.0.0.1/32"}
 
 attach_test_graph :: proc(t: ^testing.T, graph: ^app.App_Graph, name: string) -> (db_path: string, ok: bool) {
 	db_path = fmt.tprintf("%s/heimdall-hub-test-attach-%s-%d.db", os.get_env("TEMP", context.temp_allocator) if ODIN_OS == .Windows else "/tmp", name, os.get_pid())
@@ -34,12 +30,7 @@ attach_test_graph :: proc(t: ^testing.T, graph: ^app.App_Graph, name: string) ->
 	built, msg := app.build_graph(graph, app.Hub_Config{
 		database_path        = db_path,
 		migrations_dir       = "src/hub/repository/sqlite/migrations",
-		username_header      = "X-authentik-username",
-		display_name_header  = "X-authentik-name",
-		email_header         = "X-authentik-email",
-		trusted_proxy_cidrs  = attach_test_cidrs[:],
 		auto_provision_users = true,
-		logout_url           = "/_dev/logout",
 		paddle_environment   = "sandbox",
 	})
 	testing.expect(t, built, msg)
@@ -151,7 +142,7 @@ test_device_attach_reuses_bridge_id_and_retires_old_identity_on_commit :: proc(t
 	defer _ = os.remove(db_path)
 	if !built do return
 	defer app.shutdown_graph(&graph)
-	alice := [?]contracts.HTTP_Header{{name = "X-authentik-username", value = "alice"}}
+	alice := hub_test_user_headers(&graph, "alice")
 	user_id := vt_user_id(&graph, alice[:])
 
 	first, first_ok := attach_enroll(&graph, alice[:], "alice-box")
@@ -195,7 +186,7 @@ test_device_attach_rollback_leaves_old_bridge_intact :: proc(t: ^testing.T) {
 	defer _ = os.remove(db_path)
 	if !built do return
 	defer app.shutdown_graph(&graph)
-	alice := [?]contracts.HTTP_Header{{name = "X-authentik-username", value = "alice"}}
+	alice := hub_test_user_headers(&graph, "alice")
 	user_id := vt_user_id(&graph, alice[:])
 
 	first, first_ok := attach_enroll(&graph, alice[:], "alice-box")
@@ -238,8 +229,8 @@ test_device_attach_refuses_foreign_revoked_and_hides_unusable_hints :: proc(t: ^
 	defer _ = os.remove(db_path)
 	if !built do return
 	defer app.shutdown_graph(&graph)
-	alice := [?]contracts.HTTP_Header{{name = "X-authentik-username", value = "alice"}}
-	bob := [?]contracts.HTTP_Header{{name = "X-authentik-username", value = "bob"}}
+	alice := hub_test_user_headers(&graph, "alice")
+	bob := hub_test_user_headers(&graph, "bob")
 
 	alice_box, a_ok := attach_enroll(&graph, alice[:], "alice-box")
 	if !a_ok || !attach_commit(&graph, alice_box.bridge_id) do testing.fail_now(t, "alice enrollment failed")

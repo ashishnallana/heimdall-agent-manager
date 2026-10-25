@@ -343,7 +343,7 @@ test_shell_stream_ticket_and_experiment_gating :: proc(t: ^testing.T) {
 		tickets := new_user_ws_ticket_store()
 		defer user_ws_ticket_store_free(&tickets)
 		user_ws_ticket_store_put(&tickets, "ticket_valid", contracts.Auth_Context{
-			kind = .User_Token, user_id = "user_test",
+			kind = .Session, user_id = "user_test",
 		}, 60)
 
 		fake_exp := Fake_Shell_Experiments{streaming_enabled = false}
@@ -374,7 +374,7 @@ test_shell_stream_ticket_and_experiment_gating :: proc(t: ^testing.T) {
 		tickets := new_user_ws_ticket_store()
 		defer user_ws_ticket_store_free(&tickets)
 		user_ws_ticket_store_put(&tickets, "ticket_valid_2", contracts.Auth_Context{
-			kind = .User_Token, user_id = "user_test",
+			kind = .Session, user_id = "user_test",
 		}, 60)
 
 		fake_exp := Fake_Shell_Experiments{streaming_enabled = true}
@@ -783,7 +783,7 @@ shell_stream_check_input_policy :: proc(t: ^testing.T, read_only: bool) {
 	tickets := new_user_ws_ticket_store()
 	defer user_ws_ticket_store_free(&tickets)
 	user_ws_ticket_store_put(&tickets, "ticket_input_test", contracts.Auth_Context{
-		kind = .User_Token, user_id = "user_input",
+		kind = .Session, user_id = "user_input",
 	}, 60)
 
 	fake_exp := Fake_Shell_Experiments{streaming_enabled = true}
@@ -1169,7 +1169,8 @@ test_err_proto_rejected_chunk_frame_gets_protocol_error :: proc(t: ^testing.T) {
 
 @(test)
 test_shell_stream_plan_refuses_existing_shell_before_upgrade :: proc(t: ^testing.T) {
-	for auth_kind in ([]contracts.Auth_Kind{.User_Token, .Trusted_Proxy}) {
+	// Only browser sessions hold WebSocket tickets.
+	for auth_kind in ([]contracts.Auth_Kind{.Session}) {
 		pair, ok := make_stream_pair(t)
 		testing.expect(t, ok)
 		defer close_stream_pair(&pair)

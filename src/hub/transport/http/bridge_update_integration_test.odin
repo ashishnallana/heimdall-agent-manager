@@ -65,6 +65,7 @@ integration_update_fixture :: struct {
 	us_svc: user_service.User_Service,
 	ag_svc: agent_service.Agent_Service,
 	auth_svc: auth_service.Auth_Service,
+	user_headers: []contracts.HTTP_Header, // session cookie for the fixture owner
 	bh: Bridge_Handlers,
 	registry: project_service.Bridge_Runtime_Registry,
 	sink_rec: Integration_Sink_Recorder,
@@ -74,10 +75,6 @@ integration_update_fixture :: struct {
 	bridge_token: string,
 }
 
-@(private = "file")
-INTEG_TEST_HEADERS := [1]contracts.HTTP_Header{{name = "X-authentik-username", value = "integ_test_operator"}}
-@(private = "file")
-INTEG_TEST_CIDRS := [1]string{"127.0.0.1/32"}
 
 @(private = "file")
 setup_integration_update_fixture :: proc(t: ^testing.T, tag: string) -> ^integration_update_fixture {
@@ -112,11 +109,7 @@ setup_integration_update_fixture :: proc(t: ^testing.T, tag: string) -> ^integra
 	f.us_svc = user_service.new_user_service_basic(&f.us_repo, &f.clock, &f.ids)
 	f.ag_svc = agent_service.new_agent_service(&f.ag_repo, &f.br_repo, &f.clock, &f.ids)
 
-	f.auth_svc = auth_service.new_auth_service(auth_service.Trusted_Proxy_Config{
-		username_header = "X-authentik-username",
-		trusted_proxy_cidrs = INTEG_TEST_CIDRS[:],
-		auto_provision_users = true,
-	}, &f.us_svc)
+	f.auth_svc = auth_service.new_auth_service(auth_service.Auth_Config{auto_provision_users = true}, &f.us_svc)
 	f.auth_svc.clock = &f.clock
 	f.auth_svc.ids = &f.ids
 	f.auth_svc.bridges = &f.br_svc
@@ -129,11 +122,12 @@ setup_integration_update_fixture :: proc(t: ^testing.T, tag: string) -> ^integra
 		bridge_runtime_registry = &f.registry,
 	}
 
+	f.user_headers = http_test_login(t, &f.auth_svc, "integ_test_operator")
 	owner_ctx, owner_ok, _ := auth_service.resolve_auth_any(&f.auth_svc, auth_service.Auth_Request{
 		remote_addr = "127.0.0.1:4444",
-		headers = INTEG_TEST_HEADERS[:],
+		headers = f.user_headers,
 	})
-	testing.expect(t, owner_ok, "trusted proxy owner resolved")
+	testing.expect(t, owner_ok, "session owner resolved")
 	f.owner_user_id = strings.clone(owner_ctx.user_id)
 
 	// Provisioned through the DEVICE-GRANT path, the only enrollment there is
@@ -211,7 +205,7 @@ test_bridge_update_integration_wire_dispatch_and_version_bump :: proc(t: ^testin
 		path = fmt.tprintf("/api/v1/bridges/%s", f.bridge_id),
 		request_id = "req_initial_state",
 		remote_addr = "127.0.0.1:4444",
-		headers = INTEG_TEST_HEADERS[:],
+		headers = f.user_headers,
 	}
 	get_resp1 := bridge_detail_handler(rawptr(&f.bh), get_req1)
 	testing.expect_value(t, get_resp1.status, 200)
@@ -228,7 +222,7 @@ test_bridge_update_integration_wire_dispatch_and_version_bump :: proc(t: ^testin
 		body = `{"target_version":"0.2.0","force":true,"drain_timeout_seconds":30}`,
 		request_id = "req_wire_dispatch",
 		remote_addr = "127.0.0.1:4444",
-		headers = INTEG_TEST_HEADERS[:],
+		headers = f.user_headers,
 	}
 	upd_resp := bridge_update_handler(rawptr(&f.bh), upd_req)
 	testing.expectf(t, upd_resp.status == 202, "expected HTTP 202 Accepted, got %d (body: %s)", upd_resp.status, upd_resp.body)
@@ -275,7 +269,7 @@ test_bridge_update_integration_wire_dispatch_and_version_bump :: proc(t: ^testin
 		path = fmt.tprintf("/api/v1/bridges/%s", f.bridge_id),
 		request_id = "req_post_update_state",
 		remote_addr = "127.0.0.1:4444",
-		headers = INTEG_TEST_HEADERS[:],
+		headers = f.user_headers,
 	}
 	get_resp2 := bridge_detail_handler(rawptr(&f.bh), get_req2)
 	testing.expect_value(t, get_resp2.status, 200)
@@ -327,7 +321,7 @@ test_bridge_update_integration_failure_triggers_supervisor_rollback :: proc(t: ^
 		body = `{"target_version":"0.2.0","force":true}`,
 		request_id = "req_fail_dispatch",
 		remote_addr = "127.0.0.1:4444",
-		headers = INTEG_TEST_HEADERS[:],
+		headers = f.user_headers,
 	}
 	upd_resp := bridge_update_handler(rawptr(&f.bh), upd_req)
 	testing.expect_value(t, upd_resp.status, 202)
@@ -451,7 +445,7 @@ test_bridge_update_integration_failure_triggers_supervisor_rollback :: proc(t: ^
 		path = fmt.tprintf("/api/v1/bridges/%s", f.bridge_id),
 		request_id = "req_rolled_back_get",
 		remote_addr = "127.0.0.1:4444",
-		headers = INTEG_TEST_HEADERS[:],
+		headers = f.user_headers,
 	}
 	get_resp := bridge_detail_handler(rawptr(&f.bh), get_req)
 	testing.expect_value(t, get_resp.status, 200)
@@ -512,7 +506,7 @@ test_bridge_update_integration_active_tasks_drain_and_force_gating :: proc(t: ^t
 		body = `{"target_version":"0.2.0","force":false,"drain_timeout_seconds":0}`,
 		request_id = "req_conflict",
 		remote_addr = "127.0.0.1:4444",
-		headers = INTEG_TEST_HEADERS[:],
+		headers = f.user_headers,
 	}
 	conflict_resp := bridge_update_handler(rawptr(&f.bh), conflict_req)
 	testing.expectf(t, conflict_resp.status == 409, "expected 409 Conflict for active tasks, got %d (body: %s)", conflict_resp.status, conflict_resp.body)
@@ -525,7 +519,7 @@ test_bridge_update_integration_active_tasks_drain_and_force_gating :: proc(t: ^t
 		body = `{"target_version":"0.2.0","force":true,"drain_timeout_seconds":0}`,
 		request_id = "req_force",
 		remote_addr = "127.0.0.1:4444",
-		headers = INTEG_TEST_HEADERS[:],
+		headers = f.user_headers,
 	}
 	force_resp := bridge_update_handler(rawptr(&f.bh), force_req)
 	testing.expectf(t, force_resp.status == 202, "expected 202 Accepted with force=true, got %d", force_resp.status)
@@ -539,7 +533,7 @@ test_bridge_update_integration_active_tasks_drain_and_force_gating :: proc(t: ^t
 		body = `{"target_version":"0.2.0","force":false,"drain_timeout_seconds":60}`,
 		request_id = "req_drain",
 		remote_addr = "127.0.0.1:4444",
-		headers = INTEG_TEST_HEADERS[:],
+		headers = f.user_headers,
 	}
 	drain_resp := bridge_update_handler(rawptr(&f.bh), drain_req)
 	testing.expectf(t, drain_resp.status == 202, "expected 202 Accepted with drain_timeout_seconds=60, got %d", drain_resp.status)

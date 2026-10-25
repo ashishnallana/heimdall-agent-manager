@@ -1,15 +1,16 @@
 // Trusted-X-Forwarded-For client-IP resolver (ELDA-6).
 //
 // resolve_client_ip determines the real client IP for a request:
-//   - If the TCP peer (remote_addr) is inside a trusted-proxy CIDR, the request
-//     arrived via the trusted reverse proxy, so we trust X-Forwarded-For and
+//   - If the TCP peer (remote_addr) is inside a forwarded-for trusted CIDR
+//     (--forwarded-for-trusted-cidr), the request arrived via the reverse
+//     proxy, so we trust X-Forwarded-For and
 //     take its FIRST hop (the original client). This is how the dev proxy and
 //     any configured outpost deliver the true client IP.
 //   - Otherwise the TCP peer IS the client; X-Forwarded-For is attacker-
 //     controlled and MUST be ignored (spoofing protection — AC4).
 //
-// The trusted-proxy check reuses auth_service.remote_addr_trusted / strip_port
-// so CIDR matching stays consistent with the existing trusted-proxy auth path.
+// CIDR matching reuses auth_service.remote_addr_trusted / strip_port. This list
+// has no authentication meaning; it only decides whose X-Forwarded-For to trust.
 
 package device_auth
 
@@ -19,7 +20,7 @@ import auth_service "odin_test:hub/service/auth"
 // resolve_client_ip returns the effective client IP for rate-limiting and grant
 // attribution. `remote_addr` is the TCP peer ("host:port" or "host");
 // `xff_header` is the raw X-Forwarded-For header value (may be empty);
-// `trusted_cidrs` is the configured list of trusted-proxy CIDRs.
+// `trusted_cidrs` is the configured forwarded-for trusted CIDR list.
 resolve_client_ip :: proc(remote_addr, xff_header: string, trusted_cidrs: []string) -> string {
 	if remote_addr == "" do return ""
 	// Only trust XFF when the TCP peer is itself a trusted proxy.

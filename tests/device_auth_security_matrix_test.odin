@@ -7,7 +7,8 @@
 //   - authorize/token public endpoint rate limits
 //   - single-use/terminal grants and unknown device_code anti-enumeration
 //   - device_code/user_code unlinkability smoke
-//   - audit fields queryable on grants and token provenance visible via tokens list
+//   - audit fields queryable on grants
+//   - a user (no bridge key) authorize is refused: Hub user tokens were removed
 //
 // Run: odin run tests/device_auth_security_matrix_test.odin -collection:odin_test=src -file
 package device_auth_security_matrix_test
@@ -47,12 +48,59 @@ assert_true :: proc(cond: bool, label: string) {
 	fmt.printfln("FAIL {}: condition false", label)
 }
 
-fake_minter :: proc(ctx: rawptr, user_id, client, device_label: string) -> (string, string, bool) {
+// Every grant is a bridge enrollment now (the user-token grant was removed), so
+// service-level mechanics run on bridge grants with a fake bridge minter.
+sm_fake_bridge_minter :: proc(ctx: rawptr, req: device_auth.Bridge_Mint_Request) -> (device_auth.Bridge_Mint_Result, bool) {
 	_ = ctx
-	_ = user_id
-	_ = client
-	_ = device_label
-	return "hut_security_fake", "utok_security_fake", true
+	_ = req
+	return device_auth.Bridge_Mint_Result{access_token = "hba_btk_security_fake.secret", refresh_token = "hbf_btk_security_fake.refresh", bridge_id = "brg_security_fake", expires_in = 3600, refresh_expires_in = 2592000}, true
+}
+
+SM_PUB :: "04030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bc"
+SM_VERIFIER :: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+SM_CHALLENGE :: "ZtNPunH49FD35FWYhT5Tv8I7vRKQJ8uxMaL0_9eHjNA"
+sm_seq := 5000
+
+// sm_bridge_input is a complete bridge-enrollment authorize request; its
+// pair_lookup (the approval/verify index) is unique per call.
+sm_bridge_input :: proc(device_label := "", client := "ham-bridge") -> device_auth.Authorize_Input {
+	idp, proof := sm_bridge_identity(SM_PUB, SM_CHALLENGE)
+	sm_seq += 1
+	return device_auth.Authorize_Input{
+		client = client, device_label = device_label,
+		bridge_public_key = SM_PUB, bridge_identity_public_key = idp, bridge_identity_proof = proof,
+		pair_salt = "0123456789abcdef0123456789abcdef", pair_hub_origin = "https://hub.example.test:443",
+		pair_lookup = fmt.aprintf("%064x", sm_seq), pair_key_mac = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+		code_challenge = SM_CHALLENGE, code_challenge_method = "S256",
+	}
+}
+
+sm_bridge_identity :: proc(ecdh_pub, challenge: string) -> (pub_hex: string, proof: string) {
+	priv: ecdsa.Private_Key
+	scalar: [32]byte
+	scalar[0] = 0x42
+	scalar[31] = 0x07
+	_ = ecdsa.private_key_set_bytes(&priv, .SECP256R1, scalar[:])
+	pub: [65]byte
+	ecdsa.private_key_public_bytes(&priv, pub[:])
+	pub_hex = vault.hex_encode_lower(pub[:])
+	msg, _ := vault.bridge_enroll_proof_canonical(ecdh_pub, challenge)
+	sig, _ := vault.sign_p256(&priv, transmute([]byte)msg)
+	proof, _ = vault.signature_object(&sig)
+	return
+}
+
+// sm_session_headers authenticates as `user_id` with a Hub browser session (the
+// OIDC login result), plus the proxy XFF and the browser's UA.
+sm_session_headers :: proc(graph: ^app.App_Graph, user_id, xff, ua: string) -> []contracts.HTTP_Header {
+	graph.auth.web.enabled = true
+	raw, ok := auth_service.mint_session(&graph.auth, user_id)
+	assert_true(ok, "mint session")
+	out := make([]contracts.HTTP_Header, 3)
+	out[0] = auth_service.session_cookie_request_header(raw)
+	out[1] = {name = "X-Forwarded-For", value = xff}
+	out[2] = {name = "User-Agent", value = ua}
+	return out
 }
 
 new_service :: proc(rate_limit := 2, interval := 5) -> (^device_auth.Grant_Store, device_auth.Device_Auth_Service) {
@@ -65,7 +113,7 @@ new_service :: proc(rate_limit := 2, interval := 5) -> (^device_auth.Grant_Store
 		rate_window = 10,
 	})
 	svc := device_auth.new_device_auth_service(store, fake_clock(), []string{"127.0.0.1/32"})
-	device_auth.with_token_minter(&svc, fake_minter)
+	device_auth.with_bridge_token_minter(&svc, sm_fake_bridge_minter)
 	return store, svc
 }
 
@@ -100,7 +148,7 @@ main :: proc() {
 // PKCE verifier -> the credential resolves to exactly one `brg_`.
 //
 // Five properties are asserted here that cannot be seen at the service layer:
-//   1. The owner is the APPROVING USER from the trusted-proxy identity headers,
+//   1. The owner is the APPROVING USER from the browser session,
 //      even when the body shouts a different one.
 //   2. The minted credential is BRIDGE-SCOPED: verify_bridge_token resolves it
 //      to a `brg_` Auth_Context, not to a bare user.
@@ -135,13 +183,7 @@ test_bridge_enrollment_end_to_end :: proc() {
 		_ = os.remove(db_path)
 	}
 
-	trusted_headers := [?]contracts.HTTP_Header{
-		{name = "X-authentik-username", value = "approving-human"},
-		{name = "X-authentik-name", value = "Approving Human"},
-		{name = "X-authentik-email", value = "approver@example.com"},
-		{name = "X-Forwarded-For", value = "203.0.113.88, 10.0.0.1"},
-		{name = "User-Agent", value = "ApprovalPage/1.0"},
-	}
+	trusted_headers := sm_session_headers(&graph, "approving-human", "203.0.113.88, 10.0.0.1", "ApprovalPage/1.0")
 
 	// --- authorize over HTTP, as an unauthenticated bridge would ---
 	// Passwordless vault: the grant carries the bridge's identity key and its proof.
@@ -172,9 +214,9 @@ test_bridge_enrollment_end_to_end :: proc() {
 	verify_body := sm_json(Sm_Approve_Body{pair_lookup = res_a.user_code})
 	verify_resp := api_http.device_verify_handler(rawptr(&graph.device_auth_handlers), api_http.Request{
 		method = "POST", path = "/api/v1/device/verify", body = verify_body,
-		request_id = "req_bridge_verify", remote_addr = "127.0.0.1:4444", headers = trusted_headers[:],
+		request_id = "req_bridge_verify", remote_addr = "127.0.0.1:4444", headers = trusted_headers,
 	})
-	assert_eq(verify_resp.status, 200, "verify succeeds through the trusted proxy")
+	assert_eq(verify_resp.status, 200, "verify succeeds for a session user")
 	assert_true(strings.contains(verify_resp.body, "\"hub_observed\""), "verify payload groups hub-observed fields")
 	assert_true(strings.contains(verify_resp.body, "\"host_asserted\""), "verify payload groups host-asserted fields")
 	assert_true(strings.contains(verify_resp.body, "\"is_bridge_enrollment\":true"), "verify marks a bridge enrollment")
@@ -195,9 +237,9 @@ test_bridge_enrollment_end_to_end :: proc() {
 	})
 	approve_resp := api_http.device_approve_handler(rawptr(&graph.device_auth_handlers), api_http.Request{
 		method = "POST", path = "/api/v1/device/approve", body = approve_body,
-		request_id = "req_bridge_approve", remote_addr = "127.0.0.1:4444", headers = trusted_headers[:],
+		request_id = "req_bridge_approve", remote_addr = "127.0.0.1:4444", headers = trusted_headers,
 	})
-	assert_eq(approve_resp.status, 200, "bridge approve succeeds through the trusted proxy")
+	assert_eq(approve_resp.status, 200, "bridge approve succeeds for a session user")
 	grant_a, ga_ok := device_auth.get_grant(&graph.device_auth_store, res_a.device_code)
 	assert_true(ga_ok, "approved bridge grant queryable")
 	assert_eq(grant_a.owner_user_id, "approving-human", "owner is the approving user from Auth_Context, NOT the body")
@@ -214,7 +256,7 @@ test_bridge_enrollment_end_to_end :: proc() {
 	// result. The interval gate itself is covered in the token-poll test with a
 	// fake clock; here each grant is polled once.
 	id_bad := sm_dev(102, "bridge")
-	bad_grant, bad_found := seed_bridge_grant(&graph, "wrong-verifier-host", BPK_A, PKCE_CHALLENGE, trusted_headers[:], &id_bad, sm_vault_approval(&graph, "approving-human", &root, &id_bad, 2))
+	bad_grant, bad_found := seed_bridge_grant(&graph, "wrong-verifier-host", BPK_A, PKCE_CHALLENGE, trusted_headers, &id_bad, sm_vault_approval(&graph, "approving-human", &root, &id_bad, 2))
 	assert_true(bad_found, "seeded a second bridge grant for the wrong-verifier case")
 	bad_poll := sm_json(Sm_Poll_Body{device_code = bad_grant.device_code, code_verifier = WRONG_VERIFIER})
 	bad_resp := api_http.device_token_handler(rawptr(&graph.device_auth_handlers), api_http.Request{
@@ -247,7 +289,7 @@ test_bridge_enrollment_end_to_end :: proc() {
 	pending_row, pending_row_ok, _ := iface.bridge_get_bridge(graph.bridges.repo, bridge_id_a)
 	assert_true(pending_row_ok, "pending bridge row readable")
 	assert_true(domain.bridge_is_pending(pending_row), "the bridge row is pending until the vault key is delivered")
-	_, owner_get_ok, _ := bridge_service.get_bridge(&graph.bridges, contracts.Auth_Context{kind = .User_Token, user_id = "approving-human"}, bridge_id_a)
+	_, owner_get_ok, _ := bridge_service.get_bridge(&graph.bridges, contracts.Auth_Context{kind = .Session, user_id = "approving-human"}, bridge_id_a)
 	assert_true(!owner_get_ok, "a pending bridge is not a usable bridge for its owner yet")
 	// The hub observes the delivery and commits (REQ-EA-2).
 	_, commit_ok, commit_err := bridge_service.commit_pending_enrollment(&graph.bridges, bridge_service.Pending_Commit_Input{bridge_id = bridge_id_a, family_id = family_a})
@@ -490,12 +532,13 @@ test_trusted_xff_and_verify_bruteforce :: proc() {
 	store, svc := new_service(2, 5)
 	defer device_auth.grant_store_free(store)
 
-	trusted_res, trusted_ok, _ := device_auth.authorize(&svc, {client = "electron", device_label = "Trusted XFF"}, "127.0.0.1:1111", "203.0.113.5, 10.0.0.1")
+	trusted_in := sm_bridge_input("Trusted XFF")
+	trusted_res, trusted_ok, _ := device_auth.authorize(&svc, trusted_in, "127.0.0.1:1111", "203.0.113.5, 10.0.0.1")
 	assert_true(trusted_ok, "trusted authorize succeeds")
 	trusted_grant, _ := device_auth.get_grant(store, trusted_res.device_code)
 	assert_eq(trusted_grant.request_ip, "203.0.113.5", "trusted peer honors first XFF hop at authorize")
 
-	untrusted_res, untrusted_ok, _ := device_auth.authorize(&svc, {client = "electron", device_label = "Spoofed XFF"}, "198.51.100.9:4444", "203.0.113.99")
+	untrusted_res, untrusted_ok, _ := device_auth.authorize(&svc, sm_bridge_input("Spoofed XFF"), "198.51.100.9:4444", "203.0.113.99")
 	assert_true(untrusted_ok, "untrusted authorize succeeds")
 	untrusted_grant, _ := device_auth.get_grant(store, untrusted_res.device_code)
 	assert_eq(untrusted_grant.request_ip, "198.51.100.9", "untrusted peer ignores spoofed XFF at authorize")
@@ -511,7 +554,7 @@ test_trusted_xff_and_verify_bruteforce :: proc() {
 	assert_true(!u3_ok, "third verify over cap fails")
 	assert_eq(u3_err.code, domain.Error_Code.Rate_Limited, "verify brute-force cap -> Rate_Limited")
 	FAKE_NOW += 11
-	info, legit_ok, legit_err := device_auth.verify_with_ip(&svc, trusted_res.user_code, "198.51.100.200")
+	info, legit_ok, legit_err := device_auth.verify_with_ip(&svc, trusted_in.pair_lookup, "198.51.100.200")
 	assert_true(legit_ok, legit_err.message)
 	assert_eq(info.device_label, "Trusted XFF", "legitimate verify works after cooldown")
 	fmt.println("ELDA-6 OK: trusted-XFF-only and verify brute-force cap/cooldown")
@@ -521,9 +564,9 @@ test_public_rate_limit_and_token_single_use :: proc() {
 	// Public authorize endpoint rate limit.
 	rate_store, rate_svc := new_service(2, 5)
 	defer device_auth.grant_store_free(rate_store)
-	_, a1, _ := device_auth.authorize(&rate_svc, {client = "electron"}, "127.0.0.1:1", "203.0.113.44")
-	_, a2, _ := device_auth.authorize(&rate_svc, {client = "electron"}, "127.0.0.1:1", "203.0.113.44")
-	_, a3, a3_err := device_auth.authorize(&rate_svc, {client = "electron"}, "127.0.0.1:1", "203.0.113.44")
+	_, a1, _ := device_auth.authorize(&rate_svc, sm_bridge_input(), "127.0.0.1:1", "203.0.113.44")
+	_, a2, _ := device_auth.authorize(&rate_svc, sm_bridge_input(), "127.0.0.1:1", "203.0.113.44")
+	_, a3, a3_err := device_auth.authorize(&rate_svc, sm_bridge_input(), "127.0.0.1:1", "203.0.113.44")
 	assert_true(a1 && a2 && !a3, "authorize per-IP rate limit trips after budget")
 	assert_eq(a3_err.code, domain.Error_Code.Rate_Limited, "authorize over budget -> Rate_Limited")
 
@@ -531,7 +574,8 @@ test_public_rate_limit_and_token_single_use :: proc() {
 	// and too-fast polling trips slow_down/Rate_Limited.
 	store, svc := new_service(10, 5)
 	defer device_auth.grant_store_free(store)
-	res, ok, _ := device_auth.authorize(&svc, {client = "electron", device_label = "Single Use"}, "127.0.0.1:1", "203.0.113.55")
+	single_in := sm_bridge_input("Single Use")
+	res, ok, _ := device_auth.authorize(&svc, single_in, "127.0.0.1:1", "203.0.113.55")
 	assert_true(ok, "authorize for token test succeeds")
 	unknown, unknown_err := device_auth.poll(&svc, "not-a-device-code", "203.0.113.56")
 	assert_eq(unknown_err.code, domain.Error_Code.None, "unknown device poll no error")
@@ -543,12 +587,12 @@ test_public_rate_limit_and_token_single_use :: proc() {
 	assert_eq(too_fast.status, device_auth.Poll_Status.Slow_Down, "too-fast grant poll -> slow_down")
 	assert_eq(too_fast_err.code, domain.Error_Code.Rate_Limited, "too-fast grant poll -> Rate_Limited")
 	FAKE_NOW += 5
-	approved_ok, approved_err := device_auth.approve(&svc, {user_code = res.user_code, approve = true}, "owner", "203.0.113.99", "UA")
+	approved_ok, approved_err := device_auth.approve(&svc, {user_code = single_in.pair_lookup, approve = true}, "owner", "203.0.113.99", "UA")
 	assert_true(approved_ok, approved_err.message)
-	approved, poll_err := device_auth.poll(&svc, res.device_code, "203.0.113.57")
+	approved, poll_err := device_auth.poll(&svc, res.device_code, "203.0.113.57", SM_VERIFIER)
 	assert_eq(poll_err.code, domain.Error_Code.None, "approved poll no error")
 	assert_eq(approved.status, device_auth.Poll_Status.Approved, "approved grant returns token once")
-	replay, replay_err := device_auth.poll(&svc, res.device_code, "203.0.113.57")
+	replay, replay_err := device_auth.poll(&svc, res.device_code, "203.0.113.57", SM_VERIFIER)
 	assert_eq(replay_err.code, domain.Error_Code.None, "used replay no error")
 	assert_eq(replay.status, device_auth.Poll_Status.Expired, "used grant replay -> expired")
 	fmt.println("ELDA-6 OK: public rate limits, no-enumeration, single-use terminal grants")
@@ -569,60 +613,43 @@ test_http_owner_spoof_and_audit_queryability :: proc() {
 		_ = os.remove(db_path)
 	}
 
-	res, auth_ok, auth_err := device_auth.authorize(&graph.device_auth, {client = "heimdall-electron", device_label = "Audit Laptop", os = "macOS", app_version = "0.1"}, "198.51.100.20:5555", "203.0.113.250")
-	assert_true(auth_ok, auth_err.message)
-	trusted_headers := [?]contracts.HTTP_Header{
-		{name = "X-authentik-username", value = "real-owner"},
-		{name = "X-authentik-name", value = "Real Owner"},
-		{name = "X-authentik-email", value = "real-owner@example.com"},
-		{name = "X-Forwarded-For", value = "203.0.113.88, 10.0.0.1"},
-		{name = "User-Agent", value = "SecurityMatrix/1.0"},
-	}
-	body := sm_json(Sm_Approve_Body{user_code = res.user_code, approve = true, owner_user_id = "spoof-owner", user = "spoof-user"})
-	approve_resp := api_http.device_approve_handler(rawptr(&graph.device_auth_handlers), api_http.Request{method = "POST", path = "/api/v1/device/approve", body = body, request_id = "req_security_approve", remote_addr = "127.0.0.1:4444", headers = trusted_headers[:]})
-	assert_eq(approve_resp.status, 200, "HTTP approve succeeds through trusted proxy")
-	grant, grant_ok := device_auth.get_grant(&graph.device_auth_store, res.device_code)
-	assert_true(grant_ok, "approved grant queryable")
-	assert_eq(grant.owner_user_id, "real-owner", "spoofed owner body ignored; owner from Auth_Context")
-	assert_eq(grant.approver_ip, "203.0.113.88", "approve honors trusted XFF for audit IP")
-	assert_eq(grant.approver_ua, "SecurityMatrix/1.0", "approve records user-agent")
-	assert_eq(grant.device_label, "Audit Laptop", "audit carries device_label")
-	assert_eq(grant.client, "heimdall-electron", "audit carries client")
-	assert_true(grant.decided_at > 0, "audit decided_at recorded")
+	// A user (no bridge key) authorize over HTTP used to mint a Hub user token; it
+	// is refused now (users sign in with OIDC), and stores no grant.
+	user_body := sm_json(struct{client, device_label: string}{"heimdall-electron", "Audit Laptop"})
+	user_resp := api_http.device_authorize_handler(rawptr(&graph.device_auth_handlers), api_http.Request{
+		method = "POST", path = "/api/v1/device/authorize", body = user_body,
+		request_id = "req_security_user_authorize", remote_addr = "198.51.100.20:5555",
+	})
+	assert_eq(user_resp.status, 400, "user (no bridge key) device authorize -> 400")
+	assert_true(strings.contains(user_resp.body, "sign in with OIDC"), "user authorize names the removal")
+	_, user_grant_found := grant_for_label(&graph.device_auth_store, "Audit Laptop")
+	assert_true(!user_grant_found, "no grant stored for a refused user authorize")
 
-	tokens, token_err := auth_service.list_user_api_tokens(&graph.auth, domain.User_ID("real-owner"))
-	assert_eq(token_err.code, domain.Error_Code.None, "tokens list succeeds for approving owner")
-	found_device_token := false
-	found_token_id := ""
-	for token in tokens {
-		if token.created_from == "device_authorization" && token.device_label == "Audit Laptop" && token.revoked_at == "" {
-			found_device_token = true
-			found_token_id = token.token_id
-		}
-	}
-	assert_true(found_device_token, "tokens list surfaces device provenance")
-
-	deny_res, deny_auth_ok, _ := device_auth.authorize(&graph.device_auth, {client = "heimdall-electron", device_label = "Denied Laptop"}, "198.51.100.21:5555", "")
-	assert_true(deny_auth_ok, "authorize deny audit grant succeeds")
-	deny_body := sm_json(Sm_Approve_Body{user_code = deny_res.user_code, approve = false, owner_user_id = "spoof-deny"})
-	deny_resp := api_http.device_approve_handler(rawptr(&graph.device_auth_handlers), api_http.Request{method = "POST", path = "/api/v1/device/approve", body = deny_body, request_id = "req_security_deny", remote_addr = "127.0.0.1:4444", headers = trusted_headers[:]})
-	assert_eq(deny_resp.status, 200, "HTTP deny succeeds through trusted proxy")
+	// Owner spoof + audit on a bridge grant decided over HTTP by a session user.
+	// (A full approve needs a vault approval; test_bridge_enrollment_end_to_end
+	// covers it. Deny exercises the same owner binding and audit fields.)
+	trusted_headers := sm_session_headers(&graph, "real-owner", "203.0.113.88, 10.0.0.1", "SecurityMatrix/1.0")
+	deny_in := sm_bridge_input("Denied Laptop")
+	deny_res, deny_auth_ok, deny_auth_err := device_auth.authorize(&graph.device_auth, deny_in, "198.51.100.21:5555", "203.0.113.250")
+	assert_true(deny_auth_ok, deny_auth_err.message)
+	deny_body := sm_json(Sm_Approve_Body{pair_lookup = deny_in.pair_lookup, approve = false, owner_user_id = "spoof-deny", user = "spoof-user"})
+	deny_resp := api_http.device_approve_handler(rawptr(&graph.device_auth_handlers), api_http.Request{method = "POST", path = "/api/v1/device/approve", body = deny_body, request_id = "req_security_deny", remote_addr = "127.0.0.1:4444", headers = trusted_headers})
+	assert_eq(deny_resp.status, 200, "HTTP deny succeeds for a session user")
 	deny_grant, deny_grant_ok := device_auth.get_grant(&graph.device_auth_store, deny_res.device_code)
 	assert_true(deny_grant_ok, "denied grant queryable")
 	assert_eq(deny_grant.status, device_auth.Grant_Status.Denied, "deny terminal status recorded")
-	assert_eq(deny_grant.owner_user_id, "real-owner", "deny owner from context")
-	assert_eq(deny_grant.approver_ip, "203.0.113.88", "deny audit IP recorded")
-	assert_eq(deny_grant.approver_ua, "SecurityMatrix/1.0", "deny UA recorded")
-	assert_eq(deny_grant.minted_token, "", "deny does not mint token")
+	assert_eq(deny_grant.owner_user_id, "real-owner", "spoofed owner body ignored; owner from Auth_Context")
+	assert_eq(deny_grant.approver_ip, "203.0.113.88", "deny honors trusted XFF for audit IP")
+	assert_eq(deny_grant.approver_ua, "SecurityMatrix/1.0", "deny records user-agent")
+	assert_eq(deny_grant.device_label, "Denied Laptop", "audit carries device_label")
+	assert_eq(deny_grant.client, "ham-bridge", "audit carries client")
+	assert_true(deny_grant.decided_at > 0, "audit decided_at recorded")
+	assert_eq(deny_grant.minted_token, "", "deny does not mint a credential")
 
-	// Authoritative token row is queryable by id too, proving provenance survives
-	// repository read paths and is not only an in-memory grant field.
-	if found_device_token && found_token_id != "" {
-		row, row_ok, _ := iface.user_token_get_by_id(graph.auth.user_tokens, found_token_id)
-		assert_true(row_ok, "token row query by id succeeds")
-		assert_true(row.created_from != "" && row.device_label != "", "token provenance query by id includes audit fields")
-	}
-	fmt.println("ELDA-6/ELDA-7 OK: HTTP owner spoof guard + queryable approve/deny audit/provenance")
+	// The decided grant cannot be decided again (terminal).
+	again_resp := api_http.device_approve_handler(rawptr(&graph.device_auth_handlers), api_http.Request{method = "POST", path = "/api/v1/device/approve", body = deny_body, request_id = "req_security_deny_again", remote_addr = "127.0.0.1:4444", headers = trusted_headers})
+	assert_true(again_resp.status != 200, "a decided grant is terminal")
+	fmt.println("ELDA-6/ELDA-7 OK: user authorize refused; HTTP owner spoof guard + queryable deny audit")
 }
 
 // ── Passwordless vault helpers (fixed key scalars; no randomness) ───────────

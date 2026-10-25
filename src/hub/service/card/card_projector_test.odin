@@ -236,7 +236,7 @@ test_projector_user_decision_precedence :: proc(t: ^testing.T) {
 	testing.expect_value(t, c3.status, domain.CARD_STATUS_PENDING)
 
 	// Snoozed: stays snoozed while the marker is unchanged ...
-	_, snooze_ok, _ := snooze_card(&h.svc, contracts.Auth_Context{kind = .User_Token, user_id = string(PH_OWNER)}, cid, "2099-01-01T00:00:00Z")
+	_, snooze_ok, _ := snooze_card(&h.svc, contracts.Auth_Context{kind = .Session, user_id = string(PH_OWNER)}, cid, "2099-01-01T00:00:00Z")
 	testing.expect(t, snooze_ok, "snooze")
 	_, _ = project_task_card(&h.svc, PH_OWNER, "task_p")
 	c4, _ := ph_card(t, &h, cid)
@@ -349,7 +349,7 @@ test_projector_message_card_per_instance :: proc(t: ^testing.T) {
 	testing.expect(t, !b_ok, "no card without options")
 
 	// A message card cannot be accepted.
-	_, acc_ok, acc_err := accept_card(&h.svc, contracts.Auth_Context{kind = .User_Token, user_id = string(PH_OWNER)}, a.card_id)
+	_, acc_ok, acc_err := accept_card(&h.svc, contracts.Auth_Context{kind = .Session, user_id = string(PH_OWNER)}, a.card_id)
 	testing.expect(t, !acc_ok, "message card accept refused")
 	testing.expect_value(t, acc_err.code, domain.Error_Code.Conflict)
 
@@ -365,7 +365,7 @@ test_projector_message_card_per_instance :: proc(t: ^testing.T) {
 	testing.expect_value(t, a3.source_marker, "msg_a4")
 
 	// Reading the conversation retires it.
-	_, read_ok, read_err := content_service.mark_read(&h.content_svc, contracts.Auth_Context{kind = .User_Token, user_id = string(PH_OWNER)}, "chat_a")
+	_, read_ok, read_err := content_service.mark_read(&h.content_svc, contracts.Auth_Context{kind = .Session, user_id = string(PH_OWNER)}, "chat_a")
 	testing.expectf(t, read_ok, "mark read: %s", read_err.message)
 	a4, _ := ph_card(t, &h, attention_message_card_id("inst_a"))
 	testing.expect_value(t, a4.status, domain.CARD_STATUS_RESOLVED)

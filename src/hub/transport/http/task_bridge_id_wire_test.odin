@@ -4,7 +4,7 @@ package http
 //
 // The unit tests pin the shared parse helper and the emitted JSON key. The two
 // handler-level tests drive the REAL create/patch/agent-action handlers against a
-// real sqlite-backed service stack with real auth (a trusted-proxy user for the
+// real sqlite-backed service stack with real auth (a session-cookie user for the
 // cookie API; an enrolled bridge plus its instance assertion for the agent-action
 // API), so "persisted", "cleared", and "rejected with nothing persisted" are
 // asserted against the database instead of a fake, and both transports are proven
@@ -89,6 +89,7 @@ wire_fixture :: struct {
 	br_svc:   bridge_service.Bridge_Service,
 	us_svc:   user_service.User_Service,
 	auth_svc: auth_service.Auth_Service,
+	user_headers: []contracts.HTTP_Header, // session cookie for the fixture owner
 	th:       Taskchain_Handlers,
 	ah:       Agent_Action_Handlers,
 
@@ -110,8 +111,6 @@ wire_fixture :: struct {
 // File-scope so the backing arrays outlive the frames that build requests and
 // store the cidrs: a compound literal allocated inside wire_setup dangles once
 // setup returns (auth.remote_addr_trusted reads it on every later request).
-WIRE_COOKIE_HEADERS := [1]contracts.HTTP_Header{{name = "X-authentik-username", value = "wire_owner"}}
-WIRE_TRUSTED_CIDRS := [1]string{"127.0.0.1/32"}
 
 wire_cookie_request :: proc(f: ^wire_fixture, method, path, body: string) -> Request {
 	return Request{
@@ -120,7 +119,7 @@ wire_cookie_request :: proc(f: ^wire_fixture, method, path, body: string) -> Req
 		body        = body,
 		request_id  = "req_wire",
 		remote_addr = "127.0.0.1:4444",
-		headers     = WIRE_COOKIE_HEADERS[:],
+		headers     = f.user_headers,
 	}
 }
 
@@ -204,11 +203,7 @@ wire_setup :: proc(t: ^testing.T, tag: string) -> ^wire_fixture {
 	f.br_svc = bridge_service.new_bridge_service(&f.br_repo, &f.clock, &f.ids)
 	f.us_svc = user_service.new_user_service_basic(&f.us_repo, &f.clock, &f.ids)
 
-	f.auth_svc = auth_service.new_auth_service(auth_service.Trusted_Proxy_Config{
-		username_header      = "X-authentik-username",
-		trusted_proxy_cidrs  = WIRE_TRUSTED_CIDRS[:],
-		auto_provision_users = true,
-	}, &f.us_svc)
+	f.auth_svc = auth_service.new_auth_service(auth_service.Auth_Config{auto_provision_users = true}, &f.us_svc)
 	f.auth_svc.clock = &f.clock
 	f.auth_svc.ids = &f.ids
 	f.auth_svc.bridges = &f.br_svc
@@ -217,13 +212,14 @@ wire_setup :: proc(t: ^testing.T, tag: string) -> ^wire_fixture {
 	f.th = Taskchain_Handlers{auth = &f.auth_svc, taskchains = &f.tc_svc, agents = &f.ag_svc}
 	f.ah = Agent_Action_Handlers{auth = &f.auth_svc, agents = &f.ag_svc, bridges = &f.br_svc, taskchains = &f.tc_svc}
 
-	// Resolve the owner through the SAME trusted-proxy path the cookie handlers use
+	// Resolve the owner through the SAME session-cookie path the cookie handlers use
 	// (auto-provisioned), so the fixture owner id is exactly what auth will produce.
+	f.user_headers = http_test_login(t, &f.auth_svc, "wire_owner")
 	owner_ctx, owner_ok, owner_err := auth_service.resolve_auth_any(&f.auth_svc, auth_service.Auth_Request{
 		remote_addr = "127.0.0.1:4444",
-		headers     = WIRE_COOKIE_HEADERS[:],
+		headers     = f.user_headers,
 	})
-	testing.expectf(t, owner_ok, "trusted-proxy owner resolves (%s)", owner_err.message)
+	testing.expectf(t, owner_ok, "session owner resolves (%s)", owner_err.message)
 	f.owner = domain.User_ID(owner_ctx.user_id)
 
 	f.chain_id = domain.Task_Chain_ID("chain_wire_tb2")
@@ -238,7 +234,7 @@ wire_setup :: proc(t: ^testing.T, tag: string) -> ^wire_fixture {
 		updated_at    = "2026-09-25T10:00:00Z",
 	})
 
-	owner_auth := contracts.Auth_Context{kind = .User_Token, user_id = string(f.owner)}
+	owner_auth := contracts.Auth_Context{kind = .Session, user_id = string(f.owner)}
 	f.bridge_pin = wire_enroll_bridge(t, f, owner_auth.user_id, "wire-host-pin", &f.bridge_token)
 	f.bridge_alt = wire_enroll_bridge(t, f, owner_auth.user_id, "wire-host-alt", nil)
 	f.bridge_foreign = wire_enroll_bridge(t, f, "wire_foreign_owner", "wire-host-foreign", nil)
@@ -444,7 +440,7 @@ test_write_task_json_and_detail_emit_v2_state :: proc(t: ^testing.T) {
 
 	f := wire_setup(t, "state_wire")
 	defer wire_teardown(f)
-	owner_auth := contracts.Auth_Context{kind = .User_Token, user_id = string(f.owner)}
+	owner_auth := contracts.Auth_Context{kind = .Session, user_id = string(f.owner)}
 
 	for c in cases {
 		task := domain.Task{
@@ -489,7 +485,7 @@ test_write_task_json_and_detail_emit_v2_state :: proc(t: ^testing.T) {
 test_write_task_detail_emits_current_attempt_reviews :: proc(t: ^testing.T) {
 	f := wire_setup(t, "review_wire")
 	defer wire_teardown(f)
-	owner_auth := contracts.Auth_Context{kind = .User_Token, user_id = string(f.owner)}
+	owner_auth := contracts.Auth_Context{kind = .Session, user_id = string(f.owner)}
 	task := domain.Task{
 		task_id = domain.Task_ID("task_review_wire"), chain_id = f.chain_id, owner_user_id = f.owner,
 		title = "Review Wire Task", publish_state = .Published, state = .In_Review, kind = .Task, priority = .P2,

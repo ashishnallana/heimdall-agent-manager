@@ -106,6 +106,14 @@ ctl_valid_task_priority :: proc(value: string) -> bool {
 	return false
 }
 
+// ctl_user_token_removed reports (and explains) a Hub user token (hut_): the Hub
+// no longer accepts them; users authenticate with OIDC only.
+ctl_user_token_removed :: proc(user_tok: string) -> bool {
+	if !strings.has_prefix(user_tok, "hut_") do return false
+	fmt.println(`{"ok":false,"message":"Heimdall user tokens (hut_) were removed: the Hub accepts only OIDC sign-in for users. ham-ctl user mode is not available; run ham-ctl inside an agent instance (agent mode) or use the web UI."}`)
+	return true
+}
+
 resolve_ctl_transport :: proc(args: []string) -> (Ctl_Transport, bool) {
 	as_override := option_value(args, "--as", "")
 	hub_url := hub_user_mode_url(args)
@@ -113,6 +121,7 @@ resolve_ctl_transport :: proc(args: []string) -> (Ctl_Transport, bool) {
 	ag_endpoint := agent_mode_endpoint(args)
 	ag_tok := agent_mode_token(args)
 
+	if ctl_user_token_removed(user_tok) do return Ctl_Transport{}, false
 	if as_override == "user" {
 		if hub_url == "" || user_tok == "" {
 			fmt.println(`{"ok":false,"message":"--as user requires --hub-url and --user-token (or HAM_HUB_URL and HAM_USER_TOKEN)"}`)

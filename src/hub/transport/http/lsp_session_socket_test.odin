@@ -376,7 +376,7 @@ test_lsp_stream_handler_runs_and_unwinds_cleanly :: proc(t: ^testing.T) {
 	tickets := new_user_ws_ticket_store()
 	defer user_ws_ticket_store_free(&tickets)
 	user_ws_ticket_store_put(&tickets, "uwst_test_ticket", contracts.Auth_Context{
-		kind = .User_Token, user_id = "user_a", name = "a", display_name = "A", email = "a@x",
+		kind = .Session, user_id = "user_a", name = "a", display_name = "A", email = "a@x",
 	}, 60)
 
 	// Experiment ON so the handler gets past the gate and reaches the id

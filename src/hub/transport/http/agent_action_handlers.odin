@@ -352,7 +352,7 @@ agent_action_chat_send_to_agent_handler :: proc(ctx: rawptr, req: Request) -> Re
 	// E3: the row lands in the TARGET's conversation and moves its preview and
 	// last_message_at; id-only hint from the re-read row (no body, no toast).
 	if h.event_bus != nil {
-		if conv, conv_ok, _ := content_service.get_conversation(h.content, contracts.Auth_Context{kind = .User_Token, user_id = string(inst.owner_user_id)}, msg.conversation_id); conv_ok do publish_chat_message_created(h.event_bus, conv, msg)
+		if conv, conv_ok, _ := content_service.get_conversation(h.content, contracts.Auth_Context{kind = .Internal_User, user_id = string(inst.owner_user_id)}, msg.conversation_id); conv_ok do publish_chat_message_created(h.event_bus, conv, msg)
 	}
 	// Q3: id-free plain phrase (never resolve the target's name in the emit path).
 	publish_agent_action(h, inst, "chat_send_agent", "messaged another agent")

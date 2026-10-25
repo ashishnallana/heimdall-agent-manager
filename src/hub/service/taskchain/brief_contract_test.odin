@@ -41,7 +41,7 @@ brief_contract_open :: proc(t: ^testing.T, f: ^Brief_Contract_Fixture, name: str
 	f.clock = platform.real_clock()
 	f.ids = platform.real_id_generator()
 	f.svc = new_taskchain_service(&f.repo, &f.agents, &f.clock, &f.ids)
-	f.owner = contracts.Auth_Context{kind = .User_Token, user_id = "owner"}
+	f.owner = contracts.Auth_Context{kind = .Session, user_id = "owner"}
 	now := platform.clock_now(&f.clock)
 	for id in ([]string{"agt_worker", "agt_rev", "agt_rev2"}) {
 		_, _, _ = iface.agent_save(&f.agents, domain.Agent{agent_id = id, owner_user_id = "owner", name = id, slug = id, created_at = now, updated_at = now})

@@ -50,23 +50,17 @@ test_title_mutation_live_events_and_flat_listing :: proc(t: ^testing.T) {
 	_ = os.remove(db_path)
 	defer _ = os.remove(db_path)
 
-	cidrs := [?]string{"127.0.0.1/32"}
 	graph: app.App_Graph
 	ok, msg := app.build_graph(&graph, app.Hub_Config{
 		database_path        = db_path,
 		migrations_dir       = "src/hub/repository/sqlite/migrations",
-		username_header      = "X-authentik-username",
-		display_name_header  = "X-authentik-name",
-		email_header         = "X-authentik-email",
-		trusted_proxy_cidrs  = cidrs[:],
 		auto_provision_users = true,
-		logout_url           = "/_dev/logout",
 		paddle_environment   = "sandbox",
 	})
 	testing.expect(t, ok, msg)
 	defer app.shutdown_graph(&graph)
 
-	alice := [?]contracts.HTTP_Header{{name = "X-authentik-username", value = "alice"}}
+	alice := hub_test_user_headers(&graph, "alice")
 
 	// Setup mock loopback TCP socket for live event bus verification
 	listener, listen_err := net.listen_tcp(net.Endpoint{address = net.IP4_Loopback, port = 0})

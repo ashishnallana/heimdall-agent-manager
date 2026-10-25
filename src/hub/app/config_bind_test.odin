@@ -71,7 +71,7 @@ test_pairing_hub_origins_canonicalized_and_validated :: proc(t: ^testing.T) {
 @(test)
 test_preview_legacy_path_defaults_closed_and_notice :: proc(t: ^testing.T) {
 	config := default_config()
-	defer delete(config.trusted_proxy_cidrs)
+	defer delete(config.forwarded_for_trusted_cidrs)
 	testing.expect(t, !config.preview_legacy_path, "a dedicated preview origin must close the same-origin route by default")
 	testing.expect(t, strings.has_prefix(preview_legacy_path_notice("", false), "WARNING:"))
 	testing.expect(t, strings.has_prefix(preview_legacy_path_notice("https://preview.example", true), "WARNING:"))

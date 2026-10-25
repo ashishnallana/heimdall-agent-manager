@@ -1,12 +1,12 @@
 // HTTP handlers for the passwordless vault device directory
-// (docs/plans/passwordless-vault.md §2 P2). OIDC, trusted-proxy or user-token auth;
+// (docs/plans/passwordless-vault.md §2 P2). Hub session or OIDC bearer auth;
 // OIDC requests pass the central v2 gate before reaching these handlers, which
 // reuse the verified signer without consuming the same nonce a second time.
 // every mutation except register/genesis/reset also needs the device request
 // signature headers X-Heimdall-Device-{Id,Ts,Nonce,Sig}, verified by the service.
 // register, genesis and reset are the unsigned entry points, so they accept ONLY an
-// interactive browser session (Trusted_Proxy) — never a user token, which a script or
-// a stolen ham-ctl credential could hold.
+// interactive browser session (the Hub session cookie) or the native app's OIDC
+// bearer with its verified v2 device proof.
 //
 // JSON: requests are decoded into typed structs (json.unmarshal) and responses are
 // typed structs encoded with json.marshal. The signed/hashed canonical forms

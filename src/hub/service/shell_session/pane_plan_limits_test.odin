@@ -142,8 +142,8 @@ test_pane_plan_poll_sliding_window_cap_and_exemptions :: proc(t: ^testing.T) {
 	defer shell_session_service_free(&svc)
 	f := Pane_Plan_Test{max_streams = 2}
 	pane_plan_configure(&svc, &f)
-	alice := contracts.Auth_Context{kind = .User_Token, user_id = "alice"}
-	bob := contracts.Auth_Context{kind = .Trusted_Proxy, user_id = "bob"}
+	alice := contracts.Auth_Context{kind = .Session, user_id = "alice"}
+	bob := contracts.Auth_Context{kind = .OIDC, user_id = "bob"}
 	testing.expect_value(t, shell_session_admit_pane_poll(&svc, alice).code, domain.Error_Code.None)
 	f.now._nsec += i64(500 * time.Millisecond)
 	testing.expect_value(t, shell_session_admit_pane_poll(&svc, alice).code, domain.Error_Code.None)

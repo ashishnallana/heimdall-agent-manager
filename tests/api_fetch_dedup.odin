@@ -75,7 +75,7 @@ main :: proc() {
     // Empty enrichment must not dereference even a non-nil unconfigured service.
     broken := content.Content_Service{}
     h.content=&broken
-    items := http.enrich_chain_list_items(&h,{kind=.User_Token,user_id=OWNER},nil,false,true)
+    items := http.enrich_chain_list_items(&h,{kind = .Session,user_id=OWNER},nil,false,true)
     require(len(items)==0,"empty helper")
     h.content=&content_svc
 
@@ -91,14 +91,14 @@ main :: proc() {
         check(e); require(saved,"save conversation")
     }
     full, full_err := iface.content_list_conversations(&content_repo,OWNER,200,""); check(full_err)
-    links, links_err := content.list_conversation_project_links(&content_svc,{kind=.User_Token,user_id=OWNER}); check(links_err)
+    links, links_err := content.list_conversation_project_links(&content_svc,{kind = .Session,user_id=OWNER}); check(links_err)
     require(len(full)==200 && len(links)==200,"projection retains 200 boundary")
     for c,i in full {
         link:=links[i]
         require(c.conversation_id==link.conversation_id && c.agent_instance_id==link.agent_instance_id &&
             c.project_id==link.project_id && c.chain_id==link.chain_id,"projection equivalence")
     }
-    other, other_err := content.list_conversation_project_links(&content_svc,{kind=.User_Token,user_id="other-owner"}); check(other_err)
+    other, other_err := content.list_conversation_project_links(&content_svc,{kind = .Session,user_id="other-owner"}); check(other_err)
     require(len(other)==1 && other[0].conversation_id=="chat_205","owner isolation")
     _, unauthorized := content.list_conversation_project_links(&content_svc,{})
     require(unauthorized.code!=.None,"projection requires auth")
@@ -109,7 +109,7 @@ main :: proc() {
         {chain_id="chain_3",owner_user_id=OWNER,kind=domain.CHAIN_KIND_MIXED_WORK,title="fallback",created_at=NOW,updated_at=NOW,status=.Archived},
         {chain_id="missing",owner_user_id=OWNER,kind=domain.CHAIN_KIND_MIXED_WORK,title="unassigned",created_at=NOW,updated_at=NOW},
     }
-    enriched:=http.enrich_chain_list_items(&h,{kind=.User_Token,user_id=OWNER},chains,false,true)
+    enriched:=http.enrich_chain_list_items(&h,{kind = .Session,user_id=OWNER},chains,false,true)
     require(len(enriched)==3,"all enriched chains")
     require(enriched[0].project_id=="project_3","coordinator mapping wins")
     require(enriched[1].project_id=="project_3" && enriched[1].coordinator_agent_instance_id=="instance_3","chain fallback")

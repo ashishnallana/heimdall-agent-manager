@@ -469,7 +469,7 @@ review_result :: proc(svc: ^Service, task_id: domain.Task_ID, gate: Gate_Result)
 // (requires_user_approval, or simply as a human reviewer).
 user_review :: proc(svc: ^Service, auth: contracts.Auth_Context, task_id: domain.Task_ID, input: Review_Input) -> (Review_Result, bool, domain.Domain_Error) {
 	if input.verdict != "approve" && input.verdict != "request_changes" do return {}, false, domain.domain_error(.Validation_Failed, "verdict must be approve or request_changes")
-	if !contracts.is_user_auth(auth) do return {}, false, domain.domain_error(.Forbidden, "user token is required")
+	if !contracts.is_user_auth(auth) do return {}, false, domain.domain_error(.Forbidden, "user authentication is required")
 	if verr := require_change_reason(input); verr.code != .None do return {}, false, verr
 	u, uok, uerr := begin_uow(svc)
 	if !uok do return {}, false, uerr

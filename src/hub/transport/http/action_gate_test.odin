@@ -3,7 +3,7 @@ package http
 // REQ-EXP-GATE-3/4/6: every Actions route (user CRUD/run, /scheduled-prompts aliases,
 // bridge snapshot and execute) is refused for an owner without the actions flag
 // BEFORE any action repository read, write, lease, launch or prompt. These drive the
-// production handlers with real trusted-proxy / bridge-token auth (wire fixture) and a
+// production handlers with real session-cookie / bridge-token auth (wire fixture) and a
 // counting fake action repository: a refusal leaves the counter at zero.
 
 import "core:encoding/json"

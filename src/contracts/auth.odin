@@ -2,14 +2,15 @@ package contracts
 
 Auth_Kind :: enum {
 	None,
-	Trusted_Proxy,
-	User_Token,
 	Bridge_Token,
 	Enrollment_Token,
 	Instance_Token,
 	OIDC,
 	// Browser session established by the Hub's own OIDC login (opaque cookie).
 	Session,
+	// The Hub itself acting on behalf of a user (reaper, schedulers, card/action
+	// follow-ups). Constructed in-process only; never resolved from a request.
+	Internal_User,
 }
 
 Auth_Context :: struct {
@@ -23,7 +24,6 @@ Auth_Context :: struct {
 	token_scopes: []string,
 	// Set only after transport verifies the device request proof. Never from headers alone.
 	device_id: string,
-	user_token_id: string, // opaque identity for long-lived stream revocation checks
 	// Session: the SHA-256 (hex) of the session id, used to re-check long-lived
 	// streams against the session store. Never the cookie value itself.
 	session_id: string,
@@ -36,17 +36,16 @@ Auth_Context :: struct {
 // bridge, enrollment or agent-instance credential).
 is_user_auth :: proc(ctx: Auth_Context) -> bool {
 	#partial switch ctx.kind {
-	case .Session, .OIDC, .User_Token, .Trusted_Proxy:
+	case .Session, .OIDC, .Internal_User:
 		return true
 	}
 	return false
 }
 
 // is_interactive_browser_auth reports whether the principal is an interactive
-// browser session: the Hub's own session cookie, or (until it is removed) the
-// trusted-proxy identity. Never a bearer token.
+// browser session (the Hub's own session cookie). Never a bearer token.
 is_interactive_browser_auth :: proc(ctx: Auth_Context) -> bool {
-	return ctx.kind == .Session || ctx.kind == .Trusted_Proxy
+	return ctx.kind == .Session
 }
 
 HTTP_Header :: struct {

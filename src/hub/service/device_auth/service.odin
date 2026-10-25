@@ -29,12 +29,6 @@ Device_Auth_Service :: struct {
 	store:           ^Grant_Store,
 	clock:           Monotonic_Clock,
 	trusted_cidrs:   []string,
-	// minter pre-mints a token on approve (task 3 owns the real issuer; task 2
-	// defines the boundary and stores the plaintext on the grant for the first
-	// poll). May be nil — approve then leaves minted_token empty and task 3's
-	// poll path mints lazily.
-	minter:          Token_Minter,
-	minter_ctx:      rawptr,
 	// REQ-IMPL-2: bridge_minter issues the per-machine, bridge-scoped credential
 	// for a BRIDGE grant. It is a separate seam from `minter` on purpose — the
 	// two produce different identities (a `brg_` vs a user token), and a single
@@ -105,12 +99,6 @@ Bridge_Mint_Result :: struct {
 // fail the approval outright — a bridge grant never falls back to the user minter.
 Bridge_Token_Minter :: proc(ctx: rawptr, req: Bridge_Mint_Request) -> (Bridge_Mint_Result, bool)
 
-// Token_Minter issues a long-lived token for the bound owner the moment a
-// grant is approved. Task 3 provides the real implementation (user/bridge
-// token issuance); tests inject a fake. Returns (plaintext, token_id, true) on success.
-// `ctx` is opaque state the concrete minter casts back to its service graph.
-Token_Minter :: proc(ctx: rawptr, user_id, client, device_label: string) -> (string, string, bool)
-
 new_device_auth_service :: proc(store: ^Grant_Store, clock: Monotonic_Clock, trusted_cidrs: []string) -> Device_Auth_Service {
 	// Own a stable copy of the trusted CIDR strings. Callers often pass config or
 	// test-local slices; holding those slice headers directly can leave the
@@ -120,15 +108,6 @@ new_device_auth_service :: proc(store: ^Grant_Store, clock: Monotonic_Clock, tru
 		owned_cidrs[i] = strings.clone(trusted_cidrs[i])
 	}
 	return Device_Auth_Service{store = store, clock = clock, trusted_cidrs = owned_cidrs}
-}
-
-// with_token_minter attaches the task-3 token issuer so approve can pre-mint.
-// `ctx` is forwarded to the minter on each call (the app wiring passes the
-// App_Graph; tests pass their fake's state). Called by app wiring once task 3
-// ships the real minter; tests inject a fake.
-with_token_minter :: proc(service: ^Device_Auth_Service, minter: Token_Minter, minter_ctx: rawptr = nil) {
-	service.minter = minter
-	service.minter_ctx = minter_ctx
 }
 
 // with_bridge_token_minter attaches the REQ-IMPL-2 bridge-credential issuer, used
@@ -235,7 +214,7 @@ GENERIC_UNKNOWN_CODE_ERROR :: proc() -> domain.Domain_Error {
 //   - expired code  -> Not_Found generic (no enumeration), grant evicted
 //   - terminal code -> Gone (410) "code already used" (AC5)
 //   - pending valid -> Device_Info (AC3)
-// Caller MUST have already passed trusted-proxy auth (handler enforces it).
+// Caller MUST have already authenticated the approving user (handler enforces it).
 verify :: proc(service: ^Device_Auth_Service, user_code: string) -> (Device_Info, bool, domain.Domain_Error) {
 	return verify_with_ip(service, user_code, "")
 }
@@ -413,16 +392,9 @@ approve :: proc(service: ^Device_Auth_Service, input: Approve_Input, owner_user_
 			grant.minted_expires_in = mint.expires_in
 			grant.minted_refresh_expires_in = mint.refresh_expires_in
 			grant.vault_delivery_expected = mint.vault_delivery_expected
-		case .User_Token:
-			// Pre-mint the token so the first /device/token poll can return it (task 3).
-			// If the wired minter cannot issue, do not mark the grant approved; otherwise
-			// the device would poll forever without a token.
-			if service.minter != nil {
-				token, token_id, tok_ok := service.minter(service.minter_ctx, owner_user_id, grant.client, grant.device_label)
-				if !tok_ok do return false, domain.domain_error(.Internal_Error, "could not issue device authorization token")
-				grant.minted_token = token
-				grant.minted_token_id = token_id
-			}
+		case .Unsupported:
+			// Unreachable (authorize refuses these); never approve one.
+			return false, domain.domain_error(.Validation_Failed, DEVICE_AUTH_USER_GRANT_REMOVED)
 		}
 		grant.status = .Approved
 	} else {

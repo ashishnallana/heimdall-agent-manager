@@ -90,16 +90,18 @@ OS_USER_MAX_LEN :: 64
 is_bridge_grant :: proc(grant: Grant) -> bool {
 	switch grant.grant_kind {
 	case .Bridge_Enrollment: return true
-	case .User_Token:        return false
+	case .Unsupported:       return false
 	}
 	return false
 }
 
 // grant_kind_for_input is the ONE place the discriminator rule lives: a request
 // that contributes a bridge public key is a machine enrollment. The Electron
-// client sends none, so it keeps the pre-existing user-token path untouched.
+// A request without one used to mint a user token; that path was removed.
+DEVICE_AUTH_USER_GRANT_REMOVED :: "device authorization for users was removed; sign in with OIDC (bridge enrollment requires bridge_public_key)"
+
 grant_kind_for_input :: proc(input: Authorize_Input) -> Grant_Kind {
-	return .Bridge_Enrollment if input.bridge_public_key != "" else .User_Token
+	return .Bridge_Enrollment if input.bridge_public_key != "" else .Unsupported
 }
 
 // valid_bridge_public_key checks the submitted key is a plausible uncompressed
@@ -251,24 +253,9 @@ validate_bridge_authorize_input :: proc(input: Authorize_Input, allocator := con
 	if !valid_os_user(input.os_user) {
 		return "", kind, false, domain.domain_error(.Validation_Failed, "os_user is too long or contains control characters")
 	}
-	if kind == .User_Token {
-		// Not a bridge enrollment. A fingerprint submitted without a key has
-		// nothing to be checked against, so it is refused rather than stored
-		// unverified — a stored-but-underived fingerprint is the one thing the
-		// approval page must never display.
-		if input.bridge_key_fingerprint != "" {
-			return "", kind, false, domain.domain_error(.Validation_Failed, "bridge_key_fingerprint requires bridge_public_key")
-		}
-		if input.bridge_identity_public_key != "" || input.bridge_identity_proof != "" {
-			return "", kind, false, domain.domain_error(.Validation_Failed, "bridge_identity_public_key requires bridge_public_key")
-		}
-		if input.pair_lookup != "" || input.pair_key_mac != "" || input.pair_salt != "" || input.pair_hub_origin != "" {
-			return "", kind, false, domain.domain_error(.Validation_Failed, "pair_lookup requires bridge_public_key")
-		}
-		if input.previous_bridge_id != "" {
-			return "", kind, false, domain.domain_error(.Validation_Failed, "previous_bridge_id requires bridge_public_key")
-		}
-		return "", kind, true, domain.Domain_Error{}
+	if kind == .Unsupported {
+		// User device authorization (the Hub user-token grant) was removed.
+		return "", kind, false, domain.domain_error(.Validation_Failed, DEVICE_AUTH_USER_GRANT_REMOVED)
 	}
 	if !valid_bridge_public_key(input.bridge_public_key) {
 		return "", kind, false, domain.domain_error(.Validation_Failed, "bridge_public_key must be a 130-char lowercase-hex uncompressed P-256 point")

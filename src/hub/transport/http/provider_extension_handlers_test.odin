@@ -74,6 +74,7 @@ extension_handler_fixture :: struct {
 	us_svc:        user_service.User_Service,
 	ag_svc:        agent_service.Agent_Service,
 	auth_svc:      auth_service.Auth_Service,
+	user_headers: []contracts.HTTP_Header, // session cookie for the fixture owner
 	bh:            Bridge_Handlers,
 	registry:      project_service.Bridge_Runtime_Registry,
 	sink_rec:      Extension_Sink_Recorder,
@@ -81,12 +82,6 @@ extension_handler_fixture :: struct {
 	bridge_id:     string,
 }
 
-@(private = "file")
-EXTENSION_TEST_HEADERS := [1]contracts.HTTP_Header {
-	{name = "X-authentik-username", value = "update_test_user"},
-}
-@(private = "file")
-EXTENSION_TEST_CIDRS := [1]string{"127.0.0.1/32"}
 
 @(private = "file")
 extension_test_setup :: proc(
@@ -124,12 +119,7 @@ extension_test_setup :: proc(
 	f.us_svc = user_service.new_user_service_basic(&f.us_repo, &f.clock, &f.ids)
 	f.ag_svc = agent_service.new_agent_service(&f.ag_repo, &f.br_repo, &f.clock, &f.ids)
 
-	f.auth_svc = auth_service.new_auth_service(
-		auth_service.Trusted_Proxy_Config {
-			username_header = "X-authentik-username",
-			trusted_proxy_cidrs = EXTENSION_TEST_CIDRS[:],
-			auto_provision_users = true,
-		},
+	f.auth_svc = auth_service.new_auth_service(auth_service.Auth_Config{auto_provision_users = true},
 		&f.us_svc,
 	)
 	f.auth_svc.clock = &f.clock
@@ -144,18 +134,19 @@ extension_test_setup :: proc(
 		bridge_runtime_registry = &f.registry,
 	}
 
+	f.user_headers = http_test_login(t, &f.auth_svc, "update_test_user")
 	owner_ctx, owner_ok, _ := auth_service.resolve_auth_any(
 		&f.auth_svc,
 		auth_service.Auth_Request {
 			remote_addr = "127.0.0.1:4444",
-			headers = EXTENSION_TEST_HEADERS[:],
+			headers = f.user_headers,
 		},
 	)
-	testing.expect(t, owner_ok, "trusted proxy owner resolved")
+	testing.expect(t, owner_ok, "session owner resolved")
 	f.owner_user_id = strings.clone(owner_ctx.user_id)
 
 	owner_auth := contracts.Auth_Context {
-		kind    = .User_Token,
+		kind    = .Session,
 		user_id = f.owner_user_id,
 	}
 	// Provisioned through the DEVICE-GRANT path, the only enrollment there is
@@ -235,7 +226,7 @@ extension_test_request :: proc(
 		body = body,
 		request_id = "req_extension",
 		remote_addr = "127.0.0.1:4444",
-		headers = EXTENSION_TEST_HEADERS[:],
+		headers = f.user_headers,
 	}
 }
 extension_test_status :: proc(
@@ -604,11 +595,9 @@ test_extension_command_owner_scope_and_stale_connection_frames :: proc(t: ^testi
 	testing.expect_value(t, response.status, 202)
 	id := json_string(response.body, "command_id")
 	defer delete(id)
-	other_headers := [1]contracts.HTTP_Header {
-		{name = "X-authentik-username", value = "other-extension-owner"},
-	}
+	other_headers := http_test_login(t, &f.auth_svc, "other-extension-owner")
 	req := extension_test_request(f, path)
-	req.headers = other_headers[:]
+	req.headers = other_headers
 	denied := bridge_provider_extension_install_handler(rawptr(&f.ph), req)
 	testing.expect(t, denied.status == 403 || denied.status == 404, "other owner cannot install")
 	req.path = fmt.tprintf("%s/%s", path, id); req.method = "GET"

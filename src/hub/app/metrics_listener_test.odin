@@ -21,7 +21,7 @@ test_parse_metrics_addr :: proc(t: ^testing.T) {
 		testing.expect(t, strings.contains(bad_msg, "--metrics-addr"), "message names the flag")
 	}
 	cfg := default_config()
-	defer delete(cfg.trusted_proxy_cidrs)
+	defer delete(cfg.forwarded_for_trusted_cidrs)
 	testing.expect_value(t, cfg.metrics_addr, "")
 }
 
@@ -32,7 +32,7 @@ test_parse_metrics_addr :: proc(t: ^testing.T) {
 @(test)
 test_db_telemetry_default_basic :: proc(t: ^testing.T) {
 	cfg := default_config()
-	defer delete(cfg.trusted_proxy_cidrs)
+	defer delete(cfg.forwarded_for_trusted_cidrs)
 	testing.expect_value(t, cfg.db_telemetry, "")
 	ok, msg := configure_db_telemetry(cfg)
 	testing.expect(t, ok, msg)

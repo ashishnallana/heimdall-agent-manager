@@ -427,7 +427,7 @@ test_revoke_bridge_revokes_credentials_and_asks_to_close_the_socket :: proc(t: ^
 	a := enrol_one(t, f, "host-a")
 	b := enrol_one(t, f, "host-b")
 
-	owner_auth := contracts.Auth_Context{kind = .User_Token, user_id = "approving-human"}
+	owner_auth := contracts.Auth_Context{kind = .Session, user_id = "approving-human"}
 	_, ok, err := revoke_bridge(&f.svc, owner_auth, a.bridge.bridge_id)
 	testing.expect(t, ok, err.message)
 

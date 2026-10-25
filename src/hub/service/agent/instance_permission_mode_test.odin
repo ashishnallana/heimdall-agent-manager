@@ -55,7 +55,7 @@ perm_close :: proc(h: ^Perm_Harness) {
 
 @(private = "file")
 perm_user :: proc() -> contracts.Auth_Context {
-	return contracts.Auth_Context{kind = .User_Token, user_id = PERM_OWNER}
+	return contracts.Auth_Context{kind = .Session, user_id = PERM_OWNER}
 }
 
 // A permission-only operation: same bridge/project/provider/model, only the

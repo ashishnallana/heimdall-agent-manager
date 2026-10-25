@@ -540,7 +540,7 @@ test_instance_terminal_blocks_until_explicit_retry :: proc(t: ^testing.T) {
 	testing.expect_value(t, parked.attempt_no, 1)
 	on_instance_terminal(&fx.svc, "inst_w1")
 	testing.expect_value(t, count_events(fx, "task_1", EV_BLOCKED), 1)
-	started, err := start_task_agent(&fx.svc, contracts.Auth_Context{kind = .User_Token, user_id = "u1"}, parked.task_id)
+	started, err := start_task_agent(&fx.svc, contracts.Auth_Context{kind = .Session, user_id = "u1"}, parked.task_id)
 	testing.expect(t, started && err.code == .None && wake_log_has_run(log, "inst_w1"), "explicit user retry dispatches warm instance")
 	assert_projection_matches_fold(t, fx, chain.chain_id, "u1", "term")
 }
@@ -921,7 +921,7 @@ test_lease_next_inline_grant_idempotent_and_coordinator_none :: proc(t: ^testing
 	cres, cok, _ := lease_next(&fx.svc, contracts.Auth_Context{kind = .Instance_Token, user_id = "u1", agent_instance_id = "inst_coord"}, Lease_Next_Input{})
 	testing.expect(t, cok && cres.status == "none", "coordinator gets none")
 	// a user token is refused
-	_, uok, uerr := lease_next(&fx.svc, contracts.Auth_Context{kind = .User_Token, user_id = "u1"}, Lease_Next_Input{})
+	_, uok, uerr := lease_next(&fx.svc, contracts.Auth_Context{kind = .Session, user_id = "u1"}, Lease_Next_Input{})
 	testing.expect(t, !uok && uerr.code == .Forbidden, "instance token required")
 	// an instance on another chain's user: not found
 	_, xok, xerr := lease_next(&fx.svc, contracts.Auth_Context{kind = .Instance_Token, user_id = "u2", agent_instance_id = "inst_w1"}, Lease_Next_Input{})

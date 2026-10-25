@@ -80,7 +80,7 @@ main :: proc() {
 	check(err2.code == .Not_Found, "cross-owner access must be Not_Found (no info leak)")
 
 	// A user token for the same owner behaves identically (boundary is owner, not kind).
-	user_same := contracts.Auth_Context{kind = .User_Token, user_id = "usr_a"}
+	user_same := contracts.Auth_Context{kind = .Session, user_id = "usr_a"}
 	_, ok3, _ := agent_service.get_instance(&svc, user_same, "inst_owned")
 	check(ok3, "same-owner user token resolves too (owner is the boundary, not token kind)")
 

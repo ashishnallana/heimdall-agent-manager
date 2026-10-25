@@ -1131,7 +1131,7 @@ rotate :: proc(svc: ^Service, in_: Rotate_Input) -> (i64, domain.Domain_Error) {
 
 // ── Owner reset ─────────────────────────────────────────────────────────────
 // The only way to replace a directory's root. It is requested from an interactive
-// browser session (Trusted_Proxy; the handler enforces it), and it is DELAYED: the
+// browser session (the Hub session cookie; the handler enforces it), and it is DELAYED: the
 // directory is destroyed RESET_DELAY_SECONDS (72 h) later, never at once. The request
 // is announced to every session and device of the account (WS + push), and any
 // approved device may cancel it with a signed request during the delay. So a stolen

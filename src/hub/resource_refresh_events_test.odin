@@ -53,8 +53,6 @@ refresh_json_field :: proc(body, key: string) -> string {
 	return strings.clone(rest[:end])
 }
 
-// Package scope: the graph keeps the config slice, so it must outlive setup.
-refresh_trusted_cidrs := [?]string{"127.0.0.1/32"}
 
 Refresh_Fixture :: struct {
 	graph: app.App_Graph,
@@ -71,11 +69,10 @@ refresh_fixture_setup :: proc(t: ^testing.T, f: ^Refresh_Fixture, tag: string) -
 	_ = os.remove(f.db_path)
 	ok, msg := app.build_graph(&f.graph, app.Hub_Config{
 		database_path = f.db_path, migrations_dir = "src/hub/repository/sqlite/migrations",
-		username_header = "X-authentik-username", display_name_header = "X-authentik-name", email_header = "X-authentik-email",
-		trusted_proxy_cidrs = refresh_trusted_cidrs[:], auto_provision_users = true, logout_url = "/_dev/logout", paddle_environment = "sandbox",
+		auto_provision_users = true, paddle_environment = "sandbox",
 	})
 	if !testing.expect(t, ok, msg) do return false
-	f.alice = {{name = "X-authentik-username", value = "alice"}}
+	f.alice = hub_test_user_headers(&f.graph, "alice")
 	bridge_id, bridge_token, enroll_ok := device_enroll_test_bridge(&f.graph, f.alice[:], "Refresh Bridge")
 	if !testing.expect(t, enroll_ok, "bridge enroll") do return false
 	f.bridge_id = bridge_id
@@ -442,7 +439,7 @@ test_refresh_card_prompt_publishes_only_after_commit :: proc(t: ^testing.T) {
 	defer refresh_fixture_teardown(&f)
 	if !refresh_fixture_setup(t, &f, "card") do return
 	tab := refresh_socket_open(t, &f.graph, "alice"); defer refresh_socket_close(&f.graph, tab)
-	alice := contracts.Auth_Context{kind = .User_Token, user_id = "alice"}
+	alice := contracts.Auth_Context{kind = .Session, user_id = "alice"}
 
 	// A later op fails, the accept rolls back: the prompt hint is dropped.
 	bad, bad_ok, bad_err := card_service.create_card(&f.graph.cards, alice, card_service.Card_Input{title = "Rolls back", scope = "agent", operations_json = fmt.aprintf(`[{{"op":"agent.prompt","args":{{"instance_id":"%s","prompt":"p1"}}}},{{"op":"agent.update","args":{{"agent_id":"agt_missing","name":"x"}}}}]`, f.inst_id)})
@@ -539,7 +536,8 @@ test_refresh_shell_retention_and_seeding_publish :: proc(t: ^testing.T) {
 	// Canonical seeding for a newly provisioned owner announces each agent.
 	carol := refresh_socket_open(t, &f.graph, "carol"); defer refresh_socket_close(&f.graph, carol)
 	flush_ws_socket(carol.client)
-	carol_headers := []contracts.HTTP_Header{{name = "X-authentik-username", value = "carol"}}
+	carol_headers_arr := hub_test_user_headers(&f.graph, "carol")
+	carol_headers := carol_headers_arr[:]
 	list := api_http.router_dispatch(&f.graph.router, api_http.Request{method = "GET", path = "/api/v1/agents", request_id = "req_rf_carol", remote_addr = "127.0.0.1", headers = carol_headers})
 	testing.expect_value(t, list.status, 200)
 	seeded := refresh_collect(carol.client)

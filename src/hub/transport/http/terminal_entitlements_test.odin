@@ -21,23 +21,23 @@ plan_test_read_only_lookup :: proc(ctx: rawptr, user_id: string) -> (domain.User
 @(test)
 test_terminal_input_policy_auth_kinds_and_lookup_failure :: proc(t: ^testing.T) {
 	source := domain.Entitlement_Lookup{lookup = plan_test_read_only_lookup}
-	for kind in ([]contracts.Auth_Kind{.User_Token, .Trusted_Proxy}) {
+	for kind in ([]contracts.Auth_Kind{.Session, .OIDC}) {
 		err := require_terminal_input(source, {kind = kind, user_id = "owner"})
 		testing.expect_value(t, err.code, domain.Error_Code.Plan_Limit_Reached)
 	}
 	for kind in ([]contracts.Auth_Kind{.Instance_Token, .Bridge_Token}) {
 		testing.expect_value(t, require_terminal_input(source, {kind = kind}).code, domain.Error_Code.None)
 	}
-	testing.expect_value(t, require_terminal_input({}, {kind = .User_Token}).code, domain.Error_Code.None)
+	testing.expect_value(t, require_terminal_input({}, {kind = .Session}).code, domain.Error_Code.None)
 	failing := domain.Entitlement_Lookup{lookup = proc(ctx: rawptr, user_id: string) -> (domain.User_Entitlements, domain.Domain_Error) {
 		return {}, domain.domain_error(.Internal_Error, "billing unavailable")
 	}}
-	testing.expect_value(t, require_terminal_input(failing, {kind = .User_Token, user_id = "owner"}).code, domain.Error_Code.Internal_Error)
+	testing.expect_value(t, require_terminal_input(failing, {kind = .Session, user_id = "owner"}).code, domain.Error_Code.Internal_Error)
 	testing.expect_value(t, require_terminal_input(failing, {kind = .Instance_Token}).code, domain.Error_Code.None)
 	paid := domain.Entitlement_Lookup{lookup = proc(ctx: rawptr, user_id: string) -> (domain.User_Entitlements, domain.Domain_Error) {
 		return domain.unlimited_entitlements(), {}
 	}}
-	testing.expect_value(t, require_terminal_input(paid, {kind = .User_Token}).code, domain.Error_Code.None)
+	testing.expect_value(t, require_terminal_input(paid, {kind = .Session}).code, domain.Error_Code.None)
 }
 
 @(test)
@@ -48,7 +48,9 @@ test_terminal_input_plan_gates_all_rest_routes :: proc(t: ^testing.T) {
 	clock := platform.real_clock()
 	ids := http_test_id_generator()
 	users := user_service.new_user_service_basic(&user_repo, &clock, &ids)
-	auth := auth_service.new_auth_service({username_header = "X-User", trusted_proxy_cidrs = []string{"127.0.0.1/32"}}, &users)
+	auth := auth_service.new_auth_service(auth_service.Auth_Config{}, &users)
+	defer auth_service.oidc_free(&auth)
+	owner_headers := http_test_login(t, &auth, "owner")
 	source := domain.Entitlement_Lookup{lookup = plan_test_read_only_lookup}
 	agents := Agent_Handlers{auth = &auth, entitlements = source}
 	bridges := Bridge_Handlers{auth = &auth, entitlements = source}
@@ -69,7 +71,7 @@ test_terminal_input_plan_gates_all_rest_routes :: proc(t: ^testing.T) {
 	}
 	for c in cases {
 		resp := c.handler(c.ctx, Request{method = "POST", path = c.path, remote_addr = "127.0.0.1:1000",
-			headers = []contracts.HTTP_Header{{name = "X-User", value = "owner"}},
+			headers = owner_headers,
 			body = `{"data":"x","rows":24,"cols":80,"signal":2}`, request_id = "plan-rest"})
 		testing.expect_value(t, resp.status, 402)
 		testing.expect(t, strings.contains(resp.body, `"code":"plan_limit_reached"`), c.path)

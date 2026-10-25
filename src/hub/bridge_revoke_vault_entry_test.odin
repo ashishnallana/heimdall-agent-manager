@@ -16,23 +16,17 @@ test_bridge_revoke_hints_vault_entry_retirement :: proc(t: ^testing.T) {
 	db_path := fmt.tprintf("%s/heimdall-hub-test-bridge-revoke-vault-%d.db", os.get_env("TEMP", context.temp_allocator) if ODIN_OS == .Windows else "/tmp", os.get_pid())
 	_ = os.remove(db_path)
 	defer _ = os.remove(db_path)
-	cidrs := [?]string{"127.0.0.1/32"}
 	graph: app.App_Graph
 	ok, msg := app.build_graph(&graph, app.Hub_Config{
 		database_path        = db_path,
 		migrations_dir       = "src/hub/repository/sqlite/migrations",
-		username_header      = "X-authentik-username",
-		display_name_header  = "X-authentik-name",
-		email_header         = "X-authentik-email",
-		trusted_proxy_cidrs  = cidrs[:],
 		auto_provision_users = true,
-		logout_url           = "/_dev/logout",
 		paddle_environment   = "sandbox",
 	})
 	testing.expect(t, ok, msg)
 	defer app.shutdown_graph(&graph)
 
-	alice := [?]contracts.HTTP_Header{{name = "X-authentik-username", value = "alice"}}
+	alice := hub_test_user_headers(&graph, "alice")
 	bridge_id, _, enroll_ok := device_enroll_test_bridge(&graph, alice[:], "Alice Bridge")
 	testing.expect(t, enroll_ok, "device-flow bridge provisioning failed")
 	if !enroll_ok do return

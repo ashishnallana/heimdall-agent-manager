@@ -11,13 +11,12 @@ import metrics "odin_test:lib/metrics"
 //   heimdall_auth_failures_total{kind}
 //     kind is derived from the CREDENTIAL SHAPE the request presented, not
 //     from the error (a failed request has no Auth_Context.kind):
-//       trusted_proxy  - no bearer; trusted-proxy identity header present or
-//                        the route is proxy-only (require_trusted_proxy_auth)
-//       user_token     - Bearer hut_*
+//       session        - no bearer; a Hub session (or preview session) cookie
+//       oidc           - any other Bearer (an OIDC access token)
 //       bridge_token   - bare Bearer hbr_/hba_ or a refresh token hbf_
 //       instance_token - bridge bearer plus an instance assertion (header/body)
 //       missing        - no credential at all
-//       other          - any other bearer shape
+//       other          - a credential in the query/body, or a removed shape (hut_)
 //   heimdall_device_auth_total{step,result}
 //     step in authorize/verify/approve/poll; result in
 //     ok/pending/denied/expired/rate_limited/invalid/other. `step` is an
@@ -45,25 +44,23 @@ auth_metrics_init :: proc(reg: ^metrics.Registry) {
 		"Device-authorization flow steps by outcome.", {"step", "result"})
 	auth_metrics.rate_limited = metrics.new_counter(reg, "heimdall_rate_limited_total",
 		"Requests refused with 429 by a hub rate limiter, by endpoint family.", {"endpoint"})
-	for kind in ([]string{"trusted_proxy", "user_token", "bridge_token", "instance_token", "missing", "other"}) do metrics.with(auth_metrics.auth_failures, kind)
+	for kind in ([]string{"session", "oidc", "bridge_token", "instance_token", "missing", "other"}) do metrics.with(auth_metrics.auth_failures, kind)
 	metrics.with(auth_metrics.rate_limited, RATE_LIMIT_ENDPOINT_DEVICE_AUTH)
 }
 
-// auth_metrics_record_failure counts one refused request. `proxy_only` marks
-// the trusted-proxy-only middleware, where Authorization is ignored entirely.
-auth_metrics_record_failure :: proc(auth: ^auth_service.Auth_Service, req: Request, proxy_only := false) {
+// auth_metrics_record_failure counts one refused request.
+auth_metrics_record_failure :: proc(auth: ^auth_service.Auth_Service, req: Request) {
 	if auth_metrics.auth_failures == nil do return
-	metrics.counter_inc(metrics.with(auth_metrics.auth_failures, auth_failure_kind(auth, req, proxy_only)))
+	metrics.counter_inc(metrics.with(auth_metrics.auth_failures, auth_failure_kind(auth, req)))
 }
 
 // auth_failure_kind classifies the credential shape of a refused request.
-auth_failure_kind :: proc(auth: ^auth_service.Auth_Service, req: Request, proxy_only := false) -> string {
-	if proxy_only do return "trusted_proxy"
+auth_failure_kind :: proc(auth: ^auth_service.Auth_Service, req: Request) -> string {
 	token, has_bearer := bearer_token(req)
 	if has_bearer {
 		switch {
 		case strings.has_prefix(token, "hut_"):
-			return "user_token"
+			return "other"
 		case auth_service.is_bridge_bearer(token):
 			relay := header_value(req.headers, "X-Heimdall-Instance-Token")
 			if strings.has_prefix(relay, "hit_") && len(relay) > len("hit_") do return "instance_token"
@@ -72,11 +69,10 @@ auth_failure_kind :: proc(auth: ^auth_service.Auth_Service, req: Request, proxy_
 		case strings.has_prefix(token, "hbf_"):
 			return "bridge_token"
 		}
-		return "other"
+		return "oidc"
 	}
-	if auth != nil && auth.config.username_header != "" && strings.trim_space(header_value(req.headers, auth.config.username_header)) != "" {
-		return "trusted_proxy"
-	}
+	if _, has := auth_service.cookie_value(req.headers, auth_service.SESSION_COOKIE); has do return "session"
+	if _, has := auth_service.cookie_value(req.headers, auth_service.PREVIEW_COOKIE); has do return "session"
 	if auth_service.token_in_query_or_body(req.query, req.body) do return "other"
 	return "missing"
 }

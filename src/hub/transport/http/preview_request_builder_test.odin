@@ -97,7 +97,7 @@ test_preview_request_builder_dedicated_origin_forwards_device_signature :: proc(
 		"X-Heimdall-Device-Nonce: nonce_1\r\n", "X-Heimdall-Device-Sig: sig_1\r\n",
 		// The signed path is the upstream path: the prefix is stripped, not re-signed.
 		"POST /api/v1/vault/devices/register HTTP/1.1\r\n",
-		// Preview-host identity is trusted-proxy only, so Authorization is the app's own.
+		// Preview-host identity is the Hub preview cookie only, so Authorization is the app's own.
 		"Authorization: Bearer hlut_hub_token\r\n",
 		"Cookie: app=1\r\n",
 	}

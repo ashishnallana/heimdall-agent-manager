@@ -78,6 +78,7 @@ vault_status_fixture :: struct {
 	us_svc: user_service.User_Service,
 	ag_svc: agent_service.Agent_Service,
 	auth_svc: auth_service.Auth_Service,
+	user_headers: []contracts.HTTP_Header, // session cookie for the fixture owner
 	registry: project_service.Bridge_Runtime_Registry,
 	bus: events.User_Event_Bus,
 	bh: Bridge_Handlers,
@@ -85,13 +86,7 @@ vault_status_fixture :: struct {
 	bridge_id: string,
 }
 
-@(private = "file")
-VAULT_STATUS_TEST_HEADERS := [1]contracts.HTTP_Header{
-	{name = "X-authentik-username", value = "tanmay"},
-}
 
-@(private = "file")
-VAULT_STATUS_TEST_CIDRS := [1]string{"127.0.0.1/32"}
 
 @(private = "file")
 setup_vault_status_fixture :: proc(t: ^testing.T, tag: string) -> ^vault_status_fixture {
@@ -120,11 +115,7 @@ setup_vault_status_fixture :: proc(t: ^testing.T, tag: string) -> ^vault_status_
 	f.us_svc = user_service.new_user_service_basic(&f.us_repo, &f.clock, &f.ids)
 	f.ag_svc = agent_service.new_agent_service(&f.ag_repo, &f.br_repo, &f.clock, &f.ids)
 
-	f.auth_svc = auth_service.new_auth_service(auth_service.Trusted_Proxy_Config{
-		username_header = "X-authentik-username",
-		trusted_proxy_cidrs = VAULT_STATUS_TEST_CIDRS[:],
-		auto_provision_users = true,
-	}, &f.us_svc)
+	f.auth_svc = auth_service.new_auth_service(auth_service.Auth_Config{auto_provision_users = true}, &f.us_svc)
 	f.auth_svc.clock = &f.clock
 	f.auth_svc.ids = &f.ids
 	f.auth_svc.bridges = &f.br_svc
@@ -138,14 +129,15 @@ setup_vault_status_fixture :: proc(t: ^testing.T, tag: string) -> ^vault_status_
 		bridge_runtime_registry = &f.registry,
 	}
 
+	f.user_headers = http_test_login(t, &f.auth_svc, "tanmay")
 	owner_ctx, owner_ok, _ := auth_service.resolve_auth_any(&f.auth_svc, auth_service.Auth_Request{
 		remote_addr = "127.0.0.1:4444",
-		headers = VAULT_STATUS_TEST_HEADERS[:],
+		headers = f.user_headers,
 	})
-	testing.expect(t, owner_ok, "trusted proxy owner resolved")
+	testing.expect(t, owner_ok, "session owner resolved")
 	f.owner_user_id = strings.clone(owner_ctx.user_id)
 
-	owner_auth := contracts.Auth_Context{kind = .User_Token, user_id = f.owner_user_id}
+	owner_auth := contracts.Auth_Context{kind = .Session, user_id = f.owner_user_id}
 	// Provisioned through the DEVICE-GRANT path, the only enrollment there is
 	// (REQ-ENROLL-9). This replaced a create_enrollment + enroll_bridge pair; the
 	// bridge and its credential are what this fixture needs, and how the credential

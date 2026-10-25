@@ -29,7 +29,7 @@ test_review_fix_task_card_accept_executes_vote :: proc(t: ^testing.T) {
 	card, ok := ph_card(t, &h, cid)
 	testing.expect(t, ok && card.status == domain.CARD_STATUS_PENDING, "user-reviewed task is projected")
 
-	accepted, acc_ok, acc_err := accept_card(&h.svc, contracts.Auth_Context{kind = .User_Token, user_id = string(PH_OWNER)}, cid)
+	accepted, acc_ok, acc_err := accept_card(&h.svc, contracts.Auth_Context{kind = .Session, user_id = string(PH_OWNER)}, cid)
 	testing.expectf(t, acc_ok, "accept_card executes task.answer: %v %s", acc_err.code, acc_err.message)
 	testing.expect_value(t, accepted.status, domain.CARD_STATUS_ACCEPTED)
 	answered, _, _ := iface.taskchain_get_task(&h.tasks, "task_user")
@@ -50,7 +50,7 @@ test_review_fix_mark_read_clears_more_than_200 :: proc(t: ^testing.T) {
 	c, _ := ph_card(t, &h, attention_message_card_id("inst_big"))
 	testing.expect_value(t, c.status, domain.CARD_STATUS_PENDING)
 
-	_, read_ok, read_err := content_service.mark_read(&h.content_svc, contracts.Auth_Context{kind = .User_Token, user_id = string(PH_OWNER)}, "chat_big")
+	_, read_ok, read_err := content_service.mark_read(&h.content_svc, contracts.Auth_Context{kind = .Session, user_id = string(PH_OWNER)}, "chat_big")
 	testing.expectf(t, read_ok, "mark read: %s", read_err.message)
 	c2, _ := ph_card(t, &h, attention_message_card_id("inst_big"))
 	testing.expect_value(t, c2.status, domain.CARD_STATUS_RESOLVED)
@@ -144,7 +144,7 @@ test_review_fix_blocked_card_pins_the_block :: proc(t: ^testing.T) {
 	testing.expect(t, !guard_ok, "the old card's guard refuses the newer block")
 
 	ph_save_task(t, &h, task) // re-projected for the new question
-	_, acc_ok, acc_err := accept_card(&h.svc, contracts.Auth_Context{kind = .User_Token, user_id = string(PH_OWNER)}, cid, Card_Decision{note = "answer to the old question", expected_block = old_block})
+	_, acc_ok, acc_err := accept_card(&h.svc, contracts.Auth_Context{kind = .Session, user_id = string(PH_OWNER)}, cid, Card_Decision{note = "answer to the old question", expected_block = old_block})
 	testing.expect(t, !acc_ok, "an Answer written for the old block is refused")
 	testing.expect_value(t, acc_err.code, domain.Error_Code.Conflict)
 }

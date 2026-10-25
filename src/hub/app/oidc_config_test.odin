@@ -106,11 +106,57 @@ test_loopback_http_url_is_exact :: proc(t: ^testing.T) {
 	config.ui_origin = "http://hub.example.test"
 	ok, msg := validate_oidc_config(config)
 	testing.expect(t, !ok && strings.contains(msg, "ui_origin must be an https"), msg)
+	// Loopback http is accepted only in the explicit dev mode.
 	config.ui_origin = "http://localhost:8081"
+	ok, msg = validate_oidc_config(config)
+	testing.expect(t, !ok && strings.contains(msg, "HAM_OIDC_ALLOW_INSECURE_LOCALHOST"), msg)
+	config.oidc_allow_insecure_localhost = true
 	ok, msg = validate_oidc_config(config)
 	testing.expect(t, ok, msg)
 	config.ui_origin = "https://hub.example.test"
 	config.oidc_redirect_uri = "http://localhost.evil.example/api/v1/auth/callback"
 	ok, msg = validate_oidc_config(config)
-	testing.expect(t, !ok, "prefix-matching localhost host is refused")
+	testing.expect(t, !ok, "prefix-matching localhost host is refused even in dev mode")
+}
+
+// Dev mode: http OIDC endpoints on an exact loopback host; never another host.
+@(test)
+test_insecure_localhost_mode_is_scoped :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	config := default_config()
+	config.ui_origin = "http://127.0.0.1:8081"
+	config.oidc_issuer = "http://127.0.0.1:9400/application/o/heimdall-native/"
+	config.oidc_jwks_url = "http://127.0.0.1:9400/application/o/heimdall-native/jwks/"
+	config.oidc_userinfo_url = "http://127.0.0.1:9400/application/o/userinfo/"
+	config.oidc_api_audience = "heimdall-api"
+	config.oidc_api_scope = "heimdall.api"
+	config.oidc_authorize_url = "http://127.0.0.1:9400/application/o/authorize/"
+	config.oidc_token_url = "http://127.0.0.1:9400/application/o/token/"
+	config.oidc_web_client_id = "heimdall-native"
+	ok, msg := require_oidc_config(config)
+	testing.expect(t, !ok && strings.contains(msg, "https"), "http endpoints refused without the dev flag")
+	config.oidc_allow_insecure_localhost = true
+	ok, msg = require_oidc_config(config)
+	testing.expect(t, ok, msg)
+	config.oidc_jwks_url = "http://auth.example.test/jwks/"
+	ok, msg = require_oidc_config(config)
+	testing.expect(t, !ok, "dev mode never allows a non-loopback http endpoint")
+}
+
+// The server cannot start without OIDC bearer AND browser-login configuration.
+@(test)
+test_require_oidc_config :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	ok, msg := require_oidc_config(default_config())
+	testing.expect(t, !ok && strings.contains(msg, "OIDC is required"), msg)
+	bearer_only := oidc_test_hub_config()
+	ok, msg = require_oidc_config(bearer_only)
+	testing.expect(t, !ok && strings.contains(msg, "browser login is required"), msg)
+	full := bearer_only
+	full.ui_origin = "https://hub.example.test"
+	full.oidc_authorize_url = "https://auth.example.test/application/o/authorize/"
+	full.oidc_token_url = "https://auth.example.test/application/o/token/"
+	full.oidc_web_client_id = "heimdall-native"
+	ok, msg = require_oidc_config(full)
+	testing.expect(t, ok, msg)
 }

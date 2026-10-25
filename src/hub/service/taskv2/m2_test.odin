@@ -14,7 +14,7 @@ inst_auth :: proc(id: string) -> contracts.Auth_Context {
 }
 
 user_auth :: proc() -> contracts.Auth_Context {
-	return contracts.Auth_Context{kind = .User_Token, user_id = "u1"}
+	return contracts.Auth_Context{kind = .Session, user_id = "u1"}
 }
 
 @(test)

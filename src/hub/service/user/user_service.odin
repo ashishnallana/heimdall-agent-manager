@@ -204,7 +204,7 @@ ensure_user_from_auth :: proc(service: ^User_Service, user_id, display_name, ema
 	}
 	normalized := normalize_user_id(user_id)
 	if normalized == "" {
-		return domain.User{}, false, domain.domain_error(.Unauthenticated, "trusted proxy identity is missing")
+		return domain.User{}, false, domain.domain_error(.Unauthenticated, "user identity is missing")
 	}
 	found, ok, err := iface.user_get_by_id(service.users, domain.User_ID(normalized))
 	if ok {

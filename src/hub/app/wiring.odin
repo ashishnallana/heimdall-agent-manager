@@ -383,18 +383,10 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 		private_key = config.vapid_private_key,
 		subject = config.vapid_subject,
 	})
-	graph.auth = auth_service.new_auth_service_with_tokens(auth_service.Trusted_Proxy_Config{
-		username_header = config.username_header,
-		display_name_header = config.display_name_header,
-		email_header = config.email_header,
-		trusted_proxy_cidrs = config.trusted_proxy_cidrs,
+	graph.auth = auth_service.new_auth_service(auth_service.Auth_Config{
 		auto_provision_users = effective_auto_provision_users(config),
-		login_url = config.login_url,
-		logout_url = config.logout_url,
-	}, &graph.users, &graph.repos.users, &graph.clock, &graph.ids)
-	// OIDC bearer authentication is enabled whenever an issuer is configured.
-	graph.auth.oidc_mode = oidc_configured(config)
-	graph.auth.oidc = auth_service.OIDC_Config{issuer = config.oidc_issuer, audience = config.oidc_api_audience, scope = config.oidc_api_scope, claim_existing_users = config.oidc_claim_existing_users, userinfo_url = config.oidc_userinfo_url, jwks_url = config.oidc_jwks_url}
+	}, &graph.users, &graph.clock, &graph.ids)
+	graph.auth.oidc = auth_service.OIDC_Config{issuer = config.oidc_issuer, audience = config.oidc_api_audience, scope = config.oidc_api_scope, allow_insecure_localhost = config.oidc_allow_insecure_localhost, claim_existing_users = config.oidc_claim_existing_users, userinfo_url = config.oidc_userinfo_url, jwks_url = config.oidc_jwks_url}
 	// The session store is always wired: the reaper purges expired v2 device-proof
 	// nonces through it. Cookie sessions are honoured only with browser login.
 	graph.session_repo = sqlite.new_session_repository(&graph.sqlite_sessions, &graph.db)
@@ -440,17 +432,13 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 		rate_limit = config.device_auth_rate_limit,
 		rate_window = config.device_auth_rate_window,
 	})
-	graph.device_auth = device_auth_service.new_device_auth_service(&graph.device_auth_store, device_auth_service.real_monotonic_clock(), config.trusted_proxy_cidrs)
-	// Wire the device-flow token issuer (ELDA-4). The minter captures the graph
-	// so approve() can pre-mint a no-revoke, no-cap device token on the bound
-	// owner and the grant holds the plaintext for the first poll.
-	device_auth_service.with_token_minter(&graph.device_auth, device_minter, rawptr(graph))
+	graph.device_auth = device_auth_service.new_device_auth_service(&graph.device_auth_store, device_auth_service.real_monotonic_clock(), config.forwarded_for_trusted_cidrs)
 	// Wire the REQ-IMPL-2 bridge-credential issuer. Separate seam from the user
 	// minter above: a grant that carried a bridge public key mints a per-machine
 	// `brg_` identity, never a user token with the machine as a label.
 	device_auth_service.with_bridge_token_minter(&graph.device_auth, device_bridge_minter, rawptr(graph))
 	graph.users.bridges = &graph.repos.bridges
-	graph.user_handlers = http.User_Handlers{launch_preferences = &graph.users, auth = &graph.auth, event_bus = &graph.event_bus, ws_tickets = http.new_user_ws_ticket_store(), forwarded_for_cidrs = config.trusted_proxy_cidrs}
+	graph.user_handlers = http.User_Handlers{launch_preferences = &graph.users, auth = &graph.auth, event_bus = &graph.event_bus, ws_tickets = http.new_user_ws_ticket_store(), forwarded_for_cidrs = config.forwarded_for_trusted_cidrs}
 	graph.user_handlers.ws_tickets.auth = &graph.auth
 	graph.shell_session_service = shell_session_svc.new_shell_session_service(
 		repo                = &graph.shell_session_repo,
@@ -480,6 +468,7 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 		experiments         = &graph.experiment_repo,
 		preview_origin      = config.preview_origin,
 		preview_legacy_path = config.preview_legacy_path,
+		ui_origin           = config.ui_origin,
 		bridge_runtime_registry = &graph.bridge_runtime_registry,
 	}
 	// REQ-LSP-RLY-1. The registry is plain in-memory state: an LSP session lives
@@ -656,9 +645,6 @@ register_routes :: proc(graph: ^App_Graph) {
 	http.router_add(&graph.router, "POST", "/api/v1/auth/logout", rawptr(&graph.user_handlers), http.auth_logout_handler)
 	http.router_add(&graph.router, "GET", "/api/v1/me", rawptr(&graph.user_handlers), http.me_handler)
 	http.router_add(&graph.router, "GET", "/api/v1/me/logout-url", rawptr(&graph.user_handlers), http.logout_url_handler)
-	if !graph.auth.oidc_mode { http.router_add(&graph.router, "GET", "/api/v1/me/tokens", rawptr(&graph.user_handlers), http.list_my_tokens_handler) }
-	if !graph.auth.oidc_mode { http.router_add(&graph.router, "POST", "/api/v1/me/tokens", rawptr(&graph.user_handlers), http.issue_my_token_handler) }
-	if !graph.auth.oidc_mode { http.router_add(&graph.router, "POST", "/api/v1/me/tokens/*/revoke", rawptr(&graph.user_handlers), http.revoke_my_token_handler) }
 	http.router_add(&graph.router, "GET", "/api/v1/me/experiments", rawptr(&graph.experiment_handlers), http.experiment_list_handler)
 	http.router_add(&graph.router, "PUT", "/api/v1/me/experiments/*", rawptr(&graph.experiment_handlers), http.experiment_set_handler)
 	http.router_add(&graph.router, "GET", "/api/v1/providers", rawptr(&graph.provider_handlers), http.provider_catalog_list_handler)
@@ -1020,6 +1006,7 @@ register_routes :: proc(graph: ^App_Graph) {
 	// Preview tunnel proxy (T8) — raw-socket route: handler owns the socket for all
 	// request methods (plain HTTP and future WebSocket upgrade via XM-2).
 	http.router_add_raw_upgrade(&graph.router, "ANY", "/api/v1/preview/**", rawptr(&graph.shell_session_stream_handlers), http.shell_session_preview_proxy_handler)
+	http.router_add(&graph.router, "GET", http.PREVIEW_AUTH_START_PATH, rawptr(&graph.shell_session_stream_handlers), http.preview_auth_start_handler)
 	// Shell session REST API (T5).
 	http.router_add(&graph.router, "POST", "/api/v1/bridges/*/shells", rawptr(&graph.shell_session_rest_handlers), http.shell_session_create_handler)
 	http.router_add(&graph.router, "GET", "/api/v1/bridges/*/shells", rawptr(&graph.shell_session_rest_handlers), http.shell_session_list_by_bridge_handler)
@@ -1045,20 +1032,8 @@ health_handler :: proc(ctx: rawptr, req: http.Request) -> http.Response {
 	return http.respond_success("{\"ok\":true,\"version\":1}", req.request_id, server_time)
 }
 
-// device_minter is the task-3 token issuer wired into approve (ELDA-4). It
-// issues a user API token via the device-authorization path (no revoke, no cap,
-// created_from='device_authorization') and returns the plaintext + token_id so
-// the grant can hand it out on the first successful /device/token poll.
-device_minter :: proc(graph_ptr: rawptr, user_id, client, device_label: string) -> (string, string, bool) {
-	graph := (^App_Graph)(graph_ptr)
-	token, plaintext, ok, _ := auth_service.issue_device_authorization_token(&graph.auth, domain.User_ID(user_id), device_label)
-	return plaintext, token.token_id, ok
-}
-
 // device_bridge_minter is the REQ-IMPL-2 bridge-credential issuer wired into
-// approve. Unlike device_minter above — which issues a USER token whose only
-// identity is owner_user_id, with the machine as a free-text label — this mints
-// a `brg_` row and a credential that resolves to exactly that one bridge, so
+// approve. It mints a `brg_` row and a credential that resolves to exactly that one bridge, so
 // verify_bridge_token / resolve_bridge_instance_auth give per-machine scoping.
 // Returns (plaintext_token, bridge_id, ok).
 device_bridge_minter :: proc(graph_ptr: rawptr, req: device_auth_service.Bridge_Mint_Request) -> (device_auth_service.Bridge_Mint_Result, bool) {

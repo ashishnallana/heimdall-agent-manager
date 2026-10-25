@@ -88,7 +88,6 @@ oidc_http_fixture :: proc(t: ^testing.T) -> ^OIDC_HTTP_Fixture {
 	}
 	f.vault = vd.new_service(&f.vault_repo, &f.clock)
 	f.auth = auth_service.Auth_Service {
-		oidc_mode = true,
 		users = &f.users,
 		clock = &f.clock,
 		vault = &f.vault,
@@ -198,11 +197,7 @@ test_oidc_http_bootstrap_and_signed_me :: proc(t: ^testing.T) {
 		&f.auth,
 		oidc_http_request(f, "GET", "/api/v1/agents"),
 	)
-	_, unsigned_proxy, _ := require_trusted_proxy_auth(
-		&f.auth,
-		oidc_http_request(f, "GET", "/api/v1/agents"),
-	)
-	testing.expect(t, !unsigned_any && !unsigned_bridge_shared && !unsigned_proxy)
+	testing.expect(t, !unsigned_any && !unsigned_bridge_shared)
 	ws := oidc_http_request(f, "GET", "/api/v1/user-ws")
 	_, unsigned_ws, _ := user_ws_authenticate(&handlers, ws)
 	testing.expect(t, !unsigned_ws)
@@ -309,17 +304,18 @@ test_oidc_proof_preserves_independent_token_identity :: proc(t: ^testing.T) {
     f := oidc_http_fixture(t)
     defer oidc_http_close(f)
     req := oidc_http_sign(f, oidc_http_request(f, "GET", "/api/v1/agents"))
-    principal := contracts.Auth_Context{kind = .OIDC, user_id = "alice", user_token_id = "credential-sentinel"}
+    principal := contracts.Auth_Context{kind = .OIDC, user_id = "alice", session_id = "credential-sentinel", expires_ms = 77}
     verified, ok, _ := oidc_device_gate(&f.auth, principal, req)
     testing.expect(t, ok)
     testing.expect_value(t, verified.device_id, f.device.device_id)
-    testing.expect_value(t, verified.user_token_id, principal.user_token_id)
+    testing.expect_value(t, verified.session_id, principal.session_id)
+    testing.expect_value(t, verified.expires_ms, principal.expires_ms)
     _, replay_ok, _ := oidc_device_gate(&f.auth, principal, req)
     testing.expect(t, !replay_ok, "retaining token identity must not bypass replay rejection")
     // Device headers alone never populate a verified identity on bearer auth.
-    principal.kind = .User_Token
+    principal.kind = .Session
     bearer, bearer_ok, _ := oidc_device_gate(&f.auth, principal, req)
     testing.expect(t, bearer_ok)
     testing.expect_value(t, bearer.device_id, "")
-    testing.expect_value(t, bearer.user_token_id, principal.user_token_id)
+    testing.expect_value(t, bearer.session_id, principal.session_id)
 }

@@ -6,8 +6,6 @@ import "core:strconv"
 import "core:strings"
 import app "odin_test:hub/app"
 import crashlog "odin_test:lib/crashlog"
-import domain "odin_test:hub/domain"
-import auth_service "odin_test:hub/service/auth"
 import platform "odin_test:hub/platform"
 import user_service "odin_test:hub/service/user"
 
@@ -30,18 +28,18 @@ main :: proc() {
 		return
 	}
 	if is_tokens_command() {
-		if app.oidc_configured(config) { fmt.eprintln("Heimdall user tokens are disabled when OIDC is configured"); os.exit(1) }
-		ok, message := run_tokens_command(&config)
-		if !ok {
-			fmt.eprintln(message)
-			os.exit(1)
-		}
-		return
+		fmt.eprintln("ham-hub tokens was removed: Heimdall user tokens are no longer supported; users sign in with OIDC")
+		os.exit(1)
 	}
 	parse_args(&config)
-	if oidc_ok, oidc_error := app.validate_oidc_config(config); !oidc_ok {
+	// The server requires OIDC bearer + browser login configuration; there is no
+	// other way for a user to authenticate.
+	if oidc_ok, oidc_error := app.require_oidc_config(config); !oidc_ok {
 		fmt.eprintln(oidc_error)
 		os.exit(2)
+	}
+	if config.oidc_allow_insecure_localhost {
+		fmt.eprintln("ham-hub: WARNING HAM_OIDC_ALLOW_INSECURE_LOCALHOST is set: http:// OIDC endpoints on localhost are accepted. Local development only.")
 	}
 	normalized_preview_origin, preview_ok, preview_error := app.normalize_preview_origin(config.preview_origin, config.ui_origin)
 	if !preview_ok {
@@ -111,18 +109,14 @@ run_users_command :: proc(config: ^app.Hub_Config) -> (bool, string) {
 		if name == "" || email == "" do return false, "--name and --email are required"
 		created, created_ok, created_err := user_service.create_user(&graph.users, user_service.Create_User_Input{name = name, email = email})
 		if !created_ok do return false, created_err.message
-		result, issued, err := auth_service.issue_user_api_token(&graph.auth, auth_service.Issue_User_API_Token_Input{owner_user_id = created.user_id, label = arg_value("--label"), expires_at = token_expires_at()})
-		if !issued do return false, err.message
 		fmt.println("user_id=", string(created.user_id))
-		fmt.println("token_id=", result.token.token_id)
-		fmt.println("token=", result.plaintext)
-		fmt.println("expires_at=", result.token.expires_at)
+		fmt.println("next: ham-hub users link-oidc --user", string(created.user_id), "--subject <oidc-subject>")
 		return true, ""
 	}
 	return false, USERS_USAGE
 }
 
-USERS_USAGE :: "usage: ham-hub users create --name <name> --email <email> [--label <label>] [--expires-in 90d] | users link-oidc --user <user_id> [--issuer <iss>] --subject <sub> | users unlink-oidc --user <user_id> [--issuer <iss>] | users logout --user <user_id> | users disable|enable --user <user_id>"
+USERS_USAGE :: "usage: ham-hub users create --name <name> --email <email> | users link-oidc --user <user_id> [--issuer <iss>] --subject <sub> | users unlink-oidc --user <user_id> [--issuer <iss>] | users logout --user <user_id> | users disable|enable --user <user_id>"
 
 // run_users_oidc_link_command binds/unbinds an OIDC (issuer, subject) to an
 // existing Hub user. This is how an operator maps an existing account to its
@@ -133,71 +127,8 @@ run_users_oidc_link_command :: proc(graph: ^app.App_Graph, action: string) -> (b
 	return app.users_oidc_link_command(&graph.db, graph.config.oidc_issuer, platform.clock_now(&graph.clock), action, user_id, issuer, arg_value("--subject"))
 }
 
-run_tokens_command :: proc(config: ^app.Hub_Config) -> (bool, string) {
-	idx := tokens_index()
-	if idx < 0 || idx + 1 >= len(os.args) do return false, "usage: ham-hub tokens issue --user <user_id> [--label <label>] [--expires-in 90d] | tokens list --user <user_id> | tokens revoke --token-id <token_id>"
-	action := os.args[idx + 1]
-	parse_token_global_args(config)
-	graph: app.App_Graph
-	ok, message := app.build_graph(&graph, config^)
-	if !ok do return false, message
-	defer app.shutdown_graph(&graph)
-	switch action {
-	case "issue":
-		user_id := arg_value("--user")
-		if user_id == "" do return false, "--user is required"
-		result, issued, err := auth_service.issue_user_api_token(&graph.auth, auth_service.Issue_User_API_Token_Input{owner_user_id = domain.User_ID(user_id), label = arg_value("--label"), expires_at = token_expires_at()})
-		if !issued do return false, err.message
-		fmt.println("token_id=", result.token.token_id)
-		fmt.println("user_id=", string(result.token.owner_user_id))
-		fmt.println("token=", result.plaintext)
-		fmt.println("expires_at=", result.token.expires_at)
-		return true, ""
-	case "list":
-		user_id := arg_value("--user")
-		if user_id == "" do return false, "--user is required"
-		tokens, err := auth_service.list_user_api_tokens(&graph.auth, domain.User_ID(user_id))
-		if err.code != .None do return false, err.message
-		for token in tokens do print_token_metadata(token)
-		return true, ""
-	case "revoke":
-		token_id := arg_value("--token-id")
-		if token_id == "" do return false, "--token-id is required"
-		token, revoked, err := auth_service.revoke_user_api_token(&graph.auth, token_id)
-		if !revoked do return false, err.message
-		fmt.println("revoked_token_id=", token.token_id)
-		fmt.println("revoked_at=", token.revoked_at)
-		return true, ""
-	}
-	return false, "usage: ham-hub tokens issue|list|revoke [options]"
-}
-
-print_token_metadata :: proc(token: domain.User_API_Token) {
-	status := "active"
-	if token.revoked_at != "" do status = "revoked"
-	fmt.println(strings.concatenate({
-		"token_id=", token.token_id,
-		" user_id=", string(token.owner_user_id),
-		" label=", token.label,
-		" created_from=", token.created_from,
-		" device_label=", token.device_label,
-		" status=", status,
-		" created_at=", token.created_at,
-		" last_used_at=", token.last_used_at,
-		" expires_at=", token.expires_at,
-		" revoked_at=", token.revoked_at,
-	}))
-}
-
 parse_token_global_args :: proc(config: ^app.Hub_Config) {
 	parse_args(config)
-}
-
-tokens_index :: proc() -> int {
-	for i := 1; i < len(os.args); i += 1 {
-		if os.args[i] == "tokens" do return i
-	}
-	return -1
 }
 
 arg_value :: proc(name: string) -> string {
@@ -205,34 +136,6 @@ arg_value :: proc(name: string) -> string {
 		if os.args[i] == name do return os.args[i + 1]
 	}
 	return ""
-}
-
-token_expires_at :: proc() -> string {
-	if v := arg_value("--expires-at"); v != "" do return v
-	if v := arg_value("--expires-in"); v != "" {
-		seconds, ok := parse_duration_seconds(v)
-		if ok do return platform.expires_at_after_seconds(seconds)
-	}
-	return ""
-}
-
-parse_duration_seconds :: proc(value: string) -> (int, bool) {
-	if value == "" do return 0, false
-	unit := value[len(value) - 1]
-	number := value
-	mult := 1
-	if unit == 'd' || unit == 'h' || unit == 'm' || unit == 's' {
-		number = value[:len(value) - 1]
-		switch unit {
-		case 'd': mult = 86400
-		case 'h': mult = 3600
-		case 'm': mult = 60
-		case 's': mult = 1
-		}
-	}
-	parsed, ok := strconv.parse_int(number)
-	if !ok || parsed <= 0 do return 0, false
-	return int(parsed) * mult, true
 }
 
 parse_args :: proc(config: ^app.Hub_Config) {
@@ -291,11 +194,18 @@ parse_args :: proc(config: ^app.Hub_Config) {
 			config.database_path = strings.clone(os.args[i + 1]); i += 1
 		} else if arg == "--migrations-dir" && i + 1 < len(os.args) {
 			config.migrations_dir = strings.clone(os.args[i + 1]); i += 1
-		} else if arg == "--trusted-proxy-cidr" && i + 1 < len(os.args) {
+		} else if arg == "--trusted-proxy-cidr" || arg == "--login-url" || arg == "--logout-url" {
+			// Removed with trusted-proxy authentication. Fail loudly so a stale
+			// deployment config is noticed instead of silently ignored.
+			fmt.eprintfln("ham-hub: %s was removed: users authenticate only with OIDC (see --oidc-* / HAM_OIDC_*). For client-IP resolution behind a proxy use --forwarded-for-trusted-cidr.", arg)
+			os.exit(2)
+		} else if arg == "--forwarded-for-trusted-cidr" && i + 1 < len(os.args) {
 			cidrs := make([]string, 1)
 			cidrs[0] = strings.clone(os.args[i + 1])
-			config.trusted_proxy_cidrs = cidrs
+			config.forwarded_for_trusted_cidrs = cidrs
 			i += 1
+		} else if arg == "--oidc-allow-insecure-localhost" {
+			config.oidc_allow_insecure_localhost = true
 		} else if arg == "--oidc-issuer" && i + 1 < len(os.args) {
 			config.oidc_issuer = strings.clone(os.args[i + 1]); i += 1
 		} else if arg == "--oidc-jwks-url" && i + 1 < len(os.args) {
@@ -338,10 +248,6 @@ parse_args :: proc(config: ^app.Hub_Config) {
 			if !ok { fmt.eprintln("--auto-provision-users must be true or false"); os.exit(2) }
 			config.auto_provision_users_setting = parsed
 			i += 1
-		} else if arg == "--login-url" && i + 1 < len(os.args) {
-			config.login_url = strings.clone(os.args[i + 1]); i += 1
-		} else if arg == "--logout-url" && i + 1 < len(os.args) {
-			config.logout_url = strings.clone(os.args[i + 1]); i += 1
 		} else if arg == "--ui-origin" && i + 1 < len(os.args) {
 			config.ui_origin = strings.clone(os.args[i + 1]); i += 1
 		} else if arg == "--preview-origin" && i + 1 < len(os.args) {
@@ -444,6 +350,12 @@ apply_oidc_env :: proc(config: ^app.Hub_Config) {
 		parsed, ok := strconv.parse_int(v)
 		if !ok || parsed <= 0 { fmt.eprintln("HAM_SESSION_IDLE_HOURS must be a positive integer"); os.exit(2) }
 		config.session_idle_hours = int(parsed)
+	}
+	// Development only: accept http:// OIDC endpoints whose host is exactly a
+	// loopback name. Never set in production; startup prints a warning.
+	if v := os.get_env_alloc("HAM_OIDC_ALLOW_INSECURE_LOCALHOST", context.allocator); v != "" {
+		if v != "1" { fmt.eprintln("HAM_OIDC_ALLOW_INSECURE_LOCALHOST must be 1 when set"); os.exit(2) }
+		config.oidc_allow_insecure_localhost = true
 	}
 	if v := os.get_env_alloc("HAM_OIDC_CLAIM_EXISTING_USERS", context.allocator); v != "" {
 		parsed, ok := app.parse_bool_setting(v)

@@ -701,7 +701,7 @@ bridge_execute_action_handler :: proc(ctx: rawptr, req: Request) -> Response {
 
 	conv_id := inst.conversation_id
 	if conv_id == "" {
-		c, conv_ok, _ := content_service.get_conversation_by_instance(h.content, contracts.Auth_Context{kind = .User_Token, user_id = string(act.owner_user_id)}, inst.agent_instance_id)
+		c, conv_ok, _ := content_service.get_conversation_by_instance(h.content, contracts.Auth_Context{kind = .Internal_User, user_id = string(act.owner_user_id)}, inst.agent_instance_id)
 		if conv_ok do conv_id = c.conversation_id
 	}
 
@@ -712,7 +712,7 @@ bridge_execute_action_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	// Message type is 'action'
 	msg, msg_ok, msg_err := content_service.send_message(
 		h.content,
-		contracts.Auth_Context{kind = .User_Token, user_id = string(act.owner_user_id)},
+		contracts.Auth_Context{kind = .Internal_User, user_id = string(act.owner_user_id)},
 		conv_id,
 		content_service.Message_Input{
 			body = act.prompt_text,
@@ -722,7 +722,7 @@ bridge_execute_action_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	if !msg_ok {
 		return respond_error(msg_err, req.request_id)
 	}
-	publish_action_message_created(h, contracts.Auth_Context{kind = .User_Token, user_id = string(act.owner_user_id)}, msg)
+	publish_action_message_created(h, contracts.Auth_Context{kind = .Internal_User, user_id = string(act.owner_user_id)}, msg)
 
 	next_run := json_string(req.body, "target_run_at")
 	if next_run == "" do next_run = json_string(req.body, "next_target_run_at")

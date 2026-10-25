@@ -7,9 +7,9 @@ import contracts "odin_test:contracts"
 // nudge stops; a PATCH that does not touch the title leaves title_source alone.
 @(test)
 test_chain_patch_title_source :: proc(t: ^testing.T) {
-	testing.expect_value(t, chain_patch_title_source("Windows port", .User_Token), "user")
-	testing.expect_value(t, chain_patch_title_source("Windows port", .Trusted_Proxy), "user")
+	testing.expect_value(t, chain_patch_title_source("Windows port", .Session), "user")
+	testing.expect_value(t, chain_patch_title_source("Windows port", .OIDC), "user")
 	testing.expect_value(t, chain_patch_title_source("Windows port", .Instance_Token), "agent")
-	testing.expect_value(t, chain_patch_title_source("", .User_Token), "")
+	testing.expect_value(t, chain_patch_title_source("", .Session), "")
 	testing.expect_value(t, chain_patch_title_source("", .Instance_Token), "")
 }

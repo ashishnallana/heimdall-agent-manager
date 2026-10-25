@@ -18,7 +18,6 @@ import user_service "odin_test:hub/service/user"
 
 User_WS_Ticket :: struct {
 	kind: contracts.Auth_Kind,
-	user_token_id: string,
 	session_id: string, // Session tickets: re-checked by the stream it opens
 	auth_expires_ms: i64,
 	ticket: string,
@@ -46,20 +45,14 @@ User_Handlers :: struct {
 	forwarded_for_cidrs: []string,
 }
 
+// auth_config_handler: users sign in only through the Hub's OIDC browser login.
+// Field names the UI already reads (login_url, logout_url) are kept.
 auth_config_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	handlers := (^User_Handlers)(ctx)
 	builder := strings.builder_make()
-	// Browser login enabled: the Hub runs the OIDC flow itself. Field names the
-	// UI already reads (login_url, logout_url) are kept.
-	web := auth_service.web_login_enabled(handlers.auth)
-	strings.write_string(&builder, "{\"mode\":\"")
-	strings.write_string(&builder, "oidc" if web else "trusted_proxy")
-	strings.write_string(&builder, "\",\"login_url\":\"")
-	write_handler_json_string(&builder, "/api/v1/auth/login" if web else auth_service.login_url(handlers.auth))
-	strings.write_string(&builder, "\",\"logout_url\":\"")
-	write_handler_json_string(&builder, handlers.auth.web.end_session_url if web && handlers.auth.web.end_session_url != "" else auth_service.logout_url(handlers.auth))
-	if web do strings.write_string(&builder, "\",\"logout\":\"POST /api/v1/auth/logout")
-	strings.write_string(&builder, "\"}")
+	strings.write_string(&builder, "{\"mode\":\"oidc\",\"login_url\":\"/api/v1/auth/login\",\"logout_url\":\"")
+	write_handler_json_string(&builder, handlers.auth.web.end_session_url if handlers.auth != nil else "")
+	strings.write_string(&builder, "\",\"logout\":\"POST /api/v1/auth/logout\"}")
 	return respond_success(strings.to_string(builder), req.request_id, auth_ctx_server_time(req))
 }
 
@@ -80,57 +73,13 @@ me_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	return respond_success(strings.to_string(builder), req.request_id, auth_ctx_server_time(req))
 }
 
-list_my_tokens_handler :: proc(ctx: rawptr, req: Request) -> Response {
-	handlers := (^User_Handlers)(ctx)
-	auth_ctx, ok, auth_resp := require_auth(handlers.auth, req)
-	if !ok do return auth_resp
-	tokens, err := auth_service.list_user_api_tokens(handlers.auth, domain.User_ID(auth_ctx.user_id))
-	if err.code != .None do return respond_error(err, req.request_id)
-	builder := strings.builder_make()
-	strings.write_byte(&builder, '[')
-	for token, i in tokens {
-		if i > 0 do strings.write_byte(&builder, ',')
-		write_user_token_json(&builder, token)
-	}
-	strings.write_byte(&builder, ']')
-	return respond_list(strings.to_string(builder), contracts.API_Page{limit = contracts.API_DEFAULT_PAGE_LIMIT, has_more = false}, req.request_id, auth_ctx_server_time(req))
-}
-
-issue_my_token_handler :: proc(ctx: rawptr, req: Request) -> Response {
-	handlers := (^User_Handlers)(ctx)
-	auth_ctx, ok, auth_resp := require_auth(handlers.auth, req)
-	if !ok do return auth_resp
-	label := strings.trim_space(json_string(req.body, "label"))
-	if label == "" do label = "Electron app"
-	result, issued, err := auth_service.issue_user_api_token(handlers.auth, auth_service.Issue_User_API_Token_Input{owner_user_id = domain.User_ID(auth_ctx.user_id), label = label, expires_at = json_string(req.body, "expires_at")})
-	if !issued do return respond_error(err, req.request_id)
-	builder := strings.builder_make()
-	strings.write_string(&builder, "{\"token\":")
-	write_user_token_json(&builder, result.token)
-	strings.write_string(&builder, ",\"plaintext\":\"")
-	write_handler_json_string(&builder, result.plaintext)
-	strings.write_string(&builder, "\"}")
-	return respond_success(strings.to_string(builder), req.request_id, auth_ctx_server_time(req), 201)
-}
-
-revoke_my_token_handler :: proc(ctx: rawptr, req: Request) -> Response {
-	handlers := (^User_Handlers)(ctx)
-	auth_ctx, ok, auth_resp := require_auth(handlers.auth, req)
-	if !ok do return auth_resp
-	token, revoked, err := auth_service.revoke_user_api_token_for_owner(handlers.auth, domain.User_ID(auth_ctx.user_id), path_part(req.path, 5))
-	if !revoked do return respond_error(err, req.request_id)
-	builder := strings.builder_make()
-	write_user_token_json(&builder, token)
-	return respond_success(strings.to_string(builder), req.request_id, auth_ctx_server_time(req))
-}
-
 issue_user_ws_ticket_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	handlers := (^User_Handlers)(ctx)
 	auth_ctx, ok, auth_resp := require_auth(handlers.auth, req)
 	if !ok do return auth_resp
 	if auth_ctx.kind == .OIDC do return respond_error(domain.domain_error(.Forbidden, "OIDC WebSockets require a bearer and v2 device proof"), req.request_id)
-	// Only a user principal gets a user WebSocket ticket.
-	if !contracts.is_user_auth(auth_ctx) do return respond_error(domain.domain_error(.Forbidden, "user authentication is required"), req.request_id)
+	// Only a browser session gets a user WebSocket ticket.
+	if auth_ctx.kind != .Session do return respond_error(domain.domain_error(.Forbidden, "user authentication is required"), req.request_id)
 	raw_ticket, ticket_ok := device_auth.generate_device_code()
 	if !ticket_ok do return respond_error(domain.domain_error(.Internal_Error, "failed to generate websocket ticket"), req.request_id)
 	defer delete(raw_ticket)
@@ -213,11 +162,9 @@ logout_url_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	if !ok do return auth_resp
 	builder := strings.builder_make()
 	strings.write_string(&builder, "{\"logout_url\":\"")
-	// With browser login this is the provider end-session URL (no session is
-	// ended here: POST /api/v1/auth/logout does that and adds the id_token_hint).
-	logout := auth_service.logout_url(handlers.auth)
-	if auth_service.web_login_enabled(handlers.auth) && handlers.auth.web.end_session_url != "" do logout = handlers.auth.web.end_session_url
-	write_handler_json_string(&builder, logout)
+	// The provider end-session URL (no session is ended here: POST
+	// /api/v1/auth/logout does that and adds the id_token_hint).
+	write_handler_json_string(&builder, handlers.auth.web.end_session_url)
 	strings.write_string(&builder, "\"}")
 	return respond_success(strings.to_string(builder), req.request_id, auth_ctx_server_time(req))
 }
@@ -264,7 +211,6 @@ user_ws_ticket_store_put :: proc(store: ^User_WS_Ticket_Store, ticket: string, a
 	key := strings.clone(ticket, heap)
 	store.tickets[key] = User_WS_Ticket{
 		kind = auth_ctx.kind,
-		user_token_id = strings.clone(auth_ctx.user_token_id, heap),
 		session_id = strings.clone(auth_ctx.session_id, heap),
 		auth_expires_ms = auth_ctx.expires_ms,
 		ticket = key,
@@ -284,7 +230,6 @@ free_user_ws_ticket :: proc(item: User_WS_Ticket, heap: runtime.Allocator) {
 	delete(item.name, heap)
 	delete(item.display_name, heap)
 	delete(item.email, heap)
-	delete(item.user_token_id, heap)
 	delete(item.session_id, heap)
 }
 
@@ -297,11 +242,10 @@ user_ws_ticket_store_consume_raw :: proc(store: ^User_WS_Ticket_Store, ticket: s
 	if !ok do return contracts.Auth_Context{}, false
 	delete_key(&store.tickets, ticket)
 	if item.expires_at <= now do return contracts.Auth_Context{}, false
-	// Tickets are only ever issued to Session, Trusted_Proxy and User_Token
+	// Tickets are only ever issued to Session
 	// principals (never OIDC: that needs a per-request device proof).
-	kind := contracts.Auth_Kind.User_Token
-	if item.kind == .Trusted_Proxy || item.kind == .Session do kind = item.kind
-	return contracts.Auth_Context{kind = kind, user_id = item.user_id, name = item.name, display_name = item.display_name, email = item.email, user_token_id = item.user_token_id, session_id = item.session_id, expires_ms = item.auth_expires_ms}, true
+	if item.kind != .Session do return contracts.Auth_Context{}, false
+	return contracts.Auth_Context{kind = .Session, user_id = item.user_id, name = item.name, display_name = item.display_name, email = item.email, session_id = item.session_id, expires_ms = item.auth_expires_ms}, true
 }
 
 user_ws_ticket_store_consume :: proc(store: ^User_WS_Ticket_Store, ticket: string) -> (contracts.Auth_Context, bool) {
@@ -311,33 +255,6 @@ user_ws_ticket_store_consume :: proc(store: ^User_WS_Ticket_Store, ticket: strin
 	return principal, true
 }
 
-write_user_token_json :: proc(builder: ^strings.Builder, token: domain.User_API_Token) {
-	status := "active"
-	if token.revoked_at != "" do status = "revoked"
-	strings.write_string(builder, "{\"token_id\":\"")
-	write_handler_json_string(builder, token.token_id)
-	strings.write_string(builder, "\",\"owner_user_id\":\"")
-	write_handler_json_string(builder, string(token.owner_user_id))
-	strings.write_string(builder, "\",\"label\":\"")
-	write_handler_json_string(builder, token.label)
-	strings.write_string(builder, "\",\"status\":\"")
-	write_handler_json_string(builder, status)
-	strings.write_string(builder, "\",\"created_at\":\"")
-	write_handler_json_string(builder, token.created_at)
-	strings.write_string(builder, "\",\"updated_at\":\"")
-	write_handler_json_string(builder, token.updated_at)
-	strings.write_string(builder, "\",\"last_used_at\":\"")
-	write_handler_json_string(builder, token.last_used_at)
-	strings.write_string(builder, "\",\"expires_at\":\"")
-	write_handler_json_string(builder, token.expires_at)
-	strings.write_string(builder, "\",\"revoked_at\":\"")
-	write_handler_json_string(builder, token.revoked_at)
-	strings.write_string(builder, "\",\"created_from\":\"")
-	write_handler_json_string(builder, token.created_from)
-	strings.write_string(builder, "\",\"device_label\":\"")
-	write_handler_json_string(builder, token.device_label)
-	strings.write_string(builder, "\"}")
-}
 
 write_user_ws_upgrade_response :: proc(client: net.TCP_Socket, accept_key: string) -> bool {
 	response := fmt.tprintf("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: %s\r\n\r\n", accept_key)

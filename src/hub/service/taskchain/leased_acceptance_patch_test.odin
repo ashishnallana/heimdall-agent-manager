@@ -31,7 +31,7 @@ test_leased_task_acceptance_patch_preserves_scope_and_refreshes_lease :: proc(t:
 	clock := platform.real_clock()
 	ids := platform.real_id_generator()
 	svc := new_taskchain_service(&repo, &agents, &clock, &ids)
-	owner := contracts.Auth_Context{kind = .User_Token, user_id = "owner"}
+	owner := contracts.Auth_Context{kind = .Session, user_id = "owner"}
 	chain, cok, _ := create_chain(&svc, owner, Create_Chain_Input{title = "acceptance corrections"})
 	if !testing.expect(t, cok, "create chain") do return
 	chain.coordinator_agent_instance_id = "coord"

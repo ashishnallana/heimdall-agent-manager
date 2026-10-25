@@ -12,7 +12,7 @@ ph_ago :: proc(d: time.Duration) -> string {
 }
 
 ph_auth :: proc(user: domain.User_ID = PH_OWNER) -> contracts.Auth_Context {
-	return contracts.Auth_Context{kind = .User_Token, user_id = string(user)}
+	return contracts.Auth_Context{kind = .Session, user_id = string(user)}
 }
 
 // Seeds: tasks aged 2h, 30h and 10d; one question message aged 3h; and another

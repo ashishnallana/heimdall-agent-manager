@@ -26,7 +26,7 @@ test_agent_not_running_offline_start_failure_retry_and_dead_holder :: proc(t: ^t
 	for part in ([]string{"agt_w", "claude", "claude-opus-5-5", "br_1", "offline"}) do testing.expect(t, strings.contains(task.blocked_on_json, part), part)
 	attempts, _ := iface.taskchain_list_attempts_by_task(&fx.repo, task.task_id, "u1")
 	testing.expect_value(t, len(attempts), 0)
-	auth := contracts.Auth_Context{kind = .User_Token, user_id = "u1"}
+	auth := contracts.Auth_Context{kind = .Session, user_id = "u1"}
 	started, err := start_task_agent(&fx.svc, auth, task.task_id, "outdated block")
 	testing.expect(t, !started && err.code == .Conflict, "stale retry cannot act on a newer failure")
 	started, err = start_task_agent(&fx.svc, auth, task.task_id)
@@ -44,8 +44,8 @@ test_agent_not_running_offline_start_failure_retry_and_dead_holder :: proc(t: ^t
 	fx.svc.bridge_command_sink = {}
 	started, err = start_task_agent(&fx.svc, contracts.Auth_Context{kind = .Instance_Token, user_id = "u1"}, task.task_id)
 	testing.expect(t, !started && err.code == .Forbidden, "agents cannot start task agents")
-	// The UI behind the auth proxy authenticates as Trusted_Proxy, not a user token.
-	started, err = start_task_agent(&fx.svc, contracts.Auth_Context{kind = .Trusted_Proxy, user_id = "u1"}, task.task_id)
+	// The native app authenticates with an OIDC bearer, not a browser session.
+	started, err = start_task_agent(&fx.svc, contracts.Auth_Context{kind = .OIDC, user_id = "u1"}, task.task_id)
 	testing.expect(t, started && err.code == .None, "browser-session retry succeeds")
 	lease, held := lease_of(fx, "inst_w1")
 	testing.expect(t, held && wake_log_has_run(log, "inst_w1"), "success dispatches")
@@ -61,7 +61,7 @@ test_agent_not_running_offline_start_failure_retry_and_dead_holder :: proc(t: ^t
 	attempts, _ = iface.taskchain_list_attempts_by_task(&fx.repo, lease.task_id, "u1")
 	for a in attempts do testing.expect(t, !a.counts_toward_budget, "infrastructure never spends budget")
 	assert_projection_matches_fold(t, fx, chain.chain_id, "u1", "anr")
-	_, forbidden := start_task_agent(&fx.svc, contracts.Auth_Context{kind = .User_Token, user_id = "someone_else"}, task.task_id)
+	_, forbidden := start_task_agent(&fx.svc, contracts.Auth_Context{kind = .Session, user_id = "someone_else"}, task.task_id)
 	testing.expect_value(t, forbidden.code, domain.Error_Code.Not_Found)
 }
 
@@ -151,7 +151,7 @@ test_agent_not_running_solo_start_launches_only_on_user_action :: proc(t: ^testi
 	ag_service := agent.new_agent_service_with_runtime(&fx.agents, &fx.bridges, &pr_repo, &co_repo, &fx.repo, sink, &registry, &fx.clock, &fx.ids)
 	ag_service.providers = &pv_repo
 	fx.svc.agent_service = &ag_service
-	auth := contracts.Auth_Context{kind = .User_Token, user_id = "u1"}
+	auth := contracts.Auth_Context{kind = .Session, user_id = "u1"}
 	started, err := start_task_agent(&fx.svc, auth, task.task_id)
 	testing.expect(t, !started && strings.contains(err.message, "solo launch refused"), "explicit failed launch returned")
 	task = get_task(fx, "task_solo_anr")

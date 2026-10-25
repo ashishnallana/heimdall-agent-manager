@@ -424,7 +424,7 @@ validate_instance_message_configuration :: proc(service: ^Agent_Service, owner: 
 		if !project_ok do return false, project_err
 		if project.owner_user_id != owner || project.state != .Active do return false, domain.domain_error(.Conflict, "conversation is read-only: choose an accessible active project or clear the project")
 	}
-	_, valid, validation_err := validate_pinned_provider_model(service, contracts.Auth_Context{kind = .User_Token, user_id = string(owner)}, inst, inst.provider, inst.model)
+	_, valid, validation_err := validate_pinned_provider_model(service, contracts.Auth_Context{kind = .Internal_User, user_id = string(owner)}, inst, inst.provider, inst.model)
 	return valid, validation_err
 }
 

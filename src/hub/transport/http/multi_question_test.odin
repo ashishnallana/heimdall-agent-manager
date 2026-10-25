@@ -34,7 +34,6 @@ MQ_HTTP_Base :: struct {
 	us_svc: user_service.User_Service,
 	ag_svc: agent_service.Agent_Service,
 	auth_svc: auth_service.Auth_Service,
-	proxy_cidrs: [1]string,
 	owner_user_id, bridge_id, bridge_token: string,
 }
 
@@ -53,8 +52,7 @@ mq_http_base_open :: proc(t: ^testing.T) -> ^MQ_HTTP_Base {
 	f.br_svc = bridge_service.new_bridge_service(&f.br_repo, &f.clock, &f.ids)
 	f.us_svc = user_service.new_user_service_basic(&f.us_repo, &f.clock, &f.ids)
 	f.ag_svc = agent_service.new_agent_service(&f.ag_repo, &f.br_repo, &f.clock, &f.ids)
-	f.proxy_cidrs = {"127.0.0.1/32"}
-	f.auth_svc = auth_service.new_auth_service({username_header = "X-authentik-username", trusted_proxy_cidrs = f.proxy_cidrs[:], auto_provision_users = true}, &f.us_svc)
+	f.auth_svc = auth_service.new_auth_service(auth_service.Auth_Config{auto_provision_users = true}, &f.us_svc)
 	f.auth_svc.bridges = &f.br_svc
 	f.auth_svc.agents = &f.ag_svc
 	f.auth_svc.clock = &f.clock
@@ -124,9 +122,8 @@ mq_http_open :: proc(t: ^testing.T, f: ^MQ_HTTP_Fixture, tag: string) {
 	}
 }
 
-mq_http_req :: proc(path, body: string, owner := "tanmay") -> Request {
-	headers := make([]contracts.HTTP_Header, 1, context.temp_allocator)
-	headers[0] = {name = "X-authentik-username", value = owner}
+mq_http_req :: proc(base: ^MQ_HTTP_Base, path, body: string, owner := "tanmay") -> Request {
+	headers := http_test_session_headers(&base.auth_svc, owner)
 	return Request{method = "POST", path = path, body = body, request_id = "req_mq", remote_addr = "127.0.0.1:4444", headers = headers}
 }
 
@@ -147,7 +144,7 @@ mq_http_source :: proc(t: ^testing.T, f: ^MQ_HTTP_Fixture) -> domain.Chat_Messag
 	params.params.message_type = "multi_question"
 	params.params.metadata.multi_question = group
 	raw, _ := json.marshal(params, allocator = context.temp_allocator)
-	req := mq_http_req("/api/v1/agent-actions/chat/send-to-user", string(raw))
+	req := mq_http_req(f.base, "/api/v1/agent-actions/chat/send-to-user", string(raw))
 	req.headers = {{name = "Authorization", value = fmt.tprintf("Bearer %s", f.base.bridge_token)}}
 	response := agent_action_chat_send_to_user_handler(&f.agent_handlers, req)
 	if !testing.expect_value(t, response.status, 201) { fmt.println(response.body); return {} }
@@ -170,7 +167,7 @@ mq_http_submission :: proc(key: string, custom := false) -> string {
 }
 
 mq_http_answer :: proc(f: ^MQ_HTTP_Fixture, source_id, body: string, owner := "tanmay", cid := "chat_mq") -> Response {
-	return answer_chat_questions_handler(&f.handlers, mq_http_req(fmt.tprintf("/api/v1/chats/%s/messages/%s/answers", cid, source_id), body, owner))
+	return answer_chat_questions_handler(&f.handlers, mq_http_req(f.base, fmt.tprintf("/api/v1/chats/%s/messages/%s/answers", cid, source_id), body, owner))
 }
 
 @(test)
@@ -179,7 +176,7 @@ test_multi_question_http_roundtrip_and_replay :: proc(t: ^testing.T) {
 	mq_http_open(t, &f, "mq_roundtrip")
 	defer mq_http_base_close(f.base)
 	source := mq_http_source(t, &f)
-	before := list_chat_messages_handler(&f.handlers, mq_http_req("/api/v1/chats/chat_mq/messages", ""))
+	before := list_chat_messages_handler(&f.handlers, mq_http_req(f.base, "/api/v1/chats/chat_mq/messages", ""))
 	testing.expect(t, strings.contains(before.body, `"question_answer":null`), "unanswered source read model")
 	testing.expect(t, strings.contains(before.body, `"is_latest_message":true`), "latest hint supplied on source")
 	raw := mq_http_submission("request_1", true)
@@ -188,7 +185,7 @@ test_multi_question_http_roundtrip_and_replay :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(response.body, `"replayed":false`), "first request reports inserted")
 	testing.expect(t, strings.contains(response.body, `"message_type":"multi_question_answer"`), "answer delivered with explicit type")
 	testing.expect_value(t, sync.atomic_load(&f.notifications), 1)
-	auth := contracts.Auth_Context{kind = .User_Token, user_id = f.base.owner_user_id}
+	auth := contracts.Auth_Context{kind = .Session, user_id = f.base.owner_user_id}
 	inbox, e := content_service.list_agent_inbox_messages(&f.svc, auth, {agent_instance_id = "inst_mq", unread_only = true, receiver_only = true})
 	testing.expect_value(t, e.code, domain.Error_Code.None)
 	if testing.expect_value(t, len(inbox), 1) {
@@ -196,7 +193,7 @@ test_multi_question_http_roundtrip_and_replay :: proc(t: ^testing.T) {
 		testing.expect(t, strings.contains(inbox[0].metadata_json, source.message_id), "source linkage present in agent inbox")
 		testing.expect(t, !strings.contains(inbox[0].metadata_json, "Use my custom checks"), "custom text encrypted in storage")
 	}
-	after := list_chat_messages_handler(&f.handlers, mq_http_req("/api/v1/chats/chat_mq/messages", ""))
+	after := list_chat_messages_handler(&f.handlers, mq_http_req(f.base, "/api/v1/chats/chat_mq/messages", ""))
 	testing.expect(t, strings.contains(after.body, `"answer_message_id":"msg_answer_`), "answered state projects on source after reload")
 	testing.expect(t, strings.contains(after.body, `"is_latest_message":false`), "answer expires source controls")
 	unchanged, _, _ := iface.content_get_message(&f.repo, source.message_id)
@@ -270,7 +267,7 @@ test_multi_question_http_legacy_metadata_and_types :: proc(t: ^testing.T) {
 	defer mq_http_base_close(f.base)
 	sealed := mq_http_seal("Legacy choose a target")
 	raw := fmt.tprintf(`{{"agent_instance_id":"inst_mq","params":{{"body":"%s","options":["Staging","Production"],"action_ids":["crd_1"]}}}}`, sealed)
-	req := mq_http_req("/api/v1/agent-actions/chat/send-to-user", raw)
+	req := mq_http_req(f.base, "/api/v1/agent-actions/chat/send-to-user", raw)
 	req.headers = {{name = "Authorization", value = fmt.tprintf("Bearer %s", f.base.bridge_token)}}
 	response := agent_action_chat_send_to_user_handler(&f.agent_handlers, req)
 	testing.expect_value(t, response.status, 201)
@@ -386,7 +383,7 @@ test_multi_question_http_history_pagination :: proc(t: ^testing.T) {
 		seen := make(map[string]bool, context.temp_allocator)
 		index := 0
 		for page_number := 0; page_number < 6; page_number += 1 {
-			req := mq_http_req("/api/v1/chats/chat_mq/messages", "")
+			req := mq_http_req(f.base, "/api/v1/chats/chat_mq/messages", "")
 			req.method = "GET"
 			encoded_cursor, _ := strings.replace_all(cursor, "|", "%7C", context.temp_allocator)
 			req.query = fmt.tprintf("limit=%d&cursor=%s", page_size, encoded_cursor)
@@ -415,7 +412,7 @@ test_multi_question_http_history_pagination :: proc(t: ^testing.T) {
 		testing.expect_value(t, len(seen), len(expected))
 	}
 	// Preserve timestamp-only callers' historical strict-before behavior.
-	req := mq_http_req("/api/v1/chats/chat_mq/messages", "")
+	req := mq_http_req(f.base, "/api/v1/chats/chat_mq/messages", "")
 	req.query = "limit=10&cursor=2026-10-22T11:00:02Z"
 	legacy := list_chat_messages_handler(&f.handlers, req)
 	testing.expect_value(t, legacy.status, 200)

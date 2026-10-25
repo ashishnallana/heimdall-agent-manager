@@ -8,6 +8,7 @@ import "core:thread"
 import bridge "odin_test:bridge"
 import contracts "odin_test:contracts"
 import app "odin_test:hub/app"
+import auth_service "odin_test:hub/service/auth"
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
 import content_service "odin_test:hub/service/content"
@@ -119,28 +120,21 @@ test_hub_memory_actions :: proc(t: ^testing.T) {
 main :: proc() {
 	db_path := "/tmp/heimdall-hub-memory-actions-test.db"
 	_ = os.remove(db_path)
-	cidrs := [?]string{"127.0.0.1/32"}
 	graph: app.App_Graph
 	ok, message := app.build_graph(&graph, app.Hub_Config{
 		database_path = db_path,
 		migrations_dir = "src/hub/repository/sqlite/migrations",
 		bind_host = "127.0.0.1",
 		port = PORT,
-		username_header = "X-authentik-username",
-		display_name_header = "X-authentik-name",
-		email_header = "X-authentik-email",
-		trusted_proxy_cidrs = cidrs[:],
 		auto_provision_users = true,
-		logout_url = "/_dev/logout",
 		paddle_environment = "sandbox",
 	})
 	check(ok, message)
-
-	user_headers := [?]contracts.HTTP_Header{
-		{name = "X-authentik-username", value = "alice"},
-		{name = "X-authentik-name", value = "Alice User"},
-		{name = "X-authentik-email", value = "alice@example.com"},
-	}
+	// Users authenticate with a Hub browser session (OIDC login); mint one directly.
+	graph.auth.web.enabled = true
+	alice_session, alice_ok := auth_service.mint_session(&graph.auth, "alice")
+	check(alice_ok, "mint alice session")
+	user_headers := [?]contracts.HTTP_Header{auth_service.session_cookie_request_header(alice_session)}
 	bridge_id, bridge_token := enroll_bridge(&graph, user_headers[:])
 
 	owner := domain.User_ID("alice")
@@ -177,7 +171,7 @@ main :: proc() {
 	})
 	check(inst_saved, inst_err.message)
 
-	auth := contracts.Auth_Context{kind = .Trusted_Proxy, user_id = string(owner), name = string(owner)}
+	auth := contracts.Auth_Context{kind = .Session, user_id = string(owner), name = string(owner)}
 
 	// Create two test memories
 	// Memory 1: Fact, scoped to agent_id
@@ -318,11 +312,9 @@ main :: proc() {
 	// Test 11: a non-owner cannot patch someone else's memory. Ownership guards
 	// return Not_Found (404, anti-enumeration — see ownership.require_owner), the
 	// same treatment approve/archive/detail use, not 403.
-	bob_headers := [?]contracts.HTTP_Header{
-		{name = "X-authentik-username", value = "bob"},
-		{name = "X-authentik-name", value = "Bob User"},
-		{name = "X-authentik-email", value = "bob@example.com"},
-	}
+	bob_session, bob_ok := auth_service.mint_session(&graph.auth, "bob")
+	check(bob_ok, "mint bob session")
+	bob_headers := [?]contracts.HTTP_Header{auth_service.session_cookie_request_header(bob_session)}
 	patch_bob := request(&graph, "PATCH", fmt.tprintf("/api/v1/memories/%s", mem1.memory_id), "{\"title\":\"hijacked\"}", bob_headers[:])
 	check(patch_bob.status == 404, fmt.tprintf("non-owner PATCH must be rejected as Not_Found (404), got %d: %s", patch_bob.status, patch_bob.body))
 	// And the owner's memory is untouched by the rejected non-owner PATCH.

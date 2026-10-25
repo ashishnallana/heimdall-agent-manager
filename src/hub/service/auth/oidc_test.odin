@@ -140,7 +140,6 @@ OIDC_Test_Repo :: struct {
 	users: users.User_Service,
 	auth:  Auth_Service,
 	fetch: OIDC_Test_Fetch,
-	trusted_cidrs: [1]string,
 }
 oidc_test_clock :: proc(ctx: rawptr) -> string {return (^string)(ctx)^}
 oidc_test_repo :: proc(t: ^testing.T) -> ^OIDC_Test_Repo {
@@ -157,19 +156,7 @@ oidc_test_repo :: proc(t: ^testing.T) -> ^OIDC_Test_Repo {
 		now = oidc_test_clock,
 	}
 	f.users = users.new_user_service_basic(&f.repo, &f.clock, nil)
-	f.trusted_cidrs[0] = "127.0.0.1/32"
-	f.auth = new_auth_service_with_tokens(
-		Trusted_Proxy_Config {
-			username_header = "X-authentik-username",
-			trusted_proxy_cidrs = f.trusted_cidrs[:],
-			auto_provision_users = true,
-		},
-		&f.users,
-		&f.repo,
-		&f.clock,
-		nil,
-	)
-	f.auth.oidc_mode = true
+	f.auth = new_auth_service(Auth_Config{auto_provision_users = true}, &f.users, &f.clock)
 	f.auth.oidc = oidc_test_config(t, &f.fetch)
 	return f
 }
@@ -245,16 +232,10 @@ test_oidc_cache_and_expiry_and_spoofing :: proc(t: ^testing.T) {
 		_, ok, _ := resolve_auth(&f.auth, oidc_test_request(token))
 		testing.expect(t, !ok)
 	}
+	// Proxy identity headers authenticate nothing (trusted-proxy auth was removed).
 	headers := []contracts.HTTP_Header{{"X-authentik-username", "alice"}}
-	proxy_principal, proxy, _ := resolve_auth(
-		&f.auth,
-		Auth_Request{remote_addr = "127.0.0.1", headers = headers},
-	)
-	testing.expect(t, proxy)
-	testing.expect_value(t, proxy_principal.kind, contracts.Auth_Kind.Trusted_Proxy)
-	testing.expect_value(t, proxy_principal.user_id, "alice")
-	_, untrusted_proxy, _ := resolve_auth(&f.auth, Auth_Request{remote_addr = "10.0.0.1", headers = headers})
-	testing.expect(t, !untrusted_proxy)
+	_, proxy, proxy_err := resolve_auth(&f.auth, Auth_Request{remote_addr = "127.0.0.1", headers = headers})
+	testing.expect(t, !proxy && proxy_err.code == .Unauthenticated)
 	empty_auth_headers := []contracts.HTTP_Header {
 		{"Authorization", ""},
 		{"X-authentik-username", "alice"},
@@ -267,13 +248,6 @@ test_oidc_cache_and_expiry_and_spoofing :: proc(t: ^testing.T) {
 	req.query = "access_token=stolen"
 	_, query, _ := resolve_auth(&f.auth, req)
 	testing.expect(t, !query)
-	_, issued, _ := issue_user_api_token(
-		&f.auth,
-		Issue_User_API_Token_Input{owner_user_id = "alice"},
-	)
-	testing.expect(t, !issued)
-	_, _, device_issued, _ := issue_device_authorization_token(&f.auth, "alice", "script")
-	testing.expect(t, !device_issued)
 	duplicate := oidc_test_request(f.fetch.data.tokens["valid"])
 	repeated := make([]contracts.HTTP_Header, 3, context.temp_allocator)
 	copy(repeated, duplicate.headers)
@@ -443,7 +417,7 @@ test_oidc_mode_keeps_bridge_and_instance_credential_routing :: proc(t: ^testing.
 		testing.expect(t, !ok && err.code == .Forbidden && err.message == "bridge token cannot call user APIs", token)
 	}
 	_, hut_ok, hut_err := resolve_auth(&f.auth, oidc_bridge_request("Bearer hut_user_token"))
-	testing.expect(t, !hut_ok && hut_err.code == .Unauthenticated, "Hub user tokens are not accepted in OIDC mode")
+	testing.expect(t, !hut_ok && hut_err.code == .Unauthenticated && strings.contains(hut_err.message, "no longer supported"), "Hub user tokens are not accepted")
 	// Bare bridge bearer on a shared endpoint: same 403 as without OIDC.
 	_, any_ok, any_err := resolve_auth_any(&f.auth, oidc_bridge_request("Bearer hba_access"))
 	testing.expect(t, !any_ok && any_err.code == .Forbidden && strings.contains(any_err.message, "bare bridge token"), "bare bridge token on shared endpoint")

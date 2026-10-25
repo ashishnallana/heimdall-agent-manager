@@ -163,7 +163,7 @@ preview_owner_handler_response :: proc(t: ^testing.T, h: ^Shell_Session_Stream_H
 		path = path,
 		request_id = "req_owner_isolation",
 		remote_addr = "127.0.0.1:4444",
-		headers = []contracts.HTTP_Header{{name = "X-authentik-username", value = "owner"}},
+		headers = http_test_preview_headers(t, h.auth, "owner", session_id),
 	}, server_socket)
 	buf: [4096]byte
 	n, _ := net.recv_tcp(client, buf[:])
@@ -181,11 +181,8 @@ test_preview_origin_foreign_and_missing_sessions_are_identical_404_without_tunne
 	clock := platform.real_clock()
 	ids := http_test_id_generator()
 	users := user_service.new_user_service_basic(&user_repo, &clock, &ids)
-	cidrs := []string{"127.0.0.1/32"}
-	auth := auth_service.new_auth_service(auth_service.Trusted_Proxy_Config{
-		username_header = "X-authentik-username",
-		trusted_proxy_cidrs = cidrs,
-	}, &users)
+	auth := auth_service.new_auth_service(auth_service.Auth_Config{}, &users)
+	defer auth_service.oidc_free(&auth)
 	tunnel_open_count := 0
 	h := Shell_Session_Stream_Handlers{
 		auth = &auth,
@@ -211,6 +208,10 @@ test_preview_origin_cookie_filter :: proc(t: ^testing.T) {
 	actual := _preview_filter_cookie_header("app=1; authentik_proxy_x=secret; AUTHENTIK_SESSION=s; theme=dark")
 	defer delete(actual)
 	testing.expect_value(t, actual, "app=1; theme=dark")
+	// The Hub's own cookies (preview session, session, login) never reach the app.
+	hub := _preview_filter_cookie_header("__Host-heimdall_preview=p; app=2; __Host-heimdall_session=s; __HOST-HEIMDALL_LOGIN=l")
+	defer delete(hub)
+	testing.expect_value(t, hub, "app=2")
 }
 
 @(test)
@@ -283,7 +284,7 @@ preview_relay_response :: proc(t: ^testing.T, h: ^Shell_Session_Stream_Handlers,
 		path = path,
 		request_id = "req_preview_transport",
 		remote_addr = "127.0.0.1:4444",
-		headers = []contracts.HTTP_Header{{name = "X-authentik-username", value = "owner"}},
+		headers = http_test_login(t, h.auth, "owner"),
 	}, server_socket)
 	buf: [4096]byte
 	n, _ := net.recv_tcp(client, buf[:])
@@ -339,11 +340,8 @@ test_preview_legacy_route_fails_closed_with_dedicated_origin :: proc(t: ^testing
 	clock := platform.real_clock()
 	ids := http_test_id_generator()
 	users := user_service.new_user_service_basic(&user_repo, &clock, &ids)
-	cidrs := []string{"127.0.0.1/32"}
-	auth := auth_service.new_auth_service(auth_service.Trusted_Proxy_Config{
-		username_header = "X-authentik-username",
-		trusted_proxy_cidrs = cidrs,
-	}, &users)
+	auth := auth_service.new_auth_service(auth_service.Auth_Config{}, &users)
+	defer auth_service.oidc_free(&auth)
 	tunnel_open_count := 0
 	h := Shell_Session_Stream_Handlers{
 		auth = &auth,
@@ -380,4 +378,205 @@ test_preview_legacy_route_fails_closed_with_dedicated_origin :: proc(t: ^testing
 	testing.expect(t, strings.has_prefix(reopened, "HTTP/1.1 404"))
 	testing.expect_value(t, repo_state.get_calls, 1)
 	testing.expect_value(t, tunnel_open_count, 0)
+}
+
+// --- Preview-origin sign-in (phase 3): __Host-heimdall_preview via a handoff ticket ---
+
+@(private = "file")
+Preview_Flow_Fixture :: struct {
+	repo_state: Preview_Owner_Repo_State,
+	shell_repo: iface.Shell_Session_Repository,
+	user_repo:  iface.User_Repository,
+	clock:      platform.Clock,
+	now:        string,
+	users:      user_service.User_Service,
+	auth:       auth_service.Auth_Service,
+	h:          Shell_Session_Stream_Handlers,
+}
+
+@(private = "file")
+preview_flow_clock :: proc(ctx: rawptr) -> string {return (^string)(ctx)^}
+
+@(private = "file")
+preview_flow_fixture :: proc(t: ^testing.T) -> ^Preview_Flow_Fixture {
+	f := new(Preview_Flow_Fixture, context.temp_allocator)
+	f.repo_state = Preview_Owner_Repo_State{foreign_session = domain.Shell_Session{
+		session_id = "sh_owned", owner_user_id = "owner", bridge_id = "brg_1",
+		status = domain.Shell_Session_Status_Running, server_port = 3000,
+	}}
+	f.shell_repo = iface.Shell_Session_Repository{ctx = rawptr(&f.repo_state), get = preview_owner_repo_get}
+	f.user_repo = iface.User_Repository{get_by_id = preview_owner_user_get}
+	f.now = "2026-10-25T10:00:00Z"
+	f.clock = platform.Clock{ctx = &f.now, now = preview_flow_clock}
+	ids := http_test_id_generator()
+	f.users = user_service.new_user_service_basic(&f.user_repo, &f.clock, &ids)
+	f.auth = auth_service.new_auth_service(auth_service.Auth_Config{}, &f.users, &f.clock)
+	http_test_enable_sessions(&f.auth)
+	f.h = Shell_Session_Stream_Handlers{
+		auth = &f.auth,
+		shell_repo = &f.shell_repo,
+		preview_origin = "https://preview.example",
+		ui_origin = "https://hub.example",
+	}
+	return f
+}
+
+@(private = "file")
+preview_flow_header :: proc(resp: Response, name: string) -> string {
+	for h in resp.headers do if strings.equal_fold(h.name, name) do return h.value
+	return ""
+}
+
+@(private = "file")
+preview_flow_start :: proc(f: ^Preview_Flow_Fixture, query: string, headers: []contracts.HTTP_Header) -> Response {
+	return preview_auth_start_handler(&f.h, Request{method = "GET", path = PREVIEW_AUTH_START_PATH, query = query, request_id = "req_preview_start", headers = headers})
+}
+
+// preview_flow_ticket runs the start route as `user` and returns the ticket.
+@(private = "file")
+preview_flow_ticket :: proc(t: ^testing.T, f: ^Preview_Flow_Fixture, user: string) -> (string, []contracts.HTTP_Header) {
+	session := http_test_login(t, &f.auth, user)
+	resp := preview_flow_start(f, "session=sh_owned&return_to=%2Fp%2Fsh_owned%2Fapp%3Fx%3D1", session)
+	testing.expect_value(t, resp.status, 302)
+	location := preview_flow_header(resp, "Location")
+	prefix := "https://preview.example/__heimdall/preview-auth?ticket="
+	testing.expect(t, strings.has_prefix(location, prefix), location)
+	if !strings.has_prefix(location, prefix) do return "", session
+	return location[len(prefix):], session
+}
+
+@(private = "file")
+preview_flow_redeem :: proc(f: ^Preview_Flow_Fixture, ticket: string) -> Response {
+	return preview_auth_redeem(&f.h, Request{method = "GET", path = PREVIEW_AUTH_PATH, query = strings.concatenate({"ticket=", ticket}, context.temp_allocator), request_id = "req_preview_redeem"})
+}
+
+@(test)
+test_preview_auth_start_requires_session_and_owned_target :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	f := preview_flow_fixture(t)
+	defer auth_service.oidc_free(&f.auth)
+	// No Hub session: sign in first, then come back to exactly this start URL.
+	anonymous := preview_flow_start(f, "session=sh_owned&return_to=%2Fp%2Fsh_owned%2F", nil)
+	testing.expect_value(t, anonymous.status, 302)
+	testing.expect_value(t, preview_flow_header(anonymous, "Location"), "/api/v1/auth/login?return_to=%2Fapi%2Fv1%2Fpreview-auth%2Fstart%3Fsession%3Dsh_owned%26return_to%3D%252Fp%252Fsh_owned%252F")
+	// A preview session the user does not own (owner-scoped lookup): 404, no ticket.
+	intruder := http_test_login(t, &f.auth, "intruder")
+	foreign_resp := preview_flow_start(f, "session=sh_owned&return_to=%2Fp%2Fsh_owned%2F", intruder)
+	testing.expect_value(t, foreign_resp.status, 404)
+	testing.expect_value(t, preview_flow_header(foreign_resp, "Location"), "")
+	// return_to must stay inside /p/<sid>/.
+	owner := http_test_login(t, &f.auth, "owner")
+	for bad in ([]string{"%2Fp%2Fother%2F", "%2F%2Fevil.example%2Fp%2Fsh_owned%2F", "https%3A%2F%2Fevil.example%2F", "%2Fapi%2Fv1%2Fme"}) {
+		resp := preview_flow_start(f, strings.concatenate({"session=sh_owned&return_to=", bad}, context.temp_allocator), owner)
+		testing.expect(t, resp.status == 400, bad)
+	}
+	// Default return_to is the preview root.
+	ok := preview_flow_start(f, "session=sh_owned", owner)
+	testing.expect_value(t, ok.status, 302)
+	testing.expect(t, strings.has_prefix(preview_flow_header(ok, "Location"), "https://preview.example/__heimdall/preview-auth?ticket="))
+	testing.expect_value(t, preview_flow_header(ok, "Referrer-Policy"), "no-referrer")
+	// A bearer principal (no browser session) cannot mint preview tickets.
+	_, bearer_err := auth_service.preview_ticket_mint(&f.auth, contracts.Auth_Context{kind = .OIDC, user_id = "owner"}, "sh_owned", "/p/sh_owned/")
+	testing.expect_value(t, bearer_err.code, domain.Error_Code.Forbidden)
+}
+
+@(test)
+test_preview_auth_ticket_single_use_expiry_and_cookie :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	f := preview_flow_fixture(t)
+	defer auth_service.oidc_free(&f.auth)
+	ticket, _ := preview_flow_ticket(t, f, "owner")
+	resp := preview_flow_redeem(f, ticket)
+	testing.expect_value(t, resp.status, 302)
+	testing.expect_value(t, preview_flow_header(resp, "Location"), "/p/sh_owned/app?x=1")
+	cookie := preview_flow_header(resp, "Set-Cookie")
+	for attr in ([]string{"__Host-heimdall_preview=", "Path=/", "Secure", "HttpOnly", "SameSite=Lax", "Max-Age="}) do testing.expect(t, strings.contains(cookie, attr), attr)
+	testing.expect(t, !strings.contains(cookie, "Domain="), "host-only cookie")
+	// Single use.
+	again := preview_flow_redeem(f, ticket)
+	testing.expect_value(t, again.status, 403)
+	testing.expect_value(t, preview_flow_header(again, "Set-Cookie"), "")
+	// Unknown ticket.
+	testing.expect_value(t, preview_flow_redeem(f, "not-a-real-ticket-not-a-real-ticket").status, 403)
+	// Expiry: tickets live 60 s.
+	late, _ := preview_flow_ticket(t, f, "owner")
+	f.now = "2026-10-25T10:01:01Z"
+	testing.expect_value(t, preview_flow_redeem(f, late).status, 403)
+	// Only GET is served on the sign-in path.
+	post := preview_auth_redeem(&f.h, Request{method = "POST", path = PREVIEW_AUTH_PATH, query = "ticket=x", request_id = "r"})
+	testing.expect_value(t, post.status, 404)
+}
+
+@(test)
+test_preview_cookie_authenticates_and_dies_with_parent_session :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	f := preview_flow_fixture(t)
+	defer auth_service.oidc_free(&f.auth)
+	ticket, session := preview_flow_ticket(t, f, "owner")
+	resp := preview_flow_redeem(f, ticket)
+	set_cookie := preview_flow_header(resp, "Set-Cookie")
+	pair := set_cookie[:strings.index_byte(set_cookie, ';')]
+	preview_headers := []contracts.HTTP_Header{{"Cookie", pair}, {"Authorization", "Bearer app-owned-token"}}
+	nav := Request{method = "GET", path = "/p/sh_owned/index.html", request_id = "r", headers = preview_headers}
+	principal, ok, _ := preview_origin_auth(&f.h, nav)
+	testing.expect(t, ok, "preview cookie authenticates")
+	testing.expect_value(t, principal.user_id, "owner")
+	testing.expect_value(t, principal.kind, contracts.Auth_Kind.Session)
+	// The Hub session cookie alone is never accepted on the preview host:
+	// a navigation bounces through the start route, anything else is 401.
+	hub_only := Request{method = "GET", path = "/p/sh_owned/index.html", request_id = "r", headers = []contracts.HTTP_Header{session[0], {"Sec-Fetch-Mode", "navigate"}}}
+	_, hub_ok, bounce := preview_origin_auth(&f.h, hub_only)
+	testing.expect(t, !hub_ok)
+	testing.expect_value(t, bounce.status, 302)
+	testing.expect_value(t, preview_flow_header(bounce, "Location"), "https://hub.example/api/v1/preview-auth/start?session=sh_owned&return_to=%2Fp%2Fsh_owned%2Findex.html")
+	xhr := Request{method = "GET", path = "/p/sh_owned/api", request_id = "r", headers = []contracts.HTTP_Header{session[0], {"Sec-Fetch-Mode", "cors"}}}
+	_, xhr_ok, denied := preview_origin_auth(&f.h, xhr)
+	testing.expect(t, !xhr_ok)
+	testing.expect_value(t, denied.status, 401)
+	// Bearer credentials are the app's, never Hub identity, on the preview host.
+	bearer_only := Request{method = "GET", path = "/p/sh_owned/api", request_id = "r", headers = []contracts.HTTP_Header{{"Authorization", "Bearer app-owned-token"}}}
+	_, bearer_ok, _ := preview_origin_auth(&f.h, bearer_only)
+	testing.expect(t, !bearer_ok)
+	// Logging out of the parent Hub session ends the preview session.
+	_ = auth_service.web_logout(&f.auth, session)
+	_, after_logout, _ := preview_origin_auth(&f.h, nav)
+	testing.expect(t, !after_logout, "preview session dies with its parent")
+
+	// Parent expiry (not just logout) is observed on the next re-check.
+	ticket2, _ := preview_flow_ticket(t, f, "owner")
+	resp2 := preview_flow_redeem(f, ticket2)
+	cookie2 := preview_flow_header(resp2, "Set-Cookie")
+	nav.headers = []contracts.HTTP_Header{{"Cookie", cookie2[:strings.index_byte(cookie2, ';')]}}
+	_, alive, _ := preview_origin_auth(&f.h, nav)
+	testing.expect(t, alive)
+	f.now = "2026-10-26T10:00:01Z" // past the parent's 24 h idle expiry
+	_, expired, _ := preview_origin_auth(&f.h, nav)
+	testing.expect(t, !expired, "preview session ends when the parent session expires")
+}
+
+// The real Host dispatch serves the sign-in path on the preview origin and never
+// proxies it; the previewed app cannot shadow it.
+@(test)
+test_preview_origin_handler_serves_sign_in_path :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	f := preview_flow_fixture(t)
+	defer auth_service.oidc_free(&f.auth)
+	ticket, _ := preview_flow_ticket(t, f, "owner")
+	listener, listen_err := net.listen_tcp(net.Endpoint{address = net.IP4_Loopback, port = 0})
+	if listen_err != nil do testing.fail_now(t, "could not listen on loopback")
+	defer net.close(listener)
+	endpoint, _ := net.bound_endpoint(listener)
+	client, dial_err := net.dial_tcp(endpoint)
+	if dial_err != nil do testing.fail_now(t, "could not dial loopback")
+	defer net.close(client)
+	server_socket, _, accept_err := net.accept_tcp(listener)
+	if accept_err != nil do testing.fail_now(t, "could not accept loopback")
+	defer net.close(server_socket)
+	preview_origin_handler(rawptr(&f.h), Request{method = "GET", path = PREVIEW_AUTH_PATH, query = strings.concatenate({"ticket=", ticket}), request_id = "r"}, server_socket)
+	buf: [4096]byte
+	n, _ := net.recv_tcp(client, buf[:])
+	raw := string(buf[:n])
+	testing.expect(t, strings.has_prefix(raw, "HTTP/1.1 302"), raw)
+	testing.expect(t, strings.contains(raw, "Set-Cookie: __Host-heimdall_preview="), raw)
+	testing.expect_value(t, f.repo_state.get_calls, 1) // only the start route's ownership check
 }

@@ -15,7 +15,7 @@ import platform "odin_test:hub/platform"
 
 @(test)
 test_pty_plan_user_identity_exempts_agent_automation :: proc(t: ^testing.T) {
-	for kind in ([]contracts.Auth_Kind{.User_Token, .Trusted_Proxy}) {
+	for kind in ([]contracts.Auth_Kind{.Session, .OIDC}) {
 		testing.expect_value(t, pty_stream_user_id({kind = kind, user_id = "owner"}), "owner")
 	}
 	for kind in ([]contracts.Auth_Kind{.Instance_Token, .Bridge_Token}) {
@@ -77,7 +77,7 @@ test_pty_plan_both_stream_routes_refuse_with_error_and_4402 :: proc(t: ^testing.
 		hub, peer := pty_plan_pair(t)
 		defer net.close(hub)
 		defer net.close(peer)
-		user_ws_ticket_store_put(&tickets, "plan-ticket", {kind = .User_Token, user_id = "owner"}, 60)
+		user_ws_ticket_store_put(&tickets, "plan-ticket", {kind = .Session, user_id = "owner"}, 60)
 		req := Request{method = "GET", path = "/api/v1/shells/new-shell/stream", query = "ticket=plan-ticket",
 			headers = []contracts.HTTP_Header{{name = "Sec-WebSocket-Key", value = "dGhlIHNhbXBsZSBub25jZQ=="}}}
 		if agent_route {
@@ -120,7 +120,9 @@ test_pty_plan_pane_routes_share_budget_and_return_retry_after :: proc(t: ^testin
 	clock := platform.real_clock()
 	ids := http_test_id_generator()
 	users := user_service.new_user_service_basic(&user_repo, &clock, &ids)
-	auth := auth_service.new_auth_service({username_header = "X-User", trusted_proxy_cidrs = []string{"127.0.0.1/32"}}, &users)
+	auth := auth_service.new_auth_service(auth_service.Auth_Config{}, &users)
+	defer auth_service.oidc_free(&auth)
+	owner_headers := http_test_login(t, &auth, "owner")
 	agent_repo := iface.Agent_Repository{get_instance = pty_plan_agent_get}
 	agents := agent_service.new_agent_service(&agent_repo, nil, nil, nil)
 	agent_h := Agent_Handlers{auth = &auth, agents = &agents, shell_sessions = &svc}
@@ -129,7 +131,7 @@ test_pty_plan_pane_routes_share_budget_and_return_retry_after :: proc(t: ^testin
 	// consume its shared capture allowance, so neither can bypass the other.
 	for i in 0..<4 {
 		req := Request{method = "GET", path = "/api/v1/shells/new-shell/pane", remote_addr = "127.0.0.1:1000",
-			headers = []contracts.HTTP_Header{{name = "X-User", value = "owner"}}}
+			headers = owner_headers}
 		resp: Response
 		if i % 2 == 0 {
 			req.path = "/api/v1/agent-instances/new-agent/pane"
@@ -149,7 +151,7 @@ test_pty_plan_pane_routes_share_budget_and_return_retry_after :: proc(t: ^testin
 	limit = 0
 	for agent_route in ([]bool{true, false}) {
 		req := Request{method = "GET", path = "/api/v1/shells/new-shell/pane", remote_addr = "127.0.0.1:1000",
-			headers = []contracts.HTTP_Header{{name = "X-User", value = "owner"}}}
+			headers = owner_headers}
 		resp: Response
 		if agent_route {
 			req.path = "/api/v1/agent-instances/new-agent/pane"

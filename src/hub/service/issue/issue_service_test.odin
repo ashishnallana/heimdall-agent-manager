@@ -30,11 +30,11 @@ test_issue_service_lifecycle :: proc(t: ^testing.T) {
 	svc := new_issue_service(&repo, &clock, &ids)
 
 	auth := contracts.Auth_Context{
-		kind    = .User_Token,
+		kind    = .Session,
 		user_id = "user_service_tester",
 	}
 	other_auth := contracts.Auth_Context{
-		kind    = .User_Token,
+		kind    = .Session,
 		user_id = "other_user",
 	}
 

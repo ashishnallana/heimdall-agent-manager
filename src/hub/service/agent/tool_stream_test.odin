@@ -373,7 +373,7 @@ test_tool_stream_instance_removal_notifies_subscribers :: proc(t: ^testing.T) {
     ids := [1]string{"inst_a"}
     _=tool_stream_subscribe(&f.svc,&f.a,ids[:])
     tool_stream_test_clear(&f.a)
-    err:=cleanup_provider_test_instance(&f.svc,contracts.Auth_Context{kind=.User_Token,user_id="owner"},"inst_a")
+    err:=cleanup_provider_test_instance(&f.svc,contracts.Auth_Context{kind=.Session,user_id="owner"},"inst_a")
     testing.expect(t,err.code == .None)
     testing.expect_value(t,len(f.a.queue),1)
     if len(f.a.queue)>0 do testing.expect(t,strings.contains(f.a.queue[0].text,`"type":"unavailable"`))

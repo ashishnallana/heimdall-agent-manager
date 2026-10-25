@@ -104,11 +104,11 @@ grant_free_strings :: proc(g: Grant, heap: runtime.Allocator) {
 // the loopback callback guard in src/bridge/main.odin). An enum makes the illegal state unrepresentable
 // and every dispatch exhaustive.
 //
-// `User_Token` is the zero value deliberately: a grant that somehow skipped
-// derivation gets the LESS privileged, pre-existing path rather than silently
-// becoming a machine enrollment.
+// `Unsupported` is the zero value deliberately: a grant that somehow skipped
+// derivation can never be approved into anything. (It replaced the user-token
+// grant: Hub user tokens were removed, users sign in with OIDC.)
 Grant_Kind :: enum {
-	User_Token,        // ELDA / Electron: mints a user API token (pre-existing)
+	Unsupported,       // never created: authorize refuses requests without a bridge key
 	Bridge_Enrollment, // REQ-IMPL-2: mints a bridge-scoped credential (brg_)
 }
 
@@ -340,7 +340,7 @@ allow_authorize :: proc(store: ^Grant_Store, ip: string, now: i64) -> bool {
 // fingerprint (authorize() derives it from input.bridge_public_key before
 // calling); it is passed in rather than recomputed here so there is exactly one
 // place in the codebase that decides what a fingerprint is.
-create_grant :: proc(store: ^Grant_Store, input: Authorize_Input, request_ip: string, clock: Monotonic_Clock, bridge_key_fingerprint: string = "", grant_kind: Grant_Kind = .User_Token) -> (Authorize_Result, bool) {
+create_grant :: proc(store: ^Grant_Store, input: Authorize_Input, request_ip: string, clock: Monotonic_Clock, bridge_key_fingerprint: string = "", grant_kind: Grant_Kind = .Unsupported) -> (Authorize_Result, bool) {
 	sync.mutex_lock(&store.mutex)
 	defer sync.mutex_unlock(&store.mutex)
 	device_code := ""

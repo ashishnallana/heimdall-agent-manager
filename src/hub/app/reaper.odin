@@ -238,7 +238,7 @@ reaper_sweep_once :: proc(graph: ^App_Graph) {
 		expired := run.expires_at != "" && run.expires_at <= now
 		disconnected := !project_service.bridge_runtime_registry_has_live(&graph.bridge_runtime_registry, run.bridge_id)
 		if !expired && !disconnected do continue
-		auth := contracts.Auth_Context{kind = .User_Token, user_id = run.owner_user_id}
+		auth := contracts.Auth_Context{kind = .Internal_User, user_id = run.owner_user_id}
 		_ = agent_service.cleanup_provider_test_instance(&graph.agents, auth, run.agent_instance_id)
 		state := "expired" if expired else "cancelled"
 		reason := "provider test expired" if expired else "bridge disconnected during provider test"
@@ -479,7 +479,7 @@ reaper_sweep_vault_resets :: proc(graph: ^App_Graph) -> int {
 // user_id owns. False if any of them could not be revoked (or the list failed).
 @(private = "file")
 reaper_revoke_all_bridges :: proc(graph: ^App_Graph, user_id: string) -> bool {
-	auth := contracts.Auth_Context{kind = .User_Token, user_id = user_id}
+	auth := contracts.Auth_Context{kind = .Internal_User, user_id = user_id}
 	bridges, err := bridge_service.list_bridges(&graph.bridges, auth)
 	if err.code != .None do return false
 	all_ok := true

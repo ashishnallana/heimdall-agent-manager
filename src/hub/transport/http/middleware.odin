@@ -19,20 +19,6 @@ require_auth :: proc(auth: ^auth_service.Auth_Service, req: Request) -> (contrac
 	return oidc_device_gate(auth, ctx, req)
 }
 
-require_trusted_proxy_auth :: proc(auth: ^auth_service.Auth_Service, req: Request) -> (contracts.Auth_Context, bool, Response) {
-	ctx, ok, err := auth_service.resolve_trusted_proxy_auth(auth, auth_service.Auth_Request{
-		remote_addr = req.remote_addr,
-		query = req.query,
-		body = req.body,
-		headers = req.headers,
-	})
-	if !ok {
-		auth_metrics_record_failure(auth, req, proxy_only = true)
-		return contracts.Auth_Context{}, false, respond_error(err, req.request_id)
-	}
-	return oidc_device_gate(auth, ctx, req)
-}
-
 csrf_origin_equal :: proc(left, right: string) -> bool {
 	return strings.equal_fold(strings.trim_right(strings.trim_space(left), "/"), strings.trim_right(strings.trim_space(right), "/"))
 }

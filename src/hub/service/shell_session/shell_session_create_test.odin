@@ -136,7 +136,7 @@ fixture_free :: proc(fx: ^Fixture) {
 
 @(private = "file")
 test_auth :: proc() -> contracts.Auth_Context {
-	return contracts.Auth_Context{kind = .User_Token, user_id = "user_clock"}
+	return contracts.Auth_Context{kind = .Session, user_id = "user_clock"}
 }
 
 // REQ-SHELL-2 §1 made the STARTER part of create: a `run` is agent-only and a
@@ -521,7 +521,7 @@ fx2_free :: proc(fx: ^Fx2) {
 
 @(private = "file")
 user_auth :: proc() -> contracts.Auth_Context {
-	return contracts.Auth_Context{kind = .User_Token, user_id = "owner_a"}
+	return contracts.Auth_Context{kind = .Session, user_id = "owner_a"}
 }
 
 @(private = "file")
@@ -985,7 +985,7 @@ r16_fixture_free :: proc(fx: ^R16_Fixture) {
 
 @(private = "file")
 r16_auth :: proc() -> contracts.Auth_Context {
-	return contracts.Auth_Context{kind = .User_Token, user_id = "user_r16"}
+	return contracts.Auth_Context{kind = .Session, user_id = "user_r16"}
 }
 
 @(private = "file")
@@ -1198,7 +1198,7 @@ fx24_seed :: proc(fx: ^Fx24, kind: string) {
 
 @(private = "file")
 user24 :: proc() -> contracts.Auth_Context {
-	return contracts.Auth_Context{kind = .User_Token, user_id = "owner_a"}
+	return contracts.Auth_Context{kind = .Session, user_id = "owner_a"}
 }
 
 @(private = "file")
@@ -1430,7 +1430,7 @@ plan_shell_failing_lookup :: proc(ctx: rawptr, user_id: string) -> (domain.User_
 
 @(test)
 test_shell_plan_create_free_users_refused_without_side_effects :: proc(t: ^testing.T) {
-	for auth_kind in ([]contracts.Auth_Kind{.User_Token, .Trusted_Proxy}) {
+	for auth_kind in ([]contracts.Auth_Kind{.Session, .OIDC}) {
 		for kind in ([]string{"", domain.Shell_Session_Kind_Shell, domain.Shell_Session_Kind_Server}) {
 			fx: Fixture
 			fixture_make(&fx)
@@ -1493,7 +1493,7 @@ test_shell_plan_agent_create_run_and_serve_bypass_lookup :: proc(t: ^testing.T) 
 
 @(test)
 test_shell_plan_restart_downgrade_refuses_without_mutating_live_session :: proc(t: ^testing.T) {
-	for auth_kind in ([]contracts.Auth_Kind{.User_Token, .Trusted_Proxy}) {
+	for auth_kind in ([]contracts.Auth_Kind{.Session, .OIDC}) {
 		for kind in ([]string{domain.Shell_Session_Kind_Shell, domain.Shell_Session_Kind_Server}) {
 			fx: Fx24
 			fx24_make(&fx)

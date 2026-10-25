@@ -303,7 +303,7 @@ test_metrics_shell_stream_connection_lifecycle_and_bytes :: proc(t: ^testing.T) 
 	bridge_id := "brg_metrics_http_shell"
 	tickets := new_user_ws_ticket_store()
 	defer user_ws_ticket_store_free(&tickets)
-	user_ws_ticket_store_put(&tickets, "ticket_metrics_shell", contracts.Auth_Context{kind = .User_Token, user_id = "user_metrics"}, 60)
+	user_ws_ticket_store_put(&tickets, "ticket_metrics_shell", contracts.Auth_Context{kind = .Session, user_id = "user_metrics"}, 60)
 
 	exp := Tm_Experiments{key = domain.STREAMING_TERMINAL_PANE_EXPERIMENT_KEY, enabled = true}
 	exp_repo := iface.Experiment_Repository{ctx = rawptr(&exp), list_by_owner = tm_experiment_list}
@@ -446,8 +446,8 @@ test_metrics_preview_request_bytes_and_tunnel_gauge :: proc(t: ^testing.T) {
 	clock := platform.real_clock()
 	ids := http_test_id_generator()
 	users := user_service.new_user_service_basic(&user_repo, &clock, &ids)
-	cidrs := []string{"127.0.0.1/32"}
-	auth := auth_service.new_auth_service(auth_service.Trusted_Proxy_Config{username_header = "X-authentik-username", trusted_proxy_cidrs = cidrs}, &users)
+	auth := auth_service.new_auth_service(auth_service.Auth_Config{}, &users)
+	defer auth_service.oidc_free(&auth)
 
 	sink_state := Tm_Sink{allocator = context.allocator}
 	defer tm_sink_free(&sink_state)
@@ -475,7 +475,7 @@ test_metrics_preview_request_bytes_and_tunnel_gauge :: proc(t: ^testing.T) {
 	run.sock = pair.hub
 	run.req = Request{
 		method = "GET", path = "/p/sh_metrics_preview/index.html", request_id = "req_m3", remote_addr = "127.0.0.1:4444",
-		headers = []contracts.HTTP_Header{{name = "X-authentik-username", value = "owner"}},
+		headers = http_test_preview_headers(t, &auth, "owner", "sh_metrics_preview"),
 	}
 	th := thread.create_and_start_with_data(rawptr(run), tm_run_preview)
 	defer thread.destroy(th)
@@ -557,7 +557,7 @@ test_metrics_lsp_sessions_gauge_and_connection_lifecycle :: proc(t: ^testing.T) 
 	bridge_id := "brg_metrics_http_lsp"
 	tickets := new_user_ws_ticket_store()
 	defer user_ws_ticket_store_free(&tickets)
-	user_ws_ticket_store_put(&tickets, "ticket_metrics_lsp", contracts.Auth_Context{kind = .User_Token, user_id = "user_lsp"}, 60)
+	user_ws_ticket_store_put(&tickets, "ticket_metrics_lsp", contracts.Auth_Context{kind = .Session, user_id = "user_lsp"}, 60)
 	exp := Tm_Experiments{key = LSP_EXPERIMENT_KEY, enabled = true}
 	exp_repo := iface.Experiment_Repository{ctx = rawptr(&exp), list_by_owner = tm_experiment_list}
 
@@ -691,7 +691,7 @@ test_metrics_agent_stream_connection_lifecycle :: proc(t: ^testing.T) {
 	bridge_id := "brg_metrics_http_agent"
 	tickets := new_user_ws_ticket_store()
 	defer user_ws_ticket_store_free(&tickets)
-	user_ws_ticket_store_put(&tickets, "ticket_metrics_agent", contracts.Auth_Context{kind = .User_Token, user_id = "user_agent_m"}, 60)
+	user_ws_ticket_store_put(&tickets, "ticket_metrics_agent", contracts.Auth_Context{kind = .Session, user_id = "user_agent_m"}, 60)
 	exp := Tm_Experiments{key = domain.STREAMING_TERMINAL_PANE_EXPERIMENT_KEY, enabled = true}
 	exp_repo := iface.Experiment_Repository{ctx = rawptr(&exp), list_by_owner = tm_experiment_list}
 

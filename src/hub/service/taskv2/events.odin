@@ -80,7 +80,7 @@ Actor :: struct {
 actor_from_auth :: proc(auth: contracts.Auth_Context) -> Actor {
 	switch auth.kind {
 	case .Instance_Token: return Actor{kind = ACTOR_AGENT, id = auth.agent_instance_id}
-	case .Session, .OIDC, .User_Token, .Trusted_Proxy: return Actor{kind = ACTOR_USER, id = auth.user_id}
+	case .Session, .OIDC, .Internal_User: return Actor{kind = ACTOR_USER, id = auth.user_id}
 	case .Bridge_Token: return Actor{kind = ACTOR_BRIDGE, id = auth.bridge_id}
 	case .Enrollment_Token, .None:
 	}

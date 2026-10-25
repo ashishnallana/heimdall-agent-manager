@@ -75,6 +75,7 @@ telemetry_handler_fixture :: struct {
 	us_svc: user_service.User_Service,
 	ag_svc: agent_service.Agent_Service,
 	auth_svc: auth_service.Auth_Service,
+	user_headers: []contracts.HTTP_Header, // session cookie for the fixture owner
 	registry: project_service.Bridge_Runtime_Registry,
 	bh: Bridge_Handlers,
 	owner_user_id: string,
@@ -82,13 +83,7 @@ telemetry_handler_fixture :: struct {
 	bridge_token: string,
 }
 
-@(private = "file")
-TELEMETRY_TEST_HEADERS := [1]contracts.HTTP_Header{
-	{name = "X-authentik-username", value = "tanmay"},
-}
 
-@(private = "file")
-TELEMETRY_TEST_CIDRS := [1]string{"127.0.0.1/32"}
 
 @(private = "file")
 setup_telemetry_test_fixture :: proc(t: ^testing.T, tag: string) -> ^telemetry_handler_fixture {
@@ -117,11 +112,7 @@ setup_telemetry_test_fixture :: proc(t: ^testing.T, tag: string) -> ^telemetry_h
 	f.us_svc = user_service.new_user_service_basic(&f.us_repo, &f.clock, &f.ids)
 	f.ag_svc = agent_service.new_agent_service(&f.ag_repo, &f.br_repo, &f.clock, &f.ids)
 
-	f.auth_svc = auth_service.new_auth_service(auth_service.Trusted_Proxy_Config{
-		username_header = "X-authentik-username",
-		trusted_proxy_cidrs = TELEMETRY_TEST_CIDRS[:],
-		auto_provision_users = true,
-	}, &f.us_svc)
+	f.auth_svc = auth_service.new_auth_service(auth_service.Auth_Config{auto_provision_users = true}, &f.us_svc)
 	f.auth_svc.clock = &f.clock
 	f.auth_svc.ids = &f.ids
 	f.auth_svc.bridges = &f.br_svc
@@ -134,14 +125,15 @@ setup_telemetry_test_fixture :: proc(t: ^testing.T, tag: string) -> ^telemetry_h
 		bridge_runtime_registry = &f.registry,
 	}
 
+	f.user_headers = http_test_login(t, &f.auth_svc, "tanmay")
 	owner_ctx, owner_ok, _ := auth_service.resolve_auth_any(&f.auth_svc, auth_service.Auth_Request{
 		remote_addr = "127.0.0.1:4444",
-		headers = TELEMETRY_TEST_HEADERS[:],
+		headers = f.user_headers,
 	})
-	testing.expect(t, owner_ok, "trusted proxy owner resolved")
+	testing.expect(t, owner_ok, "session owner resolved")
 	f.owner_user_id = strings.clone(owner_ctx.user_id)
 
-	owner_auth := contracts.Auth_Context{kind = .User_Token, user_id = f.owner_user_id}
+	owner_auth := contracts.Auth_Context{kind = .Session, user_id = f.owner_user_id}
 	// Provisioned through the DEVICE-GRANT path, the only enrollment there is
 	// (REQ-ENROLL-9). This replaced a create_enrollment + enroll_bridge pair; the
 	// bridge and its credential are what this fixture needs, and how the credential
@@ -188,7 +180,7 @@ test_patch_bridge_telemetry :: proc(t: ^testing.T) {
 		body = `{"telemetry_enabled":"enabled"}`,
 		request_id = "req_patch_tel_1",
 		remote_addr = "127.0.0.1:4444",
-		headers = TELEMETRY_TEST_HEADERS[:],
+		headers = f.user_headers,
 	}
 	resp_enabled := rename_bridge_handler(rawptr(&f.bh), req_enabled)
 	testing.expect_value(t, resp_enabled.status, 200)
@@ -205,7 +197,7 @@ test_patch_bridge_telemetry :: proc(t: ^testing.T) {
 		body = `{"telemetry_enabled":"disabled"}`,
 		request_id = "req_patch_tel_2",
 		remote_addr = "127.0.0.1:4444",
-		headers = TELEMETRY_TEST_HEADERS[:],
+		headers = f.user_headers,
 	}
 	resp_disabled := rename_bridge_handler(rawptr(&f.bh), req_disabled)
 	testing.expect_value(t, resp_disabled.status, 200)
@@ -221,7 +213,7 @@ test_patch_bridge_telemetry :: proc(t: ^testing.T) {
 		body = `{"telemetry_enabled":"inherit"}`,
 		request_id = "req_patch_tel_3",
 		remote_addr = "127.0.0.1:4444",
-		headers = TELEMETRY_TEST_HEADERS[:],
+		headers = f.user_headers,
 	}
 	resp_inherit := rename_bridge_handler(rawptr(&f.bh), req_inherit)
 	testing.expect_value(t, resp_inherit.status, 200)
@@ -237,7 +229,7 @@ test_patch_bridge_telemetry :: proc(t: ^testing.T) {
 		body = `{"telemetry_enabled":"random_value"}`,
 		request_id = "req_patch_tel_bad",
 		remote_addr = "127.0.0.1:4444",
-		headers = TELEMETRY_TEST_HEADERS[:],
+		headers = f.user_headers,
 	}
 	resp_bad := rename_bridge_handler(rawptr(&f.bh), req_bad)
 	testing.expect_value(t, resp_bad.status, 400)
@@ -249,7 +241,7 @@ test_patch_bridge_telemetry :: proc(t: ^testing.T) {
 		body = `{}`,
 		request_id = "req_patch_tel_empty",
 		remote_addr = "127.0.0.1:4444",
-		headers = TELEMETRY_TEST_HEADERS[:],
+		headers = f.user_headers,
 	}
 	resp_empty := rename_bridge_handler(rawptr(&f.bh), req_empty)
 	testing.expect_value(t, resp_empty.status, 400)
@@ -436,7 +428,7 @@ test_patch_bridge_telemetry_dispatches_runtime_command :: proc(t: ^testing.T) {
 		body = `{"telemetry_enabled":"enabled"}`,
 		request_id = "req_patch_dispatch_1",
 		remote_addr = "127.0.0.1:4444",
-		headers = TELEMETRY_TEST_HEADERS[:],
+		headers = f.user_headers,
 	}
 	resp_enabled := rename_bridge_handler(rawptr(&f.bh), req_enabled)
 	testing.expect_value(t, resp_enabled.status, 200)
@@ -455,7 +447,7 @@ test_patch_bridge_telemetry_dispatches_runtime_command :: proc(t: ^testing.T) {
 		body = `{"telemetry_enabled":"disabled"}`,
 		request_id = "req_patch_dispatch_2",
 		remote_addr = "127.0.0.1:4444",
-		headers = TELEMETRY_TEST_HEADERS[:],
+		headers = f.user_headers,
 	}
 	resp_disabled := rename_bridge_handler(rawptr(&f.bh), req_disabled)
 	testing.expect_value(t, resp_disabled.status, 200)
@@ -481,7 +473,7 @@ test_patch_bridge_telemetry_offline_does_not_dispatch :: proc(t: ^testing.T) {
 		body = `{"telemetry_enabled":"enabled"}`,
 		request_id = "req_patch_offline_1",
 		remote_addr = "127.0.0.1:4444",
-		headers = TELEMETRY_TEST_HEADERS[:],
+		headers = f.user_headers,
 	}
 	resp := rename_bridge_handler(rawptr(&f.bh), req_enabled)
 	testing.expect_value(t, resp.status, 200)
@@ -504,7 +496,7 @@ test_bridge_connect_dispatches_initial_telemetry_when_enabled :: proc(t: ^testin
 		body = `{"telemetry_enabled":"enabled"}`,
 		request_id = "req_setup_tel",
 		remote_addr = "127.0.0.1:4444",
-		headers = TELEMETRY_TEST_HEADERS[:],
+		headers = f.user_headers,
 	}
 	resp_setup := rename_bridge_handler(rawptr(&f.bh), req_enabled)
 	testing.expect_value(t, resp_setup.status, 200)
@@ -579,7 +571,7 @@ test_bridge_connect_does_not_dispatch_telemetry_when_disabled :: proc(t: ^testin
 		body = `{"telemetry_enabled":"disabled"}`,
 		request_id = "req_setup_tel_dis",
 		remote_addr = "127.0.0.1:4444",
-		headers = TELEMETRY_TEST_HEADERS[:],
+		headers = f.user_headers,
 	}
 	resp_setup := rename_bridge_handler(rawptr(&f.bh), req_disabled)
 	testing.expect_value(t, resp_setup.status, 200)

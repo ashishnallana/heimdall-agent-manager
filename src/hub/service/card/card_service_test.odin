@@ -88,7 +88,7 @@ test_accept_card_executes_issue_create :: proc(t: ^testing.T) {
 	)
 
 	auth := contracts.Auth_Context{
-		kind    = .User_Token,
+		kind    = .Session,
 		user_id = "test_user_owner",
 	}
 
@@ -162,7 +162,7 @@ test_accept_card_executes_memory_approve :: proc(t: ^testing.T) {
 	)
 
 	auth := contracts.Auth_Context{
-		kind    = .User_Token,
+		kind    = .Session,
 		user_id = "test_user_owner",
 	}
 
@@ -241,7 +241,7 @@ test_card_default_ttl_24h :: proc(t: ^testing.T) {
 	)
 
 	auth := contracts.Auth_Context{
-		kind    = .User_Token,
+		kind    = .Session,
 		user_id = "test_user_owner",
 	}
 

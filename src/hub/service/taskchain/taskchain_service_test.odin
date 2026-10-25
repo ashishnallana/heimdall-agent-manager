@@ -68,7 +68,7 @@ test_all_chain_creations_use_mixed_work :: proc(t: ^testing.T) {
 	ids := platform.real_id_generator()
 	svc := new_taskchain_service(&tc_repo, &ag_repo, &clock, &ids)
 
-	auth := contracts.Auth_Context{kind = .User_Token, user_id = "user_kind_alias"}
+	auth := contracts.Auth_Context{kind = .Session, user_id = "user_kind_alias"}
 
 	Case :: struct { input, want: string }
 	cases := [?]Case{

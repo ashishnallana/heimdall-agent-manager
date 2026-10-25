@@ -362,7 +362,7 @@ list_chains :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context) -
 	if !ok do return nil, err
 	chains, list_err := iface.taskchain_list_chains_by_owner(service.repo, owner)
 	if list_err.code != .None do return nil, list_err
-	// READ (REQ-SEC-3): owner-scoped, not membership-scoped. Both User_Token and
+	// READ (REQ-SEC-3): owner-scoped, not membership-scoped. Both a browser Session and
 	// Instance_Token see ALL chains of their owner; an agent may list (and then
 	// read) chains it is not a member of, as long as they belong to the same owner.
 	// owner_from_auth above already guarantees cross-owner isolation.

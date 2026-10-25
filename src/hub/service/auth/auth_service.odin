@@ -1,6 +1,5 @@
 package auth
 
-import "core:crypto/legacy/sha1"
 import "core:encoding/json"
 import "core:fmt"
 import "core:strconv"
@@ -14,28 +13,26 @@ import user_service "odin_test:hub/service/user"
 import agent_service "odin_test:hub/service/agent"
 import bridge_service "odin_test:hub/service/bridge"
 
-Trusted_Proxy_Config :: struct {
-	username_header: string,
-	display_name_header: string,
-	email_header: string,
-	trusted_proxy_cidrs: []string,
+// Users authenticate only through OIDC: a bearer access token (native apps, with
+// the v2 device proof) or the Hub's own browser session cookie. Hub-issued user
+// tokens and trusted-proxy identity headers no longer exist.
+Auth_Config :: struct {
+	// Create a Hub user for an unknown OIDC subject (see oidc_resolve_identity).
 	auto_provision_users: bool,
-	login_url: string,
-	logout_url: string,
 }
 
 Auth_Service :: struct {
-	oidc_mode: bool,
 	oidc: OIDC_Config,
 	oidc_state: OIDC_State,
 	// Browser login + server-side sessions (nil sessions: cookie auth disabled).
 	web: Web_Login_Config,
 	sessions: ^iface.Session_Repository,
 	login_limiter: Login_Rate_Limiter,
+	// Preview-origin handoff tickets and preview sessions (process memory).
+	preview: Preview_Auth_Store,
 	vault: ^vd.Service,
-	config: Trusted_Proxy_Config,
+	config: Auth_Config,
 	users: ^user_service.User_Service,
-	user_tokens: ^iface.User_Repository,
 	bridges: ^bridge_service.Bridge_Service,
 	agents: ^agent_service.Agent_Service,
 	clock: ^platform.Clock,
@@ -84,17 +81,6 @@ log_bridge_auth_denied :: proc(point, method, path, bridge_id, user_id, target, 
 	)
 }
 
-Issue_User_API_Token_Input :: struct {
-	owner_user_id: domain.User_ID,
-	label: string,
-	expires_at: string,
-}
-
-Issue_User_API_Token_Result :: struct {
-	token: domain.User_API_Token,
-	plaintext: string,
-}
-
 Auth_Request :: struct {
 	remote_addr: string,
 	query: string,
@@ -102,12 +88,8 @@ Auth_Request :: struct {
 	headers: []contracts.HTTP_Header,
 }
 
-new_auth_service :: proc(config: Trusted_Proxy_Config, users: ^user_service.User_Service) -> Auth_Service {
-	return Auth_Service{config = config, users = users}
-}
-
-new_auth_service_with_tokens :: proc(config: Trusted_Proxy_Config, users: ^user_service.User_Service, user_tokens: ^iface.User_Repository, clock: ^platform.Clock, ids: ^platform.ID_Generator) -> Auth_Service {
-	return Auth_Service{config = config, users = users, user_tokens = user_tokens, clock = clock, ids = ids}
+new_auth_service :: proc(config: Auth_Config, users: ^user_service.User_Service, clock: ^platform.Clock = nil, ids: ^platform.ID_Generator = nil) -> Auth_Service {
+	return Auth_Service{config = config, users = users, clock = clock, ids = ids}
 }
 
 // The credential shapes a BRIDGE may present as a bearer token. The distinction
@@ -293,228 +275,34 @@ extract_body_instance_id :: proc(body: string) -> string {
 	return payload.agent_instance_id
 }
 
+USER_TOKENS_REMOVED_MESSAGE :: "Heimdall user tokens are no longer supported; sign in with OIDC"
+
+// resolve_auth authenticates a USER request: an OIDC bearer access token, else
+// the Hub browser session cookie. Bridge and instance credentials are resolved
+// by resolve_auth_any / resolve_auth_or_bridge_token before reaching here.
 resolve_auth :: proc(service: ^Auth_Service, req: Auth_Request) -> (contracts.Auth_Context, bool, domain.Domain_Error) {
-	// OIDC mode (an issuer is configured): every Authorization header on a user
-	// route is an OIDC bearer; Hub user tokens (hut_) are not accepted. Bridge
-	// credentials keep their explicit 403 so a misrouted bridge learns which rule
-	// it broke. Bridge/instance routes resolve their credentials before reaching
-	// here (resolve_auth_any, resolve_auth_or_bridge_token).
-	if service != nil && service.oidc_mode {
-		if header_present(req.headers, "Authorization") {
-			authz := header_value(req.headers, "Authorization")
-			if strings.has_prefix(authz, "Bearer ") {
-				token := strings.trim_space(authz[len("Bearer "):])
-				if is_bridge_bearer(token) || strings.has_prefix(token, "hbf_") do return contracts.Auth_Context{}, false, domain.domain_error(.Forbidden, "bridge token cannot call user APIs")
-			}
-			return resolve_oidc_auth(service, req)
-		}
-		if ctx, ok, err, attempted := resolve_session_cookie(service, req); attempted && ok do return ctx, ok, err
-		return resolve_trusted_proxy_auth(service, req)
-	}
 	if service == nil || service.users == nil {
 		return contracts.Auth_Context{}, false, domain.domain_error(.Internal_Error, "auth service is not configured")
 	}
 	if token_in_query_or_body(req.query, req.body) {
 		return contracts.Auth_Context{}, false, domain.domain_error(.Unauthenticated, "bearer tokens must use the Authorization header")
 	}
-	authz := header_value(req.headers, "Authorization")
-	if authz != "" && strings.has_prefix(authz, "Bearer ") {
-		token := strings.trim_space(authz[len("Bearer "):])
-		// Every bridge credential, INCLUDING the refresh token, is rejected on the
-		// user-API path with the same error. The refresh token is named explicitly
-		// rather than falling through to "unsupported bearer token" below so that a
-		// bridge presenting the wrong half of its pair gets an answer that tells it
-		// which rule it broke.
-		// The one-time enrollment token used to need its own arm here. It is gone
-		// with the flow that minted it (REQ-ENROLL-9), so there is no third shape.
-		if is_bridge_bearer(token) || strings.has_prefix(token, "hbf_") do return contracts.Auth_Context{}, false, domain.domain_error(.Forbidden, "bridge token cannot call user APIs")
-		if strings.has_prefix(token, "hut_") do return verify_user_api_token(service, token)
-		return contracts.Auth_Context{}, false, domain.domain_error(.Unauthenticated, "unsupported bearer token")
+	if header_present(req.headers, "Authorization") {
+		authz := header_value(req.headers, "Authorization")
+		if strings.has_prefix(authz, "Bearer ") {
+			token := strings.trim_space(authz[len("Bearer "):])
+			// Every bridge credential, INCLUDING the refresh token, is rejected on the
+			// user-API path with the same error, so a bridge presenting the wrong half
+			// of its pair learns which rule it broke.
+			if is_bridge_bearer(token) || strings.has_prefix(token, "hbf_") do return contracts.Auth_Context{}, false, domain.domain_error(.Forbidden, "bridge token cannot call user APIs")
+			if strings.has_prefix(token, "hut_") do return contracts.Auth_Context{}, false, domain.domain_error(.Unauthenticated, USER_TOKENS_REMOVED_MESSAGE)
+		}
+		return resolve_oidc_auth(service, req)
 	}
-	if ctx, ok, err, attempted := resolve_session_cookie(service, req); attempted && ok do return ctx, ok, err
-	return resolve_trusted_proxy_auth(service, req)
-}
-
-// resolve_trusted_proxy_auth intentionally ignores Authorization. Preview-host
-// applications own that header; identity comes exclusively from the trusted
-// reverse proxy and its configured username header.
-// resolve_session_cookie authenticates the Hub session cookie when browser login
-// is enabled. `attempted` is false when there is no usable cookie. An invalid or
-// expired cookie falls through to trusted-proxy identity (still present until
-// phase 3), which fails with 401 when no proxy identity is present either.
-resolve_session_cookie :: proc(service: ^Auth_Service, req: Auth_Request) -> (ctx: contracts.Auth_Context, ok: bool, err: domain.Domain_Error, attempted: bool) {
-	if !web_login_enabled(service) do return {}, false, {}, false
-	raw, present := cookie_value(req.headers, SESSION_COOKIE)
-	if !present do return {}, false, {}, false
-	ctx, ok, err = resolve_session_auth(service, raw)
-	return ctx, ok, err, true
-}
-
-resolve_trusted_proxy_auth :: proc(service: ^Auth_Service, req: Auth_Request) -> (contracts.Auth_Context, bool, domain.Domain_Error) {
-	if service == nil || service.users == nil {
-		return contracts.Auth_Context{}, false, domain.domain_error(.Internal_Error, "auth service is not configured")
+	if raw, present := cookie_value(req.headers, SESSION_COOKIE); present {
+		return resolve_session_auth(service, raw)
 	}
-	if !remote_addr_trusted(req.remote_addr, service.config.trusted_proxy_cidrs) {
-		return contracts.Auth_Context{}, false, domain.domain_error(.Unauthenticated, "request did not come from a trusted proxy")
-	}
-	username := header_value(req.headers, service.config.username_header)
-	if strings.trim_space(username) == "" {
-		return contracts.Auth_Context{}, false, domain.domain_error(.Unauthenticated, "trusted proxy username header is missing")
-	}
-	display_name := header_value(req.headers, service.config.display_name_header)
-	email := header_value(req.headers, service.config.email_header)
-	user, ok, err := user_service.ensure_user_from_auth(service.users, username, display_name, email, service.config.auto_provision_users)
-	if !ok do return contracts.Auth_Context{}, false, err
-	return contracts.Auth_Context{
-		kind = .Trusted_Proxy,
-		user_id = string(user.user_id),
-		name = user.name,
-		display_name = user.display_name,
-		email = user.email,
-	}, true, domain.Domain_Error{}
-}
-
-issue_user_api_token :: proc(service: ^Auth_Service, input: Issue_User_API_Token_Input) -> (Issue_User_API_Token_Result, bool, domain.Domain_Error) {
-	if service != nil && service.oidc_mode do return Issue_User_API_Token_Result{}, false, domain.domain_error(.Forbidden, "Heimdall user tokens are disabled in OIDC mode")
-	if service == nil || service.users == nil || service.user_tokens == nil || service.clock == nil || service.ids == nil do return Issue_User_API_Token_Result{}, false, domain.domain_error(.Internal_Error, "user token service is not configured")
-	owner_id := domain.User_ID(user_service.normalize_user_id(string(input.owner_user_id)))
-	if string(owner_id) == "" do return Issue_User_API_Token_Result{}, false, domain.domain_error(.Validation_Failed, "user_id is required")
-	// Explicit user creation: token issuance no longer auto-creates users. The
-	// user must already exist (created via `ham-hub users create` or trusted-proxy
-	// provisioning); otherwise issue fails with a clear error.
-	_, user_ok, user_err := user_service.get_user(service.users, owner_id)
-	if !user_ok do return Issue_User_API_Token_Result{}, false, user_err
-	// Multiple active user tokens are allowed. Each Electron/device install can keep
-	// its own token and be revoked independently.
-	plaintext := platform.generate_id(service.ids, "hut_")
-	now := platform.clock_now(service.clock)
-	token := domain.User_API_Token{token_id = platform.generate_id(service.ids, "utok_"), owner_user_id = owner_id, label = strings.trim_space(input.label), token_hash = hash_user_api_token(plaintext), created_at = now, updated_at = now, expires_at = input.expires_at, created_from = "operator"}
-	saved, saved_ok, save_err := iface.user_token_save(service.user_tokens, token)
-	if !saved_ok do return Issue_User_API_Token_Result{}, false, save_err
-	return Issue_User_API_Token_Result{token = saved, plaintext = plaintext}, true, domain.Domain_Error{}
-}
-
-// issue_device_authorization_token issues a user API token via the device
-// authorization flow (ELDA-4). Like manual user-token issuance, it imposes no
-// per-user cap, so a user can authorize multiple devices and keep all their
-// tokens active. It stamps created_from='device_authorization' and records the
-// device_label for provenance. `owner` is the Auth_Context.user_id bound at
-// approve time (never client-supplied). Returns (token, plaintext, ok, err).
-issue_device_authorization_token :: proc(service: ^Auth_Service, owner: domain.User_ID, device_label: string) -> (domain.User_API_Token, string, bool, domain.Domain_Error) {
-	if service != nil && service.oidc_mode do return {}, "", false, domain.domain_error(.Forbidden, "Heimdall user tokens are disabled in OIDC mode")
-	if service == nil || service.users == nil || service.user_tokens == nil || service.clock == nil || service.ids == nil do return domain.User_API_Token{}, "", false, domain.domain_error(.Internal_Error, "user token service is not configured")
-	owner_id := domain.User_ID(user_service.normalize_user_id(string(owner)))
-	if string(owner_id) == "" do return domain.User_API_Token{}, "", false, domain.domain_error(.Validation_Failed, "user_id is required")
-	// The owner must already exist (trusted-proxy provisioned or `users create`).
-	_, user_ok, user_err := user_service.get_user(service.users, owner_id)
-	if !user_ok do return domain.User_API_Token{}, "", false, user_err
-	// Intentionally NO revoke_active_user_tokens here: multiple device tokens
-	// per user are allowed (ELDA-4 no-cap).
-	plaintext := platform.generate_id(service.ids, "hut_")
-	now := platform.clock_now(service.clock)
-	token := domain.User_API_Token{
-		token_id = platform.generate_id(service.ids, "utok_"),
-		owner_user_id = owner_id,
-		label = strings.trim_space(device_label),
-		token_hash = hash_user_api_token(plaintext),
-		created_at = now,
-		updated_at = now,
-		created_from = "device_authorization",
-		device_label = strings.trim_space(device_label),
-	}
-	saved, saved_ok, save_err := iface.user_token_save(service.user_tokens, token)
-	if !saved_ok do return domain.User_API_Token{}, "", false, save_err
-	return saved, plaintext, true, domain.Domain_Error{}
-}
-
-list_user_api_tokens :: proc(service: ^Auth_Service, owner_user_id: domain.User_ID) -> ([]domain.User_API_Token, domain.Domain_Error) {
-	if service != nil && service.oidc_mode do return nil, domain.domain_error(.Forbidden, "Heimdall user tokens are disabled in OIDC mode")
-	if service == nil || service.user_tokens == nil do return nil, domain.domain_error(.Internal_Error, "user token service is not configured")
-	owner_id := domain.User_ID(user_service.normalize_user_id(string(owner_user_id)))
-	if string(owner_id) == "" do return nil, domain.domain_error(.Validation_Failed, "user_id is required")
-	return iface.user_token_list_by_owner(service.user_tokens, owner_id)
-}
-
-revoke_user_api_token :: proc(service: ^Auth_Service, token_id: string) -> (domain.User_API_Token, bool, domain.Domain_Error) {
-	if service == nil || service.user_tokens == nil || service.clock == nil do return domain.User_API_Token{}, false, domain.domain_error(.Internal_Error, "user token service is not configured")
-	token, ok, err := iface.user_token_get_by_id(service.user_tokens, token_id)
-	if !ok do return domain.User_API_Token{}, false, err
-	if token.revoked_at != "" do return token, true, domain.Domain_Error{}
-	now := platform.clock_now(service.clock)
-	token.revoked_at = now
-	token.updated_at = now
-	return iface.user_token_save(service.user_tokens, token)
-}
-
-revoke_user_api_token_for_owner :: proc(service: ^Auth_Service, owner_user_id: domain.User_ID, token_id: string) -> (domain.User_API_Token, bool, domain.Domain_Error) {
-	if service == nil || service.user_tokens == nil || service.clock == nil do return domain.User_API_Token{}, false, domain.domain_error(.Internal_Error, "user token service is not configured")
-	owner_id := domain.User_ID(user_service.normalize_user_id(string(owner_user_id)))
-	if string(owner_id) == "" do return domain.User_API_Token{}, false, domain.domain_error(.Validation_Failed, "user_id is required")
-	token, ok, err := iface.user_token_get_by_id(service.user_tokens, token_id)
-	if !ok do return domain.User_API_Token{}, false, err
-	if token.owner_user_id != owner_id do return domain.User_API_Token{}, false, domain.domain_error(.Not_Found, "user token not found")
-	if token.revoked_at != "" do return token, true, domain.Domain_Error{}
-	now := platform.clock_now(service.clock)
-	token.revoked_at = now
-	token.updated_at = now
-	return iface.user_token_save(service.user_tokens, token)
-}
-
-verify_user_api_token :: proc(service: ^Auth_Service, plaintext: string) -> (contracts.Auth_Context, bool, domain.Domain_Error) {
-	if service == nil || service.users == nil || service.user_tokens == nil do return contracts.Auth_Context{}, false, domain.domain_error(.Unauthenticated, "user bearer tokens are not configured")
-	token, token_ok, token_err := iface.user_token_get_by_hash(service.user_tokens, hash_user_api_token(plaintext))
-	if !token_ok {
-		_ = token_err
-		return contracts.Auth_Context{}, false, domain.domain_error(.Unauthenticated, "user bearer token is invalid")
-	}
-	if token.revoked_at != "" do return contracts.Auth_Context{}, false, domain.domain_error(.Unauthenticated, "user bearer token is revoked")
-	now := ""
-	if service.clock != nil do now = platform.clock_now(service.clock)
-	if token.expires_at != "" && now != "" && token.expires_at <= now do return contracts.Auth_Context{}, false, domain.domain_error(.Unauthenticated, "user bearer token has expired")
-	user, user_ok, user_err := user_service.get_user(service.users, token.owner_user_id)
-	if !user_ok {
-		_ = user_err
-		return contracts.Auth_Context{}, false, domain.domain_error(.Unauthenticated, "user bearer token owner is unavailable")
-	}
-	if user.status == .Disabled do return contracts.Auth_Context{}, false, domain.domain_error(.Forbidden, "user is disabled")
-	if now != "" {
-		token.last_used_at = now
-		token.updated_at = now
-		_, _, _ = iface.user_token_save(service.user_tokens, token)
-	}
-	return contracts.Auth_Context{kind = .User_Token, user_id = string(user.user_id), name = user.name, display_name = user.display_name, email = user.email, user_token_id = token.token_id}, true, domain.Domain_Error{}
-}
-
-hash_user_api_token :: proc(token: string) -> string {
-	ctx: sha1.Context
-	sha1.init(&ctx)
-	sha1.update(&ctx, transmute([]byte)token)
-	digest: [sha1.DIGEST_SIZE]byte
-	sha1.final(&ctx, digest[:])
-	builder := strings.builder_make()
-	strings.write_string(&builder, "sha1:")
-	for b in digest do write_hex_byte(&builder, b)
-	return strings.to_string(builder)
-}
-
-write_hex_byte :: proc(builder: ^strings.Builder, value: byte) {
-	strings.write_byte(builder, hex_digit(value >> 4))
-	strings.write_byte(builder, hex_digit(value & 0x0f))
-}
-
-hex_digit :: proc(n: byte) -> byte {
-	if n < 10 do return '0' + n
-	return 'a' + (n - 10)
-}
-
-login_url :: proc(service: ^Auth_Service) -> string {
-	if service == nil do return ""
-	return service.config.login_url
-}
-
-logout_url :: proc(service: ^Auth_Service) -> string {
-	if service == nil do return ""
-	return service.config.logout_url
+	return contracts.Auth_Context{}, false, domain.domain_error(.Unauthenticated, "authentication required; sign in")
 }
 
 token_in_query_or_body :: proc(query, body: string) -> bool {
@@ -625,34 +413,23 @@ ascii_equal_fold :: proc(a, b: string) -> bool {
 	return true
 }
 
-// Revalidate long-lived display demand without touching last_used_at or saving
-// tokens. The ticket carries only the opaque token ID, never bearer material.
+// live_user_authorized re-validates a long-lived stream's user principal: the
+// user must still be active; a Session must still exist and be inside its
+// absolute and idle expiry (logout deletes it); an OIDC bearer is bounded by the
+// access token's expiry (plus leeway).
 live_user_authorized :: proc(service: ^Auth_Service, auth: contracts.Auth_Context) -> bool {
-    context.allocator = context.temp_allocator
-    if service == nil || service.users == nil do return false
-    user, found, err := user_service.get_user(service.users, domain.User_ID(auth.user_id))
-    if !found || err.code != .None || user.status == .Disabled do return false
-    if auth.kind == .Trusted_Proxy do return true
-    // Session: the session row must still exist (logout deletes it) and be inside
-    // both its absolute and idle expiry.
-    if auth.kind == .Session {
-        now, now_ok := now_unix_ms(service)
-        if !now_ok do return false
-        _, live := session_lookup_live(service, auth.session_id, now)
-        return live
-    }
-    // OIDC bearer: bounded by the access token's expiry (plus leeway).
-    if auth.kind == .OIDC {
-        if auth.expires_ms <= 0 do return false
-        now, now_ok := now_unix_ms(service)
-        return now_ok && now < auth.expires_ms
-    }
-    if auth.kind != .User_Token || auth.user_token_id == "" || service.user_tokens == nil do return false
-    token, token_found, token_err := iface.user_token_get_by_id(service.user_tokens, auth.user_token_id)
-    if !token_found || token_err.code != .None || string(token.owner_user_id) != auth.user_id || token.revoked_at != "" do return false
-    if token.expires_at != "" {
-        if service.clock == nil do return false
-        if token.expires_at <= platform.clock_now(service.clock) do return false
-    }
-    return true
+	context.allocator = context.temp_allocator
+	if service == nil || service.users == nil do return false
+	user, found, err := user_service.get_user(service.users, domain.User_ID(auth.user_id))
+	if !found || err.code != .None || user.status == .Disabled do return false
+	now, now_ok := now_unix_ms(service)
+	if !now_ok do return false
+	#partial switch auth.kind {
+	case .Session:
+		_, live := session_lookup_live(service, auth.session_id, now)
+		return live
+	case .OIDC:
+		return auth.expires_ms > 0 && now < auth.expires_ms
+	}
+	return false
 }

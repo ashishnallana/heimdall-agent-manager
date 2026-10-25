@@ -188,7 +188,7 @@ test_rotate_for_device_grant_rejects_revoked_target :: proc(t: ^testing.T) {
 	owned := attach_enrol(t, f, "approving-human", "already-revoked-host")
 	owned_bridge_id := strings.clone(owned.bridge.bridge_id); defer delete(owned_bridge_id)
 
-	owner_auth := contracts.Auth_Context{kind = .User_Token, user_id = "approving-human"}
+	owner_auth := contracts.Auth_Context{kind = .Session, user_id = "approving-human"}
 	revoked, revoke_ok, revoke_err := revoke_bridge(&f.svc, owner_auth, owned_bridge_id)
 	testing.expect(t, revoke_ok, revoke_err.message)
 	testing.expect_value(t, revoked.status, domain.Bridge_Status.Revoked)
@@ -353,7 +353,7 @@ test_plan_bridge_reconcile_ranking_upgrade_revoke_and_stale_save :: proc(t: ^tes
 	testing.expect(t, saved_ok)
 	testing.expect(t, plan_test_disabled(t, f, "v19"))
 	// Revoking a retained bridge automatically brings the next ranked one back.
-	_, revoked_ok, revoked_err := revoke_bridge(&f.svc, contracts.Auth_Context{kind = .User_Token, user_id = "rank_owner"}, "recent")
+	_, revoked_ok, revoked_err := revoke_bridge(&f.svc, contracts.Auth_Context{kind = .Session, user_id = "rank_owner"}, "recent")
 	testing.expect(t, revoked_ok)
 	testing.expect_value(t, revoked_err.code, domain.Error_Code.None)
 	testing.expect(t, !plan_test_disabled(t, f, "tie_new"), "created_at resolves same-version ties")
@@ -470,7 +470,7 @@ test_plan_bridge_revoke_succeeds_when_reconciliation_fails :: proc(t: ^testing.T
 	_, saved, _ := iface.bridge_save_bridge(&f.repo, row)
 	testing.expect(t, saved)
 	f.svc.entitlements = {lookup = plan_test_lookup_failure}
-	revoked, ok, err := revoke_bridge(&f.svc, contracts.Auth_Context{kind = .User_Token, user_id = "revoke_owner"}, row.bridge_id)
+	revoked, ok, err := revoke_bridge(&f.svc, contracts.Auth_Context{kind = .Session, user_id = "revoke_owner"}, row.bridge_id)
 	defer domain.bridge_destroy(&revoked)
 	testing.expect(t, ok)
 	testing.expect_value(t, err.code, domain.Error_Code.None)

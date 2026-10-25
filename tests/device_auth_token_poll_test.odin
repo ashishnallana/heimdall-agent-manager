@@ -1,5 +1,6 @@
 // Unit tests for the /device/token poll lifecycle (ELDA-3) and device-token
-// issuance boundary (ELDA-4 token_id propagation).
+// issuance boundary (token_id propagation). All grants are bridge enrollments: the
+// user-token grant (ELDA-4) was removed with Hub user tokens.
 //
 // Covers:
 //   AC1: pending -> approved(token) -> used/expired; denied; expired;
@@ -41,14 +42,23 @@ FAKE_NOW: i64 = 7_000_000
 fake_now :: proc() -> i64 { return FAKE_NOW }
 fake_clock :: proc() -> device_auth.Monotonic_Clock { return {now = fake_now} }
 
-MINT_COUNT: int = 0
-fake_minter :: proc(ctx: rawptr, user_id, client, device_label: string) -> (string, string, bool) {
-	_ = ctx
-	_ = user_id
-	_ = client
-	_ = device_label
-	MINT_COUNT += 1
-	return "hut_fake_poll_token", "utok_fake_poll", true
+// Every grant is a bridge enrollment now (the user-token grant was removed), so
+// the generic poll lifecycle is exercised through bridge grants. pair_lookup is
+// the grant's approval index and is unique per call.
+TP_PUB :: "04030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bc"
+TP_VERIFIER :: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+TP_CHALLENGE :: "ZtNPunH49FD35FWYhT5Tv8I7vRKQJ8uxMaL0_9eHjNA"
+tp_seq := 100
+tp_bridge_input :: proc(device_label := "") -> device_auth.Authorize_Input {
+	idp, proof := test_bridge_identity(TP_PUB, TP_CHALLENGE)
+	tp_seq += 1
+	return device_auth.Authorize_Input{
+		client = "ham-bridge", device_label = device_label,
+		bridge_public_key = TP_PUB, bridge_identity_public_key = idp, bridge_identity_proof = proof,
+		pair_salt = "0123456789abcdef0123456789abcdef", pair_hub_origin = "https://hub.example.test:443",
+		pair_lookup = fmt.aprintf("%064x", tp_seq), pair_key_mac = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+		code_challenge = TP_CHALLENGE, code_challenge_method = "S256",
+	}
 }
 
 new_service :: proc(rate_limit := 100, interval := 5) -> (^device_auth.Grant_Store, device_auth.Device_Auth_Service) {
@@ -61,7 +71,6 @@ new_service :: proc(rate_limit := 100, interval := 5) -> (^device_auth.Grant_Sto
 		rate_window = 60,
 	})
 	svc := device_auth.new_device_auth_service(store, fake_clock(), []string{"127.0.0.1/32"})
-	device_auth.with_token_minter(&svc, fake_minter)
 	device_auth.with_bridge_token_minter(&svc, fake_bridge_minter)
 	return store, svc
 }
@@ -112,7 +121,13 @@ main :: proc() {
 	store, svc := new_service()
 	defer device_auth.grant_store_free(store)
 
-	res, ok, err := device_auth.authorize(&svc, {client = "electron", device_label = "MBP"}, "127.0.0.1:1", "")
+	// The user (no bridge key) grant that minted Hub user tokens was removed.
+	_, user_ok, user_err := device_auth.authorize(&svc, {client = "electron", device_label = "MBP"}, "127.0.0.1:1", "")
+	assert_true(!user_ok, "user (no bridge key) authorize is refused")
+	assert_eq(user_err.message, device_auth.DEVICE_AUTH_USER_GRANT_REMOVED, "user authorize names the removal")
+
+	life_in := tp_bridge_input("MBP")
+	res, ok, err := device_auth.authorize(&svc, life_in, "127.0.0.1:1", "")
 	assert_true(ok, "authorize for poll lifecycle succeeds")
 	assert_eq(err.code, domain.Error_Code.None, "authorize no error")
 
@@ -131,35 +146,36 @@ main :: proc() {
 
 	// AC1/AC3: once approved and polled at interval, token is returned once, then expired.
 	FAKE_NOW += 5
-	aok, aerr := device_auth.approve(&svc, {user_code = res.user_code, approve = true}, "owner-1", "203.0.113.30", "UA")
+	aok, aerr := device_auth.approve(&svc, {user_code = life_in.pair_lookup, approve = true}, "owner-1", "203.0.113.30", "UA")
 	assert_true(aok, "approve for token poll succeeds")
 	assert_eq(aerr.code, domain.Error_Code.None, "approve no error")
-	approved, approved_err := device_auth.poll(&svc, res.device_code, "203.0.113.21")
+	approved, approved_err := device_auth.poll(&svc, res.device_code, "203.0.113.21", TP_VERIFIER)
 	assert_eq(approved_err.code, domain.Error_Code.None, "approved poll no error")
 	assert_eq(approved.status, device_auth.Poll_Status.Approved, "approved grant -> approved status")
-	assert_eq(approved.access_token, "hut_fake_poll_token", "approved poll returns plaintext token")
-	assert_eq(approved.token_id, "utok_fake_poll", "approved poll returns authoritative token_id")
-	assert_eq(approved.expires_in, 600, "approved poll returns expires_in")
+	assert_eq(approved.access_token, "hba_btk_poll_fake.secret", "approved poll returns plaintext credential")
+	assert_eq(approved.token_id, "brg_poll_fake", "approved poll returns authoritative token_id (the brg_ id)")
+	assert_eq(approved.expires_in, 3600, "approved poll returns the credential's expires_in")
 	used_grant, used_ok := device_auth.get_grant(store, res.device_code)
 	assert_true(used_ok, "used grant remains recorded")
 	assert_eq(used_grant.status, device_auth.Grant_Status.Used, "approved poll marks grant Used")
 	assert_eq(used_grant.minted_token, "", "approved poll clears plaintext token from grant")
-	replay, replay_err := device_auth.poll(&svc, res.device_code, "203.0.113.21")
+	replay, replay_err := device_auth.poll(&svc, res.device_code, "203.0.113.21", TP_VERIFIER)
 	assert_eq(replay_err.code, domain.Error_Code.None, "used replay no error")
 	assert_eq(replay.status, device_auth.Poll_Status.Expired, "used grant replay -> expired")
 	fmt.println("AC1/AC2/AC3 OK: pending, slow_down, approved single-use, unknown")
 
 	// AC1: denied grants poll as denied.
 	FAKE_NOW += 10
-	denied_res, dok, _ := device_auth.authorize(&svc, {client = "electron"}, "127.0.0.1:1", "")
+	denied_in := tp_bridge_input()
+	denied_res, dok, _ := device_auth.authorize(&svc, denied_in, "127.0.0.1:1", "")
 	assert_true(dok, "authorize denied grant succeeds")
-	device_auth.approve(&svc, {user_code = denied_res.user_code, approve = false}, "owner-1", "203.0.113.30", "UA")
+	device_auth.approve(&svc, {user_code = denied_in.pair_lookup, approve = false}, "owner-1", "203.0.113.30", "UA")
 	denied, denied_err := device_auth.poll(&svc, denied_res.device_code, "203.0.113.22")
 	assert_eq(denied_err.code, domain.Error_Code.None, "denied poll no error")
 	assert_eq(denied.status, device_auth.Poll_Status.Denied, "denied grant -> denied")
 
 	// AC1: TTL expiry polls as expired.
-	exp_res, eok, _ := device_auth.authorize(&svc, {client = "electron"}, "127.0.0.1:1", "")
+	exp_res, eok, _ := device_auth.authorize(&svc, tp_bridge_input(), "127.0.0.1:1", "")
 	assert_true(eok, "authorize expired grant succeeds")
 	FAKE_NOW += 601
 	expired, expired_err := device_auth.poll(&svc, exp_res.device_code, "203.0.113.23")
@@ -243,25 +259,8 @@ main :: proc() {
 	assert_eq(replay2.status, device_auth.Poll_Status.Expired, "bridge credential is single-use (replay -> expired)")
 	fmt.println("REQ-IMPL-2 OK: PKCE enforced on redemption; wrong verifier rejected without burning the grant")
 
-	// 5. An ELDA grant (no challenge) still redeems with NO verifier — the
-	//    pre-existing contract is unchanged — and a stray verifier on such a
-	//    grant is simply ignored rather than becoming a new failure mode.
-	eres2, eok2, _ := device_auth.authorize(&psvc, {client = "electron", device_label = "MBP"}, "127.0.0.1:1", "")
-	assert_true(eok2, "electron authorize succeeds")
-	FAKE_NOW += 5
-	device_auth.approve(&psvc, {user_code = eres2.user_code, approve = true}, "owner-e2", "203.0.113.30", "UA")
-	epoll, epoll_err := device_auth.poll(&psvc, eres2.device_code, "203.0.113.41")
-	assert_eq(epoll_err.code, domain.Error_Code.None, "electron poll with no verifier no error")
-	assert_eq(epoll.status, device_auth.Poll_Status.Approved, "electron grant redeems with NO verifier (unchanged)")
-	assert_eq(epoll.access_token, "hut_fake_poll_token", "electron grant still returns its user token")
-	assert_eq(epoll.bridge_id, "", "electron grant carries no brg_")
-	assert_true(!epoll.vault_delivery_expected, "electron grant never requests bridge vault delivery")
-	eres3, _, _ := device_auth.authorize(&psvc, {client = "electron"}, "127.0.0.1:1", "")
-	FAKE_NOW += 5
-	device_auth.approve(&psvc, {user_code = eres3.user_code, approve = true}, "owner-e3", "203.0.113.30", "UA")
-	epoll3, _ := device_auth.poll(&psvc, eres3.device_code, "203.0.113.42", PKCE_VERIFIER)
-	assert_eq(epoll3.status, device_auth.Poll_Status.Approved, "a stray verifier on a challenge-less grant is ignored")
-	fmt.println("REQ-IMPL-2 OK: the pre-existing Electron poll contract is unchanged")
+	// 5. (Removed) The challenge-less user-token grant no longer exists: every
+	//    grant is a bridge enrollment and requires the PKCE verifier.
 
 	// 6. Through the HTTP handler: a PKCE failure is a 401, not a 200 with a
 	//    status field, so a bridge with the wrong verifier cannot mistake it for
@@ -326,16 +325,17 @@ main :: proc() {
 	// =====================================================================
 	rstore, rsvc := new_service()
 	defer device_auth.grant_store_free(rstore)
-	rres, rok, _ := device_auth.authorize(&rsvc, {client = "electron", device_label = "index-regression"}, "127.0.0.1:1", "")
+	rin := tp_bridge_input("index-regression")
+	rres, rok, _ := device_auth.authorize(&rsvc, rin, "127.0.0.1:1", "")
 	assert_true(rok, "regression: authorize succeeds")
-	_, rv1_ok, _ := device_auth.verify(&rsvc, rres.user_code)
+	_, rv1_ok, _ := device_auth.verify(&rsvc, rin.pair_lookup)
 	assert_true(rv1_ok, "regression: user_code resolves before any poll")
 
 	// Hand set_grant a device_code string the TEST owns, the way a handler hands
 	// it a request-scoped one.
 	caller_dc := strings.clone(rres.device_code)
 	defer delete(caller_dc)
-	caller_uc := strings.clone(rres.user_code)
+	caller_uc := strings.clone(rin.pair_lookup) // a bridge grant's approval index
 	defer delete(caller_uc)
 	grant_snapshot, gs_ok := device_auth.get_grant(rstore, rres.device_code)
 	assert_true(gs_ok, "regression: grant readable before set_grant")
@@ -379,7 +379,7 @@ main :: proc() {
 	rap_ok, rap_err := device_auth.approve(&rsvc, {user_code = caller_uc, approve = true}, "owner-reg", "1.2.3.4", "UA")
 	assert_true(rap_ok, "REGRESSION: a polled grant can still be approved by user_code")
 	assert_eq(rap_err.code, domain.Error_Code.None, "regression: approve after poll has no error")
-	rfinal, _ := device_auth.poll(&rsvc, rres.device_code, "203.0.113.90")
+	rfinal, _ := device_auth.poll(&rsvc, rres.device_code, "203.0.113.90", TP_VERIFIER)
 	assert_eq(rfinal.status, device_auth.Poll_Status.Approved, "regression: the device gets its token after approval")
 	fmt.println("REGRESSION OK: by_user_code owns its strings; poll -> verify -> approve -> poll completes")
 
@@ -432,14 +432,15 @@ main :: proc() {
 	// =====================================================================
 	race_store, race_svc := new_service()
 	defer device_auth.grant_store_free(race_store)
-	race_res, race_ok, _ := device_auth.authorize(&race_svc, {client = "ham-bridge", device_label = "late-approval"}, "127.0.0.1:1", "")
+	race_in := tp_bridge_input("late-approval")
+	race_res, race_ok, _ := device_auth.authorize(&race_svc, race_in, "127.0.0.1:1", "")
 	assert_true(race_ok, "regression: authorize for late-approval race succeeds")
 
 	// The grant's window is 600s (new_service's default expires_in). Approve
 	// with 5s left on the clock -- comfortably still Pending, so approve()'s
 	// own is_expired check passes.
 	FAKE_NOW += 595
-	race_approve_ok, race_approve_err := device_auth.approve(&race_svc, {user_code = race_res.user_code, approve = true}, "owner-race", "203.0.113.50", "UA")
+	race_approve_ok, race_approve_err := device_auth.approve(&race_svc, {user_code = race_in.pair_lookup, approve = true}, "owner-race", "203.0.113.50", "UA")
 	assert_true(race_approve_ok, "REGRESSION: approving just inside the deadline succeeds")
 	assert_eq(race_approve_err.code, domain.Error_Code.None, "regression: late approval has no error")
 
@@ -447,10 +448,10 @@ main :: proc() {
 	// before the device's next scheduled poll -- the exact gap the bridge's
 	// own interval sleep leaves open in production.
 	FAKE_NOW += 10
-	race_poll, race_poll_err := device_auth.poll(&race_svc, race_res.device_code, "203.0.113.51")
+	race_poll, race_poll_err := device_auth.poll(&race_svc, race_res.device_code, "203.0.113.51", TP_VERIFIER)
 	assert_eq(race_poll_err.code, domain.Error_Code.None, "REGRESSION: poll just past the original deadline has no error")
 	assert_eq(race_poll.status, device_auth.Poll_Status.Approved, "REGRESSION: a grant approved in time must poll Approved, never Expired, even after the original deadline has since passed")
-	assert_eq(race_poll.access_token, "hut_fake_poll_token", "regression: the approved-late grant still hands out its token")
+	assert_eq(race_poll.access_token, "hba_btk_poll_fake.secret", "regression: the approved-late grant still hands out its credential")
 	fmt.println("REGRESSION OK: approval just inside the deadline is not reported Expired by a poll that lands just after it")
 }
 

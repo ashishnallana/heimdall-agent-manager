@@ -571,7 +571,7 @@ evaluate_guard :: proc(s: ^Card_Service, owner: domain.User_ID, card: domain.Car
 	// A card whose target no longer exists, changed owner, or (via expected_state)
 	// has already been archived is stale: it drops from list and accept returns 409.
 	expected_state := json_obj_string(obj, "expected_state")
-	guard_auth := contracts.Auth_Context{kind = .User_Token, user_id = string(owner)}
+	guard_auth := contracts.Auth_Context{kind = .Internal_User, user_id = string(owner)}
 
 	agent_id := json_obj_string(obj, "agent_id")
 	if agent_id != "" {
@@ -786,7 +786,7 @@ reject_card :: proc(s: ^Card_Service, auth: contracts.Auth_Context, id: domain.C
 	}
 
 	user_auth := contracts.Auth_Context{
-		kind    = .User_Token,
+		kind    = .Internal_User,
 		user_id = string(card.owner_user_id),
 	}
 
@@ -885,7 +885,7 @@ accept_card :: proc(s: ^Card_Service, auth: contracts.Auth_Context, id: domain.C
 	}
 
 	user_auth := contracts.Auth_Context{
-		kind    = .User_Token,
+		kind    = .Internal_User,
 		user_id = string(card.owner_user_id),
 	}
 	sent_prompts := make([dynamic]domain.Chat_Message, context.temp_allocator)

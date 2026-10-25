@@ -250,7 +250,7 @@ fx3_seed :: proc(fx: ^Fx3, session_id := "sh_1", status := domain.Shell_Session_
 
 @(private = "file")
 user3 :: proc() -> contracts.Auth_Context {
-	return contracts.Auth_Context{kind = .User_Token, user_id = "owner_a"}
+	return contracts.Auth_Context{kind = .Session, user_id = "owner_a"}
 }
 
 @(private = "file")

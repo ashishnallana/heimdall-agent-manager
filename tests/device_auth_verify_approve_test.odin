@@ -8,7 +8,9 @@
 //   AC3 (ELDA-2): unknown vs expired codes both surface the SAME generic error
 //                 (no enumeration).
 //   AC6 (ELDA-7): approve records owner_user_id, approver_ip (trusted-XFF),
-//                 approver_ua, decided_at; pre-mints a token via the minter.
+//                 approver_ua, decided_at; pre-mints the bridge credential.
+// All grants are bridge enrollments: the user-token grant was removed with Hub
+// user tokens (users sign in with OIDC); a user authorize is refused.
 //
 // Run: odin run tests/device_auth_verify_approve_test.odin -collection:odin_test=src -file
 package device_auth_verify_approve_test
@@ -45,22 +47,25 @@ FAKE_NOW: i64 = 5_000_000
 fake_now :: proc() -> i64 { return FAKE_NOW }
 fake_clock :: proc() -> device_auth.Monotonic_Clock { return {now = fake_now} }
 
-// --- Fake token minter (records what approve passed it) ---
-MINT_CALLS: [dynamic]Mint_Call
-MINT_RETURN: string = "tok_fake_123"
-MINT_TOKEN_ID: string = "utok_fake_123"
-
-Mint_Call :: struct{user, client, label: string}
-
-fake_minter :: proc(ctx: rawptr, user_id, client, device_label: string) -> (string, string, bool) {
-	_ = ctx
-	append(&MINT_CALLS, Mint_Call{user_id, client, device_label})
-	return MINT_RETURN, MINT_TOKEN_ID, true
+// A complete bridge-enrollment authorize request; pair_lookup (the approval
+// index) is unique per call.
+VA_PUB :: "04030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bc"
+VA_CHALLENGE :: "ZtNPunH49FD35FWYhT5Tv8I7vRKQJ8uxMaL0_9eHjNA"
+va_seq := 1000
+va_bridge_input :: proc(device_label := "", os := "", app_version := "") -> device_auth.Authorize_Input {
+	idp, proof := test_bridge_identity(VA_PUB, VA_CHALLENGE)
+	va_seq += 1
+	return device_auth.Authorize_Input{
+		client = "ham-bridge", device_label = device_label, os = os, app_version = app_version,
+		bridge_public_key = VA_PUB, bridge_identity_public_key = idp, bridge_identity_proof = proof,
+		pair_salt = "0123456789abcdef0123456789abcdef", pair_hub_origin = "https://hub.example.test:443",
+		pair_lookup = fmt.aprintf("%064x", va_seq), pair_key_mac = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+		code_challenge = VA_CHALLENGE, code_challenge_method = "S256",
+	}
 }
 
 // --- Fake BRIDGE minter (REQ-IMPL-2). Records what approve passed it so the
-// test can prove the owner came from the Auth_Context argument and that the
-// user minter was never consulted for a bridge grant. ---
+// test can prove the owner came from the Auth_Context argument. ---
 BRIDGE_MINT_CALLS: [dynamic]device_auth.Bridge_Mint_Request
 BRIDGE_MINT_TOKEN: string = "hba_btk_fake.secretsecret"
 BRIDGE_MINT_ID: string = "brg_fake_001"
@@ -91,7 +96,6 @@ new_service :: proc() -> (^device_auth.Grant_Store, device_auth.Device_Auth_Serv
 		expires_in = 600, interval = 5, rate_limit = 100, rate_window = 60,
 	})
 	svc := device_auth.new_device_auth_service(store, fake_clock(), []string{"127.0.0.1/32"})
-	device_auth.with_token_minter(&svc, fake_minter)
 	device_auth.with_bridge_token_minter(&svc, fake_bridge_minter)
 	return store, svc
 }
@@ -116,15 +120,21 @@ main :: proc() {
 	store, svc := new_service()
 	defer device_auth.grant_store_free(store)
 
-	// Seed a pending grant.
-	res, ok, _ := device_auth.authorize(&svc, {client = "electron", device_label = "MBP", os = "macOS", app_version = "1.2.3"}, "127.0.0.1:1", "")
+	// A user (no bridge key) authorize used to mint a Hub user token; refused now.
+	_, user_ok0, user_err0 := device_auth.authorize(&svc, {client = "electron", device_label = "MBP"}, "127.0.0.1:1", "")
+	assert_true(!user_ok0, "user (no bridge key) authorize is refused")
+	assert_eq(user_err0.code, domain.Error_Code.Validation_Failed, "user authorize -> Validation_Failed")
+
+	// Seed a pending (bridge) grant.
+	seed_in := va_bridge_input("MBP", "macOS", "1.2.3")
+	res, ok, _ := device_auth.authorize(&svc, seed_in, "127.0.0.1:1", "")
 	assert_true(ok, "seed authorize succeeds")
-	uc := res.user_code
+	uc := seed_in.pair_lookup
 
 	// --- AC3: verify returns device info captured at authorize ---
 	info, vok, _ := device_auth.verify(&svc, uc)
 	assert_true(vok, "verify pending grant succeeds")
-	assert_eq(info.client, "electron", "verify client")
+	assert_eq(info.client, "ham-bridge", "verify client")
 	assert_eq(info.device_label, "MBP", "verify device_label")
 	assert_eq(info.os, "macOS", "verify os")
 	assert_eq(info.app_version, "1.2.3", "verify app_version")
@@ -151,12 +161,12 @@ main :: proc() {
 	assert_eq(grant_after.approver_ip, "203.0.113.9", "AC6 approver_ip (trusted-XFF)")
 	assert_eq(grant_after.approver_ua, "Mozilla/5.0 verify-page", "AC6 approver_ua")
 	assert_true(grant_after.decided_at == FAKE_NOW, "AC6 decided_at set")
-	// Pre-mint: minter was called with the context owner + client + label.
-	assert_eq(len(MINT_CALLS), 1, "AC4/AC6 minter called once on approve")
-	assert_eq(MINT_CALLS[0].user, "real-owner-001", "minter got context owner")
-	assert_eq(MINT_CALLS[0].client, "electron", "minter got client")
-	assert_eq(grant_after.minted_token, "tok_fake_123", "pre-minted token stored on grant")
-	assert_eq(grant_after.minted_token_id, "utok_fake_123", "pre-minted token_id stored on grant")
+	// Pre-mint: the bridge minter was called with the context owner + label.
+	assert_eq(len(BRIDGE_MINT_CALLS), 1, "AC4/AC6 minter called once on approve")
+	assert_eq(BRIDGE_MINT_CALLS[0].owner_user_id, "real-owner-001", "minter got context owner")
+	assert_eq(BRIDGE_MINT_CALLS[0].device_label, "MBP", "minter got the device label")
+	assert_eq(grant_after.minted_token, BRIDGE_MINT_TOKEN, "pre-minted credential stored on grant")
+	assert_eq(grant_after.minted_token_id, BRIDGE_MINT_ID, "pre-minted token_id stored on grant")
 	fmt.println("AC4+AC6 OK: owner from context, audit fields + pre-mint recorded")
 
 	// --- AC5: terminal grant closed (verify -> Gone, approve -> Conflict) ---
@@ -169,12 +179,13 @@ main :: proc() {
 	fmt.println("AC5 OK: approved grant terminal (verify 410, approve 409)")
 
 	// --- AC5: deny path is also terminal; no token pre-mint on deny ---
-	uc_deny_res, _, _ := device_auth.authorize(&svc, {client = "electron"}, "127.0.0.1:1", "")
-	uc_deny := uc_deny_res.user_code
-	mints_before := len(MINT_CALLS)
+	deny_in := va_bridge_input()
+	_, _, _ = device_auth.authorize(&svc, deny_in, "127.0.0.1:1", "")
+	uc_deny := deny_in.pair_lookup
+	mints_before := len(BRIDGE_MINT_CALLS)
 	aok3, _ := device_auth.approve(&svc, {user_code = uc_deny, approve = false}, "owner-d", "1.2.3.4", "UA")
 	assert_true(aok3, "deny succeeds")
-	assert_eq(len(MINT_CALLS), mints_before, "deny does NOT pre-mint a token")
+	assert_eq(len(BRIDGE_MINT_CALLS), mints_before, "deny does NOT pre-mint a token")
 	_, dg, dgok := device_auth.grant_by_user_code(store, uc_deny)
 	assert_true(dgok, "denied grant found")
 	assert_eq(dg.status, device_auth.Grant_Status.Denied, "deny sets Denied")
@@ -184,9 +195,10 @@ main :: proc() {
 	fmt.println("AC5 OK: deny terminal, no pre-mint, owner still bound")
 
 	// --- AC3: expired code -> SAME generic Not_Found as unknown (no enumeration) ---
-	res_e, _, _ := device_auth.authorize(&svc, {client = "electron"}, "127.0.0.1:1", "")
+	exp_in := va_bridge_input()
+	_, _, _ = device_auth.authorize(&svc, exp_in, "127.0.0.1:1", "")
 	FAKE_NOW += 601 // past the 600s TTL
-	_, et_ok, et_err := device_auth.verify(&svc, res_e.user_code)
+	_, et_ok, et_err := device_auth.verify(&svc, exp_in.pair_lookup)
 	assert_true(!et_ok, "verify expired fails")
 	assert_eq(et_err.code, domain.Error_Code.Not_Found, "expired -> Not_Found (same generic as unknown)")
 	assert_eq(et_err.message, "invalid or expired code", "expired message identical to unknown (no enumeration)")
@@ -260,10 +272,9 @@ main :: proc() {
 		assert_true(!bad_ok && bad_err.code == .Validation_Failed, fmt.tprintf("malformed previous_bridge_id %q is refused", bad))
 	}
 	_, user_hint_ok, user_hint_err := device_auth.authorize(&svc, {client = "electron", previous_bridge_id = "brg_1"}, "127.0.0.7:1", "")
-	assert_true(!user_hint_ok && user_hint_err.code == .Validation_Failed, "previous_bridge_id on a user-token grant is refused")
+	assert_true(!user_hint_ok && user_hint_err.code == .Validation_Failed, "previous_bridge_id without a bridge key is refused")
 
 	// --- approval dispatches to the BRIDGE minter, and only to it ---
-	user_mints_before := len(MINT_CALLS)
 	bridge_mints_before := len(BRIDGE_MINT_CALLS)
 	abok, aberr := device_auth.approve(&svc, {
 		user_code = "1111111111111111111111111111111111111111111111111111111111111111",
@@ -273,11 +284,6 @@ main :: proc() {
 		"approving-human-007", "203.0.113.9", "Mozilla/5.0 approval-page")
 	assert_true(abok, "approve bridge grant succeeds")
 	assert_eq(aberr.code, domain.Error_Code.None, "approve bridge grant no error")
-	// THE CENTRAL ASSERTION OF THIS TASK: a bridge grant is NEVER served by the
-	// user-token minter. A user token with the machine as a free-text label is
-	// the identity confusion REQ-IMPL-2 exists to remove (design §11.3), so this
-	// is the case that must fail loudly if the dispatch ever regresses.
-	assert_eq(len(MINT_CALLS), user_mints_before, "bridge grant does NOT call the user-token minter")
 	assert_eq(len(BRIDGE_MINT_CALLS), bridge_mints_before + 1, "bridge grant calls the bridge minter exactly once")
 	bcall := BRIDGE_MINT_CALLS[len(BRIDGE_MINT_CALLS) - 1]
 	// Owner from Auth_Context ONLY (scope item 4). approve() takes it as an
@@ -316,18 +322,6 @@ main :: proc() {
 	assert_eq(conflict_err.code, domain.Error_Code.Validation_Failed, "conflicting identity choices -> validation error")
 	assert_eq(len(BRIDGE_MINT_CALLS), conflict_mints_before, "conflicting identity choices never reach the minter")
 
-	// --- and the converse: an ELDA grant is NEVER served by the bridge minter ---
-	eres2, eok3, _ := device_auth.authorize(&svc, {client = "electron", device_label = "MBP"}, "127.0.0.1:1", "")
-	assert_true(eok3, "electron authorize succeeds")
-	u_before := len(MINT_CALLS)
-	b_before := len(BRIDGE_MINT_CALLS)
-	device_auth.approve(&svc, {user_code = eres2.user_code, approve = true}, "owner-e", "1.2.3.4", "UA")
-	assert_eq(len(MINT_CALLS), u_before + 1, "electron grant calls the user-token minter")
-	assert_eq(len(BRIDGE_MINT_CALLS), b_before, "electron grant does NOT call the bridge minter")
-	egrant2, _ := device_auth.get_grant(store, eres2.device_code)
-	assert_eq(egrant2.minted_bridge_id, "", "electron grant has no brg_")
-	fmt.println("REQ-IMPL-2 OK: electron grant mints via the user minter only (converse holds)")
-
 	// --- a bridge grant with an unwired bridge minter FAILS; it must not fall
 	// back to the user minter. An unwired seam is a deployment bug, and
 	// degrading a machine enrollment into a user token would be a silent
@@ -339,20 +333,18 @@ main :: proc() {
 	})
 	defer device_auth.grant_store_free(nstore)
 	nsvc := device_auth.new_device_auth_service(nstore, fake_clock(), []string{"127.0.0.1/32"})
-	device_auth.with_token_minter(&nsvc, fake_minter) // user minter wired, bridge minter NOT
+	// bridge minter NOT wired
 	nres, nok, _ := device_auth.authorize(&nsvc, {
 		client = "ham-bridge", bridge_public_key = BPK, bridge_identity_public_key = IDP, bridge_identity_proof = IDPROOF, pair_salt = "0123456789abcdef0123456789abcdef", pair_hub_origin = "https://hub.example.test:443", pair_lookup = "3333333333333333333333333333333333333333333333333333333333333333", pair_key_mac = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
 		code_challenge = PKCE_CHALLENGE, code_challenge_method = "S256",
 	}, "127.0.0.1:1", "")
 	assert_true(nok, "bridge authorize succeeds without a wired bridge minter")
-	nu_before := len(MINT_CALLS)
 	naok, naerr := device_auth.approve(&nsvc, {user_code = "3333333333333333333333333333333333333333333333333333333333333333", approve = true}, "owner-n", "1.2.3.4", "UA")
 	assert_true(!naok, "approve FAILS when the bridge minter is unwired")
 	assert_eq(naerr.code, domain.Error_Code.Internal_Error, "unwired bridge minter -> Internal_Error")
-	assert_eq(len(MINT_CALLS), nu_before, "unwired bridge minter does NOT fall back to the user minter")
 	ngrant, _ := device_auth.get_grant(nstore, nres.device_code)
 	assert_eq(ngrant.status, device_auth.Grant_Status.Pending, "failed mint leaves the grant Pending, not Approved")
-	fmt.println("REQ-IMPL-2 OK: unwired bridge minter fails closed, no fallback to the user minter")
+	fmt.println("REQ-IMPL-2 OK: unwired bridge minter fails closed")
 
 	// --- a bridge minter that returns no bridge_id is refused: an
 	// unattributable credential defeats the point of per-machine scoping. ---
@@ -406,14 +398,7 @@ main :: proc() {
 	_, denied_ok := device_auth.approved_bridge_id(&svc, "6666666666666666666666666666666666666666666666666666666666666666")
 	assert_true(!denied_ok, "a DENIED bridge grant exposes no bridge id")
 
-	// A USER-TOKEN grant has no bridge at all. Returning the user's token id here
-	// would hand the approval screen something that is not a bridge and invite it
-	// to unseal against it.
-	ures, uok3, _ := device_auth.authorize(&svc, {client = "electron"}, "127.0.0.1:1", "")
-	assert_true(uok3, "authorize a user-token grant")
-	device_auth.approve(&svc, {user_code = ures.user_code, approve = true}, "owner-u", "1.2.3.4", "UA")
-	_, user_ok := device_auth.approved_bridge_id(&svc, ures.user_code)
-	assert_true(!user_ok, "an approved USER-TOKEN grant exposes no bridge id")
+	// (A user-token grant, which had no bridge at all, can no longer be created.)
 
 	// Unknown and empty codes reveal nothing, consistent with the rest of the flow.
 	_, unknown_ok := device_auth.approved_bridge_id(&svc, "ZZZZ-9999")
@@ -423,8 +408,9 @@ main :: proc() {
 	fmt.println("REQ-IMPL-5 OK: approved_bridge_id returns the minted brg_ and fails closed otherwise")
 
 	// --- AC6: approver_ip uses trusted-XFF resolution (peer is trusted) ---
-	res_f, _, _ := device_auth.authorize(&svc, {client = "electron"}, "127.0.0.1:1", "")
-	device_auth.approve(&svc, {user_code = res_f.user_code, approve = true}, "o", "127.0.0.1:1", "ua")
+	f_in := va_bridge_input()
+	_, _, _ = device_auth.authorize(&svc, f_in, "127.0.0.1:1", "")
+	device_auth.approve(&svc, {user_code = f_in.pair_lookup, approve = true}, "o", "127.0.0.1:1", "ua")
 	// (full trusted-XFF branch coverage lives in the grant_store unit test.)
 	fmt.println("AC6 OK: approve over HTTP supplies trusted-XFF approver_ip")
 }

@@ -281,7 +281,7 @@ test_agent_instance_stream_ticket_and_experiment_gating :: proc(t: ^testing.T) {
 		defer user_ws_ticket_store_free(&tickets)
 		user_ws_ticket_store_put(&tickets, "ticket_exp_test", contracts.Auth_Context{
 			user_id = "user_42",
-			kind    = .User_Token,
+			kind    = .Session,
 		}, 60)
 
 		exp_state := Fake_Agent_Experiments{streaming_enabled = false}
@@ -349,7 +349,7 @@ test_agent_instance_stream_validation_and_permissions :: proc(t: ^testing.T) {
 
 	// 2a. Instance not found -> 404
 	{
-		user_ws_ticket_store_put(&tickets, "ticket_alice", contracts.Auth_Context{user_id = "user_alice", kind = .User_Token}, 60)
+		user_ws_ticket_store_put(&tickets, "ticket_alice", contracts.Auth_Context{user_id = "user_alice", kind = .Session}, 60)
 
 		agent_instance_stream_handler(rawptr(&h), Request{
 			method = "GET", path = "/api/v1/agent-instances/inst_unknown/stream", query = "ticket=ticket_alice", request_id = "req_4",
@@ -367,7 +367,7 @@ test_agent_instance_stream_validation_and_permissions :: proc(t: ^testing.T) {
 		testing.expect(t, ok2)
 		defer close_agent_stream_pair(&pair2)
 
-		user_ws_ticket_store_put(&tickets, "ticket_bob", contracts.Auth_Context{user_id = "user_bob", kind = .User_Token}, 60)
+		user_ws_ticket_store_put(&tickets, "ticket_bob", contracts.Auth_Context{user_id = "user_bob", kind = .Session}, 60)
 
 		agent_instance_stream_handler(rawptr(&h), Request{
 			method = "GET", path = "/api/v1/agent-instances/inst_valid/stream", query = "ticket=ticket_bob", request_id = "req_5",
@@ -452,7 +452,7 @@ agent_stream_check_input_policy :: proc(t: ^testing.T, read_only: bool) {
 	h.entitlements = {lookup = plan_test_paid_lookup}
 	if read_only do h.entitlements = {lookup = plan_test_read_only_lookup}
 
-	user_ws_ticket_store_put(&tickets, "ticket_hs", contracts.Auth_Context{user_id = "user_alice", kind = .User_Token}, 60)
+	user_ws_ticket_store_put(&tickets, "ticket_hs", contracts.Auth_Context{user_id = "user_alice", kind = .Session}, 60)
 
 	headers := make([dynamic]contracts.HTTP_Header)
 	defer delete(headers)

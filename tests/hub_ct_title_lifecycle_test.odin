@@ -412,7 +412,7 @@ test_set_title_marks_source :: proc() {
 	check(chn.title == "Flaky test investigation" && chn.title_source == "agent", "agent set-title stamps chain title + title_source='agent'")
 
 	// Auth: a non-instance (user) token cannot use the agent set-title verbs.
-	user_auth := contracts.Auth_Context{kind = .User_Token, user_id = "alice"}
+	user_auth := contracts.Auth_Context{kind = .Session, user_id = "alice"}
 	_, bad_ok, _ := content_service.set_own_conversation_title(&cs, user_auth, "inst_o", "nope")
 	check(!bad_ok, "conversation set-title requires an instance token")
 	_, bad_ok2, _ := taskchain_service.set_own_chain_title(&ts, user_auth, "chain_o", "nope")

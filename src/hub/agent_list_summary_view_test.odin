@@ -37,7 +37,7 @@ test_agents_list_summary_view_is_opt_in :: proc(t: ^testing.T) {
 	fmt.printf("agents list bytes: full=%d summary=%d\n", len(full.body), len(summary.body))
 
 	// Another owner sees none of alice's agents in either view.
-	bob := [1]contracts.HTTP_Header{{name = "X-authentik-username", value = "bob"}}
+	bob := hub_test_user_headers(&f.graph, "bob")
 	other := api_http.router_dispatch(&f.graph.router, api_http.Request{method = "GET", path = "/api/v1/agents", query = "view=summary", request_id = "req_as_bob", remote_addr = "127.0.0.1", headers = bob[:]})
 	testing.expect(t, !strings.contains(other.body, f.agent_id), "owner scoping preserved in summary view")
 

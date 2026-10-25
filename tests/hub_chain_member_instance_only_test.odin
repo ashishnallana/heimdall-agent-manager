@@ -113,7 +113,7 @@ main :: proc() {
 	}
 	service := taskchain_service.new_taskchain_service(&repo, &agents, &clock, &ids)
 
-	user_auth := contracts.Auth_Context{kind = .User_Token, user_id = "alice"}
+	user_auth := contracts.Auth_Context{kind = .Session, user_id = "alice"}
 
 	// --- 1. create_chain with agt_ coordinator_agent_id MUST NOT create an agt_ member ---
 	chain1, ok1, err1 := taskchain_service.create_chain(&service, user_auth, taskchain_service.Create_Chain_Input{

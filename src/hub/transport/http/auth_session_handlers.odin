@@ -14,7 +14,14 @@ import device_auth "odin_test:hub/service/device_auth"
 AUTH_ERROR_REDIRECT :: "/?auth_error=1"
 AUTH_FORBIDDEN_REDIRECT :: "/?auth_error=forbidden"
 
-@(private = "file")
+// plain_response builds a text/plain response whose headers live in the request's
+// temp allocator (safe to return).
+plain_response :: proc(status: int, body: string, headers: ..contracts.HTTP_Header) -> Response {
+	out := make([]contracts.HTTP_Header, len(headers), context.temp_allocator)
+	copy(out, headers)
+	return Response{status = status, content_type = "text/plain", body = body, headers = out}
+}
+
 redirect_response :: proc(location: string, cookies: ..string) -> Response {
 	headers := make([]contracts.HTTP_Header, 2 + len(cookies), context.temp_allocator)
 	headers[0] = {"Location", location}
@@ -86,7 +93,7 @@ auth_logout_handler :: proc(ctx: rawptr, req: Request) -> Response {
 
 // Stream_Auth_Guard re-validates a long-lived stream's principal: a Session is
 // checked against the session store (logout or expiry ends the stream), an OIDC
-// bearer against its token expiry, a user token against revocation. Checks are
+// bearer against its token expiry. Checks are
 // throttled; non-user principals (agents, bridges) are not re-checked here.
 STREAM_AUTH_RECHECK_MS :: 30_000
 

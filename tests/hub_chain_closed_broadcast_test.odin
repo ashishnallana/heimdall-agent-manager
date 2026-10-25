@@ -90,7 +90,7 @@ main :: proc() {
 
 	// User (proxy) closes the chain -> both members woken (actor is the user, empty).
 	captured.count = 0
-	user_auth := contracts.Auth_Context{kind = .Trusted_Proxy, user_id = "alice"}
+	user_auth := contracts.Auth_Context{kind = .Session, user_id = "alice"}
 	_, ok, err := taskchain_service.change_chain_status(&service, user_auth, "chain_1", .Completed)
 	check(ok, fmt.tprintf("chain complete should succeed: %v", err))
 	check(captured.count == 2, fmt.tprintf("chain close must wake both live members, got %d", captured.count))

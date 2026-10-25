@@ -18,8 +18,8 @@ package device_auth
 //   1. user enters the user_code shown by the device,
 //   2. POST /api/v1/device/verify {user_code} -> show device info,
 //   3. [Approve] / [Deny] -> POST /api/v1/device/approve {user_code, approve}.
-// All fetches are same-origin (the browser reached this page through the
-// trusted proxy, so the trusted-proxy identity headers ride on every request).
+// All fetches are same-origin, so the Hub session cookie rides on every request
+// (and the POSTs carry the same-origin metadata the CSRF check requires).
 DEVICE_PAGE_HTML :: `<!DOCTYPE html>
 <html lang="en">
 <head>

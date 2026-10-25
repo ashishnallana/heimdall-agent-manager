@@ -59,17 +59,12 @@ Revocation_Fixture :: struct {
 	br_svc:         bridge_service.Bridge_Service,
 	us_svc:         user_service.User_Service,
 	auth_svc:       auth_service.Auth_Service,
+	user_headers: []contracts.HTTP_Header, // session cookie for the fixture owner
 	registry:       project_service.Bridge_Runtime_Registry,
 	owner_user_id:  string,
 }
 
-@(private = "file")
-REVOCATION_TEST_HEADERS := [1]contracts.HTTP_Header{
-	{name = "X-authentik-username", value = "tanmay"},
-}
 
-@(private = "file")
-REVOCATION_TEST_CIDRS := [1]string{"127.0.0.1/32"}
 
 // setup_revocation_fixture builds the real service graph slice this test needs:
 // sqlite (so the token rows and the bridge row are genuinely persisted), the bridge
@@ -97,20 +92,17 @@ setup_revocation_fixture :: proc(t: ^testing.T, tag: string) -> ^Revocation_Fixt
 	f.br_svc = bridge_service.new_bridge_service(&f.br_repo, &f.clock, &f.ids)
 	bridge_service.with_connection_closer(&f.br_svc, bridge_runtime_service.new_bridge_connection_closer(&f.registry))
 	f.us_svc = user_service.new_user_service_basic(&f.us_repo, &f.clock, &f.ids)
-	f.auth_svc = auth_service.new_auth_service(auth_service.Trusted_Proxy_Config{
-		username_header = "X-authentik-username",
-		trusted_proxy_cidrs = REVOCATION_TEST_CIDRS[:],
-		auto_provision_users = true,
-	}, &f.us_svc)
+	f.auth_svc = auth_service.new_auth_service(auth_service.Auth_Config{auto_provision_users = true}, &f.us_svc)
 	f.auth_svc.clock = &f.clock
 	f.auth_svc.ids = &f.ids
 	f.auth_svc.bridges = &f.br_svc
 
+	f.user_headers = http_test_login(t, &f.auth_svc, "tanmay")
 	owner_ctx, owner_ok, _ := auth_service.resolve_auth_any(&f.auth_svc, auth_service.Auth_Request{
 		remote_addr = "127.0.0.1:4444",
-		headers = REVOCATION_TEST_HEADERS[:],
+		headers = f.user_headers,
 	})
-	testing.expect(t, owner_ok, "trusted proxy owner resolved")
+	testing.expect(t, owner_ok, "session owner resolved")
 	f.owner_user_id = strings.clone(owner_ctx.user_id)
 	return f
 }
@@ -214,7 +206,7 @@ test_revoke_bridge_terminates_live_websocket :: proc(t: ^testing.T) {
 	time.sleep(20 * time.Millisecond)
 	testing.expect(t, !sync.atomic_load(&job.returned), "the reader is parked in a blocking read before revocation")
 
-	owner_auth := contracts.Auth_Context{kind = .User_Token, user_id = f.owner_user_id}
+	owner_auth := contracts.Auth_Context{kind = .Session, user_id = f.owner_user_id}
 	revoked, revoke_ok, revoke_err := bridge_service.revoke_bridge(&f.br_svc, owner_auth, bridge_id)
 	testing.expect(t, revoke_ok, revoke_err.message)
 	testing.expect_value(t, revoked.status, domain.Bridge_Status.Revoked)
@@ -286,7 +278,7 @@ test_revoke_one_bridge_leaves_the_others_connected :: proc(t: ^testing.T) {
 	defer thread.destroy(b_reader)
 	time.sleep(20 * time.Millisecond)
 
-	owner_auth := contracts.Auth_Context{kind = .User_Token, user_id = f.owner_user_id}
+	owner_auth := contracts.Auth_Context{kind = .Session, user_id = f.owner_user_id}
 	_, revoke_ok, revoke_err := bridge_service.revoke_bridge(&f.br_svc, owner_auth, a_id)
 	testing.expect(t, revoke_ok, revoke_err.message)
 
@@ -322,7 +314,7 @@ test_revoke_offline_bridge_succeeds_without_a_socket :: proc(t: ^testing.T) {
 
 	enrolled := enroll_device_bridge(t, f, "offline-host")
 	bridge_id := strings.clone(enrolled.bridge.bridge_id); defer delete(bridge_id)
-	owner_auth := contracts.Auth_Context{kind = .User_Token, user_id = f.owner_user_id}
+	owner_auth := contracts.Auth_Context{kind = .Session, user_id = f.owner_user_id}
 	revoked, ok, err := bridge_service.revoke_bridge(&f.br_svc, owner_auth, bridge_id)
 	testing.expect(t, ok, err.message)
 	testing.expect_value(t, revoked.status, domain.Bridge_Status.Revoked)

@@ -4,6 +4,7 @@ import "core:strings"
 import "core:strconv"
 import "core:net"
 import vault "odin_test:lib/vault"
+import auth_service "odin_test:hub/service/auth"
 
 Hub_Config :: struct {
 	// OIDC provider settings (docs/plans/oidc-only-auth.md). Explicit endpoints, no
@@ -23,6 +24,10 @@ Hub_Config :: struct {
 	oidc_redirect_uri: string,
 	// Browser session lifetime (absolute / idle), hours. <=0 → 168 / 24.
 	session_ttl_hours: int,
+	// DEVELOPMENT ONLY (HAM_OIDC_ALLOW_INSECURE_LOCALHOST=1 /
+	// --oidc-allow-insecure-localhost): accept http:// OIDC endpoints, ui_origin and
+	// redirect URI whose host is exactly localhost, 127.0.0.1 or [::1].
+	oidc_allow_insecure_localhost: bool,
 	session_idle_hours: int,
 	// Opt-in: an unlinked OIDC subject may claim the existing user whose name
 	// equals its preferred_username. Default false (operator links instead).
@@ -48,13 +53,10 @@ Hub_Config :: struct {
 	port: int,
 	database_path: string,
 	migrations_dir: string,
-	username_header: string,
-	display_name_header: string,
-	email_header: string,
-	trusted_proxy_cidrs: []string,
+	// Reverse-proxy peers whose X-Forwarded-For is trusted when resolving the
+	// client IP (rate limits, device-approval audit). No authentication meaning.
+	forwarded_for_trusted_cidrs: []string,
 	auto_provision_users: bool,
-	login_url: string,
-	logout_url: string,
 	// Browser origin the Hub returns as `verification_uri` from device authorize.
 	// Empty is deliberately invalid for bridge enrollment: the bridge refuses to
 	// guess a UI hostname from the Hub API hostname.
@@ -139,13 +141,8 @@ default_config :: proc() -> Hub_Config {
 		port = 8081,
 		database_path = "./hub.db",
 		migrations_dir = "src/hub/repository/sqlite/migrations",
-		username_header = "X-authentik-username",
-		display_name_header = "X-authentik-name",
-		email_header = "X-authentik-email",
-		trusted_proxy_cidrs = cidrs,
+		forwarded_for_trusted_cidrs = cidrs,
 		auto_provision_users = true,
-		login_url = "",
-		logout_url = "https://auth.example.com/application/o/heimdall/end-session/",
 		ui_origin = "",
 		preview_origin = "",
 		preview_legacy_path = false,
@@ -338,7 +335,7 @@ validate_oidc_config :: proc(config: Hub_Config) -> (bool, string) {
 	for r in required {
 		if strings.trim_space(r.value) == "" do return false, strings.concatenate({r.name, " is required when OIDC is enabled"})
 		if strings.trim_space(r.value) != r.value || strings.contains_any(r.value, " \t\r\n") do return false, strings.concatenate({r.name, " must not contain whitespace"})
-		if r.url && !strings.has_prefix(r.value, "https://") do return false, strings.concatenate({r.name, " must be an https:// URL"})
+		if r.url && !oidc_url_allowed(config, r.value) do return false, strings.concatenate({r.name, " must be an https:// URL"})
 	}
 	optional_urls := [?]Required{
 		{config.oidc_authorize_url, "oidc_authorize_url (HAM_OIDC_AUTHORIZE_URL / --oidc-authorize-url)", true},
@@ -346,7 +343,7 @@ validate_oidc_config :: proc(config: Hub_Config) -> (bool, string) {
 		{config.oidc_end_session_url, "oidc_end_session_url (HAM_OIDC_END_SESSION_URL / --oidc-end-session-url)", true},
 	}
 	for r in optional_urls {
-		if r.value != "" && !strings.has_prefix(r.value, "https://") do return false, strings.concatenate({r.name, " must be an https:// URL"})
+		if r.value != "" && !oidc_url_allowed(config, r.value) do return false, strings.concatenate({r.name, " must be an https:// URL"})
 	}
 	// Browser login is all-or-nothing: any web-client key requires the rest.
 	web_keys := config.oidc_authorize_url != "" || config.oidc_token_url != "" || config.oidc_web_client_id != "" || config.oidc_web_client_secret_file != "" || config.oidc_redirect_uri != ""
@@ -356,11 +353,31 @@ validate_oidc_config :: proc(config: Hub_Config) -> (bool, string) {
 		}
 		ui := strings.trim_space(config.ui_origin)
 		if ui == "" do return false, "browser login needs ui_origin (--ui-origin): it is the CSRF origin and the default redirect URI base"
-		if !strings.has_prefix(ui, "https://") && !loopback_http_url(ui) do return false, "ui_origin must be an https:// origin (http only for localhost/127.0.0.1/[::1])"
+		if !oidc_url_allowed(config, ui) do return false, "ui_origin must be an https:// origin (http on localhost only with HAM_OIDC_ALLOW_INSECURE_LOCALHOST=1)"
 		redirect := web_redirect_uri(config)
-		if !strings.has_prefix(redirect, "https://") && !loopback_http_url(redirect) {
+		if !oidc_url_allowed(config, redirect) {
 			return false, "oidc_redirect_uri must be an https:// URL"
 		}
+	}
+	return true, ""
+}
+
+// oidc_url_allowed: https always; http only for an exact loopback host and only
+// in the explicit development mode (HAM_OIDC_ALLOW_INSECURE_LOCALHOST=1).
+oidc_url_allowed :: proc(config: Hub_Config, url: string) -> bool {
+	if strings.has_prefix(url, "https://") do return true
+	return config.oidc_allow_insecure_localhost && loopback_http_url(url)
+}
+
+// require_oidc_config is the server-start check: users can only authenticate
+// through OIDC, so the bearer settings AND browser login must be configured.
+require_oidc_config :: proc(config: Hub_Config) -> (bool, string) {
+	if ok, msg := validate_oidc_config(config); !ok do return false, msg
+	if !oidc_configured(config) {
+		return false, "OIDC is required: set HAM_OIDC_ISSUER, HAM_OIDC_JWKS_URL, HAM_OIDC_USERINFO_URL, HAM_OIDC_API_AUDIENCE, HAM_OIDC_API_SCOPE and browser login (HAM_OIDC_AUTHORIZE_URL, HAM_OIDC_TOKEN_URL, HAM_OIDC_WEB_CLIENT_ID, --ui-origin). For local development see tools/mock-oidc/README.md."
+	}
+	if !web_login_configured(config) {
+		return false, "browser login is required: set HAM_OIDC_AUTHORIZE_URL, HAM_OIDC_TOKEN_URL, HAM_OIDC_WEB_CLIENT_ID and --ui-origin"
 	}
 	return true, ""
 }
@@ -400,34 +417,6 @@ parse_bool_setting :: proc(value: string) -> (bool, bool) {
 	return false, false
 }
 
-// loopback_http_url reports whether `url` is http:// with a host that is exactly
-// localhost, 127.0.0.1 or [::1] (an optional port and path may follow).
 loopback_http_url :: proc(url: string) -> bool {
-	if !strings.has_prefix(url, "http://") do return false
-	rest := url[len("http://"):]
-	end := len(rest)
-	for c, i in rest {
-		if c == '/' || c == '?' || c == '#' {end = i; break}
-	}
-	authority := rest[:end]
-	if strings.contains_rune(authority, '@') do return false
-	host := authority
-	if strings.has_prefix(authority, "[") {
-		close := strings.index_byte(authority, ']')
-		if close < 0 do return false
-		host = authority[:close + 1]
-		tail := authority[close + 1:]
-		if tail != "" && !loopback_port_ok(tail) do return false
-	} else if colon := strings.index_byte(authority, ':'); colon >= 0 {
-		host = authority[:colon]
-		if !loopback_port_ok(authority[colon:]) do return false
-	}
-	return host == "localhost" || host == "127.0.0.1" || host == "[::1]"
-}
-
-@(private = "file")
-loopback_port_ok :: proc(tail: string) -> bool {
-	if len(tail) < 2 || tail[0] != ':' do return false
-	for c in tail[1:] do if c < '0' || c > '9' do return false
-	return len(tail) <= 6
+	return auth_service.loopback_http_url(url)
 }

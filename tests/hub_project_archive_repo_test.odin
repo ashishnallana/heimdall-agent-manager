@@ -10,6 +10,7 @@ import "core:strings"
 import "core:testing"
 import contracts "odin_test:contracts"
 import app "odin_test:hub/app"
+import auth_service "odin_test:hub/service/auth"
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
 import sqlite "odin_test:hub/repository/sqlite"
@@ -105,24 +106,23 @@ test_project_archive_http_api :: proc() {
 	_ = os.remove(api_db_path)
 	defer _ = os.remove(api_db_path)
 
-	cidrs := [?]string{"127.0.0.1/32"}
 	graph: app.App_Graph
 	ok, message := app.build_graph(&graph, app.Hub_Config{
 		database_path = api_db_path,
 		migrations_dir = "src/hub/repository/sqlite/migrations",
-		username_header = "X-authentik-username",
-		display_name_header = "X-authentik-name",
-		email_header = "X-authentik-email",
-		trusted_proxy_cidrs = cidrs[:],
 		auto_provision_users = true,
-		logout_url = "/_dev/logout",
 		paddle_environment = "sandbox",
 	})
 	check(ok, message)
 	defer { app.shutdown_graph(&graph); _ = os.remove(api_db_path) }
 
-	alice := [?]contracts.HTTP_Header{{name = "X-authentik-username", value = "alice"}}
-	bob := [?]contracts.HTTP_Header{{name = "X-authentik-username", value = "bob"}}
+	// Users authenticate with a Hub browser session (OIDC login); mint them directly.
+	graph.auth.web.enabled = true
+	alice_session, alice_ok := auth_service.mint_session(&graph.auth, "alice")
+	bob_session, bob_ok := auth_service.mint_session(&graph.auth, "bob")
+	check(alice_ok && bob_ok, "mint user sessions")
+	alice := [?]contracts.HTTP_Header{auth_service.session_cookie_request_header(alice_session)}
+	bob := [?]contracts.HTTP_Header{auth_service.session_cookie_request_header(bob_session)}
 
 	created := req(&graph, "POST", "/api/v1/projects", "{\"name\":\"Archive Me\",\"slug\":\"archive-me\",\"default_path\":\"/tmp/archive-me\"}", alice[:])
 	check(created.status == 201, fmt.tprintf("create project: %d %s", created.status, created.body))

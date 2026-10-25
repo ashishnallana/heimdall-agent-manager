@@ -426,7 +426,7 @@ jit_prepare :: proc(svc: ^Service, u: ^Uow, ctx: ^Match_Context, fleet: domain.T
 	defer delete(model)
 	project_id := domain.Project_ID("")
 	if ctx.has_coordinator do project_id = ctx.coordinator.project_id
-	auth := contracts.Auth_Context{user_id = string(ctx.chain.owner_user_id), kind = .User_Token, bridge_id = placement.bridge_id}
+	auth := contracts.Auth_Context{user_id = string(ctx.chain.owner_user_id), kind = .Internal_User, bridge_id = placement.bridge_id}
 	input := agent.Create_Instance_Input{
 		agent_id = fleet.agent_id, bridge_id = placement.bridge_id,
 		provider = provider, model = model,

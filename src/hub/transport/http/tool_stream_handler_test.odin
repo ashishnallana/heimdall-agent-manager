@@ -44,7 +44,7 @@ test_tool_stream_http_ticket_json_lifecycle_and_empty_baseline :: proc(t: ^testi
     defer net.close(pair.client)
     defer net.close(pair.listener)
     tickets:=new_user_ws_ticket_store();defer user_ws_ticket_store_free(&tickets)
-    user_ws_ticket_store_put(&tickets,"tool_ticket",{kind=.User_Token,user_id="owner"},60)
+    user_ws_ticket_store_put(&tickets,"tool_ticket",{kind=.Session,user_id="owner"},60)
     f: Tool_HTTP_Test
     repo:=iface.Agent_Repository{get_tool_instance=proc(ctx:rawptr,id:string)->(domain.Agent_Instance,bool,domain.Domain_Error){
         return domain.Agent_Instance{agent_instance_id=id,owner_user_id="owner" if id=="inst_a" else "foreign",bridge_id="brg_a",runtime_status="running"},true,{}
@@ -208,7 +208,7 @@ test_tool_stream_http_failed_upstream_route_is_unavailable :: proc(t: ^testing.T
     defer net.close(pair.client)
     defer net.close(pair.listener)
     tickets:=new_user_ws_ticket_store(); defer user_ws_ticket_store_free(&tickets)
-    user_ws_ticket_store_put(&tickets,"tool_ticket",{kind=.User_Token,user_id="owner"},60)
+    user_ws_ticket_store_put(&tickets,"tool_ticket",{kind=.Session,user_id="owner"},60)
     repo:=iface.Agent_Repository{get_tool_instance=proc(ctx:rawptr,id:string)->(domain.Agent_Instance,bool,domain.Domain_Error) {
         return domain.Agent_Instance{agent_instance_id=id,owner_user_id="owner",bridge_id="brg_offline",runtime_status="running"},true,{}
     }}
@@ -243,15 +243,17 @@ test_tool_stream_http_failed_upstream_route_is_unavailable :: proc(t: ^testing.T
 }
 
 @(test)
-test_tool_stream_ticket_preserves_opaque_credential_and_proxy_kind :: proc(t: ^testing.T) {
+test_tool_stream_ticket_preserves_session_identity_and_refuses_other_kinds :: proc(t: ^testing.T) {
     store := new_user_ws_ticket_store()
     defer user_ws_ticket_store_free(&store)
-    user_ws_ticket_store_put(&store, "opaque_ticket", {kind = .User_Token, user_id = "owner", user_token_id = "utok_public"}, 60)
-    auth, ok := user_ws_ticket_store_consume(&store, "opaque_ticket")
+    user_ws_ticket_store_put(&store, "session_ticket", {kind = .Session, user_id = "owner", session_id = "sess_hash", expires_ms = 42}, 60)
+    auth, ok := user_ws_ticket_store_consume(&store, "session_ticket")
     testing.expect(t, ok)
-    testing.expect_value(t, auth.user_token_id, "utok_public")
-    user_ws_ticket_store_put(&store, "proxy_ticket", {kind = .Trusted_Proxy, user_id = "owner"}, 60)
-    proxy, proxy_ok := user_ws_ticket_store_consume(&store, "proxy_ticket")
-    testing.expect(t, proxy_ok)
-    testing.expect_value(t, proxy.kind, contracts.Auth_Kind.Trusted_Proxy)
+    testing.expect_value(t, auth.kind, contracts.Auth_Kind.Session)
+    testing.expect_value(t, auth.session_id, "sess_hash")
+    testing.expect_value(t, auth.expires_ms, i64(42))
+    // Only browser sessions hold tickets; anything else stored is never honoured.
+    user_ws_ticket_store_put(&store, "bearer_ticket", {kind = .OIDC, user_id = "owner"}, 60)
+    _, bearer_ok := user_ws_ticket_store_consume(&store, "bearer_ticket")
+    testing.expect(t, !bearer_ok)
 }

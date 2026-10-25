@@ -23,6 +23,8 @@ OIDC_Config :: struct {
 	// its preferred_username. Off by default; operators link with
 	// `ham-hub users link-oidc` instead.
 	claim_existing_users: bool,
+	// DEVELOPMENT ONLY: allow http:// endpoints on an exact loopback host.
+	allow_insecure_localhost: bool,
 	// Injectable transport for deterministic tests; production always uses TLS.
 	// Returns the body and HTTP status; transport_ok=false when no response arrived.
 	fetch: proc(ctx: rawptr, url, token: string) -> (body: string, status: int, transport_ok: bool),
@@ -89,8 +91,8 @@ oidc_log_rejected :: proc(stage: string) {
 
 // oidc_http_get performs one https GET. The status is returned for every
 // response; only a 200 body is ever used, and error bodies are never logged.
-oidc_http_get :: proc(url, token: string) -> (body: string, status: int, transport_ok: bool) {
-	if !strings.has_prefix(url, "https://") do return "", 0, false
+oidc_http_get :: proc(url, token: string, allow_insecure_localhost := false) -> (body: string, status: int, transport_ok: bool) {
+	if !oidc_endpoint_allowed(url, allow_insecure_localhost) do return "", 0, false
 	fmt.printfln("ham-hub oidc_http_request method=GET target=%s authorization=%t", url, token != "")
 	headers := make([dynamic]http_client.Header, context.temp_allocator)
 	if token != "" do append(&headers, http_client.Header{"Authorization", strings.concatenate({"Bearer ", token}, context.temp_allocator)})
@@ -135,7 +137,7 @@ oidc_fetch :: proc(config: OIDC_Config, state: ^OIDC_State, url, token: string, 
 	defer oidc_outbound_release(state)
 	transport_ok: bool
 	if config.fetch != nil do body, status, transport_ok = config.fetch(config.fetch_ctx, url, token)
-	else do body, status, transport_ok = oidc_http_get(url, token)
+	else do body, status, transport_ok = oidc_http_get(url, token, config.allow_insecure_localhost)
 	if !transport_ok do status = 0
 	return body, transport_ok && status == 200, false, status
 }
@@ -543,6 +545,7 @@ oidc_cache_put :: proc(state: ^OIDC_State, key: string, entry: OIDC_Cache_Entry)
 }
 oidc_free :: proc(service: ^Auth_Service) {
 	login_rate_limiter_free(&service.login_limiter)
+	preview_auth_free(&service.preview)
 	sync.mutex_lock(&service.oidc_state.mutex)
 	defer sync.mutex_unlock(&service.oidc_state.mutex)
 	for k, e in service.oidc_state.entries do oidc_free_entry(k, e)
@@ -700,4 +703,43 @@ oidc_flight_take :: proc(state: ^OIDC_State, key: string) -> (string, ^OIDC_Flig
 	if _, exists := state.flights[key]; !exists do return "", nil, false
 	stored_key, flight := delete_key(&state.flights, key)
 	return stored_key, flight, true
+}
+
+// loopback_http_url reports whether `url` is http:// with a host that is exactly
+// localhost, 127.0.0.1 or [::1] (an optional port and path may follow).
+loopback_http_url :: proc(url: string) -> bool {
+	if !strings.has_prefix(url, "http://") do return false
+	rest := url[len("http://"):]
+	end := len(rest)
+	for c, i in rest {
+		if c == '/' || c == '?' || c == '#' {end = i; break}
+	}
+	authority := rest[:end]
+	if strings.contains_rune(authority, '@') do return false
+	host := authority
+	if strings.has_prefix(authority, "[") {
+		close := strings.index_byte(authority, ']')
+		if close < 0 do return false
+		host = authority[:close + 1]
+		tail := authority[close + 1:]
+		if tail != "" && !loopback_port_ok(tail) do return false
+	} else if colon := strings.index_byte(authority, ':'); colon >= 0 {
+		host = authority[:colon]
+		if !loopback_port_ok(authority[colon:]) do return false
+	}
+	return host == "localhost" || host == "127.0.0.1" || host == "[::1]"
+}
+
+@(private = "file")
+loopback_port_ok :: proc(tail: string) -> bool {
+	if len(tail) < 2 || tail[0] != ':' do return false
+	for c in tail[1:] do if c < '0' || c > '9' do return false
+	return len(tail) <= 6
+}
+
+// oidc_endpoint_allowed: https always; http only for an exact loopback host in
+// the explicit development mode.
+oidc_endpoint_allowed :: proc(url: string, allow_insecure_localhost: bool) -> bool {
+	if strings.has_prefix(url, "https://") do return true
+	return allow_insecure_localhost && loopback_http_url(url)
 }

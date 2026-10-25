@@ -38,9 +38,9 @@ test_live_provider_shell_and_legacy_endpoint_write_zero_db_messages :: proc(t: ^
 	users_impl: sqlite.User_Repo_SQLite
 	users_repo := sqlite.new_user_repository(&users_impl, &conn)
 	users := user_service.new_user_service_basic(&users_repo, &clock, &ids)
-	auth := auth_service.new_auth_service(auth_service.Trusted_Proxy_Config{username_header = "X-authentik-username",
-		trusted_proxy_cidrs = []string{"127.0.0.1/32"}, auto_provision_users = true}, &users)
-	user_headers := []contracts.HTTP_Header{{name = "X-authentik-username", value = "live_owner"}}
+	auth := auth_service.new_auth_service(auth_service.Auth_Config{auto_provision_users = true}, &users)
+	defer auth_service.oidc_free(&auth)
+	user_headers := http_test_login(t, &auth, "live_owner")
 	owner, authed, auth_err := auth_service.resolve_auth(&auth, auth_service.Auth_Request{remote_addr = "127.0.0.1", headers = user_headers})
 	testing.expect(t, authed, auth_err.message)
 	if !authed do return

@@ -30,6 +30,9 @@ Shell_Session_Stream_Handlers :: struct {
 	experiments:         ^iface.Experiment_Repository,
 	preview_origin:      string,
 	preview_legacy_path: bool,
+	// Hub UI origin: unauthenticated preview navigations bounce through
+	// <ui_origin>/api/v1/preview-auth/start to obtain a preview cookie.
+	ui_origin:           string,
 	// Read only for the bridge's unseal boot id in ready/stream_ready (PTY v2 input
 	// AAD). Optional: nil leaves the id out.
 	bridge_runtime_registry: ^project_service.Bridge_Runtime_Registry,
@@ -399,6 +402,11 @@ Preview_Transport :: enum {
 // dispatches every request whose Host is the preview origin here before any Hub
 // routing, so nothing but the preview relay is reachable on that host.
 preview_origin_handler :: proc(ctx: rawptr, req: Request, client: net.TCP_Socket) {
+	// The Hub's own preview sign-in endpoint; nothing under it is ever proxied.
+	if req.path == PREVIEW_AUTH_PATH {
+		write_http_response(client, preview_auth_redeem(ctx, req))
+		return
+	}
 	// The preview host has exactly one public namespace. In particular, Hub API,
 	// health and static paths are deliberately unreachable on this Host.
 	if !strings.has_prefix(req.path, "/p/") {
@@ -458,13 +466,13 @@ preview_proxy_relay :: proc(ctx: rawptr, req: Request, client: net.TCP_Socket, t
 		}
 	}
 
-	// Preview-host identity comes only from the trusted reverse proxy, leaving an
-	// application's own Authorization header untouched for its upstream.
+	// Preview-host identity comes only from the Hub-minted preview cookie, leaving
+	// an application's own Authorization header untouched for its upstream.
 	auth_ctx: contracts.Auth_Context
 	auth_ok: bool
 	auth_resp: Response
 	if is_preview_origin {
-		auth_ctx, auth_ok, auth_resp = require_trusted_proxy_auth(h.auth, req)
+		auth_ctx, auth_ok, auth_resp = preview_origin_auth(h, req)
 	} else {
 		auth_ctx, auth_ok, auth_resp = require_auth(h.auth, req)
 	}
@@ -1334,4 +1342,83 @@ _preview_client_to_bridge_pump :: proc(data_ptr: rawptr) {
 		)
 		delete(close_json)
 	}
+}
+
+// --- Preview-origin sign-in (replaces trusted-proxy identity on the preview host) ---
+
+PREVIEW_AUTH_PATH :: "/__heimdall/preview-auth"
+PREVIEW_AUTH_START_PATH :: "/api/v1/preview-auth/start"
+
+// preview_is_navigation: a top-level/frame document load the browser can follow
+// a redirect for (as opposed to fetch/XHR/subresource requests).
+preview_is_navigation :: proc(req: Request) -> bool {
+	if !ascii_equal_fold(req.method, "GET") do return false
+	mode := header_value(req.headers, "Sec-Fetch-Mode")
+	if mode != "" do return ascii_equal_fold(mode, "navigate")
+	return strings.contains(header_value(req.headers, "Accept"), "text/html")
+}
+
+// preview_origin_auth authenticates a preview-origin request by its preview
+// cookie. A navigation without one is redirected through the UI-origin start
+// route, which mints a handoff ticket when the browser has a Hub session.
+preview_origin_auth :: proc(h: ^Shell_Session_Stream_Handlers, req: Request) -> (contracts.Auth_Context, bool, Response) {
+	ctx, ok, err := auth_service.resolve_preview_auth(h.auth, req.headers)
+	if ok do return ctx, true, {}
+	auth_metrics_record_failure(h.auth, req)
+	session_id := path_part(req.path, 2)
+	if preview_is_navigation(req) && session_id != "" && h.ui_origin != "" {
+		target := req.path
+		if req.query != "" do target = strings.concatenate({req.path, "?", req.query}, context.temp_allocator)
+		location := strings.concatenate({
+			strings.trim_right(h.ui_origin, "/"), PREVIEW_AUTH_START_PATH,
+			"?session=", auth_service.form_encode(session_id),
+			"&return_to=", auth_service.form_encode(target),
+		}, context.temp_allocator)
+		return {}, false, plain_response(302, "", {"Location", location}, {"Cache-Control", "no-store"})
+	}
+	return {}, false, respond_error(err, req.request_id)
+}
+
+// GET <ui_origin>/api/v1/preview-auth/start?session=<sid>&return_to=/p/<sid>/...
+// Requires the Hub browser session (SameSite=Lax rides top-level and same-site
+// navigations). Without one, sign in first and come back here. A GET is safe:
+// the ticket only ever travels in a redirect to the Hub-handled preview sign-in
+// endpoint, for a preview session the signed-in user already owns.
+preview_auth_start_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Shell_Session_Stream_Handlers)(ctx)
+	if h.preview_origin == "" do return respond_error(domain.domain_error(.Not_Found, "no dedicated preview origin is configured"), req.request_id)
+	session_id := query_value(req.query, "session")
+	return_to := query_value(req.query, "return_to")
+	if return_to == "" do return_to = strings.concatenate({"/p/", session_id, "/"}, context.temp_allocator)
+	if session_id == "" || !auth_service.preview_return_to_ok(return_to, session_id) {
+		return respond_error(domain.domain_error(.Validation_Failed, "session and a return_to inside the preview are required"), req.request_id)
+	}
+	principal, ok, _ := require_auth(h.auth, req)
+	if !ok || principal.kind != .Session {
+		here := strings.concatenate({PREVIEW_AUTH_START_PATH, "?", req.query}, context.temp_allocator)
+		location := strings.concatenate({"/api/v1/auth/login?return_to=", auth_service.form_encode(here)}, context.temp_allocator)
+		return plain_response(302, "", {"Location", location}, {"Cache-Control", "no-store"})
+	}
+	// The ticket is bound to a preview session this user owns.
+	session, found, repo_err := iface.shell_session_get(h.shell_repo, principal.user_id, session_id)
+	if repo_err.code != .None do return respond_error(repo_err, req.request_id)
+	if !found do return respond_error(domain.domain_error(.Not_Found, "session not found"), req.request_id)
+	domain.shell_session_destroy(session)
+	ticket, mint_err := auth_service.preview_ticket_mint(h.auth, principal, session_id, return_to)
+	if mint_err.code != .None do return respond_error(mint_err, req.request_id)
+	location := strings.concatenate({strings.trim_right(h.preview_origin, "/"), PREVIEW_AUTH_PATH, "?ticket=", ticket}, context.temp_allocator)
+	return plain_response(302, "", {"Location", location}, {"Cache-Control", "no-store"}, {"Referrer-Policy", "no-referrer"})
+}
+
+// GET <preview_origin>/__heimdall/preview-auth?ticket=... redeems a handoff
+// ticket, sets the preview cookie and returns to the preview path.
+preview_auth_redeem :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Shell_Session_Stream_Handlers)(ctx)
+	if !ascii_equal_fold(req.method, "GET") do return Response{status = 404, content_type = "text/plain", body = "not found"}
+	raw, max_age, return_to, stage, ok := auth_service.preview_ticket_redeem(h.auth, query_value(req.query, "ticket"))
+	if !ok {
+		fmt.printfln("ham-hub preview_auth_rejected stage=%s", stage)
+		return plain_response(403, "preview sign-in failed; reopen the preview from Heimdall", {"Cache-Control", "no-store"})
+	}
+	return plain_response(302, "", {"Location", return_to}, {"Set-Cookie", auth_service.preview_cookie_header(raw, max_age)}, {"Cache-Control", "no-store"}, {"Referrer-Policy", "no-referrer"})
 }

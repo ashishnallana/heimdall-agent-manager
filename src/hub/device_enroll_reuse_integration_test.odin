@@ -145,13 +145,16 @@ Reuse_Fixture :: struct {
 	db_path: string,
 	user_id: string,
 	first:   Attach_Enrollment,
+	alice:   [1]contracts.HTTP_Header,
 }
 
 @(private = "file")
-reuse_fixture_open :: proc(t: ^testing.T, f: ^Reuse_Fixture, headers: []contracts.HTTP_Header, name: string) -> bool {
+reuse_fixture_open :: proc(t: ^testing.T, f: ^Reuse_Fixture, user: string, name: string) -> bool {
 	db_path, built := attach_test_graph(t, &f.graph, name)
 	f.db_path = db_path
 	if !built do return false
+	f.alice = hub_test_user_headers(&f.graph, user)
+	headers := f.alice[:]
 	f.user_id = vt_user_id(&f.graph, headers)
 	first, first_ok := attach_enroll(&f.graph, headers, "alice-box")
 	f.first = first
@@ -171,16 +174,15 @@ reuse_fixture_close :: proc(f: ^Reuse_Fixture, built: bool) {
 
 @(test)
 test_reenroll_reuse_keeps_bridge_id_and_dependents_and_revokes_old_credentials :: proc(t: ^testing.T) {
-	alice := [?]contracts.HTTP_Header{{name = "X-authentik-username", value = "alice"}}
 	f: Reuse_Fixture
-	opened := reuse_fixture_open(t, &f, alice[:], "reuse-e2e")
+	opened := reuse_fixture_open(t, &f, "alice", "reuse-e2e")
 	defer reuse_fixture_close(&f, f.db_path != "" && f.user_id != "")
 	if !opened do return
 	a := f.first.bridge_id
 	reuse_expect_dependents_on(t, &f.graph, f.user_id, a, "before re-enroll")
 
 	// The machine re-enrolls hinting A; the approver chooses Reuse (target A).
-	again, again_ok := attach_enroll(&f.graph, alice[:], "alice-box", target_bridge_id = a, previous_bridge_id = a)
+	again, again_ok := attach_enroll(&f.graph, f.alice[:], "alice-box", target_bridge_id = a, previous_bridge_id = a)
 	testing.expect(t, again_ok && again.approve_status == 200, again.approve_body)
 	if !again_ok do return
 	testing.expect(t, strings.contains(again.verify_body, strings.concatenate({`"previous_bridge_id":"`, a, `"`}, context.temp_allocator)), again.verify_body)
@@ -210,15 +212,14 @@ test_reenroll_reuse_keeps_bridge_id_and_dependents_and_revokes_old_credentials :
 
 @(test)
 test_reenroll_hint_but_approved_as_new_creates_new_bridge_and_leaves_old_untouched :: proc(t: ^testing.T) {
-	alice := [?]contracts.HTTP_Header{{name = "X-authentik-username", value = "alice"}}
 	f: Reuse_Fixture
-	opened := reuse_fixture_open(t, &f, alice[:], "reuse-e2e-new")
+	opened := reuse_fixture_open(t, &f, "alice", "reuse-e2e-new")
 	defer reuse_fixture_close(&f, f.db_path != "" && f.user_id != "")
 	if !opened do return
 	a := f.first.bridge_id
 
 	// The hint is offered, but the approver picks New (no target_bridge_id).
-	fresh, fresh_ok := attach_enroll(&f.graph, alice[:], "alice-box-2", previous_bridge_id = a)
+	fresh, fresh_ok := attach_enroll(&f.graph, f.alice[:], "alice-box-2", previous_bridge_id = a)
 	testing.expect(t, fresh_ok && fresh.approve_status == 200, fresh.approve_body)
 	if !fresh_ok do return
 	testing.expect(t, strings.contains(fresh.verify_body, strings.concatenate({`"previous_bridge_id":"`, a, `"`}, context.temp_allocator)), "the valid hint is shown to the approver")
@@ -261,20 +262,19 @@ reuse_expect_a_intact :: proc(t: ^testing.T, f: ^Reuse_Fixture, pending: Attach_
 
 @(test)
 test_reenroll_pending_attach_cancel_or_expiry_leaves_old_bridge_intact :: proc(t: ^testing.T) {
-	alice := [?]contracts.HTTP_Header{{name = "X-authentik-username", value = "alice"}}
 	f: Reuse_Fixture
-	opened := reuse_fixture_open(t, &f, alice[:], "reuse-e2e-rollback")
+	opened := reuse_fixture_open(t, &f, "alice", "reuse-e2e-rollback")
 	defer reuse_fixture_close(&f, f.db_path != "" && f.user_id != "")
 	if !opened do return
 	a := f.first.bridge_id
 
 	// 1. The owner cancels a pending attach.
-	cancelled_attach, c_ok := attach_enroll(&f.graph, alice[:], "alice-box", target_bridge_id = a, previous_bridge_id = a)
+	cancelled_attach, c_ok := attach_enroll(&f.graph, f.alice[:], "alice-box", target_bridge_id = a, previous_bridge_id = a)
 	testing.expect(t, c_ok && cancelled_attach.bridge_id == a, cancelled_attach.approve_body)
 	if !c_ok do return
 	cancelled := api_http.router_dispatch(&f.graph.router, api_http.Request{
 		method = "POST", path = strings.concatenate({"/api/v1/bridges/", a, "/enrollment/cancel"}, context.temp_allocator),
-		request_id = "req_reuse_cancel", remote_addr = "127.0.0.1", headers = alice[:],
+		request_id = "req_reuse_cancel", remote_addr = "127.0.0.1", headers = f.alice[:],
 	})
 	testing.expect_value(t, cancelled.status, 200)
 	testing.expect(t, strings.contains(cancelled.body, `"row_deleted":false`), cancelled.body)
@@ -282,7 +282,7 @@ test_reenroll_pending_attach_cancel_or_expiry_leaves_old_bridge_intact :: proc(t
 
 	// 2. The vault key is never delivered and the reaper expires the attach. The
 	// clock jumps only for the sweep: token checks below run on real time.
-	expired_attach, e_ok := attach_enroll(&f.graph, alice[:], "alice-box", target_bridge_id = a, previous_bridge_id = a)
+	expired_attach, e_ok := attach_enroll(&f.graph, f.alice[:], "alice-box", target_bridge_id = a, previous_bridge_id = a)
 	testing.expect(t, e_ok && expired_attach.bridge_id == a, expired_attach.approve_body)
 	if !e_ok do return
 	_, still_pending, _ := bridge_service.pending_enrollment_family(&f.graph.bridges, a)

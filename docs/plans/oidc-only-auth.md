@@ -374,3 +374,60 @@ Phase 2 review follow-up:
   `127.0.0.1` or `[::1]`.
 - **Migration number:** `134_user_sessions.sql` must be renumbered if `main` gains its own 134
   before this branch merges (and its registry/fixture references updated).
+
+Phase 3 (delete trusted proxy + `hut_`, preview-origin auth):
+- **Auth kinds.** `Trusted_Proxy` and `User_Token` are gone, and so is `Auth_Context.user_token_id`.
+  New `Internal_User` replaces the in-process "hub acting for the owner" contexts that used to be
+  built with `.User_Token` (reaper, card/action follow-ups, matcher, title nudges). It is never
+  resolved from a request. `is_user_auth` = Session | OIDC | Internal_User;
+  `is_interactive_browser_auth` = Session.
+- **Resolution.** `resolve_auth` = query/body-token 401 → Authorization: bridge 403, `hut_` 401
+  "Heimdall user tokens are no longer supported; sign in with OIDC", else OIDC → session cookie →
+  401. No fallthrough: an invalid session cookie is a 401.
+- **Config.** The hub refuses to start unless OIDC bearer AND browser login are configured
+  (`app.require_oidc_config`). `--trusted-proxy-cidr`, `--login-url`, `--logout-url` abort startup
+  with a message. The XFF CIDR list (client-IP resolution only) is now
+  `forwarded_for_trusted_cidrs` / `--forwarded-for-trusted-cidr` (default `127.0.0.1/32`). The
+  username/display-name/email header settings are deleted. Dev mode:
+  `HAM_OIDC_ALLOW_INSECURE_LOCALHOST=1` / `--oidc-allow-insecure-localhost` is the only way to use
+  http:// OIDC endpoints, `ui_origin` or redirect URI, and only for an exact loopback host; startup
+  prints a warning. There is no other bypass.
+- **User tokens.** Deleted: issue/verify/list/revoke, `/api/v1/me/tokens*`, `ham-hub tokens`
+  (now exits with a removal message), `users create` token output, `domain.User_API_Token` and the
+  repository procs. Migration `135_drop_user_api_tokens.sql` drops the table, its trigger and its
+  index (no other table references it); `upgrade_user_api_tokens_schema` is a no-op once it is
+  gone. Device authorization: the user-token grant kind became `Grant_Kind.Unsupported` (the zero
+  value); authorize without `bridge_public_key` is refused; the user token minter seam was removed.
+  Bridge enrollment/approval is unchanged and is approved by a session (or OIDC) user. The legacy
+  `/api/v1/device` HTML page redirects a browser without a session to the OIDC login.
+- **ham-ctl.** A `hut_` user token makes ham-ctl print a clear "user tokens were removed; user
+  mode is not available" message instead of failing against the hub. Agent mode is unaffected.
+- **Metrics.** `heimdall_auth_failures_total{kind}` kinds: session, oidc, bridge_token,
+  instance_token, missing, other (`hut_` and query/body credentials → other).
+- **Preview origin (as built).** Preview tickets and preview sessions are kept in hub process
+  memory (`Preview_Auth_Store`), not in SQLite: tickets live 60 s, and a preview session ends when
+  its parent session does (checked at most every 15 s, and immediately on logout through
+  `web_logout`). So no migration is needed, and after a hub restart the next preview navigation
+  just bounces through the start route again. Flow:
+  `<preview>/p/<sid>/...` without `__Host-heimdall_preview` → for a navigation, 302 to
+  `<ui_origin>/api/v1/preview-auth/start?session=<sid>&return_to=<path>`; for anything else, 401.
+  The start route needs the Hub session (otherwise it sends the browser through
+  `/api/v1/auth/login?return_to=<start URL>`). It checks that the user owns `<sid>` and that
+  `return_to` is a safe path under `/p/<sid>/`, mints a 32-byte ticket (stored hashed; single use;
+  60 s; bound to user + parent session + sid) and 302s to
+  `<preview>/__heimdall/preview-auth?ticket=…`. That endpoint is handled by the hub before any
+  proxying; it sets `__Host-heimdall_preview` (Path=/, Secure, HttpOnly, SameSite=Lax, Max-Age =
+  the parent's remaining lifetime) and 302s to `return_to`. On the preview host only that cookie
+  authenticates: never `Authorization` (the previewed app owns it) and never the hub session
+  cookie. All `__Host-heimdall_*` cookies are stripped before forwarding.
+  **Deviation:** the start route is a GET, not a CSRF-checked POST. This keeps direct preview links
+  (and the UI's existing `preview_url` links/iframes) working with no UI change. It is equally
+  safe: the ticket only ever travels in a redirect to the hub-handled preview sign-in endpoint, it
+  is single use, and it grants access only to a preview the signed-in user already owns. A forced
+  navigation can at most sign the victim into their own preview.
+  Limitation (same as with Authentik before): the preview cookie is host-wide, so a previewed app
+  can make credentialed requests to that user's other `/p/<sid>/` previews. It can never read the
+  cookie, and never reach hub APIs (CSRF Origin check; CORS without credentials).
+- `ham-hub users unlink-oidc/logout/disable` run in a separate process, so they cannot drop the
+  server's in-memory preview sessions directly. They delete the parent session rows, and preview
+  sessions die at their next parent re-check (≤ 15 s).

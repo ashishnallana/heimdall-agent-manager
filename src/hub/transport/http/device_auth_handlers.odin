@@ -6,9 +6,10 @@
 // Public redirect: GET /api/v1/device/add — the path-form entry the bridge
 // prints, folded into the UI hash route (see device_add_redirect_handler).
 //
-// Trusted-proxy-authenticated (ELDA-2/HBR-5): GET /api/v1/device (HTML page),
-// POST /api/v1/device/verify, POST /api/v1/device/approve. These refuse with
-// 401 when the request did not arrive through the trusted proxy.
+// User-authenticated (Hub session cookie, or OIDC bearer for native clients):
+// GET /api/v1/device (HTML page), POST /api/v1/device/verify, POST
+// /api/v1/device/approve. Unauthenticated requests get 401 (the HTML page
+// redirects a browser to the OIDC login instead).
 //
 // JSON: requests are decoded into typed structs and responses are typed structs
 // encoded with json.marshal (vault_decode / vault_respond).
@@ -133,12 +134,15 @@ device_authorize_handler :: proc(ctx: rawptr, req: Request) -> Response {
 }
 
 // device_page_handler serves the self-contained HTML confirm page (ELDA-2/AC1).
-// Trusted-proxy-authenticated: the browser reaches it through the trusted proxy
-// (outpost/dev-proxy), so the identity headers are present. 401 otherwise.
+// It needs a signed-in user (the Hub session cookie); a browser without one is
+// sent through the OIDC login and back.
 device_page_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	handlers := (^Device_Auth_Handlers)(ctx)
 	_, ok, auth_resp := require_auth(handlers.auth, req)
-	if !ok do return auth_resp
+	if !ok {
+		if strings.contains(header_value(req.headers, "Accept"), "text/html") do return redirect_response("/api/v1/auth/login?return_to=%2Fapi%2Fv1%2Fdevice")
+		return auth_resp
+	}
 	return Response{status = 200, content_type = "text/html; charset=utf-8", body = device_auth.DEVICE_PAGE_HTML}
 }
 

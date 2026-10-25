@@ -136,7 +136,6 @@ session_fixture :: proc(t: ^testing.T, claim_existing := false, link := true) ->
 	f.jwks = fmt.tprintf(`{{"keys":[{{"kty":"RSA","kid":"%s","alg":"RS256","use":"sig","n":"%s","e":"%s"}}]}}`, f.key.kid, f.key.n, f.key.e)
 	f.mint_aud, f.mint_iss, f.mint_sub, f.mint_exp_delta = SESSION_TEST_CLIENT, SESSION_TEST_ISSUER, "subject-1", 300
 	f.auth = auth_service.Auth_Service{
-		oidc_mode = true,
 		users = &f.users,
 		clock = &f.clock,
 		sessions = &f.session_repo,
@@ -460,9 +459,9 @@ test_session_cookie_parsing_and_kind_helpers :: proc(t: ^testing.T) {
 	testing.expect(t, !ok)
 	for kind in contracts.Auth_Kind {
 		ctx := contracts.Auth_Context{kind = kind}
-		user := kind == .Session || kind == .OIDC || kind == .User_Token || kind == .Trusted_Proxy
+		user := kind == .Session || kind == .OIDC || kind == .Internal_User
 		testing.expect(t, contracts.is_user_auth(ctx) == user)
-		testing.expect(t, contracts.is_interactive_browser_auth(ctx) == (kind == .Session || kind == .Trusted_Proxy))
+		testing.expect(t, contracts.is_interactive_browser_auth(ctx) == (kind == .Session))
 	}
 	// OIDC bearer streams are bounded by the token expiry.
 	f := session_fixture(t)

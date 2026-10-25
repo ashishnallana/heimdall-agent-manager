@@ -105,7 +105,7 @@ fx9_intent :: proc(fx: ^Fx9, session_id: string) -> string {
 
 @(private = "file")
 fx9_auth :: proc() -> contracts.Auth_Context {
-	return contracts.Auth_Context{kind = .User_Token, user_id = R9_OWNER}
+	return contracts.Auth_Context{kind = .Session, user_id = R9_OWNER}
 }
 
 @(test)

@@ -36,7 +36,7 @@ test_start_agent_card_failure_preserves_block_and_retry_dispatches :: proc(t: ^t
 	c, exists := ph_card(t, &h, cid)
 	if !testing.expect(t, exists, "unavailable agent raises a card") do return
 	testing.expect(t, strings.contains(c.operations_json, "\"op\":\"agent.start\"") && strings.contains(c.operations_json, "Start agent"), "card offers Start agent")
-	auth := contracts.Auth_Context{kind = .User_Token, user_id = string(PH_OWNER)}
+	auth := contracts.Auth_Context{kind = .Session, user_id = string(PH_OWNER)}
 	_, accepted, acc_err := accept_card(&h.svc, contracts.Auth_Context{kind = .Instance_Token, user_id = string(PH_OWNER), agent_instance_id = "inst_anr"}, cid)
 	testing.expect(t, !accepted && acc_err.code == .Forbidden, "agent cannot execute user's Start action")
 	_, accepted, acc_err = accept_card(&h.svc, auth, cid, Card_Decision{expected_block = "stale"})

@@ -20,17 +20,11 @@ test_reaper_prunes_old_bridge_log_events_every_15_min :: proc(t: ^testing.T) {
 	db_path := fmt.tprintf("/tmp/heimdall-hub-test-reaper-blog-%d.db", os.get_pid())
 	_ = os.remove(db_path)
 	defer _ = os.remove(db_path)
-	cidrs := [?]string{"127.0.0.1/32"}
 	graph: app.App_Graph
 	ok, msg := app.build_graph(&graph, app.Hub_Config{
 		database_path        = db_path,
 		migrations_dir       = "src/hub/repository/sqlite/migrations",
-		username_header      = "X-authentik-username",
-		display_name_header  = "X-authentik-name",
-		email_header         = "X-authentik-email",
-		trusted_proxy_cidrs  = cidrs[:],
 		auto_provision_users = true,
-		logout_url           = "/_dev/logout",
 		paddle_environment   = "sandbox",
 	})
 	testing.expect(t, ok, msg)
