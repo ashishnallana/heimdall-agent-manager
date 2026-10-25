@@ -191,6 +191,9 @@ bridge_agent_route :: proc(method, params: string) -> Bridge_Agent_Route {
 	case "agent.task.fetch":
 		// {task_id, ref} with ref "#<event_id>" | "facet:<task>:<attempt>:<kind>".
 		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/task/fetch"}
+	case "agent.task.readiness":
+		// {task_id}: read-only per-edge readiness (REQ-TV2-3b).
+		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/task/readiness"}
 
 	// ---- workflow (M3b) ---------------------------------------------------
 	case "agent.workflow.templates":
@@ -327,6 +330,7 @@ bridge_agent_method_allowed :: proc(method: string) -> bool {
 	     "agent.task_chain.publish", "agent.task_chain.pin",
 	     "agent.task.list", "agent.task.show", "agent.task.comments", "agent.task.create",
 	     "agent.task.update", "agent.task.depend", "agent.task.comment", "agent.task.fetch",
+	     "agent.task.readiness",
 	     "agent.lease.next", "agent.lease.heartbeat", "agent.lease.submit", "agent.lease.handoff",
 	     "agent.lease.block", "agent.lease.switch", "agent.review.post",
 	     "agent.workflow.templates", "agent.workflow.define",

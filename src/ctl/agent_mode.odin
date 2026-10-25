@@ -482,6 +482,11 @@ ctl_v2_task :: proc(endpoint, token: string, tokens, args: []string) {
 		ctl_v2_task_publish(endpoint, token, tid, args, unblock = true)
 	case "fetch":
 		ctl_v2_task_fetch(endpoint, token, tokens, args)
+	case "readiness":
+		// Read-only: per-edge prerequisite state, merge state and why it is unsatisfied.
+		tid := pos(tokens, 1)
+		if tid == "" { print_agent_help([]string{"task"}); return }
+		ctl_agent_call_task(endpoint, token, "agent.task.readiness", json_object(json_kv("task_id", tid)), args)
 	case:
 		print_agent_help([]string{"task"})
 	}
@@ -2023,6 +2028,7 @@ print_help_task :: proc() {
 	fmt.println("  ham-ctl task unblock task_1 [--note <reason>]  (coordinator/owner; retry a dispatch block after fixing placement)")
 	fmt.println("  ham-ctl task fetch task_1 facet:task_1:2:handoff")
 	fmt.println("  ham-ctl task fetch task_1 src/main.odin@HEAD")
+	fmt.println("  ham-ctl task readiness task_1   (why a task is not ready: each prerequisite's state, merge state and reason)")
 	fmt.println("  ham-ctl task comment task_1 --body 'pushed fix' --notify inst_rev")
 }
 
