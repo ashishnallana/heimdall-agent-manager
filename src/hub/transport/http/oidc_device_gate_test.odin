@@ -31,7 +31,7 @@ oidc_http_clock :: proc(_: rawptr) -> string {return "2026-10-19T10:00:00Z"}
 oidc_http_identity :: proc(
 	_: rawptr,
 	issuer, subject, username, display, email, now: string,
-	provision: bool,
+	provision, claim_existing: bool,
 ) -> (
 	domain.User,
 	bool,

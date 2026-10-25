@@ -385,13 +385,13 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 		display_name_header = config.display_name_header,
 		email_header = config.email_header,
 		trusted_proxy_cidrs = config.trusted_proxy_cidrs,
-		auto_provision_users = config.auto_provision_users,
+		auto_provision_users = effective_auto_provision_users(config),
 		login_url = config.login_url,
 		logout_url = config.logout_url,
 	}, &graph.users, &graph.repos.users, &graph.clock, &graph.ids)
 	// OIDC bearer authentication is enabled whenever an issuer is configured.
 	graph.auth.oidc_mode = oidc_configured(config)
-	graph.auth.oidc = auth_service.OIDC_Config{issuer = config.oidc_issuer, audience = config.oidc_api_audience, scope = config.oidc_api_scope, userinfo_url = config.oidc_userinfo_url, jwks_url = config.oidc_jwks_url}
+	graph.auth.oidc = auth_service.OIDC_Config{issuer = config.oidc_issuer, audience = config.oidc_api_audience, scope = config.oidc_api_scope, claim_existing_users = config.oidc_claim_existing_users, userinfo_url = config.oidc_userinfo_url, jwks_url = config.oidc_jwks_url}
 	graph.auth.vault = &graph.vault_directory
 	graph.auth.bridges = &graph.bridges
 	graph.auth.agents = &graph.agents

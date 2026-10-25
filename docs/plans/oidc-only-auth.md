@@ -47,18 +47,39 @@ keys (CLI flag + env, following existing `config_bind.odin`/`main.odin` conventi
 | `oidc_end_session_url` / `HAM_OIDC_END_SESSION_URL` | optional RP-initiated logout |
 | `oidc_api_audience` / `HAM_OIDC_API_AUDIENCE` | bearer `aud` required for native tokens (Mundus: `heimdall-api`) |
 | `oidc_api_scope` / `HAM_OIDC_API_SCOPE` | required bearer scope (Mundus: `heimdall.api`) |
-| `oidc_web_client_id` / `HAM_OIDC_WEB_CLIENT_ID` | confidential web client id |
-| `oidc_web_client_secret_file` / `HAM_OIDC_WEB_CLIENT_SECRET_FILE` | path to secret (never a literal in env/argv) |
+| `oidc_web_client_id` / `HAM_OIDC_WEB_CLIENT_ID` | client id the hub uses for browser login at the SAME provider; defaults to the provider's (native) client id; the ID token `aud` must equal it |
+| `oidc_web_client_secret_file` / `HAM_OIDC_WEB_CLIENT_SECRET_FILE` | optional path to a client secret (never a literal in env/argv); unset → public-client PKCE |
+| `oidc_claim_existing_users` / `HAM_OIDC_CLAIM_EXISTING_USERS` | default `false`; `true` lets an unlinked subject claim the existing user whose name equals its `preferred_username` |
+| `auto_provision_users` / `HAM_AUTO_PROVISION_USERS` / `--auto-provision-users` | explicit `true`/`false`; unset → `false` when OIDC is configured (`true` otherwise) |
 | `oidc_redirect_uri` | default `<ui_origin>/api/v1/auth/callback` |
 | `session_ttl_hours` / idle | sensible defaults: absolute 7d, idle 24h |
 
 Explicit endpoints (no discovery fetch at startup) keep startup deterministic and testable.
 Startup fails with a clear message if the required OIDC keys are missing — except for a documented
 local-dev/test configuration (see Dev & tests). Remove `auto_provision_users` semantics only if
-they no longer apply; first OIDC login provisions/claims the user exactly as the native branch's
-`user_external_identities` logic does (issuer+subject → user; stable across username changes; email
-never used for matching). Existing Mundus users must map to the same `user_id` they have today
-(the native branch already claims by preferred_username on first sight — keep that, and document it).
+they no longer apply. Identity resolution uses `user_external_identities` (issuer+subject → user;
+stable across username changes; email never used for matching; `UNIQUE(user_id)`, one identity per
+user). **Policy (phase 1 review):** an existing link is a plain read. An unlinked subject whose
+normalized `preferred_username` matches an existing user is claimed **only** when
+`oidc_claim_existing_users=true`; otherwise 403 "ask the operator to link it". An unlinked subject
+with no matching user is provisioned only when `auto_provision_users` is on (default off with
+OIDC); otherwise 403. Operators link/unlink with
+`ham-hub users link-oidc --user <id> [--issuer <iss>] --subject <sub>` /
+`ham-hub users unlink-oidc --user <id> [--issuer <iss>]` (`--issuer` defaults to `oidc_issuer`).
+Existing Mundus users keep their `user_id`: those the native branch already linked resolve as
+before; any not yet linked are linked by the operator (or a one-off deploy with
+`HAM_OIDC_CLAIM_EXISTING_USERS=true`).
+
+**Decision (phase 1 review, finding 5): one provider, one issuer.** Identities are keyed by a single
+issuer and `UNIQUE(user_id)`, and a separate Authentik provider for the web client would have a
+different issuer, so already-linked users would get 409s. Therefore browser login uses the **same**
+Authentik provider/issuer as native (the existing `heimdall-native` provider). The hub is a client
+of that provider using Authorization Code + PKCE (S256) + `state` + `nonce`. A client secret is
+optional (`oidc_web_client_secret_file`): sent if configured, otherwise public-client PKCE.
+`oidc_web_client_id` defaults to the provider's client id. The ID token must have `iss ==
+oidc_issuer` and `aud == oidc_web_client_id`. Tokens stay server-side (BFF); the session cookie
+design below is unchanged. The operator only adds the hub callback redirect URI
+(`<ui_origin>/api/v1/auth/callback`) to the existing provider. The `UNIQUE(user_id)` schema stays.
 
 ### Browser session flow (new)
 Routes (public, no auth):
@@ -70,7 +91,8 @@ Routes (public, no auth):
   schemes, backslashes) — open-redirect safe.
 - `GET /api/v1/auth/callback?code&state` → verify state matches cookie + server record (single use),
   exchange code at token URL with client secret (HTTP Basic or post; Authentik accepts both) and
-  `code_verifier`; validate the **ID token** (RS256 via existing JWKS code, `iss`, `aud == web
+  `code_verifier` (client secret only when `oidc_web_client_secret_file` is set; otherwise a public
+  PKCE client at the same provider/issuer as native); validate the **ID token** (RS256 via existing JWKS code, `iss`, `aud == web
   client id`, `exp`/`iat` skew, `nonce`); resolve user via the shared external-identity claim; create
   session; set `__Host-heimdall_session` (HttpOnly, Secure, SameSite=Lax, Path=/, Max-Age = absolute
   TTL); clear login cookie; 302 to `return_to` (default `/`). On any failure: log a redacted stage,
@@ -153,7 +175,12 @@ Inspect each with `git diff v0.4.45 repair/native-v0445 -- <file>`.
 
 ### Docs
 - `docs/heimdall-native-oidc.md` (move from nix repo content where relevant) → `docs/auth-oidc.md`:
-  config keys, Authentik setup (two clients or one), session model, threat notes.
+  config keys, Authentik setup (ONE provider shared by native and the hub's browser login; add the
+  hub callback redirect URI), session model, threat notes. **Authentik requirements** (security
+  relevant, since `preferred_username` drives first-link claiming/provisioning): usernames must not
+  be user-editable (disable "Allow users to change username"), and the application must be bound to
+  a group/policy so only intended users can obtain tokens. Document `ham-hub users link-oidc` /
+  `unlink-oidc` and the claim/provision defaults.
 - `SECURITY.md`, `SELF_HOSTING.md`: remove trusted-proxy/forward-auth instructions.
 
 ## Work phases (each ends with tests green + a commit + review)
@@ -181,7 +208,10 @@ Inspect each with `git diff v0.4.45 repair/native-v0445 -- <file>`.
 1. Tag release from main; config repo: drop `heimdall-native-hub` input/override/assertion, set OIDC
    env + `HAM_OIDC_WEB_CLIENT_SECRET_FILE` (SOPS), remove nginx/Caddy forward-auth + `X-authentik-*`
    for Mundus, update deployd health expectations.
-2. User configures Mundus Authentik web client (instructions provided at that point).
+2. User adds the hub callback redirect URI to the existing Mundus `heimdall-native` provider (same
+   issuer; no new provider), and confirms usernames are not user-editable and the app is bound to a
+   group/policy. Before cut-over, list Mundus users without a `user_external_identities` row and
+   link them (`ham-hub users link-oidc`) or deploy once with `HAM_OIDC_CLAIM_EXISTING_USERS=true`.
 3. Backup Mundus DB, deploy via deployd, verify UI login, native bearer probe, bridge approval,
    confirm or roll back.
 
@@ -213,3 +243,32 @@ Phase 1 (native OIDC port):
 - Skipped from the native diff as unrelated: `bridge_handlers.odin` (search-v2 relay parsing),
   `provider_extension_handlers_test.odin` (catalog min-version fixture), task-chain search tests,
   `tests/*search*`, `native-integration.json`, `docs/heimdall-native-oidc.md` (phase 5).
+
+Phase 1 review follow-up:
+- JWKS is a shared, parsed, mutex-protected cache (refresh after 10 min, usable up to 60 min while a
+  refresh is suppressed/failing). Signatures are verified against it before any network call; a
+  refresh (TTL or unknown `kid`) is single-flight and at most once per 60 s; suppressed/failed →
+  reject with no network call. Outbound OIDC fetches (JWKS + UserInfo) are capped at 8 concurrent;
+  excess fails closed immediately. The per-request JWK/token "shape" log lines from the native
+  branch were dropped (one `oidc_jwks_refreshed keys=N` line per refresh remains).
+- 60 s clock leeway on `exp`/`nbf`; `iat` may not be more than 60 s in the future. The token cache
+  entry still expires at `min(now+30 s, exp+leeway)`.
+- A set `HAM_AUTH_MODE` (any value, even empty) refuses startup and names the `HAM_OIDC_*` keys.
+- v1 device proofs keep `NONCE_DEVICE_QUOTA = 64`; v2 uses a separate bucket with 4096.
+- Identity resolution reads first; `BEGIN IMMEDIATE` only to create the first link (the user_id is
+  not additionally cached in the 30 s token entry — the read is a single indexed lookup).
+- **Search relay ported after all.** Main's UI (`src/ui/utils/taskChainSearch.ts`) and bridge
+  (`src/bridge/task_chain_search_rpc.odin`) speak `search:v2:e<epoch>:…` envelopes, but main's hub
+  relay (`task_chain_search_relay_handler`) still required the `search:v1:` prefix, so relayed
+  task-chain search was rejected as "invalid search envelope" on main/v0.4.46. The native lineage
+  fixed this in e46e604a (present in a16f0142 and repair/native-v0445). Ported that change
+  (`bridge_handlers.odin` + `task_chain_search_relay_test.odin`) only.
+
+Carried over to later phases (from the phase 1 review):
+- (7) Long-lived streams under OIDC: WebSocket tickets are refused for OIDC and
+  `live_user_authorized` has no OIDC/Session notion; streams must be bounded by token/session expiry
+  (phase 2 sessions: re-check `session_id` validity; OIDC bearer streams: close at token `exp`).
+- `tool_stream_handler` still excludes OIDC (see above) — fold into `is_user_auth` + the stream
+  revalidation above in phase 2/3.
+- Remaining informational review notes (log redaction review of provider responses, metrics labels
+  `oidc`/`session`, the `ham-hub tokens` OIDC guard only seeing env) are handled in phases 3/5.

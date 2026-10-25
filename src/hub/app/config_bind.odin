@@ -21,6 +21,12 @@ Hub_Config :: struct {
 	oidc_web_client_id: string,
 	oidc_web_client_secret_file: string, // a path; the secret itself is never in env/argv
 	oidc_redirect_uri: string,
+	// Opt-in: an unlinked OIDC subject may claim the existing user whose name
+	// equals its preferred_username. Default false (operator links instead).
+	oidc_claim_existing_users: bool,
+	// Explicit auto_provision_users from HAM_AUTO_PROVISION_USERS /
+	// --auto-provision-users. Unset: true without OIDC, false with OIDC.
+	auto_provision_users_setting: Maybe(bool),
 	// Unset: any Paddle credential/price enables limits. Explicit false opts out.
 	billing_enforce_plan_limits: Maybe(bool),
 	paddle_environment: string,
@@ -340,4 +346,28 @@ validate_oidc_config :: proc(config: Hub_Config) -> (bool, string) {
 		if r.value != "" && !strings.has_prefix(r.value, "https://") do return false, strings.concatenate({r.name, " must be an https:// URL"})
 	}
 	return true, ""
+}
+
+// effective_auto_provision_users: an explicit setting wins; otherwise unknown
+// users are provisioned only when OIDC is not configured.
+effective_auto_provision_users :: proc(config: Hub_Config) -> bool {
+	if v, set := config.auto_provision_users_setting.?; set do return v
+	if oidc_configured(config) do return false
+	return config.auto_provision_users
+}
+
+// check_legacy_auth_mode refuses a leftover HAM_AUTH_MODE: it no longer selects
+// anything, and silently ignoring it could leave a hub without OIDC that the
+// operator believes has it.
+check_legacy_auth_mode :: proc(value: string, present: bool) -> (bool, string) {
+	if !present do return true, ""
+	return false, "HAM_AUTH_MODE is no longer supported; remove it. OIDC is enabled by setting HAM_OIDC_ISSUER, HAM_OIDC_JWKS_URL, HAM_OIDC_USERINFO_URL, HAM_OIDC_API_AUDIENCE and HAM_OIDC_API_SCOPE (or the matching --oidc-* flags)"
+}
+
+// parse_bool_setting accepts exactly true/false (case-insensitive).
+parse_bool_setting :: proc(value: string) -> (bool, bool) {
+	normalized := strings.to_lower(strings.trim_space(value), context.temp_allocator)
+	if normalized == "true" do return true, true
+	if normalized == "false" do return false, true
+	return false, false
 }

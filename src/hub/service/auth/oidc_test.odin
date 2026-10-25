@@ -64,9 +64,15 @@ test_oidc_rs256_claims_and_userinfo :: proc(t: ^testing.T) {
 	config := oidc_test_config(t, &f)
 	for name, token in f.data.tokens {
 		_, _, ok := oidc_validate_token(config, token, 1_792_404_000_000)
-		expected := name == "valid" || name == "short" || name == "audience_string"
+		// exp == now and nbf == now+1 are inside the 60 s clock leeway.
+		expected := name == "valid" || name == "short" || name == "audience_string" || name == "expired" || name == "future"
 		testing.expect(t, ok == expected, name)
 	}
+	// Past the leeway: exp + 60 s <= now, nbf > now + 60 s.
+	_, _, late := oidc_validate_token(config, f.data.tokens["expired"], 1_792_404_060_000)
+	testing.expect(t, !late, "expired beyond leeway")
+	_, _, early := oidc_validate_token(config, f.data.tokens["future"], 1_792_403_940_999)
+	testing.expect(t, !early, "not yet valid beyond leeway")
 	// Correct claims without the private key are insufficient.
 	token := f.data.tokens["valid"]
 	parts := strings.split(token, ".", context.temp_allocator)
@@ -219,7 +225,7 @@ test_oidc_cache_and_expiry_and_spoofing :: proc(t: ^testing.T) {
 	short_req := oidc_test_request(f.fetch.data.tokens["short"])
 	_, short_ok, _ := resolve_auth(&f.auth, short_req)
 	testing.expect(t, short_ok)
-	f.now = "2026-10-19T10:00:10Z"
+	f.now = "2026-10-19T10:01:10Z" // exp (10:00:10) + 60 s leeway
 	_, expired, _ := resolve_auth(&f.auth, short_req)
 	testing.expect(t, !expired)
 	for token in ([]string{"hut_stolen", "", "garbage"}) {
@@ -291,6 +297,7 @@ test_oidc_persistent_identity_linking_and_collisions :: proc(t: ^testing.T) {
 		"shared@example.test",
 		f.now,
 		true,
+		true,
 	)
 	testing.expect(t, linked)
 	testing.expect_value(t, user.user_id, domain.User_ID("retained-id"))
@@ -303,6 +310,7 @@ test_oidc_persistent_identity_linking_and_collisions :: proc(t: ^testing.T) {
 		"new@example.test",
 		f.now,
 		true,
+		true,
 	)
 	testing.expect(t, stable)
 	testing.expect_value(t, renamed.user_id, user.user_id)
@@ -314,6 +322,7 @@ test_oidc_persistent_identity_linking_and_collisions :: proc(t: ^testing.T) {
 		"",
 		"",
 		f.now,
+		true,
 		true,
 	)
 	testing.expect(t, !collision)
@@ -328,6 +337,7 @@ test_oidc_persistent_identity_linking_and_collisions :: proc(t: ^testing.T) {
 		"shared@example.test",
 		f.now,
 		true,
+		true,
 	)
 	testing.expect(t, provisioned)
 	testing.expect_value(t, other.user_id, domain.User_ID("bob"))
@@ -340,6 +350,7 @@ test_oidc_persistent_identity_linking_and_collisions :: proc(t: ^testing.T) {
 		"",
 		f.now,
 		false,
+		true,
 	)
 	testing.expect(t, !disabled)
 	_, absent, _ := iface.user_get_by_id(&f.repo, "carol")
@@ -352,6 +363,7 @@ test_oidc_persistent_identity_linking_and_collisions :: proc(t: ^testing.T) {
 		"",
 		"",
 		f.now,
+		true,
 		true,
 	)
 	testing.expect(t, !issuer_collision)
@@ -367,6 +379,7 @@ test_oidc_persistent_identity_linking_and_collisions :: proc(t: ^testing.T) {
 		"",
 		f.now,
 		false,
+		true,
 	)
 	testing.expect(t, exists)
 	testing.expect_value(t, persisted.user_id, user.user_id)
@@ -428,4 +441,152 @@ test_oidc_mode_keeps_bridge_and_instance_credential_routing :: proc(t: ^testing.
 	_, bridge_ok, bridge_err := resolve_auth_or_bridge_token(&f.auth, oidc_bridge_request("Bearer hba_access"))
 	testing.expect(t, !bridge_ok && bridge_err.message == "bridge auth service is not configured", "bridge endpoint uses the bridge resolver")
 	testing.expect_value(t, f.fetch.calls, 0) // no bridge credential was ever sent to the provider
+}
+
+oidc_test_b64url :: proc(data: []byte) -> string {
+	alphabet := "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+	b := strings.builder_make(context.temp_allocator)
+	acc: u32; bits: uint
+	for v in data {
+		acc = (acc << 8) | u32(v); bits += 8
+		for bits >= 6 {bits -= 6; strings.write_byte(&b, alphabet[(acc >> bits) & 63])}
+	}
+	if bits > 0 do strings.write_byte(&b, alphabet[(acc << (6 - bits)) & 63])
+	return strings.to_string(b)
+}
+
+oidc_test_jwks_calls :: proc(f: ^OIDC_Test_Fetch) -> int {return f.calls - f.userinfo_calls}
+
+// Forged signatures for a known kid are rejected from the cached JWKS: after
+// warm-up no request reaches the provider (neither JWKS nor UserInfo).
+@(test)
+test_oidc_forged_tokens_never_fetch_after_warmup :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	f: OIDC_Test_Fetch
+	config := oidc_test_config(t, &f)
+	service: Auth_Service
+	defer oidc_free(&service)
+	now := i64(1_792_404_000_000)
+	valid := f.data.tokens["valid"]
+	_, _, warm := oidc_validate_token(config, valid, now, &service.oidc_state)
+	testing.expect(t, warm, "warm-up")
+	testing.expect_value(t, oidc_test_jwks_calls(&f), 1)
+	parts := strings.split(valid, ".", context.temp_allocator)
+	signature := make([]byte, 256, context.temp_allocator)
+	for i in 0 ..< 64 {
+		for j in 0 ..< len(signature) do signature[j] = byte((i * 131 + j * 7 + 1) & 0xff)
+		forged := strings.concatenate({parts[0], ".", parts[1], ".", oidc_test_b64url(signature)}, context.temp_allocator)
+		_, _, stage, ok := oidc_validate_token_with_stage(config, forged, now + i64(i) * 1000, &service.oidc_state)
+		testing.expect(t, !ok && stage == "signature", stage)
+	}
+	testing.expect_value(t, oidc_test_jwks_calls(&f), 1)
+	testing.expect_value(t, f.userinfo_calls, 1)
+}
+
+// An unknown-kid storm triggers at most one JWKS fetch per refresh window, and
+// a known kid keeps verifying from the cache meanwhile.
+@(test)
+test_oidc_unknown_kid_storm_is_rate_limited :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	f: OIDC_Test_Fetch
+	config := oidc_test_config(t, &f)
+	service: Auth_Service
+	defer oidc_free(&service)
+	now := i64(1_792_404_000_000)
+	parts := strings.split(f.data.tokens["valid"], ".", context.temp_allocator)
+	unknown :: proc(parts: []string, i: int) -> string {
+		header := fmt.tprintf(`{{"alg":"RS256","kid":"missing-%d"}}`, i)
+		return strings.concatenate({oidc_test_b64url(transmute([]byte)header), ".", parts[1], ".", parts[2]}, context.temp_allocator)
+	}
+	for i in 0 ..< 100 {
+		_, _, ok := oidc_validate_token(config, unknown(parts, i), now + i64(i) * 100, &service.oidc_state)
+		testing.expect(t, !ok)
+	}
+	testing.expect_value(t, oidc_test_jwks_calls(&f), 1)
+	_, _, known := oidc_validate_token(config, f.data.tokens["valid"], now + 10_001, &service.oidc_state)
+	testing.expect(t, known, "known kid verifies from the cache")
+	testing.expect_value(t, oidc_test_jwks_calls(&f), 1)
+	// Next window: exactly one more refresh, however many requests arrive.
+	for i in 0 ..< 100 {
+		_, _, ok := oidc_validate_token(config, unknown(parts, 1000 + i), now + 60_000 + i64(i) * 100, &service.oidc_state)
+		testing.expect(t, !ok)
+	}
+	testing.expect_value(t, oidc_test_jwks_calls(&f), 2)
+	// A failing refresh is not retried inline within its window.
+	f.fail = true
+	for i in 0 ..< 10 {
+		_, _, ok := oidc_validate_token(config, unknown(parts, 2000 + i), now + 120_000 + i64(i), &service.oidc_state)
+		testing.expect(t, !ok)
+	}
+	testing.expect_value(t, oidc_test_jwks_calls(&f), 3)
+}
+
+@(test)
+test_oidc_iat_leeway_and_fetch_concurrency_cap :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	f: OIDC_Test_Fetch
+	config := oidc_test_config(t, &f)
+	now := i64(1_792_404_000_000)
+	parts := strings.split(f.data.tokens["valid"], ".", context.temp_allocator)
+	with_iat :: proc(parts: []string, iat: i64) -> string {
+		claims := fmt.tprintf(`{{"iss":"https://auth.mundus.in/application/o/heimdall-native/","aud":["heimdall-api"],"sub":"subject-1","exp":1792407600,"scope":"openid heimdall.api","iat":%d}}`, iat)
+		return strings.concatenate({parts[0], ".", oidc_test_b64url(transmute([]byte)claims), ".", parts[2]}, context.temp_allocator)
+	}
+	_, _, far_stage, far_ok := oidc_validate_token_with_stage(config, with_iat(parts, now / 1000 + 61), now)
+	testing.expect(t, !far_ok && far_stage == "claims", "iat beyond leeway rejected before any fetch")
+	testing.expect_value(t, f.calls, 0)
+	_, _, near_stage, near_ok := oidc_validate_token_with_stage(config, with_iat(parts, now / 1000 + 60), now)
+	testing.expect(t, !near_ok && near_stage == "signature", "iat inside leeway passes claim checks (claims were re-encoded, so the signature fails)")
+	// Concurrency cap: with every outbound slot taken, fail fast without fetching.
+	service: Auth_Service
+	defer oidc_free(&service)
+	service.oidc_state.inflight = OIDC_MAX_INFLIGHT_FETCHES
+	calls := f.calls
+	_, _, busy_stage, busy_ok := oidc_validate_token_with_stage(config, f.data.tokens["valid"], now, &service.oidc_state)
+	testing.expect(t, !busy_ok && busy_stage == "jwks_unavailable", busy_stage)
+	testing.expect_value(t, f.calls, calls)
+	testing.expect_value(t, service.oidc_state.inflight, OIDC_MAX_INFLIGHT_FETCHES)
+}
+
+// Claiming an existing, unlinked user by preferred_username is opt-in. Without
+// it the subject is refused (403) and the operator links it explicitly.
+@(test)
+test_oidc_claim_existing_is_opt_in_and_operator_link :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	f := oidc_test_repo(t)
+	defer oidc_test_close(f)
+	_, saved, _ := iface.user_save(&f.repo, domain.User{user_id = "alice", name = "alice", status = .Active, created_at = f.now, updated_at = f.now})
+	testing.expect(t, saved)
+	issuer := f.auth.oidc.issuer
+	_, claimed, err := f.repo.resolve_external(f.repo.ctx, issuer, "subject-1", "alice", "", "", f.now, true, false)
+	testing.expect(t, !claimed && err.code == .Forbidden && strings.contains(err.message, "link-oidc"), err.message)
+	// Through resolve_auth with the default policy: still refused, never claimed.
+	_, via_auth, via_err := resolve_auth(&f.auth, oidc_test_request(f.fetch.data.tokens["valid"]))
+	testing.expect(t, !via_auth && via_err.code == .Forbidden, via_err.message)
+	// Unknown username with provisioning off: 403.
+	_, unknown, unknown_err := f.repo.resolve_external(f.repo.ctx, issuer, "subject-9", "zed", "", "", f.now, false, false)
+	testing.expect(t, !unknown && unknown_err.code == .Forbidden)
+	// Operator link, then the subject resolves (read-only path) to that user.
+	linked, link_err := sqlite.user_link_external_sqlite(&f.conn, "alice", issuer, "subject-1", f.now)
+	testing.expect(t, linked, link_err.message)
+	again, again_err := sqlite.user_link_external_sqlite(&f.conn, "alice", issuer, "subject-1", f.now)
+	testing.expect(t, again, again_err.message) // idempotent
+	_, other_saved, _ := iface.user_save(&f.repo, domain.User{user_id = "bob", name = "bob", status = .Active, created_at = f.now, updated_at = f.now})
+	testing.expect(t, other_saved)
+	stolen, stolen_err := sqlite.user_link_external_sqlite(&f.conn, "bob", issuer, "subject-1", f.now)
+	testing.expect(t, !stolen && stolen_err.code == .Conflict, "identity linked to another user")
+	second, second_err := sqlite.user_link_external_sqlite(&f.conn, "alice", issuer, "subject-2", f.now)
+	testing.expect(t, !second && second_err.code == .Conflict, "one identity per user")
+	missing, missing_err := sqlite.user_link_external_sqlite(&f.conn, "nobody", issuer, "subject-3", f.now)
+	testing.expect(t, !missing && missing_err.code == .Not_Found)
+	principal, ok, _ := resolve_auth(&f.auth, oidc_test_request(f.fetch.data.tokens["valid"]))
+	testing.expect(t, ok)
+	testing.expect_value(t, principal.user_id, "alice")
+	// Unlink with the wrong issuer is a no-op; with none removes the link.
+	removed, _ := sqlite.user_unlink_external_sqlite(&f.conn, "alice", "https://other-issuer/")
+	testing.expect_value(t, removed, 0)
+	removed, _ = sqlite.user_unlink_external_sqlite(&f.conn, "alice", "")
+	testing.expect_value(t, removed, 1)
+	_, after, _ := f.repo.resolve_external(f.repo.ctx, issuer, "subject-1", "alice", "", "", f.now, true, false)
+	testing.expect(t, !after, "unlinked subject is refused again")
 }

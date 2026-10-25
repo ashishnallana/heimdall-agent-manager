@@ -29,9 +29,13 @@ REQUEST_V2_SKEW_MS   :: 300_000
 // A nonce stays recorded until its timestamp can no longer pass the skew check:
 // ts may be up to 60 s ahead of the hub clock, and stays acceptable for 60 s after.
 NONCE_TTL_MS         :: 2 * REQUEST_SKEW_MS + 5_000
-// Per-device budget of live nonces. V2 records reads as well as writes; each
-// signing device has its own budget, so one account cannot exhaust another's.
-NONCE_DEVICE_QUOTA   :: 4096
+// Per-device budget of live v1 nonces. V1 records mutations only, which only
+// approved approver-capable devices may sign, so the budget is per signing
+// device and one device (or one account) can never exhaust anyone else's.
+NONCE_DEVICE_QUOTA   :: 64
+// V2 records reads as well as writes (over a wider window), so it has its own,
+// larger per-device budget in a separate bucket; v1 keeps its tight quota.
+NONCE_V2_DEVICE_QUOTA :: 4096
 
 Service :: struct {
 	repo:  ^iface.Vault_Directory_Repository,
@@ -105,7 +109,7 @@ nonce_cache_free :: proc(c: ^Nonce_Cache) {
 // nonce_cache_insert records `nonce` in the bucket `bucket_key`. Expired nonces of
 // that bucket are purged first; an emptied bucket is dropped, so memory follows the
 // number of devices that signed a mutation in the last NONCE_TTL_MS.
-nonce_cache_insert :: proc(c: ^Nonce_Cache, bucket_key, nonce: string, now_ms, ttl_ms: i64) -> Nonce_Result {
+nonce_cache_insert :: proc(c: ^Nonce_Cache, bucket_key, nonce: string, now_ms, ttl_ms: i64, quota := 0) -> Nonce_Result {
 	sync.mutex_lock(&c.mutex)
 	defer sync.mutex_unlock(&c.mutex)
 	heap := runtime.heap_allocator()
@@ -121,7 +125,8 @@ nonce_cache_insert :: proc(c: ^Nonce_Cache, bucket_key, nonce: string, now_ms, t
 		key_ptr, _ := delete_key(b, k)
 		delete(key_ptr, heap)
 	}
-	if len(b) >= c.quota do return .Full
+	limit := quota if quota > 0 else c.quota
+	if len(b) >= limit do return .Full
 	b[strings.clone(nonce, heap)] = now_ms + ttl_ms
 	return .Inserted
 }
@@ -380,8 +385,15 @@ verify_request :: proc(svc: ^Service, user_id: string, r: Signed_Request, need: 
 	// Only mutations consume a nonce (see the cache comment): .Self is read-only.
 	if need == .Self && !v2 do return dev, domain.Domain_Error{}
 	bucket := strings.concatenate({user_id, "|", dev.device_id}, context.temp_allocator)
-	ttl := i64(2*REQUEST_V2_SKEW_MS+5_000) if v2 else i64(NONCE_TTL_MS)
-	switch nonce_cache_insert(&svc.nonces, bucket, r.nonce, now, ttl) {
+	ttl := i64(NONCE_TTL_MS)
+	quota := NONCE_DEVICE_QUOTA
+	if v2 {
+		// Separate bucket: v2 traffic can never exhaust the v1 mutation budget.
+		bucket = strings.concatenate({"v2|", bucket}, context.temp_allocator)
+		ttl = i64(2*REQUEST_V2_SKEW_MS+5_000)
+		quota = NONCE_V2_DEVICE_QUOTA
+	}
+	switch nonce_cache_insert(&svc.nonces, bucket, r.nonce, now, ttl, quota) {
 	case .Inserted:
 	case .Replay:
 		return {}, unauth("device request nonce was already used")

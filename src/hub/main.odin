@@ -14,6 +14,12 @@ import user_service "odin_test:hub/service/user"
 main :: proc() {
 	crashlog.install("ham-hub")
 	config := app.default_config()
+	// Before anything else, including the users/tokens subcommands.
+	legacy_value, legacy_present := os.lookup_env("HAM_AUTH_MODE", context.allocator)
+	if ok, message := app.check_legacy_auth_mode(legacy_value, legacy_present); !ok {
+		fmt.eprintln(message)
+		os.exit(2)
+	}
 	apply_oidc_env(&config)
 	if is_users_command() {
 		ok, message := run_users_command(&config)
@@ -89,7 +95,7 @@ users_index :: proc() -> int {
 
 run_users_command :: proc(config: ^app.Hub_Config) -> (bool, string) {
 	idx := users_index()
-	if idx < 0 || idx + 1 >= len(os.args) do return false, "usage: ham-hub users create --name <name> --email <email> [--label <label>] [--expires-in 90d]"
+	if idx < 0 || idx + 1 >= len(os.args) do return false, USERS_USAGE
 	action := os.args[idx + 1]
 	parse_token_global_args(config)
 	graph: app.App_Graph
@@ -97,6 +103,8 @@ run_users_command :: proc(config: ^app.Hub_Config) -> (bool, string) {
 	if !ok do return false, message
 	defer app.shutdown_graph(&graph)
 	switch action {
+	case "link-oidc", "unlink-oidc":
+		return run_users_oidc_link_command(&graph, action)
 	case "create":
 		name := arg_value("--name")
 		email := arg_value("--email")
@@ -111,7 +119,18 @@ run_users_command :: proc(config: ^app.Hub_Config) -> (bool, string) {
 		fmt.println("expires_at=", result.token.expires_at)
 		return true, ""
 	}
-	return false, "usage: ham-hub users create --name <name> --email <email> [--label <label>] [--expires-in 90d]"
+	return false, USERS_USAGE
+}
+
+USERS_USAGE :: "usage: ham-hub users create --name <name> --email <email> [--label <label>] [--expires-in 90d] | users link-oidc --user <user_id> [--issuer <iss>] --subject <sub> | users unlink-oidc --user <user_id> [--issuer <iss>]"
+
+// run_users_oidc_link_command binds/unbinds an OIDC (issuer, subject) to an
+// existing Hub user. This is how an operator maps an existing account to its
+// identity-provider subject when automatic claiming is off (the default).
+run_users_oidc_link_command :: proc(graph: ^app.App_Graph, action: string) -> (bool, string) {
+	user_id := arg_value("--user")
+	issuer := arg_value("--issuer")
+	return app.users_oidc_link_command(&graph.db, graph.config.oidc_issuer, platform.clock_now(&graph.clock), action, user_id, issuer, arg_value("--subject"))
 }
 
 run_tokens_command :: proc(config: ^app.Hub_Config) -> (bool, string) {
@@ -299,6 +318,16 @@ parse_args :: proc(config: ^app.Hub_Config) {
 			config.oidc_web_client_secret_file = strings.clone(os.args[i + 1]); i += 1
 		} else if arg == "--oidc-redirect-uri" && i + 1 < len(os.args) {
 			config.oidc_redirect_uri = strings.clone(os.args[i + 1]); i += 1
+		} else if arg == "--oidc-claim-existing-users" && i + 1 < len(os.args) {
+			parsed, ok := app.parse_bool_setting(os.args[i + 1])
+			if !ok { fmt.eprintln("--oidc-claim-existing-users must be true or false"); os.exit(2) }
+			config.oidc_claim_existing_users = parsed
+			i += 1
+		} else if arg == "--auto-provision-users" && i + 1 < len(os.args) {
+			parsed, ok := app.parse_bool_setting(os.args[i + 1])
+			if !ok { fmt.eprintln("--auto-provision-users must be true or false"); os.exit(2) }
+			config.auto_provision_users_setting = parsed
+			i += 1
 		} else if arg == "--login-url" && i + 1 < len(os.args) {
 			config.login_url = strings.clone(os.args[i + 1]); i += 1
 		} else if arg == "--logout-url" && i + 1 < len(os.args) {
@@ -396,6 +425,16 @@ apply_oidc_env :: proc(config: ^app.Hub_Config) {
 	if v := os.get_env_alloc("HAM_OIDC_WEB_CLIENT_ID", context.allocator); v != "" do config.oidc_web_client_id = v
 	if v := os.get_env_alloc("HAM_OIDC_WEB_CLIENT_SECRET_FILE", context.allocator); v != "" do config.oidc_web_client_secret_file = v
 	if v := os.get_env_alloc("HAM_OIDC_REDIRECT_URI", context.allocator); v != "" do config.oidc_redirect_uri = v
+	if v := os.get_env_alloc("HAM_OIDC_CLAIM_EXISTING_USERS", context.allocator); v != "" {
+		parsed, ok := app.parse_bool_setting(v)
+		if !ok { fmt.eprintln("HAM_OIDC_CLAIM_EXISTING_USERS must be true or false"); os.exit(2) }
+		config.oidc_claim_existing_users = parsed
+	}
+	if v := os.get_env_alloc("HAM_AUTO_PROVISION_USERS", context.allocator); v != "" {
+		parsed, ok := app.parse_bool_setting(v)
+		if !ok { fmt.eprintln("HAM_AUTO_PROVISION_USERS must be true or false"); os.exit(2) }
+		config.auto_provision_users_setting = parsed
+	}
 }
 
 // apply_vapid_env seeds VAPID config from the environment:

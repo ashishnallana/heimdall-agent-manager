@@ -12,6 +12,7 @@ import "core:strconv"
 import "core:strings"
 import "core:sync"
 import "core:time"
+import "core:unicode/utf8"
 import contracts "odin_test:contracts"
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
@@ -467,23 +468,44 @@ task_chain_search_relay_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	auth_ctx, auth_ok, auth_resp := require_auth(h.auth, req)
 	if !auth_ok do return auth_resp
 	if len(req.body) > 36_000 do return respond_error(domain.domain_error(.Validation_Failed, "search envelope exceeds size limit"), req.request_id)
-	bridge_id := json_string(req.body, "bridge_id"); defer delete(bridge_id)
-	request_id := json_string(req.body, "request_id"); defer delete(request_id)
-	envelope := json_string(req.body, "envelope"); defer delete(envelope)
-	expires_at_ms := i64(json_int(req.body, "expires_at_ms", 0))
-	if bridge_id == "" || request_id == "" || len(request_id) > 128 || !strings.has_prefix(envelope, "search:v1:") || len(envelope) > 32_768 {
+	// Parse exactly one JSON object, including field types. Substring extraction
+	// (and core's convenience unmarshal) can accept trailing bytes as a request.
+	// Validate UTF-8 before core's string decoder, which assumes valid input.
+	if !utf8.valid_string(req.body) do return respond_error(domain.domain_error(.Validation_Failed, "invalid search request"), req.request_id)
+	parser := json.make_parser_from_string(req.body, .JSON, true, context.allocator)
+	value, parse_err := json.parse_value(&parser)
+	defer json.destroy_value(value)
+	object, object_ok := value.(json.Object)
+	if parse_err != nil || !object_ok || parser.curr_token.kind != .EOF {
+		return respond_error(domain.domain_error(.Validation_Failed, "invalid search request"), req.request_id)
+	}
+	bridge_value, bridge_type_ok := object["bridge_id"].(json.String)
+	request_value, request_type_ok := object["request_id"].(json.String)
+	envelope_value, envelope_type_ok := object["envelope"].(json.String)
+	expires_value, expires_type_ok := object["expires_at_ms"].(json.Integer)
+	if !bridge_type_ok || !request_type_ok || !envelope_type_ok || !expires_type_ok {
+		return respond_error(domain.domain_error(.Validation_Failed, "invalid search request"), req.request_id)
+	}
+	bridge_id, request_id, envelope, expires_at_ms := string(bridge_value), string(request_value), string(envelope_value), i64(expires_value)
+	if bridge_id == "" || len(bridge_id) > 256 || !vault.valid_id_value(bridge_id) || request_id == "" || len(request_id) > 128 || !vault.valid_id_value(request_id) || len(envelope) > 32_768 {
 		return respond_error(domain.domain_error(.Validation_Failed, "invalid search envelope"), req.request_id)
 	}
+	// Share the Bridge's v2 epoch/base64/nonce+tag grammar, without decrypting or
+	// learning the current epoch. Key, epoch freshness and replay remain Bridge gates.
+	_, payload, envelope_ok := vault.search_envelope_parse(envelope, context.temp_allocator)
+	defer delete(payload, context.temp_allocator)
+	if !envelope_ok do return respond_error(domain.domain_error(.Validation_Failed, "invalid search envelope"), req.request_id)
 	now_ms := time.to_unix_nanoseconds(time.now()) / 1_000_000
 	if expires_at_ms < now_ms || expires_at_ms > now_ms + 5_000 {
 		return respond_error(domain.domain_error(.Validation_Failed, "search envelope expired"), req.request_id)
 	}
 	bridge, bridge_ok, bridge_err := bridge_service.get_bridge(h.bridges, auth_ctx, bridge_id)
 	if !bridge_ok do return respond_error(bridge_err, req.request_id)
+	defer domain.bridge_destroy(&bridge)
 	if bridge.status != .Online || !project_service.bridge_runtime_registry_has_live(h.bridge_runtime_registry, bridge.bridge_id) {
 		return respond_error(domain.domain_error(.Bridge_Offline, "target bridge is offline"), req.request_id)
 	}
-	command_id := fmt.tprintf("cmd_search_%d", time.to_unix_nanoseconds(time.now())); defer delete(command_id)
+	command_id := fmt.aprintf("cmd_search_%d", time.to_unix_nanoseconds(time.now())); defer delete(command_id)
 	cmd_body := task_chain_search_command_json(command_id, bridge_id, auth_ctx.user_id, request_id, expires_at_ms, envelope); defer delete(cmd_body)
 	reply, reply_ok, reply_err := bridge_runtime_service.send_runtime_command_wait(
 		h.bridge_runtime_registry,
@@ -491,6 +513,7 @@ task_chain_search_relay_handler :: proc(ctx: rawptr, req: Request) -> Response {
 		5000,
 	)
 	if !reply_ok do return respond_error(reply_err, req.request_id)
+	defer delete(reply, runtime.default_allocator())
 	return respond_success(reply, req.request_id, auth_ctx_server_time(req))
 }
 
