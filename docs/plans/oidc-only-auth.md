@@ -497,3 +497,36 @@ Phase 3 review follow-up:
 - **Preview WebSockets** (HMR) run the stream auth guard; they close (`auth_revoked`) once the
   user session behind them is logged out or expires.
 - **Per-parent cap:** at most 32 preview sessions per parent session; the oldest is replaced.
+
+Phase 5 (docs + verification):
+- `docs/auth-oidc.md` covers the model, every config key, the session/cookie/preview model,
+  Authentik setup (Mundus example), the operator CLI, migrations/rollback and threat notes.
+  `SECURITY.md` and `SELF_HOSTING.md` no longer describe forward-auth. `SELF_HOSTING.md` §1.10 is
+  the upgrade path from trusted-proxy auth. The preview edge must forward `/__heimdall/` as well
+  as `/p/`.
+- Pre-existing, unrelated: `nix build .#ham-bootstrap-golden-test` fails to link (`-lsqlite3`
+  missing in its mkOdinPackage). It fails identically at 6ce3e02f.
+
+## Post-cutover follow-ups (deferred; Mundus cut-over first)
+
+- **Per-flow preview bind cookie** (`__Host-heimdall_preview_bind_<id>`, id carried through
+  start and the ticket; redeem clears only its own). Today there is one bind cookie, so two
+  previews signing in at the same time overwrite it and one of them has to bounce again.
+- **HMAC tag in the bind cookie value** (per-process key; refuse to redeem against an untagged
+  value). Otherwise script in a previewed app could plant a non-HttpOnly cookie with that name.
+- **Bounce hop counter** (stop with a clear 403 after 3 bounces). A browser that refuses the
+  preview cookie currently bounces in a loop.
+- **UI hardening:**
+  - `currentReturnTo` should fall back to `/` when the path would fail the hub's
+    `safe_return_to`, so a bad path gives a clean redirect instead of a 400.
+  - `postLogout`/`signOut` should navigate only to `https:` URLs or single-`/` relative paths.
+    This guards against a hostile or misconfigured `logout_url`.
+- **XFF docs note** in `docs/auth-oidc.md`: per-client limits trust the right-most untrusted
+  X-Forwarded-For hop, so the reverse proxy must set it to the real client (Cloudflare:
+  `CF-Connecting-IP`). Without that, the limits key on the proxy address. (Mundus nginx already
+  does this.)
+- **Drop `user_api_tokens`** in a later release, once rolling back to pre-OIDC binaries is no
+  longer possible. Migration 135 only empties it, so a rollback does not crash-loop.
+- **Electron and ham-ctl OIDC sign-in.** Both currently show "user tokens were removed" and
+  cannot authenticate as a user.
+- **Migration 134 renumber check** before merging, if `main` gained its own 134.
