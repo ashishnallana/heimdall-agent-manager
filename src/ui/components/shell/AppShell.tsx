@@ -81,6 +81,8 @@ import { ActionsRouteGate } from '../actions/ActionsRouteGate';
 import { filterActionsNavEntries } from '../actions/actionsExperiment';
 import { useActionsAccess } from '../actions/useActionsAccess';
 import type { LauncherIntent } from '../../store/workspaceLayoutSlice';
+import { buildConversationHash } from '../../utils/conversationUrl';
+import { chainConversationRoute, chainTargetId } from '../../utils/paneTarget';
 
 // Pages off the boot path (home, conversations and the workspace stay eager) load
 // on first visit, so they stay out of the entry chunk.
@@ -149,6 +151,9 @@ type ConversationSummary = {
   // True when THIS agent instance is a coordinator of its chain (per
   // /api/v1/agents/live). Renders the agent's own name gold in the rail/palette.
   isCoordinator?: boolean;
+  // The chain this row coordinates: the row then links to the chain-addressed
+  // `chain:<id>` target, which follows coordinator replacement (REQ-TV2-7).
+  coordinatorChainId?: string;
   // True on the first row of a chain-group (except the project's first group), so
   // the rail draws a subtle separator between chain-groups within a project.
   startsNewGroup?: boolean;
@@ -634,7 +639,12 @@ function buildProjectConversationTree(conversations: ConversationSummary[], live
         const conv = byInstance.get(agent.agentInstanceId);
         if (!conv || placed.has(agent.agentInstanceId)) return;
         placed.add(agent.agentInstanceId);
-        rows.push({ ...conv, isCoordinator: agent.isCoordinator, startsNewGroup: firstInGroup && rows.length > 0 });
+        rows.push({
+          ...conv,
+          isCoordinator: agent.isCoordinator,
+          coordinatorChainId: agent.isCoordinator && chain.chainId ? chain.chainId : undefined,
+          startsNewGroup: firstInGroup && rows.length > 0,
+        });
         firstInGroup = false;
       });
     });
@@ -888,17 +898,21 @@ function ProjectGroupItem({
           ) : (
             <div className="space-y-0.5">
               {projectGroup.conversations.map((conversation) => {
+                const rowRoute = conversation.coordinatorChainId
+                  ? chainConversationRoute(conversation.coordinatorChainId)
+                  : `/conversations/${encodeURIComponent(conversation.agentInstanceId)}`;
                 const isSelected = Boolean(
                   currentPath &&
                   (currentPath === `/conversations/${conversation.agentInstanceId}` ||
-                   currentPath.startsWith(`/conversations/${conversation.agentInstanceId}/`))
+                   currentPath.startsWith(`/conversations/${conversation.agentInstanceId}/`) ||
+                   (conversation.coordinatorChainId && currentPath === rowRoute))
                 );
                 return (
                   <Fragment key={conversation.conversationId}>
                   {conversation.startsNewGroup ? <div data-debug-id={`sidebar-session-group-separator-${conversation.conversationId}`} role="separator" className="mx-6 my-1 border-t border-subtle" /> : null}
                   <a
                     data-debug-id={`sidebar-session-row-${conversation.conversationId}`}
-                    href={shellHash(`/conversations/${encodeURIComponent(conversation.agentInstanceId)}`)}
+                    href={shellHash(rowRoute)}
                     className={`flex items-center gap-2 rounded-lg pl-6 pr-2 transition ${isMobile ? 'min-h-11 text-[15px]' : 'py-1.5 text-[12.5px]'} ${isSelected ? 'bg-neutral-soft text-primary font-semibold' : 'text-muted hover:bg-neutral-soft hover:text-primary'}`}
                   >
                     <BridgeLiveDot
@@ -1699,7 +1713,7 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
   };
 
   const openWorkspaceResource = (resourceId: string) => {
-    window.location.hash = buildRouteHash(`/conversations/${encodeURIComponent(resourceId)}`, '');
+    window.location.hash = buildConversationHash([resourceId]);
   };
 
   useRegisterActions([
@@ -2112,7 +2126,7 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
         open={resourcePicker === 'task-chain'}
         onClose={() => setResourcePicker(null)}
         onSelectChain={(chain) => {
-          if (chain.coordinatorAgentInstanceId) openWorkspaceResource(chain.coordinatorAgentInstanceId);
+          if (chain.coordinatorAgentInstanceId) openWorkspaceResource(chainTargetId(chain.chainId));
           setResourcePicker(null);
         }}
       />

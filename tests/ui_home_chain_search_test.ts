@@ -238,9 +238,10 @@ test('a new Main pane renders the home view; picking a recent task chain fills T
         (frame().querySelector('[data-debug-id="home-chain-row-chain-3"]') as any).click();
         await new Promise((r) => setTimeout(r, 40));
       });
-      assert.equal(layout.findPaneByAgent(store.getState().workspaceLayout.tree, 'coord-3'), newPane, 'coordinator put into the new pane');
-      assert.deepEqual(layout.selectMainAgentIds(store.getState()), ['a', 'coord-3']);
-      assert.equal(dom.window.location.hash, '#/conversations/a+coord-3?focused=coord-3');
+      // REQ-TV2-7: the chain is addressed by chain, not by its coordinator instance.
+      assert.equal(layout.findPaneByAgent(store.getState().workspaceLayout.tree, 'chain:chain-3'), newPane, 'chain target put into the new pane');
+      assert.deepEqual(layout.selectMainAgentIds(store.getState()), ['a', 'chain:chain-3']);
+      assert.equal(dom.window.location.hash, '#/conversations/a+chain:chain-3?focused=chain:chain-3');
     } finally {
       await act(async () => root.unmount());
       store.dispatch(heimdallApi.util.resetApiState());
@@ -248,7 +249,7 @@ test('a new Main pane renders the home view; picking a recent task chain fills T
   });
 });
 
-test('home page (route): search bar + last chains, flat; a row opens the coordinator conversation', async () => {
+test('home page (route): search bar + last chains, flat; a row opens the chain-addressed coordinator conversation', async () => {
   await withDom('#/home', async (dom) => {
     const { createRoot } = await import('react-dom/client');
     const { act } = await import('react');
@@ -272,7 +273,7 @@ test('home page (route): search bar + last chains, flat; a row opens the coordin
       await act(async () => {
         (doc.querySelector('[data-debug-id="home-chain-row-chain-3"]') as any).click();
       });
-      assert.equal(dom.window.location.hash, '#/conversations/coord-3');
+      assert.equal(dom.window.location.hash, '#/conversations/chain:chain-3');
       // Local search filters the list.
       const input = doc.querySelector('[data-debug-id="home-chain-search-input"]') as any;
       await act(async () => {
@@ -331,7 +332,7 @@ test('a recent chain whose list row lacks the coordinator still opens its conver
         (doc.querySelector('[data-debug-id="home-chain-row-chain-4"]') as any).click();
         await new Promise((r) => setTimeout(r, 60));
       });
-      assert.equal(dom.window.location.hash, '#/conversations/coord-4', 'opens the coordinator conversation, not the chain page');
+      assert.equal(dom.window.location.hash, '#/conversations/chain:chain-4', 'opens the chain conversation, not the chain page');
     } finally {
       await act(async () => root.unmount());
       store.dispatch(heimdallApi.util.resetApiState());
@@ -615,10 +616,12 @@ test('later-page rows retain list coordinator, detail fallback, invoking-pane ca
     await click('home-chain-next-btn', 1);
     await click('home-chain-next-btn', 1);
     await click('home-chain-row-browse-20', 1);
-    assert.deepEqual(opened, [[], ['coordinator-20']]);
+    // Each row opens its chain target (REQ-TV2-7); the coordinator only decides
+    // between the conversation and the chain page.
+    assert.deepEqual(opened, [[], ['chain:browse-20']]);
     await click('home-chain-row-browse-21', 1);
     await waitFor(() => opened[1].length === 2, act);
-    assert.deepEqual(opened, [[], ['coordinator-20', 'resolved-21']]);
+    assert.deepEqual(opened, [[], ['chain:browse-20', 'chain:browse-21']]);
     await click('home-chain-row-browse-22', 1);
     await waitFor(() => dom.window.location.hash === '#/chains/browse-22', act);
     assert.deepEqual(opened[0], []);
@@ -858,9 +861,9 @@ test('new Main pane later-page coordinator replaces that pane and preserves its 
       await act(async () => { el('home-chain-next-btn').click(); });
       assert.ok(el('home-chain-row-browse-20'));
       await act(async () => { el('home-chain-row-browse-20').click(); });
-      await waitFor(() => layout.findPaneByAgent(store.getState().workspaceLayout.tree, 'coordinator-20') === target, act);
+      await waitFor(() => layout.findPaneByAgent(store.getState().workspaceLayout.tree, 'chain:browse-20') === target, act);
       assert.equal(layout.findPaneByAgent(store.getState().workspaceLayout.tree, 'a'), sibling);
-      assert.equal(dom.window.location.hash, '#/conversations/a+coordinator-20?focused=coordinator-20');
+      assert.equal(dom.window.location.hash, '#/conversations/a+chain:browse-20?focused=chain:browse-20');
     } finally {
       await act(async () => root.unmount());
       store.dispatch(heimdallApi.util.resetApiState());

@@ -270,8 +270,10 @@ export function TaskChainSelectorModal({
     }
   };
 
-  // Opening a chain opens its coordinator's conversation; the coordinator is
-  // resolved from the chain detail when the list row doesn't carry it.
+  // Opening a chain opens its chain-addressed coordinator conversation
+  // (taskChainRoute -> `chain:<id>`); the coordinator's existence is resolved
+  // from the chain detail when the list row doesn't carry it. `onSelectChain`
+  // hosts place `chainTargetId(chain.chainId)` when a coordinator exists.
   const handleSelect = (chain: ChainSelectorItem) => {
     onClose();
     void resolveChainConversationAgent(dispatch, chain.chainId, chain.coordinatorAgentInstanceId).then((coordinator) => {

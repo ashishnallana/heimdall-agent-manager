@@ -19,17 +19,27 @@ import {
   selectMainTree,
   type MainPaneValue,
 } from './workspaceLayoutSlice';
+import { chainIdFromTargetId, chainTargetId } from '../utils/paneTarget';
 
 /**
  * Aux dock content (Jetski `auxPaneV2` equivalent).
  *
- * ONE tab strip per agent (`agentPanes[agentInstanceId]`), no splits inside the
- * aux. The dock always shows the FOCUSED Main pane's agent strip, in single and
- * split view alike (Jetski `/c/A+B?focused=A` -> conversationPanes[focused]).
- * See {@link resolveAuxTreeId}.
+ * ONE tab strip per pane TARGET (`agentPanes[<target id>]`: an agent instance
+ * id, or `chain:<chain_id>` for a chain-addressed coordinator pane), no splits
+ * inside the aux. The dock always shows the FOCUSED Main pane's strip, in single
+ * and split view alike (Jetski `/c/A+B?focused=A` -> conversationPanes[focused]).
+ * Focus only selects WHICH pane's strip is shown; it never changes another
+ * pane's target (REQ-TV2-7). See {@link resolveAuxTreeId}.
  */
 
-export type AuxTreeId = { kind: 'agent'; agentInstanceId: string };
+export type AuxTreeId =
+  | { kind: 'agent'; agentInstanceId: string }
+  | { kind: 'chain'; chainId: string };
+
+/** The `agentPanes` key of a strip: the pane's target id. */
+export function auxStripKey(treeId: AuxTreeId): string {
+  return treeId.kind === 'chain' ? chainTargetId(treeId.chainId) : treeId.agentInstanceId;
+}
 
 export interface AuxTabbedPane {
   tabs: AuxTab[];
@@ -69,11 +79,14 @@ export function resolveAuxTreeId(tree: PaneTreeState<MainPaneValue>): AuxTreeId 
   if (!agentInstanceId || agentInstanceId === NEW_PANE_AGENT_ID) return null;
   // A focused shell pane has no agent context, so no aux dock.
   if (isShellPaneId(agentInstanceId)) return null;
+  const chainId = chainIdFromTargetId(agentInstanceId);
+  if (chainId) return { kind: 'chain', chainId };
   return { kind: 'agent', agentInstanceId };
 }
 
 export function auxTreeKey(treeId: AuxTreeId | null | undefined): string {
-  return treeId ? `agent:${treeId.agentInstanceId}` : '';
+  if (!treeId) return '';
+  return treeId.kind === 'chain' ? `chain:${treeId.chainId}` : `agent:${treeId.agentInstanceId}`;
 }
 
 /**
@@ -90,11 +103,11 @@ export function getAuxPane(
   treeId: AuxTreeId | null | undefined,
 ): AuxTabbedPane | undefined {
   if (!treeId) return undefined;
-  return state.agentPanes[treeId.agentInstanceId];
+  return state.agentPanes[auxStripKey(treeId)];
 }
 
 function setAuxPane(state: AuxPanesState, treeId: AuxTreeId, pane: AuxTabbedPane): void {
-  state.agentPanes[treeId.agentInstanceId] = pane;
+  state.agentPanes[auxStripKey(treeId)] = pane;
 }
 
 function ensurePane(

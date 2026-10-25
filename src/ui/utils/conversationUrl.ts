@@ -7,6 +7,9 @@ import { buildRouteHash } from './appLocation';
  *
  *   #/conversations/<id1>+<id2>+...?focused=<id>
  *
+ * Each id is a pane TARGET id (utils/paneTarget.ts): an agent instance id, or
+ * `chain:<chain_id>` for a chain's current coordinator conversation, e.g.
+ * `#/conversations/chain:<chain_id>+<inst>?focused=chain:<chain_id>`.
  * A single view is the one-id case (`#/conversations/<id>`, the legacy URL
  * shape keeps working). `_new` marks a new-chat picker pane and may repeat.
  * `?msg=<messageId>` (deep-link to a message) is preserved by callers that
@@ -18,6 +21,11 @@ export const NEW_PANE_URL_ID = '_new';
 export interface ResolvedConversationIds {
   ids: string[];
   focused?: string;
+}
+
+/** Percent-encodes one target id, keeping the `chain:` separator readable. */
+function encodeTargetId(id: string): string {
+  return encodeURIComponent(id).replace(/%3A/gi, ':');
 }
 
 function safeDecode(segment: string): string {
@@ -78,7 +86,7 @@ export function buildConversationHash(
   options: { focusedId?: string; extraSearch?: Record<string, string> } = {},
 ): string {
   const list = ids.length > 0 ? ids : [NEW_PANE_URL_ID];
-  const path = `/conversations/${list.map((id) => encodeURIComponent(id)).join('+')}`;
+  const path = `/conversations/${list.map(encodeTargetId).join('+')}`;
   const params = new URLSearchParams();
   if (list.length > 1) {
     const focused = options.focusedId && list.includes(options.focusedId) ? options.focusedId : list[0];
@@ -87,7 +95,8 @@ export function buildConversationHash(
   for (const [k, v] of Object.entries(options.extraSearch || {})) {
     if (v) params.set(k, v);
   }
-  const search = params.toString();
+  // `:` is legal in a query; keep `focused=chain:<id>` readable.
+  const search = params.toString().replace(/%3A/gi, ':');
   return buildRouteHash(path, search ? `?${search}` : '');
 }
 

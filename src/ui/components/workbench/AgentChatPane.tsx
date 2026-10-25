@@ -50,7 +50,12 @@ import {
   useListBridgesQuery,
   type BridgeCapability,
 } from '../../api/endpoints/bridgeSupport';
-import { useFetchChainTasksQuery, useFetchTaskChainDetailQuery } from '../../api/endpoints/tasks';
+import {
+  useFetchChainTasksQuery,
+  useFetchTaskChainConversationQuery,
+  useFetchTaskChainDetailQuery,
+} from '../../api/endpoints/tasks';
+import { chainTargetId } from '../../utils/paneTarget';
 import { selectActiveVaultKey } from '../../store/vaultSlice';
 import type { AuxContent } from '../../store/auxTabId';
 import { buildRouteHash } from '../../utils/appLocation';
@@ -129,7 +134,14 @@ export function refetchIfStarted(query: { isUninitialized: boolean; refetch: () 
 }
 
 export interface AgentChatPaneProps {
+  /** The agent instance shown (a chain pane passes its resolved coordinator). */
   agentInstanceId: string;
+  /**
+   * Set when this Main pane is addressed by chain (`chain:<id>`, REQ-TV2-7): the
+   * chain context comes from the target instead of being inferred from the
+   * conversation, and the chain selector swaps the pane's TARGET.
+   */
+  chainTarget?: { chainId: string; title?: string };
   paneId?: string;
   focusMessageId?: string;
   isActiveTab?: boolean;
@@ -145,10 +157,13 @@ export interface AgentChatPaneProps {
   variant?: 'main' | 'auxSubagent';
   /** Opens (or focuses) a tab in the current aux strip. */
   onOpenAuxTab?: (content: AuxContent, title?: string) => void;
-  /** Agent switcher: swap the agent shown in this Main pane (deduped by the host). */
-  onSwitchAgent?: (agentInstanceId: string, title?: string) => void;
-  /** Opens a selected chain coordinator in a new pane beside this one. */
-  onOpenAgentInSplit?: (agentInstanceId: string, direction: 'right' | 'bottom') => void;
+  /**
+   * Agent/chain switcher: swap this Main pane's TARGET (an agent instance id or
+   * `chain:<id>`; deduped by the host).
+   */
+  onSwitchAgent?: (targetId: string, title?: string) => void;
+  /** Opens a pane target (e.g. a selected chain's `chain:<id>`) in a new pane beside this one. */
+  onOpenAgentInSplit?: (targetId: string, direction: 'right' | 'bottom') => void;
   /** Requests that this pane open its task-chain picker for a shortcut placement. */
   chainSelectorRequest?: {
     id: number;
@@ -661,6 +676,7 @@ function normalizeConversationMessages(rows: Message[], agentLabel: string): Cha
 
 export function AgentChatPane({
   agentInstanceId: routeInstanceId,
+  chainTarget,
   paneId,
   focusMessageId,
   isActiveTab = true,
@@ -726,7 +742,12 @@ export function AgentChatPane({
   const agentInstanceId = String(
     conversation?.agent_instance_id || conversation?.agentInstanceId || routeInstanceId,
   );
-  const chainId = String(conversation?.chain_id || conversation?.chainId || '');
+  // A chain-addressed pane knows its chain from the target; an agent pane infers
+  // it from its conversation.
+  const chainId = String(
+    chainTarget?.chainId || conversation?.chain_id || conversation?.chainId || '',
+  );
+  const ownTargetId = chainTarget?.chainId ? chainTargetId(chainTarget.chainId) : agentInstanceId;
   const isMultiPane = !isSinglePane;
   const title = conversationDisplayTitle(
     conversation,
@@ -755,7 +776,31 @@ export function AgentChatPane({
   }, [chainDetailQuery.data, chainTasksQuery.data]);
   const rawTitle = String(conversation?.title || '').trim();
   const editableTitle = rawTitle && !looksLikeInternalId(rawTitle) ? rawTitle : title;
-  const chainTitle = String(chainDetailQuery.data?.chain?.title || '').trim();
+  const chainTitle = String(
+    chainDetailQuery.data?.chain?.title || chainTarget?.title || '',
+  ).trim();
+  // Legacy instance link (REQ-TV2-7): when this instance was its chain's
+  // coordinator and has since been replaced, offer the chain-addressed URL.
+  const chainConversationQuery = useFetchTaskChainConversationQuery(
+    { chainId },
+    { skip: !chainId || Boolean(chainTarget) || isAuxSubagent },
+  );
+  const replacedCoordinator = Boolean(
+    !chainTarget &&
+      chainId &&
+      agentInstanceId &&
+      chainConversationQuery.data?.coordinatorAgentInstanceId &&
+      chainConversationQuery.data.coordinatorAgentInstanceId !== agentInstanceId &&
+      chainConversationQuery.data.replacedCoordinatorInstanceIds.includes(agentInstanceId),
+  );
+  const openCurrentChainCoordinator = () => {
+    const target = chainTargetId(chainId);
+    if (!target) return;
+    if (onSwitchAgent) onSwitchAgent(target);
+    else if (typeof window !== 'undefined') {
+      window.location.hash = buildRouteHash(`/conversations/${target}`, '');
+    }
+  };
 
   // agent_instance/* events carry the complete instance summary (status, config,
   // current task, run_count/started_at for restarts) and are patched into this entry.
@@ -2585,6 +2630,26 @@ export function AgentChatPane({
                   onClose={() => setMentionQuery(null)}
                 />
               )}
+              {replacedCoordinator ? (
+                <div
+                  data-debug-id="conversation-replaced-coordinator"
+                  role="status"
+                  className="mb-2 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-subtle bg-neutral-soft px-3 py-2 text-xs text-muted"
+                >
+                  <span className="min-w-0 flex-1">
+                    This agent no longer coordinates{' '}
+                    <VaultText value={chainTitle} fallback="this task chain" as="span" />.
+                  </span>
+                  <button
+                    type="button"
+                    data-debug-id="conversation-open-chain-coordinator-btn"
+                    onClick={openCurrentChainCoordinator}
+                    className="min-h-9 rounded-lg border border-subtle px-3 text-xs font-medium text-primary hover:bg-surface-raised"
+                  >
+                    Open current coordinator
+                  </button>
+                </div>
+              ) : null}
               {pendingReconfig && stagedConfigurationIssues.length > 0 ? (
                 <div
                   data-debug-id="conversation-apply-blocked-reasons"
@@ -3326,13 +3391,17 @@ export function AgentChatPane({
                 onClick={() => {
                   setChainAgentSwitcherOpen(false);
                   if (member.agentInstanceId === agentInstanceId) return;
+                  // The coordinator is addressed by chain so the pane follows a
+                  // coordinator replacement (REQ-TV2-7).
+                  const memberTarget =
+                    member.isCoordinator && chainId ? chainTargetId(chainId) : member.agentInstanceId;
                   if (onSwitchAgent) {
-                    // The workspace swaps the agent in THIS pane (deduped: an agent
+                    // The workspace swaps the target in THIS pane (deduped: a target
                     // already open elsewhere is focused instead) and syncs the URL.
-                    onSwitchAgent(member.agentInstanceId, member.title);
+                    onSwitchAgent(memberTarget, member.title);
                   } else if (typeof window !== 'undefined') {
                     window.location.hash = buildRouteHash(
-                      `/conversations/${encodeURIComponent(member.agentInstanceId)}`,
+                      `/conversations/${encodeURIComponent(memberTarget).replace(/%3A/gi, ':')}`,
                       '',
                     );
                   }
@@ -3374,19 +3443,19 @@ export function AgentChatPane({
         open={chainSelectorOpen}
         onClose={() => setChainSelectorOpen(false)}
         currentChainId={chainId}
-        // Per-pane: picking a chain swaps THIS pane to its coordinator in place
-        // (deduped by the workspace). A chain without a coordinator keeps the
-        // default navigation to /chains/<id>.
+        // Per-pane (REQ-TV2-7): picking a chain swaps THIS pane's target to
+        // `chain:<id>` in place (deduped by the workspace); other panes never
+        // change. A chain without a coordinator keeps the default navigation to
+        // /chains/<id>.
         onSelectChain={
           onSwitchAgent || onOpenAgentInSplit
             ? (chain) => {
                 if (chain.coordinatorAgentInstanceId) {
+                  const target = chainTargetId(chain.chainId);
                   if (chainSelectorPlacement === 'replace') {
-                    if (chain.coordinatorAgentInstanceId !== agentInstanceId) {
-                      onSwitchAgent?.(chain.coordinatorAgentInstanceId);
-                    }
+                    if (target !== ownTargetId) onSwitchAgent?.(target);
                   } else {
-                    onOpenAgentInSplit?.(chain.coordinatorAgentInstanceId, chainSelectorPlacement);
+                    onOpenAgentInSplit?.(target, chainSelectorPlacement);
                   }
                 } else if (typeof window !== 'undefined') {
                   window.location.hash = buildRouteHash(

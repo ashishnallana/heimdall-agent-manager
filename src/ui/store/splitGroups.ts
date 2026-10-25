@@ -5,16 +5,22 @@ import { NEW_PANE_AGENT_ID, sanitizeMainTree, type MainPaneValue } from './works
 /**
  * Split groups (Jetski `layoutGroupIndex.ts` + `layoutStorage.ts`).
  *
- * Every Main layout with >= 2 real agents is remembered as a GROUP:
- * - a global index (agent -> group; an agent is in at most one group),
- * - pane geometry keyed by the SORTED id set.
+ * Every Main layout with >= 2 real panes is remembered as a GROUP:
+ * - a global index (target -> group; a target is in at most one group),
+ * - pane geometry keyed by the SORTED target-id set.
+ * Ids are pane TARGET ids (utils/paneTarget.ts): `chain:<chain_id>` or an agent
+ * instance id, so two chains whose coordinators share a durable agent are two
+ * distinct members (REQ-TV2-7).
  * Forming a new set evicts every intersecting group (and its geometry);
  * groups left with <= 1 real agent are dropped. A single view is never
  * recorded, it only evicts groups containing that agent.
  */
 
-export const SPLIT_GROUP_INDEX_STORAGE_KEY = 'heimdall:split-groups:v1';
-export const SPLIT_LAYOUT_STORAGE_PREFIX = 'heimdall:split-layout:v1:';
+export const SPLIT_GROUP_INDEX_STORAGE_KEY = 'heimdall:split-groups:v2';
+export const SPLIT_LAYOUT_STORAGE_PREFIX = 'heimdall:split-layout:v2:';
+/** v1 was keyed by agent instance ids only; migrated once by {@link migrateLegacySplitStorage}. */
+export const LEGACY_SPLIT_GROUP_INDEX_STORAGE_KEY = 'heimdall:split-groups:v1';
+export const LEGACY_SPLIT_LAYOUT_STORAGE_PREFIX = 'heimdall:split-layout:v1:';
 
 export function isRealId(id: string): boolean {
   return Boolean(id) && id !== NEW_PANE_AGENT_ID;
@@ -83,9 +89,48 @@ function storage(): Storage | null {
   }
 }
 
+/**
+ * One-time v1 -> v2 migration. A v1 member is a bare instance id, which is
+ * still a valid (agent) pane target, so groups and their geometry carry over
+ * unchanged; a legacy coordinator pane is re-addressed as `chain:<id>` only
+ * when the workspace redirects it, and persistence then re-records the group.
+ * v1 keys are removed afterwards. No-op once v2 exists.
+ */
+export function migrateLegacySplitStorage(): void {
+  const s = storage();
+  if (!s) return;
+  try {
+    const legacyRaw = s.getItem(LEGACY_SPLIT_GROUP_INDEX_STORAGE_KEY);
+    if (legacyRaw === null) return;
+    if (s.getItem(SPLIT_GROUP_INDEX_STORAGE_KEY) === null) {
+      let legacy: string[][] = [];
+      try {
+        legacy = filterValidGroups(JSON.parse(legacyRaw));
+      } catch {
+        legacy = [];
+      }
+      for (const group of legacy) {
+        const raw = s.getItem(`${LEGACY_SPLIT_LAYOUT_STORAGE_PREFIX}${sortedKey(group)}`);
+        if (raw !== null) s.setItem(getLayoutStorageKey(group), raw);
+      }
+      s.setItem(SPLIT_GROUP_INDEX_STORAGE_KEY, JSON.stringify(legacy));
+    }
+    const stale: string[] = [];
+    for (let i = 0; i < s.length; i += 1) {
+      const key = s.key(i);
+      if (key && key.startsWith(LEGACY_SPLIT_LAYOUT_STORAGE_PREFIX)) stale.push(key);
+    }
+    for (const key of stale) s.removeItem(key);
+    s.removeItem(LEGACY_SPLIT_GROUP_INDEX_STORAGE_KEY);
+  } catch {
+    /* ignore: storage unavailable or full */
+  }
+}
+
 export function readGroupIndex(): string[][] {
   const s = storage();
   if (!s) return [];
+  migrateLegacySplitStorage();
   try {
     return filterValidGroups(JSON.parse(s.getItem(SPLIT_GROUP_INDEX_STORAGE_KEY) || '[]'));
   } catch {
@@ -131,6 +176,7 @@ export function deleteLayoutGeometry(ids: string[]): void {
 export function loadSavedLayout(ids: string[]): PaneTreeState<MainPaneValue> | null {
   const s = storage();
   if (!s || ids.length < 2) return null;
+  migrateLegacySplitStorage();
   try {
     const raw = s.getItem(getLayoutStorageKey(ids));
     if (!raw) return null;
@@ -166,8 +212,9 @@ export function persistSplitLayout(
 }
 
 /**
- * Where "open this agent" goes (sidebar/search/chain selector/Full View/links):
- * its saved split group focused on it, else its single view.
+ * Where "open this target" goes (sidebar/search/chain selector/Full View/links):
+ * its saved split group focused on it, else its single view. Pass a
+ * `chain:<id>` target for a chain's conversation.
  */
 export function resolveOpenAgentIds(
   agentInstanceId: string,

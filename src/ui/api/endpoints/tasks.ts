@@ -469,6 +469,33 @@ async function decryptChainProjectGroup(g: ChainProjectGroup, key: VaultKeyring)
   return { ...g, projectName, chains };
 }
 
+/** GET /task-chains/{id}/conversation (REQ-TV2-7). Empty ids: no coordinator. */
+export interface TaskChainConversation {
+  chainId: string;
+  title: string;
+  coordinatorAgentInstanceId: string;
+  conversationId: string;
+  /** Instances demoted from coordinator by a replacement. */
+  replacedCoordinatorInstanceIds: string[];
+}
+
+function emptyChainConversation(chainId: string): TaskChainConversation {
+  return { chainId, title: '', coordinatorAgentInstanceId: '', conversationId: '', replacedCoordinatorInstanceIds: [] };
+}
+
+export function normalizeTaskChainConversation(raw: any, chainId: string): TaskChainConversation {
+  if (!raw || typeof raw !== 'object') return emptyChainConversation(chainId);
+  const str = (v: unknown) => (typeof v === 'string' ? v.trim() : '');
+  const replaced = raw.replaced_coordinator_instance_ids ?? raw.replacedCoordinatorInstanceIds;
+  return {
+    chainId: str(raw.chain_id ?? raw.chainId) || chainId,
+    title: str(raw.title),
+    coordinatorAgentInstanceId: str(raw.coordinator_agent_instance_id ?? raw.coordinatorAgentInstanceId),
+    conversationId: str(raw.conversation_id ?? raw.conversationId),
+    replacedCoordinatorInstanceIds: Array.isArray(replaced) ? replaced.map(str).filter(Boolean) : [],
+  };
+}
+
 export const tasksApi = heimdallApi.injectEndpoints({
   endpoints: (build) => ({
     // Home browses the complete owned list; grouped previews omit older chains.
@@ -655,6 +682,27 @@ export const tasksApi = heimdallApi.injectEndpoints({
         { type: 'Chain', id: chainId },
         { type: 'ChainTasks', id: chainId },
       ],
+    }),
+    // REQ-TV2-7: the chain's CURRENT coordinator instance/conversation, which a
+    // `chain:<id>` pane target resolves through. Tagged with the chain so a
+    // coordinator replacement (task_chain resource_changed) re-resolves it.
+    fetchTaskChainConversation: build.query<TaskChainConversation, { chainId: string }>({
+      queryFn: async ({ chainId }, api) => {
+        if (!chainId) return { data: emptyChainConversation('') };
+        try {
+          const raw = await cookieJsonFetch(`/task-chains/${encodeURIComponent(chainId)}/conversation`);
+          const conversation = normalizeTaskChainConversation(unwrapData(raw), chainId);
+          const state: any = api?.getState?.();
+          const activeKey = getActiveVaultKey();
+          if (state?.vault?.isUnlocked && activeKey && conversation.title) {
+            conversation.title = (await decryptChainRecord({ title: conversation.title } as any, activeKey)).title;
+          }
+          return { data: conversation };
+        } catch (error: any) {
+          return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any };
+        }
+      },
+      providesTags: (_result, _error, { chainId }) => [{ type: 'Chain', id: chainId }],
     }),
     // Cookie-auth lazy single-task fetch. The chain/task list ships tasks WITHOUT
     // their description (to keep listings light); the full task — including the
@@ -1598,6 +1646,7 @@ export const {
   useLazyFetchTaskChainProjectPageQuery,
   useListTaskChainsQuery,
   useFetchTaskChainDetailQuery,
+  useFetchTaskChainConversationQuery,
   useFetchChainTaskDetailQuery,
   useFetchChainTaskCommentsQuery,
   useCreateTaskChainMutation,

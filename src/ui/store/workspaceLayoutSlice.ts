@@ -21,9 +21,11 @@ import {
  * The split tree of agent chats for `/conversations/<id1>+<id2>?focused=<id>`.
  * The URL is the source of truth for the OPEN PANE SET (see
  * utils/conversationUrl.ts): `setLayoutFromUrl` reconciles the tree from it and
- * in-app edits are written back to the URL. Leaves hold ONLY an agent instance
- * id, or `'_new'` for the new-chat picker. Split geometry is remembered per id
- * set as a split group (store/splitGroups.ts), never globally or per chain.
+ * in-app edits are written back to the URL. Leaves hold ONLY a pane target id
+ * (utils/paneTarget.ts): an agent instance id, `chain:<chain_id>` for a chain's
+ * current coordinator conversation, a shell `sh_…` id, or `'_new'` for the
+ * new-chat picker. Split geometry is remembered per target set as a split group
+ * (store/splitGroups.ts), never globally.
  *
  * Node shape: we reuse Heimdall's binary `tiling/*` tree (`PaneTreeState`) rather
  * than Jetski's N-ary `{children, weights}` node. Every N-ary layout Jetski can
@@ -31,8 +33,9 @@ import {
  * the binary engine already owns rendering, sash resizing, ID-preserving moves
  * and drag-to-split. The behaviors (dedupe, focus, URL sync) mirror Jetski.
  *
- * Invariant (dedupe): an agent appears in at most one leaf. Opening an agent
- * that is already open focuses its pane.
+ * Invariant (dedupe): a TARGET appears in at most one leaf. Opening a target
+ * that is already open focuses its pane. `chain:A` and `chain:B` are distinct
+ * targets even when their coordinators share a durable agent (REQ-TV2-7).
  */
 
 export const NEW_PANE_AGENT_ID = '_new';
@@ -40,7 +43,12 @@ export const NEW_PANE_AGENT_ID = '_new';
 export type LauncherIntent = 'agent' | 'shell';
 
 export interface MainPaneValue {
-  agentInstanceId: string; // NEW_PANE_AGENT_ID for the new-chat picker
+  /**
+   * The pane TARGET id (the persisted field name predates chain targets and is
+   * kept so saved layouts stay readable): an agent instance id, `chain:<id>`,
+   * a shell id, or NEW_PANE_AGENT_ID for the new-chat picker.
+   */
+  agentInstanceId: string;
   /** One-shot presentation hint for a shortcut-created picker pane. */
   launchIntent?: LauncherIntent;
 }

@@ -116,19 +116,19 @@ test('a draft says it is a draft; template stage titles never show raw placehold
   assert.ok(!renderStageTitle('X {{ something.else }}', {}).includes('{{'));
 });
 
-test('a chain row opens the coordinator chat, or the board when there is no coordinator', async () => {
+test('a chain row opens the chain-addressed coordinator chat, or the board when there is no coordinator', async () => {
   const { chainRowPrimaryAction } = await import('../src/ui/components/taskchain/TaskChainsPage.tsx');
-  assert.deepEqual(chainRowPrimaryAction('inst_coord1', false), {
+  assert.deepEqual(chainRowPrimaryAction('chain_a', 'inst_coord1', false), {
     kind: 'conversation',
-    href: '#/conversations/inst_coord1?panel=tasks',
+    href: '#/conversations/chain:chain_a?panel=tasks',
     closeSidebar: false,
   });
   // mobile keeps the plain conversation route and closes the sidebar
-  assert.deepEqual(chainRowPrimaryAction('inst_coord1', true), {
+  assert.deepEqual(chainRowPrimaryAction('chain_a', 'inst_coord1', true), {
     kind: 'conversation',
-    href: '#/conversations/inst_coord1',
+    href: '#/conversations/chain:chain_a',
     closeSidebar: true,
   });
-  assert.deepEqual(chainRowPrimaryAction('', false), { kind: 'select' });
-  assert.deepEqual(chainRowPrimaryAction('  ', true), { kind: 'select' });
+  assert.deepEqual(chainRowPrimaryAction('chain_a', '', false), { kind: 'select' });
+  assert.deepEqual(chainRowPrimaryAction('chain_a', '  ', true), { kind: 'select' });
 });
