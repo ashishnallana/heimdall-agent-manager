@@ -33,7 +33,7 @@ const STATE_RAIL: Record<string, string> = {
   cancelled: 'bg-subtle',
 };
 
-/** Actions whose controls are in TaskDetails (Your review / Waiting on your answer). */
+/** Actions whose controls are in TaskDetails (Review decision / Waiting on your answer). */
 const DECISION_IN_DETAILS = new Set<TaskActionId>(['approve', 'request_changes', 'answer']);
 
 export interface TaskCardProps {
