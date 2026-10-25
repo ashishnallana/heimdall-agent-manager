@@ -54,6 +54,7 @@ import {
   useFetchChainTasksQuery,
   useFetchTaskChainConversationQuery,
   useFetchTaskChainDetailQuery,
+  useUpdateTaskChainMutation,
 } from '../../api/endpoints/tasks';
 import { chainTargetId } from '../../utils/paneTarget';
 import { selectActiveVaultKey } from '../../store/vaultSlice';
@@ -80,7 +81,8 @@ import { MAX_UPLOAD_BYTES } from '../ArtifactUpload';
 import { ArtifactAttachmentPreview } from '../ArtifactAttachmentPreview';
 import Icon from '../Icon';
 import Markdown from '../Markdown';
-import { VaultText } from '../vault/VaultText';
+import { VaultText, useDecryptedText } from '../vault/VaultText';
+import { resolveRenameTarget } from './renameTarget';
 import { decryptPaneCaptureBody } from '../../utils/vaultChats';
 import { VAULT_LOCKED_MARKER } from '../../utils/vaultCrypto';
 import { describeCron, formatInTimeZone, timeZoneLabel } from '../actions/scheduleUtils';
@@ -728,6 +730,7 @@ export function AgentChatPane({
   usePaneDeferredRefresh(conversationId, paneVisible, messagesQuery.refetch, messagesQuery);
   const [fetchOlderMessages, olderMessagesState] = useLazyFetchConversationMessagesQuery();
   const [updateConversationTitle, updateTitleState] = useUpdateConversationTitleMutation();
+  const [updateTaskChain, updateChainState] = useUpdateTaskChainMutation();
   const [requestPaneCapture, requestPaneCaptureState] = useRequestPaneCaptureMutation();
   const [sendMessage] = useSendConversationMessageMutation();
   const [answerQuestions] = useAnswerConversationQuestionsMutation();
@@ -780,6 +783,16 @@ export function AgentChatPane({
   const chainTitle = String(
     chainDetailQuery.data?.chain?.title || chainTarget?.title || '',
   ).trim();
+  // REQ-CR-1: Rename targets the chain title (decrypted, as VaultText shows it) when
+  // this conversation belongs to a chain, else the conversation title.
+  const decryptedChainTitle = useDecryptedText(chainTitle);
+  const renameTarget = resolveRenameTarget({
+    chainId,
+    decryptedChainTitle: decryptedChainTitle.text,
+    chainTitleUnreadable: decryptedChainTitle.isLocked || decryptedChainTitle.isDecrypting,
+    conversationTitle: editableTitle,
+  });
+  const renameSeed = renameTarget.seed;
   // Legacy instance link (REQ-TV2-7): when this instance was its chain's
   // coordinator and has since been replaced, offer the chain-addressed URL.
   const chainConversationQuery = useFetchTaskChainConversationQuery(
@@ -1314,8 +1327,8 @@ export function AgentChatPane({
     requestPaneCaptureState.isLoading;
 
   useEffect(() => {
-    if (!renaming) setTitleDraft(editableTitle);
-  }, [editableTitle, renaming]);
+    if (!renaming) setTitleDraft(renameSeed);
+  }, [renameSeed, renaming]);
   const unreadCount = Number(conversation?.unread_count || conversation?.unreadCount || 0);
   usePaneMarkRead({
     isActiveTab,
@@ -1518,7 +1531,7 @@ export function AgentChatPane({
       hasFailedAttachments ||
       (!draft.trim() && uploadedAttachments.length === 0);
 
-  async function saveConversationTitle() {
+  async function saveRenameTitle() {
     const next = titleDraft.trim();
     if (!next) {
       setTitleError('Title is required.');
@@ -1526,7 +1539,13 @@ export function AgentChatPane({
     }
     setTitleError('');
     try {
-      await updateConversationTitle({ conversationId, title: next }).unwrap();
+      if (renameTarget.kind === 'chain') {
+        // Vault-aware: encrypts the title when the vault is unlocked, and invalidates
+        // the chain detail and chain list tags so the header and sidebar refresh.
+        await updateTaskChain({ chainId, title: next }).unwrap();
+      } else {
+        await updateConversationTitle({ conversationId, title: next }).unwrap();
+      }
       setRenaming(false);
     } catch (err: any) {
       setTitleError(errMsg(err, 'Rename failed'));
@@ -1785,7 +1804,7 @@ export function AgentChatPane({
 
   function beginRenameFromHeader() {
     setHeaderActionsOpen(false);
-    setTitleDraft(editableTitle);
+    setTitleDraft(renameSeed);
     setRenaming(true);
     setTitleError('');
   }
@@ -2909,24 +2928,25 @@ export function AgentChatPane({
                 onKeyDown={(event) => {
                   if (event.key === 'Enter') {
                     event.preventDefault();
-                    void saveConversationTitle();
+                    void saveRenameTitle();
                   }
                   if (event.key === 'Escape') {
                     setRenaming(false);
                     setTitleError('');
-                    setTitleDraft(editableTitle);
+                    setTitleDraft(renameSeed);
                   }
                 }}
+                aria-label={renameTarget.inputLabel}
                 className={`${isMobile ? 'min-h-11' : 'min-h-9'} min-w-0 flex-1 rounded-xl border border-subtle bg-surface px-3 py-1.5 text-base font-semibold text-primary outline-none focus:border-accent sm:text-sm`}
                 autoFocus
               />
               <button
                 type="button"
                 data-debug-id="conversation-thread-title-save-btn"
-                aria-label="Save conversation title"
+                aria-label={renameTarget.saveLabel}
                 title="Save"
-                onClick={() => void saveConversationTitle()}
-                disabled={updateTitleState.isLoading || !titleDraft.trim()}
+                onClick={() => void saveRenameTitle()}
+                disabled={updateTitleState.isLoading || updateChainState.isLoading || !titleDraft.trim()}
                 className={`grid ${isMobile ? 'h-11 w-11 rounded-full' : 'h-9 w-9 rounded-xl'} shrink-0 place-items-center bg-accent text-accent-fg hover:opacity-90 disabled:opacity-50`}
               >
                 <Icon name="check" size={16} />
@@ -2934,12 +2954,12 @@ export function AgentChatPane({
               <button
                 type="button"
                 data-debug-id="conversation-thread-title-cancel-btn"
-                aria-label="Cancel title edit"
+                aria-label={renameTarget.cancelLabel}
                 title="Cancel"
                 onClick={() => {
                   setRenaming(false);
                   setTitleError('');
-                  setTitleDraft(editableTitle);
+                  setTitleDraft(renameSeed);
                 }}
                 className={`grid ${isMobile ? 'h-11 w-11 rounded-full' : 'h-9 w-9 rounded-xl'} shrink-0 place-items-center border border-subtle bg-surface-raised text-muted hover:bg-neutral-soft hover:text-primary`}
               >
@@ -3077,7 +3097,7 @@ export function AgentChatPane({
               onClick={beginRenameFromHeader}
             >
               <Icon name="pencil" size={15} />
-              <span>Rename</span>
+              <span>{renameTarget.kind === 'chain' ? 'Rename chain' : 'Rename'}</span>
             </Menu.Item>
             <Menu.Item
               data-debug-id="conversation-thread-refresh-btn"
