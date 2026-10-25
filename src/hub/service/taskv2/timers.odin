@@ -66,6 +66,8 @@ BLOCKED_REALERT_SECONDS     :: 24 * 60 * 60
 // Rematch one-shots after a task becomes Ready / In review (bounded, no self re-arm).
 REMATCH_DELAYS_SECONDS      :: [3]i64{60, 180, 600}
 CLOCK_JUMP_SEEN_WITHIN_SECONDS :: 120
+// review_stalled re-alerts while the stall holds (re-armed from fire_rematch).
+REVIEW_STALLED_REALERT_SECONDS :: 60 * 60
 
 // timers_arm schedules a fire at due_ms. Thread-safe; O(log n).
 timers_arm :: proc(svc: ^Service, kind: Timer_Kind, key: string, due_ms: i64, armed: string) {
@@ -431,7 +433,36 @@ fire_rematch :: proc(svc: ^Service, u: ^Uow, t: Timer) -> Fire_Result {
 	chain, cok, _ := iface.taskchain_get_chain(svc.repo, task.chain_id)
 	if !cok || chain.status != .Active || chain.publish_state != .Published do return .Noop
 	if mok, _ := match_chain_in_uow(svc, u, chain, .Timer); !mok do return .Failed
+	if task.state == .In_Review do check_review_stalled(svc, u, task)
 	return .Acted
+}
+
+// check_review_stalled: the review invariant (REQ-TV2-3a). An in_review task
+// whose gate waits while no lease is live and no agent pair is owed (every
+// required reviewer has posted, yet the gate did not advance) can never move on
+// its own: tell the coordinator what is missing and how to recover, and re-arm
+// while the condition holds. A gate waiting only on the user's approval is not
+// a stall; the coordinator was told review_requested_from_user.
+@(private = "file")
+check_review_stalled :: proc(svc: ^Service, u: ^Uow, task_in: domain.Task) {
+	task, ok, _ := iface.taskchain_get_task(svc.repo, task_in.task_id)
+	if !ok || task.state != .In_Review || task.kind == .Gate do return
+	if leases, lerr := iface.taskchain_list_leases_by_task(svc.repo, task.task_id); lerr.code != .None || len(leases) > 0 do return
+	unmet, uerr := gate_unmet_components(svc, task)
+	if uerr.code != .None || len(unmet) == 0 do return
+	reviews, rerr := iface.taskchain_list_reviews_by_task(svc.repo, task.task_id, task.owner_user_id)
+	if rerr.code != .None do return
+	for m in unmet {
+		// an owed pair (no review row yet) is the matcher's job, not a stall
+		if m.kind == "review" && review_needed_from(reviews, task, m.agent_id, m.role) do return
+	}
+	if awaits_user_review(svc, task) do return
+	p := json_begin()
+	json_raw(&p, "unmet", gate_unmet_json(unmet))
+	if _, aok, _ := append_event(svc.repo, svc.clock, task, hub_actor(), EV_REVIEW_STALLED, json_end(&p)); !aok do return
+	effect_publish_task(u, task, "review_stalled")
+	effect_notify_coordinator(svc, u, task.chain_id, task.owner_user_id, "review_stalled", fmt.tprintf("[taskv2] review_stalled: task %s (%s) gate is waiting with no live lease and no review owed; unmet=%s. Recover with: ham-ctl review post %s --verdict approve|request_changes --on-behalf-of user, re-run the reviewer (task show %s), or adjust brief reviewers/review_roles", task.task_id, task.title, gate_unmet_json(unmet), task.task_id, task.task_id))
+	timers_arm(svc, .Rematch, string(task.task_id), now_ms(svc.clock) + REVIEW_STALLED_REALERT_SECONDS * 1000, domain.task_state_string(task.state))
 }
 
 @(private = "file")

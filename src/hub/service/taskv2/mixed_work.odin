@@ -5,6 +5,7 @@ import "core:strings"
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
 import platform "odin_test:hub/platform"
+import jsonx "odin_test:lib/jsonx"
 
 // These are the canonical mixed-work orchestration operations. Transport and
 // the run-scoped matcher will call this surface during the engine cutover.
@@ -167,6 +168,37 @@ work_dependencies_ready_in_uow :: proc(svc: ^Service, chain_id: domain.Task_Chai
 	return true, domain.Domain_Error{}
 }
 
+// task_dependencies_ready is THE readiness predicate for an ordinary ticket,
+// shared by the engine (refold_task) and the wire (`blocked`, REQ-TV2-3b):
+// every legacy depends_on parent is Done and every active work-dependency edge
+// is satisfied (prerequisite Done with merge none|merged, or a succeeded run).
+// Read-only. Stage and gate tasks only use the legacy edges.
+task_dependencies_ready :: proc(svc: ^Service, task: domain.Task, all_tasks: []domain.Task = nil, all_deps: []domain.Task_Dependency = nil) -> (bool, domain.Domain_Error) {
+	tasks, deps := all_tasks, all_deps
+	if tasks == nil {
+		loaded, err := iface.taskchain_list_tasks_by_chain(svc.repo, task.chain_id, task.owner_user_id)
+		if err.code != .None do return false, err
+		tasks = loaded
+	}
+	if deps == nil {
+		loaded, err := iface.taskchain_list_dependencies_by_chain(svc.repo, task.chain_id, task.owner_user_id)
+		if err.code != .None do return false, err
+		deps = loaded
+	}
+	if !deps_done_for(task.task_id, tasks, deps) do return false, domain.Domain_Error{}
+	if task.stage_key != "" || task.kind != .Task do return true, domain.Domain_Error{}
+	return work_dependencies_ready_in_uow(svc, task.chain_id, task.owner_user_id, domain.Work_Item_Ref{kind = domain.WORK_ITEM_TASK, id = string(task.task_id)})
+}
+
+// task_unblocks_dependents: whether this ticket satisfies a work-dependency
+// edge on it — Done and its branch merged or never needing a merge. The wire's
+// `unblocks_dependents` flag uses it so it agrees with the engine.
+task_unblocks_dependents :: proc(svc: ^Service, task: domain.Task) -> bool {
+	if task.state != .Done do return false
+	merge := task_merge_status(svc, task)
+	return merge.state == "none" || merge.state == "merged"
+}
+
 // Called after starting the consumer but before committing its lease/execution.
 // The DB validates current generations, active edges and strict success again.
 // If ANY receipt fails, the caller must roll back the whole start transaction.
@@ -276,18 +308,30 @@ work_chain_complete_in_uow :: proc(svc: ^Service, u: ^Uow, owner: domain.User_ID
 	for decision in scope do excluded[decision.item] = decision.action == "exclude"
 	tasks, terr := iface.taskchain_list_tasks_by_chain(svc.repo, chain_id, owner)
 	if terr.code != .None do return {}, false, terr
+	// Every offending item is named with its state, merge state and failing
+	// prerequisite, plus the recovery options (REQ-TV2-3c). No merge bypass.
+	blockers := make([dynamic]string, context.temp_allocator)
 	successes := 0
 	for task in tasks {
 		if task.workflow_run_id != "" do continue
 		item := domain.Work_Item_Ref{kind = domain.WORK_ITEM_TASK, id = string(task.task_id)}
+		merge := task_merge_status(svc, task)
 		if excluded[item] {
-			if !domain.task_state_is_terminal(task.state) do return {}, false, domain.domain_error(.Conflict, "excluded work is still active")
+			if !domain.task_state_is_terminal(task.state) do append(&blockers, completion_blocker_json(item, domain.task_state_string(task.state), merge.state, "excluded_active", ""))
 			continue
 		}
-		if task.state != .Done || task.publish_state != .Published do return {}, false, domain.domain_error(.Conflict, "included tickets must be published and done")
-		merge := task_merge_status(svc, task)
-		if merge.state != "none" && merge.state != "merged" do return {}, false, domain.domain_error(.Conflict, "included ticket still has an unresolved worktree merge")
-		if ready, rerr := work_dependencies_ready_in_uow(svc, chain_id, owner, item); !ready || rerr.code != .None do return {}, false, domain.domain_error(.Conflict, "included ticket has an unsuccessful prerequisite")
+		if task.state != .Done || task.publish_state != .Published {
+			append(&blockers, completion_blocker_json(item, domain.task_state_string(task.state), merge.state, "not_done", ""))
+			continue
+		}
+		if merge.state != "none" && merge.state != "merged" {
+			append(&blockers, completion_blocker_json(item, domain.task_state_string(task.state), merge.state, "merge_unresolved", ""))
+			continue
+		}
+		if ready, rerr := work_dependencies_ready_in_uow(svc, chain_id, owner, item); !ready || rerr.code != .None {
+			append(&blockers, completion_blocker_json(item, domain.task_state_string(task.state), merge.state, "prerequisite_unsuccessful", first_unsatisfied_prerequisite(svc, chain_id, owner, item)))
+			continue
+		}
 		successes += 1
 	}
 	runs, rerr := iface.taskchain_list_workflow_runs(svc.repo, chain_id, owner)
@@ -297,14 +341,25 @@ work_chain_complete_in_uow :: proc(svc: ^Service, u: ^Uow, owner: domain.User_ID
 		snapshot, sok, serr := work_item_snapshot(svc, chain_id, owner, item)
 		if !sok do return {}, false, serr
 		if excluded[item] {
-			if !snapshot.terminal do return {}, false, domain.domain_error(.Conflict, "excluded run is still active")
+			if !snapshot.terminal do append(&blockers, completion_blocker_json(item, run_state_label(snapshot), "", "excluded_active", ""))
 			continue
 		}
-		if !snapshot.succeeded do return {}, false, domain.domain_error(.Conflict, "included workflow runs must succeed")
-		if ready, rerr := work_dependencies_ready_in_uow(svc, chain_id, owner, item); !ready || rerr.code != .None do return {}, false, domain.domain_error(.Conflict, "included run has an unsuccessful prerequisite")
+		if !snapshot.succeeded {
+			append(&blockers, completion_blocker_json(item, run_state_label(snapshot), "", "not_succeeded", ""))
+			continue
+		}
+		if ready, rerr := work_dependencies_ready_in_uow(svc, chain_id, owner, item); !ready || rerr.code != .None {
+			append(&blockers, completion_blocker_json(item, run_state_label(snapshot), "", "prerequisite_unsuccessful", first_unsatisfied_prerequisite(svc, chain_id, owner, item)))
+			continue
+		}
 		successes += 1
 	}
-	if successes == 0 do return {}, false, domain.domain_error(.Conflict, "at least one successful included work item is required")
+	if len(blockers) > 0 {
+		names := make([dynamic]string, context.temp_allocator)
+		for b in blockers do append(&names, jsonx.extract_string(b, "id", "", true, context.temp_allocator))
+		details := fmt.tprintf(`{"code":"chain_incomplete","items":[%s],"recovery":%s}`, strings.join(blockers[:], ",", context.temp_allocator), COMPLETION_RECOVERY_JSON)
+		return {}, false, domain.domain_error(.Conflict, fmt.tprintf("chain cannot finish; unresolved work items: %s", strings.join(names[:], ", ", context.temp_allocator)), details)
+	}
 	leases, lerr := iface.taskchain_list_leases_by_chain(svc.repo, chain_id)
 	if lerr.code != .None do return {}, false, lerr
 	if len(leases) != 0 do return {}, false, domain.domain_error(.Conflict, "chain still has live leases")
@@ -312,4 +367,38 @@ work_chain_complete_in_uow :: proc(svc: ^Service, u: ^Uow, owner: domain.User_ID
 	fresh, _, _ := iface.taskchain_get_chain(svc.repo, chain_id)
 	effect_publish_chain(u, chain_id, owner, "completed")
 	return fresh, true, domain.Domain_Error{}
+}
+
+// COMPLETION_RECOVERY_JSON: the supported ways out of a chain_incomplete error.
+COMPLETION_RECOVERY_JSON :: `[{"action":"exclude","hint":"record a scope decision excluding the item (it must be terminal)"},{"action":"retry_merge","hint":"resolve the conflict in the task workdir and resubmit, or wait for the bridge to come online so the pending merge is requeued"},{"action":"settle_merge_none","hint":"a task that produced no branch (bridge VCS mode none) settles as merge none"}]`
+
+completion_blocker_json :: proc(item: domain.Work_Item_Ref, state, merge_state, reason, prerequisite: string) -> string {
+	p := json_begin()
+	json_str(&p, "kind", item.kind)
+	json_str(&p, "id", item.id)
+	json_str(&p, "state", state)
+	if merge_state != "" do json_str(&p, "merge", merge_state)
+	json_str(&p, "reason", reason)
+	if prerequisite != "" do json_str(&p, "prerequisite", prerequisite)
+	return json_end(&p)
+}
+
+run_state_label :: proc(snapshot: Work_Item_Snapshot) -> string {
+	if snapshot.succeeded do return "succeeded"
+	if snapshot.terminal do return "terminal"
+	if snapshot.started do return "running"
+	return "pending"
+}
+
+// first_unsatisfied_prerequisite names the first active edge of `item` whose
+// prerequisite has not succeeded ("" when none).
+first_unsatisfied_prerequisite :: proc(svc: ^Service, chain_id: domain.Task_Chain_ID, owner: domain.User_ID, item: domain.Work_Item_Ref) -> string {
+	edges, err := iface.taskchain_list_work_dependencies(svc.repo, chain_id, owner)
+	if err.code != .None do return ""
+	for edge in edges {
+		if edge.removed_at != "" || edge.dependent != item do continue
+		provider, pok, _ := work_item_snapshot(svc, chain_id, owner, edge.prerequisite)
+		if !pok || !provider.succeeded do return edge.prerequisite.id
+	}
+	return ""
 }

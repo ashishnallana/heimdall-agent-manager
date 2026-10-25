@@ -1,6 +1,7 @@
 package taskv2
 
 import "core:fmt"
+import "core:strings"
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
 import jsonx "odin_test:lib/jsonx"
@@ -266,4 +267,83 @@ regate_after_reviewer_change :: proc(svc: ^Service, u: ^Uow, task_in: domain.Tas
 	if fresh.state != .In_Review do return true, domain.Domain_Error{}
 	if _, gok, gerr := evaluate_gate_in_uow(svc, u, chain, fresh, actor); !gok do return false, gerr
 	return true, domain.Domain_Error{}
+}
+
+// Gate_Unmet: one missing component of a `.Waiting` gate (REQ-TV2-3a).
+// kind is "review" (agent_id/role owe an approve on this attempt) or
+// "user_approval" (requires_user_approval, or a gate's user/coordinator
+// approver, has not approved this attempt).
+Gate_Unmet :: struct {
+	kind:     string,
+	agent_id: string,
+	role:     string,
+}
+
+// gate_unmet_components lists why an in_review task's gate is still waiting.
+// Read-only; empty when the task is not in review or nothing is missing.
+gate_unmet_components :: proc(svc: ^Service, task: domain.Task) -> ([]Gate_Unmet, domain.Domain_Error) {
+	out := make([dynamic]Gate_Unmet, context.temp_allocator)
+	if svc == nil || task.state != .In_Review do return out[:], domain.Domain_Error{}
+	reviews, rerr := iface.taskchain_list_reviews_by_task(svc.repo, task.task_id, task.owner_user_id)
+	if rerr.code != .None do return out[:], rerr
+	user_approved := false
+	for r in reviews do if r.attempt_no == task.attempt_no && r.verdict == "approve" && r.reviewer_kind == "user" { user_approved = true; break }
+	if task.kind == .Gate {
+		if !user_approved do append(&out, Gate_Unmet{kind = "user_approval", role = gate_approver_policy(task)})
+		return out[:], domain.Domain_Error{}
+	}
+	author_agent := ""
+	if holder := last_attempt_holder(svc, task); holder != "" {
+		if inst, iok, _ := iface.agent_get_instance(svc.agents, holder); iok do author_agent = inst.agent_id
+	}
+	fleets, ferr := iface.taskchain_list_fleets_by_chain(svc.repo, task.chain_id, task.owner_user_id)
+	if ferr.code != .None do return out[:], ferr
+	for pair in required_review_pairs(task, fleets, author_agent) {
+		approved := false
+		for r in reviews {
+			if r.attempt_no == task.attempt_no && r.verdict == "approve" && r.reviewer_kind == "agent" && r.role == pair.role && r.reviewer_agent_id == pair.agent_id { approved = true; break }
+		}
+		if !approved do append(&out, Gate_Unmet{kind = "review", agent_id = pair.agent_id, role = pair.role})
+	}
+	if task.requires_user_approval && !user_approved do append(&out, Gate_Unmet{kind = "user_approval", role = "user"})
+	return out[:], domain.Domain_Error{}
+}
+
+// gate_unmet_json renders unmet components as a JSON array.
+gate_unmet_json :: proc(unmet: []Gate_Unmet) -> string {
+	b := strings.builder_make(context.temp_allocator)
+	strings.write_byte(&b, '[')
+	for m, i in unmet {
+		if i > 0 do strings.write_byte(&b, ',')
+		p := json_begin()
+		json_str(&p, "kind", m.kind)
+		if m.agent_id != "" do json_str(&p, "agent_id", m.agent_id)
+		if m.role != "" do json_str(&p, "role", m.role)
+		strings.write_string(&b, json_end(&p))
+	}
+	strings.write_byte(&b, ']')
+	return strings.to_string(b)
+}
+
+// agent_owes_review_in_chain: whether `agent_id` still owes a review pair on
+// any in_review task of the chain (the reviewer lifecycle invariant, REQ-TV2-3a).
+agent_owes_review_in_chain :: proc(svc: ^Service, chain_id: domain.Task_Chain_ID, owner: domain.User_ID, agent_id: string) -> bool {
+	tasks, terr := iface.taskchain_list_tasks_by_chain(svc.repo, chain_id, owner)
+	if terr.code != .None do return false
+	fleets, ferr := iface.taskchain_list_fleets_by_chain(svc.repo, chain_id, owner)
+	if ferr.code != .None do return false
+	for t in tasks {
+		if t.state != .In_Review || t.kind == .Gate do continue
+		author_agent := ""
+		if holder := last_attempt_holder(svc, t); holder != "" {
+			if inst, iok, _ := iface.agent_get_instance(svc.agents, holder); iok do author_agent = inst.agent_id
+		}
+		if author_agent == agent_id do continue
+		pairs := required_review_pairs(t, fleets, author_agent)
+		if len(pairs) == 0 do continue
+		reviews, rerr := iface.taskchain_list_reviews_by_task(svc.repo, t.task_id, t.owner_user_id)
+		if rerr.code != .None do continue
+		if len(owed_review_roles(pairs, reviews, t, agent_id)) > 0 do return true
+	}
+	return false
 }

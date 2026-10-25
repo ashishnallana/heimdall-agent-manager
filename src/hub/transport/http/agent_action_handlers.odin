@@ -178,7 +178,10 @@ agent_action_review_post_handler :: proc(ctx: rawptr, req: Request) -> Response 
 	publish_agent_action(h, inst, "review_post", fmt.tprintf("reviewed %s: %s", res.task.task_id, json_string(params, "verdict")))
 	publish_task_event(h.event_bus, string(res.task.owner_user_id), string(res.task.task_id), string(res.task.chain_id), "updated")
 	data, _ := json.marshal(make_simple_task_wire(res.task), JSON_MARSHAL_OPT, allocator = context.temp_allocator)
-	return respond_success(fmt.tprintf("{{\"gate\":\"%s\",\"task\":%s}}", gate_label(res.gate), string(data)), req.request_id, auth_ctx_server_time(req), 200)
+	// unmet (REQ-TV2-3a): why a waiting gate did not advance.
+	unmet := ""
+	if res.gate == .Waiting do unmet = fmt.tprintf(",\"unmet\":%s", taskv2.gate_unmet_json(res.unmet))
+	return respond_success(fmt.tprintf("{{\"gate\":\"%s\"%s,\"task\":%s}}", gate_label(res.gate), unmet, string(data)), req.request_id, auth_ctx_server_time(req), 200)
 }
 
 gate_label :: proc(g: taskv2.Gate_Result) -> string {
@@ -702,7 +705,7 @@ agent_action_task_show_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	if !got do return respond_error(err, req.request_id)
 	deps, _ := taskchain_service.list_chain_dependencies(h.taskchains, auth, task.chain_id)
 	publish_agent_action(h, inst, "task_show", "opened a task")
-	tch := Taskchain_Handlers{auth = h.auth, taskchains = h.taskchains, agents = h.agents, event_bus = h.event_bus}
+	tch := Taskchain_Handlers{auth = h.auth, taskchains = h.taskchains, agents = h.agents, event_bus = h.event_bus, task_engine = h.task_engine}
 	b := strings.builder_make()
 	write_task_detail_json(&b, &tch, auth, task, deps)
 	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req), 200)
@@ -724,7 +727,7 @@ agent_action_task_comments_handler :: proc(ctx: rawptr, req: Request) -> Respons
 	comments, cerr := taskchain_service.list_recent_task_comments(h.taskchains, auth, task_id, last)
 	if cerr.code != .None do return respond_error(cerr, req.request_id)
 	// MEM-7: resolve author display name via the same agent repo the member view uses.
-	tch := Taskchain_Handlers{auth = h.auth, taskchains = h.taskchains, agents = h.agents, event_bus = h.event_bus}
+	tch := Taskchain_Handlers{auth = h.auth, taskchains = h.taskchains, agents = h.agents, event_bus = h.event_bus, task_engine = h.task_engine}
 	b := strings.builder_make(); strings.write_byte(&b, '[')
 	for c, i in comments { if i > 0 do strings.write_byte(&b, ','); write_task_comment_json(&b, c, resolve_comment_author_display(&tch, auth, c)) }
 	strings.write_byte(&b, ']')
@@ -746,7 +749,7 @@ agent_action_task_list_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	if err.code != .None do return respond_error(err, req.request_id)
 	deps, _ := taskchain_service.list_chain_dependencies(h.taskchains, auth, domain.Task_Chain_ID(chain_id))
 	publish_agent_action(h, inst, "task_list", "viewed tasks")
-	tch := Taskchain_Handlers{auth = h.auth, taskchains = h.taskchains, agents = h.agents, event_bus = h.event_bus}
+	tch := Taskchain_Handlers{auth = h.auth, taskchains = h.taskchains, agents = h.agents, event_bus = h.event_bus, task_engine = h.task_engine}
 	b := strings.builder_make(); strings.write_byte(&b, '[')
 	for task, i in tasks { if i > 0 do strings.write_byte(&b, ','); write_task_detail_json(&b, &tch, auth, task, deps, false) }
 	strings.write_byte(&b, ']')
@@ -763,7 +766,7 @@ agent_action_task_comment_handler :: proc(ctx: rawptr, req: Request) -> Response
 	if !saved do return respond_error(err, req.request_id)
 	publish_agent_action(h, inst, "task_comment", fmt.tprintf("commented: %s", json_string(params, "body")))
 	publish_task_event(h.event_bus, string(comment.owner_user_id), string(comment.task_id), string(comment.chain_id), "commented")
-	tch := Taskchain_Handlers{auth = h.auth, taskchains = h.taskchains, agents = h.agents, event_bus = h.event_bus}
+	tch := Taskchain_Handlers{auth = h.auth, taskchains = h.taskchains, agents = h.agents, event_bus = h.event_bus, task_engine = h.task_engine}
 	b := strings.builder_make()
 	write_task_comment_response_json(&b, comment, resolve_comment_author_display(&tch, auth, comment), notified)
 	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req), 201)

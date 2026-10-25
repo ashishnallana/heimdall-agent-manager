@@ -613,12 +613,8 @@ refold_task :: proc(svc: ^Service, u: ^Uow, task: domain.Task, tasks: []domain.T
 	}
 	evs, ev_err := iface.taskchain_list_events_by_task(svc.repo, task.task_id, task.owner_user_id)
 	if ev_err.code != .None do return task, Task_View{}, false, ev_err
-	deps_done := deps_done_for(task.task_id, all_tasks, all_deps)
-	if deps_done && task.stage_key == "" && task.kind == .Task {
-		ready, err := work_dependencies_ready_in_uow(svc, task.chain_id, task.owner_user_id, domain.Work_Item_Ref{kind = domain.WORK_ITEM_TASK, id = string(task.task_id)})
-		if err.code != .None do return task, Task_View{}, false, err
-		deps_done = ready
-	}
+	deps_done, ready_err := task_dependencies_ready(svc, task, all_tasks, all_deps)
+	if ready_err.code != .None do return task, Task_View{}, false, ready_err
 	view := fold_task(evs, fold_input_for_task(task, deps_done))
 	now := platform.clock_now(svc.clock)
 	next := apply_view_to_task(task, view, now)

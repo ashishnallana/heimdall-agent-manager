@@ -470,6 +470,13 @@ json_value_or_null :: proc(raw: string) -> json.Value {
 	return json_value_raw(raw)
 }
 
+// task_wire_unblocks_dependents agrees with the engine: Done is not enough
+// while the branch merge is pending (REQ-TV2-3b).
+task_wire_unblocks_dependents :: proc(h: ^Taskchain_Handlers, t: domain.Task) -> bool {
+	if h == nil || h.task_engine == nil do return domain.task_state_unblocks_dependents(t.state)
+	return taskv2.task_unblocks_dependents(h.task_engine, t)
+}
+
 make_task_merge_wire :: proc(h: ^Taskchain_Handlers, t: domain.Task) -> Task_Merge_Wire {
 	if h == nil || h.task_engine == nil do return Task_Merge_Wire{state = "none"}
 	st := taskv2.task_merge_status(h.task_engine, t)
@@ -522,6 +529,12 @@ make_task_detail_wire :: proc(h: ^Taskchain_Handlers, auth_ctx: contracts.Auth_C
 		}
 	}
 
+	// One readiness predicate with the engine (REQ-TV2-3b): the legacy parent
+	// check above misses work-dependency edges and pending merges.
+	if h != nil && h.task_engine != nil {
+		if ready, rerr := taskv2.task_dependencies_ready(h.task_engine, t); rerr.code == .None do is_blocked = !ready
+	}
+
 	comment_summary, _ := taskchain_service.task_comment_summary(h.taskchains, auth_ctx, t.task_id)
 	summary_wire := make_task_comment_summary_wire(comment_summary)
 
@@ -550,7 +563,7 @@ make_task_detail_wire :: proc(h: ^Taskchain_Handlers, auth_ctx: contracts.Auth_C
 		workflow_run_id = string(t.workflow_run_id),
 		workflow_execution_no = t.workflow_execution_no,
 		blocked                = is_blocked,
-		unblocks_dependents    = domain.task_state_unblocks_dependents(t.state),
+		unblocks_dependents    = task_wire_unblocks_dependents(h, t),
 		depends_on             = dep_ids[:],
 		comment_summary        = summary_wire,
 		leases                 = make_task_lease_wires(h, t),

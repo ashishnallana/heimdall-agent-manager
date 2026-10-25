@@ -7,6 +7,7 @@ import "core:thread"
 import dbt "odin_test:hub/platform/dbtelemetry"
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
+import platform "odin_test:hub/platform"
 import project "odin_test:hub/service/project"
 import jsonx "odin_test:lib/jsonx"
 
@@ -275,7 +276,16 @@ task_merge_status :: proc(svc: ^Service, task: domain.Task) -> Merge_Status {
 			if !ran do return st
 			dirs, derr := iface.taskchain_list_directories_by_chain(svc.repo, task.chain_id, task.owner_user_id)
 			if derr.code != .None do return st
-			for d in dirs do if d.vcs_kind == "git" { st.state = "pending"; break }
+			// Snapshot at Done (REQ-TV2-3b): only a git directory that already
+			// existed when the task reached Done makes it pending. A directory
+			// added later never retro-actively owes a merge, so such a task is
+			// `none` permanently.
+			for d in dirs {
+				if d.vcs_kind != "git" do continue
+				if created_ms, cok := platform.rfc3339_to_unix_ms(d.created_at); cok && created_ms > ev.ts_ms do continue
+				st.state = "pending"
+				break
+			}
 			return st
 		}
 	}
