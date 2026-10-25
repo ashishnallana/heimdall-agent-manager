@@ -719,7 +719,7 @@ bridge_action_scheduler_sync :: proc(fetch := http.request_with_headers_deadline
         // Authoritative disable: an answer, not a transport failure, so it does not
         // spend retry budget; the next heartbeat token change (re-enable) resyncs.
         sync.mutex_lock(&s.mutex)
-        if generation == s.connection_generation do bridge_action_scheduler_suspend_locked()
+        if generation == s.connection_generation do bridge_action_scheduler_suspend_locked(now)
         sync.mutex_unlock(&s.mutex)
         success = true
         return false
@@ -762,6 +762,23 @@ bridge_action_scheduler_sync :: proc(fetch := http.request_with_headers_deadline
     s.last_full_reconcile_ms = now; s.synced_actions_version = version
     success = true
     return true
+}
+
+// bridge_action_scheduler_sync_needed_locked decides whether the tick asks the Hub.
+// Suspended (REQ-EXP-GATE-4), only a new heartbeat epoch or the daily backstop counts:
+// the Hub refuses a disabled owner whatever the revision, and the `.off` token's
+// revision is the Hub-wide schedule counter (any user's action edit or agent-instance
+// insert/delete bumps it), so following it re-polled the 403 for unrelated activity.
+// Re-enable always moves the epoch (`<base>.on<eligible_since>`), as does a Hub restart.
+// Version/revision drift accumulated while suspended is moot: the resync that a new
+// epoch triggers is a full, unconditional GET. Caller holds the mutex.
+bridge_action_scheduler_sync_needed_locked :: proc(now: i64) -> bool {
+    s := &bridge_action_sched_state
+    backstop := s.last_full_reconcile_ms > 0 && now - s.last_full_reconcile_ms >= ACTION_SCHEDULER_RECONCILE_INTERVAL_MS
+    if s.suspended do return backstop || s.wanted_epoch != s.installed_epoch
+    return backstop || s.known_actions_version != s.synced_actions_version ||
+        s.wanted_epoch != s.installed_epoch || s.wanted_revision != s.installed_revision ||
+        s.synced_actions_version < 0
 }
 
 bridge_action_scheduler_fresh_locked :: proc(now: i64) -> bool {
@@ -1022,15 +1039,8 @@ bridge_action_scheduler_tick :: proc(now_override: i64 = 0, fetch: Action_Schedu
 	actions := 0
 
 	// 1. Sync if version changed, uninitialized, or daily reconcile backstop reached
-	sync_needed := false
 	sync.mutex_lock(&bridge_action_sched_state.mutex)
-	if bridge_action_sched_state.known_actions_version != bridge_action_sched_state.synced_actions_version ||
-       bridge_action_sched_state.wanted_epoch != bridge_action_sched_state.installed_epoch ||
-       bridge_action_sched_state.wanted_revision != bridge_action_sched_state.installed_revision ||
-	   bridge_action_sched_state.synced_actions_version < 0 ||
-	   (bridge_action_sched_state.last_full_reconcile_ms > 0 && now_ms - bridge_action_sched_state.last_full_reconcile_ms >= ACTION_SCHEDULER_RECONCILE_INTERVAL_MS) {
-		sync_needed = true
-	}
+	sync_needed := bridge_action_scheduler_sync_needed_locked(now_ms)
 	sync.mutex_unlock(&bridge_action_sched_state.mutex)
 
 	if sync_needed {
@@ -1177,7 +1187,7 @@ bridge_action_scheduler_tick :: proc(now_override: i64 = 0, fetch: Action_Schedu
 			if disabled {
 				// Disabled between revalidation and execute: the Hub refused before any
 				// lease or prompt. Suspend so no further cached slot launches.
-				bridge_action_scheduler_suspend_locked()
+				bridge_action_scheduler_suspend_locked(now_ms)
 				sync.mutex_unlock(&bridge_action_sched_state.mutex)
 				break
 			}
@@ -1209,7 +1219,7 @@ action_scheduler_feature_disabled :: proc(status: int, body: string) -> bool {
 // (disabled) token so the tick does not poll the 403 every second; a re-enable changes
 // the heartbeat token, which triggers a full (non-conditional) resync.
 // Caller holds bridge_action_sched_state.mutex.
-bridge_action_scheduler_suspend_locked :: proc() {
+bridge_action_scheduler_suspend_locked :: proc(now: i64) {
     s := &bridge_action_sched_state
     for &q in s.queue do action_queue_item_free(&q)
     clear(&s.queue)
@@ -1219,6 +1229,10 @@ bridge_action_scheduler_suspend_locked :: proc() {
     s.synced_actions_version = s.known_actions_version
     s.validated_ms = 0
     s.suspended = true
+    // The 403 is an authoritative answer: it restarts the daily backstop. Without
+    // this, a snapshot installed >24h before the disable kept the backstop due, and
+    // every tick re-polled the 403 (1 Hz, forever).
+    s.last_full_reconcile_ms = now
 }
 
 // action_scheduler_skip_missed_fires rolls forward slots that fell due before the owner
@@ -1277,7 +1291,7 @@ bridge_action_scheduler_revalidate :: proc(fetch: Action_Scheduler_Fetch) -> boo
     defer sync.mutex_unlock(&s.mutex)
     if !ok || generation != s.connection_generation do return false
     if action_scheduler_feature_disabled(resp.status, resp.body) {
-        bridge_action_scheduler_suspend_locked()
+        bridge_action_scheduler_suspend_locked(bridge_runtime_now_ms())
         return false
     }
     if resp.status == 304 && s.last_etag == etag && !s.suspended do return true
