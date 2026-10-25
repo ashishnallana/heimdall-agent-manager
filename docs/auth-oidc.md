@@ -124,8 +124,9 @@ session cookie (host-only) never reaches it. Sign-in on that host works like thi
    - a per-flow `__Host-heimdall_preview_bind_<id>` cookie (300 s). Its value is
      `<random>.<mint time>.<HMAC tag>`, minted by the hub under a sub-key derived only for
      this purpose. A value without a valid tag, or minted more than 300 s ago, is never
-     accepted. A browser holding 4 or more bind cookies has them all expired before a new one
-     is minted (cookie-bomb cap);
+     accepted. At most 16 bind cookies are kept: beyond that the oldest (by mint time) are
+     expired (cookie-bomb cap). A redeem whose bind cookie is missing, stale or foreign, or
+     whose ticket expired, starts a fresh bound flow (within the hop limit) instead of failing;
    - a 302 to `<ui_origin>/api/v1/preview-auth/start?session=<sid>&return_to=…&bind=<sha256>&bind_id=<id>&hop=<n>`.
      After 3 consecutive bounces (a browser that drops the cookie) the hub shows a 403
      explanation instead of looping. The count is kept in a 30 s host-only

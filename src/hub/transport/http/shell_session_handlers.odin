@@ -1398,12 +1398,12 @@ preview_bounce :: proc(h: ^Shell_Session_Stream_Handlers, session_id, return_to:
 	bind_id, bind_value, bind_ok := auth_service.preview_bind_new(h.auth)
 	if !bind_ok || h.ui_origin == "" do return plain_response(503, "preview sign-in unavailable", {"Cache-Control", "no-store"})
 	headers := make([dynamic]contracts.HTTP_Header, context.temp_allocator)
-	// Cookie-bomb cap: when this browser already holds the maximum number of
-	// bind cookies (abandoned flows), expire them all before minting this one.
-	// A still-pending flow in another tab just bounces once more.
-	existing := auth_service.preview_bind_cookie_names(request_headers)
-	if len(existing) >= auth_service.PREVIEW_MAX_BIND_COOKIES {
-		for name in existing do append(&headers, contracts.HTTP_Header{"Set-Cookie", auth_service.expired_cookie_header(name)})
+	// Cookie-bomb cap: keep at most PREVIEW_MAX_BIND_COOKIES bind cookies by
+	// expiring only the OLDEST ones (by the mint time in the value). Many panes
+	// bouncing at once (e.g. after a hub restart) keep their in-flight flows; an
+	// expired flow's redeem re-bounces instead of failing.
+	for name in auth_service.preview_bind_cookies_to_expire(auth_service.preview_bind_cookies(request_headers)) {
+		append(&headers, contracts.HTTP_Header{"Set-Cookie", auth_service.expired_cookie_header(name)})
 	}
 	location := strings.concatenate({
 		strings.trim_right(h.ui_origin, "/"), PREVIEW_AUTH_START_PATH,
@@ -1531,6 +1531,20 @@ preview_auth_redeem :: proc(ctx: rawptr, req: Request) -> Response {
 	raw, max_age, return_to, bind_cookie, hop, stage, ok := auth_service.preview_ticket_redeem(h.auth, query_value(req.query, "ticket"), req.headers)
 	if !ok {
 		fmt.printfln("ham-hub preview_auth_rejected stage=%s", stage)
+		// A missing/stale/foreign bind cookie or an expired ticket: start a fresh,
+		// correctly bound flow for the same target (within the hop limit) rather
+		// than dead-ending. The start route re-checks ownership of the session.
+		if (stage == "bind_mismatch" || stage == "ticket_expired") && return_to != "" {
+			if sid := path_part(return_to, 2); sid != "" && auth_service.preview_return_to_ok(return_to, sid) {
+				resp := preview_bounce(h, sid, return_to, hop + 1, req.headers)
+				if bind_cookie == "" do return resp
+				with_clear := make([]contracts.HTTP_Header, len(resp.headers) + 1, context.temp_allocator)
+				copy(with_clear, resp.headers)
+				with_clear[len(resp.headers)] = contracts.HTTP_Header{"Set-Cookie", auth_service.expired_cookie_header(bind_cookie)}
+				resp.headers = with_clear
+				return resp
+			}
+		}
 		if bind_cookie != "" do return plain_response(403, "preview sign-in failed; reopen the preview from Heimdall", {"Set-Cookie", auth_service.expired_cookie_header(bind_cookie)}, {"Cache-Control", "no-store"})
 		return plain_response(403, "preview sign-in failed; reopen the preview from Heimdall", {"Cache-Control", "no-store"})
 	}

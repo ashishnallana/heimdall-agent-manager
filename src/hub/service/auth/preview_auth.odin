@@ -44,7 +44,7 @@ PREVIEW_BIND_ID_BYTES :: 6 // 8 base64url characters
 PREVIEW_MAX_HOPS :: 3
 // At most this many bind cookies live at once on the preview host; a bounce that
 // finds more expires them before minting its own (cookie-bomb cap).
-PREVIEW_MAX_BIND_COOKIES :: 4
+PREVIEW_MAX_BIND_COOKIES :: 16
 // After a successful handoff the bounce count is remembered for a short while in
 // this host-only cookie (the URL carries it only from the second hop on).
 PREVIEW_HOP_COOKIE :: "__Host-heimdall_preview_hop"
@@ -233,9 +233,11 @@ preview_ticket_redeem :: proc(service: ^Auth_Service, raw_ticket: string, header
 	bound := has_bind && preview_bind_value_ok(service, ticket.bind_id, bind_value) && oidc_constant_time_equal(sha256_hex(bind_value), ticket.bind_hash)
 	hops := ticket.hop
 	preview_free_ticket(key, ticket)
-	if expired do return "", 0, "", cookie_name, hops, "ticket_expired", false
+	// return_to and hop are returned on these two failures so the caller can
+	// re-bounce (start a fresh, correctly bound flow) instead of dead-ending.
+	if expired do return "", 0, target, cookie_name, hops, "ticket_expired", false
 	// Only the browser that started this sign-in may redeem the ticket.
-	if !bound do return "", 0, "", cookie_name, hops, "bind_mismatch", false
+	if !bound do return "", 0, target, cookie_name, hops, "bind_mismatch", false
 	bind_cookie = cookie_name
 	hop = hops
 	row, live := session_lookup_live(service, parent, now)
@@ -341,21 +343,50 @@ preview_bind_cookie_header :: proc(bind_id, value: string) -> string {
 	return fmt.tprintf("%s=%s; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=%d", preview_bind_cookie_name(bind_id), value, PREVIEW_BIND_TTL_S)
 }
 
-// preview_bind_cookie_names lists the per-flow bind cookies a request carries.
-preview_bind_cookie_names :: proc(headers: []contracts.HTTP_Header) -> []string {
+Preview_Bind_Cookie :: struct {
+	name: string,
+	minted_ms: i64, // from the value; 0 when unparseable (treated as oldest)
+}
+
+// preview_bind_cookies lists the per-flow bind cookies a request carries, with
+// the mint time from each value (not verified here: only used for ordering).
+preview_bind_cookies :: proc(headers: []contracts.HTTP_Header) -> []Preview_Bind_Cookie {
 	prefix := strings.concatenate({PREVIEW_BIND_COOKIE, "_"}, context.temp_allocator)
-	names := make([dynamic]string, context.temp_allocator)
+	out := make([dynamic]Preview_Bind_Cookie, context.temp_allocator)
 	for h in headers {
 		if !ascii_equal_fold(h.name, "Cookie") do continue
 		rest := h.value
 		for part in strings.split_iterator(&rest, ";") {
 			pair := strings.trim_space(part)
 			eq := strings.index_byte(pair, '=')
-			if eq <= 0 do continue
-			if strings.has_prefix(pair[:eq], prefix) do append(&names, pair[:eq])
+			if eq <= 0 || !strings.has_prefix(pair[:eq], prefix) do continue
+			minted: i64 = 0
+			fields := strings.split(pair[eq + 1:], ".", context.temp_allocator)
+			if len(fields) == 3 {
+				if v, ok := strconv.parse_i64(fields[1]); ok do minted = v
+			}
+			append(&out, Preview_Bind_Cookie{name = pair[:eq], minted_ms = minted})
 		}
 	}
-	return names[:]
+	return out[:]
+}
+
+// preview_bind_cookies_to_expire returns the oldest bind cookies to expire so
+// that, with one new cookie, at most PREVIEW_MAX_BIND_COOKIES remain.
+preview_bind_cookies_to_expire :: proc(existing: []Preview_Bind_Cookie) -> []string {
+	excess := len(existing) - PREVIEW_MAX_BIND_COOKIES + 1
+	if excess <= 0 do return nil
+	sorted := make([]Preview_Bind_Cookie, len(existing), context.temp_allocator)
+	copy(sorted, existing)
+	// Small n (<= a few dozen): insertion sort by mint time, oldest first.
+	for i in 1 ..< len(sorted) {
+		for j := i; j > 0 && sorted[j].minted_ms < sorted[j - 1].minted_ms; j -= 1 {
+			sorted[j], sorted[j - 1] = sorted[j - 1], sorted[j]
+		}
+	}
+	out := make([]string, excess, context.temp_allocator)
+	for i in 0 ..< excess do out[i] = sorted[i].name
+	return out
 }
 
 preview_hop_cookie_header :: proc(hop: int) -> string {

@@ -531,8 +531,10 @@ Review nice-to-haves (also done):
   window is enforced server-side.
 - [x] Sub-keys derived from the process key: `HMAC(key, "heimdall-login-seal-v1")` for the
   login AEAD and `HMAC(key, "heimdall-preview-bind-v1")` for the bind tag.
-- [x] Cookie-bomb cap: a bounce that finds 4 or more bind cookies expires them all, then mints
-  its own.
+- [x] Cookie-bomb cap: at most 16 bind cookies, and beyond that only the oldest (by the mint
+  time in the value) are expired. A redeem with a missing, stale or foreign bind cookie, or an
+  expired ticket, re-bounces within the hop limit instead of returning 403. Without this, every
+  pane bouncing at once after a hub restart would kill each other's flows.
 - [x] `__heimdall_hop` is appended only from hop 2 on. Between handoffs the count lives in a
   30 s `__Host-heimdall_preview_hop` cookie, so the normal path keeps the URL clean while loops
   are still caught.
