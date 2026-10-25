@@ -2402,8 +2402,11 @@ export function AgentChatPane({
         ref={composerContainerRef as any}
         onSubmit={submit}
         data-debug-id="conversation-composer-shell"
-        className={`w-full max-w-4xl mx-auto ${showNeedYouPill ? 'pt-5' : 'pt-2'} ${
-          isMobile ? 'px-3 ui-float-dock-pad' : 'px-3 sm:px-0 pb-4'
+        // REQ-CM-1: keep the side gutter at every pane width. `sm:` is a viewport breakpoint, so
+        // `sm:px-0` left the card flush against the border of a narrow split pane. The shell is
+        // 1.5rem wider than the max-w-4xl card so wide panes keep the card at full max-w-4xl.
+        className={`w-full max-w-[calc(56rem+1.5rem)] mx-auto px-3 ${showNeedYouPill ? 'pt-5' : 'pt-2'} ${
+          isMobile ? 'ui-float-dock-pad' : 'pb-4'
         }`}
       >
         <div className="mx-auto w-full max-w-4xl">
@@ -3298,7 +3301,8 @@ export function AgentChatPane({
           data-floating="true"
           // REQ-FROST-1 / REQ-PORT-4: float over the transcript on every form factor. Touches
           // in the gaps around the card fall through to the transcript (`.ui-float-dock`).
-          className="ui-float-dock absolute inset-x-0 bottom-0 z-20 mx-auto w-full max-w-4xl"
+          // REQ-CM-1: max-w-4xl plus the composer's px-3 gutter on both sides.
+          className="ui-float-dock absolute inset-x-0 bottom-0 z-20 mx-auto w-full max-w-[calc(56rem+1.5rem)]"
         >
           <div aria-hidden="true" className="ui-frost-tail" />
           <AgentActivityBubbles instanceId={agentInstanceId} />
@@ -3316,7 +3320,7 @@ export function AgentChatPane({
           {showTray ? (
             <div
               data-debug-id="conversation-action-tray"
-              className={isMobile ? 'w-full px-3 pt-2 ui-float-dock-pad' : 'mx-auto w-full max-w-4xl px-3 pt-2 pb-4 sm:px-0'}
+              className={isMobile ? 'w-full px-3 pt-2 ui-float-dock-pad' : 'mx-auto w-full max-w-[calc(56rem+1.5rem)] px-3 pt-2 pb-4'}
             >
               <ActionTray
                 items={trayItemList}
