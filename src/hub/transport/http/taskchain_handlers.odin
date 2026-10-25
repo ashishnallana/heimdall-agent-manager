@@ -470,6 +470,13 @@ json_value_or_null :: proc(raw: string) -> json.Value {
 	return json_value_raw(raw)
 }
 
+// task_wire_unblocks_dependents agrees with the engine: Done is not enough
+// while the branch merge is pending (REQ-TV2-3b).
+task_wire_unblocks_dependents :: proc(h: ^Taskchain_Handlers, t: domain.Task) -> bool {
+	if h == nil || h.task_engine == nil do return domain.task_state_unblocks_dependents(t.state)
+	return taskv2.task_unblocks_dependents(h.task_engine, t)
+}
+
 make_task_merge_wire :: proc(h: ^Taskchain_Handlers, t: domain.Task) -> Task_Merge_Wire {
 	if h == nil || h.task_engine == nil do return Task_Merge_Wire{state = "none"}
 	st := taskv2.task_merge_status(h.task_engine, t)
@@ -522,6 +529,12 @@ make_task_detail_wire :: proc(h: ^Taskchain_Handlers, auth_ctx: contracts.Auth_C
 		}
 	}
 
+	// One readiness predicate with the engine (REQ-TV2-3b): the legacy parent
+	// check above misses work-dependency edges and pending merges.
+	if h != nil && h.task_engine != nil {
+		if ready, rerr := taskv2.task_dependencies_ready(h.task_engine, t); rerr.code == .None do is_blocked = !ready
+	}
+
 	comment_summary, _ := taskchain_service.task_comment_summary(h.taskchains, auth_ctx, t.task_id)
 	summary_wire := make_task_comment_summary_wire(comment_summary)
 
@@ -550,7 +563,7 @@ make_task_detail_wire :: proc(h: ^Taskchain_Handlers, auth_ctx: contracts.Auth_C
 		workflow_run_id = string(t.workflow_run_id),
 		workflow_execution_no = t.workflow_execution_no,
 		blocked                = is_blocked,
-		unblocks_dependents    = domain.task_state_unblocks_dependents(t.state),
+		unblocks_dependents    = task_wire_unblocks_dependents(h, t),
 		depends_on             = dep_ids[:],
 		comment_summary        = summary_wire,
 		leases                 = make_task_lease_wires(h, t),
@@ -1540,7 +1553,8 @@ patch_task_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	brief_json, _ := jsonx.extract_raw_object(req.body, "brief", top_level_only = true, allocator = context.temp_allocator)
 	task, updated, err := taskchain_service.update_task(h.taskchains, auth_ctx, task_id, taskchain_service.Update_Task_Input{
 		title = json_string(req.body, "title"), description = json_string(req.body, "description"), brief_json = brief_json,
-		assignee_agent_id = assignee, has_assignee = json_key_present(req.body, "assignee") || json_key_present(req.body, "assignee_ref"),
+		replace_brief = jsonx.extract_bool_literal(req.body, "replace_brief", true) or_else false,
+		assignee_agent_id = assignee, has_assignee = jsonx.has_key(req.body, "assignee", top_level_only = true) || jsonx.has_key(req.body, "assignee_ref", top_level_only = true),
 		review_roles = review_roles, has_review_roles = has_roles, reviewer_agent_ids = reviewers,
 		has_reviewers = jsonx.has_key(req.body, "reviewers", top_level_only = true) || jsonx.has_key(req.body, "reviewer_refs", top_level_only = true),
 		requires_user_approval = requires_user_approval, has_requires_user_approval = has_requires_user_approval, priority = priority, has_priority = has_priority, depends_on = deps, has_depends_on = has_deps, bridge_id = bridge_pin,
@@ -1629,6 +1643,23 @@ answer_task_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	publish_task_changed(h, string(fresh.owner_user_id), string(fresh.task_id), string(fresh.chain_id), "updated")
 	b := strings.builder_make(); write_task_json(&b, fresh)
 	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req))
+}
+
+// GET …/tasks/{id}/readiness  (REQ-TV2-3b): per-edge prerequisite state, merge
+// state and the reason an edge is unsatisfied. Read-only.
+task_readiness_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Taskchain_Handlers)(ctx)
+	auth_ctx, ok, auth_resp := require_auth_any(h.auth, req)
+	if !ok do return auth_resp
+	if h.task_engine == nil do return respond_error(domain.domain_error(.Internal_Error, "task engine is not configured"), req.request_id)
+	chain_id := domain.Task_Chain_ID(path_part(req.path, 4))
+	task_id := domain.Task_ID(path_part(req.path, 6))
+	if matched, mismatch_resp := require_task_path_scope(h, auth_ctx, chain_id, task_id, req); !matched do return mismatch_resp
+	task, tok, terr := taskchain_service.get_task_for_read(h.taskchains, auth_ctx, task_id)
+	if !tok do return respond_error(terr, req.request_id)
+	raw, err := taskv2.task_readiness_json(h.task_engine, task)
+	if err.code != .None do return respond_error(err, req.request_id)
+	return respond_success(raw, req.request_id, auth_ctx_server_time(req))
 }
 
 // GET …/tasks/{id}/fetch?ref=…  (human read of an event or facet)
@@ -1843,6 +1874,10 @@ add_chain_directory_handler :: proc(ctx: rawptr, req: Request) -> Response {
 		vcs_info_json = vcs_info_json,
 	})
 	if !added do return respond_error(err, req.request_id)
+	// Refold the chain and requeue its pending merges (REQ-TV2-3b). The
+	// directory is already saved; a failure here is retried by bridge hello and
+	// the rematch timers, so it does not fail the request.
+	if h.task_engine != nil do _, _ = taskv2.directory_added(h.task_engine, dir)
 	publish_chain_changed(h, string(dir.owner_user_id), string(dir.chain_id), "updated")
 	b := strings.builder_make()
 	write_directory_json(&b, dir)
@@ -2542,8 +2577,8 @@ task_actor_fields_from_body :: proc(body: string) -> (assignee: string, reviewer
 					if t, tok := obj["type"].(json.String); tok && string(t) == "user" {
 						return "", nil, nil, false, domain.domain_error(.Validation_Failed, "user reviewer refs are not accepted; use requires_user_approval")
 					}
-					if _, iok := obj["agent_instance_id"].(json.String); iok {
-						return "", nil, nil, false, domain.domain_error(.Validation_Failed, "reviewers must be agent template ids (agent_id); instance refs are not supported")
+					if iid, iok := obj["agent_instance_id"].(json.String); iok {
+						return "", nil, nil, false, taskv2.reviewer_must_be_agent_id_error(string(iid))
 					}
 					if a, aok := obj["agent_id"].(json.String); aok && string(a) != "" do append(&revs, strings.clone(string(a)))
 				}

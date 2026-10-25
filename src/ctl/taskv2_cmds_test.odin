@@ -1,5 +1,6 @@
 package main
 
+import "core:os"
 import "core:strings"
 import "core:testing"
 
@@ -26,11 +27,18 @@ test_task_brief_json_from_flags :: proc(t: ^testing.T) {
 @(test)
 test_task_brief_json_file_base_flags_override :: proc(t: ^testing.T) {
 	file := `{"goal":"from file","acceptance":["a1","a2"],"inputs":["#e9"],"review_roles":["reviewer"],"assignee":"agt_w","budget":{"max_attempts":3},"output":{"schema":"x"},"unknown":1}`
-	// no flags: the file is carried (known keys only)
+	// no flags: the whole file is carried; the unknown key is forwarded so the
+	// hub rejects it (unknown_brief_fields) instead of ham-ctl dropping it.
 	base, ok := ctl_task_brief_json([]string{"ham-ctl"}, file)
 	defer delete(base)
 	testing.expect(t, ok, "file alone is a brief")
-	testing.expect_value(t, base, `{"goal":"from file","acceptance":["a1","a2"],"inputs":["#e9"],"review_roles":["reviewer"],"assignee":"agt_w","budget":{"max_attempts":3},"output":{"schema":"x"}}`)
+	testing.expect_value(t, base, `{"goal":"from file","acceptance":["a1","a2"],"inputs":["#e9"],"review_roles":["reviewer"],"assignee":"agt_w","budget":{"max_attempts":3},"output":{"schema":"x"},"unknown":1}`)
+
+	// reviewers and explicit nulls from the file survive; --clear-<field> sends null.
+	rev, rok := ctl_task_brief_json([]string{"ham-ctl", "--clear-review-roles"}, `{"reviewers":["agt_r"],"budget":null}`)
+	defer delete(rev)
+	testing.expect(t, rok, "reviewers file is a brief")
+	testing.expect_value(t, rev, `{"review_roles":null,"reviewers":["agt_r"],"budget":null}`)
 
 	// flags override field by field; untouched file fields survive
 	over, ok2 := ctl_task_brief_json([]string{"ham-ctl", "--goal", "from flag", "--acceptance", "only this"}, file)
@@ -47,6 +55,32 @@ test_task_brief_json_absent :: proc(t: ^testing.T) {
 	testing.expect(t, !ctl_task_brief_flags_present([]string{"--title", "x", "--priority", "p1"}), "no brief flags")
 	testing.expect(t, ctl_task_brief_flags_present([]string{"--goal", "g"}), "goal is a brief flag")
 	testing.expect(t, !ctl_task_brief_flags_present([]string{"--verify", "make"}), "verify is no longer a brief flag")
+}
+
+// REQ-TV2-4: `--replace-brief` with an explicitly empty `{}` file replaces the
+// brief with {}; a verify-only file stays the compatibility no-op.
+@(test)
+test_task_brief_replace_with_empty_file :: proc(t: ^testing.T) {
+	empty, ok := ctl_task_brief_json([]string{"ham-ctl"}, "  {}\n")
+	defer delete(empty)
+	testing.expect(t, ok, "an explicit {} file is a brief")
+	testing.expect_value(t, empty, "{}")
+	_, verify_only := ctl_task_brief_json([]string{"ham-ctl"}, `{"verify":"make"}`)
+	testing.expect(t, !verify_only, "a verify-only file carries no brief")
+
+	tmp, _ := os.temp_dir(context.temp_allocator)
+	path := strings.concatenate({tmp, "/ham_ctl_replace_empty_brief_test.json"}, context.temp_allocator)
+	testing.expect(t, os.write_entire_file(path, transmute([]byte)string("{}")) == nil, "write brief file")
+	defer os.remove(path)
+	field, fok := ctl_task_brief_field([]string{"ham-ctl", "task", "update", "t1", "--brief-file", path, "--replace-brief"})
+	testing.expect(t, fok, "replace with {} sends a brief")
+	testing.expect_value(t, field, `"brief":{},"replace_brief":true`)
+
+	vpath := strings.concatenate({tmp, "/ham_ctl_replace_verify_only_brief_test.json"}, context.temp_allocator)
+	testing.expect(t, os.write_entire_file(vpath, transmute([]byte)string(`{"verify":"make"}`)) == nil, "write verify-only file")
+	defer os.remove(vpath)
+	_, vok := ctl_task_brief_field([]string{"ham-ctl", "task", "update", "t1", "--brief-file", vpath, "--replace-brief"})
+	testing.expect(t, !vok, "verify-only replace stays a no-op")
 }
 
 @(test)

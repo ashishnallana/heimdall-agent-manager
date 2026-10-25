@@ -216,8 +216,16 @@ test_workflow_fleet_requires_worker_and_named_reviewer :: proc(t: ^testing.T) {
  err = workflow_validate_fleet(&fx.svc,chain,`{"goal":"g","reviewers":["named"]}`)
  testing.expect(t,err.code==.Validation_Failed,"missing named reviewer rejected")
  seed_fleet(fx,chain,"named",roles=`["named-reviewer"]`)
+ seed_agent(fx,"named")
  err = workflow_validate_fleet(&fx.svc,chain,`{"goal":"g","reviewers":["named"]}`)
  testing.expect(t,err.code==.None,"configured named reviewer accepted")
+ // REQ-TV2-4: a rendered inst_ or unknown reviewer gets the identity error,
+ // even when a (stale) fleet row names it.
+ seed_fleet(fx,chain,"agt_nobody",roles=`["named-reviewer"]`)
+ for bad in ([]string{"agt_nobody","inst_18e1abc"}) {
+  err = workflow_validate_fleet(&fx.svc,chain,fmt.tprintf(`{{"goal":"g","reviewers":["%s"]}}`,bad))
+  testing.expectf(t,err.code==.Validation_Failed && strings.contains(err.details_json,`"code":"reviewer_must_be_agent_id"`),"rendered reviewer %s: %s",bad,err.details_json)
+ }
 }
 
 // REQ-MW-5/9: the generation cannot close or advance while a Done task's

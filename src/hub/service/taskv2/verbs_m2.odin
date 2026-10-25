@@ -251,8 +251,11 @@ Review_Input :: struct {
 }
 
 Review_Result :: struct {
-	task: domain.Task,
-	gate: Gate_Result,
+	task:  domain.Task,
+	gate:  Gate_Result,
+	// unmet: why a `.Waiting` gate did not advance (missing review pairs, user
+	// approval), for the review_post response (REQ-TV2-3a).
+	unmet: []Gate_Unmet,
 }
 
 // review_post: the review lease IS the offer — the holder posts a verdict,
@@ -326,6 +329,8 @@ review_post :: proc(svc: ^Service, auth: contracts.Auth_Context, input: Review_I
 		json_str(&p, "role", rev_role)
 		json_str(&p, "verdict", input.verdict)
 		json_str(&p, "reviewer", rev_role if rev_role == "user" else inst.agent_instance_id)
+		json_str(&p, "reviewer_agent_id", inst.agent_id)
+		json_str(&p, "reviewer_instance_id", inst.agent_instance_id)
 		json_str(&p, "actor_kind", ACTOR_COORDINATOR)
 		if strings.trim_space(input.on_behalf_of) == "user" {
 			json_str(&p, "on_behalf_of", "user")
@@ -341,8 +346,7 @@ review_post :: proc(svc: ^Service, auth: contracts.Auth_Context, input: Review_I
 		_, cerr2 := end_uow(svc, &u, gok)
 		if !gok do return {}, false, gerr
 		if cerr2.code != .None do return {}, false, cerr2
-		fresh, _, _ := iface.taskchain_get_task(svc.repo, task.task_id)
-		return Review_Result{task = fresh, gate = gate}, true, domain.Domain_Error{}
+			return review_result(svc, task.task_id, gate), true, domain.Domain_Error{}
 	}
 	lease, held, _ := iface.taskchain_get_lease_by_holder(svc.repo, inst.agent_instance_id)
 	if !held || lease.kind != domain.LEASE_KIND_REVIEW || (strings.trim_space(input.task_id) != "" && input.task_id != string(lease.task_id)) {
@@ -377,21 +381,45 @@ review_post :: proc(svc: ^Service, auth: contracts.Auth_Context, input: Review_I
 	json_str(&p, "role", lease.review_role)
 	json_str(&p, "verdict", input.verdict)
 	json_str(&p, "reviewer", inst.agent_id)
+	json_str(&p, "reviewer_agent_id", inst.agent_id)
+	json_str(&p, "reviewer_instance_id", inst.agent_instance_id)
 	json_raw(&p, "findings", findings)
 	if strings.trim_space(input.summary) != "" do json_str(&p, "summary", strings.trim_space(input.summary))
 	refolded, _, rok, rerr := record_event(svc, &u, task, actor, EV_REVIEW_POSTED, json_end(&p))
 	if !rok { _, _ = end_uow(svc, &u, false); return {}, false, rerr }
+	// Idle first so the matcher below may re-grant this same instance.
 	mark_instance_idle(svc, &u, inst.agent_instance_id, now)
-	effect_stop(&u, inst.bridge_id, string(task.chain_id), inst.agent_instance_id)
-	arm_idle_ttl(svc, inst.agent_instance_id, fleet_idle_ttl(svc, task.chain_id, task.owner_user_id, inst.agent_id), now)
 	gate, gok, gerr := evaluate_gate_in_uow(svc, &u, chain, refolded, actor)
 	if gok && gate == .Rejected do gok, gerr = gate_replan_in_uow(svc, &u, chain, refolded, actor)
 	if gok do gok, gerr = after_chain_change(svc, &u, task.chain_id, task.owner_user_id, .Review_Posted)
+	// Reviewer lifecycle invariant (REQ-TV2-3a): decide the stop only AFTER the
+	// gate and the matcher ran. Re-granted → keep it running. Still owing a
+	// review pair anywhere in the chain (e.g. its bridge was offline for the
+	// matcher) → keep it alive under the idle TTL instead of stopping it now.
+	if gok {
+		if _, regranted, _ := iface.taskchain_get_lease_by_holder(svc.repo, inst.agent_instance_id); !regranted {
+			if !agent_owes_review_in_chain(svc, task.chain_id, task.owner_user_id, inst.agent_id) {
+				effect_stop(&u, inst.bridge_id, string(task.chain_id), inst.agent_instance_id)
+			}
+			arm_idle_ttl(svc, inst.agent_instance_id, fleet_idle_ttl(svc, task.chain_id, task.owner_user_id, inst.agent_id), now)
+		}
+	}
 	_, cerr2 := end_uow(svc, &u, gok)
 	if !gok do return {}, false, gerr
 	if cerr2.code != .None do return {}, false, cerr2
-	fresh, _, _ := iface.taskchain_get_task(svc.repo, task.task_id)
-	return Review_Result{task = fresh, gate = gate}, true, domain.Domain_Error{}
+	// A waiting gate re-checks the review invariant within the rematch window
+	// (fire_rematch → review_stalled), REQ-TV2-3a.
+	if gate == .Waiting do timers_arm(svc, .Rematch, string(task.task_id), now_ms(svc.clock) + REMATCH_DELAYS_SECONDS[0] * 1000, domain.task_state_string(domain.Task_State.In_Review))
+	return review_result(svc, task.task_id, gate), true, domain.Domain_Error{}
+}
+
+// review_result reloads the task after a review and, while its gate waits,
+// lists the unmet components.
+review_result :: proc(svc: ^Service, task_id: domain.Task_ID, gate: Gate_Result) -> Review_Result {
+	fresh, _, _ := iface.taskchain_get_task(svc.repo, task_id)
+	out := Review_Result{task = fresh, gate = gate}
+	if gate == .Waiting do out.unmet, _ = gate_unmet_components(svc, fresh)
+	return out
 }
 
 // user_review: the owner approves / requests changes on an in_review task
@@ -417,6 +445,10 @@ user_review :: proc(svc: ^Service, auth: contracts.Auth_Context, task_id: domain
 	json_str(&p, "role", "user")
 	json_str(&p, "verdict", input.verdict)
 	json_str(&p, "reviewer", "user")
+	// A user review has no agent; the keys are present (empty) so every
+	// review_posted payload has the same shape.
+	json_str(&p, "reviewer_agent_id", "")
+	json_str(&p, "reviewer_instance_id", "")
 	json_raw(&p, "findings", findings)
 	if strings.trim_space(input.summary) != "" do json_str(&p, "summary", strings.trim_space(input.summary))
 	refolded, _, rok, rerr := record_event(svc, &u, task, actor, EV_REVIEW_POSTED, json_end(&p))
@@ -427,8 +459,7 @@ user_review :: proc(svc: ^Service, auth: contracts.Auth_Context, task_id: domain
 	_, cerr2 := end_uow(svc, &u, gok)
 	if !gok do return {}, false, gerr
 	if cerr2.code != .None do return {}, false, cerr2
-	fresh, _, _ := iface.taskchain_get_task(svc.repo, task.task_id)
-	return Review_Result{task = fresh, gate = gate}, true, domain.Domain_Error{}
+	return review_result(svc, task.task_id, gate), true, domain.Domain_Error{}
 }
 
 // ---- human verbs: reopen / answer --------------------------------------------------------
@@ -569,6 +600,15 @@ brief_publish_missing :: proc(repo: ^iface.Taskchain_Repository, chain: domain.T
 // validate_brief_for_publish verifies that all draft tasks on the chain and all
 // proposed task specs satisfy brief_publish_missing.
 validate_brief_for_publish :: proc(svc: ^Service, chain: domain.Task_Chain, existing_tasks: []domain.Task, specs: []Proposed_Task_Item) -> (bool, domain.Domain_Error) {
+	// REQ-TV2-4: proposed briefs meet the same schema and reviewer identity
+	// contract as taskchain create/update, before a proposal is stored or
+	// materialized (pending, auto-approved and approved alike).
+	for spec in specs {
+		if spec.explicit_brief {
+			if serr := validate_brief_schema(spec.brief_json); serr.code != .None do return false, serr
+		}
+		if rerr := validate_reviewer_agent_ids(svc.agents if svc != nil else nil, brief_named_reviewers(spec.brief_json, context.temp_allocator)[:]); rerr.code != .None do return false, rerr
+	}
 	b := strings.builder_make(context.temp_allocator)
 	strings.write_string(&b, `{"code":"brief_incomplete","tasks":[`)
 	first := true
@@ -951,6 +991,9 @@ Proposed_Task_Item :: struct {
 	priority:    string,
 	brief_json:  string,
 	depends_on:  []domain.Task_ID,
+	// explicit_brief: the spec carried its own `brief` object (schema-checked);
+	// otherwise brief_json was synthesized from the shorthand fields.
+	explicit_brief: bool,
 }
 
 @(private = "file")
@@ -1002,6 +1045,7 @@ parse_proposed_tasks_json :: proc(raw_array: string) -> ([]Proposed_Task_Item, b
 			priority    = prio,
 			brief_json  = brief_raw,
 			depends_on  = deps[:],
+			explicit_brief = has_brief && strings.trim_space(brief_raw) != "",
 		})
 	}
 	return out[:], true, domain.Domain_Error{}

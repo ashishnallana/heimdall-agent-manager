@@ -178,7 +178,10 @@ agent_action_review_post_handler :: proc(ctx: rawptr, req: Request) -> Response 
 	publish_agent_action(h, inst, "review_post", fmt.tprintf("reviewed %s: %s", res.task.task_id, json_string(params, "verdict")))
 	publish_task_event(h.event_bus, string(res.task.owner_user_id), string(res.task.task_id), string(res.task.chain_id), "updated")
 	data, _ := json.marshal(make_simple_task_wire(res.task), JSON_MARSHAL_OPT, allocator = context.temp_allocator)
-	return respond_success(fmt.tprintf("{{\"gate\":\"%s\",\"task\":%s}}", gate_label(res.gate), string(data)), req.request_id, auth_ctx_server_time(req), 200)
+	// unmet (REQ-TV2-3a): why a waiting gate did not advance.
+	unmet := ""
+	if res.gate == .Waiting do unmet = fmt.tprintf(",\"unmet\":%s", taskv2.gate_unmet_json(res.unmet))
+	return respond_success(fmt.tprintf("{{\"gate\":\"%s\"%s,\"task\":%s}}", gate_label(res.gate), unmet, string(data)), req.request_id, auth_ctx_server_time(req), 200)
 }
 
 gate_label :: proc(g: taskv2.Gate_Result) -> string {
@@ -201,6 +204,23 @@ agent_action_task_fetch_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	if !tok do return respond_error(terr, req.request_id)
 	raw, fok, err := taskv2.task_fetch(h.task_engine, task, json_string(params, "ref"))
 	if !fok do return respond_error(err, req.request_id)
+	return respond_success(raw, req.request_id, auth_ctx_server_time(req), 200)
+}
+
+// POST /api/v1/agent-actions/task/readiness  params: {task_id}  (read-only,
+// owner-scoped like task show; REQ-TV2-3b)
+agent_action_task_readiness_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Agent_Action_Handlers)(ctx)
+	auth, _, ok, resp := require_instance_action_auth(h, req)
+	if !ok do return resp
+	if h.task_engine == nil do return respond_error(domain.domain_error(.Internal_Error, "task engine is not configured"), req.request_id)
+	params := json_object_raw(req.body, "params")
+	task_id := domain.Task_ID(json_string(params, "task_id"))
+	if strings.trim_space(string(task_id)) == "" do return respond_error(domain.domain_error(.Validation_Failed, "task_id is required"), req.request_id)
+	task, tok, terr := taskchain_service.get_task_for_read(h.taskchains, auth, task_id)
+	if !tok do return respond_error(terr, req.request_id)
+	raw, err := taskv2.task_readiness_json(h.task_engine, task)
+	if err.code != .None do return respond_error(err, req.request_id)
 	return respond_success(raw, req.request_id, auth_ctx_server_time(req), 200)
 }
 
@@ -702,7 +722,7 @@ agent_action_task_show_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	if !got do return respond_error(err, req.request_id)
 	deps, _ := taskchain_service.list_chain_dependencies(h.taskchains, auth, task.chain_id)
 	publish_agent_action(h, inst, "task_show", "opened a task")
-	tch := Taskchain_Handlers{auth = h.auth, taskchains = h.taskchains, agents = h.agents, event_bus = h.event_bus}
+	tch := Taskchain_Handlers{auth = h.auth, taskchains = h.taskchains, agents = h.agents, event_bus = h.event_bus, task_engine = h.task_engine}
 	b := strings.builder_make()
 	write_task_detail_json(&b, &tch, auth, task, deps)
 	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req), 200)
@@ -724,7 +744,7 @@ agent_action_task_comments_handler :: proc(ctx: rawptr, req: Request) -> Respons
 	comments, cerr := taskchain_service.list_recent_task_comments(h.taskchains, auth, task_id, last)
 	if cerr.code != .None do return respond_error(cerr, req.request_id)
 	// MEM-7: resolve author display name via the same agent repo the member view uses.
-	tch := Taskchain_Handlers{auth = h.auth, taskchains = h.taskchains, agents = h.agents, event_bus = h.event_bus}
+	tch := Taskchain_Handlers{auth = h.auth, taskchains = h.taskchains, agents = h.agents, event_bus = h.event_bus, task_engine = h.task_engine}
 	b := strings.builder_make(); strings.write_byte(&b, '[')
 	for c, i in comments { if i > 0 do strings.write_byte(&b, ','); write_task_comment_json(&b, c, resolve_comment_author_display(&tch, auth, c)) }
 	strings.write_byte(&b, ']')
@@ -746,7 +766,7 @@ agent_action_task_list_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	if err.code != .None do return respond_error(err, req.request_id)
 	deps, _ := taskchain_service.list_chain_dependencies(h.taskchains, auth, domain.Task_Chain_ID(chain_id))
 	publish_agent_action(h, inst, "task_list", "viewed tasks")
-	tch := Taskchain_Handlers{auth = h.auth, taskchains = h.taskchains, agents = h.agents, event_bus = h.event_bus}
+	tch := Taskchain_Handlers{auth = h.auth, taskchains = h.taskchains, agents = h.agents, event_bus = h.event_bus, task_engine = h.task_engine}
 	b := strings.builder_make(); strings.write_byte(&b, '[')
 	for task, i in tasks { if i > 0 do strings.write_byte(&b, ','); write_task_detail_json(&b, &tch, auth, task, deps, false) }
 	strings.write_byte(&b, ']')
@@ -763,7 +783,7 @@ agent_action_task_comment_handler :: proc(ctx: rawptr, req: Request) -> Response
 	if !saved do return respond_error(err, req.request_id)
 	publish_agent_action(h, inst, "task_comment", fmt.tprintf("commented: %s", json_string(params, "body")))
 	publish_task_event(h.event_bus, string(comment.owner_user_id), string(comment.task_id), string(comment.chain_id), "commented")
-	tch := Taskchain_Handlers{auth = h.auth, taskchains = h.taskchains, agents = h.agents, event_bus = h.event_bus}
+	tch := Taskchain_Handlers{auth = h.auth, taskchains = h.taskchains, agents = h.agents, event_bus = h.event_bus, task_engine = h.task_engine}
 	b := strings.builder_make()
 	write_task_comment_response_json(&b, comment, resolve_comment_author_display(&tch, auth, comment), notified)
 	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req), 201)
@@ -867,8 +887,9 @@ agent_action_task_update_handler :: proc(ctx: rawptr, req: Request) -> Response 
 		title = json_string(params, "title"),
 		description = json_string(params, "description"),
 		brief_json = brief_json,
+		replace_brief = jsonx.extract_bool_literal(params, "replace_brief", true) or_else false,
 		assignee_agent_id = assignee,
-		has_assignee = json_key_present(params, "assignee") || json_key_present(params, "assignee_ref"),
+		has_assignee = jsonx.has_key(params, "assignee", top_level_only = true) || jsonx.has_key(params, "assignee_ref", top_level_only = true),
 		review_roles = review_roles,
 		has_review_roles = has_roles,
 		reviewer_agent_ids = reviewers,

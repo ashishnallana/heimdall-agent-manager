@@ -482,6 +482,11 @@ ctl_v2_task :: proc(endpoint, token: string, tokens, args: []string) {
 		ctl_v2_task_publish(endpoint, token, tid, args, unblock = true)
 	case "fetch":
 		ctl_v2_task_fetch(endpoint, token, tokens, args)
+	case "readiness":
+		// Read-only: per-edge prerequisite state, merge state and why it is unsatisfied.
+		tid := pos(tokens, 1)
+		if tid == "" { print_agent_help([]string{"task"}); return }
+		ctl_agent_call_task(endpoint, token, "agent.task.readiness", json_object(json_kv("task_id", tid)), args)
 	case:
 		print_agent_help([]string{"task"})
 	}
@@ -1986,16 +1991,22 @@ print_help_task :: proc() {
 	fmt.println("      [--reviewer <agent-id,...>] [--require-user-approval] [--depends-on <id,id>] [--chain <id>]")
 	fmt.println("      BRIEF (what publish validates): --goal <g> --acceptance <a> (repeatable)")
 	fmt.println("      [--input <ref>]... [--review-role <role>]... [--brief-file <path.json>]")
-	fmt.println("      --brief-file is the base object {goal, acceptance:[…], inputs, review_roles, output,")
-	fmt.println("      budget}; flags override its fields. --verify, --auto-submit and")
-	fmt.println("      --require-independent-verify were removed: they are ignored with a warning.")
+	fmt.println("      --brief-file is a JSON object with any of: goal, acceptance, inputs, review_roles,")
+	fmt.println("      assignee, reviewers, budget, output, on_output, requires_user_approval, approver, gate.")
+	fmt.println("      Flags override its fields. Other keys are rejected (unknown_brief_fields). --verify,")
+	fmt.println("      --auto-submit and --require-independent-verify were removed: ignored with a warning.")
 	fmt.println("  update <task-id>                        Edit an existing task (coordinator only).")
 	fmt.println("      [--title <t>] [--description <d>] [--priority p0|p1|p2] [--assignee <agent-id>]")
 	fmt.println("      [--reviewer <agent-id,...>] [--require-user-approval | --no-require-user-approval]")
 	fmt.println("      [--depends-on <id,id>] [--bridge <bridge-id>] + the same BRIEF flags as create")
-	fmt.println("      (brief fields you pass are merged into the stored brief by the hub).")
+	fmt.println("      [--clear-<field>]... [--replace-brief]")
+	fmt.println("      Brief fields are a top-level merge into the stored brief: keys you pass replace")
+	fmt.println("      the stored value, a JSON null (or --clear-<field>, e.g. --clear-budget) removes the")
+	fmt.println("      key, and keys you leave out are kept. --replace-brief replaces the whole brief.")
+	fmt.println("      Reviewers are durable agent ids (agt_…); an inst_… id is refused.")
 	fmt.println("      --reviewer/--depends-on REPLACE the whole list (pass \"\" to clear); --bridge \"\" clears")
-	fmt.println("      the pin. Only the fields you pass change.")
+	fmt.println("      the pin. While the task is leased only acceptance (plus priority, dependencies and")
+	fmt.println("      user approval) can change; a 409 names the refused fields.")
 	fmt.println("  publish <task-id> [--chain <id>]        Publish one draft task (coordinator only). A 422")
 	fmt.println("                                          brief_incomplete lists the missing fields per task.")
 	fmt.println("  comment <task-id> --body <t>            Add a comment (the only way to comment).")
@@ -2023,6 +2034,7 @@ print_help_task :: proc() {
 	fmt.println("  ham-ctl task unblock task_1 [--note <reason>]  (coordinator/owner; retry a dispatch block after fixing placement)")
 	fmt.println("  ham-ctl task fetch task_1 facet:task_1:2:handoff")
 	fmt.println("  ham-ctl task fetch task_1 src/main.odin@HEAD")
+	fmt.println("  ham-ctl task readiness task_1   (why a task is not ready: each prerequisite's state, merge state and reason)")
 	fmt.println("  ham-ctl task comment task_1 --body 'pushed fix' --notify inst_rev")
 }
 
