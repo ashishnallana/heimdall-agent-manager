@@ -20,6 +20,16 @@ Tell them where to go, how often they can expect to get an update on a
 reported vulnerability, what to expect if the vulnerability is accepted or
 declined, etc.
 
+## Authentication model
+
+Users authenticate only through OpenID Connect: the browser through the hub's own
+authorization-code + PKCE login (an opaque, HttpOnly `__Host-` session cookie;
+tokens never reach JavaScript), native apps with an OIDC access token plus a v2
+device request signature. There are no Hub-issued user tokens and no trusted-proxy
+identity headers. Cookie-authenticated writes and WebSockets must come from
+`--ui-origin`; the preview origin has its own browser-bound, host-only cookie.
+Full model, configuration, Authentik setup and threat notes: `docs/auth-oidc.md`.
+
 ## Vault (end-to-end encryption) model
 
 Heimdall content (chat, tasks, memories, files sent to bridges, terminal captures,

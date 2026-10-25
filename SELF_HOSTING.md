@@ -87,13 +87,31 @@ npm run build
 # Create data directory
 mkdir -p /var/lib/heimdall
 
+# OIDC provider (required: users sign in only with OIDC; see docs/auth-oidc.md)
+export HAM_OIDC_ISSUER=https://auth.example.com/application/o/heimdall/
+export HAM_OIDC_JWKS_URL=https://auth.example.com/application/o/heimdall/jwks/
+export HAM_OIDC_USERINFO_URL=https://auth.example.com/application/o/userinfo/
+export HAM_OIDC_AUTHORIZE_URL=https://auth.example.com/application/o/authorize/
+export HAM_OIDC_TOKEN_URL=https://auth.example.com/application/o/token/
+export HAM_OIDC_END_SESSION_URL=https://auth.example.com/application/o/heimdall/end-session/
+export HAM_OIDC_API_AUDIENCE=heimdall-api
+export HAM_OIDC_API_SCOPE=heimdall.api
+export HAM_OIDC_WEB_CLIENT_ID=<provider client id>
+
 # Start the hub (replace /path/to/ with your actual paths)
 ham-hub \
   --db /var/lib/heimdall/hub.db \
   --migrations-dir /path/to/share/ham-hub/migrations \
   --port 8081 \
-  --host 127.0.0.1
+  --host 127.0.0.1 \
+  --ui-origin https://hub.example.com
 ```
+
+The hub refuses to start without the OIDC settings and `--ui-origin` (an https origin).
+Configure the provider as described in [docs/auth-oidc.md](docs/auth-oidc.md#authentik-setup-mundus-as-the-example)
+and link existing users with `ham-hub users link-oidc` (or set
+`HAM_AUTO_PROVISION_USERS=true` / `HAM_OIDC_CLAIM_EXISTING_USERS=true` deliberately).
+For local development use `tools/mock-oidc` (see its README).
 
 The hub binds to `127.0.0.1` by default. Put nginx/Caddy in front to expose it over
 HTTPS. The web UI is served as a static bundle and can be served by the same reverse proxy.
@@ -142,11 +160,14 @@ Wants=network-online.target
 Type=simple
 User=heimdall
 Group=heimdall
+# HAM_OIDC_* settings (see 1.4); the client secret, if any, by file path only
+EnvironmentFile=/etc/heimdall/hub-oidc.env
 ExecStart=/usr/local/bin/ham-hub \
     --db /var/lib/heimdall/hub.db \
     --migrations-dir /usr/local/share/ham-hub/migrations \
     --port 8081 \
-    --host 127.0.0.1
+    --host 127.0.0.1 \
+    --ui-origin https://hub.example.com
 Restart=on-failure
 RestartSec=5s
 StateDirectory=heimdall
@@ -186,8 +207,10 @@ In `nix-homelab-config` or any NixOS flake:
               ${inputs.heimdall.packages.x86_64-linux.ham-hub}/bin/ham-hub \
                 --db /var/lib/heimdall/hub.db \
                 --migrations-dir ${inputs.heimdall.packages.x86_64-linux.ham-hub}/share/ham-hub/migrations \
-                --port 8081 --host 127.0.0.1
+                --port 8081 --host 127.0.0.1 --ui-origin https://hub.example.com
             '';
+            # HAM_OIDC_* (see 1.4 and docs/auth-oidc.md); keep secrets in files (sops/agenix).
+            EnvironmentFile = "/run/secrets/heimdall-hub-oidc.env";
             Restart = "on-failure";
             StateDirectory = "heimdall";
             DynamicUser = true;
@@ -230,35 +253,30 @@ SPA fallback would swallow `/p/…`. As defense in depth, proxy only `/p/` and r
 
 1. **DNS + TLS:** one record for `hub-preview.example.com` pointing at the same reverse proxy. A normal
    (HTTP-01) certificate is enough.
-2. **Authentik:** create a **separate** Proxy Provider and Application for `hub-preview.example.com`:
-   - *Mode:* **Forward auth (single application)**. This gives a host-only cookie, so the preview
-     host's cookie never authenticates the hub. Do **not** use domain-level mode here.
-   - *Authorization flow:* an implicit-consent flow (the redirect must complete silently inside the
-     preview iframe).
-   - **"Intercept header authentication": OFF.** Otherwise Authentik consumes the `Authorization`
-     header that your previewed apps send to their own backends.
-   - Bind the same users/group that may use Heimdall. The hub additionally enforces that each
-     preview is opened only by the session owner.
-3. **Reverse proxy:** forward auth in front of the hub, **overriding** the identity headers. The hub
-   trusts `X-authentik-*` only from `--trusted-proxy-cidr` addresses, and the proxy must never pass
-   through client-supplied values.
+2. **No forward-auth.** The hub authenticates the preview host itself with a host-only
+   `__Host-heimdall_preview` cookie. It is minted on the preview host from a one-time, browser-bound
+   ticket that `<ui_origin>/api/v1/preview-auth/start` issues to the signed-in owner (details in
+   [docs/auth-oidc.md](docs/auth-oidc.md#preview-origin)). Unauthenticated preview navigations
+   bounce through the hub UI origin automatically.
+3. **Reverse proxy:** forward `/p/` **and** `/__heimdall/` on the preview host to the **hub API
+   listener**, keep the `Host` header, and return 404 for everything else.
 4. **Same-site note:** if the preview host shares the hub's registrable domain (as in this example),
    the hub's CSRF guard (Origin / `Sec-Fetch-Site` checks on mutating requests and WebSocket handshakes)
    is what stops previewed code from acting through your browser session. Keep `--ui-origin` set
-   correctly. Keep the Authentik session cookie `HttpOnly` and, if possible, host-only.
+   correctly.
 
 **Legacy same-origin route.** Once `--preview-origin` is set, the old `/api/v1/preview/<session-id>/`
 route on the hub origin answers **404** (code served from it could call every hub API as the viewer).
 `--preview-legacy-path true` reopens it for old links; the hub then logs a `WARNING:` line at startup,
 as it does when `--preview-origin` is unset. Prefer migrating links to `preview_url` over the opt-in.
 
-**What reaches the previewed app.** On both routes the hub strips its own identity headers
-(`X-authentik-*`) and Authentik cookies (`authentik_*`). Only the preview origin additionally forwards
+**What reaches the previewed app.** On both routes the hub strips its own cookies
+(`__Host-heimdall_*`) and any `authentik_*` cookies. Only the preview origin additionally forwards
 the app's other cookies and the vault request signature headers
 (`X-Heimdall-Device-Id`/`-Ts`/`-Nonce`/`-Sig`, so a Heimdall hub can be previewed and paired). On the
-legacy route `Authorization: Bearer …` is dropped because it may be the hub token the request was
-authenticated with; other schemes (Basic, Digest) pass through. On the preview origin the hub ignores
-`Authorization` for its own auth, so the header belongs to the app and is forwarded unchanged.
+legacy route `Authorization: Bearer …` is dropped because it may be a hub bearer; other schemes
+(Basic, Digest) pass through. On the preview origin the hub ignores `Authorization` for its own auth,
+so the header belongs to the app and is forwarded unchanged.
 
 **nginx (NixOS) example**
 
@@ -266,42 +284,13 @@ authenticated with; other schemes (Basic, Digest) pass through. On the preview o
 services.nginx.virtualHosts."hub-preview.example.com" = {
   enableACME = true;
   forceSSL = true;
-  # Authentik embedded/standalone outpost endpoints for this host
-  locations."/outpost.goauthentik.io" = {
-    proxyPass = "http://127.0.0.1:9000/outpost.goauthentik.io";
-    extraConfig = ''
-      proxy_set_header Host $host;
-      proxy_set_header X-Original-URL $scheme://$http_host$request_uri;
-      proxy_pass_request_body off;
-      proxy_set_header Content-Length "";
-      auth_request_set $auth_cookie $upstream_http_set_cookie;
-      add_header Set-Cookie $auth_cookie;
-    '';
-  };
-  locations."@goauthentik_proxy_signin".extraConfig = ''
-    internal;
-    add_header Set-Cookie $auth_cookie;
-    return 302 /outpost.goauthentik.io/start?rd=$scheme://$http_host$request_uri;
-  '';
-  # Only preview paths reach the hub; everything else is 404 at the edge.
+  # Only preview paths and the hub's preview sign-in endpoints reach the hub.
   locations."/".return = "404";
+  locations."/__heimdall/".proxyPass = "http://127.0.0.1:8081";
   locations."/p/" = {
     proxyPass = "http://127.0.0.1:8081";   # the hub API listener, not a UI/static layer
     proxyWebsockets = true;
     extraConfig = ''
-      auth_request     /outpost.goauthentik.io/auth/nginx;
-      error_page 401 = @goauthentik_proxy_signin;
-      auth_request_set $auth_cookie $upstream_http_set_cookie;
-      add_header Set-Cookie $auth_cookie;
-
-      # OVERRIDE identity headers from the auth response; never pass client values.
-      auth_request_set $ak_username $upstream_http_x_authentik_username;
-      auth_request_set $ak_name     $upstream_http_x_authentik_name;
-      auth_request_set $ak_email    $upstream_http_x_authentik_email;
-      proxy_set_header X-authentik-username $ak_username;
-      proxy_set_header X-authentik-name     $ak_name;
-      proxy_set_header X-authentik-email    $ak_email;
-
       proxy_set_header Host $host;          # the hub dispatches on Host
       proxy_buffering off;                  # streaming / SSE through the relay
       proxy_read_timeout 1h;
@@ -315,12 +304,7 @@ services.nginx.virtualHosts."hub-preview.example.com" = {
 ```caddy
 hub-preview.example.com {
 	route {
-		reverse_proxy /outpost.goauthentik.io/* http://127.0.0.1:9000
-		forward_auth http://127.0.0.1:9000 {
-			uri /outpost.goauthentik.io/auth/caddy
-			copy_headers X-Authentik-Username X-Authentik-Name X-Authentik-Email
-			trusted_proxies private_ranges
-		}
+		reverse_proxy /__heimdall/* 127.0.0.1:8081
 		reverse_proxy /p/* 127.0.0.1:8081 {
 			flush_interval -1
 		}
@@ -328,14 +312,12 @@ hub-preview.example.com {
 	}
 }
 ```
-Caddy's `copy_headers` sets these headers from the auth response. **Verify on your Caddy version** that a
-client-supplied `X-Authentik-Username` is replaced or removed (send one with curl while signed in and check
-the hub's access log). The hub must never see a client-chosen identity.
 
 **Check it**
 
 ```bash
-curl -sI https://hub-preview.example.com/p/anything/     # signed out: 302 to Authentik
+curl -sI https://hub-preview.example.com/p/anything/ -H 'Sec-Fetch-Mode: navigate'
+#   signed out: 302 to https://hub.example.com/api/v1/preview-auth/start?...&bind=...
 # In a signed-in browser: https://hub-preview.example.com/api/v1/me must be 404, never hub JSON.
 ```
 
@@ -410,6 +392,12 @@ curl -sI -H 'Accept-Encoding: gzip' "https://hub.example.com/$js" | grep -iE 'co
 > manage TLS certificates. If the hub is publicly accessible on the internet, **do not
 > use this approach** — use a real TLS terminator (nginx + ACME, Caddy, or Tailscale
 > HTTPS) so that credentials and agent traffic are encrypted in transit.
+
+> **Browser sign-in needs HTTPS.** Users sign in with OIDC and the hub requires an
+> `https://` `--ui-origin` (session cookies are `Secure` `__Host-` cookies). A plain-HTTP
+> setup below is therefore only suitable for **bridge** traffic; serve the UI origin over
+> HTTPS (e.g. Tailscale HTTPS or Caddy with an internal CA). `HAM_OIDC_ALLOW_INSECURE_LOCALHOST=1`
+> is for development on `localhost` only.
 
 For a personal, VPN-only deployment you can skip the reverse proxy entirely and use
 a simple dev-proxy (e.g. `caddy reverse-proxy` in plain HTTP mode, or a one-liner
@@ -623,6 +611,30 @@ journal arrives via `systemd-journal-upload` (whole-host journal — filter with
 `_SYSTEMD_UNIT:"heimdall-hub.service"` in LogsQL).
 
 ---
+
+### 1.10 Upgrading from trusted-proxy (forward-auth) authentication
+
+Hubs before OIDC-only authenticated browsers with forward-auth identity headers
+(`X-authentik-*`) and offered Hub user tokens (`hut_`). Both are gone.
+
+1. **Back up the database.**
+2. **Configure the provider** (one OAuth2/OIDC provider shared with native apps; add
+   `<ui_origin>/api/v1/auth/callback` as a redirect URI) — see
+   [docs/auth-oidc.md](docs/auth-oidc.md#authentik-setup-mundus-as-the-example).
+3. **Set the HAM_OIDC_* environment** (1.4) and keep `--ui-origin` (https).
+4. **Remove from the hub command line**: `--trusted-proxy-cidr`, `--login-url`, `--logout-url`
+   — they now **abort startup**, as does a leftover `HAM_AUTH_MODE`. If the hub sits behind a
+   proxy and you relied on the CIDR for client-IP logging/rate limits, use
+   `--forwarded-for-trusted-cidr` (no auth meaning).
+5. **Remove forward-auth** (Authentik outpost, `auth_request` / `forward_auth`, `X-authentik-*`
+   header injection) in front of the hub and the preview host; on the preview host forward
+   `/p/` and `/__heimdall/` (1.6a).
+6. **Link existing users** so they keep their data: `ham-hub users link-oidc --user <id>
+   --subject <sub>` per user, or one deploy with `HAM_OIDC_CLAIM_EXISTING_USERS=true` (claims the
+   existing user whose name equals the provider `preferred_username` on first sign-in; requires
+   non-editable usernames). New users are created only with `HAM_AUTO_PROVISION_USERS=true`.
+7. **User tokens**: migration 135 deletes all `hut_` tokens; `ham-ctl` user mode and the
+   Electron app cannot sign in until they gain OIDC support. Bridges are unaffected.
 
 ## Part 2 — Bridge (one per agent-running device)
 
