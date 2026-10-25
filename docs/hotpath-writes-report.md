@@ -40,7 +40,7 @@ bash verify-hotpath-writes.sh
 
 The script creates uniquely named binaries below `$HOME/.cache/heimdall-tests`, runs the standalone scoped Odin tests, runs the task-1 real-procedure replay, and builds `src/hub`, all Odin invocations through `nix develop -c`. It exits nonzero for any failure. It does not run unrelated known-failing suites or connect to a live Hub.
 
-Attempt 1: five tests passed on 2026-10-22 (session `sh_c6396a1440f4476248097ee5485706bc`). Attempt 2 adds the missing-vtable test; six tests pass. The final clean-commit `ham-ctl verify` result is recorded in the task handoff.
+Attempt 1: five tests passed on 2026-10-22 (session `sh_c6396a1440f4476248097ee5485706bc`). Attempt 2 adds the missing-vtable test; six tests pass. The final clean-commit check result is recorded in the task handoff.
 
 Test coverage includes owner/missing-ID boundaries; NULL, repeated, 299s, inclusive 300s, regressing and invalid timestamps; all effective shell assignments and terminal statuses; duplicate/missing IDs and latest-read return/timestamp behavior; FTS upgrade and repair; 103 on a DB missing the chat FTS vtables; explicit prepare/step error injection; four simultaneous callers (20 iterations each) sharing the main connection and the vault dedicated writer on a disposable WAL database; closing/reopening both connections and confirming throttle continuity. The tests use audit triggers to observe actual UPDATE execution, rather than trusting connection-global sqlite3_changes.
 
