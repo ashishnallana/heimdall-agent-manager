@@ -198,7 +198,8 @@ start_solo_task_agent :: proc(svc: ^Service, auth: contracts.Auth_Context, task:
 	if !ok do return false, err
 	current, found, read_err := iface.taskchain_get_task(svc.repo, task.task_id)
 	if !found { _, _ = end_uow(svc, &u, false); return false, read_err }
-	if current.blocked_on_json != task.blocked_on_json {
+	// A hold or release since the card was read leaves the failure itself unchanged.
+	if blocked_on_without_hold(current.blocked_on_json) != blocked_on_without_hold(task.blocked_on_json) {
 		_, _ = end_uow(svc, &u, false)
 		return false, domain.domain_error(.Conflict, "the agent failure changed; reload the card")
 	}

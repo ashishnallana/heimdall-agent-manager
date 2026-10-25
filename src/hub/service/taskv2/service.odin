@@ -662,7 +662,8 @@ nudge_idle_soloist :: proc(svc: ^Service, u: ^Uow, task: domain.Task) {
 @(private = "file")
 check_coordinator_attention_on_refold :: proc(svc: ^Service, u: ^Uow, before, after: domain.Task, view: Task_View, all_tasks: []domain.Task) {
 	if u == nil do return
-	if after.blocked_on_json != before.blocked_on_json && after.blocked_on_json != "" {
+	// A hold nested under another block is not a change of that block.
+	if after.blocked_on_json != "" && blocked_on_without_hold(after.blocked_on_json) != blocked_on_without_hold(before.blocked_on_json) {
 		if is_agent_not_running_block(after.blocked_on_json) {
 			reason := jsonx.extract_string(after.blocked_on_json, "reason", "", true, context.temp_allocator)
 			effect_notify_coordinator(svc, u, after.chain_id, after.owner_user_id, "agent_not_running", fmt.tprintf("[taskv2] agent_not_running: task %s (%s): %s", after.task_id, after.title, reason))

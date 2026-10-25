@@ -48,6 +48,19 @@ export function normalizeTaskState(raw: string | undefined): TaskStateV2 {
   return 'backlog';
 }
 
+/**
+ * The operator hold on a task (REQ-TV2-5), or null: blocked_on itself when its
+ * kind is hold, else the `hold` member the Hub nests under another block (for
+ * example a failed reviewer's agent_not_running) so both stay visible.
+ */
+export function taskHold(task: TaskWire): { reason?: string; checkpoint_requested?: boolean } | null {
+  const b = task.blocked_on;
+  if (!b) return null;
+  if (b.kind === 'hold') return b as { reason?: string; checkpoint_requested?: boolean };
+  const nested = b.hold;
+  return nested && typeof nested === 'object' ? (nested as { reason?: string; checkpoint_requested?: boolean }) : null;
+}
+
 export function getTaskBadges(task: TaskWire, _chainFleets?: any[], nowMs: number = Date.now(), names: TaskNames = EMPTY_TASK_NAMES): TaskBadge[] {
   const badges: TaskBadge[] = [];
   const state = normalizeTaskState(task.state);
@@ -113,17 +126,20 @@ export function getTaskBadges(task: TaskWire, _chainFleets?: any[], nowMs: numbe
     }
   }
 
-  if (task.blocked_on && task.blocked_on.kind === 'hold') {
+  const hold = taskHold(task);
+  if (hold) {
     // REQ-TV2-5: an operator hold, not a question for anyone. A leased task
     // keeps its lease until the holder checkpoints and hands off.
-    const checkpoint = Boolean(task.blocked_on.checkpoint_requested);
+    const checkpoint = Boolean(hold.checkpoint_requested);
     badges.push({
       kind: 'blocked',
       label: checkpoint ? 'Held · checkpoint requested' : 'Held',
       tone: 'warn',
-      title: `${task.blocked_on.reason ? `Held: ${task.blocked_on.reason}. ` : ''}${checkpoint ? 'The current holder was asked to hand off; ' : ''}no new lease until released.`,
+      title: `${hold.reason ? `Held: ${hold.reason}. ` : ''}${checkpoint ? 'The current holder was asked to hand off; ' : ''}no new lease until released.`,
     });
-  } else if (task.blocked_on) {
+  }
+  // A hold nested under another block (e.g. a failed reviewer) keeps that block visible too.
+  if (task.blocked_on && task.blocked_on.kind !== 'hold') {
     // Same rule as taskActions.blockedOnYou(): only a human/user blocker is on you.
     const waitingKind = String((task.blocked_on as any).kind || '');
     const onYou = !waitingKind || waitingKind === 'human' || waitingKind === 'user' || waitingKind === 'agent_not_running' || waitingKind === 'dispatch';

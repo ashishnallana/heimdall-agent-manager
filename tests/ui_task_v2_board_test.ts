@@ -259,6 +259,10 @@ test('getTaskStatusLines generates human-readable status sentences for each stat
   const heldBadges = getTaskBadges(makeTask({ state: 'in_progress', blocked_on: { kind: 'hold', reason: 'repair brief', checkpoint_requested: true } }), [], nowMs);
   assert.ok(heldBadges.some((b) => b.label === 'Held · checkpoint requested' && b.tone === 'warn'));
   assert.ok(!heldBadges.some((b) => b.label === 'Blocked on you'));
+  // A hold nested under a failed reviewer's block shows both.
+  const nestedBadges = getTaskBadges(makeTask({ state: 'backlog', blocked_on: { kind: 'agent_not_running', reason: 'reviewer exited', hold: { kind: 'hold', reason: 'repair brief', checkpoint_requested: true } } }), [], nowMs);
+  assert.ok(nestedBadges.some((b) => b.label === 'Held · checkpoint requested'));
+  assert.ok(nestedBadges.some((b) => b.label === 'Agent not running'));
 
   // Done
   const doneTask = makeTask({ state: 'done', attempt_no: 1 });

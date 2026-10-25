@@ -274,3 +274,75 @@ test_fleet_pause_review_role_mapping :: proc(t: ^testing.T) {
 	rl, rheld = lease_of(fx, "inst_r1")
 	testing.expect(t, rheld && rl.review_role == NAMED_REVIEW_ROLE, "resume dispatches the named review")
 }
+
+// A hold survives a concurrent infrastructure block (review round 2): one of
+// two reviewers dies (agent_not_running stays the visible blocked_on) and the
+// surviving reviewer still gets the checkpoint and may hand off; release
+// clears only the hold. Covers hold after the failure and failure after hold.
+@(test)
+test_hold_with_infrastructure_block_keeps_checkpoint :: proc(t: ^testing.T) {
+	for fail_first in ([]bool{true, false}) {
+		fx, log, ok := lease_fixture(t, "hold_infra_first" if fail_first else "hold_infra_after")
+		defer lease_fixture_close(fx, log)
+		if !ok do return
+		chain := seed_live_chain(t, fx, "chain_hold_infra")
+		seed_agent(fx, "agt_r2")
+		seed_fleet(fx, chain, "agt_w")
+		seed_fleet(fx, chain, "agt_r", roles = `["reviewer"]`)
+		seed_fleet(fx, chain, "agt_r2", roles = `["reviewer"]`)
+		seed_instance(fx, chain, "inst_w1", "agt_w", "br_1", "idle")
+		seed_instance(fx, chain, "inst_r1", "agt_r", "br_1", "idle")
+		seed_instance(fx, chain, "inst_r2", "agt_r2", "br_1", "idle")
+		_ = publish_task(t, fx, chain, "task_1", brief = `{"goal":"g","acceptance":["a"],"review_roles":["reviewer"]}`)
+		confirm_holder(fx, "inst_w1")
+		_, sok, serr := lease_submit(&fx.svc, inst_auth("inst_w1"), Submit_Input{summary = "v1", vcs_json = `{"head":"h1","dirty":false}`})
+		if !testing.expect(t, sok, fmt.tprintf("submit: %s", serr.message)) do return
+		rl1, r1 := lease_of(fx, "inst_r1")
+		_, r2 := lease_of(fx, "inst_r2")
+		if !testing.expect(t, r1 && r2, "both reviewers leased") do return
+		owner := actor_from_auth(user_auth())
+		fail_r2 :: proc(fx: ^Fixture) {
+			confirm_holder(fx, "inst_r2")
+			inst, _, _ := iface.agent_get_instance(&fx.agents, "inst_r2")
+			inst.runtime_status = "failed"
+			_, _, _ = iface.agent_save_instance(&fx.agents, inst)
+			on_instance_terminal(&fx.svc, "inst_r2")
+		}
+
+		if fail_first do fail_r2(fx)
+		_, hok, herr := task_hold(&fx.svc, get_task(fx, "task_1"), owner, "fix the brief")
+		if !testing.expect(t, hok, fmt.tprintf("hold: %s", herr.message)) do return
+		if !fail_first do fail_r2(fx)
+		_, r1 = lease_of(fx, "inst_r1")
+		if !testing.expect(t, r1, "surviving reviewer keeps its lease") do return
+
+		row := get_task(fx, "task_1")
+		testing.expect(t, is_agent_not_running_block(row.blocked_on_json), fmt.tprintf("infrastructure block stays visible: %s", row.blocked_on_json))
+		testing.expect(t, task_is_held(row), fmt.tprintf("hold seen under the infrastructure block: %s", row.blocked_on_json))
+		infra := blocked_on_without_hold(row.blocked_on_json)
+		testing.expect(t, !strings.contains(infra, `"hold"`), "hold member strips cleanly")
+		inst_r1, _, _ := iface.agent_get_instance(&fx.agents, "inst_r1")
+		pack := build_pack_json(&fx.svc, chain, row, rl1, inst_r1)
+		testing.expect(t, strings.contains(pack, `"checkpoint":{"reason":"fix the brief"}`), "surviving reviewer's pack carries the checkpoint request")
+
+		// The surviving reviewer checkpoints; the task stays parked and held
+		// (state is whatever the infrastructure block made it).
+		parked_state := row.state
+		_, dok, derr := lease_handoff(&fx.svc, inst_auth("inst_r1"), Handoff_Input{summary = "half reviewed"})
+		if !testing.expect(t, dok, fmt.tprintf("review handoff: %s", derr.message)) do return
+		_, r1 = lease_of(fx, "inst_r1")
+		testing.expect(t, !r1, "held task gets no new review lease")
+		row = get_task(fx, "task_1")
+		testing.expect_value(t, row.state, parked_state)
+		testing.expect(t, task_is_held(row) && is_agent_not_running_block(row.blocked_on_json), "still held, infrastructure block still visible")
+		testing.expect(t, !strings.contains(row.blocked_on_json, `"checkpoint_requested"`), "no live lease: checkpoint no longer requested")
+
+		// Release clears only the hold; the unresolved infrastructure block stays.
+		_, rok, rerr := task_release(&fx.svc, row, owner)
+		if !testing.expect(t, rok, fmt.tprintf("release: %s", rerr.message)) do return
+		row = get_task(fx, "task_1")
+		testing.expect(t, !task_is_held(row), "hold released")
+		testing.expect_value(t, row.blocked_on_json, infra)
+		assert_projection_matches_fold(t, fx, chain.chain_id, "u1", "hold with infrastructure block")
+	}
+}

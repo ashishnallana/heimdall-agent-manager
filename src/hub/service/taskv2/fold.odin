@@ -276,10 +276,18 @@ fold_task :: proc(events: []domain.Task_Event, input: Fold_Input) -> Task_View {
 	// A hold is an overlay, applied last so a block answered while held (or a
 	// handoff, which clears nothing) leaves the hold standing: the task parks
 	// in backlog as blocked_on {kind: hold} instead of being re-dispatched
-	// (REQ-TV2-5). Another live block keeps precedence until it is answered.
-	if v.held && !v.done && !v.cancelled && v.blocked_on_json == "" {
-		v.blocked_on_json = v.hold_json
-		if v.has_work_lease || v.review_lease_count > 0 do v.blocked_on_json = hold_checkpoint_block(v.hold_json)
+	// (REQ-TV2-5). Another live block (e.g. a failed reviewer's
+	// agent_not_running) stays the primary blocked_on so it remains visible,
+	// and the hold rides along as its `hold` member; task_hold_object reads
+	// either form, so every hold guard sees the hold whatever else blocks.
+	if v.held && !v.done && !v.cancelled {
+		hold := v.hold_json
+		if v.has_work_lease || v.review_lease_count > 0 do hold = hold_checkpoint_block(v.hold_json)
+		if v.blocked_on_json == "" {
+			v.blocked_on_json = hold
+		} else {
+			v.blocked_on_json = with_hold_member(v.blocked_on_json, hold)
+		}
 	}
 	v.state = derive_state(v, input)
 	return v
@@ -303,14 +311,40 @@ hold_checkpoint_block :: proc(hold_json: string) -> string {
 	return fmt.tprintf(`%s,"checkpoint_requested":true}}`, body[:len(body)-1])
 }
 
-// task_is_held: the task carries a hold (blocked_on.kind == "hold").
-task_is_held :: proc(task: domain.Task) -> bool {
-	return blocked_on_is_hold(task.blocked_on_json)
+// with_hold_member appends the hold object to another block as its last
+// member, `hold`. Temp-allocated.
+@(private = "file")
+with_hold_member :: proc(block_json, hold_json: string) -> string {
+	body := strings.trim_space(block_json)
+	return fmt.tprintf(`%s,"hold":%s}`, body[:len(body)-1], hold_json)
 }
 
-blocked_on_is_hold :: proc(blocked_on_json: string) -> bool {
-	if strings.trim_space(blocked_on_json) == "" do return false
-	return jsonx.extract_string(blocked_on_json, "kind", "", true, context.temp_allocator) == "hold"
+// task_is_held: the task carries a hold, either as its primary blocked_on
+// (kind == "hold") or nested under another block's `hold` member.
+task_is_held :: proc(task: domain.Task) -> bool {
+	_, held := task_hold_object(task.blocked_on_json)
+	return held
+}
+
+// task_hold_object returns the hold object of a blocked_on: blocked_on itself
+// when its kind is hold, else its nested `hold` member (see fold_task).
+task_hold_object :: proc(blocked_on_json: string) -> (string, bool) {
+	if strings.trim_space(blocked_on_json) == "" do return "", false
+	if jsonx.extract_string(blocked_on_json, "kind", "", true, context.temp_allocator) == "hold" do return blocked_on_json, true
+	return raw_object_field(blocked_on_json, "hold")
+}
+
+// blocked_on_without_hold drops the nested `hold` member that fold_task
+// appends to another block, so a hold or release does not read as a change
+// of that block (no duplicate attention, stale agent-failure cards stay valid).
+// A primary hold is returned unchanged. Temp-allocated.
+blocked_on_without_hold :: proc(blocked_on_json: string) -> string {
+	hold, ok := raw_object_field(blocked_on_json, "hold")
+	if !ok do return blocked_on_json
+	body := strings.trim_space(blocked_on_json)
+	suffix := fmt.tprintf(`,"hold":%s}`, hold)
+	if !strings.has_suffix(body, suffix) do return blocked_on_json
+	return fmt.tprintf("%s}", body[:len(body)-len(suffix)])
 }
 
 // OSCILLATION_ROUNDS: changes_requested count at which the task stops bouncing

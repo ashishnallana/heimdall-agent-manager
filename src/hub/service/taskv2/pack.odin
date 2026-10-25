@@ -166,10 +166,11 @@ build_pack_json :: proc(svc: ^Service, chain: domain.Task_Chain, task: domain.Ta
 
 	// A coordinator/owner put this leased task on hold (REQ-TV2-5): ask the
 	// holder for a safe checkpoint. The lease is never revoked.
-	if task_is_held(task) {
-		if cp, cpok := jsonx.extract_bool_literal(task.blocked_on_json, "checkpoint_requested", true); cpok && cp {
+	// The hold may sit under another block (task_hold_object).
+	if hold, held := task_hold_object(task.blocked_on_json); held {
+		if cp, cpok := jsonx.extract_bool_literal(hold, "checkpoint_requested", true); cpok && cp {
 			c := json_begin()
-			json_str(&c, "reason", jsonx.extract_string(task.blocked_on_json, "reason", "", true, context.temp_allocator))
+			json_str(&c, "reason", jsonx.extract_string(hold, "reason", "", true, context.temp_allocator))
 			json_raw(&o, "checkpoint", json_end(&c))
 		}
 	}
