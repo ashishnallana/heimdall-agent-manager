@@ -520,7 +520,9 @@ MIGRATION_134_USER_SESSIONS :: #load("migrations/134_user_sessions.sql", string)
 MIGRATION_135_CLEAR_USER_API_TOKENS :: #load("migrations/135_clear_user_api_tokens.sql", string)
 
 // Native identities have their own namespace; upstream numbers remain untouched.
-migration_order :: [139]string {
+MIGRATION_136_EXTENSION_VERSION_SYNC :: #load("migrations/136_extension_version_sync_0_5_0.sql", string)
+
+migration_order :: [140]string {
 	"001_foundation.sql",
 	"002_owner_scoped_core.sql",
 	"003_device_tokens.sql",
@@ -660,6 +662,7 @@ migration_order :: [139]string {
 	"native_001_oidc_identities.sql",
 	"134_user_sessions.sql",
 	"135_clear_user_api_tokens.sql",
+	"136_extension_version_sync_0_5_0.sql",
 }
 
 // stop_before is a TEST SEAM: when non-empty, the apply loop stops in front of
@@ -1130,6 +1133,7 @@ migration_sql :: proc(name, migrations_dir: string) -> string {
 			return string(data)
 		}
 	}
+	if name == "136_extension_version_sync_0_5_0.sql" do return strings.clone(MIGRATION_136_EXTENSION_VERSION_SYNC)
 	if name == "135_clear_user_api_tokens.sql" do return strings.clone(MIGRATION_135_CLEAR_USER_API_TOKENS)
 	if name == "134_user_sessions.sql" do return strings.clone(MIGRATION_134_USER_SESSIONS)
 	if name == "native_001_oidc_identities.sql" do return strings.clone(MIGRATION_NATIVE_001_OIDC_IDENTITIES)
