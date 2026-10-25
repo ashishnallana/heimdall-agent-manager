@@ -121,8 +121,12 @@ With `--preview-origin` set, previewed apps run on their own host, and the hub
 session cookie (host-only) never reaches it. Sign-in on that host works like this:
 
 1. A navigation to `<preview>/p/<sid>/…` without a valid preview cookie gets:
-   - a `__Host-heimdall_preview_bind=<random>` cookie (300 s);
-   - a 302 to `<ui_origin>/api/v1/preview-auth/start?session=<sid>&return_to=…&bind=<sha256>`.
+   - a per-flow `__Host-heimdall_preview_bind_<id>` cookie (300 s). Its value is
+     `<random>.<HMAC tag>`, minted by the hub; a value without a valid tag is never accepted;
+   - a 302 to `<ui_origin>/api/v1/preview-auth/start?session=<sid>&return_to=…&bind=<sha256>&bind_id=<id>&hop=<n>`.
+     After 3 consecutive bounces (a browser that drops the cookie) the hub shows a 403
+     explanation instead of looping. The `__heimdall_hop` counter it appends to `return_to` is
+     stripped before forwarding.
 
    Other requests get 401.
 2. The start route requires the hub session; without one it bounces through login. It
@@ -132,7 +136,8 @@ session cookie (host-only) never reaches it. Sign-in on that host works like thi
 
    A start request without `bind` (a direct link) goes first through
    `<preview>/__heimdall/preview-bind`.
-3. The hub, not the app, redeems the ticket. Redemption needs the matching bind cookie. It
+3. The hub, not the app, redeems the ticket. Redemption needs that flow's bind cookie (concurrent
+   previews have independent flows), and it clears that cookie. It
    sets `__Host-heimdall_preview` (HttpOnly, Secure, SameSite=Lax, host-only, lifetime equal
    to what is left of the parent session) and redirects to `return_to`.
 4. Preview requests authenticate **only** with that cookie. `Authorization` belongs to the
@@ -176,6 +181,24 @@ to start** unless both OIDC bearer and browser login are configured.
 
 All provider URLs, `ui_origin` and the redirect URI must be `https://`, except in the dev-only
 mode above. Setting some browser-login keys without the others is a startup error.
+
+**Client IP behind a reverse proxy.** The per-client limits (sign-in starts,
+device-authorization requests) and the device-approval audit key on the client
+IP. The hub trusts `X-Forwarded-For` only when the TCP peer is inside
+`--forwarded-for-trusted-cidr`, and then takes the **right-most hop that is not
+itself a trusted proxy**. Hops further left are client-supplied and ignored. Your
+edge must therefore put the real client address in that header. Otherwise every
+request looks like it came from the proxy and shares one rate-limit bucket. For
+example, nginx behind Cloudflare:
+
+```nginx
+# Only Cloudflare reaches this nginx: overwrite (not append) with Cloudflare's view.
+proxy_set_header X-Forwarded-For $http_cf_connecting_ip;   # CF-Connecting-IP
+# Without Cloudflare: proxy_set_header X-Forwarded-For $remote_addr;
+```
+
+Only trust `CF-Connecting-IP` if the origin accepts connections from Cloudflare
+alone. Any client that can reach nginx directly can set that header to anything.
 
 These now **abort startup**: `--trusted-proxy-cidr`, `--login-url`, `--logout-url`,
 and a set `HAM_AUTH_MODE` (any value).

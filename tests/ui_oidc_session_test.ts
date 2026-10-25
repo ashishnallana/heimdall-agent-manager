@@ -12,7 +12,9 @@ import {
   isTransientAuthStatus,
   loginHref,
   postLogout,
+  isSafeReturnTo,
   readAuthError,
+  safeLogoutTarget,
   readLastLoginRedirect,
   recordLoginRedirect,
   shouldAutoRedirect,
@@ -76,4 +78,32 @@ test('429/503 are transient, 401 is not', () => {
   assert.equal(isTransientAuthStatus(503), true);
   assert.equal(isTransientAuthStatus(401), false);
   assert.equal(isTransientAuthStatus(500), false);
+});
+
+test('currentReturnTo falls back to / for paths the hub would refuse', () => {
+  assert.equal(currentReturnTo({ pathname: '/p', search: '?q=a%20b', hash: '' }), '/p?q=a%20b');
+  assert.equal(currentReturnTo({ pathname: '/x%2F%2Fevil', search: '', hash: '' }), '/x%2F%2Fevil');
+  // still percent-encoded after three decodes
+  assert.equal(currentReturnTo({ pathname: '/deep%2525252F', search: '', hash: '' }), '/');
+  // decodes to a protocol-relative path
+  assert.equal(currentReturnTo({ pathname: '/%2F%2Fevil.example', search: '', hash: '' }), '/');
+  // backslash and control characters
+  assert.equal(currentReturnTo({ pathname: '/a', search: '?x=%5C', hash: '' }), '/');
+  assert.equal(currentReturnTo({ pathname: '/a', search: '?x=%0D%0A', hash: '' }), '/');
+  // malformed escape
+  assert.equal(currentReturnTo({ pathname: '/a%zz', search: '', hash: '' }), '/');
+  assert.equal(currentReturnTo({ pathname: '/' + 'a'.repeat(3000), search: '', hash: '' }), '/');
+  assert.equal(isSafeReturnTo('/#/chains/c1'), true);
+  assert.equal(isSafeReturnTo('https://evil.example'), false);
+});
+
+test('logout only navigates to https: URLs or same-origin paths', async () => {
+  assert.equal(safeLogoutTarget('https://idp.example/end-session/?x=1'), 'https://idp.example/end-session/?x=1');
+  assert.equal(safeLogoutTarget('/'), '/');
+  assert.equal(safeLogoutTarget('/signed-out'), '/signed-out');
+  for (const bad of ['javascript:alert(1)', 'data:text/html,x', '//evil.example', '/\\evil.example', 'http://idp.example/end', 'ftp://x', '', 'not a url']) {
+    assert.equal(safeLogoutTarget(bad), '/', bad);
+  }
+  const hostile = (async () => new Response(JSON.stringify({ data: { logout_url: 'javascript:alert(1)' } }), { status: 200 })) as unknown as typeof fetch;
+  assert.equal(await postLogout(hostile), '/');
 });

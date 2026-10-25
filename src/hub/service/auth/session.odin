@@ -68,6 +68,12 @@ login_seal_key :: proc(seal: ^Login_Seal) -> ([chacha20poly1305.KEY_SIZE]byte, b
 	return seal.key, true
 }
 
+// hub_process_key is a per-process random secret (also the login sealing key).
+// Every use is domain-separated (AAD / HMAC message prefix).
+hub_process_key :: proc(service: ^Auth_Service) -> ([chacha20poly1305.KEY_SIZE]byte, bool) {
+	return login_seal_key(&service.login_seal)
+}
+
 // login_cookie_seal returns base64url(nonce || ciphertext || tag).
 login_cookie_seal :: proc(service: ^Auth_Service, payload: Login_Payload) -> (string, bool) {
 	key, key_ok := login_seal_key(&service.login_seal)

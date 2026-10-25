@@ -58,10 +58,11 @@ http_test_preview_headers :: proc(t: ^testing.T, auth: ^auth_service.Auth_Servic
 		principal, ok, err := auth_service.resolve_auth(auth, auth_service.Auth_Request{headers = session})
 		testing.expectf(t, ok, "session principal for %s: %s", user_id, err.message)
 		return_to := strings.concatenate({"/p/", shell_session_id, "/"})
-		bind := "test-preview-bind-0123456789abcdef"
-		ticket, mint_err := auth_service.preview_ticket_mint(auth, principal, shell_session_id, return_to, auth_service.sha256_hex(bind))
+		bind_id, bind_value, _ := auth_service.preview_bind_new(auth)
+		ticket, mint_err := auth_service.preview_ticket_mint(auth, principal, shell_session_id, return_to, auth_service.sha256_hex(bind_value), bind_id)
 		testing.expectf(t, mint_err.code == .None, "mint preview ticket: %s", mint_err.message)
-		raw, _, _, stage, redeemed := auth_service.preview_ticket_redeem(auth, ticket, bind)
+		bind_cookie := []contracts.HTTP_Header{{"Cookie", strings.concatenate({auth_service.preview_bind_cookie_name(bind_id), "=", bind_value})}}
+		raw, _, _, _, _, stage, redeemed := auth_service.preview_ticket_redeem(auth, ticket, bind_cookie)
 		testing.expectf(t, redeemed, "redeem preview ticket: %s", stage)
 		headers[0] = contracts.HTTP_Header{"Cookie", strings.concatenate({auth_service.PREVIEW_COOKIE, "=", raw})}
 	}
