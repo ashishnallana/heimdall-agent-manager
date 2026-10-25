@@ -46,7 +46,7 @@ test_reviewer_approve_alone_completes_task :: proc(t: ^testing.T) {
 }
 
 // D1 end to end: a task in review whose gate waited on the independent-verify
-// facet, with an approval given under the old regime. Migration 128 (applied
+// facet, with an approval given under the old regime. Migration 129 (applied
 // here to pre-removal rows, exactly as on deploy) re-keys
 // the approval as audit and strips the brief; the next boot re-evaluates the
 // gate, which does NOT auto-complete; the reviewer owes (and gets) a fresh
@@ -57,10 +57,10 @@ test_d1_verify_waiting_task_gets_fresh_review_after_migration :: proc(t: ^testin
 	fx, log, ok0 := lease_fixture(t, "tv2_d1")
 	defer lease_fixture_close(fx, log)
 	if !ok0 do return
-	// the fixture database is fully migrated: consume the marker its own 128
+	// the fixture database is fully migrated: consume the marker its own 129
 	// run left, so the one this test's deploy leaves is the one boot sees
 	_, _ = iface.taskchain_take_boot_regate(&fx.repo)
-	sql := sqlite.migration_sql("128_remove_task_verify.sql", "")
+	sql := sqlite.migration_sql("129_remove_task_verify.sql", "")
 	chain := seed_live_chain(t, fx, "chain_d1")
 	seed_agent(fx, "agt_r")
 	seed_fleet(fx, chain, "agt_w")
@@ -84,7 +84,7 @@ test_d1_verify_waiting_task_gets_fresh_review_after_migration :: proc(t: ^testin
 	// the old-regime approval (posted while the gate still waited on the verify)
 	_, _, _ = iface.taskchain_save_review(&fx.repo, domain.Task_Review{task_id = d1.task_id, chain_id = d1.chain_id, owner_user_id = "u1", attempt_no = d1.attempt_no, role = "reviewer", reviewer_kind = "agent", reviewer_agent_id = "agt_r", reviewer_instance_id = "inst_old", verdict = "approve", findings_json = "[]", created_at = "2026-03-01T00:00:00Z"})
 
-	if !testing.expect(t, sqlite.exec(&fx.conn, sql), "migration 128 applies") do return
+	if !testing.expect(t, sqlite.exec(&fx.conn, sql), "migration 129 applies") do return
 	d1 = get_task(fx, "task_d1")
 	for key in ([]string{`"verify"`, "require_independent_verify"}) {
 		testing.expectf(t, !strings.contains(d1.brief_json, key), "M1 strips %s", key)
@@ -95,7 +95,7 @@ test_d1_verify_waiting_task_gets_fresh_review_after_migration :: proc(t: ^testin
 	testing.expect(t, get_task(fx, "task_solo_cmd").requires_user_approval, "command-only gate becomes a user approval")
 
 	// idempotence: a second application changes nothing
-	testing.expect(t, sqlite.exec(&fx.conn, sql), "128 re-runs cleanly")
+	testing.expect(t, sqlite.exec(&fx.conn, sql), "129 re-runs cleanly")
 	reviews, _ = iface.taskchain_list_reviews_by_task(&fx.repo, d1.task_id, "u1")
 	testing.expect(t, len(reviews) == 1 && reviews[0].role == "legacy-verify:reviewer", "re-run does not re-key again")
 	testing.expect_value(t, count_events(fx, "task_d1", "reviews_superseded"), 1)
