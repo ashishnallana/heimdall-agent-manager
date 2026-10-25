@@ -122,11 +122,16 @@ session cookie (host-only) never reaches it. Sign-in on that host works like thi
 
 1. A navigation to `<preview>/p/<sid>/…` without a valid preview cookie gets:
    - a per-flow `__Host-heimdall_preview_bind_<id>` cookie (300 s). Its value is
-     `<random>.<HMAC tag>`, minted by the hub; a value without a valid tag is never accepted;
+     `<random>.<mint time>.<HMAC tag>`, minted by the hub under a sub-key derived only for
+     this purpose. A value without a valid tag, or minted more than 300 s ago, is never
+     accepted. A browser holding 4 or more bind cookies has them all expired before a new one
+     is minted (cookie-bomb cap);
    - a 302 to `<ui_origin>/api/v1/preview-auth/start?session=<sid>&return_to=…&bind=<sha256>&bind_id=<id>&hop=<n>`.
      After 3 consecutive bounces (a browser that drops the cookie) the hub shows a 403
-     explanation instead of looping. The `__heimdall_hop` counter it appends to `return_to` is
-     stripped before forwarding.
+     explanation instead of looping. The count is kept in a 30 s host-only
+     `__Host-heimdall_preview_hop` cookie, and from the second bounce on also as a
+     `__heimdall_hop` query parameter on `return_to`. That parameter is stripped before
+     forwarding, so on the normal path the app's URL stays clean.
 
    Other requests get 401.
 2. The start route requires the hub session; without one it bounces through login. It
@@ -291,6 +296,12 @@ are gone, and trusted-proxy auth must be re-enabled at the edge. Take a DB backu
   `Authorization`. Tickets are browser-bound, so a planted ticket cannot sign a victim into
   someone else's preview. Known limit: the preview cookie is host-wide, so a previewed app can
   make credentialed requests to the *same user's* other previews (it cannot read the cookie).
+  **Accepted residual risk:** script already running on the victim's own preview origin could
+  plant a bind value it harvested within the last 300 s (for example as a non-HttpOnly cookie
+  of the same name), and so steer that browser's next preview sign-in. This is accepted: script
+  in that position can already phish the user inside the previewed app. It cannot forge a value
+  (HMAC under a hub-only key), cannot reuse one after 300 s, and never obtains the hub session
+  or the preview cookie.
 - **Provider outage:** 503/429 rather than 401. Forged tokens never cause provider calls
   (cached JWKS, rate-limited refresh, outbound cap).
 - **Identity claiming:** off by default. Usernames must be immutable in the provider, and the

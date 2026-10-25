@@ -504,7 +504,7 @@ preview_proxy_relay :: proc(ctx: rawptr, req: Request, client: net.TCP_Socket, t
 		// A preview cookie of another user (or a stale one): re-authenticate this
 		// navigation through the start route instead of a dead-end 404.
 		if is_preview_origin && preview_is_navigation(req) && h.ui_origin != "" {
-			write_http_response(client, preview_bounce(h, session_id, preview_request_target(req), preview_request_hop(req) + 1))
+			write_http_response(client, preview_bounce(h, session_id, preview_request_target(req), preview_request_hop(req) + 1, req.headers))
 			return
 		}
 		write_stream_error(client, respond_error(domain.domain_error(.Not_Found, "session not found"), req.request_id))
@@ -1391,12 +1391,20 @@ PREVIEW_HOP_PARAM :: "__heimdall_hop"
 // so only this browser can redeem the resulting ticket. `hop` counts consecutive
 // bounces; past PREVIEW_MAX_HOPS (a browser refusing the cookie) it stops with a
 // clear page instead of looping.
-preview_bounce :: proc(h: ^Shell_Session_Stream_Handlers, session_id, return_to: string, hop: int) -> Response {
+preview_bounce :: proc(h: ^Shell_Session_Stream_Handlers, session_id, return_to: string, hop: int, request_headers: []contracts.HTTP_Header = nil) -> Response {
 	if hop > auth_service.PREVIEW_MAX_HOPS {
 		return plain_response(403, "Preview sign-in keeps failing: this browser is not keeping the preview cookie. Allow cookies for this site (or disable strict tracking protection for it) and reopen the preview from Heimdall.", {"Cache-Control", "no-store"})
 	}
 	bind_id, bind_value, bind_ok := auth_service.preview_bind_new(h.auth)
 	if !bind_ok || h.ui_origin == "" do return plain_response(503, "preview sign-in unavailable", {"Cache-Control", "no-store"})
+	headers := make([dynamic]contracts.HTTP_Header, context.temp_allocator)
+	// Cookie-bomb cap: when this browser already holds the maximum number of
+	// bind cookies (abandoned flows), expire them all before minting this one.
+	// A still-pending flow in another tab just bounces once more.
+	existing := auth_service.preview_bind_cookie_names(request_headers)
+	if len(existing) >= auth_service.PREVIEW_MAX_BIND_COOKIES {
+		for name in existing do append(&headers, contracts.HTTP_Header{"Set-Cookie", auth_service.expired_cookie_header(name)})
+	}
 	location := strings.concatenate({
 		strings.trim_right(h.ui_origin, "/"), PREVIEW_AUTH_START_PATH,
 		"?session=", auth_service.form_encode(session_id),
@@ -1405,7 +1413,8 @@ preview_bounce :: proc(h: ^Shell_Session_Stream_Handlers, session_id, return_to:
 		"&bind_id=", bind_id,
 		"&hop=", fmt.tprintf("%d", hop),
 	}, context.temp_allocator)
-	return plain_response(302, "", {"Location", location}, {"Set-Cookie", auth_service.preview_bind_cookie_header(bind_id, bind_value)}, {"Cache-Control", "no-store"})
+	append(&headers, contracts.HTTP_Header{"Location", location}, contracts.HTTP_Header{"Set-Cookie", auth_service.preview_bind_cookie_header(bind_id, bind_value)}, contracts.HTTP_Header{"Cache-Control", "no-store"})
+	return plain_response(302, "", ..headers[:])
 }
 
 // preview_strip_hop removes the hub's bounce counter from a query string.
@@ -1432,8 +1441,13 @@ preview_request_target :: proc(req: Request) -> string {
 	return strings.concatenate({req.path, "?", query}, context.temp_allocator)
 }
 
+// preview_request_hop is the bounce count so far: the URL counter (second hop
+// on) or the short-lived hop cookie a successful handoff leaves behind.
 preview_request_hop :: proc(req: Request) -> int {
 	_, hop := preview_strip_hop(req.query)
+	if remembered, present := auth_service.cookie_value(req.headers, auth_service.PREVIEW_HOP_COOKIE); present {
+		if n, ok := strconv.parse_int(remembered); ok do hop = max(hop, n)
+	}
 	return max(hop, 0)
 }
 
@@ -1445,7 +1459,7 @@ preview_origin_auth :: proc(h: ^Shell_Session_Stream_Handlers, req: Request) -> 
 	if ok do return ctx, true, {}
 	session_id := path_part(req.path, 2)
 	if preview_is_navigation(req) && session_id != "" && h.ui_origin != "" {
-		return {}, false, preview_bounce(h, session_id, preview_request_target(req), preview_request_hop(req) + 1)
+		return {}, false, preview_bounce(h, session_id, preview_request_target(req), preview_request_hop(req) + 1, req.headers)
 	}
 	auth_metrics_record_failure(h.auth, req)
 	return {}, false, respond_error(err, req.request_id)
@@ -1505,7 +1519,7 @@ preview_auth_bind :: proc(ctx: rawptr, req: Request) -> Response {
 	return_to := query_value(req.query, "return_to")
 	if session_id == "" || !auth_service.preview_return_to_ok(return_to, session_id) do return plain_response(400, "invalid preview sign-in request", {"Cache-Control", "no-store"})
 	hop, _ := strconv.parse_int(query_value(req.query, "hop"))
-	return preview_bounce(h, session_id, return_to, max(hop, 0) + 1)
+	return preview_bounce(h, session_id, return_to, max(hop, 0) + 1, req.headers)
 }
 
 // GET <preview_origin>/__heimdall/preview-auth?ticket=... redeems a handoff
@@ -1520,11 +1534,16 @@ preview_auth_redeem :: proc(ctx: rawptr, req: Request) -> Response {
 		if bind_cookie != "" do return plain_response(403, "preview sign-in failed; reopen the preview from Heimdall", {"Set-Cookie", auth_service.expired_cookie_header(bind_cookie)}, {"Cache-Control", "no-store"})
 		return plain_response(403, "preview sign-in failed; reopen the preview from Heimdall", {"Cache-Control", "no-store"})
 	}
-	// Carry the bounce count so a browser that drops the cookie stops after a few
-	// rounds (stripped before anything reaches the previewed app).
-	sep := "&" if strings.contains(return_to, "?") else "?"
-	target := strings.concatenate({return_to, sep, PREVIEW_HOP_PARAM, "=", fmt.tprintf("%d", hop)}, context.temp_allocator)
-	return plain_response(302, "", {"Location", target}, {"Set-Cookie", auth_service.preview_cookie_header(raw, max_age)}, {"Set-Cookie", auth_service.expired_cookie_header(bind_cookie)}, {"Cache-Control", "no-store"}, {"Referrer-Policy", "no-referrer"})
+	// Remember the bounce count so a browser that drops the preview cookie stops
+	// after a few rounds: a short-lived hop cookie always, and the URL counter
+	// (stripped before anything reaches the previewed app) only from the second
+	// hop on, so the normal path leaves the app's URL clean.
+	target := return_to
+	if hop > 1 {
+		sep := "&" if strings.contains(return_to, "?") else "?"
+		target = strings.concatenate({return_to, sep, PREVIEW_HOP_PARAM, "=", fmt.tprintf("%d", hop)}, context.temp_allocator)
+	}
+	return plain_response(302, "", {"Location", target}, {"Set-Cookie", auth_service.preview_cookie_header(raw, max_age)}, {"Set-Cookie", auth_service.expired_cookie_header(bind_cookie)}, {"Set-Cookie", auth_service.preview_hop_cookie_header(hop)}, {"Cache-Control", "no-store"}, {"Referrer-Policy", "no-referrer"})
 }
 
 // preview_ws_close_revoked tears down a preview WebSocket whose user session ended.

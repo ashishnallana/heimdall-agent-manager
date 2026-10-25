@@ -526,6 +526,19 @@ Done on `feat/oidc-followups`:
 - [x] **Docs**: `docs/auth-oidc.md` explains the right-most untrusted X-Forwarded-For rule and
   gives the Cloudflare `CF-Connecting-IP` nginx example.
 
+Review nice-to-haves (also done):
+- [x] The bind value carries its mint time under the MAC (`<random>.<ts>.<tag>`), and the 300 s
+  window is enforced server-side.
+- [x] Sub-keys derived from the process key: `HMAC(key, "heimdall-login-seal-v1")` for the
+  login AEAD and `HMAC(key, "heimdall-preview-bind-v1")` for the bind tag.
+- [x] Cookie-bomb cap: a bounce that finds 4 or more bind cookies expires them all, then mints
+  its own.
+- [x] `__heimdall_hop` is appended only from hop 2 on. Between handoffs the count lives in a
+  30 s `__Host-heimdall_preview_hop` cookie, so the normal path keeps the URL clean while loops
+  are still caught.
+- [x] The residual risk (script on the victim's own preview origin planting a harvested bind
+  value) is documented and accepted.
+
 Remaining carry-overs:
 - **Drop `user_api_tokens`** in a later release, once rolling back to pre-OIDC binaries is no
   longer possible. Migration 135 only empties it.

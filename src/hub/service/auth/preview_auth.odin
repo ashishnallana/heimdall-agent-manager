@@ -3,6 +3,7 @@ package auth
 import "base:runtime"
 import "core:crypto/hmac"
 import "core:fmt"
+import "core:strconv"
 import "core:strings"
 import "core:sync"
 import contracts "odin_test:contracts"
@@ -41,6 +42,13 @@ PREVIEW_BIND_ID_BYTES :: 6 // 8 base64url characters
 // A browser that does not keep the preview cookie would bounce forever; give up
 // after this many consecutive bounces.
 PREVIEW_MAX_HOPS :: 3
+// At most this many bind cookies live at once on the preview host; a bounce that
+// finds more expires them before minting its own (cookie-bomb cap).
+PREVIEW_MAX_BIND_COOKIES :: 4
+// After a successful handoff the bounce count is remembered for a short while in
+// this host-only cookie (the URL carries it only from the second hop on).
+PREVIEW_HOP_COOKIE :: "__Host-heimdall_preview_hop"
+PREVIEW_HOP_TTL_S :: 30
 PREVIEW_BIND_TTL_S :: 300
 // At most this many preview sessions per parent session (oldest replaced).
 PREVIEW_MAX_PER_PARENT :: 32
@@ -126,32 +134,44 @@ preview_bind_cookie_name :: proc(bind_id: string) -> string {
 	return strings.concatenate({PREVIEW_BIND_COOKIE, "_", bind_id}, context.temp_allocator)
 }
 
+// The tag covers the flow id, the random part and the mint time (Unix ms), under
+// a key derived only for this purpose.
 @(private = "file")
-preview_bind_tag :: proc(service: ^Auth_Service, bind_id, raw: string) -> (string, bool) {
-	key, ok := hub_process_key(service)
+preview_bind_tag :: proc(service: ^Auth_Service, bind_id, raw, ts: string) -> (string, bool) {
+	key, ok := hub_subkey(service, HUB_SUBKEY_PREVIEW_BIND)
 	if !ok do return "", false
-	msg := strings.concatenate({"heimdall-preview-bind|", bind_id, "|", raw}, context.temp_allocator)
+	msg := strings.concatenate({bind_id, "|", raw, "|", ts}, context.temp_allocator)
 	tag: [32]byte
 	hmac.sum(.SHA256, tag[:], transmute([]byte)msg, key[:])
 	return base64url_encode(tag[:16]), true
 }
 
-// preview_bind_new mints a flow id and a hub-tagged bind value (cookie value).
+// preview_bind_new mints a flow id and a hub-tagged, timestamped bind value
+// (`<random>.<unix ms>.<tag>`, the cookie value).
 preview_bind_new :: proc(service: ^Auth_Service) -> (bind_id, value: string, ok: bool) {
 	id, id_ok := random_token(PREVIEW_BIND_ID_BYTES)
 	raw, raw_ok := random_token(32)
-	if !id_ok || !raw_ok do return "", "", false
-	tag, tag_ok := preview_bind_tag(service, id, raw)
+	now, now_ok := now_unix_ms(service)
+	if !id_ok || !raw_ok || !now_ok do return "", "", false
+	ts := fmt.tprintf("%d", now)
+	tag, tag_ok := preview_bind_tag(service, id, raw, ts)
 	if !tag_ok do return "", "", false
-	return id, strings.concatenate({raw, ".", tag}, context.temp_allocator), true
+	return id, strings.concatenate({raw, ".", ts, ".", tag}, context.temp_allocator), true
 }
 
-// preview_bind_value_ok verifies the hub's HMAC tag on a bind cookie value.
+// preview_bind_value_ok verifies the hub's HMAC tag on a bind cookie value and
+// that it was minted within the bind window (a harvested value goes stale even
+// if a browser keeps the cookie past its Max-Age).
 preview_bind_value_ok :: proc(service: ^Auth_Service, bind_id, value: string) -> bool {
-	dot := strings.last_index_byte(value, '.')
-	if dot <= 0 || len(value) > 128 do return false
-	want, ok := preview_bind_tag(service, bind_id, value[:dot])
-	return ok && oidc_constant_time_equal(want, value[dot + 1:])
+	if len(value) > 160 do return false
+	parts := strings.split(value, ".", context.temp_allocator)
+	if len(parts) != 3 || parts[0] == "" || parts[1] == "" do return false
+	want, ok := preview_bind_tag(service, bind_id, parts[0], parts[1])
+	if !ok || !oidc_constant_time_equal(want, parts[2]) do return false
+	minted, ts_ok := strconv.parse_i64(parts[1])
+	now, now_ok := now_unix_ms(service)
+	if !ts_ok || !now_ok do return false
+	return minted <= now + 60_000 && now - minted <= PREVIEW_BIND_TTL_S * 1000
 }
 
 preview_ticket_mint :: proc(service: ^Auth_Service, principal: contracts.Auth_Context, shell_session_id, return_to, bind_hash, bind_id: string, hop := 1) -> (string, domain.Domain_Error) {
@@ -319,4 +339,25 @@ preview_cookie_header :: proc(raw: string, max_age_s: i64) -> string {
 
 preview_bind_cookie_header :: proc(bind_id, value: string) -> string {
 	return fmt.tprintf("%s=%s; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=%d", preview_bind_cookie_name(bind_id), value, PREVIEW_BIND_TTL_S)
+}
+
+// preview_bind_cookie_names lists the per-flow bind cookies a request carries.
+preview_bind_cookie_names :: proc(headers: []contracts.HTTP_Header) -> []string {
+	prefix := strings.concatenate({PREVIEW_BIND_COOKIE, "_"}, context.temp_allocator)
+	names := make([dynamic]string, context.temp_allocator)
+	for h in headers {
+		if !ascii_equal_fold(h.name, "Cookie") do continue
+		rest := h.value
+		for part in strings.split_iterator(&rest, ";") {
+			pair := strings.trim_space(part)
+			eq := strings.index_byte(pair, '=')
+			if eq <= 0 do continue
+			if strings.has_prefix(pair[:eq], prefix) do append(&names, pair[:eq])
+		}
+	}
+	return names[:]
+}
+
+preview_hop_cookie_header :: proc(hop: int) -> string {
+	return fmt.tprintf("%s=%d; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=%d", PREVIEW_HOP_COOKIE, hop, PREVIEW_HOP_TTL_S)
 }

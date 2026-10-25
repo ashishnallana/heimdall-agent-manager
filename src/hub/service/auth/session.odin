@@ -1,5 +1,6 @@
 package auth
 
+import "core:crypto/hmac"
 import "core:crypto/sha2"
 import "core:encoding/base64"
 import "core:encoding/json"
@@ -68,15 +69,27 @@ login_seal_key :: proc(seal: ^Login_Seal) -> ([chacha20poly1305.KEY_SIZE]byte, b
 	return seal.key, true
 }
 
-// hub_process_key is a per-process random secret (also the login sealing key).
-// Every use is domain-separated (AAD / HMAC message prefix).
+// hub_process_key is the per-process random root secret. It is never used
+// directly: every purpose derives its own sub-key with hub_subkey.
 hub_process_key :: proc(service: ^Auth_Service) -> ([chacha20poly1305.KEY_SIZE]byte, bool) {
 	return login_seal_key(&service.login_seal)
 }
 
+HUB_SUBKEY_LOGIN_SEAL :: "heimdall-login-seal-v1"
+HUB_SUBKEY_PREVIEW_BIND :: "heimdall-preview-bind-v1"
+
+// hub_subkey derives a purpose-specific key: HMAC-SHA256(process key, label).
+hub_subkey :: proc(service: ^Auth_Service, label: string) -> ([32]byte, bool) {
+	root, ok := hub_process_key(service)
+	if !ok do return {}, false
+	out: [32]byte
+	hmac.sum(.SHA256, out[:], transmute([]byte)label, root[:])
+	return out, true
+}
+
 // login_cookie_seal returns base64url(nonce || ciphertext || tag).
 login_cookie_seal :: proc(service: ^Auth_Service, payload: Login_Payload) -> (string, bool) {
-	key, key_ok := login_seal_key(&service.login_seal)
+	key, key_ok := hub_subkey(service, HUB_SUBKEY_LOGIN_SEAL)
 	if !key_ok do return "", false
 	plain, merr := json.marshal(payload, allocator = context.temp_allocator)
 	if merr != nil do return "", false
@@ -96,7 +109,7 @@ login_cookie_open :: proc(service: ^Auth_Service, sealed: string) -> (Login_Payl
 	if sealed == "" || len(sealed) > 4096 do return {}, false
 	raw, decoded := oidc_decode(sealed)
 	if !decoded || len(raw) < chacha20poly1305.XIV_SIZE + chacha20poly1305.TAG_SIZE + 2 do return {}, false
-	key, key_ok := login_seal_key(&service.login_seal)
+	key, key_ok := hub_subkey(service, HUB_SUBKEY_LOGIN_SEAL)
 	if !key_ok do return {}, false
 	iv := raw[:chacha20poly1305.XIV_SIZE]
 	ct := raw[chacha20poly1305.XIV_SIZE:len(raw) - chacha20poly1305.TAG_SIZE]

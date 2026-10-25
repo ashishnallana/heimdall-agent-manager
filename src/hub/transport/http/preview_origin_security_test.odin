@@ -516,7 +516,7 @@ test_preview_auth_ticket_single_use_expiry_and_cookie :: proc(t: ^testing.T) {
 	ticket, _ := preview_flow_ticket(t, f, "owner")
 	resp := preview_flow_redeem(f, ticket)
 	testing.expect_value(t, resp.status, 302)
-	testing.expect_value(t, preview_flow_header(resp, "Location"), "/p/sh_owned/app?x=1&__heimdall_hop=1")
+	testing.expect_value(t, preview_flow_header(resp, "Location"), "/p/sh_owned/app?x=1")
 	cookie := preview_flow_set_cookie(resp, auth_service.PREVIEW_COOKIE)
 	testing.expect(t, strings.contains(preview_flow_set_cookie(resp, auth_service.preview_bind_cookie_name(f.bind_id)), "Max-Age=0"), "this flow's bind cookie cleared on redeem")
 	for attr in ([]string{"__Host-heimdall_preview=", "Path=/", "Secure", "HttpOnly", "SameSite=Lax", "Max-Age="}) do testing.expect(t, strings.contains(cookie, attr), attr)
@@ -664,7 +664,7 @@ test_preview_ticket_bound_to_starting_browser :: proc(t: ^testing.T) {
 	if strings.has_prefix(ticket_location, prefix) {
 		redeemed := preview_flow_redeem(f, ticket_location[len(prefix):], false, preview_flow_bind_cookie(new_bind_id, raw_bind))
 		testing.expect_value(t, redeemed.status, 302)
-		testing.expect_value(t, preview_flow_header(redeemed, "Location"), "/p/sh_owned/x?__heimdall_hop=1")
+		testing.expect_value(t, preview_flow_header(redeemed, "Location"), "/p/sh_owned/x")
 	}
 	// The bind endpoint refuses targets outside the preview session.
 	bad := preview_auth_bind(&f.h, Request{method = "GET", path = PREVIEW_BIND_PATH, query = "session=sh_owned&return_to=%2F%2Fevil.example", request_id = "r"})
@@ -703,10 +703,10 @@ test_preview_interleaved_flows_both_succeed :: proc(t: ^testing.T) {
 	both := contracts.HTTP_Header{"Cookie", strings.concatenate({a_pair, "; ", b_pair}, context.temp_allocator)}
 	rb := preview_flow_redeem(f, ticket_b, false, both)
 	testing.expect_value(t, rb.status, 302)
-	testing.expect_value(t, preview_flow_header(rb, "Location"), "/p/sh_owned/b?__heimdall_hop=1")
+	testing.expect_value(t, preview_flow_header(rb, "Location"), "/p/sh_owned/b")
 	ra := preview_flow_redeem(f, ticket_a, false, both)
 	testing.expect_value(t, ra.status, 302)
-	testing.expect_value(t, preview_flow_header(ra, "Location"), "/p/sh_owned/a?__heimdall_hop=1")
+	testing.expect_value(t, preview_flow_header(ra, "Location"), "/p/sh_owned/a")
 }
 
 // A browser that never keeps the preview cookie stops after a few bounces with
@@ -732,4 +732,88 @@ test_preview_bounce_hop_limit :: proc(t: ^testing.T) {
 	rest, hop = preview_strip_hop("__heimdall_hop=1")
 	testing.expect_value(t, rest, "")
 	testing.expect_value(t, hop, 1)
+}
+
+// Review (a): the bind value carries its mint time under the MAC; a harvested
+// value goes stale after the 300 s window, and the timestamp cannot be edited.
+@(test)
+test_preview_bind_value_expires_and_timestamp_is_authenticated :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	f := preview_flow_fixture(t)
+	defer auth_service.oidc_free(&f.auth)
+	parts := strings.split(f.bind_value, ".")
+	testing.expect_value(t, len(parts), 3)
+	testing.expect(t, auth_service.preview_bind_value_ok(&f.auth, f.bind_id, f.bind_value))
+	// Editing the timestamp breaks the tag.
+	bumped := strings.concatenate({parts[0], ".", parts[1], "1", ".", parts[2]})
+	testing.expect(t, !auth_service.preview_bind_value_ok(&f.auth, f.bind_id, bumped))
+	// A ticket bound to a value redeemed after the window is refused.
+	ticket, _ := preview_flow_ticket(t, f, "owner")
+	f.now = "2026-10-25T10:00:59Z"
+	fresh, _ := preview_flow_ticket(t, f, "owner")
+	testing.expect_value(t, preview_flow_redeem(f, fresh).status, 302)
+	f.now = "2026-10-25T10:05:01Z" // > 300 s after the bind value was minted
+	testing.expect(t, !auth_service.preview_bind_value_ok(&f.auth, f.bind_id, f.bind_value))
+	_ = ticket
+	late_ticket, _ := preview_flow_ticket(t, f, "owner") // ticket itself is fresh
+	testing.expect_value(t, preview_flow_redeem(f, late_ticket).status, 403)
+	// Distinct sub-keys: the bind tag key is not the login seal key.
+	login_key, _ := auth_service.hub_subkey(&f.auth, auth_service.HUB_SUBKEY_LOGIN_SEAL)
+	bind_key, _ := auth_service.hub_subkey(&f.auth, auth_service.HUB_SUBKEY_PREVIEW_BIND)
+	root, _ := auth_service.hub_process_key(&f.auth)
+	testing.expect(t, login_key != bind_key && login_key != root && bind_key != root)
+}
+
+// Review (c): a browser holding the maximum number of bind cookies gets them all
+// expired before a new one is minted.
+@(test)
+test_preview_bind_cookie_bomb_cap :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	f := preview_flow_fixture(t)
+	defer auth_service.oidc_free(&f.auth)
+	cookie := "__Host-heimdall_preview_bind_AAAAAAAA=x; __Host-heimdall_preview_bind_BBBBBBBB=x; __Host-heimdall_preview_bind_CCCCCCCC=x; app=1"
+	nav := Request{method = "GET", path = "/p/sh_owned/a", request_id = "r", headers = []contracts.HTTP_Header{{"Sec-Fetch-Mode", "navigate"}, {"Cookie", cookie}}}
+	_, _, under := preview_origin_auth(&f.h, nav)
+	expired := 0
+	for h in under.headers do if strings.equal_fold(h.name, "Set-Cookie") && strings.contains(h.value, "Max-Age=0") do expired += 1
+	testing.expect_value(t, expired, 0) // 3 < cap: keep the pending flows
+	nav.headers = []contracts.HTTP_Header{{"Sec-Fetch-Mode", "navigate"}, {"Cookie", strings.concatenate({cookie, "; __Host-heimdall_preview_bind_DDDDDDDD=x"})}}
+	_, _, at_cap := preview_origin_auth(&f.h, nav)
+	testing.expect_value(t, at_cap.status, 302)
+	expired = 0
+	for h in at_cap.headers do if strings.equal_fold(h.name, "Set-Cookie") && strings.contains(h.value, "Max-Age=0") && strings.has_prefix(h.value, "__Host-heimdall_preview_bind_") do expired += 1
+	testing.expect_value(t, expired, 4)
+	testing.expect(t, strings.contains(preview_flow_new_bind_live(at_cap), "Max-Age=300"), "a fresh bind cookie is still minted")
+}
+
+@(private = "file")
+preview_flow_new_bind_live :: proc(resp: Response) -> string {
+	for h in resp.headers do if strings.equal_fold(h.name, "Set-Cookie") && strings.has_prefix(h.value, "__Host-heimdall_preview_bind_") && !strings.contains(h.value, "Max-Age=0") do return h.value
+	return ""
+}
+
+// Review (d): the normal path leaves the app's URL clean; the bounce count is
+// kept in a short-lived hop cookie, and the URL counter appears from hop 2 on.
+@(test)
+test_preview_hop_counter_only_on_repeat_bounces :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	f := preview_flow_fixture(t)
+	defer auth_service.oidc_free(&f.auth)
+	ticket, _ := preview_flow_ticket(t, f, "owner")
+	first := preview_flow_redeem(f, ticket)
+	testing.expect_value(t, preview_flow_header(first, "Location"), "/p/sh_owned/app?x=1")
+	hop_cookie := preview_flow_set_cookie(first, auth_service.PREVIEW_HOP_COOKIE)
+	testing.expect(t, strings.has_prefix(hop_cookie, "__Host-heimdall_preview_hop=1;") && strings.contains(hop_cookie, "Max-Age=30"), hop_cookie)
+	// The browser dropped the preview cookie but kept the hop cookie: next bounce is hop 2.
+	nav := Request{method = "GET", path = "/p/sh_owned/app", request_id = "r", headers = []contracts.HTTP_Header{{"Sec-Fetch-Mode", "navigate"}, {"Cookie", "__Host-heimdall_preview_hop=1"}}}
+	_, _, second := preview_origin_auth(&f.h, nav)
+	testing.expect(t, strings.has_suffix(preview_flow_header(second, "Location"), "&hop=2"), preview_flow_header(second, "Location"))
+	// A hop-2 ticket returns with the URL counter.
+	owner := http_test_login(t, &f.auth, "owner")
+	query := strings.concatenate({"session=sh_owned&return_to=%2Fp%2Fsh_owned%2F&bind=", auth_service.sha256_hex(f.bind_value), "&bind_id=", f.bind_id, "&hop=2"})
+	started := preview_flow_start(f, query, owner)
+	loc := preview_flow_header(started, "Location")
+	t2 := loc[strings.index(loc, "ticket=") + len("ticket="):] if strings.contains(loc, "ticket=") else ""
+	again := preview_flow_redeem(f, t2)
+	testing.expect_value(t, preview_flow_header(again, "Location"), "/p/sh_owned/?__heimdall_hop=2")
 }
