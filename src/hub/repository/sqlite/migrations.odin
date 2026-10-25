@@ -533,7 +533,9 @@ MIGRATION_139_BRIDGE_TOKEN_DELIVERY_AND_REGRANT :: #load("migrations/139_bridge_
 // MIGRATION_140: unique (family_id, kind, generation) on bridge_tokens, guarded.
 MIGRATION_140_BRIDGE_TOKENS_UNIQUE_GENERATION :: #load("migrations/140_bridge_tokens_unique_generation.sql", string)
 
-migration_order :: [144]string {
+MIGRATION_141_EXTENSION_VERSION_SYNC :: #load("migrations/141_extension_version_sync_0_5_2.sql", string)
+
+migration_order :: [145]string {
 	"001_foundation.sql",
 	"002_owner_scoped_core.sql",
 	"003_device_tokens.sql",
@@ -678,6 +680,7 @@ migration_order :: [144]string {
 	"138_bridge_token_rotation_request.sql",
 	"139_bridge_token_delivery_and_regrant.sql",
 	"140_bridge_tokens_unique_generation.sql",
+	"141_extension_version_sync_0_5_2.sql",
 }
 
 // stop_before is a TEST SEAM: when non-empty, the apply loop stops in front of
@@ -1157,6 +1160,7 @@ migration_sql :: proc(name, migrations_dir: string) -> string {
 			return string(data)
 		}
 	}
+	if name == "141_extension_version_sync_0_5_2.sql" do return strings.clone(MIGRATION_141_EXTENSION_VERSION_SYNC)
 	if name == "140_bridge_tokens_unique_generation.sql" do return strings.clone(MIGRATION_140_BRIDGE_TOKENS_UNIQUE_GENERATION)
 	if name == "139_bridge_token_delivery_and_regrant.sql" do return strings.clone(MIGRATION_139_BRIDGE_TOKEN_DELIVERY_AND_REGRANT)
 	if name == "138_bridge_token_rotation_request.sql" do return strings.clone(MIGRATION_138_BRIDGE_TOKEN_ROTATION_REQUEST)
