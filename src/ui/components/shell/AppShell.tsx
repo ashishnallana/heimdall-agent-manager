@@ -1849,12 +1849,12 @@ function AuthenticatedShell({ user }: { user: AuthUser }) {
   const isEffectiveCollapsed = isMobile ? !drawerOpen : collapsed;
   const isWorkspaceRoute = isAgentConversationRoute(path);
   const hideTopLeftCluster = isMobile && isWorkspaceRoute && isCurrentAuxPaneOpen;
-  const showBrand = !isWorkspaceRoute;
+  const showBrand = !isWorkspaceRoute || !isEffectiveCollapsed;
   const topLeftClusterWidth = computeTopLeftClusterWidth(isMobile, showBrand);
   const chromeHeight = topChromeHeight(isMobile);
   const chromeIconButtonClass = chromeIconButtonSizeClass(isMobile);
-  // Fixed window controls: sidebar + vault everywhere, plus the wordmark on
-  // every route except an agent conversation. They do not move with the sidebar.
+  // Fixed sidebar control, plus the wordmark when the sidebar is open or the
+  // route is not an agent conversation. They do not move with the sidebar.
   const sidebarToggleButton = (
     <button
       data-debug-id="shell-sidebar-collapse-toggle"
