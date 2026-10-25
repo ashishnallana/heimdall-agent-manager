@@ -357,9 +357,19 @@ work_chain_complete_in_uow :: proc(svc: ^Service, u: ^Uow, owner: domain.User_ID
 	if len(blockers) > 0 {
 		names := make([dynamic]string, context.temp_allocator)
 		for b in blockers do append(&names, jsonx.extract_string(b, "id", "", true, context.temp_allocator))
-		details := fmt.tprintf(`{"code":"chain_incomplete","items":[%s],"recovery":%s}`, strings.join(blockers[:], ",", context.temp_allocator), COMPLETION_RECOVERY_JSON)
-		return {}, false, domain.domain_error(.Conflict, fmt.tprintf("chain cannot finish; unresolved work items: %s", strings.join(names[:], ", ", context.temp_allocator)), details)
+		// Built with the JSON builder: core:fmt treats a literal '{' in a
+		// format string as a placeholder and would corrupt details_json.
+		items := strings.builder_make(context.temp_allocator)
+		strings.write_byte(&items, '[')
+		strings.write_string(&items, strings.join(blockers[:], ",", context.temp_allocator))
+		strings.write_byte(&items, ']')
+		details := json_begin()
+		json_str(&details, "code", "chain_incomplete")
+		json_raw(&details, "items", strings.to_string(items))
+		json_raw(&details, "recovery", COMPLETION_RECOVERY_JSON)
+		return {}, false, domain.domain_error(.Conflict, fmt.tprintf("chain cannot finish; unresolved work items: %s", strings.join(names[:], ", ", context.temp_allocator)), json_end(&details))
 	}
+	if successes == 0 do return {}, false, domain.domain_error(.Conflict, "at least one successful included work item is required")
 	leases, lerr := iface.taskchain_list_leases_by_chain(svc.repo, chain_id)
 	if lerr.code != .None do return {}, false, lerr
 	if len(leases) != 0 do return {}, false, domain.domain_error(.Conflict, "chain still has live leases")

@@ -239,7 +239,9 @@ rebuild_timers :: proc(svc: ^Service) {
 	if done, derr := iface.taskchain_list_tasks_by_state(svc.repo, .Done); derr.code == .None {
 		for t in done {
 			evs, eerr := iface.taskchain_list_events_by_task(svc.repo, t.task_id, t.owner_user_id)
-			if eerr.code == .None && merge_pending(evs) do arm_task_timers(svc, t)
+			if eerr.code != .None || !merge_pending(evs) do continue
+			backfill_merge_snapshot(svc, t, evs)
+			arm_task_timers(svc, t)
 		}
 	}
 	// Idle_TTL from agent_instances.idle_since (live, lease-free instances).

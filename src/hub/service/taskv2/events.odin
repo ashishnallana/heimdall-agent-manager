@@ -45,6 +45,7 @@ EV_STARTED_WORKFLOW  :: "started_workflow"   // {chain_id}
 EV_CARRIED_FORWARD   :: "carried_forward"    // {from_task_id, from_attempt_no}
 EV_MERGED            :: "merged"             // {branch, into, head, mode}  — task branch landed
 EV_MERGE_FAILED      :: "merge_failed"       // {branch, detail}  — merge could not run (bridge offline, …)
+EV_MERGE_SNAPSHOT    :: "merge_snapshot"     // {applicable, git_directories:[…], backfilled?} — git directories at Done (immutable)
 EV_GATE_FEEDBACK     :: "gate_feedback"      // {gate_task_id, round, summary?, findings, rejected_at} — on a stage re-run after a gate reject
 
 // Expiry reasons. `replaced`, `dep_added` and `reopen` are STRUCTURAL: the

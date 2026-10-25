@@ -10,6 +10,7 @@ import iface "odin_test:hub/repository/iface"
 import platform "odin_test:hub/platform"
 import project "odin_test:hub/service/project"
 import jsonx "odin_test:lib/jsonx"
+import contracts "odin_test:contracts"
 
 // Per-task worktree merge-back. A task placed in a git directory works on
 // branch `heimdall/<task_id>` in `<dir>/.heimdall/worktrees/<task_id>`
@@ -287,9 +288,17 @@ task_merge_status :: proc(svc: ^Service, task: domain.Task) -> Merge_Status {
 	if task.state != .Done && !strings.contains(task.blocked_on_json, `"merge_conflict"`) do return st
 	evs, eerr := iface.taskchain_list_events_by_task(svc.repo, task.task_id, task.owner_user_id)
 	if eerr.code != .None do return st
+	// The newest merge_snapshot after the Done-making event is the
+	// immutable record of whether a git directory applied at Done.
+	snapshot_seen, snapshot_applicable := false, false
 	for i := len(evs) - 1; i >= 0; i -= 1 {
 		ev := evs[i]
 		switch ev.kind {
+		case EV_MERGE_SNAPSHOT:
+			if !snapshot_seen {
+				snapshot_seen = true
+				snapshot_applicable = jsonx.extract_bool(ev.payload_json, "applicable", false, true)
+			}
 		case EV_MERGED:
 			st.state = "merged"
 			st.head = jsonx.extract_string(ev.payload_json, "head", "", true, context.temp_allocator)
@@ -306,25 +315,82 @@ task_merge_status :: proc(svc: ^Service, task: domain.Task) -> Merge_Status {
 		case EV_APPROVED, EV_SUBMITTED:
 			// Done with no outcome yet: pending only where a worktree applies —
 			// work ran (a gate never has a work lease) in a git directory.
-			ran := false
-			for e in evs do if e.kind == EV_LEASE_GRANTED && jsonx.extract_string(e.payload_json, "kind", domain.LEASE_KIND_WORK, true, context.temp_allocator) == domain.LEASE_KIND_WORK { ran = true; break }
-			if !ran do return st
-			dirs, derr := iface.taskchain_list_directories_by_chain(svc.repo, task.chain_id, task.owner_user_id)
-			if derr.code != .None do return st
-			// Snapshot at Done (REQ-TV2-3b): only a git directory that already
-			// existed when the task reached Done makes it pending. A directory
-			// added later never retro-actively owes a merge, so such a task is
-			// `none` permanently.
-			for d in dirs {
-				if d.vcs_kind != "git" do continue
-				if created_ms, cok := platform.rfc3339_to_unix_ms(d.created_at); cok && created_ms > ev.ts_ms do continue
-				st.state = "pending"
-				break
+			if !task_ran_work(evs) do return st
+			applicable := snapshot_applicable
+			if !snapshot_seen {
+				// Legacy Done (before snapshots existed, not yet backfilled at
+				// boot): derive from the current directory rows.
+				applicable = len(git_directories_at(svc, task, ev.ts_ms)) > 0
 			}
+			if applicable do st.state = "pending"
 			return st
 		}
 	}
 	return st
+}
+
+task_ran_work :: proc(evs: []domain.Task_Event) -> bool {
+	for e in evs do if e.kind == EV_LEASE_GRANTED && jsonx.extract_string(e.payload_json, "kind", domain.LEASE_KIND_WORK, true, context.temp_allocator) == domain.LEASE_KIND_WORK do return true
+	return false
+}
+
+// git_directories_at lists the chain's git directories; with before_ms > 0
+// only those created at or before it (the legacy derivation).
+git_directories_at :: proc(svc: ^Service, task: domain.Task, before_ms: i64 = 0) -> [dynamic]string {
+	out := make([dynamic]string, context.temp_allocator)
+	dirs, derr := iface.taskchain_list_directories_by_chain(svc.repo, task.chain_id, task.owner_user_id)
+	if derr.code != .None do return out
+	for d in dirs {
+		if d.vcs_kind != "git" do continue
+		if before_ms > 0 {
+			if created_ms, cok := platform.rfc3339_to_unix_ms(d.created_at); cok && created_ms > before_ms do continue
+		}
+		append(&out, string(d.directory_id))
+	}
+	return out
+}
+
+// record_merge_snapshot (REQ-TV2-3b) appends the immutable Done-time record of
+// the chain's git directories. Later directory updates, removals or re-adds
+// never change it: a task Done with no git directory stays merge none, and a
+// task Done with one stays pending until a merge outcome even if the directory
+// goes away. Recorded on every transition into Done (so a reopen re-snapshots).
+record_merge_snapshot :: proc(svc: ^Service, task: domain.Task) {
+	if svc == nil || svc.repo == nil || !PER_LEASE_WORKTREES_ENABLED do return
+	append_merge_snapshot(svc, task, git_directories_at(svc, task)[:], false)
+}
+
+append_merge_snapshot :: proc(svc: ^Service, task: domain.Task, dirs: []string, backfilled: bool) {
+	ids := strings.builder_make(context.temp_allocator)
+	strings.write_byte(&ids, '[')
+	for id, i in dirs {
+		if i > 0 do strings.write_byte(&ids, ',')
+		strings.write_byte(&ids, '"')
+		contracts.write_json_string(&ids, id)
+		strings.write_byte(&ids, '"')
+	}
+	strings.write_byte(&ids, ']')
+	p := json_begin()
+	json_bool(&p, "applicable", len(dirs) > 0)
+	json_raw(&p, "git_directories", strings.to_string(ids))
+	if backfilled do json_bool(&p, "backfilled", true)
+	append_event(svc.repo, svc.clock, task, hub_actor(), EV_MERGE_SNAPSHOT, json_end(&p))
+}
+
+// backfill_merge_snapshot (boot): a legacy Done task with a pending merge and
+// no snapshot gets one from the legacy derivation, so from then on its merge
+// applicability no longer follows mutable directory rows.
+backfill_merge_snapshot :: proc(svc: ^Service, task: domain.Task, evs: []domain.Task_Event) {
+	if !PER_LEASE_WORKTREES_ENABLED do return
+	for i := len(evs) - 1; i >= 0; i -= 1 {
+		switch evs[i].kind {
+		case EV_MERGE_SNAPSHOT, EV_MERGED, EV_MERGE_CONFLICT, EV_MERGE_FAILED: return
+		case EV_APPROVED, EV_SUBMITTED:
+			if !task_ran_work(evs) do return
+			append_merge_snapshot(svc, task, git_directories_at(svc, task, evs[i].ts_ms)[:], true)
+			return
+		}
+	}
 }
 
 // Generation changes are refused while merges are pending, so a job authorized

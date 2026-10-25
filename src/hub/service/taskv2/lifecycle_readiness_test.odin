@@ -1,5 +1,6 @@
 package taskv2
 
+import "core:encoding/json"
 import "core:fmt"
 import "core:strings"
 import "core:testing"
@@ -148,6 +149,11 @@ test_pending_merge_readiness_agrees_and_completion_names_tickets :: proc(t: ^tes
 	queued := len(u.effects.merges)
 	_, _ = end_uow(&fx.svc, &u, false)
 	testing.expect(t, added_ok && queued == 1, fmt.tprintf("pending merge requeued on directory add (%d)", queued))
+	// the Done-time snapshot is immutable: removing every git directory does
+	// not turn the unresolved merge into `none` (no merge-gate bypass)
+	_, _ = iface.taskchain_remove_directory(&fx.repo, "dir_git", chain.chain_id, "u1")
+	_, _ = iface.taskchain_remove_directory(&fx.repo, "dir_git2", chain.chain_id, "u1")
+	testing.expect_value(t, task_merge_status(&fx.svc, get_task(fx, "task_a")).state, "pending")
 	// completion names every offending ticket, with state, merge and recovery
 	fresh_chain, _, _ := iface.taskchain_get_chain(&fx.repo, chain.chain_id)
 	_, completed, cerr := work_chain_complete(&fx.svc, "u1", Actor{kind = ACTOR_USER, id = "u1"}, chain.chain_id, fresh_chain.work_revision, "finish")
@@ -156,16 +162,39 @@ test_pending_merge_readiness_agrees_and_completion_names_tickets :: proc(t: ^tes
 	testing.expect(t, strings.contains(cerr.details_json, `"id":"task_a"`) && strings.contains(cerr.details_json, `"merge":"pending"`) && strings.contains(cerr.details_json, `"reason":"merge_unresolved"`), fmt.tprintf("task_a detail: %s", cerr.details_json))
 	testing.expect(t, strings.contains(cerr.details_json, `"id":"task_b"`) && strings.contains(cerr.details_json, `"state":"backlog"`), "task_b detail")
 	testing.expect(t, strings.contains(cerr.details_json, `"action":"exclude"`) && strings.contains(cerr.details_json, `"action":"retry_merge"`) && strings.contains(cerr.details_json, `"action":"settle_merge_none"`), "recovery options listed")
+	// details_json is a well-formed object (no core:fmt brace corruption)
+	testing.expect(t, !strings.contains(cerr.details_json, "%!"), fmt.tprintf("no fmt corruption: %s", cerr.details_json))
+	parsed, perr := json.parse_string(cerr.details_json, allocator = context.temp_allocator)
+	if !testing.expect(t, perr == .None, fmt.tprintf("details parse: %v %s", perr, cerr.details_json)) do return
+	obj, is_obj := parsed.(json.Object)
+	if !testing.expect(t, is_obj, "details is an object") do return
+	testing.expect_value(t, obj["code"].(json.String) or_else "", "chain_incomplete")
+	testing.expect_value(t, len(obj["items"].(json.Array) or_else nil), 2)
+	testing.expect_value(t, len(obj["recovery"].(json.Array) or_else nil), 3)
 }
 
-// O15: a git directory added AFTER a ticket reached Done never makes it
-// merge-pending (snapshot at Done), so the ticket stays `none`.
+// Completion still needs at least one successful included item: an empty
+// chain (no blockers, no leases) is refused, not marked completed.
+@(test)
+test_complete_empty_chain_refused :: proc(t: ^testing.T) {
+	fx, log, ok := lease_fixture(t, "t6_empty")
+	defer lease_fixture_close(fx, log)
+	if !ok do return
+	chain := seed_live_chain(t, fx, "chain_empty")
+	fresh_chain, _, _ := iface.taskchain_get_chain(&fx.repo, chain.chain_id)
+	_, completed, cerr := work_chain_complete(&fx.svc, "u1", Actor{kind = ACTOR_USER, id = "u1"}, chain.chain_id, fresh_chain.work_revision, "finish")
+	testing.expect(t, !completed && cerr.code == .Conflict && strings.contains(cerr.message, "at least one successful"), fmt.tprintf("empty chain refused: %v %s", completed, cerr.message))
+}
+
+// O15: a git directory added (or switched to git) AFTER a ticket reached Done
+// never makes it merge-pending (immutable snapshot at Done), so it stays `none`.
 @(test)
 test_directory_added_after_done_is_not_pending :: proc(t: ^testing.T) {
 	fx, log, ok := lease_fixture(t, "t6_o15")
 	defer lease_fixture_close(fx, log)
 	if !ok do return
 	chain := seed_live_chain(t, fx, "chain_o15")
+	seed_directory(fx, chain, "dir_plain", "br_1", "")
 	seed_fleet(fx, chain, "agt_w")
 	seed_instance(fx, chain, "inst_w1", "agt_w", "br_1", "idle")
 	_ = publish_task(t, fx, chain, "task_a")
@@ -173,8 +202,10 @@ test_directory_added_after_done_is_not_pending :: proc(t: ^testing.T) {
 	_, sok, _ := lease_submit(&fx.svc, inst_auth("inst_w1"), Submit_Input{summary = "a", vcs_json = `{"head":"ha","dirty":false}`})
 	if !testing.expect(t, sok, "submit") do return
 	testing.expect_value(t, task_merge_status(&fx.svc, get_task(fx, "task_a")).state, "none")
-	fixture_advance(fx, 60)
+	// same second as Done: a late git directory and a pre-Done non-git
+	// directory switched to git both leave the snapshot (none) unchanged
 	seed_directory(fx, chain, "dir_late", "br_1", "git")
+	seed_directory(fx, chain, "dir_plain", "br_1", "git")
 	done_a := get_task(fx, "task_a")
 	testing.expect_value(t, task_merge_status(&fx.svc, done_a).state, "none")
 	testing.expect(t, task_unblocks_dependents(&fx.svc, done_a), "still unblocks dependents")
