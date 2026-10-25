@@ -535,7 +535,9 @@ MIGRATION_140_BRIDGE_TOKENS_UNIQUE_GENERATION :: #load("migrations/140_bridge_to
 
 MIGRATION_141_EXTENSION_VERSION_SYNC :: #load("migrations/141_extension_version_sync_0_5_2.sql", string)
 
-migration_order :: [145]string {
+MIGRATION_142_EXTENSION_VERSION_SYNC :: #load("migrations/142_extension_version_sync_0_5_3.sql", string)
+
+migration_order :: [146]string {
 	"001_foundation.sql",
 	"002_owner_scoped_core.sql",
 	"003_device_tokens.sql",
@@ -681,6 +683,7 @@ migration_order :: [145]string {
 	"139_bridge_token_delivery_and_regrant.sql",
 	"140_bridge_tokens_unique_generation.sql",
 	"141_extension_version_sync_0_5_2.sql",
+	"142_extension_version_sync_0_5_3.sql",
 }
 
 // stop_before is a TEST SEAM: when non-empty, the apply loop stops in front of
@@ -1160,6 +1163,7 @@ migration_sql :: proc(name, migrations_dir: string) -> string {
 			return string(data)
 		}
 	}
+	if name == "142_extension_version_sync_0_5_3.sql" do return strings.clone(MIGRATION_142_EXTENSION_VERSION_SYNC)
 	if name == "141_extension_version_sync_0_5_2.sql" do return strings.clone(MIGRATION_141_EXTENSION_VERSION_SYNC)
 	if name == "140_bridge_tokens_unique_generation.sql" do return strings.clone(MIGRATION_140_BRIDGE_TOKENS_UNIQUE_GENERATION)
 	if name == "139_bridge_token_delivery_and_regrant.sql" do return strings.clone(MIGRATION_139_BRIDGE_TOKEN_DELIVERY_AND_REGRANT)
