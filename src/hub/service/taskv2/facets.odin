@@ -14,7 +14,7 @@ import jsonx "odin_test:lib/jsonx"
 
 FACET_HANDOFF   :: "handoff"
 FACET_VCS       :: "vcs"
-FACET_VERIFY    :: "verify"
+FACET_VERIFY    :: "verify" // legacy, read-only history (D2): nothing writes it, no gate/pack/alert reads it
 FACET_OUTPUT    :: "output"
 FACET_RUNTIME   :: "runtime"
 FACET_ARTIFACTS :: "artifacts"

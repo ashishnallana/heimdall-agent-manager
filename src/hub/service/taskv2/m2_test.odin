@@ -636,7 +636,7 @@ test_pack_full_sections_and_field_safe_cap :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(pack, "Choose and run checks appropriate to the change"), "protocol rule 4 asks for worker-chosen checks")
 
 	// 4. Test 32 KiB field-safe cap (cap_pack_json_field_safe): drops inputs -> handoff, preserving brief, dead_ends, findings
-	big_chunk := strings.repeat("X", 14000, context.temp_allocator)
+	big_chunk := strings.repeat("X", 20000, context.temp_allocator)
 	huge_pack := fmt.tprintf(
 		`{{"lease_id":"lse_cap","task_id":"task_pf","attempt_no":2,"brief":{{"goal":"full pack goal"}},"inputs":[{{"ref":"output:t_up","resolved":true,"data":"%s"}}],"previous_attempt":{{"attempt_no":1,"outcome":"changes_requested","handoff":{{"summary":"%s","dead_ends":["keep_dead_end_1"]}}}},"findings":[{{"role":"reviewer","reviewer":"inst_r1","path":"src/a.odin","line":42,"severity":"blocking","text":"keep_finding_1"}}]}}`,
 		big_chunk, big_chunk,

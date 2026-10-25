@@ -8,6 +8,9 @@ import domain "odin_test:hub/domain"
 
 Task_Chain_List_Published_Active_Proc :: proc(ctx: rawptr) -> ([]domain.Task_Chain, domain.Domain_Error)
 Task_List_By_State_Proc :: proc(ctx: rawptr, state: domain.Task_State) -> ([]domain.Task, domain.Domain_Error)
+// Take_Boot_Regate_Proc consumes the one-shot "re-evaluate every in-review
+// gate at boot" marker a gate-affecting migration leaves; true when it was set.
+Take_Boot_Regate_Proc :: proc(ctx: rawptr) -> (bool, domain.Domain_Error)
 
 Task_Event_Append_Proc :: proc(ctx: rawptr, event: domain.Task_Event) -> (domain.Task_Event, bool, domain.Domain_Error)
 Task_Event_List_By_Task_Proc :: proc(ctx: rawptr, task_id: domain.Task_ID, owner_user_id: domain.User_ID) -> ([]domain.Task_Event, domain.Domain_Error)
@@ -48,6 +51,11 @@ taskchain_list_published_active_chains :: proc(repo: ^Taskchain_Repository) -> (
 taskchain_list_tasks_by_state :: proc(repo: ^Taskchain_Repository, state: domain.Task_State) -> ([]domain.Task, domain.Domain_Error) {
 	if repo == nil || repo.list_tasks_by_state == nil do return nil, domain.domain_error(.Internal_Error, NOT_CONFIGURED)
 	return repo.list_tasks_by_state(repo.ctx, state)
+}
+
+taskchain_take_boot_regate :: proc(repo: ^Taskchain_Repository) -> (bool, domain.Domain_Error) {
+	if repo == nil || repo.take_boot_regate == nil do return false, domain.domain_error(.Internal_Error, NOT_CONFIGURED)
+	return repo.take_boot_regate(repo.ctx)
 }
 
 taskchain_append_event :: proc(repo: ^Taskchain_Repository, event: domain.Task_Event) -> (domain.Task_Event, bool, domain.Domain_Error) {

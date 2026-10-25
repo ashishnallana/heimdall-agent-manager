@@ -56,6 +56,19 @@ task_list_by_state_sqlite :: proc(ctx: rawptr, state: domain.Task_State) -> ([]d
 	return out[:], domain.Domain_Error{}
 }
 
+// taskchain_take_boot_regate_sqlite deletes the taskv2_boot_regate marker row
+// (migration 128) and reports whether it was there.
+taskchain_take_boot_regate_sqlite :: proc(ctx: rawptr) -> (bool, domain.Domain_Error) {
+	impl := (^Taskchain_Repo_SQLite)(ctx)
+	stmt, err := prepare(impl, "DELETE FROM taskv2_boot_regate WHERE singleton = 1 RETURNING reason;", "boot regate take")
+	if err.code != .None do return false, err
+	defer sqlite3_finalize(stmt)
+	rc := sqlite3_step(stmt)
+	if rc == SQLITE_ROW do return true, domain.Domain_Error{}
+	if rc != SQLITE_DONE do return false, domain.domain_error(.Internal_Error, "failed to take the boot regate marker")
+	return false, domain.Domain_Error{}
+}
+
 // ---- events ----------------------------------------------------------------
 
 @(private = "file")

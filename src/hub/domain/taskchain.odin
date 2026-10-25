@@ -129,7 +129,7 @@ Task_Chain :: struct {
 	coordinator_agent_instance_id: string,
 	// Workflow chains (M3b): the definition reference and the immutable snapshot
 	// `(def_id, version, inputs)` written once at `workflow.run`.
-	// defaults_json: chain-level brief defaults (e.g. auto_submit), JSON object.
+	// defaults_json: chain-level defaults (review_roles descriptions, a pending proposal), JSON object.
 	defaults_json:                 string,
 	work_revision:                 i64,
 	completion_summary:            string,
@@ -172,8 +172,8 @@ Task :: struct {
 	priority:               Task_Priority,
 	// attempt_no is the current attempt (0 until the first work lease is granted).
 	attempt_no:             int,
-	// brief_json: the task brief (goal, acceptance[], verify, inputs[],
-	// review_roles[], assignee?, budget{…}, auto_submit, …) as a JSON object.
+	// brief_json: the task brief (goal, acceptance[], inputs[],
+	// review_roles[], reviewers[], assignee?, budget{…}, output?, …) as a JSON object.
 	brief_json:             string,
 	// blocked_on_json: `{"kind": "human"|"task"|"bridge"|…, "ref": …, "reason": …,
 	// "since": ts}` while the task sits in backlog with the blocked badge; "" when

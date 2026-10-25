@@ -87,6 +87,7 @@ Taskchain_Repository :: struct {
 	// Task System v2 engine tables (see taskv2_repo.odin).
 	list_published_active_chains: Task_Chain_List_Published_Active_Proc,
 	list_tasks_by_state: Task_List_By_State_Proc,
+	take_boot_regate: Take_Boot_Regate_Proc,
 	append_event: Task_Event_Append_Proc,
 	list_events_by_task: Task_Event_List_By_Task_Proc,
 	list_events_by_chain: Task_Event_List_By_Chain_Proc,

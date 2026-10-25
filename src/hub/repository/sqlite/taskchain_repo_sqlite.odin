@@ -48,6 +48,7 @@ new_taskchain_repository :: proc(impl: ^Taskchain_Repo_SQLite, conn: ^Conn) -> i
 		delete_fleet = taskchain_delete_fleet_sqlite,
 		list_published_active_chains = taskchain_list_published_active_chains_sqlite,
 		list_tasks_by_state = task_list_by_state_sqlite,
+		take_boot_regate = taskchain_take_boot_regate_sqlite,
 		append_event = task_event_append_sqlite,
 		list_events_by_task = task_event_list_by_task_sqlite,
 		list_events_by_chain = task_event_list_by_chain_sqlite,

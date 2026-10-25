@@ -705,8 +705,9 @@ cancel_task :: proc(svc: ^Service, task: domain.Task, actor: Actor, reason: stri
 
 // boot (hub start): rebuild the timer heap from the columns, heal in_progress rows
 // that have no lease row (the migration's in_progress carry-over, or a crash
-// between a lease delete and its event), then match_chain once per Active chain
-// and re-send any unconfirmed wake whose bridge is online.
+// between a lease delete and its event), re-evaluate every in-review gate once
+// when a migration asked for it (boot_regate), then match_chain once per Active
+// chain and re-send any unconfirmed wake whose bridge is online.
 boot :: proc(svc: ^Service) {
 	if svc == nil || svc.repo == nil do return
 	init_task_metrics()
@@ -730,6 +731,7 @@ boot :: proc(svc: ^Service) {
 			metric_lease_expired(EXPIRE_HUB_RESTART)
 		}
 	}
+	boot_regate(svc, &u)
 	leases, lerr := iface.taskchain_list_all_leases(svc.repo)
 	if lerr.code == .None {
 		for l in leases {
@@ -749,6 +751,26 @@ boot :: proc(svc: ^Service) {
         }
     }
 	_, _ = end_uow(svc, &u, all_ok)
+}
+
+// boot_regate (M4, verify removal): a migration that changes what a gate needs
+// leaves a one-shot marker; the next boot re-evaluates every in-review gate
+// once under the new rules and consumes it. Fresh owed review pairs are then
+// leased by the per-chain match that boot runs next. Runs inside the boot UoW,
+// so a rollback keeps the marker for the next boot.
+boot_regate :: proc(svc: ^Service, u: ^Uow) {
+	taken, terr := iface.taskchain_take_boot_regate(svc.repo)
+	if terr.code != .None || !taken do return
+	tasks, lerr := iface.taskchain_list_tasks_by_state(svc.repo, .In_Review)
+	if lerr.code != .None do return
+	actor := Actor{kind = ACTOR_HUB, id = "boot_regate"}
+	for t in tasks {
+		chain, cok, _ := iface.taskchain_get_chain(svc.repo, t.chain_id)
+		if !cok do continue
+		if _, ok, err := evaluate_gate_in_uow(svc, u, chain, t, actor); !ok {
+			fmt.eprintfln("[taskv2] boot gate re-evaluation failed for %s: %s", t.task_id, err.message)
+		}
+	}
 }
 
 // ---- helpers ---------------------------------------------------------------------------

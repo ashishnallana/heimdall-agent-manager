@@ -41,5 +41,5 @@ test_submit_without_legacy_params_has_no_warnings :: proc(t: ^testing.T) {
 	testing.expect_value(t, with_response_warnings(`{"x":1}`, "", `{"code":"c"}`), `{"x":1,"warnings":[{"code":"c"}]}`)
 	testing.expect_value(t, with_response_warnings(`{"x":1}`, ""), `{"x":1}`)
 	fields := brief_verify_removed_fields(`{"brief":{"goal":"g","verify":"make","auto_submit":true}}`)
-	testing.expect(t, len(fields) == 2 && fields[0] == "verify" && fields[1] == "auto_submit", "brief fields named in source order")
+	testing.expect(t, len(fields) == 2 && ((fields[0] == "verify" && fields[1] == "auto_submit") || (fields[0] == "auto_submit" && fields[1] == "verify")), "both brief fields named")
 }

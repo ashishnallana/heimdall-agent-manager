@@ -14,7 +14,7 @@ Lease_Next_Input :: struct {
 	// present and no attempt_started exists for the current attempt, it is recorded.
 	vcs_base: string,
 	// peek: when true, returns the caller's existing lease (or status="none")
-	// without granting a new ready task inline (used by `ham-ctl verify`).
+	// without granting a new ready task inline (a read-only lease check).
 	peek:     bool,
 }
 
