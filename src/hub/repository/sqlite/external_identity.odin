@@ -132,6 +132,7 @@ user_link_external_sqlite :: proc(conn: ^Conn, user_id, issuer, subject, now: st
 		if err.code == .None do err = domain.domain_error(.Not_Found, "user not found")
 		return false, err
 	}
+	if user.status != .Active do return false, domain.domain_error(.Forbidden, "user is disabled; only active users can be linked")
 	if linked, read_ok := external_identity_lookup(conn, issuer, subject); !read_ok {
 		return false, domain.domain_error(.Internal_Error, "identity lookup failed")
 	} else if linked != "" {

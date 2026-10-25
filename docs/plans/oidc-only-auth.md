@@ -212,6 +212,9 @@ Inspect each with `git diff v0.4.45 repair/native-v0445 -- <file>`.
    issuer; no new provider), and confirms usernames are not user-editable and the app is bound to a
    group/policy. Before cut-over, list Mundus users without a `user_external_identities` row and
    link them (`ham-hub users link-oidc`) or deploy once with `HAM_OIDC_CLAIM_EXISTING_USERS=true`.
+   Note: with OIDC configured, `auto_provision_users` now defaults to **false** — Mundus will not
+   auto-create users on first sign-in (OIDC bearer, browser login, or trusted proxy while it
+   remains). Set `HAM_AUTO_PROVISION_USERS=true` only if that is wanted.
 3. Backup Mundus DB, deploy via deployd, verify UI login, native bearer probe, bridge approval,
    confirm or roll back.
 
@@ -342,3 +345,14 @@ Phase 2 (browser sessions):
 - **Tests.** ID tokens are minted at test time with a new TEST-ONLY RSA key
   (`testdata/oidc_rs256_signing.json`, generator alongside): the existing fixture's private key was
   discarded, and the nonce/aud/exp must vary per test.
+
+Availability follow-up (after phase 1 approval):
+- Outbound-cap refusals map to `Rate_Limited` (429) and provider transport failures (JWKS/UserInfo
+  unreachable, no usable key set) to `Provider_Unavailable` (503) — never 401, which would make the
+  native app drop its session. Forged/invalid tokens stay 401.
+- UserInfo is single-flight per token hash: concurrent first uses of a new token wait for the
+  leader, which publishes its outcome only after caching the identity.
+- JWKS has a reserved outbound slot (general requests may use 7 of 8). A refresh refused by the cap
+  is not counted against the 60 s window. A request that meets an in-flight refresh waits for it
+  (bounded by the 5 s fetch timeout) and re-runs its key lookup once.
+- `ham-hub users link-oidc` refuses inactive users.

@@ -4,7 +4,10 @@ package auth
 import "core:encoding/json"
 import "core:fmt"
 import "core:strings"
+import "core:sync"
 import "core:testing"
+import "core:thread"
+import "core:time"
 import contracts "odin_test:contracts"
 import domain "odin_test:hub/domain"
 import platform "odin_test:hub/platform"
@@ -21,16 +24,24 @@ OIDC_Test_Fetch :: struct {
 	info:                  string,
 	calls, userinfo_calls: int,
 	fail:                  bool,
+	// Concurrency tests: exact per-endpoint counts (atomic) and artificial latency.
+	jwks_hits, userinfo_hits: int,
+	jwks_delay_ms, userinfo_delay_ms: int,
 }
 oidc_test_fetch :: proc(ctx: rawptr, url, token: string) -> (string, bool) {
 	f := (^OIDC_Test_Fetch)(ctx)
-	f.calls += 1
+	sync.atomic_add(&f.calls, 1)
+	is_jwks := strings.has_suffix(url, "/jwks/")
+	if is_jwks do sync.atomic_add(&f.jwks_hits, 1)
+	else do sync.atomic_add(&f.userinfo_hits, 1)
+	delay := f.jwks_delay_ms if is_jwks else f.userinfo_delay_ms
+	if delay > 0 do time.sleep(time.Duration(delay) * time.Millisecond)
 	if f.fail do return "", false
-	if strings.has_suffix(url, "/jwks/") {
+	if is_jwks {
 		if token != "" do return "", false // JWT bearer must never be sent to JWKS.
 		return f.data.jwks, true
 	}
-	f.userinfo_calls += 1
+	sync.atomic_add(&f.userinfo_calls, 1)
 	if token == "" do return "", false
 	return f.info, true
 }
@@ -543,7 +554,7 @@ test_oidc_iat_leeway_and_fetch_concurrency_cap :: proc(t: ^testing.T) {
 	service.oidc_state.inflight = OIDC_MAX_INFLIGHT_FETCHES
 	calls := f.calls
 	_, _, busy_stage, busy_ok := oidc_validate_token_with_stage(config, f.data.tokens["valid"], now, &service.oidc_state)
-	testing.expect(t, !busy_ok && busy_stage == "jwks_unavailable", busy_stage)
+	testing.expect(t, !busy_ok && busy_stage == OIDC_STAGE_FETCH_BUSY, busy_stage)
 	testing.expect_value(t, f.calls, calls)
 	testing.expect_value(t, service.oidc_state.inflight, OIDC_MAX_INFLIGHT_FETCHES)
 }
@@ -589,4 +600,144 @@ test_oidc_claim_existing_is_opt_in_and_operator_link :: proc(t: ^testing.T) {
 	testing.expect_value(t, removed, 1)
 	_, after, _ := f.repo.resolve_external(f.repo.ctx, issuer, "subject-1", "alice", "", "", f.now, true, false)
 	testing.expect(t, !after, "unlinked subject is refused again")
+}
+
+// (a) Provider outages and the outbound cap are retryable errors, never 401.
+@(test)
+test_oidc_outage_and_saturation_are_not_401 :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	now := i64(1_792_404_000_000)
+	valid_req :: proc(f: ^OIDC_Test_Repo) -> Auth_Request {return oidc_test_request(f.fetch.data.tokens["valid"])}
+	{
+		f := oidc_test_repo(t)
+		defer oidc_test_close(f)
+		f.fetch.fail = true // provider down, nothing cached
+		_, ok, err := resolve_auth(&f.auth, valid_req(f))
+		testing.expect(t, !ok && err.code == .Provider_Unavailable, err.message)
+	}
+	{
+		f := oidc_test_repo(t)
+		defer oidc_test_close(f)
+		_, _, warm := oidc_validate_token(f.auth.oidc, f.fetch.data.tokens["valid"], now, &f.auth.oidc_state)
+		testing.expect(t, warm)
+		f.fetch.fail = true // JWKS cached, UserInfo unreachable
+		_, ok, err := resolve_auth(&f.auth, valid_req(f))
+		testing.expect(t, !ok && err.code == .Provider_Unavailable, err.message)
+		f.fetch.fail = false
+		f.auth.oidc_state.inflight = OIDC_GENERAL_FETCH_SLOTS // general slots saturated
+		_, ok, err = resolve_auth(&f.auth, valid_req(f))
+		testing.expect(t, !ok && err.code == .Rate_Limited, err.message)
+		f.auth.oidc_state.inflight = 0
+		_, ok, err = resolve_auth(&f.auth, valid_req(f))
+		testing.expect(t, ok, err.message)
+	}
+	{
+		// A forged token is still 401.
+		f := oidc_test_repo(t)
+		defer oidc_test_close(f)
+		_, ok, err := resolve_auth(&f.auth, oidc_test_request(f.fetch.data.tokens["wrong_issuer"]))
+		testing.expect(t, !ok && err.code == .Unauthenticated, err.message)
+	}
+}
+
+OIDC_Thread_Job :: struct {
+	f:  ^OIDC_Test_Repo,
+	ok: bool,
+	delay_ms: int,
+	token: string,
+	validate_only: bool,
+}
+
+oidc_thread_job :: proc(job: ^OIDC_Thread_Job) {
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+	if job.delay_ms > 0 do time.sleep(time.Duration(job.delay_ms) * time.Millisecond)
+	if job.validate_only {
+		_, _, job.ok = oidc_validate_token(job.f.auth.oidc, job.token, 1_792_404_000_000, &job.f.auth.oidc_state)
+		return
+	}
+	_, job.ok, _ = resolve_auth(&job.f.auth, oidc_test_request(job.token))
+}
+
+// (a) A burst of parallel requests with one new token makes one UserInfo call.
+@(test)
+test_oidc_userinfo_single_flight_per_token :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	f := oidc_test_repo(t)
+	defer oidc_test_close(f)
+	_, _, warm := oidc_validate_token(f.auth.oidc, f.fetch.data.tokens["valid"], 1_792_404_000_000, &f.auth.oidc_state)
+	testing.expect(t, warm)
+	sync.atomic_store(&f.fetch.userinfo_hits, 0)
+	f.fetch.userinfo_delay_ms = 150
+	jobs: [6]OIDC_Thread_Job
+	threads: [6]^thread.Thread
+	for i in 0 ..< len(jobs) {
+		jobs[i] = OIDC_Thread_Job{f = f, token = f.fetch.data.tokens["valid"], delay_ms = 0 if i == 0 else 30}
+		threads[i] = thread.create_and_start_with_poly_data(&jobs[i], oidc_thread_job)
+	}
+	for th in threads {thread.join(th); thread.destroy(th)}
+	for job, i in jobs do testing.expectf(t, job.ok, "request %d", i)
+	testing.expect_value(t, sync.atomic_load(&f.fetch.userinfo_hits), 1)
+}
+
+// (b) JWKS has a reserved outbound slot; a cap-refused refresh is not an attempt.
+@(test)
+test_oidc_jwks_reserved_slot_and_busy_not_counted :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	f: OIDC_Test_Fetch
+	config := oidc_test_config(t, &f)
+	now := i64(1_792_404_000_000)
+	valid := f.data.tokens["valid"]
+	{
+		service: Auth_Service
+		defer oidc_free(&service)
+		service.oidc_state.inflight = OIDC_GENERAL_FETCH_SLOTS // UserInfo burst holds every general slot
+		_, _, stage, ok := oidc_validate_token_with_stage(config, valid, now, &service.oidc_state)
+		testing.expect(t, !ok && stage == OIDC_STAGE_FETCH_BUSY, stage) // UserInfo refused...
+		testing.expect_value(t, sync.atomic_load(&f.jwks_hits), 1) // ...but JWKS still fetched
+	}
+	{
+		service: Auth_Service
+		defer oidc_free(&service)
+		service.oidc_state.inflight = OIDC_MAX_INFLIGHT_FETCHES // even the reserved slot taken
+		before := sync.atomic_load(&f.jwks_hits)
+		_, _, stage, ok := oidc_validate_token_with_stage(config, valid, now, &service.oidc_state)
+		testing.expect(t, !ok && stage == OIDC_STAGE_FETCH_BUSY, stage)
+		testing.expect_value(t, sync.atomic_load(&f.jwks_hits), before)
+		service.oidc_state.inflight = 0
+		_, _, ok2 := oidc_validate_token(config, valid, now + 1, &service.oidc_state)
+		testing.expect(t, ok2, "refused refresh did not consume the 60 s window")
+		testing.expect_value(t, sync.atomic_load(&f.jwks_hits), before + 1)
+	}
+}
+
+// (b) A request that meets an in-flight JWKS refresh waits for it and re-runs its
+// key lookup instead of failing.
+@(test)
+test_oidc_jwks_refresh_waiter_relooks_up :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	f := oidc_test_repo(t)
+	defer oidc_test_close(f)
+	f.fetch.jwks_delay_ms = 200
+	jobs := [2]OIDC_Thread_Job{
+		{f = f, token = f.fetch.data.tokens["valid"], validate_only = true},
+		{f = f, token = f.fetch.data.tokens["short"], validate_only = true, delay_ms = 50},
+	}
+	threads: [2]^thread.Thread
+	for i in 0 ..< 2 do threads[i] = thread.create_and_start_with_poly_data(&jobs[i], oidc_thread_job)
+	for th in threads {thread.join(th); thread.destroy(th)}
+	testing.expect(t, jobs[0].ok && jobs[1].ok, "both verified")
+	testing.expect_value(t, sync.atomic_load(&f.fetch.jwks_hits), 1)
+}
+
+// (c) The operator link refuses an inactive user.
+@(test)
+test_oidc_operator_link_refuses_disabled_user :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	f := oidc_test_repo(t)
+	defer oidc_test_close(f)
+	_, saved, _ := iface.user_save(&f.repo, domain.User{user_id = "carol", name = "carol", status = .Disabled, created_at = f.now, updated_at = f.now})
+	testing.expect(t, saved)
+	linked, err := sqlite.user_link_external_sqlite(&f.conn, "carol", f.auth.oidc.issuer, "subject-c", f.now)
+	testing.expect(t, !linked && err.code == .Forbidden, err.message)
 }

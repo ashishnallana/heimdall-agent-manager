@@ -51,11 +51,23 @@ OIDC_State :: struct {
 	jwks_fetched_ms:   i64, // 0: never fetched successfully
 	jwks_attempt_ms:   i64, // last refresh attempt (success or failure)
 	jwks_attempted:    bool,
-	jwks_refreshing:   bool, // single-flight: concurrent misses never wait or refetch
+	jwks_refreshing:   bool, // single-flight: concurrent misses never refetch
+	jwks_cond:         sync.Cond, // signalled (with jwks_mutex) when a refresh ends
+	// UserInfo single-flight per token hash (guarded by `mutex`).
+	flights:           map[string]^OIDC_Flight,
+	flight_cond:       sync.Cond,
 	// Outbound provider requests in flight (JWKS + UserInfo). Excess fails fast.
 	inflight:          int,
 }
 OIDC_CACHE_LIMIT :: 1024
+// One in-progress validation of a not-yet-cached token. Followers wait for it and
+// reuse its result instead of calling UserInfo again.
+OIDC_Flight :: struct {
+	done:    bool,
+	ok:      bool,
+	stage:   string, // static literal
+	waiters: int,
+}
 // A fresh JWKS is refreshed after this age (when a refresh is allowed). Stale
 // keys stay usable while a refresh is suppressed or failing, up to the hard age.
 OIDC_JWKS_TTL_MS :: 10 * 60_000
@@ -64,6 +76,11 @@ OIDC_JWKS_MAX_AGE_MS :: 60 * 60_000
 // unknown `kid`). A suppressed refresh rejects without any network call.
 OIDC_JWKS_REFRESH_INTERVAL_MS :: 60_000
 OIDC_MAX_INFLIGHT_FETCHES :: 8
+// UserInfo and token exchange may use all but one slot; the last is reserved for
+// the (single-flight) JWKS refresh so a UserInfo burst can never starve it.
+OIDC_GENERAL_FETCH_SLOTS :: OIDC_MAX_INFLIGHT_FETCHES - 1
+// Stages that mean "provider unreachable / Hub overloaded", not "bad token".
+OIDC_STAGE_FETCH_BUSY :: "fetch_busy"
 // Clock leeway for exp / nbf / iat.
 OIDC_CLOCK_LEEWAY_SECONDS :: 60
 
@@ -105,17 +122,47 @@ oidc_http_get :: proc(url, token: string) -> (string, bool) {
 	}
 	return res.body, true
 }
-// oidc_fetch bounds concurrent outbound provider requests: past the limit it
-// fails closed immediately instead of queueing behind a slow provider.
-oidc_fetch :: proc(config: OIDC_Config, state: ^OIDC_State, url, token: string) -> (string, bool) {
-	if sync.atomic_add(&state.inflight, 1) >= OIDC_MAX_INFLIGHT_FETCHES {
+// oidc_outbound_acquire takes an outbound-request slot, failing fast past the
+// limit instead of queueing behind a slow provider. `reserved` (JWKS only) may
+// use the slot general requests cannot.
+oidc_outbound_acquire :: proc(state: ^OIDC_State, reserved := false) -> bool {
+	limit := OIDC_MAX_INFLIGHT_FETCHES if reserved else OIDC_GENERAL_FETCH_SLOTS
+	if sync.atomic_add(&state.inflight, 1) >= limit {
 		sync.atomic_sub(&state.inflight, 1)
 		fmt.printfln("ham-hub oidc_http_rejected reason=too_many_inflight")
-		return "", false
+		return false
 	}
-	defer sync.atomic_sub(&state.inflight, 1)
-	if config.fetch != nil do return config.fetch(config.fetch_ctx, url, token)
-	return oidc_http_get(url, token)
+	return true
+}
+
+oidc_outbound_release :: proc(state: ^OIDC_State) {
+	sync.atomic_sub(&state.inflight, 1)
+}
+
+// oidc_fetch performs one bounded outbound GET. busy = refused by the cap (no
+// request was sent).
+oidc_fetch :: proc(config: OIDC_Config, state: ^OIDC_State, url, token: string, reserved := false) -> (body: string, ok: bool, busy: bool) {
+	if !oidc_outbound_acquire(state, reserved) do return "", false, true
+	defer oidc_outbound_release(state)
+	if config.fetch != nil {
+		body, ok = config.fetch(config.fetch_ctx, url, token)
+		return body, ok, false
+	}
+	body, ok = oidc_http_get(url, token)
+	return body, ok, false
+}
+
+// oidc_stage_error maps a rejection stage to the client-visible error. Provider
+// outages and the Hub's own outbound cap are retryable (503 / 429), never 401:
+// a 401 tells the native app to discard its session.
+oidc_stage_error :: proc(stage: string) -> domain.Domain_Error {
+	switch stage {
+	case OIDC_STAGE_FETCH_BUSY:
+		return domain.domain_error(.Rate_Limited, "identity provider requests are saturated; retry shortly")
+	case "jwks_transport", "jwks_decode", "jwks_unavailable", "userinfo_transport":
+		return domain.domain_error(.Provider_Unavailable, "identity provider is unreachable; retry shortly")
+	}
+	return oidc_failure()
 }
 // Strict unpadded base64url: rejects alternate spellings and nonzero pad bits.
 oidc_decode :: proc(s: string) -> ([]byte, bool) {
@@ -254,31 +301,53 @@ oidc_jwks_lookup :: proc(state: ^OIDC_State, kid: string, now_ms: i64) -> (OIDC_
 	return OIDC_JWK{strings.clone(found.kty, t), strings.clone(found.kid, t), strings.clone(found.alg, t), strings.clone(found.use, t), strings.clone(found.n, t), strings.clone(found.e, t)}, .Found, stale
 }
 
+OIDC_Refresh_Result :: enum {
+	Refreshed,
+	Suppressed, // attempted within the window
+	Waited, // another request was refreshing; it has finished now
+	Busy, // refused by the outbound cap; not counted as an attempt
+	Failed,
+}
+
 // oidc_jwks_refresh performs at most one JWKS fetch per refresh window across
-// all requests (single-flight). Returns false without any network call when a
-// refresh is already in flight or was attempted within the window.
+// all requests (single-flight). A request that finds a refresh in flight waits
+// for it (bounded by the fetch timeout) and reports .Waited, so the caller can
+// re-run its key lookup once. A refresh refused by the outbound cap is not
+// counted against the window.
 @(private = "file")
-oidc_jwks_refresh :: proc(config: OIDC_Config, state: ^OIDC_State, now_ms: i64) -> bool {
+oidc_jwks_refresh :: proc(config: OIDC_Config, state: ^OIDC_State, now_ms: i64) -> OIDC_Refresh_Result {
 	sync.mutex_lock(&state.jwks_mutex)
-	if state.jwks_refreshing || (state.jwks_attempted && now_ms - state.jwks_attempt_ms < OIDC_JWKS_REFRESH_INTERVAL_MS) {
+	if state.jwks_refreshing {
+		for state.jwks_refreshing do sync.cond_wait(&state.jwks_cond, &state.jwks_mutex)
 		sync.mutex_unlock(&state.jwks_mutex)
-		return false
+		return .Waited
 	}
+	if state.jwks_attempted && now_ms - state.jwks_attempt_ms < OIDC_JWKS_REFRESH_INTERVAL_MS {
+		sync.mutex_unlock(&state.jwks_mutex)
+		return .Suppressed
+	}
+	previous_attempted, previous_attempt_ms := state.jwks_attempted, state.jwks_attempt_ms
 	state.jwks_refreshing = true
 	state.jwks_attempted = true
 	state.jwks_attempt_ms = now_ms
 	sync.mutex_unlock(&state.jwks_mutex)
 
-	jwks_text, fetched := oidc_fetch(config, state, config.jwks_url, "")
+	jwks_text, fetched, busy := oidc_fetch(config, state, config.jwks_url, "", reserved = true)
 	parsed: OIDC_JWKS
 	ok := fetched && json.unmarshal_string(jwks_text, &parsed, .JSON, context.temp_allocator) == nil
-	if !fetched do oidc_log_rejected("jwks_transport")
+	if busy do oidc_log_rejected("jwks_busy")
+	else if !fetched do oidc_log_rejected("jwks_transport")
 	else if !ok do oidc_log_rejected("jwks_decode")
 
 	sync.mutex_lock(&state.jwks_mutex)
 	defer sync.mutex_unlock(&state.jwks_mutex)
+	defer sync.cond_broadcast(&state.jwks_cond)
 	state.jwks_refreshing = false
-	if !ok do return false
+	if busy {
+		state.jwks_attempted, state.jwks_attempt_ms = previous_attempted, previous_attempt_ms
+		return .Busy
+	}
+	if !ok do return .Failed
 	a := runtime.heap_allocator()
 	keys := make([]OIDC_JWK, len(parsed.keys), a)
 	for key, i in parsed.keys {
@@ -288,7 +357,7 @@ oidc_jwks_refresh :: proc(config: OIDC_Config, state: ^OIDC_State, now_ms: i64) 
 	state.jwks_keys = keys
 	state.jwks_fetched_ms = now_ms
 	fmt.printfln("ham-hub oidc_jwks_refreshed keys=%d", len(keys))
-	return true
+	return .Refreshed
 }
 
 // oidc_resolve_key returns the verification key for `kid`, refreshing the shared
@@ -299,13 +368,17 @@ oidc_resolve_key :: proc(config: OIDC_Config, state: ^OIDC_State, kid: string, n
 	key, lookup, stale := oidc_jwks_lookup(state, kid, now_ms)
 	if lookup == .Ambiguous do return {}, "signature", false
 	if lookup == .Found && !stale do return key, "", true
-	refreshed := oidc_jwks_refresh(config, state, now_ms)
-	if !refreshed {
+	result := oidc_jwks_refresh(config, state, now_ms)
+	if result == .Suppressed || result == .Failed || result == .Busy {
 		// Stale-but-present keys keep working while a refresh is suppressed/failing.
 		if lookup == .Found do return key, "", true
+		if result == .Busy do return {}, OIDC_STAGE_FETCH_BUSY, false
+		if result == .Failed do return {}, "jwks_transport", false
 		return {}, "jwks_unavailable" if lookup == .Unavailable else "unknown_kid", false
 	}
+	// Refreshed by us, or by the request we waited for: look up once more.
 	key, lookup, _ = oidc_jwks_lookup(state, kid, now_ms)
+	if lookup == .Unavailable do return {}, "jwks_unavailable", false
 	if lookup != .Found do return {}, "signature", false
 	return key, "", true
 }
@@ -410,8 +483,9 @@ oidc_validate_token_with_stage :: proc(
 	if !scope_ok do return {}, 0, "scope", false
 	if sig_stage, sig_ok := oidc_jwt_verify_signature(config, state, token, parts, header.kid, sig, now_ms); !sig_ok do return {}, 0, sig_stage, false
 	// UserInfo only after the signature verifies.
-	info_text, info_ok := oidc_fetch(config, state, config.userinfo_url, token)
+	info_text, info_ok, info_busy := oidc_fetch(config, state, config.userinfo_url, token)
 	info: OIDC_Identity
+	if info_busy do return {}, 0, OIDC_STAGE_FETCH_BUSY, false
 	if !info_ok do return {}, 0, "userinfo_transport", false
 	if json.unmarshal_string(info_text, &info, .JSON, context.temp_allocator) != nil do return {}, 0, "userinfo_decode", false
 	if info.sub == "" do return {}, 0, "userinfo_subject_missing", false
@@ -480,6 +554,14 @@ oidc_free :: proc(service: ^Auth_Service) {
 	for k, e in service.oidc_state.entries do oidc_free_entry(k, e)
 	delete(service.oidc_state.entries)
 	service.oidc_state.entries = nil
+	if service.oidc_state.flights != nil {
+		for k, flight in service.oidc_state.flights {
+			delete(k, runtime.heap_allocator())
+			free(flight, runtime.heap_allocator())
+		}
+		delete(service.oidc_state.flights)
+		service.oidc_state.flights = nil
+	}
 	sync.mutex_lock(&service.oidc_state.jwks_mutex)
 	defer sync.mutex_unlock(&service.oidc_state.jwks_mutex)
 	oidc_jwks_free(service.oidc_state.jwks_keys)
@@ -510,22 +592,35 @@ resolve_oidc_auth :: proc(
 	token_hash := vault.hex_encode_lower(digest[:], context.temp_allocator)
 	entry, cached := oidc_cache_get(&service.oidc_state, token_hash, now)
 	if !cached {
-		identity, expires, rejected_stage, ok := oidc_validate_token_with_stage(service.oidc, token, now, &service.oidc_state)
-		if !ok {
-			oidc_log_rejected(rejected_stage)
-			return {}, false, oidc_failure()
+		// Single-flight per token hash: concurrent first uses of one new token wait
+		// for the first validation instead of each calling UserInfo.
+		leader, follower_stage, follower_ok := oidc_flight_join(&service.oidc_state, token_hash)
+		if !leader {
+			if !follower_ok do return {}, false, oidc_stage_error(follower_stage)
+			entry, cached = oidc_cache_get(&service.oidc_state, token_hash, now)
 		}
-		after_fetch, clock_ok := platform.rfc3339_to_unix_ms(platform.clock_now(service.clock))
-		if !clock_ok || after_fetch >= expires {
-			oidc_log_rejected("expired_after_fetch")
-			return {}, false, oidc_failure()
+		if !cached {
+			// Leader, or a follower whose leader could not cache (cache full).
+			identity, expires, rejected_stage, ok := oidc_validate_token_with_stage(service.oidc, token, now, &service.oidc_state)
+			if ok {
+				after_fetch, clock_ok := platform.rfc3339_to_unix_ms(platform.clock_now(service.clock))
+				if !clock_ok || after_fetch >= expires do ok, rejected_stage = false, "expired_after_fetch"
+			}
+			if ok {
+				entry = OIDC_Cache_Entry {
+					identity = identity,
+					until_ms = min(now + 30_000, expires),
+					expires_ms = expires,
+				}
+				oidc_cache_put(&service.oidc_state, token_hash, entry)
+			}
+			// Publish only after the cache holds the identity, so woken followers hit it.
+			if leader do oidc_flight_finish(&service.oidc_state, token_hash, ok, rejected_stage)
+			if !ok {
+				oidc_log_rejected(rejected_stage)
+				return {}, false, oidc_stage_error(rejected_stage)
+			}
 		}
-		entry = OIDC_Cache_Entry {
-			identity = identity,
-			until_ms = min(now + 30_000, expires),
-			expires_ms = expires,
-		}
-		oidc_cache_put(&service.oidc_state, token_hash, entry)
 	}
 	user, ok, err := oidc_resolve_identity(service, entry.identity)
 	if !ok do return {}, false, err
@@ -565,4 +660,50 @@ oidc_resolve_identity :: proc(service: ^Auth_Service, identity: OIDC_Identity) -
 		return {}, false, err
 	}
 	return user, true, {}
+}
+
+// oidc_flight_join registers interest in validating `key`. The first caller
+// becomes the leader (returns leader=true and must call oidc_flight_finish).
+// Others wait for the leader and get its outcome; a successful leader has put
+// the identity in the token cache.
+oidc_flight_join :: proc(state: ^OIDC_State, key: string) -> (leader: bool, stage: string, ok: bool) {
+	sync.mutex_lock(&state.mutex)
+	defer sync.mutex_unlock(&state.mutex)
+	if state.flights == nil do state.flights = make(map[string]^OIDC_Flight, runtime.heap_allocator())
+	flight, exists := state.flights[key]
+	if !exists {
+		a := runtime.heap_allocator()
+		flight = new(OIDC_Flight, a)
+		state.flights[strings.clone(key, a)] = flight
+		return true, "", false
+	}
+	flight.waiters += 1
+	for !flight.done do sync.cond_wait(&state.flight_cond, &state.mutex)
+	flight.waiters -= 1
+	stage, ok = flight.stage, flight.ok
+	// The leader already removed it from the map; the last follower frees it.
+	if flight.waiters == 0 do free(flight, runtime.heap_allocator())
+	return false, stage, ok
+}
+
+// oidc_flight_finish publishes the leader's outcome and wakes its followers. A
+// no-op when the caller was not a leader for `key` (e.g. its follower path fell
+// back to validating after a cache-full put).
+oidc_flight_finish :: proc(state: ^OIDC_State, key: string, ok: bool, stage: string) {
+	sync.mutex_lock(&state.mutex)
+	defer sync.mutex_unlock(&state.mutex)
+	if state.flights == nil do return
+	stored_key, flight, exists := oidc_flight_take(state, key)
+	if !exists do return
+	delete(stored_key, runtime.heap_allocator())
+	flight.done, flight.ok, flight.stage = true, ok, stage
+	if flight.waiters == 0 do free(flight, runtime.heap_allocator())
+	else do sync.cond_broadcast(&state.flight_cond)
+}
+
+@(private = "file")
+oidc_flight_take :: proc(state: ^OIDC_State, key: string) -> (string, ^OIDC_Flight, bool) {
+	if _, exists := state.flights[key]; !exists do return "", nil, false
+	stored_key, flight := delete_key(&state.flights, key)
+	return stored_key, flight, true
 }

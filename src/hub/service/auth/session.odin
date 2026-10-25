@@ -5,7 +5,6 @@ import "core:encoding/base64"
 import "core:encoding/json"
 import "core:fmt"
 import "core:strings"
-import "core:sync"
 import contracts "odin_test:contracts"
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
@@ -256,12 +255,8 @@ OIDC_Token_Response :: struct {
 @(private = "file")
 oidc_exchange_code :: proc(service: ^Auth_Service, form, basic: string) -> (string, bool) {
 	state := &service.oidc_state
-	if sync.atomic_add(&state.inflight, 1) >= OIDC_MAX_INFLIGHT_FETCHES {
-		sync.atomic_sub(&state.inflight, 1)
-		fmt.printfln("ham-hub oidc_http_rejected reason=too_many_inflight")
-		return "", false
-	}
-	defer sync.atomic_sub(&state.inflight, 1)
+	if !oidc_outbound_acquire(state) do return "", false
+	defer oidc_outbound_release(state)
 	url := service.web.token_url
 	if service.web.exchange != nil do return service.web.exchange(service.web.exchange_ctx, url, form, basic)
 	if !strings.has_prefix(url, "https://") do return "", false
