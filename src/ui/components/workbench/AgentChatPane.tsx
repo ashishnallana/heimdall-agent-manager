@@ -78,6 +78,7 @@ import { VaultText } from '../vault/VaultText';
 import { decryptPaneCaptureBody } from '../../utils/vaultChats';
 import { VAULT_LOCKED_MARKER } from '../../utils/vaultCrypto';
 import { describeCron, formatInTimeZone, timeZoneLabel } from '../actions/scheduleUtils';
+import { useActionsAccess } from '../actions/useActionsAccess';
 import { TaskChainSelectorModal } from '../chains/TaskChainSelectorModal';
 import { useIsMobile } from '../shell/responsive';
 import { chromeIconButtonSizeClass } from '../shell/shellChrome';
@@ -1043,6 +1044,7 @@ export function AgentChatPane({
 
   const [statusMenuOpen, setStatusMenuOpen] = useState(false);
   const [headerActionsOpen, setHeaderActionsOpen] = useState(false);
+  const actionsAccess = useActionsAccess();
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [chainSelectorOpen, setChainSelectorOpen] = useState(false);
   const [chainSelectorPlacement, setChainSelectorPlacement] = useState<'replace' | 'right' | 'bottom'>('replace');
@@ -3405,6 +3407,7 @@ export function AgentChatPane({
           setPaletteOpen(false);
         }}
         actions={[]}
+        actionsEnabled={actionsAccess === 'enabled'}
         conversationGroups={chainAgentGroups}
       />
     </div>

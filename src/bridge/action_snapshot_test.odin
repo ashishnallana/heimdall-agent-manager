@@ -4,6 +4,7 @@ import "core:fmt"
 import http "odin_test:lib/http_client"
 import "base:runtime"
 import "core:strings"
+import "core:sync"
 import contracts "odin_test:contracts"
 
 @(test)
@@ -35,6 +36,8 @@ action_snapshot_candidate_rejects_partial_or_duplicate_rows :: proc(t: ^testing.
 @(test)
 action_snapshot_heartbeat_freshness_and_failed_budget_survive_reconnect :: proc(t: ^testing.T) {
     context.allocator = runtime.heap_allocator()
+    sync.mutex_lock(&action_sched_test_mutex)
+    defer sync.mutex_unlock(&action_sched_test_mutex)
     bridge_action_scheduler_init()
     bridge_retry_journal = {}
     s := &bridge_action_sched_state
@@ -71,6 +74,8 @@ snapshot_test_fetch :: proc(method, base_url, path, body: string, headers: []htt
 @(test)
 action_sync_idle_day_has_only_initial_and_daily_get :: proc(t: ^testing.T) {
     context.allocator = runtime.heap_allocator()
+    sync.mutex_lock(&action_sched_test_mutex)
+    defer sync.mutex_unlock(&action_sched_test_mutex)
     bridge_action_scheduler_init(); bridge_retry_journal = {}
     snapshot_test_calls = 0; snapshot_test_status = 200; snapshot_test_invalidations = false
     first := bridge_runtime_now_ms()
@@ -84,6 +89,8 @@ action_sync_idle_day_has_only_initial_and_daily_get :: proc(t: ^testing.T) {
 @(test)
 action_sync_permanent_error_survives_invalidation_storm_and_operator_resume :: proc(t: ^testing.T) {
     context.allocator = runtime.heap_allocator()
+    sync.mutex_lock(&action_sched_test_mutex)
+    defer sync.mutex_unlock(&action_sched_test_mutex)
     bridge_action_scheduler_init(); bridge_retry_journal = {}
     snapshot_test_calls = 0; snapshot_test_status = 401
     now := bridge_runtime_now_ms()
@@ -101,6 +108,8 @@ action_sync_permanent_error_survives_invalidation_storm_and_operator_resume :: p
 @(test)
 action_sync_fetch_keeps_newer_wanted_revision_pending :: proc(t: ^testing.T) {
     context.allocator = runtime.heap_allocator()
+    sync.mutex_lock(&action_sched_test_mutex)
+    defer sync.mutex_unlock(&action_sched_test_mutex)
     bridge_action_scheduler_init(); bridge_retry_journal = {}
     snapshot_test_calls = 0; snapshot_test_status = 200; snapshot_test_invalidations = true
     defer snapshot_test_invalidations = false
@@ -117,6 +126,7 @@ slot_test_execute :: proc(action_id, next_target_run_at: string, instance_id: st
     slot_test_executes += 1
     return false, 0, ""
 }
+slot_test_revalidate :: proc(fetch: Action_Scheduler_Fetch) -> bool { return true }
 slot_test_resolve :: proc(due: Action_Queue_Item, now: i64) -> (string, bool) {
     slot_test_mints += 1
     return "chosen", true
@@ -124,6 +134,8 @@ slot_test_resolve :: proc(due: Action_Queue_Item, now: i64) -> (string, bool) {
 @(test)
 action_unknown_execute_cannot_repost_or_remint_after_lease_expiry :: proc(t: ^testing.T) {
     context.allocator = runtime.heap_allocator()
+    sync.mutex_lock(&action_sched_test_mutex)
+    defer sync.mutex_unlock(&action_sched_test_mutex)
     bridge_action_scheduler_init(); bridge_retry_journal = {}
     s := &bridge_action_sched_state
     now := bridge_runtime_now_ms()
@@ -135,7 +147,7 @@ action_unknown_execute_cannot_repost_or_remint_after_lease_expiry :: proc(t: ^te
     for _ in 0..<100 {
         s.validated_ms = bridge_runtime_now_ms()
         if len(s.queue) > 0 { s.queue[0].leased_at_ms = 0; s.queue[0].in_flight = false }
-        bridge_action_scheduler_tick(execute = slot_test_execute, resolve = slot_test_resolve)
+        bridge_action_scheduler_tick(execute = slot_test_execute, resolve = slot_test_resolve, revalidate = slot_test_revalidate)
     }
     testing.expect_value(t, slot_test_executes, 1)
     testing.expect_value(t, slot_test_mints, 1)

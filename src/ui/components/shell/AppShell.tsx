@@ -77,6 +77,9 @@ import { priorUserClientStateCleared } from '../../store/store';
 import { selectAuxOpen, selectCurrentAuxTreeId } from '../../store/auxPanesSlice';
 import { selectOnlineLockedBridgeIds } from '../../utils/bridgeVaultStatus';
 import TaskChainSelectorModal from '../chains/TaskChainSelectorModal';
+import { ActionsRouteGate } from '../actions/ActionsRouteGate';
+import { filterActionsNavEntries } from '../actions/actionsExperiment';
+import { useActionsAccess } from '../actions/useActionsAccess';
 import type { LauncherIntent } from '../../store/workspaceLayoutSlice';
 
 // Pages off the boot path (home, conversations and the workspace stay eager) load
@@ -1227,14 +1230,19 @@ function RouteOutlet({
           <HomePage />
         ) : path === '/conversations' ? (
           <ConversationsHomePage />
-        ) : path === '/actions' ? (
-          <ActionListPage />
-        ) : path === '/actions/new' ? (
-          <ActionFormPage />
-        ) : path.startsWith('/actions/') && path.endsWith('/edit') ? (
-          <ActionFormPage actionId={decodeURIComponent(path.slice('/actions/'.length, -'/edit'.length))} />
-        ) : path.startsWith('/actions/') ? (
-          <ActionViewPage actionId={decodeURIComponent(path.slice('/actions/'.length))} />
+        ) : path === '/actions' || path.startsWith('/actions/') ? (
+          // REQ-EXP-GATE-2: Actions pages mount only while the experiment is enabled.
+          <ActionsRouteGate>
+            {path === '/actions' ? (
+              <ActionListPage />
+            ) : path === '/actions/new' ? (
+              <ActionFormPage />
+            ) : path.endsWith('/edit') ? (
+              <ActionFormPage actionId={decodeURIComponent(path.slice('/actions/'.length, -'/edit'.length))} />
+            ) : (
+              <ActionViewPage actionId={decodeURIComponent(path.slice('/actions/'.length))} />
+            )}
+          </ActionsRouteGate>
         ) : path === '/shells' ? (
           <ShellListPage />
         ) : path.startsWith('/shells/') ? (
@@ -1834,7 +1842,8 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
     };
   }, []);
 
-  const primary = NAV_ROUTES.filter((item) => item.group === 'primary');
+  const actionsAccess = useActionsAccess();
+  const primary = filterActionsNavEntries(NAV_ROUTES.filter((item) => item.group === 'primary'), actionsAccess);
   const conversationTree = useMemo(() => buildProjectConversationTree(conversations, liveProjects), [conversations, liveProjects]);
   const isEffectiveCollapsed = isMobile ? !drawerOpen : collapsed;
   const isWorkspaceRoute = isAgentConversationRoute(path);
@@ -2093,7 +2102,7 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
       <AttentionDeck open={attentionOpen} onClose={() => setAttentionOpen(false)} range={attentionRange} onRangeChange={setAttentionRange} />
       <AttentionUndoToast />
 
-      <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} onNavigate={handlePaletteNavigate} onAction={handlePaletteAction} actions={paletteActions} currentPath={path} conversationGroups={conversationTree.map((group) => ({ projectId: group.project.projectId, projectName: group.project.name, conversations: group.conversations.map((c) => ({ conversationId: c.conversationId, agentInstanceId: c.agentInstanceId, title: displayConversationTitle(c), agentName: c.agentName, isCoordinator: c.isCoordinator, runtimeStatus: c.runtimeStatus, activityStatus: c.activityStatus, unreadCount: c.unreadCount })) }))} chainGroups={chainGroupsQuery.data?.groups ?? []} />
+      <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} onNavigate={handlePaletteNavigate} onAction={handlePaletteAction} actions={paletteActions} actionsEnabled={actionsAccess === 'enabled'} currentPath={path} conversationGroups={conversationTree.map((group) => ({ projectId: group.project.projectId, projectName: group.project.name, conversations: group.conversations.map((c) => ({ conversationId: c.conversationId, agentInstanceId: c.agentInstanceId, title: displayConversationTitle(c), agentName: c.agentName, isCoordinator: c.isCoordinator, runtimeStatus: c.runtimeStatus, activityStatus: c.activityStatus, unreadCount: c.unreadCount })) }))} chainGroups={chainGroupsQuery.data?.groups ?? []} />
       <ConversationSelectorModal
         open={resourcePicker === 'conversation'}
         onClose={() => setResourcePicker(null)}

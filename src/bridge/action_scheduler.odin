@@ -73,7 +73,12 @@ Bridge_Action_Scheduler_State :: struct {
     validated_ms, last_request_ms: i64,
     sync_inflight: bool,
     sync_state: Bridge_Operation_State,
+    // suspended: the Hub answered experimental_feature_disabled (REQ-EXP-GATE-4).
+    // The cached queue is dropped and nothing fires until a later snapshot installs.
+    suspended: bool,
 }
+
+Action_Scheduler_Fetch :: #type proc(method, base_url, path, body: string, headers: []http.Header, timeout_ms: int) -> (http.Response, bool)
 
 bridge_action_sched_state: Bridge_Action_Scheduler_State
 
@@ -530,7 +535,9 @@ bridge_action_scheduler_notify_version :: proc(version: int) {
 	}
 }
 
-Action_Snapshot_Metadata :: struct { epoch: string, revision: i64, etag: string }
+// eligible_since: when the owner last enabled Actions (REQ-EXP-GATE-4); fires due
+// before it were missed while suspended and are rolled forward, not replayed.
+Action_Snapshot_Metadata :: struct { epoch: string, revision: i64, etag: string, eligible_since: string }
 Action_Snapshot_Wire_Item :: struct {
     id, target_instance_id, prompt_text, cron_expr, timezone: string,
     blackout_dates: []string,
@@ -708,6 +715,15 @@ bridge_action_scheduler_sync :: proc(fetch := http.request_with_headers_deadline
         sync.mutex_unlock(&s.mutex)
         return success
     }
+    if action_scheduler_feature_disabled(resp.status, resp.body) {
+        // Authoritative disable: an answer, not a transport failure, so it does not
+        // spend retry budget; the next heartbeat token change (re-enable) resyncs.
+        sync.mutex_lock(&s.mutex)
+        if generation == s.connection_generation do bridge_action_scheduler_suspend_locked()
+        sync.mutex_unlock(&s.mutex)
+        success = true
+        return false
+    }
     if resp.status != 200 do return false
     metadata, candidate, parsed := action_snapshot_candidate(resp.body, now)
     if !parsed {
@@ -723,6 +739,7 @@ bridge_action_scheduler_sync :: proc(fetch := http.request_with_headers_deadline
     defer sync.mutex_unlock(&s.mutex)
     if generation != s.connection_generation || (epoch != "" && metadata.epoch != epoch) ||
        (s.installed_epoch == metadata.epoch && metadata.revision < s.installed_revision) { return false }
+    action_scheduler_skip_missed_fires(&candidate, metadata.eligible_since, now)
     for &q in candidate {
         for old in s.queue {
             if old.id == q.id && old.target_run_at_ms == q.target_run_at_ms && old.in_flight {
@@ -733,6 +750,7 @@ bridge_action_scheduler_sync :: proc(fetch := http.request_with_headers_deadline
     for &q in s.queue do action_queue_item_free(&q)
     delete(s.queue)
     s.queue = candidate; installed = true
+    s.suspended = false
     delete(s.last_etag); s.last_etag = strings.clone(metadata.etag, runtime.heap_allocator())
     delete(s.installed_epoch); s.installed_epoch = strings.clone(metadata.epoch, runtime.heap_allocator())
     s.installed_revision = metadata.revision
@@ -748,7 +766,7 @@ bridge_action_scheduler_sync :: proc(fetch := http.request_with_headers_deadline
 
 bridge_action_scheduler_fresh_locked :: proc(now: i64) -> bool {
     s := &bridge_action_sched_state
-    return s.validated_ms > 0 && now >= s.validated_ms && now - s.validated_ms < BRIDGE_OPERATION_DEADLINE_MS &&
+    return !s.suspended && s.validated_ms > 0 && now >= s.validated_ms && now - s.validated_ms < BRIDGE_OPERATION_DEADLINE_MS &&
         s.wanted_epoch != "" && s.wanted_epoch == s.installed_epoch && s.wanted_revision == s.installed_revision &&
         (s.sync_state == .Succeeded || s.sync_state == .Pending)
 }
@@ -999,7 +1017,7 @@ bridge_action_scheduler_resolve_or_launch_instance :: proc(due: Action_Queue_Ite
 	return new_instance_id, true
 }
 
-bridge_action_scheduler_tick :: proc(now_override: i64 = 0, fetch := http.request_with_headers_deadline, execute := bridge_action_scheduler_execute, resolve := bridge_action_scheduler_resolve_or_launch_instance) -> int {
+bridge_action_scheduler_tick :: proc(now_override: i64 = 0, fetch: Action_Scheduler_Fetch = http.request_with_headers_deadline, execute := bridge_action_scheduler_execute, resolve := bridge_action_scheduler_resolve_or_launch_instance, revalidate: proc(fetch: Action_Scheduler_Fetch) -> bool = bridge_action_scheduler_revalidate) -> int {
 	now_ms := now_override if now_override > 0 else bridge_runtime_now_ms()
 	actions := 0
 
@@ -1051,6 +1069,10 @@ bridge_action_scheduler_tick :: proc(now_override: i64 = 0, fetch := http.reques
         fresh := bridge_action_scheduler_fresh_locked(bridge_runtime_now_ms())
         sync.mutex_unlock(&bridge_action_sched_state.mutex)
         if !fresh do break
+        // REQ-EXP-GATE-4: authoritative pre-launch check. Resolve/launch/wake below run
+        // BEFORE execute, so an execute-only rejection would still start agents after
+        // a disable. Skipped (not parked) on failure: the slot stays due for a later tick.
+        if !revalidate(fetch) do break
         slot_key := fmt.aprintf("slot:%s:%d", due.id, due.target_run_at_ms)
         _, reserved := bridge_retry_reserve(slot_key, bridge_runtime_now_ms())
         if !reserved { delete(slot_key); continue }
@@ -1149,8 +1171,16 @@ bridge_action_scheduler_tick :: proc(now_override: i64 = 0, fetch := http.reques
 				sync.mutex_unlock(&bridge_action_sched_state.mutex)
 			}
 		} else {
+			disabled := action_scheduler_feature_disabled(status, body)
 			if body != "" do delete(body)
 			sync.mutex_lock(&bridge_action_sched_state.mutex)
+			if disabled {
+				// Disabled between revalidation and execute: the Hub refused before any
+				// lease or prompt. Suspend so no further cached slot launches.
+				bridge_action_scheduler_suspend_locked()
+				sync.mutex_unlock(&bridge_action_sched_state.mutex)
+				break
+			}
 			for i in 0..<len(bridge_action_sched_state.queue) {
 				if bridge_action_sched_state.queue[i].id == due.id {
 					bridge_action_sched_state.queue[i].in_flight = false
@@ -1165,4 +1195,88 @@ bridge_action_scheduler_tick :: proc(now_override: i64 = 0, fetch := http.reques
 	}
 
 	return actions
+}
+
+// action_scheduler_feature_disabled reports the Hub's experimental gate refusal
+// (403 forbidden, details.code experimental_feature_disabled).
+action_scheduler_feature_disabled :: proc(status: int, body: string) -> bool {
+    return status == 403 && strings.contains(body, "experimental_feature_disabled")
+}
+
+// bridge_action_scheduler_suspend_locked drops every cached schedule after an
+// authoritative Actions disable (REQ-EXP-GATE-4). Definitions live on the Hub and are
+// untouched; running work is not stopped. The installed token is pinned to the wanted
+// (disabled) token so the tick does not poll the 403 every second; a re-enable changes
+// the heartbeat token, which triggers a full (non-conditional) resync.
+// Caller holds bridge_action_sched_state.mutex.
+bridge_action_scheduler_suspend_locked :: proc() {
+    s := &bridge_action_sched_state
+    for &q in s.queue do action_queue_item_free(&q)
+    clear(&s.queue)
+    delete(s.last_etag); s.last_etag = ""
+    delete(s.installed_epoch); s.installed_epoch = strings.clone(s.wanted_epoch, runtime.heap_allocator())
+    s.installed_revision = s.wanted_revision
+    s.synced_actions_version = s.known_actions_version
+    s.validated_ms = 0
+    s.suspended = true
+}
+
+// action_scheduler_skip_missed_fires rolls forward slots that fell due before the owner
+// (re-)enabled Actions, so re-enable never replays fires missed while suspended. A
+// one-shot whose time passed while disabled is dropped from the local queue (its Hub
+// definition is kept). Hub-side target_run_at advances on the next real fire.
+action_scheduler_skip_missed_fires :: proc(queue: ^[dynamic]Action_Queue_Item, eligible_since: string, now_ms: i64) {
+    if eligible_since == "" do return
+    since_ms, ok := action_scheduler_parse_rfc3339_ms(eligible_since)
+    if !ok do return
+    cutoff := min(since_ms, now_ms)
+    for i := len(queue) - 1; i >= 0; i -= 1 {
+        q := &queue[i]
+        if q.state == "completed" || q.in_flight || q.target_run_at_ms <= 0 || q.target_run_at_ms >= cutoff do continue
+        next_ms, has_next := action_scheduler_compute_next_run(q^, now_ms)
+        if !has_next || next_ms <= now_ms {
+            action_queue_item_free(q)
+            ordered_remove(queue, i)
+            continue
+        }
+        delete(q.target_run_at)
+        q.target_run_at = strings.clone(action_scheduler_format_rfc3339_utc(next_ms), runtime.heap_allocator())
+        q.target_run_at_ms = next_ms
+    }
+}
+
+// bridge_action_scheduler_revalidate asks the Hub, immediately before a due fire may
+// wake or launch an instance, whether the installed snapshot is still current and the
+// owner still eligible (conditional GET; eligibility is folded into the ETag epoch).
+// Only 304 for the installed ETag passes. experimental_feature_disabled suspends;
+// anything else (changed snapshot, auth/transport error) fails closed and forces a
+// resync. Remaining window: a disable landing after this 304 but before execute can
+// still wake/launch an instance, but execute is refused, so no prompt is delivered.
+bridge_action_scheduler_revalidate :: proc(fetch: Action_Scheduler_Fetch) -> bool {
+    s := &bridge_action_sched_state
+    sync.mutex_lock(&s.mutex)
+    etag := strings.clone(s.last_etag, runtime.heap_allocator())
+    generation := s.connection_generation
+    sync.mutex_unlock(&s.mutex)
+    defer delete(etag)
+    if etag == "" do return false
+    credential := bridge_credential_snapshot()
+    defer delete(credential)
+    auth := strings.concatenate({"Bearer ", credential})
+    defer delete(auth)
+    headers := make([dynamic]http.Header, context.temp_allocator)
+    append(&headers, http.Header{name = "Authorization", value = auth})
+    append(&headers, http.Header{name = "If-None-Match", value = etag})
+    resp, ok := fetch("GET", bridge_config.daemon_url, "/api/v1/bridge/actions", "", headers[:], 5_000)
+    defer delete(resp.body)
+    sync.mutex_lock(&s.mutex)
+    defer sync.mutex_unlock(&s.mutex)
+    if !ok || generation != s.connection_generation do return false
+    if action_scheduler_feature_disabled(resp.status, resp.body) {
+        bridge_action_scheduler_suspend_locked()
+        return false
+    }
+    if resp.status == 304 && s.last_etag == etag && !s.suspended do return true
+    s.synced_actions_version = -1
+    return false
 }

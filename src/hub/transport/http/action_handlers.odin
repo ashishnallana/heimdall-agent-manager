@@ -221,6 +221,8 @@ list_actions_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Action_Handlers)(ctx)
 	auth_ctx, ok, auth_resp := require_auth(h.auth, req)
 	if !ok do return auth_resp
+	// REQ-EXP-GATE-3: refuse before any action read, write, launch or dispatch.
+	if gated, gate_resp := require_experiment_enabled(h.experiments, auth_ctx.user_id, domain.ACTIONS_EXPERIMENT_KEY, req.request_id); !gated do return gate_resp
 
 	actions, err := h.repo.list(h.repo.ctx, domain.User_ID(auth_ctx.user_id))
 	if err.code != .None do return respond_error(err, req.request_id)
@@ -241,6 +243,8 @@ create_action_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Action_Handlers)(ctx)
 	auth_ctx, ok, auth_resp := require_auth(h.auth, req)
 	if !ok do return auth_resp
+	// REQ-EXP-GATE-3: refuse before any action read, write, launch or dispatch.
+	if gated, gate_resp := require_experiment_enabled(h.experiments, auth_ctx.user_id, domain.ACTIONS_EXPERIMENT_KEY, req.request_id); !gated do return gate_resp
 
 	target_instance_id := strings.trim_space(json_string(req.body, "target_instance_id"))
 	target_agent_id := strings.trim_space(json_string(req.body, "target_agent_id"))
@@ -374,6 +378,8 @@ get_action_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Action_Handlers)(ctx)
 	auth_ctx, ok, auth_resp := require_auth(h.auth, req)
 	if !ok do return auth_resp
+	// REQ-EXP-GATE-3: refuse before any action read, write, launch or dispatch.
+	if gated, gate_resp := require_experiment_enabled(h.experiments, auth_ctx.user_id, domain.ACTIONS_EXPERIMENT_KEY, req.request_id); !gated do return gate_resp
 
 	id := domain.Action_ID(path_part(req.path, 4))
 	act, act_ok, _ := h.repo.get(h.repo.ctx, id)
@@ -393,6 +399,8 @@ patch_action_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Action_Handlers)(ctx)
 	auth_ctx, ok, auth_resp := require_auth(h.auth, req)
 	if !ok do return auth_resp
+	// REQ-EXP-GATE-3: refuse before any action read, write, launch or dispatch.
+	if gated, gate_resp := require_experiment_enabled(h.experiments, auth_ctx.user_id, domain.ACTIONS_EXPERIMENT_KEY, req.request_id); !gated do return gate_resp
 
 	id := domain.Action_ID(path_part(req.path, 4))
 	act, act_ok, _ := h.repo.get(h.repo.ctx, id)
@@ -478,6 +486,8 @@ delete_action_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Action_Handlers)(ctx)
 	auth_ctx, ok, auth_resp := require_auth(h.auth, req)
 	if !ok do return auth_resp
+	// REQ-EXP-GATE-3: refuse before any action read, write, launch or dispatch.
+	if gated, gate_resp := require_experiment_enabled(h.experiments, auth_ctx.user_id, domain.ACTIONS_EXPERIMENT_KEY, req.request_id); !gated do return gate_resp
 
 	id := domain.Action_ID(path_part(req.path, 4))
 	act, act_ok, _ := h.repo.get(h.repo.ctx, id)
@@ -503,6 +513,8 @@ run_action_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Action_Handlers)(ctx)
 	auth_ctx, ok, auth_resp := require_auth(h.auth, req)
 	if !ok do return auth_resp
+	// REQ-EXP-GATE-3: refuse before any action read, write, launch or dispatch.
+	if gated, gate_resp := require_experiment_enabled(h.experiments, auth_ctx.user_id, domain.ACTIONS_EXPERIMENT_KEY, req.request_id); !gated do return gate_resp
 
 	id := domain.Action_ID(path_part(req.path, 4))
 	act, act_ok, _ := h.repo.get(h.repo.ctx, id)
@@ -590,7 +602,11 @@ bridge_list_actions_handler :: proc(ctx: rawptr, req: Request) -> Response {
 
 	bridge_id := bridge_auth.bridge_id
 
-    epoch := action_schedules_epoch()
+	// REQ-EXP-GATE-3/4: a disabled owner gets 403 before any snapshot read; the
+	// bridge scheduler treats it as authoritative suspension and drops its cache.
+	eligible_since, gate_err := action_owner_eligibility(h.experiments, bridge_auth.user_id)
+	if gate_err.code != .None do return respond_error(gate_err, req.request_id)
+    epoch := action_snapshot_epoch(action_schedules_epoch(), true, eligible_since)
     if epoch == "" || h.repo.snapshot == nil do return respond_error(domain.domain_error(.Internal_Error, "coherent action snapshots unavailable"), req.request_id)
     known: i64 = -1
     validator := strings.trim_space(header_value(req.headers, "If-None-Match"))
@@ -613,6 +629,10 @@ bridge_list_actions_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	strings.write_string(&b, fmt.tprintf("{{\"snapshot\":{{\"epoch\":\"%s\",\"revision\":%d,\"etag\":", epoch, revision))
     strings.write_byte(&b, '"')
     write_handler_json_string(&b, etag)
+    // eligible_since: fires due before the owner (re-)enabled Actions were missed
+    // while suspended; the bridge rolls them forward instead of replaying them.
+    strings.write_string(&b, "\",\"eligible_since\":\"")
+    write_handler_json_string(&b, eligible_since)
     strings.write_string(&b, "\"},\"data\":[")
 	for act, i in actions {
 		if i > 0 do strings.write_string(&b, ",")
@@ -633,6 +653,10 @@ bridge_execute_action_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	if !token_ok do return respond_error(domain.domain_error(.Unauthenticated, "bridge bearer token is required"), req.request_id)
 	bridge_auth, bridge_ok, bridge_err := bridge_service.verify_bridge_token(h.bridges, token)
 	if !bridge_ok do return respond_error(bridge_err, req.request_id)
+
+	// REQ-EXP-GATE-3/4: refuse a disabled owner's bridge before the action lookup,
+	// lease, prompt send or reschedule, so a stale cached schedule delivers nothing.
+	if gated, gate_resp := require_experiment_enabled(h.experiments, bridge_auth.user_id, domain.ACTIONS_EXPERIMENT_KEY, req.request_id); !gated do return gate_resp
 
 	// Route: /api/v1/bridge/actions/*/execute or /api/v1/bridge/scheduled-prompts/*/execute -> id is at path_part index 5
 	id := domain.Action_ID(path_part(req.path, 5))
@@ -781,4 +805,48 @@ action_schedules_token :: proc(raw: rawptr) -> (string, i64) {
     revision, err := h.repo.revision(h.repo.ctx)
     if err.code != .None do return "", -1
     return action_schedules_epoch(), revision
+}
+
+// action_owner_eligibility applies the shared Actions guard for a bridge owner and,
+// when enabled, returns when the owner last set the flag (eligible_since, request
+// temp arena). Fires due before that instant were missed while suspended.
+action_owner_eligibility :: proc(repo: ^iface.Experiment_Repository, owner_user_id: string) -> (eligible_since: string, err: domain.Domain_Error) {
+    err = experiment_gate_error(repo, owner_user_id, domain.ACTIONS_EXPERIMENT_KEY)
+    if err.code != .None do return "", err
+    exps, list_err := iface.experiment_list_by_owner(repo, owner_user_id)
+    defer {
+        for exp in exps {
+            delete(exp.owner_user_id)
+            delete(exp.key)
+            delete(exp.updated_at)
+        }
+        delete(exps)
+    }
+    if list_err.code != .None do return "", domain.domain_error(.Internal_Error, "could not read experiment settings")
+    for exp in exps do if exp.key == domain.ACTIONS_EXPERIMENT_KEY && exp.enabled do eligible_since = strings.clone(exp.updated_at, context.temp_allocator)
+    return eligible_since, {}
+}
+
+// action_snapshot_epoch folds the owner's Actions eligibility into the snapshot epoch
+// so ETags and heartbeat tokens change on every toggle: a validator minted before a
+// disable can never revalidate (304) eligibility afterwards, and a bridge holding a
+// cached snapshot stops treating it as fresh as soon as the token moves.
+action_snapshot_epoch :: proc(base: string, eligible: bool, eligible_since: string) -> string {
+    if base == "" do return ""
+    if !eligible do return fmt.tprintf("%s.off", base)
+    digits := strings.builder_make(context.temp_allocator)
+    for c in eligible_since do if (c >= '0' && c <= '9') do strings.write_rune(&digits, c)
+    return fmt.tprintf("%s.on%s", base, strings.to_string(digits))
+}
+
+// action_schedules_owner_token is action_schedules_token scoped to the bridge owner's
+// Actions eligibility (REQ-EXP-GATE-4). Repository failures yield no token, which
+// leaves the bridge's cached schedules unvalidated (fail closed).
+action_schedules_owner_token :: proc(raw: rawptr, experiments: ^iface.Experiment_Repository, owner_user_id: string) -> (string, i64) {
+    base, revision := action_schedules_token(raw)
+    if base == "" || revision < 0 do return "", -1
+    eligible_since, err := action_owner_eligibility(experiments, owner_user_id)
+    if err.code == .Forbidden do return action_snapshot_epoch(base, false, ""), revision
+    if err.code != .None do return "", -1
+    return action_snapshot_epoch(base, true, eligible_since), revision
 }

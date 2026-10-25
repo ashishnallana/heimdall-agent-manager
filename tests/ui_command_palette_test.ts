@@ -348,3 +348,87 @@ test('filterEditorCommands filters by shortcut text', () => {
   const altZMatches = filterEditorCommands(DEFAULT_EDITOR_COMMANDS, 'Alt+Z');
   assert.ok(altZMatches.some((c) => c.title === 'Toggle Word Wrap'));
 });
+
+// -----------------------------------------------------------------------------
+// REQ-EXP-GATE-2: the Actions destination is listed only while Actions is enabled.
+// -----------------------------------------------------------------------------
+
+import React from 'react';
+import { DEFAULT_NAV, paletteNavItems } from '../src/ui/components/ui/patterns/commandPaletteLogic.ts';
+import { resolveActionsAccess } from '../src/ui/components/actions/actionsExperiment.ts';
+
+test('palette nav hides Actions for loading, disabled, absent and errored flags; shows it when enabled', () => {
+  const cases: Array<[Parameters<typeof resolveActionsAccess>[0], boolean]> = [
+    [undefined, false],
+    [[], false],
+    [[{ key: 'actions', enabled: false }], false],
+    [[{ key: 'actions', enabled: true }], true],
+  ];
+  for (const [flags, isError] of cases) {
+    const access = resolveActionsAccess(flags, isError);
+    const routes = paletteNavItems(access === 'enabled').map((n) => n.route);
+    assert.equal(routes.includes('/actions'), false, `${access}: Actions hidden`);
+    assert.equal(routes.length, DEFAULT_NAV.length - 1, `${access}: other entries kept`);
+  }
+  assert.equal(paletteNavItems(resolveActionsAccess([{ key: 'actions', enabled: true }], false) === 'enabled').some((n) => n.route === '/actions'), true);
+  assert.deepEqual(paletteNavItems(true), DEFAULT_NAV);
+});
+
+test('rendered CommandPalette lists the Actions destination only when actionsEnabled, failing closed by default', async () => {
+  const { JSDOM } = await import('jsdom');
+  const dom = new JSDOM('<!DOCTYPE html><html><body><div id="root"></div></body></html>', { url: 'http://localhost/#/home' });
+  (dom.window.HTMLElement.prototype as any).scrollIntoView = () => {};
+  const g = globalThis as any;
+  const prev = { window: g.window, document: g.document, HTMLElement: g.HTMLElement, navigator: g.navigator, fetch: g.fetch, localStorage: g.localStorage };
+  g.window = dom.window;
+  g.document = dom.window.document;
+  g.HTMLElement = dom.window.HTMLElement;
+  g.localStorage = dom.window.localStorage;
+  Object.defineProperty(globalThis, 'navigator', { value: dom.window.navigator, configurable: true });
+  g.IS_REACT_ACT_ENVIRONMENT = true;
+  g.fetch = async () => ({ ok: true, status: 200, headers: { get: () => 'application/json' }, text: async () => '{}', json: async () => ({}) });
+  try {
+    const { createRoot } = await import('react-dom/client');
+    const { Provider } = await import('react-redux');
+    const { configureStore } = await import('@reduxjs/toolkit');
+    const { heimdallApi } = await import('../src/ui/api/heimdallApi.ts');
+    const { default: vaultReducer } = await import('../src/ui/store/vaultSlice.ts');
+    const { CommandPalette } = await import('../src/ui/components/ui/patterns/CommandPalette.tsx');
+    const store = configureStore({
+      reducer: { vault: vaultReducer, [heimdallApi.reducerPath]: heimdallApi.reducer },
+      middleware: (gdm: any) => gdm({ serializableCheck: false, immutableCheck: false }).concat(heimdallApi.middleware),
+    });
+    const root = createRoot(dom.window.document.getElementById('root')!);
+    const navLabels = () =>
+      Array.from(dom.window.document.querySelectorAll('[role="option"]')).map((el: any) => el.textContent.trim());
+    const render = async (actionsEnabled?: boolean) => {
+      await React.act(async () => {
+        root.render(React.createElement(Provider, { store }, React.createElement(CommandPalette, {
+          open: true, onClose: () => {}, onNavigate: () => {}, actions: [], ...(actionsEnabled === undefined ? {} : { actionsEnabled }),
+        })));
+        await new Promise((r) => setTimeout(r, 20));
+      });
+    };
+    try {
+      await render(undefined);
+      assert.ok(navLabels().some((l) => l.startsWith('Projects')), 'palette rendered its destinations');
+      assert.equal(navLabels().some((l) => l.startsWith('Actions')), false, 'omitted prop: Actions hidden');
+      await render(false);
+      assert.equal(navLabels().some((l) => l.startsWith('Actions')), false, 'disabled: Actions hidden');
+      await render(true);
+      assert.equal(navLabels().some((l) => l.startsWith('Actions')), true, 'enabled: Actions listed');
+      await render(false);
+      assert.equal(navLabels().some((l) => l.startsWith('Actions')), false, 'toggled off: Actions hidden again');
+    } finally {
+      await React.act(async () => root.unmount());
+    }
+  } finally {
+    dom.window.close();
+    g.window = prev.window;
+    g.document = prev.document;
+    g.HTMLElement = prev.HTMLElement;
+    g.localStorage = prev.localStorage;
+    Object.defineProperty(globalThis, 'navigator', { value: prev.navigator, configurable: true });
+    g.fetch = prev.fetch;
+  }
+});

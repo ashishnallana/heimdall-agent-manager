@@ -2186,7 +2186,16 @@ bridge_ws_process_frame :: proc(h: ^Bridge_Handlers, bridge_id: string, connecti
 		} else if h.scheduled_prompts != nil {
 			schedules_version = get_scheduled_prompts_bridge_version(h.scheduled_prompts, bridge_id)
 		}
-		epoch, revision := action_schedules_token(h.actions)
+		schedules_owner := ""
+		if h.bridges != nil {
+			if owner_bridge, owner_found, _ := iface.bridge_get_bridge(h.bridges.repo, bridge_id); owner_found {
+				schedules_owner = strings.clone(string(owner_bridge.owner_user_id), context.temp_allocator)
+				domain.bridge_destroy(&owner_bridge)
+			}
+		}
+		// REQ-EXP-GATE-4: the token folds in the owner's Actions eligibility, so a
+		// toggle immediately invalidates the bridge's cached schedule freshness.
+		epoch, revision := action_schedules_owner_token(h.actions, h.experiments, schedules_owner)
         ack := bridge_heartbeat_ack_payload(reconciled, superseded, schedules_version, epoch, revision)
 		_ = write_ws_text_frame_locked(h, bridge_id, client, ack)
 		delete(ack)

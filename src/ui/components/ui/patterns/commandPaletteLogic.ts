@@ -99,6 +99,15 @@ export const DEFAULT_NAV: { label: string; icon: IconName; route: string }[] = [
   { label: 'Appearance', icon: 'spark', route: '/settings/appearance' },
 ];
 
+/**
+ * REQ-EXP-GATE-2: palette navigation entries. The Actions entry is listed only
+ * while the Actions experiment is enabled (callers pass false for loading,
+ * disabled, absent or failed-to-load flags).
+ */
+export function paletteNavItems(actionsEnabled: boolean): typeof DEFAULT_NAV {
+  return actionsEnabled ? DEFAULT_NAV : DEFAULT_NAV.filter((item) => item.route !== '/actions');
+}
+
 export const DEFAULT_ACTIONS: PaletteAction[] = [
   { id: 'new-conversation', label: 'New conversation', icon: 'plus', hint: 'Start a new conversation', route: '/conversations/new' },
   { id: 'new-agent', label: 'New agent', icon: 'bot', hint: 'Create a durable identity', route: '/agents/new' },

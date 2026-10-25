@@ -51,6 +51,7 @@ import {
   optionId,
   DEFAULT_NAV,
   DEFAULT_ACTIONS,
+  paletteNavItems,
   mergePaletteActions,
   matchesQuery,
 } from './commandPaletteLogic';
@@ -82,6 +83,8 @@ export type CommandPaletteProps = {
   chainGroups?: ChainProjectGroup[];
   currentPath?: string;
   scope?: PaletteScope;
+  /** REQ-EXP-GATE-2: show the Actions nav entry. Fails closed (hidden) when omitted. */
+  actionsEnabled?: boolean;
 };
 
 function convoDot(convo: PaletteConversation): { tone: Parameters<typeof StatusDot>[0]['tone']; pulse: boolean } {
@@ -106,6 +109,7 @@ export function CommandPalette({
   chainGroups = [],
   currentPath = '',
   scope,
+  actionsEnabled = false,
 }: CommandPaletteProps) {
   const [query, setQuery] = useState('');
   const [activeIndex, setActiveIndex] = useState(0);
@@ -343,7 +347,7 @@ export function CommandPalette({
     // Empty query: retain quick navigation & default browsing
     if (!q) {
       if (!hasScope) {
-        DEFAULT_NAV.forEach((item) => {
+        paletteNavItems(actionsEnabled).forEach((item) => {
           out.push({ kind: 'navigate', label: item.label, icon: item.icon, route: item.route, group: 'Navigate' });
         });
         actions.forEach((a) => {
@@ -431,7 +435,7 @@ export function CommandPalette({
     }
 
     return out;
-  }, [query, actions, conversationGroups, allChains, hasScope, scopeActive, scope?.chainId, projectNamesById]);
+  }, [query, actions, conversationGroups, allChains, hasScope, scopeActive, scope?.chainId, projectNamesById, actionsEnabled]);
 
   // Reset active index when results change
   useEffect(() => {
