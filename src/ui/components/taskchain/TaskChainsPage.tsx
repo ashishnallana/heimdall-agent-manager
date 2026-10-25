@@ -141,7 +141,7 @@ function ChainRow({
         <span
           data-debug-id={`task-chains-row-task-count-${chain.chainId}`}
           className="shrink-0 rounded-md border border-subtle bg-surface-raised px-1.5 py-0.5 text-caption text-muted"
-          title={`${chain.taskCount} ${chain.taskCount === 1 ? 'task' : 'tasks'}`}
+          title={`${chain.taskCount} ${chain.taskCount === 1 ? 'ticket' : 'tickets'}`}
         >
           {chain.taskCount}
         </span>

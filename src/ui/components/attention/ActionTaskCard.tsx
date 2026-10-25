@@ -111,7 +111,7 @@ function ReviewResult({ item, mobile, active }: { item: AttentionTaskItem; mobil
 
   if (nothing) {
     if (excerpt?.body) return <DecryptedMarkdown source={excerpt.body} compact copyAll={false} className={textSize} data-debug-id="action-tray-review-excerpt" />;
-    return <p data-debug-id="action-tray-review-empty" className="text-[15px] text-muted">{loading ? 'Loading the result…' : 'The worker left no summary. Open the task to review it.'}</p>;
+    return <p data-debug-id="action-tray-review-empty" className="text-[15px] text-muted">{loading ? 'Loading the result…' : 'The worker left no summary. Open the ticket to review it.'}</p>;
   }
 
   return (

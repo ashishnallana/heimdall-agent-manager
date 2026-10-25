@@ -2526,7 +2526,7 @@ task_actor_fields_from_body :: proc(body: string) -> (assignee: string, reviewer
 	if assignee == "" {
 		if ref, ok := jsonx.extract_raw_object(body, "assignee_ref", top_level_only = true, allocator = context.temp_allocator); ok {
 			if jsonx.extract_string(ref, "agent_instance_id", "", true, context.temp_allocator) != "" {
-				return "", nil, nil, false, domain.domain_error(.Validation_Failed, "assignee must be an agent template id (agent_id); instance pins were removed in Task System v2")
+				return "", nil, nil, false, domain.domain_error(.Validation_Failed, "assignee must be an agent template id (agent_id); instance pins are not supported")
 			}
 			assignee = strings.trim_space(jsonx.extract_string(ref, "agent_id", "", true))
 		}
@@ -2543,7 +2543,7 @@ task_actor_fields_from_body :: proc(body: string) -> (assignee: string, reviewer
 						return "", nil, nil, false, domain.domain_error(.Validation_Failed, "user reviewer refs are not accepted; use requires_user_approval")
 					}
 					if _, iok := obj["agent_instance_id"].(json.String); iok {
-						return "", nil, nil, false, domain.domain_error(.Validation_Failed, "reviewers must be agent template ids (agent_id); instance refs were removed in Task System v2")
+						return "", nil, nil, false, domain.domain_error(.Validation_Failed, "reviewers must be agent template ids (agent_id); instance refs are not supported")
 					}
 					if a, aok := obj["agent_id"].(json.String); aok && string(a) != "" do append(&revs, strings.clone(string(a)))
 				}

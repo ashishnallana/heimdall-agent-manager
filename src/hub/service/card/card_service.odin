@@ -765,7 +765,7 @@ task_card_op :: proc(card: domain.Card) -> string {
 check_task_card_guard :: proc(s: ^Card_Service, card: domain.Card) -> (domain.Task, bool, domain.Domain_Error) {
 	guard_ok, guard_reason := evaluate_guard(s, card.owner_user_id, card)
 	if !guard_ok || task_card_op(card) == "" {
-		if guard_ok do guard_reason = "the card predates Task System v2"
+		if guard_ok do guard_reason = "this legacy card is no longer supported"
 		now := platform.clock_now(s.clock)
 		_, _ = iface.card_update_status(s.cards, card.card_id, domain.CARD_STATUS_RESOLVED, now)
 		notify_card_changed(s, card.owner_user_id, card.kind)
