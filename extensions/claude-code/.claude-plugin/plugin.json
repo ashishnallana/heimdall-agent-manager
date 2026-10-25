@@ -1,6 +1,6 @@
 {
   "name": "heimdall",
-  "version": "0.4.44",
+  "version": "0.4.45",
   "description": "Heimdall Agent Manager integration: live activity, subagents, tool calls, file-edit diffs and permission approvals for Heimdall-managed Claude Code agents.",
   "author": {
     "name": "Heimdall Agent Manager"
