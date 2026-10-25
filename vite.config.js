@@ -2,13 +2,14 @@ import { fileURLToPath, URL } from 'node:url';
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 
-// UI-19 / HBR-5 / HBR-6: the rewrite `/api/v1` path must obtain trusted-proxy
-// identity exclusively from `ham-dev-proxy` (the reverse proxy inside the Hub's
-// --trusted-proxy-cidr), never from the client. In dev the renderer runs at the
-// Vite dev-server origin (127.0.0.1:5173), so relative `/api/v1` requests
-// resolve to Vite itself. Forward them to `ham-dev-proxy`, which injects
-// `X-authentik-*` server-side from the `ham_dev_user` cookie set by
-// `/_dev/login?user=<name>`. No client-side header injection.
+// Users authenticate only with OIDC. In dev the renderer runs at the Vite
+// dev-server origin (the hub's --ui-origin), so relative `/api/v1` requests —
+// including the sign-in flow (/api/v1/auth/login -> mock provider ->
+// /api/v1/auth/callback) — resolve to Vite and are forwarded to `ham-dev-proxy`,
+// which passes the hub session cookie through unchanged and adds the dev user
+// selected with `/_dev/login?user=<name>` as the provider login_hint. Locally the
+// provider is tools/mock-oidc (see tools/mock-oidc/README.md). Nothing here
+// fakes identity: the dev UI talks to a hub signed into via that mock.
 //
 // Override the upstream proxy with HEIMDALL_DEV_PROXY_URL if your
 // ham-dev-proxy listens elsewhere.
@@ -48,11 +49,11 @@ export default defineConfig({
     },
   },
   server: {
-    // Route the trusted-proxy auth surface through ham-dev-proxy in dev.
+    // Route the Hub API (and its OIDC sign-in routes) through ham-dev-proxy in dev.
     proxy: {
-      // Dev login/logout cookie flow (sets ham_dev_user). Kept on the renderer
-      // origin so the cookie is same-origin with the SPA and is sent on
-      // subsequent /api/v1 requests.
+      // Dev-user selection (sets ham_dev_user, used as the sign-in login_hint).
+      // Kept on the renderer origin so the cookie reaches the proxy on
+      // /api/v1/auth/login.
       '/_dev/login': { target: DEV_PROXY_URL, changeOrigin: true },
       '/_dev/logout': { target: DEV_PROXY_URL, changeOrigin: true },
       '/api/v1': {

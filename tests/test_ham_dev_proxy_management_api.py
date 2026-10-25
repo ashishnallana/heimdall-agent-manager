@@ -6,8 +6,8 @@ ham-dev-proxy + echo Hub:
   - POST /_dev/api/users  creates a persisted, immediately-selectable user (DP-2)
   - duplicate / empty username -> 409 (DP-2)
   - POST /_dev/api/active     sets persisted active + ham_dev_user cookie (DP-3),
-    and a subsequent proxied /api/v1/ request is forwarded with that user's
-    X-authentik-username (DP-3 / AC2)
+    and the next sign-in (/api/v1/auth/login) is hinted as that user; proxied
+    requests carry no identity headers (DP-3 / AC2)
   - DELETE /_dev/api/users/<active> removes the user AND clears active (DP-7 / AC3)
   - non-loopback bind -> every /_dev/api/* route returns 404 (DP-7 / AC4)
   - management paths are never forwarded to the Hub (DP-6 invariant)
@@ -29,6 +29,8 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "tests"))
+from dev_proxy_oidc_fixture import answer_login_redirect, assert_no_identity_headers, login_hint  # noqa: E402
 
 
 def free_port() -> int:
@@ -41,6 +43,8 @@ def free_port() -> int:
 
 class HubHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
+        if answer_login_redirect(self):
+            return
         body = json.dumps({
             "path": self.path,
             "headers": {k: v for k, v in self.headers.items()},
@@ -160,13 +164,12 @@ def main() -> None:
             assert "ham_dev_user=carol" in cookie, f"set-active should set ham_dev_user cookie; got {cookie!r}"
 
             # AC2 (DP-3): persisted active reflected in GET, and a proxied /api/v1
-            # request (no cookie) is forwarded with that user's X-authentik-username.
+            # sign-in (no cookie) is hinted as carol; nothing identity-bearing is injected.
             status, listing, _ = api(base, "GET", "/_dev/api/users")
             assert listing["active"] == "carol", f"active should be carol, got {listing['active']}"
+            assert login_hint(base) == "carol", "next sign-in should be hinted as carol"
             fwd = json.loads(urllib.request.urlopen(f"{base}/api/v1/me", timeout=5).read())
-            h = {k.lower(): v for k, v in fwd["headers"].items()}
-            assert h.get("x-authentik-username") == "carol", f"proxied request should inject carol; got {h}"
-            assert h.get("x-authentik-email") == "carol@example.com", f"proxied email mismatch: {h}"
+            assert_no_identity_headers(fwd["headers"])
 
             # AC3 (DP-7): delete the active user -> 204 AND active is cleared.
             status, _, _ = api(base, "DELETE", "/_dev/api/users/carol")

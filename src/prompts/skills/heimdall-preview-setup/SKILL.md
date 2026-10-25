@@ -31,7 +31,7 @@ Use this skill whenever a Heimdall user should see or test an HTTP app that you 
 
 The URL has one of two forms:
 
-- With a preview origin configured: `<preview_origin>/p/<sid>/`. It is isolated from the Hub origin and protected by Authentik. If the iframe asks for authentication, tell the user to click **Sign in / open in new tab** once.
+- With a preview origin configured: `<preview_origin>/p/<sid>/`. It is isolated from the Hub origin and protected by its own preview sign-in: the Hub mints a host-only `__Host-heimdall_preview` cookie for the user's Hub session (an unauthenticated navigation bounces through the Hub and back automatically). If the iframe asks for authentication, tell the user to click **Sign in / open in new tab** once.
 - Legacy mode: `<ui_origin>/api/v1/preview/<sid>/`. It shares the Hub origin. Only preview trusted code: JavaScript here runs with the user's Hub-origin privileges.
 
 Both modes retain a session path prefix, so the application rules below apply to both.
@@ -52,7 +52,7 @@ The upstream receives its original method, path below the session prefix, query,
 - `X-Forwarded-Host`, `X-Forwarded-Proto: https`, `X-Forwarded-Prefix`, and `X-Forwarded-For`;
 - browser `Origin`, `Authorization` (in legacy mode only non-Bearer schemes such as Basic; see below), common CSRF headers, conditional/content headers, and WebSocket negotiation headers when applicable.
 
-In legacy mode, browser `Origin` is the Hub origin, `Cookie` is never forwarded, and an `Authorization: Bearer ...` header is consumed by the Hub's own authentication before forwarding (an unknown Bearer token is rejected with `401`), so only non-Bearer schemes such as Basic reach the app. On the preview origin, `Origin` is the preview origin, `Authorization` is left for the app, `OPTIONS` reaches the app, and application cookies are forwarded after all `authentik_*` cookies are removed. `X-authentik-*` headers never reach the app in either mode.
+In legacy mode, browser `Origin` is the Hub origin, `Cookie` is never forwarded, and an `Authorization: Bearer ...` header is consumed by the Hub's own authentication before forwarding (an unknown Bearer token is rejected with `401`), so only non-Bearer schemes such as Basic reach the app. On the preview origin, `Origin` is the preview origin, `Authorization` is left for the app, `OPTIONS` reaches the app, and application cookies are forwarded after all Hub cookies (`__Host-heimdall_*`, and legacy `authentik_*`) are removed. Hub credentials never reach the app in either mode.
 
 Use `X-Forwarded-Prefix` when generating absolute URLs. The Hub rewrites root/local `Location` responses under the active session prefix, forces each `Set-Cookie` `Path` to that prefix, drops its `Domain`, and strips `Service-Worker-Allowed`. Prefer relative URLs anyway.
 
@@ -90,7 +90,7 @@ The sidebar uses the session's `preview_url`. A stopped session remains open and
 | `404` for `/assets/...` | The build emitted root-absolute paths. Configure `base: './'`, `homepage: "."`, or `<base href="./">`, rebuild, and restart. |
 | `port_closed` | The declared port does not match the listener, or the process is not listening. Bind the exact port to `127.0.0.1`; `::1` is supported only as fallback. |
 | WebSocket `403` | The dev server is rejecting the public Origin or forwarded Host. Prefer a production build; otherwise allow the public preview/Hub origin and trust the forwarded headers in preview mode. |
-| API `401` | Check which mode is active. Legacy strips cookies and cannot carry `Authorization: Bearer` (the Hub consumes or rejects it); use the preview origin, or a frontend proxy/BFF that adds the token server-side. Preview-origin strips only Authentik cookies and forwards `Authorization`. Also confirm both sessions share an owner. |
+| API `401` | Check which mode is active. Legacy strips cookies and cannot carry `Authorization: Bearer` (the Hub consumes or rejects it); use the preview origin, or a frontend proxy/BFF that adds the token server-side. Preview-origin strips only the Hub's own cookies and forwards `Authorization`. Also confirm both sessions share an owner. |
 | Redirect loop | Trust `X-Forwarded-Proto`, `X-Forwarded-Host`, and `X-Forwarded-Prefix`; emit relative redirects when possible. |
 | Refused to frame / X-Frame-Options | Remove `X-Frame-Options: DENY` and restrictive `frame-ancestors` for this preview build. |
 

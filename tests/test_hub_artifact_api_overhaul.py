@@ -36,6 +36,10 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from hub_oidc_login import MockOIDC, login, session_headers  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -124,11 +128,13 @@ def build_odin_pkg(pkg: str, out_path: Path) -> None:
 def test_hub_artifact_api_overhaul() -> None:
     test_dir = Path(tempfile.mkdtemp(prefix="heimdall-artifact-api-test-"))
     try:
-        hub_bin = test_dir / "ham-hub"
-        build_odin_pkg("src/hub", hub_bin)
+        hub_bin = Path(os.environ["HEIMDALL_TEST_HUB_BIN"]) if os.environ.get("HEIMDALL_TEST_HUB_BIN") else test_dir / "ham-hub"
+        if not os.environ.get("HEIMDALL_TEST_HUB_BIN"):
+            build_odin_pkg("src/hub", hub_bin)
 
-        ctl_bin = test_dir / "ham-ctl"
-        build_odin_pkg("src/ctl", ctl_bin)
+        ctl_bin = Path(os.environ["HEIMDALL_TEST_CTL_BIN"]) if os.environ.get("HEIMDALL_TEST_CTL_BIN") else test_dir / "ham-ctl"
+        if not os.environ.get("HEIMDALL_TEST_CTL_BIN"):
+            build_odin_pkg("src/ctl", ctl_bin)
 
         db_path = test_dir / "hub.db"
         bridge_token_file = test_dir / "bridge_token"
@@ -143,6 +149,9 @@ def test_hub_artifact_api_overhaul() -> None:
         env["HOSTNAME"] = "cloudtop-test-node"
         env["USER"] = "testowner"
         env["HAM_CLOUDTOP_OWNER"] = "testowner"
+        # Users sign in only through OIDC: run the mock provider for this hub.
+        mock = MockOIDC.start()
+        env.update(mock.hub_env(hub_url))
 
         print(f"[2/5] Starting test Hub instance on port {hub_port} with DB {db_path}...")
         hub_proc = subprocess.Popen(
@@ -151,6 +160,7 @@ def test_hub_artifact_api_overhaul() -> None:
                 "--listen", f"127.0.0.1:{hub_port}",
                 "--db", str(db_path),
                 "--migrations-dir", str(migrations_dir),
+                "--ui-origin", hub_url,
             ],
             env=env,
             stdout=subprocess.PIPE,
@@ -161,10 +171,8 @@ def test_hub_artifact_api_overhaul() -> None:
             assert wait_for_port(hub_port, timeout=12.0), "Hub failed to start within timeout"
             print("  -> Hub started successfully.")
 
-            auth_headers = {
-                "X-authentik-username": "testowner",
-                "X-authentik-name": "Test Owner",
-            }
+            # Browser session for testowner (Origin satisfies the CSRF check).
+            auth_headers = session_headers(login(hub_url, "testowner"), hub_url)
 
             # 1. Enroll a bridge through the BROWSER-APPROVED DEVICE FLOW (REQ-ENROLL-9),
             #    then create an agent instance for the agent actions below.
@@ -229,23 +237,14 @@ def test_hub_artifact_api_overhaul() -> None:
 
             agent_inst_id = "inst_artifact_tester_1"
             other_inst_id = "inst_other_999"
-            plaintext_user_token = "hut_test_user_token_12345"
-            user_token_hash = f"sha1:{hashlib.sha1(plaintext_user_token.encode('utf-8')).hexdigest()}"
+            plaintext_user_token = "hut_test_user_token_12345"  # removed credential shape
             with sqlite3.connect(db_path) as conn:
                 c = conn.cursor()
                 c.execute("SELECT bridge_id FROM bridges WHERE bridge_id != 'brg_local' ORDER BY created_at DESC LIMIT 1")
                 b_row = c.fetchone()
                 enrolled_bridge_id = b_row[0] if b_row else "brg_local"
 
-                # Seed User & User API Token for ham-ctl hub
-                c.execute(
-                    "INSERT OR IGNORE INTO users (user_id, name, display_name, email, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    ("testowner", "testowner", "Test Owner", "", "active", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"),
-                )
-                c.execute(
-                    "INSERT INTO user_api_tokens (token_id, owner_user_id, label, token_hash, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-                    ("utok_test_1", "testowner", "Test Token", user_token_hash, "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"),
-                )
+                # testowner already exists: provisioned by the OIDC sign-in above.
 
                 # Seed Projects
                 for pid, pname in [("proj_alpha", "Project Alpha"), ("proj_beta", "Project Beta"), ("proj_gamma", "Project Gamma")]:
@@ -606,6 +605,8 @@ def test_hub_artifact_api_overhaul() -> None:
             # CLI Integration via ham-ctl hub artifacts
             # -------------------------------------------------------------
             print("[5/5] Testing ham-ctl CLI commands...")
+            # Hub user tokens were removed; ham-ctl user mode must say so clearly
+            # instead of failing with a confusing hub error.
             cli_res = run_cmd(
                 [
                     str(ctl_bin),
@@ -613,29 +614,13 @@ def test_hub_artifact_api_overhaul() -> None:
                     "--hub-url", hub_url,
                     "--user-token", plaintext_user_token,
                     "artifacts", "list",
-                    "--sort", "name",
-                    "--order", "asc",
                 ],
                 env={"HAM_CLOUDTOP_OWNER": "testowner"},
             )
-            assert cli_res.returncode == 0, f"ham-ctl hub artifacts list failed: {cli_res.stderr} {cli_res.stdout}"
-            assert "build_log.txt" in cli_res.stdout
-            assert "zebra_notes.txt" in cli_res.stdout
-
-            cli_content_res = run_cmd(
-                [
-                    str(ctl_bin),
-                    "hub",
-                    "--hub-url", hub_url,
-                    "--user-token", plaintext_user_token,
-                    "artifacts", "content",
-                    target_id,
-                ],
-                env={"HAM_CLOUDTOP_OWNER": "testowner"},
-            )
-            assert cli_content_res.returncode == 0, f"ham-ctl hub artifacts content failed: {cli_content_res.stderr}"
-            assert cli_content_res.stdout.strip() == expected_content.strip()
-            print("  -> Passed: ham-ctl hub artifacts list and content CLI commands work cleanly.")
+            assert "were removed" in cli_res.stdout, f"ham-ctl did not explain removed user tokens: {cli_res.stdout} {cli_res.stderr}"
+            st, refused, _ = http_request(f"{hub_url}/api/v1/artifacts", headers={"Authorization": f"Bearer {plaintext_user_token}"})
+            assert st == 401, f"hut_ bearer must be refused: {st} {refused}"
+            print("  -> Passed: ham-ctl explains removed user tokens; the hub refuses them.")
 
         finally:
             hub_proc.terminate()
@@ -643,6 +628,7 @@ def test_hub_artifact_api_overhaul() -> None:
                 hub_proc.wait(timeout=4)
             except subprocess.TimeoutExpired:
                 hub_proc.kill()
+            mock.stop()
     finally:
         shutil.rmtree(test_dir, ignore_errors=True)
 

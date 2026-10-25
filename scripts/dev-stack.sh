@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Local Heimdall dev stack: hub + dev-proxy + bridge + (optional) UI.
+# Local Heimdall dev stack: mock OIDC + hub + dev-proxy + bridge + (optional) UI.
+# Users authenticate only with OIDC; locally that is tools/mock-oidc (DEV ONLY).
 # Everything talks to the LOCAL hub (127.0.0.1:8081), never hub.mundus.in.
 #
 # Usage:
@@ -42,6 +43,10 @@ PROXY_ADDR="${HAM_DEV_PROXY_ADDR:-127.0.0.1:8080}"
 # Sec-Fetch-Site, so every PATCH/POST from the preview 403s with csrf_rejected
 # ("Origin does not match the UI origin") unless this names the preview origin.
 UI_ORIGIN="${HAM_DEV_UI_ORIGIN:-http://$PROXY_ADDR}"
+# Mock OIDC provider (tools/mock-oidc): the only way to sign in to this local hub.
+MOCK_OIDC_PORT="${HAM_DEV_OIDC_PORT:-8090}"
+# shellcheck source=lib/hub-oidc-dev.sh
+. "$ROOT/scripts/lib/hub-oidc-dev.sh"
 BRIDGE_PORT="${HAM_DEV_BRIDGE_PORT:-49327}"
 BRIDGE_LOCAL_ENDPOINT_PORT="${HAM_DEV_BRIDGE_LOCAL_ENDPOINT_PORT:-49328}"
 HUB_DB="${HAM_DEV_HUB_DB:-$ROOT/hub.db}"
@@ -146,12 +151,12 @@ PY
 # deleted, so the old two-step "mint a token, then exchange it" is gone.
 #
 # HOW THIS STAYS NON-INTERACTIVE WITHOUT WEAKENING ANYTHING. The device flow requires
-# a human approval, and that is the point of it — but on this stack the dev-proxy
-# already authenticates every request as the local user by injecting
-# X-authentik-username. So the script can POST the approval itself: it is a real,
-# authenticated approval by the local developer, made through the same endpoint and
-# the same Auth_Context a browser would use. No test-only bypass exists in the Hub,
-# and none is needed here.
+# a human approval, and that is the point of it — but on this stack the local user
+# can sign in non-interactively through the mock OIDC provider (the real browser
+# flow, auto-approved). So the script signs in, then POSTs the approval with that
+# browser session: a real, authenticated approval by the local developer, made
+# through the same endpoint and Auth_Context a browser would use. No test-only
+# bypass exists in the Hub, and none is needed here.
 #
 # WHAT IS WRITTEN. The credential is now an EXPIRING PAIR: the access token goes to
 # $BRIDGE_TOKEN_FILE and the refresh token to "$BRIDGE_TOKEN_FILE.refresh". The
@@ -202,8 +207,10 @@ enroll() {
   fi
   echo "[dev-stack] approving code $code as the local user via dev-proxy"
 
-  local approve
+  local approve session
+  session="$(hub_oidc_login "http://$PROXY_ADDR" tanmay)" || { kill "$enroll_pid" 2>/dev/null || true; echo "[dev-stack] OIDC sign-in failed (is the mock running? dev-stack start)"; exit 1; }
   approve="$(curl -s -m10 -X POST "http://$PROXY_ADDR/api/v1/device/approve" \
+    -H "$(hub_oidc_cookie "$session")" -H "Origin: $UI_ORIGIN" \
     -H 'Content-Type: application/json' \
     -d "{\"user_code\":\"$code\",\"approve\":true}")"
   case "$approve" in
@@ -262,6 +269,7 @@ _stop_by_match() { # $1=grep-pattern label
 }
 
 stop() {
+  _stop_pidfile oidc
   _stop_pidfile hub
   _stop_pidfile devproxy
   _stop_pidfile bridge
@@ -280,11 +288,17 @@ start() {
   stop
   sleep 1
 
+  echo "[dev-stack] starting mock OIDC provider on 127.0.0.1:$MOCK_OIDC_PORT (dev only)"
+  nohup python3 "$ROOT/tools/mock-oidc/mock_oidc.py" --port "$MOCK_OIDC_PORT" --username tanmay \
+    >"$RUN_DIR/mock-oidc.log" 2>&1 &
+  echo $! > "$(_pidfile oidc)"
+  disown $!
+  hub_oidc_export_env
+
   echo "[dev-stack] starting hub on $HUB_ADDR"
   nohup ./result-hub/bin/ham-hub \
     --listen "$HUB_ADDR" --db "$HUB_DB" \
     --migrations-dir "$MIGRATIONS" \
-    --trusted-proxy-cidr 127.0.0.1/32 \
     --ui-origin "$UI_ORIGIN" \
     >"$RUN_DIR/hub.log" 2>&1 &
   echo $! > "$(_pidfile hub)"
@@ -349,7 +363,7 @@ start() {
 
 status() {
   echo "=== dev-stack status ==="
-  for s in hub devproxy bridge; do
+  for s in oidc hub devproxy bridge; do
     f="$(_pidfile "$s")"
     if _running "$f"; then echo "  $s: RUNNING (pid $(cat "$f"))"; else echo "  $s: stopped"; fi
   done

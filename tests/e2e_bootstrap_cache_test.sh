@@ -23,7 +23,9 @@ ODIN_BIN="${ODIN:-odin}"
 HARNESS="$(mktemp -t e2e-harness-XXXX)"
 LOG="$(mktemp -t e2e-hub-log-XXXX)"
 
-cleanup() { [ -n "${HUB_PID:-}" ] && kill "$HUB_PID" 2>/dev/null || true; rm -rf "$DB" "$CACHE" "$TOKF" "$HARNESS" "$LOG"; }
+# shellcheck source=../scripts/lib/hub-oidc-dev.sh
+. "$ROOT/scripts/lib/hub-oidc-dev.sh"
+cleanup() { [ -n "${HUB_PID:-}" ] && kill "$HUB_PID" 2>/dev/null || true; hub_oidc_stop_mock; rm -rf "$DB" "$CACHE" "$TOKF" "$HARNESS" "$LOG"; }
 trap cleanup EXIT
 
 echo "[e2e] building ham-hub + ham-bridge via nix"
@@ -32,14 +34,17 @@ nix build "$ROOT#ham-bridge" --out-link "$CACHE/result-bridge" >/dev/null
 echo "[e2e] building bootstrap harness"
 "$ODIN_BIN" build tests/e2e_bridge_bootstrap_cache_harness.odin -file -collection:odin_test=src -out:"$HARNESS"
 
-echo "[e2e] starting local hub on $H"
+echo "[e2e] starting mock OIDC + local hub on $H"
+hub_oidc_start_mock "$CACHE"
+hub_oidc_export_env
 "$CACHE/result-hub/bin/ham-hub" --listen "$H" --db "$DB" \
   --migrations-dir src/hub/repository/sqlite/migrations \
-  --trusted-proxy-cidr 127.0.0.1/32 >"$LOG" 2>&1 &
+  --ui-origin "http://$H" >"$LOG" 2>&1 &
 HUB_PID=$!
 sleep 2
 
-U=(-H "X-authentik-username:alice")
+# Browser session for alice (OIDC sign-in against the mock); Origin satisfies CSRF.
+U=(-H "$(hub_oidc_cookie "$(hub_oidc_login "http://$H" alice)")" -H "Origin: http://$H")
 curl -sf -m5 "${U[@]}" "http://$H/api/v1/me" >/dev/null
 # ===== BROWSER-APPROVED DEVICE FLOW (REQ-ENROLL-9) =====
 # The one-time-token endpoints are deleted (404). The three steps are driven here

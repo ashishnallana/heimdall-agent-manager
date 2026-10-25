@@ -20,11 +20,11 @@
 // With both, every request the page makes arrives here under the prefix, and this
 // server answers files from `dist/` and forwards `/api/v1` upstream.
 //
-// AUTH IS NOT WEAKENED. This process injects no identity headers. It forwards to
-// `ham-dev-proxy`, which is the trusted proxy inside the hub's --trusted-proxy-cidr
-// and the only thing that asserts `X-authentik-*`, exactly as in `npm run dev`.
-// Any `X-authentik-*` arriving from the network is stripped before forwarding, so a
-// client cannot smuggle an identity through this hop.
+// AUTH IS NOT WEAKENED. This process injects no identity. Users authenticate only
+// with OIDC: requests carry the hub's own session cookie (from the sign-in flow,
+// locally against tools/mock-oidc), forwarded unchanged through `ham-dev-proxy`,
+// exactly as in `npm run dev`. Legacy `X-authentik-*` headers mean nothing to the
+// hub any more; they are still stripped here so nothing pretends otherwise.
 //
 // Usage:
 //   HEIMDALL_PREVIEW_PORT=45180 \
@@ -85,8 +85,8 @@ function proxyApi(req, res) {
   const headers = {};
   for (const [key, value] of Object.entries(req.headers)) {
     const lower = key.toLowerCase();
-    // An identity may only be asserted by ham-dev-proxy. Anything that arrives
-    // here claiming one is dropped rather than relayed.
+    // Legacy identity headers are dropped (the hub ignores them; identity is the
+    // session cookie).
     if (lower.startsWith('x-authentik')) continue;
     if (lower === 'host' || lower === 'connection') continue;
     headers[key] = value;

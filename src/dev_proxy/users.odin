@@ -12,9 +12,6 @@ Dev_User :: struct {
 Dev_Proxy_Config :: struct {
 	listen: string,
 	hub_url: string,
-	username_header: string,
-	display_name_header: string,
-	email_header: string,
 	default_user: string,
 	users: []Dev_User,
 	// DP-7: management API/UI (/_dev/*) are served ONLY on a loopback bind.
@@ -33,9 +30,6 @@ default_dev_proxy_config :: proc() -> Dev_Proxy_Config {
 	return Dev_Proxy_Config{
 		listen = "127.0.0.1:8080",
 		hub_url = "http://127.0.0.1:8081",
-		username_header = "X-authentik-username",
-		display_name_header = "X-authentik-name",
-		email_header = "X-authentik-email",
 		default_user = "tanmay",
 		users = users,
 	}

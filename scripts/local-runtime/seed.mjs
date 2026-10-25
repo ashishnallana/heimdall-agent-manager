@@ -5,6 +5,8 @@
 //
 // Everything goes through the hub's public REST API behind ham-dev-proxy, the same
 // path the browser UI uses, so validation, ownership and vault rules all apply.
+// It signs in like a browser (OIDC against the local mock provider; --user picks
+// the account) and sends Origin = $HEIMDALL_LOCAL_UI_ORIGIN for the CSRF check.
 // Idempotent: a fixture is skipped when the record file says it was seeded before
 // (even if the user since renamed or deleted it) or when an item with the same
 // name/title already exists. Nothing is ever updated, and no agent is launched:
@@ -12,6 +14,7 @@
 // Shared by local-hub.sh and local-hub.ps1 (see CONTRACT.md).
 import { readFileSync, writeFileSync, renameSync, existsSync, realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { hubLogin, sessionHeaders } from '../../tests/e2e/hubOidc.mjs';
 
 export const FIXTURES = {
   agents: [
@@ -52,11 +55,10 @@ function parseArgs(argv) {
   return out;
 }
 
-export async function seed({ api, record, user = '', fetchImpl = fetch, log = console.log }) {
+export async function seed({ api, record, user = '', fetchImpl = fetch, log = console.log, auth = {} }) {
   const base = api.replace(/\/+$/, '');
   const state = existsSync(record) ? JSON.parse(readFileSync(record, 'utf8')) : { version: 1, seeded: {} };
-  const headers = { 'Content-Type': 'application/json' };
-  if (user) headers['X-Dev-User'] = user;
+  const headers = { 'Content-Type': 'application/json', ...auth };
 
   async function call(method, path, body) {
     const res = await fetchImpl(base + path, { method, headers, body: body ? JSON.stringify(body) : undefined });
@@ -111,8 +113,11 @@ export async function seed({ api, record, user = '', fetchImpl = fetch, log = co
 // Compared by real path: the checkout is often reached through a symlink
 // (/home -> /var/home), and a plain URL comparison then silently skips main.
 if (process.argv[1] && realpathSync(fileURLToPath(import.meta.url)) === realpathSync(process.argv[1])) {
-  seed(parseArgs(process.argv.slice(2))).catch((err) => {
-    console.error(`seed: ${err.message}`);
-    process.exit(1);
-  });
+  const args = parseArgs(process.argv.slice(2));
+  hubLogin(args.api, args.user)
+    .then((session) => seed({ ...args, auth: sessionHeaders(session, process.env.HEIMDALL_LOCAL_UI_ORIGIN || args.api) }))
+    .catch((err) => {
+      console.error(`seed: ${err.message}`);
+      process.exit(1);
+    });
 }

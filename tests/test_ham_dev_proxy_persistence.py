@@ -31,6 +31,8 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "tests"))
+from dev_proxy_oidc_fixture import answer_login_redirect, assert_no_identity_headers, login_hint  # noqa: E402
 
 
 def free_port() -> int:
@@ -46,6 +48,8 @@ class HubHandler(http.server.BaseHTTPRequestHandler):
     the proxy injected server-side."""
 
     def do_GET(self):
+        if answer_login_redirect(self):
+            return
         body = json.dumps({
             "path": self.path,
             "headers": {k: v for k, v in self.headers.items()},
@@ -86,11 +90,6 @@ def start_proxy(proxy_bin: str, proxy_port: int, hub_port: int, testhome: str) -
     )
 
 
-def assert_user_injected(resp_headers: dict, expected_username: str, expected_email: str, ctx: str) -> None:
-    got_user = resp_headers.get("x-authentik-username")
-    got_email = resp_headers.get("x-authentik-email")
-    if got_user != expected_username or got_email != expected_email:
-        raise AssertionError(f"{ctx}: expected user={expected_username} email={expected_email}, got {resp_headers}")
 
 
 def run_once(proxy_bin: str, proxy_port: int, hub_port: int, testhome: Path) -> None:
@@ -113,13 +112,11 @@ def run_once(proxy_bin: str, proxy_port: int, hub_port: int, testhome: Path) -> 
             assert e.code == 400, f"bob should be 400, got {e.code}"
 
         # AC2 / DP-5: no cookie -> persisted active 'reviewer' (with overridden email).
-        payload = json.loads(urllib.request.urlopen(f"{base}/api/v1/me", timeout=5).read())
-        assert_user_injected({k.lower(): v for k, v in payload["headers"].items()}, "reviewer", "rev@persisted.example", "no-cookie default")
+        # (The selected user is applied as the sign-in login_hint; email now comes from the IdP.)
+        assert login_hint(base) == "reviewer", "no-cookie default should be the persisted active user"
 
         # AC2 / DP-5: existing cookie WINS over persisted active.
-        req = urllib.request.Request(f"{base}/api/v1/me", headers={"Cookie": "ham_dev_user=tanmay"})
-        payload = json.loads(urllib.request.urlopen(req, timeout=5).read())
-        assert_user_injected({k.lower(): v for k, v in payload["headers"].items()}, "tanmay", "tanmay@example.com", "cookie override")
+        assert login_hint(base, cookie="ham_dev_user=tanmay") == "tanmay", "cookie override"
 
         # DP-6 invariant: Authorization bearer passthrough.
         req = urllib.request.Request(f"{base}/api/v1/me", headers={"Authorization": "Bearer keep-me"})
@@ -127,11 +124,10 @@ def run_once(proxy_bin: str, proxy_port: int, hub_port: int, testhome: Path) -> 
         h = {k.lower(): v for k, v in payload["headers"].items()}
         assert h.get("authorization") == "Bearer keep-me", f"bearer passthrough broken: {h}"
 
-        # DP-6 invariant: client-supplied X-authentik-* stripped, persisted active injected instead.
+        # DP-6 invariant: client-supplied X-authentik-* stripped and nothing injected.
         req = urllib.request.Request(f"{base}/api/v1/me", headers={"X-authentik-username": "spoofed"})
         payload = json.loads(urllib.request.urlopen(req, timeout=5).read())
-        h = {k.lower(): v for k, v in payload["headers"].items()}
-        assert h.get("x-authentik-username") == "reviewer", f"spoofed trusted header not stripped: {h}"
+        assert_no_identity_headers(payload["headers"])
     finally:
         proc.terminate()
         try:

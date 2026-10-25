@@ -7,7 +7,7 @@
 //   node --import <checkout>/tests/helpers/vaultEndpointHarness.ts approver.mjs <verb> \
 //     --api <dev-proxy-url> --key <hub-dir>/approver/device.json [--code CODE] [--label NAME] [--user NAME]
 //
-//   --user  act as that dev-proxy user (X-Dev-User) instead of the proxy's default
+//   --user  sign in as that dev user instead of the proxy's default
 //           user. Each user has its own vault, so each needs its own --key.
 //
 //   init    create the user's vault genesis with a new approver device and save its
@@ -38,6 +38,7 @@ import { deliverKeyringToBridge } from '../../src/ui/utils/vaultBridgeDelivery.t
 import { bridgeUnsealTargetFromRecord } from '../../src/ui/utils/vaultBridgeUnseal.ts';
 import { buildBridgeApproval, buildBrowserApproval, buildGenesis, checkBridgeCodeInfo, checkBrowserCodeInfo } from '../../src/ui/utils/vaultDeviceFlows.ts';
 import { derivePairKeys, pairApproveMac } from '../../src/ui/utils/vaultPairing.ts';
+import { hubLogin, sessionHeaders } from '../../tests/e2e/hubOidc.mjs';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 export class Refused extends Error {
@@ -61,12 +62,18 @@ export function parseArgs(argv) {
   return out;
 }
 
-// The dev-proxy user every request acts as ('' = the proxy's default user).
+// The dev-proxy user every request acts as ('' = the proxy's default user). The
+// approver signs in like a browser (OIDC against the local mock provider) and
+// reuses that session; Origin = $HEIMDALL_LOCAL_UI_ORIGIN satisfies the CSRF check.
 let devUser = '';
+const sessions = new Map();
 
 async function http(api, method, p, { body, headers = {} } = {}) {
   const text = body === undefined ? undefined : JSON.stringify(body);
-  const h = { ...headers, ...(devUser ? { 'X-Dev-User': devUser } : {}), ...(text === undefined ? {} : { 'Content-Type': 'application/json' }) };
+  const key = `${api}|${devUser}`;
+  if (!sessions.has(key)) sessions.set(key, await hubLogin(api, devUser));
+  const auth = sessionHeaders(sessions.get(key), process.env.HEIMDALL_LOCAL_UI_ORIGIN || api);
+  const h = { ...auth, ...headers, ...(text === undefined ? {} : { 'Content-Type': 'application/json' }) };
   const res = await fetch(`${api}${p}`, { method, headers: h, body: text });
   const raw = await res.text();
   let json = null;

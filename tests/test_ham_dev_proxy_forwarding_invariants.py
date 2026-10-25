@@ -6,12 +6,13 @@ real built ham-dev-proxy binary driving a recording mock Hub upstream. The Hub
 records every request it receives (method/path/headers), so we can assert both
 *what* is forwarded and *that management paths are never forwarded*.
 
-DP-6 invariants under test:
-  - Authorization: Bearer <hut_/hbr_/hbe_ token> is forwarded unchanged.
-  - Client-supplied spoofable headers (X-authentik-username/name/email and
-    X-Dev-User) are STRIPPED from the forwarded request.
-  - Only the selected dev user's trusted headers are injected (HBR-6), with the
-    REAL user fields — spoofs do not leak.
+DP-6 invariants under test (OIDC era: the Hub authenticates users only with
+its own session cookie or an OIDC bearer, so the proxy injects NO identity):
+  - Authorization: Bearer ... and Cookie are forwarded unchanged.
+  - Client-supplied X-authentik-* and X-Dev-User are STRIPPED, and nothing is
+    injected in their place.
+  - The selected dev user is applied at sign-in: the Hub's /api/v1/auth/login
+    redirect gets login_hint=<user> appended (tools/mock-oidc honours it).
   - Selection precedence: X-Dev-User header > ham_dev_user cookie > default.
   - Management paths (/_dev/, /_dev/api/users, /_dev/login, /_dev/logout) are
     answered locally and NEVER forwarded to the Hub.
@@ -72,7 +73,16 @@ class RecordingHub:
                 self.end_headers()
                 self.wfile.write(body)
 
-            def do_GET(self) -> None: self._record()
+            def do_GET(self) -> None:
+                if self.path.startswith("/api/v1/auth/login"):
+                    with hub.lock:
+                        hub.requests.append({"method": self.command, "path": self.path, "headers": dict(self.headers)})
+                    self.send_response(302)
+                    self.send_header("Location", "http://127.0.0.1:9/application/o/heimdall-native/authorize/?state=s")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                self._record()
             def do_POST(self) -> None: self._record()
             def do_DELETE(self) -> None: self._record()
 
@@ -122,6 +132,33 @@ def proxied_headers(base: str, path: str, headers: dict | None = None, cookie: s
     return {k.lower(): v for k, v in payload["headers"].items()}
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+def login_hint(base: str, headers: dict | None = None, cookie: str | None = None) -> str:
+    """The login_hint the proxy adds to the Hub's sign-in redirect."""
+    req_headers = dict(headers or {})
+    if cookie:
+        req_headers["Cookie"] = cookie
+    opener = urllib.request.build_opener(_NoRedirect)
+    try:
+        opener.open(urllib.request.Request(f"{base}/api/v1/auth/login?return_to=%2F", headers=req_headers), timeout=5)
+        raise AssertionError("expected a redirect")
+    except urllib.error.HTTPError as e:
+        assert e.code == 302, e.code
+        location = e.headers["Location"]
+        e.close()
+    from urllib.parse import parse_qs, urlsplit
+    return (parse_qs(urlsplit(location).query).get("login_hint") or [""])[0]
+
+
+def assert_no_identity_headers(h: dict) -> None:
+    leaked = [k for k in h if k.startswith("x-authentik-") or k == "x-dev-user"]
+    assert not leaked, f"identity headers must never reach the Hub; saw {leaked}"
+
+
 def api(base: str, method: str, path: str, body: dict | None = None) -> int:
     data = json.dumps(body).encode() if body is not None else None
     headers = {"Content-Type": "application/json"} if body is not None else {}
@@ -167,40 +204,32 @@ def main() -> None:
             base = f"http://127.0.0.1:{proxy_port}"
 
             # --- DP-6: Bearer Authorization passthrough (unchanged) ---------------
-            for prefix in ("hut_", "hbr_", "hbe_"):
-                token = f"{prefix}abcdef0123456789"
+            for token in ("eyJ.oidc.access", "hba_abcdef0123456789"):
                 h = proxied_headers(base, "/api/v1/me", {"Authorization": f"Bearer {token}"})
                 assert h.get("authorization") == f"Bearer {token}", (
-                    f"bearer {prefix}* must be forwarded unchanged; got {h.get('authorization')}")
-            print("PASS: DP-6 bearer Authorization (hut_/hbr_/hbe_) forwarded unchanged")
+                    f"bearer must be forwarded unchanged; got {h.get('authorization')}")
+            h = proxied_headers(base, "/api/v1/me", cookie="__Host-heimdall_session=abc; ham_dev_user=tanmay")
+            assert "__Host-heimdall_session=abc" in h.get("cookie", ""), f"session cookie forwarded; got {h}"
+            print("PASS: DP-6 bearer Authorization and the Hub session cookie forwarded unchanged")
 
-            # --- DP-6 / HBR-6: spoofed trusted headers stripped; real user injected
+            # --- DP-6: spoofed identity headers stripped; nothing injected -------
             h = proxied_headers(base, "/api/v1/me", {
                 "X-Dev-User": "reviewer",                       # selects reviewer, then stripped
-                "X-authentik-username": "evil",                 # spoof — must be stripped
-                "X-authentik-name": "Evil Imposter",            # spoof — must be stripped
-                "X-authentik-email": "evil@attacker.example",   # spoof — must be stripped
-                "Authorization": "Bearer hut_keep",
+                "X-authentik-username": "evil",                 # legacy spoof — must be stripped
+                "X-authentik-name": "Evil Imposter",
+                "X-authentik-email": "evil@attacker.example",
+                "Authorization": "Bearer keep",
             })
-            assert h.get("x-authentik-username") == REVIEWER["username"], f"real username injected; got {h}"
-            assert h.get("x-authentik-name") == REVIEWER["display_name"], f"real display name injected; got {h}"
-            assert h.get("x-authentik-email") == REVIEWER["email"], f"real email injected; got {h}"
-            assert "x-dev-user" not in h, f"X-Dev-User must be stripped; saw {h.get('x-dev-user')}"
-            assert h.get("authorization") == "Bearer hut_keep", "non-spoofable headers still forwarded"
+            assert_no_identity_headers(h)
+            assert h.get("authorization") == "Bearer keep", "non-identity headers still forwarded"
             assert "evil" not in json.dumps(h), f"spoofed values leaked into forwarded headers: {h}"
-            print("PASS: DP-6/HBR-6 spoofed X-authentik-* + X-Dev-User stripped; real reviewer injected")
+            print("PASS: DP-6 X-authentik-* + X-Dev-User stripped; no identity injected")
 
-            # --- DP-6: selection precedence (cookie > default; header > cookie) ---
-            # No selector -> default_user (tanmay).
-            h = proxied_headers(base, "/api/v1/me")
-            assert h.get("x-authentik-username") == TANMAY["username"], f"default should be tanmay; got {h}"
-            # Cookie selects tanmay explicitly.
-            h = proxied_headers(base, "/api/v1/me", cookie="ham_dev_user=tanmay")
-            assert h.get("x-authentik-username") == "tanmay"
-            # Header beats cookie.
-            h = proxied_headers(base, "/api/v1/me", {"X-Dev-User": "reviewer"}, cookie="ham_dev_user=tanmay")
-            assert h.get("x-authentik-username") == "reviewer", "X-Dev-User header must win over cookie"
-            print("PASS: DP-6 selection precedence (header > cookie > default)")
+            # --- DP-6: selection precedence via the sign-in login_hint ------------
+            assert login_hint(base) == TANMAY["username"], "default should be tanmay"
+            assert login_hint(base, cookie="ham_dev_user=reviewer") == REVIEWER["username"]
+            assert login_hint(base, {"X-Dev-User": "reviewer"}, cookie="ham_dev_user=tanmay") == "reviewer", "X-Dev-User header must win over cookie"
+            print("PASS: DP-6 selection precedence (header > cookie > default) applied as login_hint")
 
             # --- DP-6: management paths NEVER forwarded to the Hub ---------------
             hub.reset()
@@ -258,8 +287,9 @@ def main() -> None:
             code = api(nbase, "POST", "/_dev/api/users", {"username": "evil"})
             assert code == 404, f"non-loopback POST management should be 404; got {code}"
             # Normal proxied forwarding is unaffected by the loopback gate.
-            h = proxied_headers(nbase, "/api/v1/me")
-            assert h.get("x-authentik-username") == "tanmay", "forwarding must still work on non-loopback"
+            h = proxied_headers(nbase, "/api/v1/me", {"Authorization": "Bearer keep"})
+            assert h.get("authorization") == "Bearer keep", "forwarding must still work on non-loopback"
+            assert_no_identity_headers(h)
             print("PASS: DP-7 non-loopback disables all /_dev/* (404); forwarding still works")
         finally:
             nl_proc.terminate()

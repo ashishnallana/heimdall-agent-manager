@@ -127,7 +127,7 @@ forward_request :: proc(client: net.TCP_Socket, config: ^Dev_Proxy_Config, reque
 	incoming := parse_headers(request)
 	defer free_headers(incoming)
 	cookie := header_value(incoming, "Cookie")
-	rewritten, ok := rewrite_headers_for_hub(config, incoming, cookie)
+	rewritten, user, ok := rewrite_headers_for_hub(config, incoming, cookie)
 	if !ok {
 		write_response(client, 400, "Bad Request", "text/plain", "unknown dev user")
 		return
@@ -181,7 +181,28 @@ forward_request :: proc(client: net.TCP_Socket, config: ^Dev_Proxy_Config, reque
 		proxy_tunnel_bidirectional(client, upstream)
 		return
 	}
+	path, _ := split_target_query(target)
+	if path == "/api/v1/auth/login" {
+		// Sign-in redirect: apply the selected dev user as the provider login_hint.
+		proxy_copy_login_response(client, upstream, user.username)
+		return
+	}
 	proxy_copy_response(client, upstream)
+}
+
+proxy_copy_login_response :: proc(client, upstream: net.TCP_Socket, username: string) {
+	_ = net.set_option(upstream, .Receive_Timeout, 30 * time.Second)
+	data := make([dynamic]byte, 0, 4096)
+	defer delete(data)
+	buf: [8192]byte
+	for {
+		n, recv_err := net.recv_tcp(upstream, buf[:])
+		if recv_err != nil || n <= 0 do break
+		append(&data, ..buf[:n])
+		if len(data) > 1024 * 1024 do break
+	}
+	out := rewrite_login_location(string(data[:]), username)
+	_, _ = net.send_tcp(client, transmute([]byte)out)
 }
 
 // proxy_tunnel_bidirectional pumps raw bytes in both directions between the

@@ -43,7 +43,7 @@ function proxyApi(req, res, targetPath) {
   const headers = {};
   for (const [key, value] of Object.entries(req.headers)) {
     const lower = key.toLowerCase();
-    if (lower.startsWith('x-authentik')) continue;
+    if (lower.startsWith('x-authentik')) continue; // legacy identity headers: never relayed (the hub uses its session cookie)
     if (lower === 'host' || lower === 'connection') continue;
     headers[key] = value;
   }
@@ -167,7 +167,7 @@ function startVite(sid) {
   const base = basePrefix || '/';
   // Use the concrete browser prefix for HTTP API calls. A document-relative
   // `./api/v1/...` works in Chromium, but WebKit can reject it with
-  // "The string did not match the expected pattern" after the Authentik
+  // "The string did not match the expected pattern" after the OIDC sign-in
   // redirect restores a hash route. The absolute path remains same-origin and
   // still traverses this preview proxy, while avoiding browser-dependent URL
   // resolution during the session bootstrap request.

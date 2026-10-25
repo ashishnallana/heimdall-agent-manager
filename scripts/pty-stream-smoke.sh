@@ -22,8 +22,13 @@ WORK="$HOME/.cache/heimdall-tests/smoke-$TAG"
 rm -rf "$WORK"; mkdir -p "$WORK/bin" "$WORK/run-b" "$WORK/logs"
 PIDS=()
 SID=""
+# shellcheck source=lib/hub-oidc-dev.sh
+. "$CLIENT_DIR/scripts/lib/hub-oidc-dev.sh"
+AUTH=()
+UI="http://127.0.0.1:$PROXY_PORT"
 cleanup() {
-  [ -n "$SID" ] && curl -s -X DELETE "http://127.0.0.1:$PROXY_PORT/api/v1/shells/$SID" >/dev/null 2>&1 || true
+  [ -n "$SID" ] && curl -s "${AUTH[@]}" -X DELETE "http://127.0.0.1:$PROXY_PORT/api/v1/shells/$SID" >/dev/null 2>&1 || true
+  hub_oidc_stop_mock
   sleep 1
   for pid in "${PIDS[@]:-}"; do [ -n "$pid" ] && kill "$pid" 2>/dev/null || true; done
   sleep 1
@@ -43,10 +48,15 @@ echo "[smoke] building from $ROOT"
   && odin build src/bridge -collection:odin_test=src -out:"$WORK/bin/bridge" \
   && odin build src/dev_proxy -collection:odin_test=src -out:"$WORK/bin/devproxy" )
 
-HEIMDALL_METRICS_ADDR="127.0.0.1:$METRICS_PORT" "$WORK/bin/hub" --listen "127.0.0.1:$HUB_PORT" --db "$WORK/hub.db" --migrations-dir "$ROOT/src/hub/repository/sqlite/migrations" --trusted-proxy-cidr 127.0.0.1/32 > "$WORK/logs/hub.log" 2>&1 & PIDS+=($!)
+# Users sign in only with OIDC: run the mock provider and sign in as tanmay below.
+hub_oidc_start_mock "$WORK/logs" tanmay
+hub_oidc_export_env
+HEIMDALL_METRICS_ADDR="127.0.0.1:$METRICS_PORT" "$WORK/bin/hub" --listen "127.0.0.1:$HUB_PORT" --db "$WORK/hub.db" --migrations-dir "$ROOT/src/hub/repository/sqlite/migrations" --ui-origin "$UI" > "$WORK/logs/hub.log" 2>&1 & PIDS+=($!)
 "$WORK/bin/devproxy" --listen "127.0.0.1:$PROXY_PORT" --hub-url "http://127.0.0.1:$HUB_PORT" --default-user tanmay > "$WORK/logs/devproxy.log" 2>&1 & PIDS+=($!)
-for _ in $(seq 1 120); do curl -sf -o /dev/null "http://127.0.0.1:$PROXY_PORT/api/v1/projects" && break || sleep 0.25; done
-api() { curl -s -X "$1" "http://127.0.0.1:$PROXY_PORT$2" -H 'Content-Type: application/json' ${3:+-d "$3"}; }
+for _ in $(seq 1 120); do curl -sf -o /dev/null "http://127.0.0.1:$PROXY_PORT/api/v1/health" && break || sleep 0.25; done
+SESSION="$(hub_oidc_login "$UI" tanmay)"
+AUTH=(-H "$(hub_oidc_cookie "$SESSION")" -H "Origin: $UI")
+api() { curl -s "${AUTH[@]}" -X "$1" "http://127.0.0.1:$PROXY_PORT$2" -H 'Content-Type: application/json' ${3:+-d "$3"}; }
 
 AUTHZ="$(api POST /api/v1/device/authorize '{"client":"ham-bridge","device_label":"pty-smoke","os":"linux","os_user":"tester","bridge_public_key":"040102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f40","code_challenge":"J6jJRRlTiLmCVJAjMgzOjMLRQ-xSS_tovxAjutN8JWI","code_challenge_method":"S256"}')"
 USER_CODE="$(printf '%s' "$AUTHZ" | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"]["user_code"])')"
@@ -71,6 +81,6 @@ sleep 1
 
 metrics() { curl -s "http://127.0.0.1:$METRICS_PORT/metrics" | grep -E "^heimdall_shell_(output_bytes_total|output_frames_total|fanout_bytes_total|input_bytes_total)|^heimdall_bridge_ws_frames_total.*(shell_pty_output|shell_pty_input)" || true; }
 echo "[smoke] --- metrics before ---"; metrics
-( cd "$CLIENT_DIR" && SMOKE_LEGACY="${SMOKE_LEGACY:-}" SMOKE_WS_URL="ws://127.0.0.1:$PROXY_PORT/api/v1/shells/$SID/stream" node scripts/pty-stream-smoke-client.mjs ) | tee "$WORK/logs/client.log"
+( cd "$CLIENT_DIR" && SMOKE_LEGACY="${SMOKE_LEGACY:-}" SMOKE_COOKIE="__Host-heimdall_session=$SESSION" SMOKE_ORIGIN="$UI" SMOKE_WS_URL="ws://127.0.0.1:$PROXY_PORT/api/v1/shells/$SID/stream" node scripts/pty-stream-smoke-client.mjs ) | tee "$WORK/logs/client.log"
 echo "[smoke] --- metrics after ---"; metrics
 echo "[smoke] bridge log tail:"; grep -E "compact|overflow|WARN" "$WORK/logs/bridge.log" | tail -5 || true

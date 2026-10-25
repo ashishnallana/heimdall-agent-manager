@@ -22,20 +22,25 @@ import urllib.request
 
 
 ROOT = Path(__file__).resolve().parents[1]
+import sys
+sys.path.insert(0, str(ROOT / 'tests'))
+from hub_oidc_login import MockOIDC, login, session_headers, SESSION_COOKIE  # noqa: E402
+UI_ORIGIN = 'http://127.0.0.1:5193'
 
 
 class WebSocket:
     """Small RFC 6455 client for real-hub fixtures; no third-party dependency."""
 
-    def __init__(self, port, path, user='alice'):
+    def __init__(self, port, path, session):
         self.sock = socket.create_connection(('127.0.0.1', port), timeout=5)
         self.reader = self.sock.makefile('rb')
         key = base64.b64encode(os.urandom(16)).decode()
+        # A cookie-authenticated upgrade must carry Origin == ui_origin (CSRF).
         self.sock.sendall((
             f'GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n'
             f'Upgrade: websocket\r\nConnection: Upgrade\r\n'
             f'Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n'
-            f'X-authentik-username: {user}\r\n\r\n'
+            f'Cookie: {SESSION_COOKIE}={session}\r\nOrigin: {UI_ORIGIN}\r\n\r\n'
         ).encode())
         self.status = int(self.reader.readline().split()[1])
         headers = {}
@@ -130,31 +135,41 @@ class AccountBillingHTTPTest(unittest.TestCase):
         self.addCleanup(self.stop_hub)
         self.env = {key: value for key, value in os.environ.items() if not key.startswith('HEIMDALL_PADDLE_') and key != 'HEIMDALL_BILLING_ENFORCE_PLAN_LIMITS'}
         self.env.update(HEIMDALL_PADDLE_WEBHOOK_SECRET='test_only_secret', HEIMDALL_PADDLE_HOBBYIST_PRICE_ID='pri_approved', HEIMDALL_PADDLE_ENVIRONMENT='sandbox')
+        # Users sign in through the real OIDC browser flow against a mock provider.
+        self.mock = MockOIDC.start()
+        self.addCleanup(self.mock.stop)
+        self.env.update(self.mock.hub_env(self.base))
+        self.sessions = {}
         self.start_hub()
 
     def start_hub(self):
-        self.process = subprocess.Popen([self.hub_bin, '--listen', f'127.0.0.1:{self.port}', '--db', self.database, '--migrations-dir', '/nonexistent/billing-test-migrations', '--ui-origin', 'http://127.0.0.1:5193', *getattr(self, 'hub_args', [])], env=self.env, stdout=self.log, stderr=subprocess.STDOUT)
-        for _ in range(100):
+        self.process = subprocess.Popen([self.hub_bin, '--listen', f'127.0.0.1:{self.port}', '--db', self.database, '--migrations-dir', '/nonexistent/billing-test-migrations', '--ui-origin', UI_ORIGIN, *getattr(self, 'hub_args', [])], env=self.env, stdout=self.log, stderr=subprocess.STDOUT)
+        for _ in range(300):
             try:
-                status, _ = self.request('GET', '/api/v1/me', user='alice')
-                if status == 200:
+                status, _ = self.request('GET', '/api/v1/health')
+                if status == 200 and self.request('GET', '/api/v1/me', user='alice')[0] == 200:
                     return
             except OSError:
                 pass
             if self.process.poll() is not None:
                 self.fail('hub exited during startup:\n' + Path(self.log.name).read_text())
             time.sleep(0.05)
-        self.fail('hub did not start')
+        self.fail('hub did not start:\n' + Path(self.log.name).read_text())
 
     def stop_hub(self):
         if hasattr(self, 'process') and self.process.poll() is None:
             self.process.terminate()
             self.process.wait(timeout=5)
 
+    def session(self, user):
+        if user not in self.sessions:
+            self.sessions[user] = login(self.base, user)
+        return self.sessions[user]
+
     def request(self, method, path, data=None, user=None, extra=None):
         headers = {'Content-Type': 'application/json'}
         if user:
-            headers.update({'X-authentik-username': user, 'X-authentik-name': user.title(), 'X-authentik-email': f'{user}@example.com'})
+            headers.update(session_headers(self.session(user), UI_ORIGIN))
         headers.update(extra or {})
         body = json.dumps(data, separators=(',', ':')).encode() if data is not None else None
         req = urllib.request.Request(self.base + path, data=body, method=method, headers=headers)
@@ -214,7 +229,7 @@ class AccountBillingHTTPTest(unittest.TestCase):
         self.assertEqual(self.webhook('evt_smoke_upgrade', 'active', '2026-10-22T01:00:00Z')[0], 200)
 
     def stream(self, path, user='alice'):
-        return WebSocket(self.port, path, user)
+        return WebSocket(self.port, path, self.session(user))
 
     def assert_ready(self, stream, read_only):
         self.assertEqual(stream.status, 101, stream.body)
@@ -237,11 +252,9 @@ class AccountBillingHTTPTest(unittest.TestCase):
             with self.subTest(path=path, plan='free'):
                 self.assert_plan_error(self.request('POST', path, body, user='alice'),
                                        'terminal_input_enabled', 0, 1)
-        status, issued = self.request('POST', '/api/v1/me/tokens', {'label': 'plan smoke'}, user='alice')
-        self.assertEqual(status, 201)
-        self.assert_plan_error(self.request('POST', mutations[0][0], mutations[0][1],
-                               extra={'Authorization': 'Bearer ' + issued['data']['plaintext']}),
-                               'terminal_input_enabled', 0, 1)
+        # Hub user tokens were removed: a hut_ bearer is refused before any plan check.
+        status, refused = self.request('POST', mutations[0][0], mutations[0][1], extra={'Authorization': 'Bearer hut_removed'})
+        self.assertEqual(status, 401, refused)
         self.upgrade()
         for path, body in mutations:
             with self.subTest(path=path, plan='hobbyist'):
@@ -349,7 +362,7 @@ class AccountBillingHTTPTest(unittest.TestCase):
                 VALUES ('server_reference', 'alice', 'hobbyist', 'pri_approved', '2099-01-01T00:00:00Z')""")
         result = subprocess.run(
             ['node', '--import', './tests/helpers/vaultEndpointHarness.ts',
-             'tests/e2e/plan_bridge_approval.mjs', self.base, self.database],
+             'tests/e2e/plan_bridge_approval.mjs', self.base, self.database, UI_ORIGIN],
             cwd=ROOT, capture_output=True, text=True, timeout=60,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -357,7 +370,7 @@ class AccountBillingHTTPTest(unittest.TestCase):
 
     def test_billing_persistence_webhooks_and_authentication(self):
         self.assertEqual(self.request('GET', '/api/v1/account/billing')[0], 401)
-        # Authentik provisioning persists defaults before opening Account.
+        # First OIDC sign-in (startup probe) persists defaults before opening Account.
         with closing(sqlite3.connect(self.database)) as conn, conn:
             self.assertEqual(conn.execute("SELECT max_bridges, terminal_streaming_enabled FROM account_entitlements WHERE user_id = 'alice'").fetchone(), (1, 1))
         status, body = self.request('GET', '/api/v1/account/billing', user='alice')
@@ -369,11 +382,10 @@ class AccountBillingHTTPTest(unittest.TestCase):
         self.assertEqual(self.request('POST', '/api/v1/account/billing/checkout', {'offer_id': 'hobbyist'}, user='alice', extra={'Content-Type': 'text/plain'})[0], 400)
         self.assertEqual(self.request('POST', '/api/v1/account/billing/checkout', {'offer_id': 'hobbyist'}, user='alice', extra={'Origin': 'http://127.0.0.1:5193'})[0], 501)
         self.assertEqual(self.request('GET', '/api/v1/account/billing', user='alice', extra={'Authorization': 'Bearer hba_bad'})[0], 403)
-        token_status, issued = self.request('POST', '/api/v1/me/tokens', {'label': 'billing-test'}, user='alice')
-        self.assertEqual(token_status, 201)
-        bearer = {'Authorization': 'Bearer ' + issued['data']['plaintext']}
-        self.assertEqual(self.request('GET', '/api/v1/account/billing', extra=bearer)[0], 200)
-        self.assertEqual(self.request('POST', '/api/v1/account/billing/checkout', {'offer_id': 'hobbyist'}, extra=bearer)[0], 501)
+        self.assertEqual(self.request('GET', '/api/v1/account/billing', extra={'Authorization': 'Bearer hut_removed'})[0], 401)
+        # A native OIDC bearer is accepted, but account routes need the v2 device proof.
+        bearer = {'Authorization': 'Bearer ' + self.mock.access_token('alice', 'mock-alice')}
+        self.assertEqual(self.request('GET', '/api/v1/account/billing', extra=bearer)[0], 401)
         self.assertEqual(self.request('POST', '/api/v1/billing/paddle/webhook', {}, extra={'Paddle-Signature': 'ts=0;h1=invalid'})[0], 401)
         with closing(sqlite3.connect(self.database)) as conn, conn:
             conn.execute("INSERT INTO billing_checkouts(reference, user_id, plan_id, price_id, expires_at) VALUES ('server_reference', 'alice', 'hobbyist', 'pri_approved', '2099-01-01T00:00:00Z')")

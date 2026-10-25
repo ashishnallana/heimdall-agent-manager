@@ -9,7 +9,7 @@
 #
 # Scenarios (each step prints PASS/FAIL; the first FAIL exits non-zero):
 #   1 bring-up: build, hub :18080, bridge :18081 (local endpoint :18082), device-flow
-#     enrolment, user token, fake `claude`/`pi` on the bridge PATH, temp git repo
+#     enrolment, browser session (mock OIDC sign-in), fake `claude`/`pi` on the bridge PATH, temp git repo
 #     registered as the chain directory, two agents (worker, reviewer) + fleet rows.
 #   2 happy path: brief (goal + acceptance, no command) → publish → ready →
 #     matcher wake-grants the worker → fake worker confirms → submit (summary
@@ -66,9 +66,13 @@ jqr() { jq -r "$1" 2>/dev/null; }
 # ----------------------------------------------------------------- teardown ----
 PIDS=()
 HUB_PID=""; BRIDGE_PID=""
+# shellcheck source=lib/hub-oidc-dev.sh
+. "$ROOT/scripts/lib/hub-oidc-dev.sh"
+SESSION=""
 cleanup() {
   local rc=$?
   trap - EXIT
+  hub_oidc_stop_mock
   section "7. teardown"
   # fake agents first (they are children of the pty-host, not of us)
   for f in "$WORK"/agents/*.pid; do [ -f "$f" ] && kill -9 "$(cat "$f")" 2>/dev/null || true; done
@@ -90,11 +94,11 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # -------------------------------------------------------------- http helpers ----
-# api <METHOD> <path> [body]  — user-token call; prints the body, sets $HTTP_CODE
+# api <METHOD> <path> [body]  — browser-session call; prints the body, sets $HTTP_CODE
 api() {
   local out
   out="$(curl -s -m 20 -w $'\n%{http_code}' -X "$1" "$HUB$2" \
-      -H "Authorization: Bearer $USER_TOKEN" -H 'Content-Type: application/json' \
+      -H "$(hub_oidc_cookie "$SESSION")" -H "Origin: $HUB" -H 'Content-Type: application/json' \
       ${3:+-d "$3"})"
   # api runs inside $(...) most of the time, so the status travels via a file
   printf '%s' "${out##*$'\n'}" > "$WORK/.http_code"; printf '%s' "${out%$'\n'*}"
@@ -164,20 +168,19 @@ fi
 for name in claude pi; do ln -sf "$HELPERS/fake-provider.sh" "$WORK/fakebin/$name"; done
 chmod +x "$HELPERS/fake-provider.sh" "$HELPERS/agentcall.py"
 
-# user + token (CLI provisioning writes the schema too)
-USER_OUT="$("$BIN/ham-hub" users create --name "Smoke" --email "smoke@example.com" --db "$WORK/hub.db" --migrations-dir "$MIGRATIONS" 2>&1)"
-USER_TOKEN="$(printf '%s' "$USER_OUT" | grep -o 'token= *hut_[^ ]*' | sed 's/token= *//')"
-USER_ID="$(printf '%s' "$USER_OUT" | grep -o 'user_id= *usr_[^ ]*' | sed 's/user_id= *//')"
-[ -n "$USER_TOKEN" ] && [ -n "$USER_ID" ] || { echo "$USER_OUT" >&2; fail "ham-hub users create"; }
-pass "user $USER_ID + token provisioned"
-
+# Users sign in only with OIDC: mock provider (DEV ONLY), then a real browser sign-in.
+hub_oidc_start_mock "$LOGS" smoke || fail "mock OIDC provider did not start"
+hub_oidc_export_env
 "$BIN/ham-hub" --listen "127.0.0.1:$HUB_PORT" --db "$WORK/hub.db" --migrations-dir "$MIGRATIONS" \
-  --trusted-proxy-cidr 127.0.0.1/32 >"$LOGS/hub.log" 2>&1 &
+  --ui-origin "$HUB" >"$LOGS/hub.log" 2>&1 &
 HUB_PID=$!; PIDS+=("$HUB_PID")
 wait_for 30 "hub health" curl -sf -o /dev/null "$HUB/api/v1/health" || { tail -20 "$LOGS/hub.log" >&2; fail "hub did not come up"; }
 pass "hub up on :$HUB_PORT (pid $HUB_PID)"
+SESSION="$(hub_oidc_login "$HUB" smoke)" || fail "OIDC sign-in"
+USER_ID=smoke
+pass "user $USER_ID signed in (browser session)"
 
-# bridge enrolment: browser-approved device flow, approved with the user token
+# bridge enrolment: browser-approved device flow, approved with the browser session
 AUTHZ="$(curl -s -X POST "$HUB/api/v1/device/authorize" -H 'Content-Type: application/json' -d '{"client":"ham-bridge","device_label":"taskv2-smoke","os":"linux","os_user":"smoke","bridge_public_key":"040102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f40","code_challenge":"J6jJRRlTiLmCVJAjMgzOjMLRQ-xSS_tovxAjutN8JWI","code_challenge_method":"S256"}')"
 USER_CODE="$(printf '%s' "$AUTHZ" | jqr .data.user_code)"; DEVICE_CODE="$(printf '%s' "$AUTHZ" | jqr .data.device_code)"
 [ -n "$USER_CODE" ] && [ "$USER_CODE" != null ] || { echo "$AUTHZ" >&2; fail "device/authorize"; }
@@ -211,8 +214,8 @@ wait_for 30 "provider $PROVIDER present on bridge" provider_present || { pstatus
 [ -n "$MODEL" ] || fail "no active model for provider $PROVIDER in the catalog"
 api_ok PUT "/api/v1/bridges/$BRIDGE_ID/providers/$PROVIDER" '{"enabled":true}' >/dev/null || fail "enable provider"
 pass "fake provider '$PROVIDER' present+enabled on bridge (model $MODEL)"
-printf '%s' "$USER_TOKEN" > "$WORK/user.token"; chmod 600 "$WORK/user.token"
-note "debug: curl -H \"Authorization: Bearer \$(cat $WORK/user.token)\" $HUB/api/v1/…"
+printf '%s' "$SESSION" > "$WORK/user.session"; chmod 600 "$WORK/user.session"
+note "debug: curl -H \"Cookie: __Host-heimdall_session=\$(cat $WORK/user.session)\" -H \"Origin: $HUB\" $HUB/api/v1/…"
 
 # chain directory: a temp git repo with one commit
 REPO="$WORK/repo"; mkdir -p "$REPO"

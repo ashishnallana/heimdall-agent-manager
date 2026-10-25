@@ -94,7 +94,12 @@ HUB_BIN="$WORK_DIR/ham-hub"
 PROXY_BIN="$WORK_DIR/ham-dev-proxy"
 PIDS=()
 
+# shellcheck source=../scripts/lib/hub-oidc-dev.sh
+. "$REPO_ROOT/scripts/lib/hub-oidc-dev.sh"
+SESSION=""
+
 cleanup() {
+  hub_oidc_stop_mock
   if [ -f "$WORK_DIR/service.pid" ]; then
     kill "$(cat "$WORK_DIR/service.pid")" 2>/dev/null || true
   fi
@@ -115,13 +120,14 @@ require_free_port() {
   fi
 }
 
-api() { # api <METHOD> <PATH> [BODY]
+api() { # api <METHOD> <PATH> [BODY] -- as the signed-in browser session (SESSION)
   local method="$1" path="$2" body="${3:-}"
+  local auth=(-H "$(hub_oidc_cookie "$SESSION")" -H "Origin: http://127.0.0.1:$PROXY_PORT")
   if [ -n "$body" ]; then
-    curl -fsS -X "$method" "http://127.0.0.1:$PROXY_PORT$path" \
+    curl -fsS -X "$method" "http://127.0.0.1:$PROXY_PORT$path" "${auth[@]}" \
       -H 'Content-Type: application/json' --data "$body" 2>/dev/null
   else
-    curl -fsS -X "$method" "http://127.0.0.1:$PROXY_PORT$path" 2>/dev/null
+    curl -fsS -X "$method" "http://127.0.0.1:$PROXY_PORT$path" "${auth[@]}" 2>/dev/null
   fi
 }
 
@@ -152,8 +158,8 @@ run_delivery_attempt() { # run_delivery_attempt <label> <bridge_binary> <run_dir
   local fake_bin="$run_dir/fake-bin"
 
   say "[$label] starting hub on $HUB_PORT and proxy on $PROXY_PORT"
+  [ -n "${MOCK_OIDC_PID:-}" ] || { hub_oidc_start_mock "$WORK_DIR" "$TEST_USER" || fail "mock OIDC did not start"; hub_oidc_export_env; }
   "$HUB_BIN" --listen "127.0.0.1:$HUB_PORT" --db "$hub_db" \
-    --trusted-proxy-cidr 127.0.0.1/32 \
     --ui-origin "http://127.0.0.1:$PROXY_PORT" >"$hub_log" 2>&1 &
   PIDS+=($!)
   local hub_pid="${PIDS[-1]}"
@@ -182,6 +188,8 @@ run_delivery_attempt() { # run_delivery_attempt <label> <bridge_binary> <run_dir
     [ "$waited" -gt 60 ] && { tail -20 "$proxy_log" >&2; fail "[$label] proxy did not come up"; }
     kill -0 "$proxy_pid" 2>/dev/null || { tail -20 "$proxy_log" >&2; fail "[$label] proxy exited"; }
   done
+  # Sign in as the test user through the dev proxy (real OIDC flow, mock provider).
+  SESSION="$(hub_oidc_login "http://127.0.0.1:$PROXY_PORT" "$TEST_USER")" || fail "[$label] OIDC sign-in failed"
 
   # Give this user a configured vault before approval. This makes the Hub return
   # vault_delivery_expected=true from the token poll, which is the contract that

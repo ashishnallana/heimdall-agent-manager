@@ -69,6 +69,12 @@ check(){ # $1=description $2=expected $3=actual
 # on a shared host: a substring like a username or a flag value is shared by every
 # stack on the box, and matching it takes down other people's work.
 PIDS=()
+# shellcheck source=../scripts/lib/hub-oidc-dev.sh
+. "$ROOT/scripts/lib/hub-oidc-dev.sh"
+# Browser-session auth for requests through the dev-proxy (filled after sign-in).
+AUTH=()
+pcurl() { curl "${AUTH[@]}" "$@"; }
+
 cleanup() {
   if [ "${XM9_KEEP:-0}" = "1" ]; then
     echo "[xm9] XM9_KEEP=1 — leaving stack up. Work dir: $WORK  session: ${SESSION_ID:-<none>}"
@@ -79,7 +85,7 @@ cleanup() {
   # the shell spawned python), so they are not in PIDS and killing the bridge alone
   # orphans them — leaving the ports bound and failing the next run's precheck.
   if [ -n "${SESSION_ID:-}" ]; then
-    curl -s -X DELETE "http://127.0.0.1:$PROXY_PORT/api/v1/shells/$SESSION_ID" >/dev/null 2>&1 || true
+    pcurl -s -X DELETE "http://127.0.0.1:$PROXY_PORT/api/v1/shells/$SESSION_ID" >/dev/null 2>&1 || true
     sleep 1
   fi
   for pid in "${PIDS[@]:-}"; do [ -n "$pid" ] && kill "$pid" 2>/dev/null || true; done
@@ -97,6 +103,7 @@ cleanup() {
   done
   sleep 1
   rm -rf "$WORK"
+  hub_oidc_stop_mock
 }
 trap cleanup EXIT
 
@@ -125,18 +132,24 @@ else
 fi
 
 echo "[xm9] starting hub on 127.0.0.1:$HUB_PORT"
-"$BIN/hub" --listen "127.0.0.1:$HUB_PORT" --db "$WORK/hub.db" --trusted-proxy-cidr 127.0.0.1/32 \
+hub_oidc_start_mock "$WORK" tanmay
+hub_oidc_export_env
+"$BIN/hub" --listen "127.0.0.1:$HUB_PORT" --db "$WORK/hub.db" --ui-origin "http://127.0.0.1:$PROXY_PORT" \
   > "$WORK/logs/hub.log" 2>&1 & PIDS+=($!)
 
-echo "[xm9] starting dev-proxy on 127.0.0.1:$PROXY_PORT (injects the authenticated user)"
+echo "[xm9] starting dev-proxy on 127.0.0.1:$PROXY_PORT (forwards the browser session; sign-in via mock OIDC)"
 "$BIN/devproxy" --listen "127.0.0.1:$PROXY_PORT" --hub-url "http://127.0.0.1:$HUB_PORT" --default-user tanmay \
   > "$WORK/logs/devproxy.log" 2>&1 & PIDS+=($!)
 
 for _ in $(seq 1 40); do
-  curl -sf -o /dev/null "http://127.0.0.1:$PROXY_PORT/api/v1/projects" && break || sleep 0.25
+  curl -sf -o /dev/null "http://127.0.0.1:$PROXY_PORT/api/v1/health" && break || sleep 0.25
 done
 
-api() { curl -s -X "$1" "http://127.0.0.1:$PROXY_PORT$2" -H 'Content-Type: application/json' ${3:+-d "$3"}; }
+# Sign in as tanmay through the dev-proxy: real OIDC flow against the mock provider.
+SESSION="$(hub_oidc_login "http://127.0.0.1:$PROXY_PORT" tanmay)" || { echo "[xm9] FAIL: OIDC sign-in failed"; exit 1; }
+AUTH=(-H "$(hub_oidc_cookie "$SESSION")" -H "Origin: http://127.0.0.1:$PROXY_PORT")
+
+api() { pcurl -s -X "$1" "http://127.0.0.1:$PROXY_PORT$2" -H 'Content-Type: application/json' ${3:+-d "$3"}; }
 
 enroll() { # $1=label $2=token file -> writes the ACCESS token to $2
   # ===== BROWSER-APPROVED DEVICE FLOW (REQ-ENROLL-9) =====
@@ -232,8 +245,8 @@ ok "a server typed into a running interactive session is listening on $PORT_ONE"
 
 # ---- the two access paths -------------------------------------------------------
 # Hub preview URL: what a browser tab loads.
-preview_body() { curl -s "http://127.0.0.1:$PROXY_PORT/api/v1/preview/$SESSION_ID/index.html"; }
-preview_status() { curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PROXY_PORT/api/v1/preview/$SESSION_ID/index.html"; }
+preview_body() { pcurl -s "http://127.0.0.1:$PROXY_PORT/api/v1/preview/$SESSION_ID/index.html"; }
+preview_status() { pcurl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PROXY_PORT/api/v1/preview/$SESSION_ID/index.html"; }
 # Bridge proxy URL: what a process on bridge A's host reaches, with no user token.
 proxy_body() { curl -s --max-time 20 "http://127.0.0.1:$A_LOCAL/proxy/$SESSION_ID/index.html"; }
 proxy_status() { curl -s --max-time 20 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$A_LOCAL/proxy/$SESSION_ID/index.html"; }
@@ -249,7 +262,7 @@ except Exception: print("<unparseable>")')"
 # ---- 3. declare the port AFTER the fact -----------------------------------------
 set_port() { # $1 = port; echoes the HTTP status, logs status+body for diagnosis
   local code
-  code="$(curl -s -o "$WORK/setport.out" -w '%{http_code}' -X POST \
+  code="$(pcurl -s -o "$WORK/setport.out" -w '%{http_code}' -X POST \
     "http://127.0.0.1:$PROXY_PORT/api/v1/shells/$SESSION_ID/port" \
     -H 'Content-Type: application/json' -d "{\"server_port\":$1}")"
   # The body on stderr, always: a bare status code turns every refusal into the same
@@ -294,25 +307,25 @@ except Exception: print("<unparseable>")')"
 check "a port above 65535 is refused (400)" "400" "$(set_port 70000)"
 check "a negative port is refused (400)" "400" "$(set_port -1)"
 check "a body with no server_port is refused (400)" "400" \
-  "$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+  "$(pcurl -s -o /dev/null -w '%{http_code}' -X POST \
      "http://127.0.0.1:$PROXY_PORT/api/v1/shells/$SESSION_ID/port" \
      -H 'Content-Type: application/json' -d '{}')"
 
 # ---- 8. ownership ---------------------------------------------------------------
-# Straight at the hub, injecting a DIFFERENT user in the trusted-proxy header — the
-# same way the dev-proxy authenticates, so this is a real second user, not a spoof
-# the hub would reject outright.
+# Straight at the hub with a DIFFERENT user's real browser session (mallory signs
+# in through the same OIDC flow), so this is a genuine second user.
 echo "[xm9] cross-owner attempt"
+MALLORY="$(hub_oidc_login "http://127.0.0.1:$PROXY_PORT" mallory)"
 check "another user cannot set a port on this session (404)" "404" \
   "$(curl -s -o /dev/null -w '%{http_code}' -X POST \
      "http://127.0.0.1:$HUB_PORT/api/v1/shells/$SESSION_ID/port" \
-     -H 'X-authentik-username: mallory' -H 'Content-Type: application/json' \
+     -H "$(hub_oidc_cookie "$MALLORY")" -H "Origin: http://127.0.0.1:$PROXY_PORT" -H 'Content-Type: application/json' \
      -d "{\"server_port\":$PORT_TWO}")"
 check "and the session's port is untouched" "0" "$(declared_port)"
 
 # ---- 9. exited session ----------------------------------------------------------
 echo "[xm9] killing the session, then trying to set a port on it"
-curl -s -X DELETE "http://127.0.0.1:$PROXY_PORT/api/v1/shells/$SESSION_ID" >/dev/null
+pcurl -s -X DELETE "http://127.0.0.1:$PROXY_PORT/api/v1/shells/$SESSION_ID" >/dev/null
 for _ in $(seq 1 40); do
   st="$(api GET "/api/v1/shells/$SESSION_ID" | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"]["session"]["status"])')"
   [ "$st" = "running" ] || break

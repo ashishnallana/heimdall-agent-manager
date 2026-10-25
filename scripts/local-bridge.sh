@@ -75,6 +75,8 @@ resolve() {
     [ -f "$henv" ] || lr_die "no local hub instance '$HUB_NAME'"
     HUB_URL="${HUB_URL:-$(lr_env_get "$henv" HUB_URL)}"
     APPROVE_URL="$(lr_env_get "$henv" PROXY_URL)"
+    # The seed approver signs in like a browser and must send the hub's CSRF origin.
+    export HEIMDALL_LOCAL_UI_ORIGIN="$(lr_env_get "$henv" UI_ORIGIN)"
     APPROVER_KEY="$(lr_env_get "$henv" APPROVER_KEY)"
     # local-hub.sh keeps a seeded account's approver under approver/users/<user>/.
     [ -z "$APPROVE_USER" ] || APPROVER_KEY="$(dirname "$APPROVER_KEY")/users/$APPROVE_USER/device.json"

@@ -3,19 +3,24 @@ package main
 import "core:strings"
 import contracts "odin_test:contracts"
 
-rewrite_headers_for_hub :: proc(config: ^Dev_Proxy_Config, incoming: []contracts.HTTP_Header, cookie_header: string) -> ([]contracts.HTTP_Header, bool) {
+// The Hub authenticates users only with OIDC (its own session cookie or a bearer),
+// so this proxy no longer injects identity headers. Requests are forwarded
+// unchanged — cookies and `Authorization: Bearer ...` included — except for the
+// dev-user selector and legacy identity headers, which are always stripped so a
+// client can never smuggle them upstream.
+//
+// The selected dev user is applied at SIGN-IN instead: the Hub's
+// /api/v1/auth/login redirect to the (mock) provider gets `login_hint=<user>`
+// appended (see rewrite_login_location), and tools/mock-oidc signs in as that user.
+rewrite_headers_for_hub :: proc(config: ^Dev_Proxy_Config, incoming: []contracts.HTTP_Header, cookie_header: string) -> ([]contracts.HTTP_Header, Dev_User, bool) {
 	user, ok := select_dev_user(config, incoming, cookie_header)
-	if !ok do return nil, false
+	if !ok do return nil, {}, false
 	out := make([dynamic]contracts.HTTP_Header)
-	// Forward everything except spoofable trusted/dev selector headers unchanged, including Authorization: Bearer ...
 	for header in incoming {
-		if is_client_control_header(header.name, config) do continue
+		if is_client_control_header(header.name) do continue
 		append(&out, contracts.HTTP_Header{name = strings.clone(header.name), value = strings.clone(header.value)})
 	}
-	append(&out, contracts.HTTP_Header{name = strings.clone(config.username_header), value = strings.clone(user.username)})
-	append(&out, contracts.HTTP_Header{name = strings.clone(config.display_name_header), value = strings.clone(user.display_name)})
-	append(&out, contracts.HTTP_Header{name = strings.clone(config.email_header), value = strings.clone(user.email)})
-	return out[:], true
+	return out[:], user, true
 }
 
 free_headers :: proc(headers: []contracts.HTTP_Header) {
@@ -26,12 +31,42 @@ free_headers :: proc(headers: []contracts.HTTP_Header) {
 	delete(headers)
 }
 
-is_client_control_header :: proc(name: string, config: ^Dev_Proxy_Config) -> bool {
-	if ascii_equal_fold(name, config.username_header) do return true
-	if ascii_equal_fold(name, config.display_name_header) do return true
-	if ascii_equal_fold(name, config.email_header) do return true
+// is_client_control_header: never forwarded. X-authentik-* identity headers are
+// meaningless to the Hub now, but stripping them keeps old clients/scripts from
+// believing they still work.
+is_client_control_header :: proc(name: string) -> bool {
+	if ascii_has_prefix_fold(name, "X-authentik-") do return true
 	if ascii_equal_fold(name, "X-Dev-User") do return true
 	return false
+}
+
+// rewrite_login_location appends login_hint=<username> to the Location of the
+// Hub's /api/v1/auth/login redirect (the provider authorize URL). Only the
+// Location header of that one response is touched.
+rewrite_login_location :: proc(response, username: string) -> string {
+	head_end := strings.index(response, "\r\n\r\n")
+	if head_end < 0 || username == "" do return response
+	head := response[:head_end]
+	b := strings.builder_make()
+	rest := head
+	first := true
+	for line in strings.split_lines_iterator(&rest) {
+		if !first do strings.write_string(&b, "\r\n")
+		first = false
+		if ascii_has_prefix_fold(line, "Location:") {
+			location := strings.trim_space(line[len("Location:"):])
+			sep := "&" if strings.contains(location, "?") else "?"
+			strings.write_string(&b, "Location: ")
+			strings.write_string(&b, location)
+			strings.write_string(&b, sep)
+			strings.write_string(&b, "login_hint=")
+			strings.write_string(&b, username)
+			continue
+		}
+		strings.write_string(&b, line)
+	}
+	strings.write_string(&b, response[head_end:])
+	return strings.to_string(b)
 }
 
 login_response_cookie :: proc(username: string) -> string {

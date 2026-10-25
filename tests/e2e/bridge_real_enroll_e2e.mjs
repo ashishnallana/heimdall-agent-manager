@@ -25,6 +25,7 @@ import { fileURLToPath } from 'node:url';
 
 import { createDeviceIdentity, memoryDeviceStore } from '../../src/ui/utils/deviceIdentity.ts';
 import { signedRequestHeaders } from '../../src/ui/utils/vaultRequestSigner.ts';
+import { hubLogin, sessionHeaders, startMockOidc } from './hubOidc.mjs';
 import { verifyDirectory } from '../../src/ui/utils/vaultDirectoryVerify.ts';
 import { openVerifiedWrap } from '../../src/ui/utils/vaultKeyringWrap.ts';
 import { serializeKeyringBytes } from '../../src/ui/utils/vaultKeyring.ts';
@@ -66,20 +67,23 @@ async function startHub(label) {
   fs.mkdirSync(dir, { recursive: true });
   const port = await freePort();
   const log = fs.openSync(path.join(dir, 'hub.log'), 'w');
-  const child = spawn(bin, ['--listen', `127.0.0.1:${port}`, '--db', path.join(dir, 'hub.db'), '--migrations-dir', migrations, '--trusted-proxy-cidr', '127.0.0.1/32', '--ui-origin', `http://127.0.0.1:${port}`],
-    { cwd: dir, env: ENV, stdio: ['ignore', log, log] });
-  children.push(child);
+  // Users sign in only with OIDC: each hub gets its own mock provider.
+  const mock = await startMockOidc();
+  children.push({ kill: mock.stop });
   const base = `http://127.0.0.1:${port}`;
+  const child = spawn(bin, ['--listen', `127.0.0.1:${port}`, '--db', path.join(dir, 'hub.db'), '--migrations-dir', migrations, '--ui-origin', base],
+    { cwd: dir, env: { ...ENV, ...mock.hubEnv(base) }, stdio: ['ignore', log, log] });
+  children.push(child);
   for (const deadline = Date.now() + 30_000; ;) {
     try { if ((await fetch(`${base}/api/v1/health`)).ok) break; } catch { /* starting */ }
     if (Date.now() > deadline) throw new Error(`${label} did not start`);
     await sleep(150);
   }
-  return { base, port };
+  return { base, port, session: await hubLogin(base, USER) };
 }
 
 async function http(hub, method, p, { body, headers = {} } = {}) {
-  const h = { 'X-authentik-username': USER, ...headers };
+  const h = { ...sessionHeaders(hub.session, hub.base), ...headers };
   const text = body === undefined ? undefined : (typeof body === 'string' ? body : JSON.stringify(body));
   if (text !== undefined) h['Content-Type'] = 'application/json';
   const res = await fetch(`${hub.base}${p}`, { method, headers: h, body: text });

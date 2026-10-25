@@ -58,6 +58,12 @@ BIN="$WORK/bin"; mkdir -p "$BIN" "$WORK/run-a" "$WORK/run-b" "$WORK/logs"
 # on a shared host: a substring like a username or a flag value is shared by every
 # stack on the box, and matching it takes down other people's work.
 PIDS=()
+# shellcheck source=../scripts/lib/hub-oidc-dev.sh
+. "$ROOT/scripts/lib/hub-oidc-dev.sh"
+# Browser-session auth for requests through the dev-proxy (filled after sign-in).
+AUTH=()
+pcurl() { curl "${AUTH[@]}" "$@"; }
+
 cleanup() {
   if [ "${XM4_KEEP:-0}" = "1" ]; then
     echo "[xm4] XM4_KEEP=1 — leaving stack up. Work dir: $WORK"
@@ -69,7 +75,7 @@ cleanup() {
   # PIDS and killing the bridge alone orphans it — leaving $ECHO_PORT bound and making
   # the next run fail its own port precheck.
   if [ -n "${SESSION_ID:-}" ]; then
-    curl -s -X DELETE "http://127.0.0.1:$PROXY_PORT/api/v1/shells/$SESSION_ID" >/dev/null 2>&1 || true
+    pcurl -s -X DELETE "http://127.0.0.1:$PROXY_PORT/api/v1/shells/$SESSION_ID" >/dev/null 2>&1 || true
     sleep 1
   fi
   for pid in "${PIDS[@]:-}"; do [ -n "$pid" ] && kill "$pid" 2>/dev/null || true; done
@@ -82,6 +88,7 @@ cleanup() {
   for pid in $(pgrep -f "xm4_echo_server.py $ECHO_PORT" 2>/dev/null || true); do kill "$pid" 2>/dev/null || true; done
   sleep 1
   rm -rf "$WORK"
+  hub_oidc_stop_mock
 }
 trap cleanup EXIT
 
@@ -104,18 +111,24 @@ else
 fi
 
 echo "[xm4] starting hub on 127.0.0.1:$HUB_PORT"
-"$BIN/hub" --listen "127.0.0.1:$HUB_PORT" --db "$WORK/hub.db" --trusted-proxy-cidr 127.0.0.1/32 \
+hub_oidc_start_mock "$WORK" tanmay
+hub_oidc_export_env
+"$BIN/hub" --listen "127.0.0.1:$HUB_PORT" --db "$WORK/hub.db" --ui-origin "http://127.0.0.1:$PROXY_PORT" \
   > "$WORK/logs/hub.log" 2>&1 & PIDS+=($!)
 
-echo "[xm4] starting dev-proxy on 127.0.0.1:$PROXY_PORT (injects the authenticated user)"
+echo "[xm4] starting dev-proxy on 127.0.0.1:$PROXY_PORT (forwards the browser session; sign-in via mock OIDC)"
 "$BIN/devproxy" --listen "127.0.0.1:$PROXY_PORT" --hub-url "http://127.0.0.1:$HUB_PORT" --default-user tanmay \
   > "$WORK/logs/devproxy.log" 2>&1 & PIDS+=($!)
 
 for _ in $(seq 1 40); do
-  curl -sf -o /dev/null "http://127.0.0.1:$PROXY_PORT/api/v1/projects" && break || sleep 0.25
+  curl -sf -o /dev/null "http://127.0.0.1:$PROXY_PORT/api/v1/health" && break || sleep 0.25
 done
 
-api() { curl -s -X "$1" "http://127.0.0.1:$PROXY_PORT$2" -H 'Content-Type: application/json' ${3:+-d "$3"}; }
+# Sign in as tanmay through the dev-proxy: real OIDC flow against the mock provider.
+SESSION="$(hub_oidc_login "http://127.0.0.1:$PROXY_PORT" tanmay)" || { echo "[xm4] FAIL: OIDC sign-in failed"; exit 1; }
+AUTH=(-H "$(hub_oidc_cookie "$SESSION")" -H "Origin: http://127.0.0.1:$PROXY_PORT")
+
+api() { pcurl -s -X "$1" "http://127.0.0.1:$PROXY_PORT$2" -H 'Content-Type: application/json' ${3:+-d "$3"}; }
 
 enroll() { # $1=label $2=token file -> writes the ACCESS token to $2
   # ===== BROWSER-APPROVED DEVICE FLOW (REQ-ENROLL-9) =====

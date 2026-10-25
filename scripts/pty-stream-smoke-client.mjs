@@ -13,7 +13,11 @@ const url = process.env.SMOKE_WS_URL;
 const legacy = process.env.SMOKE_LEGACY === '1';
 if (!url) { console.error('SMOKE_WS_URL required'); process.exit(2); }
 
-const ws = new WebSocket(url, { perMessageDeflate: false });
+// The viewer socket authenticates with the browser session cookie (+ Origin for CSRF).
+const headers = {};
+if (process.env.SMOKE_COOKIE) headers.Cookie = process.env.SMOKE_COOKIE;
+if (process.env.SMOKE_ORIGIN) headers.Origin = process.env.SMOKE_ORIGIN;
+const ws = new WebSocket(url, { perMessageDeflate: false, headers });
 ws.binaryType = 'arraybuffer';
 
 const stats = { frames: 0, wireBytes: 0, payloadBytes: 0, snapshotFrames: 0, textControl: 0, phases: {} };

@@ -25,6 +25,8 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "tests"))
+from hub_oidc_login import MockOIDC, login, session_headers  # noqa: E402
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 
@@ -124,26 +126,20 @@ def test_live_directory_fs_relay() -> None:
     tmp_dir = Path(tempfile.mkdtemp(prefix="ham-test-dir-fs-"))
     hub_bin = tmp_dir / "test_hub"
     print("Building test_hub binary...")
-    build_odin_pkg("src/hub", hub_bin)
+    if os.environ.get("HEIMDALL_TEST_HUB_BIN"):
+        hub_bin = Path(os.environ["HEIMDALL_TEST_HUB_BIN"])
+    else:
+        build_odin_pkg("src/hub", hub_bin)
 
     port = find_free_port()
     db_path = str(tmp_dir / f"ham-test-dir-fs-{port}.db")
 
     migrations_dir = str(ROOT / "src/hub/repository/sqlite/migrations")
-    user_out = subprocess.check_output(
-        [str(hub_bin), "users", "create", "--name", "Dir Test User", "--email", "dirtest@example.com", "--db", db_path, "--migrations-dir", migrations_dir],
-        text=True,
-    )
-    user_tok = None
-    for line in user_out.splitlines():
-        line = line.strip()
-        if line.startswith("token="):
-            user_tok = line.split("=", 1)[1].strip()
-            break
-    require(user_tok is not None and len(user_tok) > 0, "Failed to provision user token")
-
+    # Users sign in only with OIDC: a mock provider and a real browser session.
+    mock = MockOIDC.start()
     hub_proc = subprocess.Popen(
-        [str(hub_bin), "--listen", f"127.0.0.1:{port}", "--db", db_path],
+        [str(hub_bin), "--listen", f"127.0.0.1:{port}", "--db", db_path, "--ui-origin", f"http://127.0.0.1:{port}"],
+        env={**os.environ, **mock.hub_env(f"http://127.0.0.1:{port}")},
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -156,7 +152,7 @@ def test_live_directory_fs_relay() -> None:
         # Wait for Hub to be ready
         ready = False
         base_url = f"http://127.0.0.1:{port}"
-        for _ in range(50):
+        for _ in range(300):
             try:
                 with urllib.request.urlopen(f"{base_url}/api/v1/health", timeout=1) as resp:
                     if resp.status == 200:
@@ -166,13 +162,15 @@ def test_live_directory_fs_relay() -> None:
                 time.sleep(0.1)
 
         require(ready, "Hub failed to start up within timeout")
+        user_tok = login(base_url, "dirtest")  # browser session id
 
         def api_request(method: str, path: str, payload=None, token=user_tok) -> tuple[int, dict]:
             url = f"{base_url}{path}"
             data = json.dumps(payload).encode("utf-8") if payload is not None else None
             req = urllib.request.Request(url, data=data, method=method)
             if token:
-                req.add_header("Authorization", f"Bearer {token}")
+                for k, v in session_headers(token, base_url).items():
+                    req.add_header(k, v)
             req.add_header("Content-Type", "application/json")
             try:
                 with urllib.request.urlopen(req, timeout=10) as resp:
@@ -227,7 +225,7 @@ def test_live_directory_fs_relay() -> None:
         # mandatory and S256-only, so the precomputed pair below is required.
         #
         # token=None on authorize and token: it is an ANONYMOUS request by the bridge.
-        # The user token authenticates only the approval, which is what binds the
+        # The user's browser session authenticates only the approval, which binds the
         # bridge's owner.
         status, data = api_request("POST", "/api/v1/device/authorize", {
             "client": "ham-bridge",
@@ -467,6 +465,7 @@ def test_live_directory_fs_relay() -> None:
                 ws_sock.close()
             except Exception:
                 pass
+        mock.stop()
         hub_proc.terminate()
         try:
             hub_proc.wait(timeout=3)

@@ -34,6 +34,8 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "tests"))
+from dev_proxy_oidc_fixture import answer_login_redirect, assert_no_identity_headers, login_hint  # noqa: E402
 
 
 def free_port() -> int:
@@ -46,6 +48,8 @@ def free_port() -> int:
 
 class HubHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
+        if answer_login_redirect(self):
+            return
         body = json.dumps({"path": self.path, "headers": {k: v for k, v in self.headers.items()}}).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -164,11 +168,10 @@ def main() -> None:
             with urllib.request.urlopen(req, timeout=5) as resp:
                 assert resp.status == 200
                 assert "ham_dev_user=erin" in resp.headers.get("Set-Cookie", ""), "active should set ham_dev_user cookie"
+            assert login_hint(base) == "erin", "next sign-in should be hinted as erin"
             with urllib.request.urlopen(f"{base}/api/v1/me", timeout=5) as resp:
                 fwd = json.loads(resp.read())
-            h = {k.lower(): v for k, v in fwd["headers"].items()}
-            assert h.get("x-authentik-username") == "erin", f"proxied request should be erin; got {h}"
-            assert h.get("x-authentik-email") == "erin@example.com", f"proxied email mismatch: {h}"
+            assert_no_identity_headers(fwd["headers"])
 
             # AC3 (DP-4): [Delete] target removes the user.
             req = urllib.request.Request(f"{base}/_dev/api/users/erin", method="DELETE")

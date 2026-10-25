@@ -99,13 +99,20 @@ the **store path**; a `odin version` mismatch is not a finding.
 **Starting the stack manually (no nix):**
 ```bash
 # Use the pre-built result-* symlinks OR the /tmp/ham-* binaries above.
+# Users authenticate ONLY with OIDC. Locally that is the mock provider (DEV ONLY,
+# see tools/mock-oidc/README.md):
+python3 tools/mock-oidc/mock_oidc.py --port 8090 --username tanmay &
+eval "$(python3 tools/mock-oidc/mock_oidc.py --port 8090 --ui-origin http://127.0.0.1:8080 --print-env | grep -v '^#' | sed 's/^/export /')"
 # Hub:
 result-hub/bin/ham-hub \
   --listen 127.0.0.1:8081 --db hub.db \
   --migrations-dir src/hub/repository/sqlite/migrations \
-  --trusted-proxy-cidr 127.0.0.1/32
+  --ui-origin http://127.0.0.1:8080
 
-# Dev-proxy (auto-injects auth as user tanmay; /api/v1/* -> hub):
+# Dev-proxy (forwards the hub session cookie; adds login_hint=<selected user> to
+# the sign-in redirect; /api/v1/* -> hub). Sign in at
+# http://127.0.0.1:8080/api/v1/auth/login, or from scripts:
+#   . scripts/lib/hub-oidc-dev.sh; SESSION=$(hub_oidc_login http://127.0.0.1:8080 tanmay)
 result-devproxy/bin/ham-dev-proxy \
   --listen 127.0.0.1:8080 --hub-url http://127.0.0.1:8081 --default-user tanmay
 
@@ -763,8 +770,9 @@ isolated stack per §1a:
 nix develop --command bash -c '
   odin build src/hub       -collection:odin_test=src -out:/tmp/ham-req3-stack/ham-hub
   odin build src/dev_proxy -collection:odin_test=src -out:/tmp/ham-req3-stack/ham-dev-proxy'
+. scripts/lib/hub-oidc-dev.sh; hub_oidc_start_mock /tmp/ham-req3-stack tanmay; hub_oidc_export_env
 /tmp/ham-req3-stack/ham-hub --listen 127.0.0.1:8291 --db /tmp/ham-req3-stack/hub.db \
-  --migrations-dir src/hub/repository/sqlite/migrations --trusted-proxy-cidr 127.0.0.1/32 &
+  --migrations-dir src/hub/repository/sqlite/migrations --ui-origin http://127.0.0.1:8290 &
 /tmp/ham-req3-stack/ham-dev-proxy --listen 127.0.0.1:8290 --hub-url http://127.0.0.1:8291 \
   --default-user tanmay &
 python3 /tmp/ham-req3-stack/e2e.py     # see the REQ-IMPL-3 task comments for the script
@@ -777,9 +785,9 @@ python3 /tmp/ham-req3-stack/e2e.py     # see the REQ-IMPL-3 task comments for th
   builtin it can reach. Use `--cwd` instead; the error does not mention `cd` being a
   builtin and reads like a missing binary.
 - **The `/device/authorize` and `/device/token` legs must go to the HUB (`:8291`), not the
-  proxy**, because the dev-proxy injects a user identity and those two legs are the
-  unauthenticated device-side ones. `verify`/`approve`/`revoke` go to the **proxy**, since
-  they need the human's session. Mixing them up produces confusing 401s on the leg that is
+  proxy** (they are the unauthenticated device-side ones). `verify`/`approve`/`revoke` need
+  the human's browser session: sign in (`hub_oidc_login`) and send the session cookie plus
+  `Origin` equal to the hub's `--ui-origin`. Mixing them up produces confusing 401s on the leg that is
   supposed to be public.
 
 ---
@@ -822,7 +830,8 @@ binary. With untracked files in the tree, `build` cannot see them either (§1b).
 
 ```bash
 nix develop . --command bash -c 'odin build src/hub -collection:odin_test=src -out:/tmp/ham-iso5/ham-hub'
-/tmp/ham-iso5/ham-hub --listen 127.0.0.1:8191 --db /tmp/ham-iso5/hub.db &   # blocks; background it
+. scripts/lib/hub-oidc-dev.sh; hub_oidc_start_mock /tmp/ham-iso5 tanmay; hub_oidc_export_env   # OIDC is required
+/tmp/ham-iso5/ham-hub --listen 127.0.0.1:8191 --db /tmp/ham-iso5/hub.db --ui-origin http://127.0.0.1:8190 &   # blocks; background it
 nohup ./result-devproxy/bin/ham-dev-proxy --listen 127.0.0.1:8190 --hub-url http://127.0.0.1:8191 &
 ```
 The dev-proxy needs no rebuild if you only touched hub code. **`ham-ctl shell serve` exited

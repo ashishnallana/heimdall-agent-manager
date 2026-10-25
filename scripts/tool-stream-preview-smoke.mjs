@@ -8,6 +8,9 @@ const state = '/home/tanmay/.local/state/heimdall-tool-stream-preview-18e13baf';
 const setup = JSON.parse(fs.readFileSync(state + '/smoke.json'));
 const sid = fs.readFileSync('.ui-preview-session', 'utf8').trim();
 const base = `http://127.0.0.1:49325/proxy/${sid}`;
+// Users authenticate only with OIDC: pass the hub session (the value of the
+// __Host-heimdall_session cookie from a sign-in against that hub) in HEIMDALL_SESSION.
+const sessionCookie = process.env.HEIMDALL_SESSION ? {Cookie: `__Host-heimdall_session=${process.env.HEIMDALL_SESSION}`} : {};
 const frames = [];
 const checks = [];
 const sockets = [];
@@ -24,7 +27,7 @@ async function wait(predicate, label, timeout = 20_000) {
 }
 async function api(method, route, body) {
   const response = await fetch(base + '/api/v1' + route, {
-    method, headers: {'Content-Type': 'application/json', Origin: 'https://heimdall-preview.mundus.in'},
+    method, headers: {'Content-Type': 'application/json', Origin: 'https://heimdall-preview.mundus.in', ...sessionCookie},
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   assert.ok(response.ok, `${method} ${route}: ${response.status}`);
@@ -35,7 +38,7 @@ async function stream(ticket = true) {
   // The machine-to-machine local /proxy relay supports HTTP, not upgrades.
   // Exercise upgrades at the actual browser-facing preview server instead.
   const socket = new WebSocket('ws://127.0.0.1:45291/api/v1/tool-activity/stream' + suffix,
-    {headers: {Origin: 'https://heimdall-preview.mundus.in'}});
+    {headers: {Origin: 'https://heimdall-preview.mundus.in', ...sessionCookie}});
   sockets.push(socket);
   const local = [];
   socket.on('message', data => {const frame = JSON.parse(data); frames.push(frame); local.push(frame);});
@@ -76,7 +79,7 @@ try {
   const active = await wait(() => frames.flatMap(frame => frame.snapshot?.active || []).find(call => call.shell_session_id === shell.session_id), 'real managed shell active');
   check('real shell command summary arrives while active', active.summary.includes('tool-stream-managed-smoke'));
   const second = await stream(false);
-  check('cookie/trusted-proxy WS baseline includes running shell', second.local.some(frame => frame.baseline && frame.snapshot.active.some(call => call.shell_session_id === shell.session_id)));
+  check('session-cookie WS baseline includes running shell', second.local.some(frame => frame.baseline && frame.snapshot.active.some(call => call.shell_session_id === shell.session_id)));
   const completed = await wait(() => frames.flatMap(frame => frame.snapshot?.completed_since_last || []).find(call => call.call_id === active.call_id), 'real shell completion');
   check('real completion includes measured duration', completed.duration_ms >= 4000 && completed.status === 'exited');
   check('completion removes shell from active state', frames.filter(frame => frame.type === 'state').at(-1).snapshot.active.every(call => call.shell_session_id !== shell.session_id));

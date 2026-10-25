@@ -8,15 +8,19 @@ import { signP256 } from '../../src/ui/utils/vaultStatements.ts';
 import { verifyDirectory } from '../../src/ui/utils/vaultDirectoryVerify.ts';
 import { buildBridgeApproval, buildGenesis, checkBridgeCodeInfo } from '../../src/ui/utils/vaultDeviceFlows.ts';
 import { derivePairKeys, generatePairCode, generatePairSalt, pairBridgePayload, pairHubOrigin, pairKeyMac } from '../../src/ui/utils/vaultPairing.ts';
+import { hubLogin, sessionHeaders } from './hubOidc.mjs';
 
 const base = process.argv[2];
 assert.match(base, /^http:\/\/127\.0\.0\.1:\d+$/);
+const uiOrigin = process.argv[4] || base;
 const user = 'alice';
 const utf8 = new TextEncoder();
+// The caller's hub is configured against the mock OIDC provider: sign in as a browser.
+const session = await hubLogin(base, user);
 async function http(method, path, body, extra = {}) {
   const res = await fetch(base + path, {
     method,
-    headers: { 'Content-Type': 'application/json', 'X-authentik-username': user, ...extra },
+    headers: { 'Content-Type': 'application/json', ...sessionHeaders(session, uiOrigin), ...extra },
     body: body === undefined ? undefined : JSON.stringify(body),
     signal: AbortSignal.timeout(5000),
   });

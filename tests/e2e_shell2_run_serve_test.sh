@@ -63,13 +63,19 @@ absent(){ case "$2" in *"$3"*) bad "$1 (unexpectedly found '$3')";; *) ok "$1";;
 
 SESSION_IDS=()
 PIDS=()
+# shellcheck source=../scripts/lib/hub-oidc-dev.sh
+. "$ROOT/scripts/lib/hub-oidc-dev.sh"
+# Browser-session auth for requests through the dev-proxy (filled after sign-in).
+AUTH=()
+pcurl() { curl "${AUTH[@]}" "$@"; }
+
 cleanup() {
   if [ "${S2_KEEP:-0}" = "1" ]; then
     echo "[shell2] S2_KEEP=1 — leaving stack up. Work dir: $WORK"
     return
   fi
   for sid in "${SESSION_IDS[@]:-}"; do
-    [ -n "$sid" ] && curl -s -X DELETE "http://127.0.0.1:$PROXY_PORT/api/v1/shells/$sid" >/dev/null 2>&1 || true
+    [ -n "$sid" ] && pcurl -s -X DELETE "http://127.0.0.1:$PROXY_PORT/api/v1/shells/$sid" >/dev/null 2>&1 || true
   done
   sleep 1
   for pid in "${PIDS[@]:-}"; do [ -n "$pid" ] && kill "$pid" 2>/dev/null || true; done
@@ -77,6 +83,7 @@ cleanup() {
   for pid in $(pgrep -f "pty-host.*$WORK" 2>/dev/null || true); do kill "$pid" 2>/dev/null || true; done
   sleep 1
   rm -rf "$WORK"
+  hub_oidc_stop_mock
 }
 trap cleanup EXIT
 
@@ -99,25 +106,31 @@ else
 fi
 
 echo "[shell2] starting hub on 127.0.0.1:$HUB_PORT"
-"$BIN/hub" --listen "127.0.0.1:$HUB_PORT" --db "$WORK/hub.db" --trusted-proxy-cidr 127.0.0.1/32 \
+hub_oidc_start_mock "$WORK" tanmay
+hub_oidc_export_env
+"$BIN/hub" --listen "127.0.0.1:$HUB_PORT" --db "$WORK/hub.db" --ui-origin "http://127.0.0.1:$PROXY_PORT" \
   > "$WORK/logs/hub.log" 2>&1 & PIDS+=($!)
 
-echo "[shell2] starting dev-proxy on 127.0.0.1:$PROXY_PORT (injects the authenticated user)"
+echo "[shell2] starting dev-proxy on 127.0.0.1:$PROXY_PORT (forwards the browser session; sign-in via mock OIDC)"
 "$BIN/devproxy" --listen "127.0.0.1:$PROXY_PORT" --hub-url "http://127.0.0.1:$HUB_PORT" --default-user tanmay \
   > "$WORK/logs/devproxy.log" 2>&1 & PIDS+=($!)
 
 for _ in $(seq 1 120); do
-  curl -sf -o /dev/null "http://127.0.0.1:$PROXY_PORT/api/v1/projects" && break || sleep 0.25
+  curl -sf -o /dev/null "http://127.0.0.1:$PROXY_PORT/api/v1/health" && break || sleep 0.25
 done
-curl -sf -o /dev/null "http://127.0.0.1:$PROXY_PORT/api/v1/projects" || {
+curl -sf -o /dev/null "http://127.0.0.1:$PROXY_PORT/api/v1/health" || {
   echo "[shell2] FAIL: hub/proxy never came up. Logs follow."
   echo "--- hub.log ---";      tail -30 "$WORK/logs/hub.log"      2>/dev/null
   echo "--- devproxy.log ---"; tail -30 "$WORK/logs/devproxy.log" 2>/dev/null
   exit 1
 }
 
-api()      { curl -s -X "$1" "http://127.0.0.1:$PROXY_PORT$2" -H 'Content-Type: application/json' ${3:+-d "$3"}; }
-api_code() { curl -s -o /dev/null -w '%{http_code}' -X "$1" "http://127.0.0.1:$PROXY_PORT$2" -H 'Content-Type: application/json' ${3:+-d "$3"}; }
+# Sign in as tanmay through the dev-proxy: real OIDC flow against the mock provider.
+SESSION="$(hub_oidc_login "http://127.0.0.1:$PROXY_PORT" tanmay)" || { echo "[shell2] FAIL: OIDC sign-in failed"; exit 1; }
+AUTH=(-H "$(hub_oidc_cookie "$SESSION")" -H "Origin: http://127.0.0.1:$PROXY_PORT")
+
+api()      { pcurl -s -X "$1" "http://127.0.0.1:$PROXY_PORT$2" -H 'Content-Type: application/json' ${3:+-d "$3"}; }
+api_code() { pcurl -s -o /dev/null -w '%{http_code}' -X "$1" "http://127.0.0.1:$PROXY_PORT$2" -H 'Content-Type: application/json' ${3:+-d "$3"}; }
 
 # ===== BROWSER-APPROVED DEVICE FLOW (REQ-ENROLL-9) =====
 #

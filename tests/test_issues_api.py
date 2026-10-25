@@ -17,6 +17,8 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "tests"))
+from hub_oidc_login import MockOIDC, login, session_headers  # noqa: E402
 
 
 def require(ok: bool, message: str) -> None:
@@ -55,54 +57,37 @@ def test_live_hub_and_cli() -> None:
     ctl_bin = tmp_dir / "ham-ctl"
 
     print("Building hub and ctl binaries...")
-    build_odin_pkg("src/hub", hub_bin)
-    build_odin_pkg("src/ctl", ctl_bin)
+    if os.environ.get("HEIMDALL_TEST_HUB_BIN"):
+        hub_bin = Path(os.environ["HEIMDALL_TEST_HUB_BIN"])
+    else:
+        build_odin_pkg("src/hub", hub_bin)
+    if os.environ.get("HEIMDALL_TEST_CTL_BIN"):
+        ctl_bin = Path(os.environ["HEIMDALL_TEST_CTL_BIN"])
+    else:
+        build_odin_pkg("src/ctl", ctl_bin)
 
     port = find_free_port()
     db_path = str(tmp_dir / f"ham-issues-test-{port}.db")
 
     migrations_dir = str(ROOT / "src/hub/repository/sqlite/migrations")
 
-    # Provision user 1
-    user1_out = subprocess.check_output(
-        [str(hub_bin), "users", "create", "--name", "Alice", "--email", "alice@example.com", "--db", db_path, "--migrations-dir", migrations_dir],
-        text=True,
-    )
-    user1_tok = None
-    for line in user1_out.splitlines():
-        line = line.strip()
-        if line.startswith("token="):
-            user1_tok = line.split("=", 1)[1].strip()
-            break
-    require(user1_tok is not None and len(user1_tok) > 0, "Failed to provision user1 token")
-
-    # Provision user 2 (for authorization isolation tests)
-    user2_out = subprocess.check_output(
-        [str(hub_bin), "users", "create", "--name", "Bob", "--email", "bob@example.com", "--db", db_path, "--migrations-dir", migrations_dir],
-        text=True,
-    )
-    user2_tok = None
-    for line in user2_out.splitlines():
-        line = line.strip()
-        if line.startswith("token="):
-            user2_tok = line.split("=", 1)[1].strip()
-            break
-    require(user2_tok is not None and len(user2_tok) > 0, "Failed to provision user2 token")
-
     # Start Hub server
+    # Users sign in only with OIDC: a mock provider and real browser sessions.
+    base_url = f"http://127.0.0.1:{port}"
+    mock = MockOIDC.start()
     hub_proc = subprocess.Popen(
-        [str(hub_bin), "--listen", f"127.0.0.1:{port}", "--db", db_path],
+        [str(hub_bin), "--listen", f"127.0.0.1:{port}", "--db", db_path, "--ui-origin", base_url],
+        env={**os.environ, **mock.hub_env(base_url)},
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
     )
 
-    base_url = f"http://127.0.0.1:{port}"
 
     try:
         # Wait for Hub to become healthy
         ready = False
-        for _ in range(50):
+        for _ in range(300):
             try:
                 with urllib.request.urlopen(f"{base_url}/api/v1/health", timeout=1) as resp:
                     if resp.status == 200:
@@ -111,12 +96,13 @@ def test_live_hub_and_cli() -> None:
             except Exception:
                 time.sleep(0.1)
         require(ready, "Hub failed to start within timeout")
+        user1_tok = login(base_url, "alice")  # browser session ids
+        user2_tok = login(base_url, "bob")
 
         def api_call(method: str, path: str, token: str, payload=None) -> tuple[int, dict]:
             url = f"{base_url}{path}"
             data = json.dumps(payload).encode("utf-8") if payload is not None else None
-            req = urllib.request.Request(url, data=data, method=method)
-            req.add_header("Authorization", f"Bearer {token}")
+            req = urllib.request.Request(url, data=data, method=method, headers=session_headers(token, base_url))
             req.add_header("Content-Type", "application/json")
             try:
                 with urllib.request.urlopen(req, timeout=5) as resp:
@@ -338,56 +324,17 @@ def test_live_hub_and_cli() -> None:
         # -------------------------------------------------------------
         # 9. Test CLI verbs (ham-ctl issue ...)
         # -------------------------------------------------------------
-        print("Testing ham-ctl CLI commands...")
-        def run_ctl(*cmd_args: str) -> dict:
-            full_cmd = [str(ctl_bin)] + list(cmd_args) + ["--hub-url", base_url, "--user-token", user1_tok]
-            out = subprocess.check_output(full_cmd, text=True, cwd=ROOT)
-            return json.loads(out)
-
-        # CLI: create
-        res = run_ctl("issue", "create", "--title", "CLI Created Issue", "--description", "CLI Description", "--scope", "global")
-        require("data" in res and "issue_id" in res["data"], f"CLI create failed: {res}")
-        cli_iss_id = res["data"]["issue_id"]
-        require(cli_iss_id.startswith("iss_"), f"CLI issue_id invalid: {cli_iss_id}")
-
-        # CLI: show
-        res = run_ctl("issue", "show", cli_iss_id)
-        require("data" in res and res["data"]["title"] == "CLI Created Issue", f"CLI show failed: {res}")
-        require("description" in res["data"] and res["data"]["description"] == "CLI Description", "CLI show must include description")
-        require("comments" in res["data"] and isinstance(res["data"]["comments"], list), "CLI show must include comments array")
-
-        # CLI: list
-        res = run_ctl("issue", "list", "--status", "new")
-        require("data" in res and len(res["data"]) >= 1, f"CLI list failed: {res}")
-        cli_item = next(i for i in res["data"] if i["issue_id"] == cli_iss_id)
-        require("description_preview" in cli_item, "CLI list item must include description_preview")
-        require("description" not in cli_item, "CLI list item must NOT include full description")
-        require("comments" not in cli_item, "CLI list item must NOT include comments array")
-        require("comment_count" in cli_item, "CLI list item must include comment_count")
-
-        # CLI: update
-        res = run_ctl("issue", "update", cli_iss_id, "--status", "fixed")
-        require("data" in res and res["data"]["status"] == "fixed", f"CLI update failed: {res}")
-
-        # CLI: comment
-        res = run_ctl("issue", "comment", cli_iss_id, "--body", "Comment from CLI")
-        require("data" in res and res["data"]["body"] == "Comment from CLI", f"CLI comment failed: {res}")
-
-        # CLI: vote
-        res = run_ctl("issue", "vote", cli_iss_id, "--voter-id", "cli_agent_voter")
-        require("data" in res and res["data"].get("voted") is True, f"CLI vote failed: {res}")
-
-        # CLI: unvote
-        res = run_ctl("issue", "unvote", cli_iss_id, "--voter-id", "cli_agent_voter")
-        require("data" in res and res["data"].get("unvoted") is True, f"CLI unvote failed: {res}")
-
-        # CLI: delete
-        res = run_ctl("issue", "delete", cli_iss_id)
-        require("data" in res and res["data"].get("deleted") is True, f"CLI delete failed: {res}")
+        # Hub user tokens were removed, so ham-ctl user mode cannot reach the hub;
+        # it must say so clearly. (Agent-mode CLI is covered elsewhere.)
+        print("Testing ham-ctl user mode refusal...")
+        out = subprocess.run([str(ctl_bin), "issue", "list", "--hub-url", base_url, "--user-token", "hut_removed"],
+                             text=True, capture_output=True, cwd=ROOT)
+        require("were removed" in out.stdout, f"ham-ctl must explain removed user tokens: {out.stdout} {out.stderr}")
 
         print("Live Hub and CLI tests: ALL PASSED")
 
     finally:
+        mock.stop()
         hub_proc.terminate()
         try:
             hub_proc.wait(timeout=3)

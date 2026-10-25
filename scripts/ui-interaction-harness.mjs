@@ -100,10 +100,12 @@ const MARIONETTE_PORT = Number(arg('port', '2828'));
  * ---------------------------
  * The Vite dev server (default port 5173) proxies `/api/v1` and `/_dev/*` to
  * `ham-dev-proxy` (default 127.0.0.1:8190, override with HEIMDALL_DEV_PROXY_URL
- * in the shell that starts `npx vite`).  `ham-dev-proxy` reads the `ham_dev_user`
- * cookie and injects `X-authentik-username` on every proxied request, so hitting
- * `/_dev/login?user=<name>` once — which sets that cookie — is all the browser
- * needs before navigating the app.
+ * in the shell that starts `npx vite`).  Users authenticate only with OIDC: the
+ * hub's sign-in (`/api/v1/auth/login`) redirects to the local mock provider
+ * (tools/mock-oidc), which auto-approves and returns with the hub session cookie.
+ * `/_dev/login?user=<name>` sets `ham_dev_user`, which the proxy passes to the
+ * mock as login_hint. With --login the harness sets that cookie and then runs the
+ * sign-in navigation once before navigating the app.
  *
  * Quick-start for a full harness run
  * -----------------------------------
@@ -871,6 +873,10 @@ async function main() {
         return true;
       `);
       await new Promise((r) => setTimeout(r, 1200));
+      // OIDC sign-in: /api/v1/auth/login -> mock provider (auto-approve) ->
+      // /api/v1/auth/callback -> "/" with the hub session cookie set. Every hop is
+      // a 302 and the last one loads the app, so the navigation completes normally.
+      await page.hardNavigate(new URL('/api/v1/auth/login?return_to=%2F', BASE_URL).href);
     }
     // The ONLY full document load of the run. Everything after it is hash
     // navigation inside the already-booted app.

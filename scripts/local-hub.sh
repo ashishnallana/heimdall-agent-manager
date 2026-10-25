@@ -9,12 +9,15 @@
 #   --hub-port N       hub API port            (default 18081)
 #   --proxy-port N     ham-dev-proxy port      (default 18080)
 #   --ui-port N        browser UI (Vite) port  (default 15173)
+#   --oidc-port N      mock OIDC provider port (default 18090; DEV ONLY, see
+#                      tools/mock-oidc/README.md)
 #   --public-origin URL  origin the browser uses when the UI is reached through a
 #                      reverse proxy (e.g. https://heimdall-preview.example), as
 #                      scheme://host[:port] with no path. The hub trusts it for
 #                      CSRF instead of the local UI origin. Recorded and reused on
 #                      restart; pass --public-origin local to drop it.
-#   --user NAME        local identity the dev proxy signs in as (default: $USER)
+#   --user NAME        dev user the browser signs in as (default: $USER): the dev
+#                      proxy passes it to the mock OIDC provider as login_hint
 #   --build MODE       nix | odin | none       (default: nix; none = use --bin-dir as is)
 #   --bin-dir DIR      take ham-hub/ham-dev-proxy from DIR instead of building
 #   --no-ui            do not start the browser UI
@@ -27,7 +30,9 @@
 # Accounts: the dev proxy signs in as --user, which stays on the free plan.
 # Seeding also creates the dev proxy user "paid" on the hobbyist plan (set in
 # hub.db by local-runtime/plans.mjs), with its own sample data and seed approver.
-# Switch accounts in the browser with /_dev/login?user=paid (or the /_dev/ page).
+# Switch accounts in the browser with /_dev/login?user=paid (or the /_dev/ page),
+# then sign out and sign in again: users authenticate only with OIDC, here against
+# the bundled mock provider (tools/mock-oidc), which signs in as the selected user.
 #
 # Seeding also creates the hub user's vault with a SEED APPROVER device whose key
 # stays in approver/device.json (0600) of this instance. It lets
@@ -49,7 +54,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/local-runtime/lib.sh"
 usage() { sed -n '2,43p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 CMD="${1:-help}"; [ $# -gt 0 ] && shift
-NAME=default HUB_PORT="" PROXY_PORT="" UI_PORT="" PUBLIC_ORIGIN="" DEV_USER="${USER:-local}"
+NAME=default HUB_PORT="" PROXY_PORT="" UI_PORT="" OIDC_PORT="" PUBLIC_ORIGIN="" DEV_USER="${USER:-local}"
 BUILD="${HEIMDALL_LOCAL_BUILD:-nix}" BIN_DIR="" UI=1 SEED=1 PLAN_LIMITS=true CODE=""
 # Seeded paid accounts as user:plan; each must be in the dev proxy's default roster.
 SEED_PLANS="paid:hobbyist"
@@ -59,6 +64,7 @@ while [ $# -gt 0 ]; do
     --hub-port) HUB_PORT="$2"; shift 2 ;;
     --proxy-port) PROXY_PORT="$2"; shift 2 ;;
     --ui-port) UI_PORT="$2"; shift 2 ;;
+    --oidc-port) OIDC_PORT="$2"; shift 2 ;;
     --public-origin) PUBLIC_ORIGIN="${2%/}"; shift 2 ;;
     --user) DEV_USER="$2"; shift 2 ;;
     --build) BUILD="$2"; shift 2 ;;
@@ -136,7 +142,8 @@ start() {
   resolve_port HUB_PORT HUB_PORT 18081
   resolve_port PROXY_PORT PROXY_PORT 18080
   resolve_port UI_PORT UI_PORT 15173
-  local ports=("$HUB_PORT" "$PROXY_PORT"); [ "$UI" = 1 ] && ports+=("$UI_PORT")
+  resolve_port OIDC_PORT OIDC_PORT 18090
+  local ports=("$HUB_PORT" "$PROXY_PORT" "$OIDC_PORT"); [ "$UI" = 1 ] && ports+=("$UI_PORT")
   lr_check_ports "$DIR" "${ports[@]}"
 
   mkdir -p "$DIR"/{bin,logs,run,xdg/data,xdg/config,xdg/state}
@@ -151,11 +158,13 @@ start() {
   # proxy that is the public one; the local UI then still works for REST (browsers
   # send Sec-Fetch-Site: same-origin) but not for cookie WebSockets.
   local csrf_origin="${PUBLIC_ORIGIN:-$ui_origin}"
+  # The seed/approver helpers sign in like browsers and must send this Origin.
+  export HEIMDALL_LOCAL_UI_ORIGIN="$csrf_origin"
   # Bridges pair against the hub API URL and browsers against their page origin;
   # list every one so an approver on any of them does not see a foreign origin.
   local pairing_origins="http://127.0.0.1:$HUB_PORT,http://127.0.0.1:$PROXY_PORT,$ui_origin${PUBLIC_ORIGIN:+,$PUBLIC_ORIGIN}"
   lr_env_write "$ENV_FILE" \
-    "KIND=hub" "NAME=$NAME" "HUB_PORT=$HUB_PORT" "PROXY_PORT=$PROXY_PORT" "UI_PORT=$UI_PORT" \
+    "KIND=hub" "NAME=$NAME" "HUB_PORT=$HUB_PORT" "PROXY_PORT=$PROXY_PORT" "UI_PORT=$UI_PORT" "OIDC_PORT=$OIDC_PORT" \
     "HUB_URL=http://127.0.0.1:$HUB_PORT" "PROXY_URL=http://127.0.0.1:$PROXY_PORT" \
     "UI_URL=$ui_origin" "UI_ORIGIN=$csrf_origin" "PUBLIC_ORIGIN=$PUBLIC_ORIGIN" \
     "DEV_USER=$DEV_USER" "APPROVER_KEY=$APPROVER_KEY" "CHECKOUT=$LR_ROOT"
@@ -171,10 +180,23 @@ start() {
   local iso=(env "XDG_DATA_HOME=$DIR/xdg/data" "XDG_CONFIG_HOME=$DIR/xdg/config"
              "XDG_STATE_HOME=$DIR/xdg/state" "HEIMDALL_HOME=$DIR/xdg/data/heimdall")
 
+  # Users authenticate only with OIDC. Locally that is tools/mock-oidc (TEST key,
+  # auto-approve, http on loopback only), never a real identity provider.
+  lr_log "starting mock OIDC provider on 127.0.0.1:$OIDC_PORT (dev only)"
+  lr_spawn "$DIR" oidc "$DIR/logs/mock-oidc.log" python3 "$LR_ROOT/tools/mock-oidc/mock_oidc.py" \
+    --port "$OIDC_PORT" --username "$DEV_USER"
+  lr_wait_http "http://127.0.0.1:$OIDC_PORT/application/o/heimdall-native/jwks/" 15 || { tail -20 "$DIR/logs/mock-oidc.log" >&2 || true; stop_all; lr_die "mock OIDC provider did not come up"; }
+  local issuer="http://127.0.0.1:$OIDC_PORT/application/o/heimdall-native/"
+  local oidc_env=("HAM_OIDC_ALLOW_INSECURE_LOCALHOST=1" "HAM_OIDC_ISSUER=$issuer" "HAM_OIDC_JWKS_URL=${issuer}jwks/"
+                  "HAM_OIDC_USERINFO_URL=${issuer}userinfo/" "HAM_OIDC_AUTHORIZE_URL=${issuer}authorize/"
+                  "HAM_OIDC_TOKEN_URL=${issuer}token/" "HAM_OIDC_END_SESSION_URL=${issuer}end-session/"
+                  "HAM_OIDC_API_AUDIENCE=heimdall-api" "HAM_OIDC_API_SCOPE=heimdall.api" "HAM_OIDC_WEB_CLIENT_ID=heimdall-web"
+                  "HAM_AUTO_PROVISION_USERS=true" "HAM_OIDC_CLAIM_EXISTING_USERS=true")
+
   lr_log "starting hub on 127.0.0.1:$HUB_PORT (db $DIR/hub.db)"
-  lr_spawn "$DIR" hub "$DIR/logs/hub.log" "${iso[@]}" "$hub_bin" \
+  lr_spawn "$DIR" hub "$DIR/logs/hub.log" "${iso[@]}" "${oidc_env[@]}" "$hub_bin" \
     --listen "127.0.0.1:$HUB_PORT" --db "$DIR/hub.db" --migrations-dir "$migrations" \
-    --trusted-proxy-cidr 127.0.0.1/32 --ui-origin "$csrf_origin" --pairing-hub-origins "$pairing_origins" \
+    --ui-origin "$csrf_origin" --pairing-hub-origins "$pairing_origins" \
     --billing-enforce-plan-limits "$PLAN_LIMITS"
   if ! lr_wait_http "http://127.0.0.1:$HUB_PORT/api/v1/health" 30 || ! lr_owned_pid "$DIR" hub >/dev/null; then
     tail -20 "$DIR/logs/hub.log" >&2 || true
@@ -210,7 +232,7 @@ start() {
   status
 }
 
-stop_all() { lr_stop_svc "$DIR" ui; lr_stop_svc "$DIR" proxy; lr_stop_svc "$DIR" hub; }
+stop_all() { lr_stop_svc "$DIR" ui; lr_stop_svc "$DIR" proxy; lr_stop_svc "$DIR" hub; lr_stop_svc "$DIR" oidc; }
 
 stop() {
   [ -d "$DIR" ] || { lr_log "no instance '$NAME'"; return 0; }
@@ -222,10 +244,11 @@ stop() {
 status() {
   [ -f "$ENV_FILE" ] || { lr_log "no instance '$NAME' under $(lr_state_root)/hubs"; return 1; }
   echo "hub instance '$NAME' ($DIR)"
-  lr_svc_status "$DIR" hub; lr_svc_status "$DIR" proxy; lr_svc_status "$DIR" ui
+  lr_svc_status "$DIR" hub; lr_svc_status "$DIR" proxy; lr_svc_status "$DIR" ui; lr_svc_status "$DIR" oidc
   echo "  hub api : $(lr_env_get "$ENV_FILE" HUB_URL)"
   echo "  proxy   : $(lr_env_get "$ENV_FILE" PROXY_URL)  (bridge enrollment approvals)"
   echo "  ui      : $(lr_env_get "$ENV_FILE" UI_URL)"
+  echo "  oidc    : http://127.0.0.1:$(lr_env_get "$ENV_FILE" OIDC_PORT)/application/o/heimdall-native/  (mock, dev only)"
   local pub; pub="$(lr_env_get "$ENV_FILE" PUBLIC_ORIGIN)"
   [ -n "$pub" ] && echo "  public  : $pub  (trusted browser origin)"
   if [ -s "$APPROVER_KEY" ]; then echo "  approver: $APPROVER_KEY"; else echo "  approver: none (approve bridges in the UI)"; fi
@@ -242,6 +265,7 @@ approve_device() {
   [ -f "$ENV_FILE" ] || lr_die "no hub instance '$NAME'"
   lr_owned_pid "$DIR" proxy >/dev/null || lr_die "hub '$NAME' is not running"
   PROXY_PORT="$(lr_env_get "$ENV_FILE" PROXY_PORT)"
+  export HEIMDALL_LOCAL_UI_ORIGIN="$(lr_env_get "$ENV_FILE" UI_ORIGIN)"
   approver device --code "$CODE" || lr_die "browser approval failed"
 }
 

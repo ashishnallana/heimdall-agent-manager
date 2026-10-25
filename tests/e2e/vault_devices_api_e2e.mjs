@@ -41,8 +41,9 @@ import { acceptedPairOrigins, derivePairKeys, generatePairCode, generatePairSalt
 import { asApproverIdentity, buildRecoveryKey, openRecoveryKey } from '../../src/ui/utils/vaultRecovery.ts';
 import { generate12RecoveryWords, recoveryWordsToEntropy } from '../../src/ui/utils/vaultCrypto.ts';
 
+import { sessionHeaders, sessionPool, startMockOidc } from './hubOidc.mjs';
+
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
-const USER_HEADER = 'X-authentik-username';
 const enc = new TextEncoder();
 
 // ── tiny assertion/report layer ─────────────────────────────────────────────
@@ -86,10 +87,13 @@ async function startHub() {
   const dbPath = path.join(dir, 'hub.db');
   const log = fs.openSync(path.join(dir, 'hub.log'), 'w');
   // Hermetic: cwd and every home/appdata variable point into the temp dir.
-  const env = { ...process.env, HOME: dir, USERPROFILE: dir, APPDATA: dir, LOCALAPPDATA: dir, XDG_CONFIG_HOME: dir, XDG_DATA_HOME: dir };
+  // Users sign in with OIDC only: a mock provider, and real browser sessions below.
+  const mock = await startMockOidc();
+  const baseUrl = `http://127.0.0.1:${port}`;
+  const env = { ...process.env, ...mock.hubEnv(baseUrl), HOME: dir, USERPROFILE: dir, APPDATA: dir, LOCALAPPDATA: dir, XDG_CONFIG_HOME: dir, XDG_DATA_HOME: dir };
   const child = spawn(bin, [
     '--listen', `127.0.0.1:${port}`, '--db', dbPath, '--migrations-dir', migrations,
-    '--trusted-proxy-cidr', '127.0.0.1/32',
+    '--ui-origin', baseUrl,
     // A configured hub alias (written non-canonically: the hub canonicalizes it).
     '--pairing-hub-origins', 'https://Hub.Mundus.test/',
   ], { cwd: dir, env, stdio: ['ignore', log, log] });
@@ -104,6 +108,7 @@ async function startHub() {
     await new Promise((r) => setTimeout(r, 150));
   }
   const stop = async () => {
+    mock.stop();
     if (!exited) {
       child.kill();
       await new Promise((r) => { if (exited) r(); else child.once('exit', r); setTimeout(r, 5000); });
@@ -114,22 +119,15 @@ async function startHub() {
     }
     console.log(`(could not remove ${dir})`);
   };
-  // `ham-hub tokens issue` against the same temp DB: a user API token (hut_…).
-  const issueUserToken = (userId) => {
-    const r = spawnSync(bin, ['tokens', 'issue', '--user', userId, '--label', 'e2e', '--db', dbPath, '--migrations-dir', migrations], { cwd: dir, env, encoding: 'utf8' });
-    const m = /token=\s*(hut_\S+)/.exec(r.stdout || '');
-    if (!m) throw new Error(`tokens issue failed: ${r.stdout} ${r.stderr}`);
-    return m[1];
-  };
-  return { base, port, dir, dbPath, stop, issueUserToken };
+  return { base, port, dir, dbPath, stop, session: sessionPool(base) };
 }
 
 // ── HTTP ────────────────────────────────────────────────────────────────────
 
 let HUB;
 async function http(method, p, { user, body, headers = {}, bearer } = {}) {
-  const h = { ...headers };
-  if (user) h[USER_HEADER] = user;
+  // A signed-in browser: session cookie + Origin (CSRF). Explicit headers win.
+  const h = user ? { ...sessionHeaders(await HUB.session(user), HUB.base), ...headers } : { ...headers };
   if (bearer) h.Authorization = `Bearer ${bearer}`;
   const text = body === undefined ? undefined : (typeof body === 'string' ? body : JSON.stringify(body));
   if (text !== undefined) h['Content-Type'] = 'application/json';
@@ -380,9 +378,10 @@ async function main() {
       const none = await http('GET', '/api/v1/vault/directory', { user: ALICE });
       expect(none.status === 404, 'no directory before genesis (404)');
       S.A = await SimDevice.create(S.uid, 'e2e device A');
-      S.aliceToken = HUB.issueUserToken(S.uid);
+      // Hub user tokens (hut_) were removed: one is refused outright (401).
+      S.aliceToken = 'hut_removed_user_token';
       const viaToken = await genesis(S.A, ALICE, { bearer: S.aliceToken });
-      expect(viaToken.status === 403, `a user API token cannot genesis (${viaToken.status})`);
+      expect(viaToken.status === 401, `a removed hut_ user token cannot genesis (${viaToken.status})`);
       const stillNone = await http('GET', '/api/v1/vault/directory', { user: ALICE });
       expect(stillNone.status === 404, 'still no directory after the refused token genesis');
       const r = await genesis(S.A, ALICE);
@@ -428,7 +427,7 @@ async function main() {
       const oldVer = await http('POST', '/api/v1/device/verify', { user: ALICE, body: { pair_lookup: oldLookup } });
       expect(oldVer.status === 404, `the superseded code no longer resolves (${oldVer.status})`);
       const viaToken = await register(await SimDevice.create(S.uid, 'token device'), ALICE, { bearer: S.aliceToken });
-      expect(viaToken.status === 403, `a user API token cannot register a device (${viaToken.status})`);
+      expect(viaToken.status === 401, `a removed hut_ user token cannot register a device (${viaToken.status})`);
       const pending = await signedCall(S.B, ALICE, S.uid, 'GET', '/api/v1/vault/devices/self');
       expect(pending.status === 200 && pending.data.status === 'pending' && !pending.data.wrap && !pending.data.pair_mac, 'B polls self: pending, no wrap, no pair_mac');
 
@@ -853,7 +852,7 @@ async function main() {
 
       // Reset: the browser session schedules it (delayed); any approver cancels it.
       const tokReset = await http('POST', '/api/v1/vault/directory/reset', { bearer: S.aliceToken, body: '{}' });
-      expect(tokReset.status === 403, `a user API token cannot schedule a reset (${tokReset.status})`);
+      expect(tokReset.status === 401, `a removed hut_ user token cannot schedule a reset (${tokReset.status})`);
       const r1 = await http('POST', '/api/v1/vault/directory/reset', { user: ALICE, body: '{}' });
       expect(r1.status === 201 && r1.data.reset?.requested_at && r1.data.reset?.due_at > r1.data.reset.requested_at, `reset scheduled -> 201 with a future due_at (${r1.status})`);
       const r2 = await http('POST', '/api/v1/vault/directory/reset', { user: ALICE, body: '{}' });

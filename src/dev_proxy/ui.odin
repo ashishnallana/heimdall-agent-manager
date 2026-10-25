@@ -78,8 +78,9 @@ DEV_UI_HTML :: `<!DOCTYPE html>
 </head>
 <body>
 <h1>Heimdall Dev Proxy</h1>
-<p class="sub">Local identity manager. Pick the dev user forwarded to the Hub as
-<code>X-authentik-*</code> trusted-proxy headers.</p>
+<p class="sub">Local identity manager. The selected dev user is sent to the mock OIDC
+provider as <code>login_hint</code> when you sign in (<code>/api/v1/auth/login</code>);
+after switching, sign out and sign in again.</p>
 
 <section>
   <h2 style="font-size:1rem;margin:0 0 10px;">Dev users</h2>

@@ -17,6 +17,8 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "tests"))
+from hub_oidc_login import MockOIDC, login, session_headers  # noqa: E402
 
 
 def require(ok: bool, message: str) -> None:
@@ -120,27 +122,24 @@ def test_e2e_hub_rest_and_cli() -> None:
     hub_bin = tmp_dir / "test_hub"
     ctl_bin = tmp_dir / "test_ctl"
     print("Building test_hub and test_ctl binaries...")
-    build_odin_pkg("src/hub", hub_bin)
-    build_odin_pkg("src/ctl", ctl_bin)
+    if os.environ.get("HEIMDALL_TEST_HUB_BIN"):
+        hub_bin = Path(os.environ["HEIMDALL_TEST_HUB_BIN"])
+    else:
+        build_odin_pkg("src/hub", hub_bin)
+    if os.environ.get("HEIMDALL_TEST_CTL_BIN"):
+        ctl_bin = Path(os.environ["HEIMDALL_TEST_CTL_BIN"])
+    else:
+        build_odin_pkg("src/ctl", ctl_bin)
 
     port = find_free_port()
     db_path = str(tmp_dir / f"ham-test-dirs-{port}.db")
 
     migrations_dir = str(ROOT / "src/hub/repository/sqlite/migrations")
-    user_out = subprocess.check_output(
-        [str(hub_bin), "users", "create", "--name", "Test User", "--email", "test@example.com", "--db", db_path, "--migrations-dir", migrations_dir],
-        text=True,
-    )
-    user_tok = None
-    for line in user_out.splitlines():
-        line = line.strip()
-        if line.startswith("token="):
-            user_tok = line.split("=", 1)[1].strip()
-            break
-    require(user_tok is not None and len(user_tok) > 0, "Failed to provision user token")
-
+    # Users sign in only with OIDC: a mock provider and a real browser session.
+    mock = MockOIDC.start()
     hub_proc = subprocess.Popen(
-        [str(hub_bin), "--listen", f"127.0.0.1:{port}", "--db", db_path],
+        [str(hub_bin), "--listen", f"127.0.0.1:{port}", "--db", db_path, "--ui-origin", f"http://127.0.0.1:{port}"],
+        env={**os.environ, **mock.hub_env(f"http://127.0.0.1:{port}")},
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -150,7 +149,7 @@ def test_e2e_hub_rest_and_cli() -> None:
         # Wait for Hub to be ready
         ready = False
         base_url = f"http://127.0.0.1:{port}"
-        for _ in range(50):
+        for _ in range(300):
             try:
                 with urllib.request.urlopen(f"{base_url}/api/v1/health", timeout=1) as resp:
                     if resp.status == 200:
@@ -160,12 +159,12 @@ def test_e2e_hub_rest_and_cli() -> None:
                 time.sleep(0.1)
 
         require(ready, "Hub failed to start up within timeout")
+        user_tok = login(base_url, "testuser")  # browser session id
 
         def api_request(method: str, path: str, payload=None) -> tuple[int, dict]:
             url = f"{base_url}{path}"
             data = json.dumps(payload).encode("utf-8") if payload is not None else None
-            req = urllib.request.Request(url, data=data, method=method)
-            req.add_header("Authorization", f"Bearer {user_tok}")
+            req = urllib.request.Request(url, data=data, method=method, headers=session_headers(user_tok, base_url))
             req.add_header("Content-Type", "application/json")
             try:
                 with urllib.request.urlopen(req, timeout=5) as resp:
@@ -266,38 +265,16 @@ def test_e2e_hub_rest_and_cli() -> None:
         status, data = api_request("GET", f"/api/v1/task-chains/{chain_id}")
         require(len(data["data"]["directories"]) == 1, "chain detail should have 1 directory remaining")
 
-        # 10. Test CLI command integration (via test_ctl binary in hub user-mode)
-        def run_ctl(*args: str) -> tuple[int, str]:
-            cmd = [str(ctl_bin), "hub", "--hub-url", base_url, "--user-token", user_tok] + list(args)
-            res = subprocess.run(cmd, capture_output=True, text=True)
-            return res.returncode, res.stdout
-
-        print("Testing CLI commands via ham-ctl hub...")
-        rc, out = run_ctl("task-chains", "directory", "list", "--chain-id", chain_id)
-        require(rc == 0, f"CLI directory list failed: {out}")
-        require(dir1_id in out, f"CLI list output should contain dir1_id: {out}")
-
-        rc, out = run_ctl("task-chains", "directory", "add", "--chain-id", chain_id, "--path", "/cli/added/dir", "--vcs-kind", "jj")
-        require(rc == 0, f"CLI directory add failed: {out}")
-        require("/cli/added/dir" in out, f"CLI add output should contain path: {out}")
-        require('"vcs_kind":"jj"' in out, f"CLI add output should contain vcs_kind jj: {out}")
-
-        # Extract newly added directory id
-        match = re.search(r'"directory_id":"(dir_[^"]+)"', out)
-        require(match is not None, f"Could not find directory_id in CLI output: {out}")
-        cli_dir_id = match.group(1)
-
-        rc, out = run_ctl("task-chains", "directory", "update", "--chain-id", chain_id, "--directory-id", cli_dir_id, "--path", "/cli/updated/dir")
-        require(rc == 0, f"CLI directory update failed: {out}")
-        require("/cli/updated/dir" in out, f"CLI update output should contain updated path: {out}")
-
-        rc, out = run_ctl("task-chains", "directory", "remove", "--chain-id", chain_id, "--directory-id", cli_dir_id)
-        require(rc == 0, f"CLI directory remove failed: {out}")
-        require('"removed":true' in out, f"CLI remove output should contain removed:true: {out}")
+        # 10. ham-ctl hub user mode depended on Hub user tokens, which were removed;
+        # it must refuse with a clear explanation.
+        res = subprocess.run([str(ctl_bin), "hub", "--hub-url", base_url, "--user-token", "hut_removed",
+                              "task-chains", "directory", "list", "--chain-id", chain_id], capture_output=True, text=True)
+        require("were removed" in res.stdout, f"ham-ctl must explain removed user tokens: {res.stdout} {res.stderr}")
 
         print("End-to-end REST API and CLI verification PASSED.")
 
     finally:
+        mock.stop()
         hub_proc.terminate()
         try:
             hub_proc.wait(timeout=3)

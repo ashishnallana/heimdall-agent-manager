@@ -5,8 +5,9 @@
 # What this gets you
 # ------------------
 # A real browser session against a REAL Hub API (not mocks, not fixtures): the
-# bundle talks to `/api/v1/...`, which this preview forwards to a `ham-dev-proxy`,
-# which is the trusted proxy in front of a running hub. Anything you click WRITES
+# bundle talks to `/api/v1/...`, which this preview forwards to a `ham-dev-proxy`
+# in front of a running hub; you are whoever the hub session cookie says (users
+# sign in only with OIDC — locally via tools/mock-oidc). Anything you click WRITES
 # to that hub — point it at a throwaway or QA hub, never at production.
 #
 # Why a built bundle and not `vite dev`
