@@ -68,6 +68,10 @@ Task_View :: struct {
 	in_review:          bool,
 	done:               bool,
 	cancelled:          bool,
+	// held: a coordinator/owner hold (REQ-TV2-5). hold_json is its blocked_on
+	// object; while a work lease is live it carries checkpoint_requested.
+	held:               bool,
+	hold_json:          string,
 	// last_event_id is the id of the last event folded (0 for an empty list).
 	last_event_id:      i64,
 }
@@ -227,6 +231,13 @@ fold_task :: proc(events: []domain.Task_Event, input: Fold_Input) -> Task_View {
 			v.cancelled = true
 			v.has_work_lease = false
 			v.in_review = false
+		case EV_HELD:
+			v.held = true
+			reason := jsonx.extract_string(ev.payload_json, "reason", "", true, context.temp_allocator)
+			v.hold_json = hold_block(reason, ev.ts_ms)
+		case EV_HOLD_RELEASED:
+			v.held = false
+			v.hold_json = ""
 		case EV_REOPENED:
 			v.done = false
 			v.cancelled = false
@@ -256,8 +267,44 @@ fold_task :: proc(events: []domain.Task_Event, input: Fold_Input) -> Task_View {
 		}
 	}
 
+	// A hold is an overlay, applied last so a block answered while held (or a
+	// handoff, which clears nothing) leaves the hold standing: the task parks
+	// in backlog as blocked_on {kind: hold} instead of being re-dispatched
+	// (REQ-TV2-5). Another live block keeps precedence until it is answered.
+	if v.held && !v.done && !v.cancelled && v.blocked_on_json == "" {
+		v.blocked_on_json = v.hold_json
+		if v.has_work_lease do v.blocked_on_json = hold_checkpoint_block(v.hold_json)
+	}
 	v.state = derive_state(v, input)
 	return v
+}
+
+// hold_block is the blocked_on object of a held task. Temp-allocated.
+@(private = "file")
+hold_block :: proc(reason: string, since_ms: i64) -> string {
+	p := json_begin()
+	json_str(&p, "kind", "hold")
+	json_str(&p, "reason", reason)
+	json_int(&p, "since_ms", since_ms)
+	return json_end(&p)
+}
+
+// hold_checkpoint_block marks a hold set on a leased task: the holder is asked
+// to checkpoint (lease handoff); the lease is never revoked.
+@(private = "file")
+hold_checkpoint_block :: proc(hold_json: string) -> string {
+	body := strings.trim_space(hold_json)
+	return fmt.tprintf(`%s,"checkpoint_requested":true}}`, body[:len(body)-1])
+}
+
+// task_is_held: the task carries a hold (blocked_on.kind == "hold").
+task_is_held :: proc(task: domain.Task) -> bool {
+	return blocked_on_is_hold(task.blocked_on_json)
+}
+
+blocked_on_is_hold :: proc(blocked_on_json: string) -> bool {
+	if strings.trim_space(blocked_on_json) == "" do return false
+	return jsonx.extract_string(blocked_on_json, "kind", "", true, context.temp_allocator) == "hold"
 }
 
 // OSCILLATION_ROUNDS: changes_requested count at which the task stops bouncing

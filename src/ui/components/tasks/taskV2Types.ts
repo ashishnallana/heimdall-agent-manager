@@ -113,7 +113,17 @@ export function getTaskBadges(task: TaskWire, _chainFleets?: any[], nowMs: numbe
     }
   }
 
-  if (task.blocked_on) {
+  if (task.blocked_on && task.blocked_on.kind === 'hold') {
+    // REQ-TV2-5: an operator hold, not a question for anyone. A leased task
+    // keeps its lease until the holder checkpoints and hands off.
+    const checkpoint = Boolean(task.blocked_on.checkpoint_requested);
+    badges.push({
+      kind: 'blocked',
+      label: checkpoint ? 'Held · checkpoint requested' : 'Held',
+      tone: 'warn',
+      title: `${task.blocked_on.reason ? `Held: ${task.blocked_on.reason}. ` : ''}${checkpoint ? 'The current holder was asked to hand off; ' : ''}no new lease until released.`,
+    });
+  } else if (task.blocked_on) {
     // Same rule as taskActions.blockedOnYou(): only a human/user blocker is on you.
     const waitingKind = String((task.blocked_on as any).kind || '');
     const onYou = !waitingKind || waitingKind === 'human' || waitingKind === 'user' || waitingKind === 'agent_not_running' || waitingKind === 'dispatch';
@@ -198,6 +208,9 @@ export function getTaskStatusLines(task: TaskWire, _chainFleets?: any[], nowMs: 
 
   if (state === 'backlog') {
     if (task.blocked_on) {
+      if (task.blocked_on.kind === 'hold') {
+        return [`Held${task.blocked_on.reason ? ` — ${task.blocked_on.reason}` : ''}`, 'No new lease until it is released (task release)'];
+      }
       if (task.blocked_on.kind === 'dispatch' || task.blocked_on.kind === 'agent_not_running') {
         return [`Agent not running — ${task.blocked_on.reason || 'Agent could not start'}`, 'Start the agent from its attention card, or update its fleet settings'];
       }

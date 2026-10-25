@@ -504,8 +504,9 @@ MIGRATION_127_EXTENSION_VERSION_SYNC :: #load("migrations/127_extension_version_
 MIGRATION_128_EXTENSION_VERSION_SYNC :: #load("migrations/128_extension_version_sync_0_4_43.sql", string)
 
 MIGRATION_129_REMOVE_TASK_VERIFY :: #load("migrations/129_remove_task_verify.sql", string)
+MIGRATION_130_FLEET_PAUSE :: #load("migrations/130_fleet_pause.sql", string)
 
-migration_order :: [132]string {
+migration_order :: [133]string {
 	"001_foundation.sql",
 	"002_owner_scoped_core.sql",
 	"003_device_tokens.sql",
@@ -638,6 +639,7 @@ migration_order :: [132]string {
 	"127_extension_version_sync_0_4_42.sql",
 	"128_extension_version_sync_0_4_43.sql",
 	"129_remove_task_verify.sql",
+	"130_fleet_pause.sql",
 }
 
 // stop_before is a TEST SEAM: when non-empty, the apply loop stops in front of
@@ -1095,6 +1097,7 @@ migration_sql :: proc(name, migrations_dir: string) -> string {
 			return string(data)
 		}
 	}
+	if name == "130_fleet_pause.sql" do return strings.clone(MIGRATION_130_FLEET_PAUSE)
 	if name == "129_remove_task_verify.sql" do return strings.clone(MIGRATION_129_REMOVE_TASK_VERIFY)
 	if name == "128_extension_version_sync_0_4_43.sql" do return strings.clone(MIGRATION_128_EXTENSION_VERSION_SYNC)
 	if name == "127_extension_version_sync_0_4_42.sql" do return strings.clone(MIGRATION_127_EXTENSION_VERSION_SYNC)
@@ -1249,6 +1252,10 @@ migration_applied :: proc(conn: ^Conn, version: string) -> bool {
 	// gate a second time.
 	if version == "129_remove_task_verify.sql" {
 		return migration_applied(conn, "128_remove_task_verify.sql")
+	}
+	// The column may already exist (upgrade_task_v2_schema ensures it too).
+	if version == "130_fleet_pause.sql" {
+		return table_column_exists(conn, "task_chain_fleets", "paused_roles_json")
 	}
 	if version == "048_task_subscriptions.sql" || version == "049_task_subscriptions.sql" {
 		return sqlite_object_exists(conn, "task_subscriptions")
@@ -1692,6 +1699,7 @@ upgrade_task_v2_schema :: proc(conn: ^Conn) -> bool {
 	if !table_column_exists(conn, "task_chains", "defaults_json") && !exec(conn, "ALTER TABLE task_chains ADD COLUMN defaults_json TEXT NOT NULL DEFAULT '{}';") do return false
 	if !table_column_exists(conn, "task_chain_fleets", "roles_json") && !exec(conn, "ALTER TABLE task_chain_fleets ADD COLUMN roles_json TEXT NOT NULL DEFAULT '[\"worker\"]';") do return false
 	if !table_column_exists(conn, "task_chain_fleets", "bridge_id") && !exec(conn, "ALTER TABLE task_chain_fleets ADD COLUMN bridge_id TEXT NOT NULL DEFAULT '';") do return false
+	if !table_column_exists(conn, "task_chain_fleets", "paused_roles_json") && !exec(conn, "ALTER TABLE task_chain_fleets ADD COLUMN paused_roles_json TEXT NOT NULL DEFAULT '';") do return false
 	if !sqlite_object_exists(conn, "mixed_work_engine_epoch") && !exec(conn, "CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_chain_stage ON tasks(chain_id, stage_key, stage_index) WHERE stage_key <> '';") do return false
 	if !exec(conn, "CREATE INDEX IF NOT EXISTS idx_tasks_chain_state ON tasks(chain_id, state);") do return false
 	// M1 review follow-ups (additive, idempotent): idle_since lets the Idle_TTL

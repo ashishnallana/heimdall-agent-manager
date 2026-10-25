@@ -83,6 +83,8 @@ grant_attempt_in_uow :: proc(svc: ^Service, u: ^Uow, req: Grant_Request) -> (dom
 	defer delete(provider)
 	defer delete(model)
 	if task.kind == .Gate do return {}, false, domain.domain_error(.Conflict, "gates are never granted")
+	// A held task gets no new lease of any kind until released (REQ-TV2-5).
+	if task_is_held(task) do return {}, false, domain.domain_error(.Conflict, "task is held")
 	if req.kind == domain.LEASE_KIND_WORK && task.state != .Ready do return {}, false, domain.domain_error(.Conflict, "task is not ready")
 	if req.kind == domain.LEASE_KIND_WORK && task.stage_key == "" {
 		ready, err := work_dependencies_ready_in_uow(svc, task.chain_id, task.owner_user_id, domain.Work_Item_Ref{kind = domain.WORK_ITEM_TASK, id = string(task.task_id)})

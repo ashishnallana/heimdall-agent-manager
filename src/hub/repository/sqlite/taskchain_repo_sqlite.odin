@@ -485,6 +485,7 @@ fleet_from_stmt :: proc(stmt: sqlite3_stmt) -> domain.Task_Chain_Fleet {
 		bridge_models_json = column_text(stmt, 9),
 		roles_json       = column_text(stmt, 10),
 		bridge_id        = column_text(stmt, 11),
+		paused_roles_json = column_text(stmt, 12),
 	}
 }
 
@@ -496,7 +497,7 @@ fleet_roles_or_default :: proc(roles_json: string) -> string {
 taskchain_upsert_fleet_sqlite :: proc(ctx: rawptr, fleet: domain.Task_Chain_Fleet) -> (domain.Task_Chain_Fleet, domain.Domain_Error) {
 	impl := (^Taskchain_Repo_SQLite)(ctx)
 	stmt: sqlite3_stmt = nil
-	query := "INSERT INTO task_chain_fleets (task_chain_id, agent_id, capacity, min_warm, idle_ttl_seconds, provider, model, created_at, updated_at, bridge_models_json, roles_json, bridge_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(task_chain_id, agent_id) DO UPDATE SET capacity=excluded.capacity, min_warm=excluded.min_warm, idle_ttl_seconds=excluded.idle_ttl_seconds, provider=excluded.provider, model=excluded.model, updated_at=excluded.updated_at, bridge_models_json=excluded.bridge_models_json, roles_json=excluded.roles_json, bridge_id=excluded.bridge_id;"
+	query := "INSERT INTO task_chain_fleets (task_chain_id, agent_id, capacity, min_warm, idle_ttl_seconds, provider, model, created_at, updated_at, bridge_models_json, roles_json, bridge_id, paused_roles_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(task_chain_id, agent_id) DO UPDATE SET capacity=excluded.capacity, min_warm=excluded.min_warm, idle_ttl_seconds=excluded.idle_ttl_seconds, provider=excluded.provider, model=excluded.model, updated_at=excluded.updated_at, bridge_models_json=excluded.bridge_models_json, roles_json=excluded.roles_json, bridge_id=excluded.bridge_id, paused_roles_json=excluded.paused_roles_json;"
 	if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return domain.Task_Chain_Fleet{}, domain.domain_error(.Internal_Error, "failed to prepare fleet upsert")
 	defer sqlite3_finalize(stmt)
 	bind_text(stmt, 1, string(fleet.task_chain_id))
@@ -511,6 +512,7 @@ taskchain_upsert_fleet_sqlite :: proc(ctx: rawptr, fleet: domain.Task_Chain_Flee
 	bind_text(stmt, 10, fleet.bridge_models_json if fleet.bridge_models_json != "" else "{}")
 	bind_text(stmt, 11, fleet_roles_or_default(fleet.roles_json))
 	bind_text(stmt, 12, fleet.bridge_id)
+	bind_text(stmt, 13, fleet.paused_roles_json)
 	if sqlite3_step(stmt) != SQLITE_DONE do return domain.Task_Chain_Fleet{}, domain.domain_error(.Conflict, "fleet could not be saved")
 	return fleet, domain.Domain_Error{}
 }
@@ -518,7 +520,7 @@ taskchain_upsert_fleet_sqlite :: proc(ctx: rawptr, fleet: domain.Task_Chain_Flee
 taskchain_ensure_fleet_sqlite :: proc(ctx: rawptr, fleet: domain.Task_Chain_Fleet) -> domain.Domain_Error {
 	impl := (^Taskchain_Repo_SQLite)(ctx)
 	stmt: sqlite3_stmt = nil
-	query := "INSERT INTO task_chain_fleets (task_chain_id, agent_id, capacity, min_warm, idle_ttl_seconds, provider, model, created_at, updated_at, bridge_models_json, roles_json, bridge_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(task_chain_id, agent_id) DO NOTHING;"
+	query := "INSERT INTO task_chain_fleets (task_chain_id, agent_id, capacity, min_warm, idle_ttl_seconds, provider, model, created_at, updated_at, bridge_models_json, roles_json, bridge_id, paused_roles_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(task_chain_id, agent_id) DO NOTHING;"
 	if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return domain.domain_error(.Internal_Error, "failed to prepare fleet ensure")
 	defer sqlite3_finalize(stmt)
 	bind_text(stmt, 1, string(fleet.task_chain_id))
@@ -533,6 +535,7 @@ taskchain_ensure_fleet_sqlite :: proc(ctx: rawptr, fleet: domain.Task_Chain_Flee
 	bind_text(stmt, 10, fleet.bridge_models_json if fleet.bridge_models_json != "" else "{}")
 	bind_text(stmt, 11, fleet_roles_or_default(fleet.roles_json))
 	bind_text(stmt, 12, fleet.bridge_id)
+	bind_text(stmt, 13, fleet.paused_roles_json)
 	if sqlite3_step(stmt) != SQLITE_DONE do return domain.domain_error(.Conflict, "fleet could not be ensured")
 	return domain.Domain_Error{}
 }
@@ -540,7 +543,7 @@ taskchain_ensure_fleet_sqlite :: proc(ctx: rawptr, fleet: domain.Task_Chain_Flee
 taskchain_list_fleets_by_chain_sqlite :: proc(ctx: rawptr, chain_id: domain.Task_Chain_ID, owner_user_id: domain.User_ID) -> ([]domain.Task_Chain_Fleet, domain.Domain_Error) {
 	impl := (^Taskchain_Repo_SQLite)(ctx)
 	stmt: sqlite3_stmt = nil
-	query := "SELECT f.task_chain_id, f.agent_id, f.capacity, f.min_warm, f.idle_ttl_seconds, f.provider, f.model, f.created_at, f.updated_at, f.bridge_models_json, f.roles_json, f.bridge_id FROM task_chain_fleets f JOIN task_chains tc ON f.task_chain_id = tc.chain_id WHERE f.task_chain_id = ? AND (tc.owner_user_id = ? OR ? = '') ORDER BY f.created_at ASC, f.agent_id ASC;"
+	query := "SELECT f.task_chain_id, f.agent_id, f.capacity, f.min_warm, f.idle_ttl_seconds, f.provider, f.model, f.created_at, f.updated_at, f.bridge_models_json, f.roles_json, f.bridge_id, f.paused_roles_json FROM task_chain_fleets f JOIN task_chains tc ON f.task_chain_id = tc.chain_id WHERE f.task_chain_id = ? AND (tc.owner_user_id = ? OR ? = '') ORDER BY f.created_at ASC, f.agent_id ASC;"
 	if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return nil, domain.domain_error(.Internal_Error, "failed to prepare fleet list")
 	defer sqlite3_finalize(stmt)
 	bind_text(stmt, 1, string(chain_id))

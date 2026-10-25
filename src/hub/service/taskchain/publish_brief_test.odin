@@ -116,6 +116,26 @@ test_fleet_custom_review_roles_and_reviewers_keep_brief_roles :: proc(t: ^testin
 		testing.expect(t, berr.code == .Validation_Failed, fmt.tprintf("role %q refused", bad))
 	}
 
+	// REQ-TV2-5: capacity < 1 is refused (no silent clamp) and names the pause verb.
+	_, cerr := upsert_fleet(&svc, auth, Upsert_Fleet_Input{chain_id = chain.chain_id, agent_id = "agt_sec", capacity = 0})
+	testing.expect(t, cerr.code == .Validation_Failed && strings.contains(cerr.message, "fleet pause"), fmt.tprintf("capacity 0 refused: %s", cerr.message))
+	// pause / resume one role, then all; edits keep the pause.
+	p1, pause_err := set_fleet_pause(&svc, auth, Fleet_Pause_Input{chain_id = chain.chain_id, agent_id = "agt_sec", roles = []string{"security"}, paused = true})
+	testing.expect(t, pause_err.code == .None && p1.paused_roles_json == `["security"]`, fmt.tprintf("pause one role: %s %s", p1.paused_roles_json, pause_err.message))
+	kept_pause, _ := upsert_fleet(&svc, auth, Upsert_Fleet_Input{chain_id = chain.chain_id, agent_id = "agt_sec", capacity = 2})
+	testing.expect_value(t, kept_pause.paused_roles_json, `["security"]`)
+	p2, _ := set_fleet_pause(&svc, auth, Fleet_Pause_Input{chain_id = chain.chain_id, agent_id = "agt_sec", paused = true})
+	testing.expect_value(t, p2.paused_roles_json, domain.FLEET_PAUSED_ALL_JSON)
+	p3, _ := set_fleet_pause(&svc, auth, Fleet_Pause_Input{chain_id = chain.chain_id, agent_id = "agt_sec", roles = []string{"security"}, paused = false})
+	testing.expect_value(t, p3.paused_roles_json, `["reviewer"]`)
+	p4, _ := set_fleet_pause(&svc, auth, Fleet_Pause_Input{chain_id = chain.chain_id, agent_id = "agt_sec", paused = false})
+	testing.expect_value(t, p4.paused_roles_json, "")
+	_, unknown := set_fleet_pause(&svc, auth, Fleet_Pause_Input{chain_id = chain.chain_id, agent_id = "agt_sec", roles = []string{"worker"}, paused = true})
+	testing.expect(t, unknown.code == .Validation_Failed, "pausing a role the row does not have is refused")
+	// custom-role warning: only unrequested custom roles → advisory text.
+	testing.expect(t, fleet_roles_warning(&svc, chain.chain_id, chain.owner_user_id, []string{"checkpoint"}) != "", "checkpoint-only role set warns")
+	testing.expect(t, fleet_roles_warning(&svc, chain.chain_id, chain.owner_user_id, []string{"checkpoint", "worker"}) == "", "a built-in role silences the warning")
+
 	// reviewers[] on create keeps the brief's own review roles and names the
 	// reviewer agents in brief.reviewers (hybrid model: named reviewers are not
 	// folded into a "reviewer" role any more)

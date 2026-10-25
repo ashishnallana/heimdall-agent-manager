@@ -262,6 +262,19 @@ ctl_task_chains_fleet_command :: proc(transport: Ctl_Transport, tokens: []string
 		ctl_tasks_request(transport, "GET", path, "")
 		return
 	}
+	if sub == "pause" || sub == "resume" {
+		chain_id := pos(tokens, 1)
+		if chain_id == "" do chain_id = option_value(args, "--chain", option_value(args, "--chain-id", ""))
+		if chain_id == "" do chain_id = resolve_chain_id(transport, args)
+		agent_id := option_value(args, "--agent", option_value(args, "--agent-id", ""))
+		if chain_id == "" || agent_id == "" {
+			fmt.printfln("usage: ham-ctl task-chains fleet %s <chain-id> --agent <agent_id> [--roles <worker,reviewer>]", sub)
+			return
+		}
+		path := fmt.tprintf("/api/v1/task-chains/%s/fleets/%s/%s", safe_path_part(chain_id), safe_path_part(agent_id), sub)
+		ctl_tasks_request(transport, "POST", path, ctl_v2_fleet_pause_body(args))
+		return
+	}
 	if sub == "set" {
 		chain_id := pos(tokens, 1)
 		if chain_id == "" do chain_id = option_value(args, "--chain", option_value(args, "--chain-id", ""))
@@ -293,8 +306,10 @@ is_destructive_chain_verb :: proc(action: string) -> bool {
 
 print_tasks_help :: proc(action: string) {
 	_ = action
-	fmt.println("usage: ham-ctl tasks <list|show|create|update|depend|cancel|comment|comments|fetch|unblock>")
+	fmt.println("usage: ham-ctl tasks <list|show|create|update|depend|cancel|comment|comments|fetch|unblock|hold|release>")
 	fmt.println("  unblock <task-id> --chain <id> [--note <reason>]  (retry a dispatch block after fixing placement)")
+	fmt.println("  hold <task-id> --chain <id> --reason <text>  (no new lease until released; a current holder is asked to checkpoint)")
+	fmt.println("  release <task-id> --chain <id>  (clear a hold)")
 	fmt.println("  create --chain <id> --title <title> [--assignee <agt_id>] [--reviewer <agt_id>]... [--require-user-approval]")
 	fmt.println("  update <task-id> [--assignee <agt_id>] [--reviewer <agt_id>]... [--require-user-approval | --no-require-user-approval]")
 	fmt.println("  depend <task-id> --chain <id> --on <task-id>|task:<id>|workflow_run:<run-id>   (workflow runs become chain-level graph edges)")
@@ -756,6 +771,19 @@ ctl_tasks_command :: proc(cmd: []string, args: []string) {
 
 	if action == "show" {
 		ctl_tasks_request_and_decrypt(transport, "GET", fmt.tprintf("/api/v1/task-chains/%s/tasks/%s", safe_path_part(chain_id), safe_path_part(task_id)), "", args)
+		return
+	}
+	if action == "hold" || action == "release" {
+		body := "{}"
+		if action == "hold" {
+			reason := strings.trim_space(option_value(args, "--reason", ""))
+			if reason == "" {
+				fmt.println(`{"ok":false,"message":"tasks hold requires --reason <text>"}`)
+				os.exit(1)
+			}
+			body = json_object(json_kv("reason", reason))
+		}
+		ctl_tasks_request_and_decrypt(transport, "POST", fmt.tprintf("/api/v1/task-chains/%s/tasks/%s/%s", safe_path_part(chain_id), safe_path_part(task_id), action), body, args)
 		return
 	}
 	if action == "unblock" {

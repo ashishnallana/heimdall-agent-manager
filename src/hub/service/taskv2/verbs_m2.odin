@@ -497,6 +497,7 @@ task_reopen :: proc(svc: ^Service, task: domain.Task, actor: Actor) -> (domain.T
 // task_answer: a human clears a blocked_on (block, budget, oscillation) badge.
 task_answer :: proc(svc: ^Service, task: domain.Task, actor: Actor, note: string) -> (domain.Task, bool, domain.Domain_Error) {
 	if strings.trim_space(task.blocked_on_json) == "" do return {}, false, domain.domain_error(.Conflict, "task is not blocked")
+	if task_is_held(task) do return {}, false, domain.domain_error(.Conflict, "task is held; release it with `task release`")
 	u, uok, uerr := begin_uow(svc)
 	if !uok do return {}, false, uerr
     if _, allowed, err := work_control_chain(svc, task.owner_user_id, actor, task.chain_id); !allowed {
@@ -516,6 +517,87 @@ task_answer :: proc(svc: ^Service, task: domain.Task, actor: Actor, note: string
 	if cerr.code != .None do return {}, false, cerr
 	fresh, _, _ := iface.taskchain_get_task(svc.repo, task.task_id)
 	return fresh, true, domain.Domain_Error{}
+}
+
+// ---- human/coordinator verbs: hold / release (REQ-TV2-5) -------------------------------
+
+Hold_Result :: struct {
+	task:                 domain.Task,
+	// changed: false for a no-op (hold on a held task, release on an unheld one).
+	changed:              bool,
+	// checkpoint_requested: the task was leased; its holder was asked to hand off.
+	checkpoint_requested: bool,
+	message:              string,
+}
+
+// task_hold: the task gets no new lease (work or review) until task_release.
+// An unleased task parks in backlog as blocked_on {kind: hold}; a leased one
+// keeps its lease and the holder is asked for a checkpoint (lease handoff),
+// after which the handoff parks the task instead of re-dispatching it. Never
+// revokes a lease; the lease TTL still applies.
+task_hold :: proc(svc: ^Service, task: domain.Task, actor: Actor, reason: string) -> (Hold_Result, bool, domain.Domain_Error) {
+	if strings.trim_space(reason) == "" do return {}, false, domain.domain_error(.Validation_Failed, "reason is required")
+	if domain.task_state_is_terminal(task.state) do return {}, false, domain.domain_error(.Conflict, "a done or cancelled task cannot be held")
+	if task.kind == .Gate do return {}, false, domain.domain_error(.Conflict, "gates cannot be held")
+	u, uok, uerr := begin_uow(svc)
+	if !uok do return {}, false, uerr
+	if _, allowed, err := work_control_chain(svc, task.owner_user_id, actor, task.chain_id); !allowed {
+		_, _ = end_uow(svc, &u, false)
+		return {}, false, err
+	}
+	evs, eerr := iface.taskchain_list_events_by_task(svc.repo, task.task_id, task.owner_user_id)
+	if eerr.code != .None { _, _ = end_uow(svc, &u, false); return {}, false, eerr }
+	pre := fold_task(evs, fold_input_for_task(task, true))
+	if pre.held {
+		_, _ = end_uow(svc, &u, false)
+		return Hold_Result{task = task, message = "task is already held"}, true, domain.Domain_Error{}
+	}
+	p := json_begin()
+	json_str(&p, "reason", strings.trim_space(reason))
+	json_str(&p, "by", actor.kind)
+	fresh, view, rok, rerr := record_event(svc, &u, task, actor, EV_HELD, json_end(&p))
+	checkpoint := rok && view.has_work_lease
+	if checkpoint {
+		// Ask the holder to refresh TASK.md (its pack now carries the
+		// Checkpoint Requested section) and hand off at a safe point.
+		if lease, lok, _ := iface.taskchain_get_lease(svc.repo, view.work_lease_id); lok {
+			bridge_id := lease.bridge_id
+			if inst, iok, _ := iface.agent_get_instance(svc.agents, lease.holder_instance_id); iok && bridge_id == "" do bridge_id = inst.bridge_id
+			effect_nudge_instance(&u, lease.holder_instance_id, bridge_id, fmt.tprintf("[taskv2] Checkpoint requested on task %s: run `ham-ctl lease next` to refresh TASK.md, reach a safe point, commit, then `ham-ctl lease handoff`.", task.task_id))
+		}
+	}
+	if rok do rok, rerr = after_chain_change(svc, &u, task.chain_id, task.owner_user_id, .Task_Updated)
+	_, cerr := end_uow(svc, &u, rok)
+	if !rok do return {}, false, rerr
+	if cerr.code != .None do return {}, false, cerr
+	if f, fok, _ := iface.taskchain_get_task(svc.repo, task.task_id); fok do fresh = f
+	msg := "task held; it will not be dispatched until released"
+	if checkpoint do msg = "task held; its current holder was asked to checkpoint and hand off"
+	return Hold_Result{task = fresh, changed = true, checkpoint_requested = checkpoint, message = msg}, true, domain.Domain_Error{}
+}
+
+// task_release clears a hold; the task becomes dispatchable again (unless
+// something else still blocks it). Releasing an unheld task is a no-op.
+task_release :: proc(svc: ^Service, task: domain.Task, actor: Actor) -> (Hold_Result, bool, domain.Domain_Error) {
+	u, uok, uerr := begin_uow(svc)
+	if !uok do return {}, false, uerr
+	if _, allowed, err := work_control_chain(svc, task.owner_user_id, actor, task.chain_id); !allowed {
+		_, _ = end_uow(svc, &u, false)
+		return {}, false, err
+	}
+	evs, eerr := iface.taskchain_list_events_by_task(svc.repo, task.task_id, task.owner_user_id)
+	if eerr.code != .None { _, _ = end_uow(svc, &u, false); return {}, false, eerr }
+	if pre := fold_task(evs, fold_input_for_task(task, true)); !pre.held {
+		_, _ = end_uow(svc, &u, false)
+		return Hold_Result{task = task, message = "task is not held; nothing to release"}, true, domain.Domain_Error{}
+	}
+	fresh, _, rok, rerr := record_event(svc, &u, task, actor, EV_HOLD_RELEASED, "{}")
+	if rok do rok, rerr = after_chain_change(svc, &u, task.chain_id, task.owner_user_id, .Task_Updated)
+	_, cerr := end_uow(svc, &u, rok)
+	if !rok do return {}, false, rerr
+	if cerr.code != .None do return {}, false, cerr
+	if f, fok, _ := iface.taskchain_get_task(svc.repo, task.task_id); fok do fresh = f
+	return Hold_Result{task = fresh, changed = true, message = "hold released"}, true, domain.Domain_Error{}
 }
 
 // ---- task.fetch -------------------------------------------------------------------------

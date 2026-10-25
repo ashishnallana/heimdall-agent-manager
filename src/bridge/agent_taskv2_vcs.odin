@@ -602,6 +602,17 @@ bridge_taskv2_render_task_md :: proc(pack_json: string, max_bytes: int = BRIDGE_
 		answer_section = strings.to_string(ab)
 	}
 
+	// The coordinator or owner put this task on hold while it is leased: check
+	// in a safe state and hand off; the hub parks the task until it is released.
+	if cp, has_cp := jsonx.extract_raw_object(pack_json, "checkpoint", true, context.temp_allocator); has_cp {
+		reason := bridge_taskv2_decrypt_field(jsonx.extract_string(cp, "reason", "", true, context.temp_allocator), context.temp_allocator)
+		cb := strings.builder_make(context.temp_allocator)
+		strings.write_string(&cb, "\n## Checkpoint Requested\n")
+		strings.write_string(&cb, "This task was put on hold. Reach a safe stopping point, commit your work, then run `ham-ctl lease handoff --summary … --next-steps …`. The task stays parked until it is released; your lease is not revoked meanwhile.\n")
+		if strings.trim_space(reason) != "" do fmt.sbprintf(&cb, "**Reason**: %s\n", reason)
+		answer_section = strings.concatenate({strings.to_string(cb), answer_section}, context.temp_allocator)
+	}
+
 	// Ready-made notice sections for the document (build_doc cannot see locals).
 	if gate_feedback != "" do gate_feedback = strings.concatenate({"\n## Rejected At The Gate\n", gate_feedback}, context.temp_allocator)
 	if answer_section != "" do gate_feedback = strings.concatenate({answer_section, gate_feedback}, context.temp_allocator)

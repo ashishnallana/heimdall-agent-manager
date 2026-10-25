@@ -303,6 +303,32 @@ ctl_publish_print_and_exit :: proc(response: string) {
 // chain-scoped, so the chain is taken from --chain, else this agent's own chain
 // (context), else the task itself (task show).
 ctl_v2_task_publish :: proc(endpoint, token, tid: string, args: []string, unblock := false) {
+	if unblock {
+		ctl_v2_task_action(endpoint, token, tid, args, "answer", json_object(json_kv("note", option_value(args, "--note", ""))))
+	} else {
+		ctl_v2_task_action(endpoint, token, tid, args, "publish", "{}")
+	}
+}
+
+// ctl_v2_task_hold: `task hold <id> --reason <text>` / `task release <id>`
+// (coordinator or owner, REQ-TV2-5). Hold stops new dispatch; on a leased task
+// it asks the holder to checkpoint and hand off. Release of an unheld task is
+// a no-op with a message.
+ctl_v2_task_hold :: proc(endpoint, token, tid: string, args: []string, release := false) {
+	if release {
+		ctl_v2_task_action(endpoint, token, tid, args, "release", "{}")
+		return
+	}
+	reason := strings.trim_space(option_value(args, "--reason", ""))
+	if reason == "" {
+		fmt.println(`{"ok":false,"message":"task hold requires --reason <text>"}`)
+		os.exit(1)
+	}
+	ctl_v2_task_action(endpoint, token, tid, args, "hold", json_object(json_kv("reason", reason)))
+}
+
+// ctl_v2_task_action POSTs `body` to a chain-scoped task action route.
+ctl_v2_task_action :: proc(endpoint, token, tid: string, args: []string, action, body: string) {
 	chain_id := option_value(args, "--chain", "")
 	if chain_id == "" {
 		if res, ok := ctl_agent_local_call(endpoint, token, "agent.task.show", json_object(json_kv("task_id", tid))); ok {
@@ -320,8 +346,8 @@ ctl_v2_task_publish :: proc(endpoint, token, tid: string, args: []string, unbloc
 	}
 	params := json_object(
 		json_kv("http_method", "POST"),
-		json_kv("path", fmt.tprintf("/api/v1/task-chains/%s/tasks/%s/%s", safe_path_part(chain_id), safe_path_part(tid), "answer" if unblock else "publish")),
-		json_kv("body", json_object(json_kv("note", option_value(args, "--note", ""))) if unblock else "{}"),
+		json_kv("path", fmt.tprintf("/api/v1/task-chains/%s/tasks/%s/%s", safe_path_part(chain_id), safe_path_part(tid), action)),
+		json_kv("body", body),
 	)
 	response, ok := ctl_agent_local_call(endpoint, token, "agent.rest.request", params)
 	if !ok { fmt.println(`{"ok":false,"message":"local Bridge endpoint is not reachable"}`); os.exit(1) }
@@ -675,6 +701,14 @@ ctl_v2_task_chain_propose :: proc(endpoint, token: string, tokens, args: []strin
 	ctl_agent_call_task(endpoint, token, "agent.task_chain.propose", params, args)
 }
 
+// ctl_v2_fleet_pause_body: `{"roles":[…]}` from --role/--roles (empty = every
+// role of the row).
+ctl_v2_fleet_pause_body :: proc(args: []string) -> string {
+	roles := collect_multi_values(args, "--role", "--roles")
+	defer delete(roles)
+	return json_object(json_string_array_field("roles", roles[:]))
+}
+
 ctl_v2_fleet_set_body :: proc(args: []string, bridge_models_file_json := "") -> (string, bool) {
 	capacity_str := option_value(args, "--capacity", "")
 	roles := collect_multi_values(args, "--role", "--roles")
@@ -682,11 +716,13 @@ ctl_v2_fleet_set_body :: proc(args: []string, bridge_models_file_json := "") -> 
 	has_placement := len(roles) > 0 || has_flag(args, "--bridge") || has_flag(args, "--bridge-id") || has_flag(args, "--provider") || has_flag(args, "--model") || has_flag(args, "--bridge-models") || bridge_models_file_json != ""
 	if capacity_str == "" && !has_placement do return "", false
 
+	// The value is sent as given: the hub rejects capacity < 1 and names the
+	// pause verb (REQ-TV2-5). An unparsable value is a usage error, not 1.
 	capacity := 1
 	if capacity_str != "" {
-		if c, c_ok := strconv_parse_int_agent(capacity_str); c_ok {
-			capacity = c
-		}
+		c, c_ok := strconv_parse_int_agent(capacity_str)
+		if !c_ok do return "", false
+		capacity = c
 	}
 	fields := make([dynamic]string)
 	defer delete(fields)

@@ -1,5 +1,7 @@
 package domain
 
+import "core:strings"
+
 Publish_State :: enum {
 	Draft,
 	Published,
@@ -308,8 +310,27 @@ Task_Chain_Fleet :: struct {
 	// bridge_id: where instances of this template are placed. "" = resolve via
 	// chain directory → coordinator bridge.
 	bridge_id:  string,
+	// paused_roles_json (REQ-TV2-5): "" = not paused; a JSON array of the
+	// paused roles, `["*"]` = every role. A paused role gets no new lease on
+	// this row; live leases are untouched.
+	paused_roles_json: string,
 	created_at: string,
 	updated_at: string,
+}
+
+FLEET_PAUSED_ALL_JSON :: `["*"]`
+
+// fleet_role_paused: `role` (worker or a review role) is paused on the row.
+fleet_role_paused :: proc(fleet: Task_Chain_Fleet, role: string) -> bool {
+	raw := strings.trim_space(fleet.paused_roles_json)
+	if raw == "" || raw == "[]" do return false
+	return strings.contains(raw, `"*"`) || strings.contains(raw, strings.concatenate({`"`, role, `"`}, context.temp_allocator))
+}
+
+// fleet_paused_any: some role of the row is paused.
+fleet_paused_any :: proc(fleet: Task_Chain_Fleet) -> bool {
+	raw := strings.trim_space(fleet.paused_roles_json)
+	return raw != "" && raw != "[]"
 }
 
 task_is_workable :: proc(task: Task) -> bool {
