@@ -8,7 +8,6 @@ package main
 // (POST /api/v1/task-chains/<id>/publish) and its coordinator permission check
 // already existed — these tests pin the bridge surface that reaches them.
 
-import "core:encoding/json"
 import "core:strings"
 import "core:testing"
 
@@ -116,32 +115,4 @@ bridge_lease_params_inject :: proc(t: ^testing.T) {
 	obj := bridge_taskv2_vcs_object_json("h1", true, `[{"path":"a","status":"modified","add":1,"del":2}]`)
 	defer delete(obj)
 	testing.expect_value(t, obj, `{"kind":"git","head":"h1","dirty":true,"files":[{"path":"a","status":"modified","add":1,"del":2}]}`)
-}
-
-// shell_exited frames for `ham-ctl verify` runs carry vcs + tail (contract §verify 6).
-@(test)
-bridge_verify_exit_frame_enriched :: proc(t: ^testing.T) {
-	frame := bridge_shell_exited_event_json("sh_v1", 3, true, "exited", 0)
-	defer delete(frame)
-	enriched := bridge_taskv2_verify_exit_enrich_json(frame, "deadbeef", true, false, "line39\nline40\n")
-	defer delete(enriched)
-	testing.expect(t, strings.has_suffix(enriched, `,"vcs":{"head":"deadbeef","dirty":false},"tail":"line39\nline40\n"}`), "vcs + tail appended")
-	testing.expect(t, strings.contains(enriched, `"session_id":"sh_v1"`) && strings.contains(enriched, `"exit_code":3`), "original fields kept")
-	parsed: Bridge_Shell_Exited_Event
-	testing.expect(t, json.unmarshal_string(enriched, &parsed, json.DEFAULT_SPECIFICATION, context.temp_allocator) == nil, "still valid JSON")
-	testing.expect_value(t, parsed.run_seq, 0)
-
-	// unknown dirty -> null; not-a-repo head is written empty, tail empty
-	unknown := bridge_taskv2_verify_exit_enrich_json(`{"type":"shell_exited"}`, "", false, false, "")
-	defer delete(unknown)
-	testing.expect_value(t, unknown, `{"type":"shell_exited","vcs":{"head":"","dirty":null},"tail":""}`)
-
-	// tail keeps the last 40 lines only
-	b := strings.builder_make()
-	defer strings.builder_destroy(&b)
-	for i in 1 ..= 45 { strings.write_string(&b, "l"); strings.write_int(&b, i); strings.write_byte(&b, '\n') }
-	tail := bridge_taskv2_tail_lines(strings.to_string(b), 40)
-	testing.expect(t, strings.has_prefix(tail, "l6\n") && strings.has_suffix(tail, "l45\n"), "last 40 lines")
-	short := bridge_taskv2_tail_lines("a\nb\n", 40)
-	testing.expect_value(t, short, "a\nb\n")
 }

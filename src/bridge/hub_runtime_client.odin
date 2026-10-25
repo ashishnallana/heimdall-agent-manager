@@ -3952,15 +3952,9 @@ bridge_runtime_write_json_string :: proc(b: ^strings.Builder, value: string) {
 // A failed write is not fatal — the exit is still queued in memory and will be
 // delivered normally if the process lives long enough. bridge_shell_exited_outbox_write
 // reports the failure itself.
-bridge_shell_exited_enqueue :: proc(raw_event_json: string) {
-	bridge_tool_live_shell_exit(raw_event_json)
-	if strings.trim_space(raw_event_json) == "" do return
-	// Task System v2: a `ham-ctl verify` run's exit carries the repo head/dirty
-	// state and the log tail for the hub-written verify facet. Done here, at the
-	// one chokepoint every exit producer passes through, and BEFORE the outbox
-	// write so a replayed exit is as complete as a live one.
-	event_json := bridge_taskv2_maybe_enrich_verify_exit(raw_event_json)
-	defer delete(event_json)
+bridge_shell_exited_enqueue :: proc(event_json: string) {
+	bridge_tool_live_shell_exit(event_json)
+	if strings.trim_space(event_json) == "" do return
 
 	outbox_path: string
 	// Persisted outside the lock: this is file I/O, and bridge_runtime_mutex is the

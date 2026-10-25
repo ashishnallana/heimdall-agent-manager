@@ -26,7 +26,7 @@ test_bridge_taskv2_render_task_md_dependencies :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(md, "**Handoff Summary**: DEP_SUMMARY_TABLE_ADDED"), "summary")
 	testing.expect(t, strings.contains(md, "  - DEP_DEAD_END_BCRYPT"), "dead ends")
 	testing.expect(t, strings.contains(md, "**Last Commit**: `abc123` (see what it changed with `git show --stat abc123`)"), "last commit + how to see the change")
-	testing.expect(t, strings.contains(md, "**Verify**: `pytest -q` exit_code=`0`"), "verify")
+	testing.expect(t, !strings.contains(md, "Verify") && !strings.contains(md, "pytest -q"), "a legacy dependency verify result is not rendered")
 	testing.expect(t, strings.contains(md, "DEP_OUTPUT_BODY_"), "uncapped output inline")
 	testing.expect(t, strings.contains(md, "### task_c: Spike (cancelled)") && strings.contains(md, "was **cancelled**"), "cancelled dependency flagged")
 	// The section sits between the chain summary and the protocol rules.
@@ -47,14 +47,27 @@ test_bridge_taskv2_render_task_md_dependencies :: proc(t: ^testing.T) {
 	testing.expect(t, !strings.contains(plain, "From The Tasks This One Waits For"), "no section without dependencies")
 }
 
-// The hub's verify facet writes `command` / `head_at_end`; Previous Verify must
-// show them (it read only the older `cmd` / `head` and rendered blank).
+// Verification commands were removed (REQ-TV2-1): a pack from an older hub that
+// still carries brief.verify, previous_attempt.verify, a dependency's verify result
+// and no protocol rules renders without any of them, and the fallback rules tell
+// the agent to choose and report its own checks.
 @(test)
-test_bridge_taskv2_render_previous_verify_hub_keys :: proc(t: ^testing.T) {
-	pack := `{"task_id":"t","attempt_no":2,"task":{"title":"x"},"brief":{"goal":"g"},` +
-		`"previous_attempt":{"attempt_no":1,"outcome":"changes_requested",` +
-		`"verify":{"command":"pytest -q","exit_code":1,"head_at_start":"aaa","head_at_end":"bbb","summary":"1 failed"}}}`
+test_bridge_taskv2_render_legacy_verify_pack_ignored :: proc(t: ^testing.T) {
+	pack := `{"task_id":"t","attempt_no":2,"task":{"title":"x"},` +
+		`"brief":{"goal":"KEEP_GOAL","acceptance":["KEEP_ACCEPTANCE"],"verify":"LEGACY_BRIEF_CMD","auto_submit":true,"require_independent_verify":true},` +
+		`"dependencies":[{"task_id":"task_a","title":"Dep","state":"done","summary":"DEP_SUMMARY","head":"abc123","verify":{"cmd":"LEGACY_DEP_CMD","exit_code":0}}],` +
+		`"previous_attempt":{"attempt_no":1,"outcome":"changes_requested","handoff":{"summary":"PREV_SUMMARY"},` +
+		`"verify":{"command":"LEGACY_PREV_CMD","exit_code":1,"head_at_start":"aaa","head_at_end":"bbb","summary":"LEGACY_TAIL"}},` +
+		`"merge_conflict":{"detail":"conflict in a.txt"}}`
 	md := bridge_taskv2_render_task_md(pack, 32_000)
 	defer delete(md)
-	testing.expect(t, strings.contains(md, "**Previous Verify**: cmd=`pytest -q` exit_code=`1` head=`bbb`"), md)
+	testing.expect(t, !strings.contains(strings.to_lower(md, context.temp_allocator), "verify"), md)
+	for legacy in ([]string{"LEGACY_BRIEF_CMD", "LEGACY_DEP_CMD", "LEGACY_PREV_CMD", "LEGACY_TAIL", "exit_code"}) {
+		testing.expectf(t, !strings.contains(md, legacy), "%s is not rendered", legacy)
+	}
+	for kept in ([]string{"**Goal**: KEEP_GOAL", "- KEEP_ACCEPTANCE", "DEP_SUMMARY", "**Last Commit**: `abc123`", "**Handoff Summary**: PREV_SUMMARY", "## Merge Conflict"}) {
+		testing.expectf(t, strings.contains(md, kept), "%s is still rendered", kept)
+	}
+	testing.expect(t, strings.contains(md, "Choose and run checks appropriate to the change; report the commands and their outcomes"), "fallback rules ask for chosen, reported checks")
+	testing.expect(t, strings.contains(md, "run checks appropriate to the change, and submit with the commands and outcomes in the summary"), "merge-conflict notice asks for chosen, reported checks")
 }

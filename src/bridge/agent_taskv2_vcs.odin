@@ -1,14 +1,11 @@
 package main
 
-// Task System v2 (M2): bridge-side VCS enrichment for the lease verbs and for
-// `ham-ctl verify` exits (docs: m2 wire contract §"Bridge .Local enrichment" and
-// §verify step 6).
+// Task System v2 (M2): bridge-side VCS enrichment for the lease verbs (docs: m2
+// wire contract §"Bridge .Local enrichment").
 //
 //   agent.lease.next      -> params.vcs_base = <git HEAD of the agent's repo>
 //   agent.lease.submit    -> params.vcs = {head, dirty, files:[{path,status,add,del}]}
 //   agent.lease.handoff   -> same as submit
-//   shell_exited frame    -> when the session label starts with "verify ":
-//                            "vcs":{"head","dirty"} + "tail":"<last ≤40 log lines>"
 //
 // All git calls go through the bridge's own `vcs_run` (argv, no shell, bounded
 // by VCS_LOCAL_TIMEOUT) and FAIL SOFT: a directory that is not a git repository
@@ -258,74 +255,6 @@ bridge_agent_lease_local_rpc :: proc(request_id, method, hub_path, params: strin
 	return bridge_local_response_data(request_id, relay.body)
 }
 
-// ---- shell_exited enrichment for `ham-ctl verify` runs ---------------------
-
-BRIDGE_TASKV2_VERIFY_LABEL_PREFIX :: "verify "
-BRIDGE_TASKV2_VERIFY_TAIL_LINES :: 40
-
-// bridge_taskv2_verify_exit_enrich_json splices `vcs` and `tail` into a
-// shell_exited frame. Pure. dirty_known=false renders `"dirty":null` (contract:
-// absent values are unknown). head may be "" (not a repo) and is still written so
-// the hub can tell "no repo" from "frame predates enrichment".
-bridge_taskv2_verify_exit_enrich_json :: proc(event_json, head: string, dirty_known, dirty: bool, tail: string) -> string {
-	body := strings.trim_space(event_json)
-	if body == "" || body[len(body) - 1] != '}' do return strings.clone(event_json)
-	b := strings.builder_make()
-	strings.write_string(&b, body[:len(body) - 1])
-	if len(body) > 2 do strings.write_byte(&b, ',')
-	strings.write_string(&b, "\"vcs\":{\"head\":\"")
-	bridge_local_write_json_string(&b, head)
-	strings.write_string(&b, "\",\"dirty\":")
-	if dirty_known {
-		strings.write_string(&b, "true" if dirty else "false")
-	} else {
-		strings.write_string(&b, "null")
-	}
-	strings.write_string(&b, "},\"tail\":\"")
-	bridge_local_write_json_string(&b, tail)
-	strings.write_string(&b, "\"}")
-	return strings.to_string(b)
-}
-
-// bridge_taskv2_tail_lines returns the last `keep` lines of output (slice into
-// `output`, no copy). Unlike bridge_shell_tail it has no threshold: a verify log
-// is always cut to the keep count because the hub stores it in a facet.
-bridge_taskv2_tail_lines :: proc(output: string, keep: int) -> string {
-	tail, _ := bridge_shell_tail(output, keep, keep)
-	return tail
-}
-
-// bridge_taskv2_maybe_enrich_verify_exit returns the frame to enqueue for a
-// shell_exited event: enriched when the session is a `ham-ctl verify` run,
-// otherwise an unchanged clone. Looks the session up by the frame's session_id so
-// every producer of an exit (pty-host ChildExited, reconcile, orphan sweep) is
-// covered from the single enqueue chokepoint.
-bridge_taskv2_maybe_enrich_verify_exit :: proc(event_json: string) -> string {
-	session_id := extract_json_string(event_json, "session_id", "", context.temp_allocator)
-	if strings.trim_space(session_id) == "" do return strings.clone(event_json)
-	sess, found := bridge_shell_session_snapshot(&bridge_shell_session_map, session_id)
-	if !found do return strings.clone(event_json)
-	defer bridge_shell_session_snapshot_destroy(&bridge_shell_session_map, sess)
-	if sess.kind != .Run || !strings.has_prefix(sess.label, BRIDGE_TASKV2_VERIFY_LABEL_PREFIX) do return strings.clone(event_json)
-
-	head := ""
-	if h, ok := bridge_taskv2_git_head(sess.cwd); ok do head = h
-	defer if head != "" do delete(head)
-	dirty, dirty_known := bridge_taskv2_git_dirty(sess.cwd)
-
-	tail := ""
-	output, state := bridge_shell_output_read(session_id)
-	defer if state == .Available do delete(output)
-	sanitized := ""
-	if state == .Available {
-		sanitized = bridge_shell_sanitize_output(output)
-		tail = bridge_taskv2_tail_lines(sanitized, BRIDGE_TASKV2_VERIFY_TAIL_LINES)
-	}
-	defer if sanitized != "" do delete(sanitized)
-
-	return bridge_taskv2_verify_exit_enrich_json(event_json, head, dirty_known, dirty, tail)
-}
-
 // ---- M3: TASK.md Materialiser + Vault Decryption + 8k-Token Field-Safe Cap -
 
 BRIDGE_TASK_MD_MAX_BYTES :: 32_000 // ~8k tokens (@ 4 bytes/token)
@@ -339,17 +268,15 @@ Bridge_Task_Md_Input :: struct {
 }
 
 // A task this one waits for, as the hub's pack `dependencies` entry describes
-// it: its latest handoff, output, last commit and verify result. `dropped` hides
-// the output for size (the summary and dead ends always stay).
+// it: its latest handoff, output and last commit. `dropped` hides the output for
+// size (the summary and dead ends always stay). A legacy pack's `verify` result
+// is ignored: verification commands were removed.
 Bridge_Task_Md_Dependency :: struct {
 	task_id, title, state, summary:   string,
 	decisions, dead_ends, next_steps: []string,
 	output, output_ref:               string,
 	output_omitted, dropped:          bool,
 	head:                             string,
-	verify_cmd:                       string,
-	has_exit:                         bool,
-	exit_code:                        int,
 }
 
 bridge_taskv2_parse_dependencies :: proc(pack_json: string) -> []Bridge_Task_Md_Dependency {
@@ -378,10 +305,6 @@ bridge_taskv2_parse_dependencies :: proc(pack_json: string) -> []Bridge_Task_Md_
 		}
 		d.output_omitted, _ = jsonx.extract_bool_literal(obj, "output_omitted", true)
 		if o, ok := jsonx.extract_raw_object(obj, "output", true, context.temp_allocator); ok do d.output = bridge_taskv2_decrypt_field(o, context.temp_allocator)
-		if v, ok := jsonx.extract_raw_object(obj, "verify", true, context.temp_allocator); ok {
-			d.verify_cmd = bridge_taskv2_decrypt_field(jsonx.extract_string(v, "cmd", "", true, context.temp_allocator), context.temp_allocator)
-			d.exit_code, d.has_exit = jsonx.extract_int_found(v, "exit_code", true)
-		}
 		append(&out, d)
 	}
 	return out[:]
@@ -410,11 +333,6 @@ bridge_taskv2_write_dependencies :: proc(b: ^strings.Builder, deps: []Bridge_Tas
 		write_list(b, "Dead Ends (DO NOT REPEAT)", d.dead_ends)
 		write_list(b, "Next Steps It Left", d.next_steps)
 		if d.head != "" do fmt.sbprintf(b, "- **Last Commit**: `%s` (see what it changed with `git show --stat %s`)\n", d.head, d.head)
-		if d.verify_cmd != "" {
-			fmt.sbprintf(b, "- **Verify**: `%s` exit_code=`%d`\n", d.verify_cmd, d.exit_code)
-		} else if d.has_exit {
-			fmt.sbprintf(b, "- **Verify**: exit_code=`%d`\n", d.exit_code)
-		}
 		ref := d.output_ref if d.output_ref != "" else fmt.tprintf("output:%s", d.task_id)
 		switch {
 		case d.output != "" && !d.dropped:
@@ -442,7 +360,7 @@ Bridge_Task_Md_Doc :: struct {
 	bridge_id, directory_id, provider, model, why, workdir, branch:               string,
 	merge_conflict, gate_feedback:                                                string,
 	attempt_no, max_attempts, review_rounds:                                      int,
-	goal, verify_cmd:                                                             string,
+	goal:                                                                         string,
 	acceptance:                                                                   []string,
 	description:                                                                  string,
 	description_truncated:                                                        bool,
@@ -458,11 +376,6 @@ Bridge_Task_Md_Doc :: struct {
 	handoff_summary:                                                              string,
 	drop_handoff_summary:                                                         bool,
 	handoff_decisions, handoff_dead_ends, handoff_next_steps:                     []string,
-	verify_cmd_prev:                                                              string,
-	has_verify_exit:                                                              bool,
-	verify_exit:                                                                  int,
-	verify_head, verify_tail:                                                     string,
-	drop_verify_summary:                                                          bool,
 	findings_lines:                                                               []string,
 	rules:                                                                        []string,
 }
@@ -498,7 +411,7 @@ bridge_taskv2_build_task_md :: proc(d: ^Bridge_Task_Md_Doc, alloc := context.tem
 	if d.merge_conflict != "" {
 		strings.write_string(&b, "\n## Merge Conflict\n")
 		fmt.sbprintf(&b, "This task was done, but branch `%s` did not merge into its directory: %s\n", d.branch, d.merge_conflict)
-		strings.write_string(&b, "In the Workdir, merge the directory's current branch into yours (`git merge <that branch>`), resolve the conflicts, commit, run `ham-ctl verify`, and submit.\n")
+		strings.write_string(&b, "In the Workdir, merge the directory's current branch into yours (`git merge <that branch>`), resolve the conflicts, commit, run checks appropriate to the change, and submit with the commands and outcomes in the summary.\n")
 	}
 	strings.write_string(&b, "\n## Brief\n")
 	if d.goal != "" {
@@ -509,9 +422,6 @@ bridge_taskv2_build_task_md :: proc(d: ^Bridge_Task_Md_Doc, alloc := context.tem
 		for a in d.acceptance {
 			fmt.sbprintf(&b, "- %s\n", a)
 		}
-	}
-	if d.verify_cmd != "" {
-		fmt.sbprintf(&b, "**Verify**: `%s`\n", d.verify_cmd)
 	}
 
 	if strings.trim_space(d.description) != "" {
@@ -587,14 +497,6 @@ bridge_taskv2_build_task_md :: proc(d: ^Bridge_Task_Md_Doc, alloc := context.tem
 				fmt.sbprintf(&b, "  - %s\n", bridge_taskv2_decrypt_field(ns, context.temp_allocator))
 			}
 		}
-		if d.has_verify_exit || d.verify_cmd_prev != "" || d.verify_tail != "" || d.drop_verify_summary {
-			fmt.sbprintf(&b, "- **Previous Verify**: cmd=`%s` exit_code=`%d` head=`%s`\n", d.verify_cmd_prev, d.verify_exit, d.verify_head)
-			if d.drop_verify_summary {
-				fmt.sbprintf(&b, "  - Output omitted for size — fetch with `ham-ctl task fetch %s facet:%s:%d:verify`\n", d.task_id, d.task_id, d.prev_attempt_no)
-			} else if d.verify_tail != "" {
-				fmt.sbprintf(&b, "  - Output tail:\n```\n%s\n```\n", d.verify_tail)
-			}
-		}
 	}
 
 	if len(d.findings_lines) > 0 {
@@ -614,15 +516,15 @@ bridge_taskv2_build_task_md :: proc(d: ^Bridge_Task_Md_Doc, alloc := context.tem
 			strings.write_byte(&b, '\n')
 		}
 	} else {
-		strings.write_string(&b, "1. Confirm lease with `ham-ctl lease next`.\n2. Run `ham-ctl verify` and `ham-ctl lease submit --summary \"...\"` when done.\n")
+		strings.write_string(&b, "1. Confirm lease with `ham-ctl lease next`.\n2. Choose and run checks appropriate to the change; report the commands and their outcomes in `ham-ctl lease submit --summary \"...\"` when done.\n")
 	}
 	return strings.to_string(b)
 }
 
 // bridge_taskv2_render_task_md decrypts all vault:v2 tokens in pack_json,
 // applies the field-safe 8k-token (max_bytes) cap AFTER decryption (never inside a
-// field, dropping in order: 1. resolved input bodies, then dependency outputs -> 2. previous verify summary/tail
-// -> 3. previous handoff summary -> 4. task description cut to a head with a trailer;
+// field, dropping in order: 1. resolved input bodies, then dependency outputs
+// -> 2. previous handoff summary -> 3. task description cut to a head with a trailer;
 // preserving brief, dead_ends, and open findings intact),
 // and renders the Markdown document for <run_dir>/TASK.md.
 bridge_taskv2_render_task_md :: proc(pack_json: string, max_bytes: int = BRIDGE_TASK_MD_MAX_BYTES, allocator := context.allocator) -> string {
@@ -715,7 +617,6 @@ bridge_taskv2_render_task_md :: proc(pack_json: string, max_bytes: int = BRIDGE_
 
 	goal := bridge_taskv2_decrypt_field(jsonx.extract_string(brief_obj, "goal", "", true, context.temp_allocator), context.temp_allocator)
 	if strings.trim_space(goal) == "" do goal = description
-	verify_cmd := bridge_taskv2_decrypt_field(jsonx.extract_string(brief_obj, "verify", "", true, context.temp_allocator), context.temp_allocator)
 	acc_raw := jsonx.extract_string_array(brief_obj, "acceptance", true, context.temp_allocator)
 	acceptance := make([dynamic]string, context.temp_allocator)
 	for a in acc_raw {
@@ -805,14 +706,6 @@ bridge_taskv2_render_task_md :: proc(pack_json: string, max_bytes: int = BRIDGE_
 		}
 	}
 
-	verify_obj, _ := jsonx.extract_raw_object(prev_obj, "verify", true, context.temp_allocator)
-	// The hub's verify facet writes `command` and `head_at_end`; `cmd`/`head`
-	// are the older names.
-	verify_cmd_prev := bridge_taskv2_decrypt_field(jsonx.extract_string(verify_obj, "command", jsonx.extract_string(verify_obj, "cmd", "", true, context.temp_allocator), true, context.temp_allocator), context.temp_allocator)
-	verify_exit, has_verify_exit := jsonx.extract_int_found(verify_obj, "exit_code", true)
-	verify_head := jsonx.extract_string(verify_obj, "head_at_end", jsonx.extract_string(verify_obj, "head", "", true, context.temp_allocator), true, context.temp_allocator)
-	verify_tail := bridge_taskv2_decrypt_field(jsonx.extract_string(verify_obj, "tail", jsonx.extract_string(verify_obj, "summary", "", true, context.temp_allocator), true, context.temp_allocator), context.temp_allocator)
-
 	// Open Findings (never dropped)
 	findings_lines := make([dynamic]string, context.temp_allocator)
 	if findings_arr, has_f := bridge_provider_json_extract_array(pack_json, "findings", context.temp_allocator); has_f {
@@ -846,7 +739,7 @@ bridge_taskv2_render_task_md :: proc(pack_json: string, max_bytes: int = BRIDGE_
 		bridge_id = bridge_id, directory_id = directory_id, provider = provider, model = model,
 		why = why, workdir = workdir, branch = branch, merge_conflict = merge_conflict, gate_feedback = gate_feedback,
 		attempt_no = attempt_no, max_attempts = max_attempts, review_rounds = review_rounds,
-		goal = goal, verify_cmd = verify_cmd, acceptance = acceptance[:],
+		goal = goal, acceptance = acceptance[:],
 		description = description,
 		chain_summary = chain_summary,
 		inputs = inputs[:],
@@ -855,7 +748,6 @@ bridge_taskv2_render_task_md :: proc(pack_json: string, max_bytes: int = BRIDGE_
 		has_prev = has_prev, prev_attempt_no = prev_attempt_no, prev_outcome = prev_outcome, prev_note = prev_note,
 		handoff_summary = handoff_summary,
 		handoff_decisions = handoff_decisions[:], handoff_dead_ends = handoff_dead_ends[:], handoff_next_steps = handoff_next_steps[:],
-		verify_cmd_prev = verify_cmd_prev, has_verify_exit = has_verify_exit, verify_exit = verify_exit, verify_head = verify_head, verify_tail = verify_tail,
 		findings_lines = findings_lines[:],
 		rules = rules[:],
 	}
@@ -881,19 +773,13 @@ bridge_taskv2_render_task_md :: proc(pack_json: string, max_bytes: int = BRIDGE_
 		}
 	}
 
-	// Step 2 of field-safe cap: drop previous verify summary/tail
-	if max_bytes > 0 && len(rendered) > max_bytes && verify_tail != "" {
-		doc.drop_verify_summary = true
-		rendered = bridge_taskv2_build_task_md(&doc)
-	}
-
-	// Step 3 of field-safe cap: drop previous handoff summary (preserving dead_ends!)
+	// Step 2 of field-safe cap: drop previous handoff summary (preserving dead_ends!)
 	if max_bytes > 0 && len(rendered) > max_bytes && handoff_summary != "" {
 		doc.drop_handoff_summary = true
 		rendered = bridge_taskv2_build_task_md(&doc)
 	}
 
-	// Step 4 of field-safe cap: cut the task description to a head that fits,
+	// Step 3 of field-safe cap: cut the task description to a head that fits,
 	// keeping at least BRIDGE_TASK_MD_DESCRIPTION_MIN_HEAD bytes, with a trailer
 	// pointing at the full text. The brief's goal and acceptance are never cut.
 	if max_bytes > 0 && len(rendered) > max_bytes && doc.description != "" {
@@ -1188,11 +1074,3 @@ bridge_taskv2_handle_command :: proc(conn: ^ws.Connection, type, text: string) -
 	_ = bridge_hub_send(conn, out)
 	return true
 }
-
-// bridge_taskv2_should_auto_submit checks whether a verify run qualifies for automatic
-// lease submission (`brief.auto_submit == true`, `exit_code == 0`, `!independent`, and `!dirty`).
-bridge_taskv2_should_auto_submit :: proc(exit_code: int, independent, dirty, auto_submit: bool) -> bool {
-	return auto_submit && exit_code == 0 && !independent && !dirty
-}
-
-

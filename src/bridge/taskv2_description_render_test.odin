@@ -23,9 +23,10 @@ test_bridge_taskv2_render_task_md_description :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(md, "\n## Description\nDESCRIPTION_LINE_ONE\nDESCRIPTION_LINE_TWO\n"), md)
 	brief := strings.index(md, "## Brief")
 	section := strings.index(md, "## Description")
-	verify := strings.index(md, "**Verify**: `pytest -q`")
+	acceptance := strings.index(md, "- KEEP_ACCEPTANCE_TWO")
 	chain := strings.index(md, "## Chain Summary")
-	testing.expect(t, brief >= 0 && brief < verify && verify < section && section < chain, "Description sits between the brief and the chain summary")
+	testing.expect(t, brief >= 0 && brief < acceptance && acceptance < section && section < chain, "Description sits between the brief and the chain summary")
+	testing.expect(t, !strings.contains(md, "Verify") && !strings.contains(md, "pytest -q"), "a legacy brief.verify is not rendered")
 	testing.expect(t, !strings.contains(md, "description truncated"), "no trailer when it fits")
 }
 
