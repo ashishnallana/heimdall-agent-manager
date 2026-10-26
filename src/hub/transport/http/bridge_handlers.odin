@@ -1795,7 +1795,7 @@ bridge_ws_upgrade_handler :: proc(ctx: rawptr, req: Request, client: net.TCP_Soc
 	// Cache the owner's switch on the connection BEFORE bridge_ready goes out: a
 	// bridge may flush its bridge_log ring in the very next frame.
 	project_service.bridge_runtime_registry_set_telemetry_enabled(h.bridge_runtime_registry, bridge.bridge_id, bridge.telemetry_enabled != "disabled")
-	_ = write_ws_text_frame_locked(h, bridge.bridge_id, client, bridge_ready_payload(bridge.bridge_id, hello.generation, hello.replaced_existing, catalog_etag, bridge.telemetry_enabled != "disabled", BRIDGE_HUB_HEARTBEAT_METADATA_OMISSION))
+	_ = write_ws_text_frame_locked(h, bridge.bridge_id, client, bridge_ready_payload(bridge.bridge_id, hello.generation, hello.replaced_existing, catalog_etag, bridge.telemetry_enabled != "disabled", BRIDGE_HUB_HEARTBEAT_METADATA_OMISSION, BRIDGE_HUB_DIAGNOSTICS_FRAME_V1))
 	// REQ-ENR-1: the disconnect path publishes offline; this is its counterpart, so
 	// the UI learns a bridge came (back) online — e.g. right after enrollment commit
 	// and service restart. The enroll-only socket returned long before this point.
@@ -2330,8 +2330,13 @@ bridge_ws_process_frame :: proc(h: ^Bridge_Handlers, bridge_id: string, connecti
 		delete(payload)
 	case "bridge_heartbeat":
 		metrics.gauge_set(metrics.with(project_service.fleet_metrics.bridge_last_heartbeat, bridge_id), time.now()._nsec / 1_000_000_000)
-		_ = bridge_apply_heartbeat_stats(bridge_id, text, connection)
-		bridge_apply_heartbeat_reliability(bridge_id, text)
+		// Legacy diagnostic members are still ingested from Bridges that do not send
+		// bridge_diagnostics. Once this connection has delivered a snapshot, that frame
+		// owns the series and a stray legacy member must not overwrite it.
+		if !project_service.bridge_diagnostics_owns_generation(bridge_id, connection_generation) {
+			_ = bridge_apply_heartbeat_stats(bridge_id, text, connection)
+			bridge_apply_heartbeat_reliability(bridge_id, text)
+		}
 		project_service.bridge_runtime_registry_set_task_chain_search_status(
 			h.bridge_runtime_registry, bridge_id, connection_generation,
 			json_bool_value(text, "task_chain_search_ready"), json_bool_value(text, "task_chain_search_stale"),
@@ -2377,6 +2382,10 @@ bridge_ws_process_frame :: proc(h: ^Bridge_Handlers, bridge_id: string, connecti
 			for s in superseded do delete(s)
 			delete(superseded)
 		}
+	case "bridge_diagnostics":
+		// Plan §4.3: same socket auth and generation as heartbeat (checked on entry and
+		// again under the commit lock). Rejections are counted, never fatal.
+		_ = bridge_apply_diagnostics_frame(h.bridge_runtime_registry, bridge_id, connection_generation, text, connection)
 	case "agent_instance_status":
 		instance_id := json_string(text, "agent_instance_id")
 		state_seq := json_int(text, "state_seq", 0)
@@ -3084,9 +3093,11 @@ BRIDGE_HUB_HEARTBEAT_METADATA_OMISSION :: true
 // heartbeats (plan 4.3): false only when the owner set telemetry_enabled=disabled.
 // heartbeat_metadata_omission is an ADVERTISEMENT only (contracts
 // BRIDGE_FEATURE_HEARTBEAT_METADATA_OMISSION): it takes effect on a connection only when
-// that connection's hello also listed the feature. The enroll-only socket, which never
-// heartbeats, leaves it false.
-bridge_ready_payload :: proc(bridge_id: string, generation: int, replaced: bool, catalog_etag: string = "", heartbeat_stats := true, heartbeat_metadata_omission := false) -> string {
+// that connection's hello also listed the feature. diagnostics_frame_v1 tells the Bridge
+// this hub accepts bridge_diagnostics (plan §4.3/§4.4); old Bridges ignore it, and a
+// Bridge that sees it may move its diagnostics out of the heartbeat. The enroll-only
+// socket, which never heartbeats, leaves both false.
+bridge_ready_payload :: proc(bridge_id: string, generation: int, replaced: bool, catalog_etag: string = "", heartbeat_stats := true, heartbeat_metadata_omission := false, diagnostics_frame_v1 := false) -> string {
 	b := strings.builder_make()
 	strings.write_string(&b, "{\"type\":\"bridge_ready\",\"protocol_version\":1,\"payload\":{\"bridge_id\":\"")
 	write_handler_json_string(&b, bridge_id)
@@ -3101,6 +3112,8 @@ bridge_ready_payload :: proc(bridge_id: string, generation: int, replaced: bool,
 	strings.write_string(&b, "true" if heartbeat_stats else "false")
 	strings.write_string(&b, ",\"heartbeat_metadata_omission\":")
 	strings.write_string(&b, "true" if heartbeat_metadata_omission else "false")
+	strings.write_string(&b, ",\"diagnostics_frame_v1\":")
+	strings.write_string(&b, "true" if diagnostics_frame_v1 else "false")
 	// This hub bounds the session by its credential and accepts in-band
 	// bridge_reauth after a refresh (bridge_ws_try_reauth).
 	strings.write_string(&b, ",\"credential_reauth\":true")

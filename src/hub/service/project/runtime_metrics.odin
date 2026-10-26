@@ -1,5 +1,6 @@
 package project
 
+import "base:runtime"
 import "core:strings"
 import "core:sync"
 import "core:time"
@@ -68,6 +69,12 @@ Fleet_Metrics :: struct {
 	bridge_http_retries:      ^metrics.Family, // {bridge_id, outcome} counter, value pushed
 	bridge_breakers_open:     ^metrics.Family, // {bridge_id}
 	bridge_breaker_trips:     ^metrics.Family, // {bridge_id} counter, value pushed
+
+	// bridge_diagnostics frames (minimal heartbeat plan §4.3, T5). Freshness is a
+	// hub-receive timestamp per bounded family (age = time() - value); restarts count
+	// accepted process_epoch changes. Both are removed on disconnect.
+	bridge_diagnostics_last_sample: ^metrics.Family, // {bridge_id, family}
+	bridge_diagnostics_restarts:    ^metrics.Family, // {bridge_id}
 }
 
 fleet_metrics: Fleet_Metrics
@@ -138,6 +145,8 @@ fleet_metrics_init :: proc(reg: ^metrics.Registry) {
     m.bridge_http_retries = metrics.new_counter(reg, "heimdall_bridge_http_retries_total", "Bridge->hub HTTP retries and how retried requests ended (pushed value; resets when the bridge restarts). Removed on disconnect.", {"bridge_id", "outcome"})
 	m.bridge_breakers_open = metrics.new_gauge(reg, "heimdall_bridge_breakers_open", "Bridge dependency circuit breakers currently open. Removed on disconnect.", {"bridge_id"})
 	m.bridge_breaker_trips = metrics.new_counter(reg, "heimdall_bridge_breaker_trips_total", "Times a bridge dependency circuit breaker opened (pushed value; resets when the bridge restarts). Removed on disconnect.", {"bridge_id"})
+	m.bridge_diagnostics_last_sample = metrics.new_gauge(reg, "heimdall_bridge_diagnostics_last_sample_timestamp_seconds", "Unix time the hub last applied each bridge_diagnostics family (frame = any accepted snapshot). A family absent from later snapshots keeps its old timestamp. Removed on disconnect.", {"bridge_id", "family"})
+	m.bridge_diagnostics_restarts = metrics.new_counter(reg, "heimdall_bridge_diagnostics_process_restarts_total", "bridge_diagnostics snapshots accepted from a new Bridge process (process_epoch changed), whose cumulative counters restart. Removed on disconnect.", {"bridge_id"})
 	// Pre-create the per-kind gauges so a zero is exposed from the first scrape.
 	for kind in ([]string{"bridge", "user", "agent_stream", "shell", "lsp"}) do metrics.with(m.ws_connections, kind)
 	if !collector_registered {
@@ -165,6 +174,9 @@ fleet_metrics_tombstone_bridge :: proc(bridge_id: string) {
 	metrics.remove_where(m.bridge_http_retries, 0, bridge_id)
 	metrics.remove_where(m.bridge_breakers_open, 0, bridge_id)
 	metrics.remove_where(m.bridge_breaker_trips, 0, bridge_id)
+	metrics.remove_where(m.bridge_diagnostics_last_sample, 0, bridge_id)
+	metrics.remove_where(m.bridge_diagnostics_restarts, 0, bridge_id)
+	bridge_diagnostics_forget(bridge_id)
 	for hook in bridge_tombstone_hooks do hook(bridge_id)
 }
 
@@ -183,6 +195,7 @@ fleet_metrics_add_tombstone_hook :: proc(hook: proc(bridge_id: string)) {
 bridge_frame_kind :: proc(frame_type: string) -> string {
 	switch {
 	case frame_type == "bridge_heartbeat":                 return "heartbeat"
+	case frame_type == "bridge_diagnostics":               return "diagnostics"
 	case frame_type == "agent_instance_status":            return "agent_status"
 	case frame_type == "command_result":                   return "command_result"
 	case frame_type == "shell_pty_output":                 return "shell_pty_output"
@@ -332,4 +345,310 @@ runtime_status_enum :: proc(status: string) -> string {
 		return status
 	}
 	return "other"
+}
+
+// ---------------------------------------------------------------------------
+// bridge_diagnostics snapshots (minimal heartbeat plan §4.3, T5).
+//
+// The HTTP layer parses and fully validates a frame into a Bridge_Diagnostics_Snapshot
+// (nothing is mutated while parsing); bridge_diagnostics_commit then orders it and
+// applies it under one mutex, so ordering state and the series it guards always move
+// together. Per-family outcome: Absent leaves the family's series and freshness
+// untouched; Invalid rejects only that family (counted); Valid replaces it.
+
+Bridge_Diagnostics_Family :: enum u8 {
+	Command_Dispatch,
+	Dependency_Breakers,
+	Http_Retries,
+	Operation_Recovery,
+	Stats,
+}
+
+BRIDGE_DIAGNOSTICS_FAMILY_LABELS := [Bridge_Diagnostics_Family]string{
+	.Command_Dispatch    = "command_dispatch",
+	.Dependency_Breakers = "dependency_breakers",
+	.Http_Retries        = "http_retries",
+	.Operation_Recovery  = "operation_recovery",
+	.Stats               = "stats",
+}
+
+Bridge_Diagnostics_Part :: enum u8 {
+	Absent,
+	Valid,
+	Invalid,
+}
+
+// Optional stats gauges a Bridge may declare unavailable. host_mem_total and
+// host_mem_avail are one gauge pair (kept together, plan §3.2).
+Bridge_Diagnostics_Gauge :: enum u8 {
+	Pty_Host_Rss,
+	Host_Memory,
+	Load1,
+	Disk_Free,
+}
+
+Bridge_Diagnostics_Recovery_Row :: struct {
+	operation, state, code, class: string,
+	receipts:                      i64,
+}
+
+Bridge_Diagnostics_Provider :: struct {
+	provider: string, // already mapped through provider_enum
+	rss:      u64,
+	cpu_cs:   u64,
+}
+
+BRIDGE_DIAGNOSTICS_MAX_PROVIDERS :: 16
+BRIDGE_DIAGNOSTICS_EPOCH_MAX :: 64
+
+Bridge_Diagnostics_Snapshot :: struct {
+	process_epoch:   string,
+	sample_seq:      u64,
+	collected_at_ms: u64,
+	parts:           [Bridge_Diagnostics_Family]Bridge_Diagnostics_Part,
+	// command_dispatch: accepted, rejected (exported as "shed"), completed, deadline_expired
+	dispatch:        [4]u64,
+	breakers_open:   u64,
+	breakers_opened: u64,
+	// http_retries: retry, recovered, gave_up, deferred
+	http_retries:    [4]u64,
+	recovery_rows:   []Bridge_Diagnostics_Recovery_Row, // caller-owned; read during commit only
+	// stats; a gauge in `unavailable` carries no value and is cleared on apply.
+	rss, pty_host_rss, cpu_cs, host_mem_total, host_mem_avail, load1_cs, disk_free: u64,
+	unavailable:     bit_set[Bridge_Diagnostics_Gauge],
+	providers:       [BRIDGE_DIAGNOSTICS_MAX_PROVIDERS]Bridge_Diagnostics_Provider,
+	n_providers:     int,
+}
+
+Bridge_Diagnostics_Commit_Result :: enum u8 {
+	Applied,
+	Stale,      // same process_epoch, sample_seq not greater than the last applied
+	Superseded, // from a connection generation older than one already seen / current
+}
+
+// Rejection reasons (heimdall_bridge_frames_rejected_total{reason}); a fixed set.
+DIAGNOSTICS_REJECT_BAD_JSON           :: "diagnostics_bad_json"
+DIAGNOSTICS_REJECT_OVERSIZE           :: "diagnostics_oversize"
+DIAGNOSTICS_REJECT_ENVELOPE           :: "diagnostics_envelope"
+DIAGNOSTICS_REJECT_STALE              :: "diagnostics_stale"
+DIAGNOSTICS_REJECT_SUPERSEDED         :: "diagnostics_superseded"
+DIAGNOSTICS_REJECT_INVALID_OBJECT     :: "diagnostics_invalid_object"
+DIAGNOSTICS_REJECT_COUNTER_REGRESSION :: "diagnostics_counter_regression"
+
+// Per-bridge ordering state and the last applied cumulative counters (for the
+// same-epoch regression check). Lives until the bridge's per-bridge series are
+// tombstoned (no live generation), so a replacement connection from the same or a
+// new process is ordered against what the hub already exposes.
+@(private = "file")
+Diagnostics_State :: struct {
+	key:             string, // the map key (runtime heap)
+	generation:      int,
+	epoch:           [BRIDGE_DIAGNOSTICS_EPOCH_MAX]u8,
+	epoch_len:       int,
+	sample_seq:      u64,
+	has_dispatch:    bool,
+	dispatch:        [4]u64,
+	has_http:        bool,
+	http_retries:    [4]u64,
+	has_breakers:    bool,
+	breakers_opened: u64,
+	has_cpu:         bool,
+	cpu_cs:          u64,
+}
+
+@(private = "file")
+diagnostics_mutex: sync.Mutex
+@(private = "file")
+diagnostics_states: map[string]^Diagnostics_State // keys/values: runtime heap
+
+// bridge_diagnostics_owns_generation: a bridge_diagnostics frame has been accepted
+// on this connection generation, so the Bridge reports diagnostics there and a
+// heartbeat's legacy diagnostic members (if any) must not overwrite those series.
+bridge_diagnostics_owns_generation :: proc(bridge_id: string, generation: int) -> bool {
+	sync.lock(&diagnostics_mutex)
+	defer sync.unlock(&diagnostics_mutex)
+	st, found := diagnostics_states[bridge_id]
+	return found && st.generation == generation
+}
+
+// bridge_diagnostics_forget drops the ordering state with the per-bridge series
+// (fleet_metrics_tombstone_bridge). The next accepted snapshot is a fresh baseline:
+// with no series left there is nothing to compare against or to count a restart for.
+bridge_diagnostics_forget :: proc(bridge_id: string) {
+	sync.lock(&diagnostics_mutex)
+	defer sync.unlock(&diagnostics_mutex)
+	st, found := diagnostics_states[bridge_id]
+	if !found do return
+	delete_key(&diagnostics_states, bridge_id)
+	heap := runtime.heap_allocator()
+	delete(st.key, heap)
+	free(st, heap)
+}
+
+// bridge_diagnostics_commit orders and applies one validated snapshot.
+//   - generation older than the newest seen, or no longer the registry's current
+//     generation (registry may be nil in unit tests) -> Superseded, nothing applied;
+//   - no prior state -> baseline (not a restart);
+//   - different process_epoch -> new process: counters are applied as a reset
+//     (counter_set accepts the lower absolutes) and restarts_total is incremented;
+//   - same epoch, sample_seq <= last -> Stale (duplicate/reordered), nothing applied;
+//   - same epoch, a cumulative counter lower than last applied -> that family is
+//     rejected (counted), the others apply.
+// stats_enabled=false (owner telemetry "disabled") clears every stats series and
+// ignores any stats the frame carries; reliability families apply regardless.
+bridge_diagnostics_commit :: proc(r: ^Bridge_Runtime_Registry, bridge_id: string, generation: int, snap: ^Bridge_Diagnostics_Snapshot, stats_enabled: bool, now_unix_s: i64 = 0) -> Bridge_Diagnostics_Commit_Result {
+	m := &fleet_metrics
+	now := now_unix_s if now_unix_s != 0 else time.now()._nsec / 1_000_000_000
+	sync.lock(&diagnostics_mutex)
+	defer sync.unlock(&diagnostics_mutex)
+
+	// Barrier against a late frame from a connection that has been replaced while
+	// it was being parsed: re-check under the same lock that publishes the series.
+	if r != nil && bridge_runtime_registry_generation(r, bridge_id) != generation {
+		reject_reason(DIAGNOSTICS_REJECT_SUPERSEDED)
+		return .Superseded
+	}
+	st, found := diagnostics_states[bridge_id]
+	restarted := false
+	if found {
+		if generation < st.generation {
+			reject_reason(DIAGNOSTICS_REJECT_SUPERSEDED)
+			return .Superseded
+		}
+		same_epoch := string(st.epoch[:st.epoch_len]) == snap.process_epoch
+		if same_epoch && snap.sample_seq <= st.sample_seq {
+			reject_reason(DIAGNOSTICS_REJECT_STALE)
+			return .Stale
+		}
+		if !same_epoch {
+			restarted = true
+			st.has_dispatch, st.has_http, st.has_breakers, st.has_cpu = false, false, false, false
+		}
+	} else {
+		// The state outlives any one test/request allocator: runtime heap, like the
+		// metrics registry it mirrors.
+		heap := runtime.heap_allocator()
+		if diagnostics_states == nil do diagnostics_states = make(map[string]^Diagnostics_State, heap)
+		st = new(Diagnostics_State, heap)
+		st.key = strings.clone(bridge_id, heap)
+		diagnostics_states[st.key] = st
+	}
+	st.generation = generation
+	st.epoch_len = copy(st.epoch[:], snap.process_epoch)
+	st.sample_seq = snap.sample_seq
+	if restarted do metrics.counter_inc(metrics.with(m.bridge_diagnostics_restarts, bridge_id))
+
+	parts := snap.parts
+	if parts[.Command_Dispatch] == .Valid && st.has_dispatch && counters_regressed(snap.dispatch[:], st.dispatch[:]) do parts[.Command_Dispatch] = .Invalid
+	if parts[.Http_Retries] == .Valid && st.has_http && counters_regressed(snap.http_retries[:], st.http_retries[:]) do parts[.Http_Retries] = .Invalid
+	if parts[.Dependency_Breakers] == .Valid && st.has_breakers && snap.breakers_opened < st.breakers_opened do parts[.Dependency_Breakers] = .Invalid
+	// Only the Bridge process's own CPU is monotonic within an epoch; per-provider
+	// CPU is a sum over live instances and legitimately drops when one exits.
+	if parts[.Stats] == .Valid && stats_enabled && st.has_cpu && snap.cpu_cs < st.cpu_cs do parts[.Stats] = .Invalid
+	for family in Bridge_Diagnostics_Family {
+		if parts[family] != .Invalid do continue
+		reason := DIAGNOSTICS_REJECT_INVALID_OBJECT
+		if snap.parts[family] == .Valid do reason = DIAGNOSTICS_REJECT_COUNTER_REGRESSION
+		reject_reason(reason)
+	}
+
+	if parts[.Command_Dispatch] == .Valid {
+		metrics.counter_set(metrics.with(m.bridge_dispatch, bridge_id, "accepted"), snap.dispatch[0])
+		metrics.counter_set(metrics.with(m.bridge_dispatch, bridge_id, "shed"), snap.dispatch[1])
+		metrics.counter_set(metrics.with(m.bridge_dispatch, bridge_id, "completed"), snap.dispatch[2])
+		metrics.counter_set(metrics.with(m.bridge_dispatch, bridge_id, "deadline_expired"), snap.dispatch[3])
+		st.dispatch, st.has_dispatch = snap.dispatch, true
+	}
+	if parts[.Http_Retries] == .Valid {
+		metrics.counter_set(metrics.with(m.bridge_http_retries, bridge_id, "retry"), snap.http_retries[0])
+		metrics.counter_set(metrics.with(m.bridge_http_retries, bridge_id, "recovered"), snap.http_retries[1])
+		metrics.counter_set(metrics.with(m.bridge_http_retries, bridge_id, "gave_up"), snap.http_retries[2])
+		metrics.counter_set(metrics.with(m.bridge_http_retries, bridge_id, "deferred"), snap.http_retries[3])
+		st.http_retries, st.has_http = snap.http_retries, true
+	}
+	if parts[.Dependency_Breakers] == .Valid {
+		metrics.gauge_set(metrics.with(m.bridge_breakers_open, bridge_id), i64(snap.breakers_open))
+		metrics.counter_set(metrics.with(m.bridge_breaker_trips, bridge_id), snap.breakers_opened)
+		st.breakers_opened, st.has_breakers = snap.breakers_opened, true
+	}
+	if parts[.Operation_Recovery] == .Valid {
+		// Full replacement: rows no longer reported (or an empty list) are tombstoned.
+		// Duplicate label tuples are summed so no reported receipt is lost.
+		metrics.remove_where(m.bridge_recovery, 0, bridge_id)
+		for row in snap.recovery_rows do metrics.gauge_add(metrics.with(m.bridge_recovery, bridge_id, row.operation, row.state, row.code, row.class), row.receipts)
+	}
+	if !stats_enabled {
+		// Opt-out is explicit (owner switch), never inferred from an absent object.
+		diagnostics_clear_stats(bridge_id)
+		st.has_cpu = false
+		parts[.Stats] = .Absent
+	} else if parts[.Stats] == .Valid {
+		diagnostics_apply_stats(bridge_id, snap)
+		st.cpu_cs, st.has_cpu = snap.cpu_cs, true
+	}
+
+	metrics.gauge_set(metrics.with(m.bridge_diagnostics_last_sample, bridge_id, "frame"), now)
+	for family in Bridge_Diagnostics_Family {
+		if parts[family] == .Valid do metrics.gauge_set(metrics.with(m.bridge_diagnostics_last_sample, bridge_id, BRIDGE_DIAGNOSTICS_FAMILY_LABELS[family]), now)
+	}
+	return .Applied
+}
+
+@(private = "file")
+counters_regressed :: proc(next, last: []u64) -> bool {
+	for v, i in next do if v < last[i] do return true
+	return false
+}
+
+@(private = "file")
+reject_reason :: proc(reason: string) {
+	metrics.counter_inc(metrics.with(fleet_metrics.bridge_frames_rejected, reason))
+}
+
+@(private = "file")
+diagnostics_clear_stats :: proc(bridge_id: string) {
+	m := &fleet_metrics
+	metrics.remove_where(m.bridge_process_resident, 0, bridge_id)
+	metrics.remove_where(m.bridge_process_cpu, 0, bridge_id)
+	metrics.remove_where(m.bridge_host_memory, 0, bridge_id)
+	metrics.remove_where(m.bridge_host_load1, 0, bridge_id)
+	metrics.remove_where(m.bridge_disk_free, 0, bridge_id)
+	metrics.remove_where(m.instance_resident, 0, bridge_id)
+	metrics.remove_where(m.instance_cpu, 0, bridge_id)
+	metrics.remove(m.bridge_diagnostics_last_sample, bridge_id, BRIDGE_DIAGNOSTICS_FAMILY_LABELS[.Stats])
+}
+
+@(private = "file")
+diagnostics_apply_stats :: proc(bridge_id: string, snap: ^Bridge_Diagnostics_Snapshot) {
+	m := &fleet_metrics
+	metrics.gauge_set(metrics.with(m.bridge_process_resident, bridge_id, "bridge"), i64(snap.rss))
+	metrics.counter_set(metrics.with(m.bridge_process_cpu, bridge_id, "bridge"), snap.cpu_cs)
+	if .Pty_Host_Rss in snap.unavailable {
+		metrics.remove(m.bridge_process_resident, bridge_id, "pty_host")
+	} else {
+		metrics.gauge_set(metrics.with(m.bridge_process_resident, bridge_id, "pty_host"), i64(snap.pty_host_rss))
+	}
+	if .Host_Memory in snap.unavailable {
+		metrics.remove_where(m.bridge_host_memory, 0, bridge_id)
+	} else {
+		metrics.gauge_set(metrics.with(m.bridge_host_memory, bridge_id, "total"), i64(snap.host_mem_total))
+		metrics.gauge_set(metrics.with(m.bridge_host_memory, bridge_id, "available"), i64(snap.host_mem_avail))
+	}
+	if .Load1 in snap.unavailable {
+		metrics.remove_where(m.bridge_host_load1, 0, bridge_id)
+	} else {
+		metrics.gauge_set(metrics.with(m.bridge_host_load1, bridge_id), i64(snap.load1_cs))
+	}
+	if .Disk_Free in snap.unavailable {
+		metrics.remove_where(m.bridge_disk_free, 0, bridge_id)
+	} else {
+		metrics.gauge_set(metrics.with(m.bridge_disk_free, bridge_id), i64(snap.disk_free))
+	}
+	// Full replacement of the provider aggregates; a valid empty list tombstones all.
+	metrics.remove_where(m.instance_resident, 0, bridge_id)
+	metrics.remove_where(m.instance_cpu, 0, bridge_id)
+	for p in snap.providers[:snap.n_providers] {
+		metrics.gauge_set(metrics.with(m.instance_resident, bridge_id, p.provider), i64(p.rss))
+		metrics.counter_set(metrics.with(m.instance_cpu, bridge_id, p.provider), p.cpu_cs)
+	}
 }
