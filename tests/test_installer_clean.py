@@ -506,5 +506,91 @@ if me=='sv-enable':
         self.assertFalse(self.log.exists())
 
 
+    def test_profiles_two_bridges_one_hub(self):
+        hub='https://hub.mundus.in'; base='heimdall-bridge-hub-mundus-in'
+        self.run_install('--hub',hub)
+        out=self.run_install('--hub',hub,'--name','alice')
+        self.assertIn('Service: '+base+'_alice (',out); self.assertIn('Profile: alice',out)
+        self.env['HEIMDALL_BRIDGE_NAME']='bob'
+        self.run_install('--hub',hub)
+        del self.env['HEIMDALL_BRIDGE_NAME']
+        units=self.home/'.config/systemd/user'
+        self.assertEqual(sorted(p.name for p in units.glob('*.service')),
+                         [base+'.service',base+'_alice.service',base+'_bob.service'])
+        self.assertIn('Description=Heimdall Bridge '+hub+'\n',(units/(base+'.service')).read_text())
+        self.assertFalse((self.state(base)/'profile').exists())
+        ports=set()
+        for profile in ('alice','bob'):
+            name=base+'_'+profile
+            unit=(units/(name+'.service')).read_text()
+            self.assertIn('Description=Heimdall Bridge '+hub+' (profile '+profile+')\n',unit)
+            self.assertIn('HEIMDALL_BRIDGE_SERVICE_NAME='+name+'.service',unit)
+            self.assertIn(str(self.data(name)/'run'),unit)
+            self.assertEqual((self.state(name)/'profile').read_text(),profile+'\n')
+            self.assertEqual((self.state(name)/'hub-url').read_text(),hub+'\n')
+            p=json.loads((self.state(name)/'ports.json').read_text())
+            self.assertFalse(ports&set(p)); ports|=set(p)
+            wrapper=self.data(name)/'bin'/('ham-ctl-'+name)
+            subprocess.run([str(wrapper),'tasks','list'],env=self.env,check=True)
+            result=json.loads((self.root/'ctl.json').read_text())
+            self.assertEqual(result['endpoint'],f'tcp:127.0.0.1:{p[1]}')
+            self.assertEqual(result['args'][:2],['--config',str(self.state(name)/'config.toml')])
+        self.assertFalse(ports&set(json.loads((self.state(base)/'ports.json').read_text())))
+        # --name beats the environment.
+        self.env['HEIMDALL_BRIDGE_NAME']='bob'
+        self.assertIn('Service: '+base+'_carol (',self.run_install('--hub',hub,'--name','carol','--dry-run'))
+
+    def test_profile_uninstall_and_reenroll_scoped(self):
+        hub='http://localhost:8080'; alice='heimdall-bridge-localhost-8080_alice'; bob='heimdall-bridge-localhost-8080_bob'
+        for profile in ('alice','bob'): self.run_install('--hub',hub,'--name',profile)
+        (self.state(bob)/'bridge-token').write_text('bob-token')
+        n=len(self.commands())
+        self.run_install('--hub',hub,'--name','alice','--re-enroll',answers=[])
+        self.assertEqual((self.state(alice)/'bridge-token').read_text(),'credential\n')
+        self.assertEqual((self.state(bob)/'bridge-token').read_text(),'bob-token')
+        touched=[c for c in self.commands()[n:] if c[0]=='systemctl' and len(c)>3]
+        self.assertTrue(touched); self.assertTrue(all(c[-1]==alice for c in touched),touched)
+        self.run_install('--hub',hub,'--name','alice','--uninstall')
+        units=self.home/'.config/systemd/user'
+        self.assertFalse((units/(alice+'.service')).exists()); self.assertFalse((self.data(alice)/'bin').exists())
+        self.assertTrue((self.state(alice)/'bridge-token').exists())
+        self.assertTrue((units/(bob+'.service')).exists())
+        self.assertTrue((self.data(bob)/'bin/ham-bridge').exists())
+        self.assertNotIn(['systemctl','--user','stop',bob],self.commands())
+
+    def test_profile_never_migrates_legacy_service(self):
+        legacy=self.home/'.config/systemd/user/heimdall-bridge.service'; legacy.parent.mkdir(parents=True)
+        legacy.write_text('ExecStart=/bin/ham-bridge --hub "http://localhost:8080"\n')
+        old=self.home/'.config/heimdall'; old.mkdir(parents=True)
+        (old/'bridge-token').write_text('legacy-credential')
+        out=self.run_install('--hub','http://localhost:8080','--name','work','--dry-run')
+        self.assertIn('matching legacy migration=false',out)
+        self.run_install('--hub','http://localhost:8080','--name','work')
+        self.assertTrue(legacy.exists())
+        self.assertFalse(any(c[-1]=='heimdall-bridge' for c in self.commands()))
+        self.assertFalse((self.state('heimdall-bridge-localhost-8080_work')/'bridge-token').exists())
+
+    def test_profile_name_validation(self):
+        ok='a'+'-'*29+'9'
+        self.assertIn('Service: heimdall-bridge-hub-mundus-in_'+ok+' (',self.run_install('--hub','https://hub.mundus.in','--name',ok,'--dry-run'))
+        for bad in ('Alice','-x','a_b','a.b','a b','x'*32,'../x','é'):
+            with self.subTest(name=bad):
+                out=self.run_install('--hub','https://hub.mundus.in','--name',bad,'--dry-run',success=False)
+                self.assertIn('Invalid profile name',out)
+        self.assertIn('--name requires a value',self.run_install('--hub','https://hub.mundus.in','--name','',success=False))
+        self.env['HEIMDALL_BRIDGE_NAME']='Bad_Name'
+        self.assertIn('Invalid profile name',self.run_install('--hub','https://hub.mundus.in','--dry-run',success=False))
+        self.assertFalse(self.log.exists())
+
+    def test_termux_rejects_profile(self):
+        prefix=self.termux()
+        out=self.run_install('--hub','https://hub.mundus.in','--name','alice',success=False)
+        self.assertIn('not supported on Termux',out)
+        self.env['HEIMDALL_BRIDGE_NAME']='alice'
+        self.assertIn('not supported on Termux',self.run_install('--hub','https://hub.mundus.in','--dry-run',success=False))
+        self.assertFalse((prefix/'var/service/ham-bridge').exists())
+        self.assertFalse((self.home/'.config/heimdall').exists())
+        self.assertFalse(self.log.exists())
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
