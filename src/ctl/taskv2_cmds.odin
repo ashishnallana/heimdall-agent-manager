@@ -29,6 +29,7 @@ import "core:os"
 import "core:slice"
 import "core:strconv"
 import "core:strings"
+import httpc "odin_test:lib/httpc"
 import jsonx "odin_test:lib/jsonx"
 
 // ---- brief ------------------------------------------------------------------
@@ -78,8 +79,32 @@ ctl_task_brief_flags_present :: proc(args: []string) -> bool {
 // clear the key on update); flags win field by field and `--clear-<field>`
 // sends null. The removed verify keys are never carried.
 ctl_task_brief_json :: proc(args: []string, brief_file_text: string) -> (string, bool) {
+	entries, ok := ctl_task_brief_entries(args, brief_file_text)
+	if !ok do return "", false
+	if len(entries) == 0 do return strings.clone("{}"), true
+	fields := make([dynamic]string)
+	defer delete(fields)
+	for e in entries {
+		raw, merr := json.marshal(e.value, allocator = context.temp_allocator)
+		if merr != nil do continue
+		append(&fields, json_kv_raw(e.key, string(raw)))
+	}
+	return json_object_from_slice(fields[:]), true
+}
+
+// Ctl_Brief_Entry is one top-level brief key in the order ham-ctl writes it.
+Ctl_Brief_Entry :: struct {
+	key:   string,
+	value: json.Value,
+}
+
+// ctl_task_brief_entries is the brief as ordered (key, value) pairs: the
+// CTL_BRIEF_KEYS in schema order, then any other key sorted. ok=false when
+// there is nothing to send; an explicitly empty `{}` file is ok with no entries.
+// Values are temp-allocated.
+ctl_task_brief_entries :: proc(args: []string, brief_file_text: string) -> ([]Ctl_Brief_Entry, bool) {
 	file := strings.trim_space(brief_file_text)
-	values := make(map[string]string, allocator = context.temp_allocator)
+	values := make(map[string]json.Value, allocator = context.temp_allocator)
 	// An explicitly empty `{}` file is a brief of its own (with --replace-brief it
 	// clears every field); a file of only removed verify keys stays no brief.
 	explicit_empty := false
@@ -91,33 +116,31 @@ ctl_task_brief_json :: proc(args: []string, brief_file_text: string) -> (string,
 				removed := false
 				for k in CTL_REMOVED_BRIEF_KEYS do if k == key { removed = true; break }
 				if removed do continue
-				if raw, merr := json.marshal(value, allocator = context.temp_allocator); merr == nil do values[key] = string(raw)
+				values[key] = value
 			}
 		}
 	}
 
-	if goal := option_value(args, "--goal", ""); goal != "" do values["goal"] = ctl_json_quote(goal)
+	if goal := option_value(args, "--goal", ""); goal != "" do values["goal"] = json.String(goal)
 	acceptance := ctl_collect_repeated(args, "--acceptance")
 	defer delete(acceptance)
-	if len(acceptance) > 0 do values["acceptance"] = ctl_json_string_array_raw(acceptance[:])
-	inputs := collect_multi_values(args, "--input", "--inputs")
-	defer delete(inputs)
-	if len(inputs) > 0 do values["inputs"] = ctl_json_string_array_raw(inputs[:])
-	roles := collect_multi_values(args, "--review-role", "--review-roles")
-	defer delete(roles)
-	if len(roles) > 0 do values["review_roles"] = ctl_json_string_array_raw(roles[:])
-	if out_schema := strings.trim_space(option_value(args, "--output-schema", "")); out_schema != "" do values["output"] = ctl_json_quote(out_schema)
-	if on_wf := strings.trim_space(option_value(args, "--on-output-workflow", "")); on_wf != "" do values["on_output"] = json_object(json_kv("start_workflow", on_wf))
-	for k in CTL_BRIEF_KEYS do if has_flag(args, ctl_brief_clear_flag(k)) do values[k] = "null"
-
-	if len(values) == 0 {
-		if explicit_empty do return strings.clone("{}"), true
-		return "", false
+	if len(acceptance) > 0 do values["acceptance"] = ctl_json_string_array_value(acceptance[:])
+	inputs := ctl_multi_values(args, "--input", "--inputs")
+	if len(inputs) > 0 do values["inputs"] = ctl_json_string_array_value(inputs)
+	roles := ctl_multi_values(args, "--review-role", "--review-roles")
+	if len(roles) > 0 do values["review_roles"] = ctl_json_string_array_value(roles)
+	if out_schema := strings.trim_space(option_value(args, "--output-schema", "")); out_schema != "" do values["output"] = json.String(out_schema)
+	if on_wf := strings.trim_space(option_value(args, "--on-output-workflow", "")); on_wf != "" {
+		on_output := make(json.Object, allocator = context.temp_allocator)
+		on_output["start_workflow"] = json.String(on_wf)
+		values["on_output"] = on_output
 	}
-	fields := make([dynamic]string)
-	defer delete(fields)
+	for k in CTL_BRIEF_KEYS do if has_flag(args, ctl_brief_clear_flag(k)) do values[k] = json.Null{}
+
+	if len(values) == 0 do return nil, explicit_empty
+	entries := make([dynamic]Ctl_Brief_Entry, 0, len(values), context.temp_allocator)
 	for k in CTL_BRIEF_KEYS {
-		if v, ok := values[k]; ok do append(&fields, json_kv_raw(k, v))
+		if v, ok := values[k]; ok do append(&entries, Ctl_Brief_Entry{key = k, value = v})
 	}
 	extra := make([dynamic]string, context.temp_allocator)
 	for k in values {
@@ -126,27 +149,15 @@ ctl_task_brief_json :: proc(args: []string, brief_file_text: string) -> (string,
 		if !known do append(&extra, k)
 	}
 	slice.sort(extra[:])
-	for k in extra do append(&fields, json_kv_raw(k, values[k]))
-	return json_object_from_slice(fields[:]), true
+	for k in extra do append(&entries, Ctl_Brief_Entry{key = k, value = values[k]})
+	return entries[:], true
 }
 
-// ctl_json_quote renders one JSON string literal.
-ctl_json_quote :: proc(v: string) -> string {
-	b := strings.builder_make(context.temp_allocator)
-	strings.write_byte(&b, '"'); json_write_string(&b, v); strings.write_byte(&b, '"')
-	return strings.to_string(b)
-}
-
-// ctl_json_string_array_raw renders `["a","b"]`.
-ctl_json_string_array_raw :: proc(items: []string) -> string {
-	b := strings.builder_make(context.temp_allocator)
-	strings.write_byte(&b, '[')
-	for item, i in items {
-		if i > 0 do strings.write_byte(&b, ',')
-		strings.write_string(&b, ctl_json_quote(item))
-	}
-	strings.write_byte(&b, ']')
-	return strings.to_string(b)
+// ctl_json_string_array_value is a json.Array of strings (temp-allocated).
+ctl_json_string_array_value :: proc(items: []string) -> json.Value {
+	arr := make(json.Array, 0, len(items), context.temp_allocator)
+	for item in items do append(&arr, json.String(item))
+	return arr
 }
 
 // CTL_REMOVED_BRIEF_KEYS / CTL_REMOVED_BRIEF_FLAGS: the verification brief
@@ -185,7 +196,33 @@ ctl_warn_removed :: proc(what: string, fields: []string) {
 // when --brief-file cannot be read or is not a JSON object. Removed verification
 // fields are dropped with a stderr warning.
 ctl_task_brief_field :: proc(args: []string) -> (string, bool) {
-	file_text := ""
+	file_text, present := ctl_task_brief_file(args)
+	if !present do return "", false
+	brief, ok := ctl_task_brief_json(args, file_text)
+	if !ok do return "", false
+	// --replace-brief: the hub swaps the whole brief instead of merging keys.
+	if has_flag(args, "--replace-brief") do return strings.concatenate({json_kv_raw("brief", brief), `,"replace_brief":true`}), true
+	return json_kv_raw("brief", brief), true
+}
+
+// ctl_task_brief_value is the brief for a hub request body: the same keys and
+// values as ctl_task_brief_field, as a json.Object (temp-allocated). replace is
+// --replace-brief.
+ctl_task_brief_value :: proc(args: []string) -> (brief: json.Value, replace: Maybe(bool), ok: bool) {
+	file_text, present := ctl_task_brief_file(args)
+	if !present do return nil, nil, false
+	entries, eok := ctl_task_brief_entries(args, file_text)
+	if !eok do return nil, nil, false
+	obj := make(json.Object, len(entries), context.temp_allocator)
+	for e in entries do obj[e.key] = e.value
+	if has_flag(args, "--replace-brief") do replace = true
+	return obj, replace, true
+}
+
+// ctl_task_brief_file reads --brief-file (exits 1 when it cannot be read or is
+// not a JSON object), warns about removed verification fields, and reports
+// whether any brief input was given at all.
+ctl_task_brief_file :: proc(args: []string) -> (file_text: string, present: bool) {
 	if path := option_value(args, "--brief-file", ""); path != "" {
 		data, err := os.read_entire_file(path, context.allocator)
 		if err != nil {
@@ -198,40 +235,7 @@ ctl_task_brief_field :: proc(args: []string) -> (string, bool) {
 	}
 	ctl_warn_removed("brief", ctl_task_brief_removed_fields(args, file_text))
 	if file_text == "" && !ctl_task_brief_flags_present(args) do return "", false
-	brief, ok := ctl_task_brief_json(args, file_text)
-	if !ok do return "", false
-	// --replace-brief: the hub swaps the whole brief instead of merging keys.
-	if has_flag(args, "--replace-brief") do return strings.concatenate({json_kv_raw("brief", brief), `,"replace_brief":true`}), true
-	return json_kv_raw("brief", brief), true
-}
-
-// ctl_extract_json_array_raw returns the raw `[...]` text of a top-level array
-// member (string-aware; "" / false when absent or not an array).
-ctl_extract_json_array_raw :: proc(body, key: string) -> (string, bool) {
-	probe := strings.concatenate({"\"", key, "\""}, context.temp_allocator)
-	idx := strings.index(body, probe)
-	if idx < 0 do return "", false
-	rest := body[idx + len(probe):]
-	colon := strings.index_byte(rest, ':')
-	if colon < 0 do return "", false
-	rest = strings.trim_left_space(rest[colon + 1:])
-	if len(rest) == 0 || rest[0] != '[' do return "", false
-	depth := 0
-	in_str := false
-	esc := false
-	for i := 0; i < len(rest); i += 1 {
-		ch := rest[i]
-		if in_str {
-			if esc { esc = false; continue }
-			if ch == '\\' { esc = true; continue }
-			if ch == '"' do in_str = false
-			continue
-		}
-		if ch == '"' { in_str = true; continue }
-		if ch == '[' do depth += 1
-		if ch == ']' { depth -= 1; if depth == 0 do return rest[:i + 1], true }
-	}
-	return "", false
+	return file_text, true
 }
 
 // ---- publish: brief_incomplete rendering -------------------------------------
@@ -304,9 +308,9 @@ ctl_publish_print_and_exit :: proc(response: string) {
 // (context), else the task itself (task show).
 ctl_v2_task_publish :: proc(endpoint, token, tid: string, args: []string, unblock := false) {
 	if unblock {
-		ctl_v2_task_action(endpoint, token, tid, args, "answer", json_object(json_kv("note", option_value(args, "--note", ""))))
+		ctl_v2_task_action(endpoint, token, tid, args, "answer", httpc.json_body(Ctl_Task_Note_Body{note = option_value(args, "--note", "")}))
 	} else {
-		ctl_v2_task_action(endpoint, token, tid, args, "publish", "{}")
+		ctl_v2_task_action(endpoint, token, tid, args, "publish", ctl_empty_object_body())
 	}
 }
 
@@ -316,7 +320,7 @@ ctl_v2_task_publish :: proc(endpoint, token, tid: string, args: []string, unbloc
 // a no-op with a message.
 ctl_v2_task_hold :: proc(endpoint, token, tid: string, args: []string, release := false) {
 	if release {
-		ctl_v2_task_action(endpoint, token, tid, args, "release", "{}")
+		ctl_v2_task_action(endpoint, token, tid, args, "release", ctl_empty_object_body())
 		return
 	}
 	reason := strings.trim_space(option_value(args, "--reason", ""))
@@ -324,11 +328,11 @@ ctl_v2_task_hold :: proc(endpoint, token, tid: string, args: []string, release :
 		fmt.println(`{"ok":false,"message":"task hold requires --reason <text>"}`)
 		os.exit(1)
 	}
-	ctl_v2_task_action(endpoint, token, tid, args, "hold", json_object(json_kv("reason", reason)))
+	ctl_v2_task_action(endpoint, token, tid, args, "hold", httpc.json_body(Ctl_Task_Reason_Body{reason = reason}))
 }
 
 // ctl_v2_task_action POSTs `body` to a chain-scoped task action route.
-ctl_v2_task_action :: proc(endpoint, token, tid: string, args: []string, action, body: string) {
+ctl_v2_task_action :: proc(endpoint, token, tid: string, args: []string, action: string, body: httpc.Body) {
 	chain_id := option_value(args, "--chain", "")
 	if chain_id == "" {
 		if res, ok := ctl_agent_local_call(endpoint, token, "agent.task.show", json_object(json_kv("task_id", tid))); ok {
@@ -344,12 +348,7 @@ ctl_v2_task_action :: proc(endpoint, token, tid: string, args: []string, action,
 		fmt.println(`{"ok":false,"message":"could not resolve the task's chain; pass --chain <id>"}`)
 		os.exit(1)
 	}
-	params := json_object(
-		json_kv("http_method", "POST"),
-		json_kv("path", fmt.tprintf("/api/v1/task-chains/%s/tasks/%s/%s", safe_path_part(chain_id), safe_path_part(tid), action)),
-		json_kv("body", body),
-	)
-	response, ok := ctl_agent_local_call(endpoint, token, "agent.rest.request", params)
+	response, ok := ctl_agent_rest_local(endpoint, token, {method = .POST, path = ctl_api("task-chains", chain_id, "tasks", tid, action), body = body})
 	if !ok { fmt.println(`{"ok":false,"message":"local Bridge endpoint is not reachable"}`); os.exit(1) }
 	ctl_publish_print_and_exit(response)
 }
@@ -571,7 +570,14 @@ ctl_v2_review :: proc(endpoint, token: string, tokens, args: []string) {
 
 // ---- task-chain summary / propose / fleet --------------------------------------
 
-ctl_v2_task_chain_summary_params :: proc(tokens, args: []string, stdin_text := "", file_text := "") -> (string, bool) {
+// Ctl_Chain_Summary_Body: PUT /api/v1/task-chains/<id>/summary and the
+// agent.task_chain.set_summary params.
+Ctl_Chain_Summary_Body :: struct {
+	chain_id: string `json:"chain_id,omitempty"`,
+	summary:  string `json:"summary"`,
+}
+
+ctl_v2_task_chain_summary_body :: proc(tokens, args: []string, stdin_text := "", file_text := "") -> (Ctl_Chain_Summary_Body, bool) {
 	sub := pos(tokens, 0)
 	summary := strings.trim_space(option_value(args, "--summary", option_value(args, "--body", "")))
 	if file_text != "" && summary == "" {
@@ -586,15 +592,16 @@ ctl_v2_task_chain_summary_params :: proc(tokens, args: []string, stdin_text := "
 		}
 	}
 	if summary == "" && !has_flag(args, "--summary") && !has_flag(args, "--body") && !has_flag(args, "--file") && !has_flag(args, "--stdin") {
-		return "", false
+		return {}, false
 	}
-	fields := make([dynamic]string)
-	defer delete(fields)
-	if cid := option_value(args, "--chain", option_value(args, "--chain-id", "")); cid != "" {
-		append(&fields, json_kv("chain_id", cid))
-	}
-	append(&fields, json_kv("summary", summary))
-	return json_object_from_slice(fields[:]), true
+	return Ctl_Chain_Summary_Body{chain_id = option_value(args, "--chain", option_value(args, "--chain-id", "")), summary = summary}, true
+}
+
+// ctl_v2_task_chain_summary_params is the summary body as agent RPC params.
+ctl_v2_task_chain_summary_params :: proc(tokens, args: []string, stdin_text := "", file_text := "") -> (string, bool) {
+	body, ok := ctl_v2_task_chain_summary_body(tokens, args, stdin_text, file_text)
+	if !ok do return "", false
+	return ctl_json_text(body), true
 }
 
 ctl_v2_task_chain_summary :: proc(endpoint, token: string, tokens, args: []string) {
@@ -619,63 +626,74 @@ ctl_v2_task_chain_summary :: proc(endpoint, token: string, tokens, args: []strin
 	ctl_agent_call_task(endpoint, token, "agent.task_chain.set_summary", params, args)
 }
 
-ctl_v2_task_chain_propose_params :: proc(args: []string, file_text: string) -> (string, bool) {
+// Ctl_Chain_Propose_Body: POST /api/v1/agent-actions/chain/propose and the
+// agent.task_chain.propose params. tasks/inputs are carried from the proposal file.
+Ctl_Chain_Propose_Body :: struct {
+	chain_id:     string      `json:"chain_id,omitempty"`,
+	kind:         string      `json:"kind,omitempty"`,
+	rationale:    string      `json:"rationale,omitempty"`,
+	alternative:  string      `json:"alternative,omitempty"`,
+	auto_approve: Maybe(bool) `json:"auto_approve,omitempty"`,
+	tasks:        json.Value  `json:"tasks,omitempty"`,
+	workflow:     string      `json:"workflow,omitempty"`,
+	inputs:       json.Value  `json:"inputs,omitempty"`,
+}
+
+ctl_v2_task_chain_propose_body :: proc(args: []string, file_text: string) -> (body: Ctl_Chain_Propose_Body, ok: bool) {
 	trimmed := strings.trim_space(file_text)
-	if trimmed == "" || trimmed[0] != '{' do return "", false
-	parsed, perr := json.parse(transmute([]byte)trimmed, json.DEFAULT_SPECIFICATION, false, context.temp_allocator)
-	if perr != nil do return "", false
+	if trimmed == "" || trimmed[0] != '{' do return {}, false
+	parsed, perr := json.parse(transmute([]byte)trimmed, json.DEFAULT_SPECIFICATION, true, context.temp_allocator)
+	if perr != nil do return {}, false
 	obj, is_obj := parsed.(json.Object)
-	if !is_obj do return "", false
+	if !is_obj do return {}, false
 
-	fields := make([dynamic]string)
-	defer delete(fields)
-
-	cid := option_value(args, "--chain", option_value(args, "--chain-id", ""))
-	if cid == "" {
-		if s, ok := obj["chain_id"].(json.String); ok do cid = string(s)
+	body.chain_id = option_value(args, "--chain", option_value(args, "--chain-id", ""))
+	if body.chain_id == "" {
+		if s, sok := obj["chain_id"].(json.String); sok do body.chain_id = string(s)
 	}
-	if cid != "" do append(&fields, json_kv("chain_id", cid))
-
-	if s, ok := obj["kind"].(json.String); ok && string(s) != "" {
-		append(&fields, json_kv("kind", string(s)))
-	} else if k := option_value(args, "--kind", ""); k != "" {
-		append(&fields, json_kv("kind", k))
+	if s, sok := obj["kind"].(json.String); sok && string(s) != "" {
+		body.kind = string(s)
+	} else {
+		body.kind = option_value(args, "--kind", "")
 	}
-	if s, ok := obj["rationale"].(json.String); ok && string(s) != "" {
-		append(&fields, json_kv("rationale", string(s)))
-	} else if r := option_value(args, "--rationale", ""); r != "" {
-		append(&fields, json_kv("rationale", r))
+	if s, sok := obj["rationale"].(json.String); sok && string(s) != "" {
+		body.rationale = string(s)
+	} else {
+		body.rationale = option_value(args, "--rationale", "")
 	}
-	if s, ok := obj["alternative"].(json.String); ok && string(s) != "" {
-		append(&fields, json_kv("alternative", string(s)))
-	} else if alt := option_value(args, "--alternative", ""); alt != "" {
-		append(&fields, json_kv("alternative", alt))
+	if s, sok := obj["alternative"].(json.String); sok && string(s) != "" {
+		body.alternative = string(s)
+	} else {
+		body.alternative = option_value(args, "--alternative", "")
 	}
 	auto_approve := has_flag(args, "--auto-approve")
 	if !auto_approve {
-		if b, ok := obj["auto_approve"].(json.Boolean); ok do auto_approve = bool(b)
+		if b, bok := obj["auto_approve"].(json.Boolean); bok do auto_approve = bool(b)
 	}
-	if auto_approve do append(&fields, `"auto_approve":true`)
+	if auto_approve do body.auto_approve = true
 
-	if raw_tasks, ok := ctl_extract_json_array_raw(trimmed, "tasks"); ok {
-		append(&fields, json_kv_raw("tasks", raw_tasks))
+	if tasks, has_tasks := obj["tasks"].(json.Array); has_tasks {
+		body.tasks = tasks
 	} else {
 		wf_ref := option_value(args, "--workflow", option_value(args, "--template", ""))
 		if wf_ref == "" {
-			if s, ok := obj["workflow"].(json.String); ok do wf_ref = string(s)
+			if s, sok := obj["workflow"].(json.String); sok do wf_ref = string(s)
 		}
 		if wf_ref == "" {
-			if s, ok := obj["template"].(json.String); ok do wf_ref = string(s)
+			if s, sok := obj["template"].(json.String); sok do wf_ref = string(s)
 		}
-		if wf_ref == "" {
-			return "", false
-		}
-		append(&fields, json_kv("workflow", wf_ref))
-		if raw_in, ok := extract_json_object_raw(trimmed, "inputs", context.temp_allocator); ok {
-			append(&fields, json_kv_raw("inputs", raw_in))
-		}
+		if wf_ref == "" do return {}, false
+		body.workflow = wf_ref
+		if inputs, has_inputs := obj["inputs"].(json.Object); has_inputs do body.inputs = inputs
 	}
-	return json_object_from_slice(fields[:]), true
+	return body, true
+}
+
+// ctl_v2_task_chain_propose_params is the proposal as agent RPC params.
+ctl_v2_task_chain_propose_params :: proc(args: []string, file_text: string) -> (string, bool) {
+	body, ok := ctl_v2_task_chain_propose_body(args, file_text)
+	if !ok do return "", false
+	return ctl_json_text(body), true
 }
 
 ctl_v2_task_chain_propose :: proc(endpoint, token: string, tokens, args: []string) {
@@ -701,61 +719,65 @@ ctl_v2_task_chain_propose :: proc(endpoint, token: string, tokens, args: []strin
 	ctl_agent_call_task(endpoint, token, "agent.task_chain.propose", params, args)
 }
 
-// ctl_v2_fleet_pause_body: `{"roles":[…]}` from --role/--roles (empty = every
+// Ctl_Fleet_Pause_Body: `{"roles":[…]}` from --role/--roles (empty = every
 // role of the row).
-ctl_v2_fleet_pause_body :: proc(args: []string) -> string {
-	roles := collect_multi_values(args, "--role", "--roles")
-	defer delete(roles)
-	return json_object(json_string_array_field("roles", roles[:]))
+Ctl_Fleet_Pause_Body :: struct {
+	roles: []string `json:"roles"`,
 }
 
-ctl_v2_fleet_set_body :: proc(args: []string, bridge_models_file_json := "") -> (string, bool) {
+ctl_v2_fleet_pause_body :: proc(args: []string) -> Ctl_Fleet_Pause_Body {
+	return {roles = ctl_multi_values(args, "--role", "--roles")}
+}
+
+// Ctl_Fleet_Set_Body: PUT /api/v1/task-chains/<id>/fleets/<agent>. Placement
+// fields are presence-checked (an explicit empty value is sent).
+Ctl_Fleet_Set_Body :: struct {
+	capacity:         int           `json:"capacity"`,
+	min_warm:         Maybe(int)    `json:"min_warm,omitempty"`,
+	idle_ttl_seconds: Maybe(int)    `json:"idle_ttl_seconds,omitempty"`,
+	roles:            []string      `json:"roles,omitempty"`,
+	bridge_id:        Maybe(string) `json:"bridge_id,omitempty"`,
+	provider:         Maybe(string) `json:"provider,omitempty"`,
+	model:            Maybe(string) `json:"model,omitempty"`,
+	bridge_models:    json.Value    `json:"bridge_models,omitempty"`,
+}
+
+ctl_v2_fleet_set_body :: proc(args: []string, bridge_models_file_json := "") -> (body: Ctl_Fleet_Set_Body, ok: bool) {
 	capacity_str := option_value(args, "--capacity", "")
-	roles := collect_multi_values(args, "--role", "--roles")
-	defer delete(roles)
+	roles := ctl_multi_values(args, "--role", "--roles")
 	has_placement := len(roles) > 0 || has_flag(args, "--bridge") || has_flag(args, "--bridge-id") || has_flag(args, "--provider") || has_flag(args, "--model") || has_flag(args, "--bridge-models") || bridge_models_file_json != ""
-	if capacity_str == "" && !has_placement do return "", false
+	if capacity_str == "" && !has_placement do return {}, false
 
 	// The value is sent as given: the hub rejects capacity < 1 and names the
 	// pause verb (REQ-TV2-5). An unparsable value is a usage error, not 1.
-	capacity := 1
+	body.capacity = 1
 	if capacity_str != "" {
 		c, c_ok := strconv_parse_int_agent(capacity_str)
-		if !c_ok do return "", false
-		capacity = c
+		if !c_ok do return {}, false
+		body.capacity = c
 	}
-	fields := make([dynamic]string)
-	defer delete(fields)
-	append(&fields, json_kv_raw("capacity", fmt.tprintf("%d", capacity)))
 	if mw := option_value(args, "--min-warm", ""); mw != "" {
-		if v, v_ok := strconv_parse_int_agent(mw); v_ok do append(&fields, json_kv_raw("min_warm", fmt.tprintf("%d", v)))
+		if v, v_ok := strconv_parse_int_agent(mw); v_ok do body.min_warm = v
 	}
 	if ttl := option_value(args, "--idle-ttl", option_value(args, "--idle-ttl-seconds", "")); ttl != "" {
-		if v, v_ok := strconv_parse_int_agent(ttl); v_ok do append(&fields, json_kv_raw("idle_ttl_seconds", fmt.tprintf("%d", v)))
+		if v, v_ok := strconv_parse_int_agent(ttl); v_ok do body.idle_ttl_seconds = v
 	}
-	if len(roles) > 0 {
-		append(&fields, json_string_array_field("roles", roles[:]))
-	}
+	body.roles = roles
 	if has_flag(args, "--bridge") || has_flag(args, "--bridge-id") {
-		append(&fields, json_kv("bridge_id", option_value(args, "--bridge", option_value(args, "--bridge-id", ""))))
+		body.bridge_id = option_value(args, "--bridge", option_value(args, "--bridge-id", ""))
 	}
-	if has_flag(args, "--provider") {
-		append(&fields, json_kv("provider", option_value(args, "--provider", "")))
-	}
-	if has_flag(args, "--model") {
-		append(&fields, json_kv("model", option_value(args, "--model", "")))
-	}
+	if has_flag(args, "--provider") do body.provider = option_value(args, "--provider", "")
+	if has_flag(args, "--model") do body.model = option_value(args, "--model", "")
 	bm_raw := bridge_models_file_json
 	if bm_raw == "" {
 		bm_raw = strings.trim_space(option_value(args, "--bridge-models", ""))
 	}
 	if bm_raw != "" {
-		if _, perr := json.parse(transmute([]byte)bm_raw, json.DEFAULT_SPECIFICATION, false, context.temp_allocator); perr != nil {
-			return "", false
-		}
-		append(&fields, json_kv_raw("bridge_models", bm_raw))
+		bm, bm_ok := ctl_parse_json_document(bm_raw)
+		if !bm_ok do return {}, false
+		body.bridge_models = bm
 	}
-	return json_object_from_slice(fields[:]), true
+	return body, true
 }
 
 // ---- task fetch ------------------------------------------------------------------
@@ -896,38 +918,33 @@ print_help_verify :: proc() {
 
 // ---- workflow (M3b) --------------------------------------------------------------
 
-ctl_v2_workflow_define_params :: proc(args: []string, file_text: string) -> (string, bool) {
-	trimmed := strings.trim_space(file_text)
-	if trimmed == "" || trimmed[0] != '{' do return "", false
-	parsed, perr := json.parse(transmute([]byte)trimmed, json.DEFAULT_SPECIFICATION, false, context.temp_allocator)
-	if perr != nil do return "", false
-	_, is_obj := parsed.(json.Object)
-	if !is_obj do return "", false
-
-	fields := make([dynamic]string)
-	defer delete(fields)
-	if name := strings.trim_space(option_value(args, "--name", "")); name != "" {
-		append(&fields, json_kv("name", name))
-	}
-	append(&fields, json_kv_raw("definition", trimmed))
-	return json_object_from_slice(fields[:]), true
+// Ctl_Workflow_Define_Body: POST /api/v1/workflows/definitions and the
+// agent.workflow.define params; definition is the --file document.
+Ctl_Workflow_Define_Body :: struct {
+	name:       string     `json:"name,omitempty"`,
+	definition: json.Value `json:"definition"`,
 }
 
-ctl_v2_workflow_inputs_json :: proc(args: []string, inputs_file_text := "") -> (string, bool) {
-	Ordered_KV :: struct {
-		key:   string,
-		field: string,
-	}
-	entries := make([dynamic]Ordered_KV, context.temp_allocator)
-	upsert :: proc(list: ^[dynamic]Ordered_KV, k, field_str: string) {
-		for &e in list^ {
-			if e.key == k {
-				e.field = field_str
-				return
-			}
-		}
-		append(list, Ordered_KV{key = k, field = field_str})
-	}
+ctl_v2_workflow_define_body :: proc(args: []string, file_text: string) -> (Ctl_Workflow_Define_Body, bool) {
+	trimmed := strings.trim_space(file_text)
+	if trimmed == "" || trimmed[0] != '{' do return {}, false
+	parsed, ok := ctl_parse_json_document(trimmed)
+	if !ok do return {}, false
+	if _, is_obj := parsed.(json.Object); !is_obj do return {}, false
+	return Ctl_Workflow_Define_Body{name = strings.trim_space(option_value(args, "--name", "")), definition = parsed}, true
+}
+
+ctl_v2_workflow_define_params :: proc(args: []string, file_text: string) -> (string, bool) {
+	body, ok := ctl_v2_workflow_define_body(args, file_text)
+	if !ok do return "", false
+	return ctl_json_text(body), true
+}
+
+// ctl_v2_workflow_inputs_value merges the --inputs-file (or a JSON --inputs)
+// object with repeated --input k=v (a flag wins over the file's key). nil when
+// there are no inputs; ok=false on a malformed value. Temp-allocated.
+ctl_v2_workflow_inputs_value :: proc(args: []string, inputs_file_text := "") -> (json.Value, bool) {
+	inputs := make(json.Object, allocator = context.temp_allocator)
 
 	base_json := strings.trim_space(inputs_file_text)
 	if base_json == "" {
@@ -937,16 +954,12 @@ ctl_v2_workflow_inputs_json :: proc(args: []string, inputs_file_text := "") -> (
 		}
 	}
 	if base_json != "" {
-		if !strings.has_prefix(base_json, "{") do return "", false
-		parsed, perr := json.parse(transmute([]byte)base_json, json.DEFAULT_SPECIFICATION, false, context.temp_allocator)
-		if perr != nil do return "", false
+		if !strings.has_prefix(base_json, "{") do return nil, false
+		parsed, perr := json.parse(transmute([]byte)base_json, json.DEFAULT_SPECIFICATION, true, context.temp_allocator)
+		if perr != nil do return nil, false
 		obj, is_obj := parsed.(json.Object)
-		if !is_obj do return "", false
-		for k, v in obj {
-			if mb, merr := json.marshal(v, allocator = context.temp_allocator); merr == nil {
-				upsert(&entries, k, json_kv_raw(k, string(mb)))
-			}
-		}
+		if !is_obj do return nil, false
+		for k, v in obj do inputs[k] = v
 	}
 
 	kv_flags := ctl_collect_repeated(args, "--input", "--inputs")
@@ -955,82 +968,137 @@ ctl_v2_workflow_inputs_json :: proc(args: []string, inputs_file_text := "") -> (
 		trimmed := strings.trim_space(item)
 		if trimmed == "" || strings.has_prefix(trimmed, "{") do continue
 		eq := strings.index_byte(trimmed, '=')
-		if eq <= 0 do return "", false
+		if eq <= 0 do return nil, false
 		k := strings.trim_space(trimmed[:eq])
 		v := trimmed[eq + 1:]
-		if k == "" do return "", false
-		upsert(&entries, k, json_kv(k, v))
+		if k == "" do return nil, false
+		inputs[k] = json.String(v)
 	}
 
-	if len(entries) == 0 do return "", true
-	fields := make([dynamic]string, 0, len(entries), context.temp_allocator)
-	for e in entries {
-		append(&fields, e.field)
-	}
-	return json_object_from_slice(fields[:]), true
+	if len(inputs) == 0 do return nil, true
+	return inputs, true
+}
+
+// Ctl_Workflow_Run_Body: POST /api/v1/task-chains/<id>/workflow-runs and the
+// agent.workflow.run params.
+Ctl_Workflow_Run_Body :: struct {
+	ref:           string         `json:"ref"`,
+	request_id:    string         `json:"request_id"`,
+	inputs:        json.Value     `json:"inputs"`,
+	chain_id:      string         `json:"chain_id,omitempty"`,
+	title:         string         `json:"title,omitempty"`,
+	prerequisites: []Ctl_Work_Ref `json:"prerequisites"`,
 }
 
 // Run identity is distinct from its containing chain. Creation requires a caller
 // request key so a network retry can never silently create duplicate work.
+ctl_v2_workflow_run_body :: proc(tokens, args: []string, inputs_file_text := "", def_file_text := "") -> (body: Ctl_Workflow_Run_Body, ok: bool) {
+	ref := strings.trim_space(option_value(args, "--ref", pos(tokens, 1)))
+	request_id := strings.trim_space(option_value(args, "--request-id", ""))
+	if ref == "" || request_id == "" || def_file_text != "" do return {}, false
+	for flag in ([?]string{"--file", "--template", "--workflow", "--name", "--project", "--bridge", "--coordinator", "--description"}) { if has_flag(args, flag) do return {}, false }
+	inputs, iok := ctl_v2_workflow_inputs_value(args, inputs_file_text)
+	if !iok do return {}, false
+	if inputs == nil do inputs = make(json.Object, allocator = context.temp_allocator)
+	body = Ctl_Workflow_Run_Body{
+		ref        = ref,
+		request_id = request_id,
+		inputs     = inputs,
+		chain_id   = option_value(args, "--chain", ""),
+		title      = option_value(args, "--title", ""),
+	}
+	prerequisites := ctl_collect_repeated(args, "--after")
+	defer delete(prerequisites)
+	refs := make([dynamic]Ctl_Work_Ref, 0, len(prerequisites), context.temp_allocator)
+	for item in prerequisites {
+		work_ref, valid := ctl_work_ref(item)
+		if !valid do return {}, false
+		append(&refs, work_ref)
+	}
+	body.prerequisites = refs[:]
+	return body, true
+}
+
 ctl_v2_workflow_run_params :: proc(tokens, args: []string, inputs_file_text := "", def_file_text := "") -> (string, bool) {
- ref := strings.trim_space(option_value(args, "--ref", pos(tokens, 1)))
- request_id := strings.trim_space(option_value(args, "--request-id", ""))
- if ref == "" || request_id == "" || def_file_text != "" do return "", false
- for flag in ([?]string{"--file", "--template", "--workflow", "--name", "--project", "--bridge", "--coordinator", "--description"}) { if has_flag(args, flag) do return "", false }
- inputs, ok := ctl_v2_workflow_inputs_json(args, inputs_file_text)
- if !ok do return "", false
- if inputs == "" do inputs = "{}"
- fields := make([dynamic]string, context.temp_allocator)
- append(&fields, json_kv("ref", ref), json_kv("request_id", request_id), json_kv_raw("inputs", inputs))
- if cid := option_value(args, "--chain", ""); cid != "" do append(&fields, json_kv("chain_id", cid))
- if title := option_value(args, "--title", ""); title != "" do append(&fields, json_kv("title", title))
- prerequisites := ctl_collect_repeated(args, "--after")
- defer delete(prerequisites)
- refs := make([dynamic]string, context.temp_allocator)
- for item in prerequisites {
-  ref_json, valid := ctl_work_ref_json(item)
-  if !valid do return "", false
-  append(&refs, ref_json)
- }
- append(&fields, json_kv_raw("prerequisites", fmt.tprintf("[%s]", strings.join(refs[:], ",", context.temp_allocator))))
- return json_object_from_slice(fields[:]), true
+	body, ok := ctl_v2_workflow_run_body(tokens, args, inputs_file_text, def_file_text)
+	if !ok do return "", false
+	return ctl_json_text(body), true
+}
+
+// Ctl_Workflow_Status_Params: agent.workflow.status/history/output params.
+Ctl_Workflow_Status_Params :: struct {
+	run_id:       string     `json:"run_id"`,
+	execution_no: Maybe(i64) `json:"execution_no,omitempty"`,
+	stage_key:    string     `json:"stage_key,omitempty"`,
+}
+
+ctl_v2_workflow_status_value :: proc(tokens, args: []string) -> (value: Ctl_Workflow_Status_Params, ok: bool) {
+	value.run_id = strings.trim_space(option_value(args, "--run", pos(tokens, 1)))
+	if no := option_value(args, "--execution", ""); no != "" {
+		n, parsed := strconv.parse_i64(no)
+		if !parsed || n <= 0 do return {}, false
+		value.execution_no = n
+	}
+	return value, true
 }
 
 ctl_v2_workflow_status_params :: proc(tokens, args: []string) -> (run_id, params: string) {
- id := strings.trim_space(option_value(args, "--run", pos(tokens, 1)))
- fields := make([dynamic]string, context.temp_allocator)
- append(&fields, json_kv("run_id", id))
- if no := option_value(args, "--execution", ""); no != "" {
-  n, parsed := strconv.parse_int(no)
-  if !parsed || n <= 0 do return "", "{}"
-  append(&fields, json_kv_raw("execution_no", no))
- }
- return id, json_object_from_slice(fields[:])
+	value, ok := ctl_v2_workflow_status_value(tokens, args)
+	if !ok do return "", "{}"
+	return value.run_id, ctl_json_text(value)
 }
 
 ctl_v2_workflow_output_params :: proc(tokens, args: []string) -> (run_id, stage_key, params: string, ok: bool) {
- id, base := ctl_v2_workflow_status_params(tokens, args)
- stage := option_value(args, "--stage", pos(tokens, 2))
- if id == "" || stage == "" do return "", "", "", false
- return id, stage, strings.concatenate({base[:len(base)-1], ",", json_kv("stage_key", stage), "}"}), true
+	value, vok := ctl_v2_workflow_status_value(tokens, args)
+	stage := option_value(args, "--stage", pos(tokens, 2))
+	if !vok || value.run_id == "" || stage == "" do return "", "", "", false
+	value.stage_key = stage
+	return value.run_id, stage, ctl_json_text(value), true
+}
+
+// Ctl_Workflow_Retry_Body: POST /api/v1/workflow-runs/<id>/retry and the
+// agent.workflow.retry params.
+Ctl_Workflow_Retry_Body :: struct {
+	run_id:            string `json:"run_id"`,
+	reason:            string `json:"reason"`,
+	expected_revision: i64    `json:"expected_revision"`,
+}
+
+ctl_v2_workflow_retry_body :: proc(tokens, args: []string) -> (Ctl_Workflow_Retry_Body, bool) {
+	id := strings.trim_space(option_value(args, "--run", pos(tokens, 1)))
+	reason := strings.trim_space(option_value(args, "--reason", ""))
+	revision := option_value(args, "--expected-revision", "")
+	n, parsed := strconv.parse_i64(revision)
+	for flag in ([?]string{"--stage", "--task", "--task-id", "--cascade", "--chain", "--execution"}) { if has_flag(args, flag) do return {}, false }
+	if id == "" || reason == "" || !parsed || n <= 0 || pos(tokens, 2) != "" do return {}, false
+	return Ctl_Workflow_Retry_Body{run_id = id, reason = reason, expected_revision = n}, true
 }
 
 ctl_v2_workflow_retry_params :: proc(tokens, args: []string) -> (run_id, target, params: string, ok: bool) {
- id := strings.trim_space(option_value(args, "--run", pos(tokens, 1)))
- reason := strings.trim_space(option_value(args, "--reason", ""))
- revision := option_value(args, "--expected-revision", "")
- n, parsed := strconv.parse_int(revision)
- for flag in ([?]string{"--stage", "--task", "--task-id", "--cascade", "--chain", "--execution"}) { if has_flag(args, flag) do return "", "", "", false }
- if id == "" || reason == "" || !parsed || n <= 0 || pos(tokens, 2) != "" do return "", "", "", false
- return id, "", json_object(json_kv("run_id", id), json_kv("reason", reason), json_kv_raw("expected_revision", revision)), true
+	body, bok := ctl_v2_workflow_retry_body(tokens, args)
+	if !bok do return "", "", "", false
+	return body.run_id, "", ctl_json_text(body), true
+}
+
+// Ctl_Workflow_Cancel_Body: POST /api/v1/workflow-runs/<id>/cancel and the
+// agent.workflow.cancel params.
+Ctl_Workflow_Cancel_Body :: struct {
+	run_id:       string `json:"run_id"`,
+	reason:       string `json:"reason"`,
+	execution_no: i64    `json:"execution_no"`,
+}
+
+ctl_v2_workflow_cancel_body :: proc(tokens, args: []string) -> (Ctl_Workflow_Cancel_Body, bool) {
+	id := strings.trim_space(option_value(args, "--run", pos(tokens, 1)))
+	n, valid := strconv.parse_i64(option_value(args, "--execution", "0"))
+	if !valid || n <= 0 do return {}, false
+	return Ctl_Workflow_Cancel_Body{run_id = id, reason = option_value(args, "--reason", ""), execution_no = n}, true
 }
 
 ctl_v2_workflow_cancel_params :: proc(tokens, args: []string) -> (run_id, params: string) {
- id := strings.trim_space(option_value(args, "--run", pos(tokens, 1)))
- generation := option_value(args, "--execution", "0")
- n, valid := strconv.parse_int(generation)
- if !valid || n <= 0 do return "", "{}"
- return id, json_object(json_kv("run_id", id), json_kv("reason", option_value(args, "--reason", "")), json_kv_raw("execution_no", generation))
+	body, ok := ctl_v2_workflow_cancel_body(tokens, args)
+	if !ok do return "", "{}"
+	return body.run_id, ctl_json_text(body)
 }
 
 ctl_v2_workflow :: proc(endpoint, token: string, tokens, args: []string) {
@@ -1123,15 +1191,15 @@ ctl_workflow_user_mode :: proc(cmd, args: []string) {
 	}
 	switch verb {
 	case "", "templates":
-		ctl_tasks_request_and_decrypt(transport, "GET", "/api/v1/workflows/templates", "", args)
+		ctl_tasks_request_and_decrypt(transport, {method = .GET, path = ctl_api("workflows", "templates")}, args)
 	case "list":
         cid := option_value(args, "--chain", "")
         if cid == "" { fmt.println(`{"ok":false,"message":"workflow list requires --chain"}`); os.exit(1) }
-        ctl_tasks_request_and_decrypt(transport, "GET", fmt.tprintf("/api/v1/task-chains/%s/workflow-runs", safe_path_part(cid)), "", args)
+        ctl_tasks_request_and_decrypt(transport, {method = .GET, path = ctl_api("task-chains", cid, "workflow-runs")}, args)
     case "history":
         id, _ := ctl_v2_workflow_status_params(tokens, args)
         if id == "" { fmt.println(`{"ok":false,"message":"workflow history requires a run ID"}`); os.exit(1) }
-        ctl_tasks_request_and_decrypt(transport, "GET", fmt.tprintf("/api/v1/workflow-runs/%s/executions", safe_path_part(id)), "", args)
+        ctl_tasks_request_and_decrypt(transport, {method = .GET, path = ctl_api("workflow-runs", id, "executions")}, args)
     case "define":
         file_text := ""
 		path := option_value(args, "--file", pos(tokens, 1))
@@ -1146,53 +1214,53 @@ ctl_workflow_user_mode :: proc(cmd, args: []string) {
 				file_text = string(data)
 			}
 		}
-		params, ok := ctl_v2_workflow_define_params(args, file_text)
+		body, ok := ctl_v2_workflow_define_body(args, file_text)
 		if !ok {
 			fmt.println(`{"ok":false,"message":"workflow define requires --file <def.json> (or --stdin)"}`)
 			os.exit(1)
 		}
-		ctl_tasks_request_and_decrypt(transport, "POST", "/api/v1/workflows/definitions", params, args)
+		ctl_tasks_request_and_decrypt(transport, {method = .POST, path = ctl_api("workflows", "definitions"), body = httpc.json_body(body)}, args)
 	case "run":
 		in_text, _ := ctl_read_json_file_flag(args, "--inputs-file")
 		def_text, _ := ctl_read_json_file_flag(args, "--file")
-		params, ok := ctl_v2_workflow_run_params(tokens, args, in_text, def_text)
+		body, ok := ctl_v2_workflow_run_body(tokens, args, in_text, def_text)
 		if !ok {
 			fmt.println(`{"ok":false,"message":"workflow run requires <ref> --request-id <key> [--chain <id>] [--input k=v] [--after task:<id>|workflow_run:<id>]"}`)
 			os.exit(1)
 		}
 		cid := option_value(args, "--chain", "")
         if cid == "" { fmt.println(`{"ok":false,"message":"workflow run in user mode requires --chain"}`); os.exit(1) }
-        ctl_tasks_request_and_decrypt(transport, "POST", fmt.tprintf("/api/v1/task-chains/%s/workflow-runs", safe_path_part(cid)), params, args)
+        ctl_tasks_request_and_decrypt(transport, {method = .POST, path = ctl_api("task-chains", cid, "workflow-runs"), body = httpc.json_body(body)}, args)
 	case "status":
 		cid, _ := ctl_v2_workflow_status_params(tokens, args)
 		if cid == "" {
 			fmt.println(`{"ok":false,"message":"workflow status requires <run_id>"}`)
 			os.exit(1)
 		}
-		ctl_tasks_request_and_decrypt(transport, "GET", fmt.tprintf("/api/v1/workflow-runs/%s?execution_no=%s", safe_path_part(cid), query_escape(option_value(args, "--execution", "0"))), "", args)
+		query := []httpc.Query_Param{{"execution_no", option_value(args, "--execution", "0")}}
+		ctl_tasks_request_and_decrypt(transport, {method = .GET, path = ctl_api("workflow-runs", cid), query = query}, args)
 	case "output":
 		cid, stage, _, ok := ctl_v2_workflow_output_params(tokens, args)
 		if !ok || cid == "" {
 			fmt.println(`{"ok":false,"message":"workflow output requires <run_id> <stage_key>"}`)
 			os.exit(1)
 		}
-		ctl_tasks_request_and_decrypt(transport, "GET", fmt.tprintf("/api/v1/workflow-runs/%s/output?stage_key=%s&execution_no=%s", safe_path_part(cid), query_escape(stage), query_escape(option_value(args, "--execution", "0"))), "", args)
+		query := []httpc.Query_Param{{"stage_key", stage}, {"execution_no", option_value(args, "--execution", "0")}}
+		ctl_tasks_request_and_decrypt(transport, {method = .GET, path = ctl_api("workflow-runs", cid, "output"), query = query}, args)
 	case "retry":
-		cid, _, params, ok := ctl_v2_workflow_retry_params(tokens, args)
-		if !ok || cid == "" {
+		body, ok := ctl_v2_workflow_retry_body(tokens, args)
+		if !ok || body.run_id == "" {
 			fmt.println(`{"ok":false,"message":"workflow retry requires <run_id> --expected-revision <n> --reason <text>"}`)
 			os.exit(1)
 		}
-		defer delete(params)
-		ctl_tasks_request_and_decrypt(transport, "POST", fmt.tprintf("/api/v1/workflow-runs/%s/retry", safe_path_part(cid)), params, args)
+		ctl_tasks_request_and_decrypt(transport, {method = .POST, path = ctl_api("workflow-runs", body.run_id, "retry"), body = httpc.json_body(body)}, args)
 	case "cancel":
-		cid, params := ctl_v2_workflow_cancel_params(tokens, args)
-		defer delete(params)
-		if cid == "" {
+		body, _ := ctl_v2_workflow_cancel_body(tokens, args)
+		if body.run_id == "" {
 			fmt.println(`{"ok":false,"message":"workflow cancel requires <run_id> --execution <number>"}`)
 			os.exit(1)
 		}
-		ctl_tasks_request_and_decrypt(transport, "POST", fmt.tprintf("/api/v1/workflow-runs/%s/cancel", safe_path_part(cid)), params, args)
+		ctl_tasks_request_and_decrypt(transport, {method = .POST, path = ctl_api("workflow-runs", body.run_id, "cancel"), body = httpc.json_body(body)}, args)
 	case:
 		print_help_workflow()
 	}

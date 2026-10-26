@@ -11,6 +11,7 @@ import "core:strings"
 import "core:time"
 import local_socket "odin_test:lib/local_socket"
 import vault "odin_test:lib/vault"
+import httpc "odin_test:lib/httpc"
 
 // ── agent mode: local Bridge endpoint client (RTE2E-7) ───────────────────────
 // Agent mode talks ONLY to the local Bridge endpoint over JSONL v1 using the
@@ -318,15 +319,8 @@ ctl_v2_task_chain :: proc(endpoint, token: string, tokens, args: []string) {
 			fmt.println(`{"ok":false,"message":"task-chain decide requires --chain <id> --decision approve|reject [--reason <text>]"}`)
 			os.exit(1)
 		}
-		fields := make([dynamic]string)
-		defer delete(fields)
-		append(&fields, json_kv("decision", decision))
-		if r := option_value(args, "--reason", ""); r != "" do append(&fields, json_kv("reason", r))
-		params := json_object(
-			json_kv("http_method", "POST"),
-			json_kv("path", fmt.tprintf("/api/v1/task-chains/%s/proposal/decide", safe_path_part(cid))),
-			json_kv("body", json_object_from_slice(fields[:])),
-		)
+		body := Ctl_Proposal_Decide_Body{decision = decision, reason = option_value(args, "--reason", "")}
+		params := ctl_agent_rest_params_or_exit({method = .POST, path = ctl_api("task-chains", cid, "proposal", "decide"), body = httpc.json_body(body)})
 		ctl_agent_call_task(endpoint, token, "agent.rest.request", params, args)
 	case "graph", "depend", "remove-dependency", "scope", "complete":
 		// Mixed-work graph verbs: same parser as user mode, relayed through the
@@ -356,13 +350,7 @@ ctl_v2_task_chain_fleet :: proc(endpoint, token: string, tokens, args: []string)
 			fmt.println("usage: ham-ctl task-chain fleet list <chain-id>")
 			return
 		}
-		path := fmt.tprintf("/api/v1/task-chains/%s/fleets", safe_path_part(chain_id))
-		params := json_object(
-			json_kv("http_method", "GET"),
-			json_kv("path", path),
-			json_kv("body", ""),
-		)
-		ctl_agent_call(endpoint, token, "agent.rest.request", params)
+		ctl_agent_rest(endpoint, token, {method = .GET, path = ctl_api("task-chains", chain_id, "fleets")})
 		return
 	}
 	if sub == "pause" || sub == "resume" {
@@ -377,12 +365,7 @@ ctl_v2_task_chain_fleet :: proc(endpoint, token: string, tokens, args: []string)
 			fmt.printfln("usage: ham-ctl task-chain fleet %s [<chain-id>] --agent <agent_id> [--roles <worker,reviewer>]", sub)
 			return
 		}
-		params := json_object(
-			json_kv("http_method", "POST"),
-			json_kv("path", fmt.tprintf("/api/v1/task-chains/%s/fleets/%s/%s", safe_path_part(chain_id), safe_path_part(agent_id), sub)),
-			json_kv("body", ctl_v2_fleet_pause_body(args)),
-		)
-		ctl_agent_call(endpoint, token, "agent.rest.request", params)
+		ctl_agent_rest(endpoint, token, {method = .POST, path = ctl_api("task-chains", chain_id, "fleets", agent_id, sub), body = httpc.json_body(ctl_v2_fleet_pause_body(args))})
 		return
 	}
 	if sub == "set" {
@@ -401,24 +384,12 @@ ctl_v2_task_chain_fleet :: proc(endpoint, token: string, tokens, args: []string)
 			fmt.println("usage: ham-ctl task-chain fleet set <chain-id> --agent <agent_id> --capacity <N> [--roles <worker,reviewer>] [--bridge <id>] [--provider <p>] [--model <m>] [--bridge-models <json>]")
 			return
 		}
-		path := fmt.tprintf("/api/v1/task-chains/%s/fleets/%s", safe_path_part(chain_id), safe_path_part(agent_id))
-		params := json_object(
-			json_kv("http_method", "PUT"),
-			json_kv("path", path),
-			json_kv("body", body),
-		)
-		ctl_agent_call(endpoint, token, "agent.rest.request", params)
+		ctl_agent_rest(endpoint, token, {method = .PUT, path = ctl_api("task-chains", chain_id, "fleets", agent_id), body = httpc.json_body(body)})
 		return
 	}
 	// Fallback: if sub is a chain_id
 	chain_id := sub
-	path := fmt.tprintf("/api/v1/task-chains/%s/fleets", safe_path_part(chain_id))
-	params := json_object(
-		json_kv("http_method", "GET"),
-		json_kv("path", path),
-		json_kv("body", ""),
-	)
-	ctl_agent_call(endpoint, token, "agent.rest.request", params)
+	ctl_agent_rest(endpoint, token, {method = .GET, path = ctl_api("task-chains", chain_id, "fleets")})
 }
 
 // ---- task (one command per action) --------------------------------------
@@ -613,6 +584,14 @@ ctl_v2_reviewers_field :: proc(args: []string) -> string {
 	ids := collect_multi_values(args, "--reviewer", "--reviewer-agent-id")
 	defer delete(ids)
 	return json_string_array_field("reviewers", ids[:])
+}
+
+// ctl_v2_reviewers is the reviewers list of ctl_v2_reviewers_field for a hub
+// request body (temp-allocated; empty, not nil-equivalent, for `--reviewer ""`).
+ctl_v2_reviewers :: proc(args: []string) -> []string {
+	ids := ctl_multi_values(args, "--reviewer", "--reviewer-agent-id")
+	if ids == nil do return make([]string, 0, context.temp_allocator)
+	return ids
 }
 
 // ctl_task_actor_id_is_instance reports whether a --assignee/--reviewer value is a

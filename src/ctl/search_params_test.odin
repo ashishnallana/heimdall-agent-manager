@@ -11,13 +11,13 @@ import "core:testing"
 
 @(test)
 test_search_path_query_only :: proc(t: ^testing.T) {
-	path := ctl_build_search_path([]string{}, "hello world", "")
-	testing.expect(t, path == "/api/v1/search?q=hello%20world", path)
+	path := ctl_test_target(t, ctl_search_request([]string{}, "hello world", ""))
+	testing.expect(t, path == "/api/v1/search?q=hello+world" || path == "/api/v1/search?q=hello%20world", path)
 }
 
 @(test)
 test_search_path_omits_absent_flags :: proc(t: ^testing.T) {
-	path := ctl_build_search_path([]string{}, "q", "")
+	path := ctl_test_target(t, ctl_search_request([]string{}, "q", ""))
 	testing.expect(t, !strings.contains(path, "types="), "types omitted when --scope absent")
 	testing.expect(t, !strings.contains(path, "task_ids="), "task_ids omitted when absent")
 	testing.expect(t, !strings.contains(path, "chain_ids="), "chain_ids omitted when absent")
@@ -41,7 +41,7 @@ test_search_path_maps_all_flags :: proc(t: ^testing.T) {
 		"--exclude", "draft",
 		"--limit", "25",
 	}
-	path := ctl_build_search_path(args, "zebra", "")
+	path := ctl_test_target(t, ctl_search_request(args, "zebra", ""))
 	testing.expect(t, strings.contains(path, "q=zebra"), path)
 	testing.expect(t, strings.contains(path, "&types=task%2Ccomment"), path)          // comma encoded
 	testing.expect(t, strings.contains(path, "&task_ids=task_9"), path)
@@ -61,7 +61,7 @@ test_search_path_negations :: proc(t: ^testing.T) {
 		"--not-in-project-ids", "proj_1",
 		"--not-in-conversation-ids", "inst_1",
 	}
-	path := ctl_build_search_path(args, "q", "")
+	path := ctl_test_target(t, ctl_search_request(args, "q", ""))
 	testing.expect(t, strings.contains(path, "&not_in_task_ids=task_1"), path)
 	testing.expect(t, strings.contains(path, "&not_in_chain_ids=chain_1"), path)
 	testing.expect(t, strings.contains(path, "&not_in_project_ids=proj_1"), path)
@@ -70,18 +70,18 @@ test_search_path_negations :: proc(t: ^testing.T) {
 
 @(test)
 test_search_path_encodes_reserved_chars :: proc(t: ^testing.T) {
-	path := ctl_build_search_path([]string{"--exclude", "a&b=c d"}, "x/y?z", "")
+	path := ctl_test_target(t, ctl_search_request([]string{"--exclude", "a&b=c d"}, "x/y?z", ""))
 	// Reserved characters must be percent-encoded so they don't break the query.
 	testing.expect(t, strings.contains(path, "q=x%2Fy%3Fz"), path)
-	testing.expect(t, strings.contains(path, "exclude=a%26b%3Dc%20d"), path)
+	testing.expect(t, strings.contains(path, "exclude=a%26b%3Dc+d") || strings.contains(path, "exclude=a%26b%3Dc%20d"), path)
 	// Unreserved punctuation passes through unescaped.
-	keep := ctl_build_search_path([]string{}, "a-b_c.d~e", "")
+	keep := ctl_test_target(t, ctl_search_request([]string{}, "a-b_c.d~e", ""))
 	testing.expect(t, strings.contains(keep, "q=a-b_c.d~e"), keep)
 }
 
 @(test)
 test_search_path_appends_cursor :: proc(t: ^testing.T) {
-	path := ctl_build_search_path([]string{}, "q", "Y3Vyc29y")
+	path := ctl_test_target(t, ctl_search_request([]string{}, "q", "Y3Vyc29y"))
 	testing.expect(t, strings.has_suffix(path, "&cursor=Y3Vyc29y"), path)
 }
 

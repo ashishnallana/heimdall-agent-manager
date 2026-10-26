@@ -4,7 +4,7 @@ import "core:fmt"
 import "core:os"
 import "core:strings"
 import json "core:encoding/json"
-import http "odin_test:lib/http_client"
+import httpc "odin_test:lib/httpc"
 
 // ham-ctl search <query> [--scope csv] [typed id filters] [--exclude text] [--limit n] [--json]
 //
@@ -222,12 +222,11 @@ ctl_search_command :: proc(cmd: []string, args: []string) {
 	}
 	base := hub_user_mode_url(args)
 	if base == "" do base = "http://127.0.0.1:49328"
-	base = strings.trim_right(base, "/")
-	token := hub_user_mode_token(args)
+	hub := ctl_hub_make(strings.trim_right(base, "/"), hub_user_mode_token(args))
 
 	// --json: single request, print the structured envelope verbatim.
 	if has_flag(args, "--json") {
-		body, ok := ctl_search_fetch(base, token, ctl_build_search_path(args, query, ""))
+		body, _, ok := ctl_hub_fetch(hub, ctl_search_request(args, query, ""))
 		if !ok { fmt.println(`{"ok":false,"message":"Hub request failed"}`); os.exit(1) }
 		fmt.println(body)
 		return
@@ -246,7 +245,7 @@ ctl_search_command :: proc(cmd: []string, args: []string) {
 	cursor := ""
 	defer if cursor != "" do delete(cursor)
 	for _ in 0..<SEARCH_MAX_PAGES {
-		body, ok := ctl_search_fetch(base, token, ctl_build_search_path(args, query, cursor))
+		body, _, ok := ctl_hub_fetch(hub, ctl_search_request(args, query, cursor))
 		if !ok { fmt.println("search request failed"); os.exit(1) }
 		next, perr := ctl_search_collect(body, &rows)
 		if perr {
@@ -261,41 +260,25 @@ ctl_search_command :: proc(cmd: []string, args: []string) {
 	ctl_print_search_rows(rows[:], query)
 }
 
-// ctl_build_search_path is the pure param-builder (unit-tested). It percent-
-// encodes each value and omits any flag the caller didn't provide.
-ctl_build_search_path :: proc(args: []string, query, cursor: string) -> string {
-	b := strings.builder_make()
-	strings.write_string(&b, "/api/v1/search?q=")
-	write_query_escaped(&b, strings.trim_space(query))
-	append_search_param(&b, "types", option_value(args, "--scope", ""))
-	append_search_param(&b, "task_ids", option_value(args, "--task-ids", ""))
-	append_search_param(&b, "chain_ids", option_value(args, "--chain-ids", ""))
-	append_search_param(&b, "project_ids", option_value(args, "--project-ids", ""))
-	append_search_param(&b, "conversation_ids", option_value(args, "--conversation-ids", ""))
-	append_search_param(&b, "not_in_task_ids", option_value(args, "--not-in-task-ids", ""))
-	append_search_param(&b, "not_in_chain_ids", option_value(args, "--not-in-chain-ids", ""))
-	append_search_param(&b, "not_in_project_ids", option_value(args, "--not-in-project-ids", ""))
-	append_search_param(&b, "not_in_conversation_ids", option_value(args, "--not-in-conversation-ids", ""))
-	append_search_param(&b, "exclude", option_value(args, "--exclude", ""))
-	append_search_param(&b, "limit", option_value(args, "--limit", ""))
-	append_search_param(&b, "cursor", cursor)
-	return strings.to_string(b)
-}
-
-append_search_param :: proc(b: ^strings.Builder, key, value: string) {
-	if value == "" do return
-	strings.write_byte(b, '&')
-	strings.write_string(b, key)
-	strings.write_byte(b, '=')
-	write_query_escaped(b, value)
-}
-
-ctl_search_fetch :: proc(base, token, path: string) -> (string, bool) {
-	full_path := hub_url_path_prefix_join(base, path)
-	headers := [?]http.Header{{name = "Authorization", value = strings.concatenate({"Bearer ", token})}}
-	response, ok := http.request_with_headers_timeout("GET", base, full_path, "", headers[:], http.DEFAULT_TIMEOUT_MS)
-	if !ok do return "", false
-	return response.body, true
+// ctl_search_request is the pure request builder (unit-tested): GET
+// /api/v1/search with each flag mapped to its query param, omitting any flag
+// the caller didn't provide. httpc percent-encodes the values.
+ctl_search_request :: proc(args: []string, query, cursor: string) -> Ctl_Request {
+	q := ctl_query_make()
+	append(&q, httpc.Query_Param{"q", strings.trim_space(query)})
+	ctl_query_add(&q, "types", option_value(args, "--scope", ""))
+	ctl_query_add(&q, "task_ids", option_value(args, "--task-ids", ""))
+	ctl_query_add(&q, "chain_ids", option_value(args, "--chain-ids", ""))
+	ctl_query_add(&q, "project_ids", option_value(args, "--project-ids", ""))
+	ctl_query_add(&q, "conversation_ids", option_value(args, "--conversation-ids", ""))
+	ctl_query_add(&q, "not_in_task_ids", option_value(args, "--not-in-task-ids", ""))
+	ctl_query_add(&q, "not_in_chain_ids", option_value(args, "--not-in-chain-ids", ""))
+	ctl_query_add(&q, "not_in_project_ids", option_value(args, "--not-in-project-ids", ""))
+	ctl_query_add(&q, "not_in_conversation_ids", option_value(args, "--not-in-conversation-ids", ""))
+	ctl_query_add(&q, "exclude", option_value(args, "--exclude", ""))
+	ctl_query_add(&q, "limit", option_value(args, "--limit", ""))
+	ctl_query_add(&q, "cursor", cursor)
+	return {method = .GET, path = ctl_api("search"), query = q[:]}
 }
 
 // ctl_search_collect parses one page envelope, appends its hits to rows, and

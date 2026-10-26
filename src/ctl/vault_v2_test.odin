@@ -168,11 +168,12 @@ unseal_out :: proc(s: string) -> string {
 
 @(test)
 test_ctl_shell_enc_spec_is_bound_to_bridge_session_kind_boot :: proc(t: ^testing.T) {
-	fields := make([dynamic]string, context.temp_allocator)
+	create := Ctl_Shell_Create_Body{kind = "server"}
 	args := with_kr([]string{"--bridge-boot-id", "00112233aabbccdd"})
-	ctl_shell_attach_enc_spec("", "", "brg_n1", "server", args, "npm start", "/w", &fields)
-	body := json_object_from_slice(fields[:])
+	ctl_shell_attach_enc_spec("", "", "brg_n1", "server", args, "npm start", "/w", &create)
+	body := ctl_json_text(create)
 	defer delete(body)
+	testing.expect(t, !strings.contains(body, "npm start") && !strings.contains(body, `"/w"`), "cmd/cwd only inside the sealed enc_spec")
 	session_id := jsonx.extract_string(body, "session_id", "", true, context.temp_allocator)
 	testing.expect(t, len(session_id) == 35 && strings.has_prefix(session_id, "sh_"), session_id)
 	kr := tkr(CTL_TEST_WRITE_KEY)
