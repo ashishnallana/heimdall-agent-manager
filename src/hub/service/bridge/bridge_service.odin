@@ -143,11 +143,10 @@ bridge_owner_user_id :: proc(service: ^Bridge_Service, bridge_id: string) -> str
 // periodic sweep, which acts for no user.
 //
 // WHY last_seen_at IS THE RIGHT CLOCK, and it is not obvious from the column name.
-// It is refreshed on EVERY heartbeat, ~45s: the bridge writes "capabilities" into
-// every bridge_heartbeat frame unconditionally (bridge/hub_runtime_client.odin), the
-// heartbeat handler therefore always calls update_runtime_capabilities, and that
-// proc sets last_seen_at unconditionally. So it tracks LIVENESS, not the moment the
-// connection was established.
+// It is refreshed on EVERY current-generation heartbeat, ~45s, by
+// touch_runtime_liveness, whether or not the beat carries capability metadata
+// (heartbeat metadata may be omitted once negotiated). So it tracks LIVENESS, not
+// the moment the connection was established.
 // And mark_bridge_offline deliberately does NOT touch it, which is what makes it an
 // absence clock rather than a proxy for one: on disconnect the value FREEZES at the
 // last heartbeat and nothing moves it until the bridge genuinely returns. `now` minus
@@ -209,7 +208,10 @@ bridge_runtime_connect :: proc(service: ^Bridge_Service, token: string, hostname
 	}
 	if os_name != "" { delete(bridge.machine_os); bridge.machine_os = strings.clone(os_name) }
 	if arch != "" { delete(bridge.machine_arch); bridge.machine_arch = strings.clone(arch) }
-	if capabilities_json != "" && strings.contains(capabilities_json, "\"capabilities\"") {
+	// Every hello is a FULL replacement of the runtime metadata (plan T3): a hello that
+	// omits `features` withdraws them all rather than inheriting a previous
+	// connection's list. Only internal callers that apply no frame pass "".
+	if capabilities_json != "" {
 		record := bridge_capabilities_record(bridge.capabilities_json, capabilities_json)
 		delete(bridge.capabilities_json)
 		bridge.capabilities_json = record
@@ -373,6 +375,13 @@ bridge_capabilities_record :: proc(existing, frame: string, allocator := context
 		strings.write_byte(b, '"')
 	}
 	for key in BRIDGE_RUNTIME_CAPABILITY_KEYS {
+		if key == "features" {
+			// Always present: an absent list is an explicit withdrawal ([]), which
+			// lets a reader tell "no features" from "record lost its metadata".
+			write_key(&b, &first, key)
+			strings.write_string(&b, bridge_runtime_features_raw(frame, context.temp_allocator))
+			continue
+		}
 		// sort_keys: the capability objects are re-marshalled from a map, and without a
 		// fixed key order an identical frame produced a different record on most beats,
 		// so every heartbeat looked like a capability change (write + notification).
@@ -394,6 +403,21 @@ bridge_capabilities_record :: proc(existing, frame: string, allocator := context
 	}
 	strings.write_byte(&b, '}')
 	return strings.to_string(b)
+}
+
+// bridge_runtime_features_raw is the canonical `features` array of a hello/heartbeat
+// frame, exactly as bridge_capabilities_record stores it; an absent or non-array
+// member is the empty list (full replacement withdraws everything).
+bridge_runtime_features_raw :: proc(frame: string, allocator := context.allocator) -> string {
+	if raw, ok := jsonx.extract_raw_array(frame, "features", true, allocator, sort_keys = true); ok do return raw
+	return strings.clone("[]", allocator)
+}
+
+// bridge_stored_features_raw is the `features` array a stored capability record holds,
+// in the same canonical form; found=false when the record has lost it (a row from
+// before full-replacement records, or one restored/rewritten under a live connection).
+bridge_stored_features_raw :: proc(record: string, allocator := context.allocator) -> (string, bool) {
+	return jsonx.extract_raw_array(record, "features", true, allocator, sort_keys = true)
 }
 
 // BRIDGE_VAULT_STATUS_VALUES are the only values a bridge may report (REQ-BVS-1),

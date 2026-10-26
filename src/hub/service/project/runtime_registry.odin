@@ -121,6 +121,38 @@ Bridge_Runtime_Connection :: struct {
 	// re-check. Reader-thread only.
 	auth_token_id: [64]u8,
 	auth_token_id_len: int,
+	// Heartbeat metadata authority (plan T3), state_mutex. Set once by this
+	// connection's hello before bridge_ready; see bridge_runtime_connection_set_metadata.
+	//   metadata_recorded:   the hello installed a capability record for THIS connection
+	//   metadata_omission:   both peers negotiated heartbeat metadata omission
+	//   metadata_features:   canonical features array the stored record must hold
+	//                        (heap); legacy beats on a non-negotiated connection move it
+	metadata_recorded: bool,
+	metadata_omission: bool,
+	metadata_features: string,
+}
+
+// bridge_runtime_connection_set_metadata records the metadata contract this
+// connection's hello installed. The caller holds connection_state_lock: the hello
+// writes the durable record under the same lock, so a heartbeat (which reads these
+// fields under it) can never observe the record without the contract or vice versa.
+bridge_runtime_connection_set_metadata :: proc(c: ^Bridge_Runtime_Connection, omission: bool, features: string) {
+	if c == nil do return
+	heap := runtime.default_allocator()
+	delete(c.metadata_features, heap)
+	c.metadata_features = strings.clone(features, heap)
+	c.metadata_omission = omission
+	c.metadata_recorded = true
+}
+
+// bridge_runtime_connection_set_metadata_features moves the expected feature list after
+// a legacy heartbeat on a NON-negotiated connection applied its own metadata. Caller
+// holds connection_state_lock.
+bridge_runtime_connection_set_metadata_features :: proc(c: ^Bridge_Runtime_Connection, features: string) {
+	if c == nil || !c.metadata_recorded || c.metadata_features == features do return
+	heap := runtime.default_allocator()
+	delete(c.metadata_features, heap)
+	c.metadata_features = strings.clone(features, heap)
 }
 
 // bridge_runtime_wall_ms is the clock the session bound is compared against.
@@ -217,6 +249,7 @@ bridge_runtime_connection_release :: proc(r: ^Bridge_Runtime_Registry, c: ^Bridg
 	delete(c.unseal_key_signature, heap)
 	delete(c.identity_public_key, heap)
 	delete(c.identity_sign_alg, heap)
+	delete(c.metadata_features, heap)
 	free(c, heap)
 }
 

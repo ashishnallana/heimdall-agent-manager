@@ -196,6 +196,8 @@ Decision codes: **E** every beat · **C** startup/reconnect (hello) · **O+R** o
 | `heartbeat_metadata_omission` | Hub refreshes Bridge liveness without capabilities (T1) and ignores heartbeat metadata; Bridge may omit `capabilities`/`features`. |
 | `diagnostics_frame_v1` | Hub accepts `bridge_diagnostics`; Bridge stops sending diagnostic members in heartbeat. |
 
+**How the Hub knows a peer negotiated omission (implemented in T3).** A `bridge_ready` flag is only a Hub advertisement — an old Bridge ignores it. `heartbeat_metadata_omission` is therefore negotiated per connection only when **both** the Hub sent the flag **and** that connection's `bridge_hello.features` lists `heartbeat_metadata_omission` (`contracts.BRIDGE_FEATURE_HEARTBEAT_METADATA_OMISSION`). T4 must add that string to the Bridge's hello feature list and omit metadata only when the ready flag is also true. On a negotiated connection heartbeat `capabilities`/`features` are ignored whether present or not; otherwise a legacy beat that carries them remains a full replacement, and one that omits them changes nothing. Whenever a beat does not apply metadata, the stored `features` must equal what this connection installed (hello, or the last legacy beat on a non-negotiated connection); a missing or different list makes the Hub send `protocol_error{code:conflict, cause:resync_required}` and close, counted as `bridge_frames_rejected{reason=metadata_resync}`. Hello is a full replacement: an absent `features` member is stored as `[]`.
+
 | Hub \ Bridge | Old Bridge | New Bridge |
 | --- | --- | --- |
 | Old Hub | unchanged | No flags ⇒ legacy 15-member heartbeat, with corrected 4-feature list (T0). |

@@ -1745,6 +1745,9 @@ bridge_ws_upgrade_handler :: proc(ctx: rawptr, req: Request, client: net.TCP_Soc
 	project_service.connection_state_lock(connection)
 	if sync.atomic_load(&connection.retired) { project_service.connection_state_unlock(connection); return }
 	bridge, connect_ok, err := bridge_service.bridge_runtime_connect(h.bridges, token, hostname, platform_os, platform_arch, hello_text, version_str, commit_sha_str, build_timestamp_str)
+	// The hello's record is now the metadata authority for this connection; record the
+	// contract under the same lock so no heartbeat sees one without the other (plan T3).
+	if connect_ok do bridge_record_hello_metadata(connection, hello_text)
 	project_service.connection_state_unlock(connection)
 	if !connect_ok {
 		bridge_metrics_connect_result(admitted_bridge.bridge_id, "revoked" if err.code == .Bridge_Revoked else "connect_failed")
@@ -1792,7 +1795,7 @@ bridge_ws_upgrade_handler :: proc(ctx: rawptr, req: Request, client: net.TCP_Soc
 	// Cache the owner's switch on the connection BEFORE bridge_ready goes out: a
 	// bridge may flush its bridge_log ring in the very next frame.
 	project_service.bridge_runtime_registry_set_telemetry_enabled(h.bridge_runtime_registry, bridge.bridge_id, bridge.telemetry_enabled != "disabled")
-	_ = write_ws_text_frame_locked(h, bridge.bridge_id, client, bridge_ready_payload(bridge.bridge_id, hello.generation, hello.replaced_existing, catalog_etag, bridge.telemetry_enabled != "disabled"))
+	_ = write_ws_text_frame_locked(h, bridge.bridge_id, client, bridge_ready_payload(bridge.bridge_id, hello.generation, hello.replaced_existing, catalog_etag, bridge.telemetry_enabled != "disabled", BRIDGE_HUB_HEARTBEAT_METADATA_OMISSION))
 	// REQ-ENR-1: the disconnect path publishes offline; this is its counterpart, so
 	// the UI learns a bridge came (back) online — e.g. right after enrollment commit
 	// and service restart. The enroll-only socket returned long before this point.
@@ -2337,7 +2340,16 @@ bridge_ws_process_frame :: proc(h: ^Bridge_Handlers, bridge_id: string, connecti
 		// Durable liveness on EVERY accepted heartbeat, metadata or not (plan T1): it
 		// used to ride on the capabilities save, so a beat without "capabilities" left
 		// last_seen_at to age into the 1h gone-bridge reaper. Narrow, fenced writes.
-		bridge_apply_heartbeat_liveness(h, bridge_id, connection_generation, text)
+		if bridge_apply_heartbeat_liveness(h, bridge_id, connection_generation, text) == .Resync_Required {
+			// The stored metadata is no longer what this connection's hello installed
+			// (lost or rewritten under a live socket). Admission must not run on it:
+			// close, and the Bridge's reconnect sends a fresh hello (plan §4.2).
+			metrics.counter_inc(metrics.with(project_service.fleet_metrics.bridge_frames_rejected, HEARTBEAT_METADATA_REJECT_RESYNC))
+			refusal := bridge_protocol_error_frame("bridge_heartbeat", contracts.wire_error(.Conflict, contracts.BRIDGE_RESYNC_REQUIRED_CAUSE, "stored bridge metadata does not match this connection's hello; reconnect to resync"))
+			_ = project_service.bridge_runtime_connection_send_farewell(connection, refusal)
+			delete(refusal)
+			return false
+		}
 		bridge_apply_vault_status_report(h, bridge_id, text, connection_generation)
 		// Plan T2: inventory repair and absence reconciliation run only on a complete
 		// inventory; an absent or malformed one is counted and leaves instances alone.
@@ -3063,9 +3075,18 @@ json_key_present :: proc(body, key: string) -> bool {
 // missed beat stays well inside the 120s read deadline.
 BRIDGE_HEARTBEAT_INTERVAL_SECONDS :: 45
 
+// BRIDGE_HUB_HEARTBEAT_METADATA_OMISSION: this Hub refreshes liveness on every beat
+// (T1) and treats the hello record as the only metadata authority on a negotiated
+// connection (T3), so it may advertise heartbeat_metadata_omission to runtime sockets.
+BRIDGE_HUB_HEARTBEAT_METADATA_OMISSION :: true
+
 // heartbeat_stats tells the bridge whether to attach resource stats to its
 // heartbeats (plan 4.3): false only when the owner set telemetry_enabled=disabled.
-bridge_ready_payload :: proc(bridge_id: string, generation: int, replaced: bool, catalog_etag: string = "", heartbeat_stats := true) -> string {
+// heartbeat_metadata_omission is an ADVERTISEMENT only (contracts
+// BRIDGE_FEATURE_HEARTBEAT_METADATA_OMISSION): it takes effect on a connection only when
+// that connection's hello also listed the feature. The enroll-only socket, which never
+// heartbeats, leaves it false.
+bridge_ready_payload :: proc(bridge_id: string, generation: int, replaced: bool, catalog_etag: string = "", heartbeat_stats := true, heartbeat_metadata_omission := false) -> string {
 	b := strings.builder_make()
 	strings.write_string(&b, "{\"type\":\"bridge_ready\",\"protocol_version\":1,\"payload\":{\"bridge_id\":\"")
 	write_handler_json_string(&b, bridge_id)
@@ -3078,6 +3099,8 @@ bridge_ready_payload :: proc(bridge_id: string, generation: int, replaced: bool,
 	strings.write_string(&b, "\"")
 	strings.write_string(&b, ",\"heartbeat_stats\":")
 	strings.write_string(&b, "true" if heartbeat_stats else "false")
+	strings.write_string(&b, ",\"heartbeat_metadata_omission\":")
+	strings.write_string(&b, "true" if heartbeat_metadata_omission else "false")
 	// This hub bounds the session by its credential and accepts in-band
 	// bridge_reauth after a refresh (bridge_ws_try_reauth).
 	strings.write_string(&b, ",\"credential_reauth\":true")
@@ -3221,21 +3244,70 @@ bridge_runtime_state_leave :: proc(h: ^Bridge_Handlers, c: ^project_service.Brid
 	project_service.bridge_runtime_connection_release(h.bridge_runtime_registry, c)
 }
 
+// HEARTBEAT_METADATA_REJECT_RESYNC is the bridge_frames_rejected{reason} label for a
+// beat that found this connection's hello metadata missing or replaced.
+HEARTBEAT_METADATA_REJECT_RESYNC :: "metadata_resync"
+
+Heartbeat_Metadata_Result :: enum {
+	Applied,         // fenced write path ran (or nothing to do)
+	Stale,           // generation replaced or retired: nothing written
+	Resync_Required, // stored metadata no longer matches this connection's hello
+}
+
+// bridge_record_hello_metadata records which metadata contract this connection's hello
+// installed: the canonical features the stored record must keep, and whether heartbeat
+// metadata omission is negotiated — the Hub always advertises it, so it is negotiated
+// exactly when the hello lists BRIDGE_FEATURE_HEARTBEAT_METADATA_OMISSION. Caller holds
+// connection_state_lock (the same section that wrote the record).
+bridge_record_hello_metadata :: proc(c: ^project_service.Bridge_Runtime_Connection, hello_text: string) {
+	if c == nil do return
+	features := bridge_service.bridge_runtime_features_raw(hello_text, context.temp_allocator)
+	omission := false
+	if BRIDGE_HUB_HEARTBEAT_METADATA_OMISSION {
+		listed := jsonx.extract_string_array(hello_text, "features", true, context.temp_allocator)
+		for f in listed do if f == contracts.BRIDGE_FEATURE_HEARTBEAT_METADATA_OMISSION do omission = true
+	}
+	project_service.bridge_runtime_connection_set_metadata(c, omission, features)
+}
+
 // bridge_apply_heartbeat_liveness refreshes durable Bridge liveness for an accepted
-// heartbeat and, for a legacy frame that still carries metadata, the stored capability
-// record — both narrow fenced writes under the generation barrier. Only a status or
-// capability diff publishes; an ordinary beat moves last_seen_at alone and is silent.
-bridge_apply_heartbeat_liveness :: proc(h: ^Bridge_Handlers, bridge_id: string, generation: int, text: string) {
-	if h == nil || h.bridges == nil do return
+// heartbeat, then applies the metadata contract (plan T3), all under the generation
+// barrier so a delayed frame from a replaced connection writes nothing:
+//   - negotiated omission: heartbeat capabilities/features are IGNORED, present or not;
+//     the hello record is the sole authority and is never overwritten by a beat.
+//   - not negotiated (old Bridge, or a Bridge that did not list the feature): a legacy
+//     beat carrying metadata is applied as a full replacement, as before; one that
+//     omits it anyway (unsupported omission) changes nothing.
+//   - whenever the beat did not apply metadata, the stored features must still be what
+//     this connection installed; otherwise Resync_Required (fail closed — admission
+//     reads that record).
+// Only a status or capability diff publishes; an ordinary beat is silent.
+bridge_apply_heartbeat_liveness :: proc(h: ^Bridge_Handlers, bridge_id: string, generation: int, text: string) -> Heartbeat_Metadata_Result {
+	if h == nil || h.bridges == nil do return .Applied
 	c, current := bridge_runtime_state_enter(h, bridge_id, generation)
-	if !current do return
+	if !current do return .Stale
 	bridge, moved, err := bridge_service.touch_runtime_liveness(h.bridges, bridge_id)
 	caps_changed := false
-	if err.code == .None do caps_changed, _ = bridge_service.update_runtime_metadata(h.bridges, bridge_id, text)
+	result := Heartbeat_Metadata_Result.Applied
+	if err.code == .None {
+		negotiated := c != nil && c.metadata_recorded && c.metadata_omission
+		legacy := !negotiated && strings.contains(text, "\"capabilities\"")
+		if legacy {
+			caps_err: domain.Domain_Error
+			caps_changed, caps_err = bridge_service.update_runtime_metadata(h.bridges, bridge_id, text)
+			// The beat's list is now this connection's expectation (a legacy Bridge
+			// may legitimately change it); a failed write is repaired by the next beat.
+			if caps_err.code == .None do project_service.bridge_runtime_connection_set_metadata_features(c, bridge_service.bridge_runtime_features_raw(text, context.temp_allocator))
+		} else if c != nil && c.metadata_recorded {
+			stored, found := bridge_service.bridge_stored_features_raw(bridge.capabilities_json, context.temp_allocator)
+			if !found || stored != c.metadata_features do result = .Resync_Required
+		}
+	}
 	bridge_runtime_state_leave(h, c)
-	if err.code != .None do return
+	if err.code != .None do return result
 	defer domain.bridge_destroy(&bridge)
 	if moved || caps_changed do publish_bridge_changed(h.event_bus, bridge, "capabilities_changed")
+	return result
 }
 
 bridge_vault_status_summary_json :: proc(vault_status: string) -> string {

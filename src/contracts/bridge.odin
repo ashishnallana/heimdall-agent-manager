@@ -16,6 +16,21 @@ BRIDGE_LOOPBACK_CONTRACT_VERSION :: 1
 // 2: PTY output/input are binary frames (pty_wire.odin); shell_pty_output / data_b64 are gone.
 BRIDGE_WS_FRAME_VERSION :: 2
 
+// Heartbeat metadata omission (minimal heartbeat plan T3/T4). Negotiated per
+// connection and ONLY when both peers opt in:
+//   - the Bridge lists BRIDGE_FEATURE_HEARTBEAT_METADATA_OMISSION in its bridge_hello
+//     `features` (proof it understands the flag; old Bridges never list it), and
+//   - the Hub sets bridge_ready.payload.heartbeat_metadata_omission=true.
+// The ready flag alone is a Hub advertisement, not proof: an old Bridge ignores it and
+// keeps sending legacy capabilities/features, which the Hub keeps applying. On a
+// negotiated connection the hello record is the only metadata authority and heartbeat
+// capabilities/features are ignored whether present or not.
+BRIDGE_FEATURE_HEARTBEAT_METADATA_OMISSION :: "heartbeat_metadata_omission"
+// Cause of the protocol_error the Hub sends before closing a connection whose stored
+// metadata no longer matches what this connection's hello installed (e.g. a DB
+// restore under a live Hub); the Bridge's ordinary reconnect sends a fresh hello.
+BRIDGE_RESYNC_REQUIRED_CAUSE :: "resync_required"
+
 // Loopback routes served by the bridge on :49323.
 ROUTE_BRIDGE_HEALTH :: "/bridge/health"
 ROUTE_BRIDGE_VALIDATE_PROJECT_PATH :: "/bridge/validate-project-path"
