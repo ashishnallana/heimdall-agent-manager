@@ -4,8 +4,9 @@
 # Fails when:
 #   1. src/lib/http_client (the deleted hand-written client) exists again, or any
 #      Odin file imports it;
-#   2. any Odin package other than src/lib/httpc imports vendor:curl, foreign-
-#      imports libcurl or declares curl_* bindings;
+#   2. any Odin package (src, tests, tools) other than src/lib/httpc imports vendor:curl, foreign-
+#      imports libcurl (any "…curl….so/.dylib/.lib/.a" path), declares curl_* bindings
+#      or binds a curl_* symbol via link_name;
 #   3. httpc's forwarding escape hatches (Request.relay_target, relay_json_body)
 #      are used outside the files allowed to forward peer-supplied targets/bodies;
 #   4. production code outside the approved packages writes a raw HTTP/1.x request
@@ -61,7 +62,9 @@ check() {
 		-e 'foreign[[:space:]]+import.*curl' \
 		-e '"system:(lib)?curl' \
 		-e '(^|[^A-Za-z0-9_])curl_[a-z_]+[[:space:]]*::[[:space:]]*proc' \
-		src tests 2>/dev/null || true)
+		-e 'link_name[[:space:]]*=[[:space:]]*"curl_' \
+		-e '"[^"]*curl[^"]*\.(so|dylib|lib|a)[^"]*"' \
+		src tests tools 2>/dev/null || true)
 
 	while IFS= read -r file; do
 		allowed "$file" "${RELAY_ALLOWED[@]}" && continue
@@ -101,6 +104,9 @@ self_test() {
 		'src/hub/e.odin|req.relay_target = path'
 		'src/hub/f.odin|w(&b, " HTTP/1.1\r\nHost: x\r\n")'
 		'tests/g.odin|import curl "vendor:curl"'
+		'src/hub/h.odin|@(link_name = "curl_easy_perform") perform :: proc(h: rawptr) -> i32 ---'
+		'src/hub/i.odin|	"/usr/lib/x86_64-linux-gnu/libcurl.so.4",'
+		'tools/j/k.odin|foreign import lc "system:curl"'
 	)
 	local entry rel content
 	for entry in "${cases[@]}"; do
