@@ -3,11 +3,13 @@ on:
   push:
     paths:
       - 'scripts/install.ps1'
+      - 'scripts/apply-bridge-update.ps1'
       - 'tests/windows/**'
       - '.github/workflows/install-ps1.yml'
   pull_request:
     paths:
       - 'scripts/install.ps1'
+      - 'scripts/apply-bridge-update.ps1'
       - 'tests/windows/**'
       - '.github/workflows/install-ps1.yml'
   workflow_dispatch:
@@ -31,20 +33,28 @@ jobs:
       - name: Parse with Windows PowerShell 5.1 and PowerShell 7
         shell: pwsh
         run: |
-          foreach ($exe in @('powershell.exe', 'pwsh.exe')) {
-            $code = '$e = $null; [void][System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path scripts/install.ps1), [ref]$null, [ref]$e); $e | ForEach-Object { $_.ToString() }; exit $e.Count'
-            & $exe -NoProfile -Command $code
-            if ($LASTEXITCODE) { throw "install.ps1 does not parse under $exe" }
+          foreach ($script in @('scripts/install.ps1', 'scripts/apply-bridge-update.ps1')) {
+            foreach ($exe in @('powershell.exe', 'pwsh.exe')) {
+              $code = '$e = $null; [void][System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path ' + $script + '), [ref]$null, [ref]$e); $e | ForEach-Object { $_.ToString() }; exit $e.Count'
+              & $exe -NoProfile -Command $code
+              if ($LASTEXITCODE) { throw "$script does not parse under $exe" }
+            }
+            if (@([IO.File]::ReadAllBytes((Resolve-Path $script)) | Where-Object { $_ -gt 127 }).Count) { throw "$script must be pure ASCII" }
           }
-          if (@([IO.File]::ReadAllBytes((Resolve-Path scripts/install.ps1)) | Where-Object { $_ -gt 127 }).Count) { throw 'install.ps1 must be pure ASCII' }
       - name: Lint (PSScriptAnalyzer, errors)
         if: matrix.engine == 'pwsh'
         shell: pwsh
         run: |
           Install-Module PSScriptAnalyzer -Force -Scope CurrentUser
-          $issues = @(Invoke-ScriptAnalyzer -Path scripts/install.ps1 -Severity Error)
+          $issues = @(Invoke-ScriptAnalyzer -Path scripts/install.ps1 -Severity Error) + @(Invoke-ScriptAnalyzer -Path scripts/apply-bridge-update.ps1 -Severity Error)
           $issues | Format-Table -AutoSize | Out-String | Write-Host
           if ($issues.Count) { throw "$($issues.Count) PSScriptAnalyzer error(s)" }
       - name: Hermetic install / enroll / upgrade / uninstall test
         shell: pwsh
         run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/windows/install_ps1_test.ps1 -Engine ${{ matrix.engine }}
+      - name: Update supervisor (apply-bridge-update.ps1) test
+        shell: pwsh
+        run: |
+          if ('${{ matrix.engine }}' -eq 'pwsh') { pwsh -NoProfile -File tests/windows/apply_bridge_update_ps1_test.ps1 }
+          else { powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/windows/apply_bridge_update_ps1_test.ps1 }
+          if ($LASTEXITCODE) { throw 'apply_bridge_update_ps1_test.ps1 failed' }
