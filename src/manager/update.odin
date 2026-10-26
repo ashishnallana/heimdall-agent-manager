@@ -31,7 +31,7 @@ MANAGER_UPDATE_GITHUB_OWNER :: "tanmayv"
 MANAGER_UPDATE_GITHUB_NAME :: "heimdall-agent-manager"
 MANAGER_UPDATE_API_BASE :: "https://api.github.com"
 MANAGER_UPDATE_DOWNLOAD_BASE :: "https://github.com"
-MANAGER_UPDATE_TIMEOUT_MS :: 60000 // tarball downloads tolerate slow links
+MANAGER_UPDATE_TIMEOUT_MS :: 60000 // connect / stall budget; downloads tolerate slow links (total: httpc.LONG_TRANSFER_TIMEOUT_MS)
 MANAGER_UPDATE_MANIFEST_TIMEOUT_MS :: 20000
 // GitHub release assets redirect to objects.githubusercontent.com.
 MANAGER_UPDATE_MAX_REDIRECTS :: 5
@@ -409,7 +409,7 @@ manager_update_prepare_stage_inner :: proc(plan: ^Manager_Update_Plan, release: 
 	tarball_path := fmt.tprintf("%s/%s", stage_dir, release.tarball_name)
 
 	fmt.printfln("heimdall update: downloading %s", httpc.url_string(release.sums_url))
-	status, dl_err := httpc.download_to_file({method = .GET, url = release.sums_url, timeout_ms = MANAGER_UPDATE_TIMEOUT_MS, max_redirects = MANAGER_UPDATE_MAX_REDIRECTS}, sums_path)
+	status, dl_err := httpc.download_to_file({method = .GET, url = release.sums_url, timeout_ms = httpc.LONG_TRANSFER_TIMEOUT_MS, connect_timeout_ms = MANAGER_UPDATE_TIMEOUT_MS, stall_timeout_ms = MANAGER_UPDATE_TIMEOUT_MS, max_redirects = MANAGER_UPDATE_MAX_REDIRECTS}, sums_path)
 	if dl_err != .None || status != 200 {
 		fmt.eprintfln("heimdall update: SHA256SUMS download failed (HTTP %d) — aborting", status)
 		return false
@@ -432,7 +432,7 @@ manager_update_prepare_stage_inner :: proc(plan: ^Manager_Update_Plan, release: 
 	defer delete(expected)
 
 	fmt.printfln("heimdall update: downloading %s", httpc.url_string(release.tarball_url))
-	status, dl_err = httpc.download_to_file({method = .GET, url = release.tarball_url, timeout_ms = MANAGER_UPDATE_TIMEOUT_MS, max_redirects = MANAGER_UPDATE_MAX_REDIRECTS}, tarball_path)
+	status, dl_err = httpc.download_to_file({method = .GET, url = release.tarball_url, timeout_ms = httpc.LONG_TRANSFER_TIMEOUT_MS, connect_timeout_ms = MANAGER_UPDATE_TIMEOUT_MS, stall_timeout_ms = MANAGER_UPDATE_TIMEOUT_MS, max_redirects = MANAGER_UPDATE_MAX_REDIRECTS}, tarball_path)
 	if dl_err != .None || status != 200 {
 		fmt.eprintfln("heimdall update: tarball download failed (HTTP %d) — aborting", status)
 		return false

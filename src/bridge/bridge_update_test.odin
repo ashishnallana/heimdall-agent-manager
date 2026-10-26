@@ -161,6 +161,6 @@ bridge_update_download_reports_timeout :: proc(t: ^testing.T) {
 	bridge_update_test_calls = 0
 	ok, detail := bridge_update_download("https://github.com/example/repo/releases/download/v1/slow.tar.gz", dest, bridge_update_test_dl_timeout)
 	testing.expect(t, !ok)
-	testing.expect(t, strings.contains(detail, "timed out after 120 seconds"), detail)
+	testing.expect(t, strings.contains(detail, "timed out (no progress for 30 seconds"), detail)
 	testing.expect_value(t, bridge_update_test_calls, BRIDGE_UPDATE_DOWNLOAD_ATTEMPTS)
 }

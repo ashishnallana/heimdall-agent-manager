@@ -508,7 +508,7 @@ bridge_local_handle_agent_method :: proc(request_id, method, params: string, rec
 // {method, agent_instance_id, params} and POSTs it, with AC-5 retry. params must
 // be a JSON object (or empty): it is parsed, never spliced, so an agent cannot
 // smuggle extra envelope keys into the request.
-bridge_local_relay_agent_envelope :: proc(path: []string, method, params: string, rec: Bridge_Local_Agent_Token_Record, timeout_ms: int = httpc.DEFAULT_TIMEOUT_MS) -> Bridge_Local_Relay_Result {
+bridge_local_relay_agent_envelope :: proc(path: []string, method, params: string, rec: Bridge_Local_Agent_Token_Record, timeout_ms: int = httpc.LONG_TRANSFER_TIMEOUT_MS) -> Bridge_Local_Relay_Result {
 	envelope, valid := bridge_local_agent_relay_envelope(method, params, rec.agent_instance_id)
 	if !valid do return bridge_local_relay_invalid_params()
 	credential := bridge_credential_snapshot()
@@ -517,6 +517,7 @@ bridge_local_relay_agent_envelope :: proc(path: []string, method, params: string
 	resp, err := bridge_http_request_retry({
 		method = .POST, url = bridge_hub_url(), path = path, headers = headers[:],
 		body = httpc.json_body(envelope), timeout_ms = timeout_ms,
+		connect_timeout_ms = httpc.DEFAULT_TIMEOUT_MS, stall_timeout_ms = httpc.DEFAULT_STALL_TIMEOUT_MS,
 	})
 	defer httpc.response_destroy(&resp)
 	return bridge_local_relay_result(resp, err)
@@ -529,7 +530,11 @@ bridge_local_relay_raw :: proc(http_method: httpc.Method, path: []string, query:
 	credential := bridge_credential_snapshot()
 	defer delete(credential)
 	headers := [?]httpc.Header{httpc.bearer(credential), {name = "X-Heimdall-Instance-Token", value = rec.instance_token}}
-	req := httpc.Request{method = http_method, url = bridge_hub_url(), path = path, query = query, headers = headers[:]}
+	req := httpc.Request{
+		method = http_method, url = bridge_hub_url(), path = path, query = query, headers = headers[:],
+		timeout_ms = httpc.LONG_TRANSFER_TIMEOUT_MS, connect_timeout_ms = httpc.DEFAULT_TIMEOUT_MS,
+		stall_timeout_ms = httpc.DEFAULT_STALL_TIMEOUT_MS,
+	}
 	if body != "" do req.body = httpc.relay_json_body(body)
 	resp, err := bridge_http_request_retry(req)
 	defer httpc.response_destroy(&resp)
@@ -554,7 +559,11 @@ bridge_local_relay_rest_request :: proc(params: string, rec: Bridge_Local_Agent_
 	credential := bridge_credential_snapshot()
 	defer delete(credential)
 	headers := [?]httpc.Header{httpc.bearer(credential), {name = "X-Heimdall-Instance-Token", value = rec.instance_token}}
-	req := httpc.Request{method = method, url = bridge_hub_url(), relay_target = path, headers = headers[:]}
+	req := httpc.Request{
+		method = method, url = bridge_hub_url(), relay_target = path, headers = headers[:],
+		timeout_ms = httpc.LONG_TRANSFER_TIMEOUT_MS, connect_timeout_ms = httpc.DEFAULT_TIMEOUT_MS,
+		stall_timeout_ms = httpc.DEFAULT_STALL_TIMEOUT_MS,
+	}
 	if body != "" && method != .GET && method != .HEAD do req.body = httpc.relay_json_body(body)
 	resp, err := httpc.send(req)
 	defer httpc.response_destroy(&resp)

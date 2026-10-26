@@ -134,6 +134,11 @@ ctl_hub_fetch :: proc(hub: Ctl_Hub, req: Ctl_Request, allocator := context.alloc
 		query   = req.query,
 		headers = headers[:n],
 		body    = req.body,
+		// Responses can be large (artifacts): a stall guard, not a short total,
+		// as with the deleted client's per-read timeout.
+		timeout_ms         = httpc.LONG_TRANSFER_TIMEOUT_MS,
+		connect_timeout_ms = httpc.DEFAULT_TIMEOUT_MS,
+		stall_timeout_ms   = httpc.DEFAULT_STALL_TIMEOUT_MS,
 	})
 	defer httpc.response_destroy(&resp)
 	if err != .None do return "", resp.status, false

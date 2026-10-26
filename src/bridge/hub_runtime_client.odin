@@ -1393,7 +1393,10 @@ bridge_update_copy_file :: proc(src, dest: string) -> bool {
 	}
 }
 
-BRIDGE_UPDATE_DOWNLOAD_TIMEOUT_MS :: 120_000
+// A stall guard plus a generous total: a large tarball on a slow but working
+// link must not fail at a fixed 120 s.
+BRIDGE_UPDATE_DOWNLOAD_TIMEOUT_MS :: httpc.LONG_TRANSFER_TIMEOUT_MS
+BRIDGE_UPDATE_DOWNLOAD_STALL_TIMEOUT_MS :: 30_000
 BRIDGE_UPDATE_DOWNLOAD_CONNECT_TIMEOUT_MS :: 15_000
 BRIDGE_UPDATE_DOWNLOAD_ATTEMPTS :: 3
 // GitHub release assets redirect to objects.githubusercontent.com.
@@ -1405,14 +1408,15 @@ BRIDGE_UPDATE_DOWNLOAD_MAX_REDIRECTS :: 5
 Bridge_Update_Download :: #type proc(req: httpc.Request, dest_path: string) -> (status: int, err: httpc.Error)
 
 // bridge_update_download fetches the update tarball through libcurl (src/lib/httpc):
-// redirects followed (never https -> http), 15 s connect / 120 s total per
-// attempt, up to 3 attempts on transient failures. download_url is either an
+// redirects followed (never https -> http), 15 s connect, 30 s without progress
+// or 10 min total per attempt, up to 3 attempts on transient failures. download_url is either an
 // absolute http(s) URL or a hub-relative target ("/api/v1/...") from the update
 // command, resolved under the configured hub base URL without concatenation.
 bridge_update_download :: proc(download_url, dest_path: string, download: Bridge_Update_Download = httpc.download_to_file) -> (bool, string) {
 	req := httpc.Request{
 		method = .GET, timeout_ms = BRIDGE_UPDATE_DOWNLOAD_TIMEOUT_MS,
 		connect_timeout_ms = BRIDGE_UPDATE_DOWNLOAD_CONNECT_TIMEOUT_MS,
+		stall_timeout_ms = BRIDGE_UPDATE_DOWNLOAD_STALL_TIMEOUT_MS,
 		max_redirects = BRIDGE_UPDATE_DOWNLOAD_MAX_REDIRECTS,
 	}
 	if strings.has_prefix(download_url, "/") {
@@ -1435,7 +1439,7 @@ bridge_update_download :: proc(download_url, dest_path: string, download: Bridge
 		if !transient || attempt == BRIDGE_UPDATE_DOWNLOAD_ATTEMPTS do break
 		time.sleep(time.Duration(attempt) * time.Second)
 	}
-	if err == .Timeout do return false, fmt.tprintf("tarball download failed: timed out after %d seconds", BRIDGE_UPDATE_DOWNLOAD_TIMEOUT_MS / 1000)
+	if err == .Timeout do return false, fmt.tprintf("tarball download failed: timed out (no progress for %d seconds, or over %d seconds in total)", BRIDGE_UPDATE_DOWNLOAD_STALL_TIMEOUT_MS / 1000, BRIDGE_UPDATE_DOWNLOAD_TIMEOUT_MS / 1000)
 	if err != .None do return false, fmt.tprintf("tarball download failed: %s", httpc.error_string(err))
 	return false, fmt.tprintf("tarball download failed: HTTP %d", status)
 }
