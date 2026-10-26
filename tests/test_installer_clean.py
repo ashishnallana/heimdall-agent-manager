@@ -6,12 +6,17 @@ import json
 import os
 from pathlib import Path
 import plistlib
+import pty
+import select
 import shlex
+import shutil
 import socket
 import subprocess
 import sys
 import tarfile
 import tempfile
+import termios
+import time
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -62,6 +67,8 @@ import hashlib, os, pathlib, sys
 r=pathlib.Path(os.environ['MOCK_ROOT']); a=sys.argv[1:]; url=[x for x in a if x.startswith('http')][0]
 if url.endswith('/api/v1/health'):
     with (r/'hub-checks').open('a') as f: f.write(url+'\\n')
+    if os.environ.get('MOCK_HUB_DELAY'):
+        import time; time.sleep(float(os.environ['MOCK_HUB_DELAY']))
     if os.environ.get('MOCK_HUB_DOWN'):
         sys.stderr.write('curl: (6) Could not resolve host: '+url.split('/')[2]+'\\n'); sys.exit(6)
     sys.stdout.write('302'); sys.exit(0)
@@ -147,12 +154,40 @@ if me=='sv-enable':
         self.stub('sv',sv); self.stub('sv-enable',sv)
         return prefix
 
+    def run_terminal(self, command, env):
+        """Run command with stdin/stdout/stderr on a pty (output post-processing off,
+        so a \\r is the installer's own). Returns (status, output); fails when
+        anything (a stray spinner ticker) keeps the terminal open after exit."""
+        master, slave = pty.openpty()
+        attrs = termios.tcgetattr(slave); attrs[1] &= ~termios.OPOST
+        termios.tcsetattr(slave, termios.TCSANOW, attrs)
+        p = subprocess.Popen(command, env=env, stdin=slave, stdout=slave, stderr=slave, start_new_session=True)
+        os.close(slave)
+        out = b''; exited = None; deadline = time.monotonic() + 30
+        try:
+            while True:
+                if exited is None and p.poll() is not None: exited = time.monotonic()
+                limit = deadline if exited is None else exited + 3
+                self.assertLess(time.monotonic(), limit, 'terminal still open after the installer exited:\n'+out.decode(errors='replace'))
+                if not select.select([master], [], [], 0.1)[0]: continue
+                try: chunk = os.read(master, 65536)
+                except OSError: break   # EIO: every holder of the terminal is gone
+                if not chunk: break
+                out += chunk
+        finally:
+            os.close(master)
+            if p.poll() is None: p.kill()
+        return p.wait(), out.decode(errors='replace')
+
+    def install_script(self):
+        lib=self.root/'installer-lib.sh'
+        lib.write_text(INSTALLER.read_text().replace('main "$@"\n',''))
+        return 'source '+shlex.quote(str(lib))+'\nport_busy() { case ",${BUSY_PORTS:-}," in *",$1,"*) return 0 ;; esac; return 1; }\n'
+
     def run_install(self, *args, answers=None, success=True):
         # Run the real installer with port probing simulated: BUSY_PORTS lists the
         # loopback ports that accept connections; no test touches a host socket.
-        lib=self.root/'installer-lib.sh'
-        lib.write_text(INSTALLER.read_text().replace('main "$@"\n',''))
-        script='source '+shlex.quote(str(lib))+'\nport_busy() { case ",${BUSY_PORTS:-}," in *",$1,"*) return 0 ;; esac; return 1; }\n'
+        script=self.install_script()
         if answers is not None:
             # Override only terminal input; exercise the real prompt decision branches.
             self.env['HEIMDALL_NON_INTERACTIVE']='0'
@@ -254,7 +289,7 @@ if me=='sv-enable':
         self.run_install('--hub','https://hub.mundus.in','--dry-run')
         self.assertIn('Checking Hub',self.run_install('--hub','https://hub.mundus.in'))
         # Without any proof, the operator override is honoured.
-        import shutil; shutil.rmtree(prefix/'var/service/sshd'); shutil.rmtree(prefix/'var/service/ham-bridge')
+        shutil.rmtree(prefix/'var/service/sshd'); shutil.rmtree(prefix/'var/service/ham-bridge')
         self.env['HEIMDALL_ASSUME_RUNSVDIR']='1'
         self.run_install('--hub','https://hub.mundus.in','--keep-enrollment'); del self.env['HEIMDALL_ASSUME_RUNSVDIR']
 
@@ -297,12 +332,17 @@ if me=='sv-enable':
     def test_release_tarball_cache_avoids_redownload(self):
         cache=self.home/'.cache/heimdall/releases/heimdall-local-linux-amd64-vtest.tar.gz'
         cache.parent.mkdir(parents=True); stale=cache.parent/'heimdall-local-linux-amd64-vold.tar.gz'; stale.write_bytes(b'old')
+        # Count hashing: a verified cached copy is not hashed a second time.
+        hashes=self.root/'hashes'
+        self.stub('sha256sum','#!/bin/sh\necho "$*" >> "$MOCK_ROOT/hashes"\nexec '+shlex.quote(shutil.which('sha256sum'))+' "$@"\n')
         self.run_install('--hub','http://localhost:8080')
+        self.assertEqual(len(hashes.read_text().splitlines()),1); hashes.unlink()
         self.assertTrue(cache.exists()); self.assertEqual(cache.read_bytes(),(self.root/'bundle').read_bytes())
         self.assertFalse(stale.exists())   # older versions of the same target are pruned
         self.assertEqual(self.downloads(),['heimdall-local-linux-amd64-vtest.tar.gz'])
         out=self.run_install('--hub','http://localhost:8080','--keep-enrollment')
         self.assertIn('Using cached heimdall-local-linux-amd64-vtest.tar.gz',out)
+        self.assertEqual(len(hashes.read_text().splitlines()),1)
         self.assertEqual(self.downloads(),['heimdall-local-linux-amd64-vtest.tar.gz'])   # no second download
         # A cached file whose hash no longer matches the release is replaced by a fresh download.
         cache.write_bytes(b'stale'); self.run_install('--hub','http://localhost:8080','--keep-enrollment')
@@ -504,6 +544,68 @@ if me=='sv-enable':
         (self.state(name)/'hub-url').write_text('http://hub.mundus.in')
         self.run_install('--hub','https://hub.mundus.in','--dry-run',success=False)
         self.assertFalse(self.log.exists())
+
+    def test_terminal_spinner_and_colour(self):
+        # Hub check slow enough for the ticker to draw; UTF-8 locale -> braille frames.
+        env=dict(self.env,MOCK_HUB_DELAY='1.5',TERM='xterm',LANG='C.UTF-8',LC_ALL='')
+        status,out=self.run_terminal(['bash','-c',self.install_script()+'main "$@"','installer','--hub','http://localhost:8080'],env)
+        self.assertEqual(status,0,out)
+        self.assertRegex(out,'\r  [⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] Checking Hub http://localhost:8080 \\(up to 20s\\)  [0-9]+s\x1b\\[K')
+        self.assertIn('\r\x1b[K\x1b[32m[OK]\x1b[0m Hub reachable: HTTP 302 after ',out)
+        self.assertIn('\x1b[2m[INFO]\x1b[0m ',out)
+        self.assertIn('\x1b[1m── 6 / 6 · Ready ──\x1b[0m',out)
+        self.assertRegex(out,'\x1b\\[32m\\[OK\\]\x1b\\[0m Verifying and unpacking heimdall-local-linux-amd64-vtest.tar.gz \\([0-9]+s\\)')
+        # A non-UTF-8 locale gets ASCII frames.
+        env.update(LANG='C',MOCK_HUB_DELAY='0.8')
+        status,out=self.run_terminal(['bash','-c',self.install_script()+'main "$@"','installer','--hub','http://localhost:8080','--keep-enrollment'],env)
+        self.assertEqual(status,0,out)
+        self.assertRegex(out,'\r  [|/\\\\-] Checking Hub ')
+        self.assertNotRegex(out,'[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]')
+
+    def test_terminal_failure_stops_spinner_and_runs_exit_trap(self):
+        env=dict(self.env,MOCK_HUB_DOWN='1',MOCK_HUB_DELAY='0.8',TERM='xterm',LANG='C',LC_ALL='')
+        status,out=self.run_terminal(['bash','-c',self.install_script()+'main "$@"','installer','--hub','https://hub.mundus.in'],env)
+        self.assertEqual(status,1,out)
+        self.assertIn('\r\x1b[K\n\x1b[1;31m[ERROR]\x1b[0m Hub https://hub.mundus.in not reachable',out)
+        self.assertIn('Could not resolve host: hub.mundus.in',out)
+        self.assertFalse((self.home/'.config/heimdall/bridges/.install-lock').exists())   # main's EXIT trap ran
+        # A step's stderr is held while the spinner runs and shown when it fails,
+        # and an exit that bypasses fail (set -e) still stops the ticker before the
+        # EXIT trap that was installed before the spinner (quotes intact).
+        mark=self.root/"trap ran 'here'"
+        script=(self.install_script()+'set -euo pipefail\nwork_dir='+shlex.quote(str(self.root))+'\n'
+                'trap "$(printf \'touch %q\' '+shlex.quote(str(mark))+')" EXIT\n'
+                'spin_start "Slow step"; echo "tar: broken member" >&2; sleep 0.5; fail "Step broke"\n')
+        status,out=self.run_terminal(['bash','-c',script],env)
+        self.assertEqual(status,1,out); self.assertTrue(mark.exists(),out)
+        self.assertRegex(out,'\r  [|/\\\\-] Slow step  [0-9]+s\x1b\\[K')
+        self.assertIn('\r\x1b[K  | tar: broken member\n\n\x1b[1;31m[ERROR]\x1b[0m Step broke',out)
+        mark.unlink()
+        script=script.replace('fail "Step broke"','false; echo not-reached')
+        status,out=self.run_terminal(['bash','-c',script],env)
+        self.assertEqual(status,1,out); self.assertTrue(mark.exists(),out); self.assertNotIn('not-reached',out)
+        self.assertIn('  | tar: broken member',out)
+        self.assertEqual(list(self.root.glob('.step-stderr.*')),[])
+
+    def test_plain_output_has_no_escapes(self):
+        # Not a terminal: plain start/done lines, no escape sequences or carriage returns.
+        out=self.run_install('--hub','http://localhost:8080')
+        self.assertNotIn('\x1b',out); self.assertNotIn('\r',out)
+        self.assertIn('[INFO] Checking Hub http://localhost:8080 (up to 20s)\n[OK] Hub reachable: HTTP 302 after ',out)
+        self.assertIn('[INFO] Verifying and unpacking heimdall-local-linux-amd64-vtest.tar.gz\n',out)
+        self.assertRegex(out,'\\[OK\\] Verifying and unpacking heimdall-local-linux-amd64-vtest.tar.gz \\([0-9]+s\\)\n')
+        self.assertIn('[INFO] Fetching SHA256SUMS\n',out)
+        command=['bash','-c',self.install_script()+'main "$@"','installer','--hub','http://localhost:8080','--keep-enrollment']
+        # A terminal with NO_COLOR: the spinner stays, colour goes.
+        status,out=self.run_terminal(command,dict(self.env,NO_COLOR='1',TERM='xterm',MOCK_HUB_DELAY='0.8'))
+        self.assertEqual(status,0,out)
+        self.assertNotRegex(out,'\x1b\\[[0-9;]*m'); self.assertIn('\x1b[K',out)
+        # TERM=dumb and HEIMDALL_INSTALL_PLAIN=1: neither colour nor spinner.
+        for extra in ({'TERM':'dumb'},{'TERM':'xterm','HEIMDALL_INSTALL_PLAIN':'1'}):
+            status,out=self.run_terminal(command,dict(self.env,MOCK_HUB_DELAY='0.8',**extra))
+            self.assertEqual(status,0,out)
+            self.assertNotIn('\x1b',out,extra); self.assertNotIn('\r',out,extra)
+            self.assertIn('[INFO] Checking Hub http://localhost:8080 (up to 20s)\n',out)
 
 
 if __name__ == '__main__':

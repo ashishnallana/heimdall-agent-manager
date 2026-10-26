@@ -1,8 +1,130 @@
 #!/usr/bin/env bash
 # Clean, per-Hub user-service installer. Keep execution behind main for curl | bash.
-fail() { printf '\n[ERROR] %s\n' "$*" >&2; exit 1; }
-log() { printf '[%s] %s\n' "$1" "$2"; }
-step() { printf '\n── %s ──\n' "$*"; }
+# Output style, set up lazily by the first helper that needs it. Colour only on
+# a terminal, without NO_COLOR and with a TERM other than dumb; the spinner only
+# on a terminal stderr. HEIMDALL_INSTALL_PLAIN=1 turns off both. Bash 3.2
+# (macOS) and Termux safe: no associative arrays, no {fd} redirections.
+ui_init() {
+  UI_READY=1 UI_COLOUR=0 UI_SPIN=0 UI_TICK=1 UI_FRAMES='| / - \'
+  UI_LABEL='' UI_DEPTH=0 UI_SPIN_PID='' UI_STEP_ERR='' UI_EXIT_CMD=''
+  [ "${HEIMDALL_INSTALL_PLAIN:-0}" != 1 ] && [ "${TERM:-}" != dumb ] || return 0
+  # https://no-color.org: any non-empty NO_COLOR.
+  [ -n "${NO_COLOR:-}" ] || UI_COLOUR=1
+  UI_SPIN=1
+  case "${LC_ALL:-${LC_CTYPE:-${LANG:-}}}" in
+    *[Uu][Tt][Ff]-8*|*[Uu][Tt][Ff]8*) UI_FRAMES='⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏' ;;
+  esac
+  # BusyBox sleep may reject fractions; the spinner then ticks once a second.
+  if sleep 0.01 2>/dev/null; then UI_TICK=0.2; fi
+}
+# Whether fd $1 gets colour.
+ui_colour() {
+  [ -n "${UI_READY:-}" ] || ui_init
+  [ "$UI_COLOUR" = 1 ] && [ -t "$1" ]
+}
+# Erase a running spinner's line before writing to fd $1, when it is a terminal.
+ui_clear_line() {
+  if [ -n "${UI_SPIN_PID:-}" ] && [ -t "$1" ]; then printf '\r\033[K' >&"$1"; fi
+}
+ui_duration() {
+  if [ "$1" -ge 60 ]; then printf '%dm%02ds' "$(($1 / 60))" "$(($1 % 60))"; else printf '%ds' "$1"; fi
+}
+log() {
+  local c=2
+  case "$1" in OK) c=32 ;; WARN) c=33 ;; ERROR) c=31 ;; esac
+  ui_clear_line 1
+  if ui_colour 1; then printf '\033[%sm[%s]\033[0m %s\n' "$c" "$1" "$2"
+  else printf '[%s] %s\n' "$1" "$2"; fi
+}
+step() {
+  ui_clear_line 1
+  if ui_colour 1; then printf '\n\033[1m── %s ──\033[0m\n' "$*"; else printf '\n── %s ──\n' "$*"; fi
+}
+# Stops any spinner first, showing the failing step's stderr, then exits the shell.
+fail() {
+  spin_stop --failed
+  if ui_colour 2; then printf '\n\033[1;31m[ERROR]\033[0m %s\n' "$*" >&2
+  else printf '\n[ERROR] %s\n' "$*" >&2; fi
+  exit 1
+}
+# Redraws the spinner on fd 4 (the terminal) until killed or until the
+# installer shell itself is gone, so no exit path can leave it running.
+ui_ticker() {
+  local frames=($UI_FRAMES) i=0 e label="$UI_LABEL" cols=80
+  cols="$(stty size < /dev/tty 2>/dev/null)" && cols="${cols#* }" && [ "$cols" -gt 20 ] 2>/dev/null || cols=80
+  [ "${#label}" -le $((cols - 14)) ] || label="${label:0:$((cols - 17))}..."
+  while kill -0 "$UI_SHELL_PID" 2>/dev/null; do
+    e=$((SECONDS - UI_START))
+    # Inline time format: no subshell per tick.
+    if [ "$e" -ge 60 ]; then e="$((e / 60))m$((e % 60 / 10))$((e % 10))s"; else e="${e}s"; fi
+    printf '\r  %s %s  %s\033[K' "${frames[$((i % ${#frames[@]}))]}" "$label" "$e" >&4
+    i=$((i + 1))
+    sleep "$UI_TICK" || return 0
+  done
+}
+ui_keep_exit_cmd() { UI_EXIT_CMD="$2"; }
+ui_exit_trap() {
+  local cmd="$UI_EXIT_CMD"
+  spin_stop --failed
+  eval "$cmd"
+}
+# spin_start LABEL: until the matching spin_stop, show LABEL with a spinner and
+# the elapsed time on a terminal (stderr), or print a plain start line. Only the
+# ticker runs in the background: the work stays in this shell (it may set
+# globals, and fail must exit it). Meanwhile the step's stderr is held in a file
+# (spin_stop replays it, fail shows its tail) and the EXIT trap also stops the
+# spinner. Nested calls only count depth.
+spin_start() {
+  [ -n "${UI_READY:-}" ] || ui_init
+  if [ "$UI_DEPTH" -gt 0 ]; then UI_DEPTH=$((UI_DEPTH + 1)); return 0; fi
+  UI_DEPTH=1 UI_LABEL="$1" UI_START=$SECONDS UI_STEP_ERR='' UI_EXIT_CMD=''
+  local dir="${work_dir:-}"
+  [ -d "$dir" ] || dir="${TMPDIR:-/tmp}"
+  if [ "$UI_SPIN" = 1 ] && [ -t 2 ] && UI_STEP_ERR="$(mktemp "$dir/.step-stderr.XXXXXX")"; then
+    # Chain the current EXIT trap (trap -p into a file: bash 3.2 has no
+    # parent traps inside $(...)).
+    trap -p EXIT > "$UI_STEP_ERR"
+    if [ -s "$UI_STEP_ERR" ]; then eval "ui_keep_exit_cmd $(sed 's/^trap //' "$UI_STEP_ERR")"; fi
+    : > "$UI_STEP_ERR"
+    trap ui_exit_trap EXIT
+    exec 4>&2 2>"$UI_STEP_ERR"
+    UI_SHELL_PID=$$
+    ui_ticker < /dev/null &
+    UI_SPIN_PID=$!
+  else
+    UI_STEP_ERR=''
+    log INFO "$1"
+  fi
+}
+# spin_stop [TAG MESSAGE | --failed]: end the spinner and replay the step's
+# stderr, then print TAG MESSAGE, by default "[OK] LABEL (time)". --failed
+# (fail, the EXIT trap) prints only the tail of that stderr.
+spin_stop() {
+  [ -n "${UI_READY:-}" ] && [ "$UI_DEPTH" -gt 0 ] || return 0
+  if [ "${1:-}" != --failed ] && [ "$UI_DEPTH" -gt 1 ]; then
+    UI_DEPTH=$((UI_DEPTH - 1))
+    if [ "$#" -ge 2 ]; then log "$1" "$2"; fi
+    return 0
+  fi
+  local elapsed=$((SECONDS - UI_START)) label="$UI_LABEL" err="$UI_STEP_ERR"
+  UI_DEPTH=0 UI_LABEL='' UI_STEP_ERR=''
+  if [ -n "$UI_SPIN_PID" ]; then
+    kill "$UI_SPIN_PID" 2>/dev/null || :
+    wait "$UI_SPIN_PID" 2>/dev/null || :
+    UI_SPIN_PID=''
+    printf '\r\033[K' >&4
+    exec 2>&4 4>&-
+    if [ -n "$UI_EXIT_CMD" ]; then trap -- "$UI_EXIT_CMD" EXIT; else trap - EXIT; fi
+    UI_EXIT_CMD=''
+  fi
+  if [ -n "$err" ]; then
+    if [ "${1:-}" = --failed ]; then tail -n 20 "$err" | sed 's/^/  | /' >&2
+    else cat "$err" >&2; fi
+    rm -f "$err"
+  fi
+  [ "${1:-}" != --failed ] || return 0
+  if [ "$#" -ge 2 ]; then log "$1" "$2"; else log OK "$label ($(ui_duration "$elapsed"))"; fi
+}
 # Termux (Android) exports TERMUX_VERSION and keeps $PREFIX in the app's data dir.
 is_termux() {
   [ -n "${TERMUX_VERSION:-}" ] && return 0
@@ -74,39 +196,43 @@ identity_missing() {
   done
   return 0
 }
+# Small downloads (release list, SHA256SUMS) under a spinner; curl's error is
+# shown and its status returned on failure.
 download() {
+  local status=0
+  spin_start "Fetching ${2##*/}"
   curl --fail --location --silent --show-error --connect-timeout 15 \
-    --max-time 600 --speed-limit 1024 --speed-time 60 "$1" --output "$2"
+    --max-time 600 --speed-limit 1024 --speed-time 60 "$1" --output "$2" || status=$?
+  if [ "$status" -eq 0 ]; then spin_stop; return 0; fi
+  spin_stop --failed
+  log ERROR "Download failed (curl exit $status): $1"
+  return "$status"
 }
-# Large downloads show curl's progress bar on a terminal; quiet otherwise.
+# Large downloads show curl's progress bar on a terminal (not with
+# HEIMDALL_INSTALL_PLAIN=1); quiet otherwise.
 download_progress() {
   local quiet=--silent
-  [ -t 2 ] && quiet=--progress-bar
+  [ -n "${UI_READY:-}" ] || ui_init
+  if [ "$UI_SPIN" = 1 ] && [ -t 2 ]; then quiet=--progress-bar; fi
   curl --fail --location $quiet --show-error --connect-timeout 15 \
     --max-time 600 --speed-limit 1024 --speed-time 60 "$1" --output "$2"
 }
 HUB_CONNECT_TIMEOUT_SECONDS=20
 # Explicit Hub reachability check before anything is installed: one fixed
-# budget, a visible timer on a terminal, and curl's exact reason on failure
-# (DNS, TLS verification, refused, timeout) instead of a silent hang or an
-# unexplained half-second failure. Any HTTP answer counts: a Hub behind
+# budget, a spinner with the elapsed time on a terminal, and curl's exact reason
+# on failure (DNS, TLS verification, refused, timeout) instead of a silent hang
+# or an unexplained half-second failure. Any HTTP answer counts: a Hub behind
 # forward-auth redirects unauthenticated requests, which still proves TCP+TLS.
 wait_for_hub() {
-  local url="$hub_url/api/v1/health" err="$work_dir/hub-check.err" out="$work_dir/hub-check.code" ticks=0 pid
-  log INFO "Checking Hub $hub_url (up to ${HUB_CONNECT_TIMEOUT_SECONDS}s)"
-  curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+  local url="$hub_url/api/v1/health" err="$work_dir/hub-check.err" code status=0 start=$SECONDS
+  spin_start "Checking Hub $hub_url (up to ${HUB_CONNECT_TIMEOUT_SECONDS}s)"
+  code="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
     --connect-timeout "$HUB_CONNECT_TIMEOUT_SECONDS" --max-time "$HUB_CONNECT_TIMEOUT_SECONDS" \
-    "$url" > "$out" 2> "$err" &
-  pid=$!
-  while kill -0 "$pid" 2>/dev/null; do
-    sleep 0.5; ticks=$((ticks+1))
-    [ ! -t 2 ] || printf '\r  waiting for Hub… %2ds / %ds ' "$((ticks/2))" "$HUB_CONNECT_TIMEOUT_SECONDS" >&2
-  done
-  [ ! -t 2 ] || printf '\r%40s\r' '' >&2
-  if wait "$pid"; then
-    log OK "Hub reachable: HTTP $(cat "$out") after $((ticks/2))s"
+    "$url" 2> "$err")" || status=$?
+  if [ "$status" -eq 0 ]; then
+    spin_stop OK "Hub reachable: HTTP $code after $((SECONDS - start))s"
   else
-    fail "Hub $hub_url not reachable (gave up after $((ticks/2))s of ${HUB_CONNECT_TIMEOUT_SECONDS}s): $(tr -d '\n' < "$err")"
+    fail "Hub $hub_url not reachable (gave up after $((SECONDS - start))s of ${HUB_CONNECT_TIMEOUT_SECONDS}s): $(tr -d '\n' < "$err")"
   fi
 }
 # The helpers below need only bash, POSIX userland, tar and sha256sum/shasum:
@@ -340,13 +466,17 @@ sha256_of() {
   else out="$(shasum -a 256 < "$1")" || return 1; fi
   printf '%s\n' "${out%% *}"
 }
-# Whether file $2 matches the single SHA256SUMS ($1) entry named $3.
+# Whether file $2 matches the single SHA256SUMS ($1) entry named $3. A match
+# is remembered in SHA256_VERIFIED (sums file, name, size) so extract_bundle
+# need not hash a verified cached copy again.
 sha256_matches() {
   local expected actual
+  SHA256_VERIFIED=''
   expected="$(awk -v n="$3" '{ sub(/\r$/, "") } NF == 2 { f = $2; sub(/^\*+/, "", f); if (f == n) { c++; h = $1 } }
     END { if (c == 1) print h; else exit 1 }' "$1")" || return 1
   actual="$(sha256_of "$2")" || return 1
-  [ -n "$actual" ] && [ "$actual" = "$expected" ]
+  [ -n "$actual" ] && [ "$actual" = "$expected" ] || return 1
+  SHA256_VERIFIED="$1|$3|$(($(wc -c < "$2")))"
 }
 # posixpath.normpath for a relative path.
 normpath() {
@@ -361,14 +491,17 @@ normpath() {
   done
   printf '%s\n' "${out:-.}"
 }
-# -rwxr-xr-x -> 755 (setuid/setgid/sticky dropped).
+# -rwxr-xr-x -> MODE_OCTAL=755 (setuid/setgid/sticky dropped). Sets a variable
+# instead of printing: extract_bundle calls it per member, without subshells.
 mode_octal() {
-  local i bit=256 mode=0
+  local i digit=0
+  MODE_OCTAL=''
   for i in 1 2 3 4 5 6 7 8 9; do
-    case "${1:$i:1}" in r|w|x|s|t) mode=$((mode+bit)) ;; esac
-    bit=$((bit/2))
+    case "${1:$i:1}" in
+      r) digit=$((digit+4)) ;; w) digit=$((digit+2)) ;; x|s|t) digit=$((digit+1)) ;;
+    esac
+    if [ $((i % 3)) -eq 0 ]; then MODE_OCTAL="$MODE_OCTAL$digit"; digit=0; fi
   done
-  printf '%o\n' "$mode"
 }
 # Exactly one regular member of extract_bundle's listing (raw, kind, n) named $1
 # (a leading ./ ignored); prints its raw name.
@@ -381,29 +514,46 @@ bundle_member() {
   done
   [ -n "$found" ] && printf '%s\n' "$found"
 }
-# Verify bundle $2 in $1 against $1/SHA256SUMS, then extract only the required
+# Verify bundle $2 in $1 against $1/SHA256SUMS (skipped when sha256_matches
+# just verified this same file, the cached copy), then extract only the required
 # regular binaries, the update supervisor and the provider extension tree into
 # $1. Every member is checked from the archive listing before anything is
 # extracted: no links or unsafe paths outside the extension tree's own links.
+# One verbose listing pass gives names, kinds, link targets and modes.
 extract_bundle() {
   local root="$1" archive="$1/$2" prefix=share/heimdall/extensions
-  sha256_matches "$root/SHA256SUMS" "$archive" "$2" || fail 'SHA-256 verification failed; nothing installed.'
+  spin_start "Verifying and unpacking $2"
+  if [ "${SHA256_VERIFIED:-}" != "$root/SHA256SUMS|$2|$(($(wc -c < "$archive")))" ]; then
+    sha256_matches "$root/SHA256SUMS" "$archive" "$2" || fail 'SHA-256 verification failed; nothing installed.'
+  fi
   local -a raw=() kind=() link=() mode=() select=() bins=()
-  local line i n name binary target seen=$'\n' parent assets=0 helper='' supervisor=''
-  LC_ALL=C tar -tzf "$archive" > "$root/.members" && LC_ALL=C tar -tvzf "$archive" > "$root/.members-long" \
-    || fail 'Unable to list the release bundle; nothing installed.'
-  while IFS= read -r line; do raw[${#raw[@]}]="$line"; done < "$root/.members"
+  local line rest k fields i n name binary target seen=$'\n' parent assets=0 helper='' supervisor=''
+  LC_ALL=C tar -tvzf "$archive" > "$root/.members-long" || fail 'Unable to list the release bundle; nothing installed.'
   while IFS= read -r line; do
-    i=${#kind[@]}
+    i=${#raw[@]}
+    # Columns before the name: GNU and BusyBox tar print mode, owner/group,
+    # size, date, time; bsdtar (macOS) mode, links, owner, group, size, month,
+    # day, time or year. Runs of blanks separate them, one blank precedes the
+    # name. A misparsed name can only fail the checks or the extraction below.
+    rest="${line#"${line%%[ ]*}"}"; rest="${rest#"${rest%%[! ]*}"}"; rest="${rest%% *}"
+    case "$rest" in */*) fields=5 ;; *) fields=8 ;; esac
+    rest="$line"
+    for ((k = 1; k < fields; k++)); do
+      rest="${rest#"${rest%%[ ]*}"}"; rest="${rest#"${rest%%[! ]*}"}"
+    done
+    case "$rest" in *" "?*) rest="${rest#* }" ;; *) fail 'Unreadable release bundle listing; nothing installed.' ;; esac
     # GNU tar marks hard links "h"; bsdtar lists them as "-" ... "link to".
-    case "$line" in -*" link to "*) kind[$i]=h ;; *) kind[$i]="${line:0:1}" ;; esac
-    link[$i]=''
-    [ "${kind[$i]}" != l ] || link[$i]="${line#*" ${raw[$i]} -> "}"
-    mode[$i]="$(mode_octal "$line")"
+    case "$line" in -*" link to "*) k=h ;; *) k="${line:0:1}" ;; esac
+    kind[$i]="$k"; link[$i]=''; mode[$i]=''
+    case "$k" in
+      l) link[$i]="${rest#*" -> "}"; rest="${rest%%" -> "*}" ;;
+      h) rest="${rest%%" link to "*}" ;;
+      -) mode_octal "$line"; mode[$i]="$MODE_OCTAL" ;;
+    esac
+    raw[$i]="$rest"
   done < "$root/.members-long"
-  rm -f "$root/.members" "$root/.members-long"
+  rm -f "$root/.members-long"
   n=${#raw[@]}
-  [ "$n" -eq "${#kind[@]}" ] || fail 'Unreadable release bundle listing; nothing installed.'
   for binary in heimdall ham-bridge ham-pty-host ham-ctl; do
     bins[${#bins[@]}]="$(bundle_member "bin/$binary")" || fail "Missing/unsafe binary: $binary"
   done
@@ -461,6 +611,7 @@ extract_bundle() {
     mv "$stage/$prefix" "$root/$prefix"
   fi
   rm -rf "$stage"
+  spin_stop
 }
 # True when something accepts TCP connections on 127.0.0.1:$1.
 port_busy() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
