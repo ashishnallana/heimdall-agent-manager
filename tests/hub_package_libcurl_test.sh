@@ -7,7 +7,10 @@
 # without those on PATH failed every call at subprocess spawn (production
 # checkout was down on exactly that). This test proves the built package:
 #   1. links libcurl.so.4 and resolves it inside /nix/store (its own closure,
-#      not whatever the host happens to have);
+#      not whatever the host happens to have), to the libcurl pinned in
+#      nix/libcurl-pin.json (nix/libcurl.nix "native": Nix-native packages
+#      link the pinned version's shared library; release binaries link it
+#      statically);
 #   2. does not depend on socat/openssl on PATH any more (the wrapper's PATH
 #      is checked from an EMPTY environment, so a host install cannot mask a
 #      regression either way).
@@ -31,6 +34,11 @@ resolved="$(ldd "$real" | awk '/libcurl\.so\.4/ {print $3}')"
 case "$resolved" in
 	/nix/store/*) echo "PASS: libcurl.so.4 -> $resolved" ;;
 	*) fail "libcurl.so.4 resolved to '$resolved', outside the package closure" ;;
+esac
+pinned="$(sed -n '/"curl"/,/}/s/.*"version": *"\([^"]*\)".*/\1/p' "$repo_root/nix/libcurl-pin.json" | head -n 1)"
+case "$resolved" in
+	*-curl-"$pinned"/*) echo "PASS: the pinned libcurl $pinned" ;;
+	*) fail "libcurl.so.4 resolved to '$resolved', not the pinned curl-$pinned (nix/libcurl-pin.json)" ;;
 esac
 
 prologue="$tmpdir/prologue.sh"

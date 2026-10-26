@@ -255,17 +255,23 @@ perform :: proc(req: Request, t: ^Transfer) -> Error {
 		// certificate that IS revoked; it only tolerates an unknown status.
 		set_ok &= set_long(easy, CURLOPT_SSL_OPTIONS, CURLSSLOPT_REVOKE_BEST_EFFORT)
 	}
-	cainfo, capath, exclusive := trust_anchors(req._test_ca_file)
-	if cainfo != "" {
-		set_ok &= set_ptr(easy, CURLOPT_CAINFO, rawptr(strings.clone_to_cstring(cainfo, context.temp_allocator)))
+	trust := trust_anchors(req._test_ca_file, req._test_ca_blob)
+	if trust.cainfo != "" {
+		set_ok &= set_ptr(easy, CURLOPT_CAINFO, rawptr(strings.clone_to_cstring(trust.cainfo, context.temp_allocator)))
 	}
-	if exclusive {
-		// HAM_TLS_CA_FILE is THE trust anchor: drop the CA directory libcurl was
-		// built with (Debian/Ubuntu: /etc/ssl/certs), which CAINFO alone keeps.
+	if trust.exclusive {
+		// HAM_TLS_CA_FILE is THE trust anchor: drop any CA directory libcurl was
+		// built with (the pinned build has none; an unpinned one may), which
+		// CAINFO alone keeps.
 		_ = set_ptr(easy, CURLOPT_CAPATH, nil)
-	} else if capath != "" {
+	} else if trust.capath != "" {
 		// CAPATH is not supported by every TLS backend (Schannel); not fatal.
-		_ = set_ptr(easy, CURLOPT_CAPATH, rawptr(strings.clone_to_cstring(capath, context.temp_allocator)))
+		_ = set_ptr(easy, CURLOPT_CAPATH, rawptr(strings.clone_to_cstring(trust.capath, context.temp_allocator)))
+	}
+	if trust.blob != "" {
+		// The embedded bundle is a constant: no copy needed.
+		blob := curl_blob{data = raw_data(trust.blob), len = len(trust.blob), flags = CURL_BLOB_NOCOPY}
+		set_ok &= set_ptr(easy, CURLOPT_CAINFO_BLOB, &blob)
 	}
 
 	switch req.method {
@@ -312,20 +318,6 @@ method_cstring :: proc(m: Method) -> string {
 	case .DELETE: return "DELETE\x00"
 	}
 	return "GET\x00"
-}
-
-// trust_anchors keeps the environment contract of the old transports:
-//   HAM_TLS_CA_FILE  set -> that PEM bundle is THE trust anchor (tests, private CAs)
-//   else SSL_CERT_FILE / SSL_CERT_DIR (OpenSSL's variables; honoured explicitly so
-//        the behaviour does not depend on the TLS backend libcurl was built with)
-//   else libcurl's built-in default (system store; Schannel: Windows store).
-@(private)
-trust_anchors :: proc(test_ca_file := "") -> (cainfo: string, capath: string, exclusive: bool) {
-	if test_ca_file != "" do return test_ca_file, "", true
-	if v := strings.trim_space(os.get_env("HAM_TLS_CA_FILE", context.temp_allocator)); v != "" do return v, "", true
-	cainfo = strings.trim_space(os.get_env("SSL_CERT_FILE", context.temp_allocator))
-	capath = strings.trim_space(os.get_env("SSL_CERT_DIR", context.temp_allocator))
-	return
 }
 
 @(private)

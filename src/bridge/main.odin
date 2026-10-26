@@ -75,8 +75,9 @@ main :: proc() {
 		return
 	}
 
-	// --probe-hub <url>: reach the Hub through the bridge's OWN transport
-	// (socat/openssl TLS relay), not curl. The installer runs this after the
+	// --probe-hub <url>: reach the Hub through the bridge's OWN HTTPS client
+	// (src/lib/httpc, its statically linked libcurl), not the curl CLI. The
+	// output names the TLS library and the trust anchors in use. The installer runs this after the
 	// download and before touching any service, because curl succeeding while
 	// this path fails is exactly what a phone showed.
 	if has_flag(os.args, "--probe-hub") {
@@ -93,10 +94,10 @@ main :: proc() {
 		resp, probe_err := httpc.send({method = .GET, url = hub, path = health[:]})
 		defer httpc.response_destroy(&resp)
 		if probe_err != .None {
-			fmt.eprintfln("probe-hub FAILED: no HTTP response from %s through libcurl %s after %v — %s (%s); check TLS trust (HAM_TLS_CA_FILE / SSL_CERT_FILE) and the network", target, httpc.libcurl_version(), time.since(started), httpc.error_string(probe_err), resp.detail)
+			fmt.eprintfln("probe-hub FAILED: no HTTP response from %s through libcurl %s (%s; CA: %s) after %v — %s (%s); check TLS trust (HAM_TLS_CA_FILE / SSL_CERT_FILE) and the network", target, httpc.libcurl_version(), httpc.libcurl_tls_version(), httpc.trust_summary(), time.since(started), httpc.error_string(probe_err), resp.detail)
 			os.exit(1)
 		}
-		fmt.printfln("probe-hub OK: %s -> HTTP %d via libcurl %s in %v", target, resp.status, httpc.libcurl_version(), time.since(started))
+		fmt.printfln("probe-hub OK: %s -> HTTP %d via libcurl %s (%s; CA: %s) in %v", target, resp.status, httpc.libcurl_version(), httpc.libcurl_tls_version(), httpc.trust_summary(), time.since(started))
 		return
 	}
 
@@ -192,6 +193,12 @@ main :: proc() {
 	// Wake state must exist before the hub worker can run a launch, which
 	// records itself via bridge_task_wake_note_launched.
 	bridge_agent_wake_init()
+	// Name the HTTPS client and its trust anchors once, so a host whose CA store
+	// was not found (embedded Mozilla fallback) is visible in the service log.
+	// (Locals, not inline calls: check-http-boundary.sh's library-path pattern
+	// would read `", httpc.lib...` between two string literals as a path.)
+	https_version, https_tls, https_ca := httpc.libcurl_version(), httpc.libcurl_tls_version(), httpc.trust_summary()
+	fmt.println("bridge https client: libcurl", https_version, https_tls, "CA:", https_ca)
 	bridge_hub_runtime_start()
 	// REQ-IMPL-4 / design §7.5: renew the access token at 80% of its lifetime with
 	// jitter, rather than waiting for a 401 — by which time in-flight work has

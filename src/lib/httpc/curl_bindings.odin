@@ -10,31 +10,60 @@ package httpc
 // overridden from outside the package. Its curl_url_get binding also has the
 // wrong return type. Owning ~25 declarations is cheaper than working around it.
 //
-// Linking, one setup per OS:
-//   - Linux / BSD: `system:curl` (the nixpkgs curl in buildInputs, or the host's
-//     libcurl.so.4 for release binaries).
-//   - macOS: `system:curl` (/usr/lib/libcurl.4.dylib, part of the OS).
-//   - Windows: the static `libcurl.lib` (Schannel) that ships with the Odin
-//     toolchain under vendor/curl/lib. A foreign import path is relative to this
-//     source file, so the library is named `system:libcurl.lib` here and the
-//     build passes `/LIBPATH:<odin root>/vendor/curl/lib` (scripts/windows/build.ps1).
+// Linking: every distributed binary links the ONE libcurl pinned in
+// nix/libcurl-pin.json, statically (see README.md "Linking"):
+//   - Linux / BSD release (-define:HAM_CURL_STATIC=true, flake mkReleaseOdinPackage):
+//     libcurl.a + OpenSSL 3 libssl.a/libcrypto.a + libz.a, built by
+//     nix/libcurl.nix against musl and linked -static.
+//   - macOS release (HAM_CURL_STATIC): the same archives built for Darwin, plus
+//     the frameworks the pinned libcurl needs (Apple SecTrust verification and
+//     SystemConfiguration).
+//   - Windows (always static): libcurl.lib (Schannel) and zlib.lib built from
+//     the pin by scripts/windows/build-libcurl.ps1, /MT. A foreign import path
+//     is relative to this source file, so they are named `system:` here and the
+//     build passes /LIBPATH (scripts/windows/build.ps1).
+//   - Nix-native builds (hub units, nix run, nix develop; no define): the same
+//     pinned version as a shared library from its fixed store path.
 //
 // MIN_CURL_VERSION (httpc.odin) is checked at startup by `init`; every symbol
 // declared here exists in that version (see the list there).
 
 import "core:c"
 
+// HAM_CURL_STATIC: link the static archive set above instead of libcurl.so.
+CURL_STATIC :: #config(HAM_CURL_STATIC, false)
+
 when ODIN_OS == .Windows {
 	@(extra_linker_flags = "/NODEFAULTLIB:msvcrt")
 	foreign import libcurl {
 		"system:libcurl.lib",
+		"system:zlib.lib",
+		// What the pinned build's CMake lists (CURL_LIBS) for Schannel without
+		// IDN or LDAP: all ship with Windows.
 		"system:Advapi32.lib",
+		"system:Bcrypt.lib",
 		"system:Crypt32.lib",
-		"system:Normaliz.lib",
 		"system:Secur32.lib",
-		"system:Wldap32.lib",
 		"system:Ws2_32.lib",
 		"system:iphlpapi.lib",
+	}
+} else when ODIN_OS == .Darwin && CURL_STATIC {
+	foreign import libcurl {
+		"system:curl",
+		"system:ssl",
+		"system:crypto",
+		"system:z",
+		"system:CoreFoundation.framework",
+		"system:CoreServices.framework",
+		"system:Security.framework",
+		"system:SystemConfiguration.framework",
+	}
+} else when CURL_STATIC {
+	foreign import libcurl {
+		"system:curl",
+		"system:ssl",
+		"system:crypto",
+		"system:z",
 	}
 } else {
 	foreign import libcurl "system:curl"
@@ -101,6 +130,7 @@ when ODIN_OS == .Windows {
 @(private) CURLOPTTYPE_OBJECTPOINT :: 10000
 @(private) CURLOPTTYPE_FUNCTIONPOINT :: 20000
 @(private) CURLOPTTYPE_OFF_T :: 30000
+@(private) CURLOPTTYPE_BLOB :: 40000
 
 @(private) CURLOPT_WRITEDATA :: CURLoption(CURLOPTTYPE_OBJECTPOINT + 1)
 @(private) CURLOPT_PROXY :: CURLoption(CURLOPTTYPE_OBJECTPOINT + 4)
@@ -139,6 +169,7 @@ when ODIN_OS == .Windows {
 @(private) CURLOPT_CURLU :: CURLoption(CURLOPTTYPE_OBJECTPOINT + 282)
 @(private) CURLOPT_PREREQFUNCTION :: CURLoption(CURLOPTTYPE_FUNCTIONPOINT + 312)
 @(private) CURLOPT_PREREQDATA :: CURLoption(CURLOPTTYPE_OBJECTPOINT + 313)
+@(private) CURLOPT_CAINFO_BLOB :: CURLoption(CURLOPTTYPE_BLOB + 309)
 
 @(private) CURLINFO_LONG :: 0x200000
 @(private) CURLINFO_RESPONSE_CODE :: CURLINFO(CURLINFO_LONG + 2)
@@ -151,6 +182,16 @@ when ODIN_OS == .Windows {
 @(private) CURL_PREREQFUNC_OK :: c.int(0)
 @(private) CURLSSLOPT_REVOKE_BEST_EFFORT :: c.long(1 << 3) // 7.70.0, Schannel only
 @(private) CURLVERSION_FIRST :: c.int(0)
+@(private) CURL_VERSION_SSL :: c.int(1 << 2)
+
+// struct curl_blob (CURLOPT_*_BLOB, 7.71.0). libcurl copies the struct;
+// with CURL_BLOB_NOCOPY the data must outlive the transfer.
+@(private) curl_blob :: struct {
+	data:  rawptr,
+	len:   c.size_t,
+	flags: c.uint,
+}
+@(private) CURL_BLOB_NOCOPY :: c.uint(0)
 
 // CURLUPart
 @(private) CURLUPART_URL :: c.int(0)

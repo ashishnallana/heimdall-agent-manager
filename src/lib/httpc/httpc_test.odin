@@ -659,6 +659,76 @@ tls_end_to_end_with_test_ca :: proc(t: ^testing.T) {
 	r2, e2 := send({method = .GET, url = by_ip, timeout_ms = 5000, _test_ca_file = cert})
 	response_destroy(&r2)
 	testing.expectf(t, e2 == .Certificate, "IP not in the certificate: %v", e2)
+	// The in-memory bundle path (CURLOPT_CAINFO_BLOB) that the embedded Linux
+	// fallback uses: the same CA verifies; an unrelated bundle does not.
+	pem, rerr := os.read_entire_file(cert, context.temp_allocator)
+	if !testing.expect(t, rerr == nil) do return
+	r3, e3 := send({method = .GET, url = good, timeout_ms = 5000, _test_ca_blob = string(pem)})
+	defer response_destroy(&r3)
+	testing.expectf(t, e3 == .None && r3.status == 200, "CA blob: err=%v status=%d detail=%s", e3, r3.status, r3.detail)
+	other_key := fmt.tprintf("%s/other-key.pem", dir)
+	other := fmt.tprintf("%s/other.pem", dir)
+	gen2, _, _, gen2_err := os.process_exec(os.Process_Desc{command = []string{
+		"openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", other_key, "-out", other,
+		"-days", "1", "-subj", "/CN=other",
+	}}, context.temp_allocator)
+	if !testing.expect(t, gen2_err == nil && gen2.exited && gen2.success) do return
+	other_pem, _ := os.read_entire_file(other, context.temp_allocator)
+	r4, e4 := send({method = .GET, url = good, timeout_ms = 5000, _test_ca_blob = string(other_pem)})
+	response_destroy(&r4)
+	testing.expectf(t, e4 == .Certificate, "unrelated CA blob: %v", e4)
+}
+
+// ---- default trust anchors (ca.odin) -------------------------------------------------
+
+@(test)
+ca_probe_prefers_files_then_hashed_dirs_then_embedded :: proc(t: ^testing.T) {
+	dir := test_tmp_dir("ca-probe")
+	defer _ = os.remove_all(dir)
+	empty := fmt.tprintf("%s/empty.pem", dir)
+	bundle := fmt.tprintf("%s/bundle.pem", dir)
+	missing := fmt.tprintf("%s/missing.pem", dir)
+	plain_dir := fmt.tprintf("%s/plain", dir)
+	hashed_dir := fmt.tprintf("%s/hashed", dir)
+	testing.expect(t, os.write_entire_file(empty, []byte{}) == nil)
+	testing.expect(t, os.write_entire_file(bundle, transmute([]byte)string("-----BEGIN CERTIFICATE-----\n")) == nil)
+	testing.expect(t, os.make_directory(plain_dir) == nil)
+	testing.expect(t, os.make_directory(hashed_dir) == nil)
+	testing.expect(t, os.write_entire_file(fmt.tprintf("%s/README", plain_dir), []byte{'x'}) == nil)
+	testing.expect(t, os.write_entire_file(fmt.tprintf("%s/5ad8a5d6.0", hashed_dir), []byte{'x'}) == nil)
+
+	src, path := probe_ca_locations({missing, empty, bundle}, {hashed_dir}, true)
+	testing.expect_value(t, src, Ca_Source.System_File)
+	testing.expect_value(t, path, bundle)
+	delete(path)
+	// A directory instead of a file does not count as a bundle.
+	src, path = probe_ca_locations({missing, empty, hashed_dir}, {plain_dir, hashed_dir}, true)
+	testing.expect_value(t, src, Ca_Source.System_Dir)
+	testing.expect_value(t, path, hashed_dir)
+	delete(path)
+	// An existing but empty /etc/ssl/certs (no ca-certificates) falls through.
+	src, path = probe_ca_locations({missing}, {plain_dir, missing}, true)
+	testing.expect_value(t, src, Ca_Source.Embedded)
+	src, path = probe_ca_locations({missing}, {plain_dir}, false)
+	testing.expect_value(t, src, Ca_Source.Backend)
+}
+
+@(test)
+ca_hash_link_names :: proc(t: ^testing.T) {
+	testing.expect(t, is_hash_link_name("5ad8a5d6.0"))
+	testing.expect(t, is_hash_link_name("ABCDEF01.12"))
+	testing.expect(t, !is_hash_link_name("5ad8a5d6.r0"), "CRL links are not certificates")
+	testing.expect(t, !is_hash_link_name("5ad8a5d6"))
+	testing.expect(t, !is_hash_link_name("ca-certificates.crt"))
+	testing.expect(t, !is_hash_link_name("5ad8a5dg.0"))
+}
+
+@(test)
+ca_test_overrides_are_exclusive :: proc(t: ^testing.T) {
+	a := trust_anchors(test_ca_file = "/x/ca.pem")
+	testing.expect(t, a.exclusive && a.cainfo == "/x/ca.pem" && a.capath == "" && a.blob == "")
+	b := trust_anchors(test_ca_blob = "PEM")
+	testing.expect(t, b.exclusive && b.blob == "PEM" && b.cainfo == "")
 }
 
 @(private = "file")

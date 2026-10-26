@@ -651,13 +651,14 @@ connects outbound to the hub and never needs to be publicly reachable itself.
 
 On any Linux (x86_64, arm64) or macOS (Intel, Apple Silicon) machine, install
 prebuilt binaries with the one-line installer — no Nix, no Odin, no Rust
-toolchain, no source checkout. The bridge links the host's libcurl (≥ 7.80:
-Debian 12+, Ubuntu 22.04+, macOS 13+); for an HTTPS or WSS hub, also install
-`socat` first:
+toolchain, no source checkout. The binaries carry their own HTTPS client
+(libcurl, statically linked; the Linux binaries are fully static and run on any
+distribution, Alpine and old glibc included), so no libcurl or OpenSSL is
+needed. For an HTTPS or WSS hub, install `socat` first:
 
 ```bash
-sudo apt install socat libcurl4  # Debian/Ubuntu (libcurl4t64 on Ubuntu 24.04)
-brew install socat               # macOS (libcurl is part of the OS)
+sudo apt install socat  # Debian/Ubuntu
+brew install socat      # macOS
 ```
 
 The installer checks this dependency before any download or write and stops with
@@ -762,12 +763,26 @@ want it gone:
   then deleted. Whatever `openssl` sits there now is yours or your package
   manager's, and it stays.
 
-The bridge's HTTPS client is **libcurl** (`src/lib/httpc`), linked from the
-host and not bundled: Linux needs `libcurl.so.4` ≥ 7.80 (Debian 12+,
-Ubuntu 22.04+, Fedora 37+; `sudo apt install libcurl4`), macOS uses the
-system `/usr/lib/libcurl.4.dylib` (macOS 13+). macOS 12 (libcurl 7.79) is
-too old. libcurl honours `HAM_TLS_CA_FILE`, then `SSL_CERT_FILE` /
-`SSL_CERT_DIR`, then the system trust store, and never uses a proxy from the
+The bridge's HTTPS client is **libcurl** (`src/lib/httpc`), linked
+**statically** at the version pinned in `nix/libcurl-pin.json` (currently
+8.23.0), so nothing is needed from the host:
+
+- Linux: fully static (musl) with OpenSSL 3 and zlib inside — no glibc, no
+  libcurl, no OpenSSL on the host; it runs on Alpine, Debian 11, Ubuntu 20.04+,
+  Fedora and anything else with a Linux kernel.
+- macOS: OpenSSL 3 and zlib inside; certificates are verified by Apple's
+  SecTrust (the system keychains and trust settings).
+- Windows: Schannel and the Windows certificate store.
+
+Trust anchors, in order: `HAM_TLS_CA_FILE` (that bundle only), then
+`SSL_CERT_FILE` / `SSL_CERT_DIR`, then the system store. On Linux the system
+store is the first of `/etc/ssl/certs/ca-certificates.crt`,
+`/etc/pki/tls/certs/ca-bundle.crt`,
+`/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem`, `/etc/ssl/ca-bundle.pem`,
+`/etc/ssl/cert.pem` that exists, else `/etc/ssl/certs` when it holds hashed
+certificates, else a Mozilla CA bundle embedded in the binary (so a minimal
+container without `ca-certificates` still connects). `ham-bridge --probe-hub
+<hub>` prints which one it used. The bridge never uses a proxy from the
 environment.
 
 `socat` (the default bridge → hub **WebSocket** TLS transport) is not bundled;
@@ -902,7 +917,7 @@ refused by a lock in `%APPDATA%\heimdall\bridges\.install-lock`.
 | `ham-bridge` | Odin binary — agent supervisor, shell job executor, fs explorer |
 | `ham-pty-host` | Rust binary — spawns agent CLIs in real PTYs (replaces tmux wrapper) |
 | `ham-ctl` | CLI used by agents to read/send messages, update tasks, etc. |
-| libcurl ≥ 7.80 | HTTPS client for every bridge → hub REST call (`libcurl.so.4` / `/usr/lib/libcurl.4.dylib`; Windows: linked in statically) |
+| libcurl (built in) | HTTPS client for every bridge → hub REST call; linked statically at the pinned version (`nix/libcurl-pin.json`), nothing to install |
 | `socat` | TLS transport for the bridge → hub WebSocket (default backend; not bundled — system `PATH`) |
 | `openssl` | Legacy fallback WebSocket TLS transport (`HAM_TLS_BACKEND=s_client`; not bundled — system `PATH`) |
 | The agent CLI | `claude`, `codex`, or any other supported CLI |
@@ -920,7 +935,7 @@ Same Nix setup as the hub. The bridge and pty-host are built from the same flake
 | Odin compiler | ≥ 2024-11 (LLVM 18/21) | Compiles bridge, ctl |
 | Rust toolchain | stable (≥ 1.77) | Compiles ham-pty-host |
 | cargo | (with Rust) | Rust build tool |
-| libcurl (dev headers not needed) | ≥ 7.80 | HTTPS client (`src/lib/httpc`, `system:curl`) |
+| libcurl (dev headers not needed) | the pin in `nix/libcurl-pin.json` (≥ 8.11 accepted unpinned) | HTTPS client (`src/lib/httpc`; `nix develop` provides the pinned build) |
 | socat | ≥ 1.7 | Bridge → hub WebSocket TLS tunnel |
 | openssl / libssl | ≥ 1.1 | WebSocket TLS; socat OpenSSL engine |
 
@@ -929,12 +944,14 @@ Same Nix setup as the hub. The bridge and pty-host are built from the same flake
 **With Nix**
 
 ```bash
-# Build bridge binary (links nixpkgs libcurl; socat + openssl on PATH via wrapProgram)
+# Build bridge binary (links the pinned libcurl's shared library from the store;
+# socat + openssl on PATH via wrapProgram)
 nix build .#ham-bridge
 
 # Release binaries for the public tarballs (no nix store references — these are
-# what the release workflow ships; REQ-INST-16). Linux: host glibc + libcurl.so.4,
-# FHS loader; ham-pty-host fully static.
+# what the release workflow ships; REQ-INST-16). Linux: fully static musl ELFs
+# with the pinned libcurl + OpenSSL 3 + zlib linked in; macOS: the same libraries
+# static, only system frameworks dynamic; ham-pty-host fully static.
 nix build .#release-ham-bridge .#release-ham-ctl .#release-ham-pty-host .#release-heimdall
 
 # Build pty-host (Rust — hermetic crane build)
@@ -1269,11 +1286,13 @@ Termux at run time from `TERMUX_VERSION` or a `$PREFIX` under `/data/data/com.te
 
 **Why a separate bundle:** Android runs every app process, Termux included, under a
 seccomp allowlist derived from bionic, and kills the process (`SIGSYS`) on any other
-syscall. The `linux-arm64` binaries are statically linked against glibc, which calls
-`set_robust_list` at process start before `main`. Android blocks that call, so they die
-on launch. The `termux-arm64` bundle has the same binaries linked statically against
-musl, which makes no blocked call at start-up. Each release checks this in CI with
-`scripts/release/android-seccomp-probe.sh`.
+syscall. glibc calls `set_robust_list` at process start before `main`, and Android
+blocks that call, so a glibc-static binary dies on launch. The `termux-arm64` bundle's
+binaries are linked statically against musl, which makes no blocked call at start-up;
+`scripts/release/android-seccomp-probe.sh` checks this. (Release binaries up to v0.5.3
+were glibc-static or glibc-linked on `linux-arm64`; since the static-libcurl build the
+`linux-arm64` binaries are musl-static too, built by the same recipe. The termux bundle
+stays separate because its build identifies itself as `termux-arm64` for self-update.)
 
 ### Requirements
 
@@ -1351,8 +1370,9 @@ reinstalled, which wipes its Keystore keys), unseal it again from
 ### Self-update
 
 A Termux bridge updates only to the `termux-arm64` bundle. It never falls back to
-`linux-arm64`, because that glibc bundle dies under Android's seccomp filter
-(`set_robust_list`, SIGSYS) and leaves a bridge that cannot restart.
+`linux-arm64`, because a glibc `linux-arm64` bundle (every release up to v0.5.3) dies
+under Android's seccomp filter (`set_robust_list`, SIGSYS) and leaves a bridge that
+cannot restart.
 
 - **Release target.** The termux bundle is built with
   `-define:HAM_RELEASE_TARGET=termux-arm64`. Its bridge reports `target: termux-arm64`

@@ -106,6 +106,9 @@ self_test() {
 		'tests/g.odin|import curl "vendor:curl"'
 		'src/hub/h.odin|@(link_name = "curl_easy_perform") perform :: proc(h: rawptr) -> i32 ---'
 		'src/hub/i.odin|	"/usr/lib/x86_64-linux-gnu/libcurl.so.4",'
+		'src/bridge/l.odin|foreign import lc "/nix/store/x-curl-static/lib/libcurl.a"'
+		'src/ctl/m.odin|	"system:libcurl.lib",'
+		'src/manager/n.odin|foreign import lc { "system:curl", "system:ssl" }'
 		'tools/j/k.odin|foreign import lc "system:curl"'
 	)
 	local entry rel content

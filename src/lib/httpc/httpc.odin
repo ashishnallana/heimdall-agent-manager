@@ -24,21 +24,28 @@ import "core:strings"
 import "core:sync"
 import contracts "odin_test:contracts"
 
-// MIN_CURL_VERSION is the oldest libcurl this package runs against (checked by
-// init, before any other libcurl call). 7.80.0 is set by the newest thing used:
-//   CURLOPT_PREREQFUNCTION/PREREQDATA  7.80.0  (may_have_sent)
-// Everything else is older: curl_url/curl_url_set/curl_url_get/curl_url_cleanup,
-// CURLU_URLENCODE, CURLU_APPENDQUERY 7.62.0; CURLOPT_CURLU 7.63.0;
-// CURLOPT_XFERINFOFUNCTION 7.32.0; CURLOPT_PROTOCOLS/REDIR_PROTOCOLS 7.19.4;
-// CURLOPT_ACCEPT_ENCODING 7.21.6; *_LARGE / *_MS options, curl_easy_escape,
-// curl_slist_*, curl_version_info, curl_global_init and CURLOPT_HEADERFUNCTION
-// predate 7.20. Response headers are collected with CURLOPT_HEADERFUNCTION, not
-// curl_easy_header (7.83/7.84), so no binding names a symbol missing from 7.80:
-// on an older libcurl the binary still loads and init() reports the version.
-// CURLE_TOO_LARGE (8.6) is only a code value we map, not a symbol.
-// The later WebSocket migration (curl_ws_*) needs 8.11.0.
-MIN_CURL_VERSION :: 0x075000
-MIN_CURL_VERSION_TEXT :: "7.80.0"
+// MIN_CURL_VERSION is the oldest libcurl this package accepts (checked by
+// init, before any other libcurl call). Distributed binaries link the pinned
+// libcurl statically (nix/libcurl-pin.json, CURL_PINNED_VERSION below), so this
+// floor only matters for an unpinned build against some other libcurl.
+// 8.11.0 is the version the curl_ws_* WebSocket migration needs; what is bound
+// today needs less: CURLOPT_PREREQFUNCTION/PREREQDATA 7.80.0 (may_have_sent),
+// CURLOPT_CAINFO_BLOB 7.77.0, curl_url/curl_url_set/curl_url_get/
+// curl_url_cleanup, CURLU_URLENCODE, CURLU_APPENDQUERY 7.62.0; CURLOPT_CURLU
+// 7.63.0; CURLOPT_XFERINFOFUNCTION 7.32.0; CURLOPT_PROTOCOLS/REDIR_PROTOCOLS
+// 7.19.4; CURLOPT_ACCEPT_ENCODING 7.21.6; *_LARGE / *_MS options,
+// curl_easy_escape, curl_slist_*, curl_version_info, curl_global_init and
+// CURLOPT_HEADERFUNCTION predate 7.20. CURLE_TOO_LARGE (8.6) is only a code
+// value we map, not a symbol.
+MIN_CURL_VERSION :: 0x080b00
+MIN_CURL_VERSION_TEXT :: "8.11.0"
+
+// CURL_PINNED_VERSION is the exact libcurl version this binary was built to
+// link (-define:HAM_CURL_VERSION=<x.y.z>, read from nix/libcurl-pin.json by the
+// flake and scripts/windows/build.ps1). When set, init refuses any other
+// version: a static build always matches, so a mismatch means the link picked
+// up some other libcurl. "" (a plain `odin build`) checks only the floor.
+CURL_PINNED_VERSION :: #config(HAM_CURL_VERSION, "")
 
 // MAX_RESPONSE_HEADER_BYTES caps the headers of one response (all lines,
 // counted per status line); more is .Too_Large.
@@ -161,6 +168,9 @@ Request :: struct {
 	// not mutate the process environment while other tests read it. Production
 	// code configures trust through the environment.
 	_test_ca_file:      string,
+	// Tests only: a PEM bundle in memory, loaded with CURLOPT_CAINFO_BLOB as
+	// the embedded Linux fallback is (exclusive, like _test_ca_file).
+	_test_ca_blob:      string,
 }
 
 Error :: enum u8 {
@@ -271,6 +281,7 @@ ok_status :: proc(status: int) -> bool {
 @(private) g_init_ok: bool
 @(private) g_init_message: string
 @(private) g_version_text: string
+@(private) g_tls_text: string
 
 // init initialises libcurl exactly once (curl_global_init is not thread-safe on
 // older libcurl, so call this from main() before starting threads) and checks the
@@ -288,13 +299,32 @@ init :: proc() -> (ok: bool, message: string) {
 			g_init_message = fmt.aprintf("libcurl %s is too old: Heimdall needs libcurl >= %s", g_version_text, MIN_CURL_VERSION_TEXT, allocator = runtime.heap_allocator())
 			return
 		}
+		if CURL_PINNED_VERSION != "" && g_version_text != CURL_PINNED_VERSION {
+			g_init_message = fmt.aprintf("libcurl %s is linked but this build pins libcurl %s (nix/libcurl-pin.json): the build linked the wrong library", g_version_text, CURL_PINNED_VERSION, allocator = runtime.heap_allocator())
+			return
+		}
+		if info.features & CURL_VERSION_SSL == 0 {
+			g_init_message = fmt.aprintf("libcurl %s was built without TLS support", g_version_text, allocator = runtime.heap_allocator())
+			return
+		}
+		if info.ssl_version != nil {
+			g_tls_text = strings.clone(string(info.ssl_version), runtime.heap_allocator())
+		}
 		if rc := curl_global_init(CURL_GLOBAL_ALL); rc != CURLE_OK {
 			g_init_message = fmt.aprintf("libcurl: curl_global_init failed: %s", curl_easy_strerror(rc), allocator = runtime.heap_allocator())
 			return
 		}
+		ca_init()
 		g_init_ok = true
 	})
 	return g_init_ok, g_init_message
+}
+
+// libcurl_tls_version is the linked libcurl's TLS library ("OpenSSL/3.6.4",
+// "Schannel"; "" before init).
+libcurl_tls_version :: proc() -> string {
+	_, _ = init()
+	return g_tls_text
 }
 
 // libcurl_version is the linked libcurl's version string ("" before init).
