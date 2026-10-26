@@ -1,5 +1,5 @@
 // Sidebar cleanup: no Conversations / Task Chains entries, '+ New conversation'
-// instead of Home, no task chain list, and a fully hidden (zero-width) sidebar
+// instead of Home, a shared scrolling task-chain list, and a fully hidden (zero-width) sidebar
 // with a top-left "toggle + app name" control that reopens it (Jetski style).
 import './helpers/vaultEndpointHarness.ts';
 import { test } from 'node:test';
@@ -35,8 +35,12 @@ test('primary nav: "+ New conversation" replaces Home; Conversations and Task Ch
   assert.match(source, /'\/chains', '\/chains\/new'/);
 });
 
-test('sidebar shows no task chain list (no chain tree, no pinned chains)', () => {
+test('sidebar chains share the navigation scroller; legacy chain tree and pinned rail stay removed', () => {
   assert.doesNotMatch(source, /ProjectChainTree|CollapsedPinnedChains/);
+  assert.match(source, /data-debug-id="shell-sidebar-scroll" className="min-h-0 flex-1 overflow-y-auto p-3"/);
+  assert.match(source, /<\/nav>\s*<SidebarTaskChains/);
+  assert.match(source, /data-debug-id="shell-sidebar-account" className={`shrink-0 border-t/);
+  assert.doesNotMatch(source, /useFetchTaskChainGroupsQuery/);
   assert.equal(fs.existsSync(path.join(REPO_ROOT, 'src/ui/components/chains/ProjectChainTree.tsx')), false);
 });
 

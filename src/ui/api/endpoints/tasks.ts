@@ -1,8 +1,9 @@
+import { announceTaskChainCreated } from '../taskChainCreationEvents';
 import type { VaultKeyring } from '../../utils/vaultKeyring';
 import * as daemonApi from '../daemonApi';
 import { upsertTaskLogEvent } from '../taskCache';
 import { heimdallApi, withSessionQuery } from '../heimdallApi';
-import { cookieJsonFetch, cookieMutation } from '../cookieFetch';
+import { cookieJsonFetch, cookieJsonFetchEnvelope, cookieMutation } from '../cookieFetch';
 import { isVaultArmored, encryptVaultText, decryptVaultText, getActiveVaultKey } from '../../utils/vaultContent';
 import { decryptChainRecord, decryptChainList } from '../../utils/vaultChains';
 import { decryptTaskRecord, decryptTaskList, decryptTaskComments } from '../../utils/vaultTasks';
@@ -496,6 +497,38 @@ export function normalizeTaskChainConversation(raw: any, chainId: string): TaskC
   };
 }
 
+/** Preserve the palette's per-project previews without a live query subscription.
+ * Ciphertext stays reactive through VaultText/title warming; no key-triggered fetch.
+ */
+export async function fetchSidebarTaskChainGroups(signal: AbortSignal): Promise<ChainProjectGroup[]> {
+  const raw = await cookieJsonFetch('/task-chains', { signal });
+  const groups = Array.isArray(raw) ? raw : raw?.groups;
+  if (!Array.isArray(groups)) throw new Error('Invalid task chain group response');
+  return groups.map(normalizeChainProjectGroup);
+}
+
+/** Sidebar pages are request-driven, outside RTK subscriptions/WS invalidation.
+ * Keep ciphertext here: VaultText reacts to key installation without refetching.
+ */
+export async function fetchSidebarTaskChainPage({ cursor, signal }: { cursor: string; signal: AbortSignal }) {
+  const params = new URLSearchParams({ flat: '1', limit: '20' });
+  if (cursor) params.set('cursor', cursor);
+  const raw = await cookieJsonFetchEnvelope(`/task-chains?${params}`, { signal });
+  const chains = raw?.data;
+  const page = raw?.page;
+  if (!Array.isArray(chains) || chains.some(c => !c || typeof c !== 'object'
+    || typeof (c.chain_id ?? c.chainId) !== 'string' || !(c.chain_id ?? c.chainId).trim())
+    || typeof page?.has_more !== 'boolean' || !(page?.next_cursor === null || typeof page?.next_cursor === 'string')
+    || (page.has_more && (!page.next_cursor || page.next_cursor === cursor))) {
+    throw new Error('Invalid task chain page response');
+  }
+  return {
+    items: chains.map(normalizeChainListItem),
+    next_cursor: (page.next_cursor || '') as string,
+    has_more: page.has_more as boolean,
+  };
+}
+
 export const tasksApi = heimdallApi.injectEndpoints({
   endpoints: (build) => ({
     // Home browses the complete owned list; grouped previews omit older chains.
@@ -828,6 +861,7 @@ export const tasksApi = heimdallApi.injectEndpoints({
           if (model) body.model = model;
           if (projectId) body.project_id = projectId;
           const data = await cookieMutation('/task-chains', 'POST', body);
+          announceTaskChainCreated(String(data?.chain_id || data?.chainId || ''));
           return { data };
         } catch (error: any) {
           return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any };

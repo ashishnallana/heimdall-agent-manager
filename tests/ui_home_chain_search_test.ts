@@ -205,92 +205,27 @@ async function waitFor(predicate: () => boolean, act: any, ms = 3000) {
   }
 }
 
-test('a new Main pane renders the home view; picking a recent task chain fills THAT pane', async () => {
-  await withDom('#/conversations/a+_new?focused=_new', async (dom) => {
-    const { createRoot } = await import('react-dom/client');
-    const { act } = await import('react');
-    const { Provider } = await import('react-redux');
-    const { heimdallApi } = await import('../src/ui/api/heimdallApi.ts');
-    const layout = await import('../src/ui/store/workspaceLayoutSlice.ts');
-    const { Workspace } = await import('../src/ui/components/mainWorkspace/Workspace.tsx');
-    const { ShortcutProvider } = await import('../src/ui/services/shortcuts/ShortcutContext.tsx');
-    const store = await makeStore();
-    const doc = dom.window.document;
-    const root = createRoot(doc.getElementById('root')!);
-    try {
-      await act(async () => {
-        root.render(React.createElement(
-          Provider,
-          { store },
-          React.createElement(ShortcutProvider, {}, React.createElement(Workspace, {})),
-        ));
-        await new Promise((r) => setTimeout(r, 40));
-      });
-      const newPane = layout.findPaneByAgent(store.getState().workspaceLayout.tree, 'a') === 'pane-1' ? 'pane-2' : 'pane-1';
-      const frame = () => doc.querySelector(`[data-debug-id="main-pane-frame-${newPane}"]`)!;
-      assert.ok(frame().querySelector('[data-debug-id="home-page-pane"]'), 'the _new pane shows the home view');
-      assert.ok(frame().querySelector('[data-debug-id="new-convo-composer-shell"]'), 'with the new-conversation composer');
-      assert.ok(frame().querySelector('[data-debug-id="home-chain-search-input"]'), 'and the task chain search bar');
-      assert.equal(frame().querySelector('[data-debug-id="home-section-buttons"]'), null, 'global home sections are omitted in a pane');
-
-      await waitFor(() => Boolean(frame().querySelector('[data-debug-id="home-chain-row-chain-3"]')), act);
-      await act(async () => {
-        (frame().querySelector('[data-debug-id="home-chain-row-chain-3"]') as any).click();
-        await new Promise((r) => setTimeout(r, 40));
-      });
-      // REQ-TV2-7: the chain is addressed by chain, not by its coordinator instance.
-      assert.equal(layout.findPaneByAgent(store.getState().workspaceLayout.tree, 'chain:chain-3'), newPane, 'chain target put into the new pane');
-      assert.deepEqual(layout.selectMainAgentIds(store.getState()), ['a', 'chain:chain-3']);
-      assert.equal(dom.window.location.hash, '#/conversations/a+chain:chain-3?focused=chain:chain-3');
-    } finally {
-      await act(async () => root.unmount());
-      store.dispatch(heimdallApi.util.resetApiState());
-    }
-  });
-});
-
-test('home page (route): search bar + last chains, flat; a row opens the chain-addressed coordinator conversation', async () => {
-  await withDom('#/home', async (dom) => {
-    const { createRoot } = await import('react-dom/client');
-    const { act } = await import('react');
-    const { Provider } = await import('react-redux');
-    const { heimdallApi } = await import('../src/ui/api/heimdallApi.ts');
-    const { HomePage } = await import('../src/ui/components/home/HomePage.tsx');
-    const store = await makeStore();
-    const doc = dom.window.document;
-    const root = createRoot(doc.getElementById('root')!);
-    try {
-      await act(async () => {
-        root.render(React.createElement(Provider, { store }, React.createElement(HomePage, {})));
-        await new Promise((r) => setTimeout(r, 40));
-      });
-      assert.ok(doc.querySelector('[data-debug-id="home-chain-search-input"]'));
-      assert.equal(doc.querySelector('[data-debug-id="home-tab-chains"]'), null, 'the Recent tasks tab is replaced');
-      assert.ok(doc.querySelector('[data-debug-id="home-tab-issues"]'));
-      await waitFor(() => Boolean(doc.querySelector('[data-debug-id="home-chain-row-chain-4"]')), act);
-      const rows = Array.from(doc.querySelectorAll('[data-debug-id^="home-chain-row-"]')).map((el: any) => el.getAttribute('data-debug-id'));
-      assert.deepEqual(rows, ['home-chain-row-chain-3', 'home-chain-row-chain-4'], 'newest first, no project grouping headers');
-      await act(async () => {
-        (doc.querySelector('[data-debug-id="home-chain-row-chain-3"]') as any).click();
-      });
-      assert.equal(dom.window.location.hash, '#/conversations/chain:chain-3');
-      // Local search filters the list.
-      const input = doc.querySelector('[data-debug-id="home-chain-search-input"]') as any;
-      await act(async () => {
-        const setter = Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, 'value')!.set!;
-        setter.call(input, 'four');
-        input.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
-        await new Promise((r) => setTimeout(r, 20));
-      });
-      assert.deepEqual(
-        Array.from(doc.querySelectorAll('[data-debug-id^="home-chain-row-"]')).map((el: any) => el.getAttribute('data-debug-id')),
-        ['home-chain-row-chain-4'],
-      );
-    } finally {
-      await act(async () => root.unmount());
-      store.dispatch(heimdallApi.util.resetApiState());
-    }
-  });
+test('new Main pane and Home route keep the launcher but no longer mount a task-chain list', async () => {
+  for (const pane of [false, true]) {
+    await withDom('#/home', async dom => {
+      const { createRoot } = await import('react-dom/client');
+      const { act } = await import('react');
+      const { Provider } = await import('react-redux');
+      const { HomePage } = await import('../src/ui/components/home/HomePage.tsx');
+      const { heimdallApi } = await import('../src/ui/api/heimdallApi.ts');
+      const store = await makeStore();
+      const root = createRoot(dom.window.document.getElementById('root')!);
+      try {
+        await act(async () => root.render(React.createElement(Provider, { store },
+          React.createElement(HomePage, pane ? { pane: { onOpenAgent: () => {} } } : {}))));
+        assert.ok(dom.window.document.querySelector('[data-debug-id="new-conversation-page"]'));
+        assert.equal(dom.window.document.querySelector('[data-debug-id="home-chain-search"]'), null);
+        assert.equal(Boolean(dom.window.document.querySelector('[data-debug-id="home-section-buttons"]')), !pane);
+      } finally {
+        await act(async () => { root.unmount(); store.dispatch(heimdallApi.util.resetApiState()); });
+      }
+    });
+  }
 });
 
 test('launching from a pane fills that pane instead of navigating', () => {
@@ -310,34 +245,6 @@ test('coordinatorFromChainDetail: column first, else the member with role coordi
   );
   assert.equal(coordinatorFromChainDetail({ members: [{ agentInstanceId: 'w', role: 'worker' }] }), '');
   assert.equal(coordinatorFromChainDetail(null), '');
-});
-
-test('a recent chain whose list row lacks the coordinator still opens its conversation (resolved from chain detail)', async () => {
-  await withDom('#/home', async (dom) => {
-    const { createRoot } = await import('react-dom/client');
-    const { act } = await import('react');
-    const { Provider } = await import('react-redux');
-    const { heimdallApi } = await import('../src/ui/api/heimdallApi.ts');
-    const { HomePage } = await import('../src/ui/components/home/HomePage.tsx');
-    const store = await makeStore();
-    const doc = dom.window.document;
-    const root = createRoot(doc.getElementById('root')!);
-    try {
-      await act(async () => {
-        root.render(React.createElement(Provider, { store }, React.createElement(HomePage, {})));
-        await new Promise((r) => setTimeout(r, 40));
-      });
-      await waitFor(() => Boolean(doc.querySelector('[data-debug-id="home-chain-row-chain-4"]')), act);
-      await act(async () => {
-        (doc.querySelector('[data-debug-id="home-chain-row-chain-4"]') as any).click();
-        await new Promise((r) => setTimeout(r, 60));
-      });
-      assert.equal(dom.window.location.hash, '#/conversations/chain:chain-4', 'opens the chain conversation, not the chain page');
-    } finally {
-      await act(async () => root.unmount());
-      store.dispatch(heimdallApi.util.resetApiState());
-    }
-  });
 });
 
 // Interleaved projects include nine chains each in p1/p2 and eight Unassigned.
@@ -833,40 +740,4 @@ test('project archive eligibility refresh resets page without changing chain sna
     assert.equal(el('home-chain-next-btn').disabled, true);
     assert.equal(fixture.requests!.filter((u) => /\/task-chains\?flat=1$/.test(u)).length, 1);
   });
-});
-
-test('new Main pane later-page coordinator replaces that pane and preserves its sibling', async () => {
-  const chains = manyChains();
-  await withDom('#/conversations/a+_new?focused=_new', async (dom) => {
-    const { createRoot } = await import('react-dom/client');
-    const { act } = await import('react');
-    const { Provider } = await import('react-redux');
-    const { heimdallApi } = await import('../src/ui/api/heimdallApi.ts');
-    const layout = await import('../src/ui/store/workspaceLayoutSlice.ts');
-    const { Workspace } = await import('../src/ui/components/mainWorkspace/Workspace.tsx');
-    const { ShortcutProvider } = await import('../src/ui/services/shortcuts/ShortcutContext.tsx');
-    const store = await makeStore();
-    const root = createRoot(dom.window.document.getElementById('root')!);
-    try {
-      await act(async () => {
-        root.render(React.createElement(Provider, { store },
-          React.createElement(ShortcutProvider, {}, React.createElement(Workspace, {}))));
-      });
-      const sibling = layout.findPaneByAgent(store.getState().workspaceLayout.tree, 'a');
-      const target = sibling === 'pane-1' ? 'pane-2' : 'pane-1';
-      const frame = () => dom.window.document.querySelector(`[data-debug-id="main-pane-frame-${target}"]`)!;
-      const el = (id: string) => frame()?.querySelector(`[data-debug-id="${id}"]`) as any;
-      await waitFor(() => Boolean(el('home-chain-row-browse-00')), act);
-      await act(async () => { el('home-chain-next-btn').click(); });
-      await act(async () => { el('home-chain-next-btn').click(); });
-      assert.ok(el('home-chain-row-browse-20'));
-      await act(async () => { el('home-chain-row-browse-20').click(); });
-      await waitFor(() => layout.findPaneByAgent(store.getState().workspaceLayout.tree, 'chain:browse-20') === target, act);
-      assert.equal(layout.findPaneByAgent(store.getState().workspaceLayout.tree, 'a'), sibling);
-      assert.equal(dom.window.location.hash, '#/conversations/a+chain:browse-20?focused=chain:browse-20');
-    } finally {
-      await act(async () => root.unmount());
-      store.dispatch(heimdallApi.util.resetApiState());
-    }
-  }, { chains });
 });

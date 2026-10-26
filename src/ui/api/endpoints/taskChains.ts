@@ -1,3 +1,4 @@
+import { announceTaskChainCreated } from '../taskChainCreationEvents';
 import { heimdallApi } from '../heimdallApi';
 import { cookieJsonFetch, cookieMutation } from '../cookieFetch';
 import { encryptVaultText, isVaultArmored, getActiveVaultKey } from '../../utils/vaultContent';
@@ -362,6 +363,7 @@ export const taskChainsApi = heimdallApi.injectEndpoints({
           if (payload.projectId) body.project_id = payload.projectId;
 
           const data = await cookieMutation('/task-chains', 'POST', body);
+          announceTaskChainCreated(String(data?.chain_id || data?.chainId || ''));
           return { data };
         } catch (error: any) {
           return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any };
