@@ -107,7 +107,7 @@ src/
   daemon/             ham-daemon server, stores, services, notifications
   lib/
     config/           config parser/defaults
-    http_client/      local HTTP client helpers
+    httpc/            outbound HTTP client (libcurl wrapper; the only libcurl user)
     tmux/             tmux launch/control helpers
     vcs/              git/jj workspace helpers
     ws/               WebSocket client helpers
@@ -196,7 +196,7 @@ The Heimdall desktop UI.
 Shared libraries used by daemon/wrapper/ctl.
 
 - `config` — config structs/defaults/parser for daemon data dirs, wrapper launch/bootstrap settings, provider/model tiers, startup/activity detection, guide agent, and ctl defaults
-- `http_client` — local daemon HTTP calls
+- `httpc` — the ONLY outbound HTTP(S) client (libcurl). Requests are structured (parsed base URL + path segments + query params, validated headers, JSON/form/raw bodies); never build URLs, headers or bodies with string interpolation. `scripts/check-http-boundary.sh` (also `nix flake check`) fails if any other package touches libcurl or `http_client` comes back. See `src/lib/httpc/README.md`.
 - `tmux` — tmux lifecycle helpers
 - `vcs` — git/jj workspace helpers
 - `ws` — wrapper-side WebSocket client

@@ -312,7 +312,8 @@ to the same hub.
 **Connected to:** Agent Instance ID (the bridge spawns and owns instances), Agent Run
 Dir (run dirs are created on the bridge filesystem), Provider (the bridge passes
 provider credentials to agent processes at spawn time), Hub (bridge→hub connection is
-outbound over HTTPS using `socat` as the TLS transport).
+outbound: REST over HTTPS through the linked libcurl (`src/lib/httpc`), the WebSocket
+over `socat` as its TLS transport).
 
 ---
 
