@@ -429,6 +429,12 @@ tool_live_destroy :: proc(s: ^Tool_Live_Store) {
     delete(s.routes); delete(s.viewers)
 }
 
+tool_stream_conversation_authorized :: proc(svc: ^Agent_Service, owner, conversation: string) -> bool {
+    context.allocator = context.temp_allocator
+    if svc == nil || conversation == "" || len(conversation) > live.TOOL_LIVE_ID_MAX do return false
+    conv, got, _ := iface.content_get_conversation(svc.content, conversation)
+    return got && string(conv.owner_user_id) == owner
+}
 // Parent conversation ownership and chain membership are checked on every renewal
 // and again before payload fanout. Instance-only legacy requests never reach this.
 tool_stream_authorized :: proc(svc: ^Agent_Service, owner, conversation, id: string) -> bool {
@@ -440,9 +446,25 @@ tool_stream_authorized :: proc(svc: ^Agent_Service, owner, conversation, id: str
     if !found || string(inst.owner_user_id) != owner do return false
     if conv.agent_instance_id == id do return true
     parent, parent_ok, _ := tool_live_instance(svc, conv.agent_instance_id)
-    if !parent_ok || parent.chain_id == "" || parent.chain_id != inst.chain_id || string(parent.owner_user_id) != owner do return false
-    chain, chain_ok, _ := iface.taskchain_get_chain(svc.taskchains, domain.Task_Chain_ID(parent.chain_id))
-    if !chain_ok || string(chain.owner_user_id) != owner || chain.coordinator_agent_instance_id != parent.agent_instance_id do return false
+    if !parent_ok || string(parent.owner_user_id) != owner do return false
+    // A coordinator instance is reused across chains while its own chain_id stays
+    // its first chain, so membership is checked against the chains it coordinates,
+    // not against parent.chain_id. The member's current chain is the common case.
+    if inst.chain_id != "" {
+        chain, chain_ok, _ := iface.taskchain_get_chain(svc.taskchains, domain.Task_Chain_ID(inst.chain_id))
+        if chain_ok && tool_stream_chain_member(svc, chain, owner, parent.agent_instance_id, id) do return true
+    }
+    chains, err := iface.taskchain_list_chains_by_coordinator(svc.taskchains, parent.agent_instance_id, domain.User_ID(owner))
+    if err.code != .None do return false
+    for chain in chains {
+        if string(chain.chain_id) == inst.chain_id do continue // already checked above
+        if tool_stream_chain_member(svc, chain, owner, parent.agent_instance_id, id) do return true
+    }
+    return false
+}
+@(private = "file")
+tool_stream_chain_member :: proc(svc: ^Agent_Service, chain: domain.Task_Chain, owner, coordinator, id: string) -> bool {
+    if string(chain.owner_user_id) != owner || chain.coordinator_agent_instance_id != coordinator do return false
     members, err := iface.taskchain_list_members_by_chain(svc.taskchains, chain.chain_id, chain.owner_user_id)
     if err.code != .None do return false
     for member in members do if member.agent_instance_id == id do return true
@@ -460,11 +482,14 @@ tool_stream_view_current :: proc(svc: ^Agent_Service, w: ^Tool_Stream_Viewer, id
     inst, found, _ := tool_live_instance(svc, id)
     return found && tool_stream_bridge_supported(svc, inst.bridge_id) && tool_stream_authorized(svc, w.owner, w.scopes[id], id)
 }
+// One unauthorized member degrades to a per-instance `unavailable` frame instead of
+// refusing the whole roster; an unowned conversation or a malformed view still fails.
 tool_stream_subscribe_views :: proc(svc: ^Agent_Service, w: ^Tool_Stream_Viewer, views: json.Array) -> string {
     if len(views) > live.TOOL_LIVE_MAX_INSTANCES do return "invalid_subscription"
     scopes := make(map[string]string, runtime.heap_allocator())
     defer if scopes != nil do tool_stream_scopes_free(scopes)
     ids := make([dynamic]string, context.temp_allocator)
+    refused := make([dynamic]string, context.temp_allocator)
     total := 0
     for item in views {
         view, ok := item.(json.Object)
@@ -472,11 +497,16 @@ tool_stream_subscribe_views :: proc(svc: ^Agent_Service, w: ^Tool_Stream_Viewer,
         conversation := tool_live_text(view, "conversation_id")
         members, array_ok := view["instance_ids"].(json.Array)
         if !array_ok do return "invalid_subscription"
+        if !tool_stream_conversation_authorized(svc, w.owner, conversation) do return "forbidden"
         for m in members {
             total += 1
             if total > 4 * live.TOOL_LIVE_MAX_INSTANCES do return "invalid_subscription"
             id, string_ok := m.(json.String)
-            if !string_ok || !tool_stream_authorized(svc, w.owner, conversation, string(id)) do return "forbidden"
+            if !string_ok || !strings.has_prefix(string(id), "inst_") || len(id) > live.TOOL_LIVE_ID_MAX do return "invalid_instance_id"
+            if !tool_stream_authorized(svc, w.owner, conversation, string(id)) {
+                append(&refused, string(id))
+                continue
+            }
             if _, exists := scopes[string(id)]; !exists {
                 if len(scopes) >= live.TOOL_LIVE_MAX_INSTANCES do return "invalid_subscription"
                 key := strings.clone(string(id), runtime.heap_allocator())
@@ -489,6 +519,17 @@ tool_stream_subscribe_views :: proc(svc: ^Agent_Service, w: ^Tool_Stream_Viewer,
     code := tool_stream_subscribe(svc, w, ids[:], scopes)
     if code != "" do return code
     if w.external do scopes = nil // ownership transferred under the subscription lock
+    s := &svc.tool_live
+    sync.mutex_lock(&s.mutex); defer sync.mutex_unlock(&s.mutex)
+    for id, i in refused {
+        // Another view may legitimately scope the same member; report each refusal once.
+        if w.ids[id] do continue
+        duplicate := false
+        for earlier in refused[:i] do if earlier == id do duplicate = true
+        if duplicate do continue
+        data, _ := json.marshal(struct {type, instance_id, reason: string}{"unavailable", id, "forbidden"}, allocator = context.temp_allocator)
+        _ = tool_stream_enqueue_locked(w, string(data))
+    }
     return ""
 }
 tool_stream_expire_at :: proc(svc: ^Agent_Service, now: i64) {

@@ -436,7 +436,12 @@ test_tool_stream_scoped_replacement_requires_authorized_parent :: proc(t: ^testi
     testing.expect_value(t, tool_stream_subscribe_views(&f.svc, &f.a, bad.(json.Array)), "forbidden")
     testing.expect(t, f.a.ids["inst_a"], "invalid replacement preserves authorized demand")
     foreign_view, _ := json.parse_string(`[{"conversation_id":"chat_a","instance_ids":["inst_foreign"]}]`, .JSON, true, context.temp_allocator)
-    testing.expect_value(t, tool_stream_subscribe_views(&f.svc, &f.a, foreign_view.(json.Array)), "forbidden")
+    tool_stream_test_clear(&f.a)
+    testing.expect_value(t, tool_stream_subscribe_views(&f.svc, &f.a, foreign_view.(json.Array)), "")
+    testing.expect(t, !f.a.ids["inst_foreign"], "another owner's instance never gains demand")
+    testing.expect_value(t, f.a.queue[len(f.a.queue) - 1].text, `{"type":"unavailable","instance_id":"inst_foreign","reason":"forbidden"}`)
+    malformed, _ := json.parse_string(`[{"conversation_id":"chat_a","instance_ids":[7]}]`, .JSON, true, context.temp_allocator)
+    testing.expect_value(t, tool_stream_subscribe_views(&f.svc, &f.a, malformed.(json.Array)), "invalid_instance_id")
     empty, _ := json.parse_string("[]", .JSON, true, context.temp_allocator)
     testing.expect_value(t, tool_stream_subscribe_views(&f.svc, &f.a, empty.(json.Array)), "")
     testing.expect_value(t, len(f.svc.tool_live.routes), 0)
@@ -474,6 +479,94 @@ test_tool_stream_open_chain_explicitly_authorizes_each_current_member :: proc(t:
     testing.expect(t, !tool_stream_authorized(&f.svc, "owner", "chat_chain", "inst_unlisted"))
     f.run = 2
     testing.expect(t, !tool_stream_view_current(&f.svc, &f.a, "inst_b"), "membership revocation fences queued and incoming payload")
+    tool_stream_scopes_free(f.a.scopes); f.a.scopes = nil
+}
+
+// Coordinator inst_coord was created for chain_old (its agent_instances.chain_id)
+// and is reused to coordinate chain_new; chain_other and chain_foreign are not its own.
+@(private = "file")
+tool_stream_reused_chain_of :: proc(id: string) -> string {
+    switch id {
+    case "inst_coord", "inst_old_worker": return "chain_old"
+    case "inst_new_worker", "inst_foreign_owner": return "chain_new"
+    case "inst_other", "inst_stale": return "chain_other"
+    case "inst_foreign_chain": return "chain_foreign"
+    }
+    return ""
+}
+@(private = "file")
+tool_stream_reused_chain :: proc(id: domain.Task_Chain_ID) -> domain.Task_Chain {
+    switch id {
+    case "chain_old", "chain_new": return {chain_id = id, owner_user_id = "owner", coordinator_agent_instance_id = "inst_coord"}
+    case "chain_other": return {chain_id = id, owner_user_id = "owner", coordinator_agent_instance_id = "inst_someone_else"}
+    case "chain_foreign": return {chain_id = id, owner_user_id = "foreign", coordinator_agent_instance_id = "inst_coord"}
+    }
+    return {}
+}
+@(test)
+test_tool_stream_coordinator_reused_across_chains_authorizes_each_coordinated_chain :: proc(t: ^testing.T) {
+    f: Tool_Stream_Test; tool_stream_test_init(&f); defer tool_stream_test_free(&f)
+    f.repo.get_tool_instance = proc(ctx: rawptr, id: string) -> (domain.Agent_Instance, bool, domain.Domain_Error) {
+        return domain.Agent_Instance{agent_instance_id = id, owner_user_id = "foreign" if id == "inst_foreign_owner" else "owner", bridge_id = "brg_a",
+            chain_id = tool_stream_reused_chain_of(id), run_count = 1, runtime_status = "running"}, true, {}
+    }
+    content := iface.Content_Repository{get_conversation = proc(ctx: rawptr, id: string) -> (domain.Chat_Conversation, bool, domain.Domain_Error) {
+        return domain.Chat_Conversation{conversation_id = id, owner_user_id = "owner", agent_instance_id = "inst_coord"}, id == "chat_coord", {}
+    }}
+    chains := iface.Taskchain_Repository{ctx = &f,
+        get_chain = proc(ctx: rawptr, id: domain.Task_Chain_ID) -> (domain.Task_Chain, bool, domain.Domain_Error) {
+            chain := tool_stream_reused_chain(id)
+            return chain, chain.chain_id != "", {}
+        },
+        list_chains_by_coordinator = proc(ctx: rawptr, coordinator: string, owner: domain.User_ID) -> ([]domain.Task_Chain, domain.Domain_Error) {
+            if coordinator != "inst_coord" || owner != "owner" do return nil, {}
+            chains := make([]domain.Task_Chain, 2, context.temp_allocator)
+            chains[0] = tool_stream_reused_chain("chain_old"); chains[1] = tool_stream_reused_chain("chain_new")
+            return chains, {}
+        },
+        list_members_by_chain = proc(ctx: rawptr, id: domain.Task_Chain_ID, owner: domain.User_ID) -> ([]domain.Task_Chain_Member, domain.Domain_Error) {
+            f := (^Tool_Stream_Test)(ctx)
+            if f.run != 1 do return nil, {}
+            members := make([dynamic]domain.Task_Chain_Member, context.temp_allocator)
+            switch id {
+            case "chain_old": append(&members, domain.Task_Chain_Member{agent_instance_id = "inst_old_worker"})
+            // inst_stale's own chain_id is stale (chain_other) but it is listed here.
+            case "chain_new": for m in ([3]string{"inst_new_worker", "inst_foreign_owner", "inst_stale"}) do append(&members, domain.Task_Chain_Member{agent_instance_id = m})
+            case "chain_other": append(&members, domain.Task_Chain_Member{agent_instance_id = "inst_other"})
+            case "chain_foreign": append(&members, domain.Task_Chain_Member{agent_instance_id = "inst_foreign_chain"})
+            }
+            return members[:], {}
+        },
+    }
+    f.svc.content = &content; f.svc.taskchains = &chains
+    testing.expect(t, tool_stream_authorized(&f.svc, "owner", "chat_coord", "inst_coord"))
+    testing.expect(t, tool_stream_authorized(&f.svc, "owner", "chat_coord", "inst_old_worker"), "first chain still authorizes")
+    testing.expect(t, tool_stream_authorized(&f.svc, "owner", "chat_coord", "inst_new_worker"), "second chain's worker authorizes despite coordinator chain_id")
+    testing.expect(t, tool_stream_authorized(&f.svc, "owner", "chat_coord", "inst_stale"), "membership of any coordinated chain authorizes")
+    testing.expect(t, !tool_stream_authorized(&f.svc, "owner", "chat_coord", "inst_other"), "unrelated chain's member is refused")
+    testing.expect(t, !tool_stream_authorized(&f.svc, "owner", "chat_coord", "inst_foreign_chain"), "another owner's chain is refused")
+    testing.expect(t, !tool_stream_authorized(&f.svc, "owner", "chat_coord", "inst_foreign_owner"), "another owner's instance is refused")
+    testing.expect(t, !tool_stream_authorized(&f.svc, "owner", "chat_coord", "inst_unlisted"))
+    testing.expect(t, !tool_stream_authorized(&f.svc, "foreign", "chat_coord", "inst_new_worker"), "another viewer cannot borrow the conversation")
+
+    f.a.external = true
+    value, _ := json.parse_string(`[{"conversation_id":"chat_coord","instance_ids":["inst_coord","inst_new_worker","inst_other"]}]`, .JSON, true, context.temp_allocator)
+    testing.expect_value(t, tool_stream_subscribe_views(&f.svc, &f.a, value.(json.Array)), "")
+    testing.expect_value(t, len(f.a.ids), 2)
+    testing.expect(t, f.a.ids["inst_coord"] && f.a.ids["inst_new_worker"] && !f.a.ids["inst_other"])
+    testing.expect(t, f.svc.tool_live.routes["inst_other"] == nil, "a refused member adds no upstream demand")
+    unavailable := 0
+    for frame in f.a.queue {
+        if strings.contains(frame.text, `"type":"unavailable"`) {
+            unavailable += 1
+            testing.expect_value(t, frame.text, `{"type":"unavailable","instance_id":"inst_other","reason":"forbidden"}`)
+        }
+    }
+    testing.expect_value(t, unavailable, 1)
+    testing.expect(t, tool_stream_view_current(&f.svc, &f.a, "inst_new_worker"))
+    f.run = 2
+    testing.expect(t, !tool_stream_view_current(&f.svc, &f.a, "inst_new_worker"), "membership revocation still fences payload")
+    testing.expect(t, tool_stream_view_current(&f.svc, &f.a, "inst_coord"), "the coordinator's own rows keep flowing")
     tool_stream_scopes_free(f.a.scopes); f.a.scopes = nil
 }
 

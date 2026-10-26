@@ -22,7 +22,9 @@ export interface ToolStreamEnvironment {
   every(callback: () => void, ms: number): () => void;
   onResume(callback: () => void): () => void;
 }
-type Receipt = { deadline: number; order?: ToolOrder; baseline: boolean };
+// `refused`: the Hub declined this one member (it is not in this pane's roster any
+// more); it awaits a baseline from a later renewal without expiring the others.
+type Receipt = { deadline: number; order?: ToolOrder; baseline: boolean; refused?: boolean };
 export type ToolSubscription = { update(ids: string[]): void; release(): void };
 
 // One owner per authenticated UI store, shared by every mounted own/chain view.
@@ -188,10 +190,18 @@ export class ToolActivityStream {
       }
       this.failed(); return;
     }
+    // Accepting the subscription proves the transport and credential even when every
+    // member is idle or refused, so it renews the outage budget like a state frame.
+    if (frame?.type === 'subscribed') { this.failures = 0; this.failureStartedAt = null; return; }
     if (frame?.type === 'unavailable' && this.receipts.has(frame.instance_id)) {
-      this.invalidate([frame.instance_id]);
       const receipt = this.receipts.get(frame.instance_id)!;
+      // A per-member refusal is renewed with every subscription; it never exhausts
+      // the shared stream and only invalidates that member once.
+      const refused = frame.reason === 'forbidden';
+      if (!(refused && receipt.refused)) this.invalidate([frame.instance_id]);
       receipt.baseline = true; receipt.order = undefined;
+      receipt.refused = refused;
+      if (refused) receipt.deadline = 0;
       return;
     }
     if (frame?.type !== 'state' || typeof frame.baseline !== 'boolean' ||
@@ -202,7 +212,7 @@ export class ToolActivityStream {
     if (!receipt || (receipt.baseline && !frame.baseline)) return;
     const order = receipt.order && compareToolOrder(snapshot, receipt.order);
     if (order !== undefined && (order < 0 || (order === 0 && !frame.refresh && !frame.baseline))) return;
-    receipt.baseline = false;
+    receipt.baseline = false; receipt.refused = false;
     // Retain only ordering metadata outside Redux, never old tool content.
     receipt.order = { epoch: snapshot.epoch, generation: snapshot.generation, revision: snapshot.revision };
     receipt.deadline = this.env.now() + TOOL_FRESH_MS;

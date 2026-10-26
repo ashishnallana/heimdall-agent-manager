@@ -239,3 +239,44 @@ test('leased demand renews explicit per-member conversation scopes and permanent
   assert.equal(h.sockets.length, 1, 'permanent protocol failure cannot retry');
   child.release();
 });
+
+test('per-member forbidden refusal degrades one row; the coordinator keeps updating and the stream never exhausts', async () => {
+  const h = harness();
+  const pane = h.stream.subscribe('owner', ['inst_coord', 'inst_worker'], 'chat_coord');
+  await h.flush(); const socket = h.sockets[0]; socket.open();
+  socket.frame({ type: 'subscribed', instance_ids: ['inst_coord'] });
+  socket.frame({ type: 'unavailable', instance_id: 'inst_worker', reason: 'forbidden' });
+  socket.state(snapshot('inst_coord', 1));
+  assert.equal(h.member('inst_worker').availability, 'unavailable', 'refused member is shown unavailable');
+  assert.equal(h.member('inst_coord').availability, 'ready', 'refusal is per member');
+  let revision = 1;
+  for (let elapsed = 0; elapsed < 300_000; elapsed += 30_000) {
+    h.advance(30_000);
+    socket.frame({ type: 'subscribed', instance_ids: ['inst_coord'] });
+    socket.frame({ type: 'unavailable', instance_id: 'inst_worker', reason: 'forbidden' });
+    socket.state(snapshot('inst_coord', ++revision), false);
+  }
+  assert.equal(h.sockets.length, 1, 'no reconnect or exhaustion from a per-member refusal');
+  assert.equal(socket.readyState, 1);
+  assert.equal(h.member('inst_coord').availability, 'ready');
+  assert.equal(h.member('inst_coord').snapshot?.revision, revision, "coordinator's own rows keep updating");
+  assert.deepEqual(socket.sent.filter((frame: any) => frame.type === 'subscribe').at(-1).views[0].instance_ids,
+    ['inst_coord', 'inst_worker'], 'renewals keep asking so a later grant is picked up');
+  socket.state(snapshot('inst_worker', 1));
+  assert.equal(h.member('inst_worker').availability, 'ready', 'a later authorized baseline restores the member');
+  pane.release();
+});
+
+test('all members refused or idle: an accepted subscription renews the outage budget', async () => {
+  const h = harness();
+  const pane = h.stream.subscribe('owner', ['inst_worker'], 'chat_coord');
+  await h.flush(); const socket = h.sockets[0]; socket.open();
+  for (let elapsed = 0; elapsed < 300_000; elapsed += 5000) {
+    socket.frame({ type: 'subscribed', instance_ids: [] });
+    socket.frame({ type: 'unavailable', instance_id: 'inst_worker', reason: 'forbidden' });
+    h.advance(5000);
+  }
+  assert.equal(h.sockets.length, 1);
+  assert.equal(socket.readyState, 1, 'stream is not exhausted while the Hub keeps accepting');
+  pane.release();
+});
