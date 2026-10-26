@@ -33,12 +33,18 @@ usage() {
 Heimdall Bridge installer — Linux systemd / macOS LaunchAgent / Termux runit
 Usage: install.sh [--hub URL] [--version TAG] [--dry-run] [--uninstall]
                   [--re-enroll [--new-bridge] | --keep-enrollment] [--non-interactive]
+                  [--name PROFILE]
 Hub must be an HTTP(S) origin, e.g. https://hub.mundus.in or http://localhost:8080.
 Without --hub, asks on the terminal. Existing enrollment prompts before re-enrolling.
 Re-enrolling offers the approver this machine's previous bridge id for reuse (same
 bridge, same history); --new-bridge registers a new bridge instead (implies --re-enroll).
 --non-interactive preserves existing enrollment and prints a command for new enrollment.
 --uninstall removes only this Hub's service and binaries; credentials/data are kept.
+--name PROFILE (or HEIMDALL_BRIDGE_NAME) installs a separate bridge to the same Hub
+for this OS user, e.g. one per Heimdall account: service heimdall-bridge-<hub>_PROFILE
+with its own enrollment, ports and ham-ctl wrapper. PROFILE is 1-31 of [a-z0-9-],
+starting with a letter or digit. Pass the same --name to --uninstall or --re-enroll it.
+Not supported on Termux.
 Requires bash, curl, tar and sha256sum (or shasum); HTTPS bridges also require socat (WebSocket
 transport). The binaries carry their own HTTPS client (libcurl, linked statically;
 Linux builds are fully static), so no libcurl or OpenSSL is needed on this machine.
@@ -254,6 +260,13 @@ canonical_hub() {
   [ "${#name}" -le 160 ] || { printf '%s\n' "$bad" >&2; return 1; }
   case "$host" in *:*) host="[$host]" ;; esac
   printf '%s://%s%s\nheimdall-bridge-%s\n' "$scheme" "$host" "${port:+:$port}" "$name"
+}
+# A bridge profile name (--name) becomes part of every path and unit name: keep it
+# filename- and systemd-safe. canonical_hub never emits '_', so the service name
+# "<hub name>_<profile>" cannot collide with another Hub's. C locale: ASCII ranges.
+valid_profile() {
+  local LC_ALL=C
+  [[ $1 =~ ^[a-z0-9][a-z0-9-]{0,30}$ ]]
 }
 # The --hub value of a legacy (pre per-Hub) service definition, if any.
 legacy_service_hub() {
@@ -500,7 +513,7 @@ allocate_ports() {
 # service definition: systemd unit, launchd plist or runit run file.
 render_service() {
   local svc="$1" file="$2" name="$3" hub="$4" bin="$5" state="$6" data="$7" port="$8" endpoint="$9"
-  local path="${10}" prefix="${11}" termux_version="${12}"
+  local path="${10}" prefix="${11}" termux_version="${12}" profile="${13:-}"
   local -a args=("$bin/ham-bridge" --hub "$hub" --config "$state/config.toml" --bridge-token-file "$state/bridge-token"
     --data-dir "$data" --bind-host 127.0.0.1 --port "$port" --local-endpoint-port "$endpoint" --local-run-dir "$data/run")
   local config="$state/config.toml" wrapper="$bin/ham-ctl-$name" service_env a k
@@ -556,7 +569,8 @@ render_service() {
     *)
       local supervisor="$data/updates/apply-bridge-update.sh" bash_path
       {
-        printf '[Unit]\nDescription=Heimdall Bridge %s\nAfter=network-online.target\n\n[Service]\nType=simple\nExecStart=' "$hub"
+        printf '[Unit]\nDescription=Heimdall Bridge %s%s\nAfter=network-online.target\n\n[Service]\nType=simple\nExecStart=' \
+          "$hub" "${profile:+ (profile $profile)}"
         k=''
         for a in "${args[@]}"; do printf '%s%s' "$k" "$(systemd_exec_quote "$a")"; k=' '; done
         printf '\n'
@@ -649,11 +663,12 @@ remove_service() {
 main() {
   set -euo pipefail
   local hub_url='' version='' dry_run=false uninstall=false noninteractive=false enrollment=ask answer='' new_bridge=false
+  local profile="${HEIMDALL_BRIDGE_NAME:-}"
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      --hub|--hub-url|--version)
+      --hub|--hub-url|--version|--name)
         [ "$#" -ge 2 ] && [ -n "$2" ] || fail "$1 requires a value"
-        case "$1" in --version) version="$2" ;; *) hub_url="$2" ;; esac
+        case "$1" in --version) version="$2" ;; --name) profile="$2" ;; *) hub_url="$2" ;; esac
         shift 2 ;;
       --dry-run) dry_run=true; shift ;;
       --uninstall) uninstall=true; shift ;;
@@ -668,6 +683,8 @@ main() {
   done
   [ "${HEIMDALL_NON_INTERACTIVE:-0}" != 1 ] || noninteractive=true
   [ "${DEBIAN_FRONTEND:-}" != noninteractive ] || noninteractive=true
+  [ -z "$profile" ] || valid_profile "$profile" ||
+    fail "Invalid profile name '$profile' (--name/HEIMDALL_BRIDGE_NAME): use 1-31 lower-case letters, digits or '-', starting with a letter or digit."
   printf '\n╭──────────────────────────────────────────╮\n│         HEIMDALL · BRIDGE INSTALLER       │\n│        Your agents, connected locally     │\n╰──────────────────────────────────────────╯\n'
   step '1 / 6 · Hub and platform'
   if [ -z "$hub_url" ]; then
@@ -677,7 +694,7 @@ main() {
   fi
   local identity
   identity="$(canonical_hub "$hub_url")" || fail 'Unable to validate Hub URL.'
-  hub_url="${identity%%$'\n'*}"; local service_name="${identity#*$'\n'}"
+  hub_url="${identity%%$'\n'*}"; local service_name="${identity#*$'\n'}${profile:+_$profile}"
   local os arch uid
   case "$(uname -s)" in Linux) os=linux ;; Darwin) os=darwin ;; *) fail 'Supported platforms: Linux and macOS.' ;; esac
   case "$(uname -m)" in x86_64|amd64) arch=amd64 ;; aarch64|arm64) arch=arm64 ;; *) fail 'Supported architectures: amd64 and arm64.' ;; esac
@@ -686,6 +703,9 @@ main() {
   # svc is the supervisor: systemd (Linux), launchd (macOS) or runit (Termux).
   local svc=systemd
   if is_termux; then
+    # The released ham-bridge restarts exactly the runit service ham-bridge, so
+    # one Termux install can only ever run one bridge.
+    [ -z "$profile" ] || fail "Bridge profiles (--name/HEIMDALL_BRIDGE_NAME) are not supported on Termux: one Termux install runs one bridge (the runit service ham-bridge). Re-run without --name."
     command -v termux-keystore >/dev/null || fail 'Termux detected but termux-keystore is missing. Install the Termux:API app, then run: pkg install termux-api'
     svc=runit
   elif [ "$os" = darwin ]; then svc=launchd; fi
@@ -720,6 +740,7 @@ main() {
       runit_dir="$PREFIX/var/service/ham-bridge"; service_file="$runit_dir/run" ;;
   esac
   log INFO "Hub: $hub_url"; log INFO "Service: $service_name ($os/$arch, $svc)"
+  [ -z "$profile" ] || log INFO "Profile: $profile"
   [ "$svc" != runit ] || log INFO "runit service: $runit_dir"
   log INFO "Config/token: $state_dir"; log INFO "Data/binaries: $data_dir"
   if [ -f "$state_dir/hub-url" ] && [ "$(cat "$state_dir/hub-url")" != "$hub_url" ]; then
@@ -736,8 +757,9 @@ main() {
     log OK 'Uninstalled. Enrollment and agent data preserved.'; return
   fi
   local migrate=false existing=false
-  # Only retire a legacy service whose explicit Hub matches this installation.
-  if [ -n "$legacy_file" ] && [ -f "$legacy_file" ] && legacy_service_matches "$legacy_file" "$hub_url"; then migrate=true; fi
+  # Only retire a legacy service whose explicit Hub matches this installation,
+  # and only for the default (unnamed) bridge: the legacy service is that one.
+  if [ -z "$profile" ] && [ -n "$legacy_file" ] && [ -f "$legacy_file" ] && legacy_service_matches "$legacy_file" "$hub_url"; then migrate=true; fi
   [ ! -s "$token_file" ] || existing=true
   if "$migrate" && [ -s "$HOME/.config/heimdall/bridge-token" ]; then existing=true; fi
   if "$existing" && [ -s "$token_file" ] && identity_missing "$state_dir/config.toml"; then
@@ -877,6 +899,7 @@ main() {
     install -m 0755 "$work_dir/refresh-provider-extensions.sh" "$data_dir/updates/refresh-provider-extensions.sh"
   fi
   printf '%s\n' "$hub_url" > "$state_dir/hub-url"
+  [ -z "$profile" ] || printf '%s\n' "$profile" > "$state_dir/profile"
   [ ! -d "$bin_dir" ] || chmod 700 "$bin_dir"
   step '4 / 6 · Ports and ham-ctl routing'
   local ports bridge_port endpoint_port
@@ -884,7 +907,7 @@ main() {
   bridge_port="${ports% *}"; endpoint_port="${ports#* }"
   log OK "Bridge: 127.0.0.1:$bridge_port · Agent endpoint: 127.0.0.1:$endpoint_port"
   # Render with proper escaping for spaces, XML, shell, and systemd specifiers.
-  render_service "$svc" "$service_file" "$service_name" "$hub_url" "$bin_dir" "$state_dir" "$data_dir" "$bridge_port" "$endpoint_port" "$PATH" "${PREFIX:-}" "${TERMUX_VERSION:-}"
+  render_service "$svc" "$service_file" "$service_name" "$hub_url" "$bin_dir" "$state_dir" "$data_dir" "$bridge_port" "$endpoint_port" "$PATH" "${PREFIX:-}" "${TERMUX_VERSION:-}" "$profile"
   if [ "$svc" = runit ]; then
     mkdir -p "$runit_dir/log"
     if [ -x "$PREFIX/share/termux-services/svlogger" ]; then
