@@ -486,7 +486,10 @@ PY
   if ! version_out="$("$work_dir/ham-bridge" --version 2>&1)"; then
     fail "The downloaded ham-bridge does not start on this machine: ${version_out:-no output}. It needs libcurl >= 7.80 (libcurl.so.4: Debian 12+, Ubuntu 22.04+; macOS 13+). Nothing was replaced."
   fi
-  bridge_version="$(printf '%s\n' "$version_out" | awk 'NR==1 {print $2}')"
+  # Take the "ham-bridge <version> ..." line, not line 1: stderr is merged above
+  # (for the failure message) and a loader warning such as "libcurl.so.4: no
+  # version information available" can precede it.
+  bridge_version="$(printf '%s\n' "$version_out" | awk '$1 == "ham-bridge" {print $2; exit}')"
   if [ -n "$bridge_version" ] && [ "$(printf '%s\n0.3.36\n' "$bridge_version" | sort -V | head -n1)" = "0.3.36" ]; then
     if ! "$work_dir/ham-bridge" --probe-hub "$hub_url"; then
       fail "The downloaded ham-bridge cannot reach $hub_url through its own HTTPS client (libcurl) although the curl CLI could. Check TLS trust (HAM_TLS_CA_FILE / SSL_CERT_FILE) and the probe output above. Nothing was replaced."
