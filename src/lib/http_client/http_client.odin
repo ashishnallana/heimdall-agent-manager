@@ -206,18 +206,77 @@ parse_response_bytes :: proc(data: []byte) -> (Response, bool) {
 	return Response{status = status, body = response_body}, true
 }
 
+// response_complete reports whether `raw` holds one whole HTTP/1.1 response, so a
+// reader may stop without waiting for the peer to close. Both framings count:
+// Content-Length, and Transfer-Encoding: chunked up to its terminating zero-size
+// chunk. A proxy may switch framing on its own: Cloudflare re-chunks a body that
+// the origin-side proxy gzipped (nginx gzip_min_length 256), so the same hub reply
+// arrives with Content-Length on a LAN and chunked through the edge. A reader that
+// only understood Content-Length never finished the chunked one (lost bridge
+// credential refresh, 2026-10-25).
 response_complete :: proc(raw: string) -> bool {
 	idx := strings.index(raw, "\r\n\r\n")
 	if idx < 0 do return false
-	content_length := response_content_length(raw[:idx])
+	headers := raw[:idx]
+	if response_transfer_chunked(headers) do return response_chunked_complete(raw[idx + 4:])
+	content_length := response_content_length(headers)
 	if content_length < 0 do return false
 	return len(raw[idx + 4:]) >= content_length
+}
+
+// response_complete_at_eof is response_complete for a peer that has closed: a
+// response with neither framing header is delimited by the close itself (RFC 9112
+// §6.3), while a declared length or chunk stream must still be whole. Truncated
+// responses stay failures, so a cut-off body is never mistaken for a short one.
+response_complete_at_eof :: proc(raw: string) -> bool {
+	idx := strings.index(raw, "\r\n\r\n")
+	if idx < 0 do return false
+	headers := raw[:idx]
+	if response_transfer_chunked(headers) do return response_chunked_complete(raw[idx + 4:])
+	content_length := response_content_length(headers)
+	if content_length < 0 do return true
+	return len(raw[idx + 4:]) >= content_length
+}
+
+// response_chunked_complete reports whether a chunked body has reached its last
+// chunk and the (possibly empty) trailer section that ends it.
+response_chunked_complete :: proc(body: string) -> bool {
+	pos := 0
+	for {
+		line_end := strings.index(body[pos:], "\r\n")
+		if line_end < 0 do return false
+		size_line := strings.trim_space(body[pos:pos + line_end])
+		if semi := strings.index(size_line, ";"); semi >= 0 do size_line = size_line[:semi]
+		size, ok := parse_hex_size(size_line)
+		if !ok || size < 0 do return false
+		pos += line_end + 2
+		if size == 0 {
+			// Trailer fields, if any, then an empty line.
+			for {
+				trailer_end := strings.index(body[pos:], "\r\n")
+				if trailer_end < 0 do return false
+				if trailer_end == 0 do return true
+				pos += trailer_end + 2
+			}
+		}
+		if size > len(body) - pos - 2 do return false
+		pos += size
+		if body[pos:pos + 2] != "\r\n" do return false
+		pos += 2
+	}
+}
+
+// response_header_is reports whether a header line names `name`, ignoring ASCII
+// case: field names are case-insensitive (RFC 9110 §5.1) and proxies differ.
+response_header_is :: proc(line, name: string) -> bool {
+	if len(line) <= len(name) || line[len(name)] != ':' do return false
+	return strings.equal_fold(line[:len(name)], name)
 }
 
 response_content_length :: proc(headers: string) -> int {
 	header_text := headers
 	for line in strings.split_lines_iterator(&header_text) {
-		if strings.has_prefix(line, "Content-Length:") || strings.has_prefix(line, "content-length:") {
+		if response_header_is(line, "Content-Length") {
 			value := strings.trim_space(line[len("Content-Length:"):])
 			if parsed, ok := strconv.parse_int(value); ok do return int(parsed)
 		}
@@ -251,7 +310,7 @@ header_contains_fold :: proc(haystack, needle: string) -> bool {
 response_transfer_chunked :: proc(headers: string) -> bool {
 	header_text := headers
 	for line in strings.split_lines_iterator(&header_text) {
-		if strings.has_prefix(line, "Transfer-Encoding:") || strings.has_prefix(line, "transfer-encoding:") {
+		if response_header_is(line, "Transfer-Encoding") {
 			return header_contains_fold(line, "chunked")
 		}
 	}
@@ -267,7 +326,7 @@ response_decode_chunked_body :: proc(body: string) -> string {
 		size_line := strings.trim_space(body[pos:pos + line_end])
 		if semi := strings.index(size_line, ";"); semi >= 0 do size_line = size_line[:semi]
 		size, ok := parse_hex_size(size_line)
-		if !ok do break
+		if !ok || size < 0 do break
 		pos += line_end + 2
 		if size == 0 do break
 		if pos + size > len(body) do break
@@ -278,9 +337,11 @@ response_decode_chunked_body :: proc(body: string) -> string {
 	return strings.to_string(b)
 }
 
+// At most 15 hex digits (< 2^60), so the value can never overflow an int into a
+// negative or wrapped chunk size.
 parse_hex_size :: proc(text: string) -> (int, bool) {
 	trimmed := strings.trim_space(text)
-	if trimmed == "" do return 0, false
+	if trimmed == "" || len(trimmed) > 15 do return 0, false
 	value := 0
 	for i in 0..<len(trimmed) {
 		ch := trimmed[i]

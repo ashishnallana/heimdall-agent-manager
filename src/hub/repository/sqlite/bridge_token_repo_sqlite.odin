@@ -16,7 +16,10 @@ import domain "odin_test:hub/domain"
 import dbt "odin_test:hub/platform/dbtelemetry"
 import iface "odin_test:hub/repository/iface"
 
-BRIDGE_TOKEN_COLUMNS :: "token_id, bridge_id, kind, token_hash, family_id, generation, scope, issued_at, expires_at, family_expires_at, rotated_at, revoked_at"
+// rotation_request_hash arrived in migration 138, first_used_at and regrant_claim in 139. An older hub reading a migrated
+// database names its columns explicitly and never sees it, which is what keeps a
+// rollback able to start.
+BRIDGE_TOKEN_COLUMNS :: "token_id, bridge_id, kind, token_hash, family_id, generation, scope, issued_at, expires_at, family_expires_at, rotated_at, revoked_at, rotation_request_hash, first_used_at, regrant_claim"
 
 bridge_save_token_sqlite :: proc(ctx: rawptr, token: domain.Bridge_Token) -> (domain.Bridge_Token, bool, domain.Domain_Error) {
 	impl := (^Bridge_Repo_SQLite)(ctx)
@@ -26,7 +29,7 @@ bridge_save_token_sqlite :: proc(ctx: rawptr, token: domain.Bridge_Token) -> (do
 	// written: a save that could rewrite a token's hash or move it between families
 	// would let a bug relabel a credential instead of issuing one, and rotation
 	// already works by INSERTing the next generation rather than mutating this row.
-	query := "INSERT INTO bridge_tokens (" + BRIDGE_TOKEN_COLUMNS + ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(token_id) DO UPDATE SET expires_at=excluded.expires_at, rotated_at=excluded.rotated_at, revoked_at=excluded.revoked_at;"
+	query := "INSERT INTO bridge_tokens (" + BRIDGE_TOKEN_COLUMNS + ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(token_id) DO UPDATE SET expires_at=excluded.expires_at, rotated_at=excluded.rotated_at, revoked_at=excluded.revoked_at, rotation_request_hash=CASE WHEN excluded.rotation_request_hash != '' THEN excluded.rotation_request_hash ELSE bridge_tokens.rotation_request_hash END;"
 	if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return domain.Bridge_Token{}, false, domain.domain_error(.Internal_Error, "failed to prepare bridge token save")
 	defer sqlite3_finalize(stmt)
 	bind_text(stmt, 1, token.token_id)
@@ -42,6 +45,11 @@ bridge_save_token_sqlite :: proc(ctx: rawptr, token: domain.Bridge_Token) -> (do
 	bind_text(stmt, 10, token.family_expires_at)
 	bind_text(stmt, 11, token.rotated_at)
 	bind_text(stmt, 12, token.revoked_at)
+	bind_text(stmt, 13, token.rotation_request_hash)
+	// first_used_at / regrant_claim are written only by their dedicated
+	// compare-and-set statements; a save never moves them (the UPDATE half omits them).
+	bind_text(stmt, 14, token.first_used_at)
+	bind_text(stmt, 15, token.regrant_claim)
 	if sqlite3_step(stmt) != SQLITE_DONE do return domain.Bridge_Token{}, false, domain.domain_error(.Conflict, "bridge token could not be saved")
 	return token, true, domain.Domain_Error{}
 }
@@ -133,6 +141,116 @@ bridge_revoke_tokens_for_bridge_sqlite :: proc(ctx: rawptr, bridge_id, revoked_a
 	return row_changes, true, domain.Domain_Error{}
 }
 
+// bridge_mark_token_used_sqlite stamps an access token's first authentication.
+// `AND first_used_at = ''` keeps the first stamp and makes repeats no-ops.
+bridge_mark_token_used_sqlite :: proc(ctx: rawptr, token_id, used_at: string) -> (bool, domain.Domain_Error) {
+	impl := (^Bridge_Repo_SQLite)(ctx)
+	if token_id == "" || used_at == "" do return false, domain.domain_error(.Validation_Failed, "token_id and used_at are required")
+	stmt: sqlite3_stmt = nil
+	query := "UPDATE bridge_tokens SET first_used_at = ? WHERE token_id = ? AND first_used_at = '';"
+	if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return false, domain.domain_error(.Internal_Error, "failed to prepare bridge token use stamp")
+	defer sqlite3_finalize(stmt)
+	bind_text(stmt, 1, used_at)
+	bind_text(stmt, 2, token_id)
+	step_rc, row_changes := step_changes(impl.conn.db, stmt)
+	if step_rc != SQLITE_DONE do return false, domain.domain_error(.Internal_Error, "bridge token use could not be recorded")
+	return row_changes > 0, domain.Domain_Error{}
+}
+
+// bridge_regrant_test_hook runs inside the re-grant transaction, after the claim and
+// before the inserts; returning false makes the transaction fail there. Test-only:
+// it is how a test proves a failure in that window rolls the claim back. Keyed by
+// the spent token id so parallel tests only affect their own re-grant.
+bridge_regrant_test_hook: proc(spent_token_id: string) -> bool
+
+// bridge_regrant_atomic_sqlite applies a graced re-grant as ONE transaction (claim,
+// revoke newer generations, insert the refresh row, insert the access row). A crash,
+// SQLITE_BUSY or a unique-index conflict anywhere rolls the claim back too, so the
+// bridge's next retry still finds the claim it read and is not mistaken for theft.
+// Runs on the dedicated commit connection (see Bridge_Enroll_Commit_Conn: a BEGIN on
+// the shared connection would let other requests' statements join it).
+bridge_regrant_atomic_sqlite :: proc(ctx: rawptr, input: iface.Bridge_Regrant_Input) -> (iface.Bridge_Regrant_Outcome, domain.Domain_Error) {
+	impl := (^Bridge_Repo_SQLite)(ctx)
+	if input.spent_token_id == "" || input.family_id == "" || input.claim == "" || input.now == "" {
+		return .Failed, domain.domain_error(.Validation_Failed, "spent_token_id, family_id, claim and now are required")
+	}
+	if impl.commit != nil {
+		lock_tok := dbt.timed_lock(&impl.commit.mutex, .Enroll)
+		defer dbt.timed_unlock(&impl.commit.mutex, .Enroll, lock_tok)
+		return bridge_regrant_on(&impl.commit.conn, input)
+	}
+	// In-memory database (tests): one connection, nothing to interleave with.
+	return bridge_regrant_on(impl.conn, input)
+}
+
+@(private = "file")
+bridge_regrant_on :: proc(conn: ^Conn, input: iface.Bridge_Regrant_Input) -> (iface.Bridge_Regrant_Outcome, domain.Domain_Error) {
+	fail :: proc(msg: string) -> (iface.Bridge_Regrant_Outcome, domain.Domain_Error) {
+		return .Failed, domain.domain_error(.Internal_Error, msg)
+	}
+	if !exec(conn, "BEGIN IMMEDIATE;") do return fail("failed to begin the bridge token re-grant")
+	committed := false
+	defer if !committed do _ = exec(conn, "ROLLBACK;")
+	{
+		stmt: sqlite3_stmt = nil
+		query := "UPDATE bridge_tokens SET regrant_claim = ? WHERE token_id = ? AND regrant_claim = ? AND rotated_at != '' AND revoked_at = '';"
+		if sqlite3_prepare_v2(conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return fail("failed to prepare the re-grant claim")
+		defer sqlite3_finalize(stmt)
+		bind_text(stmt, 1, input.claim)
+		bind_text(stmt, 2, input.spent_token_id)
+		bind_text(stmt, 3, input.expected)
+		step_rc, row_changes := step_changes(conn.db, stmt)
+		if step_rc != SQLITE_DONE do return fail("the re-grant claim failed")
+		if row_changes == 0 do return .Lost, domain.Domain_Error{}
+	}
+	when ODIN_TEST {
+		if bridge_regrant_test_hook != nil && !bridge_regrant_test_hook(input.spent_token_id) do return fail("injected re-grant failure")
+	}
+	{
+		stmt: sqlite3_stmt = nil
+		query := "UPDATE bridge_tokens SET revoked_at = ? WHERE family_id = ? AND generation > ? AND revoked_at = '';"
+		if sqlite3_prepare_v2(conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return fail("failed to prepare the re-grant revocation")
+		defer sqlite3_finalize(stmt)
+		bind_text(stmt, 1, input.now)
+		bind_text(stmt, 2, input.family_id)
+		gen_buf: [24]byte
+		bind_text(stmt, 3, strconv.write_int(gen_buf[:], i64(input.generation), 10))
+		if sqlite3_step(stmt) != SQLITE_DONE do return fail("the re-grant revocation failed")
+	}
+	if !bridge_insert_token_on(conn, input.refresh_row) do return fail("the re-granted refresh token could not be saved")
+	if !bridge_insert_token_on(conn, input.access_row) do return fail("the re-granted access token could not be saved")
+	if !exec(conn, "COMMIT;") do return fail("failed to commit the bridge token re-grant")
+	committed = true
+	return .Granted, domain.Domain_Error{}
+}
+
+// bridge_insert_token_on INSERTs a NEW token row on `conn` (no upsert: a re-grant
+// never rewrites an existing row).
+@(private = "file")
+bridge_insert_token_on :: proc(conn: ^Conn, token: domain.Bridge_Token) -> bool {
+	stmt: sqlite3_stmt = nil
+	query := "INSERT INTO bridge_tokens (" + BRIDGE_TOKEN_COLUMNS + ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);"
+	if sqlite3_prepare_v2(conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return false
+	defer sqlite3_finalize(stmt)
+	bind_text(stmt, 1, token.token_id)
+	bind_text(stmt, 2, token.bridge_id)
+	bind_text(stmt, 3, domain.bridge_token_kind_string(token.kind))
+	bind_text(stmt, 4, token.token_hash)
+	bind_text(stmt, 5, token.family_id)
+	gen_buf: [24]byte
+	bind_text(stmt, 6, strconv.write_int(gen_buf[:], i64(token.generation), 10))
+	bind_text(stmt, 7, token.scope if token.scope != "" else "bridge:runtime")
+	bind_text(stmt, 8, token.issued_at)
+	bind_text(stmt, 9, token.expires_at)
+	bind_text(stmt, 10, token.family_expires_at)
+	bind_text(stmt, 11, token.rotated_at)
+	bind_text(stmt, 12, token.revoked_at)
+	bind_text(stmt, 13, token.rotation_request_hash)
+	bind_text(stmt, 14, token.first_used_at)
+	bind_text(stmt, 15, token.regrant_claim)
+	return sqlite3_step(stmt) == SQLITE_DONE
+}
+
 // bridge_mark_token_rotated_sqlite spends a refresh token.
 //
 // `AND rotated_at = ''` IS THE SINGLE-USE ENFORCEMENT, and it is here rather than in
@@ -141,15 +259,16 @@ bridge_revoke_tokens_for_bridge_sqlite :: proc(ctx: rawptr, bridge_id, revoked_a
 // caller treats 0 changed rows as "someone else already spent it", which is exactly
 // the reuse signal — so the race resolves into the detection path instead of minting
 // two live generations from one token.
-bridge_mark_token_rotated_sqlite :: proc(ctx: rawptr, token_id, rotated_at: string) -> (bool, domain.Domain_Error) {
+bridge_mark_token_rotated_sqlite :: proc(ctx: rawptr, token_id, rotated_at, request_hash: string) -> (bool, domain.Domain_Error) {
 	impl := (^Bridge_Repo_SQLite)(ctx)
 	if token_id == "" || rotated_at == "" do return false, domain.domain_error(.Validation_Failed, "token_id and rotated_at are required")
 	stmt: sqlite3_stmt = nil
-	query := "UPDATE bridge_tokens SET rotated_at = ? WHERE token_id = ? AND rotated_at = '';"
+	query := "UPDATE bridge_tokens SET rotated_at = ?, rotation_request_hash = ? WHERE token_id = ? AND rotated_at = '';"
 	if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return false, domain.domain_error(.Internal_Error, "failed to prepare bridge token rotate")
 	defer sqlite3_finalize(stmt)
 	bind_text(stmt, 1, rotated_at)
-	bind_text(stmt, 2, token_id)
+	bind_text(stmt, 2, request_hash)
+	bind_text(stmt, 3, token_id)
 	step_rc, row_changes := step_changes(impl.conn.db, stmt)
 	if step_rc != SQLITE_DONE do return false, domain.domain_error(.Internal_Error, "bridge token could not be marked rotated")
 	return row_changes > 0, domain.Domain_Error{}
@@ -283,5 +402,8 @@ bridge_token_from_stmt :: proc(stmt: sqlite3_stmt) -> domain.Bridge_Token {
 		family_expires_at = column_text(stmt, 9),
 		rotated_at = column_text(stmt, 10),
 		revoked_at = column_text(stmt, 11),
+		rotation_request_hash = column_text(stmt, 12),
+		first_used_at = column_text(stmt, 13),
+		regrant_claim = column_text(stmt, 14),
 	}
 }

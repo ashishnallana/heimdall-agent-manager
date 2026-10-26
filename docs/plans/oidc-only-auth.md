@@ -507,26 +507,42 @@ Phase 5 (docs + verification):
 - Pre-existing, unrelated: `nix build .#ham-bootstrap-golden-test` fails to link (`-lsqlite3`
   missing in its mkOdinPackage). It fails identically at 6ce3e02f.
 
-## Post-cutover follow-ups (deferred; Mundus cut-over first)
+## Post-cutover follow-ups
 
-- **Per-flow preview bind cookie** (`__Host-heimdall_preview_bind_<id>`, id carried through
-  start and the ticket; redeem clears only its own). Today there is one bind cookie, so two
-  previews signing in at the same time overwrite it and one of them has to bounce again.
-- **HMAC tag in the bind cookie value** (per-process key; refuse to redeem against an untagged
-  value). Otherwise script in a previewed app could plant a non-HttpOnly cookie with that name.
-- **Bounce hop counter** (stop with a clear 403 after 3 bounces). A browser that refuses the
-  preview cookie currently bounces in a loop.
-- **UI hardening:**
-  - `currentReturnTo` should fall back to `/` when the path would fail the hub's
-    `safe_return_to`, so a bad path gives a clean redirect instead of a 400.
-  - `postLogout`/`signOut` should navigate only to `https:` URLs or single-`/` relative paths.
-    This guards against a hostile or misconfigured `logout_url`.
-- **XFF docs note** in `docs/auth-oidc.md`: per-client limits trust the right-most untrusted
-  X-Forwarded-For hop, so the reverse proxy must set it to the real client (Cloudflare:
-  `CF-Connecting-IP`). Without that, the limits key on the proxy address. (Mundus nginx already
-  does this.)
+Done on `feat/oidc-followups`:
+- [x] **Per-flow preview bind cookie** `__Host-heimdall_preview_bind_<id>`. The 8-character id
+  is carried as `bind_id` through start and the ticket, and redeem reads and clears only its own
+  cookie (Max-Age 300). Concurrent previews no longer overwrite each other's bind cookie.
+- [x] **Hub-minted bind value**: `<random>.<HMAC-SHA256(hub process key,
+  "heimdall-preview-bind|<id>|<random>")[:16]>`. Redeem refuses a value whose tag does not
+  verify, so a non-HttpOnly cookie planted by previewed script cannot be redeemed against.
+- [x] **Bounce hop counter**: `hop` travels through start and the ticket, and redeem returns to
+  `return_to?__heimdall_hop=N`. The parameter is stripped before anything is forwarded to the
+  app. More than 3 consecutive bounces end in a clear 403 explaining that the browser refuses
+  the preview cookie.
+- [x] **UI**: `currentReturnTo` falls back to `/` whenever the hub's `safe_return_to` would
+  refuse the path (`isSafeReturnTo` mirrors it). `postLogout` only follows `https:` URLs or
+  single-`/` paths (`safeLogoutTarget`); anything else goes to `/`.
+- [x] **Docs**: `docs/auth-oidc.md` explains the right-most untrusted X-Forwarded-For rule and
+  gives the Cloudflare `CF-Connecting-IP` nginx example.
+
+Review nice-to-haves (also done):
+- [x] The bind value carries its mint time under the MAC (`<random>.<ts>.<tag>`), and the 300 s
+  window is enforced server-side.
+- [x] Sub-keys derived from the process key: `HMAC(key, "heimdall-login-seal-v1")` for the
+  login AEAD and `HMAC(key, "heimdall-preview-bind-v1")` for the bind tag.
+- [x] Cookie-bomb cap: at most 16 bind cookies, and beyond that only the oldest (by the mint
+  time in the value) are expired. A redeem with a missing, stale or foreign bind cookie, or an
+  expired ticket, re-bounces within the hop limit instead of returning 403. Without this, every
+  pane bouncing at once after a hub restart would kill each other's flows.
+- [x] `__heimdall_hop` is appended only from hop 2 on. Between handoffs the count lives in a
+  30 s `__Host-heimdall_preview_hop` cookie, so the normal path keeps the URL clean while loops
+  are still caught.
+- [x] The residual risk (script on the victim's own preview origin planting a harvested bind
+  value) is documented and accepted.
+
+Remaining carry-overs:
 - **Drop `user_api_tokens`** in a later release, once rolling back to pre-OIDC binaries is no
-  longer possible. Migration 135 only empties it, so a rollback does not crash-loop.
-- **Electron and ham-ctl OIDC sign-in.** Both currently show "user tokens were removed" and
-  cannot authenticate as a user.
-- **Migration 134 renumber check** before merging, if `main` gained its own 134.
+  longer possible. Migration 135 only empties it.
+- **Electron and ham-ctl OIDC sign-in.** Both currently say that user tokens were removed.
+- **Migration numbering** before each merge to `main`: there is no new migration on this branch.

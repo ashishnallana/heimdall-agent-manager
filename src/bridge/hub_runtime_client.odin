@@ -408,6 +408,11 @@ bridge_hub_runtime_worker :: proc() {
 					// Absent on older hubs -> keep the default (on).
 					bridge_heartbeat_stats_set_enabled(extract_json_bool(text, "heartbeat_stats", true))
 					bridge_hub_set_heartbeat_interval(extract_json_int(text, "heartbeat_interval_seconds", 0))
+					// Absent on older hubs, which neither bound the session by its
+					// credential nor understand bridge_reauth.
+					sync.atomic_store(&bridge_hub_credential_reauth_supported, extract_json_bool(text, "credential_reauth", false))
+					// This connection was opened with the current credential.
+					sync.atomic_store(&bridge_credential_reauth_pending, false)
 					ready = true
 					delete(msg_type)
 					delete(text)
@@ -655,6 +660,7 @@ bridge_hub_runtime_loop :: proc(conn: ^ws.Connection) {
 		// not on the next heartbeat.
 		bridge_runtime_drain_status_pushes(conn)
 		bridge_blockers_drain_outgoing(conn)
+		bridge_credential_reauth_drain(conn)
 		now := time.to_unix_nanoseconds(time.now())
 		if now - last_heartbeat >= sync.atomic_load(&bridge_hub_heartbeat_interval_ns) {
 			hb := bridge_hub_heartbeat_json()
@@ -708,9 +714,70 @@ bridge_should_debounce_nudge :: proc(instance_id, task_id: string) -> bool {
 	return false
 }
 
+// ===== Session credential renewal (bridge_reauth) =====
+//
+// A hub that advertises credential_reauth ends a bridge session when the access
+// token that opened it expires. After every successful refresh the bridge renews
+// the live session in-band with the new access token, so a healthy bridge is never
+// disconnected. Against an older hub nothing is sent (it would not understand it,
+// and does not end sessions). If the renewal is refused or never sent, the hub
+// closes the session with bridge_token_expired and the reconnect loop dials again
+// with the current (refreshed) credential.
+bridge_hub_credential_reauth_supported: bool
+bridge_credential_reauth_pending: bool
+
+BRIDGE_REAUTH_FRAME :: struct {
+	type:         string,
+	access_token: string,
+}
+
+bridge_credential_reauth_drain :: proc(conn: ^ws.Connection) {
+	if !sync.atomic_load(&bridge_credential_reauth_pending) do return
+	sync.atomic_store(&bridge_credential_reauth_pending, false)
+	if !sync.atomic_load(&bridge_hub_credential_reauth_supported) do return
+	credential := bridge_credential_snapshot()
+	defer delete(credential)
+	if strings.trim_space(credential) == "" do return
+	data, err := json.marshal(BRIDGE_REAUTH_FRAME{type = "bridge_reauth", access_token = credential}, allocator = context.temp_allocator)
+	if err != nil do return
+	_ = ws.send_text(conn, string(data))
+}
+
+// bridge_hub_session_frame logs the hub's answers about the session credential.
+// Returns true when the frame was one of them.
+bridge_hub_session_frame :: proc(type, text: string) -> bool {
+	if type == "bridge_reauth_result" {
+		if extract_json_bool(text, "ok", false) {
+			fmt.printfln("bridge hub session renewed with the refreshed credential (valid for %ds)", extract_json_int(text, "expires_in", 0))
+		} else {
+			msg := extract_json_string(text, "message", "")
+			defer delete(msg)
+			fmt.eprintfln("bridge hub refused the session renewal: %s; the session will end at the old credential's expiry and reconnect", msg)
+		}
+		return true
+	}
+	if type == "bridge_error" {
+		code := extract_json_string(text, "code", "")
+		defer delete(code)
+		msg := extract_json_string(text, "message", "")
+		defer delete(msg)
+		switch code {
+		case "bridge_token_expired":
+			fmt.eprintfln("bridge hub ended the session: the access token expired (%s); reconnecting with the current credential", msg)
+		case "bridge_credential_revoked":
+			fmt.eprintfln("bridge hub ended the session: this bridge's credential is revoked (%s); re-enrollment is required", msg)
+		case:
+			fmt.eprintfln("bridge hub error: %s", msg)
+		}
+		return true
+	}
+	return false
+}
+
 bridge_hub_handle_command :: proc(conn: ^ws.Connection, text: string) {
 	type := extract_json_string(text, "type", "")
 	defer delete(type)
+	if bridge_hub_session_frame(type, text) do return
 	if bridge_provider_catalog_handle_frame(conn, type, text) do return
 	if bridge_provider_handle_discover_frame(conn, type, text) do return
 	if type == "bridge_heartbeat_ack" {

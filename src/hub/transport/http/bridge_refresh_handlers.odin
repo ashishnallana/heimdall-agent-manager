@@ -22,8 +22,8 @@
 //     cache on the path.
 package http
 
-import "core:fmt"
 import "core:strings"
+import contracts "odin_test:contracts"
 import bridge_service "odin_test:hub/service/bridge"
 import domain "odin_test:hub/domain"
 
@@ -49,17 +49,19 @@ bridge_refresh_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	if !token_ok || !strings.has_prefix(token, bridge_service.REFRESH_TOKEN_PREFIX) {
 		return respond_error(domain.domain_error(.Unauthenticated, "invalid_grant"), req.request_id)
 	}
-	pair, ok, err := bridge_service.refresh_bridge_token(h.bridges, token)
+	// The bridge's per-rotation request id, when it sends one, lets a retry of a
+	// rotation whose reply was lost be answered (BRIDGE_REFRESH_RETRY_GRACE_SECONDS).
+	request_id := header_value(req.headers, bridge_service.BRIDGE_REFRESH_REQUEST_ID_HEADER)
+	pair, ok, err := bridge_service.refresh_bridge_token(h.bridges, token, request_id)
 	if !ok do return respond_error(err, req.request_id)
-	b := strings.builder_make()
-	strings.write_string(&b, "{\"access_token\":\"")
-	write_handler_json_string(&b, pair.access_token)
-	strings.write_string(&b, "\",\"refresh_token\":\"")
-	write_handler_json_string(&b, pair.refresh_token)
-	strings.write_string(&b, "\",\"bridge_id\":\"")
-	write_handler_json_string(&b, pair.bridge_id)
-	strings.write_string(&b, "\",\"token_type\":\"Bearer\"")
-	strings.write_string(&b, fmt.tprintf(",\"expires_in\":%d", pair.expires_in))
-	strings.write_string(&b, fmt.tprintf(",\"refresh_expires_in\":%d}", pair.refresh_expires_in))
-	return respond_success(strings.to_string(b), req.request_id, "", 200)
+	// Typed marshal, never concatenation: field names, order and types are the
+	// historical wire format (contracts.Bridge_Refresh_Reply).
+	return respond_success_typed(contracts.Bridge_Refresh_Reply{
+		access_token = pair.access_token,
+		refresh_token = pair.refresh_token,
+		bridge_id = pair.bridge_id,
+		token_type = "Bearer",
+		expires_in = pair.expires_in,
+		refresh_expires_in = pair.refresh_expires_in,
+	}, req.request_id, "")
 }

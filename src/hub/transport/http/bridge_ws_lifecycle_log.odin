@@ -67,6 +67,11 @@ Bridge_WS_Disconnect_Reason :: enum {
 	// can never fire, read as "no writes were abandoned", is precisely the
 	// always-zero-counter trap that ws.send_timeouts() set for this chain.
 	Write_Failed,
+	// The session's access token expired (bridge_token_expired) without an in-band
+	// bridge_reauth: the session is closed so an expired credential does no work.
+	Credential_Expired,
+	// The session's credential (token, family or bridge) was revoked.
+	Credential_Revoked,
 }
 
 // bridge_ws_reason_string maps a reason to a stable, greppable token. Returns a STRING
@@ -83,6 +88,8 @@ bridge_ws_reason_string :: proc(reason: Bridge_WS_Disconnect_Reason) -> string {
 	case .Connection_Replaced: return "connection_replaced"
 	case .Frame_Rejected:      return "frame_rejected"
 	case .Write_Failed:        return "write_failed"
+	case .Credential_Expired:  return "credential_expired"
+	case .Credential_Revoked:  return "credential_revoked"
 	}
 	return "unknown"
 }

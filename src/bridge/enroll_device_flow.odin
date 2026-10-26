@@ -482,33 +482,12 @@ Bridge_Token_Request :: struct {
 
 // Bridge_Token_Data is a /device/token or /device/refresh answer: the poll status
 // and, once approved, the credential. Absent members decode as zero values.
-Bridge_Token_Data :: struct {
-	status:                  string,
-	interval:                int,
-	approver_username:       string,
-	owner_user_id:           string,
-	bridge_id:               string,
-	access_token:            string,
-	refresh_token:           string,
-	expires_in:              int,
-	refresh_expires_in:      int,
-	vault_delivery_expected: bool,
-	enrollment_pending:      bool,
-}
+// The token-reply shape and its decoder live in contracts, shared with the hub that
+// marshals the reply (contracts/bridge_token_wire.odin).
+Bridge_Token_Data :: contracts.Bridge_Token_Data
 
-// bridge_token_response_decode reads a token answer inside the API envelope
-// ({"data":{...}}) or bare. Anything that does not decode is the zero value, which
-// callers treat as unrecognised / unusable. Temp-allocated.
 bridge_token_response_decode :: proc(body: string) -> Bridge_Token_Data {
-	envelope: struct {
-		data: Maybe(Bridge_Token_Data),
-	}
-	if vault.wire_decode(body, &envelope) {
-		if data, has := envelope.data.?; has do return data
-	}
-	flat: Bridge_Token_Data
-	if !vault.wire_decode(body, &flat) do return {}
-	return flat
+	return contracts.bridge_token_response_decode(body)
 }
 
 bridge_enroll_credential_from_json :: proc(body: string, allocator := context.allocator) -> Bridge_Enroll_Credential {
@@ -685,7 +664,7 @@ bridge_credential_refresh_once :: proc(
 	api_base, refresh_token: string,
 	allocator := context.allocator,
 ) -> (Bridge_Enroll_Credential, Bridge_Refresh_Outcome) {
-    cred, ok, err, _ := bridge_credential_refresh_typed(api_base, refresh_token, 10_000)
+    cred, ok, err, _ := bridge_credential_refresh_typed(api_base, refresh_token, "", 10_000)
     if ok do return cred, .Rotated
     if err.code == .Unauthenticated do return {}, .Revoked
     return {}, .Retry
@@ -734,6 +713,7 @@ bridge_credential_refresh_worker :: proc() {
         key := fmt.aprintf("refresh:%s:%s", api_base, bridge_id)
         refresh_path := bridge_enroll_refresh_file_for(g_bridge_credential_file)
         pending_path := strings.concatenate({g_bridge_credential_file, ".pending-rotation-v1"})
+        request_path := bridge_refresh_request_path(g_bridge_credential_file)
         recovery, valid := bridge_refresh_pending_load(pending_path, key, api_base, bridge_id)
         if !valid { fmt.eprintln("bridge credential recovery parked: invalid pending rotation record"); return }
         recovery.pending.version = 1
@@ -745,9 +725,9 @@ bridge_credential_refresh_worker :: proc() {
                 // A crash before pending-file cleanup needs adoption only, not
                 // another attempt (which may already be the sixth).
                 bridge_refresh_adopt(recovery.pending.credential)
-                _ = os.remove(pending_path)
+                _ = os.remove(pending_path); _ = os.remove(request_path)
                 delay = bridge_refresh_delay_seconds(recovery.pending.credential.expires_in, 128)
-                delete(key); delete(refresh_path); delete(pending_path)
+                delete(key); delete(refresh_path); delete(pending_path); delete(request_path)
                 if delay <= 0 do return
                 continue
             }
@@ -756,12 +736,21 @@ bridge_credential_refresh_worker :: proc() {
             }
         } else {
             bridge_retry_reopen_success(key)
+            // A receipt left terminal by a RETRIABLE failure (a lost reply, an
+            // unreachable hub, a crash mid-request) gets a fresh bounded budget
+            // here, at every start and after every pause below. It used to stay
+            // terminal on disk and stop renewal at every restart, forever.
+            bridge_retry_reopen_retriable(key)
         }
         for {
             now := bridge_runtime_now_ms()
             budget, reserved := bridge_retry_reserve(key, now)
             if !reserved {
                 if bridge_operation_terminal(budget) {
+                    if !recovery.has_pair && bridge_refresh_terminal_is_retriable(budget) {
+                        bridge_refresh_pause(key, budget)
+                        continue
+                    }
                     fmt.eprintfln("bridge credential recovery stopped: state=%v attempts=%d code=%v class=%v", budget.state, budget.attempts, budget.code, budget.class)
                     return
                 }
@@ -772,32 +761,122 @@ bridge_credential_refresh_worker :: proc() {
             err := contracts.wire_error(.Unauthenticated)
             success := false
             if recovery.has_pair || (has_stored && bridge_enroll_credential_usable(stored)) {
-                success, err = bridge_refresh_recovery_step(&recovery, pending_path, g_bridge_credential_file, refresh_path, api_base, bridge_id, stored, budget, bridge_operation_timeout_ms(budget, now))
+                // The request id is durable BEFORE the first send and reused by
+                // every retry of this rotation, across restarts, until the new pair
+                // is committed. It is what lets the hub recognise a retry of a
+                // rotation it already performed and answer it instead of treating
+                // the re-presented refresh token as stolen.
+                if !recovery.has_pair && recovery.request_id == "" {
+                    request_id, request_ok := bridge_refresh_request_ensure(request_path, key, api_base, bridge_id)
+                    if request_ok do recovery.request_id = request_id
+                }
+                if recovery.has_pair || recovery.request_id != "" {
+                    success, err = bridge_refresh_recovery_step(&recovery, pending_path, g_bridge_credential_file, refresh_path, api_base, bridge_id, stored, budget, bridge_operation_timeout_ms(budget, now))
+                } else {
+                    // Nothing was sent: retrying is safe.
+                    err = contracts.wire_error(.Internal_Error, "refresh_request_unpersisted")
+                }
             }
             delete(stored)
-            finished := bridge_retry_finish(key, bridge_runtime_now_ms(), success, err, base_ms = 5000, park_on_failure = recovery.unknown_outcome)
+            // An unknown outcome is NOT parked. It is retried, with the same request
+            // id, inside the hub's retry window (BRIDGE_REFRESH_RETRY_GRACE_SECONDS).
+            finished := bridge_retry_finish(key, bridge_runtime_now_ms(), success, err, base_ms = 5000)
             if success {
                 // Adoption is after both durable writes, so a reconnect cannot
                 // expose a half-committed rotation. Failed parent sync budgets stay.
                 bridge_refresh_adopt(recovery.pending.credential)
-                _ = os.remove(pending_path)
+                _ = os.remove(pending_path); _ = os.remove(request_path)
+                fmt.printfln("bridge credential refreshed (access token valid for %ds)", recovery.pending.credential.expires_in)
                 jitter: [1]byte
                 if !bridge_enroll_entropy(jitter[:]) do jitter[0] = 128
                 delay = bridge_refresh_delay_seconds(recovery.pending.credential.expires_in, jitter[0])
                 break
             }
+            if recovery.unknown_outcome {
+                fmt.eprintfln("bridge credential refresh outcome unknown (attempt %d, code=%v); retrying the same rotation", finished.attempts, err.code)
+            }
             if bridge_operation_terminal(finished) {
+                if !recovery.has_pair && bridge_refresh_terminal_is_retriable(finished) {
+                    bridge_refresh_pause(key, finished)
+                    continue
+                }
                 if err.code == .Unauthenticated {
-                    _ = os.remove(refresh_path); _ = os.remove(g_bridge_credential_file)
+                    _ = os.remove(refresh_path); _ = os.remove(g_bridge_credential_file); _ = os.remove(request_path)
                     sync.mutex_lock(&g_bridge_credential_mu); bridge_config.bridge_token = ""; sync.mutex_unlock(&g_bridge_credential_mu)
                 }
                 fmt.eprintfln("bridge credential recovery stopped: state=%v attempts=%d code=%v class=%v", finished.state, finished.attempts, finished.code, finished.class)
                 return
             }
         }
-        delete(key); delete(refresh_path); delete(pending_path)
+        delete(key); delete(refresh_path); delete(pending_path); delete(request_path)
         if delay <= 0 do return
     }
+}
+
+// BRIDGE_REFRESH_PAUSE_SECONDS is how long renewal rests after a bounded budget of
+// retriable attempts runs out, before it starts a fresh budget. Renewal never stops
+// for a retriable failure: an unreachable hub or a lost reply must not cost the
+// machine its enrollment.
+BRIDGE_REFRESH_PAUSE_SECONDS :: 60
+
+// bridge_refresh_terminal_is_retriable reports whether a terminal renewal receipt
+// ended for a reason that a later attempt can fix. Unauthenticated (the hub refused
+// the refresh token) and a deliberate cancel are final; everything classed retriable,
+// and a reservation a crash left without a recorded result, is not.
+bridge_refresh_terminal_is_retriable :: proc(b: Bridge_Operation_Budget) -> bool {
+    if b.state == .Succeeded || b.state == .Cancelled do return false
+    if b.state != .Waiting_Repair && b.state != .Exhausted do return false
+    return b.class == .retriable || b.code == .None
+}
+
+// bridge_refresh_pause rests, then reopens the receipt with a fresh bounded budget.
+// Only for an exchange (no pair received yet): a received pair's local commit keeps
+// the pending-rotation receipt rules (bridge_retry_resume_pending_rotation).
+bridge_refresh_pause :: proc(key: string, b: Bridge_Operation_Budget) {
+    fmt.eprintfln("bridge credential refresh paused: state=%v attempts=%d code=%v; retrying in %ds", b.state, b.attempts, b.code, BRIDGE_REFRESH_PAUSE_SECONDS)
+    time.sleep(BRIDGE_REFRESH_PAUSE_SECONDS * time.Second)
+    _ = bridge_retry_reopen_retriable(key)
+}
+
+// ===== Refresh request identity (pending-rotation retry) =====
+//
+// One rotation = one request id, generated and made durable before the first send,
+// sent as BRIDGE_REFRESH_REQUEST_ID_HEADER on every attempt, removed only once the
+// returned pair is committed. A separate file from the pending-pair record, so an
+// older bridge binary (rollback) that does not know it simply ignores it instead of
+// rejecting its pending-rotation record.
+BRIDGE_REFRESH_REQUEST_ID_HEADER :: "X-Heimdall-Refresh-Request-Id"
+Bridge_Refresh_Request :: struct {
+    version: int,
+    key, api_base, bridge_id, request_id: string,
+}
+bridge_refresh_request_path :: proc(credential_file: string, allocator := context.allocator) -> string {
+    return strings.concatenate({strings.trim_space(credential_file), ".refresh-request-v1"}, allocator)
+}
+// bridge_refresh_request_ensure returns this rotation's request id, creating and
+// persisting one if none is recorded for (key, hub, bridge). Heap-allocated.
+bridge_refresh_request_ensure :: proc(path, key, api_base, bridge_id: string) -> (string, bool) {
+    if bytes, err := os.read_entire_file(path, context.temp_allocator); err == nil {
+        rec: Bridge_Refresh_Request
+        if json.unmarshal(bytes, &rec, allocator = context.temp_allocator) == nil && rec.version == 1 && rec.key == key &&
+           rec.api_base == api_base && rec.bridge_id == bridge_id && bridge_refresh_request_id_valid(rec.request_id) {
+            return strings.clone(rec.request_id, runtime.heap_allocator()), true
+        }
+    }
+    raw: [16]byte
+    if !bridge_enroll_entropy(raw[:]) do return "", false
+    id := strings.concatenate({"rrq_", string(hex.encode(raw[:], context.temp_allocator))}, runtime.heap_allocator())
+    rec := Bridge_Refresh_Request{version = 1, key = key, api_base = api_base, bridge_id = bridge_id, request_id = id}
+    data, merr := json.marshal(rec, allocator = context.temp_allocator)
+    if merr != nil || !bridge_retry_atomic_write(path, data) { delete(id, runtime.heap_allocator()); return "", false }
+    return id, true
+}
+bridge_refresh_request_id_valid :: proc(id: string) -> bool {
+    if len(id) < 32 || len(id) > 128 do return false
+    for c in transmute([]byte)id {
+        if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-') do return false
+    }
+    return true
 }
 
 // bridge_enroll_run_browser_opener passes the URL as an argv element, never
@@ -1611,8 +1690,10 @@ bridge_credential_snapshot :: proc(allocator := context.allocator) -> string {
     return strings.clone(bridge_config.bridge_token, allocator)
 }
 
-bridge_credential_refresh_typed :: proc(api_base, refresh_token: string, timeout_ms: int) -> (Bridge_Enroll_Credential, bool, contracts.Wire_Error, bool) {
-    headers := [?]http.Header{{name = "Authorization", value = strings.concatenate({"Bearer ", refresh_token}, context.temp_allocator)}}
+bridge_credential_refresh_typed :: proc(api_base, refresh_token, request_id: string, timeout_ms: int) -> (Bridge_Enroll_Credential, bool, contracts.Wire_Error, bool) {
+    headers := make([dynamic]http.Header, 0, 2, context.temp_allocator)
+    append(&headers, http.Header{name = "Authorization", value = strings.concatenate({"Bearer ", refresh_token}, context.temp_allocator)})
+    if request_id != "" do append(&headers, http.Header{name = BRIDGE_REFRESH_REQUEST_ID_HEADER, value = request_id})
     resp, ok := http.request_with_headers_deadline("POST", api_base, BRIDGE_ENROLL_REFRESH_PATH, "{}", headers[:], timeout_ms)
     defer delete(resp.body)
     return bridge_refresh_response_classify(resp, ok, api_base)
@@ -1626,9 +1707,22 @@ bridge_refresh_response_classify :: proc(resp: http.Response, ok: bool, api_base
         uncertain := err.class == .retriable && !bridge_http_attempt_retriable("POST", resp, true)
         return {}, false, err, uncertain
     }
-    cred := bridge_enroll_credential_from_json(resp.body)
-    if !bridge_enroll_credential_usable(cred.access_token) || !bridge_enroll_credential_usable(cred.refresh_token) {
-        return {}, false, contracts.wire_error(.Bridge_Timeout), true
+    // A 200 means the hub ROTATED: the presented refresh token is spent. A reply
+    // this bridge cannot use is therefore a protocol failure with an unknown
+    // outcome, never a timeout. Say so, with what is safe to log (the length and
+    // the decoder's complaint, never a token), and let the request-id retry
+    // recover the rotation.
+    data, decode_problem := contracts.bridge_token_response_decode_checked(resp.body)
+    if decode_problem == "" && (!bridge_enroll_credential_usable(data.access_token) || !bridge_enroll_credential_usable(data.refresh_token)) {
+        decode_problem = "access_token or refresh_token missing or malformed"
+    }
+    if decode_problem != "" {
+        fmt.eprintfln("bridge credential refresh: PROTOCOL ERROR: hub answered 200 but the reply is unusable (body_len=%d): %s", len(resp.body), decode_problem)
+        return {}, false, contracts.wire_error(.Internal_Error, "refresh_reply_undecodable", "hub refresh reply could not be decoded"), true
+    }
+    cred := Bridge_Enroll_Credential{
+        bridge_id = strings.clone(data.bridge_id), access_token = strings.clone(data.access_token),
+        refresh_token = strings.clone(data.refresh_token), expires_in = data.expires_in, refresh_expires_in = data.refresh_expires_in,
     }
     return cred, true, {}, false
 }
@@ -1642,7 +1736,11 @@ Bridge_Refresh_Pending :: struct {
 Bridge_Refresh_Recovery :: struct {
     pending: Bridge_Refresh_Pending,
     has_pair: bool,
+    // The last exchange may have rotated on the hub (sent, reply lost or unusable).
+    // Informational: such an attempt is retried with the same request_id.
     unknown_outcome: bool,
+    // This rotation's durable request id (bridge_refresh_request_ensure).
+    request_id: string,
 }
 bridge_refresh_pending_save :: proc(path: string, pending: Bridge_Refresh_Pending) -> bool {
     bytes, err := json.marshal(pending, allocator = context.temp_allocator)
@@ -1674,7 +1772,7 @@ bridge_refresh_recovery_step :: proc(
     exchange := bridge_credential_refresh_typed, save_pending := bridge_refresh_pending_save, commit_pair := bridge_refresh_pair_commit,
 ) -> (bool, contracts.Wire_Error) {
     if !recovery.has_pair {
-        cred, ok, err, unknown := exchange(api_base, stored, timeout_ms)
+        cred, ok, err, unknown := exchange(api_base, stored, recovery.request_id, timeout_ms)
         recovery.unknown_outcome = unknown
         if !ok do return false, err
         recovery.pending.credential = cred
@@ -1690,6 +1788,9 @@ bridge_refresh_adopt :: proc(cred: Bridge_Enroll_Credential) {
     sync.mutex_lock(&g_bridge_credential_mu)
     bridge_config.bridge_token = strings.clone(cred.access_token, runtime.heap_allocator())
     sync.mutex_unlock(&g_bridge_credential_mu)
+    // Renew the live hub session in-band with the new access token
+    // (bridge_credential_reauth_drain, on the hub runtime loop).
+    sync.atomic_store(&bridge_credential_reauth_pending, true)
     key := bridge_action_scheduler_sync_key()
     defer delete(key)
     bridge_retry_credential_repaired(key)

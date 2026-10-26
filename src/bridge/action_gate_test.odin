@@ -30,6 +30,7 @@ gate_fetch :: proc(method, base_url, path, body: string, headers: []http.Header,
     switch gate_fetch_status {
     case 403: return {status = 403, body = strings.clone(DISABLED_BODY)}, true
     case 304: return {status = 304}, true
+    case 500: return {status = 500}, true
     }
     return {status = 200, body = strings.clone(gate_fetch_body)}, true
 }
@@ -215,4 +216,149 @@ test_action_gate_reenable_skips_fire_missed_within_eligible_second :: proc(t: ^t
     if len(s.queue) == 1 do testing.expect(t, s.queue[0].target_run_at_ms > now, "slot missed inside the eligible second rolled forward")
     testing.expect_value(t, gate_mints, 0)
     testing.expect_value(t, gate_executes, 0)
+}
+
+// Simulated times run in the past: bridge_retry_finish stamps the real clock, so a
+// simulated FUTURE reserve would trip its clock-regression fence (Waiting_Repair) and
+// hide every later poll. In the past each 403 finishes Succeeded and reopens, exactly
+// as in production, so the fetch counts below are the real poll counts.
+@(private = "file")
+gate_past_now :: proc() -> i64 { return bridge_runtime_now_ms() - 30 * 86_400_000 }
+
+// A suspended scheduler: Actions disabled (`e.off`, global revision 5) answered 403.
+@(private = "file")
+gate_suspended_state :: proc(now: i64) {
+    gate_fresh_state(now)
+    bridge_action_scheduler_notify_snapshot("e.off", 5, now)
+    gate_fetch_status = 403
+    bridge_action_scheduler_tick(now, gate_fetch, gate_execute, gate_resolve)
+    gate_fetch_calls = 0
+}
+
+// The reconnect path exactly as hub_runtime_client drives it: connection_changed on
+// disconnect and on the next bridge_ready, then heartbeat acks. An ack without a
+// schedule token (bridge_enroll_ws's bridge_heartbeat_ack_payload(0)) is included.
+@(private = "file")
+gate_reconnect :: proc(epoch: string, revision: i64, now: i64) {
+    bridge_action_scheduler_connection_changed() // loop exit
+    bridge_action_scheduler_connection_changed() // next bridge_ready
+    bridge_action_scheduler_notify_version(0)
+    bridge_action_scheduler_notify_snapshot("", -1, now) // token-less ack
+    bridge_action_scheduler_notify_version(0)
+    bridge_action_scheduler_notify_snapshot(epoch, revision, now)
+}
+
+@(test)
+test_action_gate_suspend_survives_reconnects :: proc(t: ^testing.T) {
+    context.allocator = runtime.heap_allocator()
+    sync.mutex_lock(&action_sched_test_mutex)
+    defer sync.mutex_unlock(&action_sched_test_mutex)
+    now := gate_past_now()
+    gate_suspended_state(now)
+    testing.expect(t, bridge_action_sched_state.suspended)
+    at := now
+    for _ in 0 ..< 30 {
+        at += 1_300
+        gate_reconnect("e.off", 5, at)
+        for i: i64 = 0; i < 45; i += 1 do bridge_action_scheduler_tick(at + i * 1000, gate_fetch, gate_execute, gate_resolve)
+        at += 45_000
+    }
+    testing.expect_value(t, gate_fetch_calls, 0)
+    testing.expect(t, bridge_action_sched_state.suspended)
+}
+
+// The `.off` token carries the Hub's GLOBAL schedule revision, which any user's action
+// edit or agent-instance insert/delete bumps. It says nothing about a disabled owner,
+// whose GET is refused whatever the revision, so it must not re-poll the 403.
+@(test)
+test_action_gate_suspend_ignores_revision_only_bumps :: proc(t: ^testing.T) {
+    context.allocator = runtime.heap_allocator()
+    sync.mutex_lock(&action_sched_test_mutex)
+    defer sync.mutex_unlock(&action_sched_test_mutex)
+    now := gate_past_now()
+    gate_suspended_state(now)
+    at := now
+    for rev: i64 = 6; rev < 40; rev += 1 {
+        at += 45_000
+        bridge_action_scheduler_notify_snapshot("e.off", rev, at)
+        if rev % 5 == 0 do gate_reconnect("e.off", rev, at)
+        for i: i64 = 0; i < 5; i += 1 do bridge_action_scheduler_tick(at + i * 1000, gate_fetch, gate_execute, gate_resolve)
+    }
+    testing.expect_value(t, gate_fetch_calls, 0)
+    testing.expect(t, bridge_action_sched_state.suspended)
+}
+
+// The daily reconcile backstop counts from the suspension, and one 403 answers it for
+// another day: it must not turn into a 1 Hz poll once the last install is 24h old.
+@(test)
+test_action_gate_suspend_backstop_polls_once_per_day :: proc(t: ^testing.T) {
+    context.allocator = runtime.heap_allocator()
+    sync.mutex_lock(&action_sched_test_mutex)
+    defer sync.mutex_unlock(&action_sched_test_mutex)
+    now := gate_past_now()
+    gate_fresh_state(now - 23 * 3_600_000) // snapshot installed 23h before the disable
+    bridge_action_scheduler_notify_snapshot("e.off", 0, now)
+    gate_fetch_status = 403
+    bridge_action_scheduler_tick(now, gate_fetch, gate_execute, gate_resolve)
+    testing.expect(t, bridge_action_sched_state.suspended)
+    gate_fetch_calls = 0
+    // Two hours later (25h after the install): still answered by the suspension.
+    later := now + 2 * 3_600_000
+    for i: i64 = 0; i < 120; i += 1 do bridge_action_scheduler_tick(later + i * 1000, gate_fetch, gate_execute, gate_resolve)
+    testing.expect_value(t, gate_fetch_calls, 0)
+    // A day after the suspension the backstop asks exactly once, then stays quiet.
+    day := now + ACTION_SCHEDULER_RECONCILE_INTERVAL_MS
+    for i: i64 = 0; i < 120; i += 1 do bridge_action_scheduler_tick(day + i * 1000, gate_fetch, gate_execute, gate_resolve)
+    testing.expect_value(t, gate_fetch_calls, 1)
+    testing.expect(t, bridge_action_sched_state.suspended)
+}
+
+// Re-enable still resyncs promptly after reconnects: the `.on<ts>` epoch is new.
+@(test)
+test_action_gate_reenable_after_reconnect_syncs_once :: proc(t: ^testing.T) {
+    context.allocator = runtime.heap_allocator()
+    sync.mutex_lock(&action_sched_test_mutex)
+    defer sync.mutex_unlock(&action_sched_test_mutex)
+    now := gate_past_now()
+    gate_suspended_state(now)
+    at := now + 5_000
+    gate_reconnect("e.off", 5, at)
+    for i: i64 = 0; i < 10; i += 1 do bridge_action_scheduler_tick(at + i * 1000, gate_fetch, gate_execute, gate_resolve)
+    testing.expect_value(t, gate_fetch_calls, 0)
+
+    at += 60_000
+    gate_fetch_body = `{"snapshot":{"epoch":"e.on9","revision":5,"etag":"W/\"e.on9:5\"","eligible_since":""},"data":[]}`
+    gate_fetch_status = 200
+    bridge_action_scheduler_notify_snapshot("e.on9", 5, at)
+    for i: i64 = 0; i < 10; i += 1 do bridge_action_scheduler_tick(at + i * 1000, gate_fetch, gate_execute, gate_resolve)
+    testing.expect_value(t, gate_fetch_calls, 1)
+    s := &bridge_action_sched_state
+    testing.expect(t, !s.suspended, "re-enable installs the snapshot")
+    testing.expect_value(t, s.installed_epoch, "e.on9")
+    gate_fetch_body = ""
+}
+
+// A non-403 failure on the resync is not mistaken for the disable: it spends the retry
+// budget (Backoff, attempt 1 of BRIDGE_OPERATION_ATTEMPTS) and the token stays unsynced.
+@(test)
+test_action_gate_suspended_resync_failure_uses_retry_budget :: proc(t: ^testing.T) {
+    context.allocator = runtime.heap_allocator()
+    sync.mutex_lock(&action_sched_test_mutex)
+    defer sync.mutex_unlock(&action_sched_test_mutex)
+    now := gate_past_now()
+    gate_suspended_state(now)
+    gate_fetch_status = 500
+    // Real clock: a backoff budget only advances against bridge_retry_finish's clock.
+    at := bridge_runtime_now_ms()
+    bridge_action_scheduler_notify_snapshot("e.on7", 5, at)
+    bridge_action_scheduler_tick(at, gate_fetch, gate_execute, gate_resolve)
+    testing.expect_value(t, gate_fetch_calls, 1)
+    key := bridge_action_scheduler_sync_key()
+    defer delete(key)
+    budget := bridge_retry_status(key)
+    testing.expect_value(t, budget.state, Bridge_Operation_State.Backoff)
+    testing.expect_value(t, budget.attempts, 1)
+    s := &bridge_action_sched_state
+    testing.expect(t, s.suspended)
+    testing.expect(t, s.installed_epoch != s.wanted_epoch, "still wants the re-enable resync")
 }

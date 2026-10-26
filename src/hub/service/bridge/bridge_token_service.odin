@@ -44,6 +44,7 @@
 //     or the keyring (threat T1).
 package bridge
 
+import "core:strconv"
 import "core:strings"
 import contracts "odin_test:contracts"
 import domain "odin_test:hub/domain"
@@ -128,6 +129,44 @@ BRIDGE_TOKEN_CLOCK_SKEW_SECONDS :: 60
 // the newest, and for all but 30 seconds of that one.
 BRIDGE_REFRESH_REUSE_GRACE_SECONDS :: 30
 
+// BRIDGE_REFRESH_RETRY_GRACE_SECONDS bounds the SECOND, narrower hole: a retry of
+// one exact rotation, identified by the request id the bridge sent with it
+// (BRIDGE_REFRESH_REQUEST_ID_HEADER), whose reply was lost.
+//
+// WHY IT EXISTS. The 30-second grace above assumes the retry comes at once. A lost
+// reply does not work like that: the bridge backs off, may be restarted (an update,
+// a crash), and only then retries. Past 30s its retry used to be read as theft and
+// revoked the family, or, before the bridge retried at all, it parked forever. Either
+// way the machine needed a human (incident, 2026-10-25).
+//
+// WHAT BOUNDS IT, all required:
+//   - the presented token was spent by a request carrying THIS request id (its salted
+//     digest is on the spent row; the id is 128 random bits, sent only with the
+//     token, and never logged);
+//   - at most 10 minutes since that spend;
+//   - no descendant refresh token has been redeemed, i.e. the pair minted for the
+//     lost reply was demonstrably never used. Once any descendant is used, the old
+//     token is plain reuse again.
+// Every grant revokes the never-used descendants (both kinds), so a graced retry
+// never leaves two live generations; and a replay with the wrong or no request id,
+// or after the window, or of an older token, still revokes the family.
+BRIDGE_REFRESH_RETRY_GRACE_SECONDS :: 600
+
+// BRIDGE_REFRESH_REQUEST_ID_HEADER carries the bridge's per-rotation request id.
+BRIDGE_REFRESH_REQUEST_ID_HEADER :: "X-Heimdall-Refresh-Request-Id"
+
+// refresh_request_id_valid: 32-128 chars of [A-Za-z0-9_-] (the bridge sends `rrq_`
+// + 32 hex, 128 random bits). Anything else is ignored
+// (treated as absent), never an error, so a malformed header cannot change a
+// refresh that would otherwise succeed.
+refresh_request_id_valid :: proc(id: string) -> bool {
+	if len(id) < 32 || len(id) > 128 do return false
+	for c in transmute([]byte)id {
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-') do return false
+	}
+	return true
+}
+
 // Bridge_Token_Pair is what a mint or a rotation hands back. The two plaintexts
 // exist ONLY in this value and in the response built from it — the Hub stores
 // salted digests and can never reproduce them, which is why a rotation cannot
@@ -189,9 +228,22 @@ issue_bridge_token_pair :: proc(service: ^Bridge_Service, bridge_id: string, sco
 // authenticates for an hour and can never renew, i.e. a machine that silently dies
 // later instead of immediately.
 mint_generation :: proc(service: ^Bridge_Service, bridge_id, family_id: string, generation: int, family_expires_at, now: string, scope := BRIDGE_TOKEN_SCOPE) -> (Bridge_Token_Pair, bool, domain.Domain_Error) {
+	pair, refresh_row, access_row, ok, err := prepare_generation(service, bridge_id, family_id, generation, family_expires_at, now, scope)
+	if !ok do return Bridge_Token_Pair{}, false, err
+	_, rsave_ok, rsave_err := iface.bridge_save_token(service.repo, refresh_row)
+	if !rsave_ok do return Bridge_Token_Pair{}, false, rsave_err
+	_, asave_ok, asave_err := iface.bridge_save_token(service.repo, access_row)
+	if !asave_ok do return Bridge_Token_Pair{}, false, asave_err
+	return pair, true, domain.Domain_Error{}
+}
+
+// prepare_generation issues the two credentials of one generation and builds their
+// rows without writing anything; the caller persists them (mint_generation, or the
+// atomic re-grant in rotate_from).
+prepare_generation :: proc(service: ^Bridge_Service, bridge_id, family_id: string, generation: int, family_expires_at, now: string, scope := BRIDGE_TOKEN_SCOPE) -> (pair: Bridge_Token_Pair, refresh_row, access_row: domain.Bridge_Token, ok: bool, err: domain.Domain_Error) {
 	access_expires_at, a_ok := platform.expires_at_after_seconds_from(now, BRIDGE_ACCESS_TOKEN_TTL_SECONDS)
 	refresh_expires_at, r_ok := platform.expires_at_after_seconds_from(now, BRIDGE_REFRESH_TOKEN_TTL_SECONDS)
-	if !a_ok || !r_ok do return Bridge_Token_Pair{}, false, domain.domain_error(.Internal_Error, "could not derive a credential lifetime from the hub clock")
+	if !a_ok || !r_ok do return {}, {}, {}, false, domain.domain_error(.Internal_Error, "could not derive a credential lifetime from the hub clock")
 	// The sliding refresh window is CAPPED by the family's absolute ceiling, so a
 	// long-lived family does not slide past its own cap one rotation at a time.
 	// String comparison is correct for this format: format_rfc3339_utc is
@@ -201,39 +253,21 @@ mint_generation :: proc(service: ^Bridge_Service, bridge_id, family_id: string, 
 
 	refresh_token_id := platform.generate_id(service.ids, "btk_")
 	refresh_token, refresh_hash, refresh_ok := issue_credential(REFRESH_TOKEN_PREFIX, refresh_token_id)
-	if !refresh_ok do return Bridge_Token_Pair{}, false, domain.domain_error(.Provider_Unavailable, "secure random source unavailable; no bridge credential was issued, retry")
-	_, rsave_ok, rsave_err := iface.bridge_save_token(service.repo, domain.Bridge_Token{
-		token_id = refresh_token_id,
-		bridge_id = bridge_id,
-		kind = .Refresh,
-		token_hash = refresh_hash,
-		family_id = family_id,
-		generation = generation,
-		scope = scope,
-		issued_at = now,
-		expires_at = refresh_expires_at,
-		family_expires_at = family_expires_at,
-	})
-	if !rsave_ok do return Bridge_Token_Pair{}, false, rsave_err
-
+	if !refresh_ok do return {}, {}, {}, false, domain.domain_error(.Provider_Unavailable, "secure random source unavailable; no bridge credential was issued, retry")
 	access_token_id := platform.generate_id(service.ids, "btk_")
 	access_token, access_hash, access_ok := issue_credential(ACCESS_TOKEN_PREFIX, access_token_id)
-	if !access_ok do return Bridge_Token_Pair{}, false, domain.domain_error(.Provider_Unavailable, "secure random source unavailable; no bridge credential was issued, retry")
-	_, asave_ok, asave_err := iface.bridge_save_token(service.repo, domain.Bridge_Token{
-		token_id = access_token_id,
-		bridge_id = bridge_id,
-		kind = .Access,
-		token_hash = access_hash,
-		family_id = family_id,
-		generation = generation,
-		scope = scope,
-		issued_at = now,
-		expires_at = access_expires_at,
-		family_expires_at = family_expires_at,
-	})
-	if !asave_ok do return Bridge_Token_Pair{}, false, asave_err
-
-	return Bridge_Token_Pair{
+	if !access_ok do return {}, {}, {}, false, domain.domain_error(.Provider_Unavailable, "secure random source unavailable; no bridge credential was issued, retry")
+	refresh_row = domain.Bridge_Token{
+		token_id = refresh_token_id, bridge_id = bridge_id, kind = .Refresh, token_hash = refresh_hash,
+		family_id = family_id, generation = generation, scope = scope, issued_at = now,
+		expires_at = refresh_expires_at, family_expires_at = family_expires_at,
+	}
+	access_row = domain.Bridge_Token{
+		token_id = access_token_id, bridge_id = bridge_id, kind = .Access, token_hash = access_hash,
+		family_id = family_id, generation = generation, scope = scope, issued_at = now,
+		expires_at = access_expires_at, family_expires_at = family_expires_at,
+	}
+	pair = Bridge_Token_Pair{
 		access_token = access_token,
 		refresh_token = refresh_token,
 		bridge_id = bridge_id,
@@ -241,7 +275,8 @@ mint_generation :: proc(service: ^Bridge_Service, bridge_id, family_id: string, 
 		generation = generation,
 		expires_in = BRIDGE_ACCESS_TOKEN_TTL_SECONDS,
 		refresh_expires_in = seconds_until(now, refresh_expires_at),
-	}, true, domain.Domain_Error{}
+	}
+	return pair, refresh_row, access_row, true, domain.Domain_Error{}
 }
 
 // seconds_until is `expires_at - now` in whole seconds, floored at 0. Used only to
@@ -338,7 +373,72 @@ verify_access_token_scoped :: proc(service: ^Bridge_Service, token: string, scop
 	// checked: revoke_bridge stamps both, but a token row written before that change
 	// (or by a future path that forgets) must not outlive its bridge.
 	if bridge.status == .Revoked do return contracts.Auth_Context{}, "", false, domain.domain_error(.Forbidden, "bridge is revoked")
+	// First authentication with this access token: record it. It proves the reply
+	// that carried the token was delivered, which ends the retry grace of the
+	// refresh token it was minted from (family_descendant_delivered). Once per
+	// token; the steady state reads the stamp and writes nothing.
+	if row.first_used_at == "" do _, _ = iface.bridge_mark_token_used(service.repo, row.token_id, now)
 	return contracts.Auth_Context{kind = .Bridge_Token, user_id = string(bridge.owner_user_id), bridge_id = bridge.bridge_id}, row.family_id, true, domain.Domain_Error{}
+}
+
+// Session_Credential is what a live bridge session is bound to: the token row that
+// authenticated it and how long, from now on the hub clock, it keeps
+// authenticating. The bridge WebSocket checks it for the whole session (expiry) and
+// re-reads the row periodically (revocation); see bridge_ws_runtime_loop.
+Session_Credential :: struct {
+	token_id:     string, // temp-allocated
+	valid_for_ms: i64,
+}
+
+// access_token_session_credential resolves an ALREADY VERIFIED `hba_` token to its
+// session bound. valid_for_ms runs to the same instant verify_access_token stops
+// accepting it: expires_at plus the clock-skew grace, never past the family cap.
+access_token_session_credential :: proc(service: ^Bridge_Service, token: string) -> (Session_Credential, bool) {
+	if service == nil || service.repo == nil do return {}, false
+	token_id, _, split_ok := split_credential(ACCESS_TOKEN_PREFIX, token)
+	if !split_ok do return {}, false
+	row, ok, _ := iface.bridge_get_token(service.repo, token_id)
+	if !ok || row.kind != .Access do return {}, false
+	defer domain.bridge_token_destroy(&row)
+	now_ms, now_ok := platform.rfc3339_to_unix_ms(platform.clock_now(service.clock))
+	exp_ms, exp_ok := platform.rfc3339_to_unix_ms(row.expires_at)
+	if !now_ok || !exp_ok do return {}, false
+	until := exp_ms + i64(BRIDGE_TOKEN_CLOCK_SKEW_SECONDS) * 1000
+	if row.family_expires_at != "" {
+		if cap_ms, cap_ok := platform.rfc3339_to_unix_ms(row.family_expires_at); cap_ok {
+			until = min(until, cap_ms + i64(BRIDGE_TOKEN_CLOCK_SKEW_SECONDS) * 1000)
+		}
+	}
+	return Session_Credential{token_id = strings.clone(token_id, context.temp_allocator), valid_for_ms = until - now_ms}, true
+}
+
+// Session_Credential_State is the outcome of re-checking a live session's token row.
+Session_Credential_State :: enum {
+	Valid,
+	Revoked,
+	Expired,
+}
+
+// session_credential_state re-reads a live session's token row: revoked (token,
+// family or bridge) or expired by the hub clock ends the session. A row that has
+// vanished is treated as revoked.
+session_credential_state :: proc(service: ^Bridge_Service, token_id: string) -> Session_Credential_State {
+	if service == nil || service.repo == nil || token_id == "" do return .Revoked
+	row, ok, _ := iface.bridge_get_token(service.repo, token_id)
+	if !ok do return .Revoked
+	defer domain.bridge_token_destroy(&row)
+	if row.revoked_at != "" do return .Revoked
+	bridge, bridge_ok, _ := iface.bridge_get_bridge(service.repo, row.bridge_id)
+	if !bridge_ok do return .Revoked
+	defer domain.bridge_destroy(&bridge)
+	if bridge.status == .Revoked do return .Revoked
+	now := platform.clock_now(service.clock)
+	// token_is_expired applies BRIDGE_TOKEN_CLOCK_SKEW_SECONDS, exactly as
+	// verify_access_token does, so the re-check never ends a session that verify
+	// would still accept.
+	if token_is_expired(row.expires_at, now) do return .Expired
+	if row.family_expires_at != "" && token_is_expired(row.family_expires_at, now) do return .Expired
+	return .Valid
 }
 
 // refresh_bridge_token rotates a refresh token (design §7.4).
@@ -352,8 +452,9 @@ verify_access_token_scoped :: proc(service: ^Bridge_Service, token: string, scop
 // bridge's required response to all four is identical (§7.5: stop, wipe both tokens,
 // require re-enrollment, DO NOT LOOP), so distinguishing them on the wire would add
 // an oracle and no capability. The server log distinguishes them.
-refresh_bridge_token :: proc(service: ^Bridge_Service, presented: string) -> (Bridge_Token_Pair, bool, domain.Domain_Error) {
+refresh_bridge_token :: proc(service: ^Bridge_Service, presented: string, request_id := "") -> (Bridge_Token_Pair, bool, domain.Domain_Error) {
 	invalid_grant := domain.domain_error(.Unauthenticated, "invalid_grant")
+	request_id := request_id if refresh_request_id_valid(request_id) else ""
 	if service == nil || service.repo == nil do return Bridge_Token_Pair{}, false, domain.domain_error(.Internal_Error, "bridge service is not configured")
 	token_id, presented_secret, split_ok := split_credential(REFRESH_TOKEN_PREFIX, presented)
 	if !split_ok do return Bridge_Token_Pair{}, false, invalid_grant
@@ -382,15 +483,18 @@ refresh_bridge_token :: proc(service: ^Bridge_Service, presented: string) -> (Br
 	if row.family_expires_at != "" && token_is_expired(row.family_expires_at, now) do return Bridge_Token_Pair{}, false, invalid_grant
 
 	if row.rotated_at != "" {
-		// SPENT. Either a crash-recovery replay inside the grace window, or theft.
-		if refresh_within_grace(service, row, now) {
+		// SPENT. A retry of this exact rotation, a crash-recovery replay inside the
+		// grace window, or theft.
+		if refresh_is_retry_of_rotation(service, row, request_id, now) || refresh_within_grace(service, row, now) {
 			return rotate_from(service, row, now, revoke_newer_generations = true)
 		}
-		// THEFT (§7.4.3): revoke the whole lineage, both kinds, every generation.
+		// THEFT (§7.4.3): revoke the whole lineage, both kinds, every generation,
+		// and end the bridge's live session: its access token is one of them.
 		_, _, _ = revoke_token_family(service, row.family_id, now)
+		_ = close_bridge_connection(service, row.bridge_id)
 		return Bridge_Token_Pair{}, false, invalid_grant
 	}
-	return rotate_from(service, row, now, revoke_newer_generations = false)
+	return rotate_from(service, row, now, revoke_newer_generations = false, request_id = request_id)
 }
 
 // refresh_within_grace decides whether a SPENT refresh token is the crash-recovery
@@ -415,7 +519,35 @@ refresh_within_grace :: proc(service: ^Bridge_Service, row: domain.Bridge_Token,
 	for t in family {
 		if t.generation > newest do newest = t.generation
 	}
-	return newest <= row.generation + 1
+	return newest <= row.generation + 1 && !family_descendant_delivered(family, row.generation)
+}
+
+// refresh_is_retry_of_rotation decides the BRIDGE_REFRESH_RETRY_GRACE_SECONDS case:
+// see that constant for the three conditions, all of which are checked here.
+refresh_is_retry_of_rotation :: proc(service: ^Bridge_Service, row: domain.Bridge_Token, request_id, now: string) -> bool {
+	if request_id == "" || row.rotation_request_hash == "" do return false
+	if !verify_credential(row.rotation_request_hash, request_id) do return false
+	rotated_ms, rot_ok := platform.rfc3339_to_unix_ms(row.rotated_at)
+	now_ms, now_ok := platform.rfc3339_to_unix_ms(now)
+	if !rot_ok || !now_ok do return false
+	if now_ms - rotated_ms > i64(BRIDGE_REFRESH_RETRY_GRACE_SECONDS) * 1000 do return false
+	family, _ := iface.bridge_list_tokens_by_family(service.repo, row.family_id)
+	defer free_bridge_tokens(family)
+	return !family_descendant_delivered(family, row.generation)
+}
+
+// family_descendant_delivered reports whether any generation minted from (after)
+// `generation` has demonstrably reached its holder: its access token authenticated
+// something (first_used_at: WS upgrade, bridge_reauth or any API call), or its
+// refresh token was redeemed. Revoked descendants count too: whoever used one held
+// it. Once true, re-presenting the older refresh token is reuse, never a retry.
+family_descendant_delivered :: proc(family: []domain.Bridge_Token, generation: int) -> bool {
+	for t in family {
+		if t.generation <= generation do continue
+		if t.kind == .Access && t.first_used_at != "" do return true
+		if t.kind == .Refresh && t.rotated_at != "" do return true
+	}
+	return false
 }
 
 // rotate_from mints the next generation for a family.
@@ -425,7 +557,7 @@ refresh_within_grace :: proc(service: ^Bridge_Service, row: domain.Bridge_Token,
 // which the bridge demonstrably never persisted, or it would not be presenting the
 // old one) is revoked, so it cannot be redeemed by whoever else may hold it. Without
 // that, a graced rotation would leave TWO live generations from one token.
-rotate_from :: proc(service: ^Bridge_Service, row: domain.Bridge_Token, now: string, revoke_newer_generations: bool) -> (Bridge_Token_Pair, bool, domain.Domain_Error) {
+rotate_from :: proc(service: ^Bridge_Service, row: domain.Bridge_Token, now: string, revoke_newer_generations: bool, request_id := "") -> (Bridge_Token_Pair, bool, domain.Domain_Error) {
 	invalid_grant := domain.domain_error(.Unauthenticated, "invalid_grant")
 	// The bridge must still exist and still be allowed to connect. Checked before
 	// minting so a revoked bridge cannot renew its way back in.
@@ -440,10 +572,20 @@ rotate_from :: proc(service: ^Bridge_Service, row: domain.Bridge_Token, now: str
 		// reuse path rather than minting a second live generation. This is why
 		// single-use is enforced in the UPDATE's WHERE clause and not by the
 		// read-then-check above, which every caller would pass.
-		changed, mark_err := iface.bridge_mark_token_rotated(service.repo, row.token_id, now)
+		// The request id is recorded as a salted digest beside the spend, so only a
+		// caller holding both the token and the id can claim the retry grace.
+		request_hash := ""
+		if request_id != "" {
+			hashed, hash_ok := hash_credential_secret(request_id)
+			if !hash_ok do return Bridge_Token_Pair{}, false, domain.domain_error(.Provider_Unavailable, "secure random source unavailable; no bridge credential was issued, retry")
+			request_hash = hashed
+		}
+		defer if request_hash != "" do delete(request_hash)
+		changed, mark_err := iface.bridge_mark_token_rotated(service.repo, row.token_id, now, request_hash)
 		if mark_err.code != .None do return Bridge_Token_Pair{}, false, mark_err
 		if !changed {
 			_, _, _ = revoke_token_family(service, row.family_id, now)
+			_ = close_bridge_connection(service, row.bridge_id)
 			return Bridge_Token_Pair{}, false, invalid_grant
 		}
 	}
@@ -455,12 +597,44 @@ rotate_from :: proc(service: ^Bridge_Service, row: domain.Bridge_Token, now: str
 		if t.generation > newest do newest = t.generation
 	}
 	if revoke_newer_generations {
-		for t in family {
-			if t.generation <= row.generation || t.revoked_at != "" do continue
-			r := t
-			r.revoked_at = now
-			_, _, _ = iface.bridge_save_token(service.repo, r)
+		// A GRACED RE-GRANT (crash grace or request-id retry) is claimed atomically
+		// before anything is revoked or minted. The claim is the generation this grant
+		// will mint, compare-and-set from the claim observed when the row was read, and
+		// it must move forward: two concurrent presentations of the same spent token
+		// read the same claim, so exactly one wins; a racer that read the row after the
+		// winner claimed but before it minted sees no forward move. Every loser is
+		// treated as a second holder of the token: theft. Without this, both racers
+		// minted generation N+1 and two live lineages existed with no reuse signal.
+		claim_ok := true
+		if prev, has_prev := strconv.parse_int(row.regrant_claim); row.regrant_claim != "" && (!has_prev || newest + 1 <= prev) do claim_ok = false
+		free_bridge_tokens(family)
+		if claim_ok {
+			// Claim + revoke-newer + both inserts commit together or not at all
+			// (bridge_regrant_atomic). A failure part-way used to leave the claim at
+			// N+1 with no N+1 row, so the bridge's next legitimate retry read as theft.
+			pair, refresh_row, access_row, prep_ok, prep_err := prepare_generation(service, row.bridge_id, row.family_id, newest + 1, family_expires_at, now)
+			if !prep_ok do return Bridge_Token_Pair{}, false, prep_err
+			buf: [24]byte
+			outcome, regrant_err := iface.bridge_regrant_atomic(service.repo, iface.Bridge_Regrant_Input{
+				spent_token_id = row.token_id, family_id = row.family_id, generation = row.generation,
+				expected = row.regrant_claim, claim = strconv.write_int(buf[:], i64(newest + 1), 10), now = now,
+				refresh_row = refresh_row, access_row = access_row,
+			})
+			switch outcome {
+			case .Granted:
+				return pair, true, domain.Domain_Error{}
+			case .Failed:
+				// Nothing was written; the claim is untouched, so a retry can succeed.
+				return Bridge_Token_Pair{}, false, regrant_err if regrant_err.code != .None else domain.domain_error(.Internal_Error, "the bridge credential re-grant failed; retry")
+			case .Lost:
+				claim_ok = false
+			}
 		}
+		// A lost claim is a second holder of the token: theft. This also revokes the
+		// pair the winner just received; see docs/bounded-action-recovery.md.
+		_, _, _ = revoke_token_family(service, row.family_id, now)
+		_ = close_bridge_connection(service, row.bridge_id)
+		return Bridge_Token_Pair{}, false, invalid_grant
 	}
 	free_bridge_tokens(family)
 	return mint_generation(service, row.bridge_id, row.family_id, newest + 1, family_expires_at, now)

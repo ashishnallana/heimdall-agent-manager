@@ -22,17 +22,68 @@ type LocationLike = { pathname: string; search: string; hash: string };
 /** Removes the `auth_error` parameter from a query string ("" or "?a=b"). */
 export function stripAuthError(search: string): string {
   const params = new URLSearchParams(search.startsWith('?') ? search.slice(1) : search);
+  // Leave the query byte-for-byte alone unless there is something to strip.
+  if (!params.has('auth_error')) return search && !search.startsWith('?') ? `?${search}` : search;
   params.delete('auth_error');
   const rest = params.toString();
   return rest ? `?${rest}` : '';
 }
 
-/** The same-origin path the Hub should return to after sign-in. */
+function returnToShapeOk(value: string): boolean {
+  if (!value.startsWith('/')) return false;
+  if (value.length > 1 && (value[1] === '/' || value[1] === '\\')) return false;
+  for (let i = 0; i < value.length; i += 1) {
+    const c = value.charCodeAt(i);
+    if (c < 0x20 || c === 0x7f || value[i] === '\\') return false;
+  }
+  return !value.includes('://');
+}
+
+const RETURN_TO_MAX_LENGTH = 2048;
+
+/**
+ * Mirrors the Hub's `safe_return_to`: a single leading '/', no scheme or
+ * authority, no backslashes or control characters, the same after up to three
+ * percent-decoding passes, and nothing still percent-encoded after them.
+ */
+export function isSafeReturnTo(value: string): boolean {
+  if (!value || value.length > RETURN_TO_MAX_LENGTH) return false;
+  let candidate = value;
+  for (let pass = 0; pass < 3; pass += 1) {
+    if (!returnToShapeOk(candidate)) return false;
+    if (!candidate.includes('%')) break;
+    try {
+      candidate = decodeURIComponent(candidate);
+    } catch (_err) {
+      return false;
+    }
+  }
+  return returnToShapeOk(candidate) && !candidate.includes('%');
+}
+
+/**
+ * The same-origin path the Hub should return to after sign-in. Falls back to
+ * "/" whenever the Hub would refuse it, so a strange URL never turns sign-in
+ * into a 400.
+ */
 export function currentReturnTo(location: LocationLike): string {
   const path = location.pathname && location.pathname.startsWith('/') ? location.pathname : '/';
-  // A protocol-relative or backslash path would be refused by the Hub anyway.
-  const safePath = /^\/[/\\]/.test(path) ? '/' : path;
-  return `${safePath}${stripAuthError(location.search || '')}${location.hash || ''}`;
+  const candidate = `${path}${stripAuthError(location.search || '')}${location.hash || ''}`;
+  return isSafeReturnTo(candidate) ? candidate : '/';
+}
+
+/**
+ * Where the browser may go after logout: an https: URL (the provider's
+ * end-session endpoint) or a single-'/' same-origin path. Anything else
+ * (javascript:, data:, protocol-relative, http:) becomes "/".
+ */
+export function safeLogoutTarget(value: string): string {
+  const url = String(value || '').trim();
+  if (url.startsWith('/') && !url.startsWith('//') && !url.startsWith('/\\')) return url;
+  try {
+    if (new URL(url).protocol === 'https:') return url;
+  } catch (_err) {}
+  return '/';
 }
 
 /** URL of the Hub's sign-in route, returning to `location` afterwards. */
@@ -99,7 +150,7 @@ export async function postLogout(fetchImpl: typeof fetch, url: string = LOGOUT_P
     if (response.ok) {
       const body = await response.json().catch(() => ({}));
       const url = String(body?.data?.logout_url || body?.logout_url || '').trim();
-      if (url) return url;
+      if (url) return safeLogoutTarget(url);
     }
   } catch (_err) {}
   return '/';

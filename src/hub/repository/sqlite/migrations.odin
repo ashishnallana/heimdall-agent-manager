@@ -520,7 +520,24 @@ MIGRATION_134_USER_SESSIONS :: #load("migrations/134_user_sessions.sql", string)
 MIGRATION_135_CLEAR_USER_API_TOKENS :: #load("migrations/135_clear_user_api_tokens.sql", string)
 
 // Native identities have their own namespace; upstream numbers remain untouched.
-migration_order :: [139]string {
+MIGRATION_136_EXTENSION_VERSION_SYNC :: #load("migrations/136_extension_version_sync_0_5_0.sql", string)
+
+MIGRATION_137_EXTENSION_VERSION_SYNC :: #load("migrations/137_extension_version_sync_0_5_1.sql", string)
+
+// MIGRATION_138: bridge_tokens.rotation_request_hash (refresh retry identity).
+MIGRATION_138_BRIDGE_TOKEN_ROTATION_REQUEST :: #load("migrations/138_bridge_token_rotation_request.sql", string)
+
+// MIGRATION_139: bridge_tokens.first_used_at / regrant_claim (retry grace hardening).
+MIGRATION_139_BRIDGE_TOKEN_DELIVERY_AND_REGRANT :: #load("migrations/139_bridge_token_delivery_and_regrant.sql", string)
+
+// MIGRATION_140: unique (family_id, kind, generation) on bridge_tokens, guarded.
+MIGRATION_140_BRIDGE_TOKENS_UNIQUE_GENERATION :: #load("migrations/140_bridge_tokens_unique_generation.sql", string)
+
+MIGRATION_141_EXTENSION_VERSION_SYNC :: #load("migrations/141_extension_version_sync_0_5_2.sql", string)
+
+MIGRATION_142_EXTENSION_VERSION_SYNC :: #load("migrations/142_extension_version_sync_0_5_3.sql", string)
+
+migration_order :: [146]string {
 	"001_foundation.sql",
 	"002_owner_scoped_core.sql",
 	"003_device_tokens.sql",
@@ -660,6 +677,13 @@ migration_order :: [139]string {
 	"native_001_oidc_identities.sql",
 	"134_user_sessions.sql",
 	"135_clear_user_api_tokens.sql",
+	"136_extension_version_sync_0_5_0.sql",
+	"137_extension_version_sync_0_5_1.sql",
+	"138_bridge_token_rotation_request.sql",
+	"139_bridge_token_delivery_and_regrant.sql",
+	"140_bridge_tokens_unique_generation.sql",
+	"141_extension_version_sync_0_5_2.sql",
+	"142_extension_version_sync_0_5_3.sql",
 }
 
 // stop_before is a TEST SEAM: when non-empty, the apply loop stops in front of
@@ -976,6 +1000,15 @@ run_migrations :: proc(
 		// authentication path. Keyed on the LAST object created by the file (the
 		// family index), not the first, so a half-applied file is re-run rather than
 		// marked done — the same reasoning as 050's twin.
+		// 140's unique index would fail on rows that already break it (only the
+		// pre-fix grace race could produce them). Refusing to start over that would
+		// be worse than running without the backstop, so log and skip it WITHOUT
+		// marking it applied: every start re-checks and installs the index once the
+		// data is clean. The atomic re-grant still serializes new rotations.
+		if name == "140_bridge_tokens_unique_generation.sql" && bridge_tokens_generation_duplicates(conn) > 0 {
+			fmt.eprintfln("hub: bridge_tokens has duplicate (family_id, kind, generation) rows; skipping unique index %s until they are gone", name)
+			continue
+		}
 		if name == "057_bridge_tokens.sql" && sqlite_object_exists(conn, "bridge_tokens_family") {
 			mark_migration_applied(conn, name)
 			continue
@@ -1130,6 +1163,13 @@ migration_sql :: proc(name, migrations_dir: string) -> string {
 			return string(data)
 		}
 	}
+	if name == "142_extension_version_sync_0_5_3.sql" do return strings.clone(MIGRATION_142_EXTENSION_VERSION_SYNC)
+	if name == "141_extension_version_sync_0_5_2.sql" do return strings.clone(MIGRATION_141_EXTENSION_VERSION_SYNC)
+	if name == "140_bridge_tokens_unique_generation.sql" do return strings.clone(MIGRATION_140_BRIDGE_TOKENS_UNIQUE_GENERATION)
+	if name == "139_bridge_token_delivery_and_regrant.sql" do return strings.clone(MIGRATION_139_BRIDGE_TOKEN_DELIVERY_AND_REGRANT)
+	if name == "138_bridge_token_rotation_request.sql" do return strings.clone(MIGRATION_138_BRIDGE_TOKEN_ROTATION_REQUEST)
+	if name == "137_extension_version_sync_0_5_1.sql" do return strings.clone(MIGRATION_137_EXTENSION_VERSION_SYNC)
+	if name == "136_extension_version_sync_0_5_0.sql" do return strings.clone(MIGRATION_136_EXTENSION_VERSION_SYNC)
 	if name == "135_clear_user_api_tokens.sql" do return strings.clone(MIGRATION_135_CLEAR_USER_API_TOKENS)
 	if name == "134_user_sessions.sql" do return strings.clone(MIGRATION_134_USER_SESSIONS)
 	if name == "native_001_oidc_identities.sql" do return strings.clone(MIGRATION_NATIVE_001_OIDC_IDENTITIES)
@@ -1297,6 +1337,15 @@ migration_applied :: proc(conn: ^Conn, version: string) -> bool {
 	// before release 0.4.44 took 130) also has it, so the renumbered file is marked
 	// applied there without re-executing; that database still runs 130's sync,
 	// because the ledger is keyed by full file name.
+	// The column is the whole migration; a database that already has it (an
+	// ALTER that ran under another number on a development branch) is applied.
+	// Keyed on the LAST column the file adds, so a half-applied file re-runs.
+	if version == "139_bridge_token_delivery_and_regrant.sql" {
+		return table_column_exists(conn, "bridge_tokens", "regrant_claim")
+	}
+	if version == "138_bridge_token_rotation_request.sql" {
+		return table_column_exists(conn, "bridge_tokens", "rotation_request_hash")
+	}
 	if version == "131_fleet_pause.sql" {
 		return table_column_exists(conn, "task_chain_fleets", "paused_roles_json")
 	}
@@ -1367,6 +1416,18 @@ fts5_available :: proc(conn: ^Conn) -> bool {
 
 // sqlite_object_exists reports whether a table/vtable/trigger of the given name
 // exists (sqlite_master lookup). Used to detect the FTS vtable idempotently.
+// bridge_tokens_generation_duplicates counts (family_id, kind, generation) groups
+// with more than one row; 0 when the table does not exist yet.
+bridge_tokens_generation_duplicates :: proc(conn: ^Conn) -> int {
+	if conn == nil || conn.db == nil || !sqlite_object_exists(conn, "bridge_tokens") do return 0
+	stmt: sqlite3_stmt = nil
+	query := "SELECT COUNT(*) FROM (SELECT 1 FROM bridge_tokens GROUP BY family_id, kind, generation HAVING COUNT(*) > 1);"
+	if sqlite3_prepare_v2(conn.db, cstring(raw_data(query)), c.int(-1), &stmt, nil) != SQLITE_OK do return 0
+	defer sqlite3_finalize(stmt)
+	if sqlite3_step(stmt) != SQLITE_ROW do return 0
+	return int(sqlite3_column_int64(stmt, 0))
+}
+
 sqlite_object_exists :: proc(conn: ^Conn, name: string) -> bool {
 	if conn == nil || conn.db == nil do return false
 	stmt: sqlite3_stmt = nil

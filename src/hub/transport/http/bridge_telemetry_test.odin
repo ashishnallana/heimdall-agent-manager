@@ -280,10 +280,14 @@ make_telemetry_sock_pair :: proc(t: ^testing.T) -> (Telemetry_Sock_Pair, bool) {
 }
 
 @(private = "file")
+// Skips sockets already closed and zeroed (callers close the client early and set it
+// to 0): net.close(0) would close the test process's STDIN, and the next socket any
+// parallel test opens then gets fd 0, which the runtime registry reads as "no
+// socket" (seen as a flaky "command path is not connected" elsewhere).
 close_telemetry_sock_pair :: proc(p: ^Telemetry_Sock_Pair) {
-	net.close(p.hub)
-	net.close(p.client)
-	net.close(p.listener)
+	if int(p.hub) > 0 do net.close(p.hub)
+	if int(p.client) > 0 do net.close(p.client)
+	if int(p.listener) > 0 do net.close(p.listener)
 }
 
 @(private = "file")

@@ -248,9 +248,13 @@ test_audit_claim_hub_to_bridge_large_json_command_dropped :: proc(t: ^testing.T)
 	testing.expect(t, !sent_over, "send_runtime_command must reject payloads > BRIDGE_WS_MAX_REASSEMBLY_BYTES")
 	testing.expect_value(t, derr_over.code, domain.Error_Code.Validation_Failed)
 
-	// 4. On a closed socket, send_runtime_command returns .Bridge_Offline ("bridge websocket command send failed").
-	net.close(pair.hub)
+	// 4. On a dead socket, send_runtime_command returns .Bridge_Offline ("bridge websocket command send failed").
+	// The peer is closed and the hub end SHUT DOWN, not closed: closing an fd the
+	// registry still holds would let a parallel test's new socket reuse the number
+	// (AGENTS.md, socket lifetime), making this assertion depend on scheduling.
 	net.close(pair.client)
+	_ = net.shutdown(pair.hub, .Both)
+	defer net.close(pair.hub)
 	small_cmd := project_service.Runtime_Command{
 		bridge_id  = bridge_id,
 		command_id = "cmd_audit_closed_sock",

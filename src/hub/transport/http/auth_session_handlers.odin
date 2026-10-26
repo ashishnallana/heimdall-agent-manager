@@ -78,11 +78,7 @@ auth_callback_handler :: proc(ctx: rawptr, req: Request) -> Response {
 auth_logout_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	handlers := (^User_Handlers)(ctx)
 	logout_url := auth_service.web_logout(handlers.auth, req.headers)
-	b := strings.builder_make()
-	strings.write_string(&b, "{\"logout_url\":\"")
-	write_handler_json_string(&b, logout_url)
-	strings.write_string(&b, "\"}")
-	resp := respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req))
+	resp := respond_success_typed(Auth_Logout_Reply{logout_url = logout_url}, req.request_id, auth_ctx_server_time(req))
 	headers := make([]contracts.HTTP_Header, len(resp.headers) + 2, context.temp_allocator)
 	copy(headers, resp.headers)
 	headers[len(resp.headers)] = {"Set-Cookie", auth_service.expired_cookie_header(auth_service.SESSION_COOKIE)}

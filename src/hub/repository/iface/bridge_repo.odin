@@ -33,7 +33,30 @@ Bridge_Revoke_Tokens_For_Bridge_Proc :: proc(ctx: rawptr, bridge_id, revoked_at:
 // never revoked: a separate "is it still pending?" read followed by an unconditional
 // revoke would race the commit and kill a just-committed bridge's credential.
 Bridge_Revoke_Token_Family_In_Scope_Proc :: proc(ctx: rawptr, family_id, scope, revoked_at: string) -> (int, bool, domain.Domain_Error)
-Bridge_Mark_Token_Rotated_Proc :: proc(ctx: rawptr, token_id, rotated_at: string) -> (bool, domain.Domain_Error)
+Bridge_Mark_Token_Rotated_Proc :: proc(ctx: rawptr, token_id, rotated_at, request_hash: string) -> (bool, domain.Domain_Error)
+// Stamps first_used_at on a token that has none (one write per token, ever).
+Bridge_Mark_Token_Used_Proc :: proc(ctx: rawptr, token_id, used_at: string) -> (bool, domain.Domain_Error)
+// Bridge_Regrant_Input is one graced re-grant, applied ALL OR NOTHING by
+// Bridge_Regrant_Atomic_Proc: claim the spent refresh row (compare-and-set of
+// regrant_claim from `expected` to `claim`), revoke every live row of the family
+// newer than `generation`, and insert the new refresh and access rows.
+Bridge_Regrant_Input :: struct {
+	spent_token_id: string,
+	family_id:      string,
+	generation:     int, // the spent row's generation
+	expected:       string,
+	claim:          string,
+	now:            string,
+	refresh_row:    domain.Bridge_Token,
+	access_row:     domain.Bridge_Token,
+}
+Bridge_Regrant_Outcome :: enum {
+	Granted, // committed: claim, revocations and both new rows
+	Lost,    // another re-grant holds the claim; nothing was written
+	Failed,  // an error rolled everything back; nothing was written
+}
+Bridge_Regrant_Atomic_Proc :: proc(ctx: rawptr, input: Bridge_Regrant_Input) -> (Bridge_Regrant_Outcome, domain.Domain_Error)
+
 // REQ-EA-2/8: the enrollment COMMIT, as ONE transaction. Promote the family from
 // from_scope to to_scope (a compare-and-set on scope), then either revoke every other
 // family of the bridge (attach) or clear the row's pending deadline (new bridge). A
@@ -71,6 +94,8 @@ Bridge_Repository :: struct {
 	revoke_tokens_for_bridge: Bridge_Revoke_Tokens_For_Bridge_Proc,
 	revoke_token_family_in_scope: Bridge_Revoke_Token_Family_In_Scope_Proc,
 	mark_token_rotated: Bridge_Mark_Token_Rotated_Proc,
+	mark_token_used: Bridge_Mark_Token_Used_Proc,
+	regrant_atomic: Bridge_Regrant_Atomic_Proc,
 	commit_enrollment: Bridge_Commit_Enrollment_Proc,
 	list_live_tokens_by_scope: Bridge_List_Live_Tokens_By_Scope_Proc,
 }
@@ -135,9 +160,21 @@ bridge_revoke_token_family_in_scope :: proc(repo: ^Bridge_Repository, family_id,
 	return repo.revoke_token_family_in_scope(repo.ctx, family_id, scope, revoked_at)
 }
 
-bridge_mark_token_rotated :: proc(repo: ^Bridge_Repository, token_id, rotated_at: string) -> (bool, domain.Domain_Error) {
+// request_hash, when non-empty, records which refresh request spent the token (see
+// domain.Bridge_Token.rotation_request_hash).
+bridge_mark_token_used :: proc(repo: ^Bridge_Repository, token_id, used_at: string) -> (bool, domain.Domain_Error) {
+	if repo == nil || repo.mark_token_used == nil do return false, domain.domain_error(.Internal_Error, "bridge repository is not configured")
+	return repo.mark_token_used(repo.ctx, token_id, used_at)
+}
+
+bridge_regrant_atomic :: proc(repo: ^Bridge_Repository, input: Bridge_Regrant_Input) -> (Bridge_Regrant_Outcome, domain.Domain_Error) {
+	if repo == nil || repo.regrant_atomic == nil do return .Failed, domain.domain_error(.Internal_Error, "bridge repository is not configured")
+	return repo.regrant_atomic(repo.ctx, input)
+}
+
+bridge_mark_token_rotated :: proc(repo: ^Bridge_Repository, token_id, rotated_at: string, request_hash := "") -> (bool, domain.Domain_Error) {
 	if repo == nil || repo.mark_token_rotated == nil do return false, domain.domain_error(.Internal_Error, "bridge repository is not configured")
-	return repo.mark_token_rotated(repo.ctx, token_id, rotated_at)
+	return repo.mark_token_rotated(repo.ctx, token_id, rotated_at, request_hash)
 }
 
 bridge_commit_enrollment :: proc(repo: ^Bridge_Repository, bridge_id, family_id, from_scope, to_scope: string, attach: bool, now: string) -> (Enrollment_Commit_Outcome, bool, domain.Domain_Error) {

@@ -121,8 +121,18 @@ With `--preview-origin` set, previewed apps run on their own host, and the hub
 session cookie (host-only) never reaches it. Sign-in on that host works like this:
 
 1. A navigation to `<preview>/p/<sid>/…` without a valid preview cookie gets:
-   - a `__Host-heimdall_preview_bind=<random>` cookie (300 s);
-   - a 302 to `<ui_origin>/api/v1/preview-auth/start?session=<sid>&return_to=…&bind=<sha256>`.
+   - a per-flow `__Host-heimdall_preview_bind_<id>` cookie (300 s). Its value is
+     `<random>.<mint time>.<HMAC tag>`, minted by the hub under a sub-key derived only for
+     this purpose. A value without a valid tag, or minted more than 300 s ago, is never
+     accepted. At most 16 bind cookies are kept: beyond that the oldest (by mint time) are
+     expired (cookie-bomb cap). A redeem whose bind cookie is missing, stale or foreign, or
+     whose ticket expired, starts a fresh bound flow (within the hop limit) instead of failing;
+   - a 302 to `<ui_origin>/api/v1/preview-auth/start?session=<sid>&return_to=…&bind=<sha256>&bind_id=<id>&hop=<n>`.
+     After 3 consecutive bounces (a browser that drops the cookie) the hub shows a 403
+     explanation instead of looping. The count is kept in a 30 s host-only
+     `__Host-heimdall_preview_hop` cookie, and from the second bounce on also as a
+     `__heimdall_hop` query parameter on `return_to`. That parameter is stripped before
+     forwarding, so on the normal path the app's URL stays clean.
 
    Other requests get 401.
 2. The start route requires the hub session; without one it bounces through login. It
@@ -132,7 +142,8 @@ session cookie (host-only) never reaches it. Sign-in on that host works like thi
 
    A start request without `bind` (a direct link) goes first through
    `<preview>/__heimdall/preview-bind`.
-3. The hub, not the app, redeems the ticket. Redemption needs the matching bind cookie. It
+3. The hub, not the app, redeems the ticket. Redemption needs that flow's bind cookie (concurrent
+   previews have independent flows), and it clears that cookie. It
    sets `__Host-heimdall_preview` (HttpOnly, Secure, SameSite=Lax, host-only, lifetime equal
    to what is left of the parent session) and redirects to `return_to`.
 4. Preview requests authenticate **only** with that cookie. `Authorization` belongs to the
@@ -176,6 +187,24 @@ to start** unless both OIDC bearer and browser login are configured.
 
 All provider URLs, `ui_origin` and the redirect URI must be `https://`, except in the dev-only
 mode above. Setting some browser-login keys without the others is a startup error.
+
+**Client IP behind a reverse proxy.** The per-client limits (sign-in starts,
+device-authorization requests) and the device-approval audit key on the client
+IP. The hub trusts `X-Forwarded-For` only when the TCP peer is inside
+`--forwarded-for-trusted-cidr`, and then takes the **right-most hop that is not
+itself a trusted proxy**. Hops further left are client-supplied and ignored. Your
+edge must therefore put the real client address in that header. Otherwise every
+request looks like it came from the proxy and shares one rate-limit bucket. For
+example, nginx behind Cloudflare:
+
+```nginx
+# Only Cloudflare reaches this nginx: overwrite (not append) with Cloudflare's view.
+proxy_set_header X-Forwarded-For $http_cf_connecting_ip;   # CF-Connecting-IP
+# Without Cloudflare: proxy_set_header X-Forwarded-For $remote_addr;
+```
+
+Only trust `CF-Connecting-IP` if the origin accepts connections from Cloudflare
+alone. Any client that can reach nginx directly can set that header to anything.
 
 These now **abort startup**: `--trusted-proxy-cidr`, `--login-url`, `--logout-url`,
 and a set `HAM_AUTH_MODE` (any value).
@@ -268,6 +297,12 @@ are gone, and trusted-proxy auth must be re-enabled at the edge. Take a DB backu
   `Authorization`. Tickets are browser-bound, so a planted ticket cannot sign a victim into
   someone else's preview. Known limit: the preview cookie is host-wide, so a previewed app can
   make credentialed requests to the *same user's* other previews (it cannot read the cookie).
+  **Accepted residual risk:** script already running on the victim's own preview origin could
+  plant a bind value it harvested within the last 300 s (for example as a non-HttpOnly cookie
+  of the same name), and so steer that browser's next preview sign-in. This is accepted: script
+  in that position can already phish the user inside the previewed app. It cannot forge a value
+  (HMAC under a hub-only key), cannot reuse one after 300 s, and never obtains the hub session
+  or the preview cookie.
 - **Provider outage:** 503/429 rather than 401. Forged tokens never cause provider calls
   (cached JWKS, rate-limited refresh, outbound cap).
 - **Identity claiming:** off by default. Usernames must be immutable in the provider, and the

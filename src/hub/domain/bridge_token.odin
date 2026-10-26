@@ -42,6 +42,18 @@ Bridge_Token :: struct {
 	family_expires_at: string,
 	rotated_at:        string,
 	revoked_at:        string,
+	// rotation_request_hash: on a SPENT refresh row, the salted digest of the
+	// bridge's refresh request id that spent it (X-Heimdall-Refresh-Request-Id).
+	// It is what lets a retry of THAT rotation, whose reply was lost, be answered
+	// instead of read as theft (refresh_bridge_token). '' for rows spent by a
+	// bridge that sent no request id, and for every unspent row.
+	rotation_request_hash: string,
+	// first_used_at: on an ACCESS row, when it first authenticated anything. Proof
+	// that the reply which carried it was delivered (ends the retry grace).
+	first_used_at: string,
+	// regrant_claim: on a SPENT refresh row, the compare-and-set claim of the last
+	// graced re-grant ("<generation it minted>"); serializes concurrent retries.
+	regrant_claim: string,
 }
 
 bridge_token_kind_string :: proc(kind: Bridge_Token_Kind) -> string {
@@ -78,6 +90,9 @@ bridge_token_destroy :: proc(t: ^Bridge_Token) {
 	if len(t.expires_at) > 0 do delete(t.expires_at)
 	if len(t.family_expires_at) > 0 do delete(t.family_expires_at)
 	if len(t.rotated_at) > 0 do delete(t.rotated_at)
+	if len(t.rotation_request_hash) > 0 do delete(t.rotation_request_hash)
+	if len(t.first_used_at) > 0 do delete(t.first_used_at)
+	if len(t.regrant_claim) > 0 do delete(t.regrant_claim)
 	if len(t.revoked_at) > 0 do delete(t.revoked_at)
 	t^ = Bridge_Token{}
 }
