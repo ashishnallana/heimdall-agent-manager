@@ -106,6 +106,16 @@ test_tool_stream_http_ticket_json_lifecycle_and_empty_baseline :: proc(t: ^testi
     testing.expect_value(t,len(snap["active"].(json.Array)),0)
     testing.expect_value(t,len(snap["completed_since_last"].(json.Array)),0)
     testing.expect(t,ws.send_text(&conn,`{"type":"subscribe","version":2,"views":[{"conversation_id":"chat_a","instance_ids":["inst_foreign"]}]}`))
+    // A refused member degrades to a per-instance frame; the roster itself is accepted.
+    replaced:=tool_http_test_read(t,pair.client,&reader)
+    testing.expect_value(t,agent_service.tool_live_text(replaced,"type"),"subscribed")
+    testing.expect_value(t,len(replaced["instance_ids"].(json.Array)),0)
+    refused:=tool_http_test_read(t,pair.client,&reader)
+    testing.expect_value(t,agent_service.tool_live_text(refused,"type"),"unavailable")
+    testing.expect_value(t,agent_service.tool_live_text(refused,"instance_id"),"inst_foreign")
+    testing.expect_value(t,agent_service.tool_live_text(refused,"reason"),"forbidden")
+    // A conversation the viewer does not own still refuses the whole subscription.
+    testing.expect(t,ws.send_text(&conn,`{"type":"subscribe","version":2,"views":[{"conversation_id":"chat_foreign","instance_ids":["inst_a"]}]}`))
     denied:=tool_http_test_read(t,pair.client,&reader)
     testing.expect_value(t,agent_service.tool_live_text(denied,"code"),"forbidden")
     testing.expect(t,ws.send_text(&conn,`{"type":"ping"}`))
