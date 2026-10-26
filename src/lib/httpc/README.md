@@ -85,8 +85,26 @@ silently re-sends a request on a stale connection.
   unbounded size (ham-ctl, the bridge's agent relays, manager downloads) use
   `LONG_TRANSFER_TIMEOUT_MS` plus `stall_timeout_ms` instead of a short total.
 - TLS peer and hostname verification always on.
-- Trust anchors: `HAM_TLS_CA_FILE` (that bundle only) > `SSL_CERT_FILE` /
-  `SSL_CERT_DIR` > libcurl's default (system store; Schannel: Windows store).
+- Trust anchors (`ca.odin`): `HAM_TLS_CA_FILE` (that bundle only) >
+  `SSL_CERT_FILE` / `SSL_CERT_DIR` > the system store:
+  - Linux: a statically linked OpenSSL knows only its build prefix, so `init()`
+    probes, once: the first existing, non-empty, readable file of
+    `/etc/ssl/certs/ca-certificates.crt` (Debian, Ubuntu, Alpine, Arch),
+    `/etc/pki/tls/certs/ca-bundle.crt`,
+    `/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem` (Fedora, RHEL),
+    `/etc/ssl/ca-bundle.pem` (openSUSE), `/etc/ssl/cert.pem` -> `CURLOPT_CAINFO`;
+    else `/etc/ssl/certs` if it holds OpenSSL hash links -> `CURLOPT_CAPATH`;
+    else the Mozilla bundle embedded at build time (`-define:HAM_CA_BUNDLE=<pem>`,
+    nixpkgs `cacert`; release builds) -> `CURLOPT_CAINFO_BLOB`. A build without
+    the embedded bundle on a host without any CA store fails with `.Certificate`.
+  - macOS: Apple SecTrust (system keychains and trust settings): the pinned
+    libcurl is built `--with-apple-sectrust` and uses it whenever no CA
+    file/path is set; OpenSSL does the TLS.
+  - Windows: Schannel with the Windows certificate store, revocation checked
+    best effort (`CURLSSLOPT_REVOKE_BEST_EFFORT`).
+
+  `trust_summary()` names the anchors in use (`ham-bridge --probe-hub` prints
+  it with `libcurl_tls_version()`).
 - **Proxies: never.** `http_proxy`, `HTTPS_PROXY`, `ALL_PROXY` etc. are ignored
   (`CURLOPT_PROXY ""`), as with the previous client.
 - Redirects only when `max_redirects > 0`; an https request never follows a
@@ -97,14 +115,41 @@ silently re-sends a request on a stale connection.
 
 ## Linking
 
-One setup per OS, in `curl_bindings.odin` (own minimal bindings; `vendor:curl`'s
-Linux link line names mbedTLS and cannot be overridden):
+Every build links ONE libcurl, pinned in `nix/libcurl-pin.json` (curl 8.23.0
+and zlib 1.3.2 source tarballs with SHA-256). Feature set everywhere: HTTP,
+HTTPS, WS, WSS; zlib (gzip/deflate); threaded resolver; proxies compiled in but
+disabled per request. Not built: other protocols, HTTP/2 (requests are
+HTTP/1.1 on a fresh connection, so nghttp2 would never be used), HTTP/3,
+brotli, zstd, libpsl, IDN, libssh2, GSS-API/NTLM, cookies, netrc, alt-svc,
+HSTS, MIME, and any compiled-in CA bundle or path.
 
-| OS | libcurl |
-| --- | --- |
-| Linux | `system:curl` — nixpkgs `curl` in the flake's buildInputs; release binaries need the host's `libcurl.so.4` |
-| macOS | `system:curl` — the OS's `/usr/lib/libcurl.4.dylib` |
-| Windows | static `libcurl.lib` (Schannel) shipped with the Odin toolchain in `vendor/curl/lib`; build with `-extra-linker-flags:/LIBPATH:<odin root>/vendor/curl/lib` |
+| Build | libcurl | TLS | How |
+| --- | --- | --- | --- |
+| Linux release (`release-*`) | static | OpenSSL 3, static | `nix/libcurl.nix` `linuxStatic` (pkgsStatic, musl); the binary is fully static (`-static -no-pie`, no NEEDED) |
+| macOS release | static | OpenSSL 3 static + Apple SecTrust | `nix/libcurl.nix` `darwinStatic`; only system frameworks are dynamic |
+| Windows | static, /MT | Schannel | `scripts/windows/build-libcurl.ps1`; `build.ps1 -CurlLibDir` |
+| Nix-native (hub units, `nix run`, `nix develop`) | shared, from its store path | nixpkgs OpenSSL 3 | `nix/libcurl.nix` `native` |
 
-`init()` refuses libcurl older than `MIN_CURL_VERSION` (7.80.0, for `CURLOPT_PREREQFUNCTION`; no binding needs anything newer). The planned
-WebSocket migration to `curl_ws_*` will need 8.11.0.
+`curl_bindings.odin` selects the link line: `-define:HAM_CURL_STATIC=true`
+links `curl ssl crypto z` (plus the CoreFoundation, CoreServices, Security and
+SystemConfiguration frameworks on macOS); without it, `system:curl` (the
+shared library). Windows always links `libcurl.lib` + `zlib.lib`. Own minimal
+bindings, because `vendor:curl`'s Linux link line names mbedTLS and cannot be
+overridden; the Odin toolchain's bundled Windows `libcurl.lib` (an unpinned
+8.17.0-DEV snapshot without zlib) is not used.
+
+`init()` refuses libcurl older than `MIN_CURL_VERSION` (8.11.0, what the
+`curl_ws_*` WebSocket migration needs; today's bindings need 7.80). Every
+flake and Windows build also passes `-define:HAM_CURL_VERSION=<pin>`, and then
+`init()` refuses any libcurl but exactly that version, or one without TLS, so
+a build that picked up some other libcurl fails at startup (`--version` too).
+
+### Bumping the pin
+
+1. Edit `nix/libcurl-pin.json`: version, URLs, SHA-256 of the `.tar.gz`
+   (verify the release's `.asc` signature first). Same for zlib.
+2. `nix build .#release-ham-bridge .#release-ham-ctl .#release-heimdall` and
+   `.#ham-hub`; run `odin test src/lib/httpc -collection:odin_test=src` in
+   `nix develop` and `bash tests/hub_package_libcurl_test.sh`.
+3. The Windows cache key includes the pin, so the next release run rebuilds
+   `libcurl.lib`.

@@ -329,6 +329,10 @@ jobs:
               echo "FAIL: busybox has no CA bundle; the bridge must fall back to the embedded one" >&2; exit 1; }
           fi
 
+      # NOTE (static libcurl): release-ham-bridge is musl-static now, like the
+      # termux build, so the negative control below no longer trips
+      # set_robust_list. Replace it with a glibc-static control binary before
+      # re-enabling termux-arm64 in the matrix.
       # T12: the termux bundle must start under Android's app seccomp policy.
       # scripts/release/android-seccomp-probe.sh straces --version/--help and
       # fails on any syscall that policy kills (the list and its AOSP sources

@@ -18,8 +18,11 @@
 #                keychain/trust settings verify the chain, OpenSSL does TLS).
 #   native       dynamic libcurl.so/.dylib against nixpkgs' OpenSSL and zlib,
 #                for the Nix-native packages (NixOS hub units, nix run, the dev
-#                shell). Same version and feature set; its store path is fixed
-#                by the flake, so it cannot drift on a host.
+#                shell). Same version and feature set (on Darwin also Apple
+#                SecTrust); its store path is fixed by the flake, so it cannot
+#                drift on a host. Kept dynamic because these binaries only run
+#                from their own closure: static linking would buy nothing but
+#                a second OpenSSL build per system.
 #
 # Bumping: edit ./libcurl-pin.json (version, urls, sha256 of the .tar.gz,
 # verified against the release's .asc signature), then build every
