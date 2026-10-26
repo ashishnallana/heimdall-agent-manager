@@ -54,6 +54,10 @@ let
     "--without-brotli" "--without-zstd" "--without-libpsl" "--without-libidn2"
     # SMB goes with NTLM; libssh2 and GSS-API are opt-in (--with-*).
     "--without-ca-bundle" "--without-ca-path" "--without-ca-fallback"
+    # Never read openssl.cnf (OPENSSL_CONF or the build's OPENSSLDIR, a
+    # /nix/store path): the environment must not be able to load providers or
+    # engines, or change TLS policy, behind httpc's back.
+    "--disable-openssl-auto-load-config"
   ];
 
   # A variant: the curl derivation plus the TLS and zlib it was built with, and
