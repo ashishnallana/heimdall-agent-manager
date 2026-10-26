@@ -575,6 +575,11 @@
               ols
               pkks.tmux
               pkks.curl
+              # src/lib/httpc links libcurl; its TLS tests run a throwaway
+              # openssl-generated CA behind a socat server.
+              pkks.curl.dev
+              pkks.openssl
+              pkks.socat
               pkks.jq
               pkks.sqlite
               # PTYH-4: Rust toolchain for tools/pty_host so `nix develop` gives
