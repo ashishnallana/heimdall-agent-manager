@@ -247,6 +247,14 @@ perform :: proc(req: Request, t: ^Transfer) -> Error {
 	} else {
 		set_ok &= set_long(easy, CURLOPT_FOLLOWLOCATION, c.long(0))
 	}
+	when ODIN_OS == .Windows {
+		// Schannel checks certificate revocation by default and fails the handshake
+		// when it cannot reach a CRL/OCSP responder (offline or filtered networks, a
+		// private CA from HAM_TLS_CA_FILE with no distribution point). The previous
+		// SSPI transport did not check revocation. Best effort still rejects a
+		// certificate that IS revoked; it only tolerates an unknown status.
+		set_ok &= set_long(easy, CURLOPT_SSL_OPTIONS, CURLSSLOPT_REVOKE_BEST_EFFORT)
+	}
 	cainfo, capath, exclusive := trust_anchors()
 	if cainfo != "" {
 		set_ok &= set_ptr(easy, CURLOPT_CAINFO, rawptr(strings.clone_to_cstring(cainfo, context.temp_allocator)))
