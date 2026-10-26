@@ -193,6 +193,12 @@ main :: proc() {
 	// Wake state must exist before the hub worker can run a launch, which
 	// records itself via bridge_task_wake_note_launched.
 	bridge_agent_wake_init()
+	// Name the HTTPS client and its trust anchors once, so a host whose CA store
+	// was not found (embedded Mozilla fallback) is visible in the service log.
+	// (Locals, not inline calls: check-http-boundary.sh's library-path pattern
+	// would read `", httpc.lib...` between two string literals as a path.)
+	https_version, https_tls, https_ca := httpc.libcurl_version(), httpc.libcurl_tls_version(), httpc.trust_summary()
+	fmt.println("bridge https client: libcurl", https_version, https_tls, "CA:", https_ca)
 	bridge_hub_runtime_start()
 	// REQ-IMPL-4 / design §7.5: renew the access token at 80% of its lifetime with
 	// jitter, rather than waiting for a 401 — by which time in-flight work has
