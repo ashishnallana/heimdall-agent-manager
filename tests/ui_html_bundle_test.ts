@@ -168,3 +168,82 @@ test('compilePage strips SVG SMIL animation that could retarget a link at runtim
   assert.equal(doc.getElementById('ok')?.getAttribute('href'), 'about:srcdoc#top');
   assert.ok(doc.querySelector('meta[http-equiv="Content-Security-Policy"]'));
 });
+
+function jsdomRenderer(bundle: Awaited<ReturnType<typeof readHtmlBundle>>, parseHtml = (html: string) => new JSDOM(html).window.document) {
+  let n = 0;
+  return new HtmlBundleRenderer(bundle, { parseHtml, createObjectURL: () => `blob:test/${n++}`, revokeObjectURL: () => {} });
+}
+
+/** What the sandboxed iframe sees: compiled text reparsed. */
+function assertNoBreakout(html: string) {
+  const doc = new JSDOM(html).window.document;
+  // The hostile text may survive as inert CSS text; it must not reach any element or attribute.
+  for (const el of Array.from(doc.querySelectorAll('*'))) {
+    for (const attr of Array.from(el.attributes)) assert.ok(!attr.value.includes('evil.example'), `${el.localName} ${attr.name}=${attr.value}`);
+  }
+  assert.equal(doc.querySelectorAll('meta[http-equiv]').length, 1, html);
+  for (const a of Array.from(doc.querySelectorAll('a[href]'))) assert.match(a.getAttribute('href') || '', /^about:srcdoc#/);
+  for (const style of Array.from(doc.querySelectorAll('style'))) assert.ok(!(style.textContent || '').includes('</'), style.textContent || '');
+  return doc;
+}
+
+const BREAKOUT = '</style><a id="inj" href="https://evil.example/click">x</a><meta http-equiv="refresh" content="0;url=https://evil.example/r"><style>';
+
+test('compiled CSS from <link> and @import cannot close its <style> element', async () => {
+  const bundle = await readHtmlBundle(zip([
+    MANIFEST,
+    { name: 'index.html', data: '<!doctype html><html><head><link rel="stylesheet" href="css/a.css"><style>@import "css/b.css"; p{color:red}</style></head><body><p>hi</p></body></html>' },
+    { name: 'css/a.css', data: `p{color:blue} /* ${BREAKOUT} */ i{content:"${BREAKOUT.replace(/"/g, "'")}"}` },
+    { name: 'css/b.css', data: `b{content:'${BREAKOUT.replace(/'/g, '"')}'}` },
+  ]));
+  const { html } = jsdomRenderer(bundle).compilePage('index.html');
+  const doc = assertNoBreakout(html);
+  assert.equal(doc.getElementById('inj'), null);
+  // The content survives as CSS: \3c / is the CSS escape for "</".
+  assert.match(html, /\\3c \/style>/);
+  assert.equal(doc.querySelectorAll('style').length, 2);
+});
+
+test('a percent-decoded url("#…") fragment in authored CSS is re-encoded', async () => {
+  const bundle = await readHtmlBundle(zip([
+    MANIFEST,
+    { name: 'index.html', data: '<!doctype html><html><head><style>p{background:url("#%3C/style%3E%3Ca%20href=https://evil.example%3Ex%3C/a%3E")} svg{filter:url(#blur)}</style></head><body><p>hi</p></body></html>' },
+  ]));
+  const { html } = jsdomRenderer(bundle).compilePage('index.html');
+  assertNoBreakout(html);
+  assert.match(html, /url\("#blur"\)/);
+});
+
+test('CSS range media queries keep their bare "<"', async () => {
+  const bundle = await readHtmlBundle(zip([MANIFEST, { name: 'index.html', data: '<style>@media (width < 600px){p{color:red}}</style><p>x</p>' }]));
+  const { html } = jsdomRenderer(bundle).compilePage('index.html');
+  assert.ok(new JSDOM(html).window.document.querySelector('style')?.textContent?.includes('(width < 600px)'), html);
+});
+
+test('<use> keeps same-document references and drops external SVG documents', async () => {
+  const bundle = await readHtmlBundle(zip([
+    MANIFEST,
+    { name: 'index.html', data: '<svg><symbol id="i"><rect/></symbol><use id="local" href="#i"/><use id="ext" href="sprite.svg#icon"/><use id="xext" xlink:href="sprite.svg#icon"/><image id="img" href="sprite.svg"/></svg>' },
+    { name: 'sprite.svg', data: '<svg xmlns="http://www.w3.org/2000/svg"><a href="https://evil.example/u"><set attributeName="href" to="https://evil.example/s"/><rect id="icon"/></a></svg>' },
+  ]));
+  const { html, missing } = jsdomRenderer(bundle).compilePage('index.html');
+  const doc = new JSDOM(html).window.document;
+  assert.equal(doc.getElementById('local')?.getAttribute('href'), '#i');
+  assert.equal(doc.getElementById('ext')?.hasAttribute('href'), false);
+  assert.equal(doc.getElementById('xext')?.hasAttribute('xlink:href'), false);
+  assert.match(doc.getElementById('img')?.getAttribute('href') || '', /^blob:test\//);
+  assert.deepEqual(missing, ['sprite.svg']);
+});
+
+test('compilePage fails closed when the reparsed page holds markup the sanitizer did not emit', async () => {
+  const bundle = await readHtmlBundle(zip([MANIFEST, { name: 'index.html', data: '<p>x</p>' }]));
+  // Stand-in for a serializer/parser round-trip difference: the verification parse sees more.
+  let calls = 0;
+  const parseHtml = (html: string) => new JSDOM(calls++ === 0 ? html : html.replace('</body>', '<a href="https://evil.example/x">x</a></body>')).window.document;
+  assert.throws(() => jsdomRenderer(bundle, parseHtml).compilePage('index.html'), (err: unknown) => {
+    assert.ok(err instanceof HtmlBundleError);
+    assert.equal(err.code, 'unsafe');
+    assert.match(err.message, /a href/);
+    return true;
+  });
+});

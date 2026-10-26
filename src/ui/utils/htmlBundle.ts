@@ -12,6 +12,8 @@
 //   - local images/fonts/stylesheets become blob: URLs (stylesheets inlined, @import
 //     inlined recursively, url() rewritten relative to the stylesheet);
 //   - remote references are dropped and a CSP meta forbids any network load;
+//   - "</" in compiled <style> text is CSS-escaped (raw text must not close early), and the
+//     serialized page is reparsed and checked before use (fail closed, code 'unsafe');
 //   - links to other pages carry data-hb-page/data-hb-fragment for the host to follow,
 //     and fragment links point at about:srcdoc#frag (a bare "#frag" in a srcdoc
 //     document resolves against the PARENT url and would navigate the frame away).
@@ -345,6 +347,15 @@ const CSS_URL_RE = /url\(\s*(?:"([^"]*)"|'([^']*)'|([^)"']*))\s*\)/gi;
 const CSS_IMPORT_RE = /@import\s+(?:url\(\s*(?:"([^"]*)"|'([^']*)'|([^)"']*))\s*\)|"([^"]*)"|'([^']*)')\s*([^;]*);?/gi;
 const MAX_IMPORT_DEPTH = 16;
 
+// HTML <style> contents are serialized raw, so a "</style>" in compiled CSS would end the
+// element when the iframe reparses the page and inject markup the sanitizer never saw.
+// Only "</" can end raw text, and in valid CSS it only occurs inside strings, url() and
+// comments, where \3c (the CSS escape for "<") means the same. A bare "<" is left alone:
+// media query ranges such as (width < 600px) need it.
+function styleElementText(css: string): string {
+  return css.replace(/<\//g, '\\3c /');
+}
+
 /**
  * Compiles pages of one bundle to srcdoc HTML. Owns every blob: URL it creates;
  * dispose() revokes them all (close, version change, vault lock).
@@ -398,7 +409,9 @@ export class HtmlBundleRenderer {
       const ref = String(dq ?? sq ?? bare ?? '').trim();
       const resolved = resolveBundleRef(ref, fromPath);
       if (resolved.kind === 'data' && /^data:(image|font)\//i.test(ref)) return `url("${ref.replace(/"/g, '%22')}")`;
-      if (resolved.kind === 'fragment') return `url("#${resolved.fragment.replace(/"/g, '%22')}")`;
+      // Re-encode: resolveBundleRef percent-decodes, and a decoded "</style>" here would
+      // close the element when the iframe reparses the page.
+      if (resolved.kind === 'fragment') return `url("#${encodeURIComponent(resolved.fragment)}")`;
       if (resolved.kind !== 'local') {
         if (resolved.kind === 'external' || resolved.kind === 'invalid') missing.add(ref);
         return 'url("")';
@@ -470,7 +483,7 @@ export class HtmlBundleRenderer {
     });
     // Authored <style> first: stylesheets inlined from <link> below are already compiled.
     doc.querySelectorAll('style').forEach((style) => {
-      style.textContent = this.compileCss(style.textContent || '', page, missing);
+      style.textContent = styleElementText(this.compileCss(style.textContent || '', page, missing));
     });
     doc.querySelectorAll('link').forEach((link) => {
       const rel = (link.getAttribute('rel') || '').toLowerCase().split(/\s+/);
@@ -481,7 +494,7 @@ export class HtmlBundleRenderer {
         if (resolved.kind === 'local' && css) {
           const style = doc.createElement('style');
           const media = link.getAttribute('media');
-          style.textContent = this.compileCss(new TextDecoder().decode(css), resolved.path, missing, [resolved.path]);
+          style.textContent = styleElementText(this.compileCss(new TextDecoder().decode(css), resolved.path, missing, [resolved.path]));
           if (media) style.setAttribute('media', media);
           link.replaceWith(style);
           return;
@@ -510,7 +523,15 @@ export class HtmlBundleRenderer {
         } else if (name === 'src' || name === 'poster' || ((tag === 'image' || tag === 'use' || tag === 'feimage') && (name === 'href' || name === 'xlink:href'))) {
           const resolved = resolveBundleRef(value, page);
           if (resolved.kind === 'data' && /^data:(image|font)\//i.test(value.trim())) continue;
-          if (resolved.kind === 'fragment' && (tag === 'use')) continue;
+          if (resolved.kind === 'fragment' && tag === 'use') continue;
+          if (tag === 'use') {
+            // <use> clones the referenced document into its shadow tree, outside this
+            // sanitizer (<a href>, <set> and the like would survive). Only same-document
+            // references are kept; image/feImage load SVG in image mode, which is inert.
+            if (value.trim()) missing.add(resolved.kind === 'local' ? resolved.path : value.trim());
+            el.removeAttribute(name);
+            continue;
+          }
           const url = resolved.kind === 'local' ? this.assetUrl(resolved.path, missing) : '';
           if (resolved.kind !== 'local' && value.trim()) missing.add(value.trim());
           if (url) el.setAttribute(name, url + (resolved.kind === 'local' && resolved.fragment ? `#${encodeURIComponent(resolved.fragment)}` : ''));
@@ -532,9 +553,61 @@ export class HtmlBundleRenderer {
       head.insertBefore(charset, head.firstChild);
     }
 
-    const compiled = { html: `<!doctype html>\n${doc.documentElement.outerHTML}`, missing: [...missing].sort() };
+    const html = `<!doctype html>\n${doc.documentElement.outerHTML}`;
+    // The iframe reparses this text, so check what it will actually see: anything the
+    // serializer/parser round trip brought back that the passes above never emit fails
+    // the page closed instead of rendering it.
+    const violation = this.findUnsafe(this.parseHtml(html));
+    if (violation) throw new HtmlBundleError('unsafe', `Page "${page}" cannot be previewed safely (${violation}).`);
+    const compiled = { html, missing: [...missing].sort() };
     this.pages.set(page, compiled);
     return compiled;
+  }
+
+  private isOwnUrl(value: string): boolean {
+    const base = value.split('#')[0];
+    for (const url of this.urls.values()) if (url === base) return true;
+    return false;
+  }
+
+  /** First construct in a reparsed compiled page that compilePage never emits, if any. */
+  private findUnsafe(doc: Document): string {
+    const csp = doc.querySelectorAll('meta[http-equiv]');
+    if (csp.length !== 1 || csp[0].getAttribute('http-equiv') !== 'Content-Security-Policy' || csp[0].getAttribute('content') !== HTML_BUNDLE_CSP) return 'meta http-equiv';
+    for (const el of Array.from(doc.getElementsByTagName('*'))) {
+      const tag = el.localName.toLowerCase();
+      if (el !== csp[0] && el.matches(REMOVED_ELEMENTS)) return `<${tag}>`;
+      if (tag === 'form' || REMOVED_SVG_ANIMATION.has(tag)) return `<${tag}>`;
+      if (tag === 'style' && (el.textContent || '').includes('</')) return 'markup in <style>';
+      for (const attr of Array.from(el.attributes)) {
+        const name = attr.name.toLowerCase();
+        const value = attr.value.trim();
+        if (name.startsWith('on') || name === 'srcdoc' || name === 'target' || name === 'formtarget' || name === 'download' || name === 'is' || (name === 'http-equiv' && el !== csp[0])) return `${name} attribute`;
+        if (name === 'style' && !this.cssUrlsSafe(value)) return 'style attribute url()';
+        if (!URL_ATTRS.includes(name)) continue;
+        if ((tag === 'a' || tag === 'area') && name === 'href') {
+          if (!value.startsWith('about:srcdoc#')) return `${tag} href`;
+        } else if (name === 'srcset') {
+          if (value && !value.split(',').every((c) => this.isOwnUrl(c.trim().split(/\s+/)[0] || ''))) return 'srcset';
+        } else if (tag === 'use' && (name === 'href' || name === 'xlink:href')) {
+          if (!value.startsWith('#')) return 'use href';
+        } else if (name === 'src' || name === 'poster' || name === 'href' || name === 'xlink:href') {
+          if (!this.isOwnUrl(value) && !/^data:(image|font)\//i.test(value)) return `${tag} ${name}`;
+        } else {
+          return `${name} attribute`;
+        }
+      }
+      if (tag === 'style' && !this.cssUrlsSafe(el.textContent || '')) return '<style> url()';
+    }
+    return '';
+  }
+
+  private cssUrlsSafe(css: string): boolean {
+    for (const m of css.matchAll(CSS_URL_RE)) {
+      const ref = String(m[1] ?? m[2] ?? m[3] ?? '').trim();
+      if (ref && !ref.startsWith('#') && !this.isOwnUrl(ref) && !/^data:(image|font)\//i.test(ref)) return false;
+    }
+    return true;
   }
 
   private rewriteLink(el: Element, value: string, page: string, missing: Set<string>): void {

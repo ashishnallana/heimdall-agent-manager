@@ -45,7 +45,8 @@ const files = [
 <a id="next" href="docs/two.html#sec">next</a> <a id="totop" href="#bottom">bottom</a>
 <div style="height:3000px"></div><p id="bottom">bottom</p></body></html>`],
   ['css/site.css', `@import "base.css"; body{color:rgb(0,0,255)} #bg{width:4px;height:4px;background-image:url(../img/logo.png)} @font-face{font-family:BundleFont;src:url("/fonts/f.woff2") format("woff2")} h1{font-family:BundleFont}`],
-  ['css/base.css', `h1{text-transform:uppercase}`],
+  // The comment tries to close the inlined <style> and inject a remote link (REQ-BUNDLE-5).
+  ['css/base.css', `h1{text-transform:uppercase} /* </style><a id="inj" href="https://example.com/inj">inj</a><style> */ p{margin:0}`],
   ['img/logo.png', PNG],
   ['fonts/f.woff2', Buffer.alloc(0)],
   ['docs/two.html', `<!doctype html><html><head><link rel="stylesheet" href="../css/site.css"></head><body><a id="back" href="/index.html">home</a><div style="height:3000px"></div><h2 id="sec">Section</h2></body></html>`],

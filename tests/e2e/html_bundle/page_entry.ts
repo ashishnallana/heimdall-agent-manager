@@ -55,6 +55,10 @@ const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
   r.jsUrlStripped = !(d.getElementById('jslink') as HTMLAnchorElement).hasAttribute('href');
   r.formNeutralized = d.querySelectorAll('form').length === 0;
   r.externalLinkInert = !(d.getElementById('external') as HTMLAnchorElement).hasAttribute('href');
+  // A "</style>" in bundled CSS must stay CSS text; clicking a leaked link would hit the network log.
+  const injected = d.getElementById('inj') as HTMLAnchorElement | null;
+  injected?.click();
+  r.styleBreakoutContained = !injected;
   r.cspPresent = !!d.querySelector('meta[http-equiv="Content-Security-Policy"]');
   (d.getElementById('totop') as HTMLAnchorElement).click();
   await wait(150);

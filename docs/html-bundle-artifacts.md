@@ -62,6 +62,18 @@ rendering:
     inlined recursively and `url()` resolved relative to the stylesheet. `/x` means the
     bundle root.
   - Remote references are dropped and listed in a resource warning.
+  - `<use>` keeps only same-document references (`#id`). An external SVG document
+    would be cloned into the page outside the sanitizer, so the reference is dropped
+    and listed as a resource warning. `<img>`/`<image>` load SVG in inert image mode.
+  - `<style>` contents are serialized raw, so every `</` in compiled CSS is written as
+    the CSS escape `\3c /`. Otherwise a `</style>` in a bundled stylesheet or a decoded
+    `url("#…")` fragment would end the element and inject markup when the iframe parses
+    the page. CSS `url("#…")` fragments are percent-encoded again for the same reason.
+  - **Reparse check**: the compiled text is parsed again and checked for anything the
+    compiler never emits: removed elements, handlers, link targets other than
+    `about:srcdoc#…`, URLs other than the renderer's own `blob:` URLs or
+    `data:image|font`, and `</` inside `<style>`. A page that fails is not rendered
+    (`unsafe` error).
   - A CSP meta allows only `blob:`/`data:` images and fonts plus inline styles.
 - **Navigation**:
   - Fragment links are rewritten to `about:srcdoc#frag`. A bare `#frag` in a `srcdoc`
