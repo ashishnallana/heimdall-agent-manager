@@ -1,6 +1,8 @@
-// Browser half of the html-bundle preview check: the same compiler and iframe
-// attributes as src/ui/components/HtmlBundlePreview.tsx.
-import { HtmlBundleRenderer, readHtmlBundle } from '../../../src/ui/utils/htmlBundle.ts';
+// Browser half of the html-bundle preview check: the same compiler, iframe attributes
+// and page-link mechanism (poll the frame's location.hash, parse it with
+// parseHtmlBundleNavHash) as src/ui/components/HtmlBundlePreview.tsx. The mounted
+// component itself is driven in three engines by engines.cjs.
+import { HtmlBundleRenderer, parseHtmlBundleNavHash, readHtmlBundle } from '../../../src/ui/utils/htmlBundle.ts';
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -15,24 +17,26 @@ const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
   iframe.style.cssText = 'width:800px;height:400px';
   document.body.appendChild(iframe);
   let current = '';
+  let loaded: { doc: Document; hash: string } | null = null;
   const nav: string[] = [];
   const show = (page: string, fragment = '') => new Promise<void>((resolve) => {
     current = page;
+    loaded = null;
     nav.push(fragment ? `${page}#${fragment}` : page);
     iframe.onload = () => {
       const doc = iframe.contentDocument!;
-      doc.addEventListener('click', (event) => {
-        const a = (event.target as Element).closest?.('a[data-hb-page]');
-        if (!a) return;
-        event.preventDefault();
-        const next = a.getAttribute('data-hb-page')!;
-        if (renderer.hasPage(next)) void show(next, a.getAttribute('data-hb-fragment') || '');
-      });
+      loaded = { doc, hash: doc.location.hash };
       if (fragment) doc.getElementById(fragment)?.scrollIntoView();
       resolve();
     };
     iframe.srcdoc = renderer.compilePage(page).html;
   });
+  const poll = setInterval(() => {
+    if (!loaded || iframe.contentDocument !== loaded.doc || loaded.doc.location.hash === loaded.hash) return;
+    loaded.hash = loaded.doc.location.hash;
+    const target = parseHtmlBundleNavHash(loaded.hash);
+    if (target && renderer.hasPage(target.page) && target.page !== current) void show(target.page, target.fragment);
+  }, 100);
   const r: Record<string, unknown> = {};
   await show(bundle.entry);
   await wait(400);
@@ -78,6 +82,7 @@ const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
   (d2.getElementById('back') as HTMLAnchorElement).click();
   await wait(400);
   r.navigatedBackViaRootLink = current === 'index.html';
+  clearInterval(poll);
   r.nav = nav;
   r.objectUrls = renderer.objectUrlCount;
   renderer.dispose();

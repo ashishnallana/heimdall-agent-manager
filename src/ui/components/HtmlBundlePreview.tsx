@@ -1,16 +1,20 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Select, Spinner } from '@ui';
-import { HtmlBundleError, HtmlBundleRenderer, readHtmlBundle, type HtmlBundle } from '../utils/htmlBundle';
+import { HtmlBundleError, HtmlBundleRenderer, parseHtmlBundleNavHash, readHtmlBundle, type HtmlBundle } from '../utils/htmlBundle';
 
 // REQ-BUNDLE-3/4/5: renders a decrypted html-bundle artifact in an isolated iframe.
 //
 // Isolation: `sandbox="allow-same-origin"` WITHOUT allow-scripts, allow-forms,
 // allow-popups or allow-top-navigation, plus the CSP meta every compiled page carries
 // (no network, no scripts). Without script the frame cannot reach the app's DOM, storage
-// or credentials; allow-same-origin only lets THIS component attach a click listener to
-// the frame's document so page links can be followed host-side and the page selector
-// kept in sync. Never add allow-scripts here: with allow-same-origin it would void the
-// sandbox entirely.
+// or credentials; allow-same-origin only lets THIS component read the frame's location,
+// scroll it and check its URL. Never add allow-scripts here: with allow-same-origin it
+// would void the sandbox entirely.
+//
+// Page links: a link to another page navigates the frame natively to
+// about:srcdoc#hb-page=… and the host polls the frame's location.hash to switch pages.
+// WebKit (Safari) never runs host-registered listeners (click, hashchange, …) in a
+// script-disabled frame, so polling is the only mechanism that works in every engine.
 
 type Status =
   | { kind: 'loading' }
@@ -18,6 +22,8 @@ type Status =
   | { kind: 'ready'; bundle: HtmlBundle; renderer: HtmlBundleRenderer };
 
 type Location = { page: string; fragment: string };
+
+const NAV_POLL_MS = 100;
 
 const ERROR_TITLES: Record<string, string> = {
   malformed: 'This HTML bundle is malformed',
@@ -33,6 +39,12 @@ export default function HtmlBundlePreview({ blob, locked, lockReason = 'locked' 
   const [frameKey, setFrameKey] = useState(0);
   const [navigationBlocked, setNavigationBlocked] = useState(false);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
+  const locationRef = useRef(location);
+  locationRef.current = location;
+  // The document loaded for the current location and the last hash the poll handled in
+  // it. Null from a page switch until the new page loads, so a stale document (old page,
+  // old version, escaped frame) is never read.
+  const frameDocRef = useRef<{ doc: Document; hash: string } | null>(null);
 
   useEffect(() => {
     if (!blob || locked) {
@@ -41,6 +53,7 @@ export default function HtmlBundlePreview({ blob, locked, lockReason = 'locked' 
     }
     let cancelled = false;
     let renderer: HtmlBundleRenderer | null = null;
+    frameDocRef.current = null;
     setStatus({ kind: 'loading' });
     setNavigationBlocked(false);
     blob.arrayBuffer()
@@ -60,6 +73,7 @@ export default function HtmlBundlePreview({ blob, locked, lockReason = 'locked' 
     // and the parsed archive are released here. Nothing is persisted.
     return () => {
       cancelled = true;
+      frameDocRef.current = null;
       renderer?.dispose();
     };
   }, [blob, locked]);
@@ -84,7 +98,17 @@ export default function HtmlBundlePreview({ blob, locked, lockReason = 'locked' 
     target?.scrollIntoView();
   }, []);
 
+  const navigate = useCallback((next: Location) => {
+    if (next.page === locationRef.current.page) {
+      scrollToFragment(next.fragment);
+    } else {
+      frameDocRef.current = null;
+    }
+    setLocation(next);
+  }, [scrollToFragment]);
+
   const handleLoad = useCallback(() => {
+    frameDocRef.current = null;
     const doc = iframeRef.current?.contentDocument;
     // Backstop for sanitizer gaps: every compiled page is same-origin about:srcdoc, so an
     // unreachable document (cross-origin) or any other URL means the frame navigated
@@ -95,18 +119,33 @@ export default function HtmlBundlePreview({ blob, locked, lockReason = 'locked' 
       return;
     }
     if (status.kind !== 'ready') return;
-    doc.addEventListener('click', (event) => {
-      const anchor = (event.target as Element | null)?.closest?.('a[data-hb-page], area[data-hb-page]');
-      if (!anchor) return;
-      event.preventDefault();
-      const page = anchor.getAttribute('data-hb-page') || '';
-      const fragment = anchor.getAttribute('data-hb-fragment') || '';
-      if (!status.renderer.hasPage(page)) return;
-      if (page === location.page) scrollToFragment(fragment);
-      else setLocation({ page, fragment });
-    });
+    frameDocRef.current = { doc, hash: doc.location?.hash || '' };
     scrollToFragment(location.fragment);
   }, [status, location, scrollToFragment]);
+
+  // Follow page links (see the header comment). The timer runs only while a bundle is
+  // ready and unlocked; a version change, close or lock also clears frameDocRef in the
+  // same commit that releases the old renderer, so the poll never acts on a stale one.
+  useEffect(() => {
+    if (status.kind !== 'ready' || locked) return;
+    const { renderer } = status;
+    const timer = window.setInterval(() => {
+      const loaded = frameDocRef.current;
+      if (!loaded) return;
+      let hash = '';
+      try {
+        if (iframeRef.current?.contentDocument !== loaded.doc) return;
+        hash = loaded.doc.location?.hash || '';
+      } catch {
+        return;
+      }
+      if (hash === loaded.hash) return;
+      loaded.hash = hash;
+      const target = parseHtmlBundleNavHash(hash);
+      if (target && renderer.hasPage(target.page)) navigate(target);
+    }, NAV_POLL_MS);
+    return () => window.clearInterval(timer);
+  }, [status, locked, navigate]);
 
   if (locked) {
     return (
@@ -141,7 +180,7 @@ export default function HtmlBundlePreview({ blob, locked, lockReason = 'locked' 
         <Select
           data-debug-id="artifact-viewer-html-bundle-page-select"
           value={location.page}
-          onChange={(next) => setLocation({ page: String(next), fragment: '' })}
+          onChange={(next) => navigate({ page: String(next), fragment: '' })}
         >
           {status.bundle.pages.map((page) => (
             <option key={page} value={page}>{page === status.bundle.entry ? `${page} (entry)` : page}</option>
@@ -162,7 +201,10 @@ export default function HtmlBundlePreview({ blob, locked, lockReason = 'locked' 
         </div>
       ) : null}
       <iframe
-        key={frameKey}
+        // One frame element per page: every switch loads a fresh document, even when two
+        // pages compile to identical text, and the old document (with any route left in
+        // its hash) goes away with its element.
+        key={`${frameKey}:${location.page}`}
         ref={iframeRef}
         data-debug-id="artifact-viewer-html-bundle-frame"
         title={location.page}

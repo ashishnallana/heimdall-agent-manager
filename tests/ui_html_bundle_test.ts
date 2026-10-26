@@ -1,6 +1,7 @@
 // REQ-BUNDLE-2/3/4/5: in-memory html-bundle reading, validation and reference resolution.
 // Page compilation is checked here against jsdom and end to end in Electron by
-// tests/e2e/html_bundle/run.cjs.
+// tests/e2e/html_bundle/run.cjs; page-link navigation of the mounted HtmlBundlePreview in
+// Chromium, WebKit and Firefox by tests/e2e/html_bundle/engines.cjs.
 //
 // RUN: node --test tests/ui_html_bundle_test.ts
 
@@ -12,6 +13,8 @@ import {
   HtmlBundleError,
   HtmlBundleRenderer,
   crc32,
+  htmlBundleNavHash,
+  parseHtmlBundleNavHash,
   readHtmlBundle,
   resolveBundleRef,
   validateMemberPath,
@@ -246,4 +249,70 @@ test('compilePage fails closed when the reparsed page holds markup the sanitizer
     assert.match(err.message, /a href/);
     return true;
   });
+});
+
+test('page-link routes round-trip and reject anything compilePage does not emit', () => {
+  for (const [page, fragment] of [
+    ['index.html', ''],
+    ['docs/details.html', 'end'],
+    ['a b/c&d=e#f%.HTML', 'x&hb-fragment=y#z %'],
+    ['ünï/cødé 页.htm', 'セクション 2'],
+  ]) {
+    const hash = htmlBundleNavHash(page, fragment);
+    assert.match(hash, /^hb-page=[^&#]*(&hb-fragment=[^&#]+)?$/, hash);
+    assert.deepEqual(parseHtmlBundleNavHash(hash), { page, fragment });
+    assert.deepEqual(parseHtmlBundleNavHash(`#${hash}`), { page, fragment });
+  }
+  for (const hash of [
+    '', '#', '#top', 'hb-page%3Ddetails.html', 'HB-PAGE=index.html', ' hb-page=index.html',
+    'hb-page=', 'hb-page=docs', 'hb-page=style.css', 'hb-page=docs/', 'hb-page=%2Findex.html',
+    'hb-page=..%2Findex.html', 'hb-page=a%2F.%2Fb.html', 'hb-page=a%5Cb.html', 'hb-page=a%00.html', 'hb-page=C%3Aa.html',
+    'hb-page=%E0%A4%A.html', 'hb-page=index.html&hb-fragment=%ZZ', 'hb-page=index.html&hb-fragment=',
+    'hb-page=index.html&hb-page=other.html', 'hb-page=index.html&x=1', 'hb-page=index.html&hb-fragment=a&hb-fragment=b',
+    `hb-page=${'a'.repeat(7000)}.html`,
+  ]) {
+    assert.equal(parseHtmlBundleNavHash(hash), null, hash);
+  }
+});
+
+test('compilePage routes other-page links through hb-page and keeps same-page links as fragments', async () => {
+  const index = `<!doctype html><html><body>
+<a id="self" href="index.html">home</a><a id="selffrag" href="./index.html#s2">s2</a><a id="frag" href="#s2">jump</a>
+<a id="details" href="docs/details.html">details</a><a id="xfrag" href="/docs/details.html?q=1#end%20part">end</a>
+<a id="forged" href="#hb-page=docs/details.html">forged</a><a id="forged2" href="index.html#hb-page%3Ddocs%2Fdetails.html">forged2</a>
+<a id="missing" href="docs/none.html">none</a><a id="asset" href="style.css">css</a>
+<img usemap="#m" src="data:image/png;base64,AAAA"><map name="m"><area id="area" shape="rect" coords="0,0,10,10" href="docs/details.html#end"></map>
+<svg><a id="svg" href="docs/details.html"><text>svg</text></a></svg>
+<h2 id="s2">s2</h2></body></html>`;
+  const bundle = await readHtmlBundle(zip([
+    MANIFEST,
+    { name: 'index.html', data: index },
+    { name: 'docs/details.html', data: '<a id="back" href="../index.html">back</a><a id="up" href="/index.html#s2">s2</a><a id="me" href="details.html#end">me</a><p id="end">end</p>' },
+    { name: 'style.css', data: 'p{}' },
+  ]));
+  const renderer = jsdomRenderer(bundle);
+  const doc = assertNoBreakout(renderer.compilePage('index.html').html);
+  const href = (id: string) => doc.getElementById(id)?.getAttribute('href');
+  const route = (id: string) => parseHtmlBundleNavHash((href(id) || '').replace(/^about:srcdoc/, ''));
+  assert.equal(href('self'), 'about:srcdoc#');
+  assert.equal(href('selffrag'), 'about:srcdoc#s2');
+  assert.equal(href('frag'), 'about:srcdoc#s2');
+  assert.equal(href('details'), 'about:srcdoc#hb-page=docs%2Fdetails.html');
+  assert.deepEqual(route('details'), { page: 'docs/details.html', fragment: '' });
+  assert.deepEqual(route('xfrag'), { page: 'docs/details.html', fragment: 'end part' });
+  assert.deepEqual(route('area'), { page: 'docs/details.html', fragment: 'end' });
+  assert.deepEqual(route('svg'), { page: 'docs/details.html', fragment: '' });
+  // Authored fragments that spell the reserved marker stay plain, encoded fragments.
+  assert.equal(href('forged'), 'about:srcdoc#hb-page%3Ddocs%2Fdetails.html');
+  assert.equal(route('forged'), null);
+  assert.equal(href('forged2'), 'about:srcdoc#hb-page%3Ddocs%2Fdetails.html');
+  assert.equal(route('forged2'), null);
+  for (const id of ['self', 'selffrag', 'frag']) assert.equal(route(id), null, id);
+  for (const id of ['missing', 'asset']) assert.equal(doc.getElementById(id)?.hasAttribute('href'), false, id);
+  assert.deepEqual(renderer.compilePage('index.html').missing, ['docs/none.html']);
+
+  const details = assertNoBreakout(renderer.compilePage('docs/details.html').html);
+  assert.deepEqual(parseHtmlBundleNavHash(details.getElementById('back')?.getAttribute('href')?.slice('about:srcdoc'.length) || ''), { page: 'index.html', fragment: '' });
+  assert.deepEqual(parseHtmlBundleNavHash(details.getElementById('up')?.getAttribute('href')?.slice('about:srcdoc'.length) || ''), { page: 'index.html', fragment: 's2' });
+  assert.equal(details.getElementById('me')?.getAttribute('href'), 'about:srcdoc#end');
 });

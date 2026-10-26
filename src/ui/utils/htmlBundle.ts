@@ -14,9 +14,12 @@
 //   - remote references are dropped and a CSP meta forbids any network load;
 //   - "</" in compiled <style> text is CSS-escaped (raw text must not close early), and the
 //     serialized page is reparsed and checked before use (fail closed, code 'unsafe');
-//   - links to other pages carry data-hb-page/data-hb-fragment for the host to follow,
-//     and fragment links point at about:srcdoc#frag (a bare "#frag" in a srcdoc
-//     document resolves against the PARENT url and would navigate the frame away).
+//   - fragment links point at about:srcdoc#frag (a bare "#frag" in a srcdoc document
+//     resolves against the PARENT url and would navigate the frame away); links to other
+//     pages point at about:srcdoc#hb-page=<page>[&hb-fragment=<frag>] (see
+//     htmlBundleNavHash). The frame follows them natively and the host polls the frame's
+//     location.hash: WebKit never runs host-registered listeners in a script-disabled
+//     frame, so a click handler cannot follow them there.
 // The iframe is sandboxed without allow-scripts (see HtmlBundlePreview.tsx).
 
 export const HTML_BUNDLE_KIND = 'html-bundle';
@@ -326,6 +329,50 @@ export function bundleAssetMime(path: string): string {
   return dot < 0 ? '' : MIME_BY_EXT[path.slice(dot + 1).toLowerCase()] || '';
 }
 
+// ── Page links ───────────────────────────────────────────────────────────────
+
+const NAV_PAGE_KEY = 'hb-page=';
+const NAV_FRAGMENT_KEY = 'hb-fragment=';
+// A page path is at most pathBytes UTF-8 bytes, so encoded at most 3x that; fragments get
+// the same allowance. Anything longer cannot come from compilePage.
+const NAV_HASH_MAX = 6 * HTML_BUNDLE_LIMITS.pathBytes + NAV_PAGE_KEY.length + NAV_FRAGMENT_KEY.length + 2;
+
+export type HtmlBundleNavTarget = { page: string; fragment: string };
+
+/**
+ * Fragment (without "#") that a link to another bundle page carries:
+ * `hb-page=<page>[&hb-fragment=<fragment>]`, both percent-encoded. Authored fragments are
+ * always written percent-encoded (`#hb-page=x` becomes `#hb-page%3Dx`), so an authored
+ * same-page link can never produce this form.
+ */
+export function htmlBundleNavHash(page: string, fragment = ''): string {
+  return `${NAV_PAGE_KEY}${encodeURIComponent(page)}${fragment ? `&${NAV_FRAGMENT_KEY}${encodeURIComponent(fragment)}` : ''}`;
+}
+
+/**
+ * Parse a frame `location.hash` written by a page link (see htmlBundleNavHash). Returns
+ * null for anything else: plain fragments, unknown or repeated keys, malformed
+ * percent-encoding, and page paths that are not a valid bundle HTML member path. The
+ * caller must still check the page exists in the bundle it is showing.
+ */
+export function parseHtmlBundleNavHash(hash: string): HtmlBundleNavTarget | null {
+  const raw = hash.startsWith('#') ? hash.slice(1) : hash;
+  if (!raw.startsWith(NAV_PAGE_KEY) || raw.length > NAV_HASH_MAX) return null;
+  const parts = raw.split('&');
+  if (parts.length > 2 || (parts.length === 2 && !parts[1].startsWith(NAV_FRAGMENT_KEY))) return null;
+  let page: string;
+  let fragment = '';
+  try {
+    page = decodeURIComponent(parts[0].slice(NAV_PAGE_KEY.length));
+    if (parts.length === 2) fragment = decodeURIComponent(parts[1].slice(NAV_FRAGMENT_KEY.length));
+  } catch {
+    return null;
+  }
+  if (validateMemberPath(page) || page.endsWith('/') || !isHtmlPath(page)) return null;
+  if (parts.length === 2 && !fragment) return null;
+  return { page, fragment };
+}
+
 // ── Page compilation ─────────────────────────────────────────────────────────
 
 export type CompiledPage = { html: string; missing: string[] };
@@ -617,7 +664,11 @@ export class HtmlBundleRenderer {
       return;
     }
     if (resolved.kind === 'local' && this.hasPage(resolved.path)) {
-      el.setAttribute('href', `about:srcdoc#${encodeURIComponent(resolved.fragment)}`);
+      // A link to this same page stays a plain fragment, which scrolls in place natively.
+      // data-hb-* is inert metadata; navigation reads only the href's fragment.
+      el.setAttribute('href', resolved.path === page
+        ? `about:srcdoc#${encodeURIComponent(resolved.fragment)}`
+        : `about:srcdoc#${htmlBundleNavHash(resolved.path, resolved.fragment)}`);
       el.setAttribute('data-hb-page', resolved.path);
       if (resolved.fragment) el.setAttribute('data-hb-fragment', resolved.fragment);
       else el.removeAttribute('data-hb-fragment');

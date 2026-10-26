@@ -77,14 +77,32 @@ rendering:
     (`unsafe` error).
   - A CSP meta allows only `blob:`/`data:` images and fonts plus inline styles.
 - **Navigation**:
-  - Fragment links are rewritten to `about:srcdoc#frag`. A bare `#frag` in a `srcdoc`
+  - Fragment links, and links to the page itself (`index.html#s2` on `index.html`), are
+    rewritten to `about:srcdoc#frag` and scroll natively. A bare `#frag` in a `srcdoc`
     document resolves against the *parent* URL and would navigate the frame away.
-  - Links to other pages carry `data-hb-page`. The host follows them and keeps the
-    page selector in sync.
+  - Links to other pages are rewritten to
+    `about:srcdoc#hb-page=<page>[&hb-fragment=<fragment>]`, both percent-encoded
+    (`htmlBundleNavHash`). Clicking, keyboard activation and `<area>` all navigate the
+    frame natively to that fragment. The viewer polls the frame's `location.hash` every
+    100 ms, parses it with `parseHtmlBundleNavHash`, and switches pages, keeping the page
+    selector in sync. `data-hb-page`/`data-hb-fragment` stay on the link as inert metadata.
+  - Why polling: WebKit (Safari, including iPad) never runs listeners the host registers
+    on a script-disabled frame (`click`, `pointerdown`, `hashchange`, `scroll`), so the
+    earlier host click handler did nothing there. See
+    `docs/investigations/html-bundle-navigation-diagnosis.md`.
+  - Route validation: only `hb-page=` plus an optional `hb-fragment=` is accepted, with
+    strict percent-decoding, a valid member path and an `.html`/`.htm` page that exists in
+    the bundle being shown. Anything else is ignored. Authored fragments are always
+    written encoded, so an authored `#hb-page=x` becomes `#hb-page%3Dx` and is only a
+    fragment.
+  - Lifecycle: the poll reads only the document loaded for the current page, and only
+    while the bundle is ready. A page switch, version change, close or vault lock stops
+    it reading the old document before the old renderer is released. Each page gets a
+    fresh iframe element, so a stale route in the page left behind is never re-read.
 - **Isolation**: the iframe uses `sandbox="allow-same-origin"` without `allow-scripts`,
   forms, popups or top navigation. Without script, the frame cannot reach the app's DOM,
-  storage or credentials. `allow-same-origin` exists only so the host can attach its link
-  handler. Never combine it with `allow-scripts`.
+  storage or credentials. `allow-same-origin` exists only so the host can read the
+  frame's location, scroll it and check its URL. Never combine it with `allow-scripts`.
 - **Backstop**: if a loaded frame is not a same-origin `about:srcdoc` document, the viewer
   remounts it on the current page and shows a warning.
 - **Lifecycle**: on close, version change and vault lock, the decrypted blob is dropped and
@@ -99,8 +117,25 @@ rendering:
   cleanup.
 - `tests/ui_artifact_bytes_vault_test.ts` with `tests/fixtures/artifact_binary_vault_v2.json`:
   a binary payload sealed by ham-ctl and opened byte-exact by the UI.
+- `tests/ui_html_bundle_test.ts` also covers page-link routes: round trips, invalid routes,
+  reserved-marker collisions, and the hrefs compiled for same-page, cross-page,
+  `<area>` and SVG links.
 - `tests/e2e/html_bundle/run.cjs`: Chromium (Electron) check of rendering, navigation and
   isolation:
   ```bash
   env -u LD_LIBRARY_PATH <nix electron>/bin/electron --ozone-platform=wayland tests/e2e/html_bundle/run.cjs
   ```
+- `tests/e2e/html_bundle/engines.cjs`: mounts the production `HtmlBundlePreview` in
+  Chromium, WebKit and Firefox through `playwright-core` and uses real clicks and keys
+  in the sandboxed frame. It checks Details/Back (repeated), same-page and cross-page
+  fragments, root links, keyboard Enter, `<area>`, the host page selector, reserved-marker
+  collisions, inert external links, poll cleanup on lock, version change and unmount, a
+  stale route across a version change, no scripts, and no requests beyond the host page.
+  On NixOS it finds `playwright-core` and the browsers in `/nix/store`; elsewhere set
+  `HB_PLAYWRIGHT_CORE`, `HB_CHROMIUM`, `HB_WEBKIT` and `HB_FIREFOX`. It is not part of
+  `npm test`.
+  ```bash
+  node tests/e2e/html_bundle/engines.cjs            # or: ... engines.cjs webkit
+  ```
+- **Limitation**: Playwright WebKit on Linux (WPE) shares WebCore with Safari, but it is
+  not iOS/iPadOS Safari. Page links on a real iPad must be confirmed by hand.

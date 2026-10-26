@@ -1,7 +1,9 @@
 # HTML bundle navigation report: diagnosis and correction plan (task_18e2091aa2499a48)
 
-Status: **diagnosis complete, correction plan proposed, waiting for plan approval.** No product
-code was changed. All probes and the prototype were built in a scratch directory outside the
+Status: **diagnosis complete; plan approved and implemented as approach A in
+task_18e20a349ba8ab15** (see `docs/html-bundle-artifacts.md` and
+`tests/e2e/html_bundle/engines.cjs`). The text below is the diagnosis as approved: no product
+code was changed by it. All probes and the prototype were built in a scratch directory outside the
 repo, from copies of the production files.
 
 Report: user message `msg_18e208abc55c86ac` says navigation links do not work in the deployed
