@@ -7,12 +7,17 @@
 # 3. Default OPTIONS readiness probe -> atomic replacement and cleanup
 # 4. PID-scoped stop leaves an unrelated bridge-like process alive
 # 5. Supervisor survives its service manager killing the bridge's process group
+# 6. --already-detached / HEIMDALL_UPDATE_SUPERVISOR_DETACHED=1 skips the setsid re-exec
+# 7. Without setsid(1) the supervisor warns and still updates
+# The supervisor runs with failing python3/perl stubs first on its PATH.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 SUPERVISOR="$REPO_ROOT/scripts/apply-bridge-update.sh"
+# Never inherit a live bridge's service or session settings from the caller.
+unset SERVICE_NAME HEIMDALL_BRIDGE_SERVICE_NAME BRIDGE_PID PTY_HOST_SOCKET HEIMDALL_UPDATE_SUPERVISOR_DETACHED PTY_PROCESS_READER
 
 [ -x "$SUPERVISOR" ] || { echo "FAIL: $SUPERVISOR is not executable" >&2; exit 1; }
 
@@ -31,6 +36,18 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# The supervisor must run without python3 or perl: on its PATH both are stubs
+# that record the call and fail. The harness itself still uses python3 ($PY)
+# for health servers and process-group setup.
+PY="$(command -v python3)"
+FORBIDDEN="$TMP_DIR/forbidden"
+mkdir -p "$TMP_DIR/nopy"
+for tool in python3 python perl; do
+  printf '#!/bin/sh\necho "$0 $*" >> "%s"\nexit 127\n' "$FORBIDDEN" > "$TMP_DIR/nopy/$tool"
+  chmod +x "$TMP_DIR/nopy/$tool"
+done
+SUP_PATH="$TMP_DIR/nopy:$PATH"
+
 TRUE_HOOK="$TMP_DIR/true-hook"
 cat > "$TRUE_HOOK" <<'HOOK'
 #!/usr/bin/env bash
@@ -44,7 +61,7 @@ echo "original-v1.0" > "$TMP_DIR/t1/data/bin/ham-bridge"
 echo "unresponsive-v2.0" > "$TMP_DIR/t1/stage/bin/ham-bridge"
 
 set +e
-"$SUPERVISOR" \
+PATH="$SUP_PATH" "$SUPERVISOR" \
   --data-dir "$TMP_DIR/t1/data" \
   --stage-dir "$TMP_DIR/t1/stage" \
   --bridge-port 58901 \
@@ -89,7 +106,7 @@ HOOK
 chmod +x "$CRASH_HOOK"
 
 set +e
-"$SUPERVISOR" \
+PATH="$SUP_PATH" "$SUPERVISOR" \
   --data-dir "$TMP_DIR/t2/data" \
   --stage-dir "$TMP_DIR/t2/stage" \
   --bridge-port 58902 \
@@ -150,7 +167,7 @@ mkdir -p "$TMP_DIR/t3/data/bin" "$TMP_DIR/t3/stage/bin"
 echo "old-v1.0" > "$TMP_DIR/t3/data/bin/ham-bridge"
 echo "verified-v2.0" > "$TMP_DIR/t3/stage/bin/ham-bridge"
 
-"$SUPERVISOR" \
+PATH="$SUP_PATH" "$SUPERVISOR" \
   --data-dir "$TMP_DIR/t3/data" \
   --stage-dir "$TMP_DIR/t3/stage" \
   --bridge-port "$T3_PORT" \
@@ -211,7 +228,7 @@ done
 [ -s "$T4_PORT_FILE" ] || { echo "FAIL: health server did not publish its port" >&2; exit 1; }
 T4_PORT="$(cat "$T4_PORT_FILE")"
 
-"$SUPERVISOR" \
+PATH="$SUP_PATH" "$SUPERVISOR" \
   --data-dir "$TMP_DIR/t4/data" \
   --stage-dir "$TMP_DIR/t4/stage" \
   --health-url "http://127.0.0.1:$T4_PORT/api/v1/health" \
@@ -268,7 +285,7 @@ run_group_kill_case() {
   echo "new-v2.0" > "$dir/stage/bin/ham-bridge"
   GROUP_FILE="$dir/pgid" RESTART_MARKER="$dir/restarted" \
     HEIMDALL_UPDATE_SUPERVISOR_DETACHED="$detached_env" \
-    python3 -c '
+    PATH="$SUP_PATH" "$PY" -c '
 import os, sys
 os.setpgid(0, 0)
 with open(os.environ["GROUP_FILE"], "w") as f: f.write(str(os.getpgrp()))
@@ -306,4 +323,64 @@ if [ -n "$(ls -A "$TMP_DIR/t5-control/data/bin" 2>/dev/null)" ] && [ "$(cat "$TM
 fi
 echo "PASS: Test 5 passed!"
 
+echo "=== Test 6: A caller that already detached the supervisor is not re-executed ==="
+# macOS has no setsid(1): the Bridge starts the supervisor in a new session
+# itself and says so. A setsid spy proves the supervisor does not re-exec.
+mkdir -p "$TMP_DIR/spy"
+REAL_SETSID="$(command -v setsid)"
+printf '#!/bin/sh\necho "$*" >> "%s"\nexec "%s" "$@"\n' "$TMP_DIR/setsid-calls" "$REAL_SETSID" > "$TMP_DIR/spy/setsid"
+chmod +x "$TMP_DIR/spy/setsid"
+run_plain_update() {
+  local dir="$1"; shift
+  mkdir -p "$dir/data/bin" "$dir/stage/bin"
+  echo "old-v1.0" > "$dir/data/bin/ham-bridge"
+  echo "new-v2.0" > "$dir/stage/bin/ham-bridge"
+  set +e
+  "$@" --data-dir "$dir/data" --stage-dir "$dir/stage" --bridge-port 58906 --health-timeout 1 \
+    --stop-hook "$TRUE_HOOK" --restart-hook "$TRUE_HOOK" >"$dir/out.log" 2>&1
+  RUN_EXIT=$?
+  set -e
+}
+for detach in flag env; do
+  rm -f "$TMP_DIR/setsid-calls"
+  if [ "$detach" = flag ]; then
+    run_plain_update "$TMP_DIR/t6-$detach" env PATH="$TMP_DIR/spy:$SUP_PATH" "$SUPERVISOR" --already-detached
+  else
+    run_plain_update "$TMP_DIR/t6-$detach" env PATH="$TMP_DIR/spy:$SUP_PATH" HEIMDALL_UPDATE_SUPERVISOR_DETACHED=1 "$SUPERVISOR"
+  fi
+  [ "$RUN_EXIT" -eq 1 ] || { echo "FAIL: ($detach) expected the rollback exit 1, got $RUN_EXIT" >&2; cat "$TMP_DIR/t6-$detach/out.log" >&2; exit 1; }
+  [ ! -e "$TMP_DIR/setsid-calls" ] || { echo "FAIL: ($detach) supervisor re-executed through setsid" >&2; exit 1; }
+  grep -q "SESSION:        detached" "$TMP_DIR/t6-$detach/out.log" || {
+    echo "FAIL: ($detach) supervisor did not report a detached session" >&2; cat "$TMP_DIR/t6-$detach/out.log" >&2; exit 1; }
+done
+# Control: without the signal the spy sees the re-exec.
+rm -f "$TMP_DIR/setsid-calls"
+run_plain_update "$TMP_DIR/t6-control" env PATH="$TMP_DIR/spy:$SUP_PATH" HEIMDALL_UPDATE_SUPERVISOR_DETACHED= "$SUPERVISOR"
+[ -s "$TMP_DIR/setsid-calls" ] || { echo "FAIL: control: supervisor did not re-exec through setsid" >&2; exit 1; }
+echo "PASS: Test 6 passed!"
+
+echo "=== Test 7: Without setsid(1) the supervisor warns and still updates ==="
+# A PATH of links to every tool except setsid (and python3/perl).
+FARM="$TMP_DIR/farm"
+mkdir -p "$FARM"
+IFS=: read -r -a path_dirs <<< "$PATH"
+for dir in "${path_dirs[@]}"; do
+  for tool in "$dir"/*; do
+    name="${tool##*/}"
+    case "$name" in setsid|python*|perl*) continue ;; esac
+    [ -x "$tool" ] && [ ! -e "$FARM/$name" ] && ln -s "$tool" "$FARM/$name" || true
+  done
+done
+run_plain_update "$TMP_DIR/t7" env PATH="$TMP_DIR/nopy:$FARM" HEIMDALL_UPDATE_SUPERVISOR_DETACHED= "$SUPERVISOR"
+[ "$RUN_EXIT" -eq 1 ] || { echo "FAIL: expected the rollback exit 1, got $RUN_EXIT" >&2; cat "$TMP_DIR/t7/out.log" >&2; exit 1; }
+grep -q "WARNING: setsid unavailable; cannot leave the bridge's process group" "$TMP_DIR/t7/out.log" || {
+  echo "FAIL: missing setsid warning" >&2; cat "$TMP_DIR/t7/out.log" >&2; exit 1; }
+[ "$(cat "$TMP_DIR/t7/data/bin/ham-bridge")" = "old-v1.0" ] || { echo "FAIL: rollback did not restore old-v1.0" >&2; exit 1; }
+echo "PASS: Test 7 passed!"
+
+if [ -e "$FORBIDDEN" ]; then
+  echo "FAIL: the supervisor ran python3/perl:" >&2
+  cat "$FORBIDDEN" >&2
+  exit 1
+fi
 echo "ALL SUPERVISOR TESTS PASSED SUCCESSFULLY!"
