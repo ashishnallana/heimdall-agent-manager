@@ -39,7 +39,8 @@ etag, found := httpc.header(resp, "etag")                      // case-insensiti
 
 - `Request`: `method`, `url` (from `parse_url`), `path` segments, `query`
   params, `headers`, `body`, `timeout_ms` (total budget, default 20 s),
-  `connect_timeout_ms`, `max_response_bytes` (default 256 MiB), `max_redirects`
+  `connect_timeout_ms`, `stall_timeout_ms` (abort after that long without a
+  byte moving; 0 = off), `max_response_bytes` (default 256 MiB), `max_redirects`
   (default 0: a 3xx is returned), `cancel` (atomic flag → `.Aborted`).
 - Bodies: `json_body(value)` (marshalled immediately with `core:encoding/json`),
   `form_body([]Form_Field)` (encoded with curl's escaping),
@@ -80,7 +81,9 @@ silently re-sends a request on a stale connection.
   `Accept-Encoding` = whatever libcurl decodes (gzip/deflate), chunked handled by
   libcurl, `Expect: 100-continue` disabled.
 - One cumulative deadline (`CURLOPT_TIMEOUT_MS`) over DNS, connect, TLS, send and
-  every read; a negative budget fails immediately without I/O.
+  every read; a negative budget fails immediately without I/O. Transfers of
+  unbounded size (ham-ctl, the bridge's agent relays, manager downloads) use
+  `LONG_TRANSFER_TIMEOUT_MS` plus `stall_timeout_ms` instead of a short total.
 - TLS peer and hostname verification always on.
 - Trust anchors: `HAM_TLS_CA_FILE` (that bundle only) > `SSL_CERT_FILE` /
   `SSL_CERT_DIR` > libcurl's default (system store; Schannel: Windows store).

@@ -705,3 +705,35 @@ headers_are_the_final_responses_only :: proc(t: ^testing.T) {
 	defer response_destroy(&r3)
 	testing.expect_value(t, e3, Error.Too_Large)
 }
+
+// ---- stall guard ---------------------------------------------------------------------
+
+// stall_timeout_ms bounds the time WITHOUT progress, not the transfer: a reply
+// trickling in is fine as long as bytes keep
+// moving, while a reply that stops is cut at about the stall window even though
+// the total budget is long.
+@(test)
+stall_timeout_cuts_stalls_but_not_slow_progress :: proc(t: ^testing.T) {
+	if !must_init(t) do return
+	// One server per case: the scripted server serves connections one at a time.
+	stalled := test_server_start({
+		// headers, then nothing for 4 s
+		{chunks = {"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nab", "cd"}, pause = 4 * time.Second},
+	})
+	defer test_server_stop(stalled)
+	steady := test_server_start({
+		// 5 bytes, one every 400 ms (2 s in all) against a 1 s stall window
+		{chunks = {"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\n", "a", "b", "c", "d", "e"}, pause = 400 * time.Millisecond},
+	})
+	defer test_server_stop(steady)
+	start := time.tick_now()
+	r1, e1 := send({method = .GET, url = test_server_url(stalled), timeout_ms = 60_000, stall_timeout_ms = 1000})
+	elapsed := time.tick_since(start)
+	testing.expect_value(t, e1, Error.Timeout)
+	testing.expect(t, r1.may_have_sent, "a stall after the request was sent may have reached the server")
+	response_destroy(&r1)
+	testing.expectf(t, elapsed < 3500 * time.Millisecond, "cut near the stall window, took %v", elapsed)
+	r2, e2 := send({method = .GET, url = test_server_url(steady), timeout_ms = 60_000, stall_timeout_ms = 1000})
+	defer response_destroy(&r2)
+	testing.expectf(t, e2 == .None && text(r2) == "abcde", "slow but steady reply: err=%v body=%q", e2, text(r2))
+}

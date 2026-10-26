@@ -45,6 +45,12 @@ MIN_CURL_VERSION_TEXT :: "7.80.0"
 MAX_RESPONSE_HEADER_BYTES :: 64 * 1024
 
 DEFAULT_TIMEOUT_MS :: 20_000
+// For transfers whose size is not bounded by a short budget (ham-ctl, the
+// bridge's agent relays, release downloads): a generous total plus a stall
+// guard (Request.stall_timeout_ms) restores the old client's "20 s without
+// progress" meaning instead of failing a large, healthy response at 20 s.
+LONG_TRANSFER_TIMEOUT_MS :: 10 * 60_000
+DEFAULT_STALL_TIMEOUT_MS :: 20_000
 // DEFAULT_MAX_RESPONSE_BYTES must stay well above the largest response a hub
 // legitimately returns: an artifact (content_service.ARTIFACT_MAX_BYTES, 50 MB)
 // comes back inside a JSON document, so escaping can grow it. The deleted
@@ -141,6 +147,10 @@ Request :: struct {
 	timeout_ms:         int,
 	// Connect phase budget (0 = the total budget).
 	connect_timeout_ms: int,
+	// Abort with .Timeout when no byte moves in either direction for this long
+	// (0 = off), including while waiting for the reply (checked by the progress
+	// callback, about once a second). Use with a long timeout_ms.
+	stall_timeout_ms:   int,
 	// Response body cap (0 = DEFAULT_MAX_RESPONSE_BYTES). Larger => .Too_Large.
 	max_response_bytes: int,
 	// 3xx redirects to follow (0 = none: a 3xx is returned as the response).

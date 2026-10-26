@@ -6,6 +6,7 @@ import "core:encoding/json"
 import "core:os"
 import "core:strings"
 import "core:sync"
+import "core:time"
 
 // send performs one request on a fresh libcurl easy handle (no connection reuse:
 // every request opens its own connection, as the old client did with
@@ -93,6 +94,11 @@ Transfer :: struct {
 	io_failed:      bool,
 	prereq_reached: bool,
 	cancel:         ^bool,
+	stall:          time.Duration, // 0 = no stall guard
+	last_progress:  time.Tick,
+	last_dl:        i64,
+	last_ul:        i64,
+	stalled:        bool,
 	status:         int,
 	headers:        [dynamic]Header, // the current (final) response's headers
 	header_bytes:   int,
@@ -222,7 +228,12 @@ perform :: proc(req: Request, t: ^Transfer) -> Error {
 	set_ok &= set_ptr(easy, CURLOPT_PREREQFUNCTION, rawptr(Curl_Prereq_Callback(prereq_cb)))
 	set_ok &= set_ptr(easy, CURLOPT_PREREQDATA, rawptr(t))
 	set_ok &= set_off(easy, CURLOPT_MAXFILESIZE_LARGE, i64(t.limit))
-	if req.cancel != nil {
+	t.stall = time.Duration(req.stall_timeout_ms) * time.Millisecond if req.stall_timeout_ms > 0 else 0
+	if req.cancel != nil || t.stall > 0 {
+		// The progress callback runs at least about once a second even when no
+		// byte moves. (CURLOPT_LOW_SPEED_* averages over a ~5 s window, so it
+		// would fire up to 5 s late.)
+		t.last_progress = time.tick_now()
 		set_ok &= set_long(easy, CURLOPT_NOPROGRESS, c.long(0))
 		set_ok &= set_ptr(easy, CURLOPT_XFERINFOFUNCTION, rawptr(Curl_Xferinfo_Callback(xferinfo_cb)))
 		set_ok &= set_ptr(easy, CURLOPT_XFERINFODATA, rawptr(t))
@@ -339,6 +350,7 @@ map_curl_error :: proc(rc: CURLcode, t: ^Transfer) -> Error {
 	case CURLE_TOO_MANY_REDIRECTS:
 		return .Too_Many_Redirects
 	case CURLE_ABORTED_BY_CALLBACK:
+		if t.stalled do return .Timeout
 		return .Aborted
 	case CURLE_UNSUPPORTED_PROTOCOL, CURLE_URL_MALFORMAT:
 		return .Invalid_Url
@@ -423,7 +435,18 @@ prereq_cb :: proc "c" (clientp: rawptr, conn_primary_ip, conn_local_ip: cstring,
 @(private)
 xferinfo_cb :: proc "c" (clientp: rawptr, dltotal, dlnow, ultotal, ulnow: i64) -> c.int {
 	t := (^Transfer)(clientp)
+	context = t.ctx
 	if t.cancel != nil && sync.atomic_load(t.cancel) do return 1
+	if t.stall > 0 {
+		now := time.tick_now()
+		if dlnow != t.last_dl || ulnow != t.last_ul {
+			t.last_dl, t.last_ul = dlnow, ulnow
+			t.last_progress = now
+		} else if time.tick_diff(t.last_progress, now) > t.stall {
+			t.stalled = true
+			return 1
+		}
+	}
 	return 0
 }
 
