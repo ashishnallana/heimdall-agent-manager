@@ -89,8 +89,9 @@ is_tchar :: proc(b: byte) -> bool {
 
 // json_body marshals `value` with core:encoding/json now (so the body never
 // aliases a caller temporary). Bytes are allocated with `allocator`.
-json_body :: proc(value: any, allocator := context.temp_allocator) -> Body {
-	data, err := json.marshal(value, allocator = allocator)
+// sort_keys orders map keys (json.Object / map[string]T) deterministically.
+json_body :: proc(value: any, allocator := context.temp_allocator, sort_keys := false) -> Body {
+	data, err := json.marshal(value, json.Marshal_Options{sort_maps_by_key = sort_keys}, allocator)
 	if err != nil do return Json_Body{failed = true}
 	return Json_Body{encoded = data}
 }

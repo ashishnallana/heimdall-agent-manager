@@ -9,6 +9,7 @@ import "core:testing"
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
 import platform "odin_test:hub/platform"
+import httpc "odin_test:lib/httpc"
 
 Fixture :: struct {
 	account: domain.Account_Billing,
@@ -55,7 +56,11 @@ fixture_apply :: proc(ctx: rawptr, event: domain.Billing_Event, now: string) -> 
 	fixture.applied = event
 	return {}
 }
-fixture_api :: proc(config: Config, method, path, body: string) -> (string, domain.Domain_Error) {
+fixture_api :: proc(config: Config, m: httpc.Method, segments: []string, request_body: httpc.Body) -> (string, domain.Domain_Error) {
+	method := httpc.method_name(m)
+	path, _ := httpc.build_target(segments, allocator = context.temp_allocator)
+	body := ""
+	if j, is_json := request_body.(httpc.Json_Body); is_json do body = string(j.encoded)
 	append(&fixture_paddle_calls, fmt.tprintf("%s %s", method, path))
 	if method == "GET" && path == "/transactions/txn_reserved" do return fixture_transaction_response, {}
 	if method == "POST" && path == "/transactions" {

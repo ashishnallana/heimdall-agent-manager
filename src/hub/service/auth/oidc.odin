@@ -11,7 +11,7 @@ import contracts "odin_test:contracts"
 import domain "odin_test:hub/domain"
 import platform "odin_test:hub/platform"
 import users "odin_test:hub/service/user"
-import http_client "odin_test:lib/http_client"
+import httpc "odin_test:lib/httpc"
 import vault "odin_test:lib/vault"
 
 // Bearer validation settings, all from Hub configuration (no provider is
@@ -94,12 +94,28 @@ oidc_log_rejected :: proc(stage: string) {
 oidc_http_get :: proc(url, token: string, allow_insecure_localhost := false) -> (body: string, status: int, transport_ok: bool) {
 	if !oidc_endpoint_allowed(url, allow_insecure_localhost) do return "", 0, false
 	fmt.printfln("ham-hub oidc_http_request method=GET target=%s authorization=%t", url, token != "")
-	headers := make([dynamic]http_client.Header, context.temp_allocator)
-	if token != "" do append(&headers, http_client.Header{"Authorization", strings.concatenate({"Bearer ", token}, context.temp_allocator)})
-	request_path := "/" if strings.has_suffix(url, "/") else ""
-	res, ok := http_client.request_with_headers_timeout("GET", url, request_path, "", headers[:], 5000, omit_default_port = true)
-	if !ok {
-		fmt.printfln("ham-hub oidc_http_rejected reason=request_failed")
+	endpoint, url_err := httpc.parse_url(url)
+	if url_err != .None {
+		fmt.printfln("ham-hub oidc_http_rejected reason=invalid_url")
+		return "", 0, false
+	}
+	auth: [1]httpc.Header
+	n_headers := 0
+	if token != "" {
+		auth[0] = httpc.bearer(token)
+		n_headers = 1
+	}
+	// The body is returned to the caller, which decodes it with the temp allocator.
+	res, err := httpc.send({
+		method = .GET, url = endpoint, headers = auth[:n_headers],
+		timeout_ms = 5000, max_response_bytes = OIDC_MAX_RESPONSE_BYTES,
+	}, context.temp_allocator)
+	if err == .Too_Large {
+		fmt.printfln("ham-hub oidc_http_rejected reason=body_too_large")
+		return "", 0, false
+	}
+	if err != .None {
+		fmt.printfln("ham-hub oidc_http_rejected reason=request_failed error=%s", httpc.error_string(err))
 		return "", 0, false
 	}
 	fmt.printfln("ham-hub oidc_http_response status=%d bytes=%d", res.status, len(res.body))
@@ -107,12 +123,10 @@ oidc_http_get :: proc(url, token: string, allow_insecure_localhost := false) -> 
 		fmt.printfln("ham-hub oidc_http_rejected reason=http_status status=%d", res.status)
 		return "", res.status, true
 	}
-	if len(res.body) > 1_048_576 {
-		fmt.printfln("ham-hub oidc_http_rejected reason=body_too_large")
-		return "", 0, false
-	}
-	return res.body, 200, true
+	return httpc.text(res), 200, true
 }
+// OIDC provider documents (JWKS, UserInfo, token responses) above this are refused.
+OIDC_MAX_RESPONSE_BYTES :: 1_048_576
 // oidc_outbound_acquire takes an outbound-request slot, failing fast past the
 // limit instead of queueing behind a slow provider. `reserved` (JWKS only) may
 // use the slot general requests cannot.

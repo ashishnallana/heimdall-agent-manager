@@ -1,7 +1,6 @@
 package billing
 
 import "core:encoding/json"
-import "core:fmt"
 import "core:strings"
 import "core:sync"
 import "core:time"
@@ -9,7 +8,7 @@ import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
 import platform "odin_test:hub/platform"
 import device_auth "odin_test:hub/service/device_auth"
-import http_client "odin_test:lib/http_client"
+import httpc "odin_test:lib/httpc"
 
 Config :: struct {
 	enforce_plan_limits: Maybe(bool),
@@ -29,7 +28,8 @@ Service :: struct {
 	repo: ^iface.Billing_Repository,
 	clock: ^platform.Clock,
 	config: Config,
-	request: proc(config: Config, method, path, body: string) -> (string, domain.Domain_Error),
+	// Paddle API seam: path segments under the API base, body as httpc.Body.
+	request: proc(config: Config, method: httpc.Method, path: []string, body: httpc.Body) -> (string, domain.Domain_Error),
 	// Optional seams; nil keeps production behavior (global metrics, OS CSPRNG).
 	metrics: ^Billing_Metrics,
 	new_reference: proc() -> (string, bool),
@@ -115,7 +115,7 @@ start_checkout :: proc(service: ^Service, user_id, offer_id: string) -> (Checkou
 		// Reuse the reserved transaction rather than creating a duplicate, but
 		// fetch its checkout URL so retries return the same complete contract.
 		if !valid_transaction_id(checkout.transaction_id) do return {}, domain.domain_error(.Conflict, "a checkout is already being prepared; retry shortly")
-		body, api_err := paddle_request(service, "GET", fmt.tprintf("/transactions/%s", checkout.transaction_id), "")
+		body, api_err := paddle_request(service, .GET, {"transactions", checkout.transaction_id}, nil)
 		if api_err.code != .None do return {}, api_err
 		return checkout_result(body, checkout.transaction_id)
 	}
@@ -125,9 +125,7 @@ start_checkout :: proc(service: ^Service, user_id, offer_id: string) -> (Checkou
 		customer_id: string `json:"customer_id,omitempty"`,
 		custom_data: struct {heimdall_checkout_reference: string},
 	}{items = {{price_id = selected.price_id, quantity = 1}}, collection_mode = "automatic", customer_id = account.customer_id, custom_data = {heimdall_checkout_reference = checkout.reference}}
-	encoded, encode_err := json.marshal(payload, allocator = context.temp_allocator)
-	if encode_err != nil do return {}, domain.domain_error(.Internal_Error, "could not encode checkout")
-	body, api_err := paddle_request(service, "POST", "/transactions", string(encoded))
+	body, api_err := paddle_request(service, .POST, {"transactions"}, httpc.json_body(payload))
 	// Keep failed/ambiguous reservations for 20 minutes: retrying immediately
 	// could duplicate a transaction Paddle created before a connection failed.
 	if api_err.code != .None do return {}, api_err
@@ -185,7 +183,7 @@ create_portal :: proc(service: ^Service, user_id: string) -> (Portal_Result, dom
 	account, err := service.repo.get_account(service.repo.ctx, user_id, platform.clock_now(service.clock))
 	if err.code != .None do return {}, err
 	if !strings.has_prefix(account.customer_id, "ctm_") do return {}, domain.domain_error(.Not_Found, "account has no billing customer")
-	body, api_err := paddle_request(service, "POST", fmt.tprintf("/customers/%s/portal-sessions", account.customer_id), "{}")
+	body, api_err := paddle_request(service, .POST, {"customers", account.customer_id, "portal-sessions"}, httpc.json_body(struct{}{}))
 	if api_err.code != .None do return {}, api_err
 	response: struct {data: struct {urls: struct {general: struct {overview: string}}}}
 	if json.unmarshal_string(body, &response, .JSON, context.temp_allocator) != nil do return {}, domain.domain_error(.Internal_Error, "Paddle returned an invalid portal response")
@@ -194,19 +192,24 @@ create_portal :: proc(service: ^Service, user_id: string) -> (Portal_Result, dom
 	return Portal_Result{url = url}, {}
 }
 
-paddle_request :: proc(service: ^Service, method, path, body: string) -> (string, domain.Domain_Error) {
+paddle_request :: proc(service: ^Service, method: httpc.Method, path: []string, body: httpc.Body) -> (string, domain.Domain_Error) {
 	request := service.request
 	if request == nil do request = request_paddle_api
 	return request(service.config, method, path, body)
 }
 
-request_paddle_api :: proc(config: Config, method, path, body: string) -> (string, domain.Domain_Error) {
-	base := "https://sandbox-api.paddle.com" if config.environment == "sandbox" else "https://api.paddle.com"
-	headers := []http_client.Header{{name = "Authorization", value = fmt.tprintf("Bearer %s", config.api_key)}}
-	response, ok := http_client.request_with_headers_timeout(method, base, path, body, headers, 15000, true)
-	if !ok do return "", domain.domain_error(.Internal_Error, "could not contact Paddle; retry later")
+PADDLE_API_BASE :: "https://api.paddle.com"
+PADDLE_SANDBOX_API_BASE :: "https://sandbox-api.paddle.com"
+
+// request_paddle_api returns the 2xx body (temp-allocated).
+request_paddle_api :: proc(config: Config, method: httpc.Method, path: []string, body: httpc.Body) -> (string, domain.Domain_Error) {
+	base, url_err := httpc.parse_url(PADDLE_SANDBOX_API_BASE if config.environment == "sandbox" else PADDLE_API_BASE)
+	if url_err != .None do return "", domain.domain_error(.Internal_Error, "could not contact Paddle; retry later")
+	headers := [1]httpc.Header{httpc.bearer(config.api_key)}
+	response, err := httpc.send({method = method, url = base, path = path, headers = headers[:], body = body, timeout_ms = 15000}, context.temp_allocator)
+	if err != .None do return "", domain.domain_error(.Internal_Error, "could not contact Paddle; retry later")
 	if response.status < 200 || response.status >= 300 do return "", domain.domain_error(.Internal_Error, "Paddle could not complete this request; check billing configuration")
-	return response.body, {}
+	return httpc.text(response), {}
 }
 
 // The subscription label survives cancellation, but the effective plan becomes

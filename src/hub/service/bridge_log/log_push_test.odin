@@ -4,6 +4,7 @@ import "core:strings"
 import "core:testing"
 import domain "odin_test:hub/domain"
 import project_service "odin_test:hub/service/project"
+import httpc "odin_test:lib/httpc"
 import metrics "odin_test:lib/metrics"
 
 @(private = "file")
@@ -15,10 +16,11 @@ Script :: struct {
 }
 
 @(private = "file")
-scripted_send :: proc(ctx: rawptr, base_url, path, body: string, timeout_ms: int) -> (int, bool) {
+scripted_send :: proc(ctx: rawptr, endpoint: httpc.Url, path: []string, body: httpc.Body, timeout_ms: int) -> (int, bool) {
 	s := (^Script)(ctx)
-	append(&s.bodies, strings.clone(body))
-	append(&s.paths, strings.clone(strings.concatenate({base_url, path}, context.temp_allocator)))
+	append(&s.bodies, strings.clone(string(body.(httpc.Json_Body).encoded)))
+	full, _ := httpc.build_url(endpoint, path)
+	append(&s.paths, full)
 	i := min(s.calls, len(s.statuses) - 1)
 	s.calls += 1
 	st := s.statuses[i]
@@ -49,17 +51,17 @@ test_bridge_log_push_format_is_loki_with_two_label_streams :: proc(t: ^testing.T
 		{bridge_id = "brg_2", ts_ms = 1_700_000_000_456, level = "warn", code = "hub_ws_closed", fields_json = `{"reason":"eof","duration_ms":250}`, count = 1},
 		{bridge_id = "brg_1", ts_ms = 1_700_000_000_789, level = "error", code = "other", fields_json = `{}`, count = 1},
 	}
-	body := loki_push_json(events[:], "1.2.3")
-	defer delete(body)
+	encoded := httpc.json_body(loki_push_payload(events[:], "1.2.3", context.temp_allocator), sort_keys = true)
+	body := string(encoded.(httpc.Json_Body).encoded)
 	testing.expect(t, strings.has_prefix(body, `{"streams":[{"stream":{"job":"heimdall-bridge","level":"warn"},"values":[`), body)
 	testing.expect_value(t, strings.count(body, `"stream":{`), 2)
 	// Labels are ONLY job + level: bridge_id/code/owner never appear as labels.
 	testing.expect(t, !strings.contains(body, `"stream":{"job":"heimdall-bridge","level":"warn","`), "no extra labels")
 	testing.expect(t, !strings.contains(body, "owner"), "owner is never shipped")
-	// Values: [ns, line, metadata].
-	testing.expect(t, strings.contains(body, `["1700000000456000000","Connection to the hub closed; reconnecting (reason: eof, after 250 ms)",{"bridge_id":"brg_2","code":"hub_ws_closed","class":"retriable","version":"1.2.3","count":"1","reason":"eof","duration_ms":"250"}]`), body)
-	testing.expect(t, strings.contains(body, `["1700000000123000000","Provider CLI is not installed or has no runnable command (provider: claude) (x2)",{"bridge_id":"brg_1","code":"provider_missing","class":"recoverable","version":"1.2.3","count":"2","provider":"claude"}]`), body)
-	testing.expect(t, strings.contains(body, `"code":"other","class":"fatal","version"`), body)
+	// Values: [ns, line, metadata] (metadata keys sorted by the marshaller).
+	testing.expect(t, strings.contains(body, `["1700000000456000000","Connection to the hub closed; reconnecting (reason: eof, after 250 ms)",{"bridge_id":"brg_2","class":"retriable","code":"hub_ws_closed","count":"1","duration_ms":"250","reason":"eof","version":"1.2.3"}]`), body)
+	testing.expect(t, strings.contains(body, `["1700000000123000000","Provider CLI is not installed or has no runnable command (provider: claude) (x2)",{"bridge_id":"brg_1","class":"recoverable","code":"provider_missing","count":"2","provider":"claude","version":"1.2.3"}]`), body)
+	testing.expect(t, strings.contains(body, `"class":"fatal","code":"other","count":"1","version"`), body)
 	testing.expect(t, strings.has_suffix(body, "]}]}"), body)
 }
 
@@ -73,6 +75,7 @@ test_bridge_log_push_retries_5xx_once_and_never_4xx :: proc(t: ^testing.T) {
 	ok_s := Script{statuses = {204}}
 	defer script_free(&ok_s)
 	c := client_for(&ok_s)
+	defer push_client_destroy(&c)
 	push_sink(rawptr(&c), events[:])
 	testing.expect_value(t, ok_s.calls, 1)
 	testing.expect_value(t, c.failures, 0)
@@ -82,6 +85,7 @@ test_bridge_log_push_retries_5xx_once_and_never_4xx :: proc(t: ^testing.T) {
 	bad := Script{statuses = {400}}
 	defer script_free(&bad)
 	c2 := client_for(&bad)
+	defer push_client_destroy(&c2)
 	push_sink(rawptr(&c2), events[:])
 	testing.expect_value(t, bad.calls, 1)
 	testing.expect_value(t, c2.failures, 1)
@@ -90,6 +94,7 @@ test_bridge_log_push_retries_5xx_once_and_never_4xx :: proc(t: ^testing.T) {
 	flaky := Script{statuses = {503, 204}}
 	defer script_free(&flaky)
 	c3 := client_for(&flaky)
+	defer push_client_destroy(&c3)
 	push_sink(rawptr(&c3), events[:])
 	testing.expect_value(t, flaky.calls, 2)
 	testing.expect_value(t, c3.failures, 0)
@@ -98,6 +103,7 @@ test_bridge_log_push_retries_5xx_once_and_never_4xx :: proc(t: ^testing.T) {
 	dead := Script{statuses = {0, 0, 0}}
 	defer script_free(&dead)
 	c4 := client_for(&dead)
+	defer push_client_destroy(&c4)
 	push_sink(rawptr(&c4), events[:])
 	testing.expect_value(t, dead.calls, 2)
 	testing.expect_value(t, c4.failures, 1)
@@ -106,8 +112,10 @@ test_bridge_log_push_retries_5xx_once_and_never_4xx :: proc(t: ^testing.T) {
 
 	// Empty batch / unconfigured client: no call at all.
 	c5 := client_for(&dead)
+	defer push_client_destroy(&c5)
 	push_sink(rawptr(&c5), nil)
 	c6 := client_for(&dead)
+	defer push_client_destroy(&c6)
 	c6.base_url = ""
 	push_sink(rawptr(&c6), events[:])
 	testing.expect_value(t, dead.calls, 2)
@@ -119,6 +127,7 @@ test_bridge_log_push_retries_5xx_once_and_never_4xx :: proc(t: ^testing.T) {
 @(test)
 test_bridge_log_push_client_from_url_strips_trailing_slash :: proc(t: ^testing.T) {
 	c := new_push_client("  http://127.0.0.1:9428///  ")
+	defer push_client_destroy(&c)
 	testing.expect_value(t, c.base_url, "http://127.0.0.1:9428")
 	testing.expect_value(t, c.timeout_ms, PUSH_TIMEOUT_MS)
 	testing.expect(t, c.send != nil, "default sender installed")
