@@ -501,8 +501,12 @@ if me=='sv-enable':
     def test_persisted_enrollment_command(self):
         name='heimdall-bridge-localhost-8080'
         self.run_install('--hub','http://localhost:8080')
-        subprocess.run([str(self.state(name)/'enroll.sh')],env=self.env,check=True,stdout=subprocess.PIPE)
-        self.assertTrue((self.state(name)/'bridge-token').exists())
+        # A legacy credential makes enroll log; enroll.sh carries the helpers log
+        # and fail call (it died with 127 on ui_clear_line before).
+        (self.state(name)/'bridge-token').write_text('legacy\n')
+        r=subprocess.run([str(self.state(name)/'enroll.sh')],env=self.env,check=True,stdout=subprocess.PIPE,text=True)
+        self.assertIn('[INFO] Moved legacy credential aside: ',r.stdout)
+        self.assertEqual((self.state(name)/'bridge-token').read_text(),'credential\n')
         self.assertEqual(self.commands()[-1],['systemctl','--user','restart',name])
 
     def test_macos_plist_and_enrollment(self):
@@ -553,8 +557,18 @@ if me=='sv-enable':
         self.assertRegex(out,'\r  [⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] Checking Hub http://localhost:8080 \\(up to 20s\\)  [0-9]+s\x1b\\[K')
         self.assertIn('\r\x1b[K\x1b[32m[OK]\x1b[0m Hub reachable: HTTP 302 after ',out)
         self.assertIn('\x1b[2m[INFO]\x1b[0m ',out)
-        self.assertIn('\x1b[1m── 6 / 6 · Ready ──\x1b[0m',out)
+        self.assertIn('\x1b[1;36m[9/9] \x1b[0m\x1b[1mReady\x1b[0m',out)
         self.assertRegex(out,'\x1b\\[32m\\[OK\\]\x1b\\[0m Verifying and unpacking heimdall-local-linux-amd64-vtest.tar.gz \\([0-9]+s\\)')
+        # Boxed banner: accent (cyan) UTF-8 border, bold title, dim details.
+        self.assertIn('\x1b[36m╭',out)
+        self.assertIn('\x1b[1mHeimdall Bridge Installer',out)
+        self.assertIn('\x1b[2mVersion  latest release',out)
+        self.assertIn('\x1b[2mHub      http://localhost:8080',out)
+        self.assertNotIn('Profile  ',out)
+        # The readiness wait (8s here) is slow enough to always draw; the plain
+        # test covers the start/done lines of the faster spinner sections.
+        self.assertRegex(out,'\r  [⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] Checking that heimdall-bridge-localhost-8080 stays up \\(8s\\)  [0-9]+s\x1b\\[K')
+        self.assertIn('\r\x1b[K\x1b[32m[OK]\x1b[0m Service active: heimdall-bridge-localhost-8080',out)
         # A non-UTF-8 locale gets ASCII frames.
         env.update(LANG='C',MOCK_HUB_DELAY='0.8')
         status,out=self.run_terminal(['bash','-c',self.install_script()+'main "$@"','installer','--hub','http://localhost:8080','--keep-enrollment'],env)
@@ -595,6 +609,27 @@ if me=='sv-enable':
         self.assertIn('[INFO] Verifying and unpacking heimdall-local-linux-amd64-vtest.tar.gz\n',out)
         self.assertRegex(out,'\\[OK\\] Verifying and unpacking heimdall-local-linux-amd64-vtest.tar.gz \\([0-9]+s\\)\n')
         self.assertIn('[INFO] Fetching SHA256SUMS\n',out)
+        # Plain banner and the nine numbered steps, in order.
+        self.assertTrue(out.startswith('\nHeimdall Bridge Installer - Your agents, connected locally\n'
+                                       '  Version  latest release\n  Hub      http://localhost:8080\n'),out)
+        steps=['Hub & platform','Hub check','Resolve release','Download & verify','Bridge preflight',
+               'Replace service','Ports & routing','Register & enroll','Ready']
+        at=[out.index(f'\n[{i}/9] {title}\n') for i,title in enumerate(steps,1)]
+        self.assertEqual(at,sorted(at),out)
+        # Every slow section has a start line and a done line.
+        for label in ('Checking the downloaded ham-bridge against http://localhost:8080',
+                      'Registering heimdall-bridge-localhost-8080 with systemd',
+                      'Checking that heimdall-bridge-localhost-8080 stays up (8s)'):
+            self.assertIn('[INFO] '+label+'\n',out)
+        self.assertRegex(out,'\\[INFO\\] Caching heimdall-local-linux-amd64-vtest.tar.gz\n\\[OK\\] Caching heimdall-local-linux-amd64-vtest.tar.gz \\([0-9]+s\\)\n')
+        self.assertIn('[OK] ham-bridge 0.3.36 reaches the Hub through its own HTTPS client\n'
+                      '  probe-hub OK: http://localhost:8080/api/v1/health -> HTTP 200 via socat\n',out)
+        self.assertIn('[OK] Service active: heimdall-bridge-localhost-8080\n',out)
+        self.assertIn('[OK] Heimdall Bridge vtest is ready for http://localhost:8080\n',out)
+        # A replaced service is stopped under its own start/done lines.
+        out=self.run_install('--hub','http://localhost:8080','--keep-enrollment')
+        self.assertIn('[INFO] Stopping heimdall-bridge-localhost-8080\n[OK] Removed service heimdall-bridge-localhost-8080\n',out)
+        self.assertIn('[INFO] Checking cached heimdall-local-linux-amd64-vtest.tar.gz\n[OK] Using cached ',out)
         command=['bash','-c',self.install_script()+'main "$@"','installer','--hub','http://localhost:8080','--keep-enrollment']
         # A terminal with NO_COLOR: the spinner stays, colour goes.
         status,out=self.run_terminal(command,dict(self.env,NO_COLOR='1',TERM='xterm',MOCK_HUB_DELAY='0.8'))
@@ -613,6 +648,9 @@ if me=='sv-enable':
         self.run_install('--hub',hub)
         out=self.run_install('--hub',hub,'--name','alice')
         self.assertIn('Service: '+base+'_alice (',out); self.assertIn('Profile: alice',out)
+        # The profile is named in the banner and in the final summary.
+        self.assertIn('\n  Hub      '+hub+'\n  Profile  alice\n',out)
+        self.assertIn('[OK] Heimdall Bridge vtest is ready for '+hub+' (profile alice)\n',out)
         self.env['HEIMDALL_BRIDGE_NAME']='bob'
         self.run_install('--hub',hub)
         del self.env['HEIMDALL_BRIDGE_NAME']

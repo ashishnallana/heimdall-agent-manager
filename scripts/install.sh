@@ -36,9 +36,42 @@ log() {
   if ui_colour 1; then printf '\033[%sm[%s]\033[0m %s\n' "$c" "$1" "$2"
   else printf '[%s] %s\n' "$1" "$2"; fi
 }
+STEP_TOTAL=9
+# step N TITLE: the "[N/9] TITLE" heading of one of main's steps; an empty N
+# prints TITLE alone (the dry-run plan).
 step() {
+  local n="${1:+[$1/$STEP_TOTAL] }"
   ui_clear_line 1
-  if ui_colour 1; then printf '\n\033[1m── %s ──\033[0m\n' "$*"; else printf '\n── %s ──\n' "$*"; fi
+  if ui_colour 1; then printf '\n\033[1;36m%s\033[0m\033[1m%s\033[0m\n' "$n" "$2"; else printf '\n%s%s\n' "$n" "$2"; fi
+}
+# banner VERSION HUB PROFILE: a box with an accent border on a colour terminal
+# (ASCII corners outside UTF-8 locales); plain lines otherwise. Content stays
+# ASCII so ${#line} is its display width in any locale.
+banner() {
+  local title='Heimdall Bridge Installer' tagline='Your agents, connected locally'
+  local -a info=("Version  ${1:-latest release}" "Hub      ${2:-asked below}")
+  [ -z "$3" ] || info[${#info[@]}]="Profile  $3"
+  if ! ui_colour 1; then
+    printf '\n%s - %s\n' "$title" "$tagline"
+    printf '  %s\n' "${info[@]}"
+    return 0
+  fi
+  local line i width=${#tagline} tl='+' tr='+' bl='+' br='+' h='-' v='|' rule=''
+  for line in "${info[@]}"; do [ "${#line}" -le "$width" ] || width=${#line}; done
+  case "${LC_ALL:-${LC_CTYPE:-${LANG:-}}}" in
+    *[Uu][Tt][Ff]-8*|*[Uu][Tt][Ff]8*) tl='╭' tr='╮' bl='╰' br='╯' h='─' v='│' ;;
+  esac
+  # Count, not ${#rule}: without an installed UTF-8 locale bash counts bytes.
+  for ((i = 0; i < width + 4; i++)); do rule="$rule$h"; done
+  # Accent (cyan) border; bold title, dim tagline and details.
+  printf '\n\033[36m%s%s%s\033[0m\n' "$tl" "$rule" "$tr"
+  printf '\033[36m%s\033[0m  \033[1m%-*s\033[0m  \033[36m%s\033[0m\n' "$v" "$width" "$title" "$v"
+  printf '\033[36m%s\033[0m  \033[2m%-*s\033[0m  \033[36m%s\033[0m\n' "$v" "$width" "$tagline" "$v"
+  printf '\033[36m%s\033[0m  %-*s  \033[36m%s\033[0m\n' "$v" "$width" '' "$v"
+  for line in "${info[@]}"; do
+    printf '\033[36m%s\033[0m  \033[2m%-*s\033[0m  \033[36m%s\033[0m\n' "$v" "$width" "$line" "$v"
+  done
+  printf '\033[36m%s%s%s\033[0m\n' "$bl" "$rule" "$br"
 }
 # Stops any spinner first, showing the failing step's stderr, then exits the shell.
 fail() {
@@ -791,6 +824,7 @@ enroll() {
 remove_service() {
   local file="$1" name="$2"
   [ -e "$file" ] || return 0
+  spin_start "Stopping $name"
   case "$svc" in
     systemd)
       # Require a reachable user manager before replacing a running installation.
@@ -809,7 +843,7 @@ remove_service() {
       sv down "${file%/run}" >/dev/null 2>&1 || true
       rm -rf "${file%/run}" ;;
   esac
-  log OK "Removed service $name"
+  spin_stop OK "Removed service $name"
 }
 main() {
   set -euo pipefail
@@ -836,8 +870,8 @@ main() {
   [ "${DEBIAN_FRONTEND:-}" != noninteractive ] || noninteractive=true
   [ -z "$profile" ] || valid_profile "$profile" ||
     fail "Invalid profile name '$profile' (--name/HEIMDALL_BRIDGE_NAME): use 1-31 lower-case letters, digits or '-', starting with a letter or digit."
-  printf '\n╭──────────────────────────────────────────╮\n│         HEIMDALL · BRIDGE INSTALLER       │\n│        Your agents, connected locally     │\n╰──────────────────────────────────────────╯\n'
-  step '1 / 6 · Hub and platform'
+  banner "$version" "$hub_url" "$profile"
+  step 1 'Hub & platform'
   if [ -z "$hub_url" ]; then
     "$noninteractive" && fail '--hub is required in non-interactive mode.'
     prompt 'Hub URL: ' || fail 'No terminal available. Pass --hub URL.'
@@ -929,14 +963,15 @@ main() {
     fi
   elif ! "$existing"; then enrollment=yes
   fi
-  step '2 / 6 · Preflight and verified release'
   if "$dry_run"; then
+    step '' 'Dry-run plan'
     log PLAN "Replace $service_file ($svc); enrollment=$enrollment$("$new_bridge" && printf ' (new bridge)'); matching legacy migration=$migrate"
     [ "$svc" != runit ] || log PLAN "Create runit service $runit_dir (run, log/run) and sv-enable ham-bridge."
     log PLAN 'Choose two free loopback ports; create a per-Hub ham-ctl wrapper and service.'
     log PLAN "Download heimdall-local-$target-${version:-LATEST}.tar.gz${fallback_target:+ (or heimdall-local-$fallback_target if the release has none)} and verify SHA256SUMS."
     return
   fi
+  step 2 'Hub check'
   command -v curl >/dev/null || fail 'curl is required.'
   command -v tar >/dev/null || fail 'tar is required.'
   command -v sha256sum >/dev/null || command -v shasum >/dev/null || fail 'sha256sum (coreutils) or shasum is required.'
@@ -953,6 +988,7 @@ main() {
   work_dir="$(mktemp -d "${TMPDIR:-/tmp}/heimdall-install.XXXXXX")"
   trap "$(printf 'rm -rf %q; rmdir %q' "$work_dir" "$lock_dir")" EXIT
   wait_for_hub
+  step 3 'Resolve release'
   if [ -z "$version" ]; then
     # Releases start as prereleases (candidates on the canary hub) and are promoted
     # later; without --version, resolve only promoted releases. A hub's own
@@ -967,7 +1003,7 @@ main() {
   fi
   [[ "$version" =~ ^[a-zA-Z0-9._-]+$ ]] || fail 'Invalid release tag.'
   local archive="heimdall-local-$target-$version.tar.gz" base="https://github.com/tanmayv/heimdall-agent-manager/releases/download/$version"
-  log INFO "Downloading $version"
+  log INFO "Release: $version"
   # SHA256SUMS first: it lists every bundle of the release, so it also tells
   # whether this release ships the preferred (Termux) bundle at all.
   download "$base/SHA256SUMS" "$work_dir/SHA256SUMS"
@@ -975,27 +1011,36 @@ main() {
     log WARN "Release $version has no $target bundle; installing heimdall-local-$fallback_target instead. Its glibc binaries are killed by Android's seccomp at start-up (set_robust_list); Termux bundles ship from v0.3.29 -- re-run without --version or pass a newer one."
     archive="heimdall-local-$fallback_target-$version.tar.gz"
   fi
+  step 4 'Download & verify'
   # Reuse a previously verified tarball of this exact release when its SHA-256
   # still matches the release's SHA256SUMS; otherwise download (with a progress
   # bar on a terminal). The cache only ever holds GitHub-release bundles.
-  local cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/heimdall/releases"
+  local cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/heimdall/releases" cached=false
   mkdir -p "$cache_dir"; chmod 700 "$cache_dir"
-  if [ -f "$cache_dir/$archive" ] && sha256_matches "$work_dir/SHA256SUMS" "$cache_dir/$archive" "$archive"
-  then
-    cp "$cache_dir/$archive" "$work_dir/$archive"
-    log OK "Using cached $archive (SHA-256 matches release $version; no download)"
-  else
+  if [ -f "$cache_dir/$archive" ]; then
+    spin_start "Checking cached $archive"
+    if sha256_matches "$work_dir/SHA256SUMS" "$cache_dir/$archive" "$archive"; then
+      cp "$cache_dir/$archive" "$work_dir/$archive"
+      cached=true
+      spin_stop OK "Using cached $archive (SHA-256 matches release $version; no download)"
+    else
+      spin_stop INFO "Cached $archive does not match release $version; downloading it again"
+    fi
+  fi
+  if ! "$cached"; then
+    log INFO "Downloading $archive"
     download_progress "$base/$archive" "$work_dir/$archive"
   fi
   extract_bundle "$work_dir" "$archive"
-  log OK 'Release checksum and bundle verified'
+  step 5 'Bridge preflight'
   # Preflight through the BRIDGE's own HTTPS client (its static libcurl),
   # before any service is replaced: the curl CLI reaching the Hub says nothing
   # about whether this binary can.
   chmod 700 "$work_dir/ham-bridge"
   # --probe-hub exists from 0.3.36; an older bridge ignores unknown flags and
   # would start as a daemon in the foreground, so gate on the binary's version.
-  local bridge_version version_out
+  local bridge_version version_out probe_out
+  spin_start "Checking the downloaded ham-bridge against $hub_url"
   if ! version_out="$("$work_dir/ham-bridge" --version 2>&1)"; then
     fail "The downloaded ham-bridge does not start on this machine: ${version_out:-no output}. Check that the release target ($target) matches this machine. Nothing was replaced."
   fi
@@ -1004,28 +1049,38 @@ main() {
   # print a loader warning first.
   bridge_version="$(printf '%s\n' "$version_out" | awk '$1 == "ham-bridge" {print $2; exit}')"
   if [ -n "$bridge_version" ] && [ "$(printf '%s\n0.3.36\n' "$bridge_version" | sort -V | head -n1)" = "0.3.36" ]; then
-    if ! "$work_dir/ham-bridge" --probe-hub "$hub_url"; then
+    # Captured: stdout would break the spinner line. On failure it goes to
+    # stderr, which fail shows under the error.
+    if ! probe_out="$("$work_dir/ham-bridge" --probe-hub "$hub_url" 2>&1)"; then
+      printf '%s\n' "$probe_out" >&2
       fail "The downloaded ham-bridge cannot reach $hub_url through its own HTTPS client (its static libcurl; the probe output names the TLS library and CA bundle it used) although the curl CLI could. Check TLS trust (HAM_TLS_CA_FILE / SSL_CERT_FILE) and the probe output above. Nothing was replaced."
     fi
+    spin_stop OK "ham-bridge $bridge_version reaches the Hub through its own HTTPS client"
+    [ -z "$probe_out" ] || printf '%s\n' "$probe_out" | sed 's/^/  /'
   else
-    log INFO "Bridge ${bridge_version:-unknown} predates --probe-hub (0.3.36); transport preflight skipped."
+    spin_stop INFO "Bridge ${bridge_version:-unknown} predates --probe-hub (0.3.36); transport preflight skipped."
   fi
   # Keep the verified bundle for next time; drop older versions of this target.
+  spin_start "Caching $archive"
   cp "$work_dir/$archive" "$cache_dir/$archive.tmp" && mv -f "$cache_dir/$archive.tmp" "$cache_dir/$archive"
   local old cache_prefix="${archive%-"$version".tar.gz}"
   for old in "$cache_dir/$cache_prefix"-*.tar.gz; do
     [ "$old" = "$cache_dir/$archive" ] || rm -f "$old"
   done
+  spin_stop
   # Validate and copy the full new generation before stopping a service.
   local extension_transaction=""
   if [ -d "$work_dir/share/heimdall/extensions" ]; then
     source "$work_dir/refresh-provider-extensions.sh"
     mkdir -p "$data_dir"
     extension_transaction="$(mktemp -d "$data_dir/.extensions-install.XXXXXX")"
+    # Set before spin_start, which chains whatever EXIT trap is current.
     trap "$(printf 'cleanup_provider_extension_transaction %q %q; rm -rf %q; rmdir %q' "$extension_transaction" "$data_dir/extensions" "$work_dir" "$lock_dir")" EXIT
+    spin_start 'Preparing provider extensions'
     prepare_provider_extensions "$work_dir/share/heimdall/extensions" "$data_dir/extensions" "$extension_transaction/new"
+    spin_stop
   fi
-  step '3 / 6 · Replace this Hub’s service'
+  step 6 'Replace service'
   remove_service "$service_file" "$service_name"
   if "$migrate"; then remove_service "$legacy_file" "$legacy_name"; fi
   mkdir -p "$state_dir" "$bin_dir" "$run_dir" "$log_dir" "$(dirname "$service_file")"
@@ -1052,7 +1107,7 @@ main() {
   printf '%s\n' "$hub_url" > "$state_dir/hub-url"
   [ -z "$profile" ] || printf '%s\n' "$profile" > "$state_dir/profile"
   [ ! -d "$bin_dir" ] || chmod 700 "$bin_dir"
-  step '4 / 6 · Ports and ham-ctl routing'
+  step 7 'Ports & routing'
   local ports bridge_port endpoint_port
   ports="$(allocate_ports "$state_root" "$state_dir")"
   bridge_port="${ports% *}"; endpoint_port="${ports#* }"
@@ -1072,14 +1127,14 @@ main() {
   # Persist a usable enrollment command even when the installer came from stdin.
   {
     printf '#!/usr/bin/env bash\nset -euo pipefail\n'
-    declare -f log fail sh_quote write_enroll_shim enroll
+    declare -f ui_init ui_colour ui_clear_line log spin_stop fail sh_quote write_enroll_shim enroll
     for file in state_dir bin_dir service_name uid token_file hub_url data_dir bridge_port endpoint_port run_dir; do
       printf '%s=%q\n' "$file" "${!file}"
     done
     printf 'enroll "$@"\n'
   } > "$state_dir/enroll.sh"
   chmod 700 "$state_dir/enroll.sh"
-  step '5 / 6 · Register service and enrollment'
+  step 8 'Register & enroll'
   # Start the service now only when no enrollment runs in this invocation: a
   # running bridge holds the config and `ham-bridge enroll` refuses to proceed.
   # Enrollment restarts the service itself; the block after it covers exit 3.
@@ -1087,12 +1142,16 @@ main() {
   [ "$enrollment" != yes ] || "$noninteractive" || enroll_now=true
   case "$svc" in
     systemd)
+      spin_start "Registering $service_name with systemd"
       systemctl --user daemon-reload
       if "$enroll_now"; then systemctl --user enable "$service_name"
-      else systemctl --user enable --now "$service_name"; fi ;;
+      else systemctl --user enable --now "$service_name"; fi
+      spin_stop ;;
     launchd)
+      spin_start "Registering LaunchAgent $service_name"
       plutil -lint "$service_file" >/dev/null
-      "$enroll_now" || launchctl bootstrap "gui/$uid" "$service_file" ;;
+      "$enroll_now" || launchctl bootstrap "gui/$uid" "$service_file"
+      spin_stop ;;
     runit)
       # Give runsvdir (5 s scan) time to attach a runsv before anything uses
       # `sv` on this directory. The service itself stays DOWN until enrollment
@@ -1100,8 +1159,11 @@ main() {
       # enabled service would connect the moment the token file appears and the
       # Hub would drop the enrolling process mid vault delivery.
       local waited=0
-      until [ -d "$runit_dir/supervise" ] || [ "$waited" -ge "${HEIMDALL_RUNSV_WAIT:-10}" ]; do waited=$((waited+1)); sleep 1; done ;;
+      spin_start "Waiting for runsvdir to supervise ham-bridge (up to ${HEIMDALL_RUNSV_WAIT:-10}s)"
+      until [ -d "$runit_dir/supervise" ] || [ "$waited" -ge "${HEIMDALL_RUNSV_WAIT:-10}" ]; do waited=$((waited+1)); sleep 1; done
+      spin_stop ;;
   esac
+  # Enrollment is interactive (browser approval), so it never runs under a spinner.
   if [ "$enrollment" = yes ]; then
     if "$noninteractive"; then
       log INFO 'Service installed; browser-approved enrollment is pending.'
@@ -1111,26 +1173,31 @@ main() {
     else enroll; log OK 'Browser-approved enrollment complete'; fi
   else log OK 'Existing enrollment preserved'; fi
   if "$enroll_now"; then
+    spin_start "Starting $service_name"
     case "$svc" in
       systemd) systemctl --user start "$service_name" ;;
       launchd) launchctl print "gui/$uid/$service_name" >/dev/null 2>&1 || launchctl bootstrap "gui/$uid" "$service_file" ;;
     esac
+    spin_stop
   fi
   if [ "$svc" = runit ]; then
     # Enable only now (after enrollment, or at once when none runs): removes the
     # down file for future boots and starts the service if enrollment did not.
+    spin_start 'Starting runit service ham-bridge (up to 15s)'
     if command -v sv-enable >/dev/null; then sv-enable ham-bridge
     else rm -f "$runit_dir/down"; sv up "$runit_dir"; fi
     local tries=0
     until sv status "$runit_dir" 2>/dev/null | grep -q '^run:'; do
       tries=$((tries+1)); [ "$tries" -lt 15 ] || break; sleep 1
     done
+    spin_stop
   fi
-  step '6 / 6 · Ready'
+  step 9 'Ready'
   case "$svc" in
     systemd)
       # is-active also holds between Restart= attempts; watch for a crash loop.
       local restarts tries=0
+      spin_start "Checking that $service_name stays up (${HEIMDALL_READY_WAIT:-8}s)"
       restarts="$(systemctl --user show -p NRestarts --value "$service_name" 2>/dev/null || echo 0)"
       until [ "$tries" -ge "${HEIMDALL_READY_WAIT:-8}" ]; do
         sleep 1; tries=$((tries+1))
@@ -1138,10 +1205,11 @@ main() {
         [ "$(systemctl --user show -p NRestarts --value "$service_name" 2>/dev/null || echo 0)" = "$restarts" ] || break
       done
       if [ "$tries" -lt "${HEIMDALL_READY_WAIT:-8}" ]; then
+        # On a terminal this lands in the step's held stderr, which fail shows.
         journalctl --user -u "$service_name" -n 6 --no-pager -o cat >&2 2>/dev/null || true
         fail "Service is not staying up. Inspect: journalctl --user -u $service_name (re-enroll: re-run with --re-enroll)"
       fi
-      log OK "Service active: $service_name"
+      spin_stop OK "Service active: $service_name"
       log INFO "Logs: journalctl --user -u $service_name -f" ;;
     launchd)
       launchctl print "gui/$uid/$service_name" >/dev/null || fail 'LaunchAgent registration failed.'
@@ -1153,6 +1221,8 @@ main() {
       log INFO "Logs: $PREFIX/var/log/sv/ham-bridge/current (sv status ham-bridge)" ;;
   esac
   log INFO "Hub-specific CLI: $bin_dir/ham-ctl-$service_name"
+  [ -z "$profile" ] || log INFO "Profile: $profile (pass --name $profile to --re-enroll or --uninstall this bridge)"
+  log OK "Heimdall Bridge $version is ready for $hub_url${profile:+ (profile $profile)}"
   if [ -n "$extension_transaction" ]; then
     cleanup_provider_extension_transaction "$extension_transaction" "$data_dir/extensions"
   fi
