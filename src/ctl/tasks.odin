@@ -5,7 +5,7 @@ import "core:fmt"
 import "core:os"
 import "core:strconv"
 import "core:strings"
-import http "odin_test:lib/http_client"
+import httpc "odin_test:lib/httpc"
 
 // Task_Brief_Wire is the Task System v2 brief object carried under `brief` on
 // every task read. Only the fields ham-ctl renders are typed; the hub stores the
@@ -93,6 +93,8 @@ Ctl_Transport :: struct {
 	user_token: string,
 	agent_endpoint: string,
 	agent_token: string,
+	// hub: user_base_url parsed once (resolve_ctl_transport) for the User kind.
+	hub: Ctl_Hub,
 }
 
 // ctl_valid_task_priority gates --priority on task CREATE in both CLI modes.
@@ -127,7 +129,7 @@ resolve_ctl_transport :: proc(args: []string) -> (Ctl_Transport, bool) {
 			fmt.println(`{"ok":false,"message":"--as user requires --hub-url and --user-token (or HAM_HUB_URL and HAM_USER_TOKEN)"}`)
 			return Ctl_Transport{}, false
 		}
-		return Ctl_Transport{kind = .User, user_base_url = strings.trim_right(hub_url, "/"), user_token = user_tok}, true
+		return ctl_user_transport(hub_url, user_tok), true
 	}
 
 	if as_override == "agent" {
@@ -139,76 +141,19 @@ resolve_ctl_transport :: proc(args: []string) -> (Ctl_Transport, bool) {
 	}
 
 	if hub_url != "" && user_tok != "" {
-		return Ctl_Transport{kind = .User, user_base_url = strings.trim_right(hub_url, "/"), user_token = user_tok}, true
+		return ctl_user_transport(hub_url, user_tok), true
 	}
 
 	if ag_endpoint != "" && ag_tok != "" {
 		return Ctl_Transport{kind = .Agent, agent_endpoint = ag_endpoint, agent_token = ag_tok}, true
 	}
 
-	return Ctl_Transport{kind = .User, user_base_url = strings.trim_right(hub_url, "/"), user_token = user_tok}, true
+	return ctl_user_transport(hub_url, user_tok), true
 }
 
-ctl_tasks_request :: proc(transport: Ctl_Transport, method, path, body_json: string) {
-	if transport.kind == .User {
-		if transport.user_base_url == "" || transport.user_token == "" {
-			fmt.println(`{"ok":false,"message":"user transport requires --hub-url and --user-token (or HAM_HUB_URL/HEIMDALL_HUB_URL and HAM_HUB_USER_TOKEN/HEIMDALL_USER_TOKEN)"}`)
-			return
-		}
-		ctl_hub_request(transport.user_base_url, transport.user_token, method, path, body_json)
-		return
-	}
-
-	if transport.kind == .Agent {
-		if transport.agent_endpoint == "" || transport.agent_token == "" {
-			fmt.println(`{"ok":false,"message":"agent transport requires HEIMDALL_BRIDGE_ENDPOINT and HEIMDALL_AGENT_TOKEN (or --bridge-endpoint/--agent-token)"}`)
-			return
-		}
-		params := json_object(
-			json_kv("http_method", method),
-			json_kv("path", path),
-			json_kv("body", body_json),
-		)
-		ctl_agent_call(transport.agent_endpoint, transport.agent_token, "agent.rest.request", params)
-		return
-	}
-}
-
-ctl_tasks_request_local :: proc(transport: Ctl_Transport, method, path, body_json: string) -> (string, bool) {
-	if transport.kind == .User {
-		if transport.user_base_url == "" || transport.user_token == "" {
-			return `{"ok":false,"message":"user transport requires --hub-url and --user-token"}`, false
-		}
-		full_path := hub_url_path_prefix_join(transport.user_base_url, path)
-		headers := [?]http.Header{{name = "Authorization", value = strings.concatenate({"Bearer ", transport.user_token})}}
-		response, ok := http.request_with_headers_timeout(method, transport.user_base_url, full_path, body_json, headers[:], http.DEFAULT_TIMEOUT_MS)
-		if !ok do return `{"ok":false,"message":"Hub request failed"}`, false
-		return response.body, true
-	}
-
-	if transport.kind == .Agent {
-		if transport.agent_endpoint == "" || transport.agent_token == "" {
-			return `{"ok":false,"message":"agent transport requires HEIMDALL_BRIDGE_ENDPOINT and HEIMDALL_AGENT_TOKEN"}`, false
-		}
-		params := json_object(json_kv("http_method", method), json_kv("path", path), json_kv("body", body_json))
-		return ctl_agent_local_call(transport.agent_endpoint, transport.agent_token, "agent.rest.request", params)
-	}
-	return "", false
-}
-
-ctl_tasks_request_and_decrypt :: proc(transport: Ctl_Transport, method, path, body_json: string, args: []string = nil) {
-	resp_str, ok := ctl_tasks_request_local(transport, method, path, body_json)
-	if !ok {
-		if resp_str != "" {
-			fmt.println(resp_str)
-		}
-		return
-	}
-
-	keyring, key_ok := ctl_read_vault_keyring(args, context.temp_allocator)
-	decrypted_json := ctl_decrypt_json_string(resp_str, keyring, key_ok)
-	defer delete(decrypted_json)
-	fmt.println(decrypted_json)
+ctl_user_transport :: proc(hub_url, user_tok: string) -> Ctl_Transport {
+	base := strings.trim_right(hub_url, "/")
+	return Ctl_Transport{kind = .User, user_base_url = base, user_token = user_tok, hub = ctl_hub_make(base, user_tok)}
 }
 
 resolve_chain_id :: proc(transport: Ctl_Transport, args: []string) -> string {
@@ -267,8 +212,7 @@ ctl_task_chains_fleet_command :: proc(transport: Ctl_Transport, tokens: []string
 			fmt.println("usage: ham-ctl task-chains fleet list <chain-id>")
 			return
 		}
-		path := fmt.tprintf("/api/v1/task-chains/%s/fleets", safe_path_part(chain_id))
-		ctl_tasks_request(transport, "GET", path, "")
+		ctl_tasks_request(transport, {method = .GET, path = ctl_api("task-chains", chain_id, "fleets")})
 		return
 	}
 	if sub == "pause" || sub == "resume" {
@@ -280,8 +224,7 @@ ctl_task_chains_fleet_command :: proc(transport: Ctl_Transport, tokens: []string
 			fmt.printfln("usage: ham-ctl task-chains fleet %s <chain-id> --agent <agent_id> [--roles <worker,reviewer>]", sub)
 			return
 		}
-		path := fmt.tprintf("/api/v1/task-chains/%s/fleets/%s/%s", safe_path_part(chain_id), safe_path_part(agent_id), sub)
-		ctl_tasks_request(transport, "POST", path, ctl_v2_fleet_pause_body(args))
+		ctl_tasks_request(transport, {method = .POST, path = ctl_api("task-chains", chain_id, "fleets", agent_id, sub), body = httpc.json_body(ctl_v2_fleet_pause_body(args))})
 		return
 	}
 	if sub == "set" {
@@ -295,13 +238,11 @@ ctl_task_chains_fleet_command :: proc(transport: Ctl_Transport, tokens: []string
 			fmt.println("usage: ham-ctl task-chains fleet set <chain-id> --agent <agent_id> --capacity <N> [--roles <worker,reviewer>] [--bridge <id>] [--provider <p>] [--model <m>] [--bridge-models <json>]")
 			return
 		}
-		path := fmt.tprintf("/api/v1/task-chains/%s/fleets/%s", safe_path_part(chain_id), safe_path_part(agent_id))
-		ctl_tasks_request(transport, "PUT", path, body)
+		ctl_tasks_request(transport, {method = .PUT, path = ctl_api("task-chains", chain_id, "fleets", agent_id), body = httpc.json_body(body)})
 		return
 	}
 	chain_id := sub
-	path := fmt.tprintf("/api/v1/task-chains/%s/fleets", safe_path_part(chain_id))
-	ctl_tasks_request(transport, "GET", path, "")
+	ctl_tasks_request(transport, {method = .GET, path = ctl_api("task-chains", chain_id, "fleets")})
 }
 
 // Destructive chain verbs must NEVER fall back to the auto-resolved caller
@@ -326,19 +267,8 @@ print_tasks_help :: proc(action: string) {
 	fmt.println("  (status/done/vote/votes/nudge/subscribe/unsubscribe were removed in Task System v2; use lease/review)")
 }
 
-ctl_task_chain_request_and_decrypt :: proc(transport: Ctl_Transport, method, path, body_json: string, args: []string = nil) {
-	resp_str, ok := ctl_tasks_request_local(transport, method, path, body_json)
-	if !ok {
-		if resp_str != "" {
-			fmt.println(resp_str)
-		}
-		return
-	}
-
-	keyring, key_ok := ctl_read_vault_keyring(args, context.temp_allocator)
-	decrypted_json := ctl_decrypt_vault_json(resp_str, keyring, key_ok)
-	defer delete(decrypted_json)
-	fmt.println(decrypted_json)
+ctl_task_chain_request_and_decrypt :: proc(transport: Ctl_Transport, req: Ctl_Request, args: []string = nil) {
+	ctl_tasks_request_and_decrypt(transport, req, args)
 }
 
 ctl_task_chains_command :: proc(cmd: []string, args: []string) {
@@ -371,13 +301,13 @@ ctl_task_chains_command :: proc(cmd: []string, args: []string) {
 				stdin_text = string(data)
 			}
 		}
-		params, p_ok := ctl_v2_task_chain_summary_params(cmd[idx + 1:], args, stdin_text)
+		body, p_ok := ctl_v2_task_chain_summary_body(cmd[idx + 1:], args, stdin_text)
 		cid := resolve_chain_id(transport, args)
 		if !p_ok || cid == "" {
 			fmt.println(`{"ok":false,"message":"task-chains summary requires set <text> (or --stdin) and --chain <id>"}`)
 			os.exit(1)
 		}
-		ctl_task_chain_request_and_decrypt(transport, "PUT", fmt.tprintf("/api/v1/task-chains/%s/summary", safe_path_part(cid)), params, args)
+		ctl_task_chain_request_and_decrypt(transport, {method = .PUT, path = ctl_api("task-chains", cid, "summary"), body = httpc.json_body(body)}, args)
 		return
 	}
 
@@ -395,12 +325,12 @@ ctl_task_chains_command :: proc(cmd: []string, args: []string) {
 				file_text = string(data)
 			}
 		}
-		params, p_ok := ctl_v2_task_chain_propose_params(args, file_text)
+		body, p_ok := ctl_v2_task_chain_propose_body(args, file_text)
 		if !p_ok {
 			fmt.println(`{"ok":false,"message":"task-chains propose requires --file <proposal.json> [--auto-approve] [--chain <id>]"}`)
 			os.exit(1)
 		}
-		ctl_task_chain_request_and_decrypt(transport, "POST", "/api/v1/agent-actions/chain/propose", params, args)
+		ctl_task_chain_request_and_decrypt(transport, {method = .POST, path = ctl_api("agent-actions", "chain", "propose"), body = httpc.json_body(body)}, args)
 		return
 	}
 
@@ -414,17 +344,15 @@ ctl_task_chains_command :: proc(cmd: []string, args: []string) {
 			fmt.println(`{"ok":false,"message":"task-chains decide requires --chain <id> --decision approve|reject [--reason <text>]"}`)
 			os.exit(1)
 		}
-		fields := make([dynamic]string)
-		defer delete(fields)
-		append(&fields, json_kv("decision", decision))
-		if r := option_value(args, "--reason", ""); r != "" do append(&fields, json_kv("reason", r))
-		ctl_task_chain_request_and_decrypt(transport, "POST", fmt.tprintf("/api/v1/task-chains/%s/proposal/decide", safe_path_part(cid)), json_object_from_slice(fields[:]), args)
+		body := Ctl_Proposal_Decide_Body{decision = decision, reason = option_value(args, "--reason", "")}
+		ctl_task_chain_request_and_decrypt(transport, {method = .POST, path = ctl_api("task-chains", cid, "proposal", "decide"), body = httpc.json_body(body)}, args)
 		return
 	}
 
 	if action == "" || action == "list" {
-		path := "/api/v1/task-chains?pinned=1" if has_flag(args, "--pinned") else "/api/v1/task-chains"
-		ctl_task_chain_request_and_decrypt(transport, "GET", path, "", args)
+		query := ctl_query_make()
+		if has_flag(args, "--pinned") do ctl_query_add(&query, "pinned", "1")
+		ctl_task_chain_request_and_decrypt(transport, {method = .GET, path = ctl_api("task-chains"), query = query[:]}, args)
 		return
 	}
 
@@ -433,7 +361,8 @@ ctl_task_chains_command :: proc(cmd: []string, args: []string) {
 	// an agent can fetch "chains I coordinate" with only its agent token.
 	if action == "coordinated" {
 		agent_id := option_value(args, "--agent-id", option_value(args, "--agent", ""))
-		ctl_task_chain_request_and_decrypt(transport, "GET", fmt.tprintf("/api/v1/task-chains?coordinated_by=%s", query_escape(agent_id)), "", args)
+		query := []httpc.Query_Param{{"coordinated_by", agent_id}}
+		ctl_task_chain_request_and_decrypt(transport, {method = .GET, path = ctl_api("task-chains"), query = query}, args)
 		return
 	}
 
@@ -451,15 +380,15 @@ ctl_task_chains_command :: proc(cmd: []string, args: []string) {
 		if desc != "" && !is_vault_armored(desc) {
 			desc = ctl_seal_or_exit(desc, keyring)
 		}
-		fields := make([dynamic]string)
-		defer delete(fields)
-		append(&fields, json_kv("title", title))
-		append(&fields, json_kv("description", desc))
-		append(&fields, json_kv("kind", option_value(args, "--kind", "mixed_work")))
-		append(&fields, json_kv("coordinator_agent_id", option_value(args, "--coordinator-agent-id", option_value(args, "--coordinator", ""))))
-		append(&fields, json_kv("bridge_id", option_value(args, "--bridge-id", option_value(args, "--bridge", ""))))
-		append(&fields, json_kv("project_id", option_value(args, "--project-id", option_value(args, "--project", ""))))
-		ctl_tasks_request(transport, "POST", "/api/v1/task-chains", json_object_from_slice(fields[:]))
+		body := Ctl_Chain_Create_Body{
+			title                = title,
+			description          = desc,
+			kind                 = option_value(args, "--kind", "mixed_work"),
+			coordinator_agent_id = option_value(args, "--coordinator-agent-id", option_value(args, "--coordinator", "")),
+			bridge_id            = option_value(args, "--bridge-id", option_value(args, "--bridge", "")),
+			project_id           = option_value(args, "--project-id", option_value(args, "--project", "")),
+		}
+		ctl_tasks_request(transport, {method = .POST, path = ctl_api("task-chains"), body = httpc.json_body(body)})
 		return
 	}
 
@@ -486,28 +415,27 @@ ctl_task_chains_command :: proc(cmd: []string, args: []string) {
 	}
 
 	if action == "show" {
-		ctl_task_chain_request_and_decrypt(transport, "GET", fmt.tprintf("/api/v1/task-chains/%s", safe_path_part(chain_id)), "", args)
+		ctl_task_chain_request_and_decrypt(transport, {method = .GET, path = ctl_api("task-chains", chain_id)}, args)
 		return
 	}
 
 	if action == "update" {
-		fields := make([dynamic]string)
-		defer delete(fields)
+		body: Ctl_Chain_Update_Body
 		keyring := ctl_vault_keyring_for_write(args)
 		if title := option_value(args, "--title", ""); title != "" {
 			if !is_vault_armored(title) {
 				title = ctl_seal_or_exit(title, keyring)
 			}
-			append(&fields, json_kv("title", title))
+			body.title = title
 		}
 		if desc := option_value(args, "--description", ""); desc != "" {
 			if !is_vault_armored(desc) {
 				desc = ctl_seal_or_exit(desc, keyring)
 			}
-			append(&fields, json_kv("description", desc))
+			body.description = desc
 		}
-		if status := option_value(args, "--status", ""); status != "" do append(&fields, json_kv("status", status))
-		ctl_tasks_request(transport, "PATCH", fmt.tprintf("/api/v1/task-chains/%s", safe_path_part(chain_id)), json_object_from_slice(fields[:]))
+		body.status = option_value(args, "--status", "")
+		ctl_tasks_request(transport, {method = .PATCH, path = ctl_api("task-chains", chain_id), body = httpc.json_body(body)})
 		return
 	}
 
@@ -515,7 +443,7 @@ ctl_task_chains_command :: proc(cmd: []string, args: []string) {
 		sub := option_value(args, "--action", "")
 		if idx + 1 < len(cmd) do sub = cmd[idx + 1]
 		if sub == "" || sub == "list" {
-			ctl_tasks_request(transport, "GET", fmt.tprintf("/api/v1/task-chains/%s/members", safe_path_part(chain_id)), "")
+			ctl_tasks_request(transport, {method = .GET, path = ctl_api("task-chains", chain_id, "members")})
 			return
 		}
 		if sub == "add" {
@@ -525,7 +453,7 @@ ctl_task_chains_command :: proc(cmd: []string, args: []string) {
 				fmt.println("usage: ham-ctl task-chains members --chain <id> add --agent <instance_id> [--role <role>]")
 				return
 			}
-			ctl_tasks_request(transport, "POST", fmt.tprintf("/api/v1/task-chains/%s/members", safe_path_part(chain_id)), json_object(json_kv("agent_instance_id", inst), json_kv("role", role)))
+			ctl_tasks_request(transport, {method = .POST, path = ctl_api("task-chains", chain_id, "members"), body = httpc.json_body(Ctl_Chain_Member_Body{agent_instance_id = inst, role = role})})
 			return
 		}
 		if sub == "remove" {
@@ -534,7 +462,7 @@ ctl_task_chains_command :: proc(cmd: []string, args: []string) {
 				fmt.println("usage: ham-ctl task-chains members --chain <id> remove --agent <instance_id>")
 				return
 			}
-			ctl_tasks_request(transport, "DELETE", fmt.tprintf("/api/v1/task-chains/%s/members/%s", safe_path_part(chain_id), safe_path_part(inst)), "")
+			ctl_tasks_request(transport, {method = .DELETE, path = ctl_api("task-chains", chain_id, "members", inst)})
 			return
 		}
 	}
@@ -543,7 +471,7 @@ ctl_task_chains_command :: proc(cmd: []string, args: []string) {
 		sub := option_value(args, "--action", "")
 		if idx + 1 < len(cmd) do sub = cmd[idx + 1]
 		if sub == "" || sub == "list" {
-			ctl_tasks_request(transport, "GET", fmt.tprintf("/api/v1/task-chains/%s/directories", safe_path_part(chain_id)), "")
+			ctl_tasks_request(transport, {method = .GET, path = ctl_api("task-chains", chain_id, "directories")})
 			return
 		}
 		if sub == "add" {
@@ -555,19 +483,9 @@ ctl_task_chains_command :: proc(cmd: []string, args: []string) {
 				fmt.println("usage: ham-ctl task-chains directory add --chain <id> --path <path> [--bridge <id>] [--vcs-kind <kind>] [--vcs <json>]")
 				return
 			}
-			fields := make([dynamic]string)
-			defer delete(fields)
-			append(&fields, json_kv("path", path))
-			if b := option_value(args, "--bridge-id", option_value(args, "--bridge", "")); b != "" do append(&fields, json_kv("bridge_id", b))
-			if v := option_value(args, "--vcs-kind", option_value(args, "--vcs", "")); v != "" do append(&fields, json_kv("vcs_kind", v))
-			if vcs := option_value(args, "--vcs-info", ""); vcs != "" {
-				if strings.starts_with(vcs, "{") {
-					append(&fields, fmt.tprintf("\"vcs\":%s", vcs))
-				} else {
-					append(&fields, json_kv("vcs_kind", vcs))
-				}
-			}
-			ctl_tasks_request(transport, "POST", fmt.tprintf("/api/v1/task-chains/%s/directories", safe_path_part(chain_id)), json_object_from_slice(fields[:]))
+			body := ctl_directory_body(args)
+			body.path = path
+			ctl_tasks_request(transport, {method = .POST, path = ctl_api("task-chains", chain_id, "directories"), body = httpc.json_body(body)})
 			return
 		}
 		if sub == "update" {
@@ -579,19 +497,9 @@ ctl_task_chains_command :: proc(cmd: []string, args: []string) {
 				fmt.println("usage: ham-ctl task-chains directory update --chain <id> --directory <id> [--path <path>] [--bridge <id>] [--vcs-kind <kind>] [--vcs <json>]")
 				return
 			}
-			fields := make([dynamic]string)
-			defer delete(fields)
-			if p := option_value(args, "--path", option_value(args, "--dir", "")); p != "" do append(&fields, json_kv("path", p))
-			if b := option_value(args, "--bridge-id", option_value(args, "--bridge", "")); b != "" do append(&fields, json_kv("bridge_id", b))
-			if v := option_value(args, "--vcs-kind", option_value(args, "--vcs", "")); v != "" do append(&fields, json_kv("vcs_kind", v))
-			if vcs := option_value(args, "--vcs-info", ""); vcs != "" {
-				if strings.starts_with(vcs, "{") {
-					append(&fields, fmt.tprintf("\"vcs\":%s", vcs))
-				} else {
-					append(&fields, json_kv("vcs_kind", vcs))
-				}
-			}
-			ctl_tasks_request(transport, "PATCH", fmt.tprintf("/api/v1/task-chains/%s/directories/%s", safe_path_part(chain_id), safe_path_part(dir_id)), json_object_from_slice(fields[:]))
+			body := ctl_directory_body(args)
+			body.path = option_value(args, "--path", option_value(args, "--dir", ""))
+			ctl_tasks_request(transport, {method = .PATCH, path = ctl_api("task-chains", chain_id, "directories", dir_id), body = httpc.json_body(body)})
 			return
 		}
 		if sub == "remove" || sub == "delete" {
@@ -603,7 +511,7 @@ ctl_task_chains_command :: proc(cmd: []string, args: []string) {
 				fmt.println("usage: ham-ctl task-chains directory remove --chain <id> --directory <id>")
 				return
 			}
-			ctl_tasks_request(transport, "DELETE", fmt.tprintf("/api/v1/task-chains/%s/directories/%s", safe_path_part(chain_id), safe_path_part(dir_id)), "")
+			ctl_tasks_request(transport, {method = .DELETE, path = ctl_api("task-chains", chain_id, "directories", dir_id)})
 			return
 		}
 	}
@@ -614,20 +522,21 @@ ctl_task_chains_command :: proc(cmd: []string, args: []string) {
 			fmt.println("usage: ham-ctl task-chains add-agent --chain <id> --agent <id> [--bridge <id>] [--provider <profile>] [--model <model>] [--project <id>]")
 			return
 		}
-		fields := make([dynamic]string)
-		append(&fields, json_kv("agent_id", agent_id))
-		append(&fields, json_kv("chain_id", chain_id))
-		if b := option_value(args, "--bridge-id", option_value(args, "--bridge", "")); b != "" do append(&fields, json_kv("bridge_id", b))
-		if p := option_value(args, "--provider", ""); p != "" do append(&fields, json_kv("provider", p))
-		if t := option_value(args, "--model", ""); t != "" do append(&fields, json_kv("model", t))
-		if pr := option_value(args, "--project-id", option_value(args, "--project", "")); pr != "" do append(&fields, json_kv("project_id", pr))
-		ctl_tasks_request(transport, "POST", "/api/v1/agent-instances", json_object_from_slice(fields[:]))
+		body := Ctl_Add_Agent_Body{
+			agent_id   = agent_id,
+			chain_id   = chain_id,
+			bridge_id  = option_value(args, "--bridge-id", option_value(args, "--bridge", "")),
+			provider   = option_value(args, "--provider", ""),
+			model      = option_value(args, "--model", ""),
+			project_id = option_value(args, "--project-id", option_value(args, "--project", "")),
+		}
+		ctl_tasks_request(transport, {method = .POST, path = ctl_api("agent-instances"), body = httpc.json_body(body)})
 		return
 	}
 
 	if action == "publish" {
 		// Task System v2: a 422 brief_incomplete is rendered per task and exits 1.
-		resp_str, ok := ctl_tasks_request_local(transport, "POST", fmt.tprintf("/api/v1/task-chains/%s/publish", safe_path_part(chain_id)), "{}")
+		resp_str, ok := ctl_tasks_request_local(transport, {method = .POST, path = ctl_api("task-chains", chain_id, "publish"), body = ctl_empty_object_body()})
 		if !ok { if resp_str != "" do fmt.println(resp_str); os.exit(1) }
 		ctl_publish_print_and_exit(resp_str)
 		return
@@ -636,28 +545,28 @@ ctl_task_chains_command :: proc(cmd: []string, args: []string) {
 
 
 	if action == "pin" {
-		ctl_tasks_request(transport, "POST", fmt.tprintf("/api/v1/task-chains/%s/pin", safe_path_part(chain_id)), "{\"pinned\":true}")
+		ctl_tasks_request(transport, {method = .POST, path = ctl_api("task-chains", chain_id, "pin"), body = httpc.json_body(Ctl_Pinned_Body{pinned = true})})
 		return
 	}
 
 	if action == "unpin" {
-		ctl_tasks_request(transport, "POST", fmt.tprintf("/api/v1/task-chains/%s/pin", safe_path_part(chain_id)), "{\"pinned\":false}")
+		ctl_tasks_request(transport, {method = .POST, path = ctl_api("task-chains", chain_id, "pin"), body = httpc.json_body(Ctl_Pinned_Body{pinned = false})})
 		return
 	}
 
 	// Coordinator-only recovery: return an accidentally-completed chain to active.
 	if action == "reopen" {
-		ctl_tasks_request(transport, "PATCH", fmt.tprintf("/api/v1/task-chains/%s", safe_path_part(chain_id)), json_object(json_kv("status", "active")))
+		ctl_tasks_request(transport, {method = .PATCH, path = ctl_api("task-chains", chain_id), body = httpc.json_body(Ctl_Status_Body{status = "active"})})
 		return
 	}
 
 	if action == "archive" {
-		ctl_tasks_request(transport, "PATCH", fmt.tprintf("/api/v1/task-chains/%s", safe_path_part(chain_id)), json_object(json_kv("status", "archived")))
+		ctl_tasks_request(transport, {method = .PATCH, path = ctl_api("task-chains", chain_id), body = httpc.json_body(Ctl_Status_Body{status = "archived"})})
 		return
 	}
 
 	if action == "unarchive" {
-		ctl_tasks_request(transport, "PATCH", fmt.tprintf("/api/v1/task-chains/%s", safe_path_part(chain_id)), json_object(json_kv("status", "active")))
+		ctl_tasks_request(transport, {method = .PATCH, path = ctl_api("task-chains", chain_id), body = httpc.json_body(Ctl_Status_Body{status = "active"})})
 		return
 	}
 
@@ -695,7 +604,7 @@ ctl_tasks_command :: proc(cmd: []string, args: []string) {
 			fmt.println("usage: ham-ctl tasks list --chain <id>")
 			return
 		}
-		ctl_tasks_request_and_decrypt(transport, "GET", fmt.tprintf("/api/v1/task-chains/%s/tasks", safe_path_part(chain_id)), "", args)
+		ctl_tasks_request_and_decrypt(transport, {method = .GET, path = ctl_api("task-chains", chain_id, "tasks")}, args)
 		return
 	}
 
@@ -714,9 +623,7 @@ ctl_tasks_command :: proc(cmd: []string, args: []string) {
 		if desc != "" && !is_vault_armored(desc) {
 			desc = ctl_seal_or_exit(desc, keyring)
 		}
-		fields := make([dynamic]string)
-		append(&fields, json_kv("title", title))
-		if desc != "" do append(&fields, json_kv("description", desc))
+		body := Ctl_Task_Create_Body{title = title, description = desc}
 		if prio := option_value(args, "--priority", ""); prio != "" {
 			// REQ-CLI-2: this field was already being sent and silently discarded by
 			// the Hub; now that create honours it, a bad value must not slide to p2.
@@ -724,20 +631,21 @@ ctl_tasks_command :: proc(cmd: []string, args: []string) {
 				fmt.printfln("usage: --priority must be one of p0, p1, p2 (got %q)", prio)
 				return
 			}
-			append(&fields, json_kv("priority", prio))
+			body.priority = prio
 		}
-		if assignee := option_value(args, "--assignee", option_value(args, "--assignee-agent-id", "")); assignee != "" {
-			append(&fields, ctl_v2_assignee_field(assignee))
-		}
+		body.assignee = strings.trim_space(option_value(args, "--assignee", option_value(args, "--assignee-agent-id", "")))
 		// --reviewer is repeatable and/or comma-separated for multiple reviewers.
-		if has_flag(args, "--reviewer") || has_flag(args, "--reviewer-agent-id") do append(&fields, ctl_v2_reviewers_field(args))
-		if has_flag(args, "--require-user-approval") do append(&fields, `"requires_user_approval":true`)
+		if has_flag(args, "--reviewer") || has_flag(args, "--reviewer-agent-id") do body.reviewers = ctl_v2_reviewers(args)
+		if has_flag(args, "--require-user-approval") do body.requires_user_approval = true
 		if deps, present := ctl_task_depends_on_flag(args, "--depends-on", "--on"); present && deps != "" {
-			append(&fields, ctl_v2_json_string_array("depends_on", deps))
+			body.depends_on = ctl_csv_list(deps)
 		}
-		if b := option_value(args, "--bridge", ""); b != "" do append(&fields, json_kv("bridge_id", b))
-		if brief, ok := ctl_task_brief_field(args); ok do append(&fields, brief)
-		resp_str, ok := ctl_tasks_request_local(transport, "POST", fmt.tprintf("/api/v1/task-chains/%s/tasks", safe_path_part(chain_id)), json_object_from_slice(fields[:]))
+		body.bridge_id = option_value(args, "--bridge", "")
+		if brief, replace, ok := ctl_task_brief_value(args); ok {
+			body.brief = brief
+			body.replace_brief = replace
+		}
+		resp_str, ok := ctl_tasks_request_local(transport, {method = .POST, path = ctl_api("task-chains", chain_id, "tasks"), body = httpc.json_body(body)})
 		if !ok {
 			fmt.println(resp_str)
 			return
@@ -779,25 +687,25 @@ ctl_tasks_command :: proc(cmd: []string, args: []string) {
 	}
 
 	if action == "show" {
-		ctl_tasks_request_and_decrypt(transport, "GET", fmt.tprintf("/api/v1/task-chains/%s/tasks/%s", safe_path_part(chain_id), safe_path_part(task_id)), "", args)
+		ctl_tasks_request_and_decrypt(transport, {method = .GET, path = ctl_api("task-chains", chain_id, "tasks", task_id)}, args)
 		return
 	}
 	if action == "hold" || action == "release" {
-		body := "{}"
+		body := ctl_empty_object_body()
 		if action == "hold" {
 			reason := strings.trim_space(option_value(args, "--reason", ""))
 			if reason == "" {
 				fmt.println(`{"ok":false,"message":"tasks hold requires --reason <text>"}`)
 				os.exit(1)
 			}
-			body = json_object(json_kv("reason", reason))
+			body = httpc.json_body(Ctl_Task_Reason_Body{reason = reason})
 		}
-		ctl_tasks_request_and_decrypt(transport, "POST", fmt.tprintf("/api/v1/task-chains/%s/tasks/%s/%s", safe_path_part(chain_id), safe_path_part(task_id), action), body, args)
+		ctl_tasks_request_and_decrypt(transport, {method = .POST, path = ctl_api("task-chains", chain_id, "tasks", task_id, action), body = body}, args)
 		return
 	}
 	if action == "unblock" {
-		body := json_object(json_kv("note", option_value(args, "--note", "")))
-		ctl_tasks_request_and_decrypt(transport, "POST", fmt.tprintf("/api/v1/task-chains/%s/tasks/%s/answer", safe_path_part(chain_id), safe_path_part(task_id)), body, args)
+		body := Ctl_Task_Note_Body{note = option_value(args, "--note", "")}
+		ctl_tasks_request_and_decrypt(transport, {method = .POST, path = ctl_api("task-chains", chain_id, "tasks", task_id, "answer"), body = httpc.json_body(body)}, args)
 		return
 	}
 
@@ -810,7 +718,7 @@ ctl_tasks_command :: proc(cmd: []string, args: []string) {
 			fmt.println(`{"ok":false,"message":"tasks fetch requires --ref <ref> or positional <ref>"}`)
 			os.exit(1)
 		}
-		ctl_tasks_request_and_decrypt(transport, "GET", ctl_task_fetch_path(chain_id, task_id, ref), "", args)
+		ctl_tasks_request_and_decrypt(transport, ctl_task_fetch_request(chain_id, task_id, ref), args)
 		return
 	}
 
@@ -825,25 +733,23 @@ ctl_tasks_command :: proc(cmd: []string, args: []string) {
 		if desc != "" && !is_vault_armored(desc) {
 			desc = ctl_seal_or_exit(desc, keyring)
 		}
-		fields := make([dynamic]string)
-		if title != "" do append(&fields, json_kv("title", title))
-		if desc != "" do append(&fields, json_kv("description", desc))
-		if prio := option_value(args, "--priority", ""); prio != "" do append(&fields, json_kv("priority", prio))
-		if assignee := option_value(args, "--assignee", option_value(args, "--assignee-agent-id", "")); assignee != "" {
-			append(&fields, ctl_v2_assignee_field(assignee))
-		}
+		body := Ctl_Task_Update_Body{title = title, description = desc, priority = option_value(args, "--priority", "")}
+		body.assignee = strings.trim_space(option_value(args, "--assignee", option_value(args, "--assignee-agent-id", "")))
 		// --reviewer is repeatable/comma-separated for MULTIPLE reviewers;
 		// presence-checked so `--reviewer ""` clears the list.
-		if has_flag(args, "--reviewer") || has_flag(args, "--reviewer-agent-id") do append(&fields, ctl_v2_reviewers_field(args))
-		if has_flag(args, "--require-user-approval") do append(&fields, `"requires_user_approval":true`)
-		if has_flag(args, "--no-require-user-approval") do append(&fields, `"requires_user_approval":false`)
+		if has_flag(args, "--reviewer") || has_flag(args, "--reviewer-agent-id") do body.reviewers = ctl_v2_reviewers(args)
+		if has_flag(args, "--require-user-approval") do body.requires_user_approval = true
+		if has_flag(args, "--no-require-user-approval") do body.requires_user_approval = false
 		// --bridge is presence-checked so `--bridge ""` clears the pin back to inherit.
-		if has_flag(args, "--bridge") do append(&fields, json_kv("bridge_id", option_value(args, "--bridge", "")))
+		if has_flag(args, "--bridge") do body.bridge_id = option_value(args, "--bridge", "")
 		if deps, present := ctl_task_depends_on_flag(args, "--depends-on", "--on"); present {
-			append(&fields, ctl_v2_json_string_array("depends_on", deps))
+			body.depends_on = ctl_csv_list(deps)
 		}
-		if brief, ok := ctl_task_brief_field(args); ok do append(&fields, brief)
-		ctl_tasks_request(transport, "PATCH", fmt.tprintf("/api/v1/task-chains/%s/tasks/%s", safe_path_part(chain_id), safe_path_part(task_id)), json_object_from_slice(fields[:]))
+		if brief, replace, ok := ctl_task_brief_value(args); ok {
+			body.brief = brief
+			body.replace_brief = replace
+		}
+		ctl_tasks_request(transport, {method = .PATCH, path = ctl_api("task-chains", chain_id, "tasks", task_id), body = httpc.json_body(body)})
 		return
 	}
 
@@ -853,16 +759,16 @@ ctl_tasks_command :: proc(cmd: []string, args: []string) {
 		case .Invalid:
 			ctl_print_error_exit(msg)
 		case .Task:
-			ctl_tasks_request(transport, "PATCH", fmt.tprintf("/api/v1/task-chains/%s/tasks/%s", safe_path_part(chain_id), safe_path_part(task_id)), json_object(ctl_v2_json_string_array("depends_on", prereq)))
+			ctl_tasks_request(transport, {method = .PATCH, path = ctl_api("task-chains", chain_id, "tasks", task_id), body = httpc.json_body(Ctl_Task_Depends_Body{depends_on = ctl_csv_list(prereq)})})
 		case .Workflow_Run:
 			// Whole-run prerequisites live in the chain-level work graph.
-			ctl_tasks_request_and_decrypt(transport, "POST", fmt.tprintf("/api/v1/task-chains/%s/work/depend", safe_path_part(chain_id)), ctl_task_depend_workflow_params(chain_id, task_id, prereq), args)
+			ctl_tasks_request_and_decrypt(transport, {method = .POST, path = ctl_api("task-chains", chain_id, "work", "depend"), body = httpc.json_body(ctl_task_depend_workflow_body(chain_id, task_id, prereq))}, args)
 		}
 		return
 	}
 
 	if action == "cancel" {
-		ctl_tasks_request(transport, "POST", fmt.tprintf("/api/v1/task-chains/%s/tasks/%s/cancel", safe_path_part(chain_id), safe_path_part(task_id)), "{}")
+		ctl_tasks_request(transport, {method = .POST, path = ctl_api("task-chains", chain_id, "tasks", task_id, "cancel"), body = ctl_empty_object_body()})
 		return
 	}
 
@@ -880,23 +786,7 @@ ctl_tasks_command :: proc(cmd: []string, args: []string) {
 		if !is_vault_armored(body) {
 			body = ctl_seal_or_exit(body, keyring)
 		}
-		fields := make([dynamic]string)
-		append(&fields, json_kv("body", body))
-		if notify := option_value(args, "--notify", ""); notify != "" {
-			parts := strings.split(notify, ",")
-			defer delete(parts)
-			buf := strings.builder_make()
-			strings.write_string(&buf, "\"notify\":[")
-			for p, i in parts {
-				if i > 0 do strings.write_byte(&buf, ',')
-				strings.write_byte(&buf, '"')
-				strings.write_string(&buf, strings.trim_space(p))
-				strings.write_byte(&buf, '"')
-			}
-			strings.write_byte(&buf, ']')
-			append(&fields, strings.to_string(buf))
-		}
-		ctl_tasks_request(transport, "POST", fmt.tprintf("/api/v1/task-chains/%s/tasks/%s/comments", safe_path_part(chain_id), safe_path_part(task_id)), json_object_from_slice(fields[:]))
+		ctl_tasks_request(transport, {method = .POST, path = ctl_api("task-chains", chain_id, "tasks", task_id, "comments"), body = httpc.json_body(ctl_task_comment_body(body, args))})
 		return
 	}
 
@@ -904,7 +794,7 @@ ctl_tasks_command :: proc(cmd: []string, args: []string) {
 		sub := option_value(args, "--action", "")
 		if idx + 1 < len(cmd) && (cmd[idx + 1] == "add" || cmd[idx + 1] == "list") do sub = cmd[idx + 1]
 		if sub == "" || sub == "list" {
-			ctl_tasks_request_and_decrypt(transport, "GET", fmt.tprintf("/api/v1/task-chains/%s/tasks/%s/comments", safe_path_part(chain_id), safe_path_part(task_id)), "", args)
+			ctl_tasks_request_and_decrypt(transport, {method = .GET, path = ctl_api("task-chains", chain_id, "tasks", task_id, "comments")}, args)
 			return
 		}
 		if sub == "add" {
@@ -921,26 +811,112 @@ ctl_tasks_command :: proc(cmd: []string, args: []string) {
 			if !is_vault_armored(body) {
 				body = ctl_seal_or_exit(body, keyring)
 			}
-			fields := make([dynamic]string)
-			append(&fields, json_kv("body", body))
-			if notify := option_value(args, "--notify", ""); notify != "" {
-				parts := strings.split(notify, ",")
-				defer delete(parts)
-				buf := strings.builder_make()
-				strings.write_string(&buf, "\"notify\":[")
-				for p, i in parts {
-					if i > 0 do strings.write_byte(&buf, ',')
-					strings.write_byte(&buf, '"')
-					strings.write_string(&buf, strings.trim_space(p))
-					strings.write_byte(&buf, '"')
-				}
-				strings.write_byte(&buf, ']')
-				append(&fields, strings.to_string(buf))
-			}
-			ctl_tasks_request(transport, "POST", fmt.tprintf("/api/v1/task-chains/%s/tasks/%s/comments", safe_path_part(chain_id), safe_path_part(task_id)), json_object_from_slice(fields[:]))
+			ctl_tasks_request(transport, {method = .POST, path = ctl_api("task-chains", chain_id, "tasks", task_id, "comments"), body = httpc.json_body(ctl_task_comment_body(body, args))})
 			return
 		}
 	}
 
 	fmt.println("usage: ham-ctl tasks <list|show|create|update|depend|cancel|comment|comments|fetch>")
+}
+
+// ---- hub request bodies (user transport task/chain routes) ----------------------
+
+Ctl_Proposal_Decide_Body :: struct {
+	decision: string `json:"decision"`,
+	reason:   string `json:"reason,omitempty"`,
+}
+
+Ctl_Chain_Create_Body :: struct {
+	title:                string `json:"title"`,
+	description:          string `json:"description"`,
+	kind:                 string `json:"kind"`,
+	coordinator_agent_id: string `json:"coordinator_agent_id"`,
+	bridge_id:            string `json:"bridge_id"`,
+	project_id:           string `json:"project_id"`,
+}
+
+Ctl_Chain_Update_Body :: struct {
+	title:       string `json:"title,omitempty"`,
+	description: string `json:"description,omitempty"`,
+	status:      string `json:"status,omitempty"`,
+}
+
+Ctl_Chain_Member_Body :: struct {
+	agent_instance_id: string `json:"agent_instance_id"`,
+	role:              string `json:"role"`,
+}
+
+// Ctl_Directory_Body: chain directory add/update. --vcs-info holding a JSON
+// object is sent as `vcs`; any other --vcs-info value is a vcs_kind (and wins
+// over --vcs-kind, as the later duplicate key did).
+Ctl_Directory_Body :: struct {
+	path:      string     `json:"path,omitempty"`,
+	bridge_id: string     `json:"bridge_id,omitempty"`,
+	vcs_kind:  string     `json:"vcs_kind,omitempty"`,
+	vcs:       json.Value `json:"vcs,omitempty"`,
+}
+
+ctl_directory_body :: proc(args: []string) -> (body: Ctl_Directory_Body) {
+	body.bridge_id = option_value(args, "--bridge-id", option_value(args, "--bridge", ""))
+	body.vcs_kind = option_value(args, "--vcs-kind", option_value(args, "--vcs", ""))
+	if vcs := option_value(args, "--vcs-info", ""); vcs != "" {
+		if strings.starts_with(vcs, "{") {
+			body.vcs = ctl_parse_json_flag("--vcs-info", vcs)
+		} else {
+			body.vcs_kind = vcs
+		}
+	}
+	return
+}
+
+Ctl_Add_Agent_Body :: struct {
+	agent_id:   string `json:"agent_id"`,
+	chain_id:   string `json:"chain_id"`,
+	bridge_id:  string `json:"bridge_id,omitempty"`,
+	provider:   string `json:"provider,omitempty"`,
+	model:      string `json:"model,omitempty"`,
+	project_id: string `json:"project_id,omitempty"`,
+}
+
+Ctl_Task_Create_Body :: struct {
+	title:                  string          `json:"title"`,
+	description:            string          `json:"description,omitempty"`,
+	priority:               string          `json:"priority,omitempty"`,
+	assignee:               string          `json:"assignee,omitempty"`,
+	reviewers:              Maybe([]string) `json:"reviewers,omitempty"`,
+	requires_user_approval: Maybe(bool)     `json:"requires_user_approval,omitempty"`,
+	depends_on:             []string        `json:"depends_on,omitempty"`,
+	bridge_id:              string          `json:"bridge_id,omitempty"`,
+	brief:                  json.Value      `json:"brief,omitempty"`,
+	replace_brief:          Maybe(bool)     `json:"replace_brief,omitempty"`,
+}
+
+// Ctl_Task_Update_Body: presence-checked flags (reviewers, approval, bridge,
+// depends_on) are Maybe so an explicit empty value is still sent.
+Ctl_Task_Update_Body :: struct {
+	title:                  string          `json:"title,omitempty"`,
+	description:            string          `json:"description,omitempty"`,
+	priority:               string          `json:"priority,omitempty"`,
+	assignee:               string          `json:"assignee,omitempty"`,
+	reviewers:              Maybe([]string) `json:"reviewers,omitempty"`,
+	requires_user_approval: Maybe(bool)     `json:"requires_user_approval,omitempty"`,
+	bridge_id:              Maybe(string)   `json:"bridge_id,omitempty"`,
+	depends_on:             Maybe([]string) `json:"depends_on,omitempty"`,
+	brief:                  json.Value      `json:"brief,omitempty"`,
+	replace_brief:          Maybe(bool)     `json:"replace_brief,omitempty"`,
+}
+
+Ctl_Task_Depends_Body :: struct {
+	depends_on: []string `json:"depends_on"`,
+}
+
+Ctl_Task_Comment_Body :: struct {
+	body:   string   `json:"body"`,
+	notify: []string `json:"notify,omitempty"`,
+}
+
+ctl_task_comment_body :: proc(body: string, args: []string) -> Ctl_Task_Comment_Body {
+	out := Ctl_Task_Comment_Body{body = body}
+	if notify := option_value(args, "--notify", ""); notify != "" do out.notify = ctl_csv_list(notify)
+	return out
 }

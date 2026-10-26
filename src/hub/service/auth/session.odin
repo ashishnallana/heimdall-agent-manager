@@ -13,7 +13,7 @@ import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
 import platform "odin_test:hub/platform"
 import user_service "odin_test:hub/service/user"
-import http_client "odin_test:lib/http_client"
+import httpc "odin_test:lib/httpc"
 import os_random "odin_test:lib/os_random"
 import chacha20poly1305 "core:crypto/chacha20poly1305"
 import vault "odin_test:lib/vault"
@@ -220,7 +220,9 @@ Web_Login_Config :: struct {
 	session_ttl_ms, session_idle_ms: i64,
 	// Injectable token-endpoint transport for deterministic tests. Returns the
 	// body of a 200 response; production uses https only and never echoes errors.
-	exchange: proc(ctx: rawptr, url, form_body, basic_authorization: string) -> (string, bool),
+	// `form` is the token request; `basic_authorization` the Authorization header
+	// value ("" for a public client).
+	exchange: proc(ctx: rawptr, url: string, form: []httpc.Form_Field, basic_authorization: string) -> (string, bool),
 	exchange_ctx: rawptr,
 }
 
@@ -418,18 +420,19 @@ web_login_begin :: proc(service: ^Auth_Service, return_to: string, client_ip := 
 	if !s_ok || !n_ok || !v_ok do return "", "", false, domain.domain_error(.Internal_Error, "random source unavailable")
 	sealed, sealed_ok := login_cookie_seal(service, Login_Payload{s = state_value, n = nonce, v = verifier, r = target, e = now + LOGIN_STATE_TTL_MS})
 	if !sealed_ok do return "", "", false, domain.domain_error(.Internal_Error, "could not seal the login state")
-	sep := "&" if strings.contains(service.web.authorize_url, "?") else "?"
-	url := strings.concatenate({
-		service.web.authorize_url, sep,
-		"response_type=code",
-		"&client_id=", form_encode(service.web.client_id),
-		"&redirect_uri=", form_encode(service.web.redirect_uri),
-		"&scope=", form_encode("openid profile email"),
-		"&state=", state_value,
-		"&nonce=", nonce,
-		"&code_challenge=", pkce_challenge_s256(verifier),
-		"&code_challenge_method=S256",
+	authorize, auth_err := httpc.parse_url(service.web.authorize_url)
+	if auth_err != .None do return "", "", false, domain.domain_error(.Internal_Error, "browser login authorize_url is not a valid URL")
+	url, url_err := httpc.build_url(authorize, nil, {
+		{"response_type", "code"},
+		{"client_id", service.web.client_id},
+		{"redirect_uri", service.web.redirect_uri},
+		{"scope", "openid profile email"},
+		{"state", state_value},
+		{"nonce", nonce},
+		{"code_challenge", pkce_challenge_s256(verifier)},
+		{"code_challenge_method", "S256"},
 	}, context.temp_allocator)
+	if url_err != .None do return "", "", false, domain.domain_error(.Internal_Error, "could not build the authorization URL")
 	return url, sealed, true, {}
 }
 
@@ -452,29 +455,38 @@ OIDC_Token_Response :: struct {
 // the bounded outbound path. Only a 200 body is returned; provider error bodies
 // are never echoed or logged.
 @(private = "file")
-oidc_exchange_code :: proc(service: ^Auth_Service, form, basic: string) -> (string, bool) {
+oidc_exchange_code :: proc(service: ^Auth_Service, form: []httpc.Form_Field, basic: string) -> (string, bool) {
 	state := &service.oidc_state
 	if !oidc_outbound_acquire(state) do return "", false
 	defer oidc_outbound_release(state)
 	url := service.web.token_url
 	if service.web.exchange != nil do return service.web.exchange(service.web.exchange_ctx, url, form, basic)
 	if !oidc_endpoint_allowed(url, service.oidc.allow_insecure_localhost) do return "", false
-	headers := make([dynamic]http_client.Header, context.temp_allocator)
-	append(&headers, http_client.Header{"Content-Type", "application/x-www-form-urlencoded"})
-	append(&headers, http_client.Header{"Accept", "application/json"})
-	if basic != "" do append(&headers, http_client.Header{"Authorization", basic})
-	request_path := "/" if strings.has_suffix(url, "/") else ""
-	res, ok := http_client.request_with_headers_timeout("POST", url, request_path, form, headers[:], 5000, omit_default_port = true)
-	if !ok {
-		fmt.printfln("ham-hub oidc_http_rejected reason=request_failed target=token")
+	endpoint, url_err := httpc.parse_url(url)
+	if url_err != .None {
+		fmt.printfln("ham-hub oidc_http_rejected reason=invalid_url target=token")
+		return "", false
+	}
+	headers: [2]httpc.Header
+	headers[0] = httpc.accept_json()
+	n_headers := 1
+	if basic != "" {
+		headers[1] = httpc.Header{name = "Authorization", value = basic}
+		n_headers = 2
+	}
+	res, err := httpc.send({
+		method = .POST, url = endpoint, headers = headers[:n_headers], body = httpc.form_body(form),
+		timeout_ms = 5000, max_response_bytes = OIDC_MAX_RESPONSE_BYTES,
+	}, context.temp_allocator)
+	if err != .None {
+		fmt.printfln("ham-hub oidc_http_rejected reason=request_failed target=token error=%s", httpc.error_string(err))
 		return "", false
 	}
 	if res.status != 200 {
 		fmt.printfln("ham-hub oidc_http_rejected reason=http_status status=%d target=token", res.status)
 		return "", false
 	}
-	if len(res.body) > 1_048_576 do return "", false
-	return res.body, true
+	return httpc.text(res), true
 }
 
 // web_login_complete finishes the authorization-code flow. The login state is
@@ -505,19 +517,18 @@ web_login_complete :: proc(
 	if code == "" || len(code) > 4096 do return "", "", .Failed, "code_missing"
 	login := iface.OIDC_Login_State{nonce = sealed.n, code_verifier = sealed.v, return_to = sealed.r, expires_at_ms = sealed.e}
 
-	form := strings.concatenate({
-		"grant_type=authorization_code",
-		"&code=", form_encode(code),
-		"&redirect_uri=", form_encode(service.web.redirect_uri),
-		"&code_verifier=", form_encode(login.code_verifier),
-		"&client_id=", form_encode(service.web.client_id),
-	}, context.temp_allocator)
+	form := make([]httpc.Form_Field, 5, context.temp_allocator)
+	form[0] = {"grant_type", "authorization_code"}
+	form[1] = {"code", code}
+	form[2] = {"redirect_uri", service.web.redirect_uri}
+	form[3] = {"code_verifier", login.code_verifier}
+	form[4] = {"client_id", service.web.client_id}
 	basic := ""
 	if service.web.client_secret != "" {
-		pair := strings.concatenate({form_encode(service.web.client_id), ":", form_encode(service.web.client_secret)}, context.temp_allocator)
-		encoded, enc_err := base64.encode(transmute([]byte)pair, allocator = context.temp_allocator)
-		if enc_err != nil do return "", "", .Failed, "client_secret"
-		basic = strings.concatenate({"Basic ", encoded}, context.temp_allocator)
+		// client_secret_basic (RFC 6749 §2.3.1): id and secret form-encoded, then base64.
+		auth, auth_err := httpc.oauth_client_basic(service.web.client_id, service.web.client_secret)
+		if auth_err != .None do return "", "", .Failed, "client_secret"
+		basic = auth.value
 	}
 	body, exchanged := oidc_exchange_code(service, form, basic)
 	if !exchanged do return "", "", .Failed, "token_exchange"

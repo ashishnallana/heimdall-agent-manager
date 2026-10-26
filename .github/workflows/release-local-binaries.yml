@@ -178,6 +178,12 @@ jobs:
           extra_nix_config: |
             experimental-features = nix-command flakes
 
+      - name: Check the outbound HTTP boundary (src/lib/httpc only)
+        shell: bash
+        run: |
+          scripts/check-http-boundary.sh
+          scripts/check-http-boundary.sh --self-test
+
       - name: Stamp release version into source and flake
         shell: bash
         run: |
@@ -255,6 +261,10 @@ jobs:
       # execute without it. The packaging script already gates the staged tree;
       # this re-checks the final tarball and adds the execution proof that scan
       # alone cannot give. (matrix.target is defined in-file, not event data.)
+      # The Odin binaries (ham-bridge, ham-ctl, heimdall) link the host's glibc
+      # and libcurl.so.4 (src/lib/httpc), so they are proven on the runner's own
+      # stock userland with the nix profile removed from PATH and no nix library
+      # path; ham-pty-host stays fully static and keeps the storeless rootfs proof.
       - name: Verify release binaries are portable (Linux)
         if: ${{ startsWith(matrix.target, 'linux-') || startsWith(matrix.target, 'termux-') }}
         shell: bash
@@ -269,10 +279,16 @@ jobs:
               *) echo "FAIL: $f is not an ELF binary" >&2; exit 1 ;;
             esac
             interp="$(readelf -l "$f" 2>/dev/null | sed -n 's/.*Requesting program interpreter: \(.*\)].*/\1/p' || true)"
-            if [ -n "$interp" ]; then
-              echo "FAIL: $f has a program interpreter ($interp); release Linux binaries must be fully static" >&2
-              exit 1
-            fi
+            case "$(basename "$f"):$interp" in
+              ham-pty-host:) ;;
+              ham-pty-host:*)
+                echo "FAIL: $f has a program interpreter ($interp); ham-pty-host must be fully static" >&2
+                exit 1 ;;
+              *:/lib64/ld-linux-x86-64.so.2|*:/lib/ld-linux-aarch64.so.1|*:) ;;
+              *)
+                echo "FAIL: $f has program interpreter $interp; release binaries must use the FHS loader" >&2
+                exit 1 ;;
+            esac
             if readelf -d "$f" 2>/dev/null | grep -q '/nix/store'; then
               echo "FAIL: $f references /nix/store in its dynamic section" >&2
               exit 1
@@ -283,11 +299,17 @@ jobs:
           # dynamic one, and exits non-zero rather than skipping when it can
           # prove neither -- so this step cannot pass without executing.
           echo "storeless mechanism: $(scripts/release/storeless-exec.sh select)"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libcurl4t64 || sudo apt-get install -y -qq libcurl4
           for b in ham-bridge ham-ctl heimdall; do
-            echo "--- $b --version (storeless) ---"
-            out="$(scripts/release/storeless-exec.sh run "$work/bin/$b" --version)" || {
-              echo "FAIL: $b could not execute without /nix/store" >&2; exit 1; }
-            [ -n "$out" ] || { echo "FAIL: $b --version printed nothing storeless" >&2; exit 1; }
+            echo "--- $b --version (host glibc + libcurl, no nix) ---"
+            if ldd "$work/bin/$b" | grep -q '/nix/store'; then
+              echo "FAIL: $b resolves a library from /nix/store" >&2; exit 1
+            fi
+            ldd "$work/bin/$b"
+            out="$(env -i PATH=/usr/bin:/bin "$work/bin/$b" --version)" || {
+              echo "FAIL: $b could not execute on the stock host userland" >&2; exit 1; }
+            [ -n "$out" ] || { echo "FAIL: $b --version printed nothing" >&2; exit 1; }
             echo "$out"
           done
           echo "--- ham-pty-host --help (storeless) ---"
@@ -407,7 +429,7 @@ jobs:
         run: |
           foreach ($exe in Get-ChildItem dist/windows-bin -Filter *.exe) {
             $deps = (& dumpbin /nologo /dependents $exe.FullName) -join "`n"
-            if ($deps -match '(?i)(vcruntime|msvcp)[0-9]*\.dll|sqlite3\.dll') { throw "$($exe.Name) needs a non-system DLL:`n$deps" }
+            if ($deps -match '(?i)(vcruntime|msvcp)[0-9]*\.dll|sqlite3\.dll|libcurl[-0-9a-z]*\.dll') { throw "$($exe.Name) needs a non-system DLL:`n$deps" }
           }
           & dist/windows-bin/ham-bridge.exe --version; if ($LASTEXITCODE) { throw 'ham-bridge --version failed' }
           & dist/windows-bin/ham-bridge.exe --help; if ($LASTEXITCODE) { throw 'ham-bridge --help failed' }
@@ -476,6 +498,11 @@ jobs:
           if [ -e /nix/store ]; then
             echo "FAIL: this job must run without a Nix store" >&2
             exit 1
+          fi
+          # The Odin binaries link the host libcurl (src/lib/httpc).
+          if [ "$(uname -s)" = Linux ]; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq libcurl4t64 || sudo apt-get install -y -qq libcurl4
           fi
           work="$RUNNER_TEMP/storeless-verify"
           rm -rf "$work"

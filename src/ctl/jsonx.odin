@@ -4,17 +4,6 @@ import "core:fmt"
 import "core:strings"
 import jsonx "odin_test:lib/jsonx"
 
-safe_path_part :: proc(value: string) -> string {
-	builder := strings.builder_make()
-	for ch in value {
-		switch ch {
-		case 'a'..='z', 'A'..='Z', '0'..='9', '_', '-', '@', '.': strings.write_rune(&builder, ch)
-		case: strings.write_string(&builder, "_")
-		}
-	}
-	return strings.to_string(builder)
-}
-
 extract_json_string :: proc(body, key, fallback: string, allocator := context.allocator) -> string {
 	return jsonx.extract_string(body, key, fallback, false, allocator)
 }

@@ -4,45 +4,71 @@ import "core:fmt"
 import "core:os"
 import "core:strconv"
 import "core:strings"
+import httpc "odin_test:lib/httpc"
 
-ctl_work_ref_json :: proc(value: string) -> (string, bool) {
+// Ctl_Work_Ref is a typed work-graph item: {"kind":"task"|"workflow_run","id":…}.
+Ctl_Work_Ref :: struct {
+	kind: string `json:"kind"`,
+	id:   string `json:"id"`,
+}
+
+ctl_work_ref :: proc(value: string) -> (Ctl_Work_Ref, bool) {
 	colon := strings.index(value, ":")
-	if colon <= 0 || colon + 1 >= len(value) do return "", false
+	if colon <= 0 || colon + 1 >= len(value) do return {}, false
 	kind, id := value[:colon], value[colon + 1:]
-	if kind != "task" && kind != "workflow_run" do return "", false
-	return json_object(json_kv("kind", kind), json_kv("id", id)), true
+	if kind != "task" && kind != "workflow_run" do return {}, false
+	return Ctl_Work_Ref{kind = kind, id = id}, true
+}
+
+// Ctl_Mixed_Work_Params is the body of POST /api/v1/task-chains/<id>/work/<verb>
+// and the agent.work.* params. Field order matches the wire order per verb.
+Ctl_Mixed_Work_Params :: struct {
+	chain_id:               string              `json:"chain_id"`,
+	dependent:              Maybe(Ctl_Work_Ref) `json:"dependent,omitempty"`,
+	prerequisite:           Maybe(Ctl_Work_Ref) `json:"prerequisite,omitempty"`,
+	dependency_id:          string              `json:"dependency_id,omitempty"`,
+	item:                   Maybe(Ctl_Work_Ref) `json:"item,omitempty"`,
+	action:                 string              `json:"action,omitempty"`,
+	reason:                 string              `json:"reason,omitempty"`,
+	expected_work_revision: Maybe(i64)          `json:"expected_work_revision,omitempty"`,
+	summary:                string              `json:"summary,omitempty"`,
 }
 
 // One parser is used by direct user requests and agent Bridge envelopes.
-ctl_mixed_work_params :: proc(action, chain_id: string, args: []string) -> (string, bool) {
-	fields := make([dynamic]string, context.temp_allocator)
-	append(&fields, json_kv("chain_id", chain_id))
+ctl_mixed_work_body :: proc(action, chain_id: string, args: []string) -> (p: Ctl_Mixed_Work_Params, ok: bool) {
+	p.chain_id = chain_id
 	switch action {
 	case "graph":
 	case "depend":
-		dependent, dok := ctl_work_ref_json(option_value(args, "--item", ""))
-		prerequisite, pok := ctl_work_ref_json(option_value(args, "--on", ""))
-		if !dok || !pok do return "", false
-		append(&fields, json_kv_raw("dependent", dependent), json_kv_raw("prerequisite", prerequisite))
+		dependent, dok := ctl_work_ref(option_value(args, "--item", ""))
+		prerequisite, pok := ctl_work_ref(option_value(args, "--on", ""))
+		if !dok || !pok do return {}, false
+		p.dependent, p.prerequisite = dependent, prerequisite
 	case "remove-dependency":
 		id, reason := option_value(args, "--dependency", ""), strings.trim_space(option_value(args, "--reason", ""))
-		if id == "" || reason == "" do return "", false
-		append(&fields, json_kv("dependency_id", id), json_kv("reason", reason))
+		if id == "" || reason == "" do return {}, false
+		p.dependency_id, p.reason = id, reason
 	case "scope":
-		item, ok := ctl_work_ref_json(option_value(args, "--item", ""))
+		item, iok := ctl_work_ref(option_value(args, "--item", ""))
 		decision, reason := option_value(args, "--action", ""), strings.trim_space(option_value(args, "--reason", ""))
-		if !ok || (decision != "include" && decision != "exclude") || reason == "" do return "", false
-		append(&fields, json_kv_raw("item", item), json_kv("action", decision), json_kv("reason", reason))
+		if !iok || (decision != "include" && decision != "exclude") || reason == "" do return {}, false
+		p.item, p.action, p.reason = item, decision, reason
 	case "complete":
 		revision := option_value(args, "--expected-work-revision", "")
-		n, parsed := strconv.parse_int(revision)
+		n, parsed := strconv.parse_i64(revision)
 		summary := strings.trim_space(option_value(args, "--summary", ""))
-		if !parsed || n < 0 || summary == "" do return "", false
-		append(&fields, json_kv_raw("expected_work_revision", revision), json_kv("summary", summary))
+		if !parsed || n < 0 || summary == "" do return {}, false
+		p.expected_work_revision, p.summary = n, summary
 	case:
-		return "", false
+		return {}, false
 	}
-	return json_object_from_slice(fields[:]), true
+	return p, true
+}
+
+ctl_mixed_work_params :: proc(action, chain_id: string, args: []string) -> (string, bool) {
+	body, ok := ctl_mixed_work_body(action, chain_id, args)
+	if !ok do return "", false
+	return ctl_json_text(body, context.temp_allocator), true
 }
 
 CTL_MIXED_WORK_USAGE :: "usage: task-chain graph [<chain-id>]; depend [<chain-id>] --item task:ID|workflow_run:ID --on task:ID|workflow_run:ID; remove-dependency [<chain-id>] --dependency ID --reason TEXT; scope [<chain-id>] --item task:ID|workflow_run:ID --action include|exclude --reason TEXT; complete <chain-id> --expected-work-revision N --summary TEXT. graph/depend/remove-dependency/scope default to your chain; complete needs an explicit chain id (read work_revision from graph)."
@@ -74,8 +100,12 @@ ctl_mixed_work_command :: proc(transport: Ctl_Transport, action: string, args: [
 		ctl_agent_call_task(transport.agent_endpoint, transport.agent_token, ctl_mixed_work_agent_method(action), params, args)
 		return
 	}
-	method := "GET" if action == "graph" else "POST"
-	ctl_tasks_request_and_decrypt(transport, method, fmt.tprintf("/api/v1/task-chains/%s/work/%s", safe_path_part(cid), action), "" if action == "graph" else params, args)
+	if action == "graph" {
+		ctl_tasks_request_and_decrypt(transport, {method = .GET, path = ctl_api("task-chains", cid, "work", action)}, args)
+		return
+	}
+	body, _ := ctl_mixed_work_body(action, cid, args)
+	ctl_tasks_request_and_decrypt(transport, {method = .POST, path = ctl_api("task-chains", cid, "work", action), body = httpc.json_body(body)}, args)
 }
 
 ctl_print_error_exit :: proc(message: string) -> ! {
@@ -143,14 +173,19 @@ ctl_task_depends_on_flag :: proc(args: []string, names: ..string) -> (value: str
 	return "", false
 }
 
-// ctl_task_depend_workflow_params builds the chain-level edge
+// Ctl_Task_Depend_Workflow_Body is the chain-level edge
 // task:<task_id> -> workflow_run:<run_id>. An empty chain_id lets the Hub use
 // the calling agent's chain.
+Ctl_Task_Depend_Workflow_Body :: struct {
+	chain_id:     string       `json:"chain_id,omitempty"`,
+	dependent:    Ctl_Work_Ref `json:"dependent"`,
+	prerequisite: Ctl_Work_Ref `json:"prerequisite"`,
+}
+
+ctl_task_depend_workflow_body :: proc(chain_id, task_id, run_id: string) -> Ctl_Task_Depend_Workflow_Body {
+	return {chain_id = chain_id, dependent = {kind = "task", id = task_id}, prerequisite = {kind = "workflow_run", id = run_id}}
+}
+
 ctl_task_depend_workflow_params :: proc(chain_id, task_id, run_id: string) -> string {
-	fields := make([dynamic]string, context.temp_allocator)
-	if chain_id != "" do append(&fields, json_kv("chain_id", chain_id))
-	append(&fields,
-		json_kv_raw("dependent", json_object(json_kv("kind", "task"), json_kv("id", task_id))),
-		json_kv_raw("prerequisite", json_object(json_kv("kind", "workflow_run"), json_kv("id", run_id))))
-	return json_object_from_slice(fields[:])
+	return ctl_json_text(ctl_task_depend_workflow_body(chain_id, task_id, run_id), context.temp_allocator)
 }

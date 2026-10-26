@@ -5,7 +5,7 @@ import "core:fmt"
 import "core:os"
 import "core:strings"
 import "core:time"
-import http "odin_test:lib/http_client"
+import httpc "odin_test:lib/httpc"
 
 // Bridge_Bootstrap_Result carries the staged outcome of a conditional bootstrap
 // fetch so callers (and logs) can distinguish WHERE a launch failed instead of
@@ -46,25 +46,28 @@ bridge_bootstrap_backoff_sleep :: proc(attempt: int) {
 // bridge_bootstrap_http_get_retry issues a GET with retry/backoff. It treats a
 // transport failure OR a 5xx/429 as retriable; any other status is returned to
 // the caller to interpret (200/304/404/...). The final response+ok are returned.
-bridge_bootstrap_http_get_retry :: proc(hub_url, path: string, headers: []http.Header, deadline_ns: i64 = 0) -> (http.Response, bool) {
-	return bridge_http_request_retry("GET", hub_url, path, "", headers, http.DEFAULT_TIMEOUT_MS, deadline_ns = deadline_ns)
+bridge_bootstrap_http_get_retry :: proc(req: httpc.Request, deadline_ns: i64 = 0) -> (httpc.Response, httpc.Error) {
+	get := req
+	get.method = .GET
+	return bridge_http_request_retry(get, deadline_ns = deadline_ns)
 }
 
 bridge_bootstrap_fetch_and_materialize :: proc(hub_url, bridge_token, instance_id, run_dir, bridge_endpoint, agent_token, provider: string) -> bool {
 	if strings.trim_space(hub_url) == "" || strings.trim_space(bridge_token) == "" || strings.trim_space(instance_id) == "" || strings.trim_space(run_dir) == "" do return false
-	path := strings.concatenate({"/api/v1/bridge/agent-instances/", instance_id, "/bootstrap"})
-	headers := [?]http.Header{{name = "Authorization", value = strings.concatenate({"Bearer ", bridge_token})}}
-	resp, ok := bridge_http_request_retry("GET", hub_url, path, "", headers[:], http.DEFAULT_TIMEOUT_MS)
-	if !ok || resp.status != 200 do return false
+	headers := [?]httpc.Header{httpc.bearer(bridge_token)}
+	resp, http_err := bridge_http_request_retry({method = .GET, url = bridge_hub_url(hub_url), path = {"api", "v1", "bridge", "agent-instances", instance_id, "bootstrap"}, headers = headers[:]})
+	defer httpc.response_destroy(&resp)
+	if http_err != .None || resp.status != 200 do return false
+	resp_body := httpc.text(resp)
 	_ = bridge_make_directory_all(run_dir)
-	content := bridge_bootstrap_decrypt_owned(extract_json_string(resp.body, "content", strings.concatenate({"# Agent bootstrap\n\nInstance: ", instance_id, "\n"})))
+	content := bridge_bootstrap_decrypt_owned(extract_json_string(resp_body, "content", strings.concatenate({"# Agent bootstrap\n\nInstance: ", instance_id, "\n"})))
 	agents_md_name := bridge_bootstrap_agents_md_name(provider)
 	bridge_bootstrap_cleanup_stale_agents_md(run_dir, agents_md_name)
 	if os.write_entire_file(strings.concatenate({strings.trim_right(run_dir, "/"), "/", agents_md_name}), content) != nil do return false
-	mem_content := extract_json_string(resp.body, "memory_md", "")
+	mem_content := extract_json_string(resp_body, "memory_md", "")
 	if mem_content == "" {
 		delete(mem_content)
-		mem_content = extract_json_string(resp.body, "MEMORY.md", "")
+		mem_content = extract_json_string(resp_body, "MEMORY.md", "")
 	}
 	mem_content = bridge_bootstrap_decrypt_owned(mem_content)
 	has_mem := mem_content != ""
@@ -74,7 +77,7 @@ bridge_bootstrap_fetch_and_materialize :: proc(hub_url, bridge_token, instance_i
 		_ = os.write_entire_file(mem_path, transmute([]u8)mem_content)
 	}
 	delete(mem_content)
-	skill_paths := bridge_bootstrap_write_skills(run_dir, provider, resp.body)
+	skill_paths := bridge_bootstrap_write_skills(run_dir, provider, resp_body)
 	if !bridge_bootstrap_write_ham_ctl_wrapper(run_dir, bridge_endpoint, agent_token, instance_id) do return false
 	manifest := strings.builder_make()
 	strings.write_string(&manifest, "{\"agent_instance_id\":\""); strings.write_string(&manifest, instance_id)
@@ -400,39 +403,30 @@ bridge_bootstrap_descriptor_from_launch :: proc(command_json: string) -> Bridge_
 // All hub calls retry individually with backoff; failures surface the stage +
 // HTTP status via Bridge_Bootstrap_Result.
 bridge_bootstrap_conditional_manifest :: proc(hub_url, bridge_token, provider: string, d: Bridge_Bootstrap_Descriptor, cache: ^Bootstrap_Cache, deadline_ns: i64 = 0) -> (string, Bridge_Bootstrap_Result) {
-	auth := strings.concatenate({"Bearer ", bridge_token})
-	defer delete(auth)
+	auth := httpc.bearer(bridge_token)
 
 	// Load any persisted ETag/manifest for this key to drive If-None-Match.
 	prev_etag, prev_manifest, have_prev := bootstrap_manifest_store_load(cache, d.agent_id, d.role, provider, d.project_id)
 	defer if have_prev { delete(prev_etag); delete(prev_manifest) }
 
-	path := strings.concatenate({
-		"/api/v1/bridge/agents/", d.agent_id, "/bootstrap-manifest",
-		"?role=", d.role, "&provider=", provider, "&project=", d.project_id,
-	})
-	defer delete(path)
-
 	manifest_json := ""
 	{
-		headers_dyn := make([dynamic]http.Header)
-		defer delete(headers_dyn)
-		append(&headers_dyn, http.Header{name = "Authorization", value = auth})
-		inm_value := ""
-		if have_prev {
-			inm_value = strings.concatenate({"\"", prev_etag, "\""})
-			append(&headers_dyn, http.Header{name = "If-None-Match", value = inm_value})
-		}
-		defer if inm_value != "" do delete(inm_value)
+		headers_dyn := make([dynamic]httpc.Header, context.temp_allocator)
+		append(&headers_dyn, auth)
+		if have_prev do append(&headers_dyn, httpc.if_none_match(prev_etag))
 
 		if bridge_command_deadline_expired(deadline_ns) {
 			return "", Bridge_Bootstrap_Result{ok = false, stage = "manifest_get", detail = "bootstrap command deadline exceeded"}
 		}
-		resp, ok := bridge_bootstrap_http_get_retry(hub_url, path, headers_dyn[:], deadline_ns)
-		if !ok {
+		resp, http_err := bridge_bootstrap_http_get_retry({
+			url = bridge_hub_url(hub_url), path = {"api", "v1", "bridge", "agents", d.agent_id, "bootstrap-manifest"},
+			query = {{"role", d.role}, {"provider", provider}, {"project", d.project_id}}, headers = headers_dyn[:],
+		}, deadline_ns)
+		defer httpc.response_destroy(&resp)
+		if http_err != .None {
 			return "", Bridge_Bootstrap_Result{ok = false, stage = "manifest_get", http_status = resp.status, detail = "conditional manifest GET failed after retries"}
 		}
-		defer delete(resp.body)
+		resp_body := httpc.text(resp)
 		if resp.status == 304 {
 			if !have_prev {
 				return "", Bridge_Bootstrap_Result{ok = false, stage = "manifest_get", http_status = 304, detail = "hub returned 304 but bridge has no cached manifest"}
@@ -441,17 +435,17 @@ bridge_bootstrap_conditional_manifest :: proc(hub_url, bridge_token, provider: s
 			manifest_json = strings.clone(prev_manifest)
 		} else if resp.status == 200 {
 			// The manifest body is wrapped in the hub API envelope {"data": ...}.
-			data_obj, data_ok := bridge_provider_json_extract_object(resp.body, "data")
+			data_obj, data_ok := bridge_provider_json_extract_object(resp_body, "data")
 			if !data_ok {
 				return "", Bridge_Bootstrap_Result{ok = false, stage = "manifest_get", http_status = 200, detail = "manifest 200 missing data object"}
 			}
 			// NOTE: data_obj is an ALIAS into resp.body (not an owned clone), so it
-			// must NOT be freed here — resp.body is freed by the defer above. version
-			// is json_unescape'd (owned) so it IS freed.
+			// must NOT be freed here — the response is destroyed by the defer above.
+			// version is json_unescape'd (owned) so it IS freed.
 			version := bridge_provider_json_extract_string(data_obj, "version", "")
 			defer delete(version)
-			// Reconstruct the ETag from the manifest body (the http_client does not
-			// surface response headers): {agent}:{role}:{provider}:{project}:{version}.
+			// Reconstruct the ETag from the manifest body, the same derivation the hub
+			// uses for its ETag: {agent}:{role}:{provider}:{project}:{version}.
 			etag := strings.concatenate({d.agent_id, ":", d.role, ":", provider, ":", d.project_id, ":", version})
 			defer delete(etag)
 			fmt.println("bridge bootstrap manifest MISS (200)", "agent=", d.agent_id, "role=", d.role, "provider=", provider, "project=", d.project_id, "version=", version)
@@ -475,10 +469,10 @@ bridge_bootstrap_conditional_manifest :: proc(hub_url, bridge_token, provider: s
 // hashes and ensures each is present in the disk cache, fetching only the missing
 // ones via GET /api/v1/bridge/blobs/{hash} (BRG-2). Logs HIT(disk) vs FETCH(hub)
 // per hash (LOG-1).
-bridge_bootstrap_fetch_missing_blobs :: proc(hub_url, auth, manifest_json: string, cache: ^Bootstrap_Cache, deadline_ns: i64 = 0) -> Bridge_Bootstrap_Result {
+bridge_bootstrap_fetch_missing_blobs :: proc(hub_url: string, auth: httpc.Header, manifest_json: string, cache: ^Bootstrap_Cache, deadline_ns: i64 = 0) -> Bridge_Bootstrap_Result {
 	hashes := bridge_bootstrap_collect_manifest_hashes(manifest_json)
 	defer { for h in hashes do delete(h); delete(hashes) }
-	headers := [?]http.Header{{name = "Authorization", value = auth}}
+	headers := [?]httpc.Header{auth}
 	for h in hashes {
 		if bridge_command_deadline_expired(deadline_ns) {
 			return Bridge_Bootstrap_Result{ok = false, stage = "blob_fetch", detail = "bootstrap command deadline exceeded"}
@@ -487,16 +481,15 @@ bridge_bootstrap_fetch_missing_blobs :: proc(hub_url, auth, manifest_json: strin
 			fmt.println("bridge bootstrap blob HIT (disk)", "hash=", h)
 			continue
 		}
-		blob_path := strings.concatenate({"/api/v1/bridge/blobs/", bridge_bootstrap_url_encode(h)})
-		resp, ok := bridge_bootstrap_http_get_retry(hub_url, blob_path, headers[:], deadline_ns)
-		delete(blob_path)
-		if !ok || resp.status != 200 {
+		// The hash ("sha256:<hex>") is one path segment; httpc encodes its ':'.
+		resp, http_err := bridge_bootstrap_http_get_retry({url = bridge_hub_url(hub_url), path = {"api", "v1", "bridge", "blobs", h}, headers = headers[:]}, deadline_ns)
+		if http_err != .None || resp.status != 200 {
 			status := resp.status
-			delete(resp.body)
+			httpc.response_destroy(&resp)
 			return Bridge_Bootstrap_Result{ok = false, stage = "blob_fetch", http_status = status, detail = strings.concatenate({"blob fetch failed for ", h})}
 		}
-		body := bridge_provider_json_extract_string(resp.body, "body", "")
-		delete(resp.body)
+		body := bridge_provider_json_extract_string(httpc.text(resp), "body", "")
+		httpc.response_destroy(&resp)
 		if cache != nil {
 			if !bootstrap_cache_put(cache, h, body) {
 				delete(body)
@@ -558,19 +551,6 @@ bridge_bootstrap_collect_manifest_hashes :: proc(manifest_json: string) -> [dyna
 	return out
 }
 
-// bridge_bootstrap_url_encode percent-encodes the ':' in a sha256:<hex> hash so it
-// survives as a single path segment (the hub decodes %3A back to ':').
-bridge_bootstrap_url_encode :: proc(value: string) -> string {
-	b := strings.builder_make()
-	for i in 0..<len(value) {
-		ch := value[i]
-		switch ch {
-		case 'a'..='z', 'A'..='Z', '0'..='9', '-', '_', '.': strings.write_byte(&b, ch)
-		case: fmt.sbprintf(&b, "%%%02X", ch)
-		}
-	}
-	return strings.to_string(b)
-}
 
 // bridge_bootstrap_render_header renders the AGENTS.md header LOCALLY from the
 // per-instance descriptor (comment 3 / DM): the hub's agent-keyed manifest carries
@@ -1101,12 +1081,16 @@ bridge_bootstrap_launch_materialize_run_dir :: proc(hub_url, bridge_token, run_d
 
 bridge_bootstrap_fetch_manifest_and_materialize :: proc(hub_url, bridge_token, instance_id, run_dir, bridge_endpoint, agent_token, provider: string, cache: ^Bootstrap_Cache) -> bool {
 	if strings.trim_space(hub_url) == "" || strings.trim_space(bridge_token) == "" || strings.trim_space(instance_id) == "" || strings.trim_space(run_dir) == "" do return false
-	path := strings.concatenate({"/api/v1/bridge/agent-instances/", instance_id, "/bootstrap?format=manifest"})
-	headers := [?]http.Header{{name = "Authorization", value = strings.concatenate({"Bearer ", bridge_token})}}
-	resp, ok := bridge_http_request_retry("GET", hub_url, path, "", headers[:], http.DEFAULT_TIMEOUT_MS)
-	if !ok || resp.status != 200 do return false
+	headers := [?]httpc.Header{httpc.bearer(bridge_token)}
+	hub := bridge_hub_url(hub_url)
+	resp, http_err := bridge_http_request_retry({
+		method = .GET, url = hub, path = {"api", "v1", "bridge", "agent-instances", instance_id, "bootstrap"},
+		query = {{"format", "manifest"}}, headers = headers[:],
+	})
+	defer httpc.response_destroy(&resp)
+	if http_err != .None || resp.status != 200 do return false
 
-	data_obj, data_ok := bridge_provider_json_extract_object(resp.body, "data")
+	data_obj, data_ok := bridge_provider_json_extract_object(httpc.text(resp), "data")
 	if !data_ok do return false
 	protocol, _ := bridge_provider_json_extract_int(data_obj, "protocol")
 	if protocol != 2 do return false
@@ -1187,24 +1171,20 @@ bridge_bootstrap_fetch_manifest_and_materialize :: proc(hub_url, bridge_token, i
 	}
 
 	if len(missing_hashes) > 0 {
-		req_b := strings.builder_make()
-		strings.write_string(&req_b, "{\"hashes\":[")
-		for m_hash, i in missing_hashes {
-			if i > 0 do strings.write_byte(&req_b, ',')
-			strings.write_byte(&req_b, '"')
-			bridge_bootstrap_json_string(&req_b, m_hash)
-			strings.write_byte(&req_b, '"')
+		Blob_Request :: struct {
+			hashes: []string `json:"hashes"`,
 		}
-		strings.write_string(&req_b, "]}")
-		blob_body := strings.to_string(req_b)
+		post_resp, post_err := httpc.send({
+			method = .POST, url = hub, path = {"api", "v1", "bridge", "blobs"}, headers = headers[:],
+			body = httpc.json_body(Blob_Request{hashes = missing_hashes[:]}),
+		})
+		defer httpc.response_destroy(&post_resp)
+		if post_err != .None || post_resp.status != 200 do return false
+		post_body := httpc.text(post_resp)
 
-		post_resp, post_ok := http.request_with_headers_timeout("POST", hub_url, "/api/v1/bridge/blobs", blob_body, headers[:], http.DEFAULT_TIMEOUT_MS)
-		if !post_ok || post_resp.status != 200 do return false
-		defer delete(post_resp.body)
-
-		post_data_obj, post_data_ok := bridge_provider_json_extract_object(post_resp.body, "data")
+		post_data_obj, post_data_ok := bridge_provider_json_extract_object(post_body, "data")
 		if !post_data_ok {
-			post_data_obj, post_data_ok = bridge_provider_json_extract_object(post_resp.body, "")
+			post_data_obj, post_data_ok = bridge_provider_json_extract_object(post_body, "")
 			if !post_data_ok do return false
 		}
 

@@ -5,8 +5,14 @@ import "core:os"
 import "core:strings"
 import "odin_test:contracts"
 import cfg_lib "odin_test:lib/config"
+import httpc "odin_test:lib/httpc"
 
 main :: proc() {
+	// libcurl's global init must run once before any thread starts.
+	if ok, msg := httpc.init(); !ok {
+		fmt.eprintln(msg)
+		os.exit(1)
+	}
 	// Zero the resolved vault keyring on every normal return path.
 	defer ctl_vault_wipe()
 	if len(os.args) == 2 && os.args[1] == "--version" {
@@ -25,7 +31,7 @@ main :: proc() {
 		url := hub_user_mode_url(os.args)
 		if url == "" do url = "http://127.0.0.1:49328"
 		tok := hub_user_mode_token(os.args)
-		ctl_hub_request(strings.trim_right(url, "/"), tok, "GET", "/api/v1/health", "")
+		ctl_hub_request(ctl_hub_make(strings.trim_right(url, "/"), tok), {method = .GET, path = ctl_api("health")})
 		return
 	}
 
@@ -141,7 +147,7 @@ main :: proc() {
 			fmt.println(`{"ok":false,"message":"actions requires --hub-url and --user-token (or HAM_HUB_URL/HEIMDALL_HUB_URL and HAM_HUB_USER_TOKEN/HEIMDALL_USER_TOKEN)"}`)
 			return
 		}
-		ctl_hub_actions(strings.trim_right(url, "/"), tok, cmd[1:], os.args)
+		ctl_hub_actions(ctl_hub_make(strings.trim_right(url, "/"), tok), cmd[1:], os.args)
 		return
 	}
 

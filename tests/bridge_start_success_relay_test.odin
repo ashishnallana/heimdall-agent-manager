@@ -20,7 +20,6 @@ import "core:os"
 import "core:strings"
 import "core:thread"
 import "core:time"
-import http "odin_test:lib/http_client"
 import bridge "odin_test:bridge"
 
 check :: proc(ok: bool, msg: string) {
@@ -84,7 +83,7 @@ test_agent_relay_retries_5xx_then_200 :: proc() {
 		role              = .Agent,
 	}
 
-	relay := bridge.bridge_local_relay_agent_envelope("/api/v1/agent-actions/start-success", "agent.start_success", "{}", rec)
+	relay := bridge.bridge_local_relay_agent_envelope(bridge.route_path("api", "v1", "agent-actions", "start-success"), "agent.start_success", "{}", rec)
 	check(relay.ok, "agent relay must succeed after retrying the 503")
 	check(relay.status == 200, "agent relay status must be 200 after retry")
 	check(strings.contains(relay.body, "accepted"), "relay body must carry the hub 200 payload")

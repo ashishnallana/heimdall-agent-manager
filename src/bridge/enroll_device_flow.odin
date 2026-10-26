@@ -50,7 +50,7 @@ import "core:time"
 import "core:encoding/json"
 import contracts "odin_test:contracts"
 import cfg_lib "odin_test:lib/config"
-import http "odin_test:lib/http_client"
+import httpc "odin_test:lib/httpc"
 import vault "odin_test:lib/vault"
 
 // ===== Endpoints, all derived from the one UI origin (REQ-ENROLL-10) =====
@@ -58,8 +58,8 @@ import vault "odin_test:lib/vault"
 // These are the routes that EXIST (see the hub's route table): settled 1 reused
 // the existing device grant rather than standing up the `/api/v1/bridge-device/*`
 // family design §9.3 names, so the design's paths are stale and these are not.
-BRIDGE_ENROLL_AUTHORIZE_PATH :: "/api/v1/device/authorize"
-BRIDGE_ENROLL_TOKEN_PATH :: "/api/v1/device/token"
+BRIDGE_ENROLL_AUTHORIZE_PATH :: [?]string{"api", "v1", "device", "authorize"}
+BRIDGE_ENROLL_TOKEN_PATH :: [?]string{"api", "v1", "device", "token"}
 // Path-form entry to the approval page. The Hub 302s it to the UI hash route
 // `/#/device/add[?code=…]` (GET /api/v1/device/add). A path, not the hash route
 // itself, because a forward-auth login round trip (`rd=<url>`) keeps path and
@@ -67,7 +67,7 @@ BRIDGE_ENROLL_TOKEN_PATH :: "/api/v1/device/token"
 // The UI uses the Hub's stored bridge key only after the operator confirms its
 // fingerprint against this terminal.
 BRIDGE_ENROLL_PAGE_PATH :: "/api/v1/device/add"
-BRIDGE_ENROLL_REFRESH_PATH :: "/api/v1/device/bridge-refresh"
+BRIDGE_ENROLL_REFRESH_PATH :: [?]string{"api", "v1", "device", "bridge-refresh"}
 
 // 32 bytes for the PKCE verifier (RFC 7636 §4.1 permits 43-128 chars; 32 raw
 // bytes is 43 base64url chars, the minimum, and 256 bits of entropy).
@@ -360,7 +360,8 @@ Bridge_Authorize_Request :: struct {
 	previous_bridge_id:         string `json:"previous_bridge_id,omitempty"`,
 }
 
-// bridge_enroll_authorize_body builds the /device/authorize request body.
+// bridge_enroll_authorize_body builds the /device/authorize request body as JSON
+// text (tests); the request itself sends bridge_enroll_authorize_request.
 bridge_enroll_authorize_body :: proc(
 	d: Bridge_Machine_Descriptor,
 	public_key_hex, code_challenge: string,
@@ -373,6 +374,25 @@ bridge_enroll_authorize_body :: proc(
 	previous_bridge_id: string = "",
 	allocator := context.allocator,
 ) -> string {
+	body := bridge_enroll_authorize_request(d, public_key_hex, code_challenge, identity_public_key_hex, identity_proof_json, pair_lookup, pair_key_mac, pair_salt, pair_hub_origin, previous_bridge_id)
+	data, err := json.marshal(body, allocator = allocator)
+	if err != nil do return ""
+	return string(data)
+}
+
+// bridge_enroll_authorize_request is the /device/authorize request value
+// (marshalled by httpc.json_body). Strings are temp-allocated or borrowed.
+bridge_enroll_authorize_request :: proc(
+	d: Bridge_Machine_Descriptor,
+	public_key_hex, code_challenge: string,
+	identity_public_key_hex: string = "",
+	identity_proof_json: string = "",
+	pair_lookup: string = "",
+	pair_key_mac: string = "",
+	pair_salt: string = "",
+	pair_hub_origin: string = "",
+	previous_bridge_id: string = "",
+) -> Bridge_Authorize_Request {
 	body := Bridge_Authorize_Request{
 		client = "ham-bridge", device_label = d.hostname, os = bridge_enroll_os_display(d),
 		app_version = d.bridge_version, os_user = d.os_user, bridge_public_key = public_key_hex,
@@ -384,9 +404,7 @@ bridge_enroll_authorize_body :: proc(
 	if identity_proof_json != "" {
 		if sw, ok := vault.signature_wire_from_text(identity_proof_json, context.temp_allocator); ok do body.bridge_identity_proof = sw
 	}
-	data, err := json.marshal(body, allocator = allocator)
-	if err != nil do return ""
-	return string(data)
+	return body
 }
 
 // Bridge_Authorize_Response is the API envelope of a /device/authorize answer.
@@ -435,18 +453,21 @@ bridge_enroll_poll_once :: proc(
 	api_base, device_code, code_verifier: string,
 	allocator := context.allocator,
 ) -> (Bridge_Enroll_Poll_Status, Bridge_Enroll_Credential, int) {
-	body, body_ok := vault.wire_encode(Bridge_Token_Request{device_code = device_code, code_verifier = code_verifier}, context.temp_allocator)
-	if !body_ok do return .Fatal, Bridge_Enroll_Credential{}, 0
-	resp, ok := http.request_with_headers_timeout(
-		"POST", api_base, BRIDGE_ENROLL_TOKEN_PATH, body, nil, http.DEFAULT_TIMEOUT_MS)
-	if !ok {
+	token_path := BRIDGE_ENROLL_TOKEN_PATH
+	resp, http_err := httpc.send({
+		method = .POST, url = bridge_hub_url(api_base), path = token_path[:],
+		body = httpc.json_body(Bridge_Token_Request{device_code = device_code, code_verifier = code_verifier}),
+	})
+	defer httpc.response_destroy(&resp)
+	if http_err == .Invalid_Body || http_err == .Invalid_Url do return .Fatal, Bridge_Enroll_Credential{}, 0
+	if http_err != .None {
 		// Transport failure is NOT fatal and NOT pending-forever: the caller treats
 		// it as a retryable tick, because a flapping tunnel during a 15-minute
 		// ceremony is ordinary.
 		return .Pending, Bridge_Enroll_Credential{}, 0
 	}
 	if resp.status == 429 {
-		return .Slow_Down, Bridge_Enroll_Credential{}, bridge_token_response_decode(resp.body).interval
+		return .Slow_Down, Bridge_Enroll_Credential{}, bridge_token_response_decode(httpc.text(resp)).interval
 	}
 	if resp.status == 401 {
 		fmt.eprintln("enroll FAILED: the Hub rejected this bridge's PKCE proof (401). The device code cannot be redeemed by this process.")
@@ -454,13 +475,13 @@ bridge_enroll_poll_once :: proc(
 		return .Fatal, Bridge_Enroll_Credential{}, 0
 	}
 	if resp.status != 200 {
-		fmt.eprintfln("enroll: unexpected HTTP %d from the token endpoint — %s", resp.status, resp.body)
+		fmt.eprintfln("enroll: unexpected HTTP %d from the token endpoint — %s", resp.status, httpc.text(resp))
 		blog_error(.enroll_failed, blog_sym(.stage, .token), blog_int(.hub_status, i64(resp.status)))
 		return .Fatal, Bridge_Enroll_Credential{}, 0
 	}
-	switch bridge_token_response_decode(resp.body).status {
+	switch bridge_token_response_decode(httpc.text(resp)).status {
 	case "approved":
-		return .Approved, bridge_enroll_credential_from_json(resp.body, allocator), 0
+		return .Approved, bridge_enroll_credential_from_json(httpc.text(resp), allocator), 0
 	case "denied":
 		return .Denied, Bridge_Enroll_Credential{}, 0
 	case "expired":
@@ -470,7 +491,7 @@ bridge_enroll_poll_once :: proc(
 	case "pending":
 		return .Pending, Bridge_Enroll_Credential{}, 0
 	}
-	fmt.eprintfln("enroll: unrecognised poll status in the Hub's response — %s", resp.body)
+	fmt.eprintfln("enroll: unrecognised poll status in the Hub's response — %s", httpc.text(resp))
 	return .Fatal, Bridge_Enroll_Credential{}, 0
 }
 
@@ -1278,35 +1299,39 @@ bridge_enroll_device_command :: proc(args: []string) -> bool {
 	defer bridge_pairing_disarm()
 
 	// Step 4 — the anonymous device-authorization request.
-	body := bridge_enroll_authorize_body(descriptor, public_key_hex, code_challenge, identity_hex, identity_proof, vault.pair_lookup_hex(&pair_keys, context.temp_allocator), pair_key_mac, pair_salt, pair_origin, reuse_hint, context.temp_allocator)
-	if body == "" {
+	authorize_req := bridge_enroll_authorize_request(descriptor, public_key_hex, code_challenge, identity_hex, identity_proof, vault.pair_lookup_hex(&pair_keys, context.temp_allocator), pair_key_mac, pair_salt, pair_origin, reuse_hint)
+	authorize_body := httpc.json_body(authorize_req)
+	if authorize_body.(httpc.Json_Body).failed {
 		fmt.eprintln("ham-bridge enroll: could not encode the authorize request")
 		return false
 	}
-	fmt.printfln("bridge enroll: POST %s%s (no token — host=%s user=%s)",
-		api_base, BRIDGE_ENROLL_AUTHORIZE_PATH, descriptor.hostname, descriptor.os_user)
+	hub := bridge_hub_url(api_base)
+	authorize_path := BRIDGE_ENROLL_AUTHORIZE_PATH
+	authorize_url, _ := httpc.build_url(hub, authorize_path[:], allocator = context.temp_allocator)
+	fmt.printfln("bridge enroll: POST %s (no token — host=%s user=%s)",
+		authorize_url, descriptor.hostname, descriptor.os_user)
 	if reuse_hint != "" {
 		fmt.printfln("  asking to reuse bridge %s (%s); the approver chooses to reuse it or register a new bridge",
 			reuse_hint, "--reuse-bridge" if has_flag(args, BRIDGE_ENROLL_REUSE_FLAG) else "this config's previous enrollment")
 	} else if has_flag(args, BRIDGE_ENROLL_NEW_FLAG) {
 		fmt.println("  registering a new bridge (--new-bridge): no previous bridge id is offered for reuse")
 	}
-	resp, sent := http.request_with_headers_timeout(
-		"POST", api_base, BRIDGE_ENROLL_AUTHORIZE_PATH, body, nil, http.DEFAULT_TIMEOUT_MS)
-	if !sent {
-		fmt.eprintfln("bridge enroll FAILED: could not reach %s — check the URL and that the proxy is up (transport error, no HTTP response)", api_base)
+	resp, authorize_err := httpc.send({method = .POST, url = hub, path = authorize_path[:], body = authorize_body})
+	defer httpc.response_destroy(&resp)
+	if authorize_err != .None {
+		fmt.eprintfln("bridge enroll FAILED: could not reach %s — check the URL and that the proxy is up (%s: %s)", api_base, httpc.error_string(authorize_err), resp.detail)
 		blog_error(.enroll_failed, blog_sym(.stage, .authorize), blog_sym(.reason, .transport))
 		return false
 	}
 	if resp.status != 200 {
-		fmt.eprintfln("bridge enroll FAILED: hub returned HTTP %d — %s", resp.status, resp.body)
+		fmt.eprintfln("bridge enroll FAILED: hub returned HTTP %d — %s", resp.status, httpc.text(resp))
 		blog_error(.enroll_failed, blog_sym(.stage, .authorize), blog_int(.hub_status, i64(resp.status)))
 		if resp.status == 404 do fmt.eprintln("  hint: --hub must point at the Hub API origin.")
 		return false
 	}
 	authorized: Bridge_Authorize_Response
-	if json.unmarshal_string(resp.body, &authorized, json.Specification.JSON, context.temp_allocator) != nil || authorized.data.device_code == "" {
-		fmt.eprintfln("bridge enroll FAILED: the hub's authorize response carried no device_code — %s", resp.body)
+	if json.unmarshal(resp.body, &authorized, json.Specification.JSON, context.temp_allocator) != nil || authorized.data.device_code == "" {
+		fmt.eprintfln("bridge enroll FAILED: the hub's authorize response carried no device_code — %s", httpc.text(resp))
 		return false
 	}
 	device_code := authorized.data.device_code
@@ -1691,20 +1716,31 @@ bridge_credential_snapshot :: proc(allocator := context.allocator) -> string {
 }
 
 bridge_credential_refresh_typed :: proc(api_base, refresh_token, request_id: string, timeout_ms: int) -> (Bridge_Enroll_Credential, bool, contracts.Wire_Error, bool) {
-    headers := make([dynamic]http.Header, 0, 2, context.temp_allocator)
-    append(&headers, http.Header{name = "Authorization", value = strings.concatenate({"Bearer ", refresh_token}, context.temp_allocator)})
-    if request_id != "" do append(&headers, http.Header{name = BRIDGE_REFRESH_REQUEST_ID_HEADER, value = request_id})
-    resp, ok := http.request_with_headers_deadline("POST", api_base, BRIDGE_ENROLL_REFRESH_PATH, "{}", headers[:], timeout_ms)
-    defer delete(resp.body)
-    return bridge_refresh_response_classify(resp, ok, api_base)
+    headers := make([dynamic]httpc.Header, 0, 2, context.temp_allocator)
+    append(&headers, httpc.bearer(refresh_token))
+    if request_id != "" do append(&headers, httpc.Header{name = BRIDGE_REFRESH_REQUEST_ID_HEADER, value = request_id})
+    refresh_path := BRIDGE_ENROLL_REFRESH_PATH
+    // One cumulative deadline over DNS, connect, TLS, send and every read; a
+    // spent budget fails without I/O (may_have_sent false).
+    resp, http_err := httpc.send({
+        method = .POST, url = bridge_hub_url(api_base), path = refresh_path[:], headers = headers[:],
+        body = httpc.json_body(struct{}{}), timeout_ms = bridge_deadline_ms(timeout_ms),
+    })
+    defer httpc.response_destroy(&resp)
+    return bridge_refresh_response_classify(resp, http_err == .None, api_base)
 }
-bridge_refresh_response_classify :: proc(resp: http.Response, ok: bool, api_base: string) -> (Bridge_Enroll_Credential, bool, contracts.Wire_Error, bool) {
-    err := bridge_operation_http_error(resp, ok, api_base)
+// bridge_refresh_response_classify -> (credential, ok, error, unknown_outcome).
+// unknown_outcome is true when the hub may have rotated the refresh token: a
+// transport failure after request bytes may have left (httpc may_have_sent), a
+// retriable status that cannot be proved a pre-rotation refusal, or a 200 whose
+// reply is unusable.
+bridge_refresh_response_classify :: proc(resp: httpc.Response, ok: bool, api_base: string) -> (Bridge_Enroll_Credential, bool, contracts.Wire_Error, bool) {
+    err := bridge_operation_http_error(resp, ok)
     if !ok do return {}, false, err, resp.may_have_sent
     if resp.status != 200 {
         // Retain typed code/class, while independently fencing a POST that
         // cannot be proved to have been refused before token rotation.
-        uncertain := err.class == .retriable && !bridge_http_attempt_retriable("POST", resp, true)
+        uncertain := err.class == .retriable && !bridge_http_attempt_retriable(.POST, resp, true)
         return {}, false, err, uncertain
     }
     // A 200 means the hub ROTATED: the presented refresh token is spent. A reply
@@ -1712,7 +1748,7 @@ bridge_refresh_response_classify :: proc(resp: http.Response, ok: bool, api_base
     // outcome, never a timeout. Say so, with what is safe to log (the length and
     // the decoder's complaint, never a token), and let the request-id retry
     // recover the rotation.
-    data, decode_problem := contracts.bridge_token_response_decode_checked(resp.body)
+    data, decode_problem := contracts.bridge_token_response_decode_checked(httpc.text(resp))
     if decode_problem == "" && (!bridge_enroll_credential_usable(data.access_token) || !bridge_enroll_credential_usable(data.refresh_token)) {
         decode_problem = "access_token or refresh_token missing or malformed"
     }

@@ -5,6 +5,7 @@ import "core:os"
 import "core:strings"
 import "core:testing"
 import "core:time"
+import httpc "odin_test:lib/httpc"
 
 bridge_update_test_spawn_args: [dynamic]string
 
@@ -64,52 +65,36 @@ test_bridge_update_supervisor_launch_uses_structured_argv_and_exact_pid :: proc(
 	testing.expect_value(t, bridge_update_test_spawn_args[13], "/tmp/bridge with spaces/pty-host.sock")
 }
 
-// ---- Atomic curl download helpers & tests ----
+// ---- update tarball download (httpc) ----
 
-bridge_update_test_output_path :: proc(args: []string) -> (string, bool) {
-	for i := 0; i + 1 < len(args); i += 1 {
-		if args[i] == "--output" do return args[i+1], true
-	}
-	return "", false
+@(thread_local) bridge_update_test_calls: int
+@(thread_local) bridge_update_test_seen_url: string
+
+bridge_update_test_dl_success :: proc(req: httpc.Request, dest_path: string) -> (int, httpc.Error) {
+	bridge_update_test_calls += 1
+	if req.method != .GET || req.max_redirects <= 0 || req.timeout_ms <= 0 do return 0, .Invalid_Url
+	full, _ := httpc.build_url(req.url, allocator = context.temp_allocator)
+	if req.relay_target != "" do full = req.relay_target
+	bridge_update_test_seen_url = full
+	if os.write_entire_file_from_string(dest_path, "release-bytes") != nil do return 0, .Io
+	return 200, .None
 }
 
-bridge_update_test_curl_success :: proc(
-	args: []string,
-	timeout: time.Duration,
-) -> (stdout, stderr: string, exit_code: int, ok, timed_out: bool) {
-	output, has_output := bridge_update_test_output_path(args)
-	has_fail := false
-	has_location := false
-	has_separator := false
-	for arg in args {
-		if arg == "--fail" do has_fail = true
-		if arg == "--location" do has_location = true
-		if arg == "--" do has_separator = true
-	}
-	if len(args) == 0 || args[0] != "curl" || !has_output || !has_fail || !has_location || !has_separator || timeout <= 0 {
-		return strings.clone(""), strings.clone("invalid curl argv"), 2, false, false
-	}
-	if os.write_entire_file_from_string(output, "release-bytes") != nil {
-		return strings.clone(""), strings.clone("could not write output"), 23, false, false
-	}
-	return strings.clone(""), strings.clone(""), 0, true, false
+bridge_update_test_dl_404 :: proc(req: httpc.Request, dest_path: string) -> (int, httpc.Error) {
+	bridge_update_test_calls += 1
+	return 404, .None
 }
 
-bridge_update_test_curl_failure :: proc(
-	args: []string,
-	timeout: time.Duration,
-) -> (stdout, stderr: string, exit_code: int, ok, timed_out: bool) {
-	if output, found := bridge_update_test_output_path(args); found {
-		_ = os.write_entire_file_from_string(output, "partial")
-	}
-	return strings.clone(""), strings.clone("curl: (22) The requested URL returned error: 404"), 22, false, false
+bridge_update_test_dl_timeout :: proc(req: httpc.Request, dest_path: string) -> (int, httpc.Error) {
+	bridge_update_test_calls += 1
+	return 0, .Timeout
 }
 
-bridge_update_test_curl_timeout :: proc(
-	args: []string,
-	timeout: time.Duration,
-) -> (stdout, stderr: string, exit_code: int, ok, timed_out: bool) {
-	return strings.clone(""), strings.clone(""), -1, false, true
+bridge_update_test_dl_flaky :: proc(req: httpc.Request, dest_path: string) -> (int, httpc.Error) {
+	bridge_update_test_calls += 1
+	if bridge_update_test_calls == 1 do return 502, .None
+	_ = os.write_entire_file_from_string(dest_path, "release-bytes")
+	return 200, .None
 }
 
 bridge_update_test_path :: proc(label: string) -> string {
@@ -122,47 +107,60 @@ bridge_update_test_path :: proc(label: string) -> string {
 }
 
 @(test)
-bridge_update_curl_download_is_atomic :: proc(t: ^testing.T) {
+bridge_update_download_success :: proc(t: ^testing.T) {
 	dest := bridge_update_test_path("success")
 	defer { _ = os.remove(dest); delete(dest) }
-	ok, detail := bridge_update_download_with_curl(
-		"https://github.com/example/repo/releases/download/v1/bundle.tar.gz",
-		dest,
-		bridge_update_test_curl_success,
-	)
+	bridge_update_test_calls = 0
+	ok, detail := bridge_update_download("https://github.com/example/repo/releases/download/v1/bundle.tar.gz", dest, bridge_update_test_dl_success)
 	testing.expect(t, ok, detail)
+	testing.expect_value(t, bridge_update_test_calls, 1)
+	testing.expect_value(t, bridge_update_test_seen_url, "https://github.com/example/repo/releases/download/v1/bundle.tar.gz")
 	data, read_err := os.read_entire_file(dest, context.allocator)
 	defer delete(data)
 	testing.expect(t, read_err == nil)
 	testing.expect_value(t, string(data), "release-bytes")
-	testing.expect(t, !os.exists(fmt.tprintf("%s.part", dest)), "successful download leaves no .part file")
 }
 
 @(test)
-bridge_update_curl_download_reports_error_and_removes_partial :: proc(t: ^testing.T) {
+bridge_update_download_hub_relative_target_is_forwarded :: proc(t: ^testing.T) {
+	dest := bridge_update_test_path("relative")
+	defer { _ = os.remove(dest); delete(dest) }
+	ok, detail := bridge_update_download("/api/v1/bridge/update/bundle?target=linux-amd64", dest, bridge_update_test_dl_success)
+	testing.expect(t, ok, detail)
+	testing.expect_value(t, bridge_update_test_seen_url, "/api/v1/bridge/update/bundle?target=linux-amd64")
+	bad, _ := bridge_update_download("ftp://example/bundle", dest, bridge_update_test_dl_success)
+	testing.expect(t, !bad, "a non-http(s) URL is refused before any transfer")
+}
+
+@(test)
+bridge_update_download_reports_http_error_without_retrying_4xx :: proc(t: ^testing.T) {
 	dest := bridge_update_test_path("failure")
 	defer { _ = os.remove(dest); delete(dest) }
-	ok, detail := bridge_update_download_with_curl(
-		"https://github.com/example/repo/releases/download/v1/missing.tar.gz",
-		dest,
-		bridge_update_test_curl_failure,
-	)
+	bridge_update_test_calls = 0
+	ok, detail := bridge_update_download("https://github.com/example/repo/releases/download/v1/missing.tar.gz", dest, bridge_update_test_dl_404)
 	testing.expect(t, !ok)
-	testing.expect(t, strings.contains(detail, "curl exited 22"), detail)
-	testing.expect(t, strings.contains(detail, "requested URL returned error: 404"), detail)
+	testing.expect(t, strings.contains(detail, "HTTP 404"), detail)
+	testing.expect_value(t, bridge_update_test_calls, 1)
 	testing.expect(t, !os.exists(dest), "failed download must not publish destination")
-	testing.expect(t, !os.exists(fmt.tprintf("%s.part", dest)), "failed download removes partial file")
 }
 
 @(test)
-bridge_update_curl_download_reports_timeout :: proc(t: ^testing.T) {
+bridge_update_download_retries_transient_failures :: proc(t: ^testing.T) {
+	dest := bridge_update_test_path("flaky")
+	defer { _ = os.remove(dest); delete(dest) }
+	bridge_update_test_calls = 0
+	ok, detail := bridge_update_download("https://github.com/example/repo/releases/download/v1/bundle.tar.gz", dest, bridge_update_test_dl_flaky)
+	testing.expect(t, ok, detail)
+	testing.expect_value(t, bridge_update_test_calls, 2)
+}
+
+@(test)
+bridge_update_download_reports_timeout :: proc(t: ^testing.T) {
 	dest := bridge_update_test_path("timeout")
 	defer { _ = os.remove(dest); delete(dest) }
-	ok, detail := bridge_update_download_with_curl(
-		"https://github.com/example/repo/releases/download/v1/slow.tar.gz",
-		dest,
-		bridge_update_test_curl_timeout,
-	)
+	bridge_update_test_calls = 0
+	ok, detail := bridge_update_download("https://github.com/example/repo/releases/download/v1/slow.tar.gz", dest, bridge_update_test_dl_timeout)
 	testing.expect(t, !ok)
-	testing.expect(t, strings.contains(detail, "timed out after 120 seconds"), detail)
+	testing.expect(t, strings.contains(detail, "timed out (no progress for 30 seconds"), detail)
+	testing.expect_value(t, bridge_update_test_calls, BRIDGE_UPDATE_DOWNLOAD_ATTEMPTS)
 }

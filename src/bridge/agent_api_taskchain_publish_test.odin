@@ -15,8 +15,8 @@ import "core:testing"
 bridge_task_chain_publish_routes_raw_post :: proc(t: ^testing.T) {
 	r := bridge_agent_route("agent.task_chain.publish", `{"chain_id":"chain_abc"}`)
 	testing.expect(t, r.kind == .Raw, "publish routes .Raw (plain hub route, not an agent-actions envelope)")
-	testing.expect(t, r.http_method == "POST", "publish is a POST")
-	testing.expect_value(t, r.path, "/api/v1/task-chains/chain_abc/publish")
+	testing.expect(t, r.http_method == .POST, "publish is a POST")
+	testing.expect_value(t, bridge_agent_route_target(r), "/api/v1/task-chains/chain_abc/publish")
 	testing.expect(t, !r.send_body, "publish takes no request body")
 }
 
@@ -44,8 +44,8 @@ bridge_task_chain_publish_method_allowed :: proc(t: ^testing.T) {
 bridge_task_chain_create_routes_raw_post :: proc(t: ^testing.T) {
 	r := bridge_agent_route("agent.task_chain.create", `{"title":"test chain"}`)
 	testing.expect(t, r.kind == .Raw, "create routes .Raw (plain hub route, not an agent-actions envelope)")
-	testing.expect(t, r.http_method == "POST", "create is a POST")
-	testing.expect_value(t, r.path, "/api/v1/task-chains")
+	testing.expect(t, r.http_method == .POST, "create is a POST")
+	testing.expect_value(t, bridge_agent_route_target(r), "/api/v1/task-chains")
 	testing.expect(t, r.send_body, "create takes a request body")
 }
 
@@ -79,21 +79,21 @@ bridge_removed_task_verbs_not_routed :: proc(t: ^testing.T) {
 bridge_lease_verbs_routed :: proc(t: ^testing.T) {
 	next := bridge_agent_route("agent.lease.next", "{}")
 	testing.expect(t, next.kind == .Local && next.local_op == "lease.next", "lease.next is bridge-local (vcs_base enrichment)")
-	testing.expect_value(t, next.path, "/api/v1/agent-actions/lease/next")
+	testing.expect_value(t, bridge_agent_route_target(next), "/api/v1/agent-actions/lease/next")
 	hb := bridge_agent_route("agent.lease.heartbeat", `{"note":"x"}`)
-	testing.expect(t, hb.kind == .Envelope && hb.path == "/api/v1/agent-actions/lease/heartbeat", "lease.heartbeat relays")
+	testing.expect(t, hb.kind == .Envelope && bridge_agent_route_target(hb) == "/api/v1/agent-actions/lease/heartbeat", "lease.heartbeat relays")
 	submit := bridge_agent_route("agent.lease.submit", `{"summary":"done"}`)
 	testing.expect(t, submit.kind == .Local && submit.local_op == "lease.submit", "lease.submit is bridge-local (vcs enrichment)")
-	testing.expect_value(t, submit.path, "/api/v1/agent-actions/lease/submit")
+	testing.expect_value(t, bridge_agent_route_target(submit), "/api/v1/agent-actions/lease/submit")
 	handoff := bridge_agent_route("agent.lease.handoff", `{"summary":"wip"}`)
 	testing.expect(t, handoff.kind == .Local && handoff.local_op == "lease.handoff", "lease.handoff is bridge-local (vcs enrichment)")
-	testing.expect_value(t, handoff.path, "/api/v1/agent-actions/lease/handoff")
+	testing.expect_value(t, bridge_agent_route_target(handoff), "/api/v1/agent-actions/lease/handoff")
 	block := bridge_agent_route("agent.lease.block", `{"waiting_on":{"kind":"user","reason":"q"}}`)
-	testing.expect(t, block.kind == .Envelope && block.path == "/api/v1/agent-actions/lease/block", "lease.block relays")
+	testing.expect(t, block.kind == .Envelope && bridge_agent_route_target(block) == "/api/v1/agent-actions/lease/block", "lease.block relays")
 	review := bridge_agent_route("agent.review.post", `{"verdict":"approve"}`)
-	testing.expect(t, review.kind == .Envelope && review.path == "/api/v1/agent-actions/review/post", "review.post relays")
+	testing.expect(t, review.kind == .Envelope && bridge_agent_route_target(review) == "/api/v1/agent-actions/review/post", "review.post relays")
 	fetch := bridge_agent_route("agent.task.fetch", `{"task_id":"task_1","ref":"#evt_1"}`)
-	testing.expect(t, fetch.kind == .Envelope && fetch.path == "/api/v1/agent-actions/task/fetch", "task.fetch relays")
+	testing.expect(t, fetch.kind == .Envelope && bridge_agent_route_target(fetch) == "/api/v1/agent-actions/task/fetch", "task.fetch relays")
 	for m in ([?]string{"agent.lease.next", "agent.lease.heartbeat", "agent.lease.submit", "agent.lease.handoff", "agent.lease.block", "agent.review.post", "agent.task.fetch"}) {
 		testing.expectf(t, bridge_agent_method_allowed(m), "%s allow-listed", m)
 	}

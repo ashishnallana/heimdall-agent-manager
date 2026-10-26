@@ -3,8 +3,10 @@ package main
 import json "core:encoding/json"
 import "core:fmt"
 import "core:os"
+import "core:strconv"
 import "core:strings"
 import "core:time"
+import httpc "odin_test:lib/httpc"
 import jsonx "odin_test:lib/jsonx"
 import os_random "odin_test:lib/os_random"
 import vault "odin_test:lib/vault"
@@ -61,12 +63,8 @@ ctl_agentmode_shell :: proc(endpoint, token: string, tokens, args: []string) {
 }
 
 // ctl_shell_rest calls a REST endpoint via the Bridge agent.rest.request RPC.
-ctl_shell_rest :: proc(endpoint, token, method, path, body: string) {
-	ctl_agent_call(endpoint, token, "agent.rest.request", json_object(
-		json_kv("http_method", method),
-		json_kv("path", path),
-		json_kv("body", body),
-	))
+ctl_shell_rest :: proc(endpoint, token: string, req: Ctl_Request) {
+	ctl_agent_rest(endpoint, token, req)
 }
 
 ctl_shell_preview_url_from_response :: proc(response: string) -> string {
@@ -87,12 +85,8 @@ ctl_shell_preview_url_from_response :: proc(response: string) -> string {
 	return ""
 }
 
-ctl_shell_rest_with_preview :: proc(endpoint, token, method, path, body: string) {
-	response, ok := ctl_agent_local_call(endpoint, token, "agent.rest.request", json_object(
-		json_kv("http_method", method),
-		json_kv("path", path),
-		json_kv("body", body),
-	))
+ctl_shell_rest_with_preview :: proc(endpoint, token: string, req: Ctl_Request) {
+	response, ok := ctl_agent_rest_local(endpoint, token, req)
 	if !ok {
 		fmt.println(`{"ok":false,"message":"local Bridge endpoint is not reachable"}`)
 		return
@@ -110,10 +104,7 @@ ctl_shell_bridge_boot_id :: proc(endpoint, token, bridge_id: string, args: []str
 	when ODIN_TEST {
 		if has_flag(args, "--bridge-boot-id") do return option_value(args, "--bridge-boot-id", "")
 	}
-	response, ok := ctl_agent_local_call(endpoint, token, "agent.rest.request", json_object(
-		json_kv("http_method", "GET"),
-		json_kv("path", fmt.tprintf("/api/v1/bridges/%s/public-key", safe_path_part(bridge_id))),
-	))
+	response, ok := ctl_agent_rest_local(endpoint, token, {method = .GET, path = ctl_api("bridges", bridge_id, "public-key")})
 	if !ok do return ""
 	defer delete(response)
 	// The local reply wraps the hub's answer: {"data":{"data":{...,"unseal_boot_id"}}}.
@@ -164,7 +155,7 @@ ctl_shell_boot_id_valid :: proc(boot_id: string) -> bool {
 // authorizes exactly that start: the sealed spec binds cmd/cwd to the bridge id, the
 // session id, the kind and the bridge's current boot id (finding N1). There is no
 // plaintext shell start: without a keyring, randomness or the boot id this exits.
-ctl_shell_attach_enc_spec :: proc(endpoint, token, bridge_id, kind: string, args: []string, cmd_str, cwd_str: string, fields: ^[dynamic]string) {
+ctl_shell_attach_enc_spec :: proc(endpoint, token, bridge_id, kind: string, args: []string, cmd_str, cwd_str: string, body: ^Ctl_Shell_Create_Body) {
 	keyring := ctl_vault_keyring_for_write(args)
 	boot_id := ctl_shell_bridge_boot_id(endpoint, token, bridge_id, args)
 	if !ctl_shell_boot_id_valid(boot_id) {
@@ -187,10 +178,33 @@ ctl_shell_attach_enc_spec :: proc(endpoint, token, bridge_id, kind: string, args
 		fmt.println(`{"ok":false,"message":"could not encode enc_spec"}`)
 		os.exit(1)
 	}
-	append(fields, json_kv("session_id", session_id))
+	body.session_id = session_id
 	// The bridge rejects enc_spec under any epoch but its current one (command
 	// epoch floor); ctl_seal_or_exit always seals under the current epoch.
-	append(fields, json_kv("enc_spec", ctl_seal_or_exit(spec_json, keyring)))
+	body.enc_spec = ctl_seal_or_exit(spec_json, keyring)
+}
+
+// Ctl_Shell_Create_Body: POST /api/v1/bridges/<bridge>/shells for every kind.
+// cmd and cwd never appear here: they travel only inside the sealed enc_spec.
+Ctl_Shell_Create_Body :: struct {
+	kind:              string     `json:"kind"`,
+	label:             string     `json:"label,omitempty"`,
+	server_port:       Maybe(u64) `json:"server_port,omitempty"`,
+	project_id:        string     `json:"project_id,omitempty"`,
+	chain_id:          string     `json:"chain_id,omitempty"`,
+	agent_instance_id: string     `json:"agent_instance_id,omitempty"`,
+	conversation_id:   string     `json:"conversation_id,omitempty"`,
+	background:        Maybe(bool) `json:"background,omitempty"`,
+	session_id:        string     `json:"session_id,omitempty"`,
+	enc_spec:          string     `json:"enc_spec,omitempty"`,
+}
+
+// ctl_shell_port_value converts a ctl_shell_uint_flag result ("" = absent).
+ctl_shell_port_value :: proc(digits: string) -> Maybe(u64) {
+	if digits == "" do return nil
+	v, ok := strconv.parse_u64(digits)
+	if !ok do return nil
+	return v
 }
 
 // start — POST /api/v1/bridges/{bridge_id}/shells
@@ -205,21 +219,19 @@ ctl_shell_start :: proc(endpoint, token: string, tokens, args: []string) {
 	// Defaults to `shell`, the kind a person starting a session from the CLI means.
 	// `run` is agent-scoped and needs an --agent, so it is never the default here.
 	kind := option_value(args, "--kind", "shell")
-	fields := make([dynamic]string)
-	defer delete(fields)
-	append(&fields, json_kv("kind", kind))
 	// cmd and cwd go only inside the sealed enc_spec (never in clear to the hub).
 	cmd_val := option_value(args, "--cmd", "")
 	cwd_val := option_value(args, "--cwd", "")
-	if v := option_value(args, "--label", ""); v != "" do append(&fields, json_kv("label", v))
-	if v := ctl_shell_uint_flag(args, "--port", ""); v != "" do append(&fields, json_kv_raw("server_port", v))
-	if v := option_value(args, "--project", ""); v != "" do append(&fields, json_kv("project_id", v))
-	if v := option_value(args, "--chain", ""); v != "" do append(&fields, json_kv("chain_id", v))
-	if v := option_value(args, "--agent", ""); v != "" do append(&fields, json_kv("agent_instance_id", v))
-	ctl_shell_attach_enc_spec(endpoint, token, bridge_id, kind, args, cmd_val, cwd_val, &fields)
-	ctl_shell_rest_with_preview(endpoint, token, "POST",
-		fmt.tprintf("/api/v1/bridges/%s/shells", safe_path_part(bridge_id)),
-		json_object_from_slice(fields[:]))
+	body := Ctl_Shell_Create_Body{
+		kind              = kind,
+		label             = option_value(args, "--label", ""),
+		server_port       = ctl_shell_port_value(ctl_shell_uint_flag(args, "--port", "")),
+		project_id        = option_value(args, "--project", ""),
+		chain_id          = option_value(args, "--chain", ""),
+		agent_instance_id = option_value(args, "--agent", ""),
+	}
+	ctl_shell_attach_enc_spec(endpoint, token, bridge_id, kind, args, cmd_val, cwd_val, &body)
+	ctl_shell_rest_with_preview(endpoint, token, {method = .POST, path = ctl_api("bridges", bridge_id, "shells"), body = httpc.json_body(body)})
 }
 
 // ---- agent context resolution ------------------------------------------------
@@ -345,14 +357,12 @@ ctl_shell_run :: proc(endpoint, token: string, tokens, args: []string) {
 
 	background := has_flag(args, "--bg")
 
-	fields := make([dynamic]string)
-	defer delete(fields)
-	append(&fields, json_kv("kind", "run"))
+	body := Ctl_Shell_Create_Body{kind = "run"}
 	// cmd and cwd go only inside the sealed enc_spec (never in clear to the hub).
 	// agent_instance_id is a run's SCOPE KEY. The hub also fills it from the
 	// caller's token, so this is belt-and-braces rather than the only source —
 	// which is why an explicit --agent cannot be used to attribute a run elsewhere.
-	append(&fields, json_kv("agent_instance_id", option_value(args, "--agent", ctx.agent_instance_id)))
+	body.agent_instance_id = option_value(args, "--agent", ctx.agent_instance_id)
 	// The TRIGGERING conversation. A run's completion notice and its one `shell_run`
 	// marker go here and nowhere else — never to a chain-wide or user-wide feed.
 	//
@@ -362,21 +372,17 @@ ctl_shell_run :: proc(endpoint, token: string, tokens, args: []string) {
 	// resolves a run's conversation from the caller's token regardless
 	// (shell_session_create), so sending anything else was at best ignored and at worst
 	// an attempt to write into somebody else's conversation.
-	if ctx.conversation_id != "" do append(&fields, json_kv("conversation_id", ctx.conversation_id))
+	body.conversation_id = ctx.conversation_id
 	// project_id is an annotation every kind may carry, not a scope column.
-	if v := option_value(args, "--project", ctx.project_id); v != "" do append(&fields, json_kv("project_id", v))
+	body.project_id = option_value(args, "--project", ctx.project_id)
 	// chain_id is deliberately NOT sent: a run is agent-scoped and the hub refuses
 	// one that carries a chain rather than storing a column that describes nothing.
 	cwd_val := option_value(args, "--cwd", "")
-	if v := option_value(args, "--label", ""); v != "" do append(&fields, json_kv("label", v))
-	if background do append(&fields, json_kv_raw("background", "true"))
-	ctl_shell_attach_enc_spec(endpoint, token, bridge_id, "run", args, cmd, cwd_val, &fields)
+	body.label = option_value(args, "--label", "")
+	if background do body.background = true
+	ctl_shell_attach_enc_spec(endpoint, token, bridge_id, "run", args, cmd, cwd_val, &body)
 
-	response, ok := ctl_agent_local_call(endpoint, token, "agent.rest.request", json_object(
-		json_kv("http_method", "POST"),
-		json_kv("path", fmt.tprintf("/api/v1/bridges/%s/shells", safe_path_part(bridge_id))),
-		json_kv("body", json_object_from_slice(fields[:])),
-	))
+	response, ok := ctl_agent_rest_local(endpoint, token, {method = .POST, path = ctl_api("bridges", bridge_id, "shells"), body = httpc.json_body(body)})
 	if !ok {
 		fmt.println(`{"ok":false,"message":"local Bridge endpoint is not reachable"}`)
 		return
@@ -431,28 +437,23 @@ ctl_shell_serve :: proc(endpoint, token: string, tokens, args: []string) {
 		return
 	}
 
-	fields := make([dynamic]string)
-	defer delete(fields)
-	append(&fields, json_kv("kind", "server"))
 	// cmd and cwd go only inside the sealed enc_spec (never in clear to the hub).
 	// chain_id + bridge_id are a server's SCOPE KEY: the chain summary lists every
 	// server started for that chain, whoever started it.
-	append(&fields, json_kv("chain_id", chain_id))
+	body := Ctl_Shell_Create_Body{kind = "server", chain_id = chain_id}
 	// From context, no flag — same reasoning as `run` above (REQ-SHELL-5 AC9). A server
 	// is chain-scoped, so this is an annotation recording who started it rather than a
 	// scope column, and it is still the starting agent's own conversation.
-	if ctx.conversation_id != "" do append(&fields, json_kv("conversation_id", ctx.conversation_id))
-	if v := option_value(args, "--project", ctx.project_id); v != "" do append(&fields, json_kv("project_id", v))
+	body.conversation_id = ctx.conversation_id
+	body.project_id = option_value(args, "--project", ctx.project_id)
 	// agent_instance_id is deliberately NOT sent: a server is chain-scoped, and the
 	// hub refuses one that names an agent instance.
 	cwd_val := option_value(args, "--cwd", "")
-	if v := option_value(args, "--label", ""); v != "" do append(&fields, json_kv("label", v))
-	if v := ctl_shell_uint_flag(args, "--port", ""); v != "" do append(&fields, json_kv_raw("server_port", v))
-	ctl_shell_attach_enc_spec(endpoint, token, bridge_id, "server", args, cmd, cwd_val, &fields)
+	body.label = option_value(args, "--label", "")
+	body.server_port = ctl_shell_port_value(ctl_shell_uint_flag(args, "--port", ""))
+	ctl_shell_attach_enc_spec(endpoint, token, bridge_id, "server", args, cmd, cwd_val, &body)
 
-	ctl_shell_rest_with_preview(endpoint, token, "POST",
-		fmt.tprintf("/api/v1/bridges/%s/shells", safe_path_part(bridge_id)),
-		json_object_from_slice(fields[:]))
+	ctl_shell_rest_with_preview(endpoint, token, {method = .POST, path = ctl_api("bridges", bridge_id, "shells"), body = httpc.json_body(body)})
 }
 
 // background — POST /api/v1/shells/{session_id}/background
@@ -465,8 +466,7 @@ ctl_shell_background :: proc(endpoint, token: string, tokens, args: []string) {
 		fmt.println(`{"ok":false,"message":"shell background requires <session_id>"}`)
 		return
 	}
-	ctl_shell_rest(endpoint, token, "POST",
-		fmt.tprintf("/api/v1/shells/%s/background", safe_path_part(sid)), "{}")
+	ctl_shell_rest(endpoint, token, {method = .POST, path = ctl_api("shells", sid, "background"), body = ctl_empty_object_body()})
 }
 
 // kill — DELETE /api/v1/shells/{session_id}
@@ -481,8 +481,7 @@ ctl_shell_kill :: proc(endpoint, token: string, tokens, args: []string) {
 		fmt.println(`{"ok":false,"message":"shell kill requires <session_id>"}`)
 		return
 	}
-	ctl_shell_rest(endpoint, token, "DELETE",
-		fmt.tprintf("/api/v1/shells/%s", safe_path_part(sid)), "")
+	ctl_shell_rest(endpoint, token, {method = .DELETE, path = ctl_api("shells", sid)})
 }
 
 // signal — POST /api/v1/shells/{session_id}/signal
@@ -494,9 +493,11 @@ ctl_shell_signal :: proc(endpoint, token: string, tokens, args: []string) {
 		fmt.println(`{"ok":false,"message":"shell signal requires <session_id> --signal <int>"}`)
 		return
 	}
-	ctl_shell_rest(endpoint, token, "POST",
-		fmt.tprintf("/api/v1/shells/%s/signal", safe_path_part(sid)),
-		json_object(json_kv_raw("signal", sig)))
+	Signal_Body :: struct {
+		signal: u64 `json:"signal"`,
+	}
+	sig_value, _ := strconv.parse_u64(sig)
+	ctl_shell_rest(endpoint, token, {method = .POST, path = ctl_api("shells", sid, "signal"), body = httpc.json_body(Signal_Body{signal = sig_value})})
 }
 
 // restart — POST /api/v1/shells/{session_id}/restart
@@ -507,8 +508,7 @@ ctl_shell_restart :: proc(endpoint, token: string, tokens, args: []string) {
 		fmt.println(`{"ok":false,"message":"shell restart requires <session_id>"}`)
 		return
 	}
-	ctl_shell_rest(endpoint, token, "POST",
-		fmt.tprintf("/api/v1/shells/%s/restart", safe_path_part(sid)), "{}")
+	ctl_shell_rest(endpoint, token, {method = .POST, path = ctl_api("shells", sid, "restart"), body = ctl_empty_object_body()})
 }
 
 // set-port — POST /api/v1/shells/{session_id}/port
@@ -553,9 +553,11 @@ ctl_shell_set_port :: proc(endpoint, token: string, tokens, args: []string) {
 		port = raw
 	}
 
-	ctl_shell_rest_with_preview(endpoint, token, "POST",
-		fmt.tprintf("/api/v1/shells/%s/port", safe_path_part(sid)),
-		json_object(json_kv_raw("server_port", port)))
+	Port_Body :: struct {
+		server_port: u64 `json:"server_port"`,
+	}
+	port_value, _ := strconv.parse_u64(port)
+	ctl_shell_rest_with_preview(endpoint, token, {method = .POST, path = ctl_api("shells", sid, "port"), body = httpc.json_body(Port_Body{server_port = port_value})})
 }
 
 // show — GET /api/v1/shells/{session_id}
@@ -565,8 +567,7 @@ ctl_shell_show :: proc(endpoint, token: string, tokens, args: []string) {
 		fmt.println(`{"ok":false,"message":"shell show requires <session_id>"}`)
 		return
 	}
-	ctl_shell_rest_with_preview(endpoint, token, "GET",
-		fmt.tprintf("/api/v1/shells/%s", safe_path_part(sid)), "")
+	ctl_shell_rest_with_preview(endpoint, token, {method = .GET, path = ctl_api("shells", sid)})
 }
 
 // list — GET /api/v1/shells with optional filters
@@ -588,18 +589,15 @@ ctl_shell_list :: proc(endpoint, token: string, tokens, args: []string) {
 	agent_id := option_value(args, "--agent", "")
 	status := option_value(args, "--status", "")
 
-	qparts := make([dynamic]string)
-	defer delete(qparts)
-	if bridge_id != ""  do query_param(&qparts, "bridge_id", bridge_id)
-	if project_id != "" do query_param(&qparts, "project_id", project_id)
-	if chain_id != ""   do query_param(&qparts, "chain_id", chain_id)
-	if agent_id != ""   do query_param(&qparts, "agent_instance_id", agent_id)
-	if status != ""     do query_param(&qparts, "status", status)
-	if v := ctl_shell_uint_flag(args, "--limit", ""); v != "" do query_param(&qparts, "limit", v)
-	if v := option_value(args, "--cursor", ""); v != "" do query_param(&qparts, "cursor", v)
-	qs := ""
-	if len(qparts) > 0 do qs = strings.concatenate({"?", strings.join(qparts[:], "&")})
-	ctl_shell_rest(endpoint, token, "GET", strings.concatenate({"/api/v1/shells", qs}), "")
+	query := ctl_query_make()
+	ctl_query_add(&query, "bridge_id", bridge_id)
+	ctl_query_add(&query, "project_id", project_id)
+	ctl_query_add(&query, "chain_id", chain_id)
+	ctl_query_add(&query, "agent_instance_id", agent_id)
+	ctl_query_add(&query, "status", status)
+	ctl_query_add(&query, "limit", ctl_shell_uint_flag(args, "--limit", ""))
+	ctl_query_add(&query, "cursor", option_value(args, "--cursor", ""))
+	ctl_shell_rest(endpoint, token, {method = .GET, path = ctl_api("shells"), query = query[:]})
 }
 
 // log — GET /api/v1/shells/{session_id}/log?offset=&limit=&grep=
@@ -611,15 +609,11 @@ ctl_shell_log :: proc(endpoint, token: string, tokens, args: []string) {
 		fmt.println(`{"ok":false,"message":"shell log requires <session_id>"}`)
 		return
 	}
-	qparts := make([dynamic]string)
-	defer delete(qparts)
-	if v := ctl_shell_uint_flag(args, "--offset", ""); v != "" do query_param(&qparts, "offset", v)
-	if v := ctl_shell_uint_flag(args, "--limit", "");  v != "" do query_param(&qparts, "limit", v)
-	if v := option_value(args, "--grep", ""); v != "" do query_param(&qparts, "grep", v)
-	qs := ""
-	if len(qparts) > 0 do qs = strings.concatenate({"?", strings.join(qparts[:], "&")})
-	ctl_shell_rest(endpoint, token, "GET",
-		strings.concatenate({fmt.tprintf("/api/v1/shells/%s/log", safe_path_part(sid)), qs}), "")
+	query := ctl_query_make()
+	ctl_query_add(&query, "offset", ctl_shell_uint_flag(args, "--offset", ""))
+	ctl_query_add(&query, "limit", ctl_shell_uint_flag(args, "--limit", ""))
+	ctl_query_add(&query, "grep", option_value(args, "--grep", ""))
+	ctl_shell_rest(endpoint, token, {method = .GET, path = ctl_api("shells", sid, "log"), query = query[:]})
 }
 
 // capture — GET /api/v1/shells/{session_id}/capture
@@ -631,11 +625,8 @@ ctl_shell_capture :: proc(endpoint, token: string, tokens, args: []string) {
 		return
 	}
 	// The bridge seals the screen (a v2 content envelope); decrypt it locally.
-	ctl_agent_call_and_decrypt(endpoint, token, "agent.rest.request", json_object(
-		json_kv("http_method", "GET"),
-		json_kv("path", fmt.tprintf("/api/v1/shells/%s/capture", safe_path_part(sid))),
-		json_kv("body", ""),
-	), args)
+	params := ctl_agent_rest_params_or_exit({method = .GET, path = ctl_api("shells", sid, "capture")})
+	ctl_agent_call_and_decrypt(endpoint, token, "agent.rest.request", params, args)
 }
 
 print_help_shell :: proc() {

@@ -57,11 +57,6 @@ read :: proc(s: ^Stream, out: []byte) -> (n: int, ok: bool) {
 	return max(got, 0), true
 }
 
-relay_exited :: proc(s: ^Stream) -> bool {
-	_, err := os.process_wait(s.process, 0)
-	return err == nil
-}
-
 // write_all with timeout 0 is a plain blocking write. With a timeout the pipe is
 // switched to non-blocking so a stalled relay obeys the same deadline as TCP; a
 // partial frame is then fatal to the stream.
@@ -90,8 +85,8 @@ write_all :: proc(s: ^Stream, bytes: []byte, timeout: time.Duration = 0) -> Writ
 	return .Ok
 }
 
-// close_write closes the relay's stdin. Only do this once the reply is not needed
-// past the relay's half-close grace (socat -t, 0.5 s by default).
+// close_write closes the relay's stdin (part of close).
+@(private)
 close_write :: proc(s: ^Stream) {
 	if s.stdin_w != nil {
 		_ = os.close(s.stdin_w)

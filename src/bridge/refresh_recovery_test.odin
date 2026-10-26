@@ -1,6 +1,6 @@
 package main
 import "core:testing"
-import http "odin_test:lib/http_client"
+import httpc "odin_test:lib/httpc"
 import "base:runtime"
 import "core:fmt"
 import "core:os"
@@ -66,7 +66,7 @@ refresh_test_sent: bool
 refresh_test_unknown_exchanges: int
 refresh_test_transport_failure :: proc(api, token, request_id: string, timeout_ms: int) -> (Bridge_Enroll_Credential, bool, contracts.Wire_Error, bool) {
     refresh_test_unknown_exchanges += 1
-    return bridge_refresh_response_classify(http.Response{may_have_sent=refresh_test_sent}, false, "http://localhost")
+    return bridge_refresh_response_classify(httpc.Response{may_have_sent=refresh_test_sent}, false, "http://localhost")
 }
 
 // A lost or unusable reply is an UNKNOWN outcome: the hub may have rotated. It used
@@ -105,7 +105,7 @@ refresh_test_lost_then_ok :: proc(api, token, request_id: string, timeout_ms: in
     append(&refresh_test_request_ids, request_id)
     if refresh_test_lost_exchanges == 1 {
         // The hub rotated, but the reply never arrived intact.
-        return bridge_refresh_response_classify(http.Response{status = 200, body = "{\"data\":", may_have_sent = true}, true, "http://localhost")
+        return bridge_refresh_response_classify(httpc.Response{status = 200, body = transmute([]byte)string("{\"data\":"), may_have_sent = true}, true, "http://localhost")
     }
     return {access_token = "hba_btk_2.new", refresh_token = "hbf_btk_3.new", expires_in = 3600}, true, {}, false
 }
@@ -184,13 +184,13 @@ refresh_request_id_is_durable_and_scoped :: proc(t: ^testing.T) {
 @(test)
 refresh_200_with_an_unusable_body_is_a_protocol_error_not_a_timeout :: proc(t: ^testing.T) {
     for body in ([]string{"{}", "", "{\"data\":", "<html>"}) {
-        _, ok, err, unknown := bridge_refresh_response_classify(http.Response{status = 200, body = body}, true, "http://localhost")
+        _, ok, err, unknown := bridge_refresh_response_classify(httpc.Response{status = 200, body = transmute([]byte)body}, true, "http://localhost")
         testing.expect(t, !ok && unknown && err.class == .retriable)
         testing.expect(t, err.code != .Bridge_Timeout, "a 200 the bridge cannot use is reported as what it is")
         testing.expect_value(t, err.cause, "refresh_reply_undecodable")
     }
     good := `{"data":{"access_token":"hba_btk_1.s","refresh_token":"hbf_btk_2.s","bridge_id":"brg_x","token_type":"Bearer","expires_in":3600,"refresh_expires_in":2592000},"meta":{"request_id":"r","server_time":""}}`
-    cred, ok, _, _ := bridge_refresh_response_classify(http.Response{status = 200, body = good}, true, "http://localhost")
+    cred, ok, _, _ := bridge_refresh_response_classify(httpc.Response{status = 200, body = transmute([]byte)string(good)}, true, "http://localhost")
     defer { delete(cred.bridge_id); delete(cred.access_token); delete(cred.refresh_token) }
     testing.expect(t, ok && cred.access_token == "hba_btk_1.s" && cred.refresh_token == "hbf_btk_2.s" && cred.expires_in == 3600)
 }

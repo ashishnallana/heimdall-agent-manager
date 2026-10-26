@@ -11,7 +11,7 @@ import "core:fmt"
 import "core:net"
 import "core:os"
 import "core:strings"
-import http "odin_test:lib/http_client"
+import httpc "odin_test:lib/httpc"
 import cfg_lib "odin_test:lib/config"
 
 Manager_Check_Status :: enum {
@@ -62,19 +62,21 @@ manager_probe_bridge_loopback :: proc(port: int, token: string) -> (Manager_Loop
 	if !manager_tcp_probe(port) {
 		return .Not_Listening, "not listening"
 	}
-	base_url := fmt.tprintf("http://127.0.0.1:%d", port)
-	resp: http.Response
-	ok: bool
+	base, url_err := httpc.url_from_parts("http", "127.0.0.1", port)
+	if url_err != .None do return .Other_Service, "invalid loopback port"
+	auth: [1]httpc.Header
+	n_headers := 0
 	if strings.trim_space(token) != "" {
-		headers := [?]http.Header{{name = "Authorization", value = strings.concatenate({"Bearer ", token})}}
-		resp, ok = http.request_with_headers_timeout("GET", base_url, "/bridge/health", "", headers[:], MANAGER_PROBE_TIMEOUT_MS)
-	} else {
-		resp, ok = http.request_with_timeout("GET", base_url, "/bridge/health", "", MANAGER_PROBE_TIMEOUT_MS)
+		auth[0] = httpc.bearer(token)
+		n_headers = 1
 	}
-	probe := manager_classify_loopback_probe(true, ok, resp.status, resp.body)
+	resp, err := httpc.send({method = .GET, url = base, path = {"bridge", "health"}, headers = auth[:n_headers], timeout_ms = MANAGER_PROBE_TIMEOUT_MS}, context.temp_allocator)
+	ok := err == .None
+	body := httpc.text(resp)
+	probe := manager_classify_loopback_probe(true, ok, resp.status, body)
 	switch probe {
 	case .Heimdall_Ok:
-		return probe, strings.concatenate({"healthy (", manager_health_summary(resp.body), ")"})
+		return probe, strings.concatenate({"healthy (", manager_health_summary(body), ")"})
 	case .Heimdall_Unauthorized:
 		return probe, fmt.tprintf("heimdall bridge responding (HTTP %d, token required)", resp.status)
 	case .Heimdall_Responding:

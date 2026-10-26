@@ -39,7 +39,8 @@ Re-enrolling offers the approver this machine's previous bridge id for reuse (sa
 bridge, same history); --new-bridge registers a new bridge instead (implies --re-enroll).
 --non-interactive preserves existing enrollment and prints a command for new enrollment.
 --uninstall removes only this Hub's service and binaries; credentials/data are kept.
-Requires bash, python3, curl, tar; HTTPS bridges also require socat.
+Requires bash, python3, curl, tar, and libcurl >= 7.80 (the bridge links it; Debian 12+,
+Ubuntu 22.04+, macOS 13+); HTTPS bridges also require socat (WebSocket transport).
 The Hub is checked first (20 s budget, exact failure reason). Verified release
 tarballs are cached in ${XDG_CACHE_HOME:-~/.cache}/heimdall/releases and reused
 when their SHA-256 still matches the release's SHA256SUMS.
@@ -475,17 +476,23 @@ with tarfile.open(root/name) as t:
                 os.symlink(member.linkname, dest)
 PY
   log OK 'Release checksum and bundle verified'
-  # Preflight through the BRIDGE's own transport (socat/openssl TLS relay),
-  # before any service is replaced: curl reaching the Hub says nothing about
-  # whether this binary can.
+  # Preflight through the BRIDGE's own HTTPS client (the libcurl it links),
+  # before any service is replaced: the curl CLI reaching the Hub says nothing
+  # about whether this binary can.
   chmod 700 "$work_dir/ham-bridge"
   # --probe-hub exists from 0.3.36; an older bridge ignores unknown flags and
   # would start as a daemon in the foreground, so gate on the binary's version.
-  local bridge_version
-  bridge_version="$("$work_dir/ham-bridge" --version 2>/dev/null | awk '{print $2}')"
+  local bridge_version version_out
+  if ! version_out="$("$work_dir/ham-bridge" --version 2>&1)"; then
+    fail "The downloaded ham-bridge does not start on this machine: ${version_out:-no output}. It needs libcurl >= 7.80 (libcurl.so.4: Debian 12+, Ubuntu 22.04+; macOS 13+). Nothing was replaced."
+  fi
+  # Take the "ham-bridge <version> ..." line, not line 1: stderr is merged above
+  # (for the failure message) and a loader warning such as "libcurl.so.4: no
+  # version information available" can precede it.
+  bridge_version="$(printf '%s\n' "$version_out" | awk '$1 == "ham-bridge" {print $2; exit}')"
   if [ -n "$bridge_version" ] && [ "$(printf '%s\n0.3.36\n' "$bridge_version" | sort -V | head -n1)" = "0.3.36" ]; then
     if ! "$work_dir/ham-bridge" --probe-hub "$hub_url"; then
-      fail "The downloaded ham-bridge cannot reach $hub_url through its own TLS transport although curl could. On Termux: pkg install socat ca-certificates; otherwise check socat and TLS trust. Nothing was replaced."
+      fail "The downloaded ham-bridge cannot reach $hub_url through its own HTTPS client (libcurl) although the curl CLI could. Check TLS trust (HAM_TLS_CA_FILE / SSL_CERT_FILE) and the probe output above. Nothing was replaced."
     fi
   else
     log INFO "Bridge ${bridge_version:-unknown} predates --probe-hub (0.3.36); transport preflight skipped."

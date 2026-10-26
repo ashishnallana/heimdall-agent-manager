@@ -8,9 +8,16 @@ import app "odin_test:hub/app"
 import crashlog "odin_test:lib/crashlog"
 import platform "odin_test:hub/platform"
 import user_service "odin_test:hub/service/user"
+import httpc "odin_test:lib/httpc"
+
 
 main :: proc() {
 	crashlog.install("ham-hub")
+	// libcurl global init, once, before any thread (src/lib/httpc).
+	if ok, message := httpc.init(); !ok {
+		fmt.eprintln("ham-hub:", message)
+		os.exit(1)
+	}
 	config := app.default_config()
 	// Before anything else, including the users/tokens subcommands.
 	legacy_value, legacy_present := os.lookup_env("HAM_AUTH_MODE", context.allocator)

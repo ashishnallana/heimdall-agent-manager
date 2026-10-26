@@ -11,22 +11,25 @@ package bridge_log
 // heimdall_log_push_failures_total. Runs on the writer thread; it can delay
 // the next batch by at most ~4 s and never blocks a reader thread.
 
+import "core:encoding/json"
+import "core:strconv"
 import "core:strings"
 import contracts "odin_test:contracts"
 import domain "odin_test:hub/domain"
 import project_service "odin_test:hub/service/project"
-import http_client "odin_test:lib/http_client"
+import httpc "odin_test:lib/httpc"
 import metrics "odin_test:lib/metrics"
 
-LOKI_PUSH_PATH :: "/insert/loki/api/v1/push"
+LOKI_PUSH_PATH :: [?]string{"insert", "loki", "api", "v1", "push"}
 PUSH_TIMEOUT_MS :: 2000
 PUSH_JOB :: "heimdall-bridge"
 
 // Push_Send abstracts the HTTP POST so tests can script status codes.
-Push_Send :: proc(ctx: rawptr, base_url, path, body: string, timeout_ms: int) -> (status: int, ok: bool)
+Push_Send :: proc(ctx: rawptr, endpoint: httpc.Url, path: []string, body: httpc.Body, timeout_ms: int) -> (status: int, ok: bool)
 
 Push_Client :: struct {
-	base_url:   string, // no trailing slash
+	base_url:   string, // no trailing slash; "" = push disabled
+	endpoint:   httpc.Url, // base_url parsed once (heap)
 	version:    string, // hub version, sent as metadata
 	send:       Push_Send,
 	send_ctx:   rawptr,
@@ -37,16 +40,30 @@ Push_Client :: struct {
 }
 
 @(private = "file")
-http_send :: proc(ctx: rawptr, base_url, path, body: string, timeout_ms: int) -> (int, bool) {
-	resp, ok := http_client.post_with_timeout(base_url, path, body, timeout_ms)
-	if !ok do return 0, false
+http_send :: proc(ctx: rawptr, endpoint: httpc.Url, path: []string, body: httpc.Body, timeout_ms: int) -> (int, bool) {
+	resp, err := httpc.send({method = .POST, url = endpoint, path = path, body = body, timeout_ms = timeout_ms}, context.temp_allocator)
+	if err != .None do return 0, false
 	return resp.status, true
 }
 
-// new_push_client builds the default client over src/lib/http_client. `url` is
-// the --log-push-url value (scheme://host[:port], any trailing slash stripped).
+// new_push_client builds the default client over src/lib/httpc. `url` is the
+// --log-push-url value (scheme://host[:port], any trailing slash stripped). An
+// unparsable URL disables the push (base_url "").
 new_push_client :: proc(url: string, version: string = contracts.APP_VERSION) -> Push_Client {
-	return Push_Client{base_url = strings.trim_right(strings.trim_space(url), "/"), version = version, send = http_send, timeout_ms = PUSH_TIMEOUT_MS}
+	base := strings.trim_right(strings.trim_space(url), "/")
+	endpoint: httpc.Url
+	if base != "" {
+		parsed, err := httpc.parse_url(base, context.allocator)
+		if err != .None do base = ""
+		else do endpoint = parsed
+	}
+	return Push_Client{base_url = base, endpoint = endpoint, version = version, send = http_send, timeout_ms = PUSH_TIMEOUT_MS}
+}
+
+// push_client_destroy frees the parsed endpoint (tests; the hub's client lives
+// for the process).
+push_client_destroy :: proc(c: ^Push_Client) {
+	httpc.url_destroy(&c.endpoint)
 }
 
 // install_push installs the client as the service's sink. The client must
@@ -59,16 +76,17 @@ install_push :: proc(svc: ^Service, client: ^Push_Client) {
 push_sink :: proc(ctx: rawptr, events: []domain.Bridge_Log_Event) {
 	client := (^Push_Client)(ctx)
 	if client == nil || len(events) == 0 || client.base_url == "" do return
-	body := loki_push_json(events, client.version, context.temp_allocator)
-	_ = push_once_with_retry(client, body)
+	payload := loki_push_payload(events, client.version, context.temp_allocator)
+	_ = push_once_with_retry(client, httpc.json_body(payload, sort_keys = true))
 }
 
 // push_once_with_retry returns true when the backend accepted the batch.
-push_once_with_retry :: proc(client: ^Push_Client, body: string) -> bool {
+push_once_with_retry :: proc(client: ^Push_Client, body: httpc.Body) -> bool {
+	path := LOKI_PUSH_PATH
 	timeout := client.timeout_ms if client.timeout_ms > 0 else PUSH_TIMEOUT_MS
 	for attempt in 0 ..< 2 {
 		client.attempts += 1
-		status, ok := client.send(client.send_ctx, client.base_url, LOKI_PUSH_PATH, body, timeout)
+		status, ok := client.send(client.send_ctx, client.endpoint, path[:], body, timeout)
 		if ok && status >= 200 && status < 300 do return true
 		// 4xx is a permanent rejection (too old, malformed, limits): never retry.
 		if ok && status >= 400 && status < 500 do break
@@ -79,92 +97,60 @@ push_once_with_retry :: proc(client: ^Push_Client, body: string) -> bool {
 	return false
 }
 
-// loki_push_json renders one Loki push request: one stream per level present,
-// values sorted as given (the backend accepts out-of-order within a batch).
-loki_push_json :: proc(events: []domain.Bridge_Log_Event, version: string, allocator := context.allocator) -> string {
-	b := strings.builder_make(allocator)
-	strings.write_string(&b, `{"streams":[`)
-	first_stream := true
+// loki_push_payload builds one Loki push request as a JSON value: one stream per
+// level present, values in the order given (the backend accepts out-of-order
+// within a batch). Each value is [ns, line, metadata]; metadata values are
+// strings. Marshal it with sorted keys (httpc.json_body(.., sort_keys = true)).
+// Everything is allocated with `allocator` (callers pass a temp allocator).
+loki_push_payload :: proc(events: []domain.Bridge_Log_Event, version: string, allocator := context.allocator) -> json.Value {
+	context.allocator = allocator
+	streams := make(json.Array, 0, 2)
 	for level in ([]string{"warn", "error"}) {
-		has := false
-		for e in events do if e.level == level { has = true; break }
-		if !has do continue
-		if !first_stream do strings.write_byte(&b, ',')
-		first_stream = false
-		strings.write_string(&b, `{"stream":{"job":"`)
-		strings.write_string(&b, PUSH_JOB)
-		strings.write_string(&b, `","level":"`)
-		strings.write_string(&b, level)
-		strings.write_string(&b, `"},"values":[`)
-		first_value := true
+		values := make(json.Array)
 		for e in events {
 			if e.level != level do continue
-			if !first_value do strings.write_byte(&b, ',')
-			first_value = false
-			strings.write_string(&b, `["`)
-			strings.write_i64(&b, e.ts_ms)
-			strings.write_string(&b, `000000","`)
-			line := render_message(e.code, e.fields_json, context.temp_allocator)
-			write_json_escaped(&b, line)
+			ns_buf: [32]byte
+			ns := strings.concatenate({strconv.write_int(ns_buf[:], e.ts_ms, 10), "000000"})
+			line := render_message(e.code, e.fields_json, allocator)
 			if e.count > 1 {
-				strings.write_string(&b, " (x")
-				strings.write_int(&b, e.count)
-				strings.write_byte(&b, ')')
+				count_buf: [32]byte
+				line = strings.concatenate({line, " (x", strconv.write_int(count_buf[:], i64(e.count), 10), ")"})
 			}
-			strings.write_string(&b, `",{"bridge_id":"`)
-			write_json_escaped(&b, e.bridge_id)
-			strings.write_string(&b, `","code":"`)
-			write_json_escaped(&b, e.code)
-			strings.write_string(&b, `","class":"`)
-			write_json_escaped(&b, render_class(e.code, e.fields_json))
-			strings.write_string(&b, `","version":"`)
-			write_json_escaped(&b, version)
-			strings.write_string(&b, `","count":"`)
-			strings.write_int(&b, e.count)
-			strings.write_byte(&b, '"')
-			write_fields_as_metadata(&b, e.fields_json)
-			strings.write_string(&b, "}]")
+			count_buf: [32]byte
+			meta := make(json.Object)
+			meta["bridge_id"] = json.String(e.bridge_id)
+			meta["code"] = json.String(e.code)
+			meta["class"] = json.String(render_class(e.code, e.fields_json))
+			meta["version"] = json.String(version)
+			meta["count"] = json.String(strings.clone(strconv.write_int(count_buf[:], i64(e.count), 10)))
+			add_fields_as_metadata(&meta, e.fields_json)
+			tuple := make(json.Array, 0, 3)
+			append(&tuple, json.String(ns), json.String(line), meta)
+			append(&values, tuple)
 		}
-		strings.write_string(&b, "]}")
+		if len(values) == 0 do continue
+		stream := make(json.Object)
+		labels := make(json.Object)
+		labels["job"] = json.String(PUSH_JOB)
+		labels["level"] = json.String(level)
+		stream["stream"] = labels
+		stream["values"] = values
+		append(&streams, stream)
 	}
-	strings.write_string(&b, "]}")
-	return strings.to_string(b)
+	root := make(json.Object)
+	root["streams"] = streams
+	return root
 }
 
-// write_fields_as_metadata appends `,"key":"value"` for every allow-listed
-// field (metadata values must be strings).
+// add_fields_as_metadata copies every allow-listed field into the metadata
+// (metadata values must be strings).
 @(private = "file")
-write_fields_as_metadata :: proc(b: ^strings.Builder, fields_json: string) {
+add_fields_as_metadata :: proc(meta: ^json.Object, fields_json: string) {
 	keys := contracts.BRIDGE_LOG_KEY_NAMES
 	for key_name in keys {
 		raw, found := field_raw(fields_json, key_name)
 		if !found do continue
-		strings.write_string(b, `,"`)
-		strings.write_string(b, key_name)
-		strings.write_string(b, `":"`)
-		write_json_escaped(b, strings.trim(raw, "\""))
-		strings.write_byte(b, '"')
+		meta[key_name] = json.String(strings.clone(strings.trim(raw, "\"")))
 	}
 }
 
-@(private = "file")
-write_json_escaped :: proc(b: ^strings.Builder, value: string) {
-	for ch in value {
-		switch ch {
-		case '\\': strings.write_string(b, "\\\\")
-		case '"':  strings.write_string(b, "\\\"")
-		case '\n': strings.write_string(b, "\\n")
-		case '\r': strings.write_string(b, "\\r")
-		case '\t': strings.write_string(b, "\\t")
-		case:
-			if ch < 32 {
-				strings.write_string(b, "\\u00")
-				hex := "0123456789abcdef"
-				strings.write_byte(b, hex[int(ch) >> 4])
-				strings.write_byte(b, hex[int(ch) & 15])
-			} else {
-				strings.write_rune(b, ch)
-			}
-		}
-	}
-}

@@ -23,6 +23,7 @@ import "core:crypto"
 import "core:encoding/base64"
 import "core:strconv"
 import "core:strings"
+import httpc "odin_test:lib/httpc"
 import vault "odin_test:lib/vault"
 
 Bridge_Agent_Route_Kind :: enum {
@@ -35,8 +36,12 @@ Bridge_Agent_Route_Kind :: enum {
 
 Bridge_Agent_Route :: struct {
 	kind:        Bridge_Agent_Route_Kind,
-	http_method: string, // for .Raw
-	path:        string, // for .Raw / .Envelope (envelope path is fixed per method)
+	http_method: httpc.Method, // for .Raw
+	// Hub target for .Raw / .Envelope (envelope path is fixed per method): path
+	// segments + query params, encoded by httpc (temp-allocated by route_path /
+	// route_query). Agent-supplied ids are always ONE segment or a query value.
+	path:        []string,
+	query:       []httpc.Query_Param,
 	// local_op names the bridge-local handler for .Local routes.
 	local_op:    string,
 	// send_body: for .Raw, whether params should be forwarded as the request body.
@@ -47,7 +52,7 @@ Bridge_Agent_Route :: struct {
 
 // bridge_agent_route is the ONE place that maps a v2 method + params to its
 // fulfilment. Pure (no I/O) so it is unit-testable. Returns .Unknown for any
-// method not in the allowlist. Caller owns any concatenated path string.
+// method not in the allowlist. Path/query slices are temp-allocated.
 bridge_agent_route :: proc(method, params: string) -> Bridge_Agent_Route {
 	switch method {
 	// ---- bridge discovery -------------------------------------------------
@@ -58,79 +63,79 @@ bridge_agent_route :: proc(method, params: string) -> Bridge_Agent_Route {
 	case "agent.bridge.providers":
 		bridge_id := bridge_local_extract_json_string(params, "bridge_id", "")
 		if strings.trim_space(bridge_id) != "" {
-			return Bridge_Agent_Route{kind = .Raw, http_method = "GET", path = strings.concatenate({"/api/v1/bridges/", bridge_id, "/providers"})}
+			return Bridge_Agent_Route{kind = .Raw, http_method = .GET, path = route_path("api", "v1", "bridges", bridge_id, "providers")}
 		}
 		// no bridge_id => list bridges (each carries its provider matrix)
-		return Bridge_Agent_Route{kind = .Raw, http_method = "GET", path = "/api/v1/bridges"}
+		return Bridge_Agent_Route{kind = .Raw, http_method = .GET, path = route_path("api", "v1", "bridges")}
 
 	// ---- agents: durable identities --------------------------------------
 	case "agent.agents.list":
-		return Bridge_Agent_Route{kind = .Raw, http_method = "GET", path = "/api/v1/agents"}
+		return Bridge_Agent_Route{kind = .Raw, http_method = .GET, path = route_path("api", "v1", "agents")}
 	case "agent.agents.create":
-		return Bridge_Agent_Route{kind = .Raw, http_method = "POST", path = "/api/v1/agents", send_body = true}
+		return Bridge_Agent_Route{kind = .Raw, http_method = .POST, path = route_path("api", "v1", "agents"), send_body = true}
 
 	// ---- agents: templates ------------------------------------------------
 	case "agent.agents.template_list":
-		return Bridge_Agent_Route{kind = .Raw, http_method = "GET", path = "/api/v1/templates"}
+		return Bridge_Agent_Route{kind = .Raw, http_method = .GET, path = route_path("api", "v1", "templates")}
 	case "agent.agents.template_create":
-		return Bridge_Agent_Route{kind = .Raw, http_method = "POST", path = "/api/v1/templates", send_body = true}
+		return Bridge_Agent_Route{kind = .Raw, http_method = .POST, path = route_path("api", "v1", "templates"), send_body = true}
 
 	// ---- agents: instances ------------------------------------------------
 	case "agent.agents.instance_list":
 		// live filter -> live envelope; else durable instance list (raw GET).
 		if bridge_agent_params_bool(params, "live") {
-			return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/agents/live"}
+			return Bridge_Agent_Route{kind = .Envelope, path = route_path("api", "v1", "agent-actions", "agents", "live")}
 		}
 		agent_id := bridge_local_extract_json_string(params, "agent_id", "")
 		if strings.trim_space(agent_id) != "" {
-			return Bridge_Agent_Route{kind = .Raw, http_method = "GET", path = strings.concatenate({"/api/v1/agent-instances?agent_id=", agent_id})}
+			return Bridge_Agent_Route{kind = .Raw, http_method = .GET, path = route_path("api", "v1", "agent-instances"), query = route_query({"agent_id", agent_id})}
 		}
-		return Bridge_Agent_Route{kind = .Raw, http_method = "GET", path = "/api/v1/agent-instances"}
+		return Bridge_Agent_Route{kind = .Raw, http_method = .GET, path = route_path("api", "v1", "agent-instances")}
 	case "agent.agents.new_instance":
-		return Bridge_Agent_Route{kind = .Raw, http_method = "POST", path = "/api/v1/agent-instances", send_body = true}
+		return Bridge_Agent_Route{kind = .Raw, http_method = .POST, path = route_path("api", "v1", "agent-instances"), send_body = true}
 	case "agent.agents.instance_start":
 		if id := bridge_agent_instance_id(params); id != "" {
-			return Bridge_Agent_Route{kind = .Raw, http_method = "POST", path = strings.concatenate({"/api/v1/agent-instances/", id, "/start"})}
+			return Bridge_Agent_Route{kind = .Raw, http_method = .POST, path = route_path("api", "v1", "agent-instances", id, "start")}
 		}
 	case "agent.agents.instance_restart":
 		if id := bridge_agent_instance_id(params); id != "" {
-			return Bridge_Agent_Route{kind = .Raw, http_method = "POST", path = strings.concatenate({"/api/v1/agent-instances/", id, "/restart"})}
+			return Bridge_Agent_Route{kind = .Raw, http_method = .POST, path = route_path("api", "v1", "agent-instances", id, "restart")}
 		}
 	case "agent.agents.instance_stop":
 		if id := bridge_agent_instance_id(params); id != "" {
-			return Bridge_Agent_Route{kind = .Raw, http_method = "POST", path = strings.concatenate({"/api/v1/agent-instances/", id, "/stop"}), send_body = true}
+			return Bridge_Agent_Route{kind = .Raw, http_method = .POST, path = route_path("api", "v1", "agent-instances", id, "stop"), send_body = true}
 		}
 
 	// ---- task-chain -------------------------------------------------------
 	case "agent.task_chain.create":
-		return Bridge_Agent_Route{kind = .Raw, http_method = "POST", path = "/api/v1/task-chains", send_body = true}
+		return Bridge_Agent_Route{kind = .Raw, http_method = .POST, path = route_path("api", "v1", "task-chains"), send_body = true}
 	case "agent.task_chain.list":
 		// coordinated_by_me -> chains this agent coordinates (hub defaults the
 		// coordinator to the caller's own instance from the instance token).
 		if bridge_agent_params_bool(params, "coordinated_by_me") {
-			return Bridge_Agent_Route{kind = .Raw, http_method = "GET", path = "/api/v1/task-chains?coordinated_by="}
+			return Bridge_Agent_Route{kind = .Raw, http_method = .GET, path = route_path("api", "v1", "task-chains"), query = route_query({"coordinated_by", ""})}
 		}
 		if bridge_agent_params_bool(params, "pinned") {
-			return Bridge_Agent_Route{kind = .Raw, http_method = "GET", path = "/api/v1/task-chains?pinned=1"}
+			return Bridge_Agent_Route{kind = .Raw, http_method = .GET, path = route_path("api", "v1", "task-chains"), query = route_query({"pinned", "1"})}
 		}
 		if pid := bridge_local_extract_json_string(params, "project_id", ""); strings.trim_space(pid) != "" {
-			return Bridge_Agent_Route{kind = .Raw, http_method = "GET", path = strings.concatenate({"/api/v1/task-chains?project_id=", pid})}
+			return Bridge_Agent_Route{kind = .Raw, http_method = .GET, path = route_path("api", "v1", "task-chains"), query = route_query({"project_id", pid})}
 		}
-		return Bridge_Agent_Route{kind = .Raw, http_method = "GET", path = "/api/v1/task-chains"}
+		return Bridge_Agent_Route{kind = .Raw, http_method = .GET, path = route_path("api", "v1", "task-chains")}
 	case "agent.task_chain.show":
 		// chain_id is optional: the hub defaults to the caller instance's own chain
 		// and returns the full chain (incl. description). No context-snapshot fallback.
-		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/chain/show"}
+		return Bridge_Agent_Route{kind = .Envelope, path = route_path("api", "v1", "agent-actions", "chain", "show")}
 	case "agent.task_chain.set_title":
-		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/chain/set-title"}
+		return Bridge_Agent_Route{kind = .Envelope, path = route_path("api", "v1", "agent-actions", "chain", "set-title")}
 	case "agent.task_chain.set_description":
-		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/chain/set-description"}
+		return Bridge_Agent_Route{kind = .Envelope, path = route_path("api", "v1", "agent-actions", "chain", "set-description")}
 	case "agent.task_chain.set_status":
-		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/chain/set-status"}
+		return Bridge_Agent_Route{kind = .Envelope, path = route_path("api", "v1", "agent-actions", "chain", "set-status")}
 	case "agent.task_chain.set_summary", "agent.chain.summary":
-		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/chain/summary"}
+		return Bridge_Agent_Route{kind = .Envelope, path = route_path("api", "v1", "agent-actions", "chain", "summary")}
 	case "agent.task_chain.propose", "agent.chain.propose":
-		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/chain/propose"}
+		return Bridge_Agent_Route{kind = .Envelope, path = route_path("api", "v1", "agent-actions", "chain", "propose")}
 	case "agent.task_chain.publish":
 		// REQ-CLI-1: draft chains never promote and their tasks cannot be nudged, so a
 		// coordinator agent must be able to publish the chain it built. The hub already
@@ -138,12 +143,12 @@ bridge_agent_route :: proc(method, params: string) -> Bridge_Agent_Route {
 		// cascades Published to every task; this is purely the missing agent surface.
 		// Needs chain_id — publish has no "your own chain" default hub-side.
 		if cid := bridge_local_extract_json_string(params, "chain_id", ""); strings.trim_space(cid) != "" {
-			return Bridge_Agent_Route{kind = .Raw, http_method = "POST", path = strings.concatenate({"/api/v1/task-chains/", cid, "/publish"})}
+			return Bridge_Agent_Route{kind = .Raw, http_method = .POST, path = route_path("api", "v1", "task-chains", cid, "publish")}
 		}
 		return Bridge_Agent_Route{kind = .Bad_Request, message = "task-chain publish requires a chain id: pass <chain-id> (or --chain <id>)"}
 	case "agent.task_chain.pin":
 		if cid := bridge_local_extract_json_string(params, "chain_id", ""); strings.trim_space(cid) != "" {
-			return Bridge_Agent_Route{kind = .Raw, http_method = "POST", path = strings.concatenate({"/api/v1/task-chains/", cid, "/pin"}), send_body = true}
+			return Bridge_Agent_Route{kind = .Raw, http_method = .POST, path = route_path("api", "v1", "task-chains", cid, "pin"), send_body = true}
 		}
 		return Bridge_Agent_Route{kind = .Bad_Request, message = "task-chain pin requires a chain id: pass <chain-id> (or --chain <id>)"}
 	// Task System v2: agent.task_chain.subscribe/unsubscribe were removed (the hub
@@ -152,131 +157,131 @@ bridge_agent_route :: proc(method, params: string) -> Bridge_Agent_Route {
 	// ---- task -------------------------------------------------------------
 	case "agent.task.list":
 		// chain_id is optional: the hub defaults to the caller instance's chain.
-		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/tasks/list"}
+		return Bridge_Agent_Route{kind = .Envelope, path = route_path("api", "v1", "agent-actions", "tasks", "list")}
 	case "agent.task.show":
 		// slim task detail by task_id ALONE — the hub derives the chain from the
 		// task (task ids are globally unique). No chain_id required.
-		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/tasks/show"}
+		return Bridge_Agent_Route{kind = .Envelope, path = route_path("api", "v1", "agent-actions", "tasks", "show")}
 	case "agent.task.comments":
 		// newest N comments by task_id alone (?last passed as a param). No chain_id.
-		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/tasks/comments"}
+		return Bridge_Agent_Route{kind = .Envelope, path = route_path("api", "v1", "agent-actions", "tasks", "comments")}
 	case "agent.task.create":
-		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/tasks/create"}
+		return Bridge_Agent_Route{kind = .Envelope, path = route_path("api", "v1", "agent-actions", "tasks", "create")}
 	case "agent.task.update":
-		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/tasks/update"}
+		return Bridge_Agent_Route{kind = .Envelope, path = route_path("api", "v1", "agent-actions", "tasks", "update")}
 	case "agent.task.depend":
-		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/tasks/depend"}
+		return Bridge_Agent_Route{kind = .Envelope, path = route_path("api", "v1", "agent-actions", "tasks", "depend")}
 	case "agent.task.comment":
-		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/tasks/comment"}
+		return Bridge_Agent_Route{kind = .Envelope, path = route_path("api", "v1", "agent-actions", "tasks", "comment")}
 	// Task System v2: agent.task.status / set_current / vote / nudge / subscribe /
 	// unsubscribe were removed (hub answers 410 Gone). Lease verbs (M1):
 	case "agent.lease.next":
 		// .Local (M2): the bridge adds params.vcs_base (git HEAD of the agent's
 		// repo) and relays to lease/next (agent_taskv2_vcs.odin).
-		return Bridge_Agent_Route{kind = .Local, local_op = "lease.next", path = "/api/v1/agent-actions/lease/next"}
+		return Bridge_Agent_Route{kind = .Local, local_op = "lease.next", path = route_path("api", "v1", "agent-actions", "lease", "next")}
 	case "agent.lease.heartbeat":
-		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/lease/heartbeat"}
+		return Bridge_Agent_Route{kind = .Envelope, path = route_path("api", "v1", "agent-actions", "lease", "heartbeat")}
 	case "agent.lease.submit":
 		// .Local (M2): adds params.vcs = {head, dirty, files} then relays.
-		return Bridge_Agent_Route{kind = .Local, local_op = "lease.submit", path = "/api/v1/agent-actions/lease/submit"}
+		return Bridge_Agent_Route{kind = .Local, local_op = "lease.submit", path = route_path("api", "v1", "agent-actions", "lease", "submit")}
 	case "agent.lease.handoff":
-		return Bridge_Agent_Route{kind = .Local, local_op = "lease.handoff", path = "/api/v1/agent-actions/lease/handoff"}
+		return Bridge_Agent_Route{kind = .Local, local_op = "lease.handoff", path = route_path("api", "v1", "agent-actions", "lease", "handoff")}
 	case "agent.lease.switch":
 		// .Local: like lease.next, the response carries a pack → TASK.md + worktree.
-		return Bridge_Agent_Route{kind = .Local, local_op = "lease.switch", path = "/api/v1/agent-actions/lease/switch"}
+		return Bridge_Agent_Route{kind = .Local, local_op = "lease.switch", path = route_path("api", "v1", "agent-actions", "lease", "switch")}
 	case "agent.lease.block":
-		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/lease/block"}
+		return Bridge_Agent_Route{kind = .Envelope, path = route_path("api", "v1", "agent-actions", "lease", "block")}
 	case "agent.review.post":
-		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/review/post"}
+		return Bridge_Agent_Route{kind = .Envelope, path = route_path("api", "v1", "agent-actions", "review", "post")}
 	case "agent.task.fetch":
 		// {task_id, ref} with ref "#<event_id>" | "facet:<task>:<attempt>:<kind>".
-		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/task/fetch"}
+		return Bridge_Agent_Route{kind = .Envelope, path = route_path("api", "v1", "agent-actions", "task", "fetch")}
 	case "agent.task.readiness":
 		// {task_id}: read-only per-edge readiness (REQ-TV2-3b).
-		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/task/readiness"}
+		return Bridge_Agent_Route{kind = .Envelope, path = route_path("api", "v1", "agent-actions", "task", "readiness")}
 
 	// ---- workflow (M3b) ---------------------------------------------------
 	case "agent.workflow.templates":
-		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/workflow/templates"}
+		return Bridge_Agent_Route{kind = .Envelope, path = route_path("api", "v1", "agent-actions", "workflow", "templates")}
 	case "agent.workflow.runs":
-		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/workflow/runs"}
+		return Bridge_Agent_Route{kind = .Envelope, path = route_path("api", "v1", "agent-actions", "workflow", "runs")}
 	case "agent.workflow.history":
-		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/workflow/history"}
+		return Bridge_Agent_Route{kind = .Envelope, path = route_path("api", "v1", "agent-actions", "workflow", "history")}
 	case "agent.work.graph":
-		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/work/graph"}
+		return Bridge_Agent_Route{kind = .Envelope, path = route_path("api", "v1", "agent-actions", "work", "graph")}
 	case "agent.work.depend":
-		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/work/depend"}
+		return Bridge_Agent_Route{kind = .Envelope, path = route_path("api", "v1", "agent-actions", "work", "depend")}
 	case "agent.work.remove_dependency":
-		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/work/remove-dependency"}
+		return Bridge_Agent_Route{kind = .Envelope, path = route_path("api", "v1", "agent-actions", "work", "remove-dependency")}
 	case "agent.work.scope":
-		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/work/scope"}
+		return Bridge_Agent_Route{kind = .Envelope, path = route_path("api", "v1", "agent-actions", "work", "scope")}
 	case "agent.work.complete":
-		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/work/complete"}
+		return Bridge_Agent_Route{kind = .Envelope, path = route_path("api", "v1", "agent-actions", "work", "complete")}
 	case "agent.workflow.define":
-		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/workflow/define"}
+		return Bridge_Agent_Route{kind = .Envelope, path = route_path("api", "v1", "agent-actions", "workflow", "define")}
 	case "agent.workflow.run":
-		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/workflow/run"}
+		return Bridge_Agent_Route{kind = .Envelope, path = route_path("api", "v1", "agent-actions", "workflow", "run")}
 	case "agent.workflow.status":
-		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/workflow/status"}
+		return Bridge_Agent_Route{kind = .Envelope, path = route_path("api", "v1", "agent-actions", "workflow", "status")}
 	case "agent.workflow.output":
-		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/workflow/output"}
+		return Bridge_Agent_Route{kind = .Envelope, path = route_path("api", "v1", "agent-actions", "workflow", "output")}
 	case "agent.workflow.retry":
-		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/workflow/retry"}
+		return Bridge_Agent_Route{kind = .Envelope, path = route_path("api", "v1", "agent-actions", "workflow", "retry")}
 	case "agent.workflow.cancel":
-		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/workflow/cancel"}
+		return Bridge_Agent_Route{kind = .Envelope, path = route_path("api", "v1", "agent-actions", "workflow", "cancel")}
 
 	// ---- chat -------------------------------------------------------------
 	case "agent.chat.send":
 		// to == "user" -> send-to-user; else to is an agent-instance-id.
 		to := strings.trim_space(bridge_local_extract_json_string(params, "to", ""))
 		if to == "user" {
-			return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/chat/send-to-user"}
+			return Bridge_Agent_Route{kind = .Envelope, path = route_path("api", "v1", "agent-actions", "chat", "send-to-user")}
 		}
 		if to != "" {
-			return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/chat/send-to-agent"}
+			return Bridge_Agent_Route{kind = .Envelope, path = route_path("api", "v1", "agent-actions", "chat", "send-to-agent")}
 		}
 		return Bridge_Agent_Route{kind = .Bad_Request, message = "chat send requires --to: `user` for the bound user, or an agent-instance-id"}
 	case "agent.chat.read":
-		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/chat/read"}
+		return Bridge_Agent_Route{kind = .Envelope, path = route_path("api", "v1", "agent-actions", "chat", "read")}
 
 	// ---- instance-self / misc --------------------------------------------
 	case "agent.context.get":
-		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/context"}
+		return Bridge_Agent_Route{kind = .Envelope, path = route_path("api", "v1", "agent-actions", "context")}
 	case "agent.conversation.set_title":
-		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/conversation/set-title"}
+		return Bridge_Agent_Route{kind = .Envelope, path = route_path("api", "v1", "agent-actions", "conversation", "set-title")}
 	case "agent.memory.propose":
-		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/memory/propose"}
+		return Bridge_Agent_Route{kind = .Envelope, path = route_path("api", "v1", "agent-actions", "memory", "propose")}
 	case "agent.memory.list":
-		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/memory/list"}
+		return Bridge_Agent_Route{kind = .Envelope, path = route_path("api", "v1", "agent-actions", "memory", "list")}
 	case "agent.memory.show":
-		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/memory/show"}
+		return Bridge_Agent_Route{kind = .Envelope, path = route_path("api", "v1", "agent-actions", "memory", "show")}
 	case "agent.memory.content":
-		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/memory/content"}
+		return Bridge_Agent_Route{kind = .Envelope, path = route_path("api", "v1", "agent-actions", "memory", "content")}
 	case "agent.search":
 		// Global entity search (SEARCH-7): same owner scoping + hit shape as REST.
 		// Local because the bridge relays it to the hub, then merges its decrypted
 		// task-chain hits that the hub's ciphertext FTS cannot match (SRCH-2).
 		return Bridge_Agent_Route{kind = .Local, local_op = "search"}
 	case "agent.artifact.create":
-		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/artifacts/create"}
+		return Bridge_Agent_Route{kind = .Envelope, path = route_path("api", "v1", "agent-actions", "artifacts", "create")}
 	case "agent.artifact.list":
-		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/artifacts/list"}
+		return Bridge_Agent_Route{kind = .Envelope, path = route_path("api", "v1", "agent-actions", "artifacts", "list")}
 	case "agent.artifact.show":
-		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/artifacts/show"}
+		return Bridge_Agent_Route{kind = .Envelope, path = route_path("api", "v1", "agent-actions", "artifacts", "show")}
 	case "agent.artifact.content":
-		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/artifacts/content"}
+		return Bridge_Agent_Route{kind = .Envelope, path = route_path("api", "v1", "agent-actions", "artifacts", "content")}
 
 	// ---- cards ------------------------------------------------------------
 	case "agent.cards.create":
-		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/cards/create"}
+		return Bridge_Agent_Route{kind = .Envelope, path = route_path("api", "v1", "agent-actions", "cards", "create")}
 	case "agent.cards.list":
-		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/cards/list"}
+		return Bridge_Agent_Route{kind = .Envelope, path = route_path("api", "v1", "agent-actions", "cards", "list")}
 	case "agent.cards.show":
-		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/cards/show"}
+		return Bridge_Agent_Route{kind = .Envelope, path = route_path("api", "v1", "agent-actions", "cards", "show")}
 	case "agent.cards.discard":
-		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/cards/discard"}
+		return Bridge_Agent_Route{kind = .Envelope, path = route_path("api", "v1", "agent-actions", "cards", "discard")}
 	case "agent.cards.accept":
-		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/cards/accept"}
+		return Bridge_Agent_Route{kind = .Envelope, path = route_path("api", "v1", "agent-actions", "cards", "accept")}
 
 	// ---- shell sessions -------------------------------------------------------
 	// agent.shell.wait is LOCAL, unlike every other agent.shell.* verb, which is a
@@ -361,6 +366,27 @@ bridge_agent_method_allowed :: proc(method: string) -> bool {
 
 // ---- small param helpers (pure) -----------------------------------------
 
+// route_path copies segments into a temp-allocated slice (a route outlives the
+// variadic argument array).
+route_path :: proc(segments: ..string) -> []string {
+	out := make([]string, len(segments), context.temp_allocator)
+	copy(out, segments)
+	return out
+}
+
+route_query :: proc(params: ..httpc.Query_Param) -> []httpc.Query_Param {
+	out := make([]httpc.Query_Param, len(params), context.temp_allocator)
+	copy(out, params)
+	return out
+}
+
+// bridge_agent_route_target renders a route's hub target ("/api/v1/x?y=z") for
+// logs and tests, encoded exactly as the request will be.
+bridge_agent_route_target :: proc(route: Bridge_Agent_Route) -> string {
+	target, err := httpc.build_target(route.path, route.query, context.temp_allocator)
+	return target if err == .None else ""
+}
+
 bridge_agent_params_bool :: proc(params, key: string) -> bool {
 	// accepts "key":true or "key":"true"
 	if strings.contains(params, strings.concatenate({"\"", key, "\":true"})) do return true
@@ -419,7 +445,7 @@ bridge_local_handle_agent_local_op :: proc(request_id, op, params: string, rec: 
 		// Hub-registered bridges (scope hub|all): relay GET /api/v1/bridges and
 		// splice each row through, tagged origin=hub.
 		if (scope == "hub" || scope == "all") && strings.trim_space(rec.instance_token) != "" {
-			relay := bridge_local_relay_raw("GET", "/api/v1/bridges", "", rec)
+			relay := bridge_local_relay_raw(.GET, route_path("api", "v1", "bridges"), nil, "", rec)
 			if relay.ok && relay.status >= 200 && relay.status < 300 {
 				for obj in bridge_agent_json_array_objects(bridge_agent_json_data_array(relay.body)) {
 					if !first do strings.write_byte(&b, ',')
@@ -452,10 +478,10 @@ bridge_local_handle_agent_local_op :: proc(request_id, op, params: string, rec: 
 	if op == "search" do return bridge_agent_search_rpc(request_id, params, rec)
 	// Task System v2 lease verbs: enrich with git state, then relay to the hub
 	// path the route table names (agent_taskv2_vcs.odin).
-	if op == "lease.next" do return bridge_agent_lease_local_rpc(request_id, "agent.lease.next", "/api/v1/agent-actions/lease/next", params, rec)
-	if op == "lease.submit" do return bridge_agent_lease_local_rpc(request_id, "agent.lease.submit", "/api/v1/agent-actions/lease/submit", params, rec)
-	if op == "lease.handoff" do return bridge_agent_lease_local_rpc(request_id, "agent.lease.handoff", "/api/v1/agent-actions/lease/handoff", params, rec)
-	if op == "lease.switch" do return bridge_agent_lease_local_rpc(request_id, "agent.lease.switch", "/api/v1/agent-actions/lease/switch", params, rec)
+	if op == "lease.next" do return bridge_agent_lease_local_rpc(request_id, "agent.lease.next", route_path("api", "v1", "agent-actions", "lease", "next"), params, rec)
+	if op == "lease.submit" do return bridge_agent_lease_local_rpc(request_id, "agent.lease.submit", route_path("api", "v1", "agent-actions", "lease", "submit"), params, rec)
+	if op == "lease.handoff" do return bridge_agent_lease_local_rpc(request_id, "agent.lease.handoff", route_path("api", "v1", "agent-actions", "lease", "handoff"), params, rec)
+	if op == "lease.switch" do return bridge_agent_lease_local_rpc(request_id, "agent.lease.switch", route_path("api", "v1", "agent-actions", "lease", "switch"), params, rec)
 	if op == "vault.status" {
 		status := bridge_vault_status()
 		status_str := bridge_vault_status_string(status)

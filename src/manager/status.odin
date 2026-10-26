@@ -9,7 +9,7 @@ import "core:fmt"
 import "core:os"
 import "core:strings"
 import contracts "odin_test:contracts"
-import http "odin_test:lib/http_client"
+import httpc "odin_test:lib/httpc"
 import cfg_lib "odin_test:lib/config"
 
 manager_probe_binary :: proc(bin: string) -> (path: string, version_line: string, found: bool, version_ok: bool) {
@@ -119,19 +119,29 @@ manager_status_command :: proc(args: []string) {
 	case token == "":
 		fmt.println("  skipped (no bridge token — run: ham-bridge enroll --hub <your-heimdall-url>)")
 	case:
-		detail_path := fmt.tprintf("/api/v1/bridges/%s", bridge_id)
-		headers := [?]http.Header{{name = "Authorization", value = strings.concatenate({"Bearer ", token})}}
-		resp, ok := http.request_with_headers_timeout("GET", hub_url, detail_path, "", headers[:], MANAGER_PROBE_TIMEOUT_MS)
+		detail := [?]string{"api", "v1", "bridges", bridge_id}
+		hub, url_err := httpc.parse_url(hub_url)
+		target := hub_url
+		if url_err == .None {
+			if rendered, render_err := httpc.build_url(hub, detail[:], allocator = context.temp_allocator); render_err == .None do target = rendered
+		}
+		headers := [?]httpc.Header{httpc.bearer(token)}
+		resp: httpc.Response
+		err := httpc.Error.Invalid_Url
+		if url_err == .None {
+			resp, err = httpc.send({method = .GET, url = hub, path = detail[:], headers = headers[:], timeout_ms = MANAGER_PROBE_TIMEOUT_MS}, context.temp_allocator)
+		}
+		body := httpc.text(resp)
 		switch {
-		case !ok:
-			fmt.printfln("  GET %s%s: unreachable (transport error — is the Hub/proxy up?)", hub_url, detail_path)
+		case err != .None:
+			fmt.printfln("  GET %s: unreachable (%s — is the Hub/proxy up?)", target, httpc.error_string(err))
 		case resp.status == 200:
-			status := manager_extract_json_string(resp.body, "status", "unknown")
-			last_seen := manager_extract_json_string(resp.body, "last_seen_at", "")
-			machine := manager_extract_json_string(resp.body, "machine_hostname", "")
-			fmt.printfln("  GET %s%s: %s (machine %s, last seen %s)", hub_url, detail_path, status, machine, last_seen)
+			status := manager_extract_json_string(body, "status", "unknown")
+			last_seen := manager_extract_json_string(body, "last_seen_at", "")
+			machine := manager_extract_json_string(body, "machine_hostname", "")
+			fmt.printfln("  GET %s: %s (machine %s, last seen %s)", target, status, machine, last_seen)
 		case:
-			fmt.printfln("  GET %s%s: HTTP %d — %s", hub_url, detail_path, resp.status, resp.body)
+			fmt.printfln("  GET %s: HTTP %d — %s", target, resp.status, body)
 			if resp.status == 401 || resp.status == 403 do fmt.println("  hint: bridge token rejected — re-run: ham-bridge enroll --hub <your-heimdall-url>")
 		}
 	}

@@ -7,7 +7,8 @@ import "core:os"
 import "core:strings"
 import "core:sync"
 import "core:thread"
-import http "odin_test:lib/http_client"
+import "core:encoding/json"
+import httpc "odin_test:lib/httpc"
 import jsonx "odin_test:lib/jsonx"
 
 Bridge_Local_Endpoint_Config :: struct {
@@ -488,7 +489,7 @@ bridge_local_handle_agent_method :: proc(request_id, method, params: string, rec
 		if !sync.atomic_load(&bridge_hub_runtime_up) do return bridge_local_response_error(request_id, "hub_unreachable", "Hub is unreachable; the request was not sent")
 		body := ""
 		if route.send_body { body = strings.trim_space(params); if body == "" do body = "{}" }
-		relay := bridge_local_relay_raw(route.http_method, route.path, body, rec)
+		relay := bridge_local_relay_raw(route.http_method, route.path, route.query, body, rec)
 		if !relay.ok do return bridge_local_response_error(request_id, "retryable_unavailable", "Hub relay failed")
 		if relay.status < 200 || relay.status >= 300 do return bridge_local_response_error(request_id, "hub_error", relay.body)
 		if strings.trim_space(relay.body) == "" do return bridge_local_response_data(request_id, "{}")
@@ -504,61 +505,112 @@ bridge_local_handle_agent_method :: proc(request_id, method, params: string, rec
 }
 
 // bridge_local_relay_agent_envelope wraps params in the agent-actions envelope
-// {method, agent_instance_id, params} and POSTs it, with AC-5 retry.
-bridge_local_relay_agent_envelope :: proc(path, method, params: string, rec: Bridge_Local_Agent_Token_Record, timeout_ms: int = http.DEFAULT_TIMEOUT_MS) -> Bridge_Local_Relay_Result {
-	body := bridge_local_agent_relay_body(method, params, rec.agent_instance_id)
-	credential_snapshot_509 := bridge_credential_snapshot()
-	defer delete(credential_snapshot_509)
-	headers := [?]http.Header{{name = "Authorization", value = strings.concatenate({"Bearer ", credential_snapshot_509})}, {name = "X-Heimdall-Instance-Token", value = rec.instance_token}}
-	resp, ok := bridge_http_request_retry("POST", bridge_config.daemon_url, path, body, headers[:], timeout_ms)
-	return Bridge_Local_Relay_Result{status = resp.status, body = resp.body, ok = ok}
+// {method, agent_instance_id, params} and POSTs it, with AC-5 retry. params must
+// be a JSON object (or empty): it is parsed, never spliced, so an agent cannot
+// smuggle extra envelope keys into the request.
+bridge_local_relay_agent_envelope :: proc(path: []string, method, params: string, rec: Bridge_Local_Agent_Token_Record, timeout_ms: int = httpc.LONG_TRANSFER_TIMEOUT_MS) -> Bridge_Local_Relay_Result {
+	envelope, valid := bridge_local_agent_relay_envelope(method, params, rec.agent_instance_id)
+	if !valid do return bridge_local_relay_invalid_params()
+	credential := bridge_credential_snapshot()
+	defer delete(credential)
+	headers := [?]httpc.Header{httpc.bearer(credential), {name = "X-Heimdall-Instance-Token", value = rec.instance_token}}
+	resp, err := bridge_http_request_retry({
+		method = .POST, url = bridge_hub_url(), path = path, headers = headers[:],
+		body = httpc.json_body(envelope), timeout_ms = timeout_ms,
+		connect_timeout_ms = httpc.DEFAULT_TIMEOUT_MS, stall_timeout_ms = httpc.DEFAULT_STALL_TIMEOUT_MS,
+	})
+	defer httpc.response_destroy(&resp)
+	return bridge_local_relay_result(resp, err)
 }
 
-// bridge_local_relay_raw issues a direct REST call (GET/POST) with the instance
-// token header, with AC-5 retry. Body is only sent for writes.
-bridge_local_relay_raw :: proc(http_method, path, body: string, rec: Bridge_Local_Agent_Token_Record) -> Bridge_Local_Relay_Result {
-	credential_snapshot_517 := bridge_credential_snapshot()
-	defer delete(credential_snapshot_517)
-	headers := [?]http.Header{{name = "Authorization", value = strings.concatenate({"Bearer ", credential_snapshot_517})}, {name = "X-Heimdall-Instance-Token", value = rec.instance_token}}
-	resp, ok := bridge_http_request_retry(http_method, bridge_config.daemon_url, path, body, headers[:], http.DEFAULT_TIMEOUT_MS)
-	return Bridge_Local_Relay_Result{status = resp.status, body = resp.body, ok = ok}
+// bridge_local_relay_raw issues a direct REST call with the instance token
+// header, with AC-5 retry. body is the agent's own JSON params, forwarded
+// verbatim for writes ("" = no body).
+bridge_local_relay_raw :: proc(http_method: httpc.Method, path: []string, query: []httpc.Query_Param, body: string, rec: Bridge_Local_Agent_Token_Record) -> Bridge_Local_Relay_Result {
+	credential := bridge_credential_snapshot()
+	defer delete(credential)
+	headers := [?]httpc.Header{httpc.bearer(credential), {name = "X-Heimdall-Instance-Token", value = rec.instance_token}}
+	req := httpc.Request{
+		method = http_method, url = bridge_hub_url(), path = path, query = query, headers = headers[:],
+		timeout_ms = httpc.LONG_TRANSFER_TIMEOUT_MS, connect_timeout_ms = httpc.DEFAULT_TIMEOUT_MS,
+		stall_timeout_ms = httpc.DEFAULT_STALL_TIMEOUT_MS,
+	}
+	if body != "" do req.body = httpc.relay_json_body(body)
+	resp, err := bridge_http_request_retry(req)
+	defer httpc.response_destroy(&resp)
+	return bridge_local_relay_result(resp, err)
 }
 
+// bridge_local_relay_rest_request forwards agent.rest.request: the agent names
+// an HTTP method, an origin-form hub target ("/api/v1/...?...") and an optional
+// JSON body. The target is validated by httpc (relay_target) and resolved under
+// the hub base URL; it is never concatenated here.
 bridge_local_relay_rest_request :: proc(params: string, rec: Bridge_Local_Agent_Token_Record) -> Bridge_Local_Relay_Result {
 	http_method := bridge_local_extract_json_string(params, "http_method", "")
 	if http_method == "" do http_method = bridge_local_extract_json_string(params, "method", "POST")
+	method, method_ok := httpc.method_parse(http_method)
+	if !method_ok do return Bridge_Local_Relay_Result{status = 0, ok = false}
 	path := bridge_local_extract_json_string(params, "path", "")
 	if path == "" do return Bridge_Local_Relay_Result{status = 0, ok = false}
 	body := bridge_local_extract_json_string(params, "body", "")
 	if body == "" do body = bridge_local_extract_json_object(params, "body")
 	if body == "{}" && !strings.contains(params, "\"body\"") do body = ""
 
-	credential_snapshot_532 := bridge_credential_snapshot()
-	defer delete(credential_snapshot_532)
-	headers := [?]http.Header{
-		{name = "Authorization", value = strings.concatenate({"Bearer ", credential_snapshot_532})},
-		{name = "X-Heimdall-Instance-Token", value = rec.instance_token},
+	credential := bridge_credential_snapshot()
+	defer delete(credential)
+	headers := [?]httpc.Header{httpc.bearer(credential), {name = "X-Heimdall-Instance-Token", value = rec.instance_token}}
+	req := httpc.Request{
+		method = method, url = bridge_hub_url(), relay_target = path, headers = headers[:],
+		timeout_ms = httpc.LONG_TRANSFER_TIMEOUT_MS, connect_timeout_ms = httpc.DEFAULT_TIMEOUT_MS,
+		stall_timeout_ms = httpc.DEFAULT_STALL_TIMEOUT_MS,
 	}
-	resp, ok := http.request_with_headers_timeout(http_method, bridge_config.daemon_url, path, body, headers[:], http.DEFAULT_TIMEOUT_MS)
-	return Bridge_Local_Relay_Result{status = resp.status, body = resp.body, ok = ok}
+	if body != "" && method != .GET && method != .HEAD do req.body = httpc.relay_json_body(body)
+	resp, err := httpc.send(req)
+	defer httpc.response_destroy(&resp)
+	return bridge_local_relay_result(resp, err)
 }
 
-// bridge_local_agent_relay_body wraps params in the agent-actions envelope
-// {method, agent_instance_id, params} used by all .Envelope routes.
-bridge_local_agent_relay_body :: proc(method, params, agent_instance_id: string) -> string {
-	b := strings.builder_make()
-	strings.write_string(&b, "{\"method\":\"")
-	bridge_local_write_json_string(&b, method)
-	strings.write_string(&b, "\",\"agent_instance_id\":\"")
-	bridge_local_write_json_string(&b, agent_instance_id)
-	strings.write_string(&b, "\",\"params\":")
-	if strings.trim_space(params) == "" {
-		strings.write_string(&b, "{}")
-	} else {
-		strings.write_string(&b, params)
+// bridge_local_relay_result copies what the local RPC answer needs (the body is
+// a heap clone owned by the caller, as before).
+bridge_local_relay_result :: proc(resp: httpc.Response, err: httpc.Error) -> Bridge_Local_Relay_Result {
+	if err != .None do return Bridge_Local_Relay_Result{status = 0, ok = false}
+	return Bridge_Local_Relay_Result{status = resp.status, body = strings.clone(httpc.text(resp)), ok = true}
+}
+
+// bridge_local_relay_invalid_params answers an envelope whose params are not a
+// JSON object without contacting the hub.
+bridge_local_relay_invalid_params :: proc() -> Bridge_Local_Relay_Result {
+	return Bridge_Local_Relay_Result{status = 400, ok = true, body = strings.clone(`{"error":{"code":"validation_failed","message":"params must be a JSON object"}}`)}
+}
+
+// Bridge_Agent_Relay_Envelope is the agent-actions request body.
+Bridge_Agent_Relay_Envelope :: struct {
+	method:            string     `json:"method"`,
+	agent_instance_id: string     `json:"agent_instance_id"`,
+	params:            json.Value `json:"params"`,
+}
+
+// bridge_local_agent_relay_envelope parses params (a JSON object, "" = {}) into
+// the envelope. The parsed value is temp-allocated.
+bridge_local_agent_relay_envelope :: proc(method, params, agent_instance_id: string) -> (Bridge_Agent_Relay_Envelope, bool) {
+	value: json.Value = json.Object{}
+	if text := strings.trim_space(params); text != "" {
+		parsed, perr := json.parse_string(text, .JSON, parse_integers = true, allocator = context.temp_allocator)
+		if perr != .None do return {}, false
+		if _, is_object := parsed.(json.Object); !is_object do return {}, false
+		value = parsed
 	}
-	strings.write_byte(&b, '}')
-	return strings.to_string(b)
+	return Bridge_Agent_Relay_Envelope{method = method, agent_instance_id = agent_instance_id, params = value}, true
+}
+
+// bridge_local_agent_relay_body renders the envelope as JSON text (tests and
+// logs); "" when params is not a JSON object.
+bridge_local_agent_relay_body :: proc(method, params, agent_instance_id: string) -> string {
+	envelope, valid := bridge_local_agent_relay_envelope(method, params, agent_instance_id)
+	if !valid do return ""
+	data, err := json.marshal(envelope, allocator = context.allocator)
+	if err != nil do return ""
+	return string(data)
 }
 
 bridge_local_response_data :: proc(id, data_json: string) -> string {

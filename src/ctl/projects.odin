@@ -3,9 +3,10 @@ package main
 import "core:fmt"
 import "core:os"
 import "core:strings"
+import httpc "odin_test:lib/httpc"
 
-ctl_projects_request_and_decrypt :: proc(transport: Ctl_Transport, method, path, body_json: string, args: []string = nil) {
-	resp_str, ok := ctl_tasks_request_local(transport, method, path, body_json)
+ctl_projects_request_and_decrypt :: proc(transport: Ctl_Transport, req: Ctl_Request, args: []string = nil) {
+	resp_str, ok := ctl_tasks_request_local(transport, req)
 	if !ok {
 		if resp_str != "" {
 			fmt.println(resp_str)
@@ -43,7 +44,7 @@ ctl_projects_command :: proc(cmd: []string, args: []string) {
 	if !ok do return
 
 	if action == "" || action == "list" {
-		ctl_projects_request_and_decrypt(transport, "GET", "/api/v1/projects", "", args)
+		ctl_projects_request_and_decrypt(transport, {method = .GET, path = ctl_api("projects")}, args)
 		return
 	}
 
@@ -54,7 +55,7 @@ ctl_projects_command :: proc(cmd: []string, args: []string) {
 			fmt.println(`{"ok":false,"message":"usage: ham-ctl projects show <project-id> | --project-id <id>"}`)
 			return
 		}
-		ctl_projects_request_and_decrypt(transport, "GET", fmt.tprintf("/api/v1/projects/%s", safe_path_part(project_id)), "", args)
+		ctl_projects_request_and_decrypt(transport, {method = .GET, path = ctl_api("projects", project_id)}, args)
 		return
 	}
 
@@ -74,16 +75,10 @@ ctl_projects_command :: proc(cmd: []string, args: []string) {
 			desc = ctl_seal_or_exit(desc, keyring)
 		}
 
-		fields := make([dynamic]string)
-		defer delete(fields)
-		append(&fields, json_kv("name", name))
-		if slug := option_value(args, "--slug", ""); slug != "" do append(&fields, json_kv("slug", slug))
-		if desc != "" do append(&fields, json_kv("description", desc))
-		if repo := option_value(args, "--repo-url", option_value(args, "--repo", "")); repo != "" do append(&fields, json_kv("repo_url", repo))
-		if vcs := option_value(args, "--vcs-kind", ""); vcs != "" do append(&fields, json_kv("vcs_kind", vcs))
-		if path := option_value(args, "--default-path", option_value(args, "--path", "")); path != "" do append(&fields, json_kv("default_path", path))
-
-		ctl_projects_request_and_decrypt(transport, "POST", "/api/v1/projects", json_object_from_slice(fields[:]), args)
+		body := ctl_project_body(args)
+		body.name = name
+		body.description = desc
+		ctl_projects_request_and_decrypt(transport, {method = .POST, path = ctl_api("projects"), body = httpc.json_body(body)}, args)
 		return
 	}
 
@@ -106,18 +101,32 @@ ctl_projects_command :: proc(cmd: []string, args: []string) {
 			desc = ctl_seal_or_exit(desc, keyring)
 		}
 
-		fields := make([dynamic]string)
-		defer delete(fields)
-		if name != "" do append(&fields, json_kv("name", name))
-		if desc != "" do append(&fields, json_kv("description", desc))
-		if slug := option_value(args, "--slug", ""); slug != "" do append(&fields, json_kv("slug", slug))
-		if repo := option_value(args, "--repo-url", option_value(args, "--repo", "")); repo != "" do append(&fields, json_kv("repo_url", repo))
-		if vcs := option_value(args, "--vcs-kind", ""); vcs != "" do append(&fields, json_kv("vcs_kind", vcs))
-		if path := option_value(args, "--default-path", option_value(args, "--path", "")); path != "" do append(&fields, json_kv("default_path", path))
-
-		ctl_projects_request_and_decrypt(transport, "PATCH", fmt.tprintf("/api/v1/projects/%s", safe_path_part(project_id)), json_object_from_slice(fields[:]), args)
+		body := ctl_project_body(args)
+		body.name = name
+		body.description = desc
+		ctl_projects_request_and_decrypt(transport, {method = .PATCH, path = ctl_api("projects", project_id), body = httpc.json_body(body)}, args)
 		return
 	}
 
 	fmt.println("usage: ham-ctl projects <list|create|show|update>")
+}
+
+// Ctl_Project_Body: `projects create|update`; only the fields passed are sent
+// (create always has a name).
+Ctl_Project_Body :: struct {
+	name:         string `json:"name,omitempty"`,
+	slug:         string `json:"slug,omitempty"`,
+	description:  string `json:"description,omitempty"`,
+	repo_url:     string `json:"repo_url,omitempty"`,
+	vcs_kind:     string `json:"vcs_kind,omitempty"`,
+	default_path: string `json:"default_path,omitempty"`,
+}
+
+ctl_project_body :: proc(args: []string) -> Ctl_Project_Body {
+	return {
+		slug         = option_value(args, "--slug", ""),
+		repo_url     = option_value(args, "--repo-url", option_value(args, "--repo", "")),
+		vcs_kind     = option_value(args, "--vcs-kind", ""),
+		default_path = option_value(args, "--default-path", option_value(args, "--path", "")),
+	}
 }

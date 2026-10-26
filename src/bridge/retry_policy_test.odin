@@ -9,7 +9,7 @@ import "core:sys/posix"
 import "core:testing"
 import "core:thread"
 import "core:time"
-import http "odin_test:lib/http_client"
+import httpc "odin_test:lib/httpc"
 
 @(test)
 test_bridge_http_is_retriable_classifier :: proc(t: ^testing.T) {
@@ -44,13 +44,15 @@ test_bridge_http_is_retriable_classifier :: proc(t: ^testing.T) {
 @(test)
 bridge_http_retry_respects_an_already_expired_command_budget :: proc(t: ^testing.T) {
 	started := time.now()
-	resp, ok := bridge_http_request_retry(
-		"GET", "http://127.0.0.1:1", "/never", "", nil,
-		2000, 4, 150,
+	never, _ := httpc.parse_url("http://127.0.0.1:1")
+	resp, err := bridge_http_request_retry(
+		{method = .GET, url = never, path = {"never"}, timeout_ms = 2000},
+		4, 150,
 		time.to_unix_nanoseconds(time.now()) - i64(time.Millisecond),
 	)
-	_ = resp
-	testing.expect(t, !ok, "expired work must fail before dialing")
+	httpc.response_destroy(&resp)
+	testing.expect(t, err != .None, "expired work must fail before dialing")
+	testing.expect(t, !resp.may_have_sent)
 	testing.expect(t, time.diff(started, time.now()) < 50 * time.Millisecond, "expired work must not consume retry backoff")
 }
 
@@ -100,18 +102,26 @@ retry_test_response :: proc(status: int, reason, body: string) -> string {
 }
 
 @(private = "file")
-RETRY_TEST_HEADERS := [?]http.Header{{name = "Authorization", value = "Bearer test_token"}, {name = "Content-Type", value = "application/json"}}
+RETRY_TEST_HEADERS := [?]httpc.Header{{name = "Authorization", value = "Bearer test_token"}}
+
+@(private = "file")
+retry_test_request :: proc(srv: ^Retry_Test_Server, method: httpc.Method, path: []string, json_body := false) -> httpc.Request {
+	base, _ := httpc.parse_url(srv.url)
+	req := httpc.Request{method = method, url = base, path = path, headers = RETRY_TEST_HEADERS[:], timeout_ms = 2000}
+	if json_body do req.body = httpc.json_body(struct{}{})
+	return req
+}
 
 @(test)
 test_bridge_http_get_5xx_then_200_sequence :: proc(t: ^testing.T) {
 	srv := Retry_Test_Server{responses = {retry_test_response(503, "Service Unavailable", "503 service unavailable"), retry_test_response(200, "OK", `{"restarted":true}`)}}
 	retry_test_serve(t, &srv)
 	defer retry_test_stop(&srv)
-	resp, ok := bridge_http_request_retry("GET", srv.url, "/api/v1/agent-instances/inst_test", "", RETRY_TEST_HEADERS[:], 2000, 4, 5)
-	defer delete(resp.body)
-	testing.expect(t, ok, "request_retry must return ok=true")
+	resp, err := bridge_http_request_retry(retry_test_request(&srv, .GET, {"api", "v1", "agent-instances", "inst_test"}), 4, 5)
+	defer httpc.response_destroy(&resp)
+	testing.expect(t, err == .None, "request_retry must succeed")
 	testing.expect_value(t, resp.status, 200)
-	testing.expect(t, strings.contains(resp.body, "restarted"), "body must contain restarted")
+	testing.expect(t, strings.contains(httpc.text(resp), "restarted"), "body must contain restarted")
 }
 
 // REQ-ERR-PROTO-B: a POST that failed with a 5xx may already have been applied (a
@@ -120,10 +130,10 @@ test_bridge_http_get_5xx_then_200_sequence :: proc(t: ^testing.T) {
 test_bridge_http_post_5xx_is_not_retried :: proc(t: ^testing.T) {
 	srv := Retry_Test_Server{responses = {retry_test_response(500, "Internal Server Error", `{"error":{"code":"internal_error","class":"retriable","message":"x"}}`), retry_test_response(200, "OK", `{}`)}}
 	retry_test_serve(t, &srv)
-	resp, ok := bridge_http_request_retry("POST", srv.url, "/api/v1/agent-instances", "{}", RETRY_TEST_HEADERS[:], 2000, 4, 5)
-	defer delete(resp.body)
+	resp, err := bridge_http_request_retry(retry_test_request(&srv, .POST, {"api", "v1", "agent-instances"}, true), 4, 5)
+	defer httpc.response_destroy(&resp)
 	testing.expect_value(t, resp.status, 500)
-	testing.expect(t, ok)
+	testing.expect(t, err == .None)
 	// Shutting the listener down wakes the server's second accept, so it exits.
 	retry_test_stop(&srv)
 	testing.expect_value(t, srv.requests, 1)
@@ -138,24 +148,24 @@ test_bridge_http_post_busy_is_retried_after_retry_after :: proc(t: ^testing.T) {
 	retry_test_serve(t, &srv)
 	defer retry_test_stop(&srv)
 	started := time.now()
-	resp, ok := bridge_http_request_retry("POST", srv.url, "/api/v1/agent-instances", "{}", RETRY_TEST_HEADERS[:], 2000, 4, 5)
-	defer delete(resp.body)
-	testing.expect(t, ok)
+	resp, err := bridge_http_request_retry(retry_test_request(&srv, .POST, {"api", "v1", "agent-instances"}, true), 4, 5)
+	defer httpc.response_destroy(&resp)
+	testing.expect(t, err == .None)
 	testing.expect_value(t, resp.status, 200)
 	testing.expect(t, time.diff(started, time.now()) >= 200 * time.Millisecond, "the retry waited for retry_after_ms")
 }
 
 @(test)
 test_bridge_http_attempt_retriable_by_method :: proc(t: ^testing.T) {
-	plain_503 := http.Response{status = 503, body = "unavailable"}
-	busy_503 := http.Response{status = 503, body = `{"error":{"code":"bridge_busy","class":"retriable"}}`}
-	testing.expect(t, bridge_http_attempt_retriable("GET", plain_503, true))
-	testing.expect(t, bridge_http_attempt_retriable("GET", {}, false), "GET transport failure retries")
-	testing.expect(t, !bridge_http_attempt_retriable("POST", plain_503, true), "POST 5xx may have been applied")
-	testing.expect(t, !bridge_http_attempt_retriable("POST", {}, false), "POST transport failure may have been applied")
-	testing.expect(t, bridge_http_attempt_retriable("POST", busy_503, true), "POST refused as busy was not applied")
-	testing.expect(t, bridge_http_attempt_retriable("POST", http.Response{status = 429}, true), "429 was not applied")
-	testing.expect_value(t, bridge_http_retry_after_ms(http.Response{status = 503, body = `{"error":{"code":"bridge_busy","retry_after_ms":750}}`}, true), i64(750))
+	plain_503 := httpc.Response{status = 503, body = transmute([]byte)string("unavailable")}
+	busy_503 := httpc.Response{status = 503, body = transmute([]byte)string(`{"error":{"code":"bridge_busy","class":"retriable"}}`)}
+	testing.expect(t, bridge_http_attempt_retriable(.GET, plain_503, true))
+	testing.expect(t, bridge_http_attempt_retriable(.GET, {}, false), "GET transport failure retries")
+	testing.expect(t, !bridge_http_attempt_retriable(.POST, plain_503, true), "POST 5xx may have been applied")
+	testing.expect(t, !bridge_http_attempt_retriable(.POST, {}, false), "POST transport failure may have been applied")
+	testing.expect(t, bridge_http_attempt_retriable(.POST, busy_503, true), "POST refused as busy was not applied")
+	testing.expect(t, bridge_http_attempt_retriable(.POST, httpc.Response{status = 429}, true), "429 was not applied")
+	testing.expect_value(t, bridge_http_retry_after_ms(httpc.Response{status = 503, body = transmute([]byte)string(`{"error":{"code":"bridge_busy","retry_after_ms":750}}`)}, true), i64(750))
 }
 
 @(test)
@@ -261,8 +271,8 @@ test_bridge_http_retry_metrics_count_outcomes :: proc(t: ^testing.T) {
 	before := bridge_http_retry_metrics
 	srv := Retry_Test_Server{responses = {retry_test_response(503, "Service Unavailable", "x"), retry_test_response(200, "OK", `{}`)}}
 	retry_test_serve(t, &srv)
-	resp, _ := bridge_http_request_retry("GET", srv.url, "/api/v1/x", "", RETRY_TEST_HEADERS[:], 2000, 4, 5)
-	delete(resp.body)
+	resp, _ := bridge_http_request_retry(retry_test_request(&srv, .GET, {"api", "v1", "x"}), 4, 5)
+	httpc.response_destroy(&resp)
 	retry_test_stop(&srv)
 	// Other tests in this package retry concurrently, so only lower bounds hold.
 	testing.expect(t, bridge_http_retry_metrics.retry >= before.retry + 1, "one repeated attempt")

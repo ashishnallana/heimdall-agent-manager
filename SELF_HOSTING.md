@@ -651,11 +651,13 @@ connects outbound to the hub and never needs to be publicly reachable itself.
 
 On any Linux (x86_64, arm64) or macOS (Intel, Apple Silicon) machine, install
 prebuilt binaries with the one-line installer — no Nix, no Odin, no Rust
-toolchain, no source checkout. For an HTTPS or WSS hub, install `socat` first:
+toolchain, no source checkout. The bridge links the host's libcurl (≥ 7.80:
+Debian 12+, Ubuntu 22.04+, macOS 13+); for an HTTPS or WSS hub, also install
+`socat` first:
 
 ```bash
-sudo apt install socat  # Debian/Ubuntu
-brew install socat      # macOS
+sudo apt install socat libcurl4  # Debian/Ubuntu (libcurl4t64 on Ubuntu 24.04)
+brew install socat               # macOS (libcurl is part of the OS)
 ```
 
 The installer checks this dependency before any download or write and stops with
@@ -760,11 +762,19 @@ want it gone:
   then deleted. Whatever `openssl` sits there now is yours or your package
   manager's, and it stays.
 
-`socat` (the default bridge → hub TLS transport) is not bundled; install it
-with your system package manager (`sudo apt install socat`,
+The bridge's HTTPS client is **libcurl** (`src/lib/httpc`), linked from the
+host and not bundled: Linux needs `libcurl.so.4` ≥ 7.80 (Debian 12+,
+Ubuntu 22.04+, Fedora 37+; `sudo apt install libcurl4`), macOS uses the
+system `/usr/lib/libcurl.4.dylib` (macOS 13+). macOS 12 (libcurl 7.79) is
+too old. libcurl honours `HAM_TLS_CA_FILE`, then `SSL_CERT_FILE` /
+`SSL_CERT_DIR`, then the system trust store, and never uses a proxy from the
+environment.
+
+`socat` (the default bridge → hub **WebSocket** TLS transport) is not bundled;
+install it with your system package manager (`sudo apt install socat`,
 `brew install socat`) if it is not already on `PATH`. `openssl` is likewise
-not bundled: the `HAM_TLS_BACKEND=s_client` fallback resolves it from your
-system `PATH`.
+not bundled: the `HAM_TLS_BACKEND=s_client` WebSocket fallback resolves it from
+your system `PATH`. `HAM_TLS_BACKEND` does not affect HTTPS.
 
 **Then enroll and let it hand off to the registered service:**
 
@@ -818,7 +828,8 @@ diagnostics (ports, permissions, harnesses, service unit). Run
 On Windows 10 (1809+) or 11, x64 (Windows on Arm runs the x64 bundle under
 emulation), run from a **normal, non-elevated** PowerShell — Windows PowerShell 5.1
 or PowerShell 7. No administrator rights, no execution-policy change (nothing runs
-from a `.ps1` file), and no `socat`: the Windows bridge uses the system TLS stack.
+from a `.ps1` file), and no `socat`: the Windows bridge uses the system TLS stack
+(Schannel, both for its statically linked libcurl and for the WebSocket).
 
 ```powershell
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/tanmayv/heimdall-agent-manager/main/scripts/install.ps1))) -Hub https://hub.example.com
@@ -891,8 +902,9 @@ refused by a lock in `%APPDATA%\heimdall\bridges\.install-lock`.
 | `ham-bridge` | Odin binary — agent supervisor, shell job executor, fs explorer |
 | `ham-pty-host` | Rust binary — spawns agent CLIs in real PTYs (replaces tmux wrapper) |
 | `ham-ctl` | CLI used by agents to read/send messages, update tasks, etc. |
-| `socat` | TLS transport for bridge → hub connection (default backend; not bundled — system `PATH`) |
-| `openssl` | Legacy fallback TLS transport (`HAM_TLS_BACKEND=s_client`; not bundled — system `PATH`) |
+| libcurl ≥ 7.80 | HTTPS client for every bridge → hub REST call (`libcurl.so.4` / `/usr/lib/libcurl.4.dylib`; Windows: linked in statically) |
+| `socat` | TLS transport for the bridge → hub WebSocket (default backend; not bundled — system `PATH`) |
+| `openssl` | Legacy fallback WebSocket TLS transport (`HAM_TLS_BACKEND=s_client`; not bundled — system `PATH`) |
 | The agent CLI | `claude`, `codex`, or any other supported CLI |
 
 ### 2.3 Build dependencies
@@ -908,19 +920,21 @@ Same Nix setup as the hub. The bridge and pty-host are built from the same flake
 | Odin compiler | ≥ 2024-11 (LLVM 18/21) | Compiles bridge, ctl |
 | Rust toolchain | stable (≥ 1.77) | Compiles ham-pty-host |
 | cargo | (with Rust) | Rust build tool |
-| socat | ≥ 1.7 | Bridge → hub TLS tunnel |
-| openssl / libssl | ≥ 1.1 | TLS; socat OpenSSL engine |
+| libcurl (dev headers not needed) | ≥ 7.80 | HTTPS client (`src/lib/httpc`, `system:curl`) |
+| socat | ≥ 1.7 | Bridge → hub WebSocket TLS tunnel |
+| openssl / libssl | ≥ 1.1 | WebSocket TLS; socat OpenSSL engine |
 
 ### 2.4 Building
 
 **With Nix**
 
 ```bash
-# Build bridge binary (bundles socat + openssl on PATH via wrapProgram)
+# Build bridge binary (links nixpkgs libcurl; socat + openssl on PATH via wrapProgram)
 nix build .#ham-bridge
 
-# Release binaries for the public tarballs (fully static on Linux, no nix
-# store references — these are what the release workflow ships; REQ-INST-16)
+# Release binaries for the public tarballs (no nix store references — these are
+# what the release workflow ships; REQ-INST-16). Linux: host glibc + libcurl.so.4,
+# FHS loader; ham-pty-host fully static.
 nix build .#release-ham-bridge .#release-ham-ctl .#release-ham-pty-host .#release-heimdall
 
 # Build pty-host (Rust — hermetic crane build)

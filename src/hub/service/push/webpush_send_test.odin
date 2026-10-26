@@ -9,6 +9,7 @@ import "core:thread"
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
 import platform "odin_test:hub/platform"
+import httpc "odin_test:lib/httpc"
 
 // --- WP-SEND-2: payload construction (mirrors notificationMapper.ts) ---------
 
@@ -137,24 +138,15 @@ push_preview_truncates_on_rune_boundary :: proc(t: ^testing.T) {
 	testing.expect(t, strings.count(trunc, "x") == 9)
 }
 
-// --- WP-SEND-1: endpoint splitting + disabled no-op --------------------------
+// --- WP-SEND-1: endpoint parsing + disabled no-op --------------------------
 
 @(test)
-split_endpoint_parses_base_and_path :: proc(t: ^testing.T) {
-	base, path, ok := split_endpoint("https://web.push.apple.com/abc/def?x=1")
-	defer delete(base); defer delete(path)
-	testing.expect(t, ok)
-	testing.expect_value(t, base, "https://web.push.apple.com")
-	testing.expect_value(t, path, "/abc/def?x=1")
-
-	base2, path2, ok2 := split_endpoint("https://fcm.googleapis.com")
-	defer delete(base2); defer delete(path2)
-	testing.expect(t, ok2)
-	testing.expect_value(t, base2, "https://fcm.googleapis.com")
-	testing.expect_value(t, path2, "/")
-
-	_, _, bad := split_endpoint("not-a-url")
-	testing.expect(t, !bad)
+push_endpoint_url_keeps_path_and_query :: proc(t: ^testing.T) {
+	u, err := httpc.parse_url("https://web.push.apple.com/abc/def?x=1")
+	testing.expect_value(t, err, httpc.Error.None)
+	testing.expect_value(t, httpc.url_string(u), "https://web.push.apple.com/abc/def?x=1")
+	_, bad := httpc.parse_url("not-a-url")
+	testing.expect_value(t, bad, httpc.Error.Invalid_Url)
 }
 
 // --- WP-SEND-1: async job ownership (P0 SIGSEGV regression) ------------------

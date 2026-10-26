@@ -10,6 +10,12 @@
 # Compiling SQLite needs cl.exe and lib.exe on PATH (a VS developer shell, or
 # ilammy/msvc-dev-cmd in CI); Odin needs the MSVC linker either way.
 #
+# ham-bridge and ham-ctl link libcurl through src/lib/httpc: the static
+# libcurl.lib (Schannel TLS, Windows certificate store) that ships with the Odin
+# toolchain in <odin root>/vendor/curl/lib, so no curl DLL is needed at runtime.
+# Its version is whatever the pinned Odin release bundles (ODIN_TAG in the
+# release workflow); httpc.init() refuses one older than MIN_CURL_VERSION.
+#
 # ham-pty-host is built with a static CRT (+crt-static) so the bundle runs on a
 # stock Windows without the VC++ redistributable (no VCRUNTIME140.dll).
 [CmdletBinding()]
@@ -69,11 +75,16 @@ try {
     $defines = @()
     if ($Version) { $defines += "-define:HAM_APP_VERSION=$($Version.TrimStart('v'))" }
     $srcRoot = (Join-Path $repo 'src') -replace '\\', '/'
+    $odinRoot = (& $Odin root | Out-String).Trim()
+    $curlLibDir = Join-Path $odinRoot 'vendor\curl\lib'
+    if (-not (Test-Path (Join-Path $curlLibDir 'libcurl.lib'))) { throw "libcurl.lib not found in $curlLibDir (the Odin toolchain's vendor/curl)" }
     foreach ($pair in @(@('ham-bridge', 'src/bridge'), @('ham-ctl', 'src/ctl'))) {
       if ($Components -notcontains $pair[0]) { continue }
       $out = Join-Path $OutDir ($pair[0] + '.exe')
       $odinArgs = @('build', (Join-Path $repo $pair[1]), "-collection:odin_test=$srcRoot", "-out:$out") + $defines
-      if ($pair[0] -eq 'ham-bridge') { $odinArgs += "-extra-linker-flags:/LIBPATH:$($SqliteLibDir -replace '\\', '/')" }
+      $libPaths = "/LIBPATH:$($curlLibDir -replace '\\', '/')"
+      if ($pair[0] -eq 'ham-bridge') { $libPaths += " /LIBPATH:$($SqliteLibDir -replace '\\', '/')" }
+      $odinArgs += "-extra-linker-flags:$libPaths"
       Write-Host "odin build $($pair[1]) -> $out"
       Invoke-Checked "odin build $($pair[1])" { & $Odin @odinArgs }
     }

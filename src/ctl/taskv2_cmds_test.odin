@@ -1,5 +1,6 @@
 package main
 
+import "core:encoding/json"
 import "core:os"
 import "core:strings"
 import "core:testing"
@@ -232,13 +233,14 @@ test_m3_ctl_params :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(prop_p, `"auto_approve":true`), "auto_approve appended")
 
 	// 6. task-chain fleet set placement fields
-	fleet_b, fleet_ok := ctl_v2_fleet_set_body([]string{
+	fleet_body, fleet_ok := ctl_v2_fleet_set_body([]string{
 		"ham-ctl", "task-chain", "fleet", "set", "ch_1",
 		"--capacity", "4", "--min-warm", "1", "--idle-ttl", "300",
 		"--roles", "worker,reviewer",
 		"--bridge", "br_main", "--provider", "claude", "--model", "opus",
 		"--bridge-models", `{"br_main":{"provider":"claude","model":"opus"}}`,
 	})
+	fleet_b := ctl_json_text(fleet_body)
 	defer delete(fleet_b)
 	testing.expect(t, fleet_ok, "fleet set body ok")
 	testing.expect(t, strings.contains(fleet_b, `"capacity":4`), "capacity")
@@ -267,7 +269,15 @@ test_m3b_workflow_ctl_params :: proc(t: ^testing.T) {
 	defer delete(def_p)
 	testing.expect(t, def_ok, "workflow define params ok")
 	testing.expect(t, strings.contains(def_p, `"name":"custom_wf"`), "name included")
-	testing.expect(t, strings.contains(def_p, `"definition":{"kind":"workflow","v":1,`), "definition included")
+	// The definition document is carried as parsed JSON (key order is not kept).
+	def_v, def_parsed := ctl_parse_json_document(def_p)
+	def_obj, _ := def_v.(json.Object)
+	definition, _ := def_obj["definition"].(json.Object)
+	def_kind, _ := definition["kind"].(json.String)
+	def_v1, _ := definition["v"].(json.Integer)
+	testing.expect(t, def_parsed && def_kind == "workflow" && def_v1 == 1, "definition included")
+	_, has_stages := definition["stages"].(json.Array)
+	testing.expect(t, has_stages, "definition stages included")
 
 	// 3. workflow run params (merges --inputs-file with repeated --input k=v)
 	run_p, run_ok := ctl_v2_workflow_run_params(

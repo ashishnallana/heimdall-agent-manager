@@ -14,6 +14,7 @@ import iface "odin_test:hub/repository/iface"
 import sqlite "odin_test:hub/repository/sqlite"
 import auth_service "odin_test:hub/service/auth"
 import users "odin_test:hub/service/user"
+import httpc "odin_test:lib/httpc"
 
 // Browser login (phase 2): the provider is faked in-process. The token endpoint
 // mints ID tokens with a TEST-ONLY RSA key (testdata/oidc_rs256_signing.json)
@@ -101,10 +102,11 @@ session_test_fetch :: proc(ctx: rawptr, url, token: string) -> (string, int, boo
 	return "", 0, false
 }
 
-session_test_exchange :: proc(ctx: rawptr, url, form, basic: string) -> (string, bool) {
+session_test_exchange :: proc(ctx: rawptr, url: string, fields: []httpc.Form_Field, basic: string) -> (string, bool) {
 	f := (^Session_Fixture)(ctx)
 	f.exchanges += 1
-	f.last_form = strings.clone(form, context.temp_allocator)
+	form := session_test_form_text(fields)
+	f.last_form = form
 	f.last_basic = strings.clone(basic, context.temp_allocator)
 	if f.exchange_fail do return "", false
 	// PKCE: the verifier sent here must hash to the challenge from /login.
@@ -112,6 +114,19 @@ session_test_exchange :: proc(ctx: rawptr, url, form, basic: string) -> (string,
 	if f.challenge != "" && auth_service.pkce_challenge_s256(verifier) != f.challenge do return "", false
 	if query_value(form, "code") != "the-code" do return "", false
 	return fmt.tprintf(`{{"id_token":"%s","token_type":"Bearer"}}`, session_mint_id_token(f)), true
+}
+
+// session_test_form_text renders the fields as "k=v&..." (unencoded) so the
+// assertions below can use query_value on them.
+session_test_form_text :: proc(fields: []httpc.Form_Field) -> string {
+	b := strings.builder_make(context.temp_allocator)
+	for f, i in fields {
+		if i > 0 do strings.write_byte(&b, '&')
+		strings.write_string(&b, f.name)
+		strings.write_byte(&b, '=')
+		strings.write_string(&b, f.value)
+	}
+	return strings.to_string(b)
 }
 
 session_fixture :: proc(t: ^testing.T, claim_existing := false, link := true) -> ^Session_Fixture {

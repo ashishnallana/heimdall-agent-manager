@@ -8,7 +8,7 @@ import "base:runtime"
 import "core:strings"
 import "core:sync"
 import "core:testing"
-import http "odin_test:lib/http_client"
+import httpc "odin_test:lib/httpc"
 
 // action_sched_test_mutex serializes tests that drive the process-global scheduler
 // state (bridge_action_sched_state, bridge_retry_journal); the runner is threaded.
@@ -25,14 +25,14 @@ DISABLED_BODY :: `{"error":{"code":"forbidden","message":"Actions is experimenta
 @(private = "file") gate_execute_status: int
 
 @(private = "file")
-gate_fetch :: proc(method, base_url, path, body: string, headers: []http.Header, timeout_ms: int) -> (http.Response, bool) {
+gate_fetch :: proc(req: httpc.Request) -> (httpc.Response, httpc.Error) {
     gate_fetch_calls += 1
     switch gate_fetch_status {
-    case 403: return {status = 403, body = strings.clone(DISABLED_BODY)}, true
-    case 304: return {status = 304}, true
-    case 500: return {status = 500}, true
+    case 403: return hub_test_response(403, DISABLED_BODY), .None
+    case 304: return hub_test_response(304), .None
+    case 500: return hub_test_response(500), .None
     }
-    return {status = 200, body = strings.clone(gate_fetch_body)}, true
+    return hub_test_response(200, gate_fetch_body), .None
 }
 
 @(private = "file")

@@ -2,6 +2,7 @@ package main
 
 import "core:strings"
 import "core:testing"
+import httpc "odin_test:lib/httpc"
 
 // REQ-TV2-6: one shared query encoder for every ham-ctl query value.
 
@@ -30,27 +31,36 @@ test_query_decode :: proc(v: string) -> string {
 	return strings.to_string(b)
 }
 
-@(test)
-test_query_escape_encodes_reserved_bytes :: proc(t: ^testing.T) {
-	testing.expect_value(t, query_escape("task brief"), "task%20brief")
-	testing.expect_value(t, query_escape("facet:t1:2:output"), "facet%3At1%3A2%3Aoutput")
-	testing.expect_value(t, query_escape("#evt_1"), "%23evt_1")
-	testing.expect_value(t, query_escape("src/a b.odin@HEAD"), "src%2Fa%20b.odin%40HEAD")
-	testing.expect_value(t, query_escape("a&b=c+d%e?"), "a%26b%3Dc%2Bd%25e%3F")
-	testing.expect_value(t, query_escape("Az09-_.~"), "Az09-_.~")
-	testing.expect_value(t, query_escape("é"), "%C3%A9")
-	testing.expect_value(t, query_escape(""), "")
+// ctl_test_target renders a request the way both transports encode it.
+ctl_test_target :: proc(t: ^testing.T, req: Ctl_Request, loc := #caller_location) -> string {
+	target, err := httpc.build_target(req.path, req.query, context.temp_allocator)
+	testing.expectf(t, err == .None, "build_target: %v", err, loc = loc)
+	return target
 }
 
 @(test)
-test_query_param_and_path_with_query :: proc(t: ^testing.T) {
-	q := make([dynamic]string, context.temp_allocator)
-	query_param(&q, "query", "task brief")
-	query_param(&q, "status", "")
-	query_param(&q, "agent_ids", "agt_a,agt_b")
+test_query_values_encode_reserved_bytes :: proc(t: ^testing.T) {
+	for v in ([]string{"task brief", "facet:t1:2:output", "#evt_1", "src/a b.odin@HEAD", "a&b=c+d%e?", "Az09-_.~", "é"}) {
+		query := []httpc.Query_Param{{"query", v}}
+		target := ctl_test_target(t, {method = .GET, path = ctl_api("issues"), query = query})
+		prefix := "/api/v1/issues?query="
+		testing.expectf(t, strings.has_prefix(target, prefix), "route: %s", target)
+		encoded := target[len(prefix):]
+		testing.expectf(t, !strings.contains_any(encoded, "/:#&?@ ="), "reserved byte left raw in %s", encoded)
+		testing.expect_value(t, test_query_decode(encoded), v)
+	}
+}
+
+@(test)
+test_query_add_skips_unset_values :: proc(t: ^testing.T) {
+	q := ctl_query_make()
+	ctl_query_add(&q, "query", "task brief")
+	ctl_query_add(&q, "status", "")
+	ctl_query_add(&q, "agent_ids", "agt_a,agt_b")
 	testing.expect_value(t, len(q), 2)
-	testing.expect_value(t, path_with_query("/api/v1/issues", q[:]), "/api/v1/issues?query=task%20brief&agent_ids=agt_a%2Cagt_b")
-	testing.expect_value(t, path_with_query("/api/v1/issues", nil), "/api/v1/issues")
+	target := ctl_test_target(t, {method = .GET, path = ctl_api("issues"), query = q[:]})
+	testing.expectf(t, target == "/api/v1/issues?query=task+brief&agent_ids=agt_a%2Cagt_b" || target == "/api/v1/issues?query=task%20brief&agent_ids=agt_a%2Cagt_b", "target: %s", target)
+	testing.expect_value(t, ctl_test_target(t, {method = .GET, path = ctl_api("issues")}), "/api/v1/issues")
 }
 
 @(test)
@@ -63,11 +73,11 @@ test_task_fetch_ref_round_trips :: proc(t: ^testing.T) {
 		"src/ctl/main.odin@HEAD",
 		"docs/a b+c%d.md#frag",
 	}) {
-		path := ctl_task_fetch_path("chain_1", "task_1", ref)
+		path := ctl_test_target(t, ctl_task_fetch_request("chain_1", "task_1", ref))
 		prefix := "/api/v1/task-chains/chain_1/tasks/task_1/fetch?ref="
 		testing.expectf(t, strings.has_prefix(path, prefix), "route: %s", path)
 		encoded := path[len(prefix):]
-		testing.expectf(t, !strings.contains_any(encoded, "/:#&?@ +"), "reserved byte left raw in %s", encoded)
+		testing.expectf(t, !strings.contains_any(encoded, "/:#&?@ "), "reserved byte left raw in %s", encoded)
 		testing.expect_value(t, test_query_decode(encoded), ref)
 	}
 }

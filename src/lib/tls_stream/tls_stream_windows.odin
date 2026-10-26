@@ -344,10 +344,6 @@ read :: proc(s: ^Stream, out: []byte) -> (n: int, ok: bool) {
 	}
 }
 
-relay_exited :: proc(s: ^Stream) -> bool {
-	return s.eof || s.failed
-}
-
 write_all :: proc(s: ^Stream, bytes: []byte, timeout: time.Duration = 0) -> Write_Result {
 	sync.mutex_lock(&s.send_mu)
 	defer sync.mutex_unlock(&s.send_mu)
@@ -380,10 +376,6 @@ write_all :: proc(s: ^Stream, bytes: []byte, timeout: time.Duration = 0) -> Writ
 	}
 	return .Ok
 }
-
-// close_write is a no-op: requests carry "Connection: close", and a TCP half-close
-// would only race the reply.
-close_write :: proc(s: ^Stream) {}
 
 // abort wakes a reader blocked in recv without invalidating the socket it owns.
 // Winsock shutdown alone does not interrupt a recv that is already parked;

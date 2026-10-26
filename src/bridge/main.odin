@@ -15,7 +15,7 @@ import "core:time"
 import contracts "odin_test:contracts"
 import cfg_lib "odin_test:lib/config"
 import crashlog "odin_test:lib/crashlog"
-import http "odin_test:lib/http_client"
+import httpc "odin_test:lib/httpc"
 import ws "odin_test:lib/ws"
 import jsonx "odin_test:lib/jsonx"
 import vault "odin_test:lib/vault"
@@ -61,6 +61,11 @@ main :: proc() {
 		fmt.eprintln("ERROR: could not remove HEIMDALL_VAULT_KEYRING from the environment; refusing to start so no child inherits it")
 		os.exit(1)
 	}
+	// libcurl global init, once, before any thread; refuses a too-old libcurl.
+	if ok, message := httpc.init(); !ok {
+		fmt.eprintln("ham-bridge:", message)
+		os.exit(1)
+	}
 	if has_flag(os.args, "--version") {
 		fmt.println("ham-bridge", contracts.APP_VERSION, "protocol", contracts.PROTOCOL_VERSION, "bridge", contracts.BRIDGE_LOOPBACK_CONTRACT_VERSION, "ws", contracts.BRIDGE_WS_FRAME_VERSION)
 		return
@@ -82,12 +87,16 @@ main :: proc() {
 			os.exit(2)
 		}
 		started := time.now()
-		resp, sent := http.request_with_headers_timeout("GET", api_base, "/api/v1/health", "", nil, http.DEFAULT_TIMEOUT_MS)
-		if !sent {
-			fmt.eprintfln("probe-hub FAILED: no HTTP response from %s/api/v1/health through the bridge transport (%s) after %v — check that socat is installed and works, TLS trust (HAM_TLS_CA_FILE), and the network", api_base, "s_client" if bridge_tls_backend_is_socat() == false else "socat", time.since(started))
+		hub := bridge_hub_url(api_base)
+		health := [?]string{"api", "v1", "health"}
+		target, _ := httpc.build_url(hub, health[:], allocator = context.temp_allocator)
+		resp, probe_err := httpc.send({method = .GET, url = hub, path = health[:]})
+		defer httpc.response_destroy(&resp)
+		if probe_err != .None {
+			fmt.eprintfln("probe-hub FAILED: no HTTP response from %s through libcurl %s after %v — %s (%s); check TLS trust (HAM_TLS_CA_FILE / SSL_CERT_FILE) and the network", target, httpc.libcurl_version(), time.since(started), httpc.error_string(probe_err), resp.detail)
 			os.exit(1)
 		}
-		fmt.printfln("probe-hub OK: %s/api/v1/health -> HTTP %d via %s in %v", api_base, resp.status, "s_client" if bridge_tls_backend_is_socat() == false else "socat", time.since(started))
+		fmt.printfln("probe-hub OK: %s -> HTTP %d via libcurl %s in %v", target, resp.status, httpc.libcurl_version(), time.since(started))
 		return
 	}
 

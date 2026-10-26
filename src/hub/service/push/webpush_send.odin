@@ -3,7 +3,7 @@ package push
 // WP-SEND-1: deliver an encrypted Web Push message to every subscription a user
 // owns. For each subscription we RFC 8291-encrypt the payload, sign a VAPID JWT
 // for the endpoint's origin, and POST the aes128gcm body via the Hub's
-// http_client. Endpoints that report 404/410 Gone are pruned.
+// src/lib/httpc. Endpoints that report 404/410 Gone are pruned.
 //
 // send_to_user is BLOCKING; callers on the request path must run it on a
 // background thread (see send_to_user_async) so it never stalls the response.
@@ -17,11 +17,12 @@ import "core:thread"
 import "core:time"
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
-import http_client "odin_test:lib/http_client"
+import httpc "odin_test:lib/httpc"
 
 // WEBPUSH_TTL_SECONDS is the `TTL` header: how long the push service should try
 // to deliver if the device is offline. One day matches the design doc.
 WEBPUSH_TTL_SECONDS :: 86400
+WEBPUSH_TTL_HEADER_VALUE :: "86400" // keep equal to WEBPUSH_TTL_SECONDS
 
 // Async_Send_Job carries an OWNED copy of the send arguments to a background
 // thread. Both the job struct and its strings live on the PERSISTENT heap
@@ -377,40 +378,31 @@ send_to_subscription :: proc(
 	authorization := vapid_authorization_header(jwt, service.vapid.public_key)
 	defer delete(authorization)
 
-	base_url, path, split_ok := split_endpoint(sub.endpoint)
-	if !split_ok {
+	// The endpoint is the whole target URL (path and query included); curl sends
+	// an RFC 9110 Host header without the default port, which strict push
+	// services (web.push.apple.com) require.
+	endpoint, url_err := httpc.parse_url(sub.endpoint)
+	if url_err != .None {
 		return .Transient, 0
 	}
-	defer delete(base_url)
-	defer delete(path)
-
-	headers := []http_client.Header{
+	headers := [?]httpc.Header{
 		{name = "Authorization", value = authorization},
 		{name = "Content-Encoding", value = "aes128gcm"},
-		{name = "Content-Type", value = "application/octet-stream"},
-		{name = "TTL", value = fmt.tprintf("%d", WEBPUSH_TTL_SECONDS)},
+		{name = "TTL", value = WEBPUSH_TTL_HEADER_VALUE},
 	}
-
-	resp, ok := http_client.request_with_headers_timeout(
-		"POST",
-		base_url,
-		path,
-		string(enc.body),
-		headers,
-		http_client.DEFAULT_TIMEOUT_MS,
-		// Web Push endpoints (notably Apple's web.push.apple.com) are strict; send an
-		// RFC 7230 Host header with the default :443 port omitted, matching reference
-		// clients (web-push/curl/browsers). Scoped to push; other callers unchanged.
-		omit_default_port = true,
-	)
-	if !ok {
-		fmt.eprintfln("ham-push DEBUG send: transport FAILED (dial/tls/timeout) aud=%s", audience)
+	resp, err := httpc.send({
+		method = .POST, url = endpoint, headers = headers[:],
+		body = httpc.raw_body(httpc.CONTENT_TYPE_OCTET_STREAM, enc.body),
+		max_response_bytes = 64 * 1024,
+	}, context.temp_allocator)
+	if err != .None {
+		fmt.eprintfln("ham-push DEBUG send: transport FAILED (%s) aud=%s", httpc.error_string(err), audience)
 		return .Transient, 0
 	}
 
 	// Log the push-service response so a silent Apple/APNs rejection (4xx with a
 	// reason body) is visible to ops. Body is truncated; it carries no secret.
-	body_preview := resp.body
+	body_preview := httpc.text(resp)
 	if len(body_preview) > 300 {
 		body_preview = body_preview[:300]
 	}
@@ -420,22 +412,3 @@ send_to_subscription :: proc(
 	return classify_push_status(resp.status, true), resp.status
 }
 
-// split_endpoint splits a push endpoint URL into (base_url, path) for the
-// http_client, e.g. "https://web.push.apple.com/abc?x=1" ->
-// ("https://web.push.apple.com", "/abc?x=1"). The returned strings are owned by
-// the caller.
-split_endpoint :: proc(endpoint: string, allocator := context.allocator) -> (string, string, bool) {
-	scheme_end := strings.index(endpoint, "://")
-	if scheme_end <= 0 {
-		return "", "", false
-	}
-	rest := endpoint[scheme_end + 3:]
-	slash := strings.index_byte(rest, '/')
-	if slash < 0 {
-		// No path component; target root.
-		return strings.clone(endpoint, allocator), strings.clone("/", allocator), true
-	}
-	base := endpoint[:scheme_end + 3 + slash]
-	path := endpoint[scheme_end + 3 + slash:]
-	return strings.clone(base, allocator), strings.clone(path, allocator), true
-}
