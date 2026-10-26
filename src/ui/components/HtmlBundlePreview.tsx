@@ -26,9 +26,12 @@ const ERROR_TITLES: Record<string, string> = {
   missing_entry: 'The bundle entry page is missing',
 };
 
-export default function HtmlBundlePreview({ blob, locked }: { blob: Blob | null; locked: boolean }) {
+export default function HtmlBundlePreview({ blob, locked, lockReason = 'locked' }: { blob: Blob | null; locked: boolean; lockReason?: '' | 'locked' | 'other_vault' }) {
   const [status, setStatus] = useState<Status>({ kind: 'loading' });
   const [location, setLocation] = useState<Location>({ page: '', fragment: '' });
+  // Bumped to remount the iframe when it escaped about:srcdoc (see handleLoad).
+  const [frameKey, setFrameKey] = useState(0);
+  const [navigationBlocked, setNavigationBlocked] = useState(false);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
 
   useEffect(() => {
@@ -39,6 +42,7 @@ export default function HtmlBundlePreview({ blob, locked }: { blob: Blob | null;
     let cancelled = false;
     let renderer: HtmlBundleRenderer | null = null;
     setStatus({ kind: 'loading' });
+    setNavigationBlocked(false);
     blob.arrayBuffer()
       .then((buffer) => readHtmlBundle(new Uint8Array(buffer)))
       .then((bundle) => {
@@ -82,7 +86,15 @@ export default function HtmlBundlePreview({ blob, locked }: { blob: Blob | null;
 
   const handleLoad = useCallback(() => {
     const doc = iframeRef.current?.contentDocument;
-    if (!doc || status.kind !== 'ready') return;
+    // Backstop for sanitizer gaps: every compiled page is same-origin about:srcdoc, so an
+    // unreachable document (cross-origin) or any other URL means the frame navigated
+    // away. Remount it on the current page instead of leaving foreign content shown.
+    if (!doc || !doc.URL.startsWith('about:srcdoc')) {
+      setNavigationBlocked(true);
+      setFrameKey((key) => key + 1);
+      return;
+    }
+    if (status.kind !== 'ready') return;
     doc.addEventListener('click', (event) => {
       const anchor = (event.target as Element | null)?.closest?.('a[data-hb-page], area[data-hb-page]');
       if (!anchor) return;
@@ -99,7 +111,9 @@ export default function HtmlBundlePreview({ blob, locked }: { blob: Blob | null;
   if (locked) {
     return (
       <div data-debug-id="artifact-viewer-html-bundle-locked" className="rounded-xl border border-subtle bg-surface-raised px-4 py-6 text-center text-sm text-muted">
-        This HTML bundle is encrypted. Unlock the vault to preview it.
+        {lockReason === 'other_vault'
+          ? 'This HTML bundle was encrypted by a previous vault and cannot be opened with the current one.'
+          : 'This HTML bundle is encrypted. Unlock the vault to preview it.'}
       </div>
     );
   }
@@ -137,12 +151,18 @@ export default function HtmlBundlePreview({ blob, locked }: { blob: Blob | null;
       {compiled?.error ? (
         <div data-debug-id="artifact-viewer-html-bundle-page-error" className="rounded-xl border border-warning/30 bg-warning-soft px-4 py-3 text-sm text-warning">{compiled.error}</div>
       ) : null}
+      {navigationBlocked ? (
+        <div data-debug-id="artifact-viewer-html-bundle-navigation-blocked" className="rounded-xl border border-warning/30 bg-warning-soft px-4 py-2 text-xs text-warning">
+          The page tried to navigate outside the bundle; the preview was reset.
+        </div>
+      ) : null}
       {compiled && compiled.missing.length > 0 ? (
         <div data-debug-id="artifact-viewer-html-bundle-resource-warning" className="rounded-xl border border-warning/30 bg-warning-soft px-4 py-2 text-xs text-warning">
           {compiled.missing.length} resource{compiled.missing.length === 1 ? '' : 's'} could not be loaded (missing, remote or unsupported): {compiled.missing.slice(0, 5).join(', ')}{compiled.missing.length > 5 ? ', …' : ''}
         </div>
       ) : null}
       <iframe
+        key={frameKey}
         ref={iframeRef}
         data-debug-id="artifact-viewer-html-bundle-frame"
         title={location.page}

@@ -488,7 +488,7 @@ export default function ArtifactViewer({ artifactId, daemonUrl, clientToken, onC
                 ) : contentError ? (
                   <div data-debug-id="artifact-viewer-content-error" className="rounded-xl border border-warning/30 bg-warning-soft px-4 py-3 text-sm text-warning">{contentError}</div>
                 ) : previewKind === 'html-bundle' ? (
-                  <HtmlBundlePreview blob={contentState.blob} locked={contentState.locked} />
+                  <HtmlBundlePreview blob={contentState.blob} locked={contentState.locked} lockReason={contentState.lockReason} />
                 ) : previewKind === 'image' ? (
                   <ZoomableImage contentUrl={contentUrl} alt={selectedArtifactMeta.name || artifactId} />
                 ) : previewKind === 'markdown' ? (

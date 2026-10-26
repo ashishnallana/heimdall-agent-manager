@@ -22,7 +22,8 @@ The entry page is resolved in this order:
 5. Otherwise the command fails, lists the candidate pages and asks for `--entry`.
 
 The entry must be an existing HTML member. Paths are case-sensitive. Without `--kind
-html-bundle`, a ZIP is still uploaded as an ordinary file artifact.
+html-bundle`, a ZIP is still uploaded as an ordinary file artifact, and `--directory` or
+`--entry` is rejected.
 
 ## Format (format_version 1)
 
@@ -52,8 +53,11 @@ rendering:
 - **Decrypting**: `decryptVaultBytes` decrypts the content without passing it through text
   decoding. The archive is parsed and validated in memory and never extracted to disk.
 - **Compiling pages**: each page becomes a `srcdoc` document.
-  - Removed: scripts, `on*` handlers, executable URLs, frames/objects/embeds, `<base>` and
-    `<meta http-equiv>`. Forms are converted to plain `<div>`s.
+  - Removed: scripts, `on*` handlers, executable URLs, frames/objects/embeds, `<base>`,
+    `<meta http-equiv>` and SVG animation elements (`<animate>`, `<set>`,
+    `<animateMotion>`, `<animateTransform>`, `<animateColor>`, `<discard>`). SMIL runs
+    without script and could otherwise retarget a link to a remote URL after compilation.
+    Forms are converted to plain `<div>`s.
   - Local images and fonts become `blob:` URLs. Stylesheets are inlined, with `@import`
     inlined recursively and `url()` resolved relative to the stylesheet. `/x` means the
     bundle root.
@@ -68,6 +72,8 @@ rendering:
   forms, popups or top navigation. Without script, the frame cannot reach the app's DOM,
   storage or credentials. `allow-same-origin` exists only so the host can attach its link
   handler. Never combine it with `allow-scripts`.
+- **Backstop**: if a loaded frame is not a same-origin `about:srcdoc` document, the viewer
+  remounts it on the current page and shows a warning.
 - **Lifecycle**: on close, version change and vault lock, the decrypted blob is dropped and
   every object URL is revoked.
 - **States shown**: loading, locked, malformed/rejected/too large, missing entry, and

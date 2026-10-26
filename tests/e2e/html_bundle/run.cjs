@@ -41,6 +41,7 @@ const files = [
 <a id="jslink" href="javascript:window.parent.document.title='pwned-js'">js</a>
 <a id="external" href="https://example.com/">external</a>
 <form action="https://example.com/post" method="post"><input name="q" value="1"><button>go</button></form>
+<svg width="60" height="20"><a id="smil" href="#bottom"><set attributeName="href" to="https://example.com/smil"/><animate attributeName="xlink:href" values="https://example.com/anim"/><rect width="60" height="20"/></a></svg>
 <a id="next" href="docs/two.html#sec">next</a> <a id="totop" href="#bottom">bottom</a>
 <div style="height:3000px"></div><p id="bottom">bottom</p></body></html>`],
   ['css/site.css', `@import "base.css"; body{color:rgb(0,0,255)} #bg{width:4px;height:4px;background-image:url(../img/logo.png)} @font-face{font-family:BundleFont;src:url("/fonts/f.woff2") format("woff2")} h1{font-family:BundleFont}`],

@@ -577,6 +577,16 @@ html_bundle_from_directory :: proc(root, flag_entry: string, allocator := contex
 
 // html_bundle_package_from_args is the CLI front: exactly one of --directory or --file,
 // optional --entry. Returns the archive bytes or an actionable error.
+// --directory and --entry only mean something for html-bundle; any other kind would
+// silently drop them and create an empty artifact.
+html_bundle_flags_error :: proc(args: []string, kind: string) -> string {
+	if kind == HTML_BUNDLE_KIND do return ""
+	for flag in ([]string{"--directory", "--entry"}) {
+		if has_flag(args, flag) do return fmt.tprintf("%s is only valid with --kind %s (got --kind %s)", flag, HTML_BUNDLE_KIND, kind)
+	}
+	return ""
+}
+
 html_bundle_package_from_args :: proc(args: []string, allocator := context.allocator) -> (result: Html_Bundle_Result, err: string) {
 	directory := option_value(args, "--directory", "")
 	file := option_value(args, "--file", "")

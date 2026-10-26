@@ -686,9 +686,11 @@ export type ArtifactContentState = {
   error: string;
   /** The payload is vault-armored and could not be opened (vault locked or another vault). */
   locked: boolean;
+  /** Why `locked` is set: the vault is locked (or lacks the epoch key), or the payload was sealed by a previous vault. */
+  lockReason: '' | 'locked' | 'other_vault';
 };
 
-const EMPTY_CONTENT_STATE: ArtifactContentState = { url: '', blob: null, loading: false, error: '', locked: false };
+const EMPTY_CONTENT_STATE: ArtifactContentState = { url: '', blob: null, loading: false, error: '', locked: false, lockReason: '' };
 
 export function useArtifactContentState({ daemonUrl, clientToken, artifactId, versionNo = null }: { daemonUrl: string; clientToken: string; artifactId: string; versionNo?: number | null }) {
   const isUnlocked = useSelector(selectIsVaultUnlocked);
@@ -715,6 +717,7 @@ export function useArtifactContentState({ daemonUrl, clientToken, artifactId, ve
       .then(async (blob) => {
         let finalBlob = blob;
         let locked = false;
+        let lockReason: ArtifactContentState['lockReason'] = '';
         // Resolved here rather than in render: the active CryptoKey is a module-level
         // ref, not reactive state, so it must be read when the blob is decrypted.
         // `isUnlocked` is the reactive trigger that re-runs this effect on unlock/lock.
@@ -722,6 +725,7 @@ export function useArtifactContentState({ daemonUrl, clientToken, artifactId, ve
         const rawText = (await blob.slice(0, VAULT_ARMOR_PREFIX.length).text()) === VAULT_ARMOR_PREFIX ? await blob.text() : '';
         if (rawText && isVaultArmored(rawText)) {
           locked = true;
+          lockReason = 'locked';
           const activeKey = getActiveVaultKey();
           if (isUnlocked && activeKey) {
             try {
@@ -732,13 +736,16 @@ export function useArtifactContentState({ daemonUrl, clientToken, artifactId, ve
                 finalBlob = new Blob([opened.bytes as unknown as BlobPart], { type: blob.type || 'application/octet-stream' });
                 opened.bytes.fill(0);
                 locked = false;
+                lockReason = '';
+              } else if (opened.status === 'other_vault') {
+                lockReason = 'other_vault';
               }
             } catch {}
           }
         }
         nextUrl = URL.createObjectURL(finalBlob);
         if (cancelled) URL.revokeObjectURL(nextUrl);
-        else setState({ url: nextUrl, blob: finalBlob, loading: false, error: '', locked });
+        else setState({ url: nextUrl, blob: finalBlob, loading: false, error: '', locked, lockReason });
       })
       .catch((err) => {
         if (!cancelled) setState({ ...EMPTY_CONTENT_STATE, error: String(err?.message || err || 'Failed to load artifact content') });

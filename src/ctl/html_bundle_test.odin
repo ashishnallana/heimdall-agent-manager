@@ -323,6 +323,14 @@ test_html_bundle_cli_args :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_html_bundle_flags_rejected_for_other_kinds :: proc(t: ^testing.T) {
+	hb_expect_error(t, html_bundle_flags_error([]string{"--kind", "file", "--directory", "./site"}, "file"), "--directory is only valid with --kind html-bundle")
+	hb_expect_error(t, html_bundle_flags_error([]string{"--entry", "a.html"}, "markdown"), "--entry is only valid with --kind html-bundle")
+	testing.expect_value(t, html_bundle_flags_error([]string{"--directory", "./site", "--entry", "a.html"}, HTML_BUNDLE_KIND), "")
+	testing.expect_value(t, html_bundle_flags_error([]string{"--file", "x.zip"}, "file"), "")
+}
+
+@(test)
 test_html_bundle_create_params_seal_the_archive_bytes :: proc(t: ^testing.T) {
 	root := hb_tmp_root(t, "create")
 	defer os.remove_all(root)

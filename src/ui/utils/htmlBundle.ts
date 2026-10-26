@@ -335,6 +335,11 @@ export type BundleRendererDeps = {
 };
 
 const REMOVED_ELEMENTS = 'script,iframe,frame,frameset,object,embed,applet,portal,base,meta[http-equiv],template,noembed';
+// SVG SMIL animation runs without allow-scripts and can rewrite attributes after
+// compilation, e.g. <set attributeName="href" to="https://…"> retargets a link to a
+// remote page. Static bundles do not need it, so every animation element goes. Matched
+// by lowercased localName: SVG type selectors are case-sensitive (animateMotion).
+const REMOVED_SVG_ANIMATION = new Set(['animate', 'animatecolor', 'animatemotion', 'animatetransform', 'set', 'discard']);
 const URL_ATTRS = ['href', 'src', 'srcset', 'poster', 'action', 'formaction', 'xlink:href', 'background', 'lowsrc', 'dynsrc', 'longdesc', 'ping', 'data', 'codebase', 'cite', 'manifest', 'icon'];
 const CSS_URL_RE = /url\(\s*(?:"([^"]*)"|'([^']*)'|([^)"']*))\s*\)/gi;
 const CSS_IMPORT_RE = /@import\s+(?:url\(\s*(?:"([^"]*)"|'([^']*)'|([^)"']*))\s*\)|"([^"]*)"|'([^']*)')\s*([^;]*);?/gi;
@@ -454,6 +459,9 @@ export class HtmlBundleRenderer {
     const doc = this.parseHtml(new TextDecoder().decode(bytes));
 
     doc.querySelectorAll(REMOVED_ELEMENTS).forEach((el) => el.remove());
+    for (const el of Array.from(doc.getElementsByTagName('*'))) {
+      if (REMOVED_SVG_ANIMATION.has(el.localName.toLowerCase())) el.remove();
+    }
     doc.querySelectorAll('form').forEach((form) => {
       const div = doc.createElement('div');
       while (form.firstChild) div.appendChild(form.firstChild);

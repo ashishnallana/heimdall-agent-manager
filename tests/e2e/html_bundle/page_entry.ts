@@ -60,6 +60,11 @@ const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
   await wait(150);
   r.fragmentScrolledInPlace = w.scrollY > 1000 && current === 'index.html' && iframe.contentDocument === d;
   r.parentUrlUnchanged = location.protocol === 'file:' && !location.hash;
+  // REQ-BUNDLE-5: SMIL <set>/<animate> must not survive to retarget the SVG link.
+  r.smilAnimationStripped = !d.querySelector('set, animate');
+  d.getElementById('smil')!.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+  await wait(400);
+  r.smilLinkStayedInFrame = iframe.contentDocument === d && d.URL.startsWith('about:srcdoc');
   (d.getElementById('next') as HTMLAnchorElement).click();
   await wait(400);
   const d2 = iframe.contentDocument!;

@@ -1,12 +1,13 @@
 // REQ-BUNDLE-2/3/4/5: in-memory html-bundle reading, validation and reference resolution.
-// Page compilation needs a real DOM and is exercised in Electron by
-// tests/e2e/html_bundle_preview_e2e.cjs.
+// Page compilation is checked here against jsdom and end to end in Electron by
+// tests/e2e/html_bundle/run.cjs.
 //
 // RUN: node --test tests/ui_html_bundle_test.ts
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { deflateRawSync } from 'node:zlib';
+import { JSDOM } from 'jsdom';
 import {
   HtmlBundleError,
   HtmlBundleRenderer,
@@ -147,4 +148,23 @@ test('renderer releases every object URL on dispose', async () => {
   renderer.dispose();
   assert.deepEqual(revoked.sort(), created.sort());
   assert.equal(renderer.objectUrlCount, 0);
+});
+
+test('compilePage strips SVG SMIL animation that could retarget a link at runtime', async () => {
+  const page = `<!doctype html><html><head></head><body>
+<svg><a id="set" href="#top"><set attributeName="href" to="https://evil.example/set"/><text>set</text></a>
+<a id="anim"><animate attributeName="xlink:href" values="https://evil.example/anim"/><animateMotion dur="1s"/><animateTransform attributeName="transform"/><animateColor/><discard/><text>anim</text></a>
+<a id="ok" href="#top"><text>ok</text></a></svg><p id="top">top</p></body></html>`;
+  const bundle = await readHtmlBundle(zip([MANIFEST, { name: 'index.html', data: page }]));
+  const parseHtml = (html: string) => new JSDOM(html).window.document;
+  const renderer = new HtmlBundleRenderer(bundle, { parseHtml, createObjectURL: () => 'blob:test/0', revokeObjectURL: () => {} });
+  const { html } = renderer.compilePage('index.html');
+  const doc = parseHtml(html);
+  for (const name of ['set', 'animate', 'animateMotion', 'animateTransform', 'animateColor', 'discard']) {
+    assert.equal(doc.getElementsByTagName(name).length, 0, name);
+  }
+  assert.ok(!html.includes('evil.example'), html);
+  assert.equal(doc.getElementById('set')?.getAttribute('href'), 'about:srcdoc#top');
+  assert.equal(doc.getElementById('ok')?.getAttribute('href'), 'about:srcdoc#top');
+  assert.ok(doc.querySelector('meta[http-equiv="Content-Security-Policy"]'));
 });

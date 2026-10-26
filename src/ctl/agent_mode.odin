@@ -783,6 +783,10 @@ ctl_agentmode_artifact_create_params :: proc(args: []string) -> string {
 	content := option_value(args, "--content", "")
 	content_base64 := ""
 	content_type := option_value(args, "--content-type", "")
+	if flags_err := html_bundle_flags_error(args, kind); flags_err != "" {
+		fmt.println(ctl_error_json(flags_err))
+		os.exit(1)
+	}
 	if kind == HTML_BUNDLE_KIND {
 		// REQ-BUNDLE-1/2: package --directory or validate --file into one ZIP with the
 		// manifest; the archive bytes are sealed below exactly like any --file payload.
