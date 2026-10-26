@@ -351,8 +351,10 @@ export class HtmlBundleRenderer {
   private createObjectURL: (blob: Blob) => string;
   private revokeObjectURL: (url: string) => void;
   private parseHtml: (html: string) => Document;
+  private bundle: HtmlBundle;
 
-  constructor(private bundle: HtmlBundle, deps: BundleRendererDeps = {}) {
+  constructor(bundle: HtmlBundle, deps: BundleRendererDeps = {}) {
+    this.bundle = bundle;
     this.createObjectURL = deps.createObjectURL || ((blob) => URL.createObjectURL(blob));
     this.revokeObjectURL = deps.revokeObjectURL || ((url) => URL.revokeObjectURL(url));
     this.parseHtml = deps.parseHtml || ((html) => new DOMParser().parseFromString(html, 'text/html'));
