@@ -94,94 +94,131 @@ install -m 0644 README.md "$stage/README.md"
 install -m 0644 LICENSE "$stage/LICENSE"
 
 # REQ-INST-16: the release tarballs target stock Linux/macOS hosts that have no
-# /nix/store. Gate the staged tree HERE, at the single chokepoint every release
-# path shares, before the tarball exists:
-#   * Linux  -- every shipped ELF is either fully static (no program
-#     interpreter: ham-pty-host, and everything in the termux bundle) or a
-#     release-* Odin binary linked against the host's glibc and libcurl.so.4
-#     (src/lib/httpc): then the interpreter must be the standard FHS loader
-#     (a /nix/store one is the historical bug), there is no RPATH/RUNPATH, and
-#     every NEEDED entry is a glibc library or libcurl.so.4.
-#   * Darwin -- Mach-O binaries get nix-store dylib install names rewritten to
-#     the system equivalents below (libiconv from the Rust build; libsqlite3
-#     and libcurl from the Odin builds, which link the OS copies at runtime).
-#     Any OTHER /nix/store dylib, or any /nix/store rpath, is a hard error.
+# /nix/store and need nothing installed for HTTPS: the Odin binaries link the
+# pinned libcurl (nix/libcurl-pin.json) and its TLS library STATICALLY. Gate
+# the staged tree HERE, at the single chokepoint every release path shares,
+# before the tarball exists:
+#   * Linux (and termux) -- every shipped ELF is fully static: no program
+#     interpreter, no dynamic section, so no NEEDED entry at all (the Odin
+#     binaries are static musl; ham-pty-host is static-PIE Rust). A NEEDED
+#     libcurl/libssl/libcrypto/libz is called out by name.
+#   * Darwin -- nix-store install names of OS libraries are rewritten to the
+#     system copies (libiconv from the Rust build, libsqlite3 from the bridge);
+#     then every load command must be one of DARWIN_SYSTEM_DYLIBS or a system
+#     framework in DARWIN_FRAMEWORKS. Any libcurl/libssl/libcrypto/libz -- even
+#     the OS's own -- any other dylib, or a /nix/store rpath, is a hard error.
 # Non-binary payloads (shell stubs, README) are skipped by magic bytes, so test
 # fixtures that stage #!/bin/sh stubs keep passing.
+DARWIN_SYSTEM_DYLIBS='/usr/lib/libSystem.B.dylib /usr/lib/libobjc.A.dylib /usr/lib/libiconv.2.dylib /usr/lib/libsqlite3.dylib'
+# Frameworks the binaries use: the pinned libcurl (Security and CoreFoundation
+# for Apple SecTrust; CoreServices and SystemConfiguration for its macOS
+# resolver/proxy glue), the bridge keystore (Security, CoreFoundation) and
+# Odin's core library (Foundation).
+DARWIN_FRAMEWORKS='CoreFoundation CoreServices Foundation Security SystemConfiguration'
+
 file_magic() {
   od -A n -t x1 -N 4 "$1" 2>/dev/null | tr -d ' \n'
 }
 
+# is_tls_http_lib <soname-or-path>: a libcurl, libssl, libcrypto or libz.
+is_tls_http_lib() {
+  case "$(basename "$1")" in
+    libcurl*|libssl*|libcrypto*|libz.*|libz|zlib*) return 0 ;;
+  esac
+  return 1
+}
+
 gate_linux_elf() {
-  local bin="$1" interp
+  local bin="$1" interp lib needed
   command -v readelf >/dev/null 2>&1 || {
     echo "error: readelf is required to audit Linux release binaries" >&2
     exit 1
   }
   interp="$(readelf -l "$bin" 2>/dev/null | sed -n 's/.*Requesting program interpreter: \(.*\)].*/\1/p')"
-  if readelf -d "$bin" 2>/dev/null | grep -q '/nix/store'; then
-    echo "error: $bin has RUNPATH/NEEDED under /nix/store" >&2
+  needed="$(readelf -d "$bin" 2>/dev/null | sed -n 's/.*(NEEDED).*\[\(.*\)\].*/\1/p')"
+  for lib in $needed; do
+    if is_tls_http_lib "$lib"; then
+      echo "error: $bin needs the shared library $lib; libcurl and its TLS/zlib libraries must be linked statically (nix/libcurl.nix)" >&2
+      exit 1
+    fi
+  done
+  if [ -n "$interp" ]; then
+    echo "error: $bin has a program interpreter ($interp); Linux release binaries must be fully static (build the release-* flake attrs)" >&2
     exit 1
   fi
-  [ -z "$interp" ] && return 0
-  if [ "$target" = termux-arm64 ]; then
-    echo "error: $bin has a program interpreter ($interp); termux binaries must be fully static" >&2
+  if [ -n "$needed" ]; then
+    echo "error: $bin has NEEDED entries ($(echo $needed)); Linux release binaries must be fully static" >&2
     exit 1
   fi
-  case "$interp" in
-    /lib64/ld-linux-x86-64.so.2|/lib/ld-linux-aarch64.so.1) ;;
-    *) echo "error: $bin has program interpreter $interp; release binaries must use the FHS loader (build the release-* flake attrs)" >&2; exit 1 ;;
-  esac
   if readelf -d "$bin" 2>/dev/null | grep -qE '\((RPATH|RUNPATH)\)'; then
-    echo "error: $bin has an RPATH/RUNPATH; release binaries resolve libraries from the host only" >&2
+    echo "error: $bin has an RPATH/RUNPATH; Linux release binaries must be fully static" >&2
     exit 1
   fi
-  local lib
-  while IFS= read -r lib; do
-    case "$lib" in
-      libc.so.6|libm.so.6|libpthread.so.0|libdl.so.2|librt.so.1|libcurl.so.4|ld-linux-x86-64.so.2|ld-linux-aarch64.so.1) ;;
-      *) echo "error: $bin needs $lib; release binaries may depend only on glibc and libcurl.so.4" >&2; exit 1 ;;
-    esac
-  done < <(readelf -d "$bin" 2>/dev/null | sed -n 's/.*(NEEDED).*\[\(.*\)\].*/\1/p')
+}
+
+# darwin_dylib_paths: every dylib a Mach-O binary loads, one path per line
+# (llvm-objdump --dylibs-used or otool -L; the "<file>:" header is dropped).
+darwin_dylib_paths() {
+  local dump
+  if command -v llvm-objdump >/dev/null 2>&1; then
+    dump="$(llvm-objdump --macho --dylibs-used "$1" 2>/dev/null)"
+  elif command -v otool >/dev/null 2>&1; then
+    dump="$(otool -L "$1" 2>/dev/null)"
+  else
+    echo "error: need llvm-objdump or otool to audit $1" >&2
+    exit 1
+  fi
+  printf '%s\n' "$dump" | sed -n 's/^[[:space:]]\{1,\}\([^[:space:]]\{1,\}\) (.*/\1/p'
 }
 
 rewrite_darwin_macho() {
-  local bin="$1" dump line path base
-  if command -v llvm-objdump >/dev/null 2>&1; then
-    dump="$(llvm-objdump --macho --dylibs-used "$bin" 2>/dev/null)"
-  elif command -v otool >/dev/null 2>&1; then
-    dump="$(otool -L "$bin" 2>/dev/null)"
-  else
-    echo "error: need llvm-objdump or otool to audit $bin" >&2
-    exit 1
-  fi
-  while IFS= read -r line; do
-    line="${line#"${line%%[![:space:]]*}"}"
-    case "$line" in
+  local bin="$1" path base
+  for path in $(darwin_dylib_paths "$bin"); do
+    case "$path" in
       /nix/store/*)
-        path="${line%%[[:space:]]*}"
         base="$(basename "$path")"
+        if is_tls_http_lib "$base"; then
+          echo "error: $bin links $path; libcurl and its TLS/zlib libraries must be linked statically (nix/libcurl.nix)" >&2
+          exit 1
+        fi
         case "$base" in
           libiconv*.dylib)
             install_name_tool -change "$path" /usr/lib/libiconv.2.dylib "$bin" ;;
           libsqlite3*.dylib)
             install_name_tool -change "$path" /usr/lib/libsqlite3.dylib "$bin" ;;
-          libcurl*.dylib)
-            install_name_tool -change "$path" /usr/lib/libcurl.4.dylib "$bin" ;;
           *)
             echo "error: $bin links nix-store dylib with no system mapping: $path" >&2
             exit 1 ;;
         esac ;;
     esac
-  done <<EOF
-$dump
-EOF
+  done
   if command -v llvm-objdump >/dev/null 2>&1; then
     if llvm-objdump --macho --rpaths "$bin" 2>/dev/null | grep -q '/nix/store'; then
       echo "error: $bin has an rpath under /nix/store" >&2
       exit 1
     fi
   fi
+  gate_darwin_macho "$bin"
+}
+
+# gate_darwin_macho: the allow-list above, checked after the rewrites.
+gate_darwin_macho() {
+  local bin="$1" path ok fw
+  for path in $(darwin_dylib_paths "$bin"); do
+    if is_tls_http_lib "$path"; then
+      echo "error: $bin links $path; libcurl and its TLS/zlib libraries must be linked statically, not taken from the OS (nix/libcurl.nix)" >&2
+      exit 1
+    fi
+    ok=false
+    case " $DARWIN_SYSTEM_DYLIBS " in *" $path "*) ok=true ;; esac
+    for fw in $DARWIN_FRAMEWORKS; do
+      case "$path" in "/System/Library/Frameworks/$fw.framework/"*) ok=true ;; esac
+    done
+    if [ "$ok" != true ]; then
+      echo "error: $bin links $path, which is not an allowed system library ($DARWIN_SYSTEM_DYLIBS; frameworks: $DARWIN_FRAMEWORKS)" >&2
+      exit 1
+    fi
+  done
 }
 
 for staged in "$stage"/bin/*; do
@@ -208,6 +245,8 @@ for staged in "$stage"/bin/*; do
   esac
 done
 
+curl_version="$(sed -n '/"curl"/,/}/s/.*"version": *"\([^"]*\)".*/\1/p' nix/libcurl-pin.json | head -n 1)"
+[ -n "$curl_version" ] || { echo "error: cannot read the curl version from nix/libcurl-pin.json" >&2; exit 1; }
 commit="${GITHUB_SHA:-$(git rev-parse --short=12 HEAD 2>/dev/null || printf unknown)}"
 built_at="${SOURCE_DATE_EPOCH:-}"
 if [ -n "$built_at" ]; then
@@ -228,7 +267,7 @@ cat > "$stage/METADATA.json" <<META
   "commit": "$commit",
   "built_at": "$built_at_iso",
   "binaries": $binaries_json,
-  "http_dependency": "libcurl >= 7.80 (libcurl.so.4 on Linux -- e.g. Debian 12+, Ubuntu 22.04+; /usr/lib/libcurl.4.dylib on macOS 13+). Outbound HTTPS goes through it; NOT bundled.",
+  "http_client": "libcurl $curl_version, statically linked (nix/libcurl-pin.json; Linux: OpenSSL 3 on musl, fully static; macOS: OpenSSL 3 with Apple SecTrust verification). Nothing to install.",
   "tls_dependency": "socat (DEFAULT bridge->hub WebSocket TLS transport; NOT bundled -- install it with your system package manager). OpenSSL s_client is the legacy fallback, used only when HAM_TLS_BACKEND=s_client; it is resolved from the system PATH and is NOT bundled in this tarball."
 }
 META

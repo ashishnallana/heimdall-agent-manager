@@ -205,7 +205,7 @@ def test_tarball_structure_and_metadata(ctx):
         assert modes[f'bin/{binary}'] & 0o111, f'bin/{binary} must be executable in the tarball'
 
     expected_keys = {'product', 'version', 'target', 'commit', 'built_at',
-                     'binaries', 'tls_dependency'}
+                     'binaries', 'http_client', 'tls_dependency'}
     assert set(metadata.keys()) == expected_keys, (
         f'METADATA.json keys mismatch: {sorted(metadata.keys())}')
     assert metadata['product'] == 'heimdall-local'
@@ -216,6 +216,9 @@ def test_tarball_structure_and_metadata(ctx):
     assert sorted(metadata['binaries']) == ['ham-bridge', 'ham-ctl', 'ham-pty-host', 'heimdall'], (
         f'METADATA.json binaries mismatch: {metadata["binaries"]}')
     assert isinstance(metadata['tls_dependency'], str) and metadata['tls_dependency']
+    # libcurl is linked statically at the version pinned in nix/libcurl-pin.json.
+    pinned_curl = json.loads((ROOT / 'nix' / 'libcurl-pin.json').read_text())['curl']['version']
+    assert f'libcurl {pinned_curl}, statically linked' in metadata['http_client'], metadata['http_client']
 
     ctx['tarball'] = tarball
 
@@ -3096,6 +3099,34 @@ def test_release_gate_rejects_dynamic_elf(ctx):
     assert 'has a program interpreter' in res.stderr, res.stderr
 
 
+def test_release_gate_rejects_shared_libcurl(ctx):
+    """A binary that needs a shared libcurl is named and rejected: libcurl, its
+    TLS library and zlib must be linked statically (nix/libcurl.nix)."""
+    if platform.system() != 'Linux':
+        raise Skip('ELF gate check requires Linux')
+    need_tool('readelf')
+    control = None
+    for candidate in (shutil.which('curl'), '/usr/bin/curl'):
+        if candidate and Path(candidate).is_file():
+            probe = run(['readelf', '-d', candidate])
+            if probe.returncode == 0 and re.search(r'NEEDED.*\[libcurl\.so', probe.stdout):
+                control = Path(candidate)
+                break
+    if control is None:
+        raise Skip('no curl CLI linking a shared libcurl on this host')
+    base = ctx['work'] / 'gate-shared-libcurl'
+    base.mkdir()
+    bridge = make_stub_input(base, 'bridge-out', ['ham-bridge'])
+    shutil.copy(control, bridge / 'bin' / 'ham-bridge')
+    ctl = make_stub_input(base, 'ctl-out', ['ham-ctl'])
+    manager = make_stub_input(base, 'manager-out', ['heimdall'])
+    pty_host = make_stub_input(base, 'pty-host-out', ['ham-pty-host'])
+    res = run(['bash', PACKAGE_SCRIPT, 'linux-amd64', 'v0.1.0', base / 'dist',
+               bridge, ctl, manager, pty_host], cwd=ROOT)
+    assert res.returncode != 0, 'a binary needing a shared libcurl must be rejected'
+    assert 'needs the shared library libcurl' in res.stderr, res.stderr
+
+
 def storeless_mechanism(timeout=120):
     """Name of the validated clean-environment mechanism, or AssertionError.
 
@@ -4996,6 +5027,8 @@ def main() -> int:
          test_release_gate_rejects_nix_wrapper),
         ('release gate rejects dynamic ELF binaries (REQ-INST-16)',
          test_release_gate_rejects_dynamic_elf),
+        ('release gate rejects a shared libcurl (static libcurl)',
+         test_release_gate_rejects_shared_libcurl),
         ('storeless execution gate has teeth (REQ-INST-16)', test_storeless_exec_has_teeth),
         ('termux-arm64 tarball target (T12)', test_termux_tarball_target),
         ('seccomp probe denylist is bionic-verified (T12)',
