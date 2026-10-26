@@ -45,7 +45,11 @@ MIN_CURL_VERSION_TEXT :: "7.80.0"
 MAX_RESPONSE_HEADER_BYTES :: 64 * 1024
 
 DEFAULT_TIMEOUT_MS :: 20_000
-DEFAULT_MAX_RESPONSE_BYTES :: 32 * 1024 * 1024
+// DEFAULT_MAX_RESPONSE_BYTES must stay well above the largest response a hub
+// legitimately returns: an artifact (content_service.ARTIFACT_MAX_BYTES, 50 MB)
+// comes back inside a JSON document, so escaping can grow it. The deleted
+// client had no cap; callers talking to third parties set a tight one.
+DEFAULT_MAX_RESPONSE_BYTES :: 256 * 1024 * 1024
 DEFAULT_USER_AGENT :: "heimdall/" + contracts.APP_VERSION
 
 Method :: enum u8 {

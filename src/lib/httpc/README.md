@@ -39,7 +39,7 @@ etag, found := httpc.header(resp, "etag")                      // case-insensiti
 
 - `Request`: `method`, `url` (from `parse_url`), `path` segments, `query`
   params, `headers`, `body`, `timeout_ms` (total budget, default 20 s),
-  `connect_timeout_ms`, `max_response_bytes` (default 32 MiB), `max_redirects`
+  `connect_timeout_ms`, `max_response_bytes` (default 256 MiB), `max_redirects`
   (default 0: a 3xx is returned), `cancel` (atomic flag → `.Aborted`).
 - Bodies: `json_body(value)` (marshalled immediately with `core:encoding/json`),
   `form_body([]Form_Field)` (encoded with curl's escaping),
