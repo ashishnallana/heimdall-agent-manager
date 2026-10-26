@@ -499,19 +499,41 @@ export async function openVaultPayload(payload: Uint8Array, key: CryptoKey, vaul
  * - Malformed, or does not authenticate: throws.
  */
 export async function decryptVaultText(armored: string, keyring?: VaultKeyring | null): Promise<string> {
-  if (!isVaultArmored(armored)) return armored;
+  const opened = await decryptVaultBytes(armored, keyring);
+  switch (opened.status) {
+    case 'not_armored': return armored;
+    case 'other_vault': return VAULT_OTHER_VAULT_MARKER;
+    case 'locked': return VAULT_LOCKED_MARKER;
+    case 'ok':
+      try {
+        return new TextDecoder().decode(opened.bytes);
+      } finally {
+        opened.bytes.fill(0);
+      }
+  }
+}
+
+export type VaultBytesResult =
+  | { status: 'ok'; bytes: Uint8Array }
+  | { status: 'not_armored' }
+  | { status: 'other_vault' }
+  | { status: 'locked' };
+
+/**
+ * Byte form of decryptVaultText for binary content (ZIP bundles, images): the plaintext
+ * exactly as it was sealed. Never routed through TextDecoder, which would replace every
+ * invalid UTF-8 sequence with U+FFFD and corrupt the payload. The caller owns `bytes`.
+ * Malformed tokens, and tokens that do not authenticate, throw.
+ */
+export async function decryptVaultBytes(armored: string, keyring?: VaultKeyring | null): Promise<VaultBytesResult> {
+  if (!isVaultArmored(armored)) return { status: 'not_armored' };
   const { vaultId, epoch, payload } = parseVaultEnvelope(armored);
   try {
     const kr = requireKeyring(keyring);
-    if (vaultId !== kr.vaultId) return VAULT_OTHER_VAULT_MARKER;
+    if (vaultId !== kr.vaultId) return { status: 'other_vault' };
     const key = keyFor(kr, epoch);
-    if (!key) return VAULT_LOCKED_MARKER;
-    const plain = await openVaultPayload(payload, key, vaultId, epoch);
-    try {
-      return new TextDecoder().decode(plain);
-    } finally {
-      plain.fill(0);
-    }
+    if (!key) return { status: 'locked' };
+    return { status: 'ok', bytes: await openVaultPayload(payload, key, vaultId, epoch) };
   } finally {
     payload.fill(0);
   }

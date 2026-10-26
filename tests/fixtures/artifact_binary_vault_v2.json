@@ -1,0 +1,9 @@
+{
+  "_comment": "Sealed by ham-ctl `artifact create --file` (src/ctl/artifact_vault_test.odin test_artifact_create_file_binary_bytes_round_trip payload). Pins that the UI opens CLI-sealed binary artifacts byte-for-byte.",
+  "key_hex": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "user_id": "usr_ctl_test",
+  "vault_id": "5c0f31a87702de90",
+  "epoch": 1,
+  "armored": "vault:v2:5c0f31a87702de90:e1:YgZusUSzaa3sClGW2ANhMTUXCKS/pmq0McTEfce8cJh++GpFugz7J0GCInAz62g8so9vj/ohXIoFC139/mr81FgXE3UtpKuttaoiMUv58F1mrBhRjdm6h6/7rfUCdJlI+6GZU/776725vIJ3g/f07aXBmQexAlzesTRquhlfXd9RtJ/8YhMaJE5oblbq1qZu6sz48OjXw9XeAZeV4YnK5phF1RgVGwublMUNbB6zWOjiw5MchVK7IBUC4dxeHB5x/7Thi90HCavyLY+Y8NPSUzkgkbe6tycSVCIr79XvRDiKhLWrWfudBNfh9VfJgSf+7Er7quvdWbCNW88FYqvq4roMIXUgt6PHOSmFsSDqfpNKSbkUw65YOM6f9iB3B8lEy0T5jg==",
+  "plaintext_hex": "504b0304000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff80fffec0"
+}

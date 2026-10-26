@@ -14,6 +14,8 @@ export {
   resolveKeyring,
   encryptVaultText,
   decryptVaultText,
+  decryptVaultBytes,
+  type VaultBytesResult,
   getActiveVaultKey,
   setActiveVaultKey,
   VAULT_TOKEN_RE,

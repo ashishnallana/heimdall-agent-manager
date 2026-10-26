@@ -1,5 +1,6 @@
 package main
 
+import "core:encoding/base64"
 import "core:encoding/json"
 import "core:fmt"
 import "core:os"
@@ -123,4 +124,44 @@ test_artifact_content_decryption_and_fallbacks :: proc(t: ^testing.T) {
 	legacy := "Plaintext unencrypted legacy content"
 	dec_legacy := ctl_decrypt_or_fallback_armored(legacy, tkr(TEST_ARTIFACT_VAULT_KEY), true, context.temp_allocator)
 	testing.expect_value(t, dec_legacy, legacy)
+}
+
+// artifact_binary_fixture_bytes is a ZIP-like payload that is NOT valid UTF-8: the local
+// file header magic, every byte value 0..255 and lone continuation / 0xFF/0xFE bytes. Any
+// layer that treats the payload as text (TextDecoder, U+FFFD replacement) corrupts it.
+// tests/fixtures/artifact_binary_vault_v2.json pins the same bytes for the UI side.
+artifact_binary_fixture_bytes :: proc(allocator := context.allocator) -> []byte {
+	out := make([dynamic]byte, 0, 4 + 256 + 4, allocator)
+	append(&out, 'P', 'K', 0x03, 0x04)
+	for i in 0 ..< 256 do append(&out, byte(i))
+	append(&out, 0x80, 0xff, 0xfe, 0xc0)
+	return out[:]
+}
+
+@(test)
+test_artifact_create_file_binary_bytes_round_trip :: proc(t: ^testing.T) {
+	// REQ-BUNDLE-4 (milestone A): `artifact create --file` seals the raw file bytes, so an
+	// archive survives seal -> hub (opaque armored text) -> open byte-for-byte.
+	payload := artifact_binary_fixture_bytes(context.temp_allocator)
+	dir := fmt.tprintf("%s/.cache/heimdall-tests", os.get_env("HOME", context.temp_allocator))
+	os.make_directory_all(dir)
+	path := fmt.tprintf("%s/artifact_binary_round_trip_%d.bin", dir, os.get_pid())
+	defer os.remove(path)
+	testing.expect(t, os.write_entire_file(path, payload) == nil, "fixture must be written")
+
+	out := ctl_agentmode_artifact_create_params([]string{
+		"--name", "bundle.zip", "--kind", "html-bundle", "--file", path,
+		"--vault-keyring", tkr_b64(TEST_ARTIFACT_VAULT_KEY),
+	})
+	val, err := json.parse_string(out, parse_integers = true, allocator = context.temp_allocator)
+	testing.expect(t, err == .None, "emitted params must be valid JSON")
+	obj := val.(json.Object)
+	armored_bytes, b_err := base64.decode(string(obj["content_base64"].(json.String)), allocator = context.temp_allocator)
+	testing.expect(t, b_err == nil, "content_base64 must decode")
+	armored := string(armored_bytes)
+	testing.expect(t, strings.has_prefix(armored, "vault:v2:"), "file content must be sealed")
+
+	plain, res := ctl_vault_open(armored, tkr(TEST_ARTIFACT_VAULT_KEY), context.temp_allocator)
+	testing.expect(t, res == .Ok, "sealed file content must open")
+	testing.expect(t, plain == string(payload), "opened bytes must equal the file bytes exactly")
 }
