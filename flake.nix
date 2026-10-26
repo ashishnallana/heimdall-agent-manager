@@ -26,11 +26,14 @@
       appVersion = "0.5.3";
       npmDepsHash = "sha256-yqdyHi5qX8vpKt6LfHFcln3+adOfndg5QIiUBTeSB48=";
 
+      # Every Odin binary that links src/lib/httpc needs libcurl (system:curl).
+      # Nix-native packages link the nixpkgs curl dynamically.
       mkOdinPackage = pkgs: odin: name: srcDir: pkgs.stdenv.mkDerivation {
         pname = name;
         version = appVersion;
         src = ./.;
         nativeBuildInputs = [ odin ];
+        buildInputs = [ pkgs.curl ];
         dontConfigure = true;
         dontInstall = true;
         buildPhase = ''
@@ -51,7 +54,7 @@
         version = appVersion;
         src = ./.;
         nativeBuildInputs = [ odin pkgs.makeWrapper ];
-        buildInputs = runtimeInputs;
+        buildInputs = runtimeInputs ++ [ pkgs.curl ];
         dontConfigure = true;
         dontInstall = true;
         buildPhase = ''
@@ -82,6 +85,7 @@
         version = appVersion;
         src = ./.;
         nativeBuildInputs = [ odin ];
+        buildInputs = [ pkgs.curl ];
         dontConfigure = true;
         dontInstall = true;
         buildPhase = ''
@@ -99,28 +103,53 @@
       # used to build the regular attrs, which is how bin/ham-bridge shipped
       # as a 652-byte nix wrapper script. These release attrs build the same
       # sources for the tarball:
-      #   Linux (Odin): fully static glibc via -static -no-pie against
-      #     glibc.static. odin's own -lm/-lc land earlier in the link line
-      #     but GNU ld resolves them from -L${glibc.static}/lib anyway.
-      #   Darwin (Odin): plain build; the Mach-O load commands are already
-      #     clean (/usr/lib/libSystem + system frameworks).
+      #   Linux (Odin): dynamically linked against the HOST's glibc and
+      #     libcurl.so.4 (src/lib/httpc links system:curl). sqlite stays
+      #     static: a directory holding only libsqlite3.a is searched first.
+      #     After linking, the ELF interpreter is rewritten to the FHS loader
+      #     and the nix rpath removed, so nothing references /nix/store.
+      #     The host needs glibc and libcurl >= 7.84 (httpc.MIN_CURL_VERSION;
+      #     checked at startup). Before the libcurl migration these were fully
+      #     static (-static against glibc.static); a static libcurl is future
+      #     work.
+      #   Darwin (Odin): plain build; scripts/release/package-local-binary-
+      #     tarball.sh rewrites the nix libcurl/libsqlite3 install names to the
+      #     OS copies in /usr/lib.
       # Never wrapProgram and never stage nix-store runtime deps here.
-      mkReleaseOdinPackage = pkgs: odin: name: srcDir: pkgs.stdenv.mkDerivation {
-        pname = "release-${name}";
-        version = appVersion;
-        src = ./.;
-        nativeBuildInputs = [ odin ];
-        buildInputs = pkgs.lib.optionals (name == "ham-bridge") [ pkgs.sqlite ];
-        dontConfigure = true;
-        dontInstall = true;
-        buildPhase = ''
-          runHook preBuild
-          mkdir -p $out/bin
-          odin build ${srcDir} -collection:odin_test=src -define:HAM_APP_VERSION=${appVersion} -out:$out/bin/${name} \
-            ${pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''-extra-linker-flags:"-static -no-pie -L${pkgs.glibc.static}/lib ${pkgs.lib.optionalString (name == "ham-bridge") "-L${pkgs.sqlite.out}/lib"}"''}
-          runHook postBuild
-        '';
-      };
+      mkReleaseOdinPackage = pkgs: odin: name: srcDir:
+        let
+          isLinux = pkgs.stdenv.hostPlatform.isLinux;
+          fhsLoader =
+            if pkgs.stdenv.hostPlatform.isAarch64 then "/lib/ld-linux-aarch64.so.1"
+            else "/lib64/ld-linux-x86-64.so.2";
+        in
+        pkgs.stdenv.mkDerivation {
+          pname = "release-${name}";
+          version = appVersion;
+          src = ./.;
+          nativeBuildInputs = [ odin ] ++ pkgs.lib.optionals isLinux [ pkgs.patchelf ];
+          buildInputs = [ pkgs.curl ] ++ pkgs.lib.optionals (name == "ham-bridge") [ pkgs.sqlite ];
+          dontConfigure = true;
+          dontInstall = true;
+          # The rpath/interpreter are rewritten below; keep fixup from re-adding
+          # nix-store references.
+          dontPatchELF = true;
+          dontStrip = true;
+          buildPhase = ''
+            runHook preBuild
+            mkdir -p $out/bin
+            ${pkgs.lib.optionalString isLinux ''
+              mkdir -p "$TMPDIR/static-libs"
+              ${pkgs.lib.optionalString (name == "ham-bridge") ''ln -s ${pkgs.sqlite.out}/lib/libsqlite3.a "$TMPDIR/static-libs/"''}
+            ''}
+            odin build ${srcDir} -collection:odin_test=src -define:HAM_APP_VERSION=${appVersion} -out:$out/bin/${name} \
+              ${pkgs.lib.optionalString isLinux ''${pkgs.lib.optionalString (name == "ham-bridge") "-define:HAM_PORTABLE_FMOD=true"} -extra-linker-flags:"-no-pie -L$TMPDIR/static-libs -L${pkgs.curl.out}/lib ${pkgs.lib.optionalString (name == "ham-bridge") "-Wl,--defsym,fmod=ham_portable_fmod"}"''}
+            ${pkgs.lib.optionalString isLinux ''
+              patchelf --set-interpreter ${fhsLoader} --remove-rpath $out/bin/${name}
+            ''}
+            runHook postBuild
+          '';
+        };
 
       # T12: the termux-arm64 bundle's Odin binaries. Android's app seccomp
       # allowlist is bionic-derived and SIGSYS-kills a process on syscalls bionic
@@ -137,7 +166,9 @@
       # helpers. -static -no-pie: a plain static ELF, no PT_INTERP.
       # Built for linux_arm64 from either Linux host (Odin cross-codegens
       # natively; the wrapper is pkgsCross, the same set mkReleasePtyHost uses).
-      # The linux-* release attrs above stay glibc-static and untouched.
+      # NOTE (libcurl migration): these attrs do not link yet. src/lib/httpc needs
+      # libcurl and no static musl libcurl is wired in; termux-arm64 is already
+      # disabled in the release matrix (crashlog backtrace under musl).
       # HAM_RELEASE_TARGET=termux-arm64 (src/contracts/release_target.odin) makes
       # the bridge hello, Hub update catalog and `heimdall update` resolve the
       # termux bundle instead of linux-arm64, whose glibc dies under Android's
@@ -312,20 +343,16 @@
           odin = mkOdin pkgs;
         in
         {
-          # sqlite backs the hub repository. openssl + socat are the OUTBOUND https
-          # transport: the hub's own REST calls (e.g. the Paddle billing API) go through
-          # src/lib/http_client, which terminates TLS by launching `socat` (the default)
-          # or `openssl s_client` (HAM_TLS_BACKEND=s_client). Without both on the wrapped
-          # PATH every outbound https call fails at subprocess spawn — the hub never
-          # reaches the remote and reports a generic "could not contact" error. Same
-          # shared contract as ham-bridge below; keep the two in sync.
-          ham-hub = mkOdinPackageWithRuntime pkgs odin "ham-hub" "src/hub" ([ pkgs.sqlite pkgs.openssl pkgs.socat ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.glibc.bin ]);
-          # SOCAT-1: socat is the DEFAULT bridge->hub TLS transport (HAM_TLS_BACKEND),
-          # openssl stays for the s_client fallback (and socat's own OpenSSL engine).
-          # curl handles release downloads; all three are runtimeInputs so the
-          # wrapped bridge has deterministic tools on PATH. glibc.bin supplies
-          # getent for the bounded DNS subprocess used by plain-HTTP recovery.
-          ham-bridge = mkOdinPackageWithRuntime pkgs odin "ham-bridge" "src/bridge" ([ pkgs.sqlite pkgs.curl pkgs.openssl pkgs.socat ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.glibc.bin ]);
+          # sqlite backs the hub repository. Outbound HTTPS (OIDC, Paddle, Loki,
+          # Web Push) goes through src/lib/httpc, i.e. the linked libcurl, so the
+          # hub needs no TLS helper binaries on PATH any more.
+          ham-hub = mkOdinPackageWithRuntime pkgs odin "ham-hub" "src/hub" [ pkgs.sqlite ];
+          # SOCAT-1: socat is the DEFAULT bridge->hub WebSocket (wss://) TLS
+          # transport (HAM_TLS_BACKEND); openssl stays for the s_client fallback
+          # and socat's OpenSSL engine. Outbound HTTPS uses the linked libcurl.
+          # The curl CLI is used by scripts/apply-bridge-update.sh (the update
+          # supervisor's health probe).
+          ham-bridge = mkOdinPackageWithRuntime pkgs odin "ham-bridge" "src/bridge" [ pkgs.sqlite pkgs.curl pkgs.openssl pkgs.socat ];
           ham-dev-proxy = mkOdinPackage pkgs odin "ham-dev-proxy" "src/dev_proxy";
           ham-ctl = mkOdinCtlPackage pkgs odin;
           ham-test-agent = mkOdinPackage pkgs odin "ham-test-agent" "src/test_agent";

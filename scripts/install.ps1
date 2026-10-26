@@ -888,7 +888,7 @@ function Invoke-HeimdallInstaller {
     $bridgeVersion = Get-BridgeVersion $workBridge
     if ($bridgeVersion -and (Test-VersionAtLeast $bridgeVersion '0.3.36')) {
       & $workBridge --probe-hub $hubUrl
-      if ($LASTEXITCODE -ne 0) { Fail "The new ham-bridge.exe cannot reach $hubUrl through its own TLS transport although the installer could. Check proxy/TLS trust (HAM_TLS_CA_FILE). Nothing was replaced." }
+      if ($LASTEXITCODE -ne 0) { Fail "The new ham-bridge.exe cannot reach $hubUrl through its own HTTPS client (libcurl, Schannel) although the installer could. Check TLS trust (HAM_TLS_CA_FILE). ham-bridge never uses a proxy. Nothing was replaced." }
     } else {
       $shownVersion = 'unknown'
       if ($bridgeVersion) { $shownVersion = $bridgeVersion }

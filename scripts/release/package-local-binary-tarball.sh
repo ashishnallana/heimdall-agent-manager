@@ -96,13 +96,15 @@ install -m 0644 LICENSE "$stage/LICENSE"
 # REQ-INST-16: the release tarballs target stock Linux/macOS hosts that have no
 # /nix/store. Gate the staged tree HERE, at the single chokepoint every release
 # path shares, before the tarball exists:
-#   * Linux  -- every shipped ELF must be fully static: no program interpreter
-#     at all (a /nix/store one is the historical bug; ANY interpreter means the
-#     binary was not built via the release-* flake attrs) and no RUNPATH/NEEDED
-#     under /nix/store.
+#   * Linux  -- every shipped ELF is either fully static (no program
+#     interpreter: ham-pty-host, and everything in the termux bundle) or a
+#     release-* Odin binary linked against the host's glibc and libcurl.so.4
+#     (src/lib/httpc): then the interpreter must be the standard FHS loader
+#     (a /nix/store one is the historical bug), there is no RPATH/RUNPATH, and
+#     every NEEDED entry is a glibc library or libcurl.so.4.
 #   * Darwin -- Mach-O binaries get nix-store dylib install names rewritten to
-#     the system equivalents below (libiconv is the only nix dylib the Rust
-#     build picks up; the Odin binaries already have clean load commands).
+#     the system equivalents below (libiconv from the Rust build; libsqlite3
+#     and libcurl from the Odin builds, which link the OS copies at runtime).
 #     Any OTHER /nix/store dylib, or any /nix/store rpath, is a hard error.
 # Non-binary payloads (shell stubs, README) are skipped by magic bytes, so test
 # fixtures that stage #!/bin/sh stubs keep passing.
@@ -117,14 +119,30 @@ gate_linux_elf() {
     exit 1
   }
   interp="$(readelf -l "$bin" 2>/dev/null | sed -n 's/.*Requesting program interpreter: \(.*\)].*/\1/p')"
-  if [ -n "$interp" ]; then
-    echo "error: $bin has a program interpreter ($interp); release Linux binaries must be fully static (build the release-* flake attrs)" >&2
-    exit 1
-  fi
   if readelf -d "$bin" 2>/dev/null | grep -q '/nix/store'; then
     echo "error: $bin has RUNPATH/NEEDED under /nix/store" >&2
     exit 1
   fi
+  [ -z "$interp" ] && return 0
+  if [ "$target" = termux-arm64 ]; then
+    echo "error: $bin has a program interpreter ($interp); termux binaries must be fully static" >&2
+    exit 1
+  fi
+  case "$interp" in
+    /lib64/ld-linux-x86-64.so.2|/lib/ld-linux-aarch64.so.1) ;;
+    *) echo "error: $bin has program interpreter $interp; release binaries must use the FHS loader (build the release-* flake attrs)" >&2; exit 1 ;;
+  esac
+  if readelf -d "$bin" 2>/dev/null | grep -qE '\((RPATH|RUNPATH)\)'; then
+    echo "error: $bin has an RPATH/RUNPATH; release binaries resolve libraries from the host only" >&2
+    exit 1
+  fi
+  local lib
+  while IFS= read -r lib; do
+    case "$lib" in
+      libc.so.6|libm.so.6|libpthread.so.0|libdl.so.2|librt.so.1|libcurl.so.4|ld-linux-x86-64.so.2|ld-linux-aarch64.so.1) ;;
+      *) echo "error: $bin needs $lib; release binaries may depend only on glibc and libcurl.so.4" >&2; exit 1 ;;
+    esac
+  done < <(readelf -d "$bin" 2>/dev/null | sed -n 's/.*(NEEDED).*\[\(.*\)\].*/\1/p')
 }
 
 rewrite_darwin_macho() {
@@ -148,6 +166,8 @@ rewrite_darwin_macho() {
             install_name_tool -change "$path" /usr/lib/libiconv.2.dylib "$bin" ;;
           libsqlite3*.dylib)
             install_name_tool -change "$path" /usr/lib/libsqlite3.dylib "$bin" ;;
+          libcurl*.dylib)
+            install_name_tool -change "$path" /usr/lib/libcurl.4.dylib "$bin" ;;
           *)
             echo "error: $bin links nix-store dylib with no system mapping: $path" >&2
             exit 1 ;;
@@ -208,7 +228,8 @@ cat > "$stage/METADATA.json" <<META
   "commit": "$commit",
   "built_at": "$built_at_iso",
   "binaries": $binaries_json,
-  "tls_dependency": "socat (DEFAULT bridge->hub TLS transport; NOT bundled -- install it with your system package manager). OpenSSL s_client is the legacy fallback, used only when HAM_TLS_BACKEND=s_client; it is resolved from the system PATH and is NOT bundled in this tarball."
+  "http_dependency": "libcurl >= 7.84 (libcurl.so.4 on Linux -- e.g. Debian 12+, Ubuntu 24.04+; /usr/lib/libcurl.4.dylib on macOS 13+). Outbound HTTPS goes through it; NOT bundled.",
+  "tls_dependency": "socat (DEFAULT bridge->hub WebSocket TLS transport; NOT bundled -- install it with your system package manager). OpenSSL s_client is the legacy fallback, used only when HAM_TLS_BACKEND=s_client; it is resolved from the system PATH and is NOT bundled in this tarball."
 }
 META
 
