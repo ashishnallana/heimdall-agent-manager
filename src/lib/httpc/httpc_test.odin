@@ -594,9 +594,9 @@ download_streams_follows_redirects_and_never_leaves_partials :: proc(t: ^testing
 
 // End to end over real TLS against a socat server with a throwaway certificate:
 // a chunked 200 followed by the server closing (the shape that stranded the
-// bridge), trust via HAM_TLS_CA_FILE, and hostname verification. Skipped when
-// openssl/socat are not on PATH (they are in `nix develop`). The only test in
-// this package that touches HAM_TLS_CA_FILE.
+// bridge), trust via an exclusive CA bundle (the HAM_TLS_CA_FILE path, fed
+// through Request._test_ca_file), and hostname verification. Fails when
+// openssl/socat are not on PATH (they are in `nix develop`).
 @(test)
 tls_end_to_end_with_test_ca :: proc(t: ^testing.T) {
 	if !must_init(t) do return
@@ -650,13 +650,13 @@ tls_end_to_end_with_test_ca :: proc(t: ^testing.T) {
 	testing.expectf(t, e0 == .Certificate, "untrusted cert: %v", e0)
 	testing.expect(t, !r0.may_have_sent, "a failed handshake sent no request bytes")
 
-	os.set_env("HAM_TLS_CA_FILE", cert)
-	defer os.unset_env("HAM_TLS_CA_FILE")
-	r1, e1 := send({method = .POST, url = good, path = {"api", "v1", "device", "bridge-refresh"}, body = json_body(struct{}{}), timeout_ms = 5000})
+	// The CA goes in through the request, not os.set_env: tests run in parallel
+	// and every send reads the environment (setenv racing getenv is undefined).
+	r1, e1 := send({method = .POST, url = good, path = {"api", "v1", "device", "bridge-refresh"}, body = json_body(struct{}{}), timeout_ms = 5000, _test_ca_file = cert})
 	defer response_destroy(&r1)
 	testing.expectf(t, e1 == .None && r1.status == 200 && text(r1) == `{"a":1}`, "err=%v status=%d body=%q detail=%s", e1, r1.status, text(r1), r1.detail)
 	// Hostname verification is always on: the certificate names localhost only.
-	r2, e2 := send({method = .GET, url = by_ip, timeout_ms = 5000})
+	r2, e2 := send({method = .GET, url = by_ip, timeout_ms = 5000, _test_ca_file = cert})
 	response_destroy(&r2)
 	testing.expectf(t, e2 == .Certificate, "IP not in the certificate: %v", e2)
 }

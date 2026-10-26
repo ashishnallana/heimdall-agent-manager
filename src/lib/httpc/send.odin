@@ -255,7 +255,7 @@ perform :: proc(req: Request, t: ^Transfer) -> Error {
 		// certificate that IS revoked; it only tolerates an unknown status.
 		set_ok &= set_long(easy, CURLOPT_SSL_OPTIONS, CURLSSLOPT_REVOKE_BEST_EFFORT)
 	}
-	cainfo, capath, exclusive := trust_anchors()
+	cainfo, capath, exclusive := trust_anchors(req._test_ca_file)
 	if cainfo != "" {
 		set_ok &= set_ptr(easy, CURLOPT_CAINFO, rawptr(strings.clone_to_cstring(cainfo, context.temp_allocator)))
 	}
@@ -320,7 +320,8 @@ method_cstring :: proc(m: Method) -> string {
 //        the behaviour does not depend on the TLS backend libcurl was built with)
 //   else libcurl's built-in default (system store; Schannel: Windows store).
 @(private)
-trust_anchors :: proc() -> (cainfo: string, capath: string, exclusive: bool) {
+trust_anchors :: proc(test_ca_file := "") -> (cainfo: string, capath: string, exclusive: bool) {
+	if test_ca_file != "" do return test_ca_file, "", true
 	if v := strings.trim_space(os.get_env("HAM_TLS_CA_FILE", context.temp_allocator)); v != "" do return v, "", true
 	cainfo = strings.trim_space(os.get_env("SSL_CERT_FILE", context.temp_allocator))
 	capath = strings.trim_space(os.get_env("SSL_CERT_DIR", context.temp_allocator))

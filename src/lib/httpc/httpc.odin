@@ -157,6 +157,10 @@ Request :: struct {
 	max_redirects:      int,
 	// Optional: set (atomically) to true from another thread to abort => .Aborted.
 	cancel:             ^bool,
+	// Tests only: a CA bundle used exactly like HAM_TLS_CA_FILE, so a test need
+	// not mutate the process environment while other tests read it. Production
+	// code configures trust through the environment.
+	_test_ca_file:      string,
 }
 
 Error :: enum u8 {
