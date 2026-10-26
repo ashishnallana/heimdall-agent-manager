@@ -1301,6 +1301,35 @@ apply-bridge-update.sh --interface 2 --from-version 0.5.6 --to-version 0.5.7 \
 
 `apply-bridge-update.sh --help` lists every flag.
 
+#### Windows
+
+Windows bundles ship `scripts/apply-bridge-update.ps1` instead, run by Windows
+PowerShell 5.1 (`powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File`).
+It takes the same flags, interface rules, legacy handling and version hooks
+(`Invoke-VersionHooks`, kept in step with `run_version_hooks`), and logs the same
+lines, also to `logs\apply-bridge-update.log`. Differences from the `.sh`:
+
+- **Service.** The Scheduled Task found through `--service-name`,
+  `HEIMDALL_BRIDGE_SERVICE_NAME` (set by `bridge-run.cmd`) or the task whose action runs
+  this data dir's `bin\bridge-service.js`. The supervisor stops that task's hidden
+  `wscript.exe` loop by PID rather than with `Stop-ScheduledTask` (which could end the
+  supervisor with the task), waits for the bridge PID to exit on its own (there is no
+  SIGTERM), then terminates that exact PID, and restarts with `Start-ScheduledTask`.
+- **Swap.** `bin\` is replaced by a directory rename (retried while an antivirus or
+  indexer handle holds it). The installer's `bridge-service.js`, `bridge-run.cmd` and
+  `ham-ctl-*.cmd` are carried into the new `bin\`. If PTY cleanup refuses or the rename
+  fails, nothing is swapped and the unchanged bridge is restarted.
+- **PTY cleanup.** Processes come from CIM (`Win32_Process`, owner SID checked); a
+  process's start time is its identity, and a child that started before its recorded
+  parent is not a descendant (Windows reuses PIDs and never reparents). The PTY host's
+  protocol `stop` is the graceful step, then survivors are terminated; exit `1` if any
+  survive, `3` if processes cannot be listed. `PTY_PROCESS_READER=cim|process` forces a
+  reader (`process` is `Get-Process`, PowerShell 7 only).
+- **Provider extensions** are not shipped in Windows bundles and are not refreshed.
+
+`tests/windows/apply_bridge_update_ps1_test.ps1` covers it on any PowerShell; off
+Windows (PowerShell 7) it also runs the PTY cleanup and the apply/rollback flow.
+
 ## Quick-start checklist
 
 ### Hub (once)

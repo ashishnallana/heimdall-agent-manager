@@ -28,7 +28,7 @@ foreach ($exe in @('ham-bridge.exe', 'ham-ctl.exe', 'ham-pty-host.exe')) {
 }
 $manager = Join-Path $BinDir 'heimdall.exe'
 if (Test-Path -PathType Leaf $manager) { $entries['bin/heimdall.exe'] = $manager }
-$supervisor = Join-Path $repo 'scripts\apply-bridge-update.ps1'
+$supervisor = Join-Path (Join-Path $repo 'scripts') 'apply-bridge-update.ps1'
 if (Test-Path -PathType Leaf $supervisor) { $entries['scripts/apply-bridge-update.ps1'] = $supervisor }
 $entries['README.md'] = Join-Path $repo 'README.md'
 $entries['LICENSE'] = Join-Path $repo 'LICENSE'
