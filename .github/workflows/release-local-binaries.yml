@@ -261,10 +261,12 @@ jobs:
       # execute without it. The packaging script already gates the staged tree;
       # this re-checks the final tarball and adds the execution proof that scan
       # alone cannot give. (matrix.target is defined in-file, not event data.)
-      # The Odin binaries (ham-bridge, ham-ctl, heimdall) link the host's glibc
-      # and libcurl.so.4 (src/lib/httpc), so they are proven on the runner's own
-      # stock userland with the nix profile removed from PATH and no nix library
-      # path; ham-pty-host stays fully static and keeps the storeless rootfs proof.
+      # Every Linux binary is FULLY STATIC: the Odin binaries are static musl
+      # with the pinned libcurl, OpenSSL 3 and zlib linked in (nix/libcurl.nix),
+      # ham-pty-host is static-PIE Rust. So all four run in an empty rootfs, and
+      # the HTTPS client is proven on hosts with NO libcurl: the runner itself
+      # (Ubuntu, the system CA bundle), Alpine (musl userland, its own CA
+      # bundle) and busybox (no CA bundle at all: the embedded Mozilla bundle).
       - name: Verify release binaries are portable (Linux)
         if: ${{ startsWith(matrix.target, 'linux-') || startsWith(matrix.target, 'termux-') }}
         shell: bash
@@ -278,37 +280,33 @@ jobs:
               7f454c46) ;;
               *) echo "FAIL: $f is not an ELF binary" >&2; exit 1 ;;
             esac
-            interp="$(readelf -l "$f" 2>/dev/null | sed -n 's/.*Requesting program interpreter: \(.*\)].*/\1/p' || true)"
-            case "$(basename "$f"):$interp" in
-              ham-pty-host:) ;;
-              ham-pty-host:*)
-                echo "FAIL: $f has a program interpreter ($interp); ham-pty-host must be fully static" >&2
-                exit 1 ;;
-              *:/lib64/ld-linux-x86-64.so.2|*:/lib/ld-linux-aarch64.so.1|*:) ;;
-              *)
-                echo "FAIL: $f has program interpreter $interp; release binaries must use the FHS loader" >&2
-                exit 1 ;;
-            esac
+            if readelf -l "$f" 2>/dev/null | grep -q 'Requesting program interpreter'; then
+              echo "FAIL: $f has a program interpreter; release binaries must be fully static" >&2
+              exit 1
+            fi
+            needed="$(readelf -d "$f" 2>/dev/null | sed -n 's/.*(NEEDED).*\[\(.*\)\].*/\1/p')"
+            if [ -n "$needed" ]; then
+              echo "FAIL: $f needs shared libraries: $needed" >&2
+              exit 1
+            fi
             if readelf -d "$f" 2>/dev/null | grep -q '/nix/store'; then
               echo "FAIL: $f references /nix/store in its dynamic section" >&2
               exit 1
             fi
+            echo "$(basename "$f"): static, $(readelf -h "$f" | sed -n 's/.*Machine: *//p')"
           done
+          if ldconfig -p 2>/dev/null | grep -q 'libcurl\.so'; then
+            echo "note: the runner has a libcurl; the container checks below have none"
+          fi
           # The execution half. scripts/release/storeless-exec.sh picks a clean
           # environment by PROVING it can run a static control and reject a
           # dynamic one, and exits non-zero rather than skipping when it can
           # prove neither -- so this step cannot pass without executing.
           echo "storeless mechanism: $(scripts/release/storeless-exec.sh select)"
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq libcurl4t64 || sudo apt-get install -y -qq libcurl4
           for b in ham-bridge ham-ctl heimdall; do
-            echo "--- $b --version (host glibc + libcurl, no nix) ---"
-            if ldd "$work/bin/$b" | grep -q '/nix/store'; then
-              echo "FAIL: $b resolves a library from /nix/store" >&2; exit 1
-            fi
-            ldd "$work/bin/$b"
-            out="$(env -i PATH=/usr/bin:/bin "$work/bin/$b" --version)" || {
-              echo "FAIL: $b could not execute on the stock host userland" >&2; exit 1; }
+            echo "--- $b --version (storeless; init() checks the pinned libcurl) ---"
+            out="$(scripts/release/storeless-exec.sh run "$work/bin/$b" --version)" || {
+              echo "FAIL: $b could not execute without /nix/store" >&2; exit 1; }
             [ -n "$out" ] || { echo "FAIL: $b --version printed nothing" >&2; exit 1; }
             echo "$out"
           done
@@ -317,6 +315,19 @@ jobs:
             echo "FAIL: ham-pty-host could not execute without /nix/store" >&2; exit 1; }
           [ -n "$out" ] || { echo "FAIL: ham-pty-host --help printed nothing storeless" >&2; exit 1; }
           echo "$out" | head -3
+          # HTTPS through the bridge's own client. --probe-hub succeeds on any
+          # HTTP status, so a public HTTPS origin proves DNS, TLS and CA trust.
+          if [ "${{ matrix.target }}" != termux-arm64 ]; then
+            probe=https://github.com
+            echo "--- ham-bridge --probe-hub on the runner (system CA bundle) ---"
+            env -i PATH=/usr/bin:/bin "$work/bin/ham-bridge" --probe-hub "$probe"
+            for image in alpine:3.22 busybox:1.37; do
+              echo "--- ham-bridge --probe-hub in $image (no libcurl) ---"
+              docker run --rm -v "$work/bin:/h:ro" "$image" /h/ham-bridge --probe-hub "$probe"
+            done
+            docker run --rm -v "$work/bin:/h:ro" busybox:1.37 /h/ham-bridge --probe-hub "$probe" | grep -q 'embedded Mozilla CA bundle' || {
+              echo "FAIL: busybox has no CA bundle; the bridge must fall back to the embedded one" >&2; exit 1; }
+          fi
 
       # T12: the termux bundle must start under Android's app seccomp policy.
       # scripts/release/android-seccomp-probe.sh straces --version/--help and
@@ -362,13 +373,28 @@ jobs:
               exit 1
             fi
           done
+          # libcurl, OpenSSL and zlib are linked statically; the packaging
+          # script already enforced the load-command allow-list (libSystem,
+          # libobjc, libiconv, libsqlite3, system frameworks). Show it, and
+          # re-reject any libcurl/libssl/libcrypto/libz, even the OS's own.
+          for f in "$work"/bin/*; do
+            otool -L "$f"
+            if otool -L "$f" | tail -n +2 | grep -Eq '/(libcurl|libssl|libcrypto|libz)[.0-9]*\.dylib'; then
+              echo "FAIL: $f links a shared libcurl/libssl/libcrypto/libz" >&2
+              exit 1
+            fi
+          done
           # The macOS runner has no nix store before our Nix install step puts
           # one there; the scan above is what proves these binaries never
-          # touch it. Execution proves they load and run on a stock host.
+          # touch it. Execution proves they load and run on a stock host, and
+          # --probe-hub that TLS verifies through Apple SecTrust.
           "$work/bin/ham-bridge" --version
           "$work/bin/ham-ctl" --version
           "$work/bin/heimdall" --version
           "$work/bin/ham-pty-host" --help >/dev/null
+          "$work/bin/ham-bridge" --probe-hub https://github.com | tee "$RUNNER_TEMP/probe.txt"
+          grep -q 'Apple SecTrust' "$RUNNER_TEMP/probe.txt" || {
+            echo "FAIL: the macOS bridge must verify through Apple SecTrust" >&2; exit 1; }
 
   # windows-amd64: hub-less Odin ham-bridge/ham-ctl (static sqlite3.lib from the
   # pinned amalgamation, FTS5) and a static-CRT Rust ham-pty-host, packaged as
@@ -416,25 +442,43 @@ jobs:
           & $odin version
           "ODIN=$odin" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
 
+      # The pinned libcurl (nix/libcurl-pin.json) with Schannel, plus zlib, as
+      # static /MT libraries: source tarballs SHA-256-verified, built once per
+      # pin/recipe and cached. The Odin toolchain's bundled vendor/curl
+      # libcurl.lib is not used (an 8.17.0-DEV snapshot without zlib).
+      - name: Cache the pinned static libcurl
+        id: curl-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/libcurl-static
+          key: libcurl-static-windows-x64-${{ hashFiles('nix/libcurl-pin.json', 'scripts/windows/build-libcurl.ps1') }}
+
+      - name: Build the pinned static libcurl
+        if: ${{ steps.curl-cache.outputs.cache-hit != 'true' }}
+        shell: pwsh
+        run: scripts/windows/build-libcurl.ps1 -OutDir "$env:RUNNER_TEMP/libcurl-static"
+
       - name: Build Windows binaries
         shell: pwsh
         run: |
           rustup toolchain install "$env:RUST_TOOLCHAIN" --profile minimal
           rustup default "$env:RUST_TOOLCHAIN"
           rustc --version
-          scripts/windows/build.ps1 -OutDir dist/windows-bin -Odin $env:ODIN -Version "${{ needs.prepare.outputs.version }}"
+          scripts/windows/build.ps1 -OutDir dist/windows-bin -Odin $env:ODIN -Version "${{ needs.prepare.outputs.version }}" -CurlLibDir "$env:RUNNER_TEMP/libcurl-static/lib"
 
       - name: Verify Windows binaries are self-contained and run
         shell: pwsh
         run: |
-          foreach ($exe in Get-ChildItem dist/windows-bin -Filter *.exe) {
-            $deps = (& dumpbin /nologo /dependents $exe.FullName) -join "`n"
-            if ($deps -match '(?i)(vcruntime|msvcp)[0-9]*\.dll|sqlite3\.dll|libcurl[-0-9a-z]*\.dll') { throw "$($exe.Name) needs a non-system DLL:`n$deps" }
-          }
+          scripts/windows/check-dependencies.ps1 -BinDir dist/windows-bin
           & dist/windows-bin/ham-bridge.exe --version; if ($LASTEXITCODE) { throw 'ham-bridge --version failed' }
           & dist/windows-bin/ham-bridge.exe --help; if ($LASTEXITCODE) { throw 'ham-bridge --help failed' }
           & dist/windows-bin/ham-ctl.exe --version; if ($LASTEXITCODE) { throw 'ham-ctl --version failed' }
           & dist/windows-bin/ham-pty-host.exe --help | Select-Object -First 3; if ($LASTEXITCODE) { throw 'ham-pty-host --help failed' }
+          # Schannel + the Windows certificate store, with revocation best effort.
+          $probe = (& dist/windows-bin/ham-bridge.exe --probe-hub https://github.com) -join "`n"
+          if ($LASTEXITCODE) { throw "ham-bridge --probe-hub failed:`n$probe" }
+          Write-Host $probe
+          if ($probe -notmatch 'Schannel') { throw "ham-bridge must use the pinned Schannel libcurl:`n$probe" }
 
       - name: Package heimdall-local zip
         shell: pwsh
@@ -499,11 +543,7 @@ jobs:
             echo "FAIL: this job must run without a Nix store" >&2
             exit 1
           fi
-          # The Odin binaries link the host libcurl (src/lib/httpc).
-          if [ "$(uname -s)" = Linux ]; then
-            sudo apt-get update -qq
-            sudo apt-get install -y -qq libcurl4t64 || sudo apt-get install -y -qq libcurl4
-          fi
+          # Nothing is installed first: libcurl is linked into the binaries.
           work="$RUNNER_TEMP/storeless-verify"
           rm -rf "$work"
           mkdir -p "$work"
@@ -512,6 +552,7 @@ jobs:
           "$work/bin/ham-ctl" --version
           "$work/bin/heimdall" --version
           "$work/bin/ham-pty-host" --help >/dev/null
+          "$work/bin/ham-bridge" --probe-hub https://github.com
 
   release:
     name: Publish GitHub Release
