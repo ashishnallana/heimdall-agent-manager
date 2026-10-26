@@ -403,24 +403,31 @@ export class HtmlBundleRenderer {
 
   /** Compile CSS from `fromPath`, inlining local @import recursively. */
   compileCss(css: string, fromPath: string, missing: Set<string>, seen: string[] = []): string {
-    const withImports = css.replace(CSS_IMPORT_RE, (_m, u1, u2, u3, s1, s2, media) => {
+    // Imports are swapped for placeholders first so that url() rewriting applies to this
+    // file only: inlined stylesheets are already compiled (their url()s hold blob: URLs,
+    // which a second pass would treat as external and drop).
+    const inlined: string[] = [];
+    const withPlaceholders = css.replace(CSS_IMPORT_RE, (_m, u1, u2, u3, s1, s2, media) => {
       const ref = String(u1 ?? u2 ?? u3 ?? s1 ?? s2 ?? '').trim();
       const resolved = resolveBundleRef(ref, fromPath);
+      let inner = '';
       if (resolved.kind !== 'local') {
         missing.add(ref);
-        return '';
+      } else {
+        const bytes = this.bundle.files.get(resolved.path);
+        if (!bytes || bundleAssetMime(resolved.path) !== 'text/css') {
+          missing.add(resolved.path);
+        } else if (!seen.includes(resolved.path) && seen.length < MAX_IMPORT_DEPTH) {
+          inner = this.compileCss(new TextDecoder().decode(bytes), resolved.path, missing, [...seen, resolved.path]);
+          const mediaText = String(media || '').trim();
+          if (mediaText) inner = `@media ${mediaText} {\n${inner}\n}`;
+        }
       }
-      const bytes = this.bundle.files.get(resolved.path);
-      if (!bytes || bundleAssetMime(resolved.path) !== 'text/css') {
-        missing.add(resolved.path);
-        return '';
-      }
-      if (seen.includes(resolved.path) || seen.length >= MAX_IMPORT_DEPTH) return '';
-      const inner = this.compileCss(new TextDecoder().decode(bytes), resolved.path, missing, [...seen, resolved.path]);
-      const mediaText = String(media || '').trim();
-      return mediaText ? `@media ${mediaText} {\n${inner}\n}` : inner;
+      inlined.push(inner);
+      return `/*hb-import-${inlined.length - 1}*/`;
     });
-    return this.rewriteCssUrls(withImports, fromPath, missing);
+    return this.rewriteCssUrls(withPlaceholders, fromPath, missing)
+      .replace(/\/\*hb-import-(\d+)\*\//g, (_m, index) => inlined[Number(index)] ?? '');
   }
 
   private rewriteSrcset(value: string, page: string, missing: Set<string>): string {
@@ -451,6 +458,10 @@ export class HtmlBundleRenderer {
       for (const attr of Array.from(form.attributes)) if (attr.name === 'class' || attr.name === 'id' || attr.name === 'style') div.setAttribute(attr.name, attr.value);
       form.replaceWith(div);
     });
+    // Authored <style> first: stylesheets inlined from <link> below are already compiled.
+    doc.querySelectorAll('style').forEach((style) => {
+      style.textContent = this.compileCss(style.textContent || '', page, missing);
+    });
     doc.querySelectorAll('link').forEach((link) => {
       const rel = (link.getAttribute('rel') || '').toLowerCase().split(/\s+/);
       const href = link.getAttribute('href') || '';
@@ -468,9 +479,6 @@ export class HtmlBundleRenderer {
         missing.add(resolved.kind === 'local' ? resolved.path : href);
       }
       link.remove();
-    });
-    doc.querySelectorAll('style').forEach((style) => {
-      style.textContent = this.compileCss(style.textContent || '', page, missing);
     });
 
     for (const el of Array.from(doc.querySelectorAll('*'))) {

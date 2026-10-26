@@ -629,6 +629,11 @@ the prefix. That asymmetry is behind every problem below.
   reach your dev server at all. Use the relative `../<session_id>/` form above to address
   a session deliberately.
 
+## artifact — create / read / download artifacts
+- `artifact list [--kind <k>] [--project <id>] [--task <id>] [--chain <id>] [--limit <n>]`, `artifact show <id> [--with-content]`, `artifact content <id>`, `artifact download <id> --dir <dir>`.
+- `artifact create --name <n> [--kind <k>] (--content <text> | --file <path> | --stdin)`: a single-file artifact (sealed with your vault key).
+- `artifact create --name <n> --kind html-bundle (--directory <dir> | --file <bundle.zip>) [--entry <page.html>]`: a static multi-page site (HTML/CSS/local images/fonts, **no JavaScript, no remote resources**) that the user browses in the Artifact Viewer. Relative paths are kept, symlinks are skipped, and `heimdall-artifact.json` (`{"format_version":1,"entrypoint":…}`) is generated or validated. The entry is `--entry` (must match an existing manifest), else `index.html`, else the only HTML file. Limits: 10 MiB archive, 50 MiB expanded, 1000 files, 10 MiB per file. Format: `docs/html-bundle-artifacts.md`.
+
 ## memory — durable memories
 - `memory list [--agent-ids <id,...>] [--project-ids <id,...>] [--bridge-ids <id,...>] [--template-ids <id,...>] [--status <s>] [--type <t>] [--limit <n>]` — list memories (metadata only).
 - `memory show <memory-id>` — full memory details (body + evidence).

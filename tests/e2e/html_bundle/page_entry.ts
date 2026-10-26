@@ -1,0 +1,78 @@
+// Browser half of the html-bundle preview check: the same compiler and iframe
+// attributes as src/ui/components/HtmlBundlePreview.tsx.
+import { HtmlBundleRenderer, readHtmlBundle } from '../../../src/ui/utils/htmlBundle.ts';
+
+const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+(window as any).__runBundleChecks = async (zipBase64: string) => {
+  const bytes = Uint8Array.from(atob(zipBase64), (c) => c.charCodeAt(0));
+  const bundle = await readHtmlBundle(bytes);
+  const renderer = new HtmlBundleRenderer(bundle);
+  const iframe = document.createElement('iframe');
+  iframe.setAttribute('sandbox', 'allow-same-origin');
+  iframe.setAttribute('referrerpolicy', 'no-referrer');
+  iframe.setAttribute('allow', '');
+  iframe.style.cssText = 'width:800px;height:400px';
+  document.body.appendChild(iframe);
+  let current = '';
+  const nav: string[] = [];
+  const show = (page: string, fragment = '') => new Promise<void>((resolve) => {
+    current = page;
+    nav.push(fragment ? `${page}#${fragment}` : page);
+    iframe.onload = () => {
+      const doc = iframe.contentDocument!;
+      doc.addEventListener('click', (event) => {
+        const a = (event.target as Element).closest?.('a[data-hb-page]');
+        if (!a) return;
+        event.preventDefault();
+        const next = a.getAttribute('data-hb-page')!;
+        if (renderer.hasPage(next)) void show(next, a.getAttribute('data-hb-fragment') || '');
+      });
+      if (fragment) doc.getElementById(fragment)?.scrollIntoView();
+      resolve();
+    };
+    iframe.srcdoc = renderer.compilePage(page).html;
+  });
+  const r: Record<string, unknown> = {};
+  await show(bundle.entry);
+  await wait(400);
+  const d = iframe.contentDocument!;
+  const w = iframe.contentWindow as any;
+  r.pages = bundle.pages;
+  r.missingOnEntry = renderer.compilePage(bundle.entry).missing;
+  r.nestedImageLoaded = (d.getElementById('logo') as HTMLImageElement).naturalWidth === 1;
+  r.rootPathImageLoaded = (d.getElementById('rootimg') as HTMLImageElement).naturalWidth === 1;
+  r.srcsetRewritten = (d.getElementById('logo') as HTMLImageElement).getAttribute('srcset')?.startsWith('blob:') === true;
+  r.remoteImageRemoved = !(d.getElementById('remote') as HTMLImageElement).getAttribute('src');
+  r.linkedCssApplied = getComputedStyle(d.body).color === 'rgb(0, 0, 255)';
+  r.importedCssApplied = getComputedStyle(d.querySelector('h1')!).textTransform === 'uppercase';
+  r.cssUrlImageIsBlob = getComputedStyle(d.getElementById('bg')!).backgroundImage.includes('blob:');
+  await (d as any).fonts?.ready;
+  r.fontLoaded = [...((d as any).fonts || [])].some((f: any) => f.family.includes('BundleFont') && f.status === 'loaded');
+  r.scriptsDisabled = w.__pwned !== true && document.title === 'host';
+  r.noScriptElements = d.querySelectorAll('script').length === 0;
+  r.handlersStripped = !d.querySelector('[onclick],[onerror],[onload]');
+  r.jsUrlStripped = !(d.getElementById('jslink') as HTMLAnchorElement).hasAttribute('href');
+  r.formNeutralized = d.querySelectorAll('form').length === 0;
+  r.externalLinkInert = !(d.getElementById('external') as HTMLAnchorElement).hasAttribute('href');
+  r.cspPresent = !!d.querySelector('meta[http-equiv="Content-Security-Policy"]');
+  (d.getElementById('totop') as HTMLAnchorElement).click();
+  await wait(150);
+  r.fragmentScrolledInPlace = w.scrollY > 1000 && current === 'index.html' && iframe.contentDocument === d;
+  r.parentUrlUnchanged = location.protocol === 'file:' && !location.hash;
+  (d.getElementById('next') as HTMLAnchorElement).click();
+  await wait(400);
+  const d2 = iframe.contentDocument!;
+  r.navigatedToNestedPage = current === 'docs/two.html' && !!d2.getElementById('sec');
+  r.nestedPageScrolledToFragment = (iframe.contentWindow as any).scrollY > 1000;
+  r.nestedPageRelativeCss = getComputedStyle(d2.body).color === 'rgb(0, 0, 255)';
+  (d2.getElementById('back') as HTMLAnchorElement).click();
+  await wait(400);
+  r.navigatedBackViaRootLink = current === 'index.html';
+  r.nav = nav;
+  r.objectUrls = renderer.objectUrlCount;
+  renderer.dispose();
+  r.objectUrlsAfterDispose = renderer.objectUrlCount;
+  r.title = document.title;
+  return r;
+};
