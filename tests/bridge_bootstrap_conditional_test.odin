@@ -12,6 +12,7 @@ import "core:fmt"
 import "core:os"
 import "core:strings"
 import "core:testing"
+import httpc "odin_test:lib/httpc"
 import bridge "odin_test:bridge"
 
 @(test)
@@ -85,9 +86,9 @@ main :: proc() {
 	check(len(hashes) == 3, "must collect all three hashes")
 	check(hashes[0] == "sha256:aaa" && hashes[1] == "sha256:bbb" && hashes[2] == "sha256:ccc", "hashes must be in document order")
 
-	// (5) hash url-encoding: only ':' is percent-encoded.
-	enc := bridge.bridge_bootstrap_url_encode("sha256:abc-123")
-	check(enc == "sha256%3Aabc-123", "url-encode must percent-encode the colon only")
+	// (5) a blob hash is ONE path segment: httpc percent-encodes its ':'.
+	enc, enc_err := httpc.build_target({"api", "v1", "bridge", "blobs", "sha256:abc-123"}, allocator = context.temp_allocator)
+	check(enc_err == .None && enc == "/api/v1/bridge/blobs/sha256%3Aabc-123", "a blob hash must be a single encoded segment")
 
 	// (6) BRG-3 wrapper file-set store + list/file RPC JSON. Seed the disk cache
 	// with the fragment/skill bodies the manifest references, then build the set.

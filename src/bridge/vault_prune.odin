@@ -3,7 +3,7 @@ package main
 import "core:fmt"
 import "core:os"
 import "core:strings"
-import http "odin_test:lib/http_client"
+import httpc "odin_test:lib/httpc"
 
 // ── ham-bridge vault prune (plan P4) ────────────────────────────────────────
 // One machine can hold the vault state of several bridges (one SCOPE per (hub,
@@ -109,9 +109,9 @@ bridge_vault_prune_command :: proc(args: []string) -> bool {
 	scope, _ := keystore_scope_name(bridge_id)
 	verdict := Prune_Verdict.No_Token
 	if strings.trim_space(cfg.bridge_token) != "" {
-		headers := [?]http.Header{{name = "Authorization", value = strings.concatenate({"Bearer ", cfg.bridge_token}, context.temp_allocator)}}
-		resp, sent := http.request_with_headers_timeout("GET", cfg.daemon_url, "/api/v1/bridge/actions", "", headers[:], http.DEFAULT_TIMEOUT_MS)
-		verdict = bridge_prune_verdict(sent, resp.status)
+		headers := [?]httpc.Header{httpc.bearer(cfg.bridge_token)}
+		resp, err := httpc.send({method = .GET, url = bridge_hub_url(cfg.daemon_url), path = {"api", "v1", "bridge", "actions"}, headers = headers[:]}, context.temp_allocator)
+		verdict = bridge_prune_verdict(err == .None, resp.status)
 	}
 	fmt.printfln("\n%s (hub %s, scope %s): %s", bridge_id, bridge_keystore_hub(), scope, prune_verdict_string(verdict))
 	if !has_flag(args, "--remove") do return true

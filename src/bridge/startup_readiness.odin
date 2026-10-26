@@ -6,7 +6,8 @@ import "core:strings"
 import "core:sync"
 import "core:thread"
 import "core:time"
-import http "odin_test:lib/http_client"
+import "core:encoding/json"
+import httpc "odin_test:lib/httpc"
 import contracts "odin_test:contracts"
 
 // All state belongs to one token issuance/launch, not to an extension session
@@ -220,17 +221,19 @@ bridge_startup_receipt_key :: proc(rec: Bridge_Local_Agent_Token_Record, fallbac
 bridge_startup_relay :: proc(rec: Bridge_Local_Agent_Token_Record, timeout_ms: int) -> Bridge_Startup_Relay_Result {
     if rec.instance_token == "" do return {error = contracts.wire_error(.Unauthenticated)}
     if !sync.atomic_load(&bridge_hub_runtime_up) do return {error = contracts.wire_error(.Bridge_Offline)}
-    params := fmt.tprintf("{{\"run_count\":%d}}", rec.run_count)
-    body := bridge_local_agent_relay_body("agent.start_success", params, rec.agent_instance_id)
-    defer delete(body)
+    params := make(json.Object, 1, context.temp_allocator)
+    params["run_count"] = json.Integer(rec.run_count)
+    envelope := Bridge_Agent_Relay_Envelope{method = "agent.start_success", agent_instance_id = rec.agent_instance_id, params = params}
     credential := bridge_credential_snapshot()
     defer delete(credential)
-    auth := strings.concatenate({"Bearer ", credential})
-    defer delete(auth)
-    headers := [?]http.Header{{name = "Authorization", value = auth}, {name = "X-Heimdall-Instance-Token", value = rec.instance_token}}
-    resp, ok := http.request_with_headers_deadline("POST", bridge_config.daemon_url, "/api/v1/agent-actions/start-success", body, headers[:], timeout_ms)
-    defer delete(resp.body)
-    return {ok = ok && resp.status >= 200 && resp.status < 300, error = bridge_operation_http_error(resp, ok, bridge_config.daemon_url)}
+    headers := [?]httpc.Header{httpc.bearer(credential), {name = "X-Heimdall-Instance-Token", value = rec.instance_token}}
+    resp, err := httpc.send({
+        method = .POST, url = bridge_hub_url(), path = {"api", "v1", "agent-actions", "start-success"},
+        headers = headers[:], body = httpc.json_body(envelope), timeout_ms = bridge_deadline_ms(timeout_ms),
+    })
+    defer httpc.response_destroy(&resp)
+    ok := err == .None
+    return {ok = ok && resp.status >= 200 && resp.status < 300, error = bridge_operation_http_error(resp, ok)}
 }
 
 bridge_startup_deliver :: proc(instance_id: string, timeout_ms: int) -> bool {

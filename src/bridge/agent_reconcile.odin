@@ -4,7 +4,7 @@ import "core:encoding/json"
 import "core:fmt"
 import "core:strings"
 import "core:sync"
-import http "odin_test:lib/http_client"
+import httpc "odin_test:lib/httpc"
 
 @(private = "file")
 _bridge_agent_reconcile_running: bool
@@ -179,24 +179,21 @@ bridge_agent_instance_reconcile_now :: proc() {
 	if !list_ok do return
 	defer pty_host_reply_delete(reply)
 
-	headers := make([dynamic]http.Header)
-	defer delete(headers)
 	credential_snapshot_181 := bridge_credential_snapshot()
 	defer delete(credential_snapshot_181)
-	auth_header := strings.concatenate({"Bearer ", credential_snapshot_181})
-	defer delete(auth_header)
-	append(&headers, http.Header{name = "Authorization", value = auth_header})
+	headers := [?]httpc.Header{httpc.bearer(credential_snapshot_181)}
 
-	bridge_id := bridge_config.daemon_id
-	path := fmt.tprintf("/api/v1/agent-instances?bridge_id=%s&limit=200", bridge_id)
-	resp, ok := bridge_http_request_retry("GET", bridge_config.daemon_url, path, "", headers[:], http.DEFAULT_TIMEOUT_MS)
-	if !ok do return
-	defer delete(resp.body)
+	resp, http_err := bridge_http_request_retry({
+		method = .GET, url = bridge_hub_url(), path = {"api", "v1", "agent-instances"},
+		query = {{"bridge_id", bridge_config.daemon_id}, {"limit", "200"}}, headers = headers[:],
+	})
+	defer httpc.response_destroy(&resp)
+	if http_err != .None do return
 
 	// If HTTP request fails or returns non-200, return early without reaping (fail-safe)
 	if resp.status != 200 do return
 
-	hub_instances, parse_ok := bridge_agent_instance_extract_hub_instances(resp.body)
+	hub_instances, parse_ok := bridge_agent_instance_extract_hub_instances(httpc.text(resp))
 	if !parse_ok do return
 	defer bridge_agent_instance_delete_hub_instances(&hub_instances)
 

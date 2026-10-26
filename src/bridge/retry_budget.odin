@@ -2,7 +2,7 @@ package main
 
 import "core:time"
 import contracts "odin_test:contracts"
-import http "odin_test:lib/http_client"
+import httpc "odin_test:lib/httpc"
 
 BRIDGE_OPERATION_ATTEMPTS :: 6
 BRIDGE_OPERATION_DEADLINE_MS :: i64(120_000)
@@ -68,10 +68,9 @@ bridge_operation_timeout_ms :: proc(b: Bridge_Operation_Budget, wall_ms: i64, ti
 }
 // Retain the hub's typed class, even when it differs from the HTTP status class.
 // Strings from the error body remain caller-owned and are never journalled.
-bridge_operation_http_error :: proc(resp: http.Response, ok: bool, base_url := "") -> contracts.Wire_Error {
-    if !ok && base_url != "" && !http.deadline_supported(base_url) do return contracts.wire_error(.Not_Implemented)
+bridge_operation_http_error :: proc(resp: httpc.Response, ok: bool) -> contracts.Wire_Error {
     if ok {
-        if err, found := contracts.wire_error_parse(resp.body, context.temp_allocator); found do return err
+        if err, found := contracts.wire_error_parse(httpc.text(resp), context.temp_allocator); found do return err
     }
     err := contracts.wire_error(.Bridge_Timeout)
     if ok {

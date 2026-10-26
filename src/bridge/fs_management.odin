@@ -468,10 +468,11 @@ BRIDGE_FS_READ_PAGE_BYTES_SOCAT :: 131_072
 
 // bridge_tls_backend_is_socat reports whether the bridge->hub TLS transport uses
 // socat (the default) rather than the legacy `openssl s_client` fallback. Mirrors
-// the HAM_TLS_BACKEND toggle read by the two argv builders (src/lib/ws/ws.odin and
-// src/lib/http_client/http_client.odin): only the exact value "s_client" selects
+// the HAM_TLS_BACKEND toggle read by the WebSocket transport's relay argv builder
+// (src/lib/tls_stream, used by src/lib/ws): only the exact value "s_client" selects
 // the legacy path; anything else (unset/empty/"socat"/unknown) means socat. SHARED
-// CONTRACT — keep this rule identical to those builders.
+// CONTRACT — keep this rule identical to that builder. Outbound HTTP (src/lib/httpc,
+// libcurl) is not affected by HAM_TLS_BACKEND.
 bridge_tls_backend_is_socat :: proc() -> bool {
 	backend := strings.to_lower(strings.trim_space(os.get_env("HAM_TLS_BACKEND", context.temp_allocator)))
 	return backend != "s_client"

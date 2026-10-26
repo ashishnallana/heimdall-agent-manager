@@ -1,11 +1,12 @@
 package main
 
 import "core:fmt"
+import "core:strconv"
 import "core:strings"
 import "core:sync"
 import "core:thread"
 import "core:time"
-import http "odin_test:lib/http_client"
+import httpc "odin_test:lib/httpc"
 import vault "odin_test:lib/vault"
 
 TASK_CHAIN_SEARCH_REFRESH_SECONDS :: 30
@@ -70,22 +71,19 @@ bridge_hub_task_chain_document_fetch :: proc(after_revision: i64) -> (body: stri
 	credential_snapshot_69 := bridge_credential_snapshot()
 	defer delete(credential_snapshot_69)
 	if strings.trim_space(bridge_config.daemon_url) == "" || strings.trim_space(credential_snapshot_69) == "" do return "", false
-	// This value crosses into the HTTP client and is explicitly freed below, so it
-	// must use the heap allocator. fmt.tprintf uses the temporary allocator; deleting
-	// that pointer aborted the live Bridge on its first search refresh.
-	path := fmt.aprintf("/api/v1/bridge/task-chain-search/documents?after_revision=%d&limit=500", after_revision)
-	defer delete(path)
 	credential_snapshot_75 := bridge_credential_snapshot()
 	defer delete(credential_snapshot_75)
-	auth := strings.concatenate({"Bearer ", credential_snapshot_75})
-	defer delete(auth)
-	headers := [?]http.Header{{name = "Authorization", value = auth}}
-	resp, sent := bridge_http_request_retry("GET", bridge_config.daemon_url, path, "", headers[:], http.DEFAULT_TIMEOUT_MS)
-	if !sent || resp.status != 200 {
-		delete(resp.body)
-		return "", false
-	}
-	return resp.body, true
+	headers := [?]httpc.Header{httpc.bearer(credential_snapshot_75)}
+	revision_buf: [32]byte
+	revision := strconv.write_int(revision_buf[:], after_revision, 10)
+	resp, err := bridge_http_request_retry({
+		method = .GET, url = bridge_hub_url(), path = {"api", "v1", "bridge", "task-chain-search", "documents"},
+		query = {{"after_revision", revision}, {"limit", "500"}}, headers = headers[:],
+	})
+	defer httpc.response_destroy(&resp)
+	if err != .None || resp.status != 200 do return "", false
+	// The caller owns (and frees) the returned body.
+	return strings.clone(httpc.text(resp)), true
 }
 
 // The sole storage seam. A future Bridge-primary store can replace this source

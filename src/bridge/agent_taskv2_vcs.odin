@@ -218,7 +218,7 @@ bridge_taskv2_enrich_lease_params :: proc(method, params: string, rec: Bridge_Lo
 // with identical error mapping (mirrors the .Envelope branch of the dispatcher).
 // On a non-peek `agent.lease.next` (or `agent.lease.switch`) that returns a
 // `pack`, materializes `<run_dir>/TASK.md`.
-bridge_agent_lease_local_rpc :: proc(request_id, method, hub_path, params: string, rec: Bridge_Local_Agent_Token_Record) -> string {
+bridge_agent_lease_local_rpc :: proc(request_id, method: string, hub_path: []string, params: string, rec: Bridge_Local_Agent_Token_Record) -> string {
 	if strings.trim_space(rec.instance_token) == "" do return bridge_local_response_error(request_id, "unavailable", "Bridge-held instance token is unavailable")
 	// The hub is down (no runtime session): nothing is sent, so the caller can
 	// safely retry. A relay failure after sending stays retryable_unavailable —

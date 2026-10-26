@@ -1,7 +1,7 @@
 package main
 import "core:testing"
 import "core:fmt"
-import http "odin_test:lib/http_client"
+import httpc "odin_test:lib/httpc"
 import "base:runtime"
 import "core:strings"
 import "core:sync"
@@ -62,14 +62,12 @@ action_snapshot_heartbeat_freshness_and_failed_budget_survive_reconnect :: proc(
 snapshot_test_calls: int
 snapshot_test_status: int
 snapshot_test_invalidations: bool
-snapshot_test_fetch :: proc(method, base_url, path, body: string, headers: []http.Header, timeout_ms: int) -> (http.Response, bool) {
+snapshot_test_fetch :: proc(req: httpc.Request) -> (httpc.Response, httpc.Error) {
     snapshot_test_calls += 1
-    if snapshot_test_status == 401 do return {status = 401, body = strings.clone(`{"error":{"code":"unauthenticated","class":"recoverable"}}`)}, true
-    for h in headers {
-        if h.name == "If-None-Match" && !snapshot_test_invalidations do return {status = 304}, true
-    }
+    if snapshot_test_status == 401 do return hub_test_response(401, `{"error":{"code":"unauthenticated","class":"recoverable"}}`), .None
+    if hub_test_has_header(req, "If-None-Match") && !snapshot_test_invalidations do return hub_test_response(304), .None
     if snapshot_test_invalidations do bridge_action_scheduler_notify_snapshot("e", 1, bridge_runtime_now_ms())
-    return {status = 200, body = strings.clone(`{"snapshot":{"epoch":"e","revision":0,"etag":"W/\"e:0\""},"data":[]}`)}, true
+    return hub_test_response(200, `{"snapshot":{"epoch":"e","revision":0,"etag":"W/\"e:0\""},"data":[]}`), .None
 }
 @(test)
 action_sync_idle_day_has_only_initial_and_daily_get :: proc(t: ^testing.T) {

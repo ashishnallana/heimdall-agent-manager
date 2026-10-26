@@ -6,7 +6,7 @@ import "core:strings"
 import "core:sync"
 import "core:time"
 import contracts "odin_test:contracts"
-import http "odin_test:lib/http_client"
+import httpc "odin_test:lib/httpc"
 
 BRIDGE_RETRY_MAX_ATTEMPTS :: 4
 BRIDGE_RETRY_BASE_BACKOFF_MS :: 150
@@ -94,18 +94,19 @@ bridge_http_is_retriable :: proc(status: int, ok: bool) -> bool {
 
 // bridge_http_response_is_retriable prefers the class the hub put in its error
 // envelope (REQ-ERR-PROTO-A) and falls back to the status mapping above.
-bridge_http_response_is_retriable :: proc(resp: http.Response, ok: bool) -> bool {
+bridge_http_response_is_retriable :: proc(resp: httpc.Response, ok: bool) -> bool {
 	if ok && resp.status >= 400 {
-		if werr, found := contracts.wire_error_parse(resp.body, context.temp_allocator); found do return werr.class == .retriable
+		if werr, found := contracts.wire_error_parse(httpc.text(resp), context.temp_allocator); found do return werr.class == .retriable
 	}
 	return bridge_http_is_retriable(resp.status, ok)
 }
 
 // bridge_http_method_idempotent: repeating the request cannot apply it twice
 // (RFC 9110 §9.2.2).
-bridge_http_method_idempotent :: proc(method: string) -> bool {
+bridge_http_method_idempotent :: proc(method: httpc.Method) -> bool {
 	switch method {
-	case "GET", "HEAD", "OPTIONS", "PUT", "DELETE": return true
+	case .GET, .HEAD, .PUT, .DELETE: return true
+	case .POST, .PATCH: return false
 	}
 	return false
 }
@@ -116,19 +117,19 @@ bridge_http_method_idempotent :: proc(method: string) -> bool {
 // 5xx (a launch that ran twice, an action executed twice, a comment posted twice),
 // so it is repeated only when the hub refused it before doing anything: 429, or
 // 503 with a typed busy/rate-limited error.
-bridge_http_attempt_retriable :: proc(method: string, resp: http.Response, ok: bool) -> bool {
+bridge_http_attempt_retriable :: proc(method: httpc.Method, resp: httpc.Response, ok: bool) -> bool {
 	if bridge_http_method_idempotent(method) do return bridge_http_response_is_retriable(resp, ok)
 	if !ok do return false
 	if resp.status == 429 do return true
 	if resp.status != 503 do return false
-	werr, found := contracts.wire_error_parse(resp.body, context.temp_allocator)
+	werr, found := contracts.wire_error_parse(httpc.text(resp), context.temp_allocator)
 	return found && (werr.code == .Bridge_Busy || werr.code == .Rate_Limited)
 }
 
 // bridge_http_retry_after_ms is the hub's back-off floor for a refused attempt.
-bridge_http_retry_after_ms :: proc(resp: http.Response, ok: bool) -> i64 {
+bridge_http_retry_after_ms :: proc(resp: httpc.Response, ok: bool) -> i64 {
 	if !ok || resp.status < 400 do return 0
-	werr, found := contracts.wire_error_parse(resp.body, context.temp_allocator)
+	werr, found := contracts.wire_error_parse(httpc.text(resp), context.temp_allocator)
 	return werr.retry_after_ms if found else 0
 }
 
@@ -158,53 +159,57 @@ bridge_http_backoff_sleep :: proc(attempt: int, base_ms: int = BRIDGE_RETRY_BASE
 // bridge_http_request_retry issues an HTTP request with bounded retry and jittered
 // exponential backoff (floored by the hub's retry_after_ms) for attempts that may be
 // repeated (bridge_http_attempt_retriable). Anything else returns immediately.
+// req.timeout_ms is the per-attempt budget (0 = httpc default); deadline_ns, when
+// set, caps every attempt and the backoff. The response must be released with
+// httpc.response_destroy.
 bridge_http_request_retry :: proc(
-	method, hub_url, path, body: string,
-	headers: []http.Header,
-	timeout_ms: int = http.DEFAULT_TIMEOUT_MS,
+	req: httpc.Request,
 	max_attempts: int = BRIDGE_RETRY_MAX_ATTEMPTS,
 	base_backoff_ms: int = BRIDGE_RETRY_BASE_BACKOFF_MS,
 	deadline_ns: i64 = 0,
-) -> (http.Response, bool) {
-	resp: http.Response
-	ok := false
+	fetch: Bridge_Hub_Fetch = bridge_hub_http_send,
+) -> (httpc.Response, httpc.Error) {
+	resp: httpc.Response
+	err := httpc.Error.Timeout
+	method := httpc.method_name(req.method)
+	label := bridge_http_request_label(req)
 	for attempt in 1..=max_attempts {
-		attempt_timeout_ms := timeout_ms
+		attempt_req := req
+		if attempt_req.timeout_ms <= 0 do attempt_req.timeout_ms = httpc.DEFAULT_TIMEOUT_MS
 		if deadline_ns > 0 {
 			remaining_ns := deadline_ns - time.to_unix_nanoseconds(time.now())
 			if remaining_ns <= 0 {
 				if attempt > 1 do sync.atomic_add(&bridge_http_retry_metrics.gave_up, 1)
-				return resp, false
+				httpc.response_destroy(&resp)
+				return {}, .Timeout
 			}
 			remaining_ms := int(remaining_ns / i64(time.Millisecond))
 			if remaining_ms < 1 do remaining_ms = 1
-			attempt_timeout_ms = min(attempt_timeout_ms, remaining_ms)
+			attempt_req.timeout_ms = min(attempt_req.timeout_ms, remaining_ms)
 		}
-		resp, ok = http.request_with_headers_timeout(method, hub_url, path, body, headers, attempt_timeout_ms)
-		if !bridge_http_attempt_retriable(method, resp, ok) {
+		httpc.response_destroy(&resp)
+		resp, err = fetch(attempt_req)
+		ok := err == .None
+		if !bridge_http_attempt_retriable(req.method, resp, ok) {
 			// Log the terminal outcome when it followed at least one retry, so a
 			// retried-then-succeeded (or retried-then-failed-hard) sequence is
 			// visible in the log rather than trailing off at the last "retry" line.
 			if attempt > 1 {
 				succeeded := ok && resp.status >= 200 && resp.status < 300
 				sync.atomic_add(&bridge_http_retry_metrics.recovered if succeeded else &bridge_http_retry_metrics.gave_up, 1)
-				fmt.println("bridge http retry DONE", "method=", method, "path=", path, "attempts=", attempt, "final_status=", resp.status, "ok=", ok, "outcome=", succeeded ? "succeeded_after_retry" : "failed_terminal")
+				fmt.println("bridge http retry DONE", "method=", method, "path=", label, "attempts=", attempt, "final_status=", resp.status, "ok=", ok, "outcome=", succeeded ? "succeeded_after_retry" : "failed_terminal")
 			}
-			return resp, ok
+			return resp, err
 		}
 		if attempt < max_attempts {
-			fmt.println("bridge http retry", "method=", method, "path=", path, "attempt=", attempt, "status=", resp.status, "ok=", ok)
+			fmt.println("bridge http retry", "method=", method, "path=", label, "attempt=", attempt, "status=", resp.status, "ok=", ok, "error=", httpc.error_string(err))
 			// Jittered so bridges refused together do not retry together, and never
 			// sooner than the hub asked (retry_after_ms).
 			retry_after_ms := bridge_http_retry_after_ms(resp, ok)
 			if retry_after_ms > BRIDGE_RETRY_AFTER_MAX_MS {
 				sync.atomic_add(&bridge_http_retry_metrics.deferred, 1)
-				fmt.println("bridge http retry DEFERRED", "method=", method, "path=", path, "retry_after_ms=", retry_after_ms)
-				return resp, ok
-			}
-			if resp.body != "" {
-				delete(resp.body)
-				resp.body = ""
+				fmt.println("bridge http retry DEFERRED", "method=", method, "path=", label, "retry_after_ms=", retry_after_ms)
+				return resp, err
 			}
 			backoff_ms := int(max(bridge_backoff_delay_ms(Bridge_Backoff_Policy{base_ms = i64(base_backoff_ms), jitter_pct = 20}, attempt, rand.uint64()), retry_after_ms))
 			if deadline_ns > 0 {
@@ -212,7 +217,8 @@ bridge_http_request_retry :: proc(
 				remaining_ms := int(remaining_ns / i64(time.Millisecond))
 				if remaining_ms <= 0 {
 					if attempt > 1 do sync.atomic_add(&bridge_http_retry_metrics.gave_up, 1)
-					return resp, false
+					httpc.response_destroy(&resp)
+					return {}, .Timeout
 				}
 				backoff_ms = min(backoff_ms, remaining_ms)
 			}
@@ -222,6 +228,14 @@ bridge_http_request_retry :: proc(
 	}
 	// All attempts were retriable and none terminal-succeeded: retries exhausted.
 	if max_attempts > 1 do sync.atomic_add(&bridge_http_retry_metrics.gave_up, 1)
-	fmt.println("bridge http retry EXHAUSTED", "method=", method, "path=", path, "attempts=", max_attempts, "final_status=", resp.status, "ok=", ok)
-	return resp, ok
+	fmt.println("bridge http retry EXHAUSTED", "method=", method, "path=", label, "attempts=", max_attempts, "final_status=", resp.status, "ok=", err == .None)
+	return resp, err
+}
+
+// bridge_http_request_label renders the request target for log lines (never
+// the base URL's credentials: parse_url rejects userinfo anyway).
+bridge_http_request_label :: proc(req: httpc.Request) -> string {
+	if req.relay_target != "" do return req.relay_target
+	target, err := httpc.build_target(req.path, req.query, context.temp_allocator)
+	return target if err == .None else "?"
 }

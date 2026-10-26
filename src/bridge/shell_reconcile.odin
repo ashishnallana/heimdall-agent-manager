@@ -5,7 +5,7 @@ import "core:fmt"
 import "core:os"
 import "core:strings"
 import "core:sync"
-import http "odin_test:lib/http_client"
+import httpc "odin_test:lib/httpc"
 
 @(private = "file")
 _bridge_shell_orphan_reconcile_running: bool
@@ -146,23 +146,21 @@ bridge_shell_orphan_reconcile_now :: proc() {
 	if !list_ok do return
 	defer pty_host_reply_delete(reply)
 
-	headers := make([dynamic]http.Header)
-	defer delete(headers)
 	credential_snapshot_148 := bridge_credential_snapshot()
 	defer delete(credential_snapshot_148)
-	auth_header := strings.concatenate({"Bearer ", credential_snapshot_148})
-	defer delete(auth_header)
-	append(&headers, http.Header{name = "Authorization", value = auth_header})
+	headers := [?]httpc.Header{httpc.bearer(credential_snapshot_148)}
 
-	path := fmt.tprintf("/api/v1/bridges/%s/shells?status=running", bridge_config.daemon_id)
-	resp, ok := bridge_http_request_retry("GET", bridge_config.daemon_url, path, "", headers[:], http.DEFAULT_TIMEOUT_MS)
-	if !ok do return
-	defer delete(resp.body)
+	resp, http_err := bridge_http_request_retry({
+		method = .GET, url = bridge_hub_url(), path = {"api", "v1", "bridges", bridge_config.daemon_id, "shells"},
+		query = {{"status", "running"}}, headers = headers[:],
+	})
+	defer httpc.response_destroy(&resp)
+	if http_err != .None do return
 
 	// If HTTP request fails or returns non-200, return early without reaping (fail-safe)
 	if resp.status != 200 do return
 
-	active_hub_ids, parse_ok := bridge_shell_extract_active_ids(resp.body)
+	active_hub_ids, parse_ok := bridge_shell_extract_active_ids(httpc.text(resp))
 	if !parse_ok do return
 	defer bridge_shell_delete_active_ids(&active_hub_ids)
 

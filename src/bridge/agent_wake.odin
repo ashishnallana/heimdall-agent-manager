@@ -5,7 +5,7 @@ import "core:time"
 import "core:math/rand"
 import "core:strings"
 import "core:sync"
-import http "odin_test:lib/http_client"
+import httpc "odin_test:lib/httpc"
 
 // Bridge-side agent wake machinery. The hub pushes work (leases, notices) to the
 // bridge via wake_agent / notify frames; when the target instance is not live
@@ -300,30 +300,31 @@ bridge_wake_fetch_enriched_launch_json :: proc(instance_id, command_id: string, 
 	credential_snapshot_298 := bridge_credential_snapshot()
 	defer delete(credential_snapshot_298)
 	if strings.trim_space(bridge_config.daemon_url) == "" || strings.trim_space(credential_snapshot_298) == "" do return "", bridge_error(.hub_connect_failed, .config), false
-	path := strings.concatenate({"/api/v1/bridge/agent-instances/", instance_id, "/bootstrap?format=manifest"})
-	defer delete(path)
 	credential_snapshot_301 := bridge_credential_snapshot()
 	defer delete(credential_snapshot_301)
-	auth := strings.concatenate({"Bearer ", credential_snapshot_301})
-	defer delete(auth)
-	headers := [?]http.Header{{name = "Authorization", value = auth}}
-	resp: http.Response
-    ok: bool
+	headers := [?]httpc.Header{httpc.bearer(credential_snapshot_301)}
+	req := httpc.Request{
+		method = .GET, url = bridge_hub_url(), path = {"api", "v1", "bridge", "agent-instances", instance_id, "bootstrap"},
+		query = {{"format", "manifest"}}, headers = headers[:],
+	}
+	resp: httpc.Response
+    http_err: httpc.Error
     if deadline_ns != 0 {
         left := (deadline_ns - time.to_unix_nanoseconds(time.now())) / i64(time.Millisecond)
         if left <= 0 do return "", bridge_error(.hub_connect_failed, .transport), false
-        resp, ok = http.request_with_headers_deadline("GET", bridge_config.daemon_url, path, "", headers[:], int(min(10_000, left)))
+        req.timeout_ms = int(min(10_000, left))
+        resp, http_err = httpc.send(req)
     } else {
-        resp, ok = bridge_http_request_retry("GET", bridge_config.daemon_url, path, "", headers[:], http.DEFAULT_TIMEOUT_MS)
+        resp, http_err = bridge_http_request_retry(req)
     }
+	defer httpc.response_destroy(&resp)
+	ok := http_err == .None
 	if !ok || resp.status != 200 {
-		delete(resp.body)
 		if !ok || resp.status == 0 do return "", bridge_error(.hub_connect_failed, .transport), false
 		return "", bridge_error(.hub_rejected, .other, resp.status), false
 	}
-	defer delete(resp.body)
 	// data_obj/inst_obj are ALIASES into resp.body (not owned clones) -- do not free.
-	data_obj, data_ok := bridge_provider_json_extract_object(resp.body, "data")
+	data_obj, data_ok := bridge_provider_json_extract_object(httpc.text(resp), "data")
 	if !data_ok do return "", bridge_error(.agent_bootstrap_invalid), false
 	inst_obj, inst_ok := bridge_provider_json_extract_object(data_obj, "instance")
 	if !inst_ok do return "", bridge_error(.agent_bootstrap_invalid), false

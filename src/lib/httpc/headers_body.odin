@@ -25,6 +25,15 @@ accept_json :: proc() -> Header {
 	return Header{name = "Accept", value = CONTENT_TYPE_JSON}
 }
 
+// if_none_match is "If-None-Match: <entity-tag>". A bare tag is sent as a
+// strong entity tag ("tag"); a value that is already an entity tag ("..." or
+// W/"...") is sent unchanged. Temp-allocated.
+if_none_match :: proc(tag: string) -> Header {
+	if strings.has_prefix(tag, "\"") || strings.has_prefix(tag, "W/\"") do return Header{name = "If-None-Match", value = tag}
+	parts := [3]string{"\"", tag, "\""}
+	return Header{name = "If-None-Match", value = strings.concatenate(parts[:], context.temp_allocator)}
+}
+
 user_agent :: proc(value: string) -> Header {
 	return Header{name = "User-Agent", value = value}
 }

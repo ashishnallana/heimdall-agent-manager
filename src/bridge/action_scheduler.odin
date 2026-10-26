@@ -11,7 +11,7 @@ import "core:thread"
 import "core:time"
 import "core:time/datetime"
 import "core:time/timezone"
-import http "odin_test:lib/http_client"
+import httpc "odin_test:lib/httpc"
 
 // Bridge action scheduler engine (AC-3).
 //
@@ -78,7 +78,7 @@ Bridge_Action_Scheduler_State :: struct {
     suspended: bool,
 }
 
-Action_Scheduler_Fetch :: #type proc(method, base_url, path, body: string, headers: []http.Header, timeout_ms: int) -> (http.Response, bool)
+Action_Scheduler_Fetch :: Bridge_Hub_Fetch
 
 bridge_action_sched_state: Bridge_Action_Scheduler_State
 
@@ -657,7 +657,7 @@ bridge_action_scheduler_sync_key :: proc() -> string {
     return fmt.aprintf("sync:%s:%s", bridge_config.daemon_url, bridge_config.daemon_id)
 }
 
-bridge_action_scheduler_sync :: proc(fetch := http.request_with_headers_deadline, now_override: i64 = 0) -> bool {
+bridge_action_scheduler_sync :: proc(fetch: Action_Scheduler_Fetch = bridge_hub_http_send, now_override: i64 = 0) -> bool {
     now := now_override if now_override > 0 else bridge_runtime_now_ms()
     s := &bridge_action_sched_state
     sync.mutex_lock(&s.mutex)
@@ -685,15 +685,18 @@ bridge_action_scheduler_sync :: proc(fetch := http.request_with_headers_deadline
     sync.mutex_lock(&s.mutex); s.last_request_ms = now; sync.mutex_unlock(&s.mutex)
     credential := bridge_credential_snapshot()
     defer delete(credential)
-    auth := strings.concatenate({"Bearer ", credential})
-    defer delete(auth)
-    headers := make([dynamic]http.Header, context.temp_allocator)
-    append(&headers, http.Header{name = "Authorization", value = auth})
-    if etag != "" do append(&headers, http.Header{name = "If-None-Match", value = etag})
-    resp, ok := fetch("GET", bridge_config.daemon_url, "/api/v1/bridge/actions", "", headers[:], bridge_operation_timeout_ms(budget, now))
-    defer delete(resp.body)
+    headers := make([dynamic]httpc.Header, context.temp_allocator)
+    append(&headers, httpc.bearer(credential))
+    if etag != "" do append(&headers, httpc.Header{name = "If-None-Match", value = etag})
+    resp, http_err := fetch({
+        method = .GET, url = bridge_hub_url(), path = {"api", "v1", "bridge", "actions"},
+        headers = headers[:], timeout_ms = bridge_deadline_ms(bridge_operation_timeout_ms(budget, now)),
+    })
+    defer httpc.response_destroy(&resp)
+    ok := http_err == .None
+    body := httpc.text(resp)
     success := false
-    err := bridge_operation_http_error(resp, ok, bridge_config.daemon_url)
+    err := bridge_operation_http_error(resp, ok)
     defer {
         finished := bridge_retry_finish(key, bridge_runtime_now_ms(), success, err)
         sync.mutex_lock(&s.mutex); s.sync_state = finished.state; sync.mutex_unlock(&s.mutex)
@@ -715,7 +718,7 @@ bridge_action_scheduler_sync :: proc(fetch := http.request_with_headers_deadline
         sync.mutex_unlock(&s.mutex)
         return success
     }
-    if action_scheduler_feature_disabled(resp.status, resp.body) {
+    if action_scheduler_feature_disabled(resp.status, body) {
         // Authoritative disable: an answer, not a transport failure, so it does not
         // spend retry budget; the next heartbeat token change (re-enable) resyncs.
         sync.mutex_lock(&s.mutex)
@@ -725,9 +728,9 @@ bridge_action_scheduler_sync :: proc(fetch := http.request_with_headers_deadline
         return false
     }
     if resp.status != 200 do return false
-    metadata, candidate, parsed := action_snapshot_candidate(resp.body, now)
+    metadata, candidate, parsed := action_snapshot_candidate(body, now)
     if !parsed {
-        if extract_json_string(resp.body, "epoch", "") == "" do err = contracts.wire_error(.Not_Implemented)
+        if extract_json_string(body, "epoch", "") == "" do err = contracts.wire_error(.Not_Implemented)
         return false
     }
     installed := false
@@ -816,50 +819,22 @@ bridge_action_scheduler_execute :: proc(action_id: string, next_target_run_at: s
 	if strings.trim_space(credential) == "" || strings.trim_space(bridge_config.daemon_url) == "" {
 		return false, 0, ""
 	}
-	path := fmt.tprintf("/api/v1/bridge/actions/%s/execute", action_id)
-	auth_header := strings.concatenate({"Bearer ", credential})
-	defer delete(auth_header)
-	headers := [?]http.Header{
-		{name = "Authorization", value = auth_header},
-		{name = "Content-Type", value = "application/json"},
+	// last_spawned_instance_id is sent only for fresh_per_run fires so the hub
+	// records it (REQ-SCHED-2); empty fields are omitted.
+	Execute_Body :: struct {
+		target_run_at:            string `json:"target_run_at,omitempty"`,
+		instance_id:              string `json:"instance_id,omitempty"`,
+		last_spawned_instance_id: string `json:"last_spawned_instance_id,omitempty"`,
 	}
-	// Build the JSON body WITHOUT fmt.tprintf: Odin's fmt treats literal '{'/'}'
-	// as format-verb delimiters, so a JSON object literal comes out corrupted
-	// (e.g. "%!(MISSING CLOSE BRACE)target_run_at..."). That corruption made the hub
-	// parse an empty target_run_at and mark cron actions completed while the bridge
-	// kept re-firing them -> the every-minute reschedule loop. All three values are
-	// bridge-generated ids/RFC3339 timestamps (no characters needing JSON escaping),
-	// so plain concatenation into the builder is safe. last_spawned_instance_id is
-	// sent only for fresh_per_run fires so the hub records it (REQ-SCHED-2).
-	sb := strings.builder_make()
-	defer strings.builder_destroy(&sb)
-	strings.write_byte(&sb, '{')
-	need_comma := false
-	if next_target_run_at != "" {
-		strings.write_string(&sb, "\"target_run_at\":\"")
-		strings.write_string(&sb, next_target_run_at)
-		strings.write_byte(&sb, '"')
-		need_comma = true
-	}
-	if instance_id != "" {
-		if need_comma do strings.write_byte(&sb, ',')
-		strings.write_string(&sb, "\"instance_id\":\"")
-		strings.write_string(&sb, instance_id)
-		strings.write_byte(&sb, '"')
-		need_comma = true
-	}
-	if last_spawned_instance_id != "" {
-		if need_comma do strings.write_byte(&sb, ',')
-		strings.write_string(&sb, "\"last_spawned_instance_id\":\"")
-		strings.write_string(&sb, last_spawned_instance_id)
-		strings.write_byte(&sb, '"')
-		need_comma = true
-	}
-	strings.write_byte(&sb, '}')
-	body := strings.to_string(sb)
-	resp, ok := http.request_with_headers_deadline("POST", bridge_config.daemon_url, path, body, headers[:], 10_000)
-	if !ok do return false, 0, ""
-	return resp.status == 200, resp.status, resp.body
+	payload := Execute_Body{target_run_at = next_target_run_at, instance_id = instance_id, last_spawned_instance_id = last_spawned_instance_id}
+	headers := [?]httpc.Header{httpc.bearer(credential)}
+	resp, err := httpc.send({
+		method = .POST, url = bridge_hub_url(), path = {"api", "v1", "bridge", "actions", action_id, "execute"},
+		headers = headers[:], body = httpc.json_body(payload), timeout_ms = 10_000,
+	})
+	defer httpc.response_destroy(&resp)
+	if err != .None do return false, 0, ""
+	return resp.status == 200, resp.status, strings.clone(httpc.text(resp))
 }
 
 bridge_action_scheduler_await_ready :: proc(instance_id: string, max_wait_ms: int = 5000) -> bool {
@@ -930,12 +905,7 @@ bridge_action_scheduler_resolve_or_launch_instance :: proc(due: Action_Queue_Ite
 		return "", false
 	}
 
-	auth_header := strings.concatenate({"Bearer ", credential})
-	defer delete(auth_header)
-	headers := [?]http.Header{
-		{name = "Authorization", value = auth_header},
-		{name = "Content-Type", value = "application/json"},
-	}
+	headers := [?]httpc.Header{httpc.bearer(credential)}
 
 	// For the default (reuse) strategy, enumerate existing instances of the agent-id and
 	// reuse/wake one that MATCHES the action's bridge+project targeting. fresh_per_run
@@ -943,11 +913,13 @@ bridge_action_scheduler_resolve_or_launch_instance :: proc(due: Action_Queue_Ite
 	force_create := due.instance_strategy == "fresh_per_run"
 	if !force_create {
 		// 1. Check existing instances via GET /api/v1/agent-instances?agent_id=...
-		list_path := fmt.tprintf("/api/v1/agent-instances?agent_id=%s", due.target_agent_id)
-		resp, ok := http.request_with_headers_deadline("GET", bridge_config.daemon_url, list_path, "", headers[:], 10_000)
-		if ok && resp.status == 200 {
-			defer delete(resp.body)
-			data_arr, has_data := bridge_provider_json_extract_array(resp.body, "data")
+		resp, list_err := httpc.send({
+			method = .GET, url = bridge_hub_url(), path = {"api", "v1", "agent-instances"},
+			query = {{"agent_id", due.target_agent_id}}, headers = headers[:], timeout_ms = 10_000,
+		})
+		defer httpc.response_destroy(&resp)
+		if list_err == .None && resp.status == 200 {
+			data_arr, has_data := bridge_provider_json_extract_array(httpc.text(resp), "data")
 			if !has_data do return "", false
 			if has_data {
 				objects := bridge_provider_json_top_level_objects(data_arr)
@@ -983,49 +955,34 @@ bridge_action_scheduler_resolve_or_launch_instance :: proc(due: Action_Queue_Ite
 				}
 			}
         } else {
-            delete(resp.body)
             return "", false
         }
     }
 
     // 2. No reusable instance (or fresh_per_run); launch a new one via POST /api/v1/agent-instances
-	b := strings.builder_make()
-	strings.write_string(&b, "{\"agent_id\":\"")
-	bridge_runtime_write_json_string(&b, due.target_agent_id)
-	strings.write_string(&b, "\"")
-	if due.target_bridge_id != "" {
-		strings.write_string(&b, ",\"bridge_id\":\"")
-		bridge_runtime_write_json_string(&b, due.target_bridge_id)
-		strings.write_string(&b, "\"")
+	Launch_Body :: struct {
+		agent_id:   string `json:"agent_id"`,
+		bridge_id:  string `json:"bridge_id,omitempty"`,
+		provider:   string `json:"provider,omitempty"`,
+		model:      string `json:"model,omitempty"`,
+		project_id: string `json:"project_id,omitempty"`,
 	}
-	if due.target_provider != "" {
-		strings.write_string(&b, ",\"provider\":\"")
-		bridge_runtime_write_json_string(&b, due.target_provider)
-		strings.write_string(&b, "\"")
+	launch := Launch_Body{
+		agent_id = due.target_agent_id, bridge_id = due.target_bridge_id, provider = due.target_provider,
+		model = due.target_model, project_id = due.target_project_id,
 	}
-	if due.target_model != "" {
-		strings.write_string(&b, ",\"model\":\"")
-		bridge_runtime_write_json_string(&b, due.target_model)
-		strings.write_string(&b, "\"")
-	}
-	if due.target_project_id != "" {
-		strings.write_string(&b, ",\"project_id\":\"")
-		bridge_runtime_write_json_string(&b, due.target_project_id)
-		strings.write_string(&b, "\"")
-	}
-	strings.write_string(&b, "}")
-	payload := strings.to_string(b)
-	defer delete(payload)
-
-	launch_resp, launch_ok := http.request_with_headers_deadline("POST", bridge_config.daemon_url, "/api/v1/agent-instances", payload, headers[:], 10_000)
-	if !launch_ok do return "", false
-	defer delete(launch_resp.body)
+	launch_resp, launch_err := httpc.send({
+		method = .POST, url = bridge_hub_url(), path = {"api", "v1", "agent-instances"},
+		headers = headers[:], body = httpc.json_body(launch), timeout_ms = 10_000,
+	})
+	defer httpc.response_destroy(&launch_resp)
+	if launch_err != .None do return "", false
 
 	if launch_resp.status != 200 && launch_resp.status != 201 {
 		return "", false
 	}
 
-	new_instance_id := extract_json_string(launch_resp.body, "agent_instance_id", "")
+	new_instance_id := extract_json_string(httpc.text(launch_resp), "agent_instance_id", "")
 	if new_instance_id == "" do return "", false
 
 	if bridge_action_scheduler_await_ready(new_instance_id, 5000) {
@@ -1034,7 +991,7 @@ bridge_action_scheduler_resolve_or_launch_instance :: proc(due: Action_Queue_Ite
 	return new_instance_id, true
 }
 
-bridge_action_scheduler_tick :: proc(now_override: i64 = 0, fetch: Action_Scheduler_Fetch = http.request_with_headers_deadline, execute := bridge_action_scheduler_execute, resolve := bridge_action_scheduler_resolve_or_launch_instance, revalidate: proc(fetch: Action_Scheduler_Fetch) -> bool = bridge_action_scheduler_revalidate) -> int {
+bridge_action_scheduler_tick :: proc(now_override: i64 = 0, fetch: Action_Scheduler_Fetch = bridge_hub_http_send, execute := bridge_action_scheduler_execute, resolve := bridge_action_scheduler_resolve_or_launch_instance, revalidate: proc(fetch: Action_Scheduler_Fetch) -> bool = bridge_action_scheduler_revalidate) -> int {
 	now_ms := now_override if now_override > 0 else bridge_runtime_now_ms()
 	actions := 0
 
@@ -1280,17 +1237,13 @@ bridge_action_scheduler_revalidate :: proc(fetch: Action_Scheduler_Fetch) -> boo
     if etag == "" do return false
     credential := bridge_credential_snapshot()
     defer delete(credential)
-    auth := strings.concatenate({"Bearer ", credential})
-    defer delete(auth)
-    headers := make([dynamic]http.Header, context.temp_allocator)
-    append(&headers, http.Header{name = "Authorization", value = auth})
-    append(&headers, http.Header{name = "If-None-Match", value = etag})
-    resp, ok := fetch("GET", bridge_config.daemon_url, "/api/v1/bridge/actions", "", headers[:], 5_000)
-    defer delete(resp.body)
+    headers := [?]httpc.Header{httpc.bearer(credential), {name = "If-None-Match", value = etag}}
+    resp, err := fetch({method = .GET, url = bridge_hub_url(), path = {"api", "v1", "bridge", "actions"}, headers = headers[:], timeout_ms = 5_000})
+    defer httpc.response_destroy(&resp)
     sync.mutex_lock(&s.mutex)
     defer sync.mutex_unlock(&s.mutex)
-    if !ok || generation != s.connection_generation do return false
-    if action_scheduler_feature_disabled(resp.status, resp.body) {
+    if err != .None || generation != s.connection_generation do return false
+    if action_scheduler_feature_disabled(resp.status, httpc.text(resp)) {
         bridge_action_scheduler_suspend_locked(bridge_runtime_now_ms())
         return false
     }

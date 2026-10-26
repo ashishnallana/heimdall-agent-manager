@@ -17,6 +17,7 @@ import "core:thread"
 import "core:time"
 import contracts "odin_test:contracts"
 import cfg_lib "odin_test:lib/config"
+import httpc "odin_test:lib/httpc"
 import ws "odin_test:lib/ws"
 import vault "odin_test:lib/vault"
 
@@ -1392,73 +1393,51 @@ bridge_update_copy_file :: proc(src, dest: string) -> bool {
 	}
 }
 
-BRIDGE_UPDATE_CURL_TIMEOUT_SECONDS :: 120
-BRIDGE_UPDATE_CURL_PROCESS_GRACE_SECONDS :: 10
+BRIDGE_UPDATE_DOWNLOAD_TIMEOUT_MS :: 120_000
+BRIDGE_UPDATE_DOWNLOAD_CONNECT_TIMEOUT_MS :: 15_000
+BRIDGE_UPDATE_DOWNLOAD_ATTEMPTS :: 3
+// GitHub release assets redirect to objects.githubusercontent.com.
+BRIDGE_UPDATE_DOWNLOAD_MAX_REDIRECTS :: 5
 
-Bridge_Update_Process_Run :: proc(
-	args: []string,
-	timeout: time.Duration,
-) -> (stdout, stderr: string, exit_code: int, ok, timed_out: bool)
+// Bridge_Update_Download is the injectable transport (tests script it); the
+// production value is httpc.download_to_file, which streams into a sibling .part
+// file and renames it only after a complete 200.
+Bridge_Update_Download :: #type proc(req: httpc.Request, dest_path: string) -> (status: int, err: httpc.Error)
 
-// Downloads into a sibling .part file and renames only after curl exits zero.
-// curl is deliberately used here instead of the small internal HTTP client: a
-// GitHub release download crosses HTTPS redirects and streams multi-megabyte
-// bodies, both of which deserve a mature, observable transport implementation.
-bridge_update_download_with_curl :: proc(
-	url, dest_path: string,
-	run: Bridge_Update_Process_Run = bridge_process_run_capture_status,
-) -> (bool, string) {
-	if run == nil do return false, "tarball download failed: curl runner unavailable"
-	part_path := fmt.tprintf("%s.part", dest_path)
-	_ = os.remove(part_path)
-
-	args := make([dynamic]string, 0, 24)
-	defer delete(args)
-	append(
-		&args,
-		"curl",
-		"--fail",
-		"--location",
-		"--silent",
-		"--show-error",
-		"--connect-timeout", "15",
-		"--max-time", fmt.tprintf("%d", BRIDGE_UPDATE_CURL_TIMEOUT_SECONDS),
-		"--retry", "2",
-		"--retry-delay", "1",
-		"--retry-max-time", fmt.tprintf("%d", BRIDGE_UPDATE_CURL_TIMEOUT_SECONDS),
-		"--proto", "=http,https",
-		"--proto-redir", "=http,https",
-	)
-	if ca_file := strings.trim_space(os.get_env("HAM_TLS_CA_FILE", context.temp_allocator)); ca_file != "" {
-		append(&args, "--cacert", ca_file)
+// bridge_update_download fetches the update tarball through libcurl (src/lib/httpc):
+// redirects followed (never https -> http), 15 s connect / 120 s total per
+// attempt, up to 3 attempts on transient failures. download_url is either an
+// absolute http(s) URL or a hub-relative target ("/api/v1/...") from the update
+// command, resolved under the configured hub base URL without concatenation.
+bridge_update_download :: proc(download_url, dest_path: string, download: Bridge_Update_Download = httpc.download_to_file) -> (bool, string) {
+	req := httpc.Request{
+		method = .GET, timeout_ms = BRIDGE_UPDATE_DOWNLOAD_TIMEOUT_MS,
+		connect_timeout_ms = BRIDGE_UPDATE_DOWNLOAD_CONNECT_TIMEOUT_MS,
+		max_redirects = BRIDGE_UPDATE_DOWNLOAD_MAX_REDIRECTS,
 	}
-	append(&args, "--output", part_path, "--", url)
-
-	stdout, stderr, exit_code, ok, timed_out := run(
-		args[:],
-		time.Duration(BRIDGE_UPDATE_CURL_TIMEOUT_SECONDS + BRIDGE_UPDATE_CURL_PROCESS_GRACE_SECONDS) * time.Second,
-	)
-	defer { delete(stdout); delete(stderr) }
-	if !ok {
-		_ = os.remove(part_path)
-		if timed_out {
-			return false, fmt.tprintf("tarball download failed: curl timed out after %d seconds", BRIDGE_UPDATE_CURL_TIMEOUT_SECONDS)
-		}
-		if exit_code < 0 {
-			return false, "tarball download failed: could not start curl; ensure curl is installed and on PATH"
-		}
-		detail := strings.trim_space(stderr)
-		if len(detail) > 512 do detail = detail[:512]
-		if detail != "" {
-			return false, fmt.tprintf("tarball download failed: curl exited %d: %s", exit_code, detail)
-		}
-		return false, fmt.tprintf("tarball download failed: curl exited %d", exit_code)
+	if strings.has_prefix(download_url, "/") {
+		req.url = bridge_hub_url()
+		req.relay_target = download_url
+	} else {
+		u, url_err := httpc.parse_url(download_url)
+		if url_err != .None do return false, "tarball download failed: the download URL is not a valid http(s) URL"
+		req.url = u
 	}
-	if os.rename(part_path, dest_path) != nil {
-		_ = os.remove(part_path)
-		return false, "tarball download failed: could not finalize downloaded file"
+	status := 0
+	err := httpc.Error.None
+	for attempt in 1..=BRIDGE_UPDATE_DOWNLOAD_ATTEMPTS {
+		status, err = download(req, dest_path)
+		if err == .None && status == 200 do return true, ""
+		transient := status >= 500 || status == 429
+		#partial switch err {
+		case .Dns, .Connect, .Timeout, .Send, .Recv, .Protocol, .Tls: transient = true
+		}
+		if !transient || attempt == BRIDGE_UPDATE_DOWNLOAD_ATTEMPTS do break
+		time.sleep(time.Duration(attempt) * time.Second)
 	}
-	return true, ""
+	if err == .Timeout do return false, fmt.tprintf("tarball download failed: timed out after %d seconds", BRIDGE_UPDATE_DOWNLOAD_TIMEOUT_MS / 1000)
+	if err != .None do return false, fmt.tprintf("tarball download failed: %s", httpc.error_string(err))
+	return false, fmt.tprintf("tarball download failed: HTTP %d", status)
 }
 
 Bridge_Update_Supervisor_Spawn :: proc(argv: []string) -> bool
@@ -1602,12 +1581,7 @@ bridge_runtime_apply_update :: proc(
 
 	tarball_path := fmt.tprintf("%s/bundle.tar.gz", stage_dir)
 
-	// Stream tarball from download_url
-	resolved_url := download_url
-	if strings.has_prefix(download_url, "/") {
-		hub_base := strings.trim_right(bridge_config.daemon_url, "/")
-		resolved_url = fmt.tprintf("%s%s", hub_base, download_url)
-	}
+	// Stream tarball from download_url (absolute, or hub-relative: see bridge_update_download).
 
 	if strings.has_prefix(download_url, "file://") || (os.exists(download_url) && !strings.has_prefix(download_url, "http://") && !strings.has_prefix(download_url, "https://")) {
 		local_src := download_url
@@ -1620,7 +1594,7 @@ bridge_runtime_apply_update :: proc(
 			return false, fmt.tprintf("failed to copy local bundle from %s", local_src)
 		}
 	} else {
-		dl_ok, dl_error := bridge_update_download_with_curl(resolved_url, tarball_path)
+		dl_ok, dl_error := bridge_update_download(download_url, tarball_path)
 		if !dl_ok {
 			_ = os.remove_all(stage_dir)
 			blog_error(.update_download_failed, blog_sym(.stage, .download))

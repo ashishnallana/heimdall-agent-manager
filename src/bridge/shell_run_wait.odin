@@ -6,7 +6,7 @@ package main
 // item 0). The description asked for a foreground run to block its caller until
 // the run reaches a terminal status. The transport cannot carry that as one HTTP
 // request: ham-ctl -> bridge local endpoint -> hub all use
-// http.DEFAULT_TIMEOUT_MS = 20_000 (src/lib/http_client/http_client.odin:11), so a
+// httpc.DEFAULT_TIMEOUT_MS = 20_000 (src/lib/httpc/httpc.odin), so a
 // 30-minute blocking POST is cut at 20s at two hops, and holding it hub-side
 // would pin a hub request thread for the length of the run. Polling is forbidden
 // outright by the chain.
