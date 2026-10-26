@@ -113,8 +113,10 @@ DARWIN_SYSTEM_DYLIBS='/usr/lib/libSystem.B.dylib /usr/lib/libobjc.A.dylib /usr/l
 # Frameworks the binaries use: the pinned libcurl (Security and CoreFoundation
 # for Apple SecTrust; CoreServices and SystemConfiguration for its macOS
 # resolver/proxy glue), the bridge keystore (Security, CoreFoundation) and
-# Odin's core library (Foundation).
-DARWIN_FRAMEWORKS='CoreFoundation CoreServices Foundation Security SystemConfiguration'
+# Odin's core library: core:sys/info -> core:sys/darwin/Foundation links Foundation
+# AND Cocoa (objc.odin), and core:sys/darwin can pull in CoreGraphics and System.
+# All are Apple-shipped frameworks on the sealed system volume.
+DARWIN_FRAMEWORKS='Cocoa CoreFoundation CoreGraphics CoreServices Foundation Security System SystemConfiguration'
 
 file_magic() {
   od -A n -t x1 -N 4 "$1" 2>/dev/null | tr -d ' \n'
