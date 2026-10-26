@@ -14,6 +14,7 @@ Static_Skill :: struct {
 }
 
 STATIC_SKILLS := []Static_Skill{
+	{"artifact-authoring", #load("../../../prompts/skills/artifact-authoring/SKILL.md", string)},
 	{"coordinator-task-management", #load("../../../prompts/skills/coordinator-task-management/SKILL.md", string)},
 	{"ham-ctl-reference", #load("../../../prompts/skills/ham-ctl-reference/SKILL.md", string)},
 	{"heimdall-ctl-communication", #load("../../../prompts/skills/heimdall-ctl-communication/SKILL.md", string)},

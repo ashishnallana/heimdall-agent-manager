@@ -211,5 +211,6 @@ rather than guessing:
 - `memory-management-workflow` — propose durable memories and choose their scope.
 - `search-command` — search the Hub for conversations, tasks, comments, memories, and more.
 - `heimdall-preview-setup` — share a localhost web app with the user via the Heimdall preview (`preview_url`).
+- `artifact-authoring` — produce a report, image or static HTML site for the user as an artifact and deliver it as an `artifact://` link.
 
 Checks are chosen, not configured: no task carries a verification command. Workers choose and run checks appropriate to the change and report the commands and their outcomes in `ham-ctl lease submit --summary`; reviewers judge correctness and their verdict needs no command evidence.

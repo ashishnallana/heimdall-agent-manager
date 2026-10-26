@@ -36,3 +36,19 @@ test_static_skills_heimdall_preview_setup_content :: proc(t: ^testing.T) {
 	}
 	testing.expect(t, found, "STATIC_SKILLS must contain heimdall-preview-setup")
 }
+
+@(test)
+test_static_skills_artifact_authoring_content :: proc(t: ^testing.T) {
+	found := false
+	for skill in STATIC_SKILLS {
+		if skill.slug == "artifact-authoring" {
+			found = true
+			testing.expect(t, strings.has_prefix(skill.content, "---\nname: artifact-authoring\ndescription: "), "artifact-authoring must start with name/description frontmatter")
+			testing.expect(t, strings.contains(skill.content, "--kind html-bundle --directory"), "artifact-authoring must document html-bundle directory upload")
+			testing.expect(t, strings.contains(skill.content, "--entry"), "artifact-authoring must document --entry")
+			testing.expect(t, strings.contains(skill.content, "--kind image --content-type image/png"), "artifact-authoring must document image kind and content type")
+			testing.expect(t, strings.contains(skill.content, "artifact://"), "artifact-authoring must document artifact:// delivery links")
+		}
+	}
+	testing.expect(t, found, "STATIC_SKILLS must contain artifact-authoring")
+}
