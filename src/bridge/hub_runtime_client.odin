@@ -600,10 +600,11 @@ bridge_hub_heartbeat_metadata_omission: bool
 // diagnostics keep riding the heartbeat, so the hub never loses them.
 bridge_hub_diagnostics_frame_v1: bool
 
-// BRIDGE_DIAGNOSTICS_SENDER_AVAILABLE is false until this Bridge emits the
-// bridge_diagnostics frame (plan T6, hb_impl_diag_bridge). Removing diagnostics from
-// the heartbeat before their replacement sender exists would silently drop them.
-BRIDGE_DIAGNOSTICS_SENDER_AVAILABLE :: false
+// BRIDGE_DIAGNOSTICS_SENDER_AVAILABLE: this Bridge emits the bridge_diagnostics frame
+// (plan T6, bridge_diagnostics.odin), so a connection that negotiated
+// diagnostics_frame_v1 drops the diagnostic members from its heartbeat. Turning it
+// off restores the legacy heartbeat diagnostics and stops the new frame together.
+BRIDGE_DIAGNOSTICS_SENDER_AVAILABLE :: true
 
 bridge_hub_reset_heartbeat_negotiation :: proc() {
 	sync.atomic_store(&bridge_hub_heartbeat_metadata_omission, false)
@@ -623,7 +624,7 @@ Bridge_Heartbeat_Shape :: struct {
 bridge_hub_heartbeat_shape :: proc() -> Bridge_Heartbeat_Shape {
 	return Bridge_Heartbeat_Shape{
 		omit_metadata    = sync.atomic_load(&bridge_hub_heartbeat_metadata_omission),
-		omit_diagnostics = BRIDGE_DIAGNOSTICS_SENDER_AVAILABLE && sync.atomic_load(&bridge_hub_diagnostics_frame_v1),
+		omit_diagnostics = bridge_diagnostics_negotiated(),
 	}
 }
 
@@ -674,6 +675,10 @@ bridge_hub_runtime_loop :: proc(conn: ^ws.Connection) {
 	// Send one heartbeat immediately on connect so the hub gets the initial
 	// instance digest + schedules_version handshake without waiting a full cycle.
 	last_heartbeat := bridge_hub_send_connect_heartbeat(conn)
+	// Plan T6: the connect-time diagnostics snapshot, collected off this thread and
+	// sent by bridge_diagnostics_tick once ready, then its own interval timer.
+	diagnostics_cadence: Bridge_Diagnostics_Cadence
+	bridge_diagnostics_connect(&diagnostics_cadence, last_heartbeat)
 	// The hub keeps agent blockers in memory only: resend every snapshot on connect.
 	bridge_blockers_mark_all_dirty()
 	bridge_tool_live_drain(conn, true)
@@ -751,6 +756,7 @@ bridge_hub_runtime_loop :: proc(conn: ^ws.Connection) {
 			bridge_blockers_mark_all_dirty()
 			hub_command_reassembly_sweep(&reassemblies, now)
 		}
+		bridge_diagnostics_tick(conn, &diagnostics_cadence, now, sync.atomic_load(&bridge_hub_heartbeat_interval_ns))
 		// Yield after a bounded burst. Idle connections retain the low-wake cadence;
 		// busy connections do not artificially process only 40 frames per second.
 		time.sleep(1 * time.Millisecond if inbound_count > 0 || pty_more else 25 * time.Millisecond)

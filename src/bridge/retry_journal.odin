@@ -287,6 +287,42 @@ bridge_recovery_status_json :: proc() -> string {
     return string(data)
 }
 
+// bridge_recovery_diagnostics_write appends the bridge_diagnostics operation_recovery
+// family: rows of the five consumed members only, grouped exactly like
+// bridge_recovery_status_json (whose legacy object keeps journal_failed,
+// capacity_exhausted, capacity and per-row attempts/remaining).
+bridge_recovery_diagnostics_write :: proc(b: ^strings.Builder) {
+    sync.mutex_lock(&bridge_retry_journal_mutex)
+    defer sync.mutex_unlock(&bridge_retry_journal_mutex)
+    groups := make(map[string]Bridge_Recovery_Status_Row, context.temp_allocator)
+    for r in bridge_retry_journal.receipts {
+        operation := "readiness"
+        if strings.has_prefix(r.key, "sync:") { operation = "sync" }
+        else if strings.has_prefix(r.key, "refresh:") { operation = "refresh" }
+        else if strings.has_prefix(r.key, "slot:") { operation = "slot" }
+        state := fmt.tprintf("%v", r.budget.state)
+        code := contracts.error_code_string(r.budget.code)
+        class := contracts.bridge_error_class_name(r.budget.class)
+        key := fmt.tprintf("%s/%s/%s/%s", operation, state, code, class)
+        row := groups[key]
+        row.operation = operation; row.state = state; row.code = code; row.class = class
+        row.receipts += 1
+        groups[key] = row
+    }
+    strings.write_string(b, `{"rows":[`)
+    first := true
+    for _, row in groups {
+        if !first do strings.write_byte(b, ',')
+        first = false
+        strings.write_string(b, `{"operation":"`); bridge_runtime_write_json_string(b, row.operation)
+        strings.write_string(b, `","state":"`); bridge_runtime_write_json_string(b, row.state)
+        strings.write_string(b, `","code":"`); bridge_runtime_write_json_string(b, row.code)
+        strings.write_string(b, `","class":"`); bridge_runtime_write_json_string(b, row.class)
+        fmt.sbprintf(b, `","receipts":%d}}`, row.receipts)
+    }
+    strings.write_string(b, "]}")
+}
+
 // Explicit local operator command only; ordinary reconnect/version/token events
 // never call this. Corrupt journals and unknown side-effect slots stay fenced.
 bridge_retry_operator_resume_sync :: proc(key: string, refresh := false) -> bool {

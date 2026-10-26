@@ -145,6 +145,13 @@ Bridge_Http_Retry_Metrics :: struct {
 
 bridge_http_retry_metrics: Bridge_Http_Retry_Metrics
 
+// bridge_http_retry_diagnostics_write appends the bridge_diagnostics http_retries
+// family; every member is consumed, so it matches the legacy object.
+bridge_http_retry_diagnostics_write :: proc(b: ^strings.Builder) {
+	m := &bridge_http_retry_metrics
+	fmt.sbprintf(b, `{{"retry":%d,"recovered":%d,"gave_up":%d,"deferred":%d}}`, sync.atomic_load(&m.retry), sync.atomic_load(&m.recovered), sync.atomic_load(&m.gave_up), sync.atomic_load(&m.deferred))
+}
+
 bridge_http_retry_metrics_json :: proc() -> string {
 	m := &bridge_http_retry_metrics
 	return fmt.aprintf("{{\"retry\":%d,\"recovered\":%d,\"gave_up\":%d,\"deferred\":%d}}", sync.atomic_load(&m.retry), sync.atomic_load(&m.recovered), sync.atomic_load(&m.gave_up), sync.atomic_load(&m.deferred))

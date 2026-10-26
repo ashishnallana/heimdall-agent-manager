@@ -107,6 +107,58 @@ heartbeat_stats_format :: proc(st: Heartbeat_Stats, allocator := context.allocat
 	return strings.to_string(b)
 }
 
+// heartbeat_stats_diagnostics_write appends the bridge_diagnostics `stats` family
+// (plan §4.3) and returns the frame's `unavailable` list (a literal JSON array, ""
+// when everything was sampled). Unlike the legacy object a gauge is never silently
+// absent: one that could not be sampled is OMITTED from stats AND named in
+// unavailable, never both sampled and unavailable; host_mem_total/host_mem_avail
+// travel as a pair. rss, cpu_s and pty_host_rss come from the same `ps` run that
+// st.ok vouches for, so they are always present. Providers are capped at the hub's
+// limit of 16 aggregates.
+heartbeat_stats_diagnostics_write :: proc(b: ^strings.Builder, st: Heartbeat_Stats) -> (unavailable: string) {
+	strings.write_string(b, `{"rss":`)
+	strings.write_i64(b, st.rss)
+	strings.write_string(b, `,"pty_host_rss":`)
+	strings.write_i64(b, st.pty_host_rss)
+	strings.write_string(b, `,"cpu_s":`)
+	heartbeat_stats_write_f64(b, st.cpu_seconds)
+	if st.has_host_mem {
+		strings.write_string(b, `,"host_mem_total":`)
+		strings.write_i64(b, st.host_mem_total)
+		strings.write_string(b, `,"host_mem_avail":`)
+		strings.write_i64(b, st.host_mem_avail)
+	}
+	if st.has_load1 {
+		strings.write_string(b, `,"load1":`)
+		heartbeat_stats_write_f64(b, st.load1)
+	}
+	if st.has_disk_free {
+		strings.write_string(b, `,"disk_free":`)
+		strings.write_i64(b, st.disk_free)
+	}
+	strings.write_string(b, `,"instances":[`)
+	for inst, i in st.instances {
+		if i >= HEARTBEAT_STATS_DIAGNOSTICS_MAX_PROVIDERS do break
+		if i > 0 do strings.write_byte(b, ',')
+		strings.write_string(b, `{"provider":"`)
+		bridge_runtime_write_json_string(b, inst.provider)
+		strings.write_string(b, `","rss":`)
+		strings.write_i64(b, inst.rss_bytes)
+		strings.write_string(b, `,"cpu_s":`)
+		heartbeat_stats_write_f64(b, inst.cpu_seconds)
+		strings.write_byte(b, '}')
+	}
+	strings.write_string(b, "]}")
+	missing := make([dynamic]string, 0, 4, context.temp_allocator)
+	if !st.has_host_mem do append(&missing, `"host_mem_total"`, `"host_mem_avail"`)
+	if !st.has_load1 do append(&missing, `"load1"`)
+	if !st.has_disk_free do append(&missing, `"disk_free"`)
+	if len(missing) == 0 do return ""
+	return strings.concatenate({"[", strings.join(missing[:], ",", context.temp_allocator), "]"}, context.temp_allocator)
+}
+
+HEARTBEAT_STATS_DIAGNOSTICS_MAX_PROVIDERS :: 16
+
 // Fixed two-decimal formatting; avoids locale/exponent surprises on the wire.
 @(private = "file")
 heartbeat_stats_write_f64 :: proc(b: ^strings.Builder, v: f64) {

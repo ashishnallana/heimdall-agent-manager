@@ -765,6 +765,16 @@ bridge_command_dispatch_observe_loop_delay :: proc(delay: time.Duration) {
 	sync.mutex_unlock(&bridge_dispatch_mu)
 }
 
+// bridge_command_dispatch_diagnostics_write appends the bridge_diagnostics
+// command_dispatch family: only the four cumulative counters the hub consumes. The
+// legacy heartbeat object (bridge_command_dispatch_metrics_json) keeps every member.
+bridge_command_dispatch_diagnostics_write :: proc(b: ^strings.Builder) {
+	sync.mutex_lock(&bridge_dispatch_mu)
+	m := bridge_dispatch_metrics
+	sync.mutex_unlock(&bridge_dispatch_mu)
+	fmt.sbprintf(b, `{{"accepted":%d,"rejected":%d,"completed":%d,"deadline_expired":%d}}`, m.accepted, m.rejected, m.completed, m.deadline_expired)
+}
+
 bridge_command_dispatch_metrics_json :: proc() -> string {
 	sync.mutex_lock(&bridge_dispatch_mu)
 	defer sync.mutex_unlock(&bridge_dispatch_mu)

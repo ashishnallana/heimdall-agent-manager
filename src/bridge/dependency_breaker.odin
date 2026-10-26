@@ -91,6 +91,22 @@ bridge_dependency_breaker_snapshot :: proc(key: string) -> (Bridge_Dependency_Br
 	return value, true
 }
 
+// bridge_dependency_breaker_diagnostics_write appends the bridge_diagnostics
+// dependency_breakers family: the open gauge and cumulative opened counter the hub
+// consumes. tracked/rejected stay in the legacy heartbeat object only.
+bridge_dependency_breaker_diagnostics_write :: proc(b: ^strings.Builder) {
+	now_ns := time.to_unix_nanoseconds(time.now())
+	sync.mutex_lock(&bridge_dependency_breaker_mutex)
+	open := 0
+	opened: u64
+	for breaker in bridge_dependency_breakers {
+		if breaker.open_until_ns > now_ns do open += 1
+		opened += breaker.open_count
+	}
+	sync.mutex_unlock(&bridge_dependency_breaker_mutex)
+	fmt.sbprintf(b, `{{"open":%d,"opened":%d}}`, open, opened)
+}
+
 bridge_dependency_breaker_metrics_json :: proc() -> string {
 	now_ns := time.to_unix_nanoseconds(time.now())
 	sync.mutex_lock(&bridge_dependency_breaker_mutex)

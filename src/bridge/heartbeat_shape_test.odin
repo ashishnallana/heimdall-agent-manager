@@ -215,9 +215,10 @@ test_heartbeat_live_shape_follows_each_connection_ready :: proc(t: ^testing.T) {
 		hb := bridge_hub_heartbeat_json()
 		defer delete(hb)
 		obj := shape_test_parse(t, hb, loc)
-		// Diagnostics stay until this Bridge sends bridge_diagnostics, whatever the
-		// hub advertises: nothing disappears before its replacement sender exists.
-		expect_members(t, obj, metadata, !BRIDGE_DIAGNOSTICS_SENDER_AVAILABLE || !strings.contains(ready, `"diagnostics_frame_v1":true`), loc)
+		// Diagnostics leave the heartbeat only where diagnostics_frame_v1 was
+		// negotiated, because bridge_diagnostics now carries them (plan T6).
+		testing.expect(t, BRIDGE_DIAGNOSTICS_SENDER_AVAILABLE, "bridge_diagnostics sender present", loc = loc)
+		expect_members(t, obj, metadata, !strings.contains(ready, `"diagnostics_frame_v1":true`), loc)
 		if metadata {
 			start := strings.index(hb, `"features":`) + len(`"features":`)
 			end := strings.index_byte(hb[start:], ']')
