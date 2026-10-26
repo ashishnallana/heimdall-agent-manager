@@ -16,29 +16,30 @@ set -euo pipefail
 # Re-exec into a new session before doing anything. exec keeps the PID, so a
 # caller that waits on this script still waits for the whole update.
 # The PTY-only cleanup mode runs synchronously under the live bridge: skip it.
+# A caller that already started this script in a new session (macOS has no
+# setsid(1)) says so with --already-detached or HEIMDALL_UPDATE_SUPERVISOR_DETACHED=1.
 detach_from_bridge_session() {
   [ -z "${HEIMDALL_UPDATE_SUPERVISOR_DETACHED:-}" ] || return 0
   local arg
   for arg in "$@"; do
-    case "$arg" in --stop-pty-hosts-only|-h|--help) return 0 ;; esac
+    case "$arg" in
+      --stop-pty-hosts-only|-h|--help) return 0 ;;
+      --already-detached) export HEIMDALL_UPDATE_SUPERVISOR_DETACHED=1; return 0 ;;
+    esac
   done
-  export HEIMDALL_UPDATE_SUPERVISOR_DETACHED=1
-  # setsid(2) fails only for a process-group leader; fork once in that case.
-  # python3 is already required below (service lookup, PTY host cleanup).
-  if python3 -c '' >/dev/null 2>&1; then
-    exec python3 -c '
-import os, sys
-if os.getsid(0) != os.getpid():
-    try:
-        os.setsid()
-    except OSError:
-        if os.fork():
-            os._exit(0)
-        os.setsid()
-os.execv(sys.argv[1], sys.argv[1:])
-' "$BASH" "$0" "$@"
+  # Already a session leader: there is no bridge session left to leave.
+  if [ "$(ps -o sid= -p $$ 2>/dev/null | tr -d '[:space:]')" = "$$" ]; then
+    export HEIMDALL_UPDATE_SUPERVISOR_DETACHED=1
+    return 0
   fi
-  echo "[apply-bridge-update] WARNING: python3 unavailable; cannot leave the bridge's process group" >&2
+  if command -v setsid >/dev/null 2>&1; then
+    export HEIMDALL_UPDATE_SUPERVISOR_DETACHED=1
+    # setsid(1) calls setsid(2) in place, so exec keeps this PID. Only for a
+    # process-group leader (where setsid(2) fails) does it fork once and let
+    # the parent exit.
+    exec setsid "$BASH" "$0" "$@"
+  fi
+  echo "[apply-bridge-update] WARNING: setsid unavailable; cannot leave the bridge's process group" >&2
 }
 detach_from_bridge_session "$@"
 
@@ -92,6 +93,10 @@ while [[ $# -gt 0 ]]; do
       STOP_PTY_HOSTS_ONLY=true
       shift
       ;;
+    --already-detached)
+      # Consumed by detach_from_bridge_session above.
+      shift
+      ;;
     --pty-host-socket)
       PTY_HOST_SOCKET="$2"
       shift 2
@@ -123,6 +128,7 @@ while [[ $# -gt 0 ]]; do
       echo "  --bridge-pid PID      Exact bridge process to stop"
       echo "  --pty-host-socket PATH  Bridge-owned PTY daemon socket"
       echo "  --stop-pty-hosts-only   Only clean up this bridge’s PTY hosts"
+      echo "  --already-detached    The caller started this script in a new session"
       echo "  --restart-hook PATH   Executable restart hook for isolated tests"
       echo "  --stop-hook PATH      Executable stop hook for isolated tests"
       echo "  --health-url URL      Explicit health URL override (optional)"
@@ -176,230 +182,278 @@ is_termux() {
   return 1
 }
 
+# --- Bridge-owned PTY host cleanup -------------------------------------------
 # Stop only this bridge's hosts, including old unlinked binaries, and their
 # descendants. Capture process identities before asking a daemon to shut down:
 # its children may otherwise be reparented and become invisible to cleanup.
-stop_pty_hosts_python() {
-  python3 - "$DATA_DIR" "$PTY_HOST_SOCKET" <<'PY_PTY_CLEANUP'
-import os, pathlib, re, shlex, signal, subprocess, sys, time
+# One implementation with two process readers: /proc on Linux (NixOS units carry
+# only the PATH they declare) and ps(1) everywhere else (macOS). This must run
+# under macOS /bin/bash 3.2: no associative arrays or mapfile, and empty arrays
+# are expanded with ${a[@]+...} for set -u. PIDs index sparse arrays.
 
-data = pathlib.Path(sys.argv[1]).resolve()
-expected_socket = os.path.realpath(sys.argv[2]) if sys.argv[2] else ''
-private_install = data.parent.name == 'bridges'
-uid = os.geteuid()
-
-def read_process(pid):
-    try:
-        proc = pathlib.Path('/proc')/str(pid)
-        if pathlib.Path('/proc').exists():
-            if proc.stat().st_uid != uid: return None
-            fields = (proc/'stat').read_text().rsplit(')', 1)[1].split()
-            if fields[0] == 'Z': return None
-            argv = [os.fsdecode(arg) for arg in (proc/'cmdline').read_bytes().split(b'\0') if arg]
-            try: exe = os.readlink(proc/'exe').removesuffix(' (deleted)')
-            except OSError: exe = ''
-            return (int(fields[1]), fields[19], argv, exe)
-        line = subprocess.check_output(['ps','-p',str(pid),'-o','ppid=,uid=,lstart=,command='], text=True).strip()
-        parts = line.split(None, 7)
-        if len(parts) != 8 or int(parts[1]) != uid: return None
-        command = parts[7]
-        # ps on macOS does not quote argv paths containing spaces. The native
-        # daemon's final --socket argument can be recovered without splitting it.
-        host = re.match(r'^(.*?/ham-pty-host) (?=daemon |run |--socket )', command)
-        if host:
-            exe = host.group(1)
-            tail = command[len(exe)+1:]
-            if tail.startswith('daemon --socket '):
-                argv = [exe, 'daemon', '--socket', tail[len('daemon --socket '):]]
-            elif tail.startswith('--socket ') and tail.endswith(' daemon'):
-                argv = [exe, '--socket', tail[len('--socket '):-len(' daemon')], 'daemon']
-            else: argv = [exe] + shlex.split(tail)
-        else: exe, argv = '', shlex.split(command)
-        return (int(parts[0]), ' '.join(parts[2:7]), argv, exe)
-    except (OSError, ValueError, IndexError, subprocess.CalledProcessError): return None
-
-def processes():
-    if pathlib.Path('/proc').exists():
-        ids = [int(p.name) for p in pathlib.Path('/proc').iterdir() if p.name.isdigit()]
-    else:
-        ids = [int(p) for p in subprocess.check_output(['ps','-axo','pid='], text=True).split()]
-    return {pid: info for pid in ids if (info := read_process(pid)) is not None}
-
-snapshot = processes()
-roots = {}
-for pid, (parent, born, argv, exe) in snapshot.items():
-    # An interpreter can run a test/script host; real release binaries use argv[0].
-    candidates = [exe] + argv[:2]
-    hosts = [p for p in candidates if pathlib.Path(p).name == 'ham-pty-host']
-    if not hosts or not any(command in argv for command in ('daemon', 'run')): continue
-    socket = ''
-    for index, arg in enumerate(argv):
-        if arg == '--socket' and index+1 < len(argv): socket = argv[index+1]
-        elif arg.startswith('--socket='): socket = arg.split('=', 1)[1]
-    owned_binary = private_install and any(pathlib.Path(os.path.realpath(p)).parent.parent == data and pathlib.Path(p).parent.name in ('bin','bin.old','bin.bak','bin.failed') for p in hosts)
-    owned_socket = bool(expected_socket and socket and os.path.realpath(socket) == expected_socket)
-    if owned_binary or owned_socket: roots[pid] = socket
-
-owned = set(roots)
-while True:
-    children = {pid for pid, info in snapshot.items() if info[0] in owned}
-    expanded = owned | children
-    if expanded == owned: break
-    owned = expanded
-
-def alive(pid):
-    info = read_process(pid)
-    return info is not None and info[1] == snapshot[pid][1]
-
-def send(pid, sig):
-    if not alive(pid): return
-    try:
-        if hasattr(os, 'pidfd_open') and hasattr(signal, 'pidfd_send_signal'):
-            fd = os.pidfd_open(pid)
-            try:
-                if alive(pid): signal.pidfd_send_signal(fd, sig)
-            finally: os.close(fd)
-        elif alive(pid): os.kill(pid, sig)
-    except ProcessLookupError: pass
-
-# Best effort protocol shutdown lets the PTY host terminate/reap its own agents.
-client = data/'bin/ham-pty-host'
-if client.is_file() and os.access(client, os.X_OK):
-    for socket in set(roots.values())- {''}:
-        try:
-            subprocess.run([str(client),'--socket',socket,'stop'], timeout=3,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except (OSError, subprocess.TimeoutExpired): pass
-
-if owned: print('[apply-bridge-update] stopping bridge-owned PTY processes:', ', '.join(map(str, sorted(owned))), flush=True)
-for pid in owned: send(pid, signal.SIGTERM)
-deadline = time.monotonic()+3
-while any(alive(pid) for pid in owned) and time.monotonic() < deadline: time.sleep(0.05)
-for pid in owned: send(pid, signal.SIGKILL)
-deadline = time.monotonic()+2
-while any(alive(pid) for pid in owned) and time.monotonic() < deadline: time.sleep(0.05)
-if any(alive(pid) for pid in owned): sys.exit('Bridge-owned PTY processes did not stop; refusing binary swap.')
-PY_PTY_CLEANUP
+# Resolve a path like realpath(3) without requiring it to exist; sets CANON.
+# macOS realpath(1) has no -m and readlink(1) no -f, so walk the components.
+canonical_path() {
+  local rest="$1" out='' comp target links=0
+  case "$rest" in /*) ;; *) rest="$(pwd -P)/$rest" ;; esac
+  while [ -n "$rest" ]; do
+    case "$rest" in
+      */*) comp="${rest%%/*}" rest="${rest#*/}" ;;
+      *) comp="$rest" rest='' ;;
+    esac
+    case "$comp" in
+      ''|.) continue ;;
+      ..) out="${out%/*}"; continue ;;
+    esac
+    if [ -L "$out/$comp" ] && [ "$links" -lt 40 ]; then
+      links=$((links + 1))
+      target="$(readlink "$out/$comp" 2>/dev/null || true)"
+      case "$target" in /*) out='' ;; esac
+      rest="$target${rest:+/$rest}"
+    else
+      out="$out/$comp"
+    fi
+  done
+  CANON="${out:-/}"
 }
 
-# The same cleanup for Linux hosts without python3 (NixOS services carry only
-# the PATH their unit declares). Ownership, descendant capture, start-time
-# identity before every signal, and the refusal on survivors match the Python
-# version; signals use kill(1) rather than a pidfd.
+# Run a command for at most $1 seconds (macOS has no timeout(1)).
+run_bounded() {
+  local limit="$1" pid ticks=0
+  shift
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$limit" "$@"
+    return
+  fi
+  "$@" &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null && [ "$ticks" -lt $((limit * 20)) ]; do
+    sleep 0.05
+    ticks=$((ticks + 1))
+  done
+  kill -KILL "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null
+}
+
+# Process readers. *_read_process PID sets PROC_BORN (start time identity) for a
+# live, non-zombie process owned by this user; *_snapshot calls pty_consider for
+# every such process.
 procfs_read_process() {
-  # Sets PROC_PPID, PROC_BORN and PROC_STATE for a live process owned by us.
-  local stat rest fields
+  local stat rest
+  local -a fields
   [ -O "/proc/$1" ] || return 1
   read -r stat 2>/dev/null < "/proc/$1/stat" || return 1
   rest="${stat##*) }"
   read -r -a fields <<< "$rest"
   [ "${#fields[@]}" -gt 19 ] && [ "${fields[0]}" != Z ] || return 1
-  PROC_STATE="${fields[0]}" PROC_PPID="${fields[1]}" PROC_BORN="${fields[19]}"
+  PROC_PPID="${fields[1]}" PROC_BORN="${fields[19]}"
 }
 
-stop_pty_hosts_procfs() {
-  local data expected_socket private_install=false pid arg index socket exe host
-  local owned_binary owned_socket is_command changed client deadline
-  local -a argv hosts sockets=()
-  local -A parent=() born=() owned=()
-  data="$(realpath -m -- "$DATA_DIR")"
-  expected_socket=''
-  [ -z "$PTY_HOST_SOCKET" ] || expected_socket="$(realpath -m -- "$PTY_HOST_SOCKET")"
-  [ "$(basename -- "$(dirname -- "$data")")" != bridges ] || private_install=true
-
-  for pid in /proc/[0-9]*; do
-    pid="${pid#/proc/}"
+procfs_snapshot() {
+  local dir pid arg exe is_command
+  for dir in /proc/[0-9]*; do
+    pid="${dir#/proc/}"
     procfs_read_process "$pid" || continue
-    parent[$pid]="$PROC_PPID" born[$pid]="$PROC_BORN"
-    argv=()
-    mapfile -d "" -t argv 2>/dev/null < "/proc/$pid/cmdline" || continue
-    [ "${#argv[@]}" -gt 0 ] || continue
-    is_command=false
-    for arg in "${argv[@]}"; do
-      [ "$arg" != daemon ] && [ "$arg" != run ] || is_command=true
+    PTY_ARGV=()
+    { while IFS= read -r -d '' arg || [ -n "$arg" ]; do
+        [ -z "$arg" ] || PTY_ARGV+=("$arg")
+      done < "/proc/$pid/cmdline"; } 2>/dev/null || continue
+    # Only a host command needs its executable; skip the readlink otherwise.
+    exe='' is_command=false
+    for arg in ${PTY_ARGV[@]+"${PTY_ARGV[@]}"}; do
+      case "$arg" in daemon|run) is_command=true ;; esac
     done
-    "$is_command" || continue
-    exe="$(readlink "/proc/$pid/exe" 2>/dev/null || true)"
-    exe="${exe% (deleted)}"
-    hosts=()
-    # An interpreter can run a test/script host; real release binaries use argv[0].
-    for host in "$exe" "${argv[@]:0:2}"; do
-      [ "${host##*/}" != ham-pty-host ] || hosts+=("$host")
-    done
-    [ "${#hosts[@]}" -gt 0 ] || continue
-    socket=''
-    for ((index = 0; index < ${#argv[@]}; index++)); do
-      arg="${argv[index]}"
-      if [ "$arg" = --socket ] && [ $((index + 1)) -lt ${#argv[@]} ]; then socket="${argv[index + 1]}"
-      elif [[ "$arg" == --socket=* ]]; then socket="${arg#--socket=}"
-      fi
-    done
-    owned_binary=false
-    if "$private_install"; then
-      for host in "${hosts[@]}"; do
-        case "$(basename -- "$(dirname -- "$host")")" in bin|bin.old|bin.bak|bin.failed) ;; *) continue ;; esac
-        [ "$(dirname -- "$(dirname -- "$(realpath -m -- "$host")")")" != "$data" ] || owned_binary=true
-      done
+    if "$is_command"; then
+      exe="$(readlink "/proc/$pid/exe" 2>/dev/null || true)"
+      exe="${exe% (deleted)}"
     fi
-    owned_socket=false
-    [ -z "$expected_socket" ] || [ -z "$socket" ] \
-      || [ "$(realpath -m -- "$socket")" != "$expected_socket" ] || owned_socket=true
-    if "$owned_binary" || "$owned_socket"; then
-      owned[$pid]=1
-      [ -z "$socket" ] || sockets+=("$socket")
+    pty_consider "$pid" "$PROC_PPID" "$PROC_BORN" "$exe"
+  done
+}
+
+PS_ROW_FIELDS='pid=,uid=,stat=,lstart='
+ps_read_process() {
+  local row pid uid stat l1 l2 l3 l4 l5
+  row="$(ps -o "$PS_ROW_FIELDS" -p "$1" 2>/dev/null)" || return 1
+  read -r pid uid stat l1 l2 l3 l4 l5 <<< "$row"
+  [ "$pid" = "$1" ] && [ "$uid" = "$PTY_UID" ] && [ -n "$l5" ] || return 1
+  case "$stat" in Z*) return 1 ;; esac
+  PROC_BORN="$l1 $l2 $l3 $l4 $l5"
+}
+
+# ps on macOS does not quote argv paths containing spaces. The native daemon's
+# final --socket argument is recovered without splitting it; other arguments
+# are split on whitespace. Sets PTY_EXE and PTY_ARGV.
+ps_split_command() {
+  local command="$1" rest="$1" prefix='' head tail socket marker='/ham-pty-host '
+  local -a words
+  PTY_EXE='' PTY_ARGV=()
+  while [[ "$rest" == *"$marker"* ]]; do
+    head="${rest%%"$marker"*}" tail="${rest#*"$marker"}"
+    case "$tail" in
+      'daemon '*|'run '*|'--socket '*) PTY_EXE="$prefix$head/ham-pty-host"; break ;;
+    esac
+    prefix="$prefix$head$marker" rest="$tail"
+  done
+  if [ -n "$PTY_EXE" ]; then
+    tail="${command:${#PTY_EXE}+1}"
+    case "$tail" in
+      'daemon --socket '*) PTY_ARGV=("$PTY_EXE" daemon --socket "${tail#daemon --socket }"); return ;;
+      '--socket '*' daemon')
+        socket="${tail#--socket }"
+        PTY_ARGV=("$PTY_EXE" --socket "${socket% daemon}" daemon)
+        return
+        ;;
+    esac
+    PTY_ARGV=("$PTY_EXE")
+  else
+    tail="$command"
+  fi
+  read -r -a words <<< "$tail"
+  PTY_ARGV+=(${words[@]+"${words[@]}"})
+}
+
+ps_snapshot() {
+  local listing pid ppid uid stat l1 l2 l3 l4 l5 command
+  listing="$(ps -axww -o pid=,ppid=,uid=,stat=,lstart=,command= 2>/dev/null)" || return 1
+  [ -n "$listing" ] || return 1
+  while read -r pid ppid uid stat l1 l2 l3 l4 l5 command; do
+    case "$pid$ppid" in ''|*[!0-9]*) continue ;; esac
+    [ "$uid" = "$PTY_UID" ] && [ -n "$l5" ] || continue
+    case "$stat" in Z*) continue ;; esac
+    ps_split_command "$command"
+    pty_consider "$pid" "$ppid" "$l1 $l2 $l3 $l4 $l5" "$PTY_EXE"
+  done <<< "$listing"
+}
+
+# Record one process (argv in PTY_ARGV) and decide whether it is a host this
+# bridge owns: its binary is in this private installation's bin/ (or a swap
+# directory), or it serves exactly this bridge's socket.
+pty_consider() {
+  local pid="$1" exe="$4" arg host socket='' index is_command=false
+  local owned_binary=false owned_socket=false parent_dir
+  local -a hosts=()
+  P_PARENT[$pid]="$2" P_BORN[$pid]="$3"
+  [ "${#PTY_ARGV[@]}" -gt 0 ] || return 0
+  for arg in "${PTY_ARGV[@]}"; do
+    case "$arg" in daemon|run) is_command=true ;; esac
+  done
+  "$is_command" || return 0
+  # An interpreter can run a test/script host; real release binaries use argv[0].
+  for host in "$exe" "${PTY_ARGV[@]:0:2}"; do
+    [ "${host##*/}" != ham-pty-host ] || hosts+=("$host")
+  done
+  [ "${#hosts[@]}" -gt 0 ] || return 0
+  for ((index = 0; index < ${#PTY_ARGV[@]}; index++)); do
+    arg="${PTY_ARGV[index]}"
+    if [ "$arg" = --socket ] && [ $((index + 1)) -lt ${#PTY_ARGV[@]} ]; then socket="${PTY_ARGV[index + 1]}"
+    elif [[ "$arg" == --socket=* ]]; then socket="${arg#--socket=}"
     fi
   done
+  if "$PTY_PRIVATE_INSTALL"; then
+    for host in "${hosts[@]}"; do
+      parent_dir=''
+      case "$host" in */*) parent_dir="${host%/*}" parent_dir="${parent_dir##*/}" ;; esac
+      case "$parent_dir" in bin|bin.old|bin.bak|bin.failed) ;; *) continue ;; esac
+      canonical_path "$host"
+      CANON="${CANON%/*}" CANON="${CANON%/*}"
+      [ "${CANON:-/}" != "$PTY_DATA" ] || owned_binary=true
+    done
+  fi
+  if [ -n "$PTY_EXPECTED_SOCKET" ] && [ -n "$socket" ]; then
+    canonical_path "$socket"
+    [ "$CANON" != "$PTY_EXPECTED_SOCKET" ] || owned_socket=true
+  fi
+  if "$owned_binary" || "$owned_socket"; then
+    P_OWNED[$pid]=1
+    [ -z "$socket" ] || PTY_SOCKETS+=("$socket")
+  fi
+}
+
+# The process is still the one captured in the snapshot (start time unchanged).
+pty_alive() {
+  "${PTY_READER}_read_process" "$1" && [ "$PROC_BORN" = "${P_BORN[$1]}" ]
+}
+
+pty_any_alive() {
+  local pid uid stat l1 l2 l3 l4 l5 rows list
+  if [ "$PTY_READER" = ps ]; then
+    # One ps call for every owned process; per-PID calls would stretch the bounds.
+    list="$(printf '%s,' "${!P_OWNED[@]}")"
+    rows="$(ps -o "$PS_ROW_FIELDS" -p "${list%,}" 2>/dev/null || true)"
+    while read -r pid uid stat l1 l2 l3 l4 l5; do
+      [ -n "$pid" ] && [ -n "${P_OWNED[$pid]:-}" ] && [ "$uid" = "$PTY_UID" ] || continue
+      case "$stat" in Z*) continue ;; esac
+      [ "$l1 $l2 $l3 $l4 $l5" != "${P_BORN[$pid]}" ] || return 0
+    done <<< "$rows"
+    return 1
+  fi
+  for pid in "${!P_OWNED[@]}"; do pty_alive "$pid" && return 0; done
+  return 1
+}
+
+# Signal only after re-checking identity, so a reused PID is never signalled.
+pty_send() {
+  if pty_alive "$1"; then kill -s "$2" "$1" 2>/dev/null || true; fi
+}
+
+stop_pty_hosts() {
+  local pid socket client deadline changed
+  PTY_READER="${PTY_PROCESS_READER:-}"
+  if [ -z "$PTY_READER" ]; then
+    if [ -r /proc/self/stat ]; then PTY_READER=procfs
+    elif command -v ps >/dev/null 2>&1; then PTY_READER=ps
+    fi
+  fi
+  case "$PTY_READER" in
+    procfs|ps) ;;
+    *)
+      # Exit 3 tells the Bridge cleanup could not run at all: nothing was signalled.
+      log_err "Neither /proc nor ps is available to find bridge-owned PTY hosts; no process was stopped"
+      return 3
+      ;;
+  esac
+  PTY_UID="$(id -u)"
+  canonical_path "$DATA_DIR"
+  PTY_DATA="$CANON" PTY_EXPECTED_SOCKET='' PTY_PRIVATE_INSTALL=false
+  if [ -n "$PTY_HOST_SOCKET" ]; then canonical_path "$PTY_HOST_SOCKET"; PTY_EXPECTED_SOCKET="$CANON"; fi
+  CANON="${PTY_DATA%/*}"
+  [ "${CANON##*/}" != bridges ] || PTY_PRIVATE_INSTALL=true
+  P_PARENT=() P_BORN=() P_OWNED=() PTY_SOCKETS=()
+
+  if ! "${PTY_READER}_snapshot"; then
+    log_err "Could not list processes through $PTY_READER to find bridge-owned PTY hosts; no process was stopped"
+    return 3
+  fi
 
   changed=true
   while "$changed"; do
     changed=false
-    for pid in "${!parent[@]}"; do
-      [ -z "${owned[$pid]:-}" ] && [ -n "${owned[${parent[$pid]}]:-}" ] || continue
-      owned[$pid]=1 changed=true
+    for pid in ${P_PARENT[@]+"${!P_PARENT[@]}"}; do
+      [ -z "${P_OWNED[$pid]:-}" ] && [ -n "${P_OWNED[${P_PARENT[$pid]}]:-}" ] || continue
+      P_OWNED[$pid]=1 changed=true
     done
   done
-
-  procfs_alive() { procfs_read_process "$1" && [ "$PROC_BORN" = "${born[$1]}" ]; }
-  procfs_send() { if procfs_alive "$1"; then kill -s "$2" "$1" 2>/dev/null || true; fi; }
-  procfs_any_alive() {
-    local candidate
-    for candidate in "${!owned[@]}"; do procfs_alive "$candidate" && return 0; done
-    return 1
-  }
+  [ "${#P_OWNED[@]}" -gt 0 ] || return 0
 
   # Best effort protocol shutdown lets the PTY host terminate/reap its own agents.
-  client="$data/bin/ham-pty-host"
-  if [ "${#sockets[@]}" -gt 0 ] && [ -f "$client" ] && [ -x "$client" ] && command -v timeout >/dev/null; then
-    mapfile -t sockets < <(printf "%s\n" "${sockets[@]}" | sort -u)
-    for socket in "${sockets[@]}"; do
-      timeout 3 "$client" --socket "$socket" stop >/dev/null 2>&1 || true
-    done
+  client="$PTY_DATA/bin/ham-pty-host"
+  if [ "${#PTY_SOCKETS[@]}" -gt 0 ] && [ -f "$client" ] && [ -x "$client" ]; then
+    while IFS= read -r socket; do
+      run_bounded 3 "$client" --socket "$socket" stop >/dev/null 2>&1 || true
+    done < <(printf '%s\n' "${PTY_SOCKETS[@]}" | sort -u)
   fi
 
-  [ "${#owned[@]}" -eq 0 ] || printf '[apply-bridge-update] stopping bridge-owned PTY processes: %s\n' \
-    "$(printf '%s\n' "${!owned[@]}" | sort -n | paste -sd, - | sed 's/,/, /g')"
-  for pid in "${!owned[@]}"; do procfs_send "$pid" TERM; done
+  log "stopping bridge-owned PTY processes: $(printf '%s, ' "${!P_OWNED[@]}" | sed 's/, $//') (found through $PTY_READER)"
+  for pid in "${!P_OWNED[@]}"; do pty_send "$pid" TERM; done
   deadline=$((SECONDS + 3))
-  while procfs_any_alive && [ "$SECONDS" -le "$deadline" ]; do sleep 0.05; done
-  for pid in "${!owned[@]}"; do procfs_send "$pid" KILL; done
+  while pty_any_alive && [ "$SECONDS" -le "$deadline" ]; do sleep 0.05; done
+  for pid in "${!P_OWNED[@]}"; do pty_send "$pid" KILL; done
   deadline=$((SECONDS + 2))
-  while procfs_any_alive && [ "$SECONDS" -le "$deadline" ]; do sleep 0.05; done
-  if procfs_any_alive; then
-    echo 'Bridge-owned PTY processes did not stop; refusing binary swap.' >&2
+  while pty_any_alive && [ "$SECONDS" -le "$deadline" ]; do sleep 0.05; done
+  if pty_any_alive; then
+    log_err 'Bridge-owned PTY processes did not stop; refusing binary swap.'
     return 1
-  fi
-}
-
-stop_pty_hosts() {
-  if python3 -c '' >/dev/null 2>&1; then
-    stop_pty_hosts_python
-  elif [ -r /proc/self/stat ]; then
-    log "python3 unavailable; stopping bridge-owned PTY hosts through /proc"
-    stop_pty_hosts_procfs
-  else
-    # Exit 3 tells the Bridge cleanup could not run at all: nothing was signalled.
-    log_err "python3 is required to stop bridge-owned PTY hosts on this platform; no process was stopped"
-    return 3
   fi
 }
 
@@ -449,9 +503,66 @@ done
 # the staged bundle's copy of this script, so this also protects bridges that
 # predate the termux release target and still ask the Hub for linux-arm64.
 # A bundle without METADATA.json is refused too: its target cannot be proven.
+# Print the string value of a top-level key of a JSON object file (the last
+# one wins, as in a JSON parser); print nothing for a non-string value. Fails
+# on an unterminated string, unbalanced brackets or a non-object document.
+json_top_level_string() {
+  awk -v want="$2" '
+    function hexval(h,   i, c, v) {
+      v = 0; h = tolower(h)
+      for (i = 1; i <= 4; i++) {
+        c = index("0123456789abcdef", substr(h, i, 1))
+        if (!c) return -1
+        v = v * 16 + c - 1
+      }
+      return v
+    }
+    { doc = doc $0 "\n" }
+    END {
+      n = length(doc); depth = 0; top = ""; expect_key = 0; pending = 0; key = ""; result = ""
+      for (i = 1; i <= n; i++) {
+        c = substr(doc, i, 1)
+        if (c == "\"") {
+          s = ""
+          for (i++; i <= n; i++) {
+            c = substr(doc, i, 1)
+            if (c == "\"") break
+            if (c != "\\") { s = s c; continue }
+            e = substr(doc, ++i, 1)
+            if (e == "n") s = s "\n"; else if (e == "t") s = s "\t"; else if (e == "r") s = s "\r"
+            else if (e == "b") s = s "\b"; else if (e == "f") s = s "\f"
+            else if (e == "u") {
+              v = hexval(substr(doc, i + 1, 4))
+              if (v > 0 && v < 128) { s = s sprintf("%c", v); i += 4 } else s = s "\\u"
+            } else s = s e
+          }
+          if (i > n) exit 1
+          if (depth == 1 && top == "{") {
+            if (expect_key) { key = s; expect_key = 0 }
+            else if (pending) { if (key == want) result = s; pending = 0 }
+          }
+          continue
+        }
+        if (c == "{" || c == "[") {
+          if (depth == 0) { if (top != "") exit 1; top = c; expect_key = (c == "{") }
+          else if (depth == 1 && pending) { if (key == want) result = ""; pending = 0 }
+          depth++
+          continue
+        }
+        if (c == "}" || c == "]") { if (--depth < 0) exit 1; continue }
+        if (depth == 1 && top == "{") {
+          if (c == ":") pending = 1
+          else if (c == ",") { expect_key = 1; pending = 0 }
+          else if (pending && c !~ /[ \t\r\n]/) { if (key == want) result = ""; pending = 0 }
+        }
+      }
+      if (depth != 0 || top != "{") exit 1
+      print result
+    }' "$1"
+}
+
 if is_termux; then
-  staged_target="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("target", ""))' \
-    "$STAGE_BIN/../METADATA.json" 2>/dev/null || true)"
+  staged_target="$(json_top_level_string "$STAGE_BIN/../METADATA.json" target 2>/dev/null || true)"
   case "$staged_target" in
     termux-*) log "  BUNDLE_TARGET:  $staged_target" ;;
     *)
@@ -471,31 +582,95 @@ if [ -z "$SERVICE_NAME" ] && [ -z "$RESTART_HOOK" ] && is_termux && [ -n "${PREF
   && grep -Fqs -- "$DATA_DIR/bin/ham-bridge" "$PREFIX/var/service/ham-bridge/run"; then
   SERVICE_NAME=ham-bridge
 fi
+# The first word of a shell-quoted command line (POSIX shlex rules: quotes,
+# backslash escapes, whitespace separation); sets SHELL_WORD. Fails on an
+# unterminated quote or a trailing backslash anywhere in the line.
+shell_first_word() {
+  local line="$1" i=0 n=${#1} c quote='' word='' started=false finished=false
+  SHELL_WORD=''
+  while [ "$i" -lt "$n" ]; do
+    c="${line:i:1}"
+    if [ "$quote" = "'" ]; then
+      if [ "$c" = "'" ]; then quote=''; else "$finished" || word+="$c"; fi
+    elif [ "$quote" = '"' ]; then
+      if [ "$c" = '"' ]; then
+        quote=''
+      else
+        if [ "$c" = '\' ]; then
+          i=$((i + 1))
+          [ "$i" -lt "$n" ] || return 1
+          case "${line:i:1}" in '"'|'\') c="${line:i:1}" ;; *) c="\\${line:i:1}" ;; esac
+        fi
+        "$finished" || word+="$c"
+      fi
+    else
+      case "$c" in
+        ' '|$'\t'|$'\r'|$'\n') ! "$started" || finished=true ;;
+        "'"|'"') quote="$c" started=true ;;
+        '\')
+          i=$((i + 1))
+          [ "$i" -lt "$n" ] || return 1
+          "$finished" || word+="${line:i:1}"
+          started=true
+          ;;
+        *) "$finished" || word+="$c"; started=true ;;
+      esac
+    fi
+    i=$((i + 1))
+  done
+  [ -z "$quote" ] && "$started" || return 1
+  SHELL_WORD="$word"
+}
+
+# Print a string value of a launchd plist key path (e.g. ProgramArguments.0).
+plist_string() {
+  command -v plutil >/dev/null 2>&1 || return 1
+  plutil -extract "$2" raw -o - "$1" 2>/dev/null && return 0
+  # macOS before 12 has no raw format: unwrap the one-value XML document.
+  plutil -extract "$2" xml1 -o - "$1" 2>/dev/null \
+    | sed -n 's:^[[:space:]]*<string>\(.*\)</string>[[:space:]]*$:\1:p' \
+    | sed -e 's/&lt;/</g' -e 's/&gt;/>/g' -e 's/&quot;/"/g' -e "s/&apos;/'/g" -e 's/&amp;/\&/g' \
+    | grep . || return 1
+}
+
+# Find the systemd user unit or LaunchAgent whose program is this bridge's
+# installed ham-bridge; sets SERVICE_NAME (empty when there is none). Refuses
+# to guess between several.
+find_bridge_service() {
+  local exe unit line plist value pct='%%' dollars='$$' matches=0 match=''
+  exe="$DATA_DIR/bin/ham-bridge"
+  while [[ "$exe" == *//* ]]; do exe="${exe//\/\///}"; done
+  while [[ "$exe" == */./* ]]; do exe="${exe//\/.\///}"; done
+  for unit in "$HOME/.config/systemd/user"/*.service; do
+    [ -f "$unit" ] && [ -r "$unit" ] || continue
+    while IFS= read -r line || [ -n "$line" ]; do
+      line="${line%$'\r'}"
+      case "$line" in ExecStart=*) ;; *) continue ;; esac
+      shell_first_word "${line#ExecStart=}" || continue
+      value="${SHELL_WORD//"$pct"/%}"
+      value="${value//"$dollars"/\$}"
+      if [ "$value" = "$exe" ]; then
+        matches=$((matches + 1)) match="${unit##*/}"
+        break
+      fi
+    done < "$unit"
+  done
+  for plist in "$HOME/Library/LaunchAgents"/*.plist; do
+    [ -f "$plist" ] || continue
+    value="$(plist_string "$plist" ProgramArguments.0)" || continue
+    [ "$value" = "$exe" ] || continue
+    value="$(plist_string "$plist" Label)" || continue
+    matches=$((matches + 1)) match="$value"
+  done
+  if [ "$matches" -gt 1 ]; then
+    log_err "Multiple services reference this bridge; specify --service-name."
+    exit 1
+  fi
+  SERVICE_NAME="$match"
+}
+
 if [ -z "$SERVICE_NAME" ] && [ -z "$RESTART_HOOK" ]; then
-  SERVICE_NAME="$(python3 - "$DATA_DIR" <<'PY_SERVICE'
-import pathlib, plistlib, shlex, sys
-home = pathlib.Path.home()
-exe = str(pathlib.Path(sys.argv[1])/'bin/ham-bridge')
-matches = []
-for unit in (home/'.config/systemd/user').glob('*.service'):
-    text = unit.read_text()
-    for line in text.splitlines():
-        if not line.startswith('ExecStart='): continue
-        try: args = shlex.split(line[len('ExecStart='):])
-        except ValueError: continue
-        if args and args[0].replace('%%', '%').replace('$$', '$') == exe:
-            matches.append(unit.name)
-            break
-for file in (home/'Library/LaunchAgents').glob('*.plist'):
-    try:
-        plist = plistlib.loads(file.read_bytes())
-        args = plist.get('ProgramArguments', [])
-        if args and args[0] == exe: matches.append(plist['Label'])
-    except (ValueError, OSError): pass
-if len(matches) > 1: sys.exit('Multiple services reference this bridge; specify --service-name.')
-print(matches[0] if matches else '')
-PY_SERVICE
-)"
+  find_bridge_service
 fi
 log "  SERVICE_NAME:   ${SERVICE_NAME:-standalone}"
 

@@ -3,7 +3,9 @@
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -27,6 +29,13 @@ class BridgeUpdateReleaseTests(unittest.TestCase):
             self.env.pop(key, None)
         self.log = self.root/'commands.jsonl'
         self.env['UPDATE_TEST_LOG'] = str(self.log)
+        # The supervisor must run without python3 or perl: both are stubs that
+        # record the call and fail. Python mocks run sys.executable directly.
+        self.forbidden = self.root/'forbidden'
+        self.env['UPDATE_TEST_FORBIDDEN'] = str(self.forbidden)
+        for tool in ('python3', 'python', 'perl'):
+            self.stub(tool, '#!/bin/sh\necho "$0 $*" >> "$UPDATE_TEST_FORBIDDEN"\nexit 127\n')
+        self.addCleanup(self.assert_no_forbidden_calls)
         self.stub('systemctl', '''#!/usr/bin/env python3
 import json, os, sys
 with open(os.environ['UPDATE_TEST_LOG'], 'a') as f: f.write(json.dumps(sys.argv[1:])+'\\n')
@@ -45,11 +54,17 @@ if 'show' in sys.argv: print('loaded')
         (units/'brg_actual.service').write_text('[Service]\nExecStart="'+str(self.data/'bin/ham-bridge')+'" --config "installation config"\n')
 
     def write(self, path, text):
-        path.write_text(text)
+        # Python mocks and fixture hosts name this interpreter: python3 on the
+        # supervisor's PATH is a failing stub.
+        path.write_text(text.replace('#!/usr/bin/env python3\n', '#!'+sys.executable+'\n', 1))
         path.chmod(0o755)
 
     def stub(self, name, text):
         self.write(self.mock/name, text)
+
+    def assert_no_forbidden_calls(self):
+        calls = self.forbidden.read_text() if self.forbidden.exists() else ''
+        self.assertEqual(calls, '', 'the supervisor ran python3/perl')
 
     def apply(self, **env):
         return subprocess.run(['bash', str(ROOT/'scripts/apply-bridge-update.sh'),
@@ -278,17 +293,14 @@ while True: time.sleep(1)
         self.assertTrue(self.shim.exists())
         self.assertFalse(self.log.exists())
 
-    def stop_only_without_python3(self, *args):
+    def stop_only(self, *args, **env):
         # NixOS bridge units carry only their declared PATH, which may have no
-        # python3. Shadow it with a failing one for the supervisor only; the
-        # fixture hosts above were already started with the real interpreter.
-        no_python = self.root/'no-python'
-        no_python.mkdir(exist_ok=True)
-        self.write(no_python/'python3', '#!/bin/sh\necho "python3: command not found" >&2\nexit 127\n')
+        # python3: setUp shadows it with a failing one for the supervisor. The
+        # fixture hosts above were started with the real interpreter.
         return subprocess.run(['bash', str(ROOT/'scripts/apply-bridge-update.sh'),
                                '--data-dir', str(self.data), '--stop-pty-hosts-only', *args],
-                              env=dict(self.env, PATH=str(no_python)+':'+self.env['PATH']),
-                              text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=15)
+                              env=dict(self.env, **env),
+                              text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30)
 
     @unittest.skipUnless(Path('/proc').exists(), 'process isolation fixture uses Linux procfs')
     def test_stop_only_cleanup_without_python3_keeps_ownership_scope(self):
@@ -300,9 +312,9 @@ while True: time.sleep(1)
         unrelated, unrelated_child = self.start_host(shared, self.root/'unrelated.sock', self.root/'unrelated.pid')
         (self.data/'bin/ham-pty-host').unlink()
         self.write(self.data/'bin/ham-pty-host', '#!/bin/sh\nexit 0\n')
-        result = self.stop_only_without_python3('--pty-host-socket', str(self.root/'target.sock'))
+        result = self.stop_only('--pty-host-socket', str(self.root/'target.sock'))
         self.assertEqual(result.returncode, 0, result.stdout)
-        self.assertIn('python3 unavailable; stopping bridge-owned PTY hosts through /proc', result.stdout)
+        self.assertIn('(found through procfs)', result.stdout)
         self.assertIn('stopping bridge-owned PTY processes:', result.stdout)
         for pid in (live.pid, live_child, stale.pid, stale_child, target.pid, target_child):
             self.assertFalse(self.process_alive(pid), result.stdout)
@@ -313,11 +325,213 @@ while True: time.sleep(1)
     @unittest.skipUnless(Path('/proc').exists(), 'process isolation fixture uses Linux procfs')
     def test_stop_only_cleanup_without_python3_and_no_hosts_succeeds(self):
         other, other_child = self.start_host(self.home/'data/bridges/brg_other/bin/ham-pty-host', self.root/'other.sock', self.root/'other.pid')
-        result = self.stop_only_without_python3()
+        result = self.stop_only()
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertNotIn('stopping bridge-owned PTY processes:', result.stdout)
         self.assertTrue(self.process_alive(other.pid), result.stdout)
         self.assertTrue(self.process_alive(other_child), result.stdout)
+
+    # Hosts without /proc (macOS) are read through ps. Linux procps prints the
+    # same columns; the shim rewrites a fixture host's command the way macOS ps
+    # shows a native binary: argv joined with spaces, never quoted. It can also
+    # fake a reused PID (new start time), a survivor, or a failing ps.
+    def ps_reader(self, commands):
+        real = shutil.which('ps')
+        mapping = self.root/'ps-map'
+        mapping.write_text(''.join(f'{pid}\t{command}\n' for pid, command in commands.items()))
+        self.stub('ps', '''#!/usr/bin/env bash
+[ -z "${PS_TEST_FAIL:-}" ] || exit 1
+case " $* " in *" -axww "*) mode=list ;; *) mode=row ;; esac
+requested=''
+for arg in "$@"; do [ "$prev" = -p ] && requested=",$arg,"; prev="$arg"; done
+out="$('''+real+''' "$@")"; status=$?
+printf '%s\\n' "$out" | awk -v mode="$mode" -v map="$PS_TEST_MAP" -v reborn="${PS_TEST_REBORN:-}" \\
+    -v ghost="${PS_TEST_GHOST:-}" -v ghostfile="$PS_TEST_MAP.ghost" '
+  BEGIN { while ((getline line < map) > 0) { i = index(line, "\\t"); cmd[substr(line, 1, i - 1)] = substr(line, i + 1) } }
+  $0 == "" { next }
+  mode == "list" && $1 == ghost { print $1, $3, "S", $5, $6, $7, $8, $9 > ghostfile }
+  mode == "list" && ($1 in cmd) { out = $1; for (k = 2; k <= 9; k++) out = out " " $k; print out " " cmd[$1]; next }
+  mode == "row" && $1 == reborn { print $1, $2, $3, "Thu", "Jan", "1", "00:00:00", "1970"; next }
+  mode == "row" && $1 == ghost { next }
+  { print }'
+if [ "$mode" = row ] && [ -n "${PS_TEST_GHOST:-}" ] && [[ "$requested" == *",$PS_TEST_GHOST,"* ]]; then
+  cat "$PS_TEST_MAP.ghost"; exit 0
+fi
+exit $status
+''')
+        return dict(PTY_PROCESS_READER='ps', PS_TEST_MAP=str(mapping))
+
+    @unittest.skipUnless(Path('/proc').exists(), 'process fixture uses Linux procfs to check liveness')
+    def test_ps_reader_recovers_unquoted_argv_and_keeps_ownership_scope(self):
+        live_bin = self.data/'bin/ham-pty-host'
+        live, live_child = self.start_host(live_bin, self.root/'live.sock', self.root/'live.pid')
+        other_bin = self.home/'data/bridges/brg_other/bin/ham-pty-host'
+        other, other_child = self.start_host(other_bin, self.root/'other.sock', self.root/'other.pid')
+        shared = self.root/'shared dir/bin/ham-pty-host'
+        target_socket = self.root/'sock dir/target.sock'
+        target, target_child = self.start_host(shared, target_socket, self.root/'target.pid')
+        unrelated, unrelated_child = self.start_host(shared, self.root/'sock dir/other.sock', self.root/'unrelated.pid')
+        env = self.ps_reader({
+            live.pid: f'{live_bin} daemon --socket {self.root}/live.sock',
+            other.pid: f'{other_bin} daemon --socket {self.root}/other.sock',
+            target.pid: f'{shared} --socket {target_socket} daemon',
+            unrelated.pid: f'{shared} daemon --socket {self.root}/sock dir/other.sock',
+        })
+        result = self.stop_only('--pty-host-socket', str(target_socket), **env)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn('(found through ps)', result.stdout)
+        for pid in (live.pid, live_child, target.pid, target_child):
+            self.assertFalse(self.process_alive(pid), result.stdout)
+        for pid in (other.pid, other_child, unrelated.pid, unrelated_child):
+            self.assertTrue(self.process_alive(pid), result.stdout)
+
+    @unittest.skipUnless(Path('/proc').exists(), 'process fixture uses Linux procfs to check liveness')
+    def test_ps_reader_never_signals_a_reused_pid(self):
+        host_bin = self.data/'bin/ham-pty-host'
+        host, child = self.start_host(host_bin, self.root/'live.sock', self.root/'live.pid')
+        env = self.ps_reader({host.pid: f'{host_bin} daemon --socket {self.root}/live.sock'})
+        result = self.stop_only(PS_TEST_REBORN=str(host.pid), **env)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertTrue(self.process_alive(host.pid), 'a PID with a new start time is another process')
+        self.assertFalse(self.process_alive(child), result.stdout)
+
+    @unittest.skipUnless(Path('/proc').exists(), 'process fixture uses Linux procfs to check liveness')
+    def test_ps_reader_refuses_swap_when_a_host_survives(self):
+        host_bin = self.data/'bin/ham-pty-host'
+        host, child = self.start_host(host_bin, self.root/'live.sock', self.root/'live.pid')
+        env = self.ps_reader({host.pid: f'{host_bin} daemon --socket {self.root}/live.sock'})
+        result = self.stop_only(PS_TEST_GHOST=str(host.pid), **env)
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn('did not stop; refusing binary swap', result.stdout)
+        self.assertFalse(self.process_alive(child), result.stdout)
+
+    @unittest.skipUnless(Path('/proc').exists(), 'process fixture uses Linux procfs to check liveness')
+    def test_cleanup_that_cannot_list_processes_exits_3_and_signals_nothing(self):
+        host_bin = self.data/'bin/ham-pty-host'
+        host, child = self.start_host(host_bin, self.root/'live.sock', self.root/'live.pid')
+        env = self.ps_reader({host.pid: f'{host_bin} daemon --socket {self.root}/live.sock'})
+        for case, extra in (('ps fails', dict(env, PS_TEST_FAIL='1')), ('no reader', dict(PTY_PROCESS_READER='none'))):
+            with self.subTest(case):
+                result = self.stop_only(**extra)
+                self.assertEqual(result.returncode, 3, result.stdout)
+                self.assertIn('no process was stopped', result.stdout)
+                self.assertTrue(self.process_alive(host.pid))
+                self.assertTrue(self.process_alive(child))
+
+    def test_multiple_services_referencing_the_bridge_are_refused(self):
+        units = self.home/'.config/systemd/user'
+        (units/'legacy.service').write_text('[Service]\nExecStart='+str(self.data/'bin/ham-bridge').replace(' ', '\\ ')+'\n')
+        old = (self.data/'bin/ham-bridge').read_bytes()
+        result = self.apply()
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn('Multiple services reference this bridge; specify --service-name.', result.stdout)
+        self.assertFalse(self.log.exists(), 'service never touched')
+        self.assertEqual((self.data/'bin/ham-bridge').read_bytes(), old)
+
+    def test_systemd_lookup_follows_shell_quoting_and_unit_escapes(self):
+        data = self.home/"data/bridges/brg_50%$x 'q'"
+        shutil.copytree(self.data, data, symlinks=True)
+        self.data = data
+        exe = str(data/'bin/ham-bridge')
+        units = self.home/'.config/systemd/user'
+        (units/'brg_actual.service').unlink()
+        escaped = exe.replace('%', '%%').replace('$', '$$')
+        (units/'decoy-unbalanced.service').write_text('[Service]\nExecStart="'+escaped+'\n')
+        (units/'decoy-argument.service').write_text('[Service]\nExecStart=/bin/env "'+escaped+'"\n')
+        (units/'decoy-indented.service').write_text('[Service]\n ExecStart="'+escaped+'"\n')
+        (units/'decoy-unescaped.service').write_text('[Service]\nExecStart="'+exe.replace('$', '$$$$')+'"\n')
+        quoted = escaped.replace("'", "\\'").replace(' ', '\\ ')
+        (units/'actual.service').write_text('[Unit]\nDescription=x\r\n[Service]\nExecStartPre=/bin/true\nExecStart='+quoted+' --config "c d"\r\n')
+        result = self.apply()
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn('SERVICE_NAME:   actual.service', result.stdout)
+        self.assertIn(['--user', 'restart', 'actual.service'], self.commands())
+
+    def launch_agents(self):
+        import plistlib
+        self.stub('uname', '#!/bin/sh\nprintf "Darwin\\n"\n')
+        self.stub('launchctl', """#!/usr/bin/env python3
+import json, os, sys
+with open(os.environ['UPDATE_TEST_LOG'], 'a') as f: f.write(json.dumps(sys.argv[1:])+'\\n')
+""")
+        # plutil -extract KEYPATH raw|xml1 -o - FILE; PLUTIL_NO_RAW models macOS < 12.
+        self.stub('plutil', """#!/usr/bin/env python3
+import os, plistlib, sys
+_, _, keypath, fmt, _, _, path = sys.argv
+if fmt == 'raw' and os.environ.get('PLUTIL_NO_RAW'): sys.exit(1)
+value = plistlib.loads(open(path, 'rb').read())
+try:
+    for key in keypath.split('.'): value = value[int(key)] if isinstance(value, list) else value[key]
+except (KeyError, IndexError, ValueError): sys.exit(1)
+if fmt == 'raw': print(value)
+else: sys.stdout.write(plistlib.dumps(value).decode())
+""")
+        (self.home/'.config/systemd/user/brg_actual.service').unlink()
+        agents = self.home/'Library/LaunchAgents'
+        agents.mkdir(parents=True)
+        def agent(name, label, program):
+            (agents/name).write_bytes(plistlib.dumps({'Label': label, 'ProgramArguments': [program, '--config', 'x']}))
+        agent('actual.plist', 'dev.heimdall.bridge & <hub>', str(self.data/'bin/ham-bridge'))
+        agent('other.plist', 'dev.heimdall.other', str(self.home/'data/bridges/brg_other/bin/ham-bridge'))
+        (agents/'broken.plist').write_text('not a plist')
+        return agents
+
+    def test_macos_discovers_launchagent_label_with_plutil(self):
+        self.launch_agents()
+        for case, env in (('raw', {}), ('xml1 fallback', dict(PLUTIL_NO_RAW='1'))):
+            with self.subTest(case):
+                (self.stage/'bin').mkdir(parents=True, exist_ok=True)
+                for binary in ('ham-bridge', 'ham-ctl', 'ham-pty-host', 'heimdall'):
+                    self.write(self.stage/'bin'/binary, '#!/bin/sh\necho new\n')
+                self.log.unlink(missing_ok=True)
+                result = self.apply(**env)
+                self.assertEqual(result.returncode, 0, result.stdout)
+                self.assertIn(['kickstart', '-k', f'gui/{os.geteuid()}/dev.heimdall.bridge & <hub>'], self.commands())
+
+    def test_macos_unit_and_launchagent_for_the_same_bridge_are_refused(self):
+        self.launch_agents()
+        units = self.home/'.config/systemd/user'
+        (units/'brg_actual.service').write_text('[Service]\nExecStart="'+str(self.data/'bin/ham-bridge')+'"\n')
+        result = self.apply()
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn('Multiple services reference this bridge', result.stdout)
+        self.assertFalse(self.log.exists())
+
+    def test_termux_reads_only_the_top_level_bundle_target(self):
+        _, env = self.termux()
+        metadata = self.stage/'METADATA.json'
+        refused = {
+            'nested decoy': json.dumps({'nested': {'target': 'termux-arm64'}, 'target': 'linux-arm64'}),
+            'array decoy': json.dumps({'target': 'linux-arm64', 'x': ['termux-arm64', {'target': 'termux-arm64'}]}),
+            'key in a string': '{"note": "\\"target\\": \\"termux-arm64\\"", "target": "linux-arm64"}',
+            'not an object': json.dumps([{'target': 'termux-arm64'}]),
+            'truncated': '{"target": "termux-arm64"',
+            'not a string': json.dumps({'target': 7}),
+            'no target': json.dumps({'nested': {'target': 'termux-arm64'}}),
+            'earlier duplicate': '{"target": "termux-arm64", "target": "linux-arm64"}',
+        }
+        for case, text in refused.items():
+            with self.subTest(case):
+                metadata.write_text(text)
+                result = self.apply(HEIMDALL_BRIDGE_SERVICE_NAME='ham-bridge', **env)
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertIn('only termux-* bundles run on Android', result.stdout)
+                self.assertFalse(self.log.exists(), 'service never touched')
+        accepted = {
+            'pretty': json.dumps({'product': 'x', 'nested': {'target': 'linux-arm64'}, 'target': 'termux-arm64'}, indent=2),
+            'escaped': '{"target":"termux-\\u0061rm64","t":"\\\\"}',
+            'later duplicate': '{"target": "linux-arm64", "target": "termux-arm64"}',
+        }
+        for case, text in accepted.items():
+            with self.subTest(case):
+                self.stage.mkdir(exist_ok=True)
+                (self.stage/'bin').mkdir(exist_ok=True)
+                for binary in ('ham-bridge', 'ham-ctl', 'ham-pty-host', 'heimdall'):
+                    self.write(self.stage/'bin'/binary, '#!/bin/sh\necho new\n')
+                metadata.write_text(text)
+                result = self.apply(HEIMDALL_BRIDGE_SERVICE_NAME='ham-bridge', **env)
+                self.assertEqual(result.returncode, 0, result.stdout)
+                self.assertIn('BUNDLE_TARGET:  termux-arm64', result.stdout)
 
     def test_release_tarball_contains_executable_supervisor(self):
         outputs = []
