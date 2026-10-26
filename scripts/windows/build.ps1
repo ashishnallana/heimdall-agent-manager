@@ -11,10 +11,13 @@
 # ilammy/msvc-dev-cmd in CI); Odin needs the MSVC linker either way.
 #
 # ham-bridge and ham-ctl link libcurl through src/lib/httpc: the static
-# libcurl.lib (Schannel TLS, Windows certificate store) that ships with the Odin
-# toolchain in <odin root>/vendor/curl/lib, so no curl DLL is needed at runtime.
-# Its version is whatever the pinned Odin release bundles (ODIN_TAG in the
-# release workflow); httpc.init() refuses one older than MIN_CURL_VERSION.
+# libcurl.lib (Schannel TLS, Windows certificate store) and zlib.lib built by
+# scripts/windows/build-libcurl.ps1 from the version pinned in
+# nix/libcurl-pin.json, so no curl DLL is needed at runtime. Pass their
+# directory as -CurlLibDir, or omit it to build them here first. The pinned
+# version is compiled in (-define:HAM_CURL_VERSION) and httpc.init() refuses
+# any other libcurl. The Odin toolchain's own vendor/curl/lib/libcurl.lib is
+# NOT used: it is an unpinned 8.17.0-DEV snapshot without zlib.
 #
 # ham-pty-host is built with a static CRT (+crt-static) so the bundle runs on a
 # stock Windows without the VC++ redistributable (no VCRUNTIME140.dll).
@@ -25,6 +28,7 @@ param(
   [string]$SqliteLibDir = '',
   [string]$SqliteAmalgamationDir = '',
   [string]$PtyHost = '',
+  [string]$CurlLibDir = '',
   [string]$Version = '',
   [string[]]$Components = @('ham-bridge', 'ham-ctl', 'ham-pty-host')
 )
@@ -75,9 +79,17 @@ try {
     $defines = @()
     if ($Version) { $defines += "-define:HAM_APP_VERSION=$($Version.TrimStart('v'))" }
     $srcRoot = (Join-Path $repo 'src') -replace '\\', '/'
-    $odinRoot = (& $Odin root | Out-String).Trim()
-    $curlLibDir = Join-Path $odinRoot 'vendor\curl\lib'
-    if (-not (Test-Path (Join-Path $curlLibDir 'libcurl.lib'))) { throw "libcurl.lib not found in $curlLibDir (the Odin toolchain's vendor/curl)" }
+    $pin = Get-Content -Raw (Join-Path $repo 'nix\libcurl-pin.json') | ConvertFrom-Json
+    $defines += "-define:HAM_CURL_VERSION=$($pin.curl.version)"
+    if (-not $CurlLibDir) {
+      $curlOut = Join-Path $work 'libcurl'
+      & (Join-Path $PSScriptRoot 'build-libcurl.ps1') -OutDir $curlOut # throws on failure
+      $CurlLibDir = Join-Path $curlOut 'lib'
+    }
+    foreach ($lib in 'libcurl.lib', 'zlib.lib') {
+      if (-not (Test-Path (Join-Path $CurlLibDir $lib))) { throw "$lib not found in $CurlLibDir (build it with scripts/windows/build-libcurl.ps1)" }
+    }
+    $curlLibDir = (Resolve-Path $CurlLibDir).Path
     foreach ($pair in @(@('ham-bridge', 'src/bridge'), @('ham-ctl', 'src/ctl'))) {
       if ($Components -notcontains $pair[0]) { continue }
       $out = Join-Path $OutDir ($pair[0] + '.exe')
