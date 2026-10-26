@@ -406,12 +406,7 @@ bridge_hub_runtime_worker :: proc() {
 						delete(ready_bridge_id)
 					}
 					hub_catalog_etag = extract_json_string(text, "catalog_etag", "")
-					// Absent on older hubs -> keep the default (on).
-					bridge_heartbeat_stats_set_enabled(extract_json_bool(text, "heartbeat_stats", true))
-					bridge_hub_set_heartbeat_interval(extract_json_int(text, "heartbeat_interval_seconds", 0))
-					// Absent on older hubs, which neither bound the session by its
-					// credential nor understand bridge_reauth.
-					sync.atomic_store(&bridge_hub_credential_reauth_supported, extract_json_bool(text, "credential_reauth", false))
+					bridge_hub_apply_ready_settings(text)
 					// This connection was opened with the current credential.
 					sync.atomic_store(&bridge_credential_reauth_pending, false)
 					ready = true
@@ -569,12 +564,48 @@ bridge_hub_set_heartbeat_interval :: proc(seconds: int) {
 	sync.atomic_store(&bridge_hub_heartbeat_interval_ns, interval)
 }
 
+// bridge_hub_apply_ready_settings applies the session-tuning members of bridge_ready.
+// Every one is optional: an older hub omits them and the bridge keeps the default.
+bridge_hub_apply_ready_settings :: proc(text: string) {
+	// Absent -> keep the default (on).
+	bridge_heartbeat_stats_set_enabled(extract_json_bool(text, "heartbeat_stats", true))
+	// Absent -> the 45s default.
+	bridge_hub_set_heartbeat_interval(extract_json_int(text, "heartbeat_interval_seconds", 0))
+	// Absent on older hubs, which neither bound the session by its credential nor
+	// understand bridge_reauth.
+	sync.atomic_store(&bridge_hub_credential_reauth_supported, extract_json_bool(text, "credential_reauth", false))
+}
+
+// bridge_hub_send_connect_heartbeat sends the one heartbeat every connection opens
+// with, right after bridge_ready is handled (plan T1b), and returns the anchor the
+// periodic cadence counts from. Waiting a full interval instead would leave the hub
+// without the search tuple, the instance status tuples (the repair for status pushes
+// dropped around the disconnect) and heartbeat liveness for that long after every
+// reconnect. It is an ordinary heartbeat frame, so hubs of every version accept it.
+bridge_hub_send_connect_heartbeat :: proc(conn: ^ws.Connection) -> (anchor_ns: i64) {
+	hb := bridge_hub_heartbeat_json()
+	_ = ws.send_text(conn, hb)
+	delete(hb)
+	// Anchored after the send, so building the frame (stats fork `ps`) does not pull
+	// the first periodic beat earlier than one interval after this one.
+	return time.to_unix_nanoseconds(time.now())
+}
+
+// bridge_hub_heartbeat_due reports whether the periodic heartbeat is due and, when it
+// is, moves the anchor to now, so a tick sends at most one beat. The interval is the
+// one current at the tick: a shorter interval from a newer bridge_ready fires one
+// overdue beat at once, never a catch-up burst.
+bridge_hub_heartbeat_due :: proc(last_ns: ^i64, now_ns, interval_ns: i64) -> bool {
+	if now_ns - last_ns^ < interval_ns do return false
+	last_ns^ = now_ns
+	return true
+}
+
 BRIDGE_HUB_INBOUND_BUDGET :: 32
 
 bridge_hub_runtime_loop :: proc(conn: ^ws.Connection) {
 	defer bridge_tool_live_disconnect()
 	connection_generation := bridge_command_dispatch_begin_connection()
-	last_heartbeat := time.to_unix_nanoseconds(time.now())
 	// PER-CONNECTION inbound chunk reassembly (REQ-SHELL-36). The hub splits any
 	// hub->bridge command larger than one 16-bit WS frame into ordered kind:"chunk"
 	// frames (write_ws_command); we rebuild the original command here before it reaches
@@ -591,9 +622,7 @@ bridge_hub_runtime_loop :: proc(conn: ^ws.Connection) {
 	defer hub_command_reassemblies_free(&reassemblies)
 	// Send one heartbeat immediately on connect so the hub gets the initial
 	// instance digest + schedules_version handshake without waiting a full cycle.
-	init_hb := bridge_hub_heartbeat_json()
-	_ = ws.send_text(conn, init_hb)
-	delete(init_hb)
+	last_heartbeat := bridge_hub_send_connect_heartbeat(conn)
 	// The hub keeps agent blockers in memory only: resend every snapshot on connect.
 	bridge_blockers_mark_all_dirty()
 	bridge_tool_live_drain(conn, true)
@@ -663,14 +692,13 @@ bridge_hub_runtime_loop :: proc(conn: ^ws.Connection) {
 		bridge_blockers_drain_outgoing(conn)
 		bridge_credential_reauth_drain(conn)
 		now := time.to_unix_nanoseconds(time.now())
-		if now - last_heartbeat >= sync.atomic_load(&bridge_hub_heartbeat_interval_ns) {
+		if bridge_hub_heartbeat_due(&last_heartbeat, now, sync.atomic_load(&bridge_hub_heartbeat_interval_ns)) {
 			hb := bridge_hub_heartbeat_json()
 			_ = ws.send_text(conn, hb)
 			delete(hb)
 			// Reconcile: the next drain resends every instance's full snapshot.
 			bridge_blockers_mark_all_dirty()
 			hub_command_reassembly_sweep(&reassemblies, now)
-			last_heartbeat = now
 		}
 		// Yield after a bounded burst. Idle connections retain the low-wake cadence;
 		// busy connections do not artificially process only 40 frames per second.

@@ -25,6 +25,9 @@ test_bridge_hello_and_heartbeats_advertise_the_same_runtime_features :: proc(t: 
 	defer sync.mutex_unlock(&bridge_test_config_mutex)
 	sync.mutex_lock(&keystore_test_mutex)
 	defer sync.mutex_unlock(&keystore_test_mutex)
+	// Stats fork `ps` and ensure a real pty-host daemon; features do not need them.
+	bridge_heartbeat_stats_set_enabled(false)
+	defer bridge_heartbeat_stats_set_enabled(true)
 
 	// The heartbeat serializer is exactly the shared source, element for element.
 	shared := bridge_runtime_features_json()

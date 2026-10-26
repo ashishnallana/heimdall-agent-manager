@@ -7,8 +7,8 @@ import vault "odin_test:lib/vault"
 
 // The bridge search index is process-global, and the test runner is
 // multi-threaded. Tests that rebuild or lock the global index hold this mutex so
-// they don't swap or wipe one another's index mid-assertion.
-@(private = "file")
+// they don't swap or wipe one another's index mid-assertion (package-visible: the
+// connect-heartbeat test rebuilds it too).
 task_chain_search_global_test_mutex: sync.Mutex
 
 @(test)

@@ -242,6 +242,9 @@ test_bridge_hub_reconnect_backoff_is_bounded_and_jittered :: proc(t: ^testing.T)
 // and an older hub that omits it leaves the 45s default.
 @(test)
 test_bridge_hub_heartbeat_interval_follows_hub :: proc(t: ^testing.T) {
+	// The interval is a process global the ready-settings tests also set.
+	sync.mutex_lock(&bridge_test_config_mutex)
+	defer sync.mutex_unlock(&bridge_test_config_mutex)
 	defer bridge_hub_set_heartbeat_interval(0)
 	bridge_hub_set_heartbeat_interval(30)
 	testing.expect_value(t, bridge_hub_heartbeat_interval_ns, i64(30 * time.Second))
