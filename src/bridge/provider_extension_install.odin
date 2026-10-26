@@ -245,6 +245,25 @@ bridge_hub_handle_extension_install_command :: proc(conn: ^ws.Connection, text: 
 	// remaining budget, keeping the total below the dispatcher's sixty-second cap.
 	deadline := time.time_add(time.now(), 55 * time.Second)
 	install_deadline := time.time_add(deadline, -8 * time.Second)
+	expected_version := bridge_provider_extension_read_manifest_version(ext_path, prov)
+	canonical_provider := "claude" if prov == "claude-code" else prov
+
+	// REQ-MB-5: provider plugin registration is per OS user, so another Bridge
+	// under the same account may already have registered its own copy. Installing
+	// would re-point the marketplace at this Bridge's bundle; leave an equal or
+	// newer registration alone and only upgrade an older or unusable one.
+	if installed_version, current := bridge_extension_install_current(conn, command_id, canonical_provider, expected_version); current {
+		_ = bridge_provider_extension_install_send_progress(conn, command_id, prov, "succeeded", 100,
+			fmt.tprintf("Provider extension %s is already installed (bundled %s); registration left unchanged", installed_version, expected_version))
+		if command_id != "" {
+			final := bridge_command_result_json(command_id, "succeeded", "installed")
+			defer delete(final)
+			bridge_runtime_cache_command(command_id, final)
+			if conn != nil do _ = bridge_hub_send(conn, final)
+		}
+		return
+	}
+
 	if prov == "codex" {
 		mp_root, has_mp := bridge_codex_resolve_marketplace_root(ext_path)
 		if !has_mp {
@@ -277,8 +296,6 @@ bridge_hub_handle_extension_install_command :: proc(conn: ^ws.Connection, text: 
 	}
 
 	_ = bridge_provider_extension_install_send_progress(conn, command_id, prov, "installing", 80, "Verifying installed extension status...")
-	expected_version := bridge_provider_extension_read_manifest_version(ext_path, prov)
-	canonical_provider := "claude" if prov == "claude-code" else prov
 	// Discovery evaluates the catalog minimum too. Compare against the manifest
 	// as well, since a newer bundle may arrive before the catalog is refreshed.
 	results := bridge_extension_discover({canonical_provider})
@@ -318,6 +335,32 @@ bridge_hub_handle_extension_install_command :: proc(conn: ^ws.Connection, text: 
 		bridge_runtime_cache_command(command_id, final)
 		if conn != nil do _ = bridge_hub_send(conn, final)
 	}
+}
+
+// bridge_extension_install_current reports whether the provider already has a
+// usable extension at expected_version or newer. When it does, the discovery
+// report is sent so the Hub sees the version that stays installed. An unknown
+// bundled or installed version is never treated as current.
+bridge_extension_install_current :: proc(conn: ^ws.Connection, command_id, canonical_provider, expected_version: string) -> (installed_version: string, current: bool) {
+	if expected_version == "" do return "", false
+	results := bridge_extension_discover({canonical_provider})
+	defer {
+		for &result in results do bridge_provider_path_destroy(&result)
+		delete(results)
+	}
+	for r in results {
+		if r.provider != canonical_provider && !(canonical_provider == "claude" && r.provider == "claude-code") do continue
+		current = r.state == "present" && r.extension_state == "present" && r.extension_version != "" &&
+			bridge_provider_extension_version_compare(r.extension_version, expected_version) >= 0
+		if current do installed_version = strings.clone(r.extension_version, context.temp_allocator)
+		break
+	}
+	if current {
+		report := bridge_provider_discovery_report_json(command_id, results)
+		defer delete(report)
+		if conn != nil do _ = bridge_hub_send(conn, report)
+	}
+	return
 }
 
 bridge_extension_install_fail :: proc(conn: ^ws.Connection, command_id, provider, code, message: string) {

@@ -110,6 +110,9 @@ test_install_already: bool
 test_install_probe_state: string
 test_install_probe_version: string
 test_install_probe_count: int
+// The discovery before any installer step sees the pre-install registration.
+test_install_pre_state: string
+test_install_pre_version: string
 test_install_command_id: string
 test_install_test: ^testing.T
 
@@ -131,12 +134,13 @@ test_install_discover :: proc(filter: []string) -> [dynamic]Bridge_Provider_Path
 	test_install_probe_count += 1
 	cached, _ := bridge_runtime_cached_command(test_install_command_id)
 	testing.expect(test_install_test, !strings.contains(cached, `"status":"succeeded"`), "success must not be cached before verification")
+	pre_install := test_install_probe_count == 1
 	results := make([dynamic]Bridge_Provider_Path)
 	append(&results, Bridge_Provider_Path{
 		provider = strings.clone(filter[0]),
 		state = strings.clone("present"),
-		extension_state = strings.clone(test_install_probe_state),
-		extension_version = strings.clone(test_install_probe_version),
+		extension_state = strings.clone(test_install_pre_state if pre_install else test_install_probe_state),
+		extension_version = strings.clone(test_install_pre_version if pre_install else test_install_probe_version),
 	})
 	return results
 }
@@ -164,6 +168,8 @@ test_install_reset :: proc(t: ^testing.T, name: string) {
 	test_install_probe_state = "present"
 	test_install_probe_version = "0.4.31"
 	test_install_probe_count = 0
+	test_install_pre_state = "absent"
+	test_install_pre_version = ""
 }
 
 test_install_run :: proc(provider, path: string) -> string {
@@ -190,7 +196,7 @@ test_bridge_extension_install_provider_steps :: proc(t: ^testing.T) {
 		result := test_install_run(provider, test_install_path({root, variant}))
 		testing.expectf(t, strings.contains(result, `"status":"succeeded"`), "%s: %s", provider, result)
 		delete(result)
-		testing.expect_value(t, test_install_probe_count, 1)
+		testing.expect_value(t, test_install_probe_count, 2)
 		if provider == "codex" {
 			testing.expect_value(t, len(test_install_calls), 2)
 			if len(test_install_calls) == 2 {
@@ -247,10 +253,10 @@ test_bridge_extension_install_claude_update_and_errors :: proc(t: ^testing.T) {
 		result := test_install_run("claude", test_install_path({root, "claude-code"}))
 		if failed_step == 0 {
 			testing.expect(t, strings.contains(result, `"status":"succeeded"`))
-			testing.expect_value(t, test_install_probe_count, 1)
+			testing.expect_value(t, test_install_probe_count, 2)
 		} else {
 			testing.expect(t, strings.contains(result, "Mock installation error"))
-			testing.expect_value(t, test_install_probe_count, 0)
+			testing.expect_value(t, test_install_probe_count, 1)
 		}
 		delete(result)
 		if failed_step != 1 && len(test_install_calls) == 2 {
@@ -263,7 +269,7 @@ test_bridge_extension_install_claude_update_and_errors :: proc(t: ^testing.T) {
 		result := test_install_run("codex", test_install_path({root, "codex"}))
 		testing.expect(t, strings.contains(result, "Mock installation error"))
 		testing.expect_value(t, len(test_install_calls), failed_step)
-		testing.expect_value(t, test_install_probe_count, 0)
+		testing.expect_value(t, test_install_probe_count, 1)
 		delete(result)
 	}
 }
@@ -300,6 +306,68 @@ test_bridge_extension_install_custom_marketplace_and_invalid_input :: proc(t: ^t
 	_, _, ok := bridge_extension_install_step({"/fake/provider"}, time.time_add(time.now(), -time.Second))
 	testing.expect(t, !ok)
 	testing.expect_value(t, len(test_install_calls), 0)
+}
+
+@(test)
+test_bridge_extension_install_never_downgrades_registration :: proc(t: ^testing.T) {
+	sync.mutex_lock(&test_install_mu)
+	defer sync.mutex_unlock(&test_install_mu)
+	runner, discover := bridge_extension_install_runner, bridge_extension_discover
+	defer { bridge_extension_install_runner = runner; bridge_extension_discover = discover }
+	bridge_extension_install_runner = test_install_runner
+	bridge_extension_discover = test_install_discover
+	root := test_install_fixture(t)
+	defer _ = os.remove_all(root)
+	// The fixture bundles 0.4.31; another Bridge on the same OS user registered pre_version.
+	Case :: struct { pre_version: string, skips: bool }
+	cases := []Case{
+		{"0.4.31", true}, {"v0.4.31", true}, {"0.4.32", true}, {"0.10.0", true}, {"1.0.0", true},
+		{"0.4.30", false}, {"0.4.9", false}, {"0.3.99", false},
+	}
+	for provider in ([]string{"antigravity", "claude", "claude-code", "codex"}) {
+		variant := "claude-code" if provider == "claude" else provider
+		for c in cases {
+			test_install_reset(t, fmt.tprintf("%s-%s", provider, c.pre_version))
+			test_install_pre_state = "present"
+			test_install_pre_version = c.pre_version
+			result := test_install_run(provider, test_install_path({root, variant}))
+			testing.expectf(t, strings.contains(result, `"status":"succeeded"`), "%s %s: %s", provider, c.pre_version, result)
+			delete(result)
+			if c.skips {
+				testing.expectf(t, len(test_install_calls) == 0, "%s %s: registration re-pointed by %d installer calls", provider, c.pre_version, len(test_install_calls))
+				testing.expect_value(t, test_install_probe_count, 1)
+				continue
+			}
+			testing.expect_value(t, test_install_probe_count, 2)
+			if provider == "codex" {
+				testing.expectf(t, len(test_install_calls) == 2 && test_install_calls[0][3] == "add" && test_install_calls[0][4] == root,
+					"%s %s: older registration must be re-pointed", provider, c.pre_version)
+			} else {
+				testing.expectf(t, len(test_install_calls) == 1 && test_install_calls[0][2] == "install",
+					"%s %s: older registration must be upgraded", provider, c.pre_version)
+			}
+		}
+	}
+	// An unusable registration at a current version is still repaired, and an
+	// unknown installed version never counts as current.
+	for state in ([]string{"disabled", "outdated", "error", "absent", "unknown-version"}) {
+		test_install_reset(t, state)
+		test_install_pre_state = "present" if state == "unknown-version" else state
+		test_install_pre_version = "" if state == "unknown-version" else "0.5.0"
+		result := test_install_run("claude", test_install_path({root, "claude-code"}))
+		testing.expectf(t, strings.contains(result, `"status":"succeeded"`), "%s: %s", state, result)
+		delete(result)
+		testing.expectf(t, len(test_install_calls) == 1, "%s: expected one install call, got %d", state, len(test_install_calls))
+		testing.expect_value(t, test_install_probe_count, 2)
+	}
+	// A failed upgrade of an older registration still reports the failure.
+	test_install_reset(t, "older-fails")
+	test_install_pre_state = "present"
+	test_install_pre_version = "0.4.0"
+	test_install_failure_step = 1
+	result := test_install_run("antigravity", test_install_path({root, "antigravity"}))
+	testing.expect(t, strings.contains(result, "Mock installation error"))
+	delete(result)
 }
 
 test_install_path :: proc(parts: []string) -> string {
