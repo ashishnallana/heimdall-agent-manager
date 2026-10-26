@@ -228,7 +228,7 @@ cat > "$stage/METADATA.json" <<META
   "commit": "$commit",
   "built_at": "$built_at_iso",
   "binaries": $binaries_json,
-  "http_dependency": "libcurl >= 7.84 (libcurl.so.4 on Linux -- e.g. Debian 12+, Ubuntu 24.04+; /usr/lib/libcurl.4.dylib on macOS 13+). Outbound HTTPS goes through it; NOT bundled.",
+  "http_dependency": "libcurl >= 7.80 (libcurl.so.4 on Linux -- e.g. Debian 12+, Ubuntu 22.04+; /usr/lib/libcurl.4.dylib on macOS 13+). Outbound HTTPS goes through it; NOT bundled.",
   "tls_dependency": "socat (DEFAULT bridge->hub WebSocket TLS transport; NOT bundled -- install it with your system package manager). OpenSSL s_client is the legacy fallback, used only when HAM_TLS_BACKEND=s_client; it is resolved from the system PATH and is NOT bundled in this tarball."
 }
 META

@@ -666,3 +666,42 @@ tool_present :: proc(name: string) -> bool {
 	state, _, _, err := os.process_exec(os.Process_Desc{command = []string{"sh", "-c", fmt.tprintf("command -v %s >/dev/null", name)}}, context.temp_allocator)
 	return err == nil && state.exited && state.success
 }
+
+// ---- response header collection (CURLOPT_HEADERFUNCTION) ---------------------------
+
+@(test)
+headers_are_the_final_responses_only :: proc(t: ^testing.T) {
+	if !must_init(t) do return
+	big := strings.repeat("v", MAX_RESPONSE_HEADER_BYTES, context.temp_allocator)
+	s := test_server_start({
+		// interim 100 + final; folded header; chunked trailer must not appear
+		{chunks = {"HTTP/1.1 100 Continue\r\nX-Interim: yes\r\n\r\nHTTP/1.1 200 OK\r\nX-Final: a\r\nX-Folded: one\r\n two\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n2\r\nok\r\n0\r\nX-Trailer: t\r\n\r\n"}},
+		// a followed redirect: its Location must not leak into the final headers
+		{chunks = {test_reply(302, "Found", "Location: /next\r\nX-Hop: 1\r\n", "")}},
+		{chunks = {test_reply(200, "OK", "x-final: B\r\n", "done")}},
+		// header block over the cap
+		{chunks = {test_reply(200, "OK", fmt.tprintf("X-Big: %s\r\n", big), "x")}},
+	})
+	defer test_server_stop(s)
+	r1, e1 := send({method = .GET, url = test_server_url(s)})
+	defer response_destroy(&r1)
+	testing.expect_value(t, e1, Error.None)
+	testing.expect_value(t, text(r1), "ok")
+	_, interim := header(r1, "x-interim")
+	_, trailer := header(r1, "X-Trailer")
+	testing.expect(t, !interim, "1xx headers are dropped")
+	testing.expect(t, !trailer, "trailers are not response headers")
+	folded, _ := header(r1, "x-folded")
+	testing.expect_value(t, folded, "one two")
+	r2, e2 := send({method = .GET, url = test_server_url(s), max_redirects = 1})
+	defer response_destroy(&r2)
+	testing.expect(t, e2 == .None && r2.status == 200)
+	final, _ := header(r2, "X-FINAL")
+	testing.expect_value(t, final, "B")
+	_, hop := header(r2, "x-hop")
+	_, loc := header(r2, "location")
+	testing.expect(t, !hop && !loc, "a redirect's headers are reset by the next status line")
+	r3, e3 := send({method = .GET, url = test_server_url(s)})
+	defer response_destroy(&r3)
+	testing.expect_value(t, e3, Error.Too_Large)
+}

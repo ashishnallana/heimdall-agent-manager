@@ -94,7 +94,9 @@ Transfer :: struct {
 	prereq_reached: bool,
 	cancel:         ^bool,
 	status:         int,
-	headers:        [dynamic]Header,
+	headers:        [dynamic]Header, // the current (final) response's headers
+	header_bytes:   int,
+	body_started:   bool, // header lines after the body are trailers: ignored
 	detail:         string, // temp-allocated
 }
 
@@ -215,6 +217,8 @@ perform :: proc(req: Request, t: ^Transfer) -> Error {
 	set_ok &= set_ptr(easy, CURLOPT_HTTPHEADER, rawptr(list))
 	set_ok &= set_ptr(easy, CURLOPT_WRITEFUNCTION, rawptr(Curl_Write_Callback(write_cb)))
 	set_ok &= set_ptr(easy, CURLOPT_WRITEDATA, rawptr(t))
+	set_ok &= set_ptr(easy, CURLOPT_HEADERFUNCTION, rawptr(Curl_Write_Callback(header_cb)))
+	set_ok &= set_ptr(easy, CURLOPT_HEADERDATA, rawptr(t))
 	set_ok &= set_ptr(easy, CURLOPT_PREREQFUNCTION, rawptr(Curl_Prereq_Callback(prereq_cb)))
 	set_ok &= set_ptr(easy, CURLOPT_PREREQDATA, rawptr(t))
 	set_ok &= set_off(easy, CURLOPT_MAXFILESIZE_LARGE, i64(t.limit))
@@ -271,7 +275,6 @@ perform :: proc(req: Request, t: ^Transfer) -> Error {
 		return map_curl_error(rc, t)
 	}
 	t.status = int(code)
-	copy_headers(easy, t)
 	return .None
 }
 
@@ -339,19 +342,47 @@ map_curl_error :: proc(rc: CURLcode, t: ^Transfer) -> Error {
 	return .Internal
 }
 
+// header_cb receives every response header line (CURLOPT_HEADERFUNCTION). A
+// status line starts a new response (a 1xx interim reply, a followed
+// redirect), so the collected headers reset and only the final response's
+// survive. Lines after the body began are trailers and are ignored. Copies go
+// to the response allocator; MAX_RESPONSE_HEADER_BYTES bounds one response.
 @(private)
-copy_headers :: proc(easy: ^CURL, t: ^Transfer) {
+header_cb :: proc "c" (ptr: [^]byte, size: c.size_t, nmemb: c.size_t, userdata: rawptr) -> c.size_t {
+	t := (^Transfer)(userdata)
 	context = t.ctx
-	prev: ^curl_header
-	for {
-		h := curl_easy_nextheader(easy, CURLH_HEADER, -1, prev)
-		if h == nil do break
-		append(&t.headers, Header{
-			name = strings.clone(string(h.name), t.allocator),
-			value = strings.clone(string(h.value), t.allocator),
-		})
-		prev = h
+	n := int(size * nmemb)
+	line := string(ptr[:n])
+	if strings.has_prefix(line, "HTTP/") {
+		free_headers(t.headers[:], t.allocator)
+		clear(&t.headers)
+		t.header_bytes = 0
+		t.body_started = false
 	}
+	t.header_bytes += n
+	if t.header_bytes > MAX_RESPONSE_HEADER_BYTES {
+		t.too_large = true
+		return 0
+	}
+	if t.body_started do return c.size_t(n)
+	text := strings.trim_right(line, "\r\n")
+	if text == "" || strings.has_prefix(text, "HTTP/") do return c.size_t(n)
+	if (text[0] == ' ' || text[0] == '\t') && len(t.headers) > 0 {
+		// Obsolete line folding: continue the previous value.
+		last := &t.headers[len(t.headers) - 1]
+		parts := [3]string{last.value, " ", strings.trim_space(text)}
+		joined := strings.concatenate(parts[:], t.allocator)
+		delete(last.value, t.allocator)
+		last.value = joined
+		return c.size_t(n)
+	}
+	colon := strings.index_byte(text, ':')
+	if colon <= 0 do return c.size_t(n)
+	append(&t.headers, Header{
+		name = strings.clone(strings.trim_space(text[:colon]), t.allocator),
+		value = strings.clone(strings.trim_space(text[colon + 1:]), t.allocator),
+	})
+	return c.size_t(n)
 }
 
 @(private)
@@ -359,6 +390,7 @@ write_cb :: proc "c" (ptr: [^]byte, size: c.size_t, nmemb: c.size_t, userdata: r
 	t := (^Transfer)(userdata)
 	context = t.ctx
 	n := int(size * nmemb)
+	t.body_started = true
 	if t.received + n > t.limit {
 		t.too_large = true
 		return 0

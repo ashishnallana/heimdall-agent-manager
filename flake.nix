@@ -108,7 +108,7 @@
       #     static: a directory holding only libsqlite3.a is searched first.
       #     After linking, the ELF interpreter is rewritten to the FHS loader
       #     and the nix rpath removed, so nothing references /nix/store.
-      #     The host needs glibc and libcurl >= 7.84 (httpc.MIN_CURL_VERSION;
+      #     The host needs glibc and libcurl >= 7.80 (httpc.MIN_CURL_VERSION;
       #     checked at startup). Before the libcurl migration these were fully
       #     static (-static against glibc.static); a static libcurl is future
       #     work.

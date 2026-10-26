@@ -19,7 +19,8 @@ package httpc
 //     source file, so the library is named `system:libcurl.lib` here and the
 //     build passes `/LIBPATH:<odin root>/vendor/curl/lib` (scripts/windows/build.ps1).
 //
-// MIN_CURL_VERSION (httpc.odin) is checked at startup by `init`.
+// MIN_CURL_VERSION (httpc.odin) is checked at startup by `init`; every symbol
+// declared here exists in that version (see the list there).
 
 import "core:c"
 
@@ -44,15 +45,6 @@ when ODIN_OS == .Windows {
 @(private) curl_slist :: struct {
 	data: cstring,
 	next: ^curl_slist,
-}
-
-@(private) curl_header :: struct {
-	name:   cstring,
-	value:  cstring,
-	amount: c.size_t,
-	index:  c.size_t,
-	origin: c.uint,
-	anchor: rawptr,
 }
 
 @(private) curl_version_info_data :: struct {
@@ -114,6 +106,7 @@ when ODIN_OS == .Windows {
 @(private) CURLOPT_PROXY :: CURLoption(CURLOPTTYPE_OBJECTPOINT + 4)
 @(private) CURLOPT_ERRORBUFFER :: CURLoption(CURLOPTTYPE_OBJECTPOINT + 10)
 @(private) CURLOPT_WRITEFUNCTION :: CURLoption(CURLOPTTYPE_FUNCTIONPOINT + 11)
+@(private) CURLOPT_HEADERDATA :: CURLoption(CURLOPTTYPE_OBJECTPOINT + 29)
 @(private) CURLOPT_POSTFIELDS :: CURLoption(CURLOPTTYPE_OBJECTPOINT + 15)
 @(private) CURLOPT_USERAGENT :: CURLoption(CURLOPTTYPE_OBJECTPOINT + 18)
 @(private) CURLOPT_HTTPHEADER :: CURLoption(CURLOPTTYPE_OBJECTPOINT + 23)
@@ -140,6 +133,7 @@ when ODIN_OS == .Windows {
 @(private) CURLOPT_CONNECTTIMEOUT_MS :: CURLoption(CURLOPTTYPE_LONG + 156)
 @(private) CURLOPT_PROTOCOLS :: CURLoption(CURLOPTTYPE_LONG + 181)
 @(private) CURLOPT_REDIR_PROTOCOLS :: CURLoption(CURLOPTTYPE_LONG + 182)
+@(private) CURLOPT_HEADERFUNCTION :: CURLoption(CURLOPTTYPE_FUNCTIONPOINT + 79)
 @(private) CURLOPT_XFERINFOFUNCTION :: CURLoption(CURLOPTTYPE_FUNCTIONPOINT + 219)
 @(private) CURLOPT_CURLU :: CURLoption(CURLOPTTYPE_OBJECTPOINT + 282)
 @(private) CURLOPT_PREREQFUNCTION :: CURLoption(CURLOPTTYPE_FUNCTIONPOINT + 312)
@@ -153,7 +147,6 @@ when ODIN_OS == .Windows {
 @(private) CURL_HTTP_VERSION_1_1 :: c.long(2)
 @(private) CURL_GLOBAL_ALL :: c.long(3) // CURL_GLOBAL_SSL | CURL_GLOBAL_WIN32
 @(private) CURL_ERROR_SIZE :: 256
-@(private) CURLH_HEADER :: c.uint(1 << 0)
 @(private) CURL_PREREQFUNC_OK :: c.int(0)
 @(private) CURLVERSION_FIRST :: c.int(0)
 
@@ -192,7 +185,6 @@ foreign libcurl {
 	curl_easy_perform :: proc(handle: ^CURL) -> CURLcode ---
 	curl_easy_strerror :: proc(code: CURLcode) -> cstring ---
 	curl_easy_escape :: proc(handle: ^CURL, str: [^]byte, length: c.int) -> cstring ---
-	curl_easy_nextheader :: proc(handle: ^CURL, origin: c.uint, request: c.int, prev: ^curl_header) -> ^curl_header ---
 	curl_free :: proc(ptr: rawptr) ---
 	curl_slist_append :: proc(list: ^curl_slist, data: cstring) -> ^curl_slist ---
 	curl_slist_free_all :: proc(list: ^curl_slist) ---

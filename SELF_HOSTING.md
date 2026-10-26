@@ -651,8 +651,8 @@ connects outbound to the hub and never needs to be publicly reachable itself.
 
 On any Linux (x86_64, arm64) or macOS (Intel, Apple Silicon) machine, install
 prebuilt binaries with the one-line installer — no Nix, no Odin, no Rust
-toolchain, no source checkout. The bridge links the host's libcurl (≥ 7.84:
-Debian 12+, Ubuntu 24.04+, macOS 13+); for an HTTPS or WSS hub, also install
+toolchain, no source checkout. The bridge links the host's libcurl (≥ 7.80:
+Debian 12+, Ubuntu 22.04+, macOS 13+); for an HTTPS or WSS hub, also install
 `socat` first:
 
 ```bash
@@ -763,9 +763,9 @@ want it gone:
   manager's, and it stays.
 
 The bridge's HTTPS client is **libcurl** (`src/lib/httpc`), linked from the
-host and not bundled: Linux needs `libcurl.so.4` ≥ 7.84 (Debian 12+,
-Ubuntu 24.04+, Fedora 37+; `sudo apt install libcurl4`), macOS uses the
-system `/usr/lib/libcurl.4.dylib` (macOS 13+). Ubuntu 22.04 (libcurl 7.81) is
+host and not bundled: Linux needs `libcurl.so.4` ≥ 7.80 (Debian 12+,
+Ubuntu 22.04+, Fedora 37+; `sudo apt install libcurl4`), macOS uses the
+system `/usr/lib/libcurl.4.dylib` (macOS 13+). macOS 12 (libcurl 7.79) is
 too old. libcurl honours `HAM_TLS_CA_FILE`, then `SSL_CERT_FILE` /
 `SSL_CERT_DIR`, then the system trust store, and never uses a proxy from the
 environment.
@@ -902,7 +902,7 @@ refused by a lock in `%APPDATA%\heimdall\bridges\.install-lock`.
 | `ham-bridge` | Odin binary — agent supervisor, shell job executor, fs explorer |
 | `ham-pty-host` | Rust binary — spawns agent CLIs in real PTYs (replaces tmux wrapper) |
 | `ham-ctl` | CLI used by agents to read/send messages, update tasks, etc. |
-| libcurl ≥ 7.84 | HTTPS client for every bridge → hub REST call (`libcurl.so.4` / `/usr/lib/libcurl.4.dylib`; Windows: linked in statically) |
+| libcurl ≥ 7.80 | HTTPS client for every bridge → hub REST call (`libcurl.so.4` / `/usr/lib/libcurl.4.dylib`; Windows: linked in statically) |
 | `socat` | TLS transport for the bridge → hub WebSocket (default backend; not bundled — system `PATH`) |
 | `openssl` | Legacy fallback WebSocket TLS transport (`HAM_TLS_BACKEND=s_client`; not bundled — system `PATH`) |
 | The agent CLI | `claude`, `codex`, or any other supported CLI |
@@ -920,7 +920,7 @@ Same Nix setup as the hub. The bridge and pty-host are built from the same flake
 | Odin compiler | ≥ 2024-11 (LLVM 18/21) | Compiles bridge, ctl |
 | Rust toolchain | stable (≥ 1.77) | Compiles ham-pty-host |
 | cargo | (with Rust) | Rust build tool |
-| libcurl (dev headers not needed) | ≥ 7.84 | HTTPS client (`src/lib/httpc`, `system:curl`) |
+| libcurl (dev headers not needed) | ≥ 7.80 | HTTPS client (`src/lib/httpc`, `system:curl`) |
 | socat | ≥ 1.7 | Bridge → hub WebSocket TLS tunnel |
 | openssl / libssl | ≥ 1.1 | WebSocket TLS; socat OpenSSL engine |
 

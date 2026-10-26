@@ -47,7 +47,7 @@ etag, found := httpc.header(resp, "etag")                      // case-insensiti
 - Header helpers: `bearer(token)`, `accept_json()`, `accept(type)`,
   `user_agent(v)`, `oauth_client_basic(id, secret)`. `Host`, `Content-Length`,
   `Content-Type`, `Transfer-Encoding`, `Connection`, `Expect`, ... are reserved.
-- `Response`: `status`, `headers` (copied from `curl_easy_nextheader`), `body`,
+- `Response`: `status`, `headers` (collected with `CURLOPT_HEADERFUNCTION`: final response only, trailers ignored, 64 KiB cap), `body`,
   `may_have_sent`, `detail`; `text(resp)`, `header(resp, name)`,
   `response_destroy(&resp)`.
 - `send_json(req, &out)` decodes a 2xx body into a struct (`json.unmarshal`) and
@@ -103,5 +103,5 @@ Linux link line names mbedTLS and cannot be overridden):
 | macOS | `system:curl` — the OS's `/usr/lib/libcurl.4.dylib` |
 | Windows | static `libcurl.lib` (Schannel) shipped with the Odin toolchain in `vendor/curl/lib`; build with `-extra-linker-flags:/LIBPATH:<odin root>/vendor/curl/lib` |
 
-`init()` refuses libcurl older than `MIN_CURL_VERSION` (7.84.0). The planned
+`init()` refuses libcurl older than `MIN_CURL_VERSION` (7.80.0, for `CURLOPT_PREREQFUNCTION`; no binding needs anything newer). The planned
 WebSocket migration to `curl_ws_*` will need 8.11.0.

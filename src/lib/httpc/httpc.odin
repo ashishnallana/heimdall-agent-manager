@@ -25,11 +25,24 @@ import "core:sync"
 import contracts "odin_test:contracts"
 
 // MIN_CURL_VERSION is the oldest libcurl this package runs against (checked by
-// init). 7.84.0: curl_easy_header/curl_easy_nextheader are stable (7.84.0) and
-// CURLOPT_PREREQFUNCTION exists (7.80.0). The later WebSocket migration
-// (curl_ws_*) needs 8.11.0, where the WebSocket API stopped being experimental.
-MIN_CURL_VERSION :: 0x075400
-MIN_CURL_VERSION_TEXT :: "7.84.0"
+// init, before any other libcurl call). 7.80.0 is set by the newest thing used:
+//   CURLOPT_PREREQFUNCTION/PREREQDATA  7.80.0  (may_have_sent)
+// Everything else is older: curl_url/curl_url_set/curl_url_get/curl_url_cleanup,
+// CURLU_URLENCODE, CURLU_APPENDQUERY 7.62.0; CURLOPT_CURLU 7.63.0;
+// CURLOPT_XFERINFOFUNCTION 7.32.0; CURLOPT_PROTOCOLS/REDIR_PROTOCOLS 7.19.4;
+// CURLOPT_ACCEPT_ENCODING 7.21.6; *_LARGE / *_MS options, curl_easy_escape,
+// curl_slist_*, curl_version_info, curl_global_init and CURLOPT_HEADERFUNCTION
+// predate 7.20. Response headers are collected with CURLOPT_HEADERFUNCTION, not
+// curl_easy_header (7.83/7.84), so no binding names a symbol missing from 7.80:
+// on an older libcurl the binary still loads and init() reports the version.
+// CURLE_TOO_LARGE (8.6) is only a code value we map, not a symbol.
+// The later WebSocket migration (curl_ws_*) needs 8.11.0.
+MIN_CURL_VERSION :: 0x075000
+MIN_CURL_VERSION_TEXT :: "7.80.0"
+
+// MAX_RESPONSE_HEADER_BYTES caps the headers of one response (all lines,
+// counted per status line); more is .Too_Large.
+MAX_RESPONSE_HEADER_BYTES :: 64 * 1024
 
 DEFAULT_TIMEOUT_MS :: 20_000
 DEFAULT_MAX_RESPONSE_BYTES :: 32 * 1024 * 1024
