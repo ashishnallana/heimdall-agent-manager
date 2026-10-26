@@ -236,11 +236,15 @@ perform :: proc(req: Request, t: ^Transfer) -> Error {
 	} else {
 		set_ok &= set_long(easy, CURLOPT_FOLLOWLOCATION, c.long(0))
 	}
-	cainfo, capath := trust_anchors()
+	cainfo, capath, exclusive := trust_anchors()
 	if cainfo != "" {
 		set_ok &= set_ptr(easy, CURLOPT_CAINFO, rawptr(strings.clone_to_cstring(cainfo, context.temp_allocator)))
 	}
-	if capath != "" {
+	if exclusive {
+		// HAM_TLS_CA_FILE is THE trust anchor: drop the CA directory libcurl was
+		// built with (Debian/Ubuntu: /etc/ssl/certs), which CAINFO alone keeps.
+		_ = set_ptr(easy, CURLOPT_CAPATH, nil)
+	} else if capath != "" {
 		// CAPATH is not supported by every TLS backend (Schannel); not fatal.
 		_ = set_ptr(easy, CURLOPT_CAPATH, rawptr(strings.clone_to_cstring(capath, context.temp_allocator)))
 	}
@@ -297,8 +301,8 @@ method_cstring :: proc(m: Method) -> string {
 //        the behaviour does not depend on the TLS backend libcurl was built with)
 //   else libcurl's built-in default (system store; Schannel: Windows store).
 @(private)
-trust_anchors :: proc() -> (cainfo: string, capath: string) {
-	if v := strings.trim_space(os.get_env("HAM_TLS_CA_FILE", context.temp_allocator)); v != "" do return v, ""
+trust_anchors :: proc() -> (cainfo: string, capath: string, exclusive: bool) {
+	if v := strings.trim_space(os.get_env("HAM_TLS_CA_FILE", context.temp_allocator)); v != "" do return v, "", true
 	cainfo = strings.trim_space(os.get_env("SSL_CERT_FILE", context.temp_allocator))
 	capath = strings.trim_space(os.get_env("SSL_CERT_DIR", context.temp_allocator))
 	return
