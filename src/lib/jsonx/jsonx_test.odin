@@ -130,6 +130,19 @@ test_jsonx_complex_array_with_nested_objects :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(raw_arr, `"name":"codex"`), "should contain codex")
 }
 
+// sort_keys gives byte-stable output for objects inside the array: they are re-marshalled
+// from a map, and callers that store or compare the result (the Bridge capability
+// record) saw a different string for identical input otherwise.
+@(test)
+test_jsonx_raw_array_sort_keys_is_stable :: proc(t: ^testing.T) {
+	json_str := `{"caps":[{"provider":"claude","models":[],"default_model":"opus","z":1,"a":{"y":2,"b":3}}]}`
+	for _ in 0 ..< 20 {
+		raw, ok := extract_raw_array(json_str, "caps", true, context.temp_allocator, sort_keys = true)
+		testing.expect(t, ok, "extract_raw_array should succeed")
+		testing.expect_value(t, raw, `[{"a":{"b":3,"y":2},"default_model":"opus","models":[],"provider":"claude","z":1}]`)
+	}
+}
+
 @(test)
 test_jsonx_json_unescape_string_binary_and_surrogates :: proc(t: ^testing.T) {
 	// Test surrogate pair \ud83d\ude00

@@ -17,6 +17,8 @@ import platform "odin_test:hub/platform"
 import agent_service "odin_test:hub/service/agent"
 import bridge_service "odin_test:hub/service/bridge"
 import shell_session_svc "odin_test:hub/service/shell_session"
+import sqlite "odin_test:hub/repository/sqlite"
+import "core:time"
 
 // --- time helpers ------------------------------------------------------------
 
@@ -337,4 +339,66 @@ test_reaper_thresholds_ordered_and_finer_than_server_max_age_window :: proc(t: ^
 	testing.expect(t, REAPER_BRIDGE_GONE_MS < REAPER_SERVER_MAX_AGE_MS, "a permitted lifetime must outlast an absence verdict")
 	interval_ms := DEFAULT_REAPER_INTERVAL_SECONDS * 1000
 	testing.expect(t, i64(interval_ms) * 100 < REAPER_SERVER_MAX_AGE_MS, "the sweep must be orders of magnitude finer than the window")
+}
+
+// --- plan T1: idle Bridge sending minimal heartbeats ----------------------------
+
+@(private = "file")
+Live14_Clock :: struct { unix_seconds: i64 }
+
+@(private = "file")
+live14_now :: proc(ctx: rawptr) -> string {
+	return platform.format_rfc3339_utc(time.Time{_nsec = (^Live14_Clock)(ctx).unix_seconds * 1_000_000_000})
+}
+
+// An idle Bridge whose heartbeats carry NO capability metadata (the negotiated minimal
+// beat) must not be declared gone by the 1h reaper: every accepted beat refreshes
+// durable last_seen_at through bridge_service.touch_runtime_liveness and the real
+// sqlite repository. A Bridge that went silent at the same moment is the control: it
+// is reaped, so the threshold is genuinely crossed. Simulated on a fake clock (two
+// hours of 45s beats) without waiting in real time.
+@(test)
+test_reaper_idle_bridge_with_minimal_heartbeats_is_not_reaped_after_an_hour :: proc(t: ^testing.T) {
+	fx: Fx; fx_make(&fx); defer fx_free(&fx)
+	conn, open_ok, _ := sqlite.open(":memory:")
+	testing.expect(t, open_ok, "sqlite open ok")
+	defer sqlite.close(&conn)
+	mig_ok, _ := sqlite.run_migrations(&conn)
+	testing.expect(t, mig_ok, "migrations ok")
+	repo_impl: sqlite.Bridge_Repo_SQLite
+	repo := sqlite.new_bridge_repository(&repo_impl, &conn)
+	now, now_ok := r14_now_ms()
+	testing.expect(t, now_ok, "fixed now parses")
+	clk := Live14_Clock{unix_seconds = now / 1000 - 2 * 60 * 60}
+	clock := platform.Clock{ctx = rawptr(&clk), now = live14_now}
+	fx.bridges = bridge_service.new_bridge_service(&repo, &clock, &fx.ids)
+
+	enroll :: proc(t: ^testing.T, fx: ^Fx, host: string) -> string {
+		enrolled, ok, _ := bridge_service.enroll_bridge_from_device_grant(&fx.bridges, bridge_service.Device_Enroll_Input{
+			owner_user_id = "owner_a", bridge_public_key = "04aa", bridge_key_fingerprint = "aaaa", machine_hostname = host,
+		})
+		testing.expect(t, ok, "bridge enrolled")
+		return enrolled.bridge.bridge_id
+	}
+	idle := enroll(t, &fx, "idle-box")
+	silent := enroll(t, &fx, "silent-box")
+	for id in ([]string{idle, silent}) {
+		row, _, err := bridge_service.touch_runtime_liveness(&fx.bridges, id)
+		testing.expect_value(t, err.code, domain.Error_Code.None)
+		domain.bridge_destroy(&row)
+	}
+	fx_session(&fx, "sh_idle", idle)
+	fx_session(&fx, "sh_silent", silent)
+
+	for clk.unix_seconds * 1000 < now {
+		clk.unix_seconds += 45
+		row, _, err := bridge_service.touch_runtime_liveness(&fx.bridges, idle)
+		testing.expect_value(t, err.code, domain.Error_Code.None)
+		domain.bridge_destroy(&row)
+	}
+	testing.expect_value(t, fx_sweep(&fx), 1)
+	live, _ := fx_row(&fx, "sh_idle", idle)
+	testing.expect_value(t, live.status, domain.Shell_Session_Status_Running)
+	gone, _ := fx_row(&fx, "sh_silent", silent)
+	testing.expect(t, domain.shell_session_status_is_terminal(gone.status), "silent bridge's session is reaped")
 }

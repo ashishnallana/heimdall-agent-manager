@@ -253,7 +253,10 @@ extract_raw_object :: proc(body, key: string, top_level_only := false, allocator
 }
 
 // extract_raw_array serializes the sub-array value at key back to valid JSON.
-extract_raw_array :: proc(body, key: string, top_level_only := false, allocator := context.allocator) -> (string, bool) {
+// Objects inside the array are re-marshalled from a map, so their key order is
+// unspecified unless sort_keys is set; callers that compare or store the result
+// (e.g. the Bridge capability record) must pass sort_keys=true to get stable bytes.
+extract_raw_array :: proc(body, key: string, top_level_only := false, allocator := context.allocator, sort_keys := false) -> (string, bool) {
 	parsed, parse_ok := parse_body(body, allocator)
 	if !parse_ok do return "", false
 	defer json.destroy_value(parsed, allocator)
@@ -261,7 +264,7 @@ extract_raw_array :: proc(body, key: string, top_level_only := false, allocator 
 	val, ok := find_value(parsed, key, top_level_only)
 	if !ok do return "", false
 	if _, is_arr := val.(json.Array); !is_arr do return "", false
-	bytes, merr := json.marshal(val, json.Marshal_Options{}, allocator)
+	bytes, merr := json.marshal(val, json.Marshal_Options{sort_maps_by_key = sort_keys}, allocator)
 	if merr != nil do return "", false
 	return string(bytes), true
 }

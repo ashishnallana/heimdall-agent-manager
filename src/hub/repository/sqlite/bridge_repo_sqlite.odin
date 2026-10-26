@@ -43,6 +43,7 @@ new_bridge_repository :: proc(impl: ^Bridge_Repo_SQLite, conn: ^Conn) -> iface.B
 	return iface.Bridge_Repository{
 		ctx = rawptr(impl),
 		save_bridge = bridge_save_bridge_sqlite,
+		update_runtime = bridge_update_runtime_sqlite,
 		create_limited = bridge_create_limited_sqlite,
 		count_active_by_owner = bridge_count_active_by_owner_sqlite,
 		reconcile_plan = bridge_reconcile_plan_sqlite,
@@ -81,6 +82,35 @@ bridge_save_bridge_sqlite :: proc(ctx: rawptr, bridge: domain.Bridge) -> (domain
 	bind_bridge(stmt, bridge)
 	if sqlite3_step(stmt) != SQLITE_DONE do return domain.Bridge{}, false, domain.domain_error(.Conflict, "bridge could not be saved")
 	return bridge, true, domain.Domain_Error{}
+}
+
+// bridge_update_runtime_sqlite is the narrow runtime write (see iface.Bridge_Runtime_Write).
+// Parameters: ?1 bridge_id, ?2 now, ?3 value, ?4 expected. Every statement touches only
+// its own columns plus updated_at, and the WHERE clause carries the fence, so a revoked
+// row is never resurrected and a concurrent writer's columns are never reverted.
+bridge_update_runtime_sqlite :: proc(ctx: rawptr, kind: iface.Bridge_Runtime_Write, bridge_id, now, value, expected: string) -> (bool, domain.Domain_Error) {
+	impl := (^Bridge_Repo_SQLite)(ctx)
+	query: string
+	switch kind {
+	case .Liveness:
+		query = "UPDATE bridges SET status = 'online', last_seen_at = ?2, updated_at = ?2 WHERE bridge_id = ?1 AND status != 'revoked';"
+	case .Capabilities:
+		query = "UPDATE bridges SET capabilities_json = ?3, updated_at = ?2 WHERE bridge_id = ?1 AND status != 'revoked' AND capabilities_json = ?4 AND capabilities_json != ?3;"
+	case .Vault_Status:
+		query = "UPDATE bridges SET vault_status = ?3, updated_at = ?2 WHERE bridge_id = ?1 AND status != 'revoked' AND vault_status != ?3;"
+	case .Offline:
+		query = "UPDATE bridges SET status = 'offline', updated_at = ?2 WHERE bridge_id = ?1 AND status = 'online';"
+	}
+	stmt: sqlite3_stmt = nil
+	if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return false, domain.domain_error(.Internal_Error, "failed to prepare bridge runtime update")
+	defer sqlite3_finalize(stmt)
+	bind_text(stmt, 1, bridge_id)
+	bind_text(stmt, 2, now)
+	if kind == .Capabilities || kind == .Vault_Status do bind_text(stmt, 3, value)
+	if kind == .Capabilities do bind_text(stmt, 4, expected)
+	step_rc, row_changes := step_changes(impl.conn.db, stmt)
+	if step_rc != SQLITE_DONE do return false, domain.domain_error(.Internal_Error, "bridge runtime update failed")
+	return row_changes > 0, domain.Domain_Error{}
 }
 
 bridge_get_bridge_sqlite :: proc(ctx: rawptr, bridge_id: string) -> (domain.Bridge, bool, domain.Domain_Error) {

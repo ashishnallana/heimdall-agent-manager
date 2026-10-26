@@ -2334,19 +2334,11 @@ bridge_ws_process_frame :: proc(h: ^Bridge_Handlers, bridge_id: string, connecti
 			json_bool_value(text, "task_chain_search_ready"), json_bool_value(text, "task_chain_search_stale"),
 			i64(json_int(text, "task_chain_search_revision", 0)),
 		)
-		if strings.contains(text, "\"capabilities\"") {
-			// The row is fully owned; free it rather than lean on the frame arena.
-			caps_changed := false
-			if saved, saved_ok, _ := bridge_service.update_runtime_capabilities(h.bridges, bridge_id, text, &caps_changed); saved_ok {
-				// Only a capability/status diff is news; most beats change last_seen_at only.
-				if caps_changed do publish_bridge_changed(h.event_bus, saved, "capabilities_changed")
-				b := saved; domain.bridge_destroy(&b)
-			}
-		}
-		// REQ-BVS-1. Runs AFTER update_runtime_capabilities, which rewrites the row:
-		// this one re-reads it, so it sees the fresh value and its own write is not
-		// clobbered by the capabilities save.
-		bridge_apply_vault_status_report(h, bridge_id, text)
+		// Durable liveness on EVERY accepted heartbeat, metadata or not (plan T1): it
+		// used to ride on the capabilities save, so a beat without "capabilities" left
+		// last_seen_at to age into the 1h gone-bridge reaper. Narrow, fenced writes.
+		bridge_apply_heartbeat_liveness(h, bridge_id, connection_generation, text)
+		bridge_apply_vault_status_report(h, bridge_id, text, connection_generation)
 		active := json_string_array(text, "active_instance_ids")
 		digest_active := bridge_apply_heartbeat_digest(h, bridge_id, text, connection_generation)
 		used_digest := false
@@ -2537,7 +2529,7 @@ bridge_ws_process_frame :: proc(h: ^Bridge_Handlers, bridge_id: string, connecti
 		// Deliberately NOT a synthetic bridge_heartbeat: that arm also reconciles the
 		// instance digest and reaps stale instances, which a vault operation has no
 		// business triggering.
-		bridge_apply_vault_status_report(h, bridge_id, text)
+		bridge_apply_vault_status_report(h, bridge_id, text, connection_generation)
 	case "lsp_data", "lsp_error", "lsp_started", "lsp_stopped":
 		// REQ-LSP-RLY-1. Every lsp_* type the bridge can send MUST have an arm in
 		// this switch: a type with no arm falls through and is dropped silently,
@@ -3254,7 +3246,7 @@ bridge_heartbeat_ack_payload :: proc(reconciled: int, superseded_instance_ids: [
 // the unchanged one, so it is destroyed unconditionally here. This proc runs on the
 // bridge WS runtime loop, which has no per-request arena to reclaim it: a row kept
 // instead of freed would leak on every heartbeat of every bridge, forever.
-bridge_apply_vault_status_report :: proc(h: ^Bridge_Handlers, bridge_id, text: string) {
+bridge_apply_vault_status_report :: proc(h: ^Bridge_Handlers, bridge_id, text: string, generation: int = 0) {
 	if h == nil || h.bridges == nil do return
 	report: struct {
 		vault_status: string,
@@ -3262,12 +3254,61 @@ bridge_apply_vault_status_report :: proc(h: ^Bridge_Handlers, bridge_id, text: s
 	if !vault.wire_decode(text, &report) do return
 	value := report.vault_status
 	if value == "" do return
+	c, current := bridge_runtime_state_enter(h, bridge_id, generation)
+	if !current do return
 	bridge, changed, _ := bridge_service.update_vault_status(h.bridges, bridge_id, value)
+	bridge_runtime_state_leave(h, c)
 	defer { b := bridge; domain.bridge_destroy(&b) }
 	if !changed do return
 	summary := bridge_vault_status_summary_json(bridge.vault_status)
 	defer delete(summary)
 	events.publish_resource_changed(h.event_bus, string(bridge.owner_user_id), "bridge", bridge.bridge_id, "vault_status_changed", summary)
+}
+
+// bridge_runtime_state_enter is the retirement barrier for durable Bridge-row writes
+// made on behalf of one connection generation (plan T1), the same barrier
+// bridge_apply_validated_status uses for instance rows: hold the generation's
+// state_mutex and refuse once it is retired. A replacing hello retires the old
+// generation before its own durable connect write, which takes the same lock, so a
+// delayed frame from the old connection cannot land a liveness, metadata or vault
+// write after the new generation was admitted. ok=false means "stale generation:
+// write nothing". Generation 0 / no registry is a unit harness with no registered
+// connection, where there is nothing to fence against. Publish AFTER
+// bridge_runtime_state_leave: lock order is tx_mutex -> state_mutex, never reverse.
+bridge_runtime_state_enter :: proc(h: ^Bridge_Handlers, bridge_id: string, generation: int) -> (^project_service.Bridge_Runtime_Connection, bool) {
+	if h.bridge_runtime_registry == nil || generation == 0 do return nil, true
+	c := project_service.bridge_runtime_connection_acquire(h.bridge_runtime_registry, bridge_id, generation)
+	if c == nil do return nil, false
+	project_service.connection_state_lock(c)
+	if sync.atomic_load(&c.retired) {
+		project_service.connection_state_unlock(c)
+		project_service.bridge_runtime_connection_release(h.bridge_runtime_registry, c)
+		return nil, false
+	}
+	return c, true
+}
+
+bridge_runtime_state_leave :: proc(h: ^Bridge_Handlers, c: ^project_service.Bridge_Runtime_Connection) {
+	if c == nil do return
+	project_service.connection_state_unlock(c)
+	project_service.bridge_runtime_connection_release(h.bridge_runtime_registry, c)
+}
+
+// bridge_apply_heartbeat_liveness refreshes durable Bridge liveness for an accepted
+// heartbeat and, for a legacy frame that still carries metadata, the stored capability
+// record — both narrow fenced writes under the generation barrier. Only a status or
+// capability diff publishes; an ordinary beat moves last_seen_at alone and is silent.
+bridge_apply_heartbeat_liveness :: proc(h: ^Bridge_Handlers, bridge_id: string, generation: int, text: string) {
+	if h == nil || h.bridges == nil do return
+	c, current := bridge_runtime_state_enter(h, bridge_id, generation)
+	if !current do return
+	bridge, moved, err := bridge_service.touch_runtime_liveness(h.bridges, bridge_id)
+	caps_changed := false
+	if err.code == .None do caps_changed, _ = bridge_service.update_runtime_metadata(h.bridges, bridge_id, text)
+	bridge_runtime_state_leave(h, c)
+	if err.code != .None do return
+	defer domain.bridge_destroy(&bridge)
+	if moved || caps_changed do publish_bridge_changed(h.event_bus, bridge, "capabilities_changed")
 }
 
 bridge_vault_status_summary_json :: proc(vault_status: string) -> string {

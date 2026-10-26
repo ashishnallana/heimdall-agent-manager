@@ -4,6 +4,25 @@ import domain "odin_test:hub/domain"
 
 Bridge_Save_Proc :: proc(ctx: rawptr, bridge: domain.Bridge) -> (domain.Bridge, bool, domain.Domain_Error)
 Bridge_Get_Proc :: proc(ctx: rawptr, bridge_id: string) -> (domain.Bridge, bool, domain.Domain_Error)
+
+// Bridge_Runtime_Write names the narrow, single-purpose column writes a Bridge's own
+// runtime connection makes (heartbeat liveness, legacy capability metadata, vault
+// status, disconnect). Each is one conditional UPDATE of its own columns only, never a
+// full-row save: a read-modify-save from the WS reader thread used to revert any
+// concurrent label, token rotation, telemetry, enrollment or revocation edit made
+// between its read and its write.
+//   .Liveness      status='online', last_seen_at=now   WHERE status != 'revoked'
+//   .Capabilities  capabilities_json=value             WHERE status != 'revoked' AND capabilities_json = expected (compare-and-set) AND differs
+//   .Vault_Status  vault_status=value                  WHERE status != 'revoked' AND differs
+//   .Offline       status='offline'                    WHERE status = 'online'
+// changed is true only when a row was actually written.
+Bridge_Runtime_Write :: enum {
+	Liveness,
+	Capabilities,
+	Vault_Status,
+	Offline,
+}
+Bridge_Update_Runtime_Proc :: proc(ctx: rawptr, kind: Bridge_Runtime_Write, bridge_id, now, value, expected: string) -> (bool, domain.Domain_Error)
 Bridge_List_By_Owner_Proc :: proc(ctx: rawptr, owner_user_id: domain.User_ID) -> ([]domain.Bridge, domain.Domain_Error)
 // REQ-EA-3: pending enrollments and their rollback. delete_pending removes ONLY a
 // row that is still pending and reports whether one was removed.
@@ -83,6 +102,7 @@ Bridge_Repository :: struct {
 	list_owners: Bridge_List_Owners_Proc,
 	ctx: rawptr,
 	save_bridge: Bridge_Save_Proc,
+	update_runtime: Bridge_Update_Runtime_Proc,
 	get_bridge: Bridge_Get_Proc,
 	list_by_owner: Bridge_List_By_Owner_Proc,
 	list_pending: Bridge_List_Pending_Proc,
@@ -107,6 +127,11 @@ Bridge_Repository :: struct {
 bridge_save_bridge :: proc(repo: ^Bridge_Repository, bridge: domain.Bridge) -> (domain.Bridge, bool, domain.Domain_Error) {
 	if repo == nil || repo.save_bridge == nil do return domain.Bridge{}, false, domain.domain_error(.Internal_Error, "bridge repository is not configured")
 	return repo.save_bridge(repo.ctx, bridge)
+}
+
+bridge_update_runtime :: proc(repo: ^Bridge_Repository, kind: Bridge_Runtime_Write, bridge_id, now: string, value: string = "", expected: string = "") -> (bool, domain.Domain_Error) {
+	if repo == nil || repo.update_runtime == nil do return false, domain.domain_error(.Internal_Error, "bridge repository is not configured")
+	return repo.update_runtime(repo.ctx, kind, bridge_id, now, value, expected)
 }
 
 bridge_get_bridge :: proc(repo: ^Bridge_Repository, bridge_id: string) -> (domain.Bridge, bool, domain.Domain_Error) {
