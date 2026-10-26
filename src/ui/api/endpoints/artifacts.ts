@@ -4,9 +4,11 @@ import * as daemonApi from '../daemonApi';
 import { heimdallApi, withSessionQuery } from '../heimdallApi';
 import { selectIsVaultUnlocked } from '../../store/vaultSlice';
 import {
+  VAULT_ARMOR_PREFIX,
   isVaultArmored,
   encryptVaultText,
   decryptVaultText,
+  decryptVaultBytes,
   getActiveVaultKey,
   base64ToBytes,
   bytesToBase64,
@@ -676,19 +678,33 @@ export function normalizeArtifacts(data: any) {
     });
 }
 
+export type ArtifactContentState = {
+  url: string;
+  /** The decrypted content (binary-exact), or the raw payload when it is not armored. */
+  blob: Blob | null;
+  loading: boolean;
+  error: string;
+  /** The payload is vault-armored and could not be opened (vault locked or another vault). */
+  locked: boolean;
+};
+
+const EMPTY_CONTENT_STATE: ArtifactContentState = { url: '', blob: null, loading: false, error: '', locked: false };
+
 export function useArtifactContentState({ daemonUrl, clientToken, artifactId, versionNo = null }: { daemonUrl: string; clientToken: string; artifactId: string; versionNo?: number | null }) {
   const isUnlocked = useSelector(selectIsVaultUnlocked);
-  const [state, setState] = useState<{ url: string; loading: boolean; error: string }>({ url: '', loading: false, error: '' });
+  const [state, setState] = useState<ArtifactContentState>(EMPTY_CONTENT_STATE);
   useEffect(() => {
     const token = String(clientToken || '');
     const ambientAuth = isElectronDeviceAuth() || token === 'v1';
     if (!artifactId || (!ambientAuth && (!daemonUrl || !token))) {
-      setState({ url: '', loading: false, error: '' });
+      setState(EMPTY_CONTENT_STATE);
       return;
     }
     let cancelled = false;
     let nextUrl = '';
-    setState({ url: '', loading: true, error: '' });
+    // Dropping the previous blob here is what clears a decrypted preview on vault lock,
+    // version change and close: `isUnlocked`, `versionNo` and `artifactId` re-run this.
+    setState({ ...EMPTY_CONTENT_STATE, loading: true });
     fetch(daemonApi.artifactContentUrl({ daemonUrl: ambientAuth ? '' : daemonUrl, artifactId, version: versionNo }), ambientAuth
       ? { credentials: 'include' }
       : { headers: token ? { 'Authorization': `Bearer ${token}` } : undefined, credentials: token ? 'omit' : 'include' })
@@ -698,25 +714,34 @@ export function useArtifactContentState({ daemonUrl, clientToken, artifactId, ve
       })
       .then(async (blob) => {
         let finalBlob = blob;
+        let locked = false;
         // Resolved here rather than in render: the active CryptoKey is a module-level
         // ref, not reactive state, so it must be read when the blob is decrypted.
         // `isUnlocked` is the reactive trigger that re-runs this effect on unlock/lock.
-        const activeKey = getActiveVaultKey();
-        if (isUnlocked && activeKey) {
-          try {
-            const rawText = await blob.text();
-            if (isVaultArmored(rawText)) {
-              const decrypted = await decryptVaultText(rawText, activeKey);
-              finalBlob = new Blob([decrypted], { type: blob.type || 'text/plain' });
-            }
-          } catch {}
+        // Only an armored payload is read as text; unencrypted binaries stay untouched.
+        const rawText = (await blob.slice(0, VAULT_ARMOR_PREFIX.length).text()) === VAULT_ARMOR_PREFIX ? await blob.text() : '';
+        if (rawText && isVaultArmored(rawText)) {
+          locked = true;
+          const activeKey = getActiveVaultKey();
+          if (isUnlocked && activeKey) {
+            try {
+              // Bytes, not text: TextDecoder would corrupt binary payloads (ZIP bundles,
+              // images) by replacing invalid UTF-8 with U+FFFD (REQ-BUNDLE-4).
+              const opened = await decryptVaultBytes(rawText, activeKey);
+              if (opened.status === 'ok') {
+                finalBlob = new Blob([opened.bytes as unknown as BlobPart], { type: blob.type || 'application/octet-stream' });
+                opened.bytes.fill(0);
+                locked = false;
+              }
+            } catch {}
+          }
         }
         nextUrl = URL.createObjectURL(finalBlob);
         if (cancelled) URL.revokeObjectURL(nextUrl);
-        else setState({ url: nextUrl, loading: false, error: '' });
+        else setState({ url: nextUrl, blob: finalBlob, loading: false, error: '', locked });
       })
       .catch((err) => {
-        if (!cancelled) setState({ url: '', loading: false, error: String(err?.message || err || 'Failed to load artifact content') });
+        if (!cancelled) setState({ ...EMPTY_CONTENT_STATE, error: String(err?.message || err || 'Failed to load artifact content') });
       });
     return () => {
       cancelled = true;

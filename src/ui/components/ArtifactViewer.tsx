@@ -8,6 +8,8 @@ import {
 } from '../api/endpoints/artifacts';
 import { copyTextToClipboard } from '../utils/artifactAnnotations';
 import MarkdownBody from './MarkdownBody';
+import HtmlBundlePreview from './HtmlBundlePreview';
+import { HTML_BUNDLE_KIND } from '../utils/htmlBundle';
 import { VaultText } from './vault/VaultText';
 import { isVaultArmored } from '../utils/vaultContent';
 
@@ -64,7 +66,7 @@ type ArtifactVersion = {
   created_unix_ms: number;
 };
 
-type PreviewKind = 'markdown' | 'text' | 'json' | 'diff' | 'image' | 'unsupported';
+type PreviewKind = 'html-bundle' | 'markdown' | 'text' | 'json' | 'diff' | 'image' | 'unsupported';
 type CopyState = 'idle' | 'copied' | 'error';
 
 function formatBytes(value: number) {
@@ -92,6 +94,10 @@ function classifyPreview(meta: ArtifactMeta | null): PreviewKind {
     ? (rawExt.startsWith('.') ? rawExt : `.${rawExt}`)
     : (nameDot >= 0 ? name.slice(nameDot) : '');
   const renderer = String(meta.renderer || '').toLowerCase();
+  // REQ-BUNDLE-3: only the explicit kind; a generic ZIP stays a downloadable file.
+  if (kind === HTML_BUNDLE_KIND) {
+    return 'html-bundle';
+  }
   if (kind === 'diff' || ext === '.diff' || ext === '.patch' || mime === 'text/x-diff') {
     return 'diff';
   }
@@ -316,7 +322,7 @@ export default function ArtifactViewer({ artifactId, daemonUrl, clientToken, onC
   const previewKind = useMemo(() => classifyPreview(selectedArtifactMeta), [selectedArtifactMeta]);
   const contentState = useArtifactContentState({ daemonUrl, clientToken, artifactId, versionNo: selectedVersionNo });
   const contentUrl = contentState.url;
-  const imagePreviewNeedsContent = previewKind === 'image';
+  const imagePreviewNeedsContent = previewKind === 'image' || previewKind === 'html-bundle';
   const textQuery = useFetchArtifactTextContentQuery(
     { artifactId, versionNo: selectedVersionNo, ...artifactRequestAuth },
     { skip: !artifactId || !clientToken || previewKind !== 'markdown' },
@@ -353,7 +359,9 @@ export default function ArtifactViewer({ artifactId, daemonUrl, clientToken, onC
     if (!contentUrl) return;
     const anchor = document.createElement('a');
     anchor.href = contentUrl;
-    anchor.download = selectedArtifactMeta?.name || artifactId;
+    const downloadName = selectedArtifactMeta?.name || artifactId;
+    // The html-bundle payload is the decrypted ZIP, byte-identical to what was uploaded.
+    anchor.download = previewKind === 'html-bundle' && !downloadName.toLowerCase().endsWith('.zip') ? `${downloadName}.zip` : downloadName;
     document.body.appendChild(anchor);
     anchor.click();
     document.body.removeChild(anchor);
@@ -408,7 +416,7 @@ export default function ArtifactViewer({ artifactId, daemonUrl, clientToken, onC
                 data-debug-id="artifact-viewer-download-btn"
                 variant="primary"
                 size="sm"
-                disabled={!contentUrl || contentState.loading}
+                disabled={!contentUrl || contentState.loading || (previewKind === 'html-bundle' && contentState.locked)}
                 onClick={handleDownload}
                 leading={<Icon name="download" size="sm" />}
               >
@@ -479,6 +487,8 @@ export default function ArtifactViewer({ artifactId, daemonUrl, clientToken, onC
                   </div>
                 ) : contentError ? (
                   <div data-debug-id="artifact-viewer-content-error" className="rounded-xl border border-warning/30 bg-warning-soft px-4 py-3 text-sm text-warning">{contentError}</div>
+                ) : previewKind === 'html-bundle' ? (
+                  <HtmlBundlePreview blob={contentState.blob} locked={contentState.locked} />
                 ) : previewKind === 'image' ? (
                   <ZoomableImage contentUrl={contentUrl} alt={selectedArtifactMeta.name || artifactId} />
                 ) : previewKind === 'markdown' ? (
