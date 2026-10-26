@@ -1,5 +1,6 @@
-// Package tls_stream is the one TLS client transport behind http_client (https://)
-// and ws (wss://). Callers see a single Stream API; the backend is per-OS:
+// Package tls_stream is the TLS client transport behind src/lib/ws (wss://).
+// Outbound HTTP(S) no longer uses it: that is src/lib/httpc (libcurl). Callers
+// see a single Stream API; the backend is per-OS:
 //
 //   - Unix (tls_stream_unix.odin): a TLS relay SUBPROCESS -- socat by default,
 //     `openssl s_client` when HAM_TLS_BACKEND=s_client -- spoken to over pipes.
@@ -12,8 +13,6 @@
 //   has_data(&s)    -> (ready, ok)      non-blocking: true when read() will not block
 //   read(&s, buf)   -> (n, ok)          n == 0 with ok == true is end of stream
 //   write_all(&s, bytes, timeout)       timeout 0 blocks; else partial writes are fatal
-//   relay_exited(&s) -> bool            the transport has gone away (EOF follows)
-//   close_write(&s)                     half-close the request side
 //   abort(&s)                           wake a blocked reader from another thread
 //   close(&s)                           release everything; reader-owned (see AGENTS.md)
 package tls_stream
@@ -65,9 +64,9 @@ ca_file :: proc() -> string {
 //   - anything else   -> `socat OPENSSL-CONNECT` (DEFAULT; full-duplex, no teardown).
 // SHARED CONTRACT: the bridge's bridge_tls_backend_is_socat
 // (src/bridge/fs_management.odin) applies the same rule -- keep them in sync.
-// Either helper must be on PATH for ANY outbound https:// / wss:// call on Unix,
-// including the hub's own (src/hub/service/billing) -- see the ham-hub
-// runtimeInputs in flake.nix. The Windows backend ignores HAM_TLS_BACKEND.
+// Either helper must be on PATH for any wss:// connection on Unix (the bridge's
+// hub WebSocket) -- see the ham-bridge runtimeInputs in flake.nix. The Windows
+// backend ignores HAM_TLS_BACKEND. HTTPS (src/lib/httpc) does not use it.
 relay_command :: proc(host: string, port: u16) -> []string {
 	return relay_command_for_backend(os.get_env("HAM_TLS_BACKEND", context.temp_allocator), host, port, ca_file())
 }

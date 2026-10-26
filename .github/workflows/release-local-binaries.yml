@@ -178,6 +178,12 @@ jobs:
           extra_nix_config: |
             experimental-features = nix-command flakes
 
+      - name: Check the outbound HTTP boundary (src/lib/httpc only)
+        shell: bash
+        run: |
+          scripts/check-http-boundary.sh
+          scripts/check-http-boundary.sh --self-test
+
       - name: Stamp release version into source and flake
         shell: bash
         run: |

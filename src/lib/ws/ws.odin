@@ -94,7 +94,7 @@ connect_with_bearer :: proc(ws_url, bearer_token: string) -> (Connection, bool) 
 
 // WS_HANDSHAKE_DEADLINE_DEFAULT bounds the whole TLS WebSocket connect: socat
 // spawn, DNS, TCP, TLS handshake and the HTTP 101 reply. It used to be a
-// hard-coded 5 s while plain HTTP requests get 20 s (http_client
+// hard-coded 5 s while plain HTTP requests get 20 s (httpc
 // DEFAULT_TIMEOUT_MS); on a phone network that gap made enrollment succeed and
 // the follow-on WebSocket fail every time. Override: HAM_WS_HANDSHAKE_TIMEOUT_MS.
 WS_HANDSHAKE_DEADLINE_DEFAULT :: 20 * time.Second

@@ -373,7 +373,20 @@
           default = self.packages.${system}.ham-hub;
         });
 
-      apps = forAllSystems (system: 
+      # `nix flake check`: repository invariants that need no build.
+      checks = forAllSystems (system:
+        let pkgs = pkgsFor system;
+        in {
+          # Only src/lib/httpc may touch libcurl; src/lib/http_client must not
+          # come back; no hand-rolled HTTP clients over core:net.
+          http-boundary = pkgs.runCommand "check-http-boundary" { nativeBuildInputs = [ pkgs.bash pkgs.gnugrep pkgs.coreutils ]; } ''
+            bash ${./scripts/check-http-boundary.sh} ${./.}
+            bash ${./scripts/check-http-boundary.sh} --self-test
+            touch $out
+          '';
+        });
+
+      apps = forAllSystems (system:
         let pkgs = pkgsFor system;
         in {
         # hub: wraps ham-hub so `nix run .#hub` works from any CWD. The ham-hub
