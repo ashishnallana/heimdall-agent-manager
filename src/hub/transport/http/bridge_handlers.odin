@@ -2339,51 +2339,9 @@ bridge_ws_process_frame :: proc(h: ^Bridge_Handlers, bridge_id: string, connecti
 		// last_seen_at to age into the 1h gone-bridge reaper. Narrow, fenced writes.
 		bridge_apply_heartbeat_liveness(h, bridge_id, connection_generation, text)
 		bridge_apply_vault_status_report(h, bridge_id, text, connection_generation)
-		active := json_string_array(text, "active_instance_ids")
-		digest_active := bridge_apply_heartbeat_digest(h, bridge_id, text, connection_generation)
-		used_digest := false
-		if len(active) == 0 && len(digest_active) > 0 {
-			delete(active)
-			active = digest_active
-			used_digest = true
-		}
-		if h.agents != nil do agent_service.reconcile_instance_reconfigurations(h.agents, bridge_id)
-		reconciled := bridge_runtime_service.runtime_reconcile_digest(h.bridge_runtime_registry, bridge_id, connection_generation, active)
-		// H7 cross-bridge reap: any instance this bridge reports active whose
-		// canonical bridge_id is now a DIFFERENT bridge has been relaunched
-		// elsewhere. Tell this bridge to invalidate those instances' local tokens
-		// (via the ack) so the stale old ham-wrapper self-terminates.
-		superseded: []string
-		if h.agents != nil do superseded = agent_service.detect_superseded_instances(h.agents, bridge_id, active)
-		if h.agents != nil {
-			// The per-instance unreachability signal: the bridge is still connected and
-			// reporting, and these instances are simply no longer among the ones it
-			// reports active. Their foreground runs get the same treatment as on a
-			// bridge-wide disconnect — converted, not killed — deliberately, so there
-			// is no "which signal fired?" branch whose wrong answer destroys work.
-			gone := agent_service.reconcile_bridge_heartbeat(h.agents, bridge_id, active)
-			defer domain.agent_instances_destroy(gone)
-			agent_service.notify_instances_terminal(h.agents, gone)
-			metrics.counter_add(project_service.fleet_metrics.agent_instances_reconciled_gone, u64(len(gone)))
-			for inst in gone {
-				publish_instance_changed(h.event_bus, inst, "status_changed")
-				shell_session_svc.shell_session_background_runs_for_agent(h.shell_sessions, string(inst.owner_user_id), inst.agent_instance_id)
-				reconciled += 1
-			}
-		}
-		// Opportunistic time-based reap: catches instances stranded by a
-		// disconnect the hub never observed (hub restart with persisted DB, or a
-		// lost WS close). Request-driven, so no background thread is required.
-		if h.agents != nil {
-			reaped := agent_service.reap_stale_instances(h.agents, BRIDGE_INSTANCE_STALE_MS)
-			agent_service.notify_instances_terminal(h.agents, reaped)
-			for inst in reaped {
-				shell_session_svc.shell_session_background_runs_for_agent(h.shell_sessions, string(inst.owner_user_id), inst.agent_instance_id)
-				publish_instance_changed(h.event_bus, inst, "status_changed")
-				reconciled += 1
-			}
-			domain.agent_instances_destroy(reaped)
-		}
+		// Plan T2: inventory repair and absence reconciliation run only on a complete
+		// inventory; an absent or malformed one is counted and leaves instances alone.
+		reconciled, superseded, _ := bridge_reconcile_heartbeat_inventory(h, bridge_id, connection_generation, text)
 		schedules_version := 0
 		if h.actions != nil {
 			schedules_version = get_actions_bridge_version(h.actions, bridge_id)
@@ -2400,18 +2358,12 @@ bridge_ws_process_frame :: proc(h: ^Bridge_Handlers, bridge_id: string, connecti
 		// REQ-EXP-GATE-4: the token folds in the owner's Actions eligibility, so a
 		// toggle immediately invalidates the bridge's cached schedule freshness.
 		epoch, revision := action_schedules_owner_token(h.actions, h.experiments, schedules_owner)
-        ack := bridge_heartbeat_ack_payload(reconciled, superseded, schedules_version, epoch, revision)
+		ack := bridge_heartbeat_ack_payload(reconciled, superseded, schedules_version, epoch, revision)
 		_ = write_ws_text_frame_locked(h, bridge_id, client, ack)
 		delete(ack)
 		if superseded != nil {
 			for s in superseded do delete(s)
 			delete(superseded)
-		}
-		for s in active do delete(s)
-		delete(active)
-		if !used_digest && digest_active != nil {
-			for s in digest_active do delete(s)
-			delete(digest_active)
 		}
 	case "agent_instance_status":
 		instance_id := json_string(text, "agent_instance_id")
@@ -2694,13 +2646,6 @@ Bridge_Agent_Status_Report :: struct {
 	launch_epoch: string `json:"launch_epoch"`,
 }
 
-Bridge_Heartbeat_Message :: struct {
-	type:                string                       `json:"type"`,
-	active_instance_ids: []string                     `json:"active_instance_ids"`,
-	digest:              []Bridge_Agent_Status_Report `json:"digest"`,
-	instances:           []Bridge_Agent_Status_Report `json:"instances"`,
-}
-
 // Serialize durable status writes with retirement. New connections do not finish
 // admission until the old state writer has drained; a delayed old frame cannot
 // save over the new generation's durable state.
@@ -2727,37 +2672,19 @@ bridge_apply_validated_status :: proc(h: ^Bridge_Handlers, bridge_id: string, ge
 	return instance, applied, err
 }
 
+// Decodes the heartbeat inventory, repairs status from its reports and returns every
+// reported instance id (active and terminal; caller owns the slice and its strings).
+// A non-complete inventory (bridge_heartbeat_inventory.odin) applies nothing and
+// returns nil. The heartbeat arm uses bridge_reconcile_heartbeat_inventory instead.
 bridge_apply_heartbeat_digest :: proc(h: ^Bridge_Handlers, bridge_id, text: string, generation: int = 0) -> []string {
-	current_generation := generation
-	if h != nil && current_generation == 0 { current_generation = project_service.bridge_runtime_registry_generation(h.bridge_runtime_registry, bridge_id) }
-	msg: Bridge_Heartbeat_Message
-	if err := json.unmarshal_string(text, &msg, json.DEFAULT_SPECIFICATION, context.temp_allocator); err != nil {
-		return nil
-	}
-
-	reports := msg.digest
-	if len(reports) == 0 do reports = msg.instances
-	if len(reports) == 0 do return nil
-
-	active := make([dynamic]string, context.allocator)
-	for report in reports {
-		if report.agent_instance_id == "" do continue
-		if h != nil {
-			if h.agents == nil {
-				_ = bridge_runtime_service.runtime_apply_state_report(h.bridge_runtime_registry, bridge_id, current_generation, report.agent_instance_id, report.state_seq, report.runtime_status, report.activity_status, "")
-			}
-			if h.agents != nil {
-				status_moved := false
-				if inst, applied, _ := bridge_apply_validated_status(h, bridge_id, current_generation, report.agent_instance_id, report.state_seq, report.runtime_status, report.activity_status, report.launch_epoch, changed = &status_moved); applied {
-					// A beat that only refreshed last_seen_at is not news (REQ-2).
-					if status_moved do publish_instance_changed(h.event_bus, inst, "status_changed")
-					domain.agent_instance_destroy(&inst)
-				}
-			}
-		}
-		append(&active, strings.clone(report.agent_instance_id, context.allocator))
-	}
-	return active[:]
+	inventory: Bridge_Heartbeat_Inventory
+	bridge_decode_heartbeat_inventory(&inventory, text)
+	defer bridge_heartbeat_inventory_destroy(&inventory)
+	if inventory.state != .Complete || len(inventory.reports) == 0 do return nil
+	bridge_apply_heartbeat_reports(h, bridge_id, generation, inventory.reports)
+	ids := make([]string, len(inventory.reports), context.allocator)
+	for report, i in inventory.reports do ids[i] = strings.clone(report.agent_instance_id, context.allocator)
+	return ids
 }
 
 bridge_ws_handler :: proc(ctx: rawptr, req: Request) -> Response {
