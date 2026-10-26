@@ -10,7 +10,8 @@ with no server running.
 # Pack a directory (relative paths kept, symlinks skipped and reported on stderr)
 ham-ctl artifact create --name report --kind html-bundle --directory ./site [--entry docs/index.html]
 
-# Upload a prepared ZIP (validated; a manifest is appended if it has none)
+# Upload a prepared ZIP (validated; a manifest is appended if it has none).
+# Zip from inside the site so its pages sit at the archive root: (cd site && zip -r ../site.zip .)
 ham-ctl artifact create --name report --kind html-bundle --file ./site.zip [--entry index.html]
 ```
 
