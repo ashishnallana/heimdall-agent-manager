@@ -243,6 +243,84 @@ bridge_os_supervisor_argv :: proc(script: string) -> [dynamic]string {
 	return argv
 }
 
+// BRIDGE_UPDATE_SPAWN_DETACHES: bridge_os_spawn_new_session puts the child in a
+// session of its own, so the supervisor is told --already-detached.
+BRIDGE_UPDATE_SPAWN_DETACHES :: true
+
+// bridge_os_spawn_new_session starts argv (argv[0] resolved through PATH like
+// execvp) as the leader of a new session and process group, with stdio on
+// /dev/null, and does not wait for it. setsid(2) runs in the forked child, which
+// is never a group leader, so it cannot fail with EPERM; this replaces setsid(1),
+// which macOS does not ship. Everything the child touches is prepared before
+// fork, so the child only calls async-signal-safe functions. Returns false when
+// the fork fails or the child cannot setsid/exec (it reports errno through a
+// close-on-exec pipe, as core:os process_start does).
+bridge_os_spawn_new_session :: proc(argv: []string) -> bool {
+	if len(argv) == 0 do return false
+	exe := argv[0]
+	if strings.index_byte(exe, '/') < 0 {
+		found := false
+		for dir in strings.split(os.get_env("PATH", context.temp_allocator), ":", context.temp_allocator) {
+			if dir == "" do continue
+			candidate := fmt.tprintf("%s/%s", dir, exe)
+			if bridge_os_is_executable(candidate) && os.is_file(candidate) {
+				exe = candidate
+				found = true
+				break
+			}
+		}
+		if !found do return false
+	}
+	c_exe := strings.clone_to_cstring(exe, context.temp_allocator)
+	c_argv := make([]cstring, len(argv) + 1, context.temp_allocator)
+	for arg, i in argv do c_argv[i] = strings.clone_to_cstring(arg, context.temp_allocator)
+
+	READ :: 0
+	WRITE :: 1
+	report: [2]posix.FD
+	if posix.pipe(&report) != .OK do return false
+	defer posix.close(report[READ])
+	if posix.fcntl(report[READ], .SETFD, i32(posix.FD_CLOEXEC)) == -1 || posix.fcntl(report[WRITE], .SETFD, i32(posix.FD_CLOEXEC)) == -1 {
+		posix.close(report[WRITE])
+		return false
+	}
+
+	pid := posix.fork()
+	switch pid {
+	case -1:
+		posix.close(report[WRITE])
+		return false
+	case 0:
+		fail :: proc(fd: posix.FD) -> ! {
+			errno := u8(posix.errno())
+			posix.write(fd, &errno, 1)
+			posix._exit(127)
+		}
+		if posix.setsid() == -1 do fail(report[WRITE])
+		null := posix.open("/dev/null", {.RDWR})
+		if null == -1 do fail(report[WRITE])
+		if posix.dup2(null, posix.STDIN_FILENO) == -1 do fail(report[WRITE])
+		if posix.dup2(null, posix.STDOUT_FILENO) == -1 do fail(report[WRITE])
+		if posix.dup2(null, posix.STDERR_FILENO) == -1 do fail(report[WRITE])
+		if null > posix.STDERR_FILENO do posix.close(null)
+		posix.execve(c_exe, raw_data(c_argv), posix.environ)
+		fail(report[WRITE])
+	}
+
+	posix.close(report[WRITE])
+	// EOF means execve closed the pipe: the child is running the supervisor.
+	child_errno: u8
+	for {
+		n := posix.read(report[READ], &child_errno, 1)
+		if n == -1 && posix.errno() == .EINTR do continue
+		if n != 1 do return true
+		break
+	}
+	status: i32
+	for posix.waitpid(pid, &status, {}) == -1 && posix.errno() == .EINTR {}
+	return false
+}
+
 bridge_os_default_data_dir :: proc() -> string {
 	return bridge_expand_home("~/.local/share/heimdall")
 }

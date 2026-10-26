@@ -279,6 +279,20 @@ bridge_os_supervisor_argv :: proc(script: string) -> [dynamic]string {
 	return argv
 }
 
+// BRIDGE_UPDATE_SPAWN_DETACHES: Windows has no sessions or process groups that
+// a service stop would take down with the bridge, so nothing is claimed to the
+// supervisor (no --already-detached).
+BRIDGE_UPDATE_SPAWN_DETACHES :: false
+
+// bridge_os_spawn_new_session starts argv without waiting for it; the child
+// outlives the bridge and is reaped by the OS once the bridge exits.
+bridge_os_spawn_new_session :: proc(argv: []string) -> bool {
+	if len(argv) == 0 do return false
+	process, err := os.process_start(os.Process_Desc{command = argv})
+	_ = process
+	return err == nil
+}
+
 // bridge_os_default_data_dir is %LOCALAPPDATA%\heimdall (per user, not roamed).
 bridge_os_default_data_dir :: proc() -> string {
 	if local := os.get_env("LOCALAPPDATA", context.temp_allocator); local != "" {

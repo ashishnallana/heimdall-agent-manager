@@ -1532,24 +1532,38 @@ bridge_update_download :: proc(download_url, dest_path: string, download: Bridge
 
 Bridge_Update_Supervisor_Spawn :: proc(argv: []string) -> bool
 
+// The supervisor intentionally outlives the bridge process. On Unix it is
+// started as the leader of a new session (bridge_os_spawn_new_session), so the
+// bridge's service manager (systemd unit, launchd job, Termux sv) does not take
+// it down with the bridge's process group, and no setsid(1) or python is needed.
 bridge_update_spawn_supervisor :: proc(argv: []string) -> bool {
-	if len(argv) == 0 do return false
-	process, err := os.process_start(os.Process_Desc{command = argv})
-	if err != nil do return false
-	// The supervisor intentionally outlives the bridge process. As with the PTY
-	// host daemon, retaining no join handle lets the OS adopt/reap it after the
-	// bridge exits.
-	_ = process
-	return true
+	return bridge_os_spawn_new_session(argv)
+}
+
+// BRIDGE_UPDATE_SUPERVISOR_INTERFACE is the caller interface the Bridge speaks to
+// the staged supervisor script (see the script's --help and SELF_HOSTING.md
+// "Bridge self-update"): interface 2 requires --from-version and --to-version.
+BRIDGE_UPDATE_SUPERVISOR_INTERFACE :: "2"
+
+// bridge_update_append_version_args adds the versioned-interface flags every
+// supervisor invocation carries, so the staged script can run its migration
+// hooks for exactly this from -> to transition.
+bridge_update_append_version_args :: proc(argv: ^[dynamic]string, from_version, to_version: string) {
+	append(argv,
+		"--interface", BRIDGE_UPDATE_SUPERVISOR_INTERFACE,
+		"--from-version", from_version,
+		"--to-version", to_version,
+	)
 }
 
 bridge_update_launch_supervisor :: proc(
-	supervisor_path, data_dir, stage_dir, bridge_port, hub_url, bridge_pid: string,
+	supervisor_path, data_dir, stage_dir, bridge_port, hub_url, bridge_pid, from_version, to_version: string,
 	spawn: Bridge_Update_Supervisor_Spawn = bridge_update_spawn_supervisor,
 	pty_host_socket: string = "",
 ) -> bool {
 	if spawn == nil do return false
 	argv := bridge_os_supervisor_argv(supervisor_path)
+	bridge_update_append_version_args(&argv, from_version, to_version)
 	append(&argv,
 		"--data-dir", data_dir,
 		"--stage-dir", stage_dir,
@@ -1558,7 +1572,34 @@ bridge_update_launch_supervisor :: proc(
 		"--bridge-pid", bridge_pid,
 		"--pty-host-socket", pty_host_socket,
 	)
+	// The spawn already made the supervisor a session leader; tell the script so
+	// it does not try to re-exec itself through setsid(1) (absent on macOS).
+	if BRIDGE_UPDATE_SPAWN_DETACHES do append(&argv, "--already-detached")
 	return spawn(argv[:])
+}
+
+// bridge_update_stage_supervisor copies the supervisor script out of the staged
+// bundle into target (temp-allocated detail on failure). Only the bundle being
+// installed is trusted: a script from the cwd, the data dir or an earlier update
+// would speak another version's interface, so its absence aborts the update
+// before anything is stopped.
+bridge_update_stage_supervisor :: proc(stage_dir, target: string) -> (ok: bool, detail: string) {
+	name := BRIDGE_UPDATE_SUPERVISOR_NAME
+	// Never fall back to a copy an earlier update left at target.
+	_ = os.remove(target)
+	candidates := [2]string{
+		fmt.tprintf("%s/scripts/%s", stage_dir, name),
+		fmt.tprintf("%s/%s", stage_dir, name),
+	}
+	for candidate in candidates {
+		if !os.is_file(candidate) do continue
+		if !bridge_update_copy_file(candidate, target) {
+			return false, fmt.tprintf("cannot copy supervisor script %s to %s", candidate, target)
+		}
+		_ = os.chmod(target, os.Permissions{.Read_User, .Write_User, .Execute_User, .Read_Group, .Execute_Group, .Read_Other, .Execute_Other})
+		return true, ""
+	}
+	return false, fmt.tprintf("supervisor script %s not found in the staged bundle (expected scripts/%s); update aborted before stopping anything", name, name)
 }
 
 bridge_hub_handle_update_command :: proc(conn: ^ws.Connection, text: string) {
@@ -1660,6 +1701,11 @@ bridge_runtime_apply_update :: proc(
 ) -> (bool, string) {
 	if strings.trim_space(download_url) == "" {
 		return false, "missing download_url"
+	}
+	// The supervisor's interface 2 needs the version being installed; the Hub
+	// always resolves one, so an empty value is refused before any download.
+	if strings.trim_space(target_version) == "" {
+		return false, "missing target_version"
 	}
 	// REQ-T13-1: refuse before draining or downloading anything. Installing a
 	// bundle for another target would leave the bridge unable to start (the
@@ -1801,34 +1847,15 @@ bridge_runtime_apply_update :: proc(
 		return false, fmt.tprintf("preflight execution check failed (%s --version)", bridge_binary)
 	}
 
-	// 7. Locate supervisor script scripts/apply-bridge-update.sh (.ps1 on Windows)
+	// 7. Take the supervisor script (scripts/apply-bridge-update.sh, .ps1 on
+	// Windows) from the staged bundle only; see bridge_update_stage_supervisor.
 	_ = bridge_make_directory_all(updates_dir)
-	supervisor_name := BRIDGE_UPDATE_SUPERVISOR_NAME
-	supervisor_target := fmt.tprintf("%s/%s", updates_dir, supervisor_name)
-	supervisor_found := false
-	script_candidates := []string{
-		fmt.tprintf("%s/scripts/%s", stage_dir, supervisor_name),
-		fmt.tprintf("%s/%s", stage_dir, supervisor_name),
-		fmt.tprintf("scripts/%s", supervisor_name),
-		fmt.tprintf("%s/scripts/%s", data_dir, supervisor_name),
-		fmt.tprintf("/usr/local/google/home/tanmayvijay/heimdall-cloudtop/scripts/%s", supervisor_name),
-	}
-	for sc in script_candidates {
-		if os.exists(sc) {
-			_ = bridge_update_copy_file(sc, supervisor_target)
-			supervisor_found = true
-			break
-		}
-	}
-	if !supervisor_found && os.exists(supervisor_target) {
-		supervisor_found = true
-	}
-	if !supervisor_found {
+	supervisor_target := fmt.tprintf("%s/%s", updates_dir, BRIDGE_UPDATE_SUPERVISOR_NAME)
+	if sup_ok, sup_detail := bridge_update_stage_supervisor(stage_dir, supervisor_target); !sup_ok {
 		_ = os.remove_all(stage_dir)
 		blog_error(.update_apply_failed, blog_sym(.stage, .supervisor), blog_sym(.reason, .missing_binary))
-		return false, fmt.tprintf("supervisor script %s not found", supervisor_name)
+		return false, sup_detail
 	}
-	_ = os.chmod(supervisor_target, os.Permissions{.Read_User, .Write_User, .Execute_User, .Read_Group, .Execute_Group, .Read_Other, .Execute_Other})
 	_ = bridge_update_send_progress(conn, command_id, "staged", 78, "Update bundle staged and validated.")
 
 	// 8. Stop the bridge-owned PTY host while this control connection can still
@@ -1838,6 +1865,7 @@ bridge_runtime_apply_update :: proc(
 	defer delete(pty_socket)
 	_ = bridge_update_send_progress(conn, command_id, "stopping_pty_host", 82, "Stopping bridge-owned PTY host and agent processes...")
 	stop_pty_argv := bridge_os_supervisor_argv(supervisor_target)
+	bridge_update_append_version_args(&stop_pty_argv, contracts.APP_VERSION, target_version)
 	append(&stop_pty_argv, "--data-dir", data_dir, "--stop-pty-hosts-only", "--pty-host-socket", pty_socket)
 	stop_pty_out, stop_pty_err, stop_pty_exit, stop_pty_ok, stop_pty_timed_out := bridge_process_run_capture_status(stop_pty_argv[:], 15 * time.Second)
 	defer { delete(stop_pty_out); delete(stop_pty_err) }
@@ -1866,6 +1894,8 @@ bridge_runtime_apply_update :: proc(
 		port_str,
 		bridge_config.daemon_url,
 		pid_str,
+		contracts.APP_VERSION,
+		target_version,
 		pty_host_socket = pty_socket,
 	) {
 		_ = os.remove_all(stage_dir)

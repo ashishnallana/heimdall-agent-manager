@@ -33,8 +33,9 @@ test_bridge_update_progress_json_format :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(frame, "\"message\":\"Downloading update package\""), "message matches")
 }
 
-// REQ-BUPD-FIX-5: update launch is an injectable argv boundary. This pins the
-// exact process identity forwarded to the supervisor without running the script.
+// REQ-BUPD-FIX-5, REQ-UPD-COMPAT-2: update launch is an injectable argv boundary.
+// This pins the exact argv forwarded to the supervisor without running the
+// script: the versioned interface first, then the process identity.
 @(test)
 test_bridge_update_supervisor_launch_uses_structured_argv_and_exact_pid :: proc(t: ^testing.T) {
 	bridge_update_test_clear_spawn_args()
@@ -47,22 +48,33 @@ test_bridge_update_supervisor_launch_uses_structured_argv_and_exact_pid :: proc(
 		"49323",
 		"https://hub.example.test/path?value=one&next=two",
 		"424242",
+		"0.5.6",
+		"0.6.0-rc.1",
 		bridge_update_test_capture_spawn,
 		"/tmp/bridge with spaces/pty-host.sock",
 	)
 	testing.expect(t, ok, "injected supervisor launcher succeeds")
-	testing.expect_value(t, len(bridge_update_test_spawn_args), 14)
-	if len(bridge_update_test_spawn_args) != 14 do return
-	testing.expect_value(t, bridge_update_test_spawn_args[0], "bash")
-	testing.expect_value(t, bridge_update_test_spawn_args[1], "/tmp/update scripts/apply-bridge-update.sh")
-	testing.expect_value(t, bridge_update_test_spawn_args[3], "/tmp/data dir")
-	testing.expect_value(t, bridge_update_test_spawn_args[5], "/tmp/stage dir")
-	testing.expect_value(t, bridge_update_test_spawn_args[7], "49323")
-	testing.expect_value(t, bridge_update_test_spawn_args[9], "https://hub.example.test/path?value=one&next=two")
-	testing.expect_value(t, bridge_update_test_spawn_args[10], "--bridge-pid")
-	testing.expect_value(t, bridge_update_test_spawn_args[11], "424242")
-	testing.expect_value(t, bridge_update_test_spawn_args[12], "--pty-host-socket")
-	testing.expect_value(t, bridge_update_test_spawn_args[13], "/tmp/bridge with spaces/pty-host.sock")
+	prefix := bridge_os_supervisor_argv("/tmp/update scripts/apply-bridge-update.sh")
+	expected := make([dynamic]string, context.temp_allocator)
+	append(&expected, ..prefix[:])
+	append(&expected,
+		"--interface", "2",
+		"--from-version", "0.5.6",
+		"--to-version", "0.6.0-rc.1",
+		"--data-dir", "/tmp/data dir",
+		"--stage-dir", "/tmp/stage dir",
+		"--bridge-port", "49323",
+		"--hub-url", "https://hub.example.test/path?value=one&next=two",
+		"--bridge-pid", "424242",
+		"--pty-host-socket", "/tmp/bridge with spaces/pty-host.sock",
+	)
+	// Unix spawns the supervisor in its own session and says so; Windows does not.
+	if BRIDGE_UPDATE_SPAWN_DETACHES do append(&expected, "--already-detached")
+	testing.expect_value(t, len(bridge_update_test_spawn_args), len(expected))
+	if len(bridge_update_test_spawn_args) != len(expected) do return
+	for want, i in expected {
+		testing.expectf(t, bridge_update_test_spawn_args[i] == want, "argv[%d] = %q, want %q", i, bridge_update_test_spawn_args[i], want)
+	}
 }
 
 // ---- update tarball download (httpc) ----
