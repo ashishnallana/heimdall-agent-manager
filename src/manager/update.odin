@@ -21,16 +21,20 @@ import "core:strconv"
 import "core:strings"
 import "core:time"
 import contracts "odin_test:contracts"
-import http "odin_test:lib/http_client"
+import httpc "odin_test:lib/httpc"
 
 // Release source (same GitHub repo as scripts/install.sh; mirror layout
 // matches install.sh --hub: unversioned heimdall-local-<target>.tar.gz and
 // SHA256SUMS served from the mirror root).
-MANAGER_UPDATE_GITHUB_REPO :: "tanmayv/heimdall-agent-manager"
+MANAGER_UPDATE_GITHUB_REPO :: "tanmayv/heimdall-agent-manager" // for messages
+MANAGER_UPDATE_GITHUB_OWNER :: "tanmayv"
+MANAGER_UPDATE_GITHUB_NAME :: "heimdall-agent-manager"
 MANAGER_UPDATE_API_BASE :: "https://api.github.com"
 MANAGER_UPDATE_DOWNLOAD_BASE :: "https://github.com"
 MANAGER_UPDATE_TIMEOUT_MS :: 60000 // tarball downloads tolerate slow links
 MANAGER_UPDATE_MANIFEST_TIMEOUT_MS :: 20000
+// GitHub release assets redirect to objects.githubusercontent.com.
+MANAGER_UPDATE_MAX_REDIRECTS :: 5
 
 // Binaries every release bundle must ship (package-local-binary-tarball.sh
 // required_entries). ham-pty-host stays optional there (PTYH-4), so a bundle
@@ -197,8 +201,8 @@ manager_update_versions_equal :: proc(a, b: string) -> bool {
 
 Manager_Update_Release :: struct {
 	version:    string, // tag (GitHub) or pin (Mirror/"")
-	tarball_url: string,
-	sums_url:    string,
+	tarball_url: httpc.Url,
+	sums_url:    httpc.Url,
 	tarball_name: string,
 }
 
@@ -221,26 +225,28 @@ manager_update_release_lists_asset :: proc(release_json, asset: string) -> bool 
 // bundle for plan.target (REQ-T13-3): (tag, has_target, ok). ok=false means
 // the caller must abort; the error paths print diagnostics.
 manager_update_fetch_latest_version :: proc(plan: ^Manager_Update_Plan, pin: string) -> (string, bool, bool) {
-	path := fmt.tprintf("/repos/%s/releases/latest", MANAGER_UPDATE_GITHUB_REPO)
-	if pin != "" {
-		path = fmt.tprintf("/repos/%s/releases/tags/%s", MANAGER_UPDATE_GITHUB_REPO, pin)
-	}
+	api, url_err := httpc.parse_url(MANAGER_UPDATE_API_BASE)
+	if url_err != .None do return "", false, false
+	latest := [?]string{"repos", MANAGER_UPDATE_GITHUB_OWNER, MANAGER_UPDATE_GITHUB_NAME, "releases", "latest"}
+	pinned := [?]string{"repos", MANAGER_UPDATE_GITHUB_OWNER, MANAGER_UPDATE_GITHUB_NAME, "releases", "tags", pin}
+	path := pinned[:] if pin != "" else latest[:]
 	// GitHub rejects REST calls without a User-Agent (HTTP 403).
-	headers := [?]http.Header{{name = "User-Agent", value = "heimdall-update"}}
-	resp, ok := http.request_with_headers_timeout("GET", MANAGER_UPDATE_API_BASE, path, "", headers[:], MANAGER_UPDATE_MANIFEST_TIMEOUT_MS)
-	if !ok {
-		fmt.eprintfln("heimdall update: could not reach %s (no HTTP response) — check network/proxy", MANAGER_UPDATE_API_BASE)
+	headers := [?]httpc.Header{httpc.user_agent("heimdall-update"), httpc.accept("application/vnd.github+json")}
+	resp, err := httpc.send({method = .GET, url = api, path = path, headers = headers[:], timeout_ms = MANAGER_UPDATE_MANIFEST_TIMEOUT_MS})
+	defer httpc.response_destroy(&resp)
+	if err != .None {
+		fmt.eprintfln("heimdall update: could not reach %s (%s) — check network", MANAGER_UPDATE_API_BASE, httpc.error_string(err))
 		return "", false, false
 	}
-	defer delete(resp.body)
+	body := httpc.text(resp)
 	switch resp.status {
 	case 200:
-		tag := manager_extract_json_string(resp.body, "tag_name", "")
+		tag := manager_extract_json_string(body, "tag_name", "")
 		if tag == "" {
 			fmt.eprintln("heimdall update: release manifest has no tag_name — aborting")
 			return "", false, false
 		}
-		has_target := manager_update_release_lists_asset(resp.body, manager_update_tarball_name(plan.target, tag))
+		has_target := manager_update_release_lists_asset(body, manager_update_tarball_name(plan.target, tag))
 		return strings.clone(tag), has_target, true
 	case 404:
 		if pin != "" {
@@ -250,9 +256,21 @@ manager_update_fetch_latest_version :: proc(plan: ^Manager_Update_Plan, pin: str
 		}
 		return "", false, false
 	case:
-		fmt.eprintfln("heimdall update: manifest request failed with HTTP %d — %s", resp.status, resp.body)
+		fmt.eprintfln("heimdall update: manifest request failed with HTTP %d — %s", resp.status, body)
 		return "", false, false
 	}
+}
+
+// manager_update_asset_url is base + dir segments + file name, rendered and
+// re-parsed by httpc (temp-allocated).
+manager_update_asset_url :: proc(base: httpc.Url, dir: []string, file: string) -> (httpc.Url, bool) {
+	segments := make([dynamic]string, 0, len(dir) + 1, context.temp_allocator)
+	append(&segments, ..dir)
+	append(&segments, file)
+	text, err := httpc.build_url(base, segments[:], allocator = context.temp_allocator)
+	if err != .None do return {}, false
+	u, perr := httpc.parse_url(text)
+	return u, perr == .None
 }
 
 manager_update_resolve_release :: proc(plan: ^Manager_Update_Plan) -> (Manager_Update_Release, bool) {
@@ -268,14 +286,22 @@ manager_update_resolve_release :: proc(plan: ^Manager_Update_Plan) -> (Manager_U
 		}
 		release.version = tag
 		release.tarball_name = manager_update_tarball_name(plan.target, tag)
-		base := fmt.tprintf("%s/%s/releases/download/%s", MANAGER_UPDATE_DOWNLOAD_BASE, MANAGER_UPDATE_GITHUB_REPO, tag)
-		release.tarball_url = fmt.tprintf("%s/%s", base, release.tarball_name)
-		release.sums_url = fmt.tprintf("%s/SHA256SUMS", base)
+		download, url_err := httpc.parse_url(MANAGER_UPDATE_DOWNLOAD_BASE)
+		if url_err != .None do return release, false
+		release_dir := [?]string{MANAGER_UPDATE_GITHUB_OWNER, MANAGER_UPDATE_GITHUB_NAME, "releases", "download", tag}
+		tarball_ok, sums_ok: bool
+		release.tarball_url, tarball_ok = manager_update_asset_url(download, release_dir[:], release.tarball_name)
+		release.sums_url, sums_ok = manager_update_asset_url(download, release_dir[:], "SHA256SUMS")
+		if !tarball_ok || !sums_ok do return release, false
 	case .Mirror:
 		release.version = plan.version
 		release.tarball_name = manager_update_tarball_name(plan.target, "")
-		release.tarball_url = fmt.tprintf("%s/%s", plan.source.mirror_base, release.tarball_name)
-		release.sums_url = fmt.tprintf("%s/SHA256SUMS", plan.source.mirror_base)
+		mirror, url_err := httpc.parse_url(plan.source.mirror_base)
+		if url_err != .None do return release, false
+		tarball_ok, sums_ok: bool
+		release.tarball_url, tarball_ok = manager_update_asset_url(mirror, nil, release.tarball_name)
+		release.sums_url, sums_ok = manager_update_asset_url(mirror, nil, "SHA256SUMS")
+		if !tarball_ok || !sums_ok do return release, false
 	}
 	return release, true
 }
@@ -304,12 +330,17 @@ manager_update_check :: proc(plan: ^Manager_Update_Plan) -> int {
 		fmt.println("  status:          update available (run: heimdall update)")
 		return 0
 	case .Mirror:
-		resp, ok := http.request_with_timeout("GET", plan.source.mirror_base, "/SHA256SUMS", "", MANAGER_UPDATE_MANIFEST_TIMEOUT_MS)
-		if !ok {
-			fmt.eprintfln("  mirror:          %s unreachable (transport error)", plan.source.mirror_base)
+		mirror, url_err := httpc.parse_url(plan.source.mirror_base)
+		if url_err != .None {
+			fmt.eprintfln("  mirror:          %s is not a valid URL", plan.source.mirror_base)
 			return 1
 		}
-		delete(resp.body)
+		resp, err := httpc.send({method = .GET, url = mirror, path = {"SHA256SUMS"}, timeout_ms = MANAGER_UPDATE_MANIFEST_TIMEOUT_MS})
+		defer httpc.response_destroy(&resp)
+		if err != .None {
+			fmt.eprintfln("  mirror:          %s unreachable (%s)", plan.source.mirror_base, httpc.error_string(err))
+			return 1
+		}
 		if resp.status != 200 {
 			fmt.eprintfln("  mirror:          SHA256SUMS request failed with HTTP %d", resp.status)
 			return 1
@@ -377,9 +408,9 @@ manager_update_prepare_stage_inner :: proc(plan: ^Manager_Update_Plan, release: 
 	sums_path := fmt.tprintf("%s/SHA256SUMS", stage_dir)
 	tarball_path := fmt.tprintf("%s/%s", stage_dir, release.tarball_name)
 
-	fmt.printfln("heimdall update: downloading %s", release.sums_url)
-	status, dl_ok := http.download_to_file(release.sums_url, sums_path, MANAGER_UPDATE_TIMEOUT_MS)
-	if !dl_ok || status != 200 {
+	fmt.printfln("heimdall update: downloading %s", httpc.url_string(release.sums_url))
+	status, dl_err := httpc.download_to_file({method = .GET, url = release.sums_url, timeout_ms = MANAGER_UPDATE_TIMEOUT_MS, max_redirects = MANAGER_UPDATE_MAX_REDIRECTS}, sums_path)
+	if dl_err != .None || status != 200 {
 		fmt.eprintfln("heimdall update: SHA256SUMS download failed (HTTP %d) — aborting", status)
 		return false
 	}
@@ -400,9 +431,9 @@ manager_update_prepare_stage_inner :: proc(plan: ^Manager_Update_Plan, release: 
 	}
 	defer delete(expected)
 
-	fmt.printfln("heimdall update: downloading %s", release.tarball_url)
-	status, dl_ok = http.download_to_file(release.tarball_url, tarball_path, MANAGER_UPDATE_TIMEOUT_MS)
-	if !dl_ok || status != 200 {
+	fmt.printfln("heimdall update: downloading %s", httpc.url_string(release.tarball_url))
+	status, dl_err = httpc.download_to_file({method = .GET, url = release.tarball_url, timeout_ms = MANAGER_UPDATE_TIMEOUT_MS, max_redirects = MANAGER_UPDATE_MAX_REDIRECTS}, tarball_path)
+	if dl_err != .None || status != 200 {
 		fmt.eprintfln("heimdall update: tarball download failed (HTTP %d) — aborting", status)
 		return false
 	}

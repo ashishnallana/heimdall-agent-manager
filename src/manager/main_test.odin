@@ -283,8 +283,9 @@ manager_test_mock_read_request :: proc(client: net.TCP_Socket, buffer: []byte) -
 			if idx := strings.index(text, "\r\n\r\n"); idx >= 0 do header_end = idx
 		}
 		if header_end >= 0 {
-			content_length := manager_test_mock_content_length(text[:header_end])
-			if content_length >= 0 && total >= header_end + 4 + content_length do break
+			// No Content-Length means no body (a GET), as the hub and bridge servers read it.
+			content_length := max(manager_test_mock_content_length(text[:header_end]), 0)
+			if total >= header_end + 4 + content_length do break
 		}
 	}
 	if header_end < 0 do return 0

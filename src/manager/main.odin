@@ -18,6 +18,7 @@ import "core:sys/posix"
 import contracts "odin_test:contracts"
 import cfg_lib "odin_test:lib/config"
 import jsonx "odin_test:lib/jsonx"
+import httpc "odin_test:lib/httpc"
 
 // Service identity for the primary bridge, shared with nix/home-manager.nix
 // (serviceName/label at nix/home-manager.nix:94) and scripts/install.sh.
@@ -41,6 +42,11 @@ MANAGER_MACOS_LOG_DIR :: "/tmp/heimdall-logs"
 MANAGER_PROBE_TIMEOUT_MS :: 5000
 
 main :: proc() {
+	// libcurl global init, once, before any thread (src/lib/httpc).
+	if ok, message := httpc.init(); !ok {
+		fmt.eprintln("heimdall:", message)
+		os.exit(1)
+	}
 	args := os.args
 	if len(args) <= 1 {
 		manager_print_usage()

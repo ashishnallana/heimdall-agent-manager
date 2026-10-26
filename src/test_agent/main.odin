@@ -6,7 +6,7 @@ import "core:strconv"
 import "core:strings"
 import "core:time"
 import contracts "odin_test:contracts"
-import http "odin_test:lib/http_client"
+import httpc "odin_test:lib/httpc"
 import jsonx "odin_test:lib/jsonx"
 
 Target :: struct {
@@ -44,6 +44,11 @@ Config :: struct {
 }
 
 main :: proc() {
+	// libcurl global init, once, before any thread (src/lib/httpc).
+	if ok, message := httpc.init(); !ok {
+		fmt.eprintln("ham-test-agent:", message)
+		os.exit(1)
+	}
 	if has_flag(os.args, "--version") {
 		fmt.println("ham-test-agent", contracts.APP_VERSION, "protocol", contracts.PROTOCOL_VERSION)
 		return
@@ -188,30 +193,43 @@ parse_targets :: proc(value: string) -> [dynamic]Target {
 	return targets
 }
 
+Rpc_Send_Message :: struct {
+	agent_token:              string,
+	action:                   string,
+	target_agent_instance_id: string,
+	payload:                  string,
+}
+
+Rpc_Fetch_Messages :: struct {
+	agent_token:     string,
+	action:          string,
+	conversation_id: string,
+	include_read:    bool,
+	limit:           int,
+}
+
+// rpc_post POSTs a JSON body to <daemon_url>/agent-rpc; the reply body is
+// temp-allocated.
+rpc_post :: proc(daemon_url: string, body: httpc.Body) -> (status: int, reply: string, ok: bool) {
+	base, url_err := httpc.parse_url(daemon_url)
+	if url_err != .None do return 0, "", false
+	resp, err := httpc.send({method = .POST, url = base, path = {"agent-rpc"}, body = body}, context.temp_allocator)
+	if err != .None do return 0, "", false
+	return resp.status, httpc.text(resp), true
+}
+
 rpc_send_message :: proc(daemon_url, agent_token, target, body: string) -> (bool, string) {
-	builder := strings.builder_make()
-	strings.write_string(&builder, "{\"agent_token\":\"")
-	strings.write_string(&builder, agent_token)
-	strings.write_string(&builder, "\",\"action\":\"send_message\",\"target_agent_instance_id\":\"")
-	strings.write_string(&builder, target)
-	strings.write_string(&builder, "\",\"payload\":\"")
-	strings.write_string(&builder, json_escape(body))
-	strings.write_string(&builder, "\"}")
-	response, ok := http.post(daemon_url, "/agent-rpc", strings.to_string(builder))
-	if ok && (response.status == 200 || response.status == 202) do return true, ""
+	msg := Rpc_Send_Message{agent_token = agent_token, action = "send_message", target_agent_instance_id = target, payload = body}
+	status, reply, ok := rpc_post(daemon_url, httpc.json_body(msg))
+	if ok && (status == 200 || status == 202) do return true, ""
 	if !ok do return false, "http_post_failed"
-	return false, fmt.tprintf("status=%d body=%s", response.status, response.body)
+	return false, fmt.tprintf("status=%d body=%s", status, reply)
 }
 
 rpc_fetch_messages :: proc(daemon_url, agent_token, conversation_id: string) -> (string, bool) {
-	builder := strings.builder_make()
-	strings.write_string(&builder, "{\"agent_token\":\"")
-	strings.write_string(&builder, agent_token)
-	strings.write_string(&builder, "\",\"action\":\"fetch_messages\",\"conversation_id\":\"")
-	strings.write_string(&builder, conversation_id)
-	strings.write_string(&builder, "\",\"include_read\":false,\"limit\":100}")
-	response, ok := http.post(daemon_url, "/agent-rpc", strings.to_string(builder))
-	return response.body, ok && response.status == 200
+	req := Rpc_Fetch_Messages{agent_token = agent_token, action = "fetch_messages", conversation_id = conversation_id, include_read = false, limit = 100}
+	status, reply, ok := rpc_post(daemon_url, httpc.json_body(req))
+	return reply, ok && status == 200
 }
 
 build_message_body :: proc(from, to: string, seq: int, created_unix_ms: i64, size: int) -> string {

@@ -19,6 +19,7 @@ package httpc
 import "base:runtime"
 import "core:c"
 import "core:fmt"
+import "core:strconv"
 import "core:strings"
 import "core:sync"
 import contracts "odin_test:contracts"
@@ -291,6 +292,31 @@ parse_url :: proc(raw: string, allocator := context.temp_allocator) -> (u: Url, 
 	if url_part_present(h, CURLUPART_PASSWORD) || url_part_present(h, CURLUPART_USER) do return {}, .Invalid_Url
 	host := url_part(h, CURLUPART_HOST) or_return
 	curl_free(rawptr(host))
+	full := url_part(h, CURLUPART_URL) or_return
+	defer curl_free(rawptr(full))
+	return Url{_text = strings.clone(string(full), allocator)}, .None
+}
+
+// url_from_parts builds "<scheme>://<host>:<port>/" from parts with libcurl's
+// URL API (no string formatting by the caller), e.g. a loopback probe target.
+// scheme must be "http" or "https"; port 1..65535. Allocated with `allocator`.
+url_from_parts :: proc(scheme, host: string, port: int, allocator := context.temp_allocator) -> (u: Url, err: Error) {
+	if ok, _ := init(); !ok do return {}, .Not_Initialized
+	if scheme != "http" && scheme != "https" do return {}, .Invalid_Url
+	if port <= 0 || port > 65535 || host == "" || !text_is_clean(host) do return {}, .Invalid_Url
+	h := curl_url()
+	if h == nil do return {}, .Internal
+	defer curl_url_cleanup(h)
+	port_buf: [8]byte
+	port_text := strconv.write_int(port_buf[:], i64(port), 10)
+	if curl_url_set(h, CURLUPART_SCHEME, strings.clone_to_cstring(scheme, context.temp_allocator), 0) != CURLUE_OK do return {}, .Invalid_Url
+	host_part := host
+	if strings.index_byte(host, ':') >= 0 && !strings.has_prefix(host, "[") {
+		bracketed := [3]string{"[", host, "]"} // IPv6 literal
+		host_part = strings.concatenate(bracketed[:], context.temp_allocator)
+	}
+	if curl_url_set(h, CURLUPART_HOST, strings.clone_to_cstring(host_part, context.temp_allocator), 0) != CURLUE_OK do return {}, .Invalid_Url
+	if curl_url_set(h, CURLUPART_PORT, strings.clone_to_cstring(port_text, context.temp_allocator), 0) != CURLUE_OK do return {}, .Invalid_Url
 	full := url_part(h, CURLUPART_URL) or_return
 	defer curl_free(rawptr(full))
 	return Url{_text = strings.clone(string(full), allocator)}, .None

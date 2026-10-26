@@ -18,6 +18,7 @@ import "core:testing"
 import "core:thread"
 import "core:time"
 import contracts "odin_test:contracts"
+import httpc "odin_test:lib/httpc"
 
 // ---- pure helpers ----
 
@@ -325,6 +326,11 @@ manager_update_test_build_tarball :: proc(t: ^testing.T, dir: string, target: st
 	return tarball_path, digest
 }
 
+manager_update_test_url :: proc(text: string) -> httpc.Url {
+	u, _ := httpc.parse_url(text)
+	return u
+}
+
 manager_update_test_stage_plan :: proc(dir: string, port: int, target: string) -> (Manager_Update_Plan, Manager_Update_Release) {
 	base := fmt.tprintf("http://127.0.0.1:%d", port)
 	tarball_name := fmt.tprintf("heimdall-local-%s.tar.gz", target)
@@ -339,8 +345,8 @@ manager_update_test_stage_plan :: proc(dir: string, port: int, target: string) -
 	release := Manager_Update_Release{
 		version = "",
 		tarball_name = tarball_name,
-		tarball_url = fmt.tprintf("%s/%s", base, tarball_name),
-		sums_url = fmt.tprintf("%s/SHA256SUMS", base),
+		tarball_url = manager_update_test_url(fmt.tprintf("%s/%s", base, tarball_name)),
+		sums_url = manager_update_test_url(fmt.tprintf("%s/SHA256SUMS", base)),
 	}
 	return plan, release
 }
@@ -438,8 +444,8 @@ test_manager_update_resolve_release_mirror_urls :: proc(t: ^testing.T) {
 	release, ok := manager_update_resolve_release(&plan)
 	testing.expect(t, ok, "mirror resolution needs no network")
 	testing.expect(t, release.tarball_name == "heimdall-local-linux-amd64.tar.gz", "mirror tarball is unversioned")
-	testing.expect(t, release.tarball_url == "http://127.0.0.1:49999/heimdall-local-linux-amd64.tar.gz", "mirror tarball url")
-	testing.expect(t, release.sums_url == "http://127.0.0.1:49999/SHA256SUMS", "mirror sums url")
+	testing.expect_value(t, httpc.url_string(release.tarball_url), "http://127.0.0.1:49999/heimdall-local-linux-amd64.tar.gz")
+	testing.expect_value(t, httpc.url_string(release.sums_url), "http://127.0.0.1:49999/SHA256SUMS")
 }
 
 // REQ-T13-3: a release whose SHA256SUMS has no bundle for this target is "not

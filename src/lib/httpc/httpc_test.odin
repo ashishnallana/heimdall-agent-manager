@@ -64,6 +64,23 @@ url_base_without_segments_keeps_its_path_and_query :: proc(t: ^testing.T) {
 }
 
 @(test)
+url_from_parts_builds_loopback_targets :: proc(t: ^testing.T) {
+	if !must_init(t) do return
+	u, err := url_from_parts("http", "127.0.0.1", 49324)
+	testing.expect_value(t, err, Error.None)
+	testing.expect_value(t, url_string(u), "http://127.0.0.1:49324/")
+	v6, err6 := url_from_parts("https", "::1", 8443)
+	testing.expect_value(t, err6, Error.None)
+	testing.expect_value(t, url_string(v6), "https://[::1]:8443/")
+	_, bad_port := url_from_parts("http", "127.0.0.1", 0)
+	testing.expect_value(t, bad_port, Error.Invalid_Url)
+	_, bad_scheme := url_from_parts("ftp", "127.0.0.1", 21)
+	testing.expect_value(t, bad_scheme, Error.Invalid_Url)
+	_, bad_host := url_from_parts("http", "a b/c", 80)
+	testing.expect_value(t, bad_host, Error.Invalid_Url)
+}
+
+@(test)
 url_rejects_unsafe_input :: proc(t: ^testing.T) {
 	if !must_init(t) do return
 	bad := []string{
@@ -601,9 +618,15 @@ tls_end_to_end_with_test_ca :: proc(t: ^testing.T) {
 	reply_path := fmt.tprintf("%s/reply.http", dir)
 	reply := "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n7\r\n{\"a\":1}\r\n0\r\n\r\n"
 	if !testing.expect(t, os.write_entire_file(reply_path, transmute([]byte)reply) == nil) do return
+	// The responder reads the request head before replying: replying and closing
+	// with request bytes still unread would make the kernel answer with RST and
+	// the client could lose the reply (a test race, not a client bug).
+	script_path := fmt.tprintf("%s/respond.sh", dir)
+	script := fmt.tprintf("while IFS= read -r line; do case \"$line\" in ''|$(printf '\\r')) break;; esac; done\ncat %s\n", reply_path)
+	if !testing.expect(t, os.write_entire_file(script_path, transmute([]byte)script) == nil) do return
 	server, serr := os.process_start(os.Process_Desc{command = []string{
 		"socat", fmt.tprintf("OPENSSL-LISTEN:%d,bind=127.0.0.1,reuseaddr,fork,cert=%s,key=%s,verify=0", bound.port, cert, key),
-		fmt.tprintf("EXEC:cat %s", reply_path),
+		fmt.tprintf("EXEC:sh %s", script_path),
 	}})
 	if !testing.expect(t, serr == nil, "socat TLS server starts") do return
 	defer {
