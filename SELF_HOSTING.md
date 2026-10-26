@@ -679,6 +679,11 @@ curl -fsSL https://raw.githubusercontent.com/tanmayv/heimdall-agent-manager/main
 # Download from a self-hosted hub mirror instead of GitHub Releases
 curl -fsSL https://raw.githubusercontent.com/tanmayv/heimdall-agent-manager/main/scripts/install.sh \
   | bash -s -- --hub https://hub.example.com
+
+# A second bridge to the same Hub for this OS user (another Heimdall user);
+# see 2.1.2
+curl -fsSL https://raw.githubusercontent.com/tanmayv/heimdall-agent-manager/main/scripts/install.sh \
+  | bash -s -- --hub https://hub.example.com --name bob
 ```
 
 The installer:
@@ -714,9 +719,12 @@ The installer:
    and **carries on to register the service and exits 0**. When no file could
    be written at all, the closing summary states that the install succeeded
    and that only `PATH` needs your action.
-5. Registers and starts a user service
-   (`~/.config/systemd/user/heimdall-bridge.service` on Linux,
-   `~/Library/LaunchAgents/works.earendil.heimdall-bridge.plist` on macOS).
+5. Registers and starts a per-Hub user service
+   (`~/.config/systemd/user/heimdall-bridge-<hub>.service` on Linux,
+   `~/Library/LaunchAgents/heimdall-bridge-<hub>.plist` on macOS; with
+   `--name <profile>` the name ends in `_<profile>`, see 2.1.2). A legacy
+   `heimdall-bridge.service` / `works.earendil.heimdall-bridge.plist` for the
+   same Hub is migrated to the per-Hub name.
    An existing, differing service file is first backed up next to it as
    `<name>.bak-<UTC timestamp>`; an identical file is left untouched; pass
    `--force-service` to overwrite a differing file without keeping a backup.
@@ -909,6 +917,109 @@ which stops the task, enrolls and starts it again. Manage the task with
 `-Uninstall` (with the same `-Hub`) removes the task and the binaries and keeps
 the credential, config and agent data. A second concurrent installer run is
 refused by a lock in `%APPDATA%\heimdall\bridges\.install-lock`.
+
+### 2.1.2 Several bridges for one OS user (profiles)
+
+By default `install.sh` installs **one** bridge per Hub for an OS user: the
+service name comes from the Hub URL alone (`heimdall-bridge-<hub>`, e.g.
+`heimdall-bridge-hub-example-com`), so a second run against the same Hub
+reinstalls that bridge rather than adding another. To run a second bridge to the
+**same Hub** from the **same OS account** — typically so a second Heimdall user
+(a colleague, or your own second account) gets their own bridge on this machine —
+give it a profile name with `--name` (or `HEIMDALL_BRIDGE_NAME`):
+
+```bash
+# Existing default bridge, enrolled as Heimdall user A: unchanged.
+# Second bridge for Heimdall user B on the same Hub:
+curl -fsSL https://raw.githubusercontent.com/tanmayv/heimdall-agent-manager/main/scripts/install.sh \
+  | bash -s -- --hub https://hub.example.com --name bob
+
+# Same thing through the environment:
+curl -fsSL https://raw.githubusercontent.com/tanmayv/heimdall-agent-manager/main/scripts/install.sh \
+  | HEIMDALL_BRIDGE_NAME=bob bash -s -- --hub https://hub.example.com
+```
+
+`--name` wins over `HEIMDALL_BRIDGE_NAME` when both are set. A profile name is
+1–31 characters of lower-case letters, digits and `-`, starting with a letter or
+digit (`^[a-z0-9][a-z0-9-]{0,30}$`); anything else is refused before the
+installer touches the machine.
+
+**What a profile gets.** The profile is appended to the service name as
+`heimdall-bridge-<hub>_<profile>` (e.g. `heimdall-bridge-hub-example-com_bob`).
+The Hub part never contains `_`, so a profile name can never collide with
+another Hub's bridge. Everything else derives from that name, so each profile
+is a fully separate bridge:
+
+| | Default bridge | Profile `bob` |
+| --- | --- | --- |
+| Service (Linux) | `~/.config/systemd/user/heimdall-bridge-hub-example-com.service` | `~/.config/systemd/user/heimdall-bridge-hub-example-com_bob.service` |
+| Service (macOS) | `~/Library/LaunchAgents/heimdall-bridge-hub-example-com.plist` | `~/Library/LaunchAgents/heimdall-bridge-hub-example-com_bob.plist` |
+| Config, token, `enroll.sh` | `~/.config/heimdall/bridges/heimdall-bridge-hub-example-com/` | `~/.config/heimdall/bridges/heimdall-bridge-hub-example-com_bob/` |
+| Binaries, data, extensions | `~/.local/share/heimdall/bridges/heimdall-bridge-hub-example-com/` | `~/.local/share/heimdall/bridges/heimdall-bridge-hub-example-com_bob/` |
+| CLI wrapper | `<data dir>/bin/ham-ctl-heimdall-bridge-hub-example-com` | `<data dir>/bin/ham-ctl-heimdall-bridge-hub-example-com_bob` |
+
+Each profile also gets its own loopback port pair, its own bridge id and
+credential, and its own vault key (keyed by bridge id, see 2.1). The profile is
+recorded in `<config dir>/profile`, and the systemd unit's `Description` ends in
+`(profile bob)`. Without `--name`, names, paths and file contents are exactly
+what earlier installers produced.
+
+**Enroll the profile as the right Heimdall user.** Enrollment approves the
+bridge for whichever Heimdall account is signed in to the browser that opens the
+link. For a second user's profile, open the link in a browser where *that* user
+is signed in (another browser profile or a private window), or hand the link and
+code to them. Each bridge only ever acts for the account that approved it. To
+enroll later, run the profile's own `<config dir>/enroll.sh`.
+
+**Manage a profile by passing the same `--name` again.** `--uninstall` and
+`--re-enroll` act only on the bridge named by `--hub` plus `--name`; without
+`--name` they act on the default bridge, never on a profile:
+
+```bash
+# Re-enroll only bob's bridge (e.g. approve it as a different user)
+bash scripts/install.sh --hub https://hub.example.com --name bob --re-enroll
+
+# Remove only bob's bridge; the default bridge keeps running
+bash scripts/install.sh --hub https://hub.example.com --name bob --uninstall
+```
+
+As for the default bridge, `--uninstall` removes the profile's service and its
+`<data dir>/bin` and keeps its credential, config and agent data
+(`--uninstall --dry-run` names both), so re-installing with the same `--name`
+picks the enrollment back up. Migration of a legacy (pre per-Hub)
+`heimdall-bridge` service only ever happens for the default bridge; installing a
+profile never retires or copies an existing service or credential.
+
+**Termux does not support profiles.** One Termux install runs one bridge, the
+runit service `ham-bridge` (see [Bridge on Android](#appendix--bridge-on-android-termux)),
+so `install.sh` refuses `--name`/`HEIMDALL_BRIDGE_NAME` there with an error
+before it changes anything. Use a separate Android user or device instead.
+The Windows installer (2.1.1) does not take a profile name yet.
+
+**Provider extensions are shared by every bridge of the OS user.** Each bridge
+ships its own copy of the Heimdall provider extensions in
+`<data dir>/extensions`, but the place the agent CLIs *register* a plugin is per
+OS user, not per bridge: Claude Code's plugin and marketplace settings under
+`~/.claude`, the Codex plugin marketplace under `~/.codex`, and the Antigravity
+(`agy`) plugin list. All bridges of one OS user, profiles included, therefore
+share a single registration, pointing into one bridge's `extensions` directory.
+Installing the extension from a bridge follows a **no-downgrade rule**:
+
+- If the provider already has the Heimdall extension registered and enabled at
+  the **same or a newer** version than the one this bridge ships, the install
+  succeeds and the registration is **left unchanged** (it reports *already
+  installed … registration left unchanged*). An older bridge therefore never
+  re-points the shared registration to its own older copy.
+- If the registered version is **older**, unknown, disabled, broken or absent,
+  the install registers this bridge's copy as before and verifies it.
+
+In practice: with all bridges on the same release, nothing changes. With
+versions skewed, the newest bridge's extension stays registered and older
+bridges use it too. Keep profiles on the same release (let self-update run, or
+update each one). `--uninstall` keeps `<data dir>/extensions`, so it never breaks
+the shared registration; deleting a profile's data directory by hand can, if the
+registration points into it. In that case install the provider extension again
+from a remaining bridge.
 
 ### 2.2 What the bridge needs
 
@@ -1397,7 +1508,7 @@ The installer supports Termux directly. It verifies `termux-keystore` and
 unit), enables it with `sv-enable`, and enrolls:
 
 ```bash
-pkg install curl python socat termux-api termux-services   # then restart Termux once
+pkg install curl socat termux-api termux-services   # then restart Termux once
 curl -fsSL https://raw.githubusercontent.com/tanmayv/heimdall-agent-manager/main/scripts/install.sh \
   | bash -s -- --hub https://hub.example.com
 ```
@@ -1409,6 +1520,8 @@ under Android's seccomp, so drop `--version` or pass a newer release.
 One Termux install runs **one** Hub: the released bridge restarts exactly
 `$PREFIX/var/service/ham-bridge` after enrollment, so a second `--hub` is refused until
 the first is removed (`install.sh --hub <url> --uninstall`, which keeps the enrollment).
+For the same reason Termux refuses bridge profiles (`--name` / `HEIMDALL_BRIDGE_NAME`,
+see 2.1.2).
 Per-Hub config lives in `~/.config/heimdall/bridges/<name>/`, binaries and data in
 `~/.local/share/heimdall/bridges/<name>/`.
 
