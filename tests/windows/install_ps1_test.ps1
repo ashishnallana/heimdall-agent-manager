@@ -170,6 +170,24 @@ try {
   if ($oem -eq 65001) { Check ($r.Code -eq 0) 'UTF-8 OEM code page accepts any profile path' $r.Out }
   else { Check ($r.Code -eq 1 -and $r.Out -match 'not representable in this system''s OEM code page') 'a profile path the OEM code page cannot hold is refused up front' $r.Out }
 
+  # ---- profiles: -Name / HEIMDALL_BRIDGE_NAME (mirrors install.sh --name) ----
+  $r = Invoke-Installer @('-Hub', 'https://hub.example.com', '-Name', 'work', '-DryRun')
+  Check ($r.Code -eq 0 -and $r.Out -match 'Service: heimdall-bridge-hub-example-com_work ' -and $r.Out -match 'Profile: work' -and $r.Out -match 'Profile  work') '-Name appends _<profile> to the service name' $r.Out
+  $r = Invoke-Installer @('-Hub', 'https://hub.example.com', '-DryRun') @{ HEIMDALL_BRIDGE_NAME = 'env-1' }
+  Check ($r.Code -eq 0 -and $r.Out -match 'Service: heimdall-bridge-hub-example-com_env-1 ') 'HEIMDALL_BRIDGE_NAME selects the profile' $r.Out
+  $r = Invoke-Installer @('-Hub', 'https://hub.example.com', '-Name', 'flag', '-DryRun') @{ HEIMDALL_BRIDGE_NAME = 'env-1' }
+  Check ($r.Code -eq 0 -and $r.Out -match 'Service: heimdall-bridge-hub-example-com_flag ') '-Name wins over HEIMDALL_BRIDGE_NAME' $r.Out
+  $r = Invoke-Installer @('-Hub', 'https://hub.example.com', '-DryRun')
+  Check ($r.Code -eq 0 -and $r.Out -match 'Service: heimdall-bridge-hub-example-com ' -and $r.Out -notmatch 'Profile') 'no profile leaves the default service name unchanged' $r.Out
+  foreach ($bad in @('Work', '-x', 'a_b', 'a.b', ('a' * 32), 'a b')) {
+    $r = Invoke-Installer @('-Hub', 'https://hub.example.com', '-Name', $bad, '-DryRun')
+    Check ($r.Code -eq 1 -and $r.Out -match 'Invalid profile name') "profile '$bad' is rejected" $r.Out
+  }
+  $r = Invoke-Installer @('-Hub', 'https://hub.example.com', '-Name', ('a' * 31), '-DryRun')
+  Check ($r.Code -eq 0) 'a 31-character profile is accepted' $r.Out
+  $r = Invoke-Installer @('-Hub', 'https://hub.example.com', '-Name', 'work', '-Uninstall', '-DryRun')
+  Check ($r.Code -eq 0 -and $r.Out -match 'Remove scheduled task heimdall-bridge-hub-example-com_work ') '-Uninstall -Name targets only the profile task' $r.Out
+
   # ---- failures before anything is replaced ----
   $closed = Get-FreePort
   $r = Invoke-Installer @('-Hub', "http://127.0.0.1:$closed", '-FromDir', $fake, '-NonInteractive')

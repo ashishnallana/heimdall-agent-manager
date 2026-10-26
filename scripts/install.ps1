@@ -16,6 +16,7 @@
 param(
   [Alias('HubUrl')][string]$Hub = '',
   [string]$Version = '',
+  [string]$Name = '',
   [switch]$DryRun,
   [switch]$Uninstall,
   [switch]$ReEnroll,
@@ -41,12 +42,16 @@ function Show-HeimdallUsage {
   param()
   Write-Host @'
 Heimdall Bridge installer - Windows (per-user Scheduled Task)
-Usage: install.ps1 [-Hub URL] [-Version TAG] [-DryRun] [-Uninstall]
+Usage: install.ps1 [-Hub URL] [-Version TAG] [-Name PROFILE] [-DryRun] [-Uninstall]
                    [-ReEnroll | -KeepEnrollment] [-NonInteractive] [-FromDir DIR]
 Hub must be an HTTP(S) origin, e.g. https://hub.mundus.in or http://localhost:8080.
 Without -Hub, asks on the terminal. Existing enrollment prompts before re-enrolling.
 -NonInteractive preserves existing enrollment and prints a command for new enrollment.
 -Uninstall removes only this Hub's task and binaries; credentials/data are kept.
+-Name PROFILE (or HEIMDALL_BRIDGE_NAME) installs a separate bridge to the same Hub
+for this Windows user, e.g. one per Heimdall account: task heimdall-bridge-<hub>_PROFILE
+with its own enrollment, ports and ham-ctl wrapper. PROFILE is 1-31 of [a-z0-9-],
+starting with a letter or digit. Pass the same -Name to -Uninstall or -ReEnroll it.
 -FromDir installs ham-bridge.exe, ham-pty-host.exe and ham-ctl.exe from a local
 build (DIR or DIR\bin) instead of a GitHub release; no download or checksum.
 The Hub is checked first (20 s budget, exact failure reason). Verified release
@@ -124,12 +129,13 @@ function Write-Step {
 # A box with a cyan border on a colour terminal; plain lines otherwise. ASCII
 # only, so the box is safe in any console code page.
 function Write-Banner {
-  param([string]$Version, [string]$HubUrl)
+  param([string]$Version, [string]$HubUrl, [string]$ProfileName = '')
   $title = 'Heimdall Bridge Installer'
   $tagline = 'Your agents, connected locally'
   if (-not $Version) { $Version = 'latest release' }
   if (-not $HubUrl) { $HubUrl = 'asked below' }
   $info = @("Version  $Version", "Hub      $HubUrl")
+  if ($ProfileName) { $info += "Profile  $ProfileName" }
   Write-Host ''
   if (-not (Test-HeimdallColour)) {
     Write-Host "$title - $tagline"
@@ -317,6 +323,15 @@ function ConvertTo-HubIdentity {
   if ($port) { $name += "-$port" }
   if ($name.Length -gt 160) { return $null }
   return @{ Url = "${scheme}://$authority"; Service = "heimdall-bridge-$name" }
+}
+
+# A bridge profile name (-Name) becomes part of every path and task name: keep it
+# filename-safe. ConvertTo-HubIdentity never emits '_', so the service name
+# "<hub name>_<profile>" cannot collide with another Hub's. \z, not $: .NET's $
+# also matches before a trailing newline. Case-sensitive, like install.sh.
+function Test-ProfileName {
+  param([string]$Value)
+  return ($Value -cmatch '^[a-z0-9][a-z0-9-]{0,30}\z')
 }
 
 function Enable-ModernTls {
@@ -690,13 +705,15 @@ function New-TaskXml {
   param($C)
   $id = [Security.Principal.WindowsIdentity]::GetCurrent()
   $e = { param($s) [Security.SecurityElement]::Escape("$s") }
+  $suffix = ''
+  if ($C.Profile) { $suffix = " (profile $($C.Profile))" }
   $wscript = Join-Path $env:SystemRoot 'System32\wscript.exe'
   $taskArgs = '//B //NoLogo "' + $C.Launcher + '"'
   return @"
 <?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.3" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
-    <Description>$(& $e "Heimdall Bridge for $($C.HubUrl) (installed by install.ps1)")</Description>
+    <Description>$(& $e "Heimdall Bridge for $($C.HubUrl)$suffix (installed by install.ps1)")</Description>
   </RegistrationInfo>
   <Triggers>
     <LogonTrigger>
@@ -758,7 +775,10 @@ function Invoke-HeimdallInstaller {
   if (-not $hubUrl -and -not $HeimdallPinnedHub.StartsWith('@@')) { $hubUrl = $HeimdallPinnedHub }
   if (-not $version -and -not $HeimdallPinnedVersion.StartsWith('@@')) { $version = $HeimdallPinnedVersion }
 
-  Write-Banner $version $hubUrl
+  $profileName = $O.Name
+  if (-not $profileName) { $profileName = $env:HEIMDALL_BRIDGE_NAME }
+  if ($profileName -and -not (Test-ProfileName $profileName)) { Fail "Invalid profile name '$profileName' (-Name/HEIMDALL_BRIDGE_NAME): use 1-31 lower-case letters, digits or '-', starting with a letter or digit." }
+  Write-Banner $version $hubUrl $profileName
   Write-Step 1 'Hub & platform'
   if ($PSVersionTable.PSEdition -eq 'Core' -and -not $IsWindows) { Fail 'This installer is for Windows. On Linux and macOS use scripts/install.sh.' }
   if (-not $hubUrl) {
@@ -769,6 +789,7 @@ function Invoke-HeimdallInstaller {
   if (-not $identity) { Fail 'Invalid Hub URL: use an HTTP(S) origin with no path, credentials, query, or fragment.' }
   $hubUrl = $identity.Url
   $serviceName = $identity.Service
+  if ($profileName) { $serviceName += "_$profileName" }
 
   $arch = ''
   try { $arch = "$([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture)" } catch { }
@@ -790,6 +811,7 @@ function Invoke-HeimdallInstaller {
   $binDir = Join-Path $dataDir 'bin'
   $C = @{
     HubUrl       = $hubUrl
+    Profile      = $profileName
     ServiceName  = $serviceName
     StateDir     = $stateDir
     DataDir      = $dataDir
@@ -808,6 +830,7 @@ function Invoke-HeimdallInstaller {
   }
   Write-Log INFO "Hub: $hubUrl"
   Write-Log INFO "Service: $serviceName ($HeimdallTarget, Scheduled Task)"
+  if ($profileName) { Write-Log INFO "Profile: $profileName" }
   Write-Log INFO "Config/token: $stateDir"
   Write-Log INFO "Data/binaries: $dataDir"
   # Fail before anything is touched if a path cannot go into the generated files:
@@ -1007,6 +1030,7 @@ function Invoke-HeimdallInstaller {
       Copy-Item -LiteralPath (Join-Path $workDir 'apply-bridge-update.ps1') -Destination (Join-Path $C.UpdatesDir 'apply-bridge-update.ps1') -Force
     }
     Write-Utf8File $hubFile "$hubUrl`n"
+    if ($profileName) { Write-Utf8File (Join-Path $stateDir 'profile') "$profileName`n" }
     Write-Log OK "Installed binaries to $binDir"
 
     Write-Step 7 'Ports & routing'
@@ -1119,7 +1143,7 @@ if ($Help) {
   $ErrorActionPreference = 'Stop'
   try {
     Invoke-HeimdallInstaller @{
-      Hub = $Hub; Version = $Version; DryRun = [bool]$DryRun; Uninstall = [bool]$Uninstall; ReEnroll = [bool]$ReEnroll
+      Hub = $Hub; Version = $Version; Name = $Name; DryRun = [bool]$DryRun; Uninstall = [bool]$Uninstall; ReEnroll = [bool]$ReEnroll
       KeepEnrollment = [bool]$KeepEnrollment; NonInteractive = [bool]$NonInteractive; FromDir = $FromDir
     }
   } catch {
