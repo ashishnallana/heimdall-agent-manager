@@ -278,6 +278,47 @@ while True: time.sleep(1)
         self.assertTrue(self.shim.exists())
         self.assertFalse(self.log.exists())
 
+    def stop_only_without_python3(self, *args):
+        # NixOS bridge units carry only their declared PATH, which may have no
+        # python3. Shadow it with a failing one for the supervisor only; the
+        # fixture hosts above were already started with the real interpreter.
+        no_python = self.root/'no-python'
+        no_python.mkdir(exist_ok=True)
+        self.write(no_python/'python3', '#!/bin/sh\necho "python3: command not found" >&2\nexit 127\n')
+        return subprocess.run(['bash', str(ROOT/'scripts/apply-bridge-update.sh'),
+                               '--data-dir', str(self.data), '--stop-pty-hosts-only', *args],
+                              env=dict(self.env, PATH=str(no_python)+':'+self.env['PATH']),
+                              text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=15)
+
+    @unittest.skipUnless(Path('/proc').exists(), 'process isolation fixture uses Linux procfs')
+    def test_stop_only_cleanup_without_python3_keeps_ownership_scope(self):
+        live, live_child = self.start_host(self.data/'bin/ham-pty-host', self.root/'live.sock', self.root/'live.pid')
+        stale, stale_child = self.start_host(self.data/'bin/ham-pty-host', self.root/'stale.sock', self.root/'stale.pid')
+        other, other_child = self.start_host(self.home/'data/bridges/brg_other/bin/ham-pty-host', self.root/'other.sock', self.root/'other.pid')
+        shared = self.root/'shared/bin/ham-pty-host'
+        target, target_child = self.start_host(shared, self.root/'target.sock', self.root/'target.pid')
+        unrelated, unrelated_child = self.start_host(shared, self.root/'unrelated.sock', self.root/'unrelated.pid')
+        (self.data/'bin/ham-pty-host').unlink()
+        self.write(self.data/'bin/ham-pty-host', '#!/bin/sh\nexit 0\n')
+        result = self.stop_only_without_python3('--pty-host-socket', str(self.root/'target.sock'))
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn('python3 unavailable; stopping bridge-owned PTY hosts through /proc', result.stdout)
+        self.assertIn('stopping bridge-owned PTY processes:', result.stdout)
+        for pid in (live.pid, live_child, stale.pid, stale_child, target.pid, target_child):
+            self.assertFalse(self.process_alive(pid), result.stdout)
+        for pid in (other.pid, other_child, unrelated.pid, unrelated_child):
+            self.assertTrue(self.process_alive(pid), result.stdout)
+        self.assertFalse(self.log.exists())
+
+    @unittest.skipUnless(Path('/proc').exists(), 'process isolation fixture uses Linux procfs')
+    def test_stop_only_cleanup_without_python3_and_no_hosts_succeeds(self):
+        other, other_child = self.start_host(self.home/'data/bridges/brg_other/bin/ham-pty-host', self.root/'other.sock', self.root/'other.pid')
+        result = self.stop_only_without_python3()
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertNotIn('stopping bridge-owned PTY processes:', result.stdout)
+        self.assertTrue(self.process_alive(other.pid), result.stdout)
+        self.assertTrue(self.process_alive(other_child), result.stdout)
+
     def test_release_tarball_contains_executable_supervisor(self):
         outputs = []
         for binary in ('ham-bridge', 'ham-ctl', 'heimdall', 'ham-pty-host'):

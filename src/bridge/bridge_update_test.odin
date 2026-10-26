@@ -164,3 +164,26 @@ bridge_update_download_reports_timeout :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(detail, "timed out (no progress for 30 seconds"), detail)
 	testing.expect_value(t, bridge_update_test_calls, BRIDGE_UPDATE_DOWNLOAD_ATTEMPTS)
 }
+
+// The PTY-host cleanup failure must say why it failed, not only that it did:
+// a missing interpreter (exit 127) and a timeout are different operator actions.
+@(test)
+test_bridge_update_pty_stop_failure_reports_cause :: proc(t: ^testing.T) {
+	missing := bridge_update_pty_stop_failure(127, false, "bash: line 1: python3: command not found\n")
+	testing.expect_value(t, missing, "failed to stop bridge-owned PTY host (exit 127: bash: line 1: python3: command not found); update aborted before restart")
+
+	survivors := bridge_update_pty_stop_failure(1, false, "[apply-bridge-update] stopping bridge-owned PTY processes: 42\nBridge-owned PTY processes did not stop; refusing binary swap.\n\n")
+	testing.expect_value(t, survivors, "failed to stop bridge-owned PTY host (exit 1: Bridge-owned PTY processes did not stop; refusing binary swap.); update aborted before restart")
+
+	timed_out := bridge_update_pty_stop_failure(-1, true, "partial output")
+	testing.expect_value(t, timed_out, "failed to stop bridge-owned PTY host: cleanup timed out; update aborted before restart")
+
+	silent := bridge_update_pty_stop_failure(3, false, "  \n")
+	testing.expect_value(t, silent, "failed to stop bridge-owned PTY host (exit 3); update aborted before restart")
+
+	// Bounded, and never split inside a UTF-8 sequence.
+	long := strings.concatenate({strings.repeat("a", BRIDGE_UPDATE_PTY_STOP_DETAIL_LIMIT - 1, context.temp_allocator), "é tail"}, context.temp_allocator)
+	bounded := bridge_update_pty_stop_failure(1, false, long)
+	expected := fmt.tprintf("failed to stop bridge-owned PTY host (exit 1: %s); update aborted before restart", strings.repeat("a", BRIDGE_UPDATE_PTY_STOP_DETAIL_LIMIT - 1, context.temp_allocator))
+	testing.expect_value(t, bounded, expected)
+}

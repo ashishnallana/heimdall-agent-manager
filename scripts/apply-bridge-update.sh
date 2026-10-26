@@ -179,7 +179,7 @@ is_termux() {
 # Stop only this bridge's hosts, including old unlinked binaries, and their
 # descendants. Capture process identities before asking a daemon to shut down:
 # its children may otherwise be reparented and become invisible to cleanup.
-stop_pty_hosts() {
+stop_pty_hosts_python() {
   python3 - "$DATA_DIR" "$PTY_HOST_SOCKET" <<'PY_PTY_CLEANUP'
 import os, pathlib, re, shlex, signal, subprocess, sys, time
 
@@ -280,6 +280,127 @@ deadline = time.monotonic()+2
 while any(alive(pid) for pid in owned) and time.monotonic() < deadline: time.sleep(0.05)
 if any(alive(pid) for pid in owned): sys.exit('Bridge-owned PTY processes did not stop; refusing binary swap.')
 PY_PTY_CLEANUP
+}
+
+# The same cleanup for Linux hosts without python3 (NixOS services carry only
+# the PATH their unit declares). Ownership, descendant capture, start-time
+# identity before every signal, and the refusal on survivors match the Python
+# version; signals use kill(1) rather than a pidfd.
+procfs_read_process() {
+  # Sets PROC_PPID, PROC_BORN and PROC_STATE for a live process owned by us.
+  local stat rest fields
+  [ -O "/proc/$1" ] || return 1
+  read -r stat 2>/dev/null < "/proc/$1/stat" || return 1
+  rest="${stat##*) }"
+  read -r -a fields <<< "$rest"
+  [ "${#fields[@]}" -gt 19 ] && [ "${fields[0]}" != Z ] || return 1
+  PROC_STATE="${fields[0]}" PROC_PPID="${fields[1]}" PROC_BORN="${fields[19]}"
+}
+
+stop_pty_hosts_procfs() {
+  local data expected_socket private_install=false pid arg index socket exe host
+  local owned_binary owned_socket is_command changed client deadline
+  local -a argv hosts sockets=()
+  local -A parent=() born=() owned=()
+  data="$(realpath -m -- "$DATA_DIR")"
+  expected_socket=''
+  [ -z "$PTY_HOST_SOCKET" ] || expected_socket="$(realpath -m -- "$PTY_HOST_SOCKET")"
+  [ "$(basename -- "$(dirname -- "$data")")" != bridges ] || private_install=true
+
+  for pid in /proc/[0-9]*; do
+    pid="${pid#/proc/}"
+    procfs_read_process "$pid" || continue
+    parent[$pid]="$PROC_PPID" born[$pid]="$PROC_BORN"
+    argv=()
+    mapfile -d "" -t argv 2>/dev/null < "/proc/$pid/cmdline" || continue
+    [ "${#argv[@]}" -gt 0 ] || continue
+    is_command=false
+    for arg in "${argv[@]}"; do
+      [ "$arg" != daemon ] && [ "$arg" != run ] || is_command=true
+    done
+    "$is_command" || continue
+    exe="$(readlink "/proc/$pid/exe" 2>/dev/null || true)"
+    exe="${exe% (deleted)}"
+    hosts=()
+    # An interpreter can run a test/script host; real release binaries use argv[0].
+    for host in "$exe" "${argv[@]:0:2}"; do
+      [ "${host##*/}" != ham-pty-host ] || hosts+=("$host")
+    done
+    [ "${#hosts[@]}" -gt 0 ] || continue
+    socket=''
+    for ((index = 0; index < ${#argv[@]}; index++)); do
+      arg="${argv[index]}"
+      if [ "$arg" = --socket ] && [ $((index + 1)) -lt ${#argv[@]} ]; then socket="${argv[index + 1]}"
+      elif [[ "$arg" == --socket=* ]]; then socket="${arg#--socket=}"
+      fi
+    done
+    owned_binary=false
+    if "$private_install"; then
+      for host in "${hosts[@]}"; do
+        case "$(basename -- "$(dirname -- "$host")")" in bin|bin.old|bin.bak|bin.failed) ;; *) continue ;; esac
+        [ "$(dirname -- "$(dirname -- "$(realpath -m -- "$host")")")" != "$data" ] || owned_binary=true
+      done
+    fi
+    owned_socket=false
+    [ -z "$expected_socket" ] || [ -z "$socket" ] \
+      || [ "$(realpath -m -- "$socket")" != "$expected_socket" ] || owned_socket=true
+    if "$owned_binary" || "$owned_socket"; then
+      owned[$pid]=1
+      [ -z "$socket" ] || sockets+=("$socket")
+    fi
+  done
+
+  changed=true
+  while "$changed"; do
+    changed=false
+    for pid in "${!parent[@]}"; do
+      [ -z "${owned[$pid]:-}" ] && [ -n "${owned[${parent[$pid]}]:-}" ] || continue
+      owned[$pid]=1 changed=true
+    done
+  done
+
+  procfs_alive() { procfs_read_process "$1" && [ "$PROC_BORN" = "${born[$1]}" ]; }
+  procfs_send() { if procfs_alive "$1"; then kill -s "$2" "$1" 2>/dev/null || true; fi; }
+  procfs_any_alive() {
+    local candidate
+    for candidate in "${!owned[@]}"; do procfs_alive "$candidate" && return 0; done
+    return 1
+  }
+
+  # Best effort protocol shutdown lets the PTY host terminate/reap its own agents.
+  client="$data/bin/ham-pty-host"
+  if [ "${#sockets[@]}" -gt 0 ] && [ -f "$client" ] && [ -x "$client" ] && command -v timeout >/dev/null; then
+    mapfile -t sockets < <(printf "%s\n" "${sockets[@]}" | sort -u)
+    for socket in "${sockets[@]}"; do
+      timeout 3 "$client" --socket "$socket" stop >/dev/null 2>&1 || true
+    done
+  fi
+
+  [ "${#owned[@]}" -eq 0 ] || printf '[apply-bridge-update] stopping bridge-owned PTY processes: %s\n' \
+    "$(printf '%s\n' "${!owned[@]}" | sort -n | paste -sd, - | sed 's/,/, /g')"
+  for pid in "${!owned[@]}"; do procfs_send "$pid" TERM; done
+  deadline=$((SECONDS + 3))
+  while procfs_any_alive && [ "$SECONDS" -le "$deadline" ]; do sleep 0.05; done
+  for pid in "${!owned[@]}"; do procfs_send "$pid" KILL; done
+  deadline=$((SECONDS + 2))
+  while procfs_any_alive && [ "$SECONDS" -le "$deadline" ]; do sleep 0.05; done
+  if procfs_any_alive; then
+    echo 'Bridge-owned PTY processes did not stop; refusing binary swap.' >&2
+    return 1
+  fi
+}
+
+stop_pty_hosts() {
+  if python3 -c '' >/dev/null 2>&1; then
+    stop_pty_hosts_python
+  elif [ -r /proc/self/stat ]; then
+    log "python3 unavailable; stopping bridge-owned PTY hosts through /proc"
+    stop_pty_hosts_procfs
+  else
+    # Exit 3 tells the Bridge cleanup could not run at all: nothing was signalled.
+    log_err "python3 is required to stop bridge-owned PTY hosts on this platform; no process was stopped"
+    return 3
+  fi
 }
 
 if "$STOP_PTY_HOSTS_ONLY"; then

@@ -15,6 +15,7 @@ import "core:strings"
 import "core:sync"
 import "core:thread"
 import "core:time"
+import "core:unicode/utf8"
 import contracts "odin_test:contracts"
 import cfg_lib "odin_test:lib/config"
 import httpc "odin_test:lib/httpc"
@@ -1621,6 +1622,36 @@ bridge_update_target_refusal_for :: proc(target: string, update_blocked: bool, d
 	return ""
 }
 
+BRIDGE_UPDATE_PTY_STOP_DETAIL_LIMIT :: 240
+
+// bridge_update_pty_stop_failure explains why the supervisor's PTY-host cleanup
+// failed (temp-allocated). Every outcome keeps the update aborted; the detail
+// separates a timeout from a cleanup that exited with an error, and carries the
+// supervisor's last stderr line (for example a missing interpreter) so the
+// operator does not have to infer it from the bridge journal.
+bridge_update_pty_stop_failure :: proc(exit_code: int, timed_out: bool, stderr: string) -> string {
+	if timed_out {
+		return "failed to stop bridge-owned PTY host: cleanup timed out; update aborted before restart"
+	}
+	detail := ""
+	lines := strings.split_lines(strings.trim_space(stderr), context.temp_allocator)
+	for i := len(lines) - 1; i >= 0; i -= 1 {
+		if line := strings.trim_space(lines[i]); line != "" {
+			detail = line
+			break
+		}
+	}
+	if len(detail) > BRIDGE_UPDATE_PTY_STOP_DETAIL_LIMIT {
+		cut := BRIDGE_UPDATE_PTY_STOP_DETAIL_LIMIT
+		for cut > 0 && !utf8.rune_start(detail[cut]) do cut -= 1
+		detail = detail[:cut]
+	}
+	if detail == "" {
+		return fmt.tprintf("failed to stop bridge-owned PTY host (exit %d); update aborted before restart", exit_code)
+	}
+	return fmt.tprintf("failed to stop bridge-owned PTY host (exit %d: %s); update aborted before restart", exit_code, detail)
+}
+
 bridge_runtime_apply_update :: proc(
 	conn: ^ws.Connection,
 	command_id, target_version, download_url, sha256: string,
@@ -1808,11 +1839,15 @@ bridge_runtime_apply_update :: proc(
 	_ = bridge_update_send_progress(conn, command_id, "stopping_pty_host", 82, "Stopping bridge-owned PTY host and agent processes...")
 	stop_pty_argv := bridge_os_supervisor_argv(supervisor_target)
 	append(&stop_pty_argv, "--data-dir", data_dir, "--stop-pty-hosts-only", "--pty-host-socket", pty_socket)
-	stop_pty_out, stop_pty_err, stop_pty_ok, _ := bridge_process_run_capture(stop_pty_argv[:], 15 * time.Second)
+	stop_pty_out, stop_pty_err, stop_pty_exit, stop_pty_ok, stop_pty_timed_out := bridge_process_run_capture_status(stop_pty_argv[:], 15 * time.Second)
 	defer { delete(stop_pty_out); delete(stop_pty_err) }
 	if !stop_pty_ok {
-		blog_error(.update_apply_failed, blog_sym(.stage, .drain))
-		return false, "failed to stop bridge-owned PTY host; update aborted before restart"
+		if stop_pty_timed_out {
+			blog_error(.update_apply_failed, blog_sym(.stage, .drain), blog_sym(.reason, .timeout))
+		} else {
+			blog_error(.update_apply_failed, blog_sym(.stage, .drain), blog_int(.exit_code, i64(stop_pty_exit)))
+		}
+		return false, bridge_update_pty_stop_failure(stop_pty_exit, stop_pty_timed_out, stop_pty_err)
 	}
 	_ = bridge_update_send_progress(conn, command_id, "pty_host_stopped", 88, "Bridge-owned PTY host and agent processes stopped.")
 
