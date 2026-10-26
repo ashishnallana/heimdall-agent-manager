@@ -1285,6 +1285,13 @@ must work for every bridge that may call it. The caller says what it is:
   they need belongs in the version-independent flow.
 - **PTY cleanup mode.** `--stop-pty-hosts-only` (run by the bridge before it starts
   the detached supervisor) accepts the same three flags and runs the same hooks first.
+- **What the bridge sends.** The bridge copies the supervisor only from the staged
+  bundle (`scripts/<name>`, else the bundle root) to `DATA_DIR/updates/`; a bundle
+  without it fails the update before anything is stopped. Both calls pass
+  `--interface 2 --from-version <running> --to-version <target>`. On Linux and macOS
+  the bridge starts the detached supervisor as the leader of a new session itself
+  (fork + `setsid(2)`) and adds `--already-detached`, so the script never needs
+  `setsid(1)`, which macOS lacks, to leave the bridge's service.
 
 ```bash
 apply-bridge-update.sh --interface 2 --from-version 0.5.6 --to-version 0.5.7 \

@@ -371,15 +371,11 @@ test_bridge_update_integration_failure_triggers_supervisor_rollback :: proc(t: ^
 	_ = os.write_entire_file(hook_path, transmute([]byte)hook_content)
 	_ = os.chmod(hook_path, os.Permissions{.Read_User, .Write_User, .Execute_User, .Read_Group, .Execute_Group, .Read_Other, .Execute_Other})
 
-	// Locate the supervisor script relative to THIS SOURCE FILE, so the test does
-	// not depend on the runner's cwd (it used to fall back to a hard-coded path
-	// on one developer's machine).
+	// Locate the supervisor script relative to THIS SOURCE FILE only. Like the
+	// Bridge, which runs nothing but the staged bundle's own script, the test
+	// does not fall back to a cwd-relative or hard-coded copy.
 	supervisor_script := fmt.aprintf("%s/../../../../scripts/apply-bridge-update.sh", #directory)
 	defer delete(supervisor_script)
-	if !os.exists(supervisor_script) {
-		delete(supervisor_script)
-		supervisor_script = strings.clone("scripts/apply-bridge-update.sh")
-	}
 	testing.expect(t, os.exists(supervisor_script), "supervisor script exists on disk")
 
 	// 4. Execute the supervisor against a port that is GUARANTEED closed.
@@ -390,8 +386,12 @@ test_bridge_update_integration_failure_triggers_supervisor_rollback :: proc(t: ^
 	// 58999 turns the "health check must fail" step into a success and the
 	// rollback never happens. Port 1 (tcpmux) is privileged — no test can bind
 	// it — so the probe is refused deterministically.
+	// The Bridge's argv: versioned interface 2 from the running to the target version.
 	sup_args := []string{
 		supervisor_script,
+		"--interface", "2",
+		"--from-version", "0.1.0",
+		"--to-version", "0.2.0",
 		"--data-dir", data_dir,
 		"--stage-dir", stage_dir,
 		"--bridge-port", "1",
@@ -407,6 +407,7 @@ test_bridge_update_integration_failure_triggers_supervisor_rollback :: proc(t: ^
 	testing.expect(t, proc_err == nil, "supervisor process executed without system error")
 	testing.expect(t, !state.success, "supervisor exited with failure status (exit code 1) as expected")
 	testing.expect_value(t, state.exit_code, 1)
+	testing.expectf(t, strings.contains(string(stdout), "Version hooks (update): interface 2, from 0.1.0 to 0.2.0"), "supervisor took the versioned path, stdout: %s", string(stdout))
 
 	// 5. Verify Automatic Rollback: bin.bak restored to bin
 	restored_data, read_err := os.read_entire_file(orig_bin_path, context.allocator)
