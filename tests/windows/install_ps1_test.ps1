@@ -152,6 +152,14 @@ try {
   $r = Invoke-Installer @('-Hub', 'http://[::1]:8080', '-DryRun', '-Version', 'v1.2.3')
   Check ($r.Code -eq 0 -and $r.Out -match 'heimdall-bridge---1-8080' -and $r.Out -match 'windows-amd64-v1\.2\.3\.zip') 'IPv6 Hub naming and -Version in the plan' $r.Out
   Check (-not (Test-Path (Join-Path $roaming 'heimdall'))) 'dry runs write nothing'
+  # ---- output style: numbered steps, banner, no colour when redirected ----
+  $r = Invoke-Installer @('-Hub', 'https://hub.example.com', '-DryRun')
+  Check ($r.Out -match 'Heimdall Bridge Installer - Your agents, connected locally' -and $r.Out -match '\[1/9\] Hub & platform' -and $r.Out -match 'Dry-run plan') 'plain banner, [1/9] step and Dry-run plan heading' $r.Out
+  Check ($r.Out -notmatch "\x1b\[" -and $r.Out -notmatch '\|  Heimdall') 'redirected output has no ANSI colour and no box' $r.Out
+  foreach ($mode in @(@{ HEIMDALL_INSTALL_PLAIN = '1' }, @{ NO_COLOR = '1' })) {
+    $r = Invoke-Installer @('-Hub', 'https://hub.example.com', '-DryRun') $mode
+    Check ($r.Code -eq 0 -and $r.Out -notmatch "\x1b\[" -and $r.Out -match '\[1/9\] Hub & platform') "plain output with $($mode.Keys -join '')" $r.Out
+  }
   $r = Invoke-Installer @('-Hub', $hub, '-DryRun') @{ APPDATA = (Join-Path $root 'pct%USERNAME%\Roaming') }
   Check ($r.Code -eq 1 -and $r.Out -match "contains '%'") "a profile path with '%' is refused up front" $r.Out
   # U+10380 (a surrogate pair) is in no OEM code page except UTF-8 (65001).
@@ -167,12 +175,13 @@ try {
   $r = Invoke-Installer @('-Hub', "http://127.0.0.1:$closed", '-FromDir', $fake, '-NonInteractive')
   Check ($r.Code -eq 1 -and $r.Out -match "Hub http://127\.0\.0\.1:$closed not reachable \(gave up after") 'unreachable Hub fails with the exact reason' $r.Out
   $r = Invoke-Installer @('-Hub', $hub, '-FromDir', $fake, '-NonInteractive') @{ FAKE_PROBE_FAIL = '1' }
-  Check ($r.Code -eq 1 -and $r.Out -match 'cannot reach .* through its own TLS transport') 'failed --probe-hub stops the install' $r.Out
+  Check ($r.Code -eq 1 -and $r.Out -match 'cannot reach .* through its own HTTPS client') 'failed --probe-hub stops the install' $r.Out
   Check (-not (Get-ScheduledTask -TaskPath '\' -TaskName $svc -ErrorAction SilentlyContinue) -and -not (Test-Path $binDir)) 'nothing installed after a failed preflight'
 
   # ---- fresh install from local binaries, with (fake) enrollment ----
   $r = Invoke-Installer @('-Hub', $hub, '-FromDir', $fake)
   Check ($r.Code -eq 0) 'fresh -FromDir install succeeds' $r.Out
+  Check ($r.Out -match '\[2/9\] Hub check' -and $r.Out -match '\[4/9\] Download & verify' -and $r.Out -match '\[5/9\] Bridge preflight' -and $r.Out -match '\[9/9\] Ready') 'install prints the nine numbered steps' $r.Out
   Check ($r.Out -match 'ABCD-EFGH-JKLM-NP' -and $r.Out -match 'Browser-approved enrollment complete') 'enrollment runs interactively and its pairing code is shown' $r.Out
   Check ($r.Out -match "\[OK\] Service running: $svc") 'service reported running' $r.Out
   $st = Get-ScheduledTask -TaskPath '\' -TaskName $svc -ErrorAction SilentlyContinue

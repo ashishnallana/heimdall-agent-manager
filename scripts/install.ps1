@@ -59,15 +59,93 @@ One-liner: & ([scriptblock]::Create((irm https://raw.githubusercontent.com/tanma
 '@
 }
 
-function Write-Log {
-  param([string]$Level, [string]$Message)
-  Write-Host "[$Level] $Message"
+# Output style, mirroring install.sh. Colour only on a terminal (stdout not
+# redirected), without NO_COLOR (https://no-color.org: any non-empty value);
+# progress ticks and the progress bar only on a console stderr.
+# HEIMDALL_INSTALL_PLAIN=1 turns off both.
+$HeimdallStepTotal = 9
+
+function Test-HeimdallColour {
+  param()
+  if ($env:HEIMDALL_INSTALL_PLAIN -eq '1' -or $env:NO_COLOR) { return $false }
+  try { return -not [Console]::IsOutputRedirected } catch { return $false }
 }
 
+function Test-ConsoleOutput {
+  param()
+  if ($env:HEIMDALL_INSTALL_PLAIN -eq '1') { return $false }
+  try { return ($Host.Name -eq 'ConsoleHost') -and (-not [Console]::IsErrorRedirected) } catch { return $false }
+}
+
+function Format-Elapsed {
+  param([double]$Seconds)
+  $s = [int]$Seconds
+  if ($s -ge 60) { return ('{0}m{1:00}s' -f [int][math]::Floor($s / 60), ($s % 60)) }
+  return "${s}s"
+}
+
+# A self-erasing "label... Ns" line on a console stderr; nothing otherwise.
+function Write-Tick {
+  param([string]$Label, [Diagnostics.Stopwatch]$Watch)
+  if (Test-ConsoleOutput) { [Console]::Error.Write(("`r  {0}... {1} " -f $Label, (Format-Elapsed $Watch.Elapsed.TotalSeconds))) }
+}
+
+function Clear-Tick {
+  param()
+  if (Test-ConsoleOutput) { [Console]::Error.Write("`r" + (' ' * 60) + "`r") }
+}
+
+function Write-Log {
+  param([string]$Level, [string]$Message)
+  $colour = $null
+  switch ($Level) { 'OK' { $colour = 'Green' } 'WARN' { $colour = 'Yellow' } 'ERROR' { $colour = 'Red' } }
+  if ($colour -and (Test-HeimdallColour)) {
+    Write-Host "[$Level]" -ForegroundColor $colour -NoNewline
+    Write-Host " $Message"
+  } else {
+    Write-Host "[$Level] $Message"
+  }
+}
+
+# Write-Step N TITLE: the "[N/9] TITLE" heading of one of the installer's steps;
+# an empty N prints TITLE alone (the dry-run plan).
 function Write-Step {
-  param([string]$Message)
+  param([string]$Number, [string]$Title)
   Write-Host ''
-  Write-Host "-- $Message --"
+  if (-not $Number) { $prefix = '' } else { $prefix = "[$Number/$HeimdallStepTotal] " }
+  if ($prefix -and (Test-HeimdallColour)) {
+    Write-Host $prefix -ForegroundColor Cyan -NoNewline
+    Write-Host $Title -ForegroundColor White
+  } else {
+    Write-Host "$prefix$Title"
+  }
+}
+
+# A box with a cyan border on a colour terminal; plain lines otherwise. ASCII
+# only, so the box is safe in any console code page.
+function Write-Banner {
+  param([string]$Version, [string]$HubUrl)
+  $title = 'Heimdall Bridge Installer'
+  $tagline = 'Your agents, connected locally'
+  if (-not $Version) { $Version = 'latest release' }
+  if (-not $HubUrl) { $HubUrl = 'asked below' }
+  $info = @("Version  $Version", "Hub      $HubUrl")
+  Write-Host ''
+  if (-not (Test-HeimdallColour)) {
+    Write-Host "$title - $tagline"
+    foreach ($l in $info) { Write-Host "  $l" }
+    return
+  }
+  $width = $tagline.Length
+  foreach ($l in $info) { if ($l.Length -gt $width) { $width = $l.Length } }
+  $rule = '+' + ('-' * ($width + 4)) + '+'
+  Write-Host $rule -ForegroundColor Cyan
+  foreach ($row in @(@($title, 'White'), @($tagline, 'DarkGray'), @('', 'Gray')) + @($info | ForEach-Object { , @($_, 'DarkGray') })) {
+    Write-Host '|' -ForegroundColor Cyan -NoNewline
+    Write-Host ('  ' + $row[0].PadRight($width) + '  ') -ForegroundColor $row[1] -NoNewline
+    Write-Host '|' -ForegroundColor Cyan
+  }
+  Write-Host $rule -ForegroundColor Cyan
 }
 
 function Fail {
@@ -80,11 +158,6 @@ function Test-HeimdallFailure {
   $ex = $ErrorRecord
   if ($ex -is [System.Management.Automation.ErrorRecord]) { $ex = $ex.Exception }
   return ($ex -is [System.InvalidOperationException] -and $ex.Message.StartsWith('HEIMDALL-INSTALL: '))
-}
-
-function Test-ConsoleOutput {
-  param()
-  try { return ($Host.Name -eq 'ConsoleHost') -and (-not [Console]::IsErrorRedirected) } catch { return $false }
 }
 
 function Get-ExceptionReason {
@@ -526,13 +599,16 @@ function Wait-BridgeReady {
   param($C, [int]$Seconds = 20)
   $exe = Join-Path $C.BinDir 'ham-bridge.exe'
   $deadline = [DateTime]::UtcNow.AddSeconds($Seconds)
+  $sw = [Diagnostics.Stopwatch]::StartNew()
   while ([DateTime]::UtcNow -lt $deadline) {
     $task = Get-ScheduledTask -TaskPath '\' -TaskName $C.ServiceName -ErrorAction SilentlyContinue
     $listening = @([Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners() | Where-Object { $_.Port -eq $C.BridgePort }).Count -gt 0
     $running = @(Get-BridgeProcesses $C | Where-Object { $_.ExecutablePath -ieq $exe }).Count -gt 0
-    if ($task -and "$($task.State)" -eq 'Running' -and $listening -and $running) { return $true }
+    if ($task -and "$($task.State)" -eq 'Running' -and $listening -and $running) { Clear-Tick; return $true }
+    Write-Tick 'waiting for the service' $sw
     Start-Sleep -Milliseconds 500
   }
+  Clear-Tick
   return $false
 }
 
@@ -571,7 +647,7 @@ function Invoke-BridgeEnroll {
   Set-OwnerOnlyAcl $C.TokenFile
 }
 
-$HeimdallEmbeddedFunctions = @('Write-Log', 'Fail', 'Test-HeimdallFailure', 'Set-OwnerOnlyAcl', 'Get-LogTail', 'Get-BridgeProcesses',
+$HeimdallEmbeddedFunctions = @('Test-HeimdallColour', 'Test-ConsoleOutput', 'Format-Elapsed', 'Write-Tick', 'Clear-Tick', 'Write-Log', 'Fail', 'Test-HeimdallFailure', 'Set-OwnerOnlyAcl', 'Get-LogTail', 'Get-BridgeProcesses',
   'Stop-BridgeService', 'Start-BridgeService', 'Wait-BridgeReady', 'Invoke-BridgeEnroll')
 
 # Persist a usable enrollment command even when the installer came from irm:
@@ -682,12 +758,8 @@ function Invoke-HeimdallInstaller {
   if (-not $hubUrl -and -not $HeimdallPinnedHub.StartsWith('@@')) { $hubUrl = $HeimdallPinnedHub }
   if (-not $version -and -not $HeimdallPinnedVersion.StartsWith('@@')) { $version = $HeimdallPinnedVersion }
 
-  Write-Host ''
-  Write-Host '+------------------------------------------+'
-  Write-Host '|       HEIMDALL - BRIDGE INSTALLER        |'
-  Write-Host '|      Your agents, connected locally      |'
-  Write-Host '+------------------------------------------+'
-  Write-Step '1 / 6 - Hub and platform'
+  Write-Banner $version $hubUrl
+  Write-Step 1 'Hub & platform'
   if ($PSVersionTable.PSEdition -eq 'Core' -and -not $IsWindows) { Fail 'This installer is for Windows. On Linux and macOS use scripts/install.sh.' }
   if (-not $hubUrl) {
     if ($noninteractive) { Fail '-Hub is required in non-interactive mode.' }
@@ -777,8 +849,8 @@ function Invoke-HeimdallInstaller {
     $enrollment = 'yes'
   }
 
-  Write-Step '2 / 6 - Preflight and verified release'
   if ($O.DryRun) {
+    Write-Step '' 'Dry-run plan'
     Write-Log PLAN "Replace scheduled task $serviceName (at logon, no window, restart on failure); enrollment=$enrollment"
     Write-Log PLAN 'Choose two free loopback ports; create a per-Hub ham-ctl wrapper and task.'
     if ($O.FromDir) { Write-Log PLAN "Install ham-bridge.exe, ham-pty-host.exe, ham-ctl.exe from $($O.FromDir) (no download or checksum)." }
@@ -816,9 +888,13 @@ function Invoke-HeimdallInstaller {
     Set-OwnerOnlyAcl $workDir
 
     Enable-ModernTls
+    Write-Step 2 'Hub check'
     Wait-ForHub $hubUrl
 
+    Write-Step 3 'Resolve release'
     if ($O.FromDir) {
+      Write-Log INFO 'Local binaries (-FromDir): no release lookup.'
+      Write-Step 4 'Download & verify'
       if (-not (Test-Path -LiteralPath $O.FromDir -PathType Container)) { Fail "-FromDir $($O.FromDir) is not a directory." }
       $src = (Resolve-Path -LiteralPath $O.FromDir).Path
       if (Test-Path -LiteralPath (Join-Path $src 'bin\ham-bridge.exe')) { $src = Join-Path $src 'bin' }
@@ -848,6 +924,8 @@ function Invoke-HeimdallInstaller {
         # promoted later; without -Version, resolve only promoted releases. A hub's
         # own /public/install.ps1 pins the hub's release.
         $relFile = Join-Path $workDir 'releases.json'
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        Write-Log INFO 'Looking up the latest promoted release'
         Save-Url $api $relFile
         try { $raw = [IO.File]::ReadAllText($relFile) | ConvertFrom-Json } catch { Fail 'GitHub did not return a release list; pass -Version TAG.' }
         # PowerShell 7 unwraps a one-element array; an object without tag_name is an API error.
@@ -858,10 +936,12 @@ function Invoke-HeimdallInstaller {
           if (-not $r.draft -and -not $r.prerelease -and ($assets -ccontains 'SHA256SUMS') -and ($assets -ccontains "heimdall-local-$HeimdallTarget-$tag.zip")) { $version = $tag; break }
         }
         if (-not $version) { Fail 'No promoted release bundle for this platform. Pass -Version TAG.' }
+        Write-Log OK "Latest release: $version ($(Format-Elapsed $sw.Elapsed.TotalSeconds))"
       }
       if ($version -notmatch '^[a-zA-Z0-9._-]+$') { Fail 'Invalid release tag.' }
       $archive = "heimdall-local-$HeimdallTarget-$version.zip"
       $base = "$dlRoot/$version"
+      Write-Step 4 'Download & verify'
       Write-Log INFO "Downloading $version"
       $sums = Join-Path $workDir 'SHA256SUMS'
       Save-Url "$base/SHA256SUMS" $sums
@@ -878,17 +958,23 @@ function Invoke-HeimdallInstaller {
         Save-Url "$base/$archive" $bundle -ShowProgress
       }
       if (-not (Test-Sha256 $sums $bundle $archive)) { Fail 'SHA-256 verification failed; nothing installed.' }
-      Expand-HeimdallBundle $bundle $workDir
-      Write-Log OK 'Release checksum and bundle verified'
+      $sw = [Diagnostics.Stopwatch]::StartNew()
+      if (Test-ConsoleOutput) { Write-Progress -Activity 'Unpacking the release bundle' -Status $archive }
+      try { Expand-HeimdallBundle $bundle $workDir } finally { if (Test-ConsoleOutput) { Write-Progress -Activity 'Unpacking the release bundle' -Completed } }
+      Write-Log OK "Release checksum and bundle verified ($(Format-Elapsed $sw.Elapsed.TotalSeconds))"
     }
 
     # Preflight through the BRIDGE's own transport (SChannel TLS) before the task
     # is replaced: HttpClient reaching the Hub says nothing about this binary.
+    Write-Step 5 'Bridge preflight'
     $workBridge = Join-Path $workDir 'ham-bridge.exe'
     $bridgeVersion = Get-BridgeVersion $workBridge
     if ($bridgeVersion -and (Test-VersionAtLeast $bridgeVersion '0.3.36')) {
-      & $workBridge --probe-hub $hubUrl
+      $sw = [Diagnostics.Stopwatch]::StartNew()
+      if (Test-ConsoleOutput) { Write-Progress -Activity 'Probing the Hub through the new ham-bridge' -Status $hubUrl }
+      try { & $workBridge --probe-hub $hubUrl } finally { if (Test-ConsoleOutput) { Write-Progress -Activity 'Probing the Hub through the new ham-bridge' -Completed } }
       if ($LASTEXITCODE -ne 0) { Fail "The new ham-bridge.exe cannot reach $hubUrl through its own HTTPS client (its static libcurl, Schannel and the Windows certificate store) although the installer could. Check TLS trust (HAM_TLS_CA_FILE). ham-bridge never uses a proxy. Nothing was replaced." }
+      Write-Log OK "Bridge reached the Hub through its own HTTPS client ($(Format-Elapsed $sw.Elapsed.TotalSeconds))"
     } else {
       $shownVersion = 'unknown'
       if ($bridgeVersion) { $shownVersion = $bridgeVersion }
@@ -901,7 +987,7 @@ function Invoke-HeimdallInstaller {
       Get-ChildItem -LiteralPath $cacheDir -Filter "heimdall-local-$HeimdallTarget-*.zip" | Where-Object { $_.Name -ne $archive } | Remove-Item -Force -ErrorAction SilentlyContinue
     }
 
-    Write-Step '3 / 6 - Replace this Hub''s service'
+    Write-Step 6 'Replace service'
     Stop-BridgeService $C
     if (Get-ScheduledTask -TaskPath '\' -TaskName $serviceName -ErrorAction SilentlyContinue) {
       Unregister-ScheduledTask -TaskPath '\' -TaskName $serviceName -Confirm:$false
@@ -923,7 +1009,7 @@ function Invoke-HeimdallInstaller {
     Write-Utf8File $hubFile "$hubUrl`n"
     Write-Log OK "Installed binaries to $binDir"
 
-    Write-Step '4 / 6 - Ports and ham-ctl routing'
+    Write-Step 7 'Ports & routing'
     $ports = Select-BridgePorts $stateRoot $stateDir
     $C.BridgePort = [int]$ports[0]
     $C.EndpointPort = [int]$ports[1]
@@ -988,7 +1074,7 @@ for (;;) {
     New-EnrollScript $C
     Write-Log OK "Hub-specific CLI: $($C.CtlWrapper)"
 
-    Write-Step '5 / 6 - Register service and enrollment'
+    Write-Step 8 'Register & enroll'
     # Registered but NOT started: a token-less bridge would only exit and restart,
     # and an enrolled task must not connect while enrollment delivers the vault key.
     Register-ScheduledTask -TaskPath '\' -TaskName $serviceName -Xml (New-TaskXml $C) -Force | Out-Null
@@ -1005,7 +1091,7 @@ for (;;) {
       Write-Log OK 'Existing enrollment preserved'
     }
 
-    Write-Step '6 / 6 - Ready'
+    Write-Step 9 'Ready'
     $enrolled = (Test-Path -LiteralPath $C.TokenFile) -and ((Get-Item -LiteralPath $C.TokenFile).Length -gt 0)
     if ($enrolled) {
       Set-OwnerOnlyAcl $C.TokenFile
@@ -1040,9 +1126,9 @@ if ($Help) {
     $HeimdallInstallStatus = 1
     Write-Host ''
     if (Test-HeimdallFailure $_) {
-      Write-Host "[ERROR] $($_.Exception.Message.Substring(18))"
+      Write-Log ERROR $_.Exception.Message.Substring(18)
     } else {
-      Write-Host "[ERROR] $($_.Exception.Message)"
+      Write-Log ERROR $_.Exception.Message
       Write-Host $_.InvocationInfo.PositionMessage
     }
   }
