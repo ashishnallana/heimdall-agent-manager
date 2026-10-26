@@ -150,7 +150,7 @@ test_artifact_create_file_binary_bytes_round_trip :: proc(t: ^testing.T) {
 	testing.expect(t, os.write_entire_file(path, payload) == nil, "fixture must be written")
 
 	out := ctl_agentmode_artifact_create_params([]string{
-		"--name", "bundle.zip", "--kind", "html-bundle", "--file", path,
+		"--name", "payload.bin", "--kind", "file", "--file", path,
 		"--vault-keyring", tkr_b64(TEST_ARTIFACT_VAULT_KEY),
 	})
 	val, err := json.parse_string(out, parse_integers = true, allocator = context.temp_allocator)

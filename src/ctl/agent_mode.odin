@@ -782,7 +782,19 @@ ctl_agentmode_artifact_create_params :: proc(args: []string) -> string {
 	kind := option_value(args, "--kind", "markdown")
 	content := option_value(args, "--content", "")
 	content_base64 := ""
-	if file_path := option_value(args, "--file", ""); file_path != "" {
+	content_type := option_value(args, "--content-type", "")
+	if kind == HTML_BUNDLE_KIND {
+		// REQ-BUNDLE-1/2: package --directory or validate --file into one ZIP with the
+		// manifest; the archive bytes are sealed below exactly like any --file payload.
+		bundle, bundle_err := html_bundle_package_from_args(args, context.temp_allocator)
+		if bundle_err != "" {
+			fmt.println(ctl_error_json(fmt.tprintf("html-bundle: %s", bundle_err)))
+			os.exit(1)
+		}
+		for link in bundle.skipped_symlinks do fmt.eprintf("html-bundle: skipped %q (symbolic links and special files are not packed)\n", link)
+		content_base64 = base64.encode(bundle.zip)
+		content_type = HTML_BUNDLE_CONTENT_TYPE
+	} else if file_path := option_value(args, "--file", ""); file_path != "" {
 		data, err := os.read_entire_file(file_path, context.allocator)
 		if err == nil do content_base64 = base64.encode(data)
 	}
@@ -821,7 +833,7 @@ ctl_agentmode_artifact_create_params :: proc(args: []string) -> string {
 	} else {
 		append(&fields, json_kv("content", content))
 	}
-	if ct := option_value(args, "--content-type", ""); ct != "" do append(&fields, json_kv("content_type", ct))
+	if content_type != "" do append(&fields, json_kv("content_type", content_type))
 	if desc != "" do append(&fields, json_kv("description", desc))
 	if p := option_value(args, "--project", option_value(args, "--project-id", "")); p != "" do append(&fields, json_kv("project_id", p))
 	if ai := option_value(args, "--agent-instance", option_value(args, "--agent-instance-id", "")); ai != "" do append(&fields, json_kv("agent_instance_id", ai))
@@ -2100,6 +2112,13 @@ print_help_artifact :: proc() {
 	fmt.println("       [--kind <kind>] [--since <ts>] [--until <ts>] [--sort <field>]")
 	fmt.println("       [--order <asc|desc>] [--limit <n>] [--cursor <c>] [--include-deleted]")
 	fmt.println("  create --name <name> [--kind <kind>] [--content <text>|--file <path>|--stdin]")
+	fmt.println("  create --name <name> --kind html-bundle (--directory <dir>|--file <bundle.zip>) [--entry <page.html>]")
+	fmt.println("       Static site (HTML/CSS/images/fonts; no scripts) viewed in the Artifact Viewer.")
+	fmt.println("       --directory is packed as a ZIP (relative paths kept, symlinks skipped);")
+	fmt.println("       --file must be a ZIP. heimdall-artifact.json {\"format_version\":1,")
+	fmt.println("       \"entrypoint\":\"<page>\"} is generated or validated. Entry: --entry (must")
+	fmt.println("       match an existing manifest), else index.html, else the only .html file.")
+	fmt.println("       Limits: 10 MiB archive, 50 MiB expanded, 1000 files, 10 MiB per file.")
 	fmt.println("  show <artifact-id> [--with-content]")
 	fmt.println("  content <artifact-id>                Print the raw artifact content.")
 	fmt.println("  download <artifact-id> --dir <dir>   Write to a file (inferred extension).")
@@ -2108,6 +2127,7 @@ print_help_artifact :: proc() {
 	fmt.println("  ham-ctl artifact list --limit 10")
 	fmt.println("  ham-ctl artifact list --kind markdown --sort created_at --order desc")
 	fmt.println("  ham-ctl artifact create --name test-log --kind markdown --file /tmp/test.log")
+	fmt.println("  ham-ctl artifact create --name report --kind html-bundle --directory ./site --entry docs/index.html")
 	fmt.println("  ham-ctl artifact content art_123")
 	fmt.println("  ham-ctl artifact download art_123 --dir /tmp")
 }
