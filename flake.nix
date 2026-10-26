@@ -138,6 +138,11 @@
           # cross build; we only need the static library, so skip its checks.
           sqlite = staticPkgs.sqlite.overrideAttrs (_: { doCheck = false; });
           libDirs = curl.libDirs ++ pkgs.lib.optionals (name == "ham-bridge") [ "${pkgs.lib.getLib sqlite}/lib" ];
+          # -z stack-size: musl's default thread stack is 128 KiB (glibc: 8 MiB).
+          # Odin's core:thread asks for RLIMIT_STACK, but under `ulimit -s
+          # unlimited` that request fails and musl's default applies -- to every
+          # Odin thread and libcurl's resolver threads. musl raises its default
+          # to PT_GNU_STACK's size (capped at 8 MiB), so record 8 MiB there.
         in
         pkgs.stdenv.mkDerivation {
           pname = "${pnamePrefix}${name}";
@@ -156,7 +161,7 @@
               odin build ${srcDir} ${pkgs.lib.optionalString (odinTarget != null) "-target:${odinTarget}"} -collection:odin_test=src \
               -define:HAM_APP_VERSION=${appVersion} ${curlPinDefine} -define:HAM_CURL_STATIC=true -define:HAM_LIBC_MUSL=true \
               -define:HAM_CA_BUNDLE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt ${extraDefines} \
-              -out:$out/bin/${name} -extra-linker-flags:"-static -no-pie ${pkgs.lib.concatMapStringsSep " " (d: "-L${d}") libDirs}"
+              -out:$out/bin/${name} -extra-linker-flags:"-static -no-pie -Wl,-z,stack-size=8388608 ${pkgs.lib.concatMapStringsSep " " (d: "-L${d}") libDirs}"
             runHook postBuild
           '';
         };
