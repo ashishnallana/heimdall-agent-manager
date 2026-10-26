@@ -341,3 +341,163 @@ test_tool_stream_lease_expiry_drops_demand_and_pending_completion :: proc(t: ^te
     bridge_tool_live_handle_subscription(&conn, legacy)
     testing.expect(t, len(bridge_tool_subscriptions) == 0, "legacy demand fails closed")
 }
+
+// Native hook replay: an interrupted or permission-rejected call gets PreToolUse
+// but never PostToolUse/PostToolUseFailure. The turn boundary must close it.
+@(private = "file")
+orphan_replay :: proc(t: ^testing.T, id, provider, raw: string, ts_ms: i64) {
+    // RFC 3339 here has whole-second precision: callers space steps >= 1s apart.
+    context.allocator = context.temp_allocator
+    ts := action_scheduler_format_rfc3339_utc(ts_ms)
+    events: [dynamic]string
+    switch provider {
+    case "claude":
+        m, err := ext.claude_map_hook(raw, ts)
+        testing.expect_value(t, err, ext.Claude_Error.None)
+        events = m.events
+    case "codex":
+        m, err := ext.codex_map_hook(raw, ts)
+        testing.expect_value(t, err, ext.Codex_Error.None)
+        events = m.events
+    case "antigravity":
+        m, err := ext.antigravity_map_hook(raw, ts)
+        testing.expect_value(t, err, ext.Antigravity_Error.None)
+        events = m.events
+    }
+    if len(events) == 0 do return
+    res := bridge_ext_ingest(Bridge_Local_Agent_Token_Record{agent_instance_id=id, role=.Agent},
+        ext.event_params(events[:]), bridge_runtime_now_ms())
+    testing.expect_value(t, res.accepted, len(events))
+    bridge_ext_ingest_result_destroy(&res)
+}
+@(private = "file")
+orphan_active :: proc(id: string) -> (main_calls, sub_calls: int) {
+    e := bridge_tool_tracker.tool_live.entries[id]
+    if e == nil do return
+    for c in e.active {
+        if c.agent_id == "" do main_calls += 1
+        else do sub_calls += 1
+    }
+    return
+}
+@(private = "file")
+orphan_last_status :: proc(id: string) -> string {
+    e := bridge_tool_tracker.tool_live.entries[id]
+    if e == nil || len(e.completed) == 0 do return ""
+    return e.completed[len(e.completed)-1].status
+}
+
+@(test)
+test_tool_stream_claude_orphan_closed_at_turn_boundary :: proc(t: ^testing.T) {
+    sync.mutex_lock(&live_bridge_test_mu); defer sync.mutex_unlock(&live_bridge_test_mu)
+    bridge_tool_live_init(); defer live_bridge_cleanup()
+    id := "inst_orphan_claude"
+    bridge_runtime_mark_start_success(id)
+    live.tool_live_watch(&bridge_tool_tracker, id, true)
+    now := bridge_now_unix_ms()+1000
+    orphan_replay(t, id, "claude", `{"hook_event_name":"SessionStart","session_id":"c1","source":"startup"}`, now)
+    // Rejected main-thread Bash: PreToolUse, then Stop with no PostToolUse.
+    orphan_replay(t, id, "claude", `{"hook_event_name":"PreToolUse","session_id":"c1","tool_name":"Bash","tool_use_id":"toolu_rejected","tool_input":{"command":"python3 -m pytest"}}`, now+1000)
+    // A background subagent's call is still running when the main turn stops.
+    orphan_replay(t, id, "claude", `{"hook_event_name":"PreToolUse","session_id":"c1","agent_id":"agent_bg","agent_type":"general-purpose","tool_name":"Read","tool_use_id":"toolu_sub","tool_input":{"file_path":"/tmp/x"}}`, now+2000)
+    main_calls, sub_calls := orphan_active(id)
+    testing.expect_value(t, main_calls, 1)
+    testing.expect_value(t, sub_calls, 1)
+    orphan_replay(t, id, "claude", `{"hook_event_name":"Stop","session_id":"c1","background_tasks":[{"status":"running"}]}`, now+3000)
+    main_calls, sub_calls = orphan_active(id)
+    testing.expect_value(t, main_calls, 0)
+    testing.expect_value(t, sub_calls, 1)
+    testing.expect_value(t, orphan_last_status(id), "interrupted")
+    // A late end cannot resurrect or re-complete the closed call.
+    orphan_replay(t, id, "claude", `{"hook_event_name":"PostToolUse","session_id":"c1","tool_name":"Bash","tool_use_id":"toolu_rejected","tool_input":{"command":"python3 -m pytest"},"tool_response":{}}`, now+350)
+    testing.expect_value(t, len(bridge_tool_tracker.tool_live.entries[id].completed), 1)
+
+    // Interrupted while waiting: the next prompt arrives before any Stop.
+    orphan_replay(t, id, "claude", `{"hook_event_name":"PreToolUse","session_id":"c1","tool_name":"Bash","tool_use_id":"toolu_interrupted","tool_input":{"command":"sleep 100"}}`, now+4000)
+    main_calls, _ = orphan_active(id)
+    testing.expect_value(t, main_calls, 1)
+    orphan_replay(t, id, "claude", `{"hook_event_name":"UserPromptSubmit","session_id":"c1","prompt":"new message"}`, now+5000)
+    main_calls, sub_calls = orphan_active(id)
+    testing.expect_value(t, main_calls, 0)
+    testing.expect_value(t, sub_calls, 1)
+    testing.expect_value(t, orphan_last_status(id), "interrupted")
+
+    // A main-thread call started in the new turn stays live until its own end.
+    orphan_replay(t, id, "claude", `{"hook_event_name":"PreToolUse","session_id":"c1","tool_name":"Bash","tool_use_id":"toolu_live","tool_input":{"command":"ls"}}`, now+6000)
+    main_calls, _ = orphan_active(id)
+    testing.expect_value(t, main_calls, 1)
+    orphan_replay(t, id, "claude", `{"hook_event_name":"PostToolUse","session_id":"c1","tool_name":"Bash","tool_use_id":"toolu_live","tool_input":{"command":"ls"},"tool_response":{}}`, now+7000)
+    testing.expect_value(t, orphan_last_status(id), "completed")
+
+    // Only subagent.stop closes the background subagent's calls.
+    orphan_replay(t, id, "claude", `{"hook_event_name":"SubagentStop","session_id":"c1","agent_id":"agent_bg","agent_type":"general-purpose"}`, now+8000)
+    main_calls, sub_calls = orphan_active(id)
+    testing.expect_value(t, main_calls, 0)
+    testing.expect_value(t, sub_calls, 0)
+}
+
+@(test)
+test_tool_stream_codex_orphan_closed_at_turn_boundary :: proc(t: ^testing.T) {
+    sync.mutex_lock(&live_bridge_test_mu); defer sync.mutex_unlock(&live_bridge_test_mu)
+    bridge_tool_live_init(); defer live_bridge_cleanup()
+    id := "inst_orphan_codex"
+    bridge_runtime_mark_start_success(id)
+    live.tool_live_watch(&bridge_tool_tracker, id, true)
+    now := bridge_now_unix_ms()+1000
+    orphan_replay(t, id, "codex", `{"hook_event_name":"SessionStart","session_id":"x1","source":"startup"}`, now)
+    orphan_replay(t, id, "codex", `{"hook_event_name":"PreToolUse","session_id":"x1","turn_id":"t1","tool_name":"exec_command","tool_use_id":"call_main","tool_input":{"cmd":"cargo test"}}`, now+1000)
+    orphan_replay(t, id, "codex", `{"hook_event_name":"PreToolUse","session_id":"x1","agent_id":"child_1","turn_id":"t1","tool_name":"exec_command","tool_use_id":"call_child","tool_input":{"cmd":"ls"}}`, now+2000)
+    orphan_replay(t, id, "codex", `{"hook_event_name":"Interrupt","session_id":"x1","turn_id":"t1"}`, now+3000)
+    main_calls, sub_calls := orphan_active(id)
+    testing.expect_value(t, main_calls, 0)
+    testing.expect_value(t, sub_calls, 1)
+    testing.expect_value(t, orphan_last_status(id), "interrupted")
+    orphan_replay(t, id, "codex", `{"hook_event_name":"PreToolUse","session_id":"x1","turn_id":"t1","tool_name":"exec_command","tool_use_id":"call_denied","tool_input":{"cmd":"rm -rf build"}}`, now+4000)
+    orphan_replay(t, id, "codex", `{"hook_event_name":"UserPromptSubmit","session_id":"x1","turn_id":"t2","prompt":"continue"}`, now+5000)
+    main_calls, sub_calls = orphan_active(id)
+    testing.expect_value(t, main_calls, 0)
+    testing.expect_value(t, sub_calls, 1)
+    orphan_replay(t, id, "codex", `{"hook_event_name":"PreToolUse","session_id":"x1","turn_id":"t2","tool_name":"exec_command","tool_use_id":"call_stop","tool_input":{"cmd":"make"}}`, now+6000)
+    orphan_replay(t, id, "codex", `{"hook_event_name":"Stop","session_id":"x1","turn_id":"t2"}`, now+7000)
+    main_calls, sub_calls = orphan_active(id)
+    testing.expect_value(t, main_calls, 0)
+    testing.expect_value(t, sub_calls, 1)
+    orphan_replay(t, id, "codex", `{"hook_event_name":"SubagentStop","session_id":"x1","agent_id":"child_1"}`, now+8000)
+    _, sub_calls = orphan_active(id)
+    testing.expect_value(t, sub_calls, 0)
+}
+
+@(test)
+test_tool_stream_antigravity_orphan_closed_and_turn_two_live :: proc(t: ^testing.T) {
+    sync.mutex_lock(&live_bridge_test_mu); defer sync.mutex_unlock(&live_bridge_test_mu)
+    bridge_tool_live_init(); defer live_bridge_cleanup()
+    id := "inst_orphan_agy"
+    bridge_runtime_mark_start_success(id)
+    live.tool_live_watch(&bridge_tool_tracker, id, true)
+    now := bridge_now_unix_ms()+1000
+    orphan_replay(t, id, "antigravity", `{"hookEventName":"PreInvocation","conversationId":"g1","invocationNum":1,"stepIdx":0}`, now)
+    orphan_replay(t, id, "antigravity", `{"hookEventName":"PreToolUse","conversationId":"g1","stepIdx":1,"toolCall":{"name":"run_command","args":{"CommandLine":"go test ./..."}}}`, now+1000)
+    main_calls, _ := orphan_active(id)
+    testing.expect_value(t, main_calls, 1)
+    // Stop maps to activity idle + session end; no PostToolUse ever arrives.
+    orphan_replay(t, id, "antigravity", `{"hookEventName":"Stop","conversationId":"g1","terminationReason":"user_cancel"}`, now+2000)
+    main_calls, _ = orphan_active(id)
+    testing.expect_value(t, main_calls, 0)
+    // Turn 2 (invocationNum > 1) sends no hello/session start; live tools must still work.
+    orphan_replay(t, id, "antigravity", `{"hookEventName":"PreInvocation","conversationId":"g1","invocationNum":2,"stepIdx":2}`, now+3000)
+    orphan_replay(t, id, "antigravity", `{"hookEventName":"PreToolUse","conversationId":"g1","stepIdx":3,"toolCall":{"name":"run_command","args":{"CommandLine":"ls"}}}`, now+4000)
+    main_calls, _ = orphan_active(id)
+    testing.expect_value(t, main_calls, 1)
+    orphan_replay(t, id, "antigravity", `{"hookEventName":"PostToolUse","conversationId":"g1","stepIdx":3,"toolCall":{"name":"run_command","args":{"CommandLine":"ls"}}}`, now+5000)
+    main_calls, _ = orphan_active(id)
+    testing.expect_value(t, main_calls, 0)
+    testing.expect_value(t, orphan_last_status(id), "completed")
+    // Turn 3: a fresh PreInvocation also closes a call orphaned without Stop.
+    orphan_replay(t, id, "antigravity", `{"hookEventName":"PreToolUse","conversationId":"g1","stepIdx":4,"toolCall":{"name":"run_command","args":{"CommandLine":"sleep 100"}}}`, now+6000)
+    main_calls, _ = orphan_active(id)
+    testing.expect_value(t, main_calls, 1)
+    orphan_replay(t, id, "antigravity", `{"hookEventName":"PreInvocation","conversationId":"g1","invocationNum":3,"stepIdx":5}`, now+7000)
+    main_calls, _ = orphan_active(id)
+    testing.expect_value(t, main_calls, 0)
+    testing.expect_value(t, orphan_last_status(id), "interrupted")
+}
