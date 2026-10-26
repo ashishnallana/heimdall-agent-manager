@@ -26,14 +26,20 @@
       appVersion = "0.5.4";
       npmDepsHash = "sha256-yqdyHi5qX8vpKt6LfHFcln3+adOfndg5QIiUBTeSB48=";
 
-      # Every Odin binary that links src/lib/httpc needs libcurl (system:curl).
-      # Nix-native packages link the nixpkgs curl dynamically.
+      # Every Odin binary that links src/lib/httpc links the ONE libcurl pinned
+      # in nix/libcurl-pin.json (built by nix/libcurl.nix). Nix-native packages
+      # (below) link its shared library from the store; the release-* attrs
+      # link it statically. -define:HAM_CURL_VERSION makes httpc.init() refuse
+      # any other libcurl at startup.
+      hamCurlFor = pkgs: import ./nix/libcurl.nix { inherit pkgs; inherit (pkgs) lib; };
+      curlPinDefine = "-define:HAM_CURL_VERSION=${(nixpkgs.lib.importJSON ./nix/libcurl-pin.json).curl.version}";
+
       mkOdinPackage = pkgs: odin: name: srcDir: pkgs.stdenv.mkDerivation {
         pname = name;
         version = appVersion;
         src = ./.;
         nativeBuildInputs = [ odin ];
-        buildInputs = [ pkgs.curl ];
+        buildInputs = [ (hamCurlFor pkgs).native.curl ];
         dontConfigure = true;
         dontInstall = true;
         buildPhase = ''
@@ -43,7 +49,7 @@
           # compiling any package that embeds the hub agent service (the golden test
           # imports it). Committed + regenerated-clean so local `odin build` also works.
           ${if name == "ham-bootstrap-golden-test" then "odin run tools/gen_static_skills -collection:odin_test=src -- src/prompts/skills src/hub/service/agent/static_skills_gen.odin" else ""}
-          odin build ${srcDir} -collection:odin_test=src -define:HAM_APP_VERSION=${appVersion} -out:$out/bin/${name}
+          odin build ${srcDir} -collection:odin_test=src -define:HAM_APP_VERSION=${appVersion} ${curlPinDefine} -out:$out/bin/${name}
           ${if name == "ham-test-agent" then "ln -s ham-test-agent $out/bin/bc-test-agent" else ""}
           runHook postBuild
         '';
@@ -54,7 +60,9 @@
         version = appVersion;
         src = ./.;
         nativeBuildInputs = [ odin pkgs.makeWrapper ];
-        buildInputs = runtimeInputs ++ [ pkgs.curl ];
+        # runtimeInputs are PATH tools; a curl CLI there is passed as
+        # pkgs.curl.bin so the nixpkgs libcurl never reaches the link line.
+        buildInputs = runtimeInputs ++ [ (hamCurlFor pkgs).native.curl ];
         dontConfigure = true;
         dontInstall = true;
         buildPhase = ''
@@ -64,7 +72,7 @@
           # the hub compile so the STATIC_SKILLS set can never drift from the folder.
           # Committed to the repo (reviewable) + regenerated here (verify-clean).
           ${if name == "ham-hub" then "odin run tools/gen_static_skills -collection:odin_test=src -- src/prompts/skills src/hub/service/agent/static_skills_gen.odin" else ""}
-          odin build ${srcDir} -collection:odin_test=src -define:HAM_APP_VERSION=${appVersion} -out:$out/bin/${name}
+          odin build ${srcDir} -collection:odin_test=src -define:HAM_APP_VERSION=${appVersion} ${curlPinDefine} -out:$out/bin/${name}
           wrapProgram $out/bin/${name} --prefix PATH : ${pkgs.lib.makeBinPath runtimeInputs}
           # Bundle the hub migrations SQL into the store output so the apps.hub
           # wrapper can inject an absolute --migrations-dir (NRX-1/NRX-4) and
@@ -85,13 +93,13 @@
         version = appVersion;
         src = ./.;
         nativeBuildInputs = [ odin ];
-        buildInputs = [ pkgs.curl ];
+        buildInputs = [ (hamCurlFor pkgs).native.curl ];
         dontConfigure = true;
         dontInstall = true;
         buildPhase = ''
           runHook preBuild
           mkdir -p $out/bin
-          odin build src/ctl -collection:odin_test=src -define:HAM_APP_VERSION=${appVersion} -out:$out/bin/ham-ctl
+          odin build src/ctl -collection:odin_test=src -define:HAM_APP_VERSION=${appVersion} ${curlPinDefine} -out:$out/bin/ham-ctl
           runHook postBuild
         '';
       };
@@ -102,54 +110,86 @@
       # is every machine the public tarballs target. The release workflow
       # used to build the regular attrs, which is how bin/ham-bridge shipped
       # as a 652-byte nix wrapper script. These release attrs build the same
-      # sources for the tarball:
-      #   Linux (Odin): dynamically linked against the HOST's glibc and
-      #     libcurl.so.4 (src/lib/httpc links system:curl). sqlite stays
-      #     static: a directory holding only libsqlite3.a is searched first.
-      #     After linking, the ELF interpreter is rewritten to the FHS loader
-      #     and the nix rpath removed, so nothing references /nix/store.
-      #     The host needs glibc and libcurl >= 7.80 (httpc.MIN_CURL_VERSION;
-      #     checked at startup). Before the libcurl migration these were fully
-      #     static (-static against glibc.static); a static libcurl is future
-      #     work.
-      #   Darwin (Odin): plain build; scripts/release/package-local-binary-
-      #     tarball.sh rewrites the nix libcurl/libsqlite3 install names to the
-      #     OS copies in /usr/lib.
+      # sources for the tarball, with the pinned libcurl linked STATICALLY
+      # (nix/libcurl.nix), so no host needs a libcurl at all:
+      #   Linux (Odin): fully static musl ELF (-static -no-pie, no PT_INTERP,
+      #     no NEEDED): libcurl.a + OpenSSL 3 + zlib + (bridge) sqlite from
+      #     pkgsStatic, linked by the musl cc-wrapper (ODIN_CLANG_PATH; Odin
+      #     hard-codes `-lpthread -lm -lc`, which musl's libc.a satisfies).
+      #     Runs on any Linux kernel/distro (Alpine, old glibc). musl's resolver
+      #     reads /etc/resolv.conf and /etc/hosts itself (no NSS). The CA store
+      #     is probed at run time (src/lib/httpc/ca.odin) with Mozilla's bundle
+      #     (nixpkgs cacert) embedded as the last resort.
+      #   Darwin (Odin): libcurl.a + static OpenSSL 3 + zlib, Apple SecTrust
+      #     verification; links only libSystem and system frameworks (the
+      #     bridge's libsqlite3 is rewritten to /usr/lib by
+      #     scripts/release/package-local-binary-tarball.sh).
       # Never wrapProgram and never stage nix-store runtime deps here.
-      mkReleaseOdinPackage = pkgs: odin: name: srcDir:
+      #
+      # mkStaticLinuxOdin is shared with the termux bundle: `staticPkgs` is a
+      # pkgsStatic set (native, or pkgsCross.<x>.pkgsStatic), `odinTarget` the
+      # matching -target. HAM_LIBC_MUSL selects crashlog's unwinder backtrace
+      # (musl has no execinfo).
+      mkStaticLinuxOdin = { pkgs, odin, name, srcDir, staticPkgs, pnamePrefix, odinTarget ? null, extraDefines ? "" }:
         let
-          isLinux = pkgs.stdenv.hostPlatform.isLinux;
-          fhsLoader =
-            if pkgs.stdenv.hostPlatform.isAarch64 then "/lib/ld-linux-aarch64.so.1"
-            else "/lib64/ld-linux-x86-64.so.2";
+          curl = (hamCurlFor pkgs).linuxStatic staticPkgs;
+          muslCc = staticPkgs.stdenv.cc;
+          # sqlite's own test suite (make devtest) fails under the aarch64-musl
+          # cross build; we only need the static library, so skip its checks.
+          sqlite = staticPkgs.sqlite.overrideAttrs (_: { doCheck = false; });
+          libDirs = curl.libDirs ++ pkgs.lib.optionals (name == "ham-bridge") [ "${pkgs.lib.getLib sqlite}/lib" ];
         in
         pkgs.stdenv.mkDerivation {
-          pname = "release-${name}";
+          pname = "${pnamePrefix}${name}";
           version = appVersion;
           src = ./.;
-          nativeBuildInputs = [ odin ] ++ pkgs.lib.optionals isLinux [ pkgs.patchelf ];
-          buildInputs = [ pkgs.curl ] ++ pkgs.lib.optionals (name == "ham-bridge") [ pkgs.sqlite ];
+          nativeBuildInputs = [ odin ];
           dontConfigure = true;
           dontInstall = true;
-          # The rpath/interpreter are rewritten below; keep fixup from re-adding
-          # nix-store references.
           dontPatchELF = true;
           dontStrip = true;
+          passthru = { inherit curl; };
           buildPhase = ''
             runHook preBuild
             mkdir -p $out/bin
-            ${pkgs.lib.optionalString isLinux ''
-              mkdir -p "$TMPDIR/static-libs"
-              ${pkgs.lib.optionalString (name == "ham-bridge") ''ln -s ${pkgs.sqlite.out}/lib/libsqlite3.a "$TMPDIR/static-libs/"''}
-            ''}
-            odin build ${srcDir} -collection:odin_test=src -define:HAM_APP_VERSION=${appVersion} -out:$out/bin/${name} \
-              ${pkgs.lib.optionalString isLinux ''${pkgs.lib.optionalString (name == "ham-bridge") "-define:HAM_PORTABLE_FMOD=true"} -extra-linker-flags:"-no-pie -L$TMPDIR/static-libs -L${pkgs.curl.out}/lib ${pkgs.lib.optionalString (name == "ham-bridge") "-Wl,--defsym,fmod=ham_portable_fmod"}"''}
-            ${pkgs.lib.optionalString isLinux ''
-              patchelf --set-interpreter ${fhsLoader} --remove-rpath $out/bin/${name}
-            ''}
+            ODIN_CLANG_PATH=${muslCc}/bin/${muslCc.targetPrefix}cc \
+              odin build ${srcDir} ${pkgs.lib.optionalString (odinTarget != null) "-target:${odinTarget}"} -collection:odin_test=src \
+              -define:HAM_APP_VERSION=${appVersion} ${curlPinDefine} -define:HAM_CURL_STATIC=true -define:HAM_LIBC_MUSL=true \
+              -define:HAM_CA_BUNDLE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt ${extraDefines} \
+              -out:$out/bin/${name} -extra-linker-flags:"-static -no-pie ${pkgs.lib.concatMapStringsSep " " (d: "-L${d}") libDirs}"
             runHook postBuild
           '';
         };
+
+      mkReleaseOdinPackage = pkgs: odin: name: srcDir:
+        if pkgs.stdenv.hostPlatform.isLinux then
+          mkStaticLinuxOdin {
+            inherit pkgs odin name srcDir;
+            staticPkgs = pkgs.pkgsStatic;
+            pnamePrefix = "release-";
+          }
+        else
+          let curl = (hamCurlFor pkgs).darwinStatic;
+          in pkgs.stdenv.mkDerivation {
+            pname = "release-${name}";
+            version = appVersion;
+            src = ./.;
+            nativeBuildInputs = [ odin ];
+            buildInputs = pkgs.lib.optionals (name == "ham-bridge") [ pkgs.sqlite ];
+            dontConfigure = true;
+            dontInstall = true;
+            dontStrip = true;
+            passthru = { inherit curl; };
+            # The -L dirs hold only .a archives and come before the SDK's
+            # /usr/lib, so -lcurl -lssl -lcrypto -lz resolve statically.
+            buildPhase = ''
+              runHook preBuild
+              mkdir -p $out/bin
+              odin build ${srcDir} -collection:odin_test=src -define:HAM_APP_VERSION=${appVersion} ${curlPinDefine} -define:HAM_CURL_STATIC=true \
+                -out:$out/bin/${name} -extra-linker-flags:"${pkgs.lib.concatMapStringsSep " " (d: "-L${d}") curl.libDirs}"
+              runHook postBuild
+            '';
+          };
 
       # T12: the termux-arm64 bundle's Odin binaries. Android's app seccomp
       # allowlist is bionic-derived and SIGSYS-kills a process on syscalls bionic
@@ -158,45 +198,20 @@
       # set_tid_address, set_robust_list -> SIGSYS SYS_SECCOMP), so NO
       # glibc-static binary starts under Termux. musl registers no robust list at
       # start-up, uses clone (not clone3) and never calls rseq.
-      # Odin hard-codes `-lpthread -lm -lc` on its link line and links through
-      # `clang`, unless ODIN_CLANG_PATH names another driver (Odin
-      # src/linker.cpp). Pointing it at the musl cross cc-wrapper makes that
-      # wrapper supply musl's crt1/crti/crtn, libc.a and libgcc -- libgcc matters
-      # on aarch64, where musl's long-double code calls the soft-float __*tf3
-      # helpers. -static -no-pie: a plain static ELF, no PT_INTERP.
-      # Built for linux_arm64 from either Linux host (Odin cross-codegens
-      # natively; the wrapper is pkgsCross, the same set mkReleasePtyHost uses).
-      # NOTE (libcurl migration): these attrs do not link yet. src/lib/httpc needs
-      # libcurl and no static musl libcurl is wired in; termux-arm64 is already
-      # disabled in the release matrix (crashlog backtrace under musl).
+      # Built for linux_arm64 from either Linux host with the same static-musl
+      # recipe (and pinned static libcurl) as the Linux release binaries.
       # HAM_RELEASE_TARGET=termux-arm64 (src/contracts/release_target.odin) makes
       # the bridge hello, Hub update catalog and `heimdall update` resolve the
-      # termux bundle instead of linux-arm64, whose glibc dies under Android's
-      # seccomp filter (REQ-T13-1).
+      # termux bundle instead of linux-arm64 (REQ-T13-1). The Linux release
+      # binaries are musl-static now too; the termux bundle stays separate for
+      # that update-channel identity.
       mkTermuxOdinPackage = pkgs: odin: name: srcDir:
-        let
-          muslPkgs = pkgs.pkgsCross.aarch64-multiplatform-musl;
-          muslCc = muslPkgs.stdenv.cc;
-          # sqlite's own test suite (make devtest) fails under the aarch64-musl
-          # cross build; we only need the static library, so skip its checks.
-          muslSqlite = muslPkgs.sqlite.overrideAttrs (_: { doCheck = false; });
-        in
-        pkgs.stdenv.mkDerivation {
-          pname = "release-termux-${name}";
-          version = appVersion;
-          src = ./.;
-          nativeBuildInputs = [ odin ];
-          buildInputs = pkgs.lib.optionals (name == "ham-bridge") [ muslSqlite ];
-          dontConfigure = true;
-          dontInstall = true;
-          buildPhase = ''
-            runHook preBuild
-            mkdir -p $out/bin
-            ODIN_CLANG_PATH=${muslCc}/bin/${muslCc.targetPrefix}cc \
-              odin build ${srcDir} -target:linux_arm64 -collection:odin_test=src -define:HAM_APP_VERSION=${appVersion} -define:HAM_RELEASE_TARGET=termux-arm64 \
-              -out:$out/bin/${name} -extra-linker-flags:"-static -no-pie ${pkgs.lib.optionalString (name == "ham-bridge") "-L${muslSqlite.out}/lib"}"
-            runHook postBuild
-          '';
+        mkStaticLinuxOdin {
+          inherit pkgs odin name srcDir;
+          staticPkgs = pkgs.pkgsCross.aarch64-multiplatform.pkgsStatic;
+          pnamePrefix = "release-termux-";
+          odinTarget = "linux_arm64";
+          extraDefines = "-define:HAM_RELEASE_TARGET=termux-arm64";
         };
 
       mkOdinUiPackage = pkgs: pkgs.buildNpmPackage {
@@ -352,7 +367,7 @@
           # and socat's OpenSSL engine. Outbound HTTPS uses the linked libcurl.
           # The curl CLI is used by scripts/apply-bridge-update.sh (the update
           # supervisor's health probe).
-          ham-bridge = mkOdinPackageWithRuntime pkgs odin "ham-bridge" "src/bridge" [ pkgs.sqlite pkgs.curl pkgs.openssl pkgs.socat ];
+          ham-bridge = mkOdinPackageWithRuntime pkgs odin "ham-bridge" "src/bridge" [ pkgs.sqlite pkgs.curl.bin pkgs.openssl pkgs.socat ];
           ham-dev-proxy = mkOdinPackage pkgs odin "ham-dev-proxy" "src/dev_proxy";
           ham-ctl = mkOdinCtlPackage pkgs odin;
           ham-test-agent = mkOdinPackage pkgs odin "ham-test-agent" "src/test_agent";
@@ -607,6 +622,7 @@
           pkks = pkgsFor system;
           odin = mkOdin pkks;
           ols = pkks.ols.override { inherit odin; };
+          hamCurl = (hamCurlFor pkks).native.curl;
         in
         {
           default = pkks.mkShell {
@@ -614,10 +630,13 @@
               odin
               ols
               pkks.tmux
-              pkks.curl
-              # src/lib/httpc links libcurl; its TLS tests run a throwaway
-              # openssl-generated CA behind a socat server.
-              pkks.curl.dev
+              # src/lib/httpc links the pinned libcurl (nix/libcurl.nix; its
+              # curl CLI comes along). Only this libcurl may be on the link
+              # path, so nixpkgs' curl is not in the shell. The TLS tests run
+              # a throwaway openssl-generated CA behind a socat server.
+              hamCurl.bin
+              hamCurl.out
+              hamCurl.dev
               pkks.openssl
               pkks.socat
               pkks.jq
