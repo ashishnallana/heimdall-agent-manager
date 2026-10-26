@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Icon } from '@ui';
 import NewConversationPage from '../chat/NewConversationPage';
-import { HomeChainSearch } from './HomeChainSearch';
 import { RecentIssuesTab } from './RecentIssuesTab';
 import { ActionItemsTab } from './ActionItemsTab';
 import { useListIssuesQuery } from '../../api/endpoints/issues';
@@ -24,7 +23,7 @@ function scrollContainer(node: HTMLElement | null): HTMLElement | null {
 export interface HomePageProps {
   /**
    * Main new-chat pane mode (Jetski: the `_new` pane renders the new
-   * conversation view). Launching a conversation or picking a task chain puts
+   * conversation view). Launching a conversation puts
    * that agent into THIS pane instead of navigating; global home sections
    * (issues, actions) are omitted.
    */
@@ -90,18 +89,14 @@ export function HomePage({ pane }: HomePageProps = {}) {
     window.history.replaceState(window.history.state, '', buildRouteHash(getRoutePathname(), params.toString()));
   }
 
-  // Task chains: search plus pages of task chains across projects.
-  const chainSearch = <HomeChainSearch onOpenAgent={pane?.onOpenAgent} />;
-
   if (pane) {
     return <div ref={rootRef} data-debug-id="home-page-pane" className="h-full w-full min-h-0 overflow-y-auto pb-8">
-      <NewConversationPage embedded launchIntent={pane.launchIntent} onLaunched={pane.onOpenAgent} footer={<div className="w-full min-w-0">{chainSearch}</div>} />
+      <NewConversationPage embedded launchIntent={pane.launchIntent} onLaunched={pane.onOpenAgent} />
     </div>;
   }
 
   return <div ref={rootRef} data-debug-id="home-page" className="w-full pb-8">
     <NewConversationPage embedded footer={<div className="relative w-full min-w-0 space-y-4">
-      {chainSearch}
       <div ref={buttonsRef} data-debug-id="home-section-buttons" role="group" aria-label="Home activity" className="grid w-full scroll-mt-4 grid-cols-2 gap-2 sm:gap-3">
         {sections.map(section => <button key={section.id} type="button" data-debug-id={`home-tab-${section.id}`} aria-pressed={selected === section.id} aria-expanded={selected === section.id} aria-controls="home-activity-panel" onClick={() => toggle(section.id)} className={`relative flex min-h-28 min-w-0 flex-col items-start gap-2 rounded-2xl border px-3 py-4 text-left transition-colors sm:px-4 ${selected === section.id ? 'border-accent bg-accent/10' : 'border-subtle bg-surface hover:bg-neutral-soft'}`}>
           <div className="flex w-full items-center justify-between gap-2"><Icon name={section.icon} size={20} className={selected === section.id ? 'text-accent' : 'text-muted'} /><span data-debug-id={`home-count-${section.id}`} aria-label={section.loading ? 'Loading count' : section.error ? 'Count unavailable' : `${section.count} ${section.label.toLowerCase()}`} className={`inline-flex h-6 min-w-6 items-center justify-center rounded-full px-1.5 text-xs font-semibold ${selected === section.id ? 'bg-accent text-accent-fg' : 'bg-neutral-soft text-primary'}`}>{section.loading ? '…' : section.error ? '—' : section.count}</span></div>

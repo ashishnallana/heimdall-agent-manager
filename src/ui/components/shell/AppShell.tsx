@@ -1,3 +1,4 @@
+import { SidebarTaskChains } from './SidebarTaskChains';
 import {
   LOGIN_PATH,
   authErrorMessage,
@@ -11,7 +12,7 @@ import {
 } from '../../auth/oidcSession';
 import UpgradePrompt from '../billing/UpgradePrompt';
 import { PLAN_LIMIT_EVENT, type PlanLimitDetails } from '../../utils/planLimit';
-import { Fragment, Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import ConversationsHomePage from '../chat/ConversationsHomePage';
 import ConversationSelectorModal from '../chat/ConversationSelectorModal';
@@ -36,7 +37,8 @@ import { cookieJsonFetch, cookieMutation } from '../../api/cookieFetch';
 import { useListAgentIdentitiesQuery } from '../../api/endpoints/agents';
 import { useListSidebarConversationsQuery, type SidebarConversation } from '../../api/endpoints/sidebar';
 import { useGetAgentsLiveQuery, type LiveProject } from '../../api/endpoints/agentsLive';
-import { useFetchTaskChainGroupsQuery } from '../../api/endpoints/tasks';
+import { fetchSidebarTaskChainGroups, type ChainListItem, type ChainProjectGroup } from '../../api/endpoints/tasks';
+import { subscribeTaskChainCreation, taskChainCreationRevision } from '../../api/taskChainCreationEvents';
 import { useListBridgesQuery, type Bridge } from '../../api/endpoints/bridgeSupport';
 import { useListShellsQuery } from '../../api/endpoints/shells';
 import { StatusBar } from './statusBar/StatusBar';
@@ -1338,6 +1340,17 @@ function RouteOutlet({
 }
 
 function AuthenticatedShell({ user }: { user: AuthUser }) {
+  const [sidebarScrollRoot, setSidebarScrollRoot] = useState<HTMLDivElement | null>(null);
+  const [sidebarChains, setSidebarChains] = useState<ChainListItem[]>([]);
+  const [palettePreviewGroups, setPalettePreviewGroups] = useState<ChainProjectGroup[]>([]);
+  const creationRevision = useSyncExternalStore(subscribeTaskChainCreation, taskChainCreationRevision);
+  useEffect(() => {
+    const controller = new AbortController();
+    void fetchSidebarTaskChainGroups(controller.signal)
+      .then(groups => { if (!controller.signal.aborted) setPalettePreviewGroups(groups); })
+      .catch(() => { /* Sidebar paging/retry remains available if previews fail. */ });
+    return () => controller.abort();
+  }, [creationRevision]);
   // REQ-UI-SIDEBAR-PERSISTENCE: Left sidebar collapsed state persisted in localStorage ('heimdall:shell:sidebar-collapsed')
   const [collapsed, setCollapsed] = useState<boolean>(() => {
     try {
@@ -1545,13 +1558,35 @@ function AuthenticatedShell({ user }: { user: AuthUser }) {
     () => countShells(liveShellsQuery.data?.sessions, liveShellsQuery.data?.has_more),
     [liveShellsQuery.data],
   );
-  const chainGroupsQuery = useFetchTaskChainGroupsQuery();
+  // Keep the former per-project palette reach, and add every loaded sidebar
+  // page. Preview fetches run only initially/after creation, never on generic
+  // task invalidation. Loaded rows override matching preview rows.
+  const chainGroups = useMemo(() => {
+    const chains = new Map<string, ChainListItem>();
+    for (const group of palettePreviewGroups) {
+      for (const chain of group.chains) chains.set(chain.chainId, {
+        ...chain, projectId: chain.projectId || group.projectId, projectName: chain.projectName || group.projectName,
+      });
+    }
+    for (const chain of sidebarChains) chains.set(chain.chainId, chain);
+    const groups = new Map<string, ChainProjectGroup>();
+    for (const chain of chains.values()) {
+      let group = groups.get(chain.projectId);
+      if (!group) {
+        group = { projectId: chain.projectId, projectName: chain.projectName || '', chains: [], chainTotal: 0, hasMore: false, nextCursor: '' };
+        groups.set(chain.projectId, group);
+      }
+      group.chains.push(chain);
+      group.chainTotal++;
+    }
+    return [...groups.values()];
+  }, [sidebarChains, palettePreviewGroups]);
   const searchChains = useSelector(selectSearchChains);
 
   // Background pre-warm decryption of task chains when groups load or vault unlocks (REQ-SEARCH-DECRYPT-RUNTIME-1)
   useEffect(() => {
     if (!activeVaultKey) return;
-    const groups = chainGroupsQuery.data?.groups;
+    const groups = chainGroups;
     if (!groups || groups.length === 0) return;
 
     const toDecrypt: RawSearchItemInput[] = [];
@@ -1596,7 +1631,7 @@ function AuthenticatedShell({ user }: { user: AuthUser }) {
     return () => {
       canceled = true;
     };
-  }, [chainGroupsQuery.data?.groups, activeVaultKey, searchChains, dispatch]);
+  }, [chainGroups, activeVaultKey, searchChains, dispatch]);
 
   // UI-14: the shell owns exactly one user WebSocket connection (cookie-auth
   // `/api/v1/user-ws`). Its events flow through the single `handleUserWsEvent`
@@ -2005,7 +2040,7 @@ function AuthenticatedShell({ user }: { user: AuthUser }) {
         {/* Reserves the fixed top-left cluster's row; the update badge lives in the top bar. */}
         <div aria-hidden="true" className="shrink-0" style={{ height: chromeHeight }} />
 
-        <div className="flex-1 overflow-y-auto p-3">
+        <div ref={setSidebarScrollRoot} data-debug-id="shell-sidebar-scroll" className="min-h-0 flex-1 overflow-y-auto p-3">
           {/* Primary action: open the command palette (search + jump + new chat).
               The palette is the canonical entry point (also Cmd/Ctrl-K on desktop). */}
           <button
@@ -2035,9 +2070,16 @@ function AuthenticatedShell({ user }: { user: AuthUser }) {
               />
             ))}
           </nav>
+          <SidebarTaskChains
+            onChainsChange={setSidebarChains}
+            scrollRoot={sidebarScrollRoot}
+            active={!isEffectiveCollapsed}
+            currentPath={path}
+            onNavigate={isMobile ? () => setDrawerOpen(false) : undefined}
+          />
         </div>
 
-        <div className={`border-t border-subtle p-3`}>
+        <div data-debug-id="shell-sidebar-account" className={`shrink-0 border-t border-subtle p-3`}>
           <div data-debug-id="shell-global-ownership-points" className={`flex items-center gap-2 rounded-xl px-2 py-1.5`}>
             {userAvatar}
             {(
@@ -2103,7 +2145,7 @@ function AuthenticatedShell({ user }: { user: AuthUser }) {
       <AttentionDeck open={attentionOpen} onClose={() => setAttentionOpen(false)} range={attentionRange} onRangeChange={setAttentionRange} />
       <AttentionUndoToast />
 
-      <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} onNavigate={handlePaletteNavigate} onAction={handlePaletteAction} actions={paletteActions} actionsEnabled={actionsAccess === 'enabled'} currentPath={path} conversationGroups={conversationTree.map((group) => ({ projectId: group.project.projectId, projectName: group.project.name, conversations: group.conversations.map((c) => ({ conversationId: c.conversationId, agentInstanceId: c.agentInstanceId, title: displayConversationTitle(c), agentName: c.agentName, isCoordinator: c.isCoordinator, runtimeStatus: c.runtimeStatus, activityStatus: c.activityStatus, unreadCount: c.unreadCount })) }))} chainGroups={chainGroupsQuery.data?.groups ?? []} />
+      <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} onNavigate={handlePaletteNavigate} onAction={handlePaletteAction} actions={paletteActions} actionsEnabled={actionsAccess === 'enabled'} currentPath={path} conversationGroups={conversationTree.map((group) => ({ projectId: group.project.projectId, projectName: group.project.name, conversations: group.conversations.map((c) => ({ conversationId: c.conversationId, agentInstanceId: c.agentInstanceId, title: displayConversationTitle(c), agentName: c.agentName, isCoordinator: c.isCoordinator, runtimeStatus: c.runtimeStatus, activityStatus: c.activityStatus, unreadCount: c.unreadCount })) }))} chainGroups={chainGroups} />
       <ConversationSelectorModal
         open={resourcePicker === 'conversation'}
         onClose={() => setResourcePicker(null)}

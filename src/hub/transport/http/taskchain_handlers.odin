@@ -835,6 +835,23 @@ list_task_chains_handler :: proc(ctx: rawptr, req: Request) -> Response {
 
 	// ?flat=1 or ?all=1 returns a flat JSON array of all visible chains without project grouping or preview caps.
 	if query_bool(req.query, "flat", false) || query_bool(req.query, "all", false) {
+		// Opt-in paging for the sidebar. Keep the legacy complete-array response
+		// when neither paging parameter is supplied. Auth, enrichment and archive
+		// filtering above are identical for both modes.
+		if has_query_key(req.query, "limit") || has_query_key(req.query, "cursor") {
+			limit := query_int(req.query, "limit", TASK_CHAINS_PAGE_DEFAULT)
+			if limit <= 0 do limit = TASK_CHAINS_PAGE_DEFAULT
+			if limit > TASK_CHAINS_PAGE_MAX do limit = TASK_CHAINS_PAGE_MAX
+			page := paginate_flat_chains(items[:], limit, query_value(req.query, "cursor"))
+			defer delete(page.chains)
+			defer if page.next_cursor != "" do delete(page.next_cursor)
+			wires := make([]Chain_List_Item_Wire, len(page.chains), context.temp_allocator)
+			for it, i in page.chains do wires[i] = make_chain_list_item_wire(it)
+			data, _ := json.marshal(wires, JSON_MARSHAL_OPT, allocator = context.temp_allocator)
+			return respond_list(string(data), contracts.API_Page{
+				limit = limit, next_cursor = page.next_cursor, has_more = page.has_more,
+			}, req.request_id, auth_ctx_server_time(req))
+		}
 		wires := make([]Chain_List_Item_Wire, len(items), context.temp_allocator)
 		for it, i in items {
 			wires[i] = make_chain_list_item_wire(it)
@@ -1163,6 +1180,43 @@ chain_after_cursor :: proc(it: Chain_List_Item, cur_created_at, cur_chain_id: st
 project_display_name :: proc(project_id, name: string) -> string {
 	if project_id == "" do return "Unassigned"
 	return name
+}
+
+// Flat paging preserves the former Home list's updated_at DESC / chain_id ASC
+// order across projects. Project paging deliberately retains its created_at order.
+// This bounds response size, not enrichment cost: list_chains/enrichment still
+// visit the visible list before paging, as they do for the grouped endpoint.
+Flat_Chain_Page :: struct {
+	chains: []Chain_List_Item,
+	next_cursor: string,
+	has_more: bool,
+}
+
+paginate_flat_chains :: proc(items: []Chain_List_Item, limit: int, cursor: string) -> Flat_Chain_Page {
+	cur_at, cur_id := chain_cursor_decode(cursor)
+	matched := make([dynamic]Chain_List_Item)
+	defer delete(matched)
+	for it in items {
+		if cursor != "" {
+			if it.updated_at > cur_at do continue
+			if it.updated_at == cur_at && it.chain_id <= cur_id do continue
+		}
+		append(&matched, it)
+	}
+	slice.sort_by(matched[:], proc(a, b: Chain_List_Item) -> bool {
+		if a.updated_at != b.updated_at do return a.updated_at > b.updated_at
+		return a.chain_id < b.chain_id
+	})
+	page_n := min(len(matched), max(1, limit))
+	page := make([]Chain_List_Item, page_n)
+	copy(page, matched[:page_n])
+	more := len(matched) > page_n
+	next := ""
+	if more && page_n > 0 {
+		last := page[page_n - 1]
+		next = strings.concatenate({last.updated_at, "|", last.chain_id})
+	}
+	return Flat_Chain_Page{chains = page, next_cursor = next, has_more = more}
 }
 
 // Chain_Project_Group is one project's entry in the grouped view: a bounded

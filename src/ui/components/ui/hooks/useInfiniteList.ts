@@ -87,6 +87,8 @@ export interface UseInfiniteListOptions<T> {
    * distance for the observer, not a style value. Default `'200px'`.
    */
   rootMargin?: string;
+  /** Scroll container for the sentinel. Default: the document viewport. */
+  root?: Element | null;
 }
 
 export interface UseInfiniteList<T> {
@@ -153,6 +155,7 @@ export function useInfiniteList<T>(options: UseInfiniteListOptions<T>): UseInfin
     pageCap = DEFAULT_PAGE_CAP,
     rowCap = DEFAULT_ROW_CAP,
     rootMargin = '200px',
+    root = null,
   } = options;
 
   const [items, setItems] = useState<T[]>([]);
@@ -273,8 +276,10 @@ export function useInfiniteList<T>(options: UseInfiniteListOptions<T>): UseInfin
         // The loaded rows survive a paging failure — scrolling never destroys them.
         setPagingError(err);
       } finally {
-        pagingRef.current = false;
-        if (run === runRef.current && mountedRef.current) setIsPaging(false);
+        if (run === runRef.current) {
+          pagingRef.current = false;
+          if (mountedRef.current) setIsPaging(false);
+        }
       }
     })();
   }, [commit, enabled]);
@@ -407,12 +412,12 @@ export function useInfiniteList<T>(options: UseInfiniteListOptions<T>): UseInfin
         (entries) => {
           if (entries.some((entry) => entry.isIntersecting)) loadMoreRef.current();
         },
-        { rootMargin },
+        { root, rootMargin },
       );
       observer.observe(node);
       observerRef.current = observer;
     },
-    [rootMargin],
+    [root, rootMargin],
   );
 
   return {
