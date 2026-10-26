@@ -3930,6 +3930,8 @@ Bridge_Hello_Wire :: struct {
 	active_instance_ids:      []string,
 }
 
+// BRIDGE_RUNTIME_FEATURES is the single source for the features both bridge_hello
+// and bridge_heartbeat advertise; the hub replaces its stored list on every frame.
 BRIDGE_RUNTIME_FEATURES := [?]string{"capture_agent_pane", "get_agent_pane", "instance_reconfiguration_v1", "tool_stream_demand_v2"}
 
 bridge_hub_hello_json :: proc() -> string {
@@ -3961,7 +3963,22 @@ bridge_hub_hello_json :: proc() -> string {
 	return out
 }
 
-bridge_runtime_features_json :: proc() -> string { return "[\"capture_agent_pane\",\"get_agent_pane\",\"instance_reconfiguration_v1\"]" }
+// bridge_runtime_features_json serializes BRIDGE_RUNTIME_FEATURES for the legacy
+// hand-built heartbeat. The hub stores the features of every hello AND heartbeat
+// frame, so a heartbeat that advertised a different list than the hello silently
+// withdrew whatever it omitted (tool_stream_demand_v2 was lost ~45s after connect).
+bridge_runtime_features_json :: proc(allocator := context.temp_allocator) -> string {
+	b := strings.builder_make(allocator)
+	strings.write_byte(&b, '[')
+	for feature, i in BRIDGE_RUNTIME_FEATURES {
+		if i > 0 do strings.write_byte(&b, ',')
+		strings.write_byte(&b, '"')
+		bridge_runtime_write_json_string(&b, feature)
+		strings.write_byte(&b, '"')
+	}
+	strings.write_byte(&b, ']')
+	return strings.to_string(b)
+}
 
 bridge_runtime_write_json_string :: proc(b: ^strings.Builder, value: string) {
 	logged_ctrl := false

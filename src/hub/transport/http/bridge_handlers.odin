@@ -3049,6 +3049,7 @@ write_bridge_json :: proc(b: ^strings.Builder, br: domain.Bridge, agents: ^agent
 	connected := agents != nil && project_service.bridge_runtime_registry_has_live(agents.bridge_runtime_registry, br.bridge_id)
 	strings.write_string(b, ",\"runtime_connected\":"); strings.write_string(b, "true" if connected else "false")
 	strings.write_string(b, ",\"reconfiguration_supported\":"); strings.write_string(b, "true" if agent_service.reconfiguration_bridge_supported(br) else "false")
+	strings.write_string(b, ",\"tool_stream_supported\":"); strings.write_string(b, "true" if agent_service.tool_stream_feature_supported(br) else "false")
 	strings.write_string(b, ",\"active_instance_count\":"); strings.write_string(b, fmt.tprintf("%d", agent_service.active_instance_count_for_bridge(agents, br.bridge_id)))
 	strings.write_string(b, ",\"version\":\""); write_handler_json_string(b, br.version)
 	strings.write_string(b, "\",\"commit_sha\":\""); write_handler_json_string(b, br.commit_sha)

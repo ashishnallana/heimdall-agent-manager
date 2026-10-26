@@ -49,11 +49,18 @@ instance_id_from_assertion :: proc(token: string) -> string {
 	return value
 }
 
-reconfiguration_bridge_supported :: proc(bridge: domain.Bridge) -> bool {
+// bridge_feature_supported reports whether the bridge's stored runtime features
+// (the latest hello/heartbeat `features`) include `feature`. Runtime features are
+// protocol support, distinct from provider discovery in `capabilities`.
+bridge_feature_supported :: proc(bridge: domain.Bridge, feature: string) -> bool {
 	features := jsonx.extract_string_array(bridge.capabilities_json, "features")
-	defer { for feature in features do delete(feature); delete(features) }
-	for feature in features do if feature == "instance_reconfiguration_v1" do return true
+	defer { for f in features do delete(f); delete(features) }
+	for f in features do if f == feature do return true
 	return false
+}
+
+reconfiguration_bridge_supported :: proc(bridge: domain.Bridge) -> bool {
+	return bridge_feature_supported(bridge, "instance_reconfiguration_v1")
 }
 
 configuration_snapshot :: proc(service: ^Agent_Service, inst: domain.Agent_Instance) -> domain.Instance_Configuration {

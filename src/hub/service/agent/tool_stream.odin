@@ -13,7 +13,6 @@ import iface "odin_test:hub/repository/iface"
 import project_service "odin_test:hub/service/project"
 import ws "odin_test:lib/ws"
 import live "odin_test:lib/tool_live"
-import jsonx "odin_test:lib/jsonx"
 
 TOOL_STREAM_MAX_VIEWERS :: 64
 TOOL_STREAM_MAX_ROUTES :: 1024
@@ -523,14 +522,20 @@ tool_stream_expiry_run :: proc(raw: rawptr) {
     }
 }
 
+TOOL_STREAM_DEMAND_FEATURE :: "tool_stream_demand_v2"
+
+// tool_stream_feature_supported is the one predicate for expiring-demand support:
+// live admission below and the bridge list's `tool_stream_supported` both use it.
+tool_stream_feature_supported :: proc(bridge: domain.Bridge) -> bool {
+    return bridge_feature_supported(bridge, TOOL_STREAM_DEMAND_FEATURE)
+}
+
 // Old bridges do not implement expiring demand controls. Fail closed rather than
 // silently enabling a legacy producer. Nil repositories occur only in unit fakes.
 tool_stream_bridge_supported :: proc(svc: ^Agent_Service, bridge_id: string) -> bool {
     if svc.bridges == nil do return true
+    context.allocator = context.temp_allocator // the row is read-only here, like tool_live_instance
     bridge, found, err := iface.bridge_get_bridge(svc.bridges, bridge_id)
     if !found || err.code != .None do return false
-    features := jsonx.extract_string_array(bridge.capabilities_json, "features")
-    defer { for feature in features do delete(feature); delete(features) }
-    for feature in features do if feature == "tool_stream_demand_v2" do return true
-    return false
+    return tool_stream_feature_supported(bridge)
 }
