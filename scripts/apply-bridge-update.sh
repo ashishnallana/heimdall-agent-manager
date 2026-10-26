@@ -57,10 +57,40 @@ RESTART_HOOK="${RESTART_HOOK:-}"
 STOP_HOOK="${STOP_HOOK:-}"
 HEALTH_URL="${HEALTH_URL:-}"
 HEALTH_METHOD="${HEALTH_METHOD:-}"
+# Caller contract (see "Caller interface" in docs/SELF_HOSTING.md). Interface 1
+# is the original argv; deployed Bridges send it without --interface or any
+# version. Interface 2 callers also name the running and the target version.
+SUPPORTED_INTERFACE=2
+INTERFACE=""
+FROM_VERSION=""
+TO_VERSION=""
+
+# Fail on a flag given without its value instead of on an unbound $2.
+require_value() {
+  if [ "$2" -lt 2 ]; then
+    echo "Missing value for $1" >&2
+    exit 2
+  fi
+}
 
 # Parse command line flags
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --interface)
+      require_value "$1" "$#"
+      INTERFACE="$2"
+      shift 2
+      ;;
+    --from-version)
+      require_value "$1" "$#"
+      FROM_VERSION="$2"
+      shift 2
+      ;;
+    --to-version)
+      require_value "$1" "$#"
+      TO_VERSION="$2"
+      shift 2
+      ;;
     --data-dir)
       DATA_DIR="$2"
       shift 2
@@ -119,7 +149,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     -h|--help)
       echo "Usage: $0 [options]"
-      echo "  --data-dir DIR        Root data directory (default: ~/.local/share/heimdall)"
+      echo "  --interface N         Caller interface version (default 1; current callers send $SUPPORTED_INTERFACE)."
+      echo "                        A newer interface than $SUPPORTED_INTERFACE is refused before any change."
+      echo "  --from-version VER    Version of the running bridge (required by interface 2;"
+      echo "                        absent = legacy caller, the version-independent flow)"
+      echo "  --to-version VER      Version being installed (required by interface 2)"
+      echo "                        Version hooks run on these before anything is stopped or"
+      echo "                        swapped. All three flags also apply to --stop-pty-hosts-only."
+      echo "  --data-dir DIR       Root data directory (default: ~/.local/share/heimdall)"
       echo "  --stage-dir DIR       Staging directory containing extracted binaries"
       echo "  --bridge-port PORT    Port bridge listens on for health check (default: 49323)"
       echo "  --hub-url URL         Central Hub URL"
@@ -164,6 +201,21 @@ case "$HEALTH_METHOD" in
     ;;
 esac
 
+# Validate the caller contract before anything is stopped, cleaned up or swapped.
+if [ -z "$INTERFACE" ]; then
+  INTERFACE=1
+elif ! [[ "$INTERFACE" =~ ^[1-9][0-9]{0,8}$ ]]; then
+  echo "Invalid --interface value: $INTERFACE (expected a positive integer)" >&2
+  exit 2
+elif [ "$INTERFACE" -gt "$SUPPORTED_INTERFACE" ]; then
+  echo "Unsupported supervisor interface $INTERFACE: this apply-bridge-update.sh supports interfaces 1-$SUPPORTED_INTERFACE; refusing before any change" >&2
+  exit 2
+fi
+if [ "$INTERFACE" -ge 2 ] && { [ -z "$FROM_VERSION" ] || [ -z "$TO_VERSION" ]; }; then
+  echo "Supervisor interface $INTERFACE requires --from-version and --to-version" >&2
+  exit 2
+fi
+
 log() {
   printf '[apply-bridge-update] [%s] %s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$*"
 }
@@ -171,6 +223,79 @@ log() {
 log_err() {
   printf '[apply-bridge-update] [%s] ERROR: %s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$*" >&2
 }
+
+# --- Version comparison ------------------------------------------------------
+# SemVer 2.0 precedence in plain bash (3.2-safe). A leading "v" is accepted and
+# +build metadata is ignored, as SemVer requires.
+SEMVER_RE='^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+semver_valid() {
+  [[ "$1" =~ $SEMVER_RE ]]
+}
+
+# Compare one dot-separated identifier; sets IDENT_CMP to -1, 0 or 1. Numbers
+# compare by value (any length, no integer overflow) and rank below
+# alphanumeric identifiers, which compare in ASCII order.
+IDENT_CMP=0
+semver_ident_cmp() {
+  local a="$1" b="$2" LC_ALL=C
+  if [[ "$a" =~ ^[0-9]+$ ]] && [[ "$b" =~ ^[0-9]+$ ]]; then
+    a="${a#"${a%%[!0]*}"}"; b="${b#"${b%%[!0]*}"}"
+    if [ "${#a}" -ne "${#b}" ]; then
+      [ "${#a}" -lt "${#b}" ] && IDENT_CMP=-1 || IDENT_CMP=1
+      return 0
+    fi
+  elif [[ "$a" =~ ^[0-9]+$ ]]; then
+    IDENT_CMP=-1; return 0
+  elif [[ "$b" =~ ^[0-9]+$ ]]; then
+    IDENT_CMP=1; return 0
+  fi
+  if [[ "$a" < "$b" ]]; then IDENT_CMP=-1
+  elif [[ "$a" > "$b" ]]; then IDENT_CMP=1
+  else IDENT_CMP=0
+  fi
+}
+
+# semver_compare A B: sets SEMVER_CMP to -1, 0 or 1 (A <, = or > B). Returns 1
+# with SEMVER_CMP empty when either side is not a SemVer version.
+SEMVER_CMP=""
+semver_compare() {
+  SEMVER_CMP=""
+  semver_valid "$1" && semver_valid "$2" || return 1
+  local a="${1#v}" b="${2#v}" a_pre="" b_pre="" i
+  local -a a_ids b_ids
+  a="${a%%+*}"; b="${b%%+*}"
+  case "$a" in *-*) a_pre="${a#*-}"; a="${a%%-*}" ;; esac
+  case "$b" in *-*) b_pre="${b#*-}"; b="${b%%-*}" ;; esac
+  IFS=. read -r -a a_ids <<< "$a"
+  IFS=. read -r -a b_ids <<< "$b"
+  for i in 0 1 2; do
+    semver_ident_cmp "${a_ids[$i]}" "${b_ids[$i]}"
+    [ "$IDENT_CMP" -eq 0 ] || { SEMVER_CMP="$IDENT_CMP"; return 0; }
+  done
+  # A release ranks above any of its pre-releases.
+  if [ -z "$a_pre" ] || [ -z "$b_pre" ]; then
+    if [ -n "$a_pre" ]; then SEMVER_CMP=-1
+    elif [ -n "$b_pre" ]; then SEMVER_CMP=1
+    else SEMVER_CMP=0
+    fi
+    return 0
+  fi
+  IFS=. read -r -a a_ids <<< "$a_pre"
+  IFS=. read -r -a b_ids <<< "$b_pre"
+  i=0
+  while [ "$i" -lt "${#a_ids[@]}" ] && [ "$i" -lt "${#b_ids[@]}" ]; do
+    semver_ident_cmp "${a_ids[$i]}" "${b_ids[$i]}"
+    [ "$IDENT_CMP" -eq 0 ] || { SEMVER_CMP="$IDENT_CMP"; return 0; }
+    i=$((i + 1))
+  done
+  # Equal so far: the longer identifier list ranks higher.
+  semver_ident_cmp "${#a_ids[@]}" "${#b_ids[@]}"
+  SEMVER_CMP="$IDENT_CMP"
+}
+
+# Range tests for version hooks; both are false for a non-SemVer version.
+version_before() { semver_compare "$1" "$2" && [ "$SEMVER_CMP" -lt 0 ]; }
+version_at_least() { semver_compare "$1" "$2" && [ "$SEMVER_CMP" -ge 0 ]; }
 
 # Termux (Android) exports TERMUX_VERSION and keeps $PREFIX in the app's data
 # dir (same test as install.sh). There is no systemd there: install.sh
@@ -457,12 +582,59 @@ stop_pty_hosts() {
   fi
 }
 
+# --- Version hooks -----------------------------------------------------------
+# The one place for release-specific update logic. The Bridge runs the staged
+# (target) bundle's copy of this script, so a release can carry a fix for the
+# Bridges it upgrades from. Hooks run before anything is stopped, cleaned up or
+# swapped, in both modes (PHASE is "update" or "stop-pty-hosts-only"). A hook
+# that must abort calls log_err and exits non-zero, which leaves the running
+# Bridge untouched. Match exact versions or globs on FROM_VERSION/TO_VERSION in
+# the case statements, and ranges with version_before/version_at_least (false
+# for a non-SemVer version, so a range hook never fires on one), e.g.
+#   if version_before "$FROM_VERSION" 0.7.0; then migrate_old_layout; fi
+# Legacy callers (Bridges that predate interface 2) send no versions and get no
+# hooks: a fix they need belongs in the version-independent flow.
+run_version_hooks() {
+  local phase="$1"
+  if [ -z "$FROM_VERSION" ]; then
+    log "Legacy caller (interface $INTERFACE, no --from-version): $phase runs the version-independent flow without version hooks"
+    return 0
+  fi
+  log "Version hooks ($phase): interface $INTERFACE, from ${FROM_VERSION} to ${TO_VERSION:-unknown}"
+  if [ -n "$TO_VERSION" ] && semver_compare "$FROM_VERSION" "$TO_VERSION"; then
+    case "$SEMVER_CMP" in
+      -1) log "  direction: upgrade" ;;
+      0) log "  direction: reinstall of the running version" ;;
+      1) log "  direction: downgrade" ;;
+    esac
+  else
+    log "  direction: unknown (a version is not SemVer); range hooks do not apply"
+  fi
+
+  case "$FROM_VERSION" in
+    0.5.*|v0.5.*)
+      # Logging only: the 0.5 line introduced this interface and needs no
+      # compatibility step.
+      log "  hook: from-version $FROM_VERSION (0.5 line): no compatibility steps required"
+      ;;
+  esac
+
+  # Hooks keyed on the version being installed go here.
+  case "${TO_VERSION:-}" in
+    *) ;;
+  esac
+}
+
 if "$STOP_PTY_HOSTS_ONLY"; then
+  run_version_hooks stop-pty-hosts-only
   stop_pty_hosts
   exit 0
 fi
 
 log "Starting supervisor execution"
+log "  INTERFACE:      $INTERFACE"
+log "  FROM_VERSION:   ${FROM_VERSION:-unset (legacy caller)}"
+log "  TO_VERSION:     ${TO_VERSION:-unset}"
 log "  DATA_DIR:       $DATA_DIR"
 log "  STAGE_DIR:      $STAGE_DIR"
 log "  BRIDGE_PORT:    $BRIDGE_PORT"
@@ -471,6 +643,8 @@ log "  HEALTH_METHOD:  $HEALTH_METHOD"
 log "  HEALTH_TIMEOUT: ${HEALTH_TIMEOUT}s"
 log "  BRIDGE_PID:     ${BRIDGE_PID:-unset}"
 log "  SESSION:        ${HEIMDALL_UPDATE_SUPERVISOR_DETACHED:+detached }pgid $(ps -o pgid= -p $$ 2>/dev/null | tr -d '[:space:]')"
+
+run_version_hooks update
 
 # Locate staged binaries
 STAGE_BIN=""

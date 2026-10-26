@@ -1247,6 +1247,53 @@ named `heimdall-bridge` is created and started automatically.
 
 ---
 
+### 2.11 Bridge self-update
+
+When the Hub asks a bridge to update, the bridge downloads the release bundle for its
+target, checks its SHA-256, extracts it into `DATA_DIR/updates/stage` and runs the
+**staged** bundle's `scripts/apply-bridge-update.sh` (the update supervisor). The
+supervisor stops the bridge and its PTY hosts, swaps `bin/` atomically, restarts the
+service and polls the bridge's health endpoint; if the bridge is not healthy in time it
+restores `bin.bak` and writes `logs/update_rollback.log`. It needs only bash, POSIX
+userland, `ps`, `tar`, `curl` and the service manager (`systemctl --user`, `launchctl`
+or Termux `sv`); no Python or Perl.
+
+#### Caller interface
+
+The supervisor is always the copy shipped with the version being installed, so it
+must work for every bridge that may call it. The caller says what it is:
+
+| Flag | Meaning |
+| --- | --- |
+| `--interface N` | Caller contract version. Absent means `1`, the original argv. Current callers send `2`. |
+| `--from-version VER` | Version of the running bridge. Required by interface 2. |
+| `--to-version VER` | Version being installed. Required by interface 2. |
+
+- **Newer interface.** An `--interface` above the newest one the script supports
+  (`2`), a non-numeric value, or interface 2 without both versions exits with code `2`
+  and a message on stderr, before anything is stopped, cleaned up or swapped.
+- **Legacy callers.** Bridges released before interface 2 call the supervisor without
+  `--from-version`. It logs `Legacy caller (interface 1, no --from-version)` and runs
+  the version-independent flow unchanged.
+- **Version hooks.** The section `Version hooks` in `apply-bridge-update.sh`
+  (`run_version_hooks`) is the one place for release-specific update logic: a `case` on
+  `FROM_VERSION` / `TO_VERSION` for exact versions and globs, and
+  `version_before` / `version_at_least` (SemVer 2.0 precedence, `semver_compare`) for
+  ranges. Hooks run before the bridge is stopped and log the upgrade direction; a hook
+  that must abort exits non-zero and leaves the running bridge untouched. Range hooks
+  never match a version that is not SemVer, and legacy callers get no hooks, so a fix
+  they need belongs in the version-independent flow.
+- **PTY cleanup mode.** `--stop-pty-hosts-only` (run by the bridge before it starts
+  the detached supervisor) accepts the same three flags and runs the same hooks first.
+
+```bash
+apply-bridge-update.sh --interface 2 --from-version 0.5.6 --to-version 0.5.7 \
+  --data-dir ~/.local/share/heimdall --stage-dir ~/.local/share/heimdall/updates/stage \
+  --bridge-port 49323 --bridge-pid 12345
+```
+
+`apply-bridge-update.sh --help` lists every flag.
+
 ## Quick-start checklist
 
 ### Hub (once)
@@ -1369,7 +1416,8 @@ reinstalled, which wipes its Keystore keys), unseal it again from
 
 ### Self-update
 
-A Termux bridge updates only to the `termux-arm64` bundle. It never falls back to
+The update flow and the supervisor's caller interface are described in
+[2.11 Bridge self-update](#211-bridge-self-update). A Termux bridge updates only to the `termux-arm64` bundle. It never falls back to
 `linux-arm64`, because a glibc `linux-arm64` bundle (every release up to v0.5.3) dies
 under Android's seccomp filter (`set_robust_list`, SIGSYS) and leaves a bridge that
 cannot restart.
