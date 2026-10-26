@@ -9,6 +9,7 @@ import plistlib
 import shlex
 import socket
 import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -34,23 +35,10 @@ class InstallerTests(unittest.TestCase):
                         MOCK_ROOT=str(self.root), MOCK_OS='Linux',
                         XDG_RUNTIME_DIR=str(self.root/'runtime'), DBUS_SESSION_BUS_ADDRESS='',
                         HEIMDALL_NON_INTERACTIVE='1')
-        # The managed workspace denies AF_INET sockets. Simulate bind outcomes in
-        # child processes only; no test can reach a host service or network.
-        (self.mock/'sitecustomize.py').write_text("""import os, socket
-if os.environ.get('MOCK_SOCKET'):
-    class BoundSocket:
-        held=set()
-        def __init__(self,*args): self.port=None
-        def bind(self,address):
-            port=address[1]
-            busy={int(p) for p in os.environ.get('BUSY_PORTS','').split(',') if p}
-            if port in busy or port in self.held: raise OSError('Address in use')
-            self.held.add(port); self.port=port
-        def close(self):
-            if self.port is not None: self.held.discard(self.port)
-    socket.socket=BoundSocket
-""")
-        self.env.update(PYTHONPATH=str(self.mock),MOCK_SOCKET='1')
+        # The installer must run without python3 or perl: both are stubs that
+        # record the call and fail. Python mocks below run sys.executable directly.
+        for tool in ('python3', 'python', 'perl'):
+            self.stub(tool, '#!/bin/sh\necho "$0 $*" >> "$MOCK_ROOT/forbidden"\nexit 127\n')
         self.stub('id', '#!/bin/sh\necho 1000\n')
         self.stub('uname', '#!/bin/sh\nif [ "$1" = -s ]; then echo "$MOCK_OS"; else echo "${MOCK_ARCH:-x86_64}"; fi\n')
         self.stub('socat', '#!/bin/sh\nexit 0\n')
@@ -79,7 +67,7 @@ if url.endswith('/api/v1/health'):
     sys.stdout.write('302'); sys.exit(0)
 out=pathlib.Path(a[a.index('--output')+1])
 if '/releases?' in url:
-    out.write_text(os.environ.get('MOCK_RELEASES') or '[{"tag_name":"vtest","prerelease":true,"assets":[{"name":"SHA256SUMS"},{"name":"heimdall-local-linux-amd64-vtest.tar.gz"},{"name":"heimdall-local-darwin-amd64-vtest.tar.gz"},{"name":"heimdall-local-linux-arm64-vtest.tar.gz"}]}]')
+    out.write_text(os.environ.get('MOCK_RELEASES') or '[{"tag_name":"vtest","prerelease":false,"assets":[{"name":"SHA256SUMS"},{"name":"heimdall-local-linux-amd64-vtest.tar.gz"},{"name":"heimdall-local-darwin-amd64-vtest.tar.gz"},{"name":"heimdall-local-linux-arm64-vtest.tar.gz"}]}]')
 elif url.endswith('/SHA256SUMS'):
     version=url.rsplit('/',2)[1]; digest=hashlib.sha256((r/'bundle').read_bytes()).hexdigest()
     targets=os.environ.get('MOCK_SUM_TARGETS','linux-amd64,darwin-amd64,linux-arm64,darwin-arm64').split(',')
@@ -110,7 +98,7 @@ if [ "$1" = enroll ]; then
   else launchctl kickstart -k gui/1000/works.earendil.heimdall-bridge; fi
 fi
 '''
-        ctl = b'''#!/usr/bin/env python3
+        ctl = b'#!' + sys.executable.encode() + b'''
 import json, os, pathlib, sys
 pathlib.Path(os.environ['MOCK_ROOT']+'/ctl.json').write_text(json.dumps({'args':sys.argv[1:],'endpoint':os.environ.get('HEIMDALL_BRIDGE_ENDPOINT')}))
 '''
@@ -124,9 +112,14 @@ pathlib.Path(os.environ['MOCK_ROOT']+'/ctl.json').write_text(json.dumps({'args':
             t.addfile(m, io.BytesIO(content))
 
     def tearDown(self):
+        forbidden=self.root/'forbidden'
+        calls=forbidden.read_text() if forbidden.exists() else ''
         self.tmp.cleanup()
+        self.assertEqual(calls,'','the installer ran python3/perl')
 
     def stub(self, name, text):
+        # Python mocks name this interpreter: python3 on PATH is a failing stub.
+        text=text.replace('#!/usr/bin/env python3\n','#!'+sys.executable+'\n',1)
         p=self.mock/name; p.write_text(text); p.chmod(0o755)
 
     def termux(self):
@@ -137,6 +130,8 @@ pathlib.Path(os.environ['MOCK_ROOT']+'/ctl.json').write_text(json.dumps({'args':
         self.env.update(TERMUX_VERSION='0.118.1', PREFIX=str(prefix), HEIMDALL_RUNSV_WAIT='0', MOCK_ARCH='aarch64')
         self.stub('termux-keystore','#!/bin/sh\nexit 0\n')
         self.stub('pgrep','#!/bin/sh\nexit 0\n')  # runsvdir is running
+        for tool in ('systemctl','launchctl','plutil'):  # Termux has no other supervisor
+            (self.mock/tool).unlink(missing_ok=True)
         sv='''#!/usr/bin/env python3
 import json, os, pathlib, sys
 r=pathlib.Path(os.environ['MOCK_ROOT']); me=pathlib.Path(sys.argv[0]).name
@@ -153,17 +148,18 @@ if me=='sv-enable':
         return prefix
 
     def run_install(self, *args, answers=None, success=True):
-        if answers is None:
-            command=['bash',str(INSTALLER),*args]
-        else:
+        # Run the real installer with port probing simulated: BUSY_PORTS lists the
+        # loopback ports that accept connections; no test touches a host socket.
+        lib=self.root/'installer-lib.sh'
+        lib.write_text(INSTALLER.read_text().replace('main "$@"\n',''))
+        script='source '+shlex.quote(str(lib))+'\nport_busy() { case ",${BUSY_PORTS:-}," in *",$1,"*) return 0 ;; esac; return 1; }\n'
+        if answers is not None:
             # Override only terminal input; exercise the real prompt decision branches.
-            lib=self.root/'installer-lib.sh'
-            lib.write_text(INSTALLER.read_text().replace('main "$@"\n',''))
             self.env['HEIMDALL_NON_INTERACTIVE']='0'
             self.env['PROMPT_ANSWERS']=json.dumps(answers)
             (self.root/'answers').write_text('\n'.join(answers)+'\n')
-            script='source '+shlex.quote(str(lib))+'\nexec 3< '+shlex.quote(str(self.root/'answers'))+'\nprompt() { printf "%s\\n" "$1"; IFS= read -r answer <&3; }\nmain "$@"'
-            command=['bash','-c',script,'installer',*args]
+            script+='exec 3< '+shlex.quote(str(self.root/'answers'))+'\nprompt() { printf "%s\\n" "$1"; IFS= read -r answer <&3; }\n'
+        command=['bash','-c',script+'main "$@"','installer',*args]
         r=subprocess.run(command,env=self.env,text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,timeout=20)
         if success: self.assertEqual(r.returncode,0,r.stdout)
         else: self.assertNotEqual(r.returncode,0,r.stdout)
@@ -182,7 +178,8 @@ if me=='sv-enable':
         for hub, name in [('https://hub.mundus.in','hub-mundus-in'),('http://localhost:8080','localhost-8080'),
                           ('http://localhost:8081','localhost-8081'),('http://127.0.0.1:8080','127-0-0-1-8080'),
                           ('https://192.168.1.4','192-168-1-4'),('http://[::1]:8080','--1-8080'),
-                          ('https://HUB.MUNDUS.IN:443/','hub-mundus-in')]:
+                          ('https://HUB.MUNDUS.IN:443/','hub-mundus-in'),('http://[0:0::0001]:8080','--1-8080'),
+                          ('http://[2001:DB8:0:0:1:0:0:1]','2001-db8--1-0-0-1'),('http://hub.example.:080','hub-example')]:
             with self.subTest(hub=hub):
                 out=self.run_install('--hub',hub,'--dry-run')
                 self.assertIn('Service: heimdall-bridge-'+name+' (',out)
@@ -203,8 +200,22 @@ if me=='sv-enable':
         self.assertNotIn('ExecStopPost="bash"',unit_text)
         self.assertIn('--stop-pty-hosts-only',unit_text)
 
+    def test_port_probe_detects_listener(self):
+        # The real port_busy (bash /dev/tcp), against an ephemeral listener of this test only.
+        try:
+            s=socket.socket(); s.bind(('127.0.0.1',0)); s.listen(1)
+        except OSError as e:
+            self.skipTest(f'no loopback sockets here: {e}')
+        port=s.getsockname()[1]
+        lib=self.root/'installer-lib.sh'; lib.write_text(INSTALLER.read_text().replace('main "$@"\n',''))
+        probe=['bash','-c','source "$1"; port_busy "$2"','probe',str(lib),str(port)]
+        self.assertEqual(subprocess.run(probe,env=self.env).returncode,0)
+        s.close()
+        self.assertNotEqual(subprocess.run(probe,env=self.env).returncode,0)
+
     def test_bad_origins(self):
-        for hub in ('https://hub/a','https://u:p@hub','http://hub:99999','https://hub?q=x','https://hub/#f','garbage'):
+        for hub in ('https://hub/a','https://u:p@hub','http://hub:99999','https://hub?q=x','https://hub/#f','garbage',
+                    'ftp://hub','http://[::1','http://[1::2::3]','http://a..b','http://-hub','http://hub_x'):
             self.run_install('--hub',hub,'--dry-run',success=False)
         self.assertFalse(self.log.exists())
 
@@ -263,7 +274,7 @@ if me=='sv-enable':
         self.assertEqual((self.root/'probe-hub').read_text().strip(),'http://localhost:8080')
         self.env['MOCK_PROBE_FAIL']='1'
         out=self.run_install('--hub','http://localhost:8080','--keep-enrollment',success=False)
-        self.assertIn('cannot reach http://localhost:8080 through its own TLS transport',out)
+        self.assertIn('cannot reach http://localhost:8080 through its own HTTPS client',out)
         self.assertEqual(unit.read_text(),before)           # service untouched
         self.assertFalse(any('stop' in c for c in self.commands()[len(self.commands())-1:]))
         del self.env['MOCK_PROBE_FAIL']

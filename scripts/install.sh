@@ -39,7 +39,7 @@ Re-enrolling offers the approver this machine's previous bridge id for reuse (sa
 bridge, same history); --new-bridge registers a new bridge instead (implies --re-enroll).
 --non-interactive preserves existing enrollment and prints a command for new enrollment.
 --uninstall removes only this Hub's service and binaries; credentials/data are kept.
-Requires bash, python3, curl and tar; HTTPS bridges also require socat (WebSocket
+Requires bash, curl, tar and sha256sum (or shasum); HTTPS bridges also require socat (WebSocket
 transport). The binaries carry their own HTTPS client (libcurl, linked statically;
 Linux builds are fully static), so no libcurl or OpenSSL is needed on this machine.
 The Hub is checked first (20 s budget, exact failure reason). Verified release
@@ -109,6 +109,471 @@ wait_for_hub() {
     fail "Hub $hub_url not reachable (gave up after $((ticks/2))s of ${HUB_CONNECT_TIMEOUT_SECONDS}s): $(tr -d '\n' < "$err")"
   fi
 }
+# The helpers below need only bash, POSIX userland, tar and sha256sum/shasum:
+# no python3 or perl, so the installer runs on stock macOS and Termux too.
+# Keep them bash 3.2 compatible (macOS /bin/bash): no associative arrays.
+
+# POSIX sh quoting; safe words stay bare, as Python's shlex.quote did.
+sh_quote() {
+  local safe='^[A-Za-z0-9_@%+=:,./-]+$' sq="'" esc="'\"'\"'"
+  if [[ $1 =~ $safe ]]; then printf '%s' "$1"
+  else printf "'%s'" "${1//$sq/$esc}"; fi
+}
+# Backslash-escape \ and " for a JSON/TOML/systemd double-quoted string.
+dq_escape() { printf '%s' "$1" | sed 's/[\\"]/\\&/g'; }
+# systemd quoting: "..." with \ " escaped and % doubled (specifiers).
+systemd_quote() { printf '"%s"' "$(dq_escape "$1" | sed 's/%/%%/g')"; }
+# An ExecStart= word: systemd_quote plus $ doubled (no variable expansion).
+systemd_exec_quote() { systemd_quote "$1" | sed 's/\$/$$/g'; }
+xml_escape() { printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
+# Absolute path of executable $1 in the PATH-style list $2.
+find_in_path() {
+  local rest="$2:" dir
+  while [ -n "$rest" ]; do
+    dir="${rest%%:*}"; rest="${rest#*:}"
+    case "$dir" in /*) [ -f "$dir/$1" ] && [ -x "$dir/$1" ] && { printf '%s\n' "$dir/$1"; return 0; } ;; esac
+  done
+  return 1
+}
+# One enrollment shim (systemctl or launchctl) mapping the legacy service name
+# that released ham-bridge binaries restart onto this Hub's service.
+write_enroll_shim() {
+  local path="$1" real="$2" name="$3" uid="$4" q_real
+  q_real="$(sh_quote "$real")"
+  {
+    printf '#!/bin/sh\n'
+    if [ "${path##*/}" = systemctl ]; then
+      printf 'if [ "$*" = "--user restart heimdall-bridge" ]; then\n  set -- --user restart %s\nfi\n' "$(sh_quote "$name")"
+    else
+      # kickstart needs a loaded job; enroll() boots it out, so bootstrap it again first.
+      local label
+      label="$(sh_quote "gui/$uid/$name")"
+      printf 'if [ "$*" = "kickstart -k gui/%s/works.earendil.heimdall-bridge" ]; then\n' "$uid"
+      printf '  %s print %s >/dev/null 2>&1 || %s bootstrap %s %s || exit 1\n' "$q_real" "$label" "$q_real" \
+        "$(sh_quote "gui/$uid")" "$(sh_quote "$HOME/Library/LaunchAgents/$name.plist")"
+      printf '  set -- kickstart -k %s\nfi\n' "$label"
+    fi
+    printf 'exec %s "$@"\n' "$q_real"
+  } > "$path"
+  chmod 700 "$path"
+}
+# Lower-case compressed IPv6 text (RFC 5952, as Python's ipaddress), or fail.
+ipv6_compress() {
+  local LC_ALL=C addr="$1" head tail part v4 n i best=-1 bestlen=1 run=0 out=''
+  local -a groups=() hp=() tp=()
+  case "$addr" in *:::*|*[!0-9a-f:.]*) return 1 ;; esac
+  # An IPv4 tail ("::ffff:192.0.2.1") becomes two hex groups.
+  if [[ $addr == *.* ]]; then
+    v4="${addr##*:}"
+    [[ $v4 =~ ^(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})$ ]] || return 1
+    for i in 1 2 3 4; do [ "${BASH_REMATCH[$i]}" -le 255 ] || return 1; done
+    addr="${addr%:*}:$(printf '%x:%x' $((BASH_REMATCH[1]*256+BASH_REMATCH[2])) $((BASH_REMATCH[3]*256+BASH_REMATCH[4])))"
+  fi
+  if [[ $addr == *::* ]]; then
+    head="${addr%%::*}"; tail="${addr#*::}"
+    [[ $tail != *::* ]] || return 1
+    [ -z "$head" ] || { local IFS=:; hp=($head); }
+    [ -z "$tail" ] || { local IFS=:; tp=($tail); }
+    n=$((8 - ${#hp[@]} - ${#tp[@]}))
+    [ "$n" -ge 1 ] || return 1
+    groups=(${hp[@]+"${hp[@]}"})
+    for ((i = 0; i < n; i++)); do groups[${#groups[@]}]=0; done
+    groups+=(${tp[@]+"${tp[@]}"})
+  else
+    case "$addr" in :*|*:) return 1 ;; esac
+    local IFS=:; groups=($addr)
+  fi
+  [ "${#groups[@]}" -eq 8 ] || return 1
+  for ((i = 0; i < 8; i++)); do
+    part="${groups[$i]}"
+    [[ $part =~ ^[0-9a-f]{1,4}$ ]] || return 1
+    groups[$i]="$(printf '%x' "0x$part")"
+  done
+  # IPv4-mapped addresses keep the dotted tail (Python >= 3.13 spelling).
+  if [ "${groups[0]}${groups[1]}${groups[2]}${groups[3]}${groups[4]}:${groups[5]}" = 00000:ffff ]; then
+    printf '::ffff:%d.%d.%d.%d\n' $((0x${groups[6]} >> 8)) $((0x${groups[6]} & 255)) $((0x${groups[7]} >> 8)) $((0x${groups[7]} & 255))
+    return 0
+  fi
+  # Replace the longest run (>1, leftmost on ties) of zero groups with "::".
+  for ((i = 0; i <= 8; i++)); do
+    if [ "$i" -lt 8 ] && [ "${groups[$i]}" = 0 ]; then run=$((run+1)); continue; fi
+    if [ "$run" -gt "$bestlen" ]; then best=$((i-run)); bestlen=$run; fi
+    run=0
+  done
+  for ((i = 0; i < 8; i++)); do
+    if [ "$i" -eq "$best" ]; then out="$out::"; i=$((i+bestlen-1)); continue; fi
+    case "$out" in ''|*:) out="$out${groups[$i]}" ;; *) out="$out:${groups[$i]}" ;; esac
+  done
+  printf '%s\n' "$out"
+}
+# Canonical Hub origin (line 1) and service name (line 2). Canonical origins
+# include explicit non-default ports; IPv4, IPv6 and DNS names all map to safe
+# filenames. Rejects rather than collapses ambiguous IDs.
+canonical_hub() {
+  local LC_ALL=C url="$1" scheme rest netloc after host port='' name
+  local bad='Invalid Hub URL: use an HTTP(S) origin with no path, credentials, query, or fragment.'
+  url="${url#"${url%%[![:space:]]*}"}"; url="${url%"${url##*[![:space:]]}"}"
+  case "$url" in *[![:graph:]]*) printf '%s\n' "$bad" >&2; return 1 ;; esac
+  [[ $url =~ ^([A-Za-z][A-Za-z0-9+.-]*)://(.*)$ ]] || { printf '%s\n' "$bad" >&2; return 1; }
+  scheme="$(printf '%s' "${BASH_REMATCH[1]}" | tr 'A-Z' 'a-z')"; rest="${BASH_REMATCH[2]}"
+  netloc="${rest%%[/?#]*}"; after="${rest#"$netloc"}"
+  # Only an empty path or "/", with no query or fragment (an empty "?" or "#" is none).
+  case "$after" in ''|/|'?'|'#'|'?#'|'/?'|'/#'|'/?#') ;; *) printf '%s\n' "$bad" >&2; return 1 ;; esac
+  case "$scheme" in http|https) ;; *) printf '%s\n' "$bad" >&2; return 1 ;; esac
+  case "$netloc" in *@*) printf '%s\n' "$bad" >&2; return 1 ;; esac
+  if [[ $netloc == \[* ]]; then
+    [[ $netloc =~ ^\[([^]]*)\](:([0-9]*))?$ ]] || { printf '%s\n' "$bad" >&2; return 1; }
+    host="${BASH_REMATCH[1]}"; port="${BASH_REMATCH[3]}"
+  else
+    host="${netloc%%:*}"
+    [ "$host" = "$netloc" ] || port="${netloc#*:}"
+  fi
+  host="$(printf '%s' "$host" | tr 'A-Z' 'a-z')"
+  [[ $port =~ ^[0-9]*$ ]] && [ -n "$host" ] || { printf '%s\n' "$bad" >&2; return 1; }
+  if [ -n "$port" ]; then
+    port="${port#"${port%%[!0]*}"}"
+    [ "${#port}" -le 5 ] && [ "${port:-0}" -ge 1 ] && [ "$port" -le 65535 ] || { printf '%s\n' "$bad" >&2; return 1; }
+    { [ "$scheme" = http ] && [ "$port" = 80 ]; } || { [ "$scheme" = https ] && [ "$port" = 443 ]; } && port=''
+  fi
+  if [[ $host == *:* ]]; then
+    host="$(ipv6_compress "$host")" || { printf '%s\n' "$bad" >&2; return 1; }
+  else
+    # DNS name or IPv4 literal: labels of 1-63 characters (a trailing dot is
+    # dropped), only [a-z0-9.-], no leading/trailing punctuation.
+    # Internationalized names must be given in their ASCII (xn--) form.
+    local label labels="$host."
+    while [ "${labels#*.}" != "" ]; do
+      label="${labels%%.*}"; labels="${labels#*.}"
+      [ "${#label}" -ge 1 ] && [ "${#label}" -le 63 ] || { printf '%s\n' "$bad" >&2; return 1; }
+    done
+    [ "${#labels}" -le 64 ] || { printf '%s\n' "$bad" >&2; return 1; }
+    host="${host%"${host##*[!.]}"}"
+    [[ $host =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ ]] || { printf '%s\n' "$bad" >&2; return 1; }
+  fi
+  name="${host//[!a-z0-9-]/-}${port:+-$port}"
+  [ "${#name}" -le 160 ] || { printf '%s\n' "$bad" >&2; return 1; }
+  case "$host" in *:*) host="[$host]" ;; esac
+  printf '%s://%s%s\nheimdall-bridge-%s\n' "$scheme" "$host" "${port:+:$port}" "$name"
+}
+# The --hub value of a legacy (pre per-Hub) service definition, if any.
+legacy_service_hub() {
+  case "$1" in
+    *.plist)
+      # The string after "--hub" among the <array> strings (ProgramArguments).
+      LC_ALL=C awk 'BEGIN { RS = "<" }
+        /^array[[:space:]>]/ { depth++; next }
+        /^\/array[[:space:]>]/ { if (depth) depth--; next }
+        depth && (/^string>/ || /^string\/>/) {
+          v = /^string>/ ? substr($0, 8) : ""
+          gsub(/&lt;/, "<", v); gsub(/&gt;/, ">", v); gsub(/&quot;/, "\"", v); gsub(/&apos;/, "\047", v); gsub(/&amp;/, "\\&", v)
+          if (want) { print v; exit }
+          want = (v == "--hub")
+        }' "$1" ;;
+    *)
+      grep -oE -- "--hub[[:space:]]+[\"']?[^[:space:]\"'\\\\]+" "$1" | head -n 1 | sed -E "s/^--hub[[:space:]]+[\"']?//" ;;
+  esac
+}
+# Whether the legacy service file $1 serves exactly Hub $2.
+legacy_service_matches() {
+  local value
+  value="$(legacy_service_hub "$1")" || return 1
+  while [ "${value%/}" != "$value" ]; do value="${value%/}"; done
+  [ -n "$value" ] && [ "$value" = "$2" ]
+}
+# JSON tokens, one per line (strings keep their quotes and escapes).
+json_tokens() {
+  LC_ALL=C grep -oE '"([^"\\]|\\.)*"|[][{}:,]|true|false|null|-?[0-9][0-9.eE+-]*' "$1"
+}
+# Newest promoted (non-draft, non-prerelease) release in GitHub's release list
+# $1 carrying SHA256SUMS and the bundle of the first target in $2.. that any
+# listed release carries. Exit 2: not a release list; 1: no such release.
+select_release() {
+  local file="$1"; shift
+  { json_tokens "$file" || true; } | LC_ALL=C awk -v targets="$*" '
+    # The text of a JSON string token; \uXXXX escapes are kept as they are.
+    function unq(s,  out, c) {
+      s = substr(s, 2, length(s) - 2); out = ""
+      while (match(s, /\\./)) {
+        c = substr(s, RSTART + 1, 1)
+        out = out substr(s, 1, RSTART - 1) (c == "n" ? "\n" : c == "t" ? "\t" : c == "r" ? "\r" : c == "u" ? "\\u" : c)
+        s = substr(s, RSTART + 2)
+      }
+      return out s
+    }
+    function truthy(t) { return !(t == "false" || t == "null" || t == "0" || t == "\"\"") }
+    function value(t,  i) {
+      if (d < 2 || typ[1] != "a" || typ[2] != "o") return
+      i = idx[1]
+      if (d == 2) {
+        if (key[2] == "tag_name" && t ~ /^"/) tag[i] = unq(t)
+        else if (key[2] == "draft") draft[i] = truthy(t)
+        else if (key[2] == "prerelease") pre[i] = truthy(t)
+      } else if (d == 4 && key[2] == "assets" && typ[3] == "a" && typ[4] == "o" && key[4] == "name" && t ~ /^"/) {
+        has[i, unq(t)] = 1
+      }
+    }
+    NR == 1 && $0 != "[" { exit 2 }
+    { t = $0; seen = 1 }
+    t == "{" || t == "[" {
+      if (d == 1 && typ[1] == "a") n = idx[1] + 1
+      d++; typ[d] = (t == "{") ? "o" : "a"; idx[d] = 0; ek[d] = (t == "{"); key[d] = ""; next
+    }
+    t == "}" || t == "]" { d--; next }
+    t == ":" { ek[d] = 0; next }
+    t == "," { if (typ[d] == "a") idx[d]++; else ek[d] = 1; next }
+    typ[d] == "o" && ek[d] { key[d] = unq(t); next }
+    { value(t) }
+    END {
+      if (!seen) exit 2
+      split(targets, list, " ")
+      for (j = 1; (j in list); j++)
+        for (i = 0; i < n; i++)
+          if (!draft[i] && !pre[i] && ((i, "SHA256SUMS") in has) && ((i, "heimdall-local-" list[j] "-" tag[i] ".tar.gz") in has)) {
+            print tag[i]; exit 0
+          }
+      exit 1
+    }'
+}
+sha256_of() {
+  local out
+  if command -v sha256sum >/dev/null; then out="$(sha256sum < "$1")" || return 1
+  else out="$(shasum -a 256 < "$1")" || return 1; fi
+  printf '%s\n' "${out%% *}"
+}
+# Whether file $2 matches the single SHA256SUMS ($1) entry named $3.
+sha256_matches() {
+  local expected actual
+  expected="$(awk -v n="$3" '{ sub(/\r$/, "") } NF == 2 { f = $2; sub(/^\*+/, "", f); if (f == n) { c++; h = $1 } }
+    END { if (c == 1) print h; else exit 1 }' "$1")" || return 1
+  actual="$(sha256_of "$2")" || return 1
+  [ -n "$actual" ] && [ "$actual" = "$expected" ]
+}
+# posixpath.normpath for a relative path.
+normpath() {
+  local rest="$1/" part out=''
+  while [ -n "$rest" ]; do
+    part="${rest%%/*}"; rest="${rest#*/}"
+    case "$part" in
+      ''|.) ;;
+      ..) case "$out" in ''|..|*/..) out="${out:+$out/}.." ;; */*) out="${out%/*}" ;; *) out='' ;; esac ;;
+      *) out="${out:+$out/}$part" ;;
+    esac
+  done
+  printf '%s\n' "${out:-.}"
+}
+# -rwxr-xr-x -> 755 (setuid/setgid/sticky dropped).
+mode_octal() {
+  local i bit=256 mode=0
+  for i in 1 2 3 4 5 6 7 8 9; do
+    case "${1:$i:1}" in r|w|x|s|t) mode=$((mode+bit)) ;; esac
+    bit=$((bit/2))
+  done
+  printf '%o\n' "$mode"
+}
+# Exactly one regular member of extract_bundle's listing (raw, kind, n) named $1
+# (a leading ./ ignored); prints its raw name.
+bundle_member() {
+  local i found=''
+  for ((i = 0; i < n; i++)); do
+    [ "${raw[$i]#./}" = "$1" ] || continue
+    [ -z "$found" ] && [ "${kind[$i]}" = - ] || return 1
+    found="${raw[$i]}"
+  done
+  [ -n "$found" ] && printf '%s\n' "$found"
+}
+# Verify bundle $2 in $1 against $1/SHA256SUMS, then extract only the required
+# regular binaries, the update supervisor and the provider extension tree into
+# $1. Every member is checked from the archive listing before anything is
+# extracted: no links or unsafe paths outside the extension tree's own links.
+extract_bundle() {
+  local root="$1" archive="$1/$2" prefix=share/heimdall/extensions
+  sha256_matches "$root/SHA256SUMS" "$archive" "$2" || fail 'SHA-256 verification failed; nothing installed.'
+  local -a raw=() kind=() link=() mode=() select=() bins=()
+  local line i n name binary target seen=$'\n' parent assets=0 helper='' supervisor=''
+  LC_ALL=C tar -tzf "$archive" > "$root/.members" && LC_ALL=C tar -tvzf "$archive" > "$root/.members-long" \
+    || fail 'Unable to list the release bundle; nothing installed.'
+  while IFS= read -r line; do raw[${#raw[@]}]="$line"; done < "$root/.members"
+  while IFS= read -r line; do
+    i=${#kind[@]}
+    # GNU tar marks hard links "h"; bsdtar lists them as "-" ... "link to".
+    case "$line" in -*" link to "*) kind[$i]=h ;; *) kind[$i]="${line:0:1}" ;; esac
+    link[$i]=''
+    [ "${kind[$i]}" != l ] || link[$i]="${line#*" ${raw[$i]} -> "}"
+    mode[$i]="$(mode_octal "$line")"
+  done < "$root/.members-long"
+  rm -f "$root/.members" "$root/.members-long"
+  n=${#raw[@]}
+  [ "$n" -eq "${#kind[@]}" ] || fail 'Unreadable release bundle listing; nothing installed.'
+  for binary in heimdall ham-bridge ham-pty-host ham-ctl; do
+    bins[${#bins[@]}]="$(bundle_member "bin/$binary")" || fail "Missing/unsafe binary: $binary"
+  done
+  select=("${bins[@]}")
+  for ((i = 0; i < n; i++)); do
+    [ "${raw[$i]#./}" = scripts/apply-bridge-update.sh ] || continue
+    supervisor="$(bundle_member scripts/apply-bridge-update.sh)" || fail 'Unsafe update supervisor'
+    select[${#select[@]}]="$supervisor"; break
+  done
+  # The extension tree: check every path and link before writing anything.
+  for ((i = 0; i < n; i++)); do
+    name="${raw[$i]#./}"
+    while [ "${name%/}" != "$name" ]; do name="${name%/}"; done
+    [ "$name" = "$prefix" ] || [ "${name#"$prefix"/}" != "$name" ] || continue
+    case "/$name/" in */../*|*//*|*/./*) fail "Unsafe/duplicate extension path: $name" ;; esac
+    case "$name" in *[!A-Za-z0-9._/@+=,~-]*) fail "Unsafe/duplicate extension path: $name" ;; esac
+    case "$seen" in *$'\n'?"$name"$'\n'*) fail "Unsafe/duplicate extension path: $name" ;; esac
+    case "${kind[$i]}" in d|-|l) ;; *) fail "Unsafe extension member: $name" ;; esac
+    if [ "${kind[$i]}" = l ]; then
+      target="$(normpath "${name%/*}/${link[$i]}")"
+      case "${link[$i]}" in /*) fail "Unsafe extension symlink: $name" ;; esac
+      [ "${target#"$prefix"/}" != "$target" ] || fail "Unsafe extension symlink: $name"
+    fi
+    seen="$seen${kind[$i]}$name"$'\n'
+    select[${#select[@]}]="${raw[$i]}"; assets=$((assets+1))
+  done
+  while IFS= read -r line; do
+    name="${line#?}"; parent="$name"
+    while [ "${parent%/*}" != "$parent" ]; do
+      parent="${parent%/*}"
+      case "$seen" in *$'\n'[!d]"$parent"$'\n'*) fail "Non-directory extension parent: $parent" ;; esac
+    done
+  done <<< "${seen#$'\n'}"
+  if [ "$assets" -gt 0 ]; then
+    helper="$(bundle_member scripts/refresh-provider-extensions.sh)" || fail 'Missing/unsafe extension staging helper'
+    select[${#select[@]}]="$helper"
+  fi
+  # Only checked members are extracted, into a private staging directory.
+  local stage="$root/.bundle"
+  mkdir "$stage"
+  LC_ALL=C tar --no-recursion -xzf "$archive" -C "$stage" "${select[@]}" || fail 'Unable to extract the release bundle; nothing installed.'
+  i=0
+  for binary in heimdall ham-bridge ham-pty-host ham-ctl; do
+    mv -f "$stage/${bins[$i]}" "$root/$binary"; i=$((i+1))
+  done
+  [ -z "$supervisor" ] || mv -f "$stage/$supervisor" "$root/apply-bridge-update.sh"
+  if [ "$assets" -gt 0 ]; then
+    mv -f "$stage/$helper" "$root/refresh-provider-extensions.sh"
+    # Regular files keep exactly their archive permission bits.
+    for ((i = 0; i < n; i++)); do
+      name="${raw[$i]#./}"
+      [ "${kind[$i]}" = - ] && [ "${name#"$prefix"/}" != "$name" ] && chmod "${mode[$i]}" "$stage/$name"
+    done
+    mkdir -p "$root/share/heimdall"
+    mv "$stage/$prefix" "$root/$prefix"
+  fi
+  rm -rf "$stage"
+}
+# True when something accepts TCP connections on 127.0.0.1:$1.
+port_busy() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
+# The integers of a flat JSON integer list such as [49323, 49324], or fail.
+json_int_list() {
+  local text
+  text="$(tr -d ' \t\r\n' < "$1")" || return 1
+  [[ $text =~ ^\[([0-9]+(,[0-9]+)*)?\]$ ]] || return 1
+  text="${text#[}"; printf '%s\n' "${text%]}" | tr ',' ' '
+}
+# Two free loopback ports for this Hub's bridge and agent endpoint: keep this
+# installation's previous pair when still free, never take another Hub's.
+# Prints "<bridge> <endpoint>" and records them in $2/ports.json.
+allocate_ports() {
+  local root="$1" own="$2" file nums reserved=' ' preferred='49323 49324' result=' ' start port
+  for file in "$root"/*/ports.json; do
+    [ -f "$file" ] || continue
+    nums="$(json_int_list "$file")" || continue
+    if [ "${file%/ports.json}" = "$own" ]; then
+      set -- $nums; [ "$#" -ne 2 ] || preferred="$nums"
+    else reserved="$reserved$nums "; fi
+  done
+  for start in $preferred; do
+    port=$((10#$start < 1024 ? 1024 : 10#$start))
+    while [ "$port" -le 65535 ]; do
+      case "$reserved$result" in *" $port "*) ;; *) port_busy "$port" || break ;; esac
+      port=$((port+1))
+    done
+    [ "$port" -le 65535 ] || fail 'No free bridge ports available.'
+    result="$result$port "
+  done
+  set -- $result
+  printf '[%s, %s]\n' "$1" "$2" > "$own/ports.json"
+  printf '%s %s\n' "$1" "$2"
+}
+# Write config.toml (when missing), the per-Hub ham-ctl wrapper and the
+# service definition: systemd unit, launchd plist or runit run file.
+render_service() {
+  local svc="$1" file="$2" name="$3" hub="$4" bin="$5" state="$6" data="$7" port="$8" endpoint="$9"
+  local path="${10}" prefix="${11}" termux_version="${12}"
+  local -a args=("$bin/ham-bridge" --hub "$hub" --config "$state/config.toml" --bridge-token-file "$state/bridge-token"
+    --data-dir "$data" --bind-host 127.0.0.1 --port "$port" --local-endpoint-port "$endpoint" --local-run-dir "$data/run")
+  local config="$state/config.toml" wrapper="$bin/ham-ctl-$name" service_env a k
+  if [ ! -e "$config" ]; then
+    printf '[daemon]\ndaemon_url = "%s"\ndata_dir = "%s"\n\n[wrapper]\ndaemon_url = "%s"\n' \
+      "$(dq_escape "$hub")" "$(dq_escape "$data")" "$(dq_escape "$hub")" > "$config"
+  fi
+  chmod 600 "$config"
+  case "$svc" in runit) service_env=ham-bridge ;; launchd) service_env="$name" ;; *) service_env="$name.service" ;; esac
+  # Do not override the endpoint injected into agent run directories.
+  printf '#!/bin/sh\n: "${HEIMDALL_BRIDGE_ENDPOINT:=tcp:127.0.0.1:%s}"\nexport HEIMDALL_BRIDGE_ENDPOINT\nexec %s --config %s "$@"\n' \
+    "$endpoint" "$(sh_quote "$bin/ham-ctl")" "$(sh_quote "$config")" > "$wrapper"
+  chmod 755 "$wrapper"
+  # The service environment, in this order (keys sorted for the plist).
+  local -a env=("PATH=$bin:$path" "HEIMDALL_HAM_PTY_HOST_BIN=$bin/ham-pty-host" HEIMDALL_BRIDGE_PTY_HOST=true
+    "HEIMDALL_HAM_CTL_BIN=$wrapper" "HEIMDALL_BRIDGE_ENDPOINT=tcp:127.0.0.1:$endpoint" "HEIMDALL_BRIDGE_SERVICE_NAME=$service_env")
+  case "$svc" in
+    runit)
+      # termux-services run file: exec the bridge under runsv with the same
+      # environment the systemd unit would carry; stderr joins stdout for svlogd.
+      # runsvdir usually inherits the login shell's TERMUX_VERSION/PREFIX, but the
+      # bridge selects its Android keystore backend and the update script its runit
+      # path from exactly those two, so export them explicitly: an environment
+      # without them would silently pick the Linux keyring (seccomp-killed) path.
+      {
+        printf '#!%s/bin/sh\nexec 2>&1\n' "$prefix"
+        printf 'export PREFIX=%s\n' "$(sh_quote "$prefix")"
+        printf 'export TERMUX_VERSION=%s\n' "$(sh_quote "${termux_version:-installed}")"
+        # Services started by runsvdir may lack the login shell's TMPDIR; without it
+        # the bridge and PTY host fall back to /tmp, which Android does not have.
+        printf 'export TMPDIR=%s\n' "$(sh_quote "$prefix/tmp")"
+        for a in "${env[@]}"; do printf 'export %s=%s\n' "${a%%=*}" "$(sh_quote "${a#*=}")"; done
+        printf 'exec'
+        for a in "${args[@]}"; do printf ' %s' "$(sh_quote "$a")"; done
+        printf '\n'
+      } > "$file"
+      chmod 755 "$file" ;;
+    launchd)
+      {
+        printf '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+        printf '<plist version="1.0">\n<dict>\n\t<key>AbandonProcessGroup</key>\n\t<true/>\n\t<key>EnvironmentVariables</key>\n\t<dict>\n'
+        for a in "${env[@]}"; do printf '%s\n' "$a"; done | LC_ALL=C sort -t = -k 1,1 | while IFS= read -r a; do
+          printf '\t\t<key>%s</key>\n\t\t<string>%s</string>\n' "${a%%=*}" "$(xml_escape "${a#*=}")"
+        done
+        printf '\t</dict>\n\t<key>KeepAlive</key>\n\t<dict>\n\t\t<key>SuccessfulExit</key>\n\t\t<false/>\n\t</dict>\n'
+        printf '\t<key>Label</key>\n\t<string>%s</string>\n\t<key>ProgramArguments</key>\n\t<array>\n' "$(xml_escape "$name")"
+        for a in "${args[@]}"; do printf '\t\t<string>%s</string>\n' "$(xml_escape "$a")"; done
+        printf '\t</array>\n\t<key>RunAtLoad</key>\n\t<true/>\n'
+        printf '\t<key>StandardErrorPath</key>\n\t<string>%s</string>\n' "$(xml_escape "$data/logs/bridge.err.log")"
+        printf '\t<key>StandardOutPath</key>\n\t<string>%s</string>\n' "$(xml_escape "$data/logs/bridge.out.log")"
+        printf '\t<key>ThrottleInterval</key>\n\t<integer>5</integer>\n</dict>\n</plist>\n'
+      } > "$file" ;;
+    *)
+      local supervisor="$data/updates/apply-bridge-update.sh" bash_path
+      {
+        printf '[Unit]\nDescription=Heimdall Bridge %s\nAfter=network-online.target\n\n[Service]\nType=simple\nExecStart=' "$hub"
+        k=''
+        for a in "${args[@]}"; do printf '%s%s' "$k" "$(systemd_exec_quote "$a")"; k=' '; done
+        printf '\n'
+        for a in "${env[@]}"; do printf 'Environment=%s\n' "$(systemd_quote "$a")"; done
+        if [ -f "$supervisor" ]; then
+          bash_path="$(find_in_path bash "$path")" || fail 'bash was not found while rendering the systemd unit'
+          printf 'ExecStopPost='
+          k=''
+          for a in "$bash_path" "$supervisor" --data-dir "$data" --stop-pty-hosts-only; do
+            printf '%s%s' "$k" "$(systemd_exec_quote "$a")"; k=' '
+          done
+          printf '\n'
+        fi
+        printf 'Restart=on-failure\nRestartSec=5\nKillMode=process\n\n[Install]\nWantedBy=default.target\n'
+      } > "$file" ;;
+  esac
+}
 # Released ham-bridge binaries restart the legacy service after enrollment.
 # Scope a compatibility shim to this enrollment invocation; never affect the host PATH.
 # `ham-bridge enroll` refuses while a bridge runs on the same config, so a running
@@ -122,21 +587,7 @@ enroll() {
   for tool in systemctl launchctl; do
     real="$(command -v "$tool" || true)"
     [ -n "$real" ] || continue
-    python3 - "$compat/$tool" "$real" "$service_name" "$uid" <<'PY'
-import pathlib, shlex, sys
-path, real, name, uid = sys.argv[1:]
-if pathlib.Path(path).name == 'systemctl':
-    body = 'if [ "$*" = "--user restart heimdall-bridge" ]; then\n  set -- --user restart '+shlex.quote(name)+ '\nfi\n'
-else:
-    # kickstart needs a loaded job; enroll() boots it out, so bootstrap it again first.
-    label = shlex.quote('gui/'+uid+'/'+name)
-    plist = shlex.quote(str(pathlib.Path.home()/'Library/LaunchAgents'/(name+'.plist')))
-    body = ('if [ "$*" = "kickstart -k gui/'+uid+'/works.earendil.heimdall-bridge" ]; then\n'
-            '  '+shlex.quote(real)+' print '+label+' >/dev/null 2>&1 || '+shlex.quote(real)+' bootstrap '+shlex.quote('gui/'+uid)+' '+plist+' || exit 1\n'
-            '  set -- kickstart -k '+label+'\nfi\n')
-pathlib.Path(path).write_text('#!/bin/sh\n'+body+'exec '+shlex.quote(real)+' "$@"\n')
-pathlib.Path(path).chmod(0o700)
-PY
+    write_enroll_shim "$compat/$tool" "$real" "$service_name" "$uid"
   done
   # A credential from before owner headers makes `ham-bridge enroll` refuse
   # ("no owner record"). Re-enrolling replaces it anyway; keep a backup.
@@ -219,40 +670,13 @@ main() {
   [ "${DEBIAN_FRONTEND:-}" != noninteractive ] || noninteractive=true
   printf '\n╭──────────────────────────────────────────╮\n│         HEIMDALL · BRIDGE INSTALLER       │\n│        Your agents, connected locally     │\n╰──────────────────────────────────────────╯\n'
   step '1 / 6 · Hub and platform'
-  command -v python3 >/dev/null || fail 'Install python3 first.'
   if [ -z "$hub_url" ]; then
     "$noninteractive" && fail '--hub is required in non-interactive mode.'
     prompt 'Hub URL: ' || fail 'No terminal available. Pass --hub URL.'
     hub_url="$answer"
   fi
-  # Canonical origins include explicit non-default ports. IPv4, IPv6, and DNS
-  # names all map to safe filenames. Reject rather than collapse ambiguous IDs.
   local identity
-  identity="$(python3 - "$hub_url" <<'PY'
-import ipaddress, re, sys
-from urllib.parse import urlsplit
-try:
-    u = urlsplit(sys.argv[1].strip())
-    assert u.scheme in ('http','https') and u.hostname and not u.username and not u.password
-    assert u.path in ('','/') and not u.query and not u.fragment
-    host = u.hostname.lower()
-    try: host = ipaddress.ip_address(host).compressed
-    except ValueError:
-        host = host.encode('idna').decode('ascii').rstrip('.')
-        assert re.fullmatch(r'[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?', host)
-    port = u.port
-    assert port is None or 1 <= port <= 65535
-    if port == {'http':80,'https':443}[u.scheme]: port = None
-    authority = ('['+host+']' if ':' in host else host) + (':'+str(port) if port else '')
-    name = re.sub(r'[^a-z0-9-]', '-', host)
-    if port: name += '-'+str(port)
-    assert len(name) <= 160
-    print(u.scheme+'://'+authority)
-    print('heimdall-bridge-'+name)
-except (AssertionError, ValueError, UnicodeError):
-    sys.exit('Invalid Hub URL: use an HTTP(S) origin with no path, credentials, query, or fragment.')
-PY
-)" || fail 'Unable to validate Hub URL.'
+  identity="$(canonical_hub "$hub_url")" || fail 'Unable to validate Hub URL.'
   hub_url="${identity%%$'\n'*}"; local service_name="${identity#*$'\n'}"
   local os arch uid
   case "$(uname -s)" in Linux) os=linux ;; Darwin) os=darwin ;; *) fail 'Supported platforms: Linux and macOS.' ;; esac
@@ -313,21 +737,7 @@ PY
   fi
   local migrate=false existing=false
   # Only retire a legacy service whose explicit Hub matches this installation.
-  if [ -n "$legacy_file" ] && [ -f "$legacy_file" ] && python3 - "$legacy_file" "$hub_url" <<'PY'
-import pathlib, re, sys, xml.etree.ElementTree as ET
-p, hub = sys.argv[1:]
-text = pathlib.Path(p).read_text()
-if p.endswith('.plist'):
-    try:
-        args = [n.text for n in ET.fromstring(text).findall('.//array/string')]
-        value = args[args.index('--hub')+1]
-    except (ET.ParseError, ValueError, IndexError): sys.exit(1)
-else:
-    m = re.search(r'--hub\s+["\x27]?([^\s"\x27\\]+)', text)
-    value = m.group(1) if m else ''
-sys.exit(0 if value.rstrip('/') == hub else 1)
-PY
-  then migrate=true; fi
+  if [ -n "$legacy_file" ] && [ -f "$legacy_file" ] && legacy_service_matches "$legacy_file" "$hub_url"; then migrate=true; fi
   [ ! -s "$token_file" ] || existing=true
   if "$migrate" && [ -s "$HOME/.config/heimdall/bridge-token" ]; then existing=true; fi
   if "$existing" && [ -s "$token_file" ] && identity_missing "$state_dir/config.toml"; then
@@ -355,6 +765,8 @@ PY
     return
   fi
   command -v curl >/dev/null || fail 'curl is required.'
+  command -v tar >/dev/null || fail 'tar is required.'
+  command -v sha256sum >/dev/null || command -v shasum >/dev/null || fail 'sha256sum (coreutils) or shasum is required.'
   case "$hub_url" in https:*) command -v socat >/dev/null || fail 'HTTPS transport requires socat (install via your package manager).' ;; esac
   case "$svc" in
     systemd) systemctl --user show-environment >/dev/null || fail 'No systemd user session. Run in your login session.' ;;
@@ -375,20 +787,10 @@ PY
     download 'https://api.github.com/repos/tanmayv/heimdall-agent-manager/releases?per_page=30' "$work_dir/releases.json"
     # Newest release carrying the preferred target's bundle; only when no
     # listed release has one, the newest carrying the fallback target's.
-    version="$(python3 - "$work_dir/releases.json" "$target" "$fallback_target" <<'PY'
-import json, sys
-releases = json.load(open(sys.argv[1]))
-if not isinstance(releases, list): sys.exit('GitHub did not return a release list; pass --version TAG.')
-for target in filter(None, sys.argv[2:]):
-    for release in releases:
-        tag = release.get('tag_name', '')
-        assets = {a.get('name') for a in release.get('assets', [])}
-        if not release.get('draft') and not release.get('prerelease') and {'SHA256SUMS', 'heimdall-local-'+target+'-'+tag+'.tar.gz'} <= assets:
-            print(tag)
-            sys.exit()
-sys.exit('No promoted release bundle for this platform. Pass --version TAG.')
-PY
-)"
+    local picked=0
+    version="$(select_release "$work_dir/releases.json" "$target" "$fallback_target")" || picked=$?
+    [ "$picked" != 2 ] || fail 'GitHub did not return a release list; pass --version TAG.'
+    [ "$picked" = 0 ] || fail 'No promoted release bundle for this platform. Pass --version TAG.'
   fi
   [[ "$version" =~ ^[a-zA-Z0-9._-]+$ ]] || fail 'Invalid release tag.'
   local archive="heimdall-local-$target-$version.tar.gz" base="https://github.com/tanmayv/heimdall-agent-manager/releases/download/$version"
@@ -405,77 +807,14 @@ PY
   # bar on a terminal). The cache only ever holds GitHub-release bundles.
   local cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/heimdall/releases"
   mkdir -p "$cache_dir"; chmod 700 "$cache_dir"
-  if [ -f "$cache_dir/$archive" ] && python3 - "$work_dir/SHA256SUMS" "$cache_dir/$archive" "$archive" <<'PY'
-import hashlib, pathlib, sys
-sums, cached, name = sys.argv[1:]
-entries = [line.split() for line in pathlib.Path(sums).read_text().splitlines()]
-expected = [a[0] for a in entries if len(a)==2 and a[1].lstrip('*')==name]
-sys.exit(0 if len(expected)==1 and hashlib.sha256(pathlib.Path(cached).read_bytes()).hexdigest()==expected[0] else 1)
-PY
+  if [ -f "$cache_dir/$archive" ] && sha256_matches "$work_dir/SHA256SUMS" "$cache_dir/$archive" "$archive"
   then
     cp "$cache_dir/$archive" "$work_dir/$archive"
     log OK "Using cached $archive (SHA-256 matches release $version; no download)"
   else
     download_progress "$base/$archive" "$work_dir/$archive"
   fi
-  python3 - "$work_dir" "$archive" <<'PY'
-import hashlib, os, pathlib, posixpath, sys, tarfile
-root = pathlib.Path(sys.argv[1]); name = sys.argv[2]
-entries = [line.split() for line in (root/'SHA256SUMS').read_text().splitlines()]
-expected = [a[0] for a in entries if len(a)==2 and a[1].lstrip('*')==name]
-if len(expected)!=1 or hashlib.sha256((root/name).read_bytes()).hexdigest()!=expected[0]:
-    sys.exit('SHA-256 verification failed; nothing installed.')
-# Extract only required regular binaries: reject links and unsafe archive paths.
-with tarfile.open(root/name) as t:
-    for binary in ('heimdall','ham-bridge','ham-pty-host','ham-ctl'):
-        members = [m for m in t.getmembers() if m.name.removeprefix('./') == 'bin/'+binary]
-        if len(members)!=1 or not members[0].isfile(): sys.exit('Missing/unsafe binary: '+binary)
-        (root/binary).write_bytes(t.extractfile(members[0]).read())
-    scripts = [m for m in t.getmembers() if m.name.removeprefix('./') == 'scripts/apply-bridge-update.sh']
-    if scripts:
-        if len(scripts)!=1 or not scripts[0].isfile(): sys.exit('Unsafe update supervisor')
-        (root/'apply-bridge-update.sh').write_bytes(t.extractfile(scripts[0]).read())
-
-    # Extract only the extension tree, checking every path and link before
-    # writing anything. Links are created last and cannot have child members.
-    prefix = 'share/heimdall/extensions'
-    assets = {}
-    for member in t.getmembers():
-        name = member.name.removeprefix('./').rstrip('/')
-        if name != prefix and not name.startswith(prefix+'/'): continue
-        path = pathlib.PurePosixPath(name)
-        if '..' in path.parts or path.is_absolute() or str(path) != name or name in assets:
-            sys.exit('Unsafe/duplicate extension path: '+name)
-        if not (member.isdir() or member.isfile() or member.issym()):
-            sys.exit('Unsafe extension member: '+name)
-        if member.issym():
-            target = posixpath.normpath(posixpath.join(posixpath.dirname(name), member.linkname))
-            if member.linkname.startswith('/') or not target.startswith(prefix+'/'):
-                sys.exit('Unsafe extension symlink: '+name)
-        assets[name] = member
-    for name, member in assets.items():
-        for parent in pathlib.PurePosixPath(name).parents:
-            if str(parent) in assets and not assets[str(parent)].isdir():
-                sys.exit('Non-directory extension parent: '+str(parent))
-    if assets:
-        helpers = [m for m in t.getmembers() if m.name.removeprefix('./') == 'scripts/refresh-provider-extensions.sh']
-        if len(helpers) != 1 or not helpers[0].isfile():
-            sys.exit('Missing/unsafe extension staging helper')
-        (root/'refresh-provider-extensions.sh').write_bytes(t.extractfile(helpers[0]).read())
-        for name, member in assets.items():
-            dest = root/name
-            if member.isdir():
-                dest.mkdir(parents=True, exist_ok=True)
-            elif member.isfile():
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                dest.write_bytes(t.extractfile(member).read())
-                dest.chmod(member.mode & 0o777)
-        for name, member in assets.items():
-            if member.issym():
-                dest = root/name
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                os.symlink(member.linkname, dest)
-PY
+  extract_bundle "$work_dir" "$archive"
   log OK 'Release checksum and bundle verified'
   # Preflight through the BRIDGE's own HTTPS client (its static libcurl),
   # before any service is replaced: the curl CLI reaching the Hub says nothing
@@ -541,84 +880,11 @@ PY
   [ ! -d "$bin_dir" ] || chmod 700 "$bin_dir"
   step '4 / 6 · Ports and ham-ctl routing'
   local ports bridge_port endpoint_port
-  ports="$(python3 - "$state_root" "$state_dir" <<'PY'
-import json, pathlib, socket, sys
-root, own = map(pathlib.Path, sys.argv[1:]); reserved=set(); preferred=[49323,49324]
-for file in root.glob('*/ports.json'):
-    try:
-        p=json.loads(file.read_text())
-        if file.parent==own: preferred=p
-        else: reserved.update(p)
-    except (ValueError, OSError): pass
-held=[]; result=[]
-try:
-    for start in preferred:
-        for port in range(max(1024,int(start)),65536):
-            if port in reserved or port in result: continue
-            s=socket.socket()
-            try: s.bind(('127.0.0.1',port))
-            except OSError: s.close(); continue
-            held.append(s); result.append(port); break
-        else: sys.exit('No free bridge ports available.')
-    (own/'ports.json').write_text(json.dumps(result)+'\n')
-    print(*result)
-finally:
-    for s in held: s.close()
-PY
-)"
+  ports="$(allocate_ports "$state_root" "$state_dir")"
   bridge_port="${ports% *}"; endpoint_port="${ports#* }"
   log OK "Bridge: 127.0.0.1:$bridge_port · Agent endpoint: 127.0.0.1:$endpoint_port"
   # Render with proper escaping for spaces, XML, shell, and systemd specifiers.
-  python3 - "$svc" "$service_file" "$service_name" "$hub_url" "$bin_dir" "$state_dir" "$data_dir" "$bridge_port" "$endpoint_port" "$PATH" "${PREFIX:-}" "${TERMUX_VERSION:-}" <<'PY'
-import json, pathlib, plistlib, shlex, shutil, sys
-svc, file, name, hub, bin_dir, state, data, port, endpoint, path, prefix, termux_version = sys.argv[1:]
-osname = 'darwin' if svc == 'launchd' else 'linux'
-args=[bin_dir+'/ham-bridge','--hub',hub,'--config',state+'/config.toml','--bridge-token-file',state+'/bridge-token','--data-dir',data,'--bind-host','127.0.0.1','--port',port,'--local-endpoint-port',endpoint,'--local-run-dir',data+'/run']
-config = pathlib.Path(state)/'config.toml'
-if not config.exists():
-    config.write_text('[daemon]\ndaemon_url = '+json.dumps(hub)+'\ndata_dir = '+json.dumps(data)+'\n\n[wrapper]\ndaemon_url = '+json.dumps(hub)+'\n')
-config.chmod(0o600)
-env={'PATH':bin_dir+':'+path,'HEIMDALL_HAM_PTY_HOST_BIN':bin_dir+'/ham-pty-host','HEIMDALL_BRIDGE_PTY_HOST':'true','HEIMDALL_HAM_CTL_BIN':bin_dir+'/ham-ctl','HEIMDALL_BRIDGE_ENDPOINT':'tcp:127.0.0.1:'+endpoint,'HEIMDALL_BRIDGE_SERVICE_NAME':'ham-bridge' if svc=='runit' else name+('.service' if osname=='linux' else '')}
-# Do not override the endpoint injected into agent run directories.
-wrapper=pathlib.Path(bin_dir)/('ham-ctl-'+name)
-wrapper.write_text('#!/bin/sh\n: "${HEIMDALL_BRIDGE_ENDPOINT:='+env['HEIMDALL_BRIDGE_ENDPOINT']+'}"\nexport HEIMDALL_BRIDGE_ENDPOINT\nexec '+shlex.quote(bin_dir+'/ham-ctl')+' --config '+shlex.quote(state+'/config.toml')+' "$@"\n')
-wrapper.chmod(0o755)
-env['HEIMDALL_HAM_CTL_BIN']=str(wrapper)
-if svc=='runit':
-    # termux-services run file: exec the bridge under runsv with the same
-    # environment the systemd unit would carry; stderr joins stdout for svlogd.
-    # runsvdir usually inherits the login shell's TERMUX_VERSION/PREFIX, but the
-    # bridge selects its Android keystore backend and the update script its runit
-    # path from exactly those two, so export them explicitly: an environment
-    # without them would silently pick the Linux keyring (seccomp-killed) path.
-    run=pathlib.Path(file)
-    text='#!'+prefix+'/bin/sh\nexec 2>&1\n'
-    text+='export PREFIX='+shlex.quote(prefix)+'\n'
-    text+='export TERMUX_VERSION='+shlex.quote(termux_version or 'installed')+'\n'
-    # Services started by runsvdir may lack the login shell's TMPDIR; without it
-    # the bridge and PTY host fall back to /tmp, which Android does not have.
-    text+='export TMPDIR='+shlex.quote(prefix+'/tmp')+'\n'
-    text+=''.join('export '+k+'='+shlex.quote(v)+'\n' for k,v in env.items())
-    text+='exec '+' '.join(shlex.quote(a) for a in args)+'\n'
-    run.write_text(text); run.chmod(0o755)
-elif osname=='darwin':
-    plist={'Label':name,'ProgramArguments':args,'EnvironmentVariables':env,'RunAtLoad':True,'KeepAlive':{'SuccessfulExit':False},'AbandonProcessGroup':True,'ThrottleInterval':5,'StandardOutPath':data+'/logs/bridge.out.log','StandardErrorPath':data+'/logs/bridge.err.log'}
-    pathlib.Path(file).write_bytes(plistlib.dumps(plist))
-else:
-    def quote(s): return '"'+s.replace('\\','\\\\').replace('"','\\"').replace('%','%%')+'"'
-    command=' '.join(quote(a).replace('$','$$') for a in args)
-    text='[Unit]\nDescription=Heimdall Bridge '+hub+'\nAfter=network-online.target\n\n[Service]\nType=simple\nExecStart='+command+'\n'
-    text+=''.join('Environment='+quote(k+'='+v)+'\n' for k,v in env.items())
-    supervisor = pathlib.Path(data)/'updates/apply-bridge-update.sh'
-    if supervisor.is_file():
-        bash = shutil.which('bash', path=path)
-        if not bash:
-            raise SystemExit('bash was not found while rendering the systemd unit')
-        stop_args = [bash, str(supervisor), '--data-dir', data, '--stop-pty-hosts-only']
-        text+='ExecStopPost='+' '.join(quote(a).replace('$','$$') for a in stop_args)+'\n'
-    text+='Restart=on-failure\nRestartSec=5\nKillMode=process\n\n[Install]\nWantedBy=default.target\n'
-    pathlib.Path(file).write_text(text)
-PY
+  render_service "$svc" "$service_file" "$service_name" "$hub_url" "$bin_dir" "$state_dir" "$data_dir" "$bridge_port" "$endpoint_port" "$PATH" "${PREFIX:-}" "${TERMUX_VERSION:-}"
   if [ "$svc" = runit ]; then
     mkdir -p "$runit_dir/log"
     if [ -x "$PREFIX/share/termux-services/svlogger" ]; then
@@ -632,7 +898,7 @@ PY
   # Persist a usable enrollment command even when the installer came from stdin.
   {
     printf '#!/usr/bin/env bash\nset -euo pipefail\n'
-    declare -f log fail enroll
+    declare -f log fail sh_quote write_enroll_shim enroll
     for file in state_dir bin_dir service_name uid token_file hub_url data_dir bridge_port endpoint_port run_dir; do
       printf '%s=%q\n' "$file" "${!file}"
     done
