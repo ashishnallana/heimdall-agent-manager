@@ -50,9 +50,12 @@ test_bridge_hello_and_heartbeats_advertise_the_same_runtime_features :: proc(t: 
 	defer delete(hello)
 	testing.expect_value(t, runtime_features_member(hello), shared)
 
-	// Repeated heartbeats: every one carries the complete list, never a stale subset.
+	testing.expect(t, strings.contains(shared, `"heartbeat_metadata_omission"`), "hello advertises heartbeat metadata omission support")
+
+	// Repeated legacy heartbeats (what a hub without heartbeat_metadata_omission
+	// receives): every one carries the complete list, never a stale subset.
 	for _ in 0 ..< 3 {
-		hb := bridge_hub_heartbeat_json()
+		hb := bridge_hub_heartbeat_json_shaped({})
 		defer delete(hb)
 		testing.expect_value(t, runtime_features_member(hb), shared)
 	}

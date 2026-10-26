@@ -382,6 +382,9 @@ bridge_hub_runtime_worker :: proc() {
 			bridge_hub_reconnect_sleep(&reconnect_failures)
 			continue
 		}
+		// Nothing negotiated on a previous connection carries over: only this
+		// connection's bridge_ready can re-enable a heartbeat omission.
+		bridge_hub_reset_heartbeat_negotiation()
 		hello := bridge_hub_hello_json()
 		if !ws.send_text(&conn, hello) {
 			log_failure(&last_failure, &attempts, "WS connected but sending hello failed (connection dropped immediately)", .hub_connect_failed, blog_sym(.stage, .hello), blog_sym(.reason, .write_error))
@@ -574,6 +577,54 @@ bridge_hub_apply_ready_settings :: proc(text: string) {
 	// Absent on older hubs, which neither bound the session by its credential nor
 	// understand bridge_reauth.
 	sync.atomic_store(&bridge_hub_credential_reauth_supported, extract_json_bool(text, "credential_reauth", false))
+	// Minimal heartbeat plan T4: each flag is honoured on its own and only for the
+	// connection whose bridge_ready carried it; absent (an older or rolled-back hub)
+	// means the legacy members stay.
+	sync.atomic_store(&bridge_hub_heartbeat_metadata_omission, extract_json_bool(text, "heartbeat_metadata_omission", false))
+	sync.atomic_store(&bridge_hub_diagnostics_frame_v1, extract_json_bool(text, "diagnostics_frame_v1", false))
+}
+
+// Per-connection heartbeat negotiation (minimal heartbeat plan §4.4, T4). Both start
+// false and are cleared again before every connection's hello
+// (bridge_hub_reset_heartbeat_negotiation), so a reconnect to a hub that no longer
+// advertises a flag (downgrade, rollback) sends the legacy heartbeat.
+//
+// heartbeat_metadata_omission: the hub treats this connection's hello as the only
+// metadata authority (it also requires our hello to list
+// contracts.BRIDGE_FEATURE_HEARTBEAT_METADATA_OMISSION), so heartbeats may drop
+// capabilities/features.
+bridge_hub_heartbeat_metadata_omission: bool
+// diagnostics_frame_v1: the hub accepts the separate bridge_diagnostics frame. Our
+// heartbeat drops its diagnostic members only once that frame is actually sent
+// (BRIDGE_DIAGNOSTICS_SENDER_AVAILABLE); until then the flag is recorded but the
+// diagnostics keep riding the heartbeat, so the hub never loses them.
+bridge_hub_diagnostics_frame_v1: bool
+
+// BRIDGE_DIAGNOSTICS_SENDER_AVAILABLE is false until this Bridge emits the
+// bridge_diagnostics frame (plan T6, hb_impl_diag_bridge). Removing diagnostics from
+// the heartbeat before their replacement sender exists would silently drop them.
+BRIDGE_DIAGNOSTICS_SENDER_AVAILABLE :: false
+
+bridge_hub_reset_heartbeat_negotiation :: proc() {
+	sync.atomic_store(&bridge_hub_heartbeat_metadata_omission, false)
+	sync.atomic_store(&bridge_hub_diagnostics_frame_v1, false)
+}
+
+// Bridge_Heartbeat_Shape selects which optional member groups a heartbeat carries.
+// The zero value is the legacy frame: capabilities/features and every diagnostic
+// member. The two omissions are independent; with both set the frame is the
+// eight-member core (plan §2.1).
+Bridge_Heartbeat_Shape :: struct {
+	omit_metadata:    bool,
+	omit_diagnostics: bool,
+}
+
+// bridge_hub_heartbeat_shape is the shape the current connection negotiated.
+bridge_hub_heartbeat_shape :: proc() -> Bridge_Heartbeat_Shape {
+	return Bridge_Heartbeat_Shape{
+		omit_metadata    = sync.atomic_load(&bridge_hub_heartbeat_metadata_omission),
+		omit_diagnostics = BRIDGE_DIAGNOSTICS_SENDER_AVAILABLE && sync.atomic_load(&bridge_hub_diagnostics_frame_v1),
+	}
 }
 
 // bridge_hub_send_connect_heartbeat sends the one heartbeat every connection opens
@@ -3231,55 +3282,124 @@ bridge_hub_send_vault_status :: proc(conn: ^ws.Connection) {
 	_ = bridge_hub_send(conn, frame)
 }
 
+// bridge_hub_heartbeat_json builds the heartbeat in the shape this connection
+// negotiated (bridge_hub_heartbeat_shape).
 bridge_hub_heartbeat_json :: proc() -> string {
-	caps := "[]"
-	// Resource stats are collected BEFORE bridge_runtime_mutex is taken: they
-	// fork `ps` and read /proc, none of which belongs inside that lock.
-	stats := bridge_heartbeat_stats_json()
-	defer delete(stats)
-	features := bridge_runtime_features_json()
-	dispatch_metrics := bridge_command_dispatch_metrics_json()
-	defer delete(dispatch_metrics)
-	breaker_metrics := bridge_dependency_breaker_metrics_json()
-	defer delete(breaker_metrics)
-	recovery_status := bridge_recovery_status_json()
-    defer delete(recovery_status)
-    retry_metrics := bridge_http_retry_metrics_json()
-	defer delete(retry_metrics)
+	return bridge_hub_heartbeat_json_shaped(bridge_hub_heartbeat_shape())
+}
+
+// bridge_hub_heartbeat_json_shaped collects the live state for one heartbeat and
+// serializes it with bridge_heartbeat_frame_json.
+bridge_hub_heartbeat_json_shaped :: proc(shape: Bridge_Heartbeat_Shape) -> string {
+	frame: Bridge_Heartbeat_Frame
+	if !shape.omit_metadata do frame.features = bridge_runtime_features_json()
+	// Diagnostics are collected only when sent, and BEFORE bridge_runtime_mutex is
+	// taken: stats fork `ps` and read /proc, none of which belongs inside that lock.
+	if !shape.omit_diagnostics {
+		frame.stats = bridge_heartbeat_stats_json()
+		frame.command_dispatch = bridge_command_dispatch_metrics_json()
+		frame.dependency_breakers = bridge_dependency_breaker_metrics_json()
+		frame.operation_recovery = bridge_recovery_status_json()
+		frame.http_retries = bridge_http_retry_metrics_json()
+	}
+	defer if !shape.omit_diagnostics {
+		delete(frame.stats)
+		delete(frame.command_dispatch)
+		delete(frame.dependency_breakers)
+		delete(frame.operation_recovery)
+		delete(frame.http_retries)
+	}
 	// REQ-BVS-1: read the vault tri-state BEFORE taking bridge_runtime_mutex.
 	// bridge_vault_status() touches the kernel keyring and the filesystem, and no
 	// blocking I/O belongs inside a lock the per-instance reporters also contend on.
-	vault_status := bridge_hub_vault_status_for_report()
-	search_ready, search_stale, search_revision := bridge_task_chain_search_status()
+	frame.vault_status = bridge_hub_vault_status_for_report()
+	frame.search_ready, frame.search_stale, frame.search_revision = bridge_task_chain_search_status()
 	now := bridge_runtime_now_ms()
 	sync.mutex_lock(&bridge_runtime_mutex)
 	defer sync.mutex_unlock(&bridge_runtime_mutex)
 	bridge_runtime_expire_stale_locked(now)
+	instances := make([dynamic]Bridge_Heartbeat_Instance, 0, len(bridge_runtime_instances), context.temp_allocator)
+	for inst in bridge_runtime_instances {
+		epoch := bridge_agent_instance_launch_epoch(inst.agent_instance_id)
+		append(&instances, Bridge_Heartbeat_Instance{
+			agent_instance_id = inst.agent_instance_id,
+			launch_epoch      = strings.clone(epoch, context.temp_allocator),
+			state_seq         = inst.state_seq,
+			runtime_status    = inst.runtime_status,
+			activity_status   = inst.activity_status,
+		})
+		delete(epoch)
+	}
+	frame.instances = instances[:]
+	return bridge_heartbeat_frame_json(frame, shape)
+}
+
+// Bridge_Heartbeat_Instance is the five-member repair tuple of heartbeat instances[].
+Bridge_Heartbeat_Instance :: struct {
+	agent_instance_id: string,
+	launch_epoch:      string,
+	state_seq:         int,
+	runtime_status:    string,
+	activity_status:   string,
+}
+
+// Bridge_Heartbeat_Frame is everything one heartbeat may carry. features and the
+// diagnostic members are pre-serialized JSON, written only when the shape keeps them.
+Bridge_Heartbeat_Frame :: struct {
+	vault_status:        string,
+	search_ready:        bool,
+	search_stale:        bool,
+	search_revision:     i64,
+	features:            string,
+	command_dispatch:    string,
+	dependency_breakers: string,
+	http_retries:        string,
+	operation_recovery:  string,
+	stats:               string, // "" when resource stats are off: member omitted
+	instances:           []Bridge_Heartbeat_Instance,
+}
+
+// bridge_heartbeat_frame_json serializes one heartbeat. Always present, in this
+// order: type, protocol_version (the legacy per-frame envelope constant 1, unrelated
+// to hello's negotiated version), vault_status, the task_chain_search tuple,
+// active_instance_ids and instances, both arrays even when empty. shape.omit_metadata
+// drops only capabilities/features; shape.omit_diagnostics drops only
+// command_dispatch, dependency_breakers, http_retries, operation_recovery and stats.
+//
+// active_instance_ids lists the instances with an active runtime status; instances[]
+// lists every instance with a status, terminal ones included, so a dropped terminal
+// status push is repaired. Each entry is the five-member tuple the hub decodes: the
+// ignored activity_source and error members are not sent here (decision D3-a); the
+// immediate agent_instance_status push (bridge_instance_status_json) still carries
+// both.
+bridge_heartbeat_frame_json :: proc(frame: Bridge_Heartbeat_Frame, shape: Bridge_Heartbeat_Shape) -> string {
 	b := strings.builder_make()
 	strings.write_string(&b, "{\"type\":\"bridge_heartbeat\",\"protocol_version\":1,\"vault_status\":\"")
-	bridge_runtime_write_json_string(&b, vault_status)
-	strings.write_string(&b, `","task_chain_search_ready":`); strings.write_string(&b, "true" if search_ready else "false")
-	strings.write_string(&b, `,"task_chain_search_stale":`); strings.write_string(&b, "true" if search_stale else "false")
-	strings.write_string(&b, `,"task_chain_search_revision":`); strings.write_string(&b, fmt.tprintf("%d", search_revision))
-	strings.write_string(&b, ",\"capabilities\":")
-	strings.write_string(&b, caps)
-	strings.write_string(&b, ",\"features\":")
-	strings.write_string(&b, features)
-	strings.write_string(&b, ",\"command_dispatch\":")
-	strings.write_string(&b, dispatch_metrics)
-	strings.write_string(&b, ",\"dependency_breakers\":")
-	strings.write_string(&b, breaker_metrics)
-	strings.write_string(&b, ",\"http_retries\":")
-	strings.write_string(&b, retry_metrics)
-    strings.write_string(&b, ",\"operation_recovery\":")
-    strings.write_string(&b, recovery_status)
-    if stats != "" {
-		strings.write_string(&b, ",\"stats\":")
-		strings.write_string(&b, stats)
+	bridge_runtime_write_json_string(&b, frame.vault_status)
+	strings.write_string(&b, `","task_chain_search_ready":`); strings.write_string(&b, "true" if frame.search_ready else "false")
+	strings.write_string(&b, `,"task_chain_search_stale":`); strings.write_string(&b, "true" if frame.search_stale else "false")
+	strings.write_string(&b, `,"task_chain_search_revision":`); strings.write_string(&b, fmt.tprintf("%d", frame.search_revision))
+	if !shape.omit_metadata {
+		strings.write_string(&b, `,"capabilities":[],"features":`)
+		strings.write_string(&b, frame.features)
 	}
-	strings.write_string(&b, ",\"active_instance_ids\":[")
+	if !shape.omit_diagnostics {
+		strings.write_string(&b, `,"command_dispatch":`)
+		strings.write_string(&b, frame.command_dispatch)
+		strings.write_string(&b, `,"dependency_breakers":`)
+		strings.write_string(&b, frame.dependency_breakers)
+		strings.write_string(&b, `,"http_retries":`)
+		strings.write_string(&b, frame.http_retries)
+		strings.write_string(&b, `,"operation_recovery":`)
+		strings.write_string(&b, frame.operation_recovery)
+		if frame.stats != "" {
+			strings.write_string(&b, `,"stats":`)
+			strings.write_string(&b, frame.stats)
+		}
+	}
+	strings.write_string(&b, `,"active_instance_ids":[`)
 	first_active := true
-	for inst in bridge_runtime_instances {
+	for inst in frame.instances {
 		if !bridge_runtime_status_active(inst.runtime_status) do continue
 		if !first_active do strings.write_byte(&b, ',')
 		first_active = false
@@ -3287,27 +3407,23 @@ bridge_hub_heartbeat_json :: proc() -> string {
 		bridge_runtime_write_json_string(&b, inst.agent_instance_id)
 		strings.write_byte(&b, '"')
 	}
-	strings.write_string(&b, "],\"instances\":[")
+	strings.write_string(&b, `],"instances":[`)
 	first := true
-	for inst in bridge_runtime_instances {
+	for inst in frame.instances {
 		if strings.trim_space(inst.runtime_status) == "" do continue
 		if !first do strings.write_byte(&b, ',')
 		first = false
-		strings.write_string(&b, "{\"agent_instance_id\":\"")
+		strings.write_string(&b, `{"agent_instance_id":"`)
 		bridge_runtime_write_json_string(&b, inst.agent_instance_id)
-		epoch := bridge_agent_instance_launch_epoch(inst.agent_instance_id)
-		strings.write_string(&b, "\",\"launch_epoch\":\""); bridge_runtime_write_json_string(&b, epoch); delete(epoch)
-		strings.write_string(&b, "\",\"state_seq\":")
+		strings.write_string(&b, `","launch_epoch":"`)
+		bridge_runtime_write_json_string(&b, inst.launch_epoch)
+		strings.write_string(&b, `","state_seq":`)
 		strings.write_string(&b, fmt.tprintf("%d", inst.state_seq))
-		strings.write_string(&b, ",\"runtime_status\":\"")
+		strings.write_string(&b, `,"runtime_status":"`)
 		bridge_runtime_write_json_string(&b, inst.runtime_status)
-		strings.write_string(&b, "\",\"activity_status\":\"")
+		strings.write_string(&b, `","activity_status":"`)
 		bridge_runtime_write_json_string(&b, inst.activity_status)
-		strings.write_string(&b, "\",\"activity_source\":\"")
-		bridge_runtime_write_json_string(&b, inst.activity_source)
-		strings.write_string(&b, "\"")
-		bridge_runtime_write_instance_error(&b, inst)
-		strings.write_string(&b, "}")
+		strings.write_string(&b, `"}`)
 	}
 	strings.write_string(&b, "]}")
 	return strings.to_string(b)
@@ -3958,9 +4074,12 @@ Bridge_Hello_Wire :: struct {
 	active_instance_ids:      []string,
 }
 
-// BRIDGE_RUNTIME_FEATURES is the single source for the features both bridge_hello
-// and bridge_heartbeat advertise; the hub replaces its stored list on every frame.
-BRIDGE_RUNTIME_FEATURES := [?]string{"capture_agent_pane", "get_agent_pane", "instance_reconfiguration_v1", "tool_stream_demand_v2"}
+// BRIDGE_RUNTIME_FEATURES is the single source for the features bridge_hello and the
+// legacy (non-omitting) bridge_heartbeat advertise; the hub replaces its stored list
+// on every hello and on every legacy beat that carries features.
+// heartbeat_metadata_omission tells the hub this Bridge understands the bridge_ready
+// flag of the same name (contracts.BRIDGE_FEATURE_HEARTBEAT_METADATA_OMISSION).
+BRIDGE_RUNTIME_FEATURES := [?]string{"capture_agent_pane", "get_agent_pane", "instance_reconfiguration_v1", "tool_stream_demand_v2", contracts.BRIDGE_FEATURE_HEARTBEAT_METADATA_OMISSION}
 
 bridge_hub_hello_json :: proc() -> string {
 	hello := Bridge_Hello_Wire{

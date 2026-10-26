@@ -285,7 +285,13 @@ test_ready_settings_tolerate_older_hub_payloads :: proc(t: ^testing.T) {
 	testing.expect(t, bridge_heartbeat_stats_enabled(), "stats default on")
 	testing.expect(t, !sync.atomic_load(&bridge_hub_credential_reauth_supported), "reauth off without the flag")
 
-	// Unknown future members are ignored.
+	testing.expect(t, !sync.atomic_load(&bridge_hub_heartbeat_metadata_omission), "metadata omission off without the flag")
+	testing.expect(t, !sync.atomic_load(&bridge_hub_diagnostics_frame_v1), "diagnostics frame off without the flag")
+
+	// The plan T4 flags are parsed independently of the other members.
+	defer bridge_hub_reset_heartbeat_negotiation()
 	bridge_hub_apply_ready_settings(`{"type":"bridge_ready","heartbeat_interval_seconds":20,"heartbeat_metadata_omission":true,"diagnostics_frame_v1":true}`)
 	testing.expect_value(t, sync.atomic_load(&bridge_hub_heartbeat_interval_ns), i64(20 * time.Second))
+	testing.expect(t, sync.atomic_load(&bridge_hub_heartbeat_metadata_omission), "metadata omission negotiated")
+	testing.expect(t, sync.atomic_load(&bridge_hub_diagnostics_frame_v1), "diagnostics frame advertised")
 }
