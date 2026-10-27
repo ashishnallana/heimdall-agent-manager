@@ -15,7 +15,6 @@ import { installAppViewportHeightSync } from './utils/appViewportHeight';
 import { ShortcutProvider } from './services/shortcuts/ShortcutContext';
 import { ChordHud } from './components/shortcuts/ChordHud';
 import { ShortcutCheatsheetModal } from './components/shortcuts/ShortcutCheatsheetModal';
-import './debugCapture';
 import './styles.css';
 
 // Legacy deep-link migration: if the app was opened at a real path-based route
@@ -44,7 +43,6 @@ import './styles.css';
 // settling tick and why it must never subtract `visualViewport.offsetTop`.
 if (typeof window !== 'undefined') installAppViewportHeightSync(window as never);
 
-(window as any).__debugStore = store;
 installElectronApiFetchBridge();
 
 // Register the notification service worker early so OS notifications work on

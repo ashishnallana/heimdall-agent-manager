@@ -11,6 +11,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { desktopBridgeStatusLabel } from '../src/ui/bridge/desktopBridge.ts';
 import bridgeManager from '../src/ui/electron/bridgeManager.cts';
+import externalUrl from '../src/ui/electron/externalUrl.cts';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const statusSource = fs.readFileSync(path.join(ROOT, 'src/ui/components/shell/SidebarUpdateBadge.tsx'), 'utf8');
@@ -37,18 +38,49 @@ test('REQ-BTOP-1: enrollment output recognizes the canonical 14-symbol pairing c
   );
 });
 
-// Records every child process bridgeManager starts and completes it with exit 0.
-function stubSpawn(t: any): Array<{ command: string; args: string[]; env: NodeJS.ProcessEnv }> {
-  const calls: Array<{ command: string; args: string[]; env: NodeJS.ProcessEnv }> = [];
+type SpawnCall = { command: string; args: string[]; env: NodeJS.ProcessEnv; proc: any };
+
+// Records every child process bridgeManager starts. Each completes with the exit
+// code `exitCode` returns for it; `null` leaves it running until the test acts.
+function stubSpawn(t: any, exitCode: (call: SpawnCall) => number | null = () => 0): SpawnCall[] {
+  const calls: SpawnCall[] = [];
   t.mock.method(childProcess, 'spawn', (command: string, args: string[], options: any) => {
-    calls.push({ command, args, env: options?.env || {} });
     const proc: any = new EventEmitter();
     proc.stdout = new EventEmitter();
     proc.stderr = new EventEmitter();
-    setImmediate(() => proc.emit('close', 0));
+    proc.pid = 4242 + calls.length;
+    proc.kill = () => true;
+    const call = { command, args, env: options?.env || {}, proc };
+    calls.push(call);
+    const code = exitCode(call);
+    if (code !== null) setImmediate(() => proc.emit('close', code));
     return proc;
   });
   return calls;
+}
+
+// A Bridge home with one enrolled, installed-on-macOS service for hub.example.
+function enrolledBridgeHome(t: any): { home: string; stateDir: string } {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'heimdall-bridge-home-'));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const serviceName = 'heimdall-bridge-hub-example';
+  const stateDir = path.join(home, '.config', 'heimdall', 'bridges', serviceName);
+  fs.mkdirSync(stateDir, { recursive: true });
+  fs.writeFileSync(path.join(stateDir, 'hub-url'), 'https://hub.example\n');
+  fs.writeFileSync(path.join(stateDir, 'enroll.sh'), '');
+  fs.writeFileSync(path.join(stateDir, 'bridge-token'), 'token');
+  const binDir = path.join(home, '.local', 'share', 'heimdall', 'bridges', serviceName, 'bin');
+  fs.mkdirSync(binDir, { recursive: true });
+  fs.writeFileSync(path.join(binDir, 'ham-bridge'), '');
+  fs.mkdirSync(path.join(home, 'Library', 'LaunchAgents'), { recursive: true });
+  fs.writeFileSync(path.join(home, 'Library', 'LaunchAgents', `${serviceName}.plist`), '');
+  t.mock.method(os, 'homedir', () => home);
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+  Object.defineProperty(process, 'platform', { ...platform, value: 'darwin' });
+  t.after(() => Object.defineProperty(process, 'platform', platform));
+  // launchd reports the agent as not loaded; bootstrap and kickstart succeed.
+  t.mock.method(childProcess, 'spawnSync', (_command: string, args: string[]) => ({ status: args?.[0] === 'print' ? 1 : 0, stdout: '', stderr: '' }));
+  return { home, stateDir };
 }
 
 function assertStockMacBridgeEnv(env: NodeJS.ProcessEnv) {
@@ -188,10 +220,132 @@ test('REQ-MAC-TRAY-1: closing the macOS window hides it and packaged installs la
   assert.match(mainSource, /isQuitting = true; app\.quit\(\)/);
 });
 
-test('REQ-ELECTRON-NO-REMOTE-DEBUG-1: web content cannot start or locate the localhost debug server', () => {
+test('REQ-ELECTRON-NO-REMOTE-DEBUG-1: the Electron app has no debug-control server at all', () => {
+  for (const removed of ['src/ui/electron/debugServer.cts', 'src/ui/electron/instanceRegistry.cts', 'src/ui/debugCapture.ts']) {
+    assert.equal(fs.existsSync(path.join(ROOT, removed)), false, `${removed} must stay deleted`);
+  }
   assert.doesNotMatch(preloadSource, /toggleDebugServer|getDebugInfo|debug-server|debug-info/);
-  assert.doesNotMatch(mainSource, /ipcMain\.(handle|on)\('odin-api:(toggle-debug-server|get-debug-info)'/);
-  assert.doesNotMatch(mainSource, /stopDebugServer/);
-  // The developer opt-in remains a launch-time environment switch only.
-  assert.match(mainSource, /if \(process\.env\.HEIMDALL_UI_DEBUG === '1'\) \{\s*currentDebugPort = await startDebugServer\(\);/);
+  assert.doesNotMatch(mainSource, /debugServer|startDebugServer|HEIMDALL_UI_DEBUG|instanceRegistry/);
+  const rendererEntry = fs.readFileSync(path.join(ROOT, 'src/ui/main.tsx'), 'utf8');
+  assert.doesNotMatch(rendererEntry, /debugCapture|__debugStore/);
 });
+
+test('REQ-REENROLL-RECOVER-1: a failed re-enrollment restarts the Bridge it booted out', async (t) => {
+  enrolledBridgeHome(t);
+  const calls = stubSpawn(t, (call) => (call.command === '/bin/bash' ? 1 : 0));
+  const done = new Promise<any>((resolve) => {
+    const started = bridgeManager.startReEnrollment('https://hub.example', (event: any) => { if (event.type === 'error') resolve(event); });
+    assert.deepEqual(started, { ok: true });
+  });
+  const event = await done;
+
+  assert.match(event.message, /Enrollment exited with status 1\. The Bridge was restarted with its existing enrollment\./);
+  assert.deepEqual(calls.slice(1).map((call) => [call.command, call.args[0], call.args[1]]), [
+    ['/bin/launchctl', 'print', `gui/${process.getuid()}/heimdall-bridge-hub-example`],
+    ['/bin/launchctl', 'kickstart', '-k'],
+  ]);
+});
+
+test('REQ-REENROLL-RECOVER-1: a failed first enrollment does not restart a token-less Bridge', async (t) => {
+  enrolledBridgeHome(t);
+  const calls = stubSpawn(t, (call) => (call.command === '/bin/bash' ? 1 : 0));
+  const done = new Promise<any>((resolve) => {
+    bridgeManager.startEnrollment('https://hub.example', (event: any) => { if (event.type === 'error') resolve(event); });
+  });
+  const event = await done;
+
+  assert.equal(event.message, 'Enrollment exited with status 1.');
+  assert.equal(calls.length, 1);
+});
+
+test('REQ-REENROLL-RECOVER-1: quitting stops a running re-enrollment and restarts the Bridge', async (t) => {
+  enrolledBridgeHome(t);
+  const calls = stubSpawn(t, () => null);
+  const kills: Array<[number, string]> = [];
+  t.mock.method(process, 'kill', (pid: number, signal: string) => { kills.push([pid, signal]); return true; });
+  assert.deepEqual(bridgeManager.startReEnrollment('https://hub.example', () => {}), { ok: true });
+  const syncCalls = (childProcess.spawnSync as any).mock.calls.length;
+
+  bridgeManager.stopEnrollment();
+
+  assert.deepEqual(kills, [[-calls[0].proc.pid, 'SIGTERM']]);
+  const launchctl = (childProcess.spawnSync as any).mock.calls.slice(syncCalls).map((call: any) => call.arguments[1][0]);
+  assert.deepEqual(launchctl, ['print', 'bootstrap', 'kickstart']);
+  calls[0].proc.emit('close', null);
+});
+
+test('REQ-EXT-URL-1: only https: and mailto: links reach the system browser', () => {
+  for (const ok of ['https://customer-portal.paddle.com/cpl_1', 'mailto:support@example.com', ' https://github.com/a/b ']) {
+    assert.notEqual(externalUrl.allowedExternalUrl(ok), '', ok);
+  }
+  for (const refused of [
+    'file:///Applications/Calculator.app', 'smb://evil.example/share', 'javascript:alert(1)', 'http://example.com/',
+    'x-apple.systempreferences:com.apple.preference.security', 'vscode://file/etc/passwd', 'https://user:pass@example.com/', '', null, 'not a url',
+  ]) {
+    assert.equal(externalUrl.allowedExternalUrl(refused), '', String(refused));
+  }
+});
+
+test('REQ-EXT-URL-1: Bridge pairing pages open only on the configured Hub/UI origins', () => {
+  const origins = ['https://hub.brolabs.ai', 'https://heimdall.brolabs.ai/'];
+  assert.equal(externalUrl.allowedPairingUrl('https://heimdall.brolabs.ai/api/v1/device/add?c=1', origins), 'https://heimdall.brolabs.ai/api/v1/device/add?c=1');
+  assert.equal(externalUrl.allowedPairingUrl('http://127.0.0.1:8081/api/v1/device/add', ['http://127.0.0.1:8081']), 'http://127.0.0.1:8081/api/v1/device/add');
+  for (const refused of ['https://evil.example/api/v1/device/add', 'http://heimdall.brolabs.ai/api/v1/device/add', 'https://heimdall.brolabs.ai.evil.example/api/v1/device/add', 'file:///tmp/x']) {
+    assert.equal(externalUrl.allowedPairingUrl(refused, origins), '', refused);
+  }
+});
+
+test('REQ-EXT-URL-1: every shell.openExternal call in the main process uses a vetted URL', () => {
+  const calls = [...mainSource.matchAll(/shell\.openExternal\(([^)]*)\)/g)].map((match) => match[1]);
+  // OIDC-window popups, main-window navigation, main-window popups, pairing (x2), IPC.
+  assert.deepEqual(calls, ['href', 'allowedExternalUrl(url', 'href', 'trayPairing.url', 'trayPairing.url', 'href']);
+  assert.match(mainSource, /const href = allowedExternalUrl\(url\);\s*if \(href\) void shell\.openExternal\(href\);/);
+  assert.match(mainSource, /const href = allowedExternalUrl\(url\);\s*if \(!href\) return \{ ok: false/);
+  assert.match(mainSource, /allowedPairingUrl\(payload\.url, \[configuredHubApiBaseUrl\(\), configuredUiOrigin\(\)\]\)/);
+});
+
+const NAV = { uiOrigin: 'https://heimdall.brolabs.ai', idpOrigin: 'https://auth.brolabs.ai', inAuthRedirect: false };
+
+test('REQ-NAV-ROUTE-1: only sign-in and sign-out navigations open the OIDC window', () => {
+  const route = (url: string, extra: Partial<typeof NAV> = {}) => externalUrl.classifyNavigation(url, { ...NAV, ...extra });
+  assert.equal(route('https://heimdall.brolabs.ai/chains/c1'), 'allow');
+  assert.equal(route('https://heimdall.brolabs.ai/api/v1/auth/login?return_to=%2F'), 'allow');
+  // The /api/v1/auth/login 302 to the provider, and sign-out at the provider's end-session URL.
+  assert.equal(route('https://accounts.google.com/o/oauth2/auth?x=1', { inAuthRedirect: true }), 'auth');
+  assert.equal(route('https://auth.brolabs.ai/application/o/heimdall/end-session/'), 'auth');
+  // Paddle checkout and ordinary links go to the system browser instead.
+  assert.equal(route('https://pay.paddle.io/hsc_01?_ptxn=txn_1'), 'external');
+  assert.equal(route('https://github.com/tanmayv/heimdall-agent-manager'), 'external');
+  assert.equal(route('mailto:support@example.com'), 'external');
+  // Never opened anywhere.
+  for (const refused of ['file:///etc/passwd', 'http://example.com/', 'smb://evil.example/s', 'javascript:alert(1)', 'not a url']) {
+    assert.equal(route(refused), 'block', refused);
+    assert.equal(route(refused, { inAuthRedirect: true }), 'block', refused);
+  }
+  // Without a known provider origin, sign-in still works through the redirect chain.
+  assert.equal(route('https://auth.brolabs.ai/flow', { idpOrigin: '' }), 'external');
+  assert.equal(route('https://auth.brolabs.ai/flow', { idpOrigin: '', inAuthRedirect: true }), 'auth');
+});
+
+test('REQ-NAV-ROUTE-1: auth redirect chains start only at the Hub sign-in/sign-out routes', () => {
+  assert.equal(externalUrl.isAuthStartUrl('https://heimdall.brolabs.ai/api/v1/auth/login?return_to=%2F', NAV.uiOrigin), true);
+  assert.equal(externalUrl.isAuthStartUrl('https://heimdall.brolabs.ai/api/v1/auth/logout', NAV.uiOrigin), true);
+  assert.equal(externalUrl.isAuthStartUrl('https://heimdall.brolabs.ai/settings', NAV.uiOrigin), false);
+  assert.equal(externalUrl.isAuthStartUrl('https://evil.example/api/v1/auth/login', NAV.uiOrigin), false);
+  assert.equal(externalUrl.idpOriginFromAuthConfig({ data: { logout_url: 'https://auth.brolabs.ai/application/o/heimdall/end-session/' } }), 'https://auth.brolabs.ai');
+  assert.equal(externalUrl.idpOriginFromAuthConfig({ data: { logout_url: '' } }), '');
+  assert.equal(externalUrl.idpOriginFromAuthConfig({ data: { logout_url: 'http://auth.example/end' } }), '');
+});
+
+test('REQ-NAV-ROUTE-2: the OIDC window stays on https: or the Hub UI and opens no popups', () => {
+  assert.equal(externalUrl.oidcWindowNavigationAllowed('https://accounts.google.com/signin', NAV.uiOrigin), true);
+  assert.equal(externalUrl.oidcWindowNavigationAllowed('http://127.0.0.1:5173/', 'http://127.0.0.1:5173'), true);
+  for (const refused of ['http://evil.example/', 'file:///etc/passwd', 'javascript:alert(1)']) {
+    assert.equal(externalUrl.oidcWindowNavigationAllowed(refused, NAV.uiOrigin), false, refused);
+  }
+  assert.match(mainSource, /loginWindow\.webContents\.setWindowOpenHandler\([\s\S]*?return \{ action: 'deny' \};/);
+  assert.match(mainSource, /loginWindow\.webContents\.on\('will-navigate', guardOidcNavigation\)/);
+  assert.match(mainSource, /loginWindow\.webContents\.on\('will-redirect', guardOidcNavigation\)/);
+  assert.match(mainSource, /if \(route === 'auth'\) openOidcWindow\(url, win\);\s*else if \(route === 'external'\) void shell\.openExternal\(allowedExternalUrl\(url\)\);/);
+});
+

@@ -13,9 +13,8 @@ const appIcon = (() => {
     return undefined;
   }
 })();
-const { pruneAndRegister, updatePort, deregister } = require('./instanceRegistry.cjs');
-const { startDebugServer } = require('./debugServer.cjs');
 const bridgeManager = require('./bridgeManager.cjs');
+const { allowedExternalUrl, allowedPairingUrl, classifyNavigation, idpOriginFromAuthConfig, isAuthStartUrl, oidcWindowNavigationAllowed } = require('./externalUrl.cjs');
 
 function normalizeBaseUrl(value: string): string {
   return String(value || '').trim().replace(/\/$/, '');
@@ -71,6 +70,8 @@ let isQuitting = false;
 let authenticatedUserLabel = '';
 let trayOperationMessage = '';
 let trayPairing: { code: string; url: string } | null = null;
+// Identity provider origin from GET /api/v1/auth/config, used to route sign-out.
+let idpOrigin = '';
 const LOGIN_ITEM_PREFERENCE_MARKER = 'login-item-preference-configured';
 
 function openOidcWindow(url: string, owner: any) {
@@ -107,6 +108,18 @@ function openOidcWindow(url: string, owner: any) {
       });
     } catch (_err) { /* Keep the OIDC window open for non-URL navigations. */ }
   };
+  // REQ-NAV-ROUTE-2: the OIDC window has no preload, but still must not open
+  // popups or leave https: (other than returning to the Hub UI).
+  loginWindow.webContents.setWindowOpenHandler(({ url: popupUrl }: { url: string }) => {
+    const href = allowedExternalUrl(popupUrl);
+    if (href) void shell.openExternal(href);
+    return { action: 'deny' };
+  });
+  const guardOidcNavigation = (event: any, nextUrl: string) => {
+    if (!oidcWindowNavigationAllowed(nextUrl, configuredUiOrigin())) event.preventDefault();
+  };
+  loginWindow.webContents.on('will-navigate', guardOidcNavigation);
+  loginWindow.webContents.on('will-redirect', guardOidcNavigation);
   loginWindow.webContents.on('did-navigate', finishIfReturned);
   loginWindow.webContents.on('did-redirect-navigation', finishIfReturned);
   loginWindow.on('closed', () => { if (authWindow === loginWindow) authWindow = null; });
@@ -158,20 +171,36 @@ function createWindow() {
   win.webContents.on('did-finish-load', forceWindowTitle);
 
   if (!isDev) {
-    const trustedOrigin = new URL(configuredUiOrigin()).origin;
+    // REQ-NAV-ROUTE-1: only sign-in/sign-out reaches the OIDC window. Any other
+    // off-origin page (Paddle checkout, a clicked link) opens in the system
+    // browser, and the main window stays on the Hub UI.
+    let inAuthRedirect = false;
+    win.webContents.on('did-start-navigation', (details: any, legacyUrl?: string, _inPlace?: boolean, legacyIsMainFrame?: boolean) => {
+      const url = typeof details === 'object' && details ? details.url : legacyUrl;
+      const isMainFrame = typeof details === 'object' && details ? details.isMainFrame : legacyIsMainFrame;
+      if (isMainFrame) inAuthRedirect = isAuthStartUrl(url, configuredUiOrigin());
+    });
     const guardNavigation = (event: any, url: string) => {
-      try {
-        if (new URL(url).origin === trustedOrigin) return;
-      } catch (_err) { /* Treat malformed navigation as untrusted. */ }
+      // A Hub page may itself redirect to /api/v1/auth/login before the provider.
+      if (isAuthStartUrl(url, configuredUiOrigin())) inAuthRedirect = true;
+      const route = classifyNavigation(url, { uiOrigin: configuredUiOrigin(), idpOrigin, inAuthRedirect });
+      if (route === 'allow') return;
       event.preventDefault();
-      openOidcWindow(url, win);
+      if (route === 'auth') openOidcWindow(url, win);
+      else if (route === 'external') void shell.openExternal(allowedExternalUrl(url));
     };
     // `will-redirect` is load-bearing: /auth/login reaches the identity
     // provider through an HTTP 302, which is not a user-initiated navigation.
-    win.webContents.on('will-navigate', guardNavigation);
+    win.webContents.on('will-navigate', (event: any, url: string) => {
+      // A fresh navigation is never part of an earlier sign-in redirect chain.
+      inAuthRedirect = false;
+      guardNavigation(event, url);
+    });
     win.webContents.on('will-redirect', guardNavigation);
+    win.webContents.on('did-finish-load', () => { void refreshIdpOrigin(); });
     win.webContents.setWindowOpenHandler(({ url }: { url: string }) => {
-      void shell.openExternal(url);
+      const href = allowedExternalUrl(url);
+      if (href) void shell.openExternal(href);
       return { action: 'deny' };
     });
   }
@@ -252,6 +281,15 @@ function updateAuthenticatedUser(identity: any) {
   refreshTrayStatus();
 }
 
+async function refreshIdpOrigin() {
+  try {
+    const response = await session.defaultSession.fetch(`${configuredUiOrigin()}/api/v1/auth/config`);
+    if (!response.ok) return;
+    const next = idpOriginFromAuthConfig(await response.json());
+    if (next) idpOrigin = next;
+  } catch (_err) { /* Sign-in still routes through the /api/v1/auth/login redirect chain. */ }
+}
+
 async function refreshAuthenticatedUserFromSession() {
   try {
     const response = await session.defaultSession.fetch(`${configuredUiOrigin()}/api/v1/me`, { credentials: 'include' });
@@ -262,11 +300,19 @@ async function refreshAuthenticatedUserFromSession() {
   } catch (_err) { /* The renderer will synchronize identity after a successful OIDC check. */ }
 }
 
-function handleEnrollmentEvent(payload: any) {
+function handleEnrollmentEvent(rawPayload: any) {
+  // REQ-EXT-URL-1: only open (or show) an approval page on this Hub's origins.
+  let payload = rawPayload;
+  if (payload?.type === 'pairing') {
+    const url = allowedPairingUrl(payload.url, [configuredHubApiBaseUrl(), configuredUiOrigin()]);
+    payload = url && payload.code
+      ? { ...payload, url }
+      : { type: 'error', message: 'Bridge enrollment printed an approval page outside this Hub; it was not opened.' };
+  }
   if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
     mainWindow.webContents.send('heimdall-bridge:enrollment-event', payload);
   }
-  if (payload?.type === 'pairing' && payload?.url && payload?.code) {
+  if (payload?.type === 'pairing') {
     trayPairing = { url: String(payload.url), code: String(payload.code) };
     trayOperationMessage = 'Waiting for browser approval…';
     void shell.openExternal(trayPairing.url);
@@ -274,6 +320,7 @@ function handleEnrollmentEvent(payload: any) {
     trayPairing = null;
     trayOperationMessage = payload?.message || 'Bridge enrollment complete.';
   } else if (payload?.type === 'error') {
+    trayPairing = null;
     trayOperationMessage = payload?.message || 'Bridge enrollment failed.';
   }
   refreshTrayStatus();
@@ -410,13 +457,10 @@ ipcMain.handle('odin-api:pick-directory', async (event) => {
   return { ok: true, canceled: false, path: result.filePaths[0] };
 });
 
-// REQ-ELECTRON-NO-REMOTE-DEBUG-1: the localhost debug server can drive the
-// signed-in renderer, so web content must never be able to start or locate it.
-// It is a developer opt-in at launch only (HEIMDALL_UI_DEBUG=1), never via IPC.
-let currentDebugPort = 0;
-
 ipcMain.handle('heimdall-api:open-external', async (_event, url: string) => {
-  await shell.openExternal(String(url || ''));
+  const href = allowedExternalUrl(url);
+  if (!href) return { ok: false, error: 'Only https: and mailto: links can be opened.' };
+  await shell.openExternal(href);
   return { ok: true };
 });
 
@@ -462,7 +506,7 @@ function installAppMenu() {
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
-app.whenReady().then(async () => {
+app.whenReady().then(() => {
   // macOS dock icon (window `icon` is ignored on macOS; the dock uses this).
   if (process.platform === 'darwin' && appIcon && app.dock) {
     app.dock.setIcon(appIcon);
@@ -479,8 +523,6 @@ app.whenReady().then(async () => {
   // `server.proxy` (see vite.config.js) forwards `/api/v1` to the local Hub.
   // Packaged builds load the HTTPS Hub UI directly; both use its OIDC cookie.
   const daemonUrl = process.env.HEIMDALL_DAEMON_URL || 'http://127.0.0.1:49322';
-  pruneAndRegister(daemonUrl);
-  updatePort(0); // Explicitly 0 since disabled by default
 
   console.log('[heimdall] startup config:');
   console.log(`  daemon_url=${daemonUrl}`);
@@ -498,12 +540,6 @@ app.whenReady().then(async () => {
   if (!backgroundLaunch) createWindow();
   else app.dock?.hide();
 
-  if (process.env.HEIMDALL_UI_DEBUG === '1') {
-    currentDebugPort = await startDebugServer();
-    updatePort(currentDebugPort);
-    console.log(`[heimdall] debug_server_port=${currentDebugPort}`);
-  }
-
   app.on('activate', () => {
     showMainWindow();
   });
@@ -511,13 +547,13 @@ app.whenReady().then(async () => {
 
 app.on('before-quit', () => {
   isQuitting = true;
+  bridgeManager.stopEnrollment();
   if (trayRefreshTimer) clearInterval(trayRefreshTimer);
   trayRefreshTimer = null;
   if (userRefreshTimer) clearInterval(userRefreshTimer);
   userRefreshTimer = null;
   statusTray?.destroy();
   statusTray = null;
-  deregister();
 });
 
 app.on('window-all-closed', () => {

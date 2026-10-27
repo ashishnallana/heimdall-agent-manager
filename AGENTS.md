@@ -188,7 +188,7 @@ The Heimdall desktop UI.
 - HTTP API client in `src/ui/api/daemonApi.ts`
 - Redux slices in `src/ui/store/*`
 - React components in `src/ui/components/*`
-- Exposes/consumes the debug-element surface used by the Electron debug API
+- Tags interactive elements with stable `data-debug-id` selectors for tests and browser harnesses
 - Uses `/user-client/register`, `/user-ws`, REST reads, and `/user-rpc` mutations for most interactive flows
 
 ### `src/lib`
@@ -437,7 +437,7 @@ For daemon-launched wrappers, the daemon may pre-generate the agent token, retur
 
 ## UI Debug IDs
 
-Every interactive element in the Electron UI must have a `data-debug-id` attribute. The Electron debug API (exposed at `http://127.0.0.1:<debug-port>/elements`, `/click`, `/type`, etc.) uses these IDs to locate and interact with elements programmatically.
+Every interactive element in the UI must have a `data-debug-id` attribute. UI tests and browser automation (Playwright/Puppeteer scripts under `tests/e2e/` and `scripts/`) use these IDs as stable selectors. The Electron app deliberately has no debug-control server (REQ-ELECTRON-NO-REMOTE-DEBUG-1); do not add one.
 
 ### Naming convention
 

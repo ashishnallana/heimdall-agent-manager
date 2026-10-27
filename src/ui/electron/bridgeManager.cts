@@ -7,6 +7,12 @@ const childProcess = require('child_process');
 // receives only structured status and the two explicit install/enroll actions.
 let busy = false;
 let enrollmentProcess: any = null;
+// REQ-REENROLL-RECOVER-1: enroll.sh boots the running service out before it
+// enrolls, and only a successful enrollment brings it back. A re-enrollment
+// that fails, is abandoned or is stopped by quitting the app must restart the
+// Bridge with its existing credential instead of leaving it offline.
+let enrollmentRecovery: { hubUrl: string } | null = null;
+let enrollmentStopping = false;
 
 function normalizeOrigin(value: string): string {
   try { return new URL(String(value || '')).origin; } catch (_err) { return String(value || '').replace(/\/$/, ''); }
@@ -149,24 +155,29 @@ async function installBundled(hubUrl: string) {
   } finally { busy = false; }
 }
 
+function launchAgent(hubUrl: string): { serviceName: string; plist: string; target: string; error: string } {
+  const state = findState(hubUrl);
+  if (process.platform !== 'darwin' || !state) return { serviceName: '', plist: '', target: '', error: 'Install the packaged Bridge before restarting it.' };
+  const plist = path.join(os.homedir(), 'Library', 'LaunchAgents', `${state.serviceName}.plist`);
+  if (!fs.existsSync(plist)) return { serviceName: '', plist: '', target: '', error: `LaunchAgent is missing: ${plist}` };
+  return { serviceName: state.serviceName, plist, target: `gui/${process.getuid()}/${state.serviceName}`, error: '' };
+}
+
 async function restart(hubUrl: string) {
   if (busy || enrollmentProcess) return { ok: false, status: getStatus(hubUrl), error: 'A Bridge operation is already running.' };
-  const state = findState(hubUrl);
-  if (process.platform !== 'darwin' || !state) return { ok: false, status: getStatus(hubUrl), error: 'Install the packaged Bridge before restarting it.' };
-  const plist = path.join(os.homedir(), 'Library', 'LaunchAgents', `${state.serviceName}.plist`);
-  if (!fs.existsSync(plist)) return { ok: false, status: getStatus(hubUrl), error: `LaunchAgent is missing: ${plist}` };
+  const { serviceName, plist, target, error: agentError } = launchAgent(hubUrl);
+  if (agentError) return { ok: false, status: getStatus(hubUrl), error: agentError };
   busy = true;
   let error = '';
   try {
-    const target = `gui/${process.getuid()}/${state.serviceName}`;
     const loaded = await runProcess('/bin/launchctl', ['print', target]);
     if (loaded.code !== 0) {
       const bootstrapped = await runProcess('/bin/launchctl', ['bootstrap', `gui/${process.getuid()}`, plist]);
-      if (bootstrapped.code !== 0) error = commandError(bootstrapped.output, `Unable to load ${state.serviceName}.`);
+      if (bootstrapped.code !== 0) error = commandError(bootstrapped.output, `Unable to load ${serviceName}.`);
     }
     if (!error) {
       const kicked = await runProcess('/bin/launchctl', ['kickstart', '-k', target]);
-      if (kicked.code !== 0) error = commandError(kicked.output, `Unable to restart ${state.serviceName}.`);
+      if (kicked.code !== 0) error = commandError(kicked.output, `Unable to restart ${serviceName}.`);
     }
   } catch (caught: any) {
     error = String(caught?.message || caught || 'Unable to restart the Bridge.');
@@ -176,12 +187,28 @@ async function restart(hubUrl: string) {
   return { ok: !error, status: getStatus(hubUrl), ...(error ? { error } : {}) };
 }
 
-function startEnrollment(hubUrl: string, emit: (event: any) => void) {
+// restartSync is the quit-time variant of restart(): the app is exiting, so it
+// cannot await child processes. launchctl print/bootstrap/kickstart are fast.
+function restartSync(hubUrl: string): string {
+  const agent = launchAgent(hubUrl);
+  if (agent.error) return agent.error;
+  const options = { stdio: 'ignore', timeout: 5000 };
+  if (childProcess.spawnSync('/bin/launchctl', ['print', agent.target], options).status !== 0
+    && childProcess.spawnSync('/bin/launchctl', ['bootstrap', `gui/${process.getuid()}`, agent.plist], options).status !== 0) {
+    return `Unable to load ${agent.serviceName}.`;
+  }
+  return childProcess.spawnSync('/bin/launchctl', ['kickstart', '-k', agent.target], options).status === 0 ? '' : `Unable to restart ${agent.serviceName}.`;
+}
+
+function startEnrollment(hubUrl: string, emit: (event: any) => void, options: { restartOnFailure?: boolean } = {}) {
   if (enrollmentProcess) return { ok: false, error: 'Enrollment is already running.' };
   const state = findState(hubUrl);
   const script = state && path.join(state.stateDir, 'enroll.sh');
   if (!script || !fs.existsSync(script)) return { ok: false, error: 'Install the packaged Bridge before enrolling it.' };
-  enrollmentProcess = childProcess.spawn('/bin/bash', [script, '--headless'], { env: bridgeHostEnv(), stdio: ['ignore', 'pipe', 'pipe'] });
+  // Its own process group, so stopEnrollment() also stops the ham-bridge child.
+  enrollmentProcess = childProcess.spawn('/bin/bash', [script, '--headless'], { env: bridgeHostEnv(), stdio: ['ignore', 'pipe', 'pipe'], detached: true });
+  enrollmentRecovery = options.restartOnFailure ? { hubUrl } : null;
+  enrollmentStopping = false;
   let buffer = '';
   let pairingSent = false;
   const onData = (chunk: any) => {
@@ -194,17 +221,42 @@ function startEnrollment(hubUrl: string, emit: (event: any) => void) {
   enrollmentProcess.stdout.on('data', onData); enrollmentProcess.stderr.on('data', onData);
   enrollmentProcess.on('error', (error: Error) => { emit({ type: 'error', message: error.message }); enrollmentProcess = null; });
   enrollmentProcess.on('close', (code: number) => {
-    emit(code === 0 ? { type: 'complete', message: 'Bridge enrollment complete.' } : { type: 'error', message: `Enrollment exited with status ${code}.` });
     enrollmentProcess = null;
+    const recovery = enrollmentRecovery;
+    enrollmentRecovery = null;
+    if (code === 0) { emit({ type: 'complete', message: 'Bridge enrollment complete.' }); return; }
+    const message = `Enrollment exited with status ${code}.`;
+    // stopEnrollment() already restarted the Bridge synchronously.
+    if (!recovery || enrollmentStopping) { emit({ type: 'error', message }); return; }
+    void restart(recovery.hubUrl).then((result) => emit({
+      type: 'error',
+      message: result.ok
+        ? `${message} The Bridge was restarted with its existing enrollment.`
+        : `${message} The Bridge could not be restarted: ${result.error}`,
+    }));
   });
   return { ok: true };
+}
+
+// stopEnrollment ends a running enrollment when the app quits. A re-enrollment
+// that is cut short restarts the Bridge it booted out.
+function stopEnrollment(): void {
+  const proc = enrollmentProcess;
+  if (!proc) return;
+  enrollmentStopping = true;
+  try { process.kill(-proc.pid, 'SIGTERM'); } catch (_err) { try { proc.kill('SIGTERM'); } catch (_ignored) { /* Already exited. */ } }
+  if (enrollmentRecovery) {
+    const error = restartSync(enrollmentRecovery.hubUrl);
+    if (error) console.warn('[heimdall] unable to restart Bridge after stopping re-enrollment:', error);
+  }
+  enrollmentRecovery = null;
 }
 
 function startReEnrollment(hubUrl: string, emit: (event: any) => void) {
   const status = getStatus(hubUrl);
   if (!status.installed) return { ok: false, error: 'Install the packaged Bridge before re-enrolling it.' };
   if (!status.enrolled) return { ok: false, error: 'This Bridge is not enrolled yet. Use the standard enrollment action.' };
-  return startEnrollment(hubUrl, emit);
+  return startEnrollment(hubUrl, emit, { restartOnFailure: true });
 }
 
-module.exports = { extractEnrollmentPairing, getStatus, installBundled, restart, startEnrollment, startReEnrollment };
+module.exports = { extractEnrollmentPairing, getStatus, installBundled, restart, startEnrollment, startReEnrollment, stopEnrollment };
