@@ -68,7 +68,7 @@ function openOidcWindow(url: string, owner: any) {
   // default Electron cookie jar. Once the Hub callback has set its HttpOnly
   // session cookie, the trusted main window reloads the same-origin Hub UI.
   if (authWindow && !authWindow.isDestroyed()) { authWindow.focus(); return; }
-  authWindow = new BrowserWindow({
+  const loginWindow = new BrowserWindow({
     width: 620,
     height: 760,
     parent: owner || undefined,
@@ -76,21 +76,31 @@ function openOidcWindow(url: string, owner: any) {
     title: `Sign in to ${APP_DISPLAY_NAME}`,
     webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true },
   });
+  authWindow = loginWindow;
   const uiOrigin = new URL(configuredUiOrigin()).origin;
+  let finishing = false;
   const finishIfReturned = (_event: any, nextUrl: string) => {
     try {
       const parsed = new URL(nextUrl);
       if (parsed.origin !== uiOrigin || parsed.pathname.startsWith('/api/v1/auth/login') || parsed.pathname.startsWith('/api/v1/auth/callback')) return;
-      const main = owner && !owner.isDestroyed() ? owner : BrowserWindow.getAllWindows().find((candidate: any) => candidate !== authWindow);
-      authWindow?.close();
-      authWindow = null;
-      main?.loadURL(configuredUiOrigin());
+      if (finishing) return;
+      finishing = true;
+      // Chromium emits redirect/navigation events from inside its navigation
+      // stack. Destroying the emitting WebContents synchronously trips a fatal
+      // CHECK in Electron on macOS. Complete OIDC on the next event-loop turn,
+      // after the callback response has committed its HttpOnly session cookie.
+      setImmediate(() => {
+        const main = owner && !owner.isDestroyed() ? owner : BrowserWindow.getAllWindows().find((candidate: any) => candidate !== loginWindow);
+        if (!loginWindow.isDestroyed()) loginWindow.close();
+        if (authWindow === loginWindow) authWindow = null;
+        void main?.loadURL(configuredUiOrigin());
+      });
     } catch (_err) { /* Keep the OIDC window open for non-URL navigations. */ }
   };
-  authWindow.webContents.on('did-navigate', finishIfReturned);
-  authWindow.webContents.on('did-redirect-navigation', finishIfReturned);
-  authWindow.on('closed', () => { authWindow = null; });
-  void authWindow.loadURL(url);
+  loginWindow.webContents.on('did-navigate', finishIfReturned);
+  loginWindow.webContents.on('did-redirect-navigation', finishIfReturned);
+  loginWindow.on('closed', () => { if (authWindow === loginWindow) authWindow = null; });
+  void loginWindow.loadURL(url);
 }
 
 function createWindow() {

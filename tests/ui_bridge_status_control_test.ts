@@ -65,3 +65,10 @@ test('REQ-OIDC-DESKTOP-1: Electron has no HUT bearer-token bridge and loads the 
   assert.match(mainSource, /nodeIntegration: false,\s+sandbox: true,\s+preload:/);
   assert.doesNotMatch(authGateSource, /headers\.set\(['"]Authorization|getStoredToken|device\/authorize/);
 });
+
+test('REQ-OIDC-DESKTOP-1: OIDC completion does not destroy its window inside a navigation callback', () => {
+  assert.match(mainSource, /let finishing = false/);
+  assert.match(mainSource, /if \(finishing\) return;\s+finishing = true/);
+  assert.match(mainSource, /setImmediate\(\(\) => \{[\s\S]*loginWindow\.close\(\)/);
+  assert.doesNotMatch(mainSource, /finishIfReturned[\s\S]*?authWindow\?\.close\(\)/);
+});
