@@ -295,26 +295,30 @@ ctl_extension_install_local :: proc(provider, path_override: string) -> (bool, s
 		}
 		_, err_msg, registered := ctl_extension_install_step({bin_path, "plugin", "marketplace", "add", root}, deadline)
 		if !registered do return false, err_msg
+	} else if prov == ext.CLAUDE_PROVIDER || prov == "claude-code" {
+		// Older Claude Code releases reject `plugin install --marketplace` and
+		// `-y`; register the marketplace, then install by plugin id.
+		root := ext_path
+		if !os.exists(ctl_path_join({root, ".claude-plugin", "marketplace.json"})) do root = filepath.dir(ext_path)
+		if !os.exists(ctl_path_join({root, ".claude-plugin", "marketplace.json"})) {
+			return false, fmt.tprintf("missing Claude marketplace metadata (.claude-plugin/marketplace.json) for extension directory: %s", ext_path)
+		}
+		_, err_msg, registered := ctl_extension_install_step({bin_path, "plugin", "marketplace", "add", root}, deadline)
+		if !registered do return false, err_msg
 	}
 
 	argv: []string
 	if prov == ext.ANTIGRAVITY_PROVIDER {
 		argv = []string{bin_path, "plugin", "install", ext_path}
 	} else if prov == ext.CLAUDE_PROVIDER || prov == "claude-code" {
-		root := filepath.dir(ext_path)
-		if os.exists(ctl_path_join({ext_path, ".claude-plugin", "marketplace.json"})) do root = ext_path
-		if os.exists(ctl_path_join({root, ".claude-plugin", "marketplace.json"})) {
-			argv = []string{bin_path, "plugin", "install", "--marketplace", root, "heimdall", "-y"}
-		} else {
-			argv = []string{bin_path, "plugin", "install", ext_path, "-y"}
-		}
+		argv = []string{bin_path, "plugin", "install", "heimdall@heimdall"}
 	} else {
 		argv = []string{bin_path, "plugin", "add", "heimdall@heimdall-codex"}
 	}
 	output, err_msg, installed := ctl_extension_install_step(argv, deadline)
 	if !installed do return false, err_msg
 	if (prov == ext.CLAUDE_PROVIDER || prov == "claude-code") && strings.contains(strings.to_lower(output, context.temp_allocator), "already installed") {
-		_, update_error, updated := ctl_extension_install_step({bin_path, "plugin", "update", "heimdall@heimdall", "-y"}, deadline)
+		_, update_error, updated := ctl_extension_install_step({bin_path, "plugin", "update", "heimdall@heimdall"}, deadline)
 		if !updated do return false, update_error
 	}
 
@@ -335,7 +339,7 @@ print_help_extension_install :: proc() {
 	fmt.println("")
 	fmt.println("PROVIDERS")
 	fmt.println("  antigravity  Google Antigravity CLI (agy plugin install <path>)")
-	fmt.println("  claude       Claude Code (claude plugin install)")
+	fmt.println("  claude       Claude Code (claude plugin marketplace add + plugin install)")
 	fmt.println("  codex        Codex CLI (codex plugin add)")
 	fmt.println("")
 	fmt.println("OPTIONS")

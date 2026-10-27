@@ -17,6 +17,23 @@ Bridge_Provider_Discover_Proc :: proc(filter: []string) -> [dynamic]Bridge_Provi
 
 bridge_extension_discover: Bridge_Provider_Discover_Proc = bridge_provider_discover_execute
 
+Bridge_Extension_Required_Version_Proc :: proc(provider: string) -> string
+
+// The Hub catalog's minimum extension version for a provider ("" when unknown).
+bridge_extension_required_version: Bridge_Extension_Required_Version_Proc = bridge_extension_catalog_required_version
+
+bridge_extension_catalog_required_version :: proc(provider: string) -> string {
+	profile, ok := bridge_provider_catalog_profile(provider)
+	if !ok do return ""
+	return strings.trim_space(profile.extension.min_version)
+}
+
+// Claude Code resolves plugins only through registered marketplaces. Older
+// releases reject `plugin install --marketplace` and `-y`, so installation
+// registers the bundled marketplace first and then installs by plugin id.
+BRIDGE_CLAUDE_PLUGIN_ID :: "heimdall@heimdall"
+BRIDGE_CODEX_PLUGIN_ID :: "heimdall@heimdall-codex"
+
 bridge_provider_extension_install_progress_json :: proc(command_id, provider, stage: string, progress_percent: int, message: string) -> string {
 	b := strings.builder_make()
 	strings.write_string(&b, "{\"type\":\"provider_extension_install_progress\",\"command_id\":\"")
@@ -56,37 +73,11 @@ bridge_provider_extension_build_install_args :: proc(provider, binary_path, exte
 		return argv
 	}
 	if prov == "claude" || prov == "claude-code" {
-		parent := filepath.dir(extension_path)
-		marketplace_file, _ := filepath.join({parent, ".claude-plugin", "marketplace.json"}, allocator)
-		if os.exists(marketplace_file) {
-			argv := make([]string, 7, allocator)
-			argv[0] = binary_path
-			argv[1] = "plugin"
-			argv[2] = "install"
-			argv[3] = "--marketplace"
-			argv[4] = parent
-			argv[5] = "heimdall"
-			argv[6] = "-y"
-			return argv
-		}
-		marketplace_self, _ := filepath.join({extension_path, ".claude-plugin", "marketplace.json"}, allocator)
-		if os.exists(marketplace_self) {
-			argv := make([]string, 7, allocator)
-			argv[0] = binary_path
-			argv[1] = "plugin"
-			argv[2] = "install"
-			argv[3] = "--marketplace"
-			argv[4] = extension_path
-			argv[5] = "heimdall"
-			argv[6] = "-y"
-			return argv
-		}
-		argv := make([]string, 5, allocator)
+		argv := make([]string, 4, allocator)
 		argv[0] = binary_path
 		argv[1] = "plugin"
 		argv[2] = "install"
-		argv[3] = extension_path
-		argv[4] = "-y"
+		argv[3] = BRIDGE_CLAUDE_PLUGIN_ID
 		return argv
 	}
 	if prov == "codex" {
@@ -94,7 +85,7 @@ bridge_provider_extension_build_install_args :: proc(provider, binary_path, exte
 		argv[0] = binary_path
 		argv[1] = "plugin"
 		argv[2] = "add"
-		argv[3] = "heimdall@heimdall-codex"
+		argv[3] = BRIDGE_CODEX_PLUGIN_ID
 		return argv
 	}
 
@@ -114,6 +105,19 @@ bridge_codex_resolve_marketplace_root :: proc(ext_path: string, allocator := con
 	mp2, _ := filepath.join({parent, ".agents", "plugins", "marketplace.json"}, context.temp_allocator)
 	if os.exists(mp2) do return strings.clone(parent, allocator), true
 
+
+	return "", false
+}
+
+// bridge_claude_resolve_marketplace_root finds the directory holding
+// .claude-plugin/marketplace.json: the extension itself or its parent.
+bridge_claude_resolve_marketplace_root :: proc(ext_path: string, allocator := context.temp_allocator) -> (string, bool) {
+	own, _ := filepath.join({ext_path, ".claude-plugin", "marketplace.json"}, context.temp_allocator)
+	if os.exists(own) do return strings.clone(ext_path, allocator), true
+
+	parent := filepath.dir(ext_path)
+	shared, _ := filepath.join({parent, ".claude-plugin", "marketplace.json"}, context.temp_allocator)
+	if os.exists(shared) do return strings.clone(parent, allocator), true
 
 	return "", false
 }
@@ -245,8 +249,15 @@ bridge_hub_handle_extension_install_command :: proc(conn: ^ws.Connection, text: 
 	// remaining budget, keeping the total below the dispatcher's sixty-second cap.
 	deadline := time.time_add(time.now(), 55 * time.Second)
 	install_deadline := time.time_add(deadline, -8 * time.Second)
-	expected_version := bridge_provider_extension_read_manifest_version(ext_path, prov)
+	bundled_version := bridge_provider_extension_read_manifest_version(ext_path, prov)
 	canonical_provider := "claude" if prov == "claude-code" else prov
+	required_version := bridge_extension_required_version(canonical_provider)
+	// Verification needs the newer of the bundled manifest and the catalog
+	// minimum; discovery reports "outdated" below the latter.
+	expected_version := bundled_version
+	if required_version != "" && bundled_version != "" && bridge_provider_extension_version_compare(required_version, bundled_version) > 0 {
+		expected_version = required_version
+	}
 
 	// REQ-MB-5: provider plugin registration is per OS user, so another Bridge
 	// under the same account may already have registered its own copy. Installing
@@ -262,6 +273,30 @@ bridge_hub_handle_extension_install_command :: proc(conn: ^ws.Connection, text: 
 			if conn != nil do _ = bridge_hub_send(conn, final)
 		}
 		return
+	}
+
+	// Installing a bundle older than the catalog minimum cannot satisfy
+	// verification and would only re-point the registration at stale assets.
+	if required_version != "" && bundled_version != "" && bridge_provider_extension_version_compare(bundled_version, required_version) < 0 {
+		bridge_extension_install_fail(conn, command_id, prov, "bundled_extension_outdated",
+			fmt.tprintf("bundled %s extension at %s is version %q, but Heimdall requires %q or newer; update this Bridge to a release that bundles extension %s, then retry",
+				prov, ext_path, bundled_version, required_version, required_version))
+		return
+	}
+
+	if prov == "claude" || prov == "claude-code" {
+		mp_root, has_mp := bridge_claude_resolve_marketplace_root(ext_path)
+		if !has_mp {
+			bridge_extension_install_fail(conn, command_id, prov, "missing_marketplace",
+				fmt.tprintf("missing Claude marketplace metadata (.claude-plugin/marketplace.json) for extension directory: %s", ext_path))
+			return
+		}
+		_ = bridge_provider_extension_install_send_progress(conn, command_id, prov, "installing", 25, "Registering Claude local plugin marketplace...")
+		_, message, registered := bridge_extension_install_step({bin_path, "plugin", "marketplace", "add", mp_root}, install_deadline)
+		if !registered {
+			bridge_extension_install_fail(conn, command_id, prov, "marketplace_add_failed", message)
+			return
+		}
 	}
 
 	if prov == "codex" {
@@ -288,7 +323,7 @@ bridge_hub_handle_extension_install_command :: proc(conn: ^ws.Connection, text: 
 	}
 	if (prov == "claude" || prov == "claude-code") && strings.contains(strings.to_lower(output, context.temp_allocator), "already installed") {
 		_ = bridge_provider_extension_install_send_progress(conn, command_id, prov, "installing", 65, "Updating existing Claude extension...")
-		_, message, updated := bridge_extension_install_step({bin_path, "plugin", "update", "heimdall@heimdall", "-y"}, install_deadline)
+		_, message, updated := bridge_extension_install_step({bin_path, "plugin", "update", BRIDGE_CLAUDE_PLUGIN_ID}, install_deadline)
 		if !updated {
 			bridge_extension_install_fail(conn, command_id, prov, "update_failed", message)
 			return
@@ -325,7 +360,8 @@ bridge_hub_handle_extension_install_command :: proc(conn: ^ws.Connection, text: 
 	}
 	if !verified {
 		bridge_extension_install_fail(conn, command_id, prov, "verify_failed",
-			fmt.tprintf("extension installation verification failed: state is %q, version is %q (expected %q)", actual_state, actual_version, expected_version))
+			fmt.tprintf("extension installation verification failed: state is %q, version is %q (required %q or newer, bundled %q)",
+				actual_state, actual_version, expected_version, bundled_version))
 		return
 	}
 	_ = bridge_provider_extension_install_send_progress(conn, command_id, prov, "succeeded", 100, "Provider extension installed successfully")
