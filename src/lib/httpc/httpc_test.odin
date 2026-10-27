@@ -106,6 +106,28 @@ url_rejects_unsafe_input :: proc(t: ^testing.T) {
 }
 
 @(test)
+websocket_url_accepts_only_canonical_ws_origins :: proc(t: ^testing.T) {
+	if !must_init(t) do return
+	good := []string{
+		"ws://127.0.0.1:8080/api/v1/bridge/ws",
+		"wss://hub.example/api/v1/bridge/ws?ticket=abc",
+	}
+	for value in good {
+		got, err := websocket_url(value, context.temp_allocator)
+		testing.expect_value(t, err, Error.None)
+		testing.expectf(t, got != "", "%q should produce a canonical URL", value)
+	}
+	bad := []string{
+		"", "https://hub.example/ws", "file:///tmp/socket", "wss://user@hub.example/ws",
+		"wss://hub.example/ws#fragment", "wss://hub.example/ws\r\nInjected: yes",
+	}
+	for value in bad {
+		_, err := websocket_url(value, context.temp_allocator)
+		testing.expectf(t, err == .Invalid_Url, "%q should be rejected, got %v", value, err)
+	}
+}
+
+@(test)
 build_target_renders_origin_form :: proc(t: ^testing.T) {
 	if !must_init(t) do return
 	got, err := build_target({"api", "v1", "tasks", "t 1"}, {{"status", "in progress"}}, context.temp_allocator)

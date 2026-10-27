@@ -14,6 +14,8 @@ let enrollmentProcess: any = null;
 let enrollmentRecovery: { hubUrl: string } | null = null;
 let enrollmentStopping = false;
 
+const BRIDGE_ID_PATTERN = /^brg_[A-Za-z0-9_-]{1,60}$/;
+
 function normalizeOrigin(value: string): string {
   try { return new URL(String(value || '')).origin; } catch (_err) { return String(value || '').replace(/\/$/, ''); }
 }
@@ -36,6 +38,33 @@ function findState(hubUrl: string): { stateDir: string; serviceName: string } | 
     } catch (_err) { /* Ignore incomplete/foreign state directories. */ }
   }
   return null;
+}
+
+// The bridge id is not a credential. Keep it independently discoverable so a
+// missing/rotated token can still enter the explicit --reuse-bridge flow rather
+// than being mistaken for a first enrollment.
+function discoverBridgeId(stateDir: string): string {
+  const candidates: string[] = [];
+  try { candidates.push(fs.readFileSync(path.join(stateDir, 'bridge-id'), 'utf8').trim()); } catch (_err) { /* Optional marker. */ }
+  try {
+    const config = fs.readFileSync(path.join(stateDir, 'config.toml'), 'utf8');
+    candidates.push(config.match(/^\s*daemon_id\s*=\s*"(brg_[A-Za-z0-9_-]{1,60})"\s*$/m)?.[1] || '');
+  } catch (_err) { /* An incomplete install has no config yet. */ }
+  try {
+    const header = fs.readFileSync(path.join(stateDir, 'bridge-token'), 'utf8').split(/\r?\n/, 1)[0] || '';
+    candidates.push(header.match(/^heimdall-bridge-credential\/v1\s+\S+\s+(brg_[A-Za-z0-9_-]{1,60})$/)?.[1] || '');
+  } catch (_err) { /* Tokenless is a valid re-enrollment state. */ }
+  const valid = [...new Set(candidates.filter((candidate) => BRIDGE_ID_PATTERN.test(candidate)))];
+  // A stale marker must never authorize replacement of a different identity.
+  // Require every available source to agree; the operator can then repair the
+  // non-secret metadata rather than Electron guessing which key to replace.
+  return valid.length === 1 ? valid[0] : '';
+}
+
+function rememberBridgeId(stateDir: string, bridgeId: string) {
+  if (!BRIDGE_ID_PATTERN.test(bridgeId)) return;
+  try { fs.writeFileSync(path.join(stateDir, 'bridge-id'), `${bridgeId}\n`, { mode: 0o600 }); }
+  catch (_err) { /* config.toml remains the compatibility source of truth. */ }
 }
 
 function resources(): { installScript: string; bundle: string; checksums: string; metadata: string } {
@@ -72,19 +101,23 @@ function getStatus(hubUrl: string) {
   const packaged = Object.values(resources()).every((file: any) => fs.existsSync(file));
   if (process.platform !== 'darwin') return {
     supported: false, packaged: false, installed: false, enrolled: false,
-    serviceState: 'not-installed', serviceName: '', hubUrl, installedVersion: '', bundledVersion: '', busy: busy || Boolean(enrollmentProcess), error: '',
+    bridgeId: '', canReEnroll: false, serviceState: 'not-installed', serviceName: '', hubUrl, installedVersion: '', bundledVersion: '', busy: busy || Boolean(enrollmentProcess), error: '',
   };
   const state = findState(hubUrl);
   const dataDir = state ? path.join(os.homedir(), '.local', 'share', 'heimdall', 'bridges', state.serviceName) : '';
   const binary = dataDir ? path.join(dataDir, 'bin', 'ham-bridge') : '';
   const installed = Boolean(state && fs.existsSync(binary));
-  const enrolled = Boolean(state && fs.existsSync(path.join(state.stateDir, 'bridge-token')));
+  let enrolled = false;
+  try { enrolled = Boolean(state && fs.statSync(path.join(state.stateDir, 'bridge-token')).size > 0); } catch (_err) { /* Tokenless. */ }
+  const bridgeId = state ? discoverBridgeId(state.stateDir) : '';
   const running = Boolean(state && launchdRunning(state.serviceName));
   return {
     supported: true,
     packaged,
     installed,
     enrolled,
+    bridgeId,
+    canReEnroll: Boolean(bridgeId),
     serviceState: installed ? (running ? 'running' : 'stopped') : 'not-installed',
     serviceName: state?.serviceName || '',
     hubUrl,
@@ -109,16 +142,28 @@ function runProcess(command: string, args: string[], env: NodeJS.ProcessEnv = pr
   });
 }
 
-// REQ-DMG-ENV-1: Finder-launched apps do not inherit Homebrew/Nix paths. macOS
-// ships /usr/bin/openssl, so every Bridge host process the app starts (install,
-// enroll, re-enroll) selects the bridge's verified s_client fallback instead of
-// requiring an external socat install. Enrollment needs it too: `ham-bridge
-// enroll` opens the Hub WebSocket to receive the encrypted vault key.
+// REQ-DMG-ENV-1: Finder-launched apps do not inherit Homebrew/Nix paths. Bridge
+// HTTPS and WSS are provided by the packaged binary's pinned libcurl, so only the
+// stock paths needed by the installer/service tools are required here.
 function bridgeHostEnv(): NodeJS.ProcessEnv {
+  const home = os.homedir();
+  const providerPaths = [
+    '/usr/bin', '/bin', '/usr/sbin', '/sbin',
+    '/usr/local/bin', '/opt/homebrew/bin',
+    path.join(home, '.local', 'bin'),
+    path.join(home, '.npm-global', 'bin'),
+    path.join(home, '.bun', 'bin'),
+    path.join(home, '.volta', 'bin'),
+    path.join(home, '.cargo', 'bin'),
+    path.join(home, '.nix-profile', 'bin'),
+    '/run/current-system/sw/bin',
+    '/nix/var/nix/profiles/default/bin',
+  ];
   return {
     ...process.env,
-    PATH: '/usr/bin:/bin:/usr/sbin:/sbin',
-    HAM_TLS_BACKEND: 's_client',
+    // System tools stay first while common per-user package-manager locations
+    // remain visible to the long-lived launchd bridge for provider discovery.
+    PATH: providerPaths.join(':'),
     HEIMDALL_INSTALL_PLAIN: '1',
   };
 }
@@ -200,17 +245,30 @@ function restartSync(hubUrl: string): string {
   return childProcess.spawnSync('/bin/launchctl', ['kickstart', '-k', agent.target], options).status === 0 ? '' : `Unable to restart ${agent.serviceName}.`;
 }
 
-function startEnrollment(hubUrl: string, emit: (event: any) => void, options: { restartOnFailure?: boolean } = {}) {
+function startEnrollment(
+  hubUrl: string,
+  emit: (event: any) => void,
+  options: { restartOnFailure?: boolean; reuseBridgeId?: string } = {},
+) {
   if (enrollmentProcess) return { ok: false, error: 'Enrollment is already running.' };
   const state = findState(hubUrl);
   const script = state && path.join(state.stateDir, 'enroll.sh');
   if (!script || !fs.existsSync(script)) return { ok: false, error: 'Install the packaged Bridge before enrolling it.' };
+  const reuseBridgeId = String(options.reuseBridgeId || '').trim();
+  if (reuseBridgeId && !BRIDGE_ID_PATTERN.test(reuseBridgeId)) return { ok: false, error: 'The previous Bridge ID is invalid; refusing to re-enroll it.' };
+  const args = [script, '--headless', ...(reuseBridgeId ? ['--reuse-bridge', reuseBridgeId] : [])];
   // Its own process group, so stopEnrollment() also stops the ham-bridge child.
-  enrollmentProcess = childProcess.spawn('/bin/bash', [script, '--headless'], { env: bridgeHostEnv(), stdio: ['ignore', 'pipe', 'pipe'], detached: true });
+  const proc = childProcess.spawn('/bin/bash', args, {
+    env: bridgeHostEnv(),
+    stdio: ['ignore', 'pipe', 'pipe'],
+    detached: true,
+  });
+  enrollmentProcess = proc;
   enrollmentRecovery = options.restartOnFailure ? { hubUrl } : null;
   enrollmentStopping = false;
   let buffer = '';
   let pairingSent = false;
+  let finished = false;
   const onData = (chunk: any) => {
     const message = String(chunk || '');
     buffer = (buffer + message).slice(-16_000);
@@ -218,14 +276,12 @@ function startEnrollment(hubUrl: string, emit: (event: any) => void, options: { 
     const pairing = extractEnrollmentPairing(buffer);
     if (!pairingSent && pairing) { pairingSent = true; emit({ type: 'pairing', ...pairing }); }
   };
-  enrollmentProcess.stdout.on('data', onData); enrollmentProcess.stderr.on('data', onData);
-  enrollmentProcess.on('error', (error: Error) => { emit({ type: 'error', message: error.message }); enrollmentProcess = null; });
-  enrollmentProcess.on('close', (code: number) => {
-    enrollmentProcess = null;
+  const finishFailure = (message: string) => {
+    if (finished) return;
+    finished = true;
+    if (enrollmentProcess === proc) enrollmentProcess = null;
     const recovery = enrollmentRecovery;
     enrollmentRecovery = null;
-    if (code === 0) { emit({ type: 'complete', message: 'Bridge enrollment complete.' }); return; }
-    const message = `Enrollment exited with status ${code}.`;
     // stopEnrollment() already restarted the Bridge synchronously.
     if (!recovery || enrollmentStopping) { emit({ type: 'error', message }); return; }
     void restart(recovery.hubUrl).then((result) => emit({
@@ -234,6 +290,24 @@ function startEnrollment(hubUrl: string, emit: (event: any) => void, options: { 
         ? `${message} The Bridge was restarted with its existing enrollment.`
         : `${message} The Bridge could not be restarted: ${result.error}`,
     }));
+  };
+  const finishSuccess = () => {
+    if (finished) return;
+    finished = true;
+    if (enrollmentProcess === proc) enrollmentProcess = null;
+    enrollmentRecovery = null;
+    const completedBridgeId = discoverBridgeId(state.stateDir)
+      || buffer.match(/(?:bridge_id=|(?:Re-enrolled existing|Registered new) bridge\s+)(brg_[A-Za-z0-9_-]{1,60})/)?.[1]
+      || reuseBridgeId;
+    if (completedBridgeId) rememberBridgeId(state.stateDir, completedBridgeId);
+    emit({ type: 'complete', message: 'Bridge enrollment complete.' });
+  };
+  proc.stdout.on('data', onData); proc.stderr.on('data', onData);
+  proc.on('error', (error: Error) => { finishFailure(error.message); });
+  proc.on('close', (code: number) => {
+    if (finished) return;
+    if (code === 0) finishSuccess();
+    else finishFailure(commandError(buffer, `Enrollment exited with status ${code}.`));
   });
   return { ok: true };
 }
@@ -255,8 +329,8 @@ function stopEnrollment(): void {
 function startReEnrollment(hubUrl: string, emit: (event: any) => void) {
   const status = getStatus(hubUrl);
   if (!status.installed) return { ok: false, error: 'Install the packaged Bridge before re-enrolling it.' };
-  if (!status.enrolled) return { ok: false, error: 'This Bridge is not enrolled yet. Use the standard enrollment action.' };
-  return startEnrollment(hubUrl, emit, { restartOnFailure: true });
+  if (!status.bridgeId) return { ok: false, error: 'No previous Bridge ID is recorded. Use the standard enrollment action.' };
+  return startEnrollment(hubUrl, emit, { restartOnFailure: true, reuseBridgeId: status.bridgeId });
 }
 
-module.exports = { extractEnrollmentPairing, getStatus, installBundled, restart, startEnrollment, startReEnrollment, stopEnrollment };
+module.exports = { discoverBridgeId, extractEnrollmentPairing, getStatus, installBundled, restart, startEnrollment, startReEnrollment, stopEnrollment };

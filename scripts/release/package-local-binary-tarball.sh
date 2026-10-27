@@ -308,7 +308,7 @@ cat > "$stage/METADATA.json" <<META
   "binaries": $binaries_json,
   "developer_id_signed": $signed_json,
   "http_client": "libcurl $curl_version, statically linked (nix/libcurl-pin.json; Linux: OpenSSL 3 on musl, fully static; macOS: OpenSSL 3 with Apple SecTrust verification). Nothing to install.",
-  "tls_dependency": "socat (DEFAULT bridge->hub WebSocket TLS transport; NOT bundled -- install it with your system package manager). OpenSSL s_client is the legacy fallback, used only when HAM_TLS_BACKEND=s_client; it is resolved from the system PATH and is NOT bundled in this tarball."
+  "tls_dependency": "none: HTTPS and WSS use the statically linked pinned libcurl; socat and openssl are not required."
 }
 META
 

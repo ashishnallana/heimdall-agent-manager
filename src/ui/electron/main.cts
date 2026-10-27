@@ -411,9 +411,9 @@ function refreshTrayStatus() {
     }] : [
       { label: 'Restart Bridge', enabled: !status.busy, click: () => { void restartBridgeFromTray(); } },
       {
-        label: status.enrolled ? 'Re-enroll Bridge…' : 'Enroll Bridge…',
+        label: status.canReEnroll ? 'Re-enroll Bridge…' : 'Enroll Bridge…',
         enabled: !status.busy,
-        click: () => { void enrollBridgeFromTray(Boolean(status.enrolled)); },
+        click: () => { void enrollBridgeFromTray(Boolean(status.canReEnroll)); },
       },
     ]),
     { type: 'separator' },
@@ -476,6 +476,7 @@ ipcMain.handle('heimdall-bridge:install-bundled', async () => {
   return result;
 });
 ipcMain.handle('heimdall-bridge:start-enrollment', () => bridgeManager.startEnrollment(configuredHubApiBaseUrl(), handleEnrollmentEvent));
+ipcMain.handle('heimdall-bridge:start-re-enrollment', () => bridgeManager.startReEnrollment(configuredHubApiBaseUrl(), handleEnrollmentEvent));
 
 
 // Build an application menu whose FIRST submenu is titled with the app name.

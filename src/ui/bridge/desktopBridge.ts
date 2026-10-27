@@ -9,6 +9,8 @@ export interface DesktopBridgeStatus {
   packaged: boolean;
   installed: boolean;
   enrolled: boolean;
+  bridgeId: string;
+  canReEnroll: boolean;
   serviceState: DesktopBridgeServiceState;
   serviceName: string;
   hubUrl: string;
@@ -28,6 +30,7 @@ export interface DesktopBridgeManagerApi {
   getStatus(): Promise<DesktopBridgeStatus>;
   installBundled(): Promise<{ ok: boolean; status: DesktopBridgeStatus; error?: string }>;
   startEnrollment(): Promise<{ ok: boolean; error?: string }>;
+  startReEnrollment(): Promise<{ ok: boolean; error?: string }>;
   onEnrollmentEvent(callback: (event: DesktopBridgeEnrollmentEvent) => void): () => void;
   onCheckUpdatesRequested(callback: () => void): () => void;
 }

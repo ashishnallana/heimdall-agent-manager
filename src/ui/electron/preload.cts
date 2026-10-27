@@ -20,6 +20,7 @@ contextBridge.exposeInMainWorld('odinApi', {
     getStatus: () => ipcRenderer.invoke('heimdall-bridge:get-status'),
     installBundled: () => ipcRenderer.invoke('heimdall-bridge:install-bundled'),
     startEnrollment: () => ipcRenderer.invoke('heimdall-bridge:start-enrollment'),
+    startReEnrollment: () => ipcRenderer.invoke('heimdall-bridge:start-re-enrollment'),
     onEnrollmentEvent: (callback: (event: any) => void) => {
       const listener = (_event: any, payload: any) => callback(payload);
       ipcRenderer.on('heimdall-bridge:enrollment-event', listener);

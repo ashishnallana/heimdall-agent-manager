@@ -23,6 +23,7 @@ const appShellSource = fs.readFileSync(path.join(ROOT, 'src/ui/components/shell/
 
 const base = {
   supported: true, packaged: true, installed: true, enrolled: true,
+  bridgeId: 'brg_example', canReEnroll: true,
   serviceState: 'running' as const, serviceName: 'heimdall-bridge-example',
   hubUrl: 'https://hub.example', installedVersion: '0.5.8', bundledVersion: '0.5.9', busy: false, error: '',
 };
@@ -69,6 +70,7 @@ function enrolledBridgeHome(t: any): { home: string; stateDir: string } {
   fs.writeFileSync(path.join(stateDir, 'hub-url'), 'https://hub.example\n');
   fs.writeFileSync(path.join(stateDir, 'enroll.sh'), '');
   fs.writeFileSync(path.join(stateDir, 'bridge-token'), 'token');
+  fs.writeFileSync(path.join(stateDir, 'bridge-id'), 'brg_example\n');
   const binDir = path.join(home, '.local', 'share', 'heimdall', 'bridges', serviceName, 'bin');
   fs.mkdirSync(binDir, { recursive: true });
   fs.writeFileSync(path.join(binDir, 'ham-bridge'), '');
@@ -84,12 +86,19 @@ function enrolledBridgeHome(t: any): { home: string; stateDir: string } {
 }
 
 function assertStockMacBridgeEnv(env: NodeJS.ProcessEnv) {
-  assert.equal(env.PATH, '/usr/bin:/bin:/usr/sbin:/sbin');
-  assert.equal(env.HAM_TLS_BACKEND, 's_client');
+  const home = os.homedir();
+  assert.equal(env.PATH, [
+    '/usr/bin', '/bin', '/usr/sbin', '/sbin', '/usr/local/bin', '/opt/homebrew/bin',
+    path.join(home, '.local', 'bin'), path.join(home, '.npm-global', 'bin'),
+    path.join(home, '.bun', 'bin'), path.join(home, '.volta', 'bin'),
+    path.join(home, '.cargo', 'bin'), path.join(home, '.nix-profile', 'bin'),
+    '/run/current-system/sw/bin', '/nix/var/nix/profiles/default/bin',
+  ].join(':'));
+  assert.equal(env.HAM_TLS_BACKEND, undefined);
   assert.equal(env.HEIMDALL_INSTALL_PLAIN, '1');
 }
 
-test('REQ-DMG-ENV-1: packaged install runs with the stock-macOS TLS relay environment', async (t) => {
+test('REQ-DMG-ENV-1: packaged install needs only the stock macOS tool environment', async (t) => {
   const resources = fs.mkdtempSync(path.join(os.tmpdir(), 'heimdall-bridge-resources-'));
   t.after(() => fs.rmSync(resources, { recursive: true, force: true }));
   const target = process.arch === 'arm64' ? 'darwin-arm64' : 'darwin-amd64';
@@ -108,7 +117,7 @@ test('REQ-DMG-ENV-1: packaged install runs with the stock-macOS TLS relay enviro
   assertStockMacBridgeEnv(calls[0].env);
 });
 
-test('REQ-DMG-ENV-1: enrollment runs with the same TLS relay environment as install', async (t) => {
+test('REQ-DMG-ENV-1: enrollment uses the same stock tool environment as install', async (t) => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'heimdall-bridge-home-'));
   t.after(() => fs.rmSync(home, { recursive: true, force: true }));
   const stateDir = path.join(home, '.config', 'heimdall', 'bridges', 'heimdall-bridge-hub-example');
@@ -126,6 +135,77 @@ test('REQ-DMG-ENV-1: enrollment runs with the same TLS relay environment as inst
   assert.equal(calls.length, 1);
   assert.deepEqual(calls[0].args, [path.join(stateDir, 'enroll.sh'), '--headless']);
   assertStockMacBridgeEnv(calls[0].env);
+});
+
+test('REQ-MAC-TRAY-2: tokenless state retains a safe re-enrollment identity and rejects conflicting hints', (t) => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'heimdall-bridge-state-'));
+  t.after(() => fs.rmSync(stateDir, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(stateDir, 'config.toml'), '[daemon]\ndaemon_id = "brg_previous123"\n');
+
+  assert.equal(bridgeManager.discoverBridgeId(stateDir), 'brg_previous123');
+
+  fs.writeFileSync(path.join(stateDir, 'bridge-id'), 'brg_different456\n');
+  assert.equal(bridgeManager.discoverBridgeId(stateDir), '', 'conflicting identity hints fail closed');
+});
+
+test('REQ-MAC-TRAY-2: tokenless re-enrollment explicitly reuses the recorded Bridge id', { skip: process.platform !== 'darwin' }, async (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'heimdall-bridge-home-'));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const serviceName = 'heimdall-bridge-hub-example';
+  const stateDir = path.join(home, '.config', 'heimdall', 'bridges', serviceName);
+  const binDir = path.join(home, '.local', 'share', 'heimdall', 'bridges', serviceName, 'bin');
+  fs.mkdirSync(stateDir, { recursive: true });
+  fs.mkdirSync(binDir, { recursive: true });
+  fs.writeFileSync(path.join(stateDir, 'hub-url'), 'https://hub.example\n');
+  fs.writeFileSync(path.join(stateDir, 'config.toml'), '[daemon]\ndaemon_id = "brg_previous123"\n');
+  fs.writeFileSync(path.join(stateDir, 'enroll.sh'), '');
+  fs.writeFileSync(path.join(binDir, 'ham-bridge'), '');
+  t.mock.method(os, 'homedir', () => home);
+  t.mock.method(childProcess, 'spawnSync', () => ({ status: 1, stdout: 'ham-bridge 0.5.16\n', stderr: '' }));
+  const calls = stubSpawn(t);
+  const events: any[] = [];
+  const done = new Promise<void>((resolve) => {
+    assert.deepEqual(bridgeManager.startReEnrollment('https://hub.example', (event: any) => {
+      events.push(event);
+      if (event.type === 'complete') resolve();
+    }), { ok: true });
+  });
+  await done;
+
+  assert.deepEqual(calls[0].args, [path.join(stateDir, 'enroll.sh'), '--headless', '--reuse-bridge', 'brg_previous123']);
+  assert.equal(events.filter((event) => event.type === 'complete').length, 1);
+  assert.equal(fs.readFileSync(path.join(stateDir, 'bridge-id'), 'utf8').trim(), 'brg_previous123');
+});
+
+test('REQ-MAC-TRAY-2: enrollment reports the actionable subprocess failure once', async (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'heimdall-bridge-home-'));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const stateDir = path.join(home, '.config', 'heimdall', 'bridges', 'heimdall-bridge-hub-example');
+  fs.mkdirSync(stateDir, { recursive: true });
+  fs.writeFileSync(path.join(stateDir, 'hub-url'), 'https://hub.example\n');
+  fs.writeFileSync(path.join(stateDir, 'enroll.sh'), '');
+  t.mock.method(os, 'homedir', () => home);
+  t.mock.method(childProcess, 'spawn', () => {
+    const proc: any = new EventEmitter();
+    proc.stdout = new EventEmitter();
+    proc.stderr = new EventEmitter();
+    setImmediate(() => {
+      proc.stderr.emit('data', 'bridge enroll FAILED: retained identity requires explicit reuse\n');
+      proc.emit('close', 1);
+    });
+    return proc;
+  });
+  const events: any[] = [];
+  await new Promise<void>((resolve) => {
+    bridgeManager.startEnrollment('https://hub.example', (event: any) => {
+      events.push(event);
+      if (event.type === 'error') resolve();
+    });
+  });
+
+  assert.deepEqual(events.filter((event) => event.type === 'error'), [{
+    type: 'error', message: 'bridge enroll FAILED: retained identity requires explicit reuse',
+  }]);
 });
 
 test('REQ-BTOP-1: desktop service states have explicit user-facing labels', () => {
@@ -188,6 +268,9 @@ test('REQ-MAC-TRAY-2: native menu manages packaged Bridge installation, restart,
   assert.match(mainSource, /bridgeManager\.restart\(configuredHubApiBaseUrl\(\)\)/);
   assert.match(mainSource, /'Re-enroll Bridge…'/);
   assert.match(mainSource, /bridgeManager\.startReEnrollment\(configuredHubApiBaseUrl\(\), handleEnrollmentEvent\)/);
+  assert.match(preloadSource, /startReEnrollment: \(\) => ipcRenderer\.invoke\('heimdall-bridge:start-re-enrollment'\)/);
+  assert.match(statusSource, /desktop\?\.canReEnroll/);
+  assert.match(managerSource, /'--reuse-bridge', reuseBridgeId/);
   assert.match(mainSource, /message: 'Re-enroll this Bridge\?'/);
   assert.match(mainSource, /label: 'Copy Pairing Code'/);
   assert.match(mainSource, /clipboard\.writeText/);
@@ -348,4 +431,3 @@ test('REQ-NAV-ROUTE-2: the OIDC window stays on https: or the Hub UI and opens n
   assert.match(mainSource, /loginWindow\.webContents\.on\('will-redirect', guardOidcNavigation\)/);
   assert.match(mainSource, /if \(route === 'auth'\) openOidcWindow\(url, win\);\s*else if \(route === 'external'\) void shell\.openExternal\(allowedExternalUrl\(url\)\);/);
 });
-

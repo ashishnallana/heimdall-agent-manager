@@ -17,8 +17,8 @@ def test_local_bundle_installer_contract_and_dry_run():
     source = read("scripts/install.sh")
     assert "--bundle and --checksum-file must be provided together" in source
     assert "Packaged bundle SHA-256 verification failed" in source
-    assert "HAM_TLS_BACKEND=s_client requires openssl." in source
-    assert 'env+=("HAM_TLS_BACKEND=s_client")' in source
+    assert "HAM_TLS_BACKEND=s_client requires openssl." not in source
+    assert 'env+=("HAM_TLS_BACKEND=s_client")' not in source
     assert source.index('if [ -n "$local_bundle" ]') < source.index('download "$base/SHA256SUMS"')
 
     with tempfile.TemporaryDirectory() as td:

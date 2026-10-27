@@ -204,8 +204,8 @@ for this OS user, e.g. one per Heimdall account: service heimdall-bridge-<hub>_P
 with its own enrollment, ports and ham-ctl wrapper. PROFILE is 1-31 of [a-z0-9-],
 starting with a letter or digit. Pass the same --name to --uninstall or --re-enroll it.
 Not supported on Termux.
-Requires bash, curl, tar and sha256sum (or shasum). HTTPS bridge WebSockets use socat by
-default, or openssl when HAM_TLS_BACKEND=s_client. The binaries carry their own HTTPS client (libcurl, linked statically;
+Requires bash, curl, tar and sha256sum (or shasum). The binaries carry their own
+HTTPS and secure WebSocket client (libcurl, linked statically;
 Linux builds are fully static), so no libcurl or OpenSSL is needed on this machine.
 The Hub is checked first (20 s budget, exact failure reason). Verified release
 tarballs are cached in ${XDG_CACHE_HOME:-~/.cache}/heimdall/releases and reused
@@ -718,7 +718,6 @@ render_service() {
   # The service environment, in this order (keys sorted for the plist).
   local -a env=("PATH=$bin:$path" "HEIMDALL_HAM_PTY_HOST_BIN=$bin/ham-pty-host" HEIMDALL_BRIDGE_PTY_HOST=true
     "HEIMDALL_HAM_CTL_BIN=$wrapper" "HEIMDALL_BRIDGE_ENDPOINT=tcp:127.0.0.1:$endpoint" "HEIMDALL_BRIDGE_SERVICE_NAME=$service_env")
-  if [ "${HAM_TLS_BACKEND:-}" = s_client ]; then env+=("HAM_TLS_BACKEND=s_client"); fi
   case "$svc" in
     runit)
       # termux-services run file: exec the bridge under runsv with the same
@@ -1000,15 +999,6 @@ main() {
   command -v curl >/dev/null || fail 'curl is required.'
   command -v tar >/dev/null || fail 'tar is required.'
   command -v sha256sum >/dev/null || command -v shasum >/dev/null || fail 'sha256sum (coreutils) or shasum is required.'
-  case "$hub_url" in
-    https:*)
-      if [ "${HAM_TLS_BACKEND:-}" = s_client ]; then
-        command -v openssl >/dev/null || fail 'HAM_TLS_BACKEND=s_client requires openssl.'
-        log INFO 'Using the openssl s_client WebSocket transport.'
-      else
-        command -v socat >/dev/null || fail 'HTTPS transport requires socat (install it, or set HAM_TLS_BACKEND=s_client to use openssl).'
-      fi ;;
-  esac
   case "$svc" in
     systemd) systemctl --user show-environment >/dev/null || fail 'No systemd user session. Run in your login session.' ;;
     launchd) launchctl print "gui/$uid" >/dev/null || fail 'No launchd GUI session. Run as the logged-in macOS user.' ;;

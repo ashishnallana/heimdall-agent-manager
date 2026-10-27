@@ -588,6 +588,11 @@ run_bridge_server :: proc(cfg: Bridge_Config) -> bool {
 		fmt.println("failed to listen", cfg.bind_host, cfg.port, "error:", err)
 		return false
 	}
+	if !bridge_os_socket_close_on_exec(i64(listener)) {
+		net.close(listener)
+		fmt.println("failed to secure listener", cfg.bind_host, cfg.port, "against child-process inheritance")
+		return false
+	}
 	defer net.close(listener)
 	fmt.println("ham-bridge listening", cfg.bind_host, cfg.port, "daemon_url", cfg.daemon_url)
 	for {
@@ -833,15 +838,10 @@ ws_accept_key :: proc(key: string) -> string {
 }
 
 // bridge_hub_runtime_chunk_payload_bytes returns the raw bytes-per-chunk for the
-// bridge->hub runtime WS channel, gated on the TLS backend (REQ-4): the larger
-// socat payload is only safe when socat is the transport (it does not tear down on
-// multi-read bursts); the legacy s_client fallback keeps the conservative 6000-byte
-// cap. Mirrors bridge_tls_backend_is_socat / the HAM_TLS_BACKEND toggle.
+// bridge->hub runtime WS channel. The pinned in-process libcurl transport safely
+// carries the existing 45 KiB application frames and has no subprocess pipe cap.
 bridge_hub_runtime_chunk_payload_bytes :: proc() -> int {
-	if bridge_tls_backend_is_socat() {
-		return contracts.BRIDGE_WS_HUB_RUNTIME_CHUNK_PAYLOAD_BYTES_SOCAT
-	}
-	return contracts.BRIDGE_WS_HUB_RUNTIME_CHUNK_PAYLOAD_BYTES
+	return contracts.BRIDGE_WS_HUB_RUNTIME_CHUNK_PAYLOAD_BYTES_SOCAT
 }
 
 // bridge_hub_chunk_frames returns the ordered kind:"chunk" wire frames for `text`
@@ -857,8 +857,7 @@ bridge_hub_chunk_frames :: proc(text: string) -> []string {
 // bridge_hub_chunk_frames_with_payload is the pure core of bridge_hub_chunk_frames
 // with the per-chunk raw byte size passed in explicitly. Splitting it out lets unit
 // tests exercise a specific payload deterministically WITHOUT mutating the global
-// HAM_TLS_BACKEND env (the Odin test runner executes tests concurrently, so env
-// mutation would race other tests' TLS transport selection).
+// process-global environment (the Odin test runner executes tests concurrently).
 bridge_hub_chunk_frames_with_payload :: proc(text: string, payload: int) -> []string {
 	return ws.chunk_frames(text, payload)
 }

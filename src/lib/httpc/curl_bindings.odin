@@ -100,6 +100,7 @@ when ODIN_OS == .Windows {
 @(private) CURLE_COULDNT_CONNECT :: CURLcode(7)
 @(private) CURLE_WEIRD_SERVER_REPLY :: CURLcode(8)
 @(private) CURLE_HTTP2 :: CURLcode(16)
+@(private) CURLE_HTTP_RETURNED_ERROR :: CURLcode(22)
 @(private) CURLE_PARTIAL_FILE :: CURLcode(18)
 @(private) CURLE_WRITE_ERROR :: CURLcode(23)
 @(private) CURLE_READ_ERROR :: CURLcode(26)
@@ -117,6 +118,7 @@ when ODIN_OS == .Windows {
 @(private) CURLE_BAD_CONTENT_ENCODING :: CURLcode(61)
 @(private) CURLE_FILESIZE_EXCEEDED :: CURLcode(63)
 @(private) CURLE_SSL_CACERT_BADFILE :: CURLcode(77)
+@(private) CURLE_AGAIN :: CURLcode(81)
 @(private) CURLE_SSL_SHUTDOWN_FAILED :: CURLcode(80)
 @(private) CURLE_SSL_CRL_BADFILE :: CURLcode(82)
 @(private) CURLE_SSL_ISSUER_ERROR :: CURLcode(83)
@@ -133,6 +135,7 @@ when ODIN_OS == .Windows {
 @(private) CURLOPTTYPE_BLOB :: 40000
 
 @(private) CURLOPT_WRITEDATA :: CURLoption(CURLOPTTYPE_OBJECTPOINT + 1)
+@(private) CURLOPT_URL :: CURLoption(CURLOPTTYPE_OBJECTPOINT + 2)
 @(private) CURLOPT_PROXY :: CURLoption(CURLOPTTYPE_OBJECTPOINT + 4)
 @(private) CURLOPT_ERRORBUFFER :: CURLoption(CURLOPTTYPE_OBJECTPOINT + 10)
 @(private) CURLOPT_WRITEFUNCTION :: CURLoption(CURLOPTTYPE_FUNCTIONPOINT + 11)
@@ -158,6 +161,7 @@ when ODIN_OS == .Windows {
 @(private) CURLOPT_NOSIGNAL :: CURLoption(CURLOPTTYPE_LONG + 99)
 @(private) CURLOPT_ACCEPT_ENCODING :: CURLoption(CURLOPTTYPE_OBJECTPOINT + 102)
 @(private) CURLOPT_MAXFILESIZE_LARGE :: CURLoption(CURLOPTTYPE_OFF_T + 117)
+@(private) CURLOPT_CONNECT_ONLY :: CURLoption(CURLOPTTYPE_LONG + 141)
 @(private) CURLOPT_POSTFIELDSIZE_LARGE :: CURLoption(CURLOPTTYPE_OFF_T + 120)
 @(private) CURLOPT_TIMEOUT_MS :: CURLoption(CURLOPTTYPE_LONG + 155)
 @(private) CURLOPT_CONNECTTIMEOUT_MS :: CURLoption(CURLOPTTYPE_LONG + 156)
@@ -170,6 +174,7 @@ when ODIN_OS == .Windows {
 @(private) CURLOPT_PREREQFUNCTION :: CURLoption(CURLOPTTYPE_FUNCTIONPOINT + 312)
 @(private) CURLOPT_PREREQDATA :: CURLoption(CURLOPTTYPE_OBJECTPOINT + 313)
 @(private) CURLOPT_CAINFO_BLOB :: CURLoption(CURLOPTTYPE_BLOB + 309)
+@(private) CURLOPT_PROTOCOLS_STR :: CURLoption(CURLOPTTYPE_OBJECTPOINT + 318)
 
 @(private) CURLINFO_LONG :: 0x200000
 @(private) CURLINFO_RESPONSE_CODE :: CURLINFO(CURLINFO_LONG + 2)
@@ -191,6 +196,21 @@ when ODIN_OS == .Windows {
 	len:   c.size_t,
 	flags: c.uint,
 }
+
+@(private) curl_ws_frame :: struct {
+	age:       c.int,
+	flags:     c.int,
+	offset:    i64,
+	bytesleft: i64,
+	len:       c.size_t,
+}
+
+@(private) CURLWS_TEXT   :: c.uint(1 << 0)
+@(private) CURLWS_BINARY :: c.uint(1 << 1)
+@(private) CURLWS_CONT   :: c.uint(1 << 2)
+@(private) CURLWS_CLOSE  :: c.uint(1 << 3)
+@(private) CURLWS_PING   :: c.uint(1 << 4)
+@(private) CURLWS_PONG   :: c.uint(1 << 6)
 @(private) CURL_BLOB_NOCOPY :: c.uint(0)
 
 // CURLUPart
@@ -226,6 +246,8 @@ foreign libcurl {
 	curl_easy_setopt :: proc(handle: ^CURL, option: CURLoption, #c_vararg args: ..any) -> CURLcode ---
 	curl_easy_getinfo :: proc(handle: ^CURL, info: CURLINFO, #c_vararg args: ..any) -> CURLcode ---
 	curl_easy_perform :: proc(handle: ^CURL) -> CURLcode ---
+	curl_ws_recv :: proc(handle: ^CURL, buffer: rawptr, buflen: c.size_t, received: ^c.size_t, meta: ^^curl_ws_frame) -> CURLcode ---
+	curl_ws_send :: proc(handle: ^CURL, buffer: rawptr, buflen: c.size_t, sent: ^c.size_t, fragsize: i64, flags: c.uint) -> CURLcode ---
 	curl_easy_strerror :: proc(code: CURLcode) -> cstring ---
 	curl_easy_escape :: proc(handle: ^CURL, str: [^]byte, length: c.int) -> cstring ---
 	curl_free :: proc(ptr: rawptr) ---

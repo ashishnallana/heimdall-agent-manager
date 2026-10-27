@@ -110,8 +110,8 @@ silently re-sends a request on a stale connection.
 - Redirects only when `max_redirects > 0`; an https request never follows a
   redirect to http.
 - `User-Agent: heimdall/<version>` unless the request sets one.
-- `HAM_TLS_BACKEND` does not affect HTTP any more; it only selects the WebSocket
-  (`src/lib/ws` → `src/lib/tls_stream`) relay.
+- WebSockets use the same pinned libcurl and trust policy through `src/lib/ws`.
+  `HAM_TLS_BACKEND` is obsolete and does not affect HTTP, HTTPS, WS, or WSS.
 
 ## Linking
 

@@ -59,6 +59,10 @@ bridge_local_endpoint_start_unix :: proc(config: Bridge_Local_Endpoint_Config) -
 	// Replaces a stale socket file; 0600 owner-only local Bridge socket on Unix.
 	fd, ok := local_socket.listen(path, 16)
 	if !ok do return false
+	if !bridge_os_socket_close_on_exec(i64(fd)) {
+		local_socket.close(fd)
+		return false
+	}
 	thread.run_with_poly_data(fd, bridge_local_endpoint_accept_unix_loop)
 	return true
 }
@@ -67,6 +71,10 @@ bridge_local_endpoint_start_loopback :: proc(config: Bridge_Local_Endpoint_Confi
 	address := net.IP4_Loopback
 	listener, err := net.listen_tcp({address, int(config.loopback_port)})
 	if err != nil do return false
+	if !bridge_os_socket_close_on_exec(i64(listener)) {
+		net.close(listener)
+		return false
+	}
 	thread.run_with_poly_data(listener, bridge_local_endpoint_accept_loop)
 	return true
 }

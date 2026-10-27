@@ -7,6 +7,7 @@ import "core:strconv"
 import "core:strings"
 import "core:sync"
 import "core:time"
+import httpc "odin_test:lib/httpc"
 import tls "../tls_stream"
 
 WS_KEY :: "dGhlIHNhbXBsZSBub25jZQ=="
@@ -14,7 +15,11 @@ WS_KEY :: "dGhlIHNhbXBsZSBub25jZQ=="
 Connection :: struct {
 	socket: net.TCP_Socket,
 	secure: bool,
-	// The TLS transport when secure (a relay subprocess on Unix, SChannel on Windows).
+	// Production wss:// uses the pinned libcurl WebSocket/TLS stack. tls remains
+	// only as a compatibility seam for focused transport tests that construct a
+	// Connection directly; connect() never selects the subprocess relay.
+	curl_secure: bool,
+	curl_ws: httpc.WebSocket,
 	tls: tls.Stream,
 	connected: bool,
 	pending_texts: [dynamic]string,
@@ -24,6 +29,8 @@ Connection :: struct {
 	fragmented:    [dynamic]byte,
 	fragmenting:   bool,
 	fragmented_opcode: u8,
+	curl_message: [dynamic]byte,
+	curl_message_opcode: u8,
 
 	// REQ-SHELL-32: serialises WRITES on this connection. It lives here, with the
 	// socket it protects, rather than at a caller, because caller-side discipline is
@@ -47,7 +54,7 @@ connect :: proc(ws_url: string) -> (Connection, bool) {
 connect_with_bearer :: proc(ws_url, bearer_token: string) -> (Connection, bool) {
 	host, port, path, secure, ok := parse_ws_url(ws_url)
 	if !ok do return {}, false
-	if secure do return connect_tls_with_bearer(host, port, path, bearer_token)
+	if secure do return connect_tls_with_bearer(ws_url, bearer_token)
 
 	socket, err := net.dial_tcp_from_hostname_with_port_override(host, int(port))
 	if err != nil do return {}, false
@@ -141,60 +148,22 @@ handshake_failure_reason :: proc(response: string, timed_out: bool, deadline: ti
 	return fmt.aprintf("handshake rejected by %s:%d: %s", host, port, line, allocator = allocator)
 }
 
-connect_tls_with_bearer :: proc(host: string, port: u16, path, bearer_token: string) -> (Connection, bool) {
+connect_tls_with_bearer :: proc(ws_url, bearer_token: string) -> (Connection, bool) {
 	budget := handshake_deadline()
-	stream, dial_ok := tls.dial(host, port, budget)
-	if !dial_ok { set_last_connect_error(tls.last_dial_error()); return {}, false }
-
-	auth_header := ""
-	if strings.trim_space(bearer_token) != "" {
-		auth_header = fmt.tprintf("Authorization: Bearer %s\r\n", bearer_token)
-	}
-	request := fmt.tprintf(
-		"GET %s HTTP/1.1\r\nHost: %s:%d\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n%s\r\n",
-		path,
-		host,
-		port,
-		WS_KEY,
-		auth_header,
-	)
-	if tls.write_all(&stream, transmute([]byte)request) != .Ok {
-		set_last_connect_error("could not write the handshake to the TLS relay")
-		tls.abort(&stream)
-		tls.close(&stream)
+	stream, err, detail := httpc.websocket_connect(ws_url, strings.trim_space(bearer_token), int(budget / time.Millisecond))
+	if err != .None {
+		set_last_connect_error(fmt.tprintf("libcurl WebSocket %s: %s", httpc.error_string(err), detail))
 		return {}, false
 	}
-
-	data := make([dynamic]byte)
-	defer delete(data)
-	buf: [4096]byte
-	deadline := time.to_unix_nanoseconds(time.now()) + i64(budget)
-	timed_out := true
-	for time.to_unix_nanoseconds(time.now()) < deadline {
-		if ready, has_ok := tls.has_data(&stream); !has_ok {
-			break
-		} else if ready {
-			n, read_ok := tls.read(&stream, buf[:])
-			if !read_ok || n <= 0 { timed_out = false; break }
-			append(&data, ..buf[:n])
-			if strings.contains(string(data[:]), "\r\n\r\n") { timed_out = false; break }
-		} else {
-			time.sleep(10 * time.Millisecond)
-		}
-	}
-	response := string(data[:])
-	if !(strings.has_prefix(response, "HTTP/1.1 101") || strings.has_prefix(response, "HTTP/1.0 101")) {
-		set_last_connect_error(handshake_failure_reason(response, timed_out, budget, host, port))
-		tls.abort(&stream)
-		tls.close(&stream)
-		return {}, false
-	}
-	pending_bytes := make([dynamic]byte)
-	if header_end := strings.index(response, "\r\n\r\n"); header_end >= 0 {
-		extra_start := header_end + 4
-		if extra_start < len(data) do append(&pending_bytes, ..data[extra_start:])
-	}
-	return Connection{secure = true, tls = stream, connected = true, pending_texts = make([dynamic]string), pending_bytes = pending_bytes}, true
+	return Connection{
+		secure = true,
+		curl_secure = true,
+		curl_ws = stream,
+		connected = true,
+		pending_texts = make([dynamic]string),
+		pending_bytes = make([dynamic]byte),
+		curl_message = make([dynamic]byte),
+	}, true
 }
 
 close :: proc(conn: ^Connection) {
@@ -210,16 +179,21 @@ close :: proc(conn: ^Connection) {
 	delete(conn.fragmented)
 	conn.fragmented = nil
 	conn.fragmenting = false
+	delete(conn.curl_message)
+	conn.curl_message = nil
 
 	if conn.secure || conn.socket != 0 {
 		if conn.secure {
-			tls.close(&conn.tls)
+			if conn.curl_secure do httpc.websocket_close(&conn.curl_ws)
+			else do tls.close(&conn.tls)
 		} else {
 			net.close(conn.socket)
 		}
 		conn.connected = false
 		conn.socket = 0
 		conn.secure = false
+		conn.curl_secure = false
+		conn.curl_ws = {}
 		conn.tls = {}
 	}
 }
@@ -245,7 +219,39 @@ poll_frame :: proc(conn: ^Connection) -> (text: string, opcode: u8, ok: bool) {
 
 	buf: [131072]byte
 	n := 0
-	if conn.secure {
+	if conn.curl_secure {
+		for control_count := 0; control_count < 16; control_count += 1 {
+			read_n, chunk, read_ok := httpc.websocket_receive(&conn.curl_ws, buf[:])
+			if !read_ok {
+				conn.connected = false
+				return "", 0, false
+			}
+			if chunk.kind == .Again do return "", 0, false
+			if chunk.kind == .Close {
+				conn.connected = false
+				return "", 0, false
+			}
+			if chunk.kind == .Ping || chunk.kind == .Pong do continue
+			if len(conn.curl_message) + read_n > WS_CONTINUATION_DEFAULT_MAX_BYTES {
+				conn.connected = false
+				return "", 0, false
+			}
+			op := u8(0x2) if chunk.kind == .Binary else u8(0x1)
+			if len(conn.curl_message) == 0 do conn.curl_message_opcode = op
+			else if conn.curl_message_opcode != op {
+				conn.connected = false
+				return "", 0, false
+			}
+			if read_n > 0 do append(&conn.curl_message, ..buf[:read_n])
+			if chunk.bytes_left > 0 || chunk.continuation do return "", 0, false
+			result := strings.clone(string(conn.curl_message[:]))
+			result_opcode := conn.curl_message_opcode
+			clear(&conn.curl_message)
+			conn.curl_message_opcode = 0
+			return result, result_opcode, true
+		}
+		return "", 0, false
+	} else if conn.secure {
 		if ready, has_ok := tls.has_data(&conn.tls); !has_ok {
 			conn.connected = false
 			return "", 0, false
@@ -403,6 +409,14 @@ send_frame :: proc(conn: ^Connection, opcode: u8, text: string, timeout: time.Du
 	// Re-check under the lock: a writer that blocked here may have been waiting on a
 	// peer another writer has since found dead.
 	if !conn.connected do return false
+	if conn.curl_secure {
+		ok := httpc.websocket_send(&conn.curl_ws, transmute([]byte)text, opcode == 0x2, timeout)
+		if !ok {
+			httpc.websocket_abort(&conn.curl_ws)
+			conn.connected = false
+		}
+		return ok
+	}
 	header: [WS_MAX_HEADER_BYTES]byte
 	header_len := server_frame_header_with_opcode(header[:], opcode, n)
 	frame := make([]byte, header_len + n)
@@ -412,9 +426,14 @@ send_frame :: proc(conn: ^Connection, opcode: u8, text: string, timeout: time.Du
 	copy(frame[:header_len], header[:header_len])
 	copy(frame[header_len:], transmute([]byte)text)
 	ok := false
-	if conn.secure { ok = send_all_tls(&conn.tls, frame, timeout) } else { ok = send_all_tcp(conn.socket, frame, timeout) }
+	if conn.secure {
+		ok = send_all_tls(&conn.tls, frame, timeout)
+	} else {
+		ok = send_all_tcp(conn.socket, frame, timeout)
+	}
 	if !ok {
-		if conn.secure { tls.abort(&conn.tls) } else { _ = net.shutdown(conn.socket, .Both) }
+		if conn.secure do tls.abort(&conn.tls)
+		else do _ = net.shutdown(conn.socket, .Both)
 		conn.connected = false
 	}
 	return ok
@@ -474,7 +493,9 @@ send_all_tls :: proc(stream: ^tls.Stream, bytes: []byte, timeout: time.Duration 
 abort :: proc(conn: ^Connection) {
 	sync.mutex_lock(&conn.send_mu)
 	defer sync.mutex_unlock(&conn.send_mu)
-	if conn.secure { tls.abort(&conn.tls) } else { _ = net.shutdown(conn.socket, .Both) }
+	if conn.curl_secure do httpc.websocket_abort(&conn.curl_ws)
+	else if conn.secure do tls.abort(&conn.tls)
+	else do _ = net.shutdown(conn.socket, .Both)
 	conn.connected = false
 }
 

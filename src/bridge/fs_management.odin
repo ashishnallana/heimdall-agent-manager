@@ -28,27 +28,18 @@ import vault "odin_test:lib/vault"
 // bridge_fs_init. Empty means FS management is effectively disabled (deny all).
 bridge_fs_root: string
 
-// Configured chunk size for paginated fs_read_file reads. Default 16_000.
+// Configured chunk size for paginated fs_read_file reads.
 bridge_fs_read_page_bytes: i64 = BRIDGE_FS_READ_PAGE_BYTES
 
 // bridge_fs_init resolves the configured fs_root (or $HOME when unset) to a real
 // absolute path and stores it. Call once at startup.
 bridge_fs_init :: proc(configured_root: string, read_page_bytes: i64 = BRIDGE_FS_READ_PAGE_BYTES) {
-	// Effective page is gated on the TLS backend (REQ-4): the larger page is only
-	// safe under socat. Under the s_client fallback the effective page is hard-
-	// clamped to the safe BRIDGE_FS_READ_PAGE_BYTES ceiling regardless of config —
-	// this also fixes the historical mismatch where the nix/config default (16000)
-	// exceeded the ~11 KB s_client ceiling and could itself trigger the teardown.
-	if bridge_tls_backend_is_socat() {
-		if read_page_bytes > 0 {
-			bridge_fs_read_page_bytes = read_page_bytes
-		} else {
-			bridge_fs_read_page_bytes = BRIDGE_FS_READ_PAGE_BYTES_SOCAT
-		}
+	// The pinned libcurl WebSocket transport has no subprocess stdin/read ceiling,
+	// so honor the configured page size and use a bounded default when it is unset.
+	if read_page_bytes > 0 {
+		bridge_fs_read_page_bytes = read_page_bytes
 	} else {
-		page := read_page_bytes if read_page_bytes > 0 else BRIDGE_FS_READ_PAGE_BYTES
-		if page > BRIDGE_FS_READ_PAGE_BYTES do page = BRIDGE_FS_READ_PAGE_BYTES
-		bridge_fs_read_page_bytes = page
+		bridge_fs_read_page_bytes = BRIDGE_FS_READ_PAGE_BYTES_SOCAT
 	}
 	home := cfg_lib.home_dir()
 	root := strings.trim_space(configured_root)
@@ -445,38 +436,11 @@ Bridge_Fs_Grep_Result_Wire :: struct {
 BRIDGE_FS_MAX_ENTRIES :: 2000
 BRIDGE_FS_DEFAULT_LIMIT :: 200
 BRIDGE_FS_MAX_VIEW_BYTES :: 1_000_000 // 1 MB read-file total-size view cap
-// Default per-request byte window for paginated text reads. Capped at 8000 as a
-// hotfix for the openssl-s_client TLS transport: the bridge streams a hub-runtime
-// result larger than 6000B as multiple ~8KB WS "chunk" frames, and `openssl
-// s_client` (used for the wss:// hub link) reads its stdin in 16384-byte chunks and
-// SHUTS DOWN the TLS connection on any burst that needs a second read — so a result
-// whose frames total >16KB (an ~16000B page → 3+ chunk frames) tears down the link
-// and 409-times-out. An 8000B page fits in ≤2 chunk frames (~11.6KB on the wire, one
-// s_client read), so it always survives. Proper fix is a binary-safe TLS transport
-// (socat / in-process libssl); until then keep this ≤~11000. Smaller pages also give
-// snappier first-paint + smoother scroll-to-load. The UI pages by requesting
-// offset += bytes_returned until eof.
+// Default and fallback page sizes. The old 8 KiB value remains as an explicit
+// compatibility constant for tests/configuration; production uses the configured
+// value or the 128 KiB libcurl-safe default.
 BRIDGE_FS_READ_PAGE_BYTES :: 8_000
-// Per-request fs-read page when the bridge->hub TLS transport is socat
-// (HAM_TLS_BACKEND=socat, the default). socat pumps full-duplex and does not tear
-// the TLS link down on multi-read bursts, so the ~16 KB s_client ceiling above is
-// gone. 131072 (128 KiB) is well over that ceiling (proving the fix), a power of
-// two that bounds per-page memory, and still leaves BRIDGE_FS_MAX_VIEW_BYTES (1 MB)
-// spanning ~8 pages so pagination is still exercised. Under the s_client fallback
-// bridge_fs_init clamps the effective page back down to BRIDGE_FS_READ_PAGE_BYTES.
 BRIDGE_FS_READ_PAGE_BYTES_SOCAT :: 131_072
-
-// bridge_tls_backend_is_socat reports whether the bridge->hub TLS transport uses
-// socat (the default) rather than the legacy `openssl s_client` fallback. Mirrors
-// the HAM_TLS_BACKEND toggle read by the WebSocket transport's relay argv builder
-// (src/lib/tls_stream, used by src/lib/ws): only the exact value "s_client" selects
-// the legacy path; anything else (unset/empty/"socat"/unknown) means socat. SHARED
-// CONTRACT — keep this rule identical to that builder. Outbound HTTP (src/lib/httpc,
-// libcurl) is not affected by HAM_TLS_BACKEND.
-bridge_tls_backend_is_socat :: proc() -> bool {
-	backend := strings.to_lower(strings.trim_space(os.get_env("HAM_TLS_BACKEND", context.temp_allocator)))
-	return backend != "s_client"
-}
 
 // --- helpers -------------------------------------------------------------
 

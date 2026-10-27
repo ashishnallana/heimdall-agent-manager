@@ -326,8 +326,8 @@ to the same hub.
 **Connected to:** Agent Instance ID (the bridge spawns and owns instances), Agent Run
 Dir (run dirs are created on the bridge filesystem), Provider (the bridge passes
 provider credentials to agent processes at spawn time), Hub (bridge→hub connection is
-outbound: REST over HTTPS through the statically linked libcurl (`src/lib/httpc`), the
-WebSocket over `socat` as its TLS transport).
+outbound: REST over HTTPS and WebSocket over WSS through the statically linked,
+pinned libcurl (`src/lib/httpc`)).
 
 ---
 
@@ -370,9 +370,9 @@ curl -fsSL https://raw.githubusercontent.com/tanmayv/heimdall-agent-manager/main
 
 The installer downloads and verifies the binaries, registers the system service,
 opens browser-based enrollment when needed, saves the approved credential, and starts
-the bridge. Install `socat` first (`apt install socat` or `brew install socat`); nothing
-else: the binaries link their HTTPS client (libcurl, pinned in `nix/libcurl-pin.json`)
-and its TLS library statically, and the Linux ones are fully static, so they run on any
+the bridge. There is no separate TLS runtime dependency: the binaries link their HTTPS
+and WSS client (libcurl, pinned in `nix/libcurl-pin.json`) and its TLS library statically,
+and the Linux ones are fully static, so they run on any
 distribution (Alpine and old glibc included). See
 [`SELF_HOSTING.md`](SELF_HOSTING.md) for deployment, headless, and troubleshooting details.
 
@@ -382,5 +382,5 @@ On Windows 10/11 (x64), from a normal (non-admin) PowerShell:
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/tanmayv/heimdall-agent-manager/main/scripts/install.ps1))) -Hub https://hub.mundus.in
 ```
 
-It installs the bridge as a per-user Scheduled Task (no window, starts at logon) and
-needs no `socat`; see [Windows quick install](SELF_HOSTING.md#211-windows-quick-install).
+It installs the bridge as a per-user Scheduled Task (no window, starts at logon); see
+[Windows quick install](SELF_HOSTING.md#211-windows-quick-install).

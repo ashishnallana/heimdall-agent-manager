@@ -61,6 +61,7 @@ export default function SidebarUpdateBadge({ onOpen }: { onOpen: (update: Pendin
         setEnrollmentMessage(event.message || 'Bridge enrollment complete.');
         void refreshDesktop();
       } else if (event.type === 'error') {
+        setPairing(null);
         setOperationError(event.message || 'Bridge enrollment failed.');
       }
     });
@@ -115,8 +116,10 @@ export default function SidebarUpdateBadge({ onOpen }: { onOpen: (update: Pendin
     if (!manager) return;
     setOperationError('');
     setPairing(null);
-    setEnrollmentMessage('Starting browser-approved enrollment…');
-    const result = await manager.startEnrollment().catch((error: any) => ({ ok: false, error: String(error?.message || error) }));
+    const reEnrollment = Boolean(desktop?.canReEnroll);
+    setEnrollmentMessage(reEnrollment ? 'Starting browser-approved re-enrollment…' : 'Starting browser-approved enrollment…');
+    const result = await (reEnrollment ? manager.startReEnrollment() : manager.startEnrollment())
+      .catch((error: any) => ({ ok: false, error: String(error?.message || error) }));
     if (!result.ok) setOperationError(result.error || 'Unable to start enrollment.');
   };
 
@@ -198,7 +201,7 @@ export default function SidebarUpdateBadge({ onOpen }: { onOpen: (update: Pendin
               onClick={() => { void enroll(); }}
               className="mt-3 inline-flex w-full items-center justify-center gap-2 rounded-lg bg-accent px-3 py-2 text-xs font-semibold text-on-accent hover:opacity-90"
             >
-              <Icon name="device" size={13} /> Enroll this Mac
+              <Icon name="device" size={13} /> {desktop.canReEnroll ? 'Re-enroll this Mac' : 'Enroll this Mac'}
             </button>
           ) : null}
 

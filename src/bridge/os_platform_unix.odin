@@ -10,6 +10,16 @@ import "core:os"
 import "core:strings"
 import "core:sys/posix"
 
+// Child processes must never inherit the bridge's listeners. In particular,
+// ham-pty-host intentionally outlives individual agents; inheriting these fds
+// would keep the bridge ports bound after launchd stops the bridge and make the
+// replacement process fail with Address_In_Use.
+bridge_os_socket_close_on_exec :: proc(socket: i64) -> bool {
+	fd := posix.FD(socket)
+	flags := posix.fcntl(fd, .GETFD)
+	return flags >= 0 && posix.fcntl(fd, .SETFD, flags | i32(posix.FD_CLOEXEC)) != -1
+}
+
 // bridge_os_terminate asks pid to exit (SIGTERM).
 bridge_os_terminate :: proc(pid: int) -> bool {
 	return posix.kill(posix.pid_t(pid), .SIGTERM) == .OK
