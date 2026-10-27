@@ -194,6 +194,10 @@ export function describeTaskEvent(ev: TaskEventWire, names: TaskNames): Describe
       return known(`${who} commented`);
     case 'ready_unclaimed':
       return known('Ready, but no worker has picked it up yet');
+    case 'review_stalled':
+      return known('Review is waiting for an eligible reviewer');
+    case 'dependency_stalled':
+      return known(`A prerequisite could not finish merging${s(p.detail) ? `: ${s(p.detail)}` : ''}`);
     case 'summary_overflow':
       return known('Older events were summarised');
     case 'started_workflow':
@@ -206,8 +210,14 @@ export function describeTaskEvent(ev: TaskEventWire, names: TaskNames): Describe
       return known(`Merged into the directory${s(p.mode) ? ` (${s(p.mode).replace(/-/g, ' ')})` : ''}`);
     case 'merge_conflict':
       return known(`The branch did not merge${s(p.files) ? `: conflicts in ${s(p.files)}` : ''}; waiting on you`);
+    case 'held':
+      return known(`${who} paused dispatch${s(p.reason) ? `: ${s(p.reason)}` : ''}`);
+    case 'hold_released':
+      return known(`${who} released the task hold`);
     case 'merge_failed':
       return known(`The merge did not run${s(p.detail) ? `: ${s(p.detail)}` : ''}; it is retried when the bridge reconnects`);
+    case 'merge_snapshot':
+      return known('Recorded the Git directory state for this attempt');
     case 'gate_feedback':
       return known(`The plan was rejected at the gate${s(p.summary) ? `: ${s(p.summary)}` : ''}; planning again`);
     default:
