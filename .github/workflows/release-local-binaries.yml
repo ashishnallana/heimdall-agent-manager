@@ -178,6 +178,21 @@ jobs:
           extra_nix_config: |
             experimental-features = nix-command flakes
 
+      # Reuse the Nix store (toolchains, libcurl, deps) across releases instead
+      # of building it cold on every runner. Stored in this repo's Actions cache,
+      # so no third-party substituter is trusted. The key changes only with the
+      # Nix inputs; a miss restores the newest store for this target and the
+      # build tops it up. Caches written by tag pushes are scoped to that tag,
+      # so only workflow_dispatch runs on main share theirs with later releases.
+      - name: Restore and save the Nix store
+        uses: nix-community/cache-nix-action@v7
+        with:
+          primary-key: nix-release-${{ matrix.target }}-${{ hashFiles('flake.lock', 'flake.nix', 'nix/**') }}
+          restore-prefixes-first-match: nix-release-${{ matrix.target }}-
+          # No gc-max-store-size: nothing is GC-rooted after `nix build --no-link`,
+          # so a size-capped GC would drop arbitrary paths, toolchains included.
+          # Four targets share the repo's 10 GB Actions cache (LRU-evicted).
+
       - name: Check the outbound HTTP boundary (src/lib/httpc only)
         shell: bash
         run: |
