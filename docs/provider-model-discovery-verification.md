@@ -1,8 +1,8 @@
-# On-demand provider model discovery: verification review snapshot
+# On-demand provider model discovery: final verification
 
-The integrated implementation supports explicit, bridge-scoped model refresh and consistent model selection from the UI through launch arguments. Final review found and fixed queued-request coalescing. Live metadata checks succeeded for Claude, Codex, Antigravity and Pi; Copilot authenticated discovery remains unverified. Completed suite failures were reproduced separately on the clean implementation baseline. This report does **not** claim an entirely green or completed repository suite.
+The integrated implementation supports explicit, bridge-scoped model refresh and consistent model selection from the UI through launch arguments. Final review found and fixed queued-request coalescing. Live metadata checks succeeded for Claude, Codex, Antigravity and Pi; Copilot authenticated discovery remains unverified. Completed suite failures were reproduced separately on the clean implementation baseline. The matrix has finished. This report does **not** claim an entirely green repository suite.
 
-**Review snapshot, 27 October 2026:** The user explicitly requested current work be sent for review while the full suite continues. Managed shell `sh_373de67ae460cee67bd5f02215052819` remains running. Remaining matrix results and final evidence are tracked in follow-up `task_18e24d631a61462b`, which depends on `model_final`. Approving the current code review does not complete the chain or imply the remaining suites passed.
+**Final evidence, 27 October 2026:** The user requested early code review while the suite continued. That review passed at `194d89d1`. This follow-up collects every remaining check outcome. The slow Bridge service completed all 55 tests successfully. Task approval then removed its old worktree, so the runner resumed only unfinished labels from the follow-up worktree; completed checks were preserved. Final chain closure still requires the configured review gate.
 
 ## Reviewed scope
 
@@ -15,6 +15,8 @@ Baseline: `286fc1ddad728172e075e3510b306878e91adbe8`.
 | `d0a91fbc81145b967f46c439e0ed595a28ff4089` | Hub storage, effective catalogs, API stages and launch validation |
 | `d4d09ff728a907b871a3eacabe7e945876e4b2f4` | Explicit UI refresh, bridge cache isolation and retained selections |
 | `33d8d72c2189e93328374ebaaaff88ea1a46a64e` | Queue-aware refresh coalescing, regression test and full-check runner |
+| `194d89d1f5ea970a456bd518b5c8f9bfbf8c8715` | Independently approved early verification snapshot |
+| `e13c0381ec2747a701259dcbc30ae1ed0c3d25f5` | Resume verification after task worktree cleanup without repeating recorded checks |
 
 Review covered the complete diff, including process/pipe ownership, deadlines, bounded queues and output, JSON correlation, persisted model ownership, migration registration, API compatibility, both Hub validators, task defaults, bridge membership, launch argv, UI refresh actions and cache behavior. The final report commit changes documentation only.
 
@@ -40,26 +42,84 @@ Approved requirements: [revised plan](artifact://art_18e248184b1fddc1), [approve
 
 ## Verification results
 
-| Check | Completed outcome |
-| --- | --- |
-| Full UI suite, `npm test` | 1,145 passed; one baseline failure (`held` event); one opt-in test skipped. Pretest: another 16 passed. |
-| UI production build, `npm run build` | Passed typecheck, Vite build and Electron build |
-| Hub / Bridge / CLI production builds | All passed; Bridge rebuilt after the coalescing fix |
-| Full Bridge package | 827/828 passed; Termux refusal assertion also fails on baseline |
-| Full HTTP package | 499/502 passed; all three extension-overlap failures reproduced identically on baseline |
-| Full Hub package | 56/57 passed; Actions feature-gate fixture also fails on baseline |
-| Full Hub app package | 29/30 passed; plan-sweep fixture also fails on baseline |
-| Full SQLite package | 152/152 passed |
-| Full agent service package | 62/63 passed; wake-pack assertion also fails on baseline |
-| Other completed Odin packages | Contracts 9, CLI 176, CLI extension 76, dev proxy 2, domain 17, auth 26, billing 17: all passed |
-| Focused adapter checks at final code commit | 20/20 passed without memory diagnostics |
-| Rust PTY host | 180 passed, two ignored |
-| Local runtime helpers | 10/10 passed |
-| HTTP client boundary | Passed |
-| Extension distribution Python suite | 20 run: two passed, 18 setup errors; namespaced-migration error reproduced on clean baseline |
-| QR encoding and scan checks | Passed with required `qrencode`/`zbar` tools; initial run without tools failed and is retained as environment evidence |
-| Live production metadata adapters | Four successful catalogs; Copilot bounded timeout |
-| Remaining Odin matrix | **Still running; no pass claim.** Current Bridge service tests are disk-backed and slow. A focused baseline concurrency check exceeded 90 seconds. |
+The Odin matrix covered **43 packages**, reporting **2,709 passed and 12 baseline test failures** from 2,721 tests. Separately, **18 of 29 standalone programs passed** and 11 reproduced failures on the clean baseline. Failed names, exact commands and baseline comparisons are in the companion JSON evidence.
+
+| Package/program | Tests reported | Exit | Outcome |
+| --- | ---: | ---: | --- |
+| `src/hub/transport/http` | 502 | 1 | Baseline failure |
+| `src/bridge` | 828 | 1 | Baseline failure |
+| `src/contracts` | 9 | 0 | Passed |
+| `src/ctl` | 176 | 0 | Passed |
+| `src/ctl/extension` | 76 | 0 | Passed |
+| `src/dev_proxy` | 2 | 0 | Passed |
+| `src/hub` | 57 | 1 | Baseline failure |
+| `src/hub/app` | 30 | 1 | Baseline failure |
+| `src/hub/domain` | 17 | 0 | Passed |
+| `src/hub/repository/sqlite` | 152 | 0 | Passed |
+| `src/hub/service/agent` | 63 | 1 | Baseline failure |
+| `src/hub/service/auth` | 26 | 0 | Passed |
+| `src/hub/service/billing` | 17 | 0 | Passed |
+| `src/hub/service/bridge` | 55 | 0 | Passed |
+| `src/hub/service/bridge_log` | 9 | 0 | Passed |
+| `src/hub/service/bridge_runtime` | 38 | 0 | Passed |
+| `src/hub/service/card` | 32 | 0 | Passed |
+| `src/hub/service/content` | 16 | 0 | Passed |
+| `src/hub/service/events` | 17 | 0 | Passed |
+| `src/hub/service/issue` | 1 | 0 | Passed |
+| `src/hub/service/provider` | 1 | 0 | Passed |
+| `src/hub/service/push` | 40 | 0 | Passed |
+| `src/hub/service/shell_session` | 188 | 0 | Passed |
+| `src/hub/service/taskchain` | 14 | 1 | Baseline failure |
+| `src/hub/service/taskv2` | 150 | 1 | Baseline failure |
+| `src/hub/service/user` | 3 | 0 | Passed |
+| `src/hub/service/vault_directory` | 14 | 0 | Passed |
+| `src/lib/agent_runtime` | 8 | 0 | Passed |
+| `src/lib/httpc` | 34 | 0 | Passed |
+| `src/lib/jsonx` | 18 | 0 | Passed |
+| `src/lib/local_socket` | 6 | 0 | Passed |
+| `src/lib/metrics` | 9 | 0 | Passed |
+| `src/lib/tls_stream` | 2 | 0 | Passed |
+| `src/lib/tool_live` | 18 | 0 | Passed |
+| `src/lib/vault` | 25 | 0 | Passed |
+| `src/lib/ws` | 24 | 0 | Passed |
+| `src/manager` | 38 | 0 | Passed |
+| `tests/hub_bootstrap_golden_test` | 1 | 0 | Passed |
+| `tests/migration_bootstrap_test` | 1 | 0 | Passed |
+| `tests/push_crypto_test` | 1 | 0 | Passed |
+| `tests/push_repo_test` | 1 | 0 | Passed |
+| `tests/taskchain_grouping_test` | 1 | 0 | Passed |
+| `tests/vcs_backend_test` | 1 | 0 | Passed |
+| `tests/bridge_bootstrap_conditional_test.odin` | 0 | 0 | Passed |
+| `tests/bridge_local_endpoint_test.odin` | 0 | 0 | Passed |
+| `tests/bridge_start_success_relay_test.odin` | 0 | 1 | Baseline failure |
+| `tests/device_auth_grant_store_test.odin` | 0 | 0 | Passed |
+| `tests/device_auth_security_matrix_test.odin` | 0 | 0 | Passed |
+| `tests/device_auth_token_poll_test.odin` | 0 | 0 | Passed |
+| `tests/device_auth_verify_approve_test.odin` | 0 | 0 | Passed |
+| `tests/hub_actions_repo_test.odin` | 0 | 0 | Passed |
+| `tests/hub_agent_instance_token_authz_test.odin` | 0 | 0 | Passed |
+| `tests/hub_agent_search_isolation_test.odin` | 0 | 1 | Baseline failure |
+| `tests/hub_bridge_offline_mark_test.odin` | 0 | -11 | Baseline failure |
+| `tests/hub_cards_repo_test.odin` | 0 | 0 | Passed |
+| `tests/hub_chain_closed_broadcast_test.odin` | 0 | 1 | Baseline failure |
+| `tests/hub_chain_member_instance_only_test.odin` | 0 | 0 | Passed |
+| `tests/hub_ct_title_lifecycle_test.odin` | 0 | 0 | Passed |
+| `tests/hub_fts_repair_test.odin` | 0 | 1 | Baseline failure |
+| `tests/hub_h9_coordinator_single_source_test.odin` | 0 | 0 | Passed |
+| `tests/hub_memory_actions_test.odin` | 0 | 1 | Baseline failure |
+| `tests/hub_project_archive_repo_test.odin` | 0 | 0 | Passed |
+| `tests/hub_readonly_cross_chain_test.odin` | 0 | 1 | Baseline failure |
+| `tests/hub_search_comments_skills_test.odin` | 0 | 1 | Baseline failure |
+| `tests/hub_search_fts_all_test.odin` | 0 | 1 | Baseline failure |
+| `tests/hub_search_fts_comments_test.odin` | 0 | 1 | Baseline failure |
+| `tests/hub_search_message_handler_test.odin` | 0 | 0 | Passed |
+| `tests/hub_search_messages_test.odin` | 0 | 0 | Passed |
+| `tests/hub_search_owner_isolation_test.odin` | 0 | 1 | Baseline failure |
+| `tests/hub_search_scope_validation_test.odin` | 0 | 0 | Passed |
+| `tests/hub_skills_handler_test.odin` | 0 | 0 | Passed |
+| `tests/hub_startup_blocked_projection_test.odin` | 0 | 0 | Passed |
+
+Other completed checks: UI 1,145 passed / one baseline failure / one opt-in skip, plus 16 pretests passed; Hub/Bridge/CLI and full UI/Electron builds passed; focused model checks 20/20 passed; Rust 180 passed / two ignored; runtime helpers 10/10 passed; HTTP boundary passed; QR checks passed with required tools. Python distribution: two passed / 18 baseline setup errors from 20 tests. Live metadata: four providers successful; Copilot bounded timeout.
 
 ### Reproducible command conventions
 
@@ -69,6 +129,7 @@ Full matrix commands, executed through managed shell sessions from the task work
 nix develop -c python3 scripts/provider-model-full-check.py --group odin --out-dir /home/tanmay/.cache/heimdall-tests/model-final-20261027
 python3 scripts/provider-model-full-check.py --group ui --out-dir /home/tanmay/.cache/heimdall-tests/model-final-20261027
 python3 scripts/provider-model-full-check.py --group misc --out-dir /home/tanmay/.cache/heimdall-tests/model-final-20261027
+nix develop -c python3 scripts/provider-model-full-check.py --group odin --resume --out-dir /home/tanmay/.cache/heimdall-tests/model-final-20261027
 ```
 
 The Odin matrix discovers every source package containing `*test.odin`, test-entrypoint packages under `tests/`, and standalone `tests/*_test.odin` programs. Package commands use:
@@ -91,7 +152,7 @@ nix shell --inputs-from . nixpkgs#qrencode nixpkgs#zbar --command node --test au
 git diff 286fc1ddad728172e075e3510b306878e91adbe8 HEAD --check
 ```
 
-The companion review evidence manifest records completed matrix commands, exit codes, package counts, log locations and hashes at this snapshot. Remaining rows are intentionally absent until the active runner finishes; the final Bridge rerun and supplementary results are recorded separately. All executables are under the home cache, following the repository's endpoint-security guidance. The full matrix ran once; only affected checks or concrete failures were investigated further. The initial full Bridge compilation caught a typo in the newly added regression's cleanup call; it was corrected before the final full Bridge run and exact-commit focused check. Its failed intermediate log is retained rather than counted as a passing run.
+The companion final evidence manifest records every matrix outcome, executed command, log location and hash. It preserves the initial Bridge compile failure and explicitly supersedes that row with the completed 828-test rerun. The runner interruption and resume are recorded separately from test outcomes. All executables are under the home cache, following the repository's endpoint-security guidance. The full matrix ran once; only affected checks or concrete failures were investigated further. The initial full Bridge compilation caught a typo in the newly added regression's cleanup call; it was corrected before the final full Bridge run and exact-commit focused check. Its failed intermediate log is retained rather than counted as a passing run. An exploratory baseline concurrency check exceeded its 90-second limit; the complete Bridge service suite subsequently passed all 55 tests in 14 minutes 32 seconds, so that exploratory timeout is not treated as a failed full suite.
 
 ### Live metadata coverage
 
@@ -120,6 +181,10 @@ Memory tracking remained enabled. Focused model checks reported no memory diagno
 | Hub action fixture gets experimental-feature-disabled 403 | Same focused baseline failure; `iss_18e24cae3ff34780` |
 | App plan sweep fixture expects one reconcile, gets zero | Same focused baseline failure; `iss_18e24cbfb7fe4007` |
 | Agent wake payload expects verbatim lease pack | Same focused baseline failure; `iss_18e24cd438e7e27d` |
+| Task-chain publish brief/gate fixture | Same focused baseline failure; `iss_18e24e81362ab54e` |
+| Four task-engine lifecycle/expiry/review fixtures | Same four failures on focused baseline; `iss_18e24e81442e6035` |
+| Ten standalone programs with outdated fixtures/contracts | Same failing exit codes on baseline; `iss_18e24ee81e674979` |
+| Bridge-offline standalone harness SIGSEGV | Same exit-11 on baseline; `iss_18e24ee826d8025a` |
 
 The suite is not wholly green. Each listed unrelated failure was reproduced on clean baseline `286fc1dd` using the same pinned compiler/dependencies; these failures were filed as project issues rather than expanding this chain's implementation scope. Network/service-dependent shell end-to-end scripts, paid model inference, production deployment, and Windows/macOS execution were not performed. The opt-in production Hub terminal-rendering UI test remains skipped without its external harness. Rust retains its two ignored tests.
 
@@ -166,4 +231,4 @@ The suite is not wholly green. Each listed unrelated failure was reproduced on c
 
 ## Handoff
 
-Confidence is high for the scoped discovery behavior: live metadata succeeded for four providers, model-specific regression checks passed, production builds passed, and completed suite failures have clean-baseline evidence. **Final full-suite acceptance remains pending** in `task_18e24d631a61462b`. Copilot authenticated support and other-platform runtime behavior remain explicit limitations. Proposed quality rating: **good for the current scoped code review**, with the remaining matrix and repository-wide baseline failures carried separately. The configured independent task reviewer still owns the review verdict; this report does not approve its own task or close the chain before every required item finishes.
+Confidence is high for the scoped discovery behavior: live metadata succeeded for four providers, model-specific regression checks passed, production builds passed, and completed suite failures have clean-baseline evidence. Every planned matrix check now has an outcome; all failed standalone programs were also reproduced on clean baseline with matching exit codes, including the bridge-offline SIGSEGV. Pre-existing failures remain explicitly reported. Copilot authenticated support and other-platform runtime behavior remain explicit limitations. Proposed quality rating: **good for the scoped implementation and verification**, with repository-wide baseline failures carried separately. The configured independent task reviewer still owns the review verdict; this report does not approve its own task or close the chain before every required item finishes.
