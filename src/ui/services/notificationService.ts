@@ -1,7 +1,7 @@
 // Thin, side-effectful native notification service.
 //
-// This is the ONLY module that touches window.Notification / permission /
-// visibility / focus. The notify-vs-skip policy and content live in the pure
+// Owns browser delivery and the desktop preload bridge, permission, visibility,
+// and focus. The notify-vs-skip policy and content live in the pure
 // notificationForWsEvent mapper; this service just gates and renders.
 //
 // Wiring: fireNotificationForWsEvent is called from the single handleUserWsEvent
@@ -28,10 +28,12 @@ import {
   decryptEmbeddedVaultTokens,
 } from '../utils/vaultContent.ts';
 import { selectIsVaultUnlocked, getActiveVaultKey } from '../store/vaultSlice.ts';
+import { desktopNotifications } from '../utils/desktopNotifications.ts';
 
 export function isNotificationSupported(): boolean {
   try {
     if (typeof window === 'undefined') return false;
+    if (isElectronRuntime()) return desktopNotifications()?.supported === true;
     // Supported if EITHER the in-page Notification constructor exists OR the
     // service-worker path is available (iOS PWAs expose only the latter).
     const hasConstructor = 'Notification' in window && Boolean(window.Notification);
@@ -105,9 +107,8 @@ async function activeNotificationRegistration(): Promise<ServiceWorkerRegistrati
   }
 }
 
-// Electron runs its own main-process notification surface. Detect it via the
-// injected odinApi bridge (same signal useUserWebSocket uses) so we cleanly
-// no-op here and never double-notify (REQ-N7).
+// Electron uses the same notification policy, with main-process delivery via
+// preload IPC instead of the browser/service-worker API.
 export function isElectronRuntime(): boolean {
   try {
     return typeof window !== 'undefined' && Boolean((window as any).odinApi);
@@ -135,6 +136,7 @@ export function isTabBackgrounded(): boolean {
 // / 'denied' on failure) and never throws or logs to the console.
 export async function requestNotificationPermission(): Promise<NotificationPermission> {
   if (!isNotificationSupported()) return 'unsupported';
+  if (isElectronRuntime()) return 'granted';
   try {
     const result = await window.Notification.requestPermission();
     if (result === 'granted' || result === 'denied' || result === 'default') return result;
@@ -215,6 +217,13 @@ function focusAndRoute(route: string) {
 // differently: the SW path via `notificationclick` -> postMessage -> the page's
 // message listener; the constructor path via the in-page `onclick` below.
 export async function showNativeNotification(plan: NotificationPlan): Promise<boolean> {
+  if (isElectronRuntime()) {
+    try {
+      const desktop = desktopNotifications();
+      if (!desktop?.supported) return false;
+      return await desktop.show({ title: plan.title, body: plan.body, tag: plan.tag, route: plan.route });
+    } catch { return false; }
+  }
   if (typeof window === 'undefined' || !('Notification' in window)) return false;
 
   const icon = iconUrl();
@@ -339,8 +348,6 @@ export function fireNotificationForWsEvent(
   payload: any,
   ctx: NotificationMapperCtx = {},
 ): NotificationPlan | null {
-  // Electron owns native notifications in its main process — no-op here.
-  if (isElectronRuntime()) return null;
   if (!isNotificationSupported()) return null;
 
   let settings;

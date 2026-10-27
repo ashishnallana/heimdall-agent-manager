@@ -8,6 +8,11 @@ ipcRenderer.on('heimdall-bridge:check-updates', () => {
 });
 
 contextBridge.exposeInMainWorld('odinApi', {
+  notifications: {
+    supported: process.argv.includes('--heimdall-native-notifications'),
+    show: (plan: { title: string; body: string; tag: string; route: string }) =>
+      ipcRenderer.invoke('heimdall-notifications:show', plan),
+  },
   pickDirectory: () => ipcRenderer.invoke('odin-api:pick-directory'),
   daemonUrl: process.env.HEIMDALL_DAEMON_URL || '',
   hubApiBaseUrl: process.env.HEIMDALL_HUB_API_URL || process.env.HEIMDALL_HUB_URL || '',

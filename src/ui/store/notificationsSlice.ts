@@ -1,7 +1,8 @@
 import { createSlice, type PayloadAction } from '@reduxjs/toolkit';
 import type { NotificationCategory } from '../api/notificationMapper';
+import { desktopNotifications } from '../utils/desktopNotifications.ts';
 
-// Native (Web Notifications API) OS notification settings + permission state.
+// Native OS notification settings for browser and Electron delivery.
 //
 // v1 scope: a single master enable toggle plus per-category toggles (chat,
 // attention). Persistence uses localStorage directly (mirroring the shell's
@@ -15,12 +16,12 @@ export type NotificationCategoryPrefs = Record<NotificationCategory, boolean>;
 
 export type NotificationsState = {
   // Master switch. Even when true, notifications only fire if permission is
-  // 'granted' and the tab is open-but-unfocused.
+  // 'granted' and the event passes the current-conversation focus policy.
   enabled: boolean;
   // Per-category opt-outs (both default on when the master switch is enabled).
   categories: NotificationCategoryPrefs;
-  // Last known browser permission (or 'unsupported' when window.Notification is
-  // absent). Updated only via explicit user gesture / feature detection.
+  // Browser permission, or desktop API capability (OS policy is checked by the
+  // native backend). Updated via explicit user gesture / feature detection.
   permission: NotificationPermission;
 };
 
@@ -30,6 +31,9 @@ const DEFAULT_CATEGORIES: NotificationCategoryPrefs = { chat: true, attention: t
 
 function detectPermission(): NotificationPermission {
   try {
+    if (typeof window !== 'undefined' && (window as any).odinApi) {
+      return desktopNotifications()?.supported === true ? 'granted' : 'unsupported';
+    }
     if (typeof window === 'undefined' || !('Notification' in window) || !window.Notification) {
       return 'unsupported';
     }

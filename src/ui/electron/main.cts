@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, nativeImage, Menu, shell, Tray, clipboard, session } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, nativeImage, Menu, shell, Tray, clipboard, session, Notification } = require('electron');
 const fs = require('fs');
 const path = require('path');
 
@@ -16,6 +16,7 @@ const appIcon = (() => {
 const bridgeManager = require('./bridgeManager.cjs');
 const { allowedExternalUrl, allowedPairingUrl, classifyNavigation, idpOriginFromAuthConfig, isAuthStartUrl, oidcWindowNavigationAllowed } = require('./externalUrl.cjs');
 const desktopUpdater = require('./desktopUpdater.cjs');
+const { installNotifications } = require('./notifications.cjs');
 
 function normalizeBaseUrl(value: string): string {
   return String(value || '').trim().replace(/\/$/, '');
@@ -148,6 +149,7 @@ function createWindow() {
       nodeIntegration: false,
       sandbox: true,
       preload: path.join(__dirname, 'preload.cjs'),
+      additionalArguments: Notification.isSupported() ? ['--heimdall-native-notifications'] : [],
     },
   });
   mainWindow = win;
@@ -231,7 +233,15 @@ function showMainWindow() {
   if (win.isMinimized()) win.restore();
   win.show();
   win.focus();
+  return win;
 }
+
+const desktopNotifications = installNotifications({
+  ipcMain, Notification, icon: appIcon,
+  getWindow: () => mainWindow,
+  showWindow: showMainWindow,
+  uiUrl: isDev ? process.env.VITE_DEV_SERVER_URL : configuredUiOrigin(),
+});
 
 function trayStatus(status: any): { label: string; symbol: string } {
   if (status?.busy) return { label: 'Bridge configuring…', symbol: '…' };
@@ -594,6 +604,7 @@ app.whenReady().then(() => {
 
 app.on('before-quit', () => {
   isQuitting = true;
+  desktopNotifications.dispose();
   bridgeManager.stopEnrollment();
   desktopUpdater.stop();
   if (trayRefreshTimer) clearInterval(trayRefreshTimer);

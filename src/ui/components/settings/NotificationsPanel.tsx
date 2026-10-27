@@ -41,7 +41,7 @@ export const TEST_NOTIFICATION_PLAN = {
   category: 'attention' as const,
 };
 
-// H11: pure helper computing the always-shown in-app toast message for the test
+  // H11: pure helper computing the always-shown in-app toast message for the test
 // button, covering every case (native fired / electron / unsupported / denied /
 // default). Pure + exported so it is unit-testable without React.
 export function testNotificationFeedback(opts: {
@@ -54,7 +54,7 @@ export function testNotificationFeedback(opts: {
     return 'Sent a native notification. If your tab is focused the OS popup may be suppressed — this toast confirms the path fired.';
   }
   if (opts.electron) {
-    return 'Desktop app handles native notifications; this in-app toast confirms the test fired.';
+    return 'The desktop app could not show a notification. Check your system notification settings; this toast confirms the test ran.';
   }
   if (!opts.supported) {
     return 'This browser has no Notifications API; showing an in-app toast instead.';
@@ -161,20 +161,20 @@ export default function NotificationsPanel() {
     return () => document.removeEventListener('visibilitychange', onVisibility);
   }, [dispatch]);
 
-  const masterDisabled = !supported || electron || state.permission === 'denied';
+  const masterDisabled = !supported || state.permission === 'denied';
 
   // H11: fire a real test notification so the user can confirm notifications
   // appear. It ALWAYS dispatches an in-app toast (visible feedback in every case:
-  // focused tab, Electron, denied, or unsupported) and, when browser
+  // focused tab, Electron, denied, or unsupported) and, when native
   // notifications are supported + granted, also fires the real native path via
   // showNativeNotification. Non-throwing: any failure still yields a toast.
   async function onSendTest() {
     let nativeShown = false;
     let permission = state.permission;
     try {
-      if (supported && !electron && permission === 'granted') {
+      if (supported && permission === 'granted') {
         nativeShown = await showNativeNotification(TEST_NOTIFICATION_PLAN);
-      } else if (supported && !electron && permission === 'default') {
+      } else if (supported && permission === 'default') {
         // Explicit user gesture: it is safe to request permission here. If granted,
         // fire the native notification immediately.
         permission = await requestNotificationPermission();
@@ -218,7 +218,9 @@ export default function NotificationsPanel() {
   }
 
   const statusLine = electron
-    ? 'Running in the desktop app — native notifications are handled by the app itself, so this browser setting is disabled.'
+    ? supported
+      ? 'Native desktop notifications are available. Your system notification settings control banners and sounds.'
+      : 'Native notifications are unavailable in this desktop session. Update the desktop app and check your system notification service.'
     : !supported
       ? 'This browser does not support the Web Notifications API. Notifications are unavailable here.'
       : state.permission === 'denied'
@@ -230,13 +232,13 @@ export default function NotificationsPanel() {
   return (
     <PageShell
       title="Notifications"
-      description="Get a native browser notification for important events while this tab is open but not focused. When the tab is focused you will keep seeing in-app toasts instead."
+      description="Get native notifications for important events. Notifications for the conversation you are viewing are suppressed while the app is focused."
     >
       <div data-debug-id="settings-notifications-panel" className="space-y-5 text-left">
       <Panel>
         <div className="flex items-start justify-between gap-4">
           <div>
-            <div className="font-semibold text-primary">Enable browser notifications</div>
+            <div className="font-semibold text-primary">{electron ? 'Enable desktop notifications' : 'Enable browser notifications'}</div>
             <p className="mt-1 text-sm text-muted" data-debug-id="settings-notifications-status">{statusLine}</p>
           </div>
           <Toggle
@@ -244,7 +246,7 @@ export default function NotificationsPanel() {
             onChange={onMasterToggle}
             disabled={masterDisabled}
             data-debug-id="settings-notifications-master-toggle"
-            aria-label="Enable browser notifications"
+            aria-label={electron ? 'Enable desktop notifications' : 'Enable browser notifications'}
           />
         </div>
       </Panel>
@@ -275,8 +277,8 @@ export default function NotificationsPanel() {
           <div>
             <div className="font-semibold text-primary">Test notifications</div>
             <p className="mt-1 text-sm text-muted">
-              Send a sample notification to confirm they appear. You will get a native OS notification when supported and
-              granted (and your tab is in the background), plus an in-app toast every time so you always see a result.
+              Send a sample notification to check native delivery. Your system settings control banner visibility;
+              an in-app toast reports the result every time.
             </p>
           </div>
           <Button
