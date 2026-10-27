@@ -12,6 +12,7 @@ import time
 parser = argparse.ArgumentParser()
 parser.add_argument("--group", choices=["odin", "ui", "misc"], required=True)
 parser.add_argument("--out-dir", required=True)
+parser.add_argument("--resume", action="store_true", help="Keep recorded outcomes and run only unfinished checks")
 args = parser.parse_args()
 root = Path(__file__).resolve().parents[1]
 out = Path(args.out_dir).expanduser().resolve() / args.group
@@ -19,9 +20,14 @@ out.mkdir(parents=True, exist_ok=True)
 env = dict(os.environ)
 env.pop("HEIMDALL_AGENT_TOKEN", None)
 env.pop("HEIMDALL_AGENT_INSTANCE_ID", None)
-rows = []
+results_path = out / "results.json"
+rows = json.loads(results_path.read_text()) if args.resume and results_path.exists() else []
+recorded = {row["label"] for row in rows}
 
 def run(label, command, timeout=900, expects_tests=False):
+    if label in recorded:
+        print("RECORDED " + label, flush=True)
+        return
     log = out / (re.sub(r"[^a-zA-Z0-9_-]", "_", label) + ".log")
     print("START " + label, flush=True)
     started = time.monotonic()
@@ -44,7 +50,7 @@ def run(label, command, timeout=900, expects_tests=False):
                passed=code == 0 and not missing, seconds=round(time.monotonic()-started, 2),
                tests=sum(map(int, counts)), missing_summary=missing, log=str(log))
     rows.append(row)
-    (out / "results.json").write_text(json.dumps(rows, indent=2) + "\n")
+    results_path.write_text(json.dumps(rows, indent=2) + "\n")
     print(("PASS " if row["passed"] else "FAIL ") + label +
           f" exit={code} tests={row['tests']} seconds={row['seconds']}", flush=True)
 
