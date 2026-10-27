@@ -323,7 +323,8 @@ function handleEnrollmentEvent(rawPayload: any) {
     trayPairing = null;
     trayOperationMessage = payload?.message || 'Bridge enrollment failed.';
   }
-  refreshTrayStatus();
+  if (payload?.type === 'complete' || payload?.type === 'error') void refreshBridgeStatus();
+  else refreshTrayStatus();
 }
 
 async function restartBridgeFromTray() {
@@ -378,6 +379,14 @@ async function enrollBridgeFromTray(reEnrollment: boolean) {
   }
 }
 
+// REQ-BRIDGE-STATUS-ASYNC-1: the single poller. It probes launchd and the
+// Bridge binary asynchronously; the tray menu and the renderer read the cache.
+async function refreshBridgeStatus() {
+  try { await bridgeManager.refreshStatus(configuredHubApiBaseUrl()); }
+  catch (error) { console.warn('[heimdall] unable to refresh Bridge status:', error); }
+  refreshTrayStatus();
+}
+
 function refreshTrayStatus() {
   if (!statusTray || statusTray.isDestroyed()) return;
   let status: any;
@@ -403,7 +412,7 @@ function refreshTrayStatus() {
     { type: 'separator' },
     { label: `Open ${APP_DISPLAY_NAME}`, click: showMainWindow },
     { label: 'Check for Bridge Updates…', click: openBridgeUpdates },
-    { label: 'Refresh Bridge Status', click: refreshTrayStatus },
+    { label: 'Refresh Bridge Status', click: () => { void refreshBridgeStatus(); } },
     ...(!status.installed ? [{
       label: 'Install Packaged Bridge',
       enabled: Boolean(status.packaged && !status.busy),
@@ -441,8 +450,8 @@ function installStatusTray() {
   const trayIcon = appIcon?.resize({ width: 18, height: 18 });
   trayIcon?.setTemplateImage(true);
   statusTray = new Tray(trayIcon || nativeImage.createEmpty());
-  refreshTrayStatus();
-  trayRefreshTimer = setInterval(refreshTrayStatus, 15_000);
+  void refreshBridgeStatus();
+  trayRefreshTimer = setInterval(() => { void refreshBridgeStatus(); }, 15_000);
   void refreshAuthenticatedUserFromSession();
   userRefreshTimer = setInterval(() => { void refreshAuthenticatedUserFromSession(); }, 300_000);
 }

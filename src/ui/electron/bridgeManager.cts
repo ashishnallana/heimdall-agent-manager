@@ -83,18 +83,51 @@ function bundledVersion(): string {
   catch (_err) { return ''; }
 }
 
-function installedVersion(binary: string): string {
-  try {
-    const result = childProcess.spawnSync(binary, ['--version'], { encoding: 'utf8', timeout: 5000 });
-    const match = `${result.stdout || ''}\n${result.stderr || ''}`.match(/ham-bridge\s+v?([^\s]+)/);
-    return match ? match[1] : '';
-  } catch (_err) { return ''; }
+// REQ-BRIDGE-STATUS-ASYNC-1: launchctl and `ham-bridge --version` are probed
+// asynchronously by refreshStatus() and cached per service. getStatus() only
+// reads files and that cache, so it never blocks Electron's main process.
+type ServiceProbe = { running: boolean; installedVersion: string; binary: string };
+const serviceProbes = new Map<string, ServiceProbe>();
+const statusRefreshes = new Map<string, Promise<any>>();
+
+function execFileResult(command: string, args: string[]): Promise<{ code: number; output: string }> {
+  return new Promise((resolve) => {
+    try {
+      childProcess.execFile(command, args, { encoding: 'utf8', timeout: 5000 }, (error: any, stdout: string, stderr: string) => {
+        const code = error ? (typeof error.code === 'number' ? error.code : -1) : 0;
+        resolve({ code, output: `${stdout || ''}\n${stderr || ''}` });
+      });
+    } catch (error: any) {
+      resolve({ code: -1, output: String(error?.message || error) });
+    }
+  });
 }
 
-function launchdRunning(serviceName: string): boolean {
-  if (!serviceName || process.platform !== 'darwin') return false;
-  const result = childProcess.spawnSync('/bin/launchctl', ['print', `gui/${process.getuid()}/${serviceName}`], { stdio: 'ignore', timeout: 5000 });
-  return result.status === 0;
+function bridgeBinary(serviceName: string): string {
+  return path.join(os.homedir(), '.local', 'share', 'heimdall', 'bridges', serviceName, 'bin', 'ham-bridge');
+}
+
+async function probeService(serviceName: string, binary: string): Promise<ServiceProbe> {
+  const [launchd, version] = await Promise.all([
+    execFileResult('/bin/launchctl', ['print', `gui/${process.getuid()}/${serviceName}`]),
+    fs.existsSync(binary) ? execFileResult(binary, ['--version']) : Promise.resolve({ code: -1, output: '' }),
+  ]);
+  return { running: launchd.code === 0, installedVersion: version.output.match(/ham-bridge\s+v?([^\s]+)/)?.[1] || '', binary };
+}
+
+// refreshStatus re-probes this Hub's Bridge service and returns the fresh
+// status. Concurrent callers share one probe.
+function refreshStatus(hubUrl: string): Promise<any> {
+  const key = normalizeOrigin(hubUrl);
+  const pending = statusRefreshes.get(key);
+  if (pending) return pending;
+  const refresh = (async () => {
+    const state = process.platform === 'darwin' ? findState(hubUrl) : null;
+    if (state) serviceProbes.set(state.serviceName, await probeService(state.serviceName, bridgeBinary(state.serviceName)));
+    return getStatus(hubUrl);
+  })().finally(() => statusRefreshes.delete(key));
+  statusRefreshes.set(key, refresh);
+  return refresh;
 }
 
 function getStatus(hubUrl: string) {
@@ -104,13 +137,13 @@ function getStatus(hubUrl: string) {
     bridgeId: '', canReEnroll: false, serviceState: 'not-installed', serviceName: '', hubUrl, installedVersion: '', bundledVersion: '', busy: busy || Boolean(enrollmentProcess), error: '',
   };
   const state = findState(hubUrl);
-  const dataDir = state ? path.join(os.homedir(), '.local', 'share', 'heimdall', 'bridges', state.serviceName) : '';
-  const binary = dataDir ? path.join(dataDir, 'bin', 'ham-bridge') : '';
+  const binary = state ? bridgeBinary(state.serviceName) : '';
   const installed = Boolean(state && fs.existsSync(binary));
   let enrolled = false;
   try { enrolled = Boolean(state && fs.statSync(path.join(state.stateDir, 'bridge-token')).size > 0); } catch (_err) { /* Tokenless. */ }
   const bridgeId = state ? discoverBridgeId(state.stateDir) : '';
-  const running = Boolean(state && launchdRunning(state.serviceName));
+  const probe = state ? serviceProbes.get(state.serviceName) : undefined;
+  const running = Boolean(probe?.running);
   return {
     supported: true,
     packaged,
@@ -121,7 +154,7 @@ function getStatus(hubUrl: string) {
     serviceState: installed ? (running ? 'running' : 'stopped') : 'not-installed',
     serviceName: state?.serviceName || '',
     hubUrl,
-    installedVersion: installed ? installedVersion(binary) : '',
+    installedVersion: installed && probe?.binary === binary ? probe.installedVersion : '',
     bundledVersion: bundledVersion(),
     busy: busy || Boolean(enrollmentProcess),
     error: packaged ? '' : 'The packaged Bridge resources are incomplete.',
@@ -196,7 +229,7 @@ async function installBundled(hubUrl: string) {
       '--bundle', files.bundle, '--checksum-file', files.checksums, '--non-interactive']);
     const error = result.code === 0 ? '' : (result.output.trim().split('\n').slice(-8).join('\n') || `Installer exited with status ${result.code}.`);
     busy = false;
-    return { ok: result.code === 0, status: getStatus(hubUrl), ...(error ? { error } : {}) };
+    return { ok: result.code === 0, status: await refreshStatus(hubUrl), ...(error ? { error } : {}) };
   } finally { busy = false; }
 }
 
@@ -229,7 +262,7 @@ async function restart(hubUrl: string) {
   } finally {
     busy = false;
   }
-  return { ok: !error, status: getStatus(hubUrl), ...(error ? { error } : {}) };
+  return { ok: !error, status: await refreshStatus(hubUrl), ...(error ? { error } : {}) };
 }
 
 // restartSync is the quit-time variant of restart(): the app is exiting, so it
@@ -333,4 +366,4 @@ function startReEnrollment(hubUrl: string, emit: (event: any) => void) {
   return startEnrollment(hubUrl, emit, { restartOnFailure: true, reuseBridgeId: status.bridgeId });
 }
 
-module.exports = { discoverBridgeId, extractEnrollmentPairing, getStatus, installBundled, restart, startEnrollment, startReEnrollment, stopEnrollment };
+module.exports = { discoverBridgeId, extractEnrollmentPairing, getStatus, installBundled, refreshStatus, restart, startEnrollment, startReEnrollment, stopEnrollment };

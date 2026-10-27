@@ -82,6 +82,11 @@ function enrolledBridgeHome(t: any): { home: string; stateDir: string } {
   t.after(() => Object.defineProperty(process, 'platform', platform));
   // launchd reports the agent as not loaded; bootstrap and kickstart succeed.
   t.mock.method(childProcess, 'spawnSync', (_command: string, args: string[]) => ({ status: args?.[0] === 'print' ? 1 : 0, stdout: '', stderr: '' }));
+  // Async status probes: not loaded, and no version output.
+  t.mock.method(childProcess, 'execFile', (_command: string, _args: string[], _options: any, callback: any) => {
+    setImmediate(() => callback(Object.assign(new Error('not loaded'), { code: 113 }), '', ''));
+    return new EventEmitter();
+  });
   return { home, stateDir };
 }
 
@@ -246,7 +251,7 @@ test('REQ-OIDC-DESKTOP-1: OIDC completion does not destroy its window inside a n
 test('REQ-MAC-TRAY-1: macOS keeps a status tray alive independently of the Bridge service', () => {
   assert.match(mainSource, /\bTray\b/);
   assert.match(mainSource, /function installStatusTray\(\)/);
-  assert.match(mainSource, /setInterval\(refreshTrayStatus, 15_000\)/);
+  assert.match(mainSource, /setInterval\(\(\) => \{ void refreshBridgeStatus\(\); \}, 15_000\)/);
   assert.match(mainSource, /Bridge enrollment required/);
   assert.match(mainSource, /Bridge online/);
   assert.match(mainSource, /Bridge offline/);
@@ -431,3 +436,51 @@ test('REQ-NAV-ROUTE-2: the OIDC window stays on https: or the Hub UI and opens n
   assert.match(mainSource, /loginWindow\.webContents\.on\('will-redirect', guardOidcNavigation\)/);
   assert.match(mainSource, /if \(route === 'auth'\) openOidcWindow\(url, win\);\s*else if \(route === 'external'\) void shell\.openExternal\(allowedExternalUrl\(url\)\);/);
 });
+
+test('REQ-BRIDGE-STATUS-ASYNC-1: getStatus reads only files and the probe cache', (t) => {
+  enrolledBridgeHome(t);
+  const sync = childProcess.spawnSync as any;
+  const before = sync.mock.calls.length;
+  t.mock.method(childProcess, 'execFile', () => { throw new Error('getStatus must not start a probe'); });
+
+  const status = bridgeManager.getStatus('https://hub.example');
+
+  assert.equal(sync.mock.calls.length, before, 'no synchronous child process');
+  assert.equal(status.installed, true);
+  assert.equal(status.enrolled, true);
+});
+
+test('REQ-BRIDGE-STATUS-ASYNC-1: refreshStatus probes asynchronously, caches, and shares concurrent probes', async (t) => {
+  enrolledBridgeHome(t);
+  let release: () => void = () => {};
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const probes: string[][] = [];
+  t.mock.method(childProcess, 'execFile', (command: string, args: string[], _options: any, callback: any) => {
+    probes.push([command, ...args]);
+    void gate.then(() => callback(null, command.endsWith('ham-bridge') ? 'ham-bridge v0.5.16 (abc)\n' : '', ''));
+    return new EventEmitter();
+  });
+
+  const first = bridgeManager.refreshStatus('https://hub.example');
+  const second = bridgeManager.refreshStatus('https://hub.example/');
+  // A slow probe never blocks readers: the cached status is served meanwhile.
+  assert.equal(bridgeManager.getStatus('https://hub.example').serviceState, 'stopped');
+  release();
+  const [a, b] = await Promise.all([first, second]);
+
+  assert.equal(probes.length, 2, 'one launchctl print and one --version for both callers');
+  assert.equal(probes[0][0], '/bin/launchctl');
+  assert.equal(a.serviceState, 'running');
+  assert.equal(a.installedVersion, '0.5.16');
+  assert.deepEqual(a, b);
+  assert.equal(bridgeManager.getStatus('https://hub.example').serviceState, 'running');
+});
+
+test('REQ-BRIDGE-STATUS-ASYNC-1: the tray and renderer are fed by one async poller', () => {
+  const getStatusStart = managerSource.indexOf('function getStatus(');
+  const getStatusBody = managerSource.slice(getStatusStart, managerSource.indexOf('\n}\n', getStatusStart));
+  assert.doesNotMatch(getStatusBody, /spawnSync|execFile/);
+  assert.match(mainSource, /trayRefreshTimer = setInterval\(\(\) => \{ void refreshBridgeStatus\(\); \}, 15_000\)/);
+  assert.match(mainSource, /ipcMain\.handle\('heimdall-bridge:get-status', \(\) => bridgeManager\.getStatus\(/);
+});
+
