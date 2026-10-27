@@ -1,4 +1,3 @@
-const { notarize } = require('@electron/notarize');
 const { spawnSync } = require('node:child_process');
 const path = require('node:path');
 
@@ -23,6 +22,9 @@ exports.default = async function notarizeDesktop(context) {
   if (!appleId || !appleIdPassword || !teamId) {
     throw new Error('APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD, and APPLE_TEAM_ID are required to notarize the macOS DMG');
   }
+  // @electron/notarize 3.x is ESM. Keep the electron-builder hook CommonJS,
+  // but load the package through its supported dynamic-import boundary.
+  const { notarize } = await import('@electron/notarize');
   const appPath = `${context.appOutDir}/${context.packager.appInfo.productFilename}.app`;
   try {
     await notarize({ appPath, appleId, appleIdPassword, teamId });

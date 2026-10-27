@@ -63,6 +63,7 @@ def test_dmg_configuration_embeds_bridge_and_enables_hardened_runtime():
     assert "notarize: false" in config
     assert "afterSign: scripts/release/notarize-electron.cjs" in config
     assert '"dist:mac": "npm run build && electron-builder --mac dmg"' in package
+    assert "await import('@electron/notarize')" in notarize_hook
     assert "Failed to staple your application" in notarize_hook
     assert "staple-with-retry.sh" in notarize_hook
 
