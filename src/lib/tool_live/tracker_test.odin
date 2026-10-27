@@ -427,3 +427,72 @@ test_tool_stream_completion_batch_drain_bound_and_demand :: proc(t: ^testing.T) 
     testing.expect_value(t,publications,count)
     testing.expect_value(t,len(live_obj(&s)["active"].(json.Array)),1)
 }
+
+@(test)
+test_live_turn_boundary_closes_only_main_thread_orphans :: proc(t: ^testing.T) {
+	s := live_test_service()
+	defer tool_live_destroy(&s.tool_live)
+	live_send(&s, live_ev("tool.start", "rejected", 1))
+	live_send(&s, live_ev("tool.start", "bg_child", 1, "child"))
+	row := Shell{session_id = "sh_fg", kind = "run", agent_instance_id = "live_a", owner_user_id = "owner"}
+	tool_live_shell(&s, row, true)
+	testing.expect_value(t, len(live_obj(&s)["active"].(json.Array)), 3)
+	// Subagent-scoped and non-boundary activity never closes calls.
+	live_send(&s, live_ev("activity", "", 2, "child", payload = `{"state":"idle"}`))
+	live_send(&s, live_ev("activity", "", 2, payload = `{"state":"waiting_for_user"}`))
+	testing.expect_value(t, len(live_obj(&s)["active"].(json.Array)), 3)
+	// Main turn ends with no tool.end: the main-thread call is an orphan. The
+	// subagent call and the Hub shell run (owned by its exit) stay live.
+	live_send(&s, live_ev("activity", "", 3, payload = `{"state":"idle","reason":"stop"}`))
+	obj := live_obj(&s)
+	active := obj["active"].(json.Array)
+	testing.expect_value(t, len(active), 2)
+	for a in active {
+		c := a.(json.Object)
+		kept := c["source"].(json.String) == "shell" || c["agent_id"].(json.String) == "child"
+		testing.expect(t, kept, "only subagent and shell calls survive the main turn end")
+	}
+	last := live_last(obj)
+	testing.expect(t, last != nil, "orphan reported as a completion")
+	if last != nil {
+		testing.expect_value(t, last["status"].(json.String), "interrupted")
+		testing.expect_value(t, last["duration_ms"].(json.Integer), 2000)
+	}
+	// The late end, or a delayed duplicate start, cannot resurrect the call.
+	live_send(&s, live_ev("tool.end", "rejected", 4))
+	live_send(&s, live_ev("tool.start", "rejected", 1))
+	testing.expect_value(t, len(live_obj(&s)["active"].(json.Array)), 2)
+	testing.expect_value(t, len(s.tool_live.entries["live_a"].completed), 1)
+	// A new prompt closes calls started before it, never ones started after it.
+	live_send(&s, live_ev("tool.start", "interrupted", 5))
+	live_send(&s, live_ev("tool.start", "next_turn", 7))
+	live_send(&s, live_ev("activity", "", 6, payload = `{"state":"active","reason":"user_prompt"}`))
+	active = live_obj(&s)["active"].(json.Array)
+	testing.expect_value(t, len(active), 3)
+	for a in active do testing.expect(t, a.(json.Object)["tool_use_id"].(json.String) != "interrupted", "pre-prompt call closed")
+	// Activity for another session is ignored.
+	live_send(&s, live_ev("activity", "", 8, session = "other", payload = `{"state":"idle"}`))
+	testing.expect_value(t, len(live_obj(&s)["active"].(json.Array)), 3)
+}
+
+@(test)
+test_live_turn_activity_reopens_ended_session :: proc(t: ^testing.T) {
+	s := live_test_service()
+	defer tool_live_destroy(&s.tool_live)
+	live_send(&s, live_ev("hello", "", 1))
+	live_send(&s, live_ev("tool.start", "turn1", 2))
+	live_send(&s, live_ev("activity", "", 3, payload = `{"state":"idle"}`))
+	live_send(&s, live_ev("session", "", 3, payload = `{"phase":"end"}`))
+	testing.expect_value(t, len(live_obj(&s)["active"].(json.Array)), 0)
+	// Stale or foreign-session activity does not reopen the ended session.
+	live_send(&s, live_ev("activity", "", 3, payload = `{"state":"active"}`))
+	live_send(&s, live_ev("activity", "", 4, session = "other", payload = `{"state":"active"}`))
+	live_send(&s, live_ev("tool.start", "blocked", 4))
+	testing.expect_value(t, len(live_obj(&s)["active"].(json.Array)), 0)
+	live_send(&s, live_ev("activity", "", 5, payload = `{"state":"active","reason":"user_prompt"}`))
+	live_send(&s, live_ev("tool.start", "turn2", 6))
+	testing.expect_value(t, len(live_obj(&s)["active"].(json.Array)), 1)
+	// The end-of-session fence still rejects frames from before the end.
+	live_send(&s, live_ev("tool.start", "pre_end", 2))
+	testing.expect_value(t, len(live_obj(&s)["active"].(json.Array)), 1)
+}

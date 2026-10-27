@@ -40,7 +40,7 @@ Tool_Live_Completion :: struct {
 	summary_truncated: bool,
 	duration_ms: i64,
 	completed_at_ms: i64,
-	status: string, // completed, failed, killed; never infer success from silence
+	status: string, // completed, failed, killed, interrupted; never infer success from silence
 }
 Tool_Live_Tombstone :: struct { key: string, ended_ns: i64 }
 Tool_Live_Entry :: struct {
@@ -339,6 +339,13 @@ tool_live_extension :: proc(service: ^Tracker, inst: Instance, evs: []Event) {
 			}
 			continue
 		}
+		// Turn activity for the same session proves it is still alive. Antigravity
+		// emits session end on every Stop but hello/session start only on its first
+		// invocation; the reset fence (floor at the end ts) still rejects older frames.
+		if ev.event == "activity" && e.session_closed && ev.session_id != "" && ev.session_id == e.session && ns > e.session_ns {
+			e.session_closed = false
+			e.session_ns = ns
+		}
 		if e.session_closed || ev.session_id == "" do continue
 		if e.session == "" {
 			// Initial tool event may arrive before hello. The canonical session in
@@ -356,6 +363,25 @@ tool_live_extension :: proc(service: ^Tracker, inst: Instance, evs: []Event) {
 					tool_live_tombstone_locked(e, c.call_id, ns)
 					tool_live_call_free(c); ordered_remove(&e.active, i); e.revision += 1
 				}
+			}
+			continue
+		}
+		if ev.event == "activity" {
+			// Interrupted or permission-rejected calls get a start hook but no end
+			// hook. A main turn ending (idle) or a new main turn starting (active)
+			// means no main-thread call can still run: background Bash and async
+			// Agent calls end at launch. Subagent calls end only on subagent.stop;
+			// Hub shell runs end only on their observed exit.
+			state := tool_live_text(po, "state")
+			if ev.agent_id != "" || (state != "idle" && state != "active") do continue
+			orphans := make([dynamic]string, 0, len(e.active), context.temp_allocator)
+			for c in e.active {
+				if c.source == "provider" && c.agent_id == "" && c.started_at_ms <= ns / 1_000_000 {
+					append(&orphans, strings.clone(c.call_id, context.temp_allocator))
+				}
+			}
+			for key in orphans {
+				_ = tool_live_end_locked(e, key, "interrupted", ns, collect = !service.demand_driven || s.watched[inst.agent_instance_id])
 			}
 			continue
 		}
