@@ -29,6 +29,7 @@ export interface DesktopBridgeManagerApi {
   installBundled(): Promise<{ ok: boolean; status: DesktopBridgeStatus; error?: string }>;
   startEnrollment(): Promise<{ ok: boolean; error?: string }>;
   onEnrollmentEvent(callback: (event: DesktopBridgeEnrollmentEvent) => void): () => void;
+  onCheckUpdatesRequested(callback: () => void): () => void;
 }
 
 export function desktopBridgeManager(): DesktopBridgeManagerApi | null {

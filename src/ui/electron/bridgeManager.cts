@@ -66,7 +66,7 @@ function getStatus(hubUrl: string) {
   const packaged = Object.values(resources()).every((file: any) => fs.existsSync(file));
   if (process.platform !== 'darwin') return {
     supported: false, packaged: false, installed: false, enrolled: false,
-    serviceState: 'not-installed', serviceName: '', hubUrl, installedVersion: '', bundledVersion: '', busy, error: '',
+    serviceState: 'not-installed', serviceName: '', hubUrl, installedVersion: '', bundledVersion: '', busy: busy || Boolean(enrollmentProcess), error: '',
   };
   const state = findState(hubUrl);
   const dataDir = state ? path.join(os.homedir(), '.local', 'share', 'heimdall', 'bridges', state.serviceName) : '';
@@ -84,18 +84,15 @@ function getStatus(hubUrl: string) {
     hubUrl,
     installedVersion: installed ? installedVersion(binary) : '',
     bundledVersion: bundledVersion(),
-    busy,
+    busy: busy || Boolean(enrollmentProcess),
     error: packaged ? '' : 'The packaged Bridge resources are incomplete.',
   };
 }
 
-function run(command: string, args: string[]): Promise<{ code: number; output: string }> {
+function runProcess(command: string, args: string[], env: NodeJS.ProcessEnv = process.env): Promise<{ code: number; output: string }> {
   return new Promise((resolve) => {
-    // Finder-launched apps do not inherit Homebrew/Nix paths. macOS ships
-    // /usr/bin/openssl, so the packaged click-through path selects the bridge's
-    // verified s_client fallback instead of requiring an external socat install.
     const proc = childProcess.spawn(command, args, {
-      env: { ...process.env, PATH: '/usr/bin:/bin:/usr/sbin:/sbin', HAM_TLS_BACKEND: 's_client', HEIMDALL_INSTALL_PLAIN: '1' },
+      env,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     let output = '';
@@ -106,6 +103,22 @@ function run(command: string, args: string[]): Promise<{ code: number; output: s
   });
 }
 
+function run(command: string, args: string[]): Promise<{ code: number; output: string }> {
+  // Finder-launched apps do not inherit Homebrew/Nix paths. macOS ships
+  // /usr/bin/openssl, so the packaged click-through path selects the bridge's
+  // verified s_client fallback instead of requiring an external socat install.
+  return runProcess(command, args, {
+    ...process.env,
+    PATH: '/usr/bin:/bin:/usr/sbin:/sbin',
+    HAM_TLS_BACKEND: 's_client',
+    HEIMDALL_INSTALL_PLAIN: '1',
+  });
+}
+
+function commandError(output: string, fallback: string): string {
+  return output.trim().split('\n').slice(-8).join('\n') || fallback;
+}
+
 function extractEnrollmentPairing(output: string): { url: string; code: string } | null {
   const url = output.match(/https?:\/\/[^\s]+\/api\/v1\/device\/add[^\s]*/)?.[0]?.replace(/[),.;]+$/, '') || '';
   // Pairing codes contain 14 RFC 4648 base32 symbols, rendered XXXX-XXXX-XXXX-XX.
@@ -114,7 +127,7 @@ function extractEnrollmentPairing(output: string): { url: string; code: string }
 }
 
 async function installBundled(hubUrl: string) {
-  if (busy) return { ok: false, status: getStatus(hubUrl), error: 'A Bridge operation is already running.' };
+  if (busy || enrollmentProcess) return { ok: false, status: getStatus(hubUrl), error: 'A Bridge operation is already running.' };
   const files = resources();
   const version = bundledVersion();
   if (!version || !Object.values(files).every((file: any) => fs.existsSync(file))) {
@@ -128,6 +141,33 @@ async function installBundled(hubUrl: string) {
     busy = false;
     return { ok: result.code === 0, status: getStatus(hubUrl), ...(error ? { error } : {}) };
   } finally { busy = false; }
+}
+
+async function restart(hubUrl: string) {
+  if (busy || enrollmentProcess) return { ok: false, status: getStatus(hubUrl), error: 'A Bridge operation is already running.' };
+  const state = findState(hubUrl);
+  if (process.platform !== 'darwin' || !state) return { ok: false, status: getStatus(hubUrl), error: 'Install the packaged Bridge before restarting it.' };
+  const plist = path.join(os.homedir(), 'Library', 'LaunchAgents', `${state.serviceName}.plist`);
+  if (!fs.existsSync(plist)) return { ok: false, status: getStatus(hubUrl), error: `LaunchAgent is missing: ${plist}` };
+  busy = true;
+  let error = '';
+  try {
+    const target = `gui/${process.getuid()}/${state.serviceName}`;
+    const loaded = await runProcess('/bin/launchctl', ['print', target]);
+    if (loaded.code !== 0) {
+      const bootstrapped = await runProcess('/bin/launchctl', ['bootstrap', `gui/${process.getuid()}`, plist]);
+      if (bootstrapped.code !== 0) error = commandError(bootstrapped.output, `Unable to load ${state.serviceName}.`);
+    }
+    if (!error) {
+      const kicked = await runProcess('/bin/launchctl', ['kickstart', '-k', target]);
+      if (kicked.code !== 0) error = commandError(kicked.output, `Unable to restart ${state.serviceName}.`);
+    }
+  } catch (caught: any) {
+    error = String(caught?.message || caught || 'Unable to restart the Bridge.');
+  } finally {
+    busy = false;
+  }
+  return { ok: !error, status: getStatus(hubUrl), ...(error ? { error } : {}) };
 }
 
 function startEnrollment(hubUrl: string, emit: (event: any) => void) {
@@ -154,4 +194,11 @@ function startEnrollment(hubUrl: string, emit: (event: any) => void) {
   return { ok: true };
 }
 
-module.exports = { extractEnrollmentPairing, getStatus, installBundled, startEnrollment };
+function startReEnrollment(hubUrl: string, emit: (event: any) => void) {
+  const status = getStatus(hubUrl);
+  if (!status.installed) return { ok: false, error: 'Install the packaged Bridge before re-enrolling it.' };
+  if (!status.enrolled) return { ok: false, error: 'This Bridge is not enrolled yet. Use the standard enrollment action.' };
+  return startEnrollment(hubUrl, emit);
+}
+
+module.exports = { extractEnrollmentPairing, getStatus, installBundled, restart, startEnrollment, startReEnrollment };

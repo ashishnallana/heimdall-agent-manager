@@ -92,6 +92,14 @@ export default function SidebarUpdateBadge({ onOpen }: { onOpen: (update: Pendin
     finally { setChecking(false); }
   };
 
+  useEffect(() => {
+    if (!manager) return;
+    return manager.onCheckUpdatesRequested(() => {
+      setOpen(true);
+      void checkUpdates();
+    });
+  }, [manager]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const install = async () => {
     if (!manager) return;
     setChecking(true);

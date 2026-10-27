@@ -1,4 +1,5 @@
-const { app, BrowserWindow, ipcMain, dialog, nativeImage, Menu, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, nativeImage, Menu, shell, Tray, clipboard, session } = require('electron');
+const fs = require('fs');
 const path = require('path');
 
 // Visible product identity (window title + dock/taskbar + macOS app menu).
@@ -62,6 +63,15 @@ try {
 const isDev = Boolean(process.env.VITE_DEV_SERVER_URL);
 
 let authWindow: any = null;
+let mainWindow: any = null;
+let statusTray: any = null;
+let trayRefreshTimer: NodeJS.Timeout | null = null;
+let userRefreshTimer: NodeJS.Timeout | null = null;
+let isQuitting = false;
+let authenticatedUserLabel = '';
+let trayOperationMessage = '';
+let trayPairing: { code: string; url: string } | null = null;
+const LOGIN_ITEM_PREFERENCE_MARKER = 'login-item-preference-configured';
 
 function openOidcWindow(url: string, owner: any) {
   // REQ-OIDC-DESKTOP-1: OIDC runs in a preload-free window which shares the
@@ -119,6 +129,18 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.cjs'),
     },
   });
+  mainWindow = win;
+
+  // REQ-MAC-TRAY-1: closing the visible UI leaves the lightweight tray
+  // controller running. The independently managed Bridge LaunchAgent is not
+  // coupled to either window or tray lifetime.
+  win.on('close', (event: any) => {
+    if (process.platform !== 'darwin' || isQuitting) return;
+    event.preventDefault();
+    win.hide();
+    app.dock?.hide();
+  });
+  win.on('closed', () => { if (mainWindow === win) mainWindow = null; });
 
   const forceWindowTitle = () => {
     win.setTitle(APP_DISPLAY_NAME);
@@ -162,6 +184,220 @@ function createWindow() {
     // OIDC session cookie as the browser UI; there is no deprecated HUT token.
     win.loadURL(configuredUiOrigin());
   }
+
+  return win;
+}
+
+function showMainWindow() {
+  const win = mainWindow && !mainWindow.isDestroyed() ? mainWindow : createWindow();
+  app.dock?.show();
+  if (win.isMinimized()) win.restore();
+  win.show();
+  win.focus();
+}
+
+function trayStatus(status: any): { label: string; symbol: string } {
+  if (status?.busy) return { label: 'Bridge configuring…', symbol: '…' };
+  if (!status?.installed) return { label: 'Bridge not installed', symbol: '–' };
+  if (!status?.enrolled) return { label: 'Bridge enrollment required', symbol: '!' };
+  if (status.serviceState === 'running') return { label: 'Bridge online', symbol: '●' };
+  return { label: 'Bridge offline', symbol: '○' };
+}
+
+function loginItemEnabled(): boolean {
+  try { return Boolean(app.getLoginItemSettings().openAtLogin); }
+  catch (_err) { return false; }
+}
+
+function wasOpenedAtLogin(): boolean {
+  if (process.platform !== 'darwin') return false;
+  try {
+    const settings = app.getLoginItemSettings();
+    return Boolean(settings.wasOpenedAtLogin || settings.wasOpenedAsHidden);
+  } catch (_err) { return false; }
+}
+
+function setLaunchAtLogin(enabled: boolean) {
+  if (process.platform !== 'darwin' || !app.isPackaged) return;
+  try {
+    app.setLoginItemSettings({
+      openAtLogin: enabled,
+      // Supports the intended behavior on macOS 12 and earlier. On macOS 13+
+      // Electron reports `wasOpenedAtLogin`, which we use below to suppress the
+      // initial window regardless of this deprecated OS hint.
+      openAsHidden: true,
+    });
+    const settings = app.getLoginItemSettings();
+    const requestWasRecorded = !enabled || settings.openAtLogin || settings.status === 'enabled' || settings.status === 'requires-approval';
+    if (requestWasRecorded) {
+      const marker = path.join(app.getPath('userData'), LOGIN_ITEM_PREFERENCE_MARKER);
+      fs.mkdirSync(path.dirname(marker), { recursive: true });
+      fs.writeFileSync(marker, '1\n');
+    }
+  }
+  catch (error) { console.warn('[heimdall] unable to change login-item setting:', error); }
+}
+
+function ensureDefaultLaunchAtLogin() {
+  if (process.platform !== 'darwin' || !app.isPackaged) return;
+  const marker = path.join(app.getPath('userData'), LOGIN_ITEM_PREFERENCE_MARKER);
+  if (!fs.existsSync(marker)) setLaunchAtLogin(true);
+}
+
+function updateAuthenticatedUser(identity: any) {
+  const clean = (value: any) => String(value || '').replace(/[\r\n\t]+/g, ' ').trim().slice(0, 160);
+  authenticatedUserLabel = identity && typeof identity === 'object'
+    ? clean(identity.display_name || identity.name || identity.email || identity.user_id)
+    : '';
+  refreshTrayStatus();
+}
+
+async function refreshAuthenticatedUserFromSession() {
+  try {
+    const response = await session.defaultSession.fetch(`${configuredUiOrigin()}/api/v1/me`, { credentials: 'include' });
+    if (response.status === 401 || response.status === 403) { updateAuthenticatedUser(null); return; }
+    if (!response.ok) return;
+    const body = await response.json();
+    updateAuthenticatedUser(body?.data || null);
+  } catch (_err) { /* The renderer will synchronize identity after a successful OIDC check. */ }
+}
+
+function handleEnrollmentEvent(payload: any) {
+  if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
+    mainWindow.webContents.send('heimdall-bridge:enrollment-event', payload);
+  }
+  if (payload?.type === 'pairing' && payload?.url && payload?.code) {
+    trayPairing = { url: String(payload.url), code: String(payload.code) };
+    trayOperationMessage = 'Waiting for browser approval…';
+    void shell.openExternal(trayPairing.url);
+  } else if (payload?.type === 'complete') {
+    trayPairing = null;
+    trayOperationMessage = payload?.message || 'Bridge enrollment complete.';
+  } else if (payload?.type === 'error') {
+    trayOperationMessage = payload?.message || 'Bridge enrollment failed.';
+  }
+  refreshTrayStatus();
+}
+
+async function restartBridgeFromTray() {
+  trayOperationMessage = 'Restarting Bridge…';
+  refreshTrayStatus();
+  const result = await bridgeManager.restart(configuredHubApiBaseUrl());
+  trayOperationMessage = result?.ok ? 'Bridge restarted.' : String(result?.error || 'Bridge restart failed.');
+  refreshTrayStatus();
+  if (!result?.ok) dialog.showErrorBox('Unable to restart Bridge', trayOperationMessage);
+}
+
+async function installBridgeFromTray() {
+  trayOperationMessage = 'Installing packaged Bridge…';
+  refreshTrayStatus();
+  const result = await bridgeManager.installBundled(configuredHubApiBaseUrl());
+  if (result?.ok) {
+    trayOperationMessage = result?.status?.enrolled ? 'Bridge installed and running.' : 'Bridge installed. Enrollment required.';
+  } else {
+    trayOperationMessage = String(result?.error || 'Bridge installation failed.');
+    dialog.showErrorBox('Unable to install Bridge', trayOperationMessage);
+  }
+  refreshTrayStatus();
+}
+
+async function enrollBridgeFromTray(reEnrollment: boolean) {
+  if (reEnrollment) {
+    const options = {
+      type: 'warning',
+      title: 'Re-enroll Bridge',
+      message: 'Re-enroll this Bridge?',
+      detail: 'The Bridge will disconnect until you approve the new browser pairing request. Its existing Bridge identity and history will be reused.',
+      buttons: ['Cancel', 'Re-enroll Bridge'],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+    };
+    const answer = mainWindow && !mainWindow.isDestroyed()
+      ? await dialog.showMessageBox(mainWindow, options)
+      : await dialog.showMessageBox(options);
+    if (answer.response !== 1) return;
+  }
+  trayPairing = null;
+  trayOperationMessage = reEnrollment ? 'Starting Bridge re-enrollment…' : 'Starting Bridge enrollment…';
+  refreshTrayStatus();
+  const result = reEnrollment
+    ? bridgeManager.startReEnrollment(configuredHubApiBaseUrl(), handleEnrollmentEvent)
+    : bridgeManager.startEnrollment(configuredHubApiBaseUrl(), handleEnrollmentEvent);
+  if (!result?.ok) {
+    trayOperationMessage = String(result?.error || 'Unable to start Bridge enrollment.');
+    refreshTrayStatus();
+    dialog.showErrorBox('Unable to enroll Bridge', trayOperationMessage);
+  }
+}
+
+function refreshTrayStatus() {
+  if (!statusTray || statusTray.isDestroyed()) return;
+  let status: any;
+  try { status = bridgeManager.getStatus(configuredHubApiBaseUrl()); }
+  catch (_err) {
+    status = { installed: false, enrolled: false, serviceState: 'not-installed', hubUrl: configuredHubApiBaseUrl() };
+  }
+  const presentation = trayStatus(status);
+  const version = String(status.installedVersion || status.bundledVersion || '').replace(/^v/, '');
+  statusTray.setTitle(` ${presentation.symbol}`);
+  statusTray.setToolTip(`${APP_DISPLAY_NAME} — ${presentation.label}${version ? ` (Bridge v${version})` : ''}`);
+  statusTray.setContextMenu(Menu.buildFromTemplate([
+    { label: presentation.label, enabled: false },
+    ...(version ? [{ label: `Bridge v${version}`, enabled: false }] : []),
+    { label: String(status.hubUrl || configuredHubApiBaseUrl()), enabled: false },
+    ...(authenticatedUserLabel ? [{ label: `Signed in as ${authenticatedUserLabel}`, enabled: false }] : []),
+    ...(trayOperationMessage ? [{ label: trayOperationMessage, enabled: false }] : []),
+    ...(trayPairing ? [
+      { label: `Pairing code: ${trayPairing.code}`, enabled: false },
+      { label: 'Copy Pairing Code', click: () => clipboard.writeText(trayPairing?.code || '') },
+      { label: 'Open Approval Page', click: () => { if (trayPairing?.url) void shell.openExternal(trayPairing.url); } },
+    ] : []),
+    { type: 'separator' },
+    { label: `Open ${APP_DISPLAY_NAME}`, click: showMainWindow },
+    { label: 'Check for Bridge Updates…', click: openBridgeUpdates },
+    { label: 'Refresh Bridge Status', click: refreshTrayStatus },
+    ...(!status.installed ? [{
+      label: 'Install Packaged Bridge',
+      enabled: Boolean(status.packaged && !status.busy),
+      click: () => { void installBridgeFromTray(); },
+    }] : [
+      { label: 'Restart Bridge', enabled: !status.busy, click: () => { void restartBridgeFromTray(); } },
+      {
+        label: status.enrolled ? 'Re-enroll Bridge…' : 'Enroll Bridge…',
+        enabled: !status.busy,
+        click: () => { void enrollBridgeFromTray(Boolean(status.enrolled)); },
+      },
+    ]),
+    { type: 'separator' },
+    {
+      label: 'Launch at Login',
+      type: 'checkbox',
+      checked: loginItemEnabled(),
+      click: (item: any) => setLaunchAtLogin(Boolean(item.checked)),
+    },
+    { type: 'separator' },
+    { label: `Quit ${APP_DISPLAY_NAME}`, click: () => { isQuitting = true; app.quit(); } },
+  ]));
+}
+
+function openBridgeUpdates() {
+  const win = mainWindow && !mainWindow.isDestroyed() ? mainWindow : createWindow();
+  showMainWindow();
+  const send = () => { if (!win.webContents.isDestroyed()) win.webContents.send('heimdall-bridge:check-updates'); };
+  if (win.webContents.isLoadingMainFrame()) win.webContents.once('did-finish-load', send);
+  else send();
+}
+
+function installStatusTray() {
+  if (process.platform !== 'darwin' || statusTray) return;
+  const trayIcon = appIcon?.resize({ width: 18, height: 18 });
+  trayIcon?.setTemplateImage(true);
+  statusTray = new Tray(trayIcon || nativeImage.createEmpty());
+  refreshTrayStatus();
+  trayRefreshTimer = setInterval(refreshTrayStatus, 15_000);
+  void refreshAuthenticatedUserFromSession();
+  userRefreshTimer = setInterval(() => { void refreshAuthenticatedUserFromSession(); }, 300_000);
 }
 
 ipcMain.handle('odin-api:pick-directory', async (event) => {
@@ -201,12 +437,18 @@ ipcMain.handle('heimdall-api:open-external', async (_event, url: string) => {
   return { ok: true };
 });
 
+ipcMain.on('heimdall-auth:set-user', (event, identity) => {
+  if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents) return;
+  updateAuthenticatedUser(identity);
+});
+
 ipcMain.handle('heimdall-bridge:get-status', () => bridgeManager.getStatus(configuredHubApiBaseUrl()));
-ipcMain.handle('heimdall-bridge:install-bundled', () => bridgeManager.installBundled(configuredHubApiBaseUrl()));
-ipcMain.handle('heimdall-bridge:start-enrollment', (event) => bridgeManager.startEnrollment(configuredHubApiBaseUrl(), (payload: any) => {
-  if (!event.sender.isDestroyed()) event.sender.send('heimdall-bridge:enrollment-event', payload);
-  if (payload?.type === 'pairing' && payload?.url) void shell.openExternal(String(payload.url));
-}));
+ipcMain.handle('heimdall-bridge:install-bundled', async () => {
+  const result = await bridgeManager.installBundled(configuredHubApiBaseUrl());
+  refreshTrayStatus();
+  return result;
+});
+ipcMain.handle('heimdall-bridge:start-enrollment', () => bridgeManager.startEnrollment(configuredHubApiBaseUrl(), handleEnrollmentEvent));
 
 
 // Build an application menu whose FIRST submenu is titled with the app name.
@@ -247,6 +489,8 @@ app.whenReady().then(async () => {
   app.setName(APP_DISPLAY_NAME);
   app.setAboutPanelOptions?.({ applicationName: APP_DISPLAY_NAME });
   installAppMenu();
+  ensureDefaultLaunchAtLogin();
+  installStatusTray();
 
   // In dev the renderer runs at the Vite dev-server origin, and Vite's
   // `server.proxy` (see vite.config.js) forwards `/api/v1` to the local Hub.
@@ -267,7 +511,9 @@ app.whenReady().then(async () => {
   console.log(`  packaged=${app.isPackaged}`);
   console.log(`  dev=${isDev}`);
 
-  createWindow();
+  const backgroundLaunch = wasOpenedAtLogin();
+  if (!backgroundLaunch) createWindow();
+  else app.dock?.hide();
 
   if (process.env.HEIMDALL_UI_DEBUG === '1') {
     currentDebugPort = await startDebugServer();
@@ -276,11 +522,18 @@ app.whenReady().then(async () => {
   }
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    showMainWindow();
   });
 });
 
 app.on('before-quit', () => {
+  isQuitting = true;
+  if (trayRefreshTimer) clearInterval(trayRefreshTimer);
+  trayRefreshTimer = null;
+  if (userRefreshTimer) clearInterval(userRefreshTimer);
+  userRefreshTimer = null;
+  statusTray?.destroy();
+  statusTray = null;
   deregister();
 });
 

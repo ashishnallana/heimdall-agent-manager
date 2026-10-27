@@ -951,6 +951,19 @@ function AuthGate() {
   authStatusRef.current = auth.status;
   const lastSeenUserRef = useRef(readLastSeenUserId());
 
+  // REQ-MAC-TRAY-2: the sandboxed renderer publishes only display identity
+  // fields to Electron's main process. OIDC cookies and tokens never cross IPC.
+  useEffect(() => {
+    const desktopApi = typeof window === 'undefined' ? null : (window as any).odinApi;
+    if (typeof desktopApi?.setAuthenticatedUser !== 'function') return;
+    desktopApi.setAuthenticatedUser(auth.status === 'authenticated' ? {
+      user_id: auth.user?.user_id || '',
+      name: auth.user?.name || '',
+      display_name: auth.user?.display_name || '',
+      email: auth.user?.email || '',
+    } : null);
+  }, [auth.status, auth.user]);
+
   useEffect(() => {
     let cancelled = false;
     let refreshing = false;

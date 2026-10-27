@@ -78,6 +78,20 @@ A typical run looks like this:
 Everything above is visible and steerable in real time from the dashboard, and every step
 leaves a durable record.
 
+## macOS desktop app
+
+Download the signed and notarized DMG for the Mac's architecture from GitHub Releases
+(`arm64` for Apple Silicon, `x64` for Intel), drag Heimdall to Applications, and sign in
+with the Hub's OIDC provider. Heimdall then stays available as a lightweight macOS menu-bar
+app when its main window is closed.
+
+The menu-bar control shows the local Bridge state, installed version, Hub, and signed-in
+user. It can install the Bridge bundled in the DMG, start enrollment and display/copy the
+browser pairing code, check for updates, restart the Bridge, or re-enroll the same durable
+Bridge identity. `Launch at Login` is enabled on first install and can be disabled from the
+same menu. Quitting the desktop app removes the menu item but does not stop the separately
+managed Bridge LaunchAgent.
+
 ## Keyboard shortcuts
 
 Heimdall's unmodified-key shortcuts use a Vim-style sequence grammar. Press `?` to open
