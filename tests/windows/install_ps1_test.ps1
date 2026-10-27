@@ -147,6 +147,12 @@ try {
   Check ($r.Code -eq 1 -and $r.Out -match 'Invalid Hub URL') 'a Hub URL path is rejected' $r.Out
   $r = Invoke-Installer @('-DryRun') @{ HEIMDALL_NON_INTERACTIVE = '1' }
   Check ($r.Code -eq 1 -and $r.Out -match '-Hub is required in non-interactive mode') 'non-interactive without -Hub fails' $r.Out
+  $r = Invoke-Installer @('-Hub', 'https://hub.example.com', '-DryRun', '-Bundle', 'bridge.zip')
+  Check ($r.Code -eq 1 -and $r.Out -match '-Bundle and -ChecksumFile must be supplied together') 'desktop bundle requires its checksum file' $r.Out
+  $r = Invoke-Installer @('-Hub', 'https://hub.example.com', '-DryRun', '-Bundle', 'bridge.zip', '-ChecksumFile', 'SHA256SUMS', '-FromDir', $fake)
+  Check ($r.Code -eq 1 -and $r.Out -match '-FromDir and -Bundle are mutually exclusive') 'desktop bundle and local directory modes are exclusive' $r.Out
+  $r = Invoke-Installer @('-Hub', 'https://hub.example.com', '-DryRun', '-Bundle', 'bridge.zip', '-ChecksumFile', 'SHA256SUMS')
+  Check ($r.Code -eq 0 -and $r.Out -match 'Install the packaged Bridge bundle bridge.zip after verifying SHA256SUMS') 'desktop bundle dry-run uses the verified local package' $r.Out
   $r = Invoke-Installer @('-Hub', 'HTTPS://Hub.Example.COM:443/', '-DryRun')
   Check ($r.Code -eq 0 -and $r.Out -match 'Service: heimdall-bridge-hub-example-com ' -and $r.Out -match '\[PLAN\] Download heimdall-local-windows-amd64-LATEST\.zip') '-DryRun canonicalizes the Hub and plans the release download' $r.Out
   $r = Invoke-Installer @('-Hub', 'http://[::1]:8080', '-DryRun', '-Version', 'v1.2.3')
@@ -216,11 +222,13 @@ try {
   Check ((Get-Content -Encoding UTF8 -Raw (Join-Path $stateDir 'hub-url')).Trim() -eq $hub) 'hub-url recorded'
   $cfg = Get-Content -Encoding UTF8 -Raw (Join-Path $stateDir 'config.toml')
   Check ($cfg -match "daemon_url = `"$([regex]::Escape($hub))`"" -and $cfg -match ('data_dir = "' + [regex]::Escape($dataDir.Replace('\', '/')) + '"')) 'config.toml carries the Hub and forward-slash data dir' $cfg
-  Check ((Test-OwnerOnly $stateDir) -and (Test-OwnerOnly $dataDir) -and (Test-OwnerOnly (Join-Path $stateDir 'bridge-token'))) 'state dir, data dir and token are owner-only'
+  Check ((Test-OwnerOnly $stateDir) -and (Test-OwnerOnly $dataDir) -and (Test-OwnerOnly (Join-Path $stateDir 'bridge-token')) -and
+    (Test-OwnerOnly (Join-Path $stateDir 'bridge-id'))) 'state dir, data dir, token and Bridge id are owner-only'
   Check (Test-Path (Join-Path $stateDir 'enroll.ps1')) 'enroll.ps1 persisted'
   $t = $null; $e = $null
   [void][System.Management.Automation.Language.Parser]::ParseFile((Join-Path $stateDir 'enroll.ps1'), [ref]$t, [ref]$e)
   Check ($e.Count -eq 0) 'enroll.ps1 parses' ($e | Out-String)
+  Check ((Get-Content -Encoding UTF8 -Raw (Join-Path $stateDir 'bridge-id')).Trim() -eq 'brg_fake123') 'the non-secret Bridge id is persisted independently of its credential'
 
   $enroll = @(Get-Calls $fakeLog 'ham-bridge' | Where-Object { $_[1] -eq 'enroll' })
   Check ($enroll.Count -eq 1) 'ham-bridge enroll ran once'
@@ -232,6 +240,9 @@ try {
       (Get-FieldValue $c '--local-run-dir') -eq (Join-Path $dataDir 'run')) 'enroll argv matches install.sh' ($c -join ' | ')
     Check ((Get-FieldValue $c 'HEIMDALL_HAM_PTY_HOST_BIN') -eq (Join-Path $binDir 'ham-pty-host.exe') -and (Get-FieldValue $c 'HEIMDALL_BRIDGE_PTY_HOST') -eq 'true' -and
       (Get-FieldValue $c 'HEIMDALL_HAM_CTL_BIN') -eq (Join-Path $binDir 'ham-ctl.exe') -and (Get-FieldValue $c 'PATH0') -eq $binDir) 'enroll environment carries the tool paths' ($c -join ' | ')
+    $providerPath = Get-FieldValue $c 'PATH'
+    Check ($providerPath -like "*$(Join-Path $roaming 'npm')*" -and $providerPath -like "*$(Join-Path $local 'pnpm')*" -and
+      $providerPath -like "*$(Join-Path $env:USERPROFILE '.cargo\bin')*") 'enroll PATH includes common per-user provider CLI directories' $providerPath
   }
   $probe = @(Get-Calls $fakeLog 'ham-bridge' | Where-Object { $_ -contains '--probe-hub' })
   Check ($probe.Count -ge 1 -and (Get-FieldValue $probe[-1] '--probe-hub') -eq $hub) '--probe-hub preflight ran against the Hub'
@@ -246,7 +257,21 @@ try {
     Check ((Get-FieldValue $c 'HEIMDALL_BRIDGE_ENDPOINT') -eq "tcp:127.0.0.1:$($ports[1])" -and (Get-FieldValue $c 'HEIMDALL_BRIDGE_SERVICE_NAME') -eq $svc -and
       (Get-FieldValue $c 'HEIMDALL_HAM_CTL_BIN') -eq (Join-Path $binDir "ham-ctl-$svc.cmd") -and (Get-FieldValue $c 'HEIMDALL_BRIDGE_PTY_HOST') -eq 'true' -and
       (Get-FieldValue $c 'HEIMDALL_HAM_PTY_HOST_BIN') -eq (Join-Path $binDir 'ham-pty-host.exe') -and (Get-FieldValue $c 'PATH0') -eq $binDir) 'service environment matches install.sh unit' ($c -join ' | ')
+    $providerPath = Get-FieldValue $c 'PATH'
+    Check ($providerPath -like "*$(Join-Path $env:APPDATA 'npm')*" -and $providerPath -like "*$(Join-Path $env:LOCALAPPDATA 'pnpm')*" -and
+      $providerPath -like "*$(Join-Path $env:USERPROFILE '.cargo\bin')*") 'service PATH includes common per-user provider CLI directories' $providerPath
   }
+
+  # ---- explicit identity reuse through the generated menu-bar enrollment contract ----
+  $savedLog = $env:FAKE_LOG
+  $env:FAKE_LOG = $fakeLog
+  try {
+    $reenrollOutput = & $Engine -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $stateDir 'enroll.ps1') -Headless -ReuseBridge brg_fake123 2>&1
+    $reenrollCode = $LASTEXITCODE
+  } finally { $env:FAKE_LOG = $savedLog }
+  Check ($reenrollCode -eq 0) 'generated enroll.ps1 accepts the desktop -ReuseBridge contract' ($reenrollOutput | Out-String)
+  $enroll = @(Get-Calls $fakeLog 'ham-bridge' | Where-Object { $_[1] -eq 'enroll' })
+  Check ($enroll.Count -eq 2 -and (Get-FieldValue $enroll[-1] '--reuse-bridge') -eq 'brg_fake123') 're-enrollment explicitly reuses the durable Bridge id' ($enroll[-1] -join ' | ')
 
   # ---- per-Hub ham-ctl wrapper ----
   $wrapper = Join-Path $binDir "ham-ctl-$svc.cmd"
@@ -289,6 +314,16 @@ try {
   Check (@(Get-Calls $fakeLog 'ham-bridge' | Where-Object { $_[1] -eq 'enroll' }).Count -eq 1) '-KeepEnrollment does not enroll again'
   $r = Invoke-Installer @('-Hub', $hub, '-NonInteractive') $relEnv
   Check ($r.Code -eq 0 -and $r.Out -match 'Using cached heimdall-local-windows-amd64-v9\.9\.9\.zip' -and $r.Out -match 'Existing enrollment preserved') 'second install reuses the cached bundle; -NonInteractive keeps enrollment' $r.Out
+
+  $packagedSums = Join-Path $root 'packaged-SHA256SUMS'
+  $packagedHash = (Get-FileHash -Algorithm SHA256 $bundle).Hash.ToLowerInvariant()
+  Set-Content -Path $packagedSums -Encoding ASCII -Value "$packagedHash  $([IO.Path]::GetFileName($bundle))"
+  $r = Invoke-Installer @('-Hub', $hub, '-NonInteractive', '-Version', $tag, '-Bundle', $bundle, '-ChecksumFile', $packagedSums)
+  Check ($r.Code -eq 0 -and $r.Out -match 'Packaged Bridge checksum and bundle verified' -and $r.Out -match 'Existing enrollment preserved') 'desktop packaged bundle is verified, unpacked, and installed without a download' $r.Out
+  Add-Content -LiteralPath $bundle -Value 'tampered'
+  $r = Invoke-Installer @('-Hub', $hub, '-NonInteractive', '-Version', $tag, '-Bundle', $bundle, '-ChecksumFile', $packagedSums)
+  Check ($r.Code -eq 1 -and $r.Out -match 'SHA-256 verification failed; nothing installed') 'tampered desktop packaged bundle is refused' $r.Out
+  Copy-Item -LiteralPath (Join-Path $mirror 'rel\download\v9.9.9\heimdall-local-windows-amd64-v9.9.9.zip') -Destination $bundle -Force
 
   $mz = Join-Path $mirror 'rel\download\v9.9.9\heimdall-local-windows-amd64-v9.9.9.zip'
   [IO.File]::AppendAllText($mz, 'tampered')

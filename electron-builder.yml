@@ -13,6 +13,10 @@ extraResources:
     filter:
       - '**/*'
 asar: true
+publish:
+  provider: github
+  owner: tanmayv
+  repo: heimdall-agent-manager
 mac:
   target: dmg
   category: public.app-category.developer-tools
@@ -24,6 +28,20 @@ mac:
   notarize: false
   entitlements: build/entitlements.mac.plist
   entitlementsInherit: build/entitlements.mac.plist
+win:
+  target: nsis
+  icon: src/ui/electron/icon.png
+  # Public Windows code signing has an ongoing cost. Until the project opts in,
+  # releases are unsigned and updater integrity relies on GitHub HTTPS plus the
+  # SHA-512 digest in latest.yml.
+  verifyUpdateCodeSignature: false
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  runAfterFinish: true
 afterSign: scripts/release/notarize-electron.cjs
 dmg:
   sign: true

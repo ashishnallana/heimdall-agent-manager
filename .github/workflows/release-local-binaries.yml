@@ -592,6 +592,25 @@ jobs:
           & "$work/bin/ham-bridge.exe" --version; if ($LASTEXITCODE) { throw 'packaged ham-bridge --version failed' }
           & "$work/bin/ham-bridge.exe" --help | Out-Null; if ($LASTEXITCODE) { throw 'packaged ham-bridge --help failed' }
 
+      - name: Set up Node for the Windows desktop app
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Build Heimdall installer (Windows)
+        shell: pwsh
+        run: |
+          scripts/release/stage-windows-desktop-resources.ps1 `
+            -Bundle dist/heimdall-local-windows-amd64.zip `
+            -Version "${{ needs.prepare.outputs.version }}"
+          npm ci
+          npm run build
+          npx electron-builder --win nsis --x64 --publish never `
+            -c.extraMetadata.version="${{ needs.prepare.outputs.clean_version }}"
+          $installer = Get-Item desktop-dist/Heimdall-*-x64.exe
+          if (-not (Test-Path desktop-dist/latest.yml)) { throw 'electron-builder did not produce latest.yml' }
+
       - name: Upload target artifact
         uses: actions/upload-artifact@v4
         with:
@@ -600,6 +619,9 @@ jobs:
             dist/heimdall-local-windows-amd64.zip
             dist/heimdall-local-windows-amd64.contents.txt
             dist/SHA256SUMS-windows-amd64.txt
+            desktop-dist/Heimdall-*-x64.exe
+            desktop-dist/Heimdall-*-x64.exe.blockmap
+            desktop-dist/latest.yml
           if-no-files-found: error
           retention-days: 30
 
@@ -716,7 +738,11 @@ jobs:
           sha256sum "${versioned[@]}" > SHA256SUMS
           test -f "Heimdall-${{ needs.prepare.outputs.clean_version }}-arm64.dmg"
           test -f "Heimdall-${{ needs.prepare.outputs.clean_version }}-x64.dmg"
+          test -f "Heimdall-${{ needs.prepare.outputs.clean_version }}-x64.exe"
+          test -f "Heimdall-${{ needs.prepare.outputs.clean_version }}-x64.exe.blockmap"
+          test -f latest.yml
           sha256sum Heimdall-*.dmg >> SHA256SUMS
+          sha256sum Heimdall-*.exe >> SHA256SUMS
 
       - name: Create or update GitHub Release
         env:
@@ -749,6 +775,8 @@ jobs:
           - heimdall-local-windows-amd64-$VERSION.zip (scripts/install.ps1)
           - Heimdall-${{ needs.prepare.outputs.clean_version }}-arm64.dmg (signed + notarized macOS app with Bridge)
           - Heimdall-${{ needs.prepare.outputs.clean_version }}-x64.dmg (signed + notarized macOS app with Bridge)
+          - Heimdall-${{ needs.prepare.outputs.clean_version }}-x64.exe (unsigned Windows installer with Bridge)
+          - latest.yml and the Windows block map (desktop auto-update metadata)
           - SHA256SUMS
           NOTES
           release_flags=()
@@ -758,10 +786,10 @@ jobs:
             release_flags+=(--prerelease)
           fi
           if gh release view "$VERSION" >/dev/null 2>&1; then
-            gh release upload "$VERSION" dist/heimdall-local-*-"$VERSION".tar.gz dist/heimdall-local-*-"$VERSION".zip dist/Heimdall-*.dmg dist/SHA256SUMS --clobber
+            gh release upload "$VERSION" dist/heimdall-local-*-"$VERSION".tar.gz dist/heimdall-local-*-"$VERSION".zip dist/Heimdall-*.dmg dist/Heimdall-*.exe dist/Heimdall-*.exe.blockmap dist/latest.yml dist/SHA256SUMS --clobber
             gh release edit "$VERSION" --notes-file "$notes_file"
           else
-            gh release create "$VERSION" dist/heimdall-local-*-"$VERSION".tar.gz dist/heimdall-local-*-"$VERSION".zip dist/Heimdall-*.dmg dist/SHA256SUMS \
+            gh release create "$VERSION" dist/heimdall-local-*-"$VERSION".tar.gz dist/heimdall-local-*-"$VERSION".zip dist/Heimdall-*.dmg dist/Heimdall-*.exe dist/Heimdall-*.exe.blockmap dist/latest.yml dist/SHA256SUMS \
               --title "$VERSION" \
               --target "$RELEASE_COMMIT" \
               --notes-file "$notes_file" \

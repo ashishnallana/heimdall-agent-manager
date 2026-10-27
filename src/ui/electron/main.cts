@@ -15,6 +15,7 @@ const appIcon = (() => {
 })();
 const bridgeManager = require('./bridgeManager.cjs');
 const { allowedExternalUrl, allowedPairingUrl, classifyNavigation, idpOriginFromAuthConfig, isAuthStartUrl, oidcWindowNavigationAllowed } = require('./externalUrl.cjs');
+const desktopUpdater = require('./desktopUpdater.cjs');
 
 function normalizeBaseUrl(value: string): string {
   return String(value || '').trim().replace(/\/$/, '');
@@ -74,7 +75,12 @@ let trayPairing: { code: string; url: string } | null = null;
 let trayEnrollmentLog = '';
 // Identity provider origin from GET /api/v1/auth/config, used to route sign-out.
 let idpOrigin = '';
+let desktopUpdateState: any = { phase: 'disabled', version: '', percent: 0, message: '' };
 const LOGIN_ITEM_PREFERENCE_MARKER = 'login-item-preference-configured';
+
+function supportsStatusTray(): boolean {
+  return process.platform === 'darwin' || process.platform === 'win32';
+}
 
 function openOidcWindow(url: string, owner: any) {
   // REQ-OIDC-DESKTOP-1: OIDC runs in a preload-free window which shares the
@@ -146,11 +152,11 @@ function createWindow() {
   });
   mainWindow = win;
 
-  // REQ-MAC-TRAY-1: closing the visible UI leaves the lightweight tray
-  // controller running. The independently managed Bridge LaunchAgent is not
-  // coupled to either window or tray lifetime.
+  // REQ-MAC-TRAY-1 / REQ-WIN-TRAY-1: closing the visible UI leaves the
+  // lightweight tray controller running. The independently managed Bridge
+  // LaunchAgent/Scheduled Task is not coupled to either window or tray lifetime.
   win.on('close', (event: any) => {
-    if (process.platform !== 'darwin' || isQuitting) return;
+    if (!supportsStatusTray() || isQuitting) return;
     event.preventDefault();
     win.hide();
     app.dock?.hide();
@@ -241,6 +247,7 @@ function loginItemEnabled(): boolean {
 }
 
 function wasOpenedAtLogin(): boolean {
+  if (process.platform === 'win32') return process.argv.includes('--background');
   if (process.platform !== 'darwin') return false;
   try {
     const settings = app.getLoginItemSettings();
@@ -249,17 +256,19 @@ function wasOpenedAtLogin(): boolean {
 }
 
 function setLaunchAtLogin(enabled: boolean) {
-  if (process.platform !== 'darwin' || !app.isPackaged) return;
+  if (!supportsStatusTray() || !app.isPackaged) return;
   try {
-    app.setLoginItemSettings({
-      openAtLogin: enabled,
-      // Supports the intended behavior on macOS 12 and earlier. On macOS 13+
-      // Electron reports `wasOpenedAtLogin`, which we use below to suppress the
-      // initial window regardless of this deprecated OS hint.
-      openAsHidden: true,
-    });
-    const settings = app.getLoginItemSettings();
-    const requestWasRecorded = !enabled || settings.openAtLogin || settings.status === 'enabled' || settings.status === 'requires-approval';
+    const loginSettings = process.platform === 'win32'
+      ? { openAtLogin: enabled, path: process.execPath, args: ['--background'] }
+      : {
+          openAtLogin: enabled,
+          // Supports the intended behavior on macOS 12 and earlier. On macOS
+          // 13+ Electron reports `wasOpenedAtLogin`, which suppresses the window.
+          openAsHidden: true,
+        };
+    app.setLoginItemSettings(loginSettings);
+    const recordedSettings = app.getLoginItemSettings();
+    const requestWasRecorded = !enabled || recordedSettings.openAtLogin || recordedSettings.status === 'enabled' || recordedSettings.status === 'requires-approval';
     if (requestWasRecorded) {
       const marker = path.join(app.getPath('userData'), LOGIN_ITEM_PREFERENCE_MARKER);
       fs.mkdirSync(path.dirname(marker), { recursive: true });
@@ -270,7 +279,7 @@ function setLaunchAtLogin(enabled: boolean) {
 }
 
 function ensureDefaultLaunchAtLogin() {
-  if (process.platform !== 'darwin' || !app.isPackaged) return;
+  if (!supportsStatusTray() || !app.isPackaged) return;
   const marker = path.join(app.getPath('userData'), LOGIN_ITEM_PREFERENCE_MARKER);
   if (!fs.existsSync(marker)) setLaunchAtLogin(true);
 }
@@ -401,15 +410,19 @@ function refreshTrayStatus() {
   }
   const presentation = trayStatus(status);
   const version = String(status.installedVersion || status.bundledVersion || '').replace(/^v/, '');
-  statusTray.setTitle(` ${presentation.symbol}`);
+  if (process.platform === 'darwin') statusTray.setTitle(` ${presentation.symbol}`);
   statusTray.setToolTip(`${APP_DISPLAY_NAME} — ${presentation.label}${version ? ` (Bridge v${version})` : ''}`);
+  const updateBusy = desktopUpdateState.phase === 'checking' || desktopUpdateState.phase === 'downloading';
+  const updateReady = desktopUpdateState.phase === 'downloaded';
   statusTray.setContextMenu(Menu.buildFromTemplate([
     { label: presentation.label, enabled: false },
     ...(version ? [{ label: `Bridge v${version}`, enabled: false }] : []),
+    { label: `${APP_DISPLAY_NAME} v${app.getVersion()}`, enabled: false },
     { label: String(status.hubUrl || configuredHubApiBaseUrl()), enabled: false },
     ...(authenticatedUserLabel ? [{ label: `Signed in as ${authenticatedUserLabel}`, enabled: false }] : []),
     ...(trayOperationMessage ? [{ label: trayOperationMessage, enabled: false }] : []),
     ...(trayEnrollmentLog ? [{ label: 'Show Enrollment Log', click: () => { shell.showItemInFolder(trayEnrollmentLog); } }] : []),
+    ...(desktopUpdateState.message ? [{ label: desktopUpdateState.message, enabled: false }] : []),
     ...(trayPairing ? [
       { label: `Pairing code: ${trayPairing.code}`, enabled: false },
       { label: 'Copy Pairing Code', click: () => clipboard.writeText(trayPairing?.code || '') },
@@ -417,6 +430,18 @@ function refreshTrayStatus() {
     ] : []),
     { type: 'separator' },
     { label: `Open ${APP_DISPLAY_NAME}`, click: showMainWindow },
+    ...(desktopUpdateState.phase !== 'disabled' ? [{
+      label: updateReady ? `Restart to Install Heimdall ${desktopUpdateState.version}` : 'Check for Heimdall Updates…',
+      enabled: updateReady || (!updateBusy && desktopUpdateState.phase !== 'disabled'),
+      click: () => {
+        if (updateReady) {
+          isQuitting = true;
+          desktopUpdater.install();
+        } else {
+          void desktopUpdater.check(true);
+        }
+      },
+    }] : []),
     { label: 'Check for Bridge Updates…', click: openBridgeUpdates },
     { label: 'Refresh Bridge Status', click: () => { void refreshBridgeStatus(); } },
     ...(!status.installed ? [{
@@ -452,10 +477,12 @@ function openBridgeUpdates() {
 }
 
 function installStatusTray() {
-  if (process.platform !== 'darwin' || statusTray) return;
-  const trayIcon = appIcon?.resize({ width: 18, height: 18 });
-  trayIcon?.setTemplateImage(true);
+  if (!supportsStatusTray() || statusTray) return;
+  const size = process.platform === 'win32' ? 16 : 18;
+  const trayIcon = appIcon?.resize({ width: size, height: size });
+  if (process.platform === 'darwin') trayIcon?.setTemplateImage(true);
   statusTray = new Tray(trayIcon || nativeImage.createEmpty());
+  statusTray.on('double-click', showMainWindow);
   void refreshBridgeStatus();
   trayRefreshTimer = setInterval(() => { void refreshBridgeStatus(); }, 15_000);
   void refreshAuthenticatedUserFromSession();
@@ -534,6 +561,10 @@ app.whenReady().then(() => {
   installAppMenu();
   ensureDefaultLaunchAtLogin();
   installStatusTray();
+  desktopUpdater.start(app.isPackaged && process.platform === 'win32', (next: any) => {
+    desktopUpdateState = next;
+    refreshTrayStatus();
+  });
 
   // In dev the renderer runs at the Vite dev-server origin, and Vite's
   // `server.proxy` (see vite.config.js) forwards `/api/v1` to the local Hub.
@@ -564,6 +595,7 @@ app.whenReady().then(() => {
 app.on('before-quit', () => {
   isQuitting = true;
   bridgeManager.stopEnrollment();
+  desktopUpdater.stop();
   if (trayRefreshTimer) clearInterval(trayRefreshTimer);
   trayRefreshTimer = null;
   if (userRefreshTimer) clearInterval(userRefreshTimer);
@@ -573,5 +605,5 @@ app.on('before-quit', () => {
 });
 
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit();
+  if (!supportsStatusTray()) app.quit();
 });

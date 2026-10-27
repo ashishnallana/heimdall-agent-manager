@@ -23,7 +23,9 @@ param(
   [switch]$KeepEnrollment,
   [switch]$NonInteractive,
   [switch]$Help,
-  [string]$FromDir = ''
+  [string]$FromDir = '',
+  [string]$Bundle = '',
+  [string]$ChecksumFile = ''
 )
 
 # A Hub that serves this script at /public/install.ps1 substitutes these two
@@ -43,7 +45,8 @@ function Show-HeimdallUsage {
   Write-Host @'
 Heimdall Bridge installer - Windows (per-user Scheduled Task)
 Usage: install.ps1 [-Hub URL] [-Version TAG] [-Name PROFILE] [-DryRun] [-Uninstall]
-                   [-ReEnroll | -KeepEnrollment] [-NonInteractive] [-FromDir DIR]
+                   [-ReEnroll | -KeepEnrollment] [-NonInteractive]
+                   [-FromDir DIR | -Bundle ZIP -ChecksumFile FILE]
 Hub must be an HTTP(S) origin, e.g. https://hub.mundus.in or http://localhost:8080.
 Without -Hub, asks on the terminal. Existing enrollment prompts before re-enrolling.
 -NonInteractive preserves existing enrollment and prints a command for new enrollment.
@@ -54,6 +57,8 @@ with its own enrollment, ports and ham-ctl wrapper. PROFILE is 1-31 of [a-z0-9-]
 starting with a letter or digit. Pass the same -Name to -Uninstall or -ReEnroll it.
 -FromDir installs ham-bridge.exe, ham-pty-host.exe and ham-ctl.exe from a local
 build (DIR or DIR\bin) instead of a GitHub release; no download or checksum.
+-Bundle installs a packaged Bridge ZIP after verifying its SHA-256 against
+-ChecksumFile. This is the desktop installer path; both arguments are required.
 The Hub is checked first (20 s budget, exact failure reason). Verified release
 bundles are cached in %LOCALAPPDATA%\heimdall\cache\releases and reused when
 their SHA-256 still matches the release's SHA256SUMS.
@@ -627,16 +632,67 @@ function Wait-BridgeReady {
   return $false
 }
 
+# The bridge id is public metadata, not a credential. Preserve it independently
+# so a missing or rotated token can still re-enroll the same durable Bridge.
+function Get-BridgeId {
+  param($C)
+  $ids = @()
+  $marker = Join-Path $C.StateDir 'bridge-id'
+  if (Test-Path -LiteralPath $marker) {
+    try { $ids += ([IO.File]::ReadAllText($marker)).Trim() } catch { }
+  }
+  if (Test-Path -LiteralPath $C.ConfigFile) {
+    try {
+      $match = [regex]::Match([IO.File]::ReadAllText($C.ConfigFile), '(?m)^\s*daemon_id\s*=\s*"(brg_[A-Za-z0-9_-]{1,60})"\s*$')
+      if ($match.Success) { $ids += $match.Groups[1].Value }
+    } catch { }
+  }
+  if (Test-Path -LiteralPath $C.TokenFile) {
+    try {
+      $first = [IO.File]::ReadLines($C.TokenFile) | Select-Object -First 1
+      $match = [regex]::Match("$first", '^heimdall-bridge-credential/v1\s+\S+\s+(brg_[A-Za-z0-9_-]{1,60})$')
+      if ($match.Success) { $ids += $match.Groups[1].Value }
+    } catch { }
+  }
+  $valid = @($ids | Where-Object { "$_" -match '^brg_[A-Za-z0-9_-]{1,60}$' } | Select-Object -Unique)
+  if ($valid.Count -eq 1) { return "$($valid[0])" }
+  return ''
+}
+
+function Save-BridgeId {
+  param($C, [string]$BridgeId)
+  if ($BridgeId -notmatch '^brg_[A-Za-z0-9_-]{1,60}$') { return }
+  $marker = Join-Path $C.StateDir 'bridge-id'
+  [IO.File]::WriteAllText($marker, "$BridgeId`n", (New-Object Text.UTF8Encoding($false)))
+  Set-OwnerOnlyAcl $marker
+}
+
+function Get-BridgeProviderPath {
+  param([string]$BinDir)
+  $parts = @(
+    $BinDir,
+    (Join-Path $env:APPDATA 'npm'),
+    (Join-Path $env:LOCALAPPDATA 'pnpm'),
+    (Join-Path $env:USERPROFILE '.local\bin'),
+    (Join-Path $env:USERPROFILE '.bun\bin'),
+    (Join-Path $env:USERPROFILE '.volta\bin'),
+    (Join-Path $env:USERPROFILE '.cargo\bin'),
+    $env:PATH
+  ) | Where-Object { $_ }
+  return ($parts -join ';')
+}
+
 # ham-bridge enroll prints the pairing code (typed at <hub>/device/add on an
 # approved browser) and, on Windows, exits 0 without restarting any service. It
 # gets the same tool paths the task's environment carries, so the enrolling
 # process can start the PTY host and ham-ctl too. ham-bridge enroll refuses while
 # a bridge runs on the same config, so this Hub's task is stopped first.
 function Invoke-BridgeEnroll {
-  param($C)
+  param($C, [switch]$Headless, [string]$ReuseBridge = '')
+  if ($ReuseBridge -and $ReuseBridge -notmatch '^brg_[A-Za-z0-9_-]{1,60}$') { Fail 'The previous Bridge ID is invalid; refusing to re-enroll it.' }
   Stop-BridgeService $C
   $vars = [ordered]@{
-    'PATH'                      = $C.BinDir + ';' + $env:PATH
+    'PATH'                      = Get-BridgeProviderPath $C.BinDir
     'HEIMDALL_HAM_PTY_HOST_BIN' = (Join-Path $C.BinDir 'ham-pty-host.exe')
     'HEIMDALL_BRIDGE_PTY_HOST'  = 'true'
     'HEIMDALL_HAM_CTL_BIN'      = (Join-Path $C.BinDir 'ham-ctl.exe')
@@ -646,8 +702,11 @@ function Invoke-BridgeEnroll {
   $status = 1
   try {
     foreach ($k in $vars.Keys) { [Environment]::SetEnvironmentVariable($k, $vars[$k], 'Process') }
-    & (Join-Path $C.BinDir 'ham-bridge.exe') enroll --hub $C.HubUrl --bridge-token-file $C.TokenFile --config $C.ConfigFile `
-      --data-dir $C.DataDir --port "$($C.BridgePort)" --local-endpoint-port "$($C.EndpointPort)" --local-run-dir $C.RunDir
+    $enrollArgs = @('enroll', '--hub', $C.HubUrl, '--bridge-token-file', $C.TokenFile, '--config', $C.ConfigFile,
+      '--data-dir', $C.DataDir, '--port', "$($C.BridgePort)", '--local-endpoint-port', "$($C.EndpointPort)", '--local-run-dir', $C.RunDir)
+    if ($Headless) { $enrollArgs += '--headless' }
+    if ($ReuseBridge) { $enrollArgs += @('--reuse-bridge', $ReuseBridge) }
+    & (Join-Path $C.BinDir 'ham-bridge.exe') @enrollArgs
     $status = $LASTEXITCODE
   } finally {
     foreach ($k in $vars.Keys) { [Environment]::SetEnvironmentVariable($k, $saved[$k], 'Process') }
@@ -660,10 +719,12 @@ function Invoke-BridgeEnroll {
   }
   if (-not $hasToken) { Fail 'Enrollment did not write a credential.' }
   Set-OwnerOnlyAcl $C.TokenFile
+  $completedId = Get-BridgeId $C
+  if ($completedId) { Save-BridgeId $C $completedId }
 }
 
 $HeimdallEmbeddedFunctions = @('Test-HeimdallColour', 'Test-ConsoleOutput', 'Format-Elapsed', 'Write-Tick', 'Clear-Tick', 'Write-Log', 'Fail', 'Test-HeimdallFailure', 'Set-OwnerOnlyAcl', 'Get-LogTail', 'Get-BridgeProcesses',
-  'Stop-BridgeService', 'Start-BridgeService', 'Wait-BridgeReady', 'Invoke-BridgeEnroll')
+  'Stop-BridgeService', 'Start-BridgeService', 'Wait-BridgeReady', 'Get-BridgeId', 'Save-BridgeId', 'Get-BridgeProviderPath', 'Invoke-BridgeEnroll')
 
 # Persist a usable enrollment command even when the installer came from irm:
 # stop this Hub's task, enroll, start the task and check it is ready.
@@ -672,6 +733,7 @@ function New-EnrollScript {
   $sb = New-Object System.Text.StringBuilder
   [void]$sb.AppendLine("# Enroll (or re-enroll) the Heimdall bridge for $($C.HubUrl), then start its task.")
   [void]$sb.AppendLine("# Generated by install.ps1. Run: powershell -NoProfile -ExecutionPolicy Bypass -File `"$($C.EnrollScript)`"")
+  [void]$sb.AppendLine('param([switch]$Headless, [string]$ReuseBridge = '''')')
   [void]$sb.AppendLine('$ErrorActionPreference = ''Stop''')
   foreach ($n in $HeimdallEmbeddedFunctions) {
     [void]$sb.AppendLine("function $n {")
@@ -686,7 +748,8 @@ function New-EnrollScript {
   [void]$sb.AppendLine('}')
   [void]$sb.AppendLine(@'
 try {
-  Invoke-BridgeEnroll $C
+  if (-not $ReuseBridge) { $ReuseBridge = Get-BridgeId $C }
+  Invoke-BridgeEnroll $C -Headless:$Headless -ReuseBridge $ReuseBridge
   Write-Log OK 'Browser-approved enrollment complete'
   Start-BridgeService $C
   if (-not (Wait-BridgeReady $C)) { Fail "Task $($C.ServiceName) did not start. Logs: $($C.LogDir)`n$(Get-LogTail (Join-Path $C.LogDir 'bridge.err.log'))" }
@@ -768,6 +831,8 @@ function Invoke-HeimdallInstaller {
   $version = $O.Version
   $noninteractive = [bool]$O.NonInteractive
   $enrollment = 'ask'
+  if ($O.FromDir -and $O.Bundle) { Fail '-FromDir and -Bundle are mutually exclusive.' }
+  if ([bool]$O.Bundle -ne [bool]$O.ChecksumFile) { Fail '-Bundle and -ChecksumFile must be supplied together.' }
   if ($O.ReEnroll -and $O.KeepEnrollment) { Fail '-ReEnroll and -KeepEnrollment are mutually exclusive.' }
   if ($O.ReEnroll) { $enrollment = 'yes' }
   if ($O.KeepEnrollment) { $enrollment = 'no' }
@@ -877,6 +942,7 @@ function Invoke-HeimdallInstaller {
     Write-Log PLAN "Replace scheduled task $serviceName (at logon, no window, restart on failure); enrollment=$enrollment"
     Write-Log PLAN 'Choose two free loopback ports; create a per-Hub ham-ctl wrapper and task.'
     if ($O.FromDir) { Write-Log PLAN "Install ham-bridge.exe, ham-pty-host.exe, ham-ctl.exe from $($O.FromDir) (no download or checksum)." }
+    elseif ($O.Bundle) { Write-Log PLAN "Install the packaged Bridge bundle $($O.Bundle) after verifying $($O.ChecksumFile)." }
     else {
       $shown = 'LATEST'
       if ($version) { $shown = $version }
@@ -931,6 +997,19 @@ function Invoke-HeimdallInstaller {
         if (Test-Path -LiteralPath $cand -PathType Leaf) { Copy-Item -LiteralPath $cand -Destination (Join-Path $workDir 'apply-bridge-update.ps1'); break }
       }
       Write-Log WARN "Installing local binaries from $src (not a verified release)"
+    } elseif ($O.Bundle) {
+      Write-Log INFO 'Packaged desktop bundle: no release lookup or download.'
+      Write-Step 4 'Verify & unpack'
+      if (-not (Test-Path -LiteralPath $O.Bundle -PathType Leaf)) { Fail "Packaged Bridge bundle not found: $($O.Bundle)" }
+      if (-not (Test-Path -LiteralPath $O.ChecksumFile -PathType Leaf)) { Fail "Packaged Bridge checksum file not found: $($O.ChecksumFile)" }
+      $archive = Split-Path -Leaf $O.Bundle
+      $sums = (Resolve-Path -LiteralPath $O.ChecksumFile).Path
+      if (-not (Get-ExpectedSha256 $sums $archive)) { Fail "Packaged checksum file has no entry for $archive." }
+      if (-not (Test-Sha256 $sums $O.Bundle $archive)) { Fail 'SHA-256 verification failed; nothing installed.' }
+      $sw = [Diagnostics.Stopwatch]::StartNew()
+      if (Test-ConsoleOutput) { Write-Progress -Activity 'Unpacking the packaged Bridge bundle' -Status $archive }
+      try { Expand-HeimdallBundle $O.Bundle $workDir } finally { if (Test-ConsoleOutput) { Write-Progress -Activity 'Unpacking the packaged Bridge bundle' -Completed } }
+      Write-Log OK "Packaged Bridge checksum and bundle verified ($(Format-Elapsed $sw.Elapsed.TotalSeconds))"
     } else {
       $api = $HeimdallRepoApi
       $dlRoot = $HeimdallRepoDownload
@@ -1003,7 +1082,7 @@ function Invoke-HeimdallInstaller {
       if ($bridgeVersion) { $shownVersion = $bridgeVersion }
       Write-Log INFO "Bridge $shownVersion predates --probe-hub (0.3.36); transport preflight skipped."
     }
-    if (-not $O.FromDir) {
+    if (-not $O.FromDir -and -not $O.Bundle) {
       # Keep the verified bundle for next time; drop older versions of this target.
       Copy-Item -LiteralPath $bundle -Destination "$cached.tmp" -Force
       Move-Item -LiteralPath "$cached.tmp" -Destination $cached -Force
@@ -1063,7 +1142,7 @@ function Invoke-HeimdallInstaller {
       'HEIMDALL_BRIDGE_SERVICE_NAME' = $serviceName
     }
     $runLines = @('@echo off', "rem Heimdall bridge for $hubUrl (generated by install.ps1; run by bridge-service.js)", 'setlocal DisableDelayedExpansion',
-      "set `"PATH=$(ConvertTo-CmdValue $binDir);%PATH%`"")
+      "set `"PATH=$(ConvertTo-CmdValue $binDir);%APPDATA%\npm;%LOCALAPPDATA%\pnpm;%USERPROFILE%\.local\bin;%USERPROFILE%\.bun\bin;%USERPROFILE%\.volta\bin;%USERPROFILE%\.cargo\bin;%PATH%`"")
     foreach ($k in $env1.Keys) { $runLines += "set `"$k=$(ConvertTo-CmdValue $env1[$k])`"" }
     $runLines += "`"$(ConvertTo-CmdValue (Join-Path $binDir 'ham-bridge.exe'))`" $quoted 1>>`"$(ConvertTo-CmdValue (Join-Path $C.LogDir 'bridge.out.log'))`" 2>>`"$(ConvertTo-CmdValue (Join-Path $C.LogDir 'bridge.err.log'))`""
     $runLines += 'exit /b %ERRORLEVEL%'
@@ -1108,7 +1187,7 @@ for (;;) {
         Write-Log INFO 'Service installed; browser-approved enrollment is pending.'
         Write-Host "Run: powershell -NoProfile -ExecutionPolicy Bypass -File `"$($C.EnrollScript)`""
       } else {
-        Invoke-BridgeEnroll $C
+        Invoke-BridgeEnroll $C -ReuseBridge (Get-BridgeId $C)
         Write-Log OK 'Browser-approved enrollment complete'
       }
     } else {
@@ -1145,6 +1224,7 @@ if ($Help) {
     Invoke-HeimdallInstaller @{
       Hub = $Hub; Version = $Version; Name = $Name; DryRun = [bool]$DryRun; Uninstall = [bool]$Uninstall; ReEnroll = [bool]$ReEnroll
       KeepEnrollment = [bool]$KeepEnrollment; NonInteractive = [bool]$NonInteractive; FromDir = $FromDir
+      Bundle = $Bundle; ChecksumFile = $ChecksumFile
     }
   } catch {
     $HeimdallInstallStatus = 1

@@ -27,7 +27,9 @@ public static class FakeBridge {
         foreach (var x in a) sb.Append('\t').Append(x);
         foreach (var k in new[] { "HEIMDALL_HAM_PTY_HOST_BIN", "HEIMDALL_BRIDGE_PTY_HOST", "HEIMDALL_HAM_CTL_BIN", "HEIMDALL_BRIDGE_ENDPOINT", "HEIMDALL_BRIDGE_SERVICE_NAME" })
             sb.Append('\t').Append(k).Append('=').Append(Environment.GetEnvironmentVariable(k) ?? "");
-        sb.Append("\tPATH0=").Append((Environment.GetEnvironmentVariable("PATH") ?? "").Split(';')[0]);
+        var processPath = Environment.GetEnvironmentVariable("PATH") ?? "";
+        sb.Append("\tPATH0=").Append(processPath.Split(';')[0]);
+        sb.Append("\tPATH=").Append(processPath);
         sb.Append("\r\n");
         for (int i = 0; i < 40; i++) {
             try { File.AppendAllText(file, sb.ToString()); return; } catch (IOException) { Thread.Sleep(50); }
@@ -52,7 +54,12 @@ public static class FakeBridge {
             return 0;
         }
         if (a.Length > 0 && a[0] == "enroll") {
-            File.WriteAllText(Opt(a, "--bridge-token-file"), "fake-token\n");
+            string bridgeId = Opt(a, "--reuse-bridge") ?? "brg_fake123";
+            File.WriteAllText(Opt(a, "--bridge-token-file"), "heimdall-bridge-credential/v1 fake " + bridgeId + "\n");
+            string config = Opt(a, "--config");
+            string text = File.ReadAllText(config);
+            if (text.IndexOf("daemon_id", StringComparison.Ordinal) < 0)
+                File.WriteAllText(config, text.Replace("[daemon]", "[daemon]\ndaemon_id = \"" + bridgeId + "\""));
             Console.WriteLine("  Pairing code:");
             Console.WriteLine("    ABCD-EFGH-JKLM-NP");
             return 0;

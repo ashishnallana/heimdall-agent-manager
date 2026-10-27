@@ -18,8 +18,13 @@ const statusSource = fs.readFileSync(path.join(ROOT, 'src/ui/components/shell/Si
 const preloadSource = fs.readFileSync(path.join(ROOT, 'src/ui/electron/preload.cts'), 'utf8');
 const mainSource = fs.readFileSync(path.join(ROOT, 'src/ui/electron/main.cts'), 'utf8');
 const managerSource = fs.readFileSync(path.join(ROOT, 'src/ui/electron/bridgeManager.cts'), 'utf8');
+const updaterSource = fs.readFileSync(path.join(ROOT, 'src/ui/electron/desktopUpdater.cts'), 'utf8');
 const authGateSource = fs.readFileSync(path.join(ROOT, 'src/ui/components/ElectronDeviceAuthGate.tsx'), 'utf8');
 const appShellSource = fs.readFileSync(path.join(ROOT, 'src/ui/components/shell/AppShell.tsx'), 'utf8');
+const builderSource = fs.readFileSync(path.join(ROOT, 'electron-builder.yml'), 'utf8');
+const windowsInstallerSource = fs.readFileSync(path.join(ROOT, 'scripts/install.ps1'), 'utf8');
+const windowsSocketSource = fs.readFileSync(path.join(ROOT, 'src/bridge/os_platform_windows.odin'), 'utf8');
+const releaseWorkflowSource = fs.readFileSync(path.join(ROOT, '.github/workflows/release-local-binaries.yml'), 'utf8');
 
 const base = {
   supported: true, packaged: true, installed: true, enrolled: true,
@@ -217,6 +222,155 @@ test('REQ-MAC-TRAY-2: enrollment reports the actionable subprocess failure once'
   }]);
 });
 
+test('REQ-WIN-DESKTOP-1: Windows resources and per-user Bridge paths are architecture-safe', () => {
+  const root = path.join('C:', 'Program Files', 'Heimdall', 'resources', 'bridge');
+  assert.deepEqual(bridgeManager.resources('win32', 'arm64', root), {
+    installScript: path.join(root, 'install.ps1'),
+    bundle: path.join(root, 'heimdall-local-windows-amd64.zip'),
+    checksums: path.join(root, 'SHA256SUMS'),
+    metadata: path.join(root, 'METADATA.json'),
+  });
+  assert.deepEqual(bridgeManager.desktopPaths('win32', {
+    APPDATA: path.join('C:', 'Users', 'alice', 'AppData', 'Roaming'),
+    LOCALAPPDATA: path.join('C:', 'Users', 'alice', 'AppData', 'Local'),
+  }, path.join('C:', 'Users', 'alice')), {
+    stateRoot: path.join('C:', 'Users', 'alice', 'AppData', 'Roaming', 'heimdall', 'bridges'),
+    dataRoot: path.join('C:', 'Users', 'alice', 'AppData', 'Local', 'heimdall', 'bridges'),
+    binaryName: 'ham-bridge.exe',
+    enrollScriptName: 'enroll.ps1',
+  });
+});
+
+test('REQ-WIN-DESKTOP-2: Windows desktop invokes the verified bundle and headless enrollment contracts', () => {
+  const files = bridgeManager.resources('win32', 'x64', path.join('C:', 'resources', 'bridge'));
+  const install = bridgeManager.installInvocation('win32', files, 'https://hub.example', '0.5.17');
+  assert.match(install.command, /powershell\.exe$/i);
+  assert.deepEqual(install.args.slice(-11), [
+    '-File', files.installScript, '-Hub', 'https://hub.example', '-Version', 'v0.5.17',
+    '-Bundle', files.bundle, '-ChecksumFile', files.checksums, '-NonInteractive',
+  ]);
+  const enroll = bridgeManager.enrollmentInvocation('win32', path.join('C:', 'state', 'enroll.ps1'));
+  assert.match(enroll.command, /powershell\.exe$/i);
+  assert.deepEqual(enroll.args.slice(-3), ['-File', path.join('C:', 'state', 'enroll.ps1'), '-Headless']);
+  const reenroll = bridgeManager.enrollmentInvocation('win32', path.join('C:', 'state', 'enroll.ps1'), 'brg_previous123');
+  assert.deepEqual(reenroll.args.slice(-5), [
+    '-File', path.join('C:', 'state', 'enroll.ps1'), '-Headless', '-ReuseBridge', 'brg_previous123',
+  ]);
+  assert.match(windowsInstallerSource, /\[string\]\$Bundle/);
+  assert.match(windowsInstallerSource, /\[string\]\$ChecksumFile/);
+  assert.match(windowsInstallerSource, /Test-Sha256 \$sums \$O\.Bundle \$archive/);
+  assert.match(windowsInstallerSource, /param\(\[switch\]\$Headless, \[string\]\$ReuseBridge/);
+  assert.match(windowsInstallerSource, /--reuse-bridge', \$ReuseBridge/);
+  assert.match(windowsInstallerSource, /Get-BridgeId \$C/);
+});
+
+test('REQ-WIN-DESKTOP-2: Windows desktop supplies common per-user provider locations', (t) => {
+  const home = path.join('C:', 'Users', 'alice');
+  t.mock.method(os, 'homedir', () => home);
+  const previous = {
+    APPDATA: process.env.APPDATA,
+    LOCALAPPDATA: process.env.LOCALAPPDATA,
+    PATH: process.env.PATH,
+  };
+  process.env.APPDATA = path.join(home, 'AppData', 'Roaming');
+  process.env.LOCALAPPDATA = path.join(home, 'AppData', 'Local');
+  process.env.PATH = path.join('C:', 'Windows', 'System32');
+  const roaming = process.env.APPDATA;
+  const local = process.env.LOCALAPPDATA;
+  const systemPath = process.env.PATH;
+  t.after(() => {
+    for (const [name, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[name]; else process.env[name] = value;
+    }
+  });
+
+  const env = bridgeManager.bridgeHostEnv('win32');
+  assert.deepEqual(env.PATH?.split(';'), [
+    path.join(roaming, 'npm'),
+    path.join(local, 'pnpm'),
+    path.join(home, '.local', 'bin'),
+    path.join(home, '.bun', 'bin'),
+    path.join(home, '.volta', 'bin'),
+    path.join(home, '.cargo', 'bin'),
+    systemPath,
+  ]);
+  assert.equal(env.HEIMDALL_INSTALL_PLAIN, '1');
+  assert.equal(env.HAM_TLS_BACKEND, undefined);
+});
+
+test('REQ-WIN-DESKTOP-2: Windows bridge listeners explicitly reject child-process inheritance', () => {
+  assert.match(windowsSocketSource, /SetHandleInformation/);
+  assert.match(windowsSocketSource, /win\.HANDLE_FLAG_INHERIT, 0/);
+});
+
+test('REQ-REENROLL-RECOVER-1: failed Windows re-enrollment restarts its Scheduled Task', async (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'heimdall-windows-home-'));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const roaming = path.join(home, 'AppData', 'Roaming');
+  const local = path.join(home, 'AppData', 'Local');
+  const serviceName = 'heimdall-bridge-hub-example';
+  const stateDir = path.join(roaming, 'heimdall', 'bridges', serviceName);
+  const binDir = path.join(local, 'heimdall', 'bridges', serviceName, 'bin');
+  fs.mkdirSync(stateDir, { recursive: true });
+  fs.mkdirSync(binDir, { recursive: true });
+  fs.writeFileSync(path.join(stateDir, 'hub-url'), 'https://hub.example\n');
+  fs.writeFileSync(path.join(stateDir, 'bridge-token'), 'token\n');
+  fs.writeFileSync(path.join(stateDir, 'bridge-id'), 'brg_previous123\n');
+  fs.writeFileSync(path.join(stateDir, 'enroll.ps1'), '');
+  fs.writeFileSync(path.join(binDir, 'ham-bridge.exe'), '');
+
+  const previous = {
+    APPDATA: process.env.APPDATA,
+    LOCALAPPDATA: process.env.LOCALAPPDATA,
+    USERPROFILE: process.env.USERPROFILE,
+    SystemRoot: process.env.SystemRoot,
+  };
+  Object.assign(process.env, { APPDATA: roaming, LOCALAPPDATA: local, USERPROFILE: home, SystemRoot: path.join('C:', 'Windows') });
+  t.after(() => {
+    for (const [name, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[name]; else process.env[name] = value;
+    }
+  });
+  t.mock.method(os, 'homedir', () => home);
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+  Object.defineProperty(process, 'platform', { ...platform, value: 'win32' });
+  t.after(() => Object.defineProperty(process, 'platform', platform));
+  t.mock.method(childProcess, 'spawnSync', (command: string) => ({
+    status: 0,
+    stdout: command.endsWith('ham-bridge.exe') ? 'ham-bridge 0.5.17\n' : '',
+    stderr: '',
+  }));
+  const statusProbes: Array<{ command: string; args: string[]; env: NodeJS.ProcessEnv }> = [];
+  t.mock.method(childProcess, 'execFile', (command: string, args: string[], options: any, callback: any) => {
+    statusProbes.push({ command, args, env: options?.env || {} });
+    setImmediate(() => callback(null, command.endsWith('ham-bridge.exe') ? 'ham-bridge 0.5.17\n' : '', ''));
+    return new EventEmitter();
+  });
+  const status = await bridgeManager.refreshStatus('https://hub.example');
+  assert.equal(status.serviceState, 'running');
+  assert.equal(status.installedVersion, '0.5.17');
+  assert.equal(statusProbes.length, 2);
+  assert.ok(statusProbes[0].args.includes('-Command'));
+  assert.equal(statusProbes[0].env.HEIMDALL_BRIDGE_TASK_NAME, serviceName);
+  assert.equal((childProcess.spawnSync as any).mock.calls.length, 0, 'status probing stays asynchronous on Windows');
+  const calls = stubSpawn(t, (call) => call.args.includes('-File') ? 1 : 0);
+  const events: any[] = [];
+  await new Promise<void>((resolve) => {
+    assert.deepEqual(bridgeManager.startReEnrollment('https://hub.example', (event: any) => {
+      events.push(event);
+      if (event.type === 'error') resolve();
+    }), { ok: true });
+  });
+
+  assert.deepEqual(calls[0].args.slice(-5), [
+    '-File', path.join(stateDir, 'enroll.ps1'), '-Headless', '-ReuseBridge', 'brg_previous123',
+  ]);
+  assert.equal(calls.length, 2);
+  assert.ok(calls[1].args.includes('-Command'));
+  assert.equal(calls[1].env.HEIMDALL_BRIDGE_TASK_NAME, serviceName);
+  assert.match(events.at(-1).message, /restarted with its existing enrollment/);
+});
+
 test('REQ-BTOP-1: desktop service states have explicit user-facing labels', () => {
   assert.deepEqual(desktopBridgeStatusLabel(base), { label: 'Bridge online', tone: 'success' });
   assert.deepEqual(desktopBridgeStatusLabel({ ...base, enrolled: false }), { label: 'Enrollment required', tone: 'warning' });
@@ -298,18 +452,47 @@ test('REQ-MAC-TRAY-2: tray receives display-only OIDC identity and never an auth
 });
 
 test('REQ-MAC-TRAY-1: closing the macOS window hides it and packaged installs launch hidden at login', () => {
-  assert.match(mainSource, /win\.on\('close',[\s\S]*process\.platform !== 'darwin' \|\| isQuitting[\s\S]*event\.preventDefault\(\)[\s\S]*win\.hide\(\)/);
+  assert.match(mainSource, /win\.on\('close',[\s\S]*!supportsStatusTray\(\) \|\| isQuitting[\s\S]*event\.preventDefault\(\)[\s\S]*win\.hide\(\)/);
   assert.match(mainSource, /app\.dock\?\.hide\(\)/);
-  assert.match(mainSource, /app\.setLoginItemSettings\(\{[\s\S]*openAtLogin: enabled,[\s\S]*openAsHidden: true/);
+  assert.match(mainSource, /const loginSettings =[\s\S]*openAtLogin: enabled,[\s\S]*openAsHidden: true/);
+  assert.match(mainSource, /app\.setLoginItemSettings\(loginSettings\)/);
   assert.match(mainSource, /function ensureDefaultLaunchAtLogin\(\)/);
   assert.match(mainSource, /LOGIN_ITEM_PREFERENCE_MARKER/);
-  assert.match(mainSource, /settings\.status === 'requires-approval'/);
+  assert.match(mainSource, /recordedSettings\.status === 'requires-approval'/);
   assert.match(mainSource, /label: 'Launch at Login'/);
   assert.match(mainSource, /function wasOpenedAtLogin\(\)/);
   assert.match(mainSource, /settings\.wasOpenedAtLogin/);
   assert.match(mainSource, /if \(!backgroundLaunch\) createWindow\(\)/);
   assert.match(mainSource, /showMainWindow/);
   assert.match(mainSource, /isQuitting = true; app\.quit\(\)/);
+});
+
+test('REQ-WIN-TRAY-1: Windows keeps a tray controller with Bridge, user, and update actions', () => {
+  assert.match(mainSource, /process\.platform === 'darwin' \|\| process\.platform === 'win32'/);
+  assert.match(mainSource, /process\.platform === 'win32' \? 16 : 18/);
+  assert.match(mainSource, /statusTray\.on\('double-click', showMainWindow\)/);
+  assert.match(mainSource, /process\.argv\.includes\('--background'\)/);
+  assert.match(mainSource, /args: \['--background'\]/);
+  assert.match(mainSource, /Check for Heimdall Updates/);
+  assert.match(mainSource, /Restart to Install Heimdall/);
+  assert.match(mainSource, /Check for Bridge Updates/);
+  assert.match(mainSource, /Restart Bridge/);
+  assert.match(mainSource, /Re-enroll Bridge/);
+  assert.match(mainSource, /Signed in as/);
+  assert.match(builderSource, /win:\s+[\s\S]*target: nsis/);
+  assert.match(builderSource, /nsis:\s+[\s\S]*oneClick: false[\s\S]*perMachine: false/);
+});
+
+test('REQ-WIN-UPDATE-1: unsigned Windows releases publish digest-protected updater metadata', () => {
+  assert.match(updaterSource, /require\('electron-updater'\)/);
+  assert.match(updaterSource, /autoUpdater\.allowPrerelease = false/);
+  assert.match(updaterSource, /autoUpdater\.checkForUpdates\(\)/);
+  assert.match(updaterSource, /autoUpdater\.quitAndInstall\(false, true\)/);
+  assert.match(mainSource, /desktopUpdater\.start\(app\.isPackaged && process\.platform === 'win32'/);
+  assert.match(builderSource, /publish:\s+[\s\S]*provider: github[\s\S]*repo: heimdall-agent-manager/);
+  assert.match(builderSource, /verifyUpdateCodeSignature: false/);
+  assert.doesNotMatch(releaseWorkflowSource, /WINDOWS_CODE_SIGNING_PFX|signtool sign|forceCodeSigning=true/);
+  assert.match(releaseWorkflowSource, /desktop-dist\/latest\.yml/);
 });
 
 test('REQ-ELECTRON-NO-REMOTE-DEBUG-1: the Electron app has no debug-control server at all', () => {
@@ -568,4 +751,3 @@ test('REQ-ENROLL-LOG-1: the tray summarizes a failure on one line and offers the
   assert.match(mainSource, /trayOperationMessage = String\(payload\?\.summary \|\| payload\?\.message \|\| 'Bridge enrollment failed\.'\)\.split\('\\n'\)\[0\];/);
   assert.match(mainSource, /label: 'Show Enrollment Log', click: \(\) => \{ shell\.showItemInFolder\(trayEnrollmentLog\); \}/);
 });
-
