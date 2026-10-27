@@ -20,6 +20,7 @@ Bridge_Command_Class :: enum {
 	Exclusive,
 	General_IO,
 	Shell,
+	Model_Discovery,
 }
 
 Bridge_Command_Priority :: enum {
@@ -115,6 +116,7 @@ BRIDGE_DISPATCH_BACKGROUND_LIMIT :: 32
 BRIDGE_DISPATCH_EXCLUSIVE_LIMIT :: 4
 BRIDGE_DISPATCH_GENERAL_IO_LIMIT :: 24
 BRIDGE_DISPATCH_SHELL_LIMIT :: 24
+BRIDGE_DISPATCH_MODEL_DISCOVERY_LIMIT :: 4
 BRIDGE_DISPATCH_OWNED_BYTES_LIMIT :: 4 * 1024 * 1024
 BRIDGE_DISPATCH_RECOVERY_BYTES_RESERVE :: 256 * 1024
 BRIDGE_DISPATCH_COMMAND_BYTES_LIMIT :: 1024 * 1024
@@ -131,9 +133,11 @@ bridge_dispatch_background: [dynamic]Bridge_Dispatch_Job
 bridge_dispatch_exclusive: [dynamic]Bridge_Dispatch_Job
 bridge_dispatch_general_io: [dynamic]Bridge_Dispatch_Job
 bridge_dispatch_shell: [dynamic]Bridge_Dispatch_Job
+bridge_dispatch_model_discovery: [dynamic]Bridge_Dispatch_Job
 bridge_dispatch_outputs: [dynamic]Bridge_Dispatch_Output
 bridge_dispatch_claims: [dynamic]Bridge_Dispatch_Claim
-bridge_dispatch_workers: [13]Bridge_Dispatch_Worker
+BRIDGE_DISPATCH_WORKER_CLASSES :: [14]Bridge_Command_Class{.Lifecycle, .Lifecycle, .Interactive, .Interactive, .Background, .Background, .Exclusive, .General_IO, .General_IO, .General_IO, .General_IO, .Shell, .Shell, .Model_Discovery}
+bridge_dispatch_workers: [len(BRIDGE_DISPATCH_WORKER_CLASSES)]Bridge_Dispatch_Worker
 bridge_dispatch_active_keys: [dynamic]string
 bridge_dispatch_owned_bytes: int
 bridge_dispatch_queued_cost: int
@@ -154,11 +158,11 @@ bridge_command_dispatch_init :: proc() {
 	bridge_dispatch_exclusive = make([dynamic]Bridge_Dispatch_Job, runtime.default_allocator())
 	bridge_dispatch_general_io = make([dynamic]Bridge_Dispatch_Job, runtime.default_allocator())
 	bridge_dispatch_shell = make([dynamic]Bridge_Dispatch_Job, runtime.default_allocator())
+	bridge_dispatch_model_discovery = make([dynamic]Bridge_Dispatch_Job, runtime.default_allocator())
 	bridge_dispatch_outputs = make([dynamic]Bridge_Dispatch_Output, runtime.default_allocator())
 	bridge_dispatch_claims = make([dynamic]Bridge_Dispatch_Claim, runtime.default_allocator())
 	bridge_dispatch_active_keys = make([dynamic]string, runtime.default_allocator())
-	classes := [13]Bridge_Command_Class{.Lifecycle, .Lifecycle, .Interactive, .Interactive, .Background, .Background, .Exclusive, .General_IO, .General_IO, .General_IO, .General_IO, .Shell, .Shell}
-	for class, i in classes {
+	for class, i in BRIDGE_DISPATCH_WORKER_CLASSES {
 		bridge_dispatch_workers[i].index = i
 		bridge_dispatch_workers[i].class = class
 	}
@@ -180,6 +184,7 @@ bridge_command_dispatch_begin_connection :: proc() -> i64 {
 	bridge_command_dispatch_drop_stale_queue_locked(&bridge_dispatch_exclusive, bridge_dispatch_generation)
 	bridge_command_dispatch_drop_stale_queue_locked(&bridge_dispatch_general_io, bridge_dispatch_generation)
 	bridge_command_dispatch_drop_stale_queue_locked(&bridge_dispatch_shell, bridge_dispatch_generation)
+	bridge_command_dispatch_drop_stale_queue_locked(&bridge_dispatch_model_discovery, bridge_dispatch_generation)
 	return bridge_dispatch_generation
 }
 
@@ -245,7 +250,9 @@ bridge_command_spec :: proc(command_type: string) -> (Bridge_Command_Spec, bool)
 	case "provider_discover":
 		return Bridge_Command_Spec{class = .Background, priority = .Background, key_kind = .Provider_Discovery, queued = true, requires_id = true, timeout_ms = 10_000, cost_units = 16, coalescible = true, retry_safe = true}, true
 	case "provider_models_discover":
-		return Bridge_Command_Spec{class = .Background, priority = .Background, key_kind = .Provider_Discovery, queued = true, requires_id = true, timeout_ms = 30_000, cost_units = 16, coalescible = true}, true
+		// Slow model metadata cannot consume the two workers used by Stage 1
+		// provider detection and extension installation.
+		return Bridge_Command_Spec{class = .Model_Discovery, priority = .Background, key_kind = .Provider_Discovery, queued = true, requires_id = true, timeout_ms = 30_000, cost_units = 16, coalescible = true}, true
 	case "provider_extension_install":
 		return Bridge_Command_Spec{class = .Background, priority = .Interactive, key_kind = .Provider_Discovery, queued = true, requires_id = true, timeout_ms = 60_000, cost_units = 16}, true
 	case "shell_stream_attach":
@@ -363,6 +370,7 @@ bridge_command_dispatch_queue_len_locked :: proc(class: Bridge_Command_Class) ->
 	case .Exclusive: return len(bridge_dispatch_exclusive)
 	case .General_IO: return len(bridge_dispatch_general_io)
 	case .Shell: return len(bridge_dispatch_shell)
+	case .Model_Discovery: return len(bridge_dispatch_model_discovery)
 	}
 	return 0
 }
@@ -375,12 +383,13 @@ bridge_command_dispatch_class_limit :: proc(class: Bridge_Command_Class) -> int 
 	case .Exclusive: return BRIDGE_DISPATCH_EXCLUSIVE_LIMIT
 	case .General_IO: return BRIDGE_DISPATCH_GENERAL_IO_LIMIT
 	case .Shell: return BRIDGE_DISPATCH_SHELL_LIMIT
+	case .Model_Discovery: return BRIDGE_DISPATCH_MODEL_DISCOVERY_LIMIT
 	}
 	return 0
 }
 
 bridge_command_dispatch_total_locked :: proc() -> int {
-	return len(bridge_dispatch_lifecycle) + len(bridge_dispatch_interactive) + len(bridge_dispatch_background) + len(bridge_dispatch_exclusive) + len(bridge_dispatch_general_io) + len(bridge_dispatch_shell)
+	return len(bridge_dispatch_lifecycle) + len(bridge_dispatch_interactive) + len(bridge_dispatch_background) + len(bridge_dispatch_exclusive) + len(bridge_dispatch_general_io) + len(bridge_dispatch_shell) + len(bridge_dispatch_model_discovery)
 }
 
 bridge_command_dispatch_admission_scope :: proc(class: Bridge_Command_Class, total, class_depth, owned_bytes, outbox_bytes, incoming_bytes: int, recovery: bool = false, queued_cost: int = 0, incoming_cost: int = 1) -> string {
@@ -390,6 +399,7 @@ bridge_command_dispatch_admission_scope :: proc(class: Bridge_Command_Class, tot
 	cost_limit := BRIDGE_DISPATCH_COST_LIMIT if recovery else BRIDGE_DISPATCH_COST_LIMIT - BRIDGE_DISPATCH_RECOVERY_COST_RESERVE
 	if total >= (BRIDGE_DISPATCH_TOTAL_LIMIT if recovery else normal_limit) || owned_bytes + incoming_bytes > owned_limit || outbox_bytes > outbox_limit || queued_cost + incoming_cost > cost_limit do return "global"
 	if class_depth >= bridge_command_dispatch_class_limit(class) + (BRIDGE_DISPATCH_RECOVERY_RESERVE if recovery else 0) {
+		if class == .Model_Discovery do return "model_discovery"
 		return "background" if class == .Background else ("lifecycle" if class == .Lifecycle else ("exclusive" if class == .Exclusive else "interactive"))
 	}
 	return ""
@@ -551,6 +561,7 @@ bridge_command_dispatch :: proc(conn: ^ws.Connection, text: string, generation: 
 	case .Exclusive: append(&bridge_dispatch_exclusive, job)
 	case .General_IO: append(&bridge_dispatch_general_io, job)
 	case .Shell: append(&bridge_dispatch_shell, job)
+	case .Model_Discovery: append(&bridge_dispatch_model_discovery, job)
 	}
 	append(&bridge_dispatch_claims, Bridge_Dispatch_Claim{command_id = strings.clone(command_id, runtime.default_allocator()), state = .Queued})
 	bridge_dispatch_owned_bytes += owned_bytes
@@ -575,6 +586,7 @@ bridge_command_dispatch_take :: proc(class: Bridge_Command_Class) -> (Bridge_Dis
 	case .Exclusive: queue = &bridge_dispatch_exclusive
 	case .General_IO: queue = &bridge_dispatch_general_io
 	case .Shell: queue = &bridge_dispatch_shell
+	case .Model_Discovery: queue = &bridge_dispatch_model_discovery
 	}
 	if queue == nil do return Bridge_Dispatch_Job{}, false
 	job, ok := bridge_command_dispatch_take_queue_locked(queue)

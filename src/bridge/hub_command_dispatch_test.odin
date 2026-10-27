@@ -35,6 +35,7 @@ bridge_dispatch_queue_take_transfers_job_ownership :: proc(t: ^testing.T) {
 bridge_dispatch_classifies_blocking_incident_paths :: proc(t: ^testing.T) {
 	lifecycle, lifecycle_ok := bridge_command_dispatch_class("launch_agent")
 	background, background_ok := bridge_command_dispatch_class("provider_discover")
+	models, models_ok := bridge_command_dispatch_class("provider_models_discover")
 	ext_install, ext_install_ok := bridge_command_dispatch_class("provider_extension_install")
 	interactive, interactive_ok := bridge_command_dispatch_class("notify_task_nudge")
 	exclusive, exclusive_ok := bridge_command_dispatch_class("bridge_update")
@@ -44,6 +45,7 @@ bridge_dispatch_classifies_blocking_incident_paths :: proc(t: ^testing.T) {
 	_, tunnel_async := bridge_command_dispatch_class("tunnel_data")
 	testing.expect(t, lifecycle_ok && lifecycle == .Lifecycle, "agent launch must use the isolated lifecycle lane")
 	testing.expect(t, background_ok && background == .Background, "provider discovery must use the shed-first background lane")
+	testing.expect(t, models_ok && models == .Model_Discovery, "slow model probes have their own lane")
 	testing.expect(t, ext_install_ok && ext_install == .Background, "provider extension install must use the background lane")
 	testing.expect(t, interactive_ok && interactive == .Interactive, "notifications must not share the background lane")
 	testing.expect(t, exclusive_ok && exclusive == .Exclusive, "Bridge update must never execute on the reader or lifecycle lane")
@@ -54,6 +56,28 @@ bridge_dispatch_classifies_blocking_incident_paths :: proc(t: ^testing.T) {
 	testing.expect(t, bridge_command_inline_type("bridge_heartbeat_ack"), "heartbeat acknowledgement is an explicit inline control type")
 	testing.expect(t, bridge_command_inline_type("tunnel_data"), "tunnel data is an explicit specialized data-plane type")
 	testing.expect(t, !bridge_command_inline_type("made_up_command"), "unknown commands must not fall through to inline execution")
+}
+
+@(test)
+bridge_dispatch_models_cannot_starve_provider_detection :: proc(t: ^testing.T) {
+	stage1, _ := bridge_command_spec("provider_discover")
+	stage2, _ := bridge_command_spec("provider_models_discover")
+	extension, _ := bridge_command_spec("provider_extension_install")
+	occupied: [len(BRIDGE_DISPATCH_WORKER_CLASSES)]bool
+	// All stage-two workers are occupied; further stage-two requests queue in
+	// that same class. One extension install occupies a background worker too.
+	extension_started := false
+	for class, i in BRIDGE_DISPATCH_WORKER_CLASSES {
+		if class == stage2.class { occupied[i] = true; continue }
+		if class == extension.class && !extension_started { occupied[i] = true; extension_started = true }
+	}
+	stage1_can_start := false
+	for class, i in BRIDGE_DISPATCH_WORKER_CLASSES {
+		if class == stage1.class && !occupied[i] do stage1_can_start = true
+	}
+	testing.expect(t, stage1_can_start, "stage-one detection still has a worker while models and an extension install are running")
+	testing.expect_value(t, bridge_command_dispatch_admission_scope(stage2.class, 4, BRIDGE_DISPATCH_MODEL_DISCOVERY_LIMIT, 0, 0, 128), "model_discovery")
+	testing.expect_value(t, bridge_command_dispatch_admission_scope(stage1.class, 4, 0, 0, 0, 128), "")
 }
 
 @(test)

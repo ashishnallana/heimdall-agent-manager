@@ -138,7 +138,9 @@ bridge_model_id_valid :: proc(id: string) -> bool {
 
 // Allocates model strings using the caller's allocator, never borrowing JSON.
 bridge_models_append :: proc(models: ^[dynamic]Bridge_Discovered_Model, id, label, resolved: string) -> bool {
-	if !bridge_model_id_valid(id) || (resolved != "" && !bridge_model_id_valid(resolved)) || len(label) > 512 do return false
+	if !bridge_model_id_valid(id) || (resolved != "" && !bridge_model_id_valid(resolved)) do return false
+	label := label
+	if len(label) > 512 do label = id // preserve a valid model despite display metadata
 	for model in models do if model.model_id == id do return true
 	if len(models) >= BRIDGE_MODEL_LIMIT do return false
 	append(models, Bridge_Discovered_Model{strings.clone(id), strings.clone(label if label != "" else id), strings.clone(resolved)})
@@ -158,7 +160,9 @@ bridge_models_parse_array :: proc(provider: string, array: json.Array, models: ^
 			id = bridge_model_string(obj, "model"); label = bridge_model_string(obj, "displayName")
 		case "pi":
 			upstream := bridge_model_string(obj, "provider")
-			if !bridge_provider_catalog_name_supported(upstream) || !bridge_model_id_valid(bridge_model_string(obj, "id")) do return false
+			// Pi's user-defined provider names do not follow Heimdall's own
+			// catalog slug grammar (they can contain capitals and underscores).
+			if !bridge_model_id_valid(upstream) || strings.contains(upstream, "/") || !bridge_model_id_valid(bridge_model_string(obj, "id")) do return false
 			id = fmt.tprintf("%s/%s", upstream, bridge_model_string(obj, "id")); label = bridge_model_string(obj, "name")
 		case "copilot":
 			if policy, policy_ok := obj["policy"].(json.Object); policy_ok {
@@ -244,7 +248,7 @@ bridge_models_probe :: proc(provider, binary: string, timeout := BRIDGE_MODEL_PR
 		request = `{"type":"control_request","request_id":"models","request":{"subtype":"initialize"}}`
 	case "codex": append(&args, "app-server")
 	case "pi":
-		append(&args, "--offline", "--no-session", "--no-mcp", "--no-skills", "--no-prompt-templates", "--mode", "rpc")
+		append(&args, "--offline", "--no-session", "--no-extensions", "--no-mcp", "--no-skills", "--no-prompt-templates", "--mode", "rpc")
 		request = `{"id":"models","type":"get_available_models"}`
 	case "copilot":
 		append(&args, "--server", "--stdio")

@@ -56,6 +56,9 @@ test_model_discovery_pi_qualification_and_empty_success :: proc(t: ^testing.T) {
 		testing.expect_value(t, models[0].model_id, "anthropic/same-id")
 		testing.expect_value(t, models[1].model_id, "openai-codex/same-id")
 	}
+	_, valid, _, _ = bridge_models_parse_reply("pi", `{"id":"models","command":"get_available_models","success":true,"data":{"models":[{"provider":"My_Private_Provider_With_A_Long_Name","id":"custom-model","name":"Private"}]}}`, 2, &models)
+	testing.expect(t, valid, "custom Pi provider names are not Heimdall provider slugs")
+	if testing.expect_value(t, len(models), 3) do testing.expect_value(t, models[2].model_id, "My_Private_Provider_With_A_Long_Name/custom-model")
 	_, valid, _, _ = bridge_models_parse_reply("pi", `{"id":"models","command":"get_available_models","success":true,"data":{"models":[{"provider":"anthropic","id":""}]}}`, 2, &models)
 	testing.expect(t, !valid)
 	_, valid, _, _ = bridge_models_parse_reply("pi", `{"id":"models","command":"get_available_models","success":true,"data":{"models":[]}}`, 2, &models)
@@ -84,6 +87,22 @@ test_model_discovery_agy_ids_and_output_limits :: proc(t: ^testing.T) {
 	testing.expect(t, !bridge_models_parse_agy("Please log in\n", &models), "diagnostic text is not a model list")
 	for i in len(models)..<BRIDGE_MODEL_LIMIT do testing.expect(t, bridge_models_append(&models, fmt.tprintf("m-%d", i), "", ""))
 	testing.expect(t, !bridge_models_append(&models, "one-too-many", "", ""))
+}
+
+@(test)
+test_model_discovery_pi_probe_disables_extensions :: proc(t: ^testing.T) {
+	when ODIN_OS == .Windows do return
+	path, dir := model_test_fixture(t, `case " $* " in *' --no-extensions '*) ;; *) exit 1;; esac
+IFS= read -r request
+printf '%s\n' '{"id":"models","command":"get_available_models","success":true,"data":{"models":[]}}'
+while :; do :; done
+`)
+	if path == "" do return
+	defer { os.remove(path); os.remove(dir); delete(path); delete(dir) }
+	models, state := bridge_models_probe("pi", path, 2*time.Second, dir)
+	defer model_test_destroy(&models)
+	testing.expect_value(t, state, "success")
+	testing.expect_value(t, len(models), 0)
 }
 
 @(test)
