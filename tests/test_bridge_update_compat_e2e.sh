@@ -190,8 +190,8 @@ cat > "$D/shim/launchctl" <<EOF
 echo "launchctl \$*" >> "$D/launchctl.log"
 case "\$1" in
   print) exit 0 ;;
-  kill)  kill -TERM \$(cat "$DATA/bridge.pid") ;;
-  kickstart) (cd "$D"; PATH="$MAC_PATH" nohup "$DATA/bin/ham-bridge" >/dev/null 2>&1 &) ;;
+  bootout) kill -TERM \$(cat "$DATA/bridge.pid") ;;
+  bootstrap) (cd "$D"; PATH="$MAC_PATH" nohup "$DATA/bin/ham-bridge" >/dev/null 2>&1 &) ;;
 esac
 EOF
 chmod +x "$D"/shim/*
@@ -219,7 +219,7 @@ RC=$?
 check "S4 mac apply WITHOUT --already-detached and no setsid(1): still exit 0 (rc=$RC)" test $RC -eq 0
 check "S4 setsid-unavailable warning shown" grep -q "setsid unavailable" "$D/out.log"
 check "S4 service resolved from LaunchAgent plist ($LABEL)" grep -q "SERVICE_NAME:   $LABEL" "$D/out.log"
-check "S4 launchctl print/kill/kickstart used" bash -c "grep -q '^launchctl print gui/' '$D/launchctl.log' && grep -q '^launchctl kill SIGTERM' '$D/launchctl.log' || true; grep -q kickstart '$D/launchctl.log'"
+check "S4 launchctl print/bootout/bootstrap used" bash -c "grep -q '^launchctl print gui/' '$D/launchctl.log' && grep -q '^launchctl bootout gui/' '$D/launchctl.log' && grep -q '^launchctl bootstrap gui/' '$D/launchctl.log'"
 check "S4 new bridge healthy" test "$(healthcode "$P")" = 200
 check "S4 new bin installed under path with spaces" grep -q NEW "$DATA/bin/ham-bridge"
 cat "$D/launchctl.log" | sed 's/^/    /'

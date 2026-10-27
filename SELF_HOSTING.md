@@ -1369,6 +1369,12 @@ restores `bin.bak` and writes `logs/update_rollback.log`. It needs only bash, PO
 userland, `ps`, `tar`, `curl` and the service manager (`systemctl --user`, `launchctl`
 or Termux `sv`); no Python or Perl.
 
+On macOS, the supervisor resolves the exact LaunchAgent plist by both label and
+bridge executable, runs `launchctl bootout` before replacing the binaries, and
+bootstraps that same plist after the swap. This keeps a `KeepAlive` job from
+respawning the old bridge onto the listening port during either update or rollback.
+If the plist cannot be matched uniquely, the update fails before stopping the bridge.
+
 #### Caller interface
 
 The supervisor is always the copy shipped with the version being installed, so it

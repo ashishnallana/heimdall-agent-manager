@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+import plistlib
 import shutil
 import subprocess
 import sys
@@ -88,15 +89,72 @@ if 'show' in sys.argv: print('loaded')
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertIn(['--user', 'restart', 'heimdall-bridge-hub-example.service'], self.commands())
 
-    def test_macos_restart_uses_launchagent_label(self):
+    # REQ-BUPD-4, REQ-BUPD-5: a KeepAlive LaunchAgent must be unable to
+    # respawn the old bridge between stop, binary replacement, and restart.
+    def test_macos_update_unloads_keepalive_job_around_swap(self):
         self.stub('uname', '#!/bin/sh\nprintf "Darwin\n"\n')
+        self.stub('ps', '#!/bin/sh\nprintf "x\\n"\n')
         self.stub('launchctl', """#!/usr/bin/env python3
 import json, os, sys
 with open(os.environ['UPDATE_TEST_LOG'], 'a') as f: f.write(json.dumps(sys.argv[1:])+'\\n')
 """)
-        result = self.apply(HEIMDALL_BRIDGE_SERVICE_NAME='heimdall-bridge-hub-example')
+        label = 'heimdall-bridge-hub-example'
+        agents = self.home/'Library/LaunchAgents'
+        agents.mkdir(parents=True)
+        plist = agents/(label+'.plist')
+        plist.write_bytes(plistlib.dumps({
+            'Label': label,
+            'ProgramArguments': [str(self.data/'bin/ham-bridge'), '--config', 'x'],
+            'KeepAlive': {'SuccessfulExit': False},
+            'RunAtLoad': True,
+        }))
+        result = self.apply(HEIMDALL_BRIDGE_SERVICE_NAME=label, PTY_PROCESS_READER='ps')
         self.assertEqual(result.returncode, 0, result.stdout)
-        self.assertIn(['kickstart', '-k', f'gui/{os.geteuid()}/heimdall-bridge-hub-example'], self.commands())
+        domain = f'gui/{os.geteuid()}'
+        lifecycle = [command for command in self.commands()
+                     if command[0] in ('bootout', 'bootstrap', 'kill', 'kickstart')]
+        self.assertEqual(lifecycle, [
+            ['bootout', f'{domain}/{label}'],
+            ['bootstrap', domain, str(plist)],
+        ])
+
+    def test_macos_rollback_unloads_each_running_job_before_restoring(self):
+        self.stub('uname', '#!/bin/sh\nprintf "Darwin\n"\n')
+        self.stub('ps', '#!/bin/sh\nprintf "x\\n"\n')
+        self.stub('launchctl', """#!/usr/bin/env python3
+import json, os, sys
+with open(os.environ['UPDATE_TEST_LOG'], 'a') as f: f.write(json.dumps(sys.argv[1:])+'\\n')
+""")
+        label = 'heimdall-bridge-hub-example'
+        agents = self.home/'Library/LaunchAgents'
+        agents.mkdir(parents=True)
+        plist = agents/(label+'.plist')
+        plist.write_bytes(plistlib.dumps({
+            'Label': label,
+            'ProgramArguments': [str(self.data/'bin/ham-bridge'), '--config', 'x'],
+            'KeepAlive': {'SuccessfulExit': False},
+            'RunAtLoad': True,
+        }))
+        result = self.apply(HEIMDALL_BRIDGE_SERVICE_NAME=label, UPDATE_TEST_HTTP='503', PTY_PROCESS_READER='ps')
+        self.assertEqual(result.returncode, 1, result.stdout)
+        domain = f'gui/{os.geteuid()}'
+        lifecycle = [command for command in self.commands()
+                     if command[0] in ('bootout', 'bootstrap', 'kill', 'kickstart')]
+        self.assertEqual(lifecycle, [
+            ['bootout', f'{domain}/{label}'],
+            ['bootstrap', domain, str(plist)],
+            ['bootout', f'{domain}/{label}'],
+            ['bootstrap', domain, str(plist)],
+        ])
+
+    def test_macos_missing_launchagent_plist_fails_before_replacing_binaries(self):
+        self.stub('uname', '#!/bin/sh\nprintf "Darwin\n"\n')
+        old = (self.data/'bin/ham-bridge').read_bytes()
+        result = self.apply(HEIMDALL_BRIDGE_SERVICE_NAME='heimdall-bridge-hub-example')
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn('Expected one LaunchAgent plist', result.stdout)
+        self.assertEqual((self.data/'bin/ham-bridge').read_bytes(), old)
+        self.assertFalse(self.log.exists(), 'launchctl must not run without an exact plist match')
 
     def test_missing_managed_service_fails_before_replacing_binaries(self):
         self.stub('systemctl', '#!/bin/sh\nprintf "not-found\\n"\n')
@@ -448,8 +506,8 @@ exit $status
         self.assertIn(['--user', 'restart', 'actual.service'], self.commands())
 
     def launch_agents(self):
-        import plistlib
         self.stub('uname', '#!/bin/sh\nprintf "Darwin\\n"\n')
+        self.stub('ps', '#!/bin/sh\nprintf "x\\n"\n')
         self.stub('launchctl', """#!/usr/bin/env python3
 import json, os, sys
 with open(os.environ['UPDATE_TEST_LOG'], 'a') as f: f.write(json.dumps(sys.argv[1:])+'\\n')
@@ -486,7 +544,9 @@ else: sys.stdout.write(plistlib.dumps(value).decode())
                 self.log.unlink(missing_ok=True)
                 result = self.apply(**env)
                 self.assertEqual(result.returncode, 0, result.stdout)
-                self.assertIn(['kickstart', '-k', f'gui/{os.geteuid()}/dev.heimdall.bridge & <hub>'], self.commands())
+                domain = f'gui/{os.geteuid()}'
+                self.assertIn(['bootout', f'{domain}/dev.heimdall.bridge & <hub>'], self.commands())
+                self.assertIn(['bootstrap', domain, str(self.home/'Library/LaunchAgents/actual.plist')], self.commands())
 
     def test_macos_unit_and_launchagent_for_the_same_bridge_are_refused(self):
         self.launch_agents()

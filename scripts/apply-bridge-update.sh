@@ -52,6 +52,8 @@ HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-30}"
 SERVICE_NAME="${SERVICE_NAME:-${HEIMDALL_BRIDGE_SERVICE_NAME:-}}"
 BRIDGE_PID="${BRIDGE_PID:-}"
 PTY_HOST_SOCKET="${PTY_HOST_SOCKET:-}"
+LAUNCHD_PLIST=""
+LAUNCHD_LOADED=false
 STOP_PTY_HOSTS_ONLY=false
 RESTART_HOOK="${RESTART_HOOK:-}"
 STOP_HOOK="${STOP_HOOK:-}"
@@ -811,7 +813,7 @@ plist_string() {
 # installed ham-bridge; sets SERVICE_NAME (empty when there is none). Refuses
 # to guess between several.
 find_bridge_service() {
-  local exe unit line plist value pct='%%' dollars='$$' matches=0 match=''
+  local exe unit line plist value pct='%%' dollars='$$' matches=0 match='' match_plist=''
   exe="$DATA_DIR/bin/ham-bridge"
   while [[ "$exe" == *//* ]]; do exe="${exe//\/\///}"; done
   while [[ "$exe" == */./* ]]; do exe="${exe//\/.\///}"; done
@@ -834,13 +836,39 @@ find_bridge_service() {
     value="$(plist_string "$plist" ProgramArguments.0)" || continue
     [ "$value" = "$exe" ] || continue
     value="$(plist_string "$plist" Label)" || continue
-    matches=$((matches + 1)) match="$value"
+    matches=$((matches + 1)) match="$value" match_plist="$plist"
   done
   if [ "$matches" -gt 1 ]; then
     log_err "Multiple services reference this bridge; specify --service-name."
     exit 1
   fi
   SERVICE_NAME="$match"
+  LAUNCHD_PLIST="$match_plist"
+}
+
+# Resolve the plist needed to load a named LaunchAgent after its KeepAlive job
+# has been booted out. The label alone is enough to stop a loaded job, but
+# launchctl bootstrap requires the original plist path. Match both label and
+# executable so another user's or installation's similarly named job is never
+# loaded into this bridge's place.
+find_bridge_launchd_plist() {
+  local exe plist program label matches=0 match=''
+  exe="$DATA_DIR/bin/ham-bridge"
+  while [[ "$exe" == *//* ]]; do exe="${exe//\/\///}"; done
+  while [[ "$exe" == */./* ]]; do exe="${exe//\/.\///}"; done
+  for plist in "$HOME/Library/LaunchAgents"/*.plist; do
+    [ -f "$plist" ] || continue
+    program="$(plist_string "$plist" ProgramArguments.0)" || continue
+    [ "$program" = "$exe" ] || continue
+    label="$(plist_string "$plist" Label)" || continue
+    [ "$label" = "$SERVICE_NAME" ] || continue
+    matches=$((matches + 1)) match="$plist"
+  done
+  if [ "$matches" -ne 1 ]; then
+    log_err "Expected one LaunchAgent plist for $SERVICE_NAME and $exe; found $matches."
+    return 1
+  fi
+  LAUNCHD_PLIST="$match"
 }
 
 if [ -z "$SERVICE_NAME" ] && [ -z "$RESTART_HOOK" ]; then
@@ -857,7 +885,12 @@ if [ -n "$SERVICE_NAME" ] && [ -z "$RESTART_HOOK" ] && is_termux; then
   log "  RUNIT_DIR:      $RUNIT_DIR"
 elif [ -n "$SERVICE_NAME" ] && [ -z "$RESTART_HOOK" ]; then
   if [[ "$(uname -s)" = Darwin ]]; then
-    launchctl print "gui/$(id -u)/$SERVICE_NAME" >/dev/null
+    [ -n "$LAUNCHD_PLIST" ] || find_bridge_launchd_plist || exit 1
+    launchctl print "gui/$(id -u)/$SERVICE_NAME" >/dev/null || {
+      log_err "Managed LaunchAgent not found: $SERVICE_NAME"; exit 1;
+    }
+    LAUNCHD_LOADED=true
+    log "  LAUNCHD_PLIST:  $LAUNCHD_PLIST"
   else
     systemctl --user show "$SERVICE_NAME" -p LoadState --value | grep -Fxq loaded || {
       log_err "Managed service not found: $SERVICE_NAME"; exit 1;
@@ -881,6 +914,27 @@ stop_service() {
   if [ -n "$STOP_HOOK" ]; then
     [ -x "$STOP_HOOK" ] || { log_err "Stop hook is not executable: $STOP_HOOK"; return 1; }
     "$STOP_HOOK" "$BRIDGE_PID"
+  elif [ -n "$SERVICE_NAME" ] && [[ "$(uname -s)" = Darwin ]]; then
+    # A signal is not a stop operation for a KeepAlive LaunchAgent: launchd may
+    # immediately replace the exact PID we killed, leaving that replacement on
+    # the bridge port while the new binary starts. Unload the job so no process
+    # can respawn during the swap. Rollback takes this path again for the newly
+    # bootstrapped job instead of trying the now-stale original BRIDGE_PID.
+    if "$LAUNCHD_LOADED" || launchctl print "gui/$(id -u)/$SERVICE_NAME" >/dev/null 2>&1; then
+      launchctl bootout "gui/$(id -u)/$SERVICE_NAME" || {
+        log_err "Failed to unload LaunchAgent $SERVICE_NAME"
+        return 1
+      }
+    fi
+    LAUNCHD_LOADED=false
+    if [[ "$BRIDGE_PID" =~ ^[1-9][0-9]*$ ]]; then
+      deadline=$((SECONDS + 10))
+      while bridge_pid_running "$BRIDGE_PID" && [ "$SECONDS" -lt "$deadline" ]; do sleep 0.1; done
+      if bridge_pid_running "$BRIDGE_PID"; then
+        log_err "Bridge PID $BRIDGE_PID did not exit after launchctl bootout"
+        return 1
+      fi
+    fi
   elif [[ "$BRIDGE_PID" =~ ^[1-9][0-9]*$ ]]; then
     # Under runit, `sv down` (which TERMs the supervised bridge) also keeps
     # runsv from respawning the old binary while it is being replaced.
@@ -899,8 +953,6 @@ stop_service() {
     fi
   elif [ -n "$RUNIT_DIR" ]; then
     sv down "$RUNIT_DIR"
-  elif [ -n "$SERVICE_NAME" ] && [[ "$(uname -s)" = Darwin ]]; then
-    launchctl kill SIGTERM "gui/$(id -u)/$SERVICE_NAME"
   elif [ -n "$SERVICE_NAME" ]; then
     systemctl --user stop "$SERVICE_NAME"
   else
@@ -918,7 +970,12 @@ start_service() {
   elif [ -n "$RUNIT_DIR" ]; then
     sv up "$RUNIT_DIR"
   elif [ -n "$SERVICE_NAME" ] && [[ "$(uname -s)" = Darwin ]]; then
-    launchctl kickstart -k "gui/$(id -u)/$SERVICE_NAME"
+    [ -n "$LAUNCHD_PLIST" ] || { log_err "LaunchAgent plist is unknown for $SERVICE_NAME"; return 1; }
+    launchctl bootstrap "gui/$(id -u)" "$LAUNCHD_PLIST" || {
+      log_err "Failed to load LaunchAgent $SERVICE_NAME from $LAUNCHD_PLIST"
+      return 1
+    }
+    LAUNCHD_LOADED=true
   elif [ -n "$SERVICE_NAME" ]; then
     systemctl --user daemon-reload || true
     systemctl --user restart "$SERVICE_NAME" || systemctl --user start "$SERVICE_NAME"
