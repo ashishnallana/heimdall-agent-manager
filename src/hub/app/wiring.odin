@@ -804,6 +804,8 @@ register_routes :: proc(graph: ^App_Graph) {
 	http.router_add(&graph.router, "POST", "/api/v1/task-chains/*/tasks/*/answer", rawptr(&graph.taskchain_handlers), http.answer_task_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/task-chains/*/tasks/*/hold", rawptr(&graph.taskchain_handlers), http.hold_task_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/task-chains/*/tasks/*/release", rawptr(&graph.taskchain_handlers), http.hold_task_handler)
+	http.router_add(&graph.router, "POST", "/api/v1/task-chains/*/tasks/*/recheck", rawptr(&graph.taskchain_handlers), http.recheck_task_handler)
+	http.router_add(&graph.router, "POST", "/api/v1/tasks/*/recheck", rawptr(&graph.taskchain_handlers), http.recheck_task_handler)
 	http.router_add(&graph.router, "GET", "/api/v1/task-chains/*/tasks/*/fetch", rawptr(&graph.taskchain_handlers), http.fetch_task_ref_handler)
 	http.router_add(&graph.router, "GET", "/api/v1/task-chains/*/tasks/*/readiness", rawptr(&graph.taskchain_handlers), http.task_readiness_handler)
 	http.router_add(&graph.router, "GET", "/api/v1/task-chains/*/tasks/*/events", rawptr(&graph.taskchain_handlers), http.list_task_events_handler)

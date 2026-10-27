@@ -1751,6 +1751,57 @@ hold_task_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req))
 }
 
+// POST …/task-chains/{cid}/tasks/{tid}/recheck {} | /api/v1/tasks/{tid}/recheck {}
+// Re-check: coordinator or owner. Recomputes the gate against the current
+// review requirements, readiness, dispatch and a done task's merge-back; never
+// approves, never touches a live lease, and a repeat call is a no-op. The
+// response lists what changed (`actions`) and why the rest holds (`reasons`).
+recheck_task_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Taskchain_Handlers)(ctx)
+	auth_ctx, ok, auth_resp := require_auth_any(h.auth, req)
+	if !ok do return auth_resp
+	if h.task_engine == nil do return respond_error(domain.domain_error(.Internal_Error, "task engine is not configured"), req.request_id)
+	task_id: domain.Task_ID
+	if path_part(req.path, 3) == "tasks" {
+		task_id = domain.Task_ID(path_part(req.path, 4))
+	} else {
+		chain_id := domain.Task_Chain_ID(path_part(req.path, 4))
+		task_id = domain.Task_ID(path_part(req.path, 6))
+		if matched, mismatch_resp := require_task_path_scope(h, auth_ctx, chain_id, task_id, req); !matched do return mismatch_resp
+	}
+	task, tok, terr := taskchain_service.get_task(h.taskchains, auth_ctx, task_id)
+	if !tok do return respond_error(terr, req.request_id)
+	res, rok, err := taskv2.task_recheck(h.task_engine, task, taskv2.actor_from_auth(auth_ctx))
+	if !rok do return respond_error(err, req.request_id)
+	if res.changed {
+		publish_task_changed(h, string(res.task.owner_user_id), string(res.task.task_id), string(res.task.chain_id), "updated")
+		publish_chain_changed(h, string(res.task.owner_user_id), string(res.task.chain_id), "updated")
+	}
+	b := strings.builder_make()
+	strings.write_string(&b, `{"task":`)
+	write_task_json(&b, res.task)
+	fmt.sbprintf(&b, `,"changed":%v,"actions":`, res.changed)
+	write_recheck_strings(&b, res.actions)
+	strings.write_string(&b, `,"reasons":`)
+	write_recheck_strings(&b, res.reasons)
+	strings.write_string(&b, `,"message":"`)
+	contracts.write_json_string(&b, res.message)
+	strings.write_string(&b, `"}`)
+	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req))
+}
+
+@(private = "file")
+write_recheck_strings :: proc(b: ^strings.Builder, items: []string) {
+	strings.write_byte(b, '[')
+	for item, i in items {
+		if i > 0 do strings.write_byte(b, ',')
+		strings.write_byte(b, '"')
+		contracts.write_json_string(b, item)
+		strings.write_byte(b, '"')
+	}
+	strings.write_byte(b, ']')
+}
+
 // GET …/tasks/{id}/readiness  (REQ-TV2-3b): per-edge prerequisite state, merge
 // state and the reason an edge is unsatisfied. Read-only.
 task_readiness_handler :: proc(ctx: rawptr, req: Request) -> Response {

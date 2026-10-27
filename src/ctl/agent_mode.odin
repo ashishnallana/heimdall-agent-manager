@@ -477,6 +477,11 @@ ctl_v2_task :: proc(endpoint, token: string, tokens, args: []string) {
 		tid := pos(tokens, 1)
 		if tid == "" { print_agent_help([]string{"task"}); return }
 		ctl_v2_task_hold(endpoint, token, tid, args, release = verb == "release")
+	case "recheck":
+		// Coordinator/owner: recompute gate, readiness, dispatch and merge-back.
+		tid := pos(tokens, 1)
+		if tid == "" { print_agent_help([]string{"task"}); return }
+		ctl_v2_task_action(endpoint, token, tid, args, "recheck", ctl_empty_object_body())
 	case "fetch":
 		ctl_v2_task_fetch(endpoint, token, tokens, args)
 	case "readiness":
@@ -2007,6 +2012,10 @@ print_help_task :: proc() {
 	fmt.println("  hold <task-id> --reason <text>          Coordinator/owner: no new lease until released; a current holder is asked to checkpoint (lease handoff).")
 	fmt.println("  release <task-id>                       Coordinator/owner: clear a hold so the task can dispatch again.")
 	fmt.println("                                          Dispatch failures do not spend attempts; fix the cause first.")
+	fmt.println("  recheck <task-id>                       Coordinator/owner: recompute the review gate (current reviewers and")
+	fmt.println("                                          user-approval flag), readiness, dispatch and a done task's merge-back.")
+	fmt.println("                                          Never approves, never touches a live lease; a repeat is a no-op.")
+	fmt.println("                                          Prints {task, changed, actions[], reasons[], message}.")
 	fmt.println("  comments <task-id> [--last N]           Fetch comment bodies; --last N = newest N (max 100).")
 	fmt.println("  fetch <task-id> <ref>                   Fetch one event (#<event_id>), output (output:<task_id>),")
 	fmt.println("                                          facet (facet:<task_id>:<attempt_no>:<kind>), or file at commit")

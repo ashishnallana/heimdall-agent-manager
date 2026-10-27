@@ -15,6 +15,7 @@ export type TaskActionId =
   | 'approve'
   | 'request_changes'
   | 'reopen'
+  | 'recheck'
   | 'cancel'
   | 'copy_id';
 
@@ -29,6 +30,7 @@ export const TASK_ACTION_LABELS: Record<TaskActionId, string> = {
   approve: 'Approve',
   request_changes: 'Request changes',
   reopen: 'Reopen',
+  recheck: 'Re-check',
   cancel: 'Cancel ticket',
   copy_id: 'Copy ticket id',
 };
@@ -144,6 +146,44 @@ export function taskNeedsYou(task: TaskWire): boolean {
   return isDraft(task) || blockedOnYou(task) || awaitingYourReview(task);
 }
 
+/**
+ * Re-check (hub `task recheck`) recomputes the gate, readiness, dispatch and
+ * merge-back. Offered where a task can look stuck without an agent working on
+ * it: backlog, ready and in review, and a done task whose merge is pending or
+ * failed. A task with a live work lease is left to its holder.
+ */
+export function canRecheck(task: TaskWire): boolean {
+  if (isDraft(task)) return false;
+  const state = normalizeTaskState(task.state);
+  if (state === 'done') return task.merge?.state === 'pending' || task.merge?.state === 'failed';
+  if (state !== 'backlog' && state !== 'ready' && state !== 'in_review') return false;
+  return !(task.leases || []).some((l: any) => (l?.kind || 'work') === 'work');
+}
+
+export interface RecheckToast {
+  kind: 'success' | 'info';
+  title: string;
+  message: string;
+}
+
+/**
+ * The toast for a Re-check result: what changed, else why the task still
+ * waits (every reason, so "fleet full 2/2" and "bridge offline" both show).
+ */
+export function recheckToast(result: { changed?: boolean; actions?: string[]; reasons?: string[]; message?: string } | null | undefined): RecheckToast {
+  const actions = (result?.actions || []).filter(Boolean);
+  const reasons = (result?.reasons || []).filter(Boolean);
+  if (result?.changed) {
+    const lines = [...actions, ...reasons.map((r) => `Still waiting: ${r}`)];
+    return { kind: 'success', title: 'Re-checked: updated', message: lines.join('; ') || result.message || 'The ticket was updated.' };
+  }
+  return {
+    kind: 'info',
+    title: 'Re-checked: nothing to change',
+    message: reasons.join('; ') || 'Nothing is holding this ticket that a re-check can fix.',
+  };
+}
+
 export function getTaskActions(task: TaskWire): TaskActionSet {
   const state = normalizeTaskState(task.state);
   const closed = state === 'done' || state === 'cancelled';
@@ -160,6 +200,7 @@ export function getTaskActions(task: TaskWire): TaskActionSet {
     primary.push('approve', 'request_changes');
   }
 
+  if (canRecheck(task)) more.push('recheck');
   if (!closed && !isGate(task)) more.push('cancel');
   more.push('copy_id');
   return { primary, more };

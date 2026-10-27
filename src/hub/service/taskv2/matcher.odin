@@ -630,3 +630,119 @@ fleet_row_full :: proc(ctx: ^Match_Context, fleet: domain.Task_Chain_Fleet, plac
 	}
 	return count >= max(1, fleet.capacity)
 }
+
+// ---- dispatch diagnosis (task re-check) ------------------------------------------------
+
+// dispatch_blockers explains why a ready task holds no work lease after a
+// matcher pass: the same checks grant_work makes, in the same order, per
+// worker fleet row, but read-only (no JIT, no block event, no timer). Each
+// entry is one human-readable reason; empty when nothing visible stops it.
+dispatch_blockers :: proc(svc: ^Service, chain: domain.Task_Chain, task: domain.Task) -> []string {
+	out := make([dynamic]string, context.temp_allocator)
+	if chain.publish_state != .Published || chain.status != .Active {
+		append(&out, "the chain is not active and published, so nothing is dispatched")
+		return out[:]
+	}
+	if task.state != .Ready || task.kind == .Gate do return out[:]
+	ctx, ok, _ := load_match_context(svc, chain)
+	if !ok {
+		append(&out, "the chain's fleet and leases could not be read")
+		return out[:]
+	}
+	defer destroy_match_context(&ctx)
+	if task_has_live_lease(&ctx, task.task_id, domain.LEASE_KIND_WORK) do return out[:]
+	if task.stage_key != "" {
+		stage_caps := make(map[string]map[string]int, context.temp_allocator)
+		if cap := workflow_task_max_parallel_cached(svc, &stage_caps, task); cap > 0 {
+			if n := stage_live_work_lease_count(&ctx, task.workflow_run_id, task.workflow_execution_no, task.stage_key); n >= cap {
+				append(&out, fmt.tprintf("workflow stage %s is at max_parallel (%d/%d)", task.stage_key, n, cap))
+				return out[:]
+			}
+		}
+	}
+	assignee := brief_assignee(task.brief_json)
+	if ctx.has_coordinator && chain_is_solo(svc, chain) && (assignee == "" || assignee == ctx.coordinator.agent_id) {
+		coord := ctx.coordinator
+		if !bridge_online(svc, coord.bridge_id) {
+			append(&out, fmt.tprintf("solo coordinator %s: bridge %s is offline", coord.agent_instance_id, coord.bridge_id))
+		} else if ctx.held[coord.agent_instance_id] {
+			append(&out, fmt.tprintf("solo coordinator %s already holds a lease; it pulls this task after submitting", coord.agent_instance_id))
+		} else if instance_is_live(coord) || instance_is_pending(coord) {
+			append(&out, fmt.tprintf("solo chain: waiting for coordinator %s to pull it with `ham-ctl lease next`", coord.agent_instance_id))
+		} else {
+			append(&out, fmt.tprintf("solo coordinator: %s", instance_failure_reason(coord)))
+		}
+	}
+	rows := 0
+	for fleet in ctx.fleets {
+		if ctx.has_coordinator && fleet.agent_id == ctx.coordinator.agent_id do continue
+		if !fleet_row_has_role(fleet, domain.FLEET_ROLE_WORKER) do continue
+		if assignee != "" && fleet.agent_id != assignee do continue
+		rows += 1
+		if domain.fleet_role_paused(fleet, domain.FLEET_ROLE_WORKER) {
+			append(&out, fmt.tprintf("%s: worker role is paused", fleet.agent_id))
+			continue
+		}
+		placement, pok := resolve_placement(&ctx, task, fleet, true)
+		if !pok {
+			append(&out, fmt.tprintf("%s: no bridge placement can be resolved (no task pin, fleet bridge, chain directory or coordinator bridge)", fleet.agent_id))
+			continue
+		}
+		if placement.directory_id != "" && directory_has_work_lease_ctx(&ctx, placement.directory_id) {
+			vcs := ""
+			for d in ctx.dirs do if d.directory_id == placement.directory_id { vcs = d.vcs_kind; break }
+			append(&out, fmt.tprintf("%s: chain directory %s already has a live work lease (vcs_kind %q; parallel work needs a git directory)", fleet.agent_id, placement.directory_id, vcs))
+			continue
+		}
+		held := 0
+		for inst in ctx.instances {
+			if inst.agent_id == fleet.agent_id && inst.bridge_id == placement.bridge_id && ctx.held[inst.agent_instance_id] do held += 1
+		}
+		if held >= max(1, fleet.capacity) {
+			append(&out, fmt.tprintf("%s: fleet full %d/%d on bridge %s", fleet.agent_id, held, max(1, fleet.capacity), placement.bridge_id))
+			continue
+		}
+		if !bridge_online(svc, placement.bridge_id) {
+			append(&out, fmt.tprintf("%s: bridge %s is offline", fleet.agent_id, placement.bridge_id))
+			continue
+		}
+		if svc.agent_service != nil && svc.agent_service.providers != nil {
+			provider, model := resolve_launch_model(svc.agent_service, placement.bridge_id, placement.provider, placement.model)
+			_, valid, err := agent.validate_provider_model_intersection(svc.agent_service, placement.bridge_id, provider, model)
+			delete(provider)
+			delete(model)
+			if !valid {
+				append(&out, fmt.tprintf("%s: %s", fleet.agent_id, err.message))
+				continue
+			}
+		}
+		instance_reason := ""
+		for inst in ctx.instances {
+			if inst.agent_id != fleet.agent_id || inst.bridge_id != placement.bridge_id || ctx.held[inst.agent_instance_id] do continue
+			if inst.stopped_by == agent.STOPPED_BY_USER {
+				instance_reason = fmt.tprintf("instance %s was stopped by the user", inst.agent_instance_id)
+				continue
+			}
+			disposition := agent.failed_instance_disposition(inst, ctx.now_ms)
+			if disposition == .Dead || disposition == .Hold {
+				instance_reason = instance_failure_reason(inst)
+				continue
+			}
+			instance_reason = ""
+			break
+		}
+		if instance_reason != "" {
+			append(&out, fmt.tprintf("%s: %s", fleet.agent_id, instance_reason))
+			continue
+		}
+		append(&out, fmt.tprintf("%s: a slot is free on bridge %s (%d/%d) but no lease was granted; see the hub log", fleet.agent_id, placement.bridge_id, held, max(1, fleet.capacity)))
+	}
+	if rows == 0 && !(ctx.has_coordinator && chain_is_solo(svc, chain) && (assignee == "" || assignee == ctx.coordinator.agent_id)) {
+		if assignee != "" {
+			append(&out, fmt.tprintf("assignee %s has no worker row in the chain fleet", assignee))
+		} else {
+			append(&out, "no fleet row holds the worker role")
+		}
+	}
+	return out[:]
+}

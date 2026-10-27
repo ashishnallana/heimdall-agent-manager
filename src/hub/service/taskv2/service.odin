@@ -54,6 +54,10 @@ Service :: struct {
 	// written inline (unit tests).
 	pending_touches:     map[string]struct{},
 	touch_async:         bool,
+	// merges_inflight: task ids whose merge-back job is running (sent, reply
+	// not yet recorded); guarded by state_mutex, keys heap-owned (merge.odin).
+	// A second job for the same task would race the first on one command_id.
+	merges_inflight:     map[string]struct{},
 	// wake_observer sees every wake_agent push after commit (tests).
 	wake_observer:       proc(ctx: rawptr, cmd: Wake_Command),
 	wake_observer_ctx:   rawptr,
@@ -806,7 +810,9 @@ task_updated :: proc(svc: ^Service, task: domain.Task, actor: Actor, fields: []s
 	json_raw(&payload, "fields", strings.to_string(b))
 	_, _, rok, rerr := record_event(svc, &u, task, actor, EV_UPDATED, json_end(&payload))
 	reviewers_changed := false
-	for f in fields do if f == "reviewers" || f == "review_roles" || f == "brief" { reviewers_changed = true; break }
+	// Turning user approval off can satisfy a gate whose agent reviews are all
+	// in; nothing else would decide it (no review lease is left to post).
+	for f in fields do if f == "reviewers" || f == "review_roles" || f == "brief" || f == "requires_user_approval" { reviewers_changed = true; break }
 	if rok && reviewers_changed do rok, rerr = regate_after_reviewer_change(svc, &u, task, actor)
 	if rok do rok, rerr = after_chain_change(svc, &u, task.chain_id, task.owner_user_id, .Task_Updated)
 	_, cerr := end_uow(svc, &u, rok)

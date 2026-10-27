@@ -9,7 +9,16 @@ import { decryptChainRecord, decryptChainList } from '../../utils/vaultChains';
 import { decryptTaskRecord, decryptTaskList, decryptTaskComments } from '../../utils/vaultTasks';
 import { taskCreateBridgeFields, taskPatchBridgeFields } from '../../utils/taskBridgePin';
 import { publishErrorMessage } from '../../utils/taskBrief';
-import type { TaskBriefWire, TaskLeaseWire } from '../taskWire';
+import type { TaskBriefWire, TaskLeaseWire, TaskWire } from '../taskWire';
+
+/** POST …/tasks/{id}/recheck: what changed (`actions`) and why the rest holds (`reasons`). */
+export interface TaskRecheckResult {
+  task: TaskWire;
+  changed: boolean;
+  actions: string[];
+  reasons: string[];
+  message: string;
+}
 
 export interface WorkflowDefinitionItem {
   def_id: string;
@@ -1432,6 +1441,22 @@ export const tasksApi = heimdallApi.injectEndpoints({
         { type: 'Chain' as const, id: chainId },
       ],
     }),
+    // Re-check: { task, changed, actions[], reasons[], message } (never approves,
+    // never touches a live lease; a repeat call is a no-op).
+    recheckTask: build.mutation<TaskRecheckResult, { chainId: string; taskId: string }>({
+      queryFn: async ({ chainId, taskId }) => {
+        try {
+          const data = await cookieMutation(`/task-chains/${encodeURIComponent(chainId)}/tasks/${encodeURIComponent(taskId)}/recheck`, 'POST', {});
+          return { data: data as TaskRecheckResult };
+        } catch (error: any) {
+          return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any };
+        }
+      },
+      invalidatesTags: (_result, _error, { taskId, chainId }) => [
+        ...preciseTaskTags(taskId, chainId, true),
+        { type: 'Chain' as const, id: chainId },
+      ],
+    }),
     answerTaskBlocker: build.mutation<any, { chainId: string; taskId: string; note?: string }>({
       queryFn: async ({ chainId, taskId, note = '' }) => {
         try {
@@ -1683,6 +1708,7 @@ export const {
   useAddTaskCommentMutation,
   useUserReviewTaskMutation,
   useReopenTaskMutation,
+  useRecheckTaskMutation,
   useAnswerTaskBlockerMutation,
   useFetchTaskEventsQuery,
   useFetchTaskFacetQuery,
