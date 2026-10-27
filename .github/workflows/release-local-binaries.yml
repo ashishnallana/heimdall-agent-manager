@@ -622,6 +622,17 @@ jobs:
             dist/heimdall-local-windows-amd64.zip
             dist/heimdall-local-windows-amd64.contents.txt
             dist/SHA256SUMS-windows-amd64.txt
+          if-no-files-found: error
+          retention-days: 30
+
+      # A separate artifact, like the macOS DMG: upload-artifact@v4 roots each
+      # artifact at the paths' common ancestor, so mixing dist/ and desktop-dist/
+      # would keep those prefixes and the release job's flat dist/ would miss them.
+      - name: Upload Heimdall installer (Windows)
+        uses: actions/upload-artifact@v4
+        with:
+          name: heimdall-desktop-windows-amd64-${{ needs.prepare.outputs.version }}
+          path: |
             desktop-dist/Heimdall-*-x64.exe
             desktop-dist/Heimdall-*-x64.exe.blockmap
             desktop-dist/latest.yml
@@ -699,6 +710,17 @@ jobs:
           set -euo pipefail
           cd dist
           version="${{ needs.prepare.outputs.version }}"
+          # Name what is missing; a bare `test -f` fails with only "exit code 1".
+          require_file() {
+            [ -f "$1" ] && return 0
+            echo "missing release file: dist/$1" >&2
+            echo "dist/ holds:" >&2; find . -type f | sort >&2
+            exit 1
+          }
+          require_entry() {
+            grep -Fxq "$2" "$RUNNER_TEMP/$1.entries" && return 0
+            echo "$1 is missing entry: $2" >&2; exit 1
+          }
           expected=(
             heimdall-local-darwin-arm64.tar.gz
             heimdall-local-darwin-amd64.tar.gz
@@ -708,17 +730,13 @@ jobs:
           )
           versioned=()
           for tarball in "${expected[@]}"; do
-            test -f "$tarball"
+            require_file "$tarball"
             # List once; piping tar into `grep -q` races under pipefail
             # (grep exits on first match -> tar hits EPIPE -> false failure).
             tar -tzf "$tarball" > "$RUNNER_TEMP/$tarball.entries"
-            grep -Fxq bin/ham-bridge "$RUNNER_TEMP/$tarball.entries"
-            grep -Fxq bin/ham-ctl "$RUNNER_TEMP/$tarball.entries"
-            grep -Fxq bin/heimdall "$RUNNER_TEMP/$tarball.entries"
-            grep -Fxq bin/ham-pty-host "$RUNNER_TEMP/$tarball.entries"
-            grep -Fxq scripts/apply-bridge-update.sh "$RUNNER_TEMP/$tarball.entries"
-            grep -Fxq README.md "$RUNNER_TEMP/$tarball.entries"
-            grep -Fxq LICENSE "$RUNNER_TEMP/$tarball.entries"
+            for entry in bin/ham-bridge bin/ham-ctl bin/heimdall bin/ham-pty-host scripts/apply-bridge-update.sh README.md LICENSE; do
+              require_entry "$tarball" "$entry"
+            done
             target="${tarball#heimdall-local-}"
             target="${target%.tar.gz}"
             asset="heimdall-local-${target}-${version}.tar.gz"
@@ -727,10 +745,10 @@ jobs:
           done
           # windows-amd64 ships a zip (scripts/install.ps1); no heimdall.exe.
           zip=heimdall-local-windows-amd64.zip
-          test -f "$zip"
+          require_file "$zip"
           unzip -Z1 "$zip" > "$RUNNER_TEMP/$zip.entries"
           for entry in bin/ham-bridge.exe bin/ham-ctl.exe bin/ham-pty-host.exe README.md LICENSE METADATA.json; do
-            grep -Fxq "$entry" "$RUNNER_TEMP/$zip.entries"
+            require_entry "$zip" "$entry"
           done
           # install.ps1 refuses absolute, drive-qualified, ".." and backslash names.
           if grep -Eq '(^/|^[A-Za-z]:|(^|/)\.\.(/|$)|\\)' "$RUNNER_TEMP/$zip.entries"; then
@@ -739,11 +757,11 @@ jobs:
           cp "$zip" "heimdall-local-windows-amd64-${version}.zip"
           versioned+=("heimdall-local-windows-amd64-${version}.zip")
           sha256sum "${versioned[@]}" > SHA256SUMS
-          test -f "Heimdall-${{ needs.prepare.outputs.clean_version }}-arm64.dmg"
-          test -f "Heimdall-${{ needs.prepare.outputs.clean_version }}-x64.dmg"
-          test -f "Heimdall-${{ needs.prepare.outputs.clean_version }}-x64.exe"
-          test -f "Heimdall-${{ needs.prepare.outputs.clean_version }}-x64.exe.blockmap"
-          test -f latest.yml
+          require_file "Heimdall-${{ needs.prepare.outputs.clean_version }}-arm64.dmg"
+          require_file "Heimdall-${{ needs.prepare.outputs.clean_version }}-x64.dmg"
+          require_file "Heimdall-${{ needs.prepare.outputs.clean_version }}-x64.exe"
+          require_file "Heimdall-${{ needs.prepare.outputs.clean_version }}-x64.exe.blockmap"
+          require_file latest.yml
           sha256sum Heimdall-*.dmg >> SHA256SUMS
           sha256sum Heimdall-*.exe >> SHA256SUMS
 
