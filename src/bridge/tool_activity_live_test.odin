@@ -479,7 +479,7 @@ test_tool_stream_antigravity_orphan_closed_and_turn_two_live :: proc(t: ^testing
     orphan_replay(t, id, "antigravity", `{"hookEventName":"PreToolUse","conversationId":"g1","stepIdx":1,"toolCall":{"name":"run_command","args":{"CommandLine":"go test ./..."}}}`, now+1000)
     main_calls, _ := orphan_active(id)
     testing.expect_value(t, main_calls, 1)
-    // Stop maps to activity idle + session end; no PostToolUse ever arrives.
+    // Stop maps to activity idle (turn end); no PostToolUse ever arrives.
     orphan_replay(t, id, "antigravity", `{"hookEventName":"Stop","conversationId":"g1","terminationReason":"user_cancel"}`, now+2000)
     main_calls, _ = orphan_active(id)
     testing.expect_value(t, main_calls, 0)
@@ -500,4 +500,53 @@ test_tool_stream_antigravity_orphan_closed_and_turn_two_live :: proc(t: ^testing
     main_calls, _ = orphan_active(id)
     testing.expect_value(t, main_calls, 0)
     testing.expect_value(t, orphan_last_status(id), "interrupted")
+}
+
+@(test)
+test_tool_stream_antigravity_background_subagent_survives_main_stop :: proc(t: ^testing.T) {
+    sync.mutex_lock(&live_bridge_test_mu); defer sync.mutex_unlock(&live_bridge_test_mu)
+    bridge_tool_live_init(); defer live_bridge_cleanup()
+    id := "inst_agy_bg_subagent"
+    bridge_runtime_mark_start_success(id)
+    live.tool_live_watch(&bridge_tool_tracker, id, true)
+    now := bridge_now_unix_ms()+1000
+    fixture := #load("../ctl/extension/testdata/antigravity/session_background_subagent.jsonl", string)
+    steps: [dynamic]string
+    defer delete(steps)
+    for line in strings.split_lines_iterator(&fixture) do if strings.trim_space(line) != "" do append(&steps, line)
+    testing.expect_value(t, len(steps), 11)
+    if len(steps) != 11 do return
+
+    // Turn 1: launch a background subagent; it starts a call; the main turn
+    // leaves an orphaned run_command and stops while the subagent still works.
+    for i in 0..<5 do orphan_replay(t, id, "antigravity", steps[i], now+i64(i)*1000)
+    main_calls, sub_calls := orphan_active(id)
+    testing.expect_value(t, main_calls, 1)
+    testing.expect_value(t, sub_calls, 1)
+    orphan_replay(t, id, "antigravity", steps[5], now+5000)
+    main_calls, sub_calls = orphan_active(id)
+    testing.expect_value(t, main_calls, 0)
+    testing.expect_value(t, sub_calls, 1)
+    testing.expect_value(t, orphan_last_status(id), "interrupted")
+    testing.expect(t, !bridge_tool_tracker.tool_live.entries[id].session_closed, "main Stop must not end the session")
+
+    // Turn 2: main-thread calls stay live; the subagent survives a second Stop.
+    orphan_replay(t, id, "antigravity", steps[6], now+6000)
+    orphan_replay(t, id, "antigravity", steps[7], now+7000)
+    main_calls, sub_calls = orphan_active(id)
+    testing.expect_value(t, main_calls, 1)
+    testing.expect_value(t, sub_calls, 1)
+    orphan_replay(t, id, "antigravity", steps[8], now+8000)
+    testing.expect_value(t, orphan_last_status(id), "completed")
+    orphan_replay(t, id, "antigravity", steps[9], now+9000)
+    main_calls, sub_calls = orphan_active(id)
+    testing.expect_value(t, main_calls, 0)
+    testing.expect_value(t, sub_calls, 1)
+
+    // Only the child's own Stop (subagent.stop) closes its calls.
+    orphan_replay(t, id, "antigravity", steps[10], now+10000)
+    main_calls, sub_calls = orphan_active(id)
+    testing.expect_value(t, main_calls, 0)
+    testing.expect_value(t, sub_calls, 0)
+    testing.expect(t, !bridge_tool_tracker.tool_live.entries[id].session_closed, "subagent stop must not end the session")
 }

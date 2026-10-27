@@ -141,8 +141,12 @@ The extension is governed by four core requirements: `REQ-EXT-AGY-1` through `RE
      - If tool edited files: Emits `file.edit` (see REQ-EXT-AGY-4).
      - Hook stdout: `{}`.
    - **`Stop`**:
-     - Emits `activity` (`state: "idle"`, `reason: terminationReason`).
-     - If session is terminating: Emits `session` (`phase: "end"`).
+     - Emits `activity` (`state: "idle"`, `reason: terminationReason`, `fully_idle` when present).
+     - Never emits `session` (`phase: "end"`): Stop fires once per execution loop (turn), and agy's
+       Stop payload (`executionNum`, `terminationReason`, `error`, `fullyIdle`, `finalModelOutput`)
+       has no session-termination signal; agy has no `SessionEnd` hook. The session ends with the
+       agent process. A per-turn session end would reset live tool state, dropping background subagent calls.
+     - A Stop carrying `agentId` (a child agent's loop ended) emits `subagent.stop` instead.
      - Hook stdout: `{ "decision": "stop" }` or `{}`.
 4. **Transport & Timeout Rules**:
    - Non-permission events are sent to the local Bridge socket using method `agent.extension.event` with a 500ms socket timeout (`EVENT_SOCKET_TIMEOUT_MS`).
@@ -189,7 +193,7 @@ The extension is governed by four core requirements: `REQ-EXT-AGY-1` through `RE
      - Extract subagent roles, types, and model specifications from `toolCall.args.Subagents`.
      - Emit `subagent.start` event carrying target agent identifier.
    - When subagent completes or sends a terminating message:
-     - Emit `subagent.stop` event.
+     - Emit `subagent.stop` event (mapped from a `Stop` hook that carries `agentId`).
    - If hook input carries subagent context (`agent_id`, `agent_type`), attach it to the `ham.ext.v1` envelope so tool events are attributed to the child agent.
 3. **File Edit Extraction & Unified Diffs**:
    - When mutating tools complete successfully in `PostToolUse`:

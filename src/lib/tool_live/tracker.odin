@@ -339,9 +339,10 @@ tool_live_extension :: proc(service: ^Tracker, inst: Instance, evs: []Event) {
 			}
 			continue
 		}
-		// Turn activity for the same session proves it is still alive. Antigravity
-		// emits session end on every Stop but hello/session start only on its first
-		// invocation; the reset fence (floor at the end ts) still rejects older frames.
+		// Turn activity for the same session proves it is still alive. Older
+		// Antigravity mappers (still installed with released ham-ctl) emit session
+		// end on every Stop but hello/session start only on the first invocation;
+		// the reset fence (floor at the end ts) still rejects older frames.
 		if ev.event == "activity" && e.session_closed && ev.session_id != "" && ev.session_id == e.session && ns > e.session_ns {
 			e.session_closed = false
 			e.session_ns = ns

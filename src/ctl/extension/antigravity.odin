@@ -8,7 +8,17 @@ package extension
 //   PreToolUse      (normal)       → tool.start
 //   PreToolUse      (permission)   → permission.request (sent with agent.extension.permission)
 //   PostToolUse                    → tool.end
-//   Stop                           → activity {state:idle} + session {phase:end}
+//   Stop            (main loop)    → activity {state:idle}
+//   Stop            (agentId set)  → subagent.stop
+//
+// Stop fires each time an execution loop ends, i.e. once per turn. agy 1.2.16's
+// hook contract (StopHookArgs: executionNum, terminationReason, error, fullyIdle,
+// finalModelOutput) carries no session-termination signal: terminationReason
+// values (model_stop, max_steps_exceeded, error, ...) describe why the loop
+// stopped, and fullyIdle only reports background work. agy has no SessionEnd
+// hook, so session {phase:end} is never inferred from Stop; the session ends with
+// the agent process. A session end would reset the live tool tracker and drop
+// background subagent calls on every turn.
 
 import json "core:encoding/json"
 import "core:fmt"
@@ -369,19 +379,21 @@ antigravity_map_hook :: proc(raw: string, ts: string, permission_timeout_ms := 0
 		if term_reason == "" do term_reason = json_get_string(root, "reason")
 		if term_reason == "" do term_reason = "stop"
 
-		// 1. activity: idle
-		a := pb_make()
-		pb_str(&a, "state", "idle")
-		pb_str(&a, "reason", term_reason)
-		eb := ext_event_begin("activity", ts, root, ANTIGRAVITY_PROVIDER, ANTIGRAVITY_EXT_VERSION)
-		append(&out.events, ext_event_end(&eb, pb_done(&a)))
-
-		// 2. session: end
-		s := pb_make()
-		pb_str(&s, "phase", "end")
-		pb_str(&s, "reason", term_reason)
-		eb2 := ext_event_begin("session", ts, root, ANTIGRAVITY_PROVIDER, ANTIGRAVITY_EXT_VERSION)
-		append(&out.events, ext_event_end(&eb2, pb_done(&s)))
+		if json_get_string(root, "agent_id") != "" {
+			// A child agent's loop ended: its unfinished calls cannot complete.
+			p := pb_make()
+			pb_str(&p, "reason", term_reason)
+			eb := ext_event_begin("subagent.stop", ts, root, ANTIGRAVITY_PROVIDER, ANTIGRAVITY_EXT_VERSION)
+			append(&out.events, ext_event_end(&eb, pb_done(&p)))
+		} else {
+			// Main turn ended; the session stays open for the next PreInvocation.
+			a := pb_make()
+			pb_str(&a, "state", "idle")
+			pb_str(&a, "reason", term_reason)
+			if fully_idle, ok := root["fullyIdle"].(json.Boolean); ok do pb_bool(&a, "fully_idle", bool(fully_idle))
+			eb := ext_event_begin("activity", ts, root, ANTIGRAVITY_PROVIDER, ANTIGRAVITY_EXT_VERSION)
+			append(&out.events, ext_event_end(&eb, pb_done(&a)))
+		}
 	}
 
 	// Bound aggregate-shaped inputs, not just individual strings.

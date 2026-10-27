@@ -176,25 +176,90 @@ test_antigravity_post_tool_use_error_maps_tool_end_error :: proc(t: ^testing.T) 
 }
 
 @(test)
-test_antigravity_stop_maps_idle_and_session_end :: proc(t: ^testing.T) {
+test_antigravity_stop_maps_turn_idle_without_session_end :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	defer free_all(context.temp_allocator)
 
+	// Stop ends one execution loop (a turn), not the session: agy has no
+	// session-termination signal, so a session end would wipe live subagent calls.
 	raw := #load("testdata/antigravity/stop.json", string)
 	mapped, err := antigravity_map_hook(raw, TS)
 	testing.expect_value(t, err, Antigravity_Error.None)
-	testing.expect_value(t, len(mapped.events), 2)
-	if len(mapped.events) != 2 do return
+	testing.expect_value(t, len(mapped.events), 1)
+	if len(mapped.events) != 1 do return
 
 	ev0, e0 := contracts.ext_parse_event(mapped.events[0])
 	testing.expect_value(t, e0, contracts.Ext_Error.None)
 	testing.expect_value(t, ev0.kind, contracts.Ext_Event_Kind.Activity)
 	testing.expect_value(t, ev0.activity_state, "idle")
+	testing.expect_value(t, ev0.agent_id, "")
+	v, _ := json.parse_string(mapped.events[0], json.DEFAULT_SPECIFICATION, true)
+	p := json_get_object(v.(json.Object), "payload")
+	testing.expect_value(t, json_get_string(p, "reason"), "model_stop")
 
-	ev1, e1 := contracts.ext_parse_event(mapped.events[1])
-	testing.expect_value(t, e1, contracts.Ext_Error.None)
-	testing.expect_value(t, ev1.kind, contracts.Ext_Event_Kind.Session)
-	testing.expect_value(t, ev1.session_phase, "end")
+	// No terminationReason value ends the session either.
+	for reason in ([]string{"model_stop", "max_steps_exceeded", "error", "user_canceled"}) {
+		r := fmt.tprintf(`{{"hookEventName":"Stop","conversationId":"s1","terminationReason":"%s","fullyIdle":true}}`, reason)
+		m, merr := antigravity_map_hook(r, TS)
+		testing.expect_value(t, merr, Antigravity_Error.None)
+		testing.expect_value(t, len(m.events), 1)
+		for ev_str in m.events {
+			ev, _ := contracts.ext_parse_event(ev_str)
+			testing.expectf(t, ev.kind == .Activity, "Stop(%s) emitted %v", reason, ev.kind)
+		}
+	}
+}
+
+@(test)
+test_antigravity_child_stop_maps_subagent_stop :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+
+	raw := `{"hookEventName":"Stop","conversationId":"s_parent","agentId":"agt_sub123","agentType":"research","terminationReason":"model_stop","fullyIdle":true}`
+	mapped, err := antigravity_map_hook(raw, TS)
+	testing.expect_value(t, err, Antigravity_Error.None)
+	testing.expect_value(t, len(mapped.events), 1)
+	if len(mapped.events) != 1 do return
+	ev, e := contracts.ext_parse_event(mapped.events[0])
+	testing.expect_value(t, e, contracts.Ext_Error.None)
+	testing.expect_value(t, ev.kind, contracts.Ext_Event_Kind.Subagent_Stop)
+	testing.expect_value(t, ev.agent_id, "agt_sub123")
+	testing.expect_value(t, ev.agent_type, "research")
+	testing.expect_value(t, ev.session_id, "s_parent")
+}
+
+@(test)
+test_antigravity_fixture_background_subagent_session_never_ends :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+
+	// Multi-turn native replay: two main Stops and one child Stop.
+	fixture := #load("testdata/antigravity/session_background_subagent.jsonl", string)
+	kinds: [dynamic]contracts.Ext_Event_Kind
+	for line in strings.split_lines_iterator(&fixture) {
+		if strings.trim_space(line) == "" do continue
+		mapped, err := antigravity_map_hook(line, TS)
+		testing.expect_value(t, err, Antigravity_Error.None)
+		for ev_str in mapped.events {
+			ev, perr := contracts.ext_parse_event(ev_str)
+			testing.expect_value(t, perr, contracts.Ext_Error.None)
+			testing.expect_value(t, ev.session_id, "5d0c2a7e-agy-bg")
+			if ev.kind == .Session do testing.expect_value(t, ev.session_phase, "start")
+			append(&kinds, ev.kind)
+		}
+	}
+	idle, starts, stops := 0, 0, 0
+	for k in kinds {
+		#partial switch k {
+		case .Activity: idle += 1
+		case .Session: starts += 1
+		case .Subagent_Stop: stops += 1
+		}
+	}
+	testing.expect_value(t, starts, 1)
+	testing.expect_value(t, stops, 1)
+	testing.expect_value(t, idle, 4) // two PreInvocation active + two main Stop idle
+	testing.expect_value(t, kinds[len(kinds)-1], contracts.Ext_Event_Kind.Subagent_Stop)
 }
 
 @(test)
