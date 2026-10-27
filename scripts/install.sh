@@ -188,20 +188,24 @@ usage() {
 Heimdall Bridge installer — Linux systemd / macOS LaunchAgent / Termux runit
 Usage: install.sh [--hub URL] [--version TAG] [--dry-run] [--uninstall]
                   [--re-enroll [--new-bridge] | --keep-enrollment] [--non-interactive]
+                  [--bundle FILE --checksum-file FILE]
                   [--name PROFILE]
 Hub must be an HTTP(S) origin, e.g. https://hub.mundus.in or http://localhost:8080.
 Without --hub, asks on the terminal. Existing enrollment prompts before re-enrolling.
 Re-enrolling offers the approver this machine's previous bridge id for reuse (same
 bridge, same history); --new-bridge registers a new bridge instead (implies --re-enroll).
 --non-interactive preserves existing enrollment and prints a command for new enrollment.
+--bundle installs the already-downloaded release bundle after verifying it against
+--checksum-file. Both paths must name regular files; --version is also required.
+This is used by the signed macOS app so installation never redownloads its embedded Bridge.
 --uninstall removes only this Hub's service and binaries; credentials/data are kept.
 --name PROFILE (or HEIMDALL_BRIDGE_NAME) installs a separate bridge to the same Hub
 for this OS user, e.g. one per Heimdall account: service heimdall-bridge-<hub>_PROFILE
 with its own enrollment, ports and ham-ctl wrapper. PROFILE is 1-31 of [a-z0-9-],
 starting with a letter or digit. Pass the same --name to --uninstall or --re-enroll it.
 Not supported on Termux.
-Requires bash, curl, tar and sha256sum (or shasum); HTTPS bridges also require socat (WebSocket
-transport). The binaries carry their own HTTPS client (libcurl, linked statically;
+Requires bash, curl, tar and sha256sum (or shasum). HTTPS bridge WebSockets use socat by
+default, or openssl when HAM_TLS_BACKEND=s_client. The binaries carry their own HTTPS client (libcurl, linked statically;
 Linux builds are fully static), so no libcurl or OpenSSL is needed on this machine.
 The Hub is checked first (20 s budget, exact failure reason). Verified release
 tarballs are cached in ${XDG_CACHE_HOME:-~/.cache}/heimdall/releases and reused
@@ -714,6 +718,7 @@ render_service() {
   # The service environment, in this order (keys sorted for the plist).
   local -a env=("PATH=$bin:$path" "HEIMDALL_HAM_PTY_HOST_BIN=$bin/ham-pty-host" HEIMDALL_BRIDGE_PTY_HOST=true
     "HEIMDALL_HAM_CTL_BIN=$wrapper" "HEIMDALL_BRIDGE_ENDPOINT=tcp:127.0.0.1:$endpoint" "HEIMDALL_BRIDGE_SERVICE_NAME=$service_env")
+  if [ "${HAM_TLS_BACKEND:-}" = s_client ]; then env+=("HAM_TLS_BACKEND=s_client"); fi
   case "$svc" in
     runit)
       # termux-services run file: exec the bridge under runsv with the same
@@ -848,12 +853,19 @@ remove_service() {
 main() {
   set -euo pipefail
   local hub_url='' version='' dry_run=false uninstall=false noninteractive=false enrollment=ask answer='' new_bridge=false
+  local local_bundle='' local_checksums=''
   local profile="${HEIMDALL_BRIDGE_NAME:-}"
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      --hub|--hub-url|--version|--name)
+      --hub|--hub-url|--version|--name|--bundle|--checksum-file)
         [ "$#" -ge 2 ] && [ -n "$2" ] || fail "$1 requires a value"
-        case "$1" in --version) version="$2" ;; --name) profile="$2" ;; *) hub_url="$2" ;; esac
+        case "$1" in
+          --version) version="$2" ;;
+          --name) profile="$2" ;;
+          --bundle) local_bundle="$2" ;;
+          --checksum-file) local_checksums="$2" ;;
+          *) hub_url="$2" ;;
+        esac
         shift 2 ;;
       --dry-run) dry_run=true; shift ;;
       --uninstall) uninstall=true; shift ;;
@@ -868,6 +880,15 @@ main() {
   done
   [ "${HEIMDALL_NON_INTERACTIVE:-0}" != 1 ] || noninteractive=true
   [ "${DEBIAN_FRONTEND:-}" != noninteractive ] || noninteractive=true
+  if [ -n "$local_bundle" ] || [ -n "$local_checksums" ]; then
+    [ -n "$local_bundle" ] && [ -n "$local_checksums" ] ||
+      fail '--bundle and --checksum-file must be provided together.'
+    [ -f "$local_bundle" ] && [ ! -L "$local_bundle" ] || fail "Bundle is not a regular file: $local_bundle"
+    [ -f "$local_checksums" ] && [ ! -L "$local_checksums" ] || fail "Checksum file is not a regular file: $local_checksums"
+    [ -n "$version" ] || fail '--version is required with --bundle.'
+    case "$local_bundle" in /*) ;; *) local_bundle="$(cd "$(dirname "$local_bundle")" && pwd -P)/$(basename "$local_bundle")" ;; esac
+    case "$local_checksums" in /*) ;; *) local_checksums="$(cd "$(dirname "$local_checksums")" && pwd -P)/$(basename "$local_checksums")" ;; esac
+  fi
   [ -z "$profile" ] || valid_profile "$profile" ||
     fail "Invalid profile name '$profile' (--name/HEIMDALL_BRIDGE_NAME): use 1-31 lower-case letters, digits or '-', starting with a letter or digit."
   banner "$version" "$hub_url" "$profile"
@@ -968,14 +989,26 @@ main() {
     log PLAN "Replace $service_file ($svc); enrollment=$enrollment$("$new_bridge" && printf ' (new bridge)'); matching legacy migration=$migrate"
     [ "$svc" != runit ] || log PLAN "Create runit service $runit_dir (run, log/run) and sv-enable ham-bridge."
     log PLAN 'Choose two free loopback ports; create a per-Hub ham-ctl wrapper and service.'
-    log PLAN "Download heimdall-local-$target-${version:-LATEST}.tar.gz${fallback_target:+ (or heimdall-local-$fallback_target if the release has none)} and verify SHA256SUMS."
+    if [ -n "$local_bundle" ]; then
+      log PLAN "Verify and install packaged bundle $local_bundle using $local_checksums."
+    else
+      log PLAN "Download heimdall-local-$target-${version:-LATEST}.tar.gz${fallback_target:+ (or heimdall-local-$fallback_target if the release has none)} and verify SHA256SUMS."
+    fi
     return
   fi
   step 2 'Hub check'
   command -v curl >/dev/null || fail 'curl is required.'
   command -v tar >/dev/null || fail 'tar is required.'
   command -v sha256sum >/dev/null || command -v shasum >/dev/null || fail 'sha256sum (coreutils) or shasum is required.'
-  case "$hub_url" in https:*) command -v socat >/dev/null || fail 'HTTPS transport requires socat (install via your package manager).' ;; esac
+  case "$hub_url" in
+    https:*)
+      if [ "${HAM_TLS_BACKEND:-}" = s_client ]; then
+        command -v openssl >/dev/null || fail 'HAM_TLS_BACKEND=s_client requires openssl.'
+        log INFO 'Using the openssl s_client WebSocket transport.'
+      else
+        command -v socat >/dev/null || fail 'HTTPS transport requires socat (install it, or set HAM_TLS_BACKEND=s_client to use openssl).'
+      fi ;;
+  esac
   case "$svc" in
     systemd) systemctl --user show-environment >/dev/null || fail 'No systemd user session. Run in your login session.' ;;
     launchd) launchctl print "gui/$uid" >/dev/null || fail 'No launchd GUI session. Run as the logged-in macOS user.' ;;
@@ -989,7 +1022,7 @@ main() {
   trap "$(printf 'rm -rf %q; rmdir %q' "$work_dir" "$lock_dir")" EXIT
   wait_for_hub
   step 3 'Resolve release'
-  if [ -z "$version" ]; then
+  if [ -z "$local_bundle" ] && [ -z "$version" ]; then
     # Releases start as prereleases (candidates on the canary hub) and are promoted
     # later; without --version, resolve only promoted releases. A hub's own
     # /public/install.sh passes --version, so its bridges get the hub's release.
@@ -1004,32 +1037,45 @@ main() {
   [[ "$version" =~ ^[a-zA-Z0-9._-]+$ ]] || fail 'Invalid release tag.'
   local archive="heimdall-local-$target-$version.tar.gz" base="https://github.com/tanmayv/heimdall-agent-manager/releases/download/$version"
   log INFO "Release: $version"
-  # SHA256SUMS first: it lists every bundle of the release, so it also tells
-  # whether this release ships the preferred (Termux) bundle at all.
-  download "$base/SHA256SUMS" "$work_dir/SHA256SUMS"
-  if [ -n "$fallback_target" ] && ! awk -v n="$archive" '{ sub(/^\*/, "", $2) } $2 == n { found = 1 } END { exit !found }' "$work_dir/SHA256SUMS"; then
-    log WARN "Release $version has no $target bundle; installing heimdall-local-$fallback_target instead. Its glibc binaries are killed by Android's seccomp at start-up (set_robust_list); Termux bundles ship from v0.3.29 -- re-run without --version or pass a newer one."
-    archive="heimdall-local-$fallback_target-$version.tar.gz"
-  fi
   step 4 'Download & verify'
   # Reuse a previously verified tarball of this exact release when its SHA-256
   # still matches the release's SHA256SUMS; otherwise download (with a progress
   # bar on a terminal). The cache only ever holds GitHub-release bundles.
   local cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/heimdall/releases" cached=false
-  mkdir -p "$cache_dir"; chmod 700 "$cache_dir"
-  if [ -f "$cache_dir/$archive" ]; then
-    spin_start "Checking cached $archive"
-    if sha256_matches "$work_dir/SHA256SUMS" "$cache_dir/$archive" "$archive"; then
-      cp "$cache_dir/$archive" "$work_dir/$archive"
-      cached=true
-      spin_stop OK "Using cached $archive (SHA-256 matches release $version; no download)"
-    else
-      spin_stop INFO "Cached $archive does not match release $version; downloading it again"
+  if [ -n "$local_bundle" ]; then
+    archive="$(basename "$local_bundle")"
+    case "$archive" in
+      heimdall-local-$target*.tar.gz) ;;
+      *) fail "Packaged bundle $archive does not match this machine's target $target." ;;
+    esac
+    cp "$local_checksums" "$work_dir/SHA256SUMS"
+    cp "$local_bundle" "$work_dir/$archive"
+    sha256_matches "$work_dir/SHA256SUMS" "$work_dir/$archive" "$archive" ||
+      fail 'Packaged bundle SHA-256 verification failed; nothing installed.'
+    log OK "Using packaged $archive (SHA-256 verified; no download)"
+  else
+    # SHA256SUMS first: it lists every bundle of the release, so it also tells
+    # whether this release ships the preferred (Termux) bundle at all.
+    download "$base/SHA256SUMS" "$work_dir/SHA256SUMS"
+    if [ -n "$fallback_target" ] && ! awk -v n="$archive" '{ sub(/^\*/, "", $2) } $2 == n { found = 1 } END { exit !found }' "$work_dir/SHA256SUMS"; then
+      log WARN "Release $version has no $target bundle; installing heimdall-local-$fallback_target instead. Its glibc binaries are killed by Android's seccomp at start-up (set_robust_list); Termux bundles ship from v0.3.29 -- re-run without --version or pass a newer one."
+      archive="heimdall-local-$fallback_target-$version.tar.gz"
     fi
-  fi
-  if ! "$cached"; then
-    log INFO "Downloading $archive"
-    download_progress "$base/$archive" "$work_dir/$archive"
+    mkdir -p "$cache_dir"; chmod 700 "$cache_dir"
+    if [ -f "$cache_dir/$archive" ]; then
+      spin_start "Checking cached $archive"
+      if sha256_matches "$work_dir/SHA256SUMS" "$cache_dir/$archive" "$archive"; then
+        cp "$cache_dir/$archive" "$work_dir/$archive"
+        cached=true
+        spin_stop OK "Using cached $archive (SHA-256 matches release $version; no download)"
+      else
+        spin_stop INFO "Cached $archive does not match release $version; downloading it again"
+      fi
+    fi
+    if ! "$cached"; then
+      log INFO "Downloading $archive"
+      download_progress "$base/$archive" "$work_dir/$archive"
+    fi
   fi
   extract_bundle "$work_dir" "$archive"
   step 5 'Bridge preflight'
@@ -1060,14 +1106,17 @@ main() {
   else
     spin_stop INFO "Bridge ${bridge_version:-unknown} predates --probe-hub (0.3.36); transport preflight skipped."
   fi
-  # Keep the verified bundle for next time; drop older versions of this target.
-  spin_start "Caching $archive"
-  cp "$work_dir/$archive" "$cache_dir/$archive.tmp" && mv -f "$cache_dir/$archive.tmp" "$cache_dir/$archive"
-  local old cache_prefix="${archive%-"$version".tar.gz}"
-  for old in "$cache_dir/$cache_prefix"-*.tar.gz; do
-    [ "$old" = "$cache_dir/$archive" ] || rm -f "$old"
-  done
-  spin_stop
+  # Keep downloaded releases for next time. The signed app owns its embedded
+  # copy, so a packaged bundle is not duplicated into the user's cache.
+  if [ -z "$local_bundle" ]; then
+    spin_start "Caching $archive"
+    cp "$work_dir/$archive" "$cache_dir/$archive.tmp" && mv -f "$cache_dir/$archive.tmp" "$cache_dir/$archive"
+    local old cache_prefix="${archive%-"$version".tar.gz}"
+    for old in "$cache_dir/$cache_prefix"-*.tar.gz; do
+      [ "$old" = "$cache_dir/$archive" ] || rm -f "$old"
+    done
+    spin_stop
+  fi
   # Validate and copy the full new generation before stopping a service.
   local extension_transaction=""
   if [ -d "$work_dir/share/heimdall/extensions" ]; then

@@ -227,8 +227,39 @@ jobs:
             echo "manager=${paths[3]}"
           } >> "$GITHUB_OUTPUT"
 
+      # REQ-SIGN-1: one Developer ID identity signs the standalone binaries
+      # consumed by curl/self-update and the Electron app consumed from DMG.
+      - name: Import Developer ID Application certificate (macOS)
+        if: ${{ startsWith(matrix.target, 'darwin-') }}
+        shell: bash
+        env:
+          MACOS_DEVELOPER_ID_P12_BASE64: ${{ secrets.MACOS_DEVELOPER_ID_P12_BASE64 }}
+          MACOS_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_P12_PASSWORD }}
+        run: |
+          set -euo pipefail
+          [ -n "$MACOS_DEVELOPER_ID_P12_BASE64" ] || { echo 'MACOS_DEVELOPER_ID_P12_BASE64 is required' >&2; exit 1; }
+          cert="$RUNNER_TEMP/developer-id.p12"
+          keychain="$RUNNER_TEMP/heimdall-signing.keychain-db"
+          password="$(openssl rand -hex 24)"
+          printf '%s' "$MACOS_DEVELOPER_ID_P12_BASE64" | /usr/bin/base64 -D > "$cert"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          security import "$cert" -k "$keychain" -P "$MACOS_DEVELOPER_ID_P12_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain"
+          security list-keychains -d user -s "$keychain"
+          identity="$(security find-identity -v -p codesigning "$keychain" | sed -n 's/.*"\(Developer ID Application:[^"]*\)".*/\1/p' | head -n 1)"
+          [ -n "$identity" ] || { echo 'No Developer ID Application identity found in the supplied certificate' >&2; exit 1; }
+          echo "HEIMDALL_MACOS_CODESIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
+          # electron-builder selects Developer ID automatically and rejects the
+          # certificate-class prefix in CSC_NAME; codesign above needs it.
+          echo "CSC_NAME=${identity#Developer ID Application: }" >> "$GITHUB_ENV"
+          rm -f "$cert"
+
       - name: Package heimdall-local tarball
         shell: bash
+        env:
+          HEIMDALL_REQUIRE_MACOS_SIGNING: ${{ startsWith(matrix.target, 'darwin-') && '1' || '0' }}
         run: |
           set -euo pipefail
           scripts/release/package-local-binary-tarball.sh \
@@ -368,6 +399,9 @@ jobs:
           rm -rf "$work"; mkdir -p "$work"
           tar -xzf "dist/heimdall-local-${{ matrix.target }}.tar.gz" -C "$work"
           for f in "$work"/bin/*; do
+            codesign --verify --strict --verbose=2 "$f"
+            codesign -d --verbose=4 "$f" 2>&1 | grep -q 'Authority=Developer ID Application:' || {
+              echo "FAIL: $f is not signed with Developer ID Application" >&2; exit 1; }
             if otool -L "$f" | grep -q '/nix/store'; then
               echo "FAIL: $f links a nix-store dylib" >&2
               exit 1
@@ -399,6 +433,56 @@ jobs:
           "$work/bin/ham-bridge" --probe-hub https://github.com | tee "$RUNNER_TEMP/probe.txt"
           grep -q 'Apple SecTrust' "$RUNNER_TEMP/probe.txt" || {
             echo "FAIL: the macOS bridge must verify through Apple SecTrust" >&2; exit 1; }
+
+      - name: Set up Node for the desktop app (macOS)
+        if: ${{ startsWith(matrix.target, 'darwin-') }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Build, sign, and notarize Heimdall DMG (macOS)
+        if: ${{ startsWith(matrix.target, 'darwin-') }}
+        shell: bash
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          [ -n "$APPLE_ID" ] && [ -n "$APPLE_APP_SPECIFIC_PASSWORD" ] && [ -n "$APPLE_TEAM_ID" ] || {
+            echo 'APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD, and APPLE_TEAM_ID are required for notarization' >&2; exit 1; }
+          npm ci
+          scripts/release/stage-macos-desktop-resources.sh \
+            "${{ matrix.target }}" \
+            "dist/heimdall-local-${{ matrix.target }}.tar.gz" \
+            "${{ needs.prepare.outputs.version }}"
+          npm run build
+          case "${{ matrix.target }}" in
+            darwin-arm64) arch=--arm64 ;;
+            darwin-amd64) arch=--x64 ;;
+          esac
+          npx electron-builder --mac dmg "$arch" \
+            -c.extraMetadata.version="${{ needs.prepare.outputs.clean_version }}"
+          for dmg in desktop-dist/*.dmg; do
+            codesign --verify --strict --verbose=2 "$dmg"
+            xcrun notarytool submit "$dmg" \
+              --apple-id "$APPLE_ID" \
+              --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+              --team-id "$APPLE_TEAM_ID" \
+              --wait
+            xcrun stapler staple "$dmg"
+            xcrun stapler validate "$dmg"
+          done
+
+      - name: Upload Heimdall DMG (macOS)
+        if: ${{ startsWith(matrix.target, 'darwin-') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: heimdall-desktop-${{ matrix.target }}-${{ needs.prepare.outputs.version }}
+          path: desktop-dist/*.dmg
+          if-no-files-found: error
+          retention-days: 30
 
   # windows-amd64: hub-less Odin ham-bridge/ham-ctl (static sqlite3.lib from the
   # pinned amalgamation, FTS5) and a static-CRT Rust ham-pty-host, packaged as
@@ -626,6 +710,9 @@ jobs:
           cp "$zip" "heimdall-local-windows-amd64-${version}.zip"
           versioned+=("heimdall-local-windows-amd64-${version}.zip")
           sha256sum "${versioned[@]}" > SHA256SUMS
+          test -f "Heimdall-${{ needs.prepare.outputs.clean_version }}-arm64.dmg"
+          test -f "Heimdall-${{ needs.prepare.outputs.clean_version }}-x64.dmg"
+          sha256sum Heimdall-*.dmg >> SHA256SUMS
 
       - name: Create or update GitHub Release
         env:
@@ -656,6 +743,8 @@ jobs:
           - heimdall-local-linux-amd64-$VERSION.tar.gz
           - heimdall-local-linux-arm64-$VERSION.tar.gz
           - heimdall-local-windows-amd64-$VERSION.zip (scripts/install.ps1)
+          - Heimdall-${{ needs.prepare.outputs.clean_version }}-arm64.dmg (signed + notarized macOS app with Bridge)
+          - Heimdall-${{ needs.prepare.outputs.clean_version }}-x64.dmg (signed + notarized macOS app with Bridge)
           - SHA256SUMS
           NOTES
           release_flags=()
@@ -665,10 +754,10 @@ jobs:
             release_flags+=(--prerelease)
           fi
           if gh release view "$VERSION" >/dev/null 2>&1; then
-            gh release upload "$VERSION" dist/heimdall-local-*-"$VERSION".tar.gz dist/heimdall-local-*-"$VERSION".zip dist/SHA256SUMS --clobber
+            gh release upload "$VERSION" dist/heimdall-local-*-"$VERSION".tar.gz dist/heimdall-local-*-"$VERSION".zip dist/Heimdall-*.dmg dist/SHA256SUMS --clobber
             gh release edit "$VERSION" --notes-file "$notes_file"
           else
-            gh release create "$VERSION" dist/heimdall-local-*-"$VERSION".tar.gz dist/heimdall-local-*-"$VERSION".zip dist/SHA256SUMS \
+            gh release create "$VERSION" dist/heimdall-local-*-"$VERSION".tar.gz dist/heimdall-local-*-"$VERSION".zip dist/Heimdall-*.dmg dist/SHA256SUMS \
               --title "$VERSION" \
               --target "$RELEASE_COMMIT" \
               --notes-file "$notes_file" \

@@ -2,6 +2,8 @@ node_modules/
 /dist/
 dist/
 electron-dist/
+desktop-dist/
+release-assets/
 .run-logs/
 .nix-build-links/
 bin/

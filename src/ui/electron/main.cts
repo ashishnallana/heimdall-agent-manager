@@ -1,6 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, nativeImage, Menu, safeStorage, shell } = require('electron');
-const fs = require('fs');
-const os = require('os');
+const { app, BrowserWindow, ipcMain, dialog, nativeImage, Menu, shell } = require('electron');
 const path = require('path');
 
 // Visible product identity (window title + dock/taskbar + macOS app menu).
@@ -16,6 +14,7 @@ const appIcon = (() => {
 })();
 const { pruneAndRegister, updatePort, deregister } = require('./instanceRegistry.cjs');
 const { startDebugServer, stopDebugServer } = require('./debugServer.cjs');
+const bridgeManager = require('./bridgeManager.cjs');
 
 function normalizeBaseUrl(value: string): string {
   return String(value || '').trim().replace(/\/$/, '');
@@ -26,45 +25,12 @@ function configuredHubApiBaseUrl(): string {
     process.env.HEIMDALL_HUB_API_URL ||
     process.env.HEIMDALL_HUB_URL ||
     // Default to the public Hub API, not the outpost/dev-proxy browser URL.
-    'http://127.0.0.1:8081'
+    (app.isPackaged ? 'https://hub.brolabs.ai' : 'http://127.0.0.1:8081')
   );
 }
 
-function deviceTokenPath(): string {
-  return path.join(app.getPath('userData'), 'device-authorization-token.bin');
-}
-
-function readDeviceToken(): { ok: boolean; token: string; error?: string } {
-  try {
-    const filePath = deviceTokenPath();
-    if (!fs.existsSync(filePath)) return { ok: true, token: '' };
-    if (!safeStorage.isEncryptionAvailable()) return { ok: false, token: '', error: 'Electron safeStorage encryption is unavailable on this OS/session.' };
-    const encrypted = fs.readFileSync(filePath);
-    return { ok: true, token: safeStorage.decryptString(encrypted) };
-  } catch (err: any) {
-    return { ok: false, token: '', error: String(err?.message || err || 'Unable to read stored token') };
-  }
-}
-
-function writeDeviceToken(token: string): { ok: boolean; error?: string } {
-  try {
-    if (!safeStorage.isEncryptionAvailable()) return { ok: false, error: 'Electron safeStorage encryption is unavailable on this OS/session.' };
-    fs.mkdirSync(app.getPath('userData'), { recursive: true });
-    fs.writeFileSync(deviceTokenPath(), safeStorage.encryptString(String(token || '')));
-    return { ok: true };
-  } catch (err: any) {
-    return { ok: false, error: String(err?.message || err || 'Unable to store token') };
-  }
-}
-
-function clearDeviceToken(): { ok: boolean; error?: string } {
-  try {
-    const filePath = deviceTokenPath();
-    if (fs.existsSync(filePath)) fs.rmSync(filePath, { force: true });
-    return { ok: true };
-  } catch (err: any) {
-    return { ok: false, error: String(err?.message || err || 'Unable to clear token') };
-  }
+function configuredUiOrigin(): string {
+  return normalizeBaseUrl(process.env.HEIMDALL_UI_URL || (app.isPackaged ? 'https://heimdall.brolabs.ai' : 'http://127.0.0.1:5173'));
 }
 
 // Bypass Nix sandbox GPU library mismatches on Linux to enable full hardware-accelerated rendering.
@@ -95,6 +61,38 @@ try {
 // Treat as dev only when the Vite dev server URL is explicitly provided.
 const isDev = Boolean(process.env.VITE_DEV_SERVER_URL);
 
+let authWindow: any = null;
+
+function openOidcWindow(url: string, owner: any) {
+  // REQ-OIDC-DESKTOP-1: OIDC runs in a preload-free window which shares the
+  // default Electron cookie jar. Once the Hub callback has set its HttpOnly
+  // session cookie, the trusted main window reloads the same-origin Hub UI.
+  if (authWindow && !authWindow.isDestroyed()) { authWindow.focus(); return; }
+  authWindow = new BrowserWindow({
+    width: 620,
+    height: 760,
+    parent: owner || undefined,
+    modal: Boolean(owner),
+    title: `Sign in to ${APP_DISPLAY_NAME}`,
+    webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true },
+  });
+  const uiOrigin = new URL(configuredUiOrigin()).origin;
+  const finishIfReturned = (_event: any, nextUrl: string) => {
+    try {
+      const parsed = new URL(nextUrl);
+      if (parsed.origin !== uiOrigin || parsed.pathname.startsWith('/api/v1/auth/login') || parsed.pathname.startsWith('/api/v1/auth/callback')) return;
+      const main = owner && !owner.isDestroyed() ? owner : BrowserWindow.getAllWindows().find((candidate: any) => candidate !== authWindow);
+      authWindow?.close();
+      authWindow = null;
+      main?.loadURL(configuredUiOrigin());
+    } catch (_err) { /* Keep the OIDC window open for non-URL navigations. */ }
+  };
+  authWindow.webContents.on('did-navigate', finishIfReturned);
+  authWindow.webContents.on('did-redirect-navigation', finishIfReturned);
+  authWindow.on('closed', () => { authWindow = null; });
+  void authWindow.loadURL(url);
+}
+
 function createWindow() {
   const win = new BrowserWindow({
     width: 1200,
@@ -107,6 +105,7 @@ function createWindow() {
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
+      sandbox: true,
       preload: path.join(__dirname, 'preload.cjs'),
     },
   });
@@ -126,10 +125,32 @@ function createWindow() {
   win.once('ready-to-show', forceWindowTitle);
   win.webContents.on('did-finish-load', forceWindowTitle);
 
+  if (!isDev) {
+    const trustedOrigin = new URL(configuredUiOrigin()).origin;
+    const guardNavigation = (event: any, url: string) => {
+      try {
+        if (new URL(url).origin === trustedOrigin) return;
+      } catch (_err) { /* Treat malformed navigation as untrusted. */ }
+      event.preventDefault();
+      openOidcWindow(url, win);
+    };
+    // `will-redirect` is load-bearing: /auth/login reaches the identity
+    // provider through an HTTP 302, which is not a user-initiated navigation.
+    win.webContents.on('will-navigate', guardNavigation);
+    win.webContents.on('will-redirect', guardNavigation);
+    win.webContents.setWindowOpenHandler(({ url }: { url: string }) => {
+      void shell.openExternal(url);
+      return { action: 'deny' };
+    });
+  }
+
   if (isDev) {
     win.loadURL(process.env.VITE_DEV_SERVER_URL || 'http://127.0.0.1:5173');
   } else {
-    win.loadFile(path.join(__dirname, '..', 'dist', 'index.html'));
+    // The packaged app is a trusted desktop shell for the Hub web UI. Loading
+    // the Hub origin is what lets Chromium retain/send the exact same HttpOnly
+    // OIDC session cookie as the browser UI; there is no deprecated HUT token.
+    win.loadURL(configuredUiOrigin());
   }
 }
 
@@ -165,29 +186,17 @@ ipcMain.handle('odin-api:toggle-debug-server', async (_event, enable: boolean) =
   return { enabled: currentDebugPort !== 0, port: currentDebugPort, pid: process.pid };
 });
 
-ipcMain.handle('heimdall-device-auth:get-config', () => {
-  return { apiBaseUrl: configuredHubApiBaseUrl(), safeStorageAvailable: safeStorage.isEncryptionAvailable() };
-});
-
-ipcMain.handle('heimdall-device-auth:get-token', () => readDeviceToken());
-
-ipcMain.handle('heimdall-device-auth:store-token', (_event, token: string) => writeDeviceToken(token));
-
-ipcMain.handle('heimdall-device-auth:clear-token', () => clearDeviceToken());
-
-ipcMain.handle('heimdall-device-auth:device-info', () => {
-  return {
-    client: 'heimdall-electron',
-    deviceLabel: os.hostname() || 'Heimdall Desktop',
-    os: `${process.platform} ${process.arch}`,
-    appVersion: app.getVersion?.() || '0.1.0',
-  };
-});
-
-ipcMain.handle('heimdall-device-auth:open-external', async (_event, url: string) => {
+ipcMain.handle('heimdall-api:open-external', async (_event, url: string) => {
   await shell.openExternal(String(url || ''));
   return { ok: true };
 });
+
+ipcMain.handle('heimdall-bridge:get-status', () => bridgeManager.getStatus(configuredHubApiBaseUrl()));
+ipcMain.handle('heimdall-bridge:install-bundled', () => bridgeManager.installBundled(configuredHubApiBaseUrl()));
+ipcMain.handle('heimdall-bridge:start-enrollment', (event) => bridgeManager.startEnrollment(configuredHubApiBaseUrl(), (payload: any) => {
+  if (!event.sender.isDestroyed()) event.sender.send('heimdall-bridge:enrollment-event', payload);
+  if (payload?.type === 'pairing' && payload?.url) void shell.openExternal(String(payload.url));
+}));
 
 
 // Build an application menu whose FIRST submenu is titled with the app name.
@@ -230,9 +239,8 @@ app.whenReady().then(async () => {
   installAppMenu();
 
   // In dev the renderer runs at the Vite dev-server origin, and Vite's
-  // `server.proxy` (see vite.config.js) forwards `/api/v1` to the local Hub,
-  // which authenticates users only with its OIDC session cookie (local dev uses
-  // tools/mock-oidc). TODO(oidc): desktop sign-in is not implemented yet.
+  // `server.proxy` (see vite.config.js) forwards `/api/v1` to the local Hub.
+  // Packaged builds load the HTTPS Hub UI directly; both use its OIDC cookie.
   const daemonUrl = process.env.HEIMDALL_DAEMON_URL || 'http://127.0.0.1:49322';
   pruneAndRegister(daemonUrl);
   updatePort(0); // Explicitly 0 since disabled by default
@@ -241,7 +249,8 @@ app.whenReady().then(async () => {
   console.log(`  daemon_url=${daemonUrl}`);
   console.log(`  daemon_url_source=${process.env.HEIMDALL_DAEMON_URL ? 'env' : 'default'}`);
   console.log(`  hub_api_base_url=${configuredHubApiBaseUrl()}`);
-  console.log(`  safe_storage_available=${safeStorage.isEncryptionAvailable()}`);
+  console.log(`  ui_origin=${configuredUiOrigin()}`);
+  console.log('  auth=oidc-session-cookie');
   console.log(`  pid=${process.pid}`);
   console.log(`  platform=${process.platform}`);
   console.log(`  electron=${process.versions.electron}`);

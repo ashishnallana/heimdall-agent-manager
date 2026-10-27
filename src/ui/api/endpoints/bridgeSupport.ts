@@ -28,6 +28,7 @@ export interface Bridge {
   arch?: string;
   status?: string;
   runtime_status?: string;
+  runtime_connected?: boolean;
   version?: string;
   commit_sha?: string;
   build_timestamp?: string;

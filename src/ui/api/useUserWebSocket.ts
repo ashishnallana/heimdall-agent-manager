@@ -35,8 +35,9 @@ import {
 // Hub checks Origin == ui_origin on cookie WebSocket upgrades and re-validates the
 // session while the socket lives). Other streams mint a short-lived single-use
 // ticket with a same-origin `POST /api/v1/me/ws-ticket` (cookie) and connect with
-// `?ticket=...`. Electron's legacy bearer path is not supported by the OIDC-only
-// Hub yet (no user tokens); see ElectronDeviceAuthGate.
+// `?ticket=...`. The packaged Electron app loads the Hub HTTPS origin and takes
+// this same cookie path; its preload no longer exposes the legacy deviceAuth
+// bearer bridge. See ElectronDeviceAuthGate.
 
 // Hub keeps user WebSockets open by waiting for occasional client frames. Send a
 // lightweight heartbeat well below the server idle timeout so healthy browser

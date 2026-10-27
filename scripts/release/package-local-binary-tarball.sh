@@ -247,6 +247,38 @@ for staged in "$stage"/bin/*; do
   esac
 done
 
+# REQ-SIGN-1: sign the exact Mach-O files before the tarball is created. The
+# curl installer, the DMG, and Bridge self-update all consume this same archive,
+# so signing only the .app would leave two delivery paths with unstable CDHashes
+# and repeated Keychain prompts. Local/test builds may omit the identity; release
+# CI sets HEIMDALL_REQUIRE_MACOS_SIGNING=1 and cannot publish unsigned binaries.
+if [[ "$target" == darwin-* ]]; then
+  signing_identity="${HEIMDALL_MACOS_CODESIGN_IDENTITY:-}"
+  if [ -z "$signing_identity" ] && [ "${HEIMDALL_REQUIRE_MACOS_SIGNING:-0}" = 1 ]; then
+    echo 'error: HEIMDALL_MACOS_CODESIGN_IDENTITY is required for macOS release bundles' >&2
+    exit 1
+  fi
+  if [ -n "$signing_identity" ]; then
+    command -v codesign >/dev/null 2>&1 || { echo 'error: codesign is required for macOS release bundles' >&2; exit 1; }
+    for staged in "$stage"/bin/*; do
+      magic="$(file_magic "$staged")"
+      case "$magic" in
+        cffaedfe|cefaedfe|cafebabe|cafebabf|feedface|feedfacf) ;;
+        *) continue ;;
+      esac
+      case "$(basename "$staged")" in
+        ham-bridge) identifier=works.earendil.heimdall.bridge ;;
+        ham-ctl) identifier=works.earendil.heimdall.ctl ;;
+        ham-pty-host) identifier=works.earendil.heimdall.pty-host ;;
+        heimdall) identifier=works.earendil.heimdall.manager ;;
+        *) identifier="works.earendil.heimdall.$(basename "$staged" | tr -cs 'A-Za-z0-9.-' '-')" ;;
+      esac
+      codesign --force --sign "$signing_identity" --identifier "$identifier" --options runtime --timestamp "$staged"
+      codesign --verify --strict --verbose=2 "$staged"
+    done
+  fi
+fi
+
 curl_version="$(sed -n '/"curl"/,/}/s/.*"version": *"\([^"]*\)".*/\1/p' nix/libcurl-pin.json | head -n 1)"
 [ -n "$curl_version" ] || { echo "error: cannot read the curl version from nix/libcurl-pin.json" >&2; exit 1; }
 commit="${GITHUB_SHA:-$(git rev-parse --short=12 HEAD 2>/dev/null || printf unknown)}"
@@ -261,6 +293,11 @@ if [ "$ham_pty_host_shipped" = true ]; then
 else
   binaries_json='["ham-bridge", "ham-ctl", "heimdall"]'
 fi
+if [[ "$target" == darwin-* ]] && [ -n "${HEIMDALL_MACOS_CODESIGN_IDENTITY:-}" ]; then
+  signed_json=true
+else
+  signed_json=false
+fi
 cat > "$stage/METADATA.json" <<META
 {
   "product": "heimdall-local",
@@ -269,6 +306,7 @@ cat > "$stage/METADATA.json" <<META
   "commit": "$commit",
   "built_at": "$built_at_iso",
   "binaries": $binaries_json,
+  "developer_id_signed": $signed_json,
   "http_client": "libcurl $curl_version, statically linked (nix/libcurl-pin.json; Linux: OpenSSL 3 on musl, fully static; macOS: OpenSSL 3 with Apple SecTrust verification). Nothing to install.",
   "tls_dependency": "socat (DEFAULT bridge->hub WebSocket TLS transport; NOT bundled -- install it with your system package manager). OpenSSL s_client is the legacy fallback, used only when HAM_TLS_BACKEND=s_client; it is resolved from the system PATH and is NOT bundled in this tarball."
 }

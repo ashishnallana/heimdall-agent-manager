@@ -1,0 +1,28 @@
+appId: works.earendil.heimdall
+productName: Heimdall
+directories:
+  output: desktop-dist
+  buildResources: build
+files:
+  - dist/**
+  - electron-dist/**
+  - package.json
+extraResources:
+  - from: release-assets/bridge
+    to: bridge
+    filter:
+      - '**/*'
+asar: true
+mac:
+  target: dmg
+  category: public.app-category.developer-tools
+  icon: src/ui/electron/icon.png
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+afterSign: scripts/release/notarize-electron.cjs
+dmg:
+  sign: true
+  title: Heimdall ${version}
+artifactName: Heimdall-${version}-${arch}.${ext}

@@ -6,12 +6,18 @@ contextBridge.exposeInMainWorld('odinApi', {
   toggleDebugServer: (enable: boolean) => ipcRenderer.invoke('odin-api:toggle-debug-server', enable),
   daemonUrl: process.env.HEIMDALL_DAEMON_URL || '',
   hubApiBaseUrl: process.env.HEIMDALL_HUB_API_URL || process.env.HEIMDALL_HUB_URL || '',
-  deviceAuth: {
-    getConfig: () => ipcRenderer.invoke('heimdall-device-auth:get-config'),
-    getStoredToken: () => ipcRenderer.invoke('heimdall-device-auth:get-token'),
-    storeToken: (token: string) => ipcRenderer.invoke('heimdall-device-auth:store-token', token),
-    clearToken: () => ipcRenderer.invoke('heimdall-device-auth:clear-token'),
-    getDeviceInfo: () => ipcRenderer.invoke('heimdall-device-auth:device-info'),
-    openExternal: (url: string) => ipcRenderer.invoke('heimdall-device-auth:open-external', url),
+  // REQ-OIDC-DESKTOP-1: the desktop UI uses the Hub's HttpOnly OIDC session
+  // cookie. No Hub user token/HUT storage or Authorization-header bridge is
+  // exposed to the renderer.
+  openExternal: (url: string) => ipcRenderer.invoke('heimdall-api:open-external', url),
+  bridgeManager: {
+    getStatus: () => ipcRenderer.invoke('heimdall-bridge:get-status'),
+    installBundled: () => ipcRenderer.invoke('heimdall-bridge:install-bundled'),
+    startEnrollment: () => ipcRenderer.invoke('heimdall-bridge:start-enrollment'),
+    onEnrollmentEvent: (callback: (event: any) => void) => {
+      const listener = (_event: any, payload: any) => callback(payload);
+      ipcRenderer.on('heimdall-bridge:enrollment-event', listener);
+      return () => ipcRenderer.removeListener('heimdall-bridge:enrollment-event', listener);
+    },
   },
 });

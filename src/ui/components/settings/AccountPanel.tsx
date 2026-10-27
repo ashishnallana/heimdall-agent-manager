@@ -49,7 +49,7 @@ export default function AccountPanel({ user }: { user: SettingsUser | null }) {
     const owner = user?.user_id;
     setBusy(true); setError('');
     // Open synchronously so browsers do not block the portal after an API roundtrip.
-    const desktop = (window as any).odinApi?.deviceAuth;
+    const desktop = (window as any).odinApi;
     const tab = desktop?.openExternal ? null : window.open('about:blank', '_blank');
     if (tab) tab.opener = null;
     try {
