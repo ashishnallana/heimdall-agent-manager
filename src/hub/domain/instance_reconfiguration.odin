@@ -40,6 +40,9 @@ Instance_Reconfiguration :: struct {
 	stop_command_id: string,
 	launch_command_id: string,
 	launch_epoch: string,
+	// True after a physical stop is confirmed, or after an offline source is
+	// durably fenced by transferring canonical ownership. A fenced source Bridge
+	// must terminate the superseded runtime when it next reports inventory.
 	source_stopped: bool,
 	destination_committed: bool,
 	failure_code: string,

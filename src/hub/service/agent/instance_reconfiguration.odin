@@ -107,7 +107,6 @@ begin_instance_reconfiguration :: proc(service: ^Agent_Service, auth: contracts.
 	source_bridge, source_ok, source_err := iface.bridge_get_bridge(service.bridges, inst.bridge_id)
 	if !source_ok do return {}, false, source_err
 	if source_bridge.owner_user_id != inst.owner_user_id do return {}, false, domain.domain_error(.Not_Found, "source bridge not found")
-	if source_bridge.status != .Online || !project_service.bridge_runtime_registry_has_live(service.bridge_runtime_registry, inst.bridge_id) do return {}, false, domain.domain_error(.Bridge_Offline, "source bridge must be online to confirm termination")
 	destination_bridge, bridge_ok, bridge_err := iface.bridge_get_bridge(service.bridges, input.bridge_id)
 	if !bridge_ok do return {}, false, bridge_err
 	if destination_bridge.owner_user_id != inst.owner_user_id do return {}, false, domain.domain_error(.Not_Found, "destination bridge not found")
@@ -127,8 +126,12 @@ begin_instance_reconfiguration :: proc(service: ^Agent_Service, auth: contracts.
 		if project.state != .Active do return {}, false, domain.domain_error(.Conflict, "destination project is archived")
 		path, path_ok, path_err := resolve_project_path_for_launch(service, inst.owner_user_id, next.project_id, next.bridge_id)
 		if !path_ok do return {}, false, path_err
-		// Project paths are optional context; managed instance directories own cwd.
-		if path != "" {
+		explicit_path, explicit_path_ok, explicit_path_err := iface.project_get_bridge_path(service.projects, next.project_id, next.bridge_id)
+		if !explicit_path_ok && explicit_path_err.code != .Not_Found do return {}, false, explicit_path_err
+		// REQ-PROJ-FALLBACK-1: only an explicit, non-empty per-Bridge override
+		// requires a remote preflight. With no override, the project default is
+		// optional launch context and managed instance directories still own cwd.
+		if explicit_path_ok && strings.trim_space(explicit_path.path) != "" {
 			validation, validation_ok, validation_err := project_service.bridge_command_validate_project_path(service.bridge_command_sink, project_service.Validate_Project_Path_Command{type = "validate_project_path", command_id = platform.generate_id(service.ids, "cmd_preflight_"), project_id = next.project_id, bridge_id = next.bridge_id, path = path, vcs_kind = project.vcs_kind, repo_url = project.repo_url})
 			if !validation_ok do return {}, false, validation_err
 			if !validation.ok do return {}, false, domain.domain_error(.Validation_Failed, "destination project path is not available on selected bridge")
@@ -168,6 +171,9 @@ begin_instance_reconfiguration :: proc(service: ^Agent_Service, auth: contracts.
 	if !saved do return {}, false, save_err
 	reconfiguration_notify(service, stored, "created", false)
 	defer domain.instance_reconfiguration_destroy(&stored)
+	// Check the runtime registry at the last possible point because project-path
+	// preflight may have waited while the source disconnected.
+	if !project_service.bridge_runtime_registry_has_live(service.bridge_runtime_registry, stored.source.bridge_id) do return reconfiguration_fence_source_and_launch(service, stored)
 	return reconfiguration_start_stop(service, stored)
 }
 
@@ -205,9 +211,26 @@ reconfiguration_start_stop :: proc(service: ^Agent_Service, op: domain.Instance_
 	command := project_service.Runtime_Command{bridge_id = op.source.bridge_id, command_id = op.stop_command_id, body_json = stop_command_json(op.stop_command_id, op.agent_instance_id, "configuration_change")}
 	if sent, _ := project_service.bridge_command_send_runtime(service.bridge_command_sink, command); !sent {
 		defer domain.instance_reconfiguration_destroy(&stopping)
+		// Close the disconnect race between the live-registry check and command
+		// dispatch. A genuinely disconnected source can be fenced safely; another
+		// dispatch failure on a live source still requires operator recovery.
+		if !project_service.bridge_runtime_registry_has_live(service.bridge_runtime_registry, op.source.bridge_id) do return reconfiguration_fence_source_and_launch(service, stopping)
 		return reconfiguration_advance(service, stopping, .Recovery_Required, false, false, "stop_unconfirmed", "Source stop could not be confirmed. No destination launch was requested.")
 	}
 	return stopping, true, {}
+}
+
+// REQ-RELOC-OFFLINE-1: a disconnected source cannot acknowledge a stop, but it
+// must not pin the durable instance forever. Persisting this fence before the
+// destination commit changes canonical ownership. The source Bridge's next
+// inventory heartbeat then receives the instance as superseded and terminates
+// any stale local runtime.
+reconfiguration_fence_source_and_launch :: proc(service: ^Agent_Service, op: domain.Instance_Reconfiguration) -> (domain.Instance_Reconfiguration, bool, domain.Domain_Error) {
+	fenced, fenced_ok, fence_err := reconfiguration_advance(service, op, .Source_Stopped, true, false)
+	if !fenced_ok do return {}, false, fence_err
+	defer domain.instance_reconfiguration_destroy(&fenced)
+	reconfiguration_launch_destination(service, fenced)
+	return iface.instance_reconfiguration_get(service.agents, op.owner_user_id, op.agent_instance_id, op.idempotency_key)
 }
 
 reconfiguration_launch_destination :: proc(service: ^Agent_Service, op: domain.Instance_Reconfiguration) {
@@ -395,10 +418,9 @@ retry_instance_reconfiguration :: proc(service: ^Agent_Service, auth: contracts.
 	if !valid do return {}, false, validation_err
 	if !op.source_stopped {
 		next := op; next.stop_command_id = platform.generate_id(service.ids, "cmd_reconfig_stop_retry_")
-		stopping, saved, save_err := reconfiguration_advance(service, next, .Stopping, false, false)
-		if !saved do return {}, false, save_err
-		_, _ = project_service.bridge_command_send_runtime(service.bridge_command_sink, project_service.Runtime_Command{bridge_id = op.source.bridge_id, command_id = stopping.stop_command_id, body_json = stop_command_json(stopping.stop_command_id, instance_id, "configuration_change")})
-		return stopping, true, {}
+		// Reuse the same disconnect-aware path as a new request. A source that
+		// vanished while the operation awaited recovery is fenced and superseded.
+		return reconfiguration_start_stop(service, next)
 	}
 	if !op.destination_committed {
 		stopped, saved, save_err := reconfiguration_advance(service, op, .Source_Stopped, true, false)

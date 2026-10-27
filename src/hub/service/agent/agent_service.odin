@@ -1638,8 +1638,11 @@ resolve_project_path_for_launch :: proc(service: ^Agent_Service, owner: domain.U
 	if !ok do return "", false, err
 	if project.owner_user_id != owner do return "", false, domain.domain_error(.Not_Found, "project not found")
 	if project.state != .Active do return "", false, domain.domain_error(.Conflict, "archived projects cannot be used for launches")
-	path, path_ok, _ := iface.project_get_bridge_path(service.projects, project.project_id, bridge_id)
-	if path_ok do return path.path, true, domain.Domain_Error{}
+	path, path_ok, path_err := iface.project_get_bridge_path(service.projects, project.project_id, bridge_id)
+	if path_ok && strings.trim_space(path.path) != "" do return path.path, true, domain.Domain_Error{}
+	if !path_ok && path_err.code != .Not_Found do return "", false, path_err
+	// REQ-PROJ-FALLBACK-1: an absent or empty per-Bridge override inherits the
+	// project's default path instead of preventing the launch.
 	return project.default_path, true, domain.Domain_Error{}
 }
 
