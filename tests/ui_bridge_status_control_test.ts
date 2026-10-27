@@ -297,9 +297,55 @@ test('REQ-EXT-URL-1: Bridge pairing pages open only on the configured Hub/UI ori
 
 test('REQ-EXT-URL-1: every shell.openExternal call in the main process uses a vetted URL', () => {
   const calls = [...mainSource.matchAll(/shell\.openExternal\(([^)]*)\)/g)].map((match) => match[1]);
-  assert.deepEqual(calls, ['href', 'trayPairing.url', 'trayPairing.url', 'href']);
+  // OIDC-window popups, main-window navigation, main-window popups, pairing (x2), IPC.
+  assert.deepEqual(calls, ['href', 'allowedExternalUrl(url', 'href', 'trayPairing.url', 'trayPairing.url', 'href']);
   assert.match(mainSource, /const href = allowedExternalUrl\(url\);\s*if \(href\) void shell\.openExternal\(href\);/);
   assert.match(mainSource, /const href = allowedExternalUrl\(url\);\s*if \(!href\) return \{ ok: false/);
   assert.match(mainSource, /allowedPairingUrl\(payload\.url, \[configuredHubApiBaseUrl\(\), configuredUiOrigin\(\)\]\)/);
+});
+
+const NAV = { uiOrigin: 'https://heimdall.brolabs.ai', idpOrigin: 'https://auth.brolabs.ai', inAuthRedirect: false };
+
+test('REQ-NAV-ROUTE-1: only sign-in and sign-out navigations open the OIDC window', () => {
+  const route = (url: string, extra: Partial<typeof NAV> = {}) => externalUrl.classifyNavigation(url, { ...NAV, ...extra });
+  assert.equal(route('https://heimdall.brolabs.ai/chains/c1'), 'allow');
+  assert.equal(route('https://heimdall.brolabs.ai/api/v1/auth/login?return_to=%2F'), 'allow');
+  // The /api/v1/auth/login 302 to the provider, and sign-out at the provider's end-session URL.
+  assert.equal(route('https://accounts.google.com/o/oauth2/auth?x=1', { inAuthRedirect: true }), 'auth');
+  assert.equal(route('https://auth.brolabs.ai/application/o/heimdall/end-session/'), 'auth');
+  // Paddle checkout and ordinary links go to the system browser instead.
+  assert.equal(route('https://pay.paddle.io/hsc_01?_ptxn=txn_1'), 'external');
+  assert.equal(route('https://github.com/tanmayv/heimdall-agent-manager'), 'external');
+  assert.equal(route('mailto:support@example.com'), 'external');
+  // Never opened anywhere.
+  for (const refused of ['file:///etc/passwd', 'http://example.com/', 'smb://evil.example/s', 'javascript:alert(1)', 'not a url']) {
+    assert.equal(route(refused), 'block', refused);
+    assert.equal(route(refused, { inAuthRedirect: true }), 'block', refused);
+  }
+  // Without a known provider origin, sign-in still works through the redirect chain.
+  assert.equal(route('https://auth.brolabs.ai/flow', { idpOrigin: '' }), 'external');
+  assert.equal(route('https://auth.brolabs.ai/flow', { idpOrigin: '', inAuthRedirect: true }), 'auth');
+});
+
+test('REQ-NAV-ROUTE-1: auth redirect chains start only at the Hub sign-in/sign-out routes', () => {
+  assert.equal(externalUrl.isAuthStartUrl('https://heimdall.brolabs.ai/api/v1/auth/login?return_to=%2F', NAV.uiOrigin), true);
+  assert.equal(externalUrl.isAuthStartUrl('https://heimdall.brolabs.ai/api/v1/auth/logout', NAV.uiOrigin), true);
+  assert.equal(externalUrl.isAuthStartUrl('https://heimdall.brolabs.ai/settings', NAV.uiOrigin), false);
+  assert.equal(externalUrl.isAuthStartUrl('https://evil.example/api/v1/auth/login', NAV.uiOrigin), false);
+  assert.equal(externalUrl.idpOriginFromAuthConfig({ data: { logout_url: 'https://auth.brolabs.ai/application/o/heimdall/end-session/' } }), 'https://auth.brolabs.ai');
+  assert.equal(externalUrl.idpOriginFromAuthConfig({ data: { logout_url: '' } }), '');
+  assert.equal(externalUrl.idpOriginFromAuthConfig({ data: { logout_url: 'http://auth.example/end' } }), '');
+});
+
+test('REQ-NAV-ROUTE-2: the OIDC window stays on https: or the Hub UI and opens no popups', () => {
+  assert.equal(externalUrl.oidcWindowNavigationAllowed('https://accounts.google.com/signin', NAV.uiOrigin), true);
+  assert.equal(externalUrl.oidcWindowNavigationAllowed('http://127.0.0.1:5173/', 'http://127.0.0.1:5173'), true);
+  for (const refused of ['http://evil.example/', 'file:///etc/passwd', 'javascript:alert(1)']) {
+    assert.equal(externalUrl.oidcWindowNavigationAllowed(refused, NAV.uiOrigin), false, refused);
+  }
+  assert.match(mainSource, /loginWindow\.webContents\.setWindowOpenHandler\([\s\S]*?return \{ action: 'deny' \};/);
+  assert.match(mainSource, /loginWindow\.webContents\.on\('will-navigate', guardOidcNavigation\)/);
+  assert.match(mainSource, /loginWindow\.webContents\.on\('will-redirect', guardOidcNavigation\)/);
+  assert.match(mainSource, /if \(route === 'auth'\) openOidcWindow\(url, win\);\s*else if \(route === 'external'\) void shell\.openExternal\(allowedExternalUrl\(url\)\);/);
 });
 
