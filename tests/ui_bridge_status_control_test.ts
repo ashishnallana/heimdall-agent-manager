@@ -18,8 +18,12 @@ const statusSource = fs.readFileSync(path.join(ROOT, 'src/ui/components/shell/Si
 const preloadSource = fs.readFileSync(path.join(ROOT, 'src/ui/electron/preload.cts'), 'utf8');
 const mainSource = fs.readFileSync(path.join(ROOT, 'src/ui/electron/main.cts'), 'utf8');
 const managerSource = fs.readFileSync(path.join(ROOT, 'src/ui/electron/bridgeManager.cts'), 'utf8');
+const updaterSource = fs.readFileSync(path.join(ROOT, 'src/ui/electron/desktopUpdater.cts'), 'utf8');
 const authGateSource = fs.readFileSync(path.join(ROOT, 'src/ui/components/ElectronDeviceAuthGate.tsx'), 'utf8');
 const appShellSource = fs.readFileSync(path.join(ROOT, 'src/ui/components/shell/AppShell.tsx'), 'utf8');
+const builderSource = fs.readFileSync(path.join(ROOT, 'electron-builder.yml'), 'utf8');
+const windowsInstallerSource = fs.readFileSync(path.join(ROOT, 'scripts/install.ps1'), 'utf8');
+const releaseWorkflowSource = fs.readFileSync(path.join(ROOT, '.github/workflows/release-local-binaries.yml'), 'utf8');
 
 const base = {
   supported: true, packaged: true, installed: true, enrolled: true,
@@ -208,6 +212,41 @@ test('REQ-MAC-TRAY-2: enrollment reports the actionable subprocess failure once'
   }]);
 });
 
+test('REQ-WIN-DESKTOP-1: Windows resources and per-user Bridge paths are architecture-safe', () => {
+  const root = path.join('C:', 'Program Files', 'Heimdall', 'resources', 'bridge');
+  assert.deepEqual(bridgeManager.resources('win32', 'arm64', root), {
+    installScript: path.join(root, 'install.ps1'),
+    bundle: path.join(root, 'heimdall-local-windows-amd64.zip'),
+    checksums: path.join(root, 'SHA256SUMS'),
+    metadata: path.join(root, 'METADATA.json'),
+  });
+  assert.deepEqual(bridgeManager.desktopPaths('win32', {
+    APPDATA: path.join('C:', 'Users', 'alice', 'AppData', 'Roaming'),
+    LOCALAPPDATA: path.join('C:', 'Users', 'alice', 'AppData', 'Local'),
+  }, path.join('C:', 'Users', 'alice')), {
+    stateRoot: path.join('C:', 'Users', 'alice', 'AppData', 'Roaming', 'heimdall', 'bridges'),
+    dataRoot: path.join('C:', 'Users', 'alice', 'AppData', 'Local', 'heimdall', 'bridges'),
+    binaryName: 'ham-bridge.exe',
+    enrollScriptName: 'enroll.ps1',
+  });
+});
+
+test('REQ-WIN-DESKTOP-2: Windows desktop invokes the verified bundle and headless enrollment contracts', () => {
+  const files = bridgeManager.resources('win32', 'x64', path.join('C:', 'resources', 'bridge'));
+  const install = bridgeManager.installInvocation('win32', files, 'https://hub.example', '0.5.17');
+  assert.match(install.command, /powershell\.exe$/i);
+  assert.deepEqual(install.args.slice(-11), [
+    '-File', files.installScript, '-Hub', 'https://hub.example', '-Version', 'v0.5.17',
+    '-Bundle', files.bundle, '-ChecksumFile', files.checksums, '-NonInteractive',
+  ]);
+  const enroll = bridgeManager.enrollmentInvocation('win32', path.join('C:', 'state', 'enroll.ps1'));
+  assert.match(enroll.command, /powershell\.exe$/i);
+  assert.deepEqual(enroll.args.slice(-3), ['-File', path.join('C:', 'state', 'enroll.ps1'), '-Headless']);
+  assert.match(windowsInstallerSource, /\[string\]\$Bundle/);
+  assert.match(windowsInstallerSource, /\[string\]\$ChecksumFile/);
+  assert.match(windowsInstallerSource, /Test-Sha256 \$sums \$O\.Bundle \$archive/);
+});
+
 test('REQ-BTOP-1: desktop service states have explicit user-facing labels', () => {
   assert.deepEqual(desktopBridgeStatusLabel(base), { label: 'Bridge online', tone: 'success' });
   assert.deepEqual(desktopBridgeStatusLabel({ ...base, enrolled: false }), { label: 'Enrollment required', tone: 'warning' });
@@ -289,18 +328,48 @@ test('REQ-MAC-TRAY-2: tray receives display-only OIDC identity and never an auth
 });
 
 test('REQ-MAC-TRAY-1: closing the macOS window hides it and packaged installs launch hidden at login', () => {
-  assert.match(mainSource, /win\.on\('close',[\s\S]*process\.platform !== 'darwin' \|\| isQuitting[\s\S]*event\.preventDefault\(\)[\s\S]*win\.hide\(\)/);
+  assert.match(mainSource, /win\.on\('close',[\s\S]*!supportsStatusTray\(\) \|\| isQuitting[\s\S]*event\.preventDefault\(\)[\s\S]*win\.hide\(\)/);
   assert.match(mainSource, /app\.dock\?\.hide\(\)/);
-  assert.match(mainSource, /app\.setLoginItemSettings\(\{[\s\S]*openAtLogin: enabled,[\s\S]*openAsHidden: true/);
+  assert.match(mainSource, /const loginSettings =[\s\S]*openAtLogin: enabled,[\s\S]*openAsHidden: true/);
+  assert.match(mainSource, /app\.setLoginItemSettings\(loginSettings\)/);
   assert.match(mainSource, /function ensureDefaultLaunchAtLogin\(\)/);
   assert.match(mainSource, /LOGIN_ITEM_PREFERENCE_MARKER/);
-  assert.match(mainSource, /settings\.status === 'requires-approval'/);
+  assert.match(mainSource, /recordedSettings\.status === 'requires-approval'/);
   assert.match(mainSource, /label: 'Launch at Login'/);
   assert.match(mainSource, /function wasOpenedAtLogin\(\)/);
   assert.match(mainSource, /settings\.wasOpenedAtLogin/);
   assert.match(mainSource, /if \(!backgroundLaunch\) createWindow\(\)/);
   assert.match(mainSource, /showMainWindow/);
   assert.match(mainSource, /isQuitting = true; app\.quit\(\)/);
+});
+
+test('REQ-WIN-TRAY-1: Windows keeps a tray controller with Bridge, user, and update actions', () => {
+  assert.match(mainSource, /process\.platform === 'darwin' \|\| process\.platform === 'win32'/);
+  assert.match(mainSource, /process\.platform === 'win32' \? 16 : 18/);
+  assert.match(mainSource, /statusTray\.on\('double-click', showMainWindow\)/);
+  assert.match(mainSource, /process\.argv\.includes\('--background'\)/);
+  assert.match(mainSource, /args: \['--background'\]/);
+  assert.match(mainSource, /Check for Heimdall Updates/);
+  assert.match(mainSource, /Restart to Install Heimdall/);
+  assert.match(mainSource, /Check for Bridge Updates/);
+  assert.match(mainSource, /Restart Bridge/);
+  assert.match(mainSource, /Re-enroll Bridge/);
+  assert.match(mainSource, /Signed in as/);
+  assert.match(builderSource, /win:\s+[\s\S]*target: nsis/);
+  assert.match(builderSource, /nsis:\s+[\s\S]*oneClick: false[\s\S]*perMachine: false/);
+});
+
+test('REQ-WIN-UPDATE-1: signed Windows releases publish updater metadata and install from the tray', () => {
+  assert.match(updaterSource, /require\('electron-updater'\)/);
+  assert.match(updaterSource, /autoUpdater\.allowPrerelease = false/);
+  assert.match(updaterSource, /autoUpdater\.checkForUpdates\(\)/);
+  assert.match(updaterSource, /autoUpdater\.quitAndInstall\(false, true\)/);
+  assert.match(mainSource, /desktopUpdater\.start\(app\.isPackaged && process\.platform === 'win32'/);
+  assert.match(builderSource, /publish:\s+[\s\S]*provider: github[\s\S]*repo: heimdall-agent-manager/);
+  assert.match(builderSource, /verifyUpdateCodeSignature: true/);
+  assert.match(releaseWorkflowSource, /WINDOWS_CODE_SIGNING_PFX_BASE64/);
+  assert.match(releaseWorkflowSource, /signtool sign \/fd SHA256 \/tr http:\/\/timestamp\.digicert\.com/);
+  assert.match(releaseWorkflowSource, /desktop-dist\/latest\.yml/);
 });
 
 test('REQ-ELECTRON-NO-REMOTE-DEBUG-1: the Electron app has no debug-control server at all', () => {

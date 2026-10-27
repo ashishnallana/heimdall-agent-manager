@@ -92,6 +92,21 @@ Bridge identity. `Launch at Login` is enabled on first install and can be disabl
 same menu. Quitting the desktop app removes the menu item but does not stop the separately
 managed Bridge LaunchAgent.
 
+## Windows desktop app
+
+Download the signed `Heimdall-<version>-x64.exe` installer from GitHub Releases and
+follow the setup wizard. The per-user install does not require administrator access. Sign
+in with the Hub's OIDC provider; Heimdall then stays available in the Windows notification
+area when its main window is closed. Windows on Arm currently runs the x64 build through
+the operating system's compatibility layer.
+
+The tray control shows the local Bridge state, installed version, Hub, and signed-in user.
+It can install the signed Bridge bundled with the desktop app, start enrollment and
+display/copy the browser pairing code, check for Bridge or Heimdall updates, restart the
+Bridge, or re-enroll the same durable Bridge identity. `Launch at Login` is enabled on
+first install and can be disabled from the tray. Quitting the desktop app removes the tray
+icon but does not stop the separately managed Bridge Scheduled Task.
+
 ## Keyboard shortcuts
 
 Heimdall's unmodified-key shortcuts use a Vim-style sequence grammar. Press `?` to open

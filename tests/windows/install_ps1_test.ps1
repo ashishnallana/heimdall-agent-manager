@@ -147,6 +147,12 @@ try {
   Check ($r.Code -eq 1 -and $r.Out -match 'Invalid Hub URL') 'a Hub URL path is rejected' $r.Out
   $r = Invoke-Installer @('-DryRun') @{ HEIMDALL_NON_INTERACTIVE = '1' }
   Check ($r.Code -eq 1 -and $r.Out -match '-Hub is required in non-interactive mode') 'non-interactive without -Hub fails' $r.Out
+  $r = Invoke-Installer @('-Hub', 'https://hub.example.com', '-DryRun', '-Bundle', 'bridge.zip')
+  Check ($r.Code -eq 1 -and $r.Out -match '-Bundle and -ChecksumFile must be supplied together') 'desktop bundle requires its checksum file' $r.Out
+  $r = Invoke-Installer @('-Hub', 'https://hub.example.com', '-DryRun', '-Bundle', 'bridge.zip', '-ChecksumFile', 'SHA256SUMS', '-FromDir', $fake)
+  Check ($r.Code -eq 1 -and $r.Out -match '-FromDir and -Bundle are mutually exclusive') 'desktop bundle and local directory modes are exclusive' $r.Out
+  $r = Invoke-Installer @('-Hub', 'https://hub.example.com', '-DryRun', '-Bundle', 'bridge.zip', '-ChecksumFile', 'SHA256SUMS')
+  Check ($r.Code -eq 0 -and $r.Out -match 'Install the packaged Bridge bundle bridge.zip after verifying SHA256SUMS') 'desktop bundle dry-run uses the verified local package' $r.Out
   $r = Invoke-Installer @('-Hub', 'HTTPS://Hub.Example.COM:443/', '-DryRun')
   Check ($r.Code -eq 0 -and $r.Out -match 'Service: heimdall-bridge-hub-example-com ' -and $r.Out -match '\[PLAN\] Download heimdall-local-windows-amd64-LATEST\.zip') '-DryRun canonicalizes the Hub and plans the release download' $r.Out
   $r = Invoke-Installer @('-Hub', 'http://[::1]:8080', '-DryRun', '-Version', 'v1.2.3')
@@ -289,6 +295,16 @@ try {
   Check (@(Get-Calls $fakeLog 'ham-bridge' | Where-Object { $_[1] -eq 'enroll' }).Count -eq 1) '-KeepEnrollment does not enroll again'
   $r = Invoke-Installer @('-Hub', $hub, '-NonInteractive') $relEnv
   Check ($r.Code -eq 0 -and $r.Out -match 'Using cached heimdall-local-windows-amd64-v9\.9\.9\.zip' -and $r.Out -match 'Existing enrollment preserved') 'second install reuses the cached bundle; -NonInteractive keeps enrollment' $r.Out
+
+  $packagedSums = Join-Path $root 'packaged-SHA256SUMS'
+  $packagedHash = (Get-FileHash -Algorithm SHA256 $bundle).Hash.ToLowerInvariant()
+  Set-Content -Path $packagedSums -Encoding ASCII -Value "$packagedHash  $([IO.Path]::GetFileName($bundle))"
+  $r = Invoke-Installer @('-Hub', $hub, '-NonInteractive', '-Version', $tag, '-Bundle', $bundle, '-ChecksumFile', $packagedSums)
+  Check ($r.Code -eq 0 -and $r.Out -match 'Packaged Bridge checksum and bundle verified' -and $r.Out -match 'Existing enrollment preserved') 'desktop packaged bundle is verified, unpacked, and installed without a download' $r.Out
+  Add-Content -LiteralPath $bundle -Value 'tampered'
+  $r = Invoke-Installer @('-Hub', $hub, '-NonInteractive', '-Version', $tag, '-Bundle', $bundle, '-ChecksumFile', $packagedSums)
+  Check ($r.Code -eq 1 -and $r.Out -match 'SHA-256 verification failed; nothing installed') 'tampered desktop packaged bundle is refused' $r.Out
+  Copy-Item -LiteralPath (Join-Path $mirror 'rel\download\v9.9.9\heimdall-local-windows-amd64-v9.9.9.zip') -Destination $bundle -Force
 
   $mz = Join-Path $mirror 'rel\download\v9.9.9\heimdall-local-windows-amd64-v9.9.9.zip'
   [IO.File]::AppendAllText($mz, 'tampered')
