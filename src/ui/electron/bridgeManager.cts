@@ -107,6 +107,18 @@ function bridgeBinary(serviceName: string): string {
   return path.join(os.homedir(), '.local', 'share', 'heimdall', 'bridges', serviceName, 'bin', 'ham-bridge');
 }
 
+// REQ-ENROLL-LOG-1: the full enroll.sh output of the latest run, so a failed
+// enrollment can be diagnosed (the app otherwise only keeps its pairing code).
+function enrollmentLogPath(serviceName: string): string {
+  return path.join(os.homedir(), '.local', 'share', 'heimdall', 'bridges', serviceName, 'logs', 'enroll.log');
+}
+
+// stripTerminalCodes removes ANSI colour/cursor sequences from enroll output
+// before it is shown in a failure message.
+function stripTerminalCodes(output: string): string {
+  return output.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '');
+}
+
 async function probeService(serviceName: string, binary: string): Promise<ServiceProbe> {
   const [launchd, version] = await Promise.all([
     execFileResult('/bin/launchctl', ['print', `gui/${process.getuid()}/${serviceName}`]),
@@ -301,35 +313,51 @@ function startEnrollment(
   enrollmentProcess = proc;
   enrollmentRecovery = options.restartOnFailure ? { hubUrl } : null;
   enrollmentStopping = false;
+  const logPath = enrollmentLogPath(state.serviceName);
+  let log: any = null;
+  try {
+    fs.mkdirSync(path.dirname(logPath), { recursive: true });
+    log = fs.createWriteStream(logPath, { flags: 'w', mode: 0o600 });
+    log.on('error', () => { log = null; });
+    log.write(`# Heimdall Bridge enrollment ${new Date().toISOString()} (${hubUrl})\n`);
+  } catch (_err) { log = null; }
   let buffer = '';
   let pairingSent = false;
   let finished = false;
   const onData = (chunk: any) => {
     const message = String(chunk || '');
+    log?.write(message);
     buffer = (buffer + message).slice(-16_000);
     emit({ type: 'output', message });
     const pairing = extractEnrollmentPairing(buffer);
     if (!pairingSent && pairing) { pairingSent = true; emit({ type: 'pairing', ...pairing }); }
   };
-  const finishFailure = (message: string) => {
+  // The message is the actionable failure (the last output lines, commandError)
+  // plus, REQ-ENROLL-LOG-1, where the full log is. `summary` is its most
+  // specific single line, for the one-line tray item.
+  const finishFailure = (failure: string, exitCode: number | null) => {
     if (finished) return;
     finished = true;
     if (enrollmentProcess === proc) enrollmentProcess = null;
+    log?.end(`\n# exit status ${exitCode}\n`);
     const recovery = enrollmentRecovery;
     enrollmentRecovery = null;
+    const summary = failure.split('\n').pop() || failure;
+    const logLine = `\nFull log: ${logPath}`;
     // stopEnrollment() already restarted the Bridge synchronously.
-    if (!recovery || enrollmentStopping) { emit({ type: 'error', message }); return; }
-    void restart(recovery.hubUrl).then((result) => emit({
-      type: 'error',
-      message: result.ok
-        ? `${message} The Bridge was restarted with its existing enrollment.`
-        : `${message} The Bridge could not be restarted: ${result.error}`,
-    }));
+    if (!recovery || enrollmentStopping) { emit({ type: 'error', message: failure + logLine, summary, logPath }); return; }
+    void restart(recovery.hubUrl).then((result) => {
+      const outcome = result.ok
+        ? 'The Bridge was restarted with its existing enrollment.'
+        : `The Bridge could not be restarted: ${result.error}`;
+      emit({ type: 'error', message: `${failure}\n${outcome}${logLine}`, summary: `${summary} ${outcome}`, logPath });
+    });
   };
   const finishSuccess = () => {
     if (finished) return;
     finished = true;
     if (enrollmentProcess === proc) enrollmentProcess = null;
+    log?.end('\n# exit status 0\n');
     enrollmentRecovery = null;
     const completedBridgeId = discoverBridgeId(state.stateDir)
       || buffer.match(/(?:bridge_id=|(?:Re-enrolled existing|Registered new) bridge\s+)(brg_[A-Za-z0-9_-]{1,60})/)?.[1]
@@ -338,11 +366,11 @@ function startEnrollment(
     emit({ type: 'complete', message: 'Bridge enrollment complete.' });
   };
   proc.stdout.on('data', onData); proc.stderr.on('data', onData);
-  proc.on('error', (error: Error) => { finishFailure(error.message); });
+  proc.on('error', (error: Error) => { finishFailure(error.message, null); });
   proc.on('close', (code: number) => {
     if (finished) return;
     if (code === 0) finishSuccess();
-    else finishFailure(commandError(buffer, `Enrollment exited with status ${code}.`));
+    else finishFailure(commandError(stripTerminalCodes(buffer), `Enrollment exited with status ${code}.`), code);
   });
   return { ok: true };
 }

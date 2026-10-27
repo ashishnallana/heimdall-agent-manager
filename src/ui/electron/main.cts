@@ -70,6 +70,8 @@ let isQuitting = false;
 let authenticatedUserLabel = '';
 let trayOperationMessage = '';
 let trayPairing: { code: string; url: string } | null = null;
+// REQ-ENROLL-LOG-1: the last failed enrollment's log, offered in the tray menu.
+let trayEnrollmentLog = '';
 // Identity provider origin from GET /api/v1/auth/config, used to route sign-out.
 let idpOrigin = '';
 const LOGIN_ITEM_PREFERENCE_MARKER = 'login-item-preference-configured';
@@ -318,10 +320,13 @@ function handleEnrollmentEvent(rawPayload: any) {
     void shell.openExternal(trayPairing.url);
   } else if (payload?.type === 'complete') {
     trayPairing = null;
+    trayEnrollmentLog = '';
     trayOperationMessage = payload?.message || 'Bridge enrollment complete.';
   } else if (payload?.type === 'error') {
     trayPairing = null;
-    trayOperationMessage = payload?.message || 'Bridge enrollment failed.';
+    // A menu item is one line: the summary only (the popover shows the rest).
+    trayOperationMessage = String(payload?.summary || payload?.message || 'Bridge enrollment failed.').split('\n')[0];
+    trayEnrollmentLog = payload?.logPath ? String(payload.logPath) : '';
   }
   if (payload?.type === 'complete' || payload?.type === 'error') void refreshBridgeStatus();
   else refreshTrayStatus();
@@ -404,6 +409,7 @@ function refreshTrayStatus() {
     { label: String(status.hubUrl || configuredHubApiBaseUrl()), enabled: false },
     ...(authenticatedUserLabel ? [{ label: `Signed in as ${authenticatedUserLabel}`, enabled: false }] : []),
     ...(trayOperationMessage ? [{ label: trayOperationMessage, enabled: false }] : []),
+    ...(trayEnrollmentLog ? [{ label: 'Show Enrollment Log', click: () => { shell.showItemInFolder(trayEnrollmentLog); } }] : []),
     ...(trayPairing ? [
       { label: `Pairing code: ${trayPairing.code}`, enabled: false },
       { label: 'Copy Pairing Code', click: () => clipboard.writeText(trayPairing?.code || '') },

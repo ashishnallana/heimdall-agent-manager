@@ -208,8 +208,12 @@ test('REQ-MAC-TRAY-2: enrollment reports the actionable subprocess failure once'
     });
   });
 
+  const logPath = path.join(home, '.local', 'share', 'heimdall', 'bridges', 'heimdall-bridge-hub-example', 'logs', 'enroll.log');
   assert.deepEqual(events.filter((event) => event.type === 'error'), [{
-    type: 'error', message: 'bridge enroll FAILED: retained identity requires explicit reuse',
+    type: 'error',
+    message: `bridge enroll FAILED: retained identity requires explicit reuse\nFull log: ${logPath}`,
+    summary: 'bridge enroll FAILED: retained identity requires explicit reuse',
+    logPath,
   }]);
 });
 
@@ -327,7 +331,7 @@ test('REQ-REENROLL-RECOVER-1: a failed re-enrollment restarts the Bridge it boot
   });
   const event = await done;
 
-  assert.match(event.message, /Enrollment exited with status 1\. The Bridge was restarted with its existing enrollment\./);
+  assert.match(event.message, /^Enrollment exited with status 1\.\nThe Bridge was restarted with its existing enrollment\.\nFull log: /);
   assert.deepEqual(calls.slice(1).map((call) => [call.command, call.args[0], call.args[1]]), [
     ['/bin/launchctl', 'print', `gui/${process.getuid()}/heimdall-bridge-hub-example`],
     ['/bin/launchctl', 'kickstart', '-k'],
@@ -342,7 +346,7 @@ test('REQ-REENROLL-RECOVER-1: a failed first enrollment does not restart a token
   });
   const event = await done;
 
-  assert.equal(event.message, 'Enrollment exited with status 1.');
+  assert.match(event.message, /^Enrollment exited with status 1\.\nFull log: .*\/logs\/enroll\.log$/);
   assert.equal(calls.length, 1);
 });
 
@@ -522,5 +526,46 @@ test('REQ-BTOP-1 (#8): the popover never labels the bundled version as installed
   assert.match(statusSource, /\? \(desktop\.installed \? desktop\.installedVersion : ''\)/);
   assert.doesNotMatch(statusSource, /desktop\.installedVersion \|\| desktop\.bundledVersion/);
   assert.match(statusSource, /Packaged version v\{desktop\.bundledVersion\}/);
+});
+
+test('REQ-ENROLL-LOG-1: enrollment output is kept in a log and a failure names it', async (t) => {
+  const { home } = enrolledBridgeHome(t);
+  t.mock.method(childProcess, 'spawn', (_command: string, _args: string[]) => {
+    const proc: any = new EventEmitter();
+    proc.stdout = new EventEmitter();
+    proc.stderr = new EventEmitter();
+    proc.pid = 5151;
+    proc.kill = () => true;
+    setImmediate(() => {
+      proc.stdout.emit('data', Buffer.from('Open https://hub.example/api/v1/device/add\nand type QESF-BO6G-XSJX-4E\n'));
+      proc.stderr.emit('data', Buffer.from('\x1b[31m  waiting up to 45s for encrypted vault delivery…\x1b[0m\nbridge enroll FAILED: the Hub WebSocket did not connect\n'));
+      proc.emit('close', 4);
+    });
+    return proc;
+  });
+  const done = new Promise<any>((resolve) => {
+    bridgeManager.startEnrollment('https://hub.example', (event: any) => { if (event.type === 'error') resolve(event); });
+  });
+  const event = await done;
+
+  const logPath = path.join(home, '.local', 'share', 'heimdall', 'bridges', 'heimdall-bridge-hub-example', 'logs', 'enroll.log');
+  assert.equal(event.logPath, logPath);
+  assert.equal(event.summary, 'bridge enroll FAILED: the Hub WebSocket did not connect');
+  assert.match(event.message, /bridge enroll FAILED: the Hub WebSocket did not connect/);
+  assert.doesNotMatch(event.message, /\x1b\[/, 'terminal colour codes are stripped');
+  assert.ok(event.message.endsWith(`Full log: ${logPath}`));
+  // The stream flushes asynchronously after close.
+  for (let i = 0; i < 50 && !(fs.existsSync(logPath) && fs.readFileSync(logPath, 'utf8').includes('# exit status 4')); i++) await new Promise((r) => setTimeout(r, 10));
+  const log = fs.readFileSync(logPath, 'utf8');
+  assert.match(log, /^# Heimdall Bridge enrollment .* \(https:\/\/hub\.example\)\n/);
+  assert.match(log, /QESF-BO6G-XSJX-4E/);
+  assert.match(log, /bridge enroll FAILED/);
+  assert.match(log, /# exit status 4\n$/);
+  assert.equal(fs.statSync(logPath).mode & 0o777, 0o600);
+});
+
+test('REQ-ENROLL-LOG-1: the tray summarizes a failure on one line and offers the log', () => {
+  assert.match(mainSource, /trayOperationMessage = String\(payload\?\.summary \|\| payload\?\.message \|\| 'Bridge enrollment failed\.'\)\.split\('\\n'\)\[0\];/);
+  assert.match(mainSource, /label: 'Show Enrollment Log', click: \(\) => \{ shell\.showItemInFolder\(trayEnrollmentLog\); \}/);
 });
 
