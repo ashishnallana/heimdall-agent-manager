@@ -414,6 +414,11 @@ test('REQ-MAC-TRAY-1: macOS keeps a status tray alive independently of the Bridg
   assert.match(mainSource, /Bridge online/);
   assert.match(mainSource, /Bridge offline/);
   assert.match(mainSource, /Bridge v\$\{version\}/);
+  // An installed Bridge whose --version probe has not succeeded never falls
+  // back to the version bundled with the app.
+  assert.match(mainSource, /status\.installed \? status\.installedVersion : status\.bundledVersion/);
+  assert.match(mainSource, /status\.installed \? 'Bridge version unknown' : ''/);
+  assert.doesNotMatch(mainSource, /status\.installedVersion \|\| status\.bundledVersion/);
   assert.match(mainSource, /Check for Bridge Updates/);
   assert.match(mainSource, /webContents\.send\('heimdall-bridge:check-updates'\)/);
   assert.match(preloadSource, /onCheckUpdatesRequested/);

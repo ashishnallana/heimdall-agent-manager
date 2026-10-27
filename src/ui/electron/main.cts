@@ -419,14 +419,17 @@ function refreshTrayStatus() {
     status = { installed: false, enrolled: false, serviceState: 'not-installed', hubUrl: configuredHubApiBaseUrl() };
   }
   const presentation = trayStatus(status);
-  const version = String(status.installedVersion || status.bundledVersion || '').replace(/^v/, '');
+  // An installed Bridge reports only its probed version: the version bundled
+  // with this (possibly older) app says nothing about a Bridge updated since.
+  const version = String((status.installed ? status.installedVersion : status.bundledVersion) || '').replace(/^v/, '');
+  const bridgeVersionLabel = version ? `Bridge v${version}` : (status.installed ? 'Bridge version unknown' : '');
   if (process.platform === 'darwin') statusTray.setTitle(` ${presentation.symbol}`);
-  statusTray.setToolTip(`${APP_DISPLAY_NAME} — ${presentation.label}${version ? ` (Bridge v${version})` : ''}`);
+  statusTray.setToolTip(`${APP_DISPLAY_NAME} — ${presentation.label}${bridgeVersionLabel ? ` (${bridgeVersionLabel})` : ''}`);
   const updateBusy = desktopUpdateState.phase === 'checking' || desktopUpdateState.phase === 'downloading';
   const updateReady = desktopUpdateState.phase === 'downloaded';
   statusTray.setContextMenu(Menu.buildFromTemplate([
     { label: presentation.label, enabled: false },
-    ...(version ? [{ label: `Bridge v${version}`, enabled: false }] : []),
+    ...(bridgeVersionLabel ? [{ label: bridgeVersionLabel, enabled: false }] : []),
     { label: `${APP_DISPLAY_NAME} v${app.getVersion()}`, enabled: false },
     { label: String(status.hubUrl || configuredHubApiBaseUrl()), enabled: false },
     ...(authenticatedUserLabel ? [{ label: `Signed in as ${authenticatedUserLabel}`, enabled: false }] : []),
