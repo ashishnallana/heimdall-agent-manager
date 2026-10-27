@@ -13,6 +13,8 @@ Bridge_Provider_Setting_List_Proc :: proc(ctx: rawptr, bridge_id: string) -> ([d
 
 Provider_Repository :: struct {
 	ctx:      rawptr,
+	upsert_models: proc(ctx: rawptr, value: domain.Bridge_Provider_Models) -> domain.Domain_Error,
+	list_models: proc(ctx: rawptr, bridge_id: string) -> ([dynamic]domain.Bridge_Provider_Models, domain.Domain_Error),
 	create_extension_command: Provider_Extension_Command_Create_Proc,
 	save_extension_command: Provider_Extension_Command_Save_Proc,
 	list_extension_commands: Provider_Extension_Command_List_Proc,
@@ -111,4 +113,15 @@ provider_extension_command_list :: proc(
 ) {
 	if repo == nil || repo.list_extension_commands == nil do return nil, domain.domain_error(.Internal_Error, "extension command repository is not configured")
 	return repo.list_extension_commands(repo.ctx, bridge_id)
+}
+
+bridge_provider_models_list :: proc(repo: ^Provider_Repository, bridge_id: string) -> ([dynamic]domain.Bridge_Provider_Models, domain.Domain_Error) {
+	if repo == nil do return nil, domain.domain_error(.Internal_Error, "provider repository is not configured")
+	// Optional for old repository implementations; no observation means static fallback.
+	if repo.list_models == nil do return nil, {}
+	return repo.list_models(repo.ctx, bridge_id)
+}
+bridge_provider_models_upsert :: proc(repo: ^Provider_Repository, value: domain.Bridge_Provider_Models) -> domain.Domain_Error {
+	if repo == nil || repo.upsert_models == nil do return domain.domain_error(.Internal_Error, "model repository is not configured")
+	return repo.upsert_models(repo.ctx, value)
 }

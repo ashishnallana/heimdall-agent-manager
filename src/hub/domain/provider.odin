@@ -6,6 +6,7 @@ Provider_Model :: struct {
 	label:    string,
 	state:    string,
 	rank:     int,
+	resolved_model: string,
 }
 
 Provider_Catalog_Entry :: struct {
@@ -66,6 +67,7 @@ provider_model_destroy :: proc(model: Provider_Model) {
 	delete(model.model_id)
 	delete(model.label)
 	delete(model.state)
+	delete(model.resolved_model)
 }
 
 provider_catalog_entry_destroy :: proc(entry: Provider_Catalog_Entry) {
@@ -136,5 +138,21 @@ provider_extension_command_destroy :: proc(value: Provider_Extension_Command) {
 }
 provider_extension_commands_destroy :: proc(values: [dynamic]Provider_Extension_Command) {
 	for value in values do provider_extension_command_destroy(value)
+	delete(values)
+}
+
+// Independent of binary/extension detection; only explicit model refresh writes it.
+Bridge_Provider_Models :: struct {
+	bridge_id, provider, binary_path, version_text: string,
+	has_snapshot: bool,
+	models_json, models_source, models_checked_at, models_attempted_at, models_state: string,
+}
+bridge_provider_models_destroy :: proc(v: Bridge_Provider_Models) {
+	delete(v.bridge_id); delete(v.provider); delete(v.binary_path); delete(v.version_text)
+	delete(v.models_json); delete(v.models_source); delete(v.models_checked_at)
+	delete(v.models_attempted_at); delete(v.models_state)
+}
+bridge_provider_models_list_destroy :: proc(values: [dynamic]Bridge_Provider_Models) {
+	for v in values do bridge_provider_models_destroy(v)
 	delete(values)
 }

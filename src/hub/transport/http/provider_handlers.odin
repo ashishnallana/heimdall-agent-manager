@@ -132,6 +132,13 @@ write_bridge_provider_view_json :: proc(
 		b,
 		",\"enabled\":",
 	); strings.write_string(b, "true" if view.enabled else "false")
+	strings.write_string(b, ",\"models_source\":\""); write_handler_json_string(b,view.models_source)
+	strings.write_string(b, "\",\"models_state\":\""); write_handler_json_string(b,view.models_state)
+	strings.write_string(b, "\",\"models_checked_at\":\""); write_handler_json_string(b,view.models_checked_at)
+	strings.write_string(b, "\",\"models_attempted_at\":\""); write_handler_json_string(b,view.models_attempted_at)
+	strings.write_string(b, "\",\"models_binary_path\":\""); write_handler_json_string(b,view.models_binary_path)
+	strings.write_string(b, "\",\"models_version_text\":\""); write_handler_json_string(b,view.models_version_text)
+	strings.write_string(b, "\",\"models_has_snapshot\":"); strings.write_string(b,"true" if view.models_has_snapshot else "false")
 	write_bridge_provider_extension_json(b, view)
 	strings.write_string(b, ",\"models\":[")
 	for model, i in view.catalog.models {
@@ -286,6 +293,10 @@ bridge_provider_discover_handler :: proc(ctx: rawptr, req: Request) -> Response 
 			req.request_id,
 		)
 	}
+	stage := json_string(req.body, "stage")
+	defer delete(stage)
+	if stage == "models" do return bridge_provider_models_refresh_response(h,req,bridge)
+	if stage != "" && stage != "providers" do return respond_error(domain.domain_error(.Validation_Failed,"stage must be providers or models"),req.request_id)
 	providers := json_string_array(req.body, "providers")
 	defer {for provider in providers do delete(provider); delete(providers)}
 	request_id := fmt.tprintf("pdr_%d", time.to_unix_nanoseconds(time.now()))

@@ -123,3 +123,39 @@ test_dispatch_provider_override_empty_model_matches_catalog :: proc(t: ^testing.
 	runtime, found := get_facet(&fx.svc, get_task(fx, "task_dispatch_model"), 1, FACET_RUNTIME)
 	testing.expect(t, found && jsonx.extract_string(runtime.body_json, "model", "", true, context.temp_allocator) == model, "runtime facet matches the launched model")
 }
+
+@(test)
+test_dispatch_discovered_default_and_explicit_selection :: proc(t: ^testing.T) {
+	fx,log,ok:=lease_fixture(t,"discovered_default")
+	defer lease_fixture_close(fx,log)
+	if !ok do return
+	chain:=seed_live_chain(t,fx,"chain_discovered_default")
+	seed_fleet(fx,chain,"agt_w")
+	seed_instance(fx,chain,"inst_w1","agt_w","br_1","stopped")
+	impl:sqlite.Provider_Repo_SQLite
+	repo:=sqlite.new_provider_repository(&impl,&fx.conn)
+	_,_=iface.bridge_provider_status_upsert(&repo,{bridge_id="br_1",provider="codex",state="present"})
+	_,_=iface.bridge_provider_setting_upsert(&repo,{bridge_id="br_1",provider="codex",enabled=true})
+	err:=iface.bridge_provider_models_upsert(&repo,{bridge_id="br_1",provider="codex",has_snapshot=true,models_json=`[{"model_id":"new-discovered-launch-id","label":"New"}]`,models_source="codex_app_server",models_state="success",models_checked_at="now",models_attempted_at="now"})
+	testing.expect_value(t,err.code,domain.Error_Code.None)
+	svc:=agent.Agent_Service{providers=&repo}
+	fx.svc.agent_service=&svc
+	selected,valid,validation_err:=agent.validate_provider_model_intersection(&svc,"br_1","codex","new-discovered-launch-id")
+	testing.expect(t,valid)
+	testing.expect_value(t,validation_err.code,domain.Error_Code.None)
+	testing.expect_value(t,selected.model,"new-discovered-launch-id")
+	p,m:=resolve_launch_model(&svc,"br_1","codex","")
+	defer delete(p);defer delete(m)
+	testing.expect_value(t,m,"new-discovered-launch-id")
+	ep,em:=resolve_launch_model(&svc,"br_1","codex","unavailable-explicit")
+	defer delete(ep);defer delete(em)
+	testing.expect_value(t,em,"unavailable-explicit")
+	fleets,_:=iface.taskchain_list_fleets_by_chain(&fx.repo,chain.chain_id,"u1")
+	fleets[0].provider="codex";fleets[0].model=""
+	_,_=iface.taskchain_upsert_fleet(&fx.repo,fleets[0])
+	_=publish_task(t,fx,chain,"task_discovered_default")
+	lease,held:=lease_of(fx,"inst_w1")
+	testing.expect(t,held)
+	testing.expect_value(t,lease.model,"new-discovered-launch-id")
+	testing.expect(t,len(log.cmds)>0 && strings.contains(log.cmds[0].body_json,"new-discovered-launch-id"),"discovered ID reaches launch command unchanged")
+}

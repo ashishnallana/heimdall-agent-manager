@@ -35,6 +35,9 @@ Provider_Catalog_Result :: struct {
 
 Bridge_Provider_View :: struct {
 	catalog:         domain.Provider_Catalog_Entry,
+	models_source, models_checked_at, models_attempted_at, models_state: string,
+	models_binary_path, models_version_text: string,
+	models_has_snapshot: bool,
 	bridge_id:       string,
 	binary_path:     string,
 	version_text:    string,
@@ -48,6 +51,8 @@ Bridge_Provider_View :: struct {
 
 bridge_provider_view_destroy :: proc(value: Bridge_Provider_View) {
 	domain.provider_catalog_entry_destroy(value.catalog)
+	delete(value.models_source); delete(value.models_checked_at); delete(value.models_attempted_at); delete(value.models_state)
+	delete(value.models_binary_path); delete(value.models_version_text)
 	delete(value.bridge_id); delete(value.binary_path); delete(value.version_text)
 	delete(value.detection_state); delete(value.checked_at)
 	delete(value.extension_state); delete(value.extension_version); delete(value.extension_checked_at)
@@ -205,6 +210,7 @@ validate_launchable :: proc(
 	if err.code != .None do return err
 	if !found || entry.state != "active" do return domain.domain_error(.Unprocessable_Entity, "provider is unknown or deprecated")
 	defer domain.provider_catalog_entry_destroy(entry)
+	if model_err := apply_effective_models(service.repo, bridge_id, &entry); model_err.code != .None do return model_err
 	model_ok := false
 	for candidate in entry.models {if candidate.model_id == model && candidate.state == "active" {model_ok = true; break}}
 	if !model_ok do return domain.domain_error(.Unprocessable_Entity, "model is unknown or deprecated for provider")
@@ -256,7 +262,13 @@ write_model_json :: proc(b: ^strings.Builder, model: domain.Provider_Model) {
 	contracts.write_json_string(b, model.label)
 	strings.write_string(b, "\",\"state\":\"")
 	contracts.write_json_string(b, model.state)
-	strings.write_string(b, "\"}")
+	strings.write_byte(b, '"')
+	if model.resolved_model != "" {
+		strings.write_string(b, ",\"resolved_model\":\"")
+		contracts.write_json_string(b, model.resolved_model)
+		strings.write_byte(b, '"')
+	}
+	strings.write_byte(b, '}')
 }
 
 write_catalog_entry_json :: proc(b: ^strings.Builder, entry: domain.Provider_Catalog_Entry) {
@@ -352,7 +364,7 @@ list_bridge_providers :: proc(
 	defer domain.bridge_provider_settings_destroy(settings)
 
 	views := make([dynamic]Bridge_Provider_View)
-	for entry in catalog {
+	for entry, entry_index in catalog {
 		view := Bridge_Provider_View {
 			catalog         = entry,
 			bridge_id       = strings.clone(bridge_id),
@@ -376,6 +388,23 @@ list_bridge_providers :: proc(
 				break
 			}
 		}
+		observation, observation_err := effective_model_observation(service.repo, bridge_id, &view.catalog)
+		if observation_err.code != .None {
+			bridge_provider_view_destroy(view)
+			bridge_provider_views_destroy(views)
+			// Entries not moved to views still belong to catalog.
+			for remaining in catalog[entry_index+1:] do domain.provider_catalog_entry_destroy(remaining)
+			delete(catalog)
+			return nil, observation_err
+		}
+		view.models_source = strings.clone(observation.models_source if observation.has_snapshot else "static_fallback")
+		view.models_checked_at = strings.clone(observation.models_checked_at)
+		view.models_attempted_at = strings.clone(observation.models_attempted_at)
+		view.models_state = strings.clone(observation.models_state if observation.models_state != "" else "not_checked")
+		view.models_binary_path = strings.clone(observation.binary_path)
+		view.models_version_text = strings.clone(observation.version_text)
+		view.models_has_snapshot = observation.has_snapshot
+		domain.bridge_provider_models_destroy(observation)
 		for setting in settings {
 			if setting.provider == entry.provider {view.enabled = setting.enabled; break}
 		}

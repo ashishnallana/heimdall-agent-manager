@@ -232,6 +232,13 @@ bridge_provider_profile_from_catalog :: proc(provider: Bridge_Catalog_Provider) 
 
 bridge_provider_catalog_has_model :: proc(provider_name, model_id: string) -> bool {
 	if strings.trim_space(provider_name) == "" || strings.trim_space(model_id) == "" do return false
+	observed := bridge_models_get(provider_name)
+	defer bridge_models_destroy(&observed)
+	if observed.has_snapshot {
+		if _, active := bridge_provider_catalog_profile(provider_name); !active do return false
+		for model in observed.models do if model.model_id==model_id do return true
+		return false
+	}
 	bridge_provider_catalog_init()
 	sync.rw_mutex_shared_lock(&bridge_provider_catalog_mutex)
 	defer sync.rw_mutex_shared_unlock(&bridge_provider_catalog_mutex)

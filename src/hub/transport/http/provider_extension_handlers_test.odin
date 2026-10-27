@@ -1,5 +1,8 @@
 package http
 
+import "base:runtime"
+import "core:net"
+import "core:thread"
 import "core:fmt"
 import "core:os"
 import "core:strings"
@@ -896,4 +899,132 @@ test_extension_overlap_rechecks_late_reports_and_repeated_manual_installs :: pro
 	installs := 0
 	for command in commands {if command.kind == "install" do installs += 1}
 	testing.expect_value(t, installs, 2) // exactly the two explicit manual requests
+}
+
+@(test)
+test_provider_models_api_filter_empty_and_additive_metadata :: proc(t: ^testing.T) {
+	context.allocator=context.temp_allocator
+	f := extension_test_setup(t,"model_filter")
+	defer extension_test_teardown(f)
+	extension_test_status(t,f,"codex","present","present",false)
+	extension_test_status(t,f,"claude","absent","absent",true)
+	response := bridge_provider_discover_handler(rawptr(&f.ph),extension_test_request(f,fmt.tprintf("/api/v1/bridges/%s/providers/discover",f.bridge_id),`{"stage":"models","providers":["codex","claude"],"enabled":true}`))
+	testing.expect_value(t,response.status,200)
+	testing.expect_value(t,f.sink_rec.count,0)
+	saved,err := iface.bridge_provider_models_list(&f.pr_repo,f.bridge_id)
+	testing.expect_value(t,err.code,domain.Error_Code.None)
+	testing.expect_value(t,len(saved),0)
+	domain.bridge_provider_models_list_destroy(saved)
+	views,_ := provider_service.list_bridge_providers(&f.pr_svc,f.bridge_id)
+	defer provider_service.bridge_provider_views_destroy(views)
+	eligible := provider_service.model_discovery_providers(views[:])
+	testing.expect_value(t,len(eligible),0)
+	for &view in views {
+		if view.catalog.provider=="codex" do view.enabled=true
+		if view.catalog.provider=="claude" do view.enabled=true // still absent
+	}
+	eligible=provider_service.model_discovery_providers(views[:])
+	testing.expect_value(t,len(eligible),1)
+	if len(eligible)==1 do testing.expect_value(t,eligible[0],"codex")
+	for view in views do if view.catalog.provider=="codex" {
+		b:=strings.builder_make()
+		write_bridge_provider_view_json(&b,view)
+		text:=strings.to_string(b)
+		testing.expect(t,strings.contains(text,`"models_source":"static_fallback"`))
+		testing.expect(t,strings.contains(text,`"models_state":"not_checked"`))
+		testing.expect(t,strings.contains(text,`"models_has_snapshot":false`))
+	}
+	response=bridge_provider_discover_handler(rawptr(&f.ph),extension_test_request(f,fmt.tprintf("/api/v1/bridges/%s/providers/discover",f.bridge_id),`{"stage":"automatic"}`))
+	testing.expect_value(t,response.status,400)
+}
+
+@(test)
+test_provider_models_reply_correlation_presence_and_failure :: proc(t: ^testing.T) {
+	context.allocator=context.temp_allocator
+	f:=extension_test_setup(t,"model_reply")
+	defer extension_test_teardown(f)
+	allowed:=[]string{"codex"}
+	prefix:=`{"type":"provider_model_discovery_report","request_id":"model-1","command_id":"model-1","providers":[`
+	item:=`{"provider":"codex","binary_path":"/bin/codex","version_text":"v1","has_snapshot":true,"models_source":"codex_app_server","models_state":"success","models_checked_at":"2026-10-01T00:00:00Z","models_attempted_at":"2026-10-01T00:00:00Z","models":[{"model_id":"new-model","label":"New"}]}`
+	reply:=strings.concatenate({prefix,item,"]}"})
+	testing.expect_value(t,provider_models_apply_reply(&f.pr_svc,f.bridge_id,"wrong-request",allowed,reply,"now").code,domain.Error_Code.Validation_Failed)
+	testing.expect_value(t,provider_models_apply_reply(&f.pr_svc,f.bridge_id,"model-1",allowed,reply,"now").code,domain.Error_Code.None)
+	// Extension reconciliation may receive ordinary detection reports. They must
+	// preserve the independent model fields without running any model probes.
+	command:=domain.Provider_Extension_Command{command_id="ordinary-detection",bridge_id=f.bridge_id,kind="install",state="dispatched"}
+	testing.expect_value(t,extension_apply_report(&f.bh,&command,`{"request_id":"ordinary-detection","providers":[{"provider":"codex","state":"present","checked_at":"2026-10-02","extension_state":"error"}]}`).code,domain.Error_Code.None)
+	omitted:=strings.concatenate({prefix,`{"provider":"codex","has_snapshot":true,"models_source":"codex_app_server","models_state":"success","models_checked_at":"2026-10-02","models_attempted_at":"2026-10-02"}`,"]}"})
+	testing.expect_value(t,provider_models_apply_reply(&f.pr_svc,f.bridge_id,"model-1",allowed,omitted,"now").code,domain.Error_Code.Validation_Failed)
+	failed:=strings.concatenate({`{"type":"command_result","command_id":"model-1","error":`,contracts.wire_error_json(contracts.wire_error(.Validation_Failed,"unknown_command"),context.temp_allocator),"}"})
+	testing.expect_value(t,provider_models_apply_reply(&f.pr_svc,f.bridge_id,"model-1",allowed,failed,"2026-10-03T00:00:00Z").code,domain.Error_Code.None)
+	views,_:=provider_service.list_bridge_providers(&f.pr_svc,f.bridge_id)
+	defer provider_service.bridge_provider_views_destroy(views)
+	for view in views do if view.catalog.provider=="codex" {
+		testing.expect_value(t,view.models_state,"unsupported")
+		testing.expect_value(t,view.models_checked_at,"2026-10-01T00:00:00Z")
+		testing.expect_value(t,len(view.catalog.models),1)
+		if len(view.catalog.models)==1 do testing.expect_value(t,view.catalog.models[0].model_id,"new-model")
+	}
+	testing.expect_value(t,f.sink_rec.count,0)
+}
+
+@(private="file")
+Model_API_Job :: struct { fixture:^extension_handler_fixture, status:int, body:string }
+@(private="file")
+model_api_test_worker :: proc(th:^thread.Thread) {
+	context.allocator=context.temp_allocator
+	job:=(^Model_API_Job)(th.data)
+	req:=extension_test_request(job.fixture,fmt.tprintf("/api/v1/bridges/%s/providers/discover",job.fixture.bridge_id),`{"stage":"models","providers":["claude","pi"],"enabled":true}`)
+	response:=bridge_provider_discover_handler(rawptr(&job.fixture.ph),req)
+	job.status=response.status
+	job.body=strings.clone(response.body,runtime.default_allocator())
+	free_all(context.temp_allocator)
+}
+@(test)
+test_provider_models_existing_api_runtime_round_trip :: proc(t:^testing.T) {
+	context.allocator=context.temp_allocator
+	f:=extension_test_setup(t,"model_api_roundtrip")
+	defer extension_test_teardown(f)
+	extension_test_status(t,f,"codex","present","present",true)
+	extension_test_status(t,f,"claude","present","present",false)
+	extension_test_status(t,f,"pi","absent","unsupported",true)
+	listener,listen_err:=net.listen_tcp(net.Endpoint{address=net.IP4_Loopback,port=0})
+	if !testing.expect(t,listen_err==nil) do return
+	defer net.close(listener)
+	endpoint,_:=net.bound_endpoint(listener)
+	client,dial_err:=net.dial_tcp(net.Endpoint{address=net.IP4_Loopback,port=endpoint.port})
+	if !testing.expect(t,dial_err==nil) do return
+	defer net.close(client)
+	hub,_,accept_err:=net.accept_tcp(listener)
+	if !testing.expect(t,accept_err==nil) do return
+	defer net.close(hub)
+	generation:=project_service.bridge_runtime_registry_generation(&f.registry,f.bridge_id)
+	project_service.bridge_runtime_registry_set_command_socket(&f.registry,f.bridge_id,hub,generation)
+	defer project_service.bridge_runtime_registry_mark_offline(&f.registry,f.bridge_id,generation)
+	job:=Model_API_Job{fixture=f}
+	worker:=thread.create(model_api_test_worker)
+	worker.data=rawptr(&job)
+	thread.start(worker)
+	reader:=bridge_ws_reader_make(client)
+	frame,received,_:=bridge_ws_read_frame(&reader,5*time.Second)
+	bridge_ws_reader_destroy(&reader)
+	if testing.expect(t,received,"explicit stage two sends a runtime request") {
+		testing.expect_value(t,json_string(frame,"type"),"provider_models_discover")
+		names:=json_string_array(frame,"providers")
+		testing.expect_value(t,len(names),1)
+		if len(names)==1 do testing.expect_value(t,names[0],"codex")
+		request_id:=json_string(frame,"request_id")
+		reply:=fmt.tprintf(`{{"type":"provider_model_discovery_report","request_id":"%s","command_id":"%s","providers":[{{"provider":"codex","has_snapshot":true,"models_source":"codex_app_server","models_state":"success","models_checked_at":"2026-10-01T00:00:00Z","models_attempted_at":"2026-10-01T00:00:00Z","models":[{{"model_id":"api-new-model","label":"New"}}]}}]}}`,request_id,request_id)
+		testing.expect(t,bridge_runtime_service.runtime_command_result_for_connection(&f.registry,f.bridge_id,generation,request_id,reply))
+	} else {
+		project_service.bridge_runtime_registry_mark_offline(&f.registry,f.bridge_id,generation)
+	}
+	thread.join(worker);thread.destroy(worker)
+	defer delete(job.body,runtime.default_allocator())
+	testing.expect_value(t,job.status,200)
+	testing.expect(t,strings.contains(job.body,`"model_id":"api-new-model"`),"existing provider response includes discovered models")
+	testing.expect(t,strings.contains(job.body,`"models_source":"codex_app_server"`))
+	testing.expect_value(t,provider_models_failure_state(.Bridge_Timeout,""),"timeout")
+	testing.expect_value(t,provider_models_failure_state(.Validation_Failed,"unknown_command"),"unsupported")
+	testing.expect_value(t,provider_models_failure_state(.Validation_Failed,"bridge_busy"),"busy")
 }

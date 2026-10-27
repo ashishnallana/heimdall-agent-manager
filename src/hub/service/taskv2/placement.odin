@@ -5,6 +5,7 @@ import "core:strings"
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
 import agent "odin_test:hub/service/agent"
+import provider_service "odin_test:hub/service/provider"
 
 // fleet_model_on_bridge returns the fleet row's provider/model for a bridge,
 // honouring a per-bridge override in bridge_models_json.
@@ -28,8 +29,9 @@ resolve_launch_model :: proc(agent_service: ^agent.Agent_Service, bridge_id, pro
 	catalog, err := iface.provider_catalog_list(agent_service.providers)
 	if err.code != .None do return strings.clone(provider), strings.clone(model)
 	defer domain.provider_catalog_destroy(catalog)
-	for entry in catalog {
+	for &entry in catalog {
 		if entry.state != "active" || (provider != "" && entry.provider != provider) do continue
+		if err := provider_service.apply_effective_models(agent_service.providers,bridge_id,&entry); err.code != .None do continue
 		for candidate in entry.models {
 			if candidate.state != "active" || (model != "" && candidate.model_id != model) do continue
 			_, ok, _ := agent.validate_provider_model_intersection(agent_service, bridge_id, entry.provider, candidate.model_id)

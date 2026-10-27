@@ -12,6 +12,7 @@ import dbt "odin_test:hub/platform/dbtelemetry"
 import bootcache "odin_test:hub/bootcache"
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
+import provider_service "odin_test:hub/service/provider"
 import ownership "odin_test:hub/service/ownership"
 import project_service "odin_test:hub/service/project"
 import events "odin_test:hub/service/events"
@@ -1583,6 +1584,7 @@ validate_provider_model_intersection :: proc(service: ^Agent_Service, bridge_id,
 	if entry_err.code != .None do return {}, false, entry_err
 	if !found || entry.state != "active" do return {}, false, domain.domain_error(.Unprocessable_Entity, "provider is unknown or deprecated")
 	defer domain.provider_catalog_entry_destroy(entry)
+	if err := provider_service.apply_effective_models(service.providers, bridge_id, &entry); err.code != .None do return {}, false, err
 	model_ok := false
 	for candidate in entry.models { if candidate.model_id == model && candidate.state == "active" { model_ok = true; break } }
 	if !model_ok do return {}, false, domain.domain_error(.Unprocessable_Entity, "model is unknown or deprecated for provider")

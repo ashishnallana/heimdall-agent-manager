@@ -11,6 +11,8 @@ new_provider_repository :: proc(impl: ^Provider_Repo_SQLite, conn: ^Conn) -> ifa
 	impl.conn = conn
 	return iface.Provider_Repository{
 		ctx = rawptr(impl),
+		upsert_models = bridge_provider_models_upsert_sqlite,
+		list_models = bridge_provider_models_list_sqlite,
 	create_extension_command = provider_extension_command_create_sqlite,
 	save_extension_command = provider_extension_command_save_sqlite,
 	list_extension_commands = provider_extension_command_list_sqlite,
@@ -198,4 +200,38 @@ provider_catalog_etag_sqlite :: proc(ctx: rawptr) -> (string, domain.Domain_Erro
 	defer sqlite3_finalize(stmt)
 	if sqlite3_step(stmt) != SQLITE_ROW do return "", domain.domain_error(.Internal_Error, "provider catalog etag is missing")
 	return column_text(stmt, 0), {}
+}
+
+bridge_provider_models_upsert_sqlite :: proc(ctx: rawptr, v: domain.Bridge_Provider_Models) -> domain.Domain_Error {
+	impl := (^Provider_Repo_SQLite)(ctx)
+	if !provider_repo_ready(impl) do return domain.domain_error(.Internal_Error, "sqlite repository is not open")
+	stmt: sqlite3_stmt
+	// A failed probe updates the outcome but cannot erase the Hub's last good list,
+	// even if the Bridge lost its own cache. Successful empty lists replace it.
+	query := "INSERT INTO bridge_provider_models (bridge_id,provider,binary_path,version_text,has_snapshot,models_json,models_source,models_checked_at,models_attempted_at,models_state) VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(bridge_id,provider) DO UPDATE SET binary_path=CASE WHEN (excluded.models_state='success' OR (has_snapshot=0 AND excluded.has_snapshot=1)) THEN excluded.binary_path ELSE binary_path END, version_text=CASE WHEN (excluded.models_state='success' OR (has_snapshot=0 AND excluded.has_snapshot=1)) THEN excluded.version_text ELSE version_text END, has_snapshot=CASE WHEN (excluded.models_state='success' OR (has_snapshot=0 AND excluded.has_snapshot=1)) THEN excluded.has_snapshot ELSE has_snapshot END, models_json=CASE WHEN (excluded.models_state='success' OR (has_snapshot=0 AND excluded.has_snapshot=1)) THEN excluded.models_json ELSE models_json END, models_source=CASE WHEN (excluded.models_state='success' OR (has_snapshot=0 AND excluded.has_snapshot=1)) THEN excluded.models_source ELSE models_source END, models_checked_at=CASE WHEN (excluded.models_state='success' OR (has_snapshot=0 AND excluded.has_snapshot=1)) THEN excluded.models_checked_at ELSE models_checked_at END, models_attempted_at=excluded.models_attempted_at, models_state=excluded.models_state;"
+	if sqlite3_prepare_v2(impl.conn.db,cstring(raw_data(query)),-1,&stmt,nil) != SQLITE_OK do return domain.domain_error(.Internal_Error,"failed to prepare model upsert")
+	defer sqlite3_finalize(stmt)
+	bind_text(stmt,1,v.bridge_id); bind_text(stmt,2,v.provider); bind_text(stmt,3,v.binary_path); bind_text(stmt,4,v.version_text)
+	sqlite3_bind_int(stmt,5,1 if v.has_snapshot else 0); bind_text(stmt,6,v.models_json); bind_text(stmt,7,v.models_source)
+	bind_text(stmt,8,v.models_checked_at); bind_text(stmt,9,v.models_attempted_at); bind_text(stmt,10,v.models_state)
+	if sqlite3_step(stmt) != SQLITE_DONE do return domain.domain_error(.Internal_Error,"failed to save model snapshot")
+	return {}
+}
+bridge_provider_models_list_sqlite :: proc(ctx: rawptr, bridge_id: string) -> ([dynamic]domain.Bridge_Provider_Models, domain.Domain_Error) {
+	impl := (^Provider_Repo_SQLite)(ctx)
+	if !provider_repo_ready(impl) do return nil, domain.domain_error(.Internal_Error,"sqlite repository is not open")
+	stmt: sqlite3_stmt
+	query := "SELECT bridge_id,provider,binary_path,version_text,has_snapshot,models_json,models_source,models_checked_at,models_attempted_at,models_state FROM bridge_provider_models WHERE bridge_id=? ORDER BY provider;"
+	if sqlite3_prepare_v2(impl.conn.db,cstring(raw_data(query)),-1,&stmt,nil) != SQLITE_OK do return nil, domain.domain_error(.Internal_Error,"failed to prepare model list")
+	defer sqlite3_finalize(stmt)
+	bind_text(stmt,1,bridge_id)
+	out := make([dynamic]domain.Bridge_Provider_Models)
+	for sqlite3_step(stmt) == SQLITE_ROW {
+		append(&out, domain.Bridge_Provider_Models{
+			bridge_id=column_text(stmt,0),provider=column_text(stmt,1),binary_path=column_text(stmt,2),version_text=column_text(stmt,3),
+			has_snapshot=column_text_unowned(stmt,4)=="1",models_json=column_text(stmt,5),models_source=column_text(stmt,6),
+			models_checked_at=column_text(stmt,7),models_attempted_at=column_text(stmt,8),models_state=column_text(stmt,9),
+		})
+	}
+	return out, {}
 }
