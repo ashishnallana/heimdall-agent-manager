@@ -607,6 +607,19 @@ jobs:
           & "$work/bin/ham-bridge.exe" --version; if ($LASTEXITCODE) { throw 'packaged ham-bridge --version failed' }
           & "$work/bin/ham-bridge.exe" --help | Out-Null; if ($LASTEXITCODE) { throw 'packaged ham-bridge --help failed' }
 
+      # Upload before the desktop build: `npm run build` runs `vite build`, which
+      # empties dist/ (as on macOS, where the tarball is uploaded first).
+      - name: Upload target artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: heimdall-local-windows-amd64-${{ needs.prepare.outputs.version }}
+          path: |
+            dist/heimdall-local-windows-amd64.zip
+            dist/heimdall-local-windows-amd64.contents.txt
+            dist/SHA256SUMS-windows-amd64.txt
+          if-no-files-found: error
+          retention-days: 30
+
       - name: Set up Node for the Windows desktop app
         uses: actions/setup-node@v4
         with:
@@ -628,17 +641,6 @@ jobs:
           if ($LASTEXITCODE) { throw "electron-builder failed with exit code $LASTEXITCODE" }
           $installer = Get-Item desktop-dist/Heimdall-*-x64.exe
           if (-not (Test-Path desktop-dist/latest.yml)) { throw 'electron-builder did not produce latest.yml' }
-
-      - name: Upload target artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: heimdall-local-windows-amd64-${{ needs.prepare.outputs.version }}
-          path: |
-            dist/heimdall-local-windows-amd64.zip
-            dist/heimdall-local-windows-amd64.contents.txt
-            dist/SHA256SUMS-windows-amd64.txt
-          if-no-files-found: error
-          retention-days: 30
 
       # A separate artifact, like the macOS DMG: upload-artifact@v4 roots each
       # artifact at the paths' common ancestor, so mixing dist/ and desktop-dist/
