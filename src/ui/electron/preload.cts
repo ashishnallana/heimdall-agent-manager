@@ -9,8 +9,6 @@ ipcRenderer.on('heimdall-bridge:check-updates', () => {
 
 contextBridge.exposeInMainWorld('odinApi', {
   pickDirectory: () => ipcRenderer.invoke('odin-api:pick-directory'),
-  getDebugInfo: () => ipcRenderer.invoke('odin-api:get-debug-info'),
-  toggleDebugServer: (enable: boolean) => ipcRenderer.invoke('odin-api:toggle-debug-server', enable),
   daemonUrl: process.env.HEIMDALL_DAEMON_URL || '',
   hubApiBaseUrl: process.env.HEIMDALL_HUB_API_URL || process.env.HEIMDALL_HUB_URL || '',
   setAuthenticatedUser: (identity: any) => ipcRenderer.send('heimdall-auth:set-user', identity),

@@ -14,7 +14,7 @@ const appIcon = (() => {
   }
 })();
 const { pruneAndRegister, updatePort, deregister } = require('./instanceRegistry.cjs');
-const { startDebugServer, stopDebugServer } = require('./debugServer.cjs');
+const { startDebugServer } = require('./debugServer.cjs');
 const bridgeManager = require('./bridgeManager.cjs');
 
 function normalizeBaseUrl(value: string): string {
@@ -410,27 +410,10 @@ ipcMain.handle('odin-api:pick-directory', async (event) => {
   return { ok: true, canceled: false, path: result.filePaths[0] };
 });
 
+// REQ-ELECTRON-NO-REMOTE-DEBUG-1: the localhost debug server can drive the
+// signed-in renderer, so web content must never be able to start or locate it.
+// It is a developer opt-in at launch only (HEIMDALL_UI_DEBUG=1), never via IPC.
 let currentDebugPort = 0;
-
-ipcMain.handle('odin-api:get-debug-info', () => {
-  return { enabled: currentDebugPort !== 0, port: currentDebugPort, pid: process.pid };
-});
-
-ipcMain.handle('odin-api:toggle-debug-server', async (_event, enable: boolean) => {
-  if (enable) {
-    if (currentDebugPort === 0) {
-      currentDebugPort = await startDebugServer();
-      updatePort(currentDebugPort);
-    }
-  } else {
-    if (currentDebugPort !== 0) {
-      await stopDebugServer();
-      currentDebugPort = 0;
-      updatePort(0);
-    }
-  }
-  return { enabled: currentDebugPort !== 0, port: currentDebugPort, pid: process.pid };
-});
 
 ipcMain.handle('heimdall-api:open-external', async (_event, url: string) => {
   await shell.openExternal(String(url || ''));
