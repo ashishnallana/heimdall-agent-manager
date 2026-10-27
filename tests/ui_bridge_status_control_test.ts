@@ -3,7 +3,10 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import childProcess from 'node:child_process';
+import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { desktopBridgeStatusLabel } from '../src/ui/bridge/desktopBridge.ts';
@@ -34,9 +37,63 @@ test('REQ-BTOP-1: enrollment output recognizes the canonical 14-symbol pairing c
   );
 });
 
-test('REQ-DMG-2: packaged install uses the stock-macOS TLS relay path', () => {
-  assert.match(managerSource, /PATH: '\/usr\/bin:\/bin:\/usr\/sbin:\/sbin'/);
-  assert.match(managerSource, /HAM_TLS_BACKEND: 's_client'/);
+// Records every child process bridgeManager starts and completes it with exit 0.
+function stubSpawn(t: any): Array<{ command: string; args: string[]; env: NodeJS.ProcessEnv }> {
+  const calls: Array<{ command: string; args: string[]; env: NodeJS.ProcessEnv }> = [];
+  t.mock.method(childProcess, 'spawn', (command: string, args: string[], options: any) => {
+    calls.push({ command, args, env: options?.env || {} });
+    const proc: any = new EventEmitter();
+    proc.stdout = new EventEmitter();
+    proc.stderr = new EventEmitter();
+    setImmediate(() => proc.emit('close', 0));
+    return proc;
+  });
+  return calls;
+}
+
+function assertStockMacBridgeEnv(env: NodeJS.ProcessEnv) {
+  assert.equal(env.PATH, '/usr/bin:/bin:/usr/sbin:/sbin');
+  assert.equal(env.HAM_TLS_BACKEND, 's_client');
+  assert.equal(env.HEIMDALL_INSTALL_PLAIN, '1');
+}
+
+test('REQ-DMG-ENV-1: packaged install runs with the stock-macOS TLS relay environment', async (t) => {
+  const resources = fs.mkdtempSync(path.join(os.tmpdir(), 'heimdall-bridge-resources-'));
+  t.after(() => fs.rmSync(resources, { recursive: true, force: true }));
+  const target = process.arch === 'arm64' ? 'darwin-arm64' : 'darwin-amd64';
+  for (const name of ['install.sh', `heimdall-local-${target}.tar.gz`, 'SHA256SUMS']) fs.writeFileSync(path.join(resources, name), '');
+  fs.writeFileSync(path.join(resources, 'METADATA.json'), JSON.stringify({ version: 'v0.5.15' }));
+  const previous = process.env.HEIMDALL_BRIDGE_RESOURCES;
+  process.env.HEIMDALL_BRIDGE_RESOURCES = resources;
+  t.after(() => { if (previous === undefined) delete process.env.HEIMDALL_BRIDGE_RESOURCES; else process.env.HEIMDALL_BRIDGE_RESOURCES = previous; });
+  const calls = stubSpawn(t);
+
+  const result = await bridgeManager.installBundled('https://hub.example');
+
+  assert.equal(result.ok, true);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].args.slice(0, 3), [path.join(resources, 'install.sh'), '--hub', 'https://hub.example']);
+  assertStockMacBridgeEnv(calls[0].env);
+});
+
+test('REQ-DMG-ENV-1: enrollment runs with the same TLS relay environment as install', async (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'heimdall-bridge-home-'));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const stateDir = path.join(home, '.config', 'heimdall', 'bridges', 'heimdall-bridge-hub-example');
+  fs.mkdirSync(stateDir, { recursive: true });
+  fs.writeFileSync(path.join(stateDir, 'hub-url'), 'https://hub.example\n');
+  fs.writeFileSync(path.join(stateDir, 'enroll.sh'), '');
+  t.mock.method(os, 'homedir', () => home);
+  const calls = stubSpawn(t);
+  const events: any[] = [];
+  const done = new Promise<void>((resolve) => {
+    assert.deepEqual(bridgeManager.startEnrollment('https://hub.example/', (event: any) => { events.push(event); if (event.type === 'complete') resolve(); }), { ok: true });
+  });
+  await done;
+
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].args, [path.join(stateDir, 'enroll.sh'), '--headless']);
+  assertStockMacBridgeEnv(calls[0].env);
 });
 
 test('REQ-BTOP-1: desktop service states have explicit user-facing labels', () => {

@@ -103,16 +103,22 @@ function runProcess(command: string, args: string[], env: NodeJS.ProcessEnv = pr
   });
 }
 
-function run(command: string, args: string[]): Promise<{ code: number; output: string }> {
-  // Finder-launched apps do not inherit Homebrew/Nix paths. macOS ships
-  // /usr/bin/openssl, so the packaged click-through path selects the bridge's
-  // verified s_client fallback instead of requiring an external socat install.
-  return runProcess(command, args, {
+// REQ-DMG-ENV-1: Finder-launched apps do not inherit Homebrew/Nix paths. macOS
+// ships /usr/bin/openssl, so every Bridge host process the app starts (install,
+// enroll, re-enroll) selects the bridge's verified s_client fallback instead of
+// requiring an external socat install. Enrollment needs it too: `ham-bridge
+// enroll` opens the Hub WebSocket to receive the encrypted vault key.
+function bridgeHostEnv(): NodeJS.ProcessEnv {
+  return {
     ...process.env,
     PATH: '/usr/bin:/bin:/usr/sbin:/sbin',
     HAM_TLS_BACKEND: 's_client',
     HEIMDALL_INSTALL_PLAIN: '1',
-  });
+  };
+}
+
+function run(command: string, args: string[]): Promise<{ code: number; output: string }> {
+  return runProcess(command, args, bridgeHostEnv());
 }
 
 function commandError(output: string, fallback: string): string {
@@ -175,7 +181,7 @@ function startEnrollment(hubUrl: string, emit: (event: any) => void) {
   const state = findState(hubUrl);
   const script = state && path.join(state.stateDir, 'enroll.sh');
   if (!script || !fs.existsSync(script)) return { ok: false, error: 'Install the packaged Bridge before enrolling it.' };
-  enrollmentProcess = childProcess.spawn('/bin/bash', [script, '--headless'], { env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
+  enrollmentProcess = childProcess.spawn('/bin/bash', [script, '--headless'], { env: bridgeHostEnv(), stdio: ['ignore', 'pipe', 'pipe'] });
   let buffer = '';
   let pairingSent = false;
   const onData = (chunk: any) => {
