@@ -37,18 +37,49 @@ test('REQ-BTOP-1: enrollment output recognizes the canonical 14-symbol pairing c
   );
 });
 
-// Records every child process bridgeManager starts and completes it with exit 0.
-function stubSpawn(t: any): Array<{ command: string; args: string[]; env: NodeJS.ProcessEnv }> {
-  const calls: Array<{ command: string; args: string[]; env: NodeJS.ProcessEnv }> = [];
+type SpawnCall = { command: string; args: string[]; env: NodeJS.ProcessEnv; proc: any };
+
+// Records every child process bridgeManager starts. Each completes with the exit
+// code `exitCode` returns for it; `null` leaves it running until the test acts.
+function stubSpawn(t: any, exitCode: (call: SpawnCall) => number | null = () => 0): SpawnCall[] {
+  const calls: SpawnCall[] = [];
   t.mock.method(childProcess, 'spawn', (command: string, args: string[], options: any) => {
-    calls.push({ command, args, env: options?.env || {} });
     const proc: any = new EventEmitter();
     proc.stdout = new EventEmitter();
     proc.stderr = new EventEmitter();
-    setImmediate(() => proc.emit('close', 0));
+    proc.pid = 4242 + calls.length;
+    proc.kill = () => true;
+    const call = { command, args, env: options?.env || {}, proc };
+    calls.push(call);
+    const code = exitCode(call);
+    if (code !== null) setImmediate(() => proc.emit('close', code));
     return proc;
   });
   return calls;
+}
+
+// A Bridge home with one enrolled, installed-on-macOS service for hub.example.
+function enrolledBridgeHome(t: any): { home: string; stateDir: string } {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'heimdall-bridge-home-'));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const serviceName = 'heimdall-bridge-hub-example';
+  const stateDir = path.join(home, '.config', 'heimdall', 'bridges', serviceName);
+  fs.mkdirSync(stateDir, { recursive: true });
+  fs.writeFileSync(path.join(stateDir, 'hub-url'), 'https://hub.example\n');
+  fs.writeFileSync(path.join(stateDir, 'enroll.sh'), '');
+  fs.writeFileSync(path.join(stateDir, 'bridge-token'), 'token');
+  const binDir = path.join(home, '.local', 'share', 'heimdall', 'bridges', serviceName, 'bin');
+  fs.mkdirSync(binDir, { recursive: true });
+  fs.writeFileSync(path.join(binDir, 'ham-bridge'), '');
+  fs.mkdirSync(path.join(home, 'Library', 'LaunchAgents'), { recursive: true });
+  fs.writeFileSync(path.join(home, 'Library', 'LaunchAgents', `${serviceName}.plist`), '');
+  t.mock.method(os, 'homedir', () => home);
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+  Object.defineProperty(process, 'platform', { ...platform, value: 'darwin' });
+  t.after(() => Object.defineProperty(process, 'platform', platform));
+  // launchd reports the agent as not loaded; bootstrap and kickstart succeed.
+  t.mock.method(childProcess, 'spawnSync', (_command: string, args: string[]) => ({ status: args?.[0] === 'print' ? 1 : 0, stdout: '', stderr: '' }));
+  return { home, stateDir };
 }
 
 function assertStockMacBridgeEnv(env: NodeJS.ProcessEnv) {
@@ -197,3 +228,48 @@ test('REQ-ELECTRON-NO-REMOTE-DEBUG-1: the Electron app has no debug-control serv
   const rendererEntry = fs.readFileSync(path.join(ROOT, 'src/ui/main.tsx'), 'utf8');
   assert.doesNotMatch(rendererEntry, /debugCapture|__debugStore/);
 });
+
+test('REQ-REENROLL-RECOVER-1: a failed re-enrollment restarts the Bridge it booted out', async (t) => {
+  enrolledBridgeHome(t);
+  const calls = stubSpawn(t, (call) => (call.command === '/bin/bash' ? 1 : 0));
+  const done = new Promise<any>((resolve) => {
+    const started = bridgeManager.startReEnrollment('https://hub.example', (event: any) => { if (event.type === 'error') resolve(event); });
+    assert.deepEqual(started, { ok: true });
+  });
+  const event = await done;
+
+  assert.match(event.message, /Enrollment exited with status 1\. The Bridge was restarted with its existing enrollment\./);
+  assert.deepEqual(calls.slice(1).map((call) => [call.command, call.args[0], call.args[1]]), [
+    ['/bin/launchctl', 'print', `gui/${process.getuid()}/heimdall-bridge-hub-example`],
+    ['/bin/launchctl', 'kickstart', '-k'],
+  ]);
+});
+
+test('REQ-REENROLL-RECOVER-1: a failed first enrollment does not restart a token-less Bridge', async (t) => {
+  enrolledBridgeHome(t);
+  const calls = stubSpawn(t, (call) => (call.command === '/bin/bash' ? 1 : 0));
+  const done = new Promise<any>((resolve) => {
+    bridgeManager.startEnrollment('https://hub.example', (event: any) => { if (event.type === 'error') resolve(event); });
+  });
+  const event = await done;
+
+  assert.equal(event.message, 'Enrollment exited with status 1.');
+  assert.equal(calls.length, 1);
+});
+
+test('REQ-REENROLL-RECOVER-1: quitting stops a running re-enrollment and restarts the Bridge', async (t) => {
+  enrolledBridgeHome(t);
+  const calls = stubSpawn(t, () => null);
+  const kills: Array<[number, string]> = [];
+  t.mock.method(process, 'kill', (pid: number, signal: string) => { kills.push([pid, signal]); return true; });
+  assert.deepEqual(bridgeManager.startReEnrollment('https://hub.example', () => {}), { ok: true });
+  const syncCalls = (childProcess.spawnSync as any).mock.calls.length;
+
+  bridgeManager.stopEnrollment();
+
+  assert.deepEqual(kills, [[-calls[0].proc.pid, 'SIGTERM']]);
+  const launchctl = (childProcess.spawnSync as any).mock.calls.slice(syncCalls).map((call: any) => call.arguments[1][0]);
+  assert.deepEqual(launchctl, ['print', 'bootstrap', 'kickstart']);
+  calls[0].proc.emit('close', null);
+});
+

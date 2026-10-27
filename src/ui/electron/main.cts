@@ -496,6 +496,7 @@ app.whenReady().then(() => {
 
 app.on('before-quit', () => {
   isQuitting = true;
+  bridgeManager.stopEnrollment();
   if (trayRefreshTimer) clearInterval(trayRefreshTimer);
   trayRefreshTimer = null;
   if (userRefreshTimer) clearInterval(userRefreshTimer);
