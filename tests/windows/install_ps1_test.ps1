@@ -222,11 +222,13 @@ try {
   Check ((Get-Content -Encoding UTF8 -Raw (Join-Path $stateDir 'hub-url')).Trim() -eq $hub) 'hub-url recorded'
   $cfg = Get-Content -Encoding UTF8 -Raw (Join-Path $stateDir 'config.toml')
   Check ($cfg -match "daemon_url = `"$([regex]::Escape($hub))`"" -and $cfg -match ('data_dir = "' + [regex]::Escape($dataDir.Replace('\', '/')) + '"')) 'config.toml carries the Hub and forward-slash data dir' $cfg
-  Check ((Test-OwnerOnly $stateDir) -and (Test-OwnerOnly $dataDir) -and (Test-OwnerOnly (Join-Path $stateDir 'bridge-token'))) 'state dir, data dir and token are owner-only'
+  Check ((Test-OwnerOnly $stateDir) -and (Test-OwnerOnly $dataDir) -and (Test-OwnerOnly (Join-Path $stateDir 'bridge-token')) -and
+    (Test-OwnerOnly (Join-Path $stateDir 'bridge-id'))) 'state dir, data dir, token and Bridge id are owner-only'
   Check (Test-Path (Join-Path $stateDir 'enroll.ps1')) 'enroll.ps1 persisted'
   $t = $null; $e = $null
   [void][System.Management.Automation.Language.Parser]::ParseFile((Join-Path $stateDir 'enroll.ps1'), [ref]$t, [ref]$e)
   Check ($e.Count -eq 0) 'enroll.ps1 parses' ($e | Out-String)
+  Check ((Get-Content -Encoding UTF8 -Raw (Join-Path $stateDir 'bridge-id')).Trim() -eq 'brg_fake123') 'the non-secret Bridge id is persisted independently of its credential'
 
   $enroll = @(Get-Calls $fakeLog 'ham-bridge' | Where-Object { $_[1] -eq 'enroll' })
   Check ($enroll.Count -eq 1) 'ham-bridge enroll ran once'
@@ -238,6 +240,9 @@ try {
       (Get-FieldValue $c '--local-run-dir') -eq (Join-Path $dataDir 'run')) 'enroll argv matches install.sh' ($c -join ' | ')
     Check ((Get-FieldValue $c 'HEIMDALL_HAM_PTY_HOST_BIN') -eq (Join-Path $binDir 'ham-pty-host.exe') -and (Get-FieldValue $c 'HEIMDALL_BRIDGE_PTY_HOST') -eq 'true' -and
       (Get-FieldValue $c 'HEIMDALL_HAM_CTL_BIN') -eq (Join-Path $binDir 'ham-ctl.exe') -and (Get-FieldValue $c 'PATH0') -eq $binDir) 'enroll environment carries the tool paths' ($c -join ' | ')
+    $providerPath = Get-FieldValue $c 'PATH'
+    Check ($providerPath -like "*$(Join-Path $roaming 'npm')*" -and $providerPath -like "*$(Join-Path $local 'pnpm')*" -and
+      $providerPath -like "*$(Join-Path $env:USERPROFILE '.cargo\bin')*") 'enroll PATH includes common per-user provider CLI directories' $providerPath
   }
   $probe = @(Get-Calls $fakeLog 'ham-bridge' | Where-Object { $_ -contains '--probe-hub' })
   Check ($probe.Count -ge 1 -and (Get-FieldValue $probe[-1] '--probe-hub') -eq $hub) '--probe-hub preflight ran against the Hub'
@@ -252,7 +257,21 @@ try {
     Check ((Get-FieldValue $c 'HEIMDALL_BRIDGE_ENDPOINT') -eq "tcp:127.0.0.1:$($ports[1])" -and (Get-FieldValue $c 'HEIMDALL_BRIDGE_SERVICE_NAME') -eq $svc -and
       (Get-FieldValue $c 'HEIMDALL_HAM_CTL_BIN') -eq (Join-Path $binDir "ham-ctl-$svc.cmd") -and (Get-FieldValue $c 'HEIMDALL_BRIDGE_PTY_HOST') -eq 'true' -and
       (Get-FieldValue $c 'HEIMDALL_HAM_PTY_HOST_BIN') -eq (Join-Path $binDir 'ham-pty-host.exe') -and (Get-FieldValue $c 'PATH0') -eq $binDir) 'service environment matches install.sh unit' ($c -join ' | ')
+    $providerPath = Get-FieldValue $c 'PATH'
+    Check ($providerPath -like "*$(Join-Path $env:APPDATA 'npm')*" -and $providerPath -like "*$(Join-Path $env:LOCALAPPDATA 'pnpm')*" -and
+      $providerPath -like "*$(Join-Path $env:USERPROFILE '.cargo\bin')*") 'service PATH includes common per-user provider CLI directories' $providerPath
   }
+
+  # ---- explicit identity reuse through the generated menu-bar enrollment contract ----
+  $savedLog = $env:FAKE_LOG
+  $env:FAKE_LOG = $fakeLog
+  try {
+    $reenrollOutput = & $Engine -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $stateDir 'enroll.ps1') -Headless -ReuseBridge brg_fake123 2>&1
+    $reenrollCode = $LASTEXITCODE
+  } finally { $env:FAKE_LOG = $savedLog }
+  Check ($reenrollCode -eq 0) 'generated enroll.ps1 accepts the desktop -ReuseBridge contract' ($reenrollOutput | Out-String)
+  $enroll = @(Get-Calls $fakeLog 'ham-bridge' | Where-Object { $_[1] -eq 'enroll' })
+  Check ($enroll.Count -eq 2 -and (Get-FieldValue $enroll[-1] '--reuse-bridge') -eq 'brg_fake123') 're-enrollment explicitly reuses the durable Bridge id' ($enroll[-1] -join ' | ')
 
   # ---- per-Hub ham-ctl wrapper ----
   $wrapper = Join-Path $binDir "ham-ctl-$svc.cmd"

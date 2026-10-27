@@ -14,8 +14,14 @@ import win "core:sys/windows"
 
 WAIT_TIMEOUT :: 258
 
-// Winsock sockets created by core:net are not inherited by CreateProcess.
-bridge_os_socket_close_on_exec :: proc(socket: i64) -> bool { return true }
+// Make listener non-inheritable before any PTY host or provider child starts.
+// CreateProcess call sites should already disable broad handle inheritance, but
+// clearing HANDLE_FLAG_INHERIT on the resource itself makes the invariant hold
+// if a future launcher opts into inheriting some unrelated standard handles.
+bridge_os_socket_close_on_exec :: proc(socket: i64) -> bool {
+	if socket <= 0 do return false
+	return bool(win.SetHandleInformation(win.HANDLE(uintptr(socket)), win.HANDLE_FLAG_INHERIT, 0))
+}
 
 bridge_os_terminate :: proc(pid: int) -> bool {
 	return bridge_os_kill(pid)
