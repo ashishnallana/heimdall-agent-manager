@@ -19,6 +19,9 @@ mac:
   icon: src/ui/electron/icon.png
   hardenedRuntime: true
   gatekeeperAssess: false
+  # The afterSign hook owns notarization so it can retry transient CloudKit
+  # ticket stapling without resubmitting the already accepted application.
+  notarize: false
   entitlements: build/entitlements.mac.plist
   entitlementsInherit: build/entitlements.mac.plist
 afterSign: scripts/release/notarize-electron.cjs

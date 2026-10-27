@@ -475,7 +475,7 @@ jobs:
               --password "$APPLE_APP_SPECIFIC_PASSWORD" \
               --team-id "$APPLE_TEAM_ID" \
               --wait
-            xcrun stapler staple "$dmg"
+            scripts/release/staple-with-retry.sh "$dmg"
             xcrun stapler validate "$dmg"
           done
 
