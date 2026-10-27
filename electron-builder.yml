@@ -31,7 +31,10 @@ mac:
 win:
   target: nsis
   icon: src/ui/electron/icon.png
-  verifyUpdateCodeSignature: true
+  # Public Windows code signing has an ongoing cost. Until the project opts in,
+  # releases are unsigned and updater integrity relies on GitHub HTTPS plus the
+  # SHA-512 digest in latest.yml.
+  verifyUpdateCodeSignature: false
 nsis:
   oneClick: false
   perMachine: false

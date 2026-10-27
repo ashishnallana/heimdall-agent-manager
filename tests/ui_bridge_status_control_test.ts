@@ -359,16 +359,15 @@ test('REQ-WIN-TRAY-1: Windows keeps a tray controller with Bridge, user, and upd
   assert.match(builderSource, /nsis:\s+[\s\S]*oneClick: false[\s\S]*perMachine: false/);
 });
 
-test('REQ-WIN-UPDATE-1: signed Windows releases publish updater metadata and install from the tray', () => {
+test('REQ-WIN-UPDATE-1: unsigned Windows releases publish digest-protected updater metadata', () => {
   assert.match(updaterSource, /require\('electron-updater'\)/);
   assert.match(updaterSource, /autoUpdater\.allowPrerelease = false/);
   assert.match(updaterSource, /autoUpdater\.checkForUpdates\(\)/);
   assert.match(updaterSource, /autoUpdater\.quitAndInstall\(false, true\)/);
   assert.match(mainSource, /desktopUpdater\.start\(app\.isPackaged && process\.platform === 'win32'/);
   assert.match(builderSource, /publish:\s+[\s\S]*provider: github[\s\S]*repo: heimdall-agent-manager/);
-  assert.match(builderSource, /verifyUpdateCodeSignature: true/);
-  assert.match(releaseWorkflowSource, /WINDOWS_CODE_SIGNING_PFX_BASE64/);
-  assert.match(releaseWorkflowSource, /signtool sign \/fd SHA256 \/tr http:\/\/timestamp\.digicert\.com/);
+  assert.match(builderSource, /verifyUpdateCodeSignature: false/);
+  assert.doesNotMatch(releaseWorkflowSource, /WINDOWS_CODE_SIGNING_PFX|signtool sign|forceCodeSigning=true/);
   assert.match(releaseWorkflowSource, /desktop-dist\/latest\.yml/);
 });
 

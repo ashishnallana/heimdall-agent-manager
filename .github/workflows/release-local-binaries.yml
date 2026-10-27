@@ -558,30 +558,6 @@ jobs:
           rustc --version
           scripts/windows/build.ps1 -OutDir dist/windows-bin -Odin $env:ODIN -Version "${{ needs.prepare.outputs.version }}" -CurlLibDir "$env:RUNNER_TEMP/libcurl-static/lib"
 
-      - name: Import Windows code-signing certificate
-        shell: pwsh
-        env:
-          WINDOWS_CODE_SIGNING_PFX_BASE64: ${{ secrets.WINDOWS_CODE_SIGNING_PFX_BASE64 }}
-          WINDOWS_CODE_SIGNING_PFX_PASSWORD: ${{ secrets.WINDOWS_CODE_SIGNING_PFX_PASSWORD }}
-        run: |
-          if (-not $env:WINDOWS_CODE_SIGNING_PFX_BASE64) { throw 'WINDOWS_CODE_SIGNING_PFX_BASE64 is required for Windows releases' }
-          if (-not $env:WINDOWS_CODE_SIGNING_PFX_PASSWORD) { throw 'WINDOWS_CODE_SIGNING_PFX_PASSWORD is required for Windows releases' }
-          $cert = Join-Path $env:RUNNER_TEMP 'heimdall-windows-signing.pfx'
-          [IO.File]::WriteAllBytes($cert, [Convert]::FromBase64String($env:WINDOWS_CODE_SIGNING_PFX_BASE64))
-          "CSC_LINK=$cert" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
-          "CSC_KEY_PASSWORD=$env:WINDOWS_CODE_SIGNING_PFX_PASSWORD" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
-
-      - name: Authenticode-sign Windows Bridge binaries
-        shell: pwsh
-        run: |
-          $signtool = (Get-Command signtool.exe -ErrorAction Stop).Source
-          Get-ChildItem dist/windows-bin -Filter *.exe | ForEach-Object {
-            & $signtool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /f $env:CSC_LINK /p $env:CSC_KEY_PASSWORD $_.FullName
-            if ($LASTEXITCODE) { throw "signtool failed for $($_.Name)" }
-            & $signtool verify /pa /all $_.FullName
-            if ($LASTEXITCODE) { throw "signature verification failed for $($_.Name)" }
-          }
-
       - name: Verify Windows binaries are self-contained and run
         shell: pwsh
         run: |
@@ -622,7 +598,7 @@ jobs:
           node-version: 22
           cache: npm
 
-      - name: Build signed Heimdall installer (Windows)
+      - name: Build Heimdall installer (Windows)
         shell: pwsh
         run: |
           scripts/release/stage-windows-desktop-resources.ps1 `
@@ -631,11 +607,8 @@ jobs:
           npm ci
           npm run build
           npx electron-builder --win nsis --x64 --publish never `
-            -c.forceCodeSigning=true `
             -c.extraMetadata.version="${{ needs.prepare.outputs.clean_version }}"
           $installer = Get-Item desktop-dist/Heimdall-*-x64.exe
-          $sig = Get-AuthenticodeSignature $installer.FullName
-          if ($sig.Status -ne 'Valid') { throw "installer signature is $($sig.Status): $($sig.StatusMessage)" }
           if (-not (Test-Path desktop-dist/latest.yml)) { throw 'electron-builder did not produce latest.yml' }
 
       - name: Upload target artifact
@@ -802,7 +775,7 @@ jobs:
           - heimdall-local-windows-amd64-$VERSION.zip (scripts/install.ps1)
           - Heimdall-${{ needs.prepare.outputs.clean_version }}-arm64.dmg (signed + notarized macOS app with Bridge)
           - Heimdall-${{ needs.prepare.outputs.clean_version }}-x64.dmg (signed + notarized macOS app with Bridge)
-          - Heimdall-${{ needs.prepare.outputs.clean_version }}-x64.exe (signed Windows installer with Bridge)
+          - Heimdall-${{ needs.prepare.outputs.clean_version }}-x64.exe (unsigned Windows installer with Bridge)
           - latest.yml and the Windows block map (desktop auto-update metadata)
           - SHA256SUMS
           NOTES
