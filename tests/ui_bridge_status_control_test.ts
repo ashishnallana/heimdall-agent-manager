@@ -493,6 +493,11 @@ test('REQ-WIN-UPDATE-1: unsigned Windows releases publish digest-protected updat
   assert.match(builderSource, /verifyUpdateCodeSignature: false/);
   assert.doesNotMatch(releaseWorkflowSource, /WINDOWS_CODE_SIGNING_PFX|signtool sign|forceCodeSigning=true/);
   assert.match(releaseWorkflowSource, /desktop-dist\/latest\.yml/);
+  assert.match(
+    releaseWorkflowSource,
+    /npx electron-builder --win nsis --x64 --publish never `[\s\S]*?--config\.extraMetadata\.version=[\s\S]*?if \(\$LASTEXITCODE\) \{ throw "electron-builder failed with exit code \$LASTEXITCODE" \}/,
+  );
+  assert.doesNotMatch(releaseWorkflowSource, /npx electron-builder --win[\s\S]*?-c\.extraMetadata\.version=/);
 });
 
 test('REQ-ELECTRON-NO-REMOTE-DEBUG-1: the Electron app has no debug-control server at all', () => {

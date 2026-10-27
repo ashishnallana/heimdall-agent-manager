@@ -605,9 +605,12 @@ jobs:
             -Bundle dist/heimdall-local-windows-amd64.zip `
             -Version "${{ needs.prepare.outputs.version }}"
           npm ci
+          if ($LASTEXITCODE) { throw "npm ci failed with exit code $LASTEXITCODE" }
           npm run build
+          if ($LASTEXITCODE) { throw "npm run build failed with exit code $LASTEXITCODE" }
           npx electron-builder --win nsis --x64 --publish never `
-            -c.extraMetadata.version="${{ needs.prepare.outputs.clean_version }}"
+            --config.extraMetadata.version="${{ needs.prepare.outputs.clean_version }}"
+          if ($LASTEXITCODE) { throw "electron-builder failed with exit code $LASTEXITCODE" }
           $installer = Get-Item desktop-dist/Heimdall-*-x64.exe
           if (-not (Test-Path desktop-dist/latest.yml)) { throw 'electron-builder did not produce latest.yml' }
 
