@@ -462,7 +462,11 @@ jobs:
             darwin-arm64) arch=--arm64 ;;
             darwin-amd64) arch=--x64 ;;
           esac
-          npx electron-builder --mac dmg "$arch" \
+          # Publishing is owned by the release job below after every target
+          # has passed. On a tag, electron-builder otherwise auto-selects
+          # publish=always and fails here because this build job deliberately
+          # has no contents:write token.
+          npx electron-builder --mac dmg "$arch" --publish never \
             -c.extraMetadata.version="${{ needs.prepare.outputs.clean_version }}"
           for dmg in desktop-dist/*.dmg; do
             codesign --verify --strict --verbose=2 "$dmg"

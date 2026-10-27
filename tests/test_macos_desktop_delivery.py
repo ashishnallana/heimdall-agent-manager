@@ -48,6 +48,7 @@ def test_curl_and_dmg_share_signed_archive():
     assert 'CSC_NAME=${identity#Developer ID Application: }' in workflow
     assert "codesign --verify --strict" in workflow
     assert "Build, sign, and notarize Heimdall DMG" in workflow
+    assert 'electron-builder --mac dmg "$arch" --publish never' in workflow
     assert "xcrun stapler validate" in workflow
 
 
