@@ -157,7 +157,9 @@ function getStatus(hubUrl: string) {
     installedVersion: installed && probe?.binary === binary ? probe.installedVersion : '',
     bundledVersion: bundledVersion(),
     busy: busy || Boolean(enrollmentProcess),
-    error: packaged ? '' : 'The packaged Bridge resources are incomplete.',
+    // Missing packaged resources only matter for installing; an unpackaged
+    // (Nix/dev) app still manages a Bridge that install.sh put in place.
+    error: packaged || installed ? '' : 'The packaged Bridge resources are incomplete.',
   };
 }
 

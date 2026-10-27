@@ -227,7 +227,7 @@ test('REQ-BTOP-1/2: top-bar control exposes status, version, update, install, en
     'shell-bridge-update-available-btn', 'shell-bridge-install-btn', 'shell-bridge-enroll-btn',
     'shell-bridge-pairing-code', 'shell-bridge-copy-pairing-code-btn',
   ]) assert.match(statusSource, new RegExp(`data-debug-id="${id}"`));
-  assert.match(statusSource, /desktop\.installedVersion \|\| desktop\.bundledVersion/);
+  assert.match(statusSource, /desktop\.installed \? desktop\.installedVersion : ''/);
   assert.match(statusSource, /bridgesQuery\.refetch\(\)/);
 });
 
@@ -482,5 +482,45 @@ test('REQ-BRIDGE-STATUS-ASYNC-1: the tray and renderer are fed by one async poll
   assert.doesNotMatch(getStatusBody, /spawnSync|execFile/);
   assert.match(mainSource, /trayRefreshTimer = setInterval\(\(\) => \{ void refreshBridgeStatus\(\); \}, 15_000\)/);
   assert.match(mainSource, /ipcMain\.handle\('heimdall-bridge:get-status', \(\) => bridgeManager\.getStatus\(/);
+});
+
+test('REQ-BTOP-1 (#7): an installed Bridge is not reported as an error when packaged resources are missing', async (t) => {
+  enrolledBridgeHome(t);
+  const previous = process.env.HEIMDALL_BRIDGE_RESOURCES;
+  process.env.HEIMDALL_BRIDGE_RESOURCES = path.join(os.tmpdir(), 'heimdall-no-bridge-resources');
+  t.after(() => { if (previous === undefined) delete process.env.HEIMDALL_BRIDGE_RESOURCES; else process.env.HEIMDALL_BRIDGE_RESOURCES = previous; });
+  t.mock.method(childProcess, 'execFile', (_command: string, _args: string[], _options: any, callback: any) => {
+    setImmediate(() => callback(null, 'ham-bridge v0.5.16\n', ''));
+    return new EventEmitter();
+  });
+
+  const status = await bridgeManager.refreshStatus('https://hub.example');
+
+  assert.equal(status.packaged, false);
+  assert.equal(status.error, '');
+  assert.deepEqual(desktopBridgeStatusLabel(status), { label: 'Bridge online', tone: 'success' });
+});
+
+test('REQ-BTOP-1 (#7): missing packaged resources are still an error when nothing is installed', (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'heimdall-bridge-empty-home-'));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  t.mock.method(os, 'homedir', () => home);
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+  Object.defineProperty(process, 'platform', { ...platform, value: 'darwin' });
+  t.after(() => Object.defineProperty(process, 'platform', platform));
+  const previous = process.env.HEIMDALL_BRIDGE_RESOURCES;
+  process.env.HEIMDALL_BRIDGE_RESOURCES = path.join(home, 'missing');
+  t.after(() => { if (previous === undefined) delete process.env.HEIMDALL_BRIDGE_RESOURCES; else process.env.HEIMDALL_BRIDGE_RESOURCES = previous; });
+
+  const status = bridgeManager.getStatus('https://hub.example');
+
+  assert.equal(status.installed, false);
+  assert.match(status.error, /packaged Bridge resources are incomplete/);
+});
+
+test('REQ-BTOP-1 (#8): the popover never labels the bundled version as installed', () => {
+  assert.match(statusSource, /\? \(desktop\.installed \? desktop\.installedVersion : ''\)/);
+  assert.doesNotMatch(statusSource, /desktop\.installedVersion \|\| desktop\.bundledVersion/);
+  assert.match(statusSource, /Packaged version v\{desktop\.bundledVersion\}/);
 });
 

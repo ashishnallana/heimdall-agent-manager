@@ -80,8 +80,9 @@ export default function SidebarUpdateBadge({ onOpen }: { onOpen: (update: Pendin
   const updates = pendingBridgeUpdates(bridges);
   const update = updates[0] || null;
   const status = desktop?.supported ? desktopBridgeStatusLabel(desktop) : hubBridgeLabel(hubBridge);
+  // Only an installed Bridge has a version; the bundled one is shown separately.
   const version = desktop?.supported
-    ? (desktop.installedVersion || desktop.bundledVersion)
+    ? (desktop.installed ? desktop.installedVersion : '')
     : String(hubBridge?.version || '');
   const summary = `${status.label}${version ? ` · v${version.replace(/^v/, '')}` : ''}`;
 
