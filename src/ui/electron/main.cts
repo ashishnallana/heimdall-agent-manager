@@ -14,6 +14,7 @@ const appIcon = (() => {
   }
 })();
 const bridgeManager = require('./bridgeManager.cjs');
+const { allowedExternalUrl, allowedPairingUrl } = require('./externalUrl.cjs');
 
 function normalizeBaseUrl(value: string): string {
   return String(value || '').trim().replace(/\/$/, '');
@@ -169,7 +170,8 @@ function createWindow() {
     win.webContents.on('will-navigate', guardNavigation);
     win.webContents.on('will-redirect', guardNavigation);
     win.webContents.setWindowOpenHandler(({ url }: { url: string }) => {
-      void shell.openExternal(url);
+      const href = allowedExternalUrl(url);
+      if (href) void shell.openExternal(href);
       return { action: 'deny' };
     });
   }
@@ -260,11 +262,19 @@ async function refreshAuthenticatedUserFromSession() {
   } catch (_err) { /* The renderer will synchronize identity after a successful OIDC check. */ }
 }
 
-function handleEnrollmentEvent(payload: any) {
+function handleEnrollmentEvent(rawPayload: any) {
+  // REQ-EXT-URL-1: only open (or show) an approval page on this Hub's origins.
+  let payload = rawPayload;
+  if (payload?.type === 'pairing') {
+    const url = allowedPairingUrl(payload.url, [configuredHubApiBaseUrl(), configuredUiOrigin()]);
+    payload = url && payload.code
+      ? { ...payload, url }
+      : { type: 'error', message: 'Bridge enrollment printed an approval page outside this Hub; it was not opened.' };
+  }
   if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
     mainWindow.webContents.send('heimdall-bridge:enrollment-event', payload);
   }
-  if (payload?.type === 'pairing' && payload?.url && payload?.code) {
+  if (payload?.type === 'pairing') {
     trayPairing = { url: String(payload.url), code: String(payload.code) };
     trayOperationMessage = 'Waiting for browser approval…';
     void shell.openExternal(trayPairing.url);
@@ -272,6 +282,7 @@ function handleEnrollmentEvent(payload: any) {
     trayPairing = null;
     trayOperationMessage = payload?.message || 'Bridge enrollment complete.';
   } else if (payload?.type === 'error') {
+    trayPairing = null;
     trayOperationMessage = payload?.message || 'Bridge enrollment failed.';
   }
   refreshTrayStatus();
@@ -409,7 +420,9 @@ ipcMain.handle('odin-api:pick-directory', async (event) => {
 });
 
 ipcMain.handle('heimdall-api:open-external', async (_event, url: string) => {
-  await shell.openExternal(String(url || ''));
+  const href = allowedExternalUrl(url);
+  if (!href) return { ok: false, error: 'Only https: and mailto: links can be opened.' };
+  await shell.openExternal(href);
   return { ok: true };
 });
 

@@ -11,6 +11,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { desktopBridgeStatusLabel } from '../src/ui/bridge/desktopBridge.ts';
 import bridgeManager from '../src/ui/electron/bridgeManager.cts';
+import externalUrl from '../src/ui/electron/externalUrl.cts';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const statusSource = fs.readFileSync(path.join(ROOT, 'src/ui/components/shell/SidebarUpdateBadge.tsx'), 'utf8');
@@ -271,5 +272,34 @@ test('REQ-REENROLL-RECOVER-1: quitting stops a running re-enrollment and restart
   const launchctl = (childProcess.spawnSync as any).mock.calls.slice(syncCalls).map((call: any) => call.arguments[1][0]);
   assert.deepEqual(launchctl, ['print', 'bootstrap', 'kickstart']);
   calls[0].proc.emit('close', null);
+});
+
+test('REQ-EXT-URL-1: only https: and mailto: links reach the system browser', () => {
+  for (const ok of ['https://customer-portal.paddle.com/cpl_1', 'mailto:support@example.com', ' https://github.com/a/b ']) {
+    assert.notEqual(externalUrl.allowedExternalUrl(ok), '', ok);
+  }
+  for (const refused of [
+    'file:///Applications/Calculator.app', 'smb://evil.example/share', 'javascript:alert(1)', 'http://example.com/',
+    'x-apple.systempreferences:com.apple.preference.security', 'vscode://file/etc/passwd', 'https://user:pass@example.com/', '', null, 'not a url',
+  ]) {
+    assert.equal(externalUrl.allowedExternalUrl(refused), '', String(refused));
+  }
+});
+
+test('REQ-EXT-URL-1: Bridge pairing pages open only on the configured Hub/UI origins', () => {
+  const origins = ['https://hub.brolabs.ai', 'https://heimdall.brolabs.ai/'];
+  assert.equal(externalUrl.allowedPairingUrl('https://heimdall.brolabs.ai/api/v1/device/add?c=1', origins), 'https://heimdall.brolabs.ai/api/v1/device/add?c=1');
+  assert.equal(externalUrl.allowedPairingUrl('http://127.0.0.1:8081/api/v1/device/add', ['http://127.0.0.1:8081']), 'http://127.0.0.1:8081/api/v1/device/add');
+  for (const refused of ['https://evil.example/api/v1/device/add', 'http://heimdall.brolabs.ai/api/v1/device/add', 'https://heimdall.brolabs.ai.evil.example/api/v1/device/add', 'file:///tmp/x']) {
+    assert.equal(externalUrl.allowedPairingUrl(refused, origins), '', refused);
+  }
+});
+
+test('REQ-EXT-URL-1: every shell.openExternal call in the main process uses a vetted URL', () => {
+  const calls = [...mainSource.matchAll(/shell\.openExternal\(([^)]*)\)/g)].map((match) => match[1]);
+  assert.deepEqual(calls, ['href', 'trayPairing.url', 'trayPairing.url', 'href']);
+  assert.match(mainSource, /const href = allowedExternalUrl\(url\);\s*if \(href\) void shell\.openExternal\(href\);/);
+  assert.match(mainSource, /const href = allowedExternalUrl\(url\);\s*if \(!href\) return \{ ok: false/);
+  assert.match(mainSource, /allowedPairingUrl\(payload\.url, \[configuredHubApiBaseUrl\(\), configuredUiOrigin\(\)\]\)/);
 });
 
