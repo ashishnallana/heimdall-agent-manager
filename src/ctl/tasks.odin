@@ -256,10 +256,11 @@ is_destructive_chain_verb :: proc(action: string) -> bool {
 
 print_tasks_help :: proc(action: string) {
 	_ = action
-	fmt.println("usage: ham-ctl tasks <list|show|create|update|depend|cancel|comment|comments|fetch|unblock|hold|release>")
+	fmt.println("usage: ham-ctl tasks <list|show|create|update|depend|cancel|comment|comments|fetch|unblock|hold|release|recheck>")
 	fmt.println("  unblock <task-id> --chain <id> [--note <reason>]  (retry a dispatch block after fixing placement)")
 	fmt.println("  hold <task-id> --chain <id> --reason <text>  (no new lease until released; a current holder is asked to checkpoint)")
 	fmt.println("  release <task-id> --chain <id>  (clear a hold)")
+	fmt.println("  recheck <task-id> --chain <id>  (recompute gate, readiness, dispatch and merge-back; lists what changed and why the rest holds)")
 	fmt.println("  create --chain <id> --title <title> [--assignee <agt_id>] [--reviewer <agt_id>]... [--require-user-approval]")
 	fmt.println("  update <task-id> [--assignee <agt_id>] [--reviewer <agt_id>]... [--require-user-approval | --no-require-user-approval]")
 	fmt.println("  depend <task-id> --chain <id> --on <task-id>|task:<id>|workflow_run:<run-id>   (workflow runs become chain-level graph edges)")
@@ -701,6 +702,10 @@ ctl_tasks_command :: proc(cmd: []string, args: []string) {
 			body = httpc.json_body(Ctl_Task_Reason_Body{reason = reason})
 		}
 		ctl_tasks_request_and_decrypt(transport, {method = .POST, path = ctl_api("task-chains", chain_id, "tasks", task_id, action), body = body}, args)
+		return
+	}
+	if action == "recheck" {
+		ctl_tasks_request_and_decrypt(transport, {method = .POST, path = ctl_api("task-chains", chain_id, "tasks", task_id, "recheck"), body = ctl_empty_object_body()}, args)
 		return
 	}
 	if action == "unblock" {

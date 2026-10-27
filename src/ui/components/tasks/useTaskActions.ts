@@ -4,10 +4,12 @@ import {
   useAnswerTaskBlockerMutation,
   useCancelTaskDetailMutation,
   usePublishTaskMutation,
+  useRecheckTaskMutation,
   useReopenTaskMutation,
   useUpdateTaskDetailMutation,
   useUserReviewTaskMutation,
 } from '../../api/endpoints/tasks';
+import type { TaskRecheckResult } from '../../api/endpoints/tasks';
 
 /** Readable text for a failed mutation (RTK error, hub envelope or thrown Error). */
 export function actionErrorMessage(err: any): string {
@@ -29,6 +31,7 @@ export function useTaskActions(chainId: string, taskId: string, taskTitle = '') 
   const [updateTask, update] = useUpdateTaskDetailMutation();
   const [addComment, comment] = useAddTaskCommentMutation();
   const [publishTask, publish] = usePublishTaskMutation();
+  const [recheckTask, recheck] = useRecheckTaskMutation();
   const [error, setError] = useState('');
 
   const run = async (fn: () => Promise<unknown>): Promise<boolean> => {
@@ -52,7 +55,8 @@ export function useTaskActions(chainId: string, taskId: string, taskTitle = '') 
       cancel.isLoading ||
       update.isLoading ||
       comment.isLoading ||
-      publish.isLoading,
+      publish.isLoading ||
+      recheck.isLoading,
     // Titles let a brief_incomplete error name the task instead of its id.
     publish: () => run(() => publishTask({ chainId, taskId, taskTitles: taskTitle ? { [taskId]: taskTitle } : undefined }).unwrap()),
     approve: () => run(() => userReview({ chainId, taskId, verdict: 'approve' }).unwrap()),
@@ -65,6 +69,14 @@ export function useTaskActions(chainId: string, taskId: string, taskTitle = '') 
           ),
     answer: (note: string) => run(() => answerBlocker({ chainId, taskId, note }).unwrap()),
     reopen: () => run(() => reopenTask({ chainId, taskId }).unwrap()),
+    // Resolves to the hub's result (for the toast), or null on failure (error set).
+    recheck: async (): Promise<TaskRecheckResult | null> => {
+      let result: TaskRecheckResult | null = null;
+      const ok = await run(async () => {
+        result = await recheckTask({ chainId, taskId }).unwrap();
+      });
+      return ok ? result : null;
+    },
     cancel: () => run(() => cancelTask({ chainId, taskId }).unwrap()),
     pinBridge: (bridgeId: string) => run(() => updateTask({ chainId, taskId, bridgeId }).unwrap()),
     comment: (body: string) => run(() => addComment({ chainId, taskId, body: body.trim() }).unwrap()),

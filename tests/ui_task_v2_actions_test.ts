@@ -6,7 +6,7 @@
 import './helpers/vaultEndpointHarness.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { getTaskActions, taskNeedsYou } from '../src/ui/components/tasks/taskActions.ts';
+import { canRecheck, getTaskActions, recheckToast, taskNeedsYou } from '../src/ui/components/tasks/taskActions.ts';
 import type { TaskWire } from '../src/ui/api/taskWire.ts';
 
 function task(overrides: Partial<TaskWire> & Record<string, unknown> = {}): TaskWire {
@@ -70,6 +70,36 @@ test('finished tasks can only be reopened; gates are never cancelled from a card
     assert.ok(!taskNeedsYou(task({ state, publish_state: 'draft' })));
   }
   assert.ok(!getTaskActions(task({ kind: 'gate', state: 'in_review' })).more.includes('cancel'));
+});
+
+test('Re-check is offered where a task can look stuck, never on running work', () => {
+  for (const state of ['backlog', 'ready', 'in_review']) {
+    assert.ok(getTaskActions(task({ state })).more.includes('recheck'), state);
+  }
+  assert.ok(!canRecheck(task({ state: 'in_progress' })));
+  assert.ok(!canRecheck(task({ state: 'ready', leases: [{ kind: 'work' }] as any })), 'a live work lease is left to its holder');
+  assert.ok(canRecheck(task({ state: 'in_review', leases: [{ kind: 'review' }] as any })), 'a review lease does not hide the item');
+  assert.ok(!canRecheck(task({ state: 'backlog', publish_state: 'draft' })), 'drafts are published, not re-checked');
+  assert.ok(!canRecheck(task({ state: 'cancelled' })));
+  assert.ok(!canRecheck(task({ state: 'done' })));
+  assert.ok(!canRecheck(task({ state: 'done', merge: { state: 'merged' } } as any)));
+  for (const merge of ['pending', 'failed']) {
+    const { more } = getTaskActions(task({ state: 'done', merge: { state: merge } } as any));
+    assert.deepEqual(more, ['reopen', 'recheck', 'copy_id'], `done with merge ${merge}`);
+  }
+});
+
+test('the Re-check toast says what changed, else why the task still waits', () => {
+  const changed = recheckToast({ changed: true, actions: ['state: in_review → done'], reasons: [], message: 'state: in_review → done' });
+  assert.equal(changed.kind, 'success');
+  assert.match(changed.title, /updated/);
+  assert.equal(changed.message, 'state: in_review → done');
+  const waiting = recheckToast({ changed: false, actions: [], reasons: ['agt_w: fleet full 2/2 on bridge br_1', 'agt_x: bridge br_2 is offline'], message: 'nothing to change: …' });
+  assert.equal(waiting.kind, 'info');
+  assert.match(waiting.title, /nothing to change/);
+  assert.match(waiting.message, /fleet full 2\/2/);
+  assert.match(waiting.message, /offline/);
+  assert.ok(recheckToast({ changed: false, actions: [], reasons: [] }).message.length > 0);
 });
 
 test('the board puts tasks that need you first, then by state and priority', async () => {

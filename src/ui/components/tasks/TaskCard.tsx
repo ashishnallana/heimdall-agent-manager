@@ -1,4 +1,5 @@
 import React from 'react';
+import { useDispatch } from 'react-redux';
 import { Badge, Button, Icon, IconButton, Link, Menu, StatusPill, Text } from '@ui';
 import { TaskWire } from '../../api/taskWire';
 import {
@@ -13,7 +14,8 @@ import {
   workLeaseHolder,
   uiToneForPriority,
 } from './taskV2Types';
-import { TASK_ACTION_LABELS, editLock, getTaskActions, isDraft, reviewParticipantIds, reviewVotes, taskNeedsYou, voteFor, type TaskActionId } from './taskActions';
+import { TASK_ACTION_LABELS, editLock, getTaskActions, isDraft, recheckToast, reviewParticipantIds, reviewVotes, taskNeedsYou, voteFor, type TaskActionId } from './taskActions';
+import { showToast } from '../../store/toastSlice';
 import { ReviewVoteMark } from './ReviewVoteMark';
 import { TaskEditModal, type TaskEditField } from './TaskEditModal';
 import { describeEffectivePlacement, taskEffectivePlacement } from './fleetSelection';
@@ -103,6 +105,7 @@ export const TaskCard: React.FC<TaskCardProps> = ({
   // The bridge that will actually be used (plan REQ-UI-12), never "inherit".
   const placement = describeEffectivePlacement(taskEffectivePlacement(task, chainFleets), names.bridge);
   const actions = useTaskActions(chainId, task.task_id, task.title);
+  const dispatch = useDispatch();
   const { primary, more } = getTaskActions(task);
 
   const workerLabel = people.assignee
@@ -125,6 +128,12 @@ export const TaskCard: React.FC<TaskCardProps> = ({
         return true;
       case 'reopen':
         return actions.reopen();
+      case 'recheck': {
+        const result = await actions.recheck();
+        if (!result) return false;
+        dispatch(showToast({ ...recheckToast(result), autoDismissMs: 6000 }));
+        return true;
+      }
       case 'cancel':
         if (!window.confirm(`Cancel "${task.title}"?`)) return false;
         return actions.cancel();
