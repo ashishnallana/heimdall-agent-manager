@@ -8,6 +8,7 @@ import "core:testing"
 import "core:time"
 import "core:thread"
 import "core:strconv"
+import "core:sync"
 import "base:runtime"
 
 model_test_destroy :: proc(models: ^[dynamic]Bridge_Discovered_Model) {
@@ -184,6 +185,69 @@ test_model_discovery_explicit_command_and_empty_filter :: proc(t: ^testing.T) {
 	results := bridge_models_refresh(nil)
 	defer delete(results)
 	testing.expect_value(t, len(results), 0)
+}
+
+@(test)
+test_model_discovery_coalesces_queued_overlap_only :: proc(t: ^testing.T) {
+	sync.mutex_lock(&bridge_test_config_mutex)
+	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sync.mutex_lock(&bridge_models_refresh_mu)
+	old_key, old_completed := bridge_models_last_key, bridge_models_last_completed
+	key := bridge_provider_discovery_key([]string{"codex"})
+	bridge_models_last_key = strings.clone(key, runtime.default_allocator())
+	delete(key)
+	bridge_models_last_completed = time.to_unix_nanoseconds(time.now())
+	completed := bridge_models_last_completed
+	sync.mutex_unlock(&bridge_models_refresh_mu)
+	defer {
+		delete(bridge_models_last_key, runtime.default_allocator())
+		bridge_models_last_key, bridge_models_last_completed = old_key, old_completed
+	}
+	sync.mutex_lock(&bridge_models_mu)
+	old_cache, old_loaded := bridge_models_cache, bridge_models_loaded
+	bridge_models_cache = make([dynamic]Bridge_Provider_Models, runtime.default_allocator())
+	bridge_models_loaded = true
+	append(&bridge_models_cache, bridge_models_clone({provider="codex",has_snapshot=true,models_state="success",models_checked_at="previous"}, runtime.default_allocator()))
+	sync.mutex_unlock(&bridge_models_mu)
+	defer {
+		for &v in bridge_models_cache do bridge_models_destroy(&v, runtime.default_allocator())
+		delete(bridge_models_cache)
+		bridge_models_cache, bridge_models_loaded = old_cache, old_loaded
+	}
+	// Model requests are serialized by the isolated dispatch lane. Carry its
+	// enqueue timestamp so a request that overlapped a completed probe joins it.
+	sync.mutex_lock(&bridge_dispatch_mu)
+	worker := &bridge_dispatch_workers[len(bridge_dispatch_workers)-1]
+	old_enqueued := worker.enqueued_ns
+	worker.enqueued_ns = completed - 1
+	sync.mutex_unlock(&bridge_dispatch_mu)
+	defer worker.enqueued_ns = old_enqueued
+	requested := bridge_command_worker_enqueued_ns(&worker.sink_conn)
+	testing.expect_value(t, requested, completed - 1)
+	overlap := bridge_models_refresh([]string{"codex"}, requested_ns=requested)
+	defer { for &v in overlap do bridge_models_destroy(&v); delete(overlap) }
+	if testing.expect_value(t, len(overlap), 1) {
+		testing.expect_value(t, overlap[0].models_state, "success")
+		testing.expect_value(t, overlap[0].models_checked_at, "previous")
+	}
+
+	// A later explicit click must run again. Isolate persistence and give it an
+	// empty detection snapshot: an actual attempt now reports absent, not success.
+	old_dir := bridge_config.data_dir
+	dir := fmt.aprintf("%s/.cache/heimdall-tests/model-coalesce-%d", os.get_env("HOME", context.temp_allocator), completed)
+	bridge_config.data_dir = dir
+	defer { bridge_config.data_dir = old_dir; _ = os.remove_all(dir); delete(dir) }
+	sync.rw_mutex_lock(&bridge_provider_paths_mutex)
+	old_paths, old_paths_loaded := bridge_provider_paths, bridge_provider_paths_loaded
+	bridge_provider_paths = nil; bridge_provider_paths_loaded = true
+	sync.rw_mutex_unlock(&bridge_provider_paths_mutex)
+	defer { bridge_provider_paths, bridge_provider_paths_loaded = old_paths, old_paths_loaded }
+	later := bridge_models_refresh([]string{"codex"}, requested_ns=completed + 1)
+	defer { for &v in later do bridge_models_destroy(&v); delete(later) }
+	if testing.expect_value(t, len(later), 1) {
+		testing.expect_value(t, later[0].models_state, "absent")
+		testing.expect_value(t, later[0].models_checked_at, "previous")
+	}
 }
 
 @(test)

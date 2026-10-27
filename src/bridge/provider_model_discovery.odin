@@ -400,8 +400,8 @@ bridge_models_refresh_worker :: proc(th: ^thread.Thread) {
 	job.result = previous
 }
 
-bridge_models_refresh :: proc(providers: []string, deadline_ns: i64 = 0) -> [dynamic]Bridge_Provider_Models {
-	started := time.to_unix_nanoseconds(time.now())
+bridge_models_refresh :: proc(providers: []string, deadline_ns: i64 = 0, requested_ns: i64 = 0) -> [dynamic]Bridge_Provider_Models {
+	started := requested_ns if requested_ns > 0 else time.to_unix_nanoseconds(time.now())
 	out := make([dynamic]Bridge_Provider_Models)
 	// An absent/empty stage-2 filter means no enabled providers, never all.
 	if len(providers) == 0 || len(providers) > 16 do return out
@@ -466,7 +466,7 @@ bridge_provider_handle_models_frame :: proc(conn: ^ws.Connection, frame_type, te
 	request_id := extract_json_string(text, "request_id", ""); defer delete(request_id)
 	providers, _ := bridge_provider_json_extract_string_array(text, "providers")
 	defer { for provider in providers do delete(provider); delete(providers) }
-	results := bridge_models_refresh(providers, bridge_command_worker_deadline_ns(conn))
+	results := bridge_models_refresh(providers, bridge_command_worker_deadline_ns(conn), bridge_command_worker_enqueued_ns(conn))
 	defer { for &result in results do bridge_models_destroy(&result); delete(results) }
 	report := struct { type: string `json:"type"`, request_id: string `json:"request_id"`, command_id: string `json:"command_id"`, providers: []Bridge_Provider_Models `json:"providers"` }{"provider_model_discovery_report", request_id, request_id, results[:]}
 	bytes, err := json.marshal(report)

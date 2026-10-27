@@ -18,6 +18,7 @@ names=(
   test_model_discovery_process_pagination_and_cleanup
   test_model_discovery_process_agy_exit_and_timeout
   test_model_discovery_explicit_command_and_empty_filter
+  test_model_discovery_coalesces_queued_overlap_only
   test_model_discovery_process_framing_and_output_limit
   test_model_discovery_worker_snapshot_ownership
   test_model_discovery_pi_probe_disables_extensions

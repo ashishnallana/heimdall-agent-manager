@@ -91,6 +91,7 @@ Bridge_Dispatch_Worker :: struct {
 	current_command_id: string,
 	last_result: string,
 	output_failed: bool,
+	enqueued_ns: i64,
 	started_ns: i64,
 	deadline_ns: i64,
 }
@@ -660,6 +661,7 @@ bridge_command_dispatch_finish :: proc(worker: ^Bridge_Dispatch_Worker, job: ^Br
 	worker.last_result = ""
 	worker.output_failed = false
 	worker.current_generation = 0
+	worker.enqueued_ns = 0
 	worker.started_ns = 0
 	worker.deadline_ns = 0
 	sync.mutex_unlock(&bridge_dispatch_mu)
@@ -680,6 +682,7 @@ bridge_command_dispatch_worker :: proc(data: rawptr) {
 		sync.mutex_lock(&bridge_dispatch_mu)
 		worker.current_generation = job.generation
 		worker.current_command_id = strings.clone(job.command_id, runtime.default_allocator())
+		worker.enqueued_ns = job.enqueued_ns
 		worker.started_ns = time.to_unix_nanoseconds(time.now())
 		worker.deadline_ns = job.deadline_ns
 		sync.mutex_unlock(&bridge_dispatch_mu)
@@ -706,6 +709,18 @@ bridge_command_worker_deadline_ns :: proc(conn: ^ws.Connection) -> i64 {
 	defer sync.mutex_unlock(&bridge_dispatch_mu)
 	for &worker in bridge_dispatch_workers {
 		if rawptr(conn) == rawptr(&worker.sink_conn) do return worker.deadline_ns
+	}
+	return 0
+}
+
+// Single-flight handlers must include time spent queued when deciding whether
+// an overlapping explicit request can reuse the operation that just completed.
+bridge_command_worker_enqueued_ns :: proc(conn: ^ws.Connection) -> i64 {
+	if conn == nil do return 0
+	sync.mutex_lock(&bridge_dispatch_mu)
+	defer sync.mutex_unlock(&bridge_dispatch_mu)
+	for &worker in bridge_dispatch_workers {
+		if rawptr(conn) == rawptr(&worker.sink_conn) do return worker.enqueued_ns
 	}
 	return 0
 }
