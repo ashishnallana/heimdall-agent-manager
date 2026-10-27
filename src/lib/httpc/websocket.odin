@@ -56,7 +56,9 @@ websocket_url :: proc(raw: string, allocator := context.temp_allocator) -> (out:
 	return strings.clone(string(full), allocator), .None
 }
 
-websocket_connect :: proc(raw_url, bearer_token: string, timeout_ms := DEFAULT_TIMEOUT_MS) -> (WebSocket, Error, string) {
+// _test_ca_file is the test-only exclusive trust anchor (as Request._test_ca_file):
+// tests run in parallel and must not set HAM_TLS_CA_FILE.
+websocket_connect :: proc(raw_url, bearer_token: string, timeout_ms := DEFAULT_TIMEOUT_MS, _test_ca_file := "") -> (WebSocket, Error, string) {
 	url, url_err := websocket_url(raw_url, context.temp_allocator)
 	if url_err != .None do return {}, url_err, error_string(url_err)
 	if timeout_ms <= 0 do return {}, .Timeout, error_string(.Timeout)
@@ -93,7 +95,7 @@ websocket_connect :: proc(raw_url, bearer_token: string, timeout_ms := DEFAULT_T
 	when ODIN_OS == .Windows {
 		set_ok &= set_long(easy, CURLOPT_SSL_OPTIONS, CURLSSLOPT_REVOKE_BEST_EFFORT)
 	}
-	trust := trust_anchors()
+	trust := trust_anchors(_test_ca_file)
 	if trust.cainfo != "" {
 		set_ok &= set_ptr(easy, CURLOPT_CAINFO, rawptr(strings.clone_to_cstring(trust.cainfo, context.temp_allocator)))
 	}
