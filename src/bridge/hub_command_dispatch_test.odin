@@ -285,7 +285,7 @@ HUB_TO_BRIDGE_RUNTIME_FRAME_TYPES := []string{
 	// REQ-EXT-PERM-1: user permission decision (extension_permission.odin)
 	"permission_decision",
 	// bridge lifecycle
-	"bridge_unseal", "set_telemetry", "bridge_update", "provider_discover", "provider_extension_install",
+	"bridge_unseal", "set_telemetry", "bridge_update", "provider_discover", "provider_models_discover", "provider_extension_install",
 	// agents
 	"launch_agent", "launch_provider_test", "stop_agent", "wake_agent",
 	"get_agent_pane", "capture_agent_pane",

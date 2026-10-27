@@ -867,6 +867,7 @@ bridge_hub_handle_command :: proc(conn: ^ws.Connection, text: string) {
 	if bridge_hub_session_frame(type, text) do return
 	if bridge_provider_catalog_handle_frame(conn, type, text) do return
 	if bridge_provider_handle_discover_frame(conn, type, text) do return
+	if bridge_provider_handle_models_frame(conn, type, text) do return
 	if type == "bridge_heartbeat_ack" {
 		// H7 cross-bridge reap: the hub tells us which of the instances we reported
 		// active have actually been relaunched on ANOTHER bridge. We hold a stale old

@@ -244,6 +244,8 @@ bridge_command_spec :: proc(command_type: string) -> (Bridge_Command_Spec, bool)
 		return Bridge_Command_Spec{class = .Interactive, priority = .Interactive, key_kind = .Agent, queued = true, requires_id = true, timeout_ms = 10_000, cost_units = 2}, true
 	case "provider_discover":
 		return Bridge_Command_Spec{class = .Background, priority = .Background, key_kind = .Provider_Discovery, queued = true, requires_id = true, timeout_ms = 10_000, cost_units = 16, coalescible = true, retry_safe = true}, true
+	case "provider_models_discover":
+		return Bridge_Command_Spec{class = .Background, priority = .Background, key_kind = .Provider_Discovery, queued = true, requires_id = true, timeout_ms = 30_000, cost_units = 16, coalescible = true}, true
 	case "provider_extension_install":
 		return Bridge_Command_Spec{class = .Background, priority = .Interactive, key_kind = .Provider_Discovery, queued = true, requires_id = true, timeout_ms = 60_000, cost_units = 16}, true
 	case "shell_stream_attach":
@@ -289,6 +291,7 @@ bridge_command_is_recovery :: proc(command_type: string) -> bool {
 
 bridge_command_may_spawn_process :: proc(command_type: string) -> bool {
 	return command_type == "provider_discover" ||
+	       command_type == "provider_models_discover" ||
 	       command_type == "provider_extension_install" ||
 	       command_type == "lsp_start" ||
 	       command_type == "bridge_update" ||
@@ -299,7 +302,7 @@ bridge_command_ordering_key :: proc(command_type, text: string) -> string {
 	switch command_type {
 	// Provider discovery has its own filter-keyed single-flight registry. Leaving
 	// the scheduler key empty lets the second background worker join that flight.
-	case "provider_discover": return ""
+	case "provider_discover", "provider_models_discover": return ""
 	case "provider_extension_install":
 		prov := extract_json_string(text, "provider", "")
 		defer delete(prov)
