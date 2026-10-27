@@ -515,7 +515,8 @@ All of the following element types must have `data-debug-id`:
 | `VaultResetBanner` | `vault-reset-banner`, `vault-reset-banner-cancel-btn`, `vault-reset-banner-error`, `vault-stale-head-banner`, `vault-stale-head-confirm-btn`, `vault-stale-head-error`, `vault-pending-devices-banner` |
 | `ShortcutCheatsheetModal` / `ChordHud` | `shortcut-cheatsheet-modal`, `shortcut-cheatsheet-modal-close-btn`, `shortcut-cheatsheet-action-${actionId}`, `shortcut-chord-hud` |
 | `BridgesPanel` | `settings-bridge-plan-upgrade-${bridgeId}` |
-| `RuntimeConfigurationOptions` | `${debugPrefix}-bridge-plan-upgrade` |
+| `RuntimeConfigurationOptions` | `${debugPrefix}-bridge-plan-upgrade`, `${debugPrefix}-model-refresh-btn`, `${debugPrefix}-model-catalog-status` |
+| `ModelCatalogRefresh` in fleet rows | `fleet-${agentId}-${bridgeId}-model-refresh-btn`, `fleet-${agentId}-${bridgeId}-model-catalog-status` |
 | `ExtensionBadges` | `provider-extension-badge-${provider}`, `provider-extension-help-${provider}`, `provider-extension-install-hint-${provider}`, `provider-extension-install-copy-btn-${provider}`, `conversation-signal-badge`, `conversation-signal-badge-btn` |
 | `PermissionCards` | `conversation-permission-cards`, `permission-card-${id}`, `permission-card-countdown-${id}`, `permission-card-status-${id}`, `permission-card-input-${id}`, `permission-card-diff-toggle-${id}`, `permission-card-diff-${id}`, `permission-card-error-${id}`, `permission-card-allow-btn-${id}`, `permission-card-deny-btn-${id}`, `permission-card-expired-${id}`, `terminal-prompt-card-${id}`, `terminal-prompt-open-btn-${id}` (`${id}` = blocker_id) |
 | `LiveToolActivity` | `live-tool-activity`, `live-tools-row`, `live-tools-summary`, `live-tools-duration`, `live-tools-agent`, `live-tools-shell-${sessionId}` (clickable shell row) |

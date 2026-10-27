@@ -1,3 +1,4 @@
+import { normalizeModelCatalog, type ModelCatalogMetadata } from './modelCatalogStatus';
 import { cookieJsonFetch, cookieMutation } from '../../api/cookieFetch';
 import { normalizeProviderExtension, type ProviderExtensionStatus } from '../extension/extensionBadgeModel';
 
@@ -5,8 +6,8 @@ export type DiscoveryState = 'idle' | 'running' | 'complete' | 'failed';
 export type DetectionState = 'absent' | 'present';
 export type ProviderTestRunState = 'starting' | 'detecting' | 'awaiting_validation' | 'stopping' | 'stopped' | 'failed' | 'cancelled' | 'expired';
 
-export interface ProviderModelStatus { model_id: string; label: string; state: 'active' | 'deprecated' }
-export interface BridgeProviderStatus {
+export interface ProviderModelStatus { model_id: string; label: string; state: 'active' | 'deprecated'; resolved_model?: string }
+export interface BridgeProviderStatus extends ModelCatalogMetadata {
   provider: 'claude' | 'codex' | 'copilot' | 'antigravity' | 'pi';
   display_name: string; icon_url: string; catalog_state: 'active' | 'deprecated';
   state: DetectionState; binary_path: string; version_text: string; checked_at: string | null;
@@ -32,10 +33,12 @@ function normalizeStatus(raw: any): BridgeProviderStatus {
     state: raw?.state === 'present' ? 'present' : 'absent', binary_path: String(raw?.binary_path || ''),
     version_text: String(raw?.version_text || ''), checked_at: raw?.checked_at ? String(raw.checked_at) : null,
     enabled: Boolean(raw?.enabled),
+    ...normalizeModelCatalog(raw),
     extension: normalizeProviderExtension(raw?.extension),
     models: Array.isArray(raw?.models) ? raw.models.map((model: any) => ({
       model_id: String(model?.model_id || ''), label: String(model?.label || model?.model_id || ''),
       state: model?.state === 'deprecated' ? 'deprecated' : 'active',
+      resolved_model: model?.resolved_model ? String(model.resolved_model) : undefined,
     })) : [],
   };
 }
@@ -62,9 +65,14 @@ export const providerSetupApi = {
   },
   async discover(current: ProviderSetupResponse): Promise<ProviderSetupResponse> {
     const requestedAt = new Date().toISOString();
-    const status = await cookieMutation(`/bridges/${encodeURIComponent(current.bridge.bridge_id)}/providers/discover`, 'POST', {});
+    const status = await cookieMutation(`/bridges/${encodeURIComponent(current.bridge.bridge_id)}/providers/discover`, 'POST', { stage: 'providers' });
     return { ...current, discovery: { state: 'complete', requested_at: requestedAt, completed_at: new Date().toISOString() },
       providers: (Array.isArray(status?.providers) ? status.providers : []).map(normalizeStatus) };
+  },
+  /** Explicit second stage. Hub derives the present + enabled provider filter. */
+  async refreshModels(current: ProviderSetupResponse): Promise<ProviderSetupResponse> {
+    const status = await cookieMutation(`/bridges/${encodeURIComponent(current.bridge.bridge_id)}/providers/discover`, 'POST', { stage: 'models' });
+    return { ...current, providers: (Array.isArray(status?.providers) ? status.providers : []).map(normalizeStatus) };
   },
   async setEnabled(current: ProviderSetupResponse, provider: string, enabled: boolean): Promise<ProviderSetupResponse> {
     await cookieMutation(`/bridges/${encodeURIComponent(current.bridge.bridge_id)}/providers/${encodeURIComponent(provider)}`, 'PUT', { enabled });
@@ -83,3 +91,10 @@ export const providerSetupApi = {
     await cookieMutation(`/provider-tests/${encodeURIComponent(runId)}`, 'DELETE');
   },
 };
+
+/** Only user Refresh actions call this; neither stage is retried automatically. */
+export async function refreshBridgeProviderCatalog(bridgeId: string): Promise<any> {
+  const path = `/bridges/${encodeURIComponent(bridgeId)}/providers/discover`;
+  await cookieMutation(path, 'POST', { stage: 'providers' });
+  return cookieMutation(path, 'POST', { stage: 'models' });
+}

@@ -1,3 +1,4 @@
+import ModelCatalogRefresh from '../providers/ModelCatalogRefresh';
 import { useState } from 'react';
 import { Combobox, Icon } from '@ui';
 import ProviderIcon from '../providers/ProviderIcon';
@@ -10,7 +11,7 @@ export default function RuntimeConfigurationOptions({ bridges, selection, onChan
   const bridge = bridgeOptions.find(o => o.id === selection.bridgeId)?.bridge;
   // Mounted only while the picker is open: provider status for the SELECTED bridge,
   // kept fresh while it stays open.
-  const { capabilities: caps } = useBridgeProviderStatus(bridge, { live: true });
+  const { capabilities: caps, loaded } = useBridgeProviderStatus(bridge, { live: true });
   const providers = Array.from(new Set([...caps.map(c => c.provider), selection.provider].filter(Boolean)));
   const modelsFor = (p: string) => caps.find(c => c.provider === p)?.models || [];
   // Per-provider model picks for rows that are not the active selection, so a
@@ -34,6 +35,7 @@ export default function RuntimeConfigurationOptions({ bridges, selection, onChan
       return <button type="button" key={id} data-debug-id={`${debugPrefix}-destination-bridge-option-${id}`} aria-pressed={selected} disabled={disabled || disabledReason !== null} onClick={() => onChange({ ...selection, bridgeId: id })} className={`flex min-h-14 items-center justify-between gap-3 rounded-xl border px-3 py-3 text-left disabled:opacity-50 ${selected ? 'border-accent bg-accent/10' : 'border-subtle hover:bg-neutral-soft'}`}><span className="min-w-0"><span className="block break-words text-sm font-medium text-primary">{b.label || b.machine_hostname || id}</span><span className="block text-xs text-muted">{COMPOSER_BRIDGE_STATUS_LABEL[disabledReason ?? 'ok']}</span></span>{selected ? <Icon name="check" size={18} className="shrink-0 text-accent" /> : null}</button>;
     })}</div>{bridgeOptions.some(option => option.disabledReason === 'plan_limit') ? <a href="#/settings/account" data-debug-id={`${debugPrefix}-bridge-plan-upgrade`} className="mt-2 inline-block text-xs text-accent underline">Upgrade to enable more bridges</a> : null}{!bridge && selection.bridgeId ? <p className="mt-2 text-xs text-danger">Selected bridge is unavailable. Choose a connected bridge.</p> : null}</section>
     <section data-debug-id={`${debugPrefix}-provider-model-picker`}>
+      <ModelCatalogRefresh key={selection.bridgeId} bridgeId={selection.bridgeId} provider={selection.provider} online={Boolean(bridge && String(bridge.status).toLowerCase() === 'online')} disabled={disabled} debugPrefix={debugPrefix} />
       <div className="mb-2 grid grid-cols-[minmax(0,2fr)_minmax(0,3fr)] gap-3 text-xs font-semibold uppercase tracking-wide text-muted"><h3>Provider</h3><h3>Model</h3></div>
       <div className="space-y-2">{providers.map(p => {
         const available = caps.some(c => c.provider === p);
@@ -49,7 +51,7 @@ export default function RuntimeConfigurationOptions({ bridges, selection, onChan
           <Combobox debugId={`${debugPrefix}-model-select-${p}`} options={options} value={current} onChange={m => chooseModel(p, m)} placeholder="Choose model" searchPlaceholder="Search models…" emptyLabel="No models" disabled={disabled || !available} width="full" />
         </div>;
       })}</div>
-      {selection.model && !modelsFor(selection.provider).includes(selection.model) ? <p className="mt-2 text-xs text-danger">Selected model is unavailable for {selection.provider}. Choose another model.</p> : null}
+      {loaded && selection.model && !modelsFor(selection.provider).includes(selection.model) ? <p className="mt-2 text-xs text-danger">Selected model is unavailable for {selection.provider}. Choose another model.</p> : null}
     </section>
   </div>;
 }

@@ -1,3 +1,4 @@
+import ModelCatalogRefresh from '../providers/ModelCatalogRefresh';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useDispatch } from 'react-redux';
 import {
@@ -131,10 +132,10 @@ const BridgeRuntimeRow: React.FC<BridgeRuntimeRowProps> = ({
   const instancesQuery = useListAgentInstancesQuery({ agentId, limit: 1000 }, { skip: !agentId });
 
   const capabilities = useMemo<FleetProviderCapability[]>(() => {
-    const fromQuery = fleetProviderCapabilities(providersQuery.data);
-    if (providersQuery.data) return fromQuery;
+    const fromQuery = fleetProviderCapabilities(providersQuery.currentData);
+    if (providersQuery.currentData) return fromQuery;
     return normalizeBridgeCapabilities(bridge);
-  }, [providersQuery.data, bridge]);
+  }, [providersQuery.currentData, bridge]);
 
   const resolved = resolvedFleetProviderModel(draftPT, capabilities);
   const effectiveProvider = resolved.provider;
@@ -205,12 +206,13 @@ const BridgeRuntimeRow: React.FC<BridgeRuntimeRowProps> = ({
             aria-label={`Model model for ${roleName} on ${label}`}
             options={[
               ...(!effectiveModel ? [{ value: '', label: 'Unavailable' }] :
-                modelOptions.includes(effectiveModel) ? [] : [{ value: effectiveModel, label: effectiveModel }]),
+                modelOptions.includes(effectiveModel) ? [] : [{ value: effectiveModel, label: `${effectiveModel} (unavailable)` }]),
               ...modelOptions.map((model) => ({ value: model, label: model })),
             ]}
           />
         </div>
       </div>
+      <ModelCatalogRefresh bridgeId={bId} provider={effectiveProvider} online={isOnline} disabled={disabled} debugPrefix={`fleet-${agentId}-${bId}`} />
       {bridgeInstances.map((instance: any) => (
         <div key={instance.agent_instance_id || instance.agentInstanceId} className="text-[11px] text-muted">
           {instance.display_name || instance.displayName || instance.agent_instance_id || instance.agentInstanceId}: {instance.provider} / {instance.model}
@@ -289,8 +291,8 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
 
   const providersQuery = useListBridgeProvidersQuery({ bridgeId }, { skip: !bridgeId || !isOpen });
   const bridgeCapabilities = useMemo(
-    () => fleetProviderCapabilities(providersQuery.data),
-    [providersQuery.data]
+    () => fleetProviderCapabilities(providersQuery.currentData),
+    [providersQuery.currentData]
   );
 
   const dispatch = useDispatch();
@@ -1175,7 +1177,7 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
                               label: autoModel && (fleet as any).effective?.model ? `${(fleet as any).effective.model} (default)` : 'Bridge default',
                             },
                             ...(effectiveTopPT.model && !topModelOptions.includes(effectiveTopPT.model)
-                              ? [{ value: effectiveTopPT.model, label: effectiveTopPT.model }]
+                              ? [{ value: effectiveTopPT.model, label: `${effectiveTopPT.model} (unavailable)` }]
                               : []),
                             ...topModelOptions.map((m) => ({ value: m, label: m })),
                           ]}

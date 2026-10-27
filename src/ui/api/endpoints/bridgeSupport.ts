@@ -1,3 +1,5 @@
+import { refreshBridgeProviderCatalog } from '../../components/providers/providerSetupApi';
+import { normalizeModelCatalog } from '../../components/providers/modelCatalogStatus';
 import * as daemonApi from '../daemonApi';
 import { heimdallApi, withSessionQuery } from '../heimdallApi';
 import { useMemo } from 'react';
@@ -326,6 +328,13 @@ export const bridgeSupportApi = heimdallApi.injectEndpoints({
     // listed and revoked the one-time enrollment token, and all three now 404.
     // Enrollment is browser-approved and the bridge drives it, so the UI mints
     // nothing and has no enrollment rows to list or revoke.
+    refreshBridgeModels: build.mutation<any, { bridgeId: string }>({
+      queryFn: async ({ bridgeId }) => {
+        try { return { data: await refreshBridgeProviderCatalog(bridgeId) }; }
+        catch (error: any) { return { error: customQueryError(error) as any }; }
+      },
+      invalidatesTags: (_result, _error, { bridgeId }) => [{ type: 'BridgeProviders' as const, id: bridgeId }],
+    }),
     listBridgeProviders: build.query<any, { bridgeId: string }>({
       queryFn: async ({ bridgeId }) => {
         if (!bridgeId) return { data: { bridge_id: '', providers: [] } };
@@ -343,6 +352,7 @@ export const bridgeSupportApi = heimdallApi.injectEndpoints({
               // REQ-EXT-DET-1: the catalog's extension descriptor + measured state
               // (null when the provider ships no extension).
               extension: entry?.extension ?? null,
+              ...normalizeModelCatalog(entry),
             }));
           return { data: { bridge_id: data?.bridge_id || bridgeId, providers,
             extension_commands: Array.isArray(data?.extension_commands) ? data.extension_commands : [] } };
@@ -380,6 +390,7 @@ export const {
   useInstallProviderExtensionMutation,
   useGetProviderExtensionInstallQuery,
   useListBridgeProvidersQuery,
+  useRefreshBridgeModelsMutation,
 } = bridgeSupportApi;
 
 /** How long a visible, open runtime/provider picker may show provider status. */
@@ -408,7 +419,7 @@ export function useBridgeProviderStatus(bridge: any, opts: { skip?: boolean; liv
     pollingInterval: opts.live ? PROVIDER_STATUS_LIVE_POLL_MS : 0,
     skipPollingIfUnfocused: true,
   });
-  const { data, isError } = query;
+  const { currentData: data, isError } = query;
   return useMemo(() => {
     if (!bridge) return { bridge, capabilities: [], loaded: false };
     const capabilities = data ? normalizeBridgeCapabilities(data) : [];

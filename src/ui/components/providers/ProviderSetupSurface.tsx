@@ -1,3 +1,6 @@
+import { useDispatch } from 'react-redux';
+import { heimdallApi } from '../../api/heimdallApi';
+import { modelCatalogSummary } from './modelCatalogStatus';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Button, Icon, Spinner, StatusPill } from '@ui';
 import {
@@ -38,6 +41,10 @@ export interface ProviderSetupSurfaceProps {
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export function ProviderSetupSurface({ bridgeId, mode, variant = 'full', onApply }: ProviderSetupSurfaceProps) {
+  const dispatch = useDispatch();
+  const activeBridge = useRef(bridgeId);
+  activeBridge.current = bridgeId;
+  const invalidate = () => dispatch(heimdallApi.util.invalidateTags([{ type: 'BridgeProviders', id: bridgeId }]));
   const [payload, setPayload] = useState<ProviderSetupResponse | null>(null);
   const [loadError, setLoadError] = useState('');
   const [busy, setBusy] = useState('');
@@ -53,6 +60,7 @@ export function ProviderSetupSurface({ bridgeId, mode, variant = 'full', onApply
   const [selection, setSelection] = useState<Record<string, boolean> | null>(null);
   const [rowErrors, setRowErrors] = useState<Record<string, string>>({});
   const [discoveryFailed, setDiscoveryFailed] = useState(false);
+  const [modelRefreshFailed, setModelRefreshFailed] = useState(false);
 
   useEffect(() => {
     mounted.current = true;
@@ -62,6 +70,13 @@ export function ProviderSetupSurface({ bridgeId, mode, variant = 'full', onApply
   useEffect(() => {
     let cancelled = false;
     setLoadError('');
+    setPayload(null);
+    setSelection(null);
+    setExpanded({});
+    setBusy('');
+    setNotice('');
+    setDiscoveryFailed(false);
+    setModelRefreshFailed(false);
     if (!bridgeId) {
       setLoadError('No bridge was named, so there are no providers to set up.');
       return;
@@ -76,8 +91,8 @@ export function ProviderSetupSurface({ bridgeId, mode, variant = 'full', onApply
   const refreshAfterExtensionInstall = useCallback(() => {
     if (!bridgeId) return;
     void providerSetupApi.get(bridgeId).then(
-      (response) => { if (mounted.current) setPayload(response); },
-      () => { if (mounted.current) setNotice('Could not refresh provider details after installation. Scan again to retry.'); },
+      (response) => { if (mounted.current && activeBridge.current === bridgeId) setPayload(response); },
+      () => { if (mounted.current && activeBridge.current === bridgeId) setNotice('Could not refresh provider details after installation. Scan again to retry.'); },
     );
   }, [bridgeId]);
 
@@ -88,8 +103,10 @@ export function ProviderSetupSurface({ bridgeId, mode, variant = 'full', onApply
 
   // Enrollment mode retries while the hub still answers bridge_offline: a freshly
   // enrolled bridge may not have its runtime socket up yet (REQ-ENR-3).
-  async function rediscover() {
-    if (!payload) return;
+  async function rediscover(fetchModels = true) {
+    if (!payload || payload.bridge.bridge_id !== bridgeId) return;
+    const requestedBridge = payload.bridge.bridge_id;
+    const current = () => mounted.current && activeBridge.current === requestedBridge;
     setBusy('discovery');
     setDiscoveryFailed(false);
     setNotice('Asking this bridge to scan for supported provider CLIs…');
@@ -98,18 +115,31 @@ export function ProviderSetupSurface({ bridgeId, mode, variant = 'full', onApply
       for (;;) {
         try {
           const next = await providerSetupApi.discover(payload);
-          if (!mounted.current) return;
+          if (!current()) return;
           setPayload(next);
           setSelection(defaultProviderSelection(next.providers));
           setRowErrors({});
-          setNotice(variant === 'compact' ? '' : 'Provider discovery completed on the bridge.');
+          if (fetchModels) {
+            setNotice('Fetching models for enabled providers…');
+            // Model probes are never part of the binary-detection retry loop.
+            try {
+              const refreshed = await providerSetupApi.refreshModels(next);
+              if (!current()) return;
+              setPayload(refreshed);
+              setNotice('Provider and model refresh completed.');
+            } catch (error: any) {
+              if (!current()) return;
+              setNotice(String(error?.message || error));
+            }
+          } else setNotice(variant === 'compact' ? '' : 'Provider discovery completed on the bridge.');
+          invalidate();
           return;
         } catch (error: any) {
-          if (!mounted.current) return;
+          if (!current()) return;
           if (isRetriableDiscoveryError(error) && Date.now() + DISCOVERY_RETRY_MS < deadline) {
             setNotice('Waiting for the bridge to come online before scanning…');
             await sleep(DISCOVERY_RETRY_MS);
-            if (!mounted.current) return;
+            if (!current()) return;
             continue;
           }
           setDiscoveryFailed(true);
@@ -118,7 +148,7 @@ export function ProviderSetupSurface({ bridgeId, mode, variant = 'full', onApply
         }
       }
     } finally {
-      if (mounted.current) setBusy('');
+      if (current()) setBusy('');
     }
   }
 
@@ -127,12 +157,13 @@ export function ProviderSetupSurface({ bridgeId, mode, variant = 'full', onApply
   async function applySelection() {
     if (!payload || !selection) return;
     setBusy('apply');
+    setModelRefreshFailed(false);
     setNotice('');
     const changes = providerEnableChanges(payload.providers, selection);
     const results = await Promise.allSettled(
       changes.map((change) => providerSetupApi.setEnabled(payload, change.provider, change.enabled)),
     );
-    if (!mounted.current) return;
+    if (!mounted.current || activeBridge.current !== payload.bridge.bridge_id) return;
     const errors: Record<string, string> = {};
     const saved = new Map<string, boolean>();
     results.forEach((result, index) => {
@@ -140,13 +171,35 @@ export function ProviderSetupSurface({ bridgeId, mode, variant = 'full', onApply
       if (result.status === 'fulfilled') saved.set(change.provider, change.enabled);
       else errors[change.provider] = String((result.reason as Error)?.message || result.reason);
     });
-    setPayload({
+    const updated = {
       ...payload,
       providers: payload.providers.map((entry) => saved.has(entry.provider) ? { ...entry, enabled: Boolean(saved.get(entry.provider)) } : entry),
-    });
+    };
+    setPayload(updated);
     setRowErrors(errors);
     setBusy('');
-    if (Object.keys(errors).length === 0) onApply?.();
+    invalidate();
+    if (Object.keys(errors).length === 0) {
+      // The button explicitly includes model refresh; ordinary Enable toggles do not.
+      if (checkedProviderCount(updated.providers, selection) > 0) {
+        setBusy('apply');
+        try {
+          const refreshed = await providerSetupApi.refreshModels(updated);
+          if (!mounted.current || activeBridge.current !== updated.bridge.bridge_id) return;
+          setPayload(refreshed);
+        } catch (error: any) {
+          if (!mounted.current || activeBridge.current !== updated.bridge.bridge_id) return;
+          setModelRefreshFailed(true);
+          setNotice(String(error?.message || error));
+          setBusy('');
+          invalidate();
+          return;
+        }
+        setBusy('');
+      }
+      invalidate();
+      onApply?.();
+    }
     else setNotice('Some providers could not be updated. Try again, or continue and fix them later in Settings → Providers.');
   }
 
@@ -157,7 +210,7 @@ export function ProviderSetupSurface({ bridgeId, mode, variant = 'full', onApply
     const id = payload.bridge.bridge_id;
     if (autoScannedBridge.current === id) return;
     autoScannedBridge.current = id;
-    void rediscover();
+    void rediscover(false);
   }, [mode, variant, payload, busy]);
 
   async function setProviderEnabled(provider: BridgeProviderStatus, enabled: boolean) {
@@ -166,12 +219,15 @@ export function ProviderSetupSurface({ bridgeId, mode, variant = 'full', onApply
     setBusy(key);
     setNotice('');
     try {
-      setPayload(await providerSetupApi.setEnabled(payload, provider.provider, enabled));
-      setNotice(`${provider.display_name} ${enabled ? 'enabled' : 'disabled'} on this bridge.`);
+      const updated = await providerSetupApi.setEnabled(payload, provider.provider, enabled);
+      if (!mounted.current || activeBridge.current !== updated.bridge.bridge_id) return;
+      setPayload(updated);
+      invalidate();
+      setNotice(`${provider.display_name} ${enabled ? 'enabled' : 'disabled'} on this bridge.${enabled ? ' Use Refresh to fetch its model list.' : ''}`);
     } catch (error: any) {
-      setNotice(String(error?.message || error));
+      if (mounted.current && activeBridge.current === payload.bridge.bridge_id) setNotice(String(error?.message || error));
     } finally {
-      setBusy('');
+      if (mounted.current && activeBridge.current === payload.bridge.bridge_id) setBusy('');
     }
   }
 
@@ -215,7 +271,7 @@ export function ProviderSetupSurface({ bridgeId, mode, variant = 'full', onApply
           </div>
         ) : discoveryFailed ? (
           <div className="mt-3">
-            <Button variant="secondary" data-debug-id="provider-setup-discover-btn" onClick={() => void rediscover()} leading={<Icon name="refresh" size={16} />}>
+            <Button variant="secondary" data-debug-id="provider-setup-discover-btn" onClick={() => void rediscover(false)} leading={<Icon name="refresh" size={16} />}>
               Scan again
             </Button>
           </div>
@@ -255,11 +311,11 @@ export function ProviderSetupSurface({ bridgeId, mode, variant = 'full', onApply
               </details>
             ) : null}
             <div className="mt-4 flex flex-wrap justify-end gap-2">
-              {hasRowErrors ? (
+              {hasRowErrors || modelRefreshFailed ? (
                 <Button variant="ghost" data-debug-id="provider-summary-continue-btn" disabled={busy !== ''} onClick={onApply}>Continue anyway</Button>
               ) : null}
               <Button variant="primary" data-debug-id="provider-setup-apply-btn" loading={busy === 'apply'} disabled={busy !== '' || !selection} onClick={() => void applySelection()}>
-                {enableButtonLabel(checked)}
+                {enableButtonLabel(checked)}{checked > 0 ? ' and refresh models' : ''}
               </Button>
             </div>
           </>
@@ -293,7 +349,7 @@ export function ProviderSetupSurface({ bridgeId, mode, variant = 'full', onApply
           onClick={() => void rediscover()}
           leading={busy === 'discovery' ? <Spinner size="sm" /> : <Icon name="refresh" size={16} />}
         >
-          {busy === 'discovery' ? 'Scanning…' : 'Scan again'}
+          {busy === 'discovery' ? 'Refreshing…' : 'Refresh providers and models'}
         </Button>
       </div>
 
@@ -370,13 +426,15 @@ export function ProviderSetupSurface({ bridgeId, mode, variant = 'full', onApply
                   online={bridge.status === 'online'}
                   disabled={busy !== ''}
                   onComplete={refreshAfterExtensionInstall}
-                  onRetryDiscovery={rediscover}
+                  onRetryDiscovery={() => rediscover(false)}
                 />
               ) : null}
 
               {!isExpanded ? null : available ? (
                 <div id={detailsId} className="border-t border-subtle bg-surface-raised/30 px-4 py-3">
                   <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted">Models</div>
+                  <p data-debug-id={`provider-model-catalog-status-${provider.provider}`} className="mb-3 text-xs text-muted">{modelCatalogSummary(provider)}</p>
+                  {provider.models.length === 0 ? <p className="text-sm text-muted">No models were returned. Refresh after checking your provider account.</p> : null}
                   <div className="space-y-2">
                     {provider.models.map((model) => {
                       const canTest = provider.enabled && busy === '';
