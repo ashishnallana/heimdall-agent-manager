@@ -269,6 +269,11 @@ if me=='sv-enable':
         # A desktop Linux $PREFIX (e.g. /usr/local) is not Termux.
         del self.env['TERMUX_VERSION']; (self.mock/'termux-keystore').unlink()
         self.env['PREFIX']='/usr/local'
+        # termux() removes the host-service mocks to prove that the runit path
+        # does not depend on them. Restore Linux's systemctl prerequisite before
+        # reusing this fixture as the desktop-Linux negative control; otherwise
+        # the result depends on whether the CI host happens to provide systemctl.
+        self.stub('systemctl','#!/bin/sh\nexit 0\n')
         self.run_install('--hub','https://hub.mundus.in','--dry-run')
 
     def test_termux_requires_termux_services(self):
