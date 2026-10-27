@@ -13,8 +13,6 @@ const appIcon = (() => {
     return undefined;
   }
 })();
-const { pruneAndRegister, updatePort, deregister } = require('./instanceRegistry.cjs');
-const { startDebugServer } = require('./debugServer.cjs');
 const bridgeManager = require('./bridgeManager.cjs');
 
 function normalizeBaseUrl(value: string): string {
@@ -410,11 +408,6 @@ ipcMain.handle('odin-api:pick-directory', async (event) => {
   return { ok: true, canceled: false, path: result.filePaths[0] };
 });
 
-// REQ-ELECTRON-NO-REMOTE-DEBUG-1: the localhost debug server can drive the
-// signed-in renderer, so web content must never be able to start or locate it.
-// It is a developer opt-in at launch only (HEIMDALL_UI_DEBUG=1), never via IPC.
-let currentDebugPort = 0;
-
 ipcMain.handle('heimdall-api:open-external', async (_event, url: string) => {
   await shell.openExternal(String(url || ''));
   return { ok: true };
@@ -462,7 +455,7 @@ function installAppMenu() {
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
-app.whenReady().then(async () => {
+app.whenReady().then(() => {
   // macOS dock icon (window `icon` is ignored on macOS; the dock uses this).
   if (process.platform === 'darwin' && appIcon && app.dock) {
     app.dock.setIcon(appIcon);
@@ -479,8 +472,6 @@ app.whenReady().then(async () => {
   // `server.proxy` (see vite.config.js) forwards `/api/v1` to the local Hub.
   // Packaged builds load the HTTPS Hub UI directly; both use its OIDC cookie.
   const daemonUrl = process.env.HEIMDALL_DAEMON_URL || 'http://127.0.0.1:49322';
-  pruneAndRegister(daemonUrl);
-  updatePort(0); // Explicitly 0 since disabled by default
 
   console.log('[heimdall] startup config:');
   console.log(`  daemon_url=${daemonUrl}`);
@@ -498,12 +489,6 @@ app.whenReady().then(async () => {
   if (!backgroundLaunch) createWindow();
   else app.dock?.hide();
 
-  if (process.env.HEIMDALL_UI_DEBUG === '1') {
-    currentDebugPort = await startDebugServer();
-    updatePort(currentDebugPort);
-    console.log(`[heimdall] debug_server_port=${currentDebugPort}`);
-  }
-
   app.on('activate', () => {
     showMainWindow();
   });
@@ -517,7 +502,6 @@ app.on('before-quit', () => {
   userRefreshTimer = null;
   statusTray?.destroy();
   statusTray = null;
-  deregister();
 });
 
 app.on('window-all-closed', () => {

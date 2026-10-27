@@ -188,10 +188,12 @@ test('REQ-MAC-TRAY-1: closing the macOS window hides it and packaged installs la
   assert.match(mainSource, /isQuitting = true; app\.quit\(\)/);
 });
 
-test('REQ-ELECTRON-NO-REMOTE-DEBUG-1: web content cannot start or locate the localhost debug server', () => {
+test('REQ-ELECTRON-NO-REMOTE-DEBUG-1: the Electron app has no debug-control server at all', () => {
+  for (const removed of ['src/ui/electron/debugServer.cts', 'src/ui/electron/instanceRegistry.cts', 'src/ui/debugCapture.ts']) {
+    assert.equal(fs.existsSync(path.join(ROOT, removed)), false, `${removed} must stay deleted`);
+  }
   assert.doesNotMatch(preloadSource, /toggleDebugServer|getDebugInfo|debug-server|debug-info/);
-  assert.doesNotMatch(mainSource, /ipcMain\.(handle|on)\('odin-api:(toggle-debug-server|get-debug-info)'/);
-  assert.doesNotMatch(mainSource, /stopDebugServer/);
-  // The developer opt-in remains a launch-time environment switch only.
-  assert.match(mainSource, /if \(process\.env\.HEIMDALL_UI_DEBUG === '1'\) \{\s*currentDebugPort = await startDebugServer\(\);/);
+  assert.doesNotMatch(mainSource, /debugServer|startDebugServer|HEIMDALL_UI_DEBUG|instanceRegistry/);
+  const rendererEntry = fs.readFileSync(path.join(ROOT, 'src/ui/main.tsx'), 'utf8');
+  assert.doesNotMatch(rendererEntry, /debugCapture|__debugStore/);
 });

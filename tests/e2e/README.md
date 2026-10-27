@@ -7,22 +7,7 @@
 - Uses an isolated daemon/data directory only.
 - Default isolated daemon port is `49422`.
 - Writes per-scenario transcripts under `tests/e2e/transcripts/<timestamp>/` unless `--artifacts-dir` is provided.
-- Drives user-visible actions through the Electron debug UI endpoints (`/click`, `/type`, `/select`, `/state`, `/elements`, `/screenshot`, `/upload-file`).
-
-### Driving artifact upload without a native file chooser
-
-The debug harness cannot open the OS file chooser or deliver a clipboard paste, so
-UI artifact create/upload is exercised via `POST /upload-file`, which injects a
-synthetic `File` into a real artifact upload `<input type="file">` and dispatches a
-genuine `change` event (running the production upload path end-to-end).
-
-```bash
-# Open a conversation thread and its Artifacts side panel first (via /click), then:
-curl -s -X POST "http://127.0.0.1:<debug-port>/upload-file" \
-  -d '{"debug_id":"conversation-thread-artifacts-upload-input","file_name":"harness.png","mime":"image/png"}'
-# Optional: pass base64 bytes with "content_base64"; omitted content defaults to a 1x1 PNG.
-# The new artifact then appears in the right-sidebar Artifacts list and via `ham-ctl artifacts list`.
-```
+- Drives user-visible actions through a browser automation harness against `data-debug-id` selectors. The Electron app no longer ships a debug-control server (REQ-ELECTRON-NO-REMOTE-DEBUG-1).
 
 ### Validating memory edit/archive (supersede model)
 
@@ -92,7 +77,7 @@ Each run writes:
 - `preflight.json` — local prerequisites and explicit blockers.
 - `runner-transcript.json` — summary across selected scenarios.
 - `<scenario-id>/transcript.json` — per-scenario steps, assertions, blockers, and artifact paths.
-- optional `<scenario-id>/*.png`, `redux-state.json`, `elements.json` — UI evidence collected from the Electron debug server.
+- optional `<scenario-id>/*.png` — UI evidence captured by the browser harness.
 
 ## External prerequisites for full canonical pass
 
