@@ -13,8 +13,9 @@ import jsonx "odin_test:lib/jsonx"
 // every trigger fired: the review gate against the CURRENT reviewers, review
 // roles and user-approval flag; dependency readiness (refold + released task
 // blocks); a bridge_offline agent block whose bridge is back; the matcher
-// (dispatch); and a done task's pending or failed merge-back. It is the safe
-// alternative to `task hold` + `task release`:
+// (dispatch); and a done task's pending or failed merge-back (never while a
+// merge job for it is still running). It is the safe alternative to
+// `task hold` + `task release`:
 //
 //   - it never approves: the gate only counts verdicts already posted;
 //   - a task with a live lease (work or review) is left entirely to its holder;
@@ -37,28 +38,44 @@ Recheck_Result :: struct {
 }
 
 task_recheck :: proc(svc: ^Service, task_in: domain.Task, actor: Actor) -> (Recheck_Result, bool, domain.Domain_Error) {
-	actions := make([dynamic]string, context.temp_allocator)
-	reasons := make([dynamic]string, context.temp_allocator)
 	u, uok, uerr := begin_uow(svc)
 	if !uok do return {}, false, uerr
-	chain, allowed, aerr := recheck_authorize(svc, task_in.owner_user_id, actor, task_in.chain_id)
-	if !allowed {
+	res, ok, err := task_recheck_in_uow(svc, &u, task_in, actor)
+	if !ok {
 		_, _ = end_uow(svc, &u, false)
-		return {}, false, aerr
+		return {}, false, err
 	}
+	// A re-check that changed nothing leaves nothing behind: no event, no
+	// notification (a waiting user-approval gate re-notifies on evaluation).
+	if !res.changed {
+		_, _ = end_uow(svc, &u, false)
+		return res, true, domain.Domain_Error{}
+	}
+	committed, cerr := end_uow(svc, &u, true)
+	if !committed {
+		if cerr.code == .None do cerr = domain.domain_error(.Internal_Error, "re-check was not committed")
+		return {}, false, cerr
+	}
+	if fresh, fok, _ := iface.taskchain_get_task(svc.repo, res.task.task_id); fok do res.task = fresh
+	return res, true, domain.Domain_Error{}
+}
+
+// task_recheck_in_uow does the re-check inside `u`; the caller commits only
+// when the result says it changed something, and rolls back otherwise.
+task_recheck_in_uow :: proc(svc: ^Service, u: ^Uow, task_in: domain.Task, actor: Actor) -> (Recheck_Result, bool, domain.Domain_Error) {
+	actions := make([dynamic]string, context.temp_allocator)
+	reasons := make([dynamic]string, context.temp_allocator)
+	chain, allowed, aerr := recheck_authorize(svc, task_in.owner_user_id, actor, task_in.chain_id)
+	if !allowed do return {}, false, aerr
 	task, found, terr := iface.taskchain_get_task(svc.repo, task_in.task_id)
 	if !found || task.owner_user_id != task_in.owner_user_id {
-		_, _ = end_uow(svc, &u, false)
 		if terr.code == .None do terr = domain.domain_error(.Not_Found, "task not found")
 		return {}, false, terr
 	}
 	before := task
 	before_events := recheck_event_count(svc, task)
 	before_leases, lerr := iface.taskchain_list_leases_by_task(svc.repo, task.task_id)
-	if lerr.code != .None {
-		_, _ = end_uow(svc, &u, false)
-		return {}, false, lerr
-	}
+	if lerr.code != .None do return {}, false, lerr
 	live := chain.status == .Active && chain.publish_state == .Published
 	ok, err := true, domain.Domain_Error{}
 	merge_requeued := ""
@@ -80,8 +97,8 @@ task_recheck :: proc(svc: ^Service, task_in: domain.Task, actor: Actor) -> (Rech
 		if live {
 			// 1. The gate against the current review requirements.
 			if task.state == .In_Review {
-				gate, gok, gerr := evaluate_gate_in_uow(svc, &u, chain, task, actor)
-				if gok && gate == .Rejected do gok, gerr = gate_replan_in_uow(svc, &u, chain, task, actor)
+				gate, gok, gerr := evaluate_gate_in_uow(svc, u, chain, task, actor)
+				if gok && gate == .Rejected do gok, gerr = gate_replan_in_uow(svc, u, chain, task, actor)
 				ok, err = gok, gerr
 			}
 			// 2. An agent block raised only because the bridge was away (the
@@ -93,22 +110,21 @@ task_recheck :: proc(svc: ^Service, task_in: domain.Task, actor: Actor) -> (Rech
 					json_bool(&p, "auto", true)
 					json_str(&p, "reason", "recheck_bridge_online")
 					json_str(&p, "note", fmt.tprintf("bridge %s is online again", bridge))
-					_, _, ok, err = record_event(svc, &u, task, actor, EV_ANSWERED, json_end(&p))
+					_, _, ok, err = record_event(svc, u, task, actor, EV_ANSWERED, json_end(&p))
 				}
 			}
 			// 3. Readiness, task blocks and dispatch: the shared trigger path.
-			if ok do ok, err = after_chain_change(svc, &u, chain.chain_id, chain.owner_user_id, .Task_Updated)
+			if ok do ok, err = after_chain_change(svc, u, chain.chain_id, chain.owner_user_id, .Task_Updated)
 		}
-		// 4. Merge-back of a done task (the chain may already be completed).
-		if ok {
+		// 4. Merge-back of a task that was ALREADY done (the chain may be
+		//    completed). A task this re-check just moved to done had its
+		//    merge queued by that transition; queuing it again would race it.
+		if ok && before.state == .Done {
 			if fresh, fok, _ := iface.taskchain_get_task(svc.repo, task.task_id); fok do task = fresh
-			merge_requeued = recheck_merge_in_uow(svc, &u, task)
+			merge_requeued = recheck_merge_in_uow(svc, u, task)
 		}
 	}
-	if !ok {
-		_, _ = end_uow(svc, &u, false)
-		return {}, false, err
-	}
+	if !ok do return {}, false, err
 
 	after, _, _ := iface.taskchain_get_task(svc.repo, task.task_id)
 	after_leases, _ := iface.taskchain_list_leases_by_task(svc.repo, task.task_id)
@@ -130,23 +146,8 @@ task_recheck :: proc(svc: ^Service, task_in: domain.Task, actor: Actor) -> (Rech
 	if merge_requeued != "" do append(&actions, merge_requeued)
 	if changed && len(actions) == 0 do append(&actions, "task events were re-evaluated")
 
-	// Whatever still holds the task, described against its committed state.
+	// Whatever still holds the task, described against its state after this re-check.
 	if len(reasons) == 0 do recheck_reasons(svc, chain, after, &reasons)
-
-	// A re-check that changed nothing leaves nothing behind: no event, no
-	// notification (a waiting user-approval gate re-notifies on evaluation).
-	committed := true
-	cerr: domain.Domain_Error
-	if changed {
-		committed, cerr = end_uow(svc, &u, true)
-	} else {
-		_, _ = end_uow(svc, &u, false)
-	}
-	if !committed {
-		if cerr.code == .None do cerr = domain.domain_error(.Internal_Error, "re-check was not committed")
-		return {}, false, cerr
-	}
-	if fresh, fok, _ := iface.taskchain_get_task(svc.repo, task.task_id); fok do after = fresh
 
 	msg := ""
 	if changed {
@@ -181,11 +182,12 @@ recheck_event_count :: proc(svc: ^Service, task: domain.Task) -> int {
 }
 
 // recheck_merge_in_uow re-queues the merge-back of a done task whose merge is
-// pending or failed when the bridge that ran its work is online. Returns the
-// action text, or "" when nothing was queued (recheck_reasons explains why).
+// pending or failed when the bridge that ran its work is online and no job for
+// it is still running. Returns the action text, or "" when nothing was queued
+// (recheck_reasons explains why).
 @(private = "file")
 recheck_merge_in_uow :: proc(svc: ^Service, u: ^Uow, task: domain.Task) -> string {
-	if task.state != .Done do return ""
+	if task.state != .Done || merge_inflight(svc, string(task.task_id)) do return ""
 	st := task_merge_status(svc, task)
 	if st.state != "pending" && st.state != "failed" do return ""
 	evs, err := iface.taskchain_list_events_by_task(svc.repo, task.task_id, task.owner_user_id)
@@ -285,7 +287,9 @@ recheck_merge_reasons :: proc(svc: ^Service, task: domain.Task, out: ^[dynamic]s
 		append(out, fmt.tprintf("merge conflict (%s): resolve it in the task workdir and resubmit", st.detail))
 	case "pending", "failed":
 		bridge := last_work_bridge(evs)
-		if bridge == "" {
+		if merge_inflight(svc, string(task.task_id)) {
+			append(out, fmt.tprintf("merge %s: the merge-back is in flight on bridge %s; its outcome lands on the timeline", st.state, bridge))
+		} else if bridge == "" {
 			append(out, fmt.tprintf("merge %s: no work lease recorded a bridge", st.state))
 		} else if !bridge_online(svc, bridge) {
 			append(out, fmt.tprintf("merge %s: bridge %s is offline; it is re-queued when the bridge reconnects", st.state, bridge))

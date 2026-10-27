@@ -231,6 +231,92 @@ test_recheck_explains_merge_none_without_git_directory :: proc(t: ^testing.T) {
 	testing.expect(t, recheck_reasons_contain(res, `dir_plain has vcs_kind ""`), fmt.tprintf("%v", res.reasons))
 }
 
+// recheck_queued_merges runs one re-check in its own unit of work and returns
+// how many merge-backs it queued, then commits like task_recheck would.
+recheck_queued_merges :: proc(t: ^testing.T, fx: ^Fixture, task_id: string) -> (Recheck_Result, int) {
+	u, uok, _ := begin_uow(&fx.svc)
+	if !testing.expect(t, uok, "begin uow") do return {}, -1
+	res, ok, err := task_recheck_in_uow(&fx.svc, &u, get_task(fx, task_id), actor_from_auth(user_auth()))
+	testing.expect(t, ok, fmt.tprintf("recheck: %s", err.message))
+	queued := len(u.effects.merges)
+	_, _ = end_uow(&fx.svc, &u, ok && res.changed)
+	return res, queued
+}
+
+// Review blocker (attempt #2): a re-check that closes a stale gate in a git
+// directory queues the merge-back exactly once. The in_review → done refold
+// queues it; step 4 must not queue it again. Once the task is done, a pending
+// merge is re-queued once, and never while its merge job is still running.
+@(test)
+test_recheck_stale_gate_in_git_directory_queues_one_merge :: proc(t: ^testing.T) {
+	fx, log, ok := lease_fixture(t, "recheck_gate_git")
+	defer lease_fixture_close(fx, log)
+	if !ok do return
+	chain := seed_live_chain(t, fx, "chain_rc_gate_git")
+	seed_directory(fx, chain, "dir_git", "br_1", "git")
+	seed_fleet(fx, chain, "agt_w")
+	seed_instance(fx, chain, "inst_w1", "agt_w", "br_1", "idle")
+	_ = publish_task(t, fx, chain, "task_1", brief = `{"goal":"g","acceptance":["a"],"review_roles":[]}`)
+	row := get_task(fx, "task_1")
+	row.requires_user_approval = true
+	_, _, _ = iface.taskchain_save_task(&fx.repo, row)
+	lease, leased := lease_of(fx, "inst_w1")
+	if !testing.expect(t, leased, "task_1 granted") do return
+	submit_via_release(t, fx, lease)
+	if !testing.expect_value(t, get_task(fx, "task_1").state, domain.Task_State.In_Review) do return
+	row = get_task(fx, "task_1")
+	row.requires_user_approval = false
+	_, _, _ = iface.taskchain_save_task(&fx.repo, row)
+
+	res, queued := recheck_queued_merges(t, fx, "task_1")
+	testing.expect_value(t, res.task.state, domain.Task_State.Done)
+	testing.expect_value(t, queued, 1)
+	testing.expect(t, !strings.contains(res.message, "re-queued"), res.message)
+	done := get_task(fx, "task_1")
+	testing.expect_value(t, done.state, domain.Task_State.Done)
+	testing.expect_value(t, task_merge_status(&fx.svc, done).state, "pending")
+
+	// Still in flight (the first job has not replied): nothing is re-sent.
+	testing.expect(t, merge_inflight_begin(&fx.svc, "task_1"), "mark the merge job running")
+	testing.expect(t, !merge_inflight_begin(&fx.svc, "task_1"), "one job per task")
+	busy, busy_queued := recheck_queued_merges(t, fx, "task_1")
+	testing.expect_value(t, busy_queued, 0)
+	testing.expect(t, !busy.changed, busy.message)
+	testing.expect(t, recheck_reasons_contain(busy, "in flight"), fmt.tprintf("%v", busy.reasons))
+	merge_inflight_end(&fx.svc, "task_1")
+
+	// The job ended with no outcome recorded (hub lost the reply): re-queued once.
+	again, again_queued := recheck_queued_merges(t, fx, "task_1")
+	testing.expect_value(t, again_queued, 1)
+	testing.expect(t, again.changed && strings.contains(again.message, "merge-back re-queued on bridge br_1 (was pending)"), again.message)
+}
+
+// effect_merge_worktree queues at most one merge per task per unit of work.
+@(test)
+test_merge_effect_dedupes_within_uow :: proc(t: ^testing.T) {
+	fx, log, ok := lease_fixture(t, "merge_dedupe")
+	defer lease_fixture_close(fx, log)
+	if !ok do return
+	chain := seed_live_chain(t, fx, "chain_merge_dedupe")
+	seed_directory(fx, chain, "dir_git", "br_1", "git")
+	seed_fleet(fx, chain, "agt_w")
+	seed_instance(fx, chain, "inst_w1", "agt_w", "br_1", "idle")
+	_ = publish_task(t, fx, chain, "task_1", brief = `{"goal":"g","acceptance":["a"],"review_roles":[]}`)
+	lease, leased := lease_of(fx, "inst_w1")
+	if !testing.expect(t, leased, "task_1 granted") do return
+	submit_via_release(t, fx, lease)
+	done := get_task(fx, "task_1")
+	if !testing.expect_value(t, done.state, domain.Task_State.Done) do return
+	evs, _ := iface.taskchain_list_events_by_task(&fx.repo, "task_1", "u1")
+	u, _, _ := begin_uow(&fx.svc)
+	effect_merge_worktree(&fx.svc, &u, done, evs)
+	effect_merge_worktree(&fx.svc, &u, done, evs)
+	requeue_pending_merges(&fx.svc, &u, "br_1")
+	queued := len(u.effects.merges)
+	_, _ = end_uow(&fx.svc, &u, false)
+	testing.expect_value(t, queued, 1)
+}
+
 count_all_events :: proc(fx: ^Fixture, task_id: string) -> int {
 	evs, _ := iface.taskchain_list_events_by_task(&fx.repo, domain.Task_ID(task_id), "u1")
 	return len(evs)

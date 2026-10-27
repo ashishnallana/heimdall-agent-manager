@@ -3,6 +3,7 @@ package taskv2
 import "base:runtime"
 import "core:fmt"
 import "core:strings"
+import "core:sync"
 import "core:thread"
 import dbt "odin_test:hub/platform/dbtelemetry"
 import domain "odin_test:hub/domain"
@@ -39,7 +40,8 @@ Merge_Effect :: struct {
 // No-op unless its work ran on a bridge whose chain directory gets worktrees.
 effect_merge_worktree :: proc(svc: ^Service, u: ^Uow, task: domain.Task, evs: []domain.Task_Event, only_bridge := "") {
 	if u == nil || !PER_LEASE_WORKTREES_ENABLED do return
-    if !workflow_merge_allowed(svc, task) do return
+	if merge_queued(u, task.task_id) do return
+	if !workflow_merge_allowed(svc, task) do return
 	bridge_id := ""
 	for i := len(evs) - 1; i >= 0; i -= 1 {
 		ev := evs[i]
@@ -92,6 +94,10 @@ flush_merges :: proc(svc: ^Service, e: ^Effects) {
 	context.allocator = runtime.heap_allocator()
 	for m in e.merges {
 		if svc.bridge_command_sink.send_runtime_command_wait == nil do continue
+		// One job per task at a time: a duplicate (bridge hello, directory add
+		// or re-check while the first is still waiting) would resend the same
+		// command_id and could record a stale failure after the merge.
+		if !merge_inflight_begin(svc, m.task_id) do continue
 		job := new(Merge_Job)
 		job.svc = svc
 		job.merge = Merge_Effect{
@@ -112,11 +118,43 @@ merge_job_run :: proc(data: rawptr) {
 	dbt.scope_begin(.Merge)
 	defer dbt.scope_end_background()
 	defer {
+		merge_inflight_end(job.svc, job.merge.task_id)
 		destroy_merge_effect(job.merge)
 		free(job)
 		free_all(context.temp_allocator)
 	}
 	run_merge_scoped(job.svc, job.merge)
+}
+
+// merge_inflight_begin marks `task_id`'s merge-back as running; false when a
+// job for it already is. In-memory on purpose: a restart drops the jobs too.
+merge_inflight_begin :: proc(svc: ^Service, task_id: string) -> bool {
+	sync.mutex_lock(&svc.state_mutex)
+	defer sync.mutex_unlock(&svc.state_mutex)
+	if svc.merges_inflight == nil do svc.merges_inflight = make(map[string]struct{}, runtime.heap_allocator())
+	if task_id in svc.merges_inflight do return false
+	svc.merges_inflight[strings.clone(task_id, runtime.heap_allocator())] = {}
+	return true
+}
+
+merge_inflight_end :: proc(svc: ^Service, task_id: string) {
+	sync.mutex_lock(&svc.state_mutex)
+	defer sync.mutex_unlock(&svc.state_mutex)
+	if task_id not_in svc.merges_inflight do return
+	key, _ := delete_key(&svc.merges_inflight, task_id)
+	delete(key, runtime.heap_allocator())
+}
+
+merge_inflight :: proc(svc: ^Service, task_id: string) -> bool {
+	sync.mutex_lock(&svc.state_mutex)
+	defer sync.mutex_unlock(&svc.state_mutex)
+	return task_id in svc.merges_inflight
+}
+
+// merge_queued: this unit of work already holds a merge-back for the task.
+merge_queued :: proc(u: ^Uow, task_id: domain.Task_ID) -> bool {
+	for m in u.effects.merges do if m.task_id == string(task_id) do return true
+	return false
 }
 
 // run_merge_scoped runs the merge on a scratch arena: this thread is on the

@@ -54,6 +54,10 @@ Service :: struct {
 	// written inline (unit tests).
 	pending_touches:     map[string]struct{},
 	touch_async:         bool,
+	// merges_inflight: task ids whose merge-back job is running (sent, reply
+	// not yet recorded); guarded by state_mutex, keys heap-owned (merge.odin).
+	// A second job for the same task would race the first on one command_id.
+	merges_inflight:     map[string]struct{},
 	// wake_observer sees every wake_agent push after commit (tests).
 	wake_observer:       proc(ctx: rawptr, cmd: Wake_Command),
 	wake_observer_ctx:   rawptr,
