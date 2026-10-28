@@ -19,6 +19,18 @@ function allowedExternalUrl(value: unknown): string {
   }
 }
 
+// Only the known Brolabs deployment has a canonical approval-origin alias.
+// Keep this separate from the main-window origin: moving the desktop renderer
+// would also move its cookies and origin-bound vault identity.
+function desktopPairingOrigins(hubUrl: string, uiUrl: string): string[] {
+  const origins = [hubUrl, uiUrl];
+  const base = (value: string) => String(value || '').trim().replace(/\/$/, '');
+  if (base(hubUrl) === 'https://hub.brolabs.ai' && base(uiUrl) === 'https://heimdall.brolabs.ai') {
+    origins.push('https://web.ninjy.ai');
+  }
+  return origins;
+}
+
 // allowedPairingUrl accepts a Bridge enrollment approval URL only on one of the
 // configured Hub/UI origins. Those origins may be http: in local development.
 function allowedPairingUrl(value: unknown, trustedOrigins: string[]): string {
@@ -96,4 +108,4 @@ function oidcWindowNavigationAllowed(value: unknown, uiOrigin: string): boolean 
   }
 }
 
-module.exports = { allowedExternalUrl, allowedPairingUrl, classifyNavigation, idpOriginFromAuthConfig, isAuthStartUrl, oidcWindowNavigationAllowed };
+module.exports = { allowedExternalUrl, desktopPairingOrigins, allowedPairingUrl, classifyNavigation, idpOriginFromAuthConfig, isAuthStartUrl, oidcWindowNavigationAllowed };

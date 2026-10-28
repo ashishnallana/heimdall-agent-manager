@@ -14,7 +14,7 @@ const appIcon = (() => {
   }
 })();
 const bridgeManager = require('./bridgeManager.cjs');
-const { allowedExternalUrl, allowedPairingUrl, classifyNavigation, idpOriginFromAuthConfig, isAuthStartUrl, oidcWindowNavigationAllowed } = require('./externalUrl.cjs');
+const { allowedExternalUrl, desktopPairingOrigins, allowedPairingUrl, classifyNavigation, idpOriginFromAuthConfig, isAuthStartUrl, oidcWindowNavigationAllowed } = require('./externalUrl.cjs');
 const desktopUpdater = require('./desktopUpdater.cjs');
 const { installNotifications } = require('./notifications.cjs');
 
@@ -322,10 +322,10 @@ async function refreshAuthenticatedUserFromSession() {
 }
 
 function handleEnrollmentEvent(rawPayload: any) {
-  // REQ-EXT-URL-1: only open (or show) an approval page on this Hub's origins.
+  // REQ-EXT-URL-1: only open (or show) an approval page on this Hub's trusted origins.
   let payload = rawPayload;
   if (payload?.type === 'pairing') {
-    const url = allowedPairingUrl(payload.url, [configuredHubApiBaseUrl(), configuredUiOrigin()]);
+    const url = allowedPairingUrl(payload.url, desktopPairingOrigins(configuredHubApiBaseUrl(), configuredUiOrigin()));
     payload = url && payload.code
       ? { ...payload, url }
       : { type: 'error', message: 'Bridge enrollment printed an approval page outside this Hub; it was not opened.' };

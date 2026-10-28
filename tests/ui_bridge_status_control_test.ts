@@ -580,13 +580,68 @@ test('REQ-EXT-URL-1: Bridge pairing pages open only on the configured Hub/UI ori
   }
 });
 
+test('Brolabs desktop enrollment accepts the canonical Ninjy approval without moving its UI origin', () => {
+  const hub = 'https://hub.brolabs.ai';
+  const legacy = 'https://heimdall.brolabs.ai';
+  const canonical = 'https://web.ninjy.ai';
+  for (const configured of [[hub, legacy], [hub + '/', legacy + '/'], [hub, canonical]]) {
+    const origins = externalUrl.desktopPairingOrigins(configured[0], configured[1]);
+    for (const origin of new Set([...configured.map(value => new URL(value).origin), canonical])) {
+      const approval = origin + '/api/v1/device/add';
+      assert.equal(externalUrl.allowedPairingUrl(approval, origins), approval);
+    }
+  }
+  // This alias grants only system-browser approval opening, not renderer navigation.
+  assert.equal(externalUrl.classifyNavigation(canonical + '/', {
+    uiOrigin: legacy, idpOrigin: 'https://auth.brolabs.ai', inAuthRedirect: false,
+  }), 'external');
+});
+
+test('Ninjy enrollment compatibility is scoped to the exact Brolabs deployment', () => {
+  const canonical = 'https://web.ninjy.ai/api/v1/device/add';
+  const configs = [
+    ['https://hub.example', 'https://app.example'],
+    ['https://hub.brolabs.ai', 'https://custom.example'],
+    ['https://hub.example', 'https://heimdall.brolabs.ai'],
+    ['https://hub.brolabs.ai/tenant', 'https://heimdall.brolabs.ai'],
+    ['https://hub.brolabs.ai?tenant=other', 'https://heimdall.brolabs.ai'],
+    ['https://user@hub.brolabs.ai', 'https://heimdall.brolabs.ai'],
+    ['http://hub.brolabs.ai', 'https://heimdall.brolabs.ai'],
+    ['http://127.0.0.1:8081', 'http://127.0.0.1:5173'],
+  ];
+  for (const configured of configs) {
+    const origins = externalUrl.desktopPairingOrigins(configured[0], configured[1]);
+    assert.equal(externalUrl.allowedPairingUrl(canonical, origins), '', configured.join(', '));
+    // Existing configured origins, including local development, retain their behavior.
+    for (const origin of configured.map(value => new URL(value).origin)) {
+      const approval = origin + '/api/v1/device/add';
+      assert.equal(externalUrl.allowedPairingUrl(approval, origins), approval);
+    }
+  }
+});
+
+test('Ninjy enrollment alias rejects unrelated hosts, lookalikes, credentials and unsafe protocols', () => {
+  const origins = externalUrl.desktopPairingOrigins('https://hub.brolabs.ai', 'https://heimdall.brolabs.ai');
+  for (const refused of [
+    'https://evil.example/api/v1/device/add',
+    'https://web.ninjy.ai.evil.example/api/v1/device/add',
+    'https://web.ninjy.ai@evil.example/api/v1/device/add',
+    'https://user:pass@web.ninjy.ai/api/v1/device/add',
+    'https://web.ninjy.ai:8443/api/v1/device/add',
+    'http://web.ninjy.ai/api/v1/device/add',
+    'file:///tmp/device/add', 'javascript:alert(1)',
+  ]) {
+    assert.equal(externalUrl.allowedPairingUrl(refused, origins), '', refused);
+  }
+});
+
 test('REQ-EXT-URL-1: every shell.openExternal call in the main process uses a vetted URL', () => {
   const calls = [...mainSource.matchAll(/shell\.openExternal\(([^)]*)\)/g)].map((match) => match[1]);
   // OIDC-window popups, main-window navigation, main-window popups, pairing (x2), IPC.
   assert.deepEqual(calls, ['href', 'allowedExternalUrl(url', 'href', 'trayPairing.url', 'trayPairing.url', 'href']);
   assert.match(mainSource, /const href = allowedExternalUrl\(url\);\s*if \(href\) void shell\.openExternal\(href\);/);
   assert.match(mainSource, /const href = allowedExternalUrl\(url\);\s*if \(!href\) return \{ ok: false/);
-  assert.match(mainSource, /allowedPairingUrl\(payload\.url, \[configuredHubApiBaseUrl\(\), configuredUiOrigin\(\)\]\)/);
+  assert.match(mainSource, /allowedPairingUrl\(payload\.url, desktopPairingOrigins\(configuredHubApiBaseUrl\(\), configuredUiOrigin\(\)\)\)/);
 });
 
 const NAV = { uiOrigin: 'https://heimdall.brolabs.ai', idpOrigin: 'https://auth.brolabs.ai', inAuthRedirect: false };
