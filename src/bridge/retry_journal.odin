@@ -42,6 +42,9 @@ bridge_retry_journal_load :: proc(j: ^Bridge_Retry_Journal, path: string) -> boo
     }
     info, stat_err := os.stat(path, context.temp_allocator)
     forbidden := os.Permissions{.Read_Group, .Write_Group, .Execute_Group, .Read_Other, .Write_Other, .Execute_Other}
+    // Windows has no POSIX mode bits: os.stat reports every file as
+    // read/write-all, so the group/other check would reject every journal.
+    when ODIN_OS == .Windows do forbidden = {}
     if stat_err != nil || info.type != .Regular || info.size > BRIDGE_RETRY_JOURNAL_MAX_BYTES || info.mode & forbidden != {} {
         j.failed = true; return false
     }
@@ -107,10 +110,15 @@ bridge_retry_journal_save :: proc(j: ^Bridge_Retry_Journal, path: string) -> boo
 }
 bridge_retry_atomic_write :: proc(path: string, bytes: []byte) -> bool {
     slash := strings.last_index_byte(path, '/')
+    when ODIN_OS == .Windows do slash = max(slash, strings.last_index_byte(path, '\\'))
     if slash <= 0 do return false
     dir := path[:slash]
     if mk := bridge_make_directory_all(dir); mk != nil && !os.exists(dir) do return false
-    if os.chmod(dir, {.Read_User, .Write_User, .Execute_User}) != nil do return false
+    // On Windows os.chmod opens its target for writing, which fails for a
+    // directory, and POSIX mode bits do not apply there anyway.
+    when ODIN_OS != .Windows {
+        if os.chmod(dir, {.Read_User, .Write_User, .Execute_User}) != nil do return false
+    }
     tmp := strings.concatenate({path, ".tmp"}, context.temp_allocator)
     _ = os.remove(tmp)
     f, open_err := os.open(tmp, {.Write, .Create, .Excl, .Trunc}, {.Read_User, .Write_User})
