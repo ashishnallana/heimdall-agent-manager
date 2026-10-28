@@ -19,21 +19,15 @@ const desktopUpdater = require('./desktopUpdater.cjs');
 const { installNotifications } = require('./notifications.cjs');
 const windowChrome = require('./windowChrome.cjs');
 
-function normalizeBaseUrl(value: string): string {
-  return String(value || '').trim().replace(/\/$/, '');
-}
+const { resolveDesktopConfig, desktopAuthReturnUrl } = require('./desktopConfig.cjs');
+const desktopConfig = resolveDesktopConfig(process.env, app.isPackaged);
 
 function configuredHubApiBaseUrl(): string {
-  return normalizeBaseUrl(
-    process.env.HEIMDALL_HUB_API_URL ||
-    process.env.HEIMDALL_HUB_URL ||
-    // Default to the public Hub API, not the outpost/dev-proxy browser URL.
-    (app.isPackaged ? 'https://hub.brolabs.ai' : 'http://127.0.0.1:8081')
-  );
+  return desktopConfig.hubApiBaseUrl;
 }
 
 function configuredUiOrigin(): string {
-  return normalizeBaseUrl(process.env.HEIMDALL_UI_URL || (app.isPackaged ? 'https://heimdall.brolabs.ai' : 'http://127.0.0.1:5173'));
+  return desktopConfig.uiUrl;
 }
 
 // Bypass Nix sandbox GPU library mismatches on Linux to enable full hardware-accelerated rendering.
@@ -62,7 +56,7 @@ try {
 
 // app.isPackaged is false when Electron loads a loose .cjs (Nix install, CI).
 // Treat as dev only when the Vite dev server URL is explicitly provided.
-const isDev = Boolean(process.env.VITE_DEV_SERVER_URL);
+const isDev = desktopConfig.isDev;
 
 let authWindow: any = null;
 let mainWindow: any = null;
@@ -98,25 +92,26 @@ function openOidcWindow(url: string, owner: any) {
     webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true },
   });
   authWindow = loginWindow;
-  const uiOrigin = new URL(configuredUiOrigin()).origin;
   let finishing = false;
   const finishIfReturned = (_event: any, nextUrl: string) => {
-    try {
-      const parsed = new URL(nextUrl);
-      if (parsed.origin !== uiOrigin || parsed.pathname.startsWith('/api/v1/auth/login') || parsed.pathname.startsWith('/api/v1/auth/callback')) return;
-      if (finishing) return;
-      finishing = true;
-      // Chromium emits redirect/navigation events from inside its navigation
-      // stack. Destroying the emitting WebContents synchronously trips a fatal
-      // CHECK in Electron on macOS. Complete OIDC on the next event-loop turn,
-      // after the callback response has committed its HttpOnly session cookie.
-      setImmediate(() => {
-        const main = owner && !owner.isDestroyed() ? owner : BrowserWindow.getAllWindows().find((candidate: any) => candidate !== loginWindow);
-        if (!loginWindow.isDestroyed()) loginWindow.close();
-        if (authWindow === loginWindow) authWindow = null;
-        void main?.loadURL(configuredUiOrigin());
-      });
-    } catch (_err) { /* Keep the OIDC window open for non-URL navigations. */ }
+    const returnUrl = desktopAuthReturnUrl(nextUrl, configuredUiOrigin());
+    if (!returnUrl) return;
+    if (finishing) return;
+    finishing = true;
+    // did-navigate reports a committed UI response, after the callback's cookie
+    // was accepted. Defer closing outside Chromium's navigation stack (macOS).
+    setImmediate(() => {
+      // A cancelled/replaced popup must not reload an unrelated window.
+      if (authWindow !== loginWindow || loginWindow.isDestroyed()) return;
+      const main = owner && !owner.isDestroyed() ? owner : null;
+      loginWindow.close();
+      if (authWindow === loginWindow) authWindow = null;
+      if (main && !main.isDestroyed()) {
+        void main.loadURL(returnUrl);
+        main.show();
+        main.focus();
+      }
+    });
   };
   // REQ-NAV-ROUTE-2: the OIDC window has no preload, but still must not open
   // popups or leave https: (other than returning to the Hub UI).
@@ -131,7 +126,7 @@ function openOidcWindow(url: string, owner: any) {
   loginWindow.webContents.on('will-navigate', guardOidcNavigation);
   loginWindow.webContents.on('will-redirect', guardOidcNavigation);
   loginWindow.webContents.on('did-navigate', finishIfReturned);
-  loginWindow.webContents.on('did-redirect-navigation', finishIfReturned);
+  // Redirect events occur before the final response commits; never finish there.
   loginWindow.on('closed', () => { if (authWindow === loginWindow) authWindow = null; });
   void loginWindow.loadURL(url);
 }
@@ -231,14 +226,8 @@ function createWindow() {
     });
   }
 
-  if (isDev) {
-    win.loadURL(process.env.VITE_DEV_SERVER_URL || 'http://127.0.0.1:5173');
-  } else {
-    // The packaged app is a trusted desktop shell for the Hub web UI. Loading
-    // the Hub origin is what lets Chromium retain/send the exact same HttpOnly
-    // OIDC session cookie as the browser UI; there is no deprecated HUT token.
-    win.loadURL(configuredUiOrigin());
-  }
+  // Hosted or Vite UI: all navigation, cookies and completion use the same URL.
+  win.loadURL(configuredUiOrigin());
 
   return win;
 }
@@ -256,7 +245,7 @@ const desktopNotifications = installNotifications({
   ipcMain, Notification, icon: appIcon,
   getWindow: () => mainWindow,
   showWindow: showMainWindow,
-  uiUrl: isDev ? process.env.VITE_DEV_SERVER_URL : configuredUiOrigin(),
+  uiUrl: configuredUiOrigin(),
 });
 
 function trayStatus(status: any): { label: string; symbol: string } {
@@ -603,6 +592,9 @@ app.whenReady().then(() => {
   console.log(`  daemon_url_source=${process.env.HEIMDALL_DAEMON_URL ? 'env' : 'default'}`);
   console.log(`  hub_api_base_url=${configuredHubApiBaseUrl()}`);
   console.log(`  ui_origin=${configuredUiOrigin()}`);
+  if (desktopConfig.migratedLegacyUi) {
+    console.warn('[heimdall] Brolabs desktop UI moved to https://web.ninjy.ai. Existing profile/storage is retained; canonical-origin device approval may be required.');
+  }
   console.log('  auth=oidc-session-cookie');
   console.log(`  pid=${process.pid}`);
   console.log(`  platform=${process.platform}`);
