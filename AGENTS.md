@@ -548,6 +548,12 @@ All of the following element types must have `data-debug-id`:
 | `ProviderExtensionInstallAction` | `provider-extension-action-${provider}`, `provider-extension-install-btn-${provider}`, `provider-extension-retry-btn-${provider}`, `provider-extension-progress-${provider}` |
 | `BridgesPanel` | `settings-bridge-update-extensions` |
 
+### Quoted context controls
+| Component | Debug IDs |
+|---|---|
+| QuoteSelectionPopover | `message-quote-popover`, `message-quote-btn`, `message-quote-status` |
+| ComposerContextChips | `composer-quote-chips`, `composer-quote-chip-${quoteId}`, `composer-quote-details-${quoteId}`, `composer-quote-remove-${quoteId}`, `composer-quote-source-${quoteId}` |
+
 ### Adding new elements
 
 When adding any new interactive element to the UI:
