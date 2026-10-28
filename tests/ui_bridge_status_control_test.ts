@@ -459,7 +459,10 @@ test('REQ-MAC-TRAY-2: tray receives display-only OIDC identity and never an auth
 test('REQ-MAC-TRAY-1: closing the macOS window hides it and packaged installs launch hidden at login', () => {
   assert.match(mainSource, /win\.on\('close',[\s\S]*!supportsStatusTray\(\) \|\| isQuitting[\s\S]*event\.preventDefault\(\)[\s\S]*win\.hide\(\)/);
   assert.match(mainSource, /app\.dock\?\.hide\(\)/);
-  assert.match(mainSource, /const loginSettings =[\s\S]*openAtLogin: enabled,[\s\S]*openAsHidden: true/);
+  assert.match(mainSource, /const loginSettings =[\s\S]*\{ openAtLogin: enabled \}/);
+  // Electron 44 removed the macOS 12-only login-item attributes.
+  // Match property accesses/keys only, so explanatory comments naming them stay allowed.
+  assert.doesNotMatch(mainSource, /\.wasOpenedAsHidden\b|\bopenAsHidden\s*:/);
   assert.match(mainSource, /app\.setLoginItemSettings\(loginSettings\)/);
   assert.match(mainSource, /function ensureDefaultLaunchAtLogin\(\)/);
   assert.match(mainSource, /LOGIN_ITEM_PREFERENCE_MARKER/);
