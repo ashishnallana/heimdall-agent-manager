@@ -260,8 +260,9 @@ function wasOpenedAtLogin(): boolean {
   if (process.platform === 'win32') return process.argv.includes('--background');
   if (process.platform !== 'darwin') return false;
   try {
+    // Electron 44 removed `wasOpenedAsHidden` (macOS 12 and earlier only).
     const settings = app.getLoginItemSettings();
-    return Boolean(settings.wasOpenedAtLogin || settings.wasOpenedAsHidden);
+    return Boolean(settings.wasOpenedAtLogin);
   } catch (_err) { return false; }
 }
 
@@ -270,12 +271,9 @@ function setLaunchAtLogin(enabled: boolean) {
   try {
     const loginSettings = process.platform === 'win32'
       ? { openAtLogin: enabled, path: process.execPath, args: ['--background'] }
-      : {
-          openAtLogin: enabled,
-          // Supports the intended behavior on macOS 12 and earlier. On macOS
-          // 13+ Electron reports `wasOpenedAtLogin`, which suppresses the window.
-          openAsHidden: true,
-        };
+      // macOS 13+ (Electron 44's minimum) reports `wasOpenedAtLogin`, which
+      // suppresses the window; Electron 44 removed the old `openAsHidden`.
+      : { openAtLogin: enabled };
     app.setLoginItemSettings(loginSettings);
     const recordedSettings = app.getLoginItemSettings();
     const requestWasRecorded = !enabled || recordedSettings.openAtLogin || recordedSettings.status === 'enabled' || recordedSettings.status === 'requires-approval';
@@ -438,7 +436,7 @@ function refreshTrayStatus() {
     ...(desktopUpdateState.message ? [{ label: desktopUpdateState.message, enabled: false }] : []),
     ...(trayPairing ? [
       { label: `Pairing code: ${trayPairing.code}`, enabled: false },
-      { label: 'Copy Pairing Code', click: () => clipboard.writeText(trayPairing?.code || '') },
+      { label: 'Copy Pairing Code', click: () => { void clipboard.writeText(trayPairing?.code || '').catch(() => undefined); } },
       { label: 'Open Approval Page', click: () => { if (trayPairing?.url) void shell.openExternal(trayPairing.url); } },
     ] : []),
     { type: 'separator' },
