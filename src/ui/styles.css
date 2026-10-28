@@ -1052,3 +1052,37 @@ body {
     animation: none;
   }
 }
+
+/* REQ-MAC-CHROME-1: macOS desktop hidden title bar. Every rule is gated on the
+   attribute useWindowChrome sets only when the desktop preload reports
+   `mac-hidden`, so the browser/PWA, Windows/Linux and older desktops are unaffected.
+   Chromium drag regions swallow clicks, so controls, HTML5-draggable pane grips
+   and headers, and any overlapping popover/modal are explicitly no-drag. */
+.window-gate-drag-strip {
+  display: none;
+}
+html[data-window-chrome="mac-hidden"] .window-drag {
+  -webkit-app-region: drag;
+}
+html[data-window-chrome="mac-hidden"] .window-drag :is(button, a, input, textarea, select, label, summary, [role="button"], [role="tab"], [role="menuitem"], [role="combobox"], [draggable="true"], [contenteditable], [tabindex]),
+html[data-window-chrome="mac-hidden"] :is([draggable="true"], [role="dialog"], [role="alertdialog"], [role="menu"], [role="listbox"], [role="tooltip"], [aria-modal="true"]),
+html[data-window-chrome="mac-hidden"] [data-debug-id^="main-pane-drag-grip-"] {
+  -webkit-app-region: no-drag;
+}
+/* Auth, device-vault and standalone device screens: a strip under the traffic
+   lights is the drag surface. The full shell has its own drag regions. */
+html[data-window-chrome="mac-hidden"] .window-gate-drag-strip {
+  display: block;
+  position: fixed;
+  inset: 0 0 auto 0;
+  height: 40px;
+  z-index: 70;
+  pointer-events: none;
+  -webkit-app-region: drag;
+}
+html[data-window-chrome="mac-hidden"]:has([data-debug-id="app-shell"]) .window-gate-drag-strip {
+  display: none;
+}
+html[data-window-chrome="mac-hidden"] .window-gate-pad {
+  padding-top: 40px;
+}
