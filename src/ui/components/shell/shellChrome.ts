@@ -36,9 +36,24 @@ export function topChromeHeight(isMobile: boolean): number {
   return isMobile ? MOBILE_TOP_CHROME_HEIGHT : TOP_CHROME_HEIGHT;
 }
 
-export function topLeftClusterWidth(isMobile: boolean, showBrand: boolean): number {
+/**
+ * REQ-MAC-CHROME-1: the macOS desktop app hides the native title bar and draws
+ * the traffic lights over this row (x=16, three ~14px buttons, ~8px gaps). The
+ * top-left cluster starts after them. Other platforms and the browser/PWA send
+ * no window-chrome style, so they keep a zero inset.
+ */
+export const MAC_TRAFFIC_LIGHT_INSET = 78;
+
+export type WindowChromeStyle = 'native' | 'mac-hidden';
+
+/** Left inset reserved for native window controls; 0 unless mac-hidden and windowed. */
+export function windowControlsInsetLeft(style: WindowChromeStyle, fullscreen: boolean): number {
+  return style === 'mac-hidden' && !fullscreen ? MAC_TRAFFIC_LIGHT_INSET : 0;
+}
+
+export function topLeftClusterWidth(isMobile: boolean, showBrand: boolean, controlsInset = 0): number {
   if (isMobile) return showBrand ? MOBILE_TOP_LEFT_CLUSTER_WIDTH : MOBILE_COMPACT_TOP_LEFT_CLUSTER_WIDTH;
-  return showBrand ? TOP_LEFT_CLUSTER_WIDTH : COMPACT_TOP_LEFT_CLUSTER_WIDTH;
+  return controlsInset + (showBrand ? TOP_LEFT_CLUSTER_WIDTH : COMPACT_TOP_LEFT_CLUSTER_WIDTH);
 }
 
 /** Window-chrome icon button: 32px rounded square on desktop, 44px circle on mobile. */

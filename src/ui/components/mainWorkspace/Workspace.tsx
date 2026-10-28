@@ -886,7 +886,7 @@ export function Workspace({ focusMessageId, isMobile = false, leading, leadingWi
       <div
         ref={topRightRef}
         data-debug-id="workspace-top-right-cluster"
-        className="absolute right-0 top-0 z-30 flex items-center gap-1 pl-1 pr-2"
+        className="window-drag absolute right-0 top-0 z-30 flex items-center gap-1 pl-1 pr-2"
         style={{ height: topChromeHeight(isMobile) }}
       >
         {trailing}

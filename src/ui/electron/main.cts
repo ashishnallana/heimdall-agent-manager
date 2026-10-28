@@ -17,6 +17,7 @@ const bridgeManager = require('./bridgeManager.cjs');
 const { allowedExternalUrl, desktopPairingOrigins, allowedPairingUrl, classifyNavigation, idpOriginFromAuthConfig, isAuthStartUrl, oidcWindowNavigationAllowed } = require('./externalUrl.cjs');
 const desktopUpdater = require('./desktopUpdater.cjs');
 const { installNotifications } = require('./notifications.cjs');
+const windowChrome = require('./windowChrome.cjs');
 
 function normalizeBaseUrl(value: string): string {
   return String(value || '').trim().replace(/\/$/, '');
@@ -144,15 +145,30 @@ function createWindow() {
     title: APP_DISPLAY_NAME,
     icon: appIcon,
     backgroundColor: '#0f172a',
+    // REQ-MAC-CHROME-1: macOS-only hidden title bar; {} elsewhere.
+    ...windowChrome.windowChromeOptions(process.platform, process.env),
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
       preload: path.join(__dirname, 'preload.cjs'),
-      additionalArguments: Notification.isSupported() ? ['--heimdall-native-notifications'] : [],
+      additionalArguments: [
+        ...(Notification.isSupported() ? ['--heimdall-native-notifications'] : []),
+        ...windowChrome.windowChromeArgs(process.platform, process.env),
+      ],
     },
   });
   mainWindow = win;
+
+  // The renderer drops its traffic-light inset in fullscreen, where macOS
+  // hides the buttons. Display-only state; the renderer cannot send anything.
+  const sendChromeState = () => {
+    if (win.isDestroyed()) return;
+    win.webContents.send(windowChrome.CHROME_STATE_CHANNEL, { fullscreen: win.isFullScreen() });
+  };
+  win.on('enter-full-screen', sendChromeState);
+  win.on('leave-full-screen', sendChromeState);
+  win.webContents.on('did-finish-load', sendChromeState);
 
   // REQ-MAC-TRAY-1 / REQ-WIN-TRAY-1: closing the visible UI leaves the
   // lightweight tray controller running. The independently managed Bridge

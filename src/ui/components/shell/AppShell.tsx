@@ -55,6 +55,7 @@ import {
   topLeftClusterWidth as computeTopLeftClusterWidth,
   isAgentConversationRoute,
 } from './shellChrome';
+import { useWindowChrome } from '../../hooks/useWindowChrome';
 import type { PendingBridgeUpdate } from '../settings/bridgeUpdate';
 import { buildRouteHash, getRoutePathname, getRouteSearch } from '../../utils/appLocation';
 import {
@@ -950,6 +951,8 @@ function AuthGate() {
   const authStatusRef = useRef<AuthStatus>('checking');
   authStatusRef.current = auth.status;
   const lastSeenUserRef = useRef(readLastSeenUserId());
+  // REQ-MAC-CHROME-1: sets <html data-window-chrome> before any gate renders.
+  useWindowChrome();
 
   // REQ-MAC-TRAY-2: the sandboxed renderer publishes only display identity
   // fields to Electron's main process. OIDC cookies and tokens never cross IPC.
@@ -1025,18 +1028,27 @@ function AuthGate() {
     };
   }, [dispatch]);
 
-  if (auth.status === 'checking') return <AuthStatusScreen debugId="auth-checking" title="Checking session…" body="Verifying your Heimdall session." />;
-  if (auth.status === 'unavailable') return <AuthStatusScreen debugId="auth-unavailable" title="Sign-in provider unavailable" body="Heimdall could not reach its sign-in provider. Retrying…" />;
-  if (auth.status === 'unauthenticated') return <UnauthenticatedLanding />;
-  if (auth.status === 'forbidden') return <AccessDenied />;
-  if (auth.status === 'error') return <AuthStatusScreen debugId="auth-error" title="Unable to verify session" body={auth.error || 'The app could not reach /api/v1/me.'} />;
-  return (
-    <AuthUserProvider value={auth.user}>
-      <DeviceVaultGate>
-        <AuthenticatedShell key={authUserId(auth.user) || 'authenticated'} user={auth.user || {}} />
-      </DeviceVaultGate>
-    </AuthUserProvider>
-  );
+  // REQ-MAC-CHROME-1: the auth, device-vault and standalone device screens have
+  // no 48px chrome row, so a fixed strip under the traffic lights is their window
+  // drag surface. It renders only under html[data-window-chrome="mac-hidden"] and
+  // CSS hides it once the full app shell (with its own drag regions) mounts.
+  const gateDragStrip = <div aria-hidden="true" data-debug-id="window-gate-drag-strip" className="window-gate-drag-strip" />;
+  let screen: React.ReactNode;
+  if (auth.status === 'checking') screen = <AuthStatusScreen debugId="auth-checking" title="Checking session…" body="Verifying your Heimdall session." />;
+  else if (auth.status === 'unavailable') screen = <AuthStatusScreen debugId="auth-unavailable" title="Sign-in provider unavailable" body="Heimdall could not reach its sign-in provider. Retrying…" />;
+  else if (auth.status === 'unauthenticated') screen = <UnauthenticatedLanding />;
+  else if (auth.status === 'forbidden') screen = <AccessDenied />;
+  else if (auth.status === 'error') screen = <AuthStatusScreen debugId="auth-error" title="Unable to verify session" body={auth.error || 'The app could not reach /api/v1/me.'} />;
+  else {
+    screen = (
+      <AuthUserProvider value={auth.user}>
+        <DeviceVaultGate>
+          <AuthenticatedShell key={authUserId(auth.user) || 'authenticated'} user={auth.user || {}} />
+        </DeviceVaultGate>
+      </AuthUserProvider>
+    );
+  }
+  return <>{gateDragStrip}{screen}</>;
 }
 
 function AuthStatusScreen({ debugId, title, body }: { debugId: string; title: string; body: string }) {
@@ -1898,7 +1910,10 @@ function AuthenticatedShell({ user }: { user: AuthUser }) {
   const isWorkspaceRoute = isAgentConversationRoute(path);
   const hideTopLeftCluster = isMobile && isWorkspaceRoute && isCurrentAuxPaneOpen;
   const showBrand = !isWorkspaceRoute || !isEffectiveCollapsed;
-  const topLeftClusterWidth = computeTopLeftClusterWidth(isMobile, showBrand);
+  // REQ-MAC-CHROME-1: 0 everywhere except the windowed macOS hidden title bar.
+  const { insetLeft: rawControlsInset } = useWindowChrome();
+  const controlsInset = isMobile ? 0 : rawControlsInset;
+  const topLeftClusterWidth = computeTopLeftClusterWidth(isMobile, showBrand, controlsInset);
   const chromeHeight = topChromeHeight(isMobile);
   const chromeIconButtonClass = chromeIconButtonSizeClass(isMobile);
   // Fixed sidebar control, plus the wordmark when the sidebar is open or the
@@ -1960,7 +1975,7 @@ function AuthenticatedShell({ user }: { user: AuthUser }) {
     return (
       <main
         data-debug-id="enrollment-standalone-page"
-        className="fixed inset-x-0 top-0 app-viewport-height w-full overflow-auto bg-canvas text-primary"
+        className="window-gate-pad fixed inset-x-0 top-0 app-viewport-height w-full overflow-auto bg-canvas text-primary"
       >
         <Suspense fallback={null}>
           <DeviceApprovalPage />
@@ -1976,7 +1991,7 @@ function AuthenticatedShell({ user }: { user: AuthUser }) {
     return (
       <main
         data-debug-id="provider-enrollment-standalone-page"
-        className="fixed inset-x-0 top-0 app-viewport-height w-full overflow-auto bg-canvas text-primary"
+        className="window-gate-pad fixed inset-x-0 top-0 app-viewport-height w-full overflow-auto bg-canvas text-primary"
       >
         <Suspense fallback={null}>
           <ProviderEnrollmentSetupPage bridgeId={providerBridgeId} />
@@ -2028,8 +2043,8 @@ function AuthenticatedShell({ user }: { user: AuthUser }) {
       {!hideTopLeftCluster ? (
         <div
           data-debug-id="shell-top-left-cluster"
-          className="absolute left-0 top-0 z-[60] flex items-center gap-1 px-2"
-          style={{ width: topLeftClusterWidth, height: chromeHeight }}
+          className="window-drag absolute left-0 top-0 z-[60] flex items-center gap-1 px-2"
+          style={{ width: topLeftClusterWidth, height: chromeHeight, paddingLeft: controlsInset ? controlsInset + 8 : undefined }}
         >
           {sidebarToggleButton}
           {showBrand ? brandLink : null}
@@ -2051,7 +2066,7 @@ function AuthenticatedShell({ user }: { user: AuthUser }) {
       >
         <div className="flex w-80 max-w-[calc(100vw-1rem)] min-h-0 flex-1 flex-col">
         {/* Reserves the fixed top-left cluster's row; the update badge lives in the top bar. */}
-        <div aria-hidden="true" className="shrink-0" style={{ height: chromeHeight }} />
+        <div aria-hidden="true" className="window-drag shrink-0" style={{ height: chromeHeight }} />
 
         <div ref={setSidebarScrollRoot} data-debug-id="shell-sidebar-scroll" className="min-h-0 flex-1 overflow-y-auto p-3">
           {/* Primary action: open the command palette (search + jump + new chat).
@@ -2121,7 +2136,7 @@ function AuthenticatedShell({ user }: { user: AuthUser }) {
         {!isWorkspaceRoute ? (
           <div
             data-debug-id="shell-top-bar"
-            className="flex shrink-0 items-center justify-end gap-2 border-b border-subtle bg-canvas px-3"
+            className="window-drag flex shrink-0 items-center justify-end gap-2 border-b border-subtle bg-canvas px-3"
             style={{ height: chromeHeight }}
           >
             <SidebarUpdateBadge onOpen={openBridgeUpdate} />
