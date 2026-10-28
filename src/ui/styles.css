@@ -1053,25 +1053,24 @@ body {
   }
 }
 
-/* REQ-MAC-CHROME-1: macOS desktop hidden title bar. Every rule is gated on the
-   attribute useWindowChrome sets only when the desktop preload reports
-   `mac-hidden`, so the browser/PWA, Windows/Linux and older desktops are unaffected.
+/* REQ-MAC-CHROME-1: integrated desktop title bars. Every rule is gated on a
+   desktop preload style, so browser/PWA, Linux and older desktops are unaffected.
    Chromium drag regions swallow clicks, so controls, HTML5-draggable pane grips
    and headers, and any overlapping popover/modal are explicitly no-drag. */
 .window-gate-drag-strip {
   display: none;
 }
-html[data-window-chrome="mac-hidden"] .window-drag {
+html:is([data-window-chrome="mac-hidden"], [data-window-chrome="win-overlay"]) .window-drag {
   -webkit-app-region: drag;
 }
-html[data-window-chrome="mac-hidden"] .window-drag :is(button, a, input, textarea, select, label, summary, [role="button"], [role="tab"], [role="menuitem"], [role="combobox"], [draggable="true"], [contenteditable], [tabindex]),
-html[data-window-chrome="mac-hidden"] :is([draggable="true"], [role="dialog"], [role="alertdialog"], [role="menu"], [role="listbox"], [role="tooltip"], [aria-modal="true"]),
-html[data-window-chrome="mac-hidden"] [data-debug-id^="main-pane-drag-grip-"] {
+html:is([data-window-chrome="mac-hidden"], [data-window-chrome="win-overlay"]) .window-drag :is(button, a, input, textarea, select, label, summary, [role="button"], [role="tab"], [role="menuitem"], [role="combobox"], [draggable="true"], [contenteditable], [tabindex]),
+html:is([data-window-chrome="mac-hidden"], [data-window-chrome="win-overlay"]) :is([draggable="true"], [role="dialog"], [role="alertdialog"], [role="menu"], [role="listbox"], [role="tooltip"], [aria-modal="true"]),
+html:is([data-window-chrome="mac-hidden"], [data-window-chrome="win-overlay"]) [data-debug-id^="main-pane-drag-grip-"] {
   -webkit-app-region: no-drag;
 }
 /* Auth, device-vault and standalone device screens: a strip under the traffic
    lights is the drag surface. The full shell has its own drag regions. */
-html[data-window-chrome="mac-hidden"] .window-gate-drag-strip {
+html:is([data-window-chrome="mac-hidden"], [data-window-chrome="win-overlay"]) .window-gate-drag-strip {
   display: block;
   position: fixed;
   inset: 0 0 auto 0;
@@ -1080,9 +1079,24 @@ html[data-window-chrome="mac-hidden"] .window-gate-drag-strip {
   pointer-events: none;
   -webkit-app-region: drag;
 }
-html[data-window-chrome="mac-hidden"]:has([data-debug-id="app-shell"]) .window-gate-drag-strip {
+html:is([data-window-chrome="mac-hidden"], [data-window-chrome="win-overlay"]):has([data-debug-id="app-shell"]) .window-gate-drag-strip {
   display: none;
 }
-html[data-window-chrome="mac-hidden"] .window-gate-pad {
+html:is([data-window-chrome="mac-hidden"], [data-window-chrome="win-overlay"]) .window-gate-pad {
   padding-top: 40px;
+}
+
+/* REQ-WIN-CHROME-2: native caption controls occupy the full 48px header. */
+html[data-window-chrome="win-overlay"] .window-gate-drag-strip {
+  height: 48px;
+}
+html[data-window-chrome="win-overlay"]:not([data-window-fullscreen]) .window-gate-pad {
+  padding-top: 48px;
+}
+
+html[data-window-chrome="win-overlay"][data-window-fullscreen] .window-gate-pad {
+  padding-top: 0;
+}
+html[data-window-chrome="win-overlay"][data-window-fullscreen] .window-gate-drag-strip {
+  display: none;
 }

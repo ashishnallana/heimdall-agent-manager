@@ -1,6 +1,6 @@
 // REQ-MAC-CHROME-1: macOS-only hidden native title bar with native traffic
-// lights, an integrated renderer inset and attribute-gated drag regions. Every
-// other platform, the browser/PWA and older desktops keep today's chrome.
+// lights, Windows native caption overlay, safe insets and gated drag regions.
+// Linux, browser/PWA and older desktops keep today's chrome.
 import './helpers/vaultEndpointHarness.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -8,8 +8,10 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import { JSDOM } from 'jsdom';
 import { transformSync } from 'esbuild';
-import { MAC_TRAFFIC_LIGHT_INSET, windowControlsInsetLeft } from '../src/ui/components/shell/shellChrome.ts';
-import { applyWindowChromeAttributes, readWindowChromeStyle } from '../src/ui/hooks/useWindowChrome.ts';
+import React, { act } from 'react';
+import { createRoot } from 'react-dom/client';
+import { MAC_TRAFFIC_LIGHT_INSET, windowControlsInsetLeft, windowControlsInsetRight } from '../src/ui/components/shell/shellChrome.ts';
+import { applyWindowChromeAttributes, readWindowChromeStyle, subscribeWindowChromeGeometry, useWindowChrome } from '../src/ui/hooks/useWindowChrome.ts';
 
 function read(relative: string): string {
   return fs.readFileSync(new URL(`../${relative}`, import.meta.url), 'utf8');
@@ -29,17 +31,23 @@ const mainSource = read('src/ui/electron/main.cts');
 const appShellSource = read('src/ui/components/shell/AppShell.tsx');
 const stylesSource = read('src/ui/styles.css');
 
-test('windowChrome options are macOS-only and the kill switch restores the native title bar', () => {
+test('windowChrome keeps native controls on each desktop and the kill switch restores the native title bar', () => {
   const chrome = loadCts('windowChrome');
   assert.deepEqual(plain(chrome.windowChromeOptions('darwin', {})), { titleBarStyle: 'hidden', trafficLightPosition: { x: 16, y: 17 } });
   assert.deepEqual(plain(chrome.windowChromeArgs('darwin', {})), ['--heimdall-window-chrome=mac-hidden']);
-  for (const platform of ['win32', 'linux']) {
+  for (const platform of ['linux']) {
     assert.deepEqual(plain(chrome.windowChromeOptions(platform, {})), {});
     assert.deepEqual(plain(chrome.windowChromeArgs(platform, {})), []);
   }
   assert.deepEqual(plain(chrome.windowChromeOptions('darwin', { HEIMDALL_NATIVE_TITLE_BAR: '1' })), {});
   assert.deepEqual(plain(chrome.windowChromeArgs('darwin', { HEIMDALL_NATIVE_TITLE_BAR: '1' })), []);
   assert.equal(chrome.windowChromeStyle('darwin', { HEIMDALL_NATIVE_TITLE_BAR: '0' }), 'mac-hidden');
+  assert.deepEqual(plain(chrome.windowChromeOptions('win32', {})), {
+    titleBarStyle: 'hidden', titleBarOverlay: { height: 48 }, autoHideMenuBar: true,
+  });
+  assert.deepEqual(plain(chrome.windowChromeArgs('win32', {})), ['--heimdall-window-chrome=win-overlay']);
+  assert.deepEqual(plain(chrome.windowChromeOptions('win32', { HEIMDALL_NATIVE_TITLE_BAR: '1' })), {});
+  assert.deepEqual(plain(chrome.windowChromeArgs('win32', { HEIMDALL_NATIVE_TITLE_BAR: '1' })), []);
 });
 
 test('main window applies chrome through windowChrome only, keeps security flags, and leaves the OIDC window native', () => {
@@ -81,6 +89,7 @@ function loadPreload(argv: string[]) {
 
 test('preload exposes read-only window chrome state with replayable fullscreen and unsubscribe', () => {
   assert.equal(loadPreload([]).api.windowChrome.style, 'native');
+  assert.equal(loadPreload(['--heimdall-window-chrome=win-overlay']).api.windowChrome.style, 'win-overlay');
   const { api, emit, sends } = loadPreload(['--heimdall-window-chrome=mac-hidden']);
   assert.equal(api.windowChrome.style, 'mac-hidden');
   assert.deepEqual(plain(api.windowChrome.getState()), { fullscreen: false });
@@ -123,13 +132,13 @@ test('html attributes gate the chrome CSS and are absent in the browser/native c
   assert.equal(root.style.getPropertyValue('--window-controls-inset-left'), '');
 });
 
-test('drag/no-drag CSS only applies under html[data-window-chrome="mac-hidden"]', () => {
+test('drag/no-drag CSS requires an integrated desktop style', () => {
   const chromeCss = stylesSource.slice(stylesSource.indexOf('/* REQ-MAC-CHROME-1')).replace(/\/\*[\s\S]*?\*\//g, '');
   const appRegionRules = [...chromeCss.matchAll(/([^{}]+)\{[^}]*-webkit-app-region/g)].map((m) => m[1].trim());
   assert.ok(appRegionRules.length >= 3);
   for (const selectorList of appRegionRules) {
     for (const selector of selectorList.split(/,\s*\n/)) {
-      assert.match(selector.trim(), /^html\[data-window-chrome="mac-hidden"\]/, selector);
+      assert.match(selector.trim(), /^html:is\(\[data-window-chrome="mac-hidden"\], \[data-window-chrome="win-overlay"\]\)/, selector);
     }
   }
   assert.doesNotMatch(stylesSource.slice(0, stylesSource.indexOf('/* REQ-MAC-CHROME-1')), /-webkit-app-region/);
@@ -149,4 +158,125 @@ test('top-left cluster clears the traffic lights and gate screens get a drag sur
   assert.match(authGate, /useWindowChrome\(\)/);
   assert.match(authGate, /return <>\{gateDragStrip\}\{screen\}<\/>/);
   assert.equal(appShellSource.match(/className="window-gate-pad fixed inset-x-0 top-0/g)?.length, 2);
+});
+
+test('Windows right inset follows valid overlay geometry, protects missing data and vanishes in fullscreen', () => {
+  const area = { x: 0, y: 0, width: 1062, height: 48 };
+  assert.equal(windowControlsInsetRight('win-overlay', false, 1200, area), 138);
+  assert.equal(windowControlsInsetRight('win-overlay', false, 1200, { ...area, x: 10, width: 1050 }), 140);
+  assert.equal(windowControlsInsetRight('win-overlay', true, 1200, area), 0);
+  for (const style of ['native', 'mac-hidden'] as const) {
+    assert.equal(windowControlsInsetRight(style, false, 1200, area), 0);
+  }
+  for (const invalid of [null, { ...area, width: 1300 }, { ...area, width: 1200 },
+    { ...area, width: NaN }, { ...area, width: -1 }, { ...area, height: 0 }, { ...area, x: -1 }]) {
+    assert.equal(windowControlsInsetRight('win-overlay', false, 1200, invalid), 160);
+  }
+  assert.equal(windowControlsInsetRight('win-overlay', false, 100, null), 100);
+  assert.equal(windowControlsInsetRight('win-overlay', false, NaN, area), 160);
+  assert.equal(readWindowChromeStyle({ style: 'win-overlay' }), 'win-overlay');
+});
+
+test('Windows attributes carry only right safe area and native opt-out clears both properties', () => {
+  const root = new JSDOM('<!doctype html><html></html>').window.document.documentElement;
+  applyWindowChromeAttributes(root, 'win-overlay', false, 138);
+  assert.equal(root.getAttribute('data-window-chrome'), 'win-overlay');
+  assert.equal(root.style.getPropertyValue('--window-controls-inset-left'), '0px');
+  assert.equal(root.style.getPropertyValue('--window-controls-inset-right'), '138px');
+  applyWindowChromeAttributes(root, 'win-overlay', true, 138);
+  assert.equal(root.style.getPropertyValue('--window-controls-inset-right'), '0px');
+  applyWindowChromeAttributes(root, 'native', false);
+  assert.equal(root.hasAttribute('data-window-chrome'), false);
+  assert.equal(root.style.getPropertyValue('--window-controls-inset-right'), '');
+});
+
+test('geometry subscription reads after registering, handles resize and cleans up both listeners', () => {
+  const calls: string[] = [];
+  const overlay = {
+    visible: true, getTitlebarAreaRect: () => ({ x: 0, y: 0, width: 1000, height: 48 }),
+    addEventListener: (name: string) => { calls.push('overlay+' + name); },
+    removeEventListener: (name: string) => { calls.push('overlay-' + name); },
+  };
+  const viewport = {
+    addEventListener: (name: string) => { calls.push('viewport+' + name); },
+    removeEventListener: (name: string) => { calls.push('viewport-' + name); },
+  };
+  const cleanup = subscribeWindowChromeGeometry(overlay, viewport, () => { calls.push('read'); });
+  cleanup();
+  assert.deepEqual(calls, ['overlay+geometrychange', 'viewport+resize', 'read', 'overlay-geometrychange', 'viewport-resize']);
+});
+
+test('Windows hook tracks geometry, viewport resize, fullscreen replay and unsubscribe', async () => {
+  const dom = new JSDOM('<!doctype html><html><body><div id="root"></div></body></html>');
+  const saved = new Map<string, PropertyDescriptor | undefined>();
+  const install = (key: string, value: unknown) => {
+    saved.set(key, Object.getOwnPropertyDescriptor(globalThis, key));
+    Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
+  };
+  const listeners = new Set<(state: { fullscreen: boolean }) => void>();
+  const geometryListeners = new Set<() => void>();
+  let area = { x: 0, y: 0, width: 1062, height: 48 };
+  let fullscreen = false;
+  const overlay = {
+    visible: false, getTitlebarAreaRect: () => area,
+    addEventListener: (_name: string, callback: () => void) => { geometryListeners.add(callback); },
+    removeEventListener: (_name: string, callback: () => void) => { geometryListeners.delete(callback); },
+  };
+  (dom.window as any).odinApi = { windowChrome: {
+    style: 'win-overlay', getState: () => ({ fullscreen }),
+    onStateChange: (callback: (state: { fullscreen: boolean }) => void) => {
+      listeners.add(callback);
+      // Simulate a main-process state received between first read and subscribe.
+      fullscreen = true;
+      return () => { listeners.delete(callback); };
+    },
+  } };
+  Object.defineProperty(dom.window, 'innerWidth', { configurable: true, writable: true, value: 1200 });
+  Object.defineProperty(dom.window.navigator, 'windowControlsOverlay', { value: overlay });
+  install('window', dom.window); install('document', dom.window.document);
+  install('navigator', dom.window.navigator); install('IS_REACT_ACT_ENVIRONMENT', true);
+  const root = createRoot(dom.window.document.getElementById('root')!);
+  let latest: ReturnType<typeof useWindowChrome>;
+  function Probe() { latest = useWindowChrome(); return null; }
+  try {
+    await act(async () => { root.render(React.createElement(Probe)); });
+    assert.equal(latest!.fullscreen, true);
+    assert.equal(latest!.insetRight, 0);
+    await act(async () => {
+      fullscreen = false;
+      for (const callback of listeners) callback({ fullscreen });
+    });
+    assert.equal(latest!.insetRight, 160); // no geometry yet; protect native controls
+    await act(async () => {
+      overlay.visible = true;
+      for (const callback of geometryListeners) callback();
+    });
+    assert.equal(latest!.insetRight, 138);
+    assert.equal(latest!.insetLeft, 0);
+    assert.equal(document.documentElement.style.getPropertyValue('--window-controls-inset-right'), '138px');
+    await act(async () => {
+      (dom.window as any).innerWidth = 1440;
+      area = { ...area, width: 1260 };
+      dom.window.dispatchEvent(new dom.window.Event('resize'));
+    });
+    assert.equal(latest!.insetRight, 180);
+    await act(async () => { root.unmount(); });
+    assert.equal(listeners.size, 0);
+    assert.equal(geometryListeners.size, 0);
+  } finally {
+    for (const [key, descriptor] of saved) {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+      else delete (globalThis as any)[key];
+    }
+    dom.window.close();
+  }
+});
+
+test('right safe area reaches the top bar, workspace cluster and pane/dock reservations', () => {
+  const workspace = read('src/ui/components/mainWorkspace/Workspace.tsx');
+  assert.match(appShellSource, /paddingRight: controlsInsetRight \? controlsInsetRight \+ 12 : undefined/);
+  assert.match(workspace, /const reservedTopRightWidth = topRightWidth \+ windowControlsInset/);
+  assert.match(workspace, /reserveRight=\{reservedTopRightWidth\}/);
+  assert.match(workspace, /right: windowControlsInset \|\| undefined/);
+  assert.match(workspace, /Math.max\(0, reservedTopRightWidth - 12\)/);
 });

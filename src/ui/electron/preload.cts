@@ -9,7 +9,8 @@ ipcRenderer.on('heimdall-bridge:check-updates', () => {
 
 // REQ-MAC-CHROME-1: read-only window chrome state. The sandboxed preload cannot
 // require windowChrome.cts, so the flag and channel are matched literally.
-const windowChromeStyle = process.argv.includes('--heimdall-window-chrome=mac-hidden') ? 'mac-hidden' : 'native';
+const windowChromeStyle = process.argv.includes('--heimdall-window-chrome=mac-hidden') ? 'mac-hidden'
+  : process.argv.includes('--heimdall-window-chrome=win-overlay') ? 'win-overlay' : 'native';
 let windowFullscreen = false;
 const windowChromeListeners = new Set<(state: { fullscreen: boolean }) => void>();
 ipcRenderer.on('heimdall-window:chrome-state', (_event: any, payload: any) => {

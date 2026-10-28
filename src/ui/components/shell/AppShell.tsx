@@ -1911,7 +1911,7 @@ function AuthenticatedShell({ user }: { user: AuthUser }) {
   const hideTopLeftCluster = isMobile && isWorkspaceRoute && isCurrentAuxPaneOpen;
   const showBrand = !isWorkspaceRoute || !isEffectiveCollapsed;
   // REQ-MAC-CHROME-1: 0 everywhere except the windowed macOS hidden title bar.
-  const { insetLeft: rawControlsInset } = useWindowChrome();
+  const { insetLeft: rawControlsInset, insetRight: controlsInsetRight } = useWindowChrome();
   const controlsInset = isMobile ? 0 : rawControlsInset;
   const topLeftClusterWidth = computeTopLeftClusterWidth(isMobile, showBrand, controlsInset);
   const chromeHeight = topChromeHeight(isMobile);
@@ -2137,7 +2137,7 @@ function AuthenticatedShell({ user }: { user: AuthUser }) {
           <div
             data-debug-id="shell-top-bar"
             className="window-drag flex shrink-0 items-center justify-end gap-2 border-b border-subtle bg-canvas px-3"
-            style={{ height: chromeHeight }}
+            style={{ height: chromeHeight, paddingRight: controlsInsetRight ? controlsInsetRight + 12 : undefined }}
           >
             <SidebarUpdateBadge onOpen={openBridgeUpdate} />
           </div>
