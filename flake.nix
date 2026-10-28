@@ -23,7 +23,7 @@
           import nixpkgs { inherit system; };
 
       # Keep appVersion in sync with src/contracts/protocol.odin APP_VERSION.
-      appVersion = "0.5.20";
+      appVersion = "0.5.21";
       npmDepsHash = "sha256-HK2Zpo2PckW5CxVrPr3OTiXVaJHzhRzofsesyXhxWAc=";
 
       # Every Odin binary that links src/lib/httpc links the ONE libcurl pinned
