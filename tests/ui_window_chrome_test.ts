@@ -31,6 +31,30 @@ const mainSource = read('src/ui/electron/main.cts');
 const appShellSource = read('src/ui/components/shell/AppShell.tsx');
 const stylesSource = read('src/ui/styles.css');
 
+test('Windows pins relaunch Heimdall in packaged and unpackaged runs', () => {
+  const identity = loadCts('windowsIdentity');
+  const executable = 'C:\\Program Files\\Heimdall\\Heimdall.exe';
+  const entry = 'C:\\source code\\Heimdall\\main.cjs';
+  const icon = 'C:\\source code\\Heimdall\\icon.ico';
+  const packaged = identity.taskbarDetails('win32', true, executable, entry, icon);
+  assert.equal(packaged.relaunchCommand, `"${executable}"`);
+  assert.equal(packaged.appIconPath, executable);
+  assert.equal(packaged.relaunchDisplayName, 'Heimdall');
+  assert.equal(packaged.appId, identity.APP_ID);
+  const development = identity.taskbarDetails('win32', false, 'C:\\Electron\\electron.exe', entry, icon);
+  assert.equal(development.relaunchCommand, `"C:\\Electron\\electron.exe" "${entry}"`);
+  assert.equal(development.appIconPath, icon);
+  assert.equal(development.appId, packaged.appId);
+  // A directory entry with a trailing separator must not escape the closing quote.
+  assert.equal(identity.taskbarDetails('win32', false, executable, 'C:\\app path\\', icon).relaunchCommand,
+    `"${executable}" "C:\\app path\\\\"`);
+  for (const platform of ['darwin', 'linux']) {
+    assert.equal(identity.taskbarDetails(platform, false, executable, entry, icon), null);
+  }
+  assert.match(mainSource, /win\.setAppDetails\(taskbarDetails\)/);
+  assert.match(mainSource, /app\.setAppUserModelId\?\.\(windowsIdentity\.APP_ID\)/);
+});
+
 test('windowChrome keeps native controls on each desktop and the kill switch restores the native title bar', () => {
   const chrome = loadCts('windowChrome');
   assert.deepEqual(plain(chrome.windowChromeOptions('darwin', {})), { titleBarStyle: 'hidden', trafficLightPosition: { x: 16, y: 17 } });

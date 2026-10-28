@@ -18,6 +18,7 @@ const { allowedExternalUrl, desktopPairingOrigins, allowedPairingUrl, classifyNa
 const desktopUpdater = require('./desktopUpdater.cjs');
 const { installNotifications } = require('./notifications.cjs');
 const windowChrome = require('./windowChrome.cjs');
+const windowsIdentity = require('./windowsIdentity.cjs');
 
 const { resolveDesktopConfig, desktopAuthReturnUrl } = require('./desktopConfig.cjs');
 const desktopConfig = resolveDesktopConfig(process.env, app.isPackaged);
@@ -40,7 +41,7 @@ if (process.platform === 'linux') {
 // what actually renames the menu-bar entry.
 process.title = APP_DISPLAY_NAME;
 app.setName(APP_DISPLAY_NAME);
-app.setAppUserModelId?.('works.earendil.heimdall');
+app.setAppUserModelId?.(windowsIdentity.APP_ID);
 
 // Keep Electron state namespaced under "heimdall-ui" (so it doesn't collide with
 // the ham daemon/wrapper config dir at <appData>/heimdall/, and so existing
@@ -156,6 +157,11 @@ function createWindow() {
     },
   });
   mainWindow = win;
+  const taskbarDetails = windowsIdentity.taskbarDetails(
+    process.platform, app.isPackaged, process.execPath,
+    path.resolve(process.argv[1] || app.getAppPath()), path.join(__dirname, 'icon.ico'),
+  );
+  if (taskbarDetails) win.setAppDetails(taskbarDetails);
   if (process.platform === 'win32') win.removeMenu();
 
   // The renderer drops its traffic-light inset in fullscreen, where macOS

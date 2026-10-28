@@ -16,6 +16,9 @@ out_dir="${4:-release-assets/bridge}"
 
 case "$target" in darwin-arm64|darwin-amd64) ;; *) usage; exit 2 ;; esac
 [ -f "$bundle" ] || { echo "missing Bridge bundle: $bundle" >&2; exit 1; }
+# Fail before building/publishing a DMG whose embedded installer cannot deliver
+# the provider extensions, including hidden marketplace and plugin manifests.
+bash scripts/release/verify-bundled-extensions.sh "$bundle" scripts/install.sh
 
 archive="heimdall-local-$target.tar.gz"
 rm -rf "$out_dir"

@@ -445,6 +445,52 @@ function Test-Sha256 {
 # archive entry name is ever used as a path. Absolute, drive-qualified or ".."
 # entries anywhere in the archive, duplicates, directories or links where a file
 # is expected, and oversized entries reject the whole bundle.
+function Assert-ProviderExtensionAssets {
+  param([string]$Root)
+  foreach ($required in @(
+    'antigravity/plugin.json', 'antigravity/hooks.json', 'antigravity/hooks/hooks.json',
+    'claude-code/.claude-plugin/plugin.json', 'claude-code/hooks/hooks.json',
+    'codex/.codex-plugin/plugin.json', 'codex/hooks/hooks.json',
+    '.claude-plugin/marketplace.json', '.agents/plugins/marketplace.json'
+  )) {
+    if (-not (Test-Path -LiteralPath (Join-Path $Root $required) -PathType Leaf)) {
+      Fail "Incomplete provider extension bundle: $required"
+    }
+  }
+}
+
+function Install-ProviderExtensionAssets {
+  param([string]$Source, [string]$BinDir)
+  Assert-ProviderExtensionAssets $Source
+  # This directory is managed release content. User overrides live separately
+  # at <data-dir>/extensions and are never replaced by the installer.
+  $binRoot = [IO.Path]::GetFullPath($BinDir)
+  $destination = Join-Path $binRoot 'extensions'
+  $generation = [guid]::NewGuid().ToString('N')
+  $prepared = Join-Path $binRoot "extensions-new-$generation"
+  $backup = Join-Path $binRoot "extensions-old-$generation"
+  foreach ($path in @($destination, $prepared, $backup)) {
+    if ((Split-Path -Parent ([IO.Path]::GetFullPath($path))) -ne $binRoot) { Fail "Unsafe extension destination: $path" }
+    if ((Test-Path -LiteralPath $path) -and ((Get-Item -LiteralPath $path -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+      Fail "Refusing linked extension destination: $path"
+    }
+  }
+  try {
+    Copy-Item -LiteralPath $Source -Destination $prepared -Recurse -Force
+    # Materialize the Unix compatibility symlink for local Windows checkouts too.
+    Copy-Item -LiteralPath (Join-Path $prepared 'antigravity/hooks/hooks.json') -Destination (Join-Path $prepared 'antigravity/hooks.json') -Force
+    if (Test-Path -LiteralPath $destination) { Move-Item -LiteralPath $destination -Destination $backup }
+    try { Move-Item -LiteralPath $prepared -Destination $destination }
+    catch {
+      if (Test-Path -LiteralPath $backup) { Move-Item -LiteralPath $backup -Destination $destination }
+      throw
+    }
+    if (Test-Path -LiteralPath $backup) { Remove-Item -LiteralPath $backup -Recurse -Force }
+  } finally {
+    if (Test-Path -LiteralPath $prepared) { Remove-Item -LiteralPath $prepared -Recurse -Force }
+  }
+}
+
 function Expand-HeimdallBundle {
   param([string]$Zip, [string]$Dest)
   Add-Type -AssemblyName System.IO.Compression
@@ -462,7 +508,7 @@ function Expand-HeimdallBundle {
     foreach ($e in $z.Entries) {
       $n = $e.FullName.Replace('\', '/')
       while ($n.StartsWith('./')) { $n = $n.Substring(2) }
-      if ($n.StartsWith('/') -or $n -match '^[A-Za-z]:' -or (@($n.Split('/')) -contains '..')) { Fail "Unsafe path in release bundle: $($e.FullName)" }
+      if ($n.StartsWith('/') -or $n.Contains(':') -or (@($n.Split('/')) -contains '..')) { Fail "Unsafe path in release bundle: $($e.FullName)" }
       $names[$e.FullName] = $n
     }
     foreach ($w in $wanted) {
@@ -481,6 +527,23 @@ function Expand-HeimdallBundle {
       $out = [IO.File]::Create((Join-Path $Dest $w[1]))
       try { $in.CopyTo($out) } finally { $out.Dispose(); $in.Dispose() }
     }
+    $extensionEntries = @($z.Entries | Where-Object { $names[$_.FullName].StartsWith('bin/extensions/', [StringComparison]::OrdinalIgnoreCase) })
+    $seenExtensions = @{}
+    foreach ($e in $extensionEntries) {
+      $name = $names[$e.FullName]
+      if ($name.EndsWith('/')) { continue }
+      $unixType = ([long]$e.ExternalAttributes -shr 16) -band 0xF000
+      if ($seenExtensions.ContainsKey($name) -or ($unixType -ne 0 -and $unixType -ne 0x8000) -or $e.Length -gt 16MB) {
+        Fail "Unsafe provider extension asset: $name"
+      }
+      $seenExtensions[$name] = $true
+      $target = Join-Path $Dest $name.Substring(4)
+      New-Item -ItemType Directory -Force (Split-Path -Parent $target) | Out-Null
+      $in = $e.Open()
+      $out = [IO.File]::Create($target)
+      try { $in.CopyTo($out) } finally { $out.Dispose(); $in.Dispose() }
+    }
+    if ($extensionEntries.Count -gt 0) { Assert-ProviderExtensionAssets (Join-Path $Dest 'extensions') }
   } finally {
     $z.Dispose()
   }
@@ -997,6 +1060,12 @@ function Invoke-HeimdallInstaller {
         if (Test-Path -LiteralPath $cand -PathType Leaf) { Copy-Item -LiteralPath $cand -Destination (Join-Path $workDir 'apply-bridge-update.ps1'); break }
       }
       Write-Log WARN "Installing local binaries from $src (not a verified release)"
+      $sourceExtensions = Join-Path $src 'extensions'
+      if (-not (Test-Path -LiteralPath $sourceExtensions -PathType Container)) { $sourceExtensions = Join-Path (Split-Path -Parent $src) 'extensions' }
+      if (Test-Path -LiteralPath $sourceExtensions -PathType Container) {
+        Assert-ProviderExtensionAssets $sourceExtensions
+        Copy-Item -LiteralPath $sourceExtensions -Destination (Join-Path $workDir 'extensions') -Recurse -Force
+      }
     } elseif ($O.Bundle) {
       Write-Log INFO 'Packaged desktop bundle: no release lookup or download.'
       Write-Step 4 'Verify & unpack'
@@ -1107,6 +1176,12 @@ function Invoke-HeimdallInstaller {
     if (Test-Path -LiteralPath (Join-Path $workDir 'apply-bridge-update.ps1')) {
       New-Item -ItemType Directory -Force $C.UpdatesDir | Out-Null
       Copy-Item -LiteralPath (Join-Path $workDir 'apply-bridge-update.ps1') -Destination (Join-Path $C.UpdatesDir 'apply-bridge-update.ps1') -Force
+    }
+    if (Test-Path -LiteralPath (Join-Path $workDir 'extensions') -PathType Container) {
+      Install-ProviderExtensionAssets (Join-Path $workDir 'extensions') $binDir
+      Write-Log OK 'Installed bundled provider extensions'
+    } else {
+      Write-Log WARN 'This bundle contains no provider extensions; existing extension assets were preserved.'
     }
     Write-Utf8File $hubFile "$hubUrl`n"
     if ($profileName) { Write-Utf8File (Join-Path $stateDir 'profile') "$profileName`n" }

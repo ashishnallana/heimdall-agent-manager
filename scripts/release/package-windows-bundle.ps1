@@ -5,7 +5,8 @@
 #
 # Zip root: bin/ham-bridge.exe, bin/ham-ctl.exe, bin/ham-pty-host.exe,
 # [bin/heimdall.exe], [scripts/apply-bridge-update.ps1], README.md, LICENSE,
-# METADATA.json. Entry names always use forward slashes (Windows PowerShell 5.1's
+# METADATA.json, bin/extensions/ (including hidden marketplace/plugin manifests).
+# Entry names always use forward slashes (Windows PowerShell 5.1's
 # ZipFile.CreateFromDirectory can write backslashes), and only regular files are
 # written, so scripts/install.ps1's exact-name lookup and the bridge's
 # self-update (`tar -xzf`, Windows' bsdtar reads zip) both see the same layout.
@@ -32,6 +33,29 @@ $supervisor = Join-Path (Join-Path $repo 'scripts') 'apply-bridge-update.ps1'
 if (Test-Path -PathType Leaf $supervisor) { $entries['scripts/apply-bridge-update.ps1'] = $supervisor }
 $entries['README.md'] = Join-Path $repo 'README.md'
 $entries['LICENSE'] = Join-Path $repo 'LICENSE'
+
+# Keep assets inside bin so the Windows updater swaps/rolls them back together
+# with their matching binaries. Both bridge and ctl search <exe_dir>/extensions.
+$extensionRoot = Join-Path $repo 'extensions'
+foreach ($required in @(
+  'antigravity/plugin.json', 'antigravity/hooks.json', 'antigravity/hooks/hooks.json',
+  'claude-code/.claude-plugin/plugin.json', 'claude-code/hooks/hooks.json',
+  'codex/.codex-plugin/plugin.json', 'codex/hooks/hooks.json',
+  '.claude-plugin/marketplace.json', '.agents/plugins/marketplace.json'
+)) {
+  if (-not (Test-Path -LiteralPath (Join-Path $extensionRoot $required) -PathType Leaf)) {
+    throw "missing required extension asset: $required"
+  }
+}
+foreach ($asset in Get-ChildItem -LiteralPath $extensionRoot -Recurse -Force -File) {
+  # This compatibility alias is a git symlink on Unix and a text placeholder
+  # in Windows checkouts. Ship the real JSON rather than either representation.
+  if ($asset.FullName -eq (Join-Path $extensionRoot 'antigravity\hooks.json')) { continue }
+  if ($asset.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "extension asset is a link: $($asset.FullName)" }
+  $relative = $asset.FullName.Substring($extensionRoot.Length + 1).Replace('\', '/')
+  $entries["bin/extensions/$relative"] = $asset.FullName
+}
+$entries['bin/extensions/antigravity/hooks.json'] = Join-Path $extensionRoot 'antigravity/hooks/hooks.json'
 
 # Every shipped .exe must be a PE image (MZ), never a script or a stub.
 foreach ($k in @($entries.Keys)) {

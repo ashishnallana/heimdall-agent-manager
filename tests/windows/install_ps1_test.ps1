@@ -115,6 +115,7 @@ try {
   if (-not (Test-Path $fakeExe)) { throw 'could not compile the fake bridge' }
   Copy-Item $fakeExe (Join-Path $fake 'ham-pty-host.exe')
   Copy-Item $fakeExe (Join-Path $fake 'ham-ctl.exe')
+  Copy-Item -LiteralPath (Join-Path $repo 'extensions') -Destination (Join-Path $fake 'extensions') -Recurse -Force
   $hubExe = Join-Path $root 'fake-hub.exe'
   Copy-Item $fakeExe $hubExe
   $supervisor = Join-Path $root 'apply-bridge-update.ps1'
@@ -205,6 +206,8 @@ try {
   # ---- fresh install from local binaries, with (fake) enrollment ----
   $r = Invoke-Installer @('-Hub', $hub, '-FromDir', $fake)
   Check ($r.Code -eq 0) 'fresh -FromDir install succeeds' $r.Out
+  Check (Test-Path -LiteralPath (Join-Path $binDir 'extensions/claude-code/.claude-plugin/plugin.json')) 'local install includes hidden Claude plugin manifest'
+  Check (Test-Path -LiteralPath (Join-Path $binDir 'extensions/.agents/plugins/marketplace.json')) 'local install includes hidden Codex marketplace'
   Check ($r.Out -match '\[2/9\] Hub check' -and $r.Out -match '\[4/9\] Download & verify' -and $r.Out -match '\[5/9\] Bridge preflight' -and $r.Out -match '\[9/9\] Ready') 'install prints the nine numbered steps' $r.Out
   Check ($r.Out -match 'ABCD-EFGH-JKLM-NP' -and $r.Out -match 'Browser-approved enrollment complete') 'enrollment runs interactively and its pairing code is shown' $r.Out
   Check ($r.Out -match "\[OK\] Service running: $svc") 'service reported running' $r.Out
@@ -285,10 +288,16 @@ try {
   # ---- verified release path (stub mirror), keeping the enrollment ----
   $tag = 'v9.9.9'
   $bundle = Join-Path $root "heimdall-local-windows-amd64-$tag.zip"
-  New-Bundle $bundle ([ordered]@{
+  $bundleEntries = [ordered]@{
       'bin/ham-bridge.exe' = $fakeExe; 'bin/ham-pty-host.exe' = $fakeExe; 'bin/ham-ctl.exe' = $fakeExe
       'scripts/apply-bridge-update.ps1' = $supervisor; 'README.md' = $supervisor
-    })
+    }
+  $fakeExtensions = Join-Path $fake 'extensions'
+  foreach ($asset in Get-ChildItem -LiteralPath $fakeExtensions -Recurse -Force -File) {
+    $relative = $asset.FullName.Substring($fakeExtensions.Length + 1).Replace('\', '/')
+    $bundleEntries["bin/extensions/$relative"] = $asset.FullName
+  }
+  New-Bundle $bundle $bundleEntries
   $unsafe = Join-Path $root 'heimdall-local-windows-amd64-v9.9.8.zip'
   New-Bundle $unsafe ([ordered]@{ 'bin/ham-bridge.exe' = $fakeExe; 'bin/ham-pty-host.exe' = $fakeExe; 'bin/ham-ctl.exe' = $fakeExe; '../evil.txt' = $supervisor })
   foreach ($v in @('v9.9.9', 'v9.9.8')) {
@@ -305,13 +314,17 @@ try {
   )
   Set-Content -Path (Join-Path $mirror 'rel\releases.json') -Encoding ASCII -Value (ConvertTo-Json -Depth 5 $releases)
   $relEnv = @{ HEIMDALL_INSTALL_TEST_RELEASES = "$hub/rel" }
+  $enrollmentCountBeforeReinstall = @(Get-Calls $fakeLog 'ham-bridge' | Where-Object { $_[1] -eq 'enroll' }).Count
+  $removedHook = Join-Path $binDir 'extensions/claude-code/removed-hook.json'
+  [IO.File]::WriteAllText($removedHook, 'stale')
   $r = Invoke-Installer @('-Hub', $hub, '-KeepEnrollment') $relEnv
   Check ($r.Code -eq 0 -and $r.Out -match 'Downloading v9\.9\.9' -and $r.Out -match 'Release checksum and bundle verified' -and $r.Out -match 'Existing enrollment preserved' -and $r.Out -match 'Service running') 'release install resolves the newest promoted release, verifies it and keeps enrollment' $r.Out
   $ports2 = @(foreach ($x in (Get-Content -Encoding UTF8 -Raw (Join-Path $stateDir 'ports.json') | ConvertFrom-Json)) { [int]$x })
   Check (($ports2 -join ',') -eq ($ports -join ',')) 'reinstall keeps this Hub''s ports'
   Check (Test-Path (Join-Path $dataDir 'updates\apply-bridge-update.ps1')) 'update supervisor installed to <data>\updates'
+  Check ((Test-Path -LiteralPath (Join-Path $binDir 'extensions/.claude-plugin/marketplace.json')) -and -not (Test-Path -LiteralPath $removedHook)) 'release installer refreshes shipped extensions and removes obsolete hooks'
   Check (Test-Path (Join-Path $local "heimdall\cache\releases\heimdall-local-windows-amd64-$tag.zip")) 'verified bundle cached'
-  Check (@(Get-Calls $fakeLog 'ham-bridge' | Where-Object { $_[1] -eq 'enroll' }).Count -eq 1) '-KeepEnrollment does not enroll again'
+  Check (@(Get-Calls $fakeLog 'ham-bridge' | Where-Object { $_[1] -eq 'enroll' }).Count -eq $enrollmentCountBeforeReinstall) '-KeepEnrollment does not enroll again'
   $r = Invoke-Installer @('-Hub', $hub, '-NonInteractive') $relEnv
   Check ($r.Code -eq 0 -and $r.Out -match 'Using cached heimdall-local-windows-amd64-v9\.9\.9\.zip' -and $r.Out -match 'Existing enrollment preserved') 'second install reuses the cached bundle; -NonInteractive keeps enrollment' $r.Out
 
@@ -320,6 +333,7 @@ try {
   Set-Content -Path $packagedSums -Encoding ASCII -Value "$packagedHash  $([IO.Path]::GetFileName($bundle))"
   $r = Invoke-Installer @('-Hub', $hub, '-NonInteractive', '-Version', $tag, '-Bundle', $bundle, '-ChecksumFile', $packagedSums)
   Check ($r.Code -eq 0 -and $r.Out -match 'Packaged Bridge checksum and bundle verified' -and $r.Out -match 'Existing enrollment preserved') 'desktop packaged bundle is verified, unpacked, and installed without a download' $r.Out
+  Check (Test-Path -LiteralPath (Join-Path $binDir 'extensions/codex/.codex-plugin/plugin.json')) 'desktop packaged installer installs provider extensions'
   Add-Content -LiteralPath $bundle -Value 'tampered'
   $r = Invoke-Installer @('-Hub', $hub, '-NonInteractive', '-Version', $tag, '-Bundle', $bundle, '-ChecksumFile', $packagedSums)
   Check ($r.Code -eq 1 -and $r.Out -match 'SHA-256 verification failed; nothing installed') 'tampered desktop packaged bundle is refused' $r.Out
