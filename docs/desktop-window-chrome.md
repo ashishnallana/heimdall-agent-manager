@@ -37,8 +37,8 @@ In fullscreen macOS hides the traffic lights, so the inset drops to 0.
 
 `HEIMDALL_NATIVE_TITLE_BAR=1` restores the native title bar: no hidden style, no
 argv flag, so the UI renders exactly as on other platforms. Use it to reproduce
-the separate web-contents/window misalignment (fixed by the Electron 44 runtime
-upgrade) with and without the hidden title bar. A clean hidden title bar does
+the separate web-contents/window misalignment (targeted by the Electron 44 runtime
+upgrade; resolution still requires a real macOS check) with and without the hidden title bar. A clean hidden title bar does
 not prove that misalignment is fixed.
 
 ## Rollout order
