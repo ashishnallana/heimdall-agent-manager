@@ -91,6 +91,8 @@ function openOidcWindow(url: string, owner: any) {
     title: `Sign in to ${APP_DISPLAY_NAME}`,
     webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true },
   });
+  // REQ-WIN-COMPACT-2: retain native caption, without a second application-menu row.
+  if (process.platform === 'win32') loginWindow.removeMenu();
   authWindow = loginWindow;
   let finishing = false;
   const finishIfReturned = (_event: any, nextUrl: string) => {
@@ -154,6 +156,7 @@ function createWindow() {
     },
   });
   mainWindow = win;
+  if (process.platform === 'win32') win.removeMenu();
 
   // The renderer drops its traffic-light inset in fullscreen, where macOS
   // hides the buttons. Display-only state; the renderer cannot send anything.

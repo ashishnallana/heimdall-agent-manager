@@ -1,4 +1,4 @@
-# Desktop window chrome (integrated macOS and Windows headers)
+# Desktop window chrome
 
 On macOS the desktop app hides the gray native title bar and keeps the native
 traffic lights, centered in the UI's 48px top chrome row (REQ-MAC-CHROME-1).
@@ -6,10 +6,11 @@ The window frame stays, so resize edges, the shadow, the Window menu and
 Cmd-W/Cmd-M behave as before. The OIDC sign-in window keeps its native title
 bar because it shows identity-provider pages that cannot declare drag regions.
 
-On Windows the main window also hides the native title bar. A 48px native
-Window Controls Overlay retains minimize/maximize/close, Windows Snap and
-native accessibility. The Edit/View/Window menu is auto-hidden; Alt and menu
-accelerators remain available. The OIDC popup keeps its native title bar/menu.
+Windows uses the standard native title bar with the app name and OS-managed
+minimize/maximize/close buttons. There is no custom 48px caption overlay. The
+separate File/Edit/View/Window application menu row is removed from both the
+main and sign-in windows, including Alt access to that row. Windows system
+commands such as Alt+Space and Alt+F4 remain. macOS keeps its application menu.
 
 Linux, the browser and the PWA retain their existing layout.
 
@@ -38,12 +39,12 @@ Under a desktop-reported `mac-hidden` or `win-overlay` style only:
 
 In fullscreen the control insets drop to 0.
 
-On Windows, the read-only Window Controls Overlay geometry determines the
+For older Windows shells that still report `win-overlay`, the read-only Window Controls Overlay geometry determines the
 right inset in CSS pixels. Geometry changes and viewport resize update it.
 Until valid geometry arrives, a conservative 160px reservation protects the
 caption buttons. The fixed workspace cluster moves left, and pane/dock headers
 reserve its width plus that inset. The rest of the content remains full width.
-Auth/device gate screens reserve a 48px top strip on Windows (40px on macOS).
+Those older overlay shells retain a 48px auth/device gate strip (40px on macOS). New native Windows shells need neither control insets nor that drag strip.
 No new renderer-to-main IPC is used for overlay geometry.
 
 ## Diagnostic kill switch
@@ -56,7 +57,9 @@ not prove that misalignment is fixed.
 
 ## Rollout order
 
-The packaged app loads the Hub-served UI, so the two halves deploy separately:
+The packaged app loads the Hub-served UI. The following order applies to
+integrated-title-bar shells (macOS and older Windows overlay builds); the
+current native Windows caption/menu adjustment needs only a shell restart:
 
 | Desktop | Hub UI | Result |
 | --- | --- | --- |
@@ -89,10 +92,17 @@ header is a drag region, including pane headers below the top row; confirm
 that is acceptable.
 
 Windows local-run validation is also required: caption buttons, drag and
-header double-click, Alt menu and shortcuts, tray hide/reopen, minimize and
+native-title-bar double-click, no application-menu row even on Alt, renderer shortcuts, tray hide/reopen, minimize and
 maximize/restore, Windows 11 maximize-hover Snap Layouts and Win+arrow,
 100/125/150/200% display scaling and browser zoom, mixed-DPI monitors,
 fullscreen enter/exit and reload, minimum window size, light/dark/high-contrast
 OS and app themes, pane grips/popovers/aux dock, auth gates and the native login
 popup. Native system colors are retained for caption contrast. Linux tests of
 the geometry math and hook lifecycle do not prove Windows rendering or Snap.
+
+The current Windows native-caption/menu adjustment needs only an Electron
+rebuild/restart. Existing renderer support for older `win-overlay` clients is
+retained for compatibility; its geometry/listener tests remain. Shared UI
+changes for macOS/older overlays still follow the Hub-before-shell rollout
+order above. Standard native caption sizing follows Windows DPI/accessibility
+settings rather than a fixed application button height.

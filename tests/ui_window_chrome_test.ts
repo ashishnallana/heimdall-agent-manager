@@ -1,5 +1,5 @@
 // REQ-MAC-CHROME-1: macOS-only hidden native title bar with native traffic
-// lights, Windows native caption overlay, safe insets and gated drag regions.
+// lights, Windows native caption, legacy overlay compatibility and gated drag regions.
 // Linux, browser/PWA and older desktops keep today's chrome.
 import './helpers/vaultEndpointHarness.ts';
 import { test } from 'node:test';
@@ -42,10 +42,9 @@ test('windowChrome keeps native controls on each desktop and the kill switch res
   assert.deepEqual(plain(chrome.windowChromeOptions('darwin', { HEIMDALL_NATIVE_TITLE_BAR: '1' })), {});
   assert.deepEqual(plain(chrome.windowChromeArgs('darwin', { HEIMDALL_NATIVE_TITLE_BAR: '1' })), []);
   assert.equal(chrome.windowChromeStyle('darwin', { HEIMDALL_NATIVE_TITLE_BAR: '0' }), 'mac-hidden');
-  assert.deepEqual(plain(chrome.windowChromeOptions('win32', {})), {
-    titleBarStyle: 'hidden', titleBarOverlay: { height: 48 }, autoHideMenuBar: true,
-  });
-  assert.deepEqual(plain(chrome.windowChromeArgs('win32', {})), ['--heimdall-window-chrome=win-overlay']);
+  assert.equal(chrome.windowChromeStyle('win32', {}), 'native');
+  assert.deepEqual(plain(chrome.windowChromeOptions('win32', {})), {});
+  assert.deepEqual(plain(chrome.windowChromeArgs('win32', {})), []);
   assert.deepEqual(plain(chrome.windowChromeOptions('win32', { HEIMDALL_NATIVE_TITLE_BAR: '1' })), {});
   assert.deepEqual(plain(chrome.windowChromeArgs('win32', { HEIMDALL_NATIVE_TITLE_BAR: '1' })), []);
 });

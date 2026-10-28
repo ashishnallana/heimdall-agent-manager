@@ -70,7 +70,7 @@ test('popup completion permits only trusted app returns and retains route or aut
   assert.equal(desktopAuthReturnUrl('http://127.0.0.1:5181/#/home', 'http://127.0.0.1:5181'), 'http://127.0.0.1:5181/#/home');
 });
 
-function popupHarness() {
+function popupHarness(platform = 'win32') {
   const deferred: (() => void)[] = [];
   const windows: FakeWindow[] = [];
   const loads: string[] = [];
@@ -81,7 +81,7 @@ function popupHarness() {
     show: () => { shown += 1; }, focus: () => { focused += 1; },
   };
   class FakeWindow {
-    destroyed = false; closes = 0; focuses = 0; initialUrl = '';
+    destroyed = false; closes = 0; focuses = 0; menuRemovals = 0; initialUrl = '';
     handlers = new Map<string, (...args: any[]) => void>();
     webContents = {
       setWindowOpenHandler: () => undefined,
@@ -89,6 +89,7 @@ function popupHarness() {
     };
     options: any;
     constructor(options: any) { this.options = options; windows.push(this); }
+    removeMenu() { this.menuRemovals += 1; }
     isDestroyed() { return this.destroyed; }
     focus() { this.focuses += 1; }
     close() { this.closes += 1; this.destroyed = true; this.handlers.get('closed')?.(); }
@@ -97,7 +98,7 @@ function popupHarness() {
     emit(name: string, url: string) { this.handlers.get(name)?.({}, url); }
   }
   const context: any = {
-    BrowserWindow: FakeWindow, desktopAuthReturnUrl, configuredUiOrigin: () => canonical,
+    process: { platform }, BrowserWindow: FakeWindow, desktopAuthReturnUrl, configuredUiOrigin: () => canonical,
     authWindow: null, APP_DISPLAY_NAME: 'Heimdall', setImmediate: (callback: () => void) => deferred.push(callback),
     allowedExternalUrl: () => '', oidcWindowNavigationAllowed: () => true, shell: {},
   };
@@ -161,4 +162,12 @@ test('main startup and notification identity share effective UI without touching
   assert.match(mainSource, /win.loadURL\(configuredUiOrigin\(\)\)/);
   assert.doesNotMatch(mainSource, /cookies.set|clearStorageData|BrowserWindow.getAllWindows/);
   assert.match(mainSource, /Existing profile\/storage is retained/);
+});
+
+test('Windows main and login windows remove the separate menu row; Mac/Linux login menus stay native', () => {
+  for (const platform of ['win32', 'darwin', 'linux']) {
+    const h = popupHarness(platform); h.open();
+    assert.equal(h.windows[0].menuRemovals, platform === 'win32' ? 1 : 0);
+  }
+  assert.match(mainSource, /mainWindow = win;\s+if \(process.platform === 'win32'\) win.removeMenu\(\)/);
 });
