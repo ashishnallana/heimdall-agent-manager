@@ -13,6 +13,15 @@ function publish(next: Partial<UpdateState>) {
   changed?.({ ...state });
 }
 
+// F14: electron-updater updates the NSIS install (latest.yml), the macOS app
+// from its zip (latest-mac.yml) and an AppImage (latest-linux*.yml). A deb, or
+// an unpackaged/dev run, is updated by other means.
+function supported(platform: string, isPackaged: boolean, env: Record<string, string | undefined> = process.env): boolean {
+  if (!isPackaged) return false;
+  if (platform === 'win32' || platform === 'darwin') return true;
+  return platform === 'linux' && Boolean(env.APPIMAGE);
+}
+
 function start(enabled: boolean, onChanged: (next: UpdateState) => void) {
   changed = onChanged;
   if (!enabled) { publish({ phase: 'disabled', message: '' }); return; }
@@ -71,4 +80,4 @@ function stop() {
   automaticTimer = null;
 }
 
-module.exports = { check, getState, install, start, stop };
+module.exports = { check, getState, install, start, stop, supported };

@@ -16,6 +16,7 @@ const appIcon = (() => {
 const bridgeManager = require('./bridgeManager.cjs');
 const { trustedIpcSender, allowedExternalUrl, allowedPairingUrl, classifyNavigation, idpOriginFromAuthConfig, isAuthStartUrl, oidcWindowNavigationAllowed } = require('./externalUrl.cjs');
 const desktopUpdater = require('./desktopUpdater.cjs');
+const installChoice = require('./installChoice.cjs');
 const { installNotifications } = require('./notifications.cjs');
 
 function normalizeBaseUrl(value: string): string {
@@ -377,7 +378,7 @@ function installAppMenu() {
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   // macOS dock icon (window `icon` is ignored on macOS; the dock uses this).
   if (process.platform === 'darwin' && appIcon && app.dock) {
     app.dock.setIcon(appIcon);
@@ -387,7 +388,7 @@ app.whenReady().then(() => {
   app.setName(APP_DISPLAY_NAME);
   app.setAboutPanelOptions?.({ applicationName: APP_DISPLAY_NAME });
   installAppMenu();
-  desktopUpdater.start(app.isPackaged && process.platform === 'win32', () => undefined);
+  desktopUpdater.start(desktopUpdater.supported(process.platform, app.isPackaged), () => undefined);
 
   // In dev the renderer runs at the Vite dev-server origin, and Vite's
   // `server.proxy` (see vite.config.js) forwards `/api/v1` to the local Hub.
@@ -405,6 +406,18 @@ app.whenReady().then(() => {
   console.log(`  electron=${process.versions.electron}`);
   console.log(`  packaged=${app.isPackaged}`);
   console.log(`  dev=${isDev}`);
+
+  // REQ-ENR-4 (Linux): App / Bridge / both on the first packaged launch.
+  const installChoiceMarker = path.join(app.getPath('userData'), 'install-choice.json');
+  if (installChoice.shouldAsk(process.platform, app.isPackaged, installChoiceMarker)) {
+    const { openWindow } = await installChoice.runFirstLaunch({
+      markerPath: installChoiceMarker,
+      showMessageBox: (options: any) => dialog.showMessageBox(options),
+      setupBridge: () => bridgeManager.runOperation('setup', bridgeTarget({}), sendBridgeEvent, {}),
+      packageKind: installChoice.packageKind(),
+    });
+    if (!openWindow) { app.quit(); return; }
+  }
 
   createWindow();
 
