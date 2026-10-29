@@ -216,11 +216,15 @@ bridge_uninstall_run :: proc(data: rawptr, step: bridgesvc.Uninstall_Step) -> (b
 		for f in files do if os.exists(f) do any_file = true
 		// Nothing registered and no file left: never touch the user's service manager.
 		if !registered && !any_file do return true, .None, tmsg if tmsg != "" else "skipped"
-		for argv in bridgesvc.unregister_argv(u.host, l) do _, _ = bridge_service_exec(argv)
+		// The last failing unregister command's output explains a "still registered".
+		unreg_err := ""
+		for argv in bridgesvc.unregister_argv(u.host, l) {
+			if ok, out := bridge_service_exec(argv); !ok do unreg_err = fmt.tprintf("%s: %s", argv[0], strings.trim_space(out))
+		}
 		if _, busy, left := bridge_uninstall_remove(u, files); busy do return false, .Busy, fmt.tprintf("cannot remove %s", left)
 		// systemd: forget the removed unit.
 		if l.backend == .Systemd do _, _ = bridge_service_exec({"systemctl", "--user", "daemon-reload"})
-		if bridge_service_registered(u.host, l.service_name) do return false, .Busy, fmt.tprintf("%s still registered", l.service_name)
+		if bridge_service_registered(u.host, l.service_name) do return false, .Busy, fmt.tprintf("%s still registered%s%s", l.service_name, " (" if unreg_err != "" else "", fmt.tprintf("%s)", unreg_err) if unreg_err != "" else "")
 		return true, .None, fmt.tprintf("%s %s removed%s%s", bridgesvc.backend_name(l.backend), l.service_name, ", " if tmsg != "" else "", tmsg)
 
 	case .Secrets:
