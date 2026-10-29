@@ -109,6 +109,14 @@ RequestExecutionLevel user
 InstallDir "$LOCALAPPDATA\Programs\heimdall"
 !define UNINSTALL_FILENAME "Uninstall Heimdall.exe"
 !define isUpdated "1 = 0"
+; Stand-ins for electron-builder's UAC.nsh (its UAC.dll ships only with
+; electron-builder's NSIS bundle): @INNER@ picks the elevated per-machine path.
+!define UAC_IsInnerInstance "@INNER@"
+!define UAC_SYNCREGISTERS 0x1
+!define UAC_SYNCINSTDIR 0x8
+!macro UAC_AsUser_Call type name flags
+  Call ${name}
+!macroend
 !include "@INCLUDE@"
 !include MUI2.nsh
 Var launchLink
@@ -143,15 +151,25 @@ class WindowsInstallerTests(unittest.TestCase):
         # Auto-updates (--updated) never re-run Bridge setup or remove the app.
         self.assertIn('${IfNot} ${isUpdated}', nsh)
         self.assertIn('/COMPONENTS=', nsh)
+        # Per-machine installs run sections elevated; Bridge setup must go back to the user.
+        self.assertIn('${If} ${UAC_IsInnerInstance}', nsh)
+        self.assertIn('!insertmacro UAC_AsUser_Call Function HeimdallBridgeSetupAsUser '
+                      '${UAC_SYNCREGISTERS}|${UAC_SYNCINSTDIR}', nsh)
+        as_user = nsh.split('Function HeimdallBridgeSetupAsUser', 1)[1].split('FunctionEnd', 1)[0]
+        self.assertIn('-Hub "$1" -Interactive\' $0', as_user)
+        self.assertNotIn('$HeimdallHub', as_user)  # outer instance never ran the page/customInit state
 
     @unittest.skipUnless(shutil.which('makensis') or os.environ.get('MAKENSIS'), 'makensis not available')
     def test_include_compiles_with_warnings_as_errors(self):
         makensis = os.environ.get('MAKENSIS') or shutil.which('makensis')
         with tempfile.TemporaryDirectory() as td:
-            harness = Path(td) / 'harness.nsi'
-            harness.write_text(NSIS_HARNESS.replace('@INCLUDE@', str(ROOT / 'build/installer.nsh')))
-            res = subprocess.run([makensis, '-WX', '-V2', str(harness)], capture_output=True, text=True, cwd=td)
-            self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+            # Per-user install (sections run as the user) and per-machine (elevated inner instance).
+            for inner in ('1 = 0', '1 = 1'):
+                harness = Path(td) / 'harness.nsi'
+                harness.write_text(NSIS_HARNESS.replace('@INCLUDE@', str(ROOT / 'build/installer.nsh'))
+                                   .replace('@INNER@', inner))
+                res = subprocess.run([makensis, '-WX', '-V2', str(harness)], capture_output=True, text=True, cwd=td)
+                self.assertEqual(res.returncode, 0, inner + '\n' + res.stdout + res.stderr)
             # electron-builder includes the file in the uninstaller build too.
             un = Path(td) / 'un.nsi'
             un.write_text(f'Unicode true\nName "u"\nOutFile "un.exe"\n!define BUILD_UNINSTALLER\n'
@@ -170,6 +188,9 @@ class MacAndLinuxInstallerTests(unittest.TestCase):
         self.assertIn('--nopayload', script)
         self.assertIn('launchctl asuser "$uid" sudo -u "$user"', post)
         self.assertIn('--interactive', post)
+        # A Bridge failure must not fail the whole install when the App was installed too.
+        self.assertIn('if [ -d /Applications/Heimdall.app ]; then exit 0; fi', post)
+        self.assertIn('|| bridge_failed', post)
         for path in ('scripts/release/build-macos-pkg.sh', 'scripts/release/macos-pkg-bridge-postinstall.sh'):
             self.assertEqual(subprocess.run(['bash', '-n', str(ROOT / path)]).returncode, 0)
             self.assertTrue(os.access(ROOT / path, os.X_OK), path)
@@ -179,6 +200,12 @@ class MacAndLinuxInstallerTests(unittest.TestCase):
         self.assertIn('    - dmg\n    - zip\n', config)
         self.assertIn('linux:\n', config)
         self.assertIn('    - AppImage\n    - deb\n', config)
+        deb = config.split('\ndeb:\n', 1)[1].split('\nafterSign:', 1)[0]
+        # deb.depends replaces electron-builder's defaults, so it must keep all of them.
+        for dep in ('libgtk-3-0', 'libnotify4', 'libnss3', 'libxss1', 'libxtst6', 'xdg-utils',
+                    'libatspi2.0-0', 'libuuid1', 'libsecret-1-0'):
+            self.assertIn(f'    - {dep}\n', deb)
+        self.assertIn('libayatana-appindicator3-1', deb)
 
     def test_release_ci_builds_installers_and_update_metadata(self):
         workflow = read('.github/workflows/release-local-binaries.yml')

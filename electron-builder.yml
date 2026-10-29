@@ -63,8 +63,11 @@ linux:
   maintainer: Heimdall maintainers
   synopsis: Heimdall desktop app and Bridge
 deb:
+  # electron-builder's default depends, kept in full (libnotify4: Electron
+  # notifications). The appindicator library lets the Bridge's tray show up.
   depends:
     - libgtk-3-0
+    - libnotify4
     - libnss3
     - libxss1
     - libxtst6
@@ -72,6 +75,8 @@ deb:
     - libatspi2.0-0
     - libuuid1
     - libsecret-1-0
+  recommends:
+    - libayatana-appindicator3-1
 afterSign: scripts/release/notarize-electron.cjs
 dmg:
   sign: true

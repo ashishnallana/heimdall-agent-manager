@@ -12,6 +12,12 @@
 ; what the Bridge needs into its own profile, and the Bridge's tray owns its
 ; uninstall (REQ-ENR-6).
 ;
+; The Bridge is a per-user service, so setup must run as the signed-in user.
+; When the user picks "Anyone who uses this computer", the sections run in the
+; elevated inner UAC instance (possibly as another account that supplied admin
+; credentials); there, setup is handed back to the outer, non-elevated instance
+; with UAC_AsUser_Call, the way electron-builder starts the app as the user.
+;
 ; Silent installs: /COMPONENTS=app|bridge|both (default app, so an unattended
 ; install never waits on a browser approval) and /HUB=<url>. App auto-updates
 ; (--updated) never touch the Bridge; it updates itself (ham-bridge update).
@@ -100,6 +106,17 @@
       StrCpy $HeimdallComponents "both"
     ${EndIf}
   FunctionEnd
+
+  ; Runs in the outer, non-elevated installer instance (UAC_AsUser_Call from the
+  ; elevated inner one). In: $1 = hub URL, $INSTDIR synced. Out: $0 = exit code.
+  ; The outer instance has no log window, so setup runs in its own console.
+  Function HeimdallBridgeSetupAsUser
+    ClearErrors
+    ExecWait '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\resources\bridge\install.ps1" -Bundle "$INSTDIR\resources\bridge\heimdall-local-windows-amd64.zip" -ChecksumFile "$INSTDIR\resources\bridge\SHA256SUMS" -Hub "$1" -Interactive' $0
+    ${If} ${Errors}
+      StrCpy $0 "error"
+    ${EndIf}
+  FunctionEnd
 !macroend
 
 ; Same as electron-builder's default finish page, except that "Run Heimdall" is
@@ -129,15 +146,25 @@
   ${AndIf} $HeimdallComponents != "app"
     DetailPrint "Setting up the Heimdall Bridge for $HeimdallHub (approve this computer in your browser)..."
     SetDetailsPrint both
-    nsExec::ExecToLog '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\resources\bridge\install.ps1" -Bundle "$INSTDIR\resources\bridge\heimdall-local-windows-amd64.zip" -ChecksumFile "$INSTDIR\resources\bridge\SHA256SUMS" -Hub "$HeimdallHub" -Interactive'
-    Pop $0
+    ${If} ${UAC_IsInnerInstance}
+      ; Elevated per-machine install: never set the Bridge up as the admin.
+      DetailPrint "Running Bridge setup as the signed-in user in a separate window..."
+      Push $1
+      StrCpy $1 $HeimdallHub
+      StrCpy $0 "not run"
+      !insertmacro UAC_AsUser_Call Function HeimdallBridgeSetupAsUser ${UAC_SYNCREGISTERS}|${UAC_SYNCINSTDIR}
+      Pop $1
+    ${Else}
+      nsExec::ExecToLog '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\resources\bridge\install.ps1" -Bundle "$INSTDIR\resources\bridge\heimdall-local-windows-amd64.zip" -ChecksumFile "$INSTDIR\resources\bridge\SHA256SUMS" -Hub "$HeimdallHub" -Interactive'
+      Pop $0
+    ${EndIf}
     ${If} $0 != 0
       ${If} $HeimdallComponents == "bridge"
         ; Nothing usable was installed: leave no app behind and fail the install.
         ExecWait '"$INSTDIR\${UNINSTALL_FILENAME}" /S _?=$INSTDIR'
         Delete "$INSTDIR\${UNINSTALL_FILENAME}"
         RMDir /r "$INSTDIR"
-        MessageBox MB_ICONSTOP|MB_OK "Heimdall Bridge setup failed (exit code $0); nothing was installed. The details above say which step failed." /SD IDOK
+        MessageBox MB_ICONSTOP|MB_OK "Heimdall Bridge setup failed (exit code $0); nothing was installed. Run the installer again, or set up the Bridge later from the Heimdall app." /SD IDOK
         SetErrorLevel 2
         Quit
       ${EndIf}
