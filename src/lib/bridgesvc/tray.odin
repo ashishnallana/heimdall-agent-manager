@@ -223,6 +223,28 @@ tray_view :: proc(s: Status) -> Tray_View {
 	return v
 }
 
+// tray_ico_pick finds the image in an .ico file (ICONDIR + 16-byte entries)
+// that best fits want px: the smallest at least that big, else the largest. image
+// is the entry's bytes (BMP DIB or PNG), what CreateIconFromResourceEx takes; ok
+// is false for a malformed file.
+tray_ico_pick :: proc(ico: []byte, want: int) -> (image: []byte, size: int, ok: bool) {
+	u16le :: proc(b: []byte, at: int) -> int {return int(b[at]) | int(b[at + 1]) << 8}
+	u32le :: proc(b: []byte, at: int) -> int {return u16le(b, at) | u16le(b, at + 2) << 16}
+	if len(ico) < 6 || u16le(ico, 0) != 0 || u16le(ico, 2) != 1 do return nil, 0, false
+	count := u16le(ico, 4)
+	if count == 0 || len(ico) < 6 + 16 * count do return nil, 0, false
+	best := -1
+	for i in 0 ..< count {
+		e := 6 + 16 * i
+		w := int(ico[e]) if ico[e] != 0 else 256
+		n, off := u32le(ico, e + 8), u32le(ico, e + 12)
+		if n <= 0 || off < 6 + 16 * count || off + n > len(ico) do continue
+		better := best < 0 || (w >= want && (size < want || w < size)) || (w < want && size < want && w > size)
+		if better do best, size, image = i, w, ico[off:off + n]
+	}
+	return image, size, best >= 0
+}
+
 Tray_Action :: enum {
 	Open_Heimdall,
 	Update,

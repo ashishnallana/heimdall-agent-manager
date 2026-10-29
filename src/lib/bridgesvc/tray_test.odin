@@ -114,3 +114,40 @@ test_tray_actions_run_ham_bridge :: proc(t: ^testing.T) {
 	testing.expect(t, !tray_action_enabled(.Restart, Status{}), "nothing to restart when not installed")
 	testing.expect(t, tray_action_enabled(.Uninstall, Status{}), "uninstall always offered")
 }
+
+@(test)
+test_tray_ico_pick_best_fitting_entry :: proc(t: ^testing.T) {
+	// ICONDIR with entries 16, 32, 0 (=256) px; each image is 2 bytes tagged by size.
+	ico := [?]byte{
+		0, 0, 1, 0, 3, 0,
+		16, 16, 0, 0, 1, 0, 32, 0, 2, 0, 0, 0, 54, 0, 0, 0,
+		32, 32, 0, 0, 1, 0, 32, 0, 2, 0, 0, 0, 56, 0, 0, 0,
+		0, 0, 0, 0, 1, 0, 32, 0, 2, 0, 0, 0, 58, 0, 0, 0,
+		16, 16, 32, 32, 255, 255,
+	}
+	cases := [?]struct{want, size: int, tag: byte}{{16, 16, 16}, {20, 32, 32}, {32, 32, 32}, {48, 256, 255}, {512, 256, 255}, {8, 16, 16}}
+	for c in cases {
+		img, size, ok := tray_ico_pick(ico[:], c.want)
+		testing.expectf(t, ok && size == c.size && len(img) == 2 && img[0] == c.tag, "want %d: got size %d ok %v img %v", c.want, size, ok, img)
+	}
+	_, _, ok := tray_ico_pick(ico[:5], 16)
+	testing.expect(t, !ok, "truncated header")
+	bad := ico
+	bad[2] = 2 // a .cur file
+	_, _, ok = tray_ico_pick(bad[:], 16)
+	testing.expect(t, !ok, "not an icon")
+	bad = ico
+	for i in 0 ..< 3 do bad[6 + 16 * i + 12] = 200 // every image past the end
+	_, _, ok = tray_ico_pick(bad[:], 16)
+	testing.expect(t, !ok, "no usable entry")
+}
+
+@(test)
+test_tray_ico_pick_shipped_icons :: proc(t: ^testing.T) {
+	for ico in ([?][]byte{#load("../../bridge/assets/tray/tray-ok.ico"), #load("../../bridge/assets/tray/tray-warning.ico"), #load("../../bridge/assets/tray/tray-error.ico")}) {
+		for want in ([?]int{16, 20, 24, 32, 48}) {
+			img, size, ok := tray_ico_pick(ico, want)
+			testing.expectf(t, ok && size == want && len(img) > 40, "want %d: size %d ok %v", want, size, ok)
+		}
+	}
+}

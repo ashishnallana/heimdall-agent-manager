@@ -6,8 +6,17 @@ package main
 // icon when no StatusNotifierWatcher runs. The libraries are loaded at RUNTIME
 // (dlopen), so ham-bridge never links GTK: a desktop without them (or a headless
 // host) gets "no tray" from bridge_tray_native_init and the bridge is unaffected.
+//
+// Icons: the logo + status dot PNGs are embedded and written to a per-user icon
+// directory, which app_indicator_set_icon_theme_path adds to the lookup (the SNI
+// IconThemePath), so each level is an icon name in it. Any failure there keeps
+// the stock theme icons, with the reason logged.
 
+import "core:bytes"
 import "core:dynlib"
+import "core:fmt"
+import "core:os"
+import "core:path/filepath"
 import "core:strings"
 import "core:time"
 import bridgesvc "odin_test:lib/bridgesvc"
@@ -34,7 +43,32 @@ Gtk :: struct {
 	indicator_set_icon_full: proc "c" (ind: rawptr, icon: cstring, desc: cstring),
 	indicator_set_title: proc "c" (ind: rawptr, title: cstring),
 	indicator_set_menu:  proc "c" (ind: rawptr, menu: rawptr),
+	// Optional: nil keeps the stock icons.
+	indicator_set_icon_theme_path: proc "c" (ind: rawptr, path: cstring),
 }
+
+// 44 px: hosts scale it down to the panel size, exactly 2x on a 22 px panel, so
+// HiDPI panels get a sharp icon too.
+@(private = "file")
+TRAY_LOGO_PNG := [bridgesvc.Tray_Level][]byte {
+	.Ok      = #load("assets/tray/tray-ok-44.png"),
+	.Warning = #load("assets/tray/tray-warning-44.png"),
+	.Error   = #load("assets/tray/tray-error-44.png"),
+}
+@(private = "file")
+TRAY_LOGO_NAMES := [bridgesvc.Tray_Level]cstring {
+	.Ok      = "heimdall-bridge-tray-ok",
+	.Warning = "heimdall-bridge-tray-warning",
+	.Error   = "heimdall-bridge-tray-error",
+}
+@(private = "file")
+TRAY_STOCK_NAMES := [bridgesvc.Tray_Level]cstring {
+	.Ok      = "network-transmit-receive",
+	.Warning = "network-offline",
+	.Error   = "dialog-error",
+}
+@(private = "file")
+tray_icon_names := TRAY_STOCK_NAMES
 
 @(private = "file")
 tray_gtk: Gtk
@@ -100,7 +134,41 @@ tray_load :: proc() -> (ok: bool, why: string) {
 	for n in names {
 		if !sym(libs, n.name, n.ptr) do return false, strings.concatenate({"missing symbol ", n.name}, context.temp_allocator)
 	}
+	_ = sym(libs, "app_indicator_set_icon_theme_path", (^rawptr)(&g.indicator_set_icon_theme_path))
 	return true, ""
+}
+
+// tray_write_logo_icons writes the embedded level icons into a per-user cache
+// directory (left alone when already identical) and returns it.
+@(private = "file")
+tray_write_logo_icons :: proc() -> (dir: string, why: string) {
+	cache, cerr := os.user_cache_dir(context.temp_allocator)
+	if cerr != nil || cache == "" do return "", fmt.tprintf("no user cache directory (%v)", cerr)
+	dir, _ = filepath.join({cache, "heimdall-bridge", "tray-icons"}, context.temp_allocator)
+	if err := os.make_directory_all(dir); err != nil do return "", fmt.tprintf("cannot create %s: %v", dir, err)
+	for png, level in TRAY_LOGO_PNG {
+		file, _ := filepath.join({dir, strings.concatenate({string(TRAY_LOGO_NAMES[level]), ".png"}, context.temp_allocator)}, context.temp_allocator)
+		if have, rerr := os.read_entire_file(file, context.temp_allocator); rerr == nil && bytes.equal(have, png) do continue
+		if err := os.write_entire_file(file, png); err != nil do return "", fmt.tprintf("cannot write %s: %v", file, err)
+	}
+	return dir, ""
+}
+
+// tray_use_logo_icons points the indicator at the logo icons; on failure the
+// stock names stay and the reason is logged.
+@(private = "file")
+tray_use_logo_icons :: proc() {
+	why: string
+	if tray_gtk.indicator_set_icon_theme_path == nil {
+		why = "app_indicator_set_icon_theme_path not available"
+	} else if dir, werr := tray_write_logo_icons(); dir == "" {
+		why = werr
+	} else {
+		tray_gtk.indicator_set_icon_theme_path(tray_indicator, strings.clone_to_cstring(dir, context.temp_allocator))
+		tray_icon_names = TRAY_LOGO_NAMES
+		return
+	}
+	fmt.eprintfln("ham-bridge tray: logo icons unavailable (%s); using stock icons", why)
 }
 
 @(private = "file")
@@ -116,6 +184,7 @@ bridge_tray_native_init :: proc(title: string) -> (ok: bool, why: string) {
 	APP_INDICATOR_STATUS_ACTIVE :: 1
 	tray_indicator = g.indicator_new("heimdall-bridge", "network-idle", APP_INDICATOR_CATEGORY_SYSTEM_SERVICES)
 	if tray_indicator == nil do return false, "app_indicator_new failed"
+	tray_use_logo_icons()
 	ctitle := strings.clone_to_cstring(title, context.temp_allocator)
 	g.indicator_set_title(tray_indicator, ctitle)
 	menu := g.menu_new()
@@ -138,13 +207,7 @@ bridge_tray_native_init :: proc(title: string) -> (ok: bool, why: string) {
 
 bridge_tray_native_update :: proc(view: bridgesvc.Tray_View, enabled: Bridge_Tray_Enabled) {
 	g := &tray_gtk
-	icon: cstring
-	switch view.level {
-	case .Ok:      icon = "network-transmit-receive"
-	case .Warning: icon = "network-offline"
-	case .Error:   icon = "dialog-error"
-	}
-	g.indicator_set_icon_full(tray_indicator, icon, strings.clone_to_cstring(view.tooltip, context.temp_allocator))
+	g.indicator_set_icon_full(tray_indicator, tray_icon_names[view.level], strings.clone_to_cstring(view.tooltip, context.temp_allocator))
 	g.indicator_set_title(tray_indicator, strings.clone_to_cstring(view.tooltip, context.temp_allocator))
 	g.menu_item_set_label(tray_status_item, strings.clone_to_cstring(view.title, context.temp_allocator))
 	for a in bridgesvc.Tray_Action do g.widget_set_sensitive(tray_items[a], b32(enabled[a]))

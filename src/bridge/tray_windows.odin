@@ -10,8 +10,13 @@ package main
 // every console helper it runs (powershell.exe for the Scheduled Task state each
 // poll, `service restart`, `setup`) inherits it. FreeConsole would make each of
 // them open a console window of its own.
+//
+// Icons: the logo + status dot .ico per level is embedded; the entry that fits
+// the small-icon size is turned into an HICON once at start. A level whose icon
+// cannot be made shows the stock icon instead, with the reason logged.
 
 import "base:runtime"
+import "core:fmt"
 import "core:strings"
 import "core:time"
 import win "core:sys/windows"
@@ -36,7 +41,41 @@ tray_enabled: Bridge_Tray_Enabled
 tray_clicked: Maybe(bridgesvc.Tray_Action)
 
 @(private = "file")
+TRAY_LOGO_ICO := [bridgesvc.Tray_Level][]byte {
+	.Ok      = #load("assets/tray/tray-ok.ico"),
+	.Warning = #load("assets/tray/tray-warning.ico"),
+	.Error   = #load("assets/tray/tray-error.ico"),
+}
+@(private = "file")
+tray_logo: [bridgesvc.Tray_Level]win.HICON
+
+foreign import user32 "system:User32.lib"
+
+// core:sys/windows declares CreateIconFromResourceEx in its Kernel32.lib block,
+// which does not export it; bind it from User32.lib here.
+@(default_calling_convention = "system", private = "file")
+foreign user32 {
+	CreateIconFromResourceEx :: proc(presbits: win.PBYTE, dwResSize: win.DWORD, fIcon: win.BOOL, dwVer: win.DWORD, cxDesired: win.INT, cyDesired: win.INT, Flags: win.UINT) -> win.HICON ---
+}
+
+// tray_load_logo makes the per-level logo icons at the small-icon size; a level
+// that fails keeps nil (stock icon) and is logged.
+@(private = "file")
+tray_load_logo :: proc() {
+	cx := int(win.GetSystemMetrics(win.SM_CXSMICON))
+	if cx <= 0 do cx = 16
+	for ico, level in TRAY_LOGO_ICO {
+		img, _, ok := bridgesvc.tray_ico_pick(ico, cx)
+		if ok do tray_logo[level] = CreateIconFromResourceEx(win.PBYTE(raw_data(img)), win.DWORD(len(img)), true, 0x00030000, win.INT(cx), win.INT(cx), win.LR_DEFAULTCOLOR)
+		if tray_logo[level] != nil do continue
+		why := "malformed embedded .ico" if !ok else fmt.tprintf("CreateIconFromResourceEx failed (error %d)", win.GetLastError())
+		fmt.eprintfln("ham-bridge tray: %v logo icon unavailable (%s); using the stock icon", level, why)
+	}
+}
+
+@(private = "file")
 tray_icon :: proc(level: bridgesvc.Tray_Level) -> win.HICON {
+	if tray_logo[level] != nil do return tray_logo[level]
 	// MAKEINTRESOURCE ids of the stock icons.
 	id: uintptr = 32512 // IDI_APPLICATION
 	switch level {
@@ -122,6 +161,7 @@ tray_hide_own_console :: proc() {
 bridge_tray_native_init :: proc(title: string) -> (ok: bool, why: string) {
 	tray_context = context
 	tray_hide_own_console()
+	tray_load_logo()
 	instance := win.HINSTANCE(win.GetModuleHandleW(nil))
 	class_name := win.utf8_to_wstring("HeimdallBridgeTray", context.allocator)
 	wc := win.WNDCLASSEXW{cbSize = size_of(win.WNDCLASSEXW), lpfnWndProc = tray_wndproc, hInstance = instance, lpszClassName = class_name}
@@ -182,4 +222,8 @@ bridge_tray_native_confirm :: proc(text: string) -> bool {
 bridge_tray_native_shutdown :: proc() {
 	win.Shell_NotifyIconW(win.NIM_DELETE, &tray_nid)
 	if tray_hwnd != nil do win.DestroyWindow(tray_hwnd)
+	for &icon in tray_logo {
+		if icon != nil do win.DestroyIcon(icon)
+		icon = nil
+	}
 }
