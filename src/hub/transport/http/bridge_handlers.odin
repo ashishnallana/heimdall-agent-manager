@@ -2887,6 +2887,51 @@ bridge_revoke_respond :: proc(h: ^Bridge_Handlers, auth_ctx: contracts.Auth_Cont
 	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req))
 }
 
+// bridge_uninstall_handler: POST /api/v1/bridges/{id}/uninstall {"purge": bool}
+// (default true). The owning account asks an ONLINE bridge to uninstall itself:
+// the bridge acknowledges the `bridge_uninstall` frame, then a detached
+// `ham-bridge uninstall` revokes it here with its own token and wipes its service,
+// binaries and secrets. Every request is audit-logged (bridge_service.log_bridge_uninstall),
+// refused ones included. Another account's bridge is Not_Found (owner check); an
+// offline bridge is 422: revoke it instead (POST /api/v1/bridges/{id}/revoke).
+bridge_uninstall_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Bridge_Handlers)(ctx)
+	auth_ctx, ok, auth_resp := require_auth(h.auth, req)
+	if !ok do return auth_resp
+	bridge_id := strings.trim_suffix(suffix_after(req.path, "/api/v1/bridges/"), "/uninstall")
+	user_id := string(auth_ctx.user_id)
+	purge := true
+	if jsonx.has_key(req.body, "purge", true) {
+		value, valid := json_bool_literal(req.body, "purge")
+		if !valid do return respond_error(domain.domain_error(.Validation_Failed, "purge must be a JSON boolean"), req.request_id)
+		purge = value
+	}
+	live := project_service.bridge_runtime_registry_has_live(h.bridge_runtime_registry, bridge_id)
+	cmd_id, sent, err := bridge_service.send_bridge_uninstall(h.bridges, auth_ctx, bridge_id, purge, live)
+	if !sent {
+		outcome := "failed"
+		#partial switch err.code {
+		case .Not_Found, .Forbidden:             outcome = "denied"
+		case .Unprocessable_Entity, .Bridge_Offline: outcome = "offline"
+		}
+		bridge_service.log_bridge_uninstall(outcome, bridge_id, user_id, "", req.request_id, err.message)
+		if err.code == .Bridge_Offline do return respond_error(domain.domain_error(.Unprocessable_Entity, err.message), req.request_id)
+		return respond_error(err, req.request_id)
+	}
+	defer delete(cmd_id)
+	bridge_service.log_bridge_uninstall("dispatched", bridge_id, user_id, cmd_id, req.request_id, "purge" if purge else "keep_data")
+	b := strings.builder_make()
+	defer strings.builder_destroy(&b)
+	strings.write_string(&b, "{\"command_id\":\"")
+	write_handler_json_string(&b, cmd_id)
+	strings.write_string(&b, "\",\"bridge_id\":\"")
+	write_handler_json_string(&b, bridge_id)
+	strings.write_string(&b, "\",\"status\":\"dispatched\",\"purge\":")
+	strings.write_string(&b, "true" if purge else "false")
+	strings.write_string(&b, "}")
+	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req), 202)
+}
+
 bridge_update_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Bridge_Handlers)(ctx)
 	auth_ctx, ok, auth_resp := require_auth(h.auth, req)

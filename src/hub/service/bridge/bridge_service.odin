@@ -1116,3 +1116,88 @@ record_bridge_update_progress :: proc(service: ^Bridge_Service, bridge_id, stage
 	}
 	return saved_ok, save_err
 }
+
+// ── Remote uninstall (REQ-ENR-10, F20) ──────────────────────────────────────
+
+// bridge_uninstall_audit_hook, when non-nil, receives each remote-uninstall audit
+// event instead of the stdout logger (tests assert on it).
+bridge_uninstall_audit_hook: proc(outcome, bridge_id, user_id, command_id, request_id, detail: string)
+
+// log_bridge_uninstall emits one greppable audit line per remote-uninstall request,
+// accepted or refused: `grep bridge_uninstall` over the hub log lists who asked to
+// wipe which machine. outcome: dispatched | denied | offline | failed.
+log_bridge_uninstall :: proc(outcome, bridge_id, user_id, command_id, request_id, detail: string) {
+	if bridge_uninstall_audit_hook != nil {
+		bridge_uninstall_audit_hook(outcome, bridge_id, user_id, command_id, request_id, detail)
+		return
+	}
+	fmt.printfln(
+		"ham-hub bridge_uninstall outcome=%s bridge_id=%s user_id=%s command_id=%s request_id=%s detail=%q",
+		outcome, bridge_id, user_id, command_id, request_id, detail,
+	)
+}
+
+bridge_uninstall_command_json :: proc(cmd_id: string, purge: bool) -> string {
+	b := strings.builder_make()
+	strings.write_string(&b, "{\"type\":\"bridge_uninstall\",\"command_id\":\"")
+	contracts.write_json_string(&b, cmd_id)
+	strings.write_string(&b, "\",\"mode\":\"")
+	strings.write_string(&b, "purge" if purge else "keep_data")
+	strings.write_string(&b, "\"}")
+	return strings.to_string(b)
+}
+
+// send_bridge_uninstall asks an ONLINE bridge of the caller's own account to
+// uninstall itself (`ham-bridge uninstall`, detached on the bridge): it revokes
+// itself on the hub with its own token, then wipes its service, binaries and
+// secrets. Only a user session of the owning account may ask; another account
+// gets the owner check's Not_Found, a bridge token Forbidden. An offline bridge
+// cannot be told: the caller revokes it instead. Returns the command id
+// (allocated with the context allocator).
+send_bridge_uninstall :: proc(
+	service: ^Bridge_Service,
+	auth: contracts.Auth_Context,
+	bridge_id: string,
+	purge: bool = true,
+	live: bool = true,
+	sink_override: project_service.Bridge_Command_Sink = {},
+) -> (
+	string,
+	bool,
+	domain.Domain_Error,
+) {
+	if strings.trim_space(bridge_id) == "" {
+		return "", false, domain.domain_error(.Validation_Failed, "bridge_id is required")
+	}
+	if !contracts.is_user_auth(auth) {
+		return "", false, domain.domain_error(.Forbidden, "user authentication required to uninstall a bridge")
+	}
+	bridge, ok, err := get_bridge(service, auth, bridge_id)
+	if !ok do return "", false, err
+	if bridge.status == .Revoked {
+		return "", false, domain.domain_error(.Bridge_Revoked, "bridge is revoked")
+	}
+	if bridge.status != .Online || !live {
+		return "", false, domain.domain_error(
+			.Unprocessable_Entity,
+			fmt.tprintf("Bridge %s is not online; revoke it instead", bridge.bridge_id),
+		)
+	}
+	sink := service.bridge_command_sink
+	if sink.send_runtime_command == nil && sink_override.send_runtime_command != nil {
+		sink = sink_override
+	}
+	// generate_id is temp-allocated; the caller owns (and deletes) the result.
+	cmd_id := strings.clone(platform.generate_id(service.ids, "cmd_uninst_") if service.ids != nil else "cmd_uninst_default")
+	cmd_json := bridge_uninstall_command_json(cmd_id, purge)
+	defer delete(cmd_json)
+	sent, send_err := project_service.bridge_command_send_runtime(
+		sink,
+		project_service.Runtime_Command{bridge_id = bridge.bridge_id, command_id = cmd_id, body_json = cmd_json},
+	)
+	if !sent {
+		delete(cmd_id)
+		return "", false, send_err
+	}
+	return cmd_id, true, domain.Domain_Error{}
+}

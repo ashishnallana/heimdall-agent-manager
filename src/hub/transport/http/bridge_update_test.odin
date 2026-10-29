@@ -469,3 +469,69 @@ test_bridge_update_failure_progress_is_persisted :: proc(t: ^testing.T) {
 	testing.expect_value(t, bridge.update_progress, 20)
 	testing.expect_value(t, bridge.update_error, "tarball download failed (HTTP 404)")
 }
+
+// Remote uninstall audit capture. One test drives every case so the process-wide
+// hook is never shared between parallel tests.
+@(private = "file")
+g_uninstall_audit: [dynamic]string
+
+@(private = "file")
+_test_uninstall_audit_hook :: proc(outcome, bridge_id, user_id, command_id, request_id, detail: string) {
+	append(&g_uninstall_audit, fmt.aprintf("%s %s %s", outcome, bridge_id, request_id))
+}
+
+// F20 / REQ-ENR-10: POST /api/v1/bridges/{id}/uninstall. Another account is refused
+// (owner check) and nothing is sent; the owner's request reaches an ONLINE bridge as
+// a bridge_uninstall frame; an offline bridge is 422; every request is audited.
+@(test)
+test_bridge_uninstall_owner_only_online_and_audited :: proc(t: ^testing.T) {
+	f := setup_update_test_fixture(t, "uninstall")
+	defer teardown_update_test_fixture(f)
+	bridge_service.bridge_uninstall_audit_hook = _test_uninstall_audit_hook
+	defer {
+		bridge_service.bridge_uninstall_audit_hook = nil
+		for line in g_uninstall_audit do delete(line)
+		delete(g_uninstall_audit)
+		g_uninstall_audit = nil
+	}
+	path := fmt.tprintf("/api/v1/bridges/%s/uninstall", f.bridge_id)
+
+	// Offline: the bridge cannot be told; nothing is sent.
+	resp := bridge_uninstall_handler(rawptr(&f.bh), Request{method = "POST", path = path, body = `{}`, request_id = "req_uninst_offline", remote_addr = "127.0.0.1:4444", headers = f.user_headers})
+	testing.expectf(t, resp.status == 422, "offline bridge: expected 422, got %d (%s)", resp.status, resp.body)
+	testing.expect(t, !f.sink_rec.sent, "nothing sent to an offline bridge")
+
+	bridge, ok, _ := iface.bridge_get_bridge(&f.br_repo, f.bridge_id)
+	testing.expect(t, ok, "got bridge")
+	bridge.status = .Online
+	_, save_ok, _ := iface.bridge_save_bridge(&f.br_repo, bridge)
+	testing.expect(t, save_ok, "saved online bridge")
+	_, accept_ok, _ := bridge_runtime_service.runtime_accept_hello(&f.registry, f.bridge_id, bridge_runtime_service.PROTOCOL_VERSION, "")
+	testing.expect(t, accept_ok, "bridge is live")
+
+	// Another account: refused, no frame.
+	other := http_test_login(t, &f.auth_svc, "uninstall_other_account")
+	resp = bridge_uninstall_handler(rawptr(&f.bh), Request{method = "POST", path = path, body = `{}`, request_id = "req_uninst_other", remote_addr = "127.0.0.1:4444", headers = other})
+	testing.expectf(t, resp.status == 403 || resp.status == 404, "non-owner: expected 403/404, got %d (%s)", resp.status, resp.body)
+	testing.expect(t, !f.sink_rec.sent, "a non-owner's request sends nothing")
+
+	// Unauthenticated: 401.
+	resp = bridge_uninstall_handler(rawptr(&f.bh), Request{method = "POST", path = path, body = `{}`, request_id = "req_uninst_anon", remote_addr = "192.168.1.1:1234"})
+	testing.expect_value(t, resp.status, 401)
+
+	// Owner, online: the frame goes to that bridge.
+	resp = bridge_uninstall_handler(rawptr(&f.bh), Request{method = "POST", path = path, body = `{"purge":true}`, request_id = "req_uninst_owner", remote_addr = "127.0.0.1:4444", headers = f.user_headers})
+	testing.expectf(t, resp.status == 202, "owner: expected 202, got %d (%s)", resp.status, resp.body)
+	testing.expect(t, f.sink_rec.sent, "frame sent")
+	testing.expect_value(t, f.sink_rec.last_cmd.bridge_id, f.bridge_id)
+	testing.expect(t, strings.contains(f.sink_rec.last_cmd.body_json, `"type":"bridge_uninstall"`), "bridge_uninstall frame")
+	testing.expect(t, strings.contains(f.sink_rec.last_cmd.body_json, `"mode":"purge"`), "purge mode")
+	testing.expect(t, strings.contains(resp.body, f.sink_rec.last_cmd.command_id), "response carries the command id")
+
+	testing.expect_value(t, len(g_uninstall_audit), 3)
+	if len(g_uninstall_audit) == 3 {
+		testing.expect_value(t, g_uninstall_audit[0], fmt.tprintf("offline %s req_uninst_offline", f.bridge_id))
+		testing.expect_value(t, g_uninstall_audit[1], fmt.tprintf("denied %s req_uninst_other", f.bridge_id))
+		testing.expect_value(t, g_uninstall_audit[2], fmt.tprintf("dispatched %s req_uninst_owner", f.bridge_id))
+	}
+}

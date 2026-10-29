@@ -311,12 +311,12 @@ bridge_uninstall_relocate :: proc(l: bridgesvc.Layout, args: []string) -> (reloc
 	return true, bridge_setup_exec_inherit(argv[:])
 }
 
-// bridge_uninstall_spawn_detached starts `ham-bridge uninstall --purge` for this
+// bridge_uninstall_spawn_detached starts `ham-bridge uninstall` for this
 // process's own profile in a session of its own, from a copy of the executable
 // outside bin/, so it survives the service stop it performs (KillMode=process,
 // AbandonProcessGroup, Scheduled Task End only ends the bridge itself). Used by
 // the hub's remote uninstall.
-bridge_uninstall_spawn_detached :: proc(service_name: string) -> (ok: bool, detail: string) {
+bridge_uninstall_spawn_detached :: proc(service_name: string, purge: bool) -> (ok: bool, detail: string) {
 	exe, _ := os.get_executable_path(context.temp_allocator)
 	if exe == "" do return false, "cannot resolve the bridge executable"
 	tmp_dir := ""
@@ -330,7 +330,7 @@ bridge_uninstall_spawn_detached :: proc(service_name: string) -> (ok: bool, deta
 	if err := os.copy_file(copy_path, exe); err != nil do return false, fmt.tprintf("cannot copy %s: %v", exe, err)
 	_ = os.chmod(copy_path, {.Read_User, .Write_User, .Execute_User})
 	argv := make([dynamic]string, context.temp_allocator)
-	append(&argv, copy_path, "uninstall", "--purge", "--yes", "--headless", "--json-progress", "--service", service_name, BRIDGE_UNINSTALL_RELOCATED_FLAG)
+	append(&argv, copy_path, "uninstall", "--purge" if purge else "--keep-data", "--yes", "--headless", "--json-progress", "--service", service_name, BRIDGE_UNINSTALL_RELOCATED_FLAG)
 	if !bridge_os_spawn_new_session(argv[:]) do return false, "cannot start the detached uninstall"
 	return true, ""
 }

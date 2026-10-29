@@ -260,6 +260,8 @@ bridge_command_spec :: proc(command_type: string) -> (Bridge_Command_Spec, bool)
 		return Bridge_Command_Spec{class = .Background, priority = .Background, key_kind = .Shell, queued = true, requires_id = true, timeout_ms = 10_000, cost_units = 4, retry_safe = true}, true
 	case "bridge_update":
 		return Bridge_Command_Spec{class = .Exclusive, priority = .Interactive, key_kind = .Bridge, queued = true, requires_id = true, timeout_ms = 30_000, cost_units = 64}, true
+	case "bridge_uninstall":
+		return Bridge_Command_Spec{class = .Exclusive, priority = .Interactive, key_kind = .Bridge, queued = true, requires_id = true, timeout_ms = 15_000, cost_units = 64}, true
 	case "validate_project_path", "fs_list_dir", "fs_stat", "fs_read_file", "agent_run_dir_list", "agent_run_dir_read", "fs_find_files", "fs_grep":
 		return Bridge_Command_Spec{class = .General_IO, priority = .Background, key_kind = .None, queued = true, requires_id = true, timeout_ms = 15_000, cost_units = 4, retry_safe = true}, true
 	case "fs_make_dir", "fs_create_file", "fs_write_file", "fs_batch_write", "fs_move", "fs_delete":
@@ -303,6 +305,7 @@ bridge_command_may_spawn_process :: proc(command_type: string) -> bool {
 	       command_type == "provider_extension_install" ||
 	       command_type == "lsp_start" ||
 	       command_type == "bridge_update" ||
+	       command_type == "bridge_uninstall" ||
 	       strings.has_prefix(command_type, "vcs_")
 }
 
@@ -316,7 +319,7 @@ bridge_command_ordering_key :: proc(command_type, text: string) -> string {
 		defer delete(prov)
 		if prov != "" do return strings.concatenate({"provider-ext-install:", prov})
 		return strings.clone("provider-ext-install")
-	case "bridge_update": return strings.clone("bridge-update")
+	case "bridge_update", "bridge_uninstall": return strings.clone("bridge-update")
 	case "bridge_unseal", "set_telemetry": return strings.clone("bridge-control")
 	case "fs_make_dir", "fs_create_file", "fs_write_file", "fs_batch_write", "fs_move", "fs_delete":
 		// Batch operations can touch several paths. A single filesystem mutation key

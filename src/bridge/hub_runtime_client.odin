@@ -927,6 +927,10 @@ bridge_hub_handle_command :: proc(conn: ^ws.Connection, text: string) {
 		blog_warn(.hub_connection_replaced, blog_sym(.reason, blog_replaced_reason(reason)), blog_int(.duration_ms, i64(backoff_s) * 1000))
 		return
 	}
+	if type == "bridge_uninstall" {
+		bridge_hub_handle_uninstall_command(conn, text)
+		return
+	}
 	if type == "bridge_update" {
 		bridge_hub_handle_update_command(conn, text)
 		return
@@ -1613,6 +1617,37 @@ bridge_update_stage_supervisor :: proc(stage_dir, target: string) -> (ok: bool, 
 		return true, ""
 	}
 	return false, fmt.tprintf("supervisor script %s not found in the staged bundle (expected scripts/%s); update aborted before stopping anything", name, name)
+}
+
+// bridge_hub_handle_uninstall_command: the owning account asked (hub
+// POST /api/v1/bridges/{id}/uninstall, owner-checked and audit-logged there) for
+// this bridge to uninstall itself. The detached `ham-bridge uninstall` revokes the
+// bridge with its own token, stops and unregisters this service and wipes every
+// secret; it runs from a copy outside bin/ in a session of its own, so the service
+// stop it performs does not take it down. Acknowledged before it starts.
+bridge_hub_handle_uninstall_command :: proc(conn: ^ws.Connection, text: string) {
+	command_id := extract_json_string(text, "command_id", "")
+	defer delete(command_id)
+	if cached, ok := bridge_runtime_cached_command(command_id); ok {
+		if conn != nil do _ = bridge_hub_send(conn, cached)
+		return
+	}
+	mode := extract_json_string(text, "mode", "purge")
+	defer delete(mode)
+	fmt.println("bridge hub runtime command bridge_uninstall mode", mode)
+	name, registered := bridge_enroll_service_for(bridge_service_host(), os.args)
+	ok, detail := false, "this bridge does not run as a registered service; uninstall it on the machine: ham-bridge uninstall"
+	if registered do ok, detail = bridge_uninstall_spawn_detached(name, mode != "keep_data")
+	result: string
+	if ok {
+		result = bridge_command_result_json(command_id, "accepted", "")
+	} else {
+		fmt.println("bridge uninstall failed:", detail)
+		result = bridge_command_failed_json(command_id, bridge_cause_wire_error("uninstall_failed", detail))
+	}
+	defer delete(result)
+	if command_id != "" do bridge_runtime_cache_command(command_id, result)
+	if conn != nil && command_id != "" do _ = bridge_hub_send(conn, result)
 }
 
 bridge_hub_handle_update_command :: proc(conn: ^ws.Connection, text: string) {
