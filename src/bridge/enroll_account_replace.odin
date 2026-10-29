@@ -66,8 +66,8 @@ bridge_enroll_previous_owner :: proc(old_bridge_id: string) -> string {
 }
 
 // bridge_enroll_ask_replace asks on the terminal. Any answer but y/yes is "no".
-bridge_enroll_ask_replace :: proc(old_bridge_id: string) -> Bridge_Confirm {
-	if !bridge_stdin_is_terminal() do return .Unavailable
+bridge_enroll_ask_replace :: proc(args: []string, old_bridge_id: string) -> Bridge_Confirm {
+	if !bridge_stdin_is_terminal(args) do return .Unavailable
 	fmt.printfln("This machine is enrolled as bridge %s of ANOTHER Heimdall account.", old_bridge_id)
 	fmt.println("  Replacing it revokes that bridge on the hub and deletes its credential, identity and vault key here.")
 	fmt.print("  Replace it with the account that just approved? [y/N] ")
@@ -81,8 +81,9 @@ bridge_enroll_ask_replace :: proc(old_bridge_id: string) -> Bridge_Confirm {
 	return .No
 }
 
-bridge_stdin_is_terminal :: proc() -> bool {
-	if has_flag(os.args, "--headless") || has_flag(os.args, "--json-progress") do return false
+// Never prompts for --headless / --json-progress (installers, Electron), whatever stdin is.
+bridge_stdin_is_terminal :: proc(args: []string) -> bool {
+	if has_flag(args, "--headless") || has_flag(args, "--json-progress") do return false
 	return os.is_tty(os.stdin)
 }
 
@@ -151,7 +152,7 @@ bridge_enroll_resolve_account :: proc(args: []string, api_base, config_path, old
 	old_owner := bridge_enroll_previous_owner(old_bridge_id)
 	flag := has_flag(args, BRIDGE_ENROLL_REPLACE_ACCOUNT_FLAG)
 	confirm := Bridge_Confirm.Unavailable
-	if !flag && old_owner != "" && old_owner != cred.owner_user_id do confirm = bridge_enroll_ask_replace(old_bridge_id)
+	if !flag && old_owner != "" && old_owner != cred.owner_user_id do confirm = bridge_enroll_ask_replace(args, old_bridge_id)
 	switch bridge_enroll_account_decision(old_owner, cred.owner_user_id, flag, confirm) {
 	case .Same_Account:
 		return true, false
