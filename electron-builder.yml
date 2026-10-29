@@ -25,7 +25,8 @@ mac:
     - dmg
     - zip
   category: public.app-category.developer-tools
-  icon: src/ui/electron/icon.png
+  # Icons come from scripts/brand/gen-icons.sh; the icns follows the macOS grid.
+  icon: build/icon.icns
   hardenedRuntime: true
   gatekeeperAssess: false
   # The afterSign hook owns notarization so it can retry transient CloudKit
