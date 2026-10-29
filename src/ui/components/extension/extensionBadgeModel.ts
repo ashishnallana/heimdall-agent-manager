@@ -60,7 +60,9 @@ export function normalizeProviderExtension(raw: any): ProviderExtensionStatus | 
  */
 export function providerExtensionBadge(ext: ProviderExtensionStatus | null | undefined): ProviderExtensionBadge | null {
   if (!ext || ext.state === 'unsupported') return null;
-  const hint = ext.install_hint;
+  // Bridges report a developer command with a literal <repo> placeholder; it
+  // cannot work for users, who get the Install / Update button instead.
+  const hint = String(ext.install_hint || '').includes('<repo>') ? '' : ext.install_hint;
   switch (ext.state) {
     case 'present':
       return {

@@ -68,6 +68,12 @@ async function surfaceHarness(options: { state?: string } = {}) {
     if (path.endsWith('/provider-status')) return Response.json({ data: { providers: [provider], extension_commands: [] } });
     if (path === '/api/v1/bridges') return Response.json({ data: [bridge] });
     if (path.endsWith('/update') && method === 'POST') return Response.json({ data: { command_id: 'bridge-update' } });
+    if (path.endsWith('/providers/codex/extension-install') && method === 'POST') {
+      return Response.json({ data: { command_id: 'ext-1', bridge_id: bridge.bridge_id, provider: 'codex', status: 'queued', progress_percent: 0, message: '' } });
+    }
+    if (path.endsWith('/providers/codex/extension-install/ext-1')) {
+      return Response.json({ data: { command_id: 'ext-1', bridge_id: bridge.bridge_id, provider: 'codex', status: 'running', progress_percent: 40, message: 'Installing' } });
+    }
     if (path.includes('pending')) return Response.json({ data: [] });
     if (path.includes('telemetry')) return Response.json({ data: { enabled: false } });
     if (path.includes('/events')) return Response.json({ data: { events: [] } });
@@ -107,19 +113,25 @@ async function surfaceHarness(options: { state?: string } = {}) {
   };
 }
 
-test('ProviderSetupSurface offers no web install or retry action for absent, outdated or failed extensions', async () => {
-  for (const state of ['absent', 'outdated', 'error']) {
+test('ProviderSetupSurface offers Install/Update for absent or outdated extensions and Retry for a failed check', async () => {
+  for (const [state, id] of [['absent', 'provider-extension-install-btn-codex'], ['outdated', 'provider-extension-install-btn-codex'], ['error', 'provider-extension-retry-btn-codex']]) {
     const h = await surfaceHarness({ state });
     try {
       await h.render();
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
       assert.ok(h.query('provider-extension-badge-codex'), `extension badge renders for ${state}`);
-      for (const id of ['provider-extension-action-codex', 'provider-extension-install-btn-codex',
-        'provider-extension-retry-btn-codex', 'provider-extension-progress-codex']) {
-        assert.equal(h.query(id), null, `${id} must not render for ${state}`);
-      }
-      assert.equal(h.requests.filter((r) => r.path.includes('/extension-install')).length, 0);
+      assert.ok(h.query(id), `${id} renders for ${state}`);
     } finally { await h.close(); }
   }
+  const h = await surfaceHarness({ state: 'absent' });
+  try {
+    await h.render();
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    assert.equal(h.query('provider-extension-install-btn-codex')?.textContent, 'Install Extension');
+    await h.click('provider-extension-install-btn-codex');
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    assert.equal(h.requests.filter((r) => r.method === 'POST' && r.path.endsWith('/providers/codex/extension-install')).length, 1);
+  } finally { await h.close(); }
 });
 
 test('bridge update modal defaults extension updates on, sends explicit consent, and honors opt-out', async () => {

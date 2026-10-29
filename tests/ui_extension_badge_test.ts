@@ -42,15 +42,18 @@ test('disabled, outdated, absent and error map to their labels', () => {
   const update = providerExtensionBadge(ext('outdated', { version: '0.0.9' }))!;
   assert.equal(update.label, 'Update available');
   assert.match(update.detail, /v0\.0\.9.*v0\.1\.0/);
-  assert.equal(update.installHint, HINT);
+  assert.equal(update.installHint, '', 'a <repo> placeholder hint is never shown');
+  assert.equal(providerExtensionBadge(ext('outdated', { install_hint: 'codex plugin add heimdall@heimdall' }))!.installHint, 'codex plugin add heimdall@heimdall');
   assert.equal(providerExtensionBadge(ext('error'))?.kind, 'error');
 });
 
-test('"Not found" carries the catalog install hint for the copy button', () => {
+test('"Not found" carries a usable catalog install hint, but never a <repo> placeholder', () => {
   const badge = providerExtensionBadge(ext('absent'))!;
   assert.equal(badge.kind, 'not-found');
   assert.equal(badge.label, 'Not found');
-  assert.equal(badge.installHint, HINT);
+  assert.equal(badge.installHint, '');
+  const usable = 'claude plugin install heimdall@heimdall';
+  assert.equal(providerExtensionBadge(ext('absent', { install_hint: usable }))!.installHint, usable);
 });
 
 test('badge is hidden when the provider has no extension or it is unsupported', () => {

@@ -631,7 +631,9 @@ test('F24: desktopCapabilities is the one desktop check; no odinApi.deviceAuth r
   };
   walk(path.join(ROOT, 'src/ui'));
   assert.deepEqual(probes, ['src/ui/bridge/desktopBridge.ts']);
-  assert.equal(fs.existsSync(path.join(ROOT, 'src/ui/components/extension/ProviderExtensionInstallAction.tsx')), false);
+  // Restored after 6eac97a5: older bridges and failed installs need the Hub-driven
+  // Install / Update extension action (it never touches odinApi).
+  assert.equal(fs.existsSync(path.join(ROOT, 'src/ui/components/extension/ProviderExtensionInstallAction.tsx')), true);
 });
 
 test('F1/REQ-ENR-1: another account\'s enrollment is flagged for an explicit replace confirmation', () => {
