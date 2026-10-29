@@ -6,7 +6,9 @@ name: Bridge lifecycle e2e
 # (tests/e2e/bridge_lifecycle_e2e.mjs), plus the existing real-enroll e2e.
 on:
   push:
-    branches: [main]
+    # heimdall/** : task branches pushed for a CI run (workflow_dispatch only
+    # reaches workflows that already exist on the default branch).
+    branches: [main, 'heimdall/**']
     paths:
       - 'src/bridge/**'
       - 'src/lib/**'
