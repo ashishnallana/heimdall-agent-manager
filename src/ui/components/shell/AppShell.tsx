@@ -2007,19 +2007,6 @@ function AuthenticatedShell({ user }: { user: AuthUser }) {
           aria-hidden="true"
         />
       ) : null}
-      {/* Jetski web: the sidebar toggle + app name are a FIXED top-left cluster
-          that never moves; the sidebar slides open underneath it (its header
-          reserves the cluster's space) and a hidden sidebar takes ZERO width. */}
-      {!hideTopLeftCluster ? (
-        <div
-          data-debug-id="shell-top-left-cluster"
-          className="window-drag absolute left-0 top-0 z-[60] flex items-center gap-1 px-2"
-          style={{ width: topLeftClusterWidth, height: chromeHeight, paddingLeft: controlsInset ? controlsInset + 8 : undefined }}
-        >
-          {sidebarToggleButton}
-          {showBrand ? brandLink : null}
-        </div>
-      ) : null}
       <aside
         data-debug-id={isEffectiveCollapsed ? 'shell-left-sidebar-hidden' : 'shell-left-sidebar-expanded'}
         aria-hidden={isEffectiveCollapsed}
@@ -2120,6 +2107,23 @@ function AuthenticatedShell({ user }: { user: AuthUser }) {
           workspaceLeadingWidth={isEffectiveCollapsed ? topLeftClusterWidth : 0}
         />
       </div>
+      {/* Rendered AFTER the sidebar header and top bars on purpose: Chromium applies
+          -webkit-app-region in DOM order (later elements win), so on a hidden-inset
+          macOS / overlay Windows window those overlapping drag strips would turn the
+          toggle into a drag handle and swallow its clicks. Position is absolute. */}
+      {/* Jetski web: the sidebar toggle + app name are a FIXED top-left cluster
+          that never moves; the sidebar slides open underneath it (its header
+          reserves the cluster's space) and a hidden sidebar takes ZERO width. */}
+      {!hideTopLeftCluster ? (
+        <div
+          data-debug-id="shell-top-left-cluster"
+          className="window-drag absolute left-0 top-0 z-[60] flex items-center gap-1 px-2"
+          style={{ width: topLeftClusterWidth, height: chromeHeight, paddingLeft: controlsInset ? controlsInset + 8 : undefined }}
+        >
+          {sidebarToggleButton}
+          {showBrand ? brandLink : null}
+        </div>
+      ) : null}
       </div>
 
       <StatusBar

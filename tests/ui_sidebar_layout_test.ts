@@ -68,6 +68,13 @@ test('hidden sidebar renders no rail; the fixed top-left cluster compacts on age
   // Other pages keep their top bar whether or not the sidebar is open.
   assert.match(source, /\{!isWorkspaceRoute \? \(\s*<div\s+data-debug-id="shell-top-bar"/);
   assert.doesNotMatch(source, /shell-sidebar-reopen-bar/);
+  // Chromium applies -webkit-app-region in DOM order: the top-left cluster (with the
+  // no-drag toggle) must come after every drag strip it overlaps, or a macOS
+  // hidden-inset window swallows the toggle's clicks.
+  const clusterAt = source.indexOf('data-debug-id="shell-top-left-cluster"');
+  for (const strip of ['<aside', 'data-debug-id="shell-top-bar"', '<RouteOutlet']) {
+    assert.ok(source.indexOf(strip) > 0 && clusterAt > source.indexOf(strip), `top-left cluster renders after ${strip}`);
+  }
   // The toggle flips the persisted desktop preference / the mobile drawer.
   assert.match(source, /onClick=\{\(\) => \(isMobile \? setDrawerOpen\(!drawerOpen\) : toggleCollapsed\(\)\)\}/);
   assert.match(source, /localStorage\.setItem\('heimdall:shell:sidebar-collapsed'/);
