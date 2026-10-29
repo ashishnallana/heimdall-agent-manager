@@ -33,7 +33,7 @@ place.
 
 ```bash
 ham-bridge setup --hub https://hub.example.com [--profile work] \
-  [--new-bridge | --reuse-bridge brg_...] [--headless] [--no-tray] [--json-progress]
+  [--new-bridge | --reuse-bridge brg_...] [--replace-other-account] [--headless] [--no-tray] [--json-progress]
 ```
 
 Installs from the bundle the running `ham-bridge` ships in (the directory of the
@@ -47,7 +47,7 @@ executable). Steps, in order:
 | `config` | writes `config.toml` only when missing, `hub-url`, `profile`; refuses a state dir of another hub | previous files restored |
 | `ports` | allocate / keep the profile's ports | previous `ports.json` restored |
 | `service` | renders the service file **on every run** and registers it (daemon-reload + enable / `schtasks /Create /F`) | previous file restored, re-registered |
-| `enroll` | runs `bin/ham-bridge enroll` unless already enrolled (`skipped`); `--new-bridge`, or `--reuse-bridge` naming another bridge than the current credential's, forces it | kept (credential stays valid; a re-run reuses it) |
+| `enroll` | runs `bin/ham-bridge enroll` unless already enrolled (`skipped`), passing `--replace-other-account` through; `--new-bridge`, or `--reuse-bridge` naming another bridge than the current credential's, forces it | kept (credential stays valid; a re-run reuses it) |
 | `extensions` | copies the bundle's `share/heimdall/extensions` to `<data dir>/extensions` (previous copy kept as `extensions.bak`), then for every detected provider (claude, codex, antigravity) installs or repairs the Heimdall extension: a registration from another source, outdated, disabled/errored or half-installed (marketplace without plugin) is removed (`plugin uninstall`/`remove` + `marketplace remove`) and added again from the bundle, then verified; one `progress` event per provider. A provider still failing after self-heal is reported in the step message and does not roll back the install. `ham-bridge extensions sync [--data-dir D] [--source S] [--json-progress]` runs the same work after an update | bundle copy restored from `extensions.bak`; provider registrations are left as repaired |
 | `start` | restart if running, else start; on macOS a restart is `bootout` + `bootstrap` so launchd re-reads the re-rendered plist | service stopped |
 | `verify` | waits up to 45 s for `running && connected` (from the token-free status), counting only a `runtime-status.json` written after the (re)start by a process other than the replaced bridge | service stopped |

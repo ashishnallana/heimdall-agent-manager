@@ -60,29 +60,6 @@ export interface UseAgentStreamResult {
   reconnect: () => void;
 }
 
-function hasElectronDeviceAuth(): boolean {
-  return typeof window !== 'undefined' && Boolean((window as any).odinApi?.deviceAuth);
-}
-
-async function electronApiBaseUrl(): Promise<string> {
-  try {
-    const cfg = await (window as any).odinApi?.deviceAuth?.getConfig?.();
-    return String(cfg?.apiBaseUrl || (window as any).odinApi?.hubApiBaseUrl || '').replace(/\/$/, '');
-  } catch {
-    return String((window as any).odinApi?.hubApiBaseUrl || '').replace(/\/$/, '');
-  }
-}
-
-function httpToWsUrl(base: string, path: string): string {
-  const origin = base || (typeof window !== 'undefined' ? window.location.origin : 'http://127.0.0.1:5173');
-  const parsed = new URL(origin);
-  parsed.protocol = parsed.protocol === 'https:' ? 'wss:' : 'ws:';
-  parsed.pathname = path;
-  parsed.search = '';
-  parsed.hash = '';
-  return parsed.toString();
-}
-
 function httpUrlToWs(httpUrl: string): string {
   const url = new URL(httpUrl);
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -92,14 +69,10 @@ function httpUrlToWs(httpUrl: string): string {
 /**
  * Resolves the WebSocket stream URL directly using browser cookie session authentication,
  * eliminating the mandatory HTTP pre-flight ticket request per user directive.
- * Outside Electron, resolves via apiAbsoluteUrl to preserve preview tunnel prefixes.
+ * Resolves via apiAbsoluteUrl to preserve preview tunnel prefixes.
  */
 async function agentStreamUrl(agentInstanceId: string): Promise<string> {
   const path = `/api/v1/agent-instances/${encodeURIComponent(agentInstanceId)}/stream`;
-  if (hasElectronDeviceAuth()) {
-    const base = await electronApiBaseUrl();
-    return httpToWsUrl(base, path);
-  }
   return httpUrlToWs(apiAbsoluteUrl(path));
 }
 

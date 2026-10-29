@@ -951,19 +951,6 @@ function AuthGate() {
   authStatusRef.current = auth.status;
   const lastSeenUserRef = useRef(readLastSeenUserId());
 
-  // REQ-MAC-TRAY-2: the sandboxed renderer publishes only display identity
-  // fields to Electron's main process. OIDC cookies and tokens never cross IPC.
-  useEffect(() => {
-    const desktopApi = typeof window === 'undefined' ? null : (window as any).odinApi;
-    if (typeof desktopApi?.setAuthenticatedUser !== 'function') return;
-    desktopApi.setAuthenticatedUser(auth.status === 'authenticated' ? {
-      user_id: auth.user?.user_id || '',
-      name: auth.user?.name || '',
-      display_name: auth.user?.display_name || '',
-      email: auth.user?.email || '',
-    } : null);
-  }, [auth.status, auth.user]);
-
   useEffect(() => {
     let cancelled = false;
     let refreshing = false;
@@ -1420,8 +1407,14 @@ function AuthenticatedShell({ user }: { user: AuthUser }) {
   const [settingsModalLoaded, setSettingsModalLoaded] = useState(settingsModalOpen);
   if (settingsModalOpen && !settingsModalLoaded) setSettingsModalLoaded(true);
   const [settingsModalTab, setSettingsModalTab] = useState<string>(() => resolveSettingsTab(routeFromLocation()));
-  // Opens Workspace Settings and scrolls to the Bridge's Update button once the
+  // Opens Settings > Bridges and scrolls to the Bridge's Update button once the
   // modal has rendered it (the modal mounts asynchronously after opening).
+  // F29: Settings > Bridges is the one place to set up and manage bridges.
+  const openBridgesSettings = () => {
+    if (isMobile) setDrawerOpen(false);
+    setSettingsModalTab('bridges');
+    setSettingsModalOpen(true);
+  };
   const openBridgeUpdate = (update: PendingBridgeUpdate) => {
     if (isMobile) setDrawerOpen(false);
     setSettingsModalTab('bridges');
@@ -2124,7 +2117,7 @@ function AuthenticatedShell({ user }: { user: AuthUser }) {
             className="flex shrink-0 items-center justify-end gap-2 border-b border-subtle bg-canvas px-3"
             style={{ height: chromeHeight }}
           >
-            <SidebarUpdateBadge onOpen={openBridgeUpdate} />
+            <SidebarUpdateBadge onOpen={openBridgeUpdate} onManage={openBridgesSettings} />
           </div>
         ) : null}
         <RouteOutlet
@@ -2135,7 +2128,7 @@ function AuthenticatedShell({ user }: { user: AuthUser }) {
           liveProjects={liveProjects}
           workspaceLeading={isEffectiveCollapsed ? <div aria-hidden="true" data-debug-id="shell-top-left-cluster-spacer" className="shrink-0" style={{ width: topLeftClusterWidth - 12 }} /> : null}
           workspaceLeadingWidth={isEffectiveCollapsed ? topLeftClusterWidth : 0}
-          workspaceTrailing={<SidebarUpdateBadge onOpen={openBridgeUpdate} />}
+          workspaceTrailing={<SidebarUpdateBadge onOpen={openBridgeUpdate} onManage={openBridgesSettings} />}
         />
       </div>
       </div>

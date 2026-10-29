@@ -302,19 +302,6 @@ test('hidden document pause clears retry state and resumes immediately', async (
   } finally { t.mock.timers.reset(); await h.cleanup(); }
 });
 
-test('late async URL setup cannot open a socket after disable', async () => {
-  const h = await harness();
-  try {
-    let resolve!: (config: any) => void;
-    (h.dom.window as any).odinApi = {deviceAuth: {getConfig: () => new Promise(r => {resolve = r;})}};
-    await h.step(() => h.result.reconnect());
-    await h.render({enabled: false});
-    await h.step(() => resolve({apiBaseUrl: 'http://localhost'}));
-    assert.equal(Socket.instances.length, 1);
-    assert.equal(h.result.disconnected, false);
-  } finally { await h.cleanup(); }
-});
-
 test('composer shows accessible retry, preserves terminal and output through two retry cycles, hides it for stopped/disabled panes', async () => {
   const h = await harness(true);
   try {

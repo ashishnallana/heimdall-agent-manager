@@ -1,6 +1,6 @@
 package main
 
-// `ham-bridge setup --hub <url> [--profile P] [--new-bridge|--reuse-bridge ID]
+// `ham-bridge setup --hub <url> [--profile P] [--new-bridge|--reuse-bridge ID] [--replace-other-account]
 // [--headless] [--no-tray] [--json-progress]`: install this bridge from the bundle the running
 // binary ships in, transactionally (F6, F9). The step order, retry/remediation and
 // rollback live in bridgesvc.run_setup; this file supplies the real side effects.
@@ -50,7 +50,7 @@ bridge_setup_command :: proc(args: []string) -> bool {
 	hub := strings.trim_space(option_value(args, "--hub", ""))
 	profile_name := strings.trim_space(option_value(args, "--profile", ""))
 	if hub == "" {
-		fmt.eprintln("usage: ham-bridge setup --hub <url> [--profile P] [--new-bridge | --reuse-bridge BRIDGE_ID] [--headless] [--no-tray] [--json-progress]")
+		fmt.eprintln("usage: ham-bridge setup --hub <url> [--profile P] [--new-bridge | --reuse-bridge BRIDGE_ID] [--replace-other-account] [--headless] [--no-tray] [--json-progress]")
 		return false
 	}
 	profile, ok := bridgesvc.profile_from(hub, profile_name, context.temp_allocator)
@@ -252,6 +252,9 @@ bridge_setup_run :: proc(data: rawptr, step: bridgesvc.Step) -> bridgesvc.Step_R
 		if has_flag(s.args, "--headless") do append(&argv, "--headless")
 		if has_flag(s.args, "--new-bridge") do append(&argv, "--new-bridge")
 		if reuse != "" do append(&argv, "--reuse-bridge", reuse)
+		// F1: a machine enrolled by another account is replaced only when the
+		// caller (the desktop wizard after the user confirmed) says so.
+		if has_flag(s.args, "--replace-other-account") do append(&argv, "--replace-other-account")
 		if !bridge_setup_exec_inherit(argv[:]) do return {failure = .Fatal, message = "enrollment did not complete"}
 		s.enrolled_now = true
 		if current != "" do return {ok = true, message = fmt.tprintf("re-enrolled (was %s)", current)}

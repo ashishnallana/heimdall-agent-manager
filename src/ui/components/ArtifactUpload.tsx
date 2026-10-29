@@ -94,7 +94,7 @@ export type UseArtifactUploadResult = {
 
 function canUseAmbientArtifactAuth(): boolean {
   if (typeof window === 'undefined') return false;
-  return Boolean((window as any).odinApi?.deviceAuth) || window.location.protocol === 'http:' || window.location.protocol === 'https:';
+  return window.location.protocol === 'http:' || window.location.protocol === 'https:';
 }
 
 function hasArtifactUploadAuth(session: any): boolean {

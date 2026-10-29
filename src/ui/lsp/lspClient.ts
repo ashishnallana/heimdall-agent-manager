@@ -60,30 +60,8 @@ export type LspClientOptions = {
   onNotification?: (method: string, params: unknown) => void;
 };
 
-function hasElectronDeviceAuth(): boolean {
-  return typeof window !== 'undefined' && Boolean((window as any).odinApi?.deviceAuth);
-}
-
-async function electronApiBaseUrl(): Promise<string> {
-  try {
-    const cfg = await (window as any).odinApi?.deviceAuth?.getConfig?.();
-    return String(cfg?.apiBaseUrl || (window as any).odinApi?.hubApiBaseUrl || '').replace(/\/$/, '');
-  } catch {
-    return String((window as any).odinApi?.hubApiBaseUrl || '').replace(/\/$/, '');
-  }
-}
-
-function httpToWsUrl(base: string, path: string): string {
-  const parsed = new URL(base || window.location.origin);
-  parsed.protocol = parsed.protocol === 'https:' ? 'wss:' : 'ws:';
-  parsed.pathname = path;
-  parsed.search = '';
-  parsed.hash = '';
-  return parsed.toString();
-}
-
-// Same ws/wss swap as httpToWsUrl, but PRESERVING the path already present in the
-// URL (httpToWsUrl overwrites pathname, which would discard a preview prefix).
+// http(s) -> ws(s) swap that PRESERVES the path already present in the URL
+// (overwriting the pathname would discard a preview prefix).
 function httpUrlToWs(absoluteUrl: string): URL {
   const parsed = new URL(absoluteUrl);
   parsed.protocol = parsed.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -97,17 +75,11 @@ function httpUrlToWs(absoluteUrl: string): URL {
 // authenticated fetch and spent on the upgrade.
 async function lspStreamUrl(sessionId: string): Promise<string> {
   const path = `/api/v1/lsp/${encodeURIComponent(sessionId)}/stream`;
-  // Outside Electron the URLs must be resolved against `document.baseURI`, not the
-  // bare origin: under the shell-session preview prefix
+  // The URLs must be resolved against `document.baseURI`, not the bare origin: under the shell-session preview prefix
   // (`/api/v1/preview/<session>/`) an origin-rooted path drops the prefix and lands
   // on the Hub root instead of the previewed app. `apiAbsoluteUrl` is exactly the
   // helper apiBase.ts documents for this ("a WebSocket, an `<a href>`").
-  const isElectron = hasElectronDeviceAuth();
-  const base = isElectron ? await electronApiBaseUrl() : window.location.origin;
-  const ticketUrl = isElectron
-    ? `${base}/api/v1/me/ws-ticket`
-    : apiAbsoluteUrl('/api/v1/me/ws-ticket');
-  const res = await fetch(ticketUrl, {
+  const res = await fetch(apiAbsoluteUrl('/api/v1/me/ws-ticket'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
   });
@@ -122,9 +94,7 @@ async function lspStreamUrl(sessionId: string): Promise<string> {
   if (!res.ok) throw new Error(String(data?.error?.message || data?.message || `WS ticket failed (${res.status})`));
   const ticket = String(data?.ticket || '');
   if (!ticket) throw new Error('WS ticket missing ticket field');
-  const url = isElectron
-    ? new URL(httpToWsUrl(base, path))
-    : httpUrlToWs(apiAbsoluteUrl(path));
+  const url = httpUrlToWs(apiAbsoluteUrl(path));
   url.searchParams.set('ticket', ticket);
   return url.toString();
 }

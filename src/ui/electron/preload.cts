@@ -1,12 +1,5 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
-let pendingBridgeUpdateCheck = false;
-const bridgeUpdateCheckListeners = new Set<() => void>();
-ipcRenderer.on('heimdall-bridge:check-updates', () => {
-  if (bridgeUpdateCheckListeners.size === 0) pendingBridgeUpdateCheck = true;
-  for (const callback of bridgeUpdateCheckListeners) callback();
-});
-
 contextBridge.exposeInMainWorld('odinApi', {
   notifications: {
     supported: process.argv.includes('--heimdall-native-notifications'),
@@ -16,28 +9,24 @@ contextBridge.exposeInMainWorld('odinApi', {
   pickDirectory: () => ipcRenderer.invoke('odin-api:pick-directory'),
   daemonUrl: process.env.HEIMDALL_DAEMON_URL || '',
   hubApiBaseUrl: process.env.HEIMDALL_HUB_API_URL || process.env.HEIMDALL_HUB_URL || '',
-  setAuthenticatedUser: (identity: any) => ipcRenderer.send('heimdall-auth:set-user', identity),
   // REQ-OIDC-DESKTOP-1: the desktop UI uses the Hub's HttpOnly OIDC session
   // cookie. No Hub user token/HUT storage or Authorization-header bridge is
   // exposed to the renderer.
   openExternal: (url: string) => ipcRenderer.invoke('heimdall-api:open-external', url),
+  // REQ-ENR-9/10: Settings > Bridges. Every call is re-checked in the main
+  // process (sender origin, F25); the renderer gets status and progress only.
   bridgeManager: {
-    getStatus: () => ipcRenderer.invoke('heimdall-bridge:get-status'),
-    installBundled: () => ipcRenderer.invoke('heimdall-bridge:install-bundled'),
-    startEnrollment: () => ipcRenderer.invoke('heimdall-bridge:start-enrollment'),
-    startReEnrollment: () => ipcRenderer.invoke('heimdall-bridge:start-re-enrollment'),
-    onEnrollmentEvent: (callback: (event: any) => void) => {
+    getConfig: () => ipcRenderer.invoke('heimdall-bridge:get-config'),
+    setHubUrl: (hubUrl: string) => ipcRenderer.invoke('heimdall-bridge:set-hub-url', hubUrl),
+    getStatus: (target?: any) => ipcRenderer.invoke('heimdall-bridge:get-status', target || {}),
+    list: () => ipcRenderer.invoke('heimdall-bridge:list'),
+    run: (kind: string, target?: any, options?: any) => ipcRenderer.invoke('heimdall-bridge:run', kind, target || {}, options || {}),
+    cancel: () => ipcRenderer.invoke('heimdall-bridge:cancel'),
+    openLog: (logPath: string) => ipcRenderer.invoke('heimdall-bridge:open-log', logPath),
+    onEvent: (callback: (event: any) => void) => {
       const listener = (_event: any, payload: any) => callback(payload);
-      ipcRenderer.on('heimdall-bridge:enrollment-event', listener);
-      return () => ipcRenderer.removeListener('heimdall-bridge:enrollment-event', listener);
-    },
-    onCheckUpdatesRequested: (callback: () => void) => {
-      bridgeUpdateCheckListeners.add(callback);
-      if (pendingBridgeUpdateCheck) {
-        pendingBridgeUpdateCheck = false;
-        queueMicrotask(callback);
-      }
-      return () => bridgeUpdateCheckListeners.delete(callback);
+      ipcRenderer.on('heimdall-bridge:event', listener);
+      return () => ipcRenderer.removeListener('heimdall-bridge:event', listener);
     },
   },
 });

@@ -2,6 +2,7 @@
 //
 // RUN: node --test tests/ui_settings_modal_test.ts
 
+import './helpers/vaultEndpointHarness.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -13,6 +14,9 @@ import {
   DEFAULT_NAV,
   DEFAULT_ACTIONS,
 } from '../src/ui/components/ui/patterns/commandPaletteLogic.ts';
+
+// Dynamic import runs after the harness registers its Vite-style module resolver.
+const { SETTINGS_CATEGORIES } = await import('../src/ui/components/settings/SettingsModal.tsx');
 
 // ---------------------------------------------------------------------------
 // 2. AppShell Routing Integration (REQ-SET-5, REQ-SET-6 item 5)
@@ -39,7 +43,9 @@ test('AppShell routing integration ensures settings routes resolve without crash
   assert.equal(resolveSettingsTab('#/settings/experimental'), 'experimental');
 
   // Alias normalization
-  assert.equal(normalizeSettingsTab('bridges'), 'workspace');
+  // REQ-ENR-11: Workspace Settings was replaced by Bridges; legacy links land on Bridges.
+  assert.equal(normalizeSettingsTab('bridges'), 'bridges');
+  assert.equal(normalizeSettingsTab('workspace'), 'bridges');
   assert.equal(normalizeSettingsTab('providers'), 'models');
   assert.equal(normalizeSettingsTab('labs'), 'experimental');
   assert.equal(normalizeSettingsTab('experimental'), 'experimental');
@@ -68,4 +74,12 @@ test('AppShell routing integration ensures settings routes resolve without crash
     (action) => action.id === 'settings' || action.id === 'settings-modal',
   );
   assert.ok(settingsAction, 'DEFAULT_ACTIONS must include settings action');
+});
+
+test('Settings lists a Bridges category in place of Workspace Settings (REQ-ENR-11)', () => {
+  const bridges = SETTINGS_CATEGORIES.find((category) => category.id === 'bridges');
+  assert.ok(bridges, 'SETTINGS_CATEGORIES must include bridges');
+  assert.equal(bridges.label, 'Bridges');
+  assert.equal(SETTINGS_CATEGORIES.some((category) => category.id === 'workspace'), false);
+  assert.equal(SETTINGS_CATEGORIES.some((category) => /Workspace Settings/.test(category.label)), false);
 });

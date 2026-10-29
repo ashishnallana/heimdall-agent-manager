@@ -112,10 +112,6 @@ type DeleteArtifactAnnotationArgs = ArtifactAuthArgs & {
   versionNo?: number | null;
 };
 
-function isElectronDeviceAuth(): boolean {
-  return typeof window !== 'undefined' && Boolean((window as any).odinApi?.deviceAuth);
-}
-
 function isBrowserAmbientAuth(): boolean {
   if (typeof window === 'undefined') return false;
   return window.location.protocol === 'http:' || window.location.protocol === 'https:';
@@ -123,14 +119,13 @@ function isBrowserAmbientAuth(): boolean {
 
 function auth(session: any) {
   // Hub v1 artifact endpoints should be auth-mode neutral. In the routed
-  // Authentik app, same-origin cookies authenticate relative /api/v1 requests;
-  // in Electron, the fetch bridge rewrites relative /api/v1 requests to the
-  // configured Hub and injects the secure-store user token. Do not pass legacy
+  // Authentik app (and the Electron window, which loads the Hub UI origin),
+  // same-origin cookies authenticate relative /api/v1 requests. Do not pass legacy
   // Redux clientToken values on those paths. If no legacy token exists in a web
   // shell, prefer the ambient /api/v1 route instead of an unauthenticated local
-  // daemon URL so upload and preview use the same cookie/device auth path.
+  // daemon URL so upload and preview use the same cookie auth path.
   const token = String(session?.clientToken || '');
-  if (isElectronDeviceAuth() || token === 'v1' || (!token && isBrowserAmbientAuth())) return { daemonUrl: '', clientToken: '' };
+  if (token === 'v1' || (!token && isBrowserAmbientAuth())) return { daemonUrl: '', clientToken: '' };
   return { daemonUrl: session.daemonUrl, clientToken: token };
 }
 
@@ -697,7 +692,7 @@ export function useArtifactContentState({ daemonUrl, clientToken, artifactId, ve
   const [state, setState] = useState<ArtifactContentState>(EMPTY_CONTENT_STATE);
   useEffect(() => {
     const token = String(clientToken || '');
-    const ambientAuth = isElectronDeviceAuth() || token === 'v1';
+    const ambientAuth = token === 'v1';
     if (!artifactId || (!ambientAuth && (!daemonUrl || !token))) {
       setState(EMPTY_CONTENT_STATE);
       return;

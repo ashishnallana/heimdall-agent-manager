@@ -29,6 +29,7 @@ import {
 } from '../utils/vaultContent.ts';
 import { selectIsVaultUnlocked, getActiveVaultKey } from '../store/vaultSlice.ts';
 import { desktopNotifications } from '../utils/desktopNotifications.ts';
+import { desktopCapabilities } from '../bridge/desktopBridge.ts';
 
 export function isNotificationSupported(): boolean {
   try {
@@ -110,11 +111,7 @@ async function activeNotificationRegistration(): Promise<ServiceWorkerRegistrati
 // Electron uses the same notification policy, with main-process delivery via
 // preload IPC instead of the browser/service-worker API.
 export function isElectronRuntime(): boolean {
-  try {
-    return typeof window !== 'undefined' && Boolean((window as any).odinApi);
-  } catch (_err) {
-    return false;
-  }
+  return desktopCapabilities().desktop;
 }
 
 // True when the tab is OPEN but NOT focused (hidden behind another tab, or the
