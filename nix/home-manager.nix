@@ -90,9 +90,29 @@ let
     service = cfg.bridge.service;
   };
 
+  # The per-Hub profile service name ham-bridge setup/status/update/uninstall use
+  # (bridgesvc.service_name): heimdall-bridge-<hub>[_<profile>], <hub> being the
+  # lower-cased host with every other character as '-' plus -<port> unless it
+  # is the scheme's default. The launchd label is the same name.
+  hubServiceName = url: profile:
+    let
+      m = builtins.match "(https?)://([^/?#]*).*" (lib.toLower url);
+      scheme = builtins.elemAt m 0;
+      authority = builtins.elemAt m 1;
+      v6 = builtins.match "\\[([^]]*)](:([0-9]+))?" authority;
+      hp = if v6 != null then v6 else builtins.match "([^:]*)(:([0-9]+))?" authority;
+      host = lib.removeSuffix "." (builtins.elemAt hp 0);
+      rawPort = builtins.elemAt hp 2;
+      port = if rawPort == null then "" else toString (lib.toInt rawPort);
+      defaultPort = (scheme == "http" && port == "80") || (scheme == "https" && port == "443");
+      safe = lib.stringAsChars (c: if builtins.match "[a-z0-9-]" c != null then c else "-") host;
+    in
+    assert lib.assertMsg (m != null) "programs.heimdall: hubUrl ${url} must be an http(s) origin";
+    "heimdall-bridge-${safe}${lib.optionalString (port != "" && !defaultPort) "-${port}"}${lib.optionalString (profile != "") "_${profile}"}";
+
   bridgeServiceEntries =
-    (lib.optional cfg.bridge.enable { name = "default"; config = bridgePrimaryConfig; serviceName = "heimdall-bridge"; label = "works.earendil.heimdall-bridge"; })
-    ++ (lib.mapAttrsToList (name: bridgeCfg: { name = name; config = bridgeCfg; serviceName = "heimdall-bridge-${name}"; label = "works.earendil.heimdall-bridge.${name}"; }) cfg.bridges);
+    (lib.optional cfg.bridge.enable (let n = hubServiceName bridgePrimaryConfig.hubUrl ""; in { name = "default"; config = bridgePrimaryConfig; serviceName = n; label = n; }))
+    ++ (lib.mapAttrsToList (name: bridgeCfg: let n = hubServiceName bridgeCfg.hubUrl name; in { name = name; config = bridgeCfg; serviceName = n; label = n; }) cfg.bridges);
 
   anyBridgeEnabled = cfg.bridge.enable || lib.any (bridgeCfg: bridgeCfg.enable) (lib.attrValues cfg.bridges);
   enabledBridgeEntries = lib.filter (entry: entry.config.enable) bridgeServiceEntries;
