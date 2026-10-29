@@ -16,8 +16,8 @@
 //   7-11 (with HEIMDALL_E2E_SERVICE=1) the same lifecycle for a second profile, driven
 //     through the desktop app's main-process bridgeManager.runOperation: setup wizard
 //     (pairing event) -> re-enroll -> replace other account -> update -> uninstall.
-// Hermetic: HOME/USERPROFILE/APPDATA point into a temp dir (with HEIMDALL_E2E_SERVICE=1
-// the real home, see HOME below). The OS secret stores are
+// Hermetic: HOME/USERPROFILE/APPDATA point into a temp dir (with HEIMDALL_E2E_SERVICE=1, and
+// always on macOS, the real home: see HOME below). The OS secret stores are
 // real but every item is named by a bridge id this run created; they are listed
 // (and on failure deleted) by that id only. Never touches a running dev hub/bridge.
 //
@@ -35,6 +35,7 @@ import { fileURLToPath } from 'node:url';
 import { createDeviceIdentity, memoryDeviceStore } from '../../src/ui/utils/deviceIdentity.ts';
 import { signedRequestHeaders } from '../../src/ui/utils/vaultRequestSigner.ts';
 import { hubLogin, sessionHeaders, startMockOidc } from './hubOidc.mjs';
+import { refuseLegacyInstall, scrubHeimdallEnv } from './realHomeGuard.mjs';
 import { verifyDirectory } from '../../src/ui/utils/vaultDirectoryVerify.ts';
 import { openVerifiedWrap } from '../../src/ui/utils/vaultKeyringWrap.ts';
 import { serializeKeyringBytes } from '../../src/ui/utils/vaultKeyring.ts';
@@ -66,15 +67,9 @@ async function freePort() {
   });
 }
 
-// Nothing of the caller's own bridge may reach the binaries under test. A shell the
-// bridge spawned exports HEIMDALL_BRIDGE_SERVICE_NAME, and `ham-bridge enroll` stops and
-// restarts that service as its own when the profile has none registered yet
-// (bridge_enroll_service_for): with the real home that is the bridge running this test.
-// Scrubbed from process.env itself because bridgeManager (steps 7-11) inherits it.
-for (const k of Object.keys(process.env)) {
-  const u = k.toUpperCase();
-  if (u.startsWith('HEIMDALL_') && !u.startsWith('HEIMDALL_E2E_')) delete process.env[k];
-}
+// With the real home an inherited HEIMDALL_BRIDGE_SERVICE_NAME names the bridge running
+// this test; bridgeManager (steps 7-11) inherits process.env too.
+scrubHeimdallEnv();
 
 const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'heimdall-lifecycle-'));
 // A service manager (systemd --user, launchd, Task Scheduler) starts the bridge with
@@ -87,17 +82,13 @@ const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'heimdall-lifecycle-'));
 // makeLoginAuthUI -> AuthorizationCopyRights waiting for a login-keychain prompt
 // no CI runner can show (seen with `sample`). Keep the real HOME there; every
 // bridge path is passed explicitly and keychain items are named by this run's ids.
-const HOME = WITH_SERVICE || MAC ? os.homedir() : path.join(ROOT, 'home');
+const REAL_HOME = WITH_SERVICE || MAC;
+const HOME = REAL_HOME ? os.homedir() : path.join(ROOT, 'home');
 fs.mkdirSync(HOME, { recursive: true });
 const ENV = WITH_SERVICE ? { ...process.env }
   : { ...process.env, HOME, USERPROFILE: HOME, APPDATA: path.join(HOME, 'AppData'), LOCALAPPDATA: path.join(HOME, 'Local'), XDG_CONFIG_HOME: path.join(HOME, '.config') };
 if (WITH_SERVICE && WIN && (!ENV.APPDATA || !ENV.LOCALAPPDATA)) throw new Error('APPDATA/LOCALAPPDATA unset');
-// enroll's last fallback is the pre-profile fixed-name service; with the real home it
-// would stop a real install. Refuse rather than touch it.
-const LEGACY_UNIT = !WITH_SERVICE || WIN ? ''
-  : MAC ? path.join(HOME, 'Library', 'LaunchAgents', 'works.earendil.heimdall-bridge.plist')
-  : path.join(HOME, '.config', 'systemd', 'user', 'heimdall-bridge.service');
-if (LEGACY_UNIT && fs.existsSync(LEGACY_UNIT)) throw new Error(`HEIMDALL_E2E_SERVICE=1 refuses to run: ${LEGACY_UNIT} is a real bridge install that \`ham-bridge enroll\` would stop`);
+if (REAL_HOME) refuseLegacyInstall(HOME);
 const children = [];
 const CREATED = []; // every bridge id this run enrolled
 
@@ -405,7 +396,7 @@ async function assertGone(L, accts) {
   for (const a of accts) active.push(...(await bridgesOf(a)).filter(isActive).map((b) => b.bridge_id));
   expect(active.length === 0, `no active hub bridge row for any account (${active})`);
   const ours = (d) => d === L.service || CREATED.some((id) => d === id || d.startsWith(`${id}_`));
-  const leftovers = (fs.existsSync(STATE_ROOT) ? fs.readdirSync(STATE_ROOT) : []).filter((d) => !WITH_SERVICE || ours(d));
+  const leftovers = (fs.existsSync(STATE_ROOT) ? fs.readdirSync(STATE_ROOT) : []).filter((d) => !REAL_HOME || ours(d));
   expect(leftovers.length === 0, `nothing of this run left under ${STATE_ROOT} (${leftovers})`);
 }
 
@@ -491,7 +482,7 @@ function cleanupSecrets() {
 }
 // Real-home runs: remove this run's own profile/secret dirs if a failure left them.
 function cleanupRealHome() {
-  if (!WITH_SERVICE || !SERVICE) return;
+  if (!REAL_HOME || !SERVICE) return;
   for (const p of [PROFILE.dir, PROFILE.data, SERVICE_FILE, EL.dir, EL.data, EL.serviceFile].filter(Boolean)) { try { fs.rmSync(p, { recursive: true, force: true }); } catch { /* gone */ } }
   for (const id of CREATED) for (const d of bridgeSecretFiles(id).filter((x) => !x.includes('/'))) { try { fs.rmSync(path.join(STATE_ROOT, d), { recursive: true, force: true }); } catch { /* gone */ } }
   if (LINUX_SERVICE) { spawnSync('systemctl', ['--user', 'daemon-reload']); for (const svc of [SERVICE, EL.service]) spawnSync('systemctl', ['--user', 'reset-failed', `${svc}.service`]); }

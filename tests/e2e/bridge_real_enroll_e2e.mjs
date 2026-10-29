@@ -8,7 +8,8 @@
 //   - a second instance on the same config refuses (instance lock);
 //   - a second bridge enrolled against ANOTHER hub on the same machine (its own
 //     config/token) works, and the first still starts afterwards.
-// Hermetic: HOME/USERPROFILE/APPDATA point into a temp dir, every port is
+// Hermetic: HOME/USERPROFILE/APPDATA point into a temp dir (macOS: the real home, see
+// HOME below), every port is
 // ephemeral. The Windows Credential Manager is real, but every item this run writes
 // is scoped to a random-port 127.0.0.1 hub (keystore scope), and all of them are
 // deleted at the end (cmdkey). Never touches a running dev hub/bridge.
@@ -26,6 +27,7 @@ import { fileURLToPath } from 'node:url';
 import { createDeviceIdentity, memoryDeviceStore } from '../../src/ui/utils/deviceIdentity.ts';
 import { signedRequestHeaders } from '../../src/ui/utils/vaultRequestSigner.ts';
 import { hubLogin, sessionHeaders, startMockOidc } from './hubOidc.mjs';
+import { refuseLegacyInstall, scrubHeimdallEnv } from './realHomeGuard.mjs';
 import { verifyDirectory } from '../../src/ui/utils/vaultDirectoryVerify.ts';
 import { openVerifiedWrap } from '../../src/ui/utils/vaultKeyringWrap.ts';
 import { serializeKeyringBytes } from '../../src/ui/utils/vaultKeyring.ts';
@@ -59,7 +61,12 @@ const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'heimdall-real-enroll-'));
 // makeLoginAuthUI -> AuthorizationCopyRights waiting for a login-keychain prompt
 // no CI runner can show (seen with `sample`). Keep the real HOME there; every
 // bridge path is passed explicitly and keychain items are named by this run's ids.
-const HOME = process.platform === 'darwin' ? os.homedir() : path.join(ROOT, 'home');
+// With the real home, enroll's service fallbacks (HEIMDALL_BRIDGE_SERVICE_NAME, then the
+// legacy fixed-name unit) resolve against the user's real install: scrub and refuse.
+const REAL_HOME = process.platform === 'darwin';
+const HOME = REAL_HOME ? os.homedir() : path.join(ROOT, 'home');
+scrubHeimdallEnv();
+if (REAL_HOME) refuseLegacyInstall(HOME);
 fs.mkdirSync(HOME, { recursive: true });
 const ENV = { ...process.env, HOME, USERPROFILE: HOME, APPDATA: path.join(HOME, 'AppData'), LOCALAPPDATA: path.join(HOME, 'Local'), XDG_CONFIG_HOME: path.join(HOME, '.config') };
 const children = [];
