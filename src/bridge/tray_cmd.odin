@@ -83,6 +83,8 @@ bridge_tray_command :: proc(args: []string) -> bool {
 		action, clicked := bridge_tray_native_pump(BRIDGE_TRAY_TICK)
 		if !clicked do continue
 		if action == .Quit do return true
+		// The polled status lives in the temp allocator, freed every tick: act on a fresh one.
+		status = bridge_service_status(host, name)
 		if action == .Uninstall {
 			if !bridge_tray_native_confirm(bridgesvc.TRAY_UNINSTALL_CONFIRM) do continue
 			// uninstall removes this tray's login entry and stops it; leave first so
