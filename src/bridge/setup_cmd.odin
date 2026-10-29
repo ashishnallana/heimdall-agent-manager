@@ -154,8 +154,71 @@ bridge_setup_exec_inherit :: proc(argv: []string) -> bool {
 	return werr == nil && state.success && state.exit_code == 0
 }
 
+// bridge_setup_service_path is the PATH baked into the service. A service
+// manager (launchd above all) starts the bridge with a minimal PATH, and setup
+// often runs where PATH is just as minimal: the desktop app opened from the
+// Dock/Finder, or the .pkg postinstall. Provider CLIs in the user's PATH
+// (Homebrew, npm, ~/.local/bin, Nix profiles) were then invisible to the
+// bridge. So the service gets, in order and without duplicates: this process's
+// PATH, the user's login-shell PATH, then well-known per-user and system bin
+// directories that exist. Windows services already see the user's PATH.
+bridge_setup_service_path :: proc(current, login_path, home, user: string, exists: proc(path: string) -> bool) -> string {
+	seen := make(map[string]bool, 32, context.temp_allocator)
+	out := make([dynamic]string, context.temp_allocator)
+	add :: proc(seen: ^map[string]bool, out: ^[dynamic]string, dir: string) {
+		d := strings.trim_space(dir)
+		if d == "" || seen[d] do return
+		seen[d] = true
+		append(out, d)
+	}
+	for list in ([]string{current, login_path}) {
+		for d in strings.split(list, ":", context.temp_allocator) do add(&seen, &out, d)
+	}
+	known := make([dynamic]string, context.temp_allocator)
+	if home != "" {
+		for rel in ([]string{".local/bin", "bin", ".claude/local", ".npm-global/bin", ".bun/bin", ".volta/bin", ".cargo/bin", ".deno/bin", ".nix-profile/bin", ".local/state/nix/profile/bin"}) {
+			append(&known, strings.concatenate({home, "/", rel}, context.temp_allocator))
+		}
+	}
+	if user != "" do append(&known, strings.concatenate({"/etc/profiles/per-user/", user, "/bin"}, context.temp_allocator))
+	for d in ([]string{"/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin", "/run/current-system/sw/bin", "/nix/var/nix/profiles/default/bin"}) do append(&known, d)
+	for d in known do if exists(d) do add(&seen, &out, d)
+	for d in ([]string{"/usr/bin", "/bin", "/usr/sbin", "/sbin"}) do add(&seen, &out, d)
+	return strings.join(out[:], ":", context.temp_allocator)
+}
+
+BRIDGE_SETUP_PATH_MARK :: "__HAM_SETUP_PATH__"
+
+// bridge_setup_login_shell_path asks the user's login shell for its PATH
+// (interactive too: zsh users commonly extend PATH in .zshrc). Output around
+// the markers is ignored (motd, prompts); any failure or timeout yields "".
+bridge_setup_login_shell_path :: proc() -> string {
+	shell, _ := os.lookup_env("SHELL", context.temp_allocator)
+	if shell == "" || !os.exists(shell) do return ""
+	script := "printf '" + BRIDGE_SETUP_PATH_MARK + "%s" + BRIDGE_SETUP_PATH_MARK + "' \"$PATH\""
+	stdout, _, ok, _ := bridge_process_run_capture({shell, "-ilc", script}, 5 * time.Second)
+	if !ok do return ""
+	return bridge_setup_extract_marked_path(stdout)
+}
+
+bridge_setup_extract_marked_path :: proc(stdout: string) -> string {
+	start := strings.index(stdout, BRIDGE_SETUP_PATH_MARK)
+	if start < 0 do return ""
+	rest := stdout[start + len(BRIDGE_SETUP_PATH_MARK):]
+	end := strings.index(rest, BRIDGE_SETUP_PATH_MARK)
+	if end < 0 do return ""
+	return strings.clone(rest[:end], context.temp_allocator)
+}
+
+bridge_setup_dir_exists :: proc(path: string) -> bool { return os.is_dir(path) }
+
 bridge_setup_render_input :: proc(s: ^Bridge_Setup) -> bridgesvc.Render_Input {
 	path, _ := os.lookup_env("PATH", context.temp_allocator)
+	when ODIN_OS != .Windows {
+		home, _ := os.lookup_env("HOME", context.temp_allocator)
+		user, _ := os.lookup_env("USER", context.temp_allocator)
+		path = bridge_setup_service_path(path, bridge_setup_login_shell_path(), home, user, bridge_setup_dir_exists)
+	}
 	tv, _ := os.lookup_env("TERMUX_VERSION", context.temp_allocator)
 	return {hub = s.profile.hub_url, profile = s.profile.profile, path_env = path, termux_version = tv, bridge_port = s.ports[0], endpoint_port = s.ports[1]}
 }
