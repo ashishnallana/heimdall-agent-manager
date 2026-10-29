@@ -80,6 +80,19 @@ try {
   // Non-fatal: fall back to the default (name-derived) userData path.
 }
 
+// One app process per profile (the lock is taken on userData, so after the pin
+// above). Without it a second copy (the installer's finish-page "Run" plus a
+// manual launch, or a relaunch while the old process is still exiting) shares
+// the Chromium profile, and IndexedDB then fails with "Internal error opening
+// backing store for indexedDB.open" (the vault check). The second copy exits
+// before anything starts and the running one comes to the front.
+if (!app.requestSingleInstanceLock()) {
+  app.exit(0);
+}
+app.on('second-instance', () => {
+  if (mainWindow && !mainWindow.isDestroyed()) showMainWindow();
+});
+
 // app.isPackaged is false when Electron loads a loose .cjs (Nix install, CI).
 // Treat as dev only when the Vite dev server URL is explicitly provided.
 const isDev = desktopConfig.isDev;

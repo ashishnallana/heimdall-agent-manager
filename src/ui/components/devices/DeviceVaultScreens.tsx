@@ -174,6 +174,11 @@ export function DeviceVaultProblemScreen({ state }: { state: DeviceVaultState })
     <Shell debugId="device-vault-error" title={state.errorCode === 'pairing_unverified' || state.errorCode === 'pairing_mismatch' ? 'Pairing not verified' : state.errorCode === 'vault_missing' ? 'Vault missing' : state.errorCode === 'vault_reset' ? 'Vault was reset' : state.errorCode === 'device_state_malformed' ? "This browser's device data is unreadable" : 'Vault check failed'}>
       <div data-debug-id="device-vault-error-message"><Alert tone="danger">{state.errorMessage || "Unknown error"}</Alert></div>
       <p className="mt-2 text-xs text-muted">Nothing was decrypted and no key was installed on this device.</p>
+      {/backing store|indexeddb/i.test(state.errorMessage || '') ? (
+        <p data-debug-id="device-vault-storage-locked-hint" className="mt-2 text-xs text-muted">
+          This browser's local storage could not be opened. Usually another copy of the app (or another window using the same profile) still holds it: quit every copy, reopen one, then Retry.
+        </p>
+      ) : null}
       {state.errorCode === 'vault_missing' && state.startOverPhrase ? (
         <div className="mt-3 text-xs text-muted">
           <label htmlFor="device-vault-start-over-phrase" className="mb-1 block">

@@ -53,6 +53,16 @@ test('only a ready device renders the app; every other state renders a gate scre
   });
 });
 
+test('an IndexedDB backing-store failure explains the locked-profile case; other errors do not', () => {
+  withWindow('#/', () => {
+    const locked = renderGate({ ...initialDeviceVaultState, status: 'error', errorMessage: 'Internal error opening backing store for indexedDB.open.' });
+    assert.match(locked, /device-vault-storage-locked-hint/);
+    assert.match(locked, /quit every copy/);
+    const other = renderGate({ ...initialDeviceVaultState, status: 'error', errorMessage: 'directory fetch failed' });
+    assert.doesNotMatch(other, /device-vault-storage-locked-hint/);
+  });
+});
+
 test('pending, revoked, other-account and reset-scheduled devices are parked on #/device/enroll', () => {
   for (const status of ['pending-approval', 'revoked', 'other-account', 'reset-scheduled']) {
     withWindow('#/conversations/conv_1?msg=m1', (w) => {
