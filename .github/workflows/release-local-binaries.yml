@@ -224,22 +224,20 @@ jobs:
             ".#${odin}ham-bridge" \
             ".#${odin}ham-ctl" \
             .#release-ham-pty-host \
-            ".#${odin}heimdall" \
             --print-out-paths \
             --no-link | tee "$RUNNER_TEMP/nix-paths.txt"
           paths=()
           while IFS= read -r line; do
             [ -n "$line" ] && paths+=("$line")
           done < "$RUNNER_TEMP/nix-paths.txt"
-          if [ "${#paths[@]}" -ne 4 ]; then
-            echo "expected four Nix output paths, got ${#paths[@]}" >&2
+          if [ "${#paths[@]}" -ne 3 ]; then
+            echo "expected three Nix output paths, got ${#paths[@]}" >&2
             exit 1
           fi
           {
             echo "bridge=${paths[0]}"
             echo "ctl=${paths[1]}"
             echo "pty_host=${paths[2]}"
-            echo "manager=${paths[3]}"
           } >> "$GITHUB_OUTPUT"
 
       # REQ-SIGN-1: one Developer ID identity signs the standalone binaries
@@ -283,7 +281,6 @@ jobs:
             dist \
             "${{ steps.nix-build.outputs.bridge }}" \
             "${{ steps.nix-build.outputs.ctl }}" \
-            "${{ steps.nix-build.outputs.manager }}" \
             "${{ steps.nix-build.outputs.pty_host }}"
           tar -tzf "dist/heimdall-local-${{ matrix.target }}.tar.gz" | sort | tee "dist/heimdall-local-${{ matrix.target }}.contents.txt"
           case "$(uname -s)" in
@@ -399,7 +396,7 @@ jobs:
           rm -rf "$work"; mkdir -p "$work"
           tar -xzf "dist/heimdall-local-${{ matrix.target }}.tar.gz" -C "$work"
           scripts/release/android-seccomp-probe.sh check \
-            "$work/bin/ham-bridge" "$work/bin/ham-ctl" "$work/bin/heimdall" "$work/bin/ham-pty-host"
+            "$work/bin/ham-bridge" "$work/bin/ham-ctl" "$work/bin/ham-pty-host"
           # T17: --version never accepts a connection; run the bridge as a service
           # and connect to its listeners so accept(2) vs accept4(2) is actually
           # exercised (SIGSYS __NR_accept on a real device, v0.3.32).
@@ -443,7 +440,6 @@ jobs:
           # --probe-hub that TLS verifies through Apple SecTrust.
           "$work/bin/ham-bridge" --version
           "$work/bin/ham-ctl" --version
-          "$work/bin/heimdall" --version
           "$work/bin/ham-pty-host" --help >/dev/null
           "$work/bin/ham-bridge" --probe-hub https://github.com | tee "$RUNNER_TEMP/probe.txt"
           grep -q 'Apple SecTrust' "$RUNNER_TEMP/probe.txt" || {
@@ -508,7 +504,7 @@ jobs:
   # heimdall-local-windows-amd64.zip for scripts/install.ps1. A zip, not a
   # tarball: install.ps1 reads it with .NET (exact entry names and types, no
   # extraction by name) and the bridge's self-update `tar -xzf` (Windows bsdtar)
-  # reads zip too. No heimdall.exe (the manager is systemd/launchd-only).
+  # reads zip too.
   build-windows:
     name: Build windows-amd64
     needs: prepare
@@ -695,7 +691,6 @@ jobs:
           tar -xzf "dist/heimdall-local-${{ matrix.target }}.tar.gz" -C "$work"
           "$work/bin/ham-bridge" --version
           "$work/bin/ham-ctl" --version
-          "$work/bin/heimdall" --version
           "$work/bin/ham-pty-host" --help >/dev/null
           "$work/bin/ham-bridge" --probe-hub https://github.com
 
@@ -751,7 +746,7 @@ jobs:
             # List once; piping tar into `grep -q` races under pipefail
             # (grep exits on first match -> tar hits EPIPE -> false failure).
             tar -tzf "$tarball" > "$RUNNER_TEMP/$tarball.entries"
-            for entry in bin/ham-bridge bin/ham-ctl bin/heimdall bin/ham-pty-host scripts/apply-bridge-update.sh README.md LICENSE; do
+            for entry in bin/ham-bridge bin/ham-ctl bin/ham-pty-host scripts/apply-bridge-update.sh README.md LICENSE; do
               require_entry "$tarball" "$entry"
             done
             target="${tarball#heimdall-local-}"
@@ -816,6 +811,7 @@ jobs:
           - Heimdall-${{ needs.prepare.outputs.clean_version }}-x64.exe (unsigned Windows installer with Bridge)
           - latest.yml and the Windows block map (desktop auto-update metadata)
           - SHA256SUMS
+          - install.sh, install.ps1 (bootstraps: download + verify + ham-bridge setup)
           NOTES
           release_flags=()
           if [ "${{ inputs.draft || false }}" = "true" ]; then release_flags+=(--draft); fi
@@ -823,11 +819,14 @@ jobs:
           if [ "${{ github.event_name == 'push' || inputs.prerelease }}" = "true" ]; then
             release_flags+=(--prerelease)
           fi
+          # The thin bootstraps ship as assets too; they are self-contained and
+          # resolve the newest promoted release, so any copy works.
+          cp scripts/install.sh scripts/install.ps1 dist/
           if gh release view "$VERSION" >/dev/null 2>&1; then
-            gh release upload "$VERSION" dist/heimdall-local-*-"$VERSION".tar.gz dist/heimdall-local-*-"$VERSION".zip dist/Heimdall-*.dmg dist/Heimdall-*.exe dist/Heimdall-*.exe.blockmap dist/latest.yml dist/SHA256SUMS --clobber
+            gh release upload "$VERSION" dist/heimdall-local-*-"$VERSION".tar.gz dist/heimdall-local-*-"$VERSION".zip dist/Heimdall-*.dmg dist/Heimdall-*.exe dist/Heimdall-*.exe.blockmap dist/latest.yml dist/SHA256SUMS dist/install.sh dist/install.ps1 --clobber
             gh release edit "$VERSION" --notes-file "$notes_file"
           else
-            gh release create "$VERSION" dist/heimdall-local-*-"$VERSION".tar.gz dist/heimdall-local-*-"$VERSION".zip dist/Heimdall-*.dmg dist/Heimdall-*.exe dist/Heimdall-*.exe.blockmap dist/latest.yml dist/SHA256SUMS \
+            gh release create "$VERSION" dist/heimdall-local-*-"$VERSION".tar.gz dist/heimdall-local-*-"$VERSION".zip dist/Heimdall-*.dmg dist/Heimdall-*.exe dist/Heimdall-*.exe.blockmap dist/latest.yml dist/SHA256SUMS dist/install.sh dist/install.ps1 \
               --title "$VERSION" \
               --target "$RELEASE_COMMIT" \
               --notes-file "$notes_file" \

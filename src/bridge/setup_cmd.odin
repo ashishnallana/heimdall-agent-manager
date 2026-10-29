@@ -16,7 +16,7 @@ import "core:time"
 import bridgesvc "odin_test:lib/bridgesvc"
 
 // Binaries a release bundle carries next to ham-bridge; only ham-bridge is required.
-BRIDGE_SETUP_BINARIES :: [?]string{"ham-bridge", "ham-pty-host", "ham-ctl", "ham-wrapper", "heimdall"}
+BRIDGE_SETUP_BINARIES :: [?]string{"ham-bridge", "ham-pty-host", "ham-ctl", "ham-wrapper"}
 BRIDGE_SETUP_VERIFY_TIMEOUT :: 45 * time.Second
 
 Bridge_Setup :: struct {

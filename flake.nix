@@ -395,10 +395,6 @@
           # enable the disk half from outside the repo root.
           ham-migration-bootstrap-test = mkOdinPackageWithRuntime pkgs odin "ham-migration-bootstrap-test" "tests/migration_bootstrap_test" [ pkgs.sqlite ];
           ham-pty-host = mkPtyHost pkgs;
-          # REQ-DIST-1: user-facing `heimdall` management CLI (src/manager),
-          # shipped as bin/heimdall in the release tarballs. The flake attribute
-          # is `ham-manager` because `heimdall` below is the desktop UI package.
-          ham-manager = mkOdinPackage pkgs odin "heimdall" "src/manager";
           heimdall = mkOdinUiPackage pkgs;
           heimdall-node-modules = mkNodeModules pkgs;
           # REQ-INST-16: portable release attrs consumed by
@@ -406,7 +402,6 @@
           # clean load commands on Darwin; nothing references /nix/store.
           release-ham-bridge = mkReleaseOdinPackage pkgs odin "ham-bridge" "src/bridge";
           release-ham-ctl = mkReleaseOdinPackage pkgs odin "ham-ctl" "src/ctl";
-          release-heimdall = mkReleaseOdinPackage pkgs odin "heimdall" "src/manager";
           release-ham-pty-host = mkReleasePtyHost pkgs;
         } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
           # T12: termux-arm64 bundle (musl-static Odin binaries; see
@@ -414,7 +409,6 @@
           # musl-static, built on the aarch64-linux runner.
           release-termux-ham-bridge = mkTermuxOdinPackage pkgs odin "ham-bridge" "src/bridge";
           release-termux-ham-ctl = mkTermuxOdinPackage pkgs odin "ham-ctl" "src/ctl";
-          release-termux-heimdall = mkTermuxOdinPackage pkgs odin "heimdall" "src/manager";
         } // {
           bc-test-agent = self.packages.${system}.ham-test-agent;
           default = self.packages.${system}.ham-hub;

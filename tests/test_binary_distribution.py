@@ -4,11 +4,11 @@
 Verifies the distribution surfaces end-to-end and hermetically:
 
 1. Tarball packaging: scripts/release/package-local-binary-tarball.sh produces a
-   tarball with the required entries (bin/heimdall, bin/ham-bridge,
+   tarball with the required entries (bin/ham-bridge,
    bin/ham-pty-host, bin/ham-ctl, README.md, LICENSE, METADATA.json), executable
    modes for binaries, and a valid METADATA.json schema. Stub binaries stand in
    for the Nix outputs (the script only stages files, so stubs exercise it
-   fully; the real manager binary is built separately for the CLI checks).
+   fully).
 2. Checksum validation: the release-workflow SHA256SUMS layout
    (.github/workflows/release-local-binaries.yml) round-trips — hashlib,
    sha256sum(1) and install.sh's awk lookup all agree — and a tampered tarball
@@ -43,11 +43,9 @@ Verifies the distribution surfaces end-to-end and hermetically:
    definition a test that set $HOME somewhere else. See
    assert_live_home_untouched(); it is the post-condition sibling of
    assert_bridge_isolated()'s pre-condition.
-4. heimdall CLI: the binary built from src/manager emits the documented
-   --version and status schemas, with the version line pinned to
-   src/contracts/protocol.odin.
+4. (removed: the `heimdall` manager CLI was folded into ham-bridge.)
 5. Documentation regression: SELF_HOSTING.md Part 2 documents the curl|bash
-   installer and the heimdall CLI as the primary setup path while keeping the
+   installer and ham-bridge as the primary setup path while keeping the
    manual/Nix paths, and Part 1 (hub) headings are intact.
 
 Run: python3 tests/test_binary_distribution.py
@@ -165,9 +163,8 @@ def package_tarball(base: Path, *, with_pty_host=True, with_openssl=False,
     bridge = make_stub_input(base, 'bridge-out',
                              ['ham-bridge'] + (['openssl'] if with_openssl else []))
     ctl = make_stub_input(base, 'ctl-out', list(ctl_binaries))
-    manager = make_stub_input(base, 'manager-out', ['heimdall'])
     argv = ['bash', PACKAGE_SCRIPT, target, 'v0.1.0', out_dir,
-            bridge, ctl, manager]
+            bridge, ctl]
     if with_pty_host:
         argv.append(make_stub_input(base, 'ptyhost-out', ['ham-pty-host']))
     res = run(argv, cwd=ROOT)
@@ -194,18 +191,18 @@ def test_tarball_structure_and_metadata(ctx):
 
     names, modes, metadata = read_tarball(tarball)
     required = {
-        'bin/heimdall', 'bin/ham-bridge', 'bin/ham-pty-host', 'bin/ham-ctl',
+        'bin/ham-bridge', 'bin/ham-pty-host', 'bin/ham-ctl',
         'README.md', 'LICENSE', 'METADATA.json',
     }
     missing = required - set(names)
     assert not missing, f'tarball missing required entries: {sorted(missing)}'
     assert 'bin/openssl' in names, 'bundled openssl must ship when present in the bridge output'
 
-    for binary in ('heimdall', 'ham-bridge', 'ham-pty-host', 'ham-ctl'):
+    for binary in ('ham-bridge', 'ham-pty-host', 'ham-ctl'):
         assert modes[f'bin/{binary}'] & 0o111, f'bin/{binary} must be executable in the tarball'
 
     expected_keys = {'product', 'version', 'target', 'commit', 'built_at',
-                     'binaries', 'http_client', 'tls_dependency'}
+                     'binaries', 'developer_id_signed', 'http_client', 'tls_dependency'}
     assert set(metadata.keys()) == expected_keys, (
         f'METADATA.json keys mismatch: {sorted(metadata.keys())}')
     assert metadata['product'] == 'heimdall-local'
@@ -213,7 +210,7 @@ def test_tarball_structure_and_metadata(ctx):
     assert metadata['target'] == 'linux-amd64'
     assert isinstance(metadata['commit'], str) and metadata['commit'], 'commit must be non-empty'
     assert isinstance(metadata['built_at'], str) and metadata['built_at'], 'built_at must be non-empty'
-    assert sorted(metadata['binaries']) == ['ham-bridge', 'ham-ctl', 'ham-pty-host', 'heimdall'], (
+    assert sorted(metadata['binaries']) == ['ham-bridge', 'ham-ctl', 'ham-pty-host'], (
         f'METADATA.json binaries mismatch: {metadata["binaries"]}')
     assert isinstance(metadata['tls_dependency'], str) and metadata['tls_dependency']
     # libcurl is linked statically at the version pinned in nix/libcurl-pin.json.
@@ -225,14 +222,14 @@ def test_tarball_structure_and_metadata(ctx):
 
 def test_tarball_without_pty_host(ctx):
     res, tarball = package_tarball(ctx['work2'], with_pty_host=False)
-    assert res.returncode == 0, f'6-arg (no pty-host) invocation failed:\n{res.stderr}'
+    assert res.returncode == 0, f'5-arg (no pty-host) invocation failed:\n{res.stderr}'
     names, _, metadata = read_tarball(tarball)
-    for entry in ('bin/ham-bridge', 'bin/ham-ctl', 'bin/heimdall',
+    for entry in ('bin/ham-bridge', 'bin/ham-ctl',
                   'README.md', 'LICENSE', 'METADATA.json'):
-        assert entry in names, f'entry {entry} missing from 6-arg tarball'
+        assert entry in names, f'entry {entry} missing from 5-arg tarball'
     assert 'bin/ham-pty-host' not in names, 'pty-host must not ship when not provided'
     assert 'bin/openssl' not in names, 'openssl must not ship when not bundled'
-    assert sorted(metadata['binaries']) == ['ham-bridge', 'ham-ctl', 'heimdall'], (
+    assert sorted(metadata['binaries']) == ['ham-bridge', 'ham-ctl'], (
         f'METADATA.json binaries mismatch: {metadata["binaries"]}')
 
 
@@ -261,7 +258,7 @@ def test_termux_tarball_target(ctx):
     assert res.returncode == 0, f'termux-arm64 packaging failed:\n{res.stderr}'
     assert tarball.name == 'heimdall-local-termux-arm64.tar.gz', tarball
     names, _, metadata = read_tarball(tarball)
-    for entry in ('bin/ham-bridge', 'bin/ham-ctl', 'bin/heimdall', 'bin/ham-pty-host',
+    for entry in ('bin/ham-bridge', 'bin/ham-ctl', 'bin/ham-pty-host',
                   'scripts/apply-bridge-update.sh', 'README.md', 'LICENSE', 'METADATA.json'):
         assert entry in names, f'entry {entry} missing from termux tarball'
     assert metadata['target'] == 'termux-arm64', metadata['target']
@@ -272,16 +269,15 @@ def test_packaging_error_cases(ctx):
     base.mkdir()
     bridge = make_stub_input(base, 'bridge-out', ['ham-bridge'])
     ctl = make_stub_input(base, 'ctl-out', ['ham-ctl'])
-    manager = make_stub_input(base, 'manager-out', ['heimdall'])
     out_dir = base / 'dist'
     res = run(['bash', PACKAGE_SCRIPT, 'solaris-sparc64', 'v0.1.0', out_dir,
-               bridge, ctl, manager], cwd=ROOT)
+               bridge, ctl], cwd=ROOT)
     assert res.returncode == 2, f'unsupported target must exit 2, got {res.returncode}'
     assert 'unsupported release target' in res.stderr
 
     incomplete_ctl = make_stub_input(base, 'ctl-incomplete', [])
     res = run(['bash', PACKAGE_SCRIPT, 'linux-amd64', 'v0.1.0', out_dir,
-               bridge, incomplete_ctl, manager], cwd=ROOT)
+               bridge, incomplete_ctl], cwd=ROOT)
     assert res.returncode == 1, f'missing input must exit 1, got {res.returncode}'
     assert 'missing required release input' in res.stderr
 
@@ -2855,89 +2851,6 @@ def version_constants():
     return app_version.group(1), protocol_version.group(1)
 
 
-def build_heimdall(ctx):
-    """Build src/manager so the CLI-schema tests below have a binary.
-
-    A HOST-CAPABILITY skip, not a property of the distribution: without nix
-    there is no toolchain here to build with, and `subprocess.run(['nix', ...])`
-    would raise FileNotFoundError, which main() counts as a FAILURE. That is
-    what kept this suite from running at all on the macOS CI runners
-    (.github/workflows/install-sh.yml), where there is no nix and where the
-    point of the run is the INSTALLER's darwin branches, not the compiler.
-    Pass HEIMDALL_BIN=<path> to test a prebuilt binary instead.
-    """
-    override = os.environ.get('HEIMDALL_BIN')
-    if override:
-        binary = Path(override)
-        assert binary.is_file(), f'HEIMDALL_BIN={override} does not exist'
-    else:
-        if shutil.which('nix') is None:
-            raise Skip('nix is not installed, so src/manager cannot be built '
-                       'here; set HEIMDALL_BIN=<path> to test a prebuilt binary')
-        out = ctx['work'] / 'heimdall'
-        res = run(['nix', 'develop', '--command', 'bash', '-c',
-                   f'odin build src/manager -collection:odin_test=src -out:{out}'],
-                  cwd=ROOT, timeout=600)
-        assert res.returncode == 0, f'odin build failed:\n{res.stderr}'
-        assert out.is_file(), f'build produced no binary at {out}'
-        binary = out
-    ctx['heimdall_bin'] = binary
-
-
-def test_heimdall_version_schema(ctx):
-    if 'heimdall_bin' not in ctx:
-        raise Skip('heimdall binary was not built')
-    binary = ctx['heimdall_bin']
-    app_version, protocol_version = version_constants()
-    res = run([binary, '--version'], timeout=30)
-    assert res.returncode == 0, f'heimdall --version exited {res.returncode}:\n{res.stderr}'
-    expected = f'heimdall {app_version} protocol {protocol_version}'
-    assert res.stdout == expected + '\n', f'version line mismatch: {res.stdout!r} != {expected!r}'
-
-
-def test_heimdall_status_schema(ctx):
-    if 'heimdall_bin' not in ctx:
-        raise Skip('heimdall binary was not built')
-    binary = ctx['heimdall_bin']
-    app_version, protocol_version = version_constants()
-    config = ctx['work'] / 'missing-home' / 'config.toml'
-    res = run([binary, 'status', '--config', str(config)], timeout=60)
-    # status is a report, not a gate: it always exits 0.
-    assert res.returncode == 0, f'heimdall status exited {res.returncode}:\n{res.stderr}'
-    out = res.stdout
-    assert out.splitlines()[0] == f'heimdall {app_version} protocol {protocol_version}'
-    for section in ('Enrollment', 'Bridge service', 'Hub connection',
-                    'Bridge loopback (:49323)', 'Binaries'):
-        assert section in out, f'status report missing section {section!r}'
-    assert f'config:       {config} (missing)' in out, 'missing config must be reported'
-    # INVERTED (REQ-ENROLL-9): the hint names the device flow now. Ground truth is
-    # src/manager/status.odin:60 -- a status report whose remedy line names a deleted
-    # command is worse than no hint, because the operator trusts it and loses time.
-    assert 'hub url:      (not set — run: ham-bridge enroll --hub <your-heimdall-url>)' in out
-    assert 'hbe_' not in out, 'deleted hbe_ token vocabulary reappeared in status output'
-    assert '(this binary)' in out and 'heimdall' in out
-
-
-def test_heimdall_vault_removed(ctx):
-    # REQ-T6-2: `heimdall vault` managed a machine-wide key file that nothing reads
-    # any more; bridges are unsealed per bridge from Settings -> Bridges. The group
-    # is gone, so it must be an unknown command and must not create a key file.
-    if 'heimdall_bin' not in ctx:
-        raise Skip('heimdall binary was not built')
-    binary = ctx['heimdall_bin']
-    config = ctx['work'] / 'vault-home' / 'config.toml'
-    vault_key_file = config.parent / 'vault_key'
-
-    for argv in (['vault'], ['vault', 'status'], ['vault', 'set-key', '0123456789abcdef' * 4]):
-        res = run([binary, *argv, '--config', str(config)], timeout=30)
-        assert res.returncode != 0, f'heimdall {" ".join(argv)} must fail, exited 0:\n{res.stdout}'
-        assert 'unknown command' in res.stderr, f'heimdall {argv[0]} must be an unknown command:\n{res.stderr}'
-    assert not vault_key_file.exists(), 'no heimdall command may create a vault key file'
-
-    res = run([binary, '--help'], timeout=30)
-    assert 'vault' not in res.stdout, 'heimdall --help must not list a vault command'
-
-
 # ---- 4b. release portability gate (REQ-INST-16) -------------------------------
 #
 # The release tarballs target stock Linux/macOS hosts with no /nix/store. The
@@ -2963,7 +2876,7 @@ def test_heimdall_vault_removed(ctx):
 #      what let the unrunnable `docker run ... scratch` invocation pass this
 #      check vacuously on every docker host until v0.3.3 (REQ-INST-25).
 
-RELEASE_BINARIES = ('ham-bridge', 'ham-ctl', 'heimdall', 'ham-pty-host')
+RELEASE_BINARIES = ('ham-bridge', 'ham-ctl', 'ham-pty-host')
 # Release attr per binary; the pty-host out dir name carries the musl target
 # triple, so out dirs are matched to binaries by name prefix, not position.
 RELEASE_ATTRS = {name: f'release-{name}' for name in RELEASE_BINARIES}
@@ -3063,10 +2976,9 @@ def test_release_gate_rejects_nix_wrapper(ctx):
         'exec /nix/store/fake-bridge/bin/ham-bridge "$@"\n')
     (bridge / 'bin' / 'ham-bridge').chmod(0o755)
     ctl = make_stub_input(base, 'ctl-out', ['ham-ctl'])
-    manager = make_stub_input(base, 'manager-out', ['heimdall'])
     pty_host = make_stub_input(base, 'pty-host-out', ['ham-pty-host'])
     res = run(['bash', PACKAGE_SCRIPT, 'linux-amd64', 'v0.1.0', base / 'dist',
-               bridge, ctl, manager, pty_host], cwd=ROOT)
+               bridge, ctl, pty_host], cwd=ROOT)
     assert res.returncode != 0, 'the v0.3.2-style Nix wrapper must be rejected'
     assert 'script' in res.stderr and '/nix/store' in res.stderr, res.stderr
 
@@ -3091,10 +3003,9 @@ def test_release_gate_rejects_dynamic_elf(ctx):
     bridge = make_stub_input(base, 'bridge-out', ['ham-bridge'])
     ctl = make_stub_input(base, 'ctl-out', ['ham-ctl'])
     shutil.copy(dynamic_binary, ctl / 'bin' / 'ham-ctl')
-    manager = make_stub_input(base, 'manager-out', ['heimdall'])
     pty_host = make_stub_input(base, 'pty-host-out', ['ham-pty-host'])
     res = run(['bash', PACKAGE_SCRIPT, 'linux-amd64', 'v0.1.0', base / 'dist',
-               bridge, ctl, manager, pty_host], cwd=ROOT)
+               bridge, ctl, pty_host], cwd=ROOT)
     assert res.returncode != 0, 'a dynamic ELF must be rejected'
     assert 'has a program interpreter' in res.stderr, res.stderr
 
@@ -3119,10 +3030,9 @@ def test_release_gate_rejects_shared_libcurl(ctx):
     bridge = make_stub_input(base, 'bridge-out', ['ham-bridge'])
     shutil.copy(control, bridge / 'bin' / 'ham-bridge')
     ctl = make_stub_input(base, 'ctl-out', ['ham-ctl'])
-    manager = make_stub_input(base, 'manager-out', ['heimdall'])
     pty_host = make_stub_input(base, 'pty-host-out', ['ham-pty-host'])
     res = run(['bash', PACKAGE_SCRIPT, 'linux-amd64', 'v0.1.0', base / 'dist',
-               bridge, ctl, manager, pty_host], cwd=ROOT)
+               bridge, ctl, pty_host], cwd=ROOT)
     assert res.returncode != 0, 'a binary needing a shared libcurl must be rejected'
     assert 'needs the shared library libcurl' in res.stderr, res.stderr
 
@@ -3184,7 +3094,7 @@ def test_release_tarball_is_portable(ctx):
     out_dir = ctx['work'] / 'release-dist'
     outs = release_attrs_or_skip(ctx)
     res = run(['bash', PACKAGE_SCRIPT, target, 'v0.1.0', out_dir,
-               outs['ham-bridge'], outs['ham-ctl'], outs['heimdall'],
+               outs['ham-bridge'], outs['ham-ctl'],
                outs['ham-pty-host']], cwd=ROOT, timeout=120)
     assert res.returncode == 0, f'packaging release tarball failed:\n{res.stderr}'
     tarball = out_dir / f'heimdall-local-{target}.tar.gz'
@@ -3209,7 +3119,6 @@ def test_release_tarball_is_portable(ctx):
     expected = {
         'ham-bridge': f'ham-bridge {app_version} protocol {protocol_version} bridge 1 ws 1',
         'ham-ctl': f'ham-ctl {app_version} protocol {protocol_version}',
-        'heimdall': f'heimdall {app_version} protocol {protocol_version}',
     }
     print(f'    storeless mechanism: {storeless_mechanism()}')
     for name, line in expected.items():
@@ -3362,13 +3271,13 @@ def test_termux_release_binaries_pass_seccomp_probe(ctx):
     if shutil.which('nix') is None:
         raise Skip(RELEASE_ATTRS_SKIP_REASON)
     need_tool('strace')
-    attrs = ['release-termux-ham-bridge', 'release-termux-ham-ctl', 'release-termux-heimdall']
+    attrs = ['release-termux-ham-bridge', 'release-termux-ham-ctl']
     res = run(['nix', 'build', *[f'.#{a}' for a in attrs], '--print-out-paths', '--no-link'],
               cwd=ROOT, timeout=1800)
     assert res.returncode == 0, f'nix build of termux attrs failed:\n{res.stderr}'
     outs = [l for l in res.stdout.splitlines() if l.startswith('/nix/store/')]
     binaries = [str(Path(out) / 'bin' / name)
-                for out, name in zip(outs, ('ham-bridge', 'ham-ctl', 'heimdall'))]
+                for out, name in zip(outs, ('ham-bridge', 'ham-ctl'))]
     for binary in binaries:
         scan_binary_for_nix_references(Path(binary), Path(binary).name)
     res = run(['bash', SECCOMP_PROBE_SCRIPT, 'check', *binaries], timeout=300)
@@ -5013,14 +4922,10 @@ def test_install_sh_enrollment_noninteractive_invariants(ctx):
 def main() -> int:
     tests = [
         ('tarball structure + METADATA.json schema', test_tarball_structure_and_metadata),
-        ('tarball without pty-host (6-arg variant)', test_tarball_without_pty_host),
+        ('tarball without pty-host (5-arg variant)', test_tarball_without_pty_host),
         ('packaging error cases', test_packaging_error_cases),
         ('SHA256SUMS validation + tamper fail-closed', test_sha256sums_validation),
         ('install.sh syntax (bash -n)', test_install_sh_syntax),
-        ('build heimdall (nix develop / odin)', build_heimdall),
-        ('heimdall --version schema', test_heimdall_version_schema),
-        ('heimdall status schema', test_heimdall_status_schema),
-        ('heimdall vault removed', test_heimdall_vault_removed),
         ('release build skips when Nix is absent (REQ-INST-16)',
          test_release_build_skips_without_nix),
         ('release gate rejects Nix wrapper scripts (REQ-INST-16)',

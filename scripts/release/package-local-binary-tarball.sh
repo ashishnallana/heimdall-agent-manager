@@ -3,10 +3,10 @@ set -euo pipefail
 
 usage() {
   cat >&2 <<'USAGE'
-usage: package-local-binary-tarball.sh <target> <version> <out-dir> <ham-bridge-out> <ham-ctl-out> <heimdall-out> [ham-pty-host-out]
+usage: package-local-binary-tarball.sh <target> <version> <out-dir> <ham-bridge-out> <ham-ctl-out> [ham-pty-host-out]
 
 Creates dist tarball: <out-dir>/heimdall-local-<target>.tar.gz
-Tarball root contains: bin/ham-bridge, bin/ham-ctl, bin/heimdall, share/heimdall/extensions/, README.md, LICENSE, METADATA.json
+Tarball root contains: bin/ham-bridge, bin/ham-ctl, share/heimdall/extensions/, README.md, LICENSE, METADATA.json
 When the optional <ham-pty-host-out> is given, bin/ham-pty-host is also shipped
 (self-contained; PTYH-4).
 USAGE
@@ -17,7 +17,7 @@ if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
   exit 0
 fi
 
-if [ "$#" -lt 6 ] || [ "$#" -gt 7 ]; then
+if [ "$#" -lt 5 ] || [ "$#" -gt 6 ]; then
   usage
   exit 2
 fi
@@ -27,8 +27,7 @@ version="$2"
 out_dir="$3"
 ham_bridge_out="$4"
 ham_ctl_out="$5"
-heimdall_out="$6"
-ham_pty_host_out="${7:-}"
+ham_pty_host_out="${6:-}"
 
 case "$target" in
   # termux-arm64 (T12): Android/Termux bundle. Same ELF layout and the same
@@ -41,7 +40,6 @@ esac
 for spec in \
   "$ham_bridge_out/bin/ham-bridge" \
   "$ham_ctl_out/bin/ham-ctl" \
-  "$heimdall_out/bin/heimdall" \
   "README.md" \
   "LICENSE" \
   "scripts/apply-bridge-update.sh" \
@@ -78,7 +76,6 @@ if [ -f "$ham_bridge_out/bin/openssl" ]; then
   install -m 0755 "$ham_bridge_out/bin/openssl" "$stage/bin/openssl"
 fi
 install -m 0755 "$ham_ctl_out/bin/ham-ctl" "$stage/bin/ham-ctl"
-install -m 0755 "$heimdall_out/bin/heimdall" "$stage/bin/heimdall"
 # PTYH-4: ship the self-contained PTY host binary when its Nix output is
 # provided. Optional so callers that do not ship a PTY host keep working.
 ham_pty_host_shipped=false
@@ -270,7 +267,6 @@ if [[ "$target" == darwin-* ]]; then
         ham-bridge) identifier=works.earendil.heimdall.bridge ;;
         ham-ctl) identifier=works.earendil.heimdall.ctl ;;
         ham-pty-host) identifier=works.earendil.heimdall.pty-host ;;
-        heimdall) identifier=works.earendil.heimdall.manager ;;
         *) identifier="works.earendil.heimdall.$(basename "$staged" | tr -cs 'A-Za-z0-9.-' '-')" ;;
       esac
       codesign --force --sign "$signing_identity" --identifier "$identifier" --options runtime --timestamp "$staged"
@@ -289,9 +285,9 @@ else
   built_at_iso="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 fi
 if [ "$ham_pty_host_shipped" = true ]; then
-  binaries_json='["ham-bridge", "ham-ctl", "heimdall", "ham-pty-host"]'
+  binaries_json='["ham-bridge", "ham-ctl", "ham-pty-host"]'
 else
-  binaries_json='["ham-bridge", "ham-ctl", "heimdall"]'
+  binaries_json='["ham-bridge", "ham-ctl"]'
 fi
 if [[ "$target" == darwin-* ]] && [ -n "${HEIMDALL_MACOS_CODESIGN_IDENTITY:-}" ]; then
   signed_json=true
@@ -318,7 +314,6 @@ tar -C "$stage" -czf "$tarball" bin scripts share README.md LICENSE METADATA.jso
 required_entries=(
   "bin/ham-bridge"
   "bin/ham-ctl"
-  "bin/heimdall"
   "scripts/apply-bridge-update.sh"
   "scripts/refresh-provider-extensions.sh"
   "share/heimdall/extensions/.agents/plugins/marketplace.json"
