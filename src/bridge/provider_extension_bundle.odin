@@ -107,9 +107,11 @@ bridge_bundled_extension_base_candidates :: proc(allocator := context.allocator)
 		append(&candidates, path_join({expanded, "extensions"}, allocator))
 	}
 
-	// 3. Executable-relative share directory
-	if len(os.args) > 0 && os.args[0] != "" {
-		exe := os.args[0]
+	// 3. Executable-relative share directory. args[0] is a bare name when the
+	// bridge was started through PATH, so prefer the resolved executable.
+	exe, _ := os.get_executable_path(context.temp_allocator)
+	if exe == "" && len(os.args) > 0 do exe = os.args[0]
+	if exe != "" {
 		slash := max(strings.last_index_byte(exe, '/'), strings.last_index_byte(exe, '\\'))
 		exe_dir := exe[:slash] if slash > 0 else "."
 		slash_parent := max(strings.last_index_byte(exe_dir, '/'), strings.last_index_byte(exe_dir, '\\'))
@@ -125,12 +127,25 @@ bridge_bundled_extension_base_candidates :: proc(allocator := context.allocator)
 		append(&candidates, path_join({exe_dir, "share", "extensions"}, allocator))
 	}
 
-	// 4. Standard installation directories
+	// 4. Standard installation directories (F11). An installed bridge runs with
+	// --data-dir <profile data dir>, so step 2 normally finds the copy
+	// `ham-bridge setup` / `extensions sync` put there; these are the shared
+	// per-OS roots for bridges started by hand.
 	user_local := expand_home_temp("~/.local/share/heimdall", allocator)
 	append(&candidates, path_join({user_local, "extensions"}, allocator))
 	append(&candidates, path_join({user_local, "share", "extensions"}, allocator))
-	append(&candidates, strings.clone("/usr/local/share/heimdall/extensions", allocator))
-	append(&candidates, strings.clone("/usr/share/heimdall/extensions", allocator))
+	when ODIN_OS == .Darwin {
+		append(&candidates, expand_home_temp("~/Library/Application Support/heimdall/extensions", allocator))
+	}
+	when ODIN_OS == .Windows {
+		if local := strings.trim_space(os.get_env("LOCALAPPDATA", context.temp_allocator)); local != "" {
+			append(&candidates, path_join({local, "heimdall", "extensions"}, allocator))
+		}
+	}
+	when ODIN_OS != .Windows {
+		append(&candidates, strings.clone("/usr/local/share/heimdall/extensions", allocator))
+		append(&candidates, strings.clone("/usr/share/heimdall/extensions", allocator))
+	}
 
 	// 5. Working directory / source checkout fallbacks
 	append(&candidates, strings.clone("extensions", allocator))

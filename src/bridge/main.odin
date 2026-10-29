@@ -118,6 +118,10 @@ main :: proc() {
 		if !bridge_setup_command(os.args) do os.exit(1)
 		return
 	}
+	if len(os.args) > 1 && os.args[1] == "extensions" {
+		if !bridge_extensions_command(os.args) do os.exit(1)
+		return
+	}
 	if len(os.args) > 1 && os.args[1] == "list" {
 		if !bridge_list_command(os.args) do os.exit(1)
 		return

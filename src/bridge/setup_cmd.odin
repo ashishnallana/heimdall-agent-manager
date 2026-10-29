@@ -99,7 +99,8 @@ bridge_setup_emit :: proc(data: rawptr, ev: bridgesvc.Event) {
 		return
 	}
 	switch ev.state {
-	case "start": fmt.printf("[%3d%%] %-9s ...", ev.pct, ev.step)
+	case "start": fmt.printf("[%3d%%] %-10s ...", ev.pct, ev.step)
+	case "progress": fmt.printfln("\n        %s", ev.message)
 	case "ok", "skipped": fmt.printfln(" %s%s%s", ev.state, " — " if ev.message != "" && ev.message != "skipped" else "", ev.message if ev.message != "skipped" else "")
 	case "retry": fmt.printfln(" retry (attempt %d): %s", ev.attempt, ev.message)
 	case "failed": fmt.printfln(" FAILED: %s", ev.message)
@@ -249,6 +250,9 @@ bridge_setup_run :: proc(data: rawptr, step: bridgesvc.Step) -> bridgesvc.Step_R
 		if current != "" do return {ok = true, message = fmt.tprintf("re-enrolled (was %s)", current)}
 		return {ok = true, message = "enrolled"}
 
+	case .Extensions:
+		return bridge_setup_extensions(s)
+
 	case .Start:
 		return bridge_setup_start(s)
 
@@ -268,6 +272,32 @@ bridge_setup_run :: proc(data: rawptr, step: bridgesvc.Step) -> bridgesvc.Step_R
 		return {failure = .Fatal, message = "service runs but did not connect to the hub in time", log = log}
 	}
 	return {failure = .Fatal, message = "unknown step"}
+}
+
+// bridge_setup_extensions installs the bundle's provider extensions into the
+// data dir and ensures them for every detected provider, one progress event
+// per provider. A provider that still fails after self-healing is reported in
+// the step's message but does not roll back the install.
+bridge_setup_extensions :: proc(s: ^Bridge_Setup) -> bridgesvc.Step_Result {
+	l := s.layout
+	src := bridge_extensions_bundle_source(s.bundle_dir)
+	copied := "skipped"
+	if src != "" {
+		ok, msg := bridge_extensions_install_bundle(src, l.data_dir)
+		if !ok do return {failure = .Fatal, message = msg}
+		copied = msg
+	}
+	ext_root := bridgesvc.pjoin(l.data_dir, "extensions")
+	if !os.is_dir(ext_root) do return {ok = true, message = "skipped"}
+	on_line := proc(data: rawptr, line: Bridge_Extension_Sync_Line) {
+		bridge_setup_emit(data, bridgesvc.Event{step = "extensions", state = "progress",
+			pct = bridgesvc.step_pct(.Extensions, false), message = line.line, attempt = 1})
+	}
+	lines, failures := bridge_extensions_sync_providers(ext_root, on_line, s)
+	installed := 0
+	for line in lines do if line.ok && !line.skipped do installed += 1
+	msg := fmt.tprintf("%d provider extension(s) ready, %d failed (bundle: %s)", installed, failures, copied)
+	return {ok = true, message = msg}
 }
 
 // bridge_setup_start (re)starts the service and records what Verify must not
@@ -384,6 +414,9 @@ bridge_setup_undo :: proc(data: rawptr, step: bridgesvc.Step) {
 			bridge_setup_restore(s, l.service_file)
 			if l.backend == .Systemd do _, _ = bridge_service_exec({"systemctl", "--user", "daemon-reload"})
 		}
+	case .Extensions:
+		// Provider registrations are left as repaired; only the bundle copy is undone.
+		bridge_extensions_restore(l.data_dir)
 	case .Enroll:
 		// An enrollment that completed is kept: the credential is valid for this hub
 		// and re-running setup reuses it instead of creating another bridge.

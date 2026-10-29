@@ -27,6 +27,7 @@ Step :: enum {
 	Ports, // allocate / keep the profile's loopback ports
 	Service, // render (always re-render) the service file and register it
 	Enroll, // enroll unless already enrolled to this hub
+	Extensions, // copy the bundled provider extensions, install/repair them per provider
 	Start, // (re)start the service
 	Verify, // service running and the bridge reports connected
 }
@@ -39,6 +40,7 @@ STEP_NAMES := [Step]string {
 	.Ports    = "ports",
 	.Service  = "service",
 	.Enroll   = "enroll",
+	.Extensions = "extensions",
 	.Start    = "start",
 	.Verify   = "verify",
 }
@@ -105,7 +107,7 @@ Step_Result :: struct {
 // Event is one --json-progress line.
 Event :: struct {
 	step:    string `json:"step"`,
-	state:   string `json:"state"`, // start|ok|skipped|retry|failed|rollback|done
+	state:   string `json:"state"`, // start|progress|ok|skipped|retry|failed|rollback|done
 	pct:     int    `json:"pct"`,
 	message: string `json:"message"`,
 	log:     string `json:"log"`,

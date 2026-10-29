@@ -140,3 +140,78 @@ test_bridge_extension_ensure_reports_through_sink :: proc(t: ^testing.T) {
 	testing.expect(t, len(capture.stages) > 0)
 	testing.expect_value(t, capture.reports, 1)
 }
+
+test_sync_discover_present: [3]bool
+
+// Pre-install state until the provider's own install step is the last call.
+test_sync_discover :: proc(filter: []string) -> [dynamic]Bridge_Provider_Path {
+	results := make([dynamic]Bridge_Provider_Path)
+	last := ""
+	if n := len(test_install_calls); n > 0 && len(test_install_calls[n - 1]) > 3 do last = test_install_calls[n - 1][3]
+	for p, i in BRIDGE_EXTENSION_PROVIDERS {
+		present := test_sync_discover_present[i]
+		installed := len(filter) == 1 && (last == BRIDGE_CLAUDE_PLUGIN_ID && p == "claude" || last == BRIDGE_CODEX_PLUGIN_ID && p == "codex")
+		append(&results, Bridge_Provider_Path{
+			provider = strings.clone(p),
+			resolved_path = strings.clone("/fake/provider" if present else ""),
+			state = strings.clone("present" if present else "absent"),
+			extension_state = strings.clone(test_install_probe_state if installed else test_install_pre_state),
+			extension_version = strings.clone(test_install_probe_version if installed else ""),
+		})
+	}
+	return results
+}
+
+// Setup and update: the bundle is copied into <data dir>/extensions and every
+// detected provider is ensured from that copy; undetected providers are skipped.
+@(test)
+test_bridge_extensions_sync_installs_bundle_for_detected_providers :: proc(t: ^testing.T) {
+	sync.mutex_lock(&test_install_mu)
+	defer sync.mutex_unlock(&test_install_mu)
+	saved := test_install_hook()
+	defer test_install_restore(saved)
+	bridge_extension_discover = test_sync_discover
+	src := test_install_fixture(t)
+	defer _ = os.remove_all(src)
+	data_dir := fmt.tprintf("%s-data", src)
+	defer _ = os.remove_all(data_dir)
+	test_install_reset(t, "sync")
+	test_install_pre_state = "absent"
+	test_install_probe_version = "0.4.31"
+	test_sync_discover_present = {true, true, false} // claude, codex; no antigravity
+
+	ok, msg := bridge_extensions_install_bundle(src, data_dir)
+	testing.expectf(t, ok, "%s", msg)
+	ext_root := test_install_path({data_dir, "extensions"})
+	testing.expect(t, os.exists(test_install_path({ext_root, "codex", ".codex-plugin", "plugin.json"})))
+	testing.expect(t, os.exists(test_install_path({ext_root, ".claude-plugin", "marketplace.json"})))
+
+	Seen :: struct { names: [dynamic]string }
+	seen := Seen{names = make([dynamic]string, context.temp_allocator)}
+	lines, failures := bridge_extensions_sync_providers(ext_root, proc(data: rawptr, line: Bridge_Extension_Sync_Line) {
+		append(&(^Seen)(data).names, strings.clone(line.line, context.temp_allocator))
+	}, &seen)
+	testing.expect_value(t, failures, 0)
+	testing.expect_value(t, len(lines), 3)
+	testing.expect_value(t, len(seen.names), 3)
+	if len(lines) == 3 {
+		testing.expectf(t, lines[0].ok && !lines[0].skipped && strings.contains(lines[0].line, "installed"), "%v", lines[0])
+		testing.expectf(t, lines[1].ok && !lines[1].skipped, "%v", lines[1])
+		testing.expectf(t, lines[2].skipped, "%v", lines[2])
+	}
+	// Markets are registered from the data-dir copy, never the source bundle.
+	for call in test_install_calls {
+		if test_install_verb(call) == "marketplace add" do testing.expectf(t, bridge_extension_same_path(call[4], ext_root), "registered %s", call[4])
+	}
+
+	// A second install keeps the previous copy for rollback; restore puts it back.
+	_ = os.write_entire_file_from_string(test_install_path({ext_root, "marker"}), "old")
+	ok, msg = bridge_extensions_install_bundle(src, data_dir)
+	testing.expectf(t, ok, "%s", msg)
+	testing.expect(t, !os.exists(test_install_path({ext_root, "marker"})))
+	bridge_extensions_restore(data_dir)
+	testing.expect(t, os.exists(test_install_path({ext_root, "marker"})))
+	// Installing the data-dir copy onto itself is a no-op.
+	ok, msg = bridge_extensions_install_bundle(ext_root, data_dir)
+	testing.expect(t, ok && msg == "skipped")
+}
