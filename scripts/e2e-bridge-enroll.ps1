@@ -5,8 +5,13 @@
 # ports; every Credential Manager item it writes is scoped to a random-port
 # 127.0.0.1 hub and is deleted at the end.
 #
-#   powershell -File scripts/e2e-bridge-enroll.ps1 [-SkipBuild]
-param([switch]$SkipBuild)
+# -Lifecycle also runs tests/e2e/bridge_lifecycle_e2e.mjs (enroll -> re-enroll ->
+# replace account -> setup/update when HEIMDALL_E2E_SERVICE=1 -> uninstall --purge,
+# asserting no files, Credential Manager items, scheduled task or hub rows remain).
+# -SkipBuild keeps HEIMDALL_E2E_HUB_BIN / HEIMDALL_E2E_BRIDGE_BIN when they are set (CI).
+#
+#   powershell -File scripts/e2e-bridge-enroll.ps1 [-SkipBuild] [-Lifecycle]
+param([switch]$SkipBuild, [switch]$Lifecycle)
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 $odin = if ($env:ODIN) { $env:ODIN } else { Join-Path $env:LOCALAPPDATA 'Programs\Odin\dist\odin.exe' }
@@ -22,12 +27,16 @@ if (-not $SkipBuild) {
     if ($LASTEXITCODE -ne 0) { Write-Host "FAIL build $($pair[0])"; exit 1 }
   }
 }
-$env:HEIMDALL_E2E_HUB_BIN = $hub
-$env:HEIMDALL_E2E_BRIDGE_BIN = $bridge
+if (-not ($SkipBuild -and $env:HEIMDALL_E2E_HUB_BIN)) { $env:HEIMDALL_E2E_HUB_BIN = $hub }
+if (-not ($SkipBuild -and $env:HEIMDALL_E2E_BRIDGE_BIN)) { $env:HEIMDALL_E2E_BRIDGE_BIN = $bridge }
 Push-Location $repo
 try {
   node --import ./tests/helpers/vaultEndpointHarness.ts tests/e2e/bridge_real_enroll_e2e.mjs
   $code = $LASTEXITCODE
+  if ($Lifecycle) {
+    node --import ./tests/helpers/vaultEndpointHarness.ts tests/e2e/bridge_lifecycle_e2e.mjs
+    if ($LASTEXITCODE -ne 0) { $code = $LASTEXITCODE }
+  }
 } finally {
   Pop-Location
 }

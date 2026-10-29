@@ -53,8 +53,8 @@ $OutDir = (Resolve-Path $OutDir).Path
 $work = Join-Path ([IO.Path]::GetTempPath()) ('heimdall-winbuild-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory $work | Out-Null
 try {
-  $needOdin = ($Components -contains 'ham-bridge') -or ($Components -contains 'ham-ctl')
-  if (($Components -contains 'ham-bridge') -and -not $SqliteLibDir) {
+  $needOdin = ($Components -contains 'ham-bridge') -or ($Components -contains 'ham-ctl') -or ($Components -contains 'ham-hub')
+  if ((($Components -contains 'ham-bridge') -or ($Components -contains 'ham-hub')) -and -not $SqliteLibDir) {
     if (-not $SqliteAmalgamationDir) {
       $zip = Join-Path $work 'sqlite.zip'
       Write-Host "downloading $SqliteZipUrl"
@@ -90,12 +90,13 @@ try {
       if (-not (Test-Path (Join-Path $CurlLibDir $lib))) { throw "$lib not found in $CurlLibDir (build it with scripts/windows/build-libcurl.ps1)" }
     }
     $curlLibDir = (Resolve-Path $CurlLibDir).Path
-    foreach ($pair in @(@('ham-bridge', 'src/bridge'), @('ham-ctl', 'src/ctl'))) {
+    # ham-hub is opt-in (-Components ham-hub): the e2e workflow builds it, releases do not.
+    foreach ($pair in @(@('ham-bridge', 'src/bridge'), @('ham-ctl', 'src/ctl'), @('ham-hub', 'src/hub'))) {
       if ($Components -notcontains $pair[0]) { continue }
       $out = Join-Path $OutDir ($pair[0] + '.exe')
       $odinArgs = @('build', (Join-Path $repo $pair[1]), "-collection:odin_test=$srcRoot", "-out:$out") + $defines
       $libPaths = "/LIBPATH:$($curlLibDir -replace '\\', '/')"
-      if ($pair[0] -eq 'ham-bridge') { $libPaths += " /LIBPATH:$($SqliteLibDir -replace '\\', '/')" }
+      if ($pair[0] -ne 'ham-ctl') { $libPaths += " /LIBPATH:$($SqliteLibDir -replace '\\', '/')" }
       $odinArgs += "-extra-linker-flags:$libPaths"
       Write-Host "odin build $($pair[1]) -> $out"
       Invoke-Checked "odin build $($pair[1])" { & $Odin @odinArgs }

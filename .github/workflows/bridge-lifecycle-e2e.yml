@@ -1,0 +1,128 @@
+name: Bridge lifecycle e2e
+# T12 (REQ-ENR-1/3/6): the real ham-hub + ham-bridge through enroll -> re-enroll
+# same account -> replace with another account -> setup + update (service) ->
+# uninstall --purge on Linux, macOS and Windows, asserting that no files, OS secret
+# store items, service units or active hub rows remain
+# (tests/e2e/bridge_lifecycle_e2e.mjs), plus the existing real-enroll e2e.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/bridge/**'
+      - 'src/lib/**'
+      - 'src/hub/**'
+      - 'src/ui/utils/vault*'
+      - 'tests/e2e/bridge_*_e2e.mjs'
+      - 'tests/e2e/hubOidc.mjs'
+      - 'scripts/e2e-bridge-enroll.ps1'
+      - '.github/workflows/bridge-lifecycle-e2e.yml'
+  pull_request:
+    paths:
+      - 'src/bridge/**'
+      - 'src/lib/**'
+      - 'src/hub/**'
+      - 'src/ui/utils/vault*'
+      - 'tests/e2e/bridge_*_e2e.mjs'
+      - 'tests/e2e/hubOidc.mjs'
+      - 'scripts/e2e-bridge-enroll.ps1'
+      - '.github/workflows/bridge-lifecycle-e2e.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: bridge-lifecycle-e2e-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  unix:
+    name: e2e (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            # systemd --user of the runner does not read units from the test's
+            # temp HOME, so the setup/update step runs on macOS and Windows only.
+            service: '0'
+          - os: macos-14
+            service: '1'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Build ham-hub and ham-bridge
+        id: build
+        shell: bash
+        run: |
+          set -euo pipefail
+          hub="$(nix build .#ham-hub --print-out-paths --no-link)"
+          bridge="$(nix build .#ham-bridge --print-out-paths --no-link)"
+          echo "HEIMDALL_E2E_HUB_BIN=$hub/bin/ham-hub" >> "$GITHUB_ENV"
+          echo "HEIMDALL_E2E_BRIDGE_BIN=$bridge/bin/ham-bridge" >> "$GITHUB_ENV"
+      - name: Real enroll e2e
+        run: node --import ./tests/helpers/vaultEndpointHarness.ts tests/e2e/bridge_real_enroll_e2e.mjs
+      - name: Lifecycle e2e
+        env:
+          HEIMDALL_E2E_SERVICE: ${{ matrix.service }}
+        run: node --import ./tests/helpers/vaultEndpointHarness.ts tests/e2e/bridge_lifecycle_e2e.mjs
+
+  windows:
+    name: e2e (windows-2022)
+    runs-on: windows-2022
+    timeout-minutes: 60
+    env:
+      ODIN_TAG: dev-2026-09
+      ODIN_ZIP_SHA256: 8ed8abd95b82e0af1eb7e86cb75f380fd8bde104947721817b35929f5fc19388
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Install Odin (pinned, SHA-256 verified)
+        shell: pwsh
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP 'odin.zip'
+          Invoke-WebRequest "https://github.com/odin-lang/Odin/releases/download/$env:ODIN_TAG/odin-windows-amd64-$env:ODIN_TAG.zip" -OutFile $zip
+          $got = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLowerInvariant()
+          if ($got -ne $env:ODIN_ZIP_SHA256) { throw "Odin zip SHA-256 mismatch: $got" }
+          Expand-Archive $zip -DestinationPath (Join-Path $env:RUNNER_TEMP 'odin')
+          "ODIN=$(Join-Path $env:RUNNER_TEMP 'odin\dist\odin.exe')" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+      - name: Cache the pinned static libcurl
+        id: curl-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/libcurl-static
+          key: libcurl-static-windows-x64-${{ hashFiles('nix/libcurl-pin.json', 'scripts/windows/build-libcurl.ps1') }}
+      - name: Build the pinned static libcurl
+        if: ${{ steps.curl-cache.outputs.cache-hit != 'true' }}
+        shell: pwsh
+        run: scripts/windows/build-libcurl.ps1 -OutDir "$env:RUNNER_TEMP/libcurl-static"
+      - name: Build ham-bridge and ham-hub
+        shell: pwsh
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP 'e2e-bin'
+          scripts/windows/build.ps1 -OutDir $out -Odin $env:ODIN -Components ham-bridge,ham-hub -CurlLibDir "$env:RUNNER_TEMP/libcurl-static/lib"
+          "HEIMDALL_E2E_HUB_BIN=$(Join-Path $out 'ham-hub.exe')" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "HEIMDALL_E2E_BRIDGE_BIN=$(Join-Path $out 'ham-bridge.exe')" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+      - name: Real enroll + lifecycle e2e
+        shell: pwsh
+        env:
+          HEIMDALL_E2E_SERVICE: '1'
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/e2e-bridge-enroll.ps1 -SkipBuild -Lifecycle
