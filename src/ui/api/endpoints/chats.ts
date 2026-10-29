@@ -362,16 +362,26 @@ export const chatEndpoints = heimdallApi.injectEndpoints({
         { type: 'SidebarConversations' as const, id: 'ALL' },
       ],
     }),
-    sendConversationMessage: build.mutation<any, { conversationId: string; body: string; artifactIds?: string[] }>({
-      queryFn: async ({ conversationId, body, artifactIds = [] }, api) => {
+    sendConversationMessage: build.mutation<any, { conversationId: string; body: string; artifactIds?: string[]; quoteTarget?: { chainId: string; coordinatorAgentInstanceId: string; epoch: number } }>({
+      queryFn: async ({ conversationId, body, artifactIds = [], quoteTarget }, api) => {
         if (!conversationId || !body.trim()) return { error: { status: 'CUSTOM_ERROR', error: 'Missing conversation or body' } as any };
         try {
           const state: any = api.getState();
           const isUnlocked = Boolean(state?.vault?.isUnlocked);
           const activeKey = getActiveVaultKey();
+          if (quoteTarget && (!isUnlocked || !activeKey || state.composerContext?.epoch !== quoteTarget.epoch)) throw new Error('Unlock Vault and add the quote again.');
           let encBody = body;
           if (isUnlocked && activeKey && encBody && !isVaultArmored(encBody)) {
             encBody = await encryptVaultText(encBody, activeKey);
+          }
+          if (quoteTarget) {
+            const target = await cookieJsonFetch('/task-chains/' + encodeURIComponent(quoteTarget.chainId) + '/conversation');
+            if (String(target?.conversation_id || target?.conversationId || '') !== conversationId ||
+                String(target?.coordinator_agent_instance_id || target?.coordinatorAgentInstanceId || '') !== quoteTarget.coordinatorAgentInstanceId) {
+              throw new Error('The coordinator changed. Refresh its composer and retry.');
+            }
+            const latest: any = api.getState();
+            if (!latest.vault?.isUnlocked || getActiveVaultKey() !== activeKey || latest.composerContext?.epoch !== quoteTarget.epoch) throw new Error('Vault state changed. Add the quote again.');
           }
           const data = await cookieMutation(`/chats/${encodeURIComponent(conversationId)}/messages`, 'POST', { body: encBody, artifact_ids: artifactIds });
           expireConversationOptions(conversationId);

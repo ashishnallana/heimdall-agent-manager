@@ -86,6 +86,8 @@ export interface DesktopCapabilities {
   notifications: { supported: boolean; show: (plan: { title: string; body: string; tag: string; route: string }) => Promise<boolean> } | null;
   openExternal: ((url: string) => Promise<{ ok: boolean; error?: string }>) | null;
   daemonUrl: string;
+  /** Read-only window chrome state (see hooks/useWindowChrome.ts), or null. */
+  windowChrome: unknown;
 }
 
 export function desktopCapabilities(): DesktopCapabilities {
@@ -97,6 +99,7 @@ export function desktopCapabilities(): DesktopCapabilities {
     notifications: api?.notifications || null,
     openExternal: typeof api?.openExternal === 'function' ? api.openExternal : null,
     daemonUrl: String(api?.daemonUrl || ''),
+    windowChrome: api?.windowChrome && typeof api.windowChrome === 'object' ? api.windowChrome : null,
   };
 }
 

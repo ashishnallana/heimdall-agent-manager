@@ -39,6 +39,7 @@
 // WebSocket owned by `useShellStream`/`useAgentStream` (`useShellStream.ts:196`),
 // not over an RTK Query cache entry.
 
+import { clearComposerContexts } from '../store/composerContextSlice';
 import { heimdallApi } from './heimdallApi.ts';
 
 function readIsUnlocked(state: unknown): boolean {
@@ -65,6 +66,7 @@ export const vaultCacheInvalidationMiddleware =
     if (before !== after) {
       // Both directions reset: unlock so the armored cache is re-fetched and
       // decrypted, lock so decrypted plaintext does not outlive the key.
+      store.dispatch(clearComposerContexts());
       store.dispatch(heimdallApi.util.resetApiState());
     }
 

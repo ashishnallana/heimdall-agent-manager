@@ -1,6 +1,25 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
+// REQ-MAC-CHROME-1: read-only window chrome state. The sandboxed preload cannot
+// require windowChrome.cts, so the flag and channel are matched literally.
+const windowChromeStyle = process.argv.includes('--heimdall-window-chrome=mac-hidden') ? 'mac-hidden'
+  : process.argv.includes('--heimdall-window-chrome=win-overlay') ? 'win-overlay' : 'native';
+let windowFullscreen = false;
+const windowChromeListeners = new Set<(state: { fullscreen: boolean }) => void>();
+ipcRenderer.on('heimdall-window:chrome-state', (_event: any, payload: any) => {
+  windowFullscreen = Boolean(payload?.fullscreen);
+  for (const callback of windowChromeListeners) callback({ fullscreen: windowFullscreen });
+});
+
 contextBridge.exposeInMainWorld('odinApi', {
+  windowChrome: {
+    style: windowChromeStyle,
+    getState: () => ({ fullscreen: windowFullscreen }),
+    onStateChange: (callback: (state: { fullscreen: boolean }) => void) => {
+      windowChromeListeners.add(callback);
+      return () => { windowChromeListeners.delete(callback); };
+    },
+  },
   notifications: {
     supported: process.argv.includes('--heimdall-native-notifications'),
     show: (plan: { title: string; body: string; tag: string; route: string }) =>

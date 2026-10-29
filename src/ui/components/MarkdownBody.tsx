@@ -51,6 +51,7 @@ export async function getMermaid(): Promise<MermaidRenderer | null> {
 
 export type MarkdownTextSelection = {
   selectedText: string;
+  rect?: { left: number; bottom: number };
 };
 
 export type MarkdownBodyProps = {
@@ -75,17 +76,22 @@ function tableToCsv(table: HTMLTableElement): string {
   )).join('\n');
 }
 
-function readMarkdownSelection(root: HTMLElement): MarkdownTextSelection | null {
+export function readMarkdownSelection(root: HTMLElement): MarkdownTextSelection | null {
   const selection = window.getSelection?.() || document.getSelection?.();
-  if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return null;
+  if (!selection || selection.rangeCount !== 1 || selection.isCollapsed) return null;
   const range = selection.getRangeAt(0);
   const commonAncestor = range.commonAncestorContainer;
   if (!root.contains(commonAncestor)) return null;
   if (selection.anchorNode && !root.contains(selection.anchorNode)) return null;
   if (selection.focusNode && !root.contains(selection.focusNode)) return null;
-  const selectedText = selection.toString().replace(/\s+/g, ' ').trim();
-  if (!selectedText) return null;
-  return { selectedText };
+  const excluded = 'button, input, textarea, select, [contenteditable="true"], [data-quote-exclude]';
+  const element = (node: Node | null) => node?.nodeType === 1 ? node as Element : node?.parentElement;
+  if (element(selection.anchorNode)?.closest(excluded) || element(selection.focusNode)?.closest(excluded)) return null;
+  if (Array.from(root.querySelectorAll(excluded)).some(node => range.intersectsNode(node))) return null;
+  const selectedText = selection.toString();
+  if (!selectedText.trim()) return null;
+  const rect = range.getBoundingClientRect?.();
+  return { selectedText, rect: rect ? { left: rect.left, bottom: rect.bottom } : undefined };
 }
 
 export async function renderMermaidElement(
@@ -303,9 +309,13 @@ export default function MarkdownBody({ source, className, compact, copyAll = tru
     const emitSelection = () => onTextSelectionChange(readMarkdownSelection(root));
     root.addEventListener('mouseup', emitSelection);
     root.addEventListener('keyup', emitSelection);
+    root.addEventListener('touchend', emitSelection);
+    document.addEventListener('selectionchange', emitSelection);
     return () => {
       root.removeEventListener('mouseup', emitSelection);
       root.removeEventListener('keyup', emitSelection);
+      root.removeEventListener('touchend', emitSelection);
+      document.removeEventListener('selectionchange', emitSelection);
     };
   }, [html, onTextSelectionChange]);
 

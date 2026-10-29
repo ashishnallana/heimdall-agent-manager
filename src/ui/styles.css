@@ -1052,3 +1052,51 @@ body {
     animation: none;
   }
 }
+
+/* REQ-MAC-CHROME-1: integrated desktop title bars. Every rule is gated on a
+   desktop preload style, so browser/PWA, Linux and older desktops are unaffected.
+   Chromium drag regions swallow clicks, so controls, HTML5-draggable pane grips
+   and headers, and any overlapping popover/modal are explicitly no-drag. */
+.window-gate-drag-strip {
+  display: none;
+}
+html:is([data-window-chrome="mac-hidden"], [data-window-chrome="win-overlay"]) .window-drag {
+  -webkit-app-region: drag;
+}
+html:is([data-window-chrome="mac-hidden"], [data-window-chrome="win-overlay"]) .window-drag :is(button, a, input, textarea, select, label, summary, [role="button"], [role="tab"], [role="menuitem"], [role="combobox"], [draggable="true"], [contenteditable], [tabindex]),
+html:is([data-window-chrome="mac-hidden"], [data-window-chrome="win-overlay"]) :is([draggable="true"], [role="dialog"], [role="alertdialog"], [role="menu"], [role="listbox"], [role="tooltip"], [aria-modal="true"]),
+html:is([data-window-chrome="mac-hidden"], [data-window-chrome="win-overlay"]) [data-debug-id^="main-pane-drag-grip-"] {
+  -webkit-app-region: no-drag;
+}
+/* Auth, device-vault and standalone device screens: a strip under the traffic
+   lights is the drag surface. The full shell has its own drag regions. */
+html:is([data-window-chrome="mac-hidden"], [data-window-chrome="win-overlay"]) .window-gate-drag-strip {
+  display: block;
+  position: fixed;
+  inset: 0 0 auto 0;
+  height: 40px;
+  z-index: 70;
+  pointer-events: none;
+  -webkit-app-region: drag;
+}
+html:is([data-window-chrome="mac-hidden"], [data-window-chrome="win-overlay"]):has([data-debug-id="app-shell"]) .window-gate-drag-strip {
+  display: none;
+}
+html:is([data-window-chrome="mac-hidden"], [data-window-chrome="win-overlay"]) .window-gate-pad {
+  padding-top: 40px;
+}
+
+/* REQ-WIN-CHROME-2: native caption controls occupy the full 48px header. */
+html[data-window-chrome="win-overlay"] .window-gate-drag-strip {
+  height: 48px;
+}
+html[data-window-chrome="win-overlay"]:not([data-window-fullscreen]) .window-gate-pad {
+  padding-top: 48px;
+}
+
+html[data-window-chrome="win-overlay"][data-window-fullscreen] .window-gate-pad {
+  padding-top: 0;
+}
+html[data-window-chrome="win-overlay"][data-window-fullscreen] .window-gate-drag-strip {
+  display: none;
+}

@@ -8,7 +8,7 @@ import React, {
   useRef,
   useState,
 } from 'react';
-import { useSelector } from 'react-redux';
+import { useDispatch, useSelector, useStore } from 'react-redux';
 import {
   CommandPalette,
   Icon as UiIcon,
@@ -53,6 +53,7 @@ import {
 import {
   useFetchChainTasksQuery,
   useFetchTaskChainConversationQuery,
+  useLazyFetchTaskChainConversationQuery,
   useFetchTaskChainDetailQuery,
   useUpdateTaskChainMutation,
 } from '../../api/endpoints/tasks';
@@ -81,6 +82,11 @@ import { MAX_UPLOAD_BYTES } from '../ArtifactUpload';
 import { ArtifactAttachmentPreview } from '../ArtifactAttachmentPreview';
 import Icon from '../Icon';
 import Markdown from '../Markdown';
+import type { MarkdownTextSelection } from '../MarkdownBody';
+import QuoteSelectionPopover from '../chat/QuoteSelectionPopover';
+import ComposerContextChips from '../chat/ComposerContextChips';
+import { addComposerQuote, removeComposerQuote, consumeComposerQuotes, selectComposerQuotes } from '../../store/composerContextSlice';
+import { quoteLimitError, quotedMessageBody, type QuoteContext } from '../../utils/quoteContext';
 import { VaultText, useDecryptedText } from '../vault/VaultText';
 import { resolveRenameTarget } from './renameTarget';
 import { decryptPaneCaptureBody } from '../../utils/vaultChats';
@@ -415,21 +421,30 @@ function PaneCaptureOutput({ body: rawBody, messageId }: { body: string; message
   );
 }
 
-function ThreadMessageBody({ body }: { body: string }) {
+export function ThreadMessageBody({ body, onQuote, quoteDisabledReason = '' }: {
+  body: string; onQuote?: (selectedText: string) => Promise<void>; quoteDisabledReason?: string;
+}) {
+  const [selection, setSelection] = useState<MarkdownTextSelection | null>(null);
+  const dismiss = useCallback(() => setSelection(null), []);
+  const [decryptedFor, setDecryptedFor] = useState('');
+
   const isArmored = isVaultArmored(body);
   const containsArmored = containsVaultArmored(body);
   const hasVault = isArmored || containsArmored;
   const activeKey = useSelector(selectActiveVaultKey);
+  const vaultUnlocked = useSelector((state: any) => Boolean(state.vault?.isUnlocked));
   const [decrypted, setDecrypted] = useState<string | null>(null);
 
   useEffect(() => {
     let mounted = true;
     if (!hasVault) {
       setDecrypted(body);
+      setDecryptedFor(body);
       return;
     }
-    if (!activeKey) {
+    if (!activeKey || !vaultUnlocked) {
       setDecrypted(null);
+      setDecryptedFor('');
       return;
     }
     const decryptPromise = isArmored
@@ -437,24 +452,31 @@ function ThreadMessageBody({ body }: { body: string }) {
       : decryptEmbeddedVaultTokens(body, activeKey);
     decryptPromise
       .then((res) => {
-        if (mounted) setDecrypted(res);
+        if (mounted) { setDecrypted(res); setDecryptedFor(body); }
       })
       .catch(() => {
-        if (mounted) setDecrypted(body);
+        if (mounted) { setDecrypted(null); setDecryptedFor(''); }
       });
     return () => {
       mounted = false;
     };
-  }, [body, hasVault, isArmored, activeKey]);
+  }, [body, hasVault, isArmored, activeKey, vaultUnlocked]);
 
-  if (isArmored && !activeKey) {
+  useEffect(() => { setSelection(null); }, [body, activeKey, vaultUnlocked]);
+  const quoteReady = Boolean(onQuote && vaultUnlocked && activeKey && (!hasVault || (decryptedFor === body && decrypted !== null && !containsVaultArmored(decrypted))));
+  if (isArmored && (!activeKey || !vaultUnlocked)) {
     return <VaultText value={body} as="div" />;
   }
-  if (containsArmored && !activeKey) {
+  if (containsArmored && (!activeKey || !vaultUnlocked)) {
     const sanitized = replaceVaultTokens(body, '[🔒 Encrypted]');
     return <Markdown source={sanitized} compact copyAll={false} />;
   }
-  return <Markdown source={decrypted !== null ? decrypted : body} compact copyAll={false} />;
+  return <>
+    <Markdown source={decrypted !== null && decryptedFor === body ? decrypted : body} compact copyAll={false}
+      onTextSelectionChange={quoteReady ? setSelection : undefined} />
+    {quoteReady && selection ? <QuoteSelectionPopover selection={selection} onDismiss={dismiss}
+      disabledReason={quoteDisabledReason} onQuote={() => onQuote!(selection.selectedText)} /> : null}
+  </>;
 }
 
 function parseMessageMetadata(message: Message): any {
@@ -700,6 +722,18 @@ export function AgentChatPane({
   headerTrailing,
   headerEnd,
 }: AgentChatPaneProps) {
+  const dispatch = useDispatch<any>();
+  const reduxStore = useStore<any>();
+  const [resolveQuoteCoordinator] = useLazyFetchTaskChainConversationQuery();
+  const [normalSendBusy, setNormalSendBusy] = useState(false);
+  const sendingRef = useRef(false);
+  const mountedRef = useRef(true);
+  useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false; }; }, []);
+  const renderTarget = chainTarget?.chainId ? chainTargetId(chainTarget.chainId) : routeInstanceId;
+  const currentTargetRef = useRef(renderTarget);
+  const routeGeneration = useRef(0);
+  if (currentTargetRef.current !== renderTarget) routeGeneration.current++;
+  currentTargetRef.current = renderTarget;
   const isMobileHook = useIsMobile();
   const isMobile = explicitIsMobile ?? isMobileHook;
   const isAuxSubagent = variant === 'auxSubagent';
@@ -752,6 +786,12 @@ export function AgentChatPane({
     chainTarget?.chainId || conversation?.chain_id || conversation?.chainId || '',
   );
   const ownTargetId = chainTarget?.chainId ? chainTargetId(chainTarget.chainId) : agentInstanceId;
+  const quoteTargetId = chainTargetId(chainId);
+  const quotes = useSelector((state: any) => selectComposerQuotes(state, ownTargetId));
+  const quoteEpoch = useSelector((state: any) => state.composerContext?.epoch ?? 0);
+  const quoteFocusRevision = useSelector((state: any) => state.composerContext?.focusTarget === ownTargetId ? state.composerContext.focusRevision : 0);
+  const quoteVaultKey = useSelector(selectActiveVaultKey);
+  const quoteVaultUnlocked = useSelector((state: any) => Boolean(state.vault?.isUnlocked));
   const isMultiPane = !isSinglePane;
   const title = conversationDisplayTitle(
     conversation,
@@ -797,7 +837,7 @@ export function AgentChatPane({
   // coordinator and has since been replaced, offer the chain-addressed URL.
   const chainConversationQuery = useFetchTaskChainConversationQuery(
     { chainId },
-    { skip: !chainId || Boolean(chainTarget) || isAuxSubagent },
+    { skip: !chainId },
   );
   const replacedCoordinator = Boolean(
     !chainTarget &&
@@ -946,11 +986,13 @@ export function AgentChatPane({
   );
   const [trayState, dispatchTray] = useReducer(trayReducer, INITIAL_TRAY_STATE);
   const [trayDraft, setTrayDraft] = useState('');
+  const quotedTrayDrafts = useRef(new Map<string, string>());
+  useEffect(() => { quotedTrayDrafts.current.clear(); }, [quoteEpoch, quoteVaultKey]);
   const [trayNotice, setTrayNotice] = useState('');
   const sendTrayMode = useSendTrayMode();
   const trayItemIds = useMemo(() => trayItemList.map((item) => item.card_id), [trayItemList]);
   const trayItemIdsKey = trayItemIds.join('\n');
-  const draftEmpty = !draft.trim();
+  const draftEmpty = !draft.trim() && quotes.length === 0;
   useEffect(() => {
     dispatchTray({ type: 'items', ids: trayItemIds, draftEmpty });
   }, [trayItemIdsKey]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -987,6 +1029,15 @@ export function AgentChatPane({
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
   const [mentionIndex, setMentionIndex] = useState(0);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  useEffect(() => {
+    if (!quoteFocusRevision) return;
+    // Quote explicitly opens normal chat; preserve a borrowed task answer for re-entry.
+    if (trayMode) quotedTrayDrafts.current.set(trayMode.kind + ':' + trayMode.cardId, trayDraft);
+    dispatchTray({ type: 'show_composer' });
+    const frame = requestAnimationFrame(() => textareaRef.current?.focus({ preventScroll: true }));
+    return () => cancelAnimationFrame(frame);
+  }, [quoteFocusRevision]);
+
   const composerContainerRef = useRef<HTMLFormElement | HTMLDivElement | null>(null);
   // REQ-FROST-1: on mobile the composer dock floats over the transcript; its measured
   // height becomes the transcript's bottom inset so the last message stays reachable.
@@ -995,6 +1046,8 @@ export function AgentChatPane({
   const [error, setError] = useState('');
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
   const [localMessages, setLocalMessages] = useState<Message[]>([]);
+  useEffect(() => { setLocalMessages(current => current.filter(item => !(item as any).hasQuoteContext)); }, [quoteEpoch, quoteVaultKey]);
+
   const settingsEditedRef = useRef(false);
   const [acceptedOperation, setAcceptedOperation] =
     useState<InstanceReconfiguration | null>(null);
@@ -1524,12 +1577,13 @@ export function AgentChatPane({
   configurationInputBlockedRef.current = Boolean(configurationInputBlocked);
   // A borrowed composer (Answer / Request changes) talks to the hub, not the
   // agent runtime, so runtime state does not block it.
-  const sendDisabled = trayModeItem
+  const sendDisabled = normalSendBusy || (trayModeItem
     ? hasUploadingAttachments || hasFailedAttachments || !trayDraft.trim()
     : configurationInputBlocked ||
       hasUploadingAttachments ||
       hasFailedAttachments ||
-      (!draft.trim() && uploadedAttachments.length === 0);
+      (quotes.length > 0 && !quoteVaultUnlocked) ||
+      (!draft.trim() && uploadedAttachments.length === 0 && quotes.length === 0));
 
   async function saveRenameTitle() {
     const next = titleDraft.trim();
@@ -1581,7 +1635,7 @@ export function AgentChatPane({
   }
 
   async function uploadAttachment(file: File, existingLocalId = '') {
-    if (configurationInputBlocked) return;
+    if (configurationInputBlocked || sendingRef.current) return;
     const localId =
       existingLocalId || `att_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const name = artifactUploadName(file, 'conversation-attachment');
@@ -1639,18 +1693,18 @@ export function AgentChatPane({
   }
 
   function handleAttachmentInput(event: any) {
-    if (configurationInputBlocked) return;
+    if (configurationInputBlocked || sendingRef.current) return;
     const files = Array.from(event.target.files || []) as File[];
     event.target.value = '';
     files.forEach((file) => void uploadAttachment(file));
   }
 
   function openAttachmentPicker() {
-    if (!configurationInputBlocked) fileInputRef.current?.click();
+    if (!configurationInputBlocked && !sendingRef.current) fileInputRef.current?.click();
   }
 
   function handleComposerPaste(event: ClipboardEvent<HTMLTextAreaElement>) {
-    if (configurationInputBlocked) return;
+    if (configurationInputBlocked || sendingRef.current) return;
     const files = clipboardFilesFromEvent(event);
     if (files.length === 0) return;
     event.preventDefault();
@@ -1681,28 +1735,46 @@ export function AgentChatPane({
 
   async function submit(event: FormEvent) {
     event.preventDefault();
-    if (sendDisabled) return;
+    if (sendDisabled || sendingRef.current) return;
     if (trayModeItem) {
       await submitTrayMode();
       return;
     }
     const body = draft.trim();
     const attachmentIds = uploadedAttachments.map((a) => a.id);
-    const sendBody = body || (attachmentIds.length ? 'Uploaded file' : '');
+    const sendBody = quotedMessageBody(body || (attachmentIds.length ? 'Uploaded file' : ''), quotes);
+    const submittedQuotes = quotes;
+    const submittedEpoch = quoteEpoch;
+    const submittedRoute = routeInstanceId;
+    const submittedDraft = draft;
+    const submittedTarget = ownTargetId;
+    const submittedKey = quoteVaultKey;
+    const submittedGeneration = routeGeneration.current;
     if (!sendBody && attachmentIds.length === 0) return;
+    sendingRef.current = true;
+    setNormalSendBusy(true);
     const local = optimisticUserMessage(conversationId, sendBody);
     const localId = msgId(local, 0);
     (local as any).artifact_ids_json = JSON.stringify(attachmentIds);
     setError('');
-    updateDraft('');
-    setAttachments([]);
+    if (submittedQuotes.length) (local as any).hasQuoteContext = true;
     setLocalMessages((current) => [...current, local]);
     try {
       const result = await sendMessage({
         conversationId,
         body: sendBody,
         artifactIds: attachmentIds,
+        ...(submittedQuotes.length ? { quoteTarget: { chainId, coordinatorAgentInstanceId: agentInstanceId, epoch: submittedEpoch } } : {}),
       }).unwrap();
+      if (submittedQuotes.length && ((reduxStore.getState() as any).composerContext?.epoch !== submittedEpoch || selectActiveVaultKey() !== submittedKey)) return;
+      dispatch(consumeComposerQuotes({ target: ownTargetId, ids: submittedQuotes.map(q => q.id), epoch: submittedEpoch }));
+      if (!mountedRef.current || routeGeneration.current !== submittedGeneration || currentTargetRef.current !== submittedTarget) {
+        if (readComposerDraft(submittedRoute) === submittedDraft) writeComposerDraft(submittedRoute, '');
+        return;
+      }
+      const latestDraft = readComposerDraft(submittedRoute);
+      updateDraft(latestDraft === submittedDraft ? '' : latestDraft);
+      setAttachments([]);
       const sent = sentMessageFromResult(result);
       setLocalMessages((current) =>
         current.map((message) => {
@@ -1719,12 +1791,12 @@ export function AgentChatPane({
         }),
       );
     } catch (err: any) {
-      const message = errMsg(err, 'Send failed');
-      setLocalMessages((current) =>
-        current.map((item) =>
-          msgId(item, 0) === localId ? failedLocalMessage(item, message) : item,
-        ),
-      );
+      if (!mountedRef.current || routeGeneration.current !== submittedGeneration || currentTargetRef.current !== submittedTarget || (submittedQuotes.length && ((reduxStore.getState() as any).composerContext?.epoch !== submittedEpoch || selectActiveVaultKey() !== submittedKey))) return;
+      setError(errMsg(err, 'Send failed. Your draft is retained.'));
+      setLocalMessages(current => current.filter(item => msgId(item, 0) !== localId));
+    } finally {
+      sendingRef.current = false;
+      if (mountedRef.current) setNormalSendBusy(false);
     }
   }
 
@@ -1997,7 +2069,26 @@ export function AgentChatPane({
     }
     return (
       <div className="flex flex-col gap-1">
-        <ThreadMessageBody body={message.body} />
+        <ThreadMessageBody body={message.body}
+          onQuote={!message.isUser && (!message.messageType || message.messageType === 'text') ? async selectedText => {
+            const epoch = (reduxStore.getState() as any).composerContext?.epoch;
+            const generation = routeGeneration.current;
+            const capturedKey = selectActiveVaultKey();
+            if (!quoteVaultUnlocked || !quoteTargetId) throw new Error('A chain coordinator and unlocked Vault are required.');
+            const coordinator = await resolveQuoteCoordinator({ chainId }, false).unwrap();
+            if (!coordinator.coordinatorAgentInstanceId || !coordinator.conversationId) throw new Error('The chain coordinator is unavailable.');
+            if (!mountedRef.current || generation !== routeGeneration.current || (reduxStore.getState() as any).composerContext?.epoch !== epoch || currentTargetRef.current !== ownTargetId || selectActiveVaultKey() !== capturedKey) throw new Error('The selection changed. Select the text again.');
+            const quote: QuoteContext = { version: 1, id: crypto.randomUUID(), selectedText, capturedAt: Date.now(), source: {
+              kind: 'agent_message', messageId: message.messageId, conversationId, agentInstanceId, chainId,
+              author: message.authorLabel, createdUnixMs: message.createdUnixMs,
+              href: buildConversationHash([routeInstanceId], { extraSearch: { msg: message.messageId } }),
+            } };
+            const error = quoteLimitError(selectComposerQuotes(reduxStore.getState(), quoteTargetId), quote);
+            if (error) throw new Error(error);
+            dispatch(addComposerQuote({ target: quoteTargetId, quote }));
+            if (ownTargetId !== quoteTargetId) openCurrentChainCoordinator();
+          } : undefined}
+          quoteDisabledReason={!chainId ? 'This message has no chain coordinator.' : !chainConversationQuery.data?.coordinatorAgentInstanceId ? 'The chain coordinator is unavailable.' : ''} />
         {message.artifactIds && message.artifactIds.length > 0 && (
           <div className="mt-2 flex max-w-full flex-wrap gap-2">
             {message.artifactIds.map((id) => (
@@ -2294,7 +2385,7 @@ export function AgentChatPane({
         debugId="conversation-composer-input"
         ref={textareaRef}
         value={trayModeItem ? trayDraft : draft}
-        disabled={trayModeItem ? false : configurationInputBlocked}
+        disabled={normalSendBusy || (trayModeItem ? false : configurationInputBlocked)}
         onChange={(e) => {
           if (trayModeItem) {
             setTrayDraft(e.target.value);
@@ -2364,7 +2455,7 @@ export function AgentChatPane({
       model: instanceModel,
       onSettings: () => setRuntimeMenuOpen(true),
       onUpload: openAttachmentPicker,
-      uploadDisabled: trayModeItem ? false : configurationInputBlocked,
+      uploadDisabled: normalSendBusy || (trayModeItem ? false : configurationInputBlocked),
       sendDisabled,
       paneExpanded: false,
       onPaneToggle: handleOpenPtyTab,
@@ -2437,6 +2528,8 @@ export function AgentChatPane({
               {error}
             </div>
           ) : null}
+          {!trayModeItem ? <ComposerContextChips quotes={quotes} disabled={normalSendBusy}
+            onRemove={id => dispatch(removeComposerQuote({ target: ownTargetId, id }))} /> : null}
           {attachments.length > 0 && (
             <div
               data-debug-id="conversation-attachment-tray"
@@ -2495,6 +2588,7 @@ export function AgentChatPane({
                     <button
                       type="button"
                       data-debug-id={`conversation-attachment-remove-${a.localId}`}
+                      disabled={normalSendBusy}
                       onClick={() =>
                         setAttachments((prev) =>
                           prev.filter((item) => item.localId !== a.localId),
@@ -2844,7 +2938,7 @@ export function AgentChatPane({
           // replaced or closed.
           <header
             data-debug-id="conversation-thread-header-minimal"
-            className={`flex ${isMobile ? 'min-h-14' : 'min-h-12'} shrink-0 items-center justify-end gap-1 px-3 py-2`}
+            className={`window-drag flex ${isMobile ? 'min-h-14' : 'min-h-12'} shrink-0 items-center justify-end gap-1 px-3 py-2`}
           >
             {headerLeading ? <div className="mr-auto flex items-center gap-1">{headerLeading}</div> : null}
             {onReplaceWithNew ? (
@@ -2902,7 +2996,7 @@ export function AgentChatPane({
       <header
         data-debug-id="conversation-thread-header"
         data-pane-active={isFocusedPane ? 'true' : 'false'}
-        className={`sticky top-0 z-20 flex ${isMobile ? 'min-h-14' : 'min-h-12'} shrink-0 items-center gap-2 px-3 py-2 sm:gap-3 sm:px-4 bg-canvas/90 backdrop-blur-md overflow-visible`}
+        className={`window-drag sticky top-0 z-20 flex ${isMobile ? 'min-h-14' : 'min-h-12'} shrink-0 items-center gap-2 px-3 py-2 sm:gap-3 sm:px-4 bg-canvas/90 backdrop-blur-md overflow-visible`}
       >
         <div
           data-debug-id="conversation-topbar-blur-fade"
@@ -3351,6 +3445,9 @@ export function AgentChatPane({
                 }}
                 onStartMode={(kind, item) => {
                   setError('');
+                  const key = kind + ':' + item.card_id;
+                  setTrayDraft(quotedTrayDrafts.current.get(key) || '');
+                  quotedTrayDrafts.current.delete(key);
                   dispatchTray({ type: 'start_mode', kind, cardId: item.card_id });
                   requestAnimationFrame(() => textareaRef.current?.focus());
                 }}

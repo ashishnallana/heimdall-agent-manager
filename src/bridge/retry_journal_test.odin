@@ -7,6 +7,21 @@ import "core:time"
 import contracts "odin_test:contracts"
 
 @(test)
+retry_atomic_write_windows_native_credential_path :: proc(t: ^testing.T) {
+    when ODIN_OS == .Windows {
+        dir := fmt.tprintf("%s/ham-credential-%d", os.temp_dir(context.temp_allocator), time.to_unix_nanoseconds(time.now()))
+        defer os.remove(dir)
+        path, _ := strings.replace_all(fmt.tprintf("%s/bridge-token.pending", dir), "/", "\\", context.temp_allocator)
+        defer os.remove(path)
+        testing.expect(t, bridge_write_secret_file(path, "hba_test.first"), "stage credential in a new directory")
+        testing.expect(t, bridge_write_secret_file(path, "hba_test.second"), "replace staged credential atomically")
+        data, err := os.read_entire_file(path, context.temp_allocator)
+        testing.expect(t, err == nil && string(data) == "hba_test.second\n", "credential must round-trip")
+        testing.expect(t, !os.exists(strings.concatenate({path, ".tmp"}, context.temp_allocator)))
+    }
+}
+
+@(test)
 retry_journal_disk_reservations_and_unsafe_crash_fence :: proc(t: ^testing.T) {
     path := fmt.tprintf("%s/retry-journal-%d/receipts.json", os.temp_dir(context.temp_allocator), time.to_unix_nanoseconds(time.now()))
     j := Bridge_Retry_Journal{version = 1, loaded = true}

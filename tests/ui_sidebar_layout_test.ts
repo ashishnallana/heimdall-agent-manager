@@ -56,7 +56,7 @@ test('hidden sidebar renders no rail; the fixed top-left cluster compacts on age
   assert.doesNotMatch(cluster, /vaultStatusButton/);
   assert.equal(source.split('{sidebarToggleButton}').length - 1, 1, 'toggle rendered exactly once');
   assert.match(source, /const showBrand = !isWorkspaceRoute/);
-  assert.match(source, /const topLeftClusterWidth = computeTopLeftClusterWidth\(isMobile, showBrand\)/);
+  assert.match(source, /const topLeftClusterWidth = computeTopLeftClusterWidth\(isMobile, showBrand, controlsInset\)/);
   // The sidebar animates its width (desktop) / slides (mobile) and its header reserves the cluster.
   assert.match(source, /isEffectiveCollapsed \? 'invisible w-0' : 'visible w-80 border-r border-subtle'/);
   assert.match(source, /isEffectiveCollapsed \? 'invisible -translate-x-full' : 'visible translate-x-0'/);
@@ -91,6 +91,10 @@ test('REQ-MOB-1: mobile window chrome uses 44px round buttons in a 56px row; des
   assert.equal(topLeftClusterWidth(false, false), COMPACT_TOP_LEFT_CLUSTER_WIDTH);
   assert.equal(topLeftClusterWidth(true, true), MOBILE_TOP_LEFT_CLUSTER_WIDTH);
   assert.equal(topLeftClusterWidth(true, false), MOBILE_COMPACT_TOP_LEFT_CLUSTER_WIDTH);
+  // REQ-MAC-CHROME-1: the macOS traffic-light inset widens desktop clusters only.
+  assert.equal(topLeftClusterWidth(false, true, 78), 78 + TOP_LEFT_CLUSTER_WIDTH);
+  assert.equal(topLeftClusterWidth(false, false, 78), 78 + COMPACT_TOP_LEFT_CLUSTER_WIDTH);
+  assert.equal(topLeftClusterWidth(true, false, 78), MOBILE_COMPACT_TOP_LEFT_CLUSTER_WIDTH);
   // One 44px button + 8px padding each side must fit the compact cluster.
   assert.ok(MOBILE_COMPACT_TOP_LEFT_CLUSTER_WIDTH >= 44 + 16);
   assert.ok(MOBILE_TOP_CHROME_HEIGHT >= 44);

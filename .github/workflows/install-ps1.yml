@@ -3,11 +3,15 @@ on:
   push:
     paths:
       - 'scripts/install.ps1'
+      - 'scripts/release/package-windows-bundle.ps1'
+      - 'extensions/**'
       - 'tests/windows/**'
       - '.github/workflows/install-ps1.yml'
   pull_request:
     paths:
       - 'scripts/install.ps1'
+      - 'scripts/release/package-windows-bundle.ps1'
+      - 'extensions/**'
       - 'tests/windows/**'
       - '.github/workflows/install-ps1.yml'
   workflow_dispatch:
@@ -47,6 +51,11 @@ jobs:
           $issues = @(Invoke-ScriptAnalyzer -Path scripts/install.ps1 -Severity Error)
           $issues | Format-Table -AutoSize | Out-String | Write-Host
           if ($issues.Count) { throw "$($issues.Count) PSScriptAnalyzer error(s)" }
+      - name: Provider extension packaging and installation
+        shell: pwsh
+        run: |
+          & '${{ matrix.engine }}' -NoProfile -ExecutionPolicy Bypass -File tests/windows/provider_extension_distribution_test.ps1
+          if ($LASTEXITCODE) { throw 'provider extension distribution failed' }
       - name: Hermetic install / enroll / upgrade / uninstall test
         shell: pwsh
         run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/windows/install_ps1_test.ps1 -Engine ${{ matrix.engine }}

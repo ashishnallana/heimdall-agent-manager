@@ -11,6 +11,7 @@ import taskReducer from './taskSlice';
 import memoryReducer from './memorySlice';
 import projectReducer from './projectSlice';
 import homeReducer from './homeSlice';
+import composerContextReducer from './composerContextSlice';
 import chainViewReducer from './chainViewSlice';
 import attentionReducer from './attentionSlice';
 import toastReducer from './toastSlice';
@@ -37,6 +38,7 @@ const appReducer = combineReducers({
   projects: projectReducer,
   home: homeReducer,
   chainView: chainViewReducer,
+  composerContext: composerContextReducer,
   attention: attentionReducer,
   toasts: toastReducer,
   notifications: notificationsReducer,
@@ -69,7 +71,8 @@ const rootReducer = (state: ReturnType<typeof appReducer> | undefined, action: a
 };
 
 const actionLogger = (store: any) => (next: any) => (action: any) => {
-  if (import.meta.env.DEV) {
+  if (import.meta.env.DEV && !String(action.type).startsWith('composerContext/') &&
+      action.meta?.arg?.endpointName !== 'sendConversationMessage') {
     console.log('[Redux Action]', action.type, action.payload);
   }
   return next(action);

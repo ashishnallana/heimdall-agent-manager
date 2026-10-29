@@ -569,7 +569,15 @@ MIGRATION_157_EXTENSION_VERSION_SYNC :: #load("migrations/157_extension_version_
 
 MIGRATION_158_EXTENSION_VERSION_SYNC :: #load("migrations/158_extension_version_sync_0_5_18.sql", string)
 
-migration_order :: [162]string {
+MIGRATION_159_EXTENSION_VERSION_SYNC :: #load("migrations/159_extension_version_sync_0_5_19.sql", string)
+
+MIGRATION_160_EXTENSION_VERSION_SYNC :: #load("migrations/160_extension_version_sync_0_5_20.sql", string)
+
+MIGRATION_161_EXTENSION_VERSION_SYNC :: #load("migrations/161_extension_version_sync_0_5_21.sql", string)
+
+MIGRATION_162_EXTENSION_VERSION_SYNC :: #load("migrations/162_extension_version_sync_0_5_22.sql", string)
+
+migration_order :: [166]string {
 	"001_foundation.sql",
 	"002_owner_scoped_core.sql",
 	"003_device_tokens.sql",
@@ -732,6 +740,10 @@ migration_order :: [162]string {
 	"156_extension_version_sync_0_5_16.sql",
 	"157_extension_version_sync_0_5_17.sql",
 	"158_extension_version_sync_0_5_18.sql",
+	"159_extension_version_sync_0_5_19.sql",
+	"160_extension_version_sync_0_5_20.sql",
+	"161_extension_version_sync_0_5_21.sql",
+	"162_extension_version_sync_0_5_22.sql",
 }
 
 // stop_before is a TEST SEAM: when non-empty, the apply loop stops in front of
@@ -1211,6 +1223,10 @@ migration_sql :: proc(name, migrations_dir: string) -> string {
 			return string(data)
 		}
 	}
+	if name == "162_extension_version_sync_0_5_22.sql" do return strings.clone(MIGRATION_162_EXTENSION_VERSION_SYNC)
+	if name == "161_extension_version_sync_0_5_21.sql" do return strings.clone(MIGRATION_161_EXTENSION_VERSION_SYNC)
+	if name == "160_extension_version_sync_0_5_20.sql" do return strings.clone(MIGRATION_160_EXTENSION_VERSION_SYNC)
+	if name == "159_extension_version_sync_0_5_19.sql" do return strings.clone(MIGRATION_159_EXTENSION_VERSION_SYNC)
 	if name == "158_extension_version_sync_0_5_18.sql" do return strings.clone(MIGRATION_158_EXTENSION_VERSION_SYNC)
 	if name == "157_extension_version_sync_0_5_17.sql" do return strings.clone(MIGRATION_157_EXTENSION_VERSION_SYNC)
 	if name == "156_extension_version_sync_0_5_16.sql" do return strings.clone(MIGRATION_156_EXTENSION_VERSION_SYNC)
