@@ -337,7 +337,7 @@ bridge_provider_discover :: proc(filter: []string) -> [dynamic]Bridge_Provider_P
 	}
 }
 
-bridge_provider_discovery_report_json :: proc(request_id: string, results: [dynamic]Bridge_Provider_Path) -> string {
+bridge_provider_discovery_report_json :: proc(request_id: string, results: []Bridge_Provider_Path) -> string {
 	b := strings.builder_make()
 	strings.write_string(&b, "{\"type\":\"provider_discovery_report\",\"request_id\":\"")
 	bridge_runtime_write_json_string(&b, request_id)
@@ -375,7 +375,7 @@ bridge_provider_handle_discover_frame :: proc(conn: ^ws.Connection, frame_type, 
 		for &result in results do bridge_provider_path_destroy(&result)
 		delete(results)
 	}
-	report := bridge_provider_discovery_report_json(request_id, results)
+	report := bridge_provider_discovery_report_json(request_id, results[:])
 	defer delete(report)
 	_ = bridge_hub_send(conn, report)
 	return true

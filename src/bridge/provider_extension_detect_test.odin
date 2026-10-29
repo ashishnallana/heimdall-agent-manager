@@ -136,7 +136,7 @@ test_provider_discovery_report_includes_extension_state :: proc(t: ^testing.T) {
 	results := make([dynamic]Bridge_Provider_Path)
 	defer delete(results)
 	append(&results, Bridge_Provider_Path{provider = "claude", resolved_path = "/bin/claude", version_text = "2.1", probed_at = "2026-10-22T00:00:00Z", state = "present", extension_state = "outdated", extension_version = "0.0.9"})
-	report := bridge_provider_discovery_report_json("pdr_1", results)
+	report := bridge_provider_discovery_report_json("pdr_1", results[:])
 	defer delete(report)
 	wire: struct {
 		providers: []struct {

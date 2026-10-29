@@ -150,6 +150,30 @@ bridge_provider_extension_read_manifest_version :: proc(ext_path, provider: stri
 	return ""
 }
 
+Bridge_Extension_Frame_Sink :: struct {
+	conn:       ^ws.Connection,
+	command_id: string,
+	provider:   string,
+}
+
+@(private = "file")
+bridge_extension_frame_progress :: proc(data: rawptr, stage: string, pct: int, message: string) {
+	s := (^Bridge_Extension_Frame_Sink)(data)
+	_ = bridge_provider_extension_install_send_progress(s.conn, s.command_id, s.provider, stage, pct, message)
+}
+
+@(private = "file")
+bridge_extension_frame_report :: proc(data: rawptr, results: []Bridge_Provider_Path) {
+	s := (^Bridge_Extension_Frame_Sink)(data)
+	report := bridge_provider_discovery_report_json(s.command_id, results)
+	defer delete(report)
+	if s.conn != nil do _ = bridge_hub_send(s.conn, report)
+}
+
+// bridge_hub_handle_extension_install_command installs or repairs one
+// provider's extension for the Hub. Only `provider` is read from the frame:
+// the extension bundle and the provider binary are resolved locally, so a Hub
+// frame can never make the Bridge execute a path it names (F12).
 bridge_hub_handle_extension_install_command :: proc(conn: ^ws.Connection, text: string) {
 	fmt.println("bridge hub runtime command provider_extension_install")
 	command_id := extract_json_string(text, "command_id", "")
@@ -174,229 +198,46 @@ bridge_hub_handle_extension_install_command :: proc(conn: ^ws.Connection, text: 
 	defer delete(provider)
 	prov := strings.trim_space(provider)
 	if prov == "" {
-		msg := "missing provider parameter"
-		_ = bridge_provider_extension_install_send_progress(conn, command_id, "", "failed", 0, msg)
-		if command_id != "" {
-			final := bridge_command_failed_json(command_id, bridge_cause_wire_error("missing_provider", msg), "failed")
-			defer delete(final)
-			bridge_runtime_cache_command(command_id, final)
-			if conn != nil do _ = bridge_hub_send(conn, final)
-		}
+		bridge_extension_install_fail(conn, command_id, "", "missing_provider", "missing provider parameter")
 		return
 	}
-
-	if prov != "antigravity" && prov != "claude" && prov != "claude-code" && prov != "codex" {
-		msg := fmt.tprintf("unsupported provider %q (supported: antigravity, claude, codex)", prov)
-		_ = bridge_provider_extension_install_send_progress(conn, command_id, prov, "failed", 0, msg)
-		if command_id != "" {
-			final := bridge_command_failed_json(command_id, bridge_cause_wire_error("unsupported_provider", msg), "failed")
-			defer delete(final)
-			bridge_runtime_cache_command(command_id, final)
-			if conn != nil do _ = bridge_hub_send(conn, final)
-		}
+	if !bridge_extension_provider_supported(prov) {
+		bridge_extension_install_fail(conn, command_id, prov, "unsupported_provider",
+			fmt.tprintf("unsupported provider %q (supported: antigravity, claude, codex)", prov))
 		return
 	}
 
 	_ = bridge_provider_extension_install_send_progress(conn, command_id, prov, "installing", 10, "Resolving provider extension assets...")
-
-	custom_ext := extract_json_string(text, "extension_path", "")
-	ext_path := custom_ext if custom_ext != "" else bridge_get_bundled_extension_path(prov)
-	defer {
-		delete(custom_ext)
-		if custom_ext == "" do delete(ext_path)
-	}
-
+	canonical := bridge_extension_canonical_provider(prov)
+	ext_path := bridge_extension_bundle_resolver(canonical)
+	defer delete(ext_path)
 	if ext_path == "" || !bridge_os_dir_exists(ext_path) {
-		msg := fmt.tprintf("bundled extension directory not found for provider %q", prov)
-		_ = bridge_provider_extension_install_send_progress(conn, command_id, prov, "failed", 0, msg)
-		if command_id != "" {
-			final := bridge_command_failed_json(command_id, bridge_cause_wire_error("extension_not_found", msg), "failed")
-			defer delete(final)
-			bridge_runtime_cache_command(command_id, final)
-			if conn != nil do _ = bridge_hub_send(conn, final)
-		}
+		bridge_extension_install_fail(conn, command_id, prov, "extension_not_found",
+			fmt.tprintf("bundled extension directory not found for provider %q", prov))
+		return
+	}
+	bin_path, has_bin := bridge_extension_binary_resolver(canonical)
+	defer if has_bin do delete(bin_path)
+	if !has_bin || bin_path == "" {
+		bridge_extension_install_fail(conn, command_id, prov, "binary_not_found", fmt.tprintf("provider binary not found for %q", prov))
 		return
 	}
 
-	custom_bin := extract_json_string(text, "binary_path", "")
-	bin_path := custom_bin
-	bin_allocated := false
-	if bin_path == "" {
-		resolved, ok := bridge_provider_resolve_path("claude" if prov == "claude-code" else prov)
-		if ok {
-			bin_path = resolved
-			bin_allocated = true
-		}
-	}
-	defer {
-		delete(custom_bin)
-		if bin_allocated do delete(bin_path)
-	}
-
-	if bin_path == "" {
-		msg := fmt.tprintf("provider binary not found for %q", prov)
-		_ = bridge_provider_extension_install_send_progress(conn, command_id, prov, "failed", 0, msg)
-		if command_id != "" {
-			final := bridge_command_failed_json(command_id, bridge_cause_wire_error("binary_not_found", msg), "failed")
-			defer delete(final)
-			bridge_runtime_cache_command(command_id, final)
-			if conn != nil do _ = bridge_hub_send(conn, final)
-		}
+	// Stay below the dispatcher's sixty-second cap.
+	sink_data := Bridge_Extension_Frame_Sink{conn = conn, command_id = command_id, provider = prov}
+	sink := Bridge_Extension_Sink{data = &sink_data, progress = bridge_extension_frame_progress, report = bridge_extension_frame_report}
+	result := bridge_extension_ensure(canonical, ext_path, bin_path, time.time_add(time.now(), 55 * time.Second), sink)
+	if !result.ok {
+		bridge_extension_install_fail(conn, command_id, prov, result.code, result.message)
 		return
 	}
-
-	// Reserve eight seconds for a fresh discovery. All installer calls share the
-	// remaining budget, keeping the total below the dispatcher's sixty-second cap.
-	deadline := time.time_add(time.now(), 55 * time.Second)
-	install_deadline := time.time_add(deadline, -8 * time.Second)
-	bundled_version := bridge_provider_extension_read_manifest_version(ext_path, prov)
-	canonical_provider := "claude" if prov == "claude-code" else prov
-	required_version := bridge_extension_required_version(canonical_provider)
-	// Verification needs the newer of the bundled manifest and the catalog
-	// minimum; discovery reports "outdated" below the latter.
-	expected_version := bundled_version
-	if required_version != "" && bundled_version != "" && bridge_provider_extension_version_compare(required_version, bundled_version) > 0 {
-		expected_version = required_version
-	}
-
-	// REQ-MB-5: provider plugin registration is per OS user, so another Bridge
-	// under the same account may already have registered its own copy. Installing
-	// would re-point the marketplace at this Bridge's bundle; leave an equal or
-	// newer registration alone and only upgrade an older or unusable one.
-	if installed_version, current := bridge_extension_install_current(conn, command_id, canonical_provider, expected_version); current {
-		_ = bridge_provider_extension_install_send_progress(conn, command_id, prov, "succeeded", 100,
-			fmt.tprintf("Provider extension %s is already installed (bundled %s); registration left unchanged", installed_version, expected_version))
-		if command_id != "" {
-			final := bridge_command_result_json(command_id, "succeeded", "installed")
-			defer delete(final)
-			bridge_runtime_cache_command(command_id, final)
-			if conn != nil do _ = bridge_hub_send(conn, final)
-		}
-		return
-	}
-
-	// Installing a bundle older than the catalog minimum cannot satisfy
-	// verification and would only re-point the registration at stale assets.
-	if required_version != "" && bundled_version != "" && bridge_provider_extension_version_compare(bundled_version, required_version) < 0 {
-		bridge_extension_install_fail(conn, command_id, prov, "bundled_extension_outdated",
-			fmt.tprintf("bundled %s extension at %s is version %q, but Heimdall requires %q or newer; update this Bridge to a release that bundles extension %s, then retry",
-				prov, ext_path, bundled_version, required_version, required_version))
-		return
-	}
-
-	if prov == "claude" || prov == "claude-code" {
-		mp_root, has_mp := bridge_claude_resolve_marketplace_root(ext_path)
-		if !has_mp {
-			bridge_extension_install_fail(conn, command_id, prov, "missing_marketplace",
-				fmt.tprintf("missing Claude marketplace metadata (.claude-plugin/marketplace.json) for extension directory: %s", ext_path))
-			return
-		}
-		_ = bridge_provider_extension_install_send_progress(conn, command_id, prov, "installing", 25, "Registering Claude local plugin marketplace...")
-		_, message, registered := bridge_extension_install_step({bin_path, "plugin", "marketplace", "add", mp_root}, install_deadline)
-		if !registered {
-			bridge_extension_install_fail(conn, command_id, prov, "marketplace_add_failed", message)
-			return
-		}
-	}
-
-	if prov == "codex" {
-		mp_root, has_mp := bridge_codex_resolve_marketplace_root(ext_path)
-		if !has_mp {
-			bridge_extension_install_fail(conn, command_id, prov, "missing_marketplace",
-				fmt.tprintf("missing Codex marketplace metadata for extension directory: %s", ext_path))
-			return
-		}
-		_ = bridge_provider_extension_install_send_progress(conn, command_id, prov, "installing", 25, "Registering Codex local plugin marketplace...")
-		_, message, registered := bridge_extension_install_step({bin_path, "plugin", "marketplace", "add", mp_root}, install_deadline)
-		if !registered {
-			bridge_extension_install_fail(conn, command_id, prov, "marketplace_add_failed", message)
-			return
-		}
-	}
-
-	_ = bridge_provider_extension_install_send_progress(conn, command_id, prov, "installing", 50, "Executing provider extension installation...")
-	argv := bridge_provider_extension_build_install_args(prov, bin_path, ext_path)
-	output, install_error, installed := bridge_extension_install_step(argv, install_deadline)
-	if !installed {
-		bridge_extension_install_fail(conn, command_id, prov, "install_failed", install_error)
-		return
-	}
-	if (prov == "claude" || prov == "claude-code") && strings.contains(strings.to_lower(output, context.temp_allocator), "already installed") {
-		_ = bridge_provider_extension_install_send_progress(conn, command_id, prov, "installing", 65, "Updating existing Claude extension...")
-		_, message, updated := bridge_extension_install_step({bin_path, "plugin", "update", BRIDGE_CLAUDE_PLUGIN_ID}, install_deadline)
-		if !updated {
-			bridge_extension_install_fail(conn, command_id, prov, "update_failed", message)
-			return
-		}
-	}
-
-	_ = bridge_provider_extension_install_send_progress(conn, command_id, prov, "installing", 80, "Verifying installed extension status...")
-	// Discovery evaluates the catalog minimum too. Compare against the manifest
-	// as well, since a newer bundle may arrive before the catalog is refreshed.
-	results := bridge_extension_discover({canonical_provider})
-	defer {
-		for &result in results do bridge_provider_path_destroy(&result)
-		delete(results)
-	}
-	report := bridge_provider_discovery_report_json(command_id, results)
-	defer delete(report)
-	if conn != nil do _ = bridge_hub_send(conn, report)
-
-	verified := false
-	actual_state := "absent"
-	actual_version := ""
-	for r in results {
-		if r.provider != canonical_provider && !(canonical_provider == "claude" && r.provider == "claude-code") do continue
-		actual_state = r.extension_state
-		actual_version = r.extension_version
-		verified = r.state == "present" && r.extension_state == "present" &&
-			expected_version != "" && actual_version != "" &&
-			bridge_provider_extension_version_compare(actual_version, expected_version) >= 0
-		break
-	}
-	if time.diff(time.now(), deadline) <= 0 {
-		bridge_extension_install_fail(conn, command_id, prov, "timed_out", "extension installation timed out during status verification")
-		return
-	}
-	if !verified {
-		bridge_extension_install_fail(conn, command_id, prov, "verify_failed",
-			fmt.tprintf("extension installation verification failed: state is %q, version is %q (required %q or newer, bundled %q)",
-				actual_state, actual_version, expected_version, bundled_version))
-		return
-	}
-	_ = bridge_provider_extension_install_send_progress(conn, command_id, prov, "succeeded", 100, "Provider extension installed successfully")
+	_ = bridge_provider_extension_install_send_progress(conn, command_id, prov, "succeeded", 100, result.message)
 	if command_id != "" {
 		final := bridge_command_result_json(command_id, "succeeded", "installed")
 		defer delete(final)
 		bridge_runtime_cache_command(command_id, final)
 		if conn != nil do _ = bridge_hub_send(conn, final)
 	}
-}
-
-// bridge_extension_install_current reports whether the provider already has a
-// usable extension at expected_version or newer. When it does, the discovery
-// report is sent so the Hub sees the version that stays installed. An unknown
-// bundled or installed version is never treated as current.
-bridge_extension_install_current :: proc(conn: ^ws.Connection, command_id, canonical_provider, expected_version: string) -> (installed_version: string, current: bool) {
-	if expected_version == "" do return "", false
-	results := bridge_extension_discover({canonical_provider})
-	defer {
-		for &result in results do bridge_provider_path_destroy(&result)
-		delete(results)
-	}
-	for r in results {
-		if r.provider != canonical_provider && !(canonical_provider == "claude" && r.provider == "claude-code") do continue
-		current = r.state == "present" && r.extension_state == "present" && r.extension_version != "" &&
-			bridge_provider_extension_version_compare(r.extension_version, expected_version) >= 0
-		if current do installed_version = strings.clone(r.extension_version, context.temp_allocator)
-		break
-	}
-	if current {
-		report := bridge_provider_discovery_report_json(command_id, results)
-		defer delete(report)
-		if conn != nil do _ = bridge_hub_send(conn, report)
-	}
-	return
 }
 
 bridge_extension_install_fail :: proc(conn: ^ws.Connection, command_id, provider, code, message: string) {

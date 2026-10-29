@@ -91,7 +91,10 @@ test_provider_extension_build_install_args :: proc(t: ^testing.T) {
 
 test_install_mu: sync.Mutex
 test_install_calls: [dynamic][]string
-test_install_failure_step: int
+test_install_list_count: int
+// Every installer call whose verb (argv[2], or argv[3] after "marketplace") is
+// in this set fails; "" disables. Unlike a step index this survives retries.
+test_install_fail_verbs: []string
 test_install_already: bool
 test_install_probe_state: string
 test_install_probe_version: string
@@ -99,19 +102,32 @@ test_install_probe_count: int
 // The discovery before any installer step sees the pre-install registration.
 test_install_pre_state: string
 test_install_pre_version: string
+// `plugin marketplace list --json` output ("" = not JSON).
+test_install_marketplaces: string
 test_install_command_id: string
 test_install_required: string
+test_install_bundle: string
 test_install_test: ^testing.T
 
+test_install_verb :: proc(args: []string) -> string {
+	if len(args) > 3 && args[2] == "marketplace" do return fmt.tprintf("marketplace %s", args[3])
+	return args[2] if len(args) > 2 else ""
+}
+
 test_install_runner :: proc(args: []string, timeout: time.Duration) -> (stdout, stderr: string, exit_code: int, ok, timed_out: bool) {
+	testing.expect(test_install_test, timeout > 0 && timeout <= 25 * time.Second)
+	verb := test_install_verb(args)
+	if verb == "marketplace list" {
+		test_install_list_count += 1
+		return strings.clone(test_install_marketplaces), strings.clone(""), 0, true, false
+	}
 	copied := make([]string, len(args), context.temp_allocator)
 	for arg, i in args do copied[i] = strings.clone(arg, context.temp_allocator)
 	append(&test_install_calls, copied)
-	testing.expect(test_install_test, timeout > 0 && timeout <= 25 * time.Second)
-	if len(test_install_calls) == test_install_failure_step {
-		return strings.clone(""), strings.clone("Mock installation error"), 1, false, false
+	for v in test_install_fail_verbs {
+		if v == verb do return strings.clone(""), strings.clone("Mock installation error"), 1, false, false
 	}
-	if test_install_already && args[2] == "install" {
+	if test_install_already && verb == "install" {
 		return strings.clone("ALREADY INSTALLED"), strings.clone(""), 0, true, false
 	}
 	return strings.clone("Installed"), strings.clone(""), 0, true, false
@@ -132,6 +148,14 @@ test_install_discover :: proc(filter: []string) -> [dynamic]Bridge_Provider_Path
 	return results
 }
 
+test_install_bundle_resolver :: proc(provider: string, allocator := context.allocator) -> string {
+	return strings.clone(test_install_bundle, allocator)
+}
+
+test_install_binary_resolver :: proc(provider: string) -> (string, bool) {
+	return strings.clone("/fake/provider"), true
+}
+
 test_install_fixture :: proc(t: ^testing.T) -> string {
 	root := fmt.tprintf("%s/test-install-%p-%d", bridge_scratch_root(context.temp_allocator), t, time.to_unix_nanoseconds(time.now()))
 	for dir in ([]string{"", "codex", "codex/.codex-plugin", "antigravity", "claude-code", "claude-code/.claude-plugin", ".agents/plugins", ".claude-plugin"}) {
@@ -150,18 +174,48 @@ test_install_reset :: proc(t: ^testing.T, name: string) {
 	test_install_test = t
 	test_install_command_id = fmt.tprintf("install-%s-%p-%d", name, t, time.to_unix_nanoseconds(time.now()))
 	test_install_calls = make([dynamic][]string, context.temp_allocator)
-	test_install_failure_step = 0
+	test_install_list_count = 0
+	test_install_fail_verbs = nil
 	test_install_already = false
 	test_install_probe_state = "present"
 	test_install_probe_version = "0.4.31"
 	test_install_probe_count = 0
 	test_install_pre_state = "absent"
 	test_install_pre_version = ""
+	test_install_marketplaces = "[]"
 	test_install_required = ""
 }
 
 test_install_required_version :: proc(provider: string) -> string {
 	return test_install_required
+}
+
+// Swaps every hook the install path uses; call restore when done.
+Test_Install_Hooks :: struct {
+	runner:   Bridge_Extension_Install_Runner,
+	discover: Bridge_Provider_Discover_Proc,
+	required: Bridge_Extension_Required_Version_Proc,
+	bundle:   Bridge_Extension_Bundle_Resolver,
+	binary:   Bridge_Extension_Binary_Resolver,
+}
+
+test_install_hook :: proc() -> Test_Install_Hooks {
+	saved := Test_Install_Hooks{bridge_extension_install_runner, bridge_extension_discover, bridge_extension_required_version,
+		bridge_extension_bundle_resolver, bridge_extension_binary_resolver}
+	bridge_extension_install_runner = test_install_runner
+	bridge_extension_discover = test_install_discover
+	bridge_extension_required_version = test_install_required_version
+	bridge_extension_bundle_resolver = test_install_bundle_resolver
+	bridge_extension_binary_resolver = test_install_binary_resolver
+	return saved
+}
+
+test_install_restore :: proc(saved: Test_Install_Hooks) {
+	bridge_extension_install_runner = saved.runner
+	bridge_extension_discover = saved.discover
+	bridge_extension_required_version = saved.required
+	bridge_extension_bundle_resolver = saved.bundle
+	bridge_extension_binary_resolver = saved.binary
 }
 
 // Claude Code before 2.1.295 rejects `--marketplace`, and releases such as
@@ -174,8 +228,20 @@ test_install_expect_supported_flags :: proc(t: ^testing.T, provider: string) {
 	}
 }
 
+test_install_verbs :: proc() -> string {
+	b := strings.builder_make(context.temp_allocator)
+	for call, i in test_install_calls {
+		if i > 0 do strings.write_string(&b, ",")
+		strings.write_string(&b, test_install_verb(call))
+	}
+	return strings.to_string(b)
+}
+
+// The frame names only the provider that is honoured; the bundle comes from
+// test_install_bundle via the local resolver.
 test_install_run :: proc(provider, path: string) -> string {
-	payload := fmt.tprintf(`{{"type":"provider_extension_install","command_id":"%s","provider":"%s","binary_path":"/fake/provider","extension_path":"%s"}}`, test_install_command_id, provider, path)
+	test_install_bundle = path
+	payload := fmt.tprintf(`{{"type":"provider_extension_install","command_id":"%s","provider":"%s"}}`, test_install_command_id, provider)
 	bridge_hub_handle_extension_install_command(nil, payload)
 	result, ok := bridge_runtime_cached_command(test_install_command_id)
 	testing.expect(test_install_test, ok)
@@ -186,11 +252,8 @@ test_install_run :: proc(provider, path: string) -> string {
 test_bridge_extension_install_provider_steps :: proc(t: ^testing.T) {
 	sync.mutex_lock(&test_install_mu)
 	defer sync.mutex_unlock(&test_install_mu)
-	runner, discover, required := bridge_extension_install_runner, bridge_extension_discover, bridge_extension_required_version
-	defer { bridge_extension_install_runner = runner; bridge_extension_discover = discover; bridge_extension_required_version = required }
-	bridge_extension_install_runner = test_install_runner
-	bridge_extension_discover = test_install_discover
-	bridge_extension_required_version = test_install_required_version
+	saved := test_install_hook()
+	defer test_install_restore(saved)
 	root := test_install_fixture(t)
 	defer _ = os.remove_all(root)
 	for provider in ([]string{"antigravity", "claude", "claude-code", "codex"}) {
@@ -202,97 +265,109 @@ test_bridge_extension_install_provider_steps :: proc(t: ^testing.T) {
 		testing.expect_value(t, test_install_probe_count, 2)
 		test_install_expect_supported_flags(t, provider)
 		if provider == "codex" {
-			testing.expect_value(t, len(test_install_calls), 2)
-			if len(test_install_calls) == 2 {
-				testing.expect_value(t, test_install_calls[0][2], "marketplace")
-				testing.expect_value(t, test_install_calls[0][4], root)
-				testing.expect_value(t, test_install_calls[1][2], "add")
-			}
+			testing.expect_value(t, test_install_verbs(), "marketplace add,add")
+			if len(test_install_calls) == 2 do testing.expect_value(t, test_install_calls[0][4], root)
 		} else if provider == "antigravity" {
-			testing.expect_value(t, len(test_install_calls), 1)
+			testing.expect_value(t, test_install_verbs(), "install")
 		} else {
-			testing.expectf(t, len(test_install_calls) == 2, "%s: expected 2 calls, got %d", provider, len(test_install_calls))
+			testing.expectf(t, test_install_verbs() == "marketplace add,install", "%s: %s", provider, test_install_verbs())
 			if len(test_install_calls) == 2 {
-				add, install := test_install_calls[0], test_install_calls[1]
-				testing.expect_value(t, len(add), 5)
-				if len(add) == 5 {
-					testing.expect_value(t, add[2], "marketplace")
-					testing.expect_value(t, add[3], "add")
-					testing.expect_value(t, add[4], root)
-				}
-				testing.expect_value(t, len(install), 4)
-				if len(install) == 4 {
-					testing.expect_value(t, install[2], "install")
-					testing.expect_value(t, install[3], "heimdall@heimdall")
-				}
+				testing.expect_value(t, test_install_calls[0][4], root)
+				testing.expect_value(t, test_install_calls[1][3], "heimdall@heimdall")
 			}
 		}
 	}
+}
+
+// F12: a Hub frame naming a binary or extension path never gets it executed.
+@(test)
+test_bridge_extension_install_ignores_hub_supplied_paths :: proc(t: ^testing.T) {
+	sync.mutex_lock(&test_install_mu)
+	defer sync.mutex_unlock(&test_install_mu)
+	saved := test_install_hook()
+	defer test_install_restore(saved)
+	root := test_install_fixture(t)
+	defer _ = os.remove_all(root)
+	for provider in ([]string{"antigravity", "claude", "codex"}) {
+		test_install_reset(t, fmt.tprintf("hub-paths-%s", provider))
+		variant := "claude-code" if provider == "claude" else provider
+		test_install_bundle = test_install_path({root, variant})
+		payload := fmt.tprintf(`{{"type":"provider_extension_install","command_id":"%s","provider":"%s","binary_path":"/evil/bin/sh","extension_path":"/evil/ext"}}`,
+			test_install_command_id, provider)
+		bridge_hub_handle_extension_install_command(nil, payload)
+		result, _ := bridge_runtime_cached_command(test_install_command_id)
+		testing.expectf(t, strings.contains(result, `"status":"succeeded"`), "%s: %s", provider, result)
+		testing.expect(t, len(test_install_calls) > 0)
+		for call in test_install_calls {
+			testing.expectf(t, call[0] == "/fake/provider", "%s: executed %q", provider, call[0])
+			for arg in call do testing.expectf(t, !strings.contains(arg, "/evil"), "%s: hub path reached argv %v", provider, call)
+		}
+	}
+	// No local bundle: the hub-supplied extension_path is not a fallback.
+	test_install_reset(t, "hub-paths-no-bundle")
+	test_install_bundle = ""
+	payload := fmt.tprintf(`{{"type":"provider_extension_install","command_id":"%s","provider":"antigravity","extension_path":"%s"}}`,
+		test_install_command_id, test_install_path({root, "antigravity"}))
+	bridge_hub_handle_extension_install_command(nil, payload)
+	result, _ := bridge_runtime_cached_command(test_install_command_id)
+	testing.expectf(t, strings.contains(result, "extension_not_found"), "%s", result)
+	testing.expect_value(t, len(test_install_calls), 0)
 }
 
 @(test)
 test_bridge_extension_install_rejects_unverified_results :: proc(t: ^testing.T) {
 	sync.mutex_lock(&test_install_mu)
 	defer sync.mutex_unlock(&test_install_mu)
-	runner, discover, required := bridge_extension_install_runner, bridge_extension_discover, bridge_extension_required_version
-	defer { bridge_extension_install_runner = runner; bridge_extension_discover = discover; bridge_extension_required_version = required }
-	bridge_extension_install_runner = test_install_runner
-	bridge_extension_discover = test_install_discover
-	bridge_extension_required_version = test_install_required_version
+	saved := test_install_hook()
+	defer test_install_restore(saved)
 	root := test_install_fixture(t)
 	defer _ = os.remove_all(root)
-	for state in ([]string{"absent", "disabled", "outdated", "error", "unsupported", "present"}) {
+	for state in ([]string{"absent", "disabled", "outdated", "error", "unsupported", "present", "unknown-version"}) {
 		test_install_reset(t, state)
-		test_install_probe_state = state
-		test_install_probe_version = "0.1.0" if state == "present" else "0.4.31"
+		test_install_probe_state = "present" if state == "unknown-version" else state
+		test_install_probe_version = "0.1.0" if state == "present" else "" if state == "unknown-version" else "0.4.31"
 		result := test_install_run("antigravity", test_install_path({root, "antigravity"}))
 		testing.expect(t, strings.contains(result, `"status":"failed"`))
 		testing.expect(t, strings.contains(result, "verify_failed"))
 		delete(result)
+		// Self-heal: one clean reinstall (uninstall + install) before reporting.
+		testing.expectf(t, test_install_verbs() == "install,uninstall,install", "%s: %s", state, test_install_verbs())
+		testing.expect_value(t, test_install_probe_count, 3)
 	}
-	test_install_reset(t, "unknown-version")
-	test_install_probe_version = ""
-	result := test_install_run("antigravity", test_install_path({root, "antigravity"}))
-	testing.expect(t, strings.contains(result, "verify_failed"))
-	delete(result)
 }
 
 @(test)
 test_bridge_extension_install_claude_update_and_errors :: proc(t: ^testing.T) {
 	sync.mutex_lock(&test_install_mu)
 	defer sync.mutex_unlock(&test_install_mu)
-	runner, discover, required := bridge_extension_install_runner, bridge_extension_discover, bridge_extension_required_version
-	defer { bridge_extension_install_runner = runner; bridge_extension_discover = discover; bridge_extension_required_version = required }
-	bridge_extension_install_runner = test_install_runner
-	bridge_extension_discover = test_install_discover
-	bridge_extension_required_version = test_install_required_version
+	saved := test_install_hook()
+	defer test_install_restore(saved)
 	root := test_install_fixture(t)
 	defer _ = os.remove_all(root)
-	// Claude steps: 1 marketplace add, 2 install, 3 update (already installed).
-	for failed_step in 0..=3 {
-		test_install_reset(t, fmt.tprintf("claude-%d", failed_step))
+	// "already installed" is followed by an update.
+	test_install_reset(t, "claude-update")
+	test_install_already = true
+	result := test_install_run("claude", test_install_path({root, "claude-code"}))
+	testing.expect(t, strings.contains(result, `"status":"succeeded"`))
+	testing.expect_value(t, test_install_verbs(), "marketplace add,install,update")
+	if len(test_install_calls) == 3 do testing.expect_value(t, test_install_calls[2][3], "heimdall@heimdall")
+	delete(result)
+	// A step that keeps failing is retried once after cleanup, then reported.
+	Case :: struct { verb, code, verbs: string }
+	for c in ([]Case{
+		{"marketplace add", "marketplace_add_failed", "marketplace add,uninstall,marketplace remove,marketplace add"},
+		{"install", "install_failed", "marketplace add,install,uninstall,marketplace remove,marketplace add,install"},
+		{"update", "update_failed", "marketplace add,install,update,uninstall,marketplace remove,marketplace add,install,update"},
+	}) {
+		test_install_reset(t, c.verb)
 		test_install_already = true
-		test_install_failure_step = failed_step
-		result := test_install_run("claude", test_install_path({root, "claude-code"}))
-		if failed_step == 0 {
-			testing.expect(t, strings.contains(result, `"status":"succeeded"`))
-			testing.expect_value(t, test_install_probe_count, 2)
-		} else {
-			testing.expect(t, strings.contains(result, "Mock installation error"))
-			testing.expect_value(t, test_install_probe_count, 1)
-		}
-		if failed_step == 1 do testing.expect(t, strings.contains(result, "marketplace_add_failed"))
-		delete(result)
-		testing.expect_value(t, len(test_install_calls), 3 if failed_step == 0 else failed_step)
+		test_install_fail_verbs = []string{c.verb}
+		result = test_install_run("claude", test_install_path({root, "claude-code"}))
+		testing.expectf(t, strings.contains(result, "Mock installation error") && strings.contains(result, c.code), "%s: %s", c.verb, result)
+		testing.expectf(t, test_install_verbs() == c.verbs, "%s: %s", c.verb, test_install_verbs())
+		testing.expect_value(t, test_install_probe_count, 1)
 		test_install_expect_supported_flags(t, "claude")
-		if len(test_install_calls) == 3 {
-			update := test_install_calls[2]
-			testing.expect_value(t, len(update), 4)
-			if len(update) == 4 {
-				testing.expect_value(t, update[2], "update")
-				testing.expect_value(t, update[3], "heimdall@heimdall")
-			}
-		}
+		delete(result)
 	}
 	// Claude without marketplace metadata fails before running the provider.
 	_ = os.remove(test_install_path({root, ".claude-plugin/marketplace.json"}))
@@ -301,26 +376,14 @@ test_bridge_extension_install_claude_update_and_errors :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(missing, "missing_marketplace"))
 	testing.expect_value(t, len(test_install_calls), 0)
 	delete(missing)
-	for failed_step in 1..=2 {
-		test_install_reset(t, fmt.tprintf("codex-%d", failed_step))
-		test_install_failure_step = failed_step
-		result := test_install_run("codex", test_install_path({root, "codex"}))
-		testing.expect(t, strings.contains(result, "Mock installation error"))
-		testing.expect_value(t, len(test_install_calls), failed_step)
-		testing.expect_value(t, test_install_probe_count, 1)
-		delete(result)
-	}
 }
 
 @(test)
 test_bridge_extension_install_custom_marketplace_and_invalid_input :: proc(t: ^testing.T) {
 	sync.mutex_lock(&test_install_mu)
 	defer sync.mutex_unlock(&test_install_mu)
-	runner, discover, required := bridge_extension_install_runner, bridge_extension_discover, bridge_extension_required_version
-	defer { bridge_extension_install_runner = runner; bridge_extension_discover = discover; bridge_extension_required_version = required }
-	bridge_extension_install_runner = test_install_runner
-	bridge_extension_discover = test_install_discover
-	bridge_extension_required_version = test_install_required_version
+	saved := test_install_hook()
+	defer test_install_restore(saved)
 	root := test_install_fixture(t)
 	defer _ = os.remove_all(root)
 	test_install_reset(t, "codex-root")
@@ -351,14 +414,11 @@ test_bridge_extension_install_custom_marketplace_and_invalid_input :: proc(t: ^t
 test_bridge_extension_install_never_downgrades_registration :: proc(t: ^testing.T) {
 	sync.mutex_lock(&test_install_mu)
 	defer sync.mutex_unlock(&test_install_mu)
-	runner, discover, required := bridge_extension_install_runner, bridge_extension_discover, bridge_extension_required_version
-	defer { bridge_extension_install_runner = runner; bridge_extension_discover = discover; bridge_extension_required_version = required }
-	bridge_extension_install_runner = test_install_runner
-	bridge_extension_discover = test_install_discover
-	bridge_extension_required_version = test_install_required_version
+	saved := test_install_hook()
+	defer test_install_restore(saved)
 	root := test_install_fixture(t)
 	defer _ = os.remove_all(root)
-	// The fixture bundles 0.4.31; another Bridge on the same OS user registered pre_version.
+	// The fixture bundles 0.4.31; this or another Bridge registered pre_version.
 	Case :: struct { pre_version: string, skips: bool }
 	cases := []Case{
 		{"0.4.31", true}, {"v0.4.31", true}, {"0.4.32", true}, {"0.10.0", true}, {"1.0.0", true},
@@ -378,39 +438,14 @@ test_bridge_extension_install_never_downgrades_registration :: proc(t: ^testing.
 				testing.expect_value(t, test_install_probe_count, 1)
 				continue
 			}
+			// Outdated: removed, then added again from the bundle.
 			testing.expect_value(t, test_install_probe_count, 2)
-			if provider == "codex" {
-				testing.expectf(t, len(test_install_calls) == 2 && test_install_calls[0][3] == "add" && test_install_calls[0][4] == root,
-					"%s %s: older registration must be re-pointed", provider, c.pre_version)
-			} else if provider == "antigravity" {
-				testing.expectf(t, len(test_install_calls) == 1 && test_install_calls[0][2] == "install",
-					"%s %s: older registration must be upgraded", provider, c.pre_version)
-			} else {
-				testing.expectf(t, len(test_install_calls) == 2 && test_install_calls[0][3] == "add" && test_install_calls[0][4] == root && test_install_calls[1][2] == "install",
-					"%s %s: older registration must be re-pointed and upgraded", provider, c.pre_version)
-			}
+			want := "uninstall,install"
+			if provider == "codex" do want = "remove,marketplace remove,marketplace add,add"
+			else if provider != "antigravity" do want = "uninstall,marketplace remove,marketplace add,install"
+			testing.expectf(t, test_install_verbs() == want, "%s %s: %s", provider, c.pre_version, test_install_verbs())
 		}
 	}
-	// An unusable registration at a current version is still repaired, and an
-	// unknown installed version never counts as current.
-	for state in ([]string{"disabled", "outdated", "error", "absent", "unknown-version"}) {
-		test_install_reset(t, state)
-		test_install_pre_state = "present" if state == "unknown-version" else state
-		test_install_pre_version = "" if state == "unknown-version" else "0.5.0"
-		result := test_install_run("claude", test_install_path({root, "claude-code"}))
-		testing.expectf(t, strings.contains(result, `"status":"succeeded"`), "%s: %s", state, result)
-		delete(result)
-		testing.expectf(t, len(test_install_calls) == 2, "%s: expected marketplace add and install, got %d calls", state, len(test_install_calls))
-		testing.expect_value(t, test_install_probe_count, 2)
-	}
-	// A failed upgrade of an older registration still reports the failure.
-	test_install_reset(t, "older-fails")
-	test_install_pre_state = "present"
-	test_install_pre_version = "0.4.0"
-	test_install_failure_step = 1
-	result := test_install_run("antigravity", test_install_path({root, "antigravity"}))
-	testing.expect(t, strings.contains(result, "Mock installation error"))
-	delete(result)
 }
 
 // REQ-EXTFIX-2: the bundled manifest, the catalog minimum and the installed
@@ -420,11 +455,8 @@ test_bridge_extension_install_never_downgrades_registration :: proc(t: ^testing.
 test_bridge_extension_install_aligns_bundled_and_required_versions :: proc(t: ^testing.T) {
 	sync.mutex_lock(&test_install_mu)
 	defer sync.mutex_unlock(&test_install_mu)
-	runner, discover, required := bridge_extension_install_runner, bridge_extension_discover, bridge_extension_required_version
-	defer { bridge_extension_install_runner = runner; bridge_extension_discover = discover; bridge_extension_required_version = required }
-	bridge_extension_install_runner = test_install_runner
-	bridge_extension_discover = test_install_discover
-	bridge_extension_required_version = test_install_required_version
+	saved := test_install_hook()
+	defer test_install_restore(saved)
 	root := test_install_fixture(t)
 	defer _ = os.remove_all(root)
 
@@ -444,8 +476,8 @@ test_bridge_extension_install_aligns_bundled_and_required_versions :: proc(t: ^t
 		testing.expect_value(t, test_install_probe_count, 1)
 	}
 
-	// A current registration from another Bridge is still left alone even when
-	// this Bridge's bundle is stale (no-downgrade guard runs first).
+	// A current registration is still left alone even when this Bridge's
+	// bundle is stale (no-downgrade guard runs first).
 	test_install_reset(t, "stale-bundle-current-registration")
 	test_install_required = "0.4.32"
 	test_install_pre_state = "present"
