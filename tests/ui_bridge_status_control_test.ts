@@ -196,12 +196,19 @@ test('REQ-ENR-5: Electron manages the Bridge only through ham-bridge, on macOS, 
   for (const platform of ['darwin', 'win32', 'linux'] as const) assert.equal(bridgeManager.supportedPlatform(platform), true, platform);
   assert.equal(bridgeManager.supportedPlatform('freebsd'), false);
   // No install scripts, service managers, PATH rewriting or state discovery of its own.
-  assert.doesNotMatch(managerSource, /install\.sh|install\.ps1|enroll\.sh|enroll\.ps1|launchctl|schtasks|ScheduledTask|systemctl|PATH:|bridge-token|hub-url|config\.toml/);
+  assert.doesNotMatch(managerSource, /install\.sh|install\.ps1|enroll\.sh|enroll\.ps1|launchctl|schtasks|ScheduledTask|systemctl|PATH:|hub-url/);
+  // Profile files are only named to ham-bridge enroll, never read or parsed here.
+  assert.doesNotMatch(managerSource, /readFileSync\([^)]*(?:bridge-token|config\.toml|stateDir)/);
   assert.deepEqual(bridgeManager.operationArgs('setup', HUB, {}), ['setup', '--hub', 'https://hub.example', '--headless', '--json-progress']);
+  // enroll has no --profile: it names the profile's own files from status --json state_dir.
+  const stateDir = path.join(path.sep, 'home', 'u', '.config', 'heimdall', 'bridges', 'heimdall-bridge-hub-example_work');
   assert.deepEqual(
-    bridgeManager.operationArgs('reenroll', { hub: 'https://hub.example/', profile: 'work' }, { bridgeId: 'brg_abc' }),
-    ['enroll', '--hub', 'https://hub.example', '--profile', 'work', '--headless', '--json-progress', '--reuse-bridge', 'brg_abc'],
+    bridgeManager.operationArgs('reenroll', { hub: 'https://hub.example/', profile: 'work' }, { bridgeId: 'brg_abc', stateDir, replaceOtherAccount: true }),
+    ['enroll', '--hub', 'https://hub.example', '--config', path.join(stateDir, 'config.toml'), '--bridge-token-file', path.join(stateDir, 'bridge-token'),
+      '--headless', '--json-progress', '--reuse-bridge', 'brg_abc', '--replace-other-account'],
   );
+  assert.throws(() => bridgeManager.operationArgs('reenroll', HUB, { bridgeId: 'brg_abc' }), /state directory/);
+  assert.deepEqual(bridgeManager.operationArgs('setup', HUB, { replaceOtherAccount: true }).slice(-1), ['--replace-other-account']);
   assert.deepEqual(
     bridgeManager.operationArgs('update', { hub: '', service: 'heimdall-bridge-hub-example_work' }, { bundleDir: '/cache/v1/bundle' }),
     ['update', '--bundle', '/cache/v1/bundle', '--service', 'heimdall-bridge-hub-example_work', '--json-progress'],
@@ -434,4 +441,15 @@ test('F24: desktopCapabilities is the one desktop check; no odinApi.deviceAuth r
   walk(path.join(ROOT, 'src/ui'));
   assert.deepEqual(probes, ['src/ui/bridge/desktopBridge.ts']);
   assert.equal(fs.existsSync(path.join(ROOT, 'src/ui/components/extension/ProviderExtensionInstallAction.tsx')), false);
+});
+
+test('F1/REQ-ENR-1: another account\'s enrollment is flagged for an explicit replace confirmation', () => {
+  let model = startWizard();
+  model = reduceWizard(model, { type: 'output', message: 'bridge enroll REFUSED: this machine is enrolled as brg_old by another Heimdall account; nothing was written.' });
+  model = reduceWizard(model, { type: 'error', message: 'enrollment did not complete', step: 'enroll' });
+  assert.equal(model.otherAccount, true);
+  assert.equal(reduceWizard(startWizard(), { type: 'output', message: 'Open https://hub/api/v1/device/add' }).otherAccount, false);
+  const card = fs.readFileSync(path.join(ROOT, 'src/ui/components/settings/ThisMachineCard.tsx'), 'utf8');
+  assert.match(card, /settings-bridge-wizard-replace-account[\s\S]*replaceOtherAccount: true/);
+  assert.match(fs.readFileSync(path.join(ROOT, 'src/bridge/setup_cmd.odin'), 'utf8'), /has_flag\(s\.args, "--replace-other-account"\) do append\(&argv, "--replace-other-account"\)/);
 });

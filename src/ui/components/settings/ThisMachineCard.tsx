@@ -80,7 +80,7 @@ export default function ThisMachineCard({ manager, onBridgeId }: { manager: Desk
     }
   }), [manager, refresh]);
 
-  const run = async (kind: DesktopBridgeOperation, options: { purge?: boolean; bridgeId?: string } = {}) => {
+  const run = async (kind: DesktopBridgeOperation, options: { purge?: boolean; bridgeId?: string; replaceOtherAccount?: boolean } = {}) => {
     setError('');
     setLog([]);
     setShowLog(false);
@@ -218,8 +218,17 @@ export default function ThisMachineCard({ manager, onBridgeId }: { manager: Desk
           <span className={wizard.cancelled ? 'text-muted' : 'text-danger'}>
             {wizard.cancelled
               ? `Cancelled.${wizard.rolledBack ? ' Changes were rolled back.' : ''}`
-              : `Failed at ${wizard.steps.find((step) => step.id === wizard.failedStep)?.label || 'a step'} after automatic recovery.${wizard.rolledBack ? ' Changes were rolled back.' : ''}`}
+              : wizard.otherAccount
+                ? 'This machine is enrolled by another Heimdall account. Replacing it revokes that bridge and deletes its credentials here.'
+                : `Failed at ${wizard.steps.find((step) => step.id === wizard.failedStep)?.label || 'a step'} after automatic recovery.${wizard.rolledBack ? ' Changes were rolled back.' : ''}`}
           </span>
+          {wizard.otherAccount ? (
+            // F1: replacing another account's bridge revokes it and wipes its
+            // secrets on this machine, so it needs this explicit confirmation.
+            <Button size="sm" variant="danger" data-debug-id="settings-bridge-wizard-replace-account" onClick={() => void run(installed ? 'reenroll' : 'setup', { replaceOtherAccount: true, bridgeId: status?.bridge_id || '' })}>
+              Replace the other account's bridge
+            </Button>
+          ) : null}
           {wizard.canRetry ? (
             // ham-bridge setup is idempotent: a re-run skips the steps that
             // already succeeded (enrollment is kept), so Retry resumes from the

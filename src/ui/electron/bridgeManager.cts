@@ -403,16 +403,21 @@ async function getStatus(target: BridgeProfile) {
 let current: { kind: OperationKind; target: BridgeProfile; running: Running[]; wasInstalled: boolean } | null = null;
 let cancelRequested = false;
 
-function operationArgs(kind: OperationKind, target: BridgeProfile, options: { bridgeId?: string; purge?: boolean; bundleDir?: string; replaceOtherAccount?: boolean }): string[] {
+function operationArgs(kind: OperationKind, target: BridgeProfile, options: { bridgeId?: string; purge?: boolean; bundleDir?: string; replaceOtherAccount?: boolean; stateDir?: string }): string[] {
   // setup and enroll name a profile by Hub (+ profile); the others also take --service.
   const select = profileArgs(target, kind === 'update' || kind === 'uninstall');
   switch (kind) {
     case 'setup':
       return ['setup', ...select, '--headless', '--json-progress', ...(options.replaceOtherAccount ? ['--replace-other-account'] : [])];
     case 'reenroll': {
+      // `enroll` has no --profile: it names the profile's files explicitly
+      // (state_dir from `status --json`), exactly as `setup` does.
       const bridgeId = String(options.bridgeId || '');
       if (bridgeId && !BRIDGE_ID_PATTERN.test(bridgeId)) throw new Error('The previous Bridge ID is invalid; refusing to re-enroll it.');
-      return ['enroll', ...select, '--headless', '--json-progress', ...(bridgeId ? ['--reuse-bridge', bridgeId] : ['--new-bridge']),
+      const stateDir = String(options.stateDir || '');
+      if (!stateDir || !path.isAbsolute(stateDir)) throw new Error('The installed Bridge did not report its state directory; refusing to re-enroll it.');
+      return ['enroll', '--hub', select[1], '--config', path.join(stateDir, 'config.toml'), '--bridge-token-file', path.join(stateDir, 'bridge-token'),
+        '--headless', '--json-progress', ...(bridgeId ? ['--reuse-bridge', bridgeId] : ['--new-bridge']),
         ...(options.replaceOtherAccount ? ['--replace-other-account'] : [])];
     }
     case 'update':
@@ -479,7 +484,8 @@ async function runOperation(
       if (!binary) throw new Error('No installed Bridge was found on this machine.');
     }
     if (cancelRequested) throw Object.assign(new Error('Cancelled.'), { cancelled: true });
-    const args = operationArgs(kind, target, { ...options, bundleDir });
+    if (kind === 'reenroll' && !before.installed) throw new Error('Install the Bridge on this machine before re-enrolling it.');
+    const args = operationArgs(kind, target, { ...options, bundleDir, stateDir: String((before as any).state_dir || '') });
     const result = await runCommand(binary, args, { timeoutMs: TIMEOUTS[kind === 'reenroll' ? 'setup' : kind], onLine, register });
     if (result.code === 0 && !result.cancelled && !result.timedOut) {
       emit({ type: 'complete', status: await getStatus(target) });

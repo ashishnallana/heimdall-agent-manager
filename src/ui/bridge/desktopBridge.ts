@@ -150,6 +150,8 @@ export interface WizardModel {
   cancelled: boolean;
   rolledBack: boolean;
   completed: boolean;
+  /** F1: enrollment stopped because another account enrolled this machine. */
+  otherAccount: boolean;
 }
 
 export const WIZARD_STEPS: { id: WizardStepId; label: string }[] = [
@@ -175,7 +177,7 @@ export function wizardStepFor(step: string): WizardStepId | '' {
 export function initialWizard(): WizardModel {
   return {
     steps: WIZARD_STEPS.map((step) => ({ ...step, state: 'pending', message: '', recoveries: [], log: '' })),
-    pct: 0, running: false, failedStep: '', canRetry: false, pairing: null, error: '', cancelled: false, rolledBack: false, completed: false,
+    pct: 0, running: false, failedStep: '', canRetry: false, pairing: null, error: '', cancelled: false, rolledBack: false, completed: false, otherAccount: false,
   };
 }
 
@@ -196,9 +198,13 @@ function markBefore(model: WizardModel, id: WizardStepId): WizardModel {
 }
 
 /** Folds one operation event into the wizard model. */
+// `ham-bridge enroll` refuses, headless, to replace a bridge another Heimdall
+// account enrolled until the user confirms (--replace-other-account).
+export const OTHER_ACCOUNT_PATTERN = /enrolled as \S+ by another Heimdall account/;
+
 export function reduceWizard(model: WizardModel, event: DesktopBridgeEvent): WizardModel {
   if (event.type === 'pairing') return { ...model, pairing: { url: event.url, code: event.code } };
-  if (event.type === 'output') return model;
+  if (event.type === 'output') return OTHER_ACCOUNT_PATTERN.test(event.message) ? { ...model, otherAccount: true } : model;
   if (event.type === 'complete') {
     const done = model.steps.map((step) => ({ ...step, state: step.state === 'skipped' || step.state === 'failed' ? step.state : 'ok' as WizardStepState }));
     return { ...model, steps: done, pct: 100, running: false, completed: true, pairing: null };
