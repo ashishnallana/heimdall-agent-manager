@@ -38,6 +38,70 @@ Status :: struct {
 	bridge_port:   int    `json:"bridge_port"`,
 	endpoint_port: int    `json:"endpoint_port"`,
 	state_dir:     string `json:"state_dir"`,
+	// state is the one word a tray / Electron shows (status_state):
+	// not_installed|not_enrolled|needs_reenrollment|stopped|disconnected|connected.
+	state:              string `json:"state"`,
+	needs_reenrollment: bool   `json:"needs_reenrollment"`,
+	reenroll_reason: string `json:"reenroll_reason,omitempty"`,
+	reenroll_hint:   string `json:"reenroll_hint,omitempty"`,
+}
+
+// NEEDS_REENROLL_FILE marks a profile whose credential the hub refused (revoked
+// bridge, refresh 401, enrolled but tokenless, vault key never delivered). The
+// bridge writes it and then PARKS instead of exiting non-zero, so a supervisor
+// with Restart=on-failure does not crash-loop it (F21); a successful enroll
+// removes it.
+NEEDS_REENROLL_FILE :: "needs-reenrollment.json"
+
+Reenroll_Marker :: struct {
+	bridge_id: string `json:"bridge_id"`,
+	hub:       string `json:"hub"`,
+	reason:    string `json:"reason"`, // revoked|refresh_rejected|credential_missing|vault_key_timeout
+	hint:      string `json:"hint"`,   // the command that recovers it
+	at:        i64    `json:"at"`,     // unix seconds
+}
+
+reenroll_marker_json :: proc(m: Reenroll_Marker, allocator := context.allocator) -> string {
+	data, _ := json.marshal(m, allocator = allocator)
+	return string(data)
+}
+
+read_reenroll_marker :: proc(state_dir: string) -> (m: Reenroll_Marker, ok: bool) {
+	data, err := os.read_entire_file_from_path(pjoin(state_dir, NEEDS_REENROLL_FILE), context.temp_allocator)
+	if err != nil do return {}, false
+	return m, json.unmarshal_string(string(data), &m, allocator = context.temp_allocator) == nil
+}
+
+// write_reenroll_marker writes the marker owner-only via temp + rename.
+write_reenroll_marker :: proc(state_dir: string, m: Reenroll_Marker) -> bool {
+	final := pjoin(state_dir, NEEDS_REENROLL_FILE)
+	tmp := strings.concatenate({final, ".tmp"}, context.temp_allocator)
+	if os.write_entire_file_from_string(tmp, reenroll_marker_json(m, context.temp_allocator), {.Read_User, .Write_User}) != nil do return false
+	return os.rename(tmp, final) == nil
+}
+
+clear_reenroll_marker :: proc(state_dir: string) {
+	_ = os.remove(pjoin(state_dir, NEEDS_REENROLL_FILE))
+}
+
+// reenroll_marker_applies: a marker of an older bridge id is moot once the profile
+// holds a credential of a different (newly enrolled) bridge.
+reenroll_marker_applies :: proc(m: Reenroll_Marker, enrolled: bool, bridge_id: string) -> bool {
+	if !enrolled do return true
+	return m.bridge_id == bridge_id
+}
+
+// status_state folds a Status into the single word clients render.
+// Callers that change running/connected after gather_status recompute it.
+status_state :: proc(s: Status) -> string {
+	switch {
+	case s.needs_reenrollment:       return "needs_reenrollment"
+	case !s.installed && !s.enrolled: return "not_installed"
+	case !s.enrolled:              return "not_enrolled"
+	case !s.running:               return "stopped"
+	case !s.connected:             return "disconnected"
+	}
+	return "connected"
 }
 
 runtime_status_json :: proc(r: Runtime_Status, allocator := context.allocator) -> string {
@@ -92,6 +156,11 @@ gather_status :: proc(host: Host, name: string, now: time.Time, since: i64 = 0, 
 	s.bridge_id = credential_bridge_id(cred)
 	s.enrolled = s.bridge_id != ""
 	if p, ok := read_ports(l.state_dir); ok do s.bridge_port, s.endpoint_port = p[0], p[1]
+	if m, ok := read_reenroll_marker(l.state_dir); ok && reenroll_marker_applies(m, s.enrolled, s.bridge_id) {
+		s.needs_reenrollment = true
+		s.reenroll_reason, s.reenroll_hint = m.reason, m.hint
+		if s.bridge_id == "" do s.bridge_id = m.bridge_id
+	}
 	if r, ok := read_runtime_status(l.state_dir); ok {
 		fresh := time.diff(time.unix(r.updated_at, 0), now) <= RUNTIME_STATUS_MAX_AGE
 		current := r.updated_at >= since && (stale_pid == 0 || r.pid != stale_pid)
@@ -100,6 +169,7 @@ gather_status :: proc(host: Host, name: string, now: time.Time, since: i64 = 0, 
 		s.version = r.version
 		if s.bridge_id == "" do s.bridge_id = r.bridge_id
 	}
+	s.state = status_state(s)
 	return s
 }
 

@@ -825,6 +825,8 @@ bridge_credential_refresh_worker :: proc() {
                 if err.code == .Unauthenticated {
                     _ = os.remove(refresh_path); _ = os.remove(g_bridge_credential_file); _ = os.remove(request_path)
                     sync.mutex_lock(&g_bridge_credential_mu); bridge_config.bridge_token = ""; sync.mutex_unlock(&g_bridge_credential_mu)
+                    // F21: a stable state the next start parks on, not a crash loop.
+                    bridge_reenroll_mark(cfg_lib.config_path_from_args(os.args), api_base, bridge_id, .Refresh_Rejected)
                 }
                 fmt.eprintfln("bridge credential recovery stopped: state=%v attempts=%d code=%v class=%v", finished.state, finished.attempts, finished.code, finished.class)
                 return
@@ -982,8 +984,10 @@ bridge_enroll_restart_service :: proc(args: []string) -> (ok: bool, restarted: b
 		if out != "" do fmt.eprintfln("  output: %s", out)
 		fmt.eprintfln("  Start it manually with: ham-bridge service restart --service %s — then check its log; the vault key stays persisted, no re-enrollment needed.", name)
 		bridge_enroll_service_start_failed = true
+		g_bridge_enroll_service_restarted = true // a second start attempt would fail the same way
 		return false, false
 	}
+	g_bridge_enroll_service_restarted = true
 	return true, true
 }
 
@@ -1125,6 +1129,25 @@ bridge_enroll_result_line :: proc(reuse_hint, bridge_id: string) -> string {
 // bridge_enroll_device_command runs the whole ceremony. Steps are numbered to the
 // design's §2.2 so the two can be read side by side.
 bridge_enroll_device_command :: proc(args: []string) -> bool {
+	// F2: the profile's own running service holds the config lock; stop it for the
+	// ceremony and start it again if the enrollment does not get to restart it.
+	stopped := bridge_enroll_stop_own_service(args)
+	g_bridge_enroll_service_restarted = false
+	ok := bridge_enroll_device_command_run(args)
+	if stopped != "" && !g_bridge_enroll_service_restarted {
+		if started, out := bridge_service_action(bridge_service_host(), stopped, .Start); started {
+			fmt.printfln("bridge enroll: started %s again", stopped)
+		} else {
+			fmt.eprintfln("bridge enroll: could not start %s again (%s); run: ham-bridge service start --service %s", stopped, out, stopped)
+		}
+	}
+	return ok
+}
+
+// Set once bridge_enroll_restart_service handed the new credential to the service.
+g_bridge_enroll_service_restarted: bool
+
+bridge_enroll_device_command_run :: proc(args: []string) -> bool {
 	// REQ-EA-4: resolve a previous enrollment a crash left staged before starting anew.
 	_ = bridge_enroll_atomic_recover(args)
 	// Step 0 — the single input.
@@ -1165,10 +1188,10 @@ bridge_enroll_device_command :: proc(args: []string) -> bool {
 	// bridge; only an explicit --bridge-token-file / HAM_BRIDGE_TOKEN_FILE can collide.
 	// One enrollment or running bridge per config: the config is locked for the whole
 	// ceremony and released only to restart the registered service.
-	enroll_config_lock, config_locked := bridge_config_lock(cfg_lib.config_path_from_args(args))
+	enroll_config_lock, config_locked := bridge_enroll_config_lock_retry(cfg_lib.config_path_from_args(args), 10_000)
 	if !config_locked {
 		fmt.eprintfln("ham-bridge enroll REFUSED: another ham-bridge instance (a running bridge or enrollment) uses config %s.", cfg_lib.config_path_from_args(args))
-		fmt.eprintln("  Stop it first (the enrollment restarts the registered service when it is done), or use another --config.")
+		fmt.eprintln("  It is not this profile's registered service (that one is stopped automatically); stop it, or use another --config.")
 		return false
 	}
 	defer bridge_instance_unlock(enroll_config_lock)
@@ -1376,6 +1399,11 @@ bridge_enroll_device_command :: proc(args: []string) -> bool {
 			} else {
 				fmt.printfln("Approved: registering new bridge %s", cred.bridge_id)
 			}
+			// F1: a machine enrolled by ANOTHER account is replaced only when confirmed.
+			config_path_for_account := cfg_lib.config_path_from_args(args)
+			account_ok, account_replaced := bridge_enroll_resolve_account(args, api_base, config_path_for_account, replacing_bridge_id, cred)
+			if !account_ok do return false
+			if account_replaced do replacing_bridge_id = ""
 			if reason, conflict := bridge_enroll_token_file_conflict(token_file, api_base, replacing_bridge_id, cred.bridge_id if reenroll else ""); conflict {
 				fmt.eprintfln("bridge enroll FAILED: credential file %s is not this bridge's: %s. Nothing was written; enroll again with its own --bridge-token-file.", token_file, reason)
 				return false
@@ -1425,8 +1453,11 @@ bridge_enroll_device_command :: proc(args: []string) -> bool {
 			if cred.enrollment_pending {
 				// REQ-EA-4: write nothing until the vault key is delivered and the hub
 				// commits; enroll_atomic.odin owns the whole sequence.
+				// A vault-key timeout here rolls everything back (F7): the previous
+				// credential, if any, stays usable and a plain re-run retries.
 				if !bridge_enroll_atomic_run(args, cred, token_file, config_path, api_base) do return false
 				if bridge_enroll_atomic_state() == .Committed do fmt.println(bridge_enroll_result_line(reuse_hint, cred.bridge_id))
+				bridge_reenroll_clear(config_path)
 				bridge_instance_unlock(enroll_config_lock) // the restarted service takes it
 				if reenroll do bridge_instance_unlock_scope(cred.bridge_id)
 				restart_ok, restarted := bridge_enroll_restart_service(args)

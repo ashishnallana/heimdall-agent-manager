@@ -114,8 +114,42 @@ installed profile.
 {"profile":"work","service":"heimdall-bridge-hub-example-com_work","backend":"systemd",
  "hub":"https://hub.example.com","installed":true,"enrolled":true,"running":true,
  "connected":true,"vault":"unlocked","version":"0.5.18","bridge_id":"brg_abc",
- "bridge_port":49325,"endpoint_port":49326,"state_dir":"/home/u/.config/heimdall/bridges/heimdall-bridge-hub-example-com_work"}
+ "bridge_port":49325,"endpoint_port":49326,"state_dir":"/home/u/.config/heimdall/bridges/heimdall-bridge-hub-example-com_work",
+ "state":"connected","needs_reenrollment":false}
 ```
+
+`state` is the one word a tray / Electron renders: `not_installed`, `not_enrolled`,
+`needs_reenrollment`, `stopped`, `disconnected` or `connected`.
+
+**Needs re-enrollment (F21, F7).** When the hub refuses this bridge's credential
+(the bridge was revoked, a refresh got 401, an enrolled bridge has no credential, or
+an older hub's vault key was never delivered), the bridge writes
+`<state dir>/needs-reenrollment.json` (`{bridge_id,hub,reason,hint,at}`, 0600) and
+then **parks** — no listener, no hub connection, exit code 0 once the marker goes
+away — instead of exiting non-zero into a supervisor crash loop. `status --json`
+then reports `"state":"needs_reenrollment","needs_reenrollment":true` with
+`reenroll_reason` (`revoked|refresh_rejected|credential_missing|vault_key_timeout`)
+and `reenroll_hint` (the `ham-bridge enroll --hub … --config …` command that
+recovers it). A successful enrollment removes the marker; a marker naming an older
+bridge id than the profile's current credential is ignored.
+
+## `ham-bridge enroll` hardening
+
+- **Running service (F2).** `enroll` stops its own profile's registered service
+  (systemd, launchd, Scheduled Task, runit) before taking the config lock, retries
+  the lock for up to 10 s while the process exits, restarts the service with the new
+  credential on success and starts it again if the enrollment fails.
+- **Another account (F1).** When the profile's bridge was approved by a different
+  Heimdall account than the one approving now, `enroll` asks `[y/N]` on a terminal
+  or requires `--replace-other-account` (headless / `--json-progress`). Confirmed,
+  it revokes the old bridge on the hub with the old bridge's own token
+  (`POST /api/v1/bridge/self/revoke`, best effort), deletes its access/refresh token
+  files, rotation leftovers, vault keyring, identity record, re-enroll journal and
+  needs-reenrollment marker, then writes the new credential. Declined, nothing is
+  written and the just-approved bridge is revoked again.
+- **Vault key timeout (F7).** With an atomic-enrollment hub everything is rolled
+  back (a previous credential stays usable; re-run to retry). With an older hub the
+  profile is marked `needs_reenrollment` (`vault_key_timeout`) with the retry command.
 
 `vault` is `unlocked`, `locked`, `unpaired` or `unknown` (no runtime status yet).
 `list --json` returns `{"profiles":[<status>, ...]}` sorted by service name. With no

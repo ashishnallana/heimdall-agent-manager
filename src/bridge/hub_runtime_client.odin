@@ -857,6 +857,11 @@ bridge_hub_session_frame :: proc(type, text: string) -> bool {
 			fmt.eprintfln("bridge hub ended the session: the access token expired (%s); reconnecting with the current credential", msg)
 		case "bridge_credential_revoked":
 			fmt.eprintfln("bridge hub ended the session: this bridge's credential is revoked (%s); re-enrollment is required", msg)
+			// F21: record it and exit 0; the next start parks on the marker (no crash loop).
+			if !bridge_hub_is_enroll_only_runtime() {
+				bridge_reenroll_mark(cfg_lib.config_path_from_args(os.args), bridge_config.daemon_url, bridge_config.daemon_id, .Revoked)
+				os.exit(0)
+			}
 		case:
 			fmt.eprintfln("bridge hub error: %s", msg)
 		}

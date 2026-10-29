@@ -124,6 +124,7 @@ bridge_service_status :: proc(host: bridgesvc.Host, name: string, since: i64 = 0
 	l := bridgesvc.layout_for(host, name)
 	if s.installed do s.running = bridge_service_running(host, l)
 	if !s.running do s.connected = false
+	s.state = bridgesvc.status_state(s)
 	return s
 }
 
@@ -168,6 +169,10 @@ bridge_status_print :: proc(host: bridgesvc.Host, name: string, as_json: bool) -
 	fmt.printfln("installed  %v  running %v  enrolled %v  connected %v", s.installed, s.running, s.enrolled, s.connected)
 	fmt.printfln("vault      %s  version %s  bridge %s", s.vault, s.version if s.version != "" else "-", s.bridge_id if s.bridge_id != "" else "-")
 	fmt.printfln("ports      bridge %d  endpoint %d", s.bridge_port, s.endpoint_port)
+	fmt.printfln("state      %s", s.state)
+	if s.needs_reenrollment {
+		fmt.printfln("           the hub no longer accepts this bridge (%s); recover with: %s", s.reenroll_reason, s.reenroll_hint if s.reenroll_hint != "" else "ham-bridge enroll --hub <url>")
+	}
 	return true
 }
 

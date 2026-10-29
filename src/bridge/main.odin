@@ -161,7 +161,17 @@ main :: proc() {
 	//
 	// Enrollment returns from main after restarting the registered service; this
 	// guard applies only to ordinary runtime starts.
-	if bridge_refuse_tokenless_start(bridge_config) do os.exit(1)
+	// F21: a profile the hub refused (revoked, refresh 401, vault key never delivered)
+	// parks until it is re-enrolled instead of exiting non-zero into a crash loop.
+	if m, pending := bridge_reenroll_pending(cfg_lib.config_path_from_args(os.args), bridge_config.daemon_id); pending {
+		bridge_reenroll_park(cfg_lib.config_path_from_args(os.args), m)
+	}
+	if bridge_refuse_tokenless_start(bridge_config) {
+		config_path := cfg_lib.config_path_from_args(os.args)
+		bridge_reenroll_mark(config_path, bridge_config.daemon_url, bridge_config.daemon_id, .Credential_Missing)
+		if m, pending := bridge_reenroll_pending(config_path, bridge_config.daemon_id); pending do bridge_reenroll_park(config_path, m)
+		os.exit(1)
+	}
 	// Multi-bridge isolation: bind vault state to the configured hub and refuse a hub
 	// mismatch or a second instance on the same config/scope.
 	if !bridge_bind_runtime_hub(bridge_config, cfg_lib.config_path_from_args(os.args)) do os.exit(1)
