@@ -1,741 +1,204 @@
 #!/usr/bin/env python3
-"""Hermetic installer execution: no downloads, host services, or real enrollment."""
+"""Hermetic tests of the thin bootstraps (scripts/install.sh, scripts/install.ps1).
+
+install.sh only resolves a release, downloads + SHA-256 verifies the bundle and
+runs `ham-bridge setup --headless` with the remaining flags. A mock `curl` on
+PATH serves a fake GitHub release list and release assets from a temp dir, and the
+bundle's bin/ham-bridge is a stub that records its argv, so nothing is downloaded,
+installed or enrolled.
+"""
 import hashlib
 import io
 import json
 import os
 from pathlib import Path
-import plistlib
-import pty
-import select
-import shlex
-import shutil
-import socket
+import platform
+import re
 import subprocess
-import sys
 import tarfile
 import tempfile
-import termios
-import time
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 INSTALLER = ROOT / 'scripts/install.sh'
+INSTALLER_PS1 = ROOT / 'scripts/install.ps1'
+REPO = 'tanmayv/heimdall-agent-manager'
+
+MOCK_CURL = r'''#!/usr/bin/env bash
+# Maps the URLs install.sh fetches onto $MOCK_ROOT/www; anything else is a 404.
+url='' out=''
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --output) out="$2"; shift 2 ;;
+    --connect-timeout|--max-time|--speed-limit|--speed-time) shift 2 ;;
+    -*) shift ;;
+    *) url="$1"; shift ;;
+  esac
+done
+printf '%s\n' "$url" >> "$MOCK_ROOT/curl.log"
+case "$url" in
+  https://api.github.com/repos/*/releases\?*) src="$MOCK_ROOT/www/releases.json" ;;
+  https://github.com/*/releases/download/*) src="$MOCK_ROOT/www/download/${url#*/releases/download/}" ;;
+  *) src='' ;;
+esac
+[ -n "$src" ] && [ -f "$src" ] || { echo "curl: (22) The requested URL returned error: 404" >&2; exit 22; }
+cp "$src" "$out"
+'''
+
+STUB_BRIDGE = '#!/bin/sh\nprintf "%s\\n" "$*" >> "$MOCK_ROOT/ham-bridge.log"\nexit "${STUB_EXIT:-0}"\n'
 
 
-class InstallerTests(unittest.TestCase):
+def host_target():
+    os_name = {'Linux': 'linux', 'Darwin': 'darwin'}[platform.system()]
+    arch = {'x86_64': 'amd64', 'amd64': 'amd64', 'aarch64': 'arm64', 'arm64': 'arm64'}[platform.machine()]
+    return f'{os_name}-{arch}'
+
+
+class BootstrapTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(prefix='heimdall-installer-test-')
+        self.tmp = tempfile.TemporaryDirectory(prefix='heimdall-bootstrap-test-')
         self.root = Path(self.tmp.name)
         self.home = self.root / 'home with spaces'
         self.home.mkdir()
-        self.mock = self.root / 'mock'
-        self.mock.mkdir()
-        self.log = self.root / 'commands.jsonl'
-        # The installer treats DEBIAN_FRONTEND=noninteractive (set on GitHub's Ubuntu runners) as
-        # --non-interactive, so leaking it would skip every prompt-driven branch under test.
-        base = {k: v for k, v in os.environ.items()
-                if not k.startswith('HEIMDALL_') and k != 'DEBIAN_FRONTEND'}
-        self.env = dict(base, HOME=str(self.home), PATH=str(self.mock)+':'+os.environ['PATH'],
-                        MOCK_ROOT=str(self.root), MOCK_OS='Linux',
-                        XDG_RUNTIME_DIR=str(self.root/'runtime'), DBUS_SESSION_BUS_ADDRESS='',
-                        HEIMDALL_NON_INTERACTIVE='1')
-        # The installer must run without python3 or perl: both are stubs that
-        # record the call and fail. Python mocks below run sys.executable directly.
-        for tool in ('python3', 'python', 'perl'):
-            self.stub(tool, '#!/bin/sh\necho "$0 $*" >> "$MOCK_ROOT/forbidden"\nexit 127\n')
-        self.stub('id', '#!/bin/sh\necho 1000\n')
-        self.stub('uname', '#!/bin/sh\nif [ "$1" = -s ]; then echo "$MOCK_OS"; else echo "${MOCK_ARCH:-x86_64}"; fi\n')
-        self.stub('socat', '#!/bin/sh\nexit 0\n')
-        manager = '''#!/usr/bin/env python3
-import json, os, pathlib, sys
-r=pathlib.Path(os.environ['MOCK_ROOT'])
-with (r/'commands.jsonl').open('a') as f: f.write(json.dumps([pathlib.Path(sys.argv[0]).name]+sys.argv[1:])+'\\n')
-if pathlib.Path(sys.argv[0]).name=='launchctl':
-    marker=r/'loaded'
-    if sys.argv[1]=='bootstrap': marker.touch()
-    if sys.argv[1]=='bootout' and marker.exists(): marker.unlink()
-    if sys.argv[1]=='print' and sys.argv[2].count('/')>1 and not marker.exists(): sys.exit(1)
-'''
-        for tool in ('systemctl', 'launchctl', 'plutil'):
-            self.stub(tool, manager)
-        # MOCK_RELEASES overrides the release list; MOCK_SUM_TARGETS names the
-        # bundles a release's SHA256SUMS lists; BAD_SUM (all) or BAD_SUM_TARGET
-        # (one target) corrupts digests. Archive downloads append to downloads.
-        self.stub('curl', '''#!/usr/bin/env python3
-import hashlib, os, pathlib, sys
-r=pathlib.Path(os.environ['MOCK_ROOT']); a=sys.argv[1:]; url=[x for x in a if x.startswith('http')][0]
-if url.endswith('/api/v1/health'):
-    with (r/'hub-checks').open('a') as f: f.write(url+'\\n')
-    if os.environ.get('MOCK_HUB_DELAY'):
-        import time; time.sleep(float(os.environ['MOCK_HUB_DELAY']))
-    if os.environ.get('MOCK_HUB_DOWN'):
-        sys.stderr.write('curl: (6) Could not resolve host: '+url.split('/')[2]+'\\n'); sys.exit(6)
-    sys.stdout.write('302'); sys.exit(0)
-out=pathlib.Path(a[a.index('--output')+1])
-if '/releases?' in url:
-    out.write_text(os.environ.get('MOCK_RELEASES') or '[{"tag_name":"vtest","prerelease":false,"assets":[{"name":"SHA256SUMS"},{"name":"heimdall-local-linux-amd64-vtest.tar.gz"},{"name":"heimdall-local-darwin-amd64-vtest.tar.gz"},{"name":"heimdall-local-linux-arm64-vtest.tar.gz"}]}]')
-elif url.endswith('/SHA256SUMS'):
-    version=url.rsplit('/',2)[1]; digest=hashlib.sha256((r/'bundle').read_bytes()).hexdigest()
-    targets=os.environ.get('MOCK_SUM_TARGETS','linux-amd64,darwin-amd64,linux-arm64,darwin-arm64').split(',')
-    bad=lambda t: os.environ.get('BAD_SUM') or os.environ.get('BAD_SUM_TARGET')==t
-    out.write_text(''.join(('0'*64 if bad(t) else digest)+'  heimdall-local-'+t+'-'+version+'.tar.gz\\n' for t in targets))
-else:
-    with (r/'downloads').open('a') as f: f.write(url.rsplit('/',1)[1]+'\\n')
-    out.write_bytes((r/'bundle').read_bytes())
-''')
-        bridge = b'''#!/usr/bin/env bash
-if [ "$1" = --version ]; then echo "ham-bridge ${MOCK_BRIDGE_VERSION:-0.3.36} protocol 1 bridge 1 ws 1"; exit 0; fi
-if [ "$1" = --probe-hub ]; then
-  printf '%s\\n' "$2" > "$MOCK_ROOT/probe-hub"
-  if [ -n "${MOCK_PROBE_FAIL:-}" ]; then echo "probe-hub FAILED: no HTTP response" >&2; exit 1; fi
-  echo "probe-hub OK: $2/api/v1/health -> HTTP 200 via socat"; exit 0
-fi
-if [ "$1" = enroll ]; then
-  shift
-  while [ "$#" -gt 0 ]; do
-    case "$1" in --bridge-token-file) token="$2";; esac
-    shift 2
-  done
-  printf 'credential\\n' > "$token"
-  printf '%s\\n' "${HEIMDALL_HAM_PTY_HOST_BIN:-unset}" > "$MOCK_ROOT/enroll-env"
-  printf 'approved by     alice\\n'
-  if [ -n "${TERMUX_VERSION:-}" ] && [ -d "$PREFIX/var/service/ham-bridge" ]; then sv restart "$PREFIX/var/service/ham-bridge"
-  elif [ "$MOCK_OS" = Linux ]; then systemctl --user restart heimdall-bridge
-  else launchctl kickstart -k gui/1000/works.earendil.heimdall-bridge; fi
-fi
-'''
-        ctl = b'#!' + sys.executable.encode() + b'''
-import json, os, pathlib, sys
-pathlib.Path(os.environ['MOCK_ROOT']+'/ctl.json').write_text(json.dumps({'args':sys.argv[1:],'endpoint':os.environ.get('HEIMDALL_BRIDGE_ENDPOINT')}))
-'''
-        with tarfile.open(self.root/'bundle', 'w:gz') as t:
-            for name in ('heimdall','ham-bridge','ham-pty-host','ham-ctl'):
-                content = bridge if name=='ham-bridge' else ctl if name=='ham-ctl' else b'#!/bin/sh\nexit 0\n'
-                m=tarfile.TarInfo('bin/'+name); m.size=len(content); m.mode=0o755
-                t.addfile(m, io.BytesIO(content))
-            content = (ROOT/'scripts/apply-bridge-update.sh').read_bytes()
-            m=tarfile.TarInfo('scripts/apply-bridge-update.sh'); m.size=len(content); m.mode=0o755
-            t.addfile(m, io.BytesIO(content))
+        mock = self.root / 'mock'
+        mock.mkdir()
+        (mock / 'curl').write_text(MOCK_CURL)
+        (mock / 'curl').chmod(0o755)
+        self.target = host_target()
+        base = {k: v for k, v in os.environ.items() if not k.startswith('HEIMDALL_') and k not in ('TERMUX_VERSION', 'PREFIX')}
+        self.env = dict(base, HOME=str(self.home), PATH=f'{mock}:{os.environ["PATH"]}',
+                        MOCK_ROOT=str(self.root), TMPDIR=str(self.root))
+        self.releases = []
 
     def tearDown(self):
-        forbidden=self.root/'forbidden'
-        calls=forbidden.read_text() if forbidden.exists() else ''
         self.tmp.cleanup()
-        self.assertEqual(calls,'','the installer ran python3/perl')
 
-    def stub(self, name, text):
-        # Python mocks name this interpreter: python3 on PATH is a failing stub.
-        text=text.replace('#!/usr/bin/env python3\n','#!'+sys.executable+'\n',1)
-        p=self.mock/name; p.write_text(text); p.chmod(0o755)
+    def bundle_bytes(self):
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode='w:gz') as tf:
+            data = STUB_BRIDGE.encode()
+            info = tarfile.TarInfo('bin/ham-bridge')
+            info.size, info.mode = len(data), 0o755
+            tf.addfile(info, io.BytesIO(data))
+        return buf.getvalue()
 
-    def termux(self):
-        """Model a Termux install: $PREFIX with termux-services and Termux:API present."""
-        prefix=self.root/'prefix'; (prefix/'var/service').mkdir(parents=True,exist_ok=True); (prefix/'bin').mkdir(exist_ok=True)
-        (prefix/'share/termux-services').mkdir(parents=True,exist_ok=True)
-        svlogger=prefix/'share/termux-services/svlogger'; svlogger.write_text('#!/bin/sh\nexit 0\n'); svlogger.chmod(0o755)
-        self.env.update(TERMUX_VERSION='0.118.1', PREFIX=str(prefix), HEIMDALL_RUNSV_WAIT='0', MOCK_ARCH='aarch64')
-        self.stub('termux-keystore','#!/bin/sh\nexit 0\n')
-        self.stub('pgrep','#!/bin/sh\nexit 0\n')  # runsvdir is running
-        for tool in ('systemctl','launchctl','plutil'):  # Termux has no other supervisor
-            (self.mock/tool).unlink(missing_ok=True)
-        sv='''#!/usr/bin/env python3
-import json, os, pathlib, sys
-r=pathlib.Path(os.environ['MOCK_ROOT']); me=pathlib.Path(sys.argv[0]).name
-with (r/'commands.jsonl').open('a') as f: f.write(json.dumps([me]+sys.argv[1:])+'\\n')
-root=pathlib.Path(os.environ['PREFIX'])/'var/service'
-if me=='sv' and sys.argv[1]=='status':
-    d=pathlib.Path(sys.argv[2]); d=d if d.is_absolute() else root/sys.argv[2]
-    print('run: ham-bridge: (pid 123) 2s' if (d/'run').exists() and not (d/'down').exists() else 'down: ham-bridge: 1s')
-if me=='sv-enable':
-    down=root/sys.argv[1]/'down'
-    if down.exists(): down.unlink()
-'''
-        self.stub('sv',sv); self.stub('sv-enable',sv)
-        return prefix
+    def publish(self, tag, *, prerelease=False, draft=False, sums=True, bundle=True, tamper=False):
+        name = f'heimdall-local-{self.target}-{tag}.tar.gz'
+        d = self.root / 'www' / 'download' / tag
+        d.mkdir(parents=True)
+        data = self.bundle_bytes()
+        assets = []
+        if bundle:
+            (d / name).write_bytes(data + (b'x' if tamper else b''))
+            assets.append({'name': name})
+        if sums:
+            (d / 'SHA256SUMS').write_text(f'{hashlib.sha256(data).hexdigest()}  {name}\n')
+            assets.append({'name': 'SHA256SUMS'})
+        self.releases.append({'tag_name': tag, 'draft': draft, 'prerelease': prerelease, 'assets': assets})
+        (self.root / 'www' / 'releases.json').write_text(json.dumps(self.releases))
+        return d / name, d / 'SHA256SUMS'
 
-    def run_terminal(self, command, env):
-        """Run command with stdin/stdout/stderr on a pty (output post-processing off,
-        so a \\r is the installer's own). Returns (status, output); fails when
-        anything (a stray spinner ticker) keeps the terminal open after exit."""
-        master, slave = pty.openpty()
-        attrs = termios.tcgetattr(slave); attrs[1] &= ~termios.OPOST
-        termios.tcsetattr(slave, termios.TCSANOW, attrs)
-        p = subprocess.Popen(command, env=env, stdin=slave, stdout=slave, stderr=slave, start_new_session=True)
-        os.close(slave)
-        out = b''; exited = None; deadline = time.monotonic() + 30
-        try:
-            while True:
-                if exited is None and p.poll() is not None: exited = time.monotonic()
-                limit = deadline if exited is None else exited + 3
-                self.assertLess(time.monotonic(), limit, 'terminal still open after the installer exited:\n'+out.decode(errors='replace'))
-                if not select.select([master], [], [], 0.1)[0]: continue
-                try: chunk = os.read(master, 65536)
-                except OSError: break   # EIO: every holder of the terminal is gone
-                if not chunk: break
-                out += chunk
-        finally:
-            os.close(master)
-            if p.poll() is None: p.kill()
-        return p.wait(), out.decode(errors='replace')
+    def run_installer(self, *args, stdin_script=False, extra_env=None):
+        env = dict(self.env, **(extra_env or {}))
+        if stdin_script:
+            return subprocess.run(['bash', '-s', '--', *args], input=INSTALLER.read_text(),
+                                  env=env, capture_output=True, text=True, timeout=60)
+        return subprocess.run(['bash', str(INSTALLER), *args], env=env, capture_output=True,
+                              text=True, timeout=60, stdin=subprocess.DEVNULL)
 
-    def install_script(self):
-        lib=self.root/'installer-lib.sh'
-        lib.write_text(INSTALLER.read_text().replace('main "$@"\n',''))
-        return 'source '+shlex.quote(str(lib))+'\nport_busy() { case ",${BUSY_PORTS:-}," in *",$1,"*) return 0 ;; esac; return 1; }\n'
+    def bridge_calls(self):
+        log = self.root / 'ham-bridge.log'
+        return log.read_text().splitlines() if log.exists() else []
 
-    def run_install(self, *args, answers=None, success=True):
-        # Run the real installer with port probing simulated: BUSY_PORTS lists the
-        # loopback ports that accept connections; no test touches a host socket.
-        script=self.install_script()
-        if answers is not None:
-            # Override only terminal input; exercise the real prompt decision branches.
-            self.env['HEIMDALL_NON_INTERACTIVE']='0'
-            self.env['PROMPT_ANSWERS']=json.dumps(answers)
-            (self.root/'answers').write_text('\n'.join(answers)+'\n')
-            script+='exec 3< '+shlex.quote(str(self.root/'answers'))+'\nprompt() { printf "%s\\n" "$1"; IFS= read -r answer <&3; }\n'
-        command=['bash','-c',script+'main "$@"','installer',*args]
-        r=subprocess.run(command,env=self.env,text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,timeout=20)
-        if success: self.assertEqual(r.returncode,0,r.stdout)
-        else: self.assertNotEqual(r.returncode,0,r.stdout)
-        return r.stdout
+    def assert_clean(self):
+        # The temporary download/unpack directory is always removed.
+        self.assertEqual([p.name for p in self.root.glob('heimdall-install.*')], [])
 
-    def state(self, name):
-        return self.home/'.config/heimdall/bridges'/name
+    def test_latest_promoted_release_runs_setup_with_passthrough(self):
+        self.publish('v1.1.0', prerelease=True)
+        self.publish('v1.0.0')
+        res = self.run_installer('--hub', 'https://hub.example.com', '--name', 'bob', '--new-bridge')
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(self.bridge_calls(), ['setup --headless --hub https://hub.example.com --profile bob --new-bridge'])
+        self.assertIn(f'releases/download/v1.0.0/heimdall-local-{self.target}-v1.0.0.tar.gz',
+                      (self.root / 'curl.log').read_text())
+        self.assert_clean()
 
-    def data(self, name):
-        return self.home/'.local/share/heimdall/bridges'/name
+    def test_curl_pipe_bash(self):
+        self.publish('v1.0.0')
+        res = self.run_installer('--hub', 'https://hub.example.com', stdin_script=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(self.bridge_calls(), ['setup --headless --hub https://hub.example.com'])
 
-    def commands(self):
-        return [json.loads(s) for s in self.log.read_text().splitlines()] if self.log.exists() else []
+    def test_explicit_version_may_be_prerelease(self):
+        self.publish('v1.0.0')
+        self.publish('v1.1.0-rc1', prerelease=True)
+        res = self.run_installer('--version', 'v1.1.0-rc1', '--hub', 'https://h')
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn('/v1.1.0-rc1/', (self.root / 'curl.log').read_text())
 
-    def test_names(self):
-        for hub, name in [('https://hub.mundus.in','hub-mundus-in'),('http://localhost:8080','localhost-8080'),
-                          ('http://localhost:8081','localhost-8081'),('http://127.0.0.1:8080','127-0-0-1-8080'),
-                          ('https://192.168.1.4','192-168-1-4'),('http://[::1]:8080','--1-8080'),
-                          ('https://HUB.MUNDUS.IN:443/','hub-mundus-in'),('http://[0:0::0001]:8080','--1-8080'),
-                          ('http://[2001:DB8:0:0:1:0:0:1]','2001-db8--1-0-0-1'),('http://hub.example.:080','hub-example')]:
-            with self.subTest(hub=hub):
-                out=self.run_install('--hub',hub,'--dry-run')
-                self.assertIn('Service: heimdall-bridge-'+name+' (',out)
-        self.assertFalse(self.state('heimdall-bridge-hub-mundus-in').exists())
-        self.assertFalse(self.log.exists())
+    def test_tampered_bundle_is_refused_before_ham_bridge_runs(self):
+        self.publish('v1.0.0', tamper=True)
+        res = self.run_installer('--hub', 'https://h')
+        self.assertEqual(res.returncode, 1)
+        self.assertIn('SHA-256 verification failed', res.stderr)
+        self.assertEqual(self.bridge_calls(), [])
+        self.assert_clean()
 
-    def test_installs_update_supervisor_and_managed_service_identity(self):
-        name='heimdall-bridge-hub-mundus-in'
-        self.run_install('--hub','https://hub.mundus.in')
-        data=self.home/'.local/share/heimdall/bridges'/name
-        supervisor=data/'updates/apply-bridge-update.sh'
-        self.assertEqual(supervisor.read_bytes(),(ROOT/'scripts/apply-bridge-update.sh').read_bytes())
-        self.assertTrue(os.access(supervisor,os.X_OK))
-        unit=self.home/'.config/systemd/user'/f'{name}.service'
-        unit_text=unit.read_text()
-        self.assertIn('HEIMDALL_BRIDGE_SERVICE_NAME='+name+'.service',unit_text)
-        self.assertIn('ExecStopPost=',unit_text)
-        self.assertNotIn('ExecStopPost="bash"',unit_text)
-        self.assertIn('--stop-pty-hosts-only',unit_text)
+    def test_unknown_or_unverifiable_release_is_refused(self):
+        self.publish('v1.0.0')
+        res = self.run_installer('--version', 'v9.9.9', '--hub', 'https://h')
+        self.assertEqual(res.returncode, 1)
+        self.assertIn('no SHA256SUMS', res.stderr)
+        res = self.run_installer('--version', '../x', '--hub', 'https://h')
+        self.assertIn('Invalid release tag', res.stderr)
+        self.assertEqual(self.bridge_calls(), [])
 
-    def test_port_probe_detects_listener(self):
-        # The real port_busy (bash /dev/tcp), against an ephemeral listener of this test only.
-        try:
-            s=socket.socket(); s.bind(('127.0.0.1',0)); s.listen(1)
-        except OSError as e:
-            self.skipTest(f'no loopback sockets here: {e}')
-        port=s.getsockname()[1]
-        lib=self.root/'installer-lib.sh'; lib.write_text(INSTALLER.read_text().replace('main "$@"\n',''))
-        probe=['bash','-c','source "$1"; port_busy "$2"','probe',str(lib),str(port)]
-        self.assertEqual(subprocess.run(probe,env=self.env).returncode,0)
-        s.close()
-        self.assertNotEqual(subprocess.run(probe,env=self.env).returncode,0)
+    def test_no_promoted_release_for_target(self):
+        self.publish('v1.0.0', sums=False)
+        self.publish('v0.9.0', draft=True)
+        res = self.run_installer('--hub', 'https://h')
+        self.assertEqual(res.returncode, 1)
+        self.assertIn('No promoted release', res.stderr)
 
-    def test_bad_origins(self):
-        for hub in ('https://hub/a','https://u:p@hub','http://hub:99999','https://hub?q=x','https://hub/#f','garbage',
-                    'ftp://hub','http://[::1','http://[1::2::3]','http://a..b','http://-hub','http://hub_x'):
-            self.run_install('--hub',hub,'--dry-run',success=False)
-        self.assertFalse(self.log.exists())
+    def test_uninstall_runs_ham_bridge_uninstall(self):
+        self.publish('v1.0.0')
+        res = self.run_installer('--uninstall', '--hub', 'https://h', '--purge')
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(self.bridge_calls(), ['uninstall --hub https://h --purge'])
 
-    def test_termux_requires_termux_keystore(self):
-        for env in ({'TERMUX_VERSION':'0.118.1'},{'PREFIX':'/data/data/com.termux/files/usr'}):
-            with self.subTest(env=env):
-                self.env.update(env)
-                out=self.run_install('--hub','https://hub.mundus.in','--dry-run',success=False)
-                self.assertIn('termux-keystore is missing',out)
-                self.assertIn('pkg install termux-api',out)
-                self.assertFalse(self.log.exists())
-                for k in env: del self.env[k]
-        # With Termux:API and termux-services present the check passes and the install proceeds.
-        self.termux()
-        self.assertNotIn('termux-keystore',self.run_install('--hub','https://hub.mundus.in','--dry-run'))
-        # A desktop Linux $PREFIX (e.g. /usr/local) is not Termux.
-        del self.env['TERMUX_VERSION']; (self.mock/'termux-keystore').unlink()
-        self.env['PREFIX']='/usr/local'
-        # termux() removes the host-service mocks to prove that the runit path
-        # does not depend on them. Restore Linux's systemctl prerequisite before
-        # reusing this fixture as the desktop-Linux negative control; otherwise
-        # the result depends on whether the CI host happens to provide systemctl.
-        self.stub('systemctl','#!/bin/sh\nexit 0\n')
-        self.run_install('--hub','https://hub.mundus.in','--dry-run')
+    def test_local_bundle_is_verified_and_target_checked(self):
+        bundle, sums = self.publish('v1.0.0')
+        res = self.run_installer('--bundle', str(bundle), '--checksum-file', str(sums), '--hub', 'https://h')
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertFalse((self.root / 'curl.log').exists(), 'a local bundle needs no download')
+        other = self.root / 'heimdall-local-plan9-amd64-v1.0.0.tar.gz'
+        other.write_bytes(bundle.read_bytes())
+        res = self.run_installer('--bundle', str(other), '--checksum-file', str(sums), '--hub', 'https://h')
+        self.assertEqual(res.returncode, 1)
+        self.assertIn('not for this machine', res.stderr)
 
-    def test_termux_requires_termux_services(self):
-        self.termux(); (self.mock/'sv').unlink()
-        self.assertIn('termux-services is required',self.run_install('--hub','https://hub.mundus.in','--dry-run',success=False))
-        self.termux(); self.env['PREFIX']=str(self.root/'empty-prefix')
-        self.assertIn('service directory not found',self.run_install('--hub','https://hub.mundus.in','--dry-run',success=False))
-        self.assertFalse(self.log.exists())
+    def test_ham_bridge_failure_is_the_exit_code(self):
+        self.publish('v1.0.0')
+        res = self.run_installer('--hub', 'https://h', extra_env={'STUB_EXIT': '3'})
+        self.assertEqual(res.returncode, 3)
+        self.assert_clean()
 
-    def test_termux_requires_running_runsvdir(self):
-        prefix=self.termux(); self.stub('pgrep','#!/bin/sh\nexit 1\n')
-        out=self.run_install('--hub','https://hub.mundus.in',success=False)
-        self.assertIn('termux-services does not appear to be running',out); self.assertIn('start-services.sh',out)
-        self.assertFalse((prefix/'var/service/ham-bridge').exists())
-        self.assertFalse(any(c[0] in ('sv','sv-enable') for c in self.commands()))
-        # A live supervise/ok fifo of any service (e.g. a previous install's log service) proves the supervisor.
-        (prefix/'var/service/sshd/supervise').mkdir(parents=True); (prefix/'var/service/sshd/supervise/ok').touch()
-        self.run_install('--hub','https://hub.mundus.in','--dry-run')
-        self.assertIn('Checking Hub',self.run_install('--hub','https://hub.mundus.in'))
-        # Without any proof, the operator override is honoured.
-        shutil.rmtree(prefix/'var/service/sshd'); shutil.rmtree(prefix/'var/service/ham-bridge')
-        self.env['HEIMDALL_ASSUME_RUNSVDIR']='1'
-        self.run_install('--hub','https://hub.mundus.in','--keep-enrollment'); del self.env['HEIMDALL_ASSUME_RUNSVDIR']
+    def test_bootstraps_hold_no_install_logic(self):
+        """REQ-ENR-5: download + verify + exec only; the lifecycle lives in ham-bridge."""
+        sh = INSTALLER.read_text()
+        for word in ('systemctl', 'launchctl', 'LaunchAgents', 'enroll.sh', 'sv-enable', 'apply-bridge-update', '/public/'):
+            self.assertNotIn(word, sh)
+        self.assertEqual([l for l in sh.splitlines() if l.strip()][-1], 'main "$@"')
+        ps1 = INSTALLER_PS1.read_text()
+        self.assertTrue(ps1.isascii(), 'install.ps1 must be pure ASCII (PowerShell 5.1)')
+        for word in ('Register-ScheduledTask', 'schtasks', 'enroll.ps1', 'apply-bridge-update', 'Set-Acl'):
+            self.assertNotIn(word, ps1)
+        self.assertIn("'setup', '--headless'", ps1)
+        # The same promoted-release rule on both sides.
+        self.assertIn('-not $r.draft -and -not $r.prerelease', ps1)
+        self.assertTrue(re.search(r'releases\?per_page=30', ps1))
 
-    def test_hub_unreachable_is_explicit_and_installs_nothing(self):
-        self.env['MOCK_HUB_DOWN']='1'
-        out=self.run_install('--hub','https://hub.mundus.in',success=False)
-        self.assertIn('Checking Hub https://hub.mundus.in (up to 20s)',out)
-        self.assertIn('not reachable',out); self.assertIn('Could not resolve host: hub.mundus.in',out)
-        self.assertEqual((self.root/'hub-checks').read_text().strip(),'https://hub.mundus.in/api/v1/health')
-        self.assertFalse(self.downloads()); self.assertFalse(self.data('heimdall-bridge-hub-mundus-in').exists())
-        self.assertFalse((self.home/'.config/heimdall/bridges/.install-lock').exists())
-
-    def test_bridge_transport_preflight_blocks_before_replacing_service(self):
-        name='heimdall-bridge-localhost-8080'
-        self.run_install('--hub','http://localhost:8080')
-        unit=self.home/'.config/systemd/user'/f'{name}.service'; before=unit.read_text()
-        self.assertEqual((self.root/'probe-hub').read_text().strip(),'http://localhost:8080')
-        self.env['MOCK_PROBE_FAIL']='1'
-        out=self.run_install('--hub','http://localhost:8080','--keep-enrollment',success=False)
-        self.assertIn('cannot reach http://localhost:8080 through its own HTTPS client',out)
-        self.assertEqual(unit.read_text(),before)           # service untouched
-        self.assertFalse(any('stop' in c for c in self.commands()[len(self.commands())-1:]))
-        del self.env['MOCK_PROBE_FAIL']
-
-    def test_transport_preflight_skipped_for_bridges_before_0_3_36(self):
-        self.env['MOCK_BRIDGE_VERSION']='0.3.35'
-        out=self.run_install('--hub','http://localhost:8080')
-        self.assertIn('predates --probe-hub (0.3.36); transport preflight skipped',out)
-        self.assertFalse((self.root/'probe-hub').exists())
-        del self.env['MOCK_BRIDGE_VERSION']
-        self.env['MOCK_BRIDGE_VERSION']='0.3.40'
-        self.run_install('--hub','http://localhost:8080','--keep-enrollment')
-        self.assertTrue((self.root/'probe-hub').exists())
-
-    def test_hub_check_runs_before_download(self):
-        self.run_install('--hub','http://localhost:8080')
-        self.assertEqual((self.root/'hub-checks').read_text().strip(),'http://localhost:8080/api/v1/health')
-        self.assertEqual(self.downloads(),['heimdall-local-linux-amd64-vtest.tar.gz'])
-
-    def test_release_tarball_cache_avoids_redownload(self):
-        cache=self.home/'.cache/heimdall/releases/heimdall-local-linux-amd64-vtest.tar.gz'
-        cache.parent.mkdir(parents=True); stale=cache.parent/'heimdall-local-linux-amd64-vold.tar.gz'; stale.write_bytes(b'old')
-        # Count hashing: a verified cached copy is not hashed a second time.
-        hashes=self.root/'hashes'
-        self.stub('sha256sum','#!/bin/sh\necho "$*" >> "$MOCK_ROOT/hashes"\nexec '+shlex.quote(shutil.which('sha256sum'))+' "$@"\n')
-        self.run_install('--hub','http://localhost:8080')
-        self.assertEqual(len(hashes.read_text().splitlines()),1); hashes.unlink()
-        self.assertTrue(cache.exists()); self.assertEqual(cache.read_bytes(),(self.root/'bundle').read_bytes())
-        self.assertFalse(stale.exists())   # older versions of the same target are pruned
-        self.assertEqual(self.downloads(),['heimdall-local-linux-amd64-vtest.tar.gz'])
-        out=self.run_install('--hub','http://localhost:8080','--keep-enrollment')
-        self.assertIn('Using cached heimdall-local-linux-amd64-vtest.tar.gz',out)
-        self.assertEqual(len(hashes.read_text().splitlines()),1)
-        self.assertEqual(self.downloads(),['heimdall-local-linux-amd64-vtest.tar.gz'])   # no second download
-        # A cached file whose hash no longer matches the release is replaced by a fresh download.
-        cache.write_bytes(b'stale'); self.run_install('--hub','http://localhost:8080','--keep-enrollment')
-        self.assertEqual(self.downloads(),['heimdall-local-linux-amd64-vtest.tar.gz']*2)
-        self.assertEqual(cache.read_bytes(),(self.root/'bundle').read_bytes())
-
-    def test_termux_dry_run_plans_runit(self):
-        prefix=self.termux()
-        out=self.run_install('--hub','https://hub.mundus.in','--dry-run')
-        self.assertIn('runit service: '+str(prefix/'var/service/ham-bridge'),out)
-        self.assertIn('sv-enable ham-bridge',out)
-        self.assertFalse((prefix/'var/service/ham-bridge').exists())
-        self.assertFalse(self.log.exists())
-
-    def test_termux_runit_install_enroll_and_uninstall(self):
-        prefix=self.termux(); name='heimdall-bridge-hub-mundus-in'; svc=prefix/'var/service/ham-bridge'
-        out=self.run_install('--hub','https://hub.mundus.in',answers=[])
-        self.assertIn('approved by     alice',out); self.assertIn('runit service running: ham-bridge',out)
-        run=svc/'run'; text=run.read_text()
-        self.assertTrue(os.access(run,os.X_OK)); self.assertTrue(text.startswith('#!'+str(prefix)+'/bin/sh\n'))
-        self.assertIn(str(self.data(name)/'bin/ham-bridge'),text); self.assertIn('--hub https://hub.mundus.in',text)
-        self.assertIn('export HEIMDALL_BRIDGE_SERVICE_NAME=ham-bridge\n',text)
-        self.assertIn('export PREFIX='+shlex.quote(str(prefix))+'\n',text); self.assertIn('export TERMUX_VERSION=0.118.1\n',text)
-        self.assertIn('export TMPDIR='+shlex.quote(str(prefix)+'/tmp')+'\n',text)
-        self.assertIn('export HEIMDALL_HAM_CTL_BIN='+shlex.quote(str(self.data(name)/'bin'/('ham-ctl-'+name))),text)
-        self.assertTrue((svc/'log/run').exists()); self.assertFalse((svc/'down').exists())
-        self.assertEqual((svc/'hub-url').read_text(),'https://hub.mundus.in\n')
-        commands=self.commands()
-        self.assertIn(['sv-enable','ham-bridge'],commands)
-        self.assertIn(['sv','restart',str(svc)],commands)
-        # The service is enabled only AFTER enrollment restarted it, so the enrolling
-        # process is never displaced by the service connecting with the same identity.
-        self.assertGreater(commands.index(['sv-enable','ham-bridge']),commands.index(['sv','restart',str(svc)]))
-        self.assertFalse(any(c[0] in ('systemctl','launchctl') for c in commands))
-        self.assertEqual((self.state(name)/'bridge-token').stat().st_mode&0o777,0o600)
-        # One Termux install serves one Hub: a second Hub is refused before anything is touched.
-        out=self.run_install('--hub','http://localhost:8080','--dry-run',success=False)
-        self.assertIn('one bridge service',out); self.assertFalse(self.state('heimdall-bridge-localhost-8080').exists())
-        # Re-install replaces the service (down, then recreated and enabled again).
-        self.run_install('--hub','https://hub.mundus.in','--keep-enrollment')
-        self.assertIn(['sv','down',str(svc)],self.commands()); self.assertTrue(run.exists()); self.assertFalse((svc/'down').exists())
-        # Uninstall removes the service directory and binaries, keeps the enrollment.
-        self.run_install('--hub','https://hub.mundus.in','--uninstall')
-        self.assertFalse(svc.exists()); self.assertFalse((self.data(name)/'bin').exists())
-        self.assertTrue((self.state(name)/'bridge-token').exists())
-
-    def downloads(self):
-        p=self.root/'downloads'
-        return p.read_text().split() if p.exists() else []
-
-    @staticmethod
-    def releases(*entries):
-        """A GitHub release list, newest first: (tag, [bundle targets])."""
-        return json.dumps([{'tag_name':tag,'assets':[{'name':'SHA256SUMS'}]+[
-            {'name':f'heimdall-local-{t}-{tag}.tar.gz'} for t in targets]} for tag,targets in entries])
-
-    def test_termux_downloads_termux_bundle(self):
-        # T12: glibc-static linux-* binaries are SIGSYS-killed under Android's
-        # seccomp, so Termux must fetch the musl termux-* bundle. The picker
-        # prefers an older release that has it over a newer one that does not.
-        self.termux()
-        self.env.update(MOCK_SUM_TARGETS='linux-arm64,termux-arm64',
-                        MOCK_RELEASES=self.releases(('v9',['linux-arm64']),('v8',['linux-arm64','termux-arm64'])))
-        out=self.run_install('--hub','https://hub.mundus.in','--keep-enrollment')
-        self.assertEqual(self.downloads(),['heimdall-local-termux-arm64-v8.tar.gz'])
-        self.assertNotIn('[WARN]',out)
-
-    def test_termux_dry_run_plans_termux_bundle(self):
-        self.termux()
-        out=self.run_install('--hub','https://hub.mundus.in','--dry-run','--version','v1')
-        self.assertIn('Download heimdall-local-termux-arm64-v1.tar.gz (or heimdall-local-linux-arm64 if the release has none)',out)
-
-    def test_termux_falls_back_to_linux_bundle_with_warning(self):
-        # An explicit --version predating the Termux bundle: SHA256SUMS lists no
-        # termux-* entry, so install linux-* and say it will not run.
-        self.termux()
-        self.env['MOCK_SUM_TARGETS']='linux-arm64,linux-amd64'
-        out=self.run_install('--hub','https://hub.mundus.in','--version','v0.3.28','--keep-enrollment')
-        self.assertEqual(self.downloads(),['heimdall-local-linux-arm64-v0.3.28.tar.gz'])
-        self.assertIn('[WARN] Release v0.3.28 has no termux-arm64 bundle',out)
-        self.assertIn('set_robust_list',out)
-        # The picker falls back too when no listed release has a Termux bundle.
-        (self.root/'downloads').unlink()
-        self.env['MOCK_RELEASES']=self.releases(('v7',['linux-arm64']))
-        out=self.run_install('--hub','https://hub.mundus.in','--keep-enrollment')
-        self.assertEqual(self.downloads(),['heimdall-local-linux-arm64-v7.tar.gz'])
-        self.assertIn('[WARN] Release v7 has no termux-arm64 bundle',out)
-
-    def test_termux_bundle_checksum_is_enforced(self):
-        # The termux entry of SHA256SUMS is the one verified: a bad termux digest
-        # fails closed even though the linux entry would match.
-        self.termux()
-        self.env.update(MOCK_SUM_TARGETS='linux-arm64,termux-arm64',BAD_SUM_TARGET='termux-arm64')
-        out=self.run_install('--hub','https://hub.mundus.in','--version','v8','--keep-enrollment',success=False)
-        self.assertIn('SHA-256 verification failed',out)
-        self.assertEqual(self.downloads(),['heimdall-local-termux-arm64-v8.tar.gz'])
-        self.assertFalse((self.root/'prefix/var/service/ham-bridge').exists())
-
-    def test_linux_never_takes_termux_bundle(self):
-        self.env.update(MOCK_ARCH='aarch64',MOCK_SUM_TARGETS='linux-arm64,termux-arm64',
-                        MOCK_RELEASES=self.releases(('v8',['linux-arm64','termux-arm64'])))
-        out=self.run_install('--hub','http://localhost:8080')
-        self.assertEqual(self.downloads(),['heimdall-local-linux-arm64-v8.tar.gz'])
-        self.assertNotIn('[WARN]',out)
-
-    def test_missing_hub(self):
-        self.assertIn('--hub is required',self.run_install('--dry-run',success=False))
-        self.assertIn('localhost-8888',self.run_install('--dry-run',answers=['http://localhost:8888']))
-
-    def test_install_two_hubs_and_busy_ports(self):
-        self.env['BUSY_PORTS']='49323,49324'
-        name='heimdall-bridge-localhost-8080'
-        self.state(name).mkdir(parents=True)
-        (self.state(name)/'ports.json').write_text(json.dumps([49323,49323]))
-        self.run_install('--hub','http://localhost:8080')
-        p1=json.loads((self.state(name)/'ports.json').read_text())
-        self.assertNotIn(49323,p1); self.assertEqual(len(set(p1)),2)
-        name2='heimdall-bridge-localhost-8081'
-        self.run_install('--hub','http://localhost:8081')
-        p2=json.loads((self.state(name2)/'ports.json').read_text())
-        self.assertFalse(set(p1)&set(p2))
-        unit=(self.home/'.config/systemd/user'/f'{name}.service').read_text()
-        self.assertIn(f'--local-endpoint-port" "{p1[1]}',unit)
-        self.assertIn(str(self.data(name)/'run'),unit)
-        self.assertIn(str(self.data(name)),unit)
-        wrapper=self.data(name)/'bin'/('ham-ctl-'+name)
-        subprocess.run([str(wrapper),'tasks','list'],env=self.env,check=True)
-        result=json.loads((self.root/'ctl.json').read_text())
-        self.assertEqual(result['endpoint'],f'tcp:127.0.0.1:{p1[1]}')
-        self.assertEqual(result['args'][:2],['--config',str(self.state(name)/'config.toml')])
-        env=dict(self.env,HEIMDALL_BRIDGE_ENDPOINT='unix:/agent/own.sock')
-        subprocess.run([str(wrapper),'tasks','list'],env=env,check=True)
-        self.assertEqual(json.loads((self.root/'ctl.json').read_text())['endpoint'],'unix:/agent/own.sock')
-
-    def test_checksum_failure_does_not_stop_service(self):
-        self.env['BAD_SUM']='1'
-        self.run_install('--hub','http://localhost:8080',success=False)
-        self.assertFalse(any('stop' in c for c in self.commands()))
-        self.assertFalse(self.data('heimdall-bridge-localhost-8080').exists())
-        self.assertFalse((self.home/'.config/heimdall/bridges/.install-lock').exists())
-
-    def test_enroll_then_keep_then_reenroll(self):
-        name='heimdall-bridge-localhost-8080'
-        out=self.run_install('--hub','http://localhost:8080',answers=[])
-        self.assertIn('approved by     alice',out)
-        self.assertEqual((self.root/'enroll-env').read_text().strip(),str(self.data(name)/'bin/ham-pty-host'))
-        token=self.state(name)/'bridge-token'; token.write_text('keep-me')
-        out=self.run_install('--hub','http://localhost:8080',answers=['n'])
-        self.assertIn('Re-enroll this bridge?',out); self.assertEqual(token.read_text(),'keep-me')
-        self.run_install('--hub','http://localhost:8080',answers=['y'])
-        self.assertEqual(token.read_text(),'credential\n')
-        restarts=[c for c in self.commands() if 'restart' in c]
-        self.assertTrue(restarts); self.assertTrue(all(c[-1]==name for c in restarts))
-        self.assertEqual(token.stat().st_mode&0o777,0o600)
-
-    def test_persisted_enrollment_command(self):
-        name='heimdall-bridge-localhost-8080'
-        self.run_install('--hub','http://localhost:8080')
-        # A legacy credential makes enroll log; enroll.sh carries the helpers log
-        # and fail call (it died with 127 on ui_clear_line before).
-        (self.state(name)/'bridge-token').write_text('legacy\n')
-        r=subprocess.run([str(self.state(name)/'enroll.sh')],env=self.env,check=True,stdout=subprocess.PIPE,text=True)
-        self.assertIn('[INFO] Moved legacy credential aside: ',r.stdout)
-        self.assertEqual((self.state(name)/'bridge-token').read_text(),'credential\n')
-        self.assertEqual(self.commands()[-1],['systemctl','--user','restart',name])
-
-    def test_macos_plist_and_enrollment(self):
-        self.env['MOCK_OS']='Darwin'; name='heimdall-bridge-127-0-0-1-8081'
-        self.run_install('--hub','http://127.0.0.1:8081',answers=[])
-        plist=plistlib.loads((self.home/'Library/LaunchAgents'/f'{name}.plist').read_bytes())
-        self.assertEqual(plist['Label'],name)
-        # Like KillMode=process: the update supervisor and PTY host outlive the bridge.
-        self.assertIs(plist.get('AbandonProcessGroup'),True)
-        self.assertEqual(plist['EnvironmentVariables']['HEIMDALL_BRIDGE_SERVICE_NAME'],name)
-        args=plist['ProgramArguments']; port=args[args.index('--local-endpoint-port')+1]
-        self.assertEqual(plist['EnvironmentVariables']['HEIMDALL_BRIDGE_ENDPOINT'],'tcp:127.0.0.1:'+port)
-        self.assertIn(['launchctl','kickstart','-k','gui/1000/'+name],self.commands())
-
-    def test_legacy_migration_and_foreign_hub(self):
-        legacy=self.home/'.config/systemd/user/heimdall-bridge.service'; legacy.parent.mkdir(parents=True)
-        legacy.write_text('ExecStart=/bin/ham-bridge --hub "http://localhost:8080"\n')
-        old=self.home/'.config/heimdall'; old.mkdir(parents=True)
-        (old/'bridge-token').write_text('legacy-credential')
-        (old/'bridge-token.refresh').write_text('legacy-refresh')
-        self.run_install('--hub','http://localhost:8081')
-        self.assertTrue(legacy.exists())
-        self.assertFalse(any(c[-1]=='heimdall-bridge' for c in self.commands()))
-        self.run_install('--hub','http://localhost:8080')
-        self.assertFalse(legacy.exists())
-        self.assertEqual((self.state('heimdall-bridge-localhost-8080')/'bridge-token').read_text(),'legacy-credential')
-        self.assertTrue((old/'bridge-token').exists())
-
-    def test_uninstall_only_target(self):
-        for port in (8080,8081): self.run_install('--hub',f'http://localhost:{port}')
-        name='heimdall-bridge-localhost-8080'; (self.state(name)/'bridge-token').write_text('preserve')
-        self.run_install('--hub','http://localhost:8080','--uninstall')
-        self.assertFalse((self.data(name)/'bin').exists())
-        self.assertTrue((self.state(name)/'bridge-token').exists())
-        self.assertTrue((self.data('heimdall-bridge-localhost-8081')/'bin/ham-bridge').exists())
-
-    def test_name_collision_rejected(self):
-        name='heimdall-bridge-hub-mundus-in'; self.state(name).mkdir(parents=True)
-        (self.state(name)/'hub-url').write_text('http://hub.mundus.in')
-        self.run_install('--hub','https://hub.mundus.in','--dry-run',success=False)
-        self.assertFalse(self.log.exists())
-
-    def test_terminal_spinner_and_colour(self):
-        # Hub check slow enough for the ticker to draw; UTF-8 locale -> braille frames.
-        env=dict(self.env,MOCK_HUB_DELAY='1.5',TERM='xterm',LANG='C.UTF-8',LC_ALL='')
-        status,out=self.run_terminal(['bash','-c',self.install_script()+'main "$@"','installer','--hub','http://localhost:8080'],env)
-        self.assertEqual(status,0,out)
-        self.assertRegex(out,'\r  [⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] Checking Hub http://localhost:8080 \\(up to 20s\\)  [0-9]+s\x1b\\[K')
-        self.assertIn('\r\x1b[K\x1b[32m[OK]\x1b[0m Hub reachable: HTTP 302 after ',out)
-        self.assertIn('\x1b[2m[INFO]\x1b[0m ',out)
-        self.assertIn('\x1b[1;36m[9/9] \x1b[0m\x1b[1mReady\x1b[0m',out)
-        self.assertRegex(out,'\x1b\\[32m\\[OK\\]\x1b\\[0m Verifying and unpacking heimdall-local-linux-amd64-vtest.tar.gz \\([0-9]+s\\)')
-        # Boxed banner: accent (cyan) UTF-8 border, bold title, dim details.
-        self.assertIn('\x1b[36m╭',out)
-        self.assertIn('\x1b[1mHeimdall Bridge Installer',out)
-        self.assertIn('\x1b[2mVersion  latest release',out)
-        self.assertIn('\x1b[2mHub      http://localhost:8080',out)
-        self.assertNotIn('Profile  ',out)
-        # The readiness wait (8s here) is slow enough to always draw; the plain
-        # test covers the start/done lines of the faster spinner sections.
-        self.assertRegex(out,'\r  [⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] Checking that heimdall-bridge-localhost-8080 stays up \\(8s\\)  [0-9]+s\x1b\\[K')
-        self.assertIn('\r\x1b[K\x1b[32m[OK]\x1b[0m Service active: heimdall-bridge-localhost-8080',out)
-        # A non-UTF-8 locale gets ASCII frames.
-        env.update(LANG='C',MOCK_HUB_DELAY='0.8')
-        status,out=self.run_terminal(['bash','-c',self.install_script()+'main "$@"','installer','--hub','http://localhost:8080','--keep-enrollment'],env)
-        self.assertEqual(status,0,out)
-        self.assertRegex(out,'\r  [|/\\\\-] Checking Hub ')
-        self.assertNotRegex(out,'[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]')
-
-    def test_terminal_failure_stops_spinner_and_runs_exit_trap(self):
-        env=dict(self.env,MOCK_HUB_DOWN='1',MOCK_HUB_DELAY='0.8',TERM='xterm',LANG='C',LC_ALL='')
-        status,out=self.run_terminal(['bash','-c',self.install_script()+'main "$@"','installer','--hub','https://hub.mundus.in'],env)
-        self.assertEqual(status,1,out)
-        self.assertIn('\r\x1b[K\n\x1b[1;31m[ERROR]\x1b[0m Hub https://hub.mundus.in not reachable',out)
-        self.assertIn('Could not resolve host: hub.mundus.in',out)
-        self.assertFalse((self.home/'.config/heimdall/bridges/.install-lock').exists())   # main's EXIT trap ran
-        # A step's stderr is held while the spinner runs and shown when it fails,
-        # and an exit that bypasses fail (set -e) still stops the ticker before the
-        # EXIT trap that was installed before the spinner (quotes intact).
-        mark=self.root/"trap ran 'here'"
-        script=(self.install_script()+'set -euo pipefail\nwork_dir='+shlex.quote(str(self.root))+'\n'
-                'trap "$(printf \'touch %q\' '+shlex.quote(str(mark))+')" EXIT\n'
-                'spin_start "Slow step"; echo "tar: broken member" >&2; sleep 0.5; fail "Step broke"\n')
-        status,out=self.run_terminal(['bash','-c',script],env)
-        self.assertEqual(status,1,out); self.assertTrue(mark.exists(),out)
-        self.assertRegex(out,'\r  [|/\\\\-] Slow step  [0-9]+s\x1b\\[K')
-        self.assertIn('\r\x1b[K  | tar: broken member\n\n\x1b[1;31m[ERROR]\x1b[0m Step broke',out)
-        mark.unlink()
-        script=script.replace('fail "Step broke"','false; echo not-reached')
-        status,out=self.run_terminal(['bash','-c',script],env)
-        self.assertEqual(status,1,out); self.assertTrue(mark.exists(),out); self.assertNotIn('not-reached',out)
-        self.assertIn('  | tar: broken member',out)
-        self.assertEqual(list(self.root.glob('.step-stderr.*')),[])
-
-    def test_plain_output_has_no_escapes(self):
-        # Not a terminal: plain start/done lines, no escape sequences or carriage returns.
-        out=self.run_install('--hub','http://localhost:8080')
-        self.assertNotIn('\x1b',out); self.assertNotIn('\r',out)
-        self.assertIn('[INFO] Checking Hub http://localhost:8080 (up to 20s)\n[OK] Hub reachable: HTTP 302 after ',out)
-        self.assertIn('[INFO] Verifying and unpacking heimdall-local-linux-amd64-vtest.tar.gz\n',out)
-        self.assertRegex(out,'\\[OK\\] Verifying and unpacking heimdall-local-linux-amd64-vtest.tar.gz \\([0-9]+s\\)\n')
-        self.assertIn('[INFO] Fetching SHA256SUMS\n',out)
-        # Plain banner and the nine numbered steps, in order.
-        self.assertTrue(out.startswith('\nHeimdall Bridge Installer - Your agents, connected locally\n'
-                                       '  Version  latest release\n  Hub      http://localhost:8080\n'),out)
-        steps=['Hub & platform','Hub check','Resolve release','Download & verify','Bridge preflight',
-               'Replace service','Ports & routing','Register & enroll','Ready']
-        at=[out.index(f'\n[{i}/9] {title}\n') for i,title in enumerate(steps,1)]
-        self.assertEqual(at,sorted(at),out)
-        # Every slow section has a start line and a done line.
-        for label in ('Checking the downloaded ham-bridge against http://localhost:8080',
-                      'Registering heimdall-bridge-localhost-8080 with systemd',
-                      'Checking that heimdall-bridge-localhost-8080 stays up (8s)'):
-            self.assertIn('[INFO] '+label+'\n',out)
-        self.assertRegex(out,'\\[INFO\\] Caching heimdall-local-linux-amd64-vtest.tar.gz\n\\[OK\\] Caching heimdall-local-linux-amd64-vtest.tar.gz \\([0-9]+s\\)\n')
-        self.assertIn('[OK] ham-bridge 0.3.36 reaches the Hub through its own HTTPS client\n'
-                      '  probe-hub OK: http://localhost:8080/api/v1/health -> HTTP 200 via socat\n',out)
-        self.assertIn('[OK] Service active: heimdall-bridge-localhost-8080\n',out)
-        self.assertIn('[OK] Heimdall Bridge vtest is ready for http://localhost:8080\n',out)
-        # A replaced service is stopped under its own start/done lines.
-        out=self.run_install('--hub','http://localhost:8080','--keep-enrollment')
-        self.assertIn('[INFO] Stopping heimdall-bridge-localhost-8080\n[OK] Removed service heimdall-bridge-localhost-8080\n',out)
-        self.assertIn('[INFO] Checking cached heimdall-local-linux-amd64-vtest.tar.gz\n[OK] Using cached ',out)
-        command=['bash','-c',self.install_script()+'main "$@"','installer','--hub','http://localhost:8080','--keep-enrollment']
-        # A terminal with NO_COLOR: the spinner stays, colour goes.
-        status,out=self.run_terminal(command,dict(self.env,NO_COLOR='1',TERM='xterm',MOCK_HUB_DELAY='0.8'))
-        self.assertEqual(status,0,out)
-        self.assertNotRegex(out,'\x1b\\[[0-9;]*m'); self.assertIn('\x1b[K',out)
-        # TERM=dumb and HEIMDALL_INSTALL_PLAIN=1: neither colour nor spinner.
-        for extra in ({'TERM':'dumb'},{'TERM':'xterm','HEIMDALL_INSTALL_PLAIN':'1'}):
-            status,out=self.run_terminal(command,dict(self.env,MOCK_HUB_DELAY='0.8',**extra))
-            self.assertEqual(status,0,out)
-            self.assertNotIn('\x1b',out,extra); self.assertNotIn('\r',out,extra)
-            self.assertIn('[INFO] Checking Hub http://localhost:8080 (up to 20s)\n',out)
-
-
-    def test_profiles_two_bridges_one_hub(self):
-        hub='https://hub.mundus.in'; base='heimdall-bridge-hub-mundus-in'
-        self.run_install('--hub',hub)
-        out=self.run_install('--hub',hub,'--name','alice')
-        self.assertIn('Service: '+base+'_alice (',out); self.assertIn('Profile: alice',out)
-        # The profile is named in the banner and in the final summary.
-        self.assertIn('\n  Hub      '+hub+'\n  Profile  alice\n',out)
-        self.assertIn('[OK] Heimdall Bridge vtest is ready for '+hub+' (profile alice)\n',out)
-        self.env['HEIMDALL_BRIDGE_NAME']='bob'
-        self.run_install('--hub',hub)
-        del self.env['HEIMDALL_BRIDGE_NAME']
-        units=self.home/'.config/systemd/user'
-        self.assertEqual(sorted(p.name for p in units.glob('*.service')),
-                         [base+'.service',base+'_alice.service',base+'_bob.service'])
-        self.assertIn('Description=Heimdall Bridge '+hub+'\n',(units/(base+'.service')).read_text())
-        self.assertFalse((self.state(base)/'profile').exists())
-        ports=set()
-        for profile in ('alice','bob'):
-            name=base+'_'+profile
-            unit=(units/(name+'.service')).read_text()
-            self.assertIn('Description=Heimdall Bridge '+hub+' (profile '+profile+')\n',unit)
-            self.assertIn('HEIMDALL_BRIDGE_SERVICE_NAME='+name+'.service',unit)
-            self.assertIn(str(self.data(name)/'run'),unit)
-            self.assertEqual((self.state(name)/'profile').read_text(),profile+'\n')
-            self.assertEqual((self.state(name)/'hub-url').read_text(),hub+'\n')
-            p=json.loads((self.state(name)/'ports.json').read_text())
-            self.assertFalse(ports&set(p)); ports|=set(p)
-            wrapper=self.data(name)/'bin'/('ham-ctl-'+name)
-            subprocess.run([str(wrapper),'tasks','list'],env=self.env,check=True)
-            result=json.loads((self.root/'ctl.json').read_text())
-            self.assertEqual(result['endpoint'],f'tcp:127.0.0.1:{p[1]}')
-            self.assertEqual(result['args'][:2],['--config',str(self.state(name)/'config.toml')])
-        self.assertFalse(ports&set(json.loads((self.state(base)/'ports.json').read_text())))
-        # --name beats the environment.
-        self.env['HEIMDALL_BRIDGE_NAME']='bob'
-        self.assertIn('Service: '+base+'_carol (',self.run_install('--hub',hub,'--name','carol','--dry-run'))
-
-    def test_profile_uninstall_and_reenroll_scoped(self):
-        hub='http://localhost:8080'; alice='heimdall-bridge-localhost-8080_alice'; bob='heimdall-bridge-localhost-8080_bob'
-        for profile in ('alice','bob'): self.run_install('--hub',hub,'--name',profile)
-        (self.state(bob)/'bridge-token').write_text('bob-token')
-        n=len(self.commands())
-        self.run_install('--hub',hub,'--name','alice','--re-enroll',answers=[])
-        self.assertEqual((self.state(alice)/'bridge-token').read_text(),'credential\n')
-        self.assertEqual((self.state(bob)/'bridge-token').read_text(),'bob-token')
-        touched=[c for c in self.commands()[n:] if c[0]=='systemctl' and len(c)>3]
-        self.assertTrue(touched); self.assertTrue(all(c[-1]==alice for c in touched),touched)
-        self.run_install('--hub',hub,'--name','alice','--uninstall')
-        units=self.home/'.config/systemd/user'
-        self.assertFalse((units/(alice+'.service')).exists()); self.assertFalse((self.data(alice)/'bin').exists())
-        self.assertTrue((self.state(alice)/'bridge-token').exists())
-        self.assertTrue((units/(bob+'.service')).exists())
-        self.assertTrue((self.data(bob)/'bin/ham-bridge').exists())
-        self.assertNotIn(['systemctl','--user','stop',bob],self.commands())
-
-    def test_profile_never_migrates_legacy_service(self):
-        legacy=self.home/'.config/systemd/user/heimdall-bridge.service'; legacy.parent.mkdir(parents=True)
-        legacy.write_text('ExecStart=/bin/ham-bridge --hub "http://localhost:8080"\n')
-        old=self.home/'.config/heimdall'; old.mkdir(parents=True)
-        (old/'bridge-token').write_text('legacy-credential')
-        out=self.run_install('--hub','http://localhost:8080','--name','work','--dry-run')
-        self.assertIn('matching legacy migration=false',out)
-        self.run_install('--hub','http://localhost:8080','--name','work')
-        self.assertTrue(legacy.exists())
-        self.assertFalse(any(c[-1]=='heimdall-bridge' for c in self.commands()))
-        self.assertFalse((self.state('heimdall-bridge-localhost-8080_work')/'bridge-token').exists())
-
-    def test_profile_name_validation(self):
-        ok='a'+'-'*29+'9'
-        self.assertIn('Service: heimdall-bridge-hub-mundus-in_'+ok+' (',self.run_install('--hub','https://hub.mundus.in','--name',ok,'--dry-run'))
-        for bad in ('Alice','-x','a_b','a.b','a b','x'*32,'../x','é'):
-            with self.subTest(name=bad):
-                out=self.run_install('--hub','https://hub.mundus.in','--name',bad,'--dry-run',success=False)
-                self.assertIn('Invalid profile name',out)
-        self.assertIn('--name requires a value',self.run_install('--hub','https://hub.mundus.in','--name','',success=False))
-        self.env['HEIMDALL_BRIDGE_NAME']='Bad_Name'
-        self.assertIn('Invalid profile name',self.run_install('--hub','https://hub.mundus.in','--dry-run',success=False))
-        self.assertFalse(self.log.exists())
-
-    def test_termux_rejects_profile(self):
-        prefix=self.termux()
-        out=self.run_install('--hub','https://hub.mundus.in','--name','alice',success=False)
-        self.assertIn('not supported on Termux',out)
-        self.env['HEIMDALL_BRIDGE_NAME']='alice'
-        self.assertIn('not supported on Termux',self.run_install('--hub','https://hub.mundus.in','--dry-run',success=False))
-        self.assertFalse((prefix/'var/service/ham-bridge').exists())
-        self.assertFalse((self.home/'.config/heimdall').exists())
-        self.assertFalse(self.log.exists())
 
 if __name__ == '__main__':
-    unittest.main(verbosity=2)
+    unittest.main()
