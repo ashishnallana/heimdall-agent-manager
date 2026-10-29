@@ -330,3 +330,68 @@ test_bridge_extension_concurrent_ensures_serialize :: proc(t: ^testing.T) {
 	testing.expect_value(t, test_race.installed, "0.4.31")
 	testing.expect(t, test_race.mp_registered)
 }
+
+// Uninstall removes the plugin and its marketplace (failures of either are
+// tolerated), then a fresh discovery must no longer find the extension.
+@(test)
+test_bridge_extension_remove_uninstalls_and_verifies :: proc(t: ^testing.T) {
+	sync.mutex_lock(&test_install_mu)
+	defer sync.mutex_unlock(&test_install_mu)
+	saved := test_install_hook()
+	defer test_install_restore(saved)
+	reports := 0
+	sink := Bridge_Extension_Sink{data = &reports, report = proc(data: rawptr, results: []Bridge_Provider_Path) { (^int)(data)^ += 1 }}
+
+	test_install_reset(t, "remove")
+	test_install_pre_state = "absent" // what discovery sees after the uninstall
+	test_install_fail_verbs = {"marketplace remove"}
+	result := bridge_extension_remove("codex", "/fake/provider", time.time_add(time.now(), 30 * time.Second), sink)
+	testing.expectf(t, result.ok && result.action == "uninstalled", "%v", result)
+	testing.expect_value(t, len(test_install_calls), 2)
+	if len(test_install_calls) == 2 {
+		testing.expect_value(t, test_install_verb(test_install_calls[0]), "remove")
+		testing.expect_value(t, test_install_calls[0][3], BRIDGE_CODEX_PLUGIN_ID)
+		testing.expect_value(t, test_install_verb(test_install_calls[1]), "marketplace remove")
+	}
+	testing.expect_value(t, reports, 1)
+
+	test_install_reset(t, "remove-claude")
+	test_install_pre_state = "absent"
+	result = bridge_extension_remove("claude-code", "/fake/provider", time.time_add(time.now(), 30 * time.Second), {})
+	testing.expectf(t, result.ok, "%v", result)
+	if len(test_install_calls) > 0 do testing.expect_value(t, test_install_verb(test_install_calls[0]), "uninstall")
+
+	// A marketplace that survives removal is named, not reported as success.
+	test_install_reset(t, "remove-marketplace-stuck")
+	test_install_pre_state = "absent"
+	test_install_marketplaces = `{"marketplaces":[{"name":"heimdall-codex","root":"/old/source"}]}`
+	result = bridge_extension_remove("codex", "/fake/provider", time.time_add(time.now(), 30 * time.Second), {})
+	testing.expectf(t, !result.ok && result.code == "marketplace_remove_failed" && strings.contains(result.message, "/old/source"), "%v", result)
+
+	// Still registered afterwards: the uninstall failed, and says so.
+	test_install_reset(t, "remove-stuck")
+	test_install_pre_state = "present"
+	test_install_pre_version = "0.4.31"
+	result = bridge_extension_remove("codex", "/fake/provider", time.time_add(time.now(), 30 * time.Second), {})
+	testing.expectf(t, !result.ok && result.code == "uninstall_failed", "%v", result)
+}
+
+// codex refuses `marketplace add` while another source (an older Bridge's bundle)
+// holds the name; the install replaces it within the same attempt.
+@(test)
+test_bridge_extension_replaces_marketplace_from_another_source :: proc(t: ^testing.T) {
+	sync.mutex_lock(&test_install_mu)
+	defer sync.mutex_unlock(&test_install_mu)
+	saved := test_install_hook()
+	defer test_install_restore(saved)
+	root := test_install_fixture(t)
+	defer _ = os.remove_all(root)
+	test_install_reset(t, "mp-conflict")
+	test_install_add_conflict_once = true
+	result := bridge_extension_ensure("codex", test_install_path({root, "codex"}), "/fake/provider", time.time_add(time.now(), 30 * time.Second), {})
+	testing.expectf(t, result.ok && result.action == "installed", "%v", result)
+	verbs := make([dynamic]string, context.temp_allocator)
+	for call in test_install_calls do append(&verbs, test_install_verb(call))
+	// add (refused) -> remove -> add -> plugin add, with no cleanup pass first.
+	testing.expectf(t, len(verbs) >= 4 && verbs[0] == "marketplace add" && verbs[1] == "marketplace remove" && verbs[2] == "marketplace add" && verbs[3] == "add", "%v", verbs)
+}

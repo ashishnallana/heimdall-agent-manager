@@ -96,6 +96,8 @@ test_install_list_count: int
 // in this set fails; "" disables. Unlike a step index this survives retries.
 test_install_fail_verbs: []string
 test_install_already: bool
+// The first `marketplace add` fails as codex does when another source holds the name.
+test_install_add_conflict_once: bool
 test_install_probe_state: string
 test_install_probe_version: string
 test_install_probe_count: int
@@ -124,6 +126,10 @@ test_install_runner :: proc(args: []string, timeout: time.Duration) -> (stdout, 
 	copied := make([]string, len(args), context.temp_allocator)
 	for arg, i in args do copied[i] = strings.clone(arg, context.temp_allocator)
 	append(&test_install_calls, copied)
+	if test_install_add_conflict_once && verb == "marketplace add" {
+		test_install_add_conflict_once = false
+		return strings.clone(""), strings.clone("Error: marketplace 'heimdall-codex' is already added from a different source; remove it before adding this source"), 1, false, false
+	}
 	for v in test_install_fail_verbs {
 		if v == verb do return strings.clone(""), strings.clone("Mock installation error"), 1, false, false
 	}
@@ -177,6 +183,7 @@ test_install_reset :: proc(t: ^testing.T, name: string) {
 	test_install_list_count = 0
 	test_install_fail_verbs = nil
 	test_install_already = false
+	test_install_add_conflict_once = false
 	test_install_probe_state = "present"
 	test_install_probe_version = "0.4.31"
 	test_install_probe_count = 0

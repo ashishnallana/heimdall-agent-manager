@@ -355,6 +355,47 @@ bridge_extension_ensure :: proc(provider, ext_path, bin_path: string, deadline: 
 	return bridge_extension_fail_result(cond, last_code if last_code != "" else "timed_out", last_message if last_message != "" else "extension installation timed out")
 }
 
+// bridge_extension_remove uninstalls one provider's Ninjy extension with bin_path
+// (local resolution only): plugin uninstall and marketplace removal (failures are
+// expected when parts are already gone), then a fresh discovery, reported to the
+// sink, that must no longer find the extension. Setup and update reinstall it.
+bridge_extension_remove :: proc(provider, bin_path: string, deadline: time.Time, sink: Bridge_Extension_Sink) -> Bridge_Extension_Result {
+	prov := bridge_extension_canonical_provider(provider)
+	install_deadline := time.time_add(deadline, -8 * time.Second)
+	lock_path, locked := bridge_extension_lock(prov, install_deadline)
+	if !locked {
+		return bridge_extension_fail_result(.Unknown, "busy",
+			fmt.tprintf("another Ninjy extension install for %s is still running for this OS user; retry when it finishes", prov))
+	}
+	defer bridge_extension_unlock(prov, lock_path)
+	bridge_extension_sink_progress(sink, "uninstalling", 20, fmt.tprintf("Removing the %s extension and its marketplace registration...", prov))
+	for argv in bridge_extension_cleanup_argvs(prov, bin_path) do _, _, _ = bridge_extension_install_step(argv, install_deadline)
+	bridge_extension_sink_progress(sink, "uninstalling", 80, "Verifying the extension is gone...")
+	// A marketplace source that survives `marketplace remove` (another config
+	// layer, a CLI that refused) would make the next install fail with "already
+	// added from a different source": name it instead of reporting success.
+	if mp_name := bridge_extension_marketplace_name(prov); mp_name != "" {
+		out, _, listed := bridge_extension_install_step({bin_path, "plugin", "marketplace", "list", "--json"}, install_deadline)
+		if listed {
+			if mp_path, still, _ := bridge_extension_parse_marketplace(out, mp_name); still {
+				return bridge_extension_fail_result(.Unknown, "marketplace_remove_failed",
+					fmt.tprintf("the %s marketplace %q is still registered (source %q) after `%s plugin marketplace remove %s`; remove it from the provider's config, then retry",
+						prov, mp_name, mp_path, prov, mp_name))
+			}
+		}
+	}
+	results := bridge_extension_discover({prov})
+	if sink.report != nil do sink.report(sink.data, results[:])
+	state := "absent"
+	for r in results do if r.provider == prov do state = strings.clone(r.extension_state, context.temp_allocator)
+	bridge_provider_paths_destroy_all(&results)
+	if state == "present" || state == "outdated" || state == "disabled" {
+		return bridge_extension_fail_result(.Unknown, "uninstall_failed",
+			fmt.tprintf("the %s extension is still registered after uninstall (state %q); remove it with the provider CLI", prov, state))
+	}
+	return {ok = true, condition = .Absent, action = "uninstalled", message = fmt.tprintf("Provider extension for %s uninstalled", prov)}
+}
+
 // bridge_extension_install_once registers the bundled marketplace (claude,
 // codex) and installs the plugin.
 @(private = "file")
@@ -362,6 +403,13 @@ bridge_extension_install_once :: proc(prov, ext_path, bin_path, mp_root: string,
 	if prov == "claude" || prov == "codex" {
 		bridge_extension_sink_progress(sink, "installing", 25, fmt.tprintf("Registering %s local plugin marketplace...", "Claude" if prov == "claude" else "Codex"))
 		_, msg, registered := bridge_extension_install_step({bin_path, "plugin", "marketplace", "add", mp_root}, install_deadline)
+		// Another source holds the name (e.g. an older Bridge's bundle): replace it
+		// here instead of depending on a second, possibly time-starved attempt.
+		if !registered && strings.contains(strings.to_lower(msg, context.temp_allocator), "different source") {
+			bridge_extension_sink_progress(sink, "installing", 30, "Replacing a marketplace registered from another source...")
+			_, _, _ = bridge_extension_install_step({bin_path, "plugin", "marketplace", "remove", bridge_extension_marketplace_name(prov)}, install_deadline)
+			_, msg, registered = bridge_extension_install_step({bin_path, "plugin", "marketplace", "add", mp_root}, install_deadline)
+		}
 		if !registered do return "marketplace_add_failed", msg, false
 	}
 	bridge_extension_sink_progress(sink, "installing", 50, "Executing provider extension installation...")

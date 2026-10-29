@@ -653,6 +653,8 @@ register_routes :: proc(graph: ^App_Graph) {
 	http.router_add(&graph.router, "POST", "/api/v1/bridges/*/providers/discover", rawptr(&graph.provider_handlers), http.bridge_provider_discover_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/bridges/*/providers/*/extension-install", rawptr(&graph.provider_handlers), http.bridge_provider_extension_install_handler)
 	http.router_add(&graph.router, "GET", "/api/v1/bridges/*/providers/*/extension-install/*", rawptr(&graph.provider_handlers), http.bridge_provider_extension_command_handler)
+	http.router_add(&graph.router, "POST", "/api/v1/bridges/*/providers/*/extension-uninstall", rawptr(&graph.provider_handlers), http.bridge_provider_extension_uninstall_handler)
+	http.router_add(&graph.router, "GET", "/api/v1/bridges/*/providers/*/extension-uninstall/*", rawptr(&graph.provider_handlers), http.bridge_provider_extension_command_handler)
 	http.router_add(&graph.router, "PUT", "/api/v1/bridges/*/providers/*", rawptr(&graph.provider_handlers), http.bridge_provider_enable_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/bridges/*/provider-tests", rawptr(&graph.provider_handlers), http.provider_test_start_handler)
 	http.router_add(&graph.router, "GET", "/api/v1/provider-tests/*", rawptr(&graph.provider_handlers), http.provider_test_get_handler)

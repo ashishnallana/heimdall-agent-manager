@@ -46,6 +46,7 @@ extension_command_json :: proc(command: domain.Provider_Extension_Command) -> st
 		"\",\"bridge_id\":\"",
 	); write_handler_json_string(&b, command.bridge_id)
 	strings.write_string(&b, "\",\"provider\":\""); write_handler_json_string(&b, command.provider)
+	strings.write_string(&b, "\",\"kind\":\""); write_handler_json_string(&b, command.kind)
 	strings.write_string(&b, "\",\"status\":\""); write_handler_json_string(&b, command.state)
 	strings.write_string(&b, "\",\"message\":\""); write_handler_json_string(&b, command.message)
 	strings.write_string(
@@ -65,9 +66,14 @@ extension_install_command_json :: proc(command: domain.Provider_Extension_Comman
 	strings.write_string(&b, "{\"type\":\"provider_extension_install\",\"command_id\":\"")
 	write_handler_json_string(&b, command.command_id)
 	strings.write_string(&b, "\",\"provider\":\""); write_handler_json_string(&b, command.provider)
+	// Same frame for both actions, so the bridge serializes them per provider.
+	if command.kind == "uninstall" do strings.write_string(&b, "\",\"action\":\"uninstall")
 	strings.write_string(&b, "\"}")
 	return strings.to_string(b)
 }
+
+// An install or uninstall: both are explicit per-provider actions tracked the same way.
+extension_action_kind :: proc(kind: string) -> bool {return kind == "install" || kind == "uninstall"}
 
 // The caller holds extension_mutex; no synchronous command wait on the WS reader.
 extension_command_dispatch :: proc(
@@ -91,21 +97,73 @@ extension_command_dispatch :: proc(
 	)
 }
 
-// Standalone installs from the web app are rejected (F10, ENR-8): the bridge
-// installs and self-heals provider extensions during `ham-bridge setup` and
-// update (Settings > Bridges > Update with update_extensions). The route stays
-// so older clients get a clear answer instead of a 404; ownership is still
-// checked first so the response never reveals another user's bridge.
+// POST .../providers/:provider/extension-install (install or update).
 bridge_provider_extension_install_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	return extension_action_start(ctx, req, "install")
+}
+
+// POST .../providers/:provider/extension-uninstall: the bridge runs the provider
+// CLI's plugin uninstall and reports fresh discovery. Setup/update reinstall it.
+bridge_provider_extension_uninstall_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	return extension_action_start(ctx, req, "uninstall")
+}
+
+// extension_action_start: explicit user action (kind install|uninstall). Acceptance is
+// distinct from verified completion; one action per provider at a time.
+extension_action_start :: proc(ctx: rawptr, req: Request, kind: string) -> Response {
 	h := (^Provider_Handlers)(ctx)
 	bridge, ok, response := provider_owned_bridge(h, req, path_part(req.path, 4))
 	if !ok do return response
 	defer domain.bridge_destroy(&bridge)
-	return respond_error(domain.domain_error(.Forbidden,
-		"provider extensions are installed by the bridge during setup and update; update the bridge from Settings > Bridges instead"), req.request_id)
+	if bridge.status != .Online || !project_service.bridge_runtime_registry_has_live(h.bridge_runtime_registry, bridge.bridge_id) do return respond_error(domain.domain_error(.Bridge_Offline, "bridge is not connected"), req.request_id)
+	provider := path_part(req.path, 6)
+	views, view_err := provider_service.list_bridge_providers(h.providers, bridge.bridge_id)
+	if view_err.code != .None do return respond_error(view_err, req.request_id)
+	defer provider_service.bridge_provider_views_destroy(views)
+	found, supported, present := false, false, false
+	for view in views {
+		if view.catalog.provider != provider do continue
+		found =
+			true; supported = extension_install_supported(view); present = view.detection_state == "present"
+	}
+	if !found do return respond_error(domain.domain_error(.Not_Found, "provider was not found"), req.request_id)
+	if !supported do return respond_error(domain.domain_error(.Unprocessable_Entity, fmt.tprintf("provider extension %s is unsupported", kind)), req.request_id)
+	if !present do return respond_error(domain.domain_error(.Conflict, "provider CLI is not present on this bridge"), req.request_id)
+	sync.mutex_lock(&h.providers.extension_mutex)
+	defer sync.mutex_unlock(&h.providers.extension_mutex)
+	commands, list_err := iface.provider_extension_command_list(h.providers.repo, bridge.bridge_id)
+	if list_err.code != .None do return respond_error(list_err, req.request_id)
+	defer domain.provider_extension_commands_destroy(commands)
+	for command in commands {
+		if extension_action_kind(command.kind) && command.provider == provider && !extension_command_terminal(command.state) do return respond_error(domain.domain_error(.Conflict, "an extension install or uninstall is already in progress"), req.request_id)
+	}
+	command_id := strings.clone(platform.generate_id(h.ids, "cmd_ext_"))
+	defer delete(command_id)
+	command := domain.Provider_Extension_Command {
+		command_id = command_id,
+		bridge_id  = bridge.bridge_id,
+		kind       = kind,
+		provider   = provider,
+		state      = "queued",
+	}
+	created, create_err := iface.provider_extension_command_create(h.providers.repo, command)
+	if !created do return respond_error(create_err, req.request_id)
+	sent, send_err := extension_command_dispatch(h, command)
+	if !sent {
+		command.state = "failed"; command.message = send_err.message
+		_ = iface.provider_extension_command_save(h.providers.repo, command)
+		return respond_error(send_err, req.request_id)
+	}
+	command.state = "dispatched"
+	if save_err := iface.provider_extension_command_save(h.providers.repo, command); save_err.code != .None do return respond_error(save_err, req.request_id)
+	body := extension_command_json(command)
+	defer delete(body)
+	result := respond_success(body, req.request_id, auth_ctx_server_time(req))
+	result.status = 202
+	return result
 }
 
-// GET .../providers/:provider/extension-install/:command_id (same-owner scoped).
+// GET .../providers/:provider/extension-{install,uninstall}/:command_id (same-owner scoped).
 bridge_provider_extension_command_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Provider_Handlers)(ctx)
 	bridge, ok, response := provider_owned_bridge(h, req, path_part(req.path, 4))
@@ -115,7 +173,8 @@ bridge_provider_extension_command_handler :: proc(ctx: rawptr, req: Request) -> 
 	if err.code != .None do return respond_error(err, req.request_id)
 	defer domain.provider_extension_commands_destroy(commands)
 	for command in commands {
-		if command.kind != "install" || command.command_id != path_part(req.path, 8) || command.provider != path_part(req.path, 6) do continue
+		want := "uninstall" if path_part(req.path, 7) == "extension-uninstall" else "install"
+		if command.kind != want || command.command_id != path_part(req.path, 8) || command.provider != path_part(req.path, 6) do continue
 		body := extension_command_json(command)
 		defer delete(body)
 		return respond_success(body, req.request_id, auth_ctx_server_time(req))
@@ -275,23 +334,23 @@ bridge_extension_frame :: proc(
 			extension_command_set_state(&command, state, message, command.progress)
 		} else if command.kind == "bridge_update" {
 			if state == "restarting" || state == "succeeded" do extension_command_set_state(&command, "restarting", message, 95)
-		} else if command.kind == "install" &&
+		} else if extension_action_kind(command.kind) &&
 		   frame_type == "command_result" &&
 		   state == "succeeded" {
 			// Bridge's terminal result follows manifest/version verification and discovery.
 			extension_command_set_state(&command, "succeeded", message, 100)
-		} else if command.kind == "install" &&
+		} else if extension_action_kind(command.kind) &&
 		   frame_type == "provider_extension_install_progress" {
 			// A progress hint is never the terminal command result.
 			extension_command_set_state(
 				&command,
-				"installing",
+				"uninstalling" if command.kind == "uninstall" else "installing",
 				message,
 				json_int(text, "progress_percent", command.progress),
 			)
 		}
 		if save_err := iface.provider_extension_command_save(h.providers.repo, command); save_err.code != .None do return save_err
-		if command.kind == "install" {
+		if extension_action_kind(command.kind) {
 			bridge, found, _ := iface.bridge_get_bridge(h.bridges.repo, bridge_id)
 			if found {
 				defer domain.bridge_destroy(&bridge)
@@ -313,7 +372,7 @@ extension_apply_report :: proc(
 	command: ^domain.Provider_Extension_Command,
 	text: string,
 ) -> domain.Domain_Error {
-	if command.kind != "discovery" && command.kind != "install" do return {}
+	if command.kind != "discovery" && !extension_action_kind(command.kind) do return {}
 	if command.kind == "discovery" && extension_command_terminal(command.state) do return {}
 	if command.state == "waiting" do return {} // no report has been requested yet
 	report: Provider_Discovery_Report_Wire
@@ -347,7 +406,7 @@ extension_apply_report :: proc(
 			"",
 		)
 	}
-	if command.kind == "install" do return {}
+	if extension_action_kind(command.kind) do return {}
 	views, view_err := provider_service.list_bridge_providers(h.providers, command.bridge_id)
 	if view_err.code != .None do return view_err
 	defer provider_service.bridge_provider_views_destroy(views)
@@ -370,7 +429,7 @@ extension_apply_report :: proc(
 		after_discovery := false
 		for prior in commands {
 			if prior.command_id == command.command_id do after_discovery = true
-			if prior.kind != "install" || prior.provider != view.catalog.provider do continue
+			if !extension_action_kind(prior.kind) || prior.provider != view.catalog.provider do continue
 			if prior.parent_id == command.parent_id do already_scheduled = true
 			// Even a completed install invalidates a report requested before it.
 			if after_discovery || !extension_command_terminal(prior.state) do blocker_id = prior.command_id

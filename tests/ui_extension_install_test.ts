@@ -71,6 +71,12 @@ async function surfaceHarness(options: { state?: string } = {}) {
     if (path.endsWith('/providers/codex/extension-install') && method === 'POST') {
       return Response.json({ data: { command_id: 'ext-1', bridge_id: bridge.bridge_id, provider: 'codex', status: 'queued', progress_percent: 0, message: '' } });
     }
+    if (path.endsWith('/providers/codex/extension-uninstall') && method === 'POST') {
+      return Response.json({ data: { command_id: 'ext-2', bridge_id: bridge.bridge_id, provider: 'codex', kind: 'uninstall', status: 'queued', progress_percent: 0, message: '' } });
+    }
+    if (path.endsWith('/providers/codex/extension-uninstall/ext-2')) {
+      return Response.json({ data: { command_id: 'ext-2', bridge_id: bridge.bridge_id, provider: 'codex', kind: 'uninstall', status: 'uninstalling', progress_percent: 20, message: 'Removing' } });
+    }
     if (path.endsWith('/providers/codex/extension-install/ext-1')) {
       return Response.json({ data: { command_id: 'ext-1', bridge_id: bridge.bridge_id, provider: 'codex', status: 'running', progress_percent: 40, message: 'Installing' } });
     }
@@ -131,6 +137,31 @@ test('ProviderSetupSurface offers Install/Update for absent or outdated extensio
     await h.click('provider-extension-install-btn-codex');
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
     assert.equal(h.requests.filter((r) => r.method === 'POST' && r.path.endsWith('/providers/codex/extension-install')).length, 1);
+  } finally { await h.close(); }
+});
+
+test('ProviderSetupSurface offers Uninstall for a registered extension, behind a confirmation', async () => {
+  for (const state of ['absent', 'error']) {
+    const h = await surfaceHarness({ state });
+    try {
+      await h.render();
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+      assert.equal(h.query('provider-extension-uninstall-btn-codex'), null, `no uninstall for ${state}`);
+    } finally { await h.close(); }
+  }
+  const h = await surfaceHarness({ state: 'outdated' });
+  try {
+    await h.render();
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    assert.equal(h.query('provider-extension-uninstall-btn-codex')?.textContent, 'Uninstall Extension');
+    await h.click('provider-extension-uninstall-btn-codex');
+    assert.ok(h.query('provider-extension-uninstall-confirm-codex'), 'asks before uninstalling');
+    assert.equal(h.requests.filter((r) => r.path.endsWith('/extension-uninstall')).length, 0, 'nothing sent before confirming');
+    await h.click('provider-extension-uninstall-confirm-btn-codex');
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    assert.equal(h.requests.filter((r) => r.method === 'POST' && r.path.endsWith('/providers/codex/extension-uninstall')).length, 1);
+    await act(async () => { await new Promise((r) => setTimeout(r, 50)); });
+    assert.ok(h.requests.some((r) => r.path.endsWith('/providers/codex/extension-uninstall/ext-2')), 'tracks the uninstall at its own path');
   } finally { await h.close(); }
 });
 

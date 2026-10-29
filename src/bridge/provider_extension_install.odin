@@ -207,6 +207,14 @@ bridge_hub_handle_extension_install_command :: proc(conn: ^ws.Connection, text: 
 		return
 	}
 
+	// action=uninstall shares this frame (and its per-provider ordering key).
+	action := extract_json_string(text, "action", "")
+	defer delete(action)
+	if action == "uninstall" {
+		bridge_hub_handle_extension_uninstall(conn, command_id, prov)
+		return
+	}
+
 	_ = bridge_provider_extension_install_send_progress(conn, command_id, prov, "installing", 10, "Resolving provider extension assets...")
 	canonical := bridge_extension_canonical_provider(prov)
 	ext_path := bridge_extension_bundle_resolver(canonical)
@@ -234,6 +242,31 @@ bridge_hub_handle_extension_install_command :: proc(conn: ^ws.Connection, text: 
 	_ = bridge_provider_extension_install_send_progress(conn, command_id, prov, "succeeded", 100, result.message)
 	if command_id != "" {
 		final := bridge_command_result_json(command_id, "succeeded", "installed")
+		defer delete(final)
+		bridge_runtime_cache_command(command_id, final)
+		if conn != nil do _ = bridge_hub_send(conn, final)
+	}
+}
+
+bridge_hub_handle_extension_uninstall :: proc(conn: ^ws.Connection, command_id, prov: string) {
+	_ = bridge_provider_extension_install_send_progress(conn, command_id, prov, "uninstalling", 10, "Resolving the provider CLI...")
+	canonical := bridge_extension_canonical_provider(prov)
+	bin_path, has_bin := bridge_extension_binary_resolver(canonical)
+	defer if has_bin do delete(bin_path)
+	if !has_bin || bin_path == "" {
+		bridge_extension_install_fail(conn, command_id, prov, "binary_not_found", fmt.tprintf("provider binary not found for %q", prov))
+		return
+	}
+	sink_data := Bridge_Extension_Frame_Sink{conn = conn, command_id = command_id, provider = prov}
+	sink := Bridge_Extension_Sink{data = &sink_data, progress = bridge_extension_frame_progress, report = bridge_extension_frame_report}
+	result := bridge_extension_remove(canonical, bin_path, time.time_add(time.now(), BRIDGE_EXTENSION_PROVIDER_TIMEOUT), sink)
+	if !result.ok {
+		bridge_extension_install_fail(conn, command_id, prov, result.code, result.message)
+		return
+	}
+	_ = bridge_provider_extension_install_send_progress(conn, command_id, prov, "succeeded", 100, result.message)
+	if command_id != "" {
+		final := bridge_command_result_json(command_id, "succeeded", "uninstalled")
 		defer delete(final)
 		bridge_runtime_cache_command(command_id, final)
 		if conn != nil do _ = bridge_hub_send(conn, final)

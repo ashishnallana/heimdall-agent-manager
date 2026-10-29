@@ -5,12 +5,15 @@ import {
   useGetProviderExtensionInstallQuery,
   useInstallProviderExtensionMutation,
   useListBridgeProvidersQuery,
+  useUninstallProviderExtensionMutation,
 } from '../../api/endpoints/bridgeSupport';
 import type { ProviderExtensionStatus } from './extensionBadgeModel';
 import {
   type ProviderExtensionCommand,
+  extensionCommandKind,
   extensionInstallLabel,
   extensionInstallProgress,
+  extensionUninstallable,
   isExtensionInstallTerminal,
 } from './extensionInstallModel';
 
@@ -32,17 +35,22 @@ export default function ProviderExtensionInstallAction({ bridgeId, provider, ext
     skipPollingIfUnfocused: true,
     refetchOnMountOrArgChange: true,
   });
-  const latest = (statusQuery.currentData?.extension_commands as ProviderExtensionCommand[] | undefined)
-    ?.find((entry) => entry.bridge_id === bridgeId && entry.provider === provider);
+  // The Hub lists commands oldest first; the newest install/uninstall of this provider wins.
+  const latest = [...((statusQuery.currentData?.extension_commands as ProviderExtensionCommand[] | undefined) || [])]
+    .reverse()
+    .find((entry) => entry.bridge_id === bridgeId && entry.provider === provider
+      && (!entry.kind || entry.kind === 'install' || entry.kind === 'uninstall'));
   const [submitted, setSubmitted] = useState<ProviderExtensionCommand | null>(null);
   const [requestError, setRequestError] = useState('');
   const [install, installRequest] = useInstallProviderExtensionMutation();
+  const [uninstall, uninstallRequest] = useUninstallProviderExtensionMutation();
+  const [confirmUninstall, setConfirmUninstall] = useState(false);
   const inScope = (entry: ProviderExtensionCommand | null | undefined) =>
     entry?.bridge_id === bridgeId && entry.provider === provider ? entry : null;
   const command = inScope(submitted) || latest;
   const [terminalId, setTerminalId] = useState('');
   const commandQuery = useGetProviderExtensionInstallQuery({
-    bridgeId, provider, commandId: command?.command_id || '',
+    bridgeId, provider, commandId: command?.command_id || '', kind: extensionCommandKind(command),
   }, {
     skip: !command,
     pollingInterval: command && terminalId !== command.command_id ? 1000 : 0,
@@ -54,6 +62,9 @@ export default function ProviderExtensionInstallAction({ bridgeId, provider, ext
   const active = Boolean(tracked && !isExtensionInstallTerminal(tracked.status));
   const notified = useRef('');
   const label = extensionInstallLabel(provider, extension);
+  const canUninstall = extensionUninstallable(provider, extension);
+  const requesting = installRequest.isLoading || uninstallRequest.isLoading;
+  const uninstalling = active && extensionCommandKind(tracked) === 'uninstall';
 
   useEffect(() => {
     if (submitted && latest?.command_id === submitted.command_id) setSubmitted(null);
@@ -76,6 +87,16 @@ export default function ProviderExtensionInstallAction({ bridgeId, provider, ext
     }
   }
 
+  async function startUninstall() {
+    setConfirmUninstall(false);
+    setRequestError('');
+    try {
+      setSubmitted(await uninstall({ bridgeId, provider }).unwrap());
+    } catch (error) {
+      setRequestError(apiErrorText(error, 'Unable to start extension uninstall.'));
+    }
+  }
+
   async function retryDiscovery() {
     setRetrying(true);
     try {
@@ -86,7 +107,7 @@ export default function ProviderExtensionInstallAction({ bridgeId, provider, ext
   }
 
   const canRetryDiscovery = ['claude', 'codex', 'antigravity'].includes(provider) && extension?.state === 'error';
-  if (!label && !tracked && !canRetryDiscovery) return null;
+  if (!label && !canUninstall && !tracked && !canRetryDiscovery) return null;
   const failed = tracked?.status === 'failed' || tracked?.status === 'cancelled';
 
   return (
@@ -96,7 +117,7 @@ export default function ProviderExtensionInstallAction({ bridgeId, provider, ext
           size="sm"
           variant="secondary"
           data-debug-id={`provider-extension-retry-btn-${provider}`}
-          disabled={disabled || !online || active || installRequest.isLoading || retrying}
+          disabled={disabled || !online || active || requesting || retrying}
           onClick={() => void retryDiscovery()}
           leading={retrying ? <Spinner size="sm" /> : undefined}
         >
@@ -108,14 +129,33 @@ export default function ProviderExtensionInstallAction({ bridgeId, provider, ext
           size="sm"
           variant="secondary"
           data-debug-id={`provider-extension-install-btn-${provider}`}
-          disabled={disabled || !online || active || installRequest.isLoading || !statusQuery.currentData}
+          disabled={disabled || !online || active || requesting || !statusQuery.currentData}
           onClick={() => void start()}
-          leading={active || installRequest.isLoading ? <Spinner size="sm" /> : undefined}
+          leading={(active && !uninstalling) || installRequest.isLoading ? <Spinner size="sm" /> : undefined}
         >
-          {active || installRequest.isLoading ? 'Installing…' : label}
+          {(active && !uninstalling) || installRequest.isLoading ? 'Installing…' : label}
         </Button>
       ) : null}
-      {!online && (label || canRetryDiscovery) ? <p className="text-xs text-muted">Connect this bridge to check or install extensions.</p> : null}
+      {canUninstall && !confirmUninstall ? (
+        <Button
+          size="sm"
+          variant="secondary"
+          data-debug-id={`provider-extension-uninstall-btn-${provider}`}
+          disabled={disabled || !online || active || requesting || !statusQuery.currentData}
+          onClick={() => setConfirmUninstall(true)}
+          leading={uninstalling || uninstallRequest.isLoading ? <Spinner size="sm" /> : undefined}
+        >
+          {uninstalling || uninstallRequest.isLoading ? 'Uninstalling…' : 'Uninstall Extension'}
+        </Button>
+      ) : null}
+      {confirmUninstall ? (
+        <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted" data-debug-id={`provider-extension-uninstall-confirm-${provider}`}>
+          <span>Remove the extension from this provider? Native activity, subagent and permission signals stop until it is reinstalled.</span>
+          <Button size="sm" variant="danger" data-debug-id={`provider-extension-uninstall-confirm-btn-${provider}`} onClick={() => void startUninstall()}>Uninstall</Button>
+          <Button size="sm" variant="secondary" data-debug-id={`provider-extension-uninstall-cancel-btn-${provider}`} onClick={() => setConfirmUninstall(false)}>Cancel</Button>
+        </div>
+      ) : null}
+      {!online && (label || canUninstall || canRetryDiscovery) ? <p className="text-xs text-muted">Connect this bridge to check, install or uninstall extensions.</p> : null}
       {tracked ? (
         <div role={failed ? 'alert' : 'status'} className={failed ? 'text-xs text-danger' : 'text-xs text-muted'}
           data-debug-id={`provider-extension-progress-${provider}`}>
@@ -123,7 +163,7 @@ export default function ProviderExtensionInstallAction({ bridgeId, provider, ext
           {active ? (
             <progress className="mt-1 block w-full max-w-xs" max={100}
               value={Math.max(0, Math.min(100, tracked.progress_percent))}
-              aria-label="Extension installation progress" />
+              aria-label={uninstalling ? 'Extension uninstall progress' : 'Extension installation progress'} />
           ) : null}
         </div>
       ) : null}

@@ -4,7 +4,7 @@ import * as daemonApi from '../daemonApi';
 import { heimdallApi, withSessionQuery } from '../heimdallApi';
 import { useMemo } from 'react';
 import { cookieJsonFetch, cookieMutation, customQueryError } from '../cookieFetch';
-import { type ProviderExtensionCommand, isExtensionInstallTerminal } from '../../components/extension/extensionInstallModel';
+import { type ExtensionCommandKind, type ProviderExtensionCommand, isExtensionInstallTerminal } from '../../components/extension/extensionInstallModel';
 
 export type AgentBridgeSupportEntry = {
   bridgeId: string;
@@ -319,10 +319,22 @@ export const bridgeSupportApi = heimdallApi.injectEndpoints({
       },
       invalidatesTags: (_result, _error, { bridgeId }) => [{ type: 'BridgeProviders' as const, id: bridgeId }],
     }),
-    getProviderExtensionInstall: build.query<ProviderExtensionCommand, { bridgeId: string; provider: string; commandId: string }>({
-      queryFn: async ({ bridgeId, provider, commandId }) => {
+    uninstallProviderExtension: build.mutation<ProviderExtensionCommand, { bridgeId: string; provider: string }>({
+      queryFn: async ({ bridgeId, provider }) => {
         try {
-          const data = await cookieJsonFetch(`/bridges/${encodeURIComponent(bridgeId)}/providers/${encodeURIComponent(provider)}/extension-install/${encodeURIComponent(commandId)}`);
+          const data = await cookieMutation(`/bridges/${encodeURIComponent(bridgeId)}/providers/${encodeURIComponent(provider)}/extension-uninstall`, 'POST', {});
+          return { data };
+        } catch (error: any) {
+          return { error: customQueryError(error) as any };
+        }
+      },
+      invalidatesTags: (_result, _error, { bridgeId }) => [{ type: 'BridgeProviders' as const, id: bridgeId }],
+    }),
+    getProviderExtensionInstall: build.query<ProviderExtensionCommand, { bridgeId: string; provider: string; commandId: string; kind?: ExtensionCommandKind }>({
+      queryFn: async ({ bridgeId, provider, commandId, kind }) => {
+        try {
+          const verb = kind === 'uninstall' ? 'extension-uninstall' : 'extension-install';
+          const data = await cookieJsonFetch(`/bridges/${encodeURIComponent(bridgeId)}/providers/${encodeURIComponent(provider)}/${verb}/${encodeURIComponent(commandId)}`);
           return { data };
         } catch (error: any) {
           return { error: customQueryError(error) as any };
@@ -404,6 +416,7 @@ export const {
   useUpdateBridgeMutation,
   useUninstallBridgeMutation,
   useInstallProviderExtensionMutation,
+  useUninstallProviderExtensionMutation,
   useGetProviderExtensionInstallQuery,
   useListBridgeProvidersQuery,
   useRefreshBridgeModelsMutation,

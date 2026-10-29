@@ -232,25 +232,6 @@ extension_test_request :: proc(
 		headers = f.user_headers,
 	}
 }
-// The only way an install reaches a bridge now (ENR-8): a bridge update with
-// update_extensions, the bridge reconnecting, and its fresh discovery reporting
-// the provider outdated. Returns the follow-up install's command id (owned).
-extension_test_start_install :: proc(t: ^testing.T, f: ^extension_handler_fixture, provider: string) -> string {
-	update := extension_test_update(t, f, "{\"update_extensions\":true}")
-	defer delete(update)
-	extension_test_restart(t, f, update)
-	testing.expect_value(t, json_string(f.sink_rec.last_cmd.body_json, "type"), "provider_discover")
-	discovery := strings.clone(f.sink_rec.last_cmd.command_id)
-	defer delete(discovery)
-	extension_test_report(t, f, discovery, fmt.tprintf(
-		"[{{\"provider\":\"%s\",\"state\":\"present\",\"extension_state\":\"outdated\",\"extension_version\":\"0.1.0\"}}]",
-		provider,
-	))
-	testing.expect_value(t, json_string(f.sink_rec.last_cmd.body_json, "type"), "provider_extension_install")
-	testing.expect_value(t, json_string(f.sink_rec.last_cmd.body_json, "provider"), provider)
-	return strings.clone(f.sink_rec.last_cmd.command_id)
-}
-
 extension_test_status :: proc(
 	t: ^testing.T,
 	f: ^extension_handler_fixture,
@@ -348,20 +329,32 @@ test_extension_install_endpoint_dispatch_tracking_and_verified_completion :: pro
 	defer extension_test_teardown(f)
 	extension_test_status(t, f, "codex", "present", "outdated")
 	path := fmt.tprintf("/api/v1/bridges/%s/providers/codex/extension-install", f.bridge_id)
-	id := extension_test_start_install(t, f, "codex")
+	response := bridge_provider_extension_install_handler(
+		rawptr(&f.ph),
+		extension_test_request(f, path),
+	)
+	testing.expectf(
+		t,
+		response.status == 202,
+		"expected 202, got %d: %s",
+		response.status,
+		response.body,
+	)
+	id := json_string(response.body, "command_id")
 	defer delete(id)
 	testing.expect(t, strings.has_prefix(id, "cmd_"), id)
 	testing.expect_value(t, json_string(f.sink_rec.last_cmd.body_json, "command_id"), id)
 	dispatched := f.sink_rec.count
 	commands := extension_test_commands(t, f)
 	defer domain.provider_extension_commands_destroy(commands)
-	for command in commands {
-		if command.command_id == id do testing.expect_value(t, command.state, "dispatched")
-	}
-	// The web endpoint never dispatches a second install.
-	rejected := bridge_provider_extension_install_handler(rawptr(&f.ph), extension_test_request(f, path))
-	testing.expect_value(t, rejected.status, 403)
-	testing.expect_value(t, f.sink_rec.count, dispatched)
+	testing.expect_value(t, len(commands), 1)
+	testing.expect_value(t, commands[0].state, "dispatched")
+	duplicate := bridge_provider_extension_install_handler(
+		rawptr(&f.ph),
+		extension_test_request(f, path),
+	)
+	testing.expect_value(t, duplicate.status, 409)
+	testing.expect_value(t, f.sink_rec.count, 1)
 	err := bridge_extension_frame(
 		&f.bh,
 		f.bridge_id,
@@ -419,11 +412,8 @@ test_extension_install_endpoint_dispatch_tracking_and_verified_completion :: pro
 	testing.expect(t, strings.contains(tracking.body, "\"status\":\"succeeded\""))
 }
 
-// ENR-8: the web app cannot start a standalone extension install; only the
-// bridge (setup / update) installs. Unauthenticated and foreign callers still
-// get their usual answers, and nothing is ever dispatched to the bridge.
 @(test)
-test_extension_install_endpoint_rejects_web_clients :: proc(t: ^testing.T) {
+test_extension_install_endpoint_auth_and_eligibility :: proc(t: ^testing.T) {
 	f := extension_test_setup(t, "errors")
 	defer extension_test_teardown(f)
 	path := fmt.tprintf("/api/v1/bridges/%s/providers/codex/extension-install", f.bridge_id)
@@ -431,22 +421,29 @@ test_extension_install_endpoint_rejects_web_clients :: proc(t: ^testing.T) {
 	req.headers = nil; req.remote_addr = "192.0.2.1:123"
 	response := bridge_provider_extension_install_handler(rawptr(&f.ph), req)
 	testing.expect_value(t, response.status, 401)
-	// Eligible provider, online bridge, owner session: still rejected.
-	extension_test_status(t, f, "codex", "present", "absent")
-	for provider in ([]string{"codex", "claude", "antigravity", "no-such-provider"}) {
-		req = extension_test_request(f, fmt.tprintf("/api/v1/bridges/%s/providers/%s/extension-install", f.bridge_id, provider))
-		response = bridge_provider_extension_install_handler(rawptr(&f.ph), req)
-		testing.expectf(t, response.status == 403, "%s: expected 403, got %d: %s", provider, response.status, response.body)
-		testing.expectf(t, strings.contains(response.body, "update the bridge"), "%s: %s", provider, response.body)
-	}
-	other_headers := http_test_login(t, &f.auth_svc, "other-web-client")
 	req = extension_test_request(f, path)
-	req.headers = other_headers
 	response = bridge_provider_extension_install_handler(rawptr(&f.ph), req)
-	testing.expect(t, response.status == 403 || response.status == 404, "other owner")
-	commands := extension_test_commands(t, f)
-	defer domain.provider_extension_commands_destroy(commands)
-	testing.expect_value(t, len(commands), 0)
+	testing.expect_value(t, response.status, 409)
+	req.path = fmt.tprintf(
+		"/api/v1/bridges/%s/providers/no-such-provider/extension-install",
+		f.bridge_id,
+	)
+	response = bridge_provider_extension_install_handler(rawptr(&f.ph), req)
+	testing.expect_value(t, response.status, 404)
+	req.path = fmt.tprintf("/api/v1/bridges/%s/providers/pi/extension-install", f.bridge_id)
+	response = bridge_provider_extension_install_handler(rawptr(&f.ph), req)
+	testing.expect_value(t, response.status, 422)
+	req.path = path
+	extension_test_status(t, f, "codex", "present", "absent")
+	f.sink_rec.fail = true
+	response = bridge_provider_extension_install_handler(rawptr(&f.ph), req)
+	testing.expect(t, response.status >= 400, "send failure must not return Accepted")
+	f.sink_rec.fail = false
+	bridge, _, _ := iface.bridge_get_bridge(&f.br_repo, f.bridge_id)
+	bridge.status = .Offline
+	_, _, _ = iface.bridge_save_bridge(&f.br_repo, bridge)
+	response = bridge_provider_extension_install_handler(rawptr(&f.ph), req)
+	testing.expect(t, response.status >= 400, "offline bridge rejected")
 	testing.expect_value(t, f.sink_rec.count, 0)
 }
 
@@ -598,7 +595,12 @@ test_extension_command_owner_scope_and_stale_connection_frames :: proc(t: ^testi
 	defer extension_test_teardown(f)
 	extension_test_status(t, f, "codex", "present", "outdated")
 	path := fmt.tprintf("/api/v1/bridges/%s/providers/codex/extension-install", f.bridge_id)
-	id := extension_test_start_install(t, f, "codex")
+	response := bridge_provider_extension_install_handler(
+		rawptr(&f.ph),
+		extension_test_request(f, path),
+	)
+	testing.expect_value(t, response.status, 202)
+	id := json_string(response.body, "command_id")
 	defer delete(id)
 	other_headers := http_test_login(t, &f.auth_svc, "other-extension-owner")
 	req := extension_test_request(f, path)
@@ -890,4 +892,46 @@ test_provider_models_existing_api_runtime_round_trip :: proc(t:^testing.T) {
 	testing.expect_value(t,provider_models_failure_state(.Bridge_Timeout,""),"timeout")
 	testing.expect_value(t,provider_models_failure_state(.Validation_Failed,"unknown_command"),"unsupported")
 	testing.expect_value(t,provider_models_failure_state(.Validation_Failed,"bridge_busy"),"busy")
+}
+
+// Uninstall is the same per-provider action as install: one at a time, the same
+// frame with action=uninstall, tracked at .../extension-uninstall/:id.
+@(test)
+test_extension_uninstall_endpoint_dispatch_and_tracking :: proc(t: ^testing.T) {
+	f := extension_test_setup(t, "uninstall")
+	defer extension_test_teardown(f)
+	extension_test_status(t, f, "codex", "present", "present")
+	path := fmt.tprintf("/api/v1/bridges/%s/providers/codex/extension-uninstall", f.bridge_id)
+	response := bridge_provider_extension_uninstall_handler(rawptr(&f.ph), extension_test_request(f, path))
+	testing.expectf(t, response.status == 202, "expected 202, got %d: %s", response.status, response.body)
+	id := json_string(response.body, "command_id")
+	defer delete(id)
+	testing.expect_value(t, json_string(response.body, "kind"), "uninstall")
+	testing.expect_value(t, json_string(f.sink_rec.last_cmd.body_json, "type"), "provider_extension_install")
+	testing.expect_value(t, json_string(f.sink_rec.last_cmd.body_json, "action"), "uninstall")
+	testing.expect_value(t, json_string(f.sink_rec.last_cmd.body_json, "provider"), "codex")
+	// An install cannot start while the uninstall runs.
+	install := bridge_provider_extension_install_handler(rawptr(&f.ph), extension_test_request(f, fmt.tprintf("/api/v1/bridges/%s/providers/codex/extension-install", f.bridge_id)))
+	testing.expect_value(t, install.status, 409)
+	testing.expect_value(t, f.sink_rec.count, 1)
+	err := bridge_extension_frame(&f.bh, f.bridge_id, "provider_extension_install_progress",
+		fmt.tprintf("{{\"command_id\":\"%s\",\"stage\":\"uninstalling\",\"progress_percent\":20}}", id))
+	testing.expect_value(t, err.code, domain.Error_Code.None)
+	poll := extension_test_request(f, fmt.tprintf("%s/%s", path, id))
+	poll.method = "GET"
+	tracking := bridge_provider_extension_command_handler(rawptr(&f.ph), poll)
+	testing.expect_value(t, tracking.status, 200)
+	testing.expect(t, strings.contains(tracking.body, "\"status\":\"uninstalling\""), tracking.body)
+	// The install path never finds an uninstall command.
+	wrong := extension_test_request(f, fmt.tprintf("/api/v1/bridges/%s/providers/codex/extension-install/%s", f.bridge_id, id))
+	wrong.method = "GET"
+	testing.expect_value(t, bridge_provider_extension_command_handler(rawptr(&f.ph), wrong).status, 404)
+	extension_test_report(t, f, id, "[{\"provider\":\"codex\",\"state\":\"present\",\"extension_state\":\"absent\"}]")
+	err = bridge_extension_frame(&f.bh, f.bridge_id, "command_result", fmt.tprintf("{{\"command_id\":\"%s\",\"status\":\"succeeded\"}}", id))
+	testing.expect_value(t, err.code, domain.Error_Code.None)
+	tracking = bridge_provider_extension_command_handler(rawptr(&f.ph), poll)
+	testing.expect(t, strings.contains(tracking.body, "\"status\":\"succeeded\""), tracking.body)
+	statuses, _ := iface.bridge_provider_status_list(&f.pr_repo, f.bridge_id)
+	defer domain.bridge_provider_statuses_destroy(statuses)
+	for s in statuses do if s.provider == "codex" do testing.expect_value(t, s.extension_state, "absent")
 }
