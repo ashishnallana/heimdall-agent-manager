@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { resolve } from 'node:path';
 
-const APP_NAME = 'Heimdall';
+const APP_NAME = 'Ninjy';
 const BUNDLE_ID = 'works.earendil.heimdall.dev';
 const plistPath = resolve('node_modules/electron/dist/Electron.app/Contents/Info.plist');
 

@@ -1,7 +1,7 @@
 {
-  "name": "Heimdall",
-  "short_name": "Heimdall",
-  "description": "Heimdall AI agent manager",
+  "name": "Ninjy",
+  "short_name": "Ninjy",
+  "description": "Ninjy AI agent manager",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",

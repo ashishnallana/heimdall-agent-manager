@@ -481,7 +481,7 @@ def dry_run_common_asserts(res, target, install_dir_hint):
         # and a spaced $install_dir silently truncated them. The opening quote is
         # part of each marker deliberately: matching the bare key would still
         # pass if the quoting were reverted.
-        for marker in ('[Unit]', 'Description=Heimdall Bridge', 'ExecStart="',
+        for marker in ('[Unit]', 'Description=Ninjy Bridge', 'ExecStart="',
                        'Environment="HEIMDALL_HAM_PTY_HOST_BIN=',
                        'WantedBy=default.target'):
             assert marker in out, f'systemd unit missing {marker!r}'

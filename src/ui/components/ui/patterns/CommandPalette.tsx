@@ -662,7 +662,7 @@ export function CommandPalette({
             <kbd className="rounded border border-subtle bg-neutral-soft px-1.5 py-0.5">↑↓</kbd> navigate
             <kbd className="ml-2 rounded border border-subtle bg-neutral-soft px-1.5 py-0.5">↵</kbd> select
           </span>
-          <span data-debug-id="command-palette-search-source">{qTrim ? 'Task chains' : 'Heimdall'}</span>
+          <span data-debug-id="command-palette-search-source">{qTrim ? 'Task chains' : 'Ninjy'}</span>
         </div>
       </div>
     </div>

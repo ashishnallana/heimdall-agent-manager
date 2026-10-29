@@ -338,7 +338,7 @@ export function ProviderSetupSurface({ bridgeId, mode, variant = 'full', onApply
             {bridge.label} · {bridge.machine_hostname} · {bridge.status}
           </p>
           <p className="mt-2 max-w-2xl text-sm leading-6 text-muted">
-            Heimdall asks the bridge to detect installed CLIs. Enable only the providers and models you want agents to use, then test those exact combinations.
+            Ninjy asks the bridge to detect installed CLIs. Enable only the providers and models you want agents to use, then test those exact combinations.
           </p>
         </div>
         <Button

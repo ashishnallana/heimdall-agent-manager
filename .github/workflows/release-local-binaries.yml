@@ -479,7 +479,7 @@ jobs:
         shell: bash
         run: python3 -m unittest discover -s tests -p test_desktop_extension_delivery.py
 
-      - name: Build, sign, and notarize Heimdall DMG, zip and pkg (macOS)
+      - name: Build, sign, and notarize Ninjy DMG, zip and pkg (macOS)
         if: ${{ startsWith(matrix.target, 'darwin-') }}
         shell: bash
         env:
@@ -510,8 +510,8 @@ jobs:
           # Each arch writes its own latest-mac.yml; the release job merges them.
           mv desktop-dist/latest-mac.yml "desktop-dist/latest-mac-${{ matrix.target }}.yml"
           # REQ-ENR-4: App / Bridge / both .pkg from the signed, notarized .app.
-          app_bundle="$(find desktop-dist -maxdepth 2 -name Heimdall.app -type d | head -n 1)"
-          pkg="desktop-dist/Heimdall-${{ needs.prepare.outputs.clean_version }}-${arch#--}.pkg"
+          app_bundle="$(find desktop-dist -maxdepth 2 -name Ninjy.app -type d | head -n 1)"
+          pkg="desktop-dist/Ninjy-${{ needs.prepare.outputs.clean_version }}-${arch#--}.pkg"
           scripts/release/build-macos-pkg.sh "$app_bundle" release-assets/bridge \
             "${{ needs.prepare.outputs.version }}" "${arch#--}" "$pkg"
           if [ -n "${HEIMDALL_MACOS_INSTALLER_IDENTITY:-}" ]; then
@@ -535,7 +535,7 @@ jobs:
             xcrun stapler validate "$dmg"
           done
 
-      - name: Upload Heimdall DMG, zip and pkg (macOS)
+      - name: Upload Ninjy DMG, zip and pkg (macOS)
         if: ${{ startsWith(matrix.target, 'darwin-') }}
         uses: actions/upload-artifact@v4
         with:
@@ -552,7 +552,7 @@ jobs:
       # F13: the Linux desktop app (AppImage self-updates via latest-linux*.yml;
       # deb). Both ask App / Bridge / both on first launch (installChoice.cts)
       # and bundle this target's verified Bridge archive for that setup.
-      - name: Build Heimdall AppImage and deb (Linux)
+      - name: Build Ninjy AppImage and deb (Linux)
         if: ${{ startsWith(matrix.target, 'linux-') }}
         shell: bash
         run: |
@@ -577,7 +577,7 @@ jobs:
             -c.extraMetadata.version="${{ needs.prepare.outputs.clean_version }}"
           ls -la desktop-dist
 
-      - name: Upload Heimdall AppImage and deb (Linux)
+      - name: Upload Ninjy AppImage and deb (Linux)
         if: ${{ startsWith(matrix.target, 'linux-') }}
         uses: actions/upload-artifact@v4
         with:
@@ -715,7 +715,7 @@ jobs:
           node-version: 22
           cache: npm
 
-      - name: Build Heimdall installer (Windows)
+      - name: Build Ninjy installer (Windows)
         shell: pwsh
         run: |
           scripts/release/stage-windows-desktop-resources.ps1 `
@@ -731,19 +731,19 @@ jobs:
           npx electron-builder --win nsis --x64 --publish never `
             --config.extraMetadata.version="${{ needs.prepare.outputs.clean_version }}"
           if ($LASTEXITCODE) { throw "electron-builder failed with exit code $LASTEXITCODE" }
-          $installer = Get-Item desktop-dist/Heimdall-*-x64.exe
+          $installer = Get-Item desktop-dist/Ninjy-*-x64.exe
           if (-not (Test-Path desktop-dist/latest.yml)) { throw 'electron-builder did not produce latest.yml' }
 
       # A separate artifact, like the macOS DMG: upload-artifact@v4 roots each
       # artifact at the paths' common ancestor, so mixing dist/ and desktop-dist/
       # would keep those prefixes and the release job's flat dist/ would miss them.
-      - name: Upload Heimdall installer (Windows)
+      - name: Upload Ninjy installer (Windows)
         uses: actions/upload-artifact@v4
         with:
           name: heimdall-desktop-windows-amd64-${{ needs.prepare.outputs.version }}
           path: |
-            desktop-dist/Heimdall-*-x64.exe
-            desktop-dist/Heimdall-*-x64.exe.blockmap
+            desktop-dist/Ninjy-*-x64.exe
+            desktop-dist/Ninjy-*-x64.exe.blockmap
             desktop-dist/latest.yml
           if-no-files-found: error
           retention-days: 30
@@ -867,16 +867,16 @@ jobs:
           sha256sum "${versioned[@]}" > SHA256SUMS
           clean="${{ needs.prepare.outputs.clean_version }}"
           for arch in arm64 x64; do
-            require_file "Heimdall-$clean-$arch.dmg"
-            require_file "Heimdall-$clean-$arch.zip"
-            require_file "Heimdall-$clean-$arch.pkg"
+            require_file "Ninjy-$clean-$arch.dmg"
+            require_file "Ninjy-$clean-$arch.zip"
+            require_file "Ninjy-$clean-$arch.pkg"
           done
           # electron-builder's Linux arch names (builder-util getArtifactArchName).
           for f in x86_64.AppImage arm64.AppImage amd64.deb arm64.deb; do
-            require_file "Heimdall-$clean-$f"
+            require_file "Ninjy-$clean-$f"
           done
-          require_file "Heimdall-$clean-x64.exe"
-          require_file "Heimdall-$clean-x64.exe.blockmap"
+          require_file "Ninjy-$clean-x64.exe"
+          require_file "Ninjy-$clean-x64.exe.blockmap"
           require_file latest.yml
           require_file latest-linux.yml
           require_file latest-linux-arm64.yml
@@ -887,7 +887,7 @@ jobs:
           python3 "$GITHUB_WORKSPACE/scripts/release/merge-latest-mac.py" \
             latest-mac-darwin-amd64.yml latest-mac-darwin-arm64.yml > latest-mac.yml
           rm latest-mac-darwin-*.yml
-          sha256sum Heimdall-*.dmg Heimdall-*.zip Heimdall-*.pkg Heimdall-*.AppImage Heimdall-*.deb Heimdall-*.exe >> SHA256SUMS
+          sha256sum Ninjy-*.dmg Ninjy-*.zip Ninjy-*.pkg Ninjy-*.AppImage Ninjy-*.deb Ninjy-*.exe >> SHA256SUMS
 
       - name: Create or update GitHub Release
         env:
@@ -910,7 +910,7 @@ jobs:
 
           ## Downloads
 
-          Heimdall local Bridge/wrapper/CLI binaries for $VERSION.
+          Ninjy local Bridge/wrapper/CLI binaries for $VERSION.
 
           Artifacts:
           - heimdall-local-darwin-arm64-$VERSION.tar.gz
@@ -918,12 +918,12 @@ jobs:
           - heimdall-local-linux-amd64-$VERSION.tar.gz
           - heimdall-local-linux-arm64-$VERSION.tar.gz
           - heimdall-local-windows-amd64-$VERSION.zip (scripts/install.ps1)
-          - Heimdall-${{ needs.prepare.outputs.clean_version }}-arm64.dmg (signed + notarized macOS app with Bridge)
-          - Heimdall-${{ needs.prepare.outputs.clean_version }}-x64.dmg (signed + notarized macOS app with Bridge)
-          - Heimdall-${{ needs.prepare.outputs.clean_version }}-arm64.pkg / -x64.pkg (macOS installer: App, Bridge, or both)
-          - Heimdall-${{ needs.prepare.outputs.clean_version }}-x64.exe (unsigned Windows installer: App, Bridge, or both)
-          - Heimdall-${{ needs.prepare.outputs.clean_version }}-x86_64.AppImage / -arm64.AppImage, -amd64.deb / -arm64.deb (Linux app; App, Bridge, or both on first launch)
-          - Heimdall-*.zip, latest.yml, latest-mac.yml, latest-linux*.yml and the Windows block map (desktop auto-update metadata)
+          - Ninjy-${{ needs.prepare.outputs.clean_version }}-arm64.dmg (signed + notarized macOS app with Bridge)
+          - Ninjy-${{ needs.prepare.outputs.clean_version }}-x64.dmg (signed + notarized macOS app with Bridge)
+          - Ninjy-${{ needs.prepare.outputs.clean_version }}-arm64.pkg / -x64.pkg (macOS installer: App, Bridge, or both)
+          - Ninjy-${{ needs.prepare.outputs.clean_version }}-x64.exe (unsigned Windows installer: App, Bridge, or both)
+          - Ninjy-${{ needs.prepare.outputs.clean_version }}-x86_64.AppImage / -arm64.AppImage, -amd64.deb / -arm64.deb (Linux app; App, Bridge, or both on first launch)
+          - Ninjy-*.zip, latest.yml, latest-mac.yml, latest-linux*.yml and the Windows block map (desktop auto-update metadata)
           - SHA256SUMS
           - install.sh, install.ps1 (bootstraps: download + verify + ham-bridge setup)
           NOTES
@@ -937,10 +937,10 @@ jobs:
           # resolve the newest promoted release, so any copy works.
           cp scripts/install.sh scripts/install.ps1 dist/
           if gh release view "$VERSION" >/dev/null 2>&1; then
-            gh release upload "$VERSION" dist/heimdall-local-*-"$VERSION".tar.gz dist/heimdall-local-*-"$VERSION".zip dist/Heimdall-*.dmg dist/Heimdall-*.zip dist/Heimdall-*.zip.blockmap dist/Heimdall-*.pkg dist/Heimdall-*.AppImage dist/Heimdall-*.deb dist/Heimdall-*.exe dist/Heimdall-*.exe.blockmap dist/latest.yml dist/latest-mac.yml dist/latest-linux.yml dist/latest-linux-arm64.yml dist/SHA256SUMS dist/install.sh dist/install.ps1 --clobber
+            gh release upload "$VERSION" dist/heimdall-local-*-"$VERSION".tar.gz dist/heimdall-local-*-"$VERSION".zip dist/Ninjy-*.dmg dist/Ninjy-*.zip dist/Ninjy-*.zip.blockmap dist/Ninjy-*.pkg dist/Ninjy-*.AppImage dist/Ninjy-*.deb dist/Ninjy-*.exe dist/Ninjy-*.exe.blockmap dist/latest.yml dist/latest-mac.yml dist/latest-linux.yml dist/latest-linux-arm64.yml dist/SHA256SUMS dist/install.sh dist/install.ps1 --clobber
             gh release edit "$VERSION" --notes-file "$notes_file"
           else
-            gh release create "$VERSION" dist/heimdall-local-*-"$VERSION".tar.gz dist/heimdall-local-*-"$VERSION".zip dist/Heimdall-*.dmg dist/Heimdall-*.zip dist/Heimdall-*.zip.blockmap dist/Heimdall-*.pkg dist/Heimdall-*.AppImage dist/Heimdall-*.deb dist/Heimdall-*.exe dist/Heimdall-*.exe.blockmap dist/latest.yml dist/latest-mac.yml dist/latest-linux.yml dist/latest-linux-arm64.yml dist/SHA256SUMS dist/install.sh dist/install.ps1 \
+            gh release create "$VERSION" dist/heimdall-local-*-"$VERSION".tar.gz dist/heimdall-local-*-"$VERSION".zip dist/Ninjy-*.dmg dist/Ninjy-*.zip dist/Ninjy-*.zip.blockmap dist/Ninjy-*.pkg dist/Ninjy-*.AppImage dist/Ninjy-*.deb dist/Ninjy-*.exe dist/Ninjy-*.exe.blockmap dist/latest.yml dist/latest-mac.yml dist/latest-linux.yml dist/latest-linux-arm64.yml dist/SHA256SUMS dist/install.sh dist/install.ps1 \
               --title "$VERSION" \
               --target "$RELEASE_COMMIT" \
               --notes-file "$notes_file" \

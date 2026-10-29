@@ -111,8 +111,8 @@ render_tray_autostart :: proc(host: Host, l: Layout) -> string {
 	#partial switch host.os {
 	case .Linux:
 		// Desktop Entry Exec: quote every argument, escaping \ " ` $ (spec §Exec).
-		strings.write_string(&b, "[Desktop Entry]\nType=Application\nName=Heimdall Bridge\n")
-		fmt.sbprintf(&b, "Comment=Heimdall bridge status for %s\nExec=", l.service_name)
+		strings.write_string(&b, "[Desktop Entry]\nType=Application\nName=Ninjy Bridge\n")
+		fmt.sbprintf(&b, "Comment=Ninjy bridge status for %s\nExec=", l.service_name)
 		for a, i in argv {
 			if i > 0 do strings.write_byte(&b, ' ')
 			strings.write_byte(&b, '"')
@@ -219,7 +219,7 @@ tray_view :: proc(s: Status) -> Tray_View {
 	case:                      v.title = "Unknown"
 	}
 	hub := s.hub if s.hub != "" else s.service
-	v.tooltip = fmt.tprintf("Heimdall Bridge: %s - %s", v.title, hub)
+	v.tooltip = fmt.tprintf("Ninjy Bridge: %s - %s", v.title, hub)
 	return v
 }
 
@@ -256,7 +256,7 @@ Tray_Action :: enum {
 }
 
 TRAY_ACTION_LABELS := [Tray_Action]string {
-	.Open_Heimdall = "Open Heimdall",
+	.Open_Heimdall = "Open Ninjy",
 	.Update        = "Update",
 	.Restart       = "Restart",
 	.Reenroll      = "Re-enroll",
@@ -275,7 +275,7 @@ tray_action_enabled :: proc(a: Tray_Action, s: Status) -> bool {
 	return true
 }
 
-TRAY_UNINSTALL_CONFIRM :: "Uninstall this Heimdall bridge?\n\nThe bridge service, its credentials and every secret it holds (tokens, vault key) are removed from this computer and the hub is told to revoke it. Logs are kept."
+TRAY_UNINSTALL_CONFIRM :: "Uninstall this Ninjy bridge?\n\nThe bridge service, its credentials and every secret it holds (tokens, vault key) are removed from this computer and the hub is told to revoke it. Logs are kept."
 
 // open_url_argv opens a URL or a directory with the desktop's default handler.
 open_url_argv :: proc(target: Target_OS, url: string) -> []string {

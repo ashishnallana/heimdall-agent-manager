@@ -135,7 +135,7 @@ const listsDevice = (dir: VaultDirectory, deviceId: string) => Array.isArray(dir
 
 function deviceAuthFailedMessage(err: unknown): string {
   return `The hub refused this device's signed status check (HTTP ${(err as ApiError).status}: ${message(err)}). `
-    + 'If you opened Heimdall through a preview or proxy, it must forward the X-Heimdall-Device-* headers to the hub. '
+    + 'If you opened Ninjy through a preview or proxy, it must forward the X-Heimdall-Device-* headers to the hub. '
     + 'This device was not registered again: its identity and pairing code were kept. Retry once the connection is fixed.';
 }
 

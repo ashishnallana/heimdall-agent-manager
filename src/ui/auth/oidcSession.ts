@@ -100,7 +100,7 @@ export function readAuthError(search: string): AuthError | null {
 
 export function authErrorMessage(error: AuthError): string {
   if (error === 'forbidden') {
-    return "Your account isn't linked to a Heimdall user; ask the operator to run ham-hub users link-oidc.";
+    return "Your account isn't linked to a Ninjy user; ask the operator to run ham-hub users link-oidc.";
   }
   return 'Sign-in did not complete. Try again; if it keeps failing, the identity provider may be unavailable.';
 }

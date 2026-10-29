@@ -252,7 +252,7 @@ bridge_extension_ensure :: proc(provider, ext_path, bin_path: string, deadline: 
 	lock_path, locked := bridge_extension_lock(prov, install_deadline)
 	if !locked {
 		return bridge_extension_fail_result(.Unknown, "busy",
-			fmt.tprintf("another Heimdall extension install for %s is still running for this OS user; retry when it finishes", prov))
+			fmt.tprintf("another Ninjy extension install for %s is still running for this OS user; retry when it finishes", prov))
 	}
 	defer bridge_extension_unlock(prov, lock_path)
 	bundled_version := bridge_provider_extension_read_manifest_version(ext_path, prov)
@@ -289,7 +289,7 @@ bridge_extension_ensure :: proc(provider, ext_path, bin_path: string, deadline: 
 		if sink.report != nil do sink.report(sink.data, pre[:])
 		bridge_provider_paths_destroy_all(&pre)
 		msg := fmt.tprintf("Provider extension %s is already installed (bundled %s); registration left unchanged", pre_version, expected_version)
-		if cond == .Other_Bridge do msg = fmt.tprintf("Provider extension %s is registered by another Heimdall Bridge (%s); left unchanged", pre_version, mp_path)
+		if cond == .Other_Bridge do msg = fmt.tprintf("Provider extension %s is registered by another Ninjy Bridge (%s); left unchanged", pre_version, mp_path)
 		return {ok = true, condition = cond, action = "current" if cond == .Current else "left", message = msg, version = pre_version}
 	}
 	bridge_provider_paths_destroy_all(&pre)
@@ -297,7 +297,7 @@ bridge_extension_ensure :: proc(provider, ext_path, bin_path: string, deadline: 
 	// A bundle older than the catalog minimum cannot satisfy verification.
 	if required_version != "" && bundled_version != "" && bridge_provider_extension_version_compare(bundled_version, required_version) < 0 {
 		return bridge_extension_fail_result(cond, "bundled_extension_outdated",
-			fmt.tprintf("bundled %s extension at %s is version %q, but Heimdall requires %q or newer; update this Bridge to a release that bundles extension %s, then retry",
+			fmt.tprintf("bundled %s extension at %s is version %q, but Ninjy requires %q or newer; update this Bridge to a release that bundles extension %s, then retry",
 				prov, ext_path, bundled_version, required_version, required_version))
 	}
 	if (prov == "claude" || prov == "codex") && !has_mp {

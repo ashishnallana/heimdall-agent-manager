@@ -16,8 +16,8 @@ here="$(cd "$(dirname "$0")" && pwd)"
 # and finishes the Bridge from Settings > Bridges, so report success with a hint;
 # for "Bridge only" the failure is real.
 bridge_failed() {
-  echo "Heimdall Bridge: $1; set it up later from the Heimdall app (Settings > Bridges)." >&2
-  if [ -d /Applications/Heimdall.app ]; then exit 0; fi
+  echo "Ninjy Bridge: $1; set it up later from the Ninjy app (Settings > Bridges)." >&2
+  if [ -d /Applications/Ninjy.app ]; then exit 0; fi
   exit 1
 }
 

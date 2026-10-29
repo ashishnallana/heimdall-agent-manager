@@ -1019,8 +1019,8 @@ function AuthGate() {
   // CSS hides it once the full app shell (with its own drag regions) mounts.
   const gateDragStrip = <div aria-hidden="true" data-debug-id="window-gate-drag-strip" className="window-gate-drag-strip" />;
   let screen: React.ReactNode;
-  if (auth.status === 'checking') screen = <AuthStatusScreen debugId="auth-checking" title="Checking session…" body="Verifying your Heimdall session." />;
-  else if (auth.status === 'unavailable') screen = <AuthStatusScreen debugId="auth-unavailable" title="Sign-in provider unavailable" body="Heimdall could not reach its sign-in provider. Retrying…" />;
+  if (auth.status === 'checking') screen = <AuthStatusScreen debugId="auth-checking" title="Checking session…" body="Verifying your Ninjy session." />;
+  else if (auth.status === 'unavailable') screen = <AuthStatusScreen debugId="auth-unavailable" title="Sign-in provider unavailable" body="Ninjy could not reach its sign-in provider. Retrying…" />;
   else if (auth.status === 'unauthenticated') screen = <UnauthenticatedLanding />;
   else if (auth.status === 'forbidden') screen = <AccessDenied />;
   else if (auth.status === 'error') screen = <AuthStatusScreen debugId="auth-error" title="Unable to verify session" body={auth.error || 'The app could not reach /api/v1/me.'} />;
@@ -1072,7 +1072,7 @@ function UnauthenticatedLanding() {
         {authError ? (
           <div data-debug-id={`auth-error-${authError}`} className={`mt-4 rounded-2xl border px-4 py-3 text-sm ${authError === 'forbidden' ? 'border-danger/30 bg-danger-soft text-danger' : 'border-warning/30 bg-warning-soft text-warning'}`}>{authErrorMessage(authError)}</div>
         ) : (
-          <p className="mt-3 text-sm leading-6 text-muted">Heimdall signs you in with your organisation's identity provider; no local credentials are collected.</p>
+          <p className="mt-3 text-sm leading-6 text-muted">Ninjy signs you in with your organisation's identity provider; no local credentials are collected.</p>
         )}
         <a data-debug-id="auth-login-link" href={target} onClick={() => { try { recordLoginRedirect(window.sessionStorage, Date.now()); } catch (_err) {} }} className="mt-6 inline-flex rounded-2xl bg-accent px-5 py-3 text-sm font-bold text-accent-fg hover:opacity-90">Sign in</a>
       </section>
@@ -1086,7 +1086,7 @@ function AccessDenied() {
       <section className="w-full max-w-md rounded-[2rem] border border-danger/30 bg-danger-soft p-8 text-center shadow-2xl">
         <p className="text-xs font-semibold uppercase tracking-[0.22em] text-danger">403 forbidden</p>
         <h1 className="mt-3 text-3xl font-semibold tracking-tight">Access denied</h1>
-        <p className="mt-3 text-sm leading-6 text-muted">You are authenticated, but this resource is not available to your account. Heimdall will not redirect to login for 403 responses.</p>
+        <p className="mt-3 text-sm leading-6 text-muted">You are authenticated, but this resource is not available to your account. Ninjy will not redirect to login for 403 responses.</p>
         <a data-debug-id="access-denied-home-link" href={shellHash('/home')} className="mt-6 inline-flex rounded-2xl border border-subtle bg-surface px-5 py-3 text-sm font-bold text-primary hover:bg-surface-raised">Back to home</a>
       </section>
     </main>
@@ -1930,7 +1930,7 @@ function AuthenticatedShell({ user }: { user: AuthUser }) {
   );
   const brandLink = (
     <a href={shellHash('/home')} data-debug-id="shell-brand" className="min-w-0 rounded-lg px-1.5 py-1 hover:bg-neutral-soft">
-      <span className="block truncate text-sm font-black tracking-tight text-primary">Heimdall</span>
+      <span className="block truncate text-sm font-black tracking-tight text-primary">Ninjy</span>
     </a>
   );
   const sidebarError = String((conversationsQuery.error as any)?.error || (agentsLiveQuery.error as any)?.error || '');

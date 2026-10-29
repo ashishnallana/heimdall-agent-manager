@@ -20,7 +20,7 @@ export function ProviderEnrollmentSetupPage({ bridgeId }: ProviderEnrollmentSetu
             H
           </div>
           <div>
-            <div className="text-sm font-semibold text-primary">Heimdall</div>
+            <div className="text-sm font-semibold text-primary">Ninjy</div>
             <div className="text-xs text-muted">Bridge setup</div>
           </div>
         </div>

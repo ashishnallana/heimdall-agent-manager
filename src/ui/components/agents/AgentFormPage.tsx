@@ -362,7 +362,7 @@ export default function AgentFormPage({ agentId }: { agentId?: string } = {}) {
             />
             <p className="text-body-sm text-muted">
               Launches the provider without its auto-approve flags, so the agent asks before using tools.
-              Approvals appear in Heimdall when the provider extension is installed, otherwise in the
+              Approvals appear in Ninjy when the provider extension is installed, otherwise in the
               agent&apos;s terminal. This is the default for new launches; a running agent can
               override it with &quot;Bypass permissions&quot; in its conversation settings.
             </p>

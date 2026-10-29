@@ -1,5 +1,5 @@
 appId: works.earendil.heimdall
-productName: Heimdall
+productName: Ninjy
 directories:
   output: desktop-dist
   buildResources: build
@@ -61,8 +61,8 @@ linux:
   category: Development
   icon: src/ui/electron/icon.png
   # No public maintainer address yet; dpkg accepts a bare name.
-  maintainer: Heimdall maintainers
-  synopsis: Heimdall desktop app and Bridge
+  maintainer: Ninjy maintainers
+  synopsis: Ninjy desktop app and Bridge
 deb:
   # electron-builder's default depends, kept in full (libnotify4: Electron
   # notifications). The appindicator library lets the Bridge's tray show up.
@@ -81,5 +81,5 @@ deb:
 afterSign: scripts/release/notarize-electron.cjs
 dmg:
   sign: true
-  title: Heimdall ${version}
-artifactName: Heimdall-${version}-${arch}.${ext}
+  title: Ninjy ${version}
+artifactName: Ninjy-${version}-${arch}.${ext}

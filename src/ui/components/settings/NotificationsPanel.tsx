@@ -34,7 +34,7 @@ const CATEGORY_LABELS: Array<{ key: NotificationCategory; label: string; descrip
 // H11: the sample plan the Send-test-notification button fires through the real
 // native path. Exported so tests can assert exactly what is shown.
 export const TEST_NOTIFICATION_PLAN = {
-  title: 'Heimdall test notification',
+  title: 'Ninjy test notification',
   body: 'If you can see this, notifications are working.',
   tag: 'heimdall-test',
   route: '#/settings',

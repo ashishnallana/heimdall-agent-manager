@@ -129,7 +129,7 @@ export const VERB_LABEL: Record<ActionVerb, string> = {
 
 export function deleteConfirmBody(titles: string[]): string {
   const subject = titles.length === 1 ? `"${titles[0]}"` : `${titles.length} actions`;
-  return `Deleting ${subject} removes ${titles.length === 1 ? 'its' : 'their'} schedule permanently — Heimdall can't undo this from here. Instances the action already spawned, and anything those runs produced, are left alone.`;
+  return `Deleting ${subject} removes ${titles.length === 1 ? 'its' : 'their'} schedule permanently — Ninjy can't undo this from here. Instances the action already spawned, and anything those runs produced, are left alone.`;
 }
 
 /* ------------------------------------------------------------------ *

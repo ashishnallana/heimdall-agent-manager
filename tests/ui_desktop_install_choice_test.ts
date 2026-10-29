@@ -72,7 +72,7 @@ test('Bridge only runs setup, never opens the window, and says the app can go', 
   const f = deps(2);
   assert.deepEqual(plain(await installChoice.runFirstLaunch(f.deps)), { openWindow: false, choice: 'bridge' });
   assert.equal(f.setups(), 1);
-  assert.match(f.boxes[1].detail, /delete the Heimdall AppImage/);
+  assert.match(f.boxes[1].detail, /delete the Ninjy AppImage/);
 });
 
 test('a failed Bridge-only setup is reported and points at Settings > Bridges', async () => {

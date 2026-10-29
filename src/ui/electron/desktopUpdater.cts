@@ -30,21 +30,21 @@ function start(enabled: boolean, onChanged: (next: UpdateState) => void) {
   autoUpdater.autoDownload = true;
   autoUpdater.autoInstallOnAppQuit = true;
   autoUpdater.allowPrerelease = false;
-  autoUpdater.on('checking-for-update', () => publish({ phase: 'checking', message: 'Checking for Heimdall updates…', percent: 0 }));
+  autoUpdater.on('checking-for-update', () => publish({ phase: 'checking', message: 'Checking for Ninjy updates…', percent: 0 }));
   autoUpdater.on('update-available', (info: any) => publish({
-    phase: 'available', version: String(info?.version || ''), message: `Heimdall ${String(info?.version || '')} is available.`, percent: 0,
+    phase: 'available', version: String(info?.version || ''), message: `Ninjy ${String(info?.version || '')} is available.`, percent: 0,
   }));
-  autoUpdater.on('update-not-available', () => publish({ phase: 'up-to-date', message: 'Heimdall is up to date.', percent: 0 }));
+  autoUpdater.on('update-not-available', () => publish({ phase: 'up-to-date', message: 'Ninjy is up to date.', percent: 0 }));
   autoUpdater.on('download-progress', (progress: any) => {
     const percent = Math.max(0, Math.min(100, Math.round(Number(progress?.percent || 0))));
-    publish({ phase: 'downloading', percent, message: `Downloading Heimdall update… ${percent}%` });
+    publish({ phase: 'downloading', percent, message: `Downloading Ninjy update… ${percent}%` });
   });
   autoUpdater.on('update-downloaded', (info: any) => publish({
     phase: 'downloaded', version: String(info?.version || state.version || ''), percent: 100,
-    message: `Heimdall ${String(info?.version || state.version || '')} is ready to install.`,
+    message: `Ninjy ${String(info?.version || state.version || '')} is ready to install.`,
   }));
   autoUpdater.on('error', (error: any) => publish({
-    phase: 'error', message: `Heimdall update failed: ${String(error?.message || error || 'unknown error')}`.slice(0, 300),
+    phase: 'error', message: `Ninjy update failed: ${String(error?.message || error || 'unknown error')}`.slice(0, 300),
   }));
   publish({ phase: 'idle', message: '' });
   const automaticCheck = () => { void check(false); };
@@ -60,7 +60,7 @@ async function check(manual: boolean = true) {
     return { ok: true };
   } catch (error: any) {
     const message = String(error?.message || error || 'Unable to check for updates.');
-    if (manual) publish({ phase: 'error', message: `Heimdall update failed: ${message}`.slice(0, 300) });
+    if (manual) publish({ phase: 'error', message: `Ninjy update failed: ${message}`.slice(0, 300) });
     return { ok: false, error: message };
   }
 }

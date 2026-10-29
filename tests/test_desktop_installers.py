@@ -225,7 +225,7 @@ class MacAndLinuxInstallerTests(unittest.TestCase):
         self.assertIn('scripts/release/build-macos-pkg.sh', workflow)
         self.assertIn('merge-latest-mac.py', workflow)
         for asset in ('dist/latest-mac.yml', 'dist/latest-linux.yml', 'dist/latest-linux-arm64.yml',
-                      'dist/Heimdall-*.pkg', 'dist/Heimdall-*.AppImage', 'dist/Heimdall-*.deb', 'dist/Heimdall-*.zip'):
+                      'dist/Ninjy-*.pkg', 'dist/Ninjy-*.AppImage', 'dist/Ninjy-*.deb', 'dist/Ninjy-*.zip'):
             self.assertEqual(workflow.count(f' {asset} '), 2, asset)  # gh release upload and create
 
     def test_desktop_updater_is_not_windows_only(self):

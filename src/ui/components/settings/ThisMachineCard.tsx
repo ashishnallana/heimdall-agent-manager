@@ -117,7 +117,7 @@ export default function ThisMachineCard({ manager, onBridgeId }: { manager: Desk
   if (!config.supported) {
     return (
       <section data-debug-id="settings-this-machine-card" className="mt-4 rounded-xl border border-subtle bg-surface-raised/40 p-4 text-sm text-muted">
-        This platform cannot run a Heimdall Bridge.
+        This platform cannot run a Ninjy Bridge.
       </section>
     );
   }
@@ -233,7 +233,7 @@ export default function ThisMachineCard({ manager, onBridgeId }: { manager: Desk
             {wizard.cancelled
               ? `Cancelled.${wizard.rolledBack ? ' Changes were rolled back.' : ''}`
               : wizard.otherAccount
-                ? 'This machine is enrolled by another Heimdall account. Replacing it revokes that bridge and deletes its credentials here.'
+                ? 'This machine is enrolled by another Ninjy account. Replacing it revokes that bridge and deletes its credentials here.'
                 : lastKind === 'setup'
                   ? `Failed at ${wizard.steps.find((step) => step.id === wizard.failedStep)?.label || 'a step'} after automatic recovery.${wizard.rolledBack ? ' Changes were rolled back.' : ''}`
                   : `${operationFailed[lastKind]}${wizard.error ? `: ${wizard.error}` : '.'}`}

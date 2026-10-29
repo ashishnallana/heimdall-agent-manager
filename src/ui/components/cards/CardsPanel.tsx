@@ -372,7 +372,7 @@ export default function CardsPanel() {
           </span>
         </span>
       }
-      description="Activity-driven maintenance recommendations synthesized by Heimdall Curator. Review, accept, or reject maintenance proposals."
+      description="Activity-driven maintenance recommendations synthesized by Ninjy Curator. Review, accept, or reject maintenance proposals."
       actions={
         <div className="flex items-center gap-2">
           <Button
@@ -541,7 +541,7 @@ export default function CardsPanel() {
             <p className="mt-1 max-w-md text-xs leading-relaxed text-muted">
               {searchQuery.trim()
                 ? `No action cards match query "${searchQuery}". Try clearing the search filter.`
-                : 'Heimdall Curator analyzes project task chains, comments, memories, and agents to synthesize proactive Action Cards. As new activity occurs, recommended actions will appear here.'}
+                : 'Ninjy Curator analyzes project task chains, comments, memories, and agents to synthesize proactive Action Cards. As new activity occurs, recommended actions will appear here.'}
             </p>
           </div>
         )}

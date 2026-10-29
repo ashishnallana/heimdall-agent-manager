@@ -12,7 +12,7 @@ function taskbarDetails(platform: string, packaged: boolean, executable: string,
     appId: APP_ID,
     appIconPath: packaged ? executable : icon,
     appIconIndex: 0,
-    relaunchDisplayName: 'Heimdall',
+    relaunchDisplayName: 'Ninjy',
     // An unpackaged Electron executable needs the app entry argument. Without
     // it, a pin opens Electron's welcome page instead of Heimdall.
     relaunchCommand: [executable, ...(packaged ? [] : [entry])].map(quoteArgument).join(' '),

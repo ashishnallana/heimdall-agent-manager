@@ -217,8 +217,9 @@ function markBefore(model: WizardModel, id: WizardStepId): WizardModel {
 }
 
 // `ham-bridge enroll` refuses, headless, to replace a bridge another Heimdall
-// account enrolled until the user confirms (--replace-other-account).
-export const OTHER_ACCOUNT_PATTERN = /enrolled as \S+ by another Heimdall account/;
+// account enrolled until the user confirms (--replace-other-account). Bridges
+// released before the Ninjy rename still print "Heimdall account".
+export const OTHER_ACCOUNT_PATTERN = /enrolled as \S+ by another (?:Ninjy|Heimdall) account/;
 
 // The ham-bridge step whose `ok` finishes a row made of several sub-steps.
 const lastSubStep: Partial<Record<WizardStepId, string>> = { install: 'service', done: 'verify' };

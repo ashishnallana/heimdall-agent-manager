@@ -3,7 +3,7 @@ const fs = require('fs');
 const path = require('path');
 
 // Visible product identity (window title + dock/taskbar + macOS app menu).
-const APP_DISPLAY_NAME = 'Heimdall';
+const APP_DISPLAY_NAME = 'Ninjy';
 const APP_ICON_PATH = path.join(__dirname, 'icon.png');
 const appIcon = (() => {
   try {
@@ -315,7 +315,7 @@ function bridgeHandler(channel: string, handler: (...args: any[]) => any) {
     const fromMainWindow = Boolean(mainWindow && !mainWindow.isDestroyed() && event.sender === mainWindow.webContents);
     if (!fromMainWindow || !trustedIpcSender(frame?.url, frame ? frame === event.sender.mainFrame : false, trustedUiOrigins())) {
       console.warn(`[heimdall] refused ${channel} from ${String(frame?.url || 'an unknown frame')}`);
-      return { ok: false, error: 'Bridge actions are only available to the Heimdall app window.' };
+      return { ok: false, error: 'Bridge actions are only available to the Ninjy app window.' };
     }
     try { return await handler(...args); }
     catch (error: any) { return { ok: false, error: String(error?.message || error) }; }

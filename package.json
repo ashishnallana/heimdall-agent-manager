@@ -1,10 +1,10 @@
 {
   "name": "heimdall",
-  "productName": "Heimdall",
+  "productName": "Ninjy",
   "version": "0.3.3",
   "private": true,
   "type": "module",
-  "description": "Electron/Vite React UI prototype for Heimdall Test.",
+  "description": "Ninjy desktop app (Electron/Vite React UI).",
   "main": "electron-dist/main.cjs",
   "scripts": {
     "dev": "npm run build:electron && node scripts/patch-electron-dev-name.mjs && concurrently -k \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && electron .\"",

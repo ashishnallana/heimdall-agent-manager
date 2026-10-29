@@ -88,8 +88,8 @@ export function providerExtensionBadge(ext: ProviderExtensionStatus | null | und
         label: 'Update available',
         tone: 'warning',
         detail: ext.version && ext.min_version
-          ? `Installed v${ext.version}; Heimdall needs v${ext.min_version} or newer.`
-          : 'The installed extension is older than Heimdall needs.',
+          ? `Installed v${ext.version}; Ninjy needs v${ext.min_version} or newer.`
+          : 'The installed extension is older than Ninjy needs.',
         installHint: hint,
       };
     case 'absent':
@@ -97,7 +97,7 @@ export function providerExtensionBadge(ext: ProviderExtensionStatus | null | und
         kind: 'not-found',
         label: 'Not found',
         tone: 'neutral',
-        detail: 'Install the Heimdall extension for native activity, subagent and permission signals. Without it Heimdall uses screen detection.',
+        detail: 'Install the Ninjy extension for native activity, subagent and permission signals. Without it Ninjy uses screen detection.',
         installHint: hint,
       };
     case 'error':
@@ -113,7 +113,7 @@ export function providerExtensionBadge(ext: ProviderExtensionStatus | null | und
         kind: 'not-checked',
         label: 'Extension not checked',
         tone: 'neutral',
-        detail: 'Re-run discovery to check for the Heimdall extension.',
+        detail: 'Re-run discovery to check for the Ninjy extension.',
         installHint: '',
       };
   }

@@ -71,7 +71,7 @@ bridge_tray_command :: proc(args: []string) -> bool {
 	exe_seen := bridge_tray_exe_id(tl.exe)
 	exe_pending: Bridge_Tray_Exe_Id // a differing id, confirmed by the next poll
 
-	if ok, why := bridge_tray_native_init("Heimdall Bridge"); !ok {
+	if ok, why := bridge_tray_native_init("Ninjy Bridge"); !ok {
 		// Graceful degradation: nothing to show on this desktop; exit 0 so the
 		// login entry is not restarted in a loop.
 		fmt.eprintfln("ham-bridge tray: no system tray available (%s); the bridge is unaffected", why)

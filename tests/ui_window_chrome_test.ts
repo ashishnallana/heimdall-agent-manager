@@ -31,15 +31,15 @@ const mainSource = read('src/ui/electron/main.cts');
 const appShellSource = read('src/ui/components/shell/AppShell.tsx');
 const stylesSource = read('src/ui/styles.css');
 
-test('Windows pins relaunch Heimdall in packaged and unpackaged runs', () => {
+test('Windows pins relaunch Ninjy in packaged and unpackaged runs', () => {
   const identity = loadCts('windowsIdentity');
-  const executable = 'C:\\Program Files\\Heimdall\\Heimdall.exe';
+  const executable = 'C:\\Program Files\\Ninjy\\Ninjy.exe';
   const entry = 'C:\\source code\\Heimdall\\main.cjs';
   const icon = 'C:\\source code\\Heimdall\\icon.ico';
   const packaged = identity.taskbarDetails('win32', true, executable, entry, icon);
   assert.equal(packaged.relaunchCommand, `"${executable}"`);
   assert.equal(packaged.appIconPath, executable);
-  assert.equal(packaged.relaunchDisplayName, 'Heimdall');
+  assert.equal(packaged.relaunchDisplayName, 'Ninjy');
   assert.equal(packaged.appId, identity.APP_ID);
   const development = identity.taskbarDetails('win32', false, 'C:\\Electron\\electron.exe', entry, icon);
   assert.equal(development.relaunchCommand, `"C:\\Electron\\electron.exe" "${entry}"`);

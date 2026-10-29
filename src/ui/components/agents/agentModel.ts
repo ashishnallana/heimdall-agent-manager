@@ -72,7 +72,7 @@ export function archiveConfirmBody(names: string[]): string {
     names.length === 1
       ? `"${names[0]}"`
       : `${names.length} agents`;
-  return `Archiving ${subject} only takes ${names.length === 1 ? 'it' : 'them'} out of the Active list — running instances and associated memories are untouched, and nothing is deleted. Heimdall can't un-archive from here.`;
+  return `Archiving ${subject} only takes ${names.length === 1 ? 'it' : 'them'} out of the Active list — running instances and associated memories are untouched, and nothing is deleted. Ninjy can't un-archive from here.`;
 }
 
 /* ------------------------------------------------------------------ *

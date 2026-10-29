@@ -73,7 +73,7 @@ test('hidden sidebar renders no rail; the fixed top-left cluster compacts on age
   assert.match(source, /localStorage\.setItem\('heimdall:shell:sidebar-collapsed'/);
 });
 
-test('Heimdall wordmark is visible on Home and hidden only on agent conversations', () => {
+test('Ninjy wordmark is visible on Home and hidden only on agent conversations', () => {
   assert.equal(isAgentConversationRoute('/home'), false);
   assert.equal(isAgentConversationRoute('/cards'), false);
   assert.equal(isAgentConversationRoute('/conversations'), false);
@@ -113,7 +113,7 @@ test('mobile conversation header omits the project breadcrumb segment and first 
   assert.match(breadcrumb, /<span className="shrink-0 text-faint">\/<\/span>[\s\S]*\) : null\}/);
 });
 
-test('mobile aux hides the fixed Heimdall and sidebar controls', () => {
+test('mobile aux hides the fixed Ninjy and sidebar controls', () => {
   assert.match(source, /const hideTopLeftCluster = isMobile && isWorkspaceRoute && isCurrentAuxPaneOpen/);
   assert.match(source, /\{!hideTopLeftCluster \? \(\s*<div\s+data-debug-id="shell-top-left-cluster"/);
 });

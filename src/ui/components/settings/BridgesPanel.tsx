@@ -159,7 +159,7 @@ export default function BridgesPanel() {
       title="Bridges"
       description={manager
         ? 'Set up this machine and manage every bridge: update, re-enroll or uninstall.'
-        : 'Your installed bridges. Set up or uninstall a bridge from the Heimdall desktop app or with ham-bridge on that machine.'}
+        : 'Your installed bridges. Set up or uninstall a bridge from the Ninjy desktop app or with ham-bridge on that machine.'}
     >
       <div data-debug-id="settings-bridges-panel" className="min-w-0">
       {manager ? <ThisMachineCard manager={manager} onBridgeId={setLocalBridgeId} /> : null}

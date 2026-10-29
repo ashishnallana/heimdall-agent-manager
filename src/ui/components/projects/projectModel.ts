@@ -142,7 +142,7 @@ export function archiveConfirmBody(names: string[]): string {
     names.length === 1
       ? `“${names[0]}”`
       : `${names.length} projects`;
-  return `Archiving ${subject} only takes ${names.length === 1 ? 'it' : 'them'} out of the Active list — chains, agents and memories keep working, and nothing is deleted. Heimdall can't un-archive from here.`;
+  return `Archiving ${subject} only takes ${names.length === 1 ? 'it' : 'them'} out of the Active list — chains, agents and memories keep working, and nothing is deleted. Ninjy can't un-archive from here.`;
 }
 
 /* ------------------------------------------------------------------ *
@@ -390,7 +390,7 @@ export type ProjectFormField = 'name' | 'slug' | 'description' | 'repoUrl' | 'vc
  * save it — sending a single space to fake a clear would write a lie into the
  * record, and dropping the change silently is how a user comes to distrust a form.
  */
-export const CANNOT_CLEAR_MESSAGE = "Heimdall can't clear this field yet — it would keep its previous value. Put something back, or leave it as it was.";
+export const CANNOT_CLEAR_MESSAGE = "Ninjy can't clear this field yet — it would keep its previous value. Put something back, or leave it as it was.";
 
 export interface MappedServerError {
   field: ProjectFormField;

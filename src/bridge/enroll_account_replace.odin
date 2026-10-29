@@ -70,7 +70,7 @@ bridge_enroll_previous_owner :: proc(old_bridge_id: string) -> string {
 // bridge_enroll_ask_replace asks on the terminal. Any answer but y/yes is "no".
 bridge_enroll_ask_replace :: proc(args: []string, old_bridge_id: string) -> Bridge_Confirm {
 	if !bridge_stdin_is_terminal(args) do return .Unavailable
-	fmt.printfln("This machine is enrolled as bridge %s of ANOTHER Heimdall account.", old_bridge_id)
+	fmt.printfln("This machine is enrolled as bridge %s of ANOTHER Ninjy account.", old_bridge_id)
 	fmt.println("  Replacing it revokes that bridge on the hub and deletes its credential, identity and vault key here.")
 	fmt.printf("  Replace it with the account that just approved? [y/N] (no answer in %ds = no) ", BRIDGE_ENROLL_PROMPT_TIMEOUT_MS / 1000)
 	if !bridge_stdin_wait_readable(BRIDGE_ENROLL_PROMPT_TIMEOUT_MS) {
@@ -174,7 +174,7 @@ bridge_enroll_resolve_account :: proc(args: []string, api_base, config_path, old
 	case .Same_Account:
 		return true, false
 	case .Refuse:
-		fmt.eprintfln("bridge enroll REFUSED: this machine is enrolled as %s by another Heimdall account; nothing was written.", old_bridge_id)
+		fmt.eprintfln("bridge enroll REFUSED: this machine is enrolled as %s by another Ninjy account; nothing was written.", old_bridge_id)
 		fmt.eprintfln("  To replace it, run again with %s (or answer yes at the prompt).", BRIDGE_ENROLL_REPLACE_ACCOUNT_FLAG)
 		if rv_ok, detail := bridge_self_revoke(api_base, cred.access_token); rv_ok {
 			fmt.eprintfln("  The bridge %s the approval just created was revoked again.", cred.bridge_id)

@@ -1399,7 +1399,7 @@ bridge_enroll_device_command_run :: proc(args: []string) -> bool {
 		identity_fp, _ := bridge_enroll_fingerprint(identity_hex, context.temp_allocator)
 		fmt.println("")
 		fmt.println("Enroll this machine")
-		fmt.println("  On a device that already uses Heimdall, open:")
+		fmt.println("  On a device that already uses Ninjy, open:")
 		fmt.println("")
 		fmt.printfln("  %s", approval_url)
 		fmt.println("")

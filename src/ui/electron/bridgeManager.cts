@@ -489,7 +489,7 @@ function runOperation(
   emit: Emit,
   options: { bridgeId?: string; purge?: boolean; replaceOtherAccount?: boolean; fetchImpl?: FetchLike } = {},
 ): Promise<{ ok: boolean; error?: string }> {
-  if (!supportedPlatform()) return Promise.resolve({ ok: false, error: 'This platform cannot run a Heimdall Bridge.' });
+  if (!supportedPlatform()) return Promise.resolve({ ok: false, error: 'This platform cannot run a Ninjy Bridge.' });
   if (current) return Promise.resolve({ ok: false, error: 'A Bridge operation is already running.' });
   // performOperation claims `current` before its first await, so the claim
   // exists by the time it returns; stopOnQuit waits on `settled`.

@@ -119,7 +119,7 @@ bridge_tray_native_init :: proc(title: string) -> (ok: bool, why: string) {
 		tray_items[a] = item
 	}
 	intrinsics.objc_send(nil, tray_item, "setMenu:", menu)
-	intrinsics.objc_send(nil, tray_button(), "setTitle:", tray_ns_string("Heimdall"))
+	intrinsics.objc_send(nil, tray_button(), "setTitle:", tray_ns_string("Ninjy"))
 	return true, ""
 }
 
@@ -143,7 +143,7 @@ bridge_tray_native_update :: proc(view: bridgesvc.Tray_View, enabled: Bridge_Tra
 		intrinsics.objc_send(nil, button, "setImage:", image)
 		intrinsics.objc_send(nil, button, "setTitle:", tray_ns_string(""))
 	} else {
-		intrinsics.objc_send(nil, button, "setTitle:", tray_ns_string(strings.concatenate({"Heimdall: ", view.title}, context.temp_allocator)))
+		intrinsics.objc_send(nil, button, "setTitle:", tray_ns_string(strings.concatenate({"Ninjy: ", view.title}, context.temp_allocator)))
 	}
 	intrinsics.objc_send(nil, button, "setToolTip:", tray_ns_string(view.tooltip))
 	NS.MenuItem_setTitle(tray_status_item, tray_ns_string(view.title))

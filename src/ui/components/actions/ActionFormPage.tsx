@@ -388,7 +388,7 @@ export default function ActionFormPage({ actionId }: { actionId?: string } = {})
             <Text as="p" role="title">Target</Text>
             <Text as="p" role="body-sm" tone="muted" className="ui-measure">
               {isEdit
-                ? "An action's target is fixed once it exists — Heimdall can't move a schedule to a different agent. Create a new action to target something else."
+                ? "An action's target is fixed once it exists — Ninjy can't move a schedule to a different agent. Create a new action to target something else."
                 : 'Either one running instance, or an agent identity plus the bridge it runs on. Not both.'}
             </Text>
           </div>

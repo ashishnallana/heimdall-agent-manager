@@ -71,13 +71,13 @@
     ${If} ${isUpdated}
       Abort
     ${EndIf}
-    !insertmacro MUI_HEADER_TEXT "Choose what to install" "Install the Heimdall app, the Heimdall Bridge, or both."
+    !insertmacro MUI_HEADER_TEXT "Choose what to install" "Install the Ninjy app, the Ninjy Bridge, or both."
     nsDialogs::Create 1018
     Pop $0
     ${If} $0 == error
       Abort
     ${EndIf}
-    ${NSD_CreateLabel} 0 0 100% 36u "The App is the Heimdall desktop window. The Bridge connects this computer to your Heimdall Hub so agents can run here; setting it up opens your browser to approve this computer."
+    ${NSD_CreateLabel} 0 0 100% 36u "The App is the Ninjy desktop window. The Bridge connects this computer to your Ninjy Hub so agents can run here; setting it up opens your browser to approve this computer."
     Pop $0
     ${NSD_CreateRadioButton} 0 42u 100% 12u "App and Bridge (recommended)"
     Pop $HeimdallRadioBoth
@@ -153,7 +153,7 @@
 !macro customInstall
   ${IfNot} ${isUpdated}
   ${AndIf} $HeimdallComponents != "app"
-    DetailPrint "Setting up the Heimdall Bridge for $HeimdallHub (approve this computer in your browser)..."
+    DetailPrint "Setting up the Ninjy Bridge for $HeimdallHub (approve this computer in your browser)..."
     SetDetailsPrint both
     ${If} ${UAC_IsInnerInstance}
       ; Elevated per-machine install: never set the Bridge up as the admin.
@@ -173,13 +173,13 @@
         ExecWait '"$INSTDIR\${UNINSTALL_FILENAME}" /S _?=$INSTDIR'
         Delete "$INSTDIR\${UNINSTALL_FILENAME}"
         RMDir /r "$INSTDIR"
-        MessageBox MB_ICONSTOP|MB_OK "Heimdall Bridge setup failed (exit code $0); nothing was installed. Run the installer again, or set up the Bridge later from the Heimdall app." /SD IDOK
+        MessageBox MB_ICONSTOP|MB_OK "Ninjy Bridge setup failed (exit code $0); nothing was installed. Run the installer again, or set up the Bridge later from the Ninjy app." /SD IDOK
         SetErrorLevel 2
         Quit
       ${EndIf}
-      MessageBox MB_ICONEXCLAMATION|MB_OK "Heimdall Bridge setup failed (exit code $0). The app is installed; finish the Bridge from Settings > Bridges." /SD IDOK
+      MessageBox MB_ICONEXCLAMATION|MB_OK "Ninjy Bridge setup failed (exit code $0). The app is installed; finish the Bridge from Settings > Bridges." /SD IDOK
     ${ElseIf} $HeimdallComponents == "bridge"
-      DetailPrint "Bridge only: removing the Heimdall app files."
+      DetailPrint "Bridge only: removing the Ninjy app files."
       ExecWait '"$INSTDIR\${UNINSTALL_FILENAME}" /S _?=$INSTDIR'
       Delete "$INSTDIR\${UNINSTALL_FILENAME}"
       RMDir /r "$INSTDIR"

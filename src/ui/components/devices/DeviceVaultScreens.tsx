@@ -57,7 +57,7 @@ export function DeviceGenesisScreen() {
   return (
     <Shell debugId="device-genesis-screen" title="Setting up your vault">
       <p className="text-sm text-muted">
-        This is the first device on your account. Heimdall is creating your encryption keys on this device now.
+        This is the first device on your account. Ninjy is creating your encryption keys on this device now.
         They never leave it unencrypted, and there is no password to remember.
       </p>
     </Shell>
@@ -72,7 +72,7 @@ export function DeviceWaitingScreen({ state }: { state: DeviceVaultState }) {
   return (
     <Shell debugId="device-waiting-screen" title="Approve this device">
       <p className="mb-3 text-sm text-muted">
-        On a device that already uses Heimdall, open <strong>Add a device</strong> (<strong>/device/add</strong>, or the notification there) and type this code.
+        On a device that already uses Ninjy, open <strong>Add a device</strong> (<strong>/device/add</strong>, or the notification there) and type this code.
         That is all: this browser checks the approval with the code and installs your keys on its own.
       </p>
       <p className="mb-3 text-xs text-muted">The code is a secret for the next few minutes. Type it only on your own device; never send it to anyone.</p>
@@ -124,7 +124,7 @@ export function OtherAccountWarning({ state }: { state: DeviceVaultState }) {
   const [ack, setAck] = useState(false);
   return (
     <Shell debugId="device-other-account-warning" title="A different account">
-      <div data-debug-id="device-other-account-alert"><Alert tone="warning" title="This browser already belongs to another Heimdall account">
+      <div data-debug-id="device-other-account-alert"><Alert tone="warning" title="This browser already belongs to another Ninjy account">
         This browser holds keys for {state.otherAccounts.length === 1 ? 'another account' : `${state.otherAccounts.length} other accounts`}, but the
         server now says you are signed in as <code>{state.userId}</code>. If you did not just switch accounts on purpose, the server may be
         trying to make this browser trust keys that are not yours. Sign out and do not continue.
@@ -147,7 +147,7 @@ export function DeviceVaultProblemScreen({ state }: { state: DeviceVaultState })
   if (state.status === 'unsupported') {
     return (
       <Shell debugId="device-vault-unsupported" title="This browser cannot hold your keys">
-        <p className="text-sm text-muted">Heimdall needs Web Crypto and IndexedDB in a secure context (HTTPS or localhost). Open Heimdall over HTTPS in a regular browser window.</p>
+        <p className="text-sm text-muted">Ninjy needs Web Crypto and IndexedDB in a secure context (HTTPS or localhost). Open Ninjy over HTTPS in a regular browser window.</p>
       </Shell>
     );
   }

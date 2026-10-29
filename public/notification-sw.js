@@ -33,7 +33,7 @@ const ENCRYPTED_NOTIFICATION_BODY = '[🔒 Encrypted notification]';
 // visible notification — on iOS a silent push (one that shows nothing) causes
 // Safari to revoke the push permission. Mirrors pushNotificationMapper.ts.
 const PUSH_FALLBACK = {
-  title: 'Heimdall',
+  title: 'Ninjy',
   body: 'You have a new notification.',
   tag: 'heimdall:push',
   route: '/conversations',

@@ -215,7 +215,7 @@ bridge_tray_native_pump :: proc(wait: time.Duration) -> (action: bridgesvc.Tray_
 bridge_tray_native_confirm :: proc(text: string) -> bool {
 	MB_ICONWARNING :: 0x30
 	MB_SETFOREGROUND :: 0x10000
-	r := win.MessageBoxW(tray_hwnd, win.utf8_to_wstring(text, context.temp_allocator), win.utf8_to_wstring("Heimdall Bridge", context.temp_allocator), win.MB_YESNO | MB_ICONWARNING | MB_SETFOREGROUND)
+	r := win.MessageBoxW(tray_hwnd, win.utf8_to_wstring(text, context.temp_allocator), win.utf8_to_wstring("Ninjy Bridge", context.temp_allocator), win.MB_YESNO | MB_ICONWARNING | MB_SETFOREGROUND)
 	return r == win.IDYES
 }
 

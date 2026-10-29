@@ -410,7 +410,7 @@ export default function ProjectListPage({ selectedId = '' }: { selectedId?: stri
         data-debug-id="project-empty-first-run"
         icon="grid"
         title="No projects yet"
-        description="A project points Heimdall at a folder on your machines. Everything an agent does — chains, conversations, memory — hangs off one."
+        description="A project points Ninjy at a folder on your machines. Everything an agent does — chains, conversations, memory — hangs off one."
         action={<Button variant="primary" onClick={() => navigateTo(projectNewHref())}>New project</Button>}
       />
     );
@@ -774,7 +774,7 @@ export default function ProjectListPage({ selectedId = '' }: { selectedId?: stri
   );
 
   const headerDescription =
-    'A project points Heimdall at a folder on your machines. Chains, conversations and memory all hang off one.';
+    'A project points Ninjy at a folder on your machines. Chains, conversations and memory all hang off one.';
 
   return (
     <ResourceContainer

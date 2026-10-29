@@ -38,7 +38,7 @@ export const EXPIRE_REASON_TEXT: Record<string, string> = {
   chain_closed: 'the chain was closed',
   cancelled: 'the ticket was cancelled',
   changes_requested: 'changes were requested',
-  hub_restart_no_lease: 'Heimdall restarted',
+  hub_restart_no_lease: 'Ninjy restarted',
   user_stopped: 'a person stopped the agent',
 };
 
@@ -97,7 +97,7 @@ function actorName(ev: TaskEventWire, names: TaskNames): string {
     case 'bridge':
       return names.bridge(s(ev.actor_id));
     default:
-      return 'Heimdall';
+      return 'Ninjy';
   }
 }
 

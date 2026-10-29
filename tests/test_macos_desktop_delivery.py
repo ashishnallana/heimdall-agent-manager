@@ -48,7 +48,7 @@ def test_curl_and_dmg_share_signed_archive():
     assert "MACOS_DEVELOPER_ID_P12_BASE64" in workflow
     assert 'CSC_NAME=${identity#Developer ID Application: }' in workflow
     assert "codesign --verify --strict" in workflow
-    assert "Build, sign, and notarize Heimdall DMG" in workflow
+    assert "Build, sign, and notarize Ninjy DMG" in workflow
     assert 'electron-builder --mac dmg zip "$arch" --publish never' in workflow
     assert 'scripts/release/staple-with-retry.sh "$dmg"' in workflow
     assert "xcrun stapler validate" in workflow

@@ -560,7 +560,7 @@ export function restartFailureText(err: unknown): string {
   if (/failed to restart shell session/i.test(raw)) {
     return "This session's bridge no longer has it, so it can't be restarted. Start a new shell instead.";
   }
-  return raw || "Heimdall couldn't reach the bridge to restart this session.";
+  return raw || "Ninjy couldn't reach the bridge to restart this session.";
 }
 
 /* ------------------------------------------------------------------ *

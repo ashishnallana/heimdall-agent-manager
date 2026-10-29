@@ -5,7 +5,7 @@ import './helpers/vaultEndpointHarness.ts';
 test('TEST_NOTIFICATION_PLAN and testNotificationFeedback across all runtime environments', async () => {
   const { TEST_NOTIFICATION_PLAN, testNotificationFeedback } = await import('../src/ui/components/settings/NotificationsPanel.tsx');
 
-  assert.equal(TEST_NOTIFICATION_PLAN.title, 'Heimdall test notification', 'plan title');
+  assert.equal(TEST_NOTIFICATION_PLAN.title, 'Ninjy test notification', 'plan title');
   assert.ok(TEST_NOTIFICATION_PLAN.body.length > 0, 'plan has a body');
   assert.equal(TEST_NOTIFICATION_PLAN.tag, 'heimdall-test', 'plan uses the heimdall-test coalescing tag');
   assert.equal(TEST_NOTIFICATION_PLAN.category, 'attention', 'plan has a valid category');

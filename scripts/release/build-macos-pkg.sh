@@ -13,7 +13,7 @@ set -euo pipefail
 # Signing: with HEIMDALL_MACOS_INSTALLER_IDENTITY ("Developer ID Installer: …")
 # the product archive is signed; notarizing and stapling stay with the caller.
 usage() {
-  echo 'usage: build-macos-pkg.sh <Heimdall.app> <bridge-resources-dir> <version> <arm64|x64> <out.pkg>' >&2
+  echo 'usage: build-macos-pkg.sh <Ninjy.app> <bridge-resources-dir> <version> <arm64|x64> <out.pkg>' >&2
 }
 
 [ "$#" -eq 5 ] || { usage; exit 2; }
@@ -54,17 +54,17 @@ pkgbuild --nopayload --scripts "$work/bridge-scripts" \
 cat > "$work/distribution.xml" <<XML
 <?xml version="1.0" encoding="utf-8"?>
 <installer-gui-script minSpecVersion="2">
-  <title>Heimdall</title>
+  <title>Ninjy</title>
   <options customize="always" require-scripts="false" hostArchitectures="$host_arch"/>
   <domains enable_localSystem="true"/>
   <choices-outline>
     <line choice="app"/>
     <line choice="bridge"/>
   </choices-outline>
-  <choice id="app" title="Heimdall App" description="The Heimdall desktop app, installed in Applications.">
+  <choice id="app" title="Ninjy App" description="The Ninjy desktop app, installed in Applications.">
     <pkg-ref id="works.earendil.heimdall.app"/>
   </choice>
-  <choice id="bridge" title="Heimdall Bridge" description="Connects this Mac to your Heimdall Hub so agents can run here. Setup opens your browser to approve this Mac.">
+  <choice id="bridge" title="Ninjy Bridge" description="Connects this Mac to your Ninjy Hub so agents can run here. Setup opens your browser to approve this Mac.">
     <pkg-ref id="works.earendil.heimdall.bridge"/>
   </choice>
   <pkg-ref id="works.earendil.heimdall.app" version="$version" onConclusion="none">app.pkg</pkg-ref>

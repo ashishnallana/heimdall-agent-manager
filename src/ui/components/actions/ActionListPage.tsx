@@ -408,7 +408,7 @@ export default function ActionListPage({ selectedId = '' }: { selectedId?: strin
         data-debug-id="action-empty-first-run"
         icon="clock"
         title="No actions yet"
-        description="An action is a prompt Heimdall sends to an agent — on a schedule, or whenever you run it."
+        description="An action is a prompt Ninjy sends to an agent — on a schedule, or whenever you run it."
         action={<Button variant="primary" onClick={() => navigateTo(actionNewHref())}>New action</Button>}
       />
     );
@@ -736,7 +736,7 @@ export default function ActionListPage({ selectedId = '' }: { selectedId?: strin
   );
 
   const headerDescription =
-    'An action is a prompt Heimdall sends to an agent — on a cron schedule, or whenever you run it.';
+    'An action is a prompt Ninjy sends to an agent — on a cron schedule, or whenever you run it.';
 
   return (
     <ResourceContainer

@@ -628,7 +628,7 @@ export function ProjectDetailBody({
         // The one thing a user cannot discover by looking: this cannot be undone
         // from Heimdall, so the page says it where the state is visible.
         <Alert tone="warning" title="This project is archived">
-          It still works — chains, agents and memories on it are untouched. Heimdall can&apos;t un-archive from here.
+          It still works — chains, agents and memories on it are untouched. Ninjy can&apos;t un-archive from here.
         </Alert>
       ) : null}
       {wide ? (

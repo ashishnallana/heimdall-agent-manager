@@ -450,7 +450,7 @@ export function AgentDetailBody({
       {actionError ? <Alert tone="danger" title="That didn't work">{actionError}</Alert> : null}
       {agentState(record) === 'archived' ? (
         <Alert tone="warning" title="This agent is archived">
-          It still works — running instances and memories are untouched. Heimdall can&apos;t un-archive from here.
+          It still works — running instances and memories are untouched. Ninjy can&apos;t un-archive from here.
         </Alert>
       ) : null}
       {wide ? (
