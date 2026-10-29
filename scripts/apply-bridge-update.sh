@@ -1085,6 +1085,12 @@ done
 if [ "$healthy" = true ]; then
   log "Update verification succeeded! Removing backup and staging directory."
   rm -rf "$DATA_DIR/bin.bak" "$STAGE_DIR"
+  # F10: register/repair every detected provider's extension from the activated
+  # bundle (self-healing). Best effort: the bridge is healthy, and the Hub can retry.
+  if [ -n "$EXTENSION_TRANSACTION" ] && [ -x "$DATA_DIR/bin/ham-bridge" ]; then
+    log "Syncing provider extensions from $DATA_DIR/extensions"
+    "$DATA_DIR/bin/ham-bridge" extensions sync --data-dir "$DATA_DIR" --source "$DATA_DIR/extensions" 2>&1 | while IFS= read -r line; do log "  $line"; done || true
+  fi
   log "Bridge update completed successfully."
   exit 0
 else

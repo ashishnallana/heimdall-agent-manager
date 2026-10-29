@@ -941,9 +941,13 @@ try {
       }
     }
   }
+  # Provider extensions are copied and registered by `ham-bridge extensions sync`
+  # once the new bridge is healthy (F10).
+  $EXTENSION_SOURCE = ''
   foreach ($candidate in @('..\share\heimdall\extensions', '..\share\extensions', '..\extensions')) {
     if (Test-Path -LiteralPath (Join-Path $STAGE_BIN $candidate) -PathType Container) {
-      log "  Provider extensions in the bundle are not refreshed on Windows: $(Join-Path $STAGE_BIN $candidate)"
+      $EXTENSION_SOURCE = (Resolve-Path -LiteralPath (Join-Path $STAGE_BIN $candidate)).Path
+      log "  Provider extensions in the bundle: $EXTENSION_SOURCE"
       break
     }
   }
@@ -1044,6 +1048,14 @@ try {
   # 6. Finalize or Rollback
   if ($healthy) {
     log 'Update verification succeeded! Removing backup and staging directory.'
+    # Best effort: the bridge is healthy, and the Hub can retry a provider.
+    $syncExe = Join-Path $BIN 'ham-bridge.exe'
+    if ($EXTENSION_SOURCE -and (Test-Path -LiteralPath $syncExe -PathType Leaf)) {
+      log "Syncing provider extensions from $EXTENSION_SOURCE"
+      try {
+        & $syncExe extensions sync --data-dir (Get-CanonicalPath $DATA_DIR) --source $EXTENSION_SOURCE 2>&1 | ForEach-Object { log "  $_" }
+      } catch { log "  provider extension sync failed: $($_.Exception.Message)" }
+    }
     Remove-DirectoryIfPresent $BIN_BAK
     Remove-DirectoryIfPresent $STAGE_DIR
     log 'Bridge update completed successfully.'
