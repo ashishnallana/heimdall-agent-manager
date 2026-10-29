@@ -252,13 +252,13 @@ test('ThisMachineCard retries a failed Re-enroll as Re-enroll and labels the fai
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
     await click('settings-this-machine-reenroll-btn');
     await click('settings-this-machine-confirm-ok');
-    assert.deepEqual(runs, [{ kind: 'reenroll', options: { bridgeId: 'brg_this' } }]);
+    assert.deepEqual(runs, [{ kind: 'reenroll', options: { bridgeId: 'brg_this', inAppApproval: true } }]);
     await act(async () => { listener!({ type: 'error', message: 'enrollment was not approved', step: 'enroll' }); });
     assert.match(query('settings-bridge-wizard-result')!.textContent || '', /Re-enrollment failed: enrollment was not approved/);
     assert.doesNotMatch(query('settings-bridge-wizard-result')!.textContent || '', /Failed at/);
     assert.equal(query('settings-bridge-wizard'), null, 'the setup wizard is not shown for a re-enroll');
     await click('settings-bridge-wizard-retry');
-    assert.deepEqual(runs[1], { kind: 'reenroll', options: { bridgeId: 'brg_this' } }, 'Retry repeats the re-enroll, not an update');
+    assert.deepEqual(runs[1], { kind: 'reenroll', options: { bridgeId: 'brg_this', inAppApproval: true } }, 'Retry repeats the re-enroll, not an update');
   } finally {
     await act(async () => root.unmount());
     dom.window.close();

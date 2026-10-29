@@ -322,7 +322,10 @@ function bridgeHandler(channel: string, handler: (...args: any[]) => any) {
   });
 }
 
-function sendBridgeEvent(rawPayload: any) {
+// inAppApproval: the window opens its own /device/add for the pairing code
+// (REQ-ENR-INAPP-1), so the approval page is not also opened in the browser;
+// the window is brought forward instead.
+function sendBridgeEvent(rawPayload: any, inAppApproval = false) {
   let payload = rawPayload;
   if (payload?.type === 'pairing') {
     // REQ-EXT-URL-1: only open (or show) an approval page on this Hub's origins.
@@ -330,7 +333,10 @@ function sendBridgeEvent(rawPayload: any) {
     payload = url && payload.code
       ? { ...payload, url }
       : { type: 'output', message: 'Bridge enrollment printed an approval page outside this Hub; it was not opened.' };
-    if (payload.type === 'pairing') void shell.openExternal(payload.url);
+    if (payload.type === 'pairing') {
+      if (inAppApproval && mainWindow && !mainWindow.isDestroyed()) showMainWindow();
+      else void shell.openExternal(payload.url);
+    }
   }
   if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
     mainWindow.webContents.send('heimdall-bridge:event', payload);
@@ -385,7 +391,8 @@ bridgeHandler('heimdall-bridge:run', (kind: unknown, target: unknown, options: a
     purge: options?.purge === true,
     replaceOtherAccount: options?.replaceOtherAccount === true,
   };
-  return bridgeManager.runOperation(operation, bridgeTarget(target), sendBridgeEvent, clean);
+  const inAppApproval = options?.inAppApproval === true;
+  return bridgeManager.runOperation(operation, bridgeTarget(target), (payload: any) => sendBridgeEvent(payload, inAppApproval), clean);
 });
 bridgeHandler('heimdall-bridge:cancel', () => ({ ok: bridgeManager.cancelOperation() }));
 bridgeHandler('heimdall-bridge:open-log', (logPath: unknown) => {

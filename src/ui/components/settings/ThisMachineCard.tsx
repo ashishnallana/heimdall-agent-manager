@@ -1,19 +1,21 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useState, useSyncExternalStore } from 'react';
 import { Button, Icon, Input, Modal, ModalBody, ModalFooter, StatusDot, Text } from '@ui';
 import type { Tone } from '@ui';
 import {
   type DesktopBridgeConfig,
-  type DesktopBridgeEvent,
   type DesktopBridgeManagerApi,
   type DesktopBridgeOperation,
   type DesktopBridgeOperationOptions,
   type DesktopBridgeStatus,
-  type WizardModel,
   desktopBridgeStatusLabel,
-  initialWizard,
-  reduceWizard,
-  startWizard,
 } from '../../bridge/desktopBridge';
+import {
+  attachDesktopBridgeSession,
+  desktopBridgeSession,
+  openApprovalForCode,
+  runDesktopBridgeOperation,
+  subscribeDesktopBridgeSession,
+} from '../../bridge/desktopBridgeSession';
 
 const toneFor: Record<string, Tone> = { success: 'success', warning: 'warning', danger: 'danger', muted: 'neutral' };
 
@@ -45,9 +47,10 @@ const operationFailed: Record<DesktopBridgeOperation, string> = {
 export default function ThisMachineCard({ manager, onBridgeId }: { manager: DesktopBridgeManagerApi; onBridgeId?: (bridgeId: string) => void }) {
   const [config, setConfig] = useState<DesktopBridgeConfig | null>(null);
   const [status, setStatus] = useState<DesktopBridgeStatus | null>(null);
-  const [operation, setOperation] = useState<DesktopBridgeOperation | ''>('');
-  const [wizard, setWizard] = useState<WizardModel>(() => initialWizard());
-  const [log, setLog] = useState<string[]>([]);
+  // The operation, wizard and log live in desktopBridgeSession: they keep following
+  // the run while /device/add is open for its pairing code (REQ-ENR-INAPP-1).
+  const session = useSyncExternalStore(subscribeDesktopBridgeSession, desktopBridgeSession);
+  const { operation, wizard, log, lastRun } = session;
   const [showLog, setShowLog] = useState(false);
   const [hubDraft, setHubDraft] = useState('');
   const [profile, setProfile] = useState('');
@@ -55,8 +58,6 @@ export default function ThisMachineCard({ manager, onBridgeId }: { manager: Desk
   const [confirm, setConfirm] = useState<'uninstall' | 'reenroll' | ''>('');
   const [purge, setPurge] = useState(true);
   const [error, setError] = useState('');
-  // The last operation started, so Retry repeats exactly that operation.
-  const [lastRun, setLastRun] = useState<{ kind: DesktopBridgeOperation; options: DesktopBridgeOperationOptions } | null>(null);
 
   const target = useCallback(() => ({ hub: config?.hubUrl, profile }), [config?.hubUrl, profile]);
 
@@ -78,32 +79,20 @@ export default function ThisMachineCard({ manager, onBridgeId }: { manager: Desk
     return () => window.clearInterval(timer);
   }, [config, refresh, operation]);
 
-  useEffect(() => manager.onEvent((event: DesktopBridgeEvent) => {
-    if (event.type === 'output') setLog((lines) => [...lines, event.message].slice(-500));
-    if (event.type === 'progress' && event.message) setLog((lines) => [...lines, `[${event.step}] ${event.state}: ${event.message}`].slice(-500));
-    if (event.type === 'error') setLog((lines) => [...lines, `ERROR: ${event.message}`].slice(-500));
-    setWizard((model) => reduceWizard(model, event));
-    if (event.type === 'complete' || event.type === 'error') {
-      setOperation('');
-      if (event.type === 'complete' && event.status) setStatus(event.status);
-      else void refresh();
-    }
-  }), [manager, refresh]);
+  useEffect(() => { attachDesktopBridgeSession(manager); }, [manager]);
+
+  // A finished run (seen here, or while this card was unmounted) refreshes the status.
+  useEffect(() => {
+    if (!session.finished) return;
+    if (session.finalStatus) setStatus(session.finalStatus);
+    else void refresh();
+  }, [session.finished, session.finalStatus, refresh]);
 
   const run = async (kind: DesktopBridgeOperation, options: DesktopBridgeOperationOptions = {}) => {
-    setLastRun({ kind, options });
     setError('');
-    setLog([]);
     setShowLog(false);
-    setOperation(kind);
-    setWizard(startWizard());
-    const result = await manager.run(kind, target(), options).catch((err: any) => ({ ok: false, error: String(err?.message || err) }));
-    // Progress and the final state arrive as events; a refusal (another
-    // operation running, invalid Hub URL) arrives only here.
-    if (!result.ok && result.error) {
-      setError(result.error);
-      setOperation('');
-    }
+    const failure = await runDesktopBridgeOperation(manager, kind, target(), options);
+    if (failure) setError(failure);
   };
 
   const saveHub = async () => {
@@ -209,11 +198,11 @@ export default function ThisMachineCard({ manager, onBridgeId }: { manager: Desk
               ) : null}
               {step.id === 'enroll' && wizard.pairing ? (
                 <div data-debug-id="settings-bridge-wizard-pairing" className="mt-2 rounded-lg border border-warning/30 bg-warning-soft p-2 pl-6 text-xs">
-                  <p className="text-warning">Approve this machine in the page opened in your browser and enter the code:</p>
+                  <p className="text-warning">Approve this machine on the approval page; its code is filled in for you:</p>
                   <div className="mt-1 flex items-center gap-2">
                     <code className="select-all text-sm font-bold tracking-wide text-primary">{wizard.pairing.code}</code>
                     <Button size="sm" variant="secondary" data-debug-id="settings-bridge-wizard-copy-code" onClick={() => { void navigator.clipboard.writeText(wizard.pairing?.code || ''); }}>Copy</Button>
-                    <a className="text-accent underline" href={wizard.pairing.url} target="_blank" rel="noreferrer">Open approval page</a>
+                    <button type="button" className="text-accent underline" data-debug-id="settings-bridge-wizard-open-approval" onClick={() => { if (wizard.pairing && !openApprovalForCode(wizard.pairing.code)) window.open(wizard.pairing.url, '_blank', 'noreferrer'); }}>Open approval page</button>
                   </div>
                 </div>
               ) : null}

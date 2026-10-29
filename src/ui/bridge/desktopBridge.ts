@@ -43,7 +43,13 @@ export interface DesktopBridgeTarget { hub?: string; profile?: string; service?:
 
 export type DesktopBridgeOperation = 'setup' | 'update' | 'reenroll' | 'uninstall';
 
-export interface DesktopBridgeOperationOptions { bridgeId?: string; purge?: boolean; replaceOtherAccount?: boolean }
+export interface DesktopBridgeOperationOptions {
+  bridgeId?: string;
+  purge?: boolean;
+  replaceOtherAccount?: boolean;
+  /** The renderer opens /device/add itself for the pairing code (no external browser). */
+  inAppApproval?: boolean;
+}
 
 /** One line of `--json-progress` (plus the app's own `download` step). */
 export interface DesktopBridgeProgress {

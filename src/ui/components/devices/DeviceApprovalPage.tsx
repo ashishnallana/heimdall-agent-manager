@@ -1,4 +1,5 @@
 import { useEntitlements } from '../../hooks/useEntitlements';
+import { subscribePendingApprovalCode, takePendingApprovalCode } from '../../bridge/desktopBridgeSession';
 import UpgradePrompt from '../billing/UpgradePrompt';
 import { isPlanLimitError, planLimitMessage, planLimitDetails, type PlanLimitDetails } from '../../utils/planLimit';
 import { atPlanLimit } from '../../utils/accountEntitlements';
@@ -10,7 +11,9 @@ import { atPlanLimit } from '../../utils/accountEntitlements';
 // derives a lookup from it to find the request, and checks the request's key_mac
 // with it — proof the hub did not swap the new device's keys. The approval then
 // carries a pair_mac under the same code, which the new device checks before it
-// trusts this account's root. Links never carry a code.
+// trusts this account's root. Links never carry a code. The one exception to typing
+// it: the desktop app's own bridge enrollment hands its code over in memory
+// (desktopBridgeSession, REQ-ENR-INAPP-1); the user still reviews and approves.
 //   browser → signed approval statement + keyring wrap + pair_mac;
 //   bridge  → signed approval of its identity key via /device/approve, then (once the
 //             enrolling process is connected) unseal v2 to an ephemeral key signed by
@@ -287,6 +290,21 @@ export default function DeviceApprovalPage() {
     }
   }, []);
 
+  // REQ-ENR-INAPP-1: a code this desktop app's own enrollment printed is looked up
+  // at once (taken once, so a reload or revisit asks for it again).
+  const [fromApp, setFromApp] = useState(false);
+  useEffect(() => {
+    const take = () => {
+      const handed = takePendingApprovalCode();
+      if (!handed) return;
+      setFromApp(true);
+      setCode(handed);
+      void lookUp(handed);
+    };
+    take();
+    return subscribePendingApprovalCode(take);
+  }, [lookUp]);
+
   const approve = useCallback(async () => {
     if (phase.kind !== 'review') return;
     const identity = currentDeviceIdentity();
@@ -361,7 +379,11 @@ export default function DeviceApprovalPage() {
   return (
     <div data-debug-id="device-approval-page" className="mx-auto w-full max-w-xl p-4">
       <h1 className="mb-1 flex items-center gap-2 text-lg font-semibold text-primary"><Icon name="lock" size={18} />Add a device</h1>
-      <p className="mb-4 text-sm text-muted">Type the pairing code shown on the new browser or printed by <code>ham-bridge enroll</code>.</p>
+      {fromApp ? (
+        <p data-debug-id="device-approval-from-app" className="mb-4 text-sm text-muted">This app is setting up its Bridge; its pairing code was filled in for you. Check the details, then approve.</p>
+      ) : (
+        <p className="mb-4 text-sm text-muted">Type the pairing code shown on the new browser or printed by <code>ham-bridge enroll</code>.</p>
+      )}
 
       <form
         className="mb-4 flex gap-2"
@@ -434,7 +456,8 @@ export default function DeviceApprovalPage() {
         <div data-debug-id="device-approval-done" className="flex flex-col gap-3">
           <Alert tone="success" title={phase.message.startsWith('Denied') ? 'Request denied' : 'Device approved'}>{phase.message}</Alert>
           <div className="flex flex-wrap gap-2">
-            <Button data-debug-id="device-approval-home-btn" variant="primary" onClick={() => { window.location.hash = '#/home'; }}>Go to home</Button>
+            {fromApp ? <Button data-debug-id="device-approval-bridges-btn" variant="primary" onClick={() => { window.location.hash = '#/settings/bridges'; }}>Back to Bridges</Button> : null}
+            <Button data-debug-id="device-approval-home-btn" variant={fromApp ? 'ghost' : 'primary'} onClick={() => { window.location.hash = '#/home'; }}>Go to home</Button>
             <Button data-debug-id="device-approval-another-btn" variant="ghost" onClick={reset}>Add another device</Button>
           </div>
         </div>

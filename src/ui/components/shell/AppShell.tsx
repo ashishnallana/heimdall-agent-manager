@@ -56,6 +56,7 @@ import {
 } from './shellChrome';
 import { useWindowChrome } from '../../hooks/useWindowChrome';
 import { buildRouteHash, getRoutePathname, getRouteSearch } from '../../utils/appLocation';
+import { setApprovalPageOpener } from '../../bridge/desktopBridgeSession';
 import {
   readLastSeenUserId,
   removeAppOwnedClientStorage,
@@ -1381,6 +1382,12 @@ function AuthenticatedShell({ user }: { user: AuthUser }) {
   };
   const [path, setPath] = useState(routeFromLocation);
   const [routeSearch, setRouteSearch] = useState(routeSearchFromLocation);
+  // REQ-ENR-INAPP-1 (Electron): the app's own bridge enrollment opens /device/add
+  // here, with its pairing code handed over in memory, never in the URL.
+  useEffect(() => {
+    setApprovalPageOpener(() => { window.location.hash = buildRouteHash('/device/add', ''); });
+    return () => setApprovalPageOpener(null);
+  }, []);
   const [focusMessageId, setFocusMessageId] = useState(focusMessageFromLocation);
   const [resourcePicker, setResourcePicker] = useState<'conversation' | 'task-chain' | 'shell' | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);

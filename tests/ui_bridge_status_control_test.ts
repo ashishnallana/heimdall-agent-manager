@@ -11,6 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { desktopCapabilities, initialWizard, reduceWizard, startWizard, wizardStepFor } from '../src/ui/bridge/desktopBridge.ts';
+import * as session from '../src/ui/bridge/desktopBridgeSession.ts';
 import bridgeManager from '../src/ui/electron/bridgeManager.cts';
 import externalUrl from '../src/ui/electron/externalUrl.cts';
 
@@ -198,7 +199,7 @@ test('REQ-EXT-URL-1: every shell.openExternal call in the main process uses a ve
   const calls = [...mainSource.matchAll(/shell\.openExternal\(([^)]*)\)/g)].map((match) => match[1]);
   // OIDC-window popups, main-window navigation, main-window popups, IPC, vetted Bridge pairing page.
   assert.deepEqual(calls, ['href', 'allowedExternalUrl(url', 'href', 'href', 'payload.url']);
-  assert.match(mainSource, /if \(payload\.type === 'pairing'\) void shell\.openExternal\(payload\.url\)/);
+  assert.match(mainSource, /if \(inAppApproval && mainWindow && !mainWindow\.isDestroyed\(\)\) showMainWindow\(\);\s*else void shell\.openExternal\(payload\.url\);/);
   assert.match(mainSource, /const href = allowedExternalUrl\(url\);\s*if \(href\) void shell\.openExternal\(href\);/);
   assert.match(mainSource, /const href = allowedExternalUrl\(url\);\s*if \(!href\) return \{ ok: false/);
   assert.match(mainSource, /allowedPairingUrl\(payload\.url, desktopPairingOrigins\(configuredHubApiBaseUrl\(\), configuredUiOrigin\(\)\)\)/);
@@ -678,4 +679,73 @@ test('F1/REQ-ENR-1: another account\'s enrollment is flagged for an explicit rep
   const card = fs.readFileSync(path.join(ROOT, 'src/ui/components/settings/ThisMachineCard.tsx'), 'utf8');
   assert.match(card, /settings-bridge-wizard-replace-account[\s\S]*replaceOtherAccount: true/);
   assert.match(fs.readFileSync(path.join(ROOT, 'src/bridge/setup_cmd.odin'), 'utf8'), /has_flag\(s\.args, "--replace-other-account"\) do append\(&argv, "--replace-other-account"\)/);
+});
+
+// REQ-ENR-INAPP-1: the app's own enrollment opens /device/add with its code handed
+// over in memory (never a URL), and the wizard keeps following the run meanwhile.
+function fakeManager() {
+  const listeners: ((e: any) => void)[] = [];
+  const runs: any[] = [];
+  return {
+    runs,
+    emit: (e: any) => listeners.forEach((l) => l(e)),
+    api: {
+      getConfig: async () => ({}), setHubUrl: async () => ({ ok: true }), getStatus: async () => ({}), list: async () => ({}),
+      run: async (kind: string, target: any, options: any) => { runs.push({ kind, target, options }); return { ok: true }; },
+      cancel: async () => ({ ok: true }), openLog: async () => ({ ok: true }),
+      onEvent: (cb: (e: any) => void) => { listeners.push(cb); return () => {}; },
+    } as any,
+  };
+}
+
+test('REQ-ENR-INAPP-1: setup pairing opens the in-app approval page with the code, once', async () => {
+  session.resetDesktopBridgeSessionForTests();
+  const m = fakeManager();
+  let opened = 0;
+  session.setApprovalPageOpener(() => { opened += 1; });
+  assert.equal(await session.runDesktopBridgeOperation(m.api, 'setup', { hub: 'h' }, { bridgeId: 'b1' }), '');
+  assert.deepEqual(m.runs[0].options, { bridgeId: 'b1', inAppApproval: true });
+  assert.deepEqual(session.desktopBridgeSession().lastRun, { kind: 'setup', options: { bridgeId: 'b1' } }, 'Retry repeats the user options only');
+  m.emit({ type: 'pairing', url: 'https://hub/api/v1/device/add', code: 'AAAA-BBBB-CCCC-DD' });
+  assert.equal(opened, 1);
+  assert.equal(session.takePendingApprovalCode(), 'AAAA-BBBB-CCCC-DD');
+  assert.equal(session.takePendingApprovalCode(), '', 'taken once');
+  // A reissued code reaches an already-open page.
+  const taken: string[] = [];
+  const stop = session.subscribePendingApprovalCode(() => taken.push(session.takePendingApprovalCode()));
+  m.emit({ type: 'pairing', url: 'https://hub/api/v1/device/add', code: 'EEEE-FFFF-GGGG-HH', issue: 2 });
+  stop();
+  assert.deepEqual(taken, ['EEEE-FFFF-GGGG-HH']);
+  // The wizard keeps following the run with no component mounted.
+  m.emit({ type: 'output', message: 'hello' });
+  m.emit({ type: 'complete', status: { installed: true } });
+  const s = session.desktopBridgeSession();
+  assert.equal(s.operation, '');
+  assert.equal(s.finished, 1);
+  assert.deepEqual(s.finalStatus, { installed: true });
+  assert.equal(s.wizard.completed, true);
+  assert.deepEqual(s.log, ['hello']);
+});
+
+test('REQ-ENR-INAPP-1: a pairing event outside an app-started setup/reenroll opens nothing', async () => {
+  session.resetDesktopBridgeSessionForTests();
+  const m = fakeManager();
+  let opened = 0;
+  session.setApprovalPageOpener(() => { opened += 1; });
+  session.attachDesktopBridgeSession(m.api);
+  m.emit({ type: 'pairing', url: 'https://hub/api/v1/device/add', code: 'AAAA-BBBB-CCCC-DD' });
+  await session.runDesktopBridgeOperation(m.api, 'update', {});
+  m.emit({ type: 'pairing', url: 'https://hub/api/v1/device/add', code: 'AAAA-BBBB-CCCC-DD' });
+  assert.equal(opened, 0);
+  assert.equal(session.takePendingApprovalCode(), '');
+  // No opener registered: the wizard link falls back to the browser.
+  session.setApprovalPageOpener(null);
+  assert.equal(session.openApprovalForCode('AAAA-BBBB-CCCC-DD'), false);
+});
+
+test('REQ-ENR-INAPP-1: the approval page never reads a code from the URL', () => {
+  const page = fs.readFileSync(path.join(ROOT, 'src/ui/components/devices/DeviceApprovalPage.tsx'), 'utf8');
+  assert.match(page, /const handed = takePendingApprovalCode\(\);/);
+  assert.match(page, /return subscribePendingApprovalCode\(take\);/);
+  assert.doesNotMatch(page, /searchParams|location\.(hash|search)[^;]*code|getRouteSearch/);
 });
