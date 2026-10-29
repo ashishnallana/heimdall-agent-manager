@@ -134,7 +134,7 @@ bridge_uninstall_emit :: proc(data: rawptr, ev: bridgesvc.Event) {
 	switch ev.state {
 	case "start":            fmt.printf("[%3d%%] %-10s ...", ev.pct, ev.step)
 	case "ok":               fmt.printfln(" ok%s%s", " — " if ev.message != "" else "", ev.message)
-	case "skipped":          fmt.printfln("[%3d%%] %-10s skipped%s%s", ev.pct, ev.step, " — " if ev.message != "skipped" else "", ev.message if ev.message != "skipped" else "")
+	case "skipped":          fmt.printfln(" skipped%s%s", " — " if ev.message != "skipped" else "", ev.message if ev.message != "skipped" else "")
 	case "retry":            fmt.printfln(" retry (attempt %d): %s", ev.attempt, ev.message)
 	case "warning":          fmt.printfln(" WARNING: %s", ev.message)
 	case "failed":
@@ -187,7 +187,10 @@ bridge_uninstall_run :: proc(data: rawptr, step: bridgesvc.Uninstall_Step) -> (b
 	case .Unregister:
 		files := bridgesvc.unregister_files(l)
 		registered := bridge_service_registered(u.host, l.service_name)
-		if !registered && len(files) == 0 do return true, .None, "skipped"
+		any_file := false
+		for f in files do if os.exists(f) do any_file = true
+		// Nothing registered and no file left: never touch the user's service manager.
+		if !registered && !any_file do return true, .None, "skipped"
 		for argv in bridgesvc.unregister_argv(u.host, l) do _, _ = bridge_service_exec(argv)
 		if _, busy, left := bridge_uninstall_remove(u, files); busy do return false, .Busy, fmt.tprintf("cannot remove %s", left)
 		// systemd: forget the removed unit.

@@ -98,6 +98,7 @@ run_uninstall :: proc(ops: Uninstall_Ops, mode: Uninstall_Mode) -> Uninstall_Res
 	for step in Uninstall_Step {
 		name := UNINSTALL_STEP_NAMES[step]
 		if step not_in steps {
+			ops.emit(ops.data, Event{step = name, state = "start", pct = uninstall_pct(step, false), attempt = 1})
 			ops.emit(ops.data, Event{step = name, state = "skipped", pct = uninstall_pct(step, true), message = "kept (--keep-data)", attempt = 1})
 			continue
 		}
