@@ -19,7 +19,9 @@ import "core:time"
 import bridgesvc "odin_test:lib/bridgesvc"
 
 BRIDGE_EXTENSION_PROVIDERS :: [?]string{"claude", "codex", "antigravity"}
-BRIDGE_EXTENSION_SYNC_TIMEOUT :: 90 * time.Second
+// Per provider, matching the Hub-frame path; there is no shared cap, so a slow
+// CLI cannot leave a later provider starting with its deadline already passed.
+BRIDGE_EXTENSION_PROVIDER_TIMEOUT :: 55 * time.Second
 
 // One provider's outcome; `line` is human-readable.
 Bridge_Extension_Sync_Line :: struct {
@@ -105,7 +107,6 @@ bridge_extensions_sync_providers :: proc(ext_root: string, on_line: proc(data: r
 	providers := BRIDGE_EXTENSION_PROVIDERS
 	detected := bridge_extension_discover(providers[:])
 	defer bridge_provider_paths_destroy_all(&detected)
-	deadline := time.time_add(time.now(), BRIDGE_EXTENSION_SYNC_TIMEOUT)
 	for prov in providers {
 		bin := ""
 		for d in detected {
@@ -124,9 +125,7 @@ bridge_extensions_sync_providers :: proc(ext_root: string, on_line: proc(data: r
 			line.line = fmt.tprintf("%s: bundle has no %s", prov, ext)
 		case:
 			// Each provider gets its own budget so one slow CLI cannot starve the rest.
-			per := time.time_add(time.now(), 55 * time.Second)
-			if time.diff(per, deadline) < 0 do per = deadline
-			r := bridge_extension_ensure(prov, ext, bin, per, {})
+			r := bridge_extension_ensure(prov, ext, bin, time.time_add(time.now(), BRIDGE_EXTENSION_PROVIDER_TIMEOUT), {})
 			line.ok = r.ok
 			if r.ok {
 				line.line = fmt.tprintf("%s: %s %s (found %s)", prov, r.action, r.version, BRIDGE_EXTENSION_CONDITION_NAMES[r.condition])

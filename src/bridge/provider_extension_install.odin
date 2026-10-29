@@ -226,7 +226,7 @@ bridge_hub_handle_extension_install_command :: proc(conn: ^ws.Connection, text: 
 	// Stay below the dispatcher's sixty-second cap.
 	sink_data := Bridge_Extension_Frame_Sink{conn = conn, command_id = command_id, provider = prov}
 	sink := Bridge_Extension_Sink{data = &sink_data, progress = bridge_extension_frame_progress, report = bridge_extension_frame_report}
-	result := bridge_extension_ensure(canonical, ext_path, bin_path, time.time_add(time.now(), 55 * time.Second), sink)
+	result := bridge_extension_ensure(canonical, ext_path, bin_path, time.time_add(time.now(), BRIDGE_EXTENSION_PROVIDER_TIMEOUT), sink)
 	if !result.ok {
 		bridge_extension_install_fail(conn, command_id, prov, result.code, result.message)
 		return

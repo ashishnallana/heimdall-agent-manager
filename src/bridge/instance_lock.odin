@@ -70,6 +70,14 @@ bridge_scope_lock :: proc(scope_name: string) -> (lock_path: string, ok: bool) {
 	return lock_path, bridge_instance_lock(lock_path)
 }
 
+// bridge_extension_lock_path is the per-OS-user lock serializing extension
+// installs of one provider. Provider registrations belong to the OS user, not to
+// a Bridge profile, so every profile (and `ham-bridge extensions sync` run by an
+// update next to the running bridge) contends on the same file.
+bridge_extension_lock_path :: proc(provider: string) -> (string, bool) {
+	return bridge_named_lock_path("extensions", provider)
+}
+
 // bridge_scope_lock_ok is bridge_scope_lock for a holder that keeps the lock for
 // the life of the process.
 bridge_scope_lock_ok :: proc(scope_name: string) -> bool {

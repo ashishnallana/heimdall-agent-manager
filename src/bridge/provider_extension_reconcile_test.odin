@@ -3,8 +3,10 @@ package main
 import "core:fmt"
 import "core:os"
 import "core:strings"
+import "base:runtime"
 import "core:sync"
 import "core:testing"
+import "core:thread"
 import "core:time"
 
 @(test)
@@ -214,4 +216,117 @@ test_bridge_extensions_sync_installs_bundle_for_detected_providers :: proc(t: ^t
 	// Installing the data-dir copy onto itself is a no-op.
 	ok, msg = bridge_extensions_install_bundle(ext_root, data_dir)
 	testing.expect(t, ok && msg == "skipped")
+}
+
+// A provider CLI shared by two concurrent ensures (update `extensions sync` and
+// the Hub's reconnect follow-up install), simulated with real registration state.
+Test_Race :: struct {
+	mu:            sync.Mutex,
+	installed:     string, // plugin version registered now ("" = none)
+	mp_registered: bool,
+	root:          string,
+	verbs:         [dynamic]string, // heap: appended from two threads
+	second:        ^thread.Thread,
+	second_ok:     bool,
+	second_action: string,
+	second_cond:   Bridge_Extension_Condition,
+	blocked_calls: int, // installer calls B made while A was installing (want 0)
+}
+test_race: Test_Race
+
+test_race_second :: proc(_: rawptr) {
+	r := bridge_extension_ensure("claude", test_install_path({test_race.root, "claude-code"}), "/fake/provider",
+		time.time_add(time.now(), 30 * time.Second), {})
+	sync.mutex_lock(&test_race.mu)
+	defer sync.mutex_unlock(&test_race.mu)
+	test_race.second_ok, test_race.second_cond = r.ok, r.condition
+	test_race.second_action = strings.clone(r.action, runtime.heap_allocator())
+}
+
+test_race_runner :: proc(args: []string, timeout: time.Duration) -> (stdout, stderr: string, exit_code: int, ok, timed_out: bool) {
+	verb := test_install_verb(args)
+	spawn := false
+	before := 0
+	{
+		sync.mutex_lock(&test_race.mu)
+		defer sync.mutex_unlock(&test_race.mu)
+		if verb == "marketplace list" {
+			if !test_race.mp_registered do return strings.clone("[]"), strings.clone(""), 0, true, false
+			return fmt.aprintf(`[{{"name":"heimdall","path":"%s"}}]`, test_race.root), strings.clone(""), 0, true, false
+		}
+		append(&test_race.verbs, strings.clone(verb, runtime.heap_allocator()))
+		switch verb {
+		case "uninstall":          test_race.installed = ""
+		case "marketplace remove": test_race.mp_registered = false
+		case "marketplace add":    test_race.mp_registered = true
+		case "install":            spawn = test_race.second == nil
+		}
+		before = len(test_race.verbs)
+	}
+	if spawn {
+		// B starts while A is between install and verify: the window in which
+		// B's cleanup used to remove A's fresh install.
+		test_race.second = thread.create_and_start_with_data(nil, test_race_second)
+		time.sleep(500 * time.Millisecond)
+		sync.mutex_lock(&test_race.mu)
+		test_race.blocked_calls = len(test_race.verbs) - before
+		sync.mutex_unlock(&test_race.mu)
+	}
+	if verb == "install" {
+		sync.mutex_lock(&test_race.mu)
+		test_race.installed = "0.4.31"
+		sync.mutex_unlock(&test_race.mu)
+	}
+	return strings.clone("Installed"), strings.clone(""), 0, true, false
+}
+
+test_race_discover :: proc(filter: []string) -> [dynamic]Bridge_Provider_Path {
+	sync.mutex_lock(&test_race.mu)
+	defer sync.mutex_unlock(&test_race.mu)
+	state := "absent"
+	if test_race.installed != "" do state = "present" if test_race.installed == "0.4.31" else "outdated"
+	results := make([dynamic]Bridge_Provider_Path)
+	append(&results, Bridge_Provider_Path{
+		provider = strings.clone(filter[0]),
+		state = strings.clone("present"),
+		extension_state = strings.clone(state),
+		extension_version = strings.clone(test_race.installed),
+	})
+	return results
+}
+
+// Two ensures of one provider are serialized; the second re-classifies after
+// taking the lock, finds the first one's install current and changes nothing.
+@(test)
+test_bridge_extension_concurrent_ensures_serialize :: proc(t: ^testing.T) {
+	sync.mutex_lock(&test_install_mu)
+	defer sync.mutex_unlock(&test_install_mu)
+	saved := test_install_hook()
+	defer test_install_restore(saved)
+	bridge_extension_install_runner = test_race_runner
+	bridge_extension_discover = test_race_discover
+	root := test_install_fixture(t)
+	defer _ = os.remove_all(root)
+	test_install_reset(t, "race")
+	test_race = {installed = "0.4.1", mp_registered = true, root = root, verbs = make([dynamic]string, runtime.heap_allocator())}
+	defer {
+		for v in test_race.verbs do delete(v, runtime.heap_allocator())
+		delete(test_race.verbs)
+		delete(test_race.second_action, runtime.heap_allocator())
+		test_race = {}
+	}
+
+	a := bridge_extension_ensure("claude", test_install_path({root, "claude-code"}), "/fake/provider", time.time_add(time.now(), 30 * time.Second), {})
+	testing.expectf(t, a.ok && a.condition == .Outdated && a.action == "reinstalled", "first: %v", a)
+	testing.expect(t, test_race.second != nil, "second ensure never started")
+	if test_race.second != nil {
+		thread.join(test_race.second)
+		thread.destroy(test_race.second)
+	}
+	testing.expect_value(t, test_race.blocked_calls, 0)
+	testing.expectf(t, test_race.second_ok && test_race.second_cond == .Current && test_race.second_action == "current",
+		"second: ok=%v cond=%v action=%q", test_race.second_ok, test_race.second_cond, test_race.second_action)
+	testing.expect_value(t, strings.join(test_race.verbs[:], ",", context.temp_allocator), "uninstall,marketplace remove,marketplace add,install")
+	testing.expect_value(t, test_race.installed, "0.4.31")
+	testing.expect(t, test_race.mp_registered)
 }

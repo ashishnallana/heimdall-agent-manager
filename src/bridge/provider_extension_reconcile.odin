@@ -21,6 +21,11 @@ package main
 // uninstall + marketplace remove) and then added again from the bundle. A fresh
 // install that fails or does not verify is retried once after the same cleanup,
 // so the caller only sees an error once self-healing has been tried.
+//
+// Ensures of one provider are serialized per OS user (bridge_extension_lock):
+// an update's `extensions sync` and the Hub's reconnect follow-up install would
+// otherwise each clean up the other's fresh install. Classification happens
+// after the lock is held, so the second caller finds the extension current.
 
 import "core:encoding/json"
 import "core:fmt"
@@ -28,6 +33,7 @@ import "core:mem"
 import "core:path/filepath"
 import "core:slice"
 import "core:strings"
+import "core:sync"
 import "core:time"
 
 Bridge_Extension_Condition :: enum {
@@ -37,6 +43,7 @@ Bridge_Extension_Condition :: enum {
 	Outdated,
 	Broken,
 	Foreign,
+	Unknown, // not inspected (the install lock was not acquired)
 }
 
 BRIDGE_EXTENSION_CONDITION_NAMES := [Bridge_Extension_Condition]string {
@@ -46,6 +53,7 @@ BRIDGE_EXTENSION_CONDITION_NAMES := [Bridge_Extension_Condition]string {
 	.Outdated     = "outdated",
 	.Broken       = "broken",
 	.Foreign      = "foreign",
+	.Unknown      = "unknown",
 }
 
 // Where progress and discovery reports go: Hub frames, or setup events.
@@ -194,6 +202,40 @@ bridge_extension_cleanup_argvs :: proc(provider, bin_path: string, allocator := 
 	return out[:]
 }
 
+// In-process half of the lock: POSIX record locks are per process, so two
+// threads of one bridge would both "hold" the file lock.
+@(private = "file")
+g_extension_ensure_mu: [len(BRIDGE_EXTENSION_PROVIDERS)]sync.Mutex
+
+BRIDGE_EXTENSION_LOCK_POLL :: 100 * time.Millisecond
+
+// bridge_extension_lock waits until deadline for the provider's in-process
+// mutex and its per-OS-user lock file. Release with bridge_extension_unlock.
+bridge_extension_lock :: proc(prov: string, deadline: time.Time) -> (lock_path: string, ok: bool) {
+	idx := -1
+	for p, i in BRIDGE_EXTENSION_PROVIDERS do if p == prov do idx = i
+	if idx < 0 do return "", true // unsupported; rejected later, nothing to serialize
+	path, path_ok := bridge_extension_lock_path(prov)
+	if !path_ok do return "", false
+	for !sync.mutex_try_lock(&g_extension_ensure_mu[idx]) {
+		if time.diff(time.now(), deadline) <= 0 do return "", false
+		time.sleep(BRIDGE_EXTENSION_LOCK_POLL)
+	}
+	for !bridge_instance_lock(path) {
+		if time.diff(time.now(), deadline) <= 0 {
+			sync.mutex_unlock(&g_extension_ensure_mu[idx])
+			return "", false
+		}
+		time.sleep(BRIDGE_EXTENSION_LOCK_POLL)
+	}
+	return path, true
+}
+
+bridge_extension_unlock :: proc(prov, lock_path: string) {
+	bridge_instance_unlock(lock_path)
+	for p, i in BRIDGE_EXTENSION_PROVIDERS do if p == prov do sync.mutex_unlock(&g_extension_ensure_mu[i])
+}
+
 bridge_extension_sink_progress :: proc(sink: Bridge_Extension_Sink, stage: string, pct: int, message: string) {
 	if sink.progress != nil do sink.progress(sink.data, stage, pct, message)
 }
@@ -207,6 +249,12 @@ bridge_extension_fail_result :: proc(cond: Bridge_Extension_Condition, code, mes
 bridge_extension_ensure :: proc(provider, ext_path, bin_path: string, deadline: time.Time, sink: Bridge_Extension_Sink) -> Bridge_Extension_Result {
 	prov := bridge_extension_canonical_provider(provider)
 	install_deadline := time.time_add(deadline, -8 * time.Second)
+	lock_path, locked := bridge_extension_lock(prov, install_deadline)
+	if !locked {
+		return bridge_extension_fail_result(.Unknown, "busy",
+			fmt.tprintf("another Heimdall extension install for %s is still running for this OS user; retry when it finishes", prov))
+	}
+	defer bridge_extension_unlock(prov, lock_path)
 	bundled_version := bridge_provider_extension_read_manifest_version(ext_path, prov)
 	required_version := bridge_extension_required_version(prov)
 	// Verification needs the newer of the bundled manifest and the catalog minimum.
