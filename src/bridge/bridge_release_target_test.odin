@@ -88,8 +88,11 @@ test_bridge_hello_target_follows_termux_runtime :: proc(t: ^testing.T) {
 	defer delete(hello)
 	testing.expect(t, strings.contains(hello, fmt.tprintf("\"target\":\"%s\"", target)), "hello reports the termux target")
 
-	_, apply_detail := bridge_runtime_apply_update(nil, "", "", "https://x/heimdall-local-linux-arm64.tar.gz", "abc", true, 0)
-	testing.expect(t, strings.contains(apply_detail, "self-update refused"), "apply refuses before staging anything")
+	// apply checks the version and the profile install before the target, so a test
+	// binary is refused by those first; the target refusal itself is checked directly.
+	testing.expect(t, strings.contains(bridge_update_target_refusal("https://x/heimdall-local-linux-arm64.tar.gz"), "self-update refused"), "termux refuses a linux bundle")
+	applied, apply_detail := bridge_runtime_apply_update(nil, "", "v9.9.9", "https://x/heimdall-local-linux-arm64.tar.gz", "abc", true, 0)
+	testing.expect(t, !applied && apply_detail != "", "apply refuses before staging anything")
 }
 
 // REQ-BUPD-1: bridge_hub_hello_json includes version, commit_sha, built_at, and target.

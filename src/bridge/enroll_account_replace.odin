@@ -131,8 +131,8 @@ bridge_enroll_old_token :: proc(args: []string, api_base, old_bridge_id: string)
 
 // bridge_enroll_wipe_bridge deletes every local secret of bridge_id: its access and
 // refresh token files (and rotation leftovers), vault keyring, identity record and
-// epoch floor, its re-enroll journal and any needs-reenrollment marker. Returns the
-// paths it could not remove.
+// epoch floor (with its backup and per-scope directory), its re-enroll journal and
+// any needs-reenrollment marker. Returns the paths it could not remove.
 bridge_enroll_wipe_bridge :: proc(config_path, token_file, bridge_id: string) -> (failed: [dynamic]string) {
 	failed = make([dynamic]string, context.temp_allocator)
 	if token_file != "" {
@@ -146,6 +146,15 @@ bridge_enroll_wipe_bridge :: proc(config_path, token_file, bridge_id: string) ->
 	}
 	keystore_lock_and_purge(bridge_id)
 	if !keystore_delete_identity_key(bridge_id) do append(&failed, fmt.tprintf("identity of %s", bridge_id))
+	if !keystore_identity_backup_drop(bridge_id) do append(&failed, fmt.tprintf("identity backup of %s", bridge_id))
+	// The per-scope directory (identity file, epoch floor, default credential) of
+	// the bound hub, as bridge_prune_remove and uninstall remove it.
+	if scope, scoped := keystore_scope_name(bridge_id); scoped {
+		if dir, dir_ok := bridge_vault_bridge_dir(scope, context.temp_allocator); dir_ok && os.exists(dir) {
+			_ = os.remove_all(dir)
+			if os.exists(dir) do append(&failed, dir)
+		}
+	}
 	if config_path != "" {
 		_ = os.remove(bridge_reenroll_journal_path(config_path))
 		bridge_reenroll_clear(config_path)
