@@ -873,7 +873,7 @@ nix build .#ham-bridge
 # what the release workflow ships; REQ-INST-16). Linux: fully static musl ELFs
 # with the pinned libcurl + OpenSSL 3 + zlib linked in; macOS: the same libraries
 # static, only system frameworks dynamic; ham-pty-host fully static.
-nix build .#release-ham-bridge .#release-ham-ctl .#release-ham-pty-host .#release-heimdall
+nix build .#release-ham-bridge .#release-ham-ctl .#release-ham-pty-host
 
 # Build pty-host (Rust — hermetic crane build)
 nix build .#ham-pty-host
@@ -881,8 +881,6 @@ nix build .#ham-pty-host
 # Build CLI
 nix build .#ham-ctl
 
-# Build the heimdall management CLI (enroll/status/service/update)
-nix build .#ham-manager
 
 # Or run the bridge directly (sets all required env vars automatically)
 nix run .#bridge -- --hub https://hub.example.com --bridge-token-file ~/.config/heimdall/bridge-token
@@ -977,7 +975,7 @@ it over the local socket), so they pick up an unseal without a respawn.
 `HEIMDALL_VAULT_KEY=<64-hex>` is honoured by `ham-ctl` only as a **single-bridge
 development override**; do not use it for normal operation.
 
-There is no key file and no `vault` command in the `heimdall` CLI any more. An old
+There is no key file and no vault CLI command any more (the `heimdall` CLI was removed). An old
 `~/.config/heimdall/vault_key` left over from earlier releases is ignored (it is not
 deleted); you may remove it.
 

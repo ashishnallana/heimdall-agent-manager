@@ -1596,6 +1596,12 @@ bridge_hub_handle_uninstall_command :: proc(conn: ^ws.Connection, text: string) 
 	fmt.println("bridge hub runtime command bridge_uninstall mode", mode)
 	name, registered := bridge_enroll_service_for(bridge_service_host(), os.args)
 	ok, detail := false, "this bridge does not run as a registered service; uninstall it on the machine: ham-bridge uninstall"
+	// A legacy service name (heimdall-bridge, ham-bridge, ...) would be refused by the
+	// detached uninstall's resolver after the hub was already told "accepted".
+	if registered && !bridge_service_name_safe(name) {
+		registered = false
+		detail = fmt.tprintf("this bridge is a legacy install (%s); reinstall it once with %s, or uninstall it on the machine", name, BRIDGE_REINSTALL_HINT)
+	}
 	if registered do ok, detail = bridge_uninstall_spawn_detached(name, mode != "keep_data")
 	result: string
 	if ok {

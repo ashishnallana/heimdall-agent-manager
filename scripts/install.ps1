@@ -105,7 +105,9 @@ Without -Version, installs the newest promoted (non-prerelease) release.
     if ($JsonProgress) { $argv += '--json-progress' }
     $argv += @($Rest)
     # ham-bridge copies what it needs out of the bundle; the temporary copy is removed below.
-    & $bridge @argv
+    # Out-Host: inside a function a native command's stdout would become the return
+    # value, hiding the pairing code and corrupting the exit code.
+    & $bridge @argv | Out-Host
     return $LASTEXITCODE
   } catch {
     Write-Host "[ERROR] $($_.Exception.Message)" -ForegroundColor Red

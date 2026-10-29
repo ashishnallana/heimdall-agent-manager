@@ -108,9 +108,11 @@ bridge_self_revoke :: proc(api_base, token: string) -> (ok: bool, detail: string
 	})
 	defer httpc.response_destroy(&resp)
 	if err != .None do return false, httpc.error_string(err)
-	// 401/403: the hub already refuses this token (revoked, expired, past its
-	// lifetime): it cannot be used again, which is all a revoke achieves.
-	if resp.status == 200 || resp.status == 401 || resp.status == 403 do return true, ""
+	// 403: the hub already refuses this credential for good (revoked, past its
+	// lifetime), which is all a revoke achieves. 401 is NOT done: it also means a
+	// merely expired access token, and the bridge row would stay active on the hub.
+	if resp.status == 200 || resp.status == 403 do return true, ""
+	if resp.status == 401 do return false, "HTTP 401 (access token expired or unknown; the bridge was not revoked)"
 	// 404: a still-pending (atomic) enrollment; the hub rolls it back at its deadline.
 	return false, fmt.tprintf("HTTP %d", resp.status)
 }

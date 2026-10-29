@@ -88,3 +88,13 @@ test_bridge_uninstall_delayed_delete_argv :: proc(t: ^testing.T) {
 	testing.expect_value(t, argv[5], "-Command")
 	testing.expect_value(t, argv[6], `Start-Sleep -Seconds 3; Remove-Item -LiteralPath 'C:\Users\O''Neil\Temp\ham-bridge-uninstall-3.exe' -Force -ErrorAction SilentlyContinue`)
 }
+
+@(test)
+test_bridge_service_name_safe :: proc(t: ^testing.T) {
+	testing.expect(t, bridge_service_name_safe("heimdall-bridge-hub-example-com"))
+	testing.expect(t, bridge_service_name_safe("heimdall-bridge-127-0-0-1-8081_work"))
+	// Legacy names, path components and an empty suffix are refused.
+	for bad in ([?]string{"heimdall-bridge", "heimdall-bridge-", "ham-bridge", "works.earendil.heimdall-bridge", "heimdall-bridge-x/../../..", "heimdall-bridge-x\\..\\..", "heimdall-bridge-A"}) {
+		testing.expectf(t, !bridge_service_name_safe(bad), "%q must be refused", bad)
+	}
+}

@@ -206,7 +206,7 @@
       # Built for linux_arm64 from either Linux host with the same static-musl
       # recipe (and pinned static libcurl) as the Linux release binaries.
       # HAM_RELEASE_TARGET=termux-arm64 (src/contracts/release_target.odin) makes
-      # the bridge hello, Hub update catalog and `heimdall update` resolve the
+      # the bridge hello, Hub update catalog and `ham-bridge update` resolve the
       # termux bundle instead of linux-arm64 (REQ-T13-1). The Linux release
       # binaries are musl-static now too; the termux bundle stays separate for
       # that update-channel identity.

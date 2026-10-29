@@ -148,7 +148,7 @@ a build that picked up some other libcurl fails at startup (`--version` too).
 
 1. Edit `nix/libcurl-pin.json`: version, URLs, SHA-256 of the `.tar.gz`
    (verify the release's `.asc` signature first). Same for zlib.
-2. `nix build .#release-ham-bridge .#release-ham-ctl .#release-heimdall` and
+2. `nix build .#release-ham-bridge .#release-ham-ctl` and
    `.#ham-hub`; run `odin test src/lib/httpc -collection:odin_test=src` in
    `nix develop` and `bash tests/hub_package_libcurl_test.sh`.
 3. The Windows cache key includes the pin, so the next release run rebuilds

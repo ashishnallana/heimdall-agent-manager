@@ -114,14 +114,16 @@ function profileArgs(target: BridgeProfile, allowService = true): string[] {
 
 type Running = { proc: any; kill: () => void };
 
-function killTree(proc: any) {
+const KILL_GRACE_MS = 5_000;
+
+function killTree(proc: any, signal: 'SIGTERM' | 'SIGKILL' = 'SIGTERM') {
   if (!proc || proc.exitCode !== null && proc.exitCode !== undefined) return;
   if (process.platform === 'win32') {
     try { childProcess.spawnSync('taskkill.exe', ['/PID', String(proc.pid), '/T', '/F'], { stdio: 'ignore', timeout: 5000, windowsHide: true }); }
     catch (_err) { try { proc.kill(); } catch (_ignored) { /* Already exited. */ } }
     return;
   }
-  try { process.kill(-proc.pid, 'SIGTERM'); } catch (_err) { try { proc.kill('SIGTERM'); } catch (_ignored) { /* Already exited. */ } }
+  try { process.kill(-proc.pid, signal); } catch (_err) { try { proc.kill(signal); } catch (_ignored) { /* Already exited. */ } }
 }
 
 // runCommand runs one process with a hard timeout. onLine receives complete
@@ -160,15 +162,24 @@ function runCommand(
     };
     proc.stdout?.on('data', collect('stdout'));
     proc.stderr?.on('data', collect('stderr'));
-    const timer = setTimeout(() => { timedOut = true; killTree(proc); }, options.timeoutMs);
+    // A process that ignores SIGTERM is killed 5 s later, so close always fires
+    // and the manager never stays busy.
+    let hardKill: any;
+    const stop = () => {
+      killTree(proc);
+      hardKill ??= setTimeout(() => { if (!settled) killTree(proc, 'SIGKILL'); }, KILL_GRACE_MS);
+      hardKill.unref?.();
+    };
+    const timer = setTimeout(() => { timedOut = true; stop(); }, options.timeoutMs);
     const finish = (code: number) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      clearTimeout(hardKill);
       for (const stream of ['stdout', 'stderr'] as const) if (partial[stream]) options.onLine?.(partial[stream], stream);
       resolve({ code, output, timedOut, cancelled });
     };
-    options.register?.({ proc, kill: () => { cancelled = true; killTree(proc); } });
+    options.register?.({ proc, kill: () => { cancelled = true; stop(); } });
     proc.on('error', (error: Error) => { output += error.message; finish(-1); });
     proc.on('close', (code: number | null) => finish(code === null ? -1 : Number(code)));
   });
@@ -474,7 +485,7 @@ async function performOperation(
   let lastStep = '';
   const onProgress = (event: any) => {
     if (event?.step) lastStep = String(event.step);
-    emit({ type: 'progress', ...event });
+    emit({ ...event, type: 'progress' });
   };
   let pairingSent = false;
   let plain = '';
@@ -494,7 +505,8 @@ async function performOperation(
   };
   try {
     before = await getStatus(target);
-    op.wasInstalled = Boolean(before.installed);
+    // An unreadable status may hide an existing install; never roll that back.
+    op.wasInstalled = Boolean(before.installed) || before.state === 'unknown';
     let binary = '';
     let bundleDir = '';
     if (kind === 'setup' || kind === 'update') {

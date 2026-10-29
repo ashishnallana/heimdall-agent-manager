@@ -37,13 +37,24 @@ bridge_service_host :: proc() -> bridgesvc.Host {
 	return host
 }
 
+// bridge_service_name_safe: a heimdall-bridge-* name made only of the characters
+// bridgesvc.service_name produces. The name becomes a path component (state dir,
+// service file), so '/', '\\' and '..' must never reach layout_for.
+bridge_service_name_safe :: proc(s: string) -> bool {
+	if !strings.has_prefix(s, bridgesvc.SERVICE_PREFIX) || len(s) == len(bridgesvc.SERVICE_PREFIX) || len(s) > 128 do return false
+	for c in transmute([]u8)s[len(bridgesvc.SERVICE_PREFIX):] {
+		if !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_') do return false
+	}
+	return true
+}
+
 // bridge_service_resolve picks the profile a command acts on: --service NAME,
 // else --hub URL [--profile P], else the service this process runs as
 // (HEIMDALL_BRIDGE_SERVICE_NAME, set by every rendered service file), else the
 // only installed profile. Returns "" with a message when it is ambiguous.
 bridge_service_resolve :: proc(host: bridgesvc.Host, args: []string) -> (name: string, err: string) {
 	if s := strings.trim_space(option_value(args, "--service", "")); s != "" {
-		if !strings.has_prefix(s, bridgesvc.SERVICE_PREFIX) do return "", fmt.tprintf("--service %q is not a heimdall-bridge-* service", s)
+		if !bridge_service_name_safe(s) do return "", fmt.tprintf("--service %q is not a heimdall-bridge-* service", s)
 		return s, ""
 	}
 	if hub := strings.trim_space(option_value(args, "--hub", "")); hub != "" {
@@ -54,7 +65,7 @@ bridge_service_resolve :: proc(host: bridgesvc.Host, args: []string) -> (name: s
 	}
 	if env, found := os.lookup_env("HEIMDALL_BRIDGE_SERVICE_NAME", context.temp_allocator); found && env != "" {
 		env = strings.trim_suffix(env, ".service")
-		if strings.has_prefix(env, bridgesvc.SERVICE_PREFIX) do return env, ""
+		if bridge_service_name_safe(env) do return env, ""
 	}
 	names := bridgesvc.list_services(host)
 	switch len(names) {

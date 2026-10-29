@@ -310,10 +310,12 @@ function sendBridgeEvent(rawPayload: any) {
 
 // The renderer's target: the local profile for the configured Hub, with an
 // optional profile name, or another installed profile by its service name.
+// The Hub is always the configured one: the window shows a remote origin, so a
+// script injected there must not be able to enroll this machine elsewhere.
 function bridgeTarget(raw: any) {
   const service = typeof raw?.service === 'string' ? raw.service : '';
   return {
-    hub: typeof raw?.hub === 'string' && raw.hub ? raw.hub : configuredHubApiBaseUrl(),
+    hub: configuredHubApiBaseUrl(),
     profile: typeof raw?.profile === 'string' ? raw.profile : '',
     ...(service ? { service } : {}),
   };
@@ -327,7 +329,23 @@ bridgeHandler('heimdall-bridge:get-config', () => ({
   defaultHubUrl: defaultHubApiBaseUrl(),
   bundledVersion: bridgeManager.bundledVersion(),
 }));
-bridgeHandler('heimdall-bridge:set-hub-url', (value: unknown) => ({ ok: true, hubUrl: saveHubApiBaseUrl(String(value || '')) }));
+// Changing the Hub is confirmed natively (outside the renderer) for the same reason.
+bridgeHandler('heimdall-bridge:set-hub-url', async (value: unknown) => {
+  const requested = String(value || '');
+  const next = requested ? bridgeManager.normalizeHubUrl(requested) : defaultHubApiBaseUrl();
+  if (next && next !== configuredHubApiBaseUrl() && mainWindow && !mainWindow.isDestroyed()) {
+    const answer = await dialog.showMessageBox(mainWindow, {
+      type: 'question',
+      message: `Point the Bridge on this machine at ${next}?`,
+      detail: 'Set up and re-enroll will register this machine with that Hub.',
+      buttons: ['Change Hub', 'Cancel'],
+      defaultId: 1,
+      cancelId: 1,
+    });
+    if (answer.response !== 0) return { ok: false, error: 'Hub change cancelled.' };
+  }
+  return { ok: true, hubUrl: saveHubApiBaseUrl(requested) };
+});
 bridgeHandler('heimdall-bridge:get-status', (target: unknown) => bridgeManager.getStatus(bridgeTarget(target)));
 bridgeHandler('heimdall-bridge:list', async () => ({ ok: true, profiles: await bridgeManager.listProfiles() }));
 bridgeHandler('heimdall-bridge:run', (kind: unknown, target: unknown, options: any) => {
@@ -342,8 +360,9 @@ bridgeHandler('heimdall-bridge:run', (kind: unknown, target: unknown, options: a
 });
 bridgeHandler('heimdall-bridge:cancel', () => ({ ok: bridgeManager.cancelOperation() }));
 bridgeHandler('heimdall-bridge:open-log', (logPath: unknown) => {
-  const file = String(logPath || '');
-  // Only logs under the per-user Heimdall bridge directories are revealed.
+  const file = path.resolve(String(logPath || ''));
+  // Only logs under the per-user Heimdall bridge directories are revealed
+  // (resolved first, so '..' cannot climb out of them).
   if (!/[\\/]heimdall[\\/]bridges[\\/]/.test(file) || !fs.existsSync(file)) return { ok: false, error: 'Log not found.' };
   shell.showItemInFolder(file);
   return { ok: true };

@@ -50,7 +50,9 @@ function fakeHamBridge(t: any, script: (call: SpawnCall) => void, statusFor: () 
     calls.push(call);
     setImmediate(() => {
       if (args[0] === 'status' || args[0] === 'list') {
-        proc.stdout.emit('data', `${JSON.stringify(args[0] === 'list' ? { profiles: [statusFor()] } : statusFor())}\n`);
+        const status = statusFor();
+        // A string is printed as-is (e.g. garbage, so status --json is unreadable).
+        proc.stdout.emit('data', typeof status === 'string' ? status : `${JSON.stringify(args[0] === 'list' ? { profiles: [status] } : status)}\n`);
         proc.emit('close', 0);
       } else script(call);
     });
@@ -94,7 +96,8 @@ test('REQ-WIN-UPDATE-1: unsigned Windows releases publish digest-protected updat
   assert.match(updaterSource, /autoUpdater\.allowPrerelease = false/);
   assert.match(updaterSource, /autoUpdater\.checkForUpdates\(\)/);
   assert.match(updaterSource, /autoUpdater\.quitAndInstall\(false, true\)/);
-  assert.match(mainSource, /desktopUpdater\.start\(app\.isPackaged && process\.platform === 'win32'/);
+  assert.match(mainSource, /desktopUpdater\.start\(desktopUpdater\.supported\(process\.platform, app\.isPackaged\)/);
+  assert.match(updaterSource, /platform === 'win32' \|\| platform === 'darwin'/);
   assert.match(builderSource, /publish:\s+[\s\S]*provider: github[\s\S]*repo: heimdall-agent-manager/);
   assert.match(builderSource, /verifyUpdateCodeSignature: false/);
   assert.doesNotMatch(releaseWorkflowSource, /WINDOWS_CODE_SIGNING_PFX|signtool sign|forceCodeSigning=true/);
@@ -360,6 +363,26 @@ test('REQ-ENR-6: quitting mid first-install waits for the rollback before the ap
   assert.equal(uninstalled, true, 'the partial install was removed before stopOnQuit settled');
   assert.equal(bridgeManager.operationRunning(), false);
   assert.equal((await running).ok, false);
+});
+
+test('REQ-ENR-6: a cancelled setup never rolls back an install whose status was unreadable', async (t) => {
+  let statusCalls = 0;
+  const calls = fakeHamBridge(t, ({ proc, args }) => {
+    if (args[0] === 'setup') proc.stdout.emit('data', line({ step: 'enroll', state: 'start', pct: 50 }));
+    else proc.emit('close', 0);
+  }, () => (++statusCalls === 1 ? 'not json\n' : { installed: true, state: 'running' }));
+  let enrolling!: () => void;
+  const started = new Promise<void>((resolve) => { enrolling = resolve; });
+  const running = bridgeManager.runOperation('setup', HUB, (event: any) => { if (event.type === 'progress' && event.step === 'enroll') enrolling(); });
+  await started;
+  assert.equal(bridgeManager.cancelOperation(), true);
+  assert.equal((await running).ok, false);
+  assert.equal(calls.some((c) => c.args[0] === 'uninstall'), false, 'an existing install must not be purged');
+});
+
+test('F25: the Hub a Bridge is set up against is never taken from the renderer', () => {
+  assert.match(mainSource, /function bridgeTarget\(raw: any\) \{[\s\S]*?hub: configuredHubApiBaseUrl\(\),/);
+  assert.match(mainSource, /'heimdall-bridge:set-hub-url'[\s\S]*?dialog\.showMessageBox\(mainWindow/);
 });
 
 test('REQ-ENR-6: the quit hold is bounded when the rollback hangs', async (t) => {
