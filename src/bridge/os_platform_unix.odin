@@ -257,6 +257,17 @@ bridge_os_supervisor_argv :: proc(script: string) -> [dynamic]string {
 // session of its own, so the supervisor is told --already-detached.
 BRIDGE_UPDATE_SPAWN_DETACHES :: true
 
+// bridge_os_reexec replaces this process with argv (argv[0] an absolute path),
+// keeping its pid, session and environment (the tray relaunching itself after an
+// update). Returns only when execv failed.
+bridge_os_reexec :: proc(argv: []string) -> bool {
+	if len(argv) == 0 do return false
+	c_argv := make([]cstring, len(argv) + 1, context.temp_allocator)
+	for arg, i in argv do c_argv[i] = strings.clone_to_cstring(arg, context.temp_allocator)
+	posix.execv(c_argv[0], raw_data(c_argv))
+	return false
+}
+
 // bridge_os_spawn_new_session starts argv (argv[0] resolved through PATH like
 // execvp) as the leader of a new session and process group, with stdio on
 // /dev/null, and does not wait for it. setsid(2) runs in the forked child, which

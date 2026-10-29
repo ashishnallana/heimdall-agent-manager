@@ -187,9 +187,11 @@ bridge_setup_run :: proc(data: rawptr, step: bridgesvc.Step) -> bridgesvc.Step_R
 		if !s.copy_binaries do return {ok = true, message = "skipped"}
 		bak := strings.concatenate({l.bin_dir, ".bak"}, context.temp_allocator)
 		if os.exists(l.bin_dir) {
-			// A running tray executes bin/ham-bridge too (Windows keeps bin/ busy):
-			// stop it; finish starts it again from the new binaries.
-			if bridge_tray_stop(s.host, l) do s.tray_stopped = true
+			// A running tray executes bin/ham-bridge too. Windows keeps bin/ busy:
+			// stop it there; finish starts it again from the new binaries. On
+			// Linux/macOS the rename works under it and the tray relaunches itself
+			// once it sees the new binary, staying in the user's login session.
+			if s.host.os == .Windows && bridge_tray_stop(s.host, l) do s.tray_stopped = true
 			_ = os.remove_all(bak)
 			if err := os.rename(l.bin_dir, bak); err != nil {
 				// Windows: a running bridge keeps its executable's directory busy.
@@ -432,7 +434,7 @@ bridge_setup_undo :: proc(data: rawptr, step: bridgesvc.Step) {
 
 bridge_setup_finish :: proc(data: rawptr, ok: bool) {
 	s := (^Bridge_Setup)(data)
-	if !ok && s.tray_stopped do _ = bridge_tray_spawn(bridgesvc.tray_argv(s.host, s.layout), nil)
+	if !ok && s.tray_stopped do _ = bridge_tray_spawn(bridgesvc.tray_launch_argv(s.host, s.layout), nil)
 	if !ok && s.was_running {
 		// Leave the previous install running, as it was before setup.
 		_, _ = bridge_service_action(s.host, s.layout.service_name, .Start)

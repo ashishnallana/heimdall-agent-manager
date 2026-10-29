@@ -54,8 +54,9 @@ executable). Steps, in order:
 
 After a successful run setup installs the tray (see [`ham-bridge tray`](#ham-bridge-tray)) and
 reports it as one more `tray` event (`ok`, `skipped` with the reason, or `warning`); the
-tray never fails or rolls back setup. `binaries` stops a running tray of the profile
-(it executes `bin/ham-bridge` too) and the end of setup, or its rollback, starts it again.
+tray never fails or rolls back setup. On Windows `binaries` stops a running tray of the
+profile (it keeps `bin\` busy) and the end of setup, or its rollback, starts it again; on
+Linux/macOS the tray keeps running and relaunches itself from the new binary.
 
 When a step fails with a **known** failure the engine remediates and retries it (at
 most 2 times), reporting every attempt:
@@ -232,8 +233,8 @@ process per profile; Electron has no tray of its own.
 | OS | native API | login entry (written by `setup`, removed by `uninstall`) |
 |---|---|---|
 | Linux | StatusNotifierItem via `libayatana-appindicator3` (or `libappindicator3`) + GTK 3, loaded at runtime (XEmbed fallback when no SNI watcher runs) | `~/.config/autostart/<service>-tray.desktop` |
-| macOS | `NSStatusItem` (Accessory app: no Dock icon) | `~/Library/LaunchAgents/<service>.tray.plist` (`LimitLoadToSessionType=Aqua`) |
-| Windows | `Shell_NotifyIconW` | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` value `<service>-tray` |
+| macOS | `NSStatusItem` (Accessory app: no Dock icon) | `~/Library/LaunchAgents/<service>.tray.plist` (`LimitLoadToSessionType=Aqua`, `AbandonProcessGroup` so Uninstall outlives the tray) |
+| Windows | `Shell_NotifyIconW` (retried up to 2 min at login until the taskbar accepts it) | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` value `<service>-tray`: `"conhost.exe" "--headless" "<bin>\ham-bridge.exe" "tray" ...`, so no console window opens and the helpers the tray runs share its hidden console |
 
 setup installs it only on a desktop session: Linux with `DISPLAY`, `WAYLAND_DISPLAY` or
 `XDG_SESSION_TYPE=x11|wayland`; macOS/Windows unless run over SSH (Windows: inside an
@@ -258,6 +259,11 @@ The tray polls the token-free status (the same as `ham-bridge status --json`) ev
 The running tray records its pid in `<data dir>/run/tray.pid`; a second start for the
 same profile exits. A desktop without a tray host (no libayatana, no display, no
 taskbar) logs why and exits `0`, so the login entry does not respawn it.
+
+When an update replaces `bin/ham-bridge` (two polls agree on the new size/mtime) the tray
+relaunches itself from it: `execv` in place on Linux/macOS (same pid, login session and
+launchd job), a new process on Windows, where the update's restart from the bridge's
+Scheduled Task (`InteractiveToken`) has normally already brought it back.
 
 ## `ham-bridge update`
 

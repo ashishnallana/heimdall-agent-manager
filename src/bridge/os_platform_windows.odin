@@ -302,6 +302,13 @@ bridge_os_spawn_new_session :: proc(argv: []string) -> bool {
 	return err == nil
 }
 
+// bridge_os_reexec starts argv as a new process (Windows has no exec); true means
+// it started and the caller exits. It inherits this process's (hidden) console
+// and desktop.
+bridge_os_reexec :: proc(argv: []string) -> bool {
+	return bridge_os_spawn_new_session(argv)
+}
+
 // bridge_os_default_data_dir is %LOCALAPPDATA%\heimdall (per user, not roamed).
 bridge_os_default_data_dir :: proc() -> string {
 	if local := os.get_env("LOCALAPPDATA", context.temp_allocator); local != "" {

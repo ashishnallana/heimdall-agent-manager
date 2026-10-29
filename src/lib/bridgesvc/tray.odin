@@ -51,10 +51,25 @@ tray_layout :: proc(host: Host, l: Layout) -> Tray_Layout {
 	return t
 }
 
-// tray_argv: the command line the login entry starts (temp-allocated).
+// tray_argv: the tray's own command line (temp-allocated).
 tray_argv :: proc(host: Host, l: Layout) -> []string {
 	a := make([]string, 4, context.temp_allocator)
 	a[0], a[1], a[2], a[3] = tray_layout(host, l).exe, "tray", "--service", l.service_name
+	return a
+}
+
+// tray_launch_argv: how the login entry, setup and update start the tray
+// (temp-allocated). On Windows ham-bridge is a console program, so it runs under
+// `conhost.exe --headless`: no console window at login, and the tray keeps a
+// hidden console that the helpers it runs every poll (powershell.exe for the
+// Scheduled Task state, the service/setup menu actions) inherit instead of each
+// opening a console window of their own.
+tray_launch_argv :: proc(host: Host, l: Layout) -> []string {
+	argv := tray_argv(host, l)
+	if host.os != .Windows do return argv
+	a := make([]string, len(argv) + 2, context.temp_allocator)
+	a[0], a[1] = "conhost.exe", "--headless"
+	copy(a[2:], argv)
 	return a
 }
 
@@ -91,7 +106,7 @@ tray_wanted :: proc(target: Target_OS, env: Desktop_Env) -> (wanted: bool, reaso
 // uses the registry (Windows) or has no tray.
 render_tray_autostart :: proc(host: Host, l: Layout) -> string {
 	t := tray_layout(host, l)
-	argv := tray_argv(host, l)
+	argv := tray_launch_argv(host, l)
 	b := strings.builder_make(context.temp_allocator)
 	#partial switch host.os {
 	case .Linux:
@@ -113,7 +128,10 @@ render_tray_autostart :: proc(host: Host, l: Layout) -> string {
 		strings.write_string(&b, "\nIcon=network-server\nTerminal=false\nNoDisplay=true\nX-GNOME-Autostart-enabled=true\nX-Heimdall-Generated=ham-bridge setup\n")
 	case .Darwin:
 		strings.write_string(&b, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n")
-		fmt.sbprintf(&b, "<plist version=\"1.0\">\n<dict>\n\t<key>Label</key>\n\t<string>%s</string>\n", xml_escape(t.label))
+		// AbandonProcessGroup: the tray's children (Uninstall above all, which outlives
+		// the tray by design; Restart / Re-enroll after Close tray) must not be killed
+		// with the job when the tray exits. Same reason as the bridge's own plist.
+		fmt.sbprintf(&b, "<plist version=\"1.0\">\n<dict>\n\t<key>AbandonProcessGroup</key>\n\t<true/>\n\t<key>Label</key>\n\t<string>%s</string>\n", xml_escape(t.label))
 		strings.write_string(&b, "\t<key>LimitLoadToSessionType</key>\n\t<string>Aqua</string>\n\t<key>ProcessType</key>\n\t<string>Interactive</string>\n\t<key>ProgramArguments</key>\n\t<array>\n")
 		for a in argv do fmt.sbprintf(&b, "\t\t<string>%s</string>\n", xml_escape(a))
 		strings.write_string(&b, "\t</array>\n\t<key>RunAtLoad</key>\n\t<true/>\n\t<key>KeepAlive</key>\n\t<dict>\n\t\t<key>SuccessfulExit</key>\n\t\t<false/>\n\t</dict>\n")
@@ -125,7 +143,7 @@ render_tray_autostart :: proc(host: Host, l: Layout) -> string {
 // tray_windows_command is the Run value's data: the quoted command line.
 tray_windows_command :: proc(host: Host, l: Layout) -> string {
 	b := strings.builder_make(context.temp_allocator)
-	for a, i in tray_argv(host, l) {
+	for a, i in tray_launch_argv(host, l) {
 		if i > 0 do strings.write_byte(&b, ' ')
 		fmt.sbprintf(&b, "\"%s\"", a)
 	}

@@ -17,6 +17,14 @@ package main
 // A desktop without a tray host (GNOME without the AppIndicator extension, no
 // libayatana) degrades to "no icon": the tray logs why and exits 0, so the login
 // entry does not respawn it.
+//
+// Updates: the tray watches the installed binary (bridgesvc.tray_layout .exe) and
+// relaunches itself from it once it was replaced (bridge_os_reexec: execv in place
+// on Linux/macOS, so it stays in the login session and the launchd job; a fresh
+// process on Windows). Setup therefore leaves a running tray alone on Linux/macOS,
+// where bin/ can be renamed under it; only Windows stops it to unlock bin/ and
+// restarts it from the update (the bridge's Scheduled Task runs with the user's
+// InteractiveToken, so that tray lands on the user's desktop).
 
 import "core:fmt"
 import "core:os"
@@ -40,8 +48,13 @@ bridge_tray_command :: proc(args: []string) -> bool {
 		fmt.eprintln("ham-bridge tray: no desktop tray on this platform")
 		return true
 	}
+	// The loop frees the temp allocator every tick: everything it keeps using
+	// (host paths, the service name, the tray's files) lives for the process.
+	host.home, host.appdata, host.local_appdata, host.prefix = strings.clone(host.home), strings.clone(host.appdata), strings.clone(host.local_appdata), strings.clone(host.prefix)
+	name = strings.clone(name)
 	l := bridgesvc.layout_for(host, name)
 	tl := bridgesvc.tray_layout(host, l)
+	tl.exe, tl.pid_file = strings.clone(tl.exe), strings.clone(tl.pid_file)
 	// One tray per profile: a second login (or a manual start) leaves the first.
 	if pid, ok := bridge_tray_read_pid(tl.pid_file); ok && pid != os.get_pid() && bridge_os_pid_alive(pid) && bridge_tray_pid_is_tray(pid) {
 		fmt.printfln("ham-bridge tray: already running (pid %d)", pid)
@@ -53,6 +66,10 @@ bridge_tray_command :: proc(args: []string) -> bool {
 
 	self, _ := os.get_executable_path(context.temp_allocator)
 	if self == "" do self = tl.exe
+	self = strings.clone(self)
+	defer delete(self)
+	exe_seen := bridge_tray_exe_id(tl.exe)
+	exe_pending: Bridge_Tray_Exe_Id // a differing id, confirmed by the next poll
 
 	if ok, why := bridge_tray_native_init("Heimdall Bridge"); !ok {
 		// Graceful degradation: nothing to show on this desktop; exit 0 so the
@@ -79,6 +96,22 @@ bridge_tray_command :: proc(args: []string) -> bool {
 				bridge_tray_native_update(bridgesvc.tray_view(status), bridge_tray_enabled(status))
 			}
 			bridge_tray_reap(&children)
+			// An update replaced the installed binary: run the new one. Wait until
+			// two polls agree so a binary still being moved into place is not run.
+			if id := bridge_tray_exe_id(tl.exe); id.ok && id != exe_seen {
+				if id == exe_pending {
+					argv := make([dynamic]string, context.temp_allocator)
+					append(&argv, tl.exe)
+					append(&argv, ..os.args[1:])
+					fmt.eprintfln("ham-bridge tray: %s was updated; relaunching", tl.exe)
+					_ = os.remove(tl.pid_file) // the new process (Windows) must not see this one
+					if bridge_os_reexec(argv[:]) do return true
+					fmt.eprintln("ham-bridge tray: relaunch failed; keeping the running tray")
+					_ = os.write_entire_file_from_string(tl.pid_file, fmt.tprintf("%d\n", os.get_pid()))
+					exe_seen = id
+				}
+				exe_pending = id
+			}
 		}
 		action, clicked := bridge_tray_native_pump(BRIDGE_TRAY_TICK)
 		if !clicked do continue
@@ -88,8 +121,12 @@ bridge_tray_command :: proc(args: []string) -> bool {
 		if action == .Uninstall {
 			if !bridge_tray_native_confirm(bridgesvc.TRAY_UNINSTALL_CONFIRM) do continue
 			// uninstall removes this tray's login entry and stops it; leave first so
-			// nothing holds bin/ open (Windows) while it is deleted.
-			_ = bridge_tray_spawn(bridgesvc.tray_action_argv(host, status, self, action), nil)
+			// nothing holds bin/ open (Windows) while it is deleted. A session of its
+			// own keeps it alive past this tray (launchd also has AbandonProcessGroup).
+			if !bridge_os_spawn_new_session(bridgesvc.tray_action_argv(host, status, self, action)) {
+				fmt.eprintln("ham-bridge tray: Uninstall failed to start")
+				continue
+			}
 			return true
 		}
 		if !bridge_tray_spawn(bridgesvc.tray_action_argv(host, status, self, action), &children) {
@@ -97,6 +134,19 @@ bridge_tray_command :: proc(args: []string) -> bool {
 		}
 		next_poll = time.now() // reflect a restart / re-enroll quickly
 	}
+}
+
+// Bridge_Tray_Exe_Id identifies one build of the installed binary.
+Bridge_Tray_Exe_Id :: struct {
+	ok:    bool,
+	size:  i64,
+	mtime: time.Time,
+}
+
+bridge_tray_exe_id :: proc(path: string) -> Bridge_Tray_Exe_Id {
+	fi, err := os.stat(path, context.temp_allocator)
+	if err != nil || fi.size <= 0 do return {}
+	return {ok = true, size = fi.size, mtime = fi.modification_time}
 }
 
 bridge_tray_enabled :: proc(s: bridgesvc.Status) -> (e: Bridge_Tray_Enabled) {
@@ -159,12 +209,12 @@ bridge_tray_desktop_env :: proc(args: []string) -> bridgesvc.Desktop_Env {
 // bridge_tray_install writes and registers the login entry and starts the tray
 // now (setup, desktop sessions only). Never fails setup: the bridge works
 // without a tray. message is "skipped" when not wanted.
-// force_start: setup stopped a running tray to replace bin/; an update run from
-// the (headless) service must still bring it back.
+// force_start: setup stopped a running tray to replace bin/ (Windows only); an
+// update run from the service must still bring it back.
 bridge_tray_install :: proc(host: bridgesvc.Host, l: bridgesvc.Layout, args: []string, force_start := false) -> (ok: bool, message: string) {
 	if want, why := bridgesvc.tray_wanted(host.os, bridge_tray_desktop_env(args)); !want {
 		if force_start {
-			_ = bridge_tray_spawn(bridgesvc.tray_argv(host, l), nil)
+			_ = bridge_tray_spawn(bridgesvc.tray_launch_argv(host, l), nil)
 			return true, "tray restarted"
 		}
 		return true, fmt.tprintf("skipped (%s)", why)
@@ -186,7 +236,7 @@ bridge_tray_install :: proc(host: bridgesvc.Host, l: bridgesvc.Layout, args: []s
 	if host.os != .Darwin {
 		running := false
 		if pid, pok := bridge_tray_read_pid(tl.pid_file); pok && bridge_os_pid_alive(pid) && bridge_tray_pid_is_tray(pid) do running = true
-		if !running do _ = bridge_tray_spawn(bridgesvc.tray_argv(host, l), nil)
+		if !running do _ = bridge_tray_spawn(bridgesvc.tray_launch_argv(host, l), nil)
 	}
 	return true, "tray installed (starts at login)"
 }

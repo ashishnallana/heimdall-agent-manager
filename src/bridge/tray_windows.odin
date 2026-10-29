@@ -4,6 +4,12 @@ package main
 // the icon opens a popup menu built from the latest status (TrackPopupMenu with
 // TPM_RETURNCMD, so the chosen entry comes back synchronously). Explorer that
 // restarts broadcasts "TaskbarCreated"; the icon is re-added then.
+//
+// Console: the login entry starts this console binary under `conhost --headless`
+// (bridgesvc.tray_launch_argv). The tray keeps that hidden console on purpose:
+// every console helper it runs (powershell.exe for the Scheduled Task state each
+// poll, `service restart`, `setup`) inherits it. FreeConsole would make each of
+// them open a console window of its own.
 
 import "base:runtime"
 import "core:strings"
@@ -91,10 +97,31 @@ tray_wndproc :: proc "system" (hwnd: win.HWND, msg: win.UINT, wparam: win.WPARAM
 @(private = "file")
 tray_context: runtime.Context
 
+// Explorer starts Run entries early at login; the notification area may not
+// accept icons yet. Retry this long (TaskbarCreated also re-adds) before degrading.
+@(private = "file")
+TRAY_NIM_ADD_WAIT :: 2 * time.Minute
+
+foreign import kernel32 "system:Kernel32.lib"
+
+@(default_calling_convention = "system", private = "file")
+foreign kernel32 {
+	GetConsoleProcessList :: proc(lpdwProcessList: [^]win.DWORD, dwProcessCount: win.DWORD) -> win.DWORD ---
+}
+
+// tray_hide_own_console hides a console window that only this process uses (the
+// tray started without conhost --headless); a console shared with a terminal the
+// user ran `ham-bridge tray` from is left alone.
+@(private = "file")
+tray_hide_own_console :: proc() {
+	pids: [2]win.DWORD
+	if GetConsoleProcessList(&pids[0], len(pids)) != 1 do return
+	if hwnd := win.GetConsoleWindow(); hwnd != nil do win.ShowWindow(hwnd, win.SW_HIDE)
+}
+
 bridge_tray_native_init :: proc(title: string) -> (ok: bool, why: string) {
 	tray_context = context
-	// The login entry starts the console binary: drop its console window.
-	win.FreeConsole()
+	tray_hide_own_console()
 	instance := win.HINSTANCE(win.GetModuleHandleW(nil))
 	class_name := win.utf8_to_wstring("HeimdallBridgeTray", context.allocator)
 	wc := win.WNDCLASSEXW{cbSize = size_of(win.WNDCLASSEXW), lpfnWndProc = tray_wndproc, hInstance = instance, lpszClassName = class_name}
@@ -104,7 +131,18 @@ bridge_tray_native_init :: proc(title: string) -> (ok: bool, why: string) {
 	tray_taskbar_created = win.RegisterWindowMessageW(win.utf8_to_wstring("TaskbarCreated", context.temp_allocator))
 	tray_nid = win.NOTIFYICONDATAW{cbSize = size_of(win.NOTIFYICONDATAW), hWnd = tray_hwnd, uID = 1, uFlags = win.NIF_MESSAGE | win.NIF_ICON | win.NIF_TIP, uCallbackMessage = TRAY_CALLBACK, hIcon = tray_icon(.Warning)}
 	tray_set_tip(title)
-	if !win.Shell_NotifyIconW(win.NIM_ADD, &tray_nid) do return false, "Shell_NotifyIconW failed (no taskbar)"
+	deadline := time.time_add(time.now(), TRAY_NIM_ADD_WAIT)
+	// NIM_MODIFY succeeding means a TaskbarCreated handler already added the icon.
+	for !win.Shell_NotifyIconW(win.NIM_ADD, &tray_nid) && !win.Shell_NotifyIconW(win.NIM_MODIFY, &tray_nid) {
+		if time.diff(time.now(), deadline) <= 0 do return false, "Shell_NotifyIconW failed (no taskbar)"
+		// Pump so a TaskbarCreated broadcast is handled (it adds the icon itself).
+		msg: win.MSG
+		for win.PeekMessageW(&msg, nil, 0, 0, win.PM_REMOVE) {
+			win.TranslateMessage(&msg)
+			win.DispatchMessageW(&msg)
+		}
+		time.sleep(time.Second)
+	}
 	return true, ""
 }
 
