@@ -82,23 +82,13 @@ const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'heimdall-lifecycle-'));
 // per-bridge secrets under ~ (bridge_vault_bridge_dir). So with HEIMDALL_E2E_SERVICE=1
 // (ephemeral CI runners) the whole run uses the real home; every path, service and
 // secret is still named by this run's profile/bridge ids and removed by them only.
-// macOS keeps the user's keychains and keychain search list under ~/Library; with
-// a temp HOME the Security framework finds no default keychain and
-// SecKeychainAddGenericPassword stalls the enroll silently. Point the temp HOME at
-// the real ones (items are named by this run's bridge ids and removed by them).
-function linkMacKeychains(home) {
-  if (process.platform !== 'darwin') return;
-  const real = os.homedir();
-  fs.mkdirSync(path.join(home, 'Library', 'Preferences'), { recursive: true });
-  for (const rel of [['Library', 'Keychains'], ['Library', 'Preferences', 'com.apple.security.plist']]) {
-    const src = path.join(real, ...rel);
-    const dst = path.join(home, ...rel);
-    if (fs.existsSync(src) && !fs.existsSync(dst)) fs.symlinkSync(src, dst);
-  }
-}
-const HOME = WITH_SERVICE ? os.homedir() : path.join(ROOT, 'home');
+// macOS: Security resolves the default keychain from the real user's home. Under a
+// temp HOME there is none, and SecKeychainAddGenericPassword(nil) blocks in
+// makeLoginAuthUI -> AuthorizationCopyRights waiting for a login-keychain prompt
+// no CI runner can show (seen with `sample`). Keep the real HOME there; every
+// bridge path is passed explicitly and keychain items are named by this run's ids.
+const HOME = WITH_SERVICE || MAC ? os.homedir() : path.join(ROOT, 'home');
 fs.mkdirSync(HOME, { recursive: true });
-if (!WITH_SERVICE) linkMacKeychains(HOME);
 const ENV = WITH_SERVICE ? { ...process.env }
   : { ...process.env, HOME, USERPROFILE: HOME, APPDATA: path.join(HOME, 'AppData'), LOCALAPPDATA: path.join(HOME, 'Local'), XDG_CONFIG_HOME: path.join(HOME, '.config') };
 if (WITH_SERVICE && WIN && (!ENV.APPDATA || !ENV.LOCALAPPDATA)) throw new Error('APPDATA/LOCALAPPDATA unset');
