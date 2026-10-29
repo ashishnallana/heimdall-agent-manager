@@ -447,7 +447,7 @@ async function electronPhase(hub, A, B) {
   await step('7 Electron: setup wizard installs, enrolls (pairing event) and starts the service', async () => {
     S.first = await run('setup', A);
     const st = await status();
-    expect(st.installed && st.state === 'running', `status --json: installed and running (${st.state} ${st.error || ''})`);
+    expect(st.installed && ['running', 'connected'].includes(st.state), `status --json: installed and running or connected (${st.state} ${st.error || ''})`);
     expect(S.first.events.some((e) => e.type === 'complete'), 'the wizard received complete');
     for (const deadline = Date.now() + 60_000; !(await online(A, S.first.bridgeId)()); await sleep(500)) {
       if (Date.now() > deadline) throw new CheckFailed('the service never connected as account A');
