@@ -96,4 +96,18 @@ function oidcWindowNavigationAllowed(value: unknown, uiOrigin: string): boolean 
   }
 }
 
-module.exports = { allowedExternalUrl, allowedPairingUrl, classifyNavigation, idpOriginFromAuthConfig, isAuthStartUrl, oidcWindowNavigationAllowed };
+// F25: trustedIpcSender accepts an IPC call only from the app's own main-frame
+// document on one of the trusted UI origins. A navigated-away page, an iframe or
+// any other origin is refused before a privileged handler runs.
+function trustedIpcSender(frameUrl: unknown, isMainFrame: boolean, trustedOrigins: string[]): boolean {
+  if (!isMainFrame) return false;
+  try {
+    const url = new URL(String(frameUrl || ''));
+    const origins = new Set(trustedOrigins.map((origin) => { try { return new URL(origin).origin; } catch (_err) { return ''; } }).filter(Boolean));
+    return origins.has(url.origin);
+  } catch (_err) {
+    return false;
+  }
+}
+
+module.exports = { trustedIpcSender, allowedExternalUrl, allowedPairingUrl, classifyNavigation, idpOriginFromAuthConfig, isAuthStartUrl, oidcWindowNavigationAllowed };

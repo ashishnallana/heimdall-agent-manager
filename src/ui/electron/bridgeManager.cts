@@ -1,299 +1,187 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const crypto = require('crypto');
 const childProcess = require('child_process');
 
-// REQ-DMG-2 / REQ-WIN-DESKTOP-2: all host mutation stays in Electron's main
-// process. The renderer receives only structured status and explicit actions.
-let busy = false;
-let enrollmentProcess: any = null;
-// REQ-REENROLL-RECOVER-1: enroll.sh boots the running service out before it
-// enrolls, and only a successful enrollment brings it back. A re-enrollment
-// that fails, is abandoned or is stopped by quitting the app must restart the
-// Bridge with its existing credential instead of leaving it offline.
-let enrollmentRecovery: { hubUrl: string } | null = null;
-let enrollmentStopping = false;
+// REQ-ENR-5 / REQ-ENR-9: Electron drives the Bridge lifecycle only through the
+// ham-bridge CLI (`setup|update|uninstall|status|list`, see
+// docs/bridge-setup-progress.md). It never runs install scripts, renders
+// services, edits PATH or discovers state itself: ham-bridge owns all of that on
+// Linux, macOS and Windows. All host mutation stays in Electron's main process;
+// the renderer receives structured status/progress and asks for explicit actions.
 
+const RELEASES_URL = 'https://api.github.com/repos/tanmayv/heimdall-agent-manager/releases?per_page=30';
+const RELEASE_DOWNLOAD_BASE = 'https://github.com/tanmayv/heimdall-agent-manager/releases/download';
+const PROFILE_PATTERN = /^[a-z0-9][a-z0-9-]{0,30}$/;
+const SERVICE_PATTERN = /^heimdall-bridge-[a-z0-9-]+(?:_[a-z0-9][a-z0-9-]{0,30})?$/;
 const BRIDGE_ID_PATTERN = /^brg_[A-Za-z0-9_-]{1,60}$/;
+const VERSION_PATTERN = /^v?[0-9A-Za-z._-]+$/;
 
-function normalizeOrigin(value: string): string {
-  try { return new URL(String(value || '')).origin; } catch (_err) { return String(value || '').replace(/\/$/, ''); }
+// F26: every child process is bounded. Setup includes browser approval of the
+// pairing code, so its limit is generous; status/list are quick reads.
+const TIMEOUTS = {
+  query: 15_000,
+  download: 5 * 60_000,
+  setup: 20 * 60_000,
+  update: 15 * 60_000,
+  uninstall: 5 * 60_000,
+};
+
+type Platform = NodeJS.Platform;
+type BridgeProfile = { hub: string; profile?: string; service?: string };
+type OperationKind = 'setup' | 'update' | 'reenroll' | 'uninstall';
+type Emit = (event: any) => void;
+
+function supportedPlatform(platform: Platform = process.platform): boolean {
+  return platform === 'darwin' || platform === 'win32' || platform === 'linux';
 }
 
-function supportedPlatform(platform: NodeJS.Platform = process.platform): boolean {
-  return platform === 'darwin' || platform === 'win32';
-}
-
-function desktopPaths(
-  platform: NodeJS.Platform = process.platform,
-  env: NodeJS.ProcessEnv = process.env,
-  home: string = os.homedir(),
-) {
-  if (platform === 'win32') {
-    const roaming = env.APPDATA || path.join(home, 'AppData', 'Roaming');
-    const local = env.LOCALAPPDATA || path.join(home, 'AppData', 'Local');
-    return {
-      stateRoot: path.join(roaming, 'heimdall', 'bridges'),
-      dataRoot: path.join(local, 'heimdall', 'bridges'),
-      binaryName: 'ham-bridge.exe',
-      enrollScriptName: 'enroll.ps1',
-    };
-  }
-  return {
-    stateRoot: path.join(home, '.config', 'heimdall', 'bridges'),
-    dataRoot: path.join(home, '.local', 'share', 'heimdall', 'bridges'),
-    binaryName: 'ham-bridge',
-    enrollScriptName: 'enroll.sh',
-  };
-}
-
-function findState(hubUrl: string, platform: NodeJS.Platform = process.platform): { stateDir: string; serviceName: string } | null {
-  const root = desktopPaths(platform).stateRoot;
-  let names: string[] = [];
-  try { names = fs.readdirSync(root); } catch (_err) { return null; }
-  const wanted = normalizeOrigin(hubUrl);
-  for (const serviceName of names.sort()) {
-    const stateDir = path.join(root, serviceName);
-    try {
-      if (!fs.statSync(stateDir).isDirectory()) continue;
-      const saved = normalizeOrigin(fs.readFileSync(path.join(stateDir, 'hub-url'), 'utf8').trim());
-      if (saved === wanted) return { stateDir, serviceName };
-    } catch (_err) { /* Ignore incomplete/foreign state directories. */ }
-  }
-  return null;
-}
-
-// The bridge id is not a credential. Keep it independently discoverable so a
-// missing/rotated token can still enter the explicit --reuse-bridge flow rather
-// than being mistaken for a first enrollment.
-function discoverBridgeId(stateDir: string): string {
-  const candidates: string[] = [];
-  try { candidates.push(fs.readFileSync(path.join(stateDir, 'bridge-id'), 'utf8').trim()); } catch (_err) { /* Optional marker. */ }
+function normalizeHubUrl(value: string): string {
   try {
-    const config = fs.readFileSync(path.join(stateDir, 'config.toml'), 'utf8');
-    candidates.push(config.match(/^\s*daemon_id\s*=\s*"(brg_[A-Za-z0-9_-]{1,60})"\s*$/m)?.[1] || '');
-  } catch (_err) { /* An incomplete install has no config yet. */ }
-  try {
-    const header = fs.readFileSync(path.join(stateDir, 'bridge-token'), 'utf8').split(/\r?\n/, 1)[0] || '';
-    candidates.push(header.match(/^heimdall-bridge-credential\/v1\s+\S+\s+(brg_[A-Za-z0-9_-]{1,60})$/)?.[1] || '');
-  } catch (_err) { /* Tokenless is a valid re-enrollment state. */ }
-  const valid = [...new Set(candidates.filter((candidate) => BRIDGE_ID_PATTERN.test(candidate)))];
-  // A stale marker must never authorize replacement of a different identity.
-  // Require every available source to agree; the operator can then repair the
-  // non-secret metadata rather than Electron guessing which key to replace.
-  return valid.length === 1 ? valid[0] : '';
+    const url = new URL(String(value || '').trim());
+    if (url.protocol !== 'https:' && url.protocol !== 'http:') return '';
+    return url.origin;
+  } catch (_err) { return ''; }
 }
 
-function rememberBridgeId(stateDir: string, bridgeId: string) {
-  if (!BRIDGE_ID_PATTERN.test(bridgeId)) return;
-  try { fs.writeFileSync(path.join(stateDir, 'bridge-id'), `${bridgeId}\n`, { mode: 0o600 }); }
-  catch (_err) { /* config.toml remains the compatibility source of truth. */ }
+// releaseTarget names the release bundle for this machine. Windows on Arm runs
+// the amd64 build through the OS x64 compatibility layer.
+function releaseTarget(platform: Platform = process.platform, arch: string = process.arch): string {
+  if (platform === 'win32') return 'windows-amd64';
+  const cpu = arch === 'arm64' ? 'arm64' : 'amd64';
+  return platform === 'darwin' ? `darwin-${cpu}` : `linux-${cpu}`;
 }
 
-function resources(
-  platform: NodeJS.Platform = process.platform,
+function archiveName(target: string, version: string, platform: Platform = process.platform): string {
+  return `heimdall-local-${target}-${version}.${platform === 'win32' ? 'zip' : 'tar.gz'}`;
+}
+
+function binaryName(platform: Platform = process.platform): string {
+  return platform === 'win32' ? 'ham-bridge.exe' : 'ham-bridge';
+}
+
+function bundledResources(
+  platform: Platform = process.platform,
   arch: string = process.arch,
   resourcesRoot: string = process.env.HEIMDALL_BRIDGE_RESOURCES || path.join((process as any).resourcesPath || '', 'bridge'),
 ) {
-  if (platform === 'win32') {
-    // The current native Windows release is amd64. Windows on Arm executes it
-    // through the OS x64 compatibility layer, as scripts/install.ps1 documents.
-    const target = 'windows-amd64';
-    return {
-      installScript: path.join(resourcesRoot, 'install.ps1'),
-      bundle: path.join(resourcesRoot, `heimdall-local-${target}.zip`),
-      checksums: path.join(resourcesRoot, 'SHA256SUMS'),
-      metadata: path.join(resourcesRoot, 'METADATA.json'),
-    };
-  }
-  const target = arch === 'arm64' ? 'darwin-arm64' : 'darwin-amd64';
+  const target = releaseTarget(platform, arch);
+  const ext = platform === 'win32' ? 'zip' : 'tar.gz';
   return {
-    installScript: path.join(resourcesRoot, 'install.sh'),
-    bundle: path.join(resourcesRoot, `heimdall-local-${target}.tar.gz`),
+    bundle: path.join(resourcesRoot, `heimdall-local-${target}.${ext}`),
     checksums: path.join(resourcesRoot, 'SHA256SUMS'),
     metadata: path.join(resourcesRoot, 'METADATA.json'),
   };
 }
 
-function bundledVersion(platform: NodeJS.Platform = process.platform): string {
-  try { return String(JSON.parse(fs.readFileSync(resources(platform).metadata, 'utf8'))?.version || '').replace(/^v/, ''); }
+function bundledVersion(platform: Platform = process.platform): string {
+  try { return String(JSON.parse(fs.readFileSync(bundledResources(platform).metadata, 'utf8'))?.version || '').replace(/^v/, ''); }
   catch (_err) { return ''; }
 }
 
-// REQ-BRIDGE-STATUS-ASYNC-1: launchctl and `ham-bridge --version` are probed
-// asynchronously by refreshStatus() and cached per service. getStatus() only
-// reads files and that cache, so it never blocks Electron's main process.
-type ServiceProbe = { running: boolean; installedVersion: string; binary: string };
-const serviceProbes = new Map<string, ServiceProbe>();
-const statusRefreshes = new Map<string, Promise<any>>();
-
-function serviceProbeKey(platform: NodeJS.Platform, serviceName: string): string {
-  return `${platform}:${serviceName}`;
+function cacheRoot(): string {
+  const base = process.env.HEIMDALL_BRIDGE_CACHE
+    || (process.platform === 'win32'
+      ? path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'heimdall', 'releases')
+      : path.join(process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache'), 'heimdall', 'releases'));
+  return base;
 }
 
-function execFileResult(command: string, args: string[], env: NodeJS.ProcessEnv = process.env): Promise<{ code: number; output: string }> {
+// profileArgs selects one profile explicitly (never "the only installed one"):
+// --service when the caller has it, else --hub [--profile].
+function profileArgs(target: BridgeProfile, allowService = true): string[] {
+  const service = allowService ? String(target?.service || '') : '';
+  if (service) {
+    if (!SERVICE_PATTERN.test(service)) throw new Error('Invalid bridge service name.');
+    return ['--service', service];
+  }
+  const hub = normalizeHubUrl(target?.hub || '');
+  if (!hub) throw new Error('A valid Hub URL (https://…) is required.');
+  const profile = String(target?.profile || '');
+  if (profile && !PROFILE_PATTERN.test(profile)) throw new Error('Profile names use lower-case letters, digits and dashes.');
+  return ['--hub', hub, ...(profile ? ['--profile', profile] : [])];
+}
+
+// ---------------------------------------------------------------------------
+// Child processes: bounded, cancellable, process-tree aware.
+// ---------------------------------------------------------------------------
+
+type Running = { proc: any; kill: () => void };
+
+function killTree(proc: any) {
+  if (!proc || proc.exitCode !== null && proc.exitCode !== undefined) return;
+  if (process.platform === 'win32') {
+    try { childProcess.spawnSync('taskkill.exe', ['/PID', String(proc.pid), '/T', '/F'], { stdio: 'ignore', timeout: 5000, windowsHide: true }); }
+    catch (_err) { try { proc.kill(); } catch (_ignored) { /* Already exited. */ } }
+    return;
+  }
+  try { process.kill(-proc.pid, 'SIGTERM'); } catch (_err) { try { proc.kill('SIGTERM'); } catch (_ignored) { /* Already exited. */ } }
+}
+
+// runCommand runs one process with a hard timeout. onLine receives complete
+// stdout/stderr lines. The returned handle can cancel it (whole process tree).
+function runCommand(
+  command: string,
+  args: string[],
+  options: { timeoutMs: number; onLine?: (line: string, stream: 'stdout' | 'stderr') => void; register?: (running: Running) => void },
+): Promise<{ code: number; output: string; timedOut: boolean; cancelled: boolean }> {
   return new Promise((resolve) => {
+    let proc: any;
     try {
-      childProcess.execFile(command, args, { encoding: 'utf8', timeout: 5000, windowsHide: true, env }, (error: any, stdout: string, stderr: string) => {
-        const code = error ? (typeof error.code === 'number' ? error.code : -1) : 0;
-        resolve({ code, output: `${stdout || ''}\n${stderr || ''}` });
+      proc = childProcess.spawn(command, args, {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        // A process group of its own lets cancel terminate ham-bridge and the
+        // enrollment it spawns together. Windows uses taskkill /T instead.
+        detached: process.platform !== 'win32',
+        windowsHide: true,
       });
     } catch (error: any) {
-      resolve({ code: -1, output: String(error?.message || error) });
+      resolve({ code: -1, output: String(error?.message || error), timedOut: false, cancelled: false });
+      return;
     }
-  });
-}
-
-function powershellPath(env: NodeJS.ProcessEnv = process.env): string {
-  return env.SystemRoot
-    ? path.join(env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
-    : 'powershell.exe';
-}
-
-function bridgeBinary(serviceName: string, platform: NodeJS.Platform = process.platform): string {
-  const paths = desktopPaths(platform);
-  return path.join(paths.dataRoot, serviceName, 'bin', paths.binaryName);
-}
-
-// REQ-ENROLL-LOG-1: the full enroll.sh output of the latest run, so a failed
-// enrollment can be diagnosed (the app otherwise only keeps its pairing code).
-function enrollmentLogPath(serviceName: string, platform: NodeJS.Platform = process.platform): string {
-  return path.join(desktopPaths(platform).dataRoot, serviceName, 'logs', 'enroll.log');
-}
-
-// stripTerminalCodes removes ANSI colour/cursor sequences from enroll output
-// before it is shown in a failure message.
-function stripTerminalCodes(output: string): string {
-  return output.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '');
-}
-
-async function probeService(platform: NodeJS.Platform, serviceName: string, binary: string): Promise<ServiceProbe> {
-  let service = Promise.resolve({ code: -1, output: '' });
-  if (platform === 'darwin') {
-    service = execFileResult('/bin/launchctl', ['print', `gui/${process.getuid()}/${serviceName}`]);
-  } else if (platform === 'win32' && /^[A-Za-z0-9_-]+$/.test(serviceName)) {
-    const script = "$task = Get-ScheduledTask -TaskPath '\\' -TaskName $env:HEIMDALL_BRIDGE_TASK_NAME -ErrorAction SilentlyContinue; if ($task -and $task.State -eq 'Running') { exit 0 }; exit 1";
-    service = execFileResult(powershellPath(), ['-NoProfile', '-NonInteractive', '-Command', script], {
-      ...process.env, HEIMDALL_BRIDGE_TASK_NAME: serviceName,
-    });
-  }
-  const [serviceResult, version] = await Promise.all([
-    service,
-    fs.existsSync(binary) ? execFileResult(binary, ['--version']) : Promise.resolve({ code: -1, output: '' }),
-  ]);
-  return { running: serviceResult.code === 0, installedVersion: version.output.match(/ham-bridge\s+v?([^\s]+)/)?.[1] || '', binary };
-}
-
-// refreshStatus re-probes this Hub's Bridge service and returns the fresh
-// status. Concurrent callers share one probe.
-function refreshStatus(hubUrl: string): Promise<any> {
-  const platform = process.platform;
-  const key = `${platform}:${normalizeOrigin(hubUrl)}`;
-  const pending = statusRefreshes.get(key);
-  if (pending) return pending;
-  const refresh = (async () => {
-    const state = supportedPlatform(platform) ? findState(hubUrl, platform) : null;
-    if (state) serviceProbes.set(serviceProbeKey(platform, state.serviceName), await probeService(platform, state.serviceName, bridgeBinary(state.serviceName, platform)));
-    return getStatus(hubUrl);
-  })().finally(() => statusRefreshes.delete(key));
-  statusRefreshes.set(key, refresh);
-  return refresh;
-}
-
-function getStatus(hubUrl: string) {
-  const platform = process.platform;
-  const files = resources(platform);
-  const packaged = supportedPlatform(platform) && Object.values(files).every((file: any) => fs.existsSync(file));
-  if (!supportedPlatform(platform)) return {
-    supported: false, packaged: false, installed: false, enrolled: false,
-    bridgeId: '', canReEnroll: false, serviceState: 'not-installed', serviceName: '', hubUrl, installedVersion: '', bundledVersion: '', busy: busy || Boolean(enrollmentProcess), error: '',
-  };
-  const state = findState(hubUrl, platform);
-  const binary = state ? bridgeBinary(state.serviceName, platform) : '';
-  const installed = Boolean(state && fs.existsSync(binary));
-  let enrolled = false;
-  try { enrolled = Boolean(state && fs.statSync(path.join(state.stateDir, 'bridge-token')).size > 0); } catch (_err) { /* Tokenless. */ }
-  const bridgeId = state ? discoverBridgeId(state.stateDir) : '';
-  const probe = state ? serviceProbes.get(serviceProbeKey(platform, state.serviceName)) : undefined;
-  const running = Boolean(probe?.running);
-  return {
-    supported: true,
-    packaged,
-    installed,
-    enrolled,
-    bridgeId,
-    canReEnroll: Boolean(bridgeId),
-    serviceState: installed ? (running ? 'running' : 'stopped') : 'not-installed',
-    serviceName: state?.serviceName || '',
-    hubUrl,
-    installedVersion: installed && probe?.binary === binary ? probe.installedVersion : '',
-    bundledVersion: bundledVersion(platform),
-    busy: busy || Boolean(enrollmentProcess),
-    // Missing packaged resources only matter for installing; an unpackaged
-    // (Nix/dev) app still manages a Bridge that install.sh put in place.
-    error: packaged || installed ? '' : 'The packaged Bridge resources are incomplete.',
-  };
-}
-
-function runProcess(command: string, args: string[], env: NodeJS.ProcessEnv = process.env): Promise<{ code: number; output: string }> {
-  return new Promise((resolve) => {
-    const proc = childProcess.spawn(command, args, { env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
     let output = '';
-    const collect = (chunk: any) => { output += String(chunk || ''); if (output.length > 64_000) output = output.slice(-64_000); };
-    proc.stdout.on('data', collect); proc.stderr.on('data', collect);
-    proc.on('error', (error: Error) => resolve({ code: -1, output: error.message }));
-    proc.on('close', (code: number) => resolve({ code: Number(code ?? -1), output }));
+    let timedOut = false;
+    let cancelled = false;
+    let settled = false;
+    const partial = { stdout: '', stderr: '' };
+    const collect = (stream: 'stdout' | 'stderr') => (chunk: any) => {
+      const text = String(chunk || '');
+      output = (output + text).slice(-64_000);
+      partial[stream] += text;
+      const lines = partial[stream].split(/\r?\n/);
+      partial[stream] = lines.pop() || '';
+      for (const line of lines) options.onLine?.(line, stream);
+    };
+    proc.stdout?.on('data', collect('stdout'));
+    proc.stderr?.on('data', collect('stderr'));
+    const timer = setTimeout(() => { timedOut = true; killTree(proc); }, options.timeoutMs);
+    const finish = (code: number) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      for (const stream of ['stdout', 'stderr'] as const) if (partial[stream]) options.onLine?.(partial[stream], stream);
+      resolve({ code, output, timedOut, cancelled });
+    };
+    options.register?.({ proc, kill: () => { cancelled = true; killTree(proc); } });
+    proc.on('error', (error: Error) => { output += error.message; finish(-1); });
+    proc.on('close', (code: number | null) => finish(code === null ? -1 : Number(code)));
   });
 }
 
-// REQ-DMG-ENV-1 / REQ-WIN-DESKTOP-2: packaged apps do not reliably inherit
-// shell/package-manager PATH entries. Keep provider CLIs visible to both the
-// enrollment process and the service definition rendered by the installer.
-function bridgeHostEnv(platform: NodeJS.Platform = process.platform): NodeJS.ProcessEnv {
-  const home = os.homedir();
-  if (platform === 'win32') {
-    const roaming = process.env.APPDATA || path.join(home, 'AppData', 'Roaming');
-    const local = process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local');
-    const providerPaths = [
-      path.join(roaming, 'npm'),
-      path.join(local, 'pnpm'),
-      path.join(home, '.local', 'bin'),
-      path.join(home, '.bun', 'bin'),
-      path.join(home, '.volta', 'bin'),
-      path.join(home, '.cargo', 'bin'),
-    ];
-    return {
-      ...process.env,
-      PATH: [...providerPaths, process.env.PATH || ''].filter(Boolean).join(';'),
-      HEIMDALL_INSTALL_PLAIN: '1',
-    };
-  }
-  const providerPaths = [
-    '/usr/bin', '/bin', '/usr/sbin', '/sbin',
-    '/usr/local/bin', '/opt/homebrew/bin',
-    path.join(home, '.local', 'bin'),
-    path.join(home, '.npm-global', 'bin'),
-    path.join(home, '.bun', 'bin'),
-    path.join(home, '.volta', 'bin'),
-    path.join(home, '.cargo', 'bin'),
-    path.join(home, '.nix-profile', 'bin'),
-    '/run/current-system/sw/bin', '/nix/var/nix/profiles/default/bin',
-  ];
-  return {
-    ...process.env,
-    // System tools stay first while common per-user package-manager locations
-    // remain visible to the long-lived launchd bridge for provider discovery.
-    PATH: providerPaths.join(':'),
-    HEIMDALL_INSTALL_PLAIN: '1',
-  };
+function tailError(output: string, fallback: string): string {
+  return output.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '').trim().split('\n').filter((line) => !line.startsWith('{')).slice(-8).join('\n') || fallback;
 }
 
-function run(command: string, args: string[], platform: NodeJS.Platform = process.platform): Promise<{ code: number; output: string }> {
-  return runProcess(command, args, bridgeHostEnv(platform));
-}
-
-function commandError(output: string, fallback: string): string {
-  return output.trim().split('\n').slice(-8).join('\n') || fallback;
+// parseProgressLine accepts one --json-progress line. Plain text lines (the
+// enrollment's own prompts) are returned as null and shown as log output.
+function parseProgressLine(line: string): any | null {
+  const trimmed = line.trim();
+  if (!trimmed.startsWith('{')) return null;
+  try {
+    const value = JSON.parse(trimmed);
+    return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
+  } catch (_err) { return null; }
 }
 
 function extractEnrollmentPairing(output: string): { url: string; code: string } | null {
@@ -303,243 +191,358 @@ function extractEnrollmentPairing(output: string): { url: string; code: string }
   return url && code ? { url, code } : null;
 }
 
-function installInvocation(platform: NodeJS.Platform, files: ReturnType<typeof resources>, hubUrl: string, version: string) {
-  if (platform === 'win32') return {
-    command: powershellPath(),
-    args: ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', files.installScript,
-      '-Hub', hubUrl, '-Version', `v${version}`, '-Bundle', files.bundle, '-ChecksumFile', files.checksums, '-NonInteractive'],
-  };
-  return {
-    command: '/bin/bash',
-    args: [files.installScript, '--hub', hubUrl, '--version', `v${version}`,
-      '--bundle', files.bundle, '--checksum-file', files.checksums, '--non-interactive'],
-  };
-}
+// ---------------------------------------------------------------------------
+// Locating a ham-bridge binary.
+// ---------------------------------------------------------------------------
 
-async function installBundled(hubUrl: string) {
-  if (busy || enrollmentProcess) return { ok: false, status: getStatus(hubUrl), error: 'A Bridge operation is already running.' };
-  const platform = process.platform;
-  const files = resources(platform);
-  const version = bundledVersion(platform);
-  if (!supportedPlatform(platform) || !version || !Object.values(files).every((file: any) => fs.existsSync(file))) {
-    return { ok: false, status: getStatus(hubUrl), error: 'This app does not contain a complete Bridge bundle.' };
+function findBinary(root: string, platform: Platform = process.platform, depth = 3): string {
+  const name = binaryName(platform);
+  for (const candidate of [path.join(root, name), path.join(root, 'bin', name)]) {
+    if (fs.existsSync(candidate)) return candidate;
   }
-  busy = true;
-  try {
-    const invocation = installInvocation(platform, files, hubUrl, version);
-    const result = await run(invocation.command, invocation.args, platform);
-    const error = result.code === 0 ? '' : commandError(result.output, `Installer exited with status ${result.code}.`);
-    busy = false;
-    return { ok: result.code === 0, status: await refreshStatus(hubUrl), ...(error ? { error } : {}) };
-  } finally { busy = false; }
+  if (depth <= 0) return '';
+  let entries: any[] = [];
+  try { entries = fs.readdirSync(root, { withFileTypes: true }); } catch (_err) { return ''; }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const found = findBinary(path.join(root, entry.name), platform, depth - 1);
+    if (found) return found;
+  }
+  return '';
 }
 
-function launchAgent(hubUrl: string): { serviceName: string; plist: string; target: string; error: string } {
-  const state = findState(hubUrl);
-  if (process.platform !== 'darwin' || !state) return { serviceName: '', plist: '', target: '', error: 'Install the packaged Bridge before restarting it.' };
-  const plist = path.join(os.homedir(), 'Library', 'LaunchAgents', `${state.serviceName}.plist`);
-  if (!fs.existsSync(plist)) return { serviceName: '', plist: '', target: '', error: `LaunchAgent is missing: ${plist}` };
-  return { serviceName: state.serviceName, plist, target: `gui/${process.getuid()}/${state.serviceName}`, error: '' };
+// installedBinaries are the ham-bridge executables of installed profiles; any
+// of them can answer `list` / `status`, which read only per-user files.
+function installedBinaries(platform: Platform = process.platform): string[] {
+  const home = os.homedir();
+  const dataRoot = platform === 'win32'
+    ? path.join(process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local'), 'heimdall', 'bridges')
+    : path.join(home, '.local', 'share', 'heimdall', 'bridges');
+  let names: string[] = [];
+  try { names = fs.readdirSync(dataRoot).sort(); } catch (_err) { return []; }
+  return names
+    .map((name) => path.join(dataRoot, name, 'bin', binaryName(platform)))
+    .filter((binary) => fs.existsSync(binary));
 }
 
-async function restart(hubUrl: string) {
-  if (busy || enrollmentProcess) return { ok: false, status: getStatus(hubUrl), error: 'A Bridge operation is already running.' };
+let preparedBinary = '';
+
+// queryBinary is any ham-bridge that can read status: the one prepared for the
+// last operation, an installed profile's, or the cached/bundled release.
+function queryBinary(): string {
+  if (process.env.HEIMDALL_HAM_BRIDGE) return process.env.HEIMDALL_HAM_BRIDGE;
+  if (preparedBinary && fs.existsSync(preparedBinary)) return preparedBinary;
+  return installedBinaries()[0] || findBinary(cacheRoot(), process.platform, 4);
+}
+
+function sha256File(file: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const hash = crypto.createHash('sha256');
+    fs.createReadStream(file).on('error', reject).on('data', (chunk: any) => hash.update(chunk)).on('end', () => resolve(hash.digest('hex')));
+  });
+}
+
+function checksumFor(sums: string, archive: string): string {
+  for (const line of sums.split(/\r?\n/)) {
+    const match = line.trim().match(/^([0-9a-fA-F]{64})\s+\*?(.+)$/);
+    if (match && match[2].trim() === archive) return match[1].toLowerCase();
+  }
+  return '';
+}
+
+async function verifyArchive(file: string, sums: string, archive: string): Promise<void> {
+  const expected = checksumFor(sums, archive);
+  if (!expected) throw new Error(`SHA256SUMS does not list ${archive}.`);
+  const actual = await sha256File(file);
+  if (actual !== expected) throw new Error(`SHA-256 mismatch for ${archive}; refusing to install it.`);
+}
+
+// extractArchive unpacks a verified bundle. bsdtar (macOS, Windows 10+) reads
+// both .tar.gz and .zip; GNU tar reads the Linux .tar.gz.
+async function extractArchive(file: string, dest: string, register: (running: Running) => void): Promise<void> {
+  fs.rmSync(dest, { recursive: true, force: true });
+  fs.mkdirSync(dest, { recursive: true });
+  const tar = process.platform === 'win32' ? path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tar.exe') : 'tar';
+  const args = file.endsWith('.zip') ? ['-xf', file, '-C', dest] : ['-xzf', file, '-C', dest];
+  const result = await runCommand(tar, args, { timeoutMs: TIMEOUTS.download, register });
+  if (result.code !== 0) throw new Error(tailError(result.output, `Unable to extract ${path.basename(file)}.`));
+}
+
+type FetchLike = (url: string, init?: any) => Promise<any>;
+
+async function fetchWithTimeout(fetchImpl: FetchLike, url: string, signal: AbortSignal): Promise<any> {
+  const response = await fetchImpl(url, { signal, headers: { 'user-agent': 'heimdall-desktop' } });
+  if (!response.ok) throw new Error(`GET ${url} returned ${response.status}.`);
+  return response;
+}
+
+// latestRelease picks the newest promoted (not draft, not prerelease) release
+// that ships this machine's bundle (the bootstraps apply the same rule).
+function latestRelease(releases: any[], target: string, platform: Platform = process.platform): string {
+  for (const release of Array.isArray(releases) ? releases : []) {
+    if (release?.draft || release?.prerelease) continue;
+    const tag = String(release?.tag_name || '');
+    if (!VERSION_PATTERN.test(tag)) continue;
+    const names = new Set((release?.assets || []).map((asset: any) => String(asset?.name || '')));
+    if (names.has(archiveName(target, tag, platform)) && names.has('SHA256SUMS')) return tag;
+  }
+  return '';
+}
+
+// prepareBinary (F27) downloads and SHA-256-verifies the latest release and
+// returns its ham-bridge. The bundle shipped inside the app is only the
+// offline fallback, used when the release cannot be fetched.
+async function prepareBinary(
+  emit: Emit,
+  register: (running: Running) => void,
+  options: { fetchImpl?: FetchLike; version?: string } = {},
+): Promise<{ binary: string; version: string; source: 'release' | 'bundled' | 'override' }> {
+  if (process.env.HEIMDALL_HAM_BRIDGE) return { binary: process.env.HEIMDALL_HAM_BRIDGE, version: '', source: 'override' };
   const platform = process.platform;
-  const state = findState(hubUrl, platform);
-  if (!supportedPlatform(platform) || !state) return { ok: false, status: getStatus(hubUrl), error: 'Install the packaged Bridge before restarting it.' };
-  busy = true;
-  let error = '';
+  const target = releaseTarget(platform);
+  const fetchImpl: FetchLike = options.fetchImpl || (globalThis as any).fetch;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), TIMEOUTS.download);
+  register({ proc: null, kill: () => controller.abort() });
   try {
-    if (platform === 'darwin') {
-      const plist = path.join(os.homedir(), 'Library', 'LaunchAgents', `${state.serviceName}.plist`);
-      if (!fs.existsSync(plist)) error = `LaunchAgent is missing: ${plist}`;
-      if (!error) {
-        const target = `gui/${process.getuid()}/${state.serviceName}`;
-        const loaded = await runProcess('/bin/launchctl', ['print', target]);
-        if (loaded.code !== 0) {
-          const bootstrapped = await runProcess('/bin/launchctl', ['bootstrap', `gui/${process.getuid()}`, plist]);
-          if (bootstrapped.code !== 0) error = commandError(bootstrapped.output, `Unable to load ${state.serviceName}.`);
-        }
-        if (!error) {
-          const kicked = await runProcess('/bin/launchctl', ['kickstart', '-k', target]);
-          if (kicked.code !== 0) error = commandError(kicked.output, `Unable to restart ${state.serviceName}.`);
-        }
-      }
-    } else {
-      const script = "Stop-ScheduledTask -TaskPath '\\' -TaskName $env:HEIMDALL_BRIDGE_TASK_NAME -ErrorAction SilentlyContinue; Start-ScheduledTask -TaskPath '\\' -TaskName $env:HEIMDALL_BRIDGE_TASK_NAME -ErrorAction Stop";
-      const result = await runProcess(powershellPath(), ['-NoProfile', '-NonInteractive', '-Command', script], {
-        ...process.env, HEIMDALL_BRIDGE_TASK_NAME: state.serviceName,
-      });
-      if (result.code !== 0) error = commandError(result.output, `Unable to restart ${state.serviceName}.`);
+    emit({ step: 'download', state: 'start', pct: 0, message: 'Looking up the latest Bridge release…' });
+    const version = options.version || latestRelease(await (await fetchWithTimeout(fetchImpl, RELEASES_URL, controller.signal)).json(), target, platform);
+    if (!version) throw new Error(`No published Bridge release for ${target}.`);
+    const archive = archiveName(target, version, platform);
+    const dir = path.join(cacheRoot(), version);
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const sums = await (await fetchWithTimeout(fetchImpl, `${RELEASE_DOWNLOAD_BASE}/${version}/SHA256SUMS`, controller.signal)).text();
+    const file = path.join(dir, archive);
+    let verified = false;
+    if (fs.existsSync(file)) {
+      try { await verifyArchive(file, sums, archive); verified = true; } catch (_err) { fs.rmSync(file, { force: true }); }
     }
-  } catch (caught: any) {
-    error = String(caught?.message || caught || 'Unable to restart the Bridge.');
+    if (!verified) {
+      emit({ step: 'download', state: 'progress', pct: 20, message: `Downloading ${archive}…` });
+      const response = await fetchWithTimeout(fetchImpl, `${RELEASE_DOWNLOAD_BASE}/${version}/${archive}`, controller.signal);
+      fs.writeFileSync(`${file}.part`, Buffer.from(await response.arrayBuffer()), { mode: 0o600 });
+      await verifyArchive(`${file}.part`, sums, archive);
+      fs.renameSync(`${file}.part`, file);
+    }
+    const extracted = path.join(dir, 'bundle');
+    await extractArchive(file, extracted, register);
+    const binary = findBinary(extracted, platform);
+    if (!binary) throw new Error(`${archive} does not contain ${binaryName(platform)}.`);
+    emit({ step: 'download', state: 'ok', pct: 100, message: `Bridge ${version} downloaded and verified.` });
+    preparedBinary = binary;
+    return { binary, version: version.replace(/^v/, ''), source: 'release' };
+  } catch (error: any) {
+    if (controller.signal.aborted && cancelRequested) throw error;
+    const files = bundledResources(platform);
+    const version = bundledVersion(platform);
+    if (!version || !fs.existsSync(files.bundle) || !fs.existsSync(files.checksums)) {
+      throw new Error(`Unable to download the Bridge (${String(error?.message || error)}) and this app has no bundled Bridge to fall back to.`);
+    }
+    emit({ step: 'download', state: 'retry', pct: 50, failure: 'offline', message: `Download failed (${String(error?.message || error)}); using the Bridge ${version} bundled with this app.` });
+    await verifyArchive(files.bundle, fs.readFileSync(files.checksums, 'utf8'), path.basename(files.bundle));
+    const extracted = path.join(cacheRoot(), `bundled-${version}`);
+    await extractArchive(files.bundle, extracted, register);
+    const binary = findBinary(extracted, platform);
+    if (!binary) throw new Error(`The bundled Bridge does not contain ${binaryName(platform)}.`);
+    emit({ step: 'download', state: 'ok', pct: 100, message: `Using the bundled Bridge ${version}.` });
+    preparedBinary = binary;
+    return { binary, version, source: 'bundled' };
   } finally {
-    busy = false;
+    clearTimeout(timer);
   }
-  return { ok: !error, status: await refreshStatus(hubUrl), ...(error ? { error } : {}) };
 }
 
-// restartSync is the quit-time variant of restart(): the app is exiting, so it
-// cannot await child processes. Both launchctl and Scheduled Task commands are
-// bounded and do not rely on the Electron event loop.
-function restartSync(hubUrl: string): string {
-  if (process.platform === 'win32') {
-    const state = findState(hubUrl, 'win32');
-    if (!state) return 'Install the packaged Bridge before restarting it.';
-    const script = "Stop-ScheduledTask -TaskPath '\\' -TaskName $env:HEIMDALL_BRIDGE_TASK_NAME -ErrorAction SilentlyContinue; Start-ScheduledTask -TaskPath '\\' -TaskName $env:HEIMDALL_BRIDGE_TASK_NAME -ErrorAction Stop";
-    const result = childProcess.spawnSync(powershellPath(), ['-NoProfile', '-NonInteractive', '-Command', script], {
-      stdio: 'ignore', timeout: 5000, windowsHide: true,
-      env: { ...bridgeHostEnv('win32'), HEIMDALL_BRIDGE_TASK_NAME: state.serviceName },
-    });
-    return result.status === 0 ? '' : `Unable to restart ${state.serviceName}.`;
-  }
-  const agent = launchAgent(hubUrl);
-  if (agent.error) return agent.error;
-  const options = { stdio: 'ignore', timeout: 5000 };
-  if (childProcess.spawnSync('/bin/launchctl', ['print', agent.target], options).status !== 0
-    && childProcess.spawnSync('/bin/launchctl', ['bootstrap', `gui/${process.getuid()}`, agent.plist], options).status !== 0) {
-    return `Unable to load ${agent.serviceName}.`;
-  }
-  return childProcess.spawnSync('/bin/launchctl', ['kickstart', '-k', agent.target], options).status === 0 ? '' : `Unable to restart ${agent.serviceName}.`;
+// ---------------------------------------------------------------------------
+// Status.
+// ---------------------------------------------------------------------------
+
+async function runJson(binary: string, args: string[]): Promise<any> {
+  const result = await runCommand(binary, args, { timeoutMs: TIMEOUTS.query });
+  if (result.timedOut) throw new Error(`ham-bridge ${args[0]} timed out.`);
+  const line = result.output.split(/\r?\n/).map(parseProgressLine).find(Boolean);
+  if (!line) throw new Error(tailError(result.output, `ham-bridge ${args[0]} returned no JSON.`));
+  return line;
 }
 
-function enrollmentInvocation(platform: NodeJS.Platform, script: string, reuseBridgeId = '') {
-  if (platform === 'win32') return {
-    command: powershellPath(),
-    args: ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', script, '-Headless',
-      ...(reuseBridgeId ? ['-ReuseBridge', reuseBridgeId] : [])],
+// listProfiles returns every bridge profile installed for this OS user
+// (`ham-bridge list --json`), or [] when ham-bridge has never been installed.
+async function listProfiles(): Promise<any[]> {
+  if (!supportedPlatform()) return [];
+  const binary = queryBinary();
+  if (!binary) return [];
+  const result = await runJson(binary, ['list', '--json']);
+  return Array.isArray(result?.profiles) ? result.profiles : [];
+}
+
+// getStatus reports one profile (`ham-bridge status --json`) plus what the app
+// can do about it. `state` is ham-bridge's single word for the UI.
+async function getStatus(target: BridgeProfile) {
+  const base = {
+    supported: supportedPlatform(),
+    busy: Boolean(current),
+    operation: current ? current.kind : '',
+    bundledVersion: bundledVersion(),
+    hub: normalizeHubUrl(target?.hub || ''),
+    profile: String(target?.profile || ''),
   };
-  return { command: '/bin/bash', args: [script, '--headless', ...(reuseBridgeId ? ['--reuse-bridge', reuseBridgeId] : [])] };
-}
-
-function startEnrollment(
-  hubUrl: string,
-  emit: (event: any) => void,
-  options: { restartOnFailure?: boolean; reuseBridgeId?: string } = {},
-) {
-  if (enrollmentProcess) return { ok: false, error: 'Enrollment is already running.' };
-  const platform = process.platform;
-  const state = findState(hubUrl, platform);
-  const script = state && path.join(state.stateDir, desktopPaths(platform).enrollScriptName);
-  if (!supportedPlatform(platform) || !script || !fs.existsSync(script)) return { ok: false, error: 'Install the packaged Bridge before enrolling it.' };
-  const reuseBridgeId = String(options.reuseBridgeId || '').trim();
-  if (reuseBridgeId && !BRIDGE_ID_PATTERN.test(reuseBridgeId)) return { ok: false, error: 'The previous Bridge ID is invalid; refusing to re-enroll it.' };
-  const invocation = enrollmentInvocation(platform, script, reuseBridgeId);
-  // On Unix the detached process group lets stopEnrollment() terminate the
-  // shell and ham-bridge together. Windows uses taskkill /T for the same tree.
-  const proc = childProcess.spawn(invocation.command, invocation.args, {
-    env: bridgeHostEnv(platform),
-    stdio: ['ignore', 'pipe', 'pipe'],
-    detached: platform !== 'win32',
-    windowsHide: true,
-  });
-  enrollmentProcess = proc;
-  enrollmentRecovery = options.restartOnFailure ? { hubUrl } : null;
-  enrollmentStopping = false;
-  const logPath = enrollmentLogPath(state.serviceName, platform);
-  let log: any = null;
+  if (!base.supported) return { ...base, installed: false, state: 'unsupported', error: '' };
+  const binary = queryBinary();
+  if (!binary) return { ...base, installed: false, state: 'not_installed', error: '' };
   try {
-    fs.mkdirSync(path.dirname(logPath), { recursive: true });
-    log = fs.createWriteStream(logPath, { flags: 'w', mode: 0o600 });
-    log.on('error', () => { log = null; });
-    log.write(`# Heimdall Bridge enrollment ${new Date().toISOString()} (${hubUrl})\n`);
-  } catch (_err) { log = null; }
-  let buffer = '';
+    const status = await runJson(binary, ['status', '--json', ...profileArgs(target)]);
+    return { ...base, ...status, installed: Boolean(status?.installed), state: String(status?.state || (status?.installed ? 'stopped' : 'not_installed')), error: '' };
+  } catch (error: any) {
+    return { ...base, installed: false, state: 'unknown', error: String(error?.message || error) };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Operations: setup (wizard), update, re-enroll, uninstall.
+// ---------------------------------------------------------------------------
+
+let current: { kind: OperationKind; target: BridgeProfile; running: Running[]; wasInstalled: boolean } | null = null;
+let cancelRequested = false;
+
+function operationArgs(kind: OperationKind, target: BridgeProfile, options: { bridgeId?: string; purge?: boolean; bundleDir?: string; replaceOtherAccount?: boolean }): string[] {
+  // setup and enroll name a profile by Hub (+ profile); the others also take --service.
+  const select = profileArgs(target, kind === 'update' || kind === 'uninstall');
+  switch (kind) {
+    case 'setup':
+      return ['setup', ...select, '--headless', '--json-progress', ...(options.replaceOtherAccount ? ['--replace-other-account'] : [])];
+    case 'reenroll': {
+      const bridgeId = String(options.bridgeId || '');
+      if (bridgeId && !BRIDGE_ID_PATTERN.test(bridgeId)) throw new Error('The previous Bridge ID is invalid; refusing to re-enroll it.');
+      return ['enroll', ...select, '--headless', '--json-progress', ...(bridgeId ? ['--reuse-bridge', bridgeId] : ['--new-bridge']),
+        ...(options.replaceOtherAccount ? ['--replace-other-account'] : [])];
+    }
+    case 'update':
+      return ['update', '--bundle', String(options.bundleDir || ''), ...select, '--json-progress'];
+    case 'uninstall':
+      return ['uninstall', ...select, options.purge ? '--purge' : '--keep-data', '--yes', '--json-progress'];
+  }
+  throw new Error(`Unknown operation ${kind}.`);
+}
+
+// runOperation performs one lifecycle operation and streams events to `emit`:
+//   {type:'progress', step, state, pct, message, log, attempt, failure}  (ham-bridge --json-progress and the app's own `download` step)
+//   {type:'output', message}            plain log lines
+//   {type:'pairing', url, code}         an enrollment approval code
+//   {type:'complete', status}           success
+//   {type:'error', message, step, cancelled, timedOut, rolledBack}
+// Only one operation runs at a time. Cancel (cancelOperation) terminates the
+// process tree; ham-bridge setup rolls itself back, and a cancelled first
+// install is then uninstalled so nothing is left half-configured.
+async function runOperation(
+  kind: OperationKind,
+  target: BridgeProfile,
+  emit: Emit,
+  options: { bridgeId?: string; purge?: boolean; replaceOtherAccount?: boolean; fetchImpl?: FetchLike } = {},
+): Promise<{ ok: boolean; error?: string }> {
+  if (!supportedPlatform()) return { ok: false, error: 'This platform cannot run a Heimdall Bridge.' };
+  if (current) return { ok: false, error: 'A Bridge operation is already running.' };
+  try { profileArgs(target, kind === 'update' || kind === 'uninstall'); } catch (error: any) { return { ok: false, error: String(error?.message || error) }; }
+  const before = await getStatus(target);
+  current = { kind, target, running: [], wasInstalled: Boolean(before.installed), };
+  cancelRequested = false;
+  const op = current;
+  const register = (running: Running) => { op.running.push(running); if (cancelRequested) running.kill(); };
+  let lastStep = '';
+  const onProgress = (event: any) => {
+    if (event?.step) lastStep = String(event.step);
+    emit({ type: 'progress', ...event });
+  };
   let pairingSent = false;
-  let finished = false;
-  const onData = (chunk: any) => {
-    const message = String(chunk || '');
-    log?.write(message);
-    buffer = (buffer + message).slice(-16_000);
-    emit({ type: 'output', message });
-    const pairing = extractEnrollmentPairing(buffer);
-    if (!pairingSent && pairing) { pairingSent = true; emit({ type: 'pairing', ...pairing }); }
+  let plain = '';
+  const onLine = (line: string) => {
+    const event = parseProgressLine(line);
+    if (event?.event === 'enroll_code') {
+      emit({ type: 'pairing', url: String(event.approval_url || ''), code: String(event.pairing_code || ''), issue: Number(event.issue || 1) });
+      pairingSent = true;
+      return;
+    }
+    if (event && typeof event.step === 'string') { onProgress(event); return; }
+    if (!line.trim()) return;
+    emit({ type: 'output', message: line });
+    plain = (plain + line + '\n').slice(-16_000);
+    const pairing = !pairingSent && extractEnrollmentPairing(plain);
+    if (pairing) { pairingSent = true; emit({ type: 'pairing', ...pairing }); }
   };
-  // The message is the actionable failure (the last output lines, commandError)
-  // plus, REQ-ENROLL-LOG-1, where the full log is. `summary` is its most
-  // specific single line, for the one-line tray item.
-  const finishFailure = (failure: string, exitCode: number | null) => {
-    if (finished) return;
-    finished = true;
-    if (enrollmentProcess === proc) enrollmentProcess = null;
-    log?.end(`\n# exit status ${exitCode}\n`);
-    const recovery = enrollmentRecovery;
-    enrollmentRecovery = null;
-    const summary = failure.split('\n').pop() || failure;
-    const logLine = `\nFull log: ${logPath}`;
-    // stopEnrollment() already restarted the Bridge synchronously.
-    if (!recovery || enrollmentStopping) { emit({ type: 'error', message: failure + logLine, summary, logPath }); return; }
-    void restart(recovery.hubUrl).then((result) => {
-      const outcome = result.ok
-        ? 'The Bridge was restarted with its existing enrollment.'
-        : `The Bridge could not be restarted: ${result.error}`;
-      emit({ type: 'error', message: `${failure}\n${outcome}${logLine}`, summary: `${summary} ${outcome}`, logPath });
-    });
-  };
-  const finishSuccess = () => {
-    if (finished) return;
-    finished = true;
-    if (enrollmentProcess === proc) enrollmentProcess = null;
-    log?.end('\n# exit status 0\n');
-    enrollmentRecovery = null;
-    const completedBridgeId = discoverBridgeId(state.stateDir)
-      || buffer.match(/(?:bridge_id=|(?:Re-enrolled existing|Registered new) bridge\s+)(brg_[A-Za-z0-9_-]{1,60})/)?.[1]
-      || reuseBridgeId;
-    if (completedBridgeId) rememberBridgeId(state.stateDir, completedBridgeId);
-    emit({ type: 'complete', message: 'Bridge enrollment complete.' });
-  };
-  proc.stdout.on('data', onData); proc.stderr.on('data', onData);
-  proc.on('error', (error: Error) => { finishFailure(error.message, null); });
-  proc.on('close', (code: number) => {
-    if (finished) return;
-    if (code === 0) finishSuccess();
-    else finishFailure(commandError(stripTerminalCodes(buffer), `Enrollment exited with status ${code}.`), code);
-  });
-  return { ok: true };
+  try {
+    let binary = '';
+    let bundleDir = '';
+    if (kind === 'setup' || kind === 'update') {
+      const prepared = await prepareBinary(onProgress, register, { fetchImpl: options.fetchImpl });
+      binary = prepared.binary;
+      bundleDir = path.dirname(binary).endsWith(`${path.sep}bin`) ? path.dirname(path.dirname(binary)) : path.dirname(binary);
+    } else {
+      binary = queryBinary();
+      if (!binary) throw new Error('No installed Bridge was found on this machine.');
+    }
+    if (cancelRequested) throw Object.assign(new Error('Cancelled.'), { cancelled: true });
+    const args = operationArgs(kind, target, { ...options, bundleDir });
+    const result = await runCommand(binary, args, { timeoutMs: TIMEOUTS[kind === 'reenroll' ? 'setup' : kind], onLine, register });
+    if (result.code === 0 && !result.cancelled && !result.timedOut) {
+      emit({ type: 'complete', status: await getStatus(target) });
+      return { ok: true };
+    }
+    const reason = result.cancelled ? 'Cancelled.'
+      : result.timedOut ? `The ${kind} did not finish within ${Math.round(TIMEOUTS[kind === 'reenroll' ? 'setup' : kind] / 60_000)} minutes and was stopped.`
+      : tailError(result.output, `ham-bridge ${args[0]} exited with status ${result.code}.`);
+    throw Object.assign(new Error(reason), { cancelled: result.cancelled, timedOut: result.timedOut });
+  } catch (error: any) {
+    const cancelled = Boolean(error?.cancelled || cancelRequested);
+    let rolledBack = false;
+    // Cancel = rollback: ham-bridge setup undoes its own completed steps on a
+    // failure; a first install that the user cancelled or that timed out is
+    // also removed so the machine returns to "not installed".
+    if (kind === 'setup' && !op.wasInstalled && (cancelled || error?.timedOut)) {
+      const after = await getStatus(target);
+      if (after.installed && queryBinary()) {
+        emit({ type: 'progress', step: 'rollback', state: 'start', pct: 0, message: 'Removing the partial install…' });
+        const undo = await runCommand(queryBinary(), operationArgs('uninstall', target, { purge: true }), { timeoutMs: TIMEOUTS.uninstall, onLine });
+        rolledBack = undo.code === 0;
+      } else rolledBack = true;
+    }
+    const message = String(error?.message || error || 'The Bridge operation failed.');
+    emit({ type: 'error', message, step: lastStep, cancelled, timedOut: Boolean(error?.timedOut), rolledBack });
+    return { ok: false, error: message };
+  } finally {
+    current = null;
+    cancelRequested = false;
+  }
 }
 
-// stopEnrollment ends a running enrollment when the app quits. A re-enrollment
-// that is cut short restarts the Bridge it booted out.
-function stopEnrollment(): void {
-  const proc = enrollmentProcess;
-  if (!proc) return;
-  enrollmentStopping = true;
-  if (process.platform === 'win32') {
-    try { childProcess.spawnSync('taskkill.exe', ['/PID', String(proc.pid), '/T', '/F'], { stdio: 'ignore', timeout: 5000, windowsHide: true }); }
-    catch (_err) { try { proc.kill(); } catch (_ignored) { /* Already exited. */ } }
-  } else {
-    try { process.kill(-proc.pid, 'SIGTERM'); } catch (_err) { try { proc.kill('SIGTERM'); } catch (_ignored) { /* Already exited. */ } }
-  }
-  if (enrollmentRecovery) {
-    const error = restartSync(enrollmentRecovery.hubUrl);
-    if (error) console.warn('[heimdall] unable to restart Bridge after stopping re-enrollment:', error);
-  }
-  enrollmentRecovery = null;
+function cancelOperation(): boolean {
+  if (!current) return false;
+  cancelRequested = true;
+  for (const running of current.running) running.kill();
+  return true;
 }
 
-function startReEnrollment(hubUrl: string, emit: (event: any) => void) {
-  const status = getStatus(hubUrl);
-  if (!status.installed) return { ok: false, error: 'Install the packaged Bridge before re-enrolling it.' };
-  if (!status.bridgeId) return { ok: false, error: 'No previous Bridge ID is recorded. Use the standard enrollment action.' };
-  return startEnrollment(hubUrl, emit, { restartOnFailure: true, reuseBridgeId: status.bridgeId });
+// stopOnQuit (app quit): a running operation is cancelled. The installed Bridge
+// service itself is independent of the app and keeps running.
+function stopOnQuit(): void {
+  cancelOperation();
 }
 
 module.exports = {
-  bridgeHostEnv,
-  desktopPaths,
-  discoverBridgeId,
-  enrollmentInvocation,
+  TIMEOUTS,
+  bundledResources,
+  bundledVersion,
+  cancelOperation,
+  checksumFor,
   extractEnrollmentPairing,
-  findState,
   getStatus,
-  installBundled,
-  installInvocation,
-  resources,
-  refreshStatus,
-  restart,
-  startEnrollment,
-  startReEnrollment,
-  stopEnrollment,
+  latestRelease,
+  listProfiles,
+  normalizeHubUrl,
+  operationArgs,
+  parseProgressLine,
+  prepareBinary,
+  profileArgs,
+  releaseTarget,
+  runCommand,
+  runOperation,
+  stopOnQuit,
   supportedPlatform,
 };

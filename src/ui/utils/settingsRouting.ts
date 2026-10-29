@@ -21,7 +21,8 @@ export function resolveSettingsTab(path: string): string {
 
 export function normalizeSettingsTab(tab?: string): string {
   if (!tab || tab === 'general') return DEFAULT_SETTINGS_TAB;
-  if (tab === 'bridges') return 'workspace';
+  // REQ-ENR-11: Workspace Settings was replaced by Bridges; old links land there.
+  if (tab === 'workspace') return 'bridges';
   if (tab === 'providers') return 'models';
   if (tab === 'labs') return 'experimental';
   if (tab === 'browser' || tab === 'shortcuts' || tab === 'feedback') return 'appearance';

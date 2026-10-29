@@ -1,5 +1,5 @@
 import { apiAbsoluteUrl } from './apiBase';
-import { authenticatedStreamUrl, hasElectronDeviceAuth } from './userStreamUrl';
+import { authenticatedStreamUrl } from './userStreamUrl';
 import { useEffect } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import { handleUserWsEvent, resyncAfterReconnect } from './wsInvalidation';
@@ -36,8 +36,8 @@ import {
 // session while the socket lives). Other streams mint a short-lived single-use
 // ticket with a same-origin `POST /api/v1/me/ws-ticket` (cookie) and connect with
 // `?ticket=...`. The packaged Electron app loads the Hub HTTPS origin and takes
-// this same cookie path; its preload no longer exposes the legacy deviceAuth
-// bearer bridge. See ElectronDeviceAuthGate.
+// this same cookie path (Chromium carries the HttpOnly OIDC session cookie); its
+// preload exposes no bearer-token bridge. See ElectronDeviceAuthGate.
 
 // Hub keeps user WebSockets open by waiting for occasional client frames. Send a
 // lightweight heartbeat well below the server idle timeout so healthy browser
@@ -74,8 +74,8 @@ export type UserWsConnectionEnv = {
 // function is called. Lifecycle:
 //   connect -> user_ws_ready (subscribed: resync 'initial' first time, 'reconnect' after)
 //   -> events (gap / resync_required -> coalesced resync) -> close
-//   close 4401/4403, or a pre-ready close whose /api/v1/me probe says 401/403, or an
-//   Electron ticket mint answering 401/403: PARK (no more retries)
+//   close 4401/4403, or a pre-ready close whose /api/v1/me probe says 401/403, or a
+//   resolveUrl rejecting with UserWsAuthError: PARK (no more retries)
 //   any other close: retry after a capped, jittered delay; after
 //   MAX_CONSECUTIVE_FAILURES connects without a stable ready (one that lasted
 //   STABLE_CONNECTION_MS): PARK
@@ -87,7 +87,7 @@ export function startUserWsConnection(env: UserWsConnectionEnv): () => void {
   const createSocket = env.createSocket ?? ((url: string) => new WebSocket(url));
   const resolveUrl = env.resolveUrl ?? (() => authenticatedStreamUrl('/api/v1/user-ws'));
   const probeAuth = env.probeAuth ?? (() => probeUserAuth(apiAbsoluteUrl('/api/v1/me')));
-  const isElectron = env.isElectron ?? hasElectronDeviceAuth;
+  const isElectron = env.isElectron ?? (() => false);
   const handleEvent = env.handleEvent ?? handleUserWsEvent;
   const fullResync = env.fullResync ?? resyncAfterReconnect;
   let stopped = false;

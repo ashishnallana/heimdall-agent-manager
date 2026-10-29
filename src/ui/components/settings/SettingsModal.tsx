@@ -49,10 +49,10 @@ export const SETTINGS_CATEGORIES: SettingsCategory[] = [
     description: 'Configure AI model providers, API endpoints, tokens, and active reasoning models.',
   },
   {
-    id: 'workspace',
-    label: 'Workspace Settings',
-    title: 'Workspace Settings',
-    description: 'Manage host machines, connected local/remote bridges, and agent runtimes.',
+    id: 'bridges',
+    label: 'Bridges',
+    title: 'Bridges',
+    description: 'Set up, update and uninstall the machines that run your agents.',
   },
   {
     id: 'devices',
@@ -199,7 +199,6 @@ export function SettingsModal({
       case 'models':
       case 'providers':
         return <ProvidersPanel />;
-      case 'workspace':
       case 'bridges':
         return <BridgesPanel />;
       case 'devices':
