@@ -39,10 +39,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # service: '1' runs against the runner's real home and service manager
+          # (systemd --user, launchd): setup/update and the Electron-driven steps
+          # install real units, and the post-uninstall checks query that manager.
           - os: ubuntu-24.04
-            # systemd --user of the runner does not read units from the test's
-            # temp HOME, so the setup/update step runs on macOS and Windows only.
-            service: '0'
+            service: '1'
           - os: macos-14
             service: '1'
     runs-on: ${{ matrix.os }}
@@ -60,6 +61,19 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - name: Start a systemd --user manager (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          # The runner is not a login session: linger starts user@UID so
+          # `systemctl --user` (which ham-bridge setup/uninstall drive) has a bus.
+          set -euo pipefail
+          sudo loginctl enable-linger "$USER"
+          uid="$(id -u)"
+          for _ in $(seq 1 30); do [ -S "/run/user/$uid/bus" ] && break; sleep 1; done
+          echo "XDG_RUNTIME_DIR=/run/user/$uid" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus" >> "$GITHUB_ENV"
+          XDG_RUNTIME_DIR="/run/user/$uid" systemctl --user is-system-running || true
       - name: Build ham-hub and ham-bridge
         id: build
         shell: bash

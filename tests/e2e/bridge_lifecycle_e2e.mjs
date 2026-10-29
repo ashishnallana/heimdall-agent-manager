@@ -12,8 +12,12 @@
 //     re-installs it from a bundle dir and it comes back connected;
 //   6 `ham-bridge uninstall --purge`: afterwards no profile files, no per-bridge
 //     secret dirs, no OS secret-store items (Linux user keyring, macOS Keychain,
-//     Windows Credential Manager), no service unit, and no active hub row remain.
-// Hermetic: HOME/USERPROFILE/APPDATA point into a temp dir. The OS secret stores are
+//     Windows Credential Manager), no service unit, and no active hub row remain;
+//   7-11 (with HEIMDALL_E2E_SERVICE=1) the same lifecycle for a second profile, driven
+//     through the desktop app's main-process bridgeManager.runOperation: setup wizard
+//     (pairing event) -> re-enroll -> replace other account -> update -> uninstall.
+// Hermetic: HOME/USERPROFILE/APPDATA point into a temp dir (with HEIMDALL_E2E_SERVICE=1
+// the real home, see HOME below). The OS secret stores are
 // real but every item is named by a bridge id this run created; they are listed
 // (and on failure deleted) by that id only. Never touches a running dev hub/bridge.
 //
@@ -62,23 +66,70 @@ async function freePort() {
   });
 }
 
+// Nothing of the caller's own bridge may reach the binaries under test. A shell the
+// bridge spawned exports HEIMDALL_BRIDGE_SERVICE_NAME, and `ham-bridge enroll` stops and
+// restarts that service as its own when the profile has none registered yet
+// (bridge_enroll_service_for): with the real home that is the bridge running this test.
+// Scrubbed from process.env itself because bridgeManager (steps 7-11) inherits it.
+for (const k of Object.keys(process.env)) {
+  const u = k.toUpperCase();
+  if (u.startsWith('HEIMDALL_') && !u.startsWith('HEIMDALL_E2E_')) delete process.env[k];
+}
+
 const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'heimdall-lifecycle-'));
-const HOME = path.join(ROOT, 'home');
+// A service manager (systemd --user, launchd, Task Scheduler) starts the bridge with
+// the user's REAL HOME/APPDATA (service_env sets neither), and the runtime finds its
+// per-bridge secrets under ~ (bridge_vault_bridge_dir). So with HEIMDALL_E2E_SERVICE=1
+// (ephemeral CI runners) the whole run uses the real home; every path, service and
+// secret is still named by this run's profile/bridge ids and removed by them only.
+const HOME = WITH_SERVICE ? os.homedir() : path.join(ROOT, 'home');
 fs.mkdirSync(HOME, { recursive: true });
-const ENV = { ...process.env, HOME, USERPROFILE: HOME, APPDATA: path.join(HOME, 'AppData'), LOCALAPPDATA: path.join(HOME, 'Local'), XDG_CONFIG_HOME: path.join(HOME, '.config') };
+const ENV = WITH_SERVICE ? { ...process.env }
+  : { ...process.env, HOME, USERPROFILE: HOME, APPDATA: path.join(HOME, 'AppData'), LOCALAPPDATA: path.join(HOME, 'Local'), XDG_CONFIG_HOME: path.join(HOME, '.config') };
+if (WITH_SERVICE && WIN && (!ENV.APPDATA || !ENV.LOCALAPPDATA)) throw new Error('APPDATA/LOCALAPPDATA unset');
+// enroll's last fallback is the pre-profile fixed-name service; with the real home it
+// would stop a real install. Refuse rather than touch it.
+const LEGACY_UNIT = !WITH_SERVICE || WIN ? ''
+  : MAC ? path.join(HOME, 'Library', 'LaunchAgents', 'works.earendil.heimdall-bridge.plist')
+  : path.join(HOME, '.config', 'systemd', 'user', 'heimdall-bridge.service');
+if (LEGACY_UNIT && fs.existsSync(LEGACY_UNIT)) throw new Error(`HEIMDALL_E2E_SERVICE=1 refuses to run: ${LEGACY_UNIT} is a real bridge install that \`ham-bridge enroll\` would stop`);
 const children = [];
 const CREATED = []; // every bridge id this run enrolled
 
-// The profile layout bridgesvc.layout_for gives this service name.
-const SERVICE = `heimdall-bridge-e2e${crypto.randomBytes(3).toString('hex')}`;
+// One bridge profile for the whole run: `--hub <hub> --profile PROFILE_NAME`, the
+// profile `ham-bridge setup/update` resolve (bridgesvc.profile_from). Its service name
+// depends on the hub's port, so initProfile fills SERVICE/PROFILE once the hub is up.
+const PROFILE_NAME = `e2e${crypto.randomBytes(3).toString('hex')}`;
 const STATE_ROOT = WIN ? path.join(ENV.APPDATA, 'heimdall', 'bridges') : path.join(HOME, '.config', 'heimdall', 'bridges');
-const PROFILE = {
-  dir: path.join(STATE_ROOT, SERVICE),
-  config: path.join(STATE_ROOT, SERVICE, 'config.toml'),
-  token: path.join(STATE_ROOT, SERVICE, 'bridge-token'),
-  data: WIN ? path.join(ENV.LOCALAPPDATA, 'heimdall', 'bridges', SERVICE) : path.join(HOME, '.local', 'share', 'heimdall', 'bridges', SERVICE),
-};
-const SERVICE_FILE = WIN ? '' : MAC ? path.join(HOME, 'Library', 'LaunchAgents', `${SERVICE}.plist`) : path.join(HOME, '.config', 'systemd', 'user', `${SERVICE}.service`);
+let SERVICE = '';
+let PROFILE = null;
+let SERVICE_FILE = '';
+// The Electron-driven phase (steps 7-11) uses a second profile of the same hub.
+const ELECTRON_PROFILE_NAME = `${PROFILE_NAME}-app`;
+let EL = null;
+const LINUX_SERVICE = !WIN && !MAC && WITH_SERVICE;
+
+// bridgesvc.canonical_hub + service_name: heimdall-bridge-<host with . -> ->-<port>_<profile>.
+function profileLayout(hub, name) {
+  const u = new URL(hub.base);
+  const service = `heimdall-bridge-${u.hostname.replace(/[^a-z0-9-]/g, '-')}-${u.port}_${name}`;
+  return {
+    name,
+    service,
+    dir: path.join(STATE_ROOT, service),
+    config: path.join(STATE_ROOT, service, 'config.toml'),
+    token: path.join(STATE_ROOT, service, 'bridge-token'),
+    data: WIN ? path.join(ENV.LOCALAPPDATA, 'heimdall', 'bridges', service) : path.join(HOME, '.local', 'share', 'heimdall', 'bridges', service),
+    serviceFile: WIN ? '' : MAC ? path.join(HOME, 'Library', 'LaunchAgents', `${service}.plist`) : path.join(HOME, '.config', 'systemd', 'user', `${service}.service`),
+  };
+}
+function initProfile(hub) {
+  PROFILE = profileLayout(hub, PROFILE_NAME);
+  SERVICE = PROFILE.service;
+  SERVICE_FILE = PROFILE.serviceFile;
+  EL = profileLayout(hub, ELECTRON_PROFILE_NAME);
+}
+const hubProfileArgs = (hub) => ['--hub', hub.base, '--profile', PROFILE_NAME];
 
 async function startHub(label) {
   const bin = process.env.HEIMDALL_E2E_HUB_BIN;
@@ -142,19 +193,22 @@ async function enroll(hub, acct, { extra = [], reuse = '' } = {}) {
   child.stderr.on('data', (d) => { out += d; });
   const exited = new Promise((r) => child.once('exit', (code) => r(code)));
   try {
-    return await approveEnrollment(hub, acct, { child, exited, out: () => out, reuse });
+    const code = () => (/^\s+([A-Z2-7]{4}-[A-Z2-7]{4}-[A-Z2-7]{4}-[A-Z2-7]{2})\s*$/m.exec(out) || [])[1] ?? null;
+    return await approveEnrollment(hub, acct, { exited, code, out: () => out, reuse, config: PROFILE.config, label: SERVICE });
   } catch (err) {
     await stop(child);
     throw err;
   }
 }
 
-async function approveEnrollment(hub, acct, { exited, out: output, reuse }) {
+// exited: resolves with the enrolling process's exit code (or {ok} for a bridgeManager
+// operation); code(): the pairing code shown so far, or null.
+async function approveEnrollment(hub, acct, { exited, code: codeOf, out: output, reuse, config, label }) {
   let code = null;
   let out = output();
-  for (const deadline = Date.now() + 30_000; !code; await sleep(100)) {
+  for (const deadline = Date.now() + 60_000; !code; await sleep(100)) {
     out = output();
-    code = (/^\s+([A-Z2-7]{4}-[A-Z2-7]{4}-[A-Z2-7]{4}-[A-Z2-7]{2})\s*$/m.exec(out) || [])[1] ?? null;
+    code = codeOf();
     if (Date.now() > deadline) throw new CheckFailed(`no pairing code printed:\n${out}`);
   }
   const salts = await http(acct, 'POST', '/api/v1/device/pair-salts', { body: {} });
@@ -166,7 +220,7 @@ async function approveEnrollment(hub, acct, { exited, out: output, reuse }) {
   const keys = tried.find((c) => c.salt === ver.data?.pair_salt)?.keys;
   expect(ver.status === 200 && ver.data.kind === 'bridge' && keys, `the typed code resolves the bridge (${ver.status})`);
   await checkBridgeCodeInfo(ver.data, keys);
-  const { vault_approval, statement } = await buildBridgeApproval(acct.identity, await acct.chain(), ver.data, SERVICE);
+  const { vault_approval, statement } = await buildBridgeApproval(acct.identity, await acct.chain(), ver.data, label);
   const body = { pair_lookup: keys.lookup, approve: true, vault_approval, ...(reuse ? { target_bridge_id: reuse } : { new_bridge_label: 'lifecycle' }) };
   const appr = await http(acct, 'POST', '/api/v1/device/approve', { body });
   const bridgeId = appr.data?.hub_observed?.bridge_id;
@@ -189,10 +243,14 @@ async function approveEnrollment(hub, acct, { exited, out: output, reuse }) {
     },
     withKeyringBytes: async (fn) => { const b = Uint8Array.from(acct.keyringBytes); try { return await fn(b); } finally { b.fill(0); } },
   }, { enrollment: true, identityPublicKey: ver.data.bridge_identity_public_key, expectedPublicKey: target.publicKey, extra: { enrollment: true, expected_public_key: target.publicKey, pair_mac: pairMac } });
-  const exitCode = await Promise.race([exited, sleep(30_000).then(() => 'timeout')]);
+  const exitCode = await Promise.race([exited, sleep(180_000).then(() => 'timeout')]);
   out = output();
-  expect(/bridge enroll SUCCESS/.test(out) && exitCode === 0, `ham-bridge enroll reports SUCCESS and exits 0 (exit ${exitCode})${exitCode === 0 ? '' : '\n' + out}`);
-  expect(fs.readFileSync(PROFILE.config, 'utf8').includes(hub.base), 'the profile config points at that hub');
+  if (typeof exitCode === 'object' && exitCode !== null) {
+    expect(exitCode.ok, `the bridgeManager operation completes${exitCode.ok ? '' : ` (${exitCode.error})\n${out}`}`);
+  } else {
+    expect(/bridge enroll SUCCESS/.test(out) && exitCode === 0, `ham-bridge enroll reports SUCCESS and exits 0 (exit ${exitCode})${exitCode === 0 ? '' : '\n' + out}`);
+  }
+  expect(fs.readFileSync(config, 'utf8').includes(hub.base), 'the profile config points at that hub');
   return { bridgeId, out };
 }
 
@@ -255,7 +313,8 @@ const bridgeSecretFiles = (id) => (fs.existsSync(STATE_ROOT) ? fs.readdirSync(ST
 async function main() {
   if (!process.env.HEIMDALL_E2E_HUB_BIN || !BRIDGE_BIN) throw new Error('set HEIMDALL_E2E_HUB_BIN and HEIMDALL_E2E_BRIDGE_BIN');
   const hub = await startHub('hub');
-  console.log(`throwaway hub ${hub.base}; profile ${SERVICE}; temp root ${ROOT}`);
+  initProfile(hub);
+  console.log(`throwaway hub ${hub.base}; profile ${PROFILE_NAME} (service ${SERVICE}); temp root ${ROOT}`);
   const A = await account(hub, 'e2e-lifecycle-a');
   const B = await account(hub, 'e2e-lifecycle-b');
   const S = {};
@@ -289,13 +348,24 @@ async function main() {
   });
   await step('5 setup installs the profile service; update re-installs it and it reconnects', async () => {
     const bundle = path.dirname(BRIDGE_BIN);
-    const setup = spawnSync(BRIDGE_BIN, ['setup', '--hub', hub.base, '--headless', '--no-tray', '--json-progress', '--reuse-bridge', S.b.bridgeId], { env: ENV, encoding: 'utf8', timeout: 180_000 });
-    expect(setup.status === 0, `ham-bridge setup exits 0 (exit ${setup.status})\n${setup.stdout}${setup.stderr}`);
-    const upd = spawnSync(BRIDGE_BIN, ['update', '--bundle', bundle, '--hub', hub.base, '--json-progress'], { env: ENV, encoding: 'utf8', timeout: 300_000 });
+    // The profile is enrolled as B already: setup must skip the enroll step (no
+    // pairing code) and only install + start the service for this same profile.
+    const setup = spawnSync(BRIDGE_BIN, ['setup', ...hubProfileArgs(hub), '--headless', '--no-tray', '--json-progress'], { env: ENV, encoding: 'utf8', timeout: 180_000 });
+    expect(setup.status === 0, `ham-bridge setup --profile ${PROFILE_NAME} exits 0 (exit ${setup.status})\n${setup.stdout}${setup.stderr}`);
+    const events = setup.stdout.split('\n').filter((l) => l.startsWith('{')).map((l) => { try { return JSON.parse(l); } catch { return {}; } });
+    expect(events.some((e) => e.step === 'enroll' && (e.state === 'skipped' || e.message === 'skipped')), 'setup skipped enroll for the already enrolled profile');
+    if (SERVICE_FILE) expect(fs.existsSync(SERVICE_FILE), `setup wrote the service unit of this profile (${SERVICE_FILE})`);
+    if (WIN) expect(spawnSync('schtasks', ['/Query', '/TN', SERVICE], { encoding: 'utf8' }).status === 0, 'setup registered the scheduled task');
+    for (const deadline = Date.now() + 60_000; !(await online(B, S.b.bridgeId)()); await sleep(500)) {
+      if (Date.now() > deadline) throw new CheckFailed('the installed service never connected');
+    }
+    const upd = spawnSync(BRIDGE_BIN, ['update', '--bundle', bundle, ...hubProfileArgs(hub), '--json-progress'], { env: ENV, encoding: 'utf8', timeout: 300_000 });
     expect(upd.status === 0, `ham-bridge update --bundle exits 0 (exit ${upd.status})\n${upd.stdout}${upd.stderr}`);
     for (const deadline = Date.now() + 60_000; !(await online(B, S.b.bridgeId)()); await sleep(500)) {
       if (Date.now() > deadline) throw new CheckFailed('the updated service never reconnected');
     }
+    const active = (await bridgesOf(B)).filter(isActive);
+    expect(active.length === 1 && active[0].bridge_id === S.b.bridgeId, `setup/update kept one active bridge for B (${active.map((b) => b.bridge_id)})`);
   }, { skip: WITH_SERVICE ? '' : 'needs a service manager; set HEIMDALL_E2E_SERVICE=1 (CI runners)' });
   await step('6 uninstall --purge leaves no files, secrets, service or active hub row', async () => {
     const un = spawnSync(BRIDGE_BIN, ['uninstall', '--service', SERVICE, '--purge', '--yes', '--headless', '--json-progress'], { env: ENV, encoding: 'utf8', timeout: 120_000 });
@@ -304,21 +374,102 @@ async function main() {
     for (const deadline = Date.now() + 60_000; fs.existsSync(PROFILE.dir) || fs.existsSync(PROFILE.data); await sleep(500)) {
       if (Date.now() > deadline) break;
     }
-    expect(!fs.existsSync(PROFILE.dir), `profile state dir removed (${PROFILE.dir})`);
-    expect(!fs.existsSync(PROFILE.data), `profile data dir removed (${PROFILE.data})`);
-    if (SERVICE_FILE) expect(!fs.existsSync(SERVICE_FILE), `service unit removed (${SERVICE_FILE})`);
-    if (WIN) expect(spawnSync('schtasks', ['/Query', '/TN', SERVICE], { encoding: 'utf8' }).status !== 0, 'no scheduled task remains');
-    if (MAC) expect(spawnSync('launchctl', ['print', `gui/${process.getuid()}/${SERVICE}`]).status !== 0, 'no launchd job remains');
-    if (!WIN && !MAC && WITH_SERVICE) expect(spawnSync('systemctl', ['--user', 'cat', `${SERVICE}.service`]).status !== 0, 'no systemd user unit remains');
-    for (const id of CREATED) {
-      expect(secretItems(id).length === 0, `no OS secret-store item for ${id} (${secretItems(id)})`);
-      expect(bridgeSecretFiles(id).length === 0, `no per-bridge secret dir for ${id} (${bridgeSecretFiles(id)})`);
+    await assertGone(PROFILE, [A, B]);
+  });
+  if (WITH_SERVICE) await electronPhase(hub, A, B);
+  else for (const n of ['7', '8', '9', '10', '11']) await step(`${n} Electron-driven (bridgeManager) lifecycle`, async () => {}, { skip: 'needs a service manager; set HEIMDALL_E2E_SERVICE=1 (CI runners)' });
+}
+
+// After uninstall --purge of profile L: no files, secret dirs, OS secret-store items,
+// service registration or active hub row of any bridge this run created remain.
+async function assertGone(L, accts) {
+  expect(!fs.existsSync(L.dir), `profile state dir removed (${L.dir})`);
+  expect(!fs.existsSync(L.data), `profile data dir removed (${L.data})`);
+  if (L.serviceFile) expect(!fs.existsSync(L.serviceFile), `service unit removed (${L.serviceFile})`);
+  if (WIN) expect(spawnSync('schtasks', ['/Query', '/TN', L.service], { encoding: 'utf8' }).status !== 0, 'no scheduled task remains');
+  if (MAC) expect(spawnSync('launchctl', ['print', `gui/${process.getuid()}/${L.service}`]).status !== 0, 'no launchd job remains');
+  if (LINUX_SERVICE) {
+    expect(spawnSync('systemctl', ['--user', 'is-active', `${L.service}.service`], { encoding: 'utf8' }).stdout.trim() !== 'active', 'the systemd user service is not running');
+    expect(!spawnSync('systemctl', ['--user', 'list-unit-files', `${L.service}.service`], { encoding: 'utf8' }).stdout.includes(L.service), 'systemd --user no longer knows the unit');
+  }
+  for (const id of CREATED) {
+    expect(secretItems(id).length === 0, `no OS secret-store item for ${id} (${secretItems(id)})`);
+    expect(bridgeSecretFiles(id).length === 0, `no per-bridge secret dir for ${id} (${bridgeSecretFiles(id)})`);
+  }
+  const active = [];
+  for (const a of accts) active.push(...(await bridgesOf(a)).filter(isActive).map((b) => b.bridge_id));
+  expect(active.length === 0, `no active hub bridge row for any account (${active})`);
+  const ours = (d) => d === L.service || CREATED.some((id) => d === id || d.startsWith(`${id}_`));
+  const leftovers = (fs.existsSync(STATE_ROOT) ? fs.readdirSync(STATE_ROOT) : []).filter((d) => !WITH_SERVICE || ours(d));
+  expect(leftovers.length === 0, `nothing of this run left under ${STATE_ROOT} (${leftovers})`);
+}
+
+// Steps 7-11: the same lifecycle driven the way the desktop app drives it: Electron's
+// main process calls bridgeManager.runOperation (src/ui/electron/bridgeManager.cts),
+// which runs `ham-bridge setup|enroll|update|uninstall --json-progress`, reads
+// `status --json`, and forwards {type:'pairing'} to the wizard, where the user
+// approves the code (here: the same /device/add approval as above).
+async function electronPhase(hub, A, B) {
+  const { default: bridgeManager } = await import('../../src/ui/electron/bridgeManager.cts');
+  process.env.HEIMDALL_HAM_BRIDGE = BRIDGE_BIN; // the app's "override" binary source
+  const target = { hub: hub.base, profile: ELECTRON_PROFILE_NAME };
+  const run = (kind, acct, options = {}, reuse = '') => {
+    const events = [];
+    let pairing = null;
+    let log = '';
+    const done = bridgeManager.runOperation(kind, target, (e) => {
+      events.push(e);
+      if (e.type === 'pairing' && e.code) pairing = e.code;
+      if (e.type === 'output' || e.type === 'error') log += `${e.message}\n`;
+      if (e.type === 'progress' && e.state === 'failed') log += `[${e.step}] ${e.message}\n`;
+    }, options);
+    if (!acct) return done.then((r) => ({ r, events, log }));
+    return approveEnrollment(hub, acct, { exited: done, code: () => pairing, out: () => log, reuse, config: EL.config, label: EL.service })
+      .then((x) => ({ ...x, events }));
+  };
+  const status = () => bridgeManager.getStatus(target);
+  const S = {};
+  await step('7 Electron: setup wizard installs, enrolls (pairing event) and starts the service', async () => {
+    S.first = await run('setup', A);
+    const st = await status();
+    expect(st.installed && st.state === 'running', `status --json: installed and running (${st.state} ${st.error || ''})`);
+    expect(S.first.events.some((e) => e.type === 'complete'), 'the wizard received complete');
+    for (const deadline = Date.now() + 60_000; !(await online(A, S.first.bridgeId)()); await sleep(500)) {
+      if (Date.now() > deadline) throw new CheckFailed('the service never connected as account A');
     }
-    const activeB = (await bridgesOf(B)).filter(isActive);
-    const activeA = (await bridgesOf(A)).filter(isActive);
-    expect(activeA.length === 0 && activeB.length === 0, `no active hub bridge row for either account (A ${activeA.length}, B ${activeB.length})`);
-    const leftovers = fs.existsSync(STATE_ROOT) ? fs.readdirSync(STATE_ROOT) : [];
-    expect(leftovers.length === 0, `nothing left under ${STATE_ROOT} (${leftovers})`);
+  });
+  await step('8 Electron: re-enroll as the same account reuses the bridge', async () => {
+    const again = await run('reenroll', A, { bridgeId: S.first.bridgeId }, S.first.bridgeId);
+    expect(again.bridgeId === S.first.bridgeId, `reused ${S.first.bridgeId} (got ${again.bridgeId})`);
+    const active = (await bridgesOf(A)).filter(isActive);
+    expect(active.length === 1 && active[0].bridge_id === S.first.bridgeId, `account A has exactly one active bridge (${active.map((b) => b.bridge_id)})`);
+    for (const deadline = Date.now() + 60_000; !(await online(A, S.first.bridgeId)()); await sleep(500)) {
+      if (Date.now() > deadline) throw new CheckFailed('the re-enrolled service never reconnected');
+    }
+  });
+  await step('9 Electron: replace with account B (confirmed): A revoked, A secrets wiped', async () => {
+    S.b = await run('reenroll', B, { replaceOtherAccount: true });
+    expect(S.b.bridgeId !== S.first.bridgeId, `account B got its own bridge ${S.b.bridgeId}`);
+    expect((await bridgesOf(A)).filter(isActive).length === 0, 'account A has no active bridge left on the hub');
+    expect(secretItems(S.first.bridgeId).length === 0, `no OS secret-store item of A's bridge remains (${secretItems(S.first.bridgeId)})`);
+    expect(bridgeSecretFiles(S.first.bridgeId).length === 0, `A's per-bridge secret dir is gone (${bridgeSecretFiles(S.first.bridgeId)})`);
+    for (const deadline = Date.now() + 60_000; !(await online(B, S.b.bridgeId)()); await sleep(500)) {
+      if (Date.now() > deadline) throw new CheckFailed('the service never connected as account B');
+    }
+  });
+  await step('10 Electron: update re-installs the service and it reconnects', async () => {
+    const u = await run('update', null);
+    expect(u.r.ok, `update completes${u.r.ok ? '' : ` (${u.r.error})\n${u.log}`}`);
+    expect(u.events.some((e) => e.type === 'progress' && e.step), 'progress events streamed from --json-progress');
+    for (const deadline = Date.now() + 60_000; !(await online(B, S.b.bridgeId)()); await sleep(500)) {
+      if (Date.now() > deadline) throw new CheckFailed('the updated service never reconnected');
+    }
+  });
+  await step('11 Electron: uninstall --purge leaves no files, secrets, service or active hub row', async () => {
+    const u = await run('uninstall', null, { purge: true });
+    expect(u.r.ok, `uninstall completes and confirmUninstalled passes${u.r.ok ? '' : ` (${u.r.error})\n${u.log}`}`);
+    expect((await status()).installed === false, 'status --json: not installed');
+    await assertGone(EL, [A, B]);
   });
 }
 
@@ -331,7 +482,14 @@ function cleanupSecrets() {
       else { const kid = item.trim().split(/\s+/)[0]; spawnSync('keyctl', ['unlink', `0x${kid}`, '@u']); }
     }
   }
-  if (WITH_SERVICE) spawnSync(BRIDGE_BIN, ['uninstall', '--service', SERVICE, '--purge', '--yes', '--headless'], { env: ENV, timeout: 60_000 });
+  if (WITH_SERVICE && SERVICE) for (const svc of [SERVICE, EL.service]) spawnSync(BRIDGE_BIN, ['uninstall', '--service', svc, '--purge', '--yes', '--headless'], { env: ENV, timeout: 60_000 });
+}
+// Real-home runs: remove this run's own profile/secret dirs if a failure left them.
+function cleanupRealHome() {
+  if (!WITH_SERVICE || !SERVICE) return;
+  for (const p of [PROFILE.dir, PROFILE.data, SERVICE_FILE, EL.dir, EL.data, EL.serviceFile].filter(Boolean)) { try { fs.rmSync(p, { recursive: true, force: true }); } catch { /* gone */ } }
+  for (const id of CREATED) for (const d of bridgeSecretFiles(id).filter((x) => !x.includes('/'))) { try { fs.rmSync(path.join(STATE_ROOT, d), { recursive: true, force: true }); } catch { /* gone */ } }
+  if (LINUX_SERVICE) { spawnSync('systemctl', ['--user', 'daemon-reload']); for (const svc of [SERVICE, EL.service]) spawnSync('systemctl', ['--user', 'reset-failed', `${svc}.service`]); }
 }
 
 try {
@@ -343,6 +501,7 @@ try {
   for (const c of children) { try { c.kill(); } catch { /* gone */ } }
   await sleep(500);
   if (results.some(([, r]) => r === 'FAIL')) cleanupSecrets();
+  if (results.some(([, r]) => r === 'FAIL')) cleanupRealHome();
   try { fs.rmSync(ROOT, { recursive: true, force: true }); } catch { console.log(`(could not remove ${ROOT})`); }
 }
 console.log('\n== summary');
