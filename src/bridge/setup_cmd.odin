@@ -149,7 +149,9 @@ bridge_setup_exec_inherit :: proc(argv: []string) -> bool {
 	p, err := os.process_start(os.Process_Desc{command = argv, stdin = os.stdin, stdout = os.stdout, stderr = os.stderr})
 	if err != nil do return false
 	state, werr := os.process_wait(p)
-	return werr == nil && state.success
+	// core:os on Windows reports success for every exited process (dev-2026-09/10
+	// _process_wait sets success = true), so the exit code decides.
+	return werr == nil && state.success && state.exit_code == 0
 }
 
 bridge_setup_render_input :: proc(s: ^Bridge_Setup) -> bridgesvc.Render_Input {

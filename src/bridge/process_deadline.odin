@@ -113,7 +113,7 @@ bridge_process_run_capture_status :: proc(args: []string, timeout: time.Duration
 	stdout = strings.clone(string(out_bytes[:]), context.allocator)
 	stderr = strings.clone(string(err_bytes[:]), context.allocator)
 	if state.exited do exit_code = state.exit_code
-	return stdout, stderr, exit_code, !timed_out && state.exited && state.success, timed_out
+	return stdout, stderr, exit_code, !timed_out && state.exited && state.success && state.exit_code == 0, timed_out
 }
 
 bridge_process_run_capture :: proc(args: []string, timeout: time.Duration) -> (stdout, stderr: string, ok, timed_out: bool) {
