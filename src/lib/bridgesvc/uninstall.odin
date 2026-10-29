@@ -226,10 +226,11 @@ unregister_files :: proc(l: Layout) -> []string {
 // ---- update ----------------------------------------------------------------
 //
 // `ham-bridge update --bundle DIR` is `setup` run by the NEW binary against the
-// profile it updates: setup's transaction already is the update supervisor the
-// apply-bridge-update.{sh,ps1} scripts implemented (stage, bin -> bin.bak, re-render
-// the service (F9), extensions on every OS, restart, health = running AND connected
-// to the hub, and on any failure bin.bak restored and the old bridge restarted).
+// profile it updates: setup's transaction is the whole update (stage, bin ->
+// bin.bak, re-render the service (F9), extensions on every OS, restart, health =
+// running AND connected to the hub, and on any failure bin.bak restored and the
+// old bridge restarted). It is the only update path: hub-initiated updates run it
+// too (bridge_runtime_apply_update).
 // Running the staged binary means the version being installed decides how it is
 // installed.
 

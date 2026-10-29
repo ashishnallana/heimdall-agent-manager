@@ -3,7 +3,7 @@ package main
 // Provider extensions as a step of setup and update (F10).
 //
 // `ham-bridge setup` (step `extensions`) and `ham-bridge extensions sync`
-// (run by apply-bridge-update after the swap) both:
+// (run by ham-bridge update after the swap) both:
 //   1. copy the release bundle's share/heimdall/extensions into
 //      <data dir>/extensions, where the running bridge resolves it (F11);
 //   2. bring every detected provider's Heimdall extension to the bundled version

@@ -369,9 +369,8 @@
           ham-hub = mkOdinPackageWithRuntime pkgs odin "ham-hub" "src/hub" [ pkgs.sqlite ];
           # SOCAT-1: socat is the DEFAULT bridge->hub WebSocket (wss://) TLS
           # transport (HAM_TLS_BACKEND); openssl stays for the s_client fallback
-          # and socat's OpenSSL engine. Outbound HTTPS uses the linked libcurl.
-          # The curl CLI is used by scripts/apply-bridge-update.sh (the update
-          # supervisor's health probe).
+          # and socat's OpenSSL engine. Outbound HTTPS uses the linked libcurl;
+          # the curl CLI stays on the runtime PATH for the bridge's child processes.
           ham-bridge = mkOdinPackageWithRuntime pkgs odin "ham-bridge" "src/bridge" [ pkgs.sqlite pkgs.curl.bin pkgs.openssl pkgs.socat ];
           ham-dev-proxy = mkOdinPackage pkgs odin "ham-dev-proxy" "src/dev_proxy";
           ham-ctl = mkOdinCtlPackage pkgs odin;

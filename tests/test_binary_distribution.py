@@ -259,8 +259,9 @@ def test_termux_tarball_target(ctx):
     assert tarball.name == 'heimdall-local-termux-arm64.tar.gz', tarball
     names, _, metadata = read_tarball(tarball)
     for entry in ('bin/ham-bridge', 'bin/ham-ctl', 'bin/ham-pty-host',
-                  'scripts/apply-bridge-update.sh', 'README.md', 'LICENSE', 'METADATA.json'):
+                  'README.md', 'LICENSE', 'METADATA.json'):
         assert entry in names, f'entry {entry} missing from termux tarball'
+    assert not any(n.startswith('scripts/') for n in names), 'updates run in ham-bridge: no scripts/ in the bundle'
     assert metadata['target'] == 'termux-arm64', metadata['target']
 
 

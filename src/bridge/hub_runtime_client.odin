@@ -15,11 +15,11 @@ import "core:strings"
 import "core:sync"
 import "core:thread"
 import "core:time"
-import "core:unicode/utf8"
 import bridgesvc "odin_test:lib/bridgesvc"
 import contracts "odin_test:contracts"
 import cfg_lib "odin_test:lib/config"
 import httpc "odin_test:lib/httpc"
+import local_socket "odin_test:lib/local_socket"
 import ws "odin_test:lib/ws"
 import vault "odin_test:lib/vault"
 
@@ -1548,96 +1548,35 @@ bridge_update_download :: proc(download_url, dest_path: string, download: Bridge
 	return false, fmt.tprintf("tarball download failed: HTTP %d", status)
 }
 
-Bridge_Update_Supervisor_Spawn :: proc(argv: []string) -> bool
-
-// The supervisor intentionally outlives the bridge process. On Unix it is
-// started as the leader of a new session (bridge_os_spawn_new_session), so the
-// bridge's service manager (systemd unit, launchd job, Termux sv) does not take
-// it down with the bridge's process group, and no setsid(1) or python is needed.
-bridge_update_spawn_supervisor :: proc(argv: []string) -> bool {
-	return bridge_os_spawn_new_session(argv)
-}
-
-// BRIDGE_UPDATE_SUPERVISOR_INTERFACE is the caller interface the Bridge speaks to
-// the staged supervisor script (see the script's --help and SELF_HOSTING.md
-// "Bridge self-update"): interface 2 requires --from-version and --to-version.
-BRIDGE_UPDATE_SUPERVISOR_INTERFACE :: "2"
-
-// bridge_update_append_version_args adds the versioned-interface flags every
-// supervisor invocation carries, so the staged script can run its migration
-// hooks for exactly this from -> to transition.
-bridge_update_append_version_args :: proc(argv: ^[dynamic]string, from_version, to_version: string) {
-	append(argv,
-		"--interface", BRIDGE_UPDATE_SUPERVISOR_INTERFACE,
-		"--from-version", from_version,
-		"--to-version", to_version,
-	)
-}
-
-bridge_update_launch_supervisor :: proc(
-	supervisor_path, data_dir, stage_dir, bridge_port, hub_url, bridge_pid, from_version, to_version: string,
-	spawn: Bridge_Update_Supervisor_Spawn = bridge_update_spawn_supervisor,
-	pty_host_socket: string = "",
-) -> bool {
-	if spawn == nil do return false
-	argv := bridge_os_supervisor_argv(supervisor_path)
-	bridge_update_append_version_args(&argv, from_version, to_version)
-	append(&argv,
-		"--data-dir", data_dir,
-		"--stage-dir", stage_dir,
-		"--bridge-port", bridge_port,
-		"--hub-url", hub_url,
-		"--bridge-pid", bridge_pid,
-		"--pty-host-socket", pty_host_socket,
-	)
-	// The spawn already made the supervisor a session leader; tell the script so
-	// it does not try to re-exec itself through setsid(1) (absent on macOS).
-	if BRIDGE_UPDATE_SPAWN_DETACHES do append(&argv, "--already-detached")
-	return spawn(argv[:])
-}
-
-// bridge_update_stage_supervisor copies the supervisor script out of the staged
-// bundle into target (temp-allocated detail on failure). Only the bundle being
-// installed is trusted: a script from the cwd, the data dir or an earlier update
-// would speak another version's interface, so its absence aborts the update
-// before anything is stopped.
-// bridge_update_via_ham_bridge: use the staged binary's `ham-bridge update` when
-// this bridge runs as a bridgesvc profile from that profile's bin/ and the target
-// is not older than this version (older binaries have no `update` subcommand and
-// would start a second bridge instead). Legacy fixed-name installs keep the script.
-bridge_update_via_ham_bridge :: proc(target_version: string) -> (service: string, ok: bool) {
+// bridge_update_via_ham_bridge decides whether this bridge can apply a hub update:
+// every update runs the staged binary's `ham-bridge update` (setup's transaction:
+// bin.bak, service re-render, extensions, health incl. the hub connection,
+// rollback). That needs a bridgesvc profile install running from that profile's
+// bin/, and a target that is not older than this version (older binaries have no
+// `update` subcommand). Anything else is refused before anything is downloaded or
+// stopped, with the one-time reinstall that fixes it (temp-allocated refusal).
+bridge_update_via_ham_bridge :: proc(target_version: string) -> (service: string, refusal: string) {
 	host := bridge_service_host()
 	name, registered := bridge_enroll_service_for(host, os.args)
-	if !registered || !strings.has_prefix(name, bridgesvc.SERVICE_PREFIX) do return "", false
 	exe, _ := os.get_executable_path(context.temp_allocator)
-	l := bridgesvc.layout_for(host, name)
 	norm :: proc(p: string) -> string {
 		out, _ := strings.replace_all(strings.trim_right(p, "/\\"), "\\", "/", context.temp_allocator)
 		return out
 	}
-	if exe == "" || norm(bridgesvc.pdir(exe)) != norm(l.bin_dir) do return "", false
-	if bridge_provider_extension_version_compare(target_version, contracts.APP_VERSION) < 0 do return "", false
-	return name, true
+	if !registered || !strings.has_prefix(name, bridgesvc.SERVICE_PREFIX) || exe == "" || norm(bridgesvc.pdir(exe)) != norm(bridgesvc.layout_for(host, name).bin_dir) {
+		return "", fmt.tprintf("this bridge is not a ham-bridge profile install, so it cannot apply updates; reinstall it once with %s", BRIDGE_REINSTALL_HINT)
+	}
+	if bridge_provider_extension_version_compare(target_version, contracts.APP_VERSION) < 0 {
+		return "", fmt.tprintf("cannot update from %s to the older %s from the hub; install that version with the installer's --version flag (%s)", contracts.APP_VERSION, target_version, BRIDGE_REINSTALL_HINT)
+	}
+	return name, ""
 }
 
-bridge_update_stage_supervisor :: proc(stage_dir, target: string) -> (ok: bool, detail: string) {
-	name := BRIDGE_UPDATE_SUPERVISOR_NAME
-	// Never fall back to a copy an earlier update left at target.
-	_ = os.remove(target)
-	candidates := [2]string{
-		fmt.tprintf("%s/scripts/%s", stage_dir, name),
-		fmt.tprintf("%s/%s", stage_dir, name),
-	}
-	for candidate in candidates {
-		if !os.is_file(candidate) do continue
-		if !bridge_update_copy_file(candidate, target) {
-			return false, fmt.tprintf("cannot copy supervisor script %s to %s", candidate, target)
-		}
-		_ = os.chmod(target, os.Permissions{.Read_User, .Write_User, .Execute_User, .Read_Group, .Execute_Group, .Read_Other, .Execute_Other})
-		return true, ""
-	}
-	return false, fmt.tprintf("supervisor script %s not found in the staged bundle (expected scripts/%s); update aborted before stopping anything", name, name)
-}
+// BRIDGE_REINSTALL_HINT names the headless installers (scripts/install.sh, .ps1).
+// The host is its own literal: scripts/check-http-boundary.sh reads a single
+// literal holding "curl" and ".a…" as a static libcurl path.
+BRIDGE_INSTALLER_HOST :: "install.ninjy.ai"
+BRIDGE_REINSTALL_HINT :: "'irm " + BRIDGE_INSTALLER_HOST + "/ps1 | iex'" when ODIN_OS == .Windows else "'curl -fsSL " + BRIDGE_INSTALLER_HOST + " | bash'"
 
 // bridge_hub_handle_uninstall_command: the owning account asked (hub
 // POST /api/v1/bridges/{id}/uninstall, owner-checked and audit-logged there) for
@@ -1731,34 +1670,56 @@ bridge_update_target_refusal_for :: proc(target: string, update_blocked: bool, d
 	return ""
 }
 
-BRIDGE_UPDATE_PTY_STOP_DETAIL_LIMIT :: 240
-
-// bridge_update_pty_stop_failure explains why the supervisor's PTY-host cleanup
-// failed (temp-allocated). Every outcome keeps the update aborted; the detail
-// separates a timeout from a cleanup that exited with an error, and carries the
-// supervisor's last stderr line (for example a missing interpreter) so the
-// operator does not have to infer it from the bridge journal.
-bridge_update_pty_stop_failure :: proc(exit_code: int, timed_out: bool, stderr: string) -> string {
-	if timed_out {
-		return "failed to stop bridge-owned PTY host: cleanup timed out; update aborted before restart"
+// bridge_update_stop_pty_host stops the PTY host daemon answering on socket, and
+// with it every agent it hosts, before the update swaps ham-pty-host: the daemon
+// outlives bridge restarts by design (KillMode=process, AbandonProcessGroup), so
+// the service restart would leave the old binary running (and, on Windows, its
+// executable locked). The daemon is found through the socket's peer pid, so one
+// an earlier bridge process started is stopped too, and only a process whose
+// image is ham-pty-host is ever signalled. SIGTERM lets it tear its agents down;
+// SIGKILL follows after PTY_HOST_DAEMON_TERM_GRACE. ok=false (temp-allocated
+// detail) aborts the update before anything is swapped.
+bridge_update_stop_pty_host :: proc(socket: string) -> (ok: bool, detail: string) {
+	if !bridge_pty_host_ping(socket) do return true, ""
+	s, dialed := pty_host_dial(socket)
+	if !dialed do return true, "" // stopped between the ping and the dial
+	pid, has_pid := local_socket.peer_pid(s)
+	local_socket.close(s)
+	if !has_pid {
+		return false, fmt.tprintf("failed to stop bridge-owned PTY host: cannot identify the process serving %s; update aborted before restart", socket)
 	}
-	detail := ""
-	lines := strings.split_lines(strings.trim_space(stderr), context.temp_allocator)
-	for i := len(lines) - 1; i >= 0; i -= 1 {
-		if line := strings.trim_space(lines[i]); line != "" {
-			detail = line
-			break
+	if !bridge_update_pid_is_pty_host(pid) {
+		return false, fmt.tprintf("failed to stop bridge-owned PTY host: pid %d serving %s is not ham-pty-host; update aborted before restart", pid, socket)
+	}
+	gone :: proc(pid: int, within: time.Duration) -> bool {
+		deadline := time.time_add(time.now(), within)
+		for bridge_os_pid_alive(pid) {
+			if time.diff(time.now(), deadline) <= 0 do return false
+			time.sleep(50 * time.Millisecond)
+		}
+		return true
+	}
+	_ = bridge_os_terminate(pid)
+	if !gone(pid, PTY_HOST_DAEMON_TERM_GRACE) {
+		_ = bridge_os_kill(pid)
+		if !gone(pid, PTY_HOST_DAEMON_KILL_GRACE) {
+			return false, fmt.tprintf("failed to stop bridge-owned PTY host (pid %d survived SIGKILL); update aborted before restart", pid)
 		}
 	}
-	if len(detail) > BRIDGE_UPDATE_PTY_STOP_DETAIL_LIMIT {
-		cut := BRIDGE_UPDATE_PTY_STOP_DETAIL_LIMIT
-		for cut > 0 && !utf8.rune_start(detail[cut]) do cut -= 1
-		detail = detail[:cut]
-	}
-	if detail == "" {
-		return fmt.tprintf("failed to stop bridge-owned PTY host (exit %d); update aborted before restart", exit_code)
-	}
-	return fmt.tprintf("failed to stop bridge-owned PTY host (exit %d: %s); update aborted before restart", exit_code, detail)
+	// Reap it if this process started it, and make the next use start a new one.
+	sync.mutex_lock(&pty_host_daemon_lock)
+	_ = bridge_pty_host_daemon_process_running(&pty_host_daemon_process, &pty_host_daemon_has_process)
+	pty_host_daemon_started = false
+	sync.mutex_unlock(&pty_host_daemon_lock)
+	return true, ""
+}
+
+// bridge_update_pid_is_pty_host: pid's command names ham-pty-host. When the OS
+// cannot report the command at all, the socket's own peer is trusted.
+bridge_update_pid_is_pty_host :: proc(pid: int) -> bool {
+	_, command, ok := bridge_os_process_lstart_and_command(pid)
+	if !ok do return true
+	return strings.contains(command, "ham-pty-host")
 }
 
 bridge_runtime_apply_update :: proc(
@@ -1770,11 +1731,13 @@ bridge_runtime_apply_update :: proc(
 	if strings.trim_space(download_url) == "" {
 		return false, "missing download_url"
 	}
-	// The supervisor's interface 2 needs the version being installed; the Hub
-	// always resolves one, so an empty value is refused before any download.
+	// `ham-bridge update` is chosen by the version being installed; the Hub always
+	// resolves one, so an empty value is refused before any download.
 	if strings.trim_space(target_version) == "" {
 		return false, "missing target_version"
 	}
+	service, refusal := bridge_update_via_ham_bridge(target_version)
+	if refusal != "" do return false, refusal
 	// REQ-T13-1: refuse before draining or downloading anything. Installing a
 	// bundle for another target would leave the bridge unable to start (the
 	// glibc linux-* bundle dies on Android's seccomp filter) with no way back.
@@ -1915,90 +1878,36 @@ bridge_runtime_apply_update :: proc(
 		return false, fmt.tprintf("preflight execution check failed (%s --version)", bridge_binary)
 	}
 
-	// 7. Take the supervisor script (scripts/apply-bridge-update.sh, .ps1 on
-	// Windows) from the staged bundle only; see bridge_update_stage_supervisor.
-	_ = bridge_make_directory_all(updates_dir)
-	supervisor_target := fmt.tprintf("%s/%s", updates_dir, BRIDGE_UPDATE_SUPERVISOR_NAME)
-	if sup_ok, sup_detail := bridge_update_stage_supervisor(stage_dir, supervisor_target); !sup_ok {
-		_ = os.remove_all(stage_dir)
-		blog_error(.update_apply_failed, blog_sym(.stage, .supervisor), blog_sym(.reason, .missing_binary))
-		return false, sup_detail
-	}
 	_ = bridge_update_send_progress(conn, command_id, "staged", 78, "Update bundle staged and validated.")
 
-	// 8. Stop the bridge-owned PTY host while this control connection can still
-	// report both the attempt and its result. The supervisor repeats this cleanup
-	// after bridge shutdown, making the operation idempotent across races.
+	// 7. Stop the PTY host (and the agents it hosts) while this control connection
+	// can still report both the attempt and its result.
+	_ = bridge_update_send_progress(conn, command_id, "stopping_pty_host", 82, "Stopping bridge-owned PTY host and agent processes...")
 	pty_socket := pty_host_socket_path()
 	defer delete(pty_socket)
-	_ = bridge_update_send_progress(conn, command_id, "stopping_pty_host", 82, "Stopping bridge-owned PTY host and agent processes...")
-	stop_pty_argv := bridge_os_supervisor_argv(supervisor_target)
-	bridge_update_append_version_args(&stop_pty_argv, contracts.APP_VERSION, target_version)
-	append(&stop_pty_argv, "--data-dir", data_dir, "--stop-pty-hosts-only", "--pty-host-socket", pty_socket)
-	stop_pty_out, stop_pty_err, stop_pty_exit, stop_pty_ok, stop_pty_timed_out := bridge_process_run_capture_status(stop_pty_argv[:], 15 * time.Second)
-	defer { delete(stop_pty_out); delete(stop_pty_err) }
-	if !stop_pty_ok {
-		if stop_pty_timed_out {
-			blog_error(.update_apply_failed, blog_sym(.stage, .drain), blog_sym(.reason, .timeout))
-		} else {
-			blog_error(.update_apply_failed, blog_sym(.stage, .drain), blog_int(.exit_code, i64(stop_pty_exit)))
-		}
-		return false, bridge_update_pty_stop_failure(stop_pty_exit, stop_pty_timed_out, stop_pty_err)
+	if stop_ok, stop_detail := bridge_update_stop_pty_host(pty_socket); !stop_ok {
+		_ = os.remove_all(stage_dir)
+		blog_error(.update_apply_failed, blog_sym(.stage, .drain))
+		return false, stop_detail
 	}
 	_ = bridge_update_send_progress(conn, command_id, "pty_host_stopped", 88, "Bridge-owned PTY host and agent processes stopped.")
 
-	// 9a. A bridgesvc profile install updating to a version that has
-	// `ham-bridge update` hands off to the STAGED binary's transactional update
-	// (setup: bin.bak, service re-render, extensions on every OS, health incl. the
-	// hub connection, rollback). This process is NOT exited here: setup restarts the
-	// service itself, and must see it running to restart the old bridge on rollback.
-	// `update --detach` is waited for: it preflights (hub recorded, bundle binary
-	// runs) and only then starts setup in a session of its own (stdio on the null
-	// device, so this capture does not wait for setup). An early failure therefore
-	// arrives here, and the supervisor script below still applies the update and
-	// restarts the stopped PTY host, instead of the hub waiting on 'restarting'.
-	if service, use := bridge_update_via_ham_bridge(target_version); use {
-		argv := []string{bridge_binary, "update", "--bundle", bridgesvc.pdir(bridge_binary), "--service", service, "--detach"}
-		_ = bridge_update_send_progress(conn, command_id, "restarting", 95, "PTY host stopped. Handing off to ham-bridge update...")
-		h_out, h_err, h_exit, h_ok, h_timed_out := bridge_process_run_capture_status(argv, 30 * time.Second)
-		defer {delete(h_out); delete(h_err)}
-		if h_ok && h_exit == 0 do return true, "restarting"
-		fmt.printfln("bridge update: ham-bridge update did not start (exit %d, timed_out=%v): %s; falling back to the supervisor script", h_exit, h_timed_out, strings.trim_space(h_err))
-	}
-
-	// 9. Spawn the out-of-process supervisor through the injectable argv seam.
-	// No shell command string is involved, so paths and URLs remain data and the
-	// exact bridge PID can be stopped without host-wide process matching.
-	port_str := fmt.tprintf("%d", bridge_config.port)
-	pid_str := fmt.tprintf("%d", os.get_pid())
-	// Send before spawning: the supervisor may stop this process immediately once
-	// started, so a post-spawn write races the final shutdown.
-	_ = bridge_update_send_progress(conn, command_id, "restarting", 95, "PTY host stopped. Handing off to the update supervisor...")
-	if !bridge_update_launch_supervisor(
-		supervisor_target,
-		data_dir,
-		stage_dir,
-		port_str,
-		bridge_config.daemon_url,
-		pid_str,
-		contracts.APP_VERSION,
-		target_version,
-		pty_host_socket = pty_socket,
-	) {
-		_ = os.remove_all(stage_dir)
-		blog_error(.update_apply_failed, blog_sym(.stage, .supervisor))
-		return false, "failed to spawn detached supervisor script"
-	}
-
-	// 10. Prepare clean shutdown
-	when !ODIN_TEST {
-		thread.create_and_start(proc() {
-			time.sleep(1500 * time.Millisecond)
-			os.exit(0)
-		})
-	}
-
-	return true, "restarting"
+	// 8. Hand off to the STAGED binary's transactional `ham-bridge update`. This
+	// process is NOT exited here: setup restarts the service itself, and must see it
+	// running to restart the old bridge on rollback. `update --detach` is waited
+	// for: it preflights (hub recorded, bundle binary runs) and only then starts
+	// setup in a session of its own (stdio on the null device, so this capture does
+	// not wait for setup). An early failure is reported to the hub; the PTY host
+	// restarts on the next agent launch.
+	argv := []string{bridge_binary, "update", "--bundle", bridgesvc.pdir(bridge_binary), "--service", service, "--detach"}
+	_ = bridge_update_send_progress(conn, command_id, "restarting", 95, "PTY host stopped. Handing off to ham-bridge update...")
+	h_out, h_err, h_exit, h_ok, h_timed_out := bridge_process_run_capture_status(argv, 30 * time.Second)
+	defer {delete(h_out); delete(h_err)}
+	if h_ok && h_exit == 0 do return true, "restarting"
+	_ = os.remove_all(stage_dir)
+	blog_error(.update_apply_failed, blog_sym(.stage, .preflight))
+	if h_timed_out do return false, "ham-bridge update did not start within 30 seconds; nothing was changed"
+	return false, fmt.tprintf("ham-bridge update did not start (exit %d): %s; nothing was changed", h_exit, strings.trim_space(h_err))
 }
 
 bridge_hub_handle_agent_pty_input :: proc(conn: ^ws.Connection, text: string) {

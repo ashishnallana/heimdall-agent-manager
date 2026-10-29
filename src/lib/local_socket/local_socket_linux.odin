@@ -14,3 +14,12 @@ accept :: proc(listener: Socket) -> (Socket, bool) {
 	if errno != .NONE do return INVALID_SOCKET, false
 	return Socket(fd), true
 }
+
+// peer_pid returns the pid of the process on the other end of a connected
+// socket (SO_PEERCRED), so the bridge can stop the PTY host it reaches on its
+// socket even when an earlier bridge process started it.
+peer_pid :: proc(s: Socket) -> (int, bool) {
+	cred: struct {pid: i32, uid: u32, gid: u32}
+	if _, err := linux.getsockopt_base(linux.Fd(s), int(linux.SOL_SOCKET), linux.Socket_Option.PEERCRED, &cred); err != .NONE do return 0, false
+	return int(cred.pid), cred.pid > 0
+}

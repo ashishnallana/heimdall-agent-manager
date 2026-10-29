@@ -7,18 +7,6 @@ import "core:testing"
 import "core:time"
 import httpc "odin_test:lib/httpc"
 
-bridge_update_test_spawn_args: [dynamic]string
-
-bridge_update_test_capture_spawn :: proc(argv: []string) -> bool {
-	for arg in argv do append(&bridge_update_test_spawn_args, strings.clone(arg))
-	return true
-}
-
-bridge_update_test_clear_spawn_args :: proc() {
-	for arg in bridge_update_test_spawn_args do delete(arg)
-	delete(bridge_update_test_spawn_args)
-}
-
 // REQ-BUPD-4: bridge_update_progress_json frame serialization
 @(test)
 test_bridge_update_progress_json_format :: proc(t: ^testing.T) {
@@ -31,50 +19,6 @@ test_bridge_update_progress_json_format :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(frame, "\"stage\":\"downloading\""), "stage is downloading")
 	testing.expect(t, strings.contains(frame, "\"progress_percent\":45"), "progress_percent is 45")
 	testing.expect(t, strings.contains(frame, "\"message\":\"Downloading update package\""), "message matches")
-}
-
-// REQ-BUPD-FIX-5, REQ-UPD-COMPAT-2: update launch is an injectable argv boundary.
-// This pins the exact argv forwarded to the supervisor without running the
-// script: the versioned interface first, then the process identity.
-@(test)
-test_bridge_update_supervisor_launch_uses_structured_argv_and_exact_pid :: proc(t: ^testing.T) {
-	bridge_update_test_clear_spawn_args()
-	defer bridge_update_test_clear_spawn_args()
-
-	ok := bridge_update_launch_supervisor(
-		"/tmp/update scripts/apply-bridge-update.sh",
-		"/tmp/data dir",
-		"/tmp/stage dir",
-		"49323",
-		"https://hub.example.test/path?value=one&next=two",
-		"424242",
-		"0.5.6",
-		"0.6.0-rc.1",
-		bridge_update_test_capture_spawn,
-		"/tmp/bridge with spaces/pty-host.sock",
-	)
-	testing.expect(t, ok, "injected supervisor launcher succeeds")
-	prefix := bridge_os_supervisor_argv("/tmp/update scripts/apply-bridge-update.sh")
-	expected := make([dynamic]string, context.temp_allocator)
-	append(&expected, ..prefix[:])
-	append(&expected,
-		"--interface", "2",
-		"--from-version", "0.5.6",
-		"--to-version", "0.6.0-rc.1",
-		"--data-dir", "/tmp/data dir",
-		"--stage-dir", "/tmp/stage dir",
-		"--bridge-port", "49323",
-		"--hub-url", "https://hub.example.test/path?value=one&next=two",
-		"--bridge-pid", "424242",
-		"--pty-host-socket", "/tmp/bridge with spaces/pty-host.sock",
-	)
-	// Unix spawns the supervisor in its own session and says so; Windows does not.
-	if BRIDGE_UPDATE_SPAWN_DETACHES do append(&expected, "--already-detached")
-	testing.expect_value(t, len(bridge_update_test_spawn_args), len(expected))
-	if len(bridge_update_test_spawn_args) != len(expected) do return
-	for want, i in expected {
-		testing.expectf(t, bridge_update_test_spawn_args[i] == want, "argv[%d] = %q, want %q", i, bridge_update_test_spawn_args[i], want)
-	}
 }
 
 // ---- update tarball download (httpc) ----
@@ -175,27 +119,4 @@ bridge_update_download_reports_timeout :: proc(t: ^testing.T) {
 	testing.expect(t, !ok)
 	testing.expect(t, strings.contains(detail, "timed out (no progress for 30 seconds"), detail)
 	testing.expect_value(t, bridge_update_test_calls, BRIDGE_UPDATE_DOWNLOAD_ATTEMPTS)
-}
-
-// The PTY-host cleanup failure must say why it failed, not only that it did:
-// a missing interpreter (exit 127) and a timeout are different operator actions.
-@(test)
-test_bridge_update_pty_stop_failure_reports_cause :: proc(t: ^testing.T) {
-	missing := bridge_update_pty_stop_failure(127, false, "bash: line 1: python3: command not found\n")
-	testing.expect_value(t, missing, "failed to stop bridge-owned PTY host (exit 127: bash: line 1: python3: command not found); update aborted before restart")
-
-	survivors := bridge_update_pty_stop_failure(1, false, "[apply-bridge-update] stopping bridge-owned PTY processes: 42\nBridge-owned PTY processes did not stop; refusing binary swap.\n\n")
-	testing.expect_value(t, survivors, "failed to stop bridge-owned PTY host (exit 1: Bridge-owned PTY processes did not stop; refusing binary swap.); update aborted before restart")
-
-	timed_out := bridge_update_pty_stop_failure(-1, true, "partial output")
-	testing.expect_value(t, timed_out, "failed to stop bridge-owned PTY host: cleanup timed out; update aborted before restart")
-
-	silent := bridge_update_pty_stop_failure(3, false, "  \n")
-	testing.expect_value(t, silent, "failed to stop bridge-owned PTY host (exit 3); update aborted before restart")
-
-	// Bounded, and never split inside a UTF-8 sequence.
-	long := strings.concatenate({strings.repeat("a", BRIDGE_UPDATE_PTY_STOP_DETAIL_LIMIT - 1, context.temp_allocator), "é tail"}, context.temp_allocator)
-	bounded := bridge_update_pty_stop_failure(1, false, long)
-	expected := fmt.tprintf("failed to stop bridge-owned PTY host (exit 1: %s); update aborted before restart", strings.repeat("a", BRIDGE_UPDATE_PTY_STOP_DETAIL_LIMIT - 1, context.temp_allocator))
-	testing.expect_value(t, bounded, expected)
 }

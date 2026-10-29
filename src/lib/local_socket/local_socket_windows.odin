@@ -162,6 +162,19 @@ close :: proc(s: Socket) {
 	win.closesocket(s)
 }
 
+// SIO_AF_UNIX_GETPEERPID (afunix.h): _WSAIOR(IOC_VENDOR, 256).
+SIO_AF_UNIX_GETPEERPID :: 0x58000100
+
+// peer_pid returns the pid of the process on the other end of a connected
+// socket, so the bridge can stop the PTY host it reaches on its socket even when
+// an earlier bridge process started it.
+peer_pid :: proc(s: Socket) -> (int, bool) {
+	pid: win.DWORD
+	got: win.DWORD
+	if win.WSAIoctl(s, SIO_AF_UNIX_GETPEERPID, nil, 0, &pid, size_of(pid), &got, nil, nil) != 0 do return 0, false
+	return int(pid), pid > 0
+}
+
 // remove_path deletes a socket file left behind by a listener.
 remove_path :: proc(path: string) {
 	_ = os.remove(path)

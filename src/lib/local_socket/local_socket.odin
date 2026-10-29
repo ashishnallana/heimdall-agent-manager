@@ -16,6 +16,7 @@
 //   poll_readable(s, ms)       -> (ready, ok)    ok=false only on a real error
 //   set_recv_timeout(s, d)
 //   shutdown(s, how)           wake a blocked reader without freeing the handle
+//   peer_pid(s)                -> (pid, ok)      the connected peer process
 //   close(s)
 //   valid(s), max_path_len()
 //

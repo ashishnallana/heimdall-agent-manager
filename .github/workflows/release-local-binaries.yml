@@ -746,7 +746,7 @@ jobs:
             # List once; piping tar into `grep -q` races under pipefail
             # (grep exits on first match -> tar hits EPIPE -> false failure).
             tar -tzf "$tarball" > "$RUNNER_TEMP/$tarball.entries"
-            for entry in bin/ham-bridge bin/ham-ctl bin/ham-pty-host scripts/apply-bridge-update.sh README.md LICENSE; do
+            for entry in bin/ham-bridge bin/ham-ctl bin/ham-pty-host README.md LICENSE; do
               require_entry "$tarball" "$entry"
             done
             target="${tarball#heimdall-local-}"

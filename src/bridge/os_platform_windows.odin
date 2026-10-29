@@ -277,21 +277,6 @@ bridge_os_ps :: proc(cpu: Bridge_Ps_Cpu_Column, allocator := context.allocator) 
 // ---- self-update ----
 
 BRIDGE_EXE_SUFFIX :: ".exe"
-BRIDGE_UPDATE_SUPERVISOR_NAME :: "apply-bridge-update.ps1"
-
-// bridge_os_supervisor_argv starts the update supervisor script with the Windows
-// PowerShell every Windows ships; the caller appends the script's --flags, which
-// the .ps1 parses exactly like the .sh does.
-bridge_os_supervisor_argv :: proc(script: string) -> [dynamic]string {
-	argv := make([dynamic]string, context.temp_allocator)
-	append(&argv, "powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script)
-	return argv
-}
-
-// BRIDGE_UPDATE_SPAWN_DETACHES: Windows has no sessions or process groups that
-// a service stop would take down with the bridge, so nothing is claimed to the
-// supervisor (no --already-detached).
-BRIDGE_UPDATE_SPAWN_DETACHES :: false
 
 // bridge_os_spawn_new_session starts argv without waiting for it; the child
 // outlives the bridge and is reaped by the OS once the bridge exits.

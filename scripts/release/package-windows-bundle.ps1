@@ -4,7 +4,7 @@
 #     -BinDir <dir with ham-bridge.exe ham-ctl.exe ham-pty-host.exe> -Version v0.4.9 -OutDir dist
 #
 # Zip root: bin/ham-bridge.exe, bin/ham-ctl.exe, bin/ham-pty-host.exe,
-# [scripts/apply-bridge-update.ps1], share/heimdall/extensions/**,
+# share/heimdall/extensions/**,
 # README.md, LICENSE, METADATA.json (the Linux/macOS tarball's extensions layout).
 # Entry names always use forward slashes (Windows PowerShell 5.1's
 # ZipFile.CreateFromDirectory can write backslashes), and only regular files are
@@ -27,8 +27,6 @@ foreach ($exe in @('ham-bridge.exe', 'ham-ctl.exe', 'ham-pty-host.exe')) {
   if (-not (Test-Path -PathType Leaf $p)) { throw "missing required release input: $p" }
   $entries["bin/$exe"] = $p
 }
-$supervisor = Join-Path (Join-Path $repo 'scripts') 'apply-bridge-update.ps1'
-if (Test-Path -PathType Leaf $supervisor) { $entries['scripts/apply-bridge-update.ps1'] = $supervisor }
 # Provider extensions (F10): ham-bridge setup installs them from share/heimdall/extensions.
 $extRoot = Join-Path $repo 'extensions'
 foreach ($rel in @('antigravity/plugin.json', 'claude-code/.claude-plugin/plugin.json', 'codex/.codex-plugin/plugin.json',

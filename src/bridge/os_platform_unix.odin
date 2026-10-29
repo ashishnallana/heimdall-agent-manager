@@ -243,19 +243,6 @@ bridge_os_ps :: proc(cpu: Bridge_Ps_Cpu_Column, allocator := context.allocator) 
 // ---- self-update ----
 
 BRIDGE_EXE_SUFFIX :: ""
-BRIDGE_UPDATE_SUPERVISOR_NAME :: "apply-bridge-update.sh"
-
-// bridge_os_supervisor_argv starts the update supervisor script; the caller
-// appends the script's --flags.
-bridge_os_supervisor_argv :: proc(script: string) -> [dynamic]string {
-	argv := make([dynamic]string, context.temp_allocator)
-	append(&argv, "bash", script)
-	return argv
-}
-
-// BRIDGE_UPDATE_SPAWN_DETACHES: bridge_os_spawn_new_session puts the child in a
-// session of its own, so the supervisor is told --already-detached.
-BRIDGE_UPDATE_SPAWN_DETACHES :: true
 
 // bridge_os_spawn_new_session starts argv (argv[0] resolved through PATH like
 // execvp) as the leader of a new session and process group, with stdio on
