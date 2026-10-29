@@ -1170,92 +1170,54 @@ named `heimdall-bridge` is created and started automatically.
 
 ### 2.11 Bridge self-update
 
-When the Hub asks a bridge to update, the bridge downloads the release bundle for its
-target, checks its SHA-256, extracts it into `DATA_DIR/updates/stage` and runs the
-**staged** bundle's `scripts/apply-bridge-update.sh` (the update supervisor). The
-supervisor stops the bridge and its PTY hosts, swaps `bin/` atomically, restarts the
-service and polls the bridge's health endpoint; if the bridge is not healthy in time it
-restores `bin.bak` and writes `logs/update_rollback.log`. It needs only bash, POSIX
-userland, `ps`, `tar`, `curl` and the service manager (`systemctl --user`, `launchctl`
-or Termux `sv`); no Python or Perl.
+Every update, hub-initiated or local, runs the **new** release's `ham-bridge update`.
+There is no separate update script: setup's transaction is the update.
 
-On macOS, the supervisor resolves the exact LaunchAgent plist by both label and
-bridge executable, runs `launchctl bootout` before replacing the binaries, and
-bootstraps that same plist after the swap. This keeps a `KeepAlive` job from
-respawning the old bridge onto the listening port during either update or rollback.
-If the plist cannot be matched uniquely, the update fails before stopping the bridge.
+- **From the hub** (Settings → Bridges → Update). The bridge downloads the release
+  bundle for its target, checks its SHA-256, extracts it into `DATA_DIR/updates/stage`,
+  checks that the staged `ham-bridge --version` runs, stops its PTY host (and the agents
+  it hosts), then runs the staged `ham-bridge update --bundle <stage> --service <name>
+  --detach`. The PTY host is found through its socket's peer process, and only a
+  process whose image is `ham-pty-host` is signalled (SIGTERM, then SIGKILL).
+- **From the command line.**
 
-#### Caller interface
+  ```bash
+  ham-bridge update --version latest     # newest promoted release
+  ham-bridge update --version v0.6.1     # an exact release
+  ham-bridge update --bundle ./unpacked  # a bundle you already downloaded and verified
+  ```
 
-The supervisor is always the copy shipped with the version being installed, so it
-must work for every bridge that may call it. The caller says what it is:
+  `--version` resolves the GitHub release, downloads the bundle for this OS/arch and
+  verifies it against the release's `SHA256SUMS`. An unknown or unverifiable release is
+  refused, and nothing changes.
+- **What the update does.** The new binary runs `setup` for the profile: it stages the
+  binaries, keeps `bin.bak`, re-renders the service (systemd user unit, LaunchAgent,
+  Scheduled Task or Termux runit), refreshes provider extensions, restarts the service,
+  and waits for it to be running and connected to the hub. If any step fails, it
+  restores `bin.bak` and restarts the old bridge. `ham-bridge status --json` shows the
+  result.
+- **Refusals.** The hub-initiated update is refused before anything is downloaded
+  when the bridge is not a `ham-bridge` profile install, or when the hub asks for a
+  version older than the running one. Older binaries have no `update` command. To go
+  back to an older version, run the installer with `--version`.
 
-| Flag | Meaning |
-| --- | --- |
-| `--interface N` | Caller contract version. Absent means `1`, the original argv. Current callers send `2`. |
-| `--from-version VER` | Version of the running bridge. Required by interface 2. |
-| `--to-version VER` | Version being installed. Required by interface 2. |
+#### Upgrading bridges installed before the single `ham-bridge` flow (one time)
 
-- **Newer interface.** An `--interface` above the newest one the script supports
-  (`2`), a non-numeric value, or interface 2 without both versions exits with code `2`
-  and a message on stderr, before anything is stopped, cleaned up or swapped.
-- **Legacy callers.** Bridges released before interface 2 call the supervisor without
-  `--from-version`. It logs `Legacy caller (interface 1, no --from-version)` and runs
-  the version-independent flow unchanged.
-- **Version hooks.** The section `Version hooks` in `apply-bridge-update.sh`
-  (`run_version_hooks`) is the one place for release-specific update logic: a `case` on
-  `FROM_VERSION` / `TO_VERSION` for exact versions and globs, and
-  `version_before` / `version_at_least` (SemVer 2.0 precedence, `semver_compare`) for
-  ranges. Hooks run before the bridge is stopped and log the upgrade direction; a hook
-  that must abort exits non-zero and leaves the running bridge untouched. Range hooks
-  never match a version that is not SemVer, and legacy callers get no hooks, so a fix
-  they need belongs in the version-independent flow.
-- **PTY cleanup mode.** `--stop-pty-hosts-only` (run by the bridge before it starts
-  the detached supervisor) accepts the same three flags and runs the same hooks first.
-- **What the bridge sends.** The bridge copies the supervisor only from the staged
-  bundle (`scripts/<name>`, else the bundle root) to `DATA_DIR/updates/`; a bundle
-  without it fails the update before anything is stopped. Both calls pass
-  `--interface 2 --from-version <running> --to-version <target>`. On Linux and macOS
-  the bridge starts the detached supervisor as the leader of a new session itself
-  (fork + `setsid(2)`) and adds `--already-detached`, so the script never needs
-  `setsid(1)`, which macOS lacks, to leave the bridge's service.
+Releases before this one applied updates with `scripts/apply-bridge-update.sh` (`.ps1` on
+Windows), taken from the new bundle. Bundles no longer ship that script, so **a bridge
+installed by an older release cannot be updated from the hub to this release or any
+later one**: the update fails before it stops anything, and the old bridge keeps
+running. Reinstall it once with the headless installer:
 
 ```bash
-apply-bridge-update.sh --interface 2 --from-version 0.5.6 --to-version 0.5.7 \
-  --data-dir ~/.local/share/heimdall --stage-dir ~/.local/share/heimdall/updates/stage \
-  --bridge-port 49323 --bridge-pid 12345
+curl -fsSL install.ninjy.ai | bash -s -- --hub https://hub.example.com
 ```
 
-`apply-bridge-update.sh --help` lists every flag.
+```powershell
+& ([scriptblock]::Create((irm install.ninjy.ai/ps1))) -Hub https://hub.example.com
+```
 
-#### Windows
-
-Windows bundles ship `scripts/apply-bridge-update.ps1` instead, run by Windows
-PowerShell 5.1 (`powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File`).
-It takes the same flags, interface rules, legacy handling and version hooks
-(`Invoke-VersionHooks`, kept in step with `run_version_hooks`), and logs the same
-lines, also to `logs\apply-bridge-update.log`. Differences from the `.sh`:
-
-- **Service.** The Scheduled Task found through `--service-name`,
-  `HEIMDALL_BRIDGE_SERVICE_NAME` (set by `bridge-run.cmd`) or the task whose action runs
-  this data dir's `bin\bridge-service.js`. The supervisor stops that task's hidden
-  `wscript.exe` loop by PID rather than with `Stop-ScheduledTask` (which could end the
-  supervisor with the task), waits for the bridge PID to exit on its own (there is no
-  SIGTERM), then terminates that exact PID, and restarts with `Start-ScheduledTask`.
-- **Swap.** `bin\` is replaced by a directory rename (retried while an antivirus or
-  indexer handle holds it). The installer's `bridge-service.js`, `bridge-run.cmd` and
-  `ham-ctl-*.cmd` are carried into the new `bin\`. If PTY cleanup refuses or the rename
-  fails, nothing is swapped and the unchanged bridge is restarted.
-- **PTY cleanup.** Processes come from CIM (`Win32_Process`, owner SID checked); a
-  process's start time is its identity, and a child that started before its recorded
-  parent is not a descendant (Windows reuses PIDs and never reparents). The PTY host's
-  protocol `stop` is the graceful step, then survivors are terminated; exit `1` if any
-  survive, `3` if processes cannot be listed. `PTY_PROCESS_READER=cim|process` forces a
-  reader (`process` is `Get-Process`, PowerShell 7 only).
-- **Provider extensions** are not shipped in Windows bundles and are not refreshed.
-
-`tests/windows/apply_bridge_update_ps1_test.ps1` covers it on any PowerShell; off
-Windows (PowerShell 7) it also runs the PTY cleanup and the apply/rollback flow.
+After that, hub and `ham-bridge update` updates work as described above.
 
 ## Quick-start checklist
 
@@ -1381,7 +1343,7 @@ reinstalled, which wipes its Keystore keys), unseal it again from
 
 ### Self-update
 
-The update flow and the supervisor's caller interface are described in
+The update flow is described in
 [2.11 Bridge self-update](#211-bridge-self-update). A Termux bridge updates only to the `termux-arm64` bundle. It never falls back to
 `linux-arm64`, because a glibc `linux-arm64` bundle (every release up to v0.5.3) dies
 under Android's seccomp filter (`set_robust_list`, SIGSYS) and leaves a bridge that
@@ -1412,16 +1374,11 @@ cannot restart.
 - **Defence in depth.**
   - The bridge refuses a `download_url` whose file name is another target's
     `heimdall-local-<target>` bundle.
-  - Under Termux, `apply-bridge-update.sh` refuses any staged bundle whose
-    `METADATA.json` target is not `termux-*`, before it stops anything.
-  - The bridge runs the staged bundle's copy of that script, so this also covers
-    v0.3.29 Termux bridges, which still report `linux-arm64`.
-- **Service.** `apply-bridge-update.sh` drives the runit service with
-  `sv down` / `sv up "$PREFIX/var/service/ham-bridge"` and never calls `systemctl`.
-  `sv down` keeps runsv from restarting the old binary while it is being replaced.
+  - The staged binary must run (`ham-bridge --version`) before anything is stopped.
+    A glibc `linux-*` binary is killed by Android's seccomp filter, so that check
+    refuses it.
+- **Service.** `ham-bridge update` drives the runit service with
+  `sv down` / `sv up "$PREFIX/var/service/<service>"` and never calls `systemctl`.
   On a failed health check it rolls back and runs `sv up` again.
-- **`heimdall update`.** Uses the same target. On GitHub it reports
-  "<tag> is not available for target termux-arm64" when the release has no termux
-  asset. On a `--hub` mirror it aborts when `SHA256SUMS` has no
-  `heimdall-local-termux-arm64.tar.gz` entry. It brackets the binary swap with
-  `sv down|up` instead of systemctl.
+- **`ham-bridge update --version`.** Resolves the `termux-arm64` asset of the release
+  and refuses a release that has none, or whose `SHA256SUMS` does not list it.

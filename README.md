@@ -416,4 +416,14 @@ ham-bridge update --version latest       # or --version vX.Y.Z; SHA-256 verified
 ham-bridge uninstall --hub https://hub.mundus.in [--purge]
 ```
 
+Updates started from the Hub (Settings → Bridges → Update) run the same
+`ham-bridge update` from the new release.
+
+> **Upgrading a bridge installed before the single `ham-bridge` flow:** release bundles
+> no longer ship `scripts/apply-bridge-update.sh`/`.ps1`, so a bridge installed by an
+> older release cannot be updated from the Hub to this release. Reinstall it once with
+> the command above (`curl -fsSL install.ninjy.ai | bash -s -- --hub <url>`, or
+> `irm install.ninjy.ai/ps1 | iex` on Windows); later updates work from the Hub again.
+> See [SELF_HOSTING.md §2.11](SELF_HOSTING.md#211-bridge-self-update).
+
 See [`SELF_HOSTING.md`](SELF_HOSTING.md#21-install-a-bridge) for details and troubleshooting.

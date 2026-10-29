@@ -226,11 +226,16 @@ Runs the NEW binary's `setup --headless` for the profile (`DIR/ham-bridge` or
 staging, `bin.bak`, service re-render, extensions on every OS, restart, health =
 running **and** connected to the hub, and on failure `bin.bak` restored and the old
 bridge restarted. Inside the service being updated (or with `--detach`) it runs in a
-session of its own. `--version V` (download + verify a release) is deferred to the thin-bootstrap work
-(w5), which owns release download and SHA-256 verification; until then it refuses.
+session of its own. `--version V|latest` resolves the GitHub release, downloads this
+OS/arch's bundle and SHA-256 verifies it against `SHA256SUMS` before applying it; an
+unknown or unverifiable release changes nothing.
 
-**Hub-initiated update.** A bridgesvc profile install hands the staged bundle to
+**Hub-initiated update.** The bridge stops its PTY host (found through the socket's
+peer pid; only a `ham-pty-host` image is signalled), hands the staged bundle to
 `ham-bridge update --detach` and waits for it (30 s): the preflight (hub recorded,
 bundle binary runs) happens before setup is detached, so an early failure comes back
-to the running bridge, which falls back to the supervisor script; the script applies
-the update and restarts the PTY host that was already stopped.
+to the hub as a failed update and the PTY host restarts on the next launch. There is
+no update script any more (`apply-bridge-update.{sh,ps1}` were removed): a bridge that
+is not a bridgesvc profile install, or a hub downgrade, is refused before anything is
+downloaded, and bridges installed before this release are reinstalled once with
+`curl -fsSL install.ninjy.ai | bash` (Windows: `irm install.ninjy.ai/ps1 | iex`).

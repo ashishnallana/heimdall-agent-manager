@@ -223,15 +223,12 @@ python3 -c "import sqlite3,sys; con=sqlite3.connect('/tmp/x/hub.db'); \
   [print(r) for r in con.execute('SELECT bridge_id,label,machine_hostname FROM bridges')]"
 ```
 
-**3. A copied source tree needs `tools/` AND `scripts/`, not just `src/`.**
+**3. A copied source tree needs `tools/`, not just `src/`.**
 `src/bridge/bridge_telemetry.odin` does `#load("../../tools/telemetry/telegraf.conf.template")`, so
 `cp -r src /tmp/elsewhere` then `odin test src/bridge` fails with *"Failed to `#load` file"* and nothing to
-do with your change. And `tests`/`src/hub/transport/http`'s
-`test_bridge_update_integration_failure_triggers_supervisor_rollback` resolves
-`scripts/apply-bridge-update.sh` **relative to cwd**, so a copy without `scripts/` fails that one test and it
-looks like a hub regression. Copy all three:
+do with your change. Copy both:
 ```bash
-cp -r <repo>/src <repo>/tools <repo>/scripts /tmp/elsewhere/
+cp -r <repo>/src <repo>/tools /tmp/elsewhere/
 ```
 
 **4. Do not let a script `rm -f $S/*.log` when its own stdout is redirected into that directory.** The

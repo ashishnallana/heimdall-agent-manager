@@ -1,7 +1,9 @@
 # Heimdall Bridge Update Pipeline: Architectural Design & Implementation Specification
 
 **Document Version:** 1.0.0  
-**Status:** Proposed Architecture  
+**Status:** Superseded. The out-of-process supervisor script described here
+(`apply-bridge-update.{sh,ps1}`) was removed; updates run the new release's
+`ham-bridge update` (see SELF_HOSTING.md §2.11). Kept for the hub/UI/protocol design.  
 **Author:** Coordinator Agent (`inst_18da54f3d1221d02`)  
 **Scope:** `scripts/install.sh`, `src/bridge`, `src/hub`, `src/ui`, SQLite Schema, WebSocket Protocol  
 **Requirement IDs:** `REQ-BUPD-1` through `REQ-BUPD-6`  
