@@ -750,6 +750,18 @@ test('taskBridgeOptions defaults to Inherit and lists the owner bridges (revoked
   assert.deepEqual(taskBridgeOptions([]), [{ value: '', label: TASK_BRIDGE_INHERIT_LABEL }]);
 });
 
+test('taskBridgeOptions lists only active bridges by name; the current pin stays, marked offline', () => {
+  const bridges = [
+    ...PIN_BRIDGES,
+    { bridge_id: 'brg_off', label: 'laptop', status: 'offline' },
+    { bridge_id: 'brg_plan', label: 'over plan', status: 'online', plan_disabled_at: '2026-10-01T00:00:00Z' },
+  ];
+  assert.deepEqual(taskBridgeOptions(bridges).map((o) => o.value), ['', 'brg_alpha', 'brg_beta']);
+  assert.deepEqual(taskBridgeOptions(bridges, 'brg_off').slice(-1), [{ value: 'brg_off', label: 'laptop (offline)' }]);
+  // Never a raw id when a label exists.
+  assert.ok(taskBridgeOptions(bridges).every((o) => !o.label.startsWith('brg_')));
+});
+
 test('create submit: default create sends no bridge_id, an override pins the chosen bridge', () => {
   // Default (inherit) create — the hub treats absent and '' alike, so the key is
   // simply omitted.

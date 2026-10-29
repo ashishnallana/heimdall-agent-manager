@@ -44,12 +44,20 @@ export function isRevokedBridge(bridge: any): boolean {
   return String(bridge?.status || bridge?.runtime_status || bridge?.state || '').includes('revoke');
 }
 
-export function taskBridgeOptions(bridges: any[]): Array<{ value: string; label: string }> {
+// Only an online (connected, not revoked, not plan-disabled) bridge can take a
+// task, so only those are offered.
+export function isActiveBridge(bridge: any): boolean {
+  return !isRevokedBridge(bridge) && !bridge?.plan_disabled_at && String(bridge?.status || '').toLowerCase() === 'online';
+}
+
+// The pin options: inherit, then every active bridge by name. keepId (the
+// current pin) stays listed while offline, marked so, so the select can show it.
+export function taskBridgeOptions(bridges: any[], keepId = ''): Array<{ value: string; label: string }> {
   return [
     { value: '', label: TASK_BRIDGE_INHERIT_LABEL },
     ...(bridges || [])
-      .filter((bridge) => !isRevokedBridge(bridge))
-      .map((bridge) => ({ value: bridgeIdOf(bridge), label: bridgeLabel(bridge) })),
+      .filter((bridge) => isActiveBridge(bridge) || (keepId !== '' && bridgeIdOf(bridge) === keepId))
+      .map((bridge) => ({ value: bridgeIdOf(bridge), label: `${bridgeLabel(bridge)}${isActiveBridge(bridge) ? '' : ' (offline)'}` })),
   ];
 }
 

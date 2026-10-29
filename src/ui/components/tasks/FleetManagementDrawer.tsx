@@ -273,8 +273,8 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
   }, [bridgesQuery.data?.bridges]);
   // Bridge ids never surface in the drawer text; show the bridge's name.
   const bridgeLabel = (bridgeId: string): string => {
-    const b: any = (bridgesQuery.data?.bridges || []).find((x: any) => String(x.id || x.bridge_id || '') === bridgeId);
-    return String(b?.name || b?.label || 'unknown bridge');
+    const b: any = (bridgesQuery.data?.bridges || []).find((x: any) => String(x.bridge_id || x.bridgeId || x.id || '') === bridgeId);
+    return String(b?.label || b?.name || b?.machine_hostname || 'unknown bridge');
   };
 
   const bridgeId = effectiveChainBridgeId(chainDetailQuery.data?.chain, allInstancesQuery.data?.instances || [], activeBridges);

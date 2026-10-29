@@ -3,6 +3,7 @@ import { Button, Icon, Select, Text } from '@ui';
 import type { TaskWire } from '../../api/taskWire';
 import type { TaskChainFleet } from '../../api/endpoints/taskChains';
 import { useListBridgesQuery } from '../../api/endpoints/bridgeSupport';
+import { taskBridgeOptions } from '../../utils/taskBridgePin';
 import {
   useFetchCommitDiffQuery,
   useFetchTaskEventsQuery,
@@ -243,10 +244,8 @@ export const TaskDetails: React.FC<TaskDetailsProps> = ({
   const unpinned = describeEffectivePlacement(taskEffectivePlacement({ ...task, bridge_id: '' }, chainFleets), names.bridge);
   const bridgeOptions = [
     { value: '', text: unpinned.bridge ? `Fleet default: ${unpinned.bridge}` : "Fleet default: the worker's fleet row decides" },
-    ...bridges.map((b: any) => ({
-      value: String(b.id || b.bridge_id || ''),
-      text: `${b.name || names.bridge(String(b.id || ''))}${b.status === 'online' || b.connected ? '' : ' (offline)'}`,
-    })),
+    // Active bridges by name (the API's bridge_id/label), plus the current pin.
+    ...taskBridgeOptions(bridges, String(task.bridge_id || '')).slice(1).map((o) => ({ value: o.value, text: o.label })),
   ];
 
   const workerText = people.assignee
