@@ -468,6 +468,11 @@ jobs:
           node-version: 22
           cache: npm
 
+      - name: Test desktop bundle provider extensions (macOS)
+        if: ${{ startsWith(matrix.target, 'darwin-') }}
+        shell: bash
+        run: python3 -m unittest discover -s tests -p test_desktop_extension_delivery.py
+
       - name: Build, sign, and notarize Heimdall DMG, zip and pkg (macOS)
         if: ${{ startsWith(matrix.target, 'darwin-') }}
         shell: bash
@@ -677,6 +682,9 @@ jobs:
       - name: Smoke-test the packaged bundle
         shell: pwsh
         run: |
+          # Exercise the actual ZIP through the installer, not just its binaries.
+          powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/provider_extension_distribution_test.ps1 -Bundle dist/heimdall-local-windows-amd64.zip
+          if ($LASTEXITCODE) { throw 'packaged provider extension installation failed' }
           $work = Join-Path $env:RUNNER_TEMP 'win-verify'
           Expand-Archive dist/heimdall-local-windows-amd64.zip -DestinationPath $work
           & "$work/bin/ham-bridge.exe" --version; if ($LASTEXITCODE) { throw 'packaged ham-bridge --version failed' }
@@ -707,6 +715,9 @@ jobs:
           scripts/release/stage-windows-desktop-resources.ps1 `
             -Bundle dist/heimdall-local-windows-amd64.zip `
             -Version "${{ needs.prepare.outputs.version }}"
+          # Verify the archive and installer actually embedded in the desktop app.
+          powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/provider_extension_distribution_test.ps1 -Bundle release-assets/bridge/heimdall-local-windows-amd64.zip
+          if ($LASTEXITCODE) { throw 'desktop provider extension installation failed' }
           npm ci
           if ($LASTEXITCODE) { throw "npm ci failed with exit code $LASTEXITCODE" }
           npm run build

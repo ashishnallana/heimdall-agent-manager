@@ -1,3 +1,4 @@
+import { useWindowChrome } from '../../hooks/useWindowChrome';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { PaneVisibilityProvider } from '../workbench/paneVisibility';
 import { useDispatch, useSelector } from 'react-redux';
@@ -370,6 +371,7 @@ export function Workspace({ focusMessageId, isMobile = false, leading, leadingWi
   // toggle stay in the window's top-right whether or not the aux dock is open.
   // Whatever sits under it (the top-right pane header, or the aux tab strip
   // when the dock is open) reserves its measured width.
+  const { insetRight: windowControlsInset } = useWindowChrome();
   const topRightRef = useRef<HTMLDivElement | null>(null);
   const [topRightWidth, setTopRightWidth] = useState(48);
   useEffect(() => {
@@ -697,8 +699,9 @@ export function Workspace({ focusMessageId, isMobile = false, leading, leadingWi
     },
   ]);
 
+  const reservedTopRightWidth = topRightWidth + windowControlsInset;
   const topRightSpacer = (
-    <div aria-hidden="true" data-debug-id="workspace-top-right-spacer" className="shrink-0" style={{ width: Math.max(0, topRightWidth - 12) }} />
+    <div aria-hidden="true" data-debug-id="workspace-top-right-spacer" className="shrink-0" style={{ width: Math.max(0, reservedTopRightWidth - 12) }} />
   );
 
   const renderPane = useCallback(
@@ -876,7 +879,7 @@ export function Workspace({ focusMessageId, isMobile = false, leading, leadingWi
             isActive={showActiveBorder && auxFocused}
             onActivate={() => setAuxFocused(true)}
             reserveLeft={leadingWidth}
-            reserveRight={topRightWidth}
+            reserveRight={reservedTopRightWidth}
             mobileLeadingPageCount={mainPageCount}
             mobileTotalPageCount={mobileAuxContinuumPageCount}
           />
@@ -886,8 +889,8 @@ export function Workspace({ focusMessageId, isMobile = false, leading, leadingWi
       <div
         ref={topRightRef}
         data-debug-id="workspace-top-right-cluster"
-        className="absolute right-0 top-0 z-30 flex items-center gap-1 pl-1 pr-2"
-        style={{ height: topChromeHeight(isMobile) }}
+        className="window-drag absolute right-0 top-0 z-30 flex items-center gap-1 pl-1 pr-2"
+        style={{ height: topChromeHeight(isMobile), right: windowControlsInset || undefined }}
       >
         {trailing}
         {auxToggle}

@@ -106,11 +106,16 @@ bridge_retry_journal_save :: proc(j: ^Bridge_Retry_Journal, path: string) -> boo
     return true
 }
 bridge_retry_atomic_write :: proc(path: string, bytes: []byte) -> bool {
-    slash := strings.last_index_byte(path, '/')
+    slash := strings.last_index_any(path, "/\\")
     if slash <= 0 do return false
     dir := path[:slash]
     if mk := bridge_make_directory_all(dir); mk != nil && !os.exists(dir) do return false
-    if os.chmod(dir, {.Read_User, .Write_User, .Execute_User}) != nil do return false
+    // Windows chmod opens the path as a writable file, which fails for a
+    // directory. Windows uses the ACL inherited from the user's profile;
+    // POSIX directories still require owner-only mode before secrets are written.
+    when ODIN_OS != .Windows {
+        if os.chmod(dir, {.Read_User, .Write_User, .Execute_User}) != nil do return false
+    }
     tmp := strings.concatenate({path, ".tmp"}, context.temp_allocator)
     _ = os.remove(tmp)
     f, open_err := os.open(tmp, {.Write, .Create, .Excl, .Trunc}, {.Read_User, .Write_User})

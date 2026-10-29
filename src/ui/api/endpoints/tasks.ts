@@ -1695,6 +1695,7 @@ export const {
   useListTaskChainsQuery,
   useFetchTaskChainDetailQuery,
   useFetchTaskChainConversationQuery,
+  useLazyFetchTaskChainConversationQuery,
   useFetchChainTaskDetailQuery,
   useFetchChainTaskCommentsQuery,
   useCreateTaskChainMutation,

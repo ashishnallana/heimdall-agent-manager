@@ -29,16 +29,21 @@ foreach ($exe in @('ham-bridge.exe', 'ham-ctl.exe', 'ham-pty-host.exe')) {
 }
 # Provider extensions (F10): ham-bridge setup installs them from share/heimdall/extensions.
 $extRoot = Join-Path $repo 'extensions'
-foreach ($rel in @('antigravity/plugin.json', 'claude-code/.claude-plugin/plugin.json', 'codex/.codex-plugin/plugin.json',
+foreach ($rel in @('antigravity/plugin.json', 'antigravity/hooks/hooks.json', 'claude-code/.claude-plugin/plugin.json',
+    'claude-code/hooks/hooks.json', 'codex/.codex-plugin/plugin.json', 'codex/hooks/hooks.json',
     '.claude-plugin/marketplace.json', '.agents/plugins/marketplace.json')) {
   if (-not (Test-Path -PathType Leaf (Join-Path $extRoot $rel))) { throw "missing required release input: extensions/$rel" }
 }
 $extFull = (Resolve-Path $extRoot).Path.TrimEnd('\', '/')
 foreach ($f in Get-ChildItem -LiteralPath $extFull -Recurse -File -Force) {
-  if ($f.Attributes -band [IO.FileAttributes]::ReparsePoint) { continue }
   $rel = $f.FullName.Substring($extFull.Length + 1) -replace '\\', '/'
+  # antigravity/hooks.json is a git symlink on Unix and a text placeholder in
+  # Windows checkouts; it is shipped as the real JSON below instead.
+  if ($rel -eq 'antigravity/hooks.json') { continue }
+  if ($f.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "extension asset is a link: $($f.FullName)" }
   $entries["share/heimdall/extensions/$rel"] = $f.FullName
 }
+$entries['share/heimdall/extensions/antigravity/hooks.json'] = Join-Path $extRoot 'antigravity/hooks/hooks.json'
 $entries['README.md'] = Join-Path $repo 'README.md'
 $entries['LICENSE'] = Join-Path $repo 'LICENSE'
 

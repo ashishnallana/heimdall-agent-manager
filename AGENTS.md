@@ -551,6 +551,12 @@ The web app no longer installs provider extensions; `ham-bridge setup` / `ham-br
 | --- | --- |
 | `BridgesPanel` | `settings-bridge-update-extensions` |
 
+### Quoted context controls
+| Component | Debug IDs |
+|---|---|
+| QuoteSelectionPopover | `message-quote-popover`, `message-quote-btn`, `message-quote-status` |
+| ComposerContextChips | `composer-quote-chips`, `composer-quote-chip-${quoteId}`, `composer-quote-details-${quoteId}`, `composer-quote-remove-${quoteId}`, `composer-quote-source-${quoteId}` |
+
 ### Adding new elements
 
 When adding any new interactive element to the UI:

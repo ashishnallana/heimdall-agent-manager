@@ -1,13 +1,14 @@
 import { useState } from 'react';
 import { useSelector } from 'react-redux';
 import ArtifactViewer from './ArtifactViewer';
-import MarkdownBody from './MarkdownBody';
+import MarkdownBody, { type MarkdownTextSelection } from './MarkdownBody';
 
 type MarkdownProps = {
   source: string;
   className?: string;
   compact?: boolean;
   copyAll?: boolean;
+  onTextSelectionChange?: (selection: MarkdownTextSelection | null) => void;
   'data-debug-id'?: string;
 };
 
@@ -23,7 +24,7 @@ function artifactViewerSession(session: any) {
   return { daemonUrl: String(session?.daemonUrl || ''), clientToken: String(session?.clientToken || '') };
 }
 
-export default function Markdown({ source, className, compact, copyAll = true, 'data-debug-id': dataDebugId }: MarkdownProps) {
+export default function Markdown({ source, className, compact, copyAll = true, onTextSelectionChange, 'data-debug-id': dataDebugId }: MarkdownProps) {
   const session = useSelector((state: any) => state.chat?.session || {});
   const viewerSession = artifactViewerSession(session);
   const [activeArtifactId, setActiveArtifactId] = useState('');
@@ -37,6 +38,7 @@ export default function Markdown({ source, className, compact, copyAll = true, '
         copyAll={copyAll}
         data-debug-id={dataDebugId}
         onArtifactClick={setActiveArtifactId}
+        onTextSelectionChange={onTextSelectionChange}
       />
       {activeArtifactId && viewerSession.clientToken ? (
         <ArtifactViewer artifactId={activeArtifactId} daemonUrl={viewerSession.daemonUrl} clientToken={viewerSession.clientToken} onClose={() => setActiveArtifactId('')} />
