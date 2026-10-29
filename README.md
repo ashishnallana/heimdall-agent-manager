@@ -379,25 +379,41 @@ are launched on an available bridge).
 
 ## Install a bridge
 
-Connect a Linux or macOS machine to your Hub with one command (replace the URL for a self-hosted Hub):
+Connect a Linux or macOS machine to your Hub with one command, headless (replace the
+URL for a self-hosted Hub):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/tanmayv/heimdall-agent-manager/main/scripts/install.sh | bash -s -- --hub https://hub.mundus.in
+curl -fsSL install.ninjy.ai | bash -s -- --hub https://hub.mundus.in
 ```
 
-The installer downloads and verifies the binaries, registers the system service,
-opens browser-based enrollment when needed, saves the approved credential, and starts
-the bridge. There is no separate TLS runtime dependency: the binaries link their HTTPS
-and WSS client (libcurl, pinned in `nix/libcurl-pin.json`) and its TLS library statically,
-and the Linux ones are fully static, so they run on any
-distribution (Alpine and old glibc included). See
-[`SELF_HOSTING.md`](SELF_HOSTING.md) for deployment, headless, and troubleshooting details.
+`curl -fsSL install.ninjy.ai | bash` serves [`scripts/install.sh`](scripts/install.sh), a
+thin bootstrap: it resolves the newest promoted release (or `--version TAG`), downloads
+this machine's bundle, verifies it against the release's `SHA256SUMS`, and runs
+`ham-bridge setup --headless` with every other flag passed through (`--profile NAME`,
+`--new-bridge`, `--reuse-bridge ID`, `--json-progress`). `ham-bridge` does the rest:
+installs the binaries and provider extensions, registers the user service, prints the
+browser approval link and waits for it, starts the bridge and rolls back on failure.
+The binaries link their HTTPS and WSS client (libcurl, pinned in `nix/libcurl-pin.json`)
+statically, and the Linux ones are fully static, so they run on any distribution.
 
 On Windows 10/11 (x64), from a normal (non-admin) PowerShell:
 
 ```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/tanmayv/heimdall-agent-manager/main/scripts/install.ps1))) -Hub https://hub.mundus.in
+& ([scriptblock]::Create((irm install.ninjy.ai/ps1))) -Hub https://hub.mundus.in
+# or, with the options in the environment:
+$env:HEIMDALL_HUB = 'https://hub.mundus.in'; irm install.ninjy.ai/ps1 | iex
 ```
 
-It installs the bridge as a per-user Scheduled Task (no window, starts at logon); see
-[Windows quick install](SELF_HOSTING.md#211-windows-quick-install).
+[`scripts/install.ps1`](scripts/install.ps1) does the same on Windows; the bridge runs as
+a per-user Scheduled Task. Both scripts are self-contained and also attached to every
+release.
+
+Afterwards everything goes through `ham-bridge`:
+
+```bash
+ham-bridge status --json                 # installed bridges and their state
+ham-bridge update --version latest       # or --version vX.Y.Z; SHA-256 verified, rolls back on failure
+ham-bridge uninstall --hub https://hub.mundus.in [--purge]
+```
+
+See [`SELF_HOSTING.md`](SELF_HOSTING.md#21-install-a-bridge) for details and troubleshooting.

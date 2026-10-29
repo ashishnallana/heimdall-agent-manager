@@ -647,276 +647,91 @@ connects outbound to the hub and never needs to be publicly reachable itself.
 > 2.2–2.10 cover the same ground manually (source builds, hand-written service
 > files, Nix/Home Manager) for advanced setups.
 
-### 2.1 Quick install (recommended)
+### 2.1 Install a bridge
 
-On any Linux (x86_64, arm64) or macOS (Intel, Apple Silicon) machine, install
-prebuilt binaries with the one-line installer — no Nix, no Odin, no Rust
-toolchain, no source checkout. The binaries carry their own HTTPS client
-(libcurl, statically linked; the Linux binaries are fully static and run on any
-distribution, Alpine and old glibc included), so no libcurl or OpenSSL is
-needed. For an HTTPS or WSS hub, install `socat` first:
+One command, headless, on Linux, macOS and Termux:
 
 ```bash
-sudo apt install socat  # Debian/Ubuntu
-brew install socat      # macOS
+curl -fsSL install.ninjy.ai | bash -s -- --hub https://hub.example.com
 ```
 
-The installer checks this dependency before any download or write and stops with
-these commands if it is missing. Nix builds provide `socat` through the wrapped
-bridge runtime; this prerequisite applies to the prebuilt installer path.
+`install.ninjy.ai` serves [`scripts/install.sh`](scripts/install.sh) (also attached to every
+release; any copy works, it does not depend on where it was fetched from). It is a thin
+bootstrap and does only this:
+
+1. detects the OS and architecture (`linux|darwin|termux`-`amd64|arm64`);
+2. resolves the newest **promoted** release (not draft, not prerelease) that carries
+   `SHA256SUMS` and this target's bundle, or the release named by `--version TAG`;
+3. downloads `heimdall-local-<target>-<tag>.tar.gz` and verifies it against exactly one
+   `SHA256SUMS` entry (nothing runs when it does not match);
+4. runs the bundle's `ham-bridge setup --headless` with every other argument passed
+   through, then deletes its temporary copy.
+
+Bootstrap options: `--version TAG|latest`, `--bundle FILE --checksum-file FILE` (an
+already-downloaded bundle, verified first), `--uninstall` (runs `ham-bridge uninstall`
+instead), `--name NAME` (alias of `--profile NAME`), `--help`. Everything else goes to
+`ham-bridge setup`: `--hub URL`, `--profile NAME`, `--new-bridge`, `--reuse-bridge ID`,
+`--json-progress` (machine-readable progress, [docs/bridge-setup-progress.md](docs/bridge-setup-progress.md)).
+Requires `curl`, `tar` and `sha256sum` (or `shasum`); run as your login user, not root.
+
+`ham-bridge setup` is the single install/enroll implementation (the desktop app and
+the tray drive the same command). It runs one transaction and rolls back to the previous
+install when a step fails:
+
+| Step | What happens |
+| --- | --- |
+| lock, stage | takes the per-profile install lock; snapshots the current install for rollback |
+| binaries | copies the bundle's binaries into the profile's `bin/`, keeping `bin.bak` |
+| config, ports | writes or migrates `config.toml`, `hub-url`, `profile`; keeps or allocates two loopback ports |
+| service | renders and registers the user service (systemd user unit, LaunchAgent, runit on Termux, Scheduled Task on Windows) |
+| enroll | unless already enrolled to this Hub: prints the browser approval link and waits; a machine enrolled by another account is confirmed, the old bridge revoked and its secrets wiped |
+| extensions | installs or repairs the bundled provider extensions; self-heals ones installed from another source |
+| start, verify | (re)starts the service and waits until the bridge runs and is connected to the Hub |
+
+Paths for the default profile of `https://hub.example.com`:
+
+| | Linux / Termux | macOS | Windows |
+| --- | --- | --- | --- |
+| Service | `~/.config/systemd/user/heimdall-bridge-hub-example-com.service` (Termux: `$PREFIX/var/service/ham-bridge`) | `~/Library/LaunchAgents/heimdall-bridge-hub-example-com.plist` | Scheduled Task `heimdall-bridge-hub-example-com` |
+| Config, credential | `~/.config/heimdall/bridges/heimdall-bridge-hub-example-com/` | same | `%APPDATA%\heimdall\bridges\heimdall-bridge-hub-example-com\` |
+| Binaries, data, logs | `~/.local/share/heimdall/bridges/heimdall-bridge-hub-example-com/` | same | `%LOCALAPPDATA%\heimdall\bridges\heimdall-bridge-hub-example-com\` |
+
+After the install, manage the bridge with `ham-bridge` (in the profile's `bin/`):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/tanmayv/heimdall-agent-manager/main/scripts/install.sh | bash
+ham-bridge status --json                         # every installed profile and its state
+ham-bridge enroll --hub https://hub.example.com  # re-enroll (--new-bridge for a new id)
+ham-bridge update --version latest               # or --version vX.Y.Z (see 2.11)
+ham-bridge uninstall --hub https://hub.example.com [--keep-data | --purge]
 ```
 
-Variants:
-
-```bash
-# Pin a specific release tag
-curl -fsSL https://raw.githubusercontent.com/tanmayv/heimdall-agent-manager/main/scripts/install.sh \
-  | bash -s -- --version v0.1.0
-
-# Download from a self-hosted hub mirror instead of GitHub Releases
-curl -fsSL https://raw.githubusercontent.com/tanmayv/heimdall-agent-manager/main/scripts/install.sh \
-  | bash -s -- --hub https://hub.example.com
-
-# A second bridge to the same Hub for this OS user (another Heimdall user);
-# see 2.1.2
-curl -fsSL https://raw.githubusercontent.com/tanmayv/heimdall-agent-manager/main/scripts/install.sh \
-  | bash -s -- --hub https://hub.example.com --name bob
-```
-
-The installer:
-
-1. Detects your platform and fails cleanly on unsupported ones.
-2. Downloads the release tarball and its `SHA256SUMS`, and **verifies the
-   SHA-256 checksum before extracting anything**.
-3. Installs `heimdall`, `ham-bridge`, `ham-pty-host` and `ham-ctl` to
-   `~/.local/bin` — no sudo required. Under `curl | sudo bash` the binaries go
-   to `/usr/local/bin` while the service file and PATH lines are written for
-   the invoking user (resolved from `SUDO_USER`) and chowned to them, so the
-   install never splits between `/usr/local/bin` and `/root`; running as root
-   without a resolvable `SUDO_USER` is refused. The installer never installs
-   an `openssl` — not even from an older release tarball that still ships one:
-   `openssl` is a generic name the installer does not own, and writing it into
-   a shared `/usr/local/bin` could clobber the host's own. REQ-INST-21 retired
-   the bundled-openssl machinery precisely because its provenance record could
-   then get that host file deleted on uninstall. The legacy
-   `HAM_TLS_BACKEND=s_client` path resolves `openssl` from your system `PATH`.
-4. Wires the install directory onto `PATH` in the shell config files that
-   actually exist for your shell — `~/.bashrc` / `~/.bash_profile` (bash),
-   `~/.zshrc` / `~/.zprofile` (zsh, and the login-shell files macOS reads),
-   or `~/.config/fish/config.fish` (fish) — idempotently, and under sudo in
-   the invoking user's files rather than root's. A config file for a shell you
-   do not use is never created.
-
-   **A shell config file that cannot be written is not an install failure.**
-   On NixOS and anywhere home-manager manages your dotfiles, `~/.bashrc` and
-   `~/.zshrc` are symlinks into a read-only `/nix/store` path, so the append
-   cannot succeed. The installer says which file it could not write, prints a
-   copy-pasteable snippet — the plain `export PATH=...` line, the
-   home-manager `home.sessionPath` form, and the fish `fish_add_path` form —
-   and **carries on to register the service and exits 0**. When no file could
-   be written at all, the closing summary states that the install succeeded
-   and that only `PATH` needs your action.
-5. Registers and starts a per-Hub user service
-   (`~/.config/systemd/user/heimdall-bridge-<hub>.service` on Linux,
-   `~/Library/LaunchAgents/heimdall-bridge-<hub>.plist` on macOS; with
-   `--name <profile>` the name ends in `_<profile>`, see 2.1.2). A legacy
-   `heimdall-bridge.service` / `works.earendil.heimdall-bridge.plist` for the
-   same Hub is migrated to the per-Hub name.
-   An existing, differing service file is first backed up next to it as
-   `<name>.bak-<UTC timestamp>`; an identical file is left untouched; pass
-   `--force-service` to overwrite a differing file without keeping a backup.
-6. Runs browser-approved enrollment interactively. Enrollment restarts the service
-   with its new credential and exits.
-
-The registered service always carries the mandatory `--hub <url>`. Enrollment also
-writes the same Hub API origin to `config.toml` for wrapper and CLI use.
-
-The Hub URL is never a binary mirror. `install.sh` always downloads the selected
-version and `SHA256SUMS` from the project's GitHub release.
-
-Preview every planned action without writing anything:
-
-```bash
-bash scripts/install.sh --dry-run --hub https://hub.example.com
-```
-
-To reverse an install, pass `--uninstall`:
-
-```bash
-bash scripts/install.sh --uninstall --dry-run   # report only, changes nothing
-bash scripts/install.sh --uninstall
-```
-
-It stops the bridge service (best effort), removes the four binaries, removes
-the service file, and strips the
-`PATH` lines it added — matched by the `# Added by heimdall install.sh`
-marker, so your own `PATH` edits are untouched. It deliberately **keeps** your
-state and names the path for each, so you can remove it by hand if you really
-want it gone:
-
-- `~/.config/heimdall` — the bridge token and `config.toml`, i.e. your
-  enrollment. Uninstalling the binaries does not un-enroll the device.
-- `<service file>.bak-*` — service files you had before an install replaced
-  them. These are recovery artifacts, not installer debris.
-- Any `openssl` at the install directory. The installer never installs one —
-  not even from an older release tarball that still ships a bundled `openssl` —
-  so `--uninstall` has nothing of its own to remove and never touches the name.
-  `openssl` is a generic name the installer does not own: older versions
-  installed a bundled copy and recorded `<install dir>/.heimdall-openssl.sha256`
-  as proof of authorship, and REQ-INST-21 retired that machinery after its
-  provenance record got a host's own `/usr/local/bin/openssl` overwritten and
-  then deleted. Whatever `openssl` sits there now is yours or your package
-  manager's, and it stays.
-
-The bridge's HTTPS client is **libcurl** (`src/lib/httpc`), linked
-**statically** at the version pinned in `nix/libcurl-pin.json` (currently
-8.23.0), so nothing is needed from the host:
-
-- Linux: fully static (musl) with OpenSSL 3 and zlib inside — no glibc, no
-  libcurl, no OpenSSL on the host; it runs on Alpine, Debian 11, Ubuntu 20.04+,
-  Fedora and anything else with a Linux kernel.
-- macOS: OpenSSL 3 and zlib inside; certificates are verified by Apple's
-  SecTrust (the system keychains and trust settings).
-- Windows: Schannel and the Windows certificate store.
-
-Trust anchors, in order: `HAM_TLS_CA_FILE` (that bundle only), then
-`SSL_CERT_FILE` / `SSL_CERT_DIR`, then the system store. On Linux the system
-store is the first of `/etc/ssl/certs/ca-certificates.crt`,
-`/etc/pki/tls/certs/ca-bundle.crt`,
-`/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem`, `/etc/ssl/ca-bundle.pem`,
-`/etc/ssl/cert.pem` that exists, else `/etc/ssl/certs` when it holds hashed
-certificates, else a Mozilla CA bundle embedded in the binary (so a minimal
-container without `ca-certificates` still connects). `ham-bridge --probe-hub
-<hub>` prints which one it used. The bridge never uses a proxy from the
-environment.
-
-`socat` (the default bridge → hub **WebSocket** TLS transport) is not bundled;
-install it with your system package manager (`sudo apt install socat`,
-`brew install socat`) if it is not already on `PATH`. `openssl` is likewise
-not bundled: the `HAM_TLS_BACKEND=s_client` WebSocket fallback resolves it from
-your system `PATH`. `HAM_TLS_BACKEND` does not affect HTTPS.
-
-**Then enroll and let it hand off to the registered service:**
-
-```bash
-# 1. On this device: enroll. Nothing is created on the hub
-#    first, and there is no token to copy between machines — this machine prints a
-#    link and a short code, you approve it in a browser, and the credential is
-#    delivered here directly. Writes ~/.config/heimdall/bridge-token (mode 0600)
-#    and updates config.toml with the hub URL. Add --headless if this machine has
-#    no browser of its own.
-#
-#    The Hub supplies the browser origin. Enrollment receives any encrypted vault
-#    key, restarts the registered service, and exits.
-ham-bridge enroll --hub https://hub.example.com
-
-# 2. From a second shell: enrollment, service state, hub connection, versions
-heimdall status
-```
-
-The installer starts the registered service before enrollment. Enrollment opens
-only a temporary Hub connection, so it does not collide with the service's local
-ports. The delivered vault key is persisted before the service restart, per
-bridge: on Linux in the user keyring as `heimdall:vault_key:<bridge_id>`, on macOS
-in the login Keychain (service `works.earendil.heimdall-bridge.vault`, account
-`<bridge_id>`). Several bridges enrolled on one machine therefore never share,
-overwrite, or purge each other's key.
-
-For a non-desktop Linux host, enable lingering so the user service survives logout:
-
-```bash
-sudo loginctl enable-linger "$USER"
-```
-
-On a non-desktop Linux host, lingering is required so the user service keeps
-running after the last login session ends; without it, the bridge stops when you
-log out. This does not apply to the macOS LaunchAgent.
-
-Keeping the node current is one command as well:
-
-```bash
-heimdall update --check   # report current vs latest release, download nothing
-heimdall update           # verify checksums, swap binaries, restart the service
-```
-
-`heimdall logs [-f]` tails the service logs and `heimdall doctor` runs local
-diagnostics (ports, permissions, harnesses, service unit). Run
-`heimdall --help` for the full command list.
+**Troubleshooting.** Every `ham-bridge setup` failure names the step, what was tried and
+whether the previous install was restored; re-running the same command is safe. Common
+causes: the Hub URL is unreachable from this machine (check TLS trust with
+`ham-bridge --probe-hub <url>`), no user session for the service manager (run in your
+login session; on Linux `loginctl enable-linger $USER` keeps the bridge running after
+logout), or `termux-services` not running on Termux (`pkg install termux-services`, then
+restart Termux).
 
 ### 2.1.1 Windows quick install
 
-On Windows 10 (1809+) or 11, x64 (Windows on Arm runs the x64 bundle under
-emulation), run from a **normal, non-elevated** PowerShell — Windows PowerShell 5.1
-or PowerShell 7. No administrator rights, no execution-policy change (nothing runs
-from a `.ps1` file), and no `socat`: the Windows bridge uses the system TLS stack
-(Schannel, both for its statically linked libcurl and for the WebSocket).
+From a normal (non-admin) PowerShell on Windows 10/11 x64:
 
 ```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/tanmayv/heimdall-agent-manager/main/scripts/install.ps1))) -Hub https://hub.example.com
+& ([scriptblock]::Create((irm install.ninjy.ai/ps1))) -Hub https://hub.example.com
+# or, with the options in the environment (the `| iex` form takes no arguments):
+$env:HEIMDALL_HUB = 'https://hub.example.com'; irm install.ninjy.ai/ps1 | iex
 ```
 
-Once your Hub serves the script at `/public/install.ps1`, the same form works with
-`irm https://hub.example.com/public/install.ps1`. Do not use `irm ... | iex` with
-arguments: `iex` cannot pass `-Hub`. From a checkout:
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts\install.ps1 -Hub https://hub.example.com
-```
-
-`scripts/install.ps1` follows the same six steps as `install.sh` and takes the same
-options: `-Hub URL` (asked for when omitted), `-Version TAG`, `-DryRun`,
-`-Uninstall`, `-ReEnroll` / `-KeepEnrollment`, `-NonInteractive`, `-Help`, plus
-`-FromDir DIR` to install locally built `ham-bridge.exe`, `ham-pty-host.exe` and
-`ham-ctl.exe` (from `DIR` or `DIR\bin`; no download or checksum — for testing
-before a release exists; `scripts/windows/build.ps1` builds them).
-
-1. **Hub and platform.** The Hub URL is canonicalized exactly as `install.sh`
-   does it (HTTP(S) origin only; credentials, paths, queries and fragments are
-   rejected; explicit port only when non-default; IDN and IPv6 handled), giving the
-   per-Hub service name, e.g. `heimdall-bridge-hub-example-com`.
-2. **Preflight and verified release.** The Hub is checked first (20 s budget, exact
-   failure reason). Without `-Version` the newest *promoted* GitHub release carrying
-   `heimdall-local-windows-amd64-<tag>.zip` and `SHA256SUMS` is used; the zip's
-   SHA-256 is verified, verified bundles are cached in
-   `%LOCALAPPDATA%\heimdall\cache\releases`, and only the expected regular files
-   are extracted (`bin\ham-bridge.exe`, `bin\ham-pty-host.exe`, `bin\ham-ctl.exe`,
-   `bin\heimdall.exe` and `scripts\apply-bridge-update.ps1` when shipped). The new
-   `ham-bridge.exe --probe-hub` must reach the Hub before anything is replaced.
-3. **Replace this Hub's service.** The previous task for this Hub is stopped and
-   its binaries replaced; other Hubs' installs are untouched.
-4. **Ports and ham-ctl routing.** A free loopback port pair per Hub (`ports.json`),
-   `config.toml`, and a per-Hub CLI wrapper `ham-ctl-<service>.cmd` that sets
-   `HEIMDALL_BRIDGE_ENDPOINT` and `--config`.
-5. **Register the service and enroll.** A per-user Scheduled Task named after the
-   service starts at logon, runs without elevation and without any console window
-   (`wscript.exe` runs a small hidden service loop, `bin\bridge-service.js`, that
-   restarts the bridge 5 s after a failure, like systemd `Restart=on-failure`), and
-   carries the same environment as the Linux unit. The task stays stopped while
-   `ham-bridge enroll` runs: it prints a pairing code that you type at
-   `<hub>/device/add` in a browser that is already approved. `-NonInteractive`
-   prints the enrollment command instead.
-6. **Ready.** The task is started and the bridge must be listening on its port.
-
-| What | Where |
-| --- | --- |
-| Config, token (`bridge-token`), `hub-url`, `ports.json`, `enroll.ps1` | `%APPDATA%\heimdall\bridges\<service>` |
-| Binaries, service loop, `ham-ctl-<service>.cmd` | `%LOCALAPPDATA%\heimdall\bridges\<service>\bin` |
-| Logs (`bridge.out.log`, `bridge.err.log`, rotated at 10 MB) | `%LOCALAPPDATA%\heimdall\bridges\<service>\logs` |
-
-Both directories are restricted to your account (inheritance removed, a single
-full-control entry for your SID) — the Windows form of the `0700`/`0600` modes
-`install.sh` sets. Re-enroll later with
-`powershell -NoProfile -ExecutionPolicy Bypass -File "%APPDATA%\heimdall\bridges\<service>\enroll.ps1"`,
-which stops the task, enrolls and starts it again. Manage the task with
-`Get-ScheduledTask <service>`, `Stop-ScheduledTask <service>` and
-`Start-ScheduledTask <service>`.
-
-`-Uninstall` (with the same `-Hub`) removes the task and the binaries and keeps
-the credential, config and agent data. A second concurrent installer run is
-refused by a lock in `%APPDATA%\heimdall\bridges\.install-lock`.
+`install.ninjy.ai/ps1` serves [`scripts/install.ps1`](scripts/install.ps1), the Windows
+twin of `install.sh`: it resolves the newest promoted release (or `-Version TAG`),
+downloads `heimdall-local-windows-amd64-<tag>.zip`, verifies it against `SHA256SUMS` and
+runs `ham-bridge.exe setup --headless`. Parameters: `-Hub`, `-Name` (profile),
+`-Version`, `-NewBridge`, `-ReuseBridge ID`, `-JsonProgress`, `-Uninstall`,
+`-Bundle ZIP -ChecksumFile FILE`; other arguments pass through to `ham-bridge`.
+Environment equivalents for `| iex`: `HEIMDALL_HUB`, `HEIMDALL_BRIDGE_NAME`,
+`HEIMDALL_VERSION`. From a checkout:
+`powershell -NoProfile -ExecutionPolicy Bypass -File scripts\install.ps1 -Hub https://hub.example.com`.
 
 ### 2.1.2 Several bridges for one OS user (profiles)
 
@@ -931,12 +746,10 @@ give it a profile name with `--name` (or `HEIMDALL_BRIDGE_NAME`):
 ```bash
 # Existing default bridge, enrolled as Heimdall user A: unchanged.
 # Second bridge for Heimdall user B on the same Hub:
-curl -fsSL https://raw.githubusercontent.com/tanmayv/heimdall-agent-manager/main/scripts/install.sh \
-  | bash -s -- --hub https://hub.example.com --name bob
+curl -fsSL install.ninjy.ai | bash -s -- --hub https://hub.example.com --profile bob
 
 # Same thing through the environment:
-curl -fsSL https://raw.githubusercontent.com/tanmayv/heimdall-agent-manager/main/scripts/install.sh \
-  | HEIMDALL_BRIDGE_NAME=bob bash -s -- --hub https://hub.example.com
+curl -fsSL install.ninjy.ai | HEIMDALL_BRIDGE_NAME=bob bash -s -- --hub https://hub.example.com
 ```
 
 `--name` wins over `HEIMDALL_BRIDGE_NAME` when both are set. A profile name is
@@ -954,7 +767,7 @@ is a fully separate bridge:
 | --- | --- | --- |
 | Service (Linux) | `~/.config/systemd/user/heimdall-bridge-hub-example-com.service` | `~/.config/systemd/user/heimdall-bridge-hub-example-com_bob.service` |
 | Service (macOS) | `~/Library/LaunchAgents/heimdall-bridge-hub-example-com.plist` | `~/Library/LaunchAgents/heimdall-bridge-hub-example-com_bob.plist` |
-| Config, token, `enroll.sh` | `~/.config/heimdall/bridges/heimdall-bridge-hub-example-com/` | `~/.config/heimdall/bridges/heimdall-bridge-hub-example-com_bob/` |
+| Config, token | `~/.config/heimdall/bridges/heimdall-bridge-hub-example-com/` | `~/.config/heimdall/bridges/heimdall-bridge-hub-example-com_bob/` |
 | Binaries, data, extensions | `~/.local/share/heimdall/bridges/heimdall-bridge-hub-example-com/` | `~/.local/share/heimdall/bridges/heimdall-bridge-hub-example-com_bob/` |
 | CLI wrapper | `<data dir>/bin/ham-ctl-heimdall-bridge-hub-example-com` | `<data dir>/bin/ham-ctl-heimdall-bridge-hub-example-com_bob` |
 
@@ -969,32 +782,29 @@ bridge for whichever Heimdall account is signed in to the browser that opens the
 link. For a second user's profile, open the link in a browser where *that* user
 is signed in (another browser profile or a private window), or hand the link and
 code to them. Each bridge only ever acts for the account that approved it. To
-enroll later, run the profile's own `<config dir>/enroll.sh`.
+enroll later, run `ham-bridge enroll --hub <url> --profile <name>`.
 
-**Manage a profile by passing the same `--name` again.** `--uninstall` and
-`--re-enroll` act only on the bridge named by `--hub` plus `--name`; without
-`--name` they act on the default bridge, never on a profile:
+**Manage a profile by passing the same `--profile` again.** `ham-bridge enroll`,
+`update` and `uninstall` act only on the bridge named by `--hub` plus `--profile`;
+without `--profile` they act on the default bridge, never on a profile:
 
 ```bash
 # Re-enroll only bob's bridge (e.g. approve it as a different user)
-bash scripts/install.sh --hub https://hub.example.com --name bob --re-enroll
+ham-bridge enroll --hub https://hub.example.com --profile bob
 
 # Remove only bob's bridge; the default bridge keeps running
-bash scripts/install.sh --hub https://hub.example.com --name bob --uninstall
+ham-bridge uninstall --hub https://hub.example.com --profile bob
 ```
 
-As for the default bridge, `--uninstall` removes the profile's service and its
-`<data dir>/bin` and keeps its credential, config and agent data
-(`--uninstall --dry-run` names both), so re-installing with the same `--name`
-picks the enrollment back up. Migration of a legacy (pre per-Hub)
-`heimdall-bridge` service only ever happens for the default bridge; installing a
-profile never retires or copies an existing service or credential.
+`ham-bridge uninstall --keep-data` removes the profile's service and binaries and
+keeps its credential, config and agent data, so re-installing with the same
+`--profile` picks the enrollment back up; `--purge` also wipes the secrets.
+Installing a profile never retires or copies another bridge's service or credential.
 
 **Termux does not support profiles.** One Termux install runs one bridge, the
 runit service `ham-bridge` (see [Bridge on Android](#appendix--bridge-on-android-termux)),
-so `install.sh` refuses `--name`/`HEIMDALL_BRIDGE_NAME` there with an error
-before it changes anything. Use a separate Android user or device instead.
-The Windows installer (2.1.1) does not take a profile name yet.
+so a profile is refused there before anything changes. Use a separate Android
+user or device instead.
 
 **Provider extensions are shared by every bridge of the OS user.** Each bridge
 ships its own copy of the Heimdall provider extensions in
@@ -1145,8 +955,8 @@ new enrollment, and a rollback (denied, expired, or the vault key was never
 delivered) restores them. `--reuse-bridge <brg_id>` offers another of your bridges.
 `--new-bridge` offers none. The two flags are mutually exclusive. The command prints
 the outcome as `Re-enrolled existing bridge <id>` or `Registered new bridge <id>`.
-`install.sh --re-enroll` keeps the config so the previous id is offered, and
-`install.sh --new-bridge` (or `enroll.sh --new-bridge`) registers a new bridge.
+`ham-bridge enroll --hub <url>` keeps the config so the previous id is offered, and
+`ham-bridge enroll --hub <url> --new-bridge` registers a new bridge.
 
 **Credential shapes, because the distinction is a security decision and not a naming
 detail:** `hba_` is the expiring access credential and the only shape that
@@ -1458,7 +1268,7 @@ Windows (PowerShell 7) it also runs the PTY cleanup and the apply/rollback flow.
 ### Each bridge device (once per device)
 Recommended — the quick install (section 2.1) handles the first three items:
 - [ ] Run the one-line installer:
-      `curl -fsSL https://raw.githubusercontent.com/tanmayv/heimdall-agent-manager/main/scripts/install.sh | bash -s -- --hub https://hub.example.com`
+      `curl -fsSL install.ninjy.ai | bash -s -- --hub https://hub.example.com`
 - [ ] Enroll: `ham-bridge enroll --hub https://hub.example.com` — approve the
       printed link and short code in a browser. Nothing to create on the hub first.
 - [ ] Start the bridge service (systemd user service or launchd agent)
@@ -1544,7 +1354,7 @@ unit), enables it with `sv-enable`, and enrolls:
 
 ```bash
 pkg install curl socat termux-api termux-services   # then restart Termux once
-curl -fsSL https://raw.githubusercontent.com/tanmayv/heimdall-agent-manager/main/scripts/install.sh \
+curl -fsSL install.ninjy.ai \
   | bash -s -- --hub https://hub.example.com
 ```
 
@@ -1554,7 +1364,7 @@ under Android's seccomp, so drop `--version` or pass a newer release.
 
 One Termux install runs **one** Hub: the released bridge restarts exactly
 `$PREFIX/var/service/ham-bridge` after enrollment, so a second `--hub` is refused until
-the first is removed (`install.sh --hub <url> --uninstall`, which keeps the enrollment).
+the first is removed (`ham-bridge uninstall --hub <url> --keep-data`).
 For the same reason Termux refuses bridge profiles (`--name` / `HEIMDALL_BRIDGE_NAME`,
 see 2.1.2).
 Per-Hub config lives in `~/.config/heimdall/bridges/<name>/`, binaries and data in
