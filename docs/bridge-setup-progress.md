@@ -226,7 +226,8 @@ Runs the NEW binary's `setup --headless` for the profile (`DIR/ham-bridge` or
 staging, `bin.bak`, service re-render, extensions on every OS, restart, health =
 running **and** connected to the hub, and on failure `bin.bak` restored and the old
 bridge restarted. Inside the service being updated (or with `--detach`) it runs in a
-session of its own. `--version V` (download + verify a release) is not implemented yet.
+session of its own. `--version V` (download + verify a release) is deferred to the thin-bootstrap work
+(w5), which owns release download and SHA-256 verification; until then it refuses.
 
 **Hub-initiated update.** A bridgesvc profile install hands the staged bundle to
 `ham-bridge update --detach` and waits for it (30 s): the preflight (hub recorded,

@@ -24,7 +24,7 @@ bridge_update_command :: proc(args: []string) -> bool {
 	bundle := strings.trim_space(option_value(args, "--bundle", ""))
 	if bundle == "" {
 		if option_value(args, "--version", "") != "" {
-			fmt.eprintln("ham-bridge update: --version is not supported yet; download and verify the release bundle and pass --bundle DIR (or update from Heimdall: Settings -> Bridges -> Update)")
+			fmt.eprintln("ham-bridge update: --version is not supported yet (release download + verify lands with the bootstrap rework); download and verify the release bundle and pass --bundle DIR (or update from Heimdall: Settings -> Bridges -> Update)")
 		} else {
 			fmt.eprintln(BRIDGE_UPDATE_USAGE)
 		}
