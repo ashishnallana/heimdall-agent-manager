@@ -134,6 +134,14 @@ async function newBridgeDirs(label) {
   return { dir, config: path.join(dir, 'config.toml'), token: path.join(dir, 'bridge.token'), data: path.join(dir, 'data'), port: await freePort() };
 }
 
+// macOS diagnostics for a stalled child: `sample` prints every thread's stack, which
+// names the blocking call (keychain, lock, socket) that the child's own output cannot.
+function stackOf(child) {
+  if (process.platform !== 'darwin' || child.exitCode !== null) return '';
+  const r = spawnSync('sample', [String(child.pid), '3', '-mayDie'], { encoding: 'utf8', timeout: 30_000 });
+  return `\n--- sample ${child.pid} ---\n${(r.stdout || '') + (r.stderr || '')}`;
+}
+
 // Runs `ham-bridge enroll`, reads the pairing code from its stdout, approves it like
 // the /device/add page (typed once) and delivers the first unseal with the pair_mac.
 async function enroll(hub, approver, cfg) {
@@ -173,7 +181,7 @@ async function enroll(hub, approver, cfg) {
   for (const deadline = Date.now() + 30_000; ; await sleep(250)) {
     const pk = await http(hub, 'GET', `/api/v1/bridges/${bridgeId}/public-key?enrollment=1`);
     if (pk.status === 200 && pk.data?.unseal_key_signature) { target = bridgeUnsealTargetFromRecord(bridgeId, pk.data); break; }
-    if (Date.now() > deadline) throw new CheckFailed(`the enrolling bridge never connected:\n${out}`);
+    if (Date.now() > deadline) throw new CheckFailed(`the enrolling bridge never connected:\n${out}${stackOf(child)}`);
   }
   const after = await approver.chain();
   const pairMac = await pairApproveMac(keys, statement, after.rootSignPub);
