@@ -206,6 +206,9 @@ bridge_uninstall_run :: proc(data: rawptr, step: bridgesvc.Uninstall_Step) -> (b
 		return true, .None, "stopped" if registered else "skipped"
 
 	case .Unregister:
+		// The tray's login entry goes with the service, so nothing starts at the
+		// next login and no tray points at a removed binary.
+		if tok, tmsg := bridge_tray_remove(u.host, l); !tok do return false, .Busy, tmsg
 		files := bridgesvc.unregister_files(l)
 		registered := bridge_service_registered(u.host, l.service_name)
 		any_file := false

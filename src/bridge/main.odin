@@ -126,6 +126,10 @@ main :: proc() {
 		if !bridge_uninstall_command(os.args) do os.exit(1)
 		return
 	}
+	if len(os.args) > 1 && os.args[1] == "tray" {
+		if !bridge_tray_command(os.args) do os.exit(1)
+		return
+	}
 	if len(os.args) > 1 && os.args[1] == "extensions" {
 		if !bridge_extensions_command(os.args) do os.exit(1)
 		return

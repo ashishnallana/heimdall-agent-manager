@@ -1,7 +1,7 @@
 package main
 
 // `ham-bridge setup --hub <url> [--profile P] [--new-bridge|--reuse-bridge ID]
-// [--headless] [--json-progress]`: install this bridge from the bundle the running
+// [--headless] [--no-tray] [--json-progress]`: install this bridge from the bundle the running
 // binary ships in, transactionally (F6, F9). The step order, retry/remediation and
 // rollback live in bridgesvc.run_setup; this file supplies the real side effects.
 // Every run re-renders the service file and adopts an existing per-Hub install
@@ -43,13 +43,14 @@ Bridge_Setup :: struct {
 	// by a process other than the bridge that was running before.
 	restart_at:     i64,
 	stale_pid:      int,
+	tray_stopped:   bool, // Binaries stopped a running tray; finish restarts it
 }
 
 bridge_setup_command :: proc(args: []string) -> bool {
 	hub := strings.trim_space(option_value(args, "--hub", ""))
 	profile_name := strings.trim_space(option_value(args, "--profile", ""))
 	if hub == "" {
-		fmt.eprintln("usage: ham-bridge setup --hub <url> [--profile P] [--new-bridge | --reuse-bridge BRIDGE_ID] [--headless] [--json-progress]")
+		fmt.eprintln("usage: ham-bridge setup --hub <url> [--profile P] [--new-bridge | --reuse-bridge BRIDGE_ID] [--headless] [--no-tray] [--json-progress]")
 		return false
 	}
 	profile, ok := bridgesvc.profile_from(hub, profile_name, context.temp_allocator)
@@ -104,6 +105,7 @@ bridge_setup_emit :: proc(data: rawptr, ev: bridgesvc.Event) {
 	case "ok", "skipped": fmt.printfln(" %s%s%s", ev.state, " — " if ev.message != "" && ev.message != "skipped" else "", ev.message if ev.message != "skipped" else "")
 	case "retry": fmt.printfln(" retry (attempt %d): %s", ev.attempt, ev.message)
 	case "failed": fmt.printfln(" FAILED: %s", ev.message)
+	case "warning": fmt.printfln(" warning: %s", ev.message)
 	case "rollback": fmt.printfln("        rollback %s", ev.step)
 	case "done": fmt.printfln("[100%%] %s", ev.message)
 	}
@@ -185,6 +187,9 @@ bridge_setup_run :: proc(data: rawptr, step: bridgesvc.Step) -> bridgesvc.Step_R
 		if !s.copy_binaries do return {ok = true, message = "skipped"}
 		bak := strings.concatenate({l.bin_dir, ".bak"}, context.temp_allocator)
 		if os.exists(l.bin_dir) {
+			// A running tray executes bin/ham-bridge too (Windows keeps bin/ busy):
+			// stop it; finish starts it again from the new binaries.
+			if bridge_tray_stop(s.host, l) do s.tray_stopped = true
 			_ = os.remove_all(bak)
 			if err := os.rename(l.bin_dir, bak); err != nil {
 				// Windows: a running bridge keeps its executable's directory busy.
@@ -427,10 +432,19 @@ bridge_setup_undo :: proc(data: rawptr, step: bridgesvc.Step) {
 
 bridge_setup_finish :: proc(data: rawptr, ok: bool) {
 	s := (^Bridge_Setup)(data)
+	if !ok && s.tray_stopped do _ = bridge_tray_spawn(bridgesvc.tray_argv(s.host, s.layout), nil)
 	if !ok && s.was_running {
 		// Leave the previous install running, as it was before setup.
 		_, _ = bridge_service_action(s.host, s.layout.service_name, .Start)
 	}
-	if ok do _ = os.remove_all(s.staging)
+	if ok {
+		_ = os.remove_all(s.staging)
+		// The tray is a convenience: it is reported, never a reason to roll back.
+		bridge_setup_emit(data, bridgesvc.Event{step = "tray", state = "start", pct = 100, attempt = 1})
+		tok, msg := bridge_tray_install(s.host, s.layout, s.args, force_start = s.tray_stopped)
+		state := "ok" if tok else "warning"
+		if tok && strings.has_prefix(msg, "skipped") do state = "skipped"
+		bridge_setup_emit(data, bridgesvc.Event{step = "tray", state = state, pct = 100, message = msg, attempt = 1})
+	}
 	bridgesvc.lock_release(s.lock_path, s.pid)
 }
