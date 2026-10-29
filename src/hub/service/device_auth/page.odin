@@ -25,7 +25,7 @@ DEVICE_PAGE_HTML :: `<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Heimdall — Authorize device</title>
+<title>Ninjy — Authorize device</title>
 <style>
   :root { color-scheme: light dark; }
   body { font-family: system-ui, -apple-system, Segoe UI, sans-serif; max-width: 520px;
