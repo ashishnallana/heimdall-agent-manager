@@ -178,6 +178,22 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(res.returncode, 1)
         self.assertIn('not for this machine', res.stderr)
 
+    def test_desktop_installer_bundle_runs_interactive_setup(self):
+        """REQ-ENR-4: the desktop installers stage the bundle unversioned and pass
+        --interactive, so ham-bridge setup runs without --headless (browser approval)."""
+        bundle, sums = self.publish('v1.0.0')
+        staged = self.root / f'heimdall-local-{self.target}.tar.gz'
+        staged.write_bytes(bundle.read_bytes())
+        staged_sums = self.root / 'STAGED_SHA256SUMS'
+        staged_sums.write_text(sums.read_text().replace(bundle.name, staged.name))
+        res = self.run_installer('--bundle', str(staged), '--checksum-file', str(staged_sums),
+                                 '--hub', 'https://h', '--interactive')
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(self.bridge_calls(), ['setup --hub https://h'])
+        res = self.run_installer('--bundle', str(staged), '--checksum-file', str(staged_sums), '--hub', 'https://h')
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(self.bridge_calls()[-1], 'setup --headless --hub https://h')
+
     def test_ham_bridge_failure_is_the_exit_code(self):
         self.publish('v1.0.0')
         res = self.run_installer('--hub', 'https://h', extra_env={'STUB_EXIT': '3'})
@@ -195,6 +211,8 @@ class BootstrapTests(unittest.TestCase):
         for word in ('Register-ScheduledTask', 'schtasks', 'enroll.ps1', 'apply-bridge-update', 'Set-Acl'):
             self.assertNotIn(word, ps1)
         self.assertIn("'setup', '--headless'", ps1)
+        # The Windows installer's Bridge component: setup without --headless.
+        self.assertIn("elseif ($Interactive) { $argv += 'setup' }", ps1)
         # The same promoted-release rule on both sides.
         self.assertIn('-not $r.draft -and -not $r.prerelease', ps1)
         self.assertTrue(re.search(r'releases\?per_page=30', ps1))

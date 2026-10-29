@@ -21,6 +21,7 @@
     "build": "npm run typecheck && vite build && npm run build:electron",
     "dist:mac": "npm run build && electron-builder --mac dmg",
     "dist:win": "npm run build && electron-builder --win nsis --x64",
+    "dist:linux": "npm run build && electron-builder --linux AppImage deb",
     "preview": "vite preview --host 127.0.0.1",
     "dev:preview": "./scripts/dev-preview.sh",
     "smoke": "npm run build"

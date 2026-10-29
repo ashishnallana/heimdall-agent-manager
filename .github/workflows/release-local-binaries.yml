@@ -248,6 +248,8 @@ jobs:
         env:
           MACOS_DEVELOPER_ID_P12_BASE64: ${{ secrets.MACOS_DEVELOPER_ID_P12_BASE64 }}
           MACOS_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_P12_PASSWORD }}
+          MACOS_DEVELOPER_ID_INSTALLER_P12_BASE64: ${{ secrets.MACOS_DEVELOPER_ID_INSTALLER_P12_BASE64 }}
+          MACOS_DEVELOPER_ID_INSTALLER_P12_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_INSTALLER_P12_PASSWORD }}
         run: |
           set -euo pipefail
           [ -n "$MACOS_DEVELOPER_ID_P12_BASE64" ] || { echo 'MACOS_DEVELOPER_ID_P12_BASE64 is required' >&2; exit 1; }
@@ -268,6 +270,20 @@ jobs:
           # certificate-class prefix in CSC_NAME; codesign above needs it.
           echo "CSC_NAME=${identity#Developer ID Application: }" >> "$GITHUB_ENV"
           rm -f "$cert"
+          # REQ-ENR-4: productbuild signs the App/Bridge .pkg with a Developer ID
+          # Installer identity, from the same .p12 or its own optional secret.
+          if [ -n "$MACOS_DEVELOPER_ID_INSTALLER_P12_BASE64" ]; then
+            printf '%s' "$MACOS_DEVELOPER_ID_INSTALLER_P12_BASE64" | /usr/bin/base64 -D > "$cert"
+            security import "$cert" -k "$keychain" -P "$MACOS_DEVELOPER_ID_INSTALLER_P12_PASSWORD" -T /usr/bin/productbuild -T /usr/bin/security
+            security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain"
+            rm -f "$cert"
+          fi
+          installer_identity="$(security find-identity -v -p basic "$keychain" | sed -n 's/.*"\(Developer ID Installer:[^"]*\)".*/\1/p' | head -n 1)"
+          if [ -n "$installer_identity" ]; then
+            echo "HEIMDALL_MACOS_INSTALLER_IDENTITY=$installer_identity" >> "$GITHUB_ENV"
+          else
+            echo '::warning::No Developer ID Installer identity: the macOS .pkg is published unsigned and not notarized (the DMG is unaffected).'
+          fi
 
       - name: Package heimdall-local tarball
         shell: bash
@@ -445,14 +461,14 @@ jobs:
           grep -q 'Apple SecTrust' "$RUNNER_TEMP/probe.txt" || {
             echo "FAIL: the macOS bridge must verify through Apple SecTrust" >&2; exit 1; }
 
-      - name: Set up Node for the desktop app (macOS)
-        if: ${{ startsWith(matrix.target, 'darwin-') }}
+      - name: Set up Node for the desktop app (macOS, Linux)
+        if: ${{ startsWith(matrix.target, 'darwin-') || startsWith(matrix.target, 'linux-') }}
         uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
 
-      - name: Build, sign, and notarize Heimdall DMG (macOS)
+      - name: Build, sign, and notarize Heimdall DMG, zip and pkg (macOS)
         if: ${{ startsWith(matrix.target, 'darwin-') }}
         shell: bash
         env:
@@ -477,8 +493,26 @@ jobs:
           # has passed. On a tag, electron-builder otherwise auto-selects
           # publish=always and fails here because this build job deliberately
           # has no contents:write token.
-          npx electron-builder --mac dmg "$arch" --publish never \
+          # zip: what electron-updater installs (F14); dmg: what people download.
+          npx electron-builder --mac dmg zip "$arch" --publish never \
             -c.extraMetadata.version="${{ needs.prepare.outputs.clean_version }}"
+          # Each arch writes its own latest-mac.yml; the release job merges them.
+          mv desktop-dist/latest-mac.yml "desktop-dist/latest-mac-${{ matrix.target }}.yml"
+          # REQ-ENR-4: App / Bridge / both .pkg from the signed, notarized .app.
+          app_bundle="$(find desktop-dist -maxdepth 2 -name Heimdall.app -type d | head -n 1)"
+          pkg="desktop-dist/Heimdall-${{ needs.prepare.outputs.clean_version }}-${arch#--}.pkg"
+          scripts/release/build-macos-pkg.sh "$app_bundle" release-assets/bridge \
+            "${{ needs.prepare.outputs.version }}" "${arch#--}" "$pkg"
+          if [ -n "${HEIMDALL_MACOS_INSTALLER_IDENTITY:-}" ]; then
+            pkgutil --check-signature "$pkg"
+            xcrun notarytool submit "$pkg" \
+              --apple-id "$APPLE_ID" \
+              --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+              --team-id "$APPLE_TEAM_ID" \
+              --wait
+            scripts/release/staple-with-retry.sh "$pkg"
+            xcrun stapler validate "$pkg"
+          fi
           for dmg in desktop-dist/*.dmg; do
             codesign --verify --strict --verbose=2 "$dmg"
             xcrun notarytool submit "$dmg" \
@@ -490,12 +524,57 @@ jobs:
             xcrun stapler validate "$dmg"
           done
 
-      - name: Upload Heimdall DMG (macOS)
+      - name: Upload Heimdall DMG, zip and pkg (macOS)
         if: ${{ startsWith(matrix.target, 'darwin-') }}
         uses: actions/upload-artifact@v4
         with:
           name: heimdall-desktop-${{ matrix.target }}-${{ needs.prepare.outputs.version }}
-          path: desktop-dist/*.dmg
+          path: |
+            desktop-dist/*.dmg
+            desktop-dist/*.zip
+            desktop-dist/*.zip.blockmap
+            desktop-dist/*.pkg
+            desktop-dist/latest-mac-*.yml
+          if-no-files-found: error
+          retention-days: 30
+
+      # F13: the Linux desktop app (AppImage self-updates via latest-linux*.yml;
+      # deb). Both ask App / Bridge / both on first launch (installChoice.cts)
+      # and bundle this target's verified Bridge archive for that setup.
+      - name: Build Heimdall AppImage and deb (Linux)
+        if: ${{ startsWith(matrix.target, 'linux-') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci
+          scripts/release/stage-macos-desktop-resources.sh \
+            "${{ matrix.target }}" \
+            "dist/heimdall-local-${{ matrix.target }}.tar.gz" \
+            "${{ needs.prepare.outputs.version }}"
+          npm run build
+          case "${{ matrix.target }}" in
+            linux-amd64) arch=--x64 ;;
+            linux-arm64)
+              arch=--arm64
+              # electron-builder's bundled fpm (deb) is x86_64-only.
+              sudo apt-get update -qq
+              sudo apt-get install -y -qq ruby ruby-dev build-essential
+              sudo gem install fpm --no-document
+              export USE_SYSTEM_FPM=true ;;
+          esac
+          npx electron-builder --linux AppImage deb "$arch" --publish never \
+            -c.extraMetadata.version="${{ needs.prepare.outputs.clean_version }}"
+          ls -la desktop-dist
+
+      - name: Upload Heimdall AppImage and deb (Linux)
+        if: ${{ startsWith(matrix.target, 'linux-') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: heimdall-desktop-${{ matrix.target }}-${{ needs.prepare.outputs.version }}
+          path: |
+            desktop-dist/*.AppImage
+            desktop-dist/*.deb
+            desktop-dist/latest-linux*.yml
           if-no-files-found: error
           retention-days: 30
 
@@ -769,13 +848,29 @@ jobs:
           cp "$zip" "heimdall-local-windows-amd64-${version}.zip"
           versioned+=("heimdall-local-windows-amd64-${version}.zip")
           sha256sum "${versioned[@]}" > SHA256SUMS
-          require_file "Heimdall-${{ needs.prepare.outputs.clean_version }}-arm64.dmg"
-          require_file "Heimdall-${{ needs.prepare.outputs.clean_version }}-x64.dmg"
-          require_file "Heimdall-${{ needs.prepare.outputs.clean_version }}-x64.exe"
-          require_file "Heimdall-${{ needs.prepare.outputs.clean_version }}-x64.exe.blockmap"
+          clean="${{ needs.prepare.outputs.clean_version }}"
+          for arch in arm64 x64; do
+            require_file "Heimdall-$clean-$arch.dmg"
+            require_file "Heimdall-$clean-$arch.zip"
+            require_file "Heimdall-$clean-$arch.pkg"
+          done
+          # electron-builder's Linux arch names (builder-util getArtifactArchName).
+          for f in x86_64.AppImage arm64.AppImage amd64.deb arm64.deb; do
+            require_file "Heimdall-$clean-$f"
+          done
+          require_file "Heimdall-$clean-x64.exe"
+          require_file "Heimdall-$clean-x64.exe.blockmap"
           require_file latest.yml
-          sha256sum Heimdall-*.dmg >> SHA256SUMS
-          sha256sum Heimdall-*.exe >> SHA256SUMS
+          require_file latest-linux.yml
+          require_file latest-linux-arm64.yml
+          # F14: one latest-mac.yml naming both arches' zips (electron-updater
+          # picks the arm64 entry on Apple silicon, the other one on Intel).
+          require_file latest-mac-darwin-arm64.yml
+          require_file latest-mac-darwin-amd64.yml
+          python3 "$GITHUB_WORKSPACE/scripts/release/merge-latest-mac.py" \
+            latest-mac-darwin-amd64.yml latest-mac-darwin-arm64.yml > latest-mac.yml
+          rm latest-mac-darwin-*.yml
+          sha256sum Heimdall-*.dmg Heimdall-*.zip Heimdall-*.pkg Heimdall-*.AppImage Heimdall-*.deb Heimdall-*.exe >> SHA256SUMS
 
       - name: Create or update GitHub Release
         env:
@@ -808,8 +903,10 @@ jobs:
           - heimdall-local-windows-amd64-$VERSION.zip (scripts/install.ps1)
           - Heimdall-${{ needs.prepare.outputs.clean_version }}-arm64.dmg (signed + notarized macOS app with Bridge)
           - Heimdall-${{ needs.prepare.outputs.clean_version }}-x64.dmg (signed + notarized macOS app with Bridge)
-          - Heimdall-${{ needs.prepare.outputs.clean_version }}-x64.exe (unsigned Windows installer with Bridge)
-          - latest.yml and the Windows block map (desktop auto-update metadata)
+          - Heimdall-${{ needs.prepare.outputs.clean_version }}-arm64.pkg / -x64.pkg (macOS installer: App, Bridge, or both)
+          - Heimdall-${{ needs.prepare.outputs.clean_version }}-x64.exe (unsigned Windows installer: App, Bridge, or both)
+          - Heimdall-${{ needs.prepare.outputs.clean_version }}-x86_64.AppImage / -arm64.AppImage, -amd64.deb / -arm64.deb (Linux app; App, Bridge, or both on first launch)
+          - Heimdall-*.zip, latest.yml, latest-mac.yml, latest-linux*.yml and the Windows block map (desktop auto-update metadata)
           - SHA256SUMS
           - install.sh, install.ps1 (bootstraps: download + verify + ham-bridge setup)
           NOTES
@@ -823,10 +920,10 @@ jobs:
           # resolve the newest promoted release, so any copy works.
           cp scripts/install.sh scripts/install.ps1 dist/
           if gh release view "$VERSION" >/dev/null 2>&1; then
-            gh release upload "$VERSION" dist/heimdall-local-*-"$VERSION".tar.gz dist/heimdall-local-*-"$VERSION".zip dist/Heimdall-*.dmg dist/Heimdall-*.exe dist/Heimdall-*.exe.blockmap dist/latest.yml dist/SHA256SUMS dist/install.sh dist/install.ps1 --clobber
+            gh release upload "$VERSION" dist/heimdall-local-*-"$VERSION".tar.gz dist/heimdall-local-*-"$VERSION".zip dist/Heimdall-*.dmg dist/Heimdall-*.zip dist/Heimdall-*.zip.blockmap dist/Heimdall-*.pkg dist/Heimdall-*.AppImage dist/Heimdall-*.deb dist/Heimdall-*.exe dist/Heimdall-*.exe.blockmap dist/latest.yml dist/latest-mac.yml dist/latest-linux.yml dist/latest-linux-arm64.yml dist/SHA256SUMS dist/install.sh dist/install.ps1 --clobber
             gh release edit "$VERSION" --notes-file "$notes_file"
           else
-            gh release create "$VERSION" dist/heimdall-local-*-"$VERSION".tar.gz dist/heimdall-local-*-"$VERSION".zip dist/Heimdall-*.dmg dist/Heimdall-*.exe dist/Heimdall-*.exe.blockmap dist/latest.yml dist/SHA256SUMS dist/install.sh dist/install.ps1 \
+            gh release create "$VERSION" dist/heimdall-local-*-"$VERSION".tar.gz dist/heimdall-local-*-"$VERSION".zip dist/Heimdall-*.dmg dist/Heimdall-*.zip dist/Heimdall-*.zip.blockmap dist/Heimdall-*.pkg dist/Heimdall-*.AppImage dist/Heimdall-*.deb dist/Heimdall-*.exe dist/Heimdall-*.exe.blockmap dist/latest.yml dist/latest-mac.yml dist/latest-linux.yml dist/latest-linux-arm64.yml dist/SHA256SUMS dist/install.sh dist/install.ps1 \
               --title "$VERSION" \
               --target "$RELEASE_COMMIT" \
               --notes-file "$notes_file" \
