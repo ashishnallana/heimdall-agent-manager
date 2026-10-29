@@ -112,7 +112,7 @@ ctl_valid_task_priority :: proc(value: string) -> bool {
 // no longer accepts them; users authenticate with OIDC only.
 ctl_user_token_removed :: proc(user_tok: string) -> bool {
 	if !strings.has_prefix(user_tok, "hut_") do return false
-	fmt.println(`{"ok":false,"message":"Heimdall user tokens (hut_) were removed: the Hub accepts only OIDC sign-in for users. ham-ctl user mode is not available; run ham-ctl inside an agent instance (agent mode) or use the web UI."}`)
+	fmt.println(`{"ok":false,"message":"Ninjy user tokens (hut_) were removed: the Hub accepts only OIDC sign-in for users. ham-ctl user mode is not available; run ham-ctl inside an agent instance (agent mode) or use the web UI."}`)
 	return true
 }
 

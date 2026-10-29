@@ -1817,7 +1817,7 @@ print_agent_help :: proc(cmd: []string) {
 }
 
 print_help_overview :: proc() {
-	fmt.println("ham-ctl — Heimdall agent CLI (talks to your local Bridge with your agent token)")
+	fmt.println("ham-ctl — Ninjy agent CLI (talks to your local Bridge with your agent token)")
 	fmt.println("")
 	fmt.println("USAGE")
 	fmt.println("  ham-ctl <group> <verb> [<positional>] [--flags]")

@@ -31,7 +31,7 @@ ANTIGRAVITY_HOOK_INPUT_MAX :: 16 * 1024 * 1024
 ANTIGRAVITY_TOOL_STRING_MAX :: 4 * 1024
 ANTIGRAVITY_MESSAGE_MAX :: 2 * 1024
 ANTIGRAVITY_CAPABILITIES :: [?]string{"activity", "subagents", "permissions", "file_edits", "session_id"}
-ANTIGRAVITY_DENY_DEFAULT_MESSAGE :: "Denied in Heimdall"
+ANTIGRAVITY_DENY_DEFAULT_MESSAGE :: "Denied in Ninjy"
 
 Antigravity_Hook :: enum {
 	Unknown,

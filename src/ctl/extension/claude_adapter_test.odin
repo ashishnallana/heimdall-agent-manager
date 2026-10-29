@@ -378,7 +378,7 @@ test_claude_permission_output_formats :: proc(t: ^testing.T) {
 	testing.expect_value(t, claude_permission_output("deny", `no "rm" here`),
 		`{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"no \"rm\" here"}}}`)
 	testing.expect_value(t, claude_permission_output("deny", ""),
-		`{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"Denied in Heimdall"}}}`)
+		`{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"Denied in Ninjy"}}}`)
 	testing.expect_value(t, claude_permission_output("none", "timeout"), "")
 	testing.expect_value(t, claude_permission_output("", ""), "")
 

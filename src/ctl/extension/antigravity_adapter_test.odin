@@ -293,7 +293,7 @@ test_antigravity_permission_output_formats :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 
 	testing.expect_value(t, antigravity_permission_output("allow", ""), `{"decision":"allow"}`)
-	testing.expect_value(t, antigravity_permission_output("deny", ""), `{"decision":"deny","reason":"Denied in Heimdall"}`)
+	testing.expect_value(t, antigravity_permission_output("deny", ""), `{"decision":"deny","reason":"Denied in Ninjy"}`)
 	testing.expect_value(t, antigravity_permission_output("deny", "Blocked by safety policy"), `{"decision":"deny","reason":"Blocked by safety policy"}`)
 	testing.expect_value(t, antigravity_permission_output("ask", ""), `{"decision":"ask"}`)
 

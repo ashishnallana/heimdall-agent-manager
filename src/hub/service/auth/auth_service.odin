@@ -277,7 +277,7 @@ extract_body_instance_id :: proc(body: string) -> string {
 	return payload.agent_instance_id
 }
 
-USER_TOKENS_REMOVED_MESSAGE :: "Heimdall user tokens are no longer supported; sign in with OIDC"
+USER_TOKENS_REMOVED_MESSAGE :: "Ninjy user tokens are no longer supported; sign in with OIDC"
 
 // resolve_auth authenticates a USER request: an OIDC bearer access token, else
 // the Hub browser session cookie. Bridge and instance credentials are resolved

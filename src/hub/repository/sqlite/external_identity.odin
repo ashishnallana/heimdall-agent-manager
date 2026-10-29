@@ -3,8 +3,8 @@ package sqlite
 import "core:sync"
 import domain "odin_test:hub/domain"
 
-OIDC_UNLINKED_EXISTING_USER_MESSAGE :: "this sign-in is not linked to a Heimdall user; ask the operator to link it (ham-hub users link-oidc)"
-OIDC_UNKNOWN_USER_MESSAGE :: "no Heimdall user exists for this sign-in and provisioning is disabled; ask the operator to create or link one"
+OIDC_UNLINKED_EXISTING_USER_MESSAGE :: "this sign-in is not linked to a Ninjy user; ask the operator to link it (ham-hub users link-oidc)"
+OIDC_UNKNOWN_USER_MESSAGE :: "no Ninjy user exists for this sign-in and provisioning is disabled; ask the operator to create or link one"
 
 // external_identity_lookup is the hot path: a plain read with no write lock.
 @(private = "file")

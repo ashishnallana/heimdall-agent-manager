@@ -201,7 +201,7 @@ class MacAndLinuxInstallerTests(unittest.TestCase):
         self.assertIn('launchctl asuser "$uid" sudo -u "$user"', post)
         self.assertIn('--interactive', post)
         # A Bridge failure must not fail the whole install when the App was installed too.
-        self.assertIn('if [ -d /Applications/Heimdall.app ]; then exit 0; fi', post)
+        self.assertIn('if [ -d /Applications/Ninjy.app ]; then exit 0; fi', post)
         self.assertIn('|| bridge_failed', post)
         for path in ('scripts/release/build-macos-pkg.sh', 'scripts/release/macos-pkg-bridge-postinstall.sh'):
             self.assertEqual(subprocess.run(['bash', '-n', str(ROOT / path)]).returncode, 0)

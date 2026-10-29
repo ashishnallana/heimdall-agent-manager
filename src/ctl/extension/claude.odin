@@ -325,7 +325,7 @@ claude_structured_patch :: proc(arr: json.Array) -> []Diff_Hunk {
 	return hunks[:]
 }
 
-CLAUDE_DENY_DEFAULT_MESSAGE :: "Denied in Heimdall"
+CLAUDE_DENY_DEFAULT_MESSAGE :: "Denied in Ninjy"
 
 // claude_permission_output renders Claude's PermissionRequest hook decision.
 // "none" (or anything else) yields "" — print nothing so the TUI prompt stays.

@@ -35,7 +35,7 @@ main :: proc() {
 		return
 	}
 	if is_tokens_command() {
-		fmt.eprintln("ham-hub tokens was removed: Heimdall user tokens are no longer supported; users sign in with OIDC")
+		fmt.eprintln("ham-hub tokens was removed: Ninjy user tokens are no longer supported; users sign in with OIDC")
 		os.exit(1)
 	}
 	parse_args(&config)

@@ -59,7 +59,7 @@ DEVICE_PAGE_HTML :: `<!DOCTYPE html>
 </head>
 <body>
 <h1>Authorize a device</h1>
-<p class="sub">Enter the code shown by the Heimdall app on your new device.</p>
+<p class="sub">Enter the code shown by the Ninjy app on your new device.</p>
 
 <section>
   <label for="user_code">Device code</label>

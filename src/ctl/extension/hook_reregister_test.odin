@@ -189,10 +189,10 @@ test_hook_permission_reregisters_same_blocker_after_disconnect :: proc(t: ^testi
 	rr_reset([]string{deny_reply})
 	testing.expect_value(t, hook_run("antigravity", agy_raw, rr_env(10_000), rr_send), `{"decision":"deny","reason":"forbidden operation"}`)
 
-	// Bridge returns deny without message: defaults to "Denied in Heimdall"
+	// Bridge returns deny without message: defaults to "Denied in Ninjy"
 	deny_no_msg := `{"ok":true,"data":{"decision":"deny"}}`
 	rr_reset([]string{deny_no_msg})
-	testing.expect_value(t, hook_run("antigravity", agy_raw, rr_env(10_000), rr_send), `{"decision":"deny","reason":"Denied in Heimdall"}`)
+	testing.expect_value(t, hook_run("antigravity", agy_raw, rr_env(10_000), rr_send), `{"decision":"deny","reason":"Denied in Ninjy"}`)
 
 	// Bridge returns none or error: falls back to {"decision":"ask"}
 	for reply in ([]string{none, bad}) {

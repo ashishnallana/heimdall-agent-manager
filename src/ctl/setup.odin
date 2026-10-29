@@ -123,7 +123,7 @@ ctl_setup_command :: proc(args: []string) {
 		return
 	}
 
-	fmt.println("Heimdall harness setup report (detect-only; nothing installed or modified)")
+	fmt.println("Ninjy harness setup report (detect-only; nothing installed or modified)")
 	fmt.println("=========================================================================")
 	for h in harnesses {
 		if only != "" && h.name != only do continue

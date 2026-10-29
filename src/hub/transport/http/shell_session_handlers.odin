@@ -1393,7 +1393,7 @@ PREVIEW_HOP_PARAM :: "__heimdall_hop"
 // clear page instead of looping.
 preview_bounce :: proc(h: ^Shell_Session_Stream_Handlers, session_id, return_to: string, hop: int, request_headers: []contracts.HTTP_Header = nil) -> Response {
 	if hop > auth_service.PREVIEW_MAX_HOPS {
-		return plain_response(403, "Preview sign-in keeps failing: this browser is not keeping the preview cookie. Allow cookies for this site (or disable strict tracking protection for it) and reopen the preview from Heimdall.", {"Cache-Control", "no-store"})
+		return plain_response(403, "Preview sign-in keeps failing: this browser is not keeping the preview cookie. Allow cookies for this site (or disable strict tracking protection for it) and reopen the preview from Ninjy.", {"Cache-Control", "no-store"})
 	}
 	bind_id, bind_value, bind_ok := auth_service.preview_bind_new(h.auth)
 	if !bind_ok || h.ui_origin == "" do return plain_response(503, "preview sign-in unavailable", {"Cache-Control", "no-store"})
@@ -1545,8 +1545,8 @@ preview_auth_redeem :: proc(ctx: rawptr, req: Request) -> Response {
 				return resp
 			}
 		}
-		if bind_cookie != "" do return plain_response(403, "preview sign-in failed; reopen the preview from Heimdall", {"Set-Cookie", auth_service.expired_cookie_header(bind_cookie)}, {"Cache-Control", "no-store"})
-		return plain_response(403, "preview sign-in failed; reopen the preview from Heimdall", {"Cache-Control", "no-store"})
+		if bind_cookie != "" do return plain_response(403, "preview sign-in failed; reopen the preview from Ninjy", {"Set-Cookie", auth_service.expired_cookie_header(bind_cookie)}, {"Cache-Control", "no-store"})
+		return plain_response(403, "preview sign-in failed; reopen the preview from Ninjy", {"Cache-Control", "no-store"})
 	}
 	// Remember the bounce count so a browser that drops the preview cookie stops
 	// after a few rounds: a short-lived hop cookie always, and the URL counter

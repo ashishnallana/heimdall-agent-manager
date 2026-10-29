@@ -296,7 +296,7 @@ init :: proc() -> (ok: bool, message: string) {
 		}
 		g_version_text = strings.clone(string(info.version), runtime.heap_allocator())
 		if uint(info.version_num) < MIN_CURL_VERSION {
-			g_init_message = fmt.aprintf("libcurl %s is too old: Heimdall needs libcurl >= %s", g_version_text, MIN_CURL_VERSION_TEXT, allocator = runtime.heap_allocator())
+			g_init_message = fmt.aprintf("libcurl %s is too old: Ninjy needs libcurl >= %s", g_version_text, MIN_CURL_VERSION_TEXT, allocator = runtime.heap_allocator())
 			return
 		}
 		if CURL_PINNED_VERSION != "" && g_version_text != CURL_PINNED_VERSION {

@@ -130,7 +130,7 @@ codex_permission_output :: proc(decision, message: string) -> string {
 		return `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}`
 	case "deny":
 		strings.write_string(&b, `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":`)
-		json_write_string(&b, clip_string(message if strings.trim_space(message) != "" else "Denied in Heimdall", 2048))
+		json_write_string(&b, clip_string(message if strings.trim_space(message) != "" else "Denied in Ninjy", 2048))
 		strings.write_string(&b, `}}}`)
 		return strings.to_string(b)
 	}
