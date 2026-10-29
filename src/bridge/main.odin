@@ -114,6 +114,10 @@ main :: proc() {
 		if !bridge_status_command(os.args) do os.exit(1)
 		return
 	}
+	if len(os.args) > 1 && os.args[1] == "setup" {
+		if !bridge_setup_command(os.args) do os.exit(1)
+		return
+	}
 	if len(os.args) > 1 && os.args[1] == "list" {
 		if !bridge_list_command(os.args) do os.exit(1)
 		return
@@ -233,6 +237,7 @@ print_usage :: proc() {
 	fmt.println("        asks the approver to reuse this config's bridge id (or --reuse-bridge BRIDGE_ID); --new-bridge asks for a new one")
 	fmt.println("service: ham-bridge service start|stop|restart|status [--hub URL [--profile P] | --service NAME] [--json]")
 	fmt.println("status:  ham-bridge status [--json] [--hub URL [--profile P] | --service NAME]   (installed/enrolled/running/connected/vault/version; no token needed)")
+	fmt.println("setup:   ham-bridge setup --hub URL [--profile P] [--new-bridge | --reuse-bridge BRIDGE_ID] [--headless] [--json-progress]   (transactional install from this bundle; see docs/bridge-setup-progress.md)")
 	fmt.println("list:    ham-bridge list [--json]   (every bridge profile of this OS user)")
 	fmt.println("vault:  ham-bridge vault prune [--config PATH [--bridge-token-file PATH] [--remove]] [--remove-scope BRIDGE_ID --hub URL]   (list / prune vault state of bridges whose hub rejects them; never silent)")
 	fmt.println("probe:  ham-bridge --probe-hub https://hub.example.com   (GET /api/v1/health through the bridge's own TLS transport; exit 0/1)")
