@@ -4,8 +4,9 @@
 #     -BinDir <dir with ham-bridge.exe ham-ctl.exe ham-pty-host.exe> -Version v0.4.9 -OutDir dist
 #
 # Zip root: bin/ham-bridge.exe, bin/ham-ctl.exe, bin/ham-pty-host.exe,
-# [bin/heimdall.exe], [scripts/apply-bridge-update.ps1], README.md, LICENSE,
-# METADATA.json. Entry names always use forward slashes (Windows PowerShell 5.1's
+# [bin/heimdall.exe], [scripts/apply-bridge-update.ps1], share/heimdall/extensions/**,
+# README.md, LICENSE, METADATA.json (the Linux/macOS tarball's extensions layout).
+# Entry names always use forward slashes (Windows PowerShell 5.1's
 # ZipFile.CreateFromDirectory can write backslashes), and only regular files are
 # written, so scripts/install.ps1's exact-name lookup and the bridge's
 # self-update (`tar -xzf`, Windows' bsdtar reads zip) both see the same layout.
@@ -30,6 +31,18 @@ $manager = Join-Path $BinDir 'heimdall.exe'
 if (Test-Path -PathType Leaf $manager) { $entries['bin/heimdall.exe'] = $manager }
 $supervisor = Join-Path (Join-Path $repo 'scripts') 'apply-bridge-update.ps1'
 if (Test-Path -PathType Leaf $supervisor) { $entries['scripts/apply-bridge-update.ps1'] = $supervisor }
+# Provider extensions (F10): ham-bridge setup installs them from share/heimdall/extensions.
+$extRoot = Join-Path $repo 'extensions'
+foreach ($rel in @('antigravity/plugin.json', 'claude-code/.claude-plugin/plugin.json', 'codex/.codex-plugin/plugin.json',
+    '.claude-plugin/marketplace.json', '.agents/plugins/marketplace.json')) {
+  if (-not (Test-Path -PathType Leaf (Join-Path $extRoot $rel))) { throw "missing required release input: extensions/$rel" }
+}
+$extFull = (Resolve-Path $extRoot).Path.TrimEnd('\', '/')
+foreach ($f in Get-ChildItem -LiteralPath $extFull -Recurse -File -Force) {
+  if ($f.Attributes -band [IO.FileAttributes]::ReparsePoint) { continue }
+  $rel = $f.FullName.Substring($extFull.Length + 1) -replace '\\', '/'
+  $entries["share/heimdall/extensions/$rel"] = $f.FullName
+}
 $entries['README.md'] = Join-Path $repo 'README.md'
 $entries['LICENSE'] = Join-Path $repo 'LICENSE'
 
