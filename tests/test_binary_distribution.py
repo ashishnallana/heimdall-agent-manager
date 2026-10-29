@@ -1199,12 +1199,12 @@ def test_download_branches_are_equally_bounded(ctx):
     # The API lookup stays bounded too, and keeps the tighter cap: a slow small
     # response is a broken one.
     assert 'NET_API_MAX_TIME=30' in text
-    # Values track src/manager/update.odin (60s tarball stall / 20-30s manifest)
-    # rather than inventing new numbers for the same two operations.
+    # Values track src/bridge/release_fetch.odin (`ham-bridge update --version`'s
+    # 60s download timeout) rather than inventing new numbers for the same operation.
     assert 'NET_STALL_SECONDS=60' in text
-    odin = (ROOT / 'src' / 'manager' / 'update.odin').read_text()
-    assert 'MANAGER_UPDATE_TIMEOUT_MS :: 60000' in odin, \
-        'update.odin changed; re-justify install.sh download bounds against it'
+    odin = (ROOT / 'src' / 'bridge' / 'release_fetch.odin').read_text()
+    assert 'timeout_ms = 60_000' in odin, \
+        'release_fetch.odin changed; re-justify install.sh download bounds against it'
 
 
 # --- REQ-INST-7 adversarial download bounds ------------------------------------
@@ -3296,8 +3296,7 @@ def part2_text():
 
 def test_self_hosting_documents_installer(ctx):
     part2, part1 = part2_text()
-    one_liner = (f'curl -fsSL https://raw.githubusercontent.com/{GITHUB_REPO}/main/'
-                 f'scripts/install.sh | bash')
+    one_liner = 'curl -fsSL install.ninjy.ai | bash'
     assert one_liner in part2, 'Part 2 must show the curl|bash one-liner installer'
     assert 'Quick install' in part2 and 'recommended' in part2.lower(), (
         'Part 2 must present the installer as the recommended path')
@@ -3305,7 +3304,8 @@ def test_self_hosting_documents_installer(ctx):
     # 'heimdall update'). `heimdall enroll` is DELETED, so a test demanding the doc
     # document it was pinning a dead command and would have fought whoever fixed the
     # doc.
-    for command in ('ham-bridge enroll --hub', 'heimdall status', 'heimdall update'):
+    # `heimdall status`/`heimdall update` went with src/manager: ham-bridge owns both.
+    for command in ('ham-bridge enroll --hub', 'ham-bridge status', 'ham-bridge update'):
         assert command in part2, f'Part 2 must document {command}'
 
     # The absence half, SHAPED DELIBERATELY. Note what is NOT asserted: a bare

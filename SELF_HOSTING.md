@@ -897,9 +897,6 @@ odin build src/bridge -collection:odin_test=src -out:./bin/ham-bridge
 # CLI (Odin)
 odin build src/ctl -collection:odin_test=src -out:./bin/ham-ctl
 
-# Management CLI (Odin) — the `heimdall` command used by sections 2.1/2.5
-odin build src/manager -collection:odin_test=src -out:./bin/heimdall
-
 # pty-host (Rust — must be in tools/pty_host/)
 cd tools/pty_host && cargo build --release
 cp target/release/ham-pty-host ~/bin/ham-pty-host
@@ -1234,7 +1231,7 @@ Recommended — the quick install (section 2.1) handles the first three items:
 - [ ] Enroll: `ham-bridge enroll --hub https://hub.example.com` — approve the
       printed link and short code in a browser. Nothing to create on the hub first.
 - [ ] Start the bridge service (systemd user service or launchd agent)
-- [ ] Verify with `heimdall status`; confirm the bridge appears in the hub UI
+- [ ] Verify with `ham-bridge status`; confirm the bridge appears in the hub UI
       or via `ham-ctl bridge list`
 
 Manual path (sections 2.2–2.10, for source/air-gapped setups):

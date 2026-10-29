@@ -97,7 +97,7 @@ sequenceDiagram
 
 ### REQ-BUPD-1: Bridge Version Introspection & Hello Protocol
 - **Binary Metadata Injection:**
-  - Build scripts (`scripts/package-cloudtop-bundle.sh` and Nix expressions) must bake `APP_VERSION`, Git short commit hash (`git rev-parse --short HEAD`), build ISO timestamp, and target architecture (`linux-amd64`, `linux-arm64`, `darwin-arm64`) into `ham-bridge` and `ham-ctl`.
+  - Build scripts (`scripts/release/package-local-binary-tarball.sh` and Nix expressions) must bake `APP_VERSION`, Git short commit hash (`git rev-parse --short HEAD`), build ISO timestamp, and target architecture (`linux-amd64`, `linux-arm64`, `darwin-arm64`) into `ham-bridge` and `ham-ctl`.
   - Provide CLI flag `ham-bridge --version` and `ham-bridge --version-json` returning structured metadata.
 - **WebSocket Handshake (`bridge_hello`):**
   - Update `src/bridge/hub_runtime_client.odin:bridge_hub_hello_json` to include:
@@ -147,7 +147,7 @@ sequenceDiagram
        }
        ```
   2. **GitHub Releases (Fallback / Open-Source Nodes):**
-     - Query `https://api.github.com/repos/tanmayv/heimdall-agent-manager/releases/latest` (leveraging existing logic from `src/manager/update.odin`).
+     - Query `https://api.github.com/repos/tanmayv/heimdall-agent-manager/releases/latest` (as `ham-bridge update --version` does in `src/bridge/release_fetch.odin`).
 - **Hub Catalog Service (`src/hub/service/bridge/update_catalog.odin`):**
   - Maintains latest available version per architecture.
   - Automatically computes `update_available: bool` in bridge list payloads:

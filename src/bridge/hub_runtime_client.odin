@@ -1906,8 +1906,10 @@ bridge_runtime_apply_update :: proc(
 	if h_ok && h_exit == 0 do return true, "restarting"
 	_ = os.remove_all(stage_dir)
 	blog_error(.update_apply_failed, blog_sym(.stage, .preflight))
-	if h_timed_out do return false, "ham-bridge update did not start within 30 seconds; nothing was changed"
-	return false, fmt.tprintf("ham-bridge update did not start (exit %d): %s; nothing was changed", h_exit, strings.trim_space(h_err))
+	// The install is unchanged, but the PTY host and its agents were stopped above.
+	STOPPED :: "the install was not changed, but the PTY host and its agents were stopped (they restart on the next agent launch)"
+	if h_timed_out do return false, "ham-bridge update did not start within 30 seconds; " + STOPPED
+	return false, fmt.tprintf("ham-bridge update did not start (exit %d): %s; %s", h_exit, strings.trim_space(h_err), STOPPED)
 }
 
 bridge_hub_handle_agent_pty_input :: proc(conn: ^ws.Connection, text: string) {

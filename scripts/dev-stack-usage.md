@@ -712,7 +712,7 @@ replies:
 > `this bridge's credential was issued by the removed enrollment flow and is no longer
 > accepted; re-enroll this machine with: ham-bridge enroll --hub <your-heimdall-url>`
 
-`heimdall status` and `heimdall doctor` print the same instruction.
+`ham-bridge status` prints the same instruction.
 
 ---
 

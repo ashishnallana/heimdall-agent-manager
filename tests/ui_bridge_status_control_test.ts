@@ -65,6 +65,21 @@ function stubSpawn(t: any, exitCode: (call: SpawnCall) => number | null = () => 
   return calls;
 }
 
+// asDarwin runs one test as the macOS desktop app, whatever the host is.
+function asDarwin(t: any) {
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+  Object.defineProperty(process, 'platform', { ...platform, value: 'darwin' });
+  t.after(() => Object.defineProperty(process, 'platform', platform));
+}
+
+// installedBridgeBinary writes the hub.example profile's bin/ham-bridge (Unix layout).
+function installedBridgeBinary(home: string): string {
+  const binDir = path.join(home, '.local', 'share', 'heimdall', 'bridges', 'heimdall-bridge-hub-example', 'bin');
+  fs.mkdirSync(binDir, { recursive: true });
+  fs.writeFileSync(path.join(binDir, 'ham-bridge'), '');
+  return path.join(binDir, 'ham-bridge');
+}
+
 // A Bridge home with one enrolled, installed-on-macOS service for hub.example.
 function enrolledBridgeHome(t: any): { home: string; stateDir: string } {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'heimdall-bridge-home-'));
@@ -73,7 +88,6 @@ function enrolledBridgeHome(t: any): { home: string; stateDir: string } {
   const stateDir = path.join(home, '.config', 'heimdall', 'bridges', serviceName);
   fs.mkdirSync(stateDir, { recursive: true });
   fs.writeFileSync(path.join(stateDir, 'hub-url'), 'https://hub.example\n');
-  fs.writeFileSync(path.join(stateDir, 'enroll.sh'), '');
   fs.writeFileSync(path.join(stateDir, 'bridge-token'), 'token');
   fs.writeFileSync(path.join(stateDir, 'bridge-id'), 'brg_example\n');
   const binDir = path.join(home, '.local', 'share', 'heimdall', 'bridges', serviceName, 'bin');
@@ -82,9 +96,7 @@ function enrolledBridgeHome(t: any): { home: string; stateDir: string } {
   fs.mkdirSync(path.join(home, 'Library', 'LaunchAgents'), { recursive: true });
   fs.writeFileSync(path.join(home, 'Library', 'LaunchAgents', `${serviceName}.plist`), '');
   t.mock.method(os, 'homedir', () => home);
-  const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
-  Object.defineProperty(process, 'platform', { ...platform, value: 'darwin' });
-  t.after(() => Object.defineProperty(process, 'platform', platform));
+  asDarwin(t);
   // launchd reports the agent as not loaded; bootstrap and kickstart succeed.
   t.mock.method(childProcess, 'spawnSync', (_command: string, args: string[]) => ({ status: args?.[0] === 'print' ? 1 : 0, stdout: '', stderr: '' }));
   // Async status probes: not loaded, and no version output.
@@ -117,6 +129,7 @@ test('REQ-DMG-ENV-1: packaged install needs only the stock macOS tool environmen
   const previous = process.env.HEIMDALL_BRIDGE_RESOURCES;
   process.env.HEIMDALL_BRIDGE_RESOURCES = resources;
   t.after(() => { if (previous === undefined) delete process.env.HEIMDALL_BRIDGE_RESOURCES; else process.env.HEIMDALL_BRIDGE_RESOURCES = previous; });
+  asDarwin(t);
   const calls = stubSpawn(t);
 
   const result = await bridgeManager.installBundled('https://hub.example');
@@ -133,8 +146,9 @@ test('REQ-DMG-ENV-1: enrollment uses the same stock tool environment as install'
   const stateDir = path.join(home, '.config', 'heimdall', 'bridges', 'heimdall-bridge-hub-example');
   fs.mkdirSync(stateDir, { recursive: true });
   fs.writeFileSync(path.join(stateDir, 'hub-url'), 'https://hub.example\n');
-  fs.writeFileSync(path.join(stateDir, 'enroll.sh'), '');
+  const binary = installedBridgeBinary(home);
   t.mock.method(os, 'homedir', () => home);
+  asDarwin(t);
   const calls = stubSpawn(t);
   const events: any[] = [];
   const done = new Promise<void>((resolve) => {
@@ -143,7 +157,8 @@ test('REQ-DMG-ENV-1: enrollment uses the same stock tool environment as install'
   await done;
 
   assert.equal(calls.length, 1);
-  assert.deepEqual(calls[0].args, [path.join(stateDir, 'enroll.sh'), '--headless']);
+  assert.equal(calls[0].command, binary);
+  assert.deepEqual(calls[0].args, ['setup', '--hub', 'https://hub.example', '--headless']);
   assertStockMacBridgeEnv(calls[0].env);
 });
 
@@ -158,7 +173,7 @@ test('REQ-MAC-TRAY-2: tokenless state retains a safe re-enrollment identity and 
   assert.equal(bridgeManager.discoverBridgeId(stateDir), '', 'conflicting identity hints fail closed');
 });
 
-test('REQ-MAC-TRAY-2: tokenless re-enrollment explicitly reuses the recorded Bridge id', { skip: process.platform !== 'darwin' }, async (t) => {
+test('REQ-MAC-TRAY-2: tokenless re-enrollment explicitly reuses the recorded Bridge id', async (t) => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'heimdall-bridge-home-'));
   t.after(() => fs.rmSync(home, { recursive: true, force: true }));
   const serviceName = 'heimdall-bridge-hub-example';
@@ -168,9 +183,9 @@ test('REQ-MAC-TRAY-2: tokenless re-enrollment explicitly reuses the recorded Bri
   fs.mkdirSync(binDir, { recursive: true });
   fs.writeFileSync(path.join(stateDir, 'hub-url'), 'https://hub.example\n');
   fs.writeFileSync(path.join(stateDir, 'config.toml'), '[daemon]\ndaemon_id = "brg_previous123"\n');
-  fs.writeFileSync(path.join(stateDir, 'enroll.sh'), '');
   fs.writeFileSync(path.join(binDir, 'ham-bridge'), '');
   t.mock.method(os, 'homedir', () => home);
+  asDarwin(t);
   t.mock.method(childProcess, 'spawnSync', () => ({ status: 1, stdout: 'ham-bridge 0.5.16\n', stderr: '' }));
   const calls = stubSpawn(t);
   const events: any[] = [];
@@ -182,7 +197,8 @@ test('REQ-MAC-TRAY-2: tokenless re-enrollment explicitly reuses the recorded Bri
   });
   await done;
 
-  assert.deepEqual(calls[0].args, [path.join(stateDir, 'enroll.sh'), '--headless', '--reuse-bridge', 'brg_previous123']);
+  assert.equal(calls[0].command, path.join(binDir, 'ham-bridge'));
+  assert.deepEqual(calls[0].args, ['setup', '--hub', 'https://hub.example', '--headless', '--reenroll', '--reuse-bridge', 'brg_previous123']);
   assert.equal(events.filter((event) => event.type === 'complete').length, 1);
   assert.equal(fs.readFileSync(path.join(stateDir, 'bridge-id'), 'utf8').trim(), 'brg_previous123');
 });
@@ -193,8 +209,9 @@ test('REQ-MAC-TRAY-2: enrollment reports the actionable subprocess failure once'
   const stateDir = path.join(home, '.config', 'heimdall', 'bridges', 'heimdall-bridge-hub-example');
   fs.mkdirSync(stateDir, { recursive: true });
   fs.writeFileSync(path.join(stateDir, 'hub-url'), 'https://hub.example\n');
-  fs.writeFileSync(path.join(stateDir, 'enroll.sh'), '');
+  installedBridgeBinary(home);
   t.mock.method(os, 'homedir', () => home);
+  asDarwin(t);
   t.mock.method(childProcess, 'spawn', () => {
     const proc: any = new EventEmitter();
     proc.stdout = new EventEmitter();
@@ -237,7 +254,6 @@ test('REQ-WIN-DESKTOP-1: Windows resources and per-user Bridge paths are archite
     stateRoot: path.join('C:', 'Users', 'alice', 'AppData', 'Roaming', 'heimdall', 'bridges'),
     dataRoot: path.join('C:', 'Users', 'alice', 'AppData', 'Local', 'heimdall', 'bridges'),
     binaryName: 'ham-bridge.exe',
-    enrollScriptName: 'enroll.ps1',
   });
 });
 
@@ -249,19 +265,21 @@ test('REQ-WIN-DESKTOP-2: Windows desktop invokes the verified bundle and headles
     '-File', files.installScript, '-Hub', 'https://hub.example', '-Version', 'v0.5.17',
     '-Bundle', files.bundle, '-ChecksumFile', files.checksums, '-NonInteractive',
   ]);
-  const enroll = bridgeManager.enrollmentInvocation('win32', path.join('C:', 'state', 'enroll.ps1'));
-  assert.match(enroll.command, /powershell\.exe$/i);
-  assert.deepEqual(enroll.args.slice(-3), ['-File', path.join('C:', 'state', 'enroll.ps1'), '-Headless']);
-  const reenroll = bridgeManager.enrollmentInvocation('win32', path.join('C:', 'state', 'enroll.ps1'), 'brg_previous123');
-  assert.deepEqual(reenroll.args.slice(-5), [
-    '-File', path.join('C:', 'state', 'enroll.ps1'), '-Headless', '-ReuseBridge', 'brg_previous123',
+  // Enrollment runs the installed ham-bridge directly (no generated enroll.ps1);
+  // a named profile is recovered from the service name.
+  const binary = path.join('C:', 'data', 'bin', 'ham-bridge.exe');
+  const enroll = bridgeManager.enrollmentInvocation(binary, 'https://hub.example', 'heimdall-bridge-hub-example');
+  assert.equal(enroll.command, binary);
+  assert.deepEqual(enroll.args, ['setup', '--hub', 'https://hub.example', '--headless']);
+  const reenroll = bridgeManager.enrollmentInvocation(binary, 'https://hub.example', 'heimdall-bridge-hub-example_work', 'brg_previous123');
+  assert.deepEqual(reenroll.args, [
+    'setup', '--hub', 'https://hub.example', '--profile', 'work', '--headless', '--reenroll', '--reuse-bridge', 'brg_previous123',
   ]);
   assert.match(windowsInstallerSource, /\[string\]\$Bundle/);
   assert.match(windowsInstallerSource, /\[string\]\$ChecksumFile/);
-  assert.match(windowsInstallerSource, /Test-Sha256 \$sums \$O\.Bundle \$archive/);
-  assert.match(windowsInstallerSource, /param\(\[switch\]\$Headless, \[string\]\$ReuseBridge/);
+  assert.match(windowsInstallerSource, /Get-FileHash -Algorithm SHA256/);
   assert.match(windowsInstallerSource, /--reuse-bridge', \$ReuseBridge/);
-  assert.match(windowsInstallerSource, /Get-BridgeId \$C/);
+  assert.doesNotMatch(windowsInstallerSource, /enroll\.ps1/);
 });
 
 test('REQ-WIN-DESKTOP-2: Windows desktop supplies common per-user provider locations', (t) => {
@@ -316,7 +334,6 @@ test('REQ-REENROLL-RECOVER-1: failed Windows re-enrollment restarts its Schedule
   fs.writeFileSync(path.join(stateDir, 'hub-url'), 'https://hub.example\n');
   fs.writeFileSync(path.join(stateDir, 'bridge-token'), 'token\n');
   fs.writeFileSync(path.join(stateDir, 'bridge-id'), 'brg_previous123\n');
-  fs.writeFileSync(path.join(stateDir, 'enroll.ps1'), '');
   fs.writeFileSync(path.join(binDir, 'ham-bridge.exe'), '');
 
   const previous = {
@@ -353,7 +370,7 @@ test('REQ-REENROLL-RECOVER-1: failed Windows re-enrollment restarts its Schedule
   assert.ok(statusProbes[0].args.includes('-Command'));
   assert.equal(statusProbes[0].env.HEIMDALL_BRIDGE_TASK_NAME, serviceName);
   assert.equal((childProcess.spawnSync as any).mock.calls.length, 0, 'status probing stays asynchronous on Windows');
-  const calls = stubSpawn(t, (call) => call.args.includes('-File') ? 1 : 0);
+  const calls = stubSpawn(t, (call) => call.args[0] === 'setup' ? 1 : 0);
   const events: any[] = [];
   await new Promise<void>((resolve) => {
     assert.deepEqual(bridgeManager.startReEnrollment('https://hub.example', (event: any) => {
@@ -362,9 +379,8 @@ test('REQ-REENROLL-RECOVER-1: failed Windows re-enrollment restarts its Schedule
     }), { ok: true });
   });
 
-  assert.deepEqual(calls[0].args.slice(-5), [
-    '-File', path.join(stateDir, 'enroll.ps1'), '-Headless', '-ReuseBridge', 'brg_previous123',
-  ]);
+  assert.equal(calls[0].command, path.join(binDir, 'ham-bridge.exe'));
+  assert.deepEqual(calls[0].args, ['setup', '--hub', 'https://hub.example', '--headless', '--reenroll', '--reuse-bridge', 'brg_previous123']);
   assert.equal(calls.length, 2);
   assert.ok(calls[1].args.includes('-Command'));
   assert.equal(calls[1].env.HEIMDALL_BRIDGE_TASK_NAME, serviceName);
@@ -515,9 +531,9 @@ test('REQ-ELECTRON-NO-REMOTE-DEBUG-1: the Electron app has no debug-control serv
   assert.doesNotMatch(rendererEntry, /debugCapture|__debugStore/);
 });
 
-test('REQ-REENROLL-RECOVER-1: a failed re-enrollment restarts the Bridge it booted out', async (t) => {
+test('REQ-REENROLL-RECOVER-1: a failed re-enrollment restarts the Bridge', async (t) => {
   enrolledBridgeHome(t);
-  const calls = stubSpawn(t, (call) => (call.command === '/bin/bash' ? 1 : 0));
+  const calls = stubSpawn(t, (call) => (call.args[0] === 'setup' ? 1 : 0));
   const done = new Promise<any>((resolve) => {
     const started = bridgeManager.startReEnrollment('https://hub.example', (event: any) => { if (event.type === 'error') resolve(event); });
     assert.deepEqual(started, { ok: true });
@@ -533,7 +549,7 @@ test('REQ-REENROLL-RECOVER-1: a failed re-enrollment restarts the Bridge it boot
 
 test('REQ-REENROLL-RECOVER-1: a failed first enrollment does not restart a token-less Bridge', async (t) => {
   enrolledBridgeHome(t);
-  const calls = stubSpawn(t, (call) => (call.command === '/bin/bash' ? 1 : 0));
+  const calls = stubSpawn(t, (call) => (call.args[0] === 'setup' ? 1 : 0));
   const done = new Promise<any>((resolve) => {
     bridgeManager.startEnrollment('https://hub.example', (event: any) => { if (event.type === 'error') resolve(event); });
   });

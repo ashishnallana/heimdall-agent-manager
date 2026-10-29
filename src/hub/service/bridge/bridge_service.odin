@@ -594,8 +594,8 @@ verify_bridge_token :: proc(service: ^Bridge_Service, token: string) -> (contrac
 // Every bridge enrolled through the deleted flow stops working at this change and
 // must re-enroll. That is a known, accepted consequence, so the error names the
 // command that fixes it rather than describing the problem. The bridge logs this
-// message verbatim when the Hub refuses it, and `heimdall status`/`heimdall doctor`
-// surface the same instruction.
+// message verbatim when the Hub refuses it, and `ham-bridge status` surfaces the
+// same instruction.
 BRIDGE_LEGACY_CREDENTIAL_MESSAGE :: "this bridge's credential was issued by the removed enrollment flow and is no longer accepted; re-enroll this machine with: ham-bridge enroll --hub <your-hub-url>"
 
 refresh_hostname :: proc(service: ^Bridge_Service, bridge: domain.Bridge, hostname: string) -> domain.Bridge {

@@ -7,10 +7,11 @@ const childProcess = require('child_process');
 // process. The renderer receives only structured status and explicit actions.
 let busy = false;
 let enrollmentProcess: any = null;
-// REQ-REENROLL-RECOVER-1: enroll.sh boots the running service out before it
-// enrolls, and only a successful enrollment brings it back. A re-enrollment
-// that fails, is abandoned or is stopped by quitting the app must restart the
-// Bridge with its existing credential instead of leaving it offline.
+// REQ-REENROLL-RECOVER-1: `ham-bridge setup` restarts the Bridge after it
+// enrolls and rolls back on failure, but a setup that is stopped by quitting
+// the app gets no rollback. A re-enrollment that fails, is abandoned or is
+// stopped must restart the Bridge with its existing credential instead of
+// leaving it offline.
 let enrollmentRecovery: { hubUrl: string } | null = null;
 let enrollmentStopping = false;
 
@@ -36,18 +37,16 @@ function desktopPaths(
       stateRoot: path.join(roaming, 'heimdall', 'bridges'),
       dataRoot: path.join(local, 'heimdall', 'bridges'),
       binaryName: 'ham-bridge.exe',
-      enrollScriptName: 'enroll.ps1',
     };
   }
   return {
     stateRoot: path.join(home, '.config', 'heimdall', 'bridges'),
     dataRoot: path.join(home, '.local', 'share', 'heimdall', 'bridges'),
     binaryName: 'ham-bridge',
-    enrollScriptName: 'enroll.sh',
   };
 }
 
-function findState(hubUrl: string, platform: NodeJS.Platform = process.platform): { stateDir: string; serviceName: string } | null {
+function findState(hubUrl: string, platform: NodeJS.Platform = process.platform): { stateDir: string; serviceName: string; hubUrl: string } | null {
   const root = desktopPaths(platform).stateRoot;
   let names: string[] = [];
   try { names = fs.readdirSync(root); } catch (_err) { return null; }
@@ -56,8 +55,9 @@ function findState(hubUrl: string, platform: NodeJS.Platform = process.platform)
     const stateDir = path.join(root, serviceName);
     try {
       if (!fs.statSync(stateDir).isDirectory()) continue;
-      const saved = normalizeOrigin(fs.readFileSync(path.join(stateDir, 'hub-url'), 'utf8').trim());
-      if (saved === wanted) return { stateDir, serviceName };
+      const savedUrl = fs.readFileSync(path.join(stateDir, 'hub-url'), 'utf8').trim();
+      // setup derives the service name from the hub URL, so pass it the one it saved.
+      if (normalizeOrigin(savedUrl) === wanted) return { stateDir, serviceName, hubUrl: savedUrl };
     } catch (_err) { /* Ignore incomplete/foreign state directories. */ }
   }
   return null;
@@ -155,7 +155,7 @@ function bridgeBinary(serviceName: string, platform: NodeJS.Platform = process.p
   return path.join(paths.dataRoot, serviceName, 'bin', paths.binaryName);
 }
 
-// REQ-ENROLL-LOG-1: the full enroll.sh output of the latest run, so a failed
+// REQ-ENROLL-LOG-1: the full `ham-bridge setup` output of the latest run, so a failed
 // enrollment can be diagnosed (the app otherwise only keeps its pairing code).
 function enrollmentLogPath(serviceName: string, platform: NodeJS.Platform = process.platform): string {
   return path.join(desktopPaths(platform).dataRoot, serviceName, 'logs', 'enroll.log');
@@ -404,13 +404,23 @@ function restartSync(hubUrl: string): string {
   return childProcess.spawnSync('/bin/launchctl', ['kickstart', '-k', agent.target], options).status === 0 ? '' : `Unable to restart ${agent.serviceName}.`;
 }
 
-function enrollmentInvocation(platform: NodeJS.Platform, script: string, reuseBridgeId = '') {
-  if (platform === 'win32') return {
-    command: powershellPath(),
-    args: ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', script, '-Headless',
-      ...(reuseBridgeId ? ['-ReuseBridge', reuseBridgeId] : [])],
+// profileFromServiceName inverts bridgesvc.service_name: heimdall-bridge-<hub>
+// or heimdall-bridge-<hub>_<profile> (hub names never contain '_').
+function profileFromServiceName(serviceName: string): string {
+  const separator = serviceName.indexOf('_');
+  return separator < 0 ? '' : serviceName.slice(separator + 1);
+}
+
+// Enrollment is `ham-bridge setup` from the profile's installed binary: it
+// enrolls, restarts and verifies the service, and rolls back on failure.
+// --reenroll re-pairs the bridge of a profile that still holds a credential.
+function enrollmentInvocation(binary: string, hubUrl: string, serviceName: string, reuseBridgeId = '') {
+  const profile = profileFromServiceName(serviceName);
+  return {
+    command: binary,
+    args: ['setup', '--hub', hubUrl, ...(profile ? ['--profile', profile] : []), '--headless',
+      ...(reuseBridgeId ? ['--reenroll', '--reuse-bridge', reuseBridgeId] : [])],
   };
-  return { command: '/bin/bash', args: [script, '--headless', ...(reuseBridgeId ? ['--reuse-bridge', reuseBridgeId] : [])] };
 }
 
 function startEnrollment(
@@ -421,13 +431,14 @@ function startEnrollment(
   if (enrollmentProcess) return { ok: false, error: 'Enrollment is already running.' };
   const platform = process.platform;
   const state = findState(hubUrl, platform);
-  const script = state && path.join(state.stateDir, desktopPaths(platform).enrollScriptName);
-  if (!supportedPlatform(platform) || !script || !fs.existsSync(script)) return { ok: false, error: 'Install the packaged Bridge before enrolling it.' };
+  const binary = state && bridgeBinary(state.serviceName, platform);
+  if (!supportedPlatform(platform) || !binary || !fs.existsSync(binary)) return { ok: false, error: 'Install the packaged Bridge before enrolling it.' };
   const reuseBridgeId = String(options.reuseBridgeId || '').trim();
   if (reuseBridgeId && !BRIDGE_ID_PATTERN.test(reuseBridgeId)) return { ok: false, error: 'The previous Bridge ID is invalid; refusing to re-enroll it.' };
-  const invocation = enrollmentInvocation(platform, script, reuseBridgeId);
-  // On Unix the detached process group lets stopEnrollment() terminate the
-  // shell and ham-bridge together. Windows uses taskkill /T for the same tree.
+  const invocation = enrollmentInvocation(binary, state.hubUrl, state.serviceName, reuseBridgeId);
+  // On Unix the detached process group lets stopEnrollment() terminate setup
+  // and the `ham-bridge enroll` it runs together. Windows uses taskkill /T for
+  // the same tree.
   const proc = childProcess.spawn(invocation.command, invocation.args, {
     env: bridgeHostEnv(platform),
     stdio: ['ignore', 'pipe', 'pipe'],

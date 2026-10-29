@@ -1,7 +1,7 @@
 package main
 
 // `ham-bridge setup --hub <url> [--profile P] [--new-bridge|--reuse-bridge ID]
-// [--headless] [--json-progress]`: install this bridge from the bundle the running
+// [--reenroll] [--headless] [--json-progress]`: install this bridge from the bundle the running
 // binary ships in, transactionally (F6, F9). The step order, retry/remediation and
 // rollback live in bridgesvc.run_setup; this file supplies the real side effects.
 // Every run re-renders the service file and adopts an existing per-Hub install
@@ -49,7 +49,7 @@ bridge_setup_command :: proc(args: []string) -> bool {
 	hub := strings.trim_space(option_value(args, "--hub", ""))
 	profile_name := strings.trim_space(option_value(args, "--profile", ""))
 	if hub == "" {
-		fmt.eprintln("usage: ham-bridge setup --hub <url> [--profile P] [--new-bridge | --reuse-bridge BRIDGE_ID] [--headless] [--json-progress]")
+		fmt.eprintln("usage: ham-bridge setup --hub <url> [--profile P] [--new-bridge | --reuse-bridge BRIDGE_ID] [--reenroll] [--headless] [--json-progress]")
 		return false
 	}
 	profile, ok := bridgesvc.profile_from(hub, profile_name, context.temp_allocator)
@@ -90,6 +90,15 @@ bridge_setup_command :: proc(args: []string) -> bool {
 		fmt.eprintfln("ham-bridge setup FAILED at step %q; the previous install was restored%s.", bridgesvc.STEP_NAMES[failed], " and restarted" if s.was_running else "")
 	}
 	return done
+}
+
+// bridge_setup_enroll_needed: an enrolled profile skips the enroll step, unless
+// --new-bridge, --reenroll (re-pair the same bridge, e.g. after its credential was
+// revoked), or --reuse-bridge naming another bridge than the current credential's.
+bridge_setup_enroll_needed :: proc(args: []string, current_bridge_id: string) -> bool {
+	if current_bridge_id == "" || has_flag(args, "--new-bridge") || has_flag(args, "--reenroll") do return true
+	reuse := strings.trim_space(option_value(args, "--reuse-bridge", ""))
+	return reuse != "" && reuse != current_bridge_id
 }
 
 bridge_setup_emit :: proc(data: rawptr, ev: bridgesvc.Event) {
@@ -234,11 +243,9 @@ bridge_setup_run :: proc(data: rawptr, step: bridgesvc.Step) -> bridgesvc.Step_R
 		token := bridgesvc.pjoin(l.state_dir, bridgesvc.TOKEN_FILE)
 		reuse := strings.trim_space(option_value(s.args, "--reuse-bridge", ""))
 		current := bridgesvc.credential_bridge_id(bridgesvc.read_first_line(token))
-		// Already enrolled: skip, unless --new-bridge or --reuse-bridge names
-		// another bridge than the one this profile holds a credential for.
-		if current != "" && !has_flag(s.args, "--new-bridge") && (reuse == "" || reuse == current) {
-			return {ok = true, message = "skipped"}
-		}
+		if !bridge_setup_enroll_needed(s.args, current) do return {ok = true, message = "skipped"}
+		// --reenroll keeps this profile's identity: offer the credential's bridge for reuse.
+		if reuse == "" && current != "" && !has_flag(s.args, "--new-bridge") do reuse = current
 		argv := make([dynamic]string, context.temp_allocator)
 		append(&argv, bridgesvc.pjoin(l.bin_dir, bridgesvc.exe_name(s.host, "ham-bridge")), "enroll", "--hub", s.profile.hub_url,
 			"--config", bridgesvc.pjoin(l.state_dir, bridgesvc.CONFIG_FILE), "--bridge-token-file", token)
