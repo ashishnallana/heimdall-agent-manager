@@ -126,7 +126,10 @@ installed profile.
 an older hub's vault key was never delivered), the bridge writes
 `<state dir>/needs-reenrollment.json` (`{bridge_id,hub,reason,hint,at}`, 0600) and
 then **parks** — no listener, no hub connection, exit code 0 once the marker goes
-away — instead of exiting non-zero into a supervisor crash loop. `status --json`
+away — instead of exiting non-zero into a supervisor crash loop. (A revocation that
+arrives on a live session exits 0 at once; systemd's `Restart=on-failure` then leaves
+the unit stopped, launchd / Scheduled Task restart it into the park. Either way the
+re-enrollment restarts the registered service itself.) `status --json`
 then reports `"state":"needs_reenrollment","needs_reenrollment":true` with
 `reenroll_reason` (`revoked|refresh_rejected|credential_missing|vault_key_timeout`)
 and `reenroll_hint` (the `ham-bridge enroll --hub … --config …` command that
@@ -137,19 +140,33 @@ bridge id than the profile's current credential is ignored.
 
 - **Running service (F2).** `enroll` stops its own profile's registered service
   (systemd, launchd, Scheduled Task, runit) before taking the config lock, retries
-  the lock for up to 10 s while the process exits, restarts the service with the new
-  credential on success and starts it again if the enrollment fails.
+  the lock for up to 10 s while the process exits, (re)starts the registered service
+  with the new credential on success — whether or not it was running — and starts it
+  again (once) if the enrollment fails after stopping it.
+- **Lost device code (REQ-ENR-12).** The hub keeps device grants in memory, so a hub
+  restart loses the code being polled (which still polls `pending`, anti-enumeration).
+  `/device/authorize` and every `/device/token` answer carry `grant_epoch`, the grant
+  store's lifetime id; a changed epoch — or an `expired` answer for a request nobody
+  approved — makes `enroll` request a new device code and pairing code (at most 2
+  times) and show them again. Under `--json-progress` each code is also printed as
+  `{"event":"enroll_code","approval_url":…,"pairing_code":…,"issue":n}`. Hubs without
+  `grant_epoch` keep the old behaviour (poll until the deadline).
 - **Another account (F1).** When the profile's bridge was approved by a different
   Heimdall account than the one approving now, `enroll` asks `[y/N]` on a terminal
   or requires `--replace-other-account` (headless / `--json-progress`). Confirmed,
   it revokes the old bridge on the hub with the old bridge's own token
   (`POST /api/v1/bridge/self/revoke`, best effort), deletes its access/refresh token
   files, rotation leftovers, vault keyring, identity record, re-enroll journal and
-  needs-reenrollment marker, then writes the new credential. Declined, nothing is
-  written and the just-approved bridge is revoked again.
+  needs-reenrollment marker, then writes the new credential. The local wipe runs
+  before the hub revoke (the old token is held in memory), so a failed wipe leaves the
+  old bridge working rather than revoked and half deleted; a credential-file conflict
+  is checked before either. Declined, nothing is written and the just-approved bridge
+  is revoked again.
 - **Vault key timeout (F7).** With an atomic-enrollment hub everything is rolled
   back (a previous credential stays usable; re-run to retry). With an older hub the
-  profile is marked `needs_reenrollment` (`vault_key_timeout`) with the retry command.
+  profile is marked `needs_reenrollment` (`vault_key_timeout`) and the retry command
+  printed; the service parks until that re-enrollment. Every successful enrollment
+  (atomic or not) clears the marker before restarting the service.
 
 `vault` is `unlocked`, `locked`, `unpaired` or `unknown` (no runtime status yet).
 `list --json` returns `{"profiles":[<status>, ...]}` sorted by service name. With no

@@ -416,6 +416,8 @@ Bridge_Authorize_Response :: struct {
 		interval:               int,
 		expires_in:             int,
 		bridge_key_fingerprint: string,
+		// The hub's grant-store lifetime id ("" from older hubs): see bridge_enroll_code_lost.
+		grant_epoch:            string,
 	},
 }
 // bridge_enroll_os_display renders "linux 6.18.49 amd64" for the approval screen,
@@ -442,6 +444,46 @@ Bridge_Enroll_Poll_Status :: enum {
 	// enumeration reasons, so "keep polling" must never be the fallback for an
 	// authentication failure or the bridge would spin until expiry on a hard error.
 	Fatal,
+	// Code_Lost: the hub that answered is not the one that issued the device code
+	// (its grant-store epoch changed: it restarted and grants live in memory).
+	Code_Lost,
+}
+
+// How many times one `enroll` replaces a lost or expired device code with a new one
+// before it gives up (REQ-ENR-12 self-heal, bounded).
+BRIDGE_ENROLL_MAX_REISSUES :: 2
+
+// bridge_enroll_code_lost: both epochs known and different. An older hub sends none,
+// and then a lost code still polls "pending" until this process's own deadline.
+bridge_enroll_code_lost :: proc(issued_epoch, polled_epoch: string) -> bool {
+	issued, polled := strings.trim_space(issued_epoch), strings.trim_space(polled_epoch)
+	return issued != "" && polled != "" && issued != polled
+}
+
+// bridge_enroll_progress_code emits the approval URL and pairing code as one JSON
+// line under --json-progress, for a front end (Electron, installer) driving enroll:
+// a reissued code (issue > 0) replaces the one it showed before.
+bridge_enroll_progress_code :: proc(args: []string, approval_url, pair_code: string, issue: int) {
+	if !has_flag(args, "--json-progress") do return
+	line, err := json.marshal(struct {
+		event:        string,
+		approval_url: string,
+		pairing_code: string,
+		issue:        int,
+	}{"enroll_code", approval_url, pair_code, issue}, allocator = context.temp_allocator)
+	if err == nil do fmt.println(string(line))
+}
+
+// bridge_enroll_should_reissue decides whether a poll answer is recovered by asking
+// for a new device code: only a code the hub lost or let expire unapproved (never a
+// denial or a PKCE failure), and at most BRIDGE_ENROLL_MAX_REISSUES times.
+bridge_enroll_should_reissue :: proc(status: Bridge_Enroll_Poll_Status, reissues_done: int) -> bool {
+	if reissues_done >= BRIDGE_ENROLL_MAX_REISSUES do return false
+	#partial switch status {
+	case .Code_Lost, .Expired:
+		return true
+	}
+	return false
 }
 
 // bridge_enroll_poll_once performs one POST /device/token.
@@ -452,6 +494,7 @@ Bridge_Enroll_Poll_Status :: enum {
 // by anyone but the process that started the flow (design §3.6).
 bridge_enroll_poll_once :: proc(
 	api_base, device_code, code_verifier: string,
+	issued_epoch := "",
 	allocator := context.allocator,
 ) -> (Bridge_Enroll_Poll_Status, Bridge_Enroll_Credential, int) {
 	token_path := BRIDGE_ENROLL_TOKEN_PATH
@@ -480,7 +523,11 @@ bridge_enroll_poll_once :: proc(
 		blog_error(.enroll_failed, blog_sym(.stage, .token), blog_int(.hub_status, i64(resp.status)))
 		return .Fatal, Bridge_Enroll_Credential{}, 0
 	}
-	switch bridge_token_response_decode(httpc.text(resp)).status {
+	decoded := bridge_token_response_decode(httpc.text(resp))
+	// Checked before the status: a restarted hub answers "pending" for the code it
+	// lost (anti-enumeration), so the epoch is the only sign it is gone.
+	if bridge_enroll_code_lost(issued_epoch, decoded.grant_epoch) do return .Code_Lost, Bridge_Enroll_Credential{}, 0
+	switch decoded.status {
 	case "approved":
 		return .Approved, bridge_enroll_credential_from_json(httpc.text(resp), allocator), 0
 	case "denied":
@@ -1014,7 +1061,7 @@ bridge_enroll_vault_key_persisted :: proc(bridge_id: string) -> bool {
 // Bring up only the Hub WebSocket, not either bridge-local listener. This can
 // coexist with the idle service while the browser relays the encrypted key to
 // the ephemeral enrollment keypair held by this process.
-bridge_enroll_wait_for_vault_delivery :: proc(args: []string, bridge_id: string) -> bool {
+bridge_enroll_wait_for_vault_delivery :: proc(args: []string, bridge_id: string) -> (ok: bool, timed_out: bool) {
 	bridge_enrollment_unseal_reset()
 	// REQ-T2-3: this process exits right after the restart below, so it must not be
 	// the one that tells the hub the vault is unlocked. See bridge_hub_vault_status_for_report.
@@ -1024,7 +1071,7 @@ bridge_enroll_wait_for_vault_delivery :: proc(args: []string, bridge_id: string)
 	defer delete(credential_snapshot_963)
 	if strings.trim_space(credential_snapshot_963) == "" || bridge_config.daemon_id != bridge_id {
 		fmt.eprintln("bridge enroll FAILED: the saved credential could not be loaded for vault delivery")
-		return false
+		return false, false
 	}
 	bridge_runtime_init()
 	bridge_hub_runtime_start()
@@ -1045,18 +1092,18 @@ bridge_enroll_wait_for_vault_delivery :: proc(args: []string, bridge_id: string)
 						fmt.eprintln("bridge enroll FAILED: the vault key was decrypted but could not be persisted in the macOS login keychain.")
 					}
 					fmt.eprintln("  The service was not restarted because it would start locked.")
-					return false
+					return false, false
 				}
 			}
-			return true
+			return true, false
 		}
 		time.sleep(100 * time.Millisecond)
 	}
 	fmt.eprintln("bridge enroll FAILED: enrolled, but the vault key was not delivered before the handoff deadline.")
 	fmt.eprintln("  This bridge can only pin your account with the key delivery its pairing code allowed, so it can")
-	fmt.eprintln("  never be unlocked later. Run `ham-bridge enroll --hub <url>` again (new code), and revoke this")
+	fmt.eprintln("  never be unlocked later. Enroll again (new code) with the command below, and revoke this")
 	fmt.eprintln("  bridge in Settings → Devices: it reports itself there as \"never received keys\".")
-	return false
+	return false, true
 }
 
 // bridge_enroll_print_account_fingerprint shows the account root this bridge pinned at
@@ -1131,16 +1178,7 @@ bridge_enroll_result_line :: proc(reuse_hint, bridge_id: string) -> string {
 bridge_enroll_device_command :: proc(args: []string) -> bool {
 	// F2: the profile's own running service holds the config lock; stop it for the
 	// ceremony and start it again if the enrollment does not get to restart it.
-	stopped := bridge_enroll_stop_own_service(args)
-	g_bridge_enroll_service_restarted = false
-	ok := bridge_enroll_device_command_run(args)
-	if stopped != "" && !g_bridge_enroll_service_restarted {
-		if started, out := bridge_service_action(bridge_service_host(), stopped, .Start); started {
-			fmt.printfln("bridge enroll: started %s again", stopped)
-		} else {
-			fmt.eprintfln("bridge enroll: could not start %s again (%s); run: ham-bridge service start --service %s", stopped, out, stopped)
-		}
-	}
+	ok, _ := bridge_enroll_with_own_service(bridge_enroll_live_service_ops(args), args, bridge_enroll_device_command_run)
 	return ok
 }
 
@@ -1242,298 +1280,330 @@ bridge_enroll_device_command_run :: proc(args: []string) -> bool {
 		return false
 	}
 
-	// Step 2c — PKCE, fail-closed on entropy.
-	code_verifier, verifier_ok := bridge_enroll_random_token()
-	if !verifier_ok do return false
-	code_challenge := bridge_pkce_challenge(code_verifier)
-	// Proof that this host holds the identity key, bound to this ECDH key and challenge.
-	identity_proof, proof_ok := bridge_unseal_identity_enrollment_proof(public_key_hex, code_challenge)
-	if !proof_ok {
-		fmt.eprintln("ham-bridge enroll: could not sign the identity proof of possession; cannot continue")
-		return false
-	}
-
-	// Step 3 — the secret pairing code (hub-blind pairing, plan §1 "Pairing"). Only
-	// values derived from it leave this process; its MAC keys stay in memory until the
-	// first unseal pins the account root (or this command ends).
-	pair_code, code_ok := vault.pair_code_generate(context.temp_allocator)
-	// The code (and so the armed pairing keys and this whole wait) lives at most
-	// PAIR_CODE_TTL_SECONDS from now, whatever expires_in the hub reports.
-	pair_deadline_ms := bridge_now_unix_ms() + i64(vault.PAIR_CODE_TTL_SECONDS) * 1000
-	if !code_ok {
-		fmt.eprintln("ham-bridge enroll: the OS random source failed; cannot create a pairing code")
-		return false
-	}
-	defer mem.zero_explicit(raw_data(pair_code), len(pair_code))
-	// The pairing stretch binds the code to this hub origin and a fresh public salt (a
-	// bridge does not know its account before approval, so no user id).
-	pair_salt, salt_ok := vault.pair_salt_generate(context.temp_allocator)
-	pair_origin, pair_origin_ok := bridge_hub_pair_origin(api_base, context.temp_allocator)
-	if !salt_ok || !pair_origin_ok {
-		fmt.eprintln("ham-bridge enroll: could not create the pairing salt for this hub (OS random source or hub URL); cannot continue")
-		return false
-	}
-	pair_keys, keys_ok := vault.pair_keys_derive(pair_code, vault.Pair_Context{kind = "bridge", hub_origin = pair_origin, pair_salt = pair_salt})
-	defer vault.pair_keys_wipe(&pair_keys)
-	pair_payload, payload_ok := vault.pair_bridge_payload(identity_hex, public_key_hex, code_challenge, context.temp_allocator)
-	pair_key_mac, mac_ok := vault.pair_key_mac_hex(&pair_keys, "bridge", pair_payload, context.temp_allocator)
-	if !keys_ok || !payload_ok || !mac_ok {
-		fmt.eprintln("ham-bridge enroll: could not derive the pairing values; cannot continue")
-		return false
-	}
-	bridge_pairing_arm(&pair_keys, pair_deadline_ms)
-	defer bridge_pairing_disarm()
-
-	// Step 4 — the anonymous device-authorization request.
-	authorize_req := bridge_enroll_authorize_request(descriptor, public_key_hex, code_challenge, identity_hex, identity_proof, vault.pair_lookup_hex(&pair_keys, context.temp_allocator), pair_key_mac, pair_salt, pair_origin, reuse_hint)
-	authorize_body := httpc.json_body(authorize_req)
-	if authorize_body.(httpc.Json_Body).failed {
-		fmt.eprintln("ham-bridge enroll: could not encode the authorize request")
-		return false
-	}
-	hub := bridge_hub_url(api_base)
-	authorize_path := BRIDGE_ENROLL_AUTHORIZE_PATH
-	authorize_url, _ := httpc.build_url(hub, authorize_path[:], allocator = context.temp_allocator)
-	fmt.printfln("bridge enroll: POST %s (no token — host=%s user=%s)",
-		authorize_url, descriptor.hostname, descriptor.os_user)
-	if reuse_hint != "" {
-		fmt.printfln("  asking to reuse bridge %s (%s); the approver chooses to reuse it or register a new bridge",
-			reuse_hint, "--reuse-bridge" if has_flag(args, BRIDGE_ENROLL_REUSE_FLAG) else "this config's previous enrollment")
-	} else if has_flag(args, BRIDGE_ENROLL_NEW_FLAG) {
-		fmt.println("  registering a new bridge (--new-bridge): no previous bridge id is offered for reuse")
-	}
-	resp, authorize_err := httpc.send({method = .POST, url = hub, path = authorize_path[:], body = authorize_body})
-	defer httpc.response_destroy(&resp)
-	if authorize_err != .None {
-		fmt.eprintfln("bridge enroll FAILED: could not reach %s — check the URL and that the proxy is up (%s: %s)", api_base, httpc.error_string(authorize_err), resp.detail)
-		blog_error(.enroll_failed, blog_sym(.stage, .authorize), blog_sym(.reason, .transport))
-		return false
-	}
-	if resp.status != 200 {
-		fmt.eprintfln("bridge enroll FAILED: hub returned HTTP %d — %s", resp.status, httpc.text(resp))
-		blog_error(.enroll_failed, blog_sym(.stage, .authorize), blog_int(.hub_status, i64(resp.status)))
-		if resp.status == 404 do fmt.eprintln("  hint: --hub must point at the Hub API origin.")
-		return false
-	}
-	authorized: Bridge_Authorize_Response
-	if json.unmarshal(resp.body, &authorized, json.Specification.JSON, context.temp_allocator) != nil || authorized.data.device_code == "" {
-		fmt.eprintfln("bridge enroll FAILED: the hub's authorize response carried no device_code — %s", httpc.text(resp))
-		return false
-	}
-	device_code := authorized.data.device_code
-	hub_fingerprint := authorized.data.bridge_key_fingerprint
-	interval := authorized.data.interval
-	expires_in := authorized.data.expires_in
-	if interval <= 0 do interval = BRIDGE_ENROLL_DEFAULT_INTERVAL_SECONDS
-	if expires_in <= 0 || expires_in > BRIDGE_ENROLL_MAX_WAIT_SECONDS do expires_in = BRIDGE_ENROLL_MAX_WAIT_SECONDS
-	if code_left := int((pair_deadline_ms - bridge_now_unix_ms()) / 1000); expires_in > code_left do expires_in = max(code_left, 0)
-	// Captured for diagnostics only (REQ-DIAG-1): an "expired" report with no
-	// times attached is unfalsifiable, so every time-related failure below states
-	// the wall clock, how long this process waited, and the deadline it expected.
-	authorized_at_ms := time.to_unix_nanoseconds(time.now()) / 1_000_000
-	deadline_ms := authorized_at_ms + i64(expires_in) * 1000
-
-	// The Hub echoes its own fingerprint advisorily. The bridge trusts ITS OWN, and
-	// a disagreement is reported rather than resolved: the Hub computes this from
-	// the key it received, so a mismatch means the key in transit is not the key
-	// this process holds.
-	if hub_fingerprint != "" && hub_fingerprint != fingerprint {
-		fmt.eprintln("bridge enroll WARNING: the hub reports a DIFFERENT key fingerprint than this machine computed.")
-		fmt.eprintfln("  this machine: %s", fingerprint)
-		fmt.eprintfln("  hub says:     %s", hub_fingerprint)
-		fmt.eprintln("  A mismatch is what a key substitution looks like; the approving browser will refuse it.")
-	}
-	ui_origin, ui_ok := bridge_enroll_hub_url(authorized.data.verification_uri, context.temp_allocator)
-	if !ui_ok {
-		fmt.eprintln("bridge enroll FAILED: Hub is not configured with --ui-origin; cannot build an approval link")
-		return false
-	}
-
-	// Step 6 — print a stable, code-free URL and the pairing code. The code is typed
-	// once on an approved device; a link never carries it.
-	approval_url := bridge_enroll_approval_url(approval_base if approval_base != "" else ui_origin, context.temp_allocator)
-	identity_fp, _ := bridge_enroll_fingerprint(identity_hex, context.temp_allocator)
-	fmt.println("")
-	fmt.println("Enroll this machine")
-	fmt.println("  On a device that already uses Heimdall, open:")
-	fmt.println("")
-	fmt.printfln("  %s", approval_url)
-	fmt.println("")
-	fmt.println("  and type this pairing code once:")
-	fmt.println("")
-	fmt.printfln("      %s", pair_code)
-	fmt.println("")
-	fmt.println("  The code is a secret: type it only on your own device. It expires shortly.")
-	fmt.printfln("  It is bound to the hub %s: approve on that hub's UI; the hub must list this", pair_origin)
-	fmt.println("  address as one of its pairing origins (its own API address, or --pairing-hub-origins).")
-	fmt.printfln("  (bridge identity fingerprint, shown on the approval page: %s)", identity_fp)
-	fmt.println("  This process retrieves its credential directly from the Hub using PKCE-protected polling.")
-	fmt.println("")
-	if !has_flag(args, "--headless") {
-		if bridge_enroll_try_open_approval_url(approval_url) {
-			fmt.println("Opened the approval page in your browser.")
-		} else {
-			fmt.println("Could not open a browser automatically; use the link shown above.")
+	// REQ-ENR-12: a device code the hub lost (it restarted: grants live in its memory)
+	// or that expired unapproved is replaced by a fresh one, a bounded number of times,
+	// instead of failing the ceremony. Each round re-runs steps 2c-11 with a new PKCE
+	// pair and pairing code; the identity key above is kept.
+	reissues := 0
+	for {
+		// Step 2c — PKCE, fail-closed on entropy.
+		code_verifier, verifier_ok := bridge_enroll_random_token()
+		if !verifier_ok do return false
+		code_challenge := bridge_pkce_challenge(code_verifier)
+		// Proof that this host holds the identity key, bound to this ECDH key and challenge.
+		identity_proof, proof_ok := bridge_unseal_identity_enrollment_proof(public_key_hex, code_challenge)
+		if !proof_ok {
+			fmt.eprintln("ham-bridge enroll: could not sign the identity proof of possession; cannot continue")
+			return false
 		}
-	}	fmt.printfln("Waiting for approval (expires in %dm%02ds)…", expires_in / 60, expires_in % 60)
 
-	// Steps 7-11 — poll until a terminal answer. Polling is the only completion
-	// channel; credentials never pass through the approving browser.
-	waited := 0
-	for waited < expires_in {
-		sleep_for := min(interval, expires_in - waited)
-		time.sleep(time.Duration(sleep_for) * time.Second)
-		waited += sleep_for
-		status, cred, retry_after := bridge_enroll_poll_once(api_base, device_code, code_verifier)
-		switch status {
-		case .Approved:
-			token_file := bridge_enroll_token_file_from_args(args, api_base, cred.bridge_id)
-			// Reuse only counts when the approver chose the id this process offered: an id
-			// the hub returns unasked is a new bridge and never replaces anything here.
-			reenroll := reuse_hint != "" && cred.bridge_id == reuse_hint
-			fmt.println("")
-			if reenroll {
-				fmt.printfln("Approved: re-enrolling existing bridge %s", cred.bridge_id)
-			} else if reuse_hint != "" {
-				fmt.printfln("Approved: the approver registered a NEW bridge %s instead of reusing %s (that bridge is left as it is)", cred.bridge_id, reuse_hint)
+		// Step 3 — the secret pairing code (hub-blind pairing, plan §1 "Pairing"). Only
+		// values derived from it leave this process; its MAC keys stay in memory until the
+		// first unseal pins the account root (or this command ends).
+		pair_code, code_ok := vault.pair_code_generate(context.temp_allocator)
+		// The code (and so the armed pairing keys and this whole wait) lives at most
+		// PAIR_CODE_TTL_SECONDS from now, whatever expires_in the hub reports.
+		pair_deadline_ms := bridge_now_unix_ms() + i64(vault.PAIR_CODE_TTL_SECONDS) * 1000
+		if !code_ok {
+			fmt.eprintln("ham-bridge enroll: the OS random source failed; cannot create a pairing code")
+			return false
+		}
+		defer mem.zero_explicit(raw_data(pair_code), len(pair_code))
+		// The pairing stretch binds the code to this hub origin and a fresh public salt (a
+		// bridge does not know its account before approval, so no user id).
+		pair_salt, salt_ok := vault.pair_salt_generate(context.temp_allocator)
+		pair_origin, pair_origin_ok := bridge_hub_pair_origin(api_base, context.temp_allocator)
+		if !salt_ok || !pair_origin_ok {
+			fmt.eprintln("ham-bridge enroll: could not create the pairing salt for this hub (OS random source or hub URL); cannot continue")
+			return false
+		}
+		pair_keys, keys_ok := vault.pair_keys_derive(pair_code, vault.Pair_Context{kind = "bridge", hub_origin = pair_origin, pair_salt = pair_salt})
+		defer vault.pair_keys_wipe(&pair_keys)
+		pair_payload, payload_ok := vault.pair_bridge_payload(identity_hex, public_key_hex, code_challenge, context.temp_allocator)
+		pair_key_mac, mac_ok := vault.pair_key_mac_hex(&pair_keys, "bridge", pair_payload, context.temp_allocator)
+		if !keys_ok || !payload_ok || !mac_ok {
+			fmt.eprintln("ham-bridge enroll: could not derive the pairing values; cannot continue")
+			return false
+		}
+		bridge_pairing_arm(&pair_keys, pair_deadline_ms)
+		defer bridge_pairing_disarm()
+
+		// Step 4 — the anonymous device-authorization request.
+		authorize_req := bridge_enroll_authorize_request(descriptor, public_key_hex, code_challenge, identity_hex, identity_proof, vault.pair_lookup_hex(&pair_keys, context.temp_allocator), pair_key_mac, pair_salt, pair_origin, reuse_hint)
+		authorize_body := httpc.json_body(authorize_req)
+		if authorize_body.(httpc.Json_Body).failed {
+			fmt.eprintln("ham-bridge enroll: could not encode the authorize request")
+			return false
+		}
+		hub := bridge_hub_url(api_base)
+		authorize_path := BRIDGE_ENROLL_AUTHORIZE_PATH
+		authorize_url, _ := httpc.build_url(hub, authorize_path[:], allocator = context.temp_allocator)
+		fmt.printfln("bridge enroll: POST %s (no token — host=%s user=%s)",
+			authorize_url, descriptor.hostname, descriptor.os_user)
+		if reuse_hint != "" {
+			fmt.printfln("  asking to reuse bridge %s (%s); the approver chooses to reuse it or register a new bridge",
+				reuse_hint, "--reuse-bridge" if has_flag(args, BRIDGE_ENROLL_REUSE_FLAG) else "this config's previous enrollment")
+		} else if has_flag(args, BRIDGE_ENROLL_NEW_FLAG) {
+			fmt.println("  registering a new bridge (--new-bridge): no previous bridge id is offered for reuse")
+		}
+		resp, authorize_err := httpc.send({method = .POST, url = hub, path = authorize_path[:], body = authorize_body})
+		defer httpc.response_destroy(&resp)
+		if authorize_err != .None {
+			fmt.eprintfln("bridge enroll FAILED: could not reach %s — check the URL and that the proxy is up (%s: %s)", api_base, httpc.error_string(authorize_err), resp.detail)
+			blog_error(.enroll_failed, blog_sym(.stage, .authorize), blog_sym(.reason, .transport))
+			return false
+		}
+		if resp.status != 200 {
+			fmt.eprintfln("bridge enroll FAILED: hub returned HTTP %d — %s", resp.status, httpc.text(resp))
+			blog_error(.enroll_failed, blog_sym(.stage, .authorize), blog_int(.hub_status, i64(resp.status)))
+			if resp.status == 404 do fmt.eprintln("  hint: --hub must point at the Hub API origin.")
+			return false
+		}
+		authorized: Bridge_Authorize_Response
+		if json.unmarshal(resp.body, &authorized, json.Specification.JSON, context.temp_allocator) != nil || authorized.data.device_code == "" {
+			fmt.eprintfln("bridge enroll FAILED: the hub's authorize response carried no device_code — %s", httpc.text(resp))
+			return false
+		}
+		device_code := authorized.data.device_code
+		hub_fingerprint := authorized.data.bridge_key_fingerprint
+		interval := authorized.data.interval
+		expires_in := authorized.data.expires_in
+		if interval <= 0 do interval = BRIDGE_ENROLL_DEFAULT_INTERVAL_SECONDS
+		if expires_in <= 0 || expires_in > BRIDGE_ENROLL_MAX_WAIT_SECONDS do expires_in = BRIDGE_ENROLL_MAX_WAIT_SECONDS
+		if code_left := int((pair_deadline_ms - bridge_now_unix_ms()) / 1000); expires_in > code_left do expires_in = max(code_left, 0)
+		// Captured for diagnostics only (REQ-DIAG-1): an "expired" report with no
+		// times attached is unfalsifiable, so every time-related failure below states
+		// the wall clock, how long this process waited, and the deadline it expected.
+		authorized_at_ms := time.to_unix_nanoseconds(time.now()) / 1_000_000
+		deadline_ms := authorized_at_ms + i64(expires_in) * 1000
+
+		// The Hub echoes its own fingerprint advisorily. The bridge trusts ITS OWN, and
+		// a disagreement is reported rather than resolved: the Hub computes this from
+		// the key it received, so a mismatch means the key in transit is not the key
+		// this process holds.
+		if hub_fingerprint != "" && hub_fingerprint != fingerprint {
+			fmt.eprintln("bridge enroll WARNING: the hub reports a DIFFERENT key fingerprint than this machine computed.")
+			fmt.eprintfln("  this machine: %s", fingerprint)
+			fmt.eprintfln("  hub says:     %s", hub_fingerprint)
+			fmt.eprintln("  A mismatch is what a key substitution looks like; the approving browser will refuse it.")
+		}
+		ui_origin, ui_ok := bridge_enroll_hub_url(authorized.data.verification_uri, context.temp_allocator)
+		if !ui_ok {
+			fmt.eprintln("bridge enroll FAILED: Hub is not configured with --ui-origin; cannot build an approval link")
+			return false
+		}
+
+		// Step 6 — print a stable, code-free URL and the pairing code. The code is typed
+		// once on an approved device; a link never carries it.
+		approval_url := bridge_enroll_approval_url(approval_base if approval_base != "" else ui_origin, context.temp_allocator)
+		identity_fp, _ := bridge_enroll_fingerprint(identity_hex, context.temp_allocator)
+		fmt.println("")
+		fmt.println("Enroll this machine")
+		fmt.println("  On a device that already uses Heimdall, open:")
+		fmt.println("")
+		fmt.printfln("  %s", approval_url)
+		fmt.println("")
+		fmt.println("  and type this pairing code once:")
+		fmt.println("")
+		fmt.printfln("      %s", pair_code)
+		fmt.println("")
+		fmt.println("  The code is a secret: type it only on your own device. It expires shortly.")
+		fmt.printfln("  It is bound to the hub %s: approve on that hub's UI; the hub must list this", pair_origin)
+		fmt.println("  address as one of its pairing origins (its own API address, or --pairing-hub-origins).")
+		fmt.printfln("  (bridge identity fingerprint, shown on the approval page: %s)", identity_fp)
+		fmt.println("  This process retrieves its credential directly from the Hub using PKCE-protected polling.")
+		fmt.println("")
+		bridge_enroll_progress_code(args, approval_url, pair_code, reissues)
+		// The approval page is the same URL for a reissued code: open it only once.
+		if !has_flag(args, "--headless") && reissues == 0 {
+			if bridge_enroll_try_open_approval_url(approval_url) {
+				fmt.println("Opened the approval page in your browser.")
 			} else {
-				fmt.printfln("Approved: registering new bridge %s", cred.bridge_id)
+				fmt.println("Could not open a browser automatically; use the link shown above.")
 			}
-			// F1: a machine enrolled by ANOTHER account is replaced only when confirmed.
-			config_path_for_account := cfg_lib.config_path_from_args(args)
-			account_ok, account_replaced := bridge_enroll_resolve_account(args, api_base, config_path_for_account, replacing_bridge_id, cred)
-			if !account_ok do return false
-			if account_replaced do replacing_bridge_id = ""
-			if reason, conflict := bridge_enroll_token_file_conflict(token_file, api_base, replacing_bridge_id, cred.bridge_id if reenroll else ""); conflict {
-				fmt.eprintfln("bridge enroll FAILED: credential file %s is not this bridge's: %s. Nothing was written; enroll again with its own --bridge-token-file.", token_file, reason)
-				return false
+		}
+		fmt.printfln("Waiting for approval (expires in %dm%02ds)…", expires_in / 60, expires_in % 60)
+
+		// Steps 7-11 — poll until a terminal answer. Polling is the only completion
+		// channel; credentials never pass through the approving browser.
+		waited := 0
+		reissue := false
+		poll: for waited < expires_in {
+			sleep_for := min(interval, expires_in - waited)
+			time.sleep(time.Duration(sleep_for) * time.Second)
+			waited += sleep_for
+			status, cred, retry_after := bridge_enroll_poll_once(api_base, device_code, code_verifier, authorized.data.grant_epoch)
+			if bridge_enroll_should_reissue(status, reissues) {
+				reissue = true
+				break poll
 			}
-			if strings.trim_space(token_file) == "" {
-				fmt.eprintln("bridge enroll FAILED: nowhere to store the credential — pass --bridge-token-file <path> (HOME is unset, so there is no default).")
-				fmt.eprintln("  The approval succeeded; re-run with --bridge-token-file and approve again.")
-				return false
-			}
-			config_path := cfg_lib.config_path_from_args(args)
-			// A re-enrollment replaces this machine's previous identity of that id only
-			// once it is journaled and backed up, so a rollback restores it.
-			replace_previous := false
-			// Held until the service restart: no other instance may run as this bridge
-			// while its identity is being replaced.
-			scope_lock_path := ""
-			defer if scope_lock_path != "" do bridge_instance_unlock(scope_lock_path)
-			if reenroll {
-				scope_locked := true
-				if name, scoped := keystore_scope_name(cred.bridge_id); scoped do scope_lock_path, scope_locked = bridge_scope_lock(name)
-				if !scope_locked {
-					fmt.eprintfln("bridge enroll FAILED: another ham-bridge instance runs as %s on this machine; stop it and enroll again. Nothing was written.", cred.bridge_id)
+			switch status {
+			case .Approved:
+				token_file := bridge_enroll_token_file_from_args(args, api_base, cred.bridge_id)
+				// Reuse only counts when the approver chose the id this process offered: an id
+				// the hub returns unasked is a new bridge and never replaces anything here.
+				reenroll := reuse_hint != "" && cred.bridge_id == reuse_hint
+				fmt.println("")
+				if reenroll {
+					fmt.printfln("Approved: re-enrolling existing bridge %s", cred.bridge_id)
+				} else if reuse_hint != "" {
+					fmt.printfln("Approved: the approver registered a NEW bridge %s instead of reusing %s (that bridge is left as it is)", cred.bridge_id, reuse_hint)
+				} else {
+					fmt.printfln("Approved: registering new bridge %s", cred.bridge_id)
+				}
+				// Checked before the account decision below, so a refusal here leaves the
+				// previous account's bridge untouched.
+				if reason, conflict := bridge_enroll_token_file_conflict(token_file, api_base, replacing_bridge_id, cred.bridge_id if reenroll else ""); conflict {
+					fmt.eprintfln("bridge enroll FAILED: credential file %s is not this bridge's: %s. Nothing was written; enroll again with its own --bridge-token-file.", token_file, reason)
+					_, _ = bridge_self_revoke(api_base, cred.access_token)
 					return false
 				}
-				existing: Bridge_Identity_Record
-				existing_status := keystore_read_identity(cred.bridge_id, &existing)
-				crypto.zero_explicit(&existing, size_of(existing))
-				if existing_status != .Not_Found {
-					if !bridge_reenroll_begin(config_path, api_base, cred.bridge_id, token_file) {
-						fmt.eprintfln("bridge enroll FAILED: could not back up the previous identity of %s (or an earlier re-enrollment is unresolved). Nothing was written.", cred.bridge_id)
+				if strings.trim_space(token_file) == "" {
+					fmt.eprintln("bridge enroll FAILED: nowhere to store the credential — pass --bridge-token-file <path> (HOME is unset, so there is no default).")
+					fmt.eprintln("  The approval succeeded; re-run with --bridge-token-file and approve again.")
+					return false
+				}
+				// F1: a machine enrolled by ANOTHER account is replaced only when confirmed.
+				account_ok, _ := bridge_enroll_resolve_account(args, api_base, cfg_lib.config_path_from_args(args), replacing_bridge_id, cred)
+				if !account_ok do return false
+				config_path := cfg_lib.config_path_from_args(args)
+				// A re-enrollment replaces this machine's previous identity of that id only
+				// once it is journaled and backed up, so a rollback restores it.
+				replace_previous := false
+				// Held until the service restart: no other instance may run as this bridge
+				// while its identity is being replaced.
+				scope_lock_path := ""
+				defer if scope_lock_path != "" do bridge_instance_unlock(scope_lock_path)
+				if reenroll {
+					scope_locked := true
+					if name, scoped := keystore_scope_name(cred.bridge_id); scoped do scope_lock_path, scope_locked = bridge_scope_lock(name)
+					if !scope_locked {
+						fmt.eprintfln("bridge enroll FAILED: another ham-bridge instance runs as %s on this machine; stop it and enroll again. Nothing was written.", cred.bridge_id)
 						return false
 					}
-					replace_previous = true
+					existing: Bridge_Identity_Record
+					existing_status := keystore_read_identity(cred.bridge_id, &existing)
+					crypto.zero_explicit(&existing, size_of(existing))
+					if existing_status != .Not_Found {
+						if !bridge_reenroll_begin(config_path, api_base, cred.bridge_id, token_file) {
+							fmt.eprintfln("bridge enroll FAILED: could not back up the previous identity of %s (or an earlier re-enrollment is unresolved). Nothing was written.", cred.bridge_id)
+							return false
+						}
+						replace_previous = true
+					}
 				}
-			}
-			// Pin the identity and the enrolled owner under the new bridge id before
-			// anything else: the unseal that follows is checked against both.
-			if !bridge_unseal_identity_commit_enrollment(cred.bridge_id, cred.owner_user_id, replace_previous) {
-				if replace_previous do _ = bridge_reenroll_resolve(config_path, cred.bridge_id, false)
-				if cred.owner_user_id == "" {
-					fmt.eprintln("bridge enroll FAILED: the hub did not report the approving account (owner_user_id); this bridge cannot pin its owner. Upgrade the hub and enroll again.")
+				// Pin the identity and the enrolled owner under the new bridge id before
+				// anything else: the unseal that follows is checked against both.
+				if !bridge_unseal_identity_commit_enrollment(cred.bridge_id, cred.owner_user_id, replace_previous) {
+					if replace_previous do _ = bridge_reenroll_resolve(config_path, cred.bridge_id, false)
+					if cred.owner_user_id == "" {
+						fmt.eprintln("bridge enroll FAILED: the hub did not report the approving account (owner_user_id); this bridge cannot pin its owner. Upgrade the hub and enroll again.")
+					} else {
+						fmt.eprintln("bridge enroll FAILED: this bridge's identity key could not be persisted. Nothing else was written.")
+					}
+					return false
+				}
+				if cred.enrollment_pending {
+					// REQ-EA-4: write nothing until the vault key is delivered and the hub
+					// commits; enroll_atomic.odin owns the whole sequence.
+					// A vault-key timeout here rolls everything back (F7): the previous
+					// credential, if any, stays usable and a plain re-run retries.
+					if !bridge_enroll_atomic_run(args, cred, token_file, config_path, api_base) do return false
+					if bridge_enroll_atomic_state() == .Committed do fmt.println(bridge_enroll_result_line(reuse_hint, cred.bridge_id))
+					bridge_reenroll_clear(config_path)
+					bridge_instance_unlock(enroll_config_lock) // the restarted service takes it
+					if reenroll do bridge_instance_unlock_scope(cred.bridge_id)
+					restart_ok, restarted := bridge_enroll_restart_service(args)
+					if !restart_ok do return false
+					if restarted do fmt.println("  registered bridge service restarted with the new credential")
+					return true
+				}
+				if !bridge_enroll_persist(cred, token_file, config_path, api_base) {
+					bridge_enroll_discard_identity(config_path, cred.bridge_id)
+					bridge_unseal_forget_identity()
+					return false
+				}
+				// Without atomic enrollment (an older hub) the persist IS the commit.
+				_ = bridge_reenroll_resolve(config_path, cred.bridge_id, true)
+				fmt.println("")
+				fmt.printfln("bridge enroll SUCCESS: enrolled as bridge_id=%s", cred.bridge_id)
+				fmt.println(bridge_enroll_result_line(reuse_hint, cred.bridge_id))
+				if cred.approver_username != "" {
+					fmt.printfln("  approved by     {}", cred.approver_username)
 				} else {
-					fmt.eprintln("bridge enroll FAILED: this bridge's identity key could not be persisted. Nothing else was written.")
+					fmt.println("  approved by     username unavailable (older Hub)")
 				}
-				return false
-			}
-			if cred.enrollment_pending {
-				// REQ-EA-4: write nothing until the vault key is delivered and the hub
-				// commits; enroll_atomic.odin owns the whole sequence.
-				// A vault-key timeout here rolls everything back (F7): the previous
-				// credential, if any, stays usable and a plain re-run retries.
-				if !bridge_enroll_atomic_run(args, cred, token_file, config_path, api_base) do return false
-				if bridge_enroll_atomic_state() == .Committed do fmt.println(bridge_enroll_result_line(reuse_hint, cred.bridge_id))
+				fmt.printfln("  credential      %s (0600)", token_file)
+				if strings.trim_space(cred.refresh_token) != "" {
+					fmt.printfln("  refresh token   %s (0600), access token expires in %ds and is refreshed proactively", bridge_enroll_refresh_file_for(token_file, context.temp_allocator), cred.expires_in)
+				}
+				fmt.println("  nothing secret was written to config.toml (audit F2)")
+				if cred.vault_delivery_expected {
+					if delivered, timed_out := bridge_enroll_wait_for_vault_delivery(args, cred.bridge_id); !delivered {
+						// The identity is kept: the started service reports itself "unpaired"
+						// (bridge_hub_vault_status_for_report) so the UI can show and revoke it.
+						keystore_lock_and_purge(cred.bridge_id)
+						// F7: this bridge can never be unlocked; the profile parks as
+						// needs_reenrollment with the retry command instead of running locked.
+						if timed_out do bridge_enroll_mark_vault_key_timeout(config_path, api_base, cred.bridge_id)
+						return false
+					}
+					bridge_enroll_print_account_fingerprint(cred.bridge_id)
+				}
+				// Every successful enrollment clears a needs-reenrollment marker before the
+				// service restarts: one naming a reused bridge id would park it for good.
 				bridge_reenroll_clear(config_path)
 				bridge_instance_unlock(enroll_config_lock) // the restarted service takes it
 				if reenroll do bridge_instance_unlock_scope(cred.bridge_id)
 				restart_ok, restarted := bridge_enroll_restart_service(args)
-				if !restart_ok do return false
-				if restarted do fmt.println("  registered bridge service restarted with the new credential")
-				return true
-			}
-			if !bridge_enroll_persist(cred, token_file, config_path, api_base) {
-				bridge_enroll_discard_identity(config_path, cred.bridge_id)
-				bridge_unseal_forget_identity()
-				return false
-			}
-			// Without atomic enrollment (an older hub) the persist IS the commit.
-			_ = bridge_reenroll_resolve(config_path, cred.bridge_id, true)
-			fmt.println("")
-			fmt.printfln("bridge enroll SUCCESS: enrolled as bridge_id=%s", cred.bridge_id)
-			fmt.println(bridge_enroll_result_line(reuse_hint, cred.bridge_id))
-			if cred.approver_username != "" {
-				fmt.printfln("  approved by     {}", cred.approver_username)
-			} else {
-				fmt.println("  approved by     username unavailable (older Hub)")
-			}
-			fmt.printfln("  credential      %s (0600)", token_file)
-			if strings.trim_space(cred.refresh_token) != "" {
-				fmt.printfln("  refresh token   %s (0600), access token expires in %ds and is refreshed proactively", bridge_enroll_refresh_file_for(token_file, context.temp_allocator), cred.expires_in)
-			}
-			fmt.println("  nothing secret was written to config.toml (audit F2)")
-			if cred.vault_delivery_expected {
-				if !bridge_enroll_wait_for_vault_delivery(args, cred.bridge_id) {
-					// The identity is kept: the started service reports itself "unpaired"
-					// (bridge_hub_vault_status_for_report) so the UI can show and revoke it.
-					keystore_lock_and_purge(cred.bridge_id)
+				if !restart_ok {
+					// The key (when delivered) was verified persisted above; a restart
+					// failure is an operational problem, not a reason to destroy it.
 					return false
 				}
-				bridge_enroll_print_account_fingerprint(cred.bridge_id)
-			}
-			bridge_instance_unlock(enroll_config_lock) // the restarted service takes it
-			if reenroll do bridge_instance_unlock_scope(cred.bridge_id)
-			restart_ok, restarted := bridge_enroll_restart_service(args)
-			if !restart_ok {
-				// The key (when delivered) was verified persisted above; a restart
-				// failure is an operational problem, not a reason to destroy it.
+				if restarted do fmt.println("  registered bridge service restarted with the new credential")
+				return true
+			case .Denied:
+				fmt.eprintln("bridge enroll FAILED: the request was denied in the browser. Nothing was written.")
+				blog_error(.enroll_failed, blog_sym(.stage, .poll), blog_sym(.reason, .denied))
 				return false
+			case .Code_Lost:
+				fmt.eprintfln("bridge enroll FAILED: the hub restarted and lost this enrollment request %d times. Nothing was written; run the command again.", reissues + 1)
+				blog_error(.enroll_failed, blog_sym(.stage, .poll), blog_sym(.reason, .expired))
+				return false
+			case .Expired:
+				now_ms := time.to_unix_nanoseconds(time.now()) / 1_000_000
+				fmt.eprintln("bridge enroll FAILED: the enrollment request expired before it was approved. Run the command again.")
+				blog_error(.enroll_failed, blog_sym(.stage, .poll), blog_sym(.reason, .expired))
+				fmt.eprintfln("  this process started waiting at %s and was told the request would expire at %s",
+					action_scheduler_format_rfc3339_utc(authorized_at_ms), action_scheduler_format_rfc3339_utc(deadline_ms))
+				fmt.eprintfln("  the Hub reported Expired at %s -- %ds after this process started waiting, against a %ds budget (waited=%ds)",
+					action_scheduler_format_rfc3339_utc(now_ms), (now_ms - authorized_at_ms) / 1000, expires_in, waited)
+				return false
+			case .Fatal:
+				return false
+			case .Slow_Down:
+				if retry_after > interval do interval = retry_after
+				else do interval += BRIDGE_ENROLL_DEFAULT_INTERVAL_SECONDS
+				fmt.printfln("enroll: hub asked us to slow down; polling every %ds", interval)
+			case .Pending:
+				// Nothing to do: wait out the next interval.
 			}
-			if restarted do fmt.println("  registered bridge service restarted with the new credential")
-			return true
-		case .Denied:
-			fmt.eprintln("bridge enroll FAILED: the request was denied in the browser. Nothing was written.")
-			blog_error(.enroll_failed, blog_sym(.stage, .poll), blog_sym(.reason, .denied))
-			return false
-		case .Expired:
-			now_ms := time.to_unix_nanoseconds(time.now()) / 1_000_000
-			fmt.eprintln("bridge enroll FAILED: the enrollment request expired before it was approved. Run the command again.")
-			blog_error(.enroll_failed, blog_sym(.stage, .poll), blog_sym(.reason, .expired))
-			fmt.eprintfln("  this process started waiting at %s and was told the request would expire at %s",
-				action_scheduler_format_rfc3339_utc(authorized_at_ms), action_scheduler_format_rfc3339_utc(deadline_ms))
-			fmt.eprintfln("  the Hub reported Expired at %s -- %ds after this process started waiting, against a %ds budget (waited=%ds)",
-				action_scheduler_format_rfc3339_utc(now_ms), (now_ms - authorized_at_ms) / 1000, expires_in, waited)
-			return false
-		case .Fatal:
-			return false
-		case .Slow_Down:
-			if retry_after > interval do interval = retry_after
-			else do interval += BRIDGE_ENROLL_DEFAULT_INTERVAL_SECONDS
-			fmt.printfln("enroll: hub asked us to slow down; polling every %ds", interval)
-		case .Pending:
-			// Nothing to do: wait out the next interval.
 		}
+		if reissue {
+			reissues += 1
+			fmt.println("")
+			fmt.printfln("bridge enroll: the hub no longer knows this request (it restarted, or the request expired unapproved); requesting a new pairing code (%d/%d)", reissues, BRIDGE_ENROLL_MAX_REISSUES)
+			continue
+		}
+		timeout_now_ms := time.to_unix_nanoseconds(time.now()) / 1_000_000
+		fmt.eprintln("bridge enroll FAILED: timed out waiting for approval. Nothing was written.")
+		blog_error(.enroll_failed, blog_sym(.stage, .poll), blog_sym(.reason, .timeout))
+		fmt.eprintfln("  this process started waiting at %s with a %ds budget (deadline %s) and gave up at %s (waited=%ds)",
+			action_scheduler_format_rfc3339_utc(authorized_at_ms), expires_in, action_scheduler_format_rfc3339_utc(deadline_ms),
+			action_scheduler_format_rfc3339_utc(timeout_now_ms), waited)
+		return false
 	}
-	timeout_now_ms := time.to_unix_nanoseconds(time.now()) / 1_000_000
-	fmt.eprintln("bridge enroll FAILED: timed out waiting for approval. Nothing was written.")
-	blog_error(.enroll_failed, blog_sym(.stage, .poll), blog_sym(.reason, .timeout))
-	fmt.eprintfln("  this process started waiting at %s with a %ds budget (deadline %s) and gave up at %s (waited=%ds)",
-		action_scheduler_format_rfc3339_utc(authorized_at_ms), expires_in, action_scheduler_format_rfc3339_utc(deadline_ms),
-		action_scheduler_format_rfc3339_utc(timeout_now_ms), waited)
-	return false
 }
 
 // bridge_enroll_token_file_from_args resolves where the credential goes, in the

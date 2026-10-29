@@ -123,3 +123,141 @@ test_enroll_config_lock_retry_takes_a_free_lock :: proc(t: ^testing.T) {
 	testing.expect(t, ok, "a free lock is taken")
 	bridge_instance_unlock(got)
 }
+
+// ===== Running-service enroll (F2): a simulated supervisor =====
+
+@(private = "file")
+Sim_Service :: struct {
+	registered:  bool,
+	running:     bool,
+	stop_fails:  bool,
+	start_fails: bool,
+	stops:       int,
+	starts:      int,
+}
+
+@(private = "file")
+sim_service_ops :: proc(s: ^Sim_Service) -> Bridge_Enroll_Service_Ops {
+	return {
+		state = s,
+		registered = proc(state: rawptr) -> (string, bool) {return "heimdall-bridge-sim", (^Sim_Service)(state).registered},
+		running = proc(state: rawptr, _: string) -> bool {return (^Sim_Service)(state).running},
+		stop = proc(state: rawptr, _: string) -> (bool, string) {
+			s := (^Sim_Service)(state)
+			s.stops += 1
+			if s.stop_fails do return false, "stop refused"
+			s.running = false
+			return true, ""
+		},
+		start = proc(state: rawptr, _: string) -> (bool, string) {
+			s := (^Sim_Service)(state)
+			s.starts += 1
+			if s.start_fails do return false, "start refused"
+			s.running = true
+			return true, ""
+		},
+	}
+}
+
+// A ceremony that succeeds hands its credential to the service through its own
+// restart (bridge_enroll_restart_service sets the flag); one that fails does not.
+@(private = "file")
+sim_ceremony_ok :: proc(_: []string) -> bool {
+	g_bridge_enroll_service_restarted = true
+	return true
+}
+
+@(private = "file")
+sim_ceremony_fails :: proc(_: []string) -> bool {return false}
+
+@(test)
+test_enroll_with_own_service_stops_and_restores_it :: proc(t: ^testing.T) {
+	sync.mutex_lock(&bridge_test_config_mutex)
+	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	args := []string{"ham-bridge", "enroll", "--hub", REPLACE_HUB, "--headless"}
+
+	// Running + success: stopped once, NOT started again here (the ceremony restarted it).
+	s := Sim_Service{registered = true, running = true}
+	ok, out := bridge_enroll_with_own_service(sim_service_ops(&s), args, sim_ceremony_ok)
+	testing.expect(t, ok)
+	testing.expect_value(t, out.stopped, "heimdall-bridge-sim")
+	testing.expect_value(t, s.stops, 1)
+	testing.expect_value(t, s.starts, 0)
+	testing.expect(t, !out.started_again)
+
+	// Running + failure: started again exactly once, left running.
+	s = Sim_Service{registered = true, running = true}
+	ok, out = bridge_enroll_with_own_service(sim_service_ops(&s), args, sim_ceremony_fails)
+	testing.expect(t, !ok)
+	testing.expect_value(t, s.stops, 1)
+	testing.expect_value(t, s.starts, 1)
+	testing.expect(t, out.started_again && s.running)
+
+	// Not running + failure: nothing stopped, nothing started.
+	s = Sim_Service{registered = true, running = false}
+	ok, out = bridge_enroll_with_own_service(sim_service_ops(&s), args, sim_ceremony_fails)
+	testing.expect(t, !ok)
+	testing.expect_value(t, s.stops, 0)
+	testing.expect_value(t, s.starts, 0)
+	testing.expect_value(t, out.stopped, "")
+
+	// Not registered: the supervisor is never touched.
+	s = Sim_Service{registered = false, running = true}
+	_, out = bridge_enroll_with_own_service(sim_service_ops(&s), args, sim_ceremony_fails)
+	testing.expect_value(t, s.stops + s.starts, 0)
+
+	// A stop that fails is not "stopped", so a failure does not start it on top.
+	s = Sim_Service{registered = true, running = true, stop_fails = true}
+	_, out = bridge_enroll_with_own_service(sim_service_ops(&s), args, sim_ceremony_fails)
+	testing.expect_value(t, s.stops, 1)
+	testing.expect_value(t, s.starts, 0)
+
+	// The start after a failure fails: reported, tried once.
+	s = Sim_Service{registered = true, running = true, start_fails = true}
+	ok, out = bridge_enroll_with_own_service(sim_service_ops(&s), args, sim_ceremony_fails)
+	testing.expect(t, !ok)
+	testing.expect_value(t, s.starts, 1)
+	testing.expect(t, out.restart_failed && !out.started_again)
+}
+
+// ===== Device code lost on a hub restart (REQ-ENR-12) =====
+
+@(test)
+test_enroll_reissues_a_lost_or_expired_device_code :: proc(t: ^testing.T) {
+	testing.expect(t, bridge_enroll_code_lost("1730000000000000001", "1730000099000000002"), "a new grant-store epoch: the code is gone")
+	testing.expect(t, !bridge_enroll_code_lost("1730000000000000001", "1730000000000000001"))
+	testing.expect(t, !bridge_enroll_code_lost("", "1730000000000000001"), "an older hub's authorize carried no epoch")
+	testing.expect(t, !bridge_enroll_code_lost("1730000000000000001", ""), "an older hub's poll carried no epoch")
+
+	S :: Bridge_Enroll_Poll_Status
+	testing.expect(t, bridge_enroll_should_reissue(S.Code_Lost, 0))
+	testing.expect(t, bridge_enroll_should_reissue(S.Expired, 0))
+	testing.expect(t, bridge_enroll_should_reissue(S.Code_Lost, BRIDGE_ENROLL_MAX_REISSUES - 1))
+	testing.expect(t, !bridge_enroll_should_reissue(S.Code_Lost, BRIDGE_ENROLL_MAX_REISSUES), "bounded")
+	testing.expect(t, !bridge_enroll_should_reissue(S.Expired, BRIDGE_ENROLL_MAX_REISSUES), "bounded")
+	for s in ([?]S{.Pending, .Approved, .Denied, .Slow_Down, .Fatal}) {
+		testing.expectf(t, !bridge_enroll_should_reissue(s, 0), "%v is not recovered by a new code", s)
+	}
+}
+
+// ===== Vault key never delivered (F7, legacy hub) =====
+
+@(test)
+test_enroll_vault_key_timeout_marks_needs_reenrollment :: proc(t: ^testing.T) {
+	dir := fmt.tprintf("/tmp/enroll-vkt-%d", os.get_pid())
+	_ = os.remove_all(dir)
+	testing.expect(t, os.make_directory_all(dir) == nil)
+	defer os.remove_all(dir)
+	config := strings.concatenate({dir, "/config.toml"}, context.temp_allocator)
+	hint := bridge_enroll_mark_vault_key_timeout(config, REPLACE_HUB, "brg_vkt")
+	m, ok := bridgesvc.read_reenroll_marker(dir)
+	testing.expect(t, ok, "the profile is marked")
+	testing.expect_value(t, m.reason, "vault_key_timeout")
+	testing.expect_value(t, m.bridge_id, "brg_vkt")
+	testing.expect_value(t, m.hint, hint)
+	testing.expect(t, strings.contains(hint, config) && strings.contains(hint, REPLACE_HUB), "the retry command names this profile")
+	// A successful (re-)enrollment clears it before the service restarts.
+	bridge_reenroll_clear(config)
+	_, ok = bridgesvc.read_reenroll_marker(dir)
+	testing.expect(t, !ok)
+}

@@ -35,6 +35,8 @@ Bridge_Token_Data :: struct {
 	refresh_expires_in:      int,
 	vault_delivery_expected: bool,
 	enrollment_pending:      bool,
+	// The hub's grant-store lifetime id (device-grant polls only; "" from older hubs).
+	grant_epoch:             string,
 }
 
 // bridge_token_response_decode_checked reads a token reply inside the API envelope
