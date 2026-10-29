@@ -3,6 +3,7 @@ import * as daemonApi from '../api/daemonApi';
 import { storeKnownAgents } from '../api/agentCatalog';
 import { agentsApi } from '../api/endpoints/agents';
 import { chatEndpoints } from '../api/endpoints/chats';
+import { desktopCapabilities } from '../bridge/desktopBridge';
 
 const DEFAULT_DAEMON_URL = 'http://127.0.0.1:49322';
 const DEFAULT_USER_ID = '';
@@ -340,7 +341,7 @@ function getAgentIdFromPayload(payload: any, selectedAgentId: string): string {
   return selectedAgentId;
 }
 
-const odinDaemonUrl = typeof window !== 'undefined' ? (window as any).odinApi?.daemonUrl : undefined;
+const odinDaemonUrl = desktopCapabilities().daemonUrl || undefined;
 const initialDaemonUrl = normalizeDaemonUrl(odinDaemonUrl || getStoredValue('odin.daemonUrl', DEFAULT_DAEMON_URL)) || DEFAULT_DAEMON_URL;
 
 const initialState = {

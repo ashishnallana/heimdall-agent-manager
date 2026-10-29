@@ -278,6 +278,20 @@ export const bridgeSupportApi = heimdallApi.injectEndpoints({
       },
       invalidatesTags: (_result, _error, { bridgeId }) => [{ type: 'Bridges' as const, id: 'LIST' }, { type: 'Bridges' as const, id: bridgeId }],
     }),
+    // REQ-ENR-10: ask a live bridge to uninstall itself (ham-bridge uninstall,
+    // which revokes it and wipes its secrets). An offline bridge answers 422:
+    // revoke it instead.
+    uninstallBridge: build.mutation<any, { bridgeId: string; purge?: boolean }>({
+      queryFn: async ({ bridgeId, purge }) => {
+        try {
+          const data = await cookieMutation(`/bridges/${encodeURIComponent(bridgeId)}/uninstall`, 'POST', { purge: purge !== false });
+          return { data };
+        } catch (error: any) {
+          return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any };
+        }
+      },
+      invalidatesTags: (_result, _error, { bridgeId }) => [{ type: 'Bridges' as const, id: 'LIST' }, { type: 'Bridges' as const, id: bridgeId }],
+    }),
     updateBridge: build.mutation<any, { bridgeId: string; targetVersion?: string; force?: boolean; drainTimeoutSeconds?: number; updateExtensions?: boolean }>({
       queryFn: async ({ bridgeId, targetVersion, force, drainTimeoutSeconds, updateExtensions }) => {
         try {
@@ -388,6 +402,7 @@ export const {
   useListBridgeEventsQuery,
   usePurgeBridgeEventsMutation,
   useUpdateBridgeMutation,
+  useUninstallBridgeMutation,
   useInstallProviderExtensionMutation,
   useGetProviderExtensionInstallQuery,
   useListBridgeProvidersQuery,

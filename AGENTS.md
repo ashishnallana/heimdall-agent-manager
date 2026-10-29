@@ -514,7 +514,9 @@ All of the following element types must have `data-debug-id`:
 | `RecoveryRestoreForm` | `device-recovery-restore-open-btn`, `device-recovery-restore`, `device-recovery-restore-words-input`, `device-recovery-restore-submit-btn`, `device-recovery-restore-cancel-btn`, `device-recovery-restore-error`, `device-recovery-restore-done`, `device-recovery-restore-devices-link` |
 | `VaultResetBanner` | `vault-reset-banner`, `vault-reset-banner-cancel-btn`, `vault-reset-banner-error`, `vault-stale-head-banner`, `vault-stale-head-confirm-btn`, `vault-stale-head-error`, `vault-pending-devices-banner` |
 | `ShortcutCheatsheetModal` / `ChordHud` | `shortcut-cheatsheet-modal`, `shortcut-cheatsheet-modal-close-btn`, `shortcut-cheatsheet-action-${actionId}`, `shortcut-chord-hud` |
-| `BridgesPanel` | `settings-bridge-plan-upgrade-${bridgeId}` |
+| `BridgesPanel` | `settings-bridge-plan-upgrade-${bridgeId}`, `settings-bridge-uninstall-btn-${bridgeId}`, `settings-bridge-uninstall-confirm-${bridgeId}`, `settings-bridge-uninstall-cancel-${bridgeId}` (uninstall/revoke controls render only in Electron, when `window.odinApi.bridgeManager` exists; the web panel offers Update + Rename only) |
+| `ThisMachineCard` (Electron only, top of `BridgesPanel`) | `settings-this-machine-card`, `settings-this-machine-status`, `settings-this-machine-version`, `settings-this-machine-hub`, `settings-this-machine-hub-edit`, `settings-this-machine-hub-input`, `settings-this-machine-hub-save`, `settings-this-machine-hub-cancel`, `settings-this-machine-profile-input`, `settings-this-machine-reenroll-hint`, `settings-this-machine-setup-btn`, `settings-this-machine-update-btn`, `settings-this-machine-reenroll-btn`, `settings-this-machine-uninstall-btn`, `settings-this-machine-cancel-btn`, `settings-this-machine-error`, `settings-this-machine-operation`, `settings-this-machine-confirm-${kind}`, `settings-this-machine-confirm-ok`, `settings-this-machine-confirm-cancel`, `settings-this-machine-purge`, `settings-bridge-wizard`, `settings-bridge-wizard-progress`, `settings-bridge-wizard-step-${step}`, `settings-bridge-wizard-recoveries-${step}`, `settings-bridge-wizard-pairing`, `settings-bridge-wizard-copy-code`, `settings-bridge-wizard-open-log-${step}`, `settings-bridge-wizard-result`, `settings-bridge-wizard-retry`, `settings-bridge-wizard-replace-account`, `settings-bridge-log-toggle`, `settings-bridge-log` |
+| `SidebarUpdateBadge` | `shell-bridge-status-control`, `shell-bridge-status-btn`, `shell-bridge-status-popover`, `shell-bridge-check-update-btn`, `shell-bridge-update-available-btn`, `shell-bridge-manage-btn` (opens Settings > Bridges), `shell-bridge-operation-error` |
 | `RuntimeConfigurationOptions` | `${debugPrefix}-bridge-plan-upgrade`, `${debugPrefix}-model-refresh-btn`, `${debugPrefix}-model-catalog-status` |
 | `ModelCatalogRefresh` in fleet rows | `fleet-${agentId}-${bridgeId}-model-refresh-btn`, `fleet-${agentId}-${bridgeId}-model-catalog-status` |
 | `ExtensionBadges` | `provider-extension-badge-${provider}`, `provider-extension-help-${provider}`, `provider-extension-install-hint-${provider}`, `provider-extension-install-copy-btn-${provider}`, `conversation-signal-badge`, `conversation-signal-badge-btn` |
@@ -543,9 +545,10 @@ All of the following element types must have `data-debug-id`:
 
 ### Provider extension installation controls
 
+The web app no longer installs provider extensions; `ham-bridge setup` / `ham-bridge update` does. The manual install hint and copy button live in `ExtensionBadges` (above).
+
 | Component | Debug IDs |
 | --- | --- |
-| `ProviderExtensionInstallAction` | `provider-extension-action-${provider}`, `provider-extension-install-btn-${provider}`, `provider-extension-retry-btn-${provider}`, `provider-extension-progress-${provider}` |
 | `BridgesPanel` | `settings-bridge-update-extensions` |
 
 ### Adding new elements

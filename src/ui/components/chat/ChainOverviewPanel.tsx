@@ -55,7 +55,7 @@ function workHolder(task: any): string {
 
 function canUseAmbientApiAuth(): boolean {
   if (typeof window === 'undefined') return false;
-  return Boolean((window as any).odinApi?.deviceAuth) || window.location.protocol === 'http:' || window.location.protocol === 'https:';
+  return window.location.protocol === 'http:' || window.location.protocol === 'https:';
 }
 
 function getArtifactViewerSession(session: any) {

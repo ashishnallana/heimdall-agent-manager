@@ -33,7 +33,7 @@ place.
 
 ```bash
 ham-bridge setup --hub https://hub.example.com [--profile work] \
-  [--new-bridge | --reuse-bridge brg_...] [--reenroll] [--headless] [--json-progress]
+  [--new-bridge | --reuse-bridge brg_...] [--reenroll] [--replace-other-account] [--headless] [--no-tray] [--json-progress]
 ```
 
 Installs from the bundle the running `ham-bridge` ships in (the directory of the
@@ -47,10 +47,16 @@ executable). Steps, in order:
 | `config` | writes `config.toml` only when missing, `hub-url`, `profile`; refuses a state dir of another hub | previous files restored |
 | `ports` | allocate / keep the profile's ports | previous `ports.json` restored |
 | `service` | renders the service file **on every run** and registers it (daemon-reload + enable / `schtasks /Create /F`) | previous file restored, re-registered |
-| `enroll` | runs `bin/ham-bridge enroll` unless already enrolled (`skipped`); `--new-bridge`, `--reenroll` (re-pairs the credential's own bridge, e.g. after it was revoked; used by the desktop app's Re-enroll), or `--reuse-bridge` naming another bridge than the current credential's, forces it | kept (credential stays valid; a re-run reuses it) |
+| `enroll` | runs `bin/ham-bridge enroll` unless already enrolled (`skipped`), passing `--replace-other-account` through; `--new-bridge`, `--reenroll` (re-pairs the credential's own bridge, e.g. after it was revoked; used by the desktop app's Re-enroll), or `--reuse-bridge` naming another bridge than the current credential's, forces it | kept (credential stays valid; a re-run reuses it) |
 | `extensions` | copies the bundle's `share/heimdall/extensions` to `<data dir>/extensions` (previous copy kept as `extensions.bak`), then for every detected provider (claude, codex, antigravity) installs or repairs the Heimdall extension: a registration from another source, outdated, disabled/errored or half-installed (marketplace without plugin) is removed (`plugin uninstall`/`remove` + `marketplace remove`) and added again from the bundle, then verified; one `progress` event per provider. A provider still failing after self-heal is reported in the step message and does not roll back the install. `ham-bridge extensions sync [--data-dir D] [--source S] [--json-progress]` runs the same work after an update | bundle copy restored from `extensions.bak`; provider registrations are left as repaired |
 | `start` | restart if running, else start; on macOS a restart is `bootout` + `bootstrap` so launchd re-reads the re-rendered plist | service stopped |
 | `verify` | waits up to 45 s for `running && connected` (from the token-free status), counting only a `runtime-status.json` written after the (re)start by a process other than the replaced bridge | service stopped |
+
+After a successful run setup installs the tray (see [`ham-bridge tray`](#ham-bridge-tray)) and
+reports it as one more `tray` event (`ok`, `skipped` with the reason, or `warning`); the
+tray never fails or rolls back setup. On Windows `binaries` stops a running tray of the
+profile (it keeps `bin\` busy) and the end of setup, or its rollback, starts it again; on
+Linux/macOS the tray keeps running and relaunches itself from the new binary.
 
 When a step fails with a **known** failure the engine remediates and retries it (at
 most 2 times), reporting every attempt:
@@ -189,7 +195,7 @@ plus state `warning`):
 |---|---|
 | `revoke` | the hub revokes the bridge, called with the bridge's own token (`POST /api/v1/bridge/self/revoke`), read before anything is deleted. An unreachable hub is retried, then a `warning` (revoke it in Settings -> Devices); local secrets are wiped anyway |
 | `stop` | stops the service and waits for the bridge pid; remediation: stop again, TERM, then KILL. The pid from `runtime-status.json` is used only when it is a `ham-bridge*` process (`/proc/<pid>/comm`, `ps -o comm=`, `Get-Process .Path`), or, when the OS cannot say, while the service runs: a stale file's reused pid is never waited on or signalled |
-| `unregister` | systemd `disable` + unit file + `daemon-reload`; launchd `bootout` + plist; `schtasks /Delete`; runit service dir |
+| `unregister` | the tray: its login entry (XDG autostart file / tray LaunchAgent / HKCU Run value) and the running tray process; then systemd `disable` + unit file + `daemon-reload`; launchd `bootout` + plist; `schtasks /Delete`; runit service dir |
 | `secrets` | access/refresh token files, `.pending-rotation-v1`, refresh request and marker files, the vault keyring, identity record and epoch floor in Keychain / Credential Manager / kernel keyring (private files on Linux), the per-scope vault dir |
 | `extensions` | `<data>/extensions{,.bak,.new}` |
 | `caches` | `.staging`, `run/`, `cache/`, `bootstrap-cache/`, `updates/`, `run.cmd`, `task.xml` |
@@ -214,6 +220,50 @@ offline bridge 422 — revoke it instead) sends `{"type":"bridge_uninstall","com
 in a session of its own, which revokes it on the hub and wipes it. Every request is
 audit-logged: `ham-hub bridge_uninstall outcome=dispatched|denied|offline|failed
 bridge_id= user_id= command_id= request_id= detail=`.
+
+## `ham-bridge tray`
+
+```bash
+ham-bridge tray [--hub URL [--profile P] | --service NAME]
+```
+
+The bridge-owned system tray (REQ-ENR-6). It is the installed `bin/ham-bridge`, one
+process per profile; Electron has no tray of its own.
+
+| OS | native API | login entry (written by `setup`, removed by `uninstall`) |
+|---|---|---|
+| Linux | StatusNotifierItem via `libayatana-appindicator3` (or `libappindicator3`) + GTK 3, loaded at runtime (XEmbed fallback when no SNI watcher runs) | `~/.config/autostart/<service>-tray.desktop` |
+| macOS | `NSStatusItem` (Accessory app: no Dock icon) | `~/Library/LaunchAgents/<service>.tray.plist` (`LimitLoadToSessionType=Aqua`, `AbandonProcessGroup` so Uninstall outlives the tray) |
+| Windows | `Shell_NotifyIconW` (retried up to 2 min at login until the taskbar accepts it) | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` value `<service>-tray`: `"conhost.exe" "--headless" "<bin>\ham-bridge.exe" "tray" ...`, so no console window opens and the helpers the tray runs share its hidden console |
+
+setup installs it only on a desktop session: Linux with `DISPLAY`, `WAYLAND_DISPLAY` or
+`XDG_SESSION_TYPE=x11|wayland`; macOS/Windows unless run over SSH (Windows: inside an
+interactive `SESSIONNAME`). Never on Termux or with `--no-tray`. `--headless` is not a
+signal (it only skips the browser approval; `update` passes it).
+
+The tray polls the token-free status (the same as `ham-bridge status --json`) every
+2 s, so a change shows within seconds. Status line: `Connected`, `Vault locked`,
+`Offline (bridge stopped)`, `Offline (hub unreachable)`, `Needs re-enrollment`,
+`Not enrolled`. Menu entries run ham-bridge commands:
+
+| entry | runs |
+|---|---|
+| Open Heimdall | opens the hub URL (`xdg-open` / `open` / `explorer.exe`) |
+| Update | opens `<hub>/settings/bridges` (the hub-initiated update stages the release and runs `ham-bridge update --bundle`); a local `update --version` belongs to the bootstraps (w5) |
+| Restart | `ham-bridge service restart --service <name>` |
+| Re-enroll | `ham-bridge setup --hub <hub> [--profile P] --new-bridge` (browser approval) |
+| View logs | opens `<data dir>/logs` |
+| Uninstall... | after a native yes/no confirmation: `ham-bridge uninstall --service <name> --keep-data --yes` (removes every credential and secret, the service and this tray); the tray exits first |
+| Close tray | exits the tray; the bridge keeps running |
+
+The running tray records its pid in `<data dir>/run/tray.pid`; a second start for the
+same profile exits. A desktop without a tray host (no libayatana, no display, no
+taskbar) logs why and exits `0`, so the login entry does not respawn it.
+
+When an update replaces `bin/ham-bridge` (two polls agree on the new size/mtime) the tray
+relaunches itself from it: `execv` in place on Linux/macOS (same pid, login session and
+launchd job), a new process on Windows, where the update's restart from the bridge's
+Scheduled Task (`InteractiveToken`) has normally already brought it back.
 
 ## `ham-bridge update`
 

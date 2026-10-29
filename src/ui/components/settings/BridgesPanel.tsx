@@ -6,9 +6,12 @@ import {
   useListBridgesQuery,
   useRenameBridgeMutation,
   useRevokeBridgeMutation,
+  useUninstallBridgeMutation,
   useUpdateBridgeMutation,
   useUpdateBridgeTelemetryMutation,
 } from '../../api/endpoints/bridgeSupport';
+import { desktopBridgeManager } from '../../bridge/desktopBridge';
+import ThisMachineCard from './ThisMachineCard';
 import {
   useFetchTelemetryDefaultEnabledQuery,
   useSaveTelemetryDefaultEnabledMutation,
@@ -30,12 +33,16 @@ import {
 import BridgeRecentErrorsCard from './BridgeRecentErrorsCard';
 import PendingEnrollmentsCard from './PendingEnrollmentsCard';
 
-// UI-11: Settings → Bridges. The user's machines (arch doc §6A).
-// List shows status dot, label, hostname/OS/arch, capabilities, instance count.
-// Enrollment starts on the machine with `ham-bridge enroll`; this screen is an
-// inventory and management surface only. Archive maps to the Hub's revocation
-// operation: credentials die, the live socket closes, and the durable row remains.
+// UI-11 / REQ-ENR-8..11: Settings → Bridges, the one place bridges are set up
+// and managed (F29). Desktop app: a "This machine" card (setup wizard, or
+// Update / Re-enroll / Uninstall) and the other bridges with Update and
+// Uninstall (a live bridge uninstalls itself via bridge_uninstall; an offline
+// one can only be revoked). Web app: the installed bridges with Update only.
 export default function BridgesPanel() {
+  const manager = useMemo(() => desktopBridgeManager(), []);
+  const [localBridgeId, setLocalBridgeId] = useState('');
+  const [uninstallBridge] = useUninstallBridgeMutation();
+  const [uninstallConfirmId, setUninstallConfirmId] = useState('');
   const entitlements = useEntitlements();
   const bridgesQuery = useListBridgesQuery(undefined);
   const [renameBridge] = useRenameBridgeMutation();
@@ -47,7 +54,6 @@ export default function BridgesPanel() {
 
   const [renamingId, setRenamingId] = useState('');
   const [renameValue, setRenameValue] = useState('');
-  const [archiveConfirmId, setArchiveConfirmId] = useState('');
   const [actionError, setActionError] = useState('');
 
   // Update modal state
@@ -58,7 +64,27 @@ export default function BridgesPanel() {
   const [updateBusy, setUpdateBusy] = useState(false);
   const [updateError, setUpdateError] = useState('');
 
-  const bridges: Bridge[] = (bridgesQuery.data?.bridges || []).filter((b: Bridge) => String(b?.status || b?.runtime_status || '').toLowerCase() !== 'revoked');
+  const bridges: Bridge[] = (bridgesQuery.data?.bridges || [])
+    .filter((b: Bridge) => String(b?.status || b?.runtime_status || '').toLowerCase() !== 'revoked')
+    // The desktop app shows its own machine in the "This machine" card.
+    .filter((b: Bridge) => !localBridgeId || String(b?.bridge_id || b?.bridgeId || b?.id || '') !== localBridgeId);
+
+  function bridgeOnline(bridge: Bridge): boolean {
+    const status = String(bridge?.status || bridge?.runtime_status || '').toLowerCase();
+    return bridge.runtime_connected === true || status === 'online' || status === 'connected';
+  }
+
+  async function handleUninstall(bridge: Bridge, bridgeId: string) {
+    setActionError('');
+    try {
+      // An offline bridge cannot run its own uninstall: revoke it instead.
+      if (bridgeOnline(bridge)) await uninstallBridge({ bridgeId, purge: true }).unwrap();
+      else await revokeBridge({ bridgeId }).unwrap();
+      setUninstallConfirmId('');
+    } catch (err: any) {
+      setActionError(String(err?.error || err?.message || 'Uninstall failed'));
+    }
+  }
 
   function statusTone(bridge: Bridge): Tone {
     if (bridge.plan_disabled_at) return 'warning';
@@ -87,15 +113,6 @@ export default function BridgesPanel() {
       setRenamingId('');
     } catch (err: any) {
       setActionError(String(err?.message || 'Rename failed'));
-    }
-  }
-
-  async function handleArchive(bridgeId: string) {
-    try {
-      await revokeBridge({ bridgeId }).unwrap();
-      setArchiveConfirmId('');
-    } catch (err: any) {
-      setActionError(String(err?.message || 'Archive failed'));
     }
   }
 
@@ -139,9 +156,12 @@ export default function BridgesPanel() {
   return (
     <PageShell
       title="Bridges"
-      description="Your connected machines. Archiving permanently revokes access and disconnects the bridge."
+      description={manager
+        ? 'Set up this machine and manage every bridge: update, re-enroll or uninstall.'
+        : 'Your installed bridges. Set up or uninstall a bridge from the Heimdall desktop app or with ham-bridge on that machine.'}
     >
       <div data-debug-id="settings-bridges-panel" className="min-w-0">
+      {manager ? <ThisMachineCard manager={manager} onBridgeId={setLocalBridgeId} /> : null}
       {bridgesQuery.isError ? <div data-debug-id="settings-bridges-load-error" className="mt-3 rounded-xl border border-danger/30 bg-danger-soft px-3 py-2 text-sm text-danger">Unable to load bridges. Check that you are signed in and the Hub is reachable.</div> : null}
       {actionError ? <div data-debug-id="settings-bridges-error" className="mt-3 rounded-xl border border-danger/30 bg-danger-soft px-3 py-2 text-sm text-danger">{actionError}</div> : null}
 
@@ -168,7 +188,7 @@ export default function BridgesPanel() {
 
       {/* Bridge list */}
       <div data-debug-id="settings-bridges-list" className="mt-4">
-        <Text as="div" role="overline" tone="muted" className="mb-2">Bridges ({bridges.length})</Text>
+        <Text as="div" role="overline" tone="muted" className="mb-2">{manager ? 'Other bridges' : 'Installed bridges'} ({bridges.length})</Text>
         <p data-debug-id="settings-bridges-usage" className="mb-2 text-xs text-muted">{bridges.filter((b) => !b.plan_disabled_at).length} of {entitlements.max_bridges < 0 ? 'unlimited' : entitlements.max_bridges} bridges enabled</p>
         {bridgesQuery.isFetching && bridges.length === 0 ? <div className="text-sm text-muted">Loading bridges…</div> : null}
         {bridges.length === 0 && !bridgesQuery.isFetching ? (
@@ -178,7 +198,8 @@ export default function BridgesPanel() {
             {bridges.map((bridge: Bridge) => {
               const id = String(bridge?.bridge_id || bridge?.bridgeId || bridge?.id || '');
               const isRenaming = renamingId === id;
-              const isArchiving = archiveConfirmId === id;
+              const isUninstalling = uninstallConfirmId === id;
+              const online = bridgeOnline(bridge);
               const isReady = bridgeReady(bridge);
               const status = statusLabel(bridge);
               const isUpdating = isBridgeUpdating(bridge);
@@ -319,10 +340,12 @@ export default function BridgesPanel() {
                           <Button variant="primary" size="sm" data-debug-id={`settings-bridge-rename-save-${id}`} onClick={() => void handleSaveRename(id)}>Save</Button>
                           <Button variant="secondary" size="sm" data-debug-id={`settings-bridge-rename-cancel-${id}`} onClick={() => setRenamingId('')}>Cancel</Button>
                         </>
-                      ) : isArchiving ? (
+                      ) : isUninstalling ? (
                         <>
-                          <Button variant="danger" size="sm" data-debug-id={`settings-bridge-archive-confirm-${id}`} onClick={() => void handleArchive(id)}>Archive permanently</Button>
-                          <Button variant="secondary" size="sm" data-debug-id={`settings-bridge-archive-cancel-${id}`} onClick={() => setArchiveConfirmId('')}>Cancel</Button>
+                          <Button variant="danger" size="sm" data-debug-id={`settings-bridge-uninstall-confirm-${id}`} onClick={() => void handleUninstall(bridge, id)}>
+                            {online ? 'Uninstall and wipe secrets' : 'Revoke offline bridge'}
+                          </Button>
+                          <Button variant="secondary" size="sm" data-debug-id={`settings-bridge-uninstall-cancel-${id}`} onClick={() => setUninstallConfirmId('')}>Cancel</Button>
                         </>
                       ) : (
                         <>
@@ -343,7 +366,17 @@ export default function BridgesPanel() {
                             Update
                           </Button>
                           <Button variant="secondary" size="sm" data-debug-id={`settings-bridge-rename-btn-${id}`} onClick={() => { setRenamingId(id); setRenameValue(bridge?.label || ''); }}>Rename</Button>
-                          <Button variant="danger" size="sm" data-debug-id={`settings-bridge-archive-btn-${id}`} onClick={() => setArchiveConfirmId(id)}>Archive</Button>
+                          {manager ? (
+                            <Button
+                              variant="danger"
+                              size="sm"
+                              data-debug-id={`settings-bridge-uninstall-btn-${id}`}
+                              title={online ? 'Uninstall the bridge on that machine and wipe its secrets' : 'The bridge is offline: revoke it on the Hub'}
+                              onClick={() => setUninstallConfirmId(id)}
+                            >
+                              {online ? 'Uninstall' : 'Revoke'}
+                            </Button>
+                          ) : null}
                         </>
                       )}
                     </div>

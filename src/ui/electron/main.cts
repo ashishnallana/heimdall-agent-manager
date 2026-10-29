@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, nativeImage, Menu, shell, Tray, clipboard, session, Notification } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, nativeImage, Menu, shell, session, Notification } = require('electron');
 const fs = require('fs');
 const path = require('path');
 
@@ -14,7 +14,7 @@ const appIcon = (() => {
   }
 })();
 const bridgeManager = require('./bridgeManager.cjs');
-const { allowedExternalUrl, allowedPairingUrl, classifyNavigation, idpOriginFromAuthConfig, isAuthStartUrl, oidcWindowNavigationAllowed } = require('./externalUrl.cjs');
+const { trustedIpcSender, allowedExternalUrl, allowedPairingUrl, classifyNavigation, idpOriginFromAuthConfig, isAuthStartUrl, oidcWindowNavigationAllowed } = require('./externalUrl.cjs');
 const desktopUpdater = require('./desktopUpdater.cjs');
 const { installNotifications } = require('./notifications.cjs');
 
@@ -22,13 +22,35 @@ function normalizeBaseUrl(value: string): string {
   return String(value || '').trim().replace(/\/$/, '');
 }
 
-function configuredHubApiBaseUrl(): string {
+function defaultHubApiBaseUrl(): string {
   return normalizeBaseUrl(
     process.env.HEIMDALL_HUB_API_URL ||
     process.env.HEIMDALL_HUB_URL ||
     // Default to the public Hub API, not the outpost/dev-proxy browser URL.
     (app.isPackaged ? 'https://hub.brolabs.ai' : 'http://127.0.0.1:8081')
   );
+}
+
+// F28: self-hosters point the Bridge at their own Hub. The choice is stored
+// with the app's settings; the environment/default applies until one is saved.
+function bridgeSettingsPath(): string {
+  return path.join(app.getPath('userData'), 'bridge-settings.json');
+}
+
+function configuredHubApiBaseUrl(): string {
+  try {
+    const saved = bridgeManager.normalizeHubUrl(JSON.parse(fs.readFileSync(bridgeSettingsPath(), 'utf8'))?.hubUrl || '');
+    if (saved) return saved;
+  } catch (_err) { /* No saved Hub URL. */ }
+  return defaultHubApiBaseUrl();
+}
+
+function saveHubApiBaseUrl(value: string): string {
+  const hubUrl = value ? bridgeManager.normalizeHubUrl(value) : '';
+  if (value && !hubUrl) throw new Error('Enter an http(s) Hub URL, e.g. https://hub.example.com.');
+  fs.mkdirSync(path.dirname(bridgeSettingsPath()), { recursive: true });
+  fs.writeFileSync(bridgeSettingsPath(), `${JSON.stringify({ hubUrl }, null, 2)}\n`, { mode: 0o600 });
+  return configuredHubApiBaseUrl();
 }
 
 function configuredUiOrigin(): string {
@@ -65,23 +87,8 @@ const isDev = Boolean(process.env.VITE_DEV_SERVER_URL);
 
 let authWindow: any = null;
 let mainWindow: any = null;
-let statusTray: any = null;
-let trayRefreshTimer: NodeJS.Timeout | null = null;
-let userRefreshTimer: NodeJS.Timeout | null = null;
-let isQuitting = false;
-let authenticatedUserLabel = '';
-let trayOperationMessage = '';
-let trayPairing: { code: string; url: string } | null = null;
-// REQ-ENROLL-LOG-1: the last failed enrollment's log, offered in the tray menu.
-let trayEnrollmentLog = '';
 // Identity provider origin from GET /api/v1/auth/config, used to route sign-out.
 let idpOrigin = '';
-let desktopUpdateState: any = { phase: 'disabled', version: '', percent: 0, message: '' };
-const LOGIN_ITEM_PREFERENCE_MARKER = 'login-item-preference-configured';
-
-function supportsStatusTray(): boolean {
-  return process.platform === 'darwin' || process.platform === 'win32';
-}
 
 function openOidcWindow(url: string, owner: any) {
   // REQ-OIDC-DESKTOP-1: OIDC runs in a preload-free window which shares the
@@ -154,15 +161,9 @@ function createWindow() {
   });
   mainWindow = win;
 
-  // REQ-MAC-TRAY-1 / REQ-WIN-TRAY-1: closing the visible UI leaves the
-  // lightweight tray controller running. The independently managed Bridge
-  // LaunchAgent/Scheduled Task is not coupled to either window or tray lifetime.
-  win.on('close', (event: any) => {
-    if (!supportsStatusTray() || isQuitting) return;
-    event.preventDefault();
-    win.hide();
-    app.dock?.hide();
-  });
+  // REQ-ENR-6: the system tray belongs to the Bridge (`ham-bridge tray`), not
+  // to this app. Closing the window closes it; the Bridge service is
+  // independent of the app's lifetime and keeps running.
   win.on('closed', () => { if (mainWindow === win) mainWindow = null; });
 
   const forceWindowTitle = () => {
@@ -243,265 +244,6 @@ const desktopNotifications = installNotifications({
   uiUrl: isDev ? process.env.VITE_DEV_SERVER_URL : configuredUiOrigin(),
 });
 
-function trayStatus(status: any): { label: string; symbol: string } {
-  if (status?.busy) return { label: 'Bridge configuring…', symbol: '…' };
-  if (!status?.installed) return { label: 'Bridge not installed', symbol: '–' };
-  if (!status?.enrolled) return { label: 'Bridge enrollment required', symbol: '!' };
-  if (status.serviceState === 'running') return { label: 'Bridge online', symbol: '●' };
-  return { label: 'Bridge offline', symbol: '○' };
-}
-
-function loginItemEnabled(): boolean {
-  try { return Boolean(app.getLoginItemSettings().openAtLogin); }
-  catch (_err) { return false; }
-}
-
-function wasOpenedAtLogin(): boolean {
-  if (process.platform === 'win32') return process.argv.includes('--background');
-  if (process.platform !== 'darwin') return false;
-  try {
-    const settings = app.getLoginItemSettings();
-    return Boolean(settings.wasOpenedAtLogin || settings.wasOpenedAsHidden);
-  } catch (_err) { return false; }
-}
-
-function setLaunchAtLogin(enabled: boolean) {
-  if (!supportsStatusTray() || !app.isPackaged) return;
-  try {
-    const loginSettings = process.platform === 'win32'
-      ? { openAtLogin: enabled, path: process.execPath, args: ['--background'] }
-      : {
-          openAtLogin: enabled,
-          // Supports the intended behavior on macOS 12 and earlier. On macOS
-          // 13+ Electron reports `wasOpenedAtLogin`, which suppresses the window.
-          openAsHidden: true,
-        };
-    app.setLoginItemSettings(loginSettings);
-    const recordedSettings = app.getLoginItemSettings();
-    const requestWasRecorded = !enabled || recordedSettings.openAtLogin || recordedSettings.status === 'enabled' || recordedSettings.status === 'requires-approval';
-    if (requestWasRecorded) {
-      const marker = path.join(app.getPath('userData'), LOGIN_ITEM_PREFERENCE_MARKER);
-      fs.mkdirSync(path.dirname(marker), { recursive: true });
-      fs.writeFileSync(marker, '1\n');
-    }
-  }
-  catch (error) { console.warn('[heimdall] unable to change login-item setting:', error); }
-}
-
-function ensureDefaultLaunchAtLogin() {
-  if (!supportsStatusTray() || !app.isPackaged) return;
-  const marker = path.join(app.getPath('userData'), LOGIN_ITEM_PREFERENCE_MARKER);
-  if (!fs.existsSync(marker)) setLaunchAtLogin(true);
-}
-
-function updateAuthenticatedUser(identity: any) {
-  const clean = (value: any) => String(value || '').replace(/[\r\n\t]+/g, ' ').trim().slice(0, 160);
-  authenticatedUserLabel = identity && typeof identity === 'object'
-    ? clean(identity.display_name || identity.name || identity.email || identity.user_id)
-    : '';
-  refreshTrayStatus();
-}
-
-async function refreshIdpOrigin() {
-  try {
-    const response = await session.defaultSession.fetch(`${configuredUiOrigin()}/api/v1/auth/config`);
-    if (!response.ok) return;
-    const next = idpOriginFromAuthConfig(await response.json());
-    if (next) idpOrigin = next;
-  } catch (_err) { /* Sign-in still routes through the /api/v1/auth/login redirect chain. */ }
-}
-
-async function refreshAuthenticatedUserFromSession() {
-  try {
-    const response = await session.defaultSession.fetch(`${configuredUiOrigin()}/api/v1/me`, { credentials: 'include' });
-    if (response.status === 401 || response.status === 403) { updateAuthenticatedUser(null); return; }
-    if (!response.ok) return;
-    const body = await response.json();
-    updateAuthenticatedUser(body?.data || null);
-  } catch (_err) { /* The renderer will synchronize identity after a successful OIDC check. */ }
-}
-
-function handleEnrollmentEvent(rawPayload: any) {
-  // REQ-EXT-URL-1: only open (or show) an approval page on this Hub's origins.
-  let payload = rawPayload;
-  if (payload?.type === 'pairing') {
-    const url = allowedPairingUrl(payload.url, [configuredHubApiBaseUrl(), configuredUiOrigin()]);
-    payload = url && payload.code
-      ? { ...payload, url }
-      : { type: 'error', message: 'Bridge enrollment printed an approval page outside this Hub; it was not opened.' };
-  }
-  if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
-    mainWindow.webContents.send('heimdall-bridge:enrollment-event', payload);
-  }
-  if (payload?.type === 'pairing') {
-    trayPairing = { url: String(payload.url), code: String(payload.code) };
-    trayOperationMessage = 'Waiting for browser approval…';
-    void shell.openExternal(trayPairing.url);
-  } else if (payload?.type === 'complete') {
-    trayPairing = null;
-    trayEnrollmentLog = '';
-    trayOperationMessage = payload?.message || 'Bridge enrollment complete.';
-  } else if (payload?.type === 'error') {
-    trayPairing = null;
-    // A menu item is one line: the summary only (the popover shows the rest).
-    trayOperationMessage = String(payload?.summary || payload?.message || 'Bridge enrollment failed.').split('\n')[0];
-    trayEnrollmentLog = payload?.logPath ? String(payload.logPath) : '';
-  }
-  if (payload?.type === 'complete' || payload?.type === 'error') void refreshBridgeStatus();
-  else refreshTrayStatus();
-}
-
-async function restartBridgeFromTray() {
-  trayOperationMessage = 'Restarting Bridge…';
-  refreshTrayStatus();
-  const result = await bridgeManager.restart(configuredHubApiBaseUrl());
-  trayOperationMessage = result?.ok ? 'Bridge restarted.' : String(result?.error || 'Bridge restart failed.');
-  refreshTrayStatus();
-  if (!result?.ok) dialog.showErrorBox('Unable to restart Bridge', trayOperationMessage);
-}
-
-async function installBridgeFromTray() {
-  trayOperationMessage = 'Installing packaged Bridge…';
-  refreshTrayStatus();
-  const result = await bridgeManager.installBundled(configuredHubApiBaseUrl());
-  if (result?.ok) {
-    trayOperationMessage = result?.status?.enrolled ? 'Bridge installed and running.' : 'Bridge installed. Enrollment required.';
-  } else {
-    trayOperationMessage = String(result?.error || 'Bridge installation failed.');
-    dialog.showErrorBox('Unable to install Bridge', trayOperationMessage);
-  }
-  refreshTrayStatus();
-}
-
-async function enrollBridgeFromTray(reEnrollment: boolean) {
-  if (reEnrollment) {
-    const options = {
-      type: 'warning',
-      title: 'Re-enroll Bridge',
-      message: 'Re-enroll this Bridge?',
-      detail: 'The Bridge will disconnect until you approve the new browser pairing request. Its existing Bridge identity and history will be reused.',
-      buttons: ['Cancel', 'Re-enroll Bridge'],
-      defaultId: 0,
-      cancelId: 0,
-      noLink: true,
-    };
-    const answer = mainWindow && !mainWindow.isDestroyed()
-      ? await dialog.showMessageBox(mainWindow, options)
-      : await dialog.showMessageBox(options);
-    if (answer.response !== 1) return;
-  }
-  trayPairing = null;
-  trayOperationMessage = reEnrollment ? 'Starting Bridge re-enrollment…' : 'Starting Bridge enrollment…';
-  refreshTrayStatus();
-  const result = reEnrollment
-    ? bridgeManager.startReEnrollment(configuredHubApiBaseUrl(), handleEnrollmentEvent)
-    : bridgeManager.startEnrollment(configuredHubApiBaseUrl(), handleEnrollmentEvent);
-  if (!result?.ok) {
-    trayOperationMessage = String(result?.error || 'Unable to start Bridge enrollment.');
-    refreshTrayStatus();
-    dialog.showErrorBox('Unable to enroll Bridge', trayOperationMessage);
-  }
-}
-
-// REQ-BRIDGE-STATUS-ASYNC-1: the single poller. It probes launchd and the
-// Bridge binary asynchronously; the tray menu and the renderer read the cache.
-async function refreshBridgeStatus() {
-  try { await bridgeManager.refreshStatus(configuredHubApiBaseUrl()); }
-  catch (error) { console.warn('[heimdall] unable to refresh Bridge status:', error); }
-  refreshTrayStatus();
-}
-
-function refreshTrayStatus() {
-  if (!statusTray || statusTray.isDestroyed()) return;
-  let status: any;
-  try { status = bridgeManager.getStatus(configuredHubApiBaseUrl()); }
-  catch (_err) {
-    status = { installed: false, enrolled: false, serviceState: 'not-installed', hubUrl: configuredHubApiBaseUrl() };
-  }
-  const presentation = trayStatus(status);
-  // An installed Bridge reports only its probed version: the version bundled
-  // with this (possibly older) app says nothing about a Bridge updated since.
-  const version = String((status.installed ? status.installedVersion : status.bundledVersion) || '').replace(/^v/, '');
-  const bridgeVersionLabel = version ? `Bridge v${version}` : (status.installed ? 'Bridge version unknown' : '');
-  if (process.platform === 'darwin') statusTray.setTitle(` ${presentation.symbol}`);
-  statusTray.setToolTip(`${APP_DISPLAY_NAME} — ${presentation.label}${bridgeVersionLabel ? ` (${bridgeVersionLabel})` : ''}`);
-  const updateBusy = desktopUpdateState.phase === 'checking' || desktopUpdateState.phase === 'downloading';
-  const updateReady = desktopUpdateState.phase === 'downloaded';
-  statusTray.setContextMenu(Menu.buildFromTemplate([
-    { label: presentation.label, enabled: false },
-    ...(bridgeVersionLabel ? [{ label: bridgeVersionLabel, enabled: false }] : []),
-    { label: `${APP_DISPLAY_NAME} v${app.getVersion()}`, enabled: false },
-    { label: String(status.hubUrl || configuredHubApiBaseUrl()), enabled: false },
-    ...(authenticatedUserLabel ? [{ label: `Signed in as ${authenticatedUserLabel}`, enabled: false }] : []),
-    ...(trayOperationMessage ? [{ label: trayOperationMessage, enabled: false }] : []),
-    ...(trayEnrollmentLog ? [{ label: 'Show Enrollment Log', click: () => { shell.showItemInFolder(trayEnrollmentLog); } }] : []),
-    ...(desktopUpdateState.message ? [{ label: desktopUpdateState.message, enabled: false }] : []),
-    ...(trayPairing ? [
-      { label: `Pairing code: ${trayPairing.code}`, enabled: false },
-      { label: 'Copy Pairing Code', click: () => clipboard.writeText(trayPairing?.code || '') },
-      { label: 'Open Approval Page', click: () => { if (trayPairing?.url) void shell.openExternal(trayPairing.url); } },
-    ] : []),
-    { type: 'separator' },
-    { label: `Open ${APP_DISPLAY_NAME}`, click: showMainWindow },
-    ...(desktopUpdateState.phase !== 'disabled' ? [{
-      label: updateReady ? `Restart to Install Heimdall ${desktopUpdateState.version}` : 'Check for Heimdall Updates…',
-      enabled: updateReady || (!updateBusy && desktopUpdateState.phase !== 'disabled'),
-      click: () => {
-        if (updateReady) {
-          isQuitting = true;
-          desktopUpdater.install();
-        } else {
-          void desktopUpdater.check(true);
-        }
-      },
-    }] : []),
-    { label: 'Check for Bridge Updates…', click: openBridgeUpdates },
-    { label: 'Refresh Bridge Status', click: () => { void refreshBridgeStatus(); } },
-    ...(!status.installed ? [{
-      label: 'Install Packaged Bridge',
-      enabled: Boolean(status.packaged && !status.busy),
-      click: () => { void installBridgeFromTray(); },
-    }] : [
-      { label: 'Restart Bridge', enabled: !status.busy, click: () => { void restartBridgeFromTray(); } },
-      {
-        label: status.canReEnroll ? 'Re-enroll Bridge…' : 'Enroll Bridge…',
-        enabled: !status.busy,
-        click: () => { void enrollBridgeFromTray(Boolean(status.canReEnroll)); },
-      },
-    ]),
-    { type: 'separator' },
-    {
-      label: 'Launch at Login',
-      type: 'checkbox',
-      checked: loginItemEnabled(),
-      click: (item: any) => setLaunchAtLogin(Boolean(item.checked)),
-    },
-    { type: 'separator' },
-    { label: `Quit ${APP_DISPLAY_NAME}`, click: () => { isQuitting = true; app.quit(); } },
-  ]));
-}
-
-function openBridgeUpdates() {
-  const win = mainWindow && !mainWindow.isDestroyed() ? mainWindow : createWindow();
-  showMainWindow();
-  const send = () => { if (!win.webContents.isDestroyed()) win.webContents.send('heimdall-bridge:check-updates'); };
-  if (win.webContents.isLoadingMainFrame()) win.webContents.once('did-finish-load', send);
-  else send();
-}
-
-function installStatusTray() {
-  if (!supportsStatusTray() || statusTray) return;
-  const size = process.platform === 'win32' ? 16 : 18;
-  const trayIcon = appIcon?.resize({ width: size, height: size });
-  if (process.platform === 'darwin') trayIcon?.setTemplateImage(true);
-  statusTray = new Tray(trayIcon || nativeImage.createEmpty());
-  statusTray.on('double-click', showMainWindow);
-  void refreshBridgeStatus();
-  trayRefreshTimer = setInterval(() => { void refreshBridgeStatus(); }, 15_000);
-  void refreshAuthenticatedUserFromSession();
-  userRefreshTimer = setInterval(() => { void refreshAuthenticatedUserFromSession(); }, 300_000);
-}
-
 ipcMain.handle('odin-api:pick-directory', async (event) => {
   const owner = BrowserWindow.fromWebContents(event.sender);
   const result = await dialog.showOpenDialog(owner || undefined, {
@@ -519,19 +261,92 @@ ipcMain.handle('heimdall-api:open-external', async (_event, url: string) => {
   return { ok: true };
 });
 
-ipcMain.on('heimdall-auth:set-user', (event, identity) => {
-  if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents) return;
-  updateAuthenticatedUser(identity);
-});
+async function refreshIdpOrigin() {
+  try {
+    const response = await session.defaultSession.fetch(`${configuredUiOrigin()}/api/v1/auth/config`);
+    if (!response.ok) return;
+    const next = idpOriginFromAuthConfig(await response.json());
+    if (next) idpOrigin = next;
+  } catch (_err) { /* Sign-in still routes through the /api/v1/auth/login redirect chain. */ }
+}
 
-ipcMain.handle('heimdall-bridge:get-status', () => bridgeManager.getStatus(configuredHubApiBaseUrl()));
-ipcMain.handle('heimdall-bridge:install-bundled', async () => {
-  const result = await bridgeManager.installBundled(configuredHubApiBaseUrl());
-  refreshTrayStatus();
-  return result;
+// ---------------------------------------------------------------------------
+// Settings > Bridges (REQ-ENR-9/10). Every handler first checks that the call
+// comes from the main window's own document on the trusted UI origin (F25).
+// ---------------------------------------------------------------------------
+
+function trustedUiOrigins(): string[] {
+  return isDev ? [process.env.VITE_DEV_SERVER_URL || 'http://127.0.0.1:5173'] : [configuredUiOrigin()];
+}
+
+function bridgeHandler(channel: string, handler: (...args: any[]) => any) {
+  ipcMain.handle(channel, async (event: any, ...args: any[]) => {
+    const frame = event.senderFrame;
+    const fromMainWindow = Boolean(mainWindow && !mainWindow.isDestroyed() && event.sender === mainWindow.webContents);
+    if (!fromMainWindow || !trustedIpcSender(frame?.url, frame ? frame === event.sender.mainFrame : false, trustedUiOrigins())) {
+      console.warn(`[heimdall] refused ${channel} from ${String(frame?.url || 'an unknown frame')}`);
+      return { ok: false, error: 'Bridge actions are only available to the Heimdall app window.' };
+    }
+    try { return await handler(...args); }
+    catch (error: any) { return { ok: false, error: String(error?.message || error) }; }
+  });
+}
+
+function sendBridgeEvent(rawPayload: any) {
+  let payload = rawPayload;
+  if (payload?.type === 'pairing') {
+    // REQ-EXT-URL-1: only open (or show) an approval page on this Hub's origins.
+    const url = allowedPairingUrl(payload.url, [configuredHubApiBaseUrl(), configuredUiOrigin()]);
+    payload = url && payload.code
+      ? { ...payload, url }
+      : { type: 'output', message: 'Bridge enrollment printed an approval page outside this Hub; it was not opened.' };
+    if (payload.type === 'pairing') void shell.openExternal(payload.url);
+  }
+  if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
+    mainWindow.webContents.send('heimdall-bridge:event', payload);
+  }
+}
+
+// The renderer's target: the local profile for the configured Hub, with an
+// optional profile name, or another installed profile by its service name.
+function bridgeTarget(raw: any) {
+  const service = typeof raw?.service === 'string' ? raw.service : '';
+  return {
+    hub: typeof raw?.hub === 'string' && raw.hub ? raw.hub : configuredHubApiBaseUrl(),
+    profile: typeof raw?.profile === 'string' ? raw.profile : '',
+    ...(service ? { service } : {}),
+  };
+}
+
+bridgeHandler('heimdall-bridge:get-config', () => ({
+  ok: true,
+  supported: bridgeManager.supportedPlatform(),
+  platform: process.platform,
+  hubUrl: configuredHubApiBaseUrl(),
+  defaultHubUrl: defaultHubApiBaseUrl(),
+  bundledVersion: bridgeManager.bundledVersion(),
+}));
+bridgeHandler('heimdall-bridge:set-hub-url', (value: unknown) => ({ ok: true, hubUrl: saveHubApiBaseUrl(String(value || '')) }));
+bridgeHandler('heimdall-bridge:get-status', (target: unknown) => bridgeManager.getStatus(bridgeTarget(target)));
+bridgeHandler('heimdall-bridge:list', async () => ({ ok: true, profiles: await bridgeManager.listProfiles() }));
+bridgeHandler('heimdall-bridge:run', (kind: unknown, target: unknown, options: any) => {
+  const operation = String(kind || '');
+  if (!['setup', 'update', 'reenroll', 'uninstall'].includes(operation)) return { ok: false, error: `Unknown Bridge operation ${operation}.` };
+  const clean = {
+    bridgeId: typeof options?.bridgeId === 'string' ? options.bridgeId : '',
+    purge: options?.purge === true,
+    replaceOtherAccount: options?.replaceOtherAccount === true,
+  };
+  return bridgeManager.runOperation(operation, bridgeTarget(target), sendBridgeEvent, clean);
 });
-ipcMain.handle('heimdall-bridge:start-enrollment', () => bridgeManager.startEnrollment(configuredHubApiBaseUrl(), handleEnrollmentEvent));
-ipcMain.handle('heimdall-bridge:start-re-enrollment', () => bridgeManager.startReEnrollment(configuredHubApiBaseUrl(), handleEnrollmentEvent));
+bridgeHandler('heimdall-bridge:cancel', () => ({ ok: bridgeManager.cancelOperation() }));
+bridgeHandler('heimdall-bridge:open-log', (logPath: unknown) => {
+  const file = String(logPath || '');
+  // Only logs under the per-user Heimdall bridge directories are revealed.
+  if (!/[\\/]heimdall[\\/]bridges[\\/]/.test(file) || !fs.existsSync(file)) return { ok: false, error: 'Log not found.' };
+  shell.showItemInFolder(file);
+  return { ok: true };
+});
 
 
 // Build an application menu whose FIRST submenu is titled with the app name.
@@ -572,12 +387,7 @@ app.whenReady().then(() => {
   app.setName(APP_DISPLAY_NAME);
   app.setAboutPanelOptions?.({ applicationName: APP_DISPLAY_NAME });
   installAppMenu();
-  ensureDefaultLaunchAtLogin();
-  installStatusTray();
-  desktopUpdater.start(app.isPackaged && process.platform === 'win32', (next: any) => {
-    desktopUpdateState = next;
-    refreshTrayStatus();
-  });
+  desktopUpdater.start(app.isPackaged && process.platform === 'win32', () => undefined);
 
   // In dev the renderer runs at the Vite dev-server origin, and Vite's
   // `server.proxy` (see vite.config.js) forwards `/api/v1` to the local Hub.
@@ -596,28 +406,33 @@ app.whenReady().then(() => {
   console.log(`  packaged=${app.isPackaged}`);
   console.log(`  dev=${isDev}`);
 
-  const backgroundLaunch = wasOpenedAtLogin();
-  if (!backgroundLaunch) createWindow();
-  else app.dock?.hide();
+  createWindow();
 
   app.on('activate', () => {
     showMainWindow();
   });
 });
 
-app.on('before-quit', () => {
-  isQuitting = true;
+// '' → no hold yet; 'waiting' → the quit is held for a Bridge operation;
+// 'released' → the wait is over (settled or timed out), so quit proceeds.
+let bridgeQuitHold: '' | 'waiting' | 'released' = '';
+
+app.on('before-quit', (event: any) => {
+  // A running Bridge operation is cancelled, and the quit is held (bounded by
+  // TIMEOUTS.quit) until it settles, so a cancelled first install is rolled
+  // back before the app exits. An installed Bridge service is never stopped by
+  // quitting the app.
+  if (bridgeQuitHold !== 'released' && bridgeManager.operationRunning()) {
+    event.preventDefault();
+    if (bridgeQuitHold === 'waiting') return;
+    bridgeQuitHold = 'waiting';
+    void bridgeManager.stopOnQuit().finally(() => { bridgeQuitHold = 'released'; app.quit(); });
+    return;
+  }
   desktopNotifications.dispose();
-  bridgeManager.stopEnrollment();
   desktopUpdater.stop();
-  if (trayRefreshTimer) clearInterval(trayRefreshTimer);
-  trayRefreshTimer = null;
-  if (userRefreshTimer) clearInterval(userRefreshTimer);
-  userRefreshTimer = null;
-  statusTray?.destroy();
-  statusTray = null;
 });
 
 app.on('window-all-closed', () => {
-  if (!supportsStatusTray()) app.quit();
+  if (process.platform !== 'darwin') app.quit();
 });

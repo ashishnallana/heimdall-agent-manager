@@ -1,6 +1,7 @@
 import { createSlice, type PayloadAction } from '@reduxjs/toolkit';
 import type { NotificationCategory } from '../api/notificationMapper';
 import { desktopNotifications } from '../utils/desktopNotifications.ts';
+import { desktopCapabilities } from '../bridge/desktopBridge.ts';
 
 // Native OS notification settings for browser and Electron delivery.
 //
@@ -31,7 +32,7 @@ const DEFAULT_CATEGORIES: NotificationCategoryPrefs = { chat: true, attention: t
 
 function detectPermission(): NotificationPermission {
   try {
-    if (typeof window !== 'undefined' && (window as any).odinApi) {
+    if (desktopCapabilities().desktop) {
       return desktopNotifications()?.supported === true ? 'granted' : 'unsupported';
     }
     if (typeof window === 'undefined' || !('Notification' in window) || !window.Notification) {
