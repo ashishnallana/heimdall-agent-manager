@@ -75,6 +75,8 @@ export interface DesktopBridgeManagerApi {
   onEvent(callback: (event: DesktopBridgeEvent) => void): () => void;
 }
 
+const BRIDGE_MANAGER_METHODS = ['getConfig', 'setHubUrl', 'getStatus', 'list', 'run', 'cancel', 'openLog', 'onEvent'] as const;
+
 /**
  * F24: the one desktop-capability check. Everything that behaves differently
  * in the desktop app asks this helper instead of probing `window.odinApi`.
@@ -83,6 +85,13 @@ export interface DesktopCapabilities {
   /** Running inside the Heimdall desktop app (the preload API is present). */
   desktop: boolean;
   bridgeManager: DesktopBridgeManagerApi | null;
+  /**
+   * The desktop app's preload exposes an older bridgeManager (<= v0.5.21:
+   * getStatus/installBundled/startEnrollment) than this UI speaks. The Hub
+   * serves the UI, so a newer UI routinely meets an older installed app; such
+   * an app gets bridgeManager null plus this flag, never a half-matching API.
+   */
+  legacyBridgeManager: boolean;
   notifications: { supported: boolean; show: (plan: { title: string; body: string; tag: string; route: string }) => Promise<boolean> } | null;
   openExternal: ((url: string) => Promise<{ ok: boolean; error?: string }>) | null;
   daemonUrl: string;
@@ -93,9 +102,12 @@ export interface DesktopCapabilities {
 export function desktopCapabilities(): DesktopCapabilities {
   let api: any = null;
   try { api = typeof window === 'undefined' ? null : (window as any).odinApi || null; } catch (_err) { api = null; }
+  const manager = api?.bridgeManager || null;
+  const current = Boolean(manager) && BRIDGE_MANAGER_METHODS.every((name) => typeof manager[name] === 'function');
   return {
     desktop: Boolean(api),
-    bridgeManager: (api?.bridgeManager || null) as DesktopBridgeManagerApi | null,
+    bridgeManager: current ? manager as DesktopBridgeManagerApi : null,
+    legacyBridgeManager: Boolean(manager) && !current,
     notifications: api?.notifications || null,
     openExternal: typeof api?.openExternal === 'function' ? api.openExternal : null,
     daemonUrl: String(api?.daemonUrl || ''),

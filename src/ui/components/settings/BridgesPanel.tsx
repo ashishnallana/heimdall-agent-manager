@@ -10,7 +10,7 @@ import {
   useUpdateBridgeMutation,
   useUpdateBridgeTelemetryMutation,
 } from '../../api/endpoints/bridgeSupport';
-import { desktopBridgeManager } from '../../bridge/desktopBridge';
+import { desktopCapabilities } from '../../bridge/desktopBridge';
 import ThisMachineCard from './ThisMachineCard';
 import {
   useFetchTelemetryDefaultEnabledQuery,
@@ -39,7 +39,8 @@ import PendingEnrollmentsCard from './PendingEnrollmentsCard';
 // Uninstall (a live bridge uninstalls itself via bridge_uninstall; an offline
 // one can only be revoked). Web app: the installed bridges with Update only.
 export default function BridgesPanel() {
-  const manager = useMemo(() => desktopBridgeManager(), []);
+  const desktop = useMemo(() => desktopCapabilities(), []);
+  const manager = desktop.bridgeManager;
   const [localBridgeId, setLocalBridgeId] = useState('');
   const [uninstallBridge] = useUninstallBridgeMutation();
   const [uninstallConfirmId, setUninstallConfirmId] = useState('');
@@ -162,6 +163,11 @@ export default function BridgesPanel() {
     >
       <div data-debug-id="settings-bridges-panel" className="min-w-0">
       {manager ? <ThisMachineCard manager={manager} onBridgeId={setLocalBridgeId} /> : null}
+      {desktop.legacyBridgeManager ? (
+        <div data-debug-id="settings-bridges-desktop-outdated" className="mt-3 rounded-xl border border-warning/30 bg-warning-soft px-3 py-2 text-sm text-warning">
+          This desktop app is too old to set up or manage this machine's Bridge from here. Update the desktop app to the latest version, or run ham-bridge on this machine.
+        </div>
+      ) : null}
       {bridgesQuery.isError ? <div data-debug-id="settings-bridges-load-error" className="mt-3 rounded-xl border border-danger/30 bg-danger-soft px-3 py-2 text-sm text-danger">Unable to load bridges. Check that you are signed in and the Hub is reachable.</div> : null}
       {actionError ? <div data-debug-id="settings-bridges-error" className="mt-3 rounded-xl border border-danger/30 bg-danger-soft px-3 py-2 text-sm text-danger">{actionError}</div> : null}
 

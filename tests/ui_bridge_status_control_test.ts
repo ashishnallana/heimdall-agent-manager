@@ -10,7 +10,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { initialWizard, reduceWizard, startWizard, wizardStepFor } from '../src/ui/bridge/desktopBridge.ts';
+import { desktopCapabilities, initialWizard, reduceWizard, startWizard, wizardStepFor } from '../src/ui/bridge/desktopBridge.ts';
 import bridgeManager from '../src/ui/electron/bridgeManager.cts';
 import externalUrl from '../src/ui/electron/externalUrl.cts';
 
@@ -298,6 +298,37 @@ test('F25: Bridge IPC handlers reject calls from non-app origins', () => {
   assert.match(mainSource, /event\.sender === mainWindow\.webContents/);
   assert.match(mainSource, /trustedIpcSender\(frame\?\.url, frame \? frame === event\.sender\.mainFrame : false, trustedUiOrigins\(\)\)/);
   for (const channel of channels) assert.match(preloadSource, new RegExp(`'${channel}'`), channel);
+});
+
+test('an older desktop app (<= v0.5.21 preload) gets no bridgeManager, only the legacy flag', () => {
+  const prev = (globalThis as any).window;
+  const fn = () => undefined;
+  const current = { getConfig: fn, setHubUrl: fn, getStatus: fn, list: fn, run: fn, cancel: fn, openLog: fn, onEvent: fn };
+  try {
+    (globalThis as any).window = { odinApi: { bridgeManager: { getStatus: fn, installBundled: fn, startEnrollment: fn, startReEnrollment: fn, onEnrollmentEvent: fn } } };
+    let caps = desktopCapabilities();
+    assert.equal(caps.desktop, true);
+    assert.equal(caps.bridgeManager, null);
+    assert.equal(caps.legacyBridgeManager, true);
+    (globalThis as any).window = { odinApi: { bridgeManager: current } };
+    caps = desktopCapabilities();
+    assert.equal(caps.bridgeManager, current);
+    assert.equal(caps.legacyBridgeManager, false);
+    (globalThis as any).window = {};
+    caps = desktopCapabilities();
+    assert.equal(caps.desktop, false);
+    assert.equal(caps.bridgeManager, null);
+    assert.equal(caps.legacyBridgeManager, false);
+  } finally { (globalThis as any).window = prev; }
+});
+
+test('one app process per profile: the single-instance lock follows the userData pin', () => {
+  const pin = mainSource.indexOf("app.setPath('userData', path.join(appDataDir, 'heimdall-ui'))");
+  const lock = mainSource.indexOf('if (!app.requestSingleInstanceLock()) {');
+  assert.ok(pin > 0 && lock > pin, 'requestSingleInstanceLock runs after the userData pin (the lock is per userData)');
+  assert.ok(lock < mainSource.indexOf('app.whenReady().then('), 'and before the app starts');
+  assert.match(mainSource, /if \(!app\.requestSingleInstanceLock\(\)\) \{\s*app\.exit\(0\);/);
+  assert.match(mainSource, /app\.on\('second-instance', \(\) => \{\s*if \(mainWindow && !mainWindow\.isDestroyed\(\)\) showMainWindow\(\);/);
 });
 
 test('REQ-ENR-6: the Electron tray is gone and quitting the app never touches the Bridge service', () => {
