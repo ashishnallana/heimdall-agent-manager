@@ -2890,8 +2890,8 @@ bridge_revoke_respond :: proc(h: ^Bridge_Handlers, auth_ctx: contracts.Auth_Cont
 // bridge_uninstall_handler: POST /api/v1/bridges/{id}/uninstall {"purge": bool}
 // (default true). The owning account asks an ONLINE bridge to uninstall itself:
 // the bridge acknowledges the `bridge_uninstall` frame, then a detached
-// `ham-bridge uninstall` revokes it here with its own token and wipes its service,
-// binaries and secrets. Every request is audit-logged (bridge_service.log_bridge_uninstall),
+// `ham-bridge uninstall` wipes its service, binaries and secrets; the bridge stays
+// here as offline (not revoked) so a reinstall can reuse it. Every request is audit-logged (bridge_service.log_bridge_uninstall),
 // refused ones included. Another account's bridge is Not_Found (owner check); an
 // offline bridge is 422: revoke it instead (POST /api/v1/bridges/{id}/revoke).
 bridge_uninstall_handler :: proc(ctx: rawptr, req: Request) -> Response {
