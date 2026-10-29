@@ -12,7 +12,8 @@
 //     re-installs it from a bundle dir and it comes back connected;
 //   6 `ham-bridge uninstall --purge`: afterwards no profile files, no per-bridge
 //     secret dirs, no OS secret-store items (Linux user keyring, macOS Keychain,
-//     Windows Credential Manager), no service unit, and no active hub row remain;
+//     Windows Credential Manager) and no service unit remain; the bridge stays on
+//     the hub, not revoked (uninstall never revokes; a reinstall can reuse it);
 //   7-11 (with HEIMDALL_E2E_SERVICE=1) the same lifecycle for a second profile, driven
 //     through the desktop app's main-process bridgeManager.runOperation: setup wizard
 //     (pairing event) -> re-enroll -> replace other account -> update -> uninstall.
@@ -363,22 +364,26 @@ async function main() {
     const active = (await bridgesOf(B)).filter(isActive);
     expect(active.length === 1 && active[0].bridge_id === S.b.bridgeId, `setup/update kept one active bridge for B (${active.map((b) => b.bridge_id)})`);
   }, { skip: WITH_SERVICE ? '' : 'needs a service manager; set HEIMDALL_E2E_SERVICE=1 (CI runners)' });
-  await step('6 uninstall --purge leaves no files, secrets, service or active hub row', async () => {
+  await step('6 uninstall --purge leaves no files, secrets or service; the hub row is kept', async () => {
     const un = spawnSync(BRIDGE_BIN, ['uninstall', '--service', SERVICE, '--purge', '--yes', '--headless', '--json-progress'], { env: ENV, encoding: 'utf8', timeout: 120_000 });
     expect(un.status === 0, `ham-bridge uninstall --purge exits 0 (exit ${un.status})${un.status === 0 ? '' : '\n' + un.stdout + un.stderr}`);
     // The Windows uninstall re-executes from %TEMP% and returns first; let it finish.
     for (const deadline = Date.now() + 60_000; fs.existsSync(PROFILE.dir) || fs.existsSync(PROFILE.data); await sleep(500)) {
       if (Date.now() > deadline) break;
     }
-    await assertGone(PROFILE, [A, B]);
+    await assertGone(PROFILE, [A, B], S.b.bridgeId);
   });
   if (WITH_SERVICE) await electronPhase(hub, A, B);
   else for (const n of ['7', '8', '9', '10', '11']) await step(`${n} Electron-driven (bridgeManager) lifecycle`, async () => {}, { skip: 'needs a service manager; set HEIMDALL_E2E_SERVICE=1 (CI runners)' });
 }
 
-// After uninstall --purge of profile L: no files, secret dirs, OS secret-store items,
-// service registration or active hub row of any bridge this run created remain.
-async function assertGone(L, accts) {
+// After uninstall --purge of profile L: no files, secret dirs, OS secret-store items
+// or service registration of any bridge this run created remain. The uninstalled
+// bridge itself stays on the hub, not revoked (a reinstall can reuse it), and is the
+// only active row; every earlier bridge was revoked by its replacement.
+const KEPT = []; // bridges an uninstall left on the hub (never revoked)
+async function assertGone(L, accts, keptId) {
+  KEPT.push(keptId);
   expect(!fs.existsSync(L.dir), `profile state dir removed (${L.dir})`);
   expect(!fs.existsSync(L.data), `profile data dir removed (${L.data})`);
   if (L.serviceFile) expect(!fs.existsSync(L.serviceFile), `service unit removed (${L.serviceFile})`);
@@ -394,7 +399,7 @@ async function assertGone(L, accts) {
   }
   const active = [];
   for (const a of accts) active.push(...(await bridgesOf(a)).filter(isActive).map((b) => b.bridge_id));
-  expect(active.length === 0, `no active hub bridge row for any account (${active})`);
+  expect(active.length === KEPT.length && KEPT.every((id) => active.includes(id)), `uninstall kept ${KEPT} on the hub, not revoked, and nothing else is active (${active})`);
   const ours = (d) => d === L.service || CREATED.some((id) => d === id || d.startsWith(`${id}_`));
   const leftovers = (fs.existsSync(STATE_ROOT) ? fs.readdirSync(STATE_ROOT) : []).filter((d) => !REAL_HOME || ours(d));
   expect(leftovers.length === 0, `nothing of this run left under ${STATE_ROOT} (${leftovers})`);
@@ -461,11 +466,11 @@ async function electronPhase(hub, A, B) {
       if (Date.now() > deadline) throw new CheckFailed('the updated service never reconnected');
     }
   });
-  await step('11 Electron: uninstall --purge leaves no files, secrets, service or active hub row', async () => {
+  await step('11 Electron: uninstall --purge leaves no files, secrets or service; the hub row is kept', async () => {
     const u = await run('uninstall', null, { purge: true });
     expect(u.r.ok, `uninstall completes and confirmUninstalled passes${u.r.ok ? '' : ` (${u.r.error})\n${u.log}`}`);
     expect((await status()).installed === false, 'status --json: not installed');
-    await assertGone(EL, [A, B]);
+    await assertGone(EL, [A, B], S.b.bridgeId);
   });
 }
 

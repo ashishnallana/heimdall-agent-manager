@@ -277,7 +277,7 @@ export default function ThisMachineCard({ manager, onBridgeId }: { manager: Desk
           <ModalBody className="space-y-3 text-sm text-muted">
             {confirm === 'uninstall' ? (
               <>
-                <p>The Bridge is revoked on the Hub, its service is removed, and every credential and vault key it holds on this machine is deleted.</p>
+                <p>The Bridge's service is removed and every credential and vault key it holds on this machine is deleted. It stays on the Hub as offline, so reinstalling can pick it back up; revoke it under Other bridges if you never want it back.</p>
                 <label className="flex items-center gap-2 text-xs">
                   <input type="checkbox" data-debug-id="settings-this-machine-purge" checked={purge} onChange={(event) => setPurge(event.target.checked)} />
                   Also delete logs and agent data

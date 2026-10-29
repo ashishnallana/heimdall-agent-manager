@@ -1148,9 +1148,9 @@ bridge_uninstall_command_json :: proc(cmd_id: string, purge: bool) -> string {
 }
 
 // send_bridge_uninstall asks an ONLINE bridge of the caller's own account to
-// uninstall itself (`ham-bridge uninstall`, detached on the bridge): it revokes
-// itself on the hub with its own token, then wipes its service, binaries and
-// secrets. Only a user session of the owning account may ask; another account
+// uninstall itself (`ham-bridge uninstall`, detached on the bridge): it wipes its
+// service, binaries and secrets and stays on the hub as offline, so a reinstall
+// can reuse it (revoking is the separate, explicit Revoke). Only a user session of the owning account may ask; another account
 // gets the owner check's Not_Found, a bridge token Forbidden. An offline bridge
 // cannot be told: the caller revokes it instead. Returns the command id
 // (allocated with the context allocator).

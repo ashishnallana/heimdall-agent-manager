@@ -7,9 +7,12 @@ package bridgesvc
 // the engine goes on with the next one (a half-uninstalled bridge is worse than one
 // with a single leftover file the report names). Order matters:
 //
-//   revoke      the hub revokes the bridge, using the bridge's OWN token, read
-//               before anything is deleted. Best effort: an unreachable hub is a
-//               warning (the owner revokes it in Settings -> Devices).
+//   revoke      only with --revoke: the hub revokes the bridge, using the
+//               bridge's OWN token, read before anything is deleted. Best
+//               effort: an unreachable hub is a warning. By default uninstall
+//               keeps the bridge on the hub (offline), so a reinstall can reuse
+//               it when the owner approves the pairing; revoking is the explicit
+//               Revoke action in Settings.
 //   stop        the service, so nothing rewrites tokens or holds bin/ open.
 //   unregister  the unit / plist / Scheduled Task / runit dir.
 //   secrets     access + refresh token files and rotation leftovers, identity key +
@@ -80,9 +83,11 @@ Uninstall_Result :: struct {
 	warnings: bit_set[Uninstall_Step], // steps that could not finish but leave nothing usable (revoke)
 }
 
-uninstall_steps :: proc(mode: Uninstall_Mode) -> bit_set[Uninstall_Step] {
-	all := ~bit_set[Uninstall_Step]{}
-	return all if mode == .Purge else all - {.Data}
+uninstall_steps :: proc(mode: Uninstall_Mode, revoke := false) -> bit_set[Uninstall_Step] {
+	steps := ~bit_set[Uninstall_Step]{}
+	if mode != .Purge do steps -= {.Data}
+	if !revoke do steps -= {.Revoke}
+	return steps
 }
 
 uninstall_pct :: proc(step: Uninstall_Step, done: bool) -> int {
@@ -92,14 +97,15 @@ uninstall_pct :: proc(step: Uninstall_Step, done: bool) -> int {
 
 // run_uninstall runs every step of mode. A revoke that cannot reach the hub is a
 // warning; any other step that still fails after MAX_REMEDIATIONS retries is a failure.
-run_uninstall :: proc(ops: Uninstall_Ops, mode: Uninstall_Mode) -> Uninstall_Result {
+run_uninstall :: proc(ops: Uninstall_Ops, mode: Uninstall_Mode, revoke := false) -> Uninstall_Result {
 	res: Uninstall_Result
-	steps := uninstall_steps(mode)
+	steps := uninstall_steps(mode, revoke)
 	for step in Uninstall_Step {
 		name := UNINSTALL_STEP_NAMES[step]
 		if step not_in steps {
 			ops.emit(ops.data, Event{step = name, state = "start", pct = uninstall_pct(step, false), attempt = 1})
-			ops.emit(ops.data, Event{step = name, state = "skipped", pct = uninstall_pct(step, true), message = "kept (--keep-data)", attempt = 1})
+			kept := "kept on the hub (offline; revoke it in Settings)" if step == .Revoke else "kept (--keep-data)"
+			ops.emit(ops.data, Event{step = name, state = "skipped", pct = uninstall_pct(step, true), message = kept, attempt = 1})
 			continue
 		}
 		ops.emit(ops.data, Event{step = name, state = "start", pct = uninstall_pct(step, false), attempt = 1})
@@ -123,7 +129,7 @@ run_uninstall :: proc(ops: Uninstall_Ops, mode: Uninstall_Mode) -> Uninstall_Res
 			break
 		}
 	}
-	done_msg := "bridge uninstalled; no credentials or secrets remain"
+	done_msg := "bridge uninstalled; no credentials or secrets remain" if revoke else "bridge uninstalled; no credentials or secrets remain (it stays on the hub as offline)"
 	if res.failed != {} do done_msg = "bridge uninstalled with leftovers (see failed steps)"
 	else if res.warnings != {} do done_msg = "bridge uninstalled locally; the hub could not be told (revoke it in Settings -> Devices)"
 	ops.emit(ops.data, Event{step = "uninstall", state = "done" if res.failed == {} else "failed", pct = 100, message = done_msg})

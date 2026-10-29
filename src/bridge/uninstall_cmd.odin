@@ -17,7 +17,7 @@ import "core:strings"
 import "core:time"
 import bridgesvc "odin_test:lib/bridgesvc"
 
-BRIDGE_UNINSTALL_USAGE :: "usage: ham-bridge uninstall [--hub URL [--profile P] | --service NAME] [--keep-data | --purge] [--json-progress] [--yes]"
+BRIDGE_UNINSTALL_USAGE :: "usage: ham-bridge uninstall [--hub URL [--profile P] | --service NAME] [--keep-data | --purge] [--revoke] [--json-progress] [--yes]"
 // Set on the copy a Windows uninstall re-executes from %TEMP%: a running .exe
 // cannot be deleted, so the binary that removes bin/ must not live in it.
 BRIDGE_UNINSTALL_RELOCATED_FLAG :: "--relocated"
@@ -65,7 +65,10 @@ bridge_uninstall_command :: proc(args: []string) -> bool {
 		token_files   = make([dynamic]string, context.temp_allocator),
 		leftovers     = make([dynamic]string, context.temp_allocator),
 	}
-	if !has_flag(args, "--yes") && bridge_stdin_is_terminal(args) && !bridge_uninstall_confirm(name, mode) {
+	// The bridge stays on the hub (offline) unless --revoke: a reinstall can then
+	// reuse it when the owner approves the pairing.
+	revoke := has_flag(args, "--revoke")
+	if !has_flag(args, "--yes") && bridge_stdin_is_terminal(args) && !bridge_uninstall_confirm(name, mode, revoke) {
 		fmt.println("ham-bridge uninstall: cancelled; nothing was changed")
 		return false
 	}
@@ -87,15 +90,17 @@ bridge_uninstall_command :: proc(args: []string) -> bool {
 		remediate = bridge_uninstall_remediate,
 		emit      = bridge_uninstall_emit,
 	}
-	res := bridgesvc.run_uninstall(ops, mode)
+	res := bridgesvc.run_uninstall(ops, mode, revoke)
 	if !u.json_progress && len(u.leftovers) > 0 {
 		fmt.eprintfln("ham-bridge uninstall: could not remove: %s", strings.join(u.leftovers[:], ", ", context.temp_allocator))
 	}
 	return res.failed == {}
 }
 
-bridge_uninstall_confirm :: proc(name: string, mode: bridgesvc.Uninstall_Mode) -> bool {
-	fmt.printfln("Uninstall bridge %s? This revokes it on the hub and deletes its credentials, identity and vault key%s.", name, " and ALL its logs and data" if mode == .Purge else " (logs and data are kept)")
+bridge_uninstall_confirm :: proc(name: string, mode: bridgesvc.Uninstall_Mode, revoke: bool) -> bool {
+	fmt.printfln("Uninstall bridge %s? This %s and deletes its credentials, identity and vault key here%s.", name,
+		"revokes it on the hub" if revoke else "keeps it on the hub (offline, reusable on reinstall)",
+		" and ALL its logs and data" if mode == .Purge else " (logs and data are kept)")
 	fmt.print("  Continue? [y/N] ")
 	if !bridge_stdin_wait_readable(BRIDGE_ENROLL_PROMPT_TIMEOUT_MS) do return false
 	buf: [64]byte

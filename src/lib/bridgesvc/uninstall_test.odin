@@ -55,9 +55,10 @@ test_uninstall_keep_data_skips_only_data :: proc(t: ^testing.T) {
 	res := run_uninstall(fake_uninstall_ops(&f), .Keep_Data)
 	testing.expect_value(t, res.failed, bit_set[Uninstall_Step]{})
 	testing.expect(t, !slice.contains(f.ran[:], Uninstall_Step.Data), "keep-data must not remove logs/data")
-	testing.expect_value(t, len(f.ran), len(Uninstall_Step) - 1)
-	// Revoke runs first (the token is still on disk), secrets before binaries.
-	testing.expect_value(t, f.ran[0], Uninstall_Step.Revoke)
+	// Neither data nor the hub row goes: uninstall keeps the bridge on the hub.
+	testing.expect_value(t, len(f.ran), len(Uninstall_Step) - 2)
+	testing.expect(t, !slice.contains(f.ran[:], Uninstall_Step.Revoke), "uninstall must not revoke by default")
+	testing.expect_value(t, f.ran[0], Uninstall_Step.Stop)
 	si, _ := slice.linear_search(f.ran[:], Uninstall_Step.Secrets)
 	bi, _ := slice.linear_search(f.ran[:], Uninstall_Step.Binaries)
 	testing.expect(t, si < bi, "secrets are wiped before the binaries go")
@@ -71,7 +72,18 @@ test_uninstall_purge_runs_every_step :: proc(t: ^testing.T) {
 	defer fake_destroy(&f)
 	res := run_uninstall(fake_uninstall_ops(&f), .Purge)
 	testing.expect_value(t, res.failed, bit_set[Uninstall_Step]{})
-	testing.expect_value(t, len(f.ran), len(Uninstall_Step))
+	testing.expect_value(t, len(f.ran), len(Uninstall_Step) - 1)
+	testing.expect(t, !slice.contains(f.ran[:], Uninstall_Step.Revoke), "purge keeps the bridge on the hub too")
+	revoke_skip := false
+	for ev in f.events do if ev.step == "revoke" && ev.state == "skipped" do revoke_skip = true
+	testing.expect(t, revoke_skip, "the kept hub row is reported as a skipped revoke")
+
+	// --revoke opts back in: Revoke runs first (the token is still on disk).
+	g := Fake_Uninstall{fail_times = 0}
+	defer fake_destroy(&g)
+	res = run_uninstall(fake_uninstall_ops(&g), .Purge, revoke = true)
+	testing.expect_value(t, len(g.ran), len(Uninstall_Step))
+	testing.expect_value(t, g.ran[0], Uninstall_Step.Revoke)
 }
 
 @(test)
@@ -97,7 +109,7 @@ test_uninstall_remediates_busy_and_continues_after_failure :: proc(t: ^testing.T
 test_uninstall_unreachable_hub_is_a_warning :: proc(t: ^testing.T) {
 	f := Fake_Uninstall{fail_step = .Revoke, fail_with = .Hub_Unreachable, fail_times = 99}
 	defer fake_destroy(&f)
-	res := run_uninstall(fake_uninstall_ops(&f), .Keep_Data)
+	res := run_uninstall(fake_uninstall_ops(&f), .Keep_Data, revoke = true)
 	testing.expect_value(t, res.failed, bit_set[Uninstall_Step]{})
 	testing.expect_value(t, res.warnings, bit_set[Uninstall_Step]{.Revoke})
 	testing.expect_value(t, len(f.remediated), MAX_REMEDIATIONS)
