@@ -208,15 +208,19 @@ bridge_tray_stop :: proc(host: bridgesvc.Host, l: bridgesvc.Layout) -> bool {
 }
 
 // bridge_tray_remove unregisters the login entry, deletes it and stops a running
-// tray (uninstall). Idempotent; reports what was left behind.
+// tray (uninstall). Idempotent; message is "" when there was no tray.
 bridge_tray_remove :: proc(host: bridgesvc.Host, l: bridgesvc.Layout) -> (ok: bool, message: string) {
 	if !bridgesvc.tray_supported(host.os) do return true, ""
 	tl := bridgesvc.tray_layout(host, l)
-	for argv in bridgesvc.tray_unregister_argv(host, l) do _, _ = bridge_service_exec(argv)
-	_ = bridge_tray_stop(host, l)
+	removed := false
+	for argv in bridgesvc.tray_unregister_argv(host, l) {
+		if rok, _ := bridge_service_exec(argv); rok do removed = true
+	}
+	if bridge_tray_stop(host, l) do removed = true
 	_ = os.remove(tl.pid_file)
 	if tl.autostart_file != "" && os.exists(tl.autostart_file) {
 		if os.remove(tl.autostart_file) != nil do return false, fmt.tprintf("cannot remove %s", tl.autostart_file)
+		removed = true
 	}
-	return true, "tray removed"
+	return true, "tray removed" if removed else ""
 }

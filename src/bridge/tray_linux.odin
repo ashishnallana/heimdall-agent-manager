@@ -60,7 +60,7 @@ tray_load :: proc() -> (ok: bool, why: string) {
 		return false
 	}
 	gtk, gtk_ok := dynlib.load_library("libgtk-3.so.0")
-	if !gtk_ok do return false, "libgtk-3.so.0 not found"
+	if !gtk_ok do return false, strings.concatenate({"cannot load libgtk-3.so.0: ", dynlib.last_error()}, context.temp_allocator)
 	gobj, _ := dynlib.load_library("libgobject-2.0.so.0")
 	ind: dynlib.Library
 	for name in ([?]string{"libayatana-appindicator3.so.1", "libappindicator3.so.1"}) {

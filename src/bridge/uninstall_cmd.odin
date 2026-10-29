@@ -208,19 +208,20 @@ bridge_uninstall_run :: proc(data: rawptr, step: bridgesvc.Uninstall_Step) -> (b
 	case .Unregister:
 		// The tray's login entry goes with the service, so nothing starts at the
 		// next login and no tray points at a removed binary.
-		if tok, tmsg := bridge_tray_remove(u.host, l); !tok do return false, .Busy, tmsg
+		tok, tmsg := bridge_tray_remove(u.host, l)
+		if !tok do return false, .Busy, tmsg
 		files := bridgesvc.unregister_files(l)
 		registered := bridge_service_registered(u.host, l.service_name)
 		any_file := false
 		for f in files do if os.exists(f) do any_file = true
 		// Nothing registered and no file left: never touch the user's service manager.
-		if !registered && !any_file do return true, .None, "skipped"
+		if !registered && !any_file do return true, .None, tmsg if tmsg != "" else "skipped"
 		for argv in bridgesvc.unregister_argv(u.host, l) do _, _ = bridge_service_exec(argv)
 		if _, busy, left := bridge_uninstall_remove(u, files); busy do return false, .Busy, fmt.tprintf("cannot remove %s", left)
 		// systemd: forget the removed unit.
 		if l.backend == .Systemd do _, _ = bridge_service_exec({"systemctl", "--user", "daemon-reload"})
 		if bridge_service_registered(u.host, l.service_name) do return false, .Busy, fmt.tprintf("%s still registered", l.service_name)
-		return true, .None, fmt.tprintf("%s %s removed", bridgesvc.backend_name(l.backend), l.service_name)
+		return true, .None, fmt.tprintf("%s %s removed%s%s", bridgesvc.backend_name(l.backend), l.service_name, ", " if tmsg != "" else "", tmsg)
 
 	case .Secrets:
 		return bridge_uninstall_secrets(u)
