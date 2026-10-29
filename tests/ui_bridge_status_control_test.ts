@@ -554,6 +554,39 @@ test('F27: offline, the bundled Bridge is the verified fallback', { skip: proces
   assert.ok(events.some((e) => e.step === 'download' && e.state === 'retry' && /offline/.test(e.message)));
 });
 
+test('F27: a promoted release older than the bundled Bridge is never installed', { skip: process.platform !== 'linux' }, async (t) => {
+  // An app from a pre-release (v9.1.0) while the promoted release is still v9.0.0:
+  // the old ham-bridge may predate `setup`, so the bundled one is used instead.
+  const fixture = releaseFixture(t, 'v9.1.0');
+  const resources = path.join(fixture.dir, 'resources');
+  fs.mkdirSync(resources);
+  const bundled = `heimdall-local-${fixture.target}.tar.gz`;
+  fs.copyFileSync(path.join(fixture.dir, fixture.archive), path.join(resources, bundled));
+  fs.writeFileSync(path.join(resources, 'SHA256SUMS'), fixture.sums.replace(fixture.archive, bundled));
+  fs.writeFileSync(path.join(resources, 'METADATA.json'), '{"version":"v9.1.0"}');
+  process.env.HEIMDALL_BRIDGE_RESOURCES = resources;
+  process.env.HEIMDALL_BRIDGE_CACHE = path.join(fixture.dir, 'cache');
+  t.after(() => { delete process.env.HEIMDALL_BRIDGE_RESOURCES; delete process.env.HEIMDALL_BRIDGE_CACHE; });
+  const older = fixture.archive.replace('v9.1.0', 'v9.0.0');
+  const fetched: string[] = [];
+  const fetchImpl = async (url: string) => {
+    fetched.push(url);
+    if (url.includes('/releases?')) return Response.json([{ tag_name: 'v9.0.0', assets: [{ name: older }, { name: 'SHA256SUMS' }] }]);
+    return new Response('', { status: 404 });
+  };
+  const events: any[] = [];
+  const prepared = await bridgeManager.prepareBinary((e: any) => events.push(e), () => undefined, { fetchImpl });
+  assert.equal(prepared.source, 'bundled');
+  assert.equal(prepared.version, '9.1.0');
+  assert.deepEqual(fetched.filter((u) => !u.includes('/releases?')), [], 'nothing of the older release is downloaded');
+  assert.ok(events.some((e) => e.step === 'download' && /older than this app's Bridge/.test(e.message || '')));
+  assert.ok(!events.some((e) => e.state === 'retry'), 'not reported as a failed download');
+  assert.equal(bridgeManager.compareVersions('v0.5.21', '0.5.22'), -1);
+  assert.equal(bridgeManager.compareVersions('0.5.22', 'v0.5.22'), 0);
+  assert.equal(bridgeManager.compareVersions('0.5.22', '0.5.22-rc.1'), 1);
+  assert.equal(bridgeManager.compareVersions('0.10.0', '0.9.9'), 1);
+});
+
 test('REQ-ENR-12: the wizard shows automatic recovery inline and offers Retry only once it is exhausted', () => {
   assert.equal(wizardStepFor('ports'), 'install');
   assert.equal(wizardStepFor('extensions'), 'providers');

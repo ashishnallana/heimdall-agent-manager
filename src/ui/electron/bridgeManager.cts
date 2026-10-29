@@ -292,6 +292,25 @@ async function fetchWithTimeout(fetchImpl: FetchLike, url: string, signal: Abort
   return response;
 }
 
+// compareVersions orders x.y.z[-pre] versions (with or without a leading v)
+// numerically; a pre-release sorts before its release.
+function compareVersions(a: string, b: string): number {
+  const parse = (v: string) => {
+    const [core, pre = ''] = String(v || '').replace(/^v/, '').split('-', 2);
+    return { nums: core.split('.').map((n) => Number.parseInt(n, 10) || 0), pre };
+  };
+  const x = parse(a);
+  const y = parse(b);
+  for (let i = 0; i < 3; i++) {
+    const d = (x.nums[i] || 0) - (y.nums[i] || 0);
+    if (d !== 0) return d < 0 ? -1 : 1;
+  }
+  if (x.pre === y.pre) return 0;
+  if (!x.pre) return 1;
+  if (!y.pre) return -1;
+  return x.pre < y.pre ? -1 : 1;
+}
+
 // latestRelease picks the newest promoted (not draft, not prerelease) release
 // that ships this machine's bundle (the bootstraps apply the same rule).
 function latestRelease(releases: any[], target: string, platform: Platform = process.platform): string {
@@ -320,10 +339,19 @@ async function prepareBinary(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TIMEOUTS.download);
   register({ proc: null, kill: () => controller.abort() });
+  let olderRelease = '';
   try {
     emit({ step: 'download', state: 'start', pct: 0, message: 'Looking up the latest Bridge release…' });
     const version = options.version || latestRelease(await (await fetchWithTimeout(fetchImpl, RELEASES_URL, controller.signal)).json(), target, platform);
     if (!version) throw new Error(`No published Bridge release for ${target}.`);
+    // Never install a Bridge older than the one bundled with this app: the
+    // promoted release can lag the app (an app from a pre-release), and an older
+    // ham-bridge may predate `setup` and run as a bridge instead.
+    const bundled = options.version ? '' : bundledVersion(platform);
+    if (bundled && compareVersions(version, bundled) < 0) {
+      olderRelease = version;
+      throw new Error(`the latest promoted release ${version} is older than the bundled Bridge ${bundled}`);
+    }
     const archive = archiveName(target, version, platform);
     const dir = path.join(cacheRoot(), version);
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -354,7 +382,9 @@ async function prepareBinary(
     if (!version || !fs.existsSync(files.bundle) || !fs.existsSync(files.checksums)) {
       throw new Error(`Unable to download the Bridge (${String(error?.message || error)}) and this app has no bundled Bridge to fall back to.`);
     }
-    emit({ step: 'download', state: 'retry', pct: 50, failure: 'offline', message: `Download failed (${String(error?.message || error)}); using the Bridge ${version} bundled with this app.` });
+    emit(olderRelease
+      ? { step: 'download', state: 'progress', pct: 50, message: `The latest release (${olderRelease}) is older than this app's Bridge; using the Bridge ${version} bundled with this app.` }
+      : { step: 'download', state: 'retry', pct: 50, failure: 'offline', message: `Download failed (${String(error?.message || error)}); using the Bridge ${version} bundled with this app.` });
     await verifyArchive(files.bundle, fs.readFileSync(files.checksums, 'utf8'), path.basename(files.bundle));
     const extracted = path.join(cacheRoot(), `bundled-${version}`);
     await extractArchive(files.bundle, extracted, register);
@@ -610,6 +640,7 @@ module.exports = {
   extractEnrollmentPairing,
   getStatus,
   latestRelease,
+  compareVersions,
   listProfiles,
   normalizeHubUrl,
   operationArgs,
