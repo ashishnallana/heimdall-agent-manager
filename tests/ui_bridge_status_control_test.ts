@@ -20,7 +20,6 @@ const mainSource = fs.readFileSync(path.join(ROOT, 'src/ui/electron/main.cts'), 
 const managerSource = fs.readFileSync(path.join(ROOT, 'src/ui/electron/bridgeManager.cts'), 'utf8');
 const updaterSource = fs.readFileSync(path.join(ROOT, 'src/ui/electron/desktopUpdater.cts'), 'utf8');
 const authGateSource = fs.readFileSync(path.join(ROOT, 'src/ui/components/ElectronDeviceAuthGate.tsx'), 'utf8');
-const badgeSource = fs.readFileSync(path.join(ROOT, 'src/ui/components/shell/SidebarUpdateBadge.tsx'), 'utf8');
 const builderSource = fs.readFileSync(path.join(ROOT, 'electron-builder.yml'), 'utf8');
 const windowsSocketSource = fs.readFileSync(path.join(ROOT, 'src/bridge/os_platform_windows.odin'), 'utf8');
 const releaseWorkflowSource = fs.readFileSync(path.join(ROOT, '.github/workflows/release-local-binaries.yml'), 'utf8');
@@ -307,9 +306,6 @@ test('REQ-ENR-6: the Electron tray is gone and quitting the app never touches th
   assert.match(mainSource, /app\.on\('before-quit'[\s\S]*event\.preventDefault\(\)[\s\S]*bridgeManager\.stopOnQuit\(\)\.finally\(\(\) => \{ bridgeQuitHold = 'released'; app\.quit\(\); \}\)/);
   assert.doesNotMatch(managerSource, /function stopOnQuit\([^)]*\)[^}]*(?:uninstall|service|stop')/);
   assert.doesNotMatch(preloadSource, /setAuthenticatedUser|check-updates|enrollment-event/);
-  // F29: the sidebar control only links to Settings > Bridges.
-  assert.doesNotMatch(badgeSource, /desktopBridgeManager|installBundled|startEnrollment|pairing/);
-  assert.match(badgeSource, /data-debug-id="shell-bridge-manage-btn"/);
 });
 
 test('REQ-ENR-9: setup streams --json-progress, enrollment codes and completion', async (t) => {

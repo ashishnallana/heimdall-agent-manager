@@ -48,7 +48,6 @@ import { AttentionDeck, AttentionUndoToast } from '../attention';
 import { attentionApi, useGetAttentionSummaryQuery, type AttentionRange } from '../../api/endpoints/attention';
 import { readAttentionRange, writeAttentionRange } from '../../services/attention/attentionPrefs';
 import { useGetAccountBillingQuery } from '../../api/endpoints/accountBilling';
-import SidebarUpdateBadge from './SidebarUpdateBadge';
 import {
   chromeIconButtonSizeClass,
   topChromeHeight,
@@ -56,7 +55,6 @@ import {
   isAgentConversationRoute,
 } from './shellChrome';
 import { useWindowChrome } from '../../hooks/useWindowChrome';
-import type { PendingBridgeUpdate } from '../settings/bridgeUpdate';
 import { buildRouteHash, getRoutePathname, getRouteSearch } from '../../utils/appLocation';
 import {
   readLastSeenUserId,
@@ -1419,27 +1417,6 @@ function AuthenticatedShell({ user }: { user: AuthUser }) {
   const [settingsModalLoaded, setSettingsModalLoaded] = useState(settingsModalOpen);
   if (settingsModalOpen && !settingsModalLoaded) setSettingsModalLoaded(true);
   const [settingsModalTab, setSettingsModalTab] = useState<string>(() => resolveSettingsTab(routeFromLocation()));
-  // Opens Settings > Bridges and scrolls to the Bridge's Update button once the
-  // modal has rendered it (the modal mounts asynchronously after opening).
-  // F29: Settings > Bridges is the one place to set up and manage bridges.
-  const openBridgesSettings = () => {
-    if (isMobile) setDrawerOpen(false);
-    setSettingsModalTab('bridges');
-    setSettingsModalOpen(true);
-  };
-  const openBridgeUpdate = (update: PendingBridgeUpdate) => {
-    if (isMobile) setDrawerOpen(false);
-    setSettingsModalTab('bridges');
-    setSettingsModalOpen(true);
-    const target = `[data-debug-id="settings-bridge-update-btn-${CSS.escape(update.bridgeId)}"]`;
-    const deadline = Date.now() + 3000;
-    const seek = () => {
-      const el = document.querySelector<HTMLElement>(target);
-      if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); el.focus({ preventScroll: true }); return; }
-      if (Date.now() < deadline) window.requestAnimationFrame(seek);
-    };
-    window.requestAnimationFrame(seek);
-  };
 
   const setSettingsModalOpen = useCallback((open: boolean) => {
     setSettingsModalOpenState(open);
@@ -2125,15 +2102,13 @@ function AuthenticatedShell({ user }: { user: AuthUser }) {
         {/* The fixed top-left cluster floats over the content. On the conversation
             workspace the top-left chat header reserves its space; other pages get a
             top bar in BOTH sidebar states (so the page never shifts when the sidebar
-            toggles), holding the update badge on its right. */}
+            toggles). */}
         {!isWorkspaceRoute ? (
           <div
             data-debug-id="shell-top-bar"
             className="window-drag flex shrink-0 items-center justify-end gap-2 border-b border-subtle bg-canvas px-3"
             style={{ height: chromeHeight, paddingRight: controlsInsetRight ? controlsInsetRight + 12 : undefined }}
-          >
-            <SidebarUpdateBadge onOpen={openBridgeUpdate} onManage={openBridgesSettings} />
-          </div>
+          />
         ) : null}
         <RouteOutlet
           path={path}
@@ -2143,7 +2118,6 @@ function AuthenticatedShell({ user }: { user: AuthUser }) {
           liveProjects={liveProjects}
           workspaceLeading={isEffectiveCollapsed ? <div aria-hidden="true" data-debug-id="shell-top-left-cluster-spacer" className="shrink-0" style={{ width: topLeftClusterWidth - 12 }} /> : null}
           workspaceLeadingWidth={isEffectiveCollapsed ? topLeftClusterWidth : 0}
-          workspaceTrailing={<SidebarUpdateBadge onOpen={openBridgeUpdate} onManage={openBridgesSettings} />}
         />
       </div>
       </div>

@@ -60,14 +60,13 @@ test('hidden sidebar renders no rail; the fixed top-left cluster compacts on age
   // The sidebar animates its width (desktop) / slides (mobile) and its header reserves the cluster.
   assert.match(source, /isEffectiveCollapsed \? 'invisible w-0' : 'visible w-80 border-r border-subtle'/);
   assert.match(source, /isEffectiveCollapsed \? 'invisible -translate-x-full' : 'visible translate-x-0'/);
-  // The update badge is not in the sidebar header; it lives in the top bar / workspace top-right.
-  assert.doesNotMatch(source, /style=\{\{ width: topLeftClusterWidth \}\} \/>\s*<SidebarUpdateBadge/);
+  // The bridge status chip was removed from the shell (Settings > Bridges manages bridges).
+  assert.doesNotMatch(source, /SidebarUpdateBadge/);
   // Hidden: the workspace's top-left header / other pages reserve the cluster's space.
   assert.match(source, /workspaceLeading=\{isEffectiveCollapsed \? <div aria-hidden="true" data-debug-id="shell-top-left-cluster-spacer"/);
   assert.match(source, /workspaceLeadingWidth=\{isEffectiveCollapsed \? topLeftClusterWidth : 0\}/);
-  assert.match(source, /workspaceTrailing=\{<SidebarUpdateBadge onOpen=\{openBridgeUpdate\} onManage=\{openBridgesSettings\} \/>\}/);
-  // Other pages keep their top bar (with the badge) whether or not the sidebar is open.
-  assert.match(source, /\{!isWorkspaceRoute \? \(\s*<div\s+data-debug-id="shell-top-bar"[\s\S]{0,300}<SidebarUpdateBadge onOpen=\{openBridgeUpdate\} onManage=\{openBridgesSettings\} \/>/);
+  // Other pages keep their top bar whether or not the sidebar is open.
+  assert.match(source, /\{!isWorkspaceRoute \? \(\s*<div\s+data-debug-id="shell-top-bar"/);
   assert.doesNotMatch(source, /shell-sidebar-reopen-bar/);
   // The toggle flips the persisted desktop preference / the mobile drawer.
   assert.match(source, /onClick=\{\(\) => \(isMobile \? setDrawerOpen\(!drawerOpen\) : toggleCollapsed\(\)\)\}/);
