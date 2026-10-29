@@ -105,6 +105,19 @@ main :: proc() {
 		if !bridge_vault_prune_command(os.args) do os.exit(1)
 		return
 	}
+	// Local lifecycle surface (bridgesvc): never needs the bridge token (F22).
+	if len(os.args) > 1 && os.args[1] == "service" {
+		if !bridge_service_command(os.args) do os.exit(1)
+		return
+	}
+	if len(os.args) > 1 && os.args[1] == "status" {
+		if !bridge_status_command(os.args) do os.exit(1)
+		return
+	}
+	if len(os.args) > 1 && os.args[1] == "list" {
+		if !bridge_list_command(os.args) do os.exit(1)
+		return
+	}
 	if len(os.args) > 1 && os.args[1] == "enroll" {
 		if strings.trim_space(option_value(os.args, "--hub", "")) == "" {
 			fmt.eprintln("ham-bridge enroll requires --hub <http(s)://your-hub-url[/prefix]>: the bridge is bound to exactly that hub")
@@ -218,6 +231,9 @@ print_usage :: proc() {
 	fmt.println("enroll: ham-bridge enroll --hub https://hub.example.com [--bridge-token-file PATH] [--headless] [--approval-base-url URL] [--reuse-bridge BRIDGE_ID | --new-bridge]")
 	fmt.println("        opens the approval page when possible; --headless suppresses it; no enrollment token is needed")
 	fmt.println("        asks the approver to reuse this config's bridge id (or --reuse-bridge BRIDGE_ID); --new-bridge asks for a new one")
+	fmt.println("service: ham-bridge service start|stop|restart|status [--hub URL [--profile P] | --service NAME] [--json]")
+	fmt.println("status:  ham-bridge status [--json] [--hub URL [--profile P] | --service NAME]   (installed/enrolled/running/connected/vault/version; no token needed)")
+	fmt.println("list:    ham-bridge list [--json]   (every bridge profile of this OS user)")
 	fmt.println("vault:  ham-bridge vault prune [--config PATH [--bridge-token-file PATH] [--remove]] [--remove-scope BRIDGE_ID --hub URL]   (list / prune vault state of bridges whose hub rejects them; never silent)")
 	fmt.println("probe:  ham-bridge --probe-hub https://hub.example.com   (GET /api/v1/health through the bridge's own TLS transport; exit 0/1)")
 	fmt.println("TLS: https:// Hub URLs use HTTPS and wss:// with certificate/hostname validation; http:// tunnel URLs use ws://.")

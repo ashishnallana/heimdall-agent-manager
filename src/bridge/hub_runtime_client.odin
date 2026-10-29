@@ -466,9 +466,11 @@ bridge_hub_runtime_worker :: proc() {
 			thread.run(bridge_shell_orphan_reconcile_now)
 			bridge_action_scheduler_connection_changed()
             sync.atomic_store(&bridge_hub_runtime_up, true)
+			if !bridge_hub_is_enroll_only_runtime() do bridge_local_status_write(true)
 			bridge_hub_runtime_loop(&conn)
 			bridge_action_scheduler_connection_changed()
             sync.atomic_store(&bridge_hub_runtime_up, false)
+			if !bridge_hub_is_enroll_only_runtime() do bridge_local_status_write(false)
 			// NOT beside the PTY stream teardown, and not inside
 			// bridge_hub_connection_teardown with it, deliberately: this one has no
 			// before-close requirement. It closes stdin fds, SIGTERMs language servers
@@ -756,6 +758,8 @@ bridge_hub_runtime_loop :: proc(conn: ^ws.Connection) {
 			// Reconcile: the next drain resends every instance's full snapshot.
 			bridge_blockers_mark_all_dirty()
 			hub_command_reassembly_sweep(&reassemblies, now)
+			// Keep the token-free local status (ham-bridge status --json) fresh, vault included.
+			if !bridge_hub_is_enroll_only_runtime() do bridge_local_status_write(true)
 		}
 		bridge_diagnostics_tick(conn, &diagnostics_cadence, now, sync.atomic_load(&bridge_hub_heartbeat_interval_ns))
 		// Yield after a bounded burst. Idle connections retain the low-wake cadence;

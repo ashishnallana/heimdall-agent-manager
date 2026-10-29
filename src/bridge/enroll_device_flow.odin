@@ -51,6 +51,7 @@ import "core:encoding/json"
 import contracts "odin_test:contracts"
 import cfg_lib "odin_test:lib/config"
 import httpc "odin_test:lib/httpc"
+import bridgesvc "odin_test:lib/bridgesvc"
 import vault "odin_test:lib/vault"
 
 // ===== Endpoints, all derived from the one UI origin (REQ-ENROLL-10) =====
@@ -936,45 +937,6 @@ bridge_enroll_try_open_approval_url :: proc(url: string) -> bool {
 	}
 }
 
-// BRIDGE_ENROLL_RUNIT_SERVICE is the termux-services (runit) service name; its
-// run directory is $PREFIX/var/service/ham-bridge.
-BRIDGE_ENROLL_RUNIT_SERVICE :: "ham-bridge"
-
-// bridge_enroll_runit_service_dir: Termux has no systemd, so a bridge there is
-// supervised by termux-services. Returns the service directory (temp-allocated)
-// when it exists; `sv` takes it as an absolute path, so the restart does not
-// depend on SVDIR, which only Termux login shells export.
-bridge_enroll_runit_service_dir :: proc() -> (dir: string, ok: bool) {
-	prefix, found := os.lookup_env("PREFIX", context.temp_allocator)
-	if !found || prefix == "" do return "", false
-	dir = strings.concatenate({prefix, "/var/service/", BRIDGE_ENROLL_RUNIT_SERVICE}, context.temp_allocator)
-	if !os.is_dir(dir) do return "", false
-	return dir, true
-}
-
-// bridge_enroll_restart_argv is the command that restarts the registered service
-// (temp-allocated), or nil where none is supported. runit_dir is non-empty only
-// for a Termux runit service.
-bridge_enroll_restart_argv :: proc(runit_dir: string) -> []string {
-	when ODIN_OS == .Linux {
-		if runit_dir != "" {
-			argv := make([]string, 3, context.temp_allocator)
-			argv[0], argv[1], argv[2] = "sv", "restart", runit_dir
-			return argv
-		}
-		argv := make([]string, 4, context.temp_allocator)
-		argv[0], argv[1], argv[2], argv[3] = "systemctl", "--user", "restart", "heimdall-bridge"
-		return argv
-	} else when ODIN_OS == .Darwin {
-		argv := make([]string, 4, context.temp_allocator)
-		argv[0], argv[1], argv[2] = "launchctl", "kickstart", "-k"
-		argv[3] = fmt.tprintf("gui/%d/works.earendil.heimdall-bridge", bridge_os_uid())
-		return argv
-	} else {
-		return nil
-	}
-}
-
 // bridge_enroll_start_command is the command line that starts this bridge with the
 // credential enrollment just wrote: this executable plus the --config and
 // --bridge-token-file the enroll was given (temp-allocated).
@@ -998,26 +960,27 @@ bridge_enroll_shell_quote :: proc(s: string) -> string {
 }
 
 // bridge_enroll_restart_service hands the persisted credential to the already
-// registered service. It invokes no shell. Where no service manager is supported
-// (Windows) enrollment is still complete: it prints the command that starts the
-// bridge and reports ok with restarted=false.
+// registered service of THIS profile (bridgesvc: systemd --user, launchd, Scheduled
+// Task or runit, named from the profile rather than a fixed name). It invokes no
+// shell. Where no service is registered enrollment is still complete: it prints the
+// command that starts the bridge and reports ok with restarted=false.
 bridge_enroll_restart_service :: proc(args: []string) -> (ok: bool, restarted: bool) {
-	runit_dir, _ := bridge_enroll_runit_service_dir() // "" unless the service dir exists
-	argv := bridge_enroll_restart_argv(runit_dir)
-	if argv == nil {
-		fmt.println("  no registered bridge service is restarted automatically on this platform; start the bridge with:")
+	host := bridge_service_host()
+	name, installed := bridge_enroll_service_for(host, args)
+	if !installed {
+		fmt.println("  no registered bridge service was found for this enrollment; start the bridge with:")
 		fmt.printfln("    %s", bridge_enroll_start_command(args))
 		return true, false
 	}
-	state, stdout, stderr, err := os.process_exec(os.Process_Desc{command = argv}, context.allocator)
-	defer if len(stdout) > 0 do delete(stdout)
-	defer if len(stderr) > 0 do delete(stderr)
-	if err != nil || !state.success {
+	l := bridgesvc.layout_for(host, name)
+	argv := bridgesvc.service_argv(host, l, .Restart)
+	ok_run, out := bridge_service_action(host, name, .Restart)
+	if !ok_run {
+		cmd := strings.join(argv, " ", context.temp_allocator)
 		fmt.eprintln("bridge enroll: enrollment SUCCEEDED and the credential (and the delivered vault key) are saved, but the registered service could not be restarted.")
-		fmt.eprintfln("  command: %s (exit %d, err %v)", strings.join(argv, " ", context.temp_allocator), state.exit_code, err)
-		if out := strings.trim_space(string(stdout)); out != "" do fmt.eprintfln("  stdout: %s", out)
-		if se := strings.trim_space(string(stderr)); se != "" do fmt.eprintfln("  stderr: %s", se)
-		fmt.eprintfln("  Start it manually with: %s — then check its log; the vault key stays persisted, no re-enrollment needed.", strings.join(argv, " ", context.temp_allocator))
+		fmt.eprintfln("  command: %s", cmd)
+		if out != "" do fmt.eprintfln("  output: %s", out)
+		fmt.eprintfln("  Start it manually with: ham-bridge service restart --service %s — then check its log; the vault key stays persisted, no re-enrollment needed.", name)
 		bridge_enroll_service_start_failed = true
 		return false, false
 	}
