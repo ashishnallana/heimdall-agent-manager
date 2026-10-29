@@ -162,14 +162,18 @@ export const WIZARD_STEPS: { id: WizardStepId; label: string }[] = [
   { id: 'done', label: 'Done' },
 ];
 
-/** Maps a ham-bridge setup step onto the wizard step that shows it. */
+/**
+ * Maps a ham-bridge setup step onto the wizard step that shows it. ham-bridge
+ * runs …ports, service, enroll, extensions, start, verify; start and verify
+ * belong to the last row so the rows finish in order.
+ */
 export function wizardStepFor(step: string): WizardStepId | '' {
   switch (step) {
     case 'download': return 'download';
-    case 'lock': case 'stage': case 'binaries': case 'config': case 'ports': case 'service': case 'start': case 'verify': return 'install';
+    case 'lock': case 'stage': case 'binaries': case 'config': case 'ports': case 'service': return 'install';
     case 'enroll': return 'enroll';
     case 'extensions': return 'providers';
-    case 'setup': return 'done';
+    case 'start': case 'verify': case 'setup': return 'done';
     default: return '';
   }
 }
@@ -197,11 +201,14 @@ function markBefore(model: WizardModel, id: WizardStepId): WizardModel {
   };
 }
 
-/** Folds one operation event into the wizard model. */
 // `ham-bridge enroll` refuses, headless, to replace a bridge another Heimdall
 // account enrolled until the user confirms (--replace-other-account).
 export const OTHER_ACCOUNT_PATTERN = /enrolled as \S+ by another Heimdall account/;
 
+// The ham-bridge step whose `ok` finishes a row made of several sub-steps.
+const lastSubStep: Partial<Record<WizardStepId, string>> = { install: 'service', done: 'verify' };
+
+/** Folds one operation event into the wizard model. */
 export function reduceWizard(model: WizardModel, event: DesktopBridgeEvent): WizardModel {
   if (event.type === 'pairing') return { ...model, pairing: { url: event.url, code: event.code } };
   if (event.type === 'output') return OTHER_ACCOUNT_PATTERN.test(event.message) ? { ...model, otherAccount: true } : model;
@@ -240,11 +247,11 @@ export function reduceWizard(model: WizardModel, event: DesktopBridgeEvent): Wiz
       next = updateStep(next, id, (step) => ({ ...step, state: 'recovering', message, recoveries: [...step.recoveries, message || `Retrying (${event.failure || 'recovering'})…`] }));
       break;
     case 'ok':
-      // An install sub-step finishing does not finish the Install step.
-      next = updateStep(next, id, (step) => ({ ...step, state: id === 'install' && event.step !== 'verify' ? 'running' : 'ok', message: message || step.message }));
+      // A sub-step finishing finishes its row only when it is the row's last.
+      next = updateStep(next, id, (step) => ({ ...step, state: event.step === lastSubStep[id] || !lastSubStep[id] ? 'ok' : 'running', message: message || step.message }));
       break;
     case 'skipped':
-      next = updateStep(next, id, (step) => ({ ...step, state: id === 'install' ? step.state : 'skipped', message: message || step.message }));
+      next = updateStep(next, id, (step) => ({ ...step, state: !lastSubStep[id] ? 'skipped' : event.step === lastSubStep[id] && step.state === 'running' ? 'ok' : step.state, message: message || step.message }));
       break;
     case 'warning':
       next = updateStep(next, id, (step) => ({ ...step, message }));

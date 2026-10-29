@@ -26,6 +26,11 @@ const TIMEOUTS = {
   setup: 20 * 60_000,
   update: 15 * 60_000,
   uninstall: 5 * 60_000,
+  // How long a Windows uninstall's relocated %TEMP% copy may take to remove
+  // bin\ham-bridge.exe after the parent hand-off exits.
+  uninstallSettle: 60_000,
+  // How long quitting the app waits for a cancelled operation's rollback.
+  quit: 90_000,
 };
 
 type Platform = NodeJS.Platform;
@@ -400,7 +405,7 @@ async function getStatus(target: BridgeProfile) {
 // Operations: setup (wizard), update, re-enroll, uninstall.
 // ---------------------------------------------------------------------------
 
-let current: { kind: OperationKind; target: BridgeProfile; running: Running[]; wasInstalled: boolean } | null = null;
+let current: { kind: OperationKind; target: BridgeProfile; running: Running[]; wasInstalled: boolean; settled: Promise<unknown> } | null = null;
 let cancelRequested = false;
 
 function operationArgs(kind: OperationKind, target: BridgeProfile, options: { bridgeId?: string; purge?: boolean; bundleDir?: string; replaceOtherAccount?: boolean; stateDir?: string }): string[] {
@@ -437,19 +442,34 @@ function operationArgs(kind: OperationKind, target: BridgeProfile, options: { br
 // Only one operation runs at a time. Cancel (cancelOperation) terminates the
 // process tree; ham-bridge setup rolls itself back, and a cancelled first
 // install is then uninstalled so nothing is left half-configured.
-async function runOperation(
+function runOperation(
   kind: OperationKind,
   target: BridgeProfile,
   emit: Emit,
   options: { bridgeId?: string; purge?: boolean; replaceOtherAccount?: boolean; fetchImpl?: FetchLike } = {},
 ): Promise<{ ok: boolean; error?: string }> {
-  if (!supportedPlatform()) return { ok: false, error: 'This platform cannot run a Heimdall Bridge.' };
-  if (current) return { ok: false, error: 'A Bridge operation is already running.' };
+  if (!supportedPlatform()) return Promise.resolve({ ok: false, error: 'This platform cannot run a Heimdall Bridge.' });
+  if (current) return Promise.resolve({ ok: false, error: 'A Bridge operation is already running.' });
+  // performOperation claims `current` before its first await, so the claim
+  // exists by the time it returns; stopOnQuit waits on `settled`.
+  const settled = performOperation(kind, target, emit, options);
+  const op = current as { settled: Promise<unknown> } | null;
+  if (op) op.settled = settled;
+  return settled;
+}
+
+async function performOperation(
+  kind: OperationKind,
+  target: BridgeProfile,
+  emit: Emit,
+  options: { bridgeId?: string; purge?: boolean; replaceOtherAccount?: boolean; fetchImpl?: FetchLike } = {},
+): Promise<{ ok: boolean; error?: string }> {
   try { profileArgs(target, kind === 'update' || kind === 'uninstall'); } catch (error: any) { return { ok: false, error: String(error?.message || error) }; }
-  const before = await getStatus(target);
-  current = { kind, target, running: [], wasInstalled: Boolean(before.installed), };
+  // Claim the slot before the first await so a second call is refused.
+  const op: NonNullable<typeof current> = { kind, target, running: [], wasInstalled: false, settled: Promise.resolve() };
+  current = op;
   cancelRequested = false;
-  const op = current;
+  let before: any = { installed: false };
   const register = (running: Running) => { op.running.push(running); if (cancelRequested) running.kill(); };
   let lastStep = '';
   const onProgress = (event: any) => {
@@ -473,6 +493,8 @@ async function runOperation(
     if (pairing) { pairingSent = true; emit({ type: 'pairing', ...pairing }); }
   };
   try {
+    before = await getStatus(target);
+    op.wasInstalled = Boolean(before.installed);
     let binary = '';
     let bundleDir = '';
     if (kind === 'setup' || kind === 'update') {
@@ -480,14 +502,18 @@ async function runOperation(
       binary = prepared.binary;
       bundleDir = path.dirname(binary).endsWith(`${path.sep}bin`) ? path.dirname(path.dirname(binary)) : path.dirname(binary);
     } else {
-      binary = queryBinary();
+      binary = kind === 'uninstall' ? uninstallBinary() : queryBinary();
       if (!binary) throw new Error('No installed Bridge was found on this machine.');
     }
     if (cancelRequested) throw Object.assign(new Error('Cancelled.'), { cancelled: true });
     if (kind === 'reenroll' && !before.installed) throw new Error('Install the Bridge on this machine before re-enrolling it.');
-    const args = operationArgs(kind, target, { ...options, bundleDir, stateDir: String((before as any).state_dir || '') });
+    const args = operationArgs(kind, target, { ...options, bundleDir, stateDir: String(before.state_dir || '') });
     const result = await runCommand(binary, args, { timeoutMs: TIMEOUTS[kind === 'reenroll' ? 'setup' : kind], onLine, register });
     if (result.code === 0 && !result.cancelled && !result.timedOut) {
+      // A Windows uninstall started from bin\ham-bridge.exe relocates to
+      // %TEMP% and its parent exits 0 at once, so the exit code alone proves
+      // nothing: confirm the profile is really gone.
+      if (kind === 'uninstall') await confirmUninstalled(target);
       emit({ type: 'complete', status: await getStatus(target) });
       return { ok: true };
     }
@@ -518,6 +544,27 @@ async function runOperation(
   }
 }
 
+// uninstallBinary prefers a ham-bridge outside the profile's bin/ (the one this
+// app prepared, or a cached release): run from there, Windows uninstall needs
+// no %TEMP% relocation and its exit code is the real result.
+function uninstallBinary(): string {
+  if (process.env.HEIMDALL_HAM_BRIDGE) return process.env.HEIMDALL_HAM_BRIDGE;
+  if (preparedBinary && fs.existsSync(preparedBinary)) return preparedBinary;
+  return findBinary(cacheRoot(), process.platform, 4) || installedBinaries()[0] || '';
+}
+
+// confirmUninstalled waits (bounded) for `status --json` to stop reporting
+// the profile installed, and throws if it never does.
+async function confirmUninstalled(target: BridgeProfile, settleMs: number = TIMEOUTS.uninstallSettle): Promise<void> {
+  const deadline = Date.now() + settleMs;
+  for (;;) {
+    const after = await getStatus(target);
+    if (!after.installed) return;
+    if (Date.now() >= deadline) throw new Error('ham-bridge uninstall reported success, but this Bridge is still installed. Check the uninstall log and try again.');
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+  }
+}
+
 function cancelOperation(): boolean {
   if (!current) return false;
   cancelRequested = true;
@@ -525,10 +572,21 @@ function cancelOperation(): boolean {
   return true;
 }
 
-// stopOnQuit (app quit): a running operation is cancelled. The installed Bridge
-// service itself is independent of the app and keeps running.
-function stopOnQuit(): void {
+function operationRunning(): boolean {
+  return Boolean(current);
+}
+
+// stopOnQuit (app quit): a running operation is cancelled and the returned
+// promise settles once it has finished, including the rollback of a cancelled
+// first install, or after waitMs. The caller holds the quit until then. The
+// installed Bridge service itself is independent of the app and keeps running.
+function stopOnQuit(waitMs: number = TIMEOUTS.quit): Promise<void> {
+  const op = current;
+  if (!op) return Promise.resolve();
   cancelOperation();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<void>((resolve) => { timer = setTimeout(resolve, waitMs); });
+  return Promise.race([op.settled.then(() => undefined, () => undefined), timeout]).finally(() => clearTimeout(timer));
 }
 
 module.exports = {
@@ -543,6 +601,7 @@ module.exports = {
   listProfiles,
   normalizeHubUrl,
   operationArgs,
+  operationRunning,
   parseProgressLine,
   prepareBinary,
   profileArgs,

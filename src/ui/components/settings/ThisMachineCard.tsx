@@ -6,6 +6,7 @@ import {
   type DesktopBridgeEvent,
   type DesktopBridgeManagerApi,
   type DesktopBridgeOperation,
+  type DesktopBridgeOperationOptions,
   type DesktopBridgeStatus,
   type WizardModel,
   desktopBridgeStatusLabel,
@@ -25,6 +26,13 @@ const operationLabel: Record<DesktopBridgeOperation, string> = {
   update: 'Updating the Bridge',
   reenroll: 'Re-enrolling the Bridge',
   uninstall: 'Uninstalling the Bridge',
+};
+
+const operationFailed: Record<DesktopBridgeOperation, string> = {
+  setup: 'Setup failed',
+  update: 'Update failed',
+  reenroll: 'Re-enrollment failed',
+  uninstall: 'Uninstall failed',
 };
 
 /**
@@ -47,6 +55,8 @@ export default function ThisMachineCard({ manager, onBridgeId }: { manager: Desk
   const [confirm, setConfirm] = useState<'uninstall' | 'reenroll' | ''>('');
   const [purge, setPurge] = useState(true);
   const [error, setError] = useState('');
+  // The last operation started, so Retry repeats exactly that operation.
+  const [lastRun, setLastRun] = useState<{ kind: DesktopBridgeOperation; options: DesktopBridgeOperationOptions } | null>(null);
 
   const target = useCallback(() => ({ hub: config?.hubUrl, profile }), [config?.hubUrl, profile]);
 
@@ -80,7 +90,8 @@ export default function ThisMachineCard({ manager, onBridgeId }: { manager: Desk
     }
   }), [manager, refresh]);
 
-  const run = async (kind: DesktopBridgeOperation, options: { purge?: boolean; bridgeId?: string; replaceOtherAccount?: boolean } = {}) => {
+  const run = async (kind: DesktopBridgeOperation, options: DesktopBridgeOperationOptions = {}) => {
+    setLastRun({ kind, options });
     setError('');
     setLog([]);
     setShowLog(false);
@@ -114,7 +125,10 @@ export default function ThisMachineCard({ manager, onBridgeId }: { manager: Desk
   const label = desktopBridgeStatusLabel(status);
   const installed = Boolean(status?.installed);
   const busy = Boolean(operation) || Boolean(status?.busy);
-  const showWizard = operation === 'setup' || (!installed && (wizard.running || wizard.failedStep || wizard.completed || wizard.cancelled));
+  const lastKind = lastRun?.kind || 'setup';
+  const showWizard = operation === 'setup'
+    || (lastKind === 'setup' && (wizard.failedStep || wizard.cancelled))
+    || (!installed && lastKind === 'setup' && (wizard.running || wizard.completed));
 
   return (
     <section data-debug-id="settings-this-machine-card" className="mt-4 rounded-xl border border-subtle bg-surface-raised/40 p-4">
@@ -220,20 +234,23 @@ export default function ThisMachineCard({ manager, onBridgeId }: { manager: Desk
               ? `Cancelled.${wizard.rolledBack ? ' Changes were rolled back.' : ''}`
               : wizard.otherAccount
                 ? 'This machine is enrolled by another Heimdall account. Replacing it revokes that bridge and deletes its credentials here.'
-                : `Failed at ${wizard.steps.find((step) => step.id === wizard.failedStep)?.label || 'a step'} after automatic recovery.${wizard.rolledBack ? ' Changes were rolled back.' : ''}`}
+                : lastKind === 'setup'
+                  ? `Failed at ${wizard.steps.find((step) => step.id === wizard.failedStep)?.label || 'a step'} after automatic recovery.${wizard.rolledBack ? ' Changes were rolled back.' : ''}`
+                  : `${operationFailed[lastKind]}${wizard.error ? `: ${wizard.error}` : '.'}`}
           </span>
           {wizard.otherAccount ? (
             // F1: replacing another account's bridge revokes it and wipes its
             // secrets on this machine, so it needs this explicit confirmation.
-            <Button size="sm" variant="danger" data-debug-id="settings-bridge-wizard-replace-account" onClick={() => void run(installed ? 'reenroll' : 'setup', { replaceOtherAccount: true, bridgeId: status?.bridge_id || '' })}>
+            <Button size="sm" variant="danger" data-debug-id="settings-bridge-wizard-replace-account" onClick={() => void run(lastKind === 'reenroll' ? 'reenroll' : 'setup', { ...lastRun?.options, replaceOtherAccount: true, bridgeId: lastRun?.options.bridgeId || status?.bridge_id || '' })}>
               Replace the other account's bridge
             </Button>
           ) : null}
           {wizard.canRetry ? (
+            // Retry repeats the operation that failed, with its options.
             // ham-bridge setup is idempotent: a re-run skips the steps that
-            // already succeeded (enrollment is kept), so Retry resumes from the
+            // already succeeded (enrollment is kept), so it resumes from the
             // failed step.
-            <Button size="sm" variant="primary" data-debug-id="settings-bridge-wizard-retry" onClick={() => void run(installed ? 'update' : 'setup')}>Retry</Button>
+            <Button size="sm" variant="primary" data-debug-id="settings-bridge-wizard-retry" onClick={() => void run(lastKind, lastRun?.options)}>Retry</Button>
           ) : null}
         </div>
       ) : null}

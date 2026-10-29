@@ -246,8 +246,8 @@ test('F25: Bridge IPC handlers reject calls from non-app origins', () => {
 test('REQ-ENR-6: the Electron tray is gone and quitting the app never touches the Bridge service', () => {
   assert.doesNotMatch(mainSource, /\bTray\b|statusTray|setContextMenu|setLoginItemSettings|wasOpenedAtLogin|restartSync|stopEnrollment/);
   assert.match(mainSource, /app\.on\('window-all-closed', \(\) => \{\s*if \(process\.platform !== 'darwin'\) app\.quit\(\);/);
-  assert.match(mainSource, /app\.on\('before-quit'[\s\S]*bridgeManager\.stopOnQuit\(\)/);
-  assert.doesNotMatch(managerSource, /function stopOnQuit\(\)[^}]*(?:uninstall|service|stop')/);
+  assert.match(mainSource, /app\.on\('before-quit'[\s\S]*event\.preventDefault\(\)[\s\S]*bridgeManager\.stopOnQuit\(\)\.finally\(\(\) => \{ bridgeQuitHold = 'released'; app\.quit\(\); \}\)/);
+  assert.doesNotMatch(managerSource, /function stopOnQuit\([^)]*\)[^}]*(?:uninstall|service|stop')/);
   assert.doesNotMatch(preloadSource, /setAuthenticatedUser|check-updates|enrollment-event/);
   // F29: the sidebar control only links to Settings > Bridges.
   assert.doesNotMatch(badgeSource, /desktopBridgeManager|installBundled|startEnrollment|pairing/);
@@ -317,11 +317,72 @@ test('F26: every ham-bridge process has a timeout', async (t) => {
 });
 
 test('REQ-ENR-10: only one Bridge operation runs at a time', async (t) => {
-  fakeHamBridge(t, ({ proc }) => { setTimeout(() => proc.emit('close', 0), 20); }, () => ({ installed: true, state: 'connected' }));
+  let installed = true;
+  fakeHamBridge(t, ({ proc }) => { setTimeout(() => { installed = false; proc.emit('close', 0); }, 20); }, () => ({ installed, state: installed ? 'connected' : 'not_installed' }));
   const first = bridgeManager.runOperation('uninstall', HUB, () => undefined);
   await new Promise((resolve) => setTimeout(resolve, 5));
   assert.deepEqual(await bridgeManager.runOperation('reenroll', HUB, () => undefined), { ok: false, error: 'A Bridge operation is already running.' });
   assert.equal((await first).ok, true);
+});
+
+test('REQ-ENR-10: an uninstall that exits 0 but leaves the Bridge installed is an error', async (t) => {
+  const saved = bridgeManager.TIMEOUTS.uninstallSettle;
+  bridgeManager.TIMEOUTS.uninstallSettle = 30;
+  t.after(() => { bridgeManager.TIMEOUTS.uninstallSettle = saved; });
+  // A Windows uninstall run from bin\ham-bridge.exe hands off to a %TEMP% copy
+  // and exits 0 at once; here the copy never removes the profile.
+  fakeHamBridge(t, ({ proc }) => proc.emit('close', 0), () => ({ installed: true, state: 'stopped' }));
+  const events: any[] = [];
+  const result = await bridgeManager.runOperation('uninstall', HUB, (event: any) => events.push(event), { purge: true });
+  assert.equal(result.ok, false);
+  assert.equal(events.some((e) => e.type === 'complete'), false);
+  assert.match(events.at(-1).message, /still installed/);
+  assert.equal(bridgeManager.operationRunning(), false);
+});
+
+test('REQ-ENR-6: quitting mid first-install waits for the rollback before the app exits', async (t) => {
+  let installed = false;
+  let uninstalled = false;
+  fakeHamBridge(t, ({ proc, args }) => {
+    if (args[0] === 'setup') {
+      installed = true;
+      proc.stdout.emit('data', line({ step: 'enroll', state: 'start', pct: 50 }));
+    } else if (args[0] === 'uninstall') {
+      setTimeout(() => { installed = false; uninstalled = true; proc.emit('close', 0); }, 20);
+    }
+  }, () => (installed ? { installed: true, state: 'not_enrolled' } : { installed: false, state: 'not_installed' }));
+  let enrolling!: () => void;
+  const started = new Promise<void>((resolve) => { enrolling = resolve; });
+  const running = bridgeManager.runOperation('setup', HUB, (event: any) => { if (event.type === 'progress' && event.step === 'enroll') enrolling(); });
+  await started;
+  assert.equal(bridgeManager.operationRunning(), true);
+  await bridgeManager.stopOnQuit(5_000);
+  assert.equal(uninstalled, true, 'the partial install was removed before stopOnQuit settled');
+  assert.equal(bridgeManager.operationRunning(), false);
+  assert.equal((await running).ok, false);
+});
+
+test('REQ-ENR-6: the quit hold is bounded when the rollback hangs', async (t) => {
+  const saved = bridgeManager.TIMEOUTS.uninstall;
+  bridgeManager.TIMEOUTS.uninstall = 200;
+  t.after(() => { bridgeManager.TIMEOUTS.uninstall = saved; });
+  let installed = false;
+  fakeHamBridge(t, ({ proc, args }) => {
+    if (args[0] === 'setup') {
+      installed = true;
+      proc.stdout.emit('data', line({ step: 'enroll', state: 'start', pct: 50 }));
+    } // the rollback uninstall never exits; only its own timeout ends it
+  }, () => (installed ? { installed: true, state: 'not_enrolled' } : { installed: false, state: 'not_installed' }));
+  let enrolling!: () => void;
+  const started = new Promise<void>((resolve) => { enrolling = resolve; });
+  const running = bridgeManager.runOperation('setup', HUB, (event: any) => { if (event.type === 'progress' && event.step === 'enroll') enrolling(); });
+  await started;
+  const begin = Date.now();
+  await bridgeManager.stopOnQuit(20);
+  assert.ok(Date.now() - begin < 150, 'stopOnQuit gave up after waitMs');
+  assert.equal(bridgeManager.operationRunning(), true, 'the rollback was still running');
+  assert.equal((await running).ok, false);
+  assert.equal(await bridgeManager.stopOnQuit(10), undefined, 'nothing running resolves at once');
 });
 
 // A real tar.gz release bundle containing bin/ham-bridge, plus its SHA256SUMS.
@@ -394,25 +455,50 @@ test('REQ-ENR-12: the wizard shows automatic recovery inline and offers Retry on
   let model = startWizard();
   model = reduceWizard(model, { type: 'progress', step: 'download', state: 'ok', pct: 100, message: 'downloaded' });
   model = reduceWizard(model, { type: 'progress', step: 'ports', state: 'start', pct: 40 });
-  model = reduceWizard(model, { type: 'progress', step: 'verify', state: 'retry', pct: 88, failure: 'port_in_use', message: 'moved to ports 49327/49328' });
+  model = reduceWizard(model, { type: 'progress', step: 'ports', state: 'retry', pct: 41, failure: 'port_in_use', message: 'moved to ports 49327/49328' });
   const install = model.steps.find((s) => s.id === 'install')!;
   assert.equal(install.state, 'recovering');
   assert.deepEqual(install.recoveries, ['moved to ports 49327/49328']);
+  model = reduceWizard(model, { type: 'progress', step: 'verify', state: 'retry', pct: 88, failure: 'port_in_use', message: 'still waiting for the port' });
+  assert.equal(model.steps.find((s) => s.id === 'install')!.state, 'ok', 'verify belongs to the last row');
+  assert.equal(model.steps.find((s) => s.id === 'done')!.state, 'recovering');
   assert.equal(model.canRetry, false, 'no manual retry while ham-bridge is still recovering');
   assert.equal(model.steps.find((s) => s.id === 'download')!.state, 'ok');
   model = reduceWizard(model, { type: 'progress', step: 'verify', state: 'failed', pct: 88, failure: 'port_in_use', message: 'still busy', log: '/x/heimdall/bridges/s/logs/bridge.err.log' });
   model = reduceWizard(model, { type: 'progress', step: 'verify', state: 'rollback', pct: 88 });
   model = reduceWizard(model, { type: 'error', message: 'still busy', step: 'verify' });
-  assert.equal(model.failedStep, 'install');
+  assert.equal(model.failedStep, 'done');
   assert.equal(model.canRetry, true);
   assert.equal(model.rolledBack, true);
-  assert.equal(model.steps.find((s) => s.id === 'install')!.log, '/x/heimdall/bridges/s/logs/bridge.err.log');
+  assert.equal(model.steps.find((s) => s.id === 'done')!.log, '/x/heimdall/bridges/s/logs/bridge.err.log');
   const cancelled = reduceWizard(startWizard(), { type: 'error', message: 'Cancelled.', cancelled: true, rolledBack: true });
   assert.equal(cancelled.canRetry, false);
   const done = reduceWizard(reduceWizard(initialWizard(), { type: 'pairing', url: 'https://hub/api/v1/device/add', code: 'AAAA-BBBB-CCCC-DD' }), { type: 'complete' });
   assert.equal(done.completed, true);
   assert.equal(done.pairing, null);
   assert.ok(done.steps.every((s) => s.state === 'ok'));
+});
+
+test('REQ-ENR-9: wizard rows finish in order (start/verify after Enroll and Providers)', () => {
+  const states = (model: any) => model.steps.map((s: any) => `${s.id}:${s.state}`).join(' ');
+  let model = startWizard();
+  const order = ['download', 'lock', 'stage', 'binaries', 'config', 'ports', 'service', 'enroll', 'extensions', 'start', 'verify'];
+  const seen: string[] = [];
+  for (const step of order) {
+    model = reduceWizard(model, { type: 'progress', step, state: 'start' });
+    model = reduceWizard(model, { type: 'progress', step, state: 'ok' });
+    seen.push(states(model));
+  }
+  assert.equal(seen[order.indexOf('service')], 'download:ok install:ok enroll:pending providers:pending done:pending');
+  assert.equal(seen[order.indexOf('extensions')], 'download:ok install:ok enroll:ok providers:ok done:pending');
+  assert.equal(seen[order.indexOf('start')], 'download:ok install:ok enroll:ok providers:ok done:running');
+  assert.equal(seen.at(-1), 'download:ok install:ok enroll:ok providers:ok done:ok');
+  // No row ever goes back from ok.
+  const rank: Record<string, number> = { pending: 0, running: 1, recovering: 1, ok: 2, skipped: 2, failed: 2 };
+  for (let i = 1; i < seen.length; i += 1) {
+    const prev = seen[i - 1].split(' ').map((x) => rank[x.split(':')[1]]);
+    seen[i].split(' ').forEach((x, j) => assert.ok(rank[x.split(':')[1]] >= prev[j], `${order[i]}: ${seen[i]}`));
+  }
 });
 
 test('REQ-ENR-9: enrollment output still yields the canonical 14-symbol pairing code', () => {

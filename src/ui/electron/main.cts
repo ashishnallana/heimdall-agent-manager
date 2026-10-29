@@ -87,7 +87,6 @@ const isDev = Boolean(process.env.VITE_DEV_SERVER_URL);
 
 let authWindow: any = null;
 let mainWindow: any = null;
-let isQuitting = false;
 // Identity provider origin from GET /api/v1/auth/config, used to route sign-out.
 let idpOrigin = '';
 
@@ -414,12 +413,23 @@ app.whenReady().then(() => {
   });
 });
 
-app.on('before-quit', () => {
-  isQuitting = true;
+// '' → no hold yet; 'waiting' → the quit is held for a Bridge operation;
+// 'released' → the wait is over (settled or timed out), so quit proceeds.
+let bridgeQuitHold: '' | 'waiting' | 'released' = '';
+
+app.on('before-quit', (event: any) => {
+  // A running Bridge operation is cancelled, and the quit is held (bounded by
+  // TIMEOUTS.quit) until it settles, so a cancelled first install is rolled
+  // back before the app exits. An installed Bridge service is never stopped by
+  // quitting the app.
+  if (bridgeQuitHold !== 'released' && bridgeManager.operationRunning()) {
+    event.preventDefault();
+    if (bridgeQuitHold === 'waiting') return;
+    bridgeQuitHold = 'waiting';
+    void bridgeManager.stopOnQuit().finally(() => { bridgeQuitHold = 'released'; app.quit(); });
+    return;
+  }
   desktopNotifications.dispose();
-  // A running setup/update is cancelled (and rolled back); an installed Bridge
-  // service is never stopped by quitting the app.
-  bridgeManager.stopOnQuit();
   desktopUpdater.stop();
 });
 

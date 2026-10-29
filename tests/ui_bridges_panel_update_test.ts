@@ -209,3 +209,62 @@ test('web BridgesPanel lists installed bridges with Update only (no This machine
     }
   }
 });
+
+// ---------------------------------------------------------------------------
+// 3. Electron "This machine" card: Retry repeats the operation that failed
+//    (with its options), and a non-setup failure reads as that operation's own
+//    failure, not as a wizard step.
+// ---------------------------------------------------------------------------
+
+test('ThisMachineCard retries a failed Re-enroll as Re-enroll and labels the failure by operation', async () => {
+  const { default: ThisMachineCard } = await import('../src/ui/components/settings/ThisMachineCard.tsx');
+  const dom = new JSDOM('<div id="root"></div>', { url: 'https://hub.example.test/', pretendToBeVisual: true });
+  const saved = new Map<string, PropertyDescriptor | undefined>();
+  for (const [key, value] of Object.entries({
+    window: dom.window, document: dom.window.document, HTMLElement: dom.window.HTMLElement,
+    Node: dom.window.Node, IS_REACT_ACT_ENVIRONMENT: true,
+  })) {
+    saved.set(key, Object.getOwnPropertyDescriptor(globalThis, key));
+    Object.defineProperty(globalThis, key, { value, writable: true, configurable: true });
+  }
+  const runs: Array<{ kind: string; options: any }> = [];
+  let listener: ((event: any) => void) | null = null;
+  const manager: any = {
+    getConfig: async () => ({ ok: true, supported: true, platform: 'linux', hubUrl: 'https://hub.example.test', defaultHubUrl: 'https://hub.example.test', bundledVersion: '' }),
+    setHubUrl: async () => ({ ok: true }),
+    getStatus: async () => ({ supported: true, busy: false, operation: '', installed: true, state: 'connected', bridge_id: 'brg_this', error: '' }),
+    list: async () => ({ ok: true, profiles: [] }),
+    run: async (kind: string, _target: any, options: any) => { runs.push({ kind, options }); return { ok: true }; },
+    cancel: async () => ({ ok: true }),
+    openLog: async () => ({ ok: true }),
+    onEvent: (callback: (event: any) => void) => { listener = callback; return () => { listener = null; }; },
+  };
+  const root = createRoot(dom.window.document.getElementById('root')!);
+  const doc = dom.window.document;
+  const query = (id: string) => doc.querySelector(`[data-debug-id="${id}"]`) as HTMLElement | null;
+  const click = async (id: string) => {
+    const element = query(id);
+    assert.ok(element, `${id} is rendered`);
+    await act(async () => { element!.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+  };
+  try {
+    await act(async () => { root.render(React.createElement(ThisMachineCard, { manager })); });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    await click('settings-this-machine-reenroll-btn');
+    await click('settings-this-machine-confirm-ok');
+    assert.deepEqual(runs, [{ kind: 'reenroll', options: { bridgeId: 'brg_this' } }]);
+    await act(async () => { listener!({ type: 'error', message: 'enrollment was not approved', step: 'enroll' }); });
+    assert.match(query('settings-bridge-wizard-result')!.textContent || '', /Re-enrollment failed: enrollment was not approved/);
+    assert.doesNotMatch(query('settings-bridge-wizard-result')!.textContent || '', /Failed at/);
+    assert.equal(query('settings-bridge-wizard'), null, 'the setup wizard is not shown for a re-enroll');
+    await click('settings-bridge-wizard-retry');
+    assert.deepEqual(runs[1], { kind: 'reenroll', options: { bridgeId: 'brg_this' } }, 'Retry repeats the re-enroll, not an update');
+  } finally {
+    await act(async () => root.unmount());
+    dom.window.close();
+    for (const [key, descriptor] of saved) {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+      else delete (globalThis as any)[key];
+    }
+  }
+});
