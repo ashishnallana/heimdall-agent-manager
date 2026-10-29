@@ -294,6 +294,13 @@ test_render_service_files :: proc(t: ^testing.T) {
 	wl := layout_for(win, name)
 	xml := render_service_file(win, wl, in_)
 	testing.expect(t, strings.contains(xml, "<LogonTrigger>"))
+	// The task is the signed-in user's: a LogonTrigger without a UserId is "any
+	// user", which a non-admin cannot register (schtasks: Access is denied).
+	win_in := in_
+	win_in.windows_user = "CORP\\a&b"
+	uxml := render_service_file(win, wl, win_in)
+	testing.expect(t, strings.contains(uxml, "<LogonTrigger><Enabled>true</Enabled><UserId>CORP\\a&amp;b</UserId></LogonTrigger>"))
+	testing.expect(t, strings.contains(uxml, "<Principal id=\"Author\"><UserId>CORP\\a&amp;b</UserId><LogonType>InteractiveToken</LogonType>"))
 	testing.expect(t, strings.contains(xml, "C:/L/heimdall/bridges/heimdall-bridge-hub-example-com_work/run.cmd"))
 	cmd := render_windows_run_cmd(win, wl, in_)
 	testing.expect(t, strings.contains(cmd, "ham-bridge.exe"))

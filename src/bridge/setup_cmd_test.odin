@@ -35,3 +35,10 @@ test_bridge_setup_extract_marked_path_ignores_shell_noise :: proc(t: ^testing.T)
 	testing.expect_value(t, bridge_setup_extract_marked_path("no markers"), "")
 	testing.expect_value(t, bridge_setup_extract_marked_path(BRIDGE_SETUP_PATH_MARK + "/a"), "")
 }
+
+@(test)
+test_bridge_setup_windows_user :: proc(t: ^testing.T) {
+	testing.expect_value(t, bridge_setup_windows_user("CORP", "ann"), "CORP\\ann")
+	testing.expect_value(t, bridge_setup_windows_user("", "ann"), "ann")
+	testing.expect_value(t, bridge_setup_windows_user("CORP", " "), "")
+}

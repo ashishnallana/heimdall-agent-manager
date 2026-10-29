@@ -212,6 +212,15 @@ bridge_setup_extract_marked_path :: proc(stdout: string) -> string {
 
 bridge_setup_dir_exists :: proc(path: string) -> bool { return os.is_dir(path) }
 
+// bridge_setup_windows_user names the account the logon task is for
+// (bridgesvc.Render_Input.windows_user), as install.ps1 did with the identity name.
+bridge_setup_windows_user :: proc(domain, name: string) -> string {
+	n := strings.trim_space(name)
+	if n == "" do return ""
+	d := strings.trim_space(domain)
+	return n if d == "" else strings.concatenate({d, "\\", n}, context.temp_allocator)
+}
+
 bridge_setup_render_input :: proc(s: ^Bridge_Setup) -> bridgesvc.Render_Input {
 	path, _ := os.lookup_env("PATH", context.temp_allocator)
 	when ODIN_OS != .Windows {
@@ -220,7 +229,13 @@ bridge_setup_render_input :: proc(s: ^Bridge_Setup) -> bridgesvc.Render_Input {
 		path = bridge_setup_service_path(path, bridge_setup_login_shell_path(), home, user, bridge_setup_dir_exists)
 	}
 	tv, _ := os.lookup_env("TERMUX_VERSION", context.temp_allocator)
-	return {hub = s.profile.hub_url, profile = s.profile.profile, path_env = path, termux_version = tv, bridge_port = s.ports[0], endpoint_port = s.ports[1]}
+	windows_user := ""
+	if s.host.os == .Windows {
+		domain, _ := os.lookup_env("USERDOMAIN", context.temp_allocator)
+		name, _ := os.lookup_env("USERNAME", context.temp_allocator)
+		windows_user = bridge_setup_windows_user(domain, name)
+	}
+	return {hub = s.profile.hub_url, profile = s.profile.profile, path_env = path, termux_version = tv, windows_user = windows_user, bridge_port = s.ports[0], endpoint_port = s.ports[1]}
 }
 
 // ---- steps -------------------------------------------------------------------
