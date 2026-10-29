@@ -221,3 +221,34 @@ unregister_files :: proc(l: Layout) -> []string {
 	}
 	return nil
 }
+
+// ---- update ----------------------------------------------------------------
+//
+// `ham-bridge update --bundle DIR` is `setup` run by the NEW binary against the
+// profile it updates: setup's transaction already is the update supervisor the
+// apply-bridge-update.{sh,ps1} scripts implemented (stage, bin -> bin.bak, re-render
+// the service (F9), extensions on every OS, restart, health = running AND connected
+// to the hub, and on any failure bin.bak restored and the old bridge restarted).
+// Running the staged binary means the version being installed decides how it is
+// installed.
+
+// update_bundle_exe finds the bundle's ham-bridge: DIR/ham-bridge or DIR/bin/ham-bridge.
+update_bundle_exe :: proc(host: Host, dir: string, exists: proc(path: string) -> bool) -> string {
+	name := exe_name(host, "ham-bridge")
+	for c in ([]string{pjoin(dir, name), pjoin(dir, "bin", name)}) {
+		if exists(c) do return c
+	}
+	return ""
+}
+
+// update_setup_argv: the setup the new binary runs for this profile (temp-allocated).
+update_setup_argv :: proc(new_exe, hub, profile: string, json_progress: bool) -> []string {
+	a := make([dynamic]string, context.temp_allocator)
+	append(&a, new_exe, "setup", "--hub", hub)
+	if profile != "" do append(&a, "--profile", profile)
+	// An update never enrolls: an enrolled profile skips the step, an unenrolled one
+	// must not block on a browser approval nobody is watching.
+	append(&a, "--headless")
+	if json_progress do append(&a, "--json-progress")
+	return a[:]
+}

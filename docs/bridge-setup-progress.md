@@ -172,3 +172,53 @@ bridge id than the profile's current credential is ignored.
 `vault` is `unlocked`, `locked`, `unpaired` or `unknown` (no runtime status yet).
 `list --json` returns `{"profiles":[<status>, ...]}` sorted by service name. With no
 installed profile, `status --json` prints `{"installed":false,"error":"..."}` and exits 0.
+
+## `ham-bridge uninstall`
+
+```bash
+ham-bridge uninstall [--hub URL [--profile P] | --service NAME] [--keep-data | --purge] [--json-progress] [--yes]
+```
+
+Removes one profile and **every credential and secret** it holds (F20). The default
+is `--keep-data` (logs and agent data stay); `--purge` removes the data dir too. An
+interactive terminal is asked to confirm unless `--yes`/`--headless`/`--json-progress`.
+Steps (bridgesvc `run_uninstall`; `--json-progress` emits the same event lines as setup,
+plus state `warning`):
+
+| step | removes |
+|---|---|
+| `revoke` | the hub revokes the bridge, called with the bridge's own token (`POST /api/v1/bridge/self/revoke`), read before anything is deleted. An unreachable hub is retried, then a `warning` (revoke it in Settings -> Devices); local secrets are wiped anyway |
+| `stop` | stops the service and waits for the bridge pid; remediation: stop again, TERM, then KILL |
+| `unregister` | systemd `disable` + unit file + `daemon-reload`; launchd `bootout` + plist; `schtasks /Delete`; runit service dir |
+| `secrets` | access/refresh token files, `.pending-rotation-v1`, refresh request and marker files, the vault keyring, identity record and epoch floor in Keychain / Credential Manager / kernel keyring (private files on Linux), the per-scope vault dir |
+| `extensions` | `<data>/extensions{,.bak,.new}` |
+| `caches` | `.staging`, `run/`, `cache/`, `bootstrap-cache/`, `updates/`, `run.cmd`, `task.xml` |
+| `binaries` | `bin/`, `bin.bak/` |
+| `state` | the profile's state dir (config, ports, hub-url, markers) |
+| `data` | the data dir (`--purge` only) |
+
+A step that still fails after remediation is reported (`failed`) and the uninstall
+continues; exit status is non-zero when anything was left behind. On Windows the
+command re-runs itself from a copy in `%TEMP%` so `bin\` can be deleted.
+
+**Remote uninstall.** `POST /api/v1/bridges/{id}/uninstall` `{"purge": true}` (user
+session of the owning account only; another account gets 404, a bridge token 403, an
+offline bridge 422 — revoke it instead) sends `{"type":"bridge_uninstall","command_id",
+"mode":"purge"|"keep_data"}` to the live bridge. The bridge acks `accepted` and starts
+`ham-bridge uninstall --purge --yes --service <its service>` from a copy outside `bin/`
+in a session of its own, which revokes it on the hub and wipes it. Every request is
+audit-logged: `ham-hub bridge_uninstall outcome=dispatched|denied|offline|failed
+bridge_id= user_id= command_id= request_id= detail=`.
+
+## `ham-bridge update`
+
+```bash
+ham-bridge update --bundle DIR [--hub URL [--profile P] | --service NAME] [--json-progress] [--detach]
+```
+
+Runs the NEW binary's `setup --headless` for the profile (`DIR/ham-bridge` or
+`DIR/bin/ham-bridge`, preflighted with `--version`). That transaction is the update:
+staging, `bin.bak`, service re-render, extensions on every OS, restart, health =
+running **and** connected to the hub, and on failure `bin.bak` restored and the old
+bridge restarted. Inside the service being updated (or with `--detach`) it runs in a
+session of its own. `--version V` (download + verify a release) is not implemented yet.
