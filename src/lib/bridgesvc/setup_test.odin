@@ -168,9 +168,112 @@ test_install_lock_stale_owner :: proc(t: ^testing.T) {
 	testing.expect(t, os.exists(path))
 	lock_release(path, 200)
 	testing.expect(t, !os.exists(path))
-	// Garbage lock content is stale.
+	// Garbage lock content is stale once it is past the write grace.
 	_ = os.write_entire_file_from_string(path, "garbage")
-	testing.expect_value(t, lock_acquire(path, 300, now, lock_alive_all).failure, Failure.Stale_Lock)
+	testing.expect_value(t, lock_acquire(path, 300, time.time_add(now, 2 * LOCK_WRITE_GRACE), lock_alive_all).failure, Failure.Stale_Lock)
+}
+
+@(test)
+test_install_lock_being_written_is_held :: proc(t: ^testing.T) {
+	dir := fmt.tprintf("/tmp/bridgesvc-lock-race-%d", os.get_pid())
+	_ = os.remove_all(dir)
+	_ = os.make_directory_all(dir)
+	defer os.remove_all(dir)
+	path := pjoin(dir, LOCK_FILE)
+	// An owner between create and write: empty file, fresh mtime. It must not be
+	// classified stale (whose remediation would delete the live owner's lock).
+	_ = os.write_entire_file_from_string(path, "")
+	r := lock_acquire(path, 400, time.now(), lock_alive_none)
+	testing.expect_value(t, r.failure, Failure.Fatal)
+	testing.expect(t, os.exists(path))
+	// A successful acquire leaves only the lock, with complete content, behind.
+	_ = os.remove(path)
+	testing.expect(t, lock_acquire(path, 400, time.now(), lock_alive_all).ok)
+	owner, _, ok := lock_read(path)
+	testing.expect(t, ok && owner == 400)
+	entries, _ := os.read_all_directory_by_path(dir, context.temp_allocator)
+	testing.expect_value(t, len(entries), 1)
+}
+
+@(test)
+test_remediation_plan :: proc(t: ^testing.T) {
+	testing.expect_value(t, remediation_plan(.Lock, .Stale_Lock), Remedies{.Break_Lock})
+	testing.expect_value(t, remediation_plan(.Stage, .Partial_Install), Remedies{.Discard_Staging})
+	testing.expect_value(t, remediation_plan(.Binaries, .Partial_Install), Remedies{.Discard_Staging, .Restage})
+	testing.expect_value(t, remediation_plan(.Binaries, .Stale_Service), Remedies{.Stop_Service})
+	// Start re-runs itself after remediation; Verify only polls, so its plans must
+	// end by starting the service again.
+	testing.expect_value(t, remediation_plan(.Start, .Stale_Service), Remedies{.Stop_Service, .Register})
+	testing.expect_value(t, remediation_plan(.Verify, .Stale_Service), Remedies{.Stop_Service, .Register, .Start_Service})
+	testing.expect_value(t, remediation_plan(.Verify, .Port_In_Use), Remedies{.Stop_Service, .Reallocate_Ports, .Register, .Start_Service})
+	testing.expect_value(t, remediation_plan(.Verify, .Fatal), Remedies{})
+}
+
+// Sim models the supervisor the way the real Host sees it: Verify succeeds only
+// if the service is running, and it can run only on a port nobody else holds.
+// Remediation executes remediation_plan against it, so a plan that forgets to
+// start the service again cannot pass.
+@(private = "file")
+Sim :: struct {
+	running:    bool,
+	port:       int,
+	held_port:  int, // port held by another process
+	crash_once: bool, // the first start dies right away (stale unit)
+	starts:     int,
+}
+
+@(private = "file")
+sim_start :: proc(m: ^Sim) {
+	m.starts += 1
+	m.running = m.port != m.held_port && !(m.crash_once && m.starts == 1)
+}
+
+@(private = "file")
+sim_ops :: proc(m: ^Sim) -> Setup_Ops {
+	return Setup_Ops {
+		data = m,
+		run = proc(data: rawptr, step: Step) -> Step_Result {
+			m := (^Sim)(data)
+			#partial switch step {
+			case .Start:
+				sim_start(m)
+				return {ok = true}
+			case .Verify:
+				if m.running do return {ok = true}
+				if m.port == m.held_port do return {failure = .Port_In_Use, message = "port held"}
+				return {failure = .Stale_Service, message = "not running"}
+			}
+			return {ok = true}
+		},
+		remediate = proc(data: rawptr, step: Step, failure: Failure) -> (bool, string) {
+			m := (^Sim)(data)
+			for r in remediation_plan(step, failure) {
+				#partial switch r {
+				case .Stop_Service:     m.running = false
+				case .Reallocate_Ports: m.port += 2
+				case .Start_Service:    sim_start(m)
+				}
+			}
+			return true, "plan"
+		},
+		undo = proc(data: rawptr, step: Step) {},
+		emit = proc(data: rawptr, ev: Event) {},
+	}
+}
+
+@(test)
+test_verify_remediation_leaves_service_started :: proc(t: ^testing.T) {
+	stale := Sim{port = 49323, held_port = -1, crash_once = true}
+	ok, failed := run_setup(sim_ops(&stale))
+	testing.expectf(t, ok, "stale_service at verify not remediated (failed at %v)", failed)
+	testing.expect(t, stale.running)
+	testing.expect_value(t, stale.starts, 2)
+
+	busy := Sim{port = 49323, held_port = 49323}
+	ok, failed = run_setup(sim_ops(&busy))
+	testing.expectf(t, ok, "port_in_use at verify not remediated (failed at %v)", failed)
+	testing.expect(t, busy.running)
+	testing.expect(t, busy.port != busy.held_port)
 }
 
 @(test)

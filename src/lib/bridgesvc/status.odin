@@ -66,9 +66,19 @@ credential_bridge_id :: proc(line: string) -> string {
 	return id if strings.has_prefix(id, "brg_") else ""
 }
 
+// read_runtime_status reads the runtime-status.json the bridge of a state dir wrote.
+read_runtime_status :: proc(state_dir: string) -> (r: Runtime_Status, ok: bool) {
+	data, err := os.read_entire_file_from_path(pjoin(state_dir, RUNTIME_STATUS_FILE), context.temp_allocator)
+	if err != nil do return {}, false
+	return parse_runtime_status(string(data), context.temp_allocator)
+}
+
 // gather_status reads one profile's status from disk (temp-allocated strings).
-// now is injected for tests.
-gather_status :: proc(host: Host, name: string, now: time.Time) -> Status {
+// now is injected for tests. A caller that just (re)started the bridge passes
+// since (unix seconds of the restart) and stale_pid (the pid of the bridge it
+// replaced): a runtime file written before the restart or by that old process
+// does not count as connected, because a SIGTERMed bridge never rewrites it.
+gather_status :: proc(host: Host, name: string, now: time.Time, since: i64 = 0, stale_pid := 0) -> Status {
 	l := layout_for(host, name)
 	s := Status{service = name, backend = backend_name(l.backend), state_dir = l.state_dir, vault = "unknown"}
 	s.hub = read_first_line(pjoin(l.state_dir, HUB_URL_FILE))
@@ -82,15 +92,13 @@ gather_status :: proc(host: Host, name: string, now: time.Time) -> Status {
 	s.bridge_id = credential_bridge_id(cred)
 	s.enrolled = s.bridge_id != ""
 	if p, ok := read_ports(l.state_dir); ok do s.bridge_port, s.endpoint_port = p[0], p[1]
-	data, err := os.read_entire_file_from_path(pjoin(l.state_dir, RUNTIME_STATUS_FILE), context.temp_allocator)
-	if err == nil {
-		if r, ok := parse_runtime_status(string(data), context.temp_allocator); ok {
-			fresh := time.diff(time.unix(r.updated_at, 0), now) <= RUNTIME_STATUS_MAX_AGE
-			s.connected = r.connected && fresh
-			if r.vault != "" do s.vault = r.vault
-			s.version = r.version
-			if s.bridge_id == "" do s.bridge_id = r.bridge_id
-		}
+	if r, ok := read_runtime_status(l.state_dir); ok {
+		fresh := time.diff(time.unix(r.updated_at, 0), now) <= RUNTIME_STATUS_MAX_AGE
+		current := r.updated_at >= since && (stale_pid == 0 || r.pid != stale_pid)
+		s.connected = r.connected && fresh && current
+		if r.vault != "" do s.vault = r.vault
+		s.version = r.version
+		if s.bridge_id == "" do s.bridge_id = r.bridge_id
 	}
 	return s
 }

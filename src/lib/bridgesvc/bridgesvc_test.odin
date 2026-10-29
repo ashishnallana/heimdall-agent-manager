@@ -69,6 +69,10 @@ test_layout_and_argv_per_os :: proc(t: ^testing.T) {
 	testing.expect(t, strings.has_suffix(w.state_dir, "Roaming/heimdall/bridges/heimdall-bridge-hub-example-com_work"))
 	testing.expect(t, strings.has_suffix(w.bin_dir, "Local/heimdall/bridges/heimdall-bridge-hub-example-com_work/bin"))
 	testing.expect_value(t, strings.join(service_argv(win, w, .Start), " ", context.temp_allocator), "schtasks /Run /TN \\heimdall-bridge-hub-example-com_work")
+	state := windows_task_state_argv(w)
+	testing.expect_value(t, state[0], "powershell.exe")
+	testing.expect_value(t, state[len(state) - 1], "(Get-ScheduledTask -TaskPath '\\' -TaskName 'heimdall-bridge-hub-example-com_work').State")
+	testing.expect(t, strings.contains(windows_task_state_argv(Layout{service_name = "heimdall-bridge-x'y"})[4], "'heimdall-bridge-x''y'"))
 
 	termux := Host{os = .Termux, home = "/data/home", prefix = "/data/usr"}
 	r := layout_for(termux, name)
@@ -183,6 +187,18 @@ test_status_json_from_state_dir :: proc(t: ^testing.T) {
 	// A stale runtime file does not claim a live connection.
 	stale := gather_status(host, name, time.time_add(now, 2 * RUNTIME_STATUS_MAX_AGE))
 	testing.expect(t, !stale.connected)
+
+	// After setup restarts the bridge, the replaced bridge's file (pid 42, never
+	// rewritten because it was SIGTERMed) and anything older than the restart do
+	// not count; the new bridge's first write does.
+	restart := time.to_unix_seconds(now)
+	testing.expect(t, !gather_status(host, name, now, restart, 42).connected)
+	testing.expect(t, !gather_status(host, name, now, restart + 5, 0).connected)
+	rt.pid = 43
+	_ = os.write_entire_file(pjoin(l.state_dir, RUNTIME_STATUS_FILE), transmute([]u8)runtime_status_json(rt, context.temp_allocator))
+	testing.expect(t, gather_status(host, name, now, restart, 42).connected)
+	r2, rok := read_runtime_status(l.state_dir)
+	testing.expect(t, rok && r2.pid == 43)
 
 	names := list_services(host)
 	testing.expect_value(t, len(names), 1)

@@ -72,12 +72,15 @@ bridge_service_exec :: proc(argv: []string) -> (ok: bool, output: string) {
 
 // bridge_service_running asks the supervisor whether the service is up.
 bridge_service_running :: proc(host: bridgesvc.Host, l: bridgesvc.Layout) -> bool {
+	if l.backend == .Schtasks {
+		ok, out := bridge_service_exec(bridgesvc.windows_task_state_argv(l))
+		return ok && out == "Running"
+	}
 	argv := bridgesvc.service_argv(host, l, .Status)
 	if argv == nil do return false
 	ok, out := bridge_service_exec(argv)
 	if !ok do return false
 	#partial switch l.backend {
-	case .Schtasks: return strings.contains(out, "Running")
 	case .Runit:    return strings.has_prefix(out, "run:")
 	case .Launchd:  return strings.contains(out, "state = running")
 	}
@@ -85,24 +88,39 @@ bridge_service_running :: proc(host: bridgesvc.Host, l: bridgesvc.Layout) -> boo
 }
 
 // bridge_service_action runs start/stop/restart for a resolved service. Windows
-// has no restart verb: End, then Run.
+// has no restart verb: End, then Run. launchd restarts reload the plist.
 bridge_service_action :: proc(host: bridgesvc.Host, name: string, action: bridgesvc.Action) -> (ok: bool, msg: string) {
 	l := bridgesvc.layout_for(host, name)
 	argv := bridgesvc.service_argv(host, l, action)
 	if argv == nil do return false, "no supported service manager on this platform"
+	if l.backend == .Launchd && action == .Restart do return bridge_launchd_reload(host, l)
 	ok, msg = bridge_service_exec(argv)
 	if l.backend == .Schtasks && action == .Restart {
 		ok, msg = bridge_service_exec(bridgesvc.service_argv(host, l, .Start))
 	}
-	// launchd: bootstrap of an already-loaded agent fails; kickstart it instead.
-	if !ok && l.backend == .Launchd && action == .Start {
-		ok, msg = bridge_service_exec(bridgesvc.service_argv(host, l, .Restart))
-	}
+	// launchd: bootstrap of an already-loaded agent fails; reload it instead.
+	if !ok && l.backend == .Launchd && action == .Start do return bridge_launchd_reload(host, l)
 	return ok, msg
 }
 
-bridge_service_status :: proc(host: bridgesvc.Host, name: string) -> bridgesvc.Status {
-	s := bridgesvc.gather_status(host, name, time.now())
+// bridge_launchd_reload restarts a LaunchAgent so launchd re-reads its plist:
+// `kickstart -k` only restarts the job definition launchd already loaded, which
+// would ignore a re-rendered plist (new ports, PATH, args) until logout. bootout
+// returns before the job is fully unloaded, so bootstrap is retried briefly;
+// kickstart is the last resort for a job that will not unload.
+bridge_launchd_reload :: proc(host: bridgesvc.Host, l: bridgesvc.Layout) -> (ok: bool, msg: string) {
+	_, _ = bridge_service_exec(bridgesvc.service_argv(host, l, .Stop))
+	for attempt in 0 ..< 10 {
+		if attempt > 0 do time.sleep(300 * time.Millisecond)
+		ok, msg = bridge_service_exec(bridgesvc.service_argv(host, l, .Start))
+		if ok do return
+	}
+	return bridge_service_exec(bridgesvc.service_argv(host, l, .Restart))
+}
+
+// since / stale_pid: see bridgesvc.gather_status (setup's Verify after a restart).
+bridge_service_status :: proc(host: bridgesvc.Host, name: string, since: i64 = 0, stale_pid := 0) -> bridgesvc.Status {
+	s := bridgesvc.gather_status(host, name, time.now(), since, stale_pid)
 	l := bridgesvc.layout_for(host, name)
 	if s.installed do s.running = bridge_service_running(host, l)
 	if !s.running do s.connected = false

@@ -29,6 +29,9 @@ Bridge_Setup :: struct {
 	staging:        string,
 	lock_path:      string,
 	pid:            int,
+	// Taken once, by the first Stage run: a remediation that re-stages after
+	// stopping the service must not forget that the previous install was running.
+	snapshot_taken: bool,
 	was_installed:  bool,
 	was_running:    bool,
 	copy_binaries:  bool,
@@ -36,6 +39,10 @@ Bridge_Setup :: struct {
 	backups:        map[string]Maybe(string),
 	ports:          [2]int,
 	enrolled_now:   bool,
+	// Set by every (re)start: Verify only trusts runtime status written after it,
+	// by a process other than the bridge that was running before.
+	restart_at:     i64,
+	stale_pid:      int,
 }
 
 bridge_setup_command :: proc(args: []string) -> bool {
@@ -150,8 +157,11 @@ bridge_setup_run :: proc(data: rawptr, step: bridgesvc.Step) -> bridgesvc.Step_R
 		return bridgesvc.lock_acquire(s.lock_path, s.pid, time.now(), bridge_os_pid_alive)
 
 	case .Stage:
-		s.was_installed = bridge_service_registered(s.host, l.service_name)
-		s.was_running = s.was_installed && bridge_service_running(s.host, l)
+		if !s.snapshot_taken {
+			s.snapshot_taken = true
+			s.was_installed = bridge_service_registered(s.host, l.service_name)
+			s.was_running = s.was_installed && bridge_service_running(s.host, l)
+		}
 		if !s.copy_binaries do return {ok = true, message = "skipped"}
 		if os.exists(s.staging) {
 			return {failure = .Partial_Install, message = fmt.tprintf("leftover staging dir %s from an interrupted setup", s.staging)}
@@ -221,7 +231,11 @@ bridge_setup_run :: proc(data: rawptr, step: bridgesvc.Step) -> bridgesvc.Step_R
 
 	case .Enroll:
 		token := bridgesvc.pjoin(l.state_dir, bridgesvc.TOKEN_FILE)
-		if bridgesvc.credential_bridge_id(bridgesvc.read_first_line(token)) != "" && !has_flag(s.args, "--new-bridge") {
+		reuse := strings.trim_space(option_value(s.args, "--reuse-bridge", ""))
+		current := bridgesvc.credential_bridge_id(bridgesvc.read_first_line(token))
+		// Already enrolled: skip, unless --new-bridge or --reuse-bridge names
+		// another bridge than the one this profile holds a credential for.
+		if current != "" && !has_flag(s.args, "--new-bridge") && (reuse == "" || reuse == current) {
 			return {ok = true, message = "skipped"}
 		}
 		argv := make([dynamic]string, context.temp_allocator)
@@ -229,25 +243,23 @@ bridge_setup_run :: proc(data: rawptr, step: bridgesvc.Step) -> bridgesvc.Step_R
 			"--config", bridgesvc.pjoin(l.state_dir, bridgesvc.CONFIG_FILE), "--bridge-token-file", token)
 		if has_flag(s.args, "--headless") do append(&argv, "--headless")
 		if has_flag(s.args, "--new-bridge") do append(&argv, "--new-bridge")
-		if id := strings.trim_space(option_value(s.args, "--reuse-bridge", "")); id != "" do append(&argv, "--reuse-bridge", id)
+		if reuse != "" do append(&argv, "--reuse-bridge", reuse)
 		if !bridge_setup_exec_inherit(argv[:]) do return {failure = .Fatal, message = "enrollment did not complete"}
 		s.enrolled_now = true
+		if current != "" do return {ok = true, message = fmt.tprintf("re-enrolled (was %s)", current)}
 		return {ok = true, message = "enrolled"}
 
 	case .Start:
-		action: bridgesvc.Action = .Restart if bridge_service_running(s.host, l) else .Start
-		ok, out := bridge_service_action(s.host, l.service_name, action)
-		if !ok do return {failure = .Stale_Service, message = fmt.tprintf("service %s failed: %s", bridgesvc.backend_name(l.backend), out)}
-		return {ok = true}
+		return bridge_setup_start(s)
 
 	case .Verify:
 		deadline := time.time_add(time.now(), BRIDGE_SETUP_VERIFY_TIMEOUT)
 		for time.diff(time.now(), deadline) > 0 {
-			st := bridge_service_status(s.host, l.service_name)
+			st := bridge_service_status(s.host, l.service_name, s.restart_at, s.stale_pid)
 			if st.running && st.connected do return {ok = true, message = fmt.tprintf("connected to %s (vault %s)", st.hub, st.vault)}
 			time.sleep(500 * time.Millisecond)
 		}
-		st := bridge_service_status(s.host, l.service_name)
+		st := bridge_service_status(s.host, l.service_name, s.restart_at, s.stale_pid)
 		log := bridgesvc.pjoin(l.data_dir, "logs", "bridge.err.log")
 		if !st.running {
 			if bridge_setup_port_busy(s.ports[0]) do return {failure = .Port_In_Use, message = fmt.tprintf("service is not running and port %d is held by another process", s.ports[0]), log = log}
@@ -256,6 +268,20 @@ bridge_setup_run :: proc(data: rawptr, step: bridgesvc.Step) -> bridgesvc.Step_R
 		return {failure = .Fatal, message = "service runs but did not connect to the hub in time", log = log}
 	}
 	return {failure = .Fatal, message = "unknown step"}
+}
+
+// bridge_setup_start (re)starts the service and records what Verify must not
+// mistake for the new bridge: the old bridge's runtime-status.json (it has no
+// SIGTERM handler, so it never writes connected=false) and anything older.
+bridge_setup_start :: proc(s: ^Bridge_Setup) -> bridgesvc.Step_Result {
+	l := s.layout
+	s.stale_pid = 0
+	if rt, ok := bridgesvc.read_runtime_status(l.state_dir); ok do s.stale_pid = rt.pid
+	s.restart_at = time.to_unix_seconds(time.now())
+	action: bridgesvc.Action = .Restart if bridge_service_running(s.host, l) else .Start
+	ok, out := bridge_service_action(s.host, l.service_name, action)
+	if !ok do return {failure = .Stale_Service, message = fmt.tprintf("service %s failed: %s", bridgesvc.backend_name(l.backend), out)}
+	return {ok = true}
 }
 
 // bridge_setup_register renders the service definition and registers it.
@@ -291,39 +317,43 @@ bridge_setup_register :: proc(s: ^Bridge_Setup) -> bridgesvc.Step_Result {
 	return {ok = true, message = fmt.tprintf("%s rendered", bridgesvc.backend_name(l.backend))}
 }
 
+// bridge_setup_remediate executes bridgesvc.remediation_plan for a known failure.
 bridge_setup_remediate :: proc(data: rawptr, step: bridgesvc.Step, failure: bridgesvc.Failure) -> (bool, string) {
 	s := (^Bridge_Setup)(data)
 	l := s.layout
-	#partial switch failure {
-	case .Stale_Lock:
-		return bridgesvc.lock_break(s.lock_path), "removed the dead owner's install lock"
-	case .Partial_Install:
-		_ = os.remove_all(s.staging)
-		if !os.exists(l.bin_dir) && os.exists(strings.concatenate({l.bin_dir, ".bak"}, context.temp_allocator)) {
-			_ = os.rename(strings.concatenate({l.bin_dir, ".bak"}, context.temp_allocator), l.bin_dir)
+	plan := bridgesvc.remediation_plan(step, failure)
+	if plan == {} do return false, "no remediation"
+	bak := strings.concatenate({l.bin_dir, ".bak"}, context.temp_allocator)
+	did := make([dynamic]string, context.temp_allocator)
+	for r in plan {
+		switch r {
+		case .Break_Lock:
+			if !bridgesvc.lock_break(s.lock_path) do return false, "cannot remove the dead owner's install lock"
+			append(&did, "removed the dead owner's install lock")
+		case .Discard_Staging:
+			_ = os.remove_all(s.staging)
+			if !os.exists(l.bin_dir) && os.exists(bak) do _ = os.rename(bak, l.bin_dir)
+			append(&did, "discarded the partial install")
+		case .Restage:
+			if res := bridge_setup_run(data, .Stage); !res.ok do return false, fmt.tprintf("re-staging failed: %s", res.message)
+			append(&did, "re-staged the bundle")
+		case .Stop_Service:
+			_, _ = bridge_service_action(s.host, l.service_name, .Stop)
+			append(&did, "stopped the service")
+		case .Reallocate_Ports:
+			ports, _, ok := bridgesvc.allocate_ports(l.state_root, l.state_dir, bridge_setup_port_busy)
+			if !ok do return false, "no free loopback ports"
+			s.ports = ports
+			append(&did, fmt.tprintf("moved to ports %d/%d", ports[0], ports[1]))
+		case .Register:
+			if res := bridge_setup_register(s); !res.ok do return false, fmt.tprintf("re-registering failed: %s", res.message)
+			append(&did, "re-rendered and re-registered the service")
+		case .Start_Service:
+			if res := bridge_setup_start(s); !res.ok do return false, res.message
+			append(&did, "started it again")
 		}
-		if step == .Binaries {
-			// Re-stage before retrying the swap.
-			r := bridge_setup_run(data, .Stage)
-			return r.ok, "discarded the partial install and re-staged the bundle"
-		}
-		return true, "discarded the partial staging directory"
-	case .Stale_Service:
-		_, _ = bridge_service_action(s.host, l.service_name, .Stop)
-		if step == .Start || step == .Verify {
-			r := bridge_setup_register(s)
-			return r.ok, "stopped the stale service and re-registered it"
-		}
-		return true, "stopped the running service"
-	case .Port_In_Use:
-		_, _ = bridge_service_action(s.host, l.service_name, .Stop)
-		ports, _, ok := bridgesvc.allocate_ports(l.state_root, l.state_dir, bridge_setup_port_busy)
-		if !ok do return false, "no free loopback ports"
-		s.ports = ports
-		r := bridge_setup_register(s)
-		return r.ok, fmt.tprintf("moved to ports %d/%d and re-rendered the service", ports[0], ports[1])
 	}
-	return false, "no remediation"
+	return true, strings.join(did[:], ", ", context.temp_allocator)
 }
 
 bridge_setup_undo :: proc(data: rawptr, step: bridgesvc.Step) {

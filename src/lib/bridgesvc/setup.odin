@@ -62,6 +62,39 @@ FAILURE_NAMES := [Failure]string {
 	.Fatal           = "fatal",
 }
 
+// Remedy is one remediation action; the caller executes a plan in enum order.
+Remedy :: enum {
+	Break_Lock, // remove the dead owner's install lock
+	Discard_Staging, // drop the half-copied staging dir; put bin.bak back if bin/ is gone
+	Restage, // copy the bundle into staging again
+	Stop_Service,
+	Reallocate_Ports, // move to free loopback ports
+	Register, // re-render and re-register the service file
+	Start_Service, // start it again: a Verify retry only polls, it starts nothing
+}
+Remedies :: bit_set[Remedy]
+
+// remediation_plan says how to fix a known failure at a step so that re-running
+// that step can succeed. Fatal/None have no plan.
+remediation_plan :: proc(step: Step, failure: Failure) -> Remedies {
+	plan: Remedies
+	#partial switch failure {
+	case .Stale_Lock:
+		plan = {.Break_Lock}
+	case .Partial_Install:
+		plan = {.Discard_Staging}
+		if step == .Binaries do plan += {.Restage}
+	case .Stale_Service:
+		plan = {.Stop_Service}
+		if step == .Start || step == .Verify do plan += {.Register}
+		if step == .Verify do plan += {.Start_Service}
+	case .Port_In_Use:
+		plan = {.Stop_Service, .Reallocate_Ports, .Register}
+		if step == .Verify do plan += {.Start_Service}
+	}
+	return plan
+}
+
 Step_Result :: struct {
 	ok:      bool,
 	failure: Failure,
@@ -149,18 +182,44 @@ LOCK_MAX_AGE :: 30 * time.Minute
 
 Pid_Alive_Proc :: #type proc(pid: int) -> bool
 
-// lock_acquire creates path exclusively with "<pid> <unix seconds>". When it is
-// held, it reports Stale_Lock if the owner is dead or the lock too old (the caller
-// remediates with lock_break), otherwise Fatal.
+// A lock file this young that cannot be parsed is being written by its owner
+// (only reachable where hard links are unsupported); it is held, not stale.
+LOCK_WRITE_GRACE :: 10 * time.Second
+
+// lock_acquire atomically creates path holding "<pid> <unix seconds>": the content
+// is written to a private temp file first and hard-linked into place, so another
+// setup never sees a half-written lock. When it is held, it reports Stale_Lock if
+// the owner is dead or the lock too old (the caller remediates with lock_break),
+// otherwise Fatal.
 lock_acquire :: proc(path: string, pid: int, now: time.Time, alive: Pid_Alive_Proc) -> Step_Result {
+	content := fmt.tprintf("%d %d\n", pid, time.to_unix_seconds(now))
+	tmp := fmt.tprintf("%s.%d.tmp", path, pid)
+	if os.write_entire_file_from_string(tmp, content, {.Read_User, .Write_User}) == nil {
+		lerr := os.link(tmp, path)
+		_ = os.remove(tmp)
+		if lerr == nil do return {ok = true}
+		if os.exists(path) do return lock_held(path, now, alive)
+		// No hard links on this filesystem: fall back to an exclusive create.
+	}
 	f, err := os.open(path, {.Write, .Create, .Excl}, {.Read_User, .Write_User})
 	if err == nil {
-		_, _ = os.write_string(f, fmt.tprintf("%d %d\n", pid, time.to_unix_seconds(now)))
+		_, _ = os.write_string(f, content)
 		os.close(f)
 		return {ok = true}
 	}
+	return lock_held(path, now, alive)
+}
+
+@(private = "file")
+lock_held :: proc(path: string, now: time.Time, alive: Pid_Alive_Proc) -> Step_Result {
 	owner, started, parsed := lock_read(path)
-	if !parsed || !alive(owner) || time.diff(time.unix(started, 0), now) > LOCK_MAX_AGE {
+	if !parsed {
+		if mtime, merr := os.modification_time_by_path(path); merr == nil && time.diff(mtime, now) < LOCK_WRITE_GRACE {
+			return {failure = .Fatal, message = fmt.tprintf("another setup is creating the install lock %s", path)}
+		}
+		return {failure = .Stale_Lock, message = fmt.tprintf("install lock %s is unreadable", path)}
+	}
+	if !alive(owner) || time.diff(time.unix(started, 0), now) > LOCK_MAX_AGE {
 		return {failure = .Stale_Lock, message = fmt.tprintf("install lock %s is held by dead or stale owner pid %d", path, owner)}
 	}
 	return {failure = .Fatal, message = fmt.tprintf("another setup (pid %d) is running for this profile", owner)}

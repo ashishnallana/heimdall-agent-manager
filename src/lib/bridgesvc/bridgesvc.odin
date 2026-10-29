@@ -247,6 +247,17 @@ service_argv :: proc(host: Host, l: Layout, action: Action) -> []string {
 	return a[:]
 }
 
+// windows_task_state_argv asks PowerShell for the Scheduled Task's state. The
+// ScheduledTask State enum prints as "Running" on every Windows display language,
+// unlike `schtasks /Query`, whose Status column is localized.
+windows_task_state_argv :: proc(l: Layout) -> []string {
+	// --service names are only prefix-checked: keep them inside the quoted literal.
+	quoted, _ := strings.replace_all(l.service_name, "'", "''", context.temp_allocator)
+	a := make([dynamic]string, context.temp_allocator)
+	append(&a, "powershell.exe", "-NoProfile", "-NonInteractive", "-Command", fmt.tprintf("(Get-ScheduledTask -TaskPath '\\' -TaskName '%s').State", quoted))
+	return a[:]
+}
+
 // ---- ports -----------------------------------------------------------------
 
 // parse_ports reads a flat JSON integer list such as "[49323, 49324]".

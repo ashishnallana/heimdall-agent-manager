@@ -41,25 +41,27 @@ executable). Steps, in order:
 
 | step | does | undo on rollback |
 |---|---|---|
-| `lock` | `<state dir>/.install.lock` = `"<pid> <unix seconds>"`, created exclusively | released |
-| `stage` | records whether the old service was installed/running; copies bundle binaries to `<data dir>/.staging` (`skipped` when run from the installed `bin/`) | staging removed |
+| `lock` | `<state dir>/.install.lock` = `"<pid> <unix seconds>"`, written to a temp file and hard-linked into place (exclusive create where hard links are unsupported), so it is never seen half-written | released |
+| `stage` | records (once) whether the old service was installed/running; copies bundle binaries to `<data dir>/.staging` (`skipped` when run from the installed `bin/`) | staging removed |
 | `binaries` | `bin/` -> `bin.bak/`, staging -> `bin/` | `bin.bak/` restored |
 | `config` | writes `config.toml` only when missing, `hub-url`, `profile`; refuses a state dir of another hub | previous files restored |
 | `ports` | allocate / keep the profile's ports | previous `ports.json` restored |
 | `service` | renders the service file **on every run** and registers it (daemon-reload + enable / `schtasks /Create /F`) | previous file restored, re-registered |
-| `enroll` | runs `bin/ham-bridge enroll` unless already enrolled (`skipped`); `--new-bridge` forces it | kept (credential stays valid; a re-run reuses it) |
-| `start` | restart if running, else start | service stopped |
-| `verify` | waits up to 45 s for `running && connected` (from the token-free status) | service stopped |
+| `enroll` | runs `bin/ham-bridge enroll` unless already enrolled (`skipped`); `--new-bridge`, or `--reuse-bridge` naming another bridge than the current credential's, forces it | kept (credential stays valid; a re-run reuses it) |
+| `start` | restart if running, else start; on macOS a restart is `bootout` + `bootstrap` so launchd re-reads the re-rendered plist | service stopped |
+| `verify` | waits up to 45 s for `running && connected` (from the token-free status), counting only a `runtime-status.json` written after the (re)start by a process other than the replaced bridge | service stopped |
 
 When a step fails with a **known** failure the engine remediates and retries it (at
 most 2 times), reporting every attempt:
 
 | failure | remediation |
 |---|---|
-| `stale_lock` | lock owner pid is dead, the lock is older than 30 min, or unreadable: remove it |
+| `stale_lock` | lock owner pid is dead, the lock is older than 30 min, or unreadable and older than 10 s: remove it (an unreadable lock younger than that is being written by a live setup and is `fatal`) |
 | `partial_install` | leftover/half-copied staging: discard and re-stage (restores `bin/` from `bin.bak/` if needed) |
-| `stale_service` | supervisor command failed or `bin/` is busy (Windows): stop the service, re-register |
-| `port_in_use` | service not running and its port is held by another process: stop, re-allocate ports, re-render |
+| `stale_service` | supervisor command failed or `bin/` is busy (Windows): stop the service; at `start`/`verify` also re-register; at `verify` also start it again |
+| `port_in_use` | service not running and its port is held by another process: stop, re-allocate ports, re-render; at `verify` also start it again |
+
+The plan per step and failure is `bridgesvc.remediation_plan`.
 
 Any other failure (`fatal`), or a known one that persists, rolls back every completed
 step in reverse order (the failed step first), and the previous install is started
@@ -74,7 +76,7 @@ must skip lines that do not parse as JSON objects.
 ```json
 {"step":"ports","state":"start","pct":44,"message":"","log":"","attempt":1}
 {"step":"ports","state":"ok","pct":55,"message":"bridge 49325, endpoint 49326","log":"","attempt":1}
-{"step":"verify","state":"retry","pct":88,"message":"service is not running; remediation: moved to ports 49327/49328 and re-rendered the service","log":"/home/u/.local/share/heimdall/bridges/heimdall-bridge-hub-example-com/logs/bridge.err.log","attempt":1,"failure":"port_in_use"}
+{"step":"verify","state":"retry","pct":88,"message":"service is not running and port 49325 is held by another process; remediation: stopped the service, moved to ports 49327/49328, re-rendered and re-registered the service, started it again","log":"/home/u/.local/share/heimdall/bridges/heimdall-bridge-hub-example-com/logs/bridge.err.log","attempt":1,"failure":"port_in_use"}
 {"step":"setup","state":"done","pct":100,"message":"bridge installed, enrolled and running","log":"","attempt":0}
 ```
 
