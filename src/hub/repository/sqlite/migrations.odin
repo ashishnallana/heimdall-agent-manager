@@ -583,7 +583,9 @@ MIGRATION_164_EXTENSION_VERSION_SYNC :: #load("migrations/164_extension_version_
 
 MIGRATION_165_PROVIDER_EXTENSION_UNINSTALL :: #load("migrations/165_provider_extension_uninstall.sql", string)
 
-migration_order :: [169]string {
+MIGRATION_166_EXTENSION_VERSION_SYNC :: #load("migrations/166_extension_version_sync_0_5_25.sql", string)
+
+migration_order :: [170]string {
 	"001_foundation.sql",
 	"002_owner_scoped_core.sql",
 	"003_device_tokens.sql",
@@ -753,6 +755,7 @@ migration_order :: [169]string {
 	"163_extension_version_sync_0_5_23.sql",
 	"164_extension_version_sync_0_5_24.sql",
 	"165_provider_extension_uninstall.sql",
+	"166_extension_version_sync_0_5_25.sql",
 }
 
 // stop_before is a TEST SEAM: when non-empty, the apply loop stops in front of
@@ -1232,6 +1235,7 @@ migration_sql :: proc(name, migrations_dir: string) -> string {
 			return string(data)
 		}
 	}
+	if name == "166_extension_version_sync_0_5_25.sql" do return strings.clone(MIGRATION_166_EXTENSION_VERSION_SYNC)
 	if name == "165_provider_extension_uninstall.sql" do return strings.clone(MIGRATION_165_PROVIDER_EXTENSION_UNINSTALL)
 	if name == "164_extension_version_sync_0_5_24.sql" do return strings.clone(MIGRATION_164_EXTENSION_VERSION_SYNC)
 	if name == "163_extension_version_sync_0_5_23.sql" do return strings.clone(MIGRATION_163_EXTENSION_VERSION_SYNC)
