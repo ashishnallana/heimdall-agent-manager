@@ -18,7 +18,12 @@ publish:
   owner: tanmayv
   repo: heimdall-agent-manager
 mac:
-  target: dmg
+  # dmg for people, zip for electron-updater (it cannot update from a dmg, F14).
+  # The App/Bridge/both .pkg is assembled from the signed .app by
+  # scripts/release/build-macos-pkg.sh (electron-builder's pkg has no choices).
+  target:
+    - dmg
+    - zip
   category: public.app-category.developer-tools
   icon: src/ui/electron/icon.png
   hardenedRuntime: true
@@ -36,12 +41,37 @@ win:
   # SHA-512 digest in latest.yml.
   verifyUpdateCodeSignature: false
 nsis:
+  # build/installer.nsh adds the App / Bridge / both page (REQ-ENR-4).
+  include: build/installer.nsh
   oneClick: false
   perMachine: false
   allowToChangeInstallationDirectory: true
   createDesktopShortcut: true
   createStartMenuShortcut: true
   runAfterFinish: true
+linux:
+  # F13: Linux desktop app. AppImage self-updates (electron-updater); the deb
+  # is updated by reinstalling it. Both ask App / Bridge / both on first run
+  # (src/ui/electron/installChoice.cts): neither format can run a per-user
+  # setup at install time.
+  target:
+    - AppImage
+    - deb
+  category: Development
+  icon: src/ui/electron/icon.png
+  # No public maintainer address yet; dpkg accepts a bare name.
+  maintainer: Heimdall maintainers
+  synopsis: Heimdall desktop app and Bridge
+deb:
+  depends:
+    - libgtk-3-0
+    - libnss3
+    - libxss1
+    - libxtst6
+    - xdg-utils
+    - libatspi2.0-0
+    - libuuid1
+    - libsecret-1-0
 afterSign: scripts/release/notarize-electron.cjs
 dmg:
   sign: true

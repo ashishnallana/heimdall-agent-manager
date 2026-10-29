@@ -9,6 +9,8 @@
 # Task, extensions and rollback all live in ham-bridge; updates use
 # `ham-bridge update --version`. Self-contained: it makes no assumption about
 # where it was fetched from (install.ninjy.ai, a release asset or main).
+# -Interactive drops --headless so ham-bridge opens the enrollment approval page
+# in a browser; the desktop installer's Bridge component uses it.
 #
 # Without arguments (the `| iex` form) these environment variables are read:
 #   HEIMDALL_HUB, HEIMDALL_BRIDGE_NAME (profile), HEIMDALL_VERSION.
@@ -26,6 +28,7 @@ param(
   [string]$ReuseBridge = '',
   [switch]$NewBridge,
   [switch]$JsonProgress,
+  [switch]$Interactive,
   [switch]$Uninstall,
   [switch]$Help,
   [Parameter(ValueFromRemainingArguments = $true)][string[]]$Rest = @()
@@ -40,6 +43,7 @@ function Invoke-HeimdallBootstrap {
     Write-Host @'
 Usage: install.ps1 [-Version TAG|latest] [-Bundle ZIP -ChecksumFile FILE]
                    [-Hub URL] [-Name PROFILE] [-NewBridge | -ReuseBridge ID] [-JsonProgress]
+                   [-Interactive]
                    [-Uninstall] [other ham-bridge flags, e.g. --yes]
 Without -Version, installs the newest promoted (non-prerelease) release.
 '@
@@ -54,7 +58,8 @@ Without -Version, installs the newest promoted (non-prerelease) release.
     if ($Bundle -or $ChecksumFile) {
       if (-not (Test-Path -PathType Leaf $Bundle) -or -not (Test-Path -PathType Leaf $ChecksumFile)) { throw '-Bundle and -ChecksumFile must both name files.' }
       $archive = Split-Path -Leaf $Bundle
-      if ($archive -notlike "heimdall-local-$HeimdallTarget-*.zip") { throw "Bundle $archive is not a $HeimdallTarget bundle." }
+      # The desktop app stages its bundle unversioned (heimdall-local-windows-amd64.zip).
+      if ($archive -notlike "heimdall-local-$HeimdallTarget-*.zip" -and $archive -cne "heimdall-local-$HeimdallTarget.zip") { throw "Bundle $archive is not a $HeimdallTarget bundle." }
       Copy-Item -LiteralPath $ChecksumFile $sums
       Copy-Item -LiteralPath $Bundle (Join-Path $work $archive)
     } else {
@@ -90,7 +95,7 @@ Without -Version, installs the newest promoted (non-prerelease) release.
     if (-not (Test-Path -PathType Leaf $bridge)) { throw 'The bundle has no bin\ham-bridge.exe.' }
 
     $argv = @()
-    if ($Uninstall) { $argv += 'uninstall' } else { $argv += @('setup', '--headless') }
+    if ($Uninstall) { $argv += 'uninstall' } elseif ($Interactive) { $argv += 'setup' } else { $argv += @('setup', '--headless') }
     if ($Hub) { $argv += @('--hub', $Hub) }
     if ($Name) { $argv += @('--profile', $Name) }
     if (-not $Uninstall) {

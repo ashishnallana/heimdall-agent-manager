@@ -5,7 +5,8 @@
 #
 # It only resolves a release, downloads this machine's bundle, verifies it
 # against the release's SHA256SUMS and runs `ham-bridge setup --headless` from
-# it with every other argument passed through. Installing, enrolling, the user
+# it with every other argument passed through (--interactive drops --headless
+# so ham-bridge opens the approval page: the desktop installers use it). Installing, enrolling, the user
 # service, extensions and rollback all live in ham-bridge (`ham-bridge setup
 # --help`); updates use `ham-bridge update --version`. Self-contained: it makes
 # no assumption about where it was fetched from (install.ninjy.ai, a release
@@ -15,10 +16,11 @@ usage() {
   cat <<'HELP'
 Usage: install.sh [--version TAG|latest] [--bundle FILE --checksum-file FILE]
                   [ham-bridge setup flags: --hub URL --profile NAME --new-bridge
-                   --reuse-bridge ID --json-progress ...]
+                   --reuse-bridge ID --json-progress ...] [--interactive]
        install.sh --uninstall [ham-bridge uninstall flags]
 Without --version, installs the newest promoted (non-prerelease) release.
 --bundle/--checksum-file install an already-downloaded bundle (verified first).
+--interactive opens the enrollment approval page in a browser (no --headless).
 --name NAME is accepted as --profile NAME. Everything else goes to ham-bridge.
 Requires curl, tar and sha256sum (or shasum). Run as your login user, not root.
 HELP
@@ -108,7 +110,7 @@ detect_target() {
 }
 main() {
   set -euo pipefail
-  local version='' bundle='' sums='' verb=setup
+  local version='' bundle='' sums='' verb=setup headless=--headless
   local -a pass=()
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -119,6 +121,7 @@ main() {
       --name) [ "$#" -ge 2 ] || fail '--name requires a value'; pass+=(--profile "$2"); shift 2 ;;
       --hub-url) [ "$#" -ge 2 ] || fail '--hub-url requires a value'; pass+=(--hub "$2"); shift 2 ;;
       --uninstall) verb=uninstall; shift ;;
+      --interactive) headless=''; shift ;;
       --help|-h) usage; return ;;
       *) pass+=("$1"); shift ;;
     esac
@@ -136,7 +139,8 @@ main() {
   if [ -n "$bundle" ] || [ -n "$sums" ]; then
     [ -f "$bundle" ] && [ -f "$sums" ] || fail '--bundle and --checksum-file must both name regular files.'
     archive="$(basename "$bundle")"
-    case "$archive" in heimdall-local-"$target"-*.tar.gz) ;; *) fail "Bundle $archive is not for this machine ($target)." ;; esac
+    # The desktop apps stage their bundle unversioned (heimdall-local-<target>.tar.gz).
+    case "$archive" in heimdall-local-"$target"-*.tar.gz|heimdall-local-"$target".tar.gz) ;; *) fail "Bundle $archive is not for this machine ($target)." ;; esac
     cp "$sums" "$work/SHA256SUMS"; cp "$bundle" "$work/$archive"
   else
     if [ -z "$version" ] || [ "$version" = latest ]; then
@@ -169,7 +173,7 @@ main() {
   if [ "$verb" = uninstall ]; then
     "$bridge" uninstall ${pass[@]+"${pass[@]}"} < /dev/null || status=$?
   else
-    "$bridge" setup --headless ${pass[@]+"${pass[@]}"} < /dev/null || status=$?
+    "$bridge" setup ${headless:+"$headless"} ${pass[@]+"${pass[@]}"} < /dev/null || status=$?
   fi
   exit "$status"
 }
