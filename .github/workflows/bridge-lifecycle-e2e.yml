@@ -76,6 +76,21 @@ jobs:
           echo "XDG_RUNTIME_DIR=/run/user/$uid" >> "$GITHUB_ENV"
           echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus" >> "$GITHUB_ENV"
           XDG_RUNTIME_DIR="/run/user/$uid" systemctl --user is-system-running || true
+      - name: Unlocked default keychain (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          # ham-bridge keeps its vault keyring in the default keychain
+          # (SecKeychainAddGenericPassword with no keychain). A desktop login has an
+          # unlocked login keychain; the runner's may be locked, which blocks or
+          # fails that call, so give the run its own unlocked default keychain.
+          set -euo pipefail
+          kc="$RUNNER_TEMP/e2e.keychain-db"
+          security create-keychain -p e2e "$kc"
+          security set-keychain-settings "$kc"
+          security unlock-keychain -p e2e "$kc"
+          security list-keychains -d user -s "$kc" $(security list-keychains -d user | tr -d '"')
+          security default-keychain -d user -s "$kc"
       - name: Build ham-hub and ham-bridge
         id: build
         shell: bash

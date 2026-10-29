@@ -29,10 +29,12 @@ import "core:sys/linux"
 import "core:sys/posix"
 
 KEY_SPEC_USER_KEYRING :: -4
+KEY_SPEC_PROCESS_KEYRING :: -2
 
 KEYCTL_GET_KEYRING_ID :: 0
 KEYCTL_REVOKE         :: 3
 KEYCTL_CLEAR          :: 7
+KEYCTL_LINK           :: 8
 KEYCTL_UNLINK         :: 9
 KEYCTL_SEARCH         :: 10
 KEYCTL_READ           :: 11
@@ -101,10 +103,25 @@ keystore_key_description :: proc(slot: Keystore_Slot, bridge_id: string) -> cstr
 	return strings.clone_to_cstring(strings.concatenate({KEY_DESC_KEYRING_PREFIX, bridge_id}, context.temp_allocator), context.temp_allocator)
 }
 
+// A new `user` key grants its owner only VIEW (perm 3f010000); READ, SEARCH and
+// REVOKE need possession, i.e. @u reachable from this process's own keyrings. A
+// login session links @u into the session keyring (pam_keyinit), but a bridge
+// started outside one (CI runner, ssh without PAM keyinit, container, a service
+// with a private keyring) does not possess @u: add_key succeeds and the read back
+// fails with EACCES. Linking @u into the process keyring (@p, created on demand,
+// private to this process and not inherited by children) grants possession
+// without touching the shared session keyring. Idempotent; best effort, since a
+// failure leaves the behaviour it would have had anyway.
+@(private="file")
+keystore_possess_user_keyring :: proc() {
+	_, _ = sys_keyctl(KEYCTL_LINK, transmute(uintptr)int(KEY_SPEC_USER_KEYRING), transmute(uintptr)int(KEY_SPEC_PROCESS_KEYRING))
+}
+
 // Finds the slot's key in @u (and keyrings linked under it) by exact description.
 // Deliberately not request_key(): see the file header.
 @(private="file")
 keystore_search_key :: proc(slot: Keystore_Slot, bridge_id: string) -> (key_id: int, ok: bool) {
+	keystore_possess_user_keyring()
 	key_desc := keystore_key_description(slot, bridge_id)
 	key_type := cstring(KEY_TYPE_USER)
 	found, err := sys_keyctl(
@@ -130,6 +147,7 @@ keystore_os_write_secret :: proc(slot: Keystore_Slot, bridge_id: string, data: [
 	if keystore_android_selected() do return keystore_android_write_secret(slot, bridge_id, data)
 	if len(data) == 0 do return -1
 	if slot != .Keyring do return keystore_identity_file_write(slot, bridge_id, data)
+	keystore_possess_user_keyring()
 	key_type := cstring(KEY_TYPE_USER)
 	_, err := sys_add_key(key_type, keystore_key_description(slot, bridge_id), raw_data(data), c.size_t(len(data)), KEY_SPEC_USER_KEYRING)
 	if err != 0 do blog_warn(.keystore_unavailable, blog_sym(.reason, .linux_keyring), blog_int(.errno, i64(err)))
