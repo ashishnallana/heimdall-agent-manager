@@ -1,8 +1,10 @@
 package main
 
-// `ham-bridge update --bundle DIR [--hub URL [--profile P] | --service NAME]
-// [--json-progress] [--detach]`: update an installed profile from an unpacked,
-// verified release bundle. The NEW binary runs `setup` for the profile
+// `ham-bridge update (--bundle DIR | --version TAG|latest) [--hub URL [--profile P]
+// | --service NAME] [--json-progress] [--detach]`: update an installed profile from
+// an unpacked, verified release bundle. --version downloads it first: resolve the
+// GitHub release, SHA-256 verify the bundle against its SHA256SUMS and unpack it
+// (release_fetch.odin); an unknown or unverifiable release changes nothing. The NEW binary runs `setup` for the profile
 // (bridgesvc.update_setup_argv), whose transaction stages, keeps bin.bak,
 // re-renders the service, refreshes provider extensions on every OS (Windows
 // included), restarts and waits for running + connected to the hub, and rolls back
@@ -18,16 +20,13 @@ import "core:strings"
 import "core:time"
 import bridgesvc "odin_test:lib/bridgesvc"
 
-BRIDGE_UPDATE_USAGE :: "usage: ham-bridge update --bundle DIR [--hub URL [--profile P] | --service NAME] [--json-progress] [--detach]"
+BRIDGE_UPDATE_USAGE :: "usage: ham-bridge update (--bundle DIR | --version TAG|latest) [--hub URL [--profile P] | --service NAME] [--json-progress] [--detach]"
 
 bridge_update_command :: proc(args: []string) -> bool {
 	bundle := strings.trim_space(option_value(args, "--bundle", ""))
-	if bundle == "" {
-		if option_value(args, "--version", "") != "" {
-			fmt.eprintln("ham-bridge update: --version is not supported yet (release download + verify lands with the bootstrap rework); download and verify the release bundle and pass --bundle DIR (or update from Heimdall: Settings -> Bridges -> Update)")
-		} else {
-			fmt.eprintln(BRIDGE_UPDATE_USAGE)
-		}
+	version := strings.trim_space(option_value(args, "--version", ""))
+	if (bundle == "") == (version == "") {
+		fmt.eprintln(BRIDGE_UPDATE_USAGE)
 		return false
 	}
 	host := bridge_service_host()
@@ -44,6 +43,30 @@ bridge_update_command :: proc(args: []string) -> bool {
 		return false
 	}
 	profile := bridgesvc.read_first_line(bridgesvc.pjoin(l.state_dir, bridgesvc.PROFILE_FILE))
+	if version != "" {
+		target, blocked := bridge_release_target()
+		if blocked {
+			fmt.eprintfln("ham-bridge update: this binary was not built for this platform (%s); reinstall with the matching bundle", target)
+			return false
+		}
+		// Under the profile's data dir, not the system temp dir: a detached update
+		// outlives this process and still reads the unpacked bundle.
+		work := bridgesvc.pjoin(l.data_dir, "updates", "release")
+		_ = os.remove_all(work)
+		if bridge_make_directory_all(work) != nil {
+			fmt.eprintfln("ham-bridge update: cannot create %s", work)
+			return false
+		}
+		fmt.printfln("ham-bridge update: resolving release %s for %s...", version, target)
+		dir, tag, ferr := bridge_release_fetch(version, target, work)
+		if ferr != "" {
+			_ = os.remove_all(work)
+			fmt.eprintfln("ham-bridge update: %s; nothing was changed", ferr)
+			return false
+		}
+		fmt.printfln("ham-bridge update: %s downloaded and SHA-256 verified", tag)
+		bundle = dir
+	}
 	exe := bridgesvc.update_bundle_exe(host, bundle, proc(p: string) -> bool {return os.is_file(p)})
 	if exe == "" {
 		fmt.eprintfln("ham-bridge update: %s has no %s (looked in it and in its bin/)", bundle, bridgesvc.exe_name(host, "ham-bridge"))
