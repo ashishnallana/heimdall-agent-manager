@@ -16,6 +16,7 @@ import "core:sync"
 import "core:thread"
 import "core:time"
 import "core:unicode/utf8"
+import bridgesvc "odin_test:lib/bridgesvc"
 import contracts "odin_test:contracts"
 import cfg_lib "odin_test:lib/config"
 import httpc "odin_test:lib/httpc"
@@ -1600,6 +1601,25 @@ bridge_update_launch_supervisor :: proc(
 // installed is trusted: a script from the cwd, the data dir or an earlier update
 // would speak another version's interface, so its absence aborts the update
 // before anything is stopped.
+// bridge_update_via_ham_bridge: use the staged binary's `ham-bridge update` when
+// this bridge runs as a bridgesvc profile from that profile's bin/ and the target
+// is not older than this version (older binaries have no `update` subcommand and
+// would start a second bridge instead). Legacy fixed-name installs keep the script.
+bridge_update_via_ham_bridge :: proc(target_version: string) -> (service: string, ok: bool) {
+	host := bridge_service_host()
+	name, registered := bridge_enroll_service_for(host, os.args)
+	if !registered || !strings.has_prefix(name, bridgesvc.SERVICE_PREFIX) do return "", false
+	exe, _ := os.get_executable_path(context.temp_allocator)
+	l := bridgesvc.layout_for(host, name)
+	norm :: proc(p: string) -> string {
+		out, _ := strings.replace_all(strings.trim_right(p, "/\\"), "\\", "/", context.temp_allocator)
+		return out
+	}
+	if exe == "" || norm(bridgesvc.pdir(exe)) != norm(l.bin_dir) do return "", false
+	if bridge_provider_extension_version_compare(target_version, contracts.APP_VERSION) < 0 do return "", false
+	return name, true
+}
+
 bridge_update_stage_supervisor :: proc(stage_dir, target: string) -> (ok: bool, detail: string) {
 	name := BRIDGE_UPDATE_SUPERVISOR_NAME
 	// Never fall back to a copy an earlier update left at target.
@@ -1926,6 +1946,18 @@ bridge_runtime_apply_update :: proc(
 		return false, bridge_update_pty_stop_failure(stop_pty_exit, stop_pty_timed_out, stop_pty_err)
 	}
 	_ = bridge_update_send_progress(conn, command_id, "pty_host_stopped", 88, "Bridge-owned PTY host and agent processes stopped.")
+
+	// 9a. A bridgesvc profile install updating to a version that has
+	// `ham-bridge update` hands off to the STAGED binary's transactional update
+	// (setup: bin.bak, service re-render, extensions on every OS, health incl. the
+	// hub connection, rollback). This process is NOT exited here: setup restarts the
+	// service itself, and must see it running to restart the old bridge on rollback.
+	if service, use := bridge_update_via_ham_bridge(target_version); use {
+		argv := []string{bridge_binary, "update", "--bundle", bridgesvc.pdir(bridge_binary), "--service", service, "--detach"}
+		_ = bridge_update_send_progress(conn, command_id, "restarting", 95, "PTY host stopped. Handing off to ham-bridge update...")
+		if bridge_os_spawn_new_session(argv) do return true, "restarting"
+		fmt.println("bridge update: ham-bridge update could not start; falling back to the supervisor script")
+	}
 
 	// 9. Spawn the out-of-process supervisor through the injectable argv seam.
 	// No shell command string is involved, so paths and URLs remain data and the
