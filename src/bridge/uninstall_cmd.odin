@@ -171,7 +171,10 @@ bridge_uninstall_remove :: proc(u: ^Bridge_Uninstall, paths: []string) -> (remov
 	still := make([dynamic]string, context.temp_allocator)
 	for p in paths {
 		if p == "" || !os.exists(p) do continue
-		_ = os.remove_all(p)
+		// core:os remove_all on POSIX (darwin) opendir()s first and never unlinks a
+		// regular file (ENOTDIR), so a launchd plist would be left behind.
+		if os.is_dir(p) do _ = os.remove_all(p)
+		else do _ = os.remove(p)
 		if os.exists(p) do append(&still, p)
 		else do removed += 1
 	}

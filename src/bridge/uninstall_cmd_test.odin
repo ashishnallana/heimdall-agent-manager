@@ -1,5 +1,6 @@
 package main
 
+import "core:fmt"
 import "core:os"
 import "core:strings"
 import "core:testing"
@@ -97,4 +98,25 @@ test_bridge_service_name_safe :: proc(t: ^testing.T) {
 	for bad in ([?]string{"heimdall-bridge", "heimdall-bridge-", "ham-bridge", "works.earendil.heimdall-bridge", "heimdall-bridge-x/../../..", "heimdall-bridge-x\\..\\..", "heimdall-bridge-A"}) {
 		testing.expectf(t, !bridge_service_name_safe(bad), "%q must be refused", bad)
 	}
+}
+
+// Unregister removes a single file (a launchd plist or systemd unit) as well as a
+// directory: core:os remove_all on darwin cannot unlink a regular file.
+@(test)
+test_bridge_uninstall_remove_file_and_dir :: proc(t: ^testing.T) {
+	tmp, _ := os.temp_directory(context.allocator)
+	defer delete(tmp)
+	root := fmt.tprintf("%s/heimdall-uninstall-remove-%d", tmp, time.to_unix_nanoseconds(time.now()))
+	dir := strings.concatenate({root, "/svc.d"}, context.temp_allocator)
+	file := strings.concatenate({root, "/svc.plist"}, context.temp_allocator)
+	testing.expect(t, os.make_directory_all(strings.concatenate({dir, "/sub"}, context.temp_allocator)) == nil, "fixture dir")
+	testing.expect(t, os.write_entire_file(strings.concatenate({dir, "/sub/x"}, context.temp_allocator), "x") == nil, "fixture dir file")
+	testing.expect(t, os.write_entire_file(file, "<plist/>") == nil, "fixture file")
+	defer os.remove_all(root)
+
+	removed, busy, left := bridge_uninstall_remove(nil, {file, dir, strings.concatenate({root, "/missing"}, context.temp_allocator)})
+	testing.expect_value(t, removed, 2)
+	testing.expect(t, !busy, left)
+	testing.expect(t, !os.exists(file), "the plist file is gone")
+	testing.expect(t, !os.exists(dir), "the directory is gone")
 }
