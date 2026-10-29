@@ -215,3 +215,58 @@ test_hub_from_legacy_config :: proc(t: ^testing.T) {
 	_ = os.write_entire_file_from_string(path, string("[daemon]\nurl = \"https://hub.example.com\"\n"))
 	testing.expect_value(t, hub_from_config(path), "https://hub.example.com")
 }
+
+@(test)
+test_needs_reenrollment_marker_and_state :: proc(t: ^testing.T) {
+	home := make_temp_root(t, "reenroll")
+	defer os.remove_all(home)
+	host := Host{os = .Linux, home = home, uid = 1000}
+	name := "heimdall-bridge-hub-example-com"
+	l := layout_for(host, name)
+	testing.expect(t, os.make_directory_all(l.state_dir) == nil)
+	testing.expect(t, os.make_directory_all(pdir(l.service_file)) == nil)
+	_ = os.write_entire_file_from_string(l.service_file, "[Unit]\n")
+	_ = os.write_entire_file_from_string(pjoin(l.state_dir, TOKEN_FILE), "heimdall-bridge-credential/v1 s3cret brg_old\n")
+	testing.expect_value(t, gather_status(host, name, time.now()).state, "stopped")
+
+	// A revoked bridge: stable needs_reenrollment with its recovery command.
+	m := Reenroll_Marker{bridge_id = "brg_old", hub = "https://hub.example.com", reason = "revoked", hint = "ham-bridge enroll --hub https://hub.example.com", at = 1}
+	testing.expect(t, write_reenroll_marker(l.state_dir, m))
+	testing.expect(t, !os.exists(pjoin(l.state_dir, NEEDS_REENROLL_FILE + ".tmp")), "no temp file left")
+	s := gather_status(host, name, time.now())
+	testing.expect(t, s.needs_reenrollment)
+	testing.expect_value(t, s.state, "needs_reenrollment")
+	testing.expect_value(t, s.reenroll_reason, "revoked")
+	text := status_json(s, context.temp_allocator)
+	testing.expect(t, strings.contains(text, `"state":"needs_reenrollment"`), text)
+	testing.expect(t, strings.contains(text, `"reenroll_hint":"ham-bridge enroll --hub https://hub.example.com"`), text)
+	testing.expect(t, !strings.contains(text, "s3cret"))
+
+	// Credential deleted by a rejected refresh: still needs re-enrollment, and the
+	// marker names the bridge.
+	_ = os.remove(pjoin(l.state_dir, TOKEN_FILE))
+	s2 := gather_status(host, name, time.now())
+	testing.expect(t, s2.needs_reenrollment)
+	testing.expect_value(t, s2.bridge_id, "brg_old")
+
+	// A newly enrolled bridge makes an old bridge's marker moot.
+	_ = os.write_entire_file_from_string(pjoin(l.state_dir, TOKEN_FILE), "heimdall-bridge-credential/v1 s3cret brg_new\n")
+	testing.expect(t, !gather_status(host, name, time.now()).needs_reenrollment)
+	testing.expect(t, reenroll_marker_applies(m, false, ""))
+	testing.expect(t, reenroll_marker_applies(m, true, "brg_old"))
+	testing.expect(t, !reenroll_marker_applies(m, true, "brg_new"))
+
+	clear_reenroll_marker(l.state_dir)
+	_, still := read_reenroll_marker(l.state_dir)
+	testing.expect(t, !still)
+}
+
+@(test)
+test_status_state_words :: proc(t: ^testing.T) {
+	testing.expect_value(t, status_state(Status{}), "not_installed")
+	testing.expect_value(t, status_state(Status{installed = true}), "not_enrolled")
+	testing.expect_value(t, status_state(Status{installed = true, enrolled = true}), "stopped")
+	testing.expect_value(t, status_state(Status{installed = true, enrolled = true, running = true}), "disconnected")
+	testing.expect_value(t, status_state(Status{installed = true, enrolled = true, running = true, connected = true}), "connected")
+	testing.expect_value(t, status_state(Status{installed = true, enrolled = true, running = true, connected = true, needs_reenrollment = true}), "needs_reenrollment")
+}

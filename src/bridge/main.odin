@@ -133,7 +133,7 @@ main :: proc() {
 			fmt.eprintln("  There is no enrollment token: approval happens in the browser.")
 			fmt.eprintln("  Enrollment is approved in the browser, so no secret is copied to this machine.")
 			fmt.eprintln("")
-			fmt.eprintln("    ham-bridge enroll --hub https://your-hub-url [--bridge-token-file PATH] [--headless] [--approval-base-url URL] [--reuse-bridge BRIDGE_ID | --new-bridge]")
+			fmt.eprintln("    ham-bridge enroll --hub https://your-hub-url [--bridge-token-file PATH] [--headless] [--json-progress] [--approval-base-url URL] [--reuse-bridge BRIDGE_ID | --new-bridge] [--replace-other-account]")
 			os.exit(1)
 		}
 		if !bridge_enroll_device_command(os.args) do os.exit(3 if bridge_enroll_service_start_failed else 1)
@@ -165,7 +165,17 @@ main :: proc() {
 	//
 	// Enrollment returns from main after restarting the registered service; this
 	// guard applies only to ordinary runtime starts.
-	if bridge_refuse_tokenless_start(bridge_config) do os.exit(1)
+	// F21: a profile the hub refused (revoked, refresh 401, vault key never delivered)
+	// parks until it is re-enrolled instead of exiting non-zero into a crash loop.
+	if m, pending := bridge_reenroll_pending(cfg_lib.config_path_from_args(os.args), bridge_config.daemon_id); pending {
+		bridge_reenroll_park(cfg_lib.config_path_from_args(os.args), m)
+	}
+	if bridge_refuse_tokenless_start(bridge_config) {
+		config_path := cfg_lib.config_path_from_args(os.args)
+		bridge_reenroll_mark(config_path, bridge_config.daemon_url, bridge_config.daemon_id, .Credential_Missing)
+		if m, pending := bridge_reenroll_pending(config_path, bridge_config.daemon_id); pending do bridge_reenroll_park(config_path, m)
+		os.exit(1)
+	}
 	// Multi-bridge isolation: bind vault state to the configured hub and refuse a hub
 	// mismatch or a second instance on the same config/scope.
 	if !bridge_bind_runtime_hub(bridge_config, cfg_lib.config_path_from_args(os.args)) do os.exit(1)
@@ -236,7 +246,7 @@ print_usage :: proc() {
 	fmt.println("ham-bridge", contracts.APP_VERSION, "protocol", contracts.PROTOCOL_VERSION)
 	fmt.println("usage: ham-bridge [--config <path>] [--bind-host 127.0.0.1] [--port 49323] [--daemon-url URL|--hub URL] [--daemon-id ID] [--bridge-token TOKEN|--bridge-token-file PATH] [--chunk-bytes N] [--local-endpoint-port PORT] [--local-run-dir DIR] [--no-local-proxy] [--agent-command CMD]")
 	fmt.println("bridge runtime: ham-wrapper bridge-runtime --bridge-endpoint unix:/run/heimdall/bridge.sock --agent-token hlat_... --agent-instance-id inst_... --provider codex --model gpt-6.1-sol --run-dir <dir> -- <agent-command>")
-	fmt.println("enroll: ham-bridge enroll --hub https://hub.example.com [--bridge-token-file PATH] [--headless] [--approval-base-url URL] [--reuse-bridge BRIDGE_ID | --new-bridge]")
+	fmt.println("enroll: ham-bridge enroll --hub https://hub.example.com [--bridge-token-file PATH] [--headless] [--json-progress] [--approval-base-url URL] [--reuse-bridge BRIDGE_ID | --new-bridge] [--replace-other-account]")
 	fmt.println("        opens the approval page when possible; --headless suppresses it; no enrollment token is needed")
 	fmt.println("        asks the approver to reuse this config's bridge id (or --reuse-bridge BRIDGE_ID); --new-bridge asks for a new one")
 	fmt.println("service: ham-bridge service start|stop|restart|status [--hub URL [--profile P] | --service NAME] [--json]")

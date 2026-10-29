@@ -265,6 +265,11 @@ Grant_Store :: struct {
 	grants:   map[string]Grant,        // keyed by device_code
 	by_user_code: map[string]string,   // user_code -> device_code (for browser verify lookup, task 2)
 	rate:     map[string]Rate_Limit_Entry, // keyed by source IP
+	// epoch identifies this store's lifetime (the hub process): grants live only in
+	// memory, so a device that sees the epoch change while polling knows its
+	// device_code is gone and asks for a new one (audit F7/REQ-ENR-12). Not secret and
+	// the same for every grant, so it reveals nothing about any device_code.
+	epoch:    i64,
 }
 
 // Grant_Store_Config tunes TTL, polling interval, rate limit, and the
@@ -293,6 +298,7 @@ new_grant_store :: proc(config: Grant_Store_Config) -> Grant_Store {
 		grants = make(map[string]Grant),
 		by_user_code = make(map[string]string),
 		rate = make(map[string]Rate_Limit_Entry),
+		epoch = time.to_unix_nanoseconds(time.now()),
 	}
 }
 

@@ -2838,6 +2838,26 @@ revoke_bridge_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	auth_ctx, ok, auth_resp := require_auth(h.auth, req)
 	if !ok do return auth_resp
 	bridge_id := strings.trim_suffix(suffix_after(req.path, "/api/v1/bridges/"), "/revoke")
+	return bridge_revoke_respond(h, auth_ctx, bridge_id, req)
+}
+
+// bridge_self_revoke_handler: POST /api/v1/bridge/self/revoke. A bridge revokes
+// ITSELF with its own bearer token (audit F1): `ham-bridge enroll` replacing this
+// machine's enrollment by another account's retires the old bridge on the hub
+// instead of leaving it "offline" under the first account forever. The token names
+// exactly one bridge, so there is no id in the path to confuse.
+bridge_self_revoke_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Bridge_Handlers)(ctx)
+	token, token_ok := bearer_token(req)
+	if !token_ok do return respond_error(domain.domain_error(.Unauthenticated, "bridge bearer token is required"), req.request_id)
+	bridge_auth, bridge_ok, bridge_err := bridge_service.verify_bridge_token(h.bridges, token)
+	if !bridge_ok do return respond_error(bridge_err, req.request_id)
+	return bridge_revoke_respond(h, bridge_auth, bridge_auth.bridge_id, req)
+}
+
+// bridge_revoke_respond revokes bridge_id as auth_ctx (owner-checked) and retires
+// its vault identity, metrics and logs: the body shared by both revoke routes.
+bridge_revoke_respond :: proc(h: ^Bridge_Handlers, auth_ctx: contracts.Auth_Context, bridge_id: string, req: Request) -> Response {
 	bridge, revoke_ok, err := bridge_service.revoke_bridge(h.bridges, auth_ctx, bridge_id)
 	if !revoke_ok do return respond_error(err, req.request_id)
 	publish_bridge_changed(h.event_bus, bridge, "revoked")

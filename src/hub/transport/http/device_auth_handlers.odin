@@ -103,6 +103,14 @@ Device_Authorize_Wire :: struct {
 	// Advisory echo of the Hub's fingerprint (design §2.2 step 5); omitted for a
 	// non-bridge grant so the ELDA response shape is unchanged.
 	bridge_key_fingerprint:    string `json:"bridge_key_fingerprint,omitempty"`,
+	// The grant store's lifetime id, echoed on every poll: a different value there
+	// means the hub restarted and this device_code is gone (REQ-ENR-12).
+	grant_epoch:               string `json:"grant_epoch,omitempty"`,
+}
+
+// device_grant_epoch renders the grant store's epoch for the wire.
+device_grant_epoch :: proc(handlers: ^Device_Auth_Handlers) -> string {
+	return fmt.tprintf("%d", handlers.service.store.epoch)
 }
 
 device_authorize_handler :: proc(ctx: rawptr, req: Request) -> Response {
@@ -128,6 +136,7 @@ device_authorize_handler :: proc(ctx: rawptr, req: Request) -> Response {
 		verification_uri = result.verification_uri,
 		interval = result.interval, expires_in = result.expires_in,
 		bridge_key_fingerprint = result.bridge_key_fingerprint,
+		grant_epoch = device_grant_epoch(handlers),
 	}
 	if handlers.ui_origin != "" do out.verification_uri_complete = device_add_redirect_location(handlers.ui_origin)
 	return vault_respond(out, req)
@@ -583,6 +592,8 @@ Device_Token_Wire :: struct {
 	// REQ-EA: every vault-delivery grant is minted PENDING; a bridge that sees this
 	// writes nothing until the key is delivered and the hub commits.
 	enrollment_pending:      Maybe(bool) `json:"enrollment_pending,omitempty"`,
+	// See Device_Authorize_Wire.grant_epoch.
+	grant_epoch:             string `json:"grant_epoch,omitempty"`,
 }
 
 device_token_handler :: proc(ctx: rawptr, req: Request) -> Response {
@@ -637,6 +648,7 @@ device_token_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	case: // .Pending (covers unknown device_code too — anti-enumeration)
 		out.status = "pending"
 	}
+	out.grant_epoch = device_grant_epoch(handlers)
 	return vault_respond(out, req)
 }
 

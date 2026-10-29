@@ -523,3 +523,33 @@ test_typed_credential_replies_escape_non_secret_fields :: proc(t: ^testing.T) {
 	ticket := respond_success_typed(User_WS_Ticket_Reply{ticket = "uwst_abc", expires_in = 30}, "r", "")
 	testing.expect(t, strings.contains(ticket.body, `"data":{"ticket":"uwst_abc","expires_in":30}`), ticket.body)
 }
+
+// ===== POST /api/v1/bridge/self/revoke (audit F1: account replace) =====
+
+// A bridge revokes ITSELF with its own access token; nothing else revokes through
+// this route: no token and a refresh-kind token are refused, and a revoked token gets 401/403.
+@(test)
+test_bridge_self_revoke_uses_the_bridges_own_access_token :: proc(t: ^testing.T) {
+	// Handlers and the revoke's repository reads allocate on the per-request arena
+	// in production; mirror that so the leak tracker does not report them.
+	context.allocator = context.temp_allocator
+	f := setup_session_fixture(t)
+	defer teardown_session_fixture(f)
+	self_revoke := proc(f: ^Session_Fixture, bearer: string) -> Response {
+		headers := make([dynamic]contracts.HTTP_Header, context.temp_allocator)
+		if bearer != "" do append(&headers, contracts.HTTP_Header{name = "Authorization", value = fmt.tprintf("Bearer %s", bearer)})
+		return bridge_self_revoke_handler(rawptr(&f.bh), Request{method = "POST", path = "/api/v1/bridge/self/revoke", body = "{}", headers = headers[:], request_id = "req_self_revoke"})
+	}
+	testing.expect_value(t, self_revoke(f, "").status, 401)
+	refresh_resp := self_revoke(f, f.enrolled.refresh_token)
+	testing.expectf(t, refresh_resp.status == 401 || refresh_resp.status == 403, "a refresh token cannot revoke (got %d)", refresh_resp.status)
+	_, still_ok, _ := bridge_service.verify_bridge_token(&f.br_svc, f.enrolled.bridge_token)
+	testing.expect(t, still_ok, "the refused attempts left the bridge enrolled")
+
+	testing.expect_value(t, self_revoke(f, f.enrolled.bridge_token).status, 200)
+	_, revoked_ok, _ := bridge_service.verify_bridge_token(&f.br_svc, f.enrolled.bridge_token)
+	testing.expect(t, !revoked_ok, "the bridge's credential is dead after its self-revoke")
+	// Already revoked: refused (the bridge client counts 401/403 as "revoked").
+	again := self_revoke(f, f.enrolled.bridge_token)
+	testing.expectf(t, again.status == 401 || again.status == 403, "a revoked token is refused (got %d)", again.status)
+}
