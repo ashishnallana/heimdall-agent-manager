@@ -232,6 +232,29 @@ extension_test_request :: proc(
 		headers = f.user_headers,
 	}
 }
+// An install command as the bridge-update path creates it (the standalone
+// endpoint rejects web clients). Mirrors the 202 body that path tracks.
+extension_test_start_install :: proc(f: ^extension_handler_fixture, provider: string) -> Response {
+	@(static) seq: int
+	seq += 1
+	command := domain.Provider_Extension_Command {
+		command_id = fmt.tprintf("cmd_ext_test_%d_%d", seq, time.now()._nsec),
+		bridge_id  = f.bridge_id,
+		kind       = "install",
+		provider   = provider,
+		state      = "queued",
+	}
+	created, create_err := iface.provider_extension_command_create(&f.pr_repo, command)
+	if !created do return respond_error(create_err, "req_extension")
+	sent, send_err := extension_command_dispatch(&f.ph, command)
+	if !sent do return respond_error(send_err, "req_extension")
+	command.state = "dispatched"
+	_ = iface.provider_extension_command_save(&f.pr_repo, command)
+	result := respond_success(extension_command_json(command), "req_extension", "2026-07-22T10:00:00Z")
+	result.status = 202
+	return result
+}
+
 extension_test_status :: proc(
 	t: ^testing.T,
 	f: ^extension_handler_fixture,
@@ -320,10 +343,8 @@ test_extension_install_endpoint_dispatch_tracking_and_verified_completion :: pro
 	defer extension_test_teardown(f)
 	extension_test_status(t, f, "codex", "present", "absent")
 	path := fmt.tprintf("/api/v1/bridges/%s/providers/codex/extension-install", f.bridge_id)
-	response := bridge_provider_extension_install_handler(
-		rawptr(&f.ph),
-		extension_test_request(f, path),
-	)
+	_ = path
+	response := extension_test_start_install(f, "codex")
 	testing.expectf(
 		t,
 		response.status == 202,
@@ -345,11 +366,9 @@ test_extension_install_endpoint_dispatch_tracking_and_verified_completion :: pro
 	defer domain.provider_extension_commands_destroy(commands)
 	testing.expect_value(t, len(commands), 1)
 	testing.expect_value(t, commands[0].state, "dispatched")
-	duplicate := bridge_provider_extension_install_handler(
-		rawptr(&f.ph),
-		extension_test_request(f, path),
-	)
-	testing.expect_value(t, duplicate.status, 409)
+	// The web endpoint never dispatches a second install.
+	rejected := bridge_provider_extension_install_handler(rawptr(&f.ph), extension_test_request(f, path))
+	testing.expect_value(t, rejected.status, 403)
 	testing.expect_value(t, f.sink_rec.count, 1)
 	err := bridge_extension_frame(
 		&f.bh,
@@ -408,8 +427,11 @@ test_extension_install_endpoint_dispatch_tracking_and_verified_completion :: pro
 	testing.expect(t, strings.contains(tracking.body, "\"status\":\"succeeded\""))
 }
 
+// ENR-8: the web app cannot start a standalone extension install; only the
+// bridge (setup / update) installs. Unauthenticated and foreign callers still
+// get their usual answers, and nothing is ever dispatched to the bridge.
 @(test)
-test_extension_install_endpoint_auth_and_eligibility :: proc(t: ^testing.T) {
+test_extension_install_endpoint_rejects_web_clients :: proc(t: ^testing.T) {
 	f := extension_test_setup(t, "errors")
 	defer extension_test_teardown(f)
 	path := fmt.tprintf("/api/v1/bridges/%s/providers/codex/extension-install", f.bridge_id)
@@ -417,29 +439,22 @@ test_extension_install_endpoint_auth_and_eligibility :: proc(t: ^testing.T) {
 	req.headers = nil; req.remote_addr = "192.0.2.1:123"
 	response := bridge_provider_extension_install_handler(rawptr(&f.ph), req)
 	testing.expect_value(t, response.status, 401)
-	req = extension_test_request(f, path)
-	response = bridge_provider_extension_install_handler(rawptr(&f.ph), req)
-	testing.expect_value(t, response.status, 409)
-	req.path = fmt.tprintf(
-		"/api/v1/bridges/%s/providers/no-such-provider/extension-install",
-		f.bridge_id,
-	)
-	response = bridge_provider_extension_install_handler(rawptr(&f.ph), req)
-	testing.expect_value(t, response.status, 404)
-	req.path = fmt.tprintf("/api/v1/bridges/%s/providers/pi/extension-install", f.bridge_id)
-	response = bridge_provider_extension_install_handler(rawptr(&f.ph), req)
-	testing.expect_value(t, response.status, 422)
-	req.path = path
+	// Eligible provider, online bridge, owner session: still rejected.
 	extension_test_status(t, f, "codex", "present", "absent")
-	f.sink_rec.fail = true
+	for provider in ([]string{"codex", "claude", "antigravity", "no-such-provider"}) {
+		req = extension_test_request(f, fmt.tprintf("/api/v1/bridges/%s/providers/%s/extension-install", f.bridge_id, provider))
+		response = bridge_provider_extension_install_handler(rawptr(&f.ph), req)
+		testing.expectf(t, response.status == 403, "%s: expected 403, got %d: %s", provider, response.status, response.body)
+		testing.expectf(t, strings.contains(response.body, "update the bridge"), "%s: %s", provider, response.body)
+	}
+	other_headers := http_test_login(t, &f.auth_svc, "other-web-client")
+	req = extension_test_request(f, path)
+	req.headers = other_headers
 	response = bridge_provider_extension_install_handler(rawptr(&f.ph), req)
-	testing.expect(t, response.status >= 400, "send failure must not return Accepted")
-	f.sink_rec.fail = false
-	bridge, _, _ := iface.bridge_get_bridge(&f.br_repo, f.bridge_id)
-	bridge.status = .Offline
-	_, _, _ = iface.bridge_save_bridge(&f.br_repo, bridge)
-	response = bridge_provider_extension_install_handler(rawptr(&f.ph), req)
-	testing.expect(t, response.status >= 400, "offline bridge rejected")
+	testing.expect(t, response.status == 403 || response.status == 404, "other owner")
+	commands := extension_test_commands(t, f)
+	defer domain.provider_extension_commands_destroy(commands)
+	testing.expect_value(t, len(commands), 0)
 	testing.expect_value(t, f.sink_rec.count, 0)
 }
 
@@ -591,10 +606,7 @@ test_extension_command_owner_scope_and_stale_connection_frames :: proc(t: ^testi
 	defer extension_test_teardown(f)
 	extension_test_status(t, f, "codex", "present", "absent")
 	path := fmt.tprintf("/api/v1/bridges/%s/providers/codex/extension-install", f.bridge_id)
-	response := bridge_provider_extension_install_handler(
-		rawptr(&f.ph),
-		extension_test_request(f, path),
-	)
+	response := extension_test_start_install(f, "codex")
 	testing.expect_value(t, response.status, 202)
 	id := json_string(response.body, "command_id")
 	defer delete(id)
@@ -776,7 +788,7 @@ test_extension_manual_auto_overlap_waits_and_rechecks_durably :: proc(t: ^testin
 		extension_test_restart(t, f, update_id)
 		discovery_id := strings.clone(f.sink_rec.last_cmd.command_id)
 		path := fmt.tprintf("/api/v1/bridges/%s/providers/codex/extension-install", f.bridge_id)
-		response := bridge_provider_extension_install_handler(rawptr(&f.ph), extension_test_request(f, path))
+		response := extension_test_start_install(f, "codex")
 		testing.expect_value(t, response.status, 202)
 		manual_id := json_string(response.body, "command_id")
 		before := f.sink_rec.count
@@ -856,7 +868,7 @@ test_extension_overlap_rechecks_late_reports_and_repeated_manual_installs :: pro
 	discovery_id := strings.clone(f.sink_rec.last_cmd.command_id)
 	defer delete(discovery_id)
 	path := fmt.tprintf("/api/v1/bridges/%s/providers/codex/extension-install", f.bridge_id)
-	response := bridge_provider_extension_install_handler(rawptr(&f.ph), extension_test_request(f, path))
+	response := extension_test_start_install(f, "codex")
 	testing.expect_value(t, response.status, 202)
 	manual_id := json_string(response.body, "command_id")
 	defer delete(manual_id)
@@ -870,7 +882,7 @@ test_extension_overlap_rechecks_late_reports_and_repeated_manual_installs :: pro
 	recheck_id := strings.clone(f.sink_rec.last_cmd.command_id)
 	defer delete(recheck_id)
 	// A second manual action can overlap the recheck as well.
-	response = bridge_provider_extension_install_handler(rawptr(&f.ph), extension_test_request(f, path))
+	response = extension_test_start_install(f, "codex")
 	testing.expect_value(t, response.status, 202)
 	second_id := json_string(response.body, "command_id")
 	defer delete(second_id)

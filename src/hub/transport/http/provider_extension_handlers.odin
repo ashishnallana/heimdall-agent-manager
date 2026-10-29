@@ -91,58 +91,18 @@ extension_command_dispatch :: proc(
 	)
 }
 
-// Explicit user action. Installation acceptance is distinct from verified completion.
+// Standalone installs from the web app are rejected (F10, ENR-8): the bridge
+// installs and self-heals provider extensions during `ham-bridge setup` and
+// update (Settings > Bridges > Update with update_extensions). The route stays
+// so older clients get a clear answer instead of a 404; ownership is still
+// checked first so the response never reveals another user's bridge.
 bridge_provider_extension_install_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Provider_Handlers)(ctx)
 	bridge, ok, response := provider_owned_bridge(h, req, path_part(req.path, 4))
 	if !ok do return response
 	defer domain.bridge_destroy(&bridge)
-	if bridge.status != .Online || !project_service.bridge_runtime_registry_has_live(h.bridge_runtime_registry, bridge.bridge_id) do return respond_error(domain.domain_error(.Bridge_Offline, "bridge is not connected"), req.request_id)
-	provider := path_part(req.path, 6)
-	views, view_err := provider_service.list_bridge_providers(h.providers, bridge.bridge_id)
-	if view_err.code != .None do return respond_error(view_err, req.request_id)
-	defer provider_service.bridge_provider_views_destroy(views)
-	found, supported, present := false, false, false
-	for view in views {
-		if view.catalog.provider != provider do continue
-		found =
-			true; supported = extension_install_supported(view); present = view.detection_state == "present"
-	}
-	if !found do return respond_error(domain.domain_error(.Not_Found, "provider was not found"), req.request_id)
-	if !supported do return respond_error(domain.domain_error(.Unprocessable_Entity, "provider extension installation is unsupported"), req.request_id)
-	if !present do return respond_error(domain.domain_error(.Conflict, "provider CLI is not present on this bridge"), req.request_id)
-	sync.mutex_lock(&h.providers.extension_mutex)
-	defer sync.mutex_unlock(&h.providers.extension_mutex)
-	commands, list_err := iface.provider_extension_command_list(h.providers.repo, bridge.bridge_id)
-	if list_err.code != .None do return respond_error(list_err, req.request_id)
-	defer domain.provider_extension_commands_destroy(commands)
-	for command in commands {
-		if command.kind == "install" && command.provider == provider && !extension_command_terminal(command.state) do return respond_error(domain.domain_error(.Conflict, "extension installation is already in progress"), req.request_id)
-	}
-	command_id := strings.clone(platform.generate_id(h.ids, "cmd_ext_"))
-	defer delete(command_id)
-	command := domain.Provider_Extension_Command {
-		command_id = command_id,
-		bridge_id  = bridge.bridge_id,
-		kind       = "install",
-		provider   = provider,
-		state      = "queued",
-	}
-	created, create_err := iface.provider_extension_command_create(h.providers.repo, command)
-	if !created do return respond_error(create_err, req.request_id)
-	sent, send_err := extension_command_dispatch(h, command)
-	if !sent {
-		command.state = "failed"; command.message = send_err.message
-		_ = iface.provider_extension_command_save(h.providers.repo, command)
-		return respond_error(send_err, req.request_id)
-	}
-	command.state = "dispatched"
-	if save_err := iface.provider_extension_command_save(h.providers.repo, command); save_err.code != .None do return respond_error(save_err, req.request_id)
-	body := extension_command_json(command)
-	defer delete(body)
-	result := respond_success(body, req.request_id, auth_ctx_server_time(req))
-	result.status = 202
-	return result
+	return respond_error(domain.domain_error(.Forbidden,
+		"provider extensions are installed by the bridge during setup and update; update the bridge from Settings > Bridges instead"), req.request_id)
 }
 
 // GET .../providers/:provider/extension-install/:command_id (same-owner scoped).
