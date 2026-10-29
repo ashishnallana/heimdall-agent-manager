@@ -1,9 +1,15 @@
 // REQ-BUPD-3: Unit Tests for UI BridgesPanel Version Badges, Update Notifications, and Trigger Modal
 //
-// RUN: node --test tests/ui_bridges_panel_update_test.ts
+// RUN: node --import ./tests/helpers/vaultEndpointHarness.ts --test tests/ui_bridges_panel_update_test.ts
 
+import './helpers/vaultEndpointHarness.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { JSDOM } from 'jsdom';
+import React, { act } from 'react';
+import { createRoot } from 'react-dom/client';
+import { Provider } from 'react-redux';
+import { configureStore } from '@reduxjs/toolkit';
 
 import {
   formatBridgeVersion,
@@ -14,6 +20,10 @@ import {
   shouldWarnActiveTasks,
   getActiveTaskCount,
 } from '../src/ui/components/settings/bridgeUpdate.ts';
+
+// Dynamic imports run after the harness registers its Vite-style module resolver.
+const { heimdallApi } = await import('../src/ui/api/heimdallApi.ts');
+const { default: BridgesPanel } = await import('../src/ui/components/settings/BridgesPanel.tsx');
 
 // ---------------------------------------------------------------------------
 // 1. Version Formatting and Update Predicates (REQ-BUPD-3)
@@ -127,3 +137,75 @@ test('shouldWarnActiveTasks and getActiveTaskCount detect running agent instance
   assert.equal(getActiveTaskCount({}), 0);
 });
 
+
+// ---------------------------------------------------------------------------
+// 2. Web BridgesPanel (REQ-ENR-11 / F29): no window.odinApi.bridgeManager, so
+//    there is no "This machine" card and no Uninstall / Revoke / Archive: each
+//    installed bridge offers Update (and Rename) only.
+// ---------------------------------------------------------------------------
+
+test('web BridgesPanel lists installed bridges with Update only (no This machine card, uninstall or archive)', async () => {
+  const dom = new JSDOM('<div id="root"></div>', { url: 'https://hub.example.test/', pretendToBeVisual: true });
+  const saved = new Map<string, PropertyDescriptor | undefined>();
+  for (const [key, value] of Object.entries({
+    window: dom.window, document: dom.window.document, HTMLElement: dom.window.HTMLElement,
+    Node: dom.window.Node, IS_REACT_ACT_ENVIRONMENT: true,
+  })) {
+    saved.set(key, Object.getOwnPropertyDescriptor(globalThis, key));
+    Object.defineProperty(globalThis, key, { value, writable: true, configurable: true });
+  }
+  assert.equal((dom.window as any).odinApi, undefined, 'web harness has no Electron bridge manager');
+  const previousFetch = globalThis.fetch;
+  const requests: Array<{ path: string; method: string }> = [];
+  const bridges = [
+    { bridge_id: 'bridge-online', label: 'Online bridge', status: 'online', runtime_connected: true,
+      version: '0.4.30', latest_version: '0.4.31', update_available: true, update_artifact_available: true },
+    { bridge_id: 'bridge-offline', label: 'Offline bridge', status: 'offline', version: '0.4.30' },
+  ];
+  globalThis.fetch = (async (input: any, init: any = {}) => {
+    const path = new URL(String(input), 'https://hub.example.test').pathname;
+    const method = init.method || 'GET';
+    requests.push({ path, method });
+    if (path === '/api/v1/bridges') return Response.json({ data: bridges });
+    if (path.endsWith('/provider-status')) return Response.json({ data: { providers: [], extension_commands: [] } });
+    if (path.includes('pending')) return Response.json({ data: [] });
+    if (path.includes('telemetry')) return Response.json({ data: { enabled: false } });
+    if (path.includes('/events')) return Response.json({ data: { events: [] } });
+    throw new Error(`Unexpected request: ${method} ${path}`);
+  }) as typeof fetch;
+  const store = configureStore({
+    reducer: { [heimdallApi.reducerPath]: heimdallApi.reducer },
+    middleware: (defaults) => defaults().concat(heimdallApi.middleware),
+    enhancers: (defaults) => defaults({ autoBatch: false }),
+  });
+  const root = createRoot(dom.window.document.getElementById('root')!);
+  const doc = dom.window.document;
+  const query = (id: string) => doc.querySelector(`[data-debug-id="${id}"]`) as HTMLElement | null;
+  try {
+    await act(async () => {
+      root.render(React.createElement(Provider, { store, children: React.createElement(BridgesPanel) }));
+    });
+    assert.ok(query('settings-bridges-panel'));
+    assert.equal(query('settings-this-machine-card'), null, 'no This machine card on the web');
+    assert.equal(doc.querySelector('[data-debug-id^="settings-bridge-wizard"]'), null);
+    assert.match(query('settings-bridges-list')!.textContent || '', /Installed bridges \(2\)/);
+    for (const bridge of bridges) {
+      const id = bridge.bridge_id;
+      assert.ok(query(`settings-bridge-row-${id}`), `row for ${id}`);
+      assert.ok(query(`settings-bridge-update-btn-${id}`), `Update for ${id}`);
+      assert.ok(query(`settings-bridge-rename-btn-${id}`), `Rename for ${id}`);
+    }
+    assert.equal(doc.querySelector('[data-debug-id^="settings-bridge-uninstall-"]'), null, 'no Uninstall / Revoke on the web');
+    assert.equal(doc.querySelector('[data-debug-id^="settings-bridge-archive-"]'), null, 'Archive was removed');
+    assert.equal(requests.filter((r) => r.method !== 'GET').length, 0);
+  } finally {
+    await act(async () => root.unmount());
+    store.dispatch(heimdallApi.util.resetApiState());
+    globalThis.fetch = previousFetch;
+    dom.window.close();
+    for (const [key, descriptor] of saved) {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+      else delete (globalThis as any)[key];
+    }
+  }
+});

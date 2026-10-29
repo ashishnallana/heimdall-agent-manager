@@ -418,3 +418,20 @@ test('REQ-ENR-9: enrollment output still yields the canonical 14-symbol pairing 
   assert.equal(bridgeManager.parseProgressLine('[1,2]'), null);
   assert.deepEqual(bridgeManager.parseProgressLine(' {"step":"lock","state":"ok"} '), { step: 'lock', state: 'ok' });
 });
+
+test('F24: desktopCapabilities is the one desktop check; no odinApi.deviceAuth remains', () => {
+  const probes: string[] = [];
+  const walk = (dir: string) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) { if (entry.name !== 'electron') walk(full); continue; }
+      if (!/\.tsx?$/.test(entry.name)) continue;
+      const source = fs.readFileSync(full, 'utf8');
+      assert.doesNotMatch(source, /odinApi\??\.deviceAuth/, full);
+      if (/\bodinApi\b/.test(source)) probes.push(path.relative(ROOT, full));
+    }
+  };
+  walk(path.join(ROOT, 'src/ui'));
+  assert.deepEqual(probes, ['src/ui/bridge/desktopBridge.ts']);
+  assert.equal(fs.existsSync(path.join(ROOT, 'src/ui/components/extension/ProviderExtensionInstallAction.tsx')), false);
+});

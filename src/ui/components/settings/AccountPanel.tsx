@@ -6,6 +6,7 @@ import { describeEntitlements } from '../../utils/accountEntitlements';
 import { accountBillingApi, useCreateAccountCheckoutMutation, useCreateAccountPortalMutation } from '../../api/endpoints/accountBilling';
 import { apiErrorText } from '../../api/cookieFetch';
 import { redirectToCheckout, validatePortalUrl } from '../../services/paddleCheckout';
+import { desktopCapabilities } from '../../bridge/desktopBridge';
 
 export default function AccountPanel({ user }: { user: SettingsUser | null }) {
   const [error, setError] = useState('');
@@ -49,15 +50,15 @@ export default function AccountPanel({ user }: { user: SettingsUser | null }) {
     const owner = user?.user_id;
     setBusy(true); setError('');
     // Open synchronously so browsers do not block the portal after an API roundtrip.
-    const desktop = (window as any).odinApi;
-    const tab = desktop?.openExternal ? null : window.open('about:blank', '_blank');
+    const { openExternal } = desktopCapabilities();
+    const tab = openExternal ? null : window.open('about:blank', '_blank');
     if (tab) tab.opener = null;
     try {
-      if (!desktop?.openExternal && !tab) throw new Error('Allow pop-ups to open subscription management.');
+      if (!openExternal && !tab) throw new Error('Allow pop-ups to open subscription management.');
       const result = await createPortal().unwrap();
       if (activeUser.current !== owner) { tab?.close(); return; }
       const url = validatePortalUrl(result.url);
-      if (desktop?.openExternal) await desktop.openExternal(url);
+      if (openExternal) await openExternal(url);
       else if (tab) tab.location.href = url;
     } catch (err) { tab?.close(); if (activeUser.current === owner) setError(apiErrorText(err, 'Could not open subscription management.')); }
     finally { if (activeUser.current === owner) setBusy(false); }

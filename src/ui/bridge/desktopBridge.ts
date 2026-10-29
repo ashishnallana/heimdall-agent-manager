@@ -79,10 +79,25 @@ export interface DesktopBridgeManagerApi {
  * F24: the one desktop-capability check. Everything that behaves differently
  * in the desktop app asks this helper instead of probing `window.odinApi`.
  */
-export function desktopCapabilities(): { desktop: boolean; bridgeManager: DesktopBridgeManagerApi | null } {
-  if (typeof window === 'undefined') return { desktop: false, bridgeManager: null };
-  const api = (window as any).odinApi;
-  return { desktop: Boolean(api), bridgeManager: (api?.bridgeManager || null) as DesktopBridgeManagerApi | null };
+export interface DesktopCapabilities {
+  /** Running inside the Heimdall desktop app (the preload API is present). */
+  desktop: boolean;
+  bridgeManager: DesktopBridgeManagerApi | null;
+  notifications: { supported: boolean; show: (plan: { title: string; body: string; tag: string; route: string }) => Promise<boolean> } | null;
+  openExternal: ((url: string) => Promise<{ ok: boolean; error?: string }>) | null;
+  daemonUrl: string;
+}
+
+export function desktopCapabilities(): DesktopCapabilities {
+  let api: any = null;
+  try { api = typeof window === 'undefined' ? null : (window as any).odinApi || null; } catch (_err) { api = null; }
+  return {
+    desktop: Boolean(api),
+    bridgeManager: (api?.bridgeManager || null) as DesktopBridgeManagerApi | null,
+    notifications: api?.notifications || null,
+    openExternal: typeof api?.openExternal === 'function' ? api.openExternal : null,
+    daemonUrl: String(api?.daemonUrl || ''),
+  };
 }
 
 export function desktopBridgeManager(): DesktopBridgeManagerApi | null {
