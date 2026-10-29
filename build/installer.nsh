@@ -127,10 +127,19 @@
   !define MUI_PAGE_CUSTOMFUNCTION_SHOW HeimdallFinishShow
   !insertmacro MUI_PAGE_FINISH
 
-  ; After MUI_PAGE_FINISH, which declares $mui.FinishPage.Run.
+  ; After MUI_PAGE_FINISH, which declares $mui.FinishPage.Run. Mirrors
+  ; electron-builder's own finish-page StartApp function: its StartApp macro
+  ; declares Var /GLOBAL startAppArgs and installSection.nsh already inserts it
+  ; (doStartApp), so inserting it here too fails makensis with
+  ; 'variable "startAppArgs" already declared'.
   Function HeimdallStartApp
     ${If} $HeimdallComponents != "bridge"
-      !insertmacro StartApp
+      ${If} ${isUpdated}
+        StrCpy $1 "--updated"
+      ${Else}
+        StrCpy $1 ""
+      ${EndIf}
+      ${StdUtils.ExecShellAsUser} $0 "$launchLink" "open" "$1"
     ${EndIf}
   FunctionEnd
 

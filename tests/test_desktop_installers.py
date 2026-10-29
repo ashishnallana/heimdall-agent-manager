@@ -120,8 +120,16 @@ InstallDir "$LOCALAPPDATA\Programs\heimdall"
 !include "@INCLUDE@"
 !include MUI2.nsh
 Var launchLink
+; Like electron-builder's common.nsh: StartApp declares a global, so it can be
+; inserted only once, and installSection.nsh already inserts it (doStartApp).
+!define StdUtils.ExecShellAsUser "!insertmacro ExecShellAsUserStub"
+!macro ExecShellAsUserStub out file verb args
+  ExecShell "${verb}" "${file}" "${args}"
+!macroend
 !macro StartApp
-  ExecShell "open" "$launchLink"
+  Var /GLOBAL startAppArgs
+  StrCpy $startAppArgs ""
+  ${StdUtils.ExecShellAsUser} $0 "$launchLink" "open" "$startAppArgs"
 !macroend
 Function .onInit
   !insertmacro customInit
@@ -135,6 +143,7 @@ Section "install"
   SetOutPath $INSTDIR
   StrCpy $launchLink "$INSTDIR\Heimdall.exe"
   !insertmacro customInstall
+  !insertmacro StartApp
 SectionEnd
 '''
 
@@ -158,6 +167,9 @@ class WindowsInstallerTests(unittest.TestCase):
         as_user = nsh.split('Function HeimdallBridgeSetupAsUser', 1)[1].split('FunctionEnd', 1)[0]
         self.assertIn('-Hub "$1" -Interactive\' $0', as_user)
         self.assertNotIn('$HeimdallHub', as_user)  # outer instance never ran the page/customInit state
+        # electron-builder's StartApp macro declares Var /GLOBAL startAppArgs and is
+        # already inserted by installSection.nsh: a second insert fails makensis.
+        self.assertNotIn('!insertmacro StartApp', nsh)
 
     @unittest.skipUnless(shutil.which('makensis') or os.environ.get('MAKENSIS'), 'makensis not available')
     def test_include_compiles_with_warnings_as_errors(self):

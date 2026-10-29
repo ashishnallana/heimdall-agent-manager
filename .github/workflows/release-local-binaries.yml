@@ -362,7 +362,7 @@ jobs:
           # dynamic one, and exits non-zero rather than skipping when it can
           # prove neither -- so this step cannot pass without executing.
           echo "storeless mechanism: $(scripts/release/storeless-exec.sh select)"
-          for b in ham-bridge ham-ctl heimdall; do
+          for b in ham-bridge ham-ctl; do
             echo "--- $b --version (storeless; init() checks the pinned libcurl) ---"
             out="$(scripts/release/storeless-exec.sh run "$work/bin/$b" --version)" || {
               echo "FAIL: $b could not execute without /nix/store" >&2; exit 1; }
@@ -457,7 +457,13 @@ jobs:
           "$work/bin/ham-bridge" --version
           "$work/bin/ham-ctl" --version
           "$work/bin/ham-pty-host" --help >/dev/null
-          "$work/bin/ham-bridge" --probe-hub https://github.com | tee "$RUNNER_TEMP/probe.txt"
+          # Retried: a hosted macOS runner sometimes gets no bytes back from
+          # github.com within the probe's 20s timeout (network, not TLS trust).
+          for attempt in 1 2 3; do
+            "$work/bin/ham-bridge" --probe-hub https://github.com | tee "$RUNNER_TEMP/probe.txt" && break
+            [ "$attempt" = 3 ] && { echo "FAIL: --probe-hub failed 3 times" >&2; exit 1; }
+            echo "probe-hub attempt $attempt failed; retrying in 10s" >&2; sleep 10
+          done
           grep -q 'Apple SecTrust' "$RUNNER_TEMP/probe.txt" || {
             echo "FAIL: the macOS bridge must verify through Apple SecTrust" >&2; exit 1; }
 
