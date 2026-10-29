@@ -12,6 +12,7 @@ package main
 
 import "core:fmt"
 import "core:os"
+import "core:strconv"
 import "core:strings"
 import "core:time"
 import bridgesvc "odin_test:lib/bridgesvc"
@@ -20,6 +21,13 @@ BRIDGE_UNINSTALL_USAGE :: "usage: ham-bridge uninstall [--hub URL [--profile P] 
 // Set on the copy a Windows uninstall re-executes from %TEMP%: a running .exe
 // cannot be deleted, so the binary that removes bin/ must not live in it.
 BRIDGE_UNINSTALL_RELOCATED_FLAG :: "--relocated"
+// The relocated copy waits for this pid (the bin/ ham-bridge.exe that started it)
+// to exit before it runs, so nothing in bin/ is still running or locked.
+BRIDGE_UNINSTALL_WAIT_PID_FLAG :: "--wait-pid"
+BRIDGE_UNINSTALL_PARENT_WAIT :: 30 * time.Second
+// Basename prefix of every temp copy uninstall runs from; a relocated run removes
+// its own executable only when it carries this prefix.
+BRIDGE_UNINSTALL_COPY_PREFIX :: "ham-bridge-uninstall-"
 BRIDGE_UNINSTALL_STOP_WAIT :: 10 * time.Second
 
 Bridge_Uninstall :: struct {
@@ -57,12 +65,20 @@ bridge_uninstall_command :: proc(args: []string) -> bool {
 		token_files   = make([dynamic]string, context.temp_allocator),
 		leftovers     = make([dynamic]string, context.temp_allocator),
 	}
-	when ODIN_OS == .Windows {
-		if relocated, ok := bridge_uninstall_relocate(u.layout, args); relocated do return ok
-	}
 	if !has_flag(args, "--yes") && bridge_stdin_is_terminal(args) && !bridge_uninstall_confirm(name, mode) {
 		fmt.println("ham-bridge uninstall: cancelled; nothing was changed")
 		return false
+	}
+	when ODIN_OS == .Windows {
+		if relocated, ok := bridge_uninstall_relocate(u.layout, args); relocated do return ok
+	}
+	relocated := has_flag(args, BRIDGE_UNINSTALL_RELOCATED_FLAG)
+	// A temp copy removes itself last, whatever the outcome: --purge leaves no binary.
+	defer if relocated do bridge_uninstall_remove_own_copy()
+	if wait_pid, ok := bridge_uninstall_wait_pid_arg(args); ok {
+		if !bridge_uninstall_wait_pid_exit(wait_pid, bridge_os_pid_alive, BRIDGE_UNINSTALL_PARENT_WAIT) {
+			fmt.eprintfln("ham-bridge uninstall: pid %d (the ham-bridge that started this copy) is still running; bin/ may be left behind", wait_pid)
+		}
 	}
 	bridge_uninstall_snapshot(&u)
 	ops := bridgesvc.Uninstall_Ops {
@@ -105,7 +121,12 @@ bridge_uninstall_snapshot :: proc(u: ^Bridge_Uninstall) {
 	if cfg_hub := bridgesvc.hub_from_config(u.config_path); cfg_hub != "" && u.hub == "" do u.hub = cfg_hub
 	if u.hub == "" do u.hub = bridgesvc.read_first_line(bridgesvc.pjoin(l.state_dir, bridgesvc.HUB_URL_FILE))
 	if rt, ok := bridgesvc.read_runtime_status(l.state_dir); ok {
-		u.bridge_pid = rt.pid
+		// runtime-status.json outlives the bridge (it is only rewritten, never
+		// removed on exit), so its pid may have been reused by an unrelated process
+		// that Stop must not wait on and remediation must never TERM/KILL.
+		image, image_known := bridge_uninstall_pid_image(rt.pid)
+		running := bridge_service_registered(u.host, l.service_name) && bridge_service_running(u.host, l)
+		if bridge_uninstall_trust_pid(rt.pid, os.get_pid(), running, image, image_known) do u.bridge_pid = rt.pid
 		if u.bridge_id == "" do u.bridge_id = rt.bridge_id
 	}
 	if u.bridge_id == "" {
@@ -291,9 +312,80 @@ bridge_uninstall_remediate :: proc(data: rawptr, step: bridgesvc.Uninstall_Step,
 	return true, "stopped the service again"
 }
 
+// bridge_uninstall_trust_pid decides whether the pid recorded in
+// runtime-status.json is this profile's bridge. The process image is checked when
+// the OS can tell it (a ham-bridge executable, any name the copies use); when it
+// cannot, the pid is trusted only while the service reports running.
+bridge_uninstall_trust_pid :: proc(pid, own_pid: int, service_running: bool, image: string, image_known: bool) -> bool {
+	if pid <= 0 || pid == own_pid do return false
+	if !image_known do return service_running
+	base := strings.to_lower(bridgesvc.pbase(strings.trim_space(image)), context.temp_allocator)
+	return strings.has_prefix(base, "ham-bridge")
+}
+
+// bridge_uninstall_pid_image names the executable running as pid (known=false when
+// the pid does not exist or the OS cannot tell). Linux reads /proc/<pid>/comm,
+// Windows asks Get-Process, other POSIX systems ask ps.
+bridge_uninstall_pid_image :: proc(pid: int) -> (image: string, known: bool) {
+	if pid <= 0 do return "", false
+	when ODIN_OS == .Linux {
+		data, err := os.read_entire_file(fmt.tprintf("/proc/%d/comm", pid), context.temp_allocator)
+		if err != nil do return "", false
+		image = strings.trim_space(string(data))
+		return image, image != ""
+	} else {
+		argv: []string
+		when ODIN_OS == .Windows {
+			argv = {"powershell", "-NoProfile", "-NonInteractive", "-Command", fmt.tprintf("(Get-Process -Id %d -ErrorAction Stop).Path", pid)}
+		} else {
+			argv = {"ps", "-p", fmt.tprintf("%d", pid), "-o", "comm="}
+		}
+		out, errout, ok, _ := bridge_process_run_capture(argv, 5 * time.Second)
+		defer {delete(out); delete(errout)}
+		image = strings.clone(strings.trim_space(out), context.temp_allocator)
+		return image, ok && image != ""
+	}
+}
+
+// bridge_uninstall_wait_pid_arg reads --wait-pid N.
+bridge_uninstall_wait_pid_arg :: proc(args: []string) -> (pid: int, ok: bool) {
+	v := strings.trim_space(option_value(args, BRIDGE_UNINSTALL_WAIT_PID_FLAG, ""))
+	if v == "" do return 0, false
+	n, nok := strconv.parse_int(v, 10)
+	if !nok || n <= 0 do return 0, false
+	return n, true
+}
+
+// bridge_uninstall_wait_pid_exit waits until alive(pid) is false (true) or the
+// timeout passes (false).
+bridge_uninstall_wait_pid_exit :: proc(pid: int, alive: proc(pid: int) -> bool, timeout: time.Duration, poll := 100 * time.Millisecond) -> bool {
+	deadline := time.time_add(time.now(), timeout)
+	for alive(pid) {
+		if time.diff(time.now(), deadline) <= 0 do return false
+		time.sleep(poll)
+	}
+	return true
+}
+
+// bridge_uninstall_relocated_argv: argv for the temp copy that carries on an
+// uninstall started from bin/. The user already confirmed (--yes), the copy names
+// the profile by service (it may not resolve --hub the same way from %TEMP%) and
+// waits for parent_pid to exit before touching anything.
+bridge_uninstall_relocated_argv :: proc(copy_path: string, args: []string, service_name: string, parent_pid: int) -> []string {
+	argv := make([dynamic]string, context.temp_allocator)
+	append(&argv, copy_path)
+	for a in args[1:] do append(&argv, a)
+	if !has_flag(args, "--service") do append(&argv, "--service", service_name)
+	if !has_flag(args, "--yes") do append(&argv, "--yes")
+	append(&argv, BRIDGE_UNINSTALL_RELOCATED_FLAG, BRIDGE_UNINSTALL_WAIT_PID_FLAG, fmt.tprintf("%d", parent_pid))
+	return argv[:]
+}
+
 // bridge_uninstall_relocate (Windows): when this ham-bridge.exe lives in the bin/
-// being removed, copy it to %TEMP% and run the uninstall from the copy, which
-// waits for nothing in bin/. relocated=false means "carry on in this process".
+// being removed, copy it to %TEMP%, start the copy on this console and exit at
+// once: a running .exe is locked, so bin\ham-bridge.exe can only be deleted after
+// this process is gone, which the copy waits for (--wait-pid). relocated=false
+// means "carry on in this process".
 bridge_uninstall_relocate :: proc(l: bridgesvc.Layout, args: []string) -> (relocated: bool, ok: bool) {
 	if has_flag(args, BRIDGE_UNINSTALL_RELOCATED_FLAG) do return false, false
 	exe, _ := os.get_executable_path(context.temp_allocator)
@@ -304,14 +396,42 @@ bridge_uninstall_relocate :: proc(l: bridgesvc.Layout, args: []string) -> (reloc
 	if exe == "" || same != want do return false, false
 	tmp, _ := os.lookup_env("TEMP", context.temp_allocator)
 	if tmp == "" do return false, false
-	copy_path := bridgesvc.pjoin(tmp, fmt.tprintf("ham-bridge-uninstall-%d.exe", os.get_pid()))
+	copy_path := bridgesvc.pjoin(tmp, fmt.tprintf("%s%d.exe", BRIDGE_UNINSTALL_COPY_PREFIX, os.get_pid()))
 	if os.copy_file(copy_path, exe) != nil do return false, false
-	argv := make([dynamic]string, context.temp_allocator)
-	append(&argv, copy_path)
-	for a in args[1:] do append(&argv, a)
-	if !has_flag(args, "--service") do append(&argv, "--service", l.service_name)
-	append(&argv, BRIDGE_UNINSTALL_RELOCATED_FLAG)
-	return true, bridge_setup_exec_inherit(argv[:])
+	argv := bridge_uninstall_relocated_argv(copy_path, args, l.service_name, os.get_pid())
+	// Same console, no stdin: the copy prints its progress here after we exit.
+	p, err := os.process_start(os.Process_Desc{command = argv, stdout = os.stdout, stderr = os.stderr})
+	if err != nil {
+		_ = os.remove(copy_path)
+		fmt.eprintfln("ham-bridge uninstall: cannot start %s (%v); uninstalling in place, bin/ may be left behind", copy_path, err)
+		return false, false
+	}
+	_ = p
+	fmt.println("ham-bridge uninstall: continuing from a temporary copy so bin/ can be removed; its progress follows")
+	return true, true
+}
+
+// bridge_uninstall_remove_own_copy deletes the temp copy this relocated run
+// executes from. POSIX unlinks a running executable; Windows cannot, so a hidden
+// PowerShell deletes it a few seconds after this process exits.
+bridge_uninstall_remove_own_copy :: proc() {
+	exe, _ := os.get_executable_path(context.temp_allocator)
+	if exe == "" || !strings.has_prefix(bridgesvc.pbase(exe), BRIDGE_UNINSTALL_COPY_PREFIX) do return
+	when ODIN_OS == .Windows {
+		_ = bridge_os_spawn_new_session(bridge_uninstall_delayed_delete_argv(exe))
+	} else {
+		_ = os.remove(exe)
+	}
+}
+
+// bridge_uninstall_delayed_delete_argv: PowerShell that waits, then deletes path
+// (single quotes doubled for the -LiteralPath string).
+bridge_uninstall_delayed_delete_argv :: proc(path: string) -> []string {
+	quoted, _ := strings.replace_all(path, "'", "''", context.temp_allocator)
+	argv := make([]string, 7, context.temp_allocator)
+	argv[0], argv[1], argv[2], argv[3], argv[4], argv[5] = "powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command"
+	argv[6] = fmt.tprintf("Start-Sleep -Seconds 3; Remove-Item -LiteralPath '%s' -Force -ErrorAction SilentlyContinue", quoted)
+	return argv
 }
 
 // bridge_uninstall_spawn_detached starts `ham-bridge uninstall` for this
@@ -329,7 +449,7 @@ bridge_uninstall_spawn_detached :: proc(service_name: string, purge: bool) -> (o
 		tmp_dir, _ = os.lookup_env("TMPDIR", context.temp_allocator)
 		if tmp_dir == "" do tmp_dir = "/tmp"
 	}
-	copy_path := bridgesvc.pjoin(tmp_dir, fmt.tprintf("ham-bridge-uninstall-%d%s", os.get_pid(), BRIDGE_EXE_SUFFIX))
+	copy_path := bridgesvc.pjoin(tmp_dir, fmt.tprintf("%s%d%s", BRIDGE_UNINSTALL_COPY_PREFIX, os.get_pid(), BRIDGE_EXE_SUFFIX))
 	if err := os.copy_file(copy_path, exe); err != nil do return false, fmt.tprintf("cannot copy %s: %v", exe, err)
 	_ = os.chmod(copy_path, {.Read_User, .Write_User, .Execute_User})
 	argv := make([dynamic]string, context.temp_allocator)

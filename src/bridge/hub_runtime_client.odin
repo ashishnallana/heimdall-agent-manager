@@ -1952,11 +1952,18 @@ bridge_runtime_apply_update :: proc(
 	// (setup: bin.bak, service re-render, extensions on every OS, health incl. the
 	// hub connection, rollback). This process is NOT exited here: setup restarts the
 	// service itself, and must see it running to restart the old bridge on rollback.
+	// `update --detach` is waited for: it preflights (hub recorded, bundle binary
+	// runs) and only then starts setup in a session of its own (stdio on the null
+	// device, so this capture does not wait for setup). An early failure therefore
+	// arrives here, and the supervisor script below still applies the update and
+	// restarts the stopped PTY host, instead of the hub waiting on 'restarting'.
 	if service, use := bridge_update_via_ham_bridge(target_version); use {
 		argv := []string{bridge_binary, "update", "--bundle", bridgesvc.pdir(bridge_binary), "--service", service, "--detach"}
 		_ = bridge_update_send_progress(conn, command_id, "restarting", 95, "PTY host stopped. Handing off to ham-bridge update...")
-		if bridge_os_spawn_new_session(argv) do return true, "restarting"
-		fmt.println("bridge update: ham-bridge update could not start; falling back to the supervisor script")
+		h_out, h_err, h_exit, h_ok, h_timed_out := bridge_process_run_capture_status(argv, 30 * time.Second)
+		defer {delete(h_out); delete(h_err)}
+		if h_ok && h_exit == 0 do return true, "restarting"
+		fmt.printfln("bridge update: ham-bridge update did not start (exit %d, timed_out=%v): %s; falling back to the supervisor script", h_exit, h_timed_out, strings.trim_space(h_err))
 	}
 
 	// 9. Spawn the out-of-process supervisor through the injectable argv seam.

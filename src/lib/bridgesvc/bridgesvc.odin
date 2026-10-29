@@ -341,3 +341,9 @@ pdir :: proc(path: string) -> string {
 	i := strings.last_index_any(p, "/\\")
 	return p[:i] if i > 0 else p
 }
+
+// pbase is the last element of a path, '/' or '\' separated (a view into it).
+pbase :: proc(path: string) -> string {
+	p := strings.trim_right(path, "/\\")
+	return p[strings.last_index_any(p, "/\\") + 1:]
+}

@@ -146,3 +146,11 @@ test_update_runs_the_new_binarys_setup :: proc(t: ^testing.T) {
 	argv = update_setup_argv(exe, "https://hub.example.com", "", false)
 	testing.expect_value(t, len(argv), 5)
 }
+
+@(test)
+test_pbase :: proc(t: ^testing.T) {
+	testing.expect_value(t, pbase("/home/u/.local/bin/ham-bridge"), "ham-bridge")
+	testing.expect_value(t, pbase(`C:\T\ham-bridge-uninstall-3.exe`), "ham-bridge-uninstall-3.exe")
+	testing.expect_value(t, pbase("ham-bridge"), "ham-bridge")
+	testing.expect_value(t, pbase("/opt/bin/"), "bin")
+}

@@ -188,7 +188,7 @@ plus state `warning`):
 | step | removes |
 |---|---|
 | `revoke` | the hub revokes the bridge, called with the bridge's own token (`POST /api/v1/bridge/self/revoke`), read before anything is deleted. An unreachable hub is retried, then a `warning` (revoke it in Settings -> Devices); local secrets are wiped anyway |
-| `stop` | stops the service and waits for the bridge pid; remediation: stop again, TERM, then KILL |
+| `stop` | stops the service and waits for the bridge pid; remediation: stop again, TERM, then KILL. The pid from `runtime-status.json` is used only when it is a `ham-bridge*` process (`/proc/<pid>/comm`, `ps -o comm=`, `Get-Process .Path`), or, when the OS cannot say, while the service runs: a stale file's reused pid is never waited on or signalled |
 | `unregister` | systemd `disable` + unit file + `daemon-reload`; launchd `bootout` + plist; `schtasks /Delete`; runit service dir |
 | `secrets` | access/refresh token files, `.pending-rotation-v1`, refresh request and marker files, the vault keyring, identity record and epoch floor in Keychain / Credential Manager / kernel keyring (private files on Linux), the per-scope vault dir |
 | `extensions` | `<data>/extensions{,.bak,.new}` |
@@ -198,8 +198,13 @@ plus state `warning`):
 | `data` | the data dir (`--purge` only) |
 
 A step that still fails after remediation is reported (`failed`) and the uninstall
-continues; exit status is non-zero when anything was left behind. On Windows the
-command re-runs itself from a copy in `%TEMP%` so `bin\` can be deleted.
+continues; exit status is non-zero when anything was left behind. On Windows a
+running `.exe` is locked, so an uninstall started from `bin\ham-bridge.exe` asks for
+confirmation, starts a copy in `%TEMP%` on the same console (`--yes --relocated
+--wait-pid <pid>`) and exits; the copy waits for that pid to exit (30 s) before it
+starts. A run from a temp copy (relocated, or the remote uninstall) deletes its own
+executable at the end: unlinked on POSIX, removed by a hidden PowerShell 3 s after
+exit on Windows, so `--purge` leaves no binary behind.
 
 **Remote uninstall.** `POST /api/v1/bridges/{id}/uninstall` `{"purge": true}` (user
 session of the owning account only; another account gets 404, a bridge token 403, an
@@ -222,3 +227,9 @@ staging, `bin.bak`, service re-render, extensions on every OS, restart, health =
 running **and** connected to the hub, and on failure `bin.bak` restored and the old
 bridge restarted. Inside the service being updated (or with `--detach`) it runs in a
 session of its own. `--version V` (download + verify a release) is not implemented yet.
+
+**Hub-initiated update.** A bridgesvc profile install hands the staged bundle to
+`ham-bridge update --detach` and waits for it (30 s): the preflight (hub recorded,
+bundle binary runs) happens before setup is detached, so an early failure comes back
+to the running bridge, which falls back to the supervisor script; the script applies
+the update and restarts the PTY host that was already stopped.
