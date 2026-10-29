@@ -28,55 +28,64 @@ walls:
 
 ## How Heimdall solves it
 
-- **Multi-agent by design.** A Coordinator breaks the work into a task chain and delegates
-  each task to a Worker agent. A separate Reviewer then votes LGTM or NGTM, and a task only
-  completes once every required reviewer has approved it.
-- **Persistent, scoped memory.** Facts, habits, episodes, and skills are stored durably and
-  injected into each agent at bootstrap. Knowledge is scoped to an agent, a project, a
-  device, or the whole fleet, so it survives across sessions and is shared where it belongs.
-- **Fresh context every task.** Agents restart after each task. No single conversation ever
-  grows long enough to degrade, and every task starts from a clean, focused window.
-- **Structured audit trail.** Progress is captured as structured task comments and status
-  changes — the real record of what happened, not an after-the-fact AI summary you have to
-  trust.
-- **Provider-agnostic.** Each agent is a thin adapter over whatever LLM you choose. Heimdall
-  does not care which provider backs an agent, so you can mix and match freely.
-- **Cross-device fleet.** Agents run on any device you own and are coordinated through a
-  single hub, so your laptop, workstation, and servers all pull work from the same board.
+- **Multi-agent coordination.** A Coordinator publishes focused tasks and configures a fleet
+  of durable agent identities. Workers hold leases; required reviewers and optional user
+  approval decide whether the submitted attempt is accepted.
+- **Persistent, scoped memory.** Facts, habits, episodes, expertise, and skills are stored
+  durably and made available at bootstrap. Scope can combine agent, project, template, and
+  device targets, so approved knowledge survives individual sessions.
+- **Focused task context.** Each lease carries the task brief, previous attempts, dependency
+  handoffs, and relevant chain context. Ordinary workers/reviewers are re-bootstrapped when
+  reused; Solo mode lets the Coordinator do the work while the user reviews.
+- **Structured audit trail.** Task events, attempts, comments, decisions, and review verdicts
+  record the work and the evidence used to accept it.
+- **Provider choice.** Provider launch recipes and model catalogs let you select the available
+  coding agent and model on each Bridge, with native extensions for supported runtime signals.
+- **Cross-device fleet.** Agents execute on your devices while the Hub coordinates their work,
+  including ordinary tickets and staged workflow runs in the same chain.
 
 ## Architecture
 
-Heimdall is a hub-and-bridge system. A central hub owns all shared state; one bridge per
-device spawns and supervises the agent processes that do the work. Agents and humans both
-drive the system through a CLI, and a desktop and web UI render the whole thing live.
+Heimdall is a Hub-and-Bridge system. A central Hub owns durable shared state; a Bridge on each
+execution device manages its local processes. The desktop and web UI show conversations,
+tasks, memory, artifacts, shells, and runtime activity.
 
-- **Hub (Odin).** The central REST and WebSocket server. It manages agents, task chains,
-  memories, and projects, and is the single source of truth for all shared state.
-- **Bridge (Odin).** Runs on each device. It spawns and manages the Claude Code agent
-  processes, executes shell commands on their behalf, and handles filesystem exploration so
-  agents can read and search a project safely.
-- **ham-ctl.** The command-line interface used by agents and humans alike to create and
-  update tasks, read and send messages, propose memories, and run tracked shell commands.
-- **UI (React / TypeScript / Electron + web).** The dashboard. It provides a task board, a
-  conversation view, memory management, shell-job tracking, and a fleet view of every
-  running agent across every device.
+- **Hub (`ham-hub`, Odin).** Authenticates requests and coordinates agents, task leases,
+  reviews, dependencies, workflow runs, projects, and content through SQLite-backed services.
+- **Bridge (`ham-bridge`, Odin).** Connects to the Hub, materializes agent bootstrap files,
+  discovers local providers/models, and handles tracked shell jobs and project files.
+- **Terminal host (`ham-pty-host`, Rust).** The Bridge's local daemon for launching agent
+  processes and managing terminal input, output, and screen state. Agent launches no longer
+  use the old wrapper/tmux runtime.
+- **CLI (`ham-ctl`, Odin).** Agents use their generated run-directory wrapper to read chat,
+  pull/submit leases, propose memories, and operate other authorized resources through the
+  local Bridge. Operators have a separate Hub command surface.
+- **UI (React / TypeScript / Redux, Electron + web).** The interface to the Hub, with
+  conversations, the attention deck, task/fleet views, and terminal/artifact tools.
+
+See [the contributor architecture guide](AGENTS.md), [runtime connection lifecycle](docs/runtime-registry.md),
+[terminal transport](docs/pane-transport.md), and [self-hosting](SELF_HOSTING.md).
 
 ## How work flows
 
-A typical run looks like this:
+1. Describe the goal to the Coordinator.
+2. The Coordinator creates a plan and publishes tasks with goals, acceptance items, and
+   dependencies, or starts a staged workflow run.
+3. Eligible workers receive leases. Each reads its task context and works in the named
+   checkout; Git-backed tasks use their own worktree.
+4. The worker records checks and decisions and submits the attempt. Required reviewers use
+   `approve` or `request_changes`; tasks that require user approval also wait for your verdict.
+5. Accepted Git-backed work is merged through its Bridge. Merge failures and conflicts remain
+   visible, and downstream work waits for successful prerequisites.
+6. The Coordinator explicitly completes the chain after all included tickets and workflow
+   runs succeed and no leases or pending proposal remain. Useful lessons can be proposed as
+   durable memories for your review.
 
-1. You describe what you want to the Coordinator through the UI or `ham-ctl`.
-2. The Coordinator plans a task chain and assigns each task to a Worker, with a Reviewer
-   attached.
-3. A Worker picks up its task in a fresh agent session, does the work, records progress as
-   task comments, and hands off for review.
-4. The Reviewer inspects the change and votes. On LGTM the task completes; on NGTM it goes
-   back to the Worker with feedback.
-5. When the chain finishes, its memories are proposed for approval and carried forward to
-   future work.
+In Solo mode, the Coordinator pulls and implements each task itself and the user reviews.
+It remains running between tasks; it does not delegate by default.
 
-Everything above is visible and steerable in real time from the dashboard, and every step
-leaves a durable record.
+A finished batch is not the same as a completed chain. Work and reviews leave a durable record
+that you can inspect and steer from the UI.
 
 ## macOS desktop app
 
@@ -174,19 +183,20 @@ editable control has focus.
 Heimdall is built around a simple idea: **agents should be cheap to start, focused on
 one thing, and easy for a human to steer.**
 
-### One coordinator, many short-lived workers
+### One coordinator, leased workers
 
-Work starts when you create a Project (a name + the path to your codebase) and launch
-a Coordinator agent. The Coordinator is the only persistent agent — it holds the plan,
-owns the task chain, and is the person you talk to. Every other agent lives only for
-the duration of a single task.
+A Coordinator holds the plan, owns the chain, and is your point of contact. Fleet rows identify
+which durable agents can work or review, their capacity, and their launch settings. Tasks can
+name reviewers or require every fleet member holding a review role.
 
-When the Coordinator assigns a task, Heimdall spawns a fresh Worker and a fresh
-Reviewer. The Worker runs in a clean context — no leftover conversation history, no
-accumulated confusion — and loads only the memories that are relevant to its task. When
-the task completes (Reviewer votes LGTM), both the Worker and Reviewer are stopped.
-If the chain needs them again for another task, new instances are started. This keeps
-each agent's context window small and its reasoning sharp.
+The task engine grants leases and releases them on submission, handoff, blocking, or expiry.
+Ordinary non-coordinator holders are stopped on release and re-bootstrapped when reused. An
+instance record may be reused without carrying forward the previous provider conversation.
+The task context pack carries the structured handoff instead.
+
+Solo mode keeps the Coordinator running as the worker. It pulls one task at a time, submits to
+the user's review, and can continue other ready work while that review is pending. The Soloist
+cannot approve its own work.
 
 ### Agents learn through memory proposals
 
@@ -201,32 +211,26 @@ not at the speed they generate text.
 
 ### You steer from the task board
 
-You do not need to watch every agent session. The normal working pattern is:
-
 1. Describe the goal to the Coordinator in the conversation panel.
-2. The Coordinator plans the chain and starts workers autonomously.
-3. You check in on the task board to see progress, read task comments, and spot
-   anything that looks off.
-4. If a task is going the wrong direction, post a comment on it — the Worker reads task
-   comments and adjusts. If the whole plan needs rethinking, tell the Coordinator.
-5. When a task finishes, glance at the Reviewer's verdict and the evidence comment
-   before it closes.
+2. Review the plan when approval is required, then follow task progress and comments.
+3. Send steering to the Coordinator or current worker when requirements change; use task
+   comments for a durable record of findings and decisions.
+4. Review submitted work and its reported checks. Required user review is an explicit gate,
+   not implied by answering a question or leaving a comment.
+5. If a task appears stuck, inspect its blocker, review requirements, and Bridge status.
+   `ham-ctl task recheck <task-id>` re-evaluates current gates/readiness and merge recovery;
+   it does not approve work or take over a live lease.
 
-Everything is asynchronous. You do not have to be present for each step; agents keep
-working and the board reflects real progress.
+Work continues asynchronously where prerequisites and approval policy allow it.
 
 ### The ideal first session
 
-```
-1. Add a project in the UI (name + local path on the bridge device).
-2. Start a Coordinator agent for that project.
-3. Send the Coordinator a message describing what you want to build or fix.
-4. Watch the task chain appear. The Coordinator will ask clarifying questions if
-   anything is ambiguous before delegating.
-5. Let workers run. Check back on the board when convenient.
-6. Review memory proposals on the Memory page after the chain completes.
-7. Repeat — the next chain starts with accumulated project knowledge already loaded.
-```
+1. Add a project and its codebase path on the execution Bridge.
+2. Start a Coordinator for that project and describe the goal.
+3. Review the proposed plan and clarify requirements.
+4. Use Solo mode for work you want one agent to own, or configure a worker/reviewer fleet.
+5. Follow progress, resolve questions, and review work in the attention/task surfaces.
+6. Review proposed memories so future sessions inherit the knowledge you approve.
 
 ---
 
@@ -239,28 +243,22 @@ and how it connects to the others makes the rest of the system easy to reason ab
 
 ### Agent ID
 
-A stable identifier for a *type* of agent — a named role such as `coordinator`,
-`worker`, or `reviewer`. The Agent ID is not tied to a specific running process. It is
-used when configuring which LLM provider backs a role, which skill set it loads at
-bootstrap, and which memories are scoped to it.
+A durable named agent identity, such as a project's implementation agent or reviewer. It
+stores its template/instructions and can have runtime instances on different Bridges.
+Fleet work/review roles and capacity are separate configuration on that identity.
 
-**Connected to:** Agent Instance ID (each running instance carries an Agent ID),
-Memory (some memory is scoped per-agent by Agent ID), Task Chain (coordinator and
-worker roles are identified by Agent ID).
+**Connected to:** instances, memory targets, fleet rows, task assignees, and named reviewers.
 
 ---
 
 ### Agent Instance ID
 
-The unique identifier for one *running* agent process. Every time an agent is spawned
-for a task it receives a fresh Instance ID. The Instance ID is used to route chat
-messages to that specific process, track its status in the fleet view, and identify
-which bridge it is running on.
+A managed instance of a durable agent on a Bridge, with a provider/model, run directory,
+conversation, and optional project/chain. Its database record can outlive a process and be
+restarted. The ID is not a PID and need not change for every lease.
 
-**Connected to:** Agent ID (each instance is one running copy of an agent role),
-Bridge (an instance always lives on exactly one bridge), Task Chain (a task is assigned
-to an instance by its Instance ID), Agent Run Dir (each instance has its own run
-directory on the bridge).
+**Connected to:** Agent ID, Bridge, conversation, run directory, and the current task lease.
+Tasks are assigned to durable agent identities; a lease records the actual holder instance.
 
 ---
 
@@ -278,52 +276,53 @@ path resolves on the bridge that hosts the agent).
 
 ### Memory
 
-Durable knowledge that persists across agent sessions. Memory is injected into an agent
-at bootstrap so it starts each task already aware of facts, conventions, and past
-decisions. There are four types:
+Durable knowledge that persists across agent sessions. Memory is made available to an agent
+at bootstrap so its runtime starts with applicable facts, conventions, and past
+decisions. There are five types:
 
 | Type | What it stores | Example |
 |------|---------------|---------|
 | **Fact** | Objective, stable truths about the project or environment | "The hub API runs on port 8081" |
 | **Habit** | Preferred working patterns or conventions | "Always run `npm run typecheck` before committing" |
 | **Episode** | Records of past events, decisions, or incidents | "The migration on 2025-03-15 required a manual SQL fix" |
+| **Expertise** | Reusable technical knowledge and reasoning | "How to diagnose a provider startup failure" |
 | **Skill** | Reusable procedures or mini-runbooks | "How to add a new icon to Icon.tsx" |
 
-Each memory is scoped to one of: `agent_id` (personal to one agent role), `project_id`
-(shared by all agents on a project), `bridge_id` (host-level facts about a device), or
-fleet-wide.
+Each memory can target lists of agents, projects, templates, and Bridges. Non-empty
+dimensions must all match; empty target lists allow wider applicability. Only approved active
+knowledge is made available at bootstrap. A template is a scope target, not a memory type.
 
-**Connected to:** Agent ID (agent-scoped memories), Project (project-scoped memories),
-Bridge (bridge-scoped memories), Task Chain (chains produce memories at completion that
-are proposed for approval and carried forward).
+**Connected to:** Agent ID, Project, Bridge, and agent template. Agents can propose lessons
+from task work, and humans decide what becomes durable knowledge.
 
 ---
 
 ### Task Chain
 
-A structured unit of work made up of ordered tasks. A Coordinator creates the chain,
-assigns each task to a Worker, and attaches a Reviewer. A task only completes once the
-required reviewer quorum has voted LGTM; the chain completes when all its tasks are
-done. Task chains are the primary audit trail — every status change, comment, and vote
-is recorded durably.
+A coordinated collection of work. Every chain can contain ordinary tickets and workflow
+runs, with explicit dependencies between them. A task's brief names its goal, acceptance,
+assignee, and review policy; leases and review verdicts record its attempts.
 
-**Connected to:** Agent ID / Agent Instance ID (coordinator, worker, and reviewer
-instances are attached to the chain), Project (a chain targets a project), Memory
-(chains produce memory proposals on completion), Reconcile (the Reconcile operation
-re-evaluates a chain's task assignment and status).
+Task completion requires its current review gate. Chain completion is a separate, explicit
+operation that checks all included work, merge outcomes, active leases, pending proposals,
+and the current work revision. Finishing the current batch alone does not complete it.
+
+**Connected to:** Project, Coordinator instance, fleet identities, tasks, workflow runs,
+directories, review records, and shared chain context.
 
 ---
 
 ### Agent Run Dir
 
-A temporary working directory created on the bridge for each agent instance. It holds
-the instance's runtime state: the `ham-ctl` binary, environment config, the
-`.heimdall/` bootstrap folder, and any scratch files the agent writes during its
-session. The run dir is cleaned up when the instance exits.
+A managed directory on the Bridge for an agent instance's bootstrap and runtime context.
+Before a provider process starts, the Bridge recreates it and writes instructions, applicable
+memories/skills, a manifest, and `./.heimdall/bin/ham-ctl`.
 
-**Connected to:** Agent Instance ID (one run dir per instance), Bridge (the run dir is
-a filesystem path on the bridge host), `ham-ctl` (the agent CLI binary is placed in
-the run dir so the agent always has a consistent path to it).
+A run directory is separate from the task's code checkout. Read `TASK.md` and use its
+Workdir for project edits, checks, and commits; do not put project changes in the bootstrap
+directory or assume its contents survive a relaunch.
+
+**Connected to:** Agent Instance ID, Bridge, task context pack, provider bootstrap, and CLI shim.
 
 ---
 
@@ -341,8 +340,8 @@ One bridge runs on each machine that should host agent processes. All bridges co
 to the same hub.
 
 **Connected to:** Agent Instance ID (the bridge spawns and owns instances), Agent Run
-Dir (run dirs are created on the bridge filesystem), Provider (the bridge passes
-provider credentials to agent processes at spawn time), Hub (bridge→hub connection is
+Dir (run dirs are created on the bridge filesystem), Provider (the bridge resolves local
+provider launch settings), Hub (bridge→hub connection is
 outbound: REST over HTTPS and WebSocket over WSS through the statically linked,
 pinned libcurl (`src/lib/httpc`)).
 
@@ -350,30 +349,36 @@ pinned libcurl (`src/lib/httpc`)).
 
 ### Provider
 
-The LLM backend that backs an agent. A provider record stores which API (Claude,
-OpenAI Codex, etc.) and model to use, along with the credentials needed to call it.
-Providers are configured on the hub and referenced by Agent ID, so swapping a model
-requires changing one record rather than touching every agent.
+The installed coding-agent runtime, such as Claude Code or Codex. The Hub's catalog describes
+how to launch it, select models, deliver prompts, write bootstrap files, and discover native
+extension capabilities. Each Bridge reports what is installed/enabled and its model observations.
 
-**Connected to:** Agent ID (each agent role is configured with a provider), Bridge (the
-bridge injects provider credentials into the agent environment at spawn time), Agent
-Instance ID (a running instance uses whichever provider its Agent ID was configured
-with at spawn time).
+Provider authentication belongs to the execution device's provider setup. Selecting a provider
+in the catalog does not itself sign in to that provider. The effective launch settings can
+vary by agent, instance, fleet, and Bridge.
+
+**Connected to:** Agent Instance ID, Bridge provider status, model catalogs, fleet launch
+settings, and provider extensions.
 
 ---
 
-### Reconcile (task chain)
+### Task recheck
 
-Reconcile is the operation that re-evaluates a task chain's current state and
-re-assigns any tasks that need attention — for example tasks that have no assigned
-instance, tasks whose assigned instance has died, or tasks that were blocked by a
-dependency that has since completed. Running Reconcile from the UI or via `ham-ctl
-task chain reconcile <chain-id>` is the normal way to un-stick a chain after a
-coordinator restart or a bridge reconnect.
+The task engine re-evaluates eligible work as relevant events occur: dependencies, reviews,
+lease releases/expiry, fleet changes, and Bridge lifecycle updates. To investigate a stuck task,
+use `ham-ctl task recheck <task-id>`. It recomputes gate/readiness/dispatch and merge recovery
+without approving work or disturbing a live lease.
 
-**Connected to:** Task Chain (reconcile targets one chain), Agent Instance ID
-(reconcile spawns new instances or re-assigns existing ones), Bridge (new instances
-are launched on an available bridge).
+Use `ham-ctl task-chain graph` for dependencies and the current work revision. Complete a
+finished chain explicitly:
+
+```bash
+ham-ctl task-chain complete <chain-id> --expected-work-revision <n> --summary "Final evidence."
+```
+
+The old manual chain-reconcile/status workflow is not the current CLI.
+
+**Connected to:** Task, lease, reviews, fleet capacity, dependency graph, and merge outcome.
 
 ---
 

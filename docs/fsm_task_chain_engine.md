@@ -1,5 +1,10 @@
 # Finite State Machine (FSM) Task Chain Engine: Architecture & Specification
 
+> **Historical proposal:** This document describes a pre-Task-v2 engine design and its
+> migration plan, not the current runtime, task states, or CLI. For current behavior see
+> [the contributor guide](../AGENTS.md#task-lifecycle-and-reviews) and
+> [the task v2 implementation](../src/hub/service/taskv2).
+
 - **Document Version**: 1.0.0
 - **Status**: Ready for Review
 - **Chain ID**: `chain_18da4c78c517810f`

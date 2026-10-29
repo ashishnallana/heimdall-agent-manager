@@ -1,21 +1,37 @@
 # Heimdall AI Manager Project Guide
 
-Heimdall is a local multi-agent orchestration system built around four runtime pieces:
+Heimdall is a Hub-and-Bridge multi-agent orchestration system. The current runtime consists of:
 
-- `ham-daemon` — the durable control plane and HTTP/WS server
-- `ham-wrapper` — the tmux-backed agent launcher/runtime shim
-- `ham-ctl` — the CLI used by operators, agents, and tests
-- Heimdall UI — the Electron/Vite/React/Redux desktop client
+- `ham-hub` (Odin) — durable state, authorization, task coordination, and HTTP/WebSocket APIs.
+- `ham-bridge` (Odin) — one per execution device; connects to the Hub and manages local agents,
+  shell jobs, files, provider discovery, and bootstrap materialization.
+- `ham-pty-host` (Rust) — the Bridge's local agent process and terminal host.
+- `ham-ctl` (Odin) — the CLI for agents and operators.
+- Heimdall UI — React/TypeScript/Redux with Electron and web clients.
 
-The daemon owns durable state, runtime routing, and notification fanout. Wrappers boot agents, register them, generate bootstrap files, and keep heartbeats/activity flowing back to the daemon. CLI and UI mostly fetch durable state over HTTP/REST/RPC. Agent-facing WebSockets are primarily event/summary channels: messages and chat do **not** stream full inbox bodies over WS, and agents/UI fetch the durable records after notification.
+The Hub coordinates execution on Bridges; it does not launch agent processes on the Hub host.
+Agent launches use `ham-pty-host`. The old `ham-daemon`/`ham-wrapper` and tmux agent-launch
+architecture is historical, not a runtime option. The authoritative launch path is
+[`src/bridge/pty_host_runtime.odin`](src/bridge/pty_host_runtime.odin).
 
 ## Architecture Invariants
 
-- The daemon is the source of truth for durable task, memory, project, team, VCS, artifact, auth, and agent-identity state.
-- Runtime sockets, live wrapper status, and user WebSocket connections are in-memory projections rebuilt on restart.
-- `agent_id` is the durable identity tier; `agent_instance_id` is the concrete running/project-bound instance.
-- Wrapper bootstrap files (`AGENTS.md`, optional skills files, manifest) are assembled locally on the bridge via the content-addressed Bootstrap Fragment Cache (Hub ↔ Bridge protocol 2 manifest + sha256 blob store) with fallback to full hub generation.
-- Agent inbox/chat WebSockets are metadata-only notification channels; task/lifecycle UI notifications may embed compact task/chain payloads, but durable state still lives behind REST/RPC/CLI fetches.
+- The Hub owns durable agents/instances, tasks, workflows, chat, memory, projects, artifacts,
+  authorization, and audit state. The repository layer persists it in SQLite.
+- Live Bridge connections, runtime maps, viewers, and tool activity are transient projections;
+  they are not substitutes for durable records. See [runtime registry](docs/runtime-registry.md).
+- `agent_id` is a durable identity; `agent_instance_id` identifies one managed instance. An
+  instance record can survive process exit and be restarted; it is not a PID.
+- Before starting an agent, the Bridge recreates its managed run directory and materializes
+  instructions, memories, skills, and the CLI shim. Bootstrap uses content-addressed manifests
+  and blobs, with a full-payload fallback.
+- Agent message notifications tell the agent to fetch durable messages with `ham-ctl chat read`.
+  Do not infer message bodies or task completion from a terminal notification.
+- Every task v2 mutation runs in one unit of work; network operations and other side effects
+  occur after commit. Preserve the `tx_mutex -> state_mutex` lock order. See
+  [task v2 service](src/hub/service/taskv2/service.odin).
+- Owner authorization, agent/Bridge credentials, and human sessions are different boundaries.
+  Never broaden runtime access by substituting one user's identity for another.
 
 ### Socket lifetime across threads
 
@@ -68,372 +84,195 @@ reader joinable and doing shutdown → join → close concentrates ownership in 
 reader thread: stalling that thread stalls the whole hub connection behind one local socket. In the
 bridge, reader-owns-close is used precisely because the closing thread is the WS reader.
 
-## Identity Model
+## Identity and Authorization
 
-- `agent_id`
-  - Durable identity shared across projects and runs.
-  - Stored in `src/daemon/agent_id_store.odin` as `Agent_Id_Record`.
-- `agent_instance_id`
-  - Concrete instance/session identity, often `agent_id@project-or-scope`.
-  - Stored durably as `Agent_Instance_Record`, mirrored live in `Agent_Record`.
-- `conversation_id`
-  - Agent-to-agent inbox/message stream key.
-- `client_instance_id`
-  - Durable user-client/UI identity for `/user-client/register`, `/user-rpc`, and `/user-ws`.
-- `agent_token`, `client_token`
-  - Random bearer tokens persisted in `auth/tokens.db` and recovered after daemon restart.
-- `ws_token`, `reconnect_token`
-  - Wrapper/WebSocket session credentials returned by `/register` / `/reconnect`.
+The current records are defined in [`src/hub/domain`](src/hub/domain) and auth contracts in
+[`src/contracts/auth.odin`](src/contracts/auth.odin):
 
-## Root Files
+| Identifier | Meaning |
+| --- | --- |
+| `agent_id` | Durable named agent, associated with a template and instructions. Fleet rows, task assignees, and reviewers use this identity. |
+| `agent_instance_id` | Managed instance bound to an agent, Bridge, provider/model, run directory, conversation, and optional project/chain. |
+| `conversation_id` | Durable conversation binding used to read and route chat. |
+| `bridge_id` | Enrolled execution device and its authenticated Hub connection. |
+| `task_id` / `lease_id` | Durable work item / temporary authority to work or review its current attempt. |
 
-- `flake.nix`
-  - Nix flake defining build packages/apps such as `ham-daemon`, `ham-wrapper`, `ham-ctl`, and UI packaging.
-- `package.json`
-  - Electron/Vite/React/TypeScript UI package scripts and dependencies.
-- `config.toml`
-  - Main runtime config for daemon, wrapper, providers, model tiers, startup/activity detection, guide agent, managed run dirs, and ctl defaults.
-- `README.md`
-  - High-level project overview.
-- `AGENTS.md`
-  - This architecture/bootstrap guide.
+Humans sign in through OIDC/browser sessions; Bridges use enrolled Bridge credentials; agents
+use instance tokens through the local Bridge. Do not assume token values or derive credentials
+from identifiers. See [authentication](docs/auth-oidc.md),
+[desktop login](docs/desktop-auth.md), and [self-hosting](SELF_HOSTING.md).
 
-## Source Layout
+The durable owner boundary is enforced by
+[`src/hub/service/ownership/ownership.odin`](src/hub/service/ownership/ownership.odin).
+Fleet roles are agent work/review roles, not a grant of human access to another person's runtime.
+
+## Repository Layout
 
 ```text
 src/
-  contracts/          shared protocol/data contracts
-  ctl/                ham-ctl CLI
-  daemon/             ham-daemon server, stores, services, notifications
-  lib/
-    config/           config parser/defaults
-    httpc/            outbound HTTP client (libcurl wrapper; the only libcurl user)
-    tmux/             tmux launch/control helpers
-    vcs/              git/jj workspace helpers
-    ws/               WebSocket client helpers
-  prompts/            bootstrap/profile/persona/task-chain guidance text
-  test_agent/         smoke-test agent helpers
-  ui/                 Electron/Vite/React/Redux app
-  wrapper/            ham-wrapper runtime/bootstrap generator
+  contracts/          shared wire and auth contracts
+  hub/
+    domain/           durable records and domain types
+    repository/iface/ repository contracts and unit-of-work boundary
+    repository/sqlite/ SQLite implementations and migrations
+    service/          application services; taskv2 is the lease/review/workflow engine
+    transport/http/   HTTP and WebSocket handlers
+  bridge/             local execution, bootstrap, provider hooks, and Hub connection
+  ctl/                ham-ctl command parsing and agent/user operations
+  lib/                shared HTTP, auth/vault, VCS, transport, and utility code
+  prompts/            shipped agent instructions, skills, and workflow templates
+  ui/                 React/Redux app, API client, and Electron shell
+tools/pty_host/        Rust ham-pty-host daemon and protocol
+extensions/           provider-native activity, file-edit, and permission hooks
 ```
 
-## Package Summaries
+- [`flake.nix`](flake.nix) defines `ham-hub`, `ham-bridge`, `ham-pty-host`, `ham-ctl`,
+  UI packaging, and release builds.
+- [`package.json`](package.json) defines frontend scripts and dependencies.
+- [`SELF_HOSTING.md`](SELF_HOSTING.md) is the operator setup/configuration guide.
+- [`src/hub/service/taskv2`](src/hub/service/taskv2) is the current task engine.
+  [The earlier FSM proposal](docs/fsm_task_chain_engine.md) is historical design material,
+  not the current state/command reference.
 
-### `src/contracts`
+### Outbound HTTP boundary
 
-Shared contracts used across binaries.
-
-- `identity.odin`
-  - Core identity types such as `Agent_Instance_ID`, `Agent_Class`, and the client kind/access-mode/capability enums.
-- `lifecycle.odin`
-  - The `/register` request type.
-- `protocol.odin`
-  - Build/version constants (`APP_VERSION`, `GIT_COMMIT`, `BUILD_TIMESTAMP`, `PROTOCOL_VERSION`).
-- `memory_provider.odin`
-  - The shared `Memory_Type` enum.
-- `artifacts.odin`
-  - The `Artifact_ID` type.
-
-### `src/daemon`
-
-The `ham-daemon` package. It is both the runtime hub and the persistence boundary.
-
-Key responsibilities:
-
-- HTTP server and route dispatch (`server.odin`, `rest_router.odin`, `*_http.odin`, `*_rest.odin`)
-- Wrapper lifecycle: `/register`, `/heartbeat`, `/startup`, `/ws`, `/agents/start`, `/agents/stop`
-- Agent runtime registry and lifecycle notifications (`registry.odin`, `agent_runtime_tracker.odin`, `agent_lifecycle_notifications.odin`)
-- Task chains/tasks/comments/votes/participants, projections, review routing, nudge scheduling, and durable notification outbox (`task_*.odin`)
-- User/agent chat plus approvals (`chat_*.odin`, `message_db_service.odin`, `user_rpc.odin`, `user_ws.odin`)
-- Durable memory proposal/approval pipeline (`memory_*.odin`)
-- Projects/teams/VCS/artifacts/auth/preferences/audit (`project_store.odin`, `team_*.odin`, `vcs_*.odin`, `artifact_*.odin`, `0_auth_db_service.odin`, `user_pref_db_service.odin`, `audit_db_service.odin`)
-- Hub/router scaffolding and guide/test services (`hub_*`, `router_*`, `guide_*`, `test_run.odin`)
-
-### `src/wrapper`
-
-The `ham-wrapper` package. It turns a daemon-issued start request into a managed tmux session.
-
-Key responsibilities:
-
-- Resolve provider profile / model tier / run directory / project context
-- Register with daemon and receive `conversation_id`, `agent_token`, and WS info
-- Generate managed bootstrap files (`AGENTS.md` or `CLAUDE.md`, optional `MEMORY.md`, skills files, `.heimdall-bootstrap-manifest`)
-- Launch the real agent command in tmux
-- Run startup detection and activity detection without persisting raw terminal transcripts
-- Maintain WebSocket connection, heartbeat loop, and startup/activity status reporting
-- Recover from daemon restarts via re-registration / WS reconnect logic
-
-### `src/ctl`
-
-The `ham-ctl` CLI used by both humans and agents.
-
-Current command families are much broader than the original POC:
-
-- `health`
-- `agents ...`
-- `send`, `inbox`
-- `tasks ...`, `task-chains ...`
-- `projects ...`, `teams ...`, `workspace ...`, `chains ...`, `attention`
-- `memory ...`
-- `users ...`, `chat ...`
-- `artifacts ...`
-- `start-success`
-- `help work-guide`
-
-### `src/ui`
-
-The Heimdall desktop UI.
-
-- Electron shell in `src/ui/electron`
-- HTTP API client in `src/ui/api/daemonApi.ts`
-- Redux slices in `src/ui/store/*`
-- React components in `src/ui/components/*`
-- Tags interactive elements with stable `data-debug-id` selectors for tests and browser harnesses
-- Uses `/user-client/register`, `/user-ws`, REST reads, and `/user-rpc` mutations for most interactive flows
-
-### `src/lib`
-
-Shared libraries used by daemon/wrapper/ctl.
-
-- `config` — config structs/defaults/parser for daemon data dirs, wrapper launch/bootstrap settings, provider/model tiers, startup/activity detection, guide agent, and ctl defaults
 - `httpc` — the ONLY outbound HTTP(S) client (libcurl). Requests are structured (parsed base URL + path segments + query params, validated headers, JSON/form/raw bodies); never build URLs, headers or bodies with string interpolation. `scripts/check-http-boundary.sh` (also `nix flake check`) fails if any other package touches libcurl or `http_client` comes back. See `src/lib/httpc/README.md`.
   - **One pinned libcurl, linked statically.** `nix/libcurl-pin.json` pins the curl (and zlib) source tarball for every build; `nix/libcurl.nix` builds it (Linux release: static musl with OpenSSL 3; macOS release: static OpenSSL 3 + Apple SecTrust; Nix-native packages and `nix develop`: the same version as a shared library) and `scripts/windows/build-libcurl.ps1` builds it for Windows (Schannel). Release binaries are fully static on Linux and gated by `scripts/release/package-local-binary-tarball.sh` (no NEEDED at all; macOS: system frameworks only) and `scripts/windows/check-dependencies.ps1`. Builds pass `-define:HAM_CURL_VERSION=<pin>` and `httpc.init()` refuses any other libcurl. To bump: edit the pin (version, URLs, SHA-256 checked against the release signature), build the `release-*` attrs, run the httpc suite. Never link nixpkgs' `curl` into an Odin package.
-- `tmux` — tmux lifecycle helpers
-- `vcs` — git/jj workspace helpers
-- `ws` — wrapper-side WebSocket client
 
-## Core Data Structures and Stores
+## Durable State and Runtime Projections
 
-### Identities and auth
+The Hub's domain/repository/service layers replace the old daemon JSONL stores. Durable business
+records are persisted by [`src/hub/repository/sqlite`](src/hub/repository/sqlite). Task events
+and attempts retain history; live lease rows are released when work ends. Runtime connection
+maps, process handles, viewer queues, pending permission prompts, and activity snapshots have
+their own lifetimes.
 
-- `Agent_Id_Record`
-  - Durable identity: display name, template, role, default provider, default tier, state.
-  - Append-only JSONL store in `src/daemon/agent_id_store.odin`.
-- `Agent_Instance_Record`
-  - Durable instance binding: `agent_instance_id`, `agent_id`, provider, project, run dir, tier, scope, role, current task timestamps.
-  - Append-only JSONL store in `src/daemon/agent_store.odin`.
-- `Agent_Record`
-  - In-memory runtime/session projection: live socket, heartbeat, tmux pane, pid, startup/activity state, provider cache.
-  - Lives in `src/daemon/registry.odin`.
-- Auth tokens
-  - `agent_token` and `client_token` are persisted in SQLite (`src/daemon/0_auth_db_service.odin`) and recovered across daemon restarts.
+Do not equate a live process, a durable instance record, and a task lease. A task can be waiting
+for review while its worker process has stopped; an instance can be restarted for another
+attempt. See [task records](src/hub/domain/taskv2.odin),
+[instance records](src/hub/domain/agent.odin), and [pane transport](docs/pane-transport.md).
 
-### Tasks, chains, comments, votes, and participants
+Memory has five domain types: `fact`, `habit`, `episode`, `expertise`, and `skill`.
+Targeting uses lists of agent, project, template, and Bridge IDs; non-empty dimensions must all
+match. Pending proposals need human approval before becoming active bootstrap knowledge.
+`template` is a targeting dimension, not a memory type accepted by the content service. See
+[`src/hub/domain/content.odin`](src/hub/domain/content.odin) and
+[the memory/bootstrap reference](docs/reference/heimdall_memory_system_and_bootstrap.md).
 
-Defined primarily in `src/daemon/task_store.odin`.
+Artifacts have durable metadata and separately stored content. A shell session, artifact,
+conversation, and task each have their own ownership checks; access to one must not imply
+access to another.
 
-- `Task_Chain_State`
-  - Durable chain projection: project/team/workspace ids, title/description, coordinator, default reviewer, final summary, archive/evaluation flags.
-- `Task_State`
-  - Durable task projection: title, description, acceptance criteria, assignee, dependencies, timestamps, status.
-- `Task_Event`
-  - Event log record for task/chain mutations, comments, votes, status changes, nudges, archive events, and final summary.
-- `Task_Participant`
-  - Extra role membership beyond the primary assignee/coordinator/default reviewer.
-  - Roles include `assignee`, `coordinator`, `lgtm_required`, `lgtm_optional`, and `subscriber`.
-- `Task_Comment_State`
-  - Durable comments with `resolved` state.
-- `Task_LGTM_Vote_State`
-  - Durable reviewer vote state (`approved`, role, comment, timestamp).
-- Task statuses
-  - Core task states are `planning`, `queued`, `in_progress`, `review_ready`, `approved`, `blocked`, and `cancelled`.
-  - `ready` is accepted as a CLI/HTTP alias for `queued`.
-- Storage model
-  - Tasks are event-shaped and projected into in-memory arrays plus SQLite tables (`task_db_service.odin`).
-  - The daemon also keeps a durable task notification outbox for retryable per-agent notifications.
+## Agent Launch and Bootstrap
 
-### User/agent chat
+1. The UI, CLI, or task matcher requests a managed instance launch. The Hub validates ownership
+   and resolves the target Bridge and provider/model before dispatching a Bridge command.
+2. The Bridge prepares the provider command and recreates the managed instance run directory.
+   [Pre-spawn materialization](src/bridge/bootstrap_prespawn.odin) writes the bootstrap before
+   a provider process starts.
+3. [Bootstrap assembly](src/bridge/bootstrap_service.odin) writes provider-specific instructions
+   (`AGENTS.md` or `CLAUDE.md`), applicable memory/skills, `heimdall-bootstrap-manifest.json`,
+   and `./.heimdall/bin/ham-ctl`. The Bridge also supplies the local endpoint, instance identity,
+   and agent credential.
+4. The Bridge spawns the agent through the local `ham-pty-host` daemon. The daemon owns child
+   processes, terminal I/O, and terminal state; the Bridge forwards runtime observations to
+   the Hub.
+5. Provider-native extensions supply structured activity, tools, edits, and permission events
+   where supported. Capability and provider differences matter; do not infer a successful tool
+   result from a terminal screen or from a missing native event.
+6. Once initialized, the agent signals readiness with `ham-ctl start-success`. Incoming notices
+   direct it to fetch messages or a task context pack.
 
-Defined in `src/daemon/chat_store.odin` and `message_db_service.odin`.
+Provider launch recipes live in the Hub catalog, with effective provider availability and
+model observations per Bridge. The catalog records executable/arguments, model selection,
+prompt delivery, bootstrap paths, and extension metadata. Provider authentication is part of
+the execution device's provider setup; do not describe the catalog as a universal API-key store.
+See [provider records](src/hub/domain/provider.odin) and
+[`src/hub/service/provider`](src/hub/service/provider).
 
-- `Chat_Event`
-  - Append/delivered/read/failure events for human↔agent chat.
-- `Chat_Message`
-  - Durable SQLite row keyed by `message_id`, `user_id`, `agent_instance_id`, direction, body, chain id, delivery/read timestamps, and failure info.
-- Read state
-  - Stored durably per conversation/direction in the chat DB and exposed through `/user-rpc`, `/chats/...`, and UI slices.
+## Task Lifecycle and Reviews
 
-### Memory
+A task's stored states are `backlog`, `ready`, `in_progress`, `in_review`, `done`, and
+`cancelled`. Blocking, holds, startup failures, and lease expiry add lifecycle detail; they
+are not a license to set a task's status manually. See
+[`src/hub/domain/taskchain.odin`](src/hub/domain/taskchain.odin) and
+[the fold](src/hub/service/taskv2/fold.odin).
 
-Defined by `src/contracts/memory_provider.odin` and implemented by `src/daemon/memory_*.odin`.
+- Create a task with a non-empty goal and acceptance items, then publish it if it is a draft.
+  Assign ordinary work to durable `agt_...` identities, not another runtime's `inst_...` ID.
+  Workers choose and report appropriate checks; briefs do not configure a verification command.
+- A work lease makes a ready task `in_progress`. One instance holds at most one lease; one
+  task has at most one work lease. `lease next` returns the current lease or claims eligible work.
+- Read `TASK.md` on wake. When it names a Workdir, do all edits, checks, and commits there.
+  Git-backed chain directories use per-task worktrees; do not edit the shared checkout instead.
+- Record a short plan and milestones as task comments. Keep a long-running lease alive with
+  `lease heartbeat` at least every 15 minutes. A `lease_lost` response ends the old authority.
+- `lease submit` records the attempt and releases the lease for review. `lease handoff`
+  returns unfinished work; `lease block` records an external dependency. There is no
+  `tasks done` or manual status transition in the current agent workflow.
+- Reviews use `review post --verdict approve|request_changes`. The gate checks the current
+  attempt's required named reviewers, fleet review roles, and user approval when required.
+  The author does not review their own work. A request for changes wins over approvals.
+- Review completion and merge-back are separate outcomes. A task's branch is merged through
+  its directory's Bridge; conflicts/failures remain visible and affect downstream readiness.
+- Task dependencies and workflow-run dependencies require success. Chains contain both ordinary
+  tickets and engine-managed workflow stages. Use workflow run/status/output/retry/cancel for
+  those runs rather than editing stage identities.
+- Finishing the current batch does not complete the chain. Inspect `task-chain graph`, then
+  explicitly complete the current work revision once all included items succeeded, no leases
+  remain, and any pending proposal is decided.
 
-- `Memory_Record`
-  - Durable current record.
-- `Memory_Event`
-  - Durable proposal/approval/rejection/archive history.
-- Types
-  - `fact`, `habit`, `episode`, `expertise`, `skill`.
-  - `template_id` is a memory scope target, not a memory type.
-- Statuses
-  - `pending`, `active`, `archived`, `rejected`.
-- Targeting dimensions
-  - `target_agent_id`, `target_team_kind`, `target_role`, `target_project_id`.
-- Storage
-  - SQLite in `memory/memory.db` with event history and applicable-memory queries.
+### Solo mode
 
-### Projects, teams, VCS workspaces, and artifacts
+When the coordinator is also a worker in the fleet, it pulls work with `lease next`; it is
+not automatically wake-granted work. User review is the default, and the soloist cannot approve
+its own work. The coordinator stays running across lease submissions/switches. Ordinary
+non-coordinator lease holders are stopped on release and re-bootstrapped when reused; a reused
+durable instance does not mean the previous provider conversation is retained.
+See [lease release and solo rules](src/hub/service/taskv2/lease.odin).
 
-- `Project_Record`
-  - Durable project metadata plus loose anchors (`type`, `value`, `note`).
-  - Append-only JSONL store in `src/daemon/project_store.odin`.
-- `Team_Record` / `Team_Member_Record`
-  - Durable chain team and roster records in `teams/teams.db`.
-  - Team members can be generated agents or `user_proxy` slots with `route_to` metadata.
-- `Vcs_Workspace_Record`
-  - Durable workspace handle in `vcs/vcs.db`: project, chain, path, base ref, branch/change, status, keep-on-archive.
-- `Artifact_Record`
-  - Durable artifact metadata in `artifacts/artifacts.db`; blob bytes live under the artifact blob store.
+### CLI and Communication
 
-### Bootstrap artifacts
-
-Generated by `src/wrapper/main.odin`.
-
-- Managed files can include `AGENTS.md`, `CLAUDE.md`, `MEMORY.md`, and per-skill `SKILL.md` files under directories such as `.agents/skills/` or `skills/`.
-- The wrapper writes `.heimdall-bootstrap-manifest` so it can clean up only files it previously managed.
-- Bootstrap content is assembled from live identity data, project/team/chain/workspace context, active approved memories/templates, and agent template persona/instructions.
-
-## Persistence Model
-
-Heimdall is **not** an in-memory-only system.
-
-Current storage is mixed by subsystem:
-
-- SQLite: auth tokens, tasks/projections/outbox, chat/messages, memory, teams, VCS workspaces, artifacts, preferences, audits
-- JSONL append-only stores: durable agent identities/instances, projects, some legacy/migration paths
-- In-memory runtime projections: live wrapper registry, active sockets, pending WS connections, provider-memory agent inbox implementation
-
-A good rule of thumb: durable business state lives on disk; live transport/session state stays in memory.
-
-## Runtime Data Flow
-
-### 1. Agent start and bootstrap generation
-
-1. `ham-ctl agents start ...` or UI start action sends `POST /agents/start`.
-2. The daemon validates/provider-resolves the request, upserts durable agent identity state, and launches `ham-wrapper` detached.
-3. The wrapper calls `/health`, then `/register`.
-4. The daemon returns `agent_instance_id`, `conversation_id`, WS info, `agent_token`, template persona/instructions, and team-role context.
-5. The wrapper optionally validates project context, fetches applicable memories/project/team/chain/workspace state, writes managed bootstrap files, and launches the real agent command in tmux.
-6. The wrapper reports startup status, heartbeats, and activity snapshots; the agent later signals `start-success` through `ham-ctl ... start-success`.
-
-### 2. Agent-to-agent inbox messaging
-
-1. Agent CLI/RPC sends a message through `/agent-rpc`.
-2. `message_service.odin` routes through the configured message provider and emits message-bus events.
-3. The daemon sends a metadata-only `messages_available` WS event to the target agent, including `conversation_id`, sender, and `pending_count`.
-4. The target agent fetches actual bodies through inbox/fetch RPC/CLI.
-5. Read events produce `messages_read` notifications back to the sender.
-
-### 3. User ↔ agent chat
-
-1. The UI registers a `client_instance_id` and `client_token` via `/user-client/register`, heartbeats via `/user-client/heartbeat`, and opens `/user-ws/<client_instance_id>`.
-2. Human sends use `/user-rpc action=send_to_agent`; agent sends use `chat send-to-user` / chat HTTP helpers.
-3. Chat bodies are stored durably in the chat/message SQLite store.
-4. WS `chat_event` fanout tells the UI/user client that a conversation changed and carries metadata such as `message_id`, direction, chain id, and unread count.
-5. UI/CLI fetch full bodies through `/chats/...` or `/user-rpc fetch_chat`, and mark read via `/user-rpc mark_read`.
-
-### 4. Task lifecycle and review routing
-
-1. Task and chain mutations append `Task_Event` records.
-2. Projections update `Task_State`, `Task_Chain_State`, comments, participants, and votes.
-3. Automatic gating promotes tasks from `planning` to `queued`, then to `in_progress` when the assignee is free.
-4. `tasks done` moves a task to `review_ready`; required `lgtm_required` votes auto-approve it.
-5. Notification routing is status-aware:
-   - `queued` / `in_progress` → assignee (+ subscribers)
-   - `review_ready` → required reviewers with fallback routing
-   - `approved` / `blocked` / `cancelled` → assignee + coordinator (+ subscribers)
-   - review-ready comments are not themselves a reviewer broadcast; nudges and status ownership determine who gets pinged live
-6. User-facing task WS events can include embedded task/chain snapshots, while agent-facing notifications stay lightweight summaries.
-7. If live delivery fails, the daemon queues a durable notification outbox entry for replay.
-
-### 5. Memory lifecycle
-
-1. Agents or users propose memory changes (`new`, `edit`, `archive`, `rollback`).
-2. Proposal records are stored as `pending`.
-3. Approval promotes the proposed memory to `active` (or archives/replaces the target on edit/archive/rollback flows).
-4. Wrapper bootstrap generation calls `/memory/applicable` to pull only active memories/templates relevant to the current agent/team/role/project scope.
-
-### 6. Project / team / VCS / artifact lifecycle
-
-- Projects are durable metadata records with loose anchors; they are hints, not mandatory cwd bindings.
-- Creating chains can allocate a team, generated roster, optional VCS workspace setup tasks, and workspace records.
-- VCS endpoints under `/chains/{id}/workspace...` expose status, diff, pull-base, merge-preview, merge, and archive flows.
-- Completing a VCS-backed chain can leave a workspace `merge_pending` until the merge/keep/archive decision is resolved.
-- Artifact metadata is stored durably; blobs are served separately via artifact content routes.
-
-## Current Control / Launch Model
-
-Default config path:
-
-```text
-~/.config/heimdall/config.toml
-```
-
-Pass `--config <path>` to override.
-
-### Agent command profiles
-
-`config.toml` supports multiple wrapper agent command profiles, each with command args, model-tier mapping, bootstrap feature settings, startup/activity detection, and prompt-delivery behavior.
-
-Example knobs that exist today:
-
-- `wrapper.default_agent`
-- `wrapper.agent_run_dir`, `wrapper.use_random_dir`
-- per-profile `command`, `prompt_flags`, `yolo_flags`, `starter_prompt`
-- per-profile `models.{cheap,normal,smart}`
-- per-profile bootstrap feature blocks such as `bootstrap.AGENTS_MD`, `bootstrap.MEMORY_MD`, and `bootstrap.SKILLS`
-- per-profile `startup_detection` and `activity_detection`
-- guide-agent defaults under `[guide_agent]`
-
-### Startup detection
-
-Wrappers can classify startup without persisting raw transcripts.
-
-Per-profile startup detection can:
-
-- probe a bounded tmux capture window in memory
-- auto-press safe keys for known prompts
-- classify `starting`, `ready`, `startup_blocked`, `startup_failed`, or `startup_unknown`
-- report only sanitized diagnostics back to the daemon
-
-### `ham-ctl` command families
-
-Run `ham-ctl --help` for the current surface. Important families include:
+From an agent run directory, use the generated `./.heimdall/bin/ham-ctl` wrapper.
+It authenticates to the local Bridge, which routes authorized operations to the Hub.
+User/operator commands have a separate `ham-ctl hub` surface; inspect `ham-ctl help hub`
+rather than copying retired `--as user`/`--as agent` examples.
 
 ```bash
-ham-ctl task-chains <list|create|show|update|members|add-agent|publish|complete> [--as user|agent]
-ham-ctl tasks <list|create|update|status|done|depend|cancel|comment|comments|vote|votes|nudge> [--as user|agent]
-ham-ctl agents list|start|create|update
-ham-ctl send|inbox
-ham-ctl projects ...
-ham-ctl teams ...
-ham-ctl workspace ...
-ham-ctl memory ...
-ham-ctl users ...
-ham-ctl chat ...
-ham-ctl artifacts ...
-ham-ctl help work-guide
+ham-ctl --help
+ham-ctl task --help
+ham-ctl task-chain --help
+ham-ctl lease --help
+ham-ctl workflow --help
+ham-ctl chat read
+ham-ctl chat send --to user --body "Progress and next steps."
+ham-ctl lease next
+ham-ctl task comment <task-id> --body "1. Inspect the source. 2. Make and check the change."
+ham-ctl lease heartbeat --note "Checking the change."
+ham-ctl lease submit --summary "Files changed; checks and outcomes." --decision "Choice and why."
+ham-ctl review post --verdict approve
+ham-ctl task recheck <task-id>
+ham-ctl task-chain graph
+ham-ctl task-chain complete <chain-id> --expected-work-revision <n> --summary "Final evidence."
 ```
 
-Top-level `ham-ctl task-chains` and `ham-ctl tasks` unify user and agent operations with full parity. Use `--as user` (direct HTTP to Hub with user token) or `--as agent` (IPC relay through local Bridge with agent token). Task ids are globally unique, so `tasks show/comments/status/comment/vote/nudge/...` need only the `<task-id>` — the Hub derives the chain server-side and `--chain` is never required. `tasks list` defaults to the caller instance's own chain when `--chain` is omitted.
+Use chat for user-facing replies, questions, and milestone updates. Use task comments and the
+submit handoff for technical evidence, decisions, dead ends, and checks. `chat send --to` accepts
+`user` or an exact target instance ID; the recipient fetches durable messages with `chat read`.
+Do not treat a notification, answer selection, or silence as a review verdict.
 
-### Daemon-managed agent start
+Choose a tracked shell run for build/test commands and any command that may take time:
 
-All managed launches go through the daemon. `ham-ctl` or the UI does **not** spawn wrappers directly for normal operation; it requests `POST /agents/start`, and the daemon launches `ham-wrapper` on the daemon host.
-
-## Token Model
-
-Agent and user tokens are random bearer tokens persisted by the auth DB.
-
-Do **not** assume deterministic formats such as `agent_<agent_instance_id>`.
-
-Examples:
-
-```json
-{"agent_token":"agt_<random-hex>"}
-{"client_token":"uct_<random-hex>"}
+```bash
+ham-ctl shell run --cmd 'npm run build' --cwd <workdir>
+ham-ctl shell run --cmd 'long-running-check' --cwd <workdir> --bg
+ham-ctl shell serve --cmd 'npm run dev' --cwd <workdir> --port 5173
+ham-ctl shell log <session-id>
 ```
 
-For daemon-launched wrappers, the daemon may pre-generate the agent token, return it to ctl/UI, and pass it to the wrapper so the wrapper registers using the same durable credential.
+A foreground `shell run` waits for completion; `--bg` explicitly backgrounds it. `serve`
+starts a long-running service. Always pass the actual working directory. For a user preview,
+present the returned `preview_url`; see the preview guidance below.
 
 ## UI Debug IDs
 
@@ -565,14 +404,18 @@ When adding any new interactive element to the UI:
 2. Add `data-debug-id="your-id"` to the element.
 3. Add the ID to the relevant row in the per-component registry table above.
 
-## Wrapper Lifecycle Notes
+## Runtime Lifecycle Notes
 
-- Wrapper checks for an exact existing tmux window before registration.
-- If the window exists, wrapper prints the tmux location and asks whether to close it.
-- Tmux window matching uses exact `list-windows` matching, not fuzzy tmux target matching.
-- Wrapper exits if the agent tmux pane disappears.
-- Wrapper attempts re-registration and WS reconnect after repeated heartbeat failures, allowing it to survive daemon restarts.
-- When creating a new tmux session, wrapper creates the agent window directly and avoids an extra default shell window.
+- The Bridge uses the local `ham-pty-host` daemon for agent launch and terminal I/O;
+  legacy PTY runtime flags do not restore tmux or wrapper launches.
+- Pre-spawn bootstrap recreation clears the managed run directory before writing the new
+  instance context. Keep project edits in the task Workdir, not the bootstrap directory.
+- Bridge reconnect rebuilds connection-scoped runtime observations. Durable instance and
+  task records remain in the Hub; disconnection alone is not proof a remote process stopped.
+- Provider-native permissions and activity are capability-dependent. Preserve native prompt
+  fallback when a hook times out or cannot deliver a decision.
+- Keep socket ownership and viewer backpressure rules intact when changing terminal transport.
+  See [runtime registry](docs/runtime-registry.md) and [pane transport](docs/pane-transport.md).
 
 ## Git Hooks
 
@@ -602,16 +445,21 @@ When adding any new interactive element to the UI:
 
 ## Task Chain Best Practices
 
-When coordinating a task chain, the designated Coordinator Agent must adhere to the following workflow upon task completion:
+When coordinating a chain:
 
-1. **Verify All Tasks:** Review the outputs of all individual tasks in the chain to ensure they are fully complete, correct, and work together.
-2. **Submit Verifiable Evidence:** When moving the task chain to `completed` (using the `ham-ctl task-chains status --status completed --final-summary "..."` command), the coordinator must provide a comprehensive, high-fidelity final summary. This summary MUST include:
-   - **Verifiable Results/Evidence:** Specific outputs, behavior descriptions, or test logs proving correctness.
-   - **Git Commits:** The hashes of all commits created or reviewed as part of the task chain.
-   - **File Paths:** Precise relative or absolute paths of the files modified or created.
-   - **Result Summary:** A concise overview of the accomplishments.
-3. **Propose Quality Rating:** Propose a quality rating status of `good` or `bad` for the task chain.
-4. **Reasoning:** Provide clear, objective engineering rationale explaining why the chain succeeded (`good`) or if there were critical defects or difficulties encountered (`bad`).
+1. **Verify the work:** inspect task outputs, checks, review outcomes, and merge results.
+2. **Finish explicitly:** read `ham-ctl task-chain graph` for the current work revision. Every
+   included ticket must be done and every included workflow run must have succeeded; no
+   leases or pending proposal may remain. Then run:
+   ```bash
+   ham-ctl task-chain complete <chain-id> --expected-work-revision <n> --summary "Final acceptance and evidence."
+   ```
+3. **Record evidence:** the completion summary must identify results, checks and outcomes,
+   commits, changed paths, and any limits. Do not report unrun tests as passing.
+4. **Propose a quality rating:** state `good` or `bad` with objective rationale. Batch-finished
+   notifications are a cue to assess remaining work, not to infer chain completion.
+5. **Preserve review authority:** keep required user gates. Record a verdict on behalf of the
+   user only after an explicit user decision; never infer approval from silence.
 
 ## Preview-Driven UI Development (Live Production Data + Instant HMR)
 
