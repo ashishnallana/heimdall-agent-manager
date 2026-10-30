@@ -124,12 +124,26 @@ Routine events stay quiet. You get one line, `[taskv2] <trigger>: …`, only whe
 | `oscillation` | review rounds keep bouncing: read the open findings (`task show`) and the handoff, make `acceptance` unambiguous |
 | `ready_unclaimed` | no eligible worker: check `task-chain fleet list` and `bridge list`, fix capacity, roles or bridge |
 | `agent_not_running` | A ready task cannot obtain a running agent, or a leased holder exited/lost its heartbeat. `task show <id>` shows `blocked_on.kind=agent_not_running` (legacy `dispatch` is equivalent), with agent/provider/model/bridge/error. The user can choose **Start agent** in the attention deck or chat tray; a failed start stays blocked and shows its error inline for retry. Fix the cause, then use the card or `task unblock <id> [--note <reason>]`; editing the affected fleet row also clears the block. No work attempt budget is spent. Full fleet rows remain queued without blocking |
-| stuck `ready` / `in_review` / merge | A task looks stuck: `ready_unclaimed` with free fleet capacity, `in_review` although every owed review is in (e.g. after `--no-require-user-approval`), or a done task whose merge is `pending`/`failed`/`none`. Run `task recheck <id>`: it re-runs the gate, readiness, dispatch and merge-back without approving or touching a live lease, and its `reasons` name what still holds (waiting reviewer, `fleet full n/m`, bridge offline, directory without git). Prefer it to `task hold` + `task release`, which also asks a lease holder to checkpoint |
+| stuck `ready` / `in_review` / merge | A task looks stuck: `ready_unclaimed` with free fleet capacity, `in_review` although every owed review is in (e.g. after `--no-require-user-approval`), or a done task whose merge is `pending`/`failed`/`none`. Run `task recheck <id>`: it re-runs the gate, readiness, dispatch and merge-back without approving or touching a live lease, and its `reasons` name what still holds (waiting reviewer, `fleet full n/m`, bridge offline, directory without git). Prefer it to `task hold` + `task release`, which also asks a lease holder to checkpoint (see §5 "Pausing vs deferring") |
 | `review_requested_from_user` | summarise the evidence and point the user to the existing task review UI; if they explicitly decide in chat, record their verdict (§6). No task approval action card is required |
 | `merge_conflict` / `merge_failed` | a done task's branch did not merge; the task returns to its worker with a Merge Conflict section. For `merge_failed` (merge never ran, e.g. bridge offline) check the bridge |
 | `gate_rejected` | a workflow gate was rejected: inspect the feedback, talk to the user, and retry the whole run if appropriate |
 | `summary_overflow` | compact the chain summary (`task-chain summary set`) |
 | `work_batch_finished` / `workflow_complete` | assess the goal; add more work or explicitly complete the chain |
+
+### Pausing vs deferring: when to `task hold`
+`task hold` is a deliberate stop. Nothing dispatches until someone runs `task release`, and the user is never asked to act on it. Pick the command that matches what you want:
+
+| Intent | Command |
+|---|---|
+| Work on something else first (solo) | `lease switch <other_task> --summary …`; the current task returns to `ready` |
+| Stop now; someone continues later | `lease handoff --summary … --next-steps …` |
+| This task must run after another | `task update <id> --depends-on <id>` (or `task depend`) |
+| This task is less urgent | `task update <id> --priority p2` |
+| You need the user's answer or decision | `lease block --waiting-on user --reason "<question>"`, which gives the user an answerable card |
+| Pause dispatch deliberately (re-route to another identity or model, re-plan, wait on an external event) | `task hold <id> --reason "<why and what releases it>"`, then `task release <id>` |
+
+Rules: never hold a task just to postpone it, and never hold when the user's input is needed (the user cannot answer a held task). Release every hold you set as soon as its reason is resolved.
 
 ## 6. Recording the user's verdict
 - Workflow gates with approver `user_or_coordinator`: your own `review post --verdict approve|request_changes` decides.

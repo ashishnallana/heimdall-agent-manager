@@ -31,6 +31,7 @@ All commands use `./.heimdall/bin/ham-ctl`. Exact flags: the `ham-ctl-reference`
 | Woken as a reviewer | read the role description (`lease next`), inspect the head and the worker's reported checks, run your own checks only where a concrete concern remains, then `review post` |
 | Review: everything checks out | `review post --verdict approve` |
 | Review: something is wrong | `review post --verdict request_changes --summary … [--findings-file …]` |
+| Want to postpone this task or do something else first | `lease switch <task_id> --summary …` (solo) or `lease handoff --summary … --next-steps …`; never ask for a hold to postpone work (holds are the coordinator's pause, and the user cannot act on them) |
 | Solo: an urgent task arrives mid-task | `lease switch <task_id> --summary "<where you left off>"` |
 | Found an unrelated bug | `issue list --query …`, then `issue vote <id>` or `issue create`; do not fix it in this task |
 
