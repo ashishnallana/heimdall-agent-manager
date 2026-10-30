@@ -16,6 +16,8 @@ import {
   TASK_STATES_ORDER,
   TASK_STATE_LABELS,
   TASK_STATE_COLORS,
+  holdSummary,
+  taskHold,
 } from '../src/ui/components/tasks/taskV2Types.ts';
 import type { TaskStateV2 } from '../src/ui/components/tasks/taskV2Types.ts';
 import type { TaskWire } from '../src/ui/api/taskWire.ts';
@@ -269,6 +271,12 @@ test('getTaskStatusLines generates human-readable status sentences for each stat
   const heldBadges = getTaskBadges(makeTask({ state: 'in_progress', blocked_on: { kind: 'hold', reason: 'repair brief', checkpoint_requested: true } }), [], nowMs);
   assert.ok(heldBadges.some((b) => b.label === 'Held · checkpoint requested' && b.tone === 'warn'));
   assert.ok(!heldBadges.some((b) => b.label === 'Blocked on you'));
+  // Every held card states reason, holder, age and checkpoint outright (not only in a tooltip).
+  const heldReview = makeTask({ state: 'in_review', blocked_on: { kind: 'hold', reason: 're-route', by: 'user', since_ms: nowMs - 12 * 60000, checkpoint_requested: true } });
+  assert.equal(holdSummary(taskHold(heldReview)!, nowMs), 'Held: re-route · by you · 12 min ago · checkpoint requested');
+  assert.equal(holdSummary({ kind: 'hold' } as any, nowMs), 'Held');
+  const cardSrc = fs.readFileSync(path.join(REPO_ROOT, 'src/ui/components/tasks/TaskCard.tsx'), 'utf8');
+  assert.match(cardSrc, /task-card-hold-\$\{task\.task_id\}[\s\S]{0,120}holdSummary\(hold, now, names\)/, 'the hold line renders on the collapsed card');
   // A hold nested under a failed reviewer's block shows both.
   const nestedBadges = getTaskBadges(makeTask({ state: 'backlog', blocked_on: { kind: 'agent_not_running', reason: 'reviewer exited', hold: { kind: 'hold', reason: 'repair brief', checkpoint_requested: true } } }), [], nowMs);
   assert.ok(nestedBadges.some((b) => b.label === 'Held · checkpoint requested'));

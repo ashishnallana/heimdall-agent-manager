@@ -13,6 +13,8 @@ import {
   uiToneForBadge,
   workLeaseHolder,
   uiToneForPriority,
+  holdSummary,
+  taskHold,
 } from './taskV2Types';
 import { TASK_ACTION_LABELS, editLock, getTaskActions, isDraft, recheckToast, reviewParticipantIds, reviewVotes, taskNeedsYou, voteFor, type TaskActionId } from './taskActions';
 import { showToast } from '../../store/toastSlice';
@@ -93,6 +95,7 @@ export const TaskCard: React.FC<TaskCardProps> = ({
   const isGate = task.kind === 'gate';
   const now = Date.now();
   const [sentence, detail] = getTaskStatusLines(task, chainFleets, now, names);
+  const hold = taskHold(task);
   // The holder, time left and bridge already show in the status sentence and the
   // people line, so those badges are dropped here.
   const badges = getTaskBadges(task, chainFleets, now, names).filter((b) => b.kind !== 'lease' && b.kind !== 'bridge');
@@ -256,6 +259,12 @@ export const TaskCard: React.FC<TaskCardProps> = ({
           </span>
           {detail ? ` · ${detail}` : ''}
         </Text>
+        {hold && (
+          // Every held card, whatever its state, says why, who and since when.
+          <Text as="p" role="body-sm" tone="warning" data-debug-id={`task-card-hold-${task.task_id}`}>
+            {holdSummary(hold, now, names)}
+          </Text>
+        )}
 
         {/* Row 3: who works it, who reviews it, what it waits for. Finished
             cards keep only the sentence; the rest is in the details. */}
@@ -329,7 +338,7 @@ export const TaskCard: React.FC<TaskCardProps> = ({
               <Button
                 key={id}
                 size="sm"
-                variant={id === 'request_changes' || !needsYou ? 'secondary' : 'primary'}
+                variant={id === 'request_changes' || id === 'release' || !needsYou ? 'secondary' : 'primary'}
                 disabled={actions.busy}
                 data-debug-id={`task-action-${id}-${task.task_id}`}
                 onClick={() => void runAction(id)}

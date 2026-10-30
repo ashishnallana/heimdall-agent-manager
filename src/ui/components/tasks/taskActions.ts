@@ -212,18 +212,18 @@ export function getTaskActions(task: TaskWire): TaskActionSet {
     more.push('reopen');
   } else if (isDraft(task)) {
     primary.push('publish');
-  } else if (blockedOnYou(task)) {
+  } else if (blockedOnYou(task) && !taskHold(task)) {
+    // Held: the hub refuses an answer; a failed agent under a hold is
+    // started from its attention card, and Release (below) is the way on.
     primary.push('answer');
   } else if (awaitingYourReview(task)) {
     primary.push('approve', 'request_changes');
-  } else if (taskHold(task)) {
-    // Nothing moves until someone releases it: offer that up front.
-    primary.push('release');
   }
+  // Nothing moves on a held task until someone releases it: always offer it up front.
+  if (!closed && taskHold(task)) primary.push('release');
 
   if (canRecheck(task)) more.push('recheck');
   if (canHold(task)) more.push('hold');
-  else if (!closed && taskHold(task) && !primary.includes('release')) more.push('release');
   if (!closed && !isGate(task)) more.push('cancel');
   more.push('copy_id');
   return { primary, more };

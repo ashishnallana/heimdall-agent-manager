@@ -340,7 +340,7 @@ export const TaskDetails: React.FC<TaskDetailsProps> = ({
         </Block>
       )}
 
-      {blockedOnYou(task) && (
+      {blockedOnYou(task) && !hold && (
         <Block title="Waiting on your answer" debugId="answer-blocker-block">
           {blockerQuestion(task) ? (
             <blockquote data-debug-id="answer-question" className="rounded-md border-l-2 border-accent bg-accent-soft px-3 py-2 text-body-sm text-primary">

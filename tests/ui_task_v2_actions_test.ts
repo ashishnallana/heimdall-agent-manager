@@ -174,15 +174,15 @@ test('a held task offers Release up front and never Answer; open tasks offer Hol
   const pausedQ = task({ state: 'backlog', blocked_on: { kind: 'human', reason: 'Which DB?', hold: { kind: 'hold', reason: 're-route' } } as any });
   assert.deepEqual(getTaskActions(pausedQ).primary, ['release']);
   assert.ok(!taskNeedsYou(pausedQ));
-  // A failed agent under a hold can still be started.
+  // A failed agent under a hold still needs you (Start agent, from its
+  // attention card), but it is not a question: no Answer, Release instead.
   const agentDown = task({ state: 'backlog', blocked_on: { kind: 'agent_not_running', reason: 'exited', hold: { kind: 'hold', reason: 'x' } } as any });
   assert.ok(taskNeedsYou(agentDown));
-  assert.deepEqual(getTaskActions(agentDown).primary, ['answer']);
-  assert.ok(getTaskActions(agentDown).more.includes('release'));
-  // A held review awaiting you keeps Approve; Release sits in More.
+  assert.deepEqual(getTaskActions(agentDown).primary, ['release']);
+  // A held review awaiting you keeps Approve, and Release shows beside it.
   const heldReview = task({ state: 'in_review', requires_user_approval: true, blocked_on: { kind: 'hold', reason: 'x' } as any });
-  assert.deepEqual(getTaskActions(heldReview).primary, ['approve', 'request_changes']);
-  assert.ok(getTaskActions(heldReview).more.includes('release'));
+  assert.deepEqual(getTaskActions(heldReview).primary, ['approve', 'request_changes', 'release']);
+  for (const t of [held, pausedQ, agentDown, heldReview]) assert.ok(!getTaskActions(t).more.includes('release'), 'Release is never tucked into More');
 
   assert.ok(canHold(task({ state: 'ready' })));
   assert.ok(canHold(task({ state: 'in_progress', leases: [{ kind: 'work' }] as any })), 'a leased task can be held (its holder checkpoints)');

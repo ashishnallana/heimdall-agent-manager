@@ -84,6 +84,16 @@ export function describeHold(hold: TaskHoldInfo, nowMs: number = Date.now(), nam
   return parts.join(' · ');
 }
 
+/**
+ * The line every held card shows outright, whatever the task's state:
+ * "Held: re-route · by you · 12 min ago · checkpoint requested".
+ */
+export function holdSummary(hold: TaskHoldInfo, nowMs: number = Date.now(), names: TaskNames = EMPTY_TASK_NAMES): string {
+  return [`Held${hold.reason ? `: ${hold.reason}` : ''}`, describeHold(hold, nowMs, names), hold.checkpoint_requested ? 'checkpoint requested' : '']
+    .filter(Boolean)
+    .join(' · ');
+}
+
 export function getTaskBadges(task: TaskWire, _chainFleets?: any[], nowMs: number = Date.now(), names: TaskNames = EMPTY_TASK_NAMES): TaskBadge[] {
   const badges: TaskBadge[] = [];
   const state = normalizeTaskState(task.state);
