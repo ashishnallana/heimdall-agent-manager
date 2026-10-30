@@ -436,3 +436,41 @@ test_projector_accept_does_not_swallow_new_round :: proc(t: ^testing.T) {
 	testing.expect_value(t, now.status, domain.CARD_STATUS_PENDING)
 	testing.expect_value(t, now.source_marker, ph_marker("2026-10-01T03:00:00Z"))
 }
+
+// A hold is an operator pause, not a question: holding a blocked task retires
+// its Answer card (task.answer refuses a held task). A held review awaiting the
+// user keeps its Review card, marked held with the hold's reason.
+@(test)
+test_projector_hold_retires_question_keeps_review :: proc(t: ^testing.T) {
+	h: Projector_Harness
+	ph_open(t, &h, "att_hold")
+	defer ph_close(&h)
+
+	cid := attention_task_card_id("task_q")
+	ph_save_task(t, &h, ph_task("task_q", .In_Validation, "2026-10-01T01:00:00Z"))
+	c, ok := ph_card(t, &h, cid)
+	testing.expect(t, ok && c.status == domain.CARD_STATUS_PENDING, "question card while blocked on the user")
+
+	held := ph_task("task_q", .In_Validation, "2026-10-01T02:00:00Z")
+	held.blocked_on_json = `{"kind":"human","reason":"Which database should I use?","hold":{"kind":"hold","reason":"vault:v2:hold-reason","since_ms":1}}`
+	ph_save_task(t, &h, held)
+	c, _ = ph_card(t, &h, cid)
+	testing.expect_value(t, c.status, domain.CARD_STATUS_RESOLVED)
+
+	bare := ph_task("task_h", .In_Progress, "2026-10-01T02:00:00Z")
+	bare.state = .Backlog
+	bare.blocked_on_json = `{"kind":"hold","reason":"vault:v2:hold-reason","since_ms":1}`
+	ph_save_task(t, &h, bare)
+	_, exists := ph_card(t, &h, attention_task_card_id("task_h"))
+	testing.expect(t, !exists, "a bare hold never projects a card")
+
+	review := ph_task("task_r", .In_Progress, "2026-10-01T03:00:00Z")
+	review.state = .In_Review
+	review.requires_user_approval = true
+	review.blocked_on_json = `{"kind":"hold","reason":"vault:v2:hold-reason","since_ms":1}`
+	ph_save_task(t, &h, review)
+	rc, rok := ph_card(t, &h, attention_task_card_id("task_r"))
+	testing.expect(t, rok && rc.status == domain.CARD_STATUS_PENDING, "a held review awaiting the user keeps its card")
+	testing.expect(t, strings.contains(rc.operations_json, `"op":"task.review"`), "review op")
+	testing.expect(t, strings.contains(rc.details_json, `"held":true,"hold_reason":"vault:v2:hold-reason"`), rc.details_json)
+}

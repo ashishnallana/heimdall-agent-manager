@@ -218,6 +218,13 @@ build_task_card :: proc(s: ^Card_Service, task: domain.Task, kind: taskv2.User_A
 	} else {
 		strings.write_string(&details, `null`)
 	}
+	// A held task keeps its Review card (the user's verdict is still recorded;
+	// the gate resumes on release): the deck shows it as held, with the reason.
+	if hold, held := taskv2.task_hold_object(task.blocked_on_json); held {
+		strings.write_string(&details, `,"held":true,"hold_reason":"`)
+		contracts.write_json_string(&details, jsonx.extract_string(hold, "reason", "", true, context.temp_allocator))
+		strings.write_string(&details, `"`)
+	}
 	strings.write_string(&details, `}`)
 
 	rationale := "Waiting on your review"

@@ -346,3 +346,81 @@ test_hold_with_infrastructure_block_keeps_checkpoint :: proc(t: ^testing.T) {
 		assert_projection_matches_fold(t, fx, chain.chain_id, "u1", "hold with infrastructure block")
 	}
 }
+
+// A hold is an operator pause, never a question for the user: a held task gets
+// no Blocked attention (task_answer refuses it), even over a user block, and
+// the block's card comes back on release. A held review awaiting the user
+// keeps its Review attention (the verdict is still recorded).
+@(test)
+test_hold_is_not_user_attention :: proc(t: ^testing.T) {
+	fx, log, ok := lease_fixture(t, "hold_attention")
+	defer lease_fixture_close(fx, log)
+	if !ok do return
+	chain := seed_live_chain(t, fx, "chain_hold_att")
+	seed_fleet(fx, chain, "agt_w")
+	seed_instance(fx, chain, "inst_w1", "agt_w", "br_1", "idle")
+	_ = publish_task(t, fx, chain, "task_1", brief = `{"goal":"g","acceptance":["a"],"review_roles":[]}`)
+	confirm_holder(fx, "inst_w1")
+	owner := actor_from_auth(user_auth())
+
+	// The worker asks the user: a Blocked question.
+	_, bok, berr := lease_block(&fx.svc, inst_auth("inst_w1"), Block_Input{waiting_on_json = `{"kind":"human","reason":"which db?"}`, summary = "asking"})
+	if !testing.expect(t, bok, fmt.tprintf("block: %s", berr.message)) do return
+	kind, badge := user_attention(&fx.svc, get_task(fx, "task_1"))
+	testing.expect(t, kind == .Blocked && badge == "question", "a user block is a question")
+
+	// Held over the block: no Blocked attention, and answer is refused.
+	_, hok, herr := task_hold(&fx.svc, get_task(fx, "task_1"), owner, "re-route to another identity")
+	if !testing.expect(t, hok, fmt.tprintf("hold: %s", herr.message)) do return
+	row := get_task(fx, "task_1")
+	testing.expect(t, task_is_held(row), "held")
+	kind, _ = user_attention(&fx.svc, row)
+	testing.expect_value(t, kind, User_Attention.None)
+	_, ansok, _ := task_answer(&fx.svc, row, owner, "continue")
+	testing.expect(t, !ansok, "answer is refused while held")
+
+	// Release: the user block's question card returns.
+	_, rok, _ := task_release(&fx.svc, row, owner)
+	testing.expect(t, rok, "release")
+	kind, badge = user_attention(&fx.svc, get_task(fx, "task_1"))
+	testing.expect(t, kind == .Blocked && badge == "question", "the question returns on release")
+
+	// A bare hold (no other block) is never attention either.
+	_ = publish_task(t, fx, chain, "task_2", brief = `{"goal":"g","acceptance":["a"],"review_roles":[]}`)
+	_, hok, _ = task_hold(&fx.svc, get_task(fx, "task_2"), owner, "later")
+	testing.expect(t, hok, "hold task_2")
+	row = get_task(fx, "task_2")
+	testing.expect(t, task_is_held(row), "task_2 held")
+	kind, _ = user_attention(&fx.svc, row)
+	testing.expect_value(t, kind, User_Attention.None)
+	blocked, _ := blocked_on_user(row)
+	testing.expect(t, !blocked, "a primary hold is not blocked on the user")
+}
+
+@(test)
+test_hold_keeps_user_review_attention :: proc(t: ^testing.T) {
+	fx, log, ok := lease_fixture(t, "hold_review_att")
+	defer lease_fixture_close(fx, log)
+	if !ok do return
+	chain := seed_live_chain(t, fx, "chain_hold_rev")
+	seed_fleet(fx, chain, "agt_w")
+	seed_instance(fx, chain, "inst_w1", "agt_w", "br_1", "idle")
+	task := seed_task(t, fx, chain, "task_1", `{"goal":"g","acceptance":["a"],"review_roles":[]}`)
+	task.requires_user_approval = true
+	_, _, _ = iface.taskchain_save_task(&fx.repo, task)
+	_ = publish_task(t, fx, chain, "task_1", brief = `{"goal":"g","acceptance":["a"],"review_roles":[]}`)
+	lease, leased := lease_of(fx, "inst_w1")
+	if !testing.expect(t, leased, "task_1 granted") do return
+	row := get_task(fx, "task_1")
+	row.requires_user_approval = true
+	_, _, _ = iface.taskchain_save_task(&fx.repo, row)
+	submit_via_release(t, fx, lease)
+	if !testing.expect_value(t, get_task(fx, "task_1").state, domain.Task_State.In_Review) do return
+
+	_, hok, herr := task_hold(&fx.svc, get_task(fx, "task_1"), actor_from_auth(user_auth()), "wait for the release train")
+	if !testing.expect(t, hok, fmt.tprintf("hold: %s", herr.message)) do return
+	row = get_task(fx, "task_1")
+	testing.expect(t, task_is_held(row) && row.state == .In_Review, "held in review")
+	kind, badge := user_attention(&fx.svc, row)
+	testing.expect(t, kind == .Review && badge == "review", "a held review awaiting the user keeps its Review attention")
+}

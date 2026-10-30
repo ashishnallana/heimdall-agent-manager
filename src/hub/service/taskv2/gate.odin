@@ -165,7 +165,10 @@ User_Attention :: enum { None, Review, Blocked }
 //              oscillation | blocked) and any agent block except kind "task"
 //              (cleared automatically, C3-2) and the v2 backfill of legacy
 //              paused tasks (reason paused_before_v2). `badge` is the reason for
-//              the three system ones, else "question".
+//              the three system ones, else "question". A held task is never
+//              Blocked except for a nested agent_not_running block; a held
+//              Review card stays (verdicts are still recorded) and the card
+//              marks it held.
 user_attention :: proc(svc: ^Service, task: domain.Task) -> (kind: User_Attention, badge: string) {
 	if svc == nil || domain.task_state_is_terminal(task.state) do return .None, ""
 	if task.state == .In_Review && awaits_user_review(svc, task) {
@@ -200,6 +203,11 @@ blocked_on_user :: proc(task: domain.Task) -> (bool, string) {
 	if len(raw) == 0 || domain.task_state_is_terminal(task.state) do return false, ""
 	if jsonx.extract_string(raw, "kind", "", true, context.temp_allocator) == "task" do return false, ""
 	if is_agent_not_running_block(raw) do return true, "agent_not_running"
+	// A hold is an operator pause (coordinator/owner), not a question for the
+	// user, and task_answer refuses a held task: only a nested
+	// agent_not_running block (above; Start agent does not answer) stays
+	// actionable. Matches the attention candidate query, which skips holds.
+	if task_is_held(task) do return false, ""
 	reason := jsonx.extract_string(raw, "reason", "", true, context.temp_allocator)
 	switch reason {
 	case "paused_before_v2": return false, ""
