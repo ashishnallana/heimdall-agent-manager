@@ -133,7 +133,7 @@ Routine events stay quiet. You get one line, `[taskv2] <trigger>: …`, only whe
 | `work_batch_finished` / `workflow_complete` | assess the goal; add more work or explicitly complete the chain |
 
 ### Pausing vs deferring: when to `task hold`
-`task hold` is a deliberate stop. Nothing dispatches until someone runs `task release`, and the user is never asked to act on it. Pick the command that matches what you want:
+`task hold` is a deliberate stop: nothing dispatches until someone runs `task release`. A hold never gives the user an Answer card, so the user cannot answer a held task. A Review card the user already owes, or a nested **Start agent** action, stays in their deck. Pick the command that matches what you want:
 
 | Intent | Command |
 |---|---|
