@@ -74,6 +74,10 @@ Service :: struct {
 	// attention re-projects the user's attention card of every task an
 	// event touched (attention deck), after commit. nil in bare tests.
 	attention:           ^contracts.Attention_Notifier,
+	// hold_stale_seconds: how long a held, unleased task waits before (and
+	// between) hold_stale reminders to the coordinator; <= 0 uses
+	// HOLD_STALE_SECONDS.
+	hold_stale_seconds:  int,
 }
 
 new_service :: proc(repo: ^iface.Taskchain_Repository, agents: ^iface.Agent_Repository, bridges: ^iface.Bridge_Repository, clock: ^platform.Clock, ids: ^platform.ID_Generator) -> Service {

@@ -10,6 +10,7 @@ import dbt "odin_test:hub/platform/dbtelemetry"
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
 import platform "odin_test:hub/platform"
+import jsonx "odin_test:lib/jsonx"
 
 // Timer_Service (plan §2.3): a min-heap of (due, kind, key, armed_deadline) that
 // is purely a CACHE over columns. The columns are the truth —
@@ -40,6 +41,9 @@ Timer_Kind :: enum {
 	// Dependency_Stalled: a Done prerequisite whose merge never settled keeps
 	// its backlog dependents waiting; alert after a bounded delay (REQ-TV2-3b).
 	Dependency_Stalled, // key = prerequisite task_id, armed = "done"
+	// Hold_Stale: a held task with no live lease reminds the coordinator (never
+	// the user) once per hold_stale_seconds until it is released.
+	Hold_Stale,         // key = task_id,     armed = the hold's since_ms
 }
 
 Timer :: struct {
@@ -74,6 +78,9 @@ REVIEW_STALLED_REALERT_SECONDS :: 60 * 60
 // dependency_stalled: first alert this long after the prerequisite reached
 // Done, then re-alerted at this interval while the merge stays unresolved.
 DEPENDENCY_STALLED_SECONDS     :: 10 * 60
+// hold_stale: default reminder interval for a held, unleased task
+// (Service.hold_stale_seconds overrides it).
+HOLD_STALE_SECONDS             :: 30 * 60
 
 // timers_arm schedules a fire at due_ms. Thread-safe; O(log n).
 timers_arm :: proc(svc: ^Service, kind: Timer_Kind, key: string, due_ms: i64, armed: string) {
@@ -213,6 +220,16 @@ arm_task_timers :: proc(svc: ^Service, task: domain.Task) {
 	if task.state == .Done && task.kind == .Task && task.stage_key == "" {
 		timers_arm(svc, .Dependency_Stalled, string(task.task_id), now_ms(svc.clock) + DEPENDENCY_STALLED_SECONDS * 1000, "done")
 	}
+	if hold, held := task_hold_object(task.blocked_on_json); held {
+		since := i64(jsonx.extract_int(hold, "since_ms", 0, true))
+		timers_arm(svc, .Hold_Stale, string(task.task_id), max(since + hold_stale_ms(svc), now_ms(svc.clock)), fmt.tprintf("%d", since))
+	}
+}
+
+hold_stale_ms :: proc(svc: ^Service) -> i64 {
+	secs := svc.hold_stale_seconds
+	if secs <= 0 do secs = HOLD_STALE_SECONDS
+	return i64(secs) * 1000
 }
 
 // rebuild_timers (boot): arm from the columns — every lease, every ready task,
@@ -293,6 +310,7 @@ fire_timer :: proc(svc: ^Service, t: Timer, now_ms: i64, jump_detected: bool) {
 	case .Blocked_Realert:  r = fire_blocked_realert(svc, &u, t)
 	case .Rematch:          r = fire_rematch(svc, &u, t)
 	case .Dependency_Stalled: r = fire_dependency_stalled(svc, &u, t)
+	case .Hold_Stale:       r = fire_hold_stale(svc, &u, t, now_ms)
 	}
 	if r == .Failed {
 		fmt.eprintfln("[taskv2] timer %v for %s failed; rolled back", t.kind, t.key)
@@ -576,6 +594,39 @@ fire_blocked_realert :: proc(svc: ^Service, u: ^Uow, t: Timer) -> Fire_Result {
 	effect_publish_task(u, task, "blocked_realert")
 	effect_notify_coordinator(svc, u, task.chain_id, task.owner_user_id, "blocked_on human", fmt.tprintf("[taskv2] blocked_on human: task %s (%s) still waiting on human input", task.task_id, task.title))
 	timers_arm(svc, .Blocked_Realert, string(task.task_id), now_ms(svc.clock) + BLOCKED_REALERT_SECONDS * 1000, task.blocked_on_json)
+	return .Acted
+}
+
+// fire_hold_stale: the task is still held by the same hold, no lease is live
+// (a live holder was asked to checkpoint; its handoff or expiry re-arms this),
+// and no reminder for this hold went out in the last interval. Several timers
+// may be armed for one hold (every blocked_on change re-arms); the event log
+// dedupes them. Released, cancelled and done tasks carry no hold: no-op.
+@(private = "file")
+fire_hold_stale :: proc(svc: ^Service, u: ^Uow, t: Timer, now: i64) -> Fire_Result {
+	task, ok, _ := iface.taskchain_get_task(svc.repo, domain.Task_ID(t.key))
+	if !ok || domain.task_state_is_terminal(task.state) do return .Noop
+	hold, held := task_hold_object(task.blocked_on_json)
+	if !held do return .Noop
+	since := i64(jsonx.extract_int(hold, "since_ms", 0, true))
+	if fmt.tprintf("%d", since) != t.armed do return .Noop // a newer hold owns it
+	if strings.contains(hold, `"checkpoint_requested":true`) do return .Noop
+	evs, eerr := iface.taskchain_list_events_by_task(svc.repo, task.task_id, task.owner_user_id)
+	if eerr.code != .None do return .Failed
+	last := since
+	for e in evs {
+		if e.kind == EV_HOLD_STALE && e.ts_ms >= since do last = max(last, e.ts_ms)
+	}
+	if now < last + hold_stale_ms(svc) do return .Noop
+	age_min := (now - since) / 60000
+	p := json_begin()
+	json_int(&p, "since_ms", since)
+	json_int(&p, "age_minutes", age_min)
+	if _, aok, _ := append_event(svc.repo, svc.clock, task, hub_actor(), EV_HOLD_STALE, json_end(&p)); !aok do return .Failed
+	reason := jsonx.extract_string(hold, "reason", "", true, context.temp_allocator)
+	line := fmt.tprintf("[taskv2] hold_stale: task %s (%s) held for %d min (reason: %s); release it with `task release %s` once the reason is resolved", task.task_id, task.title, age_min, reason, task.task_id)
+	effect_notify_coordinator(svc, u, task.chain_id, task.owner_user_id, "hold_stale", line)
+	timers_arm(svc, .Hold_Stale, string(task.task_id), now + hold_stale_ms(svc), t.armed)
 	return .Acted
 }
 

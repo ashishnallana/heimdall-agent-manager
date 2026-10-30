@@ -424,3 +424,83 @@ test_hold_keeps_user_review_attention :: proc(t: ^testing.T) {
 	kind, badge := user_attention(&fx.svc, row)
 	testing.expect(t, kind == .Review && badge == "review", "a held review awaiting the user keeps its Review attention")
 }
+
+// A forgotten hold reminds the coordinator (never the user): once the hold has
+// stood hold_stale_seconds with no live lease, one hold_stale notice per
+// interval, and none after release. A live holder (checkpoint requested) is
+// not reminded about, even past the interval.
+@(test)
+test_hold_stale_reminds_coordinator :: proc(t: ^testing.T) {
+	fx, log, ok := lease_fixture(t, "hold_stale")
+	defer lease_fixture_close(fx, log)
+	if !ok do return
+	chain := seed_live_chain(t, fx, "chain_hold_stale")
+	seed_fleet(fx, chain, "agt_w")
+	seed_instance(fx, chain, "inst_w1", "agt_w", "br_1", "idle")
+	notices := make([dynamic]string, context.temp_allocator)
+	fx.svc.notify_observer_ctx = &notices
+	fx.svc.notify_observer = proc(ctx: rawptr, coord_id, trigger, line: string) {
+		if trigger == "hold_stale" do append((^[dynamic]string)(ctx), strings.clone(line, context.temp_allocator))
+	}
+	_ = publish_task(t, fx, chain, "task_1", brief = `{"goal":"g","acceptance":["a"],"review_roles":[]}`)
+	confirm_holder(fx, "inst_w1")
+	owner := actor_from_auth(user_auth())
+
+	// Held while leased: no reminder while the holder is asked to checkpoint,
+	// even past a (short) interval.
+	fx.svc.hold_stale_seconds = 5 * 60
+	_, hok, herr := task_hold(&fx.svc, get_task(fx, "task_1"), owner, "re-route")
+	if !testing.expect(t, hok, fmt.tprintf("hold: %s", herr.message)) do return
+	fixture_advance(fx, 10 * 60)
+	_ = fire_due(&fx.svc, now_ms(&fx.clock))
+	testing.expect_value(t, len(notices), 0)
+	fx.svc.hold_stale_seconds = 0
+
+	// The holder hands off; once the hold has stood the interval with no
+	// lease, the coordinator is reminded exactly once.
+	_, dok, derr := lease_handoff(&fx.svc, inst_auth("inst_w1"), Handoff_Input{summary = "checkpointed"})
+	if !testing.expect(t, dok, fmt.tprintf("handoff: %s", derr.message)) do return
+	fixture_advance(fx, HOLD_STALE_SECONDS - 10 * 60 + 1)
+	_ = fire_due(&fx.svc, now_ms(&fx.clock))
+	_ = fire_due(&fx.svc, now_ms(&fx.clock))
+	if !testing.expect_value(t, len(notices), 1) do return
+	testing.expect(t, strings.contains(notices[0], "hold_stale: task task_1") && strings.contains(notices[0], "task release task_1") && strings.contains(notices[0], "re-route"), notices[0])
+	testing.expect_value(t, count_events(fx, "task_1", EV_HOLD_STALE), 1)
+	kind, _ := user_attention(&fx.svc, get_task(fx, "task_1"))
+	testing.expect_value(t, kind, User_Attention.None)
+
+	// Deduplicated: nothing before the next interval, one more after it.
+	fixture_advance(fx, HOLD_STALE_SECONDS / 2)
+	_ = fire_due(&fx.svc, now_ms(&fx.clock))
+	testing.expect_value(t, len(notices), 1)
+	fixture_advance(fx, HOLD_STALE_SECONDS / 2 + 1)
+	_ = fire_due(&fx.svc, now_ms(&fx.clock))
+	testing.expect_value(t, len(notices), 2)
+
+	// Released: no further reminders.
+	_, rok, _ := task_release(&fx.svc, get_task(fx, "task_1"), owner)
+	testing.expect(t, rok, "release")
+	fixture_advance(fx, 3 * HOLD_STALE_SECONDS)
+	_ = fire_due(&fx.svc, now_ms(&fx.clock))
+	testing.expect_value(t, len(notices), 2)
+}
+
+// hold_stale_seconds overrides the default interval; an unleased hold is
+// reminded about only after the interval.
+@(test)
+test_hold_stale_interval_is_configurable :: proc(t: ^testing.T) {
+	fx, log, ok := lease_fixture(t, "hold_stale_cfg")
+	defer lease_fixture_close(fx, log)
+	if !ok do return
+	fx.svc.hold_stale_seconds = 120
+	chain := seed_live_chain(t, fx, "chain_hold_stale_cfg")
+	_ = publish_task(t, fx, chain, "task_1", brief = `{"goal":"g","acceptance":["a"],"review_roles":[]}`)
+	_, hok, _ := task_hold(&fx.svc, get_task(fx, "task_1"), actor_from_auth(user_auth()), "wait")
+	if !testing.expect(t, hok, "hold") do return
+	fixture_advance(fx, 60)
+	_ = fire_due(&fx.svc, now_ms(&fx.clock))
+	testing.expect_value(t, count_events(fx, "task_1", EV_HOLD_STALE), 0)
+	fixture_advance(fx, 61)
+	_ = fire_due(&fx.svc, now_ms(&fx.clock))
+	testing.expect_value(t, count_events(fx, "task_1", EV_HOLD_STALE), 1)
+}

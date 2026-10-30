@@ -196,6 +196,8 @@ export function describeTaskEvent(ev: TaskEventWire, names: TaskNames): Describe
       return known('Ready, but no worker has picked it up yet');
     case 'review_stalled':
       return known('Review is waiting for an eligible reviewer');
+    case 'hold_stale':
+      return known('Still held; the coordinator was reminded to release it');
     case 'dependency_stalled':
       return known(`A prerequisite could not finish merging${s(p.detail) ? `: ${s(p.detail)}` : ''}`);
     case 'summary_overflow':
