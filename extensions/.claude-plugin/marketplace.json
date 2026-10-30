@@ -5,14 +5,14 @@
   },
   "metadata": {
     "description": "Heimdall Agent Manager provider extensions",
-    "version": "0.5.26"
+    "version": "0.5.27"
   },
   "plugins": [
     {
       "name": "heimdall",
       "source": "./claude-code",
       "description": "Heimdall Agent Manager integration: live activity, subagents, tool calls, file-edit diffs and permission approvals for Heimdall-managed Claude Code agents.",
-      "version": "0.5.26"
+      "version": "0.5.27"
     }
   ]
 }

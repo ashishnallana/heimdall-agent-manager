@@ -1,5 +1,5 @@
 {
   "name": "heimdall",
-  "version": "0.5.26",
+  "version": "0.5.27",
   "description": "Heimdall Agent Manager provider extension for Google Antigravity: real-time activity status, subagent tracking, tool lifecycle telemetry, unified file diffs, and interactive permission approvals."
 }
