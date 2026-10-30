@@ -504,3 +504,31 @@ test_hold_stale_interval_is_configurable :: proc(t: ^testing.T) {
 	_ = fire_due(&fx.svc, now_ms(&fx.clock))
 	testing.expect_value(t, count_events(fx, "task_1", EV_HOLD_STALE), 1)
 }
+
+// A hub restart between reminders: the boot rebuild arms the hold for "now",
+// the dedupe skips it, and the next reminder still comes one interval after
+// the last one.
+@(test)
+test_hold_stale_survives_restart_between_reminders :: proc(t: ^testing.T) {
+	fx, log, ok := lease_fixture(t, "hold_stale_restart")
+	defer lease_fixture_close(fx, log)
+	if !ok do return
+	chain := seed_live_chain(t, fx, "chain_hold_stale_restart")
+	_ = publish_task(t, fx, chain, "task_1", brief = `{"goal":"g","acceptance":["a"],"review_roles":[]}`)
+	_, hok, _ := task_hold(&fx.svc, get_task(fx, "task_1"), actor_from_auth(user_auth()), "wait")
+	if !testing.expect(t, hok, "hold") do return
+	fixture_advance(fx, HOLD_STALE_SECONDS + 1)
+	_ = fire_due(&fx.svc, now_ms(&fx.clock))
+	testing.expect_value(t, count_events(fx, "task_1", EV_HOLD_STALE), 1)
+
+	// Restart half an interval later: empty heap, rebuilt from the columns.
+	fixture_advance(fx, HOLD_STALE_SECONDS / 2)
+	delete(fx.svc.timers.heap)
+	fx.svc.timers = Timer_Service{}
+	rebuild_timers(&fx.svc)
+	_ = fire_due(&fx.svc, now_ms(&fx.clock))
+	testing.expect_value(t, count_events(fx, "task_1", EV_HOLD_STALE), 1)
+	fixture_advance(fx, HOLD_STALE_SECONDS / 2 + 1)
+	_ = fire_due(&fx.svc, now_ms(&fx.clock))
+	testing.expect_value(t, count_events(fx, "task_1", EV_HOLD_STALE), 2)
+}

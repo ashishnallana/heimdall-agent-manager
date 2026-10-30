@@ -601,7 +601,8 @@ fire_blocked_realert :: proc(svc: ^Service, u: ^Uow, t: Timer) -> Fire_Result {
 // (a live holder was asked to checkpoint; its handoff or expiry re-arms this),
 // and no reminder for this hold went out in the last interval. Several timers
 // may be armed for one hold (every blocked_on change re-arms); the event log
-// dedupes them. Released, cancelled and done tasks carry no hold: no-op.
+// dedupes them, and a timer that fires too early re-arms for the next interval
+// so a rebuild between reminders never drops the hold. Released, cancelled and done tasks carry no hold: no-op.
 @(private = "file")
 fire_hold_stale :: proc(svc: ^Service, u: ^Uow, t: Timer, now: i64) -> Fire_Result {
 	task, ok, _ := iface.taskchain_get_task(svc.repo, domain.Task_ID(t.key))
@@ -617,7 +618,12 @@ fire_hold_stale :: proc(svc: ^Service, u: ^Uow, t: Timer, now: i64) -> Fire_Resu
 	for e in evs {
 		if e.kind == EV_HOLD_STALE && e.ts_ms >= since do last = max(last, e.ts_ms)
 	}
-	if now < last + hold_stale_ms(svc) do return .Noop
+	if now < last + hold_stale_ms(svc) {
+		// Too soon after the last reminder (e.g. a boot rebuild armed this one
+		// for now): keep the hold covered by re-arming for the next interval.
+		timers_arm(svc, .Hold_Stale, string(task.task_id), last + hold_stale_ms(svc), t.armed)
+		return .Noop
+	}
 	age_min := (now - since) / 60000
 	p := json_begin()
 	json_int(&p, "since_ms", since)
