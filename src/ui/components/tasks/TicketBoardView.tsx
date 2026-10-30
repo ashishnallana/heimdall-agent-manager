@@ -3,7 +3,7 @@ import { Button, EmptyState, Icon, Text } from '@ui';
 import { TaskWire } from '../../api/taskWire';
 import { TaskSummaryBar } from './TaskSummaryBar';
 import { TaskCard } from './TaskCard';
-import { TASK_STATES_ORDER, normalizeTaskState } from './taskV2Types';
+import { TASK_STATES_ORDER, normalizeTaskState, taskHold } from './taskV2Types';
 import { taskNeedsYou } from './taskActions';
 import { TaskChainFleet } from '../../api/endpoints/taskChains';
 import { EMPTY_TASK_NAMES, type TaskNames } from './taskNames';
@@ -51,22 +51,35 @@ export function sortTasksForBoard(tasks: TaskWire[]): TaskWire[] {
   });
 }
 
-type BoardSectionKey = 'needs_you' | 'in_progress' | 'in_review' | 'up_next';
+type BoardSectionKey = 'needs_you' | 'in_progress' | 'in_review' | 'up_next' | 'held';
 
 const SECTION_LABELS: Record<BoardSectionKey, string> = {
   needs_you: 'Needs you',
   in_progress: 'In progress',
   in_review: 'In review',
   up_next: 'Up next',
+  // Operator holds (task hold): parked until released, nothing for you to answer.
+  held: 'Held',
 };
 
-/** Open tasks in headed groups, in board order; empty groups are dropped. */
+/**
+ * Open tasks in headed groups, in board order; empty groups are dropped. A held
+ * task goes to Held (last: it is parked, not urgent) unless it needs you.
+ */
 export function groupForBoard(sorted: TaskWire[], expandedTaskId?: string | null) {
-  const buckets: Record<BoardSectionKey, TaskWire[]> = { needs_you: [], in_progress: [], in_review: [], up_next: [] };
+  const buckets: Record<BoardSectionKey, TaskWire[]> = { needs_you: [], in_progress: [], in_review: [], up_next: [], held: [] };
   for (const t of sorted) {
     if (isFinished(t) && t.task_id !== expandedTaskId) continue;
     const s = normalizeTaskState(t.state);
-    const key: BoardSectionKey = taskNeedsYou(t) ? 'needs_you' : s === 'in_progress' ? 'in_progress' : s === 'in_review' ? 'in_review' : 'up_next';
+    const key: BoardSectionKey = taskNeedsYou(t)
+      ? 'needs_you'
+      : taskHold(t)
+        ? 'held'
+        : s === 'in_progress'
+          ? 'in_progress'
+          : s === 'in_review'
+            ? 'in_review'
+            : 'up_next';
     buckets[key].push(t);
   }
   return (Object.keys(buckets) as BoardSectionKey[])

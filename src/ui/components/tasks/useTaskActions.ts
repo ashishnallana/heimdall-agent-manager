@@ -5,6 +5,8 @@ import {
   useCancelTaskDetailMutation,
   usePublishTaskMutation,
   useRecheckTaskMutation,
+  useHoldTaskMutation,
+  useReleaseTaskMutation,
   useReopenTaskMutation,
   useUpdateTaskDetailMutation,
   useUserReviewTaskMutation,
@@ -32,6 +34,8 @@ export function useTaskActions(chainId: string, taskId: string, taskTitle = '') 
   const [addComment, comment] = useAddTaskCommentMutation();
   const [publishTask, publish] = usePublishTaskMutation();
   const [recheckTask, recheck] = useRecheckTaskMutation();
+  const [holdTask, hold] = useHoldTaskMutation();
+  const [releaseTask, release] = useReleaseTaskMutation();
   const [error, setError] = useState('');
 
   const run = async (fn: () => Promise<unknown>): Promise<boolean> => {
@@ -56,7 +60,9 @@ export function useTaskActions(chainId: string, taskId: string, taskTitle = '') 
       update.isLoading ||
       comment.isLoading ||
       publish.isLoading ||
-      recheck.isLoading,
+      recheck.isLoading ||
+      hold.isLoading ||
+      release.isLoading,
     // Titles let a brief_incomplete error name the task instead of its id.
     publish: () => run(() => publishTask({ chainId, taskId, taskTitles: taskTitle ? { [taskId]: taskTitle } : undefined }).unwrap()),
     approve: () => run(() => userReview({ chainId, taskId, verdict: 'approve' }).unwrap()),
@@ -77,6 +83,9 @@ export function useTaskActions(chainId: string, taskId: string, taskTitle = '') 
       });
       return ok ? result : null;
     },
+    // A hold needs a reason (the hub refuses an empty one); nothing is sent without it.
+    hold: (reason: string) => (!reason.trim() ? Promise.resolve(false) : run(() => holdTask({ chainId, taskId, reason: reason.trim() }).unwrap())),
+    release: () => run(() => releaseTask({ chainId, taskId }).unwrap()),
     cancel: () => run(() => cancelTask({ chainId, taskId }).unwrap()),
     pinBridge: (bridgeId: string) => run(() => updateTask({ chainId, taskId, bridgeId }).unwrap()),
     comment: (body: string) => run(() => addComment({ chainId, taskId, body: body.trim() }).unwrap()),

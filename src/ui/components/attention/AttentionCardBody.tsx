@@ -53,6 +53,15 @@ function TaskBody({ item, now }: { item: AttentionTaskItem; now: number }) {
         >
           {TASK_BADGE_LABELS[d.badge || (d.attention === 'blocked' ? 'question' : 'review')] || 'Waiting on review'}
         </li>
+        {d.held ? (
+          <li
+            data-debug-id="attention-card-held"
+            title={d.hold_reason ? `Held: ${d.hold_reason}. Your verdict still counts; the review resumes on release.` : 'Your verdict still counts; the review resumes on release.'}
+            className="rounded-[var(--radius-sm)] bg-warning-soft px-1.5 py-0.5 text-[11px] text-warning"
+          >
+            Held{d.hold_reason ? ` · ${d.hold_reason}` : ''}
+          </li>
+        ) : null}
         {d.attempt_no && d.attempt_no > 1 ? <li className="rounded-[var(--radius-sm)] bg-surface-raised px-1.5 py-0.5 text-[11px] text-muted">attempt {d.attempt_no}</li> : null}
         {d.assignee_name ? <li className="rounded-[var(--radius-sm)] bg-surface-raised px-1.5 py-0.5 text-[11px] text-muted">by {d.assignee_name}</li> : null}
       </ul>

@@ -255,7 +255,17 @@ test('getTaskStatusLines generates human-readable status sentences for each stat
   // REQ-TV2-5: an operator hold is neither "on you" nor a failure.
   const [holdLine, holdHint] = getTaskStatusLines(makeTask({ state: 'backlog', blocked_on: { kind: 'hold', reason: 'repair brief' } }), [], nowMs);
   assert.equal(holdLine, 'Held — repair brief');
-  assert.match(holdHint, /task release/);
+  assert.match(holdHint, /no new lease until it is released/);
+  // Who held it and when, from the hub's hold object.
+  const [, whoHint] = getTaskStatusLines(makeTask({ state: 'backlog', blocked_on: { kind: 'hold', reason: 'repair brief', by: 'user', since_ms: nowMs - 12 * 60000 } }), [], nowMs);
+  assert.equal(whoHint, 'by you · 12 min ago; no new lease until it is released');
+  // A question paused by a hold is not on you: the hub refuses an answer while held.
+  const pausedQ = makeTask({ state: 'backlog', blocked_on: { kind: 'human', reason: 'Which DB?', hold: { kind: 'hold', reason: 're-route' } } });
+  const [pausedLine] = getTaskStatusLines(pausedQ, [], nowMs);
+  assert.equal(pausedLine, 'Held — re-route');
+  const pausedBadges = getTaskBadges(pausedQ, [], nowMs);
+  assert.ok(pausedBadges.some((b) => b.label === 'Question paused by hold'));
+  assert.ok(!pausedBadges.some((b) => b.label === 'Blocked on you'));
   const heldBadges = getTaskBadges(makeTask({ state: 'in_progress', blocked_on: { kind: 'hold', reason: 'repair brief', checkpoint_requested: true } }), [], nowMs);
   assert.ok(heldBadges.some((b) => b.label === 'Held · checkpoint requested' && b.tone === 'warn'));
   assert.ok(!heldBadges.some((b) => b.label === 'Blocked on you'));

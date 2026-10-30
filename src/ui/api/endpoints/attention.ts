@@ -42,6 +42,9 @@ export type AttentionTaskDetails = {
   /** Identity of the block a blocked card shows; sent back with Answer. */
   block_id?: string;
   holder_instance_id?: string;
+  /** A review card on a held task (task hold): the verdict still counts; the gate resumes on release. */
+  held?: boolean;
+  hold_reason?: string;
 };
 
 export type AttentionMessageDetails = {

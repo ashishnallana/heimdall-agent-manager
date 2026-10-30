@@ -9,7 +9,7 @@ import {
   useFetchTaskEventsQuery,
   useFetchTaskFacetQuery,
 } from '../../api/endpoints/tasks';
-import { getTaskPeople, normalizeTaskState, taskChangedFiles } from './taskV2Types';
+import { describeHold, getTaskPeople, normalizeTaskState, taskChangedFiles, taskHold } from './taskV2Types';
 import { awaitingYourReview, blockedOnYou, reviewParticipantIds, reviewVotes, sameReviewer, voteFor, youApproved, type ReviewVerdict } from './taskActions';
 import type { TaskActionsApi } from './useTaskActions';
 import { EMPTY_TASK_NAMES, instanceAgentsFromEvents, participantLabel, withInstanceAgents, type TaskNames } from './taskNames';
@@ -259,6 +259,7 @@ export const TaskDetails: React.FC<TaskDetailsProps> = ({
   // Voters outside the fleet's reviewer list (a coordinator reviewing) still show.
   const extraVoters = Array.from(votes.keys()).filter((key) => key !== 'user' && !people.reviewers.some((id) => sameReviewer(votes, key, id, names)));
   const userApproved = youApproved(task);
+  const hold = taskHold(task);
   const pendingReviewers = people.reviewers.filter((id) => voteFor(votes, id, names) !== 'approve');
   const vote = (id: string) => <ReviewerVote key={id} id={id} names={names} verdict={voteFor(votes, id, names)} />;
   const reviewerGroups: React.ReactNode[] = [
@@ -281,6 +282,19 @@ export const TaskDetails: React.FC<TaskDetailsProps> = ({
         <Block title="Agent not running">
           <p className="leading-relaxed text-primary">{task.blocked_on.reason}</p>
           <Text as="p" role="body-sm" tone="muted">Check the agent’s bridge, provider, and model settings. Updating its fleet settings retries dispatch.</Text>
+        </Block>
+      )}
+      {hold && (
+        <Block title={hold.checkpoint_requested ? 'Held · checkpoint requested' : 'Held'} debugId="task-hold-block">
+          {hold.reason ? <AuthoredText value={hold.reason} debugId="task-hold-reason" /> : null}
+          <Text as="p" role="body-sm" tone="muted" data-debug-id="task-hold-meta">
+            {[describeHold(hold, Date.now(), names), hold.checkpoint_requested ? 'the current holder was asked to hand off' : '', 'no new lease until released'].filter(Boolean).join(' · ')}
+          </Text>
+          <div>
+            <Button size="sm" variant="secondary" disabled={actions.busy} data-debug-id="task-hold-release-btn" onClick={() => void actions.release()}>
+              Release hold
+            </Button>
+          </div>
         </Block>
       )}
       {(awaitingYourReview(task) || userApproved) && (

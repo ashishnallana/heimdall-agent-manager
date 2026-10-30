@@ -6,7 +6,7 @@
 import './helpers/vaultEndpointHarness.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { canRecheck, getTaskActions, recheckToast, taskNeedsYou } from '../src/ui/components/tasks/taskActions.ts';
+import { canHold, canRecheck, getTaskActions, recheckToast, taskNeedsYou } from '../src/ui/components/tasks/taskActions.ts';
 import type { TaskWire } from '../src/ui/api/taskWire.ts';
 
 function task(overrides: Partial<TaskWire> & Record<string, unknown> = {}): TaskWire {
@@ -51,11 +51,11 @@ test('review awaiting the user (or a gate) offers Approve and Request changes', 
   assert.ok(!taskNeedsYou(agentReview));
 });
 
-test('running work has no primary action; cancel lives in More and there is no verify re-run', () => {
+test('running work has no primary action; hold and cancel live in More and there is no verify re-run', () => {
   const t = task({ state: 'in_progress', attempt_no: 2 });
   const { primary, more } = getTaskActions(t);
   assert.deepEqual(primary, []);
-  assert.deepEqual(more, ['cancel', 'copy_id']);
+  assert.deepEqual(more, ['hold', 'cancel', 'copy_id']);
   // A legacy brief that still carries a verify command offers no re-run either.
   const legacy = getTaskActions(task({ state: 'in_review', attempt_no: 1, brief: { goal: 'g', acceptance: ['a'], verify: 'npm test' } as any }));
   assert.ok(!(legacy.more as string[]).includes('rerun_verify'));
@@ -163,4 +163,48 @@ test('a chain row opens the chain-addressed coordinator chat, or the board when 
   });
   assert.deepEqual(chainRowPrimaryAction('chain_a', '', false), { kind: 'select' });
   assert.deepEqual(chainRowPrimaryAction('chain_a', '  ', true), { kind: 'select' });
+});
+
+test('a held task offers Release up front and never Answer; open tasks offer Hold', () => {
+  const held = task({ state: 'backlog', blocked_on: { kind: 'hold', reason: 're-route' } as any });
+  assert.deepEqual(getTaskActions(held).primary, ['release']);
+  assert.ok(!getTaskActions(held).more.includes('hold'));
+  assert.ok(!taskNeedsYou(held), 'a hold is an operator pause, not a question for you');
+  // A question paused by a hold cannot be answered (the hub refuses it).
+  const pausedQ = task({ state: 'backlog', blocked_on: { kind: 'human', reason: 'Which DB?', hold: { kind: 'hold', reason: 're-route' } } as any });
+  assert.deepEqual(getTaskActions(pausedQ).primary, ['release']);
+  assert.ok(!taskNeedsYou(pausedQ));
+  // A failed agent under a hold can still be started.
+  const agentDown = task({ state: 'backlog', blocked_on: { kind: 'agent_not_running', reason: 'exited', hold: { kind: 'hold', reason: 'x' } } as any });
+  assert.ok(taskNeedsYou(agentDown));
+  assert.deepEqual(getTaskActions(agentDown).primary, ['answer']);
+  assert.ok(getTaskActions(agentDown).more.includes('release'));
+  // A held review awaiting you keeps Approve; Release sits in More.
+  const heldReview = task({ state: 'in_review', requires_user_approval: true, blocked_on: { kind: 'hold', reason: 'x' } as any });
+  assert.deepEqual(getTaskActions(heldReview).primary, ['approve', 'request_changes']);
+  assert.ok(getTaskActions(heldReview).more.includes('release'));
+
+  assert.ok(canHold(task({ state: 'ready' })));
+  assert.ok(canHold(task({ state: 'in_progress', leases: [{ kind: 'work' }] as any })), 'a leased task can be held (its holder checkpoints)');
+  assert.ok(getTaskActions(task({ state: 'ready' })).more.includes('hold'));
+  assert.ok(!canHold(held), 'already held');
+  assert.ok(!canHold(task({ state: 'done' })));
+  assert.ok(!canHold(task({ state: 'backlog', publish_state: 'draft' })));
+  assert.ok(!canHold(task({ state: 'ready', kind: 'gate' })), 'gates cannot be held');
+});
+
+test('the board parks held tasks in a Held section last, unless they need you', async () => {
+  const { groupForBoard, sortTasksForBoard } = await import('../src/ui/components/tasks/TicketBoardView.tsx');
+  const sorted = sortTasksForBoard([
+    task({ task_id: 'ready', state: 'ready' }),
+    task({ task_id: 'held', state: 'backlog', blocked_on: { kind: 'hold', reason: 'x' } as any }),
+    task({ task_id: 'held_running', state: 'in_progress', blocked_on: { kind: 'hold', reason: 'x', checkpoint_requested: true } as any }),
+    task({ task_id: 'held_review', state: 'in_review', requires_user_approval: true, blocked_on: { kind: 'hold', reason: 'x' } as any }),
+  ]);
+  const sections = groupForBoard(sorted).map((s: any) => [s.key, s.tasks.map((t: any) => t.task_id).sort()]);
+  assert.deepEqual(sections, [
+    ['needs_you', ['held_review']],
+    ['up_next', ['ready']],
+    ['held', ['held', 'held_running']],
+  ]);
 });

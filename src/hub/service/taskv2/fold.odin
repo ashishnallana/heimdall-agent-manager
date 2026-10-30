@@ -240,7 +240,7 @@ fold_task :: proc(events: []domain.Task_Event, input: Fold_Input) -> Task_View {
 		case EV_HELD:
 			v.held = true
 			reason := jsonx.extract_string(ev.payload_json, "reason", "", true, context.temp_allocator)
-			v.hold_json = hold_block(reason, ev.ts_ms)
+			v.hold_json = hold_block(reason, ev.ts_ms, ev.actor_kind, ev.actor_id)
 		case EV_HOLD_RELEASED:
 			v.held = false
 			v.hold_json = ""
@@ -295,11 +295,15 @@ fold_task :: proc(events: []domain.Task_Event, input: Fold_Input) -> Task_View {
 
 // hold_block is the blocked_on object of a held task. Temp-allocated.
 @(private = "file")
-hold_block :: proc(reason: string, since_ms: i64) -> string {
+hold_block :: proc(reason: string, since_ms: i64, by_kind, by_id: string) -> string {
 	p := json_begin()
 	json_str(&p, "kind", "hold")
 	json_str(&p, "reason", reason)
 	json_int(&p, "since_ms", since_ms)
+	// Who held it (user | agent | hub, and the user or instance id) so the
+	// task views can say who to ask about a release.
+	json_str(&p, "by", by_kind)
+	json_str(&p, "by_id", by_id)
 	return json_end(&p)
 }
 

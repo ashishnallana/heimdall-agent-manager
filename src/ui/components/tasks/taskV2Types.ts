@@ -53,12 +53,35 @@ export function normalizeTaskState(raw: string | undefined): TaskStateV2 {
  * kind is hold, else the `hold` member the Hub nests under another block (for
  * example a failed reviewer's agent_not_running) so both stay visible.
  */
-export function taskHold(task: TaskWire): { reason?: string; checkpoint_requested?: boolean } | null {
+export interface TaskHoldInfo {
+  reason?: string;
+  checkpoint_requested?: boolean;
+  /** When the hold was set (ms since epoch). */
+  since_ms?: number;
+  /** Who held it: user | agent | hub, and the user or instance id. */
+  by?: string;
+  by_id?: string;
+}
+
+export function taskHold(task: TaskWire): TaskHoldInfo | null {
   const b = task.blocked_on;
   if (!b) return null;
-  if (b.kind === 'hold') return b as { reason?: string; checkpoint_requested?: boolean };
+  if (b.kind === 'hold') return b as TaskHoldInfo;
   const nested = b.hold;
-  return nested && typeof nested === 'object' ? (nested as { reason?: string; checkpoint_requested?: boolean }) : null;
+  return nested && typeof nested === 'object' ? (nested as TaskHoldInfo) : null;
+}
+
+/** "by you · 12 min ago" style detail for a hold; names an agent holder by instance. */
+export function describeHold(hold: TaskHoldInfo, nowMs: number = Date.now(), names: TaskNames = EMPTY_TASK_NAMES): string {
+  const parts: string[] = [];
+  if (hold.by === 'user') parts.push('by you');
+  else if (hold.by === 'agent') parts.push(`by ${(hold.by_id && names.instance(hold.by_id)) || hold.by_id || 'the coordinator'}`);
+  else if (hold.by === 'hub') parts.push('by the hub');
+  if (hold.since_ms) {
+    const mins = Math.max(0, Math.round((nowMs - hold.since_ms) / 60000));
+    parts.push(mins < 1 ? 'just now' : mins < 60 ? `${mins} min ago` : `${Math.round(mins / 60)} h ago`);
+  }
+  return parts.join(' · ');
 }
 
 export function getTaskBadges(task: TaskWire, _chainFleets?: any[], nowMs: number = Date.now(), names: TaskNames = EMPTY_TASK_NAMES): TaskBadge[] {
@@ -135,17 +158,19 @@ export function getTaskBadges(task: TaskWire, _chainFleets?: any[], nowMs: numbe
       kind: 'blocked',
       label: checkpoint ? 'Held · checkpoint requested' : 'Held',
       tone: 'warn',
-      title: `${hold.reason ? `Held: ${hold.reason}. ` : ''}${checkpoint ? 'The current holder was asked to hand off; ' : ''}no new lease until released.`,
+      title: `${hold.reason ? `Held: ${hold.reason}. ` : ''}${describeHold(hold, nowMs, names) ? `(${describeHold(hold, nowMs, names)}) ` : ''}${checkpoint ? 'The current holder was asked to hand off; ' : ''}no new lease until released.`,
     });
   }
   // A hold nested under another block (e.g. a failed reviewer) keeps that block visible too.
   if (task.blocked_on && task.blocked_on.kind !== 'hold') {
     // Same rule as taskActions.blockedOnYou(): only a human/user blocker is on you.
     const waitingKind = String((task.blocked_on as any).kind || '');
-    const onYou = !waitingKind || waitingKind === 'human' || waitingKind === 'user' || waitingKind === 'agent_not_running' || waitingKind === 'dispatch';
+    // A hold suppresses the question (the hub refuses an answer while held).
+    const agentDown = waitingKind === 'agent_not_running' || waitingKind === 'dispatch';
+    const onYou = hold ? agentDown : !waitingKind || waitingKind === 'human' || waitingKind === 'user' || agentDown;
     badges.push({
       kind: 'blocked',
-      label: (waitingKind === 'dispatch' || waitingKind === 'agent_not_running') ? 'Agent not running' : onYou ? 'Blocked on you' : `Blocked: waiting on ${waitingKind.replace(/_/g, ' ')}`,
+      label: agentDown ? 'Agent not running' : onYou ? 'Blocked on you' : hold ? 'Question paused by hold' : `Blocked: waiting on ${waitingKind.replace(/_/g, ' ')}`,
       tone: onYou ? 'danger' : 'warn',
       title: String(task.blocked_on.reason || (onYou ? 'Waiting for your answer' : 'Waiting on another ticket or system')),
     });
@@ -224,8 +249,11 @@ export function getTaskStatusLines(task: TaskWire, _chainFleets?: any[], nowMs: 
 
   if (state === 'backlog') {
     if (task.blocked_on) {
-      if (task.blocked_on.kind === 'hold') {
-        return [`Held${task.blocked_on.reason ? ` — ${task.blocked_on.reason}` : ''}`, 'No new lease until it is released (task release)'];
+      const hold = taskHold(task);
+      const agentDown = task.blocked_on.kind === 'dispatch' || task.blocked_on.kind === 'agent_not_running';
+      if (hold && !agentDown) {
+        const who = describeHold(hold, nowMs, names);
+        return [`Held${hold.reason ? ` — ${hold.reason}` : ''}`, `${who ? `${who}; ` : ''}no new lease until it is released`];
       }
       if (task.blocked_on.kind === 'dispatch' || task.blocked_on.kind === 'agent_not_running') {
         return [`Agent not running — ${task.blocked_on.reason || 'Agent could not start'}`, 'Start the agent from its attention card, or update its fleet settings'];

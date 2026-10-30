@@ -20,6 +20,14 @@ export interface TaskRecheckResult {
   message: string;
 }
 
+/** POST …/tasks/{id}/hold {reason} | …/release {}: a hold on a held task (or a release of an unheld one) is a no-op. */
+export interface TaskHoldResult {
+  task: TaskWire;
+  changed: boolean;
+  checkpoint_requested: boolean;
+  message: string;
+}
+
 export interface WorkflowDefinitionItem {
   def_id: string;
   name: string;
@@ -1457,6 +1465,36 @@ export const tasksApi = heimdallApi.injectEndpoints({
         { type: 'Chain' as const, id: chainId },
       ],
     }),
+    // Hold (REQ-TV2-5): no new lease until released; a leased task's holder is
+    // asked to checkpoint. Coordinator or owner only.
+    holdTask: build.mutation<TaskHoldResult, { chainId: string; taskId: string; reason: string }>({
+      queryFn: async ({ chainId, taskId, reason }) => {
+        try {
+          const data = await cookieMutation(`/task-chains/${encodeURIComponent(chainId)}/tasks/${encodeURIComponent(taskId)}/hold`, 'POST', { reason });
+          return { data: data as TaskHoldResult };
+        } catch (error: any) {
+          return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any };
+        }
+      },
+      invalidatesTags: (_result, _error, { taskId, chainId }) => [
+        ...preciseTaskTags(taskId, chainId, true),
+        { type: 'Chain' as const, id: chainId },
+      ],
+    }),
+    releaseTask: build.mutation<TaskHoldResult, { chainId: string; taskId: string }>({
+      queryFn: async ({ chainId, taskId }) => {
+        try {
+          const data = await cookieMutation(`/task-chains/${encodeURIComponent(chainId)}/tasks/${encodeURIComponent(taskId)}/release`, 'POST', {});
+          return { data: data as TaskHoldResult };
+        } catch (error: any) {
+          return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any };
+        }
+      },
+      invalidatesTags: (_result, _error, { taskId, chainId }) => [
+        ...preciseTaskTags(taskId, chainId, true),
+        { type: 'Chain' as const, id: chainId },
+      ],
+    }),
     answerTaskBlocker: build.mutation<any, { chainId: string; taskId: string; note?: string }>({
       queryFn: async ({ chainId, taskId, note = '' }) => {
         try {
@@ -1710,6 +1748,8 @@ export const {
   useUserReviewTaskMutation,
   useReopenTaskMutation,
   useRecheckTaskMutation,
+  useHoldTaskMutation,
+  useReleaseTaskMutation,
   useAnswerTaskBlockerMutation,
   useFetchTaskEventsQuery,
   useFetchTaskFacetQuery,

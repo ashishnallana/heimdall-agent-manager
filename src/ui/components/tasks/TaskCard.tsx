@@ -134,6 +134,14 @@ export const TaskCard: React.FC<TaskCardProps> = ({
         dispatch(showToast({ ...recheckToast(result), autoDismissMs: 6000 }));
         return true;
       }
+      case 'hold': {
+        // The hub requires a reason; it is what the coordinator and the board show.
+        const reason = window.prompt(`Hold "${task.title}"? No new lease until it is released. Reason:`)?.trim();
+        if (!reason) return false;
+        return actions.hold(reason);
+      }
+      case 'release':
+        return actions.release();
       case 'cancel':
         if (!window.confirm(`Cancel "${task.title}"?`)) return false;
         return actions.cancel();
@@ -213,12 +221,12 @@ export const TaskCard: React.FC<TaskCardProps> = ({
                 }
               >
                 {editItems.map((it) => (
-                  <Menu.Item key={it.field} onClick={() => setEditing(it.field)}>
+                  <Menu.Item key={it.field} data-debug-id={`task-card-edit-${it.field}-${task.task_id}`} onClick={() => setEditing(it.field)}>
                     {it.label}
                   </Menu.Item>
                 ))}
                 {more.map((id) => (
-                  <Menu.Item key={id} danger={id === 'cancel'} onClick={() => void runAction(id)}>
+                  <Menu.Item key={id} danger={id === 'cancel'} data-debug-id={`task-menu-${id}-${task.task_id}`} onClick={() => void runAction(id)}>
                     {TASK_ACTION_LABELS[id]}
                   </Menu.Item>
                 ))}

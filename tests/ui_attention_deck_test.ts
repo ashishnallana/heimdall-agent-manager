@@ -853,3 +853,19 @@ test('deck Start agent shows failed starts inline and permits retry', async () =
     assert.equal(hits.filter((h) => /POST .*\/cards\/.*\/accept/.test(h)).length, 2);
   }, { acceptFailures: 1 });
 });
+
+test('a held review card keeps Approve and says it is held, with the reason', async () => {
+  const item = taskItem('held', {
+    details: { priority: 'p1', status: 'in_review', attention: 'review', badge: 'review', held: true, hold_reason: 'wait for the release train', excerpt: null },
+  });
+  await withDeck([item], async ({ q }) => {
+    const chip = q('[data-debug-id="attention-card-held"]');
+    assert.ok(chip, 'held chip shown');
+    assert.match(chip.textContent, /Held · wait for the release train/);
+    assert.match(chip.getAttribute('title'), /verdict still counts/);
+    assert.match(q('[data-debug-id="attention-card-badge"]').textContent, /Waiting on review/);
+  });
+  await withDeck([taskItem('plain')], async ({ q }) => {
+    assert.equal(q('[data-debug-id="attention-card-held"]'), null, 'no chip on an unheld card');
+  });
+});

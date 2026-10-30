@@ -1,5 +1,5 @@
 import type { TaskReviewWire, TaskWire } from '../../api/taskWire';
-import { normalizeTaskState } from './taskV2Types';
+import { normalizeTaskState, taskHold } from './taskV2Types';
 import type { TaskNames } from './taskNames';
 
 /**
@@ -16,6 +16,8 @@ export type TaskActionId =
   | 'request_changes'
   | 'reopen'
   | 'recheck'
+  | 'hold'
+  | 'release'
   | 'cancel'
   | 'copy_id';
 
@@ -31,6 +33,8 @@ export const TASK_ACTION_LABELS: Record<TaskActionId, string> = {
   request_changes: 'Request changes',
   reopen: 'Reopen',
   recheck: 'Re-check',
+  hold: 'Hold…',
+  release: 'Release hold',
   cancel: 'Cancel ticket',
   copy_id: 'Copy ticket id',
 };
@@ -133,10 +137,24 @@ export function awaitingYourReview(task: TaskWire): boolean {
   return normalizeTaskState(task.state) === 'in_review' && (Boolean(task.requires_user_approval) || isGate(task)) && !youApproved(task);
 }
 
+/**
+ * A block only you can clear. A hold is an operator pause, not a question:
+ * the hub refuses an answer while held (as its user_attention), so a held task
+ * is on you only through a nested agent-not-running block (Start agent).
+ */
 export function blockedOnYou(task: TaskWire): boolean {
   const b: any = task.blocked_on;
   if (!b) return false;
-  return !b.kind || b.kind === 'human' || b.kind === 'user' || b.kind === 'agent_not_running' || b.kind === 'dispatch';
+  const agentDown = b.kind === 'agent_not_running' || b.kind === 'dispatch';
+  if (taskHold(task)) return agentDown;
+  return !b.kind || b.kind === 'human' || b.kind === 'user' || agentDown;
+}
+
+/** Hold (hub `task hold`): any open, published, non-gate task that is not held yet. */
+export function canHold(task: TaskWire): boolean {
+  const state = normalizeTaskState(task.state);
+  if (state === 'done' || state === 'cancelled' || isDraft(task) || isGate(task)) return false;
+  return !taskHold(task);
 }
 
 /** True when nothing moves on this task until the user acts. */
@@ -198,9 +216,14 @@ export function getTaskActions(task: TaskWire): TaskActionSet {
     primary.push('answer');
   } else if (awaitingYourReview(task)) {
     primary.push('approve', 'request_changes');
+  } else if (taskHold(task)) {
+    // Nothing moves until someone releases it: offer that up front.
+    primary.push('release');
   }
 
   if (canRecheck(task)) more.push('recheck');
+  if (canHold(task)) more.push('hold');
+  else if (!closed && taskHold(task) && !primary.includes('release')) more.push('release');
   if (!closed && !isGate(task)) more.push('cancel');
   more.push('copy_id');
   return { primary, more };
