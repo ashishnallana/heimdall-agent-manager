@@ -21,7 +21,7 @@ control_write_authorized :: proc(tx:iface.MCP_Transaction,s:^Delegation_Service,
 	if !scope_allows_tool(op.view.scope,tool) do return "scope_missing"
 	return ""
 }
-Control_Comment_Proc :: proc(ctx:rawptr,raw:string,view:Access_View,task_id,request_id,digest,body:string)->(comment_id,error:string)
+Control_Comment_Proc :: proc(ctx:rawptr,raw:string,view:Access_View,chain_id,task_id,request_id,digest,body:string)->(comment_id,error:string)
 
 Control_Task_Command :: struct {
 	tool,request_id,digest,expected_revision,action,reason:string,
@@ -30,8 +30,17 @@ Control_Task_Command :: struct {
 	create:tc.Create_Task_Input,
 	update:tc.Update_Task_Input,
 	fleet:tc.Upsert_Fleet_Input,
+	applied_fields:[]string,
 }
 Control_Task_Mutate_Proc :: proc(ctx:rawptr,raw:string,view:Access_View,command:Control_Task_Command)->(result_id,error:string)
+
+// Replayable public operation snapshot. No human prose or encrypted body is
+// copied into a receipt; detailed blockers remain in the scoped task read.
+Control_Mutation_Result :: struct {
+	resource_id,chain_id,task_id,state,publish_state,revision,status:string,
+	changed,checkpoint_requested,blocked:bool,
+	applied_fields,actions,reasons:[]string,
+}
 
 // An opaque content revision covers native edits too, including same-timestamp
 // updates. Checking only updated_at or the chain's topology revision loses edits.

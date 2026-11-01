@@ -13,7 +13,7 @@ import tc "odin_test:hub/service/taskchain"
 import vault "odin_test:lib/vault"
 
 Control_Service :: struct {chains:^tc.Taskchain_Service}
-Control_Arguments :: struct {chain_id,title,description,cursor,task_id,request_id,body:string,limit,timeout_ms:int,task_write:Task_Tool_Arguments,include_configuration:bool}
+Control_Arguments :: struct {chain_id,title,description,cursor,task_id,request_id,body,state,assignee_agent_id,comment_cursor:string,limit,timeout_ms,comment_limit:int,task_write:Task_Tool_Arguments,include_configuration,include_comments:bool}
 Control_Data :: vault.Control_Data
 control_auth :: proc(owner:string)->contracts.Auth_Context {return {kind=.Internal_User,user_id=owner}}
 control_chain :: proc(c:domain.Task_Chain)->json.Object {
@@ -85,18 +85,14 @@ control_payload_ok :: proc(data:Control_Data)->bool {
 	return err==nil && len(encoded)<=4*1024*1024
 }
 control_record_matches :: proc(expected,actual:json.Object,kind:Hosted_Record_Kind)->bool {
-	allowed:=[]string{"chain_id","title","description","status","kind","work_revision","task_count","completed_task_count","user_validation_count","created_at","updated_at","configuration_revision","fleet"}
-	text:=[]string{"title","description"}
-	if kind==.Task do allowed=[]string{"task_id","title","description","state","kind","attempt_no","requires_user_approval","reviews","updated_at"}
-	if kind==.Task_Detail {allowed=[]string{"task_id","chain_id","title","description","state","kind","attempt_no","requires_user_approval","reviews","updated_at","goal","acceptance","assignee_agent_id","bridge_id","depends_on","publish_state","priority","revision","blocked_kind","blocked_ref","blocked_reason","blocked_since"};text=[]string{"title","description","goal","blocked_reason"}}
-	if kind==.Comment {allowed=[]string{"comment_id","body","created_at"};text=[]string{"body"}}
+	allowed,text:=vault.control_record_fields(kind)
 	for key,value in actual {
 		if _,present:=expected[key];!present do return false
 		found:=false;is_text:=false
 		for k in allowed do if k==key do found=true
 		for k in text do if k==key do is_text=true
 		if !found do return false
-		if kind==.Task_Detail && key=="acceptance" {
+		if kind==.Task_Detail && (key=="acceptance" || key=="inputs") {
 			items,typed:=value.(json.Array);expected_items,expected_typed:=expected[key].(json.Array)
 			if !typed || !expected_typed || len(items)!=len(expected_items) do return false
 			for item in items do if _,string_item:=item.(json.String);!string_item do return false
@@ -118,7 +114,7 @@ control_result_ok :: proc(data:Control_Data,result:string)->bool {
 	defer vault.control_wipe_value(value)
 	root,object:=value.(json.Object)
 	if err!=nil || !object || parser.curr_token.kind!=.EOF do return false
-	for key in root do if key!="chain" && key!="chains" && key!="tasks" && key!="comments" && key!="next_cursor" do return false
+	for key in root do if key!="chain" && key!="chains" && key!="tasks" && key!="comments" && key!="next_cursor" && key!="comments_next_cursor" do return false
 	if data.chain!=nil {
 		c,ok:=root["chain"].(json.Object);if !ok || !control_record_matches(data.chain,c,.Chain) do return false
 	} else if _,present:=root["chain"];present do return false
@@ -136,6 +132,8 @@ control_result_ok :: proc(data:Control_Data,result:string)->bool {
 	}
 	cursor,present:=root["next_cursor"]
 	if present {s,typed:=cursor.(json.String);if !typed || string(s)!=data.next_cursor do return false} else if data.next_cursor!="" do return false
+	comment_cursor,comment_present:=root["comments_next_cursor"]
+	if comment_present {s,typed:=comment_cursor.(json.String);if !typed || string(s)!=data.comments_next_cursor do return false} else if data.comments_next_cursor!="" do return false
 	return true
 }
 control_sealed_ok :: proc(view:Access_View,text:string)->(title,description:string,ok:bool) {

@@ -7,6 +7,7 @@ import domain "odin_test:hub/domain"
 import auth "odin_test:hub/service/auth"
 import mcp "odin_test:hub/service/mcp"
 import vault "odin_test:lib/vault"
+import tc "odin_test:hub/service/taskchain"
 
 mcp_task_sealed_fields :: proc(view:mcp.Access_View,expected,actual:json.Object)->bool {
 	if len(expected)!=len(actual) do return false
@@ -33,6 +34,13 @@ mcp_task_write_call :: proc(h:^MCP_Control_Handlers,id:json.Value,raw:string,vie
 		for text in args.acceptance do if text!="" do crypto.zero_explicit(raw_data(text),len(text))
 	}
 	if h.mutate_task==nil do return mcp_tool_result(id,"request_failed",true)
+	if tool=="tasks.update" || tool=="tasks.control" {
+		task,owned,err:=tc.get_task_for_read(h.control.chains,mcp.control_auth(view.owner),domain.Task_ID(args.task_id))
+		if !owned || err.code!=.None || string(task.chain_id)!=args.chain_id do return mcp_tool_result(id,"not_found",true)
+	} else {
+		_,owned,err:=tc.get_chain_for_read(h.control.chains,mcp.control_auth(view.owner),domain.Task_Chain_ID(args.chain_id))
+		if !owned || err.code!=.None do return mcp_tool_result(id,"not_found",true)
+	}
 	encoded,err:=json.marshal(args,allocator=context.temp_allocator)
 	if err!=nil do return mcp_tool_result(id,"request_failed",true)
 	digest:=auth.sha256_hex(string(encoded))
@@ -71,15 +79,19 @@ mcp_task_write_call :: proc(h:^MCP_Control_Handlers,id:json.Value,raw:string,vie
 	command:=mcp.Control_Task_Command{tool=tool,request_id=args.request_id,digest=digest,expected_revision=args.expected_revision,action=args.action,reason=get_text(sealed,"reason"),chain_id=domain.Task_Chain_ID(args.chain_id),task_id=domain.Task_ID(args.task_id)}
 	command.create={chain_id=command.chain_id,title=get_text(sealed,"title"),description=get_text(sealed,"description"),brief_json=brief_json,assignee_agent_id=args.assignee_agent_id,bridge_id=args.bridge_id,reviewer_agent_ids=args.reviewers,depends_on=deps,requires_user_approval=args.requires_user_approval,has_requires_user_approval=mcp.task_argument_present(args,"requires_user_approval")}
 	command.update={title=get_text(sealed,"title"),description=get_text(sealed,"description"),brief_json=brief_json,assignee_agent_id=args.assignee_agent_id,has_assignee=mcp.task_argument_present(args,"assignee_agent_id"),reviewer_agent_ids=args.reviewers,has_reviewers=mcp.task_argument_present(args,"reviewers"),depends_on=deps,has_depends_on=mcp.task_argument_present(args,"depends_on"),requires_user_approval=args.requires_user_approval,has_requires_user_approval=mcp.task_argument_present(args,"requires_user_approval")}
+	command.create.priority=domain.task_priority_from_string(args.priority);command.create.has_priority=mcp.task_argument_present(args,"priority")
+	command.update.priority=command.create.priority;command.update.has_priority=command.create.has_priority
 	bridge:=new(string,context.temp_allocator);bridge^=args.bridge_id
 	if mcp.task_argument_present(args,"bridge_id") do command.update.bridge_id=bridge
 	capacity:=args.capacity;if capacity==0 do capacity=1
 	roles:=args.roles;if len(roles)==0 do roles=[]string{"worker"}
 	profile:=args.provider_profile;if profile=="" do profile=args.provider
 	command.fleet={chain_id=command.chain_id,agent_id=args.agent_id,bridge_id=bridge,provider=args.provider,model=args.model,provider_profile=profile,has_provider_profile=true,capacity=capacity,roles=roles,has_roles=true}
-	result_id,code:=h.mutate_task(h.create_ctx,raw,view,command)
+	applied:=make([dynamic]string,context.temp_allocator)
+	for key in mcp.TASK_TOOL_KEYS do if mcp.task_argument_present(args,key) && key!="chain_id" && key!="task_id" && key!="request_id" && key!="expected_revision" do append(&applied,key)
+	command.applied_fields=applied[:]
+	result_json,code:=h.mutate_task(h.create_ctx,raw,view,command)
 	if code=="invalid_token" do return mcp_unauthorized(h)
 	if code!="" do return mcp_tool_result(id,code,true)
-	output,_:=json.marshal(struct {resource_id:string}{result_id},allocator=context.temp_allocator)
-	return mcp_tool_result(id,string(output),false)
+	return mcp_tool_result(id,result_json,false)
 }

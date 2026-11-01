@@ -115,8 +115,8 @@ test_mcp_control_hosted_four_tools_ownership_creation_and_stateless_restart :: p
 	testing.expect(t,strings.contains(list.body,"chains.list") && strings.contains(list.body,"chains.get") && strings.contains(list.body,"chains.create") && strings.contains(list.body,"events.wait") && !strings.contains(list.body,"lease.next"))
 	testing.expect(t,!strings.contains(list.body,"tasks.get") && !strings.contains(list.body,"tasks.create") && !strings.contains(list.body,"chains.configure"))
 	for call in ([]string{
-		`{"jsonrpc":"2.0","id":20,"method":"tools/call","params":{"name":"tasks.get","arguments":{"task_id":"task_fixture"}}}`,
-		`{"jsonrpc":"2.0","id":21,"method":"tools/call","params":{"name":"tasks.comment","arguments":{"task_id":"task_fixture","request_id":"legacy_denied","body":"Never write"}}}`,
+		`{"jsonrpc":"2.0","id":20,"method":"tools/call","params":{"name":"tasks.get","arguments":{"chain_id":"chain_fixture","task_id":"task_fixture"}}}`,
+		`{"jsonrpc":"2.0","id":21,"method":"tools/call","params":{"name":"tasks.comment","arguments":{"chain_id":"chain_fixture","task_id":"task_fixture","request_id":"legacy_denied","body":"Never write"}}}`,
 		`{"jsonrpc":"2.0","id":22,"method":"tools/call","params":{"name":"tasks.create","arguments":{"chain_id":"chain_fixture","request_id":"legacy_denied","title":"Never write","goal":"Never write","acceptance":["Never write"]}}}`,
 	}) {
 		testing.expect(t,strings.contains(mcp_control_request(&f.h,f.token,call).body,"scope_missing"))
@@ -211,8 +211,8 @@ test_mcp_control_rpc_grammar_and_device_reply_binding :: proc(t:^testing.T) {
 		testing.expect(t,!valid)
 	}
 	for raw in ([]string{
-		`{"task_id":"task_a","request_id":"r","expected_revision":"old","goal":"g"}`,
-		`{"task_id":"task_a","request_id":"r","expected_revision":"0000000000000000000000000000000000000000000000000000000000000000","state":"done"}`,
+		`{"chain_id":"chain_a","task_id":"task_a","request_id":"r","expected_revision":"old","goal":"g"}`,
+		`{"chain_id":"chain_a","task_id":"task_a","request_id":"r","expected_revision":"0000000000000000000000000000000000000000000000000000000000000000","state":"done"}`,
 	}) {
 		value,_:=json.parse_string(raw,parse_integers=true,allocator=context.temp_allocator)
 		_,valid:=mcp_arguments("tasks.update",value)

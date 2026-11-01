@@ -11,9 +11,9 @@ mcp_task_write_arguments :: proc(tool:string,value:json.Value)->(mcp.Control_Arg
 	if !typed do return {},false
 	allowed:[]string
 	switch tool {
-	case "tasks.create":allowed=[]string{"chain_id","request_id","title","description","goal","acceptance","assignee_agent_id","bridge_id","reviewers","depends_on","requires_user_approval"}
-	case "tasks.update":allowed=[]string{"task_id","request_id","expected_revision","title","description","goal","acceptance","assignee_agent_id","bridge_id","reviewers","depends_on","requires_user_approval"}
-	case "tasks.control":allowed=[]string{"task_id","request_id","expected_revision","action","reason"}
+	case "tasks.create":allowed=[]string{"chain_id","request_id","title","description","goal","acceptance","assignee_agent_id","bridge_id","reviewers","depends_on","requires_user_approval","priority"}
+	case "tasks.update":allowed=[]string{"chain_id","task_id","request_id","expected_revision","title","description","goal","acceptance","assignee_agent_id","bridge_id","reviewers","depends_on","requires_user_approval","priority"}
+	case "tasks.control":allowed=[]string{"chain_id","task_id","request_id","expected_revision","action","reason"}
 	case "chains.configure":allowed=[]string{"chain_id","request_id","expected_revision","action","agent_id","bridge_id","provider","model","provider_profile","roles","capacity"}
 	case:return {},false
 	}
@@ -52,11 +52,13 @@ mcp_task_write_arguments :: proc(tool:string,value:json.Value)->(mcp.Control_Arg
 		for text in args.acceptance do if text!="" do crypto.zero_explicit(raw_data(text),len(text))
 	}
 	args.present=mask
+	if mcp.task_argument_present(args,"priority") && args.priority!="p0" && args.priority!="p1" && args.priority!="p2" do return {},false
 	if args.request_id=="" || !vault.valid_id_value(args.request_id) do return {},false
-	if tool=="tasks.create" || tool=="chains.configure" {if !mcp.control_id_ok(args.chain_id) do return {},false} else if len(args.task_id)<=5 || !strings.has_prefix(args.task_id,"task_") || !vault.valid_id_value(args.task_id) do return {},false
+	if !mcp.control_id_ok(args.chain_id) do return {},false
+	if tool=="tasks.update" || tool=="tasks.control" {if len(args.task_id)<=5 || !strings.has_prefix(args.task_id,"task_") || !vault.valid_id_value(args.task_id) do return {},false}
 	if tool!="tasks.create" && (len(args.expected_revision)!=64 || !vault.is_lower_hex(args.expected_revision)) do return {},false
 	if tool=="tasks.create" && (args.title=="" || args.goal=="" || len(args.acceptance)<1) do return {},false
-	if tool=="tasks.update" && len(obj)<4 do return {},false
+	if tool=="tasks.update" && len(obj)<5 do return {},false
 	if tool=="tasks.control" {
 		valid:=false
 		for action in ([]string{"publish","cancel","reopen","answer","hold","release","recheck"}) do if action==args.action do valid=true

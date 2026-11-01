@@ -11,6 +11,7 @@ Control_Data :: struct {
 	tasks:[]json.Object `json:"tasks,omitempty"`,
 	comments:[]json.Object `json:"comments,omitempty"`,
 	next_cursor:string `json:"next_cursor,omitempty"`,
+	comments_next_cursor:string `json:"comments_next_cursor,omitempty"`,
 }
 Control_Consent :: struct {
 	v:int,

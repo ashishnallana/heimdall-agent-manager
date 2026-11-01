@@ -39,17 +39,42 @@ checks remain in force. Device versus hosted decryption is an independent choice
 ## Task tools
 
 Task reads expose bounded, typed projections: title, description, goal,
-acceptance, assignment, bridge pin, dependencies, current review verdicts,
-blocking metadata/reason and an opaque `revision`. `tasks.get` includes comments;
-`tasks.list` pages at up to 100 tasks. Full briefs, attempt facets and arbitrary
-nested data are not returned. Legacy chain snapshots keep their original
+acceptance, input references, assignment, bridge pin, dependencies, current review
+verdicts with durable reviewer and instance references, and an opaque `revision`.
+`tasks.get` adds native-policy `allowed_actions`, the latest attempt's metadata
+and typed handoff summary, and separate block/hold reasons and numeric
+`since_ms` values. A hold reports `checkpoint_requested` while a lease remains.
+Arbitrary attempt facets and unapproved brief fields are not returned.
+
+Existing-ticket tools require both `chain_id` and `task_id`; membership and owner
+are checked before decryption or mutation, including retries. `tasks.list`
+supports canonical `state` and durable `assignee_agent_id` filters before stable
+keyset pagination (up to 100 tasks). Cursors bind the owner, chain and filters.
+Create/update accept native priorities `p0`, `p1` and `p2`.
+
+Task metadata is independent of comment volume. Comments are opt-in through
+`include_comments`, with `comment_limit` (1–100, default 50), `comment_cursor`
+and `comments_next_cursor`. Pages bind the owner/chain/task and contain at most
+1 MiB of stored bodies. A legacy body over 256 KiB returns metadata with
+`body_error: "comment_too_large"`, without its body; paging can continue.
+Comment responses and reads preserve the delegated user, client and grant IDs,
+timestamp, and `author_kind: "delegated_user"`; no agent/reviewer is impersonated.
+Legacy chain snapshots keep their original
 projection. Connections with task-write permission additionally receive
 `configuration_revision` and public fleet placement metadata in `chains.get`.
 
 Every new write requires a caller-chosen `request_id`. Reuse the same ID and
 identical arguments after an ambiguous response. A different argument set with
 the same ID returns `idempotency_conflict`. Receipts are scoped to owner, grant
-and tool, and persist only argument digests and public result identifiers.
+and tool, and persist only argument digests and public operation metadata.
+Mutation responses include resulting state, publish state, revision, applied
+field names, `changed`, `checkpoint_requested`, `blocked` and status
+`completed`, `accepted` (checkpoint pending), or `noop`. Recheck adds bounded
+action/reason codes such as `lease_dispatched`, `state_changed`, `held`,
+`lease_active`, `review_pending`, `fleet_capacity` and `native_blocker`.
+Private native explanation text remains in the scoped task read; receipts never
+store human prose. Identical retries return the original operation snapshot,
+even when later native work changes the task; refresh with `tasks.get`.
 Revoked or expired credentials cannot replay a receipt. Reconnecting creates a
 new grant: it does not authorize replaying the old grant's receipts.
 

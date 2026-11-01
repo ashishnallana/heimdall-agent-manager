@@ -45,8 +45,8 @@ export async function verifyMcpWorkerJob(j: McpWorkerJob, identity: DeviceIdenti
 }
 const chainFields = ['chain_id', 'title', 'description', 'status', 'kind', 'work_revision', 'task_count', 'completed_task_count', 'user_validation_count', 'created_at', 'updated_at', 'configuration_revision', 'fleet'];
 const taskFields = ['task_id', 'title', 'description', 'state', 'kind', 'attempt_no', 'requires_user_approval', 'reviews', 'updated_at'];
-const taskDetailFields = [...taskFields, 'chain_id', 'goal', 'acceptance', 'assignee_agent_id', 'bridge_id', 'depends_on', 'publish_state', 'priority', 'revision', 'blocked_kind', 'blocked_ref', 'blocked_reason', 'blocked_since'];
-const commentFields = ['comment_id', 'body', 'created_at'];
+const taskDetailFields = [...taskFields, 'chain_id', 'goal', 'acceptance', 'inputs', 'review_roles', 'reviewers', 'assignee_agent_id', 'bridge_id', 'depends_on', 'publish_state', 'priority', 'revision', 'blocked_kind', 'blocked_ref', 'blocked_reason', 'blocked_since', 'blocked_since_ms', 'hold_reason', 'hold_since_ms', 'hold_by', 'checkpoint_requested', 'allowed_actions', 'latest_attempt_no', 'latest_attempt_holder_instance_id', 'latest_attempt_outcome', 'latest_attempt_started_at', 'latest_attempt_ended_at', 'latest_attempt_summary', 'latest_attempt_summary_error'];
+const commentFields = ['comment_id', 'chain_id', 'task_id', 'body', 'created_at', 'author_kind', 'author_user_id', 'author_agent_instance_id', 'delegated_client_id', 'delegated_grant_id', 'body_error', 'body_bytes'];
 async function readable(raw: Record<string, unknown>, fields: string[], textFields: string[], keyring: VaultKeyring, owner: string): Promise<Record<string, unknown>> {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw) || (raw.owner_user_id !== undefined && raw.owner_user_id !== owner)) throw new Error('MCP record owner mismatch');
   const out: Record<string, unknown> = {};
@@ -104,11 +104,11 @@ export async function transformMcpWorkerJob(job: McpWorkerJob, keyring: VaultKey
   if (input.tasks) out.tasks = await Promise.all(input.tasks.map(async (r: Record<string, unknown>) => {
     const details = job.tool === 'tasks.get' || job.tool === 'tasks.list';
     // Acceptance items need the same strict text transform as individual fields.
-    const { acceptance, ...rest } = r;
-    const result = await readable(details ? rest : r, details ? taskDetailFields : taskFields, details ? ['title', 'description', 'goal', 'blocked_reason'] : ['title', 'description'], keyring, job.owner);
-    if (details && acceptance !== undefined) {
-      if (!Array.isArray(acceptance)) throw new Error('Invalid task acceptance');
-      result.acceptance = await Promise.all(acceptance.map(async body => {
+    const { acceptance, inputs, ...rest } = r;
+    const result = await readable(details ? rest : r, details ? taskDetailFields : taskFields, details ? ['title', 'description', 'goal', 'blocked_reason', 'hold_reason', 'latest_attempt_summary'] : ['title', 'description'], keyring, job.owner);
+    for (const [key, value] of [['acceptance', acceptance], ['inputs', inputs]] as const) if (details && value !== undefined) {
+      if (!Array.isArray(value)) throw new Error('Invalid task text list');
+      result[key] = await Promise.all(value.map(async body => {
         if (typeof body !== 'string') throw new Error('Invalid task acceptance');
         return (await readable({ body }, commentFields, ['body'], keyring, job.owner)).body;
       }));
@@ -117,6 +117,7 @@ export async function transformMcpWorkerJob(job: McpWorkerJob, keyring: VaultKey
   }));
   if (input.comments) out.comments = await Promise.all(input.comments.map((r: Record<string, unknown>) => readable(r, commentFields, ['body'], keyring, job.owner)));
   if (input.next_cursor) out.next_cursor = input.next_cursor;
+  if (input.comments_next_cursor) out.comments_next_cursor = input.comments_next_cursor;
   return JSON.stringify(out);
 }
 export async function signMcpWorkerReply(job: McpWorkerJob, identity: DeviceIdentity, result: string): Promise<McpWorkerReply> {

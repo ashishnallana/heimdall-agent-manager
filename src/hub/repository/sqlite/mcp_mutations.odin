@@ -28,11 +28,21 @@ mcp_receipt_get :: proc(conn:^Conn,owner,grant,tool,request_id:string)->(digest,
 	if rc!=SQLITE_ROW do return "","",false,repo_err("cannot read MCP mutation receipt")
 	return strings.clone(column_text_unowned(stmt,0),context.temp_allocator),strings.clone(column_text_unowned(stmt,1),context.temp_allocator),true,{}
 }
-mcp_receipt_put :: proc(conn:^Conn,owner,grant,tool,request_id,digest,result_id:string)->domain.Domain_Error {
-	stmt,ok:=prepare(conn,"INSERT INTO mcp_mutation_receipts(owner_user_id,grant_id,tool,request_id,argument_digest,result_id) VALUES(?,?,?,?,?,?);")
+mcp_receipt_put :: proc(conn:^Conn,owner,grant,tool,request_id,digest,result_id:string,result_json:string="")->domain.Domain_Error {
+	stmt,ok:=prepare(conn,"INSERT INTO mcp_mutation_receipts(owner_user_id,grant_id,tool,request_id,argument_digest,result_id,result_json) VALUES(?,?,?,?,?,?,?);")
 	if !ok do return repo_err("cannot prepare MCP mutation receipt")
 	defer sqlite3_finalize(stmt)
 	bind_text(stmt,1,owner);bind_text(stmt,2,grant);bind_text(stmt,3,tool);bind_text(stmt,4,request_id);bind_text(stmt,5,digest);bind_text(stmt,6,result_id)
+	bind_text(stmt,7,result_json)
 	if sqlite3_step(stmt)!=SQLITE_DONE do return repo_err("cannot write MCP mutation receipt")
 	return {}
+}
+
+mcp_receipt_result :: proc(conn:^Conn,owner,grant,tool,request_id:string)->(string,bool) {
+	stmt,ok:=prepare(conn,"SELECT result_json FROM mcp_mutation_receipts WHERE owner_user_id=? AND grant_id=? AND tool=? AND request_id=?;")
+	if !ok do return "",false
+	defer sqlite3_finalize(stmt)
+	bind_text(stmt,1,owner);bind_text(stmt,2,grant);bind_text(stmt,3,tool);bind_text(stmt,4,request_id)
+	if sqlite3_step(stmt)!=SQLITE_ROW do return "",false
+	return strings.clone(column_text_unowned(stmt,0),context.temp_allocator),true
 }

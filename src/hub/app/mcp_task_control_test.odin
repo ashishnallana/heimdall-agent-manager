@@ -31,7 +31,14 @@ mcp_task_test_seed :: proc(tx:iface.MCP_Transaction,ctx:rawptr)->domain.Domain_E
 }
 mcp_task_test_now :: proc(ctx:rawptr)->string {return "2026-10-31T07:00:00Z"}
 
-mcp_task_test_call :: proc(h:^http.MCP_Control_Handlers,headers:[]contracts.HTTP_Header,tool:string,args:json.Object)->http.Response {
+mcp_task_test_call :: proc(h:^http.MCP_Control_Handlers,headers:[]contracts.HTTP_Header,tool:string,input:json.Object)->http.Response {
+	args:=input
+	if strings.has_prefix(tool,"tasks.") && tool!="tasks.create" {
+		if _,present:=args["chain_id"];!present {
+			id,_:=args["task_id"].(json.String);task,found,_:=iface.taskchain_get_task(h.control.chains.repo,domain.Task_ID(id))
+			if found do args["chain_id"]=json.String(task.chain_id)
+		}
+	}
 	encoded,_:=json.marshal(struct {jsonrpc:string,id:int,method:string,params:struct {name:string,arguments:json.Object}}{"2.0",1,"tools/call",{tool,args}},allocator=context.temp_allocator)
 	return http.mcp_control_handler(h,{method="POST",path="/api/v1/mcp",headers=headers,body=string(encoded)})
 }
@@ -57,7 +64,7 @@ mcp_task_attention_probe :: proc(ctx:rawptr,owner,kind,id:string) {
 mcp_task_comment_race :: proc(job:^MCP_Task_Comment_Race) {
 	context.allocator=context.temp_allocator
 	defer free_all(context.temp_allocator)
-	id,err:=mcp_comment_task(job.graph,job.raw,job.view,"task_comment","concurrent_retry","concurrent_digest",job.body)
+	id,err:=mcp_comment_task(job.graph,job.raw,job.view,"chain_comment","task_comment","concurrent_retry","concurrent_digest",job.body)
 	job.ok=err=="" && len(id)>0 && len(id)<=len(job.id)
 	if job.ok do copy(job.id[:],id)
 }
@@ -126,15 +133,15 @@ test_mcp_task_comment_native_atomic_retry_and_revocation :: proc(t:^testing.T) {
 	sealed:=mcp.hosted_with_access(&g.mcp_delegation,&directory,var_tokens.access_token,view.client,mcp.control_hosted_transform,&op)
 	input:struct {body:string}
 	if !testing.expect(t,sealed.error=="" && json.unmarshal_string(sealed.response,&input,.JSON,context.temp_allocator)==nil) do return
-	first,first_err:=mcp_comment_task(g,var_tokens.access_token,view,"task_comment","retry_a","digest_a",input.body)
+	first,first_err:=mcp_comment_task(g,var_tokens.access_token,view,"chain_comment","task_comment","retry_a","digest_a",input.body)
 	testing.expectf(t,first_err=="" && first!="","comment: %s",first_err)
 	testing.expect(t,attention_probe.notices==1 && !attention_probe.inside_transaction)
-	second,second_err:=mcp_comment_task(g,var_tokens.access_token,view,"task_comment","retry_a","digest_a",input.body)
+	second,second_err:=mcp_comment_task(g,var_tokens.access_token,view,"chain_comment","task_comment","retry_a","digest_a",input.body)
 	testing.expect(t,second_err=="" && second==first)
-	_,conflict:=mcp_comment_task(g,var_tokens.access_token,view,"task_comment","retry_a","different",input.body)
+	_,conflict:=mcp_comment_task(g,var_tokens.access_token,view,"chain_comment","task_comment","retry_a","different",input.body)
 	testing.expect(t,conflict=="idempotency_conflict")
 	testing.expect(t,sqlite.exec(&g.db,"CREATE TRIGGER fail_comment_receipt BEFORE INSERT ON mcp_mutation_receipts WHEN NEW.request_id='fail_comment_receipt' BEGIN SELECT RAISE(ABORT,'synthetic receipt failure'); END;"))
-	_,failed_receipt:=mcp_comment_task(g,var_tokens.access_token,view,"task_comment","fail_comment_receipt","digest_failed",input.body)
+	_,failed_receipt:=mcp_comment_task(g,var_tokens.access_token,view,"chain_comment","task_comment","fail_comment_receipt","digest_failed",input.body)
 	testing.expect(t,failed_receipt=="request_failed")
 	testing.expect(t,attention_probe.notices==1 && !attention_probe.inside_transaction,"failed mutation must not publish an attention refresh")
 	testing.expect(t,sqlite.exec(&g.db,"DROP TRIGGER fail_comment_receipt;"))
@@ -142,23 +149,24 @@ test_mcp_task_comment_native_atomic_retry_and_revocation :: proc(t:^testing.T) {
 	testing.expect(t,len(rows)==1 && rows[0].body==input.body && !strings.contains(rows[0].body,"private synthetic comment"))
 	events,_:=iface.taskchain_list_events_by_task(&g.repos.taskchains,"task_comment",domain.User_ID(v.request.owner))
 	testing.expect(t,len(events)==1 && events[0].kind=="comment")
-	_,missing:=mcp_comment_task(g,var_tokens.access_token,view,"task_missing","retry_b","digest_b",input.body)
+	_,missing:=mcp_comment_task(g,var_tokens.access_token,view,"chain_comment","task_missing","retry_b","digest_b",input.body)
 	testing.expect(t,missing=="not_found")
 	_,_,receipt,_:=sqlite.mcp_receipt_get(&g.db,view.owner,view.grant,"tasks.comment","retry_b")
 	testing.expect(t,!receipt)
 	delegation:=http.MCP_Delegation_Handlers{service=&g.mcp_delegation,directory=&directory,grant_directory=&directory,origin=g.mcp_delegation.issuer}
 	h:=http.MCP_Control_Handlers{delegation=&delegation,control={chains=&g.taskchains},create_ctx=g,comment=mcp_comment_task,mutate_task=mcp_mutate_task}
 	headers:=[]contracts.HTTP_Header{{"Authorization",strings.concatenate({"Bearer ",var_tokens.access_token},context.temp_allocator)},{"Content-Type","application/json"}}
-	call:=`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"tasks.comment","arguments":{"task_id":"task_comment","request_id":"http_retry","body":"HTTP private comment"}}}`
+	call:=`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"tasks.comment","arguments":{"chain_id":"chain_comment","task_id":"task_comment","request_id":"http_retry","body":"HTTP private comment"}}}`
 	response:=http.mcp_control_handler(&h,{method="POST",path="/api/v1/mcp",headers=headers,body=strings.clone(call,context.temp_allocator)})
 	retry:=http.mcp_control_handler(&h,{method="POST",path="/api/v1/mcp",headers=headers,body=strings.clone(call,context.temp_allocator)})
 	testing.expectf(t,response.status==200 && response.sensitive && strings.contains(response.body,"comment_id") && response.body==retry.body,"HTTP comment/retry: %s",response.body)
-	get:=http.mcp_control_handler(&h,{method="POST",path="/api/v1/mcp",headers=headers,body=strings.clone(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"tasks.get","arguments":{"task_id":"task_comment"}}}`,context.temp_allocator)})
+	get:=http.mcp_control_handler(&h,{method="POST",path="/api/v1/mcp",headers=headers,body=strings.clone(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"tasks.get","arguments":{"chain_id":"chain_comment","task_id":"task_comment","include_comments":true}}}`,context.temp_allocator)})
 	testing.expectf(t,get.status==200 && get.sensitive && strings.contains(get.body,"HTTP private comment") && !strings.contains(get.body,"vault:v2:"),"task get: %s",get.body)
 	rows,_=iface.taskchain_list_comments_by_task(&g.repos.taskchains,"task_comment",domain.User_ID(v.request.owner))
 	testing.expect(t,len(rows)==2)
 	mcp_task_test_mutations(t,g,&h,headers,view)
 	mcp_task_test_placement(t,g,&h,headers,view)
+	mcp_task_test_contract(t,g,&h,headers,view,input.body)
 	jobs:[4]MCP_Task_Comment_Race
 	threads:[4]^thread.Thread
 	for i in 0..<len(jobs) {
@@ -168,14 +176,14 @@ test_mcp_task_comment_native_atomic_retry_and_revocation :: proc(t:^testing.T) {
 	for th in threads {thread.join(th);thread.destroy(th)}
 	for job in jobs do testing.expect(t,job.ok && job.id==jobs[0].id)
 	rows,_=iface.taskchain_list_comments_by_task(&g.repos.taskchains,"task_comment",domain.User_ID(v.request.owner))
-	testing.expect(t,len(rows)==3)
+	testing.expect(t,len(rows)==4)
 	h.mutate_task=mcp_task_revoke_before_write
 	revocation_race:=mcp_task_test_call(&h,headers,"tasks.create",json.Object{"chain_id"=json.String("chain_mutation"),"request_id"=json.String("revoked_before_commit"),"title"=json.String("Never commit"),"goal"=json.String("Never commit"),"acceptance"=json.Array{json.String("Never commit")}})
 	testing.expect(t,revocation_race.status==401)
 	_,_,revoked_receipt,_:=sqlite.mcp_receipt_get(&g.db,view.owner,view.grant,"tasks.create","revoked_before_commit")
 	testing.expect(t,!revoked_receipt)
 	testing.expect(t,mcp.delegation_revoke(&g.mcp_delegation,view.owner,view.grant).code==.None)
-	_,revoked:=mcp_comment_task(g,var_tokens.access_token,view,"task_comment","retry_a","digest_a",input.body)
+	_,revoked:=mcp_comment_task(g,var_tokens.access_token,view,"chain_comment","task_comment","retry_a","digest_a",input.body)
 	testing.expect(t,revoked=="invalid_token")
 }
 
@@ -291,6 +299,8 @@ mcp_task_test_placement :: proc(t:^testing.T,g:^App_Graph,h:^http.MCP_Control_Ha
 	lease_b,leased_b,_:=iface.taskchain_get_lease_by_holder(&g.repos.taskchains,"inst_placement_b")
 	testing.expect(t,leased_a && leased_b && string(lease_a.task_id)==string(second_id) && string(lease_b.task_id)==string(id))
 	testing.expect(t,lease_a.provider=="claude" && lease_a.model==second_model && lease_b.provider=="codex" && lease_b.model==model)
+	testing.expect(t,second["state"].(json.String)=="in_progress" && second["publish_state"].(json.String)=="published")
+	mcp_task_test_outcomes(t,g,h,headers,view,lease_b.task_id)
 }
 
 mcp_task_test_mutations :: proc(t:^testing.T,g:^App_Graph,h:^http.MCP_Control_Handlers,headers:[]contracts.HTTP_Header,view:mcp.Access_View) {
@@ -298,6 +308,7 @@ mcp_task_test_mutations :: proc(t:^testing.T,g:^App_Graph,h:^http.MCP_Control_Ha
 	_,saved,_:=iface.taskchain_save_chain(&g.repos.taskchains,{chain_id="chain_mutation",owner_user_id=domain.User_ID(view.owner),title="Synthetic mutation",kind="mixed_work",status=.Active,created_at=now,updated_at=now})
 	if !testing.expect(t,saved) do return
 	args:=json.Object{"chain_id"=json.String("chain_mutation"),"request_id"=json.String("create_retry"),"title"=json.String("Private task title"),"goal"=json.String("Private task goal"),"acceptance"=json.Array{json.String("Private criterion")},"requires_user_approval"=json.Boolean(true)}
+	args["priority"]=json.String("p0")
 	first:=mcp_task_test_call(h,headers,"tasks.create",args)
 	output:=mcp_task_test_output(t,first)
 	if output==nil do return
@@ -307,6 +318,7 @@ mcp_task_test_mutations :: proc(t:^testing.T,g:^App_Graph,h:^http.MCP_Control_Ha
 	testing.expect(t,first.body==retry.body)
 	task,found,err:=iface.taskchain_get_task(&g.repos.taskchains,domain.Task_ID(id))
 	if !testing.expect(t,found && err.code==.None) do return
+	testing.expect(t,task.priority==.P0 && output["publish_state"].(json.String)=="draft" && output["revision"]!=nil)
 	testing.expect(t,strings.has_prefix(task.title,"vault:v2:") && !strings.contains(task.brief_json,"Private task goal") && !strings.contains(task.brief_json,"Private criterion") && task.requires_user_approval)
 	read:=mcp_task_test_output(t,mcp_task_test_call(h,headers,"tasks.get",json.Object{"task_id"=id}))
 	if read==nil do return
@@ -315,6 +327,7 @@ mcp_task_test_mutations :: proc(t:^testing.T,g:^App_Graph,h:^http.MCP_Control_Ha
 	testing.expect_value(t,string(goal),"Private task goal")
 	revision,_:=record["revision"].(json.String)
 	update:=json.Object{"task_id"=id,"request_id"=json.String("update_retry"),"expected_revision"=revision,"goal"=json.String("Updated private goal")}
+	update["priority"]=json.String("p1")
 	changed:=mcp_task_test_output(t,mcp_task_test_call(h,headers,"tasks.update",update))
 	if changed==nil do return
 	testing.expect(t,mcp_task_test_call(h,headers,"tasks.update",update).body==mcp_task_test_call(h,headers,"tasks.update",update).body)
@@ -324,6 +337,7 @@ mcp_task_test_mutations :: proc(t:^testing.T,g:^App_Graph,h:^http.MCP_Control_Ha
 	_,_,receipt,_:=sqlite.mcp_receipt_get(&g.db,view.owner,view.grant,"tasks.update","stale_update")
 	testing.expect(t,!receipt)
 	task,_,_=iface.taskchain_get_task(&g.repos.taskchains,domain.Task_ID(id))
+	testing.expect(t,task.priority==.P1 && changed["applied_fields"]!=nil && changed["revision"]!=nil)
 	testing.expect(t,task.requires_user_approval && !strings.contains(task.brief_json,"Updated private goal"))
 	chain,_,_:=iface.taskchain_get_chain(&g.repos.taskchains,"chain_mutation")
 	service:=mcp.Control_Service{chains=&g.taskchains}

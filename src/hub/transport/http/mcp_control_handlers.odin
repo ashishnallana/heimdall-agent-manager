@@ -64,7 +64,7 @@ mcp_arguments :: proc(name:string,value:json.Value)->(mcp.Control_Arguments,bool
 	for key,v in obj {
 		switch key {
 		case "chain_id":
-			s,typed:=v.(json.String);if !typed || (name!="chains.get" && name!="events.wait" && name!="tasks.list") || !mcp.control_id_ok(string(s)) do return {},false
+			s,typed:=v.(json.String);if !typed || (name!="chains.get" && name!="events.wait" && name!="tasks.list" && name!="tasks.get" && name!="tasks.comment") || !mcp.control_id_ok(string(s)) do return {},false
 			args.chain_id=string(s)
 		case "title":
 			s,typed:=v.(json.String);if !typed || name!="chains.create" || len(s)<1 || len(s)>500 || strings.trim_space(string(s))=="" do return {},false
@@ -82,8 +82,24 @@ mcp_arguments :: proc(name:string,value:json.Value)->(mcp.Control_Arguments,bool
 			s,typed:=v.(json.String);if !typed || name!="chains.create" || len(s)>20000 do return {},false
 			args.description=string(s)
 		case "cursor":
-			s,typed:=v.(json.String);if !typed || (name!="chains.list" && name!="tasks.list") || len(s)>20 do return {},false
+			s,typed:=v.(json.String);if !typed || (name!="chains.list" && name!="tasks.list") || len(s)>2048 || name=="chains.list" && len(s)>20 do return {},false
 			args.cursor=string(s)
+		case "state":
+			s,typed:=v.(json.String);if !typed || name!="tasks.list" do return {},false
+			state,valid:=domain.task_state_from_string(string(s));if !valid || domain.task_state_string(state)!=string(s) do return {},false
+			args.state=string(s)
+		case "assignee_agent_id":
+			s,typed:=v.(json.String);if !typed || name!="tasks.list" || len(s)<5 || len(s)>256 || !strings.has_prefix(string(s),"agt_") || !vault.valid_id_value(string(s)) do return {},false
+			args.assignee_agent_id=string(s)
+		case "include_comments":
+			b,typed:=v.(json.Boolean);if !typed || name!="tasks.get" do return {},false
+			args.include_comments=bool(b)
+		case "comment_limit":
+			n,typed:=v.(json.Integer);if !typed || name!="tasks.get" || n<1 || n>100 do return {},false
+			args.comment_limit=int(n)
+		case "comment_cursor":
+			s,typed:=v.(json.String);if !typed || name!="tasks.get" || len(s)>2048 do return {},false
+			args.comment_cursor=string(s)
 		case "limit":
 			n,typed:=v.(json.Integer);if !typed || (name!="chains.list" && name!="tasks.list") || n<1 || n>100 do return {},false
 			args.limit=int(n)
@@ -94,9 +110,9 @@ mcp_arguments :: proc(name:string,value:json.Value)->(mcp.Control_Arguments,bool
 		}
 	}
 	switch name {
-	case "tasks.get":return args,args.task_id!=""
+	case "tasks.get":return args,args.chain_id!="" && args.task_id!="" && (args.include_comments || args.comment_cursor=="" && args.comment_limit==0)
 	case "tasks.list":return args,args.chain_id!=""
-	case "tasks.comment":return args,args.task_id!="" && args.request_id!="" && args.body!=""
+	case "tasks.comment":return args,args.chain_id!="" && args.task_id!="" && args.request_id!="" && args.body!=""
 	case "chains.get","events.wait":return args,args.chain_id!=""
 	case "chains.create":return args,args.title!=""
 	case "chains.list":return args,true

@@ -19,7 +19,7 @@ mcp_task_authority :: proc(ctx:rawptr,grant:domain.MCP_Record)->(bool,domain.Dom
 	return mcp.delegation_vault_authority(op.directory,grant)
 }
 
-mcp_comment_task :: proc(ctx:rawptr,raw:string,view:mcp.Access_View,task_id,request_id,digest,body:string)->(string,string) {
+mcp_comment_task :: proc(ctx:rawptr,raw:string,view:mcp.Access_View,chain_id,task_id,request_id,digest,body:string)->(string,string) {
 	graph:=(^App_Graph)(ctx)
 	uow,begun,err:=iface.unit_of_work_begin(&graph.uow_factory)
 	if !begun || err.code!=.None do return "","request_failed"
@@ -35,6 +35,8 @@ mcp_comment_task :: proc(ctx:rawptr,raw:string,view:mcp.Access_View,task_id,requ
 	service.authority_ctx=&authority;service.authority=mcp_task_authority
 	code:=mcp.control_write_authorized(sqlite.mcp_transaction_view(&graph.db),&service,&directory,raw,view,"tasks.comment")
 	if code!="" do return "",code
+	task,owned,terr:=tc.get_task_for_read(&graph.taskchains,mcp.control_auth(view.owner),domain.Task_ID(task_id))
+	if !owned || terr.code!=.None || string(task.chain_id)!=chain_id do return "","not_found"
 	prior,result,found,rerr:=sqlite.mcp_receipt_get(&graph.db,view.owner,view.grant,"tasks.comment",request_id)
 	if rerr.code!=.None do return "","request_failed"
 	if found {
@@ -44,7 +46,7 @@ mcp_comment_task :: proc(ctx:rawptr,raw:string,view:mcp.Access_View,task_id,requ
 	chains:=graph.taskchains
 	// Native write-through card projection must not run under this outer UOW.
 	chains.attention=nil
-	comment,_,ok,cerr:=tc.comment_task(&chains,mcp.control_auth(view.owner),{task_id=domain.Task_ID(task_id),body=body})
+	comment,_,ok,cerr:=tc.comment_task(&chains,mcp.control_auth(view.owner),{task_id=domain.Task_ID(task_id),body=body,delegated_client_id=view.client,delegated_grant_id=view.grant})
 	if !ok || cerr.code!=.None {
 		if cerr.code==.Not_Found || cerr.code==.Forbidden do return "","not_found"
 		if cerr.code==.Conflict do return "","conflict"

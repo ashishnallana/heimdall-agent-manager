@@ -80,9 +80,21 @@ mcp_mutate_task :: proc(ctx:rawptr,raw:string,view:mcp.Access_View,command:mcp.C
 	committed:=false
 	defer if !committed do iface.unit_of_work_rollback(&uow)
 	if code:=mcp_task_write_check(g,raw,view,command.tool);code!="" do return "",code
+	if command.tool=="tasks.update" || command.tool=="tasks.control" {
+		bound,owned,berr:=tc.get_task_for_read(&g.taskchains,mcp.control_auth(view.owner),command.task_id)
+		if !owned || berr.code!=.None || bound.chain_id!=command.chain_id do return "","not_found"
+	} else {
+		_,owned,berr:=tc.get_chain_for_read(&g.taskchains,mcp.control_auth(view.owner),command.chain_id)
+		if !owned || berr.code!=.None do return "","not_found"
+	}
 	prior,result,found,rerr:=sqlite.mcp_receipt_get(&g.db,view.owner,view.grant,command.tool,command.request_id)
 	if rerr.code!=.None do return "","request_failed"
-	if found {if prior!=command.digest do return "","idempotency_conflict";return result,""}
+	if found {
+		if prior!=command.digest do return "","idempotency_conflict"
+		encoded,loaded:=sqlite.mcp_receipt_result(&g.db,view.owner,view.grant,command.tool,command.request_id)
+		if !loaded || encoded=="" do return "","request_failed"
+		return encoded,""
+	}
 	principal:=mcp.control_auth(view.owner)
 	reviewers:=command.create.reviewer_agent_ids
 	if command.tool=="tasks.update" do reviewers=command.update.reviewer_agent_ids
@@ -99,6 +111,7 @@ mcp_mutate_task :: proc(ctx:rawptr,raw:string,view:mcp.Access_View,command:mcp.C
 		var_ok:bool
 		task,var_ok,err=tc.get_task_for_read(&g.taskchains,principal,command.task_id)
 		if !var_ok || err.code!=.None do return "","not_found"
+		if task.chain_id!=command.chain_id do return "","not_found"
 		chain_id=task.chain_id
 		revision,ok:=mcp.control_task_revision(&service,task)
 		if !ok do return "","request_failed"
@@ -109,6 +122,7 @@ mcp_mutate_task :: proc(ctx:rawptr,raw:string,view:mcp.Access_View,command:mcp.C
 	id:string
 	operation_err:domain.Domain_Error
 	ok:=false
+	outcome:=mcp.Control_Mutation_Result{changed=true,applied_fields=command.applied_fields}
 	switch command.tool {
 	case "tasks.create":
 		if code:=mcp_task_target(g,chain.owner_user_id,chain_id,command.create.assignee_agent_id,command.create.bridge_id);code!="" do return "",code
@@ -133,9 +147,17 @@ mcp_mutate_task :: proc(ctx:rawptr,raw:string,view:mcp.Access_View,command:mcp.C
 		case "cancel":_,ok,operation_err=tc.cancel_task(&chains,principal,task.task_id,command.reason)
 		case "reopen":_,ok,operation_err=tv2.task_reopen(&g.task_engine,task,actor)
 		case "answer":_,ok,operation_err=tv2.task_answer(&g.task_engine,task,actor,command.reason)
-		case "hold":_,ok,operation_err=tv2.task_hold(&g.task_engine,task,actor,command.reason)
-		case "release":_,ok,operation_err=tv2.task_release(&g.task_engine,task,actor)
-		case "recheck":_,ok,operation_err=tv2.task_recheck(&g.task_engine,task,actor)
+		case "hold":
+			res:tv2.Hold_Result;res,ok,operation_err=tv2.task_hold(&g.task_engine,task,actor,command.reason)
+			outcome.changed=res.changed;outcome.checkpoint_requested=res.checkpoint_requested
+		case "release":
+			res:tv2.Hold_Result;res,ok,operation_err=tv2.task_release(&g.task_engine,task,actor)
+			outcome.changed=res.changed
+		case "recheck":
+			res:tv2.Recheck_Result;res,ok,operation_err=tv2.task_recheck(&g.task_engine,task,actor)
+			outcome.changed=res.changed
+			outcome.actions=mcp.control_outcome_codes(res.actions,true)
+			outcome.reasons=mcp.control_outcome_codes(res.reasons,false)
 		case:return "","invalid_arguments"
 		}
 		id=string(task.task_id)
@@ -180,9 +202,26 @@ mcp_mutate_task :: proc(ctx:rawptr,raw:string,view:mcp.Access_View,command:mcp.C
 	case:return "","invalid_arguments"
 	}
 	if !ok || operation_err.code!=.None {code:=mcp_task_error(operation_err);if code=="" do code="request_failed";return "",code}
-	if perr:=sqlite.mcp_receipt_put(&g.db,view.owner,view.grant,command.tool,command.request_id,command.digest,id);perr.code!=.None do return "","request_failed"
+	outcome.resource_id=id;outcome.chain_id=string(chain_id)
+	outcome.status="completed";if !outcome.changed do outcome.status="noop";if outcome.checkpoint_requested do outcome.status="accepted"
+	if command.tool=="chains.configure" {
+		fresh,exists,ferr:=iface.taskchain_get_chain(&g.repos.taskchains,chain_id)
+		if !exists || ferr.code!=.None do return "","request_failed"
+		outcome.revision,ok=mcp.control_configuration_revision(&service,fresh)
+		outcome.state="active";outcome.publish_state="published" if fresh.publish_state==.Published else "draft"
+	} else {
+		fresh,exists,ferr:=iface.taskchain_get_task(&g.repos.taskchains,domain.Task_ID(id))
+		if !exists || ferr.code!=.None do return "","request_failed"
+		outcome.task_id=id;outcome.state=domain.task_state_string(fresh.state);outcome.publish_state="published" if fresh.publish_state==.Published else "draft"
+		outcome.blocked=strings.trim_space(fresh.blocked_on_json)!=""
+		outcome.revision,ok=mcp.control_task_revision(&service,fresh)
+	}
+	if !ok do return "","request_failed"
+	encoded,eerr:=json.marshal(outcome,allocator=context.temp_allocator)
+	if eerr!=nil do return "","request_failed"
+	if perr:=sqlite.mcp_receipt_put(&g.db,view.owner,view.grant,command.tool,command.request_id,command.digest,id,string(encoded));perr.code!=.None do return "","request_failed"
 	if ok,cerr:=iface.unit_of_work_commit(&uow);!ok || cerr.code!=.None do return "","request_failed"
 	committed=true
 	if command.tool!="chains.configure" do contracts.attention_notify(g.taskchains.attention,view.owner,contracts.ATTENTION_SOURCE_TASK,id)
-	return id,""
+	return string(encoded),""
 }

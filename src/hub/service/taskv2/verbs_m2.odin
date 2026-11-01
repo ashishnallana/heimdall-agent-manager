@@ -509,6 +509,7 @@ user_review :: proc(svc: ^Service, auth: contracts.Auth_Context, task_id: domain
 
 // task_reopen: done|cancelled → a new attempt (non-counting grant next).
 task_reopen :: proc(svc: ^Service, task: domain.Task, actor: Actor) -> (domain.Task, bool, domain.Domain_Error) {
+	if guard:=task_control_precondition(svc,task,actor,"reopen");guard.code!=.None do return {},false,guard
 	if task.workflow_run_id != "" do return {}, false, domain.domain_error(.Conflict, "retry the whole workflow run rather than reopening a generated task", `{"code":"workflow_task_managed"}`)
 	if !domain.task_state_is_terminal(task.state) do return {}, false, domain.domain_error(.Conflict, "only a done or cancelled task can be reopened")
 	u, uok, uerr := begin_uow(svc)
@@ -539,6 +540,7 @@ task_reopen :: proc(svc: ^Service, task: domain.Task, actor: Actor) -> (domain.T
 
 // task_answer: a human clears a blocked_on (block, budget, oscillation) badge.
 task_answer :: proc(svc: ^Service, task: domain.Task, actor: Actor, note: string) -> (domain.Task, bool, domain.Domain_Error) {
+	if guard:=task_control_precondition(svc,task,actor,"answer");guard.code!=.None do return {},false,guard
 	if strings.trim_space(task.blocked_on_json) == "" do return {}, false, domain.domain_error(.Conflict, "task is not blocked")
 	if task_is_held(task) do return {}, false, domain.domain_error(.Conflict, "task is held; release it with `task release`")
 	u, uok, uerr := begin_uow(svc)
@@ -580,6 +582,7 @@ Hold_Result :: struct {
 // revokes a lease; the lease TTL still applies.
 task_hold :: proc(svc: ^Service, task: domain.Task, actor: Actor, reason: string) -> (Hold_Result, bool, domain.Domain_Error) {
 	if strings.trim_space(reason) == "" do return {}, false, domain.domain_error(.Validation_Failed, "reason is required")
+	if guard:=task_control_precondition(svc,task,actor,"hold");guard.code!=.None do return {},false,guard
 	if domain.task_state_is_terminal(task.state) do return {}, false, domain.domain_error(.Conflict, "a done or cancelled task cannot be held")
 	if task.kind == .Gate do return {}, false, domain.domain_error(.Conflict, "gates cannot be held")
 	u, uok, uerr := begin_uow(svc)
@@ -627,6 +630,7 @@ task_hold :: proc(svc: ^Service, task: domain.Task, actor: Actor, reason: string
 // task_release clears a hold; the task becomes dispatchable again (unless
 // something else still blocks it). Releasing an unheld task is a no-op.
 task_release :: proc(svc: ^Service, task: domain.Task, actor: Actor) -> (Hold_Result, bool, domain.Domain_Error) {
+	if guard:=task_control_precondition(svc,task,actor,"release");guard.code!=.None do return {},false,guard
 	u, uok, uerr := begin_uow(svc)
 	if !uok do return {}, false, uerr
 	if _, allowed, err := work_control_chain(svc, task.owner_user_id, actor, task.chain_id); !allowed {

@@ -17,3 +17,5 @@ control_configuration :: proc(s:^Control_Service,chain:domain.Task_Chain)->(revi
 	for row in rows do append(&visible,json.Object{"agent_id"=json.String(row.agent_id),"bridge_id"=json.String(row.bridge_id),"provider"=json.String(row.provider),"provider_profile"=json.String(row.provider_profile),"model"=json.String(row.model),"capacity"=json.Integer(row.capacity),"roles_json"=json.String(row.roles_json),"bridge_models_json"=json.String(row.bridge_models_json)})
 	return auth.sha256_hex(string(encoded)),visible,true
 }
+
+control_configuration_revision :: proc(s:^Control_Service,chain:domain.Task_Chain)->(string,bool) {revision,_,ok:=control_configuration(s,chain);return revision,ok}

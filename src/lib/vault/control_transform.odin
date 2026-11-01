@@ -55,16 +55,10 @@ control_record_json :: proc(kr:^Vault_Keyring,kind:Control_Record_Kind,record:js
 	out:=make(json.Object,context.temp_allocator)
 	// Match the local four-tool POC's projection; never return full task briefs,
 	// handoff/facet blobs or other nested encrypted business records by accident.
-	allowed:=[]string{"chain_id","title","description","status","kind","work_revision","task_count","completed_task_count","user_validation_count","created_at","updated_at","configuration_revision","fleet"}
-	if kind==.Task do allowed=[]string{"task_id","title","description","state","kind","attempt_no","requires_user_approval","reviews","updated_at"}
-	if kind==.Task_Detail do allowed=[]string{"task_id","chain_id","title","description","state","kind","attempt_no","requires_user_approval","reviews","updated_at","goal","acceptance","assignee_agent_id","bridge_id","depends_on","publish_state","priority","revision","blocked_kind","blocked_ref","blocked_reason","blocked_since"}
-	if kind==.Comment do allowed=[]string{"comment_id","body","created_at"}
+	allowed,fields:=control_record_fields(kind)
 	for key in allowed do if value,present:=record[key];present do out[key]=value
 	opened:=make([dynamic]string,context.temp_allocator)
 	defer for plain in opened do if plain!="" do crypto.zero_explicit(raw_data(plain),len(plain))
-	fields:=[]string{"title","description"}
-	if kind==.Task_Detail do fields=[]string{"title","description","goal","blocked_reason"}
-	if kind==.Comment do fields=[]string{"body"}
 	for key in fields {
 		value,exists:=out[key]
 		if !exists || value==nil do continue
@@ -75,7 +69,7 @@ control_record_json :: proc(kr:^Vault_Keyring,kind:Control_Record_Kind,record:js
 		append(&opened,plain);out[key]=json.String(plain)
 	}
 	if kind==.Task_Detail {
-		if value,present:=out["acceptance"];present {
+		for key in ([]string{"acceptance","inputs"}) do if value,present:=out[key];present {
 			items,typed:=value.(json.Array)
 			if !typed do return "",false
 			readable:=make(json.Array,0,len(items),context.temp_allocator)
@@ -84,7 +78,7 @@ control_record_json :: proc(kr:^Vault_Keyring,kind:Control_Record_Kind,record:js
 				plain,ok:=control_text(kr,string(text));if !ok do return "",false
 				append(&opened,plain);append(&readable,json.String(plain))
 			}
-			out["acceptance"]=readable
+			out[key]=readable
 		}
 	}
 	data,err:=json.marshal(out,allocator=context.temp_allocator)

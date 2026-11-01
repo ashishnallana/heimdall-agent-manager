@@ -204,6 +204,7 @@ Task :: struct {
 }
 
 Task_Comment :: struct {
+	delegated_client_id,delegated_grant_id:string,
 	comment_id:               string,
 	task_id:                  Task_ID,
 	chain_id:                 Task_Chain_ID,
@@ -213,6 +214,8 @@ Task_Comment :: struct {
 	created_at:               string,
 	updated_at:               string,
 }
+
+Task_Comment_Page_Item :: struct {comment:Task_Comment,body_bytes:int}
 
 // Task_Comment_Summary is the compact comment rollup embedded on task objects so
 // list/show/context can convey "there is discussion, and how recent" without

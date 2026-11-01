@@ -56,6 +56,41 @@ test('extended task reads open only typed brief fields and retain legacy project
   const malformed = JSON.parse(payload); malformed.tasks[0].acceptance = [{}];
   await assert.rejects(transformMcpWorkerJob({ ...job, payload: JSON.stringify(malformed) }, f.keyring));
 });
+
+test('task detail worker retains typed hold, attempt, provenance and comment paging metadata', async () => {
+  const f = await mcpWorkerFixture(Date.now(), 'mcp:chains mcp:tasks:read');
+  const token = JSON.parse(f.job.payload).chain.title;
+  const input = {
+    tasks: [{ owner_user_id: f.job.owner, task_id: 'task_a', chain_id: 'chain_a', title: token,
+      inputs: [token, 'output:task_ref'], review_roles: ['reviewer'], reviewers: ['agt_reviewer'],
+      blocked_kind: 'agent_not_running', blocked_since_ms: 123, blocked_reason: token,
+      hold_reason: token, hold_since_ms: 456, hold_by: 'user', checkpoint_requested: true,
+      allowed_actions: ['release', 'recheck'], latest_attempt_no: 2,
+      latest_attempt_holder_instance_id: 'inst_worker', latest_attempt_outcome: 'submitted',
+      latest_attempt_summary: token, arbitrary_facet: { secret: token },
+      reviews: [{ reviewer_agent_id: 'agt_reviewer', reviewer_instance_id: 'inst_reviewer', verdict: 'approve' }] }],
+    comments: [{ owner_user_id: f.job.owner, comment_id: 'cmt_a', task_id: 'task_a', chain_id: 'chain_a', body: token,
+      author_kind: 'delegated_user', author_user_id: f.job.owner, author_agent_instance_id: '',
+      delegated_client_id: 'client_a', delegated_grant_id: 'grant_a' },
+      { owner_user_id: f.job.owner, comment_id: 'cmt_big', body_error: 'comment_too_large', body_bytes: 300000 }],
+    comments_next_cursor: 'owner-task-bound-position',
+  };
+  const job = { ...f.job, tool: 'tasks.get', payload: JSON.stringify(input) };
+  const output = JSON.parse(await transformMcpWorkerJob(job, f.keyring));
+  const task = output.tasks[0];
+  assert.deepEqual(task.inputs, ['worker secret title', 'output:task_ref']);
+  for (const key of ['blocked_reason', 'hold_reason', 'latest_attempt_summary']) assert.equal(task[key], 'worker secret title');
+  for (const key of ['blocked_since_ms', 'hold_since_ms', 'checkpoint_requested', 'allowed_actions', 'latest_attempt_no', 'reviews']) assert.deepEqual(task[key], input.tasks[0][key as keyof typeof input.tasks[0]]);
+  assert.equal(task.arbitrary_facet, undefined);
+  assert.equal(output.comments[0].body, 'worker secret title');
+  assert.equal(output.comments[0].author_kind, 'delegated_user');
+  assert.equal(output.comments[0].delegated_grant_id, 'grant_a');
+  assert.equal(output.comments[1].body, undefined);
+  assert.equal(output.comments[1].body_error, 'comment_too_large');
+  assert.equal(output.comments_next_cursor, input.comments_next_cursor);
+  input.tasks[0].hold_reason = 'vault:v2:broken';
+  await assert.rejects(transformMcpWorkerJob({ ...job, payload: JSON.stringify(input) }, f.keyring));
+});
 import { importKeyring } from '../src/ui/utils/vaultKeyring.ts';
 import { FakeHub, newBrowser, hubApi, recorder, USER } from './helpers/vaultDirectoryFixture.ts';
 import { memoryDeviceStore } from '../src/ui/utils/deviceIdentity.ts';
