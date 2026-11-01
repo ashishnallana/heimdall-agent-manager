@@ -120,16 +120,18 @@ export function SettingsModal({
   const [mobileSection, setMobileSection] = useState<string | null>(() => initialTab ? normalizeSettingsTab(initialTab) : null);
   const [currentUser, setCurrentUser] = useState<SettingsUser | null>(() => user || null);
 
+  const [bridgeHeading, setBridgeHeading] = useState<ProviderSettingsHeading | null>(null);
   const [providerHeading, setProviderHeading] = useState<ProviderSettingsHeading | null>(null);
-  const providerHeadingRef = useRef<HTMLElement>(null);
-  const previousProviderFocus = useRef<string | null>(null);
+  const surfaceHeading = normalizeSettingsTab(activeTab) === 'bridges' ? bridgeHeading : providerHeading;
+  const surfaceHeadingRef = useRef<HTMLElement>(null);
+  const previousSurfaceFocus = useRef<string | null>(null);
   useEffect(() => {
-    const focusKey = normalizeSettingsTab(activeTab) === 'models' && open
-      ? providerHeading?.focusKey ?? null : null;
-    if (focusKey !== null && previousProviderFocus.current !== null
-      && focusKey !== previousProviderFocus.current) providerHeadingRef.current?.focus();
-    previousProviderFocus.current = focusKey;
-  }, [activeTab, open, providerHeading?.focusKey]);
+    const focusKey = ['models', 'bridges'].includes(normalizeSettingsTab(activeTab)) && open
+      ? surfaceHeading?.focusKey ?? null : null;
+    if (focusKey !== null && previousSurfaceFocus.current !== null
+      && focusKey !== previousSurfaceFocus.current) surfaceHeadingRef.current?.focus();
+    previousSurfaceFocus.current = focusKey;
+  }, [activeTab, open, surfaceHeading?.focusKey]);
 
   const close = useCallback(() => onOpenChange(false), [onOpenChange]);
   useDialogA11y(open, close, panelRef);
@@ -194,7 +196,7 @@ export function SettingsModal({
     };
   }, [activeTab, categories]);
 
-  const providerTab = normalizeSettingsTab(activeTab) === 'models';
+  const sharedSurfaceTab = ['models', 'bridges'].includes(normalizeSettingsTab(activeTab));
   const selectCategory = (id: string) => {
     setActiveTab(id);
     setMobileSection(id);
@@ -220,7 +222,7 @@ export function SettingsModal({
       case 'providers':
         return <ProvidersPanel onHeadingChange={setProviderHeading} />;
       case 'bridges':
-        return <BridgesPanel />;
+        return <BridgesPanel onHeadingChange={setBridgeHeading} />;
       case 'updates':
         return <DesktopUpdatesPanel />;
       case 'devices':
@@ -273,7 +275,7 @@ export function SettingsModal({
         {/* =============================================================== */}
         {/* Providers use one mounted content tree across breakpoints so resizing
             never discards a draft or duplicates discovery requests. */}
-        <div className={`${providerTab && mobileSection !== null ? 'flex' : 'hidden md:flex'} flex-row w-full h-full overflow-hidden`}>
+        <div className={`${sharedSurfaceTab && mobileSection !== null ? 'flex' : 'hidden md:flex'} flex-row w-full h-full overflow-hidden`}>
           {/* Left Navigation Pane (w-64 border-r border-subtle bg-surface-raised/40) */}
           <aside
             data-debug-id="settings-desktop-sidebar"
@@ -353,16 +355,16 @@ export function SettingsModal({
             className="min-w-0 flex-1 flex flex-col overflow-hidden bg-surface h-full"
           >
             {/* Header: title, description, and Close button (X) */}
-            <div className="flex items-start justify-between px-4 md:px-8 pt-4 md:pt-7 pb-4 shrink-0">
-              {providerTab ? <button type="button" data-debug-id="providers-settings-back" onClick={() => setMobileSection(null)} className="mr-3 inline-flex min-h-11 items-center rounded-[var(--radius-md)] px-2 text-sm text-accent focus-visible:outline-none focus-visible:shadow-focus md:hidden">← Settings</button> : null}
+            <div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-x-4 px-4 md:flex md:px-8 pt-4 md:pt-7 pb-4 shrink-0">
+              {sharedSurfaceTab ? <button type="button" data-debug-id="providers-settings-back" onClick={() => setMobileSection(null)} className="mb-2 col-span-2 inline-flex min-h-11 items-center rounded-[var(--radius-md)] px-2 text-sm text-accent focus-visible:outline-none focus-visible:shadow-focus md:hidden">← Settings</button> : null}
               <div className="min-w-0 flex-1">
-                {providerTab ? (
+                {sharedSurfaceTab ? (
                   <div className="space-y-2 break-words">
-                    {providerHeading?.breadcrumb ? <Text role="overline" tone="muted">{providerHeading.breadcrumb}</Text> : null}
-                    <Text ref={providerHeadingRef} as="h1" role="display" tabIndex={-1}>
-                      {providerHeading?.title || currentTabInfo.title}
+                    {surfaceHeading?.breadcrumb ? <Text role="overline" tone="muted">{surfaceHeading.breadcrumb}</Text> : null}
+                    <Text ref={surfaceHeadingRef} as="h1" role="display" tabIndex={-1}>
+                      {surfaceHeading?.title || currentTabInfo.title}
                     </Text>
-                    <Text role="body" tone="muted">{providerHeading?.description || currentTabInfo.description}</Text>
+                    <Text role="body" tone="muted">{surfaceHeading?.description || currentTabInfo.description}</Text>
                   </div>
                 ) : (
                   <>
@@ -399,7 +401,7 @@ export function SettingsModal({
         {/* =============================================================== */}
         {/* 3. Mobile Presentation (<768px): Full viewport Master-Detail    */}
         {/* =============================================================== */}
-        <div className={`${providerTab && mobileSection !== null ? 'hidden' : 'flex md:hidden'} flex-col w-full h-full overflow-hidden`}>
+        <div className={`${sharedSurfaceTab && mobileSection !== null ? 'hidden' : 'flex md:hidden'} flex-col w-full h-full overflow-hidden`}>
           {mobileSection === null ? (
             /* Master View: Full-screen list of all categories and projects */
             <div

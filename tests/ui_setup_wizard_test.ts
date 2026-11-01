@@ -203,7 +203,7 @@ test('discover projects with sessions, skip ones already in Ninjy', async () => 
 
 test('identity step: a sunset rides on the approval, never a revoke up front (REQ-3)', async () => {
   const { readFileSync } = await import('node:fs');
-  const source = readFileSync(new URL('../src/ui/components/setup/SetupWizardPage.tsx', import.meta.url), 'utf8');
+  const source = readFileSync(new URL('../src/ui/components/bridge/LocalBridgeFlow.tsx', import.meta.url), 'utf8');
   // No UI-side revoke: the hub retires the bridge atomically with the approval.
   assert.doesNotMatch(source, /useRevokeBridgeMutation|revokeBridge\(/);
   assert.match(source, /await approveBridgeEnrollment\(\{[\s\S]*?target: plan\.reuse,[\s\S]*?sunset: sunset \? \{ bridge_id: sunset\.bridge_id, label: sunset\.label \} : null,/);

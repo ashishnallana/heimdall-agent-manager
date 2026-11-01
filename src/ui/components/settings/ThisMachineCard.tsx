@@ -1,365 +1,105 @@
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
-import { Button, Icon, Input, Modal, ModalBody, ModalFooter, StatusDot, Text } from '@ui';
-import type { Tone } from '@ui';
-import {
-  type DesktopBridgeConfig,
-  type DesktopBridgeManagerApi,
-  type DesktopBridgeOperation,
-  type DesktopBridgeOperationOptions,
-  type DesktopBridgeStatus,
-  type DesktopBridgeTarget,
-  accountBridgeProfile,
-  bridgeProfileLabel,
-  installedHubProfiles,
-  desktopBridgeStatusLabel,
-  desktopSetupPlan,
-  otherAccountProfiles,
-} from '../../bridge/desktopBridge';
-import {
-  attachDesktopBridgeSession,
-  desktopBridgeSession,
-  openApprovalForCode,
-  runDesktopBridgeOperation,
-  subscribeDesktopBridgeSession,
-} from '../../bridge/desktopBridgeSession';
-import BridgeProfileInventory from './BridgeProfileInventory';
+import { useEffect, useState } from 'react';
+import { Alert, Button, Input, Modal, ModalBody, ModalFooter, StatusPill } from '@ui';
+import type { DesktopBridgeManagerApi } from '../../bridge/desktopBridge';
+import { bridgeProfileLabel, desktopBridgeStatusLabel } from '../../bridge/desktopBridge';
+import { overrideApprovalPageOpener, runDesktopBridgeOperation } from '../../bridge/desktopBridgeSession';
+import { hasBridgeIdentityReview } from '../../bridge/useBridgeIdentityState';
+import { useThisMachineBridge } from '../../bridge/useThisMachineBridge';
+import BridgeOperationFeedback from '../bridge/BridgeOperationFeedback';
+import { IdentityStep, MachineSteps } from '../bridge/LocalBridgeFlow';
+import { setupRail } from '../setup/setupWizardModel';
+import BridgeOperationRail from '../bridge/BridgeOperationRail';
+import type { SetupStep } from '../setup/setupWizardModel';
 
-const toneFor: Record<string, Tone> = { success: 'success', warning: 'warning', danger: 'danger', muted: 'neutral' };
-
-const stepIcon: Record<string, string> = {
-  pending: '○', running: '◐', recovering: '↻', ok: '✓', skipped: '–', failed: '✕',
-};
-
-const operationLabel: Record<DesktopBridgeOperation, string> = {
-  setup: 'Setting up this machine',
-  update: 'Updating the Bridge',
-  reenroll: 'Re-enrolling the Bridge',
-  uninstall: 'Uninstalling the Bridge',
-};
-
-const operationFailed: Record<DesktopBridgeOperation, string> = {
-  setup: 'Setup failed',
-  update: 'Update failed',
-  reenroll: 'Re-enrollment failed',
-  uninstall: 'Uninstall failed',
-};
-
-/**
- * REQ-ENR-9/10 (Electron only): "This machine". Not installed → the setup
- * wizard (Download latest → Install → Enroll → Providers → Done) with per-step
- * progress, automatic recovery shown inline, an expandable log, Retry from the
- * failed step once recovery is exhausted, and Cancel (= rollback). Installed →
- * status plus Update / Re-enroll / Uninstall.
- *
- * Several Ninjy accounts can each run a bridge on this machine and OS user, one
- * profile each. The card shows only the signed-in account's own profile: the
- * `ham-bridge list` profile whose bridge id is one of `accountBridgeIds` (the
- * account's bridges on the Hub; null while they load). Without one it offers
- * setup with --separate-account, which never touches another account's bridge.
- */
-export default function ThisMachineCard({ manager, accountBridgeIds, onBridgeId, onSetupComplete }: {
+/** Settings hosts the same detector/install/identity/update as /setup.
+ * Completion never marks first-run setup seen or visits Agents/Projects. */
+export default function ThisMachineCard({ manager, onBridgeId, onSetupComplete }: {
   manager: DesktopBridgeManagerApi;
-  accountBridgeIds: string[] | null;
-  onBridgeId?: (bridgeId: string) => void;
-  onSetupComplete?: () => void;
+  onBridgeId?: (bridgeId: string) => void; onSetupComplete?: () => void;
 }) {
-  const [config, setConfig] = useState<DesktopBridgeConfig | null>(null);
-  const [status, setStatus] = useState<DesktopBridgeStatus | null>(null);
-  // The signed-in account's installed profile, and how many other accounts' are installed.
-  const [own, setOwn] = useState<DesktopBridgeStatus | null>(null);
-  const [otherAccounts, setOtherAccounts] = useState(0);
-  const [profiles, setProfiles] = useState<DesktopBridgeStatus[] | null>(null);
-  // A bridge this card just set up counts as the account's own until the Hub's
-  // bridge list (refetched through onSetupComplete) includes it.
-  const [adoptedBridgeId, setAdoptedBridgeId] = useState('');
-  const sawSetup = useRef(false);
-  // The operation, wizard and log live in desktopBridgeSession: they keep following
-  // the run while /device/add is open for its pairing code (REQ-ENR-INAPP-1).
-  const session = useSyncExternalStore(subscribeDesktopBridgeSession, desktopBridgeSession);
-  const { operation, wizard, log, lastRun } = session;
-  const [showLog, setShowLog] = useState(false);
-  const [hubDraft, setHubDraft] = useState('');
-  const [profile, setProfile] = useState('');
-  const [editingHub, setEditingHub] = useState(false);
+  const detection = useThisMachineBridge(manager);
+  const { config, status, phase, bridgeId, session, refresh } = detection;
+  const [flow, setFlow] = useState(() => session.operation === 'setup' || hasBridgeIdentityReview());
+  const [step, setStep] = useState<SetupStep>(() => hasBridgeIdentityReview() ? 'identity' : 'detect');
   const [confirm, setConfirm] = useState<'uninstall' | 'reenroll' | ''>('');
   const [purge, setPurge] = useState(true);
+  const [editingHub, setEditingHub] = useState(false);
+  const [hubDraft, setHubDraft] = useState('');
   const [error, setError] = useState('');
-
-  const target = useCallback((): DesktopBridgeTarget => (own ? { hub: config?.hubUrl, profile: String(own.profile || '') } : { hub: config?.hubUrl, profile }), [config?.hubUrl, own, profile]);
-
-  const refresh = useCallback(async () => {
-    if (!config || !accountBridgeIds) return;
-    try {
-      const listed = await manager.list();
-      if (!listed.ok) throw new Error(listed.error || 'Unable to list the Bridges on this machine.');
-      const ids = adoptedBridgeId ? [...accountBridgeIds, adoptedBridgeId] : accountBridgeIds;
-      const mine = accountBridgeProfile(listed.profiles, config.hubUrl, ids);
-      setOwn(mine);
-      setProfiles(installedHubProfiles(listed.profiles, config.hubUrl));
-      setOtherAccounts(otherAccountProfiles(listed.profiles, config.hubUrl, ids).length);
-      // Other profiles appear in discovery only; lifecycle controls and status
-      // always target this account's own Bridge.
-      setStatus(mine
-        ? await manager.getStatus({ hub: config.hubUrl, profile: String(mine.profile || '') })
-        : { supported: config.supported, busy: false, operation: '', installed: false, state: 'not_installed', hub: config.hubUrl, error: '' });
-    } catch (err: any) { setError(String(err?.message || err)); }
-  }, [manager, config, accountBridgeIds, adoptedBridgeId]);
-
-  useEffect(() => { onBridgeId?.(status?.installed ? String(status.bridge_id || '') : ''); }, [status?.installed, status?.bridge_id, onBridgeId]);
-
-  useEffect(() => {
-    void manager.getConfig().then((next) => { setConfig(next); setHubDraft(next.hubUrl); }).catch((err: any) => setError(String(err?.message || err)));
-  }, [manager]);
-
-  useEffect(() => {
-    if (!config) return;
-    void refresh();
-    const timer = window.setInterval(() => { if (!operation) void refresh(); }, 15_000);
-    return () => window.clearInterval(timer);
-  }, [config, refresh, operation]);
-
-  useEffect(() => { attachDesktopBridgeSession(manager); }, [manager]);
-
-  // A finished run (seen here, or while this card was unmounted) refreshes the status.
-  useEffect(() => { if (operation === 'setup') sawSetup.current = true; }, [operation]);
-  useEffect(() => {
-    if (!session.finished) return;
-    const final = session.finalStatus as DesktopBridgeStatus | null;
-    if (sawSetup.current && final?.installed && final.bridge_id) {
-      sawSetup.current = false;
-      setAdoptedBridgeId(String(final.bridge_id));
-      onSetupComplete?.();
-    }
-    if (final) setStatus(final);
-    else void refresh();
-  }, [session.finished, session.finalStatus, refresh, onSetupComplete]);
-
-  const run = async (kind: DesktopBridgeOperation, options: DesktopBridgeOperationOptions = {}, runTarget: DesktopBridgeTarget = target()) => {
+  const busy = Boolean(session.operation || status?.busy);
+  const label = phase === 'loading' ? { label: 'Checking this machine', tone: 'muted' }
+    : phase === 'absent' ? { label: 'No bridge linked to this account', tone: 'muted' }
+    : phase === 'error' ? { label: 'Status unavailable', tone: 'danger' }
+    : desktopBridgeStatusLabel(status);
+  useEffect(() => { onBridgeId?.(bridgeId); }, [bridgeId, onBridgeId]);
+  useEffect(() => overrideApprovalPageOpener(() => { setFlow(true); setStep('identity'); }), []);
+  const setupFlow = phase !== 'present' || step === 'identity' || session.operation === 'setup';
+  const finish = () => { setFlow(false); setStep('detect'); onSetupComplete?.(); void refresh(); };
+  const run = async (kind: 'update' | 'reenroll' | 'uninstall') => {
+    if (phase !== 'present' || !config || !status || busy) return;
     setError('');
-    setShowLog(false);
-    const failure = await runDesktopBridgeOperation(manager, kind, runTarget, options);
+    const failure = await runDesktopBridgeOperation(manager, kind,
+      { hub: config.hubUrl, profile: String(status.profile || '') },
+      kind === 'uninstall' ? { purge } : kind === 'reenroll' ? { bridgeId } : {});
     if (failure) setError(failure);
+
   };
-
-  // Set up: the account's own profile as is, else a separate-account install.
-  const setup = () => {
-    const plan = desktopSetupPlan(own, config?.hubUrl || '', profile);
-    void run('setup', plan.options, plan.target);
-  };
-
-  const saveHub = async () => {
-    const result = await manager.setHubUrl(hubDraft.trim());
-    if (!result.ok) { setError(result.error || 'Invalid Hub URL.'); return; }
-    setConfig((current) => (current ? { ...current, hubUrl: result.hubUrl || current.hubUrl } : current));
-    setEditingHub(false);
-  };
-
-  if (!config) return null;
-  if (!config.supported) {
-    return (
-      <section data-debug-id="settings-this-machine-card" className="mt-4 rounded-xl border border-subtle bg-surface-raised/40 p-4 text-sm text-muted">
-        This platform cannot run a Ninjy Bridge.
-      </section>
-    );
-  }
-
-  // Whose bridge is whose is unknown until the account's bridges load.
-  const label = accountBridgeIds ? desktopBridgeStatusLabel(status) : { label: 'Loading your bridges…', tone: 'muted' as const };
-  const installed = Boolean(status?.installed);
-  const busy = Boolean(operation) || Boolean(status?.busy);
-  const lastKind = lastRun?.kind || 'setup';
-  const showWizard = operation === 'setup'
-    || (lastKind === 'setup' && (wizard.failedStep || wizard.cancelled))
-    || (!installed && lastKind === 'setup' && (wizard.running || wizard.completed));
-
   return (
-    <section data-debug-id="settings-this-machine-card" className="mt-4 rounded-xl border border-subtle bg-surface-raised/40 p-4">
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-        <div className="min-w-0">
-          <Text as="div" role="overline" tone="muted">This machine</Text>
-          <div className="mt-1 flex flex-wrap items-center gap-2">
-            <StatusDot data-debug-id="settings-this-machine-status" tone={toneFor[label.tone]} label={label.label} />
-            <span className="text-sm font-medium text-primary">{label.label}</span>
-            {status?.version ? <span data-debug-id="settings-this-machine-version" className="rounded-full border border-subtle px-2 py-0.5 font-mono text-[10px] text-primary">v{String(status.version).replace(/^v/, '')}</span> : null}
-          </div>
-          <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-caption text-muted">
-            {editingHub ? (
-              <span className="flex items-center gap-2">
-                <Input data-debug-id="settings-this-machine-hub-input" value={hubDraft} onChange={setHubDraft} size="sm" aria-label="Hub URL" />
-                <Button size="sm" variant="primary" data-debug-id="settings-this-machine-hub-save" onClick={() => void saveHub()}>Save</Button>
-                <Button size="sm" variant="secondary" data-debug-id="settings-this-machine-hub-cancel" onClick={() => { setEditingHub(false); setHubDraft(config.hubUrl); }}>Cancel</Button>
-              </span>
-            ) : (
-              <span>
-                Hub: <span data-debug-id="settings-this-machine-hub" className="font-mono text-primary">{config.hubUrl}</span>
-                {!busy && !installed ? (
-                  <button type="button" data-debug-id="settings-this-machine-hub-edit" className="ml-2 text-accent underline" onClick={() => setEditingHub(true)}>Change</button>
-                ) : null}
-              </span>
-            )}
-            {status?.bridge_id ? <span>id: <span className="font-mono text-primary">{status.bridge_id}</span></span> : null}
-            {!installed && !busy ? (
-              <span className="flex items-center gap-1">
-                Profile:
-                <Input data-debug-id="settings-this-machine-profile-input" value={profile} onChange={(value) => setProfile(value.toLowerCase())} size="sm" placeholder="default" aria-label="Bridge profile" />
-              </span>
-            ) : installed ? <span>Profile: <span data-debug-id="settings-this-machine-profile" className="font-mono text-primary">{bridgeProfileLabel(status?.profile)}</span></span> : null}
-          </div>
-          {!installed && otherAccounts > 0 ? (
-            <p data-debug-id="settings-this-machine-other-accounts" className="mt-2 text-xs text-muted">
-              {otherAccounts === 1 ? 'Another Ninjy account has a bridge' : `${otherAccounts} other Ninjy accounts have bridges`} on this machine. Setting up installs a separate bridge for your account; {otherAccounts === 1 ? 'theirs keeps' : 'theirs keep'} running untouched.
-            </p>
-          ) : null}
-          {status?.needs_reenrollment ? (
-            <p data-debug-id="settings-this-machine-reenroll-hint" className="mt-2 text-xs text-danger">The Hub no longer accepts this Bridge ({status.reenroll_reason || 'revoked'}). Re-enroll it to reconnect.</p>
-          ) : null}
+    <section data-debug-id="settings-this-machine-card" className="mt-4 min-w-0 rounded-xl border border-subtle bg-surface p-4">
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+        <div className="min-w-0 space-y-2">
+          <h2 className="font-serif text-xl text-primary">This machine</h2>
+          <StatusPill data-debug-id="settings-this-machine-status" tone={label.tone === 'muted' ? 'neutral' : label.tone as 'success' | 'warning' | 'danger'}>{label.label}</StatusPill>
+          {phase === 'present' ? <p className="break-words text-xs text-muted">Profile <span data-debug-id="settings-this-machine-profile" className="font-mono text-primary">{bridgeProfileLabel(status?.profile)}</span> · <span className="font-mono">{bridgeId}</span></p> : null}
+          {phase === 'present' && status?.version ? <p data-debug-id="settings-this-machine-version" className="font-mono text-xs text-muted">v{String(status.version).replace(/^v/, '')}</p> : null}
+          {phase === 'present' && status?.needs_reenrollment ? <p data-debug-id="settings-this-machine-reenroll-hint" className="text-sm text-danger">The Hub no longer accepts this bridge ({status.reenroll_reason || 'revoked'}). Re-enroll it to reconnect.</p> : null}
+          {config ? <p data-debug-id="settings-this-machine-hub" className="break-all font-mono text-xs text-muted">{config.hubUrl}</p> : null}
         </div>
-
-        <div className="flex flex-wrap gap-1.5 sm:justify-end">
-          {!installed ? (
-            busy ? null : (
-              <Button variant="primary" size="sm" data-debug-id="settings-this-machine-setup-btn" leading={<Icon name="download" size="sm" />} disabled={!accountBridgeIds} title={accountBridgeIds ? undefined : 'Loading your bridges…'} onClick={() => setup()}>
-                Set up this machine
-              </Button>
-            )
-          ) : (
-            <>
-              <Button variant="secondary" size="sm" data-debug-id="settings-this-machine-update-btn" disabled={busy} onClick={() => void run('update')}>Update</Button>
-              <Button variant="secondary" size="sm" data-debug-id="settings-this-machine-reenroll-btn" disabled={busy} onClick={() => setConfirm('reenroll')}>Re-enroll</Button>
-              <Button variant="danger" size="sm" data-debug-id="settings-this-machine-uninstall-btn" disabled={busy} onClick={() => { setPurge(true); setConfirm('uninstall'); }}>Uninstall</Button>
-            </>
-          )}
-          {busy ? (
-            <Button variant="secondary" size="sm" data-debug-id="settings-this-machine-cancel-btn" onClick={() => void manager.cancel()}>Cancel</Button>
-          ) : null}
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 [&>button]:min-w-0 [&>button]:whitespace-normal [&>button]:h-auto [&>button]:min-h-8">
+          {phase === 'absent' && !flow ? <Button variant="primary" data-debug-id="settings-this-machine-setup-btn" disabled={busy} onClick={() => { setFlow(true); setStep('detect'); }}>Install bridge on this machine</Button> : null}
+          {phase === 'present' ? <>
+            <Button variant="secondary" size="sm" data-debug-id="settings-this-machine-update-btn" disabled={busy} onClick={() => void run('update')}>Update</Button>
+            <Button variant="secondary" size="sm" data-debug-id="settings-this-machine-reenroll-btn" disabled={busy} onClick={() => setConfirm('reenroll')}>Re-enroll</Button>
+            <Button variant="danger" size="sm" data-debug-id="settings-this-machine-uninstall-btn" disabled={busy} onClick={() => setConfirm('uninstall')}>Uninstall</Button>
+            <Button variant="secondary" size="sm" data-debug-id="settings-this-machine-manage-btn" onClick={() => { setFlow(true); setStep('detect'); }}>Manage</Button>
+          </> : null}
+          {phase === 'error' ? <Button variant="secondary" data-debug-id="settings-this-machine-retry" onClick={() => void refresh()}>Check again</Button> : null}
+          {phase === 'absent' && !busy && !flow ? <Button variant="ghost" size="sm" data-debug-id="settings-this-machine-hub-edit" onClick={() => { setHubDraft(config?.hubUrl || ''); setEditingHub(true); }}>Change Hub</Button> : null}
         </div>
       </div>
-
-      {profiles && accountBridgeIds ? <div className="mt-4"><BridgeProfileInventory profiles={profiles} accountBridgeIds={accountBridgeIds} debugId="settings-detected-profiles" /></div> : null}
-
-      {error ? <p role="alert" data-debug-id="settings-this-machine-error" className="mt-3 whitespace-pre-wrap text-xs text-danger">{error}</p> : null}
-
-      {showWizard ? (
-        <ol data-debug-id="settings-bridge-wizard" className="mt-4 space-y-2" aria-label="Setup progress">
-          <div className="h-1.5 w-full overflow-hidden rounded-full bg-neutral-soft" aria-hidden="true">
-            <div data-debug-id="settings-bridge-wizard-progress" className="h-full bg-accent transition-all" style={{ width: `${Math.max(0, Math.min(100, wizard.pct))}%` }} />
-          </div>
-          {wizard.steps.map((step) => (
-            <li key={step.id} data-debug-id={`settings-bridge-wizard-step-${step.id}`} data-state={step.state} className="rounded-lg border border-subtle bg-surface px-3 py-2">
-              <div className="flex items-center gap-2 text-sm">
-                <span aria-hidden="true" className={`w-4 text-center ${step.state === 'failed' ? 'text-danger' : step.state === 'ok' ? 'text-success' : step.state === 'recovering' ? 'text-warning' : 'text-muted'}`}>{stepIcon[step.state]}</span>
-                <span className="font-medium text-primary">{step.label}</span>
-                {step.message ? <span className="min-w-0 truncate text-xs text-muted" title={step.message}>{step.message}</span> : null}
-              </div>
-              {step.recoveries.length ? (
-                <ul data-debug-id={`settings-bridge-wizard-recoveries-${step.id}`} className="mt-1 space-y-0.5 pl-6 text-[11px] text-warning">
-                  {step.recoveries.map((recovery, index) => <li key={index}>Automatic recovery {index + 1}: {recovery}</li>)}
-                </ul>
-              ) : null}
-              {step.id === 'enroll' && wizard.pairing ? (
-                <div data-debug-id="settings-bridge-wizard-pairing" className="mt-2 rounded-lg border border-warning/30 bg-warning-soft p-2 pl-6 text-xs">
-                  <p className="text-warning">Approve this machine on the approval page; its code is filled in for you:</p>
-                  <div className="mt-1 flex items-center gap-2">
-                    <code className="select-all text-sm font-bold tracking-wide text-primary">{wizard.pairing.code}</code>
-                    <Button size="sm" variant="secondary" data-debug-id="settings-bridge-wizard-copy-code" onClick={() => { void navigator.clipboard.writeText(wizard.pairing?.code || ''); }}>Copy</Button>
-                    <button type="button" className="text-accent underline" data-debug-id="settings-bridge-wizard-open-approval" onClick={() => { if (wizard.pairing && !openApprovalForCode(wizard.pairing.code)) window.open(wizard.pairing.url, '_blank', 'noreferrer'); }}>Open approval page</button>
-                  </div>
-                </div>
-              ) : null}
-              {step.state === 'failed' && step.log ? (
-                <button type="button" className="mt-1 pl-6 text-[11px] text-accent underline" data-debug-id={`settings-bridge-wizard-open-log-${step.id}`} onClick={() => void manager.openLog(step.log)}>Show log file</button>
-              ) : null}
-            </li>
-          ))}
-        </ol>
-      ) : operation ? (
-        <p data-debug-id="settings-this-machine-operation" className="mt-3 text-xs text-muted">{operationLabel[operation]}… {wizard.steps.find((step) => step.state === 'running' || step.state === 'recovering')?.message || ''}</p>
-      ) : null}
-
-      {!operation && (wizard.failedStep || wizard.cancelled) ? (
-        <div data-debug-id="settings-bridge-wizard-result" className="mt-3 flex flex-wrap items-center gap-2 text-xs">
-          <span className={wizard.cancelled ? 'text-muted' : 'text-danger'}>
-            {wizard.cancelled
-              ? `Cancelled.${wizard.rolledBack ? ' Changes were rolled back.' : ''}`
-              : wizard.otherAccount
-                ? 'This machine is enrolled by another Ninjy account. Replacing it revokes that bridge and deletes its credentials here.'
-                : lastKind === 'setup'
-                  ? `Failed at ${wizard.steps.find((step) => step.id === wizard.failedStep)?.label || 'a step'} after automatic recovery.${wizard.rolledBack ? ' Changes were rolled back.' : ''}`
-                  : `${operationFailed[lastKind]}${wizard.error ? `: ${wizard.error}` : '.'}`}
-          </span>
-          {wizard.otherAccount && lastKind === 'setup' ? (
-            // The safe answer to another account's enrollment: a profile of
-            // this account's own, next to theirs.
-            <Button size="sm" variant="primary" data-debug-id="settings-bridge-wizard-separate-account" onClick={() => void run('setup', { separateAccount: true }, { hub: config.hubUrl, profile: '' })}>
-              Install a separate bridge for this account
-            </Button>
-          ) : null}
-          {wizard.otherAccount ? (
-            // F1: replacing another account's bridge revokes it and wipes its
-            // secrets on this machine, so it needs this explicit confirmation.
-            <Button size="sm" variant="danger" data-debug-id="settings-bridge-wizard-replace-account" onClick={() => void run(lastKind === 'reenroll' ? 'reenroll' : 'setup', { ...lastRun?.options, separateAccount: false, replaceOtherAccount: true, bridgeId: lastRun?.options.bridgeId || status?.bridge_id || '' })}>
-              Replace the other account's bridge
-            </Button>
-          ) : null}
-          {wizard.canRetry ? (
-            // Retry repeats the operation that failed, with its options.
-            // ham-bridge setup is idempotent: a re-run skips the steps that
-            // already succeeded (enrollment is kept), so it resumes from the
-            // failed step.
-            <Button size="sm" variant="primary" data-debug-id="settings-bridge-wizard-retry" onClick={() => void run(lastKind, lastRun?.options, lastRun?.target)}>Retry</Button>
-          ) : null}
+      {detection.error || error ? <div className="mt-3" data-debug-id="settings-this-machine-error"><Alert tone="danger">{error || detection.error}</Alert></div> : null}
+      <BridgeOperationFeedback manager={manager} />
+      {flow ? <div data-debug-id="settings-local-bridge-flow" className={"mt-6 grid min-w-0 gap-6 border-t border-subtle pt-6 " + (setupFlow ? "lg:grid-cols-[9rem_minmax(0,1fr)]" : "")}>
+        {setupFlow ? <BridgeOperationRail className="lg:border-r lg:border-subtle lg:pr-3" items={setupRail(step, phase === 'present').slice(0, 3)} label="Bridge setup" debugId="settings-local-flow-rail" /> : null}
+        <div className="flex min-w-0 flex-col gap-6 [overflow-wrap:anywhere]">
+        {step === 'identity' ? <IdentityStep onDone={finish} onBack={() => setStep('install')} />
+          : <MachineSteps manager={manager} showOperationFeedback={false} step={step} onStep={setStep} onConnected={() => {}} onContinue={finish} />}
+        <Button variant="ghost" size="sm" data-debug-id="settings-local-flow-close" onClick={() => setFlow(false)}>Back to Bridges</Button>
         </div>
-      ) : null}
-
-      {log.length ? (
-        <div className="mt-3">
-          <button type="button" data-debug-id="settings-bridge-log-toggle" className="text-xs text-accent underline" aria-expanded={showLog} onClick={() => setShowLog((value) => !value)}>
-            {showLog ? 'Hide log' : `Show log (${log.length} lines)`}
-          </button>
-          {showLog ? (
-            <pre data-debug-id="settings-bridge-log" className="mt-2 max-h-64 overflow-auto rounded-lg border border-subtle bg-surface p-2 font-mono text-[11px] text-muted whitespace-pre-wrap">{log.join('\n')}</pre>
-          ) : null}
-        </div>
-      ) : null}
-
-      {confirm ? (
-        <Modal
-          open
-          onOpenChange={(next) => { if (!next) setConfirm(''); }}
-          title={confirm === 'uninstall' ? 'Uninstall the Bridge from this machine?' : 'Re-enroll this Bridge?'}
-          size="sm"
-          data-debug-id={`settings-this-machine-confirm-${confirm}`}
-        >
-          <ModalBody className="space-y-3 text-sm text-muted">
-            {confirm === 'uninstall' ? (
-              <>
-                <p>The Bridge's service is removed and every credential and vault key it holds on this machine is deleted. It stays on the Hub as offline, so reinstalling can pick it back up; revoke it under Other bridges if you never want it back.</p>
-                <label className="flex items-center gap-2 text-xs">
-                  <input type="checkbox" data-debug-id="settings-this-machine-purge" checked={purge} onChange={(event) => setPurge(event.target.checked)} />
-                  Also delete logs and agent data
-                </label>
-              </>
-            ) : (
-              <p>The Bridge disconnects until you approve the new pairing request in your browser. Its identity and history are kept.</p>
-            )}
-          </ModalBody>
-          <ModalFooter>
-            <Button variant="secondary" size="sm" data-debug-id="settings-this-machine-confirm-cancel" onClick={() => setConfirm('')}>Cancel</Button>
-            <Button
-              variant={confirm === 'uninstall' ? 'danger' : 'primary'}
-              size="sm"
-              data-debug-id="settings-this-machine-confirm-ok"
-              onClick={() => {
-                const kind = confirm;
-                setConfirm('');
-                void run(kind === 'uninstall' ? 'uninstall' : 'reenroll', kind === 'uninstall' ? { purge } : { bridgeId: status?.bridge_id || '' });
-              }}
-            >
-              {confirm === 'uninstall' ? 'Uninstall' : 'Re-enroll'}
-            </Button>
-          </ModalFooter>
-        </Modal>
-      ) : null}
+      </div> : null}
+      {editingHub ? <div className="mt-4 flex flex-col gap-2 sm:flex-row">
+        <Input data-debug-id="settings-this-machine-hub-input" aria-label="Hub URL" value={hubDraft} onChange={setHubDraft} />
+        <Button data-debug-id="settings-this-machine-hub-save" onClick={async () => {
+          try {
+            const result = await manager.setHubUrl(hubDraft.trim());
+            if (!result.ok) throw new Error(result.error || 'Invalid Hub URL.');
+            setEditingHub(false); void refresh();
+          } catch (err: any) { setError(String(err?.message || err)); }
+        }}>Save</Button>
+        <Button variant="secondary" data-debug-id="settings-this-machine-hub-cancel" onClick={() => setEditingHub(false)}>Cancel</Button>
+      </div> : null}
+      {confirm ? <Modal open onOpenChange={(next) => { if (!next) setConfirm(''); }} title={confirm === 'uninstall' ? 'Uninstall the bridge from this machine?' : 'Re-enroll this bridge?'} size="sm">
+        <ModalBody className="space-y-3 text-sm text-muted">
+          {confirm === 'uninstall' ? <>
+            <p>The service and credentials on this machine are removed. The bridge stays offline on the Hub so you can reuse its identity.</p>
+            <label className="flex items-center gap-2"><input type="checkbox" data-debug-id="settings-this-machine-purge" checked={purge} onChange={(e) => setPurge(e.target.checked)} />Also delete logs and agent data</label>
+          </> : <p>The bridge disconnects until you approve its pairing request. Its identity and history are kept.</p>}
+        </ModalBody>
+        <ModalFooter>
+          <Button variant="secondary" data-debug-id="settings-this-machine-confirm-cancel" onClick={() => setConfirm('')}>Cancel</Button>
+          <Button variant={confirm === 'uninstall' ? 'danger' : 'primary'} data-debug-id="settings-this-machine-confirm-ok" onClick={() => { const kind = confirm; setConfirm(''); void run(kind); }}>{confirm === 'uninstall' ? 'Uninstall' : 'Re-enroll'}</Button>
+        </ModalFooter>
+      </Modal> : null}
     </section>
   );
 }
