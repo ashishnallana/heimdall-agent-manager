@@ -301,6 +301,7 @@ All of the following element types must have `data-debug-id`:
 |-----------|---------|
 | `DesktopUpdatesPanel` | `settings-nav-updates`, `desktop-updates-panel`, `desktop-updates-current-version`, `desktop-updates-status`, `desktop-updates-check`, `desktop-updates-progress`, `desktop-updates-retry`, `desktop-updates-restart`, `desktop-updates-later`, `desktop-updates-release-link` |
 | `DesktopUpdatePreparation` | `desktop-update-preparing-overlay`, `desktop-update-preparing-status` |
+| `SetupWizardPage` Projects step | `setup-projects-retry-btn` |
 | `ProviderProfilesSurface` | `provider-profiles`, `profile-add`, `profile-select-${profileId}`, `profile-wizard-step`, `profile-driver`, `profile-label`, `profile-id`, `profile-accent`, `profile-enabled`, `profile-back`, `profile-next`, `profile-save`, `profile-cancel`, `profile-delete-reset`, `profile-delete-confirm`, `profile-delete-cancel`, `profiles-refresh`, `profile-discover`, `profile-model-refresh`, `profile-model-test-${modelId}`, `settings-bridge-profiles-${bridgeId}` |
 | `Task requirement controls` | `task-requirements-editor`, `task-requirements-goal`, `task-requirements-acceptance`, `task-requirements-reason`, `task-requirements-save`, `task-requirements-status`, `task-requirements-history` |
 | `ProfileRuntimeEditor` | `profile-config-${field}`, `profile-api-key-clear`, `profile-auth-method`, `profile-arg-${index}`, `profile-arg-add`, `profile-arg-remove-${index}`, `profile-env-name-${index}`, `profile-env-value-${index}`, `profile-env-sensitive-${index}`, `profile-env-clear-${index}`, `profile-env-remove-${index}`, `profile-env-add`, `profile-custom-models` |
@@ -563,4 +564,3 @@ ham-ctl shell log <session_id>
 - `HEIMDALL_VITE_PORT`: Port for internal Vite dev server (default: `5174`).
 - `HEIMDALL_BRIDGE_ID`: Explicit bridge ID override (defaults to auto-detecting the online bridge).
 - `HEIMDALL_PREVIEW_CHAIN`: Optional task chain ID to file the session under.
-

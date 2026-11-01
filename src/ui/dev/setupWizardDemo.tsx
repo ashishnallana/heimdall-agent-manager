@@ -97,7 +97,9 @@ const ownProfile: DesktopBridgeStatus = {
 const otherProfile: DesktopBridgeStatus = { ...ownProfile, profile: 'default', bridge_id: 'brg_someone_else', state: 'connected' };
 const notInstalled: DesktopBridgeStatus = { supported: true, busy: false, operation: '', installed: false, state: 'not_installed', hub: HUB_URL, error: '' };
 
-const projects: any[] = [];
+const projects: any[] = [
+  { project_id: 'prj_existing', name: 'notes', description: 'My own notes description.', bridge_paths: [{ bridge_id: 'brg_fixture_1', path: '/home/dev/notes' }] },
+];
 const model = (model_id: string, label: string) => ({ model_id, label, state: 'active' });
 const PROVIDERS: any[] = [
   { provider: 'claude', display_name: 'Claude Code', catalog_state: 'active', state: 'present', binary_path: '/home/dev/.local/bin/claude', version_text: '2.1.0', checked_at: '2026-10-31T12:00:00Z', enabled: true, models: [model('claude-sonnet-5-5', 'Sonnet 5.5'), model('claude-opus-5-5', 'Opus 5.5')], extension: null },
@@ -112,7 +114,7 @@ const FS: Record<string, { entries: Array<{ name: string; is_dir: boolean }> }> 
   ] },
 };
 const SESSIONS: Record<string, number> = { '-home-dev-heimdall-agent-manager': 12, '-home-dev-notes': 3, '-home-dev-scratch': 0 };
-const DIRS = new Set(['/home', '/home/dev', '/home/dev/heimdall-agent-manager', '/home/dev/notes', '/home/dev/scratch']);
+const DIRS = new Set(['/home', '/home/dev', '/home/dev/heimdall-agent-manager', '/home/dev/notes', '/home/dev/scratch', '/home/dev/archive/heimdall-agent-manager']);
 
 // The pairing request this machine's (scripted) setup prints. Built with the real
 // pairing derivation so the wizard's own key-MAC check passes on it.
@@ -164,10 +166,18 @@ async function route(req: DemoRequest) {
     row.status = 'revoked';
     return ok({ bridge: row });
   }
+  if (method === 'GET' && /^\/bridges\/[^/]+\/session-projects$/.test(path)) {
+    return ok({ ok: true, truncated: false, projects: [
+      { source: 'Claude Code', path: '-home-dev-heimdall-agent-manager', canonical_path: '/home/dev/heimdall-agent-manager', sessions: 12, last_session_at: '2026-10-31T10:00:00Z', description: 'Heimdall is a Hub-and-Bridge multi-agent orchestration system.' },
+      { source: 'Codex', path: '/home/dev/heimdall-agent-manager', canonical_path: '/home/dev/heimdall-agent-manager', sessions: 4, last_session_at: '2026-10-31T12:00:00Z', description: 'Heimdall is a Hub-and-Bridge multi-agent orchestration system.' },
+      { source: 'Codex', path: '/home/dev/archive/heimdall-agent-manager', canonical_path: '/home/dev/archive/heimdall-agent-manager', sessions: 2, last_session_at: '2026-10-30T12:00:00Z', description: 'An archived orchestration prototype.' },
+      { source: 'Claude Code', path: '-home-dev-notes', canonical_path: '/home/dev/notes', sessions: 3, last_session_at: '2026-10-29T12:00:00Z', description: 'A notebook for project research.' },
+    ] });
+  }
   const fs = path.match(/^\/bridges\/[^/]+\/fs(\/stat)?$/);
   if (method === 'GET' && fs) {
     const p = req.query.get('path') || '';
-    if (fs[1]) return ok({ ok: true, exists: DIRS.has(p), is_dir: DIRS.has(p) });
+    if (fs[1]) return ok({ ok: true, path: p, exists: DIRS.has(p), is_dir: DIRS.has(p) });
     if (FS[p]) return ok({ ok: true, path: '/home/dev/.claude/projects', entries: FS[p].entries });
     const dir = p.split('/').pop() || '';
     if (dir in SESSIONS) return ok({ ok: true, path: p, entries: Array.from({ length: SESSIONS[dir] }, (_, i) => ({ name: `session-${i}.jsonl`, is_dir: false })) });
@@ -183,11 +193,16 @@ async function route(req: DemoRequest) {
     row.enabled = Boolean(req.body?.enabled);
     return ok(row);
   }
-  if (method === 'GET' && path === '/projects') return ok({ projects });
+  if (method === 'GET' && path === '/projects') return { status: 200, body: { data: projects.map(({ bridge_paths, ...project }) => project), page: { has_more: false, next_cursor: null } } };
   if (method === 'POST' && path === '/projects') {
-    const project = { project_id: `prj_fixture_${projects.length + 1}`, name: req.body?.name || '', bridge_paths: [] as any[] };
+    const project = { project_id: `prj_fixture_${projects.length + 1}`, name: req.body?.name || '', description: req.body?.description || '', default_path: req.body?.default_path || '', bridge_paths: [] as any[] };
     projects.push(project);
     return ok(project);
+  }
+  const detail = path.match(/^\/projects\/([^/]+)$/);
+  if (method === 'GET' && detail) {
+    const project = projects.find((p) => p.project_id === decodeURIComponent(detail[1]));
+    return project ? ok({ project, bridge_paths: project.bridge_paths }) : notFound;
   }
   const bp = path.match(/^\/projects\/([^/]+)\/bridge-paths\/([^/]+)$/);
   if (method === 'PUT' && bp) {

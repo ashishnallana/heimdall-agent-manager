@@ -1,4 +1,5 @@
 import { heimdallApi } from '../heimdallApi';
+import { loadAllProjectPages } from '../projectPagination';
 import { apiErrorText, cookieJsonFetch, cookieJsonFetchEnvelope, cookieMutation } from '../cookieFetch';
 import { isVaultArmored, encryptVaultText, decryptVaultText, getActiveVaultKey } from '../../utils/vaultContent';
 import { encryptProjectFields, decryptProjectRecord, decryptProjectList } from '../../utils/vaultProjects';
@@ -30,11 +31,18 @@ function projectTagId(project: any, fallback = '') {
 
 export const projectsApi = heimdallApi.injectEndpoints({
   endpoints: (build) => ({
-    listProjects: build.query<any, { scope?: string } | void>({
+    listProjects: build.query<any, { scope?: string; allPages?: boolean } | void>({
       queryFn: async (_arg, api) => {
         try {
-          const data = await cookieJsonFetch('/projects');
-          const rawProjects = Array.isArray(data) ? data : (data?.projects || []);
+          const allPages = Boolean(_arg && _arg.allPages);
+          const data = allPages ? null : await cookieJsonFetch('/projects');
+          const rawProjects = allPages
+            ? await loadAllProjectPages((cursor) => {
+              const params = new URLSearchParams({ limit: '50' });
+              if (cursor) params.set('cursor', cursor);
+              return cookieJsonFetchEnvelope('/projects?' + params.toString());
+            })
+            : Array.isArray(data) ? data : (data?.projects || []);
           const state: any = api?.getState?.();
           const activeKey = getActiveVaultKey();
           const isUnlocked = Boolean(state?.vault?.isUnlocked);

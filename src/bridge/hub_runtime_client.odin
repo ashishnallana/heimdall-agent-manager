@@ -1470,6 +1470,7 @@ bridge_hub_handle_command :: proc(conn: ^ws.Connection, text: string) {
 		_ = bridge_ext_permission_handle_decision_frame(text)
 		return
 	}
+	if bridge_session_projects_handle_command(conn, type, text) do return
 	if bridge_fs_handle_command(conn, type, text) do return
 	if bridge_vcs_handle_command(conn, type, text) do return
 	if bridge_taskv2_handle_command(conn, type, text) do return
