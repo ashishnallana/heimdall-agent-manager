@@ -101,7 +101,9 @@ control_record_json :: proc(kr:^Vault_Keyring,kind:Control_Record_Kind,record:js
 				if !id_ok || !label_ok || !state_ok || !rank_ok || !eligible_ok do return "",false
 				plain,ok:=control_text(kr,string(label));if !ok do return "",false
 				append(&opened,plain)
-				append(&readable,json.Object{"model_id"=id,"label"=json.String(plain),"state"=state,"rank"=rank,"eligible"=eligible})
+				entry:=make(json.Object,context.temp_allocator)
+				entry["model_id"]=id;entry["label"]=json.String(plain);entry["state"]=state;entry["rank"]=rank;entry["eligible"]=eligible
+				append(&readable,entry)
 			}
 			out["models"]=readable
 		}
