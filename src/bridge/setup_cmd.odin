@@ -70,8 +70,8 @@ bridge_setup_command :: proc(args: []string) -> bool {
 		return false
 	}
 	if bridge_setup_wants_separate_account(host, args, profile) {
-		separate := bridgesvc.separate_account_profile(host, profile.hub_name, profile.profile)
-		if separate == "" {
+		separate, found := bridgesvc.separate_account_profile(host, profile.hub_name, profile.profile)
+		if !found {
 			fmt.eprintfln("ham-bridge setup: every account profile for %s is enrolled; pass --profile P for a new one", profile.hub_url)
 			return false
 		}

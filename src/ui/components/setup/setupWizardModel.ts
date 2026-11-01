@@ -5,10 +5,25 @@
 // pair with live log) → bridge identity (reuse one, or register new and sunset one
 // when the plan is full) → agents → projects from past sessions → New conversation.
 
-import type { WizardModel, WizardStepState } from '../../bridge/desktopBridge';
+import type { DesktopBridgeStatus, WizardModel, WizardStepState } from '../../bridge/desktopBridge';
 import type { ReusableBridge } from '../../api/endpoints/vaultDevices';
 
 export type SetupStep = 'detect' | 'machine' | 'install' | 'identity' | 'agents' | 'projects';
+
+/** Reuse an unenrolled local slot, or suggest a free name without touching
+ * another account's enrolled slot. Empty string is the valid default profile. */
+export function setupProfileChoices(profiles: DesktopBridgeStatus[]): string[] {
+  const enrolled = new Set(profiles.filter((p) => p.enrolled).map((p) => p.profile || ''));
+  const choices = new Set(profiles.filter((p) => !p.enrolled).map((p) => p.profile || ''));
+  if (!enrolled.has('')) choices.add('');
+  if (!choices.size) {
+    for (let n = 2; ; n += 1) {
+      const name = `account-${n}`;
+      if (!enrolled.has(name)) { choices.add(name); break; }
+    }
+  }
+  return [...choices].filter((p) => !enrolled.has(p));
+}
 
 export type RailState = 'done' | 'current' | 'todo';
 

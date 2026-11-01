@@ -51,7 +51,16 @@ instead, leaving the enrolled one's service, ports and credential untouched.
 
 The Ninjy desktop app (Settings > Bridges > This machine) matches the profiles in
 `ham-bridge list --json` against the signed-in account's bridges on the Hub. It
-shows and manages only that account's own profile. Without one, it runs setup
+shows only profiles linked to the signed-in account by default. **Show other
+local profiles** reveals other accounts' and unenrolled slots for this Hub, but
+never adds controls to manage another account's Bridge. Switching accounts
+resets this toggle. Setup still discovers every profile internally to avoid
+replacing or stopping another account's service. An empty list
+is shown as "No Bridge profiles installed". The unnamed default profile is a
+valid slot, distinct from having no available profile. The first-time wizard
+lets you select an unenrolled profile or create a named one; Retry keeps that
+selection. Profile names use 1-31 lowercase letters, digits or dashes, starting
+with a letter or digit. Without one, it runs setup
 with `--separate-account`, even for the first bridge, so a second account's
 install never stops, replaces or reconfigures the first account's running
 bridge. Replacing is offered only as an explicit choice after an enrollment

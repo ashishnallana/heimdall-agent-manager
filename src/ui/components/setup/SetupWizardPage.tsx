@@ -8,17 +8,20 @@
 // (bridgeApproval.ts); the user still reviews and approves.
 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
-import { Alert, Button, Icon, Input, Radio, Spinner, StatusPill } from '@ui';
+import { Alert, Button, Icon, Input, Radio, Select, Spinner, StatusPill } from '@ui';
 import type { Tone } from '@ui';
 import {
   type DesktopBridgeConfig,
   type DesktopBridgeManagerApi,
   type DesktopBridgeStatus,
   accountBridgeProfile,
+  bridgeProfileError,
+  bridgeProfileLabel,
   desktopBridgeStatusLabel,
   desktopCapabilities,
   desktopSetupPlan,
   otherAccountProfiles,
+  installedHubProfiles,
 } from '../../bridge/desktopBridge';
 import {
   attachDesktopBridgeSession,
@@ -46,6 +49,7 @@ import { reusableBridgesOf, reusableBridgeStatusText, REUSE_WARNING } from '../d
 import UpgradePrompt from '../billing/UpgradePrompt';
 import ProviderSetupSurface from '../providers/ProviderSetupSurface';
 import { formatBridgeVersion, formatLatestVersion } from '../settings/bridgeUpdate';
+import BridgeProfileInventory from '../settings/BridgeProfileInventory';
 import {
   EMPTY_IDENTITY_CHOICE,
   bridgeHasUpdate,
@@ -54,6 +58,7 @@ import {
   installRows,
   markSetupSeen,
   setupRail,
+  setupProfileChoices,
   sunsetCandidates,
   sunsetFailureNote,
   type IdentityChoice,
@@ -207,6 +212,12 @@ function MachineSteps({ manager, step, onStep, onConnected }: {
   const [confirmUninstall, setConfirmUninstall] = useState(false);
   const [detectRun, setDetectRun] = useState(0);
   const [adoptedId, setAdoptedId] = useState('');
+  const [profiles, setProfiles] = useState<DesktopBridgeStatus[]>([]);
+  const [profile, setProfile] = useState('');
+  const [customProfile, setCustomProfile] = useState(false);
+  const profileChoices = setupProfileChoices(profiles);
+  const profileError = bridgeProfileError(profile) || (profiles.some((p) => (p.profile || '') === profile && p.enrolled)
+    ? 'This profile is already enrolled. Choose a separate profile for your account.' : '');
 
   useEffect(() => { attachDesktopBridgeSession(manager); }, [manager]);
   useEffect(() => {
@@ -228,6 +239,10 @@ function MachineSteps({ manager, step, onStep, onConnected }: {
         setChecks(2);
         const ids = adoptedId ? [...accountBridgeIds, adoptedId] : accountBridgeIds;
         const own = accountBridgeProfile(listed.profiles, config.hubUrl, ids);
+        const detected = installedHubProfiles(listed.profiles, config.hubUrl);
+        setProfiles(detected);
+        setProfile(setupProfileChoices(detected)[0]);
+        setCustomProfile(false);
         setOtherAccounts(otherAccountProfiles(listed.profiles, config.hubUrl, ids).length);
         const next = own ? await manager.getStatus({ hub: config.hubUrl, profile: String(own.profile || '') }) : null;
         if (cancelled) return;
@@ -264,7 +279,8 @@ function MachineSteps({ manager, step, onStep, onConnected }: {
     if (!config) return;
     setError('');
     if (kind === 'setup') {
-      const plan = desktopSetupPlan(null, config.hubUrl, '');
+      if (profileError) { setError(profileError); return; }
+      const plan = desktopSetupPlan(null, config.hubUrl, profile);
       const failure = await runDesktopBridgeOperation(manager, 'setup', plan.target, plan.options);
       if (failure) setError(failure);
       return;
@@ -325,6 +341,8 @@ function MachineSteps({ manager, step, onStep, onConnected }: {
             <StatusPill data-debug-id="setup-machine-status" tone={statusTone[label.tone]}>{label.label}</StatusPill>
           </div>
           <dl className="grid grid-cols-[8rem_minmax(0,1fr)] text-sm">
+            <dt className="border-b border-subtle px-4 py-3 text-muted">Profile</dt>
+            <dd data-debug-id="setup-machine-profile" className="border-b border-subtle px-4 py-3 font-mono text-primary">{bridgeProfileLabel(status?.profile)}</dd>
             <dt className="border-b border-subtle px-4 py-3 text-muted">Version</dt>
             <dd className="flex flex-wrap items-center gap-2 border-b border-subtle px-4 py-3">
               <span data-debug-id="setup-machine-version" className="font-mono text-primary">{version || 'Unknown'}</span>
@@ -346,6 +364,8 @@ function MachineSteps({ manager, step, onStep, onConnected }: {
             </div>
           ) : null}
         </section>
+
+        <BridgeProfileInventory profiles={profiles} accountBridgeIds={accountBridgeIds} debugId="setup-detected-profiles" />
 
         {status && status.state !== 'connected' && !busy ? (
           <Alert tone="warning" title={label.label}>
@@ -398,12 +418,29 @@ function MachineSteps({ manager, step, onStep, onConnected }: {
         title={!started ? 'Set up this machine' : failed ? 'Install didn’t finish' : wizard.pairing ? 'Installed, waiting for you' : running ? 'Setting up this machine' : 'Installed'}
       >
         {!started
-          ? 'No bridge was found here. Ninjy will download the bridge runtime, install it as a background service and pair it with your account. One click.'
+          ? profiles.length ? 'No Bridge linked to your account was found here. Choose a separate profile to connect this computer.' : 'No Bridge profiles are installed for this Hub on this computer. Choose a profile, then install and connect the Bridge to your account.'
           : failed ? 'One step failed. The log below shows where.' : 'Running ham-bridge setup. Keep this window open.'}
       </StepHeading>
 
+      <p data-debug-id="setup-selected-profile" className="text-xs text-muted">Profile: <span className="font-mono text-primary">{bridgeProfileLabel(started ? lastRun?.target?.profile : profile)}</span></p>
+
       {!started ? (
         <>
+          <BridgeProfileInventory profiles={profiles} accountBridgeIds={accountBridgeIds} debugId="setup-detected-profiles" />
+          <section className="space-y-3 rounded-xl border border-subtle bg-surface p-4">
+            <label htmlFor="setup-profile-select" className="block text-sm font-medium text-primary">Bridge profile</label>
+            <p id="setup-profile-help" className="text-xs leading-relaxed text-muted">Each profile runs a separate Bridge with its own credentials. Use a different profile for each Ninjy account on this computer.</p>
+            <Select id="setup-profile-select" data-debug-id="setup-profile-select" aria-label="Bridge profile" aria-describedby="setup-profile-help" value={customProfile ? '__new__' : profile}
+              onChange={(value) => { setCustomProfile(value === '__new__'); setProfile(value === '__new__' ? '' : value); }}>
+              {profileChoices.map((name) => <option key={name} value={name}>{bridgeProfileLabel(name)}</option>)}
+              <option value="__new__">Create a named profile…</option>
+            </Select>
+            {customProfile ? <div className="space-y-2">
+              <label htmlFor="setup-profile-name" className="block text-xs font-medium text-muted">Profile name</label>
+              <Input id="setup-profile-name" data-debug-id="setup-profile-name-input" value={profile} onChange={setProfile} placeholder="personal" invalid={Boolean(profileError) || !profile} aria-describedby="setup-profile-help" />
+            </div> : null}
+            {profileError ? <p role="alert" data-debug-id="setup-profile-error" className="text-xs text-danger">{profileError}</p> : null}
+          </section>
           <section className="rounded-xl border border-subtle bg-surface">
             <dl className="grid grid-cols-[8rem_minmax(0,1fr)] text-sm">
               <dt className="border-b border-subtle px-4 py-3 text-muted">Bridge</dt>
@@ -420,7 +457,7 @@ function MachineSteps({ manager, step, onStep, onConnected }: {
             </p>
           ) : null}
           <div className="flex flex-wrap items-center gap-3">
-            <Button variant="primary" size="lg" data-debug-id="setup-install-btn" leading={<Icon name="download" size="sm" />} disabled={!config} onClick={() => void run('setup')}>Install and enroll</Button>
+            <Button variant="primary" size="lg" data-debug-id="setup-install-btn" leading={<Icon name="download" size="sm" />} disabled={!config || Boolean(profileError) || (customProfile && !profile)} onClick={() => void run('setup')}>Install and enroll</Button>
             <span className="text-xs text-faint">About a minute. You'll see every step as it runs.</span>
           </div>
         </>
@@ -464,7 +501,7 @@ function MachineSteps({ manager, step, onStep, onConnected }: {
             {wizard.otherAccount ? (
               <Button variant="primary" data-debug-id="setup-install-bridges-btn" onClick={() => { window.location.hash = buildRouteHash('/settings/bridges', ''); }}>Open bridge settings</Button>
             ) : (
-              <Button variant="primary" data-debug-id="setup-install-retry-btn" onClick={() => void runDesktopBridgeOperation(manager, 'setup', { hub: config?.hubUrl, profile: '' }, lastRun?.options || {}).then((f) => f && setError(f))}>Retry</Button>
+              <Button variant="primary" data-debug-id="setup-install-retry-btn" onClick={() => void runDesktopBridgeOperation(manager, 'setup', lastRun?.target || { hub: config?.hubUrl, profile }, lastRun?.options || {}).then((f) => f && setError(f))}>Retry</Button>
             )}
             <Button variant="secondary" data-debug-id="setup-install-copy-log-btn" onClick={() => { void navigator.clipboard?.writeText(log.join('\n')); }}>Copy log</Button>
             {wizard.steps.find((s) => s.log)?.log ? (

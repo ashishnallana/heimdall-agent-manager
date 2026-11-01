@@ -276,6 +276,31 @@ test_status_state_words :: proc(t: ^testing.T) {
 // ham-ctl and ports. Uninstalling either one, in both orders, removes only its
 // own paths and leaves the other's install and the shared extensions root.
 @(test)
+test_separate_account_default_is_available_not_exhausted :: proc(t: ^testing.T) {
+	root := make_temp_root(t, "profile-selection")
+	defer os.remove_all(root)
+	host := Host{os = .Linux, home = root, uid = 1000}
+	_, hub, _ := canonical_hub("https://hub.example.com", context.temp_allocator)
+	selected, found := separate_account_profile(host, hub, "")
+	testing.expect(t, found, "a fresh install has an available default profile")
+	testing.expect_value(t, selected, "")
+	testing.expect_value(t, list_json([]Status{}, context.temp_allocator), `{"profiles":[]}`)
+	// Occupy the default and every automatic account slot. Only now is the
+	// empty selection an error; a new explicit name must still be available.
+	for n in 1 ..< 100 {
+		name := "" if n == 1 else fmt.tprintf("account-%d", n)
+		l := layout_for(host, service_name(hub, name, context.temp_allocator))
+		testing.expect(t, os.make_directory_all(l.state_dir) == nil)
+		testing.expect(t, os.write_entire_file_from_string(pjoin(l.state_dir, TOKEN_FILE), strings.concatenate({CREDENTIAL_HEADER, "secret brg_existing\n"}, context.temp_allocator)) == nil)
+	}
+	_, exhausted := separate_account_profile(host, hub, "")
+	testing.expect(t, !exhausted, "all automatic profiles are actually enrolled")
+	personal, personal_found := separate_account_profile(host, hub, "personal")
+	testing.expect(t, personal_found)
+	testing.expect_value(t, personal, "personal")
+}
+
+@(test)
 test_two_accounts_install_uninstall_both_orders :: proc(t: ^testing.T) {
 	_, hub_name, _ := canonical_hub("https://hub.example.com", context.temp_allocator)
 	for first in 0 ..< 2 {
@@ -297,12 +322,17 @@ test_two_accounts_install_uninstall_both_orders :: proc(t: ^testing.T) {
 		}
 
 		// Account A takes the default profile; account B asks for it too.
-		testing.expect_value(t, separate_account_profile(host, hub_name, ""), "")
+		selected_1, found_1 := separate_account_profile(host, hub_name, "")
+		testing.expect(t, found_1)
+		testing.expect_value(t, selected_1, "")
 		a, a_ports := install(t, host, hub_name, "", free)
-		b_profile := separate_account_profile(host, hub_name, "")
+		b_profile, b_found := separate_account_profile(host, hub_name, "")
+		testing.expect(t, b_found)
 		testing.expect_value(t, b_profile, "account-2")
 		b, b_ports := install(t, host, hub_name, b_profile, free)
-		testing.expect_value(t, separate_account_profile(host, hub_name, ""), "account-3")
+		selected_2, found_2 := separate_account_profile(host, hub_name, "")
+		testing.expect(t, found_2)
+		testing.expect_value(t, selected_2, "account-3")
 		testing.expect(t, a.service_name != b.service_name && a.service_file != b.service_file)
 		testing.expect(t, a.state_dir != b.state_dir && a.data_dir != b.data_dir && a.bin_dir != b.bin_dir)
 		testing.expect(t, a_ports[0] != b_ports[0] && a_ports[1] != b_ports[1] && a_ports[0] != b_ports[1] && a_ports[1] != b_ports[0])

@@ -153,6 +153,22 @@ function hubOrigin(value: string | undefined): string {
   try { return new URL(String(value || '').trim()).origin; } catch (_err) { return ''; }
 }
 
+/** Installed slots for this Hub, including unenrolled slots. An empty list is
+ * different from profiles installed for accounts other than the signed-in one. */
+export function installedHubProfiles(profiles: DesktopBridgeStatus[] | undefined, hubUrl: string): DesktopBridgeStatus[] {
+  const hub = hubOrigin(hubUrl);
+  return (profiles || []).filter((p) => p?.installed && hubOrigin(p.hub) === hub);
+}
+
+export function bridgeProfileLabel(profile: string | undefined): string {
+  return profile || 'Default (unnamed)';
+}
+
+export function bridgeProfileError(profile: string): string {
+  return profile === '' || /^[a-z0-9][a-z0-9-]{0,30}$/.test(profile)
+    ? '' : 'Use 1–31 lowercase letters, digits or dashes, starting with a letter or digit.';
+}
+
 /**
  * The installed profile for `hubUrl` that belongs to the signed-in Ninjy
  * account: its bridge id is one of the account's bridges on the Hub. Several

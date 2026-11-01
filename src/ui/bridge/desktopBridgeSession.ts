@@ -13,6 +13,7 @@ import {
   type DesktopBridgeManagerApi,
   type DesktopBridgeOperation,
   type DesktopBridgeOperationOptions,
+  type DesktopBridgeTarget,
   type WizardModel,
   initialWizard,
   reduceWizard,
@@ -21,7 +22,7 @@ import {
 
 export interface DesktopBridgeSession {
   operation: DesktopBridgeOperation | '';
-  lastRun: { kind: DesktopBridgeOperation; options: DesktopBridgeOperationOptions } | null;
+  lastRun: { kind: DesktopBridgeOperation; options: DesktopBridgeOperationOptions; target?: DesktopBridgeTarget } | null;
   wizard: WizardModel;
   log: string[];
   /** Bumped on every 'complete' / 'error', so the card refreshes its status. */
@@ -117,10 +118,10 @@ export function takePendingApprovalCode(): string {
   return code;
 }
 
-export async function runDesktopBridgeOperation(manager: DesktopBridgeManagerApi, kind: DesktopBridgeOperation, target: any, options: DesktopBridgeOperationOptions = {}): Promise<string> {
+export async function runDesktopBridgeOperation(manager: DesktopBridgeManagerApi, kind: DesktopBridgeOperation, target: DesktopBridgeTarget, options: DesktopBridgeOperationOptions = {}): Promise<string> {
   attachDesktopBridgeSession(manager);
   pendingApprovalCode = '';
-  set({ lastRun: { kind, options }, log: [], operation: kind, wizard: startWizard() });
+  set({ lastRun: { kind, options: { ...options }, target: { ...target } }, log: [], operation: kind, wizard: startWizard() });
   // inAppApproval: this app opens /device/add itself, so the main process skips
   // the external browser (an older app ignores it and opens both).
   const result = await manager.run(kind, target, { ...options, inAppApproval: true }).catch((err: any) => ({ ok: false, error: String(err?.message || err) }));

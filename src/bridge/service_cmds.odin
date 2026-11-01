@@ -214,9 +214,10 @@ bridge_list_command :: proc(args: []string) -> bool {
 		fmt.println(bridgesvc.list_json(statuses, context.temp_allocator))
 		return true
 	}
-	if len(statuses) == 0 do fmt.println("no bridge profiles installed for this user")
+	if len(statuses) == 0 do fmt.println("No bridge profiles installed for this OS user. Run ham-bridge setup --hub <url> [--profile <name>] to install one.")
 	for s in statuses {
-		fmt.printfln("%-48s %-36s running=%v connected=%v vault=%s", s.service, s.hub, s.running, s.connected, s.vault)
+		profile := s.profile if s.profile != "" else "default (unnamed)"
+		fmt.printfln("profile=%s service=%s hub=%s running=%v connected=%v vault=%s", profile, s.service, s.hub, s.running, s.connected, s.vault)
 	}
 	return true
 }

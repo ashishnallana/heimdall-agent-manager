@@ -320,7 +320,7 @@ test('ThisMachineCard retries a failed Re-enroll as Re-enroll and labels the fai
   }
 });
 
-test('ThisMachineCard: account B never sees or manages account A\'s bridge and sets up a separate one', async () => {
+test('ThisMachineCard: account B detects account A\'s profile but cannot manage it', async () => {
   const { default: ThisMachineCard } = await import('../src/ui/components/settings/ThisMachineCard.tsx');
   // The run session is module state; start without the previous test's run.
   (await import('../src/ui/bridge/desktopBridgeSession.ts')).resetDesktopBridgeSessionForTests();
@@ -335,7 +335,7 @@ test('ThisMachineCard: account B never sees or manages account A\'s bridge and s
   }
   const runs: Array<{ kind: string; target: any; options: any }> = [];
   const statusTargets: any[] = [];
-  const profileA = { installed: true, state: 'connected', hub: 'https://hub.example.test', profile: '', service: 'heimdall-bridge-hub-example-test', bridge_id: 'brg_a' };
+  const profileA = { installed: true, state: 'connected', hub: 'https://hub.example.test', profile: 'p1', enrolled: true, service: 'heimdall-bridge-hub-example-test_p1', bridge_id: 'brg_a' };
   const manager: any = {
     getConfig: async () => ({ ok: true, supported: true, platform: 'linux', hubUrl: 'https://hub.example.test', defaultHubUrl: 'https://hub.example.test', bundledVersion: '' }),
     setHubUrl: async () => ({ ok: true }),
@@ -361,6 +361,10 @@ test('ThisMachineCard: account B never sees or manages account A\'s bridge and s
     assert.equal(query('settings-this-machine-update-btn'), null, 'B cannot update A\'s bridge');
     assert.equal(query('settings-this-machine-uninstall-btn'), null, 'B cannot uninstall A\'s bridge');
     assert.doesNotMatch(doc.body.textContent || '', /brg_a/);
+    assert.equal(query('settings-detected-profiles-p1'), null, 'other accounts are hidden by default');
+    await act(async () => { query('settings-detected-profiles-show-others')!.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+    assert.match(query('settings-detected-profiles-p1')!.textContent || '', /p1.*Not linked to this account/);
+    assert.equal(query('settings-this-machine-uninstall-btn'), null, 'revealing a profile does not grant lifecycle controls');
     assert.match(query('settings-this-machine-other-accounts')!.textContent || '', /Another Ninjy account has a bridge on this machine/);
     await act(async () => { query('settings-this-machine-setup-btn')!.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
     assert.deepEqual(runs, [{ kind: 'setup', target: { hub: 'https://hub.example.test', profile: '' }, options: { separateAccount: true, inAppApproval: true } }]);

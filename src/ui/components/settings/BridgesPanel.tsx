@@ -309,7 +309,6 @@ export default function BridgesPanel() {
                         <span>os: <span className="text-primary">{bridge?.machine_os || bridge?.os || '—'}</span></span>
                         <span>arch: <span className="text-primary">{bridge?.machine_arch || bridge?.arch || '—'}</span></span>
                         <span>target: <span data-debug-id={`settings-bridge-target-${id}`} className="font-mono text-primary">{bridge?.target || '—'}</span></span>
-                        <span>caps: <BridgeCapabilitiesLabel bridge={bridge} id={id} /></span>
                         <span>instances: <span className="text-primary">{bridge?.active_instance_count ?? bridge?.instance_count ?? bridge?.instances?.length ?? 0}</span></span>
                         <span>last seen: <span className="text-primary">{bridge?.last_seen_at ? new Date(bridge.last_seen_at).toLocaleString() : '—'}</span></span>
                       </div>
@@ -530,7 +529,7 @@ export default function BridgesPanel() {
 }
 
 // Provider status is per bridge (GET /bridges/{id}/provider-status), fetched for the
-// rows this panel shows. Both pieces read the same cache entry: one request a bridge.
+// rows this panel shows. The badge reads the cached provider status for each bridge.
 function BridgeNoProvidersBadge({ bridge, id }: { bridge: Bridge; id: string }) {
   const { capabilities, loaded } = useBridgeProviderStatus(bridge);
   if (!loaded || capabilities.length > 0) return null;
@@ -543,14 +542,4 @@ function BridgeNoProvidersBadge({ bridge, id }: { bridge: Bridge; id: string }) 
       no providers configured
     </a>
   );
-}
-
-function BridgeCapabilitiesLabel({ bridge, id }: { bridge: Bridge; id: string }) {
-  const { capabilities, loaded } = useBridgeProviderStatus(bridge);
-  const text = !loaded
-    ? '…'
-    : capabilities.length
-      ? capabilities.map((cap) => `${cap.provider}${cap.models.length ? ` (${cap.models.join('/')})` : ''}`).join(', ')
-      : '—';
-  return <span data-debug-id={`settings-bridge-caps-${id}`} className="text-primary">{text}</span>;
 }

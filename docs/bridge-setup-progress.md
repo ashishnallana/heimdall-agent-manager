@@ -11,6 +11,17 @@ bootstraps drive it through the commands below and parse their JSON. Implementat
 
 A bridge **profile** is `(hub, optional profile name)`. Everything derives from it:
 
+Omitting `--profile` selects the valid unnamed default profile (shown in the UI
+as **Default (unnamed)**). It does not mean profile selection failed.
+`ham-bridge list` explicitly reports when no profiles are installed; its JSON
+contract remains `{"profiles":[]}`. The first-time wizard and Settings show this
+empty state separately from profiles not linked to the signed-in account.
+The wizard offers available slots and a named-profile option. Detected profiles
+show their names and account-link status. Only profiles linked to the signed-in
+account appear by default; **Show other local profiles** reveals the others.
+Only the signed-in account's matching Bridge is offered lifecycle controls.
+
+
 | Item | Value |
 |---|---|
 | hub name | lower-cased host, every char outside `[a-z0-9-]` -> `-`, plus `-<port>` for a non-default port |

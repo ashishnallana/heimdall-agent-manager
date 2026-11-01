@@ -9,6 +9,8 @@ import {
   type DesktopBridgeStatus,
   type DesktopBridgeTarget,
   accountBridgeProfile,
+  bridgeProfileLabel,
+  installedHubProfiles,
   desktopBridgeStatusLabel,
   desktopSetupPlan,
   otherAccountProfiles,
@@ -20,6 +22,7 @@ import {
   runDesktopBridgeOperation,
   subscribeDesktopBridgeSession,
 } from '../../bridge/desktopBridgeSession';
+import BridgeProfileInventory from './BridgeProfileInventory';
 
 const toneFor: Record<string, Tone> = { success: 'success', warning: 'warning', danger: 'danger', muted: 'neutral' };
 
@@ -65,6 +68,7 @@ export default function ThisMachineCard({ manager, accountBridgeIds, onBridgeId,
   // The signed-in account's installed profile, and how many other accounts' are installed.
   const [own, setOwn] = useState<DesktopBridgeStatus | null>(null);
   const [otherAccounts, setOtherAccounts] = useState(0);
+  const [profiles, setProfiles] = useState<DesktopBridgeStatus[] | null>(null);
   // A bridge this card just set up counts as the account's own until the Hub's
   // bridge list (refetched through onSetupComplete) includes it.
   const [adoptedBridgeId, setAdoptedBridgeId] = useState('');
@@ -91,8 +95,10 @@ export default function ThisMachineCard({ manager, accountBridgeIds, onBridgeId,
       const ids = adoptedBridgeId ? [...accountBridgeIds, adoptedBridgeId] : accountBridgeIds;
       const mine = accountBridgeProfile(listed.profiles, config.hubUrl, ids);
       setOwn(mine);
+      setProfiles(installedHubProfiles(listed.profiles, config.hubUrl));
       setOtherAccounts(otherAccountProfiles(listed.profiles, config.hubUrl, ids).length);
-      // Another account's profile is never shown (or updated / uninstalled) here.
+      // Other profiles appear in discovery only; lifecycle controls and status
+      // always target this account's own Bridge.
       setStatus(mine
         ? await manager.getStatus({ hub: config.hubUrl, profile: String(mine.profile || '') })
         : { supported: config.supported, busy: false, operation: '', installed: false, state: 'not_installed', hub: config.hubUrl, error: '' });
@@ -197,7 +203,7 @@ export default function ThisMachineCard({ manager, accountBridgeIds, onBridgeId,
                 Profile:
                 <Input data-debug-id="settings-this-machine-profile-input" value={profile} onChange={(value) => setProfile(value.toLowerCase())} size="sm" placeholder="default" aria-label="Bridge profile" />
               </span>
-            ) : status?.profile ? <span>profile: <span className="font-mono text-primary">{status.profile}</span></span> : null}
+            ) : installed ? <span>Profile: <span data-debug-id="settings-this-machine-profile" className="font-mono text-primary">{bridgeProfileLabel(status?.profile)}</span></span> : null}
           </div>
           {!installed && otherAccounts > 0 ? (
             <p data-debug-id="settings-this-machine-other-accounts" className="mt-2 text-xs text-muted">
@@ -228,6 +234,8 @@ export default function ThisMachineCard({ manager, accountBridgeIds, onBridgeId,
           ) : null}
         </div>
       </div>
+
+      {profiles && accountBridgeIds ? <div className="mt-4"><BridgeProfileInventory profiles={profiles} accountBridgeIds={accountBridgeIds} debugId="settings-detected-profiles" /></div> : null}
 
       {error ? <p role="alert" data-debug-id="settings-this-machine-error" className="mt-3 whitespace-pre-wrap text-xs text-danger">{error}</p> : null}
 
@@ -298,7 +306,7 @@ export default function ThisMachineCard({ manager, accountBridgeIds, onBridgeId,
             // ham-bridge setup is idempotent: a re-run skips the steps that
             // already succeeded (enrollment is kept), so it resumes from the
             // failed step.
-            <Button size="sm" variant="primary" data-debug-id="settings-bridge-wizard-retry" onClick={() => void run(lastKind, lastRun?.options)}>Retry</Button>
+            <Button size="sm" variant="primary" data-debug-id="settings-bridge-wizard-retry" onClick={() => void run(lastKind, lastRun?.options, lastRun?.target)}>Retry</Button>
           ) : null}
         </div>
       ) : null}

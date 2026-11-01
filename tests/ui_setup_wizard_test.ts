@@ -239,3 +239,24 @@ test('sunset failure note reads the refetched bridge list (REQ-3)', () => {
   assert.match(unknown, /^Could not check whether dawnstar is still active; see Bridges\./);
   assert.doesNotMatch(unknown, /is still active\. $/);
 });
+
+
+test('profile choices distinguish no profiles from occupied slots and keep accounts separate', () => {
+  assert.deepEqual(model.setupProfileChoices([]), ['']);
+  const profiles: any[] = [{ profile: '', enrolled: true }, { profile: 'p1', enrolled: true }];
+  assert.deepEqual(model.setupProfileChoices(profiles), ['account-2']);
+  assert.deepEqual(model.setupProfileChoices([...profiles, { profile: 'personal', enrolled: false }]), ['personal']);
+  assert.deepEqual(model.setupProfileChoices([{ profile: 'p1', enrolled: true }] as any), ['']);
+});
+
+test('profile names and discovery keep the unnamed default and reject invalid input', async () => {
+  const { bridgeProfileError, bridgeProfileLabel, installedHubProfiles } = await import('../src/ui/bridge/desktopBridge.ts');
+  assert.equal(bridgeProfileLabel(''), 'Default (unnamed)');
+  assert.equal(bridgeProfileLabel('p1'), 'p1');
+  for (const name of ['', 'personal', 'a', 'a'.repeat(31)]) assert.equal(bridgeProfileError(name), '');
+  for (const name of ['Work', '-work', 'two words', '../p1', 'a'.repeat(32)]) assert.ok(bridgeProfileError(name));
+  const profiles: any[] = [{ installed: true, hub: 'https://hub.example', profile: 'p1' },
+    { installed: false, hub: 'https://hub.example', profile: 'gone' },
+    { installed: true, hub: 'https://other.example', profile: 'other' }];
+  assert.deepEqual(installedHubProfiles(profiles, 'https://hub.example/').map((p) => p.profile), ['p1']);
+});

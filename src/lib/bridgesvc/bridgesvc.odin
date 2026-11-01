@@ -201,14 +201,15 @@ profile_enrolled :: proc(host: Host, name: string) -> bool {
 // separate_account_profile is the profile a NEW Ninjy account installs into on
 // this hub, so it never replaces the account that owns `requested`: requested
 // itself while it is not enrolled, else the first account-N (N >= 2) whose
-// profile is not enrolled. Temp-allocated; "" when none is left.
-separate_account_profile :: proc(host: Host, hub_name, requested: string) -> string {
-	if !profile_enrolled(host, service_name(hub_name, requested, context.temp_allocator)) do return requested
+// profile is not enrolled. Temp-allocated. The empty name is the valid default
+// profile; only found=false means no profile is available.
+separate_account_profile :: proc(host: Host, hub_name, requested: string) -> (profile: string, found: bool) {
+	if !profile_enrolled(host, service_name(hub_name, requested, context.temp_allocator)) do return requested, true
 	for n in 2 ..< 100 {
 		p := fmt.tprintf("%s%d", SEPARATE_ACCOUNT_PROFILE_PREFIX, n)
-		if !profile_enrolled(host, service_name(hub_name, p, context.temp_allocator)) do return p
+		if !profile_enrolled(host, service_name(hub_name, p, context.temp_allocator)) do return p, true
 	}
-	return ""
+	return "", false
 }
 
 // layout_for gives the on-disk layout of a service (temp-allocated strings).

@@ -59,8 +59,12 @@ test_bridge_setup_wants_separate_account :: proc(t: ^testing.T) {
 	testing.expect(t, !bridge_setup_wants_separate_account(host, []string{"setup", "--headless", "--new-bridge"}, profile))
 	testing.expect(t, !bridge_setup_wants_separate_account(host, []string{"setup", "--replace-other-account"}, profile))
 	// Nothing enrolled: the requested profile is used as is.
-	testing.expect_value(t, bridgesvc.separate_account_profile(host, profile.hub_name, ""), "")
-	testing.expect_value(t, bridgesvc.separate_account_profile(host, profile.hub_name, "work"), "work")
+	selected_1, found_1 := bridgesvc.separate_account_profile(host, profile.hub_name, "")
+	testing.expect(t, found_1)
+	testing.expect_value(t, selected_1, "")
+	selected_2, found_2 := bridgesvc.separate_account_profile(host, profile.hub_name, "work")
+	testing.expect(t, found_2)
+	testing.expect_value(t, selected_2, "work")
 }
 
 // Headless (installers, Electron) nobody can confirm a replace: a run that would
@@ -94,5 +98,7 @@ test_bridge_setup_headless_enrolled_profile_defaults_to_separate :: proc(t: ^tes
 	testing.expect(t, !bridge_setup_wants_separate_account(host, with(headless, "--reenroll"), profile), "re-pairing its own bridge stays in place")
 	testing.expect(t, !bridge_setup_wants_separate_account(host, with(headless, "--new-bridge", "--replace-other-account"), profile), "an explicit replace is honoured")
 	// The separate profile is a fresh one; the enrolled default is never chosen.
-	testing.expect_value(t, bridgesvc.separate_account_profile(host, profile.hub_name, ""), "account-2")
+	selected_3, found_3 := bridgesvc.separate_account_profile(host, profile.hub_name, "")
+	testing.expect(t, found_3)
+	testing.expect_value(t, selected_3, "account-2")
 }
