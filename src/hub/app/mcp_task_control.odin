@@ -23,8 +23,8 @@ mcp_comment_task :: proc(ctx:rawptr,raw:string,view:mcp.Access_View,chain_id,tas
 	graph:=(^App_Graph)(ctx)
 	uow,begun,err:=iface.unit_of_work_begin(&graph.uow_factory)
 	if !begun || err.code!=.None do return "","request_failed"
-	committed:=false
-	defer if !committed do iface.unit_of_work_rollback(&uow)
+	finished:=false
+	defer if !finished do iface.unit_of_work_rollback(&uow)
 	// All authority reads, the native mutation, engine events, and receipt share
 	// one connection. Nested task-engine effects run only after outer COMMIT.
 	impl:sqlite.Vault_Directory_Repo_SQLite
@@ -53,8 +53,10 @@ mcp_comment_task :: proc(ctx:rawptr,raw:string,view:mcp.Access_View,chain_id,tas
 		return "","request_failed"
 	}
 	if perr:=sqlite.mcp_receipt_put(&graph.db,view.owner,view.grant,"tasks.comment",request_id,digest,string(comment.comment_id));perr.code!=.None do return "","request_failed"
-	if ok,cerr:=iface.unit_of_work_commit(&uow);!ok || cerr.code!=.None do return "","request_failed"
-	committed=true
+	commit_ok,commit_err:=iface.unit_of_work_commit(&uow)
+	// COMMIT consumes the UOW even on failure (SQLite rolls back and frees it).
+	finished=true
+	if !commit_ok || commit_err.code!=.None do return "","request_failed"
 	contracts.attention_notify(graph.taskchains.attention,view.owner,contracts.ATTENTION_SOURCE_TASK,task_id)
 	return string(comment.comment_id),""
 }

@@ -167,6 +167,7 @@ test_mcp_task_comment_native_atomic_retry_and_revocation :: proc(t:^testing.T) {
 	mcp_task_test_mutations(t,g,&h,headers,view)
 	mcp_task_test_placement(t,g,&h,headers,view)
 	mcp_task_test_contract(t,g,&h,headers,view,input.body)
+	mcp_task_test_failed_commit(t,g,var_tokens.access_token,view,input.body,&attention_probe)
 	jobs:[4]MCP_Task_Comment_Race
 	threads:[4]^thread.Thread
 	for i in 0..<len(jobs) {

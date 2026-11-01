@@ -77,8 +77,8 @@ mcp_mutate_task :: proc(ctx:rawptr,raw:string,view:mcp.Access_View,command:mcp.C
 	g:=(^App_Graph)(ctx)
 	uow,begun,err:=iface.unit_of_work_begin(&g.uow_factory)
 	if !begun || err.code!=.None do return "","request_failed"
-	committed:=false
-	defer if !committed do iface.unit_of_work_rollback(&uow)
+	finished:=false
+	defer if !finished do iface.unit_of_work_rollback(&uow)
 	if code:=mcp_task_write_check(g,raw,view,command.tool);code!="" do return "",code
 	if command.tool=="tasks.update" || command.tool=="tasks.control" {
 		bound,owned,berr:=tc.get_task_for_read(&g.taskchains,mcp.control_auth(view.owner),command.task_id)
@@ -220,8 +220,10 @@ mcp_mutate_task :: proc(ctx:rawptr,raw:string,view:mcp.Access_View,command:mcp.C
 	encoded,eerr:=json.marshal(outcome,allocator=context.temp_allocator)
 	if eerr!=nil do return "","request_failed"
 	if perr:=sqlite.mcp_receipt_put(&g.db,view.owner,view.grant,command.tool,command.request_id,command.digest,id,string(encoded));perr.code!=.None do return "","request_failed"
-	if ok,cerr:=iface.unit_of_work_commit(&uow);!ok || cerr.code!=.None do return "","request_failed"
-	committed=true
+	commit_ok,commit_err:=iface.unit_of_work_commit(&uow)
+	// COMMIT consumes the UOW even on failure (SQLite rolls back and frees it).
+	finished=true
+	if !commit_ok || commit_err.code!=.None do return "","request_failed"
 	if command.tool!="chains.configure" do contracts.attention_notify(g.taskchains.attention,view.owner,contracts.ATTENTION_SOURCE_TASK,id)
 	return string(encoded),""
 }
