@@ -1,12 +1,13 @@
 import { buildRouteHash } from '../../utils/appLocation';
 import { useEffect, useState } from 'react';
-import { Alert, Button, Input, Modal, ModalBody, ModalFooter, StatusPill } from '@ui';
+import { Alert, Button, Input, Modal, ModalBody, ModalFooter, Spinner, StatusPill } from '@ui';
 import type { DesktopBridgeManagerApi } from '../../bridge/desktopBridge';
 import { bridgeProfileLabel, desktopBridgeStatusLabel } from '../../bridge/desktopBridge';
 import { overrideApprovalPageOpener, runDesktopBridgeOperation } from '../../bridge/desktopBridgeSession';
 import { hasBridgeIdentityReview } from '../../bridge/useBridgeIdentityState';
 import { useThisMachineBridge } from '../../bridge/useThisMachineBridge';
 import BridgeOperationFeedback from '../bridge/BridgeOperationFeedback';
+import BridgeProfileInventory from './BridgeProfileInventory';
 import { IdentityStep, MachineSteps } from '../bridge/LocalBridgeFlow';
 import { setupRail } from '../setup/setupWizardModel';
 import BridgeOperationRail from '../bridge/BridgeOperationRail';
@@ -59,10 +60,14 @@ export default function ThisMachineCard({ manager, onBridgeId, onSetupComplete }
           {phase === 'present' && status?.needs_reenrollment ? <p data-debug-id="settings-this-machine-reenroll-hint" className="text-sm text-danger">The Hub no longer accepts this bridge ({status.reenroll_reason || 'revoked'}). Re-enroll it to reconnect.</p> : null}
           {config ? <p data-debug-id="settings-this-machine-hub" className="break-all font-mono text-xs text-muted">{config.hubUrl}</p> : null}
         </div>
+      </div>
+      {phase === 'loading' ? <div data-debug-id="settings-this-machine-loading" role="status" className="mt-4 flex items-center gap-2 text-sm text-muted"><Spinner size="sm" />Checking your bridges and this machine...</div> : null}
+      {detection.accountBridgeIds && (phase === 'present' || phase === 'absent') ? <div className="mt-4"><BridgeProfileInventory profiles={detection.profiles} accountBridgeIds={detection.accountBridgeIds} debugId="settings-detected-profiles" /></div> : null}
+      <div className="mt-4" data-debug-id="settings-this-machine-actions">
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 [&>button]:min-w-0 [&>button]:whitespace-normal [&>button]:h-auto [&>button]:min-h-8">
-          <Button variant="ghost" size="sm" data-debug-id="settings-this-machine-open-setup-btn" disabled={busy} onClick={() => { window.location.hash = buildRouteHash('/setup', ''); }}>Open setup wizard</Button>
+          <Button variant="ghost" size="sm" data-debug-id="settings-this-machine-open-setup-btn" disabled={busy || (phase !== 'present' && phase !== 'absent')} onClick={() => { window.location.hash = buildRouteHash('/setup', ''); }}>Open setup wizard</Button>
           {!flow && resumableSetup ? <Button variant="primary" data-debug-id="settings-this-machine-resume-btn" onClick={() => setFlow(true)}>Resume setup</Button> : null}
-          {phase === 'absent' && !flow && !resumableSetup ? <Button variant="primary" data-debug-id="settings-this-machine-setup-btn" disabled={busy} onClick={() => { setFlow(true); setStep('detect'); }}>Install bridge on this machine</Button> : null}
+          {phase === 'absent' && !flow && !resumableSetup ? <Button variant="primary" data-debug-id="settings-this-machine-setup-btn" disabled={busy} onClick={() => { if (phase === 'absent' && !busy) window.location.hash = buildRouteHash('/setup', ''); }}>Install bridge on this machine</Button> : null}
           {phase === 'present' ? <>
             <Button variant="secondary" size="sm" data-debug-id="settings-this-machine-update-btn" disabled={busy} onClick={() => void run('update')}>Update</Button>
             <Button variant="secondary" size="sm" data-debug-id="settings-this-machine-reenroll-btn" disabled={busy} onClick={() => setConfirm('reenroll')}>Re-enroll</Button>

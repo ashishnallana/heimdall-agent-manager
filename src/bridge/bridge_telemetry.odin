@@ -136,7 +136,7 @@ bridge_telemetry_start :: proc() -> bool {
 		append(&cmd, "telegraf", "--config", conf_file)
 	}
 
-	proc_handle, start_err := os.process_start(os.Process_Desc{
+	proc_handle, start_err := bridge_os_start_hidden(os.Process_Desc{
 		command = cmd[:],
 	})
 	if start_err != nil {

@@ -380,12 +380,13 @@ test('ThisMachineCard: account B detects account A\'s profile but cannot manage 
     await act(async () => query('settings-this-machine-open-setup-btn')!.click());
     assert.equal(dom.window.location.hash, '#/setup', 'the wizard can be reopened after the first-run flag was remembered');
     await act(async () => query('settings-this-machine-setup-btn')!.click());
-    assert.equal(query('setup-detected-profiles-p1'), null, 'other accounts are hidden by default');
-    await act(async () => query('setup-detected-profiles-show-others')!.click());
-    assert.match(query('setup-detected-profiles-p1')!.textContent || '', /p1.*Not linked to this account/);
+    assert.equal(query('settings-detected-profiles-p1'), null, 'other accounts are hidden by default');
+    await act(async () => query('settings-detected-profiles-show-others')!.click());
+    assert.match(query('settings-detected-profiles-p1')!.textContent || '', /p1.*Not linked to this account/);
     assert.equal(query('settings-this-machine-uninstall-btn'), null, 'revealing inventory does not grant lifecycle controls');
-    await act(async () => query('setup-install-btn')!.click());
-    assert.deepEqual(runs, [{ kind: 'setup', target: { hub: 'https://hub.example.test', profile: '' }, options: { separateAccount: true, inAppApproval: true } }]);
+    assert.equal(dom.window.location.hash, '#/setup', 'Install opens the full wizard for profile selection');
+    assert.equal(query('settings-local-bridge-flow'), null);
+    assert.deepEqual(runs, [], 'opening the wizard does not start installation');
   } finally {
     await act(async () => root.unmount());
     store.dispatch(heimdallApi.util.resetApiState());

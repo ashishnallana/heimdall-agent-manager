@@ -578,7 +578,7 @@ async function performOperation(
       binary = prepared.binary;
       bundleDir = path.dirname(binary).endsWith(`${path.sep}bin`) ? path.dirname(path.dirname(binary)) : path.dirname(binary);
     } else {
-      binary = kind === 'uninstall' ? uninstallBinary() : queryBinary();
+      binary = kind === 'uninstall' ? await uninstallBinary(register) : queryBinary();
       if (!binary) throw new Error('No installed Bridge was found on this machine.');
     }
     if (cancelRequested) throw Object.assign(new Error('Cancelled.'), { cancelled: true });
@@ -648,13 +648,35 @@ async function firstLaunchSetup(hub: string, emit: Emit): Promise<{ ok: boolean;
   return runOperation('setup', { hub, profile: '' }, emit, { separateAccount: true });
 }
 
-// uninstallBinary prefers a ham-bridge outside the profile's bin/ (the one this
-// app prepared, or a cached release): run from there, Windows uninstall needs
-// no %TEMP% relocation and its exit code is the real result.
-function uninstallBinary(): string {
+// Use this app's bundled lifecycle fixes even after restarting the app, when
+// preparedBinary is empty. An arbitrary recursive cache search can select a
+// much older release merely because its directory sorts first.
+async function uninstallBinary(register: (running: Running) => void = () => {}): Promise<string> {
   if (process.env.HEIMDALL_HAM_BRIDGE) return process.env.HEIMDALL_HAM_BRIDGE;
+  const platform = process.platform;
+  const version = bundledVersion(platform);
+  if (version) {
+    const extracted = path.join(cacheRoot(), `bundled-${version}`);
+    let binary = findBinary(extracted, platform);
+    const files = bundledResources(platform);
+    if (!binary && fs.existsSync(files.bundle) && fs.existsSync(files.checksums)) {
+      await verifyArchive(files.bundle, fs.readFileSync(files.checksums, 'utf8'), path.basename(files.bundle));
+      await extractArchive(files.bundle, extracted, register);
+      binary = findBinary(extracted, platform);
+      if (!binary) throw new Error(`The bundled Bridge does not contain ${binaryName(platform)}.`);
+    }
+    if (binary) return binary;
+  }
   if (preparedBinary && fs.existsSync(preparedBinary)) return preparedBinary;
-  return findBinary(cacheRoot(), process.platform, 4) || installedBinaries()[0] || '';
+  let entries: any[] = [];
+  try { entries = fs.readdirSync(cacheRoot(), { withFileTypes: true }); } catch (_err) { /* no cached release */ }
+  const releases = entries.filter((entry) => entry.isDirectory() && /^(?:bundled-)?v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(entry.name));
+  releases.sort((a, b) => compareVersions(b.name.replace(/^bundled-/, ''), a.name.replace(/^bundled-/, '')));
+  for (const release of releases) {
+    const binary = findBinary(path.join(cacheRoot(), release.name), platform, 4);
+    if (binary) return binary;
+  }
+  return installedBinaries()[0] || '';
 }
 
 // confirmUninstalled waits (bounded) for `status --json` to stop reporting
@@ -717,4 +739,5 @@ module.exports = {
   runOperation,
   stopOnQuit,
   supportedPlatform,
+  uninstallBinary,
 };

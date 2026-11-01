@@ -19,8 +19,8 @@ export function verifiedMachineStatus(own: DesktopBridgeStatus, status: DesktopB
 export function useThisMachineBridge(manager: DesktopBridgeManagerApi) {
   const query = useListBridgesQuery();
   const bridges = useMemo(() => query.data?.bridges || [], [query.data]);
-  const accountBridgeIds = useMemo(() => query.data && !query.isError
-    ? bridges.map((b: any) => String(b.bridge_id || b.bridgeId || b.id || '')).filter(Boolean) : null, [bridges, query.data, query.isError]);
+  const accountBridgeIds = useMemo(() => query.data && !query.isError && !query.isFetching
+    ? bridges.map((b: any) => String(b.bridge_id || b.bridgeId || b.id || '')).filter(Boolean) : null, [bridges, query.data, query.isError, query.isFetching]);
   const session = useSyncExternalStore(subscribeDesktopBridgeSession, desktopBridgeSession);
   const [config, setConfig] = useState<DesktopBridgeConfig | null>(null);
   const [status, setStatus] = useState<DesktopBridgeStatus | null>(null);
@@ -83,7 +83,8 @@ export function useThisMachineBridge(manager: DesktopBridgeManagerApi) {
     void refresh();
   }, [session.finished, query.refetch, refresh]);
   const owned = phase === 'present' && Boolean(status?.bridge_id && accountBridgeIds?.includes(status.bridge_id));
-  const verifiedPhase = phase === 'present' && !owned ? (query.isError ? 'error' : 'loading') : phase;
+  const verifiedPhase = query.isError ? 'error' : query.isLoading || query.isFetching || !accountBridgeIds ? 'loading'
+    : phase === 'present' && !owned ? 'loading' : phase;
   return { config, status, profiles, otherAccounts, phase: verifiedPhase, error, setError, refresh,
     accountBridgeIds, bridges, session, bridgeId: owned ? String(status?.bridge_id || '') : '' };
 }

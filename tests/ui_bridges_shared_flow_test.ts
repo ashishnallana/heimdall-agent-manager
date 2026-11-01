@@ -128,3 +128,67 @@ test('identity controller preserves choice, pending attempt and approval wait ac
   await render(React.createElement(Probe));
   assert.equal(value, ''); assert.equal(attempt.current, ''); assert.equal(wait.current, null);
 }));
+
+
+test('Settings waits for Hub and local discovery before opening the installation wizard', async () => ui(async ({ render, dom, store }: any) => {
+  const { default: ThisMachineCard } = await import('../src/ui/components/settings/ThisMachineCard.tsx');
+  let finishHub: any; let finishLocal: any;
+  globalThis.fetch = (() => new Promise((resolve) => { finishHub = resolve; })) as typeof fetch;
+  const { manager, runs } = createManager({ list: () => new Promise((resolve) => { finishLocal = resolve; }) });
+  const find = (id: string) => dom.window.document.querySelector(`[data-debug-id="${id}"]`) as HTMLButtonElement;
+  await render(React.createElement(ThisMachineCard, { manager }));
+  assert.ok(find('settings-this-machine-loading'));
+  assert.equal(find('settings-this-machine-open-setup-btn').disabled, true);
+  assert.equal(find('settings-this-machine-setup-btn'), null);
+  await act(async () => { finishHub(Response.json({ data: { bridges: [] } })); });
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+  assert.ok(find('settings-this-machine-loading'), 'local discovery is still pending');
+  assert.equal(find('settings-this-machine-setup-btn'), null);
+  await act(async () => { finishLocal({ ok: true, profiles: [] }); });
+  assert.equal(find('settings-this-machine-loading'), null);
+  const install = find('settings-this-machine-setup-btn');
+  assert.ok(install && !install.disabled);
+  await act(async () => { install.click(); });
+  assert.match(dom.window.location.hash, /setup/);
+  assert.equal(find('settings-local-bridge-flow'), null, 'installation opens the full first-time wizard');
+  assert.deepEqual(runs, [], 'navigation never starts installation directly');
+  // A background Hub refresh must gate even previously confirmed absence.
+  await act(async () => { store.dispatch(heimdallApi.util.invalidateTags([{ type: 'Bridges', id: 'LIST' }])); });
+  assert.ok(find('settings-this-machine-loading'));
+  assert.equal(find('settings-this-machine-setup-btn'), null);
+  assert.equal(find('settings-this-machine-open-setup-btn').disabled, true);
+  await act(async () => { finishHub(Response.json({ data: { bridges: [] } })); });
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+  await act(async () => { finishLocal({ ok: true, profiles: [] }); });
+}));
+
+test('Settings lifecycle controls follow detected profiles and failed discovery offers no install', async () => ui(async ({ render, dom }: any) => {
+  const { default: ThisMachineCard } = await import('../src/ui/components/settings/ThisMachineCard.tsx');
+  const { manager } = createManager();
+  await render(React.createElement(ThisMachineCard, { manager }));
+  const inventory = dom.window.document.querySelector('[data-debug-id="settings-detected-profiles"]')!;
+  for (const id of ['open-setup', 'update', 'reenroll', 'uninstall']) {
+    const button = dom.window.document.querySelector(`[data-debug-id="settings-this-machine-${id}-btn"]`)!;
+    assert.ok(inventory.compareDocumentPosition(button) & dom.window.Node.DOCUMENT_POSITION_FOLLOWING, id);
+  }
+  await render(null);
+  const failed = createManager({ list: async () => ({ ok: false, error: 'Discovery unavailable' }) });
+  await render(React.createElement(ThisMachineCard, { manager: failed.manager }));
+  assert.equal(dom.window.document.querySelector('[data-debug-id="settings-this-machine-setup-btn"]'), null);
+  assert.equal((dom.window.document.querySelector('[data-debug-id="settings-this-machine-open-setup-btn"]') as HTMLButtonElement).disabled, true);
+  assert.match(dom.window.document.body.textContent || '', /Discovery unavailable/);
+}));
+
+
+test('Settings keeps setup disabled until the discovered profile status resolves', async () => ui(async ({ render, dom }: any) => {
+  const { default: ThisMachineCard } = await import('../src/ui/components/settings/ThisMachineCard.tsx');
+  let finishStatus: any;
+  const { manager } = createManager({ getStatus: () => new Promise((resolve) => { finishStatus = resolve; }) });
+  await render(React.createElement(ThisMachineCard, { manager }));
+  assert.ok(dom.window.document.querySelector('[data-debug-id="settings-this-machine-loading"]'));
+  assert.equal(dom.window.document.querySelector('[data-debug-id="settings-this-machine-setup-btn"]'), null);
+  assert.equal((dom.window.document.querySelector('[data-debug-id="settings-this-machine-open-setup-btn"]') as HTMLButtonElement).disabled, true);
+  await act(async () => { finishStatus(own); });
+  assert.equal(dom.window.document.querySelector('[data-debug-id="settings-this-machine-loading"]'), null);
+  assert.ok(dom.window.document.querySelector('[data-debug-id="settings-this-machine-update-btn"]'));
+}));

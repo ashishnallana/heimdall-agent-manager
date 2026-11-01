@@ -499,7 +499,7 @@ bridge_uninstall_relocate :: proc(l: bridgesvc.Layout, args: []string) -> (reloc
 	if os.copy_file(copy_path, exe) != nil do return false, false
 	argv := bridge_uninstall_relocated_argv(copy_path, args, l.service_name, os.get_pid())
 	// Same console, no stdin: the copy prints its progress here after we exit.
-	p, err := os.process_start(os.Process_Desc{command = argv, stdout = os.stdout, stderr = os.stderr})
+	p, err := bridge_os_start_hidden(os.Process_Desc{command = argv, stdout = os.stdout, stderr = os.stderr})
 	if err != nil {
 		_ = os.remove(copy_path)
 		fmt.eprintfln("ham-bridge uninstall: cannot start %s (%v); uninstalling in place, bin/ may be left behind", copy_path, err)

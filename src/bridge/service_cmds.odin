@@ -76,11 +76,15 @@ bridge_service_resolve :: proc(host: bridgesvc.Host, args: []string) -> (name: s
 }
 
 bridge_service_exec :: proc(argv: []string) -> (ok: bool, output: string) {
-	state, stdout, stderr, err := os.process_exec(os.Process_Desc{command = argv}, context.temp_allocator)
-	out := strings.trim_space(strings.concatenate({string(stdout), string(stderr)}, context.temp_allocator))
-	// core:os on Windows reports success for every exited process (dev-2026-09/10
-	// _process_wait sets success = true), so the exit code decides.
-	return err == nil && state.success && state.exit_code == 0, out
+	when ODIN_OS == .Windows {
+		stdout, stderr, success, _ := bridge_process_run_capture(argv, 30*time.Second)
+		defer { delete(stdout); delete(stderr) }
+		return success, strings.trim_space(strings.concatenate({stdout, stderr}, context.temp_allocator))
+	} else {
+		state, stdout, stderr, err := os.process_exec(os.Process_Desc{command = argv}, context.temp_allocator)
+		out := strings.trim_space(strings.concatenate({string(stdout), string(stderr)}, context.temp_allocator))
+		return err == nil && state.success && state.exit_code == 0, out
+	}
 }
 
 // A scheduled task can be Ready after its launcher exits while its Bridge is
