@@ -174,3 +174,26 @@ The chain is solo when you are the Soloist or hold a worker fleet row yourself. 
 - You never review your own work (`403 solo_self_review`).
 - `[taskv2] solo: task … is ready for you` means pull it with `lease next`.
 - Urgent request mid-task: create the task, then `lease switch <task_id> --summary "<where you left off>"`.
+
+## 9. Live requirement amendments and significant changes
+
+Use a native requirement amendment when the user changes acceptance details or clarifies the goal while retaining the task's objective and deliverable. Read `task show` first, then supply its `requirements_revision`, the revised goal/acceptance, and a concrete reason:
+
+```bash
+./bin/ham-ctl task show <task-id>
+./bin/ham-ctl task update <task-id> --goal "<revised goal>" \
+  --acceptance "<current acceptance item>" \
+  --expected-requirements-revision <n> --reason "<what changed and why>"
+```
+
+Repeated acceptance flags replace the list; include every item that should remain. A revision conflict requires a fresh read and deliberate reconciliation, not a blind retry. In the UI use **Change requirements**, provide goal, acceptance and reason, and inspect the task's revision, read status and **Requirement changes** history. MCP clients use `tasks.get` then `tasks.update` with `expected_revision`, `reason` and an idempotent `request_id`; consult the CLI reference and MCP documentation for the distinct concurrency fields.
+
+Native delivery prompts active workers to refresh `lease next`, read the new `TASK.md`, and acknowledge the exact revision on their own lease. Do not acknowledge for them. An edit after submission invalidates stale review evidence: reviewers checkpoint and worker rework must be submitted before current approval. Comments preserve discussion but do not wake agents or change their brief. Preserve existing review gates.
+
+For a significant change to objective, deliverable or approach that invalidates the plan or review basis:
+
+1. Record the decision on the original task: rationale, old/new scope, retained work and original task disposition.
+2. Create a self-contained replacement task linked to the original, with current acceptance and required approvals; record the replacement ID on the original.
+3. Checkpoint active work before redirecting it. In solo mode, `lease switch <replacement-id> --summary "..."` preserves progress. Explicitly rewire future dependencies and keep terminal/workflow lifecycle restrictions. A reference link preserves provenance; a dependency should exist only when the new task actually requires successful completion of the old one.
+
+Do not overwrite the original into an unrelated assignment or treat the scope change as approval of unfinished work.

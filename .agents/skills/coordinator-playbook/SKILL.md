@@ -10,3 +10,9 @@ heimdall_managed: true
 - Consolidate team questions before asking the user, propose defaults when useful, and avoid blocking on questions the task state already answers.
 - Ensure every implementation task has an assignee, blocking reviewer, dependencies, and acceptance criteria tied to REQ-IDs.
 - Complete the chain only after approved tasks cover every requirement; final summaries include task IDs, review results, evidence, commits, known gaps, and requirement coverage.
+
+## Requirement amendments
+
+For a clarification or acceptance change that keeps the same objective/deliverable, use the native requirement-update interface with the revision just read and an explicit reason. Follow the bundled `coordinator-task-management` skill for UI/CLI/MCP details and worker acknowledgement; comments alone do not update the brief or wake agents.
+
+For significant objective, deliverable or approach changes, record rationale, original/new scope, retained work and disposition on the original task. Create a self-contained linked replacement with required approvals, record its ID on the original, checkpoint active work and explicitly rewire future dependencies. Preserve history and review evidence.
