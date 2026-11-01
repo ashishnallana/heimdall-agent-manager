@@ -404,7 +404,7 @@ export default function ProviderProfilesSurface({ bridge, onHeadingChange }: {
   const [error, setError] = useState('');
   const [runtimeError, setRuntimeError] = useState('');
   const [confirmDelete, setConfirmDelete] = useState(false);
-  const [savedDraft, setSavedDraft] = useState('');
+  const [savedDraft, setSavedDraft] = useState<ProviderProfile | null>(null);
   const [savedLabel, setSavedLabel] = useState('');
   const [testModelId, setTestModelId] = useState('');
   const [testTarget, setTestTarget] = useState<ProviderTestTarget | null>(null);
@@ -476,14 +476,9 @@ export default function ProviderProfilesSurface({ bridge, onHeadingChange }: {
     try {
       const full = await providerProfilesApi.operate(bridgeId, p.profile_id, 'get');
       if (full && editableRef.current) {
-        const loadedProfile = {
-          ...full,
-          enabled:
-            statuses.find((s) => (s.profile_id || s.provider) === p.profile_id)?.enabled ??
-            p.enabled,
-        };
-        setDraft(loadedProfile);
-        setSavedDraft(JSON.stringify(loadedProfile));
+        // Edit persisted configuration; runtime availability is an independent projection.
+        setDraft(full);
+        setSavedDraft(full);
         setSavedLabel(labels[p.profile_id] || p.profile_id);
         setLabel(labels[p.profile_id] || p.profile_id);
       }
@@ -564,7 +559,7 @@ export default function ProviderProfilesSurface({ bridge, onHeadingChange }: {
       const full = await providerProfilesApi.operate(bridgeId, id, 'get');
       if (full && editableRef.current) {
         setDraft(full);
-        setSavedDraft(JSON.stringify(full));
+        setSavedDraft(full);
         const savedName = await profileLabel(full);
         setLabel(savedName);
         setSavedLabel(savedName);
@@ -625,7 +620,7 @@ export default function ProviderProfilesSurface({ bridge, onHeadingChange }: {
   const testModels = (currentStatus?.models || []).filter((m) => m.state === 'active');
   const testModel = testModels.find((m) => m.model_id === testModelId) || testModels[0];
   const draftChanged = Boolean(
-    draft && (JSON.stringify(draft) !== savedDraft || label !== savedLabel),
+    draft && (JSON.stringify(draft) !== JSON.stringify(savedDraft) || label !== savedLabel),
   );
   const editing = Boolean(draft || selected || step !== null);
   const bridgeName = String(bridge?.label || bridge?.machine_hostname || bridgeId);
@@ -763,11 +758,12 @@ export default function ProviderProfilesSurface({ bridge, onHeadingChange }: {
                 <Panel className="flex flex-wrap items-center justify-between gap-4" data-debug-id="profile-enablement">
                   <div className="min-w-0">
                     <Text role="title">Profile availability</Text>
-                    <Text role="body-sm" tone="muted">Allow new launches with this profile. Save profile to apply changes.</Text>
+                    <Text role="body-sm" tone="muted">Configure whether this profile allows new launches. Save profile to apply changes.</Text>
                   </div>
                   <div className="flex flex-wrap items-center gap-3">
+                    <Text role="caption" tone="muted" data-debug-id="profile-runtime-availability">Runtime availability: {currentStatus ? currentStatus.enabled ? 'Enabled' : 'Disabled' : 'Not reported'}</Text>
                     <StatusPill tone={draft.enabled ? 'success' : 'neutral'}>{draft.enabled ? 'Enabled' : 'Disabled'}</StatusPill>
-                    {step !== null || profiles.find((p) => p.profile_id === draft.profile_id)?.enabled !== draft.enabled
+                    {step !== null || savedDraft?.enabled !== draft.enabled
                       ? <Text role="caption" tone="muted">Pending save</Text> : null}
                     <Button variant="secondary" data-debug-id="profile-enabled" aria-pressed={draft.enabled}
                       disabled={busy || !editable} onClick={() => setDraft({ ...draft, enabled: !draft.enabled })}>

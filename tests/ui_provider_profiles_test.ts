@@ -419,10 +419,48 @@ test('mounted wizard validates identity, environment never reveals stored secret
     assert.match(q('profile-env-value-0').placeholder, /Stored secret/);
     assert.ok(!dom.window.document.body.innerHTML.includes('secret-after-save'));
     assert.equal(q('profiles-list'), null, 'saved editor remains full width');
+    // Reopen with configured=false/runtime=true. Runtime must never seed the draft.
+    await click('profile-back-to-list');
+    await click('profile-select-' + savedProfile.profile_id);
+    const assertEnablement = (configured: boolean, runtime: boolean, pending: boolean) => {
+      assert.equal(q('profile-enabled').getAttribute('aria-pressed'), String(configured));
+      assert.equal(q('profile-enabled').textContent, configured ? 'Disable profile' : 'Enable profile');
+      assert.equal(q('profile-enablement').textContent.includes('Pending save'), pending);
+      assert.equal(q('profile-runtime-availability').textContent, 'Runtime availability: ' + (runtime ? 'Enabled' : 'Disabled'));
+    };
+    assertEnablement(false, true, false);
+    await click('profile-enabled');
+    assertEnablement(true, true, true);
+    await click('profile-enabled');
+    assertEnablement(false, true, false);
     await click('profile-enabled');
     await click('profile-save');
     await act(tick);
     assert.equal(savedProfile.enabled, true, 'enable action restores launch availability after save');
+    // Reopen with the inverse mismatch, configured=true/runtime=false.
+    status.find((p) => p.profile_id === savedProfile.profile_id)!.enabled = false;
+    await click('profile-back-to-list');
+    await click('profiles-refresh');
+    await act(tick);
+    await click('profile-select-' + savedProfile.profile_id);
+    assertEnablement(true, false, false);
+    await click('profile-enabled');
+    assertEnablement(false, false, true);
+    await click('profile-enabled');
+    assertEnablement(true, false, false);
+    // An unrelated edit must keep configured enablement in the sealed payload.
+    await change('profile-label', 'Updated work account');
+    await click('profile-save');
+    await act(tick);
+    assert.equal(savedProfile.enabled, true, 'runtime mismatch cannot silently disable a saved profile');
+    assertEnablement(true, false, false);
+    assert.equal(q('profile-test').disabled, true, 'configured enablement does not imply runtime availability');
+    status.find((p) => p.profile_id === savedProfile.profile_id)!.enabled = true;
+    await click('profile-back-to-list');
+    await click('profiles-refresh');
+    await act(tick);
+    await click('profile-select-' + savedProfile.profile_id);
+    discoveryRequests.length = 0;
     await click('profile-discover');
     assert.deepEqual(discoveryRequests, [
       { stage: 'providers', providers: ['claude'], profile_id: savedProfile.profile_id },
