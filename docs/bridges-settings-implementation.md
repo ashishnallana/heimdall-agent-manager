@@ -62,3 +62,13 @@ This is real React UI exercised with isolated in-memory API and Electron fixture
 ## Review evidence
 
 [Final 60-screenshot gallery](artifact://art_18e3ee4927aba581). Downloaded gallery roundtrip matched all 61 source files byte-for-byte and its entrypoint manifest. The gallery labels all screenshots as isolated API/desktop fixtures.
+
+## Active setup resume review correction
+
+Settings now offers an enabled **Resume setup** entry after **Back to Bridges** hides an active setup or unfinished identity review. It reopens the retained step without starting another operation, changing the target/options, or resetting the shared identity controller. Failed/cancelled setup remains reachable for its existing retry behavior.
+
+Regression coverage in `tests/e2e/bridges_layout_browser_check.mjs` exercises install → Back → resume, Settings/wizard host switches, pending identity lookup → Back → resume without duplicate requests, preserved lookup failure, return to install, cancellation/rollback and reopening the exact retry. Identity choice, pending attempt and approval wait retention are also covered by the existing shared-controller test.
+
+Validation: `npm run build` and `npm run typecheck` pass; focused bridge/setup/enrollment suite passes 78/78. Browser checks pass 80 responsive states across five widths (1440/1024/768/390/320) with isolated in-memory APIs and Electron operations. State screenshots reset modal scroll to the top so clipped offscreen controls are not measured as overlaps. [Resume regression screenshots](artifact://art_18e3eeecd054d3b2) contain 20 focused captures; downloaded bundle matched all 21 source files and its manifest.
+
+No native lifecycle operation, account mutation or live preview refresh was performed. Existing full implementation evidence and limits above remain applicable.

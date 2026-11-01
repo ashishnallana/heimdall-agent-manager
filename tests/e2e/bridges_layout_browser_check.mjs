@@ -35,6 +35,13 @@ try {
         await page.evaluate(async () => Promise.all(['Source Serif 4', 'IBM Plex Sans', 'IBM Plex Mono'].map((f) => document.fonts.load('14px "' + f + '"'))));
       }
       const check = async (state) => {
+        // Navigation may collapse a tall flow while the modal body is scrolled.
+        // Capture each state from the top rather than measuring clipped controls.
+        await page.evaluate(() => {
+          for (const element of document.querySelectorAll('*')) {
+            if (element.scrollTop) element.scrollTop = 0;
+          }
+        });
         const m = await page.evaluate(() => {
           const visible = (el) => el.getBoundingClientRect().width > 0 && el.getBoundingClientRect().height > 0;
           const containers = [...document.querySelectorAll('[data-debug-id="settings-desktop-content"], [data-debug-id="settings-bridges-panel"], [data-debug-id="settings-this-machine-card"], [data-debug-id="settings-local-bridge-flow"]')].filter(visible);
@@ -108,15 +115,51 @@ try {
         await q('setup-install-btn').click();
         await page.evaluate(() => window.bridgesFixture.emit({ type: 'progress', step: 'download', state: 'ok', message: 'Downloaded' }));
         await check('shared-install-progress');
+        const firstRun = await page.evaluate(() => window.bridgesFixture.runs[0]);
+        await q('settings-local-flow-close').click();
+        await q('settings-this-machine-resume-btn').waitFor();
+        assert.equal(await q('settings-this-machine-resume-btn').isEnabled(), true);
+        await check('setup-collapsed');
+        await q('settings-this-machine-resume-btn').click();
+        await q('setup-install-progress').waitFor();
+        await q('setup-install-cancel-btn').waitFor();
+        assert.deepEqual(await page.evaluate(() => window.bridgesFixture.runs), [firstRun]);
+        await check('setup-resumed');
         await page.evaluate(() => window.bridgesFixture.host('wizard'));
         await page.locator('[data-debug-id="setup-install-progress"]').waitFor();
         assert.equal(await page.locator('[data-debug-id="setup-selected-profile"]').textContent(), 'Profile: Default (unnamed)');
         assert.equal(await page.evaluate(() => window.bridgesFixture.runs.length), 1, 'host switch resumes without starting another operation');
         await page.evaluate(() => window.bridgesFixture.host('settings'));
         await q('setup-install-progress').waitFor();
+        await page.evaluate(() => window.bridgesFixture.emit({ type: 'pairing', code: 'ABCD-EFGH-JKLM-NP' }));
+        if (await q('setup-install-identity-btn').count()) await q('setup-install-identity-btn').click();
+        await q('setup-identity-waiting').waitFor();
+        await page.waitForFunction(() => window.bridgesFixture.requests.some((r) => r.url.endsWith('/device/pair-salts')));
+        const pendingRequests = await page.evaluate(() => window.bridgesFixture.requests.filter((r) => r.url.endsWith('/device/pair-salts')).length);
+        await q('settings-local-flow-close').click();
+        await q('settings-this-machine-resume-btn').click();
+        await q('setup-identity-waiting').waitFor();
+        assert.equal(await page.evaluate(() => window.bridgesFixture.requests.filter((r) => r.url.endsWith('/device/pair-salts')).length), pendingRequests, 'pending lookup survives closing without duplication');
+        await check('identity-pending-resumed');
+        await page.evaluate(() => window.bridgesFixture.finishPairLookup());
+        await q('setup-identity-lookup-error').waitFor();
+        const identityError = await q('setup-identity-lookup-error').textContent();
+        const requestsBeforeResume = await page.evaluate(() => window.bridgesFixture.requests.length);
+        await q('settings-local-flow-close').click();
+        await q('settings-this-machine-resume-btn').click();
+        await q('setup-identity-lookup-error').waitFor();
+        assert.equal(await q('setup-identity-lookup-error').textContent(), identityError, 'identity step and lookup state survive closing');
+        assert.equal(await page.evaluate(() => window.bridgesFixture.requests.length), requestsBeforeResume, 'resuming identity does not restart lookup');
+        assert.deepEqual(await page.evaluate(() => window.bridgesFixture.runs), [firstRun], 'identity resume keeps exact operation, target and options');
+        await check('identity-resumed');
+        await q('setup-identity-back-btn').click();
         await q('setup-install-cancel-btn').click();
         await q('setup-install-retry-btn').waitFor();
         await check('shared-install-cancelled');
+        await q('settings-local-flow-close').click();
+        await q('settings-this-machine-resume-btn').click();
+        await q('setup-install-retry-btn').click();
+        assert.deepEqual(await page.evaluate(() => window.bridgesFixture.runs), [firstRun, firstRun], 'cancelled setup retry retains its original target and options');
         assert.equal(await page.evaluate(() => Object.keys(localStorage).some((k) => k.includes('setup-seen'))), false);
       }
       await page.close();

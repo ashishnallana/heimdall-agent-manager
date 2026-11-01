@@ -22,6 +22,7 @@ const rows = [
 const requests: any[] = [];
 const runs: any[] = [];
 const listeners = new Set<(event: any) => void>();
+let finishPairLookup: (() => void) | undefined;
 let telemetry = true;
 let autoUpdate = true;
 let installed = scenario === 'installed' || scenario === 'unknown';
@@ -38,7 +39,7 @@ const manager = {
   onEvent: (fn: (event: any) => void) => { listeners.add(fn); return () => listeners.delete(fn); },
 };
 if (scenario !== 'browser') (window as any).odinApi = { bridgeManager: manager };
-(window as any).bridgesFixture = { requests, runs, emit: (event: any) => {
+(window as any).bridgesFixture = { requests, runs, finishPairLookup: () => finishPairLookup?.(), emit: (event: any) => {
   if (event.type === 'complete' && event.status) installed = true;
   listeners.forEach((fn) => fn(event));
 } };
@@ -47,6 +48,9 @@ window.fetch = async (input, init = {}) => {
   const body = init.body ? JSON.parse(String(init.body)) : null;
   requests.push({ url, method, body });
   const json = (data: any) => Response.json({ data });
+  if (url.endsWith('/device/pair-salts')) return new Promise<Response>((resolve) => {
+    finishPairLookup = () => resolve(json({ candidates: [], pairing_hub_origins: [] }));
+  });
   if (url.endsWith('/bridges')) return json({ bridges: rows });
   if (url.includes('/auto-update')) { if (body) autoUpdate = body.enabled; return json({ enabled: autoUpdate }); }
   if (url.includes('/telemetry')) { if (body) telemetry = body.enabled; return json({ enabled: telemetry }); }

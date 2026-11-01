@@ -27,6 +27,9 @@ export default function ThisMachineCard({ manager, onBridgeId, onSetupComplete }
   const [hubDraft, setHubDraft] = useState('');
   const [error, setError] = useState('');
   const busy = Boolean(session.operation || status?.busy);
+  // Closing the presentation must not strand the app-lifetime operation/review.
+  const resumableSetup = session.operation === 'setup' || hasBridgeIdentityReview()
+    || (session.lastRun?.kind === 'setup' && Boolean(session.wizard.failedStep || session.wizard.cancelled));
   const label = phase === 'loading' ? { label: 'Checking this machine', tone: 'muted' }
     : phase === 'absent' ? { label: 'No bridge linked to this account', tone: 'muted' }
     : phase === 'error' ? { label: 'Status unavailable', tone: 'danger' }
@@ -56,7 +59,8 @@ export default function ThisMachineCard({ manager, onBridgeId, onSetupComplete }
           {config ? <p data-debug-id="settings-this-machine-hub" className="break-all font-mono text-xs text-muted">{config.hubUrl}</p> : null}
         </div>
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 [&>button]:min-w-0 [&>button]:whitespace-normal [&>button]:h-auto [&>button]:min-h-8">
-          {phase === 'absent' && !flow ? <Button variant="primary" data-debug-id="settings-this-machine-setup-btn" disabled={busy} onClick={() => { setFlow(true); setStep('detect'); }}>Install bridge on this machine</Button> : null}
+          {!flow && resumableSetup ? <Button variant="primary" data-debug-id="settings-this-machine-resume-btn" onClick={() => setFlow(true)}>Resume setup</Button> : null}
+          {phase === 'absent' && !flow && !resumableSetup ? <Button variant="primary" data-debug-id="settings-this-machine-setup-btn" disabled={busy} onClick={() => { setFlow(true); setStep('detect'); }}>Install bridge on this machine</Button> : null}
           {phase === 'present' ? <>
             <Button variant="secondary" size="sm" data-debug-id="settings-this-machine-update-btn" disabled={busy} onClick={() => void run('update')}>Update</Button>
             <Button variant="secondary" size="sm" data-debug-id="settings-this-machine-reenroll-btn" disabled={busy} onClick={() => setConfirm('reenroll')}>Re-enroll</Button>
