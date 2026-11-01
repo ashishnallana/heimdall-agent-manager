@@ -10,8 +10,10 @@ The catalog is filtered by the connection's signed permissions. Task read adds
 `tasks.update`, `tasks.control` and `chains.configure`. Agent read adds
 `agents.list/get`; agent write adds `agents.create/update/archive`. Instance read
 adds `instances.list/get/operations`, `bridges.list` and `providers.list`.
-Instance control adds `instances.create/start/stop/reconfigure`. Remaining capability
-groups are foundations for subsequent increments and expose no tools yet.
+Instance control adds `instances.create/start/stop/reconfigure`. Memory and project
+read add `list/get`; their writes add `create/update/archive`. Issue read adds
+`list/get`; issue write adds `create/update/delete/comment`. Artifact permissions
+remain a foundation for the next increment and expose no tools yet.
 
 The optional scopes are `mcp:<resource>:read` and `mcp:<resource>:write` for tasks,
 agents, memories, projects, issues and artifacts. Runtime sessions use
@@ -166,6 +168,69 @@ do not claim exactly-once physical execution across process/network failures.
 Repository integration uses synthetic bridge transports to verify lifecycle,
 cross-provider moves, command ordering, recovery, lease isolation and revocation.
 Physical cross-machine execution remains the separate acceptance task.
+
+## Memories, projects and issues
+
+Resource writes require a stable `request_id` (up to 128 bytes); edits, archives,
+issue deletion and issue comments also require `expected_revision` from the
+resource's `get`. Revisions cover complete native records, project path
+associations, and native issue comment/vote counts. Same-timestamp native edits
+therefore conflict. Omitted fields remain unchanged; an empty description or
+evidence is sealed as an explicit clear. Unsupported fields, arbitrary metadata,
+owner/author overrides and noncanonical enum values are rejected.
+
+The live grant, account/directory, native mutations and metadata-only receipt
+share the same SQLite transaction. Plaintext prose is never stored in retry
+receipts. Receipts are checked before encryption and current-record lookups:
+an identical issue-delete or comment retry remains replayable after deletion.
+A changed payload with the same key conflicts. Memory attention projection runs
+only after the outer commit; failed commits discard it. Native issue-comment
+parent updates are checked so a failure rolls back the child and receipt too.
+
+Memory creation always uses native `pending` status and its default 24-hour
+expiry unless an explicit expiry is supplied. There is no approval/rejection
+tool or writable status field. Updating an owned pending/active memory follows
+native policy and preserves that status; editing active knowledge requires the
+explicit signed memory-write permission. System memories may be read and carry
+`read_only: true`; every mutation of them is refused. Archives retain rows and
+references, and archived/rejected memories retain native edit restrictions.
+
+All four target dimensions are available as `agent_ids`, `project_ids`,
+`bridge_ids` and `template_ids` (native template IDs use `tmpl_`). Each list has
+at most 100 unique, validated available/owned IDs. An empty list means broad
+applicability in that dimension; nonempty dimensions are ANDed. List filters
+preserve the native global-or-matching semantics. Title/description/body/evidence
+are encrypted under the verified current epoch, with a 64-KiB body limit and
+20-KiB description/evidence limits. Lists omit bodies/evidence; get returns them.
+
+Project names/descriptions are encrypted. Slugs, repository URLs, VCS kind and
+paths retain their native operational representation; legacy encrypted slugs
+are opened as typed labels. An omitted create slug receives a generated label
+without exposing the plaintext name. Explicit empty `repo_url`/`vcs_kind` clears
+them, while omission preserves them. `default_path` remains required and nonempty.
+Optional `bridge_paths` contains up to 20 owned `{bridge_id, path}` deltas:
+nonempty paths set an override, empty paths remove it. Changes remain unvalidated
+until native runtime preflight; this API neither reads the filesystem nor runs
+commands. Get exposes at most 100 associations and their validation flag/time,
+omitting raw validation diagnostics. Project archive retains dependent records.
+
+Issue status is exactly `new`, `fixed` or `obsolete`; native close/reopen times
+apply. Scope is exactly `global`, `project`, `agent_id` or `bridge_id`, with a
+matching owned target (global requires an empty target). Optional chain links
+must also be owned. Changing scope requires a compatible explicit target;
+no foreign reference or implicit owner fallback is accepted. Comments use the
+delegated user's identity and cannot impersonate an agent. `issues.delete` is
+explicitly destructive and follows native child deletion semantics.
+
+Lists use stable owner/tool/filter-bound created-time-plus-ID cursors, default
+50/max 100 records and a 1-MiB stored-text page budget. Issue lists provide a
+512-byte UTF-8 description preview after decryption; `issues.get` returns the
+full description. Comments are opt-in through `include_comments` and page
+separately with `comment_limit`/`comment_cursor` and `comments_next_cursor`, bound
+to the parent issue. Oversized legacy prose returns a typed `*_error` marker
+instead of an unbounded decrypt job. New typed worker jobs bind exact resource
+tools to signed rights, project path metadata and nested issue comment IDs,
+authors and cursors; unknown private fields are never forwarded.
 
 ## Task tools
 

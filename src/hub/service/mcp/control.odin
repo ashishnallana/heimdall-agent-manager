@@ -13,9 +13,12 @@ import tc "odin_test:hub/service/taskchain"
 import vault "odin_test:lib/vault"
 import agent "odin_test:hub/service/agent"
 import provider "odin_test:hub/service/provider"
+import content "odin_test:hub/service/content"
+import project "odin_test:hub/service/project"
+import issue "odin_test:hub/service/issue"
 
-Control_Service :: struct {chains:^tc.Taskchain_Service,agents:^agent.Agent_Service,providers:^provider.Provider_Service,bridges:^iface.Bridge_Repository}
-Control_Arguments :: struct {chain_id,title,description,cursor,task_id,request_id,body,state,assignee_agent_id,comment_cursor:string,limit,timeout_ms,comment_limit:int,task_write:Task_Tool_Arguments,catalog:Catalog_Arguments,runtime:Runtime_Arguments,include_configuration,include_comments:bool}
+Control_Service :: struct {chains:^tc.Taskchain_Service,agents:^agent.Agent_Service,providers:^provider.Provider_Service,bridges:^iface.Bridge_Repository,content:^content.Content_Service,projects:^project.Project_Service,issues:^issue.Issue_Service,resource_ctx:rawptr,resource_page:iface.Resource_Page_Proc}
+Control_Arguments :: struct {chain_id,title,description,cursor,task_id,request_id,body,state,assignee_agent_id,comment_cursor:string,limit,timeout_ms,comment_limit:int,task_write:Task_Tool_Arguments,catalog:Catalog_Arguments,runtime:Runtime_Arguments,resource:Resource_Arguments,include_configuration,include_comments:bool}
 Control_Data :: vault.Control_Data
 control_auth :: proc(owner:string)->contracts.Auth_Context {return {kind=.Internal_User,user_id=owner}}
 control_chain :: proc(c:domain.Task_Chain)->json.Object {
@@ -27,6 +30,7 @@ control_id_ok :: proc(id:string)->bool {return strings.has_prefix(id,"chain_") &
 // Services authorize every chain/task/comment before any decryption dispatch.
 // Bounded projections deliberately omit briefs, facets and other nested data.
 control_read :: proc(s:^Control_Service,owner,name:string,args:Control_Arguments)->(Control_Data,string) {
+	if resource_tool(name) do return resource_read(s,owner,name,args.resource)
 	if catalog_tool(name) do return control_read_catalog(s,owner,name,args.catalog)
 	if name=="tasks.list" || name=="tasks.get" do return control_read_tasks(s,owner,name,args)
 	principal:=control_auth(owner)
@@ -80,7 +84,7 @@ control_read :: proc(s:^Control_Service,owner,name:string,args:Control_Arguments
 	return out,""
 }
 control_transform :: vault.control_transform_data
-Control_Transform :: struct {data:Control_Data,title,description,tool,body:string,seal:bool,task_fields,agent_fields:json.Object}
+Control_Transform :: struct {data:Control_Data,title,description,tool,body:string,seal:bool,task_fields,agent_fields,resource_fields:json.Object}
 
 control_payload_ok :: proc(data:Control_Data)->bool {
 	encoded,err:=json.marshal(data,allocator=context.temp_allocator)
@@ -95,7 +99,11 @@ control_record_matches :: proc(expected,actual:json.Object,kind:Hosted_Record_Ki
 		for k in allowed do if k==key do found=true
 		for k in text do if k==key do is_text=true
 		if !found do return false
-		if kind==.Provider && key=="models" {
+		if kind==.Issue && key=="comments" {
+			items,typed:=value.(json.Array);original,original_typed:=expected[key].(json.Array)
+			if !typed || !original_typed || len(items)!=len(original) do return false
+			for item,i in items {row,ok:=item.(json.Object);source,source_ok:=original[i].(json.Object);if !ok || !source_ok || !control_record_matches(source,row,.Issue_Comment) do return false}
+		} else if kind==.Provider && key=="models" {
 			items,typed:=value.(json.Array);expected_items,expected_typed:=expected[key].(json.Array)
 			if !typed || !expected_typed || len(items)!=len(expected_items) do return false
 			for item,i in items {
@@ -110,7 +118,8 @@ control_record_matches :: proc(expected,actual:json.Object,kind:Hosted_Record_Ki
 			if !typed || !expected_typed || len(items)!=len(expected_items) do return false
 			for item in items do if _,string_item:=item.(json.String);!string_item do return false
 		} else if is_text {
-			if _,ok:=value.(json.String);!ok do return false
+			text,ok:=value.(json.String);if !ok do return false
+			if kind==.Issue && key=="description" {if limit,typed:=expected["description_limit"].(json.Integer);typed && limit==512 && len(text)>512 do return false}
 		} else if !tc.json_values_equal(expected[key],value) do return false
 	}
 	for key in allowed do if _,exists:=expected[key];exists {
@@ -170,6 +179,7 @@ control_sealed_ok :: proc(view:Access_View,text:string)->(title,description:stri
 }
 control_hosted_transform :: proc(ctx:rawptr,kr:^vault.Vault_Keyring)->(string,bool) {
 	op:=(^Control_Transform)(ctx)
+	if op.resource_fields!=nil do return vault.control_seal_resource_fields(kr,op.tool,op.resource_fields)
 	if op.agent_fields!=nil do return vault.control_seal_agent_fields(kr,op.agent_fields)
 	if op.task_fields!=nil do return vault.control_seal_task_fields(kr,op.task_fields)
 	if op.tool=="tasks.comment" {

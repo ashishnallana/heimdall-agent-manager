@@ -27,6 +27,7 @@ MCP_Control_Handlers :: struct {
 	mutate_task:mcp.Control_Task_Mutate_Proc,
 	mutate_catalog:mcp.Catalog_Mutate_Proc,
 	runtime:mcp.Runtime_Proc,
+	mutate_resource:mcp.Resource_Mutate_Proc,
 	// Optional approved enrolled-bridge transport. It receives no client token.
 	bridge_ctx:rawptr,
 	bridge_transform:proc(ctx:rawptr,job:vault.Control_Job)->(string,bool),
@@ -61,6 +62,7 @@ mcp_id_ok :: proc(id:json.Value)->bool {
 	return false
 }
 mcp_arguments :: proc(name:string,value:json.Value)->(mcp.Control_Arguments,bool) {
+	if mcp.resource_tool(name) do return mcp_resource_arguments(name,value)
 	if mcp.runtime_tool(name) do return mcp_runtime_arguments(name,value)
 	if mcp.catalog_tool(name) do return mcp_catalog_arguments(name,value)
 	if name=="tasks.create" || name=="tasks.update" || name=="tasks.control" || name=="chains.configure" do return mcp_task_write_arguments(name,value)
@@ -202,6 +204,7 @@ mcp_control_handler :: proc(ctx:rawptr,req:Request)->(response:Response) {
 	handle,admitted:=mcp.request_begin(&h.requests,key,string(encoded_id))
 	if !admitted do return mcp_tool_result(id,"busy: request is already active or capacity is exhausted",true)
 	defer mcp.request_end(&h.requests,handle)
+	if mcp.resource_write(string(name)) do return mcp_resource_write_call(h,id,raw,view,string(name),args.resource,handle,started)
 	if mcp.runtime_tool(string(name)) {
 		if h.runtime==nil do return mcp_tool_result(id,"request_failed",true)
 		cancellation:=MCP_Runtime_Cancellation{h=h,handle=handle,started=started}
@@ -238,6 +241,7 @@ mcp_control_handler :: proc(ctx:rawptr,req:Request)->(response:Response) {
 	op:=mcp.Control_Transform{seal=string(name)=="chains.create",title=args.title,description=args.description}
 	if string(name)=="tasks.get" || string(name)=="tasks.list" do op.tool=string(name)
 	if mcp.catalog_tool(string(name)) do op.tool=string(name)
+	if mcp.resource_tool(string(name)) do op.tool=string(name)
 	if !op.seal {
 		code:string
 		data,code=mcp.control_read(&h.control,view.owner,string(name),args)

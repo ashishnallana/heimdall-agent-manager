@@ -55,6 +55,12 @@ configure_mcp_delegation :: proc(graph: ^App_Graph) -> (bool, string) {
 	graph.mcp_control_handlers.mutate_task=mcp_mutate_task
 	graph.mcp_control_handlers.mutate_catalog=mcp_mutate_catalog
 	graph.mcp_control_handlers.runtime=mcp_runtime_call
+	graph.mcp_control_handlers.mutate_resource=mcp_mutate_resource
+	graph.mcp_control_handlers.control.content=&graph.content
+	graph.mcp_control_handlers.control.projects=&graph.projects
+	graph.mcp_control_handlers.control.issues=&graph.issues
+	graph.mcp_control_handlers.control.resource_ctx=&graph.db
+	graph.mcp_control_handlers.control.resource_page=sqlite.mcp_resource_refs
 	valid=true
 	return true,""
 }

@@ -1,3 +1,4 @@
+import { resourceSpecs, resourceToolKinds, sealResourceFields } from './mcpResourceFields.ts';
 import { mcpConsentVersion, mcpConsentDomain, validMcpScopes } from './mcpCapabilities.ts';
 import type { DeviceIdentity } from './deviceIdentity.ts';
 import type { VerifiedChain } from './vaultDirectoryVerify.ts';
@@ -8,7 +9,7 @@ import { decryptVaultBytes, encryptVaultText, findVaultTokens, replaceVaultToken
 
 export interface McpWorkerJob {
   request_id: string; generation: string; owner: string; resource: string; grant: string; head: string;
-  operation: 'read' | 'seal' | 'seal_comment' | 'seal_task' | 'seal_agent'; payload: string; digest: string; revision: number; deadline_ms: number;
+  operation: 'read' | 'seal' | 'seal_comment' | 'seal_task' | 'seal_agent' | 'seal_resource'; payload: string; digest: string; revision: number; deadline_ms: number;
   tool?: string;
   epoch: number; consent: string; signature: string; directory: Record<string, unknown>;
 }
@@ -20,6 +21,10 @@ export async function mcpJobDigest(j: McpWorkerJob): Promise<string> {
 }
 export function mcpJobScopeAllowed(scope: string, tool: string | undefined, operation: string): boolean {
   if (!validMcpScopes(scope)) return false;
+  for (const [resource, tools] of Object.entries({ memories: ['create', 'update'], projects: ['create', 'update'], issues: ['create', 'update', 'comment'] })) {
+    if (tools.some(action => tool === `${resource}.${action}`)) return operation === 'seal_resource' && scope.split(' ').includes(`mcp:${resource}:write`);
+    if ([`${resource}.list`, `${resource}.get`].includes(tool || '')) return operation === 'read' && scope.split(' ').includes(`mcp:${resource}:read`);
+  }
   if (!tool) return operation === 'read' || operation === 'seal';
   if (['agents.list', 'agents.get'].includes(tool)) return operation === 'read' && scope.split(' ').includes('mcp:agents:read');
   if (['bridges.list', 'providers.list', 'instances.list', 'instances.get'].includes(tool)) return operation === 'read' && scope.split(' ').includes('mcp:instances:read');
@@ -34,7 +39,7 @@ export function mcpJobScopeAllowed(scope: string, tool: string | undefined, oper
  * against this device's independently pinned, freshly verified directory. */
 export async function verifyMcpWorkerJob(j: McpWorkerJob, identity: DeviceIdentity, chain: VerifiedChain, resource: string, now = Date.now()): Promise<void> {
   const id = (s: unknown) => typeof s === 'string' && /^[A-Za-z0-9_.:-]{1,256}$/.test(s);
-  if (!id(j.request_id) || !id(j.generation) || j.owner !== identity.userId || j.owner !== chain.userId || j.resource !== resource || j.head !== chain.headHash || j.epoch !== chain.currentEpoch || !Number.isSafeInteger(j.deadline_ms) || j.deadline_ms <= now || j.deadline_ms > now + 5000 || typeof j.payload !== 'string' || j.payload.length > 4 * 1024 * 1024 || !['read', 'seal', 'seal_comment', 'seal_task', 'seal_agent'].includes(j.operation) || j.digest !== await mcpJobDigest(j)) throw new Error('Stale or mismatched MCP request');
+  if (!id(j.request_id) || !id(j.generation) || j.owner !== identity.userId || j.owner !== chain.userId || j.resource !== resource || j.head !== chain.headHash || j.epoch !== chain.currentEpoch || !Number.isSafeInteger(j.deadline_ms) || j.deadline_ms <= now || j.deadline_ms > now + 5000 || typeof j.payload !== 'string' || j.payload.length > 4 * 1024 * 1024 || !['read', 'seal', 'seal_comment', 'seal_task', 'seal_agent', 'seal_resource'].includes(j.operation) || j.digest !== await mcpJobDigest(j)) throw new Error('Stale or mismatched MCP request');
   const me = chain.trusted.get(identity.deviceId);
   if (!me || !kindPolicy(me.kind).receivesWrap) throw new Error('Approved device required');
   const c = JSON.parse(j.consent);
@@ -51,14 +56,15 @@ const taskFields = ['task_id', 'title', 'description', 'state', 'kind', 'attempt
 const taskDetailFields = [...taskFields, 'chain_id', 'goal', 'acceptance', 'inputs', 'review_roles', 'reviewers', 'assignee_agent_id', 'bridge_id', 'depends_on', 'publish_state', 'priority', 'revision', 'blocked_kind', 'blocked_ref', 'blocked_reason', 'blocked_since', 'blocked_since_ms', 'hold_reason', 'hold_since_ms', 'hold_by', 'checkpoint_requested', 'allowed_actions', 'latest_attempt_no', 'latest_attempt_holder_instance_id', 'latest_attempt_outcome', 'latest_attempt_started_at', 'latest_attempt_ended_at', 'latest_attempt_summary', 'latest_attempt_summary_error'];
 const commentFields = ['comment_id', 'chain_id', 'task_id', 'body', 'created_at', 'author_kind', 'author_user_id', 'author_agent_instance_id', 'delegated_client_id', 'delegated_grant_id', 'body_error', 'body_bytes'];
 const catalogFields: Record<string, { fields: string[]; text: string[] }> = {
+  ...resourceSpecs,
   agent: { fields: ['agent_id', 'name', 'slug', 'template_id', 'instructions', 'instructions_error', 'state', 'permission_mode', 'created_at', 'updated_at', 'revision', 'supports'], text: ['name', 'slug', 'instructions'] },
   instance: { fields: ['agent_instance_id', 'agent_id', 'bridge_id', 'display_name', 'provider', 'provider_profile', 'model', 'runtime_status', 'startup_status', 'activity_status', 'project_id', 'chain_id', 'current_task_id', 'current_task_role', 'revision', 'configuration_revision', 'permission_mode', 'created_at', 'updated_at', 'last_seen_at'], text: ['display_name'] },
   bridge: { fields: ['bridge_id', 'label', 'status', 'machine_os', 'machine_arch', 'version', 'plan_disabled', 'enrollment_pending', 'eligible', 'created_at', 'last_seen_at'], text: ['label'] },
   provider: { fields: ['bridge_id', 'provider', 'provider_profile', 'display_name', 'label', 'enabled', 'profile_state', 'detection_state', 'models_state', 'models_source', 'models_checked_at', 'eligible', 'models', 'models_next_cursor'], text: ['display_name', 'label'] },
 };
-const catalogToolKinds: Record<string, string> = { 'agents.list': 'agent', 'agents.get': 'agent', 'instances.list': 'instance', 'instances.get': 'instance', 'bridges.list': 'bridge', 'providers.list': 'provider' };
-async function readable(raw: Record<string, unknown>, fields: string[], textFields: string[], keyring: VaultKeyring, owner: string): Promise<Record<string, unknown>> {
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw) || (raw.owner_user_id !== undefined && raw.owner_user_id !== owner)) throw new Error('MCP record owner mismatch');
+const catalogToolKinds: Record<string, string> = { ...resourceToolKinds, 'agents.list': 'agent', 'agents.get': 'agent', 'instances.list': 'instance', 'instances.get': 'instance', 'bridges.list': 'bridge', 'providers.list': 'provider' };
+async function readable(raw: Record<string, unknown>, fields: string[], textFields: string[], keyring: VaultKeyring, owner: string, allowSystem = false): Promise<Record<string, unknown>> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw) || (raw.owner_user_id !== undefined && raw.owner_user_id !== owner && !(allowSystem && raw.owner_user_id === 'system' && raw.read_only === true))) throw new Error('MCP record owner mismatch');
   const out: Record<string, unknown> = {};
   for (const key of fields) if (raw[key] !== undefined) out[key] = raw[key];
   for (const key of textFields) {
@@ -84,6 +90,7 @@ async function readable(raw: Record<string, unknown>, fields: string[], textFiel
 }
 export async function transformMcpWorkerJob(job: McpWorkerJob, keyring: VaultKeyring): Promise<string> {
   const input = JSON.parse(job.payload);
+  if (job.operation === 'seal_resource') return sealResourceFields(job.tool || '', input, keyring);
   if (job.operation === 'seal_agent') {
     if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('Invalid agent fields');
     const sealed: Record<string, string> = {};
@@ -128,7 +135,33 @@ export async function transformMcpWorkerJob(job: McpWorkerJob, keyring: VaultKey
     if (input.records !== undefined && !Array.isArray(input.records)) throw new Error('Invalid catalog records');
     const spec = catalogFields[expectedKind];
     out.records = await Promise.all((input.records || []).map(async (record: Record<string, unknown>) => {
-      const row = await readable(expectedKind === 'provider' ? { ...record, models: undefined } : record, spec.fields, spec.text, keyring, job.owner);
+      const source = expectedKind === 'provider' ? { ...record, models: undefined } : expectedKind === 'issue' ? { ...record, comments: undefined } : record;
+      const row = await readable(source, spec.fields, spec.text, keyring, job.owner, expectedKind === 'memory');
+      if (expectedKind === 'issue' && record.description_limit !== undefined) {
+        if (record.description_limit !== 512) throw new Error('Invalid issue preview limit');
+        if (typeof row.description === 'string') {
+          const bytes = new TextEncoder().encode(row.description);
+          if (bytes.length > 512) { let end = 512; while (end > 0 && (bytes[end] & 0xc0) === 0x80) end--; row.description = new TextDecoder().decode(bytes.subarray(0, end)); }
+          bytes.fill(0);
+        }
+      }
+      if (expectedKind === 'memory') {
+        for (const field of ['agent_ids', 'project_ids', 'bridge_ids', 'template_ids']) {
+          const ids = record[field];
+          if (ids !== undefined && (!Array.isArray(ids) || ids.length > 100 || ids.some(id => typeof id !== 'string' || id.length > 256))) throw new Error('Invalid memory targets');
+        }
+      }
+      if (expectedKind === 'issue' && record.comments !== undefined) {
+        if (!Array.isArray(record.comments) || record.comments.length > 100) throw new Error('Invalid issue comments');
+        const commentSpec = resourceSpecs.issue_comment;
+        row.comments = await Promise.all(record.comments.map(comment => readable(comment, commentSpec.fields, commentSpec.text, keyring, job.owner)));
+      }
+      if (expectedKind === 'project' && record.bridge_paths !== undefined) {
+        if (!Array.isArray(record.bridge_paths) || record.bridge_paths.length > 100) throw new Error('Invalid bridge paths');
+        for (const path of record.bridge_paths) {
+          if (!path || typeof path !== 'object' || Object.keys(path).length !== 5 || typeof path.is_validated !== 'boolean' || ['bridge_id', 'path', 'last_validated_at', 'updated_at'].some(key => typeof path[key] !== 'string' || path[key].length > 4096)) throw new Error('Invalid bridge path');
+        }
+      }
       if (expectedKind === 'provider' && record.models !== undefined) {
         if (!Array.isArray(record.models) || record.models.length > 100) throw new Error('Invalid provider models');
         row.models = await Promise.all(record.models.map(model => {

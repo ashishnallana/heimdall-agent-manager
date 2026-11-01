@@ -8,6 +8,10 @@ CONTROL_TEXT_BASIC := [?]string{"title","description"}
 CONTROL_TEXT_COMMENT := [?]string{"body"}
 CONTROL_TEXT_DETAIL := [?]string{"title","description","goal","blocked_reason","hold_reason","latest_attempt_summary"}
 control_record_fields :: proc(kind:Control_Record_Kind)->([]string,[]string) {
+	if kind==.Memory do return CONTROL_FIELDS_MEMORY[:],CONTROL_TEXT_MEMORY[:]
+	if kind==.Project do return CONTROL_FIELDS_PROJECT[:],CONTROL_TEXT_PROJECT[:]
+	if kind==.Issue do return CONTROL_FIELDS_ISSUE[:],CONTROL_TEXT_ISSUE[:]
+	if kind==.Issue_Comment do return CONTROL_FIELDS_ISSUE_COMMENT[:],CONTROL_TEXT_ISSUE_COMMENT[:]
 	if kind==.Agent do return CONTROL_FIELDS_AGENT[:],CONTROL_TEXT_AGENT[:]
 	if kind==.Instance do return CONTROL_FIELDS_INSTANCE[:],CONTROL_TEXT_INSTANCE[:]
 	if kind==.Bridge do return CONTROL_FIELDS_BRIDGE[:],CONTROL_TEXT_BRIDGE[:]

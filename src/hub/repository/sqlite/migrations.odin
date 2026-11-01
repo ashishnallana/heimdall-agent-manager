@@ -607,10 +607,11 @@ MIGRATION_178_BRIDGE_SUNSET_RECEIPTS :: #load("migrations/178_bridge_sunset_rece
 MIGRATION_179_MCP_MUTATION_RECEIPTS :: #load("migrations/179_mcp_mutation_receipts.sql", string)
 MIGRATION_180_MCP_TASK_CONTRACT :: #load("migrations/180_mcp_task_contract.sql", string)
 MIGRATION_181_MCP_RUNTIME_INTENTS :: #load("migrations/181_mcp_runtime_intents.sql", string)
+MIGRATION_182_MCP_RESOURCE_PAGES :: #load("migrations/182_mcp_resource_pages.sql", string)
 
 MIGRATION_177_EXTENSION_VERSION_SYNC :: #load("migrations/177_extension_version_sync_0_5_33.sql", string)
 
-migration_order :: [185]string {
+migration_order :: [186]string {
 	"001_foundation.sql",
 	"002_owner_scoped_core.sql",
 	"003_device_tokens.sql",
@@ -796,6 +797,7 @@ migration_order :: [185]string {
 	"179_mcp_mutation_receipts.sql",
 	"180_mcp_task_contract.sql",
 	"181_mcp_runtime_intents.sql",
+	"182_mcp_resource_pages.sql",
 }
 
 // stop_before is a TEST SEAM: when non-empty, the apply loop stops in front of
@@ -1290,6 +1292,7 @@ migration_sql :: proc(name, migrations_dir: string) -> string {
 	if name == "179_mcp_mutation_receipts.sql" do return strings.clone(MIGRATION_179_MCP_MUTATION_RECEIPTS)
 	if name == "180_mcp_task_contract.sql" do return strings.clone(MIGRATION_180_MCP_TASK_CONTRACT)
 	if name == "181_mcp_runtime_intents.sql" do return strings.clone(MIGRATION_181_MCP_RUNTIME_INTENTS)
+	if name == "182_mcp_resource_pages.sql" do return strings.clone(MIGRATION_182_MCP_RESOURCE_PAGES)
 	if name == "174_extension_version_sync_0_5_32.sql" do return strings.clone(MIGRATION_174_EXTENSION_VERSION_SYNC)
 	if name == "173_extension_version_sync_0_5_31.sql" do return strings.clone(MIGRATION_173_EXTENSION_VERSION_SYNC)
 	if name == "175_mcp_delegated_credentials.sql" do return strings.clone(MIGRATION_175_MCP)

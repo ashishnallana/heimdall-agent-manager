@@ -109,6 +109,7 @@ mcp_control_request :: proc(h:^MCP_Control_Handlers,token,body:string)->Response
 test_mcp_control_hosted_four_tools_ownership_creation_and_stateless_restart :: proc(t:^testing.T) {
 	context.allocator=context.temp_allocator
 	f:=mcp_control_fixture(t);defer mcp_control_close(f)
+	mcp_resource_legacy_assertions(t,f)
 	init:=mcp_control_request(&f.h,f.token,`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}`)
 	testing.expect(t,init.status==200 && strings.contains(init.body,"2025-06-18"))
 	list:=mcp_control_request(&f.h,f.token,`{"jsonrpc":"2.0","id":2,"method":"tools/list"}`)

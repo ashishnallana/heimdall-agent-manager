@@ -9,6 +9,7 @@ Issue_Update_Proc :: proc(ctx: rawptr, issue: domain.Issue) -> (domain.Issue, bo
 Issue_Delete_Proc :: proc(ctx: rawptr, issue_id: domain.Issue_ID, owner_user_id: domain.User_ID) -> (bool, domain.Domain_Error)
 
 Issue_Comment_Save_Proc :: proc(ctx: rawptr, comment: domain.Issue_Comment) -> (domain.Issue_Comment, bool, domain.Domain_Error)
+Issue_Comment_Get_Proc :: proc(ctx:rawptr,id:domain.Issue_Comment_ID,owner:domain.User_ID)->(domain.Issue_Comment,bool,domain.Domain_Error)
 Issue_Comment_List_Proc :: proc(ctx: rawptr, issue_id: domain.Issue_ID, owner_user_id: domain.User_ID) -> ([]domain.Issue_Comment, domain.Domain_Error)
 Issue_Comment_Delete_Proc :: proc(ctx: rawptr, comment_id: domain.Issue_Comment_ID, owner_user_id: domain.User_ID) -> (bool, domain.Domain_Error)
 
@@ -19,6 +20,7 @@ Issue_Vote_Count_Proc :: proc(ctx: rawptr, issue_id: domain.Issue_ID) -> (int, d
 Issue_Vote_List_Proc :: proc(ctx: rawptr, issue_id: domain.Issue_ID) -> ([]domain.Issue_Vote, domain.Domain_Error)
 
 Issue_Repository :: struct {
+	get_comment:Issue_Comment_Get_Proc,
 	ctx:            rawptr,
 	save:           Issue_Save_Proc,
 	get:            Issue_Get_Proc,

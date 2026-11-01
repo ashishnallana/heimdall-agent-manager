@@ -42,7 +42,7 @@ control_text :: proc(kr:^Vault_Keyring,text:string)->(string,bool) {
 	return strings.to_string(b),true
 }
 
-Control_Record_Kind :: enum {Chain,Task,Comment,Task_Detail,Agent,Instance,Bridge,Provider}
+Control_Record_Kind :: enum {Chain,Task,Comment,Task_Detail,Agent,Instance,Bridge,Provider,Memory,Project,Issue,Issue_Comment}
 // Return a request-owned JSON encoding. Callers must wipe it after forwarding or
 // on any discarded-result path; never cache it. Input metadata is not mutated.
 control_record_json :: proc(kr:^Vault_Keyring,kind:Control_Record_Kind,record:json.Object)->(string,bool) {
@@ -51,7 +51,8 @@ control_record_json :: proc(kr:^Vault_Keyring,kind:Control_Record_Kind,record:js
 		value,present:=record[key]
 		if !present do continue
 		owner,valid:=value.(json.String)
-		if !valid || string(owner)!=keyring_user_id(kr) do return "",false
+		read_only,_:=record["read_only"].(json.Boolean)
+		if !valid || string(owner)!=keyring_user_id(kr) && !(kind==.Memory && string(owner)=="system" && bool(read_only)) do return "",false
 	}
 	out:=make(json.Object,context.temp_allocator)
 	// Match the local four-tool POC's projection; never return full task briefs,
@@ -60,6 +61,8 @@ control_record_json :: proc(kr:^Vault_Keyring,kind:Control_Record_Kind,record:js
 	for key in allowed do if value,present:=record[key];present do out[key]=value
 	opened:=make([dynamic]string,context.temp_allocator)
 	defer for plain in opened do if plain!="" do crypto.zero_explicit(raw_data(plain),len(plain))
+	nested:=make([dynamic]json.Value,context.temp_allocator)
+	defer for value in nested do control_wipe_value(value)
 	for key in fields {
 		value,exists:=out[key]
 		if !exists || value==nil do continue
@@ -95,6 +98,40 @@ control_record_json :: proc(kr:^Vault_Keyring,kind:Control_Record_Kind,record:js
 				append(&readable,json.Object{"model_id"=id,"label"=json.String(plain),"state"=state,"rank"=rank,"eligible"=eligible})
 			}
 			out["models"]=readable
+		}
+	}
+	if kind==.Issue {
+		if value,present:=out["description_limit"];present {
+			limit,typed:=value.(json.Integer);if !typed || limit!=512 do return "",false
+			if text,typed:=out["description"].(json.String);typed && len(text)>512 {
+				end:=512;for end>0 && u8(text[end]) & 0xc0==0x80 do end-=1
+				out["description"]=json.String(text[:end])
+			}
+		}
+		if value,present:=out["comments"];present {
+			items,typed:=value.(json.Array);if !typed || len(items)>100 do return "",false
+			readable:=make(json.Array,0,len(items),context.temp_allocator)
+			for item in items {
+				row,object:=item.(json.Object);if !object do return "",false
+				text,ok:=control_record_json(kr,.Issue_Comment,row);if !ok do return "",false
+				plain,err:=json.parse_string(text,parse_integers=true,allocator=context.temp_allocator)
+				append(&nested,plain)
+				append(&opened,text);if err!=nil do return "",false
+				append(&readable,plain)
+			}
+			out["comments"]=readable
+		}
+	}
+	if kind==.Project {
+		if value,present:=out["bridge_paths"];present {
+			items,typed:=value.(json.Array);if !typed || len(items)>100 do return "",false
+			for item in items {row,ok:=item.(json.Object);if !ok || len(row)!=5 do return "",false;for key in ([]string{"bridge_id","path","last_validated_at","updated_at"}) do if text,typed:=row[key].(json.String);!typed || len(text)>4096 do return "",false;if _,typed:=row["is_validated"].(json.Boolean);!typed do return "",false}
+		}
+	}
+	if kind==.Memory {
+		for key in ([]string{"agent_ids","project_ids","bridge_ids","template_ids"}) do if value,present:=out[key];present {
+			items,typed:=value.(json.Array);if !typed || len(items)>100 do return "",false
+			for item in items do if text,typed:=item.(json.String);!typed || len(text)>256 do return "",false
 		}
 	}
 	data,err:=json.marshal(out,allocator=context.temp_allocator)

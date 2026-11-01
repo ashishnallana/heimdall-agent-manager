@@ -14,6 +14,7 @@ Issue_Repo_SQLite :: struct {
 new_issue_repository :: proc(impl: ^Issue_Repo_SQLite, conn: ^Conn) -> iface.Issue_Repository {
 	impl.conn = conn
 	return iface.Issue_Repository{
+		get_comment=issue_comment_get_sqlite,
 		ctx            = rawptr(impl),
 		save           = issue_save_sqlite,
 		get            = issue_get_sqlite,

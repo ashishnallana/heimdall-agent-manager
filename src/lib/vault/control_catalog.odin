@@ -12,8 +12,8 @@ CONTROL_TEXT_BRIDGE := [?]string{"label"}
 CONTROL_FIELDS_PROVIDER := [?]string{"bridge_id","provider","provider_profile","display_name","label","enabled","profile_state","detection_state","models_state","models_source","models_checked_at","eligible","models","models_next_cursor"}
 CONTROL_TEXT_PROVIDER := [?]string{"display_name","label"}
 
-control_catalog_kind :: proc(kind:string)->(Control_Record_Kind,bool) {switch kind {case "agent":return .Agent,true;case "instance":return .Instance,true;case "bridge":return .Bridge,true;case "provider":return .Provider,true};return {},false}
-control_catalog_tool_kind :: proc(tool:string)->string {switch tool {case "agents.list","agents.get":return "agent";case "instances.list","instances.get":return "instance";case "bridges.list":return "bridge";case "providers.list":return "provider"};return ""}
+control_catalog_kind :: proc(kind:string)->(Control_Record_Kind,bool) {switch kind {case "agent":return .Agent,true;case "instance":return .Instance,true;case "bridge":return .Bridge,true;case "provider":return .Provider,true;case "memory":return .Memory,true;case "project":return .Project,true;case "issue":return .Issue,true};return {},false}
+control_catalog_tool_kind :: proc(tool:string)->string {switch tool {case "agents.list","agents.get":return "agent";case "instances.list","instances.get":return "instance";case "bridges.list":return "bridge";case "providers.list":return "provider";case "memories.list","memories.get":return "memory";case "projects.list","projects.get":return "project";case "issues.list","issues.get":return "issue"};return ""}
 control_catalog_data_ok :: proc(tool:string,data:Control_Data)->bool {
 	kind:=control_catalog_tool_kind(tool)
 	if data.records_kind!=kind do return false
