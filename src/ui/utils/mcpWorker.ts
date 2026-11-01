@@ -1,3 +1,4 @@
+import { mcpConsentVersion, mcpConsentDomain } from './mcpCapabilities.ts';
 import type { DeviceIdentity } from './deviceIdentity.ts';
 import type { VerifiedChain } from './vaultDirectoryVerify.ts';
 import type { VaultKeyring } from './vaultKeyring.ts';
@@ -26,10 +27,10 @@ export async function verifyMcpWorkerJob(j: McpWorkerJob, identity: DeviceIdenti
   const c = JSON.parse(j.consent);
   const canonical = JSON.stringify({ v: c.v, owner: c.owner, vault_id: c.vault_id, client: c.client, resource: c.resource, scope: c.scope, grant: c.grant, family: c.family, revision: c.revision, mode: c.mode, recipient: c.recipient, recipient_public_key: c.recipient_public_key, approver: c.approver, directory_version: c.directory_version, directory_head: c.directory_head, epoch: c.epoch, issued_ms: c.issued_ms, wrap_sha256: c.wrap_sha256 });
   const signer = chain.trusted.get(c.approver);
-  if (canonical !== j.consent || c.v !== 1 || c.mode !== 'device' || c.owner !== chain.userId || c.vault_id !== chain.vaultId || c.client === '' || typeof c.client !== 'string' || typeof c.family !== 'string' || !c.family || c.resource !== resource || c.scope !== 'mcp:chains' || c.grant !== j.grant || c.revision !== j.revision || !Number.isSafeInteger(c.revision) || c.revision < 1 || !Number.isSafeInteger(c.directory_version) || c.directory_version < 1 || c.directory_version > chain.version || chain.logHashes[c.directory_version - 1] !== c.directory_head || !signer || signer.approval_seq > c.directory_version || !kindPolicy(signer.kind).canApprove || c.recipient !== '' || c.recipient_public_key !== '' || c.wrap_sha256 !== '') throw new Error('MCP consent does not verify');
+  if (canonical !== j.consent || !mcpConsentVersion(c.scope) || c.v !== mcpConsentVersion(c.scope) || c.mode !== 'device' || c.owner !== chain.userId || c.vault_id !== chain.vaultId || c.client === '' || typeof c.client !== 'string' || typeof c.family !== 'string' || !c.family || c.resource !== resource || c.grant !== j.grant || c.revision !== j.revision || !Number.isSafeInteger(c.revision) || c.revision < 1 || !Number.isSafeInteger(c.directory_version) || c.directory_version < 1 || c.directory_version > chain.version || chain.logHashes[c.directory_version - 1] !== c.directory_head || !signer || signer.approval_seq > c.directory_version || !kindPolicy(signer.kind).canApprove || c.recipient !== '' || c.recipient_public_key !== '' || c.wrap_sha256 !== '') throw new Error('MCP consent does not verify');
   let epoch = 0;
   for (const [ep, proof] of chain.epochs) if (proof.seq <= c.directory_version && ep > epoch) epoch = ep;
-  if (c.epoch !== epoch || !await verifySignature(signer.sign_alg, signer.sign_public_key, new TextEncoder().encode(`heimdall-mcp-consent/v1\n${j.consent}`), j.signature)) throw new Error('MCP consent signature does not verify');
+  if (c.epoch !== epoch || !await verifySignature(signer.sign_alg, signer.sign_public_key, new TextEncoder().encode(mcpConsentDomain(c.v) + j.consent), j.signature)) throw new Error('MCP consent signature does not verify');
 }
 const chainFields = ['chain_id', 'title', 'description', 'status', 'kind', 'work_revision', 'task_count', 'completed_task_count', 'user_validation_count', 'created_at', 'updated_at'];
 const taskFields = ['task_id', 'title', 'description', 'state', 'kind', 'attempt_no', 'requires_user_approval', 'reviews', 'updated_at'];

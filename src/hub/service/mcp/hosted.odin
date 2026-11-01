@@ -16,7 +16,7 @@ verified_grant_directory :: proc(directory:^vd.Service,g:domain.MCP_Record)->(va
 	c:Consent
 	if json.unmarshal_string(g.consent,&c,.JSON,context.temp_allocator)!=nil do return {},false,domain.Domain_Error{}
 	canonical,enc_err:=json.marshal(c,allocator=context.temp_allocator)
-	if enc_err!=nil || string(canonical)!=g.consent || c.v!=1 || c.owner!=g.owner || c.vault_id!=g.vault_id || c.client!=g.client || c.resource!=g.resource || c.scope!=g.scope || c.grant!=g.grant || c.family!=g.family || c.revision!=g.revision || c.mode!=g.mode || c.recipient!=g.recipient || c.recipient_public_key!=g.recipient_public_key || c.approver!=g.approver || c.directory_version!=g.directory_version || c.directory_head!=g.directory_head || c.epoch!=g.epoch || g.revoked do return {},false,domain.Domain_Error{}
+	if enc_err!=nil || string(canonical)!=g.consent || c.v==0 || c.v!=consent_version(c.scope) || c.owner!=g.owner || c.vault_id!=g.vault_id || c.client!=g.client || c.resource!=g.resource || c.scope!=g.scope || c.grant!=g.grant || c.family!=g.family || c.revision!=g.revision || c.mode!=g.mode || c.recipient!=g.recipient || c.recipient_public_key!=g.recipient_public_key || c.approver!=g.approver || c.directory_version!=g.directory_version || c.directory_head!=g.directory_head || c.epoch!=g.epoch || g.revoked do return {},false,domain.Domain_Error{}
 	view,err:=vd.get_directory(directory,g.owner)
 	if err.code!=.None do return {},false,err
 	logs:=make([]vault.Directory_Log_Item,len(view.log),context.temp_allocator)

@@ -57,3 +57,18 @@ test('consent refuses another account, an unapproved signer and an expired reque
   await assert.rejects(buildMcpConsent('ticket', request, 'device', await newBrowser(), chain, never, now), /approved device/);
   await assert.rejects(buildMcpConsent('ticket', { ...request, expires_ms: now }, 'device', identity, chain, never, now), /expired/);
 });
+
+test('v2 consent signs only explicitly selected requested rights under a distinct domain', async () => {
+  const { identity, chain } = await setup();
+  const expanded = { ...request, scope: 'mcp:chains mcp:tasks:read mcp:tasks:write mcp:artifacts:read' };
+  const never = async () => { throw new Error('must not access keyring'); };
+  const selected = 'mcp:chains mcp:tasks:read';
+  const body = await buildMcpConsent('ticket', expanded, 'device', identity, chain, never, now, selected);
+  assert.equal(JSON.parse(body.consent).v, 2);
+  assert.equal(JSON.parse(body.consent).scope, selected);
+  assert.ok(await verifySignature(identity.signAlg, identity.signPub, new TextEncoder().encode(`heimdall-mcp-consent/v2\n${body.consent}`), body.signature));
+  assert.equal(await verifySignature(identity.signAlg, identity.signPub, new TextEncoder().encode(`heimdall-mcp-consent/v1\n${body.consent}`), body.signature), false);
+  await assert.rejects(buildMcpConsent('ticket', request, 'device', identity, chain, never, now, selected), /unsupported/);
+  const reduced = await buildMcpConsent('ticket', expanded, 'device', identity, chain, never, now, 'mcp:chains');
+  assert.equal(JSON.parse(reduced.consent).v, 1);
+});

@@ -6,9 +6,13 @@ import "core:testing"
 
 @(test)
 test_control_worker_cross_runtime_consent_digest_keys_and_projection :: proc(t:^testing.T) {
+    control_worker_cross_runtime_flow(t,#load("../../../tests/fixtures/mcp_worker_v1.json",string))
+    control_worker_cross_runtime_flow(t,#load("../../../tests/fixtures/mcp_worker_v2.json",string))
+}
+control_worker_cross_runtime_flow :: proc(t:^testing.T,vector_json:string) {
 	context.allocator=context.temp_allocator
 	v:struct {now_ms:i64,keyring_hex,device_id,bridge_device_id,result:string,job:Control_Job,reply,bridge_reply:Control_Reply}
-	testing.expect(t,json.unmarshal_string(#load("../../../tests/fixtures/mcp_worker_v1.json",string),&v,.JSON,context.temp_allocator)==nil)
+	testing.expect(t,json.unmarshal_string(vector_json,&v,.JSON,context.temp_allocator)==nil)
 	raw:=make([]byte,len(v.keyring_hex)/2,context.temp_allocator)
 	testing.expect(t,hex_decode_into(raw,v.keyring_hex))
 	kr,parsed:=keyring_parse(raw,v.job.owner)

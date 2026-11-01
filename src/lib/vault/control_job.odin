@@ -47,7 +47,7 @@ control_job_verify :: proc(job:Control_Job,owner,resource,device_id:string,kr:^V
 	c:Control_Consent
 	if json.unmarshal_string(job.consent,&c,.JSON,context.temp_allocator)!=nil do return false
 	canonical,err:=json.marshal(c,allocator=context.temp_allocator)
-	if err!=nil || string(canonical)!=job.consent || c.v!=1 || c.mode!="device" || c.owner!=owner || c.resource!=resource || c.scope!="mcp:chains" || c.grant!=job.grant || c.revision!=job.revision || c.client=="" || c.family=="" || c.recipient!="" || c.recipient_public_key!="" || c.wrap_sha256!="" do return false
+	if err!=nil || string(canonical)!=job.consent || c.v==0 || c.v!=control_consent_version(c.scope) || c.mode!="device" || c.owner!=owner || c.resource!=resource || c.grant!=job.grant || c.revision!=job.revision || c.client=="" || c.family=="" || c.recipient!="" || c.recipient_public_key!="" || c.wrap_sha256!="" do return false
 	d:=job.directory
 	if d.owner!=owner || d.head_hash!=job.head || d.current_epoch!=i64(job.epoch) || d.vault_id!=c.vault_id || d.pin_seq!=c.directory_version || d.pin_hash!=c.directory_head do return false
 	verified,ok:=directory_verify(d)
@@ -64,7 +64,7 @@ control_job_verify :: proc(job:Control_Job,owner,resource,device_id:string,kr:^V
 	epoch:u32
 	for ep,proof in verified.epochs do if proof.start_seq<=c.directory_version && ep>epoch do epoch=ep
 	if i64(epoch)!=c.epoch do return false
-	message:=strings.concatenate({"heimdall-mcp-consent/v1\n",job.consent},context.temp_allocator)
+	message:=strings.concatenate({control_consent_domain(c.v),job.consent},context.temp_allocator)
 	return verify(approver.sign_alg,approver.sign_public_key,transmute([]byte)message,job.signature)
 }
 // Wipe decoded plaintext copies as well as serialized results.

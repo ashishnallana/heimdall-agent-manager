@@ -55,11 +55,15 @@ mcp_http_headers :: proc(cookie:contracts.HTTP_Header,signed:map[string]string,o
 
 @(test)
 test_mcp_delegation_signed_consent_token_retry_and_disconnect :: proc(t:^testing.T) {
+    mcp_http_consent_flow(t,#load("../../../../tests/fixtures/mcp_consent_v1.json",string))
+    mcp_http_consent_flow(t,#load("../../../../tests/fixtures/mcp_consent_v2.json",string))
+}
+mcp_http_consent_flow :: proc(t:^testing.T,vector_json:string) {
 	context.allocator=context.temp_allocator
 	f:=mcp_test_fixture(t)
 	defer sqlite.close(&f.conn)
 	state:MCP_HTTP_State
-	testing.expect(t,json.unmarshal(transmute([]byte)string(#load("../../../../tests/fixtures/mcp_consent_v1.json",string)),&state.vector,.JSON,context.temp_allocator)==nil)
+	testing.expect(t,json.unmarshal(transmute([]byte)vector_json,&state.vector,.JSON,context.temp_allocator)==nil)
 	v:=&state.vector
 	_,saved,_:=iface.user_save(&f.user_repo,domain.User{user_id=domain.User_ID(v.request.owner),name=v.request.owner,status=.Active,created_at=mcp_test_now(nil),updated_at=mcp_test_now(nil)})
 	testing.expect(t,saved)
@@ -87,6 +91,7 @@ test_mcp_delegation_signed_consent_token_retry_and_disconnect :: proc(t:^testing
 	testing.expect(t,mcp_delegation_consent_handler(&h,{method="POST",path=MCP_OAUTH+"/consent",body=strings.clone(v.consent_body,context.temp_allocator),headers=foreign_headers}).status==403)
 	headers:=mcp_http_headers(cookie,v.consent_headers,h.origin)
 	accepted:=mcp_delegation_consent_handler(&h,{method="POST",path=MCP_OAUTH+"/consent",body=strings.clone(v.consent_body,context.temp_allocator),headers=headers})
+	testing.expect(t,accepted.sensitive,"credential redirect is wiped by HTTP writer")
 	testing.expectf(t,accepted.status==200,"signed browser consent status %d",accepted.status)
 	if accepted.status!=200 do return
 	callback:struct {redirect:string}
@@ -98,16 +103,28 @@ test_mcp_delegation_signed_consent_token_retry_and_disconnect :: proc(t:^testing
 	form:=mcp_join("grant_type=authorization_code&client_id=",v.request.client,"&resource=",auth.form_encode(v.request.resource),"&redirect_uri=",auth.form_encode(v.request.redirect),"&code=",auth.form_encode(code),"&code_verifier=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 	form_headers:=make([]contracts.HTTP_Header,1,context.temp_allocator)
 	form_headers[0]={"Content-Type","application/x-www-form-urlencoded"}
-	token_resp:=mcp_delegation_token_handler(&h,{method="POST",body=strings.clone(form,context.temp_allocator),headers=form_headers})
+	// Requesting unsigned or unselected rights must not consume the code.
+    elevated:=mcp_join(form,"&scope=",auth.form_encode("mcp:chains mcp:instances:control"))
+    denied:=mcp_delegation_token_handler(&h,{method="POST",body=strings.clone(elevated,context.temp_allocator),headers=form_headers})
+    testing.expect(t,strings.contains(denied.body,"invalid_scope"))
+    token_resp:=mcp_delegation_token_handler(&h,{method="POST",body=strings.clone(form,context.temp_allocator),headers=form_headers})
+	testing.expect(t,token_resp.sensitive,"token response copies use sensitive cleanup")
 	testing.expect(t,token_resp.status==200 && header_value(token_resp.headers,"Cache-Control")=="no-store")
 	tokens:mcp.Tokens
 	testing.expect(t,json.unmarshal_string(token_resp.body,&tokens,.JSON,context.temp_allocator)==nil)
+    consent:mcp.Consent
+    testing.expect(t,json.unmarshal_string(v.hosted.consent,&consent,.JSON,context.temp_allocator)==nil)
+    testing.expect_value(t,tokens.scope,consent.scope)
+    testing.expect(t,!mcp.scope_allows_tool(tokens.scope,"tasks.comment"))
+    if consent.v==2 do testing.expect(t,mcp.scope_allows_tool(tokens.scope,"artifacts.get"))
 	native_headers:=make([]contracts.HTTP_Header,1,context.temp_allocator)
 	native_headers[0]={"Authorization",mcp_join("Bearer ",tokens.access_token)}
 	_,native_ok,_:=require_auth(&f.auth,{method="GET",path="/api/v1/me",headers=native_headers})
 	testing.expect(t,!native_ok)
 	refresh_form:=mcp_join("grant_type=refresh_token&client_id=",v.request.client,"&resource=",auth.form_encode(v.request.resource),"&refresh_token=",auth.form_encode(tokens.refresh_token))
-	rotated:=mcp_delegation_token_handler(&h,{method="POST",body=strings.clone(refresh_form,context.temp_allocator),headers=form_headers})
+	broader:=mcp_join(refresh_form,"&scope=",auth.form_encode("mcp:chains mcp:tasks:read mcp:tasks:write mcp:artifacts:read"))
+    if consent.v==2 do testing.expect(t,strings.contains(mcp_delegation_token_handler(&h,{method="POST",body=strings.clone(broader,context.temp_allocator),headers=form_headers}).body,"invalid_scope"))
+    rotated:=mcp_delegation_token_handler(&h,{method="POST",body=strings.clone(refresh_form,context.temp_allocator),headers=form_headers})
 	retry:=mcp_delegation_token_handler(&h,{method="POST",body=strings.clone(refresh_form,context.temp_allocator),headers=form_headers})
 	testing.expect(t,rotated.status==200 && retry.status==200 && rotated.body==retry.body)
 	recipients:=mcp_connector_epoch_handler(&h,{method="GET",path=MCP_OAUTH+"/recipients",headers=mcp_http_headers(cookie,v.recipients_headers,h.origin)})

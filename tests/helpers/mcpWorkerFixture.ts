@@ -4,7 +4,7 @@ import { importKeyring } from '../../src/ui/utils/vaultKeyring.ts';
 import { encryptVaultText } from '../../src/ui/utils/vaultContent.ts';
 import { mcpJobDigest, signMcpWorkerReply, transformMcpWorkerJob, type McpWorkerJob } from '../../src/ui/utils/mcpWorker.ts';
 
-export async function mcpWorkerFixture(now = Date.now()) {
+export async function mcpWorkerFixture(now = Date.now(), scope = 'mcp:chains') {
   const owner = 'usr_mcp_worker_fixture';
   const resource = 'https://hub.example/api/v1/mcp';
   const hub = new FakeHub(owner);
@@ -12,7 +12,7 @@ export async function mcpWorkerFixture(now = Date.now()) {
   await hub.genesis(identity);
   const bridge = await hub.addBridge(identity, 'brg_mcp_fixture');
   const chain = await hub.chain();
-  const request = { owner, client: 'client-worker-fixture', redirect: 'https://client.example/callback', resource, scope: 'mcp:chains', grant: 'grant-worker-fixture', family: 'family-worker-fixture', revision: 1, expires_ms: now + 300000 };
+  const request = { owner, client: 'client-worker-fixture', redirect: 'https://client.example/callback', resource, scope, grant: 'grant-worker-fixture', family: 'family-worker-fixture', revision: 1, expires_ms: now + 300000 };
   const consent = await buildMcpConsent('ticket-worker-fixture', request, 'device', identity, chain, async () => { throw new Error('Default mode never exports keyring'); }, now);
   const bytes = await hub.keyringBytes(identity);
   const keyringHex = Buffer.from(bytes).toString('hex'); // SYNTHETIC fixture only.

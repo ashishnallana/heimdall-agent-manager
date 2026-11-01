@@ -66,13 +66,13 @@ delegation_register :: proc(s: ^Delegation_Service, redirect: string) -> (string
 	if err.code != .None do return "", err
 	return id, domain.Domain_Error{}
 }
-delegation_begin :: proc(s: ^Delegation_Service, owner, client, redirect, challenge, state: string, now: i64) -> (string, domain.Domain_Error) {
-	if owner == "" || !challenge_ok(challenge) || len(state) > 1024 do return "", domain.domain_error(.Validation_Failed, "invalid OAuth request")
+delegation_begin :: proc(s: ^Delegation_Service, owner, client, redirect, challenge, state: string, now: i64, scope: string = DELEGATION_SCOPE) -> (string, domain.Domain_Error) {
+	if owner == "" || !scopes_valid(scope) || !challenge_ok(challenge) || len(state) > 1024 do return "", domain.domain_error(.Validation_Failed, "invalid OAuth request")
 	ticket, tok := auth.random_token()
 	grant, gok := auth.random_token()
 	family, fok := auth.random_token()
 	if !tok || !gok || !fok do return "", domain.domain_error(.Internal_Error, "MCP entropy unavailable")
-	p := domain.MCP_Record{kind = "pending", id = auth.sha256_hex(ticket), owner = owner, client = client, redirect = redirect, challenge = challenge, oauth_state = state, resource = s.resource, scope = DELEGATION_SCOPE, grant = grant, family = family, revision = 1, created_ms = now, expires_ms = now+300_000}
+	p := domain.MCP_Record{kind = "pending", id = auth.sha256_hex(ticket), owner = owner, client = client, redirect = redirect, challenge = challenge, oauth_state = state, resource = s.resource, scope = scope, grant = grant, family = family, revision = 1, created_ms = now, expires_ms = now+300_000}
 	op := Public_Operation{action = "pending", row = p, now = now}
 	err := iface.mcp_transaction(s.repo, public_transaction, &op)
 	if err.code != .None do return "", err

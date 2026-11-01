@@ -8,7 +8,7 @@ import vd "odin_test:hub/service/vault_directory"
 import vault "odin_test:lib/vault"
 
 // A request-local public snapshot. No credential/private capability is retained.
-Access_View :: struct {owner,client,grant,family,mode,head,vault_id:string,revision,version,expires_ms:i64,epoch:u32,consent,signature:string}
+Access_View :: struct {owner,client,grant,family,mode,head,vault_id,scope:string,revision,version,expires_ms:i64,epoch:u32,consent,signature:string}
 Access_Check :: struct {service:^Delegation_Service,directory:^vd.Service,raw:string,claims:Credential_Claims,view:Access_View,ok:bool}
 access_transaction :: proc(tx:iface.MCP_Transaction,ctx:rawptr)->domain.Domain_Error {
 	op:=(^Access_Check)(ctx)
@@ -26,7 +26,7 @@ access_transaction :: proc(tx:iface.MCP_Transaction,ctx:rawptr)->domain.Domain_E
 	dir,verified,verr:=verified_grant_directory(op.directory,g)
 	if verr.code!=.None do return verr
 	if !verified do return {}
-	op.view={owner=c.owner,client=c.client,grant=c.grant,family=c.family,mode=g.mode,head=dir.head_hash,vault_id=c.vault_id,revision=c.revision,version=dir.version,expires_ms=c.expires_ms,epoch=dir.current_epoch,consent=g.consent,signature=g.signature}
+	op.view={owner=c.owner,client=c.client,grant=c.grant,family=c.family,mode=g.mode,scope=c.scope,head=dir.head_hash,vault_id=c.vault_id,revision=c.revision,version=dir.version,expires_ms=c.expires_ms,epoch=dir.current_epoch,consent=g.consent,signature=g.signature}
 	op.ok=true
 	return {}
 }
@@ -40,7 +40,7 @@ access_view :: proc(s:^Delegation_Service,directory:^vd.Service,raw:string)->(Ac
 	return op.view,err.code==.None && op.ok
 }
 access_same :: proc(a,b:Access_View)->bool {
-	return a.owner==b.owner && a.client==b.client && a.grant==b.grant && a.family==b.family && a.revision==b.revision && a.mode==b.mode && a.head==b.head && a.epoch==b.epoch
+	return a.owner==b.owner && a.client==b.client && a.grant==b.grant && a.family==b.family && a.revision==b.revision && a.mode==b.mode && a.scope==b.scope && a.head==b.head && a.epoch==b.epoch
 }
 
 Public_Job_Check :: struct {service:^Delegation_Service,directory:^vd.Service,job:vault.Control_Job,ok:bool}

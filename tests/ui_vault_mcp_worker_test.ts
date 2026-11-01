@@ -22,6 +22,16 @@ test('MCP worker verifies pinned consent, owner, head, digest, generation and de
   await assert.rejects(verify(forged));
 });
 
+test('MCP worker accepts signed v2 scope and rejects unsigned scope/version changes', async () => {
+  const f = await mcpWorkerFixture(Date.now(), 'mcp:chains mcp:tasks:read mcp:artifacts:read');
+  await verifyMcpWorkerJob(f.job, f.identity, f.chain, f.job.resource, f.now);
+  for (const patch of [{ v: 1 }, { scope: 'mcp:chains' }, { scope: 'mcp:chains mcp:tasks:write' }, { scope: 'mcp:chains mcp:messages:write' }]) {
+    const job = { ...f.job, consent: JSON.stringify({ ...JSON.parse(f.job.consent), ...patch }) };
+    job.digest = await mcpJobDigest(job);
+    await assert.rejects(verifyMcpWorkerJob(job, f.identity, f.chain, job.resource, f.now));
+  }
+});
+
 test('MCP worker projects readable records and fails closed instead of returning locked placeholders', async () => {
   const f = await mcpWorkerFixture();
   const result = JSON.parse(await transformMcpWorkerJob(f.job, f.keyring));

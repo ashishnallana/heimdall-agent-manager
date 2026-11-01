@@ -146,6 +146,7 @@ mcp_control_handler :: proc(ctx:rawptr,req:Request)->(response:Response) {
 	name,nok:=params["name"].(json.String)
 	args,args_ok:=mcp_arguments(string(name),params["arguments"])
 	if !nok || !args_ok do return mcp_rpc_error(id,-32602,"Unknown tool or invalid arguments")
+	if !mcp.scope_allows_tool(view.scope,string(name)) do return mcp_tool_result(id,"scope_missing",true)
 	encoded_id,_:=json.marshal(id,allocator=context.temp_allocator)
 	handle,admitted:=mcp.request_begin(&h.requests,key,string(encoded_id))
 	if !admitted do return mcp_tool_result(id,"busy: request is already active or capacity is exhausted",true)
