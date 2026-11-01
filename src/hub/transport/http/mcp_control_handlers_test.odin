@@ -113,6 +113,14 @@ test_mcp_control_hosted_four_tools_ownership_creation_and_stateless_restart :: p
 	testing.expect(t,init.status==200 && strings.contains(init.body,"2025-06-18"))
 	list:=mcp_control_request(&f.h,f.token,`{"jsonrpc":"2.0","id":2,"method":"tools/list"}`)
 	testing.expect(t,strings.contains(list.body,"chains.list") && strings.contains(list.body,"chains.get") && strings.contains(list.body,"chains.create") && strings.contains(list.body,"events.wait") && !strings.contains(list.body,"lease.next"))
+	testing.expect(t,!strings.contains(list.body,"tasks.get") && !strings.contains(list.body,"tasks.create") && !strings.contains(list.body,"chains.configure"))
+	for call in ([]string{
+		`{"jsonrpc":"2.0","id":20,"method":"tools/call","params":{"name":"tasks.get","arguments":{"task_id":"task_fixture"}}}`,
+		`{"jsonrpc":"2.0","id":21,"method":"tools/call","params":{"name":"tasks.comment","arguments":{"task_id":"task_fixture","request_id":"legacy_denied","body":"Never write"}}}`,
+		`{"jsonrpc":"2.0","id":22,"method":"tools/call","params":{"name":"tasks.create","arguments":{"chain_id":"chain_fixture","request_id":"legacy_denied","title":"Never write","goal":"Never write","acceptance":["Never write"]}}}`,
+	}) {
+		testing.expect(t,strings.contains(mcp_control_request(&f.h,f.token,call).body,"scope_missing"))
+	}
 	read:=mcp_control_request(&f.h,f.token,`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"chains.get","arguments":{"chain_id":"chain_fixture"}}}`)
 	testing.expectf(t,read.status==200 && strings.contains(read.body,"usr_alice_fixture secret") && strings.contains(read.body,"embedded secret") && strings.contains(read.body,"comments") && !strings.contains(read.body,"vault:v2:") && !strings.contains(read.body,"private nested brief"),"read response: %s",read.body)
 	// Real foreign-owner row exists: still indistinguishable from missing.
@@ -192,6 +200,24 @@ test_mcp_control_wait_hint_cancel_and_revocation :: proc(t:^testing.T) {
 @(test)
 test_mcp_control_rpc_grammar_and_device_reply_binding :: proc(t:^testing.T) {
 	context.allocator=context.temp_allocator
+	for raw in ([]string{
+		`{"chain_id":"chain_a","request_id":"r","title":"x","goal":"g","acceptance":[{}]}`,
+		`{"chain_id":"chain_a","request_id":"r","title":"x","goal":"g","acceptance":["a"],"owner_user_id":"foreign"}`,
+		`{"chain_id":"chain_a","title":"x","goal":"g","acceptance":["a"]}`,
+	}) {
+		value,err:=json.parse_string(raw,parse_integers=true,allocator=context.temp_allocator)
+		testing.expect(t,err==nil)
+		_,valid:=mcp_arguments("tasks.create",value)
+		testing.expect(t,!valid)
+	}
+	for raw in ([]string{
+		`{"task_id":"task_a","request_id":"r","expected_revision":"old","goal":"g"}`,
+		`{"task_id":"task_a","request_id":"r","expected_revision":"0000000000000000000000000000000000000000000000000000000000000000","state":"done"}`,
+	}) {
+		value,_:=json.parse_string(raw,parse_integers=true,allocator=context.temp_allocator)
+		_,valid:=mcp_arguments("tasks.update",value)
+		testing.expect(t,!valid)
+	}
 	disabled:MCP_Control_Handlers
 	mcp_bridge_result(&Bridge_Handlers{mcp_control=&disabled},"brg_disabled",strings.clone("{}",context.temp_allocator),1)
 	f:=mcp_control_fixture(t);defer mcp_control_close(f)

@@ -51,6 +51,8 @@ configure_mcp_delegation :: proc(graph: ^App_Graph) -> (bool, string) {
 	mcp.init(&graph.mcp_spike) // bounded transient pre-login request handles only
 	graph.mcp_delegation_handlers={auth=&graph.auth,directory=&graph.vault_directory,grant_directory=&graph.mcp_vault_view,service=&graph.mcp_delegation,login_requests=&graph.mcp_spike,origin=origin}
 	graph.mcp_control_handlers={delegation=&graph.mcp_delegation_handlers,control={chains=&graph.taskchains},bus=&graph.event_bus,bridge_ctx=graph,bridge_transform=mcp_bridge_transform,create_ctx=graph,create=mcp_create_chain}
+	graph.mcp_control_handlers.comment=mcp_comment_task
+	graph.mcp_control_handlers.mutate_task=mcp_mutate_task
 	valid=true
 	return true,""
 }

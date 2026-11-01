@@ -13,7 +13,7 @@ import tc "odin_test:hub/service/taskchain"
 import vault "odin_test:lib/vault"
 
 Control_Service :: struct {chains:^tc.Taskchain_Service}
-Control_Arguments :: struct {chain_id,title,description,cursor:string,limit,timeout_ms:int}
+Control_Arguments :: struct {chain_id,title,description,cursor,task_id,request_id,body:string,limit,timeout_ms:int,task_write:Task_Tool_Arguments,include_configuration:bool}
 Control_Data :: vault.Control_Data
 control_auth :: proc(owner:string)->contracts.Auth_Context {return {kind=.Internal_User,user_id=owner}}
 control_chain :: proc(c:domain.Task_Chain)->json.Object {
@@ -25,6 +25,7 @@ control_id_ok :: proc(id:string)->bool {return strings.has_prefix(id,"chain_") &
 // Services authorize every chain/task/comment before any decryption dispatch.
 // Bounded projections deliberately omit briefs, facets and other nested data.
 control_read :: proc(s:^Control_Service,owner,name:string,args:Control_Arguments)->(Control_Data,string) {
+	if name=="tasks.list" || name=="tasks.get" do return control_read_tasks(s,owner,name,args)
 	principal:=control_auth(owner)
 	if name=="chains.list" {
 		all,err:=tc.list_chains(s.chains,principal)
@@ -51,6 +52,11 @@ control_read :: proc(s:^Control_Service,owner,name:string,args:Control_Arguments
 	tasks,terr:=tc.list_tasks(s.chains,principal,c.chain_id)
 	if terr.code!=.None || len(tasks)>1000 do return {},"result_too_large"
 	out:=Control_Data{chain=control_chain(c),tasks=make([]json.Object,len(tasks),context.temp_allocator),comments=make([]json.Object,0,context.temp_allocator)}
+	if args.include_configuration {
+		configuration_revision,fleet,configured:=control_configuration(s,c)
+		if !configured do return {},"request_failed"
+		out.chain["configuration_revision"]=json.String(configuration_revision);out.chain["fleet"]=fleet
+	}
 	comments:=make([dynamic]json.Object,context.temp_allocator)
 	for t,i in tasks {
 		if string(t.owner_user_id)!=owner || t.chain_id!=c.chain_id do return {},"request_failed"
@@ -71,7 +77,7 @@ control_read :: proc(s:^Control_Service,owner,name:string,args:Control_Arguments
 	return out,""
 }
 control_transform :: vault.control_transform_data
-Control_Transform :: struct {data:Control_Data,title,description:string,seal:bool}
+Control_Transform :: struct {data:Control_Data,title,description,tool,body:string,seal:bool,task_fields:json.Object}
 
 control_payload_ok :: proc(data:Control_Data)->bool {
 	encoded,err:=json.marshal(data,allocator=context.temp_allocator)
@@ -79,9 +85,10 @@ control_payload_ok :: proc(data:Control_Data)->bool {
 	return err==nil && len(encoded)<=4*1024*1024
 }
 control_record_matches :: proc(expected,actual:json.Object,kind:Hosted_Record_Kind)->bool {
-	allowed:=[]string{"chain_id","title","description","status","kind","work_revision","task_count","completed_task_count","user_validation_count","created_at","updated_at"}
+	allowed:=[]string{"chain_id","title","description","status","kind","work_revision","task_count","completed_task_count","user_validation_count","created_at","updated_at","configuration_revision","fleet"}
 	text:=[]string{"title","description"}
 	if kind==.Task do allowed=[]string{"task_id","title","description","state","kind","attempt_no","requires_user_approval","reviews","updated_at"}
+	if kind==.Task_Detail {allowed=[]string{"task_id","chain_id","title","description","state","kind","attempt_no","requires_user_approval","reviews","updated_at","goal","acceptance","assignee_agent_id","bridge_id","depends_on","publish_state","priority","revision","blocked_kind","blocked_ref","blocked_reason","blocked_since"};text=[]string{"title","description","goal","blocked_reason"}}
 	if kind==.Comment {allowed=[]string{"comment_id","body","created_at"};text=[]string{"body"}}
 	for key,value in actual {
 		if _,present:=expected[key];!present do return false
@@ -89,7 +96,11 @@ control_record_matches :: proc(expected,actual:json.Object,kind:Hosted_Record_Ki
 		for k in allowed do if k==key do found=true
 		for k in text do if k==key do is_text=true
 		if !found do return false
-		if is_text {
+		if kind==.Task_Detail && key=="acceptance" {
+			items,typed:=value.(json.Array);expected_items,expected_typed:=expected[key].(json.Array)
+			if !typed || !expected_typed || len(items)!=len(expected_items) do return false
+			for item in items do if _,string_item:=item.(json.String);!string_item do return false
+		} else if is_text {
 			if _,ok:=value.(json.String);!ok do return false
 		} else if !tc.json_values_equal(expected[key],value) do return false
 	}
@@ -113,7 +124,7 @@ control_result_ok :: proc(data:Control_Data,result:string)->bool {
 	} else if _,present:=root["chain"];present do return false
 	for field,i in ([]string{"chains","tasks","comments"}) {
 		expected:=data.chains;kind:=Hosted_Record_Kind.Chain
-		if i==1 {expected=data.tasks;kind=.Task}
+		if i==1 {expected=data.tasks;kind=.Task;if len(expected)>0 {if _,details:=expected[0]["chain_id"];details do kind=.Task_Detail}}
 		if i==2 {expected=data.comments;kind=.Comment}
 		raw_array,present:=root[field]
 		actual,ok:=raw_array.(json.Array)
@@ -143,7 +154,14 @@ control_sealed_ok :: proc(view:Access_View,text:string)->(title,description:stri
 }
 control_hosted_transform :: proc(ctx:rawptr,kr:^vault.Vault_Keyring)->(string,bool) {
 	op:=(^Control_Transform)(ctx)
-	if !op.seal do return control_transform(op.data,kr)
+	if op.task_fields!=nil do return vault.control_seal_task_fields(kr,op.task_fields)
+	if op.tool=="tasks.comment" {
+		payload,err:=json.marshal(struct {body:string}{op.body},allocator=context.temp_allocator)
+		if err!=nil do return "",false
+		defer if len(payload)>0 do crypto.zero_explicit(raw_data(payload),len(payload))
+		return vault.control_job_transform({operation="seal_comment",payload=string(payload)},kr)
+	}
+	if !op.seal do return vault.control_transform_data(op.data,kr,op.tool=="tasks.get" || op.tool=="tasks.list")
 	t,d,ok:=hosted_seal_chain(kr,op.title,op.description)
 	if !ok do return "",false
 	encoded,err:=json.marshal(struct {title,description:string}{t,d},allocator=context.temp_allocator)

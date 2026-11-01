@@ -49,6 +49,7 @@ public_job_transaction :: proc(tx:iface.MCP_Transaction,ctx:rawptr)->domain.Doma
 	g,found,err:=tx.get(tx.ctx,"grant",j.grant)
 	if err.code!=.None do return err
 	if !found || g.revoked || g.mode!="device" || g.owner!=j.owner || g.resource!=j.resource || g.revision!=j.revision || g.consent!=j.consent || g.signature!=j.signature do return {}
+	if !vault.control_job_scope_ok(g.scope,j.tool,j.operation) do return {}
 	c:=Credential_Claims{owner=g.owner,client=g.client,resource=g.resource,scope=g.scope,grant=g.grant,family=g.family,vault_id=g.vault_id,recipient=g.recipient,revision=g.revision}
 	live,lerr:=delegation_live(op.service,tx,c)
 	if lerr.code!=.None do return lerr

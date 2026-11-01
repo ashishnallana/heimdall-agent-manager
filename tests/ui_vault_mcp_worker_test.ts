@@ -1,7 +1,61 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mcpWorkerFixture } from './helpers/mcpWorkerFixture.ts';
-import { verifyMcpWorkerJob, transformMcpWorkerJob, mcpJobDigest } from '../src/ui/utils/mcpWorker.ts';
+import { verifyMcpWorkerJob, transformMcpWorkerJob, mcpJobDigest, mcpJobScopeAllowed } from '../src/ui/utils/mcpWorker.ts';
+import { decryptVaultBytes } from '../src/ui/utils/vaultContent.ts';
+
+test('task comment worker requires signed write scope and binds the tool in its digest', async () => {
+  const f = await mcpWorkerFixture(Date.now(), 'mcp:chains mcp:tasks:write');
+  const job = { ...f.job, tool: 'tasks.comment', operation: 'seal_comment' as const, payload: JSON.stringify({ body: 'task comment secret' }) };
+  job.digest = await mcpJobDigest(job);
+  await verifyMcpWorkerJob(job, f.identity, f.chain, job.resource, f.now);
+  const result = JSON.parse(await transformMcpWorkerJob(job, f.keyring));
+  assert.match(result.body, /^vault:v2:/);
+  assert.ok(!JSON.stringify(result).includes('task comment secret'));
+  const opened = await decryptVaultBytes(result.body, f.keyring);
+  assert.equal(opened.status, 'ok');
+  if (opened.status === 'ok') {
+    assert.equal(new TextDecoder().decode(opened.bytes), 'task comment secret');
+    opened.bytes.fill(0);
+  }
+  await assert.rejects(verifyMcpWorkerJob({ ...job, tool: 'tasks.get' }, f.identity, f.chain, job.resource, f.now));
+  const legacy = await mcpWorkerFixture();
+  const unauthorized = { ...legacy.job, tool: 'tasks.comment', operation: 'seal_comment' as const, payload: job.payload };
+  unauthorized.digest = await mcpJobDigest(unauthorized);
+  await assert.rejects(verifyMcpWorkerJob(unauthorized, legacy.identity, legacy.chain, unauthorized.resource, legacy.now));
+  assert.equal(mcpJobScopeAllowed('mcp:chains mcp:tasks:read', 'tasks.comment', 'seal_comment'), false);
+  assert.equal(mcpJobScopeAllowed('mcp:chains mcp:tasks:write', 'tasks.get', 'read'), false);
+  assert.equal(mcpJobScopeAllowed('mcp:chains', undefined, 'seal_comment'), false);
+  const create = { ...f.job, tool: 'tasks.create', operation: 'seal_task' as const, payload: JSON.stringify({ title: 'private title', goal: 'private goal', acceptance: ['private acceptance'] }) };
+  create.digest = await mcpJobDigest(create);
+  await verifyMcpWorkerJob(create, f.identity, f.chain, create.resource, f.now);
+  const sealedTask = JSON.parse(await transformMcpWorkerJob(create, f.keyring));
+  assert.match(sealedTask.title, /^vault:v2:/);
+  assert.match(sealedTask.goal, /^vault:v2:/);
+  assert.match(sealedTask.acceptance[0], /^vault:v2:/);
+  assert.ok(!JSON.stringify(sealedTask).includes('private'));
+  await assert.rejects(transformMcpWorkerJob({ ...create, payload: JSON.stringify({ owner_user_id: 'foreign' }) }, f.keyring));
+  await assert.rejects(transformMcpWorkerJob({ ...create, payload: JSON.stringify({ acceptance: ['x'.repeat(201)] }) }, f.keyring));
+});
+
+test('extended task reads open only typed brief fields and retain legacy projection', async () => {
+  const f = await mcpWorkerFixture(Date.now(), 'mcp:chains mcp:tasks:read');
+  const token = JSON.parse(f.job.payload).chain.title;
+  const payload = JSON.stringify({ tasks: [{ owner_user_id: f.job.owner, task_id: 'task_a', chain_id: 'chain_a', title: token, description: '', goal: token, acceptance: [token], assignee_agent_id: 'agt_a', bridge_id: 'brg_a', arbitrary_secret: 'omitted' }] });
+  const job = { ...f.job, tool: 'tasks.get', payload };
+  job.digest = await mcpJobDigest(job);
+  await verifyMcpWorkerJob(job, f.identity, f.chain, job.resource, f.now);
+  const result = JSON.parse(await transformMcpWorkerJob(job, f.keyring));
+  assert.equal(result.tasks[0].goal, 'worker secret title');
+  assert.deepEqual(result.tasks[0].acceptance, ['worker secret title']);
+  assert.equal(result.tasks[0].bridge_id, 'brg_a');
+  assert.equal(result.tasks[0].arbitrary_secret, undefined);
+  const legacy = JSON.parse(await transformMcpWorkerJob({ ...job, tool: undefined }, f.keyring));
+  assert.equal(legacy.tasks[0].goal, undefined);
+  assert.equal(legacy.tasks[0].acceptance, undefined);
+  const malformed = JSON.parse(payload); malformed.tasks[0].acceptance = [{}];
+  await assert.rejects(transformMcpWorkerJob({ ...job, payload: JSON.stringify(malformed) }, f.keyring));
+});
 import { importKeyring } from '../src/ui/utils/vaultKeyring.ts';
 import { FakeHub, newBrowser, hubApi, recorder, USER } from './helpers/vaultDirectoryFixture.ts';
 import { memoryDeviceStore } from '../src/ui/utils/deviceIdentity.ts';

@@ -1,0 +1,60 @@
+{
+  "synthetic_fixture": true,
+  "now_ms": 1793430000000,
+  "request": {
+    "owner": "usr_mcp_task_fixture",
+    "client": "client-task-fixture",
+    "redirect": "https://client.example/callback",
+    "resource": "https://hub.example/api/v1/mcp",
+    "scope": "mcp:chains mcp:tasks:read mcp:tasks:write",
+    "grant": "grant-task-fixture",
+    "family": "family-task-fixture",
+    "revision": 1,
+    "expires_ms": 1793430300000
+  },
+  "directory": {
+    "version": 1,
+    "current_epoch": 1,
+    "root_device_id": "dev_e9d57c66f6736191dd556d30de4277b8",
+    "head_hash": "a85f81b611c343312622ade9e3c8acd72c917824a5b211a127b967dd5a21b384",
+    "log": [
+      {
+        "seq": 1,
+        "statement": "heimdall-vault-statement/v2\ntype=genesis\nuser_id=usr_mcp_task_fixture\nseq=1\nprev_hash=\nissuer_device_id=dev_e9d57c66f6736191dd556d30de4277b8\nissued_at_ms=1793499893636\nsubject_device_id=dev_e9d57c66f6736191dd556d30de4277b8\nsubject_kind=browser\nsubject_sign_pub=04589166920ce944c388dec5a680fb28c043452bcef41e7db548b86b3feef02013a67516f4fc5c9cafb3c1357ebe9c851a8de0cc146fb3b307286b042108a03b39\nsubject_ecdh_pub=04a932eb4a82c925dec7ec5cced3bf3c85cb012b282b01a9a39cfa1258e831b5925420baf34b4c5bc24070ca91525b121cbfca3dac2231fb26944a987bb0cf37aa\nsubject_sign_alg=ecdsa-p256-sha256\nsubject_wrap_alg=ecdh-p256-hkdf-sha256-aes256gcm\nsubject_label_b64=Um9vdCBicm93c2Vy\nepoch=1\nepoch_commit=bbbe25d04791c823cebad3aa882d507cb11afa50ba6b8822b1b01066e0d2ce1b\nwrap_sha256=97da8e735f1308c9257b9c99058ce4e73fee694a3205f16a256517355a7d6f76",
+        "signature": {
+          "alg": "ecdsa-p256-sha256",
+          "sig": "61c34e8ba94ef496891f6f37eaadac5055788157df80554e30702eba69ff8576adb089d9eadb9bfa3c7fd38ecd65eb534f269eec79ed05e42ac1e45fd90268a9"
+        }
+      }
+    ],
+    "devices": [
+      {
+        "device_id": "dev_e9d57c66f6736191dd556d30de4277b8",
+        "kind": "browser",
+        "label": "Root browser",
+        "fingerprint": "d90f 54ef 1dc3 caf1",
+        "status": "approved",
+        "sign_alg": "ecdsa-p256-sha256",
+        "wrap_alg": "ecdh-p256-hkdf-sha256-aes256gcm",
+        "sign_public_key": "04589166920ce944c388dec5a680fb28c043452bcef41e7db548b86b3feef02013a67516f4fc5c9cafb3c1357ebe9c851a8de0cc146fb3b307286b042108a03b39",
+        "ecdh_public_key": "04a932eb4a82c925dec7ec5cced3bf3c85cb012b282b01a9a39cfa1258e831b5925420baf34b4c5bc24070ca91525b121cbfca3dac2231fb26944a987bb0cf37aa"
+      }
+    ],
+    "retired_hints": [],
+    "reset": null
+  },
+  "hosted": {
+    "request": "ticket-task-fixture",
+    "consent": "{\"v\":2,\"owner\":\"usr_mcp_task_fixture\",\"vault_id\":\"e9d57c66f6736191\",\"client\":\"client-task-fixture\",\"resource\":\"https://hub.example/api/v1/mcp\",\"scope\":\"mcp:chains mcp:tasks:read mcp:tasks:write\",\"grant\":\"grant-task-fixture\",\"family\":\"family-task-fixture\",\"revision\":1,\"mode\":\"hosted\",\"recipient\":\"mcp_0420d5da-014e-4caa-abc1-fbd58af62c48\",\"recipient_public_key\":\"04838cc27cff47be2d9cddbdefb8f11f73225f140bee1ca737894787d6d773aa342b1a49874034365b8c4dd60272c4a6e374b5caa0b0403b383d056e08e7fd2010\",\"approver\":\"dev_e9d57c66f6736191dd556d30de4277b8\",\"directory_version\":1,\"directory_head\":\"a85f81b611c343312622ade9e3c8acd72c917824a5b211a127b967dd5a21b384\",\"epoch\":1,\"issued_ms\":1793430000000,\"wrap_sha256\":\"0c2b3e6c6090dd8382114577d652a0e014eaa2b5230e4688942f88324b95d54a\"}",
+    "signature": "{\"alg\":\"ecdsa-p256-sha256\",\"sig\":\"252cc3a89b16901049bea55bed53329465b22571bd60367dd2f857a845a96924d764bcd4f7bc3a9cfe2d639dbc00a40d71a75f726b60a36f270108cb0b8bb474\"}",
+    "wrap_json": "{\"v\":1,\"alg\":\"ecdh-p256-hkdf-sha256-aes256gcm\",\"recipient_device_id\":\"mcp_0420d5da-014e-4caa-abc1-fbd58af62c48\",\"directory_version\":1,\"current_epoch\":1,\"ephemeral_public_key\":\"0452df7550c3ed329ee6d8b135e2a9b8ac9625ac5246d4131160e04aec41eae87b91a950e22f0c67bbe3583453929710ba162d5190ee6e63f1ec38ba324e979f4a\",\"iv\":\"81f3189e61c4e38f94f0fbb1\",\"ciphertext\":\"e61ddd83edd526c94f189bc846eef1019fa3c478b95c2fbc515b4203d67a8ab77b1b8aa9932497941d336c2b4c6c8166b5ce8869d403a2d34b3bff0756234b3fb0538ffa165e422837de1b3a3c9a14702dd4e5903613fcf0d6c4d8fb\",\"wrapped_by_device_id\":\"dev_e9d57c66f6736191dd556d30de4277b8\",\"signature\":{\"alg\":\"ecdsa-p256-sha256\",\"sig\":\"b1ecf6e3fecd4291eecbf73b4a66187c1f56a9a8c1ed79dbc6c529262332c74f4f499db13fe52c88c5b854991076579b6837504b38406fd5007f0d6e8199e0ff\"}}",
+    "private_capability": "728f2cbd44ccc4755fef7bb6c9bc227fe450f58682b8315a33bc10766aba0f59"
+  },
+  "device": {
+    "request": "ticket-task-fixture",
+    "consent": "{\"v\":2,\"owner\":\"usr_mcp_task_fixture\",\"vault_id\":\"e9d57c66f6736191\",\"client\":\"client-task-fixture\",\"resource\":\"https://hub.example/api/v1/mcp\",\"scope\":\"mcp:chains mcp:tasks:read mcp:tasks:write\",\"grant\":\"grant-task-fixture\",\"family\":\"family-task-fixture\",\"revision\":1,\"mode\":\"device\",\"recipient\":\"\",\"recipient_public_key\":\"\",\"approver\":\"dev_e9d57c66f6736191dd556d30de4277b8\",\"directory_version\":1,\"directory_head\":\"a85f81b611c343312622ade9e3c8acd72c917824a5b211a127b967dd5a21b384\",\"epoch\":1,\"issued_ms\":1793430000000,\"wrap_sha256\":\"\"}",
+    "signature": "{\"alg\":\"ecdsa-p256-sha256\",\"sig\":\"80cf2319a587e953e0d9f07e091c6960b516ce5c13e74039ba02c77072a4117dfd3f3c8c11f63b8d0c0cd870b7926bc2baa682a0b5c72a55d084f13bc70bbe2c\"}",
+    "wrap_json": "",
+    "private_capability": ""
+  }
+}

@@ -137,6 +137,8 @@ sqlite_uow_after_commit :: proc(ctx: rawptr, hook: iface.After_Commit_Hook) -> b
 drop_after_commit_from :: proc(depth: int) {
 	for i := 0; i < len(tx_after_commit); i += 1 {
 		if tx_after_commit[i].depth >= depth {
+			hook:=tx_after_commit[i].hook
+			if hook.discard!=nil do hook.discard(hook.ctx)
 			ordered_remove(&tx_after_commit, i)
 			i -= 1
 		}
@@ -177,6 +179,7 @@ sqlite_uow_commit :: proc(ctx: rawptr) -> (bool, domain.Domain_Error) {
 		// A failed COMMIT leaves the transaction open on the handle; roll it back
 		// so the next BEGIN (on whichever thread wins the mutex) can start clean.
 		exec(uow_ctx.conn, "ROLLBACK;")
+		drop_after_commit_from(0)
 	}
 	free(uow_ctx)
 	// Take the deferred hooks out before releasing the mutex (the next owner
@@ -207,6 +210,7 @@ sqlite_uow_rollback :: proc(ctx: rawptr) {
 	}
 	uow_ctx_conn := uow_ctx.conn
 	exec(uow_ctx.conn, "ROLLBACK;")
+	drop_after_commit_from(0)
 	free(uow_ctx)
 	delete(tx_after_commit)
 	tx_after_commit = nil

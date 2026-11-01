@@ -1374,7 +1374,7 @@ send_chain_level_wake :: proc(service: ^Taskchain_Service, chain: domain.Task_Ch
 // comment_task records a comment. Task System v2: a comment is an audit event
 // with no protocol meaning — nobody is woken by it (the pack carries the refs
 // an agent may fetch). The returned `notified` list is always empty.
-comment_task :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, input: Task_Comment_Input) -> (domain.Task_Comment, []string, bool, domain.Domain_Error) {
+comment_task_impl :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, input: Task_Comment_Input) -> (domain.Task_Comment, []string, bool, domain.Domain_Error) {
 	if strings.trim_space(input.body) == "" do return domain.Task_Comment{}, nil, false, domain.domain_error(.Validation_Failed, "comment body is required")
 	task, ok, err := get_task(service, auth, input.task_id)
 	if !ok do return domain.Task_Comment{}, nil, false, err
@@ -1384,7 +1384,9 @@ comment_task :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, 
 	comment := domain.Task_Comment{comment_id = platform.generate_id(service.ids, "cmt_"), task_id = task.task_id, chain_id = task.chain_id, owner_user_id = task.owner_user_id, author_agent_instance_id = auth.agent_instance_id, body = input.body, created_at = now, updated_at = now}
 	saved, ok2, err2 := save_comment(service, comment)
 	if !ok2 do return saved, nil, ok2, err2
-	if service.engine != nil do _ = taskv2.task_comment(service.engine, task, engine_actor(auth), saved.comment_id)
+	if service.engine != nil {
+		if eerr:=taskv2.task_comment(service.engine, task, engine_actor(auth), saved.comment_id);eerr.code!=.None do return {},nil,false,eerr
+	}
 	return saved, nil, true, domain.Domain_Error{}
 }
 
@@ -1942,7 +1944,9 @@ upsert_fleet_impl :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Cont
 	if save_err.code != .None do return saved, save_err
 	// Editing a row never touches live leases; the next grant uses the new
 	// placement. The engine re-evaluates review gates and ready tasks.
-	if service.engine != nil do _ = taskv2.fleet_changed(service.engine, chain, trimmed_agent)
+	if service.engine != nil {
+		if eerr:=taskv2.fleet_changed(service.engine,chain,trimmed_agent);eerr.code!=.None do return {},eerr
+	}
 	return saved, domain.Domain_Error{}
 }
 
@@ -2163,6 +2167,13 @@ cancel_task_impl :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Conte
 // ---- one-UoW wrappers (review C1) --------------------------------------------------
 // Each mutating verb runs entirely inside one unit of work; the *_impl bodies
 // are unchanged and the engine calls inside them nest as SAVEPOINTs.
+
+comment_task :: proc(service:^Taskchain_Service,auth:contracts.Auth_Context,input:Task_Comment_Input)->(domain.Task_Comment,[]string,bool,domain.Domain_Error) {
+	v:=verb_begin(service)
+	out,notified,ok,err:=comment_task_impl(service,auth,input)
+	if cerr:=verb_end(&v,ok);cerr.code!=.None do return {},nil,false,cerr
+	return out,notified,ok,err
+}
 
 publish_chain :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, chain_id: domain.Task_Chain_ID) -> (domain.Task_Chain, bool, domain.Domain_Error) {
 	v := verb_begin(service)

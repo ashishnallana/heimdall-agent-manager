@@ -28,6 +28,7 @@ Control_Job :: struct {
 	epoch:u32,
 	consent,signature:string,
 	directory:Directory_Verification_Input,
+	tool:string `json:"tool,omitempty"`,
 }
 Control_Reply :: struct {request_id,generation,digest,device_id,result,signature:string,deadline_ms:i64}
 control_reply_statement :: proc(job:Control_Job,device_id,result:string)->string {
@@ -43,9 +44,10 @@ control_job_digest :: proc(job:Control_Job)->string {
 	return sha256_hex(string(encoded))
 }
 control_job_verify :: proc(job:Control_Job,owner,resource,device_id:string,kr:^Vault_Keyring,now:i64,root_pin:^Root_Pin=nil)->bool {
-	if job.owner!=owner || job.resource!=resource || job.request_id=="" || !valid_id_value(job.request_id) || job.generation=="" || !valid_id_value(job.generation) || job.deadline_ms<=now || job.deadline_ms>now+5000 || len(job.payload)>4*1024*1024 || job.digest!=control_job_digest(job) || (job.operation!="read" && job.operation!="seal") do return false
+	if job.owner!=owner || job.resource!=resource || job.request_id=="" || !valid_id_value(job.request_id) || job.generation=="" || !valid_id_value(job.generation) || job.deadline_ms<=now || job.deadline_ms>now+5000 || len(job.payload)>4*1024*1024 || job.digest!=control_job_digest(job) || (job.operation!="read" && job.operation!="seal" && job.operation!="seal_comment" && job.operation!="seal_task") do return false
 	c:Control_Consent
 	if json.unmarshal_string(job.consent,&c,.JSON,context.temp_allocator)!=nil do return false
+	if !control_job_scope_ok(c.scope,job.tool,job.operation) do return false
 	canonical,err:=json.marshal(c,allocator=context.temp_allocator)
 	if err!=nil || string(canonical)!=job.consent || c.v==0 || c.v!=control_consent_version(c.scope) || c.mode!="device" || c.owner!=owner || c.resource!=resource || c.grant!=job.grant || c.revision!=job.revision || c.client=="" || c.family=="" || c.recipient!="" || c.recipient_public_key!="" || c.wrap_sha256!="" do return false
 	d:=job.directory
@@ -75,7 +77,7 @@ control_wipe_value :: proc(value:json.Value) {
 	case json.Array:for child in v do control_wipe_value(child)
 	}
 }
-control_transform_data :: proc(data:Control_Data,kr:^Vault_Keyring)->(string,bool) {
+control_transform_data :: proc(data:Control_Data,kr:^Vault_Keyring,details:=false)->(string,bool) {
 	out:=data
 	opened:=make([dynamic]json.Value,context.temp_allocator)
 	defer for value in opened do control_wipe_value(value)
@@ -93,7 +95,7 @@ control_transform_data :: proc(data:Control_Data,kr:^Vault_Keyring)->(string,boo
 	out.chains=make([]json.Object,len(data.chains),context.temp_allocator)
 	for c,i in data.chains {out.chains[i],ok=transform(c,.Chain,kr,&opened);if !ok do return "",false}
 	out.tasks=make([]json.Object,len(data.tasks),context.temp_allocator)
-	for t,i in data.tasks {out.tasks[i],ok=transform(t,.Task,kr,&opened);if !ok do return "",false}
+	for t,i in data.tasks {out.tasks[i],ok=transform(t,.Task_Detail if details else .Task,kr,&opened);if !ok do return "",false}
 	out.comments=make([]json.Object,len(data.comments),context.temp_allocator)
 	for c,i in data.comments {out.comments[i],ok=transform(c,.Comment,kr,&opened);if !ok do return "",false}
 	encoded,err:=json.marshal(out,allocator=context.temp_allocator)
@@ -104,6 +106,23 @@ control_transform_data :: proc(data:Control_Data,kr:^Vault_Keyring)->(string,boo
 	return string(encoded),true
 }
 control_job_transform :: proc(job:Control_Job,kr:^Vault_Keyring)->(string,bool) {
+	if job.operation=="seal_task" {
+		value,err:=json.parse_string(job.payload,parse_integers=true,allocator=context.temp_allocator)
+		defer control_wipe_value(value)
+		fields,typed:=value.(json.Object)
+		if err!=nil || !typed do return "",false
+		return control_seal_task_fields(kr,fields)
+	}
+	if job.operation=="seal_comment" {
+		input:struct {body:string}
+		if json.unmarshal_string(job.payload,&input,.JSON,context.temp_allocator)!=nil do return "",false
+		defer if input.body!="" do crypto.zero_explicit(raw_data(input.body),len(input.body))
+		if kr==nil || !keyring_validate(kr) || len(input.body)<1 || len(input.body)>20000 do return "",false
+		body,ok:=seal_string(input.body,kr,context.temp_allocator)
+		if !ok do return "",false
+		encoded,err:=json.marshal(struct {body:string}{body},allocator=context.temp_allocator)
+		return string(encoded),err==nil
+	}
 	if job.operation=="read" {
 		data:Control_Data
 		if json.unmarshal_string(job.payload,&data,.JSON,context.temp_allocator)!=nil do return "",false
@@ -113,7 +132,7 @@ control_job_transform :: proc(job:Control_Job,kr:^Vault_Keyring)->(string,bool) 
 			for row in data.tasks do control_wipe_value(row)
 			for row in data.comments do control_wipe_value(row)
 		}
-		return control_transform_data(data,kr)
+		return control_transform_data(data,kr,job.tool=="tasks.get" || job.tool=="tasks.list")
 	}
 	input:struct {title,description:string}
 	defer {if input.title!="" do crypto.zero_explicit(raw_data(input.title),len(input.title));if input.description!="" do crypto.zero_explicit(raw_data(input.description),len(input.description))}

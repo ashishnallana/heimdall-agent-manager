@@ -270,7 +270,7 @@ end_uow :: proc(svc: ^Service, u: ^Uow, ok: bool) -> (bool, domain.Domain_Error)
 			d := new(Deferred_Effects)
 			d.svc = svc
 			d.effects = u.effects
-			if iface.unit_of_work_after_commit(&u.tx, iface.After_Commit_Hook{ctx = rawptr(d), run = deferred_effects_run}) {
+			if iface.unit_of_work_after_commit(&u.tx, iface.After_Commit_Hook{ctx = rawptr(d), run = deferred_effects_run, discard=deferred_effects_discard}) {
 				u.effects = Effects{} // ownership moved
 			} else {
 				free(d)
@@ -349,6 +349,15 @@ deferred_effects_run :: proc(ctx: rawptr) {
 	d := (^Deferred_Effects)(ctx)
 	if d == nil do return
 	flush_effects(d.svc, &d.effects)
+	destroy_effects(&d.effects)
+	free(d)
+}
+
+@(private = "file")
+deferred_effects_discard :: proc(ctx:rawptr) {
+	d:=(^Deferred_Effects)(ctx)
+	if d==nil do return
+	cancel_reservations(d.svc,&d.effects)
 	destroy_effects(&d.effects)
 	free(d)
 }
