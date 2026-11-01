@@ -477,6 +477,7 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          HEIMDALL_DESKTOP_SIGNED_RELEASE: '1'
         run: |
           set -euo pipefail
           [ -n "$APPLE_ID" ] && [ -n "$APPLE_APP_SPECIFIC_PASSWORD" ] && [ -n "$APPLE_TEAM_ID" ] || {
@@ -497,11 +498,15 @@ jobs:
           # has no contents:write token.
           # zip: what electron-updater installs (F14); dmg: what people download.
           npx electron-builder --mac dmg zip "$arch" --publish never \
-            -c.extraMetadata.version="${{ needs.prepare.outputs.clean_version }}"
+            -c.extraMetadata.version="${{ needs.prepare.outputs.clean_version }}" \
+            -c.forceCodeSigning=true
           # Each arch writes its own latest-mac.yml; the release job merges them.
           mv desktop-dist/latest-mac.yml "desktop-dist/latest-mac-${{ matrix.target }}.yml"
           # REQ-ENR-4: App / Bridge / both .pkg from the signed, notarized .app.
           app_bundle="$(find desktop-dist -maxdepth 2 -name Ninjy.app -type d | head -n 1)"
+          codesign --verify --deep --strict "$app_bundle"
+          spctl --assess --type execute "$app_bundle"
+          xcrun stapler validate "$app_bundle"
           pkg="desktop-dist/Ninjy-${{ needs.prepare.outputs.clean_version }}-${arch#--}.pkg"
           scripts/release/build-macos-pkg.sh "$app_bundle" release-assets/bridge \
             "${{ needs.prepare.outputs.version }}" "${arch#--}" "$pkg"
@@ -708,6 +713,10 @@ jobs:
 
       - name: Build Ninjy installer (Windows)
         shell: pwsh
+        env:
+          HEIMDALL_WINDOWS_PUBLISHER_NAME: ${{ vars.WINDOWS_UPDATE_PUBLISHER_NAME }}
+          CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
         run: |
           scripts/release/stage-windows-desktop-resources.ps1 `
             -Bundle dist/heimdall-local-windows-amd64.zip `
@@ -719,10 +728,23 @@ jobs:
           if ($LASTEXITCODE) { throw "npm ci failed with exit code $LASTEXITCODE" }
           npm run build
           if ($LASTEXITCODE) { throw "npm run build failed with exit code $LASTEXITCODE" }
+          $signing = @()
+          if ($env:HEIMDALL_WINDOWS_PUBLISHER_NAME) {
+            if (-not $env:CSC_LINK -or -not $env:CSC_KEY_PASSWORD) { throw 'Windows signed updates require WIN_CSC_LINK and WIN_CSC_KEY_PASSWORD' }
+            $env:HEIMDALL_DESKTOP_SIGNED_RELEASE = '1'
+            $signing = @('--config.forceCodeSigning=true', "--config.win.publisherName=$($env:HEIMDALL_WINDOWS_PUBLISHER_NAME)")
+          }
           npx electron-builder --win nsis --x64 --publish never `
-            --config.extraMetadata.version="${{ needs.prepare.outputs.clean_version }}"
+            --config.extraMetadata.version="${{ needs.prepare.outputs.clean_version }}" @signing
           if ($LASTEXITCODE) { throw "electron-builder failed with exit code $LASTEXITCODE" }
           $installer = Get-Item desktop-dist/Ninjy-*-x64.exe
+          if ($env:HEIMDALL_DESKTOP_SIGNED_RELEASE -eq '1') {
+            $signature = Get-AuthenticodeSignature $installer.FullName
+            if ($signature.Status -ne 'Valid' -or -not $signature.SignerCertificate) { throw 'Installer Authenticode validation failed' }
+            $publisher = $signature.SignerCertificate.GetNameInfo([System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false)
+            if ($env:HEIMDALL_WINDOWS_PUBLISHER_NAME -match '(^|,)\s*CN=') { $publisher = $signature.SignerCertificate.Subject }
+            if ($publisher -ne $env:HEIMDALL_WINDOWS_PUBLISHER_NAME) { throw 'Installer publisher does not match configured update publisher' }
+          }
           if (-not (Test-Path desktop-dist/latest.yml)) { throw 'electron-builder did not produce latest.yml' }
 
       # A separate artifact, like the macOS DMG: upload-artifact@v4 roots each
@@ -880,6 +902,10 @@ jobs:
             cp latest-mac-darwin-arm64.yml latest-mac.yml
           fi
           rm latest-mac-darwin-*.yml
+          mac_update_arches=(--arch arm64)
+          if [ -f "Ninjy-$clean-x64.zip" ]; then mac_update_arches+=(--arch x64); fi
+          python3 "$GITHUB_WORKSPACE/scripts/release/validate-desktop-updates.py" . --version "$clean" --platform mac "${mac_update_arches[@]}"
+          python3 "$GITHUB_WORKSPACE/scripts/release/validate-desktop-updates.py" . --version "$clean" --platform windows --arch x64
           sha256sum Ninjy-*.dmg Ninjy-*.zip Ninjy-*.pkg Ninjy-*.AppImage Ninjy-*.deb Ninjy-*.exe >> SHA256SUMS
 
       - name: Create or update GitHub Release

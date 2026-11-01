@@ -26,6 +26,7 @@ jobs:
     name: Promote ${{ inputs.version }}
     runs-on: ubuntu-24.04
     steps:
+      - uses: actions/checkout@v4
       - name: Verify the release is a complete candidate
         env:
           GH_TOKEN: ${{ github.token }}
@@ -34,7 +35,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || {
+          [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
             echo "invalid release tag: $VERSION" >&2; exit 2; }
           gh release view "$VERSION" --json isDraft,isPrerelease,assets > release.json
           if [ "$(jq -r .isDraft release.json)" = "true" ]; then
@@ -70,6 +71,15 @@ jobs:
           jq -e '.assets | any(.name == "SHA256SUMS")' release.json >/dev/null || {
             echo "missing asset: SHA256SUMS" >&2; missing=1; }
           [ "$missing" = 0 ]
+          mkdir -p desktop-candidate
+          gh release download "$VERSION" --dir desktop-candidate \
+            --pattern latest.yml --pattern latest-mac.yml \
+            --pattern 'Ninjy-*.zip' --pattern 'Ninjy-*.zip.blockmap' \
+            --pattern 'Ninjy-*.exe' --pattern 'Ninjy-*.exe.blockmap'
+          python3 scripts/release/validate-desktop-updates.py desktop-candidate \
+            --version "${VERSION#v}" --platform mac --arch arm64 --assets release.json
+          python3 scripts/release/validate-desktop-updates.py desktop-candidate \
+            --version "${VERSION#v}" --platform windows --arch x64 --assets release.json
 
       - name: Mark as the stable Latest release
         env:

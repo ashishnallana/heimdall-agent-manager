@@ -9,6 +9,8 @@ import React, {
   useState,
 } from 'react';
 import { useDispatch, useSelector, useStore } from 'react-redux';
+import { desktopUpdateFrozen, desktopUpdatePreparation } from '../../utils/desktopUpdatePreparation';
+import { writeClientStorageChecked, writeComposerDraftChecked } from '../../utils/clientPersistence';
 import {
   CommandPalette,
   Icon as UiIcon,
@@ -946,8 +948,11 @@ export function AgentChatPane({
   // Per-agent composer draft state isolated by routeInstanceId, with fallback to COMPOSER_DRAFT_KEY
   const loadedDraftAgentIdRef = useRef<string>(routeInstanceId);
   const [draft, setDraft] = useState<string>(() => readComposerDraft(routeInstanceId));
+  const updateDraftRef = useRef(draft);
+  updateDraftRef.current = draft;
 
   useEffect(() => {
+    if (desktopUpdateFrozen()) return;
     if (loadedDraftAgentIdRef.current !== routeInstanceId) {
       const nextDraft = readComposerDraft(routeInstanceId);
       loadedDraftAgentIdRef.current = routeInstanceId;
@@ -959,6 +964,8 @@ export function AgentChatPane({
 
   const updateDraft = useCallback(
     (value: string) => {
+      if (desktopUpdateFrozen()) return;
+      updateDraftRef.current = value;
       setDraft(value);
       if (loadedDraftAgentIdRef.current === routeInstanceId) {
         writeComposerDraft(routeInstanceId, value);
@@ -1047,6 +1054,19 @@ export function AgentChatPane({
   const [composerDockHeight, setComposerDockHeight] = useState(0);
   const [error, setError] = useState('');
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
+  const updateFilePickerPending = useRef(false);
+  const updateBlockers = useRef({ attachments, trayDraft, quotes, trayModeItem });
+  updateBlockers.current = { attachments, trayDraft, quotes, trayModeItem };
+  useEffect(() => desktopUpdatePreparation.register({
+    blocked: () => sendingRef.current || updateFilePickerPending.current || updateBlockers.current.attachments.length > 0
+      || updateBlockers.current.quotes.length > 0 || Boolean(updateBlockers.current.trayModeItem) || Boolean(updateBlockers.current.trayDraft.trim())
+      || [...quotedTrayDrafts.current.values()].some(value => Boolean(value.trim())),
+    flush: () => {
+      const latest = textareaRef.current?.value ?? updateDraftRef.current;
+      writeComposerDraftChecked(routeInstanceId, latest);
+      writeClientStorageChecked(COMPOSER_DRAFT_KEY, latest || null);
+    },
+  }), [routeInstanceId]);
   const [localMessages, setLocalMessages] = useState<Message[]>([]);
   useEffect(() => { setLocalMessages(current => current.filter(item => !(item as any).hasQuoteContext)); }, [quoteEpoch, quoteVaultKey]);
 
@@ -1218,6 +1238,12 @@ export function AgentChatPane({
   }]);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  useEffect(() => {
+    const input = fileInputRef.current;
+    const cancelled = () => { updateFilePickerPending.current = false; };
+    input?.addEventListener('cancel', cancelled);
+    return () => input?.removeEventListener('cancel', cancelled);
+  });
 
   const [renaming, setRenaming] = useState(false);
   const [titleDraft, setTitleDraft] = useState('');
@@ -1646,6 +1672,7 @@ export function AgentChatPane({
   }
 
   async function uploadAttachment(file: File, existingLocalId = '') {
+    if (desktopUpdateFrozen()) return;
     if (configurationInputBlocked || sendingRef.current) return;
     const localId =
       existingLocalId || `att_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -1704,6 +1731,8 @@ export function AgentChatPane({
   }
 
   function handleAttachmentInput(event: any) {
+    updateFilePickerPending.current = false;
+    if (desktopUpdateFrozen()) return;
     if (configurationInputBlocked || sendingRef.current) return;
     const files = Array.from(event.target.files || []) as File[];
     event.target.value = '';
@@ -1711,7 +1740,11 @@ export function AgentChatPane({
   }
 
   function openAttachmentPicker() {
-    if (!configurationInputBlocked && !sendingRef.current) fileInputRef.current?.click();
+    if (desktopUpdateFrozen()) return;
+    if (!configurationInputBlocked && !sendingRef.current && fileInputRef.current) {
+      updateFilePickerPending.current = true;
+      fileInputRef.current.click();
+    }
   }
 
   function handleComposerPaste(event: ClipboardEvent<HTMLTextAreaElement>) {
@@ -1723,6 +1756,7 @@ export function AgentChatPane({
   }
 
   async function submitTrayMode() {
+    if (desktopUpdateFrozen()) return;
     if (!trayMode || !trayModeItem) return;
     const text = appendArtifactLinks(
       trayDraft.trim(),
@@ -1746,6 +1780,7 @@ export function AgentChatPane({
 
   async function submit(event: FormEvent) {
     event.preventDefault();
+    if (desktopUpdateFrozen()) return;
     if (sendDisabled || sendingRef.current) return;
     if (trayModeItem) {
       await submitTrayMode();
@@ -2401,6 +2436,7 @@ export function AgentChatPane({
         value={trayModeItem ? trayDraft : draft}
         disabled={normalSendBusy || (trayModeItem ? false : configurationInputBlocked)}
         onChange={(e) => {
+          if (desktopUpdateFrozen()) return;
           if (trayModeItem) {
             setTrayDraft(e.target.value);
             return;

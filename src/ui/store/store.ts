@@ -1,4 +1,5 @@
 import { combineReducers, configureStore, createAction } from '@reduxjs/toolkit';
+import { desktopUpdateMutationGuard } from '../utils/desktopUpdatePreparation';
 import { heimdallApi, setupHeimdallApiListeners } from '../api/heimdallApi';
 import { vaultCacheInvalidationMiddleware } from '../api/vaultCacheInvalidation';
 import { paneDeferralResetMiddleware } from '../api/wsInvalidation';
@@ -84,7 +85,7 @@ export const store = configureStore({
     // REQ-CACHE-1: vaultCacheInvalidationMiddleware runs BEFORE heimdallApi.middleware
     // so the reset it dispatches on a lock/unlock transition is handled by the API
     // middleware in the same pass. See api/vaultCacheInvalidation.ts.
-    getDefaultMiddleware().concat(
+    getDefaultMiddleware().prepend(desktopUpdateMutationGuard).concat(
       actionLogger,
       inputPreferencesMiddleware,
       vaultCacheInvalidationMiddleware,

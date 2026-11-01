@@ -80,6 +80,9 @@ class StageResourcesTests(unittest.TestCase):
         bundle = Path(td) / f'heimdall-local-{target}.tar.gz'
         meta = json.dumps({'version': 'v1.2.3', 'target': target, 'developer_id_signed': signed}).encode()
         with tarfile.open(bundle, 'w:gz') as tf:
+            # Staging now verifies the real extension payload before its signing
+            # checks. Keep this fixture representative of a release archive.
+            tf.add(ROOT / 'extensions', arcname='share/heimdall/extensions')
             info = tarfile.TarInfo('METADATA.json')
             info.size = len(meta)
             tf.addfile(info, io.BytesIO(meta))
@@ -230,7 +233,7 @@ class MacAndLinuxInstallerTests(unittest.TestCase):
 
     def test_desktop_updater_is_not_windows_only(self):
         main = read('src/ui/electron/main.cts')
-        self.assertIn('desktopUpdater.supported(process.platform, app.isPackaged)', main)
+        self.assertIn('desktopUpdates = installDesktopUpdates', main)
         self.assertNotIn("process.platform === 'win32', () => undefined", main)
 
 

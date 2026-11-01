@@ -93,11 +93,14 @@ test('package kind comes from APPIMAGE', () => {
   assert.match(installChoice.removalHint('deb'), /apt remove heimdall/);
 });
 
-test('desktop auto-update covers Windows, macOS and AppImage, never dev or deb', () => {
-  const updater = loadCts('desktopUpdater', (id: string) => (id === 'electron-updater' ? { autoUpdater: {} } : nodeRequire(id)));
-  assert.equal(updater.supported('win32', true, {}), true);
-  assert.equal(updater.supported('darwin', true, {}), true, 'F14: macOS updates from the zip');
-  assert.equal(updater.supported('linux', true, { APPIMAGE: '/x.AppImage' }), true);
-  assert.equal(updater.supported('linux', true, {}), false, 'a deb is updated by reinstalling it');
-  assert.equal(updater.supported('darwin', false, {}), false, 'dev runs never self-update');
+test('desktop auto-update requires signed install policy and never covers Linux or dev', () => {
+  const { evaluatePolicy } = loadCts('desktopUpdatePolicy');
+  const input = { platform: 'darwin', arch: 'arm64', isPackaged: true, currentVersion: '1.2.3',
+    executable: '/Applications/Ninjy.app/Contents/MacOS/Ninjy', resources: '/Applications/Ninjy.app/Contents/Resources', writable: true,
+    policy: { schemaVersion: 1, distribution: 'mac-app', updatesEnabled: true },
+    feed: { provider: 'github', owner: 'tanmayv', repo: 'heimdall-agent-manager' } };
+  assert.equal(evaluatePolicy(input).supported, true);
+  assert.equal(evaluatePolicy({ ...input, platform: 'linux' }).supported, false, 'AppImage and deb use manual delivery');
+  assert.equal(evaluatePolicy({ ...input, isPackaged: false }).supported, false);
+  assert.equal(evaluatePolicy({ ...input, platform: 'win32', arch: 'x64', policy: null }).supported, false);
 });

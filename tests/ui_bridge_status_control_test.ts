@@ -19,7 +19,8 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const preloadSource = fs.readFileSync(path.join(ROOT, 'src/ui/electron/preload.cts'), 'utf8');
 const mainSource = fs.readFileSync(path.join(ROOT, 'src/ui/electron/main.cts'), 'utf8');
 const managerSource = fs.readFileSync(path.join(ROOT, 'src/ui/electron/bridgeManager.cts'), 'utf8');
-const updaterSource = fs.readFileSync(path.join(ROOT, 'src/ui/electron/desktopUpdater.cts'), 'utf8');
+const updaterSource = fs.readFileSync(path.join(ROOT, 'src/ui/electron/desktopUpdateController.cts'), 'utf8');
+const updaterMainSource = fs.readFileSync(path.join(ROOT, 'src/ui/electron/desktopUpdatesMain.cts'), 'utf8');
 const authGateSource = fs.readFileSync(path.join(ROOT, 'src/ui/components/ElectronDeviceAuthGate.tsx'), 'utf8');
 const builderSource = fs.readFileSync(path.join(ROOT, 'electron-builder.yml'), 'utf8');
 const windowsSocketSource = fs.readFileSync(path.join(ROOT, 'src/bridge/os_platform_windows.odin'), 'utf8');
@@ -100,16 +101,15 @@ test('REQ-OIDC-DESKTOP-1: OIDC completion does not destroy its window inside a n
   assert.doesNotMatch(mainSource, /finishIfReturned[\s\S]*?authWindow\?\.close\(\)/);
 });
 
-test('REQ-WIN-UPDATE-1: unsigned Windows releases publish digest-protected updater metadata', () => {
-  assert.match(updaterSource, /require\('electron-updater'\)/);
-  assert.match(updaterSource, /autoUpdater\.allowPrerelease = false/);
-  assert.match(updaterSource, /autoUpdater\.checkForUpdates\(\)/);
-  assert.match(updaterSource, /autoUpdater\.quitAndInstall\(false, true\)/);
-  assert.match(mainSource, /desktopUpdater\.start\(desktopUpdater\.supported\(process\.platform, app\.isPackaged\)/);
-  assert.match(updaterSource, /platform === 'win32' \|\| platform === 'darwin'/);
+test('REQ-AU: updater delivery retains NSIS/version identity and enables publisher verification', () => {
+  assert.match(updaterMainSource, /require\('electron-updater'\)/);
+  assert.match(updaterSource, /updater\.allowPrerelease = false/);
+  assert.match(updaterSource, /updater\.autoInstallOnAppQuit = false/);
+  assert.match(updaterMainSource, /updater\.quitAndInstall\(false, true\)/);
+  assert.match(mainSource, /desktopUpdates = installDesktopUpdates/);
   assert.match(builderSource, /publish:\s+[\s\S]*provider: github[\s\S]*repo: heimdall-agent-manager/);
-  assert.match(builderSource, /verifyUpdateCodeSignature: false/);
-  assert.doesNotMatch(releaseWorkflowSource, /WINDOWS_CODE_SIGNING_PFX|signtool sign|forceCodeSigning=true/);
+  assert.match(builderSource, /verifyUpdateCodeSignature: true/);
+  assert.match(releaseWorkflowSource, /WIN_CSC_LINK/);
   assert.match(releaseWorkflowSource, /desktop-dist\/latest\.yml/);
   assert.match(
     releaseWorkflowSource,
@@ -669,7 +669,9 @@ test('F24: desktopCapabilities is the one desktop check; no odinApi.deviceAuth r
       if (!/\.tsx?$/.test(entry.name)) continue;
       const source = fs.readFileSync(full, 'utf8');
       assert.doesNotMatch(source, /odinApi\??\.deviceAuth/, full);
-      if (/\bodinApi\b/.test(source)) probes.push(path.relative(ROOT, full));
+      // The explicitly guarded dev demo installs a fixture preload; production
+      // capability probes still belong exclusively to desktopBridge.ts.
+      if (/\bodinApi\b/.test(source) && path.relative(ROOT, full) !== 'src/ui/dev/setupWizardDemo.tsx') probes.push(path.relative(ROOT, full));
     }
   };
   walk(path.join(ROOT, 'src/ui'));

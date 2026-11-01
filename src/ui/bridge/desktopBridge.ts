@@ -92,6 +92,7 @@ const BRIDGE_MANAGER_METHODS = ['getConfig', 'setHubUrl', 'getStatus', 'list', '
 export interface DesktopCapabilities {
   /** Running inside the Heimdall desktop app (the preload API is present). */
   desktop: boolean;
+  desktopUpdates: DesktopUpdatesApi | null;
   bridgeManager: DesktopBridgeManagerApi | null;
   /**
    * The desktop app's preload exposes an older bridgeManager (<= v0.5.21:
@@ -114,6 +115,8 @@ export function desktopCapabilities(): DesktopCapabilities {
   const current = Boolean(manager) && BRIDGE_MANAGER_METHODS.every((name) => typeof manager[name] === 'function');
   return {
     desktop: Boolean(api),
+    desktopUpdates: api?.desktopUpdates?.schemaVersion === 1 && ['getState', 'check', 'retry', 'restartAndInstall', 'onState', 'onPrepare', 'onRelease', 'preparationResult']
+      .every(name => typeof api.desktopUpdates[name] === 'function') ? api.desktopUpdates : null,
     bridgeManager: current ? manager as DesktopBridgeManagerApi : null,
     legacyBridgeManager: Boolean(manager) && !current,
     notifications: api?.notifications || null,
@@ -121,6 +124,25 @@ export function desktopCapabilities(): DesktopCapabilities {
     daemonUrl: String(api?.daemonUrl || ''),
     windowChrome: api?.windowChrome && typeof api.windowChrome === 'object' ? api.windowChrome : null,
   };
+}
+
+export interface DesktopUpdateState {
+  schemaVersion: 1;
+  phase: 'disabled' | 'idle' | 'checking' | 'available' | 'downloading' | 'downloaded' | 'up-to-date' | 'error' | 'preparing-restart';
+  currentVersion: string; targetVersion: string; supported: boolean; reason: string;
+  channel: 'stable'; message: string; errorCode: string; retryable: boolean;
+  percent: number | null; transferred: number | null; total: number | null; lastCheckedAt: string | null;
+}
+export interface DesktopUpdatesApi {
+  schemaVersion: 1;
+  getState(): Promise<DesktopUpdateState>;
+  check(): Promise<DesktopUpdateState>;
+  retry(): Promise<DesktopUpdateState>;
+  restartAndInstall(): Promise<{ ok: boolean; error?: string }>;
+  onState(callback: (state: DesktopUpdateState) => void): () => void;
+  onPrepare(callback: (request: { epoch: number }) => void): () => void;
+  onRelease(callback: (request: { epoch: number }) => void): () => void;
+  preparationResult(result: { epoch: number; ready: boolean }): Promise<{ ok: boolean }>;
 }
 
 export function desktopBridgeManager(): DesktopBridgeManagerApi | null {

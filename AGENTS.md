@@ -299,6 +299,8 @@ All of the following element types must have `data-debug-id`:
 
 | Component | Key IDs |
 |-----------|---------|
+| `DesktopUpdatesPanel` | `settings-nav-updates`, `desktop-updates-panel`, `desktop-updates-current-version`, `desktop-updates-status`, `desktop-updates-check`, `desktop-updates-progress`, `desktop-updates-retry`, `desktop-updates-restart`, `desktop-updates-later`, `desktop-updates-release-link` |
+| `DesktopUpdatePreparation` | `desktop-update-preparing-overlay`, `desktop-update-preparing-status` |
 | `ProviderProfilesSurface` | `provider-profiles`, `profile-add`, `profile-select-${profileId}`, `profile-wizard-step`, `profile-driver`, `profile-label`, `profile-id`, `profile-accent`, `profile-enabled`, `profile-back`, `profile-next`, `profile-save`, `profile-cancel`, `profile-delete-reset`, `profile-delete-confirm`, `profile-delete-cancel`, `profiles-refresh`, `profile-discover`, `profile-model-refresh`, `profile-model-test-${modelId}`, `settings-bridge-profiles-${bridgeId}` |
 | `ProfileRuntimeEditor` | `profile-config-${field}`, `profile-api-key-clear`, `profile-auth-method`, `profile-arg-${index}`, `profile-arg-add`, `profile-arg-remove-${index}`, `profile-env-name-${index}`, `profile-env-value-${index}`, `profile-env-sensitive-${index}`, `profile-env-clear-${index}`, `profile-env-remove-${index}`, `profile-env-add`, `profile-custom-models` |
 | `AgentPaneComposerPanel` | `agent-pane-composer-panel`, `agent-pane-terminal`, `agent-pane-stream-disconnected`, `agent-pane-retry-connection-btn` |

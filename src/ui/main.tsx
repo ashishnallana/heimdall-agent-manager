@@ -18,6 +18,9 @@ import { ShortcutProvider } from './services/shortcuts/ShortcutContext';
 import { ChordHud } from './components/shortcuts/ChordHud';
 import { ShortcutCheatsheetModal } from './components/shortcuts/ShortcutCheatsheetModal';
 import './styles.css';
+import { desktopCapabilities } from './bridge/desktopBridge';
+import { desktopUpdatePreparation, installDesktopUpdatePreparation, unsupportedUpdateEditorOpen } from './utils/desktopUpdatePreparation';
+import { heimdallApi } from './api/heimdallApi';
 
 // Legacy deep-link migration: if the app was opened at a real path-based route
 // (e.g. an old bookmark `.../workspace/chains/X/tasks/Y?...`, or a direct
@@ -46,6 +49,12 @@ import './styles.css';
 if (typeof window !== 'undefined') installAppViewportHeightSync(window as never);
 
 installElectronApiFetchBridge();
+installDesktopUpdatePreparation(desktopCapabilities().desktopUpdates);
+desktopUpdatePreparation.register({
+  blocked: () => store.dispatch(heimdallApi.util.getRunningMutationsThunk()).length > 0
+    || unsupportedUpdateEditorOpen(document),
+  flush: () => {}, // Unknown editors/forms block; registered composers/workspace perform checked writes.
+});
 
 // Register the notification service worker early so OS notifications work on
 // platforms where the in-page Notification constructor is unavailable (iOS

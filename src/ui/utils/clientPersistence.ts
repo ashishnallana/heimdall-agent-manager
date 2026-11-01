@@ -150,6 +150,19 @@ export function getComposerDraftKey(agentInstanceId: string): string {
   return `${COMPOSER_DRAFT_KEY_PREFIX}${agentInstanceId || 'default'}`;
 }
 
+/** Restart preparation must observe storage failure instead of best-effort writes. */
+export function writeClientStorageChecked(key: string, value: string | null): void {
+  if (typeof window === 'undefined') throw new Error('Client storage unavailable');
+  if (value === null) window.localStorage.removeItem(key);
+  else window.localStorage.setItem(key, value);
+  if (window.localStorage.getItem(key) !== value) throw new Error('Client storage verification failed');
+}
+
+export function writeComposerDraftChecked(agentInstanceId: string, draft: string): void {
+  if (!agentInstanceId) throw new Error('Composer identity unavailable');
+  writeClientStorageChecked(getComposerDraftKey(agentInstanceId), draft || null);
+}
+
 export function readComposerDraft(agentInstanceId: string): string {
   if (typeof window === 'undefined' || !agentInstanceId) return '';
   try {

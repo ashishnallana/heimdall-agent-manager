@@ -6,6 +6,7 @@ import { useFetchExperimentsQuery } from '../../api/endpoints/settings';
 import { withApiBase } from '../../api/apiBase';
 
 import AppearanceSettings from './AppearanceSettings';
+import DesktopUpdatesPanel from './DesktopUpdatesPanel';
 import NotificationsPanel from './NotificationsPanel';
 import { ProvidersPanel } from './ProvidersPanel';
 import BridgesPanel from './BridgesPanel';
@@ -24,6 +25,7 @@ export interface SettingsCategory {
 }
 
 export const SETTINGS_CATEGORIES: SettingsCategory[] = [
+  { id: 'updates', label: 'App updates', title: 'App updates', description: 'Installed desktop version, automatic updates and restart controls.' },
   {
     id: 'account',
     label: 'Account',
@@ -201,6 +203,8 @@ export function SettingsModal({
         return <ProvidersPanel />;
       case 'bridges':
         return <BridgesPanel />;
+      case 'updates':
+        return <DesktopUpdatesPanel />;
       case 'devices':
         return <DevicesPanel />;
       case 'lsp':
