@@ -15,7 +15,9 @@ import vault "odin_test:lib/vault"
 Consent :: vault.Control_Consent
 CONSENT_DOMAIN :: "heimdall-mcp-consent/v1\n"
 consent_message :: proc(canonical: string) -> string {
-	return strings.concatenate({CONSENT_DOMAIN,canonical},context.temp_allocator)
+	c:Consent
+	if json.unmarshal_string(canonical,&c,.JSON,context.temp_allocator)!=nil || c.v!=consent_version(c.scope) || c.v==0 do return ""
+	return strings.concatenate({vault.control_consent_domain(c.v),canonical},context.temp_allocator)
 }
 
 Consent_Input :: struct {
@@ -27,7 +29,7 @@ Consent_Input :: struct {
 delegation_vault_authority :: proc(ctx: rawptr, grant: domain.MCP_Record) -> (bool, domain.Domain_Error) {
 	c:Consent
 	if json.unmarshal(transmute([]byte)grant.consent,&c,.JSON,context.temp_allocator)!=nil do return false,domain.Domain_Error{}
-	if c.v!=1 || c.owner!=grant.owner || c.vault_id!=grant.vault_id || c.client!=grant.client || c.resource!=grant.resource || c.scope!=grant.scope || c.grant!=grant.grant || c.family!=grant.family || c.revision!=grant.revision || c.recipient!=grant.recipient || c.recipient_public_key!=grant.recipient_public_key || c.mode!=grant.mode || c.approver!=grant.approver do return false,domain.Domain_Error{}
+	if c.v==0 || c.v!=consent_version(c.scope) || c.owner!=grant.owner || c.vault_id!=grant.vault_id || c.client!=grant.client || c.resource!=grant.resource || c.scope!=grant.scope || c.grant!=grant.grant || c.family!=grant.family || c.revision!=grant.revision || c.recipient!=grant.recipient || c.recipient_public_key!=grant.recipient_public_key || c.mode!=grant.mode || c.approver!=grant.approver do return false,domain.Domain_Error{}
 	directory := (^vd.Service)(ctx)
 	view, err := vd.get_directory(directory, grant.owner)
 	if err.code == .Not_Found do return false, domain.Domain_Error{}
@@ -76,7 +78,7 @@ consent_transaction :: proc(tx: iface.MCP_Transaction, ctx: rawptr) -> domain.Do
 	if json.unmarshal(transmute([]byte)op.input.consent, &c, .JSON, context.temp_allocator) != nil do return domain.domain_error(.Validation_Failed, "malformed connector consent")
 	canonical, enc_err := json.marshal(c, allocator = context.temp_allocator)
 	if enc_err != nil || string(canonical) != op.input.consent do return domain.domain_error(.Validation_Failed, "noncanonical connector consent")
-	if c.v != 1 || c.owner != op.owner || c.approver != op.signer || c.client != p.client || c.resource != op.service.resource || c.scope != DELEGATION_SCOPE || c.grant != p.grant || c.family != p.family || c.revision != 1 || c.issued_ms > op.now+30_000 || c.issued_ms < op.now-120_000 do return domain.domain_error(.Forbidden, "connector consent binding mismatch")
+	if c.v == 0 || c.v != consent_version(c.scope) || !scope_subset(c.scope,p.scope) || c.owner != op.owner || c.approver != op.signer || c.client != p.client || c.resource != op.service.resource || c.grant != p.grant || c.family != p.family || c.revision != 1 || c.issued_ms > op.now+30_000 || c.issued_ms < op.now-120_000 do return domain.domain_error(.Forbidden, "connector consent binding mismatch")
 	// The write lock prevents directory writers from revoking the signer/resetting
 	// the vault between this authority read and the consent commit.
 	view, verr := vd.get_directory(op.vault, op.owner)

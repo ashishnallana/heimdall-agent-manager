@@ -1,7 +1,96 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mcpWorkerFixture } from './helpers/mcpWorkerFixture.ts';
-import { verifyMcpWorkerJob, transformMcpWorkerJob, mcpJobDigest } from '../src/ui/utils/mcpWorker.ts';
+import { verifyMcpWorkerJob, transformMcpWorkerJob, mcpJobDigest, mcpJobScopeAllowed } from '../src/ui/utils/mcpWorker.ts';
+import { decryptVaultBytes } from '../src/ui/utils/vaultContent.ts';
+
+test('task comment worker requires signed write scope and binds the tool in its digest', async () => {
+  const f = await mcpWorkerFixture(Date.now(), 'mcp:chains mcp:tasks:write');
+  const job = { ...f.job, tool: 'tasks.comment', operation: 'seal_comment' as const, payload: JSON.stringify({ body: 'task comment secret' }) };
+  job.digest = await mcpJobDigest(job);
+  await verifyMcpWorkerJob(job, f.identity, f.chain, job.resource, f.now);
+  const result = JSON.parse(await transformMcpWorkerJob(job, f.keyring));
+  assert.match(result.body, /^vault:v2:/);
+  assert.ok(!JSON.stringify(result).includes('task comment secret'));
+  const opened = await decryptVaultBytes(result.body, f.keyring);
+  assert.equal(opened.status, 'ok');
+  if (opened.status === 'ok') {
+    assert.equal(new TextDecoder().decode(opened.bytes), 'task comment secret');
+    opened.bytes.fill(0);
+  }
+  await assert.rejects(verifyMcpWorkerJob({ ...job, tool: 'tasks.get' }, f.identity, f.chain, job.resource, f.now));
+  const legacy = await mcpWorkerFixture();
+  const unauthorized = { ...legacy.job, tool: 'tasks.comment', operation: 'seal_comment' as const, payload: job.payload };
+  unauthorized.digest = await mcpJobDigest(unauthorized);
+  await assert.rejects(verifyMcpWorkerJob(unauthorized, legacy.identity, legacy.chain, unauthorized.resource, legacy.now));
+  assert.equal(mcpJobScopeAllowed('mcp:chains mcp:tasks:read', 'tasks.comment', 'seal_comment'), false);
+  assert.equal(mcpJobScopeAllowed('mcp:chains mcp:tasks:write', 'tasks.get', 'read'), false);
+  assert.equal(mcpJobScopeAllowed('mcp:chains', undefined, 'seal_comment'), false);
+  const create = { ...f.job, tool: 'tasks.create', operation: 'seal_task' as const, payload: JSON.stringify({ title: 'private title', goal: 'private goal', acceptance: ['private acceptance'] }) };
+  create.digest = await mcpJobDigest(create);
+  await verifyMcpWorkerJob(create, f.identity, f.chain, create.resource, f.now);
+  const sealedTask = JSON.parse(await transformMcpWorkerJob(create, f.keyring));
+  assert.match(sealedTask.title, /^vault:v2:/);
+  assert.match(sealedTask.goal, /^vault:v2:/);
+  assert.match(sealedTask.acceptance[0], /^vault:v2:/);
+  assert.ok(!JSON.stringify(sealedTask).includes('private'));
+  await assert.rejects(transformMcpWorkerJob({ ...create, payload: JSON.stringify({ owner_user_id: 'foreign' }) }, f.keyring));
+  await assert.rejects(transformMcpWorkerJob({ ...create, payload: JSON.stringify({ acceptance: ['x'.repeat(201)] }) }, f.keyring));
+});
+
+test('extended task reads open only typed brief fields and retain legacy projection', async () => {
+  const f = await mcpWorkerFixture(Date.now(), 'mcp:chains mcp:tasks:read');
+  const token = JSON.parse(f.job.payload).chain.title;
+  const payload = JSON.stringify({ tasks: [{ owner_user_id: f.job.owner, task_id: 'task_a', chain_id: 'chain_a', title: token, description: '', goal: token, acceptance: [token], assignee_agent_id: 'agt_a', bridge_id: 'brg_a', arbitrary_secret: 'omitted' }] });
+  const job = { ...f.job, tool: 'tasks.get', payload };
+  job.digest = await mcpJobDigest(job);
+  await verifyMcpWorkerJob(job, f.identity, f.chain, job.resource, f.now);
+  const result = JSON.parse(await transformMcpWorkerJob(job, f.keyring));
+  assert.equal(result.tasks[0].goal, 'worker secret title');
+  assert.deepEqual(result.tasks[0].acceptance, ['worker secret title']);
+  assert.equal(result.tasks[0].bridge_id, 'brg_a');
+  assert.equal(result.tasks[0].arbitrary_secret, undefined);
+  const legacy = JSON.parse(await transformMcpWorkerJob({ ...job, tool: undefined }, f.keyring));
+  assert.equal(legacy.tasks[0].goal, undefined);
+  assert.equal(legacy.tasks[0].acceptance, undefined);
+  const malformed = JSON.parse(payload); malformed.tasks[0].acceptance = [{}];
+  await assert.rejects(transformMcpWorkerJob({ ...job, payload: JSON.stringify(malformed) }, f.keyring));
+});
+
+test('task detail worker retains typed hold, attempt, provenance and comment paging metadata', async () => {
+  const f = await mcpWorkerFixture(Date.now(), 'mcp:chains mcp:tasks:read');
+  const token = JSON.parse(f.job.payload).chain.title;
+  const input = {
+    tasks: [{ owner_user_id: f.job.owner, task_id: 'task_a', chain_id: 'chain_a', title: token,
+      inputs: [token, 'output:task_ref'], review_roles: ['reviewer'], reviewers: ['agt_reviewer'],
+      blocked_kind: 'agent_not_running', blocked_since_ms: 123, blocked_reason: token,
+      hold_reason: token, hold_since_ms: 456, hold_by: 'user', checkpoint_requested: true,
+      allowed_actions: ['release', 'recheck'], latest_attempt_no: 2,
+      latest_attempt_holder_instance_id: 'inst_worker', latest_attempt_outcome: 'submitted',
+      latest_attempt_summary: token, arbitrary_facet: { secret: token },
+      reviews: [{ reviewer_agent_id: 'agt_reviewer', reviewer_instance_id: 'inst_reviewer', verdict: 'approve' }] }],
+    comments: [{ owner_user_id: f.job.owner, comment_id: 'cmt_a', task_id: 'task_a', chain_id: 'chain_a', body: token,
+      author_kind: 'delegated_user', author_user_id: f.job.owner, author_agent_instance_id: '',
+      delegated_client_id: 'client_a', delegated_grant_id: 'grant_a' },
+      { owner_user_id: f.job.owner, comment_id: 'cmt_big', body_error: 'comment_too_large', body_bytes: 300000 }],
+    comments_next_cursor: 'owner-task-bound-position',
+  };
+  const job = { ...f.job, tool: 'tasks.get', payload: JSON.stringify(input) };
+  const output = JSON.parse(await transformMcpWorkerJob(job, f.keyring));
+  const task = output.tasks[0];
+  assert.deepEqual(task.inputs, ['worker secret title', 'output:task_ref']);
+  for (const key of ['blocked_reason', 'hold_reason', 'latest_attempt_summary']) assert.equal(task[key], 'worker secret title');
+  for (const key of ['blocked_since_ms', 'hold_since_ms', 'checkpoint_requested', 'allowed_actions', 'latest_attempt_no', 'reviews']) assert.deepEqual(task[key], input.tasks[0][key as keyof typeof input.tasks[0]]);
+  assert.equal(task.arbitrary_facet, undefined);
+  assert.equal(output.comments[0].body, 'worker secret title');
+  assert.equal(output.comments[0].author_kind, 'delegated_user');
+  assert.equal(output.comments[0].delegated_grant_id, 'grant_a');
+  assert.equal(output.comments[1].body, undefined);
+  assert.equal(output.comments[1].body_error, 'comment_too_large');
+  assert.equal(output.comments_next_cursor, input.comments_next_cursor);
+  input.tasks[0].hold_reason = 'vault:v2:broken';
+  await assert.rejects(transformMcpWorkerJob({ ...job, payload: JSON.stringify(input) }, f.keyring));
+});
 import { importKeyring } from '../src/ui/utils/vaultKeyring.ts';
 import { FakeHub, newBrowser, hubApi, recorder, USER } from './helpers/vaultDirectoryFixture.ts';
 import { memoryDeviceStore } from '../src/ui/utils/deviceIdentity.ts';
@@ -20,6 +109,16 @@ test('MCP worker verifies pinned consent, owner, head, digest, generation and de
   const c = JSON.parse(f.job.consent); c.client = 'attacker';
   const forged = { ...f.job, consent: JSON.stringify(c) }; forged.digest = await mcpJobDigest(forged);
   await assert.rejects(verify(forged));
+});
+
+test('MCP worker accepts signed v2 scope and rejects unsigned scope/version changes', async () => {
+  const f = await mcpWorkerFixture(Date.now(), 'mcp:chains mcp:tasks:read mcp:artifacts:read');
+  await verifyMcpWorkerJob(f.job, f.identity, f.chain, f.job.resource, f.now);
+  for (const patch of [{ v: 1 }, { scope: 'mcp:chains' }, { scope: 'mcp:chains mcp:tasks:write' }, { scope: 'mcp:chains mcp:messages:write' }]) {
+    const job = { ...f.job, consent: JSON.stringify({ ...JSON.parse(f.job.consent), ...patch }) };
+    job.digest = await mcpJobDigest(job);
+    await assert.rejects(verifyMcpWorkerJob(job, f.identity, f.chain, job.resource, f.now));
+  }
 });
 
 test('MCP worker projects readable records and fails closed instead of returning locked placeholders', async () => {

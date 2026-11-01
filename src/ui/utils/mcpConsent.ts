@@ -1,3 +1,4 @@
+import { mcpConsentVersion, mcpConsentDomain, mcpScopeSubset } from './mcpCapabilities.ts';
 import type { DeviceIdentity } from './deviceIdentity.ts';
 import type { VerifiedChain } from './vaultDirectoryVerify.ts';
 import { sealKeyringWrap, exportPublicHex } from './vaultKeyringWrap.ts';
@@ -33,12 +34,13 @@ export async function buildMcpConsent(
   chain: VerifiedChain,
   withBytes: <T>(run: (bytes: Uint8Array) => Promise<T>) => Promise<T>,
   now = Date.now(),
+  selectedScope = request.scope,
 ): Promise<McpConsentBody> {
   const approver = chain.trusted.get(identity.deviceId);
   if (identity.userId !== chain.userId || request.owner !== chain.userId || !approver || !kindPolicy(approver.kind).canApprove) {
     throw new Error('An approved device for this account is required');
   }
-  if (request.expires_ms <= now || request.scope !== 'mcp:chains' || request.revision !== 1) throw new Error('Connector request expired or unsupported');
+  if (request.expires_ms <= now || !mcpScopeSubset(selectedScope, request.scope) || request.revision !== 1) throw new Error('Connector request expired or unsupported');
   let recipient = '';
   let recipientPublic = '';
   let privateCapability = '';
@@ -63,12 +65,12 @@ export async function buildMcpConsent(
     }
     // Must match the fixed-order Odin Consent struct. Every field is present.
     const consent = JSON.stringify({
-      v: 1, owner: chain.userId, vault_id: chain.vaultId, client: request.client,
-      resource: request.resource, scope: request.scope, grant: request.grant, family: request.family,
+      v: mcpConsentVersion(selectedScope), owner: chain.userId, vault_id: chain.vaultId, client: request.client,
+      resource: request.resource, scope: selectedScope, grant: request.grant, family: request.family,
       revision: request.revision, mode, recipient, recipient_public_key: recipientPublic, approver: identity.deviceId,
       directory_version: chain.version, directory_head: chain.headHash, epoch: chain.currentEpoch, issued_ms: now, wrap_sha256: wrapHash,
     });
-    return { request: ticket, consent, signature: await signP256(identity.signPrivateKey, new TextEncoder().encode(`heimdall-mcp-consent/v1\n${consent}`)), wrap_json: wrapJson, private_capability: privateCapability };
+    return { request: ticket, consent, signature: await signP256(identity.signPrivateKey, new TextEncoder().encode(mcpConsentDomain(mcpConsentVersion(selectedScope)) + consent)), wrap_json: wrapJson, private_capability: privateCapability };
   } finally {
     scalar?.fill(0);
     // JS strings / CryptoKeys cannot be reliably zeroized. No browser storage,

@@ -1,3 +1,4 @@
+#+feature dynamic-literals
 package vault
 
 import "core:encoding/json"
@@ -6,14 +7,38 @@ import "core:testing"
 
 @(test)
 test_control_worker_cross_runtime_consent_digest_keys_and_projection :: proc(t:^testing.T) {
+    control_worker_cross_runtime_flow(t,#load("../../../tests/fixtures/mcp_worker_v1.json",string))
+    control_worker_cross_runtime_flow(t,#load("../../../tests/fixtures/mcp_worker_v2.json",string))
+}
+control_worker_cross_runtime_flow :: proc(t:^testing.T,vector_json:string) {
 	context.allocator=context.temp_allocator
 	v:struct {now_ms:i64,keyring_hex,device_id,bridge_device_id,result:string,job:Control_Job,reply,bridge_reply:Control_Reply}
-	testing.expect(t,json.unmarshal_string(#load("../../../tests/fixtures/mcp_worker_v1.json",string),&v,.JSON,context.temp_allocator)==nil)
+	testing.expect(t,json.unmarshal_string(vector_json,&v,.JSON,context.temp_allocator)==nil)
 	raw:=make([]byte,len(v.keyring_hex)/2,context.temp_allocator)
 	testing.expect(t,hex_decode_into(raw,v.keyring_hex))
 	kr,parsed:=keyring_parse(raw,v.job.owner)
 	defer keyring_wipe(&kr)
 	testing.expect(t,parsed)
+	fields:=make(json.Object,context.temp_allocator)
+	fields["goal"]=json.String("private task goal")
+	fields["acceptance"]=json.Array{json.String("private task acceptance")}
+	sealed,seal_ok:=control_seal_task_fields(&kr,fields)
+	testing.expect(t,seal_ok && !strings.contains(sealed,"private task"))
+	sealed_value,seal_err:=json.parse_string(sealed,parse_integers=true,allocator=context.temp_allocator)
+	sealed_fields,seal_typed:=sealed_value.(json.Object)
+	testing.expect(t,seal_err==nil && seal_typed)
+	sealed_fields["owner_user_id"]=json.String(v.job.owner)
+	opened_fields,fields_ok:=control_record_json(&kr,.Task_Detail,sealed_fields)
+	testing.expect(t,fields_ok && strings.contains(opened_fields,"private task goal") && strings.contains(opened_fields,"private task acceptance"))
+	legacy_fields,legacy_ok:=control_record_json(&kr,.Task,sealed_fields)
+	testing.expect(t,legacy_ok && !strings.contains(legacy_fields,"private task"))
+	fields["owner_user_id"]=json.String("not an encryptable field")
+	_,unknown_field:=control_seal_task_fields(&kr,fields)
+	testing.expect(t,!unknown_field)
+	delete_key(&fields,"owner_user_id")
+	fields["acceptance"]=json.Array{json.String(strings.repeat("x",201,context.temp_allocator))}
+	_,too_large:=control_seal_task_fields(&kr,fields)
+	testing.expect(t,!too_large)
 	testing.expect_value(t,control_job_digest(v.job),v.job.digest)
 	testing.expect(t,control_job_verify(v.job,v.job.owner,v.job.resource,v.device_id,&kr,v.now_ms))
 	testing.expect(t,control_job_verify(v.job,v.job.owner,v.job.resource,v.bridge_device_id,&kr,v.now_ms),"approved bridge uses its unsealed keyring, without directory wrap privilege")

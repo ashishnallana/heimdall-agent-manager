@@ -35,7 +35,7 @@ credential_metadata :: proc(c: Credential_Claims, raw: string) -> domain.MCP_Rec
 }
 
 delegation_claims_ok :: proc(s: ^Delegation_Service, c: Credential_Claims, client: string, now: i64) -> bool {
-	return s != nil && len(s.keys) > 0 && c.issuer == s.issuer && c.client == client && c.resource == s.resource && c.scope == DELEGATION_SCOPE && c.owner != "" && c.vault_id != "" && c.grant != "" && c.family != "" && c.revision > 0 && c.jti != "" && c.issued_ms <= now && c.issued_ms > 0
+	return s != nil && len(s.keys) > 0 && c.issuer == s.issuer && c.client == client && c.resource == s.resource && scopes_valid(c.scope) && c.owner != "" && c.vault_id != "" && c.grant != "" && c.family != "" && c.revision > 0 && c.jti != "" && c.issued_ms <= now && c.issued_ms > 0
 }
 
 // Caller runs under the repository transaction. Envelope authentication has
@@ -76,7 +76,7 @@ delegation_issue :: proc(tx: iface.MCP_Transaction, s: ^Delegation_Service, pare
 	rt, rt_ok := credential_seal(&s.keys[0], c)
 	if !rt_ok do return "", "", domain.domain_error(.Internal_Error, "MCP sealing unavailable")
 	rt_row := credential_metadata(c, rt)
-	encoded, enc_err := json.marshal(Tokens{at, rt, "Bearer", int(ACCESS_TTL/1000), DELEGATION_SCOPE}, allocator = context.temp_allocator)
+	encoded, enc_err := json.marshal(Tokens{at, rt, "Bearer", int(ACCESS_TTL/1000), parent.scope}, allocator = context.temp_allocator)
 	if enc_err != nil do return "", "", domain.domain_error(.Internal_Error, "MCP response encoding unavailable")
 	if err := tx.put(tx.ctx, at_row); err.code != .None do return "", "", err
 	if err := tx.put(tx.ctx, rt_row); err.code != .None do return "", "", err

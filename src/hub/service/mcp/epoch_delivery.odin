@@ -25,7 +25,7 @@ epoch_delivery_transaction :: proc(tx:iface.MCP_Transaction,ctx:rawptr)->domain.
 		if err.code!=.None do return err
 		out:=make([dynamic]domain.MCP_Record,context.temp_allocator)
 		for g in grants {
-			if g.revoked || g.mode!="hosted" || g.resource!=op.service.resource || g.scope!=DELEGATION_SCOPE do continue
+			if g.revoked || g.mode!="hosted" || g.resource!=op.service.resource || !scopes_valid(g.scope) do continue
 			live,lerr:=delegation_live(op.service,tx,grant_claim_bindings(g))
 			if lerr.code!=.None do return lerr
 			if !live do continue
@@ -38,7 +38,7 @@ epoch_delivery_transaction :: proc(tx:iface.MCP_Transaction,ctx:rawptr)->domain.
 	}
 	g,found,err:=tx.get(tx.ctx,"grant",op.input.grant)
 	if err.code!=.None do return err
-	if !found || g.owner!=op.owner || g.mode!="hosted" || g.resource!=op.service.resource || g.scope!=DELEGATION_SCOPE || g.revision!=op.input.revision do return domain.domain_error(.Forbidden,"connector grant unavailable")
+	if !found || g.owner!=op.owner || g.mode!="hosted" || g.resource!=op.service.resource || !scopes_valid(g.scope) || g.revision!=op.input.revision do return domain.domain_error(.Forbidden,"connector grant unavailable")
 	live,lerr:=delegation_live(op.service,tx,grant_claim_bindings(g))
 	if lerr.code!=.None do return lerr
 	if !live do return domain.domain_error(.Forbidden,"connector grant unavailable")

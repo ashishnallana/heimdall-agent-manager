@@ -1,8 +1,52 @@
 package sqlite
 
 import "core:testing"
+import "core:sync"
+import "core:thread"
+import "core:time"
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
+
+Reconfiguration_Tx_Worker :: struct {repo:^iface.Agent_Repository,op:domain.Instance_Reconfiguration,initial,started,done,ok:bool}
+reconfiguration_tx_worker :: proc(th:^thread.Thread) {
+	w:=(^Reconfiguration_Tx_Worker)(th.data)
+	sync.atomic_store(&w.started,true)
+	stored:domain.Instance_Reconfiguration
+	if w.initial {stored,w.ok,_=iface.instance_reconfiguration_begin(w.repo,w.op)} else {stored,w.ok,_=iface.instance_reconfiguration_advance(w.repo,w.op,w.op.revision-1)}
+	if w.ok do domain.instance_reconfiguration_destroy(&stored)
+	sync.atomic_store(&w.done,true)
+}
+
+@(test)
+test_reconfiguration_writes_survive_other_request_rollback :: proc(t:^testing.T) {
+	for initial in ([]bool{true,false}) {
+		conn:Conn;impl:Agent_Repo_SQLite
+		repo:=reconfiguration_test_setup(t,&conn,&impl)
+		op:=reconfiguration_test_op()
+		if !initial {
+			stored,ok,err:=iface.instance_reconfiguration_begin(&repo,op)
+			if !testing.expect(t,ok,err.message) {close(&conn);return}
+			domain.instance_reconfiguration_destroy(&stored)
+			op.phase=.Stopping;op.revision=2
+		}
+		factory_impl:SQLite_Unit_Of_Work_Factory
+		factory:=new_unit_of_work_factory(&factory_impl,&conn,nil)
+		uow,ok,err:=iface.unit_of_work_begin(&factory)
+		if !testing.expect(t,ok,err.message) {close(&conn);return}
+		w:=Reconfiguration_Tx_Worker{repo=&repo,op=op,initial=initial}
+		th:=thread.create(reconfiguration_tx_worker);th.data=&w;thread.start(th)
+		for !sync.atomic_load(&w.started) do time.sleep(time.Millisecond)
+		time.sleep(60*time.Millisecond)
+		testing.expect(t,!sync.atomic_load(&w.done),"native move write must wait for the unrelated request transaction")
+		iface.unit_of_work_rollback(&uow)
+		thread.join(th);thread.destroy(th)
+		testing.expect(t,w.ok,"native move write commits after the other request rolls back")
+		stored,found,_:=iface.instance_reconfiguration_get(&repo,"owner","inst_move","key_move")
+		testing.expect(t,found,"request rollback must not erase native move progress")
+		if found {testing.expect_value(t,stored.phase,op.phase);domain.instance_reconfiguration_destroy(&stored)}
+		close(&conn)
+	}
+}
 
 reconfiguration_test_setup :: proc(t: ^testing.T, conn: ^Conn, impl: ^Agent_Repo_SQLite) -> iface.Agent_Repository {
 	opened, ok := tmpl_clone_migrated(t)

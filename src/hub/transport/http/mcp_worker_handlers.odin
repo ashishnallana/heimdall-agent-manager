@@ -66,6 +66,7 @@ mcp_device_transform :: proc(h:^MCP_Control_Handlers,view:mcp.Access_View,op:^mc
 	d,verified:=mcp_worker_directory(h,view)
 	if !verified do return {error="decryption_unavailable"}
 	job:=vault.Control_Job{owner=view.owner,resource=h.delegation.service.resource,grant=view.grant,revision=view.revision,head=view.head,epoch=view.epoch,consent=view.consent,signature=view.signature,directory=d,operation="read"}
+	job.tool=op.tool
 	now,clock_ok:=auth.now_unix_ms(h.delegation.auth)
 	if !clock_ok do return {error="decryption_unavailable"}
 	job.request_id,_=auth.random_token();job.generation,_=auth.random_token()
@@ -73,7 +74,7 @@ mcp_device_transform :: proc(h:^MCP_Control_Handlers,view:mcp.Access_View,op:^mc
 	job.deadline_ms=min(now+4000,view.expires_ms)
 	encoded:[]byte
 	err:json.Marshal_Error
-	if op.seal {job.operation="seal";encoded,err=json.marshal(struct {title,description:string}{op.title,op.description},allocator=context.temp_allocator)} else {encoded,err=json.marshal(op.data,allocator=context.temp_allocator)}
+	if op.resource_fields!=nil {job.operation="seal_resource";encoded,err=json.marshal(op.resource_fields,allocator=context.temp_allocator)} else if op.agent_fields!=nil {job.operation="seal_agent";encoded,err=json.marshal(op.agent_fields,allocator=context.temp_allocator)} else if op.task_fields!=nil {job.operation="seal_task";encoded,err=json.marshal(op.task_fields,allocator=context.temp_allocator)} else if op.tool=="tasks.comment" {job.operation="seal_comment";encoded,err=json.marshal(struct {body:string}{op.body},allocator=context.temp_allocator)} else if op.seal {job.operation="seal";encoded,err=json.marshal(struct {title,description:string}{op.title,op.description},allocator=context.temp_allocator)} else {encoded,err=json.marshal(op.data,allocator=context.temp_allocator)}
 	defer if len(encoded)>0 do crypto.zero_explicit(raw_data(encoded),len(encoded))
 	if err!=nil || len(encoded)>4*1024*1024 do return {error="result_too_large"}
 	job.payload=string(encoded);job.digest=vault.control_job_digest(job)

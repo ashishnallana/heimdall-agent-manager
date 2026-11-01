@@ -23,10 +23,18 @@ MCP_Control_Handlers :: struct {
 	requests:mcp.Request_Registry,
 	create_ctx:rawptr,
 	create:mcp.Control_Create_Proc,
+	comment:mcp.Control_Comment_Proc,
+	mutate_task:mcp.Control_Task_Mutate_Proc,
+	mutate_catalog:mcp.Catalog_Mutate_Proc,
+	runtime:mcp.Runtime_Proc,
+	mutate_resource:mcp.Resource_Mutate_Proc,
 	// Optional approved enrolled-bridge transport. It receives no client token.
 	bridge_ctx:rawptr,
 	bridge_transform:proc(ctx:rawptr,job:vault.Control_Job)->(string,bool),
 }
+// 64KiB agent instructions may expand sixfold when JSON-escaped; typed tool
+// field limits remain stricter than this bounded transport envelope.
+MCP_CONTROL_MAX_BODY_BYTES :: 512*1024
 mcp_control_register_routes :: proc(r:^Router,h:^MCP_Control_Handlers) {
 	router_add(r,"ANY",MCP_PATH,h,mcp_control_handler)
 	router_add(r,"GET",MCP_OAUTH+"/jobs",h,mcp_worker_handler)
@@ -54,6 +62,10 @@ mcp_id_ok :: proc(id:json.Value)->bool {
 	return false
 }
 mcp_arguments :: proc(name:string,value:json.Value)->(mcp.Control_Arguments,bool) {
+	if mcp.resource_tool(name) do return mcp_resource_arguments(name,value)
+	if mcp.runtime_tool(name) do return mcp_runtime_arguments(name,value)
+	if mcp.catalog_tool(name) do return mcp_catalog_arguments(name,value)
+	if name=="tasks.create" || name=="tasks.update" || name=="tasks.control" || name=="chains.configure" do return mcp_task_write_arguments(name,value)
 	args:mcp.Control_Arguments
 	obj,ok:=value.(json.Object)
 	if value==nil {obj=make(json.Object,context.temp_allocator);ok=true}
@@ -61,19 +73,44 @@ mcp_arguments :: proc(name:string,value:json.Value)->(mcp.Control_Arguments,bool
 	for key,v in obj {
 		switch key {
 		case "chain_id":
-			s,typed:=v.(json.String);if !typed || (name!="chains.get" && name!="events.wait") || !mcp.control_id_ok(string(s)) do return {},false
+			s,typed:=v.(json.String);if !typed || (name!="chains.get" && name!="events.wait" && name!="tasks.list" && name!="tasks.get" && name!="tasks.comment") || !mcp.control_id_ok(string(s)) do return {},false
 			args.chain_id=string(s)
 		case "title":
 			s,typed:=v.(json.String);if !typed || name!="chains.create" || len(s)<1 || len(s)>500 || strings.trim_space(string(s))=="" do return {},false
 			args.title=string(s)
+		case "task_id":
+			s,typed:=v.(json.String);if !typed || (name!="tasks.comment" && name!="tasks.get") || len(s)<=5 || len(s)>256 || !strings.has_prefix(string(s),"task_") || !vault.valid_id_value(string(s)) do return {},false
+			args.task_id=string(s)
+		case "request_id":
+			s,typed:=v.(json.String);if !typed || name!="tasks.comment" || len(s)<1 || len(s)>256 || !vault.valid_id_value(string(s)) do return {},false
+			args.request_id=string(s)
+		case "body":
+			s,typed:=v.(json.String);if !typed || name!="tasks.comment" || len(s)<1 || len(s)>20000 || strings.trim_space(string(s))=="" do return {},false
+			args.body=string(s)
 		case "description":
 			s,typed:=v.(json.String);if !typed || name!="chains.create" || len(s)>20000 do return {},false
 			args.description=string(s)
 		case "cursor":
-			s,typed:=v.(json.String);if !typed || name!="chains.list" || len(s)>20 do return {},false
+			s,typed:=v.(json.String);if !typed || (name!="chains.list" && name!="tasks.list") || len(s)>2048 || name=="chains.list" && len(s)>20 do return {},false
 			args.cursor=string(s)
+		case "state":
+			s,typed:=v.(json.String);if !typed || name!="tasks.list" do return {},false
+			state,valid:=domain.task_state_from_string(string(s));if !valid || domain.task_state_string(state)!=string(s) do return {},false
+			args.state=string(s)
+		case "assignee_agent_id":
+			s,typed:=v.(json.String);if !typed || name!="tasks.list" || len(s)<5 || len(s)>256 || !strings.has_prefix(string(s),"agt_") || !vault.valid_id_value(string(s)) do return {},false
+			args.assignee_agent_id=string(s)
+		case "include_comments":
+			b,typed:=v.(json.Boolean);if !typed || name!="tasks.get" do return {},false
+			args.include_comments=bool(b)
+		case "comment_limit":
+			n,typed:=v.(json.Integer);if !typed || name!="tasks.get" || n<1 || n>100 do return {},false
+			args.comment_limit=int(n)
+		case "comment_cursor":
+			s,typed:=v.(json.String);if !typed || name!="tasks.get" || len(s)>2048 do return {},false
+			args.comment_cursor=string(s)
 		case "limit":
-			n,typed:=v.(json.Integer);if !typed || name!="chains.list" || n<1 || n>100 do return {},false
+			n,typed:=v.(json.Integer);if !typed || (name!="chains.list" && name!="tasks.list") || n<1 || n>100 do return {},false
 			args.limit=int(n)
 		case "timeout_ms":
 			n,typed:=v.(json.Integer);if !typed || name!="events.wait" || n<1 || n>25000 do return {},false
@@ -82,6 +119,9 @@ mcp_arguments :: proc(name:string,value:json.Value)->(mcp.Control_Arguments,bool
 		}
 	}
 	switch name {
+	case "tasks.get":return args,args.chain_id!="" && args.task_id!="" && (args.include_comments || args.comment_cursor=="" && args.comment_limit==0)
+	case "tasks.list":return args,args.chain_id!=""
+	case "tasks.comment":return args,args.chain_id!="" && args.task_id!="" && args.request_id!="" && args.body!=""
 	case "chains.get","events.wait":return args,args.chain_id!=""
 	case "chains.create":return args,args.title!=""
 	case "chains.list":return args,true
@@ -110,7 +150,7 @@ mcp_control_handler :: proc(ctx:rawptr,req:Request)->(response:Response) {
 	view,valid:=mcp.access_view(h.delegation.service,h.delegation.grant_directory,raw)
 	if !valid do return mcp_unauthorized(h)
 	if req.method!="POST" do return plain_response(405,"method not allowed",{"Allow","POST"})
-	if len(req.body)>32768 || !strings.has_prefix(header_value(req.headers,"Content-Type"),"application/json") do return mcp_oauth_error("invalid_request")
+	if len(req.body)>MCP_CONTROL_MAX_BODY_BYTES || !strings.has_prefix(header_value(req.headers,"Content-Type"),"application/json") do return mcp_oauth_error("invalid_request")
 	defer if req.body!="" do crypto.zero_explicit(raw_data(req.body),len(req.body))
 	rpc,parsed:=mcp_parse_object(req.body)
 	defer vault.control_wipe_value(rpc)
@@ -134,22 +174,48 @@ mcp_control_handler :: proc(ctx:rawptr,req:Request)->(response:Response) {
 		if !ok do return mcp_rpc_error(id,-32602,"Invalid initialization")
 		protocol:="2025-11-25"
 		if requested=="2025-03-26" || requested=="2025-06-18" || requested=="2024-11-05" do protocol=string(requested)
-		return mcp_rpc_result(id,json.Object{"protocolVersion"=json.String(protocol),"capabilities"=json.Object{"tools"=json.Object{}},"serverInfo"=json.Object{"name"=json.String("heimdall-control"),"version"=json.String("0.1.0")},"instructions"=json.String("Act as the connected user. Only four chain tools are available; no agent/lease/review authority. Poll events.wait while actively monitoring with a stopping condition and budget. No background wake or durable replay. Never automatically retry an ambiguous chains.create result. Default decryption requires an approved unlocked device; hosted decryption requires explicit connection consent.")})
+		return mcp_rpc_result(id,json.Object{"protocolVersion"=json.String(protocol),"capabilities"=json.Object{"tools"=json.Object{}},"serverInfo"=json.Object{"name"=json.String("heimdall-control"),"version"=json.String("0.2.0")},"instructions"=json.String("Act as the connected user within the tools and permissions advertised by tools/list. Task and runtime writes can dispatch work on owned machines. Reuse a stable request_id with identical arguments after ambiguous task/runtime-write results; refresh tasks.get or instances.get revision, or chains.get configuration_revision before a new update. Runtime acceptance is not readiness; poll instances.operations. Hold and checkpoint active task leases before lifecycle changes. No messaging, external leases or review approval authority. Poll events.wait only while actively monitoring with a stopping condition and budget; no background wake or durable replay. Never automatically retry an ambiguous chains.create result. Default decryption requires an approved unlocked device; hosted decryption requires explicit connection consent.")})
 	case "ping":return mcp_rpc_result(id,json.Object{})
 	case "tools/list":
 		tools,err:=json.parse_string(#load("mcp_tools.json",string),parse_integers=true,allocator=context.temp_allocator)
 		if err!=nil do return mcp_rpc_error(id,-32603,"Tool metadata unavailable")
-		return mcp_rpc_result(id,json.Object{"tools"=tools})
+		catalog,typed:=tools.(json.Array)
+		if !typed do return mcp_rpc_error(id,-32603,"Tool metadata unavailable")
+		visible:=make(json.Array,0,len(catalog),context.temp_allocator)
+		for value in catalog {
+			tool,object:=value.(json.Object);name,named:=tool["name"].(json.String)
+			if object && named && mcp.scope_allows_tool(view.scope,string(name)) do append(&visible,value)
+		}
+		return mcp_rpc_result(id,json.Object{"tools"=visible})
 	case "tools/call":
 	case:return mcp_rpc_error(id,-32601,"Method not found")
 	}
 	name,nok:=params["name"].(json.String)
 	args,args_ok:=mcp_arguments(string(name),params["arguments"])
+	defer {
+		for text in ([]string{args.catalog.name,args.catalog.slug,args.catalog.instructions}) do if text!="" do crypto.zero_explicit(raw_data(text),len(text))
+		for text in ([]string{args.task_write.title,args.task_write.description,args.task_write.goal,args.task_write.reason}) do if text!="" do crypto.zero_explicit(raw_data(text),len(text))
+		for text in args.task_write.acceptance do if text!="" do crypto.zero_explicit(raw_data(text),len(text))
+	}
 	if !nok || !args_ok do return mcp_rpc_error(id,-32602,"Unknown tool or invalid arguments")
+	if !mcp.scope_allows_tool(view.scope,string(name)) do return mcp_tool_result(id,"scope_missing",true)
+	args.include_configuration=mcp.scope_allows_tool(view.scope,"chains.configure")
 	encoded_id,_:=json.marshal(id,allocator=context.temp_allocator)
 	handle,admitted:=mcp.request_begin(&h.requests,key,string(encoded_id))
 	if !admitted do return mcp_tool_result(id,"busy: request is already active or capacity is exhausted",true)
 	defer mcp.request_end(&h.requests,handle)
+	if mcp.resource_write(string(name)) do return mcp_resource_write_call(h,id,raw,view,string(name),args.resource,handle,started)
+	if mcp.runtime_tool(string(name)) {
+		if h.runtime==nil do return mcp_tool_result(id,"request_failed",true)
+		cancellation:=MCP_Runtime_Cancellation{h=h,handle=handle,started=started}
+		result,code:=h.runtime(h.create_ctx,raw,view,string(name),args.runtime,&cancellation,mcp_runtime_cancelled)
+		if code=="invalid_token" do return mcp_unauthorized(h)
+		if code!="" do return mcp_tool_result(id,code,true)
+		return mcp_tool_result(id,result,false)
+	}
+	if mcp.catalog_write(string(name)) do return mcp_catalog_write_call(h,id,raw,view,string(name),args.catalog,handle,started)
+	if string(name)=="tasks.create" || string(name)=="tasks.update" || string(name)=="tasks.control" || string(name)=="chains.configure" do return mcp_task_write_call(h,id,raw,view,string(name),args.task_write,handle,started)
+	if string(name)=="tasks.comment" do return mcp_task_comment_call(h,id,raw,view,args,handle,started)
 	data:mcp.Control_Data
 	wait_changed:=false
 	if string(name)=="events.wait" {
@@ -173,6 +239,10 @@ mcp_control_handler :: proc(ctx:rawptr,req:Request)->(response:Response) {
 	if !fresh_ok do return mcp_unauthorized(h)
 	view=fresh
 	op:=mcp.Control_Transform{seal=string(name)=="chains.create",title=args.title,description=args.description}
+	if string(name)=="tasks.get" || string(name)=="tasks.list" do op.tool=string(name)
+	if mcp.catalog_tool(string(name)) do op.tool=string(name)
+	if mcp.resource_tool(string(name)) do op.tool=string(name)
+	defer if mcp.resource_kind(string(name))=="artifact" {for row in data.records {for key in ([]string{"name","description","content"}) {if text,typed:=row[key].(json.String);typed && len(text)>0 do crypto.zero_explicit(raw_data(text),len(text))}}}
 	if !op.seal {
 		code:string
 		data,code=mcp.control_read(&h.control,view.owner,string(name),args)

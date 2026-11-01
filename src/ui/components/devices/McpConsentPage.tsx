@@ -5,15 +5,18 @@ import { currentDeviceIdentity, fetchVerifiedChain } from '../../services/device
 import { getKeyringSession, withKeyringBytes } from '../../utils/vaultKeyringSession';
 import { getRouteSearch } from '../../utils/appLocation';
 import { buildMcpConsent, type McpConsentRequest } from '../../utils/mcpConsent';
+import { MCP_CAPABILITIES, selectedMcpScopes } from '../../utils/mcpCapabilities';
 
 export default function McpConsentPage() {
   const ticket = new URLSearchParams(getRouteSearch()).get('request') || '';
   const [request, setRequest] = useState<McpConsentRequest | null>(null);
   const [hosted, setHosted] = useState(false);
+  const [selected, setSelected] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   useEffect(() => {
     let active = true;
+    setRequest(null); setSelected([]); setHosted(false); setError('');
     if (!ticket) { setError('This connector request is missing. Start the connection again.'); return; }
     fetchMcpConsent(ticket).then((r) => { if (active) setRequest(r); }).catch(() => { if (active) setError('This request expired, or this browser is not an approved Ninjy device. Open Ninjy on an approved device and start the connection again.'); });
     return () => { active = false; };
@@ -26,7 +29,7 @@ export default function McpConsentPage() {
       const identity = currentDeviceIdentity();
       if (!identity || !getKeyringSession()) throw new Error('An approved unlocked Ninjy device is required');
       const { chain } = await fetchVerifiedChain();
-      body = await buildMcpConsent(ticket, request, hosted ? 'hosted' : 'device', identity, chain, (run) => withKeyringBytes(run, chain));
+      body = await buildMcpConsent(ticket, request, hosted ? 'hosted' : 'device', identity, chain, (run) => withKeyringBytes(run, chain), Date.now(), selectedMcpScopes(request.scope, selected));
       const result = await completeMcpConsent(body);
       // The server returns the exact registered HTTPS callback with a one-use
       // code. Never save it to history/state or print it to an error message.
@@ -46,6 +49,15 @@ export default function McpConsentPage() {
       <Text as="p" role="body-sm">Account: {request.owner}</Text>
       <Text as="p" role="body-sm">Connector callback: {request.redirect}</Text>
       <Text as="p" role="body-sm">Resource: {request.resource}</Text>
+      {MCP_CAPABILITIES.filter(([scope]) => request.scope.split(' ').includes(scope)).length > 0 && <fieldset className="space-y-2" disabled={busy}>
+        <legend>Additional permissions</legend>
+        <Text as="p" role="body-sm">Only enable the actions you want this connection to perform. Existing connections keep their original permissions.</Text>
+        {MCP_CAPABILITIES.filter(([scope]) => request.scope.split(' ').includes(scope)).map(([scope, label]) => <Checkbox
+          key={scope} data-debug-id={`mcp-consent-capability-${scope.replaceAll(':', '-')}`}
+          checked={selected.includes(scope)} disabled={busy} label={label}
+          onChange={(checked) => setSelected((current) => checked ? [...current.filter((value) => value !== scope), scope] : current.filter((value) => value !== scope))}
+        />)}
+      </fieldset>}
       <Text as="p" role="body-sm">By default, an approved online bridge or an approved unlocked browser must decrypt results.</Text>
       <Checkbox data-debug-id="mcp-consent-hosted" checked={hosted} onChange={setHosted} label="Allow hosted decryption for this connection" disabled={busy} />
       {hosted && <Alert tone="warning" title="The hosted service can read your results">The service will receive decryption access in memory and send readable results to your AI provider. This connection can work while your devices are offline. Disconnecting stops future access; it cannot erase data already shared.</Alert>}

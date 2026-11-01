@@ -7,14 +7,14 @@ import { verifiedConnectorRecipient, buildConnectorEpochWraps, type ConnectorEpo
 import * as dv from '../src/ui/services/deviceVault.ts';
 
 const resource = 'https://hub.example/api/v1/mcp';
-async function setup() {
+async function setup(scope = 'mcp:chains') {
   const kv = memoryDeviceStore();
   const identity = await createDeviceIdentity(kv, USER);
   const hub = new FakeHub();
   await hub.genesis(identity);
   const chain = await hub.chain();
   const now = Date.now();
-  const request = { owner: USER, client: 'client-fixture', redirect: 'https://client.example/callback', resource, scope: 'mcp:chains', grant: 'grant-fixture', family: 'family-fixture', revision: 1, expires_ms: now + 300000 };
+  const request = { owner: USER, client: 'client-fixture', redirect: 'https://client.example/callback', resource, scope, grant: 'grant-fixture', family: 'family-fixture', revision: 1, expires_ms: now + 300000 };
   const body = await buildMcpConsent('ticket', request, 'hosted', identity, chain, async (run) => { const bytes = await hub.keyringBytes(identity); try { return await run(bytes); } finally { bytes.fill(0); } }, now);
   const row = { grant: request.grant, revision: 1, consent: body.consent, signature: body.signature };
   return { kv, identity, hub, chain, row };
@@ -37,6 +37,17 @@ test('connector recipient comes from signed consent and a pinned verified chain'
     assert.equal(JSON.parse(wraps[0].wrap_json).recipient_device_id, recipient.device_id);
     await assert.rejects(buildConnectorEpochWraps(identity, chain, [row, row], bytes, resource));
   } finally { bytes.fill(0); }
+});
+
+test('scoped hosted recipient verifies v2 consent and cannot accept a changed scope', async () => {
+  const { identity, hub, chain, row } = await setup('mcp:chains mcp:tasks:read mcp:artifacts:read');
+  const recipient = await verifiedConnectorRecipient(row, chain, resource);
+  assert.match(recipient.device_id, /^mcp_/);
+  const changed = { ...JSON.parse(row.consent), scope: 'mcp:chains mcp:tasks:write' };
+  await assert.rejects(verifiedConnectorRecipient({ ...row, consent: JSON.stringify(changed) }, chain, resource));
+  const bytes = await hub.keyringBytes(identity);
+  try { assert.equal((await buildConnectorEpochWraps(identity, chain, [row], bytes, resource)).length, 1); }
+  finally { bytes.fill(0); }
 });
 
 test('rotation automatically delivers connector wraps; failure preserves rotation and can be repaired', async (t) => {

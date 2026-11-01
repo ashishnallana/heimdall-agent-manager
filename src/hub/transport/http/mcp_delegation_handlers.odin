@@ -54,9 +54,9 @@ mcp_connector_epoch_handler :: proc(ctx:rawptr,req:Request)->Response {
 mcp_delegation_metadata_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^MCP_Delegation_Handlers)(ctx)
 	if req.path == "/.well-known/oauth-authorization-server" {
-		return mcp_json(struct {issuer, authorization_endpoint, token_endpoint, registration_endpoint: string, response_types_supported, grant_types_supported, code_challenge_methods_supported, token_endpoint_auth_methods_supported, scopes_supported: []string}{h.origin, mcp_join(h.origin,MCP_OAUTH,"/authorize"), mcp_join(h.origin,MCP_OAUTH,"/token"), mcp_join(h.origin,MCP_OAUTH,"/register"), []string{"code"}, []string{"authorization_code","refresh_token"}, []string{"S256"}, []string{"none"}, []string{mcp.DELEGATION_SCOPE}})
+		return mcp_json(struct {issuer, authorization_endpoint, token_endpoint, registration_endpoint: string, response_types_supported, grant_types_supported, code_challenge_methods_supported, token_endpoint_auth_methods_supported, scopes_supported: []string}{h.origin, mcp_join(h.origin,MCP_OAUTH,"/authorize"), mcp_join(h.origin,MCP_OAUTH,"/token"), mcp_join(h.origin,MCP_OAUTH,"/register"), []string{"code"}, []string{"authorization_code","refresh_token"}, []string{"S256"}, []string{"none"}, mcp.supported_scopes()})
 	}
-	return mcp_json(struct {resource: string, authorization_servers, scopes_supported, bearer_methods_supported: []string}{h.service.resource, []string{h.origin}, []string{mcp.DELEGATION_SCOPE}, []string{"header"}})
+	return mcp_json(struct {resource: string, authorization_servers, scopes_supported, bearer_methods_supported: []string}{h.service.resource, []string{h.origin}, mcp.supported_scopes(), []string{"header"}})
 }
 mcp_delegation_register_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^MCP_Delegation_Handlers)(ctx)
@@ -81,10 +81,12 @@ mcp_delegation_authorize_handler :: proc(ctx: rawptr, req: Request) -> Response 
 		if !found do return mcp_oauth_error("invalid_request")
 		query = form
 	}
+	requested_scope,scope_ok:=mcp.canonical_scopes(query_value(query,"scope"))
+	if !scope_ok do return mcp_oauth_error("invalid_scope")
 	client, redirect := query_value(query,"client_id"),query_value(query,"redirect_uri")
 	c, found, err := mcp.delegation_read(h.service,"client",client)
 	if err.code != .None do return mcp_oauth_error("temporarily_unavailable",503)
-	if !found || c.revoked || c.redirect != redirect || !mcp.challenge_ok(query_value(query,"code_challenge")) || query_value(query,"code_challenge_method") != "S256" || query_value(query,"response_type") != "code" || query_value(query,"resource") != h.service.resource || (query_value(query,"scope") != "" && query_value(query,"scope") != mcp.DELEGATION_SCOPE) do return mcp_oauth_error("invalid_request")
+	if !found || c.revoked || c.redirect != redirect || !mcp.challenge_ok(query_value(query,"code_challenge")) || query_value(query,"code_challenge_method") != "S256" || query_value(query,"response_type") != "code" || query_value(query,"resource") != h.service.resource do return mcp_oauth_error("invalid_request")
 	principal, ok, _ := require_auth(h.auth,req)
 	if !ok {
 		if resume == "" {
@@ -96,7 +98,7 @@ mcp_delegation_authorize_handler :: proc(ctx: rawptr, req: Request) -> Response 
 	}
 	if principal.kind != .Session do return mcp_oauth_error("access_denied",403)
 	if resume != "" {_, _ = mcp.pending_read(h.login_requests,resume,now,true)}
-	ticket, berr := mcp.delegation_begin(h.service,principal.user_id,client,redirect,query_value(query,"code_challenge"),query_value(query,"state"),now)
+	ticket, berr := mcp.delegation_begin(h.service,principal.user_id,client,redirect,query_value(query,"code_challenge"),query_value(query,"state"),now,requested_scope)
 	if berr.code != .None do return respond_error(berr,req.request_id)
 	return redirect_response(mcp_join(h.origin,"/#/mcp/consent?request=",ticket))
 }
@@ -131,7 +133,9 @@ mcp_delegation_consent_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	code,redirect,state,err:=mcp.delegation_consent(h.service,h.grant_directory,principal.user_id,signer.device_id,input,now)
 	if err.code!=.None do return respond_error(err,req.request_id)
 	separator:="&" if strings.contains(redirect,"?") else "?"
-	return mcp_json(struct {redirect: string}{mcp_join(redirect,separator,"code=",auth.form_encode(code),"&state=",auth.form_encode(state))})
+	response:=mcp_json(struct {redirect: string}{mcp_join(redirect,separator,"code=",auth.form_encode(code),"&state=",auth.form_encode(state))})
+	response.sensitive=true
+	return response
 }
 mcp_delegation_connections_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^MCP_Delegation_Handlers)(ctx)
@@ -158,7 +162,7 @@ mcp_delegation_token_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	if !strings.has_prefix(header_value(req.headers,"Content-Type"),"application/x-www-form-urlencoded") || !mcp_form_unique(req.body,65536) do return mcp_oauth_error("invalid_request")
 	if header_value(req.headers,"Authorization")!="" do return mcp_oauth_error("invalid_client",401)
 	if query_value(req.body,"resource")!=h.service.resource do return mcp_oauth_error("invalid_target")
-	if scope:=query_value(req.body,"scope");scope!="" && scope!=mcp.DELEGATION_SCOPE do return mcp_oauth_error("invalid_scope")
+
 	now,clock_ok:=auth.now_unix_ms(h.auth)
 	if !clock_ok do return mcp_oauth_error("temporarily_unavailable",503)
 	kind,raw:="",""
@@ -167,11 +171,17 @@ mcp_delegation_token_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	case "refresh_token": kind="refresh";raw=query_value(req.body,"refresh_token")
 	case: return mcp_oauth_error("unsupported_grant_type")
 	}
+	if requested:=query_value(req.body,"scope");requested!="" {
+		canonical,ok:=mcp.canonical_scopes(requested)
+		claims,opened:=mcp.credential_open(h.service.keys,raw,kind)
+		defer mcp.credential_claims_wipe(&claims)
+		if !ok || !opened || canonical!=claims.scope do return mcp_oauth_error("invalid_scope")
+	}
 	result:=mcp.delegation_redeem(h.service,raw,kind,query_value(req.body,"client_id"),query_value(req.body,"redirect_uri"),query_value(req.body,"code_verifier"),now)
 	if result.error!="" do return mcp_oauth_error(result.error)
 	// Exact bytes, including a recovered retry response. Neither body nor raw
 	// credentials are included in telemetry, audit records or error messages.
 	headers:=make([]contracts.HTTP_Header,2,context.temp_allocator)
 	headers[0]={"Cache-Control","no-store"};headers[1]={"Pragma","no-cache"}
-	return Response{status=200,content_type="application/json",body=result.response,headers=headers}
+	return Response{status=200,content_type="application/json",body=result.response,headers=headers,sensitive=true}
 }

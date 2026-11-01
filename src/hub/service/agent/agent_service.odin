@@ -334,7 +334,7 @@ create_instance :: proc(service: ^Agent_Service, auth: contracts.Auth_Context, i
 // reservation. The caller either sends the launch (send_instance_launch) or
 // delivers the instance through a wake_agent run[] entry after its own commit
 // (Task System v2 JIT grants), and must cancel the reservation if it gives up.
-prepare_instance :: proc(service: ^Agent_Service, auth: contracts.Auth_Context, input: Create_Instance_Input) -> (inst: domain.Agent_Instance, generation: int, ok: bool, err: domain.Domain_Error) {
+prepare_instance :: proc(service: ^Agent_Service, auth: contracts.Auth_Context, input: Create_Instance_Input, default_title_override:string="") -> (inst: domain.Agent_Instance, generation: int, ok: bool, err: domain.Domain_Error) {
 	owner, owner_ok, owner_err := ownership.owner_from_auth(auth)
 	if !owner_ok do return domain.Agent_Instance{}, 0, false, owner_err
 	agent, agent_ok, agent_err := get_agent(service, auth, input.agent_id)
@@ -356,6 +356,9 @@ prepare_instance :: proc(service: ^Agent_Service, auth: contracts.Auth_Context, 
 	// "<agent-name> #<n>". The same default title is used for the (new) chain and
 	// the conversation so a run is identifiable before the agent/user renames it.
 	default_title := default_title_for_agent(service, owner, agent)
+	// A delegated adapter can reuse an already sealed owned label. Appending a
+	// plaintext counter to an armored vault token would corrupt that token.
+	if default_title_override!="" do default_title=default_title_override
 	chain_id, chain_ok, chain_err := resolve_instance_chain(service, owner, input.chain_id, default_title)
 	if !chain_ok do return domain.Agent_Instance{}, 0, false, chain_err
 	project_path := ""
@@ -813,9 +816,10 @@ write_bootstrap_messages :: proc(b: ^strings.Builder, service: ^Agent_Service, i
 	}
 }
 
-stop_instance :: proc(service: ^Agent_Service, auth: contracts.Auth_Context, instance_id: string, input: Stop_Instance_Input) -> (domain.Agent_Instance, bool, domain.Domain_Error) {
+stop_instance :: proc(service: ^Agent_Service, auth: contracts.Auth_Context, instance_id: string, input: Stop_Instance_Input, guard_ctx:rawptr=nil, guard:proc(ctx:rawptr)->domain.Domain_Error=nil) -> (domain.Agent_Instance, bool, domain.Domain_Error) {
 	lock_tok := dbt.timed_lock(&service.reconfiguration_mutex, .Reconfig)
 	defer dbt.timed_unlock(&service.reconfiguration_mutex, .Reconfig, lock_tok)
+	if guard!=nil {if err:=guard(guard_ctx);err.code!=.None do return {},false,err}
 	if input.force {
 		if inst, handled, err := force_stop_instance_reconfiguration_locked(service, auth, instance_id); handled do return inst, err.code == .None, err
 	}
@@ -868,7 +872,10 @@ clear_user_stop :: proc(service: ^Agent_Service, inst: domain.Agent_Instance) ->
 // stop-then-start), start refuses an instance that is already live so the agent
 // gets a clear "already_running" (409/Conflict) instead of silently re-spawning.
 // The machine-readable code rides in details_json so ham-ctl can branch on it.
-start_instance :: proc(service: ^Agent_Service, auth: contracts.Auth_Context, instance_id: string) -> (domain.Agent_Instance, bool, domain.Domain_Error) {
+start_instance :: proc(service: ^Agent_Service, auth: contracts.Auth_Context, instance_id: string, guard_ctx:rawptr=nil, guard:proc(ctx:rawptr)->domain.Domain_Error=nil) -> (domain.Agent_Instance, bool, domain.Domain_Error) {
+	lock_tok := dbt.timed_lock(&service.reconfiguration_mutex, .Reconfig)
+	defer dbt.timed_unlock(&service.reconfiguration_mutex, .Reconfig, lock_tok)
+	if guard!=nil {if err:=guard(guard_ctx);err.code!=.None do return {},false,err}
 	inst, ok, err := get_instance(service, auth, instance_id)
 	if !ok do return domain.Agent_Instance{}, false, err
 	if runtime_expected_active(inst.runtime_status) {
@@ -877,7 +884,7 @@ start_instance :: proc(service: ^Agent_Service, auth: contracts.Auth_Context, in
 		return domain.Agent_Instance{}, false, domain.domain_error(.Conflict, msg, details)
 	}
 	inst = clear_user_stop(service, inst)
-	return relaunch_instance(service, auth, inst, inst.provider, inst.model)
+	return relaunch_instance_locked(service, auth, inst, inst.provider, inst.model)
 }
 
 get_instance_pane :: proc(service: ^Agent_Service, auth: contracts.Auth_Context, instance_id: string, since_hash: string, width, line_limit: int) -> (string, bool, domain.Domain_Error) {

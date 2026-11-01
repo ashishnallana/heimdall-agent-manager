@@ -85,7 +85,7 @@ reconfiguration_require_idle :: proc(service: ^Agent_Service, instance_id: strin
 	return true, {}
 }
 
-begin_instance_reconfiguration :: proc(service: ^Agent_Service, auth: contracts.Auth_Context, instance_id: string, input: Reconfigure_Operation_Input) -> (domain.Instance_Reconfiguration, bool, domain.Domain_Error) {
+begin_instance_reconfiguration :: proc(service: ^Agent_Service, auth: contracts.Auth_Context, instance_id: string, input: Reconfigure_Operation_Input, guard_ctx:rawptr=nil, guard:proc(ctx:rawptr)->domain.Domain_Error=nil) -> (domain.Instance_Reconfiguration, bool, domain.Domain_Error) {
 	inst, found, err := get_instance(service, auth, instance_id)
 	if !found do return {}, false, err
 	defer domain.agent_instance_destroy(&inst)
@@ -156,6 +156,9 @@ begin_instance_reconfiguration :: proc(service: ^Agent_Service, auth: contracts.
 	lock_tok := dbt.timed_lock(&service.reconfiguration_mutex, .Reconfig)
 	defer dbt.timed_unlock(&service.reconfiguration_mutex, .Reconfig, lock_tok)
 	defer project_service.bridge_runtime_instance_cancel_reservation(service.bridge_runtime_registry, next.bridge_id, generation, next.agent_instance_id)
+	// Delegated callers may revoke authorization while remote path preflight is
+	// waiting. Recheck at the native acceptance boundary before persisting/sending.
+	if guard!=nil {if err:=guard(guard_ctx);err.code!=.None do return {},false,err}
 	if existing, exists, _ := iface.instance_reconfiguration_get(service.agents, string(inst.owner_user_id), instance_id, input.idempotency_key); exists {
 		if !reconfiguration_same_destination(existing, input, permission_mode) {
 			domain.instance_reconfiguration_destroy(&existing)
@@ -401,9 +404,10 @@ reconfiguration_json :: proc(op: domain.Instance_Reconfiguration) -> string {
 	return string(data)
 }
 
-retry_instance_reconfiguration :: proc(service: ^Agent_Service, auth: contracts.Auth_Context, instance_id, key: string, expected_revision: int) -> (domain.Instance_Reconfiguration, bool, domain.Domain_Error) {
+retry_instance_reconfiguration :: proc(service: ^Agent_Service, auth: contracts.Auth_Context, instance_id, key: string, expected_revision: int, guard_ctx:rawptr=nil, guard:proc(ctx:rawptr)->domain.Domain_Error=nil) -> (domain.Instance_Reconfiguration, bool, domain.Domain_Error) {
 	lock_tok := dbt.timed_lock(&service.reconfiguration_mutex, .Reconfig)
 	defer dbt.timed_unlock(&service.reconfiguration_mutex, .Reconfig, lock_tok)
+	if guard!=nil {if err:=guard(guard_ctx);err.code!=.None do return {},false,err}
 	inst, found, err := get_instance(service, auth, instance_id)
 	if !found do return {}, false, err
 	defer domain.agent_instance_destroy(&inst)
