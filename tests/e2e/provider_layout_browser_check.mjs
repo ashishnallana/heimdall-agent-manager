@@ -61,6 +61,8 @@ try {
     };
     await checkHeading('Providers', 'Choose a bridge');
     await checkLayout('overview');
+    const cardWidths = await q('providers-bridge-overview').evaluate((grid) => [...grid.children].map((card) => [card.getBoundingClientRect().width, grid.getBoundingClientRect().width]));
+    assert.ok(cardWidths.every(([card, grid]) => Math.abs(card - grid) < 2), 'bridge cards span content width');
     await q('providers-bridge-bridge_test').focus();
     await page.keyboard.press('Enter');
     await q('profile-select-claude').waitFor();
@@ -77,10 +79,34 @@ try {
     await q('profile-save').click();
     await page.getByRole('alert').filter({ hasText: 'Enter a custom config directory' }).first().waitFor();
     await q('profile-config-config_dir').fill('/private/claude');
+    const enabled = q('profile-enabled');
+    assert.equal(await enabled.evaluate((el) => el.tagName), 'BUTTON');
+    const previousEnabled = await enabled.getAttribute('aria-pressed');
+    await enabled.focus();
+    await page.keyboard.press('Space');
+    assert.notEqual(await enabled.getAttribute('aria-pressed'), previousEnabled);
+    assert.ok((await q('profile-enablement').textContent()).includes(previousEnabled === 'true' ? 'Disabled' : 'Enabled'));
+    assert.ok((await q('profile-enablement').textContent()).includes('Pending save'));
+    await checkLayout('availability-pending-save');
+    await enabled.click();
+    assert.equal(await enabled.textContent(), previousEnabled === 'true' ? 'Disable profile' : 'Enable profile');
+    await q('provider-extension-action-claude').waitFor();
+    const alignment = await page.evaluate(() => {
+      const accent = document.querySelector('[data-debug-id="profile-accent"]');
+      const label = accent.closest('label');
+      const action = document.querySelector('[data-debug-id="provider-extension-action-claude"]');
+      return { accentHeight: accent.getBoundingClientRect().height, labelHeight: label.getBoundingClientRect().height,
+        actionPadding: getComputedStyle(action).paddingLeft };
+    });
+    assert.equal(alignment.accentHeight, 40);
+    assert.ok(alignment.labelHeight <= 42, 'accent stays aligned with label');
+    assert.equal(alignment.actionPadding, '0px', 'editor extension action has no provider-row indentation');
     await checkLayout('claude-editor');
+    await q('provider-extension-install-btn-claude').scrollIntoViewIfNeeded();
+    await page.screenshot({ path: path.join(evidence, width + '-extension-action.png'), fullPage: true });
     await q('profile-save').click();
     await q('profile-save').waitFor({ state: 'visible' });
-    await page.waitForFunction(() => !document.querySelector('[data-debug-id="profile-save"]').disabled);
+    await page.waitForFunction(() => { const save = document.querySelector('[data-debug-id="profile-save"]'); return save && !save.disabled; });
     assert.equal(await q('profile-config-config_dir').inputValue(), '/private/claude');
 
     // The same mounted editor must survive desktop/mobile resize.
@@ -115,10 +141,28 @@ try {
 
     await q('profile-add').click();
     await checkHeading('Add provider', 'Provider profile and runtime settings on Riverwood.');
+    const checkStep = async (step) => {
+      const steps = q('profile-wizard-step').locator('li');
+      assert.equal(await steps.count(), 3);
+      assert.equal(await q('profile-wizard-step').locator('[aria-current="step"]').count(), 1);
+      assert.equal(await steps.nth(step).getAttribute('aria-current'), 'step');
+      assert.ok((await steps.nth(step).textContent()).includes('Current step'));
+      if (step) assert.ok((await steps.nth(step - 1).textContent()).includes('Completed'));
+      if (step < 2) assert.ok((await steps.nth(step + 1).textContent()).includes('Upcoming'));
+      assert.equal(await q('profile-back').isDisabled(), step === 0);
+      await checkLayout('wizard-' + step);
+    };
+    await checkStep(0);
     await q('profile-driver').selectOption('claude');
     await q('profile-next').click();
+    await checkStep(1);
     await q('profile-label').fill('Work account');
     const id = await q('profile-id').inputValue();
+    await q('profile-next').click();
+    await checkStep(2);
+    await q('profile-back').click();
+    await checkStep(1);
+    assert.equal(await q('profile-label').inputValue(), 'Work account');
     await q('profile-next').click();
     await q('profile-env-add').click();
     await q('profile-env-name-0').fill('WORK_TOKEN');

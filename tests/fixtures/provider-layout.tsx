@@ -64,7 +64,7 @@ window.fetch = async (input, init = {}) => {
   if (url.endsWith('/provider-status') || url.endsWith('/providers/discover')) return json({ providers: profiles.map((p) => ({ ...p,
     display_name: p.provider === 'claude' ? 'Claude Code' : p.provider === 'codex' ? 'Codex' : p.provider,
     state: ['claude', 'codex'].includes(p.provider) ? 'present' : 'absent', catalog_state: 'active', version_text: '1.0',
-    models: [{ model_id: 'example-model', label: 'Example model', state: 'active' }], extension: null,
+    models: [{ model_id: 'example-model', label: 'Example model', state: 'active' }], extension: { state: 'absent' },
   })) });
   if (url.endsWith('/experiments')) return json({ flags: [] });
   if (url.endsWith('/me')) return json({ user_id: 'usr_test', display_name: 'Layout test' });

@@ -72,3 +72,31 @@ The Settings shell now owns the provider page title, subtitle and contextual bre
 This correction was made directly in `/var/home/tanmay/provider-settings-main` on local `main`, starting at `fc39983a7d2fe8c60104801fec8d986d19281b4b`. The original checkout and remote main remain unchanged. No further integration is required after independent review of this correction.
 
 Verification: `npm run build` passed; `node --import ./tests/helpers/vaultEndpointHarness.ts --test tests/ui_provider_bridge_navigation_test.ts tests/ui_provider_profiles_test.ts tests/ui_settings_modal_test.ts` passed 11/11; the browser command above with `PROVIDER_LAYOUT_EVIDENCE=/tmp/provider-heading-evidence` passed 24 integrated responsive states. Existing navigation and browser checks now assert Settings heading ownership and route/editor context changes. Desktop/narrow overview, bridge list and editor screenshots were visually inspected. [Heading verification gallery](artifact://art_18e3e8e5d4479adc).
+
+## Wizard and alignment polish
+
+The follow-up starts from approved main `608b79f00ebf927cffd1bda3e77073b32077f0f1` in
+`/var/home/tanmay/provider-settings-main`. Bridge cards now span the content width.
+The add wizard has numbered Provider/Identity/Config steps, explicit completed/current/upcoming
+labels, one `aria-current="step"`, and a stable Back control (disabled on the first step).
+The native accent picker aligns with its label. Extension actions use an editor layout without
+the provider-row indentation; the setup-row caller retains its existing layout.
+
+A prominent Profile availability panel near the editor heading contains an Enabled/Disabled
+pill and an explicit Disable profile / Enable profile button. Changes remain drafts until
+Save profile; Pending save appears beside the state/action when appropriate. Permission,
+connectivity, save and sealed API behavior remain unchanged.
+
+Verification on final source:
+
+- `npm run typecheck`: pass.
+- `npm run build`: pass, including Vite/Electron; existing environment/chunk warnings remain.
+- `node --import ./tests/helpers/vaultEndpointHarness.ts --test tests/ui_provider_bridge_navigation_test.ts tests/ui_provider_profiles_test.ts tests/ui_settings_modal_test.ts tests/ui_provider_setup_collapse_test.ts tests/ui_extension_install_test.ts`: 18/18 pass. Includes disable/save and enable/save through the sealed API.
+- `PLAYWRIGHT_MODULE=/tmp/provider-layout-browser/node_modules/playwright PROVIDER_FONT_DIR=/tmp/approved-provider-mockup/site/assets PROVIDER_LAYOUT_EVIDENCE=/tmp/provider-polish-evidence node tests/e2e/provider_layout_browser_check.mjs`: 39 states pass at 1440/768/390 widths, zero browser exceptions.
+- `git diff --check`: pass.
+- Representative screenshots: `artifact://art_18e3eb47e4bc30c2`; seven images plus HTML round-trip byte-identically. Desktop overview/extension, tablet wizard and phone wizard/availability/extension inspected directly.
+
+Backend-wide tests and real-account mutations are outside this presentation-only patch.
+Original checkout HEAD `79065f209c8ab582c73a4efd8703a49b6033fa49` and index SHA256
+`7d8738e48e6f7a05cd0511689e49aa47433219acd4d55145155c4a372270ebaa` remain unchanged.
+Independent review precedes isolated preview refresh; production services are untouched.

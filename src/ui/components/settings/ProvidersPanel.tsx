@@ -118,7 +118,7 @@ export function ProvidersPanel({ bridgeId: routeBridgeId = '', onHeadingChange }
         <Text as="h2" role="heading">Your bridges</Text>
         <Text role="body-sm" tone="muted">{bridges.length} bridges</Text>
       </div>
-      {bridges.length ? <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3" data-debug-id="providers-bridge-overview">
+      {bridges.length ? <div className="grid grid-cols-1 gap-3" data-debug-id="providers-bridge-overview">
         {bridges.map((b: any) => <ProviderBridgeCard key={bridgeKey(b)} bridge={b} />)}
       </div> : <Panel><Text role="body" tone="muted">Enroll a bridge before configuring providers.</Text></Panel>}
       <Text role="body-sm" tone="muted">Provider profiles belong to a bridge. Each bridge keeps its own accounts, environment and runtime configuration.</Text>

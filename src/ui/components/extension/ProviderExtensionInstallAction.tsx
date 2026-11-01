@@ -24,12 +24,13 @@ interface Props {
   extension: ProviderExtensionStatus | null;
   online: boolean;
   disabled?: boolean;
+  layout?: 'row' | 'editor';
   onComplete: () => void;
   onRetryDiscovery: () => Promise<void>;
 }
 
 /** Tracks manual and automatic installs, including commands recovered after navigation. */
-export default function ProviderExtensionInstallAction({ bridgeId, provider, profileId, extension, online, disabled, onComplete, onRetryDiscovery }: Props) {
+export default function ProviderExtensionInstallAction({ bridgeId, provider, profileId, extension, online, disabled, layout = 'row', onComplete, onRetryDiscovery }: Props) {
   // RTK shares this subscription across every provider card on the bridge.
   const statusQuery = useListBridgeProvidersQuery({ bridgeId }, {
     pollingInterval: 5000,
@@ -112,7 +113,7 @@ export default function ProviderExtensionInstallAction({ bridgeId, provider, pro
   const failed = tracked?.status === 'failed' || tracked?.status === 'cancelled';
 
   return (
-    <div className="space-y-2 px-4 pb-3 sm:pl-[4.75rem]" data-debug-id={`provider-extension-action-${provider}`}>
+    <div className={layout === 'editor' ? 'flex min-w-0 flex-wrap items-center gap-2 [&>p]:w-full [&>div]:w-full' : 'space-y-2 px-4 pb-3 sm:pl-[4.75rem]'} data-debug-id={`provider-extension-action-${provider}`}>
       {canRetryDiscovery ? (
         <Button
           size="sm"
