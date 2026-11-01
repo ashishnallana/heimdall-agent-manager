@@ -57,6 +57,15 @@ export interface TaskReviewWire {
 }
 
 export interface TaskWire {
+  requirements?: {
+    revision: number;
+    submitted_revision: number;
+    submitted_head: string;
+    checkpoint_required: boolean;
+    acknowledgements: Array<{ lease_id: string; holder_instance_id: string; revision: number; pending: boolean }>;
+    history: string;
+    history_truncated: boolean;
+  };
   /** Where a done task's worktree branch is (Tickets F5). */
   merge?: { state: 'none' | 'pending' | 'merged' | 'conflict' | 'failed'; detail?: string; head?: string };
   task_id: string;

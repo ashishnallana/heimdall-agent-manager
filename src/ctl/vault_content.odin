@@ -96,7 +96,7 @@ ctl_decrypt_json_value :: proc(v: ^json.Value, kr: ^vault.Vault_Keyring, key_con
 		defer delete(updates)
 		for k, sub_v in val {
 			switch k {
-			case "title", "description", "description_preview", "body", "evidence", "last_comment_preview", "last_message_preview", "name", "content", "text", "label", "custom_text":
+			case "goal", "requirements_reason", "reason", "title", "description", "description_preview", "body", "evidence", "last_comment_preview", "last_message_preview", "name", "content", "text", "label", "custom_text":
 				if s, is_str := sub_v.(json.String); is_str {
 					str_val := string(s)
 					if vault.is_armored(str_val) {
@@ -104,6 +104,20 @@ ctl_decrypt_json_value :: proc(v: ^json.Value, kr: ^vault.Vault_Keyring, key_con
 						append(&updates, Json_Field_Update{k = k, v = json.String(new_str)})
 					}
 				}
+            case "history", "requirements_history":
+                if text,ok:=sub_v.(json.String);ok {
+                    opened:=vault.replace_embedded_tokens(string(text),kr,"[Encrypted requirements history]",vault.FAILED_MARKER,allocator)
+                    append(&updates,Json_Field_Update{k=k,v=json.String(opened)})
+                }
+            case "acceptance":
+                if items,ok:=sub_v.(json.Array);ok {
+                    for item,i in items {
+                        if text,typed:=item.(json.String);typed && vault.is_armored(string(text)) {
+                            items[i]=json.String(ctl_decrypt_or_fallback_armored(string(text),kr,key_configured,allocator))
+                        }
+                    }
+                    append(&updates,Json_Field_Update{k=k,v=items})
+                }
 			case:
 				#partial switch _ in sub_v {
 				case json.Object, json.Array:
@@ -187,7 +201,8 @@ ctl_decrypt_json_string :: proc(raw_json: string, kr: ^vault.Vault_Keyring, key_
 		// The armored token is raw base64 in the source, but the plaintext replacing it
 		// sits inside a JSON string literal and so has to be escaped.
 		escaped := ctl_json_escape_bytes(plaintext, context.temp_allocator)
-		out = strings.replace_all(out, armored, escaped, context.temp_allocator) or_else out
+		source := ctl_json_escape_bytes(armored, context.temp_allocator)
+		out = strings.replace_all(out, source, escaped, context.temp_allocator) or_else out
 	}
 	return strings.clone(out, allocator)
 }
@@ -221,7 +236,7 @@ ctl_collect_decrypted_pairs :: proc(before, after: json.Value, pairs: ^[dynamic]
 		b_str, a_str := string(b), string(a)
 		// Only an armored value can have been rewritten, and an unchanged one means the
 		// field was not in the list (or decryption fell back to the armored text itself).
-		if b_str != a_str && vault.is_armored(b_str) {
+		if b_str != a_str && strings.contains(b_str, VAULT_ARMOR_PREFIX) {
 			append(pairs, [2]string{b_str, a_str})
 		}
 	}

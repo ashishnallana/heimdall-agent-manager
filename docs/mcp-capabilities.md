@@ -399,3 +399,31 @@ connections remain supported. No production deployment is included in this chang
 The separate audit's ingress buffering, registration lifecycle, loss-free epoch
 lifecycle and verified recovery work remain outstanding. Do not enable broader
 plaintext traffic without resolving the relevant rollout gates.
+
+### Changing live task requirements
+
+Use `tasks.get` before changing `goal` or `acceptance`. Send its opaque
+`revision` as `expected_revision`, a nonempty `reason`, and a new
+`request_id` to `tasks.update`. Goal, acceptance and reason are encrypted
+by the approved device. Reuse identical arguments and the same request ID for
+an ambiguous response; a conflict requires an intentional fresh read and edit.
+
+A live edit preserves the worker lease and records a requirement revision.
+Native workers receive a notice, refresh with `lease next`, read `TASK.md`,
+and explicitly acknowledge that revision with `lease heartbeat --lease <id>
+--acknowledge-requirements-revision <n>`. Submission binds that lease and
+revision. Review binds the submitted revision, attempt and commit. A change
+after submission blocks stale approval and schedules worker rework after
+reviewers checkpoint. MCP cannot acknowledge another agent's lease or approve
+a review.
+
+Task detail reads expose `requirements_revision`, `requirements_submitted_revision`,
+`requirements_submitted_head`, `requirements_checkpoint_required`,
+`requirements_acknowledgements` and decrypted `requirements_history`.
+History is bounded to recent changes; `requirements_history_truncated` indicates
+older audit events remain in native task history. These fields require the
+signed task-detail capability; legacy projections omit them.
+
+Comments remain audit-only and do not wake agents. Requirement changes use the
+native durable delivery path. An external MCP client must call `tasks.get` or
+`events.wait` while its conversation is running to observe progress.

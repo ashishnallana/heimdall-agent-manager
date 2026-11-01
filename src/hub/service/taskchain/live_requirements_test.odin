@@ -29,6 +29,12 @@ test_live_requirements_history_conflict_noop_and_rollback :: proc(t: ^testing.T)
 		kind = domain.LEASE_KIND_WORK, attempt_no = 1,
 		expires_at = "2099-01-01T00:00:00Z", hard_deadline_at = "2099-01-01T01:00:00Z"})
 	if !testing.expect(t, lok) do return
+    _, missing_revision, missing_revision_err := update_task(&f.svc,f.owner,task.task_id,{
+        brief_json = `{"goal":"must not bypass"}`, require_requirements_context = true, requirements_reason = "scope"})
+    testing.expect(t,!missing_revision && missing_revision_err.code == .Validation_Failed)
+    _, missing_reason, missing_reason_err := update_task(&f.svc,f.owner,task.task_id,{
+        brief_json = `{"goal":"must not bypass"}`, require_requirements_context = true, expected_requirements_revision = 1})
+    testing.expect(t,!missing_reason && missing_reason_err.code == .Validation_Failed)
 	edited, eok, eerr := update_task(&f.svc, f.owner, task.task_id, {
 		brief_json = `{"goal":"new objective","acceptance":["a1","Google sign-in"]}`,
 		expected_requirements_revision = 1, requirements_reason = "Added provider",

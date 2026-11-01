@@ -12,7 +12,7 @@ mcp_task_write_arguments :: proc(tool:string,value:json.Value)->(mcp.Control_Arg
 	allowed:[]string
 	switch tool {
 	case "tasks.create":allowed=[]string{"chain_id","request_id","title","description","goal","acceptance","assignee_agent_id","bridge_id","reviewers","depends_on","requires_user_approval","priority"}
-	case "tasks.update":allowed=[]string{"chain_id","task_id","request_id","expected_revision","title","description","goal","acceptance","assignee_agent_id","bridge_id","reviewers","depends_on","requires_user_approval","priority"}
+	case "tasks.update":allowed=[]string{"chain_id","task_id","request_id","expected_revision","reason","title","description","goal","acceptance","assignee_agent_id","bridge_id","reviewers","depends_on","requires_user_approval","priority"}
 	case "tasks.control":allowed=[]string{"chain_id","task_id","request_id","expected_revision","action","reason"}
 	case "chains.configure":allowed=[]string{"chain_id","request_id","expected_revision","action","agent_id","bridge_id","provider","model","provider_profile","roles","capacity"}
 	case:return {},false
@@ -59,6 +59,7 @@ mcp_task_write_arguments :: proc(tool:string,value:json.Value)->(mcp.Control_Arg
 	if tool!="tasks.create" && (len(args.expected_revision)!=64 || !vault.is_lower_hex(args.expected_revision)) do return {},false
 	if tool=="tasks.create" && (args.title=="" || args.goal=="" || len(args.acceptance)<1) do return {},false
 	if tool=="tasks.update" && len(obj)<5 do return {},false
+    if tool=="tasks.update" && (mcp.task_argument_present(args,"goal") || mcp.task_argument_present(args,"acceptance")) && args.reason=="" do return {},false
 	if tool=="tasks.control" {
 		valid:=false
 		for action in ([]string{"publish","cancel","reopen","answer","hold","release","recheck"}) do if action==args.action do valid=true

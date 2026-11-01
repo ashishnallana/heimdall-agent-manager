@@ -889,6 +889,10 @@ agent_action_task_update_handler :: proc(ctx: rawptr, req: Request) -> Response 
 	if actor_err.code != .None do return respond_error(actor_err, req.request_id)
 	brief_json, _ := jsonx.extract_raw_object(params, "brief", top_level_only = true, allocator = context.temp_allocator)
 	task, updated, err := taskchain_service.update_task(h.taskchains, auth, task_id, taskchain_service.Update_Task_Input{
+        require_requirements_context = true,
+        expected_requirements_revision = i64(jsonx.extract_int(params, "expected_requirements_revision", 0, true)),
+        requirements_reason = json_string(params, "requirements_reason"),
+        requirements_request_id = json_string(params, "request_id"),
 		title = json_string(params, "title"),
 		description = json_string(params, "description"),
 		brief_json = brief_json,

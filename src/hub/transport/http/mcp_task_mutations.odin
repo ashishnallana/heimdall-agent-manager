@@ -81,6 +81,9 @@ mcp_task_write_call :: proc(h:^MCP_Control_Handlers,id:json.Value,raw:string,vie
 	command.update={title=get_text(sealed,"title"),description=get_text(sealed,"description"),brief_json=brief_json,assignee_agent_id=args.assignee_agent_id,has_assignee=mcp.task_argument_present(args,"assignee_agent_id"),reviewer_agent_ids=args.reviewers,has_reviewers=mcp.task_argument_present(args,"reviewers"),depends_on=deps,has_depends_on=mcp.task_argument_present(args,"depends_on"),requires_user_approval=args.requires_user_approval,has_requires_user_approval=mcp.task_argument_present(args,"requires_user_approval")}
 	command.create.priority=domain.task_priority_from_string(args.priority);command.create.has_priority=mcp.task_argument_present(args,"priority")
 	command.update.priority=command.create.priority;command.update.has_priority=command.create.has_priority
+    command.update.require_requirements_context=true
+    command.update.requirements_reason=get_text(sealed,"reason")
+    command.update.requirements_request_id=args.request_id
 	bridge:=new(string,context.temp_allocator);bridge^=args.bridge_id
 	if mcp.task_argument_present(args,"bridge_id") do command.update.bridge_id=bridge
 	capacity:=args.capacity;if capacity==0 do capacity=1

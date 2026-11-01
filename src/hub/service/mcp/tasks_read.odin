@@ -3,6 +3,7 @@ package mcp
 
 import "core:encoding/json"
 import "core:slice"
+import "core:strings"
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
 import tc "odin_test:hub/service/taskchain"
@@ -51,6 +52,14 @@ control_read_tasks :: proc(s:^Control_Service,owner,name:string,args:Control_Arg
 		for dep in deps do if dep.task_id==task.task_id do append(&d,json.String(dep.depends_on_task_id))
 		row:=json.Object{"owner_user_id"=json.String(owner),"task_id"=json.String(task.task_id),"chain_id"=json.String(task.chain_id),"title"=json.String(task.title),"description"=json.String(task.description),"state"=json.String(domain.task_state_string(task.state)),"kind"=json.String(domain.task_kind_string(task.kind)),"attempt_no"=json.Integer(task.attempt_no),"requires_user_approval"=json.Boolean(task.requires_user_approval),"reviews"=r,"bridge_id"=json.String(task.bridge_id),"depends_on"=d,"publish_state"=json.String("published" if task.publish_state==.Published else "draft"),"priority"=json.String(domain.task_priority_string(task.priority)),"updated_at"=json.String(task.updated_at)}
 		if name=="tasks.get" {
+            raw, req_err := tv2.requirements_projection_json(s.chains.repo,task)
+            if req_err.code!=.None do return {},"request_failed"
+            value, parse_err := json.parse_string(raw,parse_integers=true,allocator=context.temp_allocator)
+            req, typed := value.(json.Object)
+            if parse_err!=nil || !typed do return {},"request_failed"
+            for key in ([]string{"revision","submitted_revision","submitted_head","checkpoint_required","acknowledgements","history","history_truncated"}) {
+                row[strings.concatenate({"requirements_",key},context.temp_allocator)]=req[key]
+            }
 			for key in ([]string{"goal","acceptance","inputs","review_roles","reviewers"}) do if value,present:=obj[key];present && value!=nil do row[key]=value
 			if code:=control_task_attempt(s,task,&row);code!="" do return {},code
 		}

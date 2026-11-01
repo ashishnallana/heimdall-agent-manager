@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Badge, Button, Checkbox, Modal, ModalBody, ModalFooter, Select, StatusPill, Text } from '@ui';
+import { Badge, Button, Checkbox, Modal, ModalBody, ModalFooter, Select, StatusPill, Text, Textarea } from '@ui';
 import type { TaskWire } from '../../api/taskWire';
 import { useUpdateTaskDetailMutation } from '../../api/endpoints/tasks';
 import { useListAgentIdentitiesQuery } from '../../api/endpoints/agents';
@@ -8,7 +8,7 @@ import { TASK_STATE_LABELS, TASK_STATE_TONE, normalizeTaskState } from './taskV2
 import { actionErrorMessage } from './useTaskActions';
 import { EMPTY_TASK_NAMES, type TaskNames } from './taskNames';
 
-export type TaskEditField = 'assignee' | 'reviewers' | 'deps';
+export type TaskEditField = 'assignee' | 'reviewers' | 'deps' | 'requirements';
 
 export interface TaskEditModalProps {
   chainId: string;
@@ -22,6 +22,7 @@ export interface TaskEditModalProps {
 }
 
 const TITLES: Record<TaskEditField, string> = {
+  requirements: 'Change requirements',
   assignee: 'Who works on it',
   reviewers: 'Who must approve it',
   deps: 'What it waits for',
@@ -59,6 +60,11 @@ export const TaskEditModal: React.FC<TaskEditModalProps> = ({
   const [userApproval, setUserApproval] = useState(Boolean(task.requires_user_approval));
   const [deps, setDeps] = useState<string[]>(currentDeps);
   const [error, setError] = useState('');
+  const [goal, setGoal] = useState('');
+  const [acceptance, setAcceptance] = useState('');
+  const [reason, setReason] = useState('');
+  const [requirementRevision, setRequirementRevision] = useState(0);
+  const [original, setOriginal] = useState({ goal: '', acceptance: '' });
 
   // Reset the draft whenever the dialog opens for a field.
   useEffect(() => {
@@ -68,6 +74,10 @@ export const TaskEditModal: React.FC<TaskEditModalProps> = ({
     setUserApproval(Boolean(task.requires_user_approval));
     setDeps(currentDeps);
     setError('');
+    const goal = String(task.brief?.goal || '');
+    const acceptance = (task.brief?.acceptance || []).join('\n');
+    setGoal(goal); setAcceptance(acceptance); setOriginal({ goal, acceptance });
+    setReason(''); setRequirementRevision(task.requirements?.revision || 0);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [field, task.task_id]);
 
@@ -97,6 +107,15 @@ export const TaskEditModal: React.FC<TaskEditModalProps> = ({
       args.requiresUserApproval = userApproval;
     }
     if (field === 'deps') args.dependsOn = deps;
+    if (field === 'requirements') {
+      const items = acceptance.split('\n').map(item => item.trim()).filter(Boolean);
+      if (!goal.trim() || !items.length || !reason.trim()) { setError('Provide a goal, acceptance criteria and a reason for the change.'); return; }
+      if (new TextEncoder().encode(goal).length > 2000 || items.length > 20 || items.some(item => new TextEncoder().encode(item).length > 200)) { setError('Use a goal up to 2,000 bytes and up to 20 acceptance criteria of 200 bytes each.'); return; }
+      if (goal === original.goal && acceptance === original.acceptance) { setError('Change the goal or acceptance criteria first.'); return; }
+      args.brief = { ...(goal !== original.goal ? { goal } : {}), ...(acceptance !== original.acceptance ? { acceptance: items } : {}) };
+      args.expectedRequirementsRevision = requirementRevision;
+      args.requirementsReason = reason.trim();
+    }
     try {
       await updateTask(args).unwrap();
       onClose();
@@ -121,6 +140,16 @@ export const TaskEditModal: React.FC<TaskEditModalProps> = ({
               Assigning an agent adds it to this chain's fleet. If the ticket is ready, the agent may start right away.
             </Text>
           </>
+        )}
+        {field === 'requirements' && (
+          <div className="space-y-3" data-debug-id="task-requirements-editor">
+            <Text as="p" role="caption" tone="muted">Working agents will be notified. A change during review requires rework and fresh approvals.</Text>
+            <label className="block">Goal<Textarea aria-label="Task goal" data-debug-id="task-requirements-goal" value={goal} onChange={setGoal} rows={3} width="full" /></label>
+            <label className="block">Acceptance criteria, one per line<Textarea aria-label="Acceptance criteria" data-debug-id="task-requirements-acceptance" value={acceptance} onChange={setAcceptance} rows={5} width="full" /></label>
+            <label className="block">Reason for the change<Textarea aria-label="Reason for the change" data-debug-id="task-requirements-reason" value={reason} onChange={setReason} rows={2} width="full" /></label>
+            {requirementRevision === 0 && <Text tone="warning">Reload the task before editing its requirements.</Text>}
+            {(goal.startsWith('vault:v2:') || acceptance.includes('vault:v2:')) && <Text tone="warning">Unlock the vault to edit these requirements.</Text>}
+          </div>
         )}
 
         {field === 'reviewers' && (
@@ -213,7 +242,7 @@ export const TaskEditModal: React.FC<TaskEditModalProps> = ({
         <Button size="sm" variant="ghost" onClick={onClose}>
           Cancel
         </Button>
-        <Button size="sm" variant="primary" loading={updateState.isLoading} onClick={save}>
+        <Button size="sm" variant="primary" data-debug-id="task-requirements-save" disabled={field === 'requirements' && (!requirementRevision || goal.startsWith('vault:v2:') || acceptance.includes('vault:v2:'))} loading={updateState.isLoading} onClick={save}>
           Save
         </Button>
       </ModalFooter>

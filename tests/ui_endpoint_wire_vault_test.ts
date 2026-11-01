@@ -80,6 +80,7 @@ const KEY_HEX = await keyringFromHex(KEY_HEX_RAW);
 type Captured = { url: string; method: string; body: any };
 let captured: Captured[] = [];
 let nextResponseBody: any = { data: { ok: true } };
+let nextResponseStatus = 200;
 
 (globalThis as any).fetch = async (input: any, init: any = {}) => {
   const url = String(input?.url ?? input);
@@ -93,7 +94,7 @@ let nextResponseBody: any = { data: { ok: true } };
   captured.push({ url, method: String(init?.method || 'GET').toUpperCase(), body });
   const text = typeof nextResponseBody === 'string' ? nextResponseBody : JSON.stringify(nextResponseBody);
   return {
-    ok: true, status: 200,
+    ok: nextResponseStatus < 400, status: nextResponseStatus,
     headers: { get: (h: string) => (h.toLowerCase() === 'content-type' ? 'application/json' : null) },
     text: async () => text,
     json: async () => (typeof nextResponseBody === 'string' ? JSON.parse(nextResponseBody) : nextResponseBody),
@@ -312,5 +313,65 @@ test('LOCKED: writes do not throw and armored reads stay armored (locked placeho
 // The two files cannot be reverted (shared working tree), so instead evaluate the
 // EXACT pre-fix operand against a real, fully unlocked store.
 // =============================================================================
+
+test('live requirements seal changed fields and preserve the reviewed revision without a fresh read', async () => {
+  const tasks = await import('../src/ui/api/endpoints/tasks.ts');
+  const store = makeStore();
+  await unlock(store);
+  captured = []; nextResponseBody = { data: { ok: true } };
+  const result = await go(store, tasks.tasksApi.endpoints.updateTaskDetail.initiate({
+    chainId: 'chain_live', taskId: 'task_live', brief: { goal: 'New private goal' },
+    expectedRequirementsRevision: 7, requirementsReason: 'Private reason',
+  }));
+  assertNoError(result, 'requirement edit');
+  const change = body(c => c.method === 'PATCH');
+  assert.match(change.brief.goal, /^vault:v2:/);
+  assert.match(change.requirements_reason, /^vault:v2:/);
+  assert.equal(change.expected_requirements_revision, 7);
+  assert.equal(change.brief.acceptance, undefined, 'unchanged criteria are not re-encrypted or overwritten');
+  assert.ok(change.request_id);
+  assert.ok(!JSON.stringify(change).includes('Private reason'));
+  captured = [];
+  await go(store, tasks.tasksApi.endpoints.userReviewTask.initiate({
+    chainId: 'chain_live', taskId: 'task_live', verdict: 'approve',
+    requirementsRevision: 7, expectedAttemptNo: 3, expectedHead: 'reviewed-head',
+  }));
+  const review = body(c => c.method === 'POST');
+  assert.equal(review.requirements_revision, 7);
+  assert.equal(review.expected_attempt_no, 3);
+  assert.equal(review.expected_head, 'reviewed-head');
+  assert.equal(captured.filter(c => c.method === 'GET').length, 0, 'approval never fetches a newer context implicitly');
+  store.dispatch(heimdallApi.util.resetApiState());
+});
+
+test('requirement edits fail closed while locked and surface conflicts without an automatic retry', async () => {
+  const tasks = await import('../src/ui/api/endpoints/tasks.ts');
+  const store = makeStore();
+  setActiveVaultKey(null);
+  store.dispatch(keyringCleared());
+  captured = [];
+  let result = await go(store, tasks.tasksApi.endpoints.updateTaskDetail.initiate({
+    chainId: 'chain_live', taskId: 'task_live', brief: { acceptance: ['private criterion'] },
+    expectedRequirementsRevision: 7, requirementsReason: 'reason',
+  }));
+  assert.ok(result.error);
+  assert.equal(captured.length, 0);
+  await unlock(store);
+  nextResponseStatus = 409;
+  nextResponseBody = { error: { code: 'conflict', message: 'Requirements changed; reload the task' } };
+  try {
+    result = await go(store, tasks.tasksApi.endpoints.updateTaskDetail.initiate({
+      chainId: 'chain_live', taskId: 'task_live', brief: { acceptance: ['private criterion'] },
+      expectedRequirementsRevision: 7, requirementsReason: 'reason',
+    }));
+    assert.ok(result.error);
+    assert.match(result.error.error, /reload/i);
+    assert.equal(captured.length, 1);
+    assert.equal(captured[0].body.expected_requirements_revision, 7);
+  } finally {
+    nextResponseStatus = 200; nextResponseBody = { data: { ok: true } };
+    store.dispatch(heimdallApi.util.resetApiState());
+  }
+});
 
 

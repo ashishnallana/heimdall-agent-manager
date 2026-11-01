@@ -145,6 +145,7 @@ Create_Task_Input :: struct {
 }
 
 Update_Task_Input :: struct {
+    require_requirements_context: bool,
 	// Public adapters supply the revision they read and a sealed change reason.
 	// Zero keeps trusted internal callers compatible; every route still records
 	// requirement history. It is not the broad MCP record revision.
@@ -1124,6 +1125,11 @@ update_task_impl :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Conte
 		new_brief = applied
 	}
 	brief_keys := brief_changed_keys(task.brief_json, new_brief)
+    if input.require_requirements_context && taskv2.requirements_differ(task.brief_json, new_brief) {
+        if input.expected_requirements_revision < 1 || strings.trim_space(input.requirements_reason) == "" {
+            return {}, false, domain.domain_error(.Validation_Failed, "requirement edits require expected_requirements_revision and an explicit requirements_reason")
+        }
+    }
 
 	// Leased: requirements may change, but assignment and execution settings may not.
 	if task_has_work_lease(service, task.task_id) {

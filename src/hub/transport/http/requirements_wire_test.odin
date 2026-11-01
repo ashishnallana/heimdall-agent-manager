@@ -1,6 +1,8 @@
+#+feature dynamic-literals
 package http
 
 import "core:testing"
+import "core:encoding/json"
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
 import taskv2 "odin_test:hub/service/taskv2"
@@ -50,4 +52,23 @@ test_requirements_ack_and_submission_revision_wire :: proc(t: ^testing.T) {
         testing.expect_value(t, jsonx.extract_int(event.payload_json, "requirements_revision", 0, true), 2)
         testing.expect_value(t, jsonx.extract_string(event.payload_json, "head", "", true, context.temp_allocator), "wire-head")
     }
+}
+
+@(test)
+test_mcp_requirement_edit_requires_reason :: proc(t: ^testing.T) {
+    context.allocator = context.temp_allocator
+    obj:=json.Object{
+        "chain_id"=json.String("chain_example"),"task_id"=json.String("task_example"),
+        "request_id"=json.String("edit-one"),
+        "expected_revision"=json.String("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        "goal"=json.String("new objective"),
+    }
+    _,missing:=mcp_task_write_arguments("tasks.update",obj)
+    testing.expect(t,!missing,"requirement edits need explicit reason before device encryption")
+    obj["reason"]=json.String("scope changed")
+    _,valid:=mcp_task_write_arguments("tasks.update",obj)
+    testing.expect(t,valid)
+    obj["reason"]=json.String("   ")
+    _,blank:=mcp_task_write_arguments("tasks.update",obj)
+    testing.expect(t,!blank)
 }

@@ -5,6 +5,7 @@ import type { TaskChainFleet } from '../../api/endpoints/taskChains';
 import { useListBridgesQuery } from '../../api/endpoints/bridgeSupport';
 import { taskBridgeOptions } from '../../utils/taskBridgePin';
 import {
+  useFetchChainTaskDetailQuery,
   useFetchCommitDiffQuery,
   useFetchTaskEventsQuery,
   useFetchTaskFacetQuery,
@@ -198,6 +199,9 @@ export const TaskDetails: React.FC<TaskDetailsProps> = ({
   const attemptNo = task.attempt_no || 1;
   const skip = { skip: !chainId || !taskId };
 
+  const { data: detailData } = useFetchChainTaskDetailQuery({ chainId, taskId }, skip);
+  const requirements = detailData?.task?.requirements || task.requirements;
+
   const { data: vcsData } = useFetchTaskFacetQuery({ chainId, taskId, attemptNo, kind: 'vcs' }, skip);
   const { data: handoffData } = useFetchTaskFacetQuery({ chainId, taskId, attemptNo, kind: 'handoff' }, skip);
   // Legacy only (D2): attempts from before verification commands were removed
@@ -374,6 +378,18 @@ export const TaskDetails: React.FC<TaskDetailsProps> = ({
       )}
 
       <Block title="Brief" collapsible debugId="task-details-brief">
+        {requirements && (
+          <div className="space-y-1" data-debug-id="task-requirements-status">
+            <Text as="p" role="caption" tone="muted">Requirements revision {requirements.revision}</Text>
+            {requirements.checkpoint_required && <Text as="p" tone="warning">Requirements changed after submission. Review is waiting for worker rework.</Text>}
+            {requirements.acknowledgements.map(ack => (
+              <Text as="p" role="caption" key={ack.lease_id} tone={ack.pending ? 'warning' : 'muted'}>
+                <HolderName instanceId={ack.holder_instance_id} names={names} />: {ack.pending ? 'waiting to read the change' : ack.revision ? `read revision ${ack.revision}` : 'working from the initial requirements'}
+              </Text>
+            ))}
+            {requirements.history && <details data-debug-id="task-requirements-history"><summary className="cursor-pointer">Requirement changes</summary><AuthoredText value={requirements.history} />{requirements.history_truncated && <Text tone="muted">Showing recent changes. Older changes remain in the task history.</Text>}</details>}
+          </div>
+        )}
         {task.brief?.goal || task.description ? (
           <AuthoredText value={String(task.brief?.goal || task.description)} debugId="task-details-goal" />
         ) : (

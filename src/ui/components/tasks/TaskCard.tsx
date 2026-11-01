@@ -107,7 +107,7 @@ export const TaskCard: React.FC<TaskCardProps> = ({
   const inReview = state === 'in_review';
   // The bridge that will actually be used (plan REQ-UI-12), never "inherit".
   const placement = describeEffectivePlacement(taskEffectivePlacement(task, chainFleets), names.bridge);
-  const actions = useTaskActions(chainId, task.task_id, task.title);
+  const actions = useTaskActions(chainId, task.task_id, task.title, task);
   const dispatch = useDispatch();
   const { primary, more } = getTaskActions(task);
 
@@ -173,6 +173,9 @@ export const TaskCard: React.FC<TaskCardProps> = ({
         { field: 'reviewers', label: 'Change reviewers' },
         { field: 'deps', label: 'Change what it waits for' },
       ];
+  if (!isGate && !task.workflow_run_id && !task.stage_key && state !== 'done' && state !== 'cancelled') {
+    editItems.unshift({ field: 'requirements', label: 'Change requirements' });
+  }
   const hasMenu = more.length > 0 || editItems.length > 0;
   // Decisions that need words live in the open details; don't repeat them above.
   const shownPrimary = expanded ? primary.filter((id) => !DECISION_IN_DETAILS.has(id)) : primary;

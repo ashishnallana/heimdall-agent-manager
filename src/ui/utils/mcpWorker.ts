@@ -53,7 +53,7 @@ export async function verifyMcpWorkerJob(j: McpWorkerJob, identity: DeviceIdenti
 }
 const chainFields = ['chain_id', 'title', 'description', 'status', 'kind', 'work_revision', 'task_count', 'completed_task_count', 'user_validation_count', 'created_at', 'updated_at', 'configuration_revision', 'fleet'];
 const taskFields = ['task_id', 'title', 'description', 'state', 'kind', 'attempt_no', 'requires_user_approval', 'reviews', 'updated_at'];
-const taskDetailFields = [...taskFields, 'chain_id', 'goal', 'acceptance', 'inputs', 'review_roles', 'reviewers', 'assignee_agent_id', 'bridge_id', 'depends_on', 'publish_state', 'priority', 'revision', 'blocked_kind', 'blocked_ref', 'blocked_reason', 'blocked_since', 'blocked_since_ms', 'hold_reason', 'hold_since_ms', 'hold_by', 'checkpoint_requested', 'allowed_actions', 'latest_attempt_no', 'latest_attempt_holder_instance_id', 'latest_attempt_outcome', 'latest_attempt_started_at', 'latest_attempt_ended_at', 'latest_attempt_summary', 'latest_attempt_summary_error'];
+const taskDetailFields = [...taskFields, 'chain_id', 'goal', 'acceptance', 'inputs', 'review_roles', 'reviewers', 'assignee_agent_id', 'bridge_id', 'depends_on', 'publish_state', 'priority', 'revision', 'blocked_kind', 'blocked_ref', 'blocked_reason', 'blocked_since', 'blocked_since_ms', 'hold_reason', 'hold_since_ms', 'hold_by', 'checkpoint_requested', 'allowed_actions', 'latest_attempt_no', 'latest_attempt_holder_instance_id', 'latest_attempt_outcome', 'latest_attempt_started_at', 'latest_attempt_ended_at', 'latest_attempt_summary', 'latest_attempt_summary_error', 'requirements_revision', 'requirements_submitted_revision', 'requirements_submitted_head', 'requirements_checkpoint_required', 'requirements_acknowledgements', 'requirements_history', 'requirements_history_truncated'];
 const commentFields = ['comment_id', 'chain_id', 'task_id', 'body', 'created_at', 'author_kind', 'author_user_id', 'author_agent_instance_id', 'delegated_client_id', 'delegated_grant_id', 'body_error', 'body_bytes'];
 const catalogFields: Record<string, { fields: string[]; text: string[] }> = {
   ...resourceSpecs,
@@ -182,7 +182,7 @@ export async function transformMcpWorkerJob(job: McpWorkerJob, keyring: VaultKey
     const details = job.tool === 'tasks.get' || job.tool === 'tasks.list';
     // Acceptance items need the same strict text transform as individual fields.
     const { acceptance, inputs, ...rest } = r;
-    const result = await readable(details ? rest : r, details ? taskDetailFields : taskFields, details ? ['title', 'description', 'goal', 'blocked_reason', 'hold_reason', 'latest_attempt_summary'] : ['title', 'description'], keyring, job.owner);
+    const result = await readable(details ? rest : r, details ? taskDetailFields : taskFields, details ? ['title', 'description', 'goal', 'blocked_reason', 'hold_reason', 'latest_attempt_summary', 'requirements_history'] : ['title', 'description'], keyring, job.owner);
     for (const [key, value] of [['acceptance', acceptance], ['inputs', inputs]] as const) if (details && value !== undefined) {
       if (!Array.isArray(value)) throw new Error('Invalid task text list');
       result[key] = await Promise.all(value.map(async body => {
