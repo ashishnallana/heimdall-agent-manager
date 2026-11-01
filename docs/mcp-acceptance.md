@@ -54,6 +54,9 @@ Native reconfiguration creation and advancement acquire the shared SQLite unit
 of work. This prevents an unrelated polling or rejected request from rolling
 back progress written by the autonomous reconciliation thread. The repository
 concurrency regression covers both initial creation and advancement.
+MCP operation polling closes its authorization/receipt transaction before reading
+live native runtime progress. A native integration regression verifies that a
+readiness update observed during polling remains durable.
 
 ## Second physical machine
 

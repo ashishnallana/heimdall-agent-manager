@@ -16,6 +16,31 @@ import project "odin_test:hub/service/project"
 import http "odin_test:hub/transport/http"
 
 MCP_Runtime_Test_Sink :: struct {g:^App_Graph,commands:[dynamic]project.Runtime_Command,fail,revoke,inside_transaction:bool,view:mcp.Access_View}
+MCP_Runtime_Poll_Probe :: struct {g:^App_Graph,original:iface.Agent_Repository,inside_transaction:bool}
+mcp_runtime_poll_probe_get :: proc(ctx:rawptr,id:string)->(domain.Agent_Instance,bool,domain.Domain_Error) {
+	p:=(^MCP_Runtime_Poll_Probe)(ctx)
+	i,found,err:=iface.agent_get_instance(&p.original,id)
+	if !found do return i,found,err
+	uow,ok,_:=iface.unit_of_work_begin(&p.g.uow_factory)
+	if ok {
+		p.inside_transaction=uow.nested
+		i.last_seen_at="2026-10-31T07:00:13Z"
+		_,_,_=iface.agent_save_instance(&p.original,i)
+		_,_=iface.unit_of_work_commit(&uow)
+	}
+	return i,found,err
+}
+mcp_runtime_poll_transaction_test :: proc(t:^testing.T,g:^App_Graph,h:^http.MCP_Control_Handlers,headers:[]contracts.HTTP_Header,id:string)->json.Object {
+	probe:=MCP_Runtime_Poll_Probe{g=g,original=g.repos.agents}
+	repo:=g.repos.agents;repo.ctx=&probe;repo.get_instance=mcp_runtime_poll_probe_get
+	original:=g.agents.agents;g.agents.agents=&repo
+	defer g.agents.agents=original
+	result:=mcp_runtime_test_poll(t,h,headers,"instances.start","runtime_start")
+	testing.expect(t,!probe.inside_transaction,"live native progress reads must run after the MCP authorization transaction closes")
+	persisted,_,_:=iface.agent_get_instance(&g.repos.agents,id)
+	testing.expect(t,persisted.last_seen_at=="2026-10-31T07:00:13Z","polling must not roll back a concurrent native readiness update")
+	return result
+}
 mcp_runtime_test_sink_destroy :: proc(p:^MCP_Runtime_Test_Sink) {
 	context.allocator=runtime.heap_allocator()
 	for cmd in p.commands {delete(cmd.bridge_id);delete(cmd.command_id);delete(cmd.body_json)}
@@ -101,7 +126,7 @@ mcp_runtime_test :: proc(t:^testing.T,g:^App_Graph,h:^http.MCP_Control_Handlers,
 	mcp_task_test_output(t,mcp_runtime_heap_call(h,headers,"instances.start",start));testing.expect_value(t,len(sink.commands),2)
 	start["request_id"]=json.String("runtime_stale");testing.expect(t,strings.contains(mcp_runtime_heap_call(h,headers,"instances.start",start).body,"revision_conflict"))
 	i,_,_=iface.agent_get_instance(&g.repos.agents,string(id));i.runtime_status="running";i.startup_status="ready";_,_,_=iface.agent_save_instance(&g.repos.agents,i)
-	result=mcp_runtime_test_poll(t,h,headers,"instances.start","runtime_start");if result==nil do return;testing.expect(t,result["status"].(json.String)=="completed")
+	result=mcp_runtime_poll_transaction_test(t,g,h,headers,string(id));if result==nil do return;testing.expect(t,result["status"].(json.String)=="completed")
 	// Existing placement task holds a real native lease on B: lifecycle cannot
 	// silently drop it or its checkpoint. Callers must explicitly hold work first.
 	stop_busy:=json.Object{"agent_instance_id"=json.String("inst_placement_b"),"request_id"=json.String("runtime_busy"),"expected_revision"=mcp_runtime_test_revision(g,"inst_placement_b")}

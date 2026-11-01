@@ -43,6 +43,12 @@ mcp_runtime_call :: proc(ctx:rawptr,raw:string,view:mcp.Access_View,tool:string,
 		stored,ok:=sqlite.mcp_receipt_result(&g.db,view.owner,view.grant,lookup_tool,a.request_id);state:MCP_Runtime_State
 		if !ok || json.unmarshal_string(stored,&state,.JSON,context.temp_allocator)!=nil do return "","request_failed"
 		if a.agent_instance_id!="" && a.agent_instance_id!=state.result.agent_instance_id do return "","not_found"
+		// Receipt authorization is a short snapshot. Observe live native progress
+		// only after it closes: leaving a rollback-only read transaction open
+		// can swallow readiness updates on the Hub's shared SQLite connection.
+		finished=true
+		committed,commit_err:=iface.unit_of_work_commit(&uow)
+		if !committed || commit_err.code!=.None do return "","request_failed"
 		return mcp_runtime_poll(g,view,state),""
 	}
 	if tool=="instances.operations" do return "","not_found"
