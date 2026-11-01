@@ -1,4 +1,4 @@
-"""REQ-ENR-4 / F13 / F14: per-OS desktop installers offer App, Bridge, or both;
+"""Windows desktop installation is app-only; Bridge setup is in the app wizard.
 release CI builds the Linux app; macOS and Windows (and the AppImage) self-update."""
 
 from pathlib import Path
@@ -138,40 +138,43 @@ Function .onInit
   !insertmacro customInit
 FunctionEnd
 !insertmacro MUI_PAGE_DIRECTORY
-!insertmacro customPageAfterChangeDir
+!ifmacrodef customPageAfterChangeDir
+  !insertmacro customPageAfterChangeDir
+!endif
 !insertmacro MUI_PAGE_INSTFILES
-!insertmacro customFinishPage
+!ifmacrodef customFinishPage
+  !insertmacro customFinishPage
+!else
+  !insertmacro MUI_PAGE_FINISH
+!endif
 !insertmacro MUI_LANGUAGE "English"
 Section "install"
   SetOutPath $INSTDIR
   StrCpy $launchLink "$INSTDIR\Heimdall.exe"
-  !insertmacro customInstall
+  !ifmacrodef customInstall
+    !insertmacro customInstall
+  !endif
   !insertmacro StartApp
 SectionEnd
 '''
 
 
 class WindowsInstallerTests(unittest.TestCase):
-    def test_components_page_contract(self):
+    def test_windows_installer_is_app_only(self):
         nsh = read('build/installer.nsh')
         config = read('electron-builder.yml')
         self.assertIn('include: build/installer.nsh', config)
-        for label in ('App and Bridge (recommended)', 'App only', 'Bridge only'):
-            self.assertIn(label, nsh)
-        self.assertIn('install.ps1" -Bundle "$INSTDIR\\resources\\bridge\\heimdall-local-windows-amd64.zip"', nsh)
-        self.assertIn('-Interactive', nsh)
-        # Auto-updates (--updated) never re-run Bridge setup or remove the app.
-        self.assertIn('${IfNot} ${isUpdated}', nsh)
+        for removed in ('App and Bridge (recommended)', 'Bridge only', 'HeimdallComponentsPage',
+                        'install.ps1', 'ExecWait', 'nsExec::', 'UAC_AsUser_Call',
+                        '!macro customInstall', '!macro customFinishPage'):
+            self.assertNotIn(removed, nsh)
+        self.assertIn('setup wizard', nsh)
+        # Old unattended requests must fail clearly rather than install the wrong component.
         self.assertIn('/COMPONENTS=', nsh)
-        # Per-machine installs run sections elevated; Bridge setup must go back to the user.
-        self.assertIn('${If} ${UAC_IsInnerInstance}', nsh)
-        self.assertIn('!insertmacro UAC_AsUser_Call Function HeimdallBridgeSetupAsUser '
-                      '${UAC_SYNCREGISTERS}|${UAC_SYNCINSTDIR}', nsh)
-        as_user = nsh.split('Function HeimdallBridgeSetupAsUser', 1)[1].split('FunctionEnd', 1)[0]
-        self.assertIn('-Hub "$1" -Interactive\' $0', as_user)
-        self.assertNotIn('$HeimdallHub', as_user)  # outer instance never ran the page/customInit state
-        # electron-builder's StartApp macro declares Var /GLOBAL startAppArgs and is
-        # already inserted by installSection.nsh: a second insert fails makensis.
+        self.assertIn('$R1 != "app"', nsh)
+        self.assertIn('/HUB=', nsh)
+        self.assertIn('SetErrorLevel 2', nsh)
+        # The builder's ordinary app finish page and update behavior remain in control.
         self.assertNotIn('!insertmacro StartApp', nsh)
 
     @unittest.skipUnless(shutil.which('makensis') or os.environ.get('MAKENSIS'), 'makensis not available')

@@ -10,7 +10,8 @@
 # `ham-bridge update --version`. Self-contained: it makes no assumption about
 # where it was fetched from (install.ninjy.ai, a release asset or main).
 # -Interactive drops --headless so ham-bridge opens the enrollment approval page
-# in a browser; the desktop installer's Bridge component uses it.
+# in a browser for standalone CLI installs. The desktop installer is app-only;
+# desktop Bridge installation and approval run through the in-app setup wizard.
 #
 # Without arguments (the `| iex` form) these environment variables are read:
 #   HEIMDALL_HUB, HEIMDALL_BRIDGE_NAME (profile), HEIMDALL_VERSION.

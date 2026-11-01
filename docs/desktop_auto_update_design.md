@@ -22,7 +22,7 @@ The current desktop loads a Hub-served UI. A newer web UI can meet an older prel
 | `scripts/release/merge-latest-mac.py` | Combines per-architecture `files` entries, checks matching versions and duplicate URLs. Keep this mechanism. |
 | `.github/workflows/release-local-binaries.yml` | macOS ARM64 default, Intel opt-in; Windows x64; Linux amd64/arm64. Builds and uploads updater manifests, ZIPs, NSIS installers and blockmaps. macOS signing/notarization required; Windows signing absent. |
 | `.github/workflows/promote-release.yml` | Candidate promotion clears GitHub prerelease flag and marks Latest without rebuilding. Current completeness check focuses on Bridge bundles and misses desktop manifests/payloads. |
-| `build/installer.nsh` | `--updated` path skips Bridge setup/component choices. Preserve this behavior. |
+| `build/installer.nsh` | Windows installs the app only and rejects obsolete Bridge-component flags. Bridge setup/enrollment runs through the in-app wizard; app installation and updates never launch it. |
 | `src/ui/utils/clientPersistence.ts`, `src/ui/components/workbench/AgentChatPane.tsx` | Per-instance composer drafts are stored synchronously in `updateDraft`, plus effect persistence; helpers currently swallow storage errors. Do not equate this with guaranteed successful flush. |
 | `src/ui/components/mainWorkspace/Workspace.tsx`, `src/ui/store/splitGroups.ts` | Workspace layout/auxiliary panes persist through effects. Drain/flush these before restart. |
 | `AGENTS.md` | Interactive controls require `data-debug-id`; no Electron remote debug server. Tests must be relevant and focused; no full `npm test`. |
