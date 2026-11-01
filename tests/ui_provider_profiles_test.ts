@@ -372,7 +372,9 @@ test('mounted wizard validates identity, environment never reveals stored secret
       await tick();
     });
     await act(tick);
+    assert.ok(q('profiles-list'), 'bridge opens on its provider list');
     await click('profile-add');
+    assert.equal(q('profiles-list'), null, 'editor has no adjacent provider switcher');
     assert.match(q('profile-wizard-step').textContent, /● Provider/);
     await click('profile-next');
     assert.match(q('profile-id').value, /^claude_[a-z2-7]{4}$/);
@@ -411,6 +413,7 @@ test('mounted wizard validates identity, environment never reveals stored secret
     );
     assert.match(q('profile-env-value-0').placeholder, /Stored secret/);
     assert.ok(!dom.window.document.body.innerHTML.includes('secret-after-save'));
+    assert.equal(q('profiles-list'), null, 'saved editor remains full width');
     await click('profile-discover');
     assert.deepEqual(discoveryRequests, [
       { stage: 'providers', providers: ['claude'], profile_id: savedProfile.profile_id },

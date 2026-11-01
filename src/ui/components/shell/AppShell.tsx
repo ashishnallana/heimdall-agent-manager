@@ -390,6 +390,7 @@ function routeBreadcrumbs(path: string, conversations: ConversationSummary[] = [
     const rest = path.slice('/settings/providers/'.length);
     if (rest === 'new') return [{ label: 'Settings', href: '/settings/bridges' }, { label: 'Providers', href: '/settings/providers' }, { label: 'New Provider' }];
     if (rest.endsWith('/edit')) return [{ label: 'Settings', href: '/settings/bridges' }, { label: 'Providers', href: '/settings/providers' }, { label: decodeSegment(rest.slice(0, -'/edit'.length)) }, { label: 'Edit' }];
+    return [{ label: 'Settings', href: '/settings/bridges' }, { label: 'Providers', href: '/settings/providers' }, { label: decodeSegment(rest) }];
   }
   if (path.startsWith('/settings/')) {
     const key = path.slice('/settings/'.length).split('/')[0] || 'bridges';
@@ -1294,6 +1295,8 @@ function RouteOutlet({
           <ProviderEditorPage />
         ) : path.startsWith('/settings/providers/') && path.endsWith('/edit') ? (
           <ProviderEditorPage providerName={decodeSegment(path.slice('/settings/providers/'.length, -'/edit'.length))} />
+        ) : path.startsWith('/settings/providers/') ? (
+          <ProvidersPanel bridgeId={decodeSegment(path.slice('/settings/providers/'.length))} />
         ) : path === '/settings/projects' ? (
           <ProjectsPanel />
         ) : path === '/settings/templates' ? (

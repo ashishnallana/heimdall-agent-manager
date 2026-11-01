@@ -301,7 +301,7 @@ export default function BridgesPanel() {
                           </span>
                         ) : null}
 
-                        <BridgeNoProvidersBadge bridge={bridge} id={id} /><a data-debug-id={`settings-bridge-profiles-${id}`} className="text-xs text-accent underline" href={`#/settings/providers?bridge=${encodeURIComponent(id)}`}>Provider profiles</a>
+                        <BridgeNoProvidersBadge bridge={bridge} id={id} /><a data-debug-id={`settings-bridge-profiles-${id}`} className="text-xs text-accent underline" href={`#/settings/providers/${encodeURIComponent(id)}`}>Provider profiles</a>
                       </div>
                       <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-caption text-muted">
                         <span>status: <span data-debug-id={`settings-bridge-status-label-${id}`} className="text-primary">{statusLabel(bridge)}</span></span>
@@ -535,7 +535,7 @@ function BridgeNoProvidersBadge({ bridge, id }: { bridge: Bridge; id: string }) 
   if (!loaded || capabilities.length > 0) return null;
   return (
     <a
-      href={`#settings/providers?bridge=${encodeURIComponent(id)}`}
+      href={`#/settings/providers/${encodeURIComponent(id)}`}
       data-debug-id={`settings-bridge-no-providers-${id}`}
       className="inline-flex items-center gap-1 rounded-full border border-subtle bg-surface-raised/40 px-2 py-0.5 text-[10px] text-muted hover:border-accent hover:text-accent transition-colors whitespace-nowrap"
     >

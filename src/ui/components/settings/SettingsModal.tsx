@@ -46,9 +46,9 @@ export const SETTINGS_CATEGORIES: SettingsCategory[] = [
   },
   {
     id: 'models',
-    label: 'Models',
-    title: 'Models & Providers',
-    description: 'Configure AI model providers, API endpoints, tokens, and active reasoning models.',
+    label: 'Providers',
+    title: 'Providers',
+    description: 'Manage provider profiles and runtime settings on each bridge.',
   },
   {
     id: 'bridges',
@@ -183,6 +183,13 @@ export function SettingsModal({
     };
   }, [activeTab, categories]);
 
+  const providerTab = normalizeSettingsTab(activeTab) === 'models';
+  const selectCategory = (id: string) => {
+    setActiveTab(id);
+    setMobileSection(id);
+    if (normalizeSettingsTab(id) === 'models') window.location.hash = '#/settings/providers';
+  };
+
   if (!open) return null;
 
   function renderTabContent(tabId: string) {
@@ -253,11 +260,13 @@ export function SettingsModal({
         {/* =============================================================== */}
         {/* 2. Desktop / Tablet 2-Pane Layout (md:flex)                     */}
         {/* =============================================================== */}
-        <div className="hidden md:flex flex-row w-full h-full overflow-hidden">
+        {/* Providers use one mounted content tree across breakpoints so resizing
+            never discards a draft or duplicates discovery requests. */}
+        <div className={`${providerTab && mobileSection !== null ? 'flex' : 'hidden md:flex'} flex-row w-full h-full overflow-hidden`}>
           {/* Left Navigation Pane (w-64 border-r border-subtle bg-surface-raised/40) */}
           <aside
             data-debug-id="settings-desktop-sidebar"
-            className="w-64 border-r border-subtle flex flex-col bg-surface-raised/40 shrink-0 h-full overflow-hidden"
+            className="hidden md:flex w-64 border-r border-subtle flex-col bg-surface-raised/40 shrink-0 h-full overflow-hidden"
             aria-label="Settings sidebar"
           >
             {/* Header: Settings */}
@@ -278,7 +287,7 @@ export function SettingsModal({
                       key={category.id}
                       type="button"
                       data-debug-id={`settings-nav-item-${category.id}`}
-                      onClick={() => setActiveTab(category.id)}
+                      onClick={() => selectCategory(category.id)}
                       className={`w-full flex items-center px-3 py-1.5 rounded-lg text-sm text-left transition-colors ${
                         isActive
                           ? 'bg-surface-raised text-primary font-medium shadow-sm'
@@ -330,18 +339,23 @@ export function SettingsModal({
           {/* Right Content Pane (flex-1 flex flex-col overflow-hidden bg-surface) */}
           <main
             data-debug-id="settings-desktop-content"
-            className="flex-1 flex flex-col overflow-hidden bg-surface h-full"
+            className="min-w-0 flex-1 flex flex-col overflow-hidden bg-surface h-full"
           >
             {/* Header: title, description, and Close button (X) */}
-            <div className="flex items-start justify-between px-8 pt-7 pb-4 shrink-0">
+            <div className="flex items-start justify-between px-4 md:px-8 pt-4 md:pt-7 pb-4 shrink-0">
+              {providerTab ? <button type="button" data-debug-id="providers-settings-back" onClick={() => setMobileSection(null)} className="mr-3 inline-flex min-h-11 items-center rounded-[var(--radius-md)] px-2 text-sm text-accent focus-visible:outline-none focus-visible:shadow-focus md:hidden">← Settings</button> : null}
               <div className="min-w-0 flex-1">
-                <h2 className="text-xl font-semibold text-primary tracking-tight">
-                  {currentTabInfo.title}
-                </h2>
-                {currentTabInfo.description && (
-                  <p className="mt-1 text-sm text-muted">
-                    {currentTabInfo.description}
-                  </p>
+                {providerTab ? <span className="text-xs text-muted">Settings / Providers</span> : (
+                  <>
+                    <h2 className="text-xl font-semibold text-primary tracking-tight">
+                      {currentTabInfo.title}
+                    </h2>
+                    {currentTabInfo.description && (
+                      <p className="mt-1 text-sm text-muted">
+                        {currentTabInfo.description}
+                      </p>
+                    )}
+                  </>
                 )}
               </div>
               <button
@@ -357,7 +371,7 @@ export function SettingsModal({
             </div>
 
             {/* Body: scrollable container rendering the active tab content */}
-            <div className="flex-1 overflow-y-auto px-8 pb-8 pt-2">
+            <div className="min-w-0 flex-1 overflow-y-auto px-4 md:px-8 pb-8 pt-2">
               {renderTabContent(activeTab)}
             </div>
           </main>
@@ -366,7 +380,7 @@ export function SettingsModal({
         {/* =============================================================== */}
         {/* 3. Mobile Presentation (<768px): Full viewport Master-Detail    */}
         {/* =============================================================== */}
-        <div className="flex md:hidden flex-col w-full h-full overflow-hidden">
+        <div className={`${providerTab && mobileSection !== null ? 'hidden' : 'flex md:hidden'} flex-col w-full h-full overflow-hidden`}>
           {mobileSection === null ? (
             /* Master View: Full-screen list of all categories and projects */
             <div
@@ -397,8 +411,7 @@ export function SettingsModal({
                       type="button"
                       data-debug-id={`mobile-nav-item-${category.id}`}
                       onClick={() => {
-                        setActiveTab(category.id);
-                        setMobileSection(category.id);
+                        selectCategory(category.id);
                       }}
                       className="flex min-h-[44px] w-full items-center justify-between rounded-xl px-3 py-2.5 text-left text-sm font-medium text-primary hover:bg-surface-raised active:bg-surface-raised transition-colors"
                     >
@@ -467,7 +480,7 @@ export function SettingsModal({
 
               {/* Detail Content Body */}
               <div className="flex-1 overflow-y-auto p-4">
-                {renderTabContent(mobileSection)}
+                {normalizeSettingsTab(mobileSection) !== 'models' ? renderTabContent(mobileSection) : null}
               </div>
             </div>
           )}
