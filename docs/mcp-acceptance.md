@@ -50,6 +50,10 @@ does not establish that arbitrary stopped provider sessions can resume.
 
 An optional `HEIMDALL_E2E_MOVE_MODEL` requests a real native model reconfiguration
 and requires its operation to reach completion; acceptance alone is insufficient.
+Native reconfiguration creation and advancement acquire the shared SQLite unit
+of work. This prevents an unrelated polling or rejected request from rolling
+back progress written by the autonomous reconciliation thread. The repository
+concurrency regression covers both initial creation and advancement.
 
 ## Second physical machine
 

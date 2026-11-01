@@ -3,6 +3,7 @@ package sqlite
 import "core:encoding/json"
 import "core:strings"
 import domain "odin_test:hub/domain"
+import iface "odin_test:hub/repository/iface"
 
 instance_reconfiguration_decode :: proc(stmt: sqlite3_stmt) -> (domain.Instance_Reconfiguration, bool, domain.Domain_Error) {
 	raw := column_text(stmt, 0)
@@ -24,6 +25,34 @@ instance_reconfiguration_get_sqlite :: proc(ctx: rawptr, owner, instance_id, key
 }
 
 instance_reconfiguration_begin_sqlite :: proc(ctx: rawptr, op: domain.Instance_Reconfiguration) -> (domain.Instance_Reconfiguration, bool, domain.Domain_Error) {
+	return instance_reconfiguration_write_sqlite(ctx, op, 0, true)
+}
+
+instance_reconfiguration_advance_sqlite :: proc(ctx: rawptr, op: domain.Instance_Reconfiguration, expected_revision: int) -> (domain.Instance_Reconfiguration, bool, domain.Domain_Error) {
+	return instance_reconfiguration_write_sqlite(ctx, op, expected_revision, false)
+}
+
+// Reconciliation also runs outside HTTP units of work. Serialize these writes
+// with the shared connection's transaction owner, otherwise a concurrent MCP
+// read/rejected request can observe and then roll back native move progress.
+instance_reconfiguration_write_sqlite :: proc(ctx: rawptr, op: domain.Instance_Reconfiguration, expected_revision: int, initial: bool) -> (domain.Instance_Reconfiguration, bool, domain.Domain_Error) {
+	impl := (^Agent_Repo_SQLite)(ctx)
+	factory := SQLite_Unit_Of_Work_Factory{conn=impl.conn}
+	uow, begun, err := sqlite_uow_begin(&factory)
+	if !begun do return {}, false, err
+	finished := false
+	defer if !finished do iface.unit_of_work_rollback(&uow)
+	stored: domain.Instance_Reconfiguration
+	ok: bool
+	if initial {stored,ok,err=instance_reconfiguration_begin_impl(ctx,op)} else {stored,ok,err=instance_reconfiguration_advance_impl(ctx,op,expected_revision)}
+	if !ok do return {},false,err
+	finished=true // COMMIT consumes the UOW even when it fails.
+	committed, commit_err := iface.unit_of_work_commit(&uow)
+	if !committed {domain.instance_reconfiguration_destroy(&stored);return {},false,commit_err}
+	return stored,true,{}
+}
+
+instance_reconfiguration_begin_impl :: proc(ctx: rawptr, op: domain.Instance_Reconfiguration) -> (domain.Instance_Reconfiguration, bool, domain.Domain_Error) {
 	impl := (^Agent_Repo_SQLite)(ctx)
 	if op.operation_id == "" || op.idempotency_key == "" || len(op.idempotency_key) > 128 || op.phase != .Prepared || op.revision != 1 || op.source_stopped || op.destination_committed {
 		return {}, false, domain.domain_error(.Validation_Failed, "invalid initial reconfiguration")
@@ -55,7 +84,7 @@ instance_reconfiguration_begin_sqlite :: proc(ctx: rawptr, op: domain.Instance_R
 	return instance_reconfiguration_decode(stmt)
 }
 
-instance_reconfiguration_advance_sqlite :: proc(ctx: rawptr, op: domain.Instance_Reconfiguration, expected_revision: int) -> (domain.Instance_Reconfiguration, bool, domain.Domain_Error) {
+instance_reconfiguration_advance_impl :: proc(ctx: rawptr, op: domain.Instance_Reconfiguration, expected_revision: int) -> (domain.Instance_Reconfiguration, bool, domain.Domain_Error) {
 	impl := (^Agent_Repo_SQLite)(ctx)
 	old, found, err := instance_reconfiguration_get_sqlite(ctx, op.owner_user_id, op.agent_instance_id, op.idempotency_key)
 	if !found do return {}, false, err
