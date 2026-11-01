@@ -8,11 +8,14 @@ mcp_resource_refs :: proc(ctx:rawptr,q:iface.Resource_Page_Query)->([]iface.Reso
 	conn:=(^Conn)(ctx)
 	if q.limit<1 || q.limit>101 do return nil,domain.domain_error(.Validation_Failed,"invalid resource page limit")
 	table,id:string
-	switch q.kind {case "memory":table="memories";id="memory_id";case "project":table="projects";id="project_id";case "issue":table="issues";id="issue_id";case "issue_comment":table="issue_comments";id="comment_id";case:return nil,domain.domain_error(.Validation_Failed,"unknown resource")}
+	switch q.kind {case "artifact":table="artifacts";id="artifact_id";case "memory":table="memories";id="memory_id";case "project":table="projects";id="project_id";case "issue":table="issues";id="issue_id";case "issue_comment":table="issue_comments";id="comment_id";case:return nil,domain.domain_error(.Validation_Failed,"unknown resource")}
 	owner_clause:="owner_user_id=?";if q.kind=="memory" do owner_clause="(owner_user_id=? OR owner_user_id='system')"
 	query:=strings.concatenate({"SELECT ",id,",created_at FROM ",table," WHERE ",owner_clause," AND (created_at>? OR (created_at=? AND ",id,">?))"},context.temp_allocator)
 	values:=make([dynamic]string,context.temp_allocator);append(&values,q.owner,q.after_created,q.after_created,q.after_id)
-	if q.kind=="memory" {
+	if q.kind=="artifact" {
+		query=strings.concatenate({query," AND COALESCE(deleted_at,'')='' AND (?='' OR project_id=?) AND (?='' OR chain_id=?) AND (?='' OR task_id=?) AND (?='' OR agent_id=?) AND (?='' OR agent_instance_id=?)"},context.temp_allocator)
+		append(&values,q.project_id,q.project_id,q.chain_id,q.chain_id,q.task_id,q.task_id,q.agent_id,q.agent_id,q.agent_instance_id,q.agent_instance_id)
+	} else if q.kind=="memory" {
 		query=strings.concatenate({query," AND (?='' OR status=?) AND (?='' OR type=?)"},context.temp_allocator);append(&values,q.status,q.status,q.type,q.type)
 		for field,i in ([]string{"agent_ids","project_ids","bridge_ids","template_ids"}) {
 			filter:=q.agent_id;if i==1 do filter=q.project_id;if i==2 do filter=q.bridge_id;if i==3 do filter=q.template_id

@@ -37,14 +37,16 @@ mcp_mutate_resource :: proc(ctx:rawptr,raw:string,view:mcp.Access_View,command:m
 		if command.tool=="memories.archive" && mcp.resource_text(current,"status")=="archived" {id=a.id;state="archived";changed=false} else {id,state,code=mcp_resource_memory(g,view,command)}
 	case "project":
 		if command.tool=="projects.archive" && mcp.resource_text(current,"state")=="archived" {id=a.id;state="archived";changed=false} else {id,state,code=mcp_resource_project(g,view,command)}
+	case "artifact":id,state,code=mcp_resource_artifact(g,view,command)
 	case "issue":id,state,comment_id,code=mcp_resource_issue(g,view,command)
 	case:return "","invalid_arguments"
 	}
 	if code!="" do return "",code
-	prefix:="mem_";if kind=="project" do prefix="proj_";if kind=="issue" do prefix="iss_"
+	prefix:="mem_";if kind=="project" do prefix="proj_";if kind=="issue" do prefix="iss_";if kind=="artifact" do prefix="art_"
 	if !strings.has_prefix(id,prefix) || len(id)<=len(prefix) do return "","request_failed"
-	if command.tool!="issues.delete" {_,rev,e:=mcp.resource_get(&control,view.owner,kind,id,false);if e!="" do return "",e;revision=rev}
+	if command.tool!="issues.delete" && command.tool!="artifacts.delete" {_,rev,e:=mcp.resource_get(&control,view.owner,kind,id,false);if e!="" do return "",e;revision=rev}
 	result:=mcp.Resource_Result{resource_id=id,kind=kind,state=state,revision=revision,comment_id=comment_id,status="completed" if changed else "noop",changed=changed}
+	if kind=="artifact" do result.link=strings.concatenate({"artifact://",id},context.temp_allocator)
 	encoded,eerr:=json.marshal(result,allocator=context.temp_allocator);if eerr!=nil do return "","request_failed"
 	if perr:=sqlite.mcp_receipt_put(&g.db,view.owner,view.grant,command.tool,a.request_id,command.digest,id,string(encoded));perr.code!=.None do return "","request_failed"
 	if kind=="memory" && changed && g.content.attention!=nil {

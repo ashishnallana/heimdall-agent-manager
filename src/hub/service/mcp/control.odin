@@ -119,6 +119,7 @@ control_record_matches :: proc(expected,actual:json.Object,kind:Hosted_Record_Ki
 			for item in items do if _,string_item:=item.(json.String);!string_item do return false
 		} else if is_text {
 			text,ok:=value.(json.String);if !ok do return false
+			if kind==.Artifact && key=="content" && (len(text)>65536 || strings.contains(string(text),"\x00")) do return false
 			if kind==.Issue && key=="description" {if limit,typed:=expected["description_limit"].(json.Integer);typed && limit==512 && len(text)>512 do return false}
 		} else if !tc.json_values_equal(expected[key],value) do return false
 	}

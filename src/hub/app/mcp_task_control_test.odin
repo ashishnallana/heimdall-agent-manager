@@ -94,7 +94,7 @@ test_mcp_resource_native_lifecycle_approval_paging_and_retries :: proc(t:^testin
 	mcp_task_test_fixture(t,#load("../../../tests/fixtures/mcp_resources_v2.json",string),true,false,true)
 }
 
-mcp_task_test_fixture :: proc(t:^testing.T,vector:string,catalog:bool,runtime:bool=false,resources:bool=false) {
+mcp_task_test_fixture :: proc(t:^testing.T,vector:string,catalog:bool,runtime:bool=false,resources:bool=false,artifacts:bool=false) {
 	context.allocator=context.temp_allocator
 	g:=new(App_Graph,context.temp_allocator)
 	v:MCP_Task_Test_Vector
@@ -178,6 +178,7 @@ mcp_task_test_fixture :: proc(t:^testing.T,vector:string,catalog:bool,runtime:bo
 	if catalog {
 		mcp_task_test_placement(t,g,&h,headers,view)
 		h.control.agents=&g.agents;h.control.bridges=&g.repos.bridges;h.control.providers=&g.providers;h.mutate_catalog=mcp_mutate_catalog
+		if artifacts {mcp_artifact_test(t,g,&h,headers,view,var_tokens.access_token);return}
 		if resources {mcp_resource_test(t,g,&h,headers,view,var_tokens.access_token);return}
 		if runtime {h.runtime=mcp_runtime_call;mcp_runtime_test(t,g,&h,headers,view,var_tokens.access_token);return}
 		mcp_catalog_test(t,g,&h,headers,view,var_tokens.access_token)

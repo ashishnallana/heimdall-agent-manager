@@ -21,7 +21,7 @@ export async function mcpJobDigest(j: McpWorkerJob): Promise<string> {
 }
 export function mcpJobScopeAllowed(scope: string, tool: string | undefined, operation: string): boolean {
   if (!validMcpScopes(scope)) return false;
-  for (const [resource, tools] of Object.entries({ memories: ['create', 'update'], projects: ['create', 'update'], issues: ['create', 'update', 'comment'] })) {
+  for (const [resource, tools] of Object.entries({ artifacts: ['create', 'update'], memories: ['create', 'update'], projects: ['create', 'update'], issues: ['create', 'update', 'comment'] })) {
     if (tools.some(action => tool === `${resource}.${action}`)) return operation === 'seal_resource' && scope.split(' ').includes(`mcp:${resource}:write`);
     if ([`${resource}.list`, `${resource}.get`].includes(tool || '')) return operation === 'read' && scope.split(' ').includes(`mcp:${resource}:read`);
   }
@@ -137,6 +137,10 @@ export async function transformMcpWorkerJob(job: McpWorkerJob, keyring: VaultKey
     out.records = await Promise.all((input.records || []).map(async (record: Record<string, unknown>) => {
       const source = expectedKind === 'provider' ? { ...record, models: undefined } : expectedKind === 'issue' ? { ...record, comments: undefined } : record;
       const row = await readable(source, spec.fields, spec.text, keyring, job.owner, expectedKind === 'memory');
+      if (expectedKind === 'artifact' && row.content !== undefined) {
+        const mime = String(row.mime || row.content_type || '').split(';', 1)[0].trim().toLowerCase();
+        if (!['text/plain', 'text/markdown', 'application/json'].includes(mime) || typeof row.content !== 'string' || new TextEncoder().encode(row.content).length > 65536 || row.content.includes('\0')) throw new Error('Invalid or oversized artifact text');
+      }
       if (expectedKind === 'issue' && record.description_limit !== undefined) {
         if (record.description_limit !== 512) throw new Error('Invalid issue preview limit');
         if (typeof row.description === 'string') {

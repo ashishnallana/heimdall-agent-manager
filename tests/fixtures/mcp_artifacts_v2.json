@@ -1,0 +1,60 @@
+{
+  "synthetic_fixture": true,
+  "now_ms": 1793430000000,
+  "request": {
+    "owner": "usr_mcp_task_fixture",
+    "client": "client-task-fixture",
+    "redirect": "https://client.example/callback",
+    "resource": "https://hub.example/api/v1/mcp",
+    "scope": "mcp:chains mcp:tasks:read mcp:tasks:write mcp:agents:read mcp:agents:write mcp:instances:read mcp:instances:control mcp:memories:read mcp:memories:write mcp:projects:read mcp:projects:write mcp:issues:read mcp:issues:write mcp:artifacts:read mcp:artifacts:write",
+    "grant": "grant-task-fixture",
+    "family": "family-task-fixture",
+    "revision": 1,
+    "expires_ms": 1793430300000
+  },
+  "directory": {
+    "version": 1,
+    "current_epoch": 1,
+    "root_device_id": "dev_7fb1400941571d0036b48e4abb49cf64",
+    "head_hash": "1ba060c9af95defcdb6d2fbb721e60884a8c920e365007fc6b16873ae02e2c94",
+    "log": [
+      {
+        "seq": 1,
+        "statement": "heimdall-vault-statement/v2\ntype=genesis\nuser_id=usr_mcp_task_fixture\nseq=1\nprev_hash=\nissuer_device_id=dev_7fb1400941571d0036b48e4abb49cf64\nissued_at_ms=1793513665111\nsubject_device_id=dev_7fb1400941571d0036b48e4abb49cf64\nsubject_kind=browser\nsubject_sign_pub=04459a68681467f8fad0dc1e92823437974bcfa954fc26b1d53c75617c3065931e5f627eadf0c57c291c999c00103d3e79d921eab8f1b39a17dfd7c9a490d09ebd\nsubject_ecdh_pub=045038f09756ce7b79ba6458e6e23e9408fbcbe0cf4967475edcf9b40bdf425ab3751344b567643227af7d8e260fc3939eb88fba5004594f17461b313d251abeeb\nsubject_sign_alg=ecdsa-p256-sha256\nsubject_wrap_alg=ecdh-p256-hkdf-sha256-aes256gcm\nsubject_label_b64=Um9vdCBicm93c2Vy\nepoch=1\nepoch_commit=5b9cce3725fcd61cc2fb989403e18f3398ebbef838028fc37199f79ecdfa47ac\nwrap_sha256=673358bc83263737362ed590a13af9e5975a8db6ed4711bc9665fd23507df7ba",
+        "signature": {
+          "alg": "ecdsa-p256-sha256",
+          "sig": "80a8297aff18aecc2c8f6809f7ca0b91f59c62752b696002d09d0cad8fedd8028181c69f733f038993bd89e28e6f89ac33ecb8267c9db58ffdc1638de82a7fb0"
+        }
+      }
+    ],
+    "devices": [
+      {
+        "device_id": "dev_7fb1400941571d0036b48e4abb49cf64",
+        "kind": "browser",
+        "label": "Root browser",
+        "fingerprint": "8fd7 c2fe 9634 e7c7",
+        "status": "approved",
+        "sign_alg": "ecdsa-p256-sha256",
+        "wrap_alg": "ecdh-p256-hkdf-sha256-aes256gcm",
+        "sign_public_key": "04459a68681467f8fad0dc1e92823437974bcfa954fc26b1d53c75617c3065931e5f627eadf0c57c291c999c00103d3e79d921eab8f1b39a17dfd7c9a490d09ebd",
+        "ecdh_public_key": "045038f09756ce7b79ba6458e6e23e9408fbcbe0cf4967475edcf9b40bdf425ab3751344b567643227af7d8e260fc3939eb88fba5004594f17461b313d251abeeb"
+      }
+    ],
+    "retired_hints": [],
+    "reset": null
+  },
+  "hosted": {
+    "request": "ticket-task-fixture",
+    "consent": "{\"v\":2,\"owner\":\"usr_mcp_task_fixture\",\"vault_id\":\"7fb1400941571d00\",\"client\":\"client-task-fixture\",\"resource\":\"https://hub.example/api/v1/mcp\",\"scope\":\"mcp:chains mcp:tasks:read mcp:tasks:write mcp:agents:read mcp:agents:write mcp:instances:read mcp:instances:control mcp:memories:read mcp:memories:write mcp:projects:read mcp:projects:write mcp:issues:read mcp:issues:write mcp:artifacts:read mcp:artifacts:write\",\"grant\":\"grant-task-fixture\",\"family\":\"family-task-fixture\",\"revision\":1,\"mode\":\"hosted\",\"recipient\":\"mcp_f8fc46d8-75ca-4399-8b81-bbce5a0169c4\",\"recipient_public_key\":\"04af3584f92982155c1eb73bacdefa0dc98e10a8adbb1d93f3415cbf91fe47a4fc53c8456ba7cbd68a9619aec252f5aec22e9bd7702fe4bbf6aa62c301415e5973\",\"approver\":\"dev_7fb1400941571d0036b48e4abb49cf64\",\"directory_version\":1,\"directory_head\":\"1ba060c9af95defcdb6d2fbb721e60884a8c920e365007fc6b16873ae02e2c94\",\"epoch\":1,\"issued_ms\":1793430000000,\"wrap_sha256\":\"f6db230c8043c86af1f11715fe18236c5e9648c7158b32178e219b718c06a83f\"}",
+    "signature": "{\"alg\":\"ecdsa-p256-sha256\",\"sig\":\"328b296b1aedc9973a8d8072993daa64e14cc5cbd56525b3e238c179e619323eed38d9e65c57ebf0243df4737b28194b97300122d84b06493ea3b6e81d92b495\"}",
+    "wrap_json": "{\"v\":1,\"alg\":\"ecdh-p256-hkdf-sha256-aes256gcm\",\"recipient_device_id\":\"mcp_f8fc46d8-75ca-4399-8b81-bbce5a0169c4\",\"directory_version\":1,\"current_epoch\":1,\"ephemeral_public_key\":\"04dedf08779c2f3d43833e12314f2f0ebb97bf04357d24c5a0f77b0ac9120eab3cba6420afb5d4735f107ad6a70ec1352ce4d35288510b462931273965dad87062\",\"iv\":\"67815f70ea8ef841c5f11ba1\",\"ciphertext\":\"252a86642acada406e9aa6a0e90dc4b81fe8a175a5af51d143d241d35bd28e2874a5941368eedd9957e6a05037b24ee553f75e3c91b360c67b8bb35865839b452522bdb8fa4a1dc3214202a48f353f6bad7b97f8dc10c6502d3dc33a\",\"wrapped_by_device_id\":\"dev_7fb1400941571d0036b48e4abb49cf64\",\"signature\":{\"alg\":\"ecdsa-p256-sha256\",\"sig\":\"0b946f6cd002719a9e7ef0b162c6fc1f867ecb2a21d02c7b2225885c13a7a740c487a30185c8a486479d05e4ee24914a5465d4f77ecc6470c246f023b89af920\"}}",
+    "private_capability": "6767b72cf807eb23bf42a2416e517d71263370ed68a42e03ab29b606fc0cd215"
+  },
+  "device": {
+    "request": "ticket-task-fixture",
+    "consent": "{\"v\":2,\"owner\":\"usr_mcp_task_fixture\",\"vault_id\":\"7fb1400941571d00\",\"client\":\"client-task-fixture\",\"resource\":\"https://hub.example/api/v1/mcp\",\"scope\":\"mcp:chains mcp:tasks:read mcp:tasks:write mcp:agents:read mcp:agents:write mcp:instances:read mcp:instances:control mcp:memories:read mcp:memories:write mcp:projects:read mcp:projects:write mcp:issues:read mcp:issues:write mcp:artifacts:read mcp:artifacts:write\",\"grant\":\"grant-task-fixture\",\"family\":\"family-task-fixture\",\"revision\":1,\"mode\":\"device\",\"recipient\":\"\",\"recipient_public_key\":\"\",\"approver\":\"dev_7fb1400941571d0036b48e4abb49cf64\",\"directory_version\":1,\"directory_head\":\"1ba060c9af95defcdb6d2fbb721e60884a8c920e365007fc6b16873ae02e2c94\",\"epoch\":1,\"issued_ms\":1793430000000,\"wrap_sha256\":\"\"}",
+    "signature": "{\"alg\":\"ecdsa-p256-sha256\",\"sig\":\"0f10ce077912875f7cf32b7ca3bc4376b9744f56974a61d9e078eee7f3d361b792e9209cb2ba0965ece792781522896e510cc6bf8b96534e93b161fca63f58b5\"}",
+    "wrap_json": "",
+    "private_capability": ""
+  }
+}

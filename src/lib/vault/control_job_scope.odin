@@ -5,6 +5,8 @@ control_job_scope_ok :: proc(scope,tool,operation:string)->bool {
 	if !control_scopes_valid(scope) do return false
 	if tool=="" do return operation=="read" || operation=="seal"
 	switch tool {
+	case "artifacts.list","artifacts.get":return operation=="read" && control_scope_has(scope,"mcp:artifacts:read")
+	case "artifacts.create","artifacts.update":return operation=="seal_resource" && control_scope_has(scope,"mcp:artifacts:write")
 	case "memories.list","memories.get":return operation=="read" && control_scope_has(scope,"mcp:memories:read")
 	case "projects.list","projects.get":return operation=="read" && control_scope_has(scope,"mcp:projects:read")
 	case "issues.list","issues.get":return operation=="read" && control_scope_has(scope,"mcp:issues:read")

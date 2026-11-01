@@ -7,6 +7,7 @@ import "core:encoding/json"
 @(test)
 test_resource_scopes_never_imply_read_write_or_approval :: proc(t:^testing.T) {
 	for resource in ([]struct {read_scope,write_scope:string,reads,writes:[]string}{
+		{"mcp:chains mcp:artifacts:read","mcp:chains mcp:artifacts:write",([]string{"artifacts.list","artifacts.get"}),([]string{"artifacts.create","artifacts.update","artifacts.delete"})},
 		{"mcp:chains mcp:memories:read","mcp:chains mcp:memories:write",([]string{"memories.list","memories.get"}),([]string{"memories.create","memories.update","memories.archive"})},
 		{"mcp:chains mcp:projects:read","mcp:chains mcp:projects:write",([]string{"projects.list","projects.get"}),([]string{"projects.create","projects.update","projects.archive"})},
 		{"mcp:chains mcp:issues:read","mcp:chains mcp:issues:write",([]string{"issues.list","issues.get"}),([]string{"issues.create","issues.update","issues.delete","issues.comment"})},

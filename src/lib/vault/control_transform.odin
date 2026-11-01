@@ -42,7 +42,7 @@ control_text :: proc(kr:^Vault_Keyring,text:string)->(string,bool) {
 	return strings.to_string(b),true
 }
 
-Control_Record_Kind :: enum {Chain,Task,Comment,Task_Detail,Agent,Instance,Bridge,Provider,Memory,Project,Issue,Issue_Comment}
+Control_Record_Kind :: enum {Chain,Task,Comment,Task_Detail,Agent,Instance,Bridge,Provider,Memory,Project,Issue,Issue_Comment,Artifact}
 // Return a request-owned JSON encoding. Callers must wipe it after forwarding or
 // on any discarded-result path; never cache it. Input metadata is not mutated.
 control_record_json :: proc(kr:^Vault_Keyring,kind:Control_Record_Kind,record:json.Object)->(string,bool) {
@@ -71,6 +71,12 @@ control_record_json :: proc(kr:^Vault_Keyring,kind:Control_Record_Kind,record:js
 		plain,ok:=control_text(kr,string(text))
 		if !ok do return "",false
 		append(&opened,plain);out[key]=json.String(plain)
+	}
+	if kind==.Artifact {
+		if value,present:=out["content"];present {
+			text,typed:=value.(json.String)
+			if !typed || !control_artifact_type_ok(out) || !utf8.valid_string(string(text)) || len(text)>65536 || strings.contains(string(text),"\x00") do return "",false
+		}
 	}
 	if kind==.Task_Detail {
 		for key in ([]string{"acceptance","inputs"}) do if value,present:=out[key];present {

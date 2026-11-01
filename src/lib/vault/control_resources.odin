@@ -2,6 +2,18 @@ package vault
 
 import "core:encoding/json"
 import "core:strings"
+import "core:unicode/utf8"
+
+CONTROL_FIELDS_ARTIFACT := [?]string{"artifact_id","name","description","kind","content_type","mime","ext","size_bytes","stored_bytes","agent_id","agent_instance_id","chain_id","task_id","project_id","link","created_at","updated_at","revision","content","content_error"}
+CONTROL_TEXT_ARTIFACT := [?]string{"name","description","content"}
+CONTROL_SEAL_ARTIFACT_METADATA := [?]string{"name","description"}
+
+control_artifact_type_ok :: proc(fields:json.Object)->bool {
+	value,_:=fields["mime"].(json.String);if value=="" do value,_=fields["content_type"].(json.String)
+	text:=string(value);if i:=strings.index(text,";");i>=0 do text=text[:i]
+	text=strings.to_lower(strings.trim_space(text),context.temp_allocator)
+	return text=="text/plain" || text=="text/markdown" || text=="application/json"
+}
 
 CONTROL_FIELDS_MEMORY := [?]string{"memory_id","read_only","title","description","body","evidence","title_error","description_error","body_error","evidence_error","type","status","expires_at","agent_ids","project_ids","bridge_ids","template_ids","proposed_by_instance_id","proposed_in_chain_id","created_at","updated_at","revision"}
 CONTROL_TEXT_MEMORY := [?]string{"title","description","body","evidence"}
@@ -16,6 +28,8 @@ CONTROL_SEAL_ISSUE_COMMENT := [?]string{"body"}
 
 control_resource_limits :: proc(tool:string)->(kind:string,keys:[]string) {
 	switch tool {
+	case "artifacts.create":return "artifact",CONTROL_TEXT_ARTIFACT[:]
+	case "artifacts.update":return "artifact",CONTROL_SEAL_ARTIFACT_METADATA[:]
 	case "memories.create","memories.update":return "memory",CONTROL_TEXT_MEMORY[:]
 	case "projects.create","projects.update":return "project",CONTROL_SEAL_PROJECT[:]
 	case "issues.create","issues.update":return "issue",CONTROL_TEXT_ISSUE[:]
@@ -31,7 +45,8 @@ control_seal_resource_fields :: proc(kr:^Vault_Keyring,tool:string,fields:json.O
 		known:=false;for allowed in keys do if key==allowed do known=true
 		text,typed:=value.(json.String);if !known || !typed do return "",false
 		cap:=20000;if key=="title" || key=="name" do cap=500;if kind=="memory" && key=="body" do cap=65536
-		if len(text)>cap || (key=="name" || key=="title" || key=="body") && strings.trim_space(string(text))=="" do return "",false
+		if kind=="artifact" && key=="content" do cap=65536
+		if !utf8.valid_string(string(text)) || strings.contains(string(text),"\x00") || len(text)>cap || (key=="name" || key=="title" || key=="body") && strings.trim_space(string(text))=="" do return "",false
 		token,ok:=seal_string(string(text),kr,context.temp_allocator);if !ok do return "",false
 		out[key]=json.String(token)
 	}

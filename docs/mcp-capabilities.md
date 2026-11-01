@@ -12,8 +12,8 @@ The catalog is filtered by the connection's signed permissions. Task read adds
 adds `instances.list/get/operations`, `bridges.list` and `providers.list`.
 Instance control adds `instances.create/start/stop/reconfigure`. Memory and project
 read add `list/get`; their writes add `create/update/archive`. Issue read adds
-`list/get`; issue write adds `create/update/delete/comment`. Artifact permissions
-remain a foundation for the next increment and expose no tools yet.
+`list/get`; issue write adds `create/update/delete/comment`. Artifact read adds
+`artifacts.list/get`; artifact write adds `artifacts.create/update/delete`.
 
 The optional scopes are `mcp:<resource>:read` and `mcp:<resource>:write` for tasks,
 agents, memories, projects, issues and artifacts. Runtime sessions use
@@ -40,6 +40,68 @@ an explicit token-endpoint scope must match the existing credential after
 canonicalization. Narrowing or broadening a family requires fresh consent rather
 than silently changing that family's rights. Revocation and current-directory
 checks remain in force. Device versus hosted decryption is an independent choice.
+
+## Artifact content and task results
+
+Artifact tools use native artifact records and stable `artifact://art_…` links.
+`artifacts.create` accepts `name`, optional `description`, `content` and an exact
+`content_type`: `text/plain`, `text/markdown` or `application/json`. Text must be
+valid UTF-8 without NUL bytes; JSON creation additionally requires one complete
+JSON value. Name is limited to 500 bytes, description to 20,000 bytes, and content
+to 65,536 bytes. All three prose fields are sealed under the verified current
+vault epoch. The native record's `size_bytes` describes stored bytes, including
+encryption overhead; it is not a plaintext size promise.
+
+Optional owned `project_id`, `chain_id`, `task_id`, `agent_id` and
+`agent_instance_id` establish native associations. Native consistency checks
+apply to task/chain and instance/agent/project combinations. When only a task is
+provided, its chain is derived inside the same write transaction. These are
+associations, not proof that an agent executed or completed a task.
+
+`artifacts.list` returns metadata without content. It supports these association
+filters and owner/filter-bound `created_at` + `artifact_id` keyset cursors, with
+the usual default 50 / maximum 100 records and a 1 MiB page budget. A filter must
+refer to an owned target. `artifacts.get` opens bounded content by default;
+`include_content: false` reads metadata and revision only. Content is a string,
+including for JSON documents; arbitrary nested business objects are not opened.
+
+Native artifacts produced outside MCP use the same vault text format and can be
+retrieved by an external client with artifact-read consent. After a task finishes,
+call `artifacts.list` with its `task_id`, then `artifacts.get` with a returned
+`artifact_id`. Preserve the returned `link` for the user. Task-read and
+artifact-read permissions are independent; knowing a task or artifact ID grants
+no access by itself.
+
+Content reads copy at most 128 KiB of stored text out of SQLite and open at most
+64 KiB of UTF-8 plaintext. Unsupported MIME types (including HTML and binary),
+oversized stored content, and missing external blob content return metadata with
+`content_error`: `unsupported_content_type`, `content_too_large`, or
+`content_unavailable`. Legacy MIME parameters such as `charset=utf-8` are
+recognized. Invalid UTF-8, NUL, oversized decrypted content, or a locked/unavailable
+epoch fail the content transform closed; retry with `include_content: false` to
+read metadata. Legacy names/descriptions above 48 KiB or excessive other metadata
+return `result_too_large`. No blob path is followed or exposed. Metadata update
+and deletion do not load stored content, even for a large native binary.
+
+`artifacts.update` changes **only name and description**, preserving native
+metadata-update semantics. An explicitly empty description clears it through an
+encrypted empty string. Content replacement, association changes, versions and
+rollback are unavailable. The opaque `revision` binds native metadata,
+associations and stored length; native artifact content is immutable through
+this lifecycle. Both update and delete require `expected_revision` from a read
+or preceding mutation. Same-timestamp metadata changes still conflict.
+
+`artifacts.delete` permanently deletes the native row. It is not an archive or
+soft delete; existing links subsequently become unavailable. Legacy tombstones
+are hidden. Every write requires a stable `request_id`. The native change and
+metadata-only receipt commit together after final live-grant/account/epoch checks.
+Identical retries return the original result even after deletion; changed payloads
+conflict. Receipt replay does not re-seal content or recreate a deleted artifact.
+The mutation result includes `resource_id`, `revision`, `state` and `link`.
+
+This increment accepts no filesystem paths, filenames to read, remote fetch URLs,
+base64/binary uploads, arbitrary metadata, origin fields or owner/actor overrides.
+An artifact's text is returned as data; MCP neither executes nor renders it.
 
 ## Agent definitions and target discovery
 

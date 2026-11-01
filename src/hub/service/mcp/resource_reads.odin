@@ -23,6 +23,7 @@ resource_get :: proc(s:^Control_Service,owner,kind,id:string,detail:bool)->(json
 	row:=make(json.Object,context.temp_allocator)
 	revision:string
 	switch kind {
+	case "artifact":return resource_artifact_get(s,owner,id,detail)
 	case "memory":
 		m,found,err:=content.get_memory(s.content,auth,id);if !found || err.code!=.None do return nil,"","not_found"
 		if len(m.agent_ids)>100 || len(m.project_ids)>100 || len(m.bridge_ids)>100 || len(m.template_ids)>100 do return nil,"","result_too_large"
@@ -56,14 +57,15 @@ resource_project_ids :: proc(values:[]domain.Project_ID)->json.Array {out:=make(
 resource_read :: proc(s:^Control_Service,owner,tool:string,a:Resource_Arguments)->(Control_Data,string) {
 	kind:=resource_kind(tool);out:=Control_Data{records_kind=kind}
 	if s.content==nil || s.projects==nil || s.issues==nil || s.resource_page==nil do return {},"request_failed"
+	if kind=="artifact" && a.id=="" {if ok,err:=content.artifact_context_owned(s.content,domain.User_ID(owner),{project_id=domain.Project_ID(a.project_id),chain_id=a.chain_id,task_id=a.task_id,agent_id=a.agent_id,agent_instance_id=a.agent_instance_id});!ok || err.code!=.None do return {},"not_found"}
 	if a.id!="" {
-		row,_,code:=resource_get(s,owner,kind,a.id,true);if code!="" do return {},code
+		row,_,code:=resource_get(s,owner,kind,a.id,kind!="artifact" || a.include_content);if code!="" do return {},code
 		if tool=="issues.get" && a.include_comments {comments,next,err:=resource_issue_comments(s,owner,a);if err!="" do return {},err;row["comments"]=comments;row["comments_next_cursor"]=json.String(next)}
 		out.records=make([]json.Object,1,context.temp_allocator);out.records[0]=row;return out,""
 	}
 	cursor,valid:=resource_cursor(owner,tool,a,a.cursor,"");if !valid do return {},"invalid_arguments"
 	limit:=a.limit;if limit==0 do limit=50
-	refs,err:=s.resource_page(s.resource_ctx,{kind=kind,owner=owner,after_created=cursor.created_at,after_id=cursor.id,status=a.status,type=a.type,agent_id=a.agent_id,project_id=a.project_id,bridge_id=a.bridge_id,template_id=a.template_id,scope_type=a.scope_type,target_id=a.target_id,chain_id=a.chain_id,limit=limit+1})
+	refs,err:=s.resource_page(s.resource_ctx,{kind=kind,owner=owner,after_created=cursor.created_at,after_id=cursor.id,status=a.status,type=a.type,agent_id=a.agent_id,project_id=a.project_id,bridge_id=a.bridge_id,template_id=a.template_id,scope_type=a.scope_type,target_id=a.target_id,chain_id=a.chain_id,task_id=a.task_id,agent_instance_id=a.agent_instance_id,limit=limit+1})
 	if err.code!=.None do return {},"request_failed"
 	rows:=make([dynamic]json.Object,context.temp_allocator);bytes:=0
 	for ref,i in refs {

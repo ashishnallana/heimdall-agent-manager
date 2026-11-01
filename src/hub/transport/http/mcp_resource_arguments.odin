@@ -1,7 +1,9 @@
 package http
 
 import "core:encoding/json"
+import "core:crypto"
 import "core:strings"
+import "core:unicode/utf8"
 import domain "odin_test:hub/domain"
 import platform "odin_test:hub/platform"
 import mcp "odin_test:hub/service/mcp"
@@ -10,6 +12,11 @@ import vault "odin_test:lib/vault"
 mcp_resource_allowed :: proc(tool,key:string)->bool {
 	allowed:string
 	switch tool {
+	case "artifacts.list":allowed="|project_id|chain_id|task_id|agent_id|agent_instance_id|cursor|limit|"
+	case "artifacts.get":allowed="|artifact_id|include_content|"
+	case "artifacts.create":allowed="|request_id|name|description|content|content_type|project_id|chain_id|task_id|agent_id|agent_instance_id|"
+	case "artifacts.update":allowed="|artifact_id|request_id|expected_revision|name|description|"
+	case "artifacts.delete":allowed="|artifact_id|request_id|expected_revision|"
 	case "memories.list":allowed="|status|type|agent_id|project_id|bridge_id|template_id|cursor|limit|"
 	case "memories.get":allowed="|memory_id|"
 	case "memories.create":allowed="|request_id|title|description|body|evidence|type|expires_at|agent_ids|project_ids|bridge_ids|template_ids|"
@@ -32,12 +39,13 @@ mcp_resource_allowed :: proc(tool,key:string)->bool {
 }
 mcp_resource_arguments :: proc(tool:string,value:json.Value)->(mcp.Control_Arguments,bool) {
 	obj,typed:=value.(json.Object);if value==nil {obj=make(json.Object,context.temp_allocator);typed=true};if !typed do return {},false
-	a:=mcp.Resource_Arguments{fields=make(json.Object,context.temp_allocator)}
+	a:=mcp.Resource_Arguments{fields=make(json.Object,context.temp_allocator),include_content=tool=="artifacts.get"}
 	for key,value in obj {
 		if !mcp_resource_allowed(tool,key) do return {},false
 		for known,i in mcp.RESOURCE_KEYS do if known==key do a.present|=u64(1)<<u64(i)
 		switch key {
 		case "limit","comment_limit":n,ok:=value.(json.Integer);if !ok || n<1 || n>100 do return {},false;if key=="limit" {a.limit=int(n)} else {a.comment_limit=int(n)}
+		case "include_content":v,ok:=value.(json.Boolean);if !ok do return {},false;a.include_content=bool(v)
 		case "include_comments":v,ok:=value.(json.Boolean);if !ok do return {},false;a.include_comments=bool(v)
 		case "bridge_paths":
 			items,ok:=value.(json.Array);if !ok || len(items)>20 do return {},false
@@ -52,9 +60,14 @@ mcp_resource_arguments :: proc(tool:string,value:json.Value)->(mcp.Control_Argum
 		case:
 			text,ok:=value.(json.String);if !ok do return {},false;s:=string(text)
 			switch key {
-			case "name","title","description","body","evidence":
+			case "name","title","description","body","evidence","content":
 				limit:=20000;if key=="name" || key=="title" do limit=500;if key=="body" && mcp.resource_kind(tool)=="memory" do limit=65536
-				if len(s)>limit || (key=="name" || key=="title" || key=="body") && strings.trim_space(s)=="" do return {},false;a.fields[key]=text
+				if key=="content" do limit=65536
+				if !utf8.valid_string(s) || strings.contains(s,"\x00") || len(s)>limit || (key=="name" || key=="title" || key=="body") && strings.trim_space(s)=="" do return {},false;a.fields[key]=text
+			case "artifact_id":if !mcp_runtime_id(s,"art_") do return {},false;a.id=s
+			case "task_id":if !mcp_runtime_id(s,"task_") do return {},false;a.task_id=s
+			case "agent_instance_id":if !mcp_runtime_id(s,"inst_") do return {},false;a.agent_instance_id=s
+			case "content_type":if s!="text/plain" && s!="text/markdown" && s!="application/json" do return {},false;a.content_type=s
 			case "memory_id":if !mcp_runtime_id(s,"mem_") do return {},false;a.id=s
 			case "issue_id":if !mcp_runtime_id(s,"iss_") do return {},false;a.id=s
 			case "project_id":if !mcp_runtime_id(s,"proj_") do return {},false;if mcp.resource_kind(tool)=="project" {a.id=s} else {a.project_id=s}
@@ -82,6 +95,15 @@ mcp_resource_arguments :: proc(tool:string,value:json.Value)->(mcp.Control_Argum
 	}
 	if strings.has_suffix(tool,".list") do return mcp.Control_Arguments{resource=a},true
 	if strings.has_suffix(tool,".get") do return mcp.Control_Arguments{resource=a},a.id!="" && (a.include_comments || a.comment_limit==0 && a.comment_cursor=="")
+	if tool=="artifacts.create" {
+		if mcp.resource_text(a.fields,"name")=="" || !mcp.resource_present(a,"content") || a.content_type=="" do return {},false
+		if a.content_type=="application/json" {
+			candidate:=strings.clone(mcp.resource_text(a.fields,"content"),context.temp_allocator)
+			defer if len(candidate)>0 do crypto.zero_explicit(raw_data(candidate),len(candidate))
+			parser:=json.make_parser_from_string(candidate,.JSON,true,context.temp_allocator);value,e:=json.parse_value(&parser);defer vault.control_wipe_value(value)
+			if e!=nil || parser.curr_token.kind!=.EOF do return {},false
+		}
+	}
 	if a.request_id=="" do return {},false
 	if !strings.has_suffix(tool,".create") && (a.id=="" || a.expected_revision=="") do return {},false
 	if strings.has_suffix(tool,".update") && len(obj)<=3 do return {},false
