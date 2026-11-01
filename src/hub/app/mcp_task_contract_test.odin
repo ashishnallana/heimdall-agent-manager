@@ -20,7 +20,13 @@ mcp_task_test_contract :: proc(t:^testing.T,g:^App_Graph,h:^http.MCP_Control_Han
 	now:=mcp_task_test_now(nil)
 	owner:=domain.User_ID(view.owner)
 	for tool in ([]string{"tasks.get","tasks.comment","tasks.update","tasks.control"}) {
-		_,accepted:=http.mcp_arguments(tool,json.Object{"task_id"=json.String("task_comment"),"request_id"=json.String("missing_chain"),"body"=json.String("Missing chain")})
+		args:=json.Object{"task_id"=json.String("task_comment")}
+		if tool!="tasks.get" do args["request_id"]=json.String("missing_chain")
+		if tool=="tasks.comment" do args["body"]=json.String("Missing chain")
+		if tool=="tasks.update" || tool=="tasks.control" do args["expected_revision"]=json.String("0000000000000000000000000000000000000000000000000000000000000000")
+		if tool=="tasks.update" {args["priority"]=json.String("p0");args["title"]=json.String("Title")}
+		if tool=="tasks.control" do args["action"]=json.String("recheck")
+		_,accepted:=http.mcp_arguments(tool,args)
 		testing.expect(t,!accepted)
 	}
 	for other_owner in ([]bool{false,true}) {
