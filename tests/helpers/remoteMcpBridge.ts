@@ -20,16 +20,16 @@ export async function remoteMcpBridge(h: any) {
   const code = fs.readFileSync(new URL('./remoteMcpBridge.py', import.meta.url), 'utf8');
   const hash = createHash('sha256').update(fs.readFileSync(h.certFile)).digest('hex');
   const binaryHash = process.env.HEIMDALL_E2E_REMOTE_TEST_BINARY === '1' ? createHash('sha256').update(fs.readFileSync(process.env.HEIMDALL_E2E_BRIDGE_BIN!)).digest('hex') : '';
-  const started = await call(['shell','start','--bridge',bridge,'--agent',h.operatorEnv.HEIMDALL_AGENT_INSTANCE_ID,'--kind','run','--label','isolated-mcp-dawnstar-acceptance','--cmd',`python3 -u -c ${quote(code)} ${quote(h.base)} ${quote(hash)} ${quote(binaryHash)}`]);
+  const runtimeHash = h.runtimeBundle ? createHash('sha256').update(fs.readFileSync(h.runtimeBundle)).digest('hex') : '';
+  const started = await call(['shell','start','--bridge',bridge,'--agent',h.operatorEnv.HEIMDALL_AGENT_INSTANCE_ID,'--kind','run','--label','isolated-mcp-dawnstar-acceptance','--cmd',`python3 -u -c ${quote(code)} ${quote(h.base)} ${quote(hash)} ${quote(binaryHash)} ${quote(h.remoteCallbackUrl)} ${quote(runtimeHash)}`]);
   const session = started.session.session_id;
   console.log('REMOTE_SESSION ' + session);
-  const logs = async () => (await call(['shell','log',session,'--limit','100'])).lines.join('\n');
   const close = async () => { await call(['shell','kill',session]).catch(() => {}); };
   try {
-    const pairing = await eventually(async () => /PAIR_CODE ([A-Z2-7-]+)/.exec(await logs())?.[1], 'remote Bridge pairing', 45000);
+    const pairing = await eventually(async () => { if (h.remoteProgress.closed) throw new Error('Remote enrollment exited; diagnostics remain private'); return h.remoteProgress.pairing; }, 'remote Bridge pairing', 45000);
     const bridgeId = await h.approveBridge(pairing);
-    await eventually(async () => (await logs()).includes('REMOTE_ENROLLED') ? true : undefined, 'remote enrollment exit');
-    const meta = JSON.parse(/REMOTE_META (.+)/.exec(await logs())![1]);
+    await eventually(async () => { if (h.remoteProgress.closed) throw new Error('Remote enrollment exited; diagnostics remain private'); return h.remoteProgress.enrolled || undefined; }, 'remote enrollment exit');
+    const meta = h.remoteProgress.meta;
     await eventually(async () => { const response = await h.request('GET','/api/v1/bridges'); return (response.data.bridges ?? response.data).find((row: any) => row.bridge_id === bridgeId && row.status === 'online'); }, 'remote Bridge online');
     check(meta.hostname === 'dawnstar', 'second Bridge runs on physical Dawnstar');
     return { bridgeId, projectDir: meta.project, physicalHostname: meta.hostname, close,

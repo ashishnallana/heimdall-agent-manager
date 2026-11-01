@@ -2,6 +2,7 @@
 // Optional real model execution uses the caller's explicitly selected Codex home.
 import fs from 'node:fs';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { nativeMcpHub, check, eventually } from '../helpers/nativeMcpAcceptance.ts';
 import { claudeMcpAcceptance } from '../helpers/claudeMcpAcceptance.ts';
 import { remoteMcpBridge } from '../helpers/remoteMcpBridge.ts';
@@ -10,6 +11,7 @@ const scope = 'mcp:chains mcp:tasks:read mcp:tasks:write mcp:agents:read mcp:age
 async function main() {
   const h = await nativeMcpHub();
   const report: Record<string, unknown> = { kind: 'isolated-native-http', production: false, actual_model_execution: false, external_claude: false, physical_machines: 1 };
+  report.native_binaries = Object.fromEntries(['HUB', 'BRIDGE'].map(kind => [kind.toLowerCase(), createHash('sha256').update(fs.readFileSync(process.env[`HEIMDALL_E2E_${kind}_BIN`]!)).digest('hex')]));
   let remote: Awaited<ReturnType<typeof remoteMcpBridge>> | undefined;
   try {
     let bridge: any = await h.enroll();
@@ -38,6 +40,10 @@ async function main() {
     check(JSON.stringify(replay) === JSON.stringify(created), 'HTTP mutation replay is stable');
     const deviceRead = await h.tool(device, 'artifacts.get', { artifact_id: created.resource_id });
     check(deviceRead.records[0].content === '# Synthetic result\nVerified.', 'device grant decrypts via real approved Bridge');
+    const foreign = await h.foreignRequest('POST', '/api/v1/projects', { name: 'Other synthetic owner', slug: 'foreign-synthetic', default_path: path.join(h.root, 'foreign-project') });
+    check(foreign.status === 201 && foreign.data.project_id, 'second synthetic owner creates private project (' + foreign.status + ' ' + (foreign.data.error?.message || foreign.data.message || '') + ')');
+    const foreignRead = await h.rpc(hosted, 'tools/call', { name: 'projects.get', arguments: { project_id: foreign.data.project_id } });
+    check(foreignRead.json.result?.isError && foreignRead.json.result.content[0].text === 'not_found', 'foreign resource denied without content disclosure');
     report.chain_id = chainId; report.bridge_id = bridge.bridgeId; report.artifact_id = created.resource_id;
     if (process.env.HEIMDALL_E2E_REMOTE_BRIDGE) {
       remote = await remoteMcpBridge(h); bridge = remote;
@@ -60,6 +66,8 @@ async function main() {
       const controllerMode = process.env.HEIMDALL_E2E_CLAUDE_CLIENT === '1';
       const task = await h.tool(hosted, 'tasks.create', { chain_id: chainId, request_id: 'task', title: 'Write synthetic acceptance result', goal: 'Create a Markdown artifact named acceptance-result.md containing exactly MCP_NATIVE_OFFLOAD_OK. Associate it with this task and chain using ham-ctl artifact create flags. Submit the lease with the artifact:// link in the summary. All files belong only in this disposable project directory.' + (controllerMode ? ` Before submitting, wait at most 90 seconds for the test coordinator to create ${barrier}; use ham-ctl shell run for this bounded wait. This barrier lets a second real task queue before native idle shutdown.` : ''), acceptance: ['Artifact content equals MCP_NATIVE_OFFLOAD_OK and native task lease is submitted.'], assignee_agent_id: agent.agent_id, bridge_id: bridge.bridgeId, requires_user_approval: false });
       const definition = await h.tool(hosted, 'agents.get', { agent_id: agent.agent_id });
+      const unsupported = await h.rpc(hosted, 'tools/call', { name: 'instances.create', arguments: { agent_id: agent.agent_id, chain_id: chainId, project_id: project.resource_id, bridge_id: bridge.bridgeId, provider: eligible.provider, provider_profile: eligible.provider_profile, model: 'unsupported-acceptance-model', request_id: 'unsupported-runtime', expected_revision: definition.records[0].revision } });
+      check(unsupported.json.result?.isError && unsupported.json.result.content[0].text === 'invalid_arguments', 'unsupported model denied before native launch');
       const runtime = await h.tool(hosted, 'instances.create', { agent_id: agent.agent_id, chain_id: chainId, project_id: project.resource_id, bridge_id: bridge.bridgeId, provider: eligible.provider, provider_profile: eligible.provider_profile, model, request_id: 'runtime', expected_revision: definition.records[0].revision });
       check(runtime.agent_instance_id, 'real instance create accepted');
       const configured = await h.tool(hosted, 'chains.get', { chain_id: chainId });
@@ -86,6 +94,9 @@ async function main() {
       check(artifacts.records?.length > 0, 'task-produced artifact associated with task');
       const result = await h.tool(hosted, 'artifacts.get', { artifact_id: artifacts.records[0].artifact_id });
       check(result.records[0].content.trim() === 'MCP_NATIVE_OFFLOAD_OK', 'real offload artifact retrieved through MCP');
+      await h.tool(hosted, 'tasks.comment', { chain_id: chainId, task_id: task.task_id, request_id: 'acceptance-comment', body: 'Verified real encrypted task result through MCP.' });
+      const commented = await h.tool(hosted, 'tasks.get', { chain_id: chainId, task_id: task.task_id, include_comments: true });
+      check(commented.comments.some((row: any) => row.body === 'Verified real encrypted task result through MCP.'), 'task comment write/read roundtrip');
       Object.assign(report, { actual_model_execution: true, task_id: task.task_id, agent_id: agent.agent_id, agent_instance_id: runtime.agent_instance_id, result_artifact_id: result.records[0].artifact_id, task_state: completed.state, model });
       if (clientPromise) {
         const client = await clientPromise;
@@ -97,8 +108,35 @@ async function main() {
         check(artifact.records[0].content.trim() === 'MCP_CLAUDE_OFFLOAD_OK', 'independent verification of Claude-controlled real result');
         Object.assign(report, { external_claude: true, claude_task_id: controlled.task_id, claude_artifact_id: artifact.records[0].artifact_id, claude_tools: client.tools });
       }
+      const moveModel = process.env.HEIMDALL_E2E_MOVE_MODEL;
+      if (moveModel) {
+        const source = await h.tool(hosted, 'instances.get', { agent_instance_id: runtime.agent_instance_id });
+        await h.tool(hosted, 'instances.reconfigure', { agent_instance_id: runtime.agent_instance_id, bridge_id: bridge.bridgeId, project_id: project.resource_id, provider: eligible.provider, provider_profile: eligible.provider_profile, model: moveModel, request_id: 'actual-model-move', expected_revision: source.records[0].revision });
+        const moved = await eventually(async () => {
+          const operation = await h.tool(hosted, 'instances.operations', { operation_tool: 'instances.reconfigure', request_id: 'actual-model-move' });
+          if (operation.status === 'completed') return operation;
+          if (operation.status === 'failed' || operation.status === 'repair_required') throw new Error('Real model move: ' + operation.status + ' ' + operation.phase);
+          return undefined;
+        }, 'actual native model move readiness', 90000);
+        const destination = await h.tool(hosted, 'instances.get', { agent_instance_id: runtime.agent_instance_id });
+        check(destination.records[0].model === moveModel, 'native model move reaches requested destination');
+        Object.assign(report, { model_move: { model: moveModel, status: moved.status } });
+      }
       const current = await h.tool(hosted, 'instances.get', { agent_instance_id: runtime.agent_instance_id });
       await h.tool(hosted, 'instances.stop', { agent_instance_id: runtime.agent_instance_id, request_id: 'stop', expected_revision: current.records[0].revision });
+      await eventually(async () => {
+        const operation = await h.tool(hosted, 'instances.operations', { operation_tool: 'instances.stop', request_id: 'stop' });
+        return operation.status === 'completed' ? operation : undefined;
+      }, 'native stop completion');
+      if (remote) await remote.close(); else bridge.runtime.kill();
+      await eventually(async () => {
+        const rows = await h.tool(hosted, 'bridges.list', {});
+        return rows.records.some((row: any) => row.bridge_id === bridge.bridgeId && !row.eligible) ? true : undefined;
+      }, 'disposable execution Bridge offline');
+      const stopped = await h.tool(hosted, 'instances.get', { agent_instance_id: runtime.agent_instance_id });
+      const offline = await h.rpc(hosted, 'tools/call', { name: 'instances.start', arguments: { agent_instance_id: runtime.agent_instance_id, request_id: 'offline-start', expected_revision: stopped.records[0].revision } });
+      check(offline.json.result?.isError && offline.json.result.content[0].text === 'bridge_offline', 'offline target denied without fallback launch');
+      report.offline_target_denied = true;
     }
     console.log('REPORT ' + JSON.stringify(report));
     fs.writeFileSync(path.join(h.root, 'report.json'), JSON.stringify(report, null, 2), { mode: 0o600 });

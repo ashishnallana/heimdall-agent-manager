@@ -1,6 +1,6 @@
 """Disposable second-machine Bridge. No service install or real config edits."""
 import base64, hashlib, json, os, pathlib, re, shutil, signal, socket, ssl
-import subprocess, sys, tempfile, time, urllib.request
+import io, subprocess, sys, tarfile, tempfile, time, urllib.request
 
 root = pathlib.Path(tempfile.mkdtemp(prefix='mcp-e2e-'))
 root.chmod(0o700)
@@ -22,13 +22,17 @@ base, expected = sys.argv[1:3]
 cert = urllib.request.urlopen(base+'/__acceptance_ca', context=ssl._create_unverified_context(), timeout=10).read()
 if hashlib.sha256(cert).hexdigest() != expected: raise SystemExit('Test CA pin mismatch')
 ca = root/'ca.pem'; ca.write_bytes(cert)
+callback = sys.argv[4]
+def progress(**values):
+    request = urllib.request.Request(callback, data=json.dumps(values).encode(), headers={'Content-Type':'application/json'}, method='POST')
+    urllib.request.urlopen(request, context=ssl.create_default_context(cafile=str(ca)), timeout=10).close()
 if len(sys.argv)>3 and sys.argv[3]:
     binary = urllib.request.urlopen(base+'/__acceptance_bridge', context=ssl.create_default_context(cafile=str(ca)), timeout=20).read()
     if hashlib.sha256(binary).hexdigest() != sys.argv[3]: raise SystemExit('Test Bridge binary pin mismatch')
     bridge = root/'ham-bridge'; bridge.write_bytes(binary); bridge.chmod(0o700)
     # A test binary built on a conventional Linux host names /lib64/ld-linux;
     # NixOS instead uses its installed Bridge's store loader and library closure.
-    if not pathlib.Path('/lib64/ld-linux-x86-64.so.2').exists():
+    if pathlib.Path('/nix/store').is_dir() or not pathlib.Path('/lib64/ld-linux-x86-64.so.2').exists():
         libs = []
         for executable in (installed_bridge, pathlib.Path(shutil.which('curl') or str(installed_bridge))):
             listing = subprocess.run(['ldd',str(executable)],capture_output=True,text=True).stdout
@@ -36,7 +40,29 @@ if len(sys.argv)>3 and sys.argv[3]:
                 p = pathlib.Path(name)
                 if p.is_file():
                     libs.append(str(p.parent))
-                    if 'ld-linux' in p.name: prefix = [str(p)]
+                    if 'ld-linux' in p.name and '/nix/store/' in str(p) and 'glibc' in str(p): prefix = [str(p.resolve())]
+        if not prefix:
+            for directory in libs:
+                candidate = pathlib.Path(directory)/'ld-linux-x86-64.so.2'
+                if 'glibc' in directory and candidate.is_file(): prefix = [str(candidate.resolve())]; break
+        # The installed release may statically link SQLite while this freshly
+        # built test binary dynamically links it. Use an existing store library
+        # without installing packages or changing the machine's loader config.
+        for library in pathlib.Path('/nix/store').glob('*sqlite*/lib/libsqlite3.so.0'):
+            libs.append(str(library.parent))
+        if len(sys.argv)>5 and sys.argv[5]:
+            bundle = urllib.request.urlopen(base+'/__acceptance_runtime', context=ssl.create_default_context(cafile=str(ca)), timeout=30).read()
+            if hashlib.sha256(bundle).hexdigest() != sys.argv[5]: raise SystemExit('Test runtime pin mismatch')
+            directory = root/'runtime-libs'; directory.mkdir()
+            with tarfile.open(fileobj=io.BytesIO(bundle), mode='r:gz') as archive:
+                total = 0
+                for member in archive:
+                    if member.isdir(): continue
+                    name = member.name.removeprefix('./')
+                    total += member.size
+                    if not member.isfile() or '/' in name or name in ('','.','..') or total>100*1024*1024: raise SystemExit('Invalid test runtime bundle')
+                    (directory/name).write_bytes(archive.extractfile(member).read())
+            libs.insert(0,str(directory))
         if not prefix: raise SystemExit('Nix test loader unavailable')
         prefix += ['--library-path',':'.join(dict.fromkeys(libs))]
 env = {k:v for k,v in os.environ.items() if not k.startswith('HEIMDALL_')}
@@ -62,6 +88,7 @@ proc = None
 def stop(signum,frame): raise SystemExit(0)
 signal.signal(signal.SIGTERM,stop); signal.signal(signal.SIGINT,stop)
 print('REMOTE_META '+json.dumps({'root':str(root),'project':str(project),'hostname':socket.gethostname()}),flush=True)
+progress(meta={'root':str(root),'project':str(project),'hostname':socket.gethostname()})
 try:
     proc = subprocess.Popen([*prefix,str(bridge),'enroll','--hub',base,'--headless',*args],env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
     enrollment_succeeded = False
@@ -70,16 +97,19 @@ try:
             log.write(line); log.flush()
             if 'bridge enroll SUCCESS:' in line: enrollment_succeeded = True
             m = re.fullmatch(r'\s*([A-Z2-7]{4}-[A-Z2-7]{4}-[A-Z2-7]{4}-[A-Z2-7]{2})\s*',line)
-            if m: print('PAIR_CODE '+m[1],flush=True)
+            if m: progress(pairing=m[1])
     code = proc.wait()
     if code != 0 and not (enrollment_succeeded and (root/'config.toml').is_file() and (root/'bridge.token').is_file()):
         raise SystemExit('Remote enrollment failed; diagnostics remain private')
     print('REMOTE_ENROLLED',flush=True)
+    progress(enrolled=True)
     log = (root/'bridge.log').open('w')
     proc = subprocess.Popen([*prefix,str(bridge),*args],cwd=root,env=env,stdout=log,stderr=log)
     deadline = time.monotonic()+600
     while proc.poll() is None and time.monotonic()<deadline: time.sleep(1)
 finally:
+    try: progress(closed=True)
+    except Exception: pass
     for sock in (root/'run').glob('pty-host-*.sock'):
         subprocess.run([str(pty),'--socket',str(sock),'stop'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=10)
     if proc is not None and proc.poll() is None:

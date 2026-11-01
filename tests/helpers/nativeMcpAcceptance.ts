@@ -14,7 +14,8 @@ import { buildGenesis, buildBridgeApproval, checkBridgeCodeInfo } from '../../sr
 import { signedRequestHeaders } from '../../src/ui/utils/vaultRequestSigner.ts';
 import { verifyDirectory } from '../../src/ui/utils/vaultDirectoryVerify.ts';
 import { openVerifiedWrap } from '../../src/ui/utils/vaultKeyringWrap.ts';
-import { serializeKeyringBytes, parseKeyringBytes } from '../../src/ui/utils/vaultKeyring.ts';
+import { serializeKeyringBytes, importKeyring } from '../../src/ui/utils/vaultKeyring.ts';
+import { encryptProjectFields } from '../../src/ui/utils/vaultProjects.ts';
 import { buildMcpConsent } from '../../src/ui/utils/mcpConsent.ts';
 import { derivePairKeys, pairApproveMac } from '../../src/ui/utils/vaultPairing.ts';
 import { deliverKeyringToBridge } from '../../src/ui/utils/vaultBridgeDelivery.ts';
@@ -34,13 +35,18 @@ export async function nativeMcpHub() {
   if (process.env.HEIMDALL_E2E_LIVE_RUNTIME === '1' && providerHome) {
     // Use only an unexpired short-lived access credential. Never copy the real
     // config/plugins or refresh a shared OAuth family from this disposable run.
-    const auth = JSON.parse(fs.readFileSync(path.join(providerHome, 'auth.json'), 'utf8'));
+    let auth: any;
+    try { auth = JSON.parse(fs.readFileSync(path.join(providerHome, 'auth.json'), 'utf8')); }
+    catch { throw new Error('Provider access credential unavailable or invalid'); }
     const token = auth.tokens?.access_token;
-    const expires = token ? JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString()).exp : 0;
+    let expires = 0;
+    try { expires = token ? JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString()).exp : 0; }
+    catch { throw new Error('Provider access credential unavailable or invalid'); }
     check(expires * 1000 > Date.now() + 600000, 'provider access credential valid beyond test deadline');
     auth.tokens.refresh_token = '';
     const home = path.join(testHome, '.codex'); fs.mkdirSync(home);
     isolatedAuth = path.join(home, 'auth.json'); fs.writeFileSync(isolatedAuth, JSON.stringify(auth), { mode: 0o600 });
+    process.once('exit', () => fs.rmSync(isolatedAuth!, { force: true }));
   }
   for (const key of Object.keys(process.env)) if (key.startsWith('HEIMDALL_') && !key.startsWith('HEIMDALL_E2E_')) delete process.env[key];
   const env = { ...process.env };
@@ -65,9 +71,32 @@ export async function nativeMcpHub() {
   tls.setDefaultCACertificates([...tls.getCACertificates(), cert]);
   env.HAM_TLS_CA_FILE = certFile;
   const sockets = new Set<net.Socket>();
+  let runtimeBundle: string | undefined;
+  if (process.env.HEIMDALL_E2E_REMOTE_TEST_BINARY === '1' && process.env.HEIMDALL_E2E_REMOTE_LIBCURL) {
+    const library = fs.realpathSync(process.env.HEIMDALL_E2E_REMOTE_LIBCURL);
+    const listing = spawnSync('ldd', [library], { encoding: 'utf8' });
+    check(listing.status === 0, 'test libcurl dependency discovery');
+    const directory = path.join(root, 'runtime-libs'); fs.mkdirSync(directory);
+    fs.copyFileSync(library, path.join(directory, 'libcurl.so.4'));
+    for (const match of listing.stdout.matchAll(/=> (\/home\/linuxbrew\/[^\s]+)/g)) fs.copyFileSync(fs.realpathSync(match[1]), path.join(directory, path.basename(match[1])));
+    runtimeBundle = path.join(root, 'runtime-libs.tar.gz');
+    check(spawnSync('tar', ['-czf', runtimeBundle, '-C', directory, '.']).status === 0, 'private test libcurl bundle');
+  }
+  const remoteProgress: Record<string, any> = {};
+  const remoteCallbackPath = '/__acceptance_remote/' + randomBytes(24).toString('hex');
   const proxy = https.createServer({ cert, key: fs.readFileSync(privateFile) }, (req, res) => {
+    if (req.method === 'POST' && req.url === remoteCallbackPath) {
+      let body = '';
+      req.on('data', chunk => { body += chunk; if (body.length > 4096) req.destroy(); });
+      req.on('end', () => {
+        try { Object.assign(remoteProgress, JSON.parse(body)); res.writeHead(204); res.end(); }
+        catch { res.writeHead(400); res.end(); }
+      });
+      return;
+    }
     if (req.method === "GET" && req.url === "/__acceptance_ca") { res.writeHead(200, { "Content-Type": "application/x-pem-file" }); res.end(cert); return; }
     if (req.method === 'GET' && req.url === '/__acceptance_bridge' && process.env.HEIMDALL_E2E_REMOTE_TEST_BINARY === '1') { res.writeHead(200, { 'Content-Type': 'application/octet-stream' }); fs.createReadStream(process.env.HEIMDALL_E2E_BRIDGE_BIN!).pipe(res); return; }
+    if (req.method === 'GET' && req.url === '/__acceptance_runtime' && runtimeBundle) { res.writeHead(200); fs.createReadStream(runtimeBundle).pipe(res); return; }
     const upstream = http.request({ host: '127.0.0.1', port: backendPort, method: req.method, path: req.url, headers: req.headers }, reply => { res.writeHead(reply.statusCode!, reply.headers); reply.pipe(res); });
     upstream.on('error', () => { res.writeHead(502); res.end(); }); req.pipe(upstream);
   });
@@ -83,6 +112,24 @@ export async function nativeMcpHub() {
   spawnOwned(hubBin, ['--listen', `127.0.0.1:${backendPort}`, '--db', path.join(root, 'hub.db'), '--ui-origin', base, '--public-app-origin', base, '--mcp-oauth-key-file', keyFile, '--billing-enforce-plan-limits', 'false'], root, mock.hubEnv(base), 'hub.log');
   await eventually(async () => { try { return (await fetch(base + '/api/v1/health')).ok ? true : undefined; } catch { return undefined; } }, 'Hub health');
   const session = await hubLogin(base, 'mcp-acceptance');
+  const foreignRequest = async (method: string, target: string, body?: unknown) => {
+    const other = await hubLogin(base, 'mcp-acceptance-other');
+    const call = async (verb: string, route: string, payload?: unknown, extra = {}) => {
+      const response = await fetch(base + route, { method: verb, headers: { ...sessionHeaders(other, base), 'Content-Type': 'application/json', ...extra }, body: payload === undefined ? undefined : JSON.stringify(payload) });
+      const json = await response.json(); return { status: response.status, data: json.data ?? json };
+    };
+    const me = await call('GET', '/api/v1/me'); const owner = me.data.user_id;
+    const identity = await createDeviceIdentity(memoryDeviceStore(), owner);
+    check((await call('POST', '/api/v1/vault/directory/genesis', await buildGenesis(identity, 'Other synthetic vault'))).status === 201, 'other synthetic vault genesis');
+    const directory = await call('GET', '/api/v1/vault/directory');
+    const verified = await verifyDirectory(directory.data, owner, null);
+    const headers = await signedRequestHeaders({ deviceId: identity.deviceId, signPrivateKey: identity.signPrivateKey }, owner, 'GET', '/api/v1/vault/devices/self', '');
+    const self = await call('GET', '/api/v1/vault/devices/self', undefined, headers);
+    const ring = await openVerifiedWrap(self.data.wrap, { userId: owner, recipientDeviceId: identity.deviceId, recipientEcdhPrivate: identity.ecdhPrivateKey, chain: verified });
+    const bytes = serializeKeyringBytes(ring);
+    try { return await call(method, target, await encryptProjectFields(body as any, await importKeyring(bytes, owner))); }
+    finally { bytes.fill(0); for (const entry of ring.entries) entry.key.fill(0); }
+  };
   const request = async (method: string, target: string, body?: unknown, headers = {}, redirect: RequestRedirect = 'follow') => {
     const text = body === undefined ? undefined : typeof body === 'string' ? body : JSON.stringify(body);
     const response = await fetch(base + target, { method, headers: { ...sessionHeaders(session, base), ...(text === undefined ? {} : { 'Content-Type': 'application/json' }), ...headers }, body: text, redirect });
@@ -164,7 +211,7 @@ export async function nativeMcpHub() {
     daemonSockets.push(path.join(dir, 'run', `pty-host-${bridgeId}.sock`));
     return { bridgeId, runtime, dir };
   };
-  return { root, base, certFile, operatorEnv, approveBridge, owner, keyringBytes, identity, chain, request, signed, grant, rpc, tool, enroll,
+  return { root, base, certFile, runtimeBundle, operatorEnv, remoteProgress, remoteCallbackUrl: base + remoteCallbackPath, approveBridge, owner, keyringBytes, identity, chain, request, foreignRequest, signed, grant, rpc, tool, enroll,
     async close() { keyringBytes.fill(0); stopDaemons(); for (const child of children.reverse()) child.kill(); mock.stop(); for (const socket of sockets) socket.destroy(); proxy.close(); if (isolatedAuth) fs.rmSync(isolatedAuth, { force: true }); await pause(300); for (const child of children) if (child.exitCode === null) child.kill('SIGKILL'); },
   };
 }
