@@ -112,3 +112,16 @@ attempting edits/navigation and inject an error followed by late completion.
 If native behavior conflicts with the required rollout policy, keep rollout
 disabled and resolve it before publishing. No release is published by the
 implementation task or its local checks.
+
+Renderer exclusion is synchronous at work initiation: ShortcutProvider rejects both
+window-capture shortcuts and programmatic actions while preparation is held.
+The store guard throws on RTK mutation pending dispatch before API middleware,
+onQueryStarted, or the payload creator can run; returning a dropped pending action
+would still start the request. Cookie and daemon mutation transports also reject
+new non-read requests while frozen, including delayed direct callbacks. Rejected
+and completed actions still settle, and release restores normal initiation.
+The observer remains a fallback for changing blockers, not the exclusion boundary.
+The focused integration fixture is tests/ui_desktop_updates_freeze_test.ts; it uses
+the real provider, heimdallApi, middleware and preparation installer with delayed
+native completion, including synchronous invalidation and a successful retry after
+release.

@@ -58,8 +58,22 @@ export function unsupportedUpdateEditorOpen(doc: Document): boolean {
   });
 }
 
-/** Reject mutation dispatch at the store boundary, including delayed callbacks. */
+/** Stop side effects synchronously; polling cannot protect the native quit gate. */
+export function assertDesktopUpdateWorkAllowed() {
+  if (desktopUpdateFrozen()) throw new Error('Desktop update restart is preparing; try again after it is cancelled.');
+}
+
+export function guardDesktopUpdateRequest(method = 'GET') {
+  if (!['GET', 'HEAD', 'OPTIONS'].includes(method.toUpperCase())) assertDesktopUpdateWorkAllowed();
+}
+
+/** Runs before thunk/API middleware. Throwing at pending aborts createAsyncThunk
+ * before its payload creator AND onQueryStarted run. Dropping pending alone
+ * would still let the mutation request execute. Rejections/settlements pass. */
 export const desktopUpdateMutationGuard = () => (next: any) => (action: any) => {
+  if (desktopUpdateFrozen() && action?.meta?.requestStatus === 'pending' && action?.meta?.arg?.type === 'mutation') {
+    assertDesktopUpdateWorkAllowed();
+  }
   if (desktopUpdateFrozen() && /^(workspaceLayout|workspaceChrome|auxPanes|composerContext)\//.test(String(action?.type))) return action;
   return next(action);
 };

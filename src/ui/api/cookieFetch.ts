@@ -1,3 +1,4 @@
+import { guardDesktopUpdateRequest } from '../utils/desktopUpdatePreparation';
 // UI-14/UI-15: shared cookie-authenticated JSON fetch helper. The browser holds
 // only the Hub's OIDC session cookie (HttpOnly); the rewrite app uses the SAME cookie auth
 // session as `/api/v1/me` (`credentials: 'include'`), NOT the legacy per-client
@@ -83,6 +84,7 @@ export function apiUrl(path: string): string {
 // queryFn maps it to an error state.
 // `init` carries an optional AbortSignal so a caller can bound a request that stalls.
 export async function cookieJsonFetch(path: string, init?: RequestInit): Promise<any> {
+  guardDesktopUpdateRequest(init?.method);
   const res = await fetch(apiUrl(path), { ...init, credentials: 'include' });
   if (!res.ok) throw await errorFromResponse(res);
   let rawText: string;
@@ -107,12 +109,14 @@ export async function cookieJsonFetch(path: string, init?: RequestInit): Promise
 // paged list supersedes its in-flight page whenever the filters change, and
 // `useInfiniteList` hands each fetch a signal it expects to be honoured.
 export async function cookieJsonFetchEnvelope(path: string, init?: RequestInit): Promise<any> {
+  guardDesktopUpdateRequest(init?.method);
   const res = await fetch(apiUrl(path), { ...init, credentials: 'include' });
   if (!res.ok) throw await errorFromResponse(res);
   return res.json();
 }
 
 export async function cookieMutation(path: string, method: string = 'POST', data?: any): Promise<any> {
+  guardDesktopUpdateRequest(method);
   const res = await fetch(apiUrl(path), {
     method,
     headers: { 'Content-Type': 'application/json' },

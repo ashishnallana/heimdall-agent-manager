@@ -1,3 +1,4 @@
+import { desktopUpdateFrozen } from '../../utils/desktopUpdatePreparation';
 import React, {
   createContext,
   useCallback,
@@ -110,6 +111,7 @@ export function ShortcutProvider({ children }: { children: ReactNode }) {
   actionsRef.current = actions;
 
   const runAction = useCallback((actionId: string) => {
+    if (desktopUpdateFrozen()) return false;
     const action = actionsRef.current.find((candidate) => candidate.id === actionId);
     if (!action || !isActionEnabled(action)) return false;
     action.run();
@@ -135,6 +137,13 @@ export function ShortcutProvider({ children }: { children: ReactNode }) {
     };
 
     const onKeyDown = (event: KeyboardEvent) => {
+      // Window capture precedes the document overlay's input blocker.
+      if (desktopUpdateFrozen()) {
+        clearSequence();
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        return;
+      }
       if (isShortcutOverrideTrigger(event) && isEditableShortcutTarget(event.target)) {
         clearSequence();
         setEditableOverride(true);
