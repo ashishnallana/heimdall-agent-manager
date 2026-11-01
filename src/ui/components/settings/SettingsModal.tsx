@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Icon } from '@ui';
+import { Icon, Text } from '@ui';
 import { useDialogA11y } from '../ui/composites/useDialogA11y';
 import { useFetchExperimentsQuery } from '../../api/endpoints/settings';
 import { withApiBase } from '../../api/apiBase';
@@ -8,7 +8,7 @@ import { withApiBase } from '../../api/apiBase';
 import AppearanceSettings from './AppearanceSettings';
 import DesktopUpdatesPanel from './DesktopUpdatesPanel';
 import NotificationsPanel from './NotificationsPanel';
-import { ProvidersPanel } from './ProvidersPanel';
+import { ProvidersPanel, type ProviderSettingsHeading } from './ProvidersPanel';
 import BridgesPanel from './BridgesPanel';
 import ExperimentalPanel from './ExperimentalPanel';
 import DevicesPanel from './DevicesPanel';
@@ -120,6 +120,17 @@ export function SettingsModal({
   const [mobileSection, setMobileSection] = useState<string | null>(() => initialTab ? normalizeSettingsTab(initialTab) : null);
   const [currentUser, setCurrentUser] = useState<SettingsUser | null>(() => user || null);
 
+  const [providerHeading, setProviderHeading] = useState<ProviderSettingsHeading | null>(null);
+  const providerHeadingRef = useRef<HTMLElement>(null);
+  const previousProviderFocus = useRef<string | null>(null);
+  useEffect(() => {
+    const focusKey = normalizeSettingsTab(activeTab) === 'models' && open
+      ? providerHeading?.focusKey ?? null : null;
+    if (focusKey !== null && previousProviderFocus.current !== null
+      && focusKey !== previousProviderFocus.current) providerHeadingRef.current?.focus();
+    previousProviderFocus.current = focusKey;
+  }, [activeTab, open, providerHeading?.focusKey]);
+
   const close = useCallback(() => onOpenChange(false), [onOpenChange]);
   useDialogA11y(open, close, panelRef);
 
@@ -207,7 +218,7 @@ export function SettingsModal({
         return <NotificationsPanel />;
       case 'models':
       case 'providers':
-        return <ProvidersPanel />;
+        return <ProvidersPanel onHeadingChange={setProviderHeading} />;
       case 'bridges':
         return <BridgesPanel />;
       case 'updates':
@@ -345,7 +356,15 @@ export function SettingsModal({
             <div className="flex items-start justify-between px-4 md:px-8 pt-4 md:pt-7 pb-4 shrink-0">
               {providerTab ? <button type="button" data-debug-id="providers-settings-back" onClick={() => setMobileSection(null)} className="mr-3 inline-flex min-h-11 items-center rounded-[var(--radius-md)] px-2 text-sm text-accent focus-visible:outline-none focus-visible:shadow-focus md:hidden">← Settings</button> : null}
               <div className="min-w-0 flex-1">
-                {providerTab ? <span className="text-xs text-muted">Settings / Providers</span> : (
+                {providerTab ? (
+                  <div className="space-y-2 break-words">
+                    {providerHeading?.breadcrumb ? <Text role="overline" tone="muted">{providerHeading.breadcrumb}</Text> : null}
+                    <Text ref={providerHeadingRef} as="h1" role="display" tabIndex={-1}>
+                      {providerHeading?.title || currentTabInfo.title}
+                    </Text>
+                    <Text role="body" tone="muted">{providerHeading?.description || currentTabInfo.description}</Text>
+                  </div>
+                ) : (
                   <>
                     <h2 className="text-xl font-semibold text-primary tracking-tight">
                       {currentTabInfo.title}

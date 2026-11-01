@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import type { ProviderSettingsHeading } from '../settings/ProvidersPanel';
 import { useDispatch, useSelector } from 'react-redux';
 import { Badge, Button, Panel, Spinner, StatusPill, Text } from '@ui';
 import { heimdallApi } from '../../api/heimdallApi';
@@ -381,7 +382,10 @@ export function ProfileRuntimeEditor({
   );
 }
 
-export default function ProviderProfilesSurface({ bridge }: { bridge: any }) {
+export default function ProviderProfilesSurface({ bridge, onHeadingChange }: {
+  bridge: any;
+  onHeadingChange?: (heading: ProviderSettingsHeading) => void;
+}) {
   const bridgeId = String(bridge?.bridge_id || bridge?.id || '');
   const unlocked = useSelector(selectIsVaultUnlocked);
   const editable = unlocked && bridge?.status === 'online' && bridge?.vault_status === 'unlocked';
@@ -624,13 +628,15 @@ export default function ProviderProfilesSurface({ bridge }: { bridge: any }) {
     draft && (JSON.stringify(draft) !== savedDraft || label !== savedLabel),
   );
   const editing = Boolean(draft || selected || step !== null);
-  const headingRef = useRef<HTMLElement>(null);
-  const previousEditing = useRef(editing);
-  useEffect(() => {
-    if (previousEditing.current !== editing) headingRef.current?.focus();
-    previousEditing.current = editing;
-  }, [editing]);
   const bridgeName = String(bridge?.label || bridge?.machine_hostname || bridgeId);
+  const title = editing ? step !== null ? 'Add provider' : label || selected : bridgeName;
+  const description = editing ? `Provider profile and runtime settings on ${bridgeName}.`
+    : 'Provider profiles and runtime settings on this bridge.';
+  const breadcrumb = editing ? bridgeName + ' / ' + (draft?.provider || selected) : 'Settings / Providers';
+  const focusKey = bridgeId + '/' + (editing ? step !== null ? 'new' : selected : 'list');
+  useLayoutEffect(() => {
+    onHeadingChange?.({ title, description, breadcrumb, focusKey });
+  }, [onHeadingChange, title, description, breadcrumb, focusKey]);
   const closeEditor = () => {
     setDraft(null);
     setLabel('');
@@ -642,13 +648,6 @@ export default function ProviderProfilesSurface({ bridge }: { bridge: any }) {
   return (
     <div data-debug-id="provider-profiles" className="min-w-0 w-full space-y-6">
       <div className="flex flex-wrap items-start justify-between gap-4">
-        <div className="min-w-0 space-y-2 break-words">
-          <Text role="overline" tone="muted">{editing ? bridgeName + ' / ' + (draft?.provider || selected) : 'Settings / Providers'}</Text>
-          <Text ref={headingRef} as="h1" role="display" tabIndex={-1}>{editing ? step !== null ? 'Add provider' : label || selected : bridgeName}</Text>
-          <Text role="body" tone="muted">
-            {editing ? `Provider profile and runtime settings on ${bridgeName}.` : 'Provider profiles and runtime settings on this bridge.'}
-          </Text>
-        </div>
         {editing ? <Button variant="secondary" data-debug-id="profile-back-to-list" disabled={busy} onClick={closeEditor}>← Back to providers</Button> : (
         <Button
           data-debug-id="profile-add"

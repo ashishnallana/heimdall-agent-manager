@@ -63,3 +63,12 @@ These are fixture integration checks, not tests against live Hub/Bridge services
 ## Integration after independent approval
 
 This task chain has no application repository directory configured for automatic merge-back. The commit is available locally on the branch above, in the original repository's shared object database. After independent review, the coordinator/operator should inspect the committed diff, then integrate that exact commit into the intended current main branch using the normal merge/cherry-pick process. Reconcile any intervening main changes and repeat affected checks. Do not reset or overwrite the original checkout's unrelated branch or uncommitted work. No remote push, deployment, service restart or release publication is part of this task.
+
+
+## Settings heading ownership correction
+
+The Settings shell now owns the provider page title, subtitle and contextual breadcrumb. Overview, selected bridge, existing profile and add-provider views publish their current context through a small heading callback; provider content retains back actions and meaningful form section headings. Heading updates occur before paint, and focus moves to the Settings heading when navigating between contexts without interrupting label editing. Provider APIs and form behavior are unchanged.
+
+This correction was made directly in `/var/home/tanmay/provider-settings-main` on local `main`, starting at `fc39983a7d2fe8c60104801fec8d986d19281b4b`. The original checkout and remote main remain unchanged. No further integration is required after independent review of this correction.
+
+Verification: `npm run build` passed; `node --import ./tests/helpers/vaultEndpointHarness.ts --test tests/ui_provider_bridge_navigation_test.ts tests/ui_provider_profiles_test.ts tests/ui_settings_modal_test.ts` passed 11/11; the browser command above with `PROVIDER_LAYOUT_EVIDENCE=/tmp/provider-heading-evidence` passed 24 integrated responsive states. Existing navigation and browser checks now assert Settings heading ownership and route/editor context changes. Desktop/narrow overview, bridge list and editor screenshots were visually inspected. [Heading verification gallery](artifact://art_18e3e8e5d4479adc).

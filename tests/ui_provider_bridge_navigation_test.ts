@@ -6,7 +6,7 @@ import { Provider } from 'react-redux';
 import { createRoot } from 'react-dom/client';
 import { makeVaultStore, unlockVault, lockVaultFully } from './helpers/vaultEndpointHarness.ts';
 
-const { ProvidersPanel } = await import('../src/ui/components/settings/ProvidersPanel.tsx');
+const { SettingsModal } = await import('../src/ui/components/settings/SettingsModal.tsx');
 const { heimdallApi } = await import('../src/ui/api/heimdallApi.ts');
 
 test('provider overview navigates between bridge lists without implicitly selecting a bridge', async () => {
@@ -54,8 +54,11 @@ test('provider overview navigates between bridge lists without implicitly select
     await act(tick);
   };
   try {
-    await act(async () => { root.render(React.createElement(Provider, { store }, React.createElement(ProvidersPanel))); await tick(); });
+    await act(async () => { root.render(React.createElement(Provider, { store }, React.createElement(SettingsModal, { open: true, initialTab: 'providers', onOpenChange: () => {}, user: { name: 'Test' } }))); await tick(); });
     await act(tick);
+    assert.equal(q('settings-desktop-content').querySelectorAll('h1').length, 1);
+    assert.equal(q('providers-panel').querySelectorAll('h1').length, 0, 'Settings owns the page heading');
+    assert.equal(q('settings-desktop-content').querySelector('h1')?.textContent?.trim(), 'Providers');
     assert.ok(q('providers-bridge-overview'), dom.window.document.body.textContent || 'empty');
     assert.equal(q('provider-profiles'), null);
     assert.equal(q('providers-bridge-bridge_revoked'), null);
@@ -88,6 +91,8 @@ test('provider overview navigates between bridge lists without implicitly select
     assert.ok(q('profile-select-claude'), 'legacy bridge bookmark remains supported');
     await navigate('#/settings/providers/missing');
     assert.match(dom.window.document.body.textContent!, /no longer available/);
+    assert.equal(q('settings-desktop-content').querySelector('h1')?.textContent?.trim(), 'missing');
+    assert.doesNotMatch(q('settings-desktop-content').querySelector('h1')!.textContent!, /Riverwood|Laptop/);
     assert.equal(q('provider-profiles'), null, 'missing bridge must never fall back to a different bridge');
     await navigate('#/settings/providers');
     failBridges = true;

@@ -35,6 +35,14 @@ try {
       await page.addStyleTag({ content: faces.join('\n') });
       await page.evaluate(async () => { await Promise.all(['Source Serif 4', 'IBM Plex Sans', 'IBM Plex Mono'].map((family) => document.fonts.load(`14px "${family}"`))); });
     }
+    const checkHeading = async (title, description, breadcrumb = '') => {
+      const shell = q('settings-desktop-content');
+      await page.waitForFunction((title) => document.querySelector('[data-debug-id="settings-desktop-content"] h1')?.textContent.trim() === title, title);
+      assert.equal(await shell.locator('h1:visible').count(), 1, 'Settings owns one visible page heading');
+      assert.equal(await q('providers-panel').locator('h1').count(), 0, 'provider content has no duplicate page heading');
+      assert.ok((await shell.locator('h1').locator('..').textContent()).includes(description));
+      if (breadcrumb) assert.ok((await shell.locator('h1').locator('..').textContent()).includes(breadcrumb));
+    };
     const checkLayout = async (name) => {
       const measurement = await page.evaluate(() => {
         const containers = [...document.querySelectorAll('[data-debug-id="settings-desktop-content"], [data-debug-id="profile-editor"], [data-debug-id="providers-panel"]')]
@@ -51,14 +59,17 @@ try {
       await page.screenshot({ path: path.join(evidence, `${width}-${name}.png`), fullPage: true });
       results.push({ width, state: name, ...measurement });
     };
+    await checkHeading('Providers', 'Choose a bridge');
     await checkLayout('overview');
     await q('providers-bridge-bridge_test').focus();
     await page.keyboard.press('Enter');
     await q('profile-select-claude').waitFor();
+    await checkHeading('Riverwood', 'Provider profiles and runtime settings on this bridge.', 'Settings / Providers');
     await checkLayout('bridge-list');
     await q('profile-select-claude').click();
     await q('profile-editor').waitFor();
     assert.equal(await page.evaluate(() => document.activeElement.tagName), 'H1', 'entering editor moves focus to its heading');
+    await checkHeading('Claude Code', 'Provider profile and runtime settings on Riverwood.', 'Riverwood / claude');
     assert.equal(await q('profiles-list').count(), 0);
     const widths = await page.evaluate(() => ['profile-editor', 'provider-profiles'].map((id) => document.querySelector(`[data-debug-id="${id}"]`).getBoundingClientRect().width));
     assert.ok(Math.abs(widths[0] - widths[1]) < 2, `editor must use all content width: ${widths}`);
@@ -74,11 +85,13 @@ try {
 
     // The same mounted editor must survive desktop/mobile resize.
     await q('profile-label').fill('Unsaved draft');
+    await checkHeading('Unsaved draft', 'Provider profile and runtime settings on Riverwood.');
     await page.setViewportSize({ width: width === 390 ? 1440 : 390, height: 1000 });
     assert.equal(await q('profile-label').inputValue(), 'Unsaved draft');
     await page.setViewportSize({ width, height: 1000 });
     await q('profile-back-to-list').click();
     assert.equal(await page.evaluate(() => document.activeElement.tagName), 'H1', 'returning to list restores heading focus');
+    await checkHeading('Riverwood', 'Provider profiles and runtime settings on this bridge.');
     await q('profile-select-claude').click();
     await q('profile-delete-reset').waitFor();
     assert.equal(await q('profile-delete-reset').textContent(), 'Reset overrides');
@@ -101,6 +114,7 @@ try {
     await q('profile-cancel').click();
 
     await q('profile-add').click();
+    await checkHeading('Add provider', 'Provider profile and runtime settings on Riverwood.');
     await q('profile-driver').selectOption('claude');
     await q('profile-next').click();
     await q('profile-label').fill('Work account');
@@ -124,11 +138,13 @@ try {
     await q('providers-bridge-bridge_offline').click();
     await q('profile-locked').waitFor();
     assert.equal(await q('profile-add').isDisabled(), true);
+    await checkHeading('Laptop', 'Provider profiles and runtime settings on this bridge.');
     await checkLayout('offline');
     await q('providers-all-bridges').click();
     await q('providers-bridge-bridge_locked').click();
     await q('profile-locked').waitFor();
     assert.equal(await q('profiles-refresh').isDisabled(), true);
+    await checkHeading('Locked', 'Provider profiles and runtime settings on this bridge.');
     await checkLayout('locked');
     await page.close();
   }

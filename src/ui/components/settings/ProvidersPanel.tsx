@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useState } from 'react';
 import { Badge, Button, Panel, Spinner, StatusPill, Text } from '@ui';
 import { useListBridgesQuery } from '../../api/endpoints/bridgeSupport';
 import { apiErrorText } from '../../api/cookieFetch';
@@ -54,7 +54,18 @@ function ProviderBridgeCard({ bridge }: { bridge: any }) {
   );
 }
 
-export function ProvidersPanel({ bridgeId: routeBridgeId = '' }: { bridgeId?: string } = {}) {
+export interface ProviderSettingsHeading {
+  title: string;
+  description: string;
+  breadcrumb: string;
+  focusKey: string;
+}
+
+export function ProvidersPanel({ bridgeId: routeBridgeId = '', onHeadingChange }: {
+  bridgeId?: string;
+  onHeadingChange?: (heading: ProviderSettingsHeading) => void;
+} = {}) {
+  const [editorHeading, setEditorHeading] = useState<ProviderSettingsHeading | null>(null);
   const [hash, setHash] = useState(() => window.location.hash);
   useEffect(() => {
     const changed = () => setHash(window.location.hash);
@@ -75,21 +86,34 @@ export function ProvidersPanel({ bridgeId: routeBridgeId = '' }: { bridgeId?: st
   const bridgeId = routeBridgeId || pathBridge || legacyBridge;
   const bridge = bridges.find((b: any) => bridgeKey(b) === bridgeId);
 
+  const bridgeName = bridge ? providerBridgeName(bridge) : bridgeId;
+  const heading = editorHeading?.focusKey.startsWith(bridgeId + '/') && bridge && !query.isError && !query.isLoading
+    ? editorHeading : {
+      title: bridgeName || 'Providers',
+      description: bridgeId
+        ? query.isLoading ? 'Loading bridge provider settings…'
+          : query.isError ? 'Could not load bridge provider settings.'
+          : bridge ? 'Provider profiles and runtime settings on this bridge.'
+          : 'This bridge is no longer available. Choose another bridge.'
+        : 'Choose a bridge to manage its provider profiles and runtime settings.',
+      breadcrumb: bridgeId ? 'Settings / Providers' : '',
+      focusKey: bridgeId ? bridgeId + '/list' : '',
+    };
+  useLayoutEffect(() => {
+    onHeadingChange?.(heading);
+  }, [onHeadingChange, heading.title, heading.description, heading.breadcrumb, heading.focusKey]);
+
   if (query.isLoading) return <div className="flex min-h-64 items-center justify-center gap-2 text-sm text-muted"><Spinner size="sm" /> Loading bridges…</div>;
   if (query.isError) return <Panel><p role="alert" className="text-danger">Could not load bridges.</p><Button variant="secondary" data-debug-id="providers-retry" onClick={() => void query.refetch()}>Try again</Button></Panel>;
   if (bridgeId) return (
     <div data-debug-id="providers-panel" className="min-w-0 space-y-4">
       <a data-debug-id="providers-all-bridges" className="text-sm text-accent" href="#/settings/providers">← All bridges</a>
-      {bridge ? <ProviderProfilesSurface key={bridgeId} bridge={bridge} /> : <Panel><Text role="body">This bridge is no longer available. Choose another bridge.</Text></Panel>}
+      {bridge ? <ProviderProfilesSurface key={bridgeId} bridge={bridge} onHeadingChange={setEditorHeading} /> : <Panel><Text role="body">This bridge is no longer available. Choose another bridge.</Text></Panel>}
     </div>
   );
 
   return (
     <div data-debug-id="providers-panel" className="min-w-0 space-y-6">
-      <div className="space-y-2">
-        <Text as="h1" role="display">Providers</Text>
-        <Text role="body" tone="muted">Choose a bridge to manage its provider profiles and runtime settings.</Text>
-      </div>
       <div className="flex flex-wrap items-center justify-between gap-2">
         <Text as="h2" role="heading">Your bridges</Text>
         <Text role="body-sm" tone="muted">{bridges.length} bridges</Text>
