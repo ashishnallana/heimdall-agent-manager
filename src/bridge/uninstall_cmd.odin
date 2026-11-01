@@ -16,6 +16,7 @@ import "core:strconv"
 import "core:strings"
 import "core:time"
 import bridgesvc "odin_test:lib/bridgesvc"
+import local_socket "odin_test:lib/local_socket"
 
 BRIDGE_UNINSTALL_USAGE :: "usage: ham-bridge uninstall [--hub URL [--profile P] | --service NAME] [--keep-data | --purge] [--revoke] [--json-progress] [--yes]"
 // Set on the copy a Windows uninstall re-executes from %TEMP%: a running .exe
@@ -44,6 +45,7 @@ Bridge_Uninstall :: struct {
 	config_path:   string,
 	bridge_pid:    int,
 	leftovers:     [dynamic]string,
+	pty_sockets:   [dynamic]string,
 }
 
 bridge_uninstall_command :: proc(args: []string) -> bool {
@@ -116,6 +118,7 @@ bridge_uninstall_confirm :: proc(name: string, mode: bridgesvc.Uninstall_Mode, r
 // the credential (hub, bridge id, token) and the running bridge's pid.
 bridge_uninstall_snapshot :: proc(u: ^Bridge_Uninstall) {
 	l := u.layout
+	u.pty_sockets = make([dynamic]string, context.temp_allocator)
 	u.config_path = bridgesvc.pjoin(l.state_dir, bridgesvc.CONFIG_FILE)
 	profile_token := bridgesvc.pjoin(l.state_dir, bridgesvc.TOKEN_FILE)
 	append(&u.token_files, profile_token)
@@ -128,6 +131,7 @@ bridge_uninstall_snapshot :: proc(u: ^Bridge_Uninstall) {
 	if cfg_hub := bridgesvc.hub_from_config(u.config_path); cfg_hub != "" && u.hub == "" do u.hub = cfg_hub
 	if u.hub == "" do u.hub = bridgesvc.read_first_line(bridgesvc.pjoin(l.state_dir, bridgesvc.HUB_URL_FILE))
 	if rt, ok := bridgesvc.read_runtime_status(l.state_dir); ok {
+		bridge_uninstall_add_pty_identity(u, rt.bridge_id)
 		// runtime-status.json outlives the bridge (it is only rewritten, never
 		// removed on exit), so its pid may have been reused by an unrelated process
 		// that Stop must not wait on and remediation must never TERM/KILL.
@@ -136,8 +140,9 @@ bridge_uninstall_snapshot :: proc(u: ^Bridge_Uninstall) {
 		if bridge_uninstall_trust_pid(rt.pid, os.get_pid(), running, image, image_known) do u.bridge_pid = rt.pid
 		if u.bridge_id == "" do u.bridge_id = rt.bridge_id
 	}
-	if u.bridge_id == "" {
-		if m, ok := bridgesvc.read_reenroll_marker(l.state_dir); ok do u.bridge_id = m.bridge_id
+	if m, ok := bridgesvc.read_reenroll_marker(l.state_dir); ok {
+		bridge_uninstall_add_pty_identity(u, m.bridge_id)
+		if u.bridge_id == "" do u.bridge_id = m.bridge_id
 	}
 	// A credential enrolled without --bridge-token-file lives at the per-scope default.
 	if u.hub != "" && u.bridge_id != "" {
@@ -151,6 +156,69 @@ bridge_uninstall_snapshot :: proc(u: ^Bridge_Uninstall) {
 		}
 	}
 	if u.hub != "" do _ = bridge_keystore_set_hub(u.hub)
+	// Snapshot before Secrets removes identity records. Only this profile's run
+	// directory supplies candidates; never scan shared temporary socket directories.
+	run := bridgesvc.pjoin(l.data_dir, "run")
+	bridge_uninstall_add_pty_identity(u, u.bridge_id)
+	if infos, err := os.read_directory_by_path(run, -1, context.temp_allocator); err == nil {
+		for info in infos {
+			if info.name == "pty-host.sock" || (strings.has_prefix(info.name, "pty-host-") && strings.has_suffix(info.name, ".sock")) {
+				append(&u.pty_sockets, bridge_unix_socket_bounded_path(bridgesvc.pjoin(run, info.name)))
+			}
+		}
+	}
+}
+
+bridge_uninstall_add_pty_identity :: proc(u: ^Bridge_Uninstall, bridge_id: string) {
+	if strings.trim_space(bridge_id) == "" do return
+	id := bridge_runtime_safe_part(bridge_id)
+	defer delete(id)
+	run := bridgesvc.pjoin(u.layout.data_dir, "run")
+	scoped := fmt.tprintf("/%s", id)
+	name := "pty-host.sock" if strings.contains(run, fmt.tprintf("%s/", scoped)) || strings.has_suffix(run, scoped) else fmt.tprintf("pty-host-%s.sock", id)
+	append(&u.pty_sockets, bridge_unix_socket_bounded_path(bridgesvc.pjoin(run, name)))
+}
+
+// Uninstall explicitly ends the selected profile's sessions. Speak Shutdown
+// directly so a daemon retained from an older binary generation can be stopped
+// even when the installed ham-pty-host executable has already moved or vanished.
+bridge_uninstall_stop_pty_hosts :: proc(u: ^Bridge_Uninstall) -> (bool, string) {
+	when ODIN_OS == .Windows {
+		if ok, detail := bridge_uninstall_discover_pty_hosts(u); !ok do return false, detail
+	}
+	request := pty_host_frame([]byte{0x37}) // dproto::CtlMsg::Shutdown
+	defer delete(request)
+	for socket in u.pty_sockets {
+		// Connect before sending: Winsock's nonblocking AF_UNIX connect can
+		// return WSAEWOULDBLOCK even for a healthy local daemon.
+		fd, connected := pty_host_dial(socket)
+		if !connected do continue
+		sent := 0
+		for sent < len(request) {
+			n := local_socket.send(fd, request[sent:])
+			if n <= 0 do break
+			sent += n
+		}
+		local_socket.close(fd)
+		if sent != len(request) do return false, fmt.tprintf("cannot request PTY shutdown at %s", socket)
+		deadline := time.time_add(time.now(), BRIDGE_UNINSTALL_STOP_WAIT)
+		for {
+			probe, alive := pty_host_dial(socket)
+			if alive do local_socket.close(probe)
+			if !alive do break
+			if time.diff(time.now(), deadline) <= 0 do return false, fmt.tprintf("profile PTY daemon is still running at %s", socket)
+			time.sleep(100 * time.Millisecond)
+		}
+	}
+	return true, ""
+}
+
+bridge_uninstall_pty_image_owned :: proc(l: bridgesvc.Layout, image: string) -> bool {
+	if bridgesvc.path_key(image) == bridgesvc.path_key(bridgesvc.pjoin(l.bin_dir, "ham-pty-host.exe")) do return true
+	parent := bridgesvc.pdir(image)
+	if bridgesvc.path_key(bridgesvc.pdir(parent)) != bridgesvc.path_key(l.data_dir) do return false
+	name := bridgesvc.pbase(parent)
+	return (name == "bin.bak" || strings.has_prefix(name, "bin.bak-")) && bridgesvc.pbase(image) == "ham-pty-host.exe"
 }
 
 bridge_uninstall_emit :: proc(data: rawptr, ev: bridgesvc.Event) {
@@ -213,6 +281,7 @@ bridge_uninstall_run :: proc(data: rawptr, step: bridgesvc.Uninstall_Step) -> (b
 		}
 		if !bridge_uninstall_wait_stopped(u) do return false, .Still_Running, fmt.tprintf("bridge pid %d is still running", u.bridge_pid)
 		if registered && bridge_service_running(u.host, l) do return false, .Still_Running, "the service is still running"
+		if ok, detail := bridge_uninstall_stop_pty_hosts(u); !ok do return false, .Still_Running, detail
 		return true, .None, "stopped" if registered else "skipped"
 
 	case .Unregister:

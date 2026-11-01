@@ -5,6 +5,33 @@ import "core:os"
 import "core:strings"
 import "core:testing"
 import "core:time"
+import bridgesvc "odin_test:lib/bridgesvc"
+
+@(test)
+test_bridge_uninstall_pty_identity_is_profile_scoped :: proc(t: ^testing.T) {
+	first := Bridge_Uninstall{layout = bridgesvc.Layout{data_dir = "/profiles/one"}, pty_sockets = make([dynamic]string, context.temp_allocator)}
+	second := Bridge_Uninstall{layout = bridgesvc.Layout{data_dir = "/profiles/two"}, pty_sockets = make([dynamic]string, context.temp_allocator)}
+	bridge_uninstall_add_pty_identity(&first, "brg_same")
+	bridge_uninstall_add_pty_identity(&second, "brg_same")
+	defer { for socket in first.pty_sockets do delete(socket); for socket in second.pty_sockets do delete(socket) }
+	bridge_uninstall_add_pty_identity(&first, "")
+	testing.expect_value(t, len(first.pty_sockets), 1)
+	testing.expect_value(t, first.pty_sockets[0], "/profiles/one/run/pty-host-brg_same.sock")
+	testing.expect(t, first.pty_sockets[0] != second.pty_sockets[0], "same bridge identity never targets another profile's daemon")
+}
+
+@(test)
+test_bridge_uninstall_pty_image_requires_exact_profile :: proc(t: ^testing.T) {
+	l := bridgesvc.Layout{data_dir = "/profiles/one", bin_dir = "/profiles/one/bin"}
+	owned := []string{"/profiles/one/bin/ham-pty-host.exe", "/profiles/one/bin.bak/ham-pty-host.exe", "/profiles/one/bin.bak-12-34/ham-pty-host.exe"}
+	for image in owned {
+		testing.expect(t, bridge_uninstall_pty_image_owned(l, image), image)
+	}
+	unowned := []string{"/profiles/two/bin/ham-pty-host.exe", "/profiles/one-other/bin/ham-pty-host.exe", "/profiles/one/nested/bin.bak-12/ham-pty-host.exe", "/profiles/one/bin/ham-bridge.exe"}
+	for image in unowned {
+		testing.expect(t, !bridge_uninstall_pty_image_owned(l, image), image)
+	}
+}
 
 // The hub's remote uninstall frame is a known, queued, exclusive bridge command
 // serialized with updates (never run concurrently with one).

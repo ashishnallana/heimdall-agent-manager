@@ -14,6 +14,37 @@ import win "core:sys/windows"
 
 WAIT_TIMEOUT :: 258
 
+// core:os process_start enables broad handle inheritance even with nil stdio.
+// A persistent PTY daemon must not keep the Bridge's log files or any other
+// inheritable handles open after the Bridge exits.
+bridge_os_start_daemon :: proc(argv: []string) -> (os.Process, os.Error) {
+	if len(argv) == 0 do return {}, os.General_Error.Invalid_Command
+	line := strings.builder_make(context.temp_allocator)
+	for arg, i in argv {
+		if i > 0 do strings.write_byte(&line, ' ')
+		strings.write_byte(&line, '"')
+		slashes := 0
+		for j in 0 ..< len(arg) {
+			c := arg[j]
+			if c == '\\' { slashes += 1; continue }
+			count := slashes * 2 + 1 if c == '"' else slashes
+			for _ in 0 ..< count do strings.write_byte(&line, '\\')
+			slashes = 0
+			strings.write_byte(&line, c)
+		}
+		for _ in 0 ..< slashes * 2 do strings.write_byte(&line, '\\')
+		strings.write_byte(&line, '"')
+	}
+	command := win.utf8_to_wstring(strings.to_string(line), context.temp_allocator)
+	startup := win.STARTUPINFOW{cb = size_of(win.STARTUPINFOW)}
+	process: win.PROCESS_INFORMATION
+	if !win.CreateProcessW(nil, command, nil, nil, false, win.CREATE_NO_WINDOW, nil, nil, &startup, &process) {
+		return {}, os.Platform_Error(win.GetLastError())
+	}
+	win.CloseHandle(process.hThread)
+	return os.Process{pid = int(process.dwProcessId), handle = uintptr(process.hProcess)}, nil
+}
+
 // Make listener non-inheritable before any PTY host or provider child starts.
 // CreateProcess call sites should already disable broad handle inheritance, but
 // clearing HANDLE_FLAG_INHERIT on the resource itself makes the invariant hold
@@ -50,6 +81,10 @@ bridge_os_process_lstart_and_command :: proc(pid: int) -> (start_unix_sec: i64, 
 	h := win.OpenProcess(win.PROCESS_QUERY_LIMITED_INFORMATION, false, u32(pid))
 	if h == nil do return 0, "", false
 	defer win.CloseHandle(h)
+	return bridge_os_process_identity_handle(h)
+}
+
+bridge_os_process_identity_handle :: proc(h: win.HANDLE) -> (start_unix_sec: i64, command: string, ok: bool) {
 	creation, exit_t, kernel_t, user_t: win.FILETIME
 	if !win.GetProcessTimes(h, &creation, &exit_t, &kernel_t, &user_t) do return 0, "", false
 	ticks := i64(u64(creation.dwHighDateTime) << 32 | u64(creation.dwLowDateTime))
@@ -61,6 +96,23 @@ bridge_os_process_lstart_and_command :: proc(pid: int) -> (start_unix_sec: i64, 
 	image, err := win.utf16_to_utf8(buf[:size], context.temp_allocator)
 	if err != nil do return 0, "", false
 	return start_unix_sec, image, true
+}
+
+// Bind the identity check and termination to one process handle, so PID reuse
+// between probing and stopping cannot target an unrelated process. Exit zero
+// for an intentional service stop, avoiding Task Scheduler's failure restart.
+bridge_os_stop_service_process :: proc(pid: int, recorded_at: i64, expected: string) -> bool {
+	if pid <= 0 || pid == os.get_pid() do return false
+	h := win.OpenProcess(win.PROCESS_TERMINATE | win.PROCESS_QUERY_LIMITED_INFORMATION | win.SYNCHRONIZE, false, u32(pid))
+	if h == nil do return false
+	defer win.CloseHandle(h)
+	started, image, known := bridge_os_process_identity_handle(h)
+	if !known || started <= 0 || started > recorded_at do return false
+	image, _ = strings.replace_all(image, "\\", "/", context.temp_allocator)
+	path, _ := strings.replace_all(expected, "\\", "/", context.temp_allocator)
+	if strings.to_lower(image, context.temp_allocator) != strings.to_lower(path, context.temp_allocator) do return false
+	if !win.TerminateProcess(h, 0) do return false
+	return win.WaitForSingleObject(h, 5000) == 0
 }
 
 // bridge_os_exe_base reduces a command line or image path to a comparable
@@ -282,8 +334,10 @@ BRIDGE_EXE_SUFFIX :: ".exe"
 // outlives the bridge and is reaped by the OS once the bridge exits.
 bridge_os_spawn_new_session :: proc(argv: []string) -> bool {
 	if len(argv) == 0 do return false
-	process, err := os.process_start(os.Process_Desc{command = argv})
-	_ = process
+	process, err := bridge_os_start_daemon(argv)
+	// Detached workers have no waiter in this process. Closing our handle does
+	// not terminate the child; it prevents one handle leak per automatic update.
+	if err == nil do win.CloseHandle(win.HANDLE(process.handle))
 	return err == nil
 }
 
