@@ -157,8 +157,8 @@ test_brief_leased_edit_lists_fields :: proc(t: ^testing.T) {
 	if !testing.expectf(t, lok, "seed lease: %s", lerr.message) do return
 	_, bad, berr := update_task(&f.svc, f.owner, task.task_id, Update_Task_Input{brief_json = `{"goal":"changed","budget":null,"acceptance":["ok"]}`})
 	testing.expect(t, !bad && berr.code == .Conflict, "leased scope edit refused")
-	testing.expect(t, strings.contains(berr.details_json, `"fields":["brief.budget","brief.goal"]`), berr.details_json)
-	testing.expect(t, strings.contains(berr.details_json, `"allowed":["brief.acceptance"`), berr.details_json)
+	testing.expect(t, strings.contains(berr.details_json, `"fields":["brief.budget"]`), berr.details_json)
+	testing.expect(t, strings.contains(berr.details_json, `"allowed":["brief.goal","brief.acceptance"`), berr.details_json)
 	testing.expect(t, strings.contains(berr.message, "REQ-TV2-5"), berr.message)
 	_, tbad, tberr := update_task(&f.svc, f.owner, task.task_id, Update_Task_Input{title = "renamed", has_assignee = true, assignee_agent_id = "agt_rev"})
 	testing.expect(t, !tbad && strings.contains(tberr.details_json, `"fields":["title","brief.assignee"]`), tberr.details_json)

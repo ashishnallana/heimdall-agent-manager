@@ -10,10 +10,9 @@ import json "core:encoding/json"
 import domain "odin_test:hub/domain"
 import taskv2 "odin_test:hub/service/taskv2"
 
-// LEASED_BRIEF_EDIT_KEYS: the brief keys a leased task still accepts, because
-// changing them does not change the in-flight work. Everything else waits for
-// the hold/checkpoint (REQ-TV2-5) or for the lease to end.
-LEASED_BRIEF_EDIT_KEYS := [?]string{"acceptance"}
+// Requirement edits are versioned and delivered to the worker. Placement and
+// other execution settings still wait for a checkpoint or lease release.
+LEASED_BRIEF_EDIT_KEYS := [?]string{"goal", "acceptance"}
 
 write_json_string_array :: proc(b: ^strings.Builder, items: []string) {
 	taskv2.write_json_string_array(b, items)
@@ -157,10 +156,10 @@ leased_edit_error :: proc(fields: []string) -> domain.Domain_Error {
 	b := strings.builder_make(context.temp_allocator)
 	strings.write_string(&b, `{"code":"task_leased","fields":`)
 	write_json_string_array(&b, fields)
-	strings.write_string(&b, `,"allowed":["brief.acceptance","priority","depends_on","requires_user_approval"],"see":"REQ-TV2-5 hold/checkpoint"}`)
+	strings.write_string(&b, `,"allowed":["brief.goal","brief.acceptance","priority","depends_on","requires_user_approval"],"see":"REQ-TV2-5 hold/checkpoint"}`)
 	msg := strings.concatenate({
 		"task is leased: cannot change ", strings.join(fields, ", ", context.temp_allocator),
-		" while a worker holds it. Allowed while leased: brief.acceptance, priority, depends_on, requires_user_approval. ",
+		" while a worker holds it. Allowed while leased: brief.goal, brief.acceptance, priority, depends_on, requires_user_approval. ",
 		"Hold the task at a checkpoint (REQ-TV2-5) or wait for the lease to end, then edit.",
 	}, context.temp_allocator)
 	return domain.domain_error(.Conflict, msg, strings.to_string(b))
