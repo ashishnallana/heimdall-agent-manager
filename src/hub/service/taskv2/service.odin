@@ -949,6 +949,11 @@ release_task_blocks_in_uow :: proc(svc: ^Service, u: ^Uow, tasks: []domain.Task)
 after_chain_change :: proc(svc: ^Service, u: ^Uow, chain_id: domain.Task_Chain_ID, owner: domain.User_ID, trigger: Trigger) -> (bool, domain.Domain_Error) {
 	chain, ok, err := iface.taskchain_get_chain(svc.repo, chain_id)
 	if !ok do return false, err
+	requirement_tasks, req_err := iface.taskchain_list_tasks_by_chain(svc.repo, chain_id, owner)
+	if req_err.code != .None do return false, req_err
+	for task in requirement_tasks {
+		if rok, rerr := requirements_reconcile_in_uow(svc, u, task); !rok do return false, rerr
+	}
 	// Settle run/task dependencies together; a successful run can release
 	// another run or a ticket in this same transaction.
 	for pass := 0; pass < 130; pass += 1 {

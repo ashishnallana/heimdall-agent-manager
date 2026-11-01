@@ -208,6 +208,10 @@ fold_task :: proc(events: []domain.Task_Event, input: Fold_Input) -> Task_View {
 				v.last_release = .Expired
 				apply_budget(&v, max_attempts, ev.ts_ms)
 			}
+		case EV_REQUIREMENTS_REWORK:
+			if !v.in_review do continue
+			v.in_review = false
+			v.last_release = .Replaced // requirement changes do not spend worker failure budget
 		case EV_CHANGES_REQUESTED:
 			// Verdicts only mean something while the task awaits review.
 			if !v.in_review do continue

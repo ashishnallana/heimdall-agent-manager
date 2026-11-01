@@ -40,6 +40,7 @@ gate_approver_policy :: proc(task: domain.Task) -> string {
 evaluate_gate_in_uow :: proc(svc: ^Service, u: ^Uow, chain: domain.Task_Chain, task_in: domain.Task, actor: Actor) -> (Gate_Result, bool, domain.Domain_Error) {
 	task := task_in
 	if task.state != .In_Review do return .Waiting, true, domain.Domain_Error{}
+	if requirements_stale_review(svc, task) do return .Waiting, true, domain.Domain_Error{}
 	// A held task is a repair window (REQ-TV2-5): verdicts are recorded but the
 	// gate does not move until task_release re-evaluates it.
 	if task_is_held(task) do return .Waiting, true, domain.Domain_Error{}

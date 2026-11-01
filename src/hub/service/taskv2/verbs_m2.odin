@@ -41,6 +41,7 @@ work_lease_caller :: proc(svc: ^Service, auth: contracts.Auth_Context, lease_id:
 // ---- lease.submit ---------------------------------------------------------------------
 
 Submit_Input :: struct {
+	requirements_revision: i64,
 	lease_id:       string,
 	summary:        string,
 	handoff_json:   string, // optional object: next_steps, decisions, … (verbatim)
@@ -70,6 +71,13 @@ lease_submit :: proc(svc: ^Service, auth: contracts.Auth_Context, input: Submit_
 	if !uok do return {}, false, uerr
 	c, ok, err := work_lease_caller(svc, auth, input.lease_id)
 	if !ok { _, _ = end_uow(svc, &u, false); return {}, false, err }
+	if state, rerr := requirements_read(svc.repo, c.task); rerr.code != .None || (state.revision > 1 && input.lease_id != c.lease.lease_id) {
+		_, _ = end_uow(svc, &u, false)
+		return {}, false, domain.domain_error(.Conflict, "submit must name the current lease and requirements revision")
+	}
+	if rerr := requirements_submit_guard(svc, c.task, c.lease, input.requirements_revision); rerr.code != .None {
+		_, _ = end_uow(svc, &u, false); return {}, false, rerr
+	}
 	// output contract: brief.output present → an output object is required and validated
 	if oerr := validate_task_output_contract(c.task, input.output_json); oerr.code != .None {
 		_, _ = end_uow(svc, &u, false)
@@ -83,6 +91,11 @@ lease_submit :: proc(svc: ^Service, auth: contracts.Auth_Context, input: Submit_
 	p := json_begin()
 	json_str(&p, "lease_id", c.lease.lease_id)
 	json_int(&p, "attempt_no", i64(c.lease.attempt_no))
+	state, state_err := requirements_read(svc.repo, c.task)
+	if state_err.code != .None { _, _ = end_uow(svc, &u, false); return {}, false, state_err }
+	json_int(&p, "requirements_revision", state.revision)
+	json_raw(&p, "requirements", requirements_snapshot(c.task.brief_json))
+	json_str(&p, "head", jsonx.extract_string(input.vcs_json, "head", "", true, context.temp_allocator))
 	task, rok, rerr := release_in_uow(svc, &u, c.lease, actor, EV_SUBMITTED, json_end(&p), "submitted")
 	if rok do rok, rerr = after_chain_change(svc, &u, c.task.chain_id, c.task.owner_user_id, .Lease_Released)
 	_, cerr := end_uow(svc, &u, rok)
@@ -166,7 +179,7 @@ review_checkpoint_handoff :: proc(svc: ^Service, u: ^Uow, auth: contracts.Auth_C
 	if strings.trim_space(input.lease_id) != "" && input.lease_id != lease.lease_id do return {}, true, false, lease_lost_error()
 	current, tok, terr := iface.taskchain_get_task(svc.repo, lease.task_id)
 	if !tok do return {}, true, false, terr
-	if !task_is_held(current) do return {}, true, false, domain.domain_error(.Conflict, "a review lease ends with `review post`; `lease handoff` is only for a checkpoint requested by a task hold")
+	if !task_is_held(current) && !requirements_stale_review(svc, current) do return {}, true, false, domain.domain_error(.Conflict, "a review lease ends with `review post`; `lease handoff` is only for a requested checkpoint")
 	if deleted, _ := iface.taskchain_delete_lease(svc.repo, lease.lease_id); !deleted do return {}, true, false, lease_lost_error()
 	metric_lease_released(lease.kind)
 	p := json_begin()
@@ -286,6 +299,10 @@ waiting_with_since :: proc(waiting: string, since_ms: i64) -> string {
 // ---- review.post (agent) ---------------------------------------------------------------
 
 Review_Input :: struct {
+	lease_id: string,
+	requirements_revision: i64,
+	expected_attempt_no: int,
+	expected_head: string,
 	task_id:       string, // optional for agents (their review lease names it); required for users and on_behalf_of:user
 	verdict:       string, // approve | request_changes
 	findings_json: string, // array, verbatim (capped)
@@ -353,6 +370,9 @@ review_post :: proc(svc: ^Service, auth: contracts.Auth_Context, input: Review_I
 			_, _ = end_uow(svc, &u, false)
 			return {}, false, domain.domain_error(.Conflict, "task is not awaiting review")
 		}
+		if rerr := requirements_review_guard(svc, task, input); rerr.code != .None {
+			_, _ = end_uow(svc, &u, false); return {}, false, rerr
+		}
 		if task.kind == .Gate && gate_approver_policy(task) == "user" && strings.trim_space(input.on_behalf_of) == "" {
 			_, _ = end_uow(svc, &u, false)
 			return {}, false, domain.domain_error(.Forbidden, "gate stage requires human user approval", `{"code":"gate_requires_user"}`)
@@ -370,6 +390,9 @@ review_post :: proc(svc: ^Service, auth: contracts.Auth_Context, input: Review_I
 		p := json_begin()
 		json_int(&p, "attempt_no", i64(task.attempt_no))
 		json_str(&p, "role", rev_role)
+		if berr := requirements_review_binding(svc, task, &p); berr.code != .None {
+			_, _ = end_uow(svc, &u, false); return {}, false, berr
+		}
 		json_str(&p, "verdict", input.verdict)
 		json_str(&p, "reviewer", rev_role if rev_role == "user" else inst.agent_instance_id)
 		json_str(&p, "reviewer_agent_id", inst.agent_id)
@@ -398,6 +421,16 @@ review_post :: proc(svc: ^Service, auth: contracts.Auth_Context, input: Review_I
 	}
 	task, tok, terr := iface.taskchain_get_task(svc.repo, lease.task_id)
 	if !tok { _, _ = end_uow(svc, &u, false); return {}, false, terr }
+	if state, rerr := requirements_read(svc.repo, task); rerr.code != .None || (state.revision > 1 && input.lease_id != lease.lease_id) {
+		_, _ = end_uow(svc, &u, false)
+		return {}, false, domain.domain_error(.Conflict, "review must name the current review lease")
+	}
+	if rerr := requirements_review_guard(svc, task, input); rerr.code != .None {
+		_, _ = end_uow(svc, &u, false); return {}, false, rerr
+	}
+	if rerr := requirements_submit_guard(svc, task, lease, input.requirements_revision); rerr.code != .None {
+		_, _ = end_uow(svc, &u, false); return {}, false, rerr
+	}
 	chain, cok, cerr := iface.taskchain_get_chain(svc.repo, task.chain_id)
 	if !cok { _, _ = end_uow(svc, &u, false); return {}, false, cerr }
 	findings, _ := findings_json_capped(input.findings_json)
@@ -422,6 +455,9 @@ review_post :: proc(svc: ^Service, auth: contracts.Auth_Context, input: Review_I
 	p := json_begin()
 	json_int(&p, "attempt_no", i64(task.attempt_no))
 	json_str(&p, "role", lease.review_role)
+	if berr := requirements_review_binding(svc, task, &p); berr.code != .None {
+		_, _ = end_uow(svc, &u, false); return {}, false, berr
+	}
 	json_str(&p, "verdict", input.verdict)
 	json_str(&p, "reviewer", inst.agent_id)
 	json_str(&p, "reviewer_agent_id", inst.agent_id)
@@ -476,6 +512,9 @@ user_review :: proc(svc: ^Service, auth: contracts.Auth_Context, task_id: domain
 	task, tok, terr := iface.taskchain_get_task(svc.repo, task_id)
 	if !tok || string(task.owner_user_id) != auth.user_id { _, _ = end_uow(svc, &u, false); return {}, false, domain.domain_error(.Not_Found, "task not found") }
 	if task.state != .In_Review { _, _ = end_uow(svc, &u, false); return {}, false, domain.domain_error(.Conflict, "task is not awaiting review") }
+	if rerr := requirements_review_guard(svc, task, input); rerr.code != .None {
+		_, _ = end_uow(svc, &u, false); return {}, false, rerr
+	}
 	chain, cok, cerr := iface.taskchain_get_chain(svc.repo, task.chain_id)
 	if !cok { _, _ = end_uow(svc, &u, false); return {}, false, cerr }
 	findings, _ := findings_json_capped(input.findings_json)
@@ -486,6 +525,9 @@ user_review :: proc(svc: ^Service, auth: contracts.Auth_Context, task_id: domain
 	p := json_begin()
 	json_int(&p, "attempt_no", i64(task.attempt_no))
 	json_str(&p, "role", "user")
+	if berr := requirements_review_binding(svc, task, &p); berr.code != .None {
+		_, _ = end_uow(svc, &u, false); return {}, false, berr
+	}
 	json_str(&p, "verdict", input.verdict)
 	json_str(&p, "reviewer", "user")
 	// A user review has no agent; the keys are present (empty) so every

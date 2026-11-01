@@ -42,6 +42,12 @@ lease_next :: proc(svc: ^Service, auth: contracts.Auth_Context, input: Lease_Nex
 		fresh, _, _ := iface.taskchain_get_lease(svc.repo, lease.lease_id)
 		task, tok, terr := iface.taskchain_get_task(svc.repo, fresh.task_id)
 		if !tok { rok = false; rerr = terr } else {
+			if !input.peek {
+				if perr := requirements_present(svc, task, fresh); perr.code != .None {
+					_, _ = end_uow(svc, &u, false)
+					return {}, false, perr
+				}
+			}
 			record_attempt_started(svc, task, fresh, input.vcs_base)
 			res = Lease_Next_Result{status = "current", lease = fresh, task = task}
 		}
@@ -55,6 +61,10 @@ lease_next :: proc(svc: ^Service, auth: contracts.Auth_Context, input: Lease_Nex
 			if lease, task, granted := grant_inline_for_instance(svc, &u, chain, inst, .Lease_Next); granted {
 				record_attempt_started(svc, task, lease, input.vcs_base)
 				res = Lease_Next_Result{status = "granted", lease = lease, task = task}
+				if perr := requirements_present(svc, task, lease); perr.code != .None {
+					_, _ = end_uow(svc, &u, false)
+					return {}, false, perr
+				}
 			}
 		}
 	}
@@ -70,6 +80,7 @@ lease_next :: proc(svc: ^Service, auth: contracts.Auth_Context, input: Lease_Nex
 }
 
 Lease_Heartbeat_Input :: struct {
+	acknowledge_requirements_revision: i64,
 	lease_id: string,
 	note:     string,
 }
@@ -77,6 +88,9 @@ Lease_Heartbeat_Input :: struct {
 // lease_heartbeat extends the TTL (never past the hard cap). 409 lease_lost when
 // the caller holds nothing or names a lease it does not hold.
 lease_heartbeat :: proc(svc: ^Service, auth: contracts.Auth_Context, input: Lease_Heartbeat_Input) -> (domain.Task_Lease, bool, domain.Domain_Error) {
+	if input.acknowledge_requirements_revision != 0 && input.lease_id == "" {
+		return {}, false, domain.domain_error(.Validation_Failed, "lease_id is required to acknowledge requirements")
+	}
 	inst, ok, err := instance_from_auth(svc, auth)
 	if !ok do return {}, false, err
 	u, uok, uerr := begin_uow(svc)
@@ -85,6 +99,14 @@ lease_heartbeat :: proc(svc: ^Service, auth: contracts.Auth_Context, input: Leas
 	if !held || (strings.trim_space(input.lease_id) != "" && input.lease_id != lease.lease_id) {
 		_, _ = end_uow(svc, &u, false)
 		return {}, false, lease_lost_error()
+	}
+	if input.acknowledge_requirements_revision != 0 {
+		task, found, terr := iface.taskchain_get_task(svc.repo, lease.task_id)
+		if !found { _, _ = end_uow(svc, &u, false); return {}, false, terr }
+		if aerr := requirements_ack_in_uow(svc, task, lease, input.acknowledge_requirements_revision); aerr.code != .None {
+			_, _ = end_uow(svc, &u, false); return {}, false, aerr
+		}
+		effect_publish_task(&u, task, "requirements_acknowledged")
 	}
 	saved, hok, herr := heartbeat_in_uow(svc, &u, lease, Actor{kind = ACTOR_AGENT, id = inst.agent_instance_id}, input.note)
 	_, cerr := end_uow(svc, &u, hok)
