@@ -366,6 +366,8 @@ test('ThisMachineCard: account B detects account A\'s profile but cannot manage 
     assert.match(query('settings-detected-profiles-p1')!.textContent || '', /p1.*Not linked to this account/);
     assert.equal(query('settings-this-machine-uninstall-btn'), null, 'revealing a profile does not grant lifecycle controls');
     assert.match(query('settings-this-machine-other-accounts')!.textContent || '', /Another Ninjy account has a bridge on this machine/);
+    await act(async () => { query('settings-this-machine-open-setup-btn')!.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+    assert.equal(dom.window.location.hash, '#/setup', 'the wizard can be reopened after the first-run flag was remembered');
     await act(async () => { query('settings-this-machine-setup-btn')!.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
     assert.deepEqual(runs, [{ kind: 'setup', target: { hub: 'https://hub.example.test', profile: '' }, options: { separateAccount: true, inAppApproval: true } }]);
   } finally {

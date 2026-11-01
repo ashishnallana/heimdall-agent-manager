@@ -298,6 +298,18 @@ parse_ports :: proc(text: string) -> (ports: [2]int, ok: bool) {
 
 Port_Busy_Proc :: #type proc(port: int) -> bool
 
+// Directory enumeration on Windows returns absolute backslash paths even when
+// the profile was constructed with forward slashes or a root-relative path.
+path_key :: proc(path: string) -> string {
+	absolute, err := os.get_absolute_path(path, context.temp_allocator)
+	value := absolute if err == nil else path
+	when ODIN_OS == .Windows {
+		value, _ = strings.replace_all(value, "\\", "/", context.temp_allocator)
+		value = strings.to_lower(value, context.temp_allocator)
+	}
+	return strings.trim_right(value, "/\\")
+}
+
 // allocate_ports keeps this profile's persisted pair while it is free, never takes
 // a pair another profile under state_root has recorded, and otherwise walks up
 // from the defaults. The result is written to <state_dir>/ports.json. reused
@@ -305,7 +317,7 @@ Port_Busy_Proc :: #type proc(port: int) -> bool
 allocate_ports :: proc(state_root, state_dir: string, busy: Port_Busy_Proc) -> (ports: [2]int, reused: bool, ok: bool) {
 	reserved := make([dynamic]int, context.temp_allocator)
 	preferred := [2]int{DEFAULT_BRIDGE_PORT, DEFAULT_ENDPOINT_PORT}
-	own_clean := strings.trim_right(state_dir, "/\\")
+	own_clean := path_key(state_dir)
 	have_own := false
 	if entries, err := os.read_all_directory_by_path(state_root, context.temp_allocator); err == nil {
 		for e in entries {
@@ -314,7 +326,7 @@ allocate_ports :: proc(state_root, state_dir: string, busy: Port_Busy_Proc) -> (
 			if rerr != nil do continue
 			p, pok := parse_ports(string(data))
 			if !pok do continue
-			if strings.trim_right(e.fullpath, "/\\") == own_clean {
+			if path_key(e.fullpath) == own_clean {
 				preferred, have_own = p, true
 			} else {
 				append(&reserved, p[0], p[1])

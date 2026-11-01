@@ -7,6 +7,25 @@ import "core:testing"
 import bridgesvc "odin_test:lib/bridgesvc"
 
 @(test)
+test_setup_rejects_colliding_hub_owner_before_stopping_or_staging :: proc(t: ^testing.T) {
+	root := fmt.tprintf("%s/bridge-owner-preflight-%d", os.temp_dir(context.temp_allocator), os.get_pid())
+	defer os.remove_all(root)
+	host := bridgesvc.Host{os = .Linux, home = root, uid = 1000}
+	a, a_ok := bridgesvc.profile_from("https://a.b", "work", context.temp_allocator)
+	b, b_ok := bridgesvc.profile_from("https://a-b", "work", context.temp_allocator)
+	testing.expect(t, a_ok && b_ok)
+	testing.expect_value(t, a.service_name, b.service_name)
+	l := bridgesvc.layout_for(host, a.service_name)
+	testing.expect(t, os.make_directory_all(l.state_dir) == nil)
+	testing.expect(t, os.write_entire_file_from_string(bridgesvc.pjoin(l.state_dir, bridgesvc.HUB_URL_FILE), a.hub_url) == nil)
+	s := Bridge_Setup{host = host, profile = b, layout = l, copy_binaries = true, staging = bridgesvc.pjoin(l.data_dir, ".staging")}
+	result := bridge_setup_run(&s, .Stage)
+	testing.expect(t, !result.ok && result.failure == .Fatal)
+	testing.expect(t, !s.snapshot_taken && !s.stopped_for_setup, "ownership must be checked before service discovery or stop")
+	testing.expect(t, !os.exists(s.staging), "another Hub's profile must not be staged over")
+}
+
+@(test)
 test_bridge_setup_enroll_needed :: proc(t: ^testing.T) {
 	base := []string{"setup", "--hub", "https://hub.example.com"}
 	testing.expect(t, bridge_setup_enroll_needed(base, ""), "no credential: enroll")

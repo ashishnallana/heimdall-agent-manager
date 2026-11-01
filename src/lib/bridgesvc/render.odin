@@ -215,6 +215,8 @@ render_windows_run_cmd :: proc(host: Host, l: Layout, in_: Render_Input) -> stri
 	args := service_args(host, l, in_)
 	fmt.sbprintf(&b, "\"%s\"", cmdq(args[0]))
 	for a in args[1:] do fmt.sbprintf(&b, " \"%s\"", cmdq(a))
-	fmt.sbprintf(&b, " 1>>\"%s\" 2>>\"%s\"\r\nexit /b %%ERRORLEVEL%%\r\n", cmdq(pjoin(l.data_dir, "logs", "bridge.out.log")), cmdq(pjoin(l.data_dir, "logs", "bridge.err.log")))
+	// Redirection can fail before the executable runs without setting ERRORLEVEL.
+	// Make that failure visible to Task Scheduler rather than reporting success.
+	fmt.sbprintf(&b, " 1>>\"%s\" 2>>\"%s\" || exit /b 1\r\nexit /b %%ERRORLEVEL%%\r\n", cmdq(pjoin(l.data_dir, "logs", "bridge.out.log")), cmdq(pjoin(l.data_dir, "logs", "bridge.err.log")))
 	return strings.to_string(b)
 }

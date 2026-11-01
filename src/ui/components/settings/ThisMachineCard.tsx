@@ -23,6 +23,7 @@ import {
   subscribeDesktopBridgeSession,
 } from '../../bridge/desktopBridgeSession';
 import BridgeProfileInventory from './BridgeProfileInventory';
+import { buildRouteHash } from '../../utils/appLocation';
 
 const toneFor: Record<string, Tone> = { success: 'success', warning: 'warning', danger: 'danger', muted: 'neutral' };
 
@@ -216,6 +217,7 @@ export default function ThisMachineCard({ manager, accountBridgeIds, onBridgeId,
         </div>
 
         <div className="flex flex-wrap gap-1.5 sm:justify-end">
+          <Button variant="ghost" size="sm" data-debug-id="settings-this-machine-open-setup-btn" disabled={busy} onClick={() => { window.location.hash = buildRouteHash('/setup', ''); }}>Open setup wizard</Button>
           {!installed ? (
             busy ? null : (
               <Button variant="primary" size="sm" data-debug-id="settings-this-machine-setup-btn" leading={<Icon name="download" size="sm" />} disabled={!accountBridgeIds} title={accountBridgeIds ? undefined : 'Loading your bridges…'} onClick={() => setup()}>

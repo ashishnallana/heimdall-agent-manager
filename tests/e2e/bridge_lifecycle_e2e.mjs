@@ -25,7 +25,11 @@
 //   HEIMDALL_E2E_HUB_BIN=<ham-hub> HEIMDALL_E2E_BRIDGE_BIN=<ham-bridge> \
 //   node --import ./tests/helpers/vaultEndpointHarness.ts tests/e2e/bridge_lifecycle_e2e.mjs
 
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn as nodeSpawn, spawnSync as nodeSpawnSync } from 'node:child_process';
+
+// These are background probes, including on a developer's Windows desktop.
+const spawn = (command, args, options = {}) => nodeSpawn(command, args, { ...options, windowsHide: true });
+const spawnSync = (command, args, options = {}) => nodeSpawnSync(command, args, { ...options, windowsHide: true });
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import net from 'node:net';
@@ -39,7 +43,8 @@ import { hubLogin, sessionHeaders, startMockOidc } from './hubOidc.mjs';
 import { refuseLegacyInstall, scrubHeimdallEnv } from './realHomeGuard.mjs';
 import { verifyDirectory } from '../../src/ui/utils/vaultDirectoryVerify.ts';
 import { openVerifiedWrap } from '../../src/ui/utils/vaultKeyringWrap.ts';
-import { serializeKeyringBytes } from '../../src/ui/utils/vaultKeyring.ts';
+import { importKeyring, serializeKeyringBytes } from '../../src/ui/utils/vaultKeyring.ts';
+import { encryptVaultText } from '../../src/ui/utils/vaultCrypto.ts';
 import { deliverKeyringToBridge } from '../../src/ui/utils/vaultBridgeDelivery.ts';
 import { bridgeUnsealTargetFromRecord } from '../../src/ui/utils/vaultBridgeUnseal.ts';
 import { buildBridgeApproval, buildGenesis, checkBridgeCodeInfo } from '../../src/ui/utils/vaultDeviceFlows.ts';
@@ -128,6 +133,43 @@ function initProfile(hub) {
   EL = profileLayout(hub, ELECTRON_PROFILE_NAME);
 }
 const hubProfileArgs = (hub) => ['--hub', hub.base, '--profile', PROFILE_NAME];
+
+// Match the daemon socket derived from the installed service's own run dir.
+function profilePtySocket(bridgeId) {
+  const data = WIN ? `${ENV.LOCALAPPDATA}/heimdall/bridges/${SERVICE}` : PROFILE.data;
+  const intended = `${data}/run/pty-host-${bridgeId}.sock`;
+  if (Buffer.byteLength(intended) <= 103) return intended;
+  let hash = 14695981039346656037n;
+  for (const b of Buffer.from(intended)) hash = BigInt.asUintN(64, (hash ^ BigInt(b)) * 1099511628211n);
+  const tmp = WIN ? os.tmpdir() : ENV.TMPDIR?.startsWith('/') ? ENV.TMPDIR.replace(/\/+$/, '') : '/tmp';
+  return `${tmp}/${WIN ? 'heimdall-run' : `heimdall-${process.getuid()}`}/${hash.toString(16).padStart(16, '0')}.sock`;
+}
+
+async function startRestartProbe(acct, bridgeId) {
+  const sessionId = `sh_${crypto.randomBytes(16).toString('hex')}`;
+  const pub = await http(acct, 'GET', `/api/v1/bridges/${bridgeId}/public-key`);
+  const keyring = await importKeyring(Uint8Array.from(acct.keyringBytes), acct.userId);
+  const enc_spec = await encryptVaultText(JSON.stringify({ cmd: '', cwd: HOME, timestamp: Date.now(), nonce: crypto.randomBytes(16).toString('hex'),
+    bridge_id: bridgeId, session_id: sessionId, kind: 'shell', boot_id: pub.data.unseal_boot_id }), keyring);
+  const created = await http(acct, 'POST', `/api/v1/bridges/${bridgeId}/shells`, { body: { session_id: sessionId, kind: 'shell', enc_spec } });
+  expect(created.status === 201 || created.status === 200, `live PTY shell accepted (${created.status}${created.status >= 400 ? ` ${created.raw}` : ''})`);
+  const ptyBin = path.join(path.dirname(BRIDGE_BIN), WIN ? 'ham-pty-host.exe' : 'ham-pty-host');
+  const socket = profilePtySocket(bridgeId);
+  children.push({ kill: () => spawnSync(ptyBin, ['--socket', socket, 'stop'], { env: ENV, timeout: 5000 }) });
+  const pid = () => {
+    const listed = spawnSync(ptyBin, ['--socket', socket, 'list'], { env: ENV, encoding: 'utf8', timeout: 5000 });
+    const row = String(listed.stdout || '').split('\n').find((l) => l.startsWith(sessionId));
+    return listed.status === 0 && row?.includes('alive') ? Number(/pid=(\d+)/.exec(row)?.[1] || 0) : 0;
+  };
+  let originalPid = 0;
+  for (const deadline = Date.now() + 30_000; !(originalPid = pid()); await sleep(200)) {
+    if (Date.now() > deadline) throw new CheckFailed(`shell did not start on the service's PTY daemon (${socket})`);
+  }
+  return { originalPid, pid, close: async () => {
+    await http(acct, 'DELETE', `/api/v1/shells/${sessionId}`);
+    spawnSync(ptyBin, ['--socket', socket, 'stop'], { env: ENV, timeout: 5000 });
+  } };
+}
 
 async function startHub(label) {
   const bin = process.env.HEIMDALL_E2E_HUB_BIN;
@@ -398,13 +440,33 @@ async function main() {
     for (const deadline = Date.now() + 60_000; !(await online(B, S.b.bridgeId)()); await sleep(500)) {
       if (Date.now() > deadline) throw new CheckFailed('the installed service never connected');
     }
-    const upd = spawnSync(BRIDGE_BIN, ['update', '--bundle', bundle, ...hubProfileArgs(hub), '--json-progress'], { env: ENV, encoding: 'utf8', timeout: 300_000 });
-    expect(upd.status === 0, `ham-bridge update --bundle exits 0 (exit ${upd.status})\n${upd.stdout}${upd.stderr}`);
-    for (const deadline = Date.now() + 60_000; !(await online(B, S.b.bridgeId)()); await sleep(500)) {
-      if (Date.now() > deadline) throw new CheckFailed('the updated service never reconnected');
-    }
-    const active = (await bridgesOf(B)).filter(isActive);
-    expect(active.length === 1 && active[0].bridge_id === S.b.bridgeId, `setup/update kept one active bridge for B (${active.map((b) => b.bridge_id)})`);
+    const live = await startRestartProbe(B, S.b.bridgeId);
+    const portsBefore = fs.readFileSync(path.join(PROFILE.dir, 'ports.json'), 'utf8');
+    try {
+      // The second pass exercises the detached worker path used for self-updates,
+      // with the first backup still pinned by the original live PTY daemon.
+      for (let pass = 0; pass < 2; pass += 1) {
+        const before = JSON.parse(fs.readFileSync(path.join(PROFILE.dir, 'runtime-status.json'), 'utf8'));
+        const updateEnv = pass ? { ...ENV, HEIMDALL_BRIDGE_SERVICE_NAME: SERVICE } : ENV;
+        const upd = spawnSync(BRIDGE_BIN, ['update', '--bundle', bundle, ...hubProfileArgs(hub), '--json-progress'], { env: updateEnv, encoding: 'utf8', timeout: 300_000 });
+        expect(upd.status === 0, `update ${pass + 1} accepted (exit ${upd.status})\n${upd.stdout}${upd.stderr}`);
+        for (const deadline = Date.now() + 90_000; ; await sleep(500)) {
+          const after = JSON.parse(fs.readFileSync(path.join(PROFILE.dir, 'runtime-status.json'), 'utf8'));
+          if (after.pid !== before.pid && after.connected && await online(B, S.b.bridgeId)()) break;
+          if (Date.now() > deadline) throw new CheckFailed(`update ${pass + 1} never connected as a new Bridge process`);
+        }
+        expect(fs.readFileSync(path.join(PROFILE.dir, 'ports.json'), 'utf8') === portsBefore, 'update reused the released ports of its own profile');
+        expect(live.pid() === live.originalPid, `live PTY process survived update ${pass + 1}`);
+      }
+      const restarted = spawnSync(BRIDGE_BIN, ['service', 'restart', ...hubProfileArgs(hub), '--json'], { env: ENV, encoding: 'utf8', timeout: 30_000 });
+      expect(restarted.status === 0, `explicit service restart succeeded: ${restarted.stdout}${restarted.stderr}`);
+      for (const deadline = Date.now() + 60_000; !(await online(B, S.b.bridgeId)()); await sleep(500)) {
+        if (Date.now() > deadline) throw new CheckFailed('the restarted service never reconnected');
+      }
+      expect(live.pid() === live.originalPid, 'live PTY process survived explicit service restart');
+      const active = (await bridgesOf(B)).filter(isActive);
+      expect(active.length === 1 && active[0].bridge_id === S.b.bridgeId, 'both updates kept the same enrolled Bridge identity');
+    } finally { await live.close(); }
   }, { skip: WITH_SERVICE ? '' : 'needs a service manager; set HEIMDALL_E2E_SERVICE=1 (CI runners)' });
   await step('6 uninstall --purge leaves no files, secrets or service; the hub row is kept', async () => {
     const un = spawnSync(BRIDGE_BIN, ['uninstall', '--service', SERVICE, '--purge', '--yes', '--headless', '--json-progress'], { env: ENV, encoding: 'utf8', timeout: 120_000 });

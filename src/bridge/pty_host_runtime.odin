@@ -268,7 +268,7 @@ bridge_pty_host_ensure_daemon :: proc() -> (string, bool) {
 	cmd := []string{bin, "daemon", "--socket", socket}
 	// env = nil => the daemon inherits the bridge's environment. The per-agent
 	// HEIMDALL_* env is delivered in each Spawn request, not the daemon's env.
-	proc_handle, err := os.process_start(os.Process_Desc{command = cmd})
+	proc_handle, err := bridge_os_start_daemon(cmd)
 	if err != nil {
 		fmt.eprintln("bridge pty-host: failed to start daemon:", bin, err)
 		blog_error(.pty_host_spawn_failed, blog_sym(.stage, .exec))

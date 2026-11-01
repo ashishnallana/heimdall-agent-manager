@@ -120,6 +120,9 @@ Setup_Ops :: struct {
 	run:       proc(data: rawptr, step: Step) -> Step_Result,
 	remediate: proc(data: rawptr, step: Step, failure: Failure) -> (ok: bool, message: string),
 	undo:      proc(data: rawptr, step: Step),
+	// Optional validation for side-effecting undo implementations. A failed undo
+	// stops rollback before earlier steps can delete or replace still-live files.
+	rollback_status: proc(data: rawptr) -> (ok: bool, message: string),
 	emit:      proc(data: rawptr, ev: Event),
 	finish:    proc(data: rawptr, ok: bool), // release the lock, drop staging
 }
@@ -164,6 +167,13 @@ run_setup :: proc(ops: Setup_Ops) -> (ok: bool, failed_step: Step) {
 			for i := len(completed) - 1; i >= 0; i -= 1 {
 				s := completed[i]
 				ops.undo(ops.data, s)
+				if ops.rollback_status != nil {
+					if restored, why := ops.rollback_status(ops.data); !restored {
+						message := "rollback incomplete" if why == "" else fmt.tprintf("rollback incomplete: %s", why)
+						ops.emit(ops.data, Event{step = STEP_NAMES[s], state = "warning", pct = step_pct(step, false), message = message})
+						break
+					}
+				}
 				ops.emit(ops.data, Event{step = STEP_NAMES[s], state = "rollback", pct = step_pct(step, false), message = "restored previous state"})
 			}
 			if ops.finish != nil do ops.finish(ops.data, false)

@@ -1399,8 +1399,9 @@ function AuthenticatedShell({ user }: { user: AuthUser }) {
   const setupRedirectChecked = useRef(false);
   useEffect(() => {
     if (setupRedirectChecked.current) return;
-    setupRedirectChecked.current = true;
     if (path !== '/home' || !desktopCapabilities().desktop) return;
+    if (!user?.user_id) return;
+    setupRedirectChecked.current = true;
     if (setupSeen(String(user?.user_id || ''))) return;
     window.location.hash = buildRouteHash('/setup', '');
   }, [path, user?.user_id]);

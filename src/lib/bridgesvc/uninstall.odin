@@ -1,5 +1,8 @@
 package bridgesvc
 
+import "core:os"
+import "core:strings"
+
 // `ham-bridge uninstall` engine (F20, REQ-ENR-6).
 //
 // Uninstall is the reverse of setup, but it never rolls back: every step is
@@ -171,6 +174,16 @@ uninstall_paths :: proc(l: Layout) -> Uninstall_Paths {
 		pjoin(l.data_dir, "task.xml"),
 	})
 	p.binaries = clone_list({l.bin_dir, concat(l.bin_dir, ".bak")})
+	// Updates retain pinned backups so live PTY sessions can keep running. A
+	// later uninstall removes only direct backup children of this profile.
+	if entries, err := os.read_all_directory_by_path(l.data_dir, context.temp_allocator); err == nil {
+		bins := make([dynamic]string, context.temp_allocator)
+		append(&bins, ..p.binaries)
+		for e in entries {
+			if e.type == .Directory && strings.has_prefix(e.name, "bin.bak-") && path_key(pdir(e.fullpath)) == path_key(l.data_dir) do append(&bins, e.fullpath)
+		}
+		p.binaries = bins[:]
+	}
 	p.state = clone_list({l.state_dir})
 	p.data = clone_list({l.data_dir})
 	return p

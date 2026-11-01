@@ -21,7 +21,11 @@ Fake :: struct {
 	undone:      [dynamic]Step,
 	events:      [dynamic]Event,
 	finished_ok: bool,
+	finished:    bool,
 	inject:      bool,
+	rollback_fail: bool,
+	rollback_fail_step: Step,
+	rollback_failed: bool,
 }
 
 @(private = "file")
@@ -44,8 +48,12 @@ fake_ops :: proc(f: ^Fake) -> Setup_Ops {
 		},
 		undo = proc(data: rawptr, step: Step) {
 			f := (^Fake)(data)
-			f.pending[step] = false
 			append(&f.undone, step)
+			if f.rollback_fail && step == f.rollback_fail_step {
+				f.rollback_failed = true
+				return
+			}
+			f.pending[step] = false
 		},
 		emit = proc(data: rawptr, ev: Event) {
 			f := (^Fake)(data)
@@ -53,6 +61,7 @@ fake_ops :: proc(f: ^Fake) -> Setup_Ops {
 		},
 		finish = proc(data: rawptr, ok: bool) {
 			f := (^Fake)(data)
+			f.finished = true
 			f.finished_ok = ok
 			if ok do f.live = "v2"
 		},
@@ -94,6 +103,37 @@ test_setup_fatal_failure_at_each_step_rolls_back :: proc(t: ^testing.T) {
 		testing.expect_value(t, f.undone[len(f.undone) - 1], Step.Lock)
 		testing.expect_value(t, len(f.remediated), 0)
 	}
+}
+
+@(test)
+test_setup_failed_undo_stops_destructive_rollback_and_reports_incomplete :: proc(t: ^testing.T) {
+	f := fake_make()
+	f.inject, f.fail_step, f.fail_with, f.fail_times = true, .Verify, .Fatal, 99
+	f.rollback_fail, f.rollback_fail_step = true, .Start
+	ops := fake_ops(&f)
+	ops.rollback_status = proc(data: rawptr) -> (bool, string) {
+		f := (^Fake)(data)
+		return !f.rollback_failed, "replacement process could not be stopped" if f.rollback_failed else ""
+	}
+	ok, failed := run_setup(ops)
+	testing.expect(t, !ok)
+	testing.expect_value(t, failed, Step.Verify)
+	testing.expect(t, f.finished && !f.finished_ok, "finish must still run to release the install lock")
+	testing.expect_value(t, len(f.undone), 2)
+	testing.expect_value(t, f.undone[0], Step.Verify)
+	testing.expect_value(t, f.undone[1], Step.Start)
+	testing.expect(t, f.pending[.Binaries], "failed process shutdown must prevent earlier binary rollback")
+	testing.expect(t, f.pending[.Stage], "rollback must not continue destroying staging after an undo failure")
+	warnings, false_restorations := 0, 0
+	for ev in f.events {
+		if ev.state == "warning" && strings.contains(ev.message, "rollback incomplete: replacement process could not be stopped") {
+			warnings += 1
+			testing.expect_value(t, ev.step, "start")
+		}
+		if ev.state == "rollback" && ev.step == "start" do false_restorations += 1
+	}
+	testing.expect_value(t, warnings, 1)
+	testing.expect_value(t, false_restorations, 0)
 }
 
 @(test)
