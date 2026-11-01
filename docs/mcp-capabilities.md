@@ -83,6 +83,13 @@ read metadata. Legacy names/descriptions above 48 KiB or excessive other metadat
 return `result_too_large`. No blob path is followed or exposed. Metadata update
 and deletion do not load stored content, even for a large native binary.
 
+Older native uploads with empty MIME fields retain their explicit `markdown`,
+`text`, or `json` kind declaration; MCP normalizes those to the corresponding
+supported text MIME. It never infers content type from an encrypted name or
+filesystem path. Agent uploads automatically inherit the authenticated instance's
+current task, chain and actor bindings; caller-provided task/actor overrides do
+not replace that native attribution.
+
 `artifacts.update` changes **only name and description**, preserving native
 metadata-update semantics. An explicitly empty description clears it through an
 encrypted empty string. Content replacement, association changes, versions and

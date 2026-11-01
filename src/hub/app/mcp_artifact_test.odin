@@ -89,6 +89,8 @@ mcp_artifact_bounds_test :: proc(t:^testing.T,g:^App_Graph,h:^http.MCP_Control_H
 	blob:=mcp_resource_first(t,h,headers,"artifacts.get",json.Object{"artifact_id"=json.String("art_blob")});if blob!=nil do testing.expect(t,blob["content_error"].(json.String)=="content_unavailable")
 	_,_,_=iface.content_save_artifact(&g.repos.content,{artifact_id="art_tombstone",owner_user_id=domain.User_ID(view.owner),name="Deleted",content_type="text/plain",deleted_at=mcp_task_test_now(nil)})
 	testing.expect(t,strings.contains(mcp_resource_heap_call(h,headers,"artifacts.get",json.Object{"artifact_id"=json.String("art_tombstone")}).body,"not_found"))
+	_,_,_=iface.content_save_artifact(&g.repos.content,{artifact_id="art_legacy_markdown",owner_user_id=domain.User_ID(view.owner),name="Legacy result",kind="markdown",content="Legacy task result"})
+	legacy:=mcp_resource_first(t,h,headers,"artifacts.get",json.Object{"artifact_id"=json.String("art_legacy_markdown")});if legacy!=nil do testing.expect(t,legacy["content"].(json.String)=="Legacy task result" && legacy["content_type"].(json.String)=="text/markdown")
 	// Stable ties and cursor filter binding; metadata pages never include content.
 	now:=mcp_task_test_now(nil)
 	for id in ([]string{"art_page_a","art_page_b"}) do _,_,_=iface.content_save_artifact(&g.repos.content,{artifact_id=id,owner_user_id=domain.User_ID(view.owner),name="Page result",task_id="task_comment",content_type="text/plain",content="Page",created_at=now,updated_at=now})

@@ -21,8 +21,14 @@ resource_artifact_get :: proc(s:^Control_Service,owner,id:string,detail:bool)->(
 	metadata:=a;metadata.content=""
 	revision:=resource_digest(struct {artifact:domain.Artifact,stored_bytes:int}{metadata,stored})
 	row:=json.Object{"owner_user_id"=json.String(a.owner_user_id),"artifact_id"=json.String(a.artifact_id),"name"=json.String(a.name),"description"=json.String(a.description),"kind"=json.String(a.kind),"content_type"=json.String(a.content_type),"mime"=json.String(a.mime),"ext"=json.String(a.ext),"size_bytes"=json.Integer(a.size_bytes),"stored_bytes"=json.Integer(stored),"agent_id"=json.String(a.agent_id),"agent_instance_id"=json.String(a.agent_instance_id),"chain_id"=json.String(a.chain_id),"task_id"=json.String(a.task_id),"project_id"=json.String(a.project_id),"link"=json.String(strings.concatenate({"artifact://",a.artifact_id},context.temp_allocator)),"created_at"=json.String(a.created_at),"updated_at"=json.String(a.updated_at),"revision"=json.String(revision)}
+	mime:=resource_artifact_mime(a.content_type,a.mime)
+	// Older native CLI uploads declare their textual kind but omit MIME. Honor
+	// only those explicit native text declarations; never infer from a path/name.
+	if mime=="" {
+		switch a.kind {case "markdown":mime="text/markdown";case "text":mime="text/plain";case "json":mime="application/json"}
+		if mime!="" do row["content_type"]=json.String(mime)
+	}
 	if detail {
-		mime:=resource_artifact_mime(a.content_type,a.mime)
 		if mime!="text/plain" && mime!="text/markdown" && mime!="application/json" {row["content_error"]=json.String("unsupported_content_type")} else if stored>128*1024 {row["content_error"]=json.String("content_too_large")} else if a.blob_ref!="" && stored==0 {row["content_error"]=json.String("content_unavailable")} else {row["content"]=json.String(a.content)}
 	}
 	return row,revision,""
