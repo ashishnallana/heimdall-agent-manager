@@ -194,7 +194,7 @@ export default function BridgesPanel({ onHeadingChange }: { onHeadingChange?: (h
         {bridges.length === 0 && !bridgesQuery.isFetching ? (
           <div data-debug-id="settings-bridges-empty" className="rounded-xl border border-dashed border-subtle bg-surface-raised/30 p-4 text-center text-sm text-muted">No active bridges.</div>
         ) : (
-          <div className={!selectedId ? "grid grid-cols-1 gap-3 xl:grid-cols-2" : "space-y-4"}>
+          <div className={!selectedId ? "grid grid-cols-1 gap-3" : "space-y-4"}>
             {!selectedId ? bridges.map((bridge) => {
               const id = String(bridge.bridge_id || bridge.bridgeId || bridge.id || '');
               const online = bridgeOnline(bridge);
