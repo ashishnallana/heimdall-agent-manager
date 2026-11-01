@@ -76,10 +76,19 @@ mcp_task_revoke_before_write :: proc(ctx:rawptr,raw:string,view:mcp.Access_View,
 
 @(test)
 test_mcp_task_comment_native_atomic_retry_and_revocation :: proc(t:^testing.T) {
+	mcp_task_test_fixture(t,#load("../../../tests/fixtures/mcp_tasks_v2.json",string),false)
+}
+
+@(test)
+test_mcp_catalog_native_crud_targets_scopes_and_retries :: proc(t:^testing.T) {
+	mcp_task_test_fixture(t,#load("../../../tests/fixtures/mcp_catalog_v2.json",string),true)
+}
+
+mcp_task_test_fixture :: proc(t:^testing.T,vector:string,catalog:bool) {
 	context.allocator=context.temp_allocator
 	g:=new(App_Graph,context.temp_allocator)
 	v:MCP_Task_Test_Vector
-	if !testing.expect(t,json.unmarshal_string(#load("../../../tests/fixtures/mcp_tasks_v2.json",string),&v,.JSON,context.temp_allocator)==nil) do return
+	if !testing.expect(t,json.unmarshal_string(vector,&v,.JSON,context.temp_allocator)==nil) do return
 	repo,rerr:=sqlite.open_mcp_repository(&g.mcp_repository_impl,":memory:")
 	if !testing.expect(t,rerr.code==.None) do return
 	defer sqlite.close(&g.mcp_repository_impl.conn)
@@ -156,6 +165,12 @@ test_mcp_task_comment_native_atomic_retry_and_revocation :: proc(t:^testing.T) {
 	delegation:=http.MCP_Delegation_Handlers{service=&g.mcp_delegation,directory=&directory,grant_directory=&directory,origin=g.mcp_delegation.issuer}
 	h:=http.MCP_Control_Handlers{delegation=&delegation,control={chains=&g.taskchains},create_ctx=g,comment=mcp_comment_task,mutate_task=mcp_mutate_task}
 	headers:=[]contracts.HTTP_Header{{"Authorization",strings.concatenate({"Bearer ",var_tokens.access_token},context.temp_allocator)},{"Content-Type","application/json"}}
+	if catalog {
+		mcp_task_test_placement(t,g,&h,headers,view)
+		h.control.agents=&g.agents;h.control.bridges=&g.repos.bridges;h.control.providers=&g.providers;h.mutate_catalog=mcp_mutate_catalog
+		mcp_catalog_test(t,g,&h,headers,view,var_tokens.access_token)
+		return
+	}
 	call:=`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"tasks.comment","arguments":{"chain_id":"chain_comment","task_id":"task_comment","request_id":"http_retry","body":"HTTP private comment"}}}`
 	response:=http.mcp_control_handler(&h,{method="POST",path="/api/v1/mcp",headers=headers,body=strings.clone(call,context.temp_allocator)})
 	retry:=http.mcp_control_handler(&h,{method="POST",path="/api/v1/mcp",headers=headers,body=strings.clone(call,context.temp_allocator)})

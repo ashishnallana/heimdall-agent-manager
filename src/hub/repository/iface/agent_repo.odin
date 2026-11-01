@@ -34,6 +34,8 @@ Agent_Repository :: struct {
 	save: Agent_Save_Proc,
 	get: Agent_Get_Proc,
 	list_by_owner: Agent_List_By_Owner_Proc,
+	list_agent_refs: Agent_Catalog_Page_Proc,
+	list_instance_refs: Agent_Catalog_Page_Proc,
 	save_support: Agent_Save_Support_Proc,
 	get_support: Agent_Get_Support_Proc,
 	list_support: Agent_List_Support_Proc,

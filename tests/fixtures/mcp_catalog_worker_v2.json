@@ -1,0 +1,329 @@
+{
+  "synthetic_fixture": true,
+  "now_ms": 1793430000000,
+  "keyring_hex": "484b523200167573725f6d63705f776f726b65725f66697874757265bb7f8206d95e1ddf00000001000100000001a833fa7d367a793ce8de79acfaba682891c42eb50b3575aa80b33850b8d59710",
+  "device_id": "dev_bb7f8206d95e1ddf45074d002c487efe",
+  "bridge_device_id": "dev_7349d27426d88ffae8b8bc91bb876fe8",
+  "entries": [
+    {
+      "job": {
+        "request_id": "req_worker_fixture",
+        "generation": "gen_worker_fixture",
+        "owner": "usr_mcp_worker_fixture",
+        "resource": "https://hub.example/api/v1/mcp",
+        "grant": "grant-worker-fixture",
+        "head": "0ed21205421ce856362e72eec0566704ce7ecc5b72f7ddef1d9e2dad4933cd92",
+        "operation": "seal_agent",
+        "payload": "{\"name\":\"agent secret name\",\"slug\":\"agent secret slug\",\"instructions\":\"agent secret instructions\"}",
+        "digest": "02d89e907bd0e9c224bea8c8d1c03a53cd524aeb0e4bf441dd56d202520e8c7c",
+        "revision": 1,
+        "deadline_ms": 1793430004000,
+        "epoch": 1,
+        "consent": "{\"v\":2,\"owner\":\"usr_mcp_worker_fixture\",\"vault_id\":\"bb7f8206d95e1ddf\",\"client\":\"client-worker-fixture\",\"resource\":\"https://hub.example/api/v1/mcp\",\"scope\":\"mcp:chains mcp:agents:read mcp:agents:write mcp:instances:read\",\"grant\":\"grant-worker-fixture\",\"family\":\"family-worker-fixture\",\"revision\":1,\"mode\":\"device\",\"recipient\":\"\",\"recipient_public_key\":\"\",\"approver\":\"dev_bb7f8206d95e1ddf45074d002c487efe\",\"directory_version\":2,\"directory_head\":\"0ed21205421ce856362e72eec0566704ce7ecc5b72f7ddef1d9e2dad4933cd92\",\"epoch\":1,\"issued_ms\":1793430000000,\"wrap_sha256\":\"\"}",
+        "signature": "{\"alg\":\"ecdsa-p256-sha256\",\"sig\":\"a9246f416068961e1c1eee7f004f13ca80349bd180ae467c2ec71435a3328020d27d676e177d65a4c161d991f91aa18b2da51c691542d7bfff05859105b4f943\"}",
+        "directory": {
+          "owner": "usr_mcp_worker_fixture",
+          "root_device_id": "dev_bb7f8206d95e1ddf45074d002c487efe",
+          "head_hash": "0ed21205421ce856362e72eec0566704ce7ecc5b72f7ddef1d9e2dad4933cd92",
+          "version": 2,
+          "current_epoch": 1,
+          "log": [
+            {
+              "seq": 1,
+              "statement": "heimdall-vault-statement/v2\ntype=genesis\nuser_id=usr_mcp_worker_fixture\nseq=1\nprev_hash=\nissuer_device_id=dev_bb7f8206d95e1ddf45074d002c487efe\nissued_at_ms=1793507216523\nsubject_device_id=dev_bb7f8206d95e1ddf45074d002c487efe\nsubject_kind=browser\nsubject_sign_pub=0421078dc2cd9e85b3a67a6232ed76d752e40c66b4bd2102ea1fb8201ef6e926e9ffd690df792bb3ebf7f56d72ec87595ec9b9e26e013974169aa42d0e3b690452\nsubject_ecdh_pub=04fc8195e07b6a3e9b9f767fef5cc3cd15a1c9cff7ce45bf67e3c807df50acf2d65804019caaf1e597e3aecb99f661042978b06773a8e0d6654354103ac2c23a22\nsubject_sign_alg=ecdsa-p256-sha256\nsubject_wrap_alg=ecdh-p256-hkdf-sha256-aes256gcm\nsubject_label_b64=Um9vdCBicm93c2Vy\nepoch=1\nepoch_commit=f0765f8a55307b2f99047a8e6f9f134948c74797ffb3c647ca15c45c36c4ec4c\nwrap_sha256=0fafcf358a82ac54ac67573fa788040fc35902b0656e762631c38c428070f8ec",
+              "signature": "{\"alg\":\"ecdsa-p256-sha256\",\"sig\":\"40126d3cd60809328572d73472dcd61fad9349b6f50590c63ab349b856090d659c4caa0404b8d8eb471b5ab0ed87f985a112774a604c092d94a438ffe16050df\"}"
+            },
+            {
+              "seq": 2,
+              "statement": "heimdall-vault-statement/v2\ntype=approve\nuser_id=usr_mcp_worker_fixture\nseq=2\nprev_hash=494fd425107d78078e48a06ec4c8465e823d5a4f3722c3c045221ac1afcd283d\nissuer_device_id=dev_bb7f8206d95e1ddf45074d002c487efe\nissued_at_ms=1793507216532\nsubject_device_id=dev_7349d27426d88ffae8b8bc91bb876fe8\nsubject_kind=bridge\nsubject_sign_pub=04775c043cd4e187dcf701f16348a14ce1a2c561ebe214656a221fa95faccb2e002c0b3f26ea29f245eeb54a3a0d696b52b7ad78ad9b1bf2b744e326ecc938c2f1\nsubject_ecdh_pub=\nsubject_sign_alg=ecdsa-p256-sha256\nsubject_wrap_alg=\nsubject_label_b64=YnJpZGdl\nepoch=1\nepoch_commit=f0765f8a55307b2f99047a8e6f9f134948c74797ffb3c647ca15c45c36c4ec4c\nwrap_sha256=",
+              "signature": "{\"alg\":\"ecdsa-p256-sha256\",\"sig\":\"5916735f18d63155be532fccb169b3f2c7c4ccd629f9054eb241f95176dcb5c36643be054d6cdf3d216e9a8a3354cf073716f9caee7c2dabc95fbf1d704e853a\"}"
+            }
+          ],
+          "devices": [
+            {
+              "id": "dev_bb7f8206d95e1ddf45074d002c487efe",
+              "kind": "browser",
+              "sign_alg": "ecdsa-p256-sha256",
+              "wrap_alg": "ecdh-p256-hkdf-sha256-aes256gcm",
+              "sign_public_key": "0421078dc2cd9e85b3a67a6232ed76d752e40c66b4bd2102ea1fb8201ef6e926e9ffd690df792bb3ebf7f56d72ec87595ec9b9e26e013974169aa42d0e3b690452",
+              "ecdh_public_key": "04fc8195e07b6a3e9b9f767fef5cc3cd15a1c9cff7ce45bf67e3c807df50acf2d65804019caaf1e597e3aecb99f661042978b06773a8e0d6654354103ac2c23a22",
+              "approved": true,
+              "pending": false
+            },
+            {
+              "id": "dev_7349d27426d88ffae8b8bc91bb876fe8",
+              "kind": "bridge",
+              "sign_alg": "ecdsa-p256-sha256",
+              "wrap_alg": "",
+              "sign_public_key": "04775c043cd4e187dcf701f16348a14ce1a2c561ebe214656a221fa95faccb2e002c0b3f26ea29f245eeb54a3a0d696b52b7ad78ad9b1bf2b744e326ecc938c2f1",
+              "ecdh_public_key": "",
+              "approved": true,
+              "pending": false
+            }
+          ],
+          "pin_seq": 2,
+          "pin_hash": "0ed21205421ce856362e72eec0566704ce7ecc5b72f7ddef1d9e2dad4933cd92",
+          "vault_id": "bb7f8206d95e1ddf"
+        },
+        "tool": "agents.create"
+      },
+      "result": "{\"name\":\"vault:v2:bb7f8206d95e1ddf:e1:Qm9sbIx+xzennWPkPiON4EocIWYTPsYcZskzs7HgSZHmLwSm1F6ClDlTGUR5\",\"slug\":\"vault:v2:bb7f8206d95e1ddf:e1:yXhmFbjG7A02GKV9hCYeD4eXUHKYUXvUvvBtQlrrPp6y++8nzccP1CKmuTv+\",\"instructions\":\"vault:v2:bb7f8206d95e1ddf:e1:LjNRNJ2LcT6YUdhe58rUyHf6txoM+sAgx0HECkmOjWlB7MmYOyElrn8ZyyFcow8WDO6QOFE=\"}"
+    },
+    {
+      "job": {
+        "request_id": "req_worker_fixture",
+        "generation": "gen_worker_fixture",
+        "owner": "usr_mcp_worker_fixture",
+        "resource": "https://hub.example/api/v1/mcp",
+        "grant": "grant-worker-fixture",
+        "head": "0ed21205421ce856362e72eec0566704ce7ecc5b72f7ddef1d9e2dad4933cd92",
+        "operation": "read",
+        "payload": "{\"records_kind\":\"agent\",\"records\":[{\"owner_user_id\":\"usr_mcp_worker_fixture\",\"agent_id\":\"agt_a\",\"name\":\"vault:v2:bb7f8206d95e1ddf:e1:NDmyGcyDlsnDJOnBEmk6tXd1/1tfBsPhkEqxDq296V4qgJBF6vp/B60nD9FuQto=\",\"slug\":\"vault:v2:bb7f8206d95e1ddf:e1:NDmyGcyDlsnDJOnBEmk6tXd1/1tfBsPhkEqxDq296V4qgJBF6vp/B60nD9FuQto=\",\"instructions\":\"vault:v2:bb7f8206d95e1ddf:e1:NDmyGcyDlsnDJOnBEmk6tXd1/1tfBsPhkEqxDq296V4qgJBF6vp/B60nD9FuQto=\",\"permission_mode\":\"ask\",\"revision\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"token\":\"never expose\"}]}",
+        "digest": "3435f5e66c18462fa3b80d4c0a1121c4a26df96011cc1b7672a92f91a8b436db",
+        "revision": 1,
+        "deadline_ms": 1793430004000,
+        "epoch": 1,
+        "consent": "{\"v\":2,\"owner\":\"usr_mcp_worker_fixture\",\"vault_id\":\"bb7f8206d95e1ddf\",\"client\":\"client-worker-fixture\",\"resource\":\"https://hub.example/api/v1/mcp\",\"scope\":\"mcp:chains mcp:agents:read mcp:agents:write mcp:instances:read\",\"grant\":\"grant-worker-fixture\",\"family\":\"family-worker-fixture\",\"revision\":1,\"mode\":\"device\",\"recipient\":\"\",\"recipient_public_key\":\"\",\"approver\":\"dev_bb7f8206d95e1ddf45074d002c487efe\",\"directory_version\":2,\"directory_head\":\"0ed21205421ce856362e72eec0566704ce7ecc5b72f7ddef1d9e2dad4933cd92\",\"epoch\":1,\"issued_ms\":1793430000000,\"wrap_sha256\":\"\"}",
+        "signature": "{\"alg\":\"ecdsa-p256-sha256\",\"sig\":\"a9246f416068961e1c1eee7f004f13ca80349bd180ae467c2ec71435a3328020d27d676e177d65a4c161d991f91aa18b2da51c691542d7bfff05859105b4f943\"}",
+        "directory": {
+          "owner": "usr_mcp_worker_fixture",
+          "root_device_id": "dev_bb7f8206d95e1ddf45074d002c487efe",
+          "head_hash": "0ed21205421ce856362e72eec0566704ce7ecc5b72f7ddef1d9e2dad4933cd92",
+          "version": 2,
+          "current_epoch": 1,
+          "log": [
+            {
+              "seq": 1,
+              "statement": "heimdall-vault-statement/v2\ntype=genesis\nuser_id=usr_mcp_worker_fixture\nseq=1\nprev_hash=\nissuer_device_id=dev_bb7f8206d95e1ddf45074d002c487efe\nissued_at_ms=1793507216523\nsubject_device_id=dev_bb7f8206d95e1ddf45074d002c487efe\nsubject_kind=browser\nsubject_sign_pub=0421078dc2cd9e85b3a67a6232ed76d752e40c66b4bd2102ea1fb8201ef6e926e9ffd690df792bb3ebf7f56d72ec87595ec9b9e26e013974169aa42d0e3b690452\nsubject_ecdh_pub=04fc8195e07b6a3e9b9f767fef5cc3cd15a1c9cff7ce45bf67e3c807df50acf2d65804019caaf1e597e3aecb99f661042978b06773a8e0d6654354103ac2c23a22\nsubject_sign_alg=ecdsa-p256-sha256\nsubject_wrap_alg=ecdh-p256-hkdf-sha256-aes256gcm\nsubject_label_b64=Um9vdCBicm93c2Vy\nepoch=1\nepoch_commit=f0765f8a55307b2f99047a8e6f9f134948c74797ffb3c647ca15c45c36c4ec4c\nwrap_sha256=0fafcf358a82ac54ac67573fa788040fc35902b0656e762631c38c428070f8ec",
+              "signature": "{\"alg\":\"ecdsa-p256-sha256\",\"sig\":\"40126d3cd60809328572d73472dcd61fad9349b6f50590c63ab349b856090d659c4caa0404b8d8eb471b5ab0ed87f985a112774a604c092d94a438ffe16050df\"}"
+            },
+            {
+              "seq": 2,
+              "statement": "heimdall-vault-statement/v2\ntype=approve\nuser_id=usr_mcp_worker_fixture\nseq=2\nprev_hash=494fd425107d78078e48a06ec4c8465e823d5a4f3722c3c045221ac1afcd283d\nissuer_device_id=dev_bb7f8206d95e1ddf45074d002c487efe\nissued_at_ms=1793507216532\nsubject_device_id=dev_7349d27426d88ffae8b8bc91bb876fe8\nsubject_kind=bridge\nsubject_sign_pub=04775c043cd4e187dcf701f16348a14ce1a2c561ebe214656a221fa95faccb2e002c0b3f26ea29f245eeb54a3a0d696b52b7ad78ad9b1bf2b744e326ecc938c2f1\nsubject_ecdh_pub=\nsubject_sign_alg=ecdsa-p256-sha256\nsubject_wrap_alg=\nsubject_label_b64=YnJpZGdl\nepoch=1\nepoch_commit=f0765f8a55307b2f99047a8e6f9f134948c74797ffb3c647ca15c45c36c4ec4c\nwrap_sha256=",
+              "signature": "{\"alg\":\"ecdsa-p256-sha256\",\"sig\":\"5916735f18d63155be532fccb169b3f2c7c4ccd629f9054eb241f95176dcb5c36643be054d6cdf3d216e9a8a3354cf073716f9caee7c2dabc95fbf1d704e853a\"}"
+            }
+          ],
+          "devices": [
+            {
+              "id": "dev_bb7f8206d95e1ddf45074d002c487efe",
+              "kind": "browser",
+              "sign_alg": "ecdsa-p256-sha256",
+              "wrap_alg": "ecdh-p256-hkdf-sha256-aes256gcm",
+              "sign_public_key": "0421078dc2cd9e85b3a67a6232ed76d752e40c66b4bd2102ea1fb8201ef6e926e9ffd690df792bb3ebf7f56d72ec87595ec9b9e26e013974169aa42d0e3b690452",
+              "ecdh_public_key": "04fc8195e07b6a3e9b9f767fef5cc3cd15a1c9cff7ce45bf67e3c807df50acf2d65804019caaf1e597e3aecb99f661042978b06773a8e0d6654354103ac2c23a22",
+              "approved": true,
+              "pending": false
+            },
+            {
+              "id": "dev_7349d27426d88ffae8b8bc91bb876fe8",
+              "kind": "bridge",
+              "sign_alg": "ecdsa-p256-sha256",
+              "wrap_alg": "",
+              "sign_public_key": "04775c043cd4e187dcf701f16348a14ce1a2c561ebe214656a221fa95faccb2e002c0b3f26ea29f245eeb54a3a0d696b52b7ad78ad9b1bf2b744e326ecc938c2f1",
+              "ecdh_public_key": "",
+              "approved": true,
+              "pending": false
+            }
+          ],
+          "pin_seq": 2,
+          "pin_hash": "0ed21205421ce856362e72eec0566704ce7ecc5b72f7ddef1d9e2dad4933cd92",
+          "vault_id": "bb7f8206d95e1ddf"
+        },
+        "tool": "agents.get"
+      },
+      "result": "{\"records_kind\":\"agent\",\"records\":[{\"agent_id\":\"agt_a\",\"name\":\"worker secret title\",\"slug\":\"worker secret title\",\"instructions\":\"worker secret title\",\"permission_mode\":\"ask\",\"revision\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}]}"
+    },
+    {
+      "job": {
+        "request_id": "req_worker_fixture",
+        "generation": "gen_worker_fixture",
+        "owner": "usr_mcp_worker_fixture",
+        "resource": "https://hub.example/api/v1/mcp",
+        "grant": "grant-worker-fixture",
+        "head": "0ed21205421ce856362e72eec0566704ce7ecc5b72f7ddef1d9e2dad4933cd92",
+        "operation": "read",
+        "payload": "{\"records_kind\":\"instance\",\"records\":[{\"owner_user_id\":\"usr_mcp_worker_fixture\",\"agent_instance_id\":\"inst_a\",\"agent_id\":\"agt_a\",\"bridge_id\":\"brg_a\",\"display_name\":\"vault:v2:bb7f8206d95e1ddf:e1:NDmyGcyDlsnDJOnBEmk6tXd1/1tfBsPhkEqxDq296V4qgJBF6vp/B60nD9FuQto=\",\"provider\":\"codex\",\"provider_profile\":\"work\",\"model\":\"model_a\",\"runtime_status\":\"running\",\"launch_epoch\":\"never expose\"}]}",
+        "digest": "29dbb09e402ec40ed1156bf56370cda494cfd49fd1630e5fe8ae1adcfaff5d50",
+        "revision": 1,
+        "deadline_ms": 1793430004000,
+        "epoch": 1,
+        "consent": "{\"v\":2,\"owner\":\"usr_mcp_worker_fixture\",\"vault_id\":\"bb7f8206d95e1ddf\",\"client\":\"client-worker-fixture\",\"resource\":\"https://hub.example/api/v1/mcp\",\"scope\":\"mcp:chains mcp:agents:read mcp:agents:write mcp:instances:read\",\"grant\":\"grant-worker-fixture\",\"family\":\"family-worker-fixture\",\"revision\":1,\"mode\":\"device\",\"recipient\":\"\",\"recipient_public_key\":\"\",\"approver\":\"dev_bb7f8206d95e1ddf45074d002c487efe\",\"directory_version\":2,\"directory_head\":\"0ed21205421ce856362e72eec0566704ce7ecc5b72f7ddef1d9e2dad4933cd92\",\"epoch\":1,\"issued_ms\":1793430000000,\"wrap_sha256\":\"\"}",
+        "signature": "{\"alg\":\"ecdsa-p256-sha256\",\"sig\":\"a9246f416068961e1c1eee7f004f13ca80349bd180ae467c2ec71435a3328020d27d676e177d65a4c161d991f91aa18b2da51c691542d7bfff05859105b4f943\"}",
+        "directory": {
+          "owner": "usr_mcp_worker_fixture",
+          "root_device_id": "dev_bb7f8206d95e1ddf45074d002c487efe",
+          "head_hash": "0ed21205421ce856362e72eec0566704ce7ecc5b72f7ddef1d9e2dad4933cd92",
+          "version": 2,
+          "current_epoch": 1,
+          "log": [
+            {
+              "seq": 1,
+              "statement": "heimdall-vault-statement/v2\ntype=genesis\nuser_id=usr_mcp_worker_fixture\nseq=1\nprev_hash=\nissuer_device_id=dev_bb7f8206d95e1ddf45074d002c487efe\nissued_at_ms=1793507216523\nsubject_device_id=dev_bb7f8206d95e1ddf45074d002c487efe\nsubject_kind=browser\nsubject_sign_pub=0421078dc2cd9e85b3a67a6232ed76d752e40c66b4bd2102ea1fb8201ef6e926e9ffd690df792bb3ebf7f56d72ec87595ec9b9e26e013974169aa42d0e3b690452\nsubject_ecdh_pub=04fc8195e07b6a3e9b9f767fef5cc3cd15a1c9cff7ce45bf67e3c807df50acf2d65804019caaf1e597e3aecb99f661042978b06773a8e0d6654354103ac2c23a22\nsubject_sign_alg=ecdsa-p256-sha256\nsubject_wrap_alg=ecdh-p256-hkdf-sha256-aes256gcm\nsubject_label_b64=Um9vdCBicm93c2Vy\nepoch=1\nepoch_commit=f0765f8a55307b2f99047a8e6f9f134948c74797ffb3c647ca15c45c36c4ec4c\nwrap_sha256=0fafcf358a82ac54ac67573fa788040fc35902b0656e762631c38c428070f8ec",
+              "signature": "{\"alg\":\"ecdsa-p256-sha256\",\"sig\":\"40126d3cd60809328572d73472dcd61fad9349b6f50590c63ab349b856090d659c4caa0404b8d8eb471b5ab0ed87f985a112774a604c092d94a438ffe16050df\"}"
+            },
+            {
+              "seq": 2,
+              "statement": "heimdall-vault-statement/v2\ntype=approve\nuser_id=usr_mcp_worker_fixture\nseq=2\nprev_hash=494fd425107d78078e48a06ec4c8465e823d5a4f3722c3c045221ac1afcd283d\nissuer_device_id=dev_bb7f8206d95e1ddf45074d002c487efe\nissued_at_ms=1793507216532\nsubject_device_id=dev_7349d27426d88ffae8b8bc91bb876fe8\nsubject_kind=bridge\nsubject_sign_pub=04775c043cd4e187dcf701f16348a14ce1a2c561ebe214656a221fa95faccb2e002c0b3f26ea29f245eeb54a3a0d696b52b7ad78ad9b1bf2b744e326ecc938c2f1\nsubject_ecdh_pub=\nsubject_sign_alg=ecdsa-p256-sha256\nsubject_wrap_alg=\nsubject_label_b64=YnJpZGdl\nepoch=1\nepoch_commit=f0765f8a55307b2f99047a8e6f9f134948c74797ffb3c647ca15c45c36c4ec4c\nwrap_sha256=",
+              "signature": "{\"alg\":\"ecdsa-p256-sha256\",\"sig\":\"5916735f18d63155be532fccb169b3f2c7c4ccd629f9054eb241f95176dcb5c36643be054d6cdf3d216e9a8a3354cf073716f9caee7c2dabc95fbf1d704e853a\"}"
+            }
+          ],
+          "devices": [
+            {
+              "id": "dev_bb7f8206d95e1ddf45074d002c487efe",
+              "kind": "browser",
+              "sign_alg": "ecdsa-p256-sha256",
+              "wrap_alg": "ecdh-p256-hkdf-sha256-aes256gcm",
+              "sign_public_key": "0421078dc2cd9e85b3a67a6232ed76d752e40c66b4bd2102ea1fb8201ef6e926e9ffd690df792bb3ebf7f56d72ec87595ec9b9e26e013974169aa42d0e3b690452",
+              "ecdh_public_key": "04fc8195e07b6a3e9b9f767fef5cc3cd15a1c9cff7ce45bf67e3c807df50acf2d65804019caaf1e597e3aecb99f661042978b06773a8e0d6654354103ac2c23a22",
+              "approved": true,
+              "pending": false
+            },
+            {
+              "id": "dev_7349d27426d88ffae8b8bc91bb876fe8",
+              "kind": "bridge",
+              "sign_alg": "ecdsa-p256-sha256",
+              "wrap_alg": "",
+              "sign_public_key": "04775c043cd4e187dcf701f16348a14ce1a2c561ebe214656a221fa95faccb2e002c0b3f26ea29f245eeb54a3a0d696b52b7ad78ad9b1bf2b744e326ecc938c2f1",
+              "ecdh_public_key": "",
+              "approved": true,
+              "pending": false
+            }
+          ],
+          "pin_seq": 2,
+          "pin_hash": "0ed21205421ce856362e72eec0566704ce7ecc5b72f7ddef1d9e2dad4933cd92",
+          "vault_id": "bb7f8206d95e1ddf"
+        },
+        "tool": "instances.get"
+      },
+      "result": "{\"records_kind\":\"instance\",\"records\":[{\"agent_instance_id\":\"inst_a\",\"agent_id\":\"agt_a\",\"bridge_id\":\"brg_a\",\"display_name\":\"worker secret title\",\"provider\":\"codex\",\"provider_profile\":\"work\",\"model\":\"model_a\",\"runtime_status\":\"running\"}]}"
+    },
+    {
+      "job": {
+        "request_id": "req_worker_fixture",
+        "generation": "gen_worker_fixture",
+        "owner": "usr_mcp_worker_fixture",
+        "resource": "https://hub.example/api/v1/mcp",
+        "grant": "grant-worker-fixture",
+        "head": "0ed21205421ce856362e72eec0566704ce7ecc5b72f7ddef1d9e2dad4933cd92",
+        "operation": "read",
+        "payload": "{\"records_kind\":\"bridge\",\"records\":[{\"owner_user_id\":\"usr_mcp_worker_fixture\",\"bridge_id\":\"brg_a\",\"label\":\"vault:v2:bb7f8206d95e1ddf:e1:NDmyGcyDlsnDJOnBEmk6tXd1/1tfBsPhkEqxDq296V4qgJBF6vp/B60nD9FuQto=\",\"status\":\"online\",\"eligible\":true,\"bridge_token_hash\":\"never expose\"}]}",
+        "digest": "cb3f5d678d81889468634431405ca1525af9e38efd0b7aacd7ea974c6e5bc7e0",
+        "revision": 1,
+        "deadline_ms": 1793430004000,
+        "epoch": 1,
+        "consent": "{\"v\":2,\"owner\":\"usr_mcp_worker_fixture\",\"vault_id\":\"bb7f8206d95e1ddf\",\"client\":\"client-worker-fixture\",\"resource\":\"https://hub.example/api/v1/mcp\",\"scope\":\"mcp:chains mcp:agents:read mcp:agents:write mcp:instances:read\",\"grant\":\"grant-worker-fixture\",\"family\":\"family-worker-fixture\",\"revision\":1,\"mode\":\"device\",\"recipient\":\"\",\"recipient_public_key\":\"\",\"approver\":\"dev_bb7f8206d95e1ddf45074d002c487efe\",\"directory_version\":2,\"directory_head\":\"0ed21205421ce856362e72eec0566704ce7ecc5b72f7ddef1d9e2dad4933cd92\",\"epoch\":1,\"issued_ms\":1793430000000,\"wrap_sha256\":\"\"}",
+        "signature": "{\"alg\":\"ecdsa-p256-sha256\",\"sig\":\"a9246f416068961e1c1eee7f004f13ca80349bd180ae467c2ec71435a3328020d27d676e177d65a4c161d991f91aa18b2da51c691542d7bfff05859105b4f943\"}",
+        "directory": {
+          "owner": "usr_mcp_worker_fixture",
+          "root_device_id": "dev_bb7f8206d95e1ddf45074d002c487efe",
+          "head_hash": "0ed21205421ce856362e72eec0566704ce7ecc5b72f7ddef1d9e2dad4933cd92",
+          "version": 2,
+          "current_epoch": 1,
+          "log": [
+            {
+              "seq": 1,
+              "statement": "heimdall-vault-statement/v2\ntype=genesis\nuser_id=usr_mcp_worker_fixture\nseq=1\nprev_hash=\nissuer_device_id=dev_bb7f8206d95e1ddf45074d002c487efe\nissued_at_ms=1793507216523\nsubject_device_id=dev_bb7f8206d95e1ddf45074d002c487efe\nsubject_kind=browser\nsubject_sign_pub=0421078dc2cd9e85b3a67a6232ed76d752e40c66b4bd2102ea1fb8201ef6e926e9ffd690df792bb3ebf7f56d72ec87595ec9b9e26e013974169aa42d0e3b690452\nsubject_ecdh_pub=04fc8195e07b6a3e9b9f767fef5cc3cd15a1c9cff7ce45bf67e3c807df50acf2d65804019caaf1e597e3aecb99f661042978b06773a8e0d6654354103ac2c23a22\nsubject_sign_alg=ecdsa-p256-sha256\nsubject_wrap_alg=ecdh-p256-hkdf-sha256-aes256gcm\nsubject_label_b64=Um9vdCBicm93c2Vy\nepoch=1\nepoch_commit=f0765f8a55307b2f99047a8e6f9f134948c74797ffb3c647ca15c45c36c4ec4c\nwrap_sha256=0fafcf358a82ac54ac67573fa788040fc35902b0656e762631c38c428070f8ec",
+              "signature": "{\"alg\":\"ecdsa-p256-sha256\",\"sig\":\"40126d3cd60809328572d73472dcd61fad9349b6f50590c63ab349b856090d659c4caa0404b8d8eb471b5ab0ed87f985a112774a604c092d94a438ffe16050df\"}"
+            },
+            {
+              "seq": 2,
+              "statement": "heimdall-vault-statement/v2\ntype=approve\nuser_id=usr_mcp_worker_fixture\nseq=2\nprev_hash=494fd425107d78078e48a06ec4c8465e823d5a4f3722c3c045221ac1afcd283d\nissuer_device_id=dev_bb7f8206d95e1ddf45074d002c487efe\nissued_at_ms=1793507216532\nsubject_device_id=dev_7349d27426d88ffae8b8bc91bb876fe8\nsubject_kind=bridge\nsubject_sign_pub=04775c043cd4e187dcf701f16348a14ce1a2c561ebe214656a221fa95faccb2e002c0b3f26ea29f245eeb54a3a0d696b52b7ad78ad9b1bf2b744e326ecc938c2f1\nsubject_ecdh_pub=\nsubject_sign_alg=ecdsa-p256-sha256\nsubject_wrap_alg=\nsubject_label_b64=YnJpZGdl\nepoch=1\nepoch_commit=f0765f8a55307b2f99047a8e6f9f134948c74797ffb3c647ca15c45c36c4ec4c\nwrap_sha256=",
+              "signature": "{\"alg\":\"ecdsa-p256-sha256\",\"sig\":\"5916735f18d63155be532fccb169b3f2c7c4ccd629f9054eb241f95176dcb5c36643be054d6cdf3d216e9a8a3354cf073716f9caee7c2dabc95fbf1d704e853a\"}"
+            }
+          ],
+          "devices": [
+            {
+              "id": "dev_bb7f8206d95e1ddf45074d002c487efe",
+              "kind": "browser",
+              "sign_alg": "ecdsa-p256-sha256",
+              "wrap_alg": "ecdh-p256-hkdf-sha256-aes256gcm",
+              "sign_public_key": "0421078dc2cd9e85b3a67a6232ed76d752e40c66b4bd2102ea1fb8201ef6e926e9ffd690df792bb3ebf7f56d72ec87595ec9b9e26e013974169aa42d0e3b690452",
+              "ecdh_public_key": "04fc8195e07b6a3e9b9f767fef5cc3cd15a1c9cff7ce45bf67e3c807df50acf2d65804019caaf1e597e3aecb99f661042978b06773a8e0d6654354103ac2c23a22",
+              "approved": true,
+              "pending": false
+            },
+            {
+              "id": "dev_7349d27426d88ffae8b8bc91bb876fe8",
+              "kind": "bridge",
+              "sign_alg": "ecdsa-p256-sha256",
+              "wrap_alg": "",
+              "sign_public_key": "04775c043cd4e187dcf701f16348a14ce1a2c561ebe214656a221fa95faccb2e002c0b3f26ea29f245eeb54a3a0d696b52b7ad78ad9b1bf2b744e326ecc938c2f1",
+              "ecdh_public_key": "",
+              "approved": true,
+              "pending": false
+            }
+          ],
+          "pin_seq": 2,
+          "pin_hash": "0ed21205421ce856362e72eec0566704ce7ecc5b72f7ddef1d9e2dad4933cd92",
+          "vault_id": "bb7f8206d95e1ddf"
+        },
+        "tool": "bridges.list"
+      },
+      "result": "{\"records_kind\":\"bridge\",\"records\":[{\"bridge_id\":\"brg_a\",\"label\":\"worker secret title\",\"status\":\"online\",\"eligible\":true}]}"
+    },
+    {
+      "job": {
+        "request_id": "req_worker_fixture",
+        "generation": "gen_worker_fixture",
+        "owner": "usr_mcp_worker_fixture",
+        "resource": "https://hub.example/api/v1/mcp",
+        "grant": "grant-worker-fixture",
+        "head": "0ed21205421ce856362e72eec0566704ce7ecc5b72f7ddef1d9e2dad4933cd92",
+        "operation": "read",
+        "payload": "{\"records_kind\":\"provider\",\"records\":[{\"owner_user_id\":\"usr_mcp_worker_fixture\",\"bridge_id\":\"brg_a\",\"provider\":\"codex\",\"provider_profile\":\"work\",\"label\":\"vault:v2:bb7f8206d95e1ddf:e1:NDmyGcyDlsnDJOnBEmk6tXd1/1tfBsPhkEqxDq296V4qgJBF6vp/B60nD9FuQto=\",\"eligible\":true,\"models\":[{\"model_id\":\"model_a\",\"label\":\"vault:v2:bb7f8206d95e1ddf:e1:NDmyGcyDlsnDJOnBEmk6tXd1/1tfBsPhkEqxDq296V4qgJBF6vp/B60nD9FuQto=\",\"state\":\"active\",\"rank\":1,\"eligible\":true}],\"base_args_json\":\"never expose\"}],\"next_cursor\":\"owner_bound_position\"}",
+        "digest": "b9e2ec9f6ab869798f3d9d514f7f3b18d9536e8b30934a044a0d30f61caa4234",
+        "revision": 1,
+        "deadline_ms": 1793430004000,
+        "epoch": 1,
+        "consent": "{\"v\":2,\"owner\":\"usr_mcp_worker_fixture\",\"vault_id\":\"bb7f8206d95e1ddf\",\"client\":\"client-worker-fixture\",\"resource\":\"https://hub.example/api/v1/mcp\",\"scope\":\"mcp:chains mcp:agents:read mcp:agents:write mcp:instances:read\",\"grant\":\"grant-worker-fixture\",\"family\":\"family-worker-fixture\",\"revision\":1,\"mode\":\"device\",\"recipient\":\"\",\"recipient_public_key\":\"\",\"approver\":\"dev_bb7f8206d95e1ddf45074d002c487efe\",\"directory_version\":2,\"directory_head\":\"0ed21205421ce856362e72eec0566704ce7ecc5b72f7ddef1d9e2dad4933cd92\",\"epoch\":1,\"issued_ms\":1793430000000,\"wrap_sha256\":\"\"}",
+        "signature": "{\"alg\":\"ecdsa-p256-sha256\",\"sig\":\"a9246f416068961e1c1eee7f004f13ca80349bd180ae467c2ec71435a3328020d27d676e177d65a4c161d991f91aa18b2da51c691542d7bfff05859105b4f943\"}",
+        "directory": {
+          "owner": "usr_mcp_worker_fixture",
+          "root_device_id": "dev_bb7f8206d95e1ddf45074d002c487efe",
+          "head_hash": "0ed21205421ce856362e72eec0566704ce7ecc5b72f7ddef1d9e2dad4933cd92",
+          "version": 2,
+          "current_epoch": 1,
+          "log": [
+            {
+              "seq": 1,
+              "statement": "heimdall-vault-statement/v2\ntype=genesis\nuser_id=usr_mcp_worker_fixture\nseq=1\nprev_hash=\nissuer_device_id=dev_bb7f8206d95e1ddf45074d002c487efe\nissued_at_ms=1793507216523\nsubject_device_id=dev_bb7f8206d95e1ddf45074d002c487efe\nsubject_kind=browser\nsubject_sign_pub=0421078dc2cd9e85b3a67a6232ed76d752e40c66b4bd2102ea1fb8201ef6e926e9ffd690df792bb3ebf7f56d72ec87595ec9b9e26e013974169aa42d0e3b690452\nsubject_ecdh_pub=04fc8195e07b6a3e9b9f767fef5cc3cd15a1c9cff7ce45bf67e3c807df50acf2d65804019caaf1e597e3aecb99f661042978b06773a8e0d6654354103ac2c23a22\nsubject_sign_alg=ecdsa-p256-sha256\nsubject_wrap_alg=ecdh-p256-hkdf-sha256-aes256gcm\nsubject_label_b64=Um9vdCBicm93c2Vy\nepoch=1\nepoch_commit=f0765f8a55307b2f99047a8e6f9f134948c74797ffb3c647ca15c45c36c4ec4c\nwrap_sha256=0fafcf358a82ac54ac67573fa788040fc35902b0656e762631c38c428070f8ec",
+              "signature": "{\"alg\":\"ecdsa-p256-sha256\",\"sig\":\"40126d3cd60809328572d73472dcd61fad9349b6f50590c63ab349b856090d659c4caa0404b8d8eb471b5ab0ed87f985a112774a604c092d94a438ffe16050df\"}"
+            },
+            {
+              "seq": 2,
+              "statement": "heimdall-vault-statement/v2\ntype=approve\nuser_id=usr_mcp_worker_fixture\nseq=2\nprev_hash=494fd425107d78078e48a06ec4c8465e823d5a4f3722c3c045221ac1afcd283d\nissuer_device_id=dev_bb7f8206d95e1ddf45074d002c487efe\nissued_at_ms=1793507216532\nsubject_device_id=dev_7349d27426d88ffae8b8bc91bb876fe8\nsubject_kind=bridge\nsubject_sign_pub=04775c043cd4e187dcf701f16348a14ce1a2c561ebe214656a221fa95faccb2e002c0b3f26ea29f245eeb54a3a0d696b52b7ad78ad9b1bf2b744e326ecc938c2f1\nsubject_ecdh_pub=\nsubject_sign_alg=ecdsa-p256-sha256\nsubject_wrap_alg=\nsubject_label_b64=YnJpZGdl\nepoch=1\nepoch_commit=f0765f8a55307b2f99047a8e6f9f134948c74797ffb3c647ca15c45c36c4ec4c\nwrap_sha256=",
+              "signature": "{\"alg\":\"ecdsa-p256-sha256\",\"sig\":\"5916735f18d63155be532fccb169b3f2c7c4ccd629f9054eb241f95176dcb5c36643be054d6cdf3d216e9a8a3354cf073716f9caee7c2dabc95fbf1d704e853a\"}"
+            }
+          ],
+          "devices": [
+            {
+              "id": "dev_bb7f8206d95e1ddf45074d002c487efe",
+              "kind": "browser",
+              "sign_alg": "ecdsa-p256-sha256",
+              "wrap_alg": "ecdh-p256-hkdf-sha256-aes256gcm",
+              "sign_public_key": "0421078dc2cd9e85b3a67a6232ed76d752e40c66b4bd2102ea1fb8201ef6e926e9ffd690df792bb3ebf7f56d72ec87595ec9b9e26e013974169aa42d0e3b690452",
+              "ecdh_public_key": "04fc8195e07b6a3e9b9f767fef5cc3cd15a1c9cff7ce45bf67e3c807df50acf2d65804019caaf1e597e3aecb99f661042978b06773a8e0d6654354103ac2c23a22",
+              "approved": true,
+              "pending": false
+            },
+            {
+              "id": "dev_7349d27426d88ffae8b8bc91bb876fe8",
+              "kind": "bridge",
+              "sign_alg": "ecdsa-p256-sha256",
+              "wrap_alg": "",
+              "sign_public_key": "04775c043cd4e187dcf701f16348a14ce1a2c561ebe214656a221fa95faccb2e002c0b3f26ea29f245eeb54a3a0d696b52b7ad78ad9b1bf2b744e326ecc938c2f1",
+              "ecdh_public_key": "",
+              "approved": true,
+              "pending": false
+            }
+          ],
+          "pin_seq": 2,
+          "pin_hash": "0ed21205421ce856362e72eec0566704ce7ecc5b72f7ddef1d9e2dad4933cd92",
+          "vault_id": "bb7f8206d95e1ddf"
+        },
+        "tool": "providers.list"
+      },
+      "result": "{\"records_kind\":\"provider\",\"records\":[{\"bridge_id\":\"brg_a\",\"provider\":\"codex\",\"provider_profile\":\"work\",\"label\":\"worker secret title\",\"eligible\":true,\"models\":[{\"model_id\":\"model_a\",\"label\":\"worker secret title\",\"state\":\"active\",\"rank\":1,\"eligible\":true}]}],\"next_cursor\":\"owner_bound_position\"}"
+    }
+  ]
+}

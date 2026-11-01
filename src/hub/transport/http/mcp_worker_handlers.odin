@@ -74,7 +74,7 @@ mcp_device_transform :: proc(h:^MCP_Control_Handlers,view:mcp.Access_View,op:^mc
 	job.deadline_ms=min(now+4000,view.expires_ms)
 	encoded:[]byte
 	err:json.Marshal_Error
-	if op.task_fields!=nil {job.operation="seal_task";encoded,err=json.marshal(op.task_fields,allocator=context.temp_allocator)} else if op.tool=="tasks.comment" {job.operation="seal_comment";encoded,err=json.marshal(struct {body:string}{op.body},allocator=context.temp_allocator)} else if op.seal {job.operation="seal";encoded,err=json.marshal(struct {title,description:string}{op.title,op.description},allocator=context.temp_allocator)} else {encoded,err=json.marshal(op.data,allocator=context.temp_allocator)}
+	if op.agent_fields!=nil {job.operation="seal_agent";encoded,err=json.marshal(op.agent_fields,allocator=context.temp_allocator)} else if op.task_fields!=nil {job.operation="seal_task";encoded,err=json.marshal(op.task_fields,allocator=context.temp_allocator)} else if op.tool=="tasks.comment" {job.operation="seal_comment";encoded,err=json.marshal(struct {body:string}{op.body},allocator=context.temp_allocator)} else if op.seal {job.operation="seal";encoded,err=json.marshal(struct {title,description:string}{op.title,op.description},allocator=context.temp_allocator)} else {encoded,err=json.marshal(op.data,allocator=context.temp_allocator)}
 	defer if len(encoded)>0 do crypto.zero_explicit(raw_data(encoded),len(encoded))
 	if err!=nil || len(encoded)>4*1024*1024 do return {error="result_too_large"}
 	job.payload=string(encoded);job.digest=vault.control_job_digest(job)

@@ -8,7 +8,7 @@ import { decryptVaultBytes, encryptVaultText, findVaultTokens, replaceVaultToken
 
 export interface McpWorkerJob {
   request_id: string; generation: string; owner: string; resource: string; grant: string; head: string;
-  operation: 'read' | 'seal' | 'seal_comment' | 'seal_task'; payload: string; digest: string; revision: number; deadline_ms: number;
+  operation: 'read' | 'seal' | 'seal_comment' | 'seal_task' | 'seal_agent'; payload: string; digest: string; revision: number; deadline_ms: number;
   tool?: string;
   epoch: number; consent: string; signature: string; directory: Record<string, unknown>;
 }
@@ -21,6 +21,9 @@ export async function mcpJobDigest(j: McpWorkerJob): Promise<string> {
 export function mcpJobScopeAllowed(scope: string, tool: string | undefined, operation: string): boolean {
   if (!validMcpScopes(scope)) return false;
   if (!tool) return operation === 'read' || operation === 'seal';
+  if (['agents.list', 'agents.get'].includes(tool)) return operation === 'read' && scope.split(' ').includes('mcp:agents:read');
+  if (['bridges.list', 'providers.list', 'instances.list', 'instances.get'].includes(tool)) return operation === 'read' && scope.split(' ').includes('mcp:instances:read');
+  if (['agents.create', 'agents.update', 'agents.archive'].includes(tool)) return operation === 'seal_agent' && scope.split(' ').includes('mcp:agents:write');
   if (['chains.list', 'chains.get', 'events.wait'].includes(tool)) return operation === 'read';
   if (tool === 'chains.create') return operation === 'seal';
   if (['tasks.list', 'tasks.get'].includes(tool)) return operation === 'read' && scope.split(' ').includes('mcp:tasks:read');
@@ -31,7 +34,7 @@ export function mcpJobScopeAllowed(scope: string, tool: string | undefined, oper
  * against this device's independently pinned, freshly verified directory. */
 export async function verifyMcpWorkerJob(j: McpWorkerJob, identity: DeviceIdentity, chain: VerifiedChain, resource: string, now = Date.now()): Promise<void> {
   const id = (s: unknown) => typeof s === 'string' && /^[A-Za-z0-9_.:-]{1,256}$/.test(s);
-  if (!id(j.request_id) || !id(j.generation) || j.owner !== identity.userId || j.owner !== chain.userId || j.resource !== resource || j.head !== chain.headHash || j.epoch !== chain.currentEpoch || !Number.isSafeInteger(j.deadline_ms) || j.deadline_ms <= now || j.deadline_ms > now + 5000 || typeof j.payload !== 'string' || j.payload.length > 4 * 1024 * 1024 || !['read', 'seal', 'seal_comment', 'seal_task'].includes(j.operation) || j.digest !== await mcpJobDigest(j)) throw new Error('Stale or mismatched MCP request');
+  if (!id(j.request_id) || !id(j.generation) || j.owner !== identity.userId || j.owner !== chain.userId || j.resource !== resource || j.head !== chain.headHash || j.epoch !== chain.currentEpoch || !Number.isSafeInteger(j.deadline_ms) || j.deadline_ms <= now || j.deadline_ms > now + 5000 || typeof j.payload !== 'string' || j.payload.length > 4 * 1024 * 1024 || !['read', 'seal', 'seal_comment', 'seal_task', 'seal_agent'].includes(j.operation) || j.digest !== await mcpJobDigest(j)) throw new Error('Stale or mismatched MCP request');
   const me = chain.trusted.get(identity.deviceId);
   if (!me || !kindPolicy(me.kind).receivesWrap) throw new Error('Approved device required');
   const c = JSON.parse(j.consent);
@@ -47,6 +50,13 @@ const chainFields = ['chain_id', 'title', 'description', 'status', 'kind', 'work
 const taskFields = ['task_id', 'title', 'description', 'state', 'kind', 'attempt_no', 'requires_user_approval', 'reviews', 'updated_at'];
 const taskDetailFields = [...taskFields, 'chain_id', 'goal', 'acceptance', 'inputs', 'review_roles', 'reviewers', 'assignee_agent_id', 'bridge_id', 'depends_on', 'publish_state', 'priority', 'revision', 'blocked_kind', 'blocked_ref', 'blocked_reason', 'blocked_since', 'blocked_since_ms', 'hold_reason', 'hold_since_ms', 'hold_by', 'checkpoint_requested', 'allowed_actions', 'latest_attempt_no', 'latest_attempt_holder_instance_id', 'latest_attempt_outcome', 'latest_attempt_started_at', 'latest_attempt_ended_at', 'latest_attempt_summary', 'latest_attempt_summary_error'];
 const commentFields = ['comment_id', 'chain_id', 'task_id', 'body', 'created_at', 'author_kind', 'author_user_id', 'author_agent_instance_id', 'delegated_client_id', 'delegated_grant_id', 'body_error', 'body_bytes'];
+const catalogFields: Record<string, { fields: string[]; text: string[] }> = {
+  agent: { fields: ['agent_id', 'name', 'slug', 'template_id', 'instructions', 'instructions_error', 'state', 'permission_mode', 'created_at', 'updated_at', 'revision', 'supports'], text: ['name', 'slug', 'instructions'] },
+  instance: { fields: ['agent_instance_id', 'agent_id', 'bridge_id', 'display_name', 'provider', 'provider_profile', 'model', 'runtime_status', 'startup_status', 'activity_status', 'project_id', 'chain_id', 'current_task_id', 'current_task_role', 'configuration_revision', 'permission_mode', 'created_at', 'updated_at', 'last_seen_at'], text: ['display_name'] },
+  bridge: { fields: ['bridge_id', 'label', 'status', 'machine_os', 'machine_arch', 'version', 'plan_disabled', 'enrollment_pending', 'eligible', 'created_at', 'last_seen_at'], text: ['label'] },
+  provider: { fields: ['bridge_id', 'provider', 'provider_profile', 'display_name', 'label', 'enabled', 'profile_state', 'detection_state', 'models_state', 'models_source', 'models_checked_at', 'eligible', 'models', 'models_next_cursor'], text: ['display_name', 'label'] },
+};
+const catalogToolKinds: Record<string, string> = { 'agents.list': 'agent', 'agents.get': 'agent', 'instances.list': 'instance', 'instances.get': 'instance', 'bridges.list': 'bridge', 'providers.list': 'provider' };
 async function readable(raw: Record<string, unknown>, fields: string[], textFields: string[], keyring: VaultKeyring, owner: string): Promise<Record<string, unknown>> {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw) || (raw.owner_user_id !== undefined && raw.owner_user_id !== owner)) throw new Error('MCP record owner mismatch');
   const out: Record<string, unknown> = {};
@@ -74,6 +84,17 @@ async function readable(raw: Record<string, unknown>, fields: string[], textFiel
 }
 export async function transformMcpWorkerJob(job: McpWorkerJob, keyring: VaultKeyring): Promise<string> {
   const input = JSON.parse(job.payload);
+  if (job.operation === 'seal_agent') {
+    if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('Invalid agent fields');
+    const sealed: Record<string, string> = {};
+    for (const [key, value] of Object.entries(input)) {
+      const limit = ({ name: 500, slug: 500, instructions: 65536 } as Record<string, number>)[key];
+      if (!limit || typeof value !== 'string' || new TextEncoder().encode(value).length > limit) throw new Error('Invalid agent text');
+      if (key !== 'instructions' && !value.trim()) throw new Error('Invalid agent name');
+      sealed[key] = await encryptVaultText(value, keyring);
+    }
+    return JSON.stringify(sealed);
+  }
   if (job.operation === 'seal_task') {
     if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).length < 1 || Object.keys(input).length > 5) throw new Error('Invalid task fields');
     const sealed: Record<string, unknown> = {};
@@ -99,6 +120,25 @@ export async function transformMcpWorkerJob(job: McpWorkerJob, keyring: VaultKey
     return JSON.stringify({ title: await encryptVaultText(input.title, keyring), description: await encryptVaultText(input.description, keyring) });
   }
   const out: Record<string, unknown> = {};
+  const expectedKind = catalogToolKinds[job.tool || ''] || '';
+  if ((input.records_kind || '') !== expectedKind || (!expectedKind && input.records?.length)) throw new Error('MCP catalog/tool mismatch');
+  if (expectedKind && (input.chain || input.chains?.length || input.tasks?.length || input.comments?.length || input.comments_next_cursor)) throw new Error('Unexpected catalog payload');
+  if (expectedKind) {
+    out.records_kind = expectedKind;
+    if (input.records !== undefined && !Array.isArray(input.records)) throw new Error('Invalid catalog records');
+    const spec = catalogFields[expectedKind];
+    out.records = await Promise.all((input.records || []).map(async (record: Record<string, unknown>) => {
+      const row = await readable(expectedKind === 'provider' ? { ...record, models: undefined } : record, spec.fields, spec.text, keyring, job.owner);
+      if (expectedKind === 'provider' && record.models !== undefined) {
+        if (!Array.isArray(record.models) || record.models.length > 100) throw new Error('Invalid provider models');
+        row.models = await Promise.all(record.models.map(model => {
+          if (!model || typeof model !== 'object' || Object.keys(model).length !== 5 || typeof model.model_id !== 'string' || typeof model.label !== 'string' || typeof model.state !== 'string' || !Number.isSafeInteger(model.rank) || typeof model.eligible !== 'boolean') throw new Error('Invalid provider model');
+          return readable(model, ['model_id', 'label', 'state', 'rank', 'eligible'], ['label'], keyring, job.owner);
+        }));
+      }
+      return row;
+    }));
+  }
   if (input.chain) out.chain = await readable(input.chain, chainFields, ['title', 'description'], keyring, job.owner);
   if (input.chains) out.chains = await Promise.all(input.chains.map((r: Record<string, unknown>) => readable(r, chainFields, ['title', 'description'], keyring, job.owner)));
   if (input.tasks) out.tasks = await Promise.all(input.tasks.map(async (r: Record<string, unknown>) => {

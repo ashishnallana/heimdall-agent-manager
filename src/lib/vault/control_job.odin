@@ -6,6 +6,8 @@ import "core:fmt"
 import "core:strings"
 
 Control_Data :: struct {
+	records_kind:string `json:"records_kind,omitempty"`,
+	records:[]json.Object `json:"records,omitempty"`,
 	chains:[]json.Object `json:"chains,omitempty"`,
 	chain:json.Object `json:"chain,omitempty"`,
 	tasks:[]json.Object `json:"tasks,omitempty"`,
@@ -45,7 +47,7 @@ control_job_digest :: proc(job:Control_Job)->string {
 	return sha256_hex(string(encoded))
 }
 control_job_verify :: proc(job:Control_Job,owner,resource,device_id:string,kr:^Vault_Keyring,now:i64,root_pin:^Root_Pin=nil)->bool {
-	if job.owner!=owner || job.resource!=resource || job.request_id=="" || !valid_id_value(job.request_id) || job.generation=="" || !valid_id_value(job.generation) || job.deadline_ms<=now || job.deadline_ms>now+5000 || len(job.payload)>4*1024*1024 || job.digest!=control_job_digest(job) || (job.operation!="read" && job.operation!="seal" && job.operation!="seal_comment" && job.operation!="seal_task") do return false
+	if job.owner!=owner || job.resource!=resource || job.request_id=="" || !valid_id_value(job.request_id) || job.generation=="" || !valid_id_value(job.generation) || job.deadline_ms<=now || job.deadline_ms>now+5000 || len(job.payload)>4*1024*1024 || job.digest!=control_job_digest(job) || (job.operation!="read" && job.operation!="seal" && job.operation!="seal_comment" && job.operation!="seal_task" && job.operation!="seal_agent") do return false
 	c:Control_Consent
 	if json.unmarshal_string(job.consent,&c,.JSON,context.temp_allocator)!=nil do return false
 	if !control_job_scope_ok(c.scope,job.tool,job.operation) do return false
@@ -92,6 +94,11 @@ control_transform_data :: proc(data:Control_Data,kr:^Vault_Keyring,details:=fals
 		return obj,err==nil && valid
 	}
 	ok:=true
+	if len(data.records)>0 {
+		kind,known:=control_catalog_kind(data.records_kind);if !known do return "",false
+		out.records=make([]json.Object,len(data.records),context.temp_allocator)
+		for row,i in data.records {out.records[i],ok=transform(row,kind,kr,&opened);if !ok do return "",false}
+	}
 	if data.chain!=nil {out.chain,ok=transform(data.chain,.Chain,kr,&opened);if !ok do return "",false}
 	out.chains=make([]json.Object,len(data.chains),context.temp_allocator)
 	for c,i in data.chains {out.chains[i],ok=transform(c,.Chain,kr,&opened);if !ok do return "",false}
@@ -107,6 +114,12 @@ control_transform_data :: proc(data:Control_Data,kr:^Vault_Keyring,details:=fals
 	return string(encoded),true
 }
 control_job_transform :: proc(job:Control_Job,kr:^Vault_Keyring)->(string,bool) {
+	if job.operation=="seal_agent" {
+		value,err:=json.parse_string(job.payload,parse_integers=true,allocator=context.temp_allocator)
+		defer control_wipe_value(value)
+		fields,typed:=value.(json.Object);if err!=nil || !typed do return "",false
+		return control_seal_agent_fields(kr,fields)
+	}
 	if job.operation=="seal_task" {
 		value,err:=json.parse_string(job.payload,parse_integers=true,allocator=context.temp_allocator)
 		defer control_wipe_value(value)
@@ -127,6 +140,8 @@ control_job_transform :: proc(job:Control_Job,kr:^Vault_Keyring)->(string,bool) 
 	if job.operation=="read" {
 		data:Control_Data
 		if json.unmarshal_string(job.payload,&data,.JSON,context.temp_allocator)!=nil do return "",false
+		if !control_catalog_data_ok(job.tool,data) do return "",false
+		defer control_catalog_wipe(data)
 		defer {
 			control_wipe_value(data.chain)
 			for row in data.chains do control_wipe_value(row)

@@ -5,6 +5,9 @@ control_job_scope_ok :: proc(scope,tool,operation:string)->bool {
 	if !control_scopes_valid(scope) do return false
 	if tool=="" do return operation=="read" || operation=="seal"
 	switch tool {
+	case "agents.list","agents.get":return operation=="read" && control_scope_has(scope,"mcp:agents:read")
+	case "instances.list","instances.get","bridges.list","providers.list":return operation=="read" && control_scope_has(scope,"mcp:instances:read")
+	case "agents.create","agents.update","agents.archive":return operation=="seal_agent" && control_scope_has(scope,"mcp:agents:write")
 	case "chains.list","chains.get","events.wait":return operation=="read"
 	case "chains.create":return operation=="seal"
 	case "tasks.list","tasks.get":return operation=="read" && control_scope_has(scope,"mcp:tasks:read")

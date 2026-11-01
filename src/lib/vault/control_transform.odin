@@ -1,3 +1,4 @@
+#+feature dynamic-literals
 package vault
 
 import "core:crypto"
@@ -41,7 +42,7 @@ control_text :: proc(kr:^Vault_Keyring,text:string)->(string,bool) {
 	return strings.to_string(b),true
 }
 
-Control_Record_Kind :: enum {Chain,Task,Comment,Task_Detail}
+Control_Record_Kind :: enum {Chain,Task,Comment,Task_Detail,Agent,Instance,Bridge,Provider}
 // Return a request-owned JSON encoding. Callers must wipe it after forwarding or
 // on any discarded-result path; never cache it. Input metadata is not mutated.
 control_record_json :: proc(kr:^Vault_Keyring,kind:Control_Record_Kind,record:json.Object)->(string,bool) {
@@ -79,6 +80,21 @@ control_record_json :: proc(kr:^Vault_Keyring,kind:Control_Record_Kind,record:js
 				append(&opened,plain);append(&readable,json.String(plain))
 			}
 			out[key]=readable
+		}
+	}
+	if kind==.Provider {
+		if value,present:=out["models"];present {
+			models,typed:=value.(json.Array);if !typed || len(models)>100 do return "",false
+			readable:=make(json.Array,0,len(models),context.temp_allocator)
+			for item in models {
+				model,object:=item.(json.Object);if !object || len(model)!=5 do return "",false
+				id,id_ok:=model["model_id"].(json.String);label,label_ok:=model["label"].(json.String);state,state_ok:=model["state"].(json.String);rank,rank_ok:=model["rank"].(json.Integer);eligible,eligible_ok:=model["eligible"].(json.Boolean)
+				if !id_ok || !label_ok || !state_ok || !rank_ok || !eligible_ok do return "",false
+				plain,ok:=control_text(kr,string(label));if !ok do return "",false
+				append(&opened,plain)
+				append(&readable,json.Object{"model_id"=id,"label"=json.String(plain),"state"=state,"rank"=rank,"eligible"=eligible})
+			}
+			out["models"]=readable
 		}
 	}
 	data,err:=json.marshal(out,allocator=context.temp_allocator)

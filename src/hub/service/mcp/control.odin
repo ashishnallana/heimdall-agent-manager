@@ -11,9 +11,11 @@ import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
 import tc "odin_test:hub/service/taskchain"
 import vault "odin_test:lib/vault"
+import agent "odin_test:hub/service/agent"
+import provider "odin_test:hub/service/provider"
 
-Control_Service :: struct {chains:^tc.Taskchain_Service}
-Control_Arguments :: struct {chain_id,title,description,cursor,task_id,request_id,body,state,assignee_agent_id,comment_cursor:string,limit,timeout_ms,comment_limit:int,task_write:Task_Tool_Arguments,include_configuration,include_comments:bool}
+Control_Service :: struct {chains:^tc.Taskchain_Service,agents:^agent.Agent_Service,providers:^provider.Provider_Service,bridges:^iface.Bridge_Repository}
+Control_Arguments :: struct {chain_id,title,description,cursor,task_id,request_id,body,state,assignee_agent_id,comment_cursor:string,limit,timeout_ms,comment_limit:int,task_write:Task_Tool_Arguments,catalog:Catalog_Arguments,include_configuration,include_comments:bool}
 Control_Data :: vault.Control_Data
 control_auth :: proc(owner:string)->contracts.Auth_Context {return {kind=.Internal_User,user_id=owner}}
 control_chain :: proc(c:domain.Task_Chain)->json.Object {
@@ -25,6 +27,7 @@ control_id_ok :: proc(id:string)->bool {return strings.has_prefix(id,"chain_") &
 // Services authorize every chain/task/comment before any decryption dispatch.
 // Bounded projections deliberately omit briefs, facets and other nested data.
 control_read :: proc(s:^Control_Service,owner,name:string,args:Control_Arguments)->(Control_Data,string) {
+	if catalog_tool(name) do return control_read_catalog(s,owner,name,args.catalog)
 	if name=="tasks.list" || name=="tasks.get" do return control_read_tasks(s,owner,name,args)
 	principal:=control_auth(owner)
 	if name=="chains.list" {
@@ -77,7 +80,7 @@ control_read :: proc(s:^Control_Service,owner,name:string,args:Control_Arguments
 	return out,""
 }
 control_transform :: vault.control_transform_data
-Control_Transform :: struct {data:Control_Data,title,description,tool,body:string,seal:bool,task_fields:json.Object}
+Control_Transform :: struct {data:Control_Data,title,description,tool,body:string,seal:bool,task_fields,agent_fields:json.Object}
 
 control_payload_ok :: proc(data:Control_Data)->bool {
 	encoded,err:=json.marshal(data,allocator=context.temp_allocator)
@@ -92,7 +95,17 @@ control_record_matches :: proc(expected,actual:json.Object,kind:Hosted_Record_Ki
 		for k in allowed do if k==key do found=true
 		for k in text do if k==key do is_text=true
 		if !found do return false
-		if kind==.Task_Detail && (key=="acceptance" || key=="inputs") {
+		if kind==.Provider && key=="models" {
+			items,typed:=value.(json.Array);expected_items,expected_typed:=expected[key].(json.Array)
+			if !typed || !expected_typed || len(items)!=len(expected_items) do return false
+			for item,i in items {
+				model,ok:=item.(json.Object);original,original_ok:=expected_items[i].(json.Object)
+				if !ok || !original_ok || len(model)!=5 || len(original)!=5 do return false
+				for k in ([]string{"model_id","label","state","rank","eligible"}) {
+					if k=="label" {if _,typed:=model[k].(json.String);!typed do return false} else if !tc.json_values_equal(original[k],model[k]) do return false
+				}
+			}
+		} else if kind==.Task_Detail && (key=="acceptance" || key=="inputs") {
 			items,typed:=value.(json.Array);expected_items,expected_typed:=expected[key].(json.Array)
 			if !typed || !expected_typed || len(items)!=len(expected_items) do return false
 			for item in items do if _,string_item:=item.(json.String);!string_item do return false
@@ -114,7 +127,12 @@ control_result_ok :: proc(data:Control_Data,result:string)->bool {
 	defer vault.control_wipe_value(value)
 	root,object:=value.(json.Object)
 	if err!=nil || !object || parser.curr_token.kind!=.EOF do return false
-	for key in root do if key!="chain" && key!="chains" && key!="tasks" && key!="comments" && key!="next_cursor" && key!="comments_next_cursor" do return false
+	for key in root do if key!="chain" && key!="chains" && key!="tasks" && key!="comments" && key!="next_cursor" && key!="comments_next_cursor" && key!="records_kind" && key!="records" do return false
+	if kind,known:=vault.control_catalog_kind(data.records_kind);known {
+		raw_kind,typed:=root["records_kind"].(json.String);if !typed || string(raw_kind)!=data.records_kind do return false
+		rows,array_typed:=root["records"].(json.Array);if len(data.records)>0 && !array_typed || len(rows)!=len(data.records) do return false
+		for item,i in rows {obj,ok:=item.(json.Object);if !ok || !control_record_matches(data.records[i],obj,kind) do return false}
+	} else {if _,present:=root["records_kind"];present do return false;if _,present:=root["records"];present do return false}
 	if data.chain!=nil {
 		c,ok:=root["chain"].(json.Object);if !ok || !control_record_matches(data.chain,c,.Chain) do return false
 	} else if _,present:=root["chain"];present do return false
@@ -152,6 +170,7 @@ control_sealed_ok :: proc(view:Access_View,text:string)->(title,description:stri
 }
 control_hosted_transform :: proc(ctx:rawptr,kr:^vault.Vault_Keyring)->(string,bool) {
 	op:=(^Control_Transform)(ctx)
+	if op.agent_fields!=nil do return vault.control_seal_agent_fields(kr,op.agent_fields)
 	if op.task_fields!=nil do return vault.control_seal_task_fields(kr,op.task_fields)
 	if op.tool=="tasks.comment" {
 		payload,err:=json.marshal(struct {body:string}{op.body},allocator=context.temp_allocator)
@@ -159,7 +178,10 @@ control_hosted_transform :: proc(ctx:rawptr,kr:^vault.Vault_Keyring)->(string,bo
 		defer if len(payload)>0 do crypto.zero_explicit(raw_data(payload),len(payload))
 		return vault.control_job_transform({operation="seal_comment",payload=string(payload)},kr)
 	}
-	if !op.seal do return vault.control_transform_data(op.data,kr,op.tool=="tasks.get" || op.tool=="tasks.list")
+	if !op.seal {
+		if !vault.control_catalog_data_ok(op.tool,op.data) do return "",false
+		return vault.control_transform_data(op.data,kr,op.tool=="tasks.get" || op.tool=="tasks.list")
+	}
 	t,d,ok:=hosted_seal_chain(kr,op.title,op.description)
 	if !ok do return "",false
 	encoded,err:=json.marshal(struct {title,description:string}{t,d},allocator=context.temp_allocator)

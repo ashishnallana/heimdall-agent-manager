@@ -7,8 +7,10 @@ leases are excluded.
 
 The catalog is filtered by the connection's signed permissions. Task read adds
 `tasks.list` and `tasks.get`; task write adds `tasks.comment`, `tasks.create`,
-`tasks.update`, `tasks.control` and `chains.configure`. Other capability groups
-remain foundations for subsequent increments and expose no tools yet.
+`tasks.update`, `tasks.control` and `chains.configure`. Agent read adds
+`agents.list/get`; agent write adds `agents.create/update/archive`. Instance read
+adds `instances.list/get`, `bridges.list` and `providers.list`. Remaining capability
+groups are foundations for subsequent increments and expose no tools yet.
 
 The optional scopes are `mcp:<resource>:read` and `mcp:<resource>:write` for tasks,
 agents, memories, projects, issues and artifacts. Runtime sessions use
@@ -35,6 +37,60 @@ an explicit token-endpoint scope must match the existing credential after
 canonicalization. Narrowing or broadening a family requires fresh consent rather
 than silently changing that family's rights. Revocation and current-directory
 checks remain in force. Device versus hosted decryption is an independent choice.
+
+## Agent definitions and target discovery
+
+Agent tools address durable `agent_id` values; instance tools address
+`agent_instance_id`. Definition create/update/archive never creates, starts,
+stops or moves a runtime session. Archive preserves historic references and
+leaves existing sessions running under native rules.
+
+Agent writes require stable `request_id` values; update/archive additionally
+require `expected_revision` from `agents.get` or the list summary. Revisions
+cover the full native definition and support rows, including same-timestamp
+native edits. The native write and public metadata-only retry receipt share
+one live-grant transaction. COMMIT consumes that transaction on either outcome.
+Native template availability and all support-bridge ownership checks apply.
+
+`name`, `slug` and `instructions` are current-epoch encrypted. Names/slugs are
+bounded to 500 bytes; instructions to 64 KiB. An explicit empty instruction
+string clears it through an encrypted empty value. Lists omit instructions;
+encrypted slugs are labels, so use `agent_id` for identity and deduplication.
+The transport envelope permits 512 KiB to cover worst-case JSON escaping;
+individual tool field limits still apply.
+get returns typed instructions and up to 100 support rows. Oversized legacy
+instructions return `instructions_error` while metadata/revision remain readable.
+Support replacements contain explicit owned bridge IDs, enablement, priority
+0–100 and maximum instances 0–64 (zero keeps native unlimited semantics).
+
+New definitions retain the native `yolo` default unless `ask` is selected.
+An explicit definition update may tighten `yolo` to `ask`; weakening an existing
+`ask` definition returns `permission_escalation_not_allowed`. Omitted mode stays
+unchanged. Runtime moves remain a separate capability and preserve permission mode.
+
+All lists default to 50 records, cap at 100, and return `records_kind`, `records`
+and optional `next_cursor`. Agent state and instance agent/bridge/runtime-state
+filters apply before stable owner/filter-bound keyset paging. Cursors are seek
+positions, not authorization credentials; owner and resource checks still apply.
+
+`providers.list` requires an owned `bridge_id` and optionally an owned
+`agent_id`. It exposes exact provider-profile identities, effective observed or
+fallback models, model provenance/status and configuration-eligibility flags.
+Flags account for native profile validation, provider/model state and detection,
+agent archival/support, and bridge status/enrollment/plan state. They are a
+snapshot, not a capacity reservation: task/launch writes recheck current rules.
+No alternate bridge/profile is silently substituted.
+
+Profiles page with the ordinary `limit`/`cursor`. Each profile's models page
+independently with `model_limit` (default 50, max 100). To continue, select the
+returned `provider_profile` and pass its `models_next_cursor` as `model_cursor`;
+model cursors bind owner, bridge, agent and profile. Do not combine model and
+profile cursors. Unknown exact profiles return `not_found`.
+
+Public projections omit tokens/hashes, environment, executable arguments and
+paths, transcripts, launch epochs and raw diagnostic errors. Provider labels and
+model labels use typed decryption in both browser and native workers. Native
+provider-view strings are copied before those views are freed.
 
 ## Task tools
 

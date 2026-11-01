@@ -25,10 +25,14 @@ MCP_Control_Handlers :: struct {
 	create:mcp.Control_Create_Proc,
 	comment:mcp.Control_Comment_Proc,
 	mutate_task:mcp.Control_Task_Mutate_Proc,
+	mutate_catalog:mcp.Catalog_Mutate_Proc,
 	// Optional approved enrolled-bridge transport. It receives no client token.
 	bridge_ctx:rawptr,
 	bridge_transform:proc(ctx:rawptr,job:vault.Control_Job)->(string,bool),
 }
+// 64KiB agent instructions may expand sixfold when JSON-escaped; typed tool
+// field limits remain stricter than this bounded transport envelope.
+MCP_CONTROL_MAX_BODY_BYTES :: 512*1024
 mcp_control_register_routes :: proc(r:^Router,h:^MCP_Control_Handlers) {
 	router_add(r,"ANY",MCP_PATH,h,mcp_control_handler)
 	router_add(r,"GET",MCP_OAUTH+"/jobs",h,mcp_worker_handler)
@@ -56,6 +60,7 @@ mcp_id_ok :: proc(id:json.Value)->bool {
 	return false
 }
 mcp_arguments :: proc(name:string,value:json.Value)->(mcp.Control_Arguments,bool) {
+	if mcp.catalog_tool(name) do return mcp_catalog_arguments(name,value)
 	if name=="tasks.create" || name=="tasks.update" || name=="tasks.control" || name=="chains.configure" do return mcp_task_write_arguments(name,value)
 	args:mcp.Control_Arguments
 	obj,ok:=value.(json.Object)
@@ -141,7 +146,7 @@ mcp_control_handler :: proc(ctx:rawptr,req:Request)->(response:Response) {
 	view,valid:=mcp.access_view(h.delegation.service,h.delegation.grant_directory,raw)
 	if !valid do return mcp_unauthorized(h)
 	if req.method!="POST" do return plain_response(405,"method not allowed",{"Allow","POST"})
-	if len(req.body)>32768 || !strings.has_prefix(header_value(req.headers,"Content-Type"),"application/json") do return mcp_oauth_error("invalid_request")
+	if len(req.body)>MCP_CONTROL_MAX_BODY_BYTES || !strings.has_prefix(header_value(req.headers,"Content-Type"),"application/json") do return mcp_oauth_error("invalid_request")
 	defer if req.body!="" do crypto.zero_explicit(raw_data(req.body),len(req.body))
 	rpc,parsed:=mcp_parse_object(req.body)
 	defer vault.control_wipe_value(rpc)
@@ -184,6 +189,7 @@ mcp_control_handler :: proc(ctx:rawptr,req:Request)->(response:Response) {
 	name,nok:=params["name"].(json.String)
 	args,args_ok:=mcp_arguments(string(name),params["arguments"])
 	defer {
+		for text in ([]string{args.catalog.name,args.catalog.slug,args.catalog.instructions}) do if text!="" do crypto.zero_explicit(raw_data(text),len(text))
 		for text in ([]string{args.task_write.title,args.task_write.description,args.task_write.goal,args.task_write.reason}) do if text!="" do crypto.zero_explicit(raw_data(text),len(text))
 		for text in args.task_write.acceptance do if text!="" do crypto.zero_explicit(raw_data(text),len(text))
 	}
@@ -194,6 +200,7 @@ mcp_control_handler :: proc(ctx:rawptr,req:Request)->(response:Response) {
 	handle,admitted:=mcp.request_begin(&h.requests,key,string(encoded_id))
 	if !admitted do return mcp_tool_result(id,"busy: request is already active or capacity is exhausted",true)
 	defer mcp.request_end(&h.requests,handle)
+	if mcp.catalog_write(string(name)) do return mcp_catalog_write_call(h,id,raw,view,string(name),args.catalog,handle,started)
 	if string(name)=="tasks.create" || string(name)=="tasks.update" || string(name)=="tasks.control" || string(name)=="chains.configure" do return mcp_task_write_call(h,id,raw,view,string(name),args.task_write,handle,started)
 	if string(name)=="tasks.comment" do return mcp_task_comment_call(h,id,raw,view,args,handle,started)
 	data:mcp.Control_Data
@@ -220,6 +227,7 @@ mcp_control_handler :: proc(ctx:rawptr,req:Request)->(response:Response) {
 	view=fresh
 	op:=mcp.Control_Transform{seal=string(name)=="chains.create",title=args.title,description=args.description}
 	if string(name)=="tasks.get" || string(name)=="tasks.list" do op.tool=string(name)
+	if mcp.catalog_tool(string(name)) do op.tool=string(name)
 	if !op.seal {
 		code:string
 		data,code=mcp.control_read(&h.control,view.owner,string(name),args)
