@@ -377,6 +377,8 @@ test('ThisMachineCard: account B detects account A\'s profile but cannot manage 
     assert.equal(query('settings-this-machine-update-btn'), null);
     assert.equal(query('settings-this-machine-uninstall-btn'), null);
     assert.doesNotMatch(doc.body.textContent || '', /brg_a/);
+    await act(async () => query('settings-this-machine-open-setup-btn')!.click());
+    assert.equal(dom.window.location.hash, '#/setup', 'the wizard can be reopened after the first-run flag was remembered');
     await act(async () => query('settings-this-machine-setup-btn')!.click());
     assert.equal(query('setup-detected-profiles-p1'), null, 'other accounts are hidden by default');
     await act(async () => query('setup-detected-profiles-show-others')!.click());

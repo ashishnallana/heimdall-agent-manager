@@ -10,6 +10,15 @@ import "core:os"
 import "core:strings"
 import "core:sys/posix"
 
+bridge_os_start_daemon :: proc(argv: []string) -> (os.Process, os.Error) {
+	return os.process_start(os.Process_Desc{command = argv})
+}
+
+// Only the Windows Task Scheduler path calls this native stop helper.
+bridge_os_stop_service_process :: proc(pid: int, recorded_at: i64, expected: string) -> bool {
+	return false
+}
+
 // Child processes must never inherit the bridge's listeners. In particular,
 // ham-pty-host intentionally outlives individual agents; inheriting these fds
 // would keep the bridge ports bound after launchd stops the bridge and make the

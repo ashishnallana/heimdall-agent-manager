@@ -203,6 +203,7 @@ Task_Comment_Summary_Wire :: struct {
 }
 
 Task_Detail_Wire :: struct {
+    requirements: json.Value `json:"requirements"`,
 	task_id:                string                    `json:"task_id"`,
 	chain_id:               string                    `json:"chain_id"`,
 	title:                  string                    `json:"title"`,
@@ -545,11 +546,16 @@ make_task_detail_wire :: proc(h: ^Taskchain_Handlers, auth_ctx: contracts.Auth_C
 	summary_wire := make_task_comment_summary_wire(comment_summary)
 
 	desc_maybe: Maybe(string) = nil
+    requirement_wire: json.Value
+    if raw, err := taskv2.requirements_projection_json(h.taskchains.repo, t, include_description); err.code == .None {
+        requirement_wire = json_value_or_null(raw)
+    }
 	if include_description {
 		desc_maybe = t.description
 	}
 
 	return Task_Detail_Wire{
+        requirements = requirement_wire,
 		task_id                = string(t.task_id),
 		chain_id               = string(t.chain_id),
 		title                  = t.title,
@@ -1624,6 +1630,10 @@ patch_task_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	if actor_err.code != .None do return respond_error(actor_err, req.request_id)
 	brief_json, _ := jsonx.extract_raw_object(req.body, "brief", top_level_only = true, allocator = context.temp_allocator)
 	task, updated, err := taskchain_service.update_task(h.taskchains, auth_ctx, task_id, taskchain_service.Update_Task_Input{
+        require_requirements_context = true,
+        expected_requirements_revision = i64(jsonx.extract_int(req.body, "expected_requirements_revision", 0, true)),
+        requirements_reason = json_string(req.body, "requirements_reason"),
+        requirements_request_id = json_string(req.body, "request_id"),
 		title = json_string(req.body, "title"), description = json_string(req.body, "description"), brief_json = brief_json,
 		replace_brief = jsonx.extract_bool_literal(req.body, "replace_brief", true) or_else false,
 		assignee_agent_id = assignee, has_assignee = jsonx.has_key(req.body, "assignee", top_level_only = true) || jsonx.has_key(req.body, "assignee_ref", top_level_only = true),
@@ -1673,7 +1683,10 @@ user_review_task_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	chain_id := domain.Task_Chain_ID(path_part(req.path, 4))
 	task_id := domain.Task_ID(path_part(req.path, 6))
 	if matched, mismatch_resp := require_task_path_scope(h, auth_ctx, chain_id, task_id, req); !matched do return mismatch_resp
-	res, rok, err := taskv2.user_review(h.task_engine, auth_ctx, task_id, taskv2.Review_Input{verdict = json_string(req.body, "verdict"), findings_json = verbatim_field(req.body, "findings"), summary = json_string(req.body, "summary")})
+	res, rok, err := taskv2.user_review(h.task_engine, auth_ctx, task_id, taskv2.Review_Input{verdict = json_string(req.body, "verdict"), findings_json = verbatim_field(req.body, "findings"), summary = json_string(req.body, "summary"),
+		requirements_revision = i64(jsonx.extract_int(req.body, "requirements_revision", 0, true)),
+		expected_attempt_no = jsonx.extract_int(req.body, "expected_attempt_no", 0, true),
+		expected_head = json_string(req.body, "expected_head")})
 	if !rok do return respond_error(err, req.request_id)
 	publish_task_changed(h, string(res.task.owner_user_id), string(res.task.task_id), string(res.task.chain_id), "updated")
 	b := strings.builder_make(); write_task_json(&b, res.task)

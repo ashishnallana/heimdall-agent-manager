@@ -35,3 +35,11 @@ You never set task status by hand. A task is `in_progress` exactly while you hol
 - `search-command`: Finding prior conversations, tasks, comments, and memories before planning.
 - `memory-management-workflow`: Memory scoping and proposals.
 - `heimdall-ctl-communication`: User messaging and status updates.
+
+## Amending requirements or replacing a task
+
+When the user amends a task, first decide whether its objective and deliverable are still the same.
+
+- **Same task:** change the native brief goal/acceptance through the requirement-update interface, with the current requirements revision and an explicit reason. Follow `coordinator-task-management` for the read/change/acknowledgement workflow. A comment alone does not update requirements or wake the worker. Keep the chain design and acceptance criteria consistent with the amendment.
+- **Significant change:** if the objective, deliverable, or approach changes enough to invalidate the original plan or review basis, record the decision on the original task: why it changed, original versus new scope, completed work worth retaining, and the original task's disposition. Create a self-contained new task linked to the original, with its own acceptance criteria and required approvals. Explicitly update future dependencies; do not silently repurpose the original task or erase its history.
+- For an active task being replaced, arrange a checkpoint/handoff before redirecting work. A soloist can use `lease switch` after creating the replacement; preserve progress in its summary. Terminal tasks require explicit reopen for further work. Keep workflow-managed stage identities under workflow lifecycle controls.

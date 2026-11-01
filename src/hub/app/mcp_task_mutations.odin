@@ -129,6 +129,14 @@ mcp_mutate_task :: proc(ctx:rawptr,raw:string,view:mcp.Access_View,command:mcp.C
 		created,created_ok,create_err:=tc.create_task(&chains,principal,command.create)
 		id=string(created.task_id);ok=created_ok;operation_err=create_err
 	case "tasks.update":
+        // The mandatory whole-record revision was checked in this transaction.
+        // Bind the native requirement revision to that same read; MCP callers
+        // cannot silently bypass its optimistic concurrency check.
+        req_state, req_err := tv2.requirements_read(g.taskchains.repo,task)
+        if req_err.code!=.None do return "","request_failed"
+        update_input:=command.update
+        update_input.expected_requirements_revision=req_state.revision
+        update_input.require_requirements_context=true
 		if command.update.has_assignee || command.update.bridge_id!=nil {
 			brief,_:=json.parse_string(task.brief_json,parse_integers=true,allocator=context.temp_allocator)
 			obj,_:=brief.(json.Object);assignee,_:=obj["assignee"].(json.String)
@@ -137,7 +145,7 @@ mcp_mutate_task :: proc(ctx:rawptr,raw:string,view:mcp.Access_View,command:mcp.C
 			if command.update.bridge_id!=nil do b=command.update.bridge_id^
 			if code:=mcp_task_target(g,chain.owner_user_id,chain_id,a,b);code!="" do return "",code
 		}
-		updated,updated_ok,update_err:=tc.update_task(&chains,principal,task.task_id,command.update)
+		updated,updated_ok,update_err:=tc.update_task(&chains,principal,task.task_id,update_input)
 		id=string(updated.task_id);ok=updated_ok;operation_err=update_err
 	case "tasks.control":
 		if command.action=="publish" {if code:=mcp_task_stored_target(g,task);code!="" do return "",code}

@@ -279,8 +279,10 @@ mcp_task_test_placement :: proc(t:^testing.T,g:^App_Graph,h:^http.MCP_Control_Ha
 	testing.expect(t,!wrong_machine)
 	current,_,_:=iface.taskchain_get_task(&g.repos.taskchains,domain.Task_ID(id))
 	task_revision,_:=mcp.control_task_revision(&service,current)
-	edit:=json.Object{"task_id"=id,"request_id"=json.String("leased_goal"),"expected_revision"=json.String(task_revision),"goal"=json.String("Cannot replace in-flight goal")}
-	testing.expect(t,strings.contains(mcp_task_test_call(h,headers,"tasks.update",edit).body,"conflict"))
+	edit:=json.Object{"task_id"=id,"request_id"=json.String("leased_goal"),"expected_revision"=json.String(task_revision),"goal"=json.String("Replace in-flight goal"),"reason"=json.String("Requirement changed while working")}
+    changed_goal:=mcp_task_test_output(t,mcp_task_test_call(h,headers,"tasks.update",edit))
+    if changed_goal==nil do return
+    edit["expected_revision"]=changed_goal["revision"]
 	delete_key(&edit,"goal");edit["acceptance"]=json.Array{json.String("Allowed acceptance refinement")};edit["request_id"]=json.String("leased_acceptance")
 	if mcp_task_test_output(t,mcp_task_test_call(h,headers,"tasks.update",edit))==nil do return
 	create["request_id"]=json.String("wrong_machine_create");create["bridge_id"]=json.String("brg_placement_a")
@@ -355,10 +357,17 @@ mcp_task_test_mutations :: proc(t:^testing.T,g:^App_Graph,h:^http.MCP_Control_Ha
 	goal,_:=record["goal"].(json.String)
 	testing.expect_value(t,string(goal),"Private task goal")
 	revision,_:=record["revision"].(json.String)
-	update:=json.Object{"task_id"=id,"request_id"=json.String("update_retry"),"expected_revision"=revision,"goal"=json.String("Updated private goal")}
+	update:=json.Object{"task_id"=id,"request_id"=json.String("update_retry"),"expected_revision"=revision,"goal"=json.String("Updated private goal"),"reason"=json.String("Private changed requirement reason")}
 	update["priority"]=json.String("p1")
 	changed:=mcp_task_test_output(t,mcp_task_test_call(h,headers,"tasks.update",update))
 	if changed==nil do return
+    latest:=mcp_task_test_output(t,mcp_task_test_call(h,headers,"tasks.get",json.Object{"task_id"=id}))
+    if latest==nil do return
+    latest_tasks,_:=latest["tasks"].(json.Array)
+    latest_row,_:=latest_tasks[0].(json.Object)
+    testing.expect_value(t,int(latest_row["requirements_revision"].(json.Integer)),2)
+    history,_:=latest_row["requirements_history"].(json.String)
+    testing.expect(t,strings.contains(string(history),"Updated private goal") && strings.contains(string(history),"Private changed requirement reason") && !strings.contains(string(history),"vault:v2:"))
 	testing.expect(t,mcp_task_test_call(h,headers,"tasks.update",update).body==mcp_task_test_call(h,headers,"tasks.update",update).body)
 	update["request_id"]=json.String("stale_update")
 	stale:=mcp_task_test_call(h,headers,"tasks.update",update)

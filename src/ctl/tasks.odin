@@ -739,6 +739,9 @@ ctl_tasks_command :: proc(cmd: []string, args: []string) {
 			desc = ctl_seal_or_exit(desc, keyring)
 		}
 		body := Ctl_Task_Update_Body{title = title, description = desc, priority = option_value(args, "--priority", "")}
+        if revision:=ctl_requirements_revision_flag(args,"--expected-requirements-revision");revision>0 do body.expected_requirements_revision=revision
+        if reason:=option_value(args,"--reason","");reason!="" do body.requirements_reason=ctl_seal_or_exit(reason,keyring)
+        body.request_id=option_value(args,"--request-id","")
 		body.assignee = strings.trim_space(option_value(args, "--assignee", option_value(args, "--assignee-agent-id", "")))
 		// --reviewer is repeatable/comma-separated for MULTIPLE reviewers;
 		// presence-checked so `--reviewer ""` clears the list.
@@ -751,7 +754,7 @@ ctl_tasks_command :: proc(cmd: []string, args: []string) {
 			body.depends_on = ctl_csv_list(deps)
 		}
 		if brief, replace, ok := ctl_task_brief_value(args); ok {
-			body.brief = brief
+			body.brief = ctl_requirement_brief_sealed(brief,args)
 			body.replace_brief = replace
 		}
 		ctl_tasks_request(transport, {method = .PATCH, path = ctl_api("task-chains", chain_id, "tasks", task_id), body = httpc.json_body(body)})
@@ -899,6 +902,9 @@ Ctl_Task_Create_Body :: struct {
 // Ctl_Task_Update_Body: presence-checked flags (reviewers, approval, bridge,
 // depends_on) are Maybe so an explicit empty value is still sent.
 Ctl_Task_Update_Body :: struct {
+    expected_requirements_revision: Maybe(int) `json:"expected_requirements_revision,omitempty"`,
+    requirements_reason: string `json:"requirements_reason,omitempty"`,
+    request_id: string `json:"request_id,omitempty"`,
 	title:                  string          `json:"title,omitempty"`,
 	description:            string          `json:"description,omitempty"`,
 	priority:               string          `json:"priority,omitempty"`,

@@ -27,6 +27,7 @@ import jsonx "odin_test:lib/jsonx"
 // aliased the request body would dangle at the next probe.
 
 Timer_Kind :: enum {
+	Requirements_Notice, // pending revision/read acknowledgements, rebuilt from durable events
 	Lease_TTL,         // key = lease_id,    armed = expires_at
 	Lease_Hard_Cap,    // key = lease_id,    armed = hard_deadline_at
 	Grant_Unconfirmed, // key = lease_id,    armed = granted_at (+ resend count via events)
@@ -88,6 +89,11 @@ timers_arm :: proc(svc: ^Service, kind: Timer_Kind, key: string, due_ms: i64, ar
 	ts := &svc.timers
 	sync.mutex_lock(&ts.mutex)
 	defer sync.mutex_unlock(&ts.mutex)
+	// Pending requirement notices are a recurring retry, unlike the existing
+	// one-shot timers. Keep one per task, including under frequent heartbeats.
+	if kind == .Requirements_Notice {
+		for timer in ts.heap do if timer.kind == kind && timer.key == key do return
+	}
 	if ts.heap == nil do ts.heap = make([dynamic]Timer, runtime.heap_allocator())
 	ts.seq += 1
 	t := Timer{
@@ -189,6 +195,11 @@ min_rfc3339 :: proc(a, b: string) -> string {
 // ---- arming from engine events -------------------------------------------------------
 
 arm_lease_timers :: proc(svc: ^Service, lease: domain.Task_Lease) {
+	if task, found, _ := iface.taskchain_get_task(svc.repo, lease.task_id); found {
+		if state, err := requirements_read(svc.repo, task); err.code == .None && state.revision > 1 {
+			timers_arm(svc, .Requirements_Notice, string(lease.task_id), now_ms(svc.clock) + 1000, "")
+		}
+	}
 	timers_arm(svc, .Lease_TTL, lease.lease_id, to_ms(lease.expires_at), lease.expires_at)
 	timers_arm(svc, .Lease_Hard_Cap, lease.lease_id, to_ms(lease.hard_deadline_at), lease.hard_deadline_at)
 	if lease.confirmed_at == "" {
@@ -301,6 +312,13 @@ fire_timer :: proc(svc: ^Service, t: Timer, now_ms: i64, jump_detected: bool) {
 	if !ok do return
 	r := Fire_Result.Noop
 	switch t.kind {
+	case .Requirements_Notice:
+		if task, found, _ := iface.taskchain_get_task(svc.repo, domain.Task_ID(t.key)); found {
+			if ok, _ := requirements_reconcile_in_uow(svc, &u, task); ok {
+				r = .Acted
+				if ok, _ := after_chain_change(svc, &u, task.chain_id, task.owner_user_id, .Task_Updated); !ok do r = .Failed
+			} else { r = .Failed }
+		}
 	case .Lease_TTL:        r = fire_lease_ttl(svc, &u, t, now_ms, jump_detected)
 	case .Lease_Hard_Cap:   r = fire_lease_hard_cap(svc, &u, t)
 	case .Grant_Unconfirmed: r = fire_grant_unconfirmed(svc, &u, t)

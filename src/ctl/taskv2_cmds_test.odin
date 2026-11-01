@@ -354,3 +354,28 @@ test_workflow_cancel_params_require_execution :: proc(t: ^testing.T) {
  testing.expect_value(t,id,"wrun_1")
  testing.expect(t,strings.contains(params,`"execution_no":2`),"execution is carried through the transport")
 }
+
+@(test)
+test_live_requirements_ctl_context_flags :: proc(t: ^testing.T) {
+    args := []string{"ham-ctl","review","post","--requirements-revision","7","--expected-attempt","2","--expected-head","abc","--lease","lease_a","--verdict","approve","task_a"};
+    tokens := command_tokens(args)
+    defer delete(tokens)
+    testing.expect_value(t,len(tokens),3)
+    if len(tokens)==3 do testing.expect_value(t,tokens[2],"task_a")
+    review,ok := ctl_v2_review_post_params(tokens[1:],args,"")
+    defer delete(review)
+    testing.expect(t,ok && strings.contains(review,`"requirements_revision":7`) && strings.contains(review,`"expected_attempt_no":2`) && strings.contains(review,`"expected_head":"abc"`) && strings.contains(review,`"lease_id":"lease_a"`))
+    heartbeat := ctl_v2_heartbeat_params([]string{"--lease","lease_a","--acknowledge-requirements-revision","7"})
+    testing.expect(t,strings.contains(heartbeat,`"acknowledge_requirements_revision":7`))
+    submit,sok := ctl_v2_lease_submit_params([]string{"--summary","done","--lease","lease_a","--requirements-revision","7"},"","","","/work")
+    defer delete(submit)
+    testing.expect(t,sok && strings.contains(submit,`"requirements_revision":7`) && strings.contains(submit,`"lease_id":"lease_a"`))
+    update := ctl_agentmode_task_update_params("task_a",with_kr([]string{"--goal","new objective","--acceptance","new acceptance","--reason","scope changed","--expected-requirements-revision","7"}))
+    testing.expect(t,!strings.contains(update,"new objective") && !strings.contains(update,"scope changed") && strings.contains(update,`"expected_requirements_revision":7`))
+    opened := unseal_out(update)
+    testing.expect(t,strings.contains(opened,"new objective") && strings.contains(opened,"new acceptance") && strings.contains(opened,"scope changed"))
+    token,_:=ctl_vault_seal("prior objective",tkr(CTL_TEST_WRITE_KEY),context.temp_allocator)
+    history:=unseal_out(json_object_from_slice([]string{json_kv("history",strings.concatenate({"Before: ",token,"\nAfter: ",token},context.temp_allocator))}))
+    testing.expect(t,strings.contains(history,"Before: prior objective") && !strings.contains(history,"vault:v2:"))
+
+}

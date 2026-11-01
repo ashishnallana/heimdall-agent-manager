@@ -399,3 +399,41 @@ connections remain supported. No production deployment is included in this chang
 The separate audit's ingress buffering, registration lifecycle, loss-free epoch
 lifecycle and verified recovery work remain outstanding. Do not enable broader
 plaintext traffic without resolving the relevant rollout gates.
+
+### Changing live task requirements
+
+Use `tasks.get` before changing `goal` or `acceptance`. Send its opaque
+`revision` as `expected_revision`, a nonempty `reason`, and a new
+`request_id` to `tasks.update`. Goal, acceptance and reason are encrypted
+by the approved device. Reuse identical arguments and the same request ID for
+an ambiguous response; a conflict requires an intentional fresh read and edit.
+
+A live edit preserves the worker lease and records a requirement revision.
+Native workers receive a notice, refresh with `lease next`, read `TASK.md`,
+and explicitly acknowledge that revision with `lease heartbeat --lease <id>
+--acknowledge-requirements-revision <n>`. Submission binds that lease and
+revision. Review binds the submitted revision, attempt and commit. A change
+after submission blocks stale approval and schedules worker rework after
+reviewers checkpoint. MCP cannot acknowledge another agent's lease or approve
+a review.
+
+Task detail reads expose `requirements_revision`, `requirements_submitted_revision`,
+`requirements_submitted_head`, `requirements_checkpoint_required`,
+`requirements_acknowledgements` and decrypted `requirements_history`.
+History is bounded to recent changes; `requirements_history_truncated` indicates
+older audit events remain in native task history. These fields require the
+signed task-detail capability; legacy projections omit them.
+
+Comments remain audit-only and do not wake agents. Requirement changes use the
+native durable delivery path. An external MCP client must call `tasks.get` or
+`events.wait` while its conversation is running to observe progress.
+
+#### Choosing an amendment or a replacement
+
+Use a requirement amendment for a clarification or acceptance change that keeps the same objective and deliverable. A coordinator records the reason and updates the native brief; a comment alone does not amend requirements or notify the worker.
+
+In the UI choose **Change requirements**, edit goal/acceptance and supply a reason. Details show the revision, worker read status, post-submission checkpoint warning and **Requirement changes** history. Reload and reconcile if another edit wins.
+
+For CLI access, read the numeric `requirements_revision` from `task show` and pass it as `--expected-requirements-revision` with `--reason` to `task update`. Repeated `--acceptance` values replace the list; retain every applicable item. The MCP concurrency value remains the opaque `revision`/`expected_revision` pair described above, not that numeric CLI field. Workers read refreshed `TASK.md` before acknowledging their own lease; stale submissions and verdicts cannot satisfy the current gate.
+
+If the objective, deliverable or approach changes significantly enough to invalidate the original plan or review basis, record the decision on the original task: rationale, original/new scope, retained work and disposition. Create a self-contained replacement task linked to the original, retain required approvals, and record the replacement ID on the original. Checkpoint active work and explicitly rewire future dependencies. Preserve the original history; do not silently overwrite it into a new assignment. A provenance link does not require making the replacement depend on success of a superseded task.

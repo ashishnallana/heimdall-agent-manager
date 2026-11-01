@@ -1,3 +1,4 @@
+import { buildRouteHash } from '../../utils/appLocation';
 import { useEffect, useState } from 'react';
 import { Alert, Button, Input, Modal, ModalBody, ModalFooter, StatusPill } from '@ui';
 import type { DesktopBridgeManagerApi } from '../../bridge/desktopBridge';
@@ -59,6 +60,7 @@ export default function ThisMachineCard({ manager, onBridgeId, onSetupComplete }
           {config ? <p data-debug-id="settings-this-machine-hub" className="break-all font-mono text-xs text-muted">{config.hubUrl}</p> : null}
         </div>
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 [&>button]:min-w-0 [&>button]:whitespace-normal [&>button]:h-auto [&>button]:min-h-8">
+          <Button variant="ghost" size="sm" data-debug-id="settings-this-machine-open-setup-btn" disabled={busy} onClick={() => { window.location.hash = buildRouteHash('/setup', ''); }}>Open setup wizard</Button>
           {!flow && resumableSetup ? <Button variant="primary" data-debug-id="settings-this-machine-resume-btn" onClick={() => setFlow(true)}>Resume setup</Button> : null}
           {phase === 'absent' && !flow && !resumableSetup ? <Button variant="primary" data-debug-id="settings-this-machine-setup-btn" disabled={busy} onClick={() => { setFlow(true); setStep('detect'); }}>Install bridge on this machine</Button> : null}
           {phase === 'present' ? <>

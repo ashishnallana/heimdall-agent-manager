@@ -247,7 +247,9 @@ bridge_agent_lease_local_rpc :: proc(request_id, method: string, hub_path: []str
 				// and cds into it.
 				bridge_taskv2_ensure_pack_worktree(pack_obj)
 				if strings.trim_space(run_dir) != "" {
-					_ = bridge_taskv2_materialize_task_md(run_dir, pack_obj)
+					if !bridge_taskv2_materialize_task_md(run_dir, pack_obj) {
+						return bridge_local_response_error(request_id, "task_context_unavailable", "Could not refresh TASK.md; retry lease next before acknowledging requirements")
+					}
 				}
 			}
 		}
@@ -614,6 +616,45 @@ bridge_taskv2_render_task_md :: proc(pack_json: string, max_bytes: int = BRIDGE_
 	}
 
 	// Ready-made notice sections for the document (build_doc cannot see locals).
+	if requirements, present := jsonx.extract_raw_object(pack_json, "requirements", true, context.temp_allocator); present {
+		if jsonx.extract_bool(requirements, "unavailable", false, true) do return strings.clone("", allocator)
+		rb := strings.builder_make(context.temp_allocator)
+		revision := jsonx.extract_int(requirements, "revision", 1, true)
+		ack := jsonx.extract_int(requirements, "acknowledged_revision", 0, true)
+		fmt.sbprintf(&rb, "\n## Requirements\nCurrent revision: **%d**. Your lease acknowledged revision: **%d**.\n", revision, ack)
+		if needed := jsonx.extract_bool(requirements, "acknowledgement_required", false, true); needed {
+			fmt.sbprintf(&rb, "Read the current brief and changes, adjust your plan, then explicitly acknowledge with `ham-ctl lease heartbeat --lease %s --acknowledge-requirements-revision %d`. Acknowledgement means read, not completed. Submit with `--lease %s --requirements-revision %d`.\n", lease_id, revision, lease_id, revision)
+		}
+		if checkpoint := jsonx.extract_bool(requirements, "review_checkpoint_required", false, true); checkpoint {
+			strings.write_string(&rb, "Requirements changed after submission. Do not post a verdict. Reach a safe point and run `ham-ctl lease handoff --summary <review progress>`; worker rework follows.\n")
+		}
+		if lease_kind == "review" {
+			fmt.sbprintf(&rb, "Submitted revision: **%d**, attempt: **%d**, head: `%s`. Review the exact submitted work against the current requirements.\n",
+				jsonx.extract_int(requirements, "submitted_revision", 1, true),
+				jsonx.extract_int(requirements, "submitted_attempt_no", attempt_no, true),
+				jsonx.extract_string(requirements, "submitted_head", "", true, context.temp_allocator))
+			if snapshot, has_snapshot := jsonx.extract_raw_object(requirements, "submitted_requirements", true, context.temp_allocator); has_snapshot {
+				fmt.sbprintf(&rb, "**Submitted requirements**:\n```json\n%s\n```\n", bridge_taskv2_decrypt_field(snapshot, context.temp_allocator))
+			}
+		}
+		if change, has_change := jsonx.extract_raw_object(requirements, "latest_change", true, context.temp_allocator); has_change {
+			reason := bridge_taskv2_decrypt_field(jsonx.extract_string(change, "reason", "", true, context.temp_allocator), context.temp_allocator)
+			if reason != "" do fmt.sbprintf(&rb, "**Change reason**: %s\n", reason)
+			before, _ := jsonx.extract_raw_object(change, "before", true, context.temp_allocator)
+			after, _ := jsonx.extract_raw_object(change, "after", true, context.temp_allocator)
+			fmt.sbprintf(&rb, "**Before**:\n```json\n%s\n```\n**After**:\n```json\n%s\n```\n",
+				bridge_taskv2_decrypt_field(before, context.temp_allocator), bridge_taskv2_decrypt_field(after, context.temp_allocator))
+		}
+		if fetch := jsonx.extract_string(requirements, "change_fetch", "", true, context.temp_allocator); fetch != "" {
+			fmt.sbprintf(&rb, "Full latest change/history reference: `%s`.\n", fetch)
+		}
+		if lease_kind == "review" {
+			if fetch := jsonx.extract_string(requirements, "submitted_fetch", "", true, context.temp_allocator); fetch != "" {
+				fmt.sbprintf(&rb, "Submitted requirement snapshot: `%s`.\n", fetch)
+			}
+		}
+		answer_section = strings.concatenate({strings.to_string(rb), answer_section}, context.temp_allocator)
+	}
 	if gate_feedback != "" do gate_feedback = strings.concatenate({"\n## Rejected At The Gate\n", gate_feedback}, context.temp_allocator)
 	if answer_section != "" do gate_feedback = strings.concatenate({answer_section, gate_feedback}, context.temp_allocator)
 	// Solo mode: say how this chain works, ahead of the other notices.
@@ -807,7 +848,9 @@ bridge_taskv2_render_task_md :: proc(pack_json: string, max_bytes: int = BRIDGE_
 	return strings.clone(rendered, allocator)
 }
 
-// bridge_taskv2_materialize_task_md renders and writes `<run_dir>/TASK.md`.
+bridge_taskv2_task_md_mutex: sync.Mutex
+
+// Publish a complete context file; a reader never sees a partially written brief.
 bridge_taskv2_materialize_task_md :: proc(run_dir, pack_json: string, max_bytes: int = BRIDGE_TASK_MD_MAX_BYTES) -> bool {
 	clean := strings.trim_right(strings.trim_space(run_dir), "/")
 	if clean == "" || !strings.has_prefix(strings.trim_space(pack_json), "{") do return false
@@ -817,7 +860,8 @@ bridge_taskv2_materialize_task_md :: proc(run_dir, pack_json: string, max_bytes:
 	if strings.trim_space(md) == "" do return false
 	path := strings.concatenate({clean, "/TASK.md"})
 	defer delete(path)
-	return os.write_entire_file(path, transmute([]byte)md) == nil
+	sync.mutex_guard(&bridge_taskv2_task_md_mutex)
+	return bridge_retry_atomic_write(path, transmute([]byte)md)
 }
 
 // bridge_taskv2_worktree_add_detached creates an ephemeral detached git worktree at `rev`

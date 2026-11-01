@@ -119,10 +119,21 @@ export async function decryptTaskRecord<T extends TaskPayload>(
     }
   }
 
+  let brief = (task as any).brief;
+  if (brief && typeof brief === 'object') {
+    const open = async (text: string) => {
+      try { return isVaultArmored(text) ? await decryptVaultText(text, resolvedKey) : containsVaultArmored(text) ? await decryptEmbeddedVaultTokens(text, resolvedKey) : text; }
+      catch { return text; }
+    };
+    brief = { ...brief };
+    if (typeof brief.goal === 'string') brief.goal = await open(brief.goal);
+    if (Array.isArray(brief.acceptance)) brief.acceptance = await Promise.all(brief.acceptance.map(open));
+  }
   return {
     ...task,
     title,
     description,
+    ...(brief ? { brief } : {}),
     ...(commentSummary ? { comment_summary: commentSummary, commentSummary } : {}),
   };
 }

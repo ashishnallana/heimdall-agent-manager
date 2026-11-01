@@ -145,11 +145,18 @@ Create_Task_Input :: struct {
 }
 
 Update_Task_Input :: struct {
+    require_requirements_context: bool,
+	// Public adapters supply the revision they read and a sealed change reason.
+	// Zero keeps trusted internal callers compatible; every route still records
+	// requirement history. It is not the broad MCP record revision.
+	expected_requirements_revision: i64,
+	requirements_reason: string,
+	requirements_request_id: string,
 	title: string,
 	description: string,
 	// brief_json is a top-level key merge into the stored brief (an explicit
 	// null removes a key); replace_brief swaps the whole brief instead. Keys
-	// outside taskv2.BRIEF_KEYS are rejected. While leased only acceptance may change.
+	// outside taskv2.BRIEF_KEYS are rejected. Live goal/acceptance edits are versioned.
 	brief_json: string,
 	replace_brief: bool,
 	assignee_agent_id: string,
@@ -1118,8 +1125,13 @@ update_task_impl :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Conte
 		new_brief = applied
 	}
 	brief_keys := brief_changed_keys(task.brief_json, new_brief)
+    if input.require_requirements_context && taskv2.requirements_differ(task.brief_json, new_brief) {
+        if input.expected_requirements_revision < 1 || strings.trim_space(input.requirements_reason) == "" {
+            return {}, false, domain.domain_error(.Validation_Failed, "requirement edits require expected_requirements_revision and an explicit requirements_reason")
+        }
+    }
 
-	// Leased: only edits that leave the in-flight work unchanged are allowed.
+	// Leased: requirements may change, but assignment and execution settings may not.
 	if task_has_work_lease(service, task.task_id) {
 		offending := make([dynamic]string, context.temp_allocator)
 		if new_title != task.title do append(&offending, "title")
@@ -1144,6 +1156,20 @@ update_task_impl :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Conte
 			if k == "review_roles" do append(&changed, "review_roles")
 			if k == "reviewers" do append(&changed, "reviewers")
 		}
+	}
+	if task.publish_state == .Published && taskv2.requirements_differ(task.brief_json, new_brief) {
+		candidate := task
+		candidate.brief_json = new_brief
+		if missing := brief_publish_problems(service, chain, candidate); len(missing) > 0 {
+			problems := make(map[string][]string, context.temp_allocator)
+			problems[string(task.task_id)] = missing
+			return {}, false, publish_problems_error(problems)
+		}
+	}
+	if req_err := taskv2.requirements_record(service.repo, service.clock, task, new_brief,
+		engine_actor(auth), input.expected_requirements_revision,
+		input.requirements_reason, input.requirements_request_id); req_err.code != .None {
+		return {}, false, req_err
 	}
 	task.brief_json = new_brief
 	if input.has_requires_user_approval {
@@ -2202,6 +2228,9 @@ create_task :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, i
 
 update_task :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, task_id: domain.Task_ID, input: Update_Task_Input) -> (domain.Task, bool, domain.Domain_Error) {
 	v := verb_begin(service)
+	if service.uow_factory != nil && !v.has {
+		return {}, false, domain.domain_error(.Internal_Error, "could not begin task update transaction")
+	}
 	out, ok, err := update_task_impl(service, auth, task_id, input)
 	if cerr := verb_end(&v, ok); cerr.code != .None do return domain.Task{}, false, cerr
 	return out, ok, err

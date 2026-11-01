@@ -4,6 +4,32 @@ import { mcpWorkerFixture } from './helpers/mcpWorkerFixture.ts';
 import { verifyMcpWorkerJob, transformMcpWorkerJob, mcpJobDigest, mcpJobScopeAllowed } from '../src/ui/utils/mcpWorker.ts';
 import { decryptVaultBytes } from '../src/ui/utils/vaultContent.ts';
 
+test('requirement changes seal their reason and extended reads decrypt history without changing acknowledgement metadata', async () => {
+  const f = await mcpWorkerFixture(Date.now(), 'mcp:chains mcp:tasks:read mcp:tasks:write');
+  const edit = { ...f.job, tool: 'tasks.update', operation: 'seal_task' as const, payload: JSON.stringify({ goal: 'Changed goal', reason: 'Changed requirement reason' }) };
+  edit.digest = await mcpJobDigest(edit);
+  await verifyMcpWorkerJob(edit, f.identity, f.chain, edit.resource, f.now);
+  const sealed = JSON.parse(await transformMcpWorkerJob(edit, f.keyring));
+  assert.match(sealed.goal, /^vault:v2:/); assert.match(sealed.reason, /^vault:v2:/);
+  const acknowledgements = [{ lease_id: 'lease_a', holder_instance_id: 'inst_a', revision: 1, pending: true }];
+  const read = { ...f.job, tool: 'tasks.get', payload: JSON.stringify({ tasks: [{
+    owner_user_id: f.job.owner, task_id: 'task_a', title: '',
+    requirements_revision: 2, requirements_submitted_revision: 1,
+    requirements_submitted_head: 'submitted-head', requirements_checkpoint_required: true,
+    requirements_acknowledgements: acknowledgements,
+    requirements_history: `Revision 2\nReason: ${sealed.reason}\nAfter goal: ${sealed.goal}\n`,
+  }] }) };
+  read.digest = await mcpJobDigest(read);
+  await verifyMcpWorkerJob(read, f.identity, f.chain, read.resource, f.now);
+  const result = JSON.parse(await transformMcpWorkerJob(read, f.keyring)).tasks[0];
+  assert.match(result.requirements_history, /Changed requirement reason/);
+  assert.match(result.requirements_history, /Changed goal/);
+  assert.ok(!result.requirements_history.includes('vault:v2:'));
+  assert.deepEqual(result.requirements_acknowledgements, acknowledgements);
+  const legacy = JSON.parse(await transformMcpWorkerJob({ ...read, tool: undefined }, f.keyring)).tasks[0];
+  assert.equal(legacy.requirements_history, undefined, 'legacy grant projection never gains requirement history');
+});
+
 test('task comment worker requires signed write scope and binds the tool in its digest', async () => {
   const f = await mcpWorkerFixture(Date.now(), 'mcp:chains mcp:tasks:write');
   const job = { ...f.job, tool: 'tasks.comment', operation: 'seal_comment' as const, payload: JSON.stringify({ body: 'task comment secret' }) };

@@ -144,3 +144,17 @@ When `TASK.md` has a **Solo Mode** section you are the coordinator and the worke
 ### Unavailable fleet instances
 
 A user-stopped, terminated, or failed fleet instance prevents an automatic replacement launch when no eligible free instance exists on that bridge. Use the task’s **Start agent** card to retry after repairing the cause. Retriable provider errors remain queued during backoff and retry automatically; bridge-offline blocks clear when that bridge reconnects.
+
+## 9. Requirements changed while you work or review
+
+On a requirement-change notice, refresh with `lease next` and read the latest `TASK.md`, including the changed goal, acceptance and revision. Reconcile your work and checks with the amendment, then acknowledge exactly the revision and lease you read:
+
+```bash
+./bin/ham-ctl lease heartbeat --lease <lease-id> --acknowledge-requirements-revision <n>
+```
+
+Only the holder may acknowledge its lease; an ordinary heartbeat or comment is not acknowledgement. If requirements change again, reread and acknowledge the newer revision. Submit binds the current lease/revision; a stale or unread revision must be reconciled before submission. Report scope decisions and any changed verification in task comments and the handoff.
+
+For review, inspect the submitted requirements revision, attempt and commit. If a change requires a checkpoint, hand off the review rather than approving stale work. After worker rework, assess the new submission; do not reuse an obsolete verdict.
+
+If the change substantially replaces the objective, deliverable or approach, ask the coordinator to record the decision on the original and create a linked replacement. Preserve completed work and checkpoint/handoff context; do not silently repurpose your task.

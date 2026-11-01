@@ -248,6 +248,7 @@ grant_work :: proc(svc: ^Service, u: ^Uow, ctx: ^Match_Context, task: domain.Tas
 
 @(private = "file")
 grant_reviews :: proc(svc: ^Service, u: ^Uow, ctx: ^Match_Context, task: domain.Task, trigger: Trigger) {
+	if requirements_stale_review(svc, task) do return
 	// A held task gets no new review lease (REQ-TV2-5).
 	if task_is_held(task) do return
 	author_agent := ""
@@ -472,7 +473,7 @@ grant_inline_for_instance :: proc(svc: ^Service, u: ^Uow, chain: domain.Task_Cha
 	// the user (REQ-SOLO-5).
 	for task in ctx.sorted {
 		if coordinator do break
-		if task.state != .In_Review || task.kind == .Gate || task_is_held(task) do continue
+		if task.state != .In_Review || task.kind == .Gate || task_is_held(task) || requirements_stale_review(svc, task) do continue
 		author_agent := ""
 		if holder := last_attempt_holder(svc, task); holder != "" {
 			if h, hok, _ := iface.agent_get_instance(svc.agents, holder); hok do author_agent = h.agent_id

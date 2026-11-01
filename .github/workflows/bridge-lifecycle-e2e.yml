@@ -97,9 +97,13 @@ jobs:
         run: |
           set -euo pipefail
           hub="$(nix build .#ham-hub --print-out-paths --no-link)"
-          bridge="$(nix build .#ham-bridge --print-out-paths --no-link)"
+          bridge="$(nix build .#release-ham-bridge --print-out-paths --no-link)"
+          pty="$(nix build .#release-ham-pty-host --print-out-paths --no-link)"
+          bundle="$RUNNER_TEMP/lifecycle-bundle"
+          mkdir -p "$bundle"
+          cp "$bridge/bin/ham-bridge" "$pty/bin/ham-pty-host" "$bundle/"
           echo "HEIMDALL_E2E_HUB_BIN=$hub/bin/ham-hub" >> "$GITHUB_ENV"
-          echo "HEIMDALL_E2E_BRIDGE_BIN=$bridge/bin/ham-bridge" >> "$GITHUB_ENV"
+          echo "HEIMDALL_E2E_BRIDGE_BIN=$bundle/ham-bridge" >> "$GITHUB_ENV"
       - name: Real enroll e2e
         run: node --import ./tests/helpers/vaultEndpointHarness.ts tests/e2e/bridge_real_enroll_e2e.mjs
       - name: Lifecycle e2e
@@ -149,7 +153,7 @@ jobs:
         shell: pwsh
         run: |
           $out = Join-Path $env:RUNNER_TEMP 'e2e-bin'
-          scripts/windows/build.ps1 -OutDir $out -Odin $env:ODIN -Components ham-bridge,ham-hub -CurlLibDir "$env:RUNNER_TEMP/libcurl-static/lib"
+          scripts/windows/build.ps1 -OutDir $out -Odin $env:ODIN -Components ham-bridge,ham-hub,ham-pty-host -CurlLibDir "$env:RUNNER_TEMP/libcurl-static/lib"
           "HEIMDALL_E2E_HUB_BIN=$(Join-Path $out 'ham-hub.exe')" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
           "HEIMDALL_E2E_BRIDGE_BIN=$(Join-Path $out 'ham-bridge.exe')" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
       - name: Real enroll + lifecycle e2e
