@@ -34,6 +34,7 @@ import http "odin_test:hub/transport/http"
 import platform "odin_test:hub/platform"
 
 App_Graph :: struct {
+	mcp_runtime_mutex:sync.Mutex,
 	mcp_spike: mcp_service.Store,
 	mcp_spike_handlers: http.MCP_Spike_Handlers,
 	mcp_repository_impl: sqlite.MCP_Repo_SQLite,

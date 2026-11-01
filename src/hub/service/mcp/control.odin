@@ -15,7 +15,7 @@ import agent "odin_test:hub/service/agent"
 import provider "odin_test:hub/service/provider"
 
 Control_Service :: struct {chains:^tc.Taskchain_Service,agents:^agent.Agent_Service,providers:^provider.Provider_Service,bridges:^iface.Bridge_Repository}
-Control_Arguments :: struct {chain_id,title,description,cursor,task_id,request_id,body,state,assignee_agent_id,comment_cursor:string,limit,timeout_ms,comment_limit:int,task_write:Task_Tool_Arguments,catalog:Catalog_Arguments,include_configuration,include_comments:bool}
+Control_Arguments :: struct {chain_id,title,description,cursor,task_id,request_id,body,state,assignee_agent_id,comment_cursor:string,limit,timeout_ms,comment_limit:int,task_write:Task_Tool_Arguments,catalog:Catalog_Arguments,runtime:Runtime_Arguments,include_configuration,include_comments:bool}
 Control_Data :: vault.Control_Data
 control_auth :: proc(owner:string)->contracts.Auth_Context {return {kind=.Internal_User,user_id=owner}}
 control_chain :: proc(c:domain.Task_Chain)->json.Object {

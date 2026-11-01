@@ -84,7 +84,12 @@ test_mcp_catalog_native_crud_targets_scopes_and_retries :: proc(t:^testing.T) {
 	mcp_task_test_fixture(t,#load("../../../tests/fixtures/mcp_catalog_v2.json",string),true)
 }
 
-mcp_task_test_fixture :: proc(t:^testing.T,vector:string,catalog:bool) {
+@(test)
+test_mcp_runtime_native_lifecycle_intents_and_moves :: proc(t:^testing.T) {
+	mcp_task_test_fixture(t,#load("../../../tests/fixtures/mcp_runtime_v2.json",string),true,true)
+}
+
+mcp_task_test_fixture :: proc(t:^testing.T,vector:string,catalog:bool,runtime:bool=false) {
 	context.allocator=context.temp_allocator
 	g:=new(App_Graph,context.temp_allocator)
 	v:MCP_Task_Test_Vector
@@ -168,6 +173,7 @@ mcp_task_test_fixture :: proc(t:^testing.T,vector:string,catalog:bool) {
 	if catalog {
 		mcp_task_test_placement(t,g,&h,headers,view)
 		h.control.agents=&g.agents;h.control.bridges=&g.repos.bridges;h.control.providers=&g.providers;h.mutate_catalog=mcp_mutate_catalog
+		if runtime {h.runtime=mcp_runtime_call;mcp_runtime_test(t,g,&h,headers,view,var_tokens.access_token);return}
 		mcp_catalog_test(t,g,&h,headers,view,var_tokens.access_token)
 		return
 	}

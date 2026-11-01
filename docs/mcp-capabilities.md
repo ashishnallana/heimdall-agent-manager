@@ -9,7 +9,8 @@ The catalog is filtered by the connection's signed permissions. Task read adds
 `tasks.list` and `tasks.get`; task write adds `tasks.comment`, `tasks.create`,
 `tasks.update`, `tasks.control` and `chains.configure`. Agent read adds
 `agents.list/get`; agent write adds `agents.create/update/archive`. Instance read
-adds `instances.list/get`, `bridges.list` and `providers.list`. Remaining capability
+adds `instances.list/get/operations`, `bridges.list` and `providers.list`.
+Instance control adds `instances.create/start/stop/reconfigure`. Remaining capability
 groups are foundations for subsequent increments and expose no tools yet.
 
 The optional scopes are `mcp:<resource>:read` and `mcp:<resource>:write` for tasks,
@@ -91,6 +92,80 @@ Public projections omit tokens/hashes, environment, executable arguments and
 paths, transcripts, launch epochs and raw diagnostic errors. Provider labels and
 model labels use typed decryption in both browser and native workers. Native
 provider-view strings are copied before those views are freed.
+
+## Runtime lifecycle and moves
+
+`instances.create` requires a durable owned `agent_id`, an existing active owned
+`chain_id`, and the full destination: `bridge_id`, `project_id` (explicitly empty
+to clear), `provider`, `provider_profile` and `model`. It creates a worker member
+in that chain, without replacing its coordinator. The new instance and its
+conversation reuse the definition's sealed name as their label; ciphertext is
+never corrupted by appending a plaintext counter. Creation inherits the native
+agent permission mode. Runtime tools accept no permission override, environment,
+credentials, shell commands, message text or force-stop flag.
+
+All four writes require a stable `request_id` of at most 128 bytes and an opaque
+`expected_revision`: use the definition's `revision` from `agents.get` for create,
+and the runtime `revision` from `instances.get` for other actions. Runtime
+revisions cover configuration, launch/run generation, effective permission mode,
+runtime/startup state, user-stop flag and current task binding. Ordinary heartbeat
+timestamps do not invalidate them. This revision differs from the native numeric
+`configuration_revision`, which the move adapter supplies internally.
+
+An active task lease or task binding returns `active_task_lease`. Explicitly hold
+the task and wait for its native checkpoint/lease handoff before controlling its
+runtime. Lifecycle writes do not silently release or transfer active task work.
+The prepared lifecycle intent and lease check share a transaction. Both automatic
+matching and the engine's final grant check exclude prepared/ambiguous intents and active
+native moves, while counting their instance toward capacity. An indexed pending
+intent lookup avoids scanning completed receipt history. No alternate machine,
+profile or model is substituted when the requested target is unavailable.
+
+The adapter commits a durable intent before sending any runtime command, and
+never holds a database transaction across a network preflight or send. Create
+preparation, conversation/membership and receipt commit atomically; rollback also
+cancels its launch reservation. Delegated authorization, runtime revision and
+lease checks run again at native acceptance, after remote move preflight. A
+cancellation or revoked credential observed there prevents dispatch. Cancellation
+after dispatch does not undo an accepted operation.
+
+Responses contain only operation/resource IDs, opaque revision, safe phase/error
+codes and status. Acceptance or a sent command is not proof of a ready runtime.
+Poll `instances.operations` with `operation_tool` (one of the four write tools)
+and the original `request_id`; this requires instance read permission. Reads and
+identical write retries observe progress and never resend commands. Receipts bind
+the owner, connection grant and tool; changed arguments with the same request ID
+return `idempotency_conflict`, before checking an old revision. Revoked credentials
+cannot replay receipts, and a new connection cannot read the old grant's history.
+
+Create/start complete only after the expected native run is ready; stop completes
+only after the corresponding run reports stopped. Native moves expose their real
+`prepared`, `stopping`, `source_stopped`, `launching`, `ready`, `failed` and
+`recovery_required` phases. Source stop acknowledgement or native offline-source
+fencing must precede destination launch. Moves preserve instance/conversation/
+chain identity and the existing permission override. Their native operation ID
+and `operation_revision` are public, but command IDs, launch assertions, private
+paths, labels and raw failure messages are omitted.
+
+For a move in `recovery_required`, intentionally call `instances.reconfigure`
+with a **new** `request_id`, the original destination, `retry_request_id` pointing
+to the earlier move request, and `expected_operation_revision` from polling.
+Also refresh the instance revision. Native retry continues the same move and
+launch epoch; replaying this retry request cannot create another runtime. It does
+not create a second move or silently change its destination.
+
+Ambiguous create/start/stop failures are reported as `repair_required`; they are
+excluded from new task grants and are not automatically resent. A process interruption or failed progress write can
+leave `dispatch_unconfirmed`/`progress_unconfirmed`: the prepared intent remains
+excluded from new task grants until native/operator recovery reconciles it.
+Polling does not clear this guard or infer that a command was sent. A missing
+runtime confirmation after three minutes also requires repair. This conservative
+path favors avoiding duplicate launches over automatic crash recovery. The tools
+do not claim exactly-once physical execution across process/network failures.
+
+Repository integration uses synthetic bridge transports to verify lifecycle,
+cross-provider moves, command ordering, recovery, lease isolation and revocation.
+Physical cross-machine execution remains the separate acceptance task.
 
 ## Task tools
 

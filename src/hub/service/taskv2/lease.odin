@@ -78,6 +78,7 @@ grant_attempt_in_uow :: proc(svc: ^Service, u: ^Uow, req: Grant_Request) -> (dom
 		}
 	}
 	inst := req.instance
+	if busy,err:=iface.agent_runtime_busy(svc.agents,inst.agent_instance_id);err.code!=.None {return {},false,err} else if busy {return {},false,domain.domain_error(.Conflict,"instance has a pending runtime action")}
 	// Resolve the actual wake selection once, so lease history, runtime facets
 	// and the bridge command agree even when reusing an older warm instance.
 	provider, model := lease_launch_model(svc, req.placement, inst)

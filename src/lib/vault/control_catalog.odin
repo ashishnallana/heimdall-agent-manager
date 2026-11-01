@@ -5,7 +5,7 @@ import "core:strings"
 
 CONTROL_FIELDS_AGENT := [?]string{"agent_id","name","slug","template_id","instructions","instructions_error","state","permission_mode","created_at","updated_at","revision","supports"}
 CONTROL_TEXT_AGENT := [?]string{"name","slug","instructions"}
-CONTROL_FIELDS_INSTANCE := [?]string{"agent_instance_id","agent_id","bridge_id","display_name","provider","provider_profile","model","runtime_status","startup_status","activity_status","project_id","chain_id","current_task_id","current_task_role","configuration_revision","permission_mode","created_at","updated_at","last_seen_at"}
+CONTROL_FIELDS_INSTANCE := [?]string{"agent_instance_id","agent_id","bridge_id","display_name","provider","provider_profile","model","runtime_status","startup_status","activity_status","project_id","chain_id","current_task_id","current_task_role","revision","configuration_revision","permission_mode","created_at","updated_at","last_seen_at"}
 CONTROL_TEXT_INSTANCE := [?]string{"display_name"}
 CONTROL_FIELDS_BRIDGE := [?]string{"bridge_id","label","status","machine_os","machine_arch","version","plan_disabled","enrollment_pending","eligible","created_at","last_seen_at"}
 CONTROL_TEXT_BRIDGE := [?]string{"label"}

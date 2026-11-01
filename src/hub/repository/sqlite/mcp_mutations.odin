@@ -46,3 +46,15 @@ mcp_receipt_result :: proc(conn:^Conn,owner,grant,tool,request_id:string)->(stri
 	if sqlite3_step(stmt)!=SQLITE_ROW do return "",false
 	return strings.clone(column_text_unowned(stmt,0),context.temp_allocator),true
 }
+
+// Only runtime intents change progress after dispatch. Agent/task mutation
+// receipts stay immutable. The caller holds the native UOW.
+mcp_runtime_receipt_update :: proc(conn:^Conn,owner,grant,tool,request_id,result_json:string)->domain.Domain_Error {
+	if tool!="instances.create" && tool!="instances.start" && tool!="instances.stop" && tool!="instances.reconfigure" do return repo_err("not a runtime intent")
+	stmt,ok:=prepare(conn,"UPDATE mcp_mutation_receipts SET result_json=? WHERE owner_user_id=? AND grant_id=? AND tool=? AND request_id=?;")
+	if !ok do return repo_err("cannot prepare runtime progress")
+	defer sqlite3_finalize(stmt)
+	bind_text(stmt,1,result_json);bind_text(stmt,2,owner);bind_text(stmt,3,grant);bind_text(stmt,4,tool);bind_text(stmt,5,request_id)
+	if sqlite3_step(stmt)!=SQLITE_DONE do return repo_err("cannot save runtime progress")
+	return {}
+}

@@ -26,6 +26,7 @@ MCP_Control_Handlers :: struct {
 	comment:mcp.Control_Comment_Proc,
 	mutate_task:mcp.Control_Task_Mutate_Proc,
 	mutate_catalog:mcp.Catalog_Mutate_Proc,
+	runtime:mcp.Runtime_Proc,
 	// Optional approved enrolled-bridge transport. It receives no client token.
 	bridge_ctx:rawptr,
 	bridge_transform:proc(ctx:rawptr,job:vault.Control_Job)->(string,bool),
@@ -60,6 +61,7 @@ mcp_id_ok :: proc(id:json.Value)->bool {
 	return false
 }
 mcp_arguments :: proc(name:string,value:json.Value)->(mcp.Control_Arguments,bool) {
+	if mcp.runtime_tool(name) do return mcp_runtime_arguments(name,value)
 	if mcp.catalog_tool(name) do return mcp_catalog_arguments(name,value)
 	if name=="tasks.create" || name=="tasks.update" || name=="tasks.control" || name=="chains.configure" do return mcp_task_write_arguments(name,value)
 	args:mcp.Control_Arguments
@@ -170,7 +172,7 @@ mcp_control_handler :: proc(ctx:rawptr,req:Request)->(response:Response) {
 		if !ok do return mcp_rpc_error(id,-32602,"Invalid initialization")
 		protocol:="2025-11-25"
 		if requested=="2025-03-26" || requested=="2025-06-18" || requested=="2024-11-05" do protocol=string(requested)
-		return mcp_rpc_result(id,json.Object{"protocolVersion"=json.String(protocol),"capabilities"=json.Object{"tools"=json.Object{}},"serverInfo"=json.Object{"name"=json.String("heimdall-control"),"version"=json.String("0.2.0")},"instructions"=json.String("Act as the connected user within the tools and permissions advertised by tools/list. Task writes can dispatch work on owned machines. Reuse a stable request_id with identical arguments after ambiguous task-write results; refresh tasks.get revision or chains.get configuration_revision before a new update. No messaging, external leases or review approval authority. Poll events.wait only while actively monitoring with a stopping condition and budget; no background wake or durable replay. Never automatically retry an ambiguous chains.create result. Default decryption requires an approved unlocked device; hosted decryption requires explicit connection consent.")})
+		return mcp_rpc_result(id,json.Object{"protocolVersion"=json.String(protocol),"capabilities"=json.Object{"tools"=json.Object{}},"serverInfo"=json.Object{"name"=json.String("heimdall-control"),"version"=json.String("0.2.0")},"instructions"=json.String("Act as the connected user within the tools and permissions advertised by tools/list. Task and runtime writes can dispatch work on owned machines. Reuse a stable request_id with identical arguments after ambiguous task/runtime-write results; refresh tasks.get or instances.get revision, or chains.get configuration_revision before a new update. Runtime acceptance is not readiness; poll instances.operations. Hold and checkpoint active task leases before lifecycle changes. No messaging, external leases or review approval authority. Poll events.wait only while actively monitoring with a stopping condition and budget; no background wake or durable replay. Never automatically retry an ambiguous chains.create result. Default decryption requires an approved unlocked device; hosted decryption requires explicit connection consent.")})
 	case "ping":return mcp_rpc_result(id,json.Object{})
 	case "tools/list":
 		tools,err:=json.parse_string(#load("mcp_tools.json",string),parse_integers=true,allocator=context.temp_allocator)
@@ -200,6 +202,14 @@ mcp_control_handler :: proc(ctx:rawptr,req:Request)->(response:Response) {
 	handle,admitted:=mcp.request_begin(&h.requests,key,string(encoded_id))
 	if !admitted do return mcp_tool_result(id,"busy: request is already active or capacity is exhausted",true)
 	defer mcp.request_end(&h.requests,handle)
+	if mcp.runtime_tool(string(name)) {
+		if h.runtime==nil do return mcp_tool_result(id,"request_failed",true)
+		cancellation:=MCP_Runtime_Cancellation{h=h,handle=handle,started=started}
+		result,code:=h.runtime(h.create_ctx,raw,view,string(name),args.runtime,&cancellation,mcp_runtime_cancelled)
+		if code=="invalid_token" do return mcp_unauthorized(h)
+		if code!="" do return mcp_tool_result(id,code,true)
+		return mcp_tool_result(id,result,false)
+	}
 	if mcp.catalog_write(string(name)) do return mcp_catalog_write_call(h,id,raw,view,string(name),args.catalog,handle,started)
 	if string(name)=="tasks.create" || string(name)=="tasks.update" || string(name)=="tasks.control" || string(name)=="chains.configure" do return mcp_task_write_call(h,id,raw,view,string(name),args.task_write,handle,started)
 	if string(name)=="tasks.comment" do return mcp_task_comment_call(h,id,raw,view,args,handle,started)

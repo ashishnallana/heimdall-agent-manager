@@ -31,7 +31,7 @@ mcp_catalog_test :: proc(t:^testing.T,g:^App_Graph,h:^http.MCP_Control_Handlers,
 	owner:=domain.User_ID(view.owner);now:=mcp_task_test_now(nil)
 	listed:=http.mcp_control_handler(h,{method="POST",path="/api/v1/mcp",headers=headers,body=strings.clone(`{"jsonrpc":"2.0","id":50,"method":"tools/list"}`,context.temp_allocator)})
 	catalog:struct {result:struct {tools:[]struct {name:string}}}
-	testing.expect(t,json.unmarshal_string(listed.body,&catalog,.JSON,context.temp_allocator)==nil && len(catalog.result.tools)==20)
+	testing.expect(t,json.unmarshal_string(listed.body,&catalog,.JSON,context.temp_allocator)==nil && len(catalog.result.tools)==21)
 	visible:=make(map[string]bool,context.temp_allocator);for tool in catalog.result.tools do visible[tool.name]=true
 	for tool in ([]string{"agents.list","agents.get","agents.create","agents.update","agents.archive","bridges.list","providers.list","instances.list","instances.get"}) do testing.expect(t,visible[tool])
 	testing.expect(t,!visible["instances.start"] && !visible["agents.delete"] && !visible["messages.send"])

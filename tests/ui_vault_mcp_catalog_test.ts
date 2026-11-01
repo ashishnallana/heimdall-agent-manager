@@ -27,7 +27,7 @@ test('catalog reads open approved text and omit runtime credentials and diagnost
   const token = JSON.parse(f.job.payload).chain.title;
   const cases = [
     ['agents.get', 'agent', { agent_id: 'agt_a', name: token, slug: token, instructions: token, permission_mode: 'ask', revision: 'a'.repeat(64), supports: [{ bridge_id: 'brg_a', enabled: true }] }, ['name', 'slug', 'instructions']],
-    ['instances.get', 'instance', { agent_instance_id: 'inst_a', agent_id: 'agt_a', bridge_id: 'brg_a', display_name: token, provider: 'codex', provider_profile: 'work', model: 'model_a', runtime_status: 'running' }, ['display_name']],
+    ['instances.get', 'instance', { agent_instance_id: 'inst_a', agent_id: 'agt_a', bridge_id: 'brg_a', display_name: token, provider: 'codex', provider_profile: 'work', model: 'model_a', runtime_status: 'running', revision: 'b'.repeat(64) }, ['display_name']],
     ['bridges.list', 'bridge', { bridge_id: 'brg_a', label: token, status: 'online', eligible: true }, ['label']],
     ['providers.list', 'provider', { bridge_id: 'brg_a', provider: 'codex', provider_profile: 'work', display_name: 'Codex', label: token, models: [{ model_id: 'model_a', label: token, state: 'active', rank: 1, eligible: true }] }, ['label']],
   ] as const;
@@ -41,6 +41,7 @@ test('catalog reads open approved text and omit runtime credentials and diagnost
     for (const field of textFields) assert.equal(output.records[0][field], 'worker secret title');
     for (const field of ['bridge_token_hash', 'binary_path', 'base_args_json', 'environment', 'provider_transcript_path', 'launch_epoch', 'last_error_json']) assert.equal(output.records[0][field], undefined);
     if (kind === 'provider') assert.equal(output.records[0].models[0].label, 'worker secret title');
+    if (kind === 'instance') assert.equal(output.records[0].revision, 'b'.repeat(64));
     assert.equal(output.next_cursor, 'bound_position');
     await assert.rejects(transformMcpWorkerJob({ ...job, payload: JSON.stringify({ ...input, records_kind: 'wrong_kind' }) }, f.keyring));
     await assert.rejects(transformMcpWorkerJob({ ...job, payload: JSON.stringify({ ...input, chain: { title: token } }) }, f.keyring));

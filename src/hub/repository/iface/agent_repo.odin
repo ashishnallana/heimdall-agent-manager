@@ -26,6 +26,7 @@ Agent_List_Active_Runtime_Instances_Proc :: proc(ctx: rawptr) -> ([]domain.Agent
 Agent_Next_Title_Counter_Proc :: proc(ctx: rawptr, agent_id: string, owner_user_id: domain.User_ID, now: string) -> (int, bool, domain.Domain_Error)
 
 Agent_Repository :: struct {
+	runtime_busy:Agent_Runtime_Busy_Proc,
 	ctx: rawptr,
 	reconfiguration_begin: Instance_Reconfiguration_Begin_Proc,
 	reconfiguration_get: Instance_Reconfiguration_Get_Proc,

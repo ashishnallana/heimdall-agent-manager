@@ -351,6 +351,11 @@ pick_instance :: proc(svc: ^Service, u: ^Uow, ctx: ^Match_Context, task: domain.
 	have_live, have_stopping, have_warm, have_pref := false, false, false, false
 	for inst in ctx.instances {
 		if inst.agent_id != fleet.agent_id || inst.bridge_id != placement.bridge_id do continue
+		if busy,err:=iface.agent_runtime_busy(svc.agents,inst.agent_instance_id);busy || err.code!=.None {
+			live_count+=1
+			failure="instance has a pending runtime action"
+			continue
+		}
 		// F4: a person stopped this instance — never re-wake or re-grant it
 		// (whatever its runtime state, including as prefer=last holder), and
 		// do not count it toward capacity. Without another free instance, ask

@@ -54,6 +54,7 @@ configure_mcp_delegation :: proc(graph: ^App_Graph) -> (bool, string) {
 	graph.mcp_control_handlers.comment=mcp_comment_task
 	graph.mcp_control_handlers.mutate_task=mcp_mutate_task
 	graph.mcp_control_handlers.mutate_catalog=mcp_mutate_catalog
+	graph.mcp_control_handlers.runtime=mcp_runtime_call
 	valid=true
 	return true,""
 }

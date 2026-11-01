@@ -114,7 +114,7 @@ test_mcp_control_hosted_four_tools_ownership_creation_and_stateless_restart :: p
 	list:=mcp_control_request(&f.h,f.token,`{"jsonrpc":"2.0","id":2,"method":"tools/list"}`)
 	testing.expect(t,strings.contains(list.body,"chains.list") && strings.contains(list.body,"chains.get") && strings.contains(list.body,"chains.create") && strings.contains(list.body,"events.wait") && !strings.contains(list.body,"lease.next"))
 	testing.expect(t,!strings.contains(list.body,"tasks.get") && !strings.contains(list.body,"tasks.create") && !strings.contains(list.body,"chains.configure"))
-	for name in ([]string{"agents.list","instances.list","bridges.list","providers.list"}) do testing.expect(t,!strings.contains(list.body,name))
+	for name in ([]string{"agents.list","instances.list","bridges.list","providers.list","instances.create","instances.start","instances.stop","instances.reconfigure","instances.operations"}) do testing.expect(t,!strings.contains(list.body,name))
 	for call in ([]string{
 		`{"jsonrpc":"2.0","id":20,"method":"tools/call","params":{"name":"tasks.get","arguments":{"chain_id":"chain_fixture","task_id":"task_fixture"}}}`,
 		`{"jsonrpc":"2.0","id":21,"method":"tools/call","params":{"name":"tasks.comment","arguments":{"chain_id":"chain_fixture","task_id":"task_fixture","request_id":"legacy_denied","body":"Never write"}}}`,
@@ -128,6 +128,11 @@ test_mcp_control_hosted_four_tools_ownership_creation_and_stateless_restart :: p
 		`{"jsonrpc":"2.0","id":29,"method":"tools/call","params":{"name":"instances.get","arguments":{"agent_instance_id":"inst_fixture"}}}`,
 		`{"jsonrpc":"2.0","id":30,"method":"tools/call","params":{"name":"bridges.list","arguments":{}}}`,
 		`{"jsonrpc":"2.0","id":31,"method":"tools/call","params":{"name":"providers.list","arguments":{"bridge_id":"brg_fixture"}}}`,
+		`{"jsonrpc":"2.0","id":32,"method":"tools/call","params":{"name":"instances.start","arguments":{"agent_instance_id":"inst_fixture","request_id":"denied","expected_revision":"0000000000000000000000000000000000000000000000000000000000000000"}}}`,
+		`{"jsonrpc":"2.0","id":33,"method":"tools/call","params":{"name":"instances.stop","arguments":{"agent_instance_id":"inst_fixture","request_id":"denied","expected_revision":"0000000000000000000000000000000000000000000000000000000000000000"}}}`,
+		`{"jsonrpc":"2.0","id":34,"method":"tools/call","params":{"name":"instances.operations","arguments":{"operation_tool":"instances.create","request_id":"denied"}}}`,
+		`{"jsonrpc":"2.0","id":35,"method":"tools/call","params":{"name":"instances.create","arguments":{"agent_id":"agt_fixture","chain_id":"chain_fixture","bridge_id":"brg_fixture","project_id":"","provider":"codex","provider_profile":"codex","model":"model","request_id":"denied","expected_revision":"0000000000000000000000000000000000000000000000000000000000000000"}}}`,
+		`{"jsonrpc":"2.0","id":36,"method":"tools/call","params":{"name":"instances.reconfigure","arguments":{"agent_instance_id":"inst_fixture","bridge_id":"brg_fixture","project_id":"","provider":"codex","provider_profile":"codex","model":"model","request_id":"denied","expected_revision":"0000000000000000000000000000000000000000000000000000000000000000"}}}`,
 	}) {
 		testing.expect(t,strings.contains(mcp_control_request(&f.h,f.token,call).body,"scope_missing"))
 	}
