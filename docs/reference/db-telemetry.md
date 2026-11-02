@@ -83,8 +83,8 @@ Every chain write (`tasks/create`, `lease/submit`, review, publish, fleet change
 
 | `phase` | Code |
 |---|---|
-| `requirements` | `taskchain_list_tasks_by_chain` + `requirements_reconcile_in_uow` per task |
-| `refold` | every `refold_chain` call: the settle-loop passes and the final pass |
+| `requirements` | `taskchain_list_tasks_by_chain` + `requirements_reconcile_in_uow` per task; includes the one batched chain fold-event read (`list_fold_events_by_chain`) that every later fold in the call is served from |
+| `refold` | every `refold_chain` call: the settle-loop passes and the final pass. Since F1 a pass costs a few statements (tasks, deps, work edges) plus saves; only tasks whose inputs changed are refolded (`fold_cache.odin`) |
 | `release_workflow` | `release_task_blocks_in_uow`, `trigger_on_output_workflows_in_uow`, `workflow_reconcile_chain` per settle pass |
 | `summary` | `rebuild_chain_summary_in_uow` (only on the triggers that rebuild it) |
 | `match` | `match_chain_in_uow` |

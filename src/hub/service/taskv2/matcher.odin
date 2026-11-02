@@ -179,7 +179,7 @@ resolve_placement :: proc(ctx: ^Match_Context, task: domain.Task, fleet: domain.
 @(private = "file")
 grant_work :: proc(svc: ^Service, u: ^Uow, ctx: ^Match_Context, task: domain.Task, trigger: Trigger) {
 	assignee := brief_assignee(task.brief_json)
-	evs, _ := iface.taskchain_list_events_by_task(svc.repo, task.task_id, task.owner_user_id)
+	evs, _ := task_fold_events(svc, task)
 	view := fold_task(evs, fold_input_for_task(task, true))
 	prefer := ""
 	if view.last_release == .Changes_Requested || view.last_release == .Expired {

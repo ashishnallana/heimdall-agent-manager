@@ -14,6 +14,9 @@ Take_Boot_Regate_Proc :: proc(ctx: rawptr) -> (bool, domain.Domain_Error)
 
 Task_Event_Append_Proc :: proc(ctx: rawptr, event: domain.Task_Event) -> (domain.Task_Event, bool, domain.Domain_Error)
 Task_Event_List_By_Task_Proc :: proc(ctx: rawptr, task_id: domain.Task_ID, owner_user_id: domain.User_ID) -> ([]domain.Task_Event, domain.Domain_Error)
+// Task_Event_List_By_Chain_Proc lists the chain's FOLD events (every kind but
+// `comment`), ascending event_id: the one batched read after_chain_change
+// refolds from. Comment history stays on list_events_by_task.
 Task_Event_List_By_Chain_Proc :: proc(ctx: rawptr, chain_id: domain.Task_Chain_ID, owner_user_id: domain.User_ID) -> ([]domain.Task_Event, domain.Domain_Error)
 
 Task_Attempt_Save_Proc :: proc(ctx: rawptr, attempt: domain.Task_Attempt) -> (domain.Task_Attempt, bool, domain.Domain_Error)
@@ -66,6 +69,11 @@ taskchain_append_event :: proc(repo: ^Taskchain_Repository, event: domain.Task_E
 taskchain_list_events_by_task :: proc(repo: ^Taskchain_Repository, task_id: domain.Task_ID, owner_user_id: domain.User_ID) -> ([]domain.Task_Event, domain.Domain_Error) {
 	if repo == nil || repo.list_events_by_task == nil do return nil, domain.domain_error(.Internal_Error, NOT_CONFIGURED)
 	return repo.list_events_by_task(repo.ctx, task_id, owner_user_id)
+}
+
+taskchain_list_fold_events_by_chain :: proc(repo: ^Taskchain_Repository, chain_id: domain.Task_Chain_ID, owner_user_id: domain.User_ID) -> ([]domain.Task_Event, domain.Domain_Error) {
+	if repo == nil || repo.list_fold_events_by_chain == nil do return nil, domain.domain_error(.Internal_Error, NOT_CONFIGURED)
+	return repo.list_fold_events_by_chain(repo.ctx, chain_id, owner_user_id)
 }
 
 taskchain_save_attempt :: proc(repo: ^Taskchain_Repository, attempt: domain.Task_Attempt) -> (domain.Task_Attempt, bool, domain.Domain_Error) {
