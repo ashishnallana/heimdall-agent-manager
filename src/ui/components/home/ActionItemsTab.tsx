@@ -451,10 +451,10 @@ export function ActionItemsTab() {
       )}
 
       {/* Top Header & Actions Bar */}
-      <div className="flex flex-col gap-4 border-b border-subtle pb-4 sm:flex-row sm:items-start sm:justify-between">
-        <div className="space-y-1.5 min-w-0 flex-1">
+      <div className="flex flex-col gap-3 border-b border-subtle pb-4">
+        <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
           {/* Badges Cluster */}
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
             <StatusPill tone={cardStatusTone(selectedCard.status)}>
               {selectedCard.status}
             </StatusPill>
@@ -478,6 +478,64 @@ export function ActionItemsTab() {
             </span>
           </div>
 
+          {/* Action Controls */}
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            {(selectedCard.status === 'pending' || selectedCard.status === 'snoozed') ? (
+              <>
+                <Button
+                  variant="primary"
+                  size="sm"
+                  data-debug-id={`action-accept-btn-${selectedCard.card_id}`}
+                  disabled={processingId === selectedCard.card_id}
+                  onClick={() => handleAccept(selectedCard)}
+                  leading={processingId === selectedCard.card_id ? <Spinner size="sm" /> : <Icon name="check" size={14} />}
+                  className="min-h-[44px] sm:min-h-[36px]"
+                >
+                  Accept
+                </Button>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  data-debug-id={`action-reject-btn-${selectedCard.card_id}`}
+                  disabled={processingId === selectedCard.card_id}
+                  onClick={() => handleReject(selectedCard)}
+                  leading={<Icon name="close" size={14} />}
+                  className="min-h-[44px] sm:min-h-[36px]"
+                >
+                  Reject
+                </Button>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  data-debug-id={`action-snooze-btn-${selectedCard.card_id}`}
+                  disabled={processingId === selectedCard.card_id}
+                  onClick={() => handleSnooze(selectedCard)}
+                  leading={<Icon name="clock" size={14} />}
+                  className="min-h-[44px] sm:min-h-[36px]"
+                >
+                  Snooze 24h
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  data-debug-id={`action-discard-btn-${selectedCard.card_id}`}
+                  disabled={processingId === selectedCard.card_id}
+                  onClick={() => handleDiscard(selectedCard)}
+                  leading={<Icon name="trash" size={14} />}
+                  className="min-h-[44px] sm:min-h-[36px]"
+                >
+                  Discard
+                </Button>
+              </>
+            ) : (
+              <span className="text-xs text-muted italic">
+                Card resolved as {selectedCard.status}
+              </span>
+            )}
+          </div>
+        </div>
+
+        <div className="min-w-0 space-y-1.5">
           <h2
             data-debug-id="action-item-detail-title"
             className="text-xl sm:text-2xl font-bold tracking-tight text-primary break-words"
@@ -485,62 +543,6 @@ export function ActionItemsTab() {
             <VaultText value={selectedCard.title} fallback={UNTITLED_CARD} as="span" />
           </h2>
           <p className="text-caption font-mono text-muted">{selectedCard.card_id}</p>
-        </div>
-
-        {/* Action Controls */}
-        <div className="flex flex-wrap items-center gap-2 shrink-0">
-          {(selectedCard.status === 'pending' || selectedCard.status === 'snoozed') ? (
-            <>
-              <Button
-                variant="primary"
-                size="sm"
-                data-debug-id={`action-accept-btn-${selectedCard.card_id}`}
-                disabled={processingId === selectedCard.card_id}
-                onClick={() => handleAccept(selectedCard)}
-                leading={processingId === selectedCard.card_id ? <Spinner size="sm" /> : <Icon name="check" size={14} />}
-                className="min-h-[44px] sm:min-h-[36px]"
-              >
-                Accept
-              </Button>
-              <Button
-                variant="secondary"
-                size="sm"
-                data-debug-id={`action-reject-btn-${selectedCard.card_id}`}
-                disabled={processingId === selectedCard.card_id}
-                onClick={() => handleReject(selectedCard)}
-                leading={<Icon name="close" size={14} />}
-                className="min-h-[44px] sm:min-h-[36px]"
-              >
-                Reject
-              </Button>
-              <Button
-                variant="secondary"
-                size="sm"
-                data-debug-id={`action-snooze-btn-${selectedCard.card_id}`}
-                disabled={processingId === selectedCard.card_id}
-                onClick={() => handleSnooze(selectedCard)}
-                leading={<Icon name="clock" size={14} />}
-                className="min-h-[44px] sm:min-h-[36px]"
-              >
-                Snooze 24h
-              </Button>
-              <Button
-                variant="ghost"
-                size="sm"
-                data-debug-id={`action-discard-btn-${selectedCard.card_id}`}
-                disabled={processingId === selectedCard.card_id}
-                onClick={() => handleDiscard(selectedCard)}
-                leading={<Icon name="trash" size={14} />}
-                className="min-h-[44px] sm:min-h-[36px]"
-              >
-                Discard
-              </Button>
-            </>
-          ) : (
-            <span className="text-xs text-muted italic">
-              Card resolved as {selectedCard.status}
-            </span>
-          )}
         </div>
       </div>
 
