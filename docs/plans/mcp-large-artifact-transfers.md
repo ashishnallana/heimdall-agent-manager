@@ -25,7 +25,7 @@ Line numbers are at commit `2919dec8`.
 | Limit | Where | Effect on 15 MiB |
 |---|---|---|
 | MCP JSON-RPC body ≤ 512 KiB | `src/hub/transport/http/mcp_control_handlers.odin:37` (`MCP_CONTROL_MAX_BODY_BYTES`), enforced at `:153` | a 15 MiB file cannot ride in `tools/call` arguments |
-| MCP response write timeout ≤ 5 s, whole request ≤ 30 s | `mcp_control_handlers.odin:145` | a long synchronous transfer in one call is not allowed |
+| Whole MCP request window 30 s; the 5 s figure is only the response **write** timeout (`min(5 s, remaining of 30 s)`) | `mcp_control_handlers.odin:145` (write timeout), `:265` (a tool result after 30 s elapsed becomes `cancelled`) | compute must finish well inside 30 s minus write time; moving 20+ MiB of JSON per call is not viable |
 | `artifacts.create.content` ≤ 65,536 bytes, text MIME only, no NUL | `src/hub/transport/http/mcp_resource_arguments.odin:17,98-105`; `src/hub/service/mcp/control.odin:122` (`kind==.Artifact && key=="content" && len>65536`) | text-only, 64 KiB |
 | `artifacts.get` copies ≤ 128 KiB stored, opens text MIME only | `src/hub/service/mcp/artifacts.odin:16,32` | binary/HTML bundle → `unsupported_content_type`; > 128 KiB → `content_too_large` |
 | Device control job payload/result ≤ 4 MiB, deadline ≤ 4 s | `src/hub/service/mcp/control.odin:92,134`; `src/hub/service/mcp/worker_broker.odin:65`; `src/hub/transport/http/mcp_worker_handlers.odin:55,74,79` | device-decrypted results capped at 4 MiB / 4 s |
@@ -132,7 +132,7 @@ key.
 | New persisted crypto format | yes (v3) | no | **no** |
 | UI / ctl reader changes | yes | no | **no** |
 | MCP calls per 15 MiB upload | ~60 | 1 (huge) | **2** + 1–4 HTTP PUT/PATCH |
-| Peak server memory per transfer | low | ~3× file in MCP handler | bounded, ≈ 52 MiB only during commit/prepare |
+| Peak server memory per transfer | low | ~3× file in MCP handler | bounded, ≈ 72 MiB only during a hosted commit/prepare (§5.7) |
 | Resumable | per chunk | no | **yes** (offset-based) |
 
 ## 5. Recommended design: scoped transfer handles
@@ -218,11 +218,21 @@ terminal state returns that state without a token.
                "transfer_id":{"type":"string","pattern":"^xfr_[A-Za-z0-9]{1,64}$"}}}
 ```
 
-Result: `{"transfer_id","state":"committed","artifact_id","link":"artifact://art_…","revision","size_bytes":15728640,"sha256"}`
-or, if sealing exceeds the request budget, `{"state":"committing"}` (poll
-`artifacts.transfer_status`). Errors: `transfer_incomplete` (with `received_bytes`),
-`digest_mismatch`, `bundle_invalid` (with the validator's reason), `transfer_expired`,
-`decryption_unavailable`, `quota_exceeded`.
+Result (hosted): always terminal within the call —
+`{"transfer_id","state":"committed","artifact_id","link":"artifact://art_…","revision","size_bytes":15728640,"sha256"}`.
+Hosted commit never returns `committing` and never continues after the call (key
+boundary, §5.5). Result (device mode, T5 only): `{"transfer_id","state":"committing"}`;
+poll `artifacts.transfer_status`.
+
+Errors: `transfer_incomplete` (with `received_bytes`), `digest_mismatch`,
+`bundle_invalid` (with the validator's reason), `transfer_expired`,
+`decryption_unavailable`, `quota_exceeded`, and the **retryable** `busy`
+(`{"error":"busy","retryable":true,"retry_after_ms":…}`, seal/open semaphore full)
+and `cancelled` (30 s window elapsed or client cancelled). Retryable errors leave the
+transfer in `receiving` with its staging intact and record **no receipt** (receipts
+commit only together with the native change, `docs/mcp-capabilities.md:114-117`), so a
+replay with the same `request_id` re-attempts the commit. `digest_mismatch` and
+`bundle_invalid` are terminal (`failed`).
 
 **`artifacts.download_begin`**
 
@@ -241,13 +251,40 @@ clients that render links. For human download the result also carries
 `browser_url = download_url + "?t=<token>"` (see §5.4 for its stricter rules).
 `size_bytes`/`sha256` are of the **decoded** bytes.
 
+In hosted mode `download_begin` opens and stages synchronously inside the call and
+returns `state: "ready"` or an error; it never returns `preparing` (that state exists
+only for device mode, T5). `busy`/`cancelled` are retryable and create **no** transfer
+row and no receipt.
+
+Replay and snapshot semantics for `download_begin`:
+
+- Same `request_id`, identical arguments, transfer still `ready`: returns the same
+  `transfer_id`, `sha256`, `expires_at` and the **remaining** `max_fetches` (the counter
+  is not reset), with a freshly minted token. Because only `sha256(token)` is stored,
+  rotation is the only way to return a usable token; it **invalidates** the previous
+  token and any `browser_url` built from it. A client that has already shown a
+  `browser_url` to the user must not replay; it should call `download_begin` with a new
+  `request_id` (new transfer, counted against quotas) if it needs another link.
+- Replay after a terminal state (`expired`, `cancelled`, `failed`, or fetches
+  exhausted → `expired`) returns that state without a token; it does not re-prepare.
+- The staged bytes are an immutable **snapshot** of the artifact taken inside the
+  `download_begin` call (identified by the returned `revision`). A later artifact
+  edit, re-upload or delete does not change what the transfer serves; the transfer
+  keeps serving the snapshot until TTL/fetch exhaustion. Exception: if the owner's
+  grant is revoked or the account disabled, the transfer is wiped (§5.4). Archive/
+  delete of the artifact also schedules a wipe of its download transfers at the next
+  janitor tick, so a deleted artifact is downloadable for at most one tick after
+  deletion (T1 sets the transfer janitor interval to ≤ 60 s; the existing
+  maintenance tick interval is not assumed).
+
 **`artifacts.transfer_status`** `{transfer_id}` → `{state, kind:"upload"|"download", received_bytes|size_bytes, expires_at, error?}`.
 
 **`artifacts.transfer_cancel`** `{request_id, transfer_id}` → `{state:"cancelled"}`;
 idempotent; wipes staging immediately.
 
-States: `receiving → committing → committed`; `preparing → ready`; any → `cancelled |
-expired | failed`. Terminal states keep a metadata-only row for 24 h for idempotent
+States: hosted `receiving → committed`, `ready` (created ready); device mode (T5) adds
+`receiving → committing → committed` and `preparing → ready`; any non-terminal →
+`cancelled | expired | failed`. Terminal states keep a metadata-only row for 24 h for idempotent
 replay, then are purged.
 
 ### 5.3 Transfer HTTP endpoints (data path, outside MCP JSON-RPC)
@@ -340,8 +377,28 @@ Decryption modes:
 
 | Mode | Upload commit | Download prepare |
 |---|---|---|
-| **Hosted** (`hosted_with_access`) | Hub decrypts staging with `K_t` into one buffer, verifies size+sha256 (and the HTML bundle, §5.8), seals one v2 token with the request-local keyring, recheck credential/epoch (existing second-transaction recheck), `create_artifact` | Hub loads the artifact (full read, ≤ armored 15 MiB), opens v2 once, re-stages under `K_t` |
+| **Hosted** (`hosted_with_access`) | Inside the callback: decrypt staging with `K_t` into one buffer, verify size+sha256 and the HTML bundle (§5.8), seal one v2 token with the borrowed keyring, wipe the plaintext, re-open the token and compare sha256, return the token. After the callback: existing second-transaction recheck, then `create_artifact` + `committed` + receipt in one transaction | Inside the callback: open the already-loaded v2 value once, seal ≤ 1 MiB chunks under `K_t` into memory, wipe plaintext, return the chunks. After the recheck: insert the transfer row and chunks in one transaction |
 | **Device** (default) | Hub sends a control job `artifact_transfer_seal{transfer_id, seal_url, fetch_token}` (small payload, existing ≤ 4 MiB lane). The approved, unlocked device fetches staged plaintext over HTTPS with a device-scoped one-time fetch token, seals with its keyring (`encryptVaultBytes`), validates bundles with `readHtmlBundle`, and POSTs the sealed value to `/api/v1/mcp/transfers/{id}/sealed` with its existing signed device proof. Hub verifies device signature, epoch, armored size bound, then `create_artifact` | Symmetric job `artifact_transfer_open`: device GETs the sealed value via its normal artifact route, decrypts, PUTs plaintext into staging. Hub verifies size and computes sha256 |
+
+**Hosted call boundary (normative).** `hosted_with_access` opens the keyring, runs the
+transform callback **synchronously** between its two DB transactions, and wipes the
+keyring on return; the callback "may only use the borrowed keyring synchronously; it
+must not retain it" (`src/hub/service/mcp/hosted.odin:108-122`). Therefore every
+hosted step that needs the vault keyring — staging decrypt + validation + seal +
+re-open for upload, open + `K_t` re-staging for download — runs entirely inside that
+one callback within the MCP call. Nothing that needs the keyring is ever deferred to a
+background job, retried later from saved state, or continued after the response. The
+callback outputs only ciphertext (the v2 token or `K_t` chunks) through its `ctx`; all
+DB writes happen in the handler after the final recheck, matching the existing
+`artifacts.create` sealed path (`mcp_control_handlers.odin:255-270`). If the semaphore
+is full the callback is never entered (`busy`); if the 30 s window elapses
+(`mcp_control_handlers.odin:265`) or the client cancels, the output is wiped and
+discarded and the transfer stays `receiving` (upload) or is never created (download).
+
+Budget (assumption, to be measured in T4): three AES-256-GCM passes over 15 MiB plus
+base64 and SHA-256 are expected to take well under 5 s on Hub hardware; T4 adds a
+timing test that fails if a 15,728,640-byte hosted commit exceeds 10 s, leaving
+≥ 15 s headroom inside the 30 s window for the write timeout and DB work.
 
 The device lanes keep large bytes **out of the broker** (`worker_broker.odin:65`,
 `control.odin:134` unchanged): the job carries only ids and tokens. Device mode is a
@@ -374,9 +431,27 @@ later stage (§8, T5); until it lands, transfer tools in device mode return
 | Staged bytes per owner / global | ≤ 64 MiB / ≤ 512 MiB (config `mcp_transfer_staging_max_bytes`) |
 | Idle TTL / absolute TTL | 15 min since last byte / 60 min since begin |
 | Download fetches | ≤ 8 complete-or-ranged GETs per transfer |
-| Global seal/open concurrency | semaphore of 2 (commit + prepare share it); waiters get `busy` with `retry_after` rather than queueing |
-| Peak memory per commit/prepare | ≈ 15 MiB plaintext + 15.7 MiB raw ciphertext + 21 MiB armored ≈ **52 MiB**; ⇒ ≤ ~104 MiB global |
+| Global seal/open concurrency | semaphore of 2 (commit + prepare share it), acquired **before** entering `hosted_with_access`; waiters get retryable `busy` with `retry_after_ms` rather than queueing |
+| Peak memory per hosted commit | ≈ **72 MiB** (derivation below) |
+| Peak memory per hosted prepare | ≈ **72 MiB**: stored armored value 21 + decoded payload 15 + plaintext 15 + `K_t` chunks 15 (+ ~6 KiB chunk headers) |
+| Global seal/open bound | 2 slots × 72 MiB ≈ **144 MiB**, plus the data-path row below |
 | Per-request memory on the data path | ≤ one request body (≤ 15 MiB) + one 1 MiB staged chunk |
+
+Commit peak derivation (`src/lib/vault/envelope.odin:246-262,309-318`; F = 15 MiB, A = armored ≈ 20 MiB + prefix):
+
+1. Decrypt staging → plaintext P (F). Validation (§5.8) adds ≤ 2F for the largest
+   member while it is checked (inflate buffer + clone, `html_bundle.odin:287-304`),
+   freed before step 2: peak ≈ 3F = 45 MiB.
+2. `vault.seal`: payload `nonce‖tag‖ct` (F, temp, zeroed by `defer`) + base64 (A,
+   temp) + concatenated token (A): peak P + F + 2A ≈ 15 + 15 + 21 + 21 = **72 MiB**.
+3. Wipe and free P (its sha256 was already checked in step 1) and release the
+   temp allocations of step 2 (the callback runs in a scoped arena or calls
+   `free_all(context.temp_allocator)` after copying the token out).
+4. Re-open: `envelope_parse` payload (F, temp) + plaintext P′ (F) next to the token
+   (A): ≈ 51 MiB; sha256(P′) compared, P′ wiped.
+
+Without step 3 the re-open would add 2F on top of step 2 (≈ 102 MiB); step 3 is
+therefore mandatory and covered by test 7.
 
 A janitor (existing periodic maintenance tick) expires transfers, deletes staging
 rows and wipes `K_t`. Expired/cancelled staging is deleted in one transaction per
@@ -391,7 +466,17 @@ exists, ≤ 1000 entries, ≤ 50 MiB expanded, 64 KiB manifest) **before sealing
 - Hosted: Hub runs the validator on the decrypted staging buffer at commit. This needs
   the validator moved from `src/ctl` into a shared package (e.g.
   `src/lib/html_bundle`) imported by both ctl and hub (ticket T3). Expansion is
-  bounded by the existing 50 MiB declared+actual check.
+  bounded by the existing 50 MiB declared+actual check. Memory: today
+  `html_bundle_from_zip` inflates every member into `context.temp_allocator` and
+  keeps them until the temp arena is freed, then clones the archive
+  (`html_bundle.odin:495-532`) — up to 50 MiB expanded + 15 MiB clone. T3 adds a
+  validate-only entry point (`html_bundle_validate(data, entry) -> (entry, err)`)
+  that inflates **one member at a time**, frees it (via a per-member arena) before
+  the next, never clones or rewrites the archive (it rejects a bundle without a
+  manifest/entry rather than appending one), and retains only the central-directory
+  metadata (≤ 1000 entries × ≤ 1 KiB paths ≈ 1 MiB). Its peak is therefore ≤ 2 ×
+  largest member (≤ 2 × 15 MiB) + ~1 MiB, freed before sealing (§5.7 step 1). The
+  ctl packaging path keeps its current behaviour.
 - Device: the device runs `readHtmlBundle` (`src/ui/utils/htmlBundle.ts`) before
   sealing.
 
@@ -402,15 +487,23 @@ route never renders HTML.
 ### 5.9 Retries, resumability, cancellation and failure handling
 
 - Tool calls: idempotent by `request_id` (identical args → same result; changed args
-  → `conflict`). An ambiguous `upload_commit` is safe to retry: commit is
-  compare-and-set on `state = receiving → committing`, and the artifact insert and the
-  transfer's `committed` state + receipt commit in one transaction.
+  → `conflict`). An ambiguous `upload_commit` is safe to retry: the artifact insert,
+  the compare-and-set `receiving → committed` and the receipt commit in one
+  transaction after the hosted recheck. Two concurrent commits of the same transfer
+  may both seal; the CAS lets exactly one insert, and the loser wipes its token and
+  returns the winner's committed result. A per-transfer in-memory "sealing" flag
+  makes the second concurrent call return `busy` early in the common case.
 - Data path: upload resumes from `HEAD` `Upload-Offset`; a PATCH with a wrong offset
   gets `409` + the current offset; download resumes with `Range` (`curl -C -`).
-- Commit/prepare longer than the MCP budget (`mcp_control_handlers.odin:145`, 5 s
-  write timeout) continues in the background job; the tool returns `committing` /
-  `preparing` and `transfer_status` reports completion. `notifications/progress` is
-  emitted when the client supplied a `progressToken`.
+- Hosted commit/prepare is synchronous (§5.5 boundary). The budget is the 30 s
+  request window (`mcp_control_handlers.odin:265`) minus the ≤ 5 s response write
+  timeout (`:145`), not 5 s of compute. Semaphore full → retryable `busy`; window
+  exceeded or cancelled → retryable `cancelled`; in both cases the output is wiped,
+  upload transfers stay `receiving`, no download transfer is created, no receipt is
+  stored, and a replay with the same `request_id` retries. Only device mode (T5)
+  returns `committing`/`preparing` for `transfer_status` polling, because there the
+  keyring lives on the device and the Hub holds none. `notifications/progress` is
+  not emitted (the current handler has no progress support and calls are short).
 - Cancellation: `artifacts.transfer_cancel`, HTTP `DELETE`, or MCP
   `notifications/cancelled` on an in-flight `upload_commit`/`download_begin` (the
   latter cancels only if sealing has not yet produced the artifact; otherwise the
@@ -484,7 +577,16 @@ ends):
 3. **Byte-exact round trip**: 15,728,640-byte non-UTF-8 random payload →
    `upload_begin` → PUT → `upload_commit` (hosted) → `download_begin` → GET →
    identical bytes and digest; also the same via 2 PATCHes, and a ranged GET
-   reassembly (`0-8388607`, `8388608-`).
+   reassembly (`0-8388607`, `8388608-`). Hosted commit/download return terminal
+   `committed`/`ready` in the same call (never `committing`/`preparing`); a fake
+   transform clock past 30 s yields `cancelled`, the transfer stays `receiving` with
+   staging intact, no receipt exists, and a replay with the same `request_id`
+   commits. Test that the hosted transform retains no keyring pointer after return
+   (the keyring is wiped and the callback ctx holds only ciphertext). Timing guard:
+   15,728,640-byte hosted commit < 10 s. `download_begin` replay: same transfer,
+   rotated token (old token → 401), `max_fetches` not reset; artifact edited/deleted
+   after `download_begin` → GET still returns the snapshot until the janitor tick
+   (delete) or TTL (edit).
 4. HTML bundle: valid 15 MiB bundle commits and opens in
    `tests/ui_html_bundle_test.ts` flow; bundle with a disallowed member or missing
    entry → `bundle_invalid`, nothing inserted.
@@ -492,8 +594,10 @@ ends):
    grant mid-upload → 401 and staging wiped.
 6. HTTP: `src/hub/transport/http` tests for headers (`Upload-Offset`, `Range`,
    `Repr-Digest`, `no-store`, `nosniff`), `?t=` rejected for PUT/PATCH, body bounds.
-7. Memory: assertion test that commit uses one plaintext buffer (allocator tracking),
-   and semaphore returns `busy` at 3 concurrent commits.
+7. Memory: tracking-allocator test that a hosted 15 MiB commit peaks ≤ 75 MiB and
+   prepare ≤ 75 MiB (§5.7), that P is wiped before the re-open, that the bundle
+   validator holds at most one inflated member at a time, and that the semaphore
+   returns retryable `busy` (transfer still `receiving`) at 3 concurrent commits.
 8. Device mode (T5): browser test with a fake broker, seal/open lanes, signature
    rejection, stale epoch rejection.
 9. End-to-end manual (no live deploy in this chain): local Hub + Claude Code connector
@@ -505,7 +609,7 @@ ends):
 |---|---|---|---|
 | T1 | Transfer storage and service | – | migration 187, repo procs, transfer service (state machine, `K_t` map, AEAD staging, quotas, TTL janitor, semaphore); unit tests 2, 7 |
 | T2 | Transfer HTTP data path | T1 | `/api/v1/mcp/transfers/{id}` PUT/PATCH/HEAD/GET/DELETE, token auth + grant liveness, rate limits, headers; tests 5, 6 |
-| T3 | Shared HTML bundle validator | – | move validator from `src/ctl/html_bundle.odin` into `src/lib/html_bundle`; ctl keeps behaviour; existing ctl tests stay green |
+| T3 | Shared HTML bundle validator | – | move validator from `src/ctl/html_bundle.odin` into `src/lib/html_bundle`; add streaming validate-only entry point (one member resident at a time, no archive clone, §5.8); ctl keeps behaviour; existing ctl tests stay green |
 | T4 | Hosted MCP tools | T1, T2, T3 | `artifacts.upload_begin/upload_commit/download_begin/transfer_status/transfer_cancel` (argument parsing in `mcp_resource_arguments.odin`, catalog, capabilities), hosted seal/open + re-open digest check, `artifacts.get` hint; tests 1, 3, 4 |
 | T5 | Device-mode lanes | T4 | control job kinds `artifact_transfer_seal/open`, device fetch/sealed endpoints with device proof, UI worker implementation; test 8 |
 | T6 | Docs and skills | T4 | `docs/mcp-capabilities.md` (replace "no binary uploads"), `docs/html-bundle-artifacts.md` upload table, artifact-authoring skill client flow, threat-model notes |
@@ -519,6 +623,11 @@ extends it to default device decryption.
   reads; v3 would touch every reader).
 - **Decided:** bytes never cross the model context; MCP negotiates, HTTPS carries.
 - **Decided:** staging key is memory-only; restart loses in-flight transfers.
+- **Decided:** hosted seal/open runs only inside the synchronous `hosted_with_access`
+  callback; no background continuation in hosted mode; overload/time-out are
+  retryable errors with no receipt. Async states exist only for device mode.
+- **Open (assumption):** hosted 15 MiB commit time on production hardware; guarded by
+  the T4 timing test.
 - **Open (user):** whether chat-only clients' download link should be offered via
   URL-mode elicitation by default (`elicit` defaults to `false` here).
 - **Open (unverified assumption):** per-client support for URL-mode elicitation and
