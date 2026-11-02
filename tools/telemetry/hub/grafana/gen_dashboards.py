@@ -5,7 +5,7 @@ Hand-maintaining Grafana JSON is error-prone; this script is the source of
 truth for every dashboard above (task-system-v2.json is still hand-maintained).
 Re-run it and commit the JSON when panels change:
   python3 tools/telemetry/hub/grafana/gen_dashboards.py
-verify-db-dashboard.sh fails when the committed JSON differs from the output.
+Commit the regenerated JSON; it must match this script's output.
 """
 import json
 import os
