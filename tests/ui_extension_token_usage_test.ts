@@ -1,0 +1,109 @@
+// Per-instance token usage (chain T3r): normalization of the instance JSON's
+// token_usage / token_totals, the list badge thresholds (amber >= 60 %, red >=
+// 80 %), the Runtime card's context meter and lifetime totals, and that every
+// piece renders nothing when the data is absent.
+//
+// RUN: node --import ./tests/helpers/vaultEndpointHarness.ts --test tests/ui_extension_token_usage_test.ts
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import { fileURLToPath } from 'node:url';
+
+const model = await import('../src/ui/components/extension/tokenUsageModel.ts');
+const view = await import('../src/ui/components/extension/TokenUsage.tsx');
+
+const SNAPSHOT = {
+  tool_calls: 12, est_tokens_total: 4200, context_tokens: 130000, context_window: 200000,
+  window_source: 'config', context_pct: 65, output_tokens_total: 900, compactions: 1, run_count: 3, updated_at_ms: 1,
+};
+const TOTALS = { total_context_tokens: 310000, total_est_tool_tokens: 9100, total_output_tokens: 1500, runs_counted: 2, last_run_counted: 2 };
+
+async function render(element: any): Promise<string> {
+  const React = await import('react');
+  const { renderToStaticMarkup } = await import('react-dom/server');
+  return renderToStaticMarkup(React.createElement(React.Fragment, null, element));
+}
+
+test('normalizes the snapshot and totals; rejects absent or malformed data', () => {
+  const u = model.normalizeTokenUsage(SNAPSHOT)!;
+  assert.equal(u.contextPct, 65);
+  assert.equal(u.contextWindow, 200000);
+  assert.equal(u.windowSource, 'config');
+  assert.equal(u.runCount, 3);
+  for (const raw of [undefined, null, 'x', [], {}, { tool_calls: -1, est_tokens_total: 1 }, { tool_calls: 1 }]) {
+    assert.equal(model.normalizeTokenUsage(raw), null, JSON.stringify(raw));
+  }
+  // No context reported yet: no percentage even with a window.
+  assert.equal(model.normalizeTokenUsage({ tool_calls: 0, est_tokens_total: 0, context_window: 200000, compactions: 0 })!.contextPct, null);
+  // Percentage derived when the bridge omitted it.
+  assert.equal(model.normalizeTokenUsage({ tool_calls: 1, est_tokens_total: 1, context_tokens: 500000, context_window: 1000000 })!.contextPct, 50);
+  assert.deepEqual(model.normalizeTokenTotals(TOTALS), { totalContextTokens: 310000, totalEstToolTokens: 9100, totalOutputTokens: 1500, runsCounted: 2 });
+  for (const raw of [undefined, null, {}, { runs_counted: 0 }]) assert.equal(model.normalizeTokenTotals(raw), null);
+});
+
+test('badge tone: neutral below 60 %, amber at 60 %, red at 80 %', () => {
+  assert.equal(model.contextTone(59), 'neutral');
+  assert.equal(model.contextTone(60), 'warning');
+  assert.equal(model.contextTone(79), 'warning');
+  assert.equal(model.contextTone(80), 'danger');
+  assert.equal(model.contextTone(100), 'danger');
+  const badge = model.contextBadge({ token_usage: { ...SNAPSHOT, context_tokens: 164000, context_pct: 82 } })!;
+  assert.equal(badge.tone, 'danger');
+  assert.equal(badge.label, 'ctx 82%');
+  assert.match(badge.tooltip, /164K of 200K tokens \(82%\)/);
+  assert.match(badge.tooltip, /window: model config/);
+  assert.equal(model.contextBadge({}), null);
+  assert.equal(model.contextBadge({ token_usage: { tool_calls: 0, est_tokens_total: 0, compactions: 0 } }), null, 'hidden without a context figure');
+});
+
+test('formatTokens is compact', () => {
+  assert.equal(model.formatTokens(950), '950');
+  assert.equal(model.formatTokens(1250), '1.2K');
+  assert.equal(model.formatTokens(130000), '130K');
+  assert.equal(model.formatTokens(1500000), '1.5M');
+  assert.equal(model.formatTokens(475000), '475K');
+});
+
+test('list badge renders with its tone and is hidden without data', async () => {
+  const amber = await render(view.ContextUsageBadge({ instance: { token_usage: SNAPSHOT }, instanceId: 'inst_a' }));
+  assert.match(amber, /data-debug-id="live-instance-context-inst_a"/);
+  assert.match(amber, /data-context-tone="warning"/);
+  assert.match(amber, /ctx 65%/);
+  assert.equal(view.ContextUsageBadge({ instance: {}, instanceId: 'inst_a' }), null);
+  assert.equal(view.ContextUsageBadge({ instance: null, instanceId: 'inst_a' }), null);
+});
+
+test('Runtime card meter shows % of window and its source; totals list every sum', async () => {
+  const meter = await render(view.ContextMeter({ instance: { token_usage: SNAPSHOT } }));
+  assert.match(meter, /role="progressbar"/);
+  assert.match(meter, /aria-valuenow="65"/);
+  assert.match(meter, /65% · 130K \/ 200K tokens/);
+  assert.match(meter, /window: model config/);
+  assert.match(meter, /data-context-tone="warning"/);
+
+  const pending = await render(view.ContextMeter({ instance: { token_usage: { tool_calls: 2, est_tokens_total: 40, context_window: 200000, window_source: 'default', compactions: 0 } } }));
+  assert.match(pending, /No context reported yet · window 200K \(default\)/);
+  assert.doesNotMatch(pending, /progressbar/);
+
+  const totals = await render(view.TokenTotalsSummary({ instance: { token_totals: TOTALS } }));
+  assert.match(totals, /data-debug-id="live-instance-total-context">310K</);
+  assert.match(totals, /data-debug-id="live-instance-total-tool">9.1K</);
+  assert.match(totals, /data-debug-id="live-instance-total-output">1.5K</);
+  assert.match(totals, /data-debug-id="live-instance-total-runs">2</);
+
+  assert.equal(view.ContextMeter({ instance: {} }), null);
+  assert.equal(view.TokenTotalsSummary({ instance: {} }), null);
+  assert.equal(view.TokenTotalsSummary({ instance: { token_totals: { runs_counted: 0 } } }), null);
+});
+
+test('instance list rows and the Runtime card render the token pieces', () => {
+  const read = (rel: string) => fs.readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8');
+  const list = read('../src/ui/components/agents/AgentListPage.tsx');
+  assert.match(list, /<ContextUsageBadge instance=\{inst\} instanceId=\{instId\} \/>/);
+  const detail = read('../src/ui/components/agents/AgentDetail.tsx');
+  assert.match(detail, /<ContextMeter instance=\{inst\} \/>/);
+  assert.match(detail, /<TokenTotalsSummary instance=\{inst\} \/>/);
+  const ws = read('../src/ui/api/wsInvalidation.ts');
+  assert.match(ws, /change === 'token_usage_changed'/);
+});

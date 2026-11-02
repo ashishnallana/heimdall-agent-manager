@@ -56,6 +56,8 @@ import PaginatedMemoriesSection from '../shared/PaginatedMemoriesSection';
 import { buildRouteHash } from '../../utils/appLocation';
 import { agentFailureSummary } from '../../utils/agentStatus';
 import { AgentFailureNotice } from './AgentFailureNotice';
+import { ContextMeter, TokenTotalsSummary } from '../extension/TokenUsage';
+import { normalizeTokenTotals, normalizeTokenUsage } from '../extension/tokenUsageModel';
 import {
   VERB_LABEL,
   absoluteTime,
@@ -715,6 +717,18 @@ export function LiveInstanceDetailPane({
             {!provider && !model ? <Text role="body" tone="muted">—</Text> : null}
           </div>
         </DetailRow>
+
+        {normalizeTokenUsage(inst?.token_usage) ? (
+          <DetailRow label="Context">
+            <ContextMeter instance={inst} />
+          </DetailRow>
+        ) : null}
+
+        {normalizeTokenTotals(inst?.token_totals) ? (
+          <DetailRow label="Lifetime Tokens">
+            <TokenTotalsSummary instance={inst} />
+          </DetailRow>
+        ) : null}
 
         <DetailRow label="Current Task">
           {currentTaskId ? (

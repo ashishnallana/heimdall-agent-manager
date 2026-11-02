@@ -897,6 +897,11 @@ function handleInstanceChanged(dispatch: any, payload: any, ctx: WsCtx, instance
   if (change === 'created') {
     queueInvalidation(dispatch, [{ type: 'AgentInstances', id: 'LIST' }, { type: 'SidebarConversations', id: 'ALL' }]);
   }
+  // token_usage / token_totals are not in the summary (T3r): refetch the instance
+  // and the list (coalesced; the bridge throttles snapshots to ~10 s per instance).
+  if (change === 'token_usage_changed' && instanceId) {
+    queueInvalidation(dispatch, [{ type: 'AgentInstances', id: instanceId }, { type: 'AgentInstances', id: 'LIST' }]);
+  }
   // Legacy caches + the "identity missing from the catalogue" check (agents.ts).
   handleAgentEvent(dispatch, { ...payload, type: 'agent_update', agent_instance_id: instanceId, summary }, ctx);
 }

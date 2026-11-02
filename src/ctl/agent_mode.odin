@@ -1899,7 +1899,7 @@ print_help_agents :: proc() {
 	fmt.println("  template list                       List agent templates (personas).")
 	fmt.println("  template create --name <n>          Create a template.")
 	fmt.println("      [--description <d>] [--persona <t>] [--instructions <t>]")
-	fmt.println("  instance list [--agent <id>] [--live]   List instances (durable, or --live).")
+	fmt.println("  instance list [--agent <id>] [--live]   List instances (durable, with token_usage/token_totals when known; or --live).")
 	fmt.println("  new-instance <agent-id>             Launch a NEW instance of a durable agent.")
 	fmt.println("      [--project <id>] [--bridge <id>] [--provider <p>] [--model <t>] [--chain <id>]")
 	fmt.println("  start   <agent-instance-id>          Start a STOPPED instance (409 if already running).")
