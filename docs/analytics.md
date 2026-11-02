@@ -7,7 +7,7 @@ share one PostHog project:
 | Client | Code | Gated by |
 | --- | --- | --- |
 | Marketing site (`www.ninjy.ai`, `homelab/sites/heimdall/` in `nix-homelab-config`) | `posthog-js` snippet + shared `assets/analytics.js` | the key constant in that file (empty = off) |
-| App: web (`web.ninjy.ai`) and Electron desktop | [`src/ui/analytics/`](../src/ui/analytics) | `VITE_POSTHOG_KEY` at build time |
+| App: web (`web.ninjy.ai`) and Electron desktop | [`src/ui/analytics/`](../src/ui/analytics) | the runtime config `/posthog-config.json` (no key = off) |
 
 There is no autocapture, no session recording, no surveys/heatmaps, and no automatic
 pageviews in the app. Every event is listed below; nothing else is sent.
@@ -80,7 +80,9 @@ change them.
 
 - After sign-in the app calls `identify(<hub user id>)` with **no person properties**: no
   email, name or display name.
-- `reset()` runs on sign-out, and before identifying a different user on an account switch.
+- `reset()` runs on sign-out, before identifying a different user on an in-page account switch,
+  and when the signed-in user differs from the last user seen on this device (a switch across
+  page loads, alongside `clearPriorUserClientState`).
 - Events before sign-in (`app_opened`) are anonymous and merge into the person on identify.
 
 ## Privacy rules
@@ -101,20 +103,61 @@ change them.
 
 ## Configuration (app)
 
+The app takes its PostHog key at **runtime**, not at build time. One build therefore runs keyless
+(self-hosted, dev) or keyed (the hosted deployment), and the key never enters the bundle or the
+repository.
+
+### Runtime config: `/posthog-config.json`
+
+```json
+{"key": "phc_…", "host": "/ingest"}
+```
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `key` | yes | PostHog project API key. **Missing, empty or blank disables analytics.** |
+| `host` | no | Ingest host (`api_host`). A relative value is resolved against the origin the config was fetched from. Without one, the platform default below applies. |
+
+- **Where it is read:** web fetches the same-origin `/posthog-config.json`. Electron always
+  fetches `https://web.ninjy.ai/posthog-config.json`, whatever UI origin its window loads, so a
+  relative `host` becomes `https://web.ninjy.ai/ingest`. Both requests use `fetch` with
+  `credentials: 'omit'` and `cache: 'no-store'`
+  ([`runtimeConfig.ts`](../src/ui/analytics/runtimeConfig.ts)).
+- **Format:** JSON is fetched rather than a `<script>` file (`window.__POSTHOG__`) because a
+  script tag cannot be validated: an SPA `index.html` fallback served for a missing file would
+  throw on the page. A bad answer only turns analytics off.
+- **Off:** a 404, network error, non-JSON body (for example the SPA fallback), non-object JSON, or
+  missing/empty key means analytics stays off. Nothing is thrown, shown or logged by the app
+  (the browser still lists the failed request in devtools). `posthog-js` is never imported and
+  no request goes to the ingest host.
+- **Startup:** `main.tsx` calls `analytics.start()`, which reads the config and then imports the
+  lazy `posthog-js` chunk only when a key is present. `identify`/`reset`/`track` calls made while
+  the config is loading are replayed in order once a key is found, and dropped when none is.
+- **Source of the key (hosted):** the sops secret
+  `secrets/trusted/ai/posthog.yaml` → `posthog_project_key` in `nix-homelab-config`. The
+  `web.ninjy.ai` nginx config renders it into `/posthog-config.json` (sops template
+  `posthog-config-json`) and serves it unauthenticated with `Content-Type: application/json`,
+  `Cache-Control: no-store`, `X-Content-Type-Options: nosniff` and
+  `Access-Control-Allow-Origin: *` (needed when Electron is pointed at another UI origin). If the
+  secret is absent the location is not emitted, so the app sees the SPA fallback and stays off.
+  To rotate the key, update the sops secret and redeploy; no app rebuild is needed.
+- **Self-hosting:** serve your own `/posthog-config.json` at the UI origin to enable analytics,
+  or serve nothing to keep it off. Electron reads the hosted config even when it points at a
+  self-hosted UI.
+
+### Build-time variables (dev override)
+
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `VITE_POSTHOG_KEY` | unset | PostHog project API key (`phc_…`). **Empty or unset disables analytics entirely.** |
-| `VITE_POSTHOG_HOST` | web: `/ingest`; Electron: `https://web.ninjy.ai/ingest` | Ingest host (`api_host`). |
+| `VITE_POSTHOG_KEY` | unset | Dev override only. When set, it is used instead of the runtime config and no config is fetched. Never set it for release builds. |
+| `VITE_POSTHOG_HOST` | web: `/ingest`; Electron: `https://web.ninjy.ai/ingest` | Ingest host used with `VITE_POSTHOG_KEY` (the runtime config has its own `host`). |
 | `VITE_APP_VERSION` | `package.json` `version` | `app_version` super-property. |
 
-`ui_host` is always `https://us.posthog.com`. All three are Vite build-time variables: set them in
-the environment of `npm run build` / `vite build`.
+`ui_host` is always `https://us.posthog.com`.
 
-- **No key:** `main.tsx` checks `import.meta.env.VITE_POSTHOG_KEY`, which Vite replaces at build
-  time. Without a key the check is constant-false, so the dynamic `import('posthog-js')` is
-  removed and the bundle contains no PostHog code at all.
-- **With a key:** posthog-js is a separate lazy chunk loaded after boot; calls made before it
-  loads are queued in order. If it fails to load (ad blocker, offline), events are dropped.
+- **Bundle:** `posthog-js` is always built as a separate lazy chunk. It is downloaded and run only
+  after a key is resolved; calls made before it loads are queued in order. If it fails to load
+  (ad blocker, offline), events are dropped.
 - **Ingest proxy:** `/ingest` on `web.ninjy.ai` reverse-proxies to PostHog
   (`us.i.posthog.com`, and `us-assets.i.posthog.com` for `/ingest/static`), so events are
   same-origin for the web app and less likely to be blocked. Electron loads the UI from the

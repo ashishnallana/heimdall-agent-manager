@@ -46,16 +46,15 @@ if (typeof window !== 'undefined') installAppViewportHeightSync(window as never)
 
 installElectronApiFetchBridge();
 
-// REQ-PH-3: PostHog product analytics, only when the build carries VITE_POSTHOG_KEY.
-// Vite replaces the key at build time, so without one this branch — and the posthog-js
-// chunk it imports — is dropped from the bundle. Sends `app_opened` once per session;
-// the AuthGate identifies the user. See docs/analytics.md.
-if (import.meta.env.VITE_POSTHOG_KEY) {
-  analytics.init({
-    env: import.meta.env,
-    loadClient: async () => (await import('posthog-js')).default as unknown as AnalyticsClient,
-  });
-}
+// REQ-PH-3: PostHog product analytics. The key is read at runtime from /posthog-config.json
+// (web: same origin; Electron: https://web.ninjy.ai), rendered from sops on the hosted
+// deployment; VITE_POSTHOG_KEY is a dev override. Without a key (404, network error, empty)
+// analytics stays off and the lazy posthog-js chunk is never loaded. Sends `app_opened` once
+// per session; the AuthGate identifies the user. See docs/analytics.md.
+void analytics.start({
+  env: import.meta.env,
+  loadClient: async () => (await import('posthog-js')).default as unknown as AnalyticsClient,
+});
 
 // Register the notification service worker early so OS notifications work on
 // platforms where the in-page Notification constructor is unavailable (iOS

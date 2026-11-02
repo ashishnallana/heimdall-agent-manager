@@ -1,5 +1,5 @@
-// PostHog product analytics: key gating, payload shape, once-per-user milestones
-// (REQ-PH-3/4/5, docs/analytics.md).
+// PostHog product analytics: runtime-config key gating, payload shape, once-per-user
+// milestones (REQ-PH-3/4/5, docs/analytics.md).
 //
 // RUN: node --import ./tests/helpers/vaultEndpointHarness.ts --test tests/ui_analytics_test.ts
 
@@ -19,6 +19,12 @@ import {
   type AnalyticsClient,
 } from '../src/ui/analytics/analytics.ts';
 import { observeMilestones } from '../src/ui/analytics/milestones.ts';
+import {
+  ELECTRON_RUNTIME_CONFIG_URL,
+  loadRuntimeConfig,
+  parseRuntimeConfig,
+  runtimeConfigUrl,
+} from '../src/ui/analytics/runtimeConfig.ts';
 
 type Call = [string, ...unknown[]];
 
@@ -222,4 +228,142 @@ test('funnel milestones fire once per user at the Hub success points with non-co
   ]);
   const payloads = JSON.stringify(calls);
   for (const secret of ['Secret plan', 'do the thing', 'hello prompt', 'My secret profile']) assert.ok(!payloads.includes(secret), secret);
+});
+
+// --- Runtime config (/posthog-config.json) -------------------------------------------
+
+type FetchCall = { url: string; init?: Record<string, unknown> };
+
+function fakeFetch(answer: { status?: number; body?: string; error?: Error }, seen: FetchCall[] = []) {
+  return async (url: string, init?: Record<string, unknown>) => {
+    seen.push({ url, init });
+    if (answer.error) throw answer.error;
+    const status = answer.status ?? 200;
+    return { ok: status >= 200 && status < 300, text: async () => answer.body ?? '' };
+  };
+}
+
+async function startWith(answer: Parameters<typeof fakeFetch>[0], platform: 'web' | 'electron' = 'web', env = {}) {
+  const calls: Call[] = [];
+  const seen: FetchCall[] = [];
+  let loads = 0;
+  const analytics = new Analytics();
+  const pending = analytics.start({
+    env,
+    platform,
+    loadConfig: (p) => loadRuntimeConfig({ platform: p, fetch: fakeFetch(answer, seen), origin: 'https://web.ninjy.ai' }),
+    loadClient: async () => { loads += 1; return fakeClient(calls); },
+    localStorage: memoryStorage(),
+    sessionStorage: memoryStorage(),
+  });
+  // The AuthGate may identify before the config answers.
+  analytics.identify('usr_early');
+  const on = await pending;
+  await flush();
+  return { analytics, calls, seen, on, loads: () => loads };
+}
+
+test('runtime config present (web): same-origin fetch without cookies, key and relative host used', async () => {
+  const { on, seen, calls, analytics, loads } = await startWith({ body: '{"key":"phc_live","host":"/ingest"}' });
+  assert.equal(on, true);
+  assert.equal(analytics.enabled, true);
+  assert.equal(loads(), 1);
+  assert.deepEqual(seen, [{ url: 'https://web.ninjy.ai/posthog-config.json', init: { credentials: 'omit', cache: 'no-store' } }]);
+  const [, key, options] = calls.find((c) => c[0] === 'init')!;
+  assert.equal(key, 'phc_live');
+  assert.equal((options as any).api_host, 'https://web.ninjy.ai/ingest');
+  // The identify made while the config loaded is replayed after init, in order.
+  assert.deepEqual(calls.map((c) => c[0] === 'capture' ? `capture:${c[1]}` : c[0]),
+    ['init', 'register', 'capture:app_opened', 'identify', 'capture:app_login']);
+  assert.equal(analytics.currentUserId, 'usr_early');
+});
+
+test('runtime config present (Electron): reads https://web.ninjy.ai and posts to its /ingest', async () => {
+  assert.equal(ELECTRON_RUNTIME_CONFIG_URL, 'https://web.ninjy.ai/posthog-config.json');
+  const { on, seen, calls } = await startWith({ body: '{"key":"phc_live"}' }, 'electron');
+  assert.equal(on, true);
+  assert.equal(seen[0].url, ELECTRON_RUNTIME_CONFIG_URL);
+  const options = calls.find((c) => c[0] === 'init')![2] as any;
+  assert.equal(options.api_host, 'https://web.ninjy.ai/ingest');
+  assert.deepEqual(calls.find((c) => c[0] === 'register')![1], { platform: 'electron', app_version: 'unknown' });
+  // Electron's config URL does not depend on the page origin.
+  assert.equal(runtimeConfigUrl('electron', 'https://hub.example.com'), ELECTRON_RUNTIME_CONFIG_URL);
+});
+
+const OFF_CASES: Array<[string, Parameters<typeof fakeFetch>[0]]> = [
+  ['404', { status: 404, body: '<html>Not Found</html>' }],
+  ['network error', { error: new TypeError('Failed to fetch') }],
+  ['empty key', { body: '{"key":"","host":"/ingest"}' }],
+  ['blank key', { body: '{"key":"   "}' }],
+  ['missing key', { body: '{"host":"/ingest"}' }],
+  ['SPA HTML fallback (200)', { body: '<!doctype html><html></html>' }],
+  ['non-object JSON', { body: '["phc_x"]' }],
+];
+
+for (const [name, answer] of OFF_CASES) {
+  test(`runtime config ${name}: analytics off, posthog-js never loaded, nothing sent, no throw`, async () => {
+    for (const platform of ['web', 'electron'] as const) {
+      const { on, calls, analytics, loads } = await startWith(answer, platform);
+      analytics.track('app_opened', {});
+      analytics.trackOnce('bridge_connected', { bridge_count: 1, online_count: 1 });
+      analytics.reset();
+      await flush();
+      assert.equal(on, false);
+      assert.equal(analytics.enabled, false);
+      assert.equal(loads(), 0, 'posthog-js must not be imported');
+      assert.deepEqual(calls, []);
+      assert.equal(analytics.currentUserId, '');
+    }
+  });
+}
+
+test('a throwing config loader is treated as no config', async () => {
+  const analytics = new Analytics();
+  let loads = 0;
+  const on = await analytics.start({ platform: 'web', loadConfig: async () => { throw new Error('boom'); }, loadClient: async () => { loads += 1; return fakeClient([]); } });
+  assert.equal(on, false);
+  assert.equal(loads, 0);
+});
+
+test('VITE_POSTHOG_KEY is a dev override: no config fetch, env key and host win', async () => {
+  const { on, seen, calls } = await startWith({ body: '{"key":"phc_live"}' }, 'web', { VITE_POSTHOG_KEY: 'phc_dev', VITE_POSTHOG_HOST: 'http://localhost:8010' });
+  assert.equal(on, true);
+  assert.deepEqual(seen, []);
+  const [, key, options] = calls.find((c) => c[0] === 'init')!;
+  assert.equal(key, 'phc_dev');
+  assert.equal((options as any).api_host, 'http://localhost:8010');
+});
+
+test('parseRuntimeConfig resolves hosts against the config URL and rejects non-http hosts', () => {
+  const at = 'https://web.ninjy.ai/posthog-config.json';
+  assert.deepEqual(parseRuntimeConfig('{"key":" phc_a ","host":"/ingest/"}', at), { key: 'phc_a', host: 'https://web.ninjy.ai/ingest' });
+  assert.deepEqual(parseRuntimeConfig('{"key":"phc_a","host":"https://us.i.posthog.com"}', at), { key: 'phc_a', host: 'https://us.i.posthog.com' });
+  assert.deepEqual(parseRuntimeConfig('{"key":"phc_a","host":"javascript:alert(1)"}', at), { key: 'phc_a', host: '' });
+  assert.deepEqual(parseRuntimeConfig('{"key":"phc_a","host":42}', at), { key: 'phc_a', host: '' });
+  assert.equal(parseRuntimeConfig('{"key":7}', at), null);
+  assert.equal(parseRuntimeConfig('', at), null);
+  assert.equal(parseRuntimeConfig('null', at), null);
+  // An empty runtime host falls back to the platform default.
+  assert.equal(resolveAnalyticsConfig({}, 'web', { key: 'k', host: '' })?.apiHost, WEB_DEFAULT_HOST);
+  assert.equal(resolveAnalyticsConfig({}, 'electron', { key: 'k', host: '' })?.apiHost, ELECTRON_DEFAULT_HOST);
+  // A web page without an http(s) origin (tests, file://) has no config to fetch.
+  assert.equal(runtimeConfigUrl('web', 'null'), null);
+  assert.equal(runtimeConfigUrl('web'), null, 'no window under node');
+});
+
+test('a cross-load account switch reset made while the config loads is replayed before identify', async () => {
+  const calls: Call[] = [];
+  const analytics = new Analytics();
+  const pending = analytics.start({
+    platform: 'web',
+    loadConfig: async () => ({ key: 'k', host: '' }),
+    loadClient: async () => fakeClient(calls),
+    localStorage: memoryStorage(), sessionStorage: memoryStorage(),
+  });
+  analytics.reset();
+  analytics.identify('usr_new');
+  await pending;
+  await flush();
+  const order = calls.map((c) => c[0]).filter((c) => c === 'reset' || c === 'identify');
+  assert.deepEqual(order, ['reset', 'identify']);
 });

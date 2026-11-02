@@ -1,11 +1,11 @@
 // Product analytics (PostHog) for the Ninjy app — web (web.ninjy.ai) and Electron.
 // Taxonomy, privacy rules and env vars: docs/analytics.md.
 //
-// REQ-PH-3: everything here is a no-op unless the build was made with a non-empty
-// VITE_POSTHOG_KEY. Self-hosted and dev builds have no key, so posthog-js is not even
-// in their bundle (main.tsx guards its dynamic import on the statically replaced key)
-// and nothing is ever sent. With a key, autocapture, pageviews and session recording are off:
-// the only events are the typed ones below.
+// REQ-PH-3: everything here is a no-op unless a PostHog key is found at runtime. The key
+// comes from /posthog-config.json (runtimeConfig.ts), which the hosted deployment renders
+// from sops; VITE_POSTHOG_KEY is only a dev override. Without a key (self-hosted, dev, a
+// 404) the posthog-js chunk is never loaded and nothing is ever sent. With a key,
+// autocapture, pageviews and session recording are off: the only events are the typed ones below.
 //
 // REQ-PH-4/5: identify() takes the Hub user id and nothing else; milestone events
 // are sent once per user (a local flag per user plus a `$set_once` person property),
@@ -13,6 +13,7 @@
 // task, vault, file or prompt content, names, emails or free text.
 
 import { desktopCapabilities } from '../bridge/desktopBridge';
+import { loadRuntimeConfig, type PosthogRuntimeConfig } from './runtimeConfig';
 
 export type AnalyticsPlatform = 'web' | 'electron';
 
@@ -65,11 +66,20 @@ const SESSION_OPENED_KEY = 'ninjy-analytics.opened';
 // Property values are ids, counts and type names; anything longer is not one of those.
 const MAX_PROP_LENGTH = 64;
 
-/** `null` (analytics off) unless the build carries a PostHog project key. */
-export function resolveAnalyticsConfig(env: AnalyticsEnv | undefined, platform: AnalyticsPlatform): AnalyticsConfig | null {
-  const key = String(env?.VITE_POSTHOG_KEY ?? '').trim();
+/**
+ * `null` (analytics off) unless there is a PostHog project key. A build-time
+ * VITE_POSTHOG_KEY (dev override) wins together with VITE_POSTHOG_HOST; otherwise the
+ * runtime config's key and host are used.
+ */
+export function resolveAnalyticsConfig(
+  env: AnalyticsEnv | undefined,
+  platform: AnalyticsPlatform,
+  runtime: PosthogRuntimeConfig | null = null,
+): AnalyticsConfig | null {
+  const envKey = String(env?.VITE_POSTHOG_KEY ?? '').trim();
+  const key = envKey || String(runtime?.key ?? '').trim();
   if (!key) return null;
-  const host = String(env?.VITE_POSTHOG_HOST ?? '').trim();
+  const host = envKey ? String(env?.VITE_POSTHOG_HOST ?? '').trim() : String(runtime?.host ?? '').trim();
   return {
     key,
     apiHost: host || (platform === 'electron' ? ELECTRON_DEFAULT_HOST : WEB_DEFAULT_HOST),
@@ -155,32 +165,75 @@ function writeFlag(storage: StorageLike | null, key: string): void {
 
 export interface AnalyticsOptions {
   env?: AnalyticsEnv;
+  /** Key/host read from /posthog-config.json (see start()). */
+  runtime?: PosthogRuntimeConfig | null;
   platform?: AnalyticsPlatform;
-  /** Loads posthog-js. main.tsx passes it only in a keyed build, so Vite drops the chunk otherwise. */
+  /** Loads posthog-js; called only once a key is known, so keyless sessions never fetch the chunk. */
   loadClient?: () => Promise<AnalyticsClient>;
   localStorage?: StorageLike | null;
   sessionStorage?: StorageLike | null;
   now?: () => Date;
 }
 
+export interface AnalyticsStartOptions extends Omit<AnalyticsOptions, 'runtime'> {
+  /** Reads the runtime config; defaults to runtimeConfig.ts loadRuntimeConfig. */
+  loadConfig?: (platform: AnalyticsPlatform) => Promise<PosthogRuntimeConfig | null>;
+}
+
+// Calls made while the runtime config is still loading, replayed once it resolves.
+const MAX_DEFERRED = 200;
+
 /** One analytics session. The app uses the module-level instance below. */
 export class Analytics {
   private config: AnalyticsConfig | null = null;
   private client: AnalyticsClient | null = null;
   private pending: Array<(client: AnalyticsClient) => void> = [];
+  private starting = false;
+  private deferred: Array<() => void> = [];
   private userId = '';
   private sent = new Set<string>();
   private local: StorageLike | null = null;
   private session: StorageLike | null = null;
   private now: () => Date = () => new Date();
 
-  get enabled(): boolean { return this.config !== null; }
+  /** True once started with a key, and while the runtime config is still loading. */
+  get enabled(): boolean { return this.config !== null || this.starting; }
   get currentUserId(): string { return this.userId; }
 
-  /** Starts analytics when the build has a key; returns whether it did. */
+  /**
+   * Resolves the key (VITE_POSTHOG_KEY dev override, else /posthog-config.json), then
+   * initialises. Calls made meanwhile are replayed in order when a key is found and dropped
+   * when not. Never rejects; resolves to whether analytics is on.
+   */
+  async start(options: AnalyticsStartOptions = {}): Promise<boolean> {
+    if (this.config) return true;
+    if (this.starting) return false;
+    const platform = options.platform ?? detectPlatform();
+    const { loadConfig = (p: AnalyticsPlatform) => loadRuntimeConfig({ platform: p }), ...rest } = options;
+    let runtime: PosthogRuntimeConfig | null = null;
+    if (!resolveAnalyticsConfig(options.env, platform)) {
+      this.starting = true;
+      try { runtime = await loadConfig(platform); } catch { runtime = null; }
+      this.starting = false;
+    }
+    const replay = this.deferred;
+    this.deferred = [];
+    const on = this.init({ ...rest, platform, runtime });
+    if (on) for (const call of replay) call();
+    return on;
+  }
+
+  /** Queues a public call while the runtime config loads; true when it was queued. */
+  private defer(call: () => void): boolean {
+    if (!this.starting) return false;
+    if (this.deferred.length < MAX_DEFERRED) this.deferred.push(call);
+    return true;
+  }
+
+  /** Starts analytics from an already-resolved key; returns whether it did. */
   init(options: AnalyticsOptions = {}): boolean {
     if (this.config) return true;
-    const config = resolveAnalyticsConfig(options.env, options.platform ?? detectPlatform());
+    const config = resolveAnalyticsConfig(options.env, options.platform ?? detectPlatform(), options.runtime ?? null);
     if (!config || !options.loadClient) return false;
     this.config = config;
     this.local = options.localStorage !== undefined ? options.localStorage : defaultStorage('localStorage');
@@ -212,6 +265,7 @@ export class Analytics {
   }
 
   track<E extends AnalyticsEvent>(event: E, props: AnalyticsEventProps[E], options?: Record<string, unknown>): void {
+    if (this.defer(() => this.track(event, props, options))) return;
     const clean = sanitizeProps(props as Record<string, unknown>);
     this.withClient((client) => { client.capture(event, clean, options); });
   }
@@ -222,6 +276,7 @@ export class Analytics {
    * be attributed to the funnel anyway.
    */
   trackOnce<E extends AnalyticsEvent>(event: E, props: AnalyticsEventProps[E]): boolean {
+    if (this.defer(() => { this.trackOnce(event, props); })) return false;
     if (!this.config || !this.userId) return false;
     const key = `${ONCE_KEY_PREFIX}${this.userId}.${event}`;
     if (this.sent.has(key) || readFlag(this.local, key)) {
@@ -241,6 +296,7 @@ export class Analytics {
 
   /** REQ-PH-4: the stable Hub user id only; never email, name or other traits. */
   identify(userId: string): void {
+    if (this.defer(() => this.identify(userId))) return;
     const id = String(userId || '').trim();
     if (!this.config || !id || id === this.userId) return;
     // An account switch must not merge two people into one.
@@ -252,6 +308,7 @@ export class Analytics {
 
   /** On sign-out or account switch: drop the identity so later events are anonymous. */
   reset(): void {
+    if (this.defer(() => this.reset())) return;
     if (!this.config) return;
     this.userId = '';
     this.withClient((client) => { client.reset(); });

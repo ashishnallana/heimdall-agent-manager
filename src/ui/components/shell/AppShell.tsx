@@ -972,9 +972,12 @@ function AuthGate() {
           const previousUserId = lastSeenUserRef.current || readLastSeenUserId();
           if (nextUserId && previousUserId && previousUserId !== nextUserId) {
             clearPriorUserClientState(dispatch, nextUserId);
+            // A different user than the one last seen on this device (switch across page
+            // loads): drop the previous analytics identity too, so the two are never merged.
+            analytics.reset();
           }
-          // REQ-PH-4: the Hub user id only. identify() resets first on an account switch
-          // and sends `app_login` once per user.
+          // REQ-PH-4: the Hub user id only. identify() resets first on an in-page account
+          // switch and sends `app_login` once per user.
           if (nextUserId) analytics.identify(nextUserId);
           if (nextUserId) {
             writeLastSeenUserId(nextUserId);

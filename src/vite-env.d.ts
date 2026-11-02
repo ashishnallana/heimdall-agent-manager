@@ -1,9 +1,9 @@
 /// <reference types="vite/client" />
 
 interface ImportMetaEnv {
-  /** PostHog project key; analytics is off when empty (docs/analytics.md). */
+  /** Dev override for the PostHog key; release builds read /posthog-config.json at runtime (docs/analytics.md). */
   readonly VITE_POSTHOG_KEY?: string;
-  /** PostHog ingest host; defaults to /ingest (web) or https://web.ninjy.ai/ingest (Electron). */
+  /** Ingest host used with VITE_POSTHOG_KEY; defaults to /ingest (web) or https://web.ninjy.ai/ingest (Electron). */
   readonly VITE_POSTHOG_HOST?: string;
   /** App version sent as the `app_version` super-property; defaults to package.json. */
   readonly VITE_APP_VERSION?: string;
