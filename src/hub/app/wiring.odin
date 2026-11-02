@@ -45,13 +45,6 @@ App_Graph :: struct {
 	mcp_delegation: mcp_service.Delegation_Service,
 	mcp_delegation_handlers: http.MCP_Delegation_Handlers,
 	mcp_control_handlers: http.MCP_Control_Handlers,
-	// E2EE artifact transfers: ciphertext-only staging on a dedicated connection.
-	mcp_transfer_conn: sqlite.Conn,
-	mcp_transfer_repo_impl: sqlite.Transfer_Repo_SQLite,
-	mcp_transfer_repo: iface.Transfer_Repository,
-	mcp_transfer_service: mcp_service.Transfer_Service,
-	mcp_transfer_handlers: http.MCP_Transfer_Handlers,
-	mcp_transfer_gate: http.Pre_Body_Gate, // pre-body admission for transfer routes (§7)
 	config: Hub_Config,
 	clock: platform.Clock,
 	ids: platform.ID_Generator,
@@ -654,7 +647,6 @@ shutdown_graph :: proc(graph: ^App_Graph) {
 	sqlite.close(&graph.sqlite_bridge_commit.conn)
 	if graph.config.mcp_oauth_spike || graph.config.mcp_oauth_key_file != "" do mcp_service.free(&graph.mcp_spike)
 	free_mcp_delegation(graph)
-	sqlite.close(&graph.mcp_transfer_conn)
 	auth_service.oidc_free(&graph.auth)
 	sqlite.close(&graph.oidc_identity_db)
 	vault_directory_service.service_free(&graph.vault_directory)
@@ -668,10 +660,6 @@ register_routes :: proc(graph: ^App_Graph) {
 	}
 	if graph.config.mcp_oauth_key_file != "" do http.mcp_delegation_register_routes(&graph.router, &graph.mcp_delegation_handlers)
 	if graph.config.mcp_oauth_key_file != "" do http.mcp_control_register_routes(&graph.router, &graph.mcp_control_handlers)
-	if graph.config.mcp_oauth_key_file != "" && graph.mcp_transfer_conn.db != nil {
-		http.mcp_transfer_register_routes(&graph.router, &graph.mcp_transfer_handlers)
-		graph.mcp_transfer_gate = {ctx = &graph.mcp_transfer_handlers, admit = http.mcp_transfer_pre_body, release = http.mcp_transfer_pre_body_release}
-	}
 	http.router_add(&graph.router, "GET", "/api/v1/account/billing", rawptr(&graph.billing_handlers), http.account_billing_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/account/billing/checkout", rawptr(&graph.billing_handlers), http.account_checkout_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/account/billing/portal", rawptr(&graph.billing_handlers), http.account_portal_handler)

@@ -94,7 +94,7 @@ test_mcp_resource_native_lifecycle_approval_paging_and_retries :: proc(t:^testin
 	mcp_task_test_fixture(t,#load("../../../tests/fixtures/mcp_resources_v2.json",string),true,false,true)
 }
 
-mcp_task_test_fixture :: proc(t:^testing.T,vector:string,catalog:bool,runtime:bool=false,resources:bool=false,artifacts:bool=false,transfers:bool=false) {
+mcp_task_test_fixture :: proc(t:^testing.T,vector:string,catalog:bool,runtime:bool=false,resources:bool=false,artifacts:bool=false) {
 	context.allocator=context.temp_allocator
 	g:=new(App_Graph,context.temp_allocator)
 	v:MCP_Task_Test_Vector
@@ -136,7 +136,6 @@ mcp_task_test_fixture :: proc(t:^testing.T,vector:string,catalog:bool,runtime:bo
 	if !testing.expect(t,tokens.error=="" && json.unmarshal_string(tokens.response,&var_tokens,.JSON,context.temp_allocator)==nil) do return
 	view,live:=mcp.access_view(&g.mcp_delegation,&directory,var_tokens.access_token)
 	if !testing.expect(t,live) do return
-	if transfers {g.mcp_vault_view=directory;mcp_transfer_liveness_test(t,g,view);return}
 	g.repos.taskchains=sqlite.new_taskchain_repository(&g.sqlite_taskchains,&g.db)
 	g.taskchains=tc.new_taskchain_service(&g.repos.taskchains,nil,&g.clock,&g.ids)
 	g.uow_factory=sqlite.new_unit_of_work_factory(&g.sqlite_uow_factory,&g.db,&g.repos)

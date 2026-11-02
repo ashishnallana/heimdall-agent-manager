@@ -26,96 +26,6 @@ Server_Config :: struct {
 	ui_origin: string,
 	preview_ctx: rawptr,
 	preview_handler: Upgrade_Handler_Proc,
-	// pre_body, when set, is consulted once the request head is read and BEFORE any
-	// body byte is received (design §7 pre-body admission).
-	pre_body: ^Pre_Body_Gate,
-}
-
-// Pre_Body_Verdict: status 0 admits the request; any other status is written as the
-// response without reading the body. held means admit took a slot that release must
-// return after the response is written. stream means the body is NOT buffered: the
-// handler receives Request.body_stream and reads it in bounded windows.
-Pre_Body_Verdict :: struct {
-	status: int,
-	body:   string,
-	headers: []contracts.HTTP_Header,
-	held:   bool,
-	stream: bool,
-}
-
-// Body_Stream is an unbuffered request body: the bytes that arrived with the head
-// (prefix) followed by at most `remaining` more bytes from the socket. Tests and other
-// transports build one over an in-memory body with body_stream_from_bytes.
-Body_Stream :: struct {
-	client:    net.TCP_Socket,
-	prefix:    []byte,
-	total:     int, // declared Content-Length
-	remaining: int, // bytes not yet returned by body_stream_read
-	from_socket: bool,
-	// Socket reads are bounded (§7: a stalled or trickling peer must not hold a
-	// data-path slot): each recv waits at most `idle`, and the whole body must
-	// arrive before `deadline` (set when has_deadline). Either limit ends the read
-	// with ok=false, exactly like a peer that closed early.
-	idle:         time.Duration,
-	deadline:     time.Tick,
-	has_deadline: bool,
-}
-
-// Bounds for slot-holding (pre-body admitted) requests. A streamed body must keep
-// arriving (no recv waits longer than the idle timeout) and finish within
-// base + declared_length / min_rate, so a 15 MiB-class body at the minimum rate
-// takes <= ~5 min and 8 trickling peers cannot starve the data path indefinitely.
-STREAM_BODY_IDLE_TIMEOUT :: 30 * time.Second
-STREAM_BODY_DEADLINE_BASE :: 30 * time.Second
-STREAM_BODY_MIN_BYTES_PER_SEC :: 64 * 1024
-
-// stream_body_budget is the total time a streamed body of `total` bytes may take.
-stream_body_budget :: proc(total: int, base: time.Duration, min_rate: int) -> time.Duration {
-	rate := min_rate > 0 ? min_rate : STREAM_BODY_MIN_BYTES_PER_SEC
-	return base + time.Duration(i64(max(total, 0)) * i64(time.Second) / i64(rate))
-}
-
-body_stream_from_bytes :: proc(body: []byte) -> Body_Stream {
-	return Body_Stream{prefix = body, total = len(body), remaining = len(body)}
-}
-
-// body_stream_read fills buf as far as possible (up to remaining). It returns the
-// number of bytes written; ok=false means the peer closed or failed before the
-// declared length was reached (the returned bytes are still valid).
-body_stream_read :: proc(s: ^Body_Stream, buf: []byte) -> (n: int, ok: bool) {
-	want := min(len(buf), s.remaining)
-	for n < want {
-		if len(s.prefix) > 0 {
-			k := copy(buf[n:want], s.prefix)
-			s.prefix = s.prefix[k:]
-			n += k
-			s.remaining -= k
-			continue
-		}
-		if !s.from_socket do return n, false
-		wait := s.idle
-		if s.has_deadline {
-			left := time.tick_diff(time.tick_now(), s.deadline)
-			if left <= 0 do return n, false
-			if wait <= 0 || left < wait do wait = left
-		}
-		if wait > 0 do _ = net.set_option(s.client, .Receive_Timeout, wait)
-		got, err := net.recv_tcp(s.client, buf[n:want])
-		if err != nil || got <= 0 do return n, false
-		n += got
-		s.remaining -= got
-	}
-	return n, true
-}
-
-Pre_Body_Gate :: struct {
-	ctx:     rawptr,
-	admit:   proc(ctx: rawptr, method, path: string, content_length: int) -> Pre_Body_Verdict,
-	release: proc(ctx: rawptr),
-	// Overrides for the STREAM_BODY_* bounds (0 = default); tests shorten them.
-	body_idle_timeout:  time.Duration,
-	body_deadline_base: time.Duration,
-	body_min_rate:      int,
 }
 
 Server_State :: struct {
@@ -175,12 +85,7 @@ handle_client :: proc(client: net.TCP_Socket, source: net.Endpoint, router: ^Rou
 	if arena_ok do req_allocator = virtual.arena_allocator(&arena)
 	context.allocator = req_allocator
 
-	request, ok, verdict := read_http_request_gated(client, config.pre_body)
-	defer if verdict.held do config.pre_body.release(config.pre_body.ctx)
-	if verdict.status != 0 {
-		write_http_response(client, Response{status = verdict.status, content_type = "application/json", body = verdict.body, headers = verdict.headers})
-		return
-	}
+	request, ok := read_http_request(client)
 	if !ok do return
 	method, target := request_method_target(request)
 	path, query := split_target_query(target)
@@ -198,27 +103,6 @@ handle_client :: proc(client: net.TCP_Socket, source: net.Endpoint, router: ^Rou
 		request_id = request_id,
 		remote_addr = net.address_to_string_allocator(source.address),
 		headers = headers,
-		admitted = verdict.held,
-	}
-	stream: Body_Stream
-	idle := STREAM_BODY_IDLE_TIMEOUT
-	if config.pre_body != nil && config.pre_body.body_idle_timeout > 0 do idle = config.pre_body.body_idle_timeout
-	if verdict.held {
-		// A slot holder must not block on a stalled peer in either direction:
-		// bounded receive (streamed body) and send (ciphertext GET windows).
-		_ = net.set_option(client, .Receive_Timeout, idle)
-		_ = net.set_option(client, .Send_Timeout, idle)
-	}
-	if verdict.stream {
-		prefix := transmute([]byte)body
-		declared := content_length(request[:max(len(request) - len(body) - 4, 0)])
-		base := STREAM_BODY_DEADLINE_BASE
-		if config.pre_body.body_deadline_base > 0 do base = config.pre_body.body_deadline_base
-		stream = Body_Stream{client = client, prefix = prefix, total = declared, remaining = declared, from_socket = true,
-			idle = idle, has_deadline = true,
-			deadline = time.tick_add(time.tick_now(), stream_body_budget(declared, base, config.pre_body.body_min_rate))}
-		req_obj.body = ""
-		req_obj.body_stream = &stream
 	}
 	// The preview origin is a separate security boundary. Dispatch it before
 	// OPTIONS and every router path so no Hub API can ever be reached by Host.
@@ -283,18 +167,6 @@ preview_origin_host_matches :: proc(host, preview_origin: string) -> bool {
 
 
 read_http_request :: proc(client: net.TCP_Socket) -> (string, bool) {
-	raw, ok, _ := read_http_request_gated(client, nil)
-	return raw, ok
-}
-
-// read_http_request_gated reads one request. With a gate, the head (request line +
-// headers) is offered to gate.admit before any body byte is read: a refusal is
-// returned without reading the body, so an oversized or over-admission upload costs
-// the Hub only its header bytes. A declared Content-Length above the shared reader
-// cap is refused (413) the same way instead of buffering up to the cap first.
-read_http_request_gated :: proc(client: net.TCP_Socket, gate: ^Pre_Body_Gate) -> (string, bool, Pre_Body_Verdict) {
-	verdict: Pre_Body_Verdict
-	head_seen := false
 	buf: [8192]byte
 	data := make([dynamic]byte, 0, 8192)
 	// `data` is never handed to the caller (a clone is returned instead), and none of the
@@ -302,30 +174,11 @@ read_http_request_gated :: proc(client: net.TCP_Socket, gate: ^Pre_Body_Gate) ->
 	defer delete(data)
 	for {
 		n, recv_err := net.recv_tcp(client, buf[:])
-		if recv_err != nil || n <= 0 do return "", false, verdict
+		if recv_err != nil || n <= 0 do return "", false
 		append(&data, ..buf[:n])
 		raw := string(data[:])
-		if !head_seen {
-			if idx := strings.index(raw, "\r\n\r\n"); idx >= 0 {
-				head_seen = true
-				cl := content_length(raw[:idx])
-				if cl > MAX_HTTP_REQUEST_BYTES {
-					verdict.status = 413; verdict.body = `{"error":"body_too_large"}`
-					return "", false, verdict
-				}
-				if gate != nil && gate.admit != nil {
-					method, target := request_method_target(raw)
-					path, _ := split_target_query(target)
-					verdict = gate.admit(gate.ctx, method, path, cl)
-					if verdict.status != 0 do return "", false, verdict
-					// Streamed body: return the head plus whatever body bytes already
-					// arrived (never more than declared); the handler reads the rest.
-					if verdict.stream do return strings.clone(raw[:min(len(raw), idx + 4 + cl)]), true, verdict
-				}
-			}
-		}
-		if request_complete(raw) do return strings.clone(raw), true, verdict
-		if len(data) > MAX_HTTP_REQUEST_BYTES do return "", false, verdict
+		if request_complete(raw) do return strings.clone(raw), true
+		if len(data) > MAX_HTTP_REQUEST_BYTES do return "", false
 	}
 }
 

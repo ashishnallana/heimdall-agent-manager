@@ -1,6 +1,19 @@
 # MCP large artifact transfers (15 MiB files and HTML bundles) — strict E2EE
 
-Status: **design, not implemented.** Task `task_18e442c8474574d1`, chain
+> **Superseded (2026-11-02, task `task_18e449b0b41218f2`).** This design is **not**
+> the direction for Heimdall. Large MCP artifacts (≤ 15 MiB, incl. HTML bundles) go
+> through the ordinary artifact create path — exact JSON entry content and `files` —
+> sealed by the **existing MCP encryption/decryption relay** (approved bridge or
+> unlocked browser in device mode, Hub keyring in hosted mode), with artifact-specific
+> relay limits raised for that path. The standalone transfer-handle architecture
+> described here (staging tables, `hxt_` data path, blind token checks, transfer
+> receipts, pre-body admission and streaming hooks) was implemented in
+> `42da6ed8..bf234a70` and then **removed from source**; migration
+> `187_mcp_artifact_transfers.sql` is no longer registered. The 15 MiB limit
+> (`13d3b242`) and HTML bundle support (`2919dec8`) remain. The text below is kept
+> as historical context only — do not implement it.
+
+Status: **superseded (see banner above); historically a design.** Task `task_18e442c8474574d1`, chain
 `chain_18e43a321b7b6c60` (REQ-ART-1/REQ-ART-2). This revision **supersedes** the
 design at commit `9bd7b372` (task `task_18e4411ea03fd52a`), whose staging and hosted
 seal/open let the Hub see transfer plaintext (§10). It unblocks

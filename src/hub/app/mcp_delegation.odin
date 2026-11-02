@@ -61,7 +61,6 @@ configure_mcp_delegation :: proc(graph: ^App_Graph) -> (bool, string) {
 	graph.mcp_control_handlers.control.issues=&graph.issues
 	graph.mcp_control_handlers.control.resource_ctx=&graph.db
 	graph.mcp_control_handlers.control.resource_page=sqlite.mcp_resource_refs
-	if !mcp_transfers_init(graph) do return false,"cannot open MCP transfer storage"
 	valid=true
 	return true,""
 }
@@ -92,7 +91,6 @@ mcp_cleanup_once :: proc(graph: ^App_Graph) {
 	if !ok do return
 	// Fixed operation only: no database/body/credential values enter logs.
 	if err:=sqlite.mcp_cleanup(&graph.mcp_repository_impl, now);err.code!=.None do fmt.eprintln("hub: MCP metadata cleanup failed")
-	if graph.mcp_transfer_conn.db != nil do mcp.transfer_janitor(&graph.mcp_transfer_service)
 }
 free_mcp_delegation :: proc(graph: ^App_Graph) {
 	mcp.worker_registrations_free(&graph.mcp_control_handlers.registrations)

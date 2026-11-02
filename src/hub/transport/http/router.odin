@@ -18,12 +18,6 @@ Request :: struct {
 	request_id: string,
 	remote_addr: string,
 	headers:    []contracts.HTTP_Header,
-	// admitted: a Pre_Body_Gate already took this request's data-path slot before
-	// its body was read; the server releases it after the response.
-	admitted:   bool,
-	// body_stream: set (and body left empty) when a Pre_Body_Gate asked for a
-	// streamed body; the handler reads it in bounded windows (design §7).
-	body_stream: ^Body_Stream,
 }
 
 Route :: struct {

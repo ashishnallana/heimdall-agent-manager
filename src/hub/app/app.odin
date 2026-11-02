@@ -36,7 +36,6 @@ run :: proc(config: Hub_Config) -> (bool, string) {
 		ui_origin = config.ui_origin,
 		preview_ctx = rawptr(&graph.shell_session_stream_handlers),
 		preview_handler = http.preview_origin_handler,
-		pre_body = graph.mcp_transfer_gate.admit != nil ? &graph.mcp_transfer_gate : nil,
 	})
 	if !served do return false, "hub server failed"
 	return true, "hub server stopped"

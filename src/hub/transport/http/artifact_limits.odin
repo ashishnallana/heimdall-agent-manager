@@ -28,28 +28,3 @@ artifact_request_too_large :: proc(req: Request) -> (domain.Domain_Error, bool) 
 	if len(req.body) <= ARTIFACT_MAX_REQUEST_BYTES do return {}, false
 	return domain.domain_error(.Validation_Failed, fmt.tprintf("artifact request is too large: %d bytes, limit %d (content limit %s)", len(req.body), ARTIFACT_MAX_REQUEST_BYTES, contracts.ARTIFACT_MAX_CONTENT_LABEL)), true
 }
-
-// ── E2EE transfer data-path body bounds (docs/plans/mcp-large-artifact-transfers.md §5.2/§7) ──
-//
-// Transfer bodies are ciphertext of one vault v2 token and are bounded BEFORE they are
-// read: PATCH <= 8 MiB, PUT <= the armored size of a 15 MiB plaintext (streamed to
-// <= 1 MiB chunk rows), seal/opened JSON <= 64 KiB. All sit far below the shared
-// 80 MiB reader cap.
-TRANSFER_PUT_MAX_BYTES   :: contracts.ARTIFACT_TRANSFER_CIPHERTEXT_MAX_BYTES
-TRANSFER_PATCH_MAX_BYTES :: contracts.ARTIFACT_TRANSFER_CHUNK_MAX_BYTES
-// A single download response carries at most one stored window (design §7).
-TRANSFER_GET_WINDOW_BYTES :: i64(contracts.ARTIFACT_TRANSFER_STORE_CHUNK_BYTES)
-TRANSFER_JSON_MAX_BYTES  :: contracts.ARTIFACT_TRANSFER_JSON_MAX_BYTES
-#assert(TRANSFER_PUT_MAX_BYTES == ARTIFACT_MAX_STORED_BYTES)
-#assert(TRANSFER_PUT_MAX_BYTES < 80 * 1024 * 1024)
-
-// transfer_body_bound returns the maximum body for a transfer data-path request, or
-// -1 when the method/route carries no body.
-transfer_body_bound :: proc(method: string, ciphertext_route: bool) -> int {
-	switch method {
-	case "PUT":   return ciphertext_route ? TRANSFER_PUT_MAX_BYTES : -1
-	case "PATCH": return ciphertext_route ? TRANSFER_PATCH_MAX_BYTES : -1
-	case "POST":  return ciphertext_route ? -1 : TRANSFER_JSON_MAX_BYTES
-	}
-	return -1
-}

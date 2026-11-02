@@ -32,14 +32,3 @@ test_artifact_input_decodes_binary_content_base64_byte_exact :: proc(t: ^testing
 	testing.expect_value(t, len(input.content), len(payload))
 	testing.expect(t, input.content == string(payload), "decoded bytes reach the service unchanged")
 }
-
-@(test)
-test_transfer_body_bounds_cover_15_mib_ciphertext :: proc(t: ^testing.T) {
-	testing.expect_value(t, transfer_body_bound("PUT", true), 20_971_598)
-	testing.expect_value(t, transfer_body_bound("PATCH", true), 8 * 1024 * 1024)
-	testing.expect_value(t, transfer_body_bound("POST", false), 64 * 1024)
-	testing.expect_value(t, transfer_body_bound("POST", true), -1)
-	testing.expect_value(t, transfer_body_bound("GET", true), -1)
-	// Three PATCHes carry the worst-case 15 MiB token.
-	testing.expect(t, 3 * transfer_body_bound("PATCH", true) >= transfer_body_bound("PUT", true))
-}

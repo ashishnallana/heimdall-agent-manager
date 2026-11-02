@@ -1,6 +1,14 @@
 # Claude browser agent → Hub-blind HTML bundle upload: feasibility
 
-Status: **feasibility study, not implemented.** Task `task_18e44763bb01b861`, chain
+> **Superseded (2026-11-02, task `task_18e449b0b41218f2`).** Not the direction for
+> Heimdall: no vault keys, crypto helper, pinned inbox key or new key scheme on the
+> Claude side. Claude-driven uploads use exact JSON entry content and `files` on the
+> normal artifact create path, sealed by the **existing MCP encryption/decryption
+> relay**. The companion transfer plan (`docs/plans/mcp-large-artifact-transfers.md`)
+> is superseded too and its code was removed. Kept as historical research only (the
+> egress and MCP App findings remain useful references).
+
+Status: **superseded (see banner above); historically a feasibility study.** Task `task_18e44763bb01b861`, chain
 `chain_18e43a321b7b6c60`. Complements `docs/plans/mcp-large-artifact-transfers.md`
 (the "transfer plan"), whose executors are local `ham-ctl` or a Heimdall browser tab
 where the user picks the file (§3 of that plan). Neither is an autonomous upload by
