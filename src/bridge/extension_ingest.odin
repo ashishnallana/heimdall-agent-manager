@@ -22,6 +22,12 @@ Bridge_Ext_Instance_State :: struct {
 	events_accepted:   int,
 	events_dropped:    int,
 	token_usage:       Bridge_Ext_Token_Usage, // extension_token_usage.odin
+	// From the launch command (context_window.odin resolves the window from
+	// these). Empty when the bridge has no launch record for the instance.
+	launch_provider:   string,
+	model:             string,
+	provider_profile:  string,
+	resolved_model:    string,
 }
 
 Bridge_Ext_Ingest_Result :: struct {
@@ -218,4 +224,81 @@ bridge_ext_handle_rpc :: proc(request_id, method, params: string, rec: Bridge_Lo
 		return bridge_local_response_error(request_id, "bad_request", contracts.ext_error_message(res.fatal))
 	}
 	return bridge_local_response_data(request_id, bridge_ext_ingest_result_json(res))
+}
+
+Bridge_Ext_Context_Window_Instance :: struct {
+	agent_instance_id, provider, model, provider_profile, resolved_model: string,
+}
+
+// bridge_ext_note_launch records an instance's provider/model/profile at launch
+// and resolves its context window. Resolution runs before bridge_ext_mutex is
+// taken: it reads the discovery cache and the window config under their own locks.
+bridge_ext_note_launch :: proc(instance_id, provider, model, provider_profile: string) {
+	context.allocator = bridge_ext_allocator()
+	if strings.trim_space(instance_id) == "" do return
+	resolved := bridge_context_window_resolved_model(provider, model, provider_profile)
+	r := bridge_context_window_resolve(provider, model, resolved)
+	sync.mutex_lock(&bridge_ext_mutex)
+	s := bridge_ext_state_locked(instance_id)
+	if s != nil {
+		delete(s.launch_provider); delete(s.model); delete(s.provider_profile); delete(s.resolved_model)
+		s.launch_provider = strings.clone(provider)
+		s.model = strings.clone(model)
+		s.provider_profile = strings.clone(provider_profile)
+		s.resolved_model = strings.clone(resolved)
+		_ = bridge_ext_token_usage_set_window(&s.token_usage, r)
+	}
+	sync.mutex_unlock(&bridge_ext_mutex)
+}
+
+// bridge_ext_context_window_instances lists instances with a launch record
+// (temp allocator).
+bridge_ext_context_window_instances :: proc() -> [dynamic]Bridge_Ext_Context_Window_Instance {
+	out := make([dynamic]Bridge_Ext_Context_Window_Instance, context.temp_allocator)
+	sync.mutex_lock(&bridge_ext_mutex)
+	defer sync.mutex_unlock(&bridge_ext_mutex)
+	for s in bridge_ext_states {
+		if s.launch_provider == "" do continue
+		append(&out, Bridge_Ext_Context_Window_Instance{
+			strings.clone(s.agent_instance_id, context.temp_allocator),
+			strings.clone(s.launch_provider, context.temp_allocator),
+			strings.clone(s.model, context.temp_allocator),
+			strings.clone(s.provider_profile, context.temp_allocator),
+			strings.clone(s.resolved_model, context.temp_allocator),
+		})
+	}
+	return out
+}
+
+// bridge_ext_context_windows_refresh re-resolves every launched instance after
+// an override changed; a changed window is pushed upstream with the next due
+// token snapshot.
+bridge_ext_context_windows_refresh :: proc() {
+	insts := bridge_ext_context_window_instances()
+	if len(insts) == 0 do return
+	resolutions := make([]Bridge_Context_Window_Resolution, len(insts), context.temp_allocator)
+	for inst, i in insts do resolutions[i] = bridge_context_window_resolve(inst.provider, inst.model, inst.resolved_model)
+	sync.mutex_lock(&bridge_ext_mutex)
+	for inst, i in insts {
+		for &s in bridge_ext_states {
+			if s.agent_instance_id != inst.agent_instance_id do continue
+			_ = bridge_ext_token_usage_set_window(&s.token_usage, resolutions[i])
+			break
+		}
+	}
+	sync.mutex_unlock(&bridge_ext_mutex)
+	_ = bridge_ext_token_enqueue_due(bridge_runtime_now_ms())
+}
+
+// bridge_ext_context_window_for reports an instance's resolved window, its
+// source and the current context percentage (-1 when unknown). An instance
+// without a launch record gets the default.
+bridge_ext_context_window_for :: proc(instance_id: string) -> (window: i64, source: Bridge_Context_Window_Source, context_pct: i64) {
+	sync.mutex_lock(&bridge_ext_mutex)
+	defer sync.mutex_unlock(&bridge_ext_mutex)
+	for s in bridge_ext_states {
+		if s.agent_instance_id != instance_id do continue
+		return bridge_ext_token_usage_window(s.token_usage), s.token_usage.window_source, bridge_ext_token_usage_context_pct(s.token_usage)
+	}
+	return BRIDGE_EXT_TOKEN_DEFAULT_WINDOW, .Default, -1
 }

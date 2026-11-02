@@ -971,6 +971,10 @@ bridge_hub_handle_command :: proc(conn: ^ws.Connection, text: string) {
 		bridge_task_chain_search_handle_command(conn, text)
 		return
 	}
+	if type == "context_window_op" {
+		bridge_hub_handle_context_window_op(conn, text)
+		return
+	}
 	if type == "mcp_transform" {bridge_mcp_transform(conn,text);return}
 	if type == "set_telemetry" {
 		command_id := extract_json_string(text, "command_id", "")
@@ -2601,6 +2605,9 @@ bridge_runtime_launch_provider_test :: proc(command_id, command_json: string) ->
 // registered) the agent under the daemon PTY. Retry/backoff on spawn preserves
 // AC-5 launch resilience.
 bridge_runtime_launch_agent_pty_host :: proc(command_id, instance_id, run_dir, endpoint, provider, model, agent_token, display_name: string, timeout_seconds: u64, project_path: string = "", permission_mode: string = "", provider_profile: string = "") -> (ok: bool, detail: string, err: Bridge_Error) {
+	// T2b: the context window is resolved per launch from provider + model
+	// (override > shipped config > default); never detected from the provider.
+	bridge_ext_note_launch(instance_id, provider, model, provider_profile)
 	// REQ-PROF-4: an unknown or disabled profile fails the launch; it never falls
 	// back to the default profile, which could run under the wrong account.
 	pp, pp_err := profile_lookup(provider, provider_profile)

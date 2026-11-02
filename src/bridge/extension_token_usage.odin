@@ -14,8 +14,10 @@ import contracts "odin_test:contracts"
 // An event-driven push is sent at most once per interval per instance...
 BRIDGE_EXT_TOKEN_PUSH_MIN_INTERVAL_MS :: 10_000
 // ...unless context_tokens moved by at least this many percentage points of the
-// context window (the reported one, else the default) since the last push.
+// instance's resolved context window (context_window.odin) since the last push.
 BRIDGE_EXT_TOKEN_PUSH_DELTA_PP :: 5
+// Window of an instance the bridge has no launch record for (equals the shipped
+// config's default_window; a test keeps them in step).
 BRIDGE_EXT_TOKEN_DEFAULT_WINDOW :: 200_000
 // A context drop to (100 - this)% or less of the previous value is a compaction.
 BRIDGE_EXT_COMPACTION_DROP_PCT :: 50
@@ -27,7 +29,10 @@ Bridge_Ext_Token_Usage :: struct {
 	has_context:         bool,
 	context_tokens:      i64, // latest provider-reported context size
 	context_source:      string, // owned; usage.source of context_tokens
-	context_window:      i64, // reported window; 0 = not reported
+	// Resolved by the bridge from overrides/shipped config (never reported by the
+	// provider); 0 = no launch record, i.e. the default. Survives resets.
+	context_window:      i64,
+	window_source:       Bridge_Context_Window_Source,
 	has_output_total:    bool,
 	output_tokens_total: i64,
 	compactions:         i64,
@@ -47,9 +52,11 @@ bridge_ext_token_usage_reset :: proc(u: ^Bridge_Ext_Token_Usage, session_id: str
 	new_id := strings.clone(session_id) // session_id may alias u.session_id
 	delete(u.session_id); delete(u.context_source)
 	dirty, has_pushed, last_at, last_ctx := u.dirty, u.has_pushed, u.last_push_at_ms, u.last_push_context
+	window, source := u.context_window, u.window_source
 	u^ = {}
 	u.session_id = new_id
 	u.dirty, u.has_pushed, u.last_push_at_ms, u.last_push_context = dirty, has_pushed, last_at, last_ctx
+	u.context_window, u.window_source = window, source
 }
 
 bridge_ext_token_usage_destroy :: proc(u: ^Bridge_Ext_Token_Usage) {
@@ -88,7 +95,8 @@ bridge_ext_token_usage_apply :: proc(u: ^Bridge_Ext_Token_Usage, ev: contracts.E
 			delete(u.context_source)
 			u.context_source = strings.clone(ev.usage.source)
 		}
-		if ev.usage.has_context_window && ev.usage.context_window > 0 do u.context_window = ev.usage.context_window
+		// usage.context_window is deliberately ignored: the window comes only from
+		// the bridge's override/shipped config (user decision, no runtime detection).
 		if ev.usage.has_output_tokens_total {
 			u.has_output_total = true
 			u.output_tokens_total = max(ev.usage.output_tokens_total, 0)
@@ -104,6 +112,22 @@ bridge_ext_token_usage_apply :: proc(u: ^Bridge_Ext_Token_Usage, ev: contracts.E
 
 bridge_ext_token_usage_window :: proc(u: Bridge_Ext_Token_Usage) -> i64 {
 	return u.context_window if u.context_window > 0 else BRIDGE_EXT_TOKEN_DEFAULT_WINDOW
+}
+
+// bridge_ext_token_usage_set_window records a resolved window and reports
+// whether it changed; a change marks the snapshot dirty once it has content.
+bridge_ext_token_usage_set_window :: proc(u: ^Bridge_Ext_Token_Usage, r: Bridge_Context_Window_Resolution) -> bool {
+	if u.context_window == r.context_window && u.window_source == r.source do return false
+	u.context_window, u.window_source = r.context_window, r.source
+	if u.updated_at_ms != 0 do u.dirty = true
+	return true
+}
+
+// bridge_ext_token_usage_context_pct is context_tokens as a whole percentage of
+// the resolved window (floor); -1 until the provider reported a context size.
+bridge_ext_token_usage_context_pct :: proc(u: Bridge_Ext_Token_Usage) -> i64 {
+	if !u.has_context do return -1
+	return u.context_tokens * 100 / bridge_ext_token_usage_window(u)
 }
 
 // bridge_ext_token_push_due: a changed snapshot goes upstream when the per-instance
@@ -167,9 +191,10 @@ bridge_ext_token_mark_pushed :: proc(u: ^Bridge_Ext_Token_Usage, now: i64) {
 	u.last_push_context = u.context_tokens
 }
 
-// bridge_ext_token_usage_write_json writes the snapshot object. context_* and
-// output_tokens_total are omitted until reported; context_window only when the
-// provider reported one (consumers apply the 200k default).
+// bridge_ext_token_usage_write_json writes the snapshot object. context_tokens,
+// context_source, context_pct and output_tokens_total are omitted until
+// reported; context_window and window_source (override|config|default) are
+// always present.
 bridge_ext_token_usage_write_json :: proc(b: ^strings.Builder, u: Bridge_Ext_Token_Usage) {
 	strings.write_string(b, fmt.tprintf("{{\"tool_calls\":%d,\"est_tokens_total\":%d", u.tool_calls, u.est_tokens_total))
 	if u.has_context {
@@ -177,7 +202,8 @@ bridge_ext_token_usage_write_json :: proc(b: ^strings.Builder, u: Bridge_Ext_Tok
 		bridge_local_write_json_string(b, u.context_source)
 		strings.write_byte(b, '"')
 	}
-	if u.context_window > 0 do strings.write_string(b, fmt.tprintf(",\"context_window\":%d", u.context_window))
+	strings.write_string(b, fmt.tprintf(",\"context_window\":%d,\"window_source\":\"%s\"", bridge_ext_token_usage_window(u), bridge_context_window_source_name(u.window_source)))
+	if pct := bridge_ext_token_usage_context_pct(u); pct >= 0 do strings.write_string(b, fmt.tprintf(",\"context_pct\":%d", pct))
 	if u.has_output_total do strings.write_string(b, fmt.tprintf(",\"output_tokens_total\":%d", u.output_tokens_total))
 	strings.write_string(b, fmt.tprintf(",\"compactions\":%d,\"updated_at_ms\":%d}}", u.compactions, u.updated_at_ms))
 }

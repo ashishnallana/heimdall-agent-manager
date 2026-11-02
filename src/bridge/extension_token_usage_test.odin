@@ -77,7 +77,9 @@ test_ext_tokens_accumulate_tool_calls_and_usage :: proc(t: ^testing.T) {
 	testing.expect(t, u.has_context)
 	testing.expect_value(t, u.context_tokens, i64(42000))
 	testing.expect_value(t, u.context_source, "claude_transcript")
-	testing.expect_value(t, u.context_window, i64(475000))
+	// A provider-reported window is ignored (T2b: windows come only from config).
+	testing.expect_value(t, u.context_window, i64(0))
+	testing.expect_value(t, bridge_ext_token_usage_window(u), i64(BRIDGE_EXT_TOKEN_DEFAULT_WINDOW))
 	testing.expect_value(t, u.output_tokens_total, i64(1234))
 	testing.expect_value(t, u.compactions, i64(0))
 	testing.expect_value(t, u.updated_at_ms, i64(3000))
@@ -88,7 +90,7 @@ test_ext_tokens_accumulate_tool_calls_and_usage :: proc(t: ^testing.T) {
 	testing.expect_value(t, u.tool_calls, i64(3))
 	testing.expect_value(t, u.context_tokens, i64(50000))
 	testing.expect_value(t, u.output_tokens_total, i64(1234))
-	testing.expect_value(t, u.context_window, i64(475000))
+	testing.expect_value(t, u.context_window, i64(0))
 }
 
 @(test)
@@ -183,8 +185,10 @@ test_ext_tokens_push_throttle :: proc(t: ^testing.T) {
 	testing.expect(t, bridge_ext_token_push_due(u, 13_000))
 	bridge_ext_token_mark_pushed(&u, 13_000)
 
-	// With a reported 475k window, 5pp is 23750 tokens.
-	_ = tok_apply(t, &u, tok_event("tool.end", "s1", tok_usage("50000", `,"context_window":475000`)), 14_000)
+	// With a resolved 475k window, 5pp is 23750 tokens.
+	testing.expect(t, bridge_ext_token_usage_set_window(&u, {475000, .Config}))
+	bridge_ext_token_mark_pushed(&u, 13_500) // the window change itself made it dirty
+	_ = tok_apply(t, &u, tok_event("tool.end", "s1", tok_usage("50000", `,"context_window":999999`)), 14_000)
 	testing.expect(t, !bridge_ext_token_push_due(u, 14_000), "20001 < 5pp of 475k")
 	_ = tok_apply(t, &u, tok_event("tool.end", "s1", tok_usage("53749")), 14_500)
 	testing.expect(t, bridge_ext_token_push_due(u, 14_500), "23750 = 5pp of 475k")
@@ -223,8 +227,10 @@ test_ext_tokens_ingest_status_and_upstream_frame :: proc(t: ^testing.T) {
 	testing.expect_value(t, tu["output_tokens_total"].(json.Integer), 77)
 	testing.expect_value(t, tu["compactions"].(json.Integer), 0)
 	testing.expect_value(t, tu["updated_at_ms"].(json.Integer), json.Integer(now + 1000))
-	_, has_window := tu["context_window"]
-	testing.expect(t, !has_window, "context_window is omitted when the provider did not report one")
+	// No launch record: the default window, and the percentage of it.
+	testing.expect_value(t, tu["context_window"].(json.Integer), 200000)
+	testing.expect_value(t, tu["window_source"].(json.String), "default")
+	testing.expect_value(t, tu["context_pct"].(json.Integer), 20)
 
 	// The upstream frame carries the same small object and nothing raw.
 	frame := bridge_instance_status_json(id)
@@ -236,6 +242,9 @@ test_ext_tokens_ingest_status_and_upstream_frame :: proc(t: ^testing.T) {
 	ftu := froot["token_usage"].(json.Object)
 	testing.expect_value(t, ftu["est_tokens_total"].(json.Integer), 200)
 	testing.expect_value(t, ftu["context_tokens"].(json.Integer), 40000)
+	testing.expect_value(t, ftu["context_window"].(json.Integer), 200000)
+	testing.expect_value(t, ftu["window_source"].(json.String), "default")
+	testing.expect_value(t, ftu["context_pct"].(json.Integer), 20)
 	_, has_session := ftu["session_id"]
 	testing.expect(t, !has_session, "the provider session id stays local")
 	testing.expect(t, !strings.contains(frame, "tu_1"), "no raw event content upstream")

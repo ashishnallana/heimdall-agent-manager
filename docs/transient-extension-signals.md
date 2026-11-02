@@ -13,14 +13,44 @@ bounded to 256 instances; native tool state retains its existing bounded reducer
 The one derived value that goes upstream from extension events is a per-instance
 token snapshot (`src/bridge/extension_token_usage.odin`): tool calls, the sum of
 `tool.end` `metrics.est_tokens`, the latest provider `usage.context_tokens` with
-its source (and window, when reported), `output_tokens_total`, a compaction count
+its source, `output_tokens_total`, a compaction count
 (a context drop of 50% or more) and its update time. Counters reset on a session
 start (except `source: compact`) and on a new provider session id. It rides as an
 optional `token_usage` member of `agent_instance_status`, which older hubs ignore;
 a dedicated frame type would be refused by them as `unknown_frame_type`. Pushes
 are bounded to one per instance per 10 seconds, or sooner when context moves by
-5 percentage points of the window (200k when unreported), and only when the
-snapshot changed. `ham-ctl extension status` shows the same object locally.
+5 percentage points of the window, and only when the snapshot changed.
+`ham-ctl extension status` shows the same object locally.
+
+## Context window
+
+Each snapshot also carries `context_window`, `window_source`
+(`override`|`config`|`default`) and, once a context size is known,
+`context_pct` (whole percent, floor). The window is never detected at runtime:
+a provider-reported `usage.context_window` is ignored. The bridge resolves it at
+launch (`src/bridge/context_window.odin`) from, in order:
+
+1. a user override persisted on the bridge in
+   `<data_dir>/bridge/context_window_overrides.json`, keyed by provider + model
+   (exact id, the configured model or its `resolved_model`); values below
+   100000 are rejected;
+2. the read-only config shipped in the binary
+   (`src/bridge/context_windows.json`): ordered `{provider, model_regex,
+   context_window}` entries, first match wins, the regex anchored to the whole
+   id, tried against the configured model (which may be an alias such as
+   `default`) and then the `resolved_model` from model discovery; it also
+   ships `warn_pct` 60 and `rollover_pct` 80;
+3. the 200000 default.
+
+The hub drives overrides with the `context_window_op` frame
+`{command_id, op: list|set|clear, provider?, model?, context_window?}`. The
+bridge answers `context_window_op_result {command_id, op, ok, error?,
+default_window, min_window, max_window, warn_pct, rollover_pct, entries,
+overrides, windows:[{provider, model, resolved_model?, context_window, source}]}`
+for every op, so a caller re-renders from any reply. `windows` lists discovered
+models, launched instances, overrides and the pair named in the request. A set
+or clear re-resolves running instances; the new window goes up with their next
+snapshot.
 
 ## Open conversations
 
