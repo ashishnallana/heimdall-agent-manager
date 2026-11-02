@@ -643,7 +643,7 @@ shutdown_graph :: proc(graph: ^App_Graph) {
 	delete(graph.action_bridge_versions)
 	billing_service.service_free(&graph.billing)
 	sqlite.close(&graph.sqlite_actions.snapshot_conn)
-	sqlite.close(&graph.sqlite_billing.conn)
+	sqlite.close_billing_repository(&graph.sqlite_billing)
 	sqlite.close(&graph.sqlite_bridge_commit.conn)
 	if graph.config.mcp_oauth_spike || graph.config.mcp_oauth_key_file != "" do mcp_service.free(&graph.mcp_spike)
 	free_mcp_delegation(graph)
