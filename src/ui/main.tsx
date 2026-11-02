@@ -15,6 +15,7 @@ import { installAppViewportHeightSync } from './utils/appViewportHeight';
 import { ShortcutProvider } from './services/shortcuts/ShortcutContext';
 import { ChordHud } from './components/shortcuts/ChordHud';
 import { ShortcutCheatsheetModal } from './components/shortcuts/ShortcutCheatsheetModal';
+import { analytics, type AnalyticsClient } from './analytics/analytics';
 import './styles.css';
 
 // Legacy deep-link migration: if the app was opened at a real path-based route
@@ -44,6 +45,17 @@ import './styles.css';
 if (typeof window !== 'undefined') installAppViewportHeightSync(window as never);
 
 installElectronApiFetchBridge();
+
+// REQ-PH-3: PostHog product analytics, only when the build carries VITE_POSTHOG_KEY.
+// Vite replaces the key at build time, so without one this branch — and the posthog-js
+// chunk it imports — is dropped from the bundle. Sends `app_opened` once per session;
+// the AuthGate identifies the user. See docs/analytics.md.
+if (import.meta.env.VITE_POSTHOG_KEY) {
+  analytics.init({
+    env: import.meta.env,
+    loadClient: async () => (await import('posthog-js')).default as unknown as AnalyticsClient,
+  });
+}
 
 // Register the notification service worker early so OS notifications work on
 // platforms where the in-page Notification constructor is unavailable (iOS

@@ -1,4 +1,5 @@
 import { announceTaskChainCreated } from './taskChainCreationEvents';
+import { analytics } from '../analytics/analytics';
 import { heimdallApi, HEIMDALL_TAG_TYPES } from './heimdallApi';
 import { tasksApi } from './endpoints/tasks';
 import { normalizeChain, workspaceApi } from './endpoints/workspace';
@@ -965,7 +966,11 @@ function handleResourceChanged(dispatch: any, payload: any, ctx: WsCtx) {
       return;
     }
     case 'task_chain': {
-      if (payload.change === 'created') announceTaskChainCreated(chainId);
+      if (payload.change === 'created') {
+        announceTaskChainCreated(chainId);
+        // A chain an agent created for the user (e.g. via ham-ctl) reaches the app only here.
+        analytics.trackOnce('first_chain_created', {});
+      }
       // TODO(FIX): Replace any with strict TypeScript interface matching Odin backend schema
       const tags: any[] = [
         { type: 'ChainList', id: 'ALL' },

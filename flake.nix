@@ -24,7 +24,7 @@
 
       # Keep appVersion in sync with src/contracts/protocol.odin APP_VERSION.
       appVersion = "0.5.27";
-      npmDepsHash = "sha256-HK2Zpo2PckW5CxVrPr3OTiXVaJHzhRzofsesyXhxWAc=";
+      npmDepsHash = "sha256-169t5VJDklB9sGqP27O62FppKxy+oRT4b+BIguLTVxM=";
 
       # Every Odin binary that links src/lib/httpc links the ONE libcurl pinned
       # in nix/libcurl-pin.json (built by nix/libcurl.nix). Nix-native packages
