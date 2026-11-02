@@ -4,9 +4,11 @@
 	"rollover_pct": 70,
 	"entries": [
 		{"provider": "claude", "model_regex": ".*\\[1m\\].*", "context_window": 1000000},
-		{"provider": "claude", "model_regex": ".*opus.*", "context_window": 200000},
-		{"provider": "claude", "model_regex": ".*sonnet.*", "context_window": 200000},
-		{"provider": "claude", "model_regex": ".*haiku.*", "context_window": 200000},
-		{"provider": "codex", "model_regex": "gpt-.*", "context_window": 475000}
+		{"provider": "claude", "model_regex": ".*haiku-4-5.*", "context_window": 200000},
+		{"provider": "claude", "model_regex": ".*(opus|sonnet)-4-6.*", "context_window": 200000},
+		{"provider": "claude", "model_regex": "(default|opus|sonnet|haiku|fable)", "context_window": 1000000},
+		{"provider": "claude", "model_regex": "claude-(opus|sonnet|haiku|fable)-(5|4-7|4-8).*", "context_window": 1000000},
+		{"provider": "codex", "model_regex": "gpt-6\\.1-(sol|terra).*", "context_window": 475000},
+		{"provider": "codex", "model_regex": "gpt-.*", "context_window": 258400}
 	]
 }

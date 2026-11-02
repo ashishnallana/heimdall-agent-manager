@@ -42,6 +42,27 @@ launch (`src/bridge/context_window.odin`) from, in order:
    ships `warn_pct` 40 and `rollover_pct` 70;
 3. the 200000 default.
 
+The shipped map (first match wins; `src/bridge/context_window_test.odin`
+resolves every id below):
+
+| Provider | `model_regex` | Window | Why |
+| --- | --- | --- | --- |
+| claude | `.*\[1m\].*` | 1000000 | explicit 1M variant |
+| claude | `.*haiku-4-5.*` | 200000 | no 1M variant |
+| claude | `.*(opus\|sonnet)-4-6.*` | 200000 | Claude Code needs `[1m]` for 1M on these |
+| claude | `(default\|opus\|sonnet\|haiku\|fable)` | 1000000 | aliases; on the Anthropic API they resolve to the 5.5 / 5.1 models |
+| claude | `claude-(opus\|sonnet\|haiku\|fable)-(5\|4-7\|4-8).*` | 1000000 | Claude 5.x and Opus 4.7+ run at a native 1M in Claude Code |
+| codex | `gpt-6\.1-(sol\|terra).*` | 475000 | Codex `model_context_window`, 95% of 500K (observed on this host) |
+| codex | `gpt-.*` | 258400 | 95% of Codex's default 272K; conservative for the rest |
+
+Any other Claude id gets the 200000 default, the same assumption Claude Code
+makes for a model it does not know. Sources: the Anthropic platform docs
+(models overview, context windows), the Claude Code model-configuration docs,
+and openai/codex issue 53336 for Codex's effective window. Caveat: a Claude
+Code launched with `CLAUDE_CODE_DISABLE_1M_CONTEXT=1` runs those models at
+200K; the bridge cannot see that, so set a 200000 override for the model on
+that bridge.
+
 The hub drives overrides with the `context_window_op` frame
 `{command_id, op: list|set|clear, provider?, model?, context_window?}`. The
 bridge answers `context_window_op_result {command_id, op, ok, error?,

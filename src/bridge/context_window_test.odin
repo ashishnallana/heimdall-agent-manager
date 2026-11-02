@@ -37,7 +37,7 @@ test_ctxwin_shipped_config_parses_every_entry :: proc(t: ^testing.T) {
 	c: Bridge_Context_Window_Config
 	testing.expect(t, bridge_context_window_parse_config(BRIDGE_CONTEXT_WINDOWS_EMBEDDED, &c))
 	defer bridge_context_window_config_destroy(&c)
-	testing.expect_value(t, len(c.entries), 5) // no shipped regex may fail to compile
+	testing.expect_value(t, len(c.entries), 7) // no shipped regex may fail to compile
 	testing.expect_value(t, c.default_window, i64(200_000))
 	testing.expect_value(t, c.default_window, i64(BRIDGE_EXT_TOKEN_DEFAULT_WINDOW))
 	testing.expect_value(t, c.warn_pct, 40)
@@ -50,17 +50,18 @@ test_ctxwin_regex_match_order_and_default :: proc(t: ^testing.T) {
 	saved, scratch := ctxwin_scratch_begin("order")
 	defer ctxwin_scratch_end(saved, scratch)
 
-	r := bridge_context_window_resolve("claude", "claude-opus-5-5")
+	r := bridge_context_window_resolve("claude", "claude-opus-4-6")
 	testing.expect_value(t, r, Bridge_Context_Window_Resolution{200_000, .Config})
-	// The [1m] entry is listed first, so it wins over .*opus.*.
-	r = bridge_context_window_resolve("claude", "claude-opus-5-5[1m]")
+	// The [1m] entry is listed first, so it wins over the 4-6 entry.
+	r = bridge_context_window_resolve("claude", "claude-opus-4-6[1m]")
 	testing.expect_value(t, r, Bridge_Context_Window_Resolution{1_000_000, .Config})
 	r = bridge_context_window_resolve("claude", "sonnet[1m]")
 	testing.expect_value(t, r, Bridge_Context_Window_Resolution{1_000_000, .Config})
-	r = bridge_context_window_resolve("claude", "haiku")
-	testing.expect_value(t, r, Bridge_Context_Window_Resolution{200_000, .Config})
+	// Aliases are anchored too: a suffix or prefix is not the alias.
+	r = bridge_context_window_resolve("claude", "opus-ish")
+	testing.expect_value(t, r, Bridge_Context_Window_Resolution{200_000, .Default})
 	r = bridge_context_window_resolve("codex", "gpt-5.5-codex")
-	testing.expect_value(t, r, Bridge_Context_Window_Resolution{475_000, .Config})
+	testing.expect_value(t, r, Bridge_Context_Window_Resolution{258_400, .Config})
 	// Anchored: gpt-.* must match the whole id, and entries are per provider.
 	r = bridge_context_window_resolve("codex", "my-gpt-5")
 	testing.expect_value(t, r, Bridge_Context_Window_Resolution{200_000, .Default})
@@ -107,15 +108,21 @@ test_ctxwin_alias_via_resolved_model :: proc(t: ^testing.T) {
 	testing.expect_value(t, bridge_context_window_resolved_in(models[:], "plain"), "")
 	testing.expect_value(t, bridge_context_window_resolved_in(models[:], "unknown"), "")
 
-	// `default` matches no entry itself; its resolved_model does.
-	r := bridge_context_window_resolve("claude", "default")
-	testing.expect_value(t, r.source, Bridge_Context_Window_Source.Default)
+	// `plain` matches no entry and has no resolved_model; `default` is a
+	// shipped alias entry itself and its resolved_model agrees.
+	r := bridge_context_window_resolve("claude", "plain", bridge_context_window_resolved_in(models[:], "plain"))
+	testing.expect_value(t, r, Bridge_Context_Window_Resolution{200_000, .Default})
 	r = bridge_context_window_resolve("claude", "default", bridge_context_window_resolved_in(models[:], "default"))
+	testing.expect_value(t, r, Bridge_Context_Window_Resolution{1_000_000, .Config})
+	// An unknown alias falls through to its resolved_model.
+	r = bridge_context_window_resolve("claude", "my-alias", "claude-sonnet-4-6")
 	testing.expect_value(t, r, Bridge_Context_Window_Resolution{200_000, .Config})
 	r = bridge_context_window_resolve("claude", "big", bridge_context_window_resolved_in(models[:], "big"))
 	testing.expect_value(t, r, Bridge_Context_Window_Resolution{1_000_000, .Config})
 	// The configured model is tried first: an alias matching an entry keeps it.
-	r = bridge_context_window_resolve("claude", "opus[1m]", "claude-opus-5-5")
+	r = bridge_context_window_resolve("claude", "opus[1m]", "claude-opus-4-6")
+	testing.expect_value(t, r, Bridge_Context_Window_Resolution{1_000_000, .Config})
+	r = bridge_context_window_resolve("claude", "sonnet", "claude-sonnet-4-6")
 	testing.expect_value(t, r, Bridge_Context_Window_Resolution{1_000_000, .Config})
 }
 
@@ -149,7 +156,7 @@ test_ctxwin_override_precedence_persistence_and_clear :: proc(t: ^testing.T) {
 	testing.expect_value(t, bridge_context_window_clear("claude", "claude-opus-5-5"), Bridge_Context_Window_Error.None)
 	testing.expect_value(t, bridge_context_window_clear("claude", "claude-opus-5-5"), Bridge_Context_Window_Error.None)
 	bridge_context_window_reload_for_test()
-	testing.expect_value(t, bridge_context_window_resolve("claude", "claude-opus-5-5"), Bridge_Context_Window_Resolution{200_000, .Config})
+	testing.expect_value(t, bridge_context_window_resolve("claude", "claude-opus-5-5"), Bridge_Context_Window_Resolution{1_000_000, .Config})
 	testing.expect_value(t, bridge_context_window_resolve("codex", "brand-new-model").source, Bridge_Context_Window_Source.Override)
 
 	// A hand-edited file is validated on load like the RPC.
@@ -197,7 +204,7 @@ test_ctxwin_op_frame_list_set_clear :: proc(t: ^testing.T) {
 	testing.expect_value(t, root["rollover_pct"].(json.Integer), 70)
 	testing.expect_value(t, root["default_window"].(json.Integer), 200000)
 	testing.expect_value(t, root["min_window"].(json.Integer), 100000)
-	testing.expect_value(t, len(root["entries"].(json.Array)), 5)
+	testing.expect_value(t, len(root["entries"].(json.Array)), 7)
 	overrides := root["overrides"].(json.Array)
 	testing.expect_value(t, len(overrides), 1)
 	found := false
@@ -217,15 +224,15 @@ test_ctxwin_op_frame_list_set_clear :: proc(t: ^testing.T) {
 	testing.expect_value(t, bridge_context_window_resolve("codex", "gpt-x-test").context_window, i64(1000000))
 
 	// A list for a pair with no override reports where its value comes from.
-	list := bridge_context_window_op_json(`{"command_id":"cmd_3","op":"list","provider":"codex","model":"gpt-5.5"}`)
+	list := bridge_context_window_op_json(`{"command_id":"cmd_3","op":"list","provider":"codex","model":"gpt-6.1-sol"}`)
 	defer delete(list)
-	testing.expect(t, strings.contains(list, `{"provider":"codex","model":"gpt-5.5","context_window":475000,"source":"config"}`))
+	testing.expect(t, strings.contains(list, `{"provider":"codex","model":"gpt-6.1-sol","context_window":475000,"source":"config"}`))
 
 	clr := bridge_context_window_op_json(`{"command_id":"cmd_4","op":"clear","provider":"codex","model":"gpt-x-test"}`)
 	defer delete(clr)
 	testing.expect(t, strings.contains(clr, `"ok":true`))
 	testing.expect(t, strings.contains(clr, `"overrides":[]`))
-	testing.expect(t, strings.contains(clr, `{"provider":"codex","model":"gpt-x-test","context_window":475000,"source":"config"}`))
+	testing.expect(t, strings.contains(clr, `{"provider":"codex","model":"gpt-x-test","context_window":258400,"source":"config"}`))
 
 	unknown := bridge_context_window_op_json(`{"command_id":"cmd_5","op":"nuke"}`)
 	defer delete(unknown)
@@ -240,7 +247,7 @@ test_ctxwin_instance_snapshot_carries_window_and_pct :: proc(t: ^testing.T) {
 
 	id := "inst_test_ctxwin_snapshot"
 	bridge_runtime_mark_start_success(id)
-	bridge_ext_note_launch(id, "codex", "gpt-5.5", "")
+	bridge_ext_note_launch(id, "codex", "gpt-6.1-sol", "")
 	window, source, pct := bridge_ext_context_window_for(id)
 	testing.expect_value(t, window, i64(475_000))
 	testing.expect_value(t, source, Bridge_Context_Window_Source.Config)
@@ -258,7 +265,7 @@ test_ctxwin_instance_snapshot_carries_window_and_pct :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(frame, `"context_window":475000,"window_source":"config","context_pct":60`))
 
 	// An override re-resolves the live instance; a session reset keeps the window.
-	testing.expect_value(t, bridge_context_window_set("codex", "gpt-5.5", 1_000_000), Bridge_Context_Window_Error.None)
+	testing.expect_value(t, bridge_context_window_set("codex", "gpt-6.1-sol", 1_000_000), Bridge_Context_Window_Error.None)
 	window, source, pct = bridge_ext_context_window_for(id)
 	testing.expect_value(t, window, i64(1_000_000))
 	testing.expect_value(t, source, Bridge_Context_Window_Source.Override)
@@ -268,8 +275,57 @@ test_ctxwin_instance_snapshot_carries_window_and_pct :: proc(t: ^testing.T) {
 	window, source, _ = bridge_ext_context_window_for(id)
 	testing.expect_value(t, window, i64(1_000_000))
 	testing.expect_value(t, source, Bridge_Context_Window_Source.Override)
-	testing.expect_value(t, bridge_context_window_clear("codex", "gpt-5.5"), Bridge_Context_Window_Error.None)
+	testing.expect_value(t, bridge_context_window_clear("codex", "gpt-6.1-sol"), Bridge_Context_Window_Error.None)
 	window, source, _ = bridge_ext_context_window_for(id)
 	testing.expect_value(t, window, i64(475_000))
 	testing.expect_value(t, source, Bridge_Context_Window_Source.Config)
+}
+
+// The shipped map (R1 research, docs/transient-extension-signals.md): every
+// model id seen on our bridges resolves to its documented window. Claude 5.x
+// and Opus 4.7+ run at a native 1M in Claude Code; opus/sonnet-4-6 and
+// haiku-4-5 are 200K unless the id carries [1m]; Codex windows are the
+// effective (95%) values Codex reports.
+@(test)
+test_ctxwin_shipped_map_known_model_ids :: proc(t: ^testing.T) {
+	sync.mutex_lock(&bridge_test_config_mutex); defer sync.mutex_unlock(&bridge_test_config_mutex)
+	saved, scratch := ctxwin_scratch_begin("shipped")
+	defer ctxwin_scratch_end(saved, scratch)
+
+	Case :: struct {
+		provider, model: string,
+		want:            Bridge_Context_Window_Resolution,
+	}
+	cases := [?]Case {
+		// Claude Code aliases (resolve to the 5.5 / 5.1 models on the Anthropic API).
+		{"claude", "default", {1_000_000, .Config}},
+		{"claude", "opus", {1_000_000, .Config}},
+		{"claude", "sonnet", {1_000_000, .Config}},
+		{"claude", "haiku", {1_000_000, .Config}},
+		{"claude", "fable", {1_000_000, .Config}},
+		// Claude 5.x and Opus 4.7 / 4.8: native 1M.
+		{"claude", "claude-opus-5-5", {1_000_000, .Config}},
+		{"claude", "claude-sonnet-5-5", {1_000_000, .Config}},
+		{"claude", "claude-haiku-5-5", {1_000_000, .Config}},
+		{"claude", "claude-fable-5-1", {1_000_000, .Config}},
+		{"claude", "claude-opus-4-8", {1_000_000, .Config}},
+		{"claude", "claude-opus-4-7", {1_000_000, .Config}},
+		// Older models: 200K unless the [1m] variant is selected.
+		{"claude", "claude-opus-4-6", {200_000, .Config}},
+		{"claude", "claude-sonnet-4-6", {200_000, .Config}},
+		{"claude", "claude-haiku-4-5-20251001", {200_000, .Config}},
+		{"claude", "claude-opus-4-6[1m]", {1_000_000, .Config}},
+		// Codex effective windows.
+		{"codex", "gpt-6.1-sol", {475_000, .Config}},
+		{"codex", "gpt-6.1-terra", {475_000, .Config}},
+		{"codex", "gpt-6-luna", {258_400, .Config}},
+		{"codex", "gpt-5.6-sol", {258_400, .Config}},
+		// Unknown Claude ids get the default, as Claude Code assumes.
+		{"claude", "claude-mystery-9", {200_000, .Default}},
+		{"claude", "claude-opus-4-5", {200_000, .Default}},
+	}
+	for c in cases {
+		got := bridge_context_window_resolve(c.provider, c.model)
+		testing.expectf(t, got == c.want, "%s/%s: got %v, want %v", c.provider, c.model, got, c.want)
+	}
 }

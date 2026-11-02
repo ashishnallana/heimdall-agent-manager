@@ -7,6 +7,8 @@ package main
 //   2. the read-only config shipped inside the bridge binary
 //      (context_windows.json: ordered {provider, model_regex, context_window},
 //      first match wins, regex anchored to the whole model id);
+//      the entries and their sources (and the CLAUDE_CODE_DISABLE_1M_CONTEXT
+//      caveat) are listed in docs/transient-extension-signals.md;
 //   3. the default (200 000).
 // The model id tried is the configured model (which may be an alias such as
 // `default` or `opus`) and then, when discovery knows it, its resolved_model.
