@@ -18,6 +18,9 @@ Request :: struct {
 	request_id: string,
 	remote_addr: string,
 	headers:    []contracts.HTTP_Header,
+	// admitted: a Pre_Body_Gate already took this request's data-path slot before
+	// its body was read; the server releases it after the response.
+	admitted:   bool,
 }
 
 Route :: struct {

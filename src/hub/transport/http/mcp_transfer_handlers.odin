@@ -28,6 +28,38 @@ MCP_Transfer_Handlers :: struct {
 	grant_ctx:  rawptr,
 }
 
+// mcp_transfer_pre_body is the server's pre-body gate for transfer routes (§7): the
+// declared Content-Length is bounded per method BEFORE the body is read (413), and a
+// data-path request (PUT/PATCH/GET .../ciphertext) takes its global slot BEFORE the
+// body is read (503 + Retry-After when full). Only admitted requests are buffered, so
+// in-flight transfer bodies are bounded by slots x per-method bound. A missing
+// Content-Length counts as 0 (the reader then stops at the header terminator).
+mcp_transfer_pre_body :: proc(ctx: rawptr, method, path: string, content_length: int) -> Pre_Body_Verdict {
+	h := (^MCP_Transfer_Handlers)(ctx)
+	if h == nil || h.svc == nil || !strings.has_prefix(path, MCP_TRANSFERS_PATH + "/") do return {}
+	is_ciphertext := strings.has_suffix(path, "/ciphertext")
+	bound := TRANSFER_JSON_MAX_BYTES
+	if is_ciphertext && method == "PUT" do bound = TRANSFER_PUT_MAX_BYTES
+	else if is_ciphertext && method == "PATCH" do bound = TRANSFER_PATCH_MAX_BYTES
+	else if method == "GET" || method == "HEAD" || method == "DELETE" do bound = 0
+	if content_length < 0 || content_length > bound {
+		return {status = 413, body = `{"error":"body_too_large"}`, headers = xfr_headers()}
+	}
+	if is_ciphertext && (method == "PUT" || method == "PATCH" || method == "GET") {
+		if !mcp.transfer_data_path_acquire(h.svc) {
+			b := busy_response()
+			return {status = b.status, body = b.body, headers = b.headers}
+		}
+		return {held = true}
+	}
+	return {}
+}
+
+mcp_transfer_pre_body_release :: proc(ctx: rawptr) {
+	h := (^MCP_Transfer_Handlers)(ctx)
+	if h != nil && h.svc != nil do mcp.transfer_data_path_release(h.svc)
+}
+
 mcp_transfer_register_routes :: proc(r: ^Router, h: ^MCP_Transfer_Handlers) {
 	router_add(r, "ANY", MCP_TRANSFERS_PATH + "/**", h, mcp_transfer_handler)
 }
@@ -151,11 +183,15 @@ mcp_transfer_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	if !strings.has_prefix(token, mcp.TRANSFER_TOKEN_PREFIX) do return xfr_error(401, "unauthenticated")
 
 	is_data := sub == "ciphertext" && (req.method == "PUT" || req.method == "PATCH" || req.method == "GET")
-	// Global data-path admission before touching SQLite (§7).
-	if is_data {
+	// Global data-path admission before touching SQLite (§7). In the server this
+	// already happened before the body was read (mcp_transfer_pre_body); direct
+	// dispatch (tests, other transports) acquires here.
+	acquired := false
+	if is_data && !req.admitted {
 		if !mcp.transfer_data_path_acquire(h.svc) do return busy_response()
+		acquired = true
 	}
-	defer if is_data do mcp.transfer_data_path_release(h.svc)
+	defer if acquired do mcp.transfer_data_path_release(h.svc)
 
 	x, af := mcp.transfer_authenticate(h.svc, token, id)
 	if !mcp.transfer_ok(af) do return fail_response(af)

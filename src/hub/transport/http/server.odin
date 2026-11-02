@@ -26,6 +26,25 @@ Server_Config :: struct {
 	ui_origin: string,
 	preview_ctx: rawptr,
 	preview_handler: Upgrade_Handler_Proc,
+	// pre_body, when set, is consulted once the request head is read and BEFORE any
+	// body byte is received (design §7 pre-body admission).
+	pre_body: ^Pre_Body_Gate,
+}
+
+// Pre_Body_Verdict: status 0 admits the request; any other status is written as the
+// response without reading the body. held means admit took a slot that release must
+// return after the response is written.
+Pre_Body_Verdict :: struct {
+	status: int,
+	body:   string,
+	headers: []contracts.HTTP_Header,
+	held:   bool,
+}
+
+Pre_Body_Gate :: struct {
+	ctx:     rawptr,
+	admit:   proc(ctx: rawptr, method, path: string, content_length: int) -> Pre_Body_Verdict,
+	release: proc(ctx: rawptr),
 }
 
 Server_State :: struct {
@@ -85,7 +104,12 @@ handle_client :: proc(client: net.TCP_Socket, source: net.Endpoint, router: ^Rou
 	if arena_ok do req_allocator = virtual.arena_allocator(&arena)
 	context.allocator = req_allocator
 
-	request, ok := read_http_request(client)
+	request, ok, verdict := read_http_request_gated(client, config.pre_body)
+	defer if verdict.held do config.pre_body.release(config.pre_body.ctx)
+	if verdict.status != 0 {
+		write_http_response(client, Response{status = verdict.status, content_type = "application/json", body = verdict.body, headers = verdict.headers})
+		return
+	}
 	if !ok do return
 	method, target := request_method_target(request)
 	path, query := split_target_query(target)
@@ -103,6 +127,7 @@ handle_client :: proc(client: net.TCP_Socket, source: net.Endpoint, router: ^Rou
 		request_id = request_id,
 		remote_addr = net.address_to_string_allocator(source.address),
 		headers = headers,
+		admitted = verdict.held,
 	}
 	// The preview origin is a separate security boundary. Dispatch it before
 	// OPTIONS and every router path so no Hub API can ever be reached by Host.
@@ -167,6 +192,18 @@ preview_origin_host_matches :: proc(host, preview_origin: string) -> bool {
 
 
 read_http_request :: proc(client: net.TCP_Socket) -> (string, bool) {
+	raw, ok, _ := read_http_request_gated(client, nil)
+	return raw, ok
+}
+
+// read_http_request_gated reads one request. With a gate, the head (request line +
+// headers) is offered to gate.admit before any body byte is read: a refusal is
+// returned without reading the body, so an oversized or over-admission upload costs
+// the Hub only its header bytes. A declared Content-Length above the shared reader
+// cap is refused (413) the same way instead of buffering up to the cap first.
+read_http_request_gated :: proc(client: net.TCP_Socket, gate: ^Pre_Body_Gate) -> (string, bool, Pre_Body_Verdict) {
+	verdict: Pre_Body_Verdict
+	head_seen := false
 	buf: [8192]byte
 	data := make([dynamic]byte, 0, 8192)
 	// `data` is never handed to the caller (a clone is returned instead), and none of the
@@ -174,11 +211,27 @@ read_http_request :: proc(client: net.TCP_Socket) -> (string, bool) {
 	defer delete(data)
 	for {
 		n, recv_err := net.recv_tcp(client, buf[:])
-		if recv_err != nil || n <= 0 do return "", false
+		if recv_err != nil || n <= 0 do return "", false, verdict
 		append(&data, ..buf[:n])
 		raw := string(data[:])
-		if request_complete(raw) do return strings.clone(raw), true
-		if len(data) > MAX_HTTP_REQUEST_BYTES do return "", false
+		if !head_seen {
+			if idx := strings.index(raw, "\r\n\r\n"); idx >= 0 {
+				head_seen = true
+				cl := content_length(raw[:idx])
+				if cl > MAX_HTTP_REQUEST_BYTES {
+					verdict.status = 413; verdict.body = `{"error":"body_too_large"}`
+					return "", false, verdict
+				}
+				if gate != nil && gate.admit != nil {
+					method, target := request_method_target(raw)
+					path, _ := split_target_query(target)
+					verdict = gate.admit(gate.ctx, method, path, cl)
+					if verdict.status != 0 do return "", false, verdict
+				}
+			}
+		}
+		if request_complete(raw) do return strings.clone(raw), true, verdict
+		if len(data) > MAX_HTTP_REQUEST_BYTES do return "", false, verdict
 	}
 }
 
