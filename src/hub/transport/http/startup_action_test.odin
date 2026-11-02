@@ -185,6 +185,12 @@ startup_task_wake_replacement_has_fresh_receipt_and_confirms_lease :: proc(t: ^t
 	_, _, _ = iface.taskchain_save_task(&f.tc_repo, task)
 	testing.expect_value(t, taskv2.task_created(&engine, task, taskv2.hub_actor()).code, domain.Error_Code.None)
 	task, _, _ = iface.taskchain_get_task(&f.tc_repo, task.task_id)
+	// The old child has exited: the grant launches a replacement (T8: a live
+	// child would keep its generation and be nudged instead).
+	if stopped, sok, _ := iface.agent_get_instance(&f.ag_repo, f.instance_id); sok {
+		stopped.runtime_status = "stopped"
+		_, _, _ = iface.agent_save_instance(&f.ag_repo, stopped)
+	}
 	u, begun, begin_err := taskv2.begin_uow(&engine)
 	if !testing.expect(t, begun, begin_err.message) do return
 	lease, granted, grant_err := taskv2.grant_in_uow(&engine, &u, taskv2.Grant_Request{chain = chain, task = task, instance = inst, kind = domain.LEASE_KIND_WORK, delivery = domain.LEASE_DELIVERY_WAKE, placement = taskv2.Placement{bridge_id = f.bridge_pin, provider = inst.provider, model = inst.model}, actor = taskv2.hub_actor()})
