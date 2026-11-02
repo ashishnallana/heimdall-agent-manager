@@ -135,6 +135,13 @@ mcp_artifact_security_test :: proc(t:^testing.T,g:^App_Graph,h:^http.MCP_Control
 	for job in jobs do testing.expect(t,job.ok && job.len==jobs[0].len && job.result==jobs[0].result)
 }
 
+@(private="file") mcp_bundle_probe_seen:int
+@(private="file") mcp_bundle_probe_fail:bool
+@(private="file") mcp_bundle_probe :: proc()->string {
+	mcp_bundle_probe_seen=http.mcp_bundle_slots_in_use()
+	return mcp_bundle_probe_fail?"decryption_unavailable":""
+}
+
 // Claude-style entry/files JSON -> MCP handler -> pack -> relay seal -> vault store.
 mcp_artifact_bundle_test :: proc(t:^testing.T,g:^App_Graph,h:^http.MCP_Control_Handlers,headers:[]contracts.HTTP_Header,view:mcp.Access_View) {
 	png:=[]byte{0x89,'P','N','G',0x0d,0x0a,0x1a,0x0a,0x00,0xff};png64,_:=base64.encode(png,allocator=context.temp_allocator)
@@ -176,6 +183,27 @@ mcp_artifact_bundle_test :: proc(t:^testing.T,g:^App_Graph,h:^http.MCP_Control_H
 	for _ in 0..<http.MCP_BUNDLE_MAX_CONCURRENT do http.mcp_bundle_slot_release()
 	testing.expect(t,mcp_task_test_output(t,mcp_resource_heap_call(h,headers,"artifacts.create",busy_create))!=nil,"retry after release succeeds")
 	testing.expect_value(t,http.mcp_bundle_slots_in_use(),0)
+	// The create slot is held through the seal/relay step, and released after
+	// success, a transform error and an invalid bundle.
+	mcp_bundle_probe_seen=-1;mcp_bundle_probe_fail=false
+	http.mcp_bundle_transform_probe=mcp_bundle_probe
+	defer http.mcp_bundle_transform_probe=nil
+	held:=json.Object{"request_id"=json.String("bundle_held"),"name"=json.String("Held"),"entry"=json.String("index.html"),"files"=files}
+	testing.expect(t,mcp_task_test_output(t,mcp_resource_heap_call(h,headers,"artifacts.create",held))!=nil)
+	testing.expect_value(t,mcp_bundle_probe_seen,1)
+	testing.expect_value(t,http.mcp_bundle_slots_in_use(),0)
+	mcp_bundle_probe_seen=-1;mcp_bundle_probe_fail=true
+	held["request_id"]=json.String("bundle_transform_error")
+	failed:=mcp_resource_heap_call(h,headers,"artifacts.create",held).body
+	testing.expectf(t,strings.contains(failed,"decryption_unavailable"),"transform error surfaces: %s",failed)
+	testing.expect_value(t,mcp_bundle_probe_seen,1)
+	testing.expect_value(t,http.mcp_bundle_slots_in_use(),0)
+	mcp_bundle_probe_seen=-1;mcp_bundle_probe_fail=false
+	invalid:=json.Object{"request_id"=json.String("bundle_invalid_slot"),"name"=json.String("Bad"),"entry"=json.String("index.html"),"files"=json.Object{"other.html"=json.Object{"text"=json.String("x")}}}
+	testing.expect(t,strings.contains(mcp_resource_heap_call(h,headers,"artifacts.create",invalid).body,"invalid_bundle"))
+	testing.expect_value(t,mcp_bundle_probe_seen,-1)
+	testing.expect_value(t,http.mcp_bundle_slots_in_use(),0)
+	http.mcp_bundle_transform_probe=nil
 	mcp_artifact_bundle_large_test(t,h,headers)
 	// Changed input under the same request_id is a conflict, not a silent replay.
 	files["styles.css"]=json.Object{"text"=json.String("body {color:blue}")}
