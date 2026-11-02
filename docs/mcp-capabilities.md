@@ -61,7 +61,54 @@ request framing (base64 inside JSON, multipart, metadata) is bounded separately,
 so encryption or transport overhead never shrinks or stretches the 15 MiB. The
 MCP 65,536-byte inline `content` window and 128 KiB stored read window are
 narrower transport bounds of this connector, not a different artifact limit;
-create larger or binary artifacts with `ham-ctl artifact create --file`.
+create larger text or other binary artifacts with `ham-ctl artifact create --file`.
+
+### HTML bundles through `artifacts.create`
+
+`artifacts.create` also accepts a static site as `entry` + `files` instead of
+`content`/`content_type` (the two forms are exclusive):
+
+```json
+{"request_id":"site-1","name":"Report site","entry":"index.html",
+ "files":{"index.html":{"text":"<!doctype html>..."},
+          "styles.css":{"text":"body {...}"},
+          "logo.png":{"base64":"iVBORw0KGgo...","type":"image/png"}}}
+```
+
+Each member has exactly one of `text` (UTF-8) or `base64` (standard alphabet,
+padded, no whitespace) and an optional `type` that must match its extension. The
+path grammar, extension allowlist, reserved manifest name, nested-archive and
+file/directory rules are those of `docs/html-bundle-artifacts.md`, shared through
+`src/lib/html_bundle`. Budget: at most 999 files and **15 MiB = 15,728,640 decoded
+bytes** for the packed archive. Any rejection returns `invalid_bundle: <reason>`
+and stores nothing.
+
+Flow and trust boundary (the existing relay, explicitly authorized for this
+connector): the tool input reaches the Hub in plaintext as for every MCP write;
+the Hub validates and packs the existing manifest + stored-ZIP format
+(deterministic bytes) and sends the archive as `content_base64` in the normal
+signed `seal_resource` job to the approved unlocked device (browser worker or
+bridge) or, with hosted consent, the hosted keyring. The sealer re-validates the
+archive and seals the exact bytes with the current vault epoch; the Hub stores a
+normal `kind: html-bundle`, `application/zip`, `vault:v2:` artifact, so every
+authorized device lists, decrypts, previews and downloads it with the existing
+viewer and vault keys after the uploader disconnects. The bundle receipt digest
+(v2) binds `entry` plus the key-sorted `files`; text digests keep v1.
+
+Transport bounds for bundles only: MCP request body 48 MiB (every other tool
+is still refused above 512 KiB, after parsing); seal job payload and reply
+`base64(15 MiB) + 1 MiB` (`vault.control_job_payload_max` /
+`control_reply_max`, 4 MiB for every other job); worker/bridge reply envelope
++1 MiB. Relay deadlines, the 64-slot/4-per-owner broker and request registry
+are unchanged.
+
+**Current gaps (tracked on task_18e449b9e73aac5c):** the enrolled-bridge sealer still
+keeps its 1 MiB `mcp_transform` command/frame guards (and the WebSocket layer a
+16 MiB message cap), so a bundle job above ~1 MiB is not offered to a bridge and
+is served by an unlocked browser worker or hosted consent instead. `artifacts.get`
+does not yet return bundle bytes over MCP (it reports
+`content_error: unsupported_content_type`); download through the UI viewer or
+`ham-ctl artifact get`.
 
 Optional owned `project_id`, `chain_id`, `task_id`, `agent_id` and
 `agent_instance_id` establish native associations. Native consistency checks
@@ -118,7 +165,7 @@ conflict. Receipt replay does not re-seal content or recreate a deleted artifact
 The mutation result includes `resource_id`, `revision`, `state` and `link`.
 
 This increment accepts no filesystem paths, filenames to read, remote fetch URLs,
-base64/binary uploads, arbitrary metadata, origin fields or owner/actor overrides.
+base64/binary uploads other than `files` members of an HTML bundle, arbitrary metadata, origin fields or owner/actor overrides.
 An artifact's text is returned as data; MCP neither executes nor renders it.
 
 ## Agent definitions and target discovery

@@ -9,10 +9,10 @@ execution.
 
 | Path | How | Validation |
 |---|---|---|
-| ham-ctl | `artifact create --kind html-bundle --directory … \| --file …` (below) | `src/ctl/html_bundle.odin`, before sealing |
+| ham-ctl | `artifact create --kind html-bundle --directory … \| --file …` (below) | `src/lib/html_bundle` (format core shared with MCP) via `src/ctl/html_bundle.odin`, before sealing |
 | UI | Artifact upload button / composer: pick a `.zip` | `readHtmlBundle` in the browser before upload; a ZIP that is not a valid bundle (e.g. no manifest) is refused with the reason |
 | HTTP API | `POST /api/v1/artifacts` with `kind: "html-bundle"`, `mime: "application/zip"`, `content_base64` | The Hub stores the (usually vault-sealed) bytes opaquely; it cannot inspect sealed content, so validation happens in the producing client and again in the viewer |
-| MCP | `artifacts.list`/`artifacts.get` return bundle metadata (`kind`, `content_type: application/zip`, `size_bytes`); `get` with content reports `content_error: unsupported_content_type` | `artifacts.create` is text-only (64 KiB inline) and cannot create bundles; use ham-ctl or the UI |
+| MCP | `artifacts.create` with `entry` + `files` (`{"path":{"text"|"base64","type"?}}`), see `docs/mcp-capabilities.md`; `list`/`get` return bundle metadata (`kind`, `content_type: application/zip`, `size_bytes`) | The Hub validates and packs with `html_bundle_from_entry_files` (`src/lib/html_bundle`), the sealing device/hosted vault re-validates the archive before sealing its exact bytes, and the viewer validates again |
 
 Both ham-ctl and the UI seal the exact archive bytes when the vault is available
 (`encryptVaultBytes` in the UI), so **Download** returns the byte-identical ZIP.
