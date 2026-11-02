@@ -6,16 +6,28 @@ import domain "odin_test:hub/domain"
 // (docs/plans/mcp-large-artifact-transfers.md §11). It never sees plaintext.
 Transfer_Chunk_Visitor :: proc(user: rawptr, bytes: []byte) -> bool
 
+// Transfer_Quota bounds enforced atomically by the repository; 0 = unbounded.
+Transfer_Quota :: struct {
+	max_active:        int,
+	max_owner_staged:  i64,
+	max_global_staged: i64,
+}
+
 Transfer_Repository :: struct {
 	ctx: rawptr,
-	insert: proc(ctx: rawptr, t: domain.Mcp_Transfer) -> domain.Domain_Error,
+	// insert creates the row iff the owner is still under q (active transfers of
+	// t.direction and upload staged bytes), evaluated in the same statement so
+	// concurrent begins cannot overshoot; inserted=false means quota exceeded.
+	insert: proc(ctx: rawptr, t: domain.Mcp_Transfer, q: Transfer_Quota) -> (inserted: bool, err: domain.Domain_Error),
 	get: proc(ctx: rawptr, transfer_id: string) -> (domain.Mcp_Transfer, bool, domain.Domain_Error),
 	get_by_request: proc(ctx: rawptr, owner, client_id, request_id: string) -> (domain.Mcp_Transfer, bool, domain.Domain_Error),
 	get_by_token: proc(ctx: rawptr, token_sha256: string) -> (domain.Mcp_Transfer, bool, domain.Domain_Error),
 	rotate_token: proc(ctx: rawptr, transfer_id, token_sha256, touched_at: string) -> domain.Domain_Error,
-	// append_chunk stores bytes at offset iff received_bytes == offset and the state is
-	// receiving (CAS); ok=false means the offset moved or the state changed.
-	append_chunk: proc(ctx: rawptr, transfer_id: string, offset: i64, bytes: []byte, touched_at, expires_at: string) -> (bool, domain.Domain_Error),
+	// append_chunk stores bytes at offset iff received_bytes == offset, the state is
+	// receiving (CAS) and the owner/global staged sums plus len(bytes) stay within q,
+	// all in the same UPDATE; ok=false means the offset moved, the state changed or
+	// a staging quota would be exceeded.
+	append_chunk: proc(ctx: rawptr, transfer_id: string, offset: i64, bytes: []byte, touched_at, expires_at: string, q: Transfer_Quota) -> (bool, domain.Domain_Error),
 	visit_chunks: proc(ctx: rawptr, transfer_id: string, user: rawptr, visit: Transfer_Chunk_Visitor) -> domain.Domain_Error,
 	// set_state CAS: from -> to, optionally recording error; deletes chunks when to is terminal.
 	set_state: proc(ctx: rawptr, transfer_id, from, to, error, touched_at: string) -> (bool, domain.Domain_Error),

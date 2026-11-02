@@ -55,10 +55,19 @@ xfr_from_stmt :: proc(s: sqlite3_stmt) -> domain.Mcp_Transfer {
 }
 
 @(private = "file")
-xfr_insert :: proc(ctx: rawptr, x: domain.Mcp_Transfer) -> domain.Domain_Error {
+XFR_UNBOUNDED :: i64(1) << 62
+
+@(private = "file")
+xfr_bound :: proc(v: i64) -> i64 { return v > 0 ? v : XFR_UNBOUNDED }
+
+// The quota predicate is part of the INSERT so concurrent begins serialize on the
+// SQLite write lock and can never exceed it (check-then-act would).
+xfr_insert :: proc(ctx: rawptr, x: domain.Mcp_Transfer, q: iface.Transfer_Quota) -> (bool, domain.Domain_Error) {
 	impl := (^Transfer_Repo_SQLite)(ctx)
-	stmt, ok := xprep(impl, "INSERT INTO mcp_transfers (" + XFR_COLUMNS + ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);")
-	if !ok do return xerr("failed to prepare transfer insert")
+	stmt, ok := xprep(impl, "INSERT INTO mcp_transfers (" + XFR_COLUMNS + ") SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,? " +
+		"WHERE (SELECT COUNT(*) FROM mcp_transfers WHERE owner_user_id=?2 AND direction=?6 AND state IN ('receiving','sealed','ready','delivered')) < ?37 " +
+		"AND (SELECT COALESCE(SUM(received_bytes),0) FROM mcp_transfers WHERE owner_user_id=?2 AND direction='upload' AND state IN ('receiving','sealed')) < ?38;")
+	if !ok do return false, xerr("failed to prepare transfer insert")
 	defer sqlite3_finalize(stmt)
 	texts := []string{x.transfer_id, x.owner_user_id, x.client_id, x.grant_id, x.family_id, x.direction, x.state, x.error, x.token_sha256,
 		x.artifact_id, x.artifact_revision, x.request_id, x.request_digest, x.kind, x.content_type, x.ext, x.associations, x.vault_id}
@@ -69,8 +78,10 @@ xfr_insert :: proc(ctx: rawptr, x: domain.Mcp_Transfer) -> domain.Domain_Error {
 	for v, k in rest do bind_text(stmt, 24 + k, v)
 	bind_i64(stmt, 33, x.open_verified ? 1 : 0)
 	bind_text(stmt, 34, x.created_at); bind_text(stmt, 35, x.touched_at); bind_text(stmt, 36, x.expires_at)
-	if sqlite3_step(stmt) != SQLITE_DONE do return domain.domain_error(.Conflict, "transfer could not be created")
-	return {}
+	bind_i64(stmt, 37, xfr_bound(i64(q.max_active))); bind_i64(stmt, 38, xfr_bound(q.max_owner_staged))
+	rc, changed := step_changes(impl.conn.db, stmt)
+	if rc != SQLITE_DONE do return false, domain.domain_error(.Conflict, "transfer could not be created")
+	return changed == 1, {}
 }
 
 @(private = "file")
@@ -140,18 +151,21 @@ xfr_tx_end :: proc(impl: ^Transfer_Repo_SQLite, mu: rawptr, commit: bool) -> boo
 }
 
 @(private = "file")
-xfr_append_chunk :: proc(ctx: rawptr, id: string, offset: i64, bytes: []byte, touched_at, expires_at: string) -> (bool, domain.Domain_Error) {
+xfr_append_chunk :: proc(ctx: rawptr, id: string, offset: i64, bytes: []byte, touched_at, expires_at: string, q: iface.Transfer_Quota) -> (bool, domain.Domain_Error) {
 	impl := (^Transfer_Repo_SQLite)(ctx)
 	if len(bytes) == 0 do return false, domain.domain_error(.Validation_Failed, "empty chunk")
 	mu, began := xfr_tx_begin(impl)
 	if !began do return false, xerr("failed to begin transfer append")
-	upd, uok := xprep(impl, "UPDATE mcp_transfers SET received_bytes=received_bytes+?,touched_at=?,expires_at=CASE WHEN ?<expires_at THEN ? ELSE expires_at END WHERE transfer_id=? AND state='receiving' AND direction='upload' AND received_bytes=?;")
+	upd, uok := xprep(impl, "UPDATE mcp_transfers SET received_bytes=received_bytes+?,touched_at=?,expires_at=CASE WHEN ?<expires_at THEN ? ELSE expires_at END WHERE transfer_id=? AND state='receiving' AND direction='upload' AND received_bytes=? " +
+		"AND (SELECT COALESCE(SUM(o.received_bytes),0) FROM mcp_transfers o WHERE o.owner_user_id=mcp_transfers.owner_user_id AND o.direction='upload' AND o.state IN ('receiving','sealed'))+?1<=?7 " +
+		"AND (SELECT COALESCE(SUM(g.received_bytes),0) FROM mcp_transfers g WHERE g.direction='upload' AND g.state IN ('receiving','sealed'))+?1<=?8;")
 	if !uok {
 		xfr_tx_end(impl, mu, false)
 		return false, xerr("failed to prepare transfer append")
 	}
 	bind_i64(upd, 1, i64(len(bytes))); bind_text(upd, 2, touched_at); bind_text(upd, 3, expires_at); bind_text(upd, 4, expires_at)
 	bind_text(upd, 5, id); bind_i64(upd, 6, offset)
+	bind_i64(upd, 7, xfr_bound(q.max_owner_staged)); bind_i64(upd, 8, xfr_bound(q.max_global_staged))
 	urc, changed := step_changes(impl.conn.db, upd)
 	sqlite3_finalize(upd)
 	if urc != SQLITE_DONE || changed != 1 {

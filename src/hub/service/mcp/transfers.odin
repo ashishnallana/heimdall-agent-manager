@@ -249,8 +249,17 @@ transfer_upload_begin :: proc(s: ^Transfer_Service, who: Transfer_Caller, in_: U
 		vault_id = vid, epoch = i64(epoch),
 		created_at = transfer_time(now), touched_at = transfer_time(now), expires_at = transfer_time(now + contracts.ARTIFACT_TRANSFER_ABSOLUTE_TTL_MS),
 	}
-	if err := s.repo.insert(s.repo.ctx, x); err.code != .None do return {}, "", fail(.Conflict, "conflict")
+	inserted, ierr := s.repo.insert(s.repo.ctx, x, {max_active = contracts.ARTIFACT_TRANSFER_MAX_UPLOADS_PER_OWNER, max_owner_staged = contracts.ARTIFACT_TRANSFER_STAGED_MAX_PER_OWNER})
+	if ierr.code != .None do return {}, "", fail(.Conflict, "conflict")
+	if !inserted do return {}, "", quota_exceeded()
 	return x, token, {}
+}
+
+// quota_exceeded: a retryable owner/global quota refusal (§7).
+@(private = "file")
+quota_exceeded :: proc() -> Transfer_Fail {
+	f := fail(.Rate_Limited, "quota_exceeded", true); f.retry_after_ms = contracts.ARTIFACT_TRANSFER_RETRY_AFTER_MS
+	return f
 }
 
 @(private = "file")
@@ -315,7 +324,9 @@ transfer_download_begin :: proc(s: ^Transfer_Service, who: Transfer_Caller, requ
 		received_bytes = total, ciphertext_bytes = total, ciphertext_sha256 = vault.hex_encode_lower(digest[:], context.temp_allocator),
 		created_at = transfer_time(now), touched_at = transfer_time(now), expires_at = transfer_time(now + contracts.ARTIFACT_TRANSFER_ABSOLUTE_TTL_MS),
 	}
-	if err := s.repo.insert(s.repo.ctx, x); err.code != .None do return {}, "", fail(.Conflict, "conflict")
+	inserted, ierr := s.repo.insert(s.repo.ctx, x, {max_active = contracts.ARTIFACT_TRANSFER_MAX_DOWNLOADS_PER_OWNER})
+	if ierr.code != .None do return {}, "", fail(.Conflict, "conflict")
+	if !inserted do return {}, "", quota_exceeded()
 	return x, token, {}
 }
 
@@ -386,10 +397,17 @@ transfer_append :: proc(s: ^Transfer_Service, x: domain.Mcp_Transfer, offset: i6
 	rest := bytes
 	for len(rest) > 0 {
 		k := min(len(rest), contracts.ARTIFACT_TRANSFER_STORE_CHUNK_BYTES)
-		ok, err := s.repo.append_chunk(s.repo.ctx, x.transfer_id, pos, rest[:k], transfer_time(now), x.expires_at)
+		// The quota is re-enforced inside the append UPDATE: the check above is a
+		// fast path, concurrent appends cannot overshoot the staged caps.
+		ok, err := s.repo.append_chunk(s.repo.ctx, x.transfer_id, pos, rest[:k], transfer_time(now), x.expires_at,
+			{max_owner_staged = contracts.ARTIFACT_TRANSFER_STAGED_MAX_PER_OWNER, max_global_staged = gmax})
 		if err.code != .None do return pos, fail(.Internal_Error, "internal")
 		if !ok {
 			cur, _, _ := s.repo.get(s.repo.ctx, x.transfer_id)
+			if cur.state == domain.MCP_TRANSFER_RECEIVING && cur.received_bytes == pos {
+				f := quota_exceeded(); f.offset = pos
+				return pos, f
+			}
 			f := fail(.Conflict, "offset_mismatch"); f.offset = cur.received_bytes
 			return cur.received_bytes, f
 		}
