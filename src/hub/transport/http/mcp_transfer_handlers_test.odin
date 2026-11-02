@@ -105,7 +105,7 @@ test_transfer_http_data_path :: proc(t: ^testing.T) {
 	base := strings.concatenate({MCP_TRANSFERS_PATH, "/", x.transfer_id}, context.temp_allocator)
 	ct := strings.concatenate({base, "/ciphertext"}, context.temp_allocator)
 
-	pt := make([]byte, 3000)
+	pt := make([]byte, 1_800_000) // token > 2 MiB: downloads span several 1 MiB windows
 	for i in 0 ..< len(pt) do pt[i] = byte(i * 13)
 	tok, _ := vault.seal_with_key(pt, f.key[:], f.dir.vault_id, 3)
 
@@ -162,9 +162,27 @@ test_transfer_http_data_path :: proc(t: ^testing.T) {
 	dx, dtoken, df := mcp.transfer_download_begin(&f.svc, who, "rd", "d", x.artifact_id)
 	testing.expect_value(t, df.reason, "")
 	dct := strings.concatenate({MCP_TRANSFERS_PATH, "/", dx.transfer_id, "/ciphertext"}, context.temp_allocator)
+	// A GET never carries more than one 1 MiB window (§7): the first answer is a
+	// 206 for [0, 1 MiB) and the client continues with Range until the end. Only
+	// the pass starting at offset 0 counts against max_fetches.
 	g := call(&f, "GET", dct, dtoken, "")
-	testing.expect_value(t, g.status, 200)
-	testing.expect(t, g.body == tok, "served bytes are the stored token")
+	testing.expect_value(t, g.status, 206)
+	testing.expect_value(t, len(g.body), int(TRANSFER_GET_WINDOW_BYTES))
+	testing.expect_value(t, hdr(g, "Content-Range"), fmt.tprintf("bytes 0-%d/%d", TRANSFER_GET_WINDOW_BYTES - 1, len(tok)))
+	got := strings.builder_make(context.temp_allocator)
+	strings.write_string(&got, g.body)
+	windows := 1
+	for strings.builder_len(got) < len(tok) {
+		w := call(&f, "GET", dct, dtoken, "", contracts.HTTP_Header{"Range", fmt.tprintf("bytes=%d-", strings.builder_len(got))})
+		if !testing.expect_value(t, w.status, 206) do break
+		if !testing.expect(t, len(w.body) > 0 && i64(len(w.body)) <= TRANSFER_GET_WINDOW_BYTES) do break
+		strings.write_string(&got, w.body)
+		windows += 1
+	}
+	testing.expect(t, strings.to_string(got) == tok, "windowed bytes are the stored token")
+	testing.expect_value(t, windows, (len(tok) + int(TRANSFER_GET_WINDOW_BYTES) - 1) / int(TRANSFER_GET_WINDOW_BYTES))
+	counted, _, _ := f.repo.get(f.repo.ctx, dx.transfer_id)
+	testing.expect_value(t, counted.fetches, i64(1)) // one full pass = one fetch
 	testing.expect_value(t, hdr(g, "Content-Disposition"), "attachment")
 	testing.expect_value(t, hdr(g, "X-Content-Type-Options"), "nosniff")
 	testing.expect_value(t, hdr(g, "Referrer-Policy"), "no-referrer")
@@ -174,7 +192,7 @@ test_transfer_http_data_path :: proc(t: ^testing.T) {
 	testing.expect(t, part.body == tok[10:20])
 	testing.expect_value(t, call(&f, "GET", dct, dtoken, "", contracts.HTTP_Header{"Range", "bytes=0-1,5-6"}).status, 416)
 	testing.expect_value(t, call(&f, "PATCH", dct, dtoken, "x", contracts.HTTP_Header{"Upload-Offset", "0"}).status, 405)
-	for _ in 0 ..< contracts.ARTIFACT_TRANSFER_MAX_FETCHES - 2 do call(&f, "GET", dct, dtoken, "")
+	for _ in 0 ..< contracts.ARTIFACT_TRANSFER_MAX_FETCHES - 1 do testing.expect_value(t, call(&f, "GET", dct, dtoken, "").status, 206)
 	testing.expect_value(t, call(&f, "GET", dct, dtoken, "").status, 429)
 
 	// Revoked grant -> 401 and the transfer is failed.

@@ -204,10 +204,17 @@ mcp_transfer_handler :: proc(ctx: rawptr, req: Request) -> Response {
 			if !rok do return xfr_error(416, "range_not_satisfiable", contracts.HTTP_Header{"Content-Range", fmt.tprintf("bytes */%d", x.ciphertext_bytes)})
 			start, end, status = s, e, 206
 		}
+		// Design §7: one response is at most one 1 MiB window, so a data-path slot
+		// holds <= 1 MiB of response body. Larger requests get a 206 for the first
+		// window; clients continue with Range from Content-Range's end + 1.
+		if end - start + 1 > TRANSFER_GET_WINDOW_BYTES {
+			end = start + TRANSFER_GET_WINDOW_BYTES - 1
+			status = 206
+		}
 		if !mcp.transfer_owner_get_acquire(h.svc, x.owner_user_id) do return fail_response(mcp.rate_limited())
 		defer mcp.transfer_owner_get_release(h.svc, x.owner_user_id)
-		if f := mcp.transfer_fetch_begin(h.svc, x); !mcp.transfer_ok(f) do return fail_response(f)
-		// Assembled from <= 1 MiB substr() windows; never a full-value SQLite copy.
+		if f := mcp.transfer_fetch_begin(h.svc, x, start == 0); !mcp.transfer_ok(f) do return fail_response(f)
+		// One <= 1 MiB substr() window; never a full-value SQLite copy.
 		body := make([]byte, int(end - start + 1), context.temp_allocator)
 		pos := 0
 		for pos < len(body) {

@@ -37,6 +37,8 @@ artifact_request_too_large :: proc(req: Request) -> (domain.Domain_Error, bool) 
 // 80 MiB reader cap.
 TRANSFER_PUT_MAX_BYTES   :: contracts.ARTIFACT_TRANSFER_CIPHERTEXT_MAX_BYTES
 TRANSFER_PATCH_MAX_BYTES :: contracts.ARTIFACT_TRANSFER_CHUNK_MAX_BYTES
+// A single download response carries at most one stored window (design §7).
+TRANSFER_GET_WINDOW_BYTES :: i64(contracts.ARTIFACT_TRANSFER_STORE_CHUNK_BYTES)
 TRANSFER_JSON_MAX_BYTES  :: contracts.ARTIFACT_TRANSFER_JSON_MAX_BYTES
 #assert(TRANSFER_PUT_MAX_BYTES == ARTIFACT_MAX_STORED_BYTES)
 #assert(TRANSFER_PUT_MAX_BYTES < 80 * 1024 * 1024)

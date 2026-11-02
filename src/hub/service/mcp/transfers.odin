@@ -562,9 +562,11 @@ transfer_commit :: proc(s: ^Transfer_Service, who: Transfer_Caller, transfer_id:
 
 // ── Download data ──
 
-// transfer_fetch_begin counts one GET against max_fetches and confirms the artifact
-// still holds exactly the bound ciphertext (deleted -> Gone).
-transfer_fetch_begin :: proc(s: ^Transfer_Service, x: domain.Mcp_Transfer) -> Transfer_Fail {
+// transfer_fetch_begin confirms the artifact still holds exactly the bound
+// ciphertext (deleted -> Gone) and, when count is set (a read pass starting at
+// offset 0), counts one fetch against max_fetches. Responses are <= 1 MiB windows,
+// so a full 15 MiB read is ~21 GETs but one fetch.
+transfer_fetch_begin :: proc(s: ^Transfer_Service, x: domain.Mcp_Transfer, count := true) -> Transfer_Fail {
 	if x.direction != domain.MCP_TRANSFER_DOWNLOAD do return fail(.Validation_Failed, "wrong_direction")
 	if x.state != domain.MCP_TRANSFER_READY && x.state != domain.MCP_TRANSFER_DELIVERED do return fail(.Gone, x.state)
 	one: [1]byte
@@ -574,6 +576,7 @@ transfer_fetch_begin :: proc(s: ^Transfer_Service, x: domain.Mcp_Transfer) -> Tr
 		s.repo.set_state(s.repo.ctx, x.transfer_id, x.state, domain.MCP_TRANSFER_FAILED, "artifact_gone", transfer_time(now_ms(s)))
 		return fail(.Gone, "artifact_gone")
 	}
+	if !count do return {}
 	ok, cerr := s.repo.count_fetch(s.repo.ctx, x.transfer_id, contracts.ARTIFACT_TRANSFER_MAX_FETCHES, transfer_time(now_ms(s)))
 	if cerr.code != .None do return fail(.Internal_Error, "internal")
 	if !ok do return fail(.Rate_Limited, "max_fetches")
