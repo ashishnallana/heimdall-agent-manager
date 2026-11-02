@@ -53,7 +53,7 @@ new_taskchain_repository :: proc(impl: ^Taskchain_Repo_SQLite, conn: ^Conn) -> i
 		take_boot_regate = taskchain_take_boot_regate_sqlite,
 		append_event = task_event_append_sqlite,
 		list_events_by_task = task_event_list_by_task_sqlite,
-		list_events_by_chain = task_event_list_by_chain_sqlite,
+		list_fold_events_by_chain = task_fold_event_list_by_chain_sqlite,
 		save_attempt = task_attempt_save_sqlite,
 		list_attempts_by_task = task_attempt_list_by_task_sqlite,
 		save_facet = task_attempt_facet_save_sqlite,

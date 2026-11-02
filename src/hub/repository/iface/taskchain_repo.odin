@@ -94,7 +94,7 @@ Taskchain_Repository :: struct {
 	take_boot_regate: Take_Boot_Regate_Proc,
 	append_event: Task_Event_Append_Proc,
 	list_events_by_task: Task_Event_List_By_Task_Proc,
-	list_events_by_chain: Task_Event_List_By_Chain_Proc,
+	list_fold_events_by_chain: Task_Event_List_By_Chain_Proc,
 	save_attempt: Task_Attempt_Save_Proc,
 	list_attempts_by_task: Task_Attempt_List_By_Task_Proc,
 	save_facet: Task_Attempt_Facet_Save_Proc,
