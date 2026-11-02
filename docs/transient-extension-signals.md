@@ -58,15 +58,25 @@ launch (`src/bridge/context_window.odin`) from, in order:
 The shipped map (first match wins; `src/bridge/context_window_test.odin`
 resolves every id below):
 
-| Provider | `model_regex` | Window | Why |
-| --- | --- | --- | --- |
-| claude | `.*\[1m\].*` | 1000000 | explicit 1M variant |
-| claude | `.*haiku-4-5.*` | 200000 | no 1M variant |
-| claude | `.*(opus\|sonnet)-4-6.*` | 200000 | Claude Code needs `[1m]` for 1M on these |
-| claude | `(default\|opus\|sonnet\|haiku\|fable)` | 1000000 | aliases; on the Anthropic API they resolve to the 5.5 / 5.1 models |
-| claude | `claude-(opus\|sonnet\|haiku\|fable)-(5\|4-7\|4-8).*` | 1000000 | Claude 5.x and Opus 4.7+ run at a native 1M in Claude Code |
-| codex | `gpt-6\.1-(sol\|terra).*` | 475000 | Codex `model_context_window`, 95% of 500K (observed on this host) |
-| codex | `gpt-.*` | 258400 | 95% of Codex's default 272K; conservative for the rest |
+| Provider | `model_regex` | Window | Why | Source / confidence |
+| --- | --- | --- | --- | --- |
+| claude | `.*\[1m\].*` | 1000000 | explicit 1M variant | Anthropic docs |
+| claude | `.*haiku-4-5.*` | 200000 | no 1M variant | Anthropic docs |
+| claude | `.*(opus\|sonnet)-4-6.*` | 200000 | Claude Code needs `[1m]` for 1M on these | Claude Code model-config docs |
+| claude | `(default\|opus\|sonnet\|haiku\|fable)` | 1000000 | aliases; on the Anthropic API they resolve to the 5.5 / 5.1 models | Claude Code model-config docs |
+| claude | `claude-(opus\|sonnet\|haiku\|fable)-(5\|4-7\|4-8).*` | 1000000 | Claude 5.x and Opus 4.7+ run at a native 1M in Claude Code | Anthropic docs |
+| codex | `gpt-6\.1-(sol\|terra).*` | 475000 | Codex `model_context_window`, 95% of 500K (observed on this host) | Codex rollout on this host |
+| codex | `gpt-.*` | 258400 | 95% of Codex's default 272K; conservative for the rest | openai/codex issue 53336; conservative |
+| pi | `anthropic/claude-(opus\|sonnet\|haiku)-4-5.*` | 200000 | Claude 4.5 models | `pi --list-models`; authoritative |
+| pi | `anthropic/.*` | 1000000 | every other Anthropic model in pi, including opus/sonnet-4-6 | `pi --list-models`; authoritative |
+| pi | `openai-codex/gpt-5\.3-codex-spark.*` | 128000 | Codex Spark | `pi --list-models`; authoritative |
+| pi | `openai-codex/.*` | 272000 | gpt-5.5, 5.6-\*, 6-\*, 6.1-sol | `pi --list-models`; authoritative |
+| pi | `zai/glm-4\.7.*` | 204800 | GLM-4.7 | `pi --list-models`; authoritative |
+| pi | `zai/glm-5-turbo.*` | 200000 | GLM-5 Turbo | `pi --list-models`; authoritative |
+| pi | `zai/glm-5\..*` | 1000000 | glm-5.2, 5.2-highspeed, 5.3, 5.3-flash, 5.3-highspeed | `pi --list-models`; authoritative |
+| antigravity | `gemini-.*` | 256000 | native 1048576, but a 256K platform compression limit is reported | Google model docs + third-party monitor; conservative |
+| antigravity | `claude-.*` | 200000 | in-app limit unknown | undocumented; conservative |
+| antigravity | `gpt-oss-120b.*` | 131072 | native gpt-oss-120b window | model card; in-app limit unknown |
 
 Any other Claude id gets the 200000 default, the same assumption Claude Code
 makes for a model it does not know. Sources: the Anthropic platform docs
@@ -75,6 +85,16 @@ and openai/codex issue 53336 for Codex's effective window. Caveat: a Claude
 Code launched with `CLAUDE_CODE_DISABLE_1M_CONTEXT=1` runs those models at
 200K; the bridge cannot see that, so set a 200000 override for the model on
 that bridge.
+
+Pi and Antigravity rows come from dawnstar's `provider_models.json` and
+`pi --list-models`, read on 2026-11-02 (agy 1.2.16). Pi ids are
+`<provider>/<model>`, and pi's own registry gives the windows, so those rows
+are authoritative. Antigravity does not document its in-app limit: the rows are
+set low so rollover fires before the platform compacts. Pi has no Heimdall
+extension yet, so the bridge gets no `context_tokens` for a Pi agent; its rows
+take effect once a Pi usage source exists, and until then the byte estimate
+applies. Copilot is not in the map (no models were listed; it needed
+authentication on dawnstar).
 
 The hub drives overrides with the `context_window_op` frame
 `{command_id, op: list|set|clear, provider?, model?, context_window?}`. The

@@ -37,7 +37,7 @@ test_ctxwin_shipped_config_parses_every_entry :: proc(t: ^testing.T) {
 	c: Bridge_Context_Window_Config
 	testing.expect(t, bridge_context_window_parse_config(BRIDGE_CONTEXT_WINDOWS_EMBEDDED, &c))
 	defer bridge_context_window_config_destroy(&c)
-	testing.expect_value(t, len(c.entries), 7) // no shipped regex may fail to compile
+	testing.expect_value(t, len(c.entries), 17) // no shipped regex may fail to compile
 	testing.expect_value(t, c.default_window, i64(200_000))
 	testing.expect_value(t, c.default_window, i64(BRIDGE_EXT_TOKEN_DEFAULT_WINDOW))
 	testing.expect_value(t, c.warn_pct, 40)
@@ -67,7 +67,7 @@ test_ctxwin_regex_match_order_and_default :: proc(t: ^testing.T) {
 	testing.expect_value(t, r, Bridge_Context_Window_Resolution{200_000, .Default})
 	r = bridge_context_window_resolve("claude", "gpt-5")
 	testing.expect_value(t, r, Bridge_Context_Window_Resolution{200_000, .Default})
-	r = bridge_context_window_resolve("pi", "anthropic/claude-opus")
+	r = bridge_context_window_resolve("copilot", "anthropic/claude-opus") // provider with no entries
 	testing.expect_value(t, r, Bridge_Context_Window_Resolution{200_000, .Default})
 	r = bridge_context_window_resolve("", "")
 	testing.expect_value(t, r, Bridge_Context_Window_Resolution{200_000, .Default})
@@ -204,7 +204,7 @@ test_ctxwin_op_frame_list_set_clear :: proc(t: ^testing.T) {
 	testing.expect_value(t, root["rollover_pct"].(json.Integer), 70)
 	testing.expect_value(t, root["default_window"].(json.Integer), 200000)
 	testing.expect_value(t, root["min_window"].(json.Integer), 100000)
-	testing.expect_value(t, len(root["entries"].(json.Array)), 7)
+	testing.expect_value(t, len(root["entries"].(json.Array)), 17)
 	overrides := root["overrides"].(json.Array)
 	testing.expect_value(t, len(overrides), 1)
 	found := false
@@ -323,6 +323,28 @@ test_ctxwin_shipped_map_known_model_ids :: proc(t: ^testing.T) {
 		// Unknown Claude ids get the default, as Claude Code assumes.
 		{"claude", "claude-mystery-9", {200_000, .Default}},
 		{"claude", "claude-opus-4-5", {200_000, .Default}},
+		// Pi: ids are <provider>/<model>; windows from `pi --list-models`.
+		{"pi", "anthropic/claude-opus-4-5", {200_000, .Config}},
+		{"pi", "anthropic/claude-sonnet-4-6", {1_000_000, .Config}},
+		{"pi", "openai-codex/gpt-5.3-codex-spark", {128_000, .Config}},
+		{"pi", "openai-codex/gpt-6.1-sol", {272_000, .Config}},
+		{"pi", "zai/glm-4.7", {204_800, .Config}},
+		{"pi", "zai/glm-5-turbo", {200_000, .Config}},
+		{"pi", "zai/glm-5.3-flash", {1_000_000, .Config}},
+		// Antigravity: conservative (in-app limit undocumented).
+		{"antigravity", "gemini-4-argon-high", {256_000, .Config}},
+		{"antigravity", "claude-opus-5-5-medium", {200_000, .Config}},
+		{"antigravity", "gpt-oss-120b-medium", {131_072, .Config}},
+		// Escaped dots stay literal; unknown pi providers get the default.
+		{"pi", "zai/glm-4x7", {200_000, .Default}},
+		{"pi", "zai/glm-5x2", {200_000, .Default}},
+		{"pi", "google/gemini-4-argon", {200_000, .Default}},
+		// Pi/Antigravity regexes never leak into claude/codex (and vice versa).
+		{"claude", "anthropic/claude-opus-5-5", {200_000, .Default}},
+		{"codex", "openai-codex/gpt-6.1-sol", {200_000, .Default}},
+		{"codex", "gpt-oss-120b-medium", {258_400, .Config}},
+		{"claude", "claude-opus-5-5-medium", {1_000_000, .Config}},
+		{"antigravity", "gpt-6.1-sol", {200_000, .Default}},
 	}
 	for c in cases {
 		got := bridge_context_window_resolve(c.provider, c.model)
