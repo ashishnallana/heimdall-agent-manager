@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mcpWorkerFixture } from './helpers/mcpWorkerFixture.ts';
-import { verifyMcpWorkerJob, transformMcpWorkerJob, mcpJobDigest, mcpJobScopeAllowed } from '../src/ui/utils/mcpWorker.ts';
+import { verifyMcpWorkerJob, transformMcpWorkerJob, mcpJobDigest, mcpJobScopeAllowed, mcpJobDeadlineMaxMs, MCP_JOB_ARTIFACT_DEADLINE_MAX_MS, MCP_JOB_DEADLINE_MAX_MS } from '../src/ui/utils/mcpWorker.ts';
 import { decryptVaultBytes } from '../src/ui/utils/vaultContent.ts';
 
 test('requirement changes seal their reason and extended reads decrypt history without changing acknowledgement metadata', async () => {
@@ -197,4 +197,15 @@ test('browser worker is off by default, registers only on explicit opt-in, and w
   while (!registrations.some(r => r.enabled === false) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 5));
   assert.equal(registrations.at(-1).enabled, false);
   assert.equal(registrations.at(-1).generation, registrations[0].generation);
+});
+
+test('MCP job deadline window: 20 s only for html-bundle capable artifact jobs (mirrors vault.control_job_deadline_max_ms)', () => {
+  assert.equal(MCP_JOB_DEADLINE_MAX_MS, 5000);
+  assert.equal(MCP_JOB_ARTIFACT_DEADLINE_MAX_MS, 20000);
+  assert.equal(mcpJobDeadlineMaxMs('seal_resource', 'artifacts.create'), 20000);
+  assert.equal(mcpJobDeadlineMaxMs('read', 'artifacts.get'), 20000);
+  assert.equal(mcpJobDeadlineMaxMs('read', 'artifacts.list'), 5000);
+  assert.equal(mcpJobDeadlineMaxMs('seal_resource', 'memories.create'), 5000);
+  assert.equal(mcpJobDeadlineMaxMs('read', 'chains.get'), 5000);
+  assert.equal(mcpJobDeadlineMaxMs('seal'), 5000);
 });

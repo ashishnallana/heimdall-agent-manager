@@ -55,6 +55,17 @@ control_data_payload_max :: proc(data:Control_Data)->int {
 	}
 	return CONTROL_JOB_PAYLOAD_MAX
 }
+// Device job deadlines. Ordinary jobs keep the 5 s window. artifacts.create
+// seal_resource and artifacts.get read jobs can carry an html-bundle (~21 MiB
+// base64 each way), so the Hub may give them up to 20 s, still inside the 30 s
+// MCP request window. Verifiers reject anything further out.
+CONTROL_JOB_DEADLINE_MAX_MS :: 5000
+CONTROL_JOB_ARTIFACT_DEADLINE_MAX_MS :: 20000
+#assert(CONTROL_JOB_ARTIFACT_DEADLINE_MAX_MS<30000)
+control_job_deadline_max_ms :: proc(operation,tool:string)->i64 {
+	if control_job_payload_max(operation,tool)>CONTROL_JOB_PAYLOAD_MAX do return CONTROL_JOB_ARTIFACT_DEADLINE_MAX_MS
+	return CONTROL_JOB_DEADLINE_MAX_MS
+}
 // Reply bound: a bundle seal returns the armored archive token (~base64 size).
 control_reply_max :: proc(operation,tool:string)->int {return control_job_payload_max(operation,tool)}
 control_job_digest :: proc(job:Control_Job)->string {
@@ -66,7 +77,7 @@ control_job_digest :: proc(job:Control_Job)->string {
 	return sha256_hex(string(encoded))
 }
 control_job_verify :: proc(job:Control_Job,owner,resource,device_id:string,kr:^Vault_Keyring,now:i64,root_pin:^Root_Pin=nil)->bool {
-	if job.owner!=owner || job.resource!=resource || job.request_id=="" || !valid_id_value(job.request_id) || job.generation=="" || !valid_id_value(job.generation) || job.deadline_ms<=now || job.deadline_ms>now+5000 || len(job.payload)>control_job_payload_max(job.operation,job.tool) || job.digest!=control_job_digest(job) || (job.operation!="read" && job.operation!="seal" && job.operation!="seal_comment" && job.operation!="seal_task" && job.operation!="seal_agent" && job.operation!="seal_resource") do return false
+	if job.owner!=owner || job.resource!=resource || job.request_id=="" || !valid_id_value(job.request_id) || job.generation=="" || !valid_id_value(job.generation) || job.deadline_ms<=now || job.deadline_ms>now+control_job_deadline_max_ms(job.operation,job.tool) || len(job.payload)>control_job_payload_max(job.operation,job.tool) || job.digest!=control_job_digest(job) || (job.operation!="read" && job.operation!="seal" && job.operation!="seal_comment" && job.operation!="seal_task" && job.operation!="seal_agent" && job.operation!="seal_resource") do return false
 	c:Control_Consent
 	if json.unmarshal_string(job.consent,&c,.JSON,context.temp_allocator)!=nil do return false
 	if !control_job_scope_ok(c.scope,job.tool,job.operation) do return false

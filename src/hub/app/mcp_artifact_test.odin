@@ -161,6 +161,21 @@ mcp_artifact_bundle_test :: proc(t:^testing.T,g:^App_Graph,h:^http.MCP_Control_H
 		checked,err:=hb.html_bundle_from_zip(archive,"",context.temp_allocator)
 		testing.expect(t,err=="" && checked.entry=="index.html")
 	}
+	// Hub-wide bundle bound: with both slots held, a third bundle create and a
+	// bundle download answer busy (retryable); text artifacts are unaffected.
+	testing.expect_value(t,http.mcp_bundle_slots_in_use(),0)
+	for _ in 0..<http.MCP_BUNDLE_MAX_CONCURRENT do testing.expect(t,http.mcp_bundle_slot_acquire())
+	testing.expect(t,!http.mcp_bundle_slot_acquire())
+	busy_create:=json.Object{"request_id"=json.String("bundle_busy"),"name"=json.String("Busy"),"entry"=json.String("index.html"),"files"=files}
+	busy:=mcp_resource_heap_call(h,headers,"artifacts.create",busy_create).body
+	testing.expectf(t,strings.contains(busy,"busy: html-bundle capacity"),"third bundle create: %s",busy)
+	busy_get:=http.mcp_control_handler(h,{method="POST",path="/api/v1/mcp",headers=headers,body=strings.concatenate({`{"jsonrpc":"2.0","id":78,"method":"tools/call","params":{"name":"artifacts.get","arguments":{"artifact_id":"`,id,`","include_content":true}}}`},context.temp_allocator)}).body
+	testing.expectf(t,strings.contains(busy_get,"busy: html-bundle capacity"),"bundle download while full: %s",busy_get)
+	text_ok:=mcp_resource_heap_call(h,headers,"artifacts.create",json.Object{"request_id"=json.String("text_while_busy"),"name"=json.String("Note.md"),"content"=json.String("# still fine"),"content_type"=json.String("text/markdown")})
+	testing.expect(t,mcp_task_test_output(t,text_ok)!=nil,"text artifacts are not bundle-bounded")
+	for _ in 0..<http.MCP_BUNDLE_MAX_CONCURRENT do http.mcp_bundle_slot_release()
+	testing.expect(t,mcp_task_test_output(t,mcp_resource_heap_call(h,headers,"artifacts.create",busy_create))!=nil,"retry after release succeeds")
+	testing.expect_value(t,http.mcp_bundle_slots_in_use(),0)
 	mcp_artifact_bundle_large_test(t,h,headers)
 	// Changed input under the same request_id is a conflict, not a silent replay.
 	files["styles.css"]=json.Object{"text"=json.String("body {color:blue}")}

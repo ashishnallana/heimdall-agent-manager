@@ -335,3 +335,59 @@ test_mcp_control_url_only_http_forwarding_and_sensitive_response :: proc(t:^test
 	wire:=strings.to_string(response)
 	testing.expect(t,strings.has_prefix(wire,"HTTP/1.1 200") && strings.contains(wire,"Cache-Control: no-store") && strings.contains(wire,"usr_alice_fixture secret") && !strings.contains(wire,"vault:v2:"))
 }
+
+mcp_large_body :: proc(prefix,suffix:string)->string {
+	pad:=strings.repeat("x",MCP_CONTROL_MAX_BODY_BYTES+1024,context.temp_allocator)
+	return strings.concatenate({prefix,pad,suffix},context.temp_allocator)
+}
+// Bodies over 512 KiB that are not an artifacts.create bundle are refused with
+// -32602 and never reach a single-value type assertion (which would panic the Hub).
+@(test)
+test_mcp_control_large_body_non_bundle_shapes_are_refused_without_panic :: proc(t:^testing.T) {
+	context.allocator=context.temp_allocator
+	f:=mcp_control_fixture(t);defer mcp_control_close(f)
+	bodies:=[]string{
+		// (a) no arguments at all (passes the substring pre-gate via params.files)
+		mcp_large_body(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"artifacts.create","files":{},"pad":"`,`"}}`),
+		// (b) arguments is a string
+		mcp_large_body(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"artifacts.create","arguments":"x","files":{},"pad":"`,`"}}`),
+		// (c) another tool carrying a files object
+		mcp_large_body(`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"tasks.get","arguments":{"files":{}},"tag":"artifacts.create","pad":"`,`"}}`),
+		// (d) artifacts.create without files in arguments
+		mcp_large_body(`{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"artifacts.create","arguments":{"request_id":"r","name":"n"},"files":0,"pad":"`,`"}}`),
+		// (e) arguments.files is not an object
+		mcp_large_body(`{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"artifacts.create","arguments":{"files":"x"},"pad":"`,`"}}`),
+		// (f) name is a huge string: refused by the pre-parse gate
+		mcp_large_body(`{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"`,`"}}`),
+		// (g) non-call method over 512 KiB: refused by the pre-parse gate
+		mcp_large_body(`{"jsonrpc":"2.0","id":7,"method":"tools/list","params":{"pad":"`,`"}}`),
+	}
+	for body,i in bodies {
+		resp:=mcp_control_request(&f.h,f.token,body)
+		testing.expectf(t,resp.status==200 && strings.contains(resp.body,"-32602") && strings.contains(resp.body,"request_too_large"),"case %d: %d %s",i,resp.status,resp.body)
+	}
+	// A small call with non-object arguments is still the ordinary invalid-arguments error.
+	small:=mcp_control_request(&f.h,f.token,`{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"artifacts.create","arguments":"x"}}`)
+	testing.expectf(t,strings.contains(small.body,"-32602"),"small: %s",small.body)
+}
+// The Anthropic Messages API rejects input_schema with oneOf/allOf/anyOf (and not)
+// at the top level; claude.ai passes MCP tool schemas through to it.
+@(test)
+test_mcp_tools_catalog_has_no_top_level_schema_combinators :: proc(t:^testing.T) {
+	tools,err:=json.parse_string(#load("mcp_tools.json",string),parse_integers=true,allocator=context.temp_allocator)
+	testing.expect(t,err==nil)
+	catalog,_:=tools.(json.Array)
+	testing.expect(t,len(catalog)>0)
+	for value in catalog {
+		tool,_:=value.(json.Object)
+		name,_:=tool["name"].(json.String)
+		schema,typed:=tool["inputSchema"].(json.Object)
+		testing.expectf(t,typed,"%s: inputSchema missing",name)
+		for key in ([]string{"oneOf","anyOf","allOf","not","if","then","else"}) {
+			_,present:=schema[key]
+			testing.expectf(t,!present,"%s: top-level %s in inputSchema",name,key)
+		}
+		kind,_:=schema["type"].(json.String)
+		testing.expectf(t,string(kind)=="object","%s: inputSchema type %s",name,kind)
+	}
+}

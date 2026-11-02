@@ -7,6 +7,13 @@ import { kindPolicy, signP256, verifySignature } from './vaultStatements.ts';
 import { sha256HexOfText } from './vaultRequestSigner.ts';
 import { decryptVaultBytes, encryptVaultText, findVaultTokens, replaceVaultTokens, VAULT_TOKEN_RE } from './vaultContent.ts';
 
+// Mirrors vault.control_job_deadline_max_ms: html-bundle capable artifact jobs
+// (artifacts.create seal_resource, artifacts.get read) may run up to 20 s.
+export const MCP_JOB_DEADLINE_MAX_MS = 5000;
+export const MCP_JOB_ARTIFACT_DEADLINE_MAX_MS = 20000;
+export function mcpJobDeadlineMaxMs(operation: string, tool?: string): number {
+  return mcpJobPayloadMax(operation, tool) > mcpJobPayloadMax('read') ? MCP_JOB_ARTIFACT_DEADLINE_MAX_MS : MCP_JOB_DEADLINE_MAX_MS;
+}
 export interface McpWorkerJob {
   request_id: string; generation: string; owner: string; resource: string; grant: string; head: string;
   operation: 'read' | 'seal' | 'seal_comment' | 'seal_task' | 'seal_agent' | 'seal_resource'; payload: string; digest: string; revision: number; deadline_ms: number;
@@ -39,7 +46,7 @@ export function mcpJobScopeAllowed(scope: string, tool: string | undefined, oper
  * against this device's independently pinned, freshly verified directory. */
 export async function verifyMcpWorkerJob(j: McpWorkerJob, identity: DeviceIdentity, chain: VerifiedChain, resource: string, now = Date.now()): Promise<void> {
   const id = (s: unknown) => typeof s === 'string' && /^[A-Za-z0-9_.:-]{1,256}$/.test(s);
-  if (!id(j.request_id) || !id(j.generation) || j.owner !== identity.userId || j.owner !== chain.userId || j.resource !== resource || j.head !== chain.headHash || j.epoch !== chain.currentEpoch || !Number.isSafeInteger(j.deadline_ms) || j.deadline_ms <= now || j.deadline_ms > now + 5000 || typeof j.payload !== 'string' || j.payload.length > mcpJobPayloadMax(j.operation, j.tool) || !['read', 'seal', 'seal_comment', 'seal_task', 'seal_agent', 'seal_resource'].includes(j.operation) || j.digest !== await mcpJobDigest(j)) throw new Error('Stale or mismatched MCP request');
+  if (!id(j.request_id) || !id(j.generation) || j.owner !== identity.userId || j.owner !== chain.userId || j.resource !== resource || j.head !== chain.headHash || j.epoch !== chain.currentEpoch || !Number.isSafeInteger(j.deadline_ms) || j.deadline_ms <= now || j.deadline_ms > now + mcpJobDeadlineMaxMs(j.operation, j.tool) || typeof j.payload !== 'string' || j.payload.length > mcpJobPayloadMax(j.operation, j.tool) || !['read', 'seal', 'seal_comment', 'seal_task', 'seal_agent', 'seal_resource'].includes(j.operation) || j.digest !== await mcpJobDigest(j)) throw new Error('Stale or mismatched MCP request');
   const me = chain.trusted.get(identity.deviceId);
   if (!me || !kindPolicy(me.kind).receivesWrap) throw new Error('Approved device required');
   const c = JSON.parse(j.consent);

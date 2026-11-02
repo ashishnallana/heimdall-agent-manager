@@ -4,10 +4,28 @@ import "core:encoding/base64"
 import "core:encoding/json"
 import "core:strings"
 import "core:crypto"
+import "core:sync"
 import "core:time"
 import mcp "odin_test:hub/service/mcp"
 import hb "odin_test:lib/html_bundle"
 
+// Hub-wide bound on concurrent html-bundle work (artifacts.create with
+// entry/files, artifacts.get of a bundle). Each holds roughly 150 MiB of request
+// body, decoded members, archive, base64, job payload and relay command, so the
+// Hub admits MCP_BUNDLE_MAX_CONCURRENT at a time and answers the rest with a
+// retryable busy result. Text artifacts and every other tool are not counted.
+MCP_BUNDLE_MAX_CONCURRENT :: 2
+MCP_BUNDLE_BUSY :: "busy: html-bundle capacity is exhausted; retry shortly with the same request_id"
+@(private="file") mcp_bundle_active:int
+mcp_bundle_slot_acquire :: proc()->bool {
+	for {
+		current:=sync.atomic_load(&mcp_bundle_active)
+		if current>=MCP_BUNDLE_MAX_CONCURRENT do return false
+		if _,swapped:=sync.atomic_compare_exchange_strong(&mcp_bundle_active,current,current+1);swapped do return true
+	}
+}
+mcp_bundle_slot_release :: proc() {sync.atomic_sub(&mcp_bundle_active,1)}
+mcp_bundle_slots_in_use :: proc()->int {return sync.atomic_load(&mcp_bundle_active)}
 mcp_resource_write_call :: proc(h:^MCP_Control_Handlers,id:json.Value,raw:string,view:mcp.Access_View,tool:string,a:mcp.Resource_Arguments,handle:mcp.Request_Handle,started:time.Tick)->Response {
 	if h.mutate_resource==nil do return mcp_tool_result(id,"request_failed",true)
 	digest:=mcp.resource_write_digest(a);args:=a;args.fields=nil
@@ -29,6 +47,9 @@ mcp_resource_write_call :: proc(h:^MCP_Control_Handlers,id:json.Value,raw:string
 	defer if len(archive)>0 do crypto.zero_explicit(raw_data(archive),len(archive))
 	defer if len(archive64)>0 do crypto.zero_explicit(raw_data(archive64),len(archive64))
 	if tool=="artifacts.create" && a.files!=nil {
+		// Bounded concurrency: each bundle create holds ~150 MiB transiently.
+		if !mcp_bundle_slot_acquire() do return mcp_tool_result(id,MCP_BUNDLE_BUSY,true)
+		defer mcp_bundle_slot_release()
 		// Existing relay trust model: the Hub sees the plaintext tool input, packs the
 		// html-bundle and relays only the archive to the device/hosted sealer, which
 		// re-validates it before sealing the exact bytes (vault content_base64).

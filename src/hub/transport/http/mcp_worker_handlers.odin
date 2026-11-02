@@ -63,6 +63,13 @@ mcp_verify_reply :: proc(job:vault.Control_Job,reply:vault.Control_Reply,expecte
 // Worker/bridge reply envelope: largest result (artifact bundle seal) + 1 MiB of
 // reply metadata. Every result is still bounded per job by control_reply_max.
 MCP_WORKER_MAX_REPLY_BYTES :: vault.CONTROL_JOB_ARTIFACT_PAYLOAD_MAX+1024*1024
+// A bundle job carries html-bundle bytes: a seal_resource payload with
+// content_base64, or a read of one artifact record with content_base64.
+mcp_device_job_is_bundle :: proc(op:^mcp.Control_Transform,operation:string)->bool {
+	if vault.control_job_payload_max(operation,op.tool)<=vault.CONTROL_JOB_PAYLOAD_MAX do return false
+	if op.resource_fields!=nil {_,bundle:=op.resource_fields["content_base64"];return bundle}
+	return operation=="read" && vault.control_data_payload_max(op.data)>vault.CONTROL_JOB_PAYLOAD_MAX
+}
 mcp_device_transform :: proc(h:^MCP_Control_Handlers,view:mcp.Access_View,op:^mcp.Control_Transform,handle:mcp.Request_Handle,started:time.Tick)->mcp.Delegation_Result {
 	device_started:=time.tick_now()
 	if view.mode!="device" do return {error="decryption_unavailable"}
@@ -74,12 +81,20 @@ mcp_device_transform :: proc(h:^MCP_Control_Handlers,view:mcp.Access_View,op:^mc
 	if !clock_ok do return {error="decryption_unavailable"}
 	job.request_id,_=auth.random_token();job.generation,_=auth.random_token()
 	if job.request_id=="" || job.generation=="" do return {error="decryption_unavailable"}
-	job.deadline_ms=min(now+4000,view.expires_ms)
 	encoded:[]byte
 	err:json.Marshal_Error
 	if op.resource_fields!=nil {job.operation="seal_resource";encoded,err=json.marshal(op.resource_fields,allocator=context.temp_allocator)} else if op.agent_fields!=nil {job.operation="seal_agent";encoded,err=json.marshal(op.agent_fields,allocator=context.temp_allocator)} else if op.task_fields!=nil {job.operation="seal_task";encoded,err=json.marshal(op.task_fields,allocator=context.temp_allocator)} else if op.tool=="tasks.comment" {job.operation="seal_comment";encoded,err=json.marshal(struct {body:string}{op.body},allocator=context.temp_allocator)} else if op.seal {job.operation="seal";encoded,err=json.marshal(struct {title,description:string}{op.title,op.description},allocator=context.temp_allocator)} else {encoded,err=json.marshal(op.data,allocator=context.temp_allocator)}
 	defer if len(encoded)>0 do crypto.zero_explicit(raw_data(encoded),len(encoded))
 	if err!=nil || len(encoded)>vault.control_job_payload_max(job.operation,job.tool) do return {error="result_too_large"}
+	// Bundle jobs (html-bundle seal or download) get a longer, still bounded
+	// device window: up to 20 s and never past 24 s into the 30 s request, so
+	// the ~21 MiB MCP response keeps time to be written. Others keep 4 s.
+	window:=i64(4000)
+	if mcp_device_job_is_bundle(op,job.operation) {
+		left:=i64((24*time.Second-time.tick_since(started))/time.Millisecond)
+		window=max(i64(4000),min(vault.control_job_deadline_max_ms(job.operation,job.tool)-1000,left))
+	}
+	job.deadline_ms=min(now+window,view.expires_ms)
 	job.payload=string(encoded);job.digest=vault.control_job_digest(job)
 	if !mcp.worker_begin(&h.workers,job) do return {error="decryption_unavailable"}
 	defer mcp.worker_end(&h.workers,job.request_id,job.generation)
@@ -98,7 +113,7 @@ mcp_device_transform :: proc(h:^MCP_Control_Handlers,view:mcp.Access_View,op:^mc
 	for {
 		if mcp.request_cancelled(&h.requests,handle) do return {error="cancelled"}
 		now,clock_ok=auth.now_unix_ms(h.delegation.auth)
-		if !clock_ok || now>=job.deadline_ms || time.tick_since(device_started)>=4*time.Second || time.tick_since(started)>=29*time.Second do return {error="decryption_unavailable"}
+		if !clock_ok || now>=job.deadline_ms || time.tick_since(device_started)>=time.Duration(window)*time.Millisecond || time.tick_since(started)>=29*time.Second do return {error="decryption_unavailable"}
 		result,ok:=mcp.worker_result(&h.workers,job.request_id,job.generation)
 		if ok {
 			device,registration:=mcp.worker_receiver(&h.workers,job.request_id,job.generation)

@@ -110,7 +110,9 @@ Transport bounds, bundles only (every other tool and job keeps its old bound):
 
 | Hop | Bundle bound | Everything else |
 | --- | --- | --- |
-| MCP request body | 48 MiB, only `tools/call artifacts.create` with a `files` object (checked after parse) | 512 KiB |
+| MCP request body | 48 MiB, only `tools/call artifacts.create` with a `files` object. Pre-admission cost: a body over 512 KiB is first screened without parsing (it must contain `"tools/call"`, `"artifacts.create"` and `"files"`, else `-32602 request_too_large`); a body that passes is parsed in full (up to 48 MiB) before scope and `request_begin` admission, then method, tool name and `arguments.files` object are rechecked on the tree | 512 KiB |
+| Hub bundle concurrency (`MCP_BUNDLE_MAX_CONCURRENT`) | 2 bundle operations Hub-wide (bundle `artifacts.create`, bundle `artifacts.get` download); a third gets the tool error `busy: html-bundle capacity is exhausted…`, retry with the same `request_id`. Bounds hosted seals too | not counted (text artifacts and other tools only use the 64-slot / 4-per-grant request registry) |
+| Device job deadline (`vault.control_job_deadline_max_ms`, TS `mcpJobDeadlineMaxMs`) | Hub signs bundle jobs with up to 19 s (never past 24 s into the 30 s request, leaving time to write the response); devices accept up to 20 s for `seal_resource artifacts.create` / `read artifacts.get` | 4 s signed, 5 s accepted |
 | Control job payload / reply (`vault.control_job_payload_max`, `control_reply_max`, `control_data_payload_max`) | `base64(15 MiB) + 1 MiB` = 22,020,096 B for `seal_resource artifacts.create` and `read artifacts.get` with one `content_base64` record | 4 MiB |
 | Worker broker job / browser worker POST / bridge result frame | payload bound + 1 MiB | (same formula, 4 MiB + 1 MiB) |
 | Hub -> bridge `mcp_transform` command (`mcp_bridge_command_max`) | payload bound + 2 MiB | 1 MiB |
@@ -118,13 +120,18 @@ Transport bounds, bundles only (every other tool and job keeps its old bound):
 | Bridge `mcp_transform` handler | same lane limit, then `control_job_verify` per operation/tool | |
 | WS chunk reassembly (both directions, `BRIDGE_WS_MAX_REASSEMBLY_BYTES`, `ws.CHUNK_MAX_*`) | 32 MiB message / 8192 chunks / 32 MiB buffered per connection (a ~24 MiB bundle job is ~4200 hub->bridge chunks of 6000 B) | per-command caps above apply after reassembly |
 
-Relay deadlines are unchanged: a job must complete within its 5 s signed deadline.
-For bundle jobs the Hub waits for the bridge until that deadline (small jobs keep
-the 1.5 s bridge window and leave the rest for an unlocked browser), so a 15 MiB
-bundle over a slow Hub<->device link can still time out (`decryption_unavailable`;
-retry with the same `request_id`). The 64-slot/4-per-owner broker and request
-registry are unchanged. Peak Hub memory per bundle request is a small multiple of
-the ~21 MiB base64 (request body, parsed JSON, packed archive, job, reply).
+Relay deadlines: ordinary jobs keep the 4 s signed / 5 s accepted window. Bundle
+jobs (a `seal_resource` carrying `content_base64`, or a `read` returning one bundle
+record) are signed with up to 19 s, bounded by the 24 s mark of the 30 s MCP request,
+and the Hub waits for the bridge or the unlocked browser until that deadline. At
+15 MiB that needs roughly 2 x 21 MiB of transfer plus validation and sealing inside
+the window (about 20 Mbit/s each way); a slower Hub<->device link still times out
+with `decryption_unavailable` (retry with the same `request_id`; smaller bundles
+fit). The 64-slot/4-per-owner broker and request registry are unchanged, and at
+most 2 bundle operations run Hub-wide. Peak Hub memory per bundle request is a small multiple of
+the ~21 MiB base64 (request body, parsed JSON, packed archive, job, reply; roughly
+150 MiB), so the bundle bound caps it at about 300 MiB plus parse-only cost of
+bodies that are refused after parsing.
 
 Optional owned `project_id`, `chain_id`, `task_id`, `agent_id` and
 `agent_instance_id` establish native associations. Native consistency checks
