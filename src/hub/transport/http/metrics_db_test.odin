@@ -7,8 +7,8 @@ import dbt "odin_test:hub/platform/dbtelemetry"
 import metrics "odin_test:lib/metrics"
 
 // Per-request DB accounting (DB telemetry plan §2.3.4, §3). Flips the global
-// telemetry mode, so these run only with -define:DBT_TESTS=true (single
-// threaded, verify-db-telemetry.sh); a plain package run skips them.
+// telemetry mode, so these run only with -define:DBT_TESTS=true (with
+// -define:ODIN_TEST_THREADS=1); a plain package run skips them.
 DBT_TESTS :: #config(DBT_TESTS, false)
 
 @(test)
