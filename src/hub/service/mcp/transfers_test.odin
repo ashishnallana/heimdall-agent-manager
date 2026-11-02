@@ -46,11 +46,16 @@ Xfr_Fixture :: struct {
 	priv:    ecdsa.Private_Key,
 	key:     [32]byte,
 	path:    string,
+	dir_fail: int, // the next N directory lookups fail (transient outage)
 }
 
 @(private = "file")
 fixture_dir :: proc(user: rawptr, owner, grant_id: string) -> (^vault.Verified_Directory, bool) {
 	f := (^Xfr_Fixture)(user)
+	if f.dir_fail > 0 {
+		f.dir_fail -= 1
+		return nil, false
+	}
 	if owner != "user_a" && owner != "user_b" do return nil, false
 	return &f.dir, true
 }
@@ -406,4 +411,36 @@ test_transfer_commit_rechecks_epoch_and_device :: proc(t: ^testing.T) {
 			testing.expect_value(t, query_text(&f, fmt.tprintf("SELECT COUNT(*) FROM artifacts WHERE artifact_id='%s';", x.artifact_id)), "0")
 		}
 	}
+}
+
+// A transient directory outage during seal or commit is retryable and leaves the
+// transfer's durable state untouched (§5.1/§9); the retry then succeeds.
+@(test)
+test_transfer_transient_check_failure_keeps_state :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	f: Xfr_Fixture
+	if !fixture_open(t, &f, "transient") do return
+	defer fixture_close(&f)
+	tok := small_token(&f)
+	x, _ := upload(t, &f, WHO_A, "tr_1", tok)
+	f.dir_fail = 1
+	_, sf := transfer_seal(&f.svc, x, exec_seal_input(&f, x, tok))
+	testing.expect_value(t, sf.reason, "vault_required")
+	testing.expect(t, sf.retryable)
+	cur, _, _ := f.repo.get(f.repo.ctx, x.transfer_id)
+	testing.expect_value(t, cur.state, domain.MCP_TRANSFER_RECEIVING)
+	testing.expect_value(t, cur.received_bytes, x.received_bytes)
+	sealed, sf2 := transfer_seal(&f.svc, cur, exec_seal_input(&f, cur, tok))
+	testing.expect_value(t, sf2.reason, "")
+	testing.expect_value(t, sealed.state, domain.MCP_TRANSFER_SEALED)
+
+	f.dir_fail = 1
+	_, cf := transfer_commit(&f.svc, WHO_A, x.transfer_id, {})
+	testing.expect(t, cf.retryable, "transient commit failure is retryable")
+	cur, _, _ = f.repo.get(f.repo.ctx, x.transfer_id)
+	testing.expect_value(t, cur.state, domain.MCP_TRANSFER_SEALED)
+	f.dir_fail = 0
+	done, cf2 := transfer_commit(&f.svc, WHO_A, x.transfer_id, {})
+	testing.expect_value(t, cf2.reason, "")
+	testing.expect_value(t, done.state, domain.MCP_TRANSFER_COMMITTED)
 }

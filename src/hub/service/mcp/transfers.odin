@@ -445,10 +445,10 @@ small_token_ok :: proc(tok: string, vault_id: string, epoch: u32, max_plain: int
 @(private = "file")
 staged_check :: proc(s: ^Transfer_Service, x: domain.Mcp_Transfer, in_: Seal_Input) -> (ciphertext_sha256: string, f: Transfer_Fail) {
 	vid, epoch, dir, vok := current_vault(s, x.owner_user_id, x.grant_id)
-	if !vok do return "", fail(.Validation_Failed, "vault_required")
+	if !vok do return "", fail(.Validation_Failed, "vault_required", true) // transient: lookup/tx failure
 	hc: Hash_Check
 	sha2.init_256(&hc.h)
-	if err := s.repo.visit_chunks(s.repo.ctx, x.transfer_id, &hc, hash_visit); err.code != .None do return "", fail(.Internal_Error, "internal")
+	if err := s.repo.visit_chunks(s.repo.ctx, x.transfer_id, &hc, hash_visit); err.code != .None do return "", fail(.Internal_Error, "internal", true)
 	info, canonical := vault.blind_token_check_finish(&hc.check)
 	if !canonical || hc.bytes != x.received_bytes do return "", fail(.Validation_Failed, "ciphertext_invalid")
 	vbuf: [vault.VAULT_ID_HEX_CHARS]byte
@@ -483,7 +483,8 @@ staged_check :: proc(s: ^Transfer_Service, x: domain.Mcp_Transfer, in_: Seal_Inp
 
 // transfer_seal runs the blind checks and moves receiving -> sealed. A duplicate seal
 // with the identical receipt is idempotent; a different receipt after sealed is a
-// conflict. Any check failure fails the transfer and wipes staging.
+// conflict. A definitive check failure fails the transfer and wipes staging; a
+// retryable one (transient lookup/read error) leaves it receiving.
 transfer_seal :: proc(s: ^Transfer_Service, x: domain.Mcp_Transfer, in_: Seal_Input) -> (domain.Mcp_Transfer, Transfer_Fail) {
 	if x.direction != domain.MCP_TRANSFER_UPLOAD do return {}, fail(.Validation_Failed, "wrong_direction")
 	if x.state == domain.MCP_TRANSFER_SEALED {
@@ -494,6 +495,9 @@ transfer_seal :: proc(s: ^Transfer_Service, x: domain.Mcp_Transfer, in_: Seal_In
 	if x.received_bytes == 0 do return {}, fail(.Validation_Failed, "not_received", true)
 	sum, f := staged_check(s, x, in_)
 	if !transfer_ok(f) {
+		// Retryable failures (directory lookup, chunk read) never change durable
+		// state (§5.1/§9); only a definitive blind-check failure fails the transfer.
+		if f.retryable do return {}, f
 		reason := f.reason
 		s.repo.set_state(s.repo.ctx, x.transfer_id, domain.MCP_TRANSFER_RECEIVING, domain.MCP_TRANSFER_FAILED, reason, transfer_time(now_ms(s)))
 		return {}, f
@@ -537,6 +541,7 @@ transfer_commit :: proc(s: ^Transfer_Service, who: Transfer_Caller, transfer_id:
 	defer sync.atomic_sub(&s.commits_in_flight, 1)
 	if _, f := staged_check(s, x, Seal_Input{receipt = x.seal_statement, signature = x.seal_signature, device_id = x.seal_device_id,
 		name_token = x.name_token, description_token = x.description_token, attestation_token = x.attestation_token}); !transfer_ok(f) {
+		if f.retryable do return x, f
 		s.repo.set_state(s.repo.ctx, x.transfer_id, domain.MCP_TRANSFER_SEALED, domain.MCP_TRANSFER_FAILED, f.reason, transfer_time(now_ms(s)))
 		return x, f
 	}
