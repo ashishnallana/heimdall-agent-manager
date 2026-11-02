@@ -46,6 +46,7 @@ extension_command_json :: proc(command: domain.Provider_Extension_Command) -> st
 		"\",\"bridge_id\":\"",
 	); write_handler_json_string(&b, command.bridge_id)
 	strings.write_string(&b, "\",\"provider\":\""); write_handler_json_string(&b, command.provider)
+	strings.write_string(&b, "\",\"profile_id\":\""); write_handler_json_string(&b,domain.profile_effective_id(command.provider,command.profile_id))
 	strings.write_string(&b, "\",\"kind\":\""); write_handler_json_string(&b, command.kind)
 	strings.write_string(&b, "\",\"status\":\""); write_handler_json_string(&b, command.state)
 	strings.write_string(&b, "\",\"message\":\""); write_handler_json_string(&b, command.message)
@@ -66,6 +67,7 @@ extension_install_command_json :: proc(command: domain.Provider_Extension_Comman
 	strings.write_string(&b, "{\"type\":\"provider_extension_install\",\"command_id\":\"")
 	write_handler_json_string(&b, command.command_id)
 	strings.write_string(&b, "\",\"provider\":\""); write_handler_json_string(&b, command.provider)
+	strings.write_string(&b, "\",\"profile_id\":\""); write_handler_json_string(&b,domain.profile_effective_id(command.provider,command.profile_id))
 	// Same frame for both actions, so the bridge serializes them per provider.
 	if command.kind == "uninstall" do strings.write_string(&b, "\",\"action\":\"uninstall")
 	strings.write_string(&b, "\"}")
@@ -85,7 +87,7 @@ extension_command_dispatch :: proc(
 ) {
 	payload := ""
 	if command.kind == "discovery" {
-		payload = provider_discover_command_json(command.command_id, nil)
+		payload = provider_discover_command_json(command.command_id, nil,command.profile_id)
 	} else {
 		payload = extension_install_command_json(command)
 	}
@@ -117,12 +119,14 @@ extension_action_start :: proc(ctx: rawptr, req: Request, kind: string) -> Respo
 	defer domain.bridge_destroy(&bridge)
 	if bridge.status != .Online || !project_service.bridge_runtime_registry_has_live(h.bridge_runtime_registry, bridge.bridge_id) do return respond_error(domain.domain_error(.Bridge_Offline, "bridge is not connected"), req.request_id)
 	provider := path_part(req.path, 6)
+	profile_id:=json_string(req.body,"profile_id");defer delete(profile_id)
+	if e:=provider_service.validate_profile(h.providers.repo,bridge.bridge_id,provider,profile_id);e.code!=.None do return respond_error(e,req.request_id)
 	views, view_err := provider_service.list_bridge_providers(h.providers, bridge.bridge_id)
 	if view_err.code != .None do return respond_error(view_err, req.request_id)
 	defer provider_service.bridge_provider_views_destroy(views)
 	found, supported, present := false, false, false
 	for view in views {
-		if view.catalog.provider != provider do continue
+		if view.catalog.provider != provider || view.profile_id!=domain.profile_effective_id(provider,profile_id) do continue
 		found =
 			true; supported = extension_install_supported(view); present = view.detection_state == "present"
 	}
@@ -135,7 +139,7 @@ extension_action_start :: proc(ctx: rawptr, req: Request, kind: string) -> Respo
 	if list_err.code != .None do return respond_error(list_err, req.request_id)
 	defer domain.provider_extension_commands_destroy(commands)
 	for command in commands {
-		if extension_action_kind(command.kind) && command.provider == provider && !extension_command_terminal(command.state) do return respond_error(domain.domain_error(.Conflict, "an extension install or uninstall is already in progress"), req.request_id)
+		if extension_action_kind(command.kind) && command.provider == provider && domain.profile_effective_id(provider,command.profile_id)==domain.profile_effective_id(provider,profile_id) && !extension_command_terminal(command.state) do return respond_error(domain.domain_error(.Conflict, "an extension install or uninstall is already in progress"), req.request_id)
 	}
 	command_id := strings.clone(platform.generate_id(h.ids, "cmd_ext_"))
 	defer delete(command_id)
@@ -144,6 +148,7 @@ extension_action_start :: proc(ctx: rawptr, req: Request, kind: string) -> Respo
 		bridge_id  = bridge.bridge_id,
 		kind       = kind,
 		provider   = provider,
+		profile_id = domain.profile_effective_id(provider,profile_id),
 		state      = "queued",
 	}
 	created, create_err := iface.provider_extension_command_create(h.providers.repo, command)
@@ -386,6 +391,7 @@ extension_apply_report :: proc(
 		statuses[i] = {
 			bridge_id            = command.bridge_id,
 			provider             = item.provider,
+			profile_id = item.profile_id,
 			binary_path          = item.binary_path,
 			version_text         = item.version_text,
 			state                = item.state,
@@ -415,12 +421,16 @@ extension_apply_report :: proc(
 	defer domain.provider_extension_commands_destroy(commands)
 	ph := extension_frame_handlers(h)
 	for view in views {
-		if !view.enabled || !extension_install_supported(view) do continue
+        if !view.enabled || !extension_install_supported(view) do continue
+        reported:=false
+        for item in report.providers do if item.provider==view.catalog.provider && domain.profile_effective_id(item.provider,item.profile_id)==view.profile_id do reported=true
+        if !reported do continue
+
 		// A deferred report only resumes the provider whose install it waited on.
 		if command.provider != "" {
 			matches := false
 			for prior in commands {
-				if prior.command_id == command.provider && prior.provider == view.catalog.provider do matches = true
+				if prior.command_id == command.provider && prior.provider == view.catalog.provider && domain.profile_effective_id(prior.provider,prior.profile_id)==view.profile_id do matches = true
 			}
 			if !matches do continue
 		}
@@ -429,7 +439,7 @@ extension_apply_report :: proc(
 		after_discovery := false
 		for prior in commands {
 			if prior.command_id == command.command_id do after_discovery = true
-			if !extension_action_kind(prior.kind) || prior.provider != view.catalog.provider do continue
+			if !extension_action_kind(prior.kind) || prior.provider != view.catalog.provider || domain.profile_effective_id(prior.provider,prior.profile_id)!=view.profile_id do continue
 			if prior.parent_id == command.parent_id do already_scheduled = true
 			// Even a completed install invalidates a report requested before it.
 			if after_discovery || !extension_command_terminal(prior.state) do blocker_id = prior.command_id
@@ -441,6 +451,7 @@ extension_apply_report :: proc(
 				bridge_id = command.bridge_id,
 				kind = "discovery",
 				provider = blocker_id,
+				profile_id = view.profile_id,
 				parent_id = command.parent_id,
 				state = "waiting",
 			}
@@ -451,7 +462,7 @@ extension_apply_report :: proc(
 		// Eligibility comes from THIS response, never stale rows from an earlier scan.
 		eligible := false
 		for item in report.providers {
-			if item.provider == view.catalog.provider &&
+			if item.provider == view.catalog.provider && domain.profile_effective_id(item.provider,item.profile_id)==view.profile_id &&
 			   item.state == "present" &&
 			   item.extension_state == "outdated" &&
 			   item.extension_version != "" {eligible = true}
@@ -467,7 +478,7 @@ extension_apply_report :: proc(
 				context.temp_allocator,
 			); decode_err == nil && descriptor.min_version != "" {
 				for item in report.providers {
-					if item.provider == view.catalog.provider &&
+					if item.provider == view.catalog.provider && domain.profile_effective_id(item.provider,item.profile_id)==view.profile_id &&
 					   item.state == "present" &&
 					   item.extension_state == "present" &&
 					   item.extension_version != "" &&
@@ -482,12 +493,13 @@ extension_apply_report :: proc(
 			}
 		}
 		if !eligible do continue
-		id := fmt.tprintf("%s_ext_%s", command.parent_id, view.catalog.provider)
+		id := fmt.tprintf("%s_ext_%s", command.parent_id, view.profile_id)
 		install := domain.Provider_Extension_Command {
 			command_id = id,
 			bridge_id  = command.bridge_id,
 			kind       = "install",
 			provider   = view.catalog.provider,
+			profile_id = view.profile_id,
 			parent_id  = command.parent_id,
 			state      = "queued",
 		}

@@ -937,8 +937,8 @@ export const tasksApi = heimdallApi.injectEndpoints({
       ],
     }),
     // TODO(FIX): Replace any with strict TypeScript interface matching Odin backend schema
-    updateTaskDetail: build.mutation<any, { chainId: string; taskId: string; title?: string; description?: string; assigneeRef?: any; reviewerRefs?: any[]; reviewRoles?: string[]; requiresUserApproval?: boolean; dependsOn?: string[]; bridgeId?: string }>({
-      queryFn: async ({ chainId, taskId, title, description, assigneeRef, reviewerRefs, reviewRoles, requiresUserApproval, dependsOn, bridgeId }, api) => {
+    updateTaskDetail: build.mutation<any, { chainId: string; taskId: string; title?: string; description?: string; assigneeRef?: any; reviewerRefs?: any[]; reviewRoles?: string[]; requiresUserApproval?: boolean; dependsOn?: string[]; bridgeId?: string; brief?: Pick<TaskBriefWire, 'goal' | 'acceptance'>; expectedRequirementsRevision?: number; requirementsReason?: string }>({
+      queryFn: async ({ chainId, taskId, title, description, assigneeRef, reviewerRefs, reviewRoles, requiresUserApproval, dependsOn, bridgeId, brief, expectedRequirementsRevision, requirementsReason }, api) => {
         try {
           const state: any = api.getState();
           const isUnlocked = Boolean(state?.vault?.isUnlocked);
@@ -957,6 +957,16 @@ export const tasksApi = heimdallApi.injectEndpoints({
 
           // TODO(FIX): Replace any with strict TypeScript interface matching Odin backend schema
           const body: any = {};
+          if (brief !== undefined) {
+            if (!isUnlocked || !activeKey) throw new Error('Unlock your vault before changing requirements.');
+            if (!expectedRequirementsRevision || !requirementsReason?.trim()) throw new Error('Reload the task and provide a reason for the change.');
+            body.brief = {};
+            if (brief.goal !== undefined) body.brief.goal = isVaultArmored(brief.goal) ? brief.goal : await encryptVaultText(brief.goal, activeKey);
+            if (brief.acceptance !== undefined) body.brief.acceptance = await Promise.all(brief.acceptance.map(value => isVaultArmored(value) ? value : encryptVaultText(value, activeKey)));
+            body.expected_requirements_revision = expectedRequirementsRevision;
+            body.requirements_reason = await encryptVaultText(requirementsReason.trim(), activeKey);
+            body.request_id = crypto.randomUUID();
+          }
           if (encTitle !== undefined) body.title = encTitle;
           if (encDesc !== undefined) body.description = encDesc;
           if (assigneeRef !== undefined) body.assignee_ref = assigneeRef;
@@ -1417,10 +1427,13 @@ export const tasksApi = heimdallApi.injectEndpoints({
       invalidatesTags: (_result, _error, { taskId, chainId }) => preciseTaskTags(taskId, chainId, true),
     }),
     // Tickets (M4): human action verbs replacing legacy set-status/vote/nudge.
-    userReviewTask: build.mutation<any, { chainId: string; taskId: string; verdict: 'approve' | 'request_changes'; findings?: any; summary?: string }>({
-      queryFn: async ({ chainId, taskId, verdict, findings, summary }) => {
+    userReviewTask: build.mutation<any, { chainId: string; taskId: string; verdict: 'approve' | 'request_changes'; findings?: any; summary?: string; requirementsRevision?: number; expectedAttemptNo?: number; expectedHead?: string }>({
+      queryFn: async ({ chainId, taskId, verdict, findings, summary, requirementsRevision, expectedAttemptNo, expectedHead }) => {
         try {
           const body: any = { verdict };
+          if (requirementsRevision !== undefined) body.requirements_revision = requirementsRevision;
+          if (expectedAttemptNo !== undefined) body.expected_attempt_no = expectedAttemptNo;
+          if (expectedHead !== undefined) body.expected_head = expectedHead;
           if (findings !== undefined) body.findings = findings;
           // The reason a rejected workflow gate hands to the re-plan (F1).
           if (summary) body.summary = summary;

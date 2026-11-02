@@ -3,6 +3,7 @@ package sqlite
 import "core:encoding/json"
 import "core:strings"
 import domain "odin_test:hub/domain"
+import iface "odin_test:hub/repository/iface"
 
 instance_reconfiguration_decode :: proc(stmt: sqlite3_stmt) -> (domain.Instance_Reconfiguration, bool, domain.Domain_Error) {
 	raw := column_text(stmt, 0)
@@ -24,6 +25,34 @@ instance_reconfiguration_get_sqlite :: proc(ctx: rawptr, owner, instance_id, key
 }
 
 instance_reconfiguration_begin_sqlite :: proc(ctx: rawptr, op: domain.Instance_Reconfiguration) -> (domain.Instance_Reconfiguration, bool, domain.Domain_Error) {
+	return instance_reconfiguration_write_sqlite(ctx, op, 0, true)
+}
+
+instance_reconfiguration_advance_sqlite :: proc(ctx: rawptr, op: domain.Instance_Reconfiguration, expected_revision: int) -> (domain.Instance_Reconfiguration, bool, domain.Domain_Error) {
+	return instance_reconfiguration_write_sqlite(ctx, op, expected_revision, false)
+}
+
+// Reconciliation also runs outside HTTP units of work. Serialize these writes
+// with the shared connection's transaction owner, otherwise a concurrent MCP
+// read/rejected request can observe and then roll back native move progress.
+instance_reconfiguration_write_sqlite :: proc(ctx: rawptr, op: domain.Instance_Reconfiguration, expected_revision: int, initial: bool) -> (domain.Instance_Reconfiguration, bool, domain.Domain_Error) {
+	impl := (^Agent_Repo_SQLite)(ctx)
+	factory := SQLite_Unit_Of_Work_Factory{conn=impl.conn}
+	uow, begun, err := sqlite_uow_begin(&factory)
+	if !begun do return {}, false, err
+	finished := false
+	defer if !finished do iface.unit_of_work_rollback(&uow)
+	stored: domain.Instance_Reconfiguration
+	ok: bool
+	if initial {stored,ok,err=instance_reconfiguration_begin_impl(ctx,op)} else {stored,ok,err=instance_reconfiguration_advance_impl(ctx,op,expected_revision)}
+	if !ok do return {},false,err
+	finished=true // COMMIT consumes the UOW even when it fails.
+	committed, commit_err := iface.unit_of_work_commit(&uow)
+	if !committed {domain.instance_reconfiguration_destroy(&stored);return {},false,commit_err}
+	return stored,true,{}
+}
+
+instance_reconfiguration_begin_impl :: proc(ctx: rawptr, op: domain.Instance_Reconfiguration) -> (domain.Instance_Reconfiguration, bool, domain.Domain_Error) {
 	impl := (^Agent_Repo_SQLite)(ctx)
 	if op.operation_id == "" || op.idempotency_key == "" || len(op.idempotency_key) > 128 || op.phase != .Prepared || op.revision != 1 || op.source_stopped || op.destination_committed {
 		return {}, false, domain.domain_error(.Validation_Failed, "invalid initial reconfiguration")
@@ -41,7 +70,7 @@ instance_reconfiguration_begin_sqlite :: proc(ctx: rawptr, op: domain.Instance_R
 	defer delete(data)
 	// One INSERT both compares the configuration snapshot and acquires the unique
 	// per-instance active slot. No shared-connection BEGIN/COMMIT window is needed.
-	query := "INSERT INTO instance_reconfigurations (operation_id, owner_user_id, agent_instance_id, idempotency_key, revision, phase, blocks_input, payload_json, created_at, updated_at) SELECT ?, ?, ?, ?, 1, 'prepared', 1, ?, ?, ? FROM agent_instances WHERE agent_instance_id=? AND owner_user_id=? AND bridge_id=? AND project_id=? AND project_path=? AND provider=? AND model=? AND configuration_revision=? AND conversation_id=? RETURNING payload_json;"
+	query := "INSERT INTO instance_reconfigurations (operation_id, owner_user_id, agent_instance_id, idempotency_key, revision, phase, blocks_input, payload_json, created_at, updated_at) SELECT ?, ?, ?, ?, 1, 'prepared', 1, ?, ?, ? FROM agent_instances WHERE agent_instance_id=? AND owner_user_id=? AND bridge_id=? AND project_id=? AND project_path=? AND provider=? AND model=? AND configuration_revision=? AND conversation_id=? AND provider_profile=? RETURNING payload_json;"
 	stmt: sqlite3_stmt
 	if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return {}, false, domain.domain_error(.Internal_Error, "failed reconfiguration prepare")
 	defer sqlite3_finalize(stmt)
@@ -50,11 +79,12 @@ instance_reconfiguration_begin_sqlite :: proc(ctx: rawptr, op: domain.Instance_R
 	bind_text(stmt, 8, op.agent_instance_id); bind_text(stmt, 9, op.owner_user_id); bind_text(stmt, 10, op.source.bridge_id)
 	bind_text(stmt, 11, op.source.project_id); bind_text(stmt, 12, op.source.project_path); bind_text(stmt, 13, op.source.provider); bind_text(stmt, 14, op.source.model)
 	bind_text(stmt, 15, i32_to_string(op.expected_revision)); bind_text(stmt, 16, op.conversation_id)
+	bind_text(stmt,17,domain.profile_effective_id(op.source.provider,op.source.provider_profile))
 	if sqlite3_step(stmt) != SQLITE_ROW do return {}, false, domain.domain_error(.Conflict, "configuration changed or another reconfiguration requires recovery")
 	return instance_reconfiguration_decode(stmt)
 }
 
-instance_reconfiguration_advance_sqlite :: proc(ctx: rawptr, op: domain.Instance_Reconfiguration, expected_revision: int) -> (domain.Instance_Reconfiguration, bool, domain.Domain_Error) {
+instance_reconfiguration_advance_impl :: proc(ctx: rawptr, op: domain.Instance_Reconfiguration, expected_revision: int) -> (domain.Instance_Reconfiguration, bool, domain.Domain_Error) {
 	impl := (^Agent_Repo_SQLite)(ctx)
 	old, found, err := instance_reconfiguration_get_sqlite(ctx, op.owner_user_id, op.agent_instance_id, op.idempotency_key)
 	if !found do return {}, false, err

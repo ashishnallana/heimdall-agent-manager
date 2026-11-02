@@ -68,6 +68,8 @@ Bridge_Runtime_Connection :: struct {
 	task_chain_search_revision: i64,
 	references: int, // registry.metadata_mutex
 	retired: bool, // atomic
+	// Retirement notice has been sent; reject buffered inbound frames too.
+	credential_revoked: bool, // atomic; transport owner still owns socket close
 	writer_mutex: sync.Mutex,
 	// Held across a whole CHUNKED command (REQ-ERR-PROTO-C) so two chunk sequences
 	// never interleave, while writer_mutex is taken per frame so acks, pongs and small

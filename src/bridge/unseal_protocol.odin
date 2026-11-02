@@ -435,6 +435,17 @@ bridge_identity_public_key_hex :: proc(bridge_id: string) -> string {
 	return strings.clone(string(g_bridge_identity_pub_hex_buf[:]), context.temp_allocator)
 }
 
+// Internal caller constructs only the MCP result domain-separated statement.
+bridge_mcp_sign_result :: proc(bridge_id,statement:string)->(string,bool) {
+	if !strings.has_prefix(statement,"heimdall-mcp-worker-result/v1\n") do return "",false
+	sync.mutex_lock(&g_bridge_identity_mu)
+	defer sync.mutex_unlock(&g_bridge_identity_mu)
+	if !bridge_unseal_identity_for_locked(bridge_id) do return "",false
+	sig,ok:=vault.sign_p256(&g_bridge_identity_priv,transmute([]byte)statement)
+	if !ok do return "",false
+	return vault.signature_object(&sig,context.temp_allocator)
+}
+
 // bridge_unseal_key_signature_json returns the signature object over this boot's
 // ephemeral key for bridge_id, signing on first use per bridge id. ok=false means
 // there is nothing to advertise (no identity, no ephemeral key). Temp-allocated.

@@ -68,6 +68,7 @@ export interface DeviceVaultState {
   busy: boolean;
   /** Bridges whose last key delivery failed (bridge id -> error); cleared on success. */
   bridgeKeyFailures: Record<string, string>;
+  mcpKeyDeliveryError: string;
   /** other-account: account ids this browser already holds pins for. */
   otherAccounts: string[];
   /**
@@ -96,6 +97,7 @@ export const initialDeviceVaultState: DeviceVaultState = {
   errorMessage: '',
   busy: false,
   bridgeKeyFailures: {},
+  mcpKeyDeliveryError: '',
   otherAccounts: [],
   startOverPhrase: '',
 };
@@ -141,6 +143,9 @@ export const deviceVaultSlice = createSlice({
       for (const id of action.payload.succeeded) delete state.bridgeKeyFailures[id];
       for (const f of action.payload.failed) state.bridgeKeyFailures[f.bridgeId] = f.error;
     },
+    mcpKeyDeliveryReported(state, action: PayloadAction<string>) {
+      state.mcpKeyDeliveryError = action.payload;
+    },
     deviceVaultSignedOut() {
       return initialDeviceVaultState;
     },
@@ -155,6 +160,7 @@ export const {
   deviceVaultFailed,
   deviceVaultSignedOut,
   bridgeKeyDeliveryReported,
+  mcpKeyDeliveryReported,
 } = deviceVaultSlice.actions;
 
 type WithDeviceVault = { deviceVault?: DeviceVaultState };

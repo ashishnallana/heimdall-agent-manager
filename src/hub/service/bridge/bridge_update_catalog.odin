@@ -5,7 +5,7 @@ import "core:fmt"
 import "core:os"
 import "core:strconv"
 import "core:strings"
-import contracts "odin_test:contracts"
+import "core:sync"
 import domain "odin_test:hub/domain"
 
 Bridge_Manifest_Target_Wire :: struct {
@@ -27,6 +27,9 @@ Bridge_Update_Target :: struct {
 Bridge_Update_Info :: struct {
 	update_available:  bool,
 	latest_version:    string,
+	latest_source:     string,
+	warning:           string,
+	fallback_reason:   string,
 	latest_commit_sha: string,
 	target:            string,
 	download_url:      string,
@@ -38,6 +41,11 @@ Bridge_Update_Info :: struct {
 }
 
 Bridge_Update_Catalog :: struct {
+	// Wiring supplies the transport. Nil means an offline manifest-only catalog.
+	release_get: Bridge_Catalog_Get,
+	cache_enabled: bool,
+	cache_mutex: sync.Mutex,
+	cache: [14]Bridge_Catalog_Cache_Entry,
 	manifest_path:         string,
 	override_version:      string,
 	override_commit_sha:   string,
@@ -158,69 +166,73 @@ is_bridge_update_available :: proc(bridge_version, bridge_commit, latest_version
 	return false
 }
 
+// Returned strings use context.temp_allocator; consume them before resetting it.
 resolve_bridge_update_info :: proc(catalog: ^Bridge_Update_Catalog, bridge: domain.Bridge) -> Bridge_Update_Info {
 	target := normalize_bridge_target(bridge.machine_os, bridge.machine_arch)
-	latest_version := contracts.APP_VERSION
-	latest_commit_sha := contracts.GIT_COMMIT
-	// There is deliberately no synthetic fallback URL. The Hub has never served
-	// /api/v1/updates/bundle/*, so inventing that path turns missing target
-	// metadata into a late Bridge-side 404. A catalog miss stays empty and is
-	// rejected before dispatch by send_bridge_update.
-	download_url := ""
-	sha256 := ""
-
+	info := Bridge_Update_Info{target = target, latest_source = "manifest"}
 	manifest_path := ""
-	if catalog != nil {
-		if catalog.override_version != "" do latest_version = catalog.override_version
-		if catalog.override_commit_sha != "" do latest_commit_sha = catalog.override_commit_sha
-		if catalog.override_download_url != "" do download_url = catalog.override_download_url
-		if catalog.override_sha256 != "" do sha256 = catalog.override_sha256
-		manifest_path = catalog.manifest_path
-	}
-
-	env_path := os.get_env("HEIMDALL_UPDATE_MANIFEST_PATH", context.allocator)
-	defer if env_path != "" do delete(env_path)
-	if manifest_path == "" && env_path != "" {
-		manifest_path = env_path
-	}
-	if manifest_path != "" && os.exists(manifest_path) {
+	if catalog != nil do manifest_path = catalog.manifest_path
+	env_path := os.get_env("HEIMDALL_UPDATE_MANIFEST_PATH", context.temp_allocator)
+	if manifest_path == "" do manifest_path = env_path
+	if manifest_path != "" {
 		if data, err := os.read_entire_file(manifest_path, context.temp_allocator); err == nil {
-			manifest_text := string(data)
 			manifest: Bridge_Update_Manifest_Wire
-			if json_err := json.unmarshal_string(manifest_text, &manifest, json.DEFAULT_SPECIFICATION, context.temp_allocator); json_err == nil {
-				if manifest.version != "" && (catalog == nil || catalog.override_version == "") {
-					latest_version = manifest.version
-				}
-				if manifest.commit_sha != "" && (catalog == nil || catalog.override_commit_sha == "") {
-					latest_commit_sha = manifest.commit_sha
-				}
-				if manifest.targets != nil {
-					if target_info, ok := manifest.targets[target]; ok {
-						if target_info.tarball_url != "" && (catalog == nil || catalog.override_download_url == "") {
-							download_url = target_info.tarball_url
-						}
-						if target_info.sha256 != "" && (catalog == nil || catalog.override_sha256 == "") {
-							sha256 = target_info.sha256
-						}
-					}
+			if json.unmarshal(data, &manifest, json.DEFAULT_SPECIFICATION, context.temp_allocator) == nil {
+				info.latest_version = manifest.version
+				info.latest_commit_sha = manifest.commit_sha
+				if artifact, ok := manifest.targets[target]; ok {
+					info.download_url, info.sha256 = artifact.tarball_url, artifact.sha256
 				}
 			}
 		}
 	}
-
-	// update_available still means "a newer release exists"; artifact_available
-	// says whether that release can be installed on this target. Together they
-	// let the UI say "not available for this target" instead of "up to date".
-	artifact_available := strings.trim_space(download_url) != "" && strings.trim_space(sha256) != ""
-	avail := is_bridge_update_available(bridge.version, bridge.commit_sha, latest_version, latest_commit_sha)
-
-	return Bridge_Update_Info{
-		update_available = avail,
-		latest_version = latest_version,
-		latest_commit_sha = latest_commit_sha,
-		target = target,
-		download_url = download_url,
-		sha256 = sha256,
-		artifact_available = artifact_available,
+	manifest_info := info
+	promoted, reachable := bridge_catalog_release(catalog, target, "")
+	if reachable {
+		info = promoted
+	} else {
+		info.fallback_reason = promoted.fallback_reason
 	}
+	if catalog != nil && catalog.override_version != "" {
+		pin := catalog.override_version
+		// Never pair a pin with a different version's manifest/promoted artifact.
+		if strings.trim_prefix(pin, "v") != strings.trim_prefix(info.latest_version, "v") || info.latest_version == "" {
+			if strings.trim_prefix(pin, "v") == strings.trim_prefix(manifest_info.latest_version, "v") &&
+				strings.trim_space(manifest_info.download_url) != "" && strings.trim_space(manifest_info.sha256) != "" {
+				info = manifest_info
+			} else {
+				info, _ = bridge_catalog_release(catalog, target, pin)
+			}
+		}
+		info.latest_version, info.latest_source = pin, "override"
+		if !reachable {
+			if info.fallback_reason == "" {
+				info.fallback_reason = promoted.fallback_reason
+			} else if info.fallback_reason != promoted.fallback_reason {
+				info.fallback_reason = fmt.tprintf("%s; %s", promoted.fallback_reason, info.fallback_reason)
+			}
+		}
+		if promoted.latest_version != "" && compare_semver(pin, promoted.latest_version) < 0 {
+			pin_warning := fmt.tprintf("Operator pin %s is older than promoted release %s", pin, promoted.latest_version)
+			if info.warning == "" {
+				info.warning = pin_warning
+			} else {
+				info.warning = fmt.tprintf("%s; %s", pin_warning, info.warning)
+			}
+		}
+		if catalog.override_commit_sha != "" do info.latest_commit_sha = catalog.override_commit_sha
+		// URL and digest are an inseparable operator-supplied pair.
+		if catalog.override_download_url != "" || catalog.override_sha256 != "" {
+			info.download_url, info.sha256 = catalog.override_download_url, catalog.override_sha256
+		}
+	} else if catalog != nil && !reachable {
+		if catalog.override_commit_sha != "" do info.latest_commit_sha = catalog.override_commit_sha
+		if catalog.override_download_url != "" || catalog.override_sha256 != "" {
+			info.download_url, info.sha256 = catalog.override_download_url, catalog.override_sha256
+		}
+	}
+	info.target = target
+	info.artifact_available = strings.trim_space(info.download_url) != "" && strings.trim_space(info.sha256) != ""
+	info.update_available = is_bridge_update_available(bridge.version, bridge.commit_sha, info.latest_version, info.latest_commit_sha)
+	return info
 }

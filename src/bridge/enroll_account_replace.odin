@@ -27,6 +27,8 @@ import bridgesvc "odin_test:lib/bridgesvc"
 import httpc "odin_test:lib/httpc"
 
 BRIDGE_ENROLL_REPLACE_ACCOUNT_FLAG :: "--replace-other-account"
+// ham-bridge setup flag that installs another account as its own profile instead.
+BRIDGE_SETUP_SEPARATE_ACCOUNT_FLAG :: "--separate-account"
 // An unanswered [y/N] prompt counts as "not confirmed" after this long.
 BRIDGE_ENROLL_PROMPT_TIMEOUT_MS :: 120_000
 BRIDGE_SELF_REVOKE_PATH :: [?]string{"api", "v1", "bridge", "self", "revoke"}
@@ -72,6 +74,7 @@ bridge_enroll_ask_replace :: proc(args: []string, old_bridge_id: string) -> Brid
 	if !bridge_stdin_is_terminal(args) do return .Unavailable
 	fmt.printfln("This machine is enrolled as bridge %s of ANOTHER Ninjy account.", old_bridge_id)
 	fmt.println("  Replacing it revokes that bridge on the hub and deletes its credential, identity and vault key here.")
+	fmt.printfln("  To keep it, answer no and run ham-bridge setup again with %s: this account then gets its own profile and service.", BRIDGE_SETUP_SEPARATE_ACCOUNT_FLAG)
 	fmt.printf("  Replace it with the account that just approved? [y/N] (no answer in %ds = no) ", BRIDGE_ENROLL_PROMPT_TIMEOUT_MS / 1000)
 	if !bridge_stdin_wait_readable(BRIDGE_ENROLL_PROMPT_TIMEOUT_MS) {
 		fmt.println("")
@@ -101,7 +104,7 @@ bridge_self_revoke :: proc(api_base, token: string) -> (ok: bool, detail: string
 	if t == "" do return false, "no credential"
 	auth := strings.concatenate({"Bearer ", t}, context.temp_allocator)
 	path := BRIDGE_SELF_REVOKE_PATH
-	resp, err := httpc.send({
+	resp, err := bridge_hub_http_send_alloc({
 		method = .POST, url = bridge_hub_url(api_base), path = path[:],
 		headers = {{name = "Authorization", value = auth}},
 		body = httpc.json_body(struct{}{}), timeout_ms = 10_000,
@@ -176,6 +179,7 @@ bridge_enroll_resolve_account :: proc(args: []string, api_base, config_path, old
 	case .Refuse:
 		fmt.eprintfln("bridge enroll REFUSED: this machine is enrolled as %s by another Ninjy account; nothing was written.", old_bridge_id)
 		fmt.eprintfln("  To replace it, run again with %s (or answer yes at the prompt).", BRIDGE_ENROLL_REPLACE_ACCOUNT_FLAG)
+		fmt.eprintfln("  To keep it and install this account as its own profile and service, run ham-bridge setup again with %s (or pass a different --profile).", BRIDGE_SETUP_SEPARATE_ACCOUNT_FLAG)
 		if rv_ok, detail := bridge_self_revoke(api_base, cred.access_token); rv_ok {
 			fmt.eprintfln("  The bridge %s the approval just created was revoked again.", cred.bridge_id)
 		} else {

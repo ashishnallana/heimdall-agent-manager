@@ -589,7 +589,37 @@ MIGRATION_167_EXTENSION_VERSION_SYNC :: #load("migrations/167_extension_version_
 
 MIGRATION_168_EXTENSION_VERSION_SYNC :: #load("migrations/168_extension_version_sync_0_5_27.sql", string)
 
-migration_order :: [172]string {
+MIGRATION_169_PROVIDER_PROFILES :: #load("migrations/169_provider_profiles.sql", string)
+
+MIGRATION_170_EXTENSION_VERSION_SYNC :: #load("migrations/170_extension_version_sync_0_5_28.sql", string)
+
+MIGRATION_171_EXTENSION_VERSION_SYNC :: #load("migrations/171_extension_version_sync_0_5_29.sql", string)
+
+MIGRATION_172_EXTENSION_VERSION_SYNC :: #load("migrations/172_extension_version_sync_0_5_30.sql", string)
+
+MIGRATION_173_EXTENSION_VERSION_SYNC :: #load("migrations/173_extension_version_sync_0_5_31.sql", string)
+MIGRATION_175_MCP :: #load("migrations/175_mcp_delegated_credentials.sql", string)
+MIGRATION_176_MCP_WRAPS :: #load("migrations/176_mcp_epoch_wraps.sql", string)
+
+MIGRATION_174_EXTENSION_VERSION_SYNC :: #load("migrations/174_extension_version_sync_0_5_32.sql", string)
+
+MIGRATION_178_BRIDGE_SUNSET_RECEIPTS :: #load("migrations/178_bridge_sunset_receipts.sql", string)
+MIGRATION_179_MCP_MUTATION_RECEIPTS :: #load("migrations/179_mcp_mutation_receipts.sql", string)
+MIGRATION_180_MCP_TASK_CONTRACT :: #load("migrations/180_mcp_task_contract.sql", string)
+MIGRATION_181_MCP_RUNTIME_INTENTS :: #load("migrations/181_mcp_runtime_intents.sql", string)
+MIGRATION_182_MCP_RESOURCE_PAGES :: #load("migrations/182_mcp_resource_pages.sql", string)
+
+MIGRATION_177_EXTENSION_VERSION_SYNC :: #load("migrations/177_extension_version_sync_0_5_33.sql", string)
+
+MIGRATION_183_MCP_ARTIFACT_PAGES :: #load("migrations/183_mcp_artifact_pages.sql", string)
+
+MIGRATION_184_EXTENSION_VERSION_SYNC :: #load("migrations/184_extension_version_sync_0_5_34.sql", string)
+
+MIGRATION_185_EXTENSION_VERSION_SYNC :: #load("migrations/185_extension_version_sync_0_5_35.sql", string)
+
+MIGRATION_186_EXTENSION_VERSION_SYNC :: #load("migrations/186_extension_version_sync_0_5_36.sql", string)
+
+migration_order :: [190]string {
 	"001_foundation.sql",
 	"002_owner_scoped_core.sql",
 	"003_device_tokens.sql",
@@ -762,6 +792,24 @@ migration_order :: [172]string {
 	"166_extension_version_sync_0_5_25.sql",
 	"167_extension_version_sync_0_5_26.sql",
 	"168_extension_version_sync_0_5_27.sql",
+	"169_provider_profiles.sql",
+	"170_extension_version_sync_0_5_28.sql",
+	"171_extension_version_sync_0_5_29.sql",
+	"172_extension_version_sync_0_5_30.sql",
+	"173_extension_version_sync_0_5_31.sql",
+	"174_extension_version_sync_0_5_32.sql",
+	"175_mcp_delegated_credentials.sql",
+	"176_mcp_epoch_wraps.sql",
+	"177_extension_version_sync_0_5_33.sql",
+	"178_bridge_sunset_receipts.sql",
+	"179_mcp_mutation_receipts.sql",
+	"180_mcp_task_contract.sql",
+	"181_mcp_runtime_intents.sql",
+	"182_mcp_resource_pages.sql",
+	"183_mcp_artifact_pages.sql",
+	"184_extension_version_sync_0_5_34.sql",
+	"185_extension_version_sync_0_5_35.sql",
+	"186_extension_version_sync_0_5_36.sql",
 }
 
 // stop_before is a TEST SEAM: when non-empty, the apply loop stops in front of
@@ -798,6 +846,12 @@ run_migrations :: proc(
 			mark_migration_applied(conn, name)
 			continue
 		}
+        // The profile migration commits atomically. Its final index also lets
+        // startup repair a crash between schema commit and ledger insertion.
+        if name=="169_provider_profiles.sql" && sqlite_object_exists(conn,"idx_bridge_provider_profiles_driver") {
+         mark_migration_applied(conn,name)
+         continue
+        }
 		if migration_applied(conn, name) do continue
 		if name == "003_device_tokens.sql" &&
 		   table_column_exists(conn, "user_api_tokens", "created_from") &&
@@ -1184,6 +1238,9 @@ run_migrations :: proc(
 			mark_migration_applied(conn, name)
 			continue
 		}
+        // Fleet provider/model historically arrive via a post-loop upgrade.
+        // Ensure that prerequisite before migrating their default profile IDs.
+        if name=="169_provider_profiles.sql" && !upgrade_task_chain_fleets_schema(conn) do return false,domain.domain_error(.Internal_Error,"fleet profile migration prerequisite failed")
 		sql := migration_sql(name, migrations_dir)
 		if sql == "" {
 			return false, domain.domain_error(
@@ -1192,6 +1249,7 @@ run_migrations :: proc(
 			)
 		}
 		if !exec(conn, sql) {
+			if name=="169_provider_profiles.sql" do _=exec(conn,"ROLLBACK;")
 			delete(sql)
 			return false, domain.domain_error(
 				.Internal_Error,
@@ -1241,6 +1299,23 @@ migration_sql :: proc(name, migrations_dir: string) -> string {
 			return string(data)
 		}
 	}
+	if name == "186_extension_version_sync_0_5_36.sql" do return strings.clone(MIGRATION_186_EXTENSION_VERSION_SYNC)
+	if name == "185_extension_version_sync_0_5_35.sql" do return strings.clone(MIGRATION_185_EXTENSION_VERSION_SYNC)
+	if name == "184_extension_version_sync_0_5_34.sql" do return strings.clone(MIGRATION_184_EXTENSION_VERSION_SYNC)
+	if name == "177_extension_version_sync_0_5_33.sql" do return strings.clone(MIGRATION_177_EXTENSION_VERSION_SYNC)
+	if name == "178_bridge_sunset_receipts.sql" do return strings.clone(MIGRATION_178_BRIDGE_SUNSET_RECEIPTS)
+	if name == "179_mcp_mutation_receipts.sql" do return strings.clone(MIGRATION_179_MCP_MUTATION_RECEIPTS)
+	if name == "180_mcp_task_contract.sql" do return strings.clone(MIGRATION_180_MCP_TASK_CONTRACT)
+	if name == "181_mcp_runtime_intents.sql" do return strings.clone(MIGRATION_181_MCP_RUNTIME_INTENTS)
+	if name == "183_mcp_artifact_pages.sql" do return strings.clone(MIGRATION_183_MCP_ARTIFACT_PAGES)
+	if name == "182_mcp_resource_pages.sql" do return strings.clone(MIGRATION_182_MCP_RESOURCE_PAGES)
+	if name == "174_extension_version_sync_0_5_32.sql" do return strings.clone(MIGRATION_174_EXTENSION_VERSION_SYNC)
+	if name == "173_extension_version_sync_0_5_31.sql" do return strings.clone(MIGRATION_173_EXTENSION_VERSION_SYNC)
+	if name == "175_mcp_delegated_credentials.sql" do return strings.clone(MIGRATION_175_MCP)
+	if name == "176_mcp_epoch_wraps.sql" do return strings.clone(MIGRATION_176_MCP_WRAPS)
+	if name == "172_extension_version_sync_0_5_30.sql" do return strings.clone(MIGRATION_172_EXTENSION_VERSION_SYNC)
+	if name == "171_extension_version_sync_0_5_29.sql" do return strings.clone(MIGRATION_171_EXTENSION_VERSION_SYNC)
+	if name == "170_extension_version_sync_0_5_28.sql" do return strings.clone(MIGRATION_170_EXTENSION_VERSION_SYNC)
 	if name == "168_extension_version_sync_0_5_27.sql" do return strings.clone(MIGRATION_168_EXTENSION_VERSION_SYNC)
 	if name == "167_extension_version_sync_0_5_26.sql" do return strings.clone(MIGRATION_167_EXTENSION_VERSION_SYNC)
 	if name == "166_extension_version_sync_0_5_25.sql" do return strings.clone(MIGRATION_166_EXTENSION_VERSION_SYNC)
@@ -1261,6 +1336,7 @@ migration_sql :: proc(name, migrations_dir: string) -> string {
 	if name == "151_extension_version_sync_0_5_11.sql" do return strings.clone(MIGRATION_151_EXTENSION_VERSION_SYNC)
 	if name == "150_extension_version_sync_0_5_10.sql" do return strings.clone(MIGRATION_150_EXTENSION_VERSION_SYNC)
 	if name == "149_extension_version_sync_0_5_9.sql" do return strings.clone(MIGRATION_149_EXTENSION_VERSION_SYNC)
+	if name == "169_provider_profiles.sql" do return strings.clone(MIGRATION_169_PROVIDER_PROFILES)
 	if name == "148_bridge_provider_models.sql" do return strings.clone(MIGRATION_148_BRIDGE_PROVIDER_MODELS)
 	if name == "147_extension_version_sync_0_5_8.sql" do return strings.clone(MIGRATION_147_EXTENSION_VERSION_SYNC)
 	if name == "146_extension_version_sync_0_5_7.sql" do return strings.clone(MIGRATION_146_EXTENSION_VERSION_SYNC)

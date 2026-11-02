@@ -50,7 +50,10 @@ service_env :: proc(host: Host, l: Layout, in_: Render_Input) -> []string {
 	append(&e, strings.concatenate({"PATH=", path}, context.temp_allocator),
 		strings.concatenate({"HEIMDALL_HAM_PTY_HOST_BIN=", pjoin(l.bin_dir, exe_name(host, "ham-pty-host"))}, context.temp_allocator),
 		"HEIMDALL_BRIDGE_PTY_HOST=true",
-		strings.concatenate({"HEIMDALL_HAM_CTL_BIN=", pjoin(l.bin_dir, exe_name(host, strings.concatenate({"ham-ctl-", l.service_name}, context.temp_allocator)))}, context.temp_allocator),
+		// The ham-ctl binary setup installs into bin/ (BRIDGE_SETUP_BINARIES), never
+		// the ham-ctl-<service> wrapper: the bridge execs this from every agent's
+		// run-dir shim, which sets the endpoint and token itself.
+		strings.concatenate({"HEIMDALL_HAM_CTL_BIN=", pjoin(l.bin_dir, exe_name(host, "ham-ctl"))}, context.temp_allocator),
 		fmt.tprintf("HEIMDALL_BRIDGE_ENDPOINT=tcp:127.0.0.1:%d", in_.endpoint_port),
 		strings.concatenate({"HEIMDALL_BRIDGE_SERVICE_NAME=", service_env_name}, context.temp_allocator))
 	return e[:]
@@ -169,6 +172,37 @@ default_config_toml :: proc(hub, data_dir: string) -> string {
 
 windows_run_cmd_path :: proc(l: Layout) -> string {return pjoin(l.data_dir, "run.cmd")}
 
+// ctl_wrapper_path: the per-profile CLI a person runs to talk to this bridge,
+// bin/ham-ctl-<service> (.cmd on Windows). setup writes it on every run, after
+// the bin/ swap, so it survives installs and updates.
+ctl_wrapper_path :: proc(host: Host, l: Layout) -> string {
+	name := strings.concatenate({"ham-ctl-", l.service_name}, context.temp_allocator)
+	if host.os == .Windows do name = strings.concatenate({name, ".cmd"}, context.temp_allocator)
+	return pjoin(l.bin_dir, name)
+}
+
+// render_ctl_wrapper: bin/ham-ctl with this profile's config and, unless the
+// caller set one, this profile's local endpoint (the service env's value).
+render_ctl_wrapper :: proc(host: Host, l: Layout, in_: Render_Input) -> string {
+	endpoint := fmt.tprintf("tcp:127.0.0.1:%d", in_.endpoint_port)
+	ctl := pjoin(l.bin_dir, exe_name(host, "ham-ctl"))
+	config := pjoin(l.state_dir, CONFIG_FILE)
+	b := strings.builder_make(context.temp_allocator)
+	if host.os == .Windows {
+		cmdq :: proc(s: string) -> string {
+			out, _ := strings.replace_all(s, "%", "%%", context.temp_allocator)
+			return out
+		}
+		fmt.sbprintf(&b, "@echo off\r\nif not defined HEIMDALL_BRIDGE_ENDPOINT set \"HEIMDALL_BRIDGE_ENDPOINT=%s\"\r\n", endpoint)
+		fmt.sbprintf(&b, "\"%s\" --config \"%s\" %%*\r\n", cmdq(ctl), cmdq(config))
+	} else {
+		// Not fmt: it reads `{` as an argument index, and the shell default needs ${...}.
+		strings.write_string(&b, strings.concatenate({"#!/bin/sh\n: \"${HEIMDALL_BRIDGE_ENDPOINT:=", endpoint, "}\"\nexport HEIMDALL_BRIDGE_ENDPOINT\n"}, context.temp_allocator))
+		strings.write_string(&b, strings.concatenate({"exec ", sh_quote(ctl), " --config ", sh_quote(config), " \"$@\"\n"}, context.temp_allocator))
+	}
+	return strings.to_string(b)
+}
+
 // render_windows_run_cmd: the batch file the Scheduled Task runs (CRLF).
 render_windows_run_cmd :: proc(host: Host, l: Layout, in_: Render_Input) -> string {
 	cmdq :: proc(s: string) -> string {
@@ -181,6 +215,8 @@ render_windows_run_cmd :: proc(host: Host, l: Layout, in_: Render_Input) -> stri
 	args := service_args(host, l, in_)
 	fmt.sbprintf(&b, "\"%s\"", cmdq(args[0]))
 	for a in args[1:] do fmt.sbprintf(&b, " \"%s\"", cmdq(a))
-	fmt.sbprintf(&b, " 1>>\"%s\" 2>>\"%s\"\r\nexit /b %%ERRORLEVEL%%\r\n", cmdq(pjoin(l.data_dir, "logs", "bridge.out.log")), cmdq(pjoin(l.data_dir, "logs", "bridge.err.log")))
+	// Redirection can fail before the executable runs without setting ERRORLEVEL.
+	// Make that failure visible to Task Scheduler rather than reporting success.
+	fmt.sbprintf(&b, " 1>>\"%s\" 2>>\"%s\" || exit /b 1\r\nexit /b %%ERRORLEVEL%%\r\n", cmdq(pjoin(l.data_dir, "logs", "bridge.out.log")), cmdq(pjoin(l.data_dir, "logs", "bridge.err.log")))
 	return strings.to_string(b)
 }

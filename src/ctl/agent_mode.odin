@@ -1454,6 +1454,9 @@ ctl_agentmode_task_update_params :: proc(tid: string, args: []string) -> string 
 	}
 	fields := make([dynamic]string)
 	append(&fields, json_kv("task_id", tid))
+    if revision:=ctl_requirements_revision_flag(args,"--expected-requirements-revision");revision>0 do append(&fields,json_kv_raw("expected_requirements_revision",fmt.tprintf("%d",revision)))
+    if reason:=option_value(args,"--reason","");reason!="" do append(&fields,json_kv("requirements_reason",ctl_seal_or_exit(reason,keyring)))
+    if id:=option_value(args,"--request-id","");id!="" do append(&fields,json_kv("request_id",id))
 	if v := option_value(args, "--chain", ""); v != "" do append(&fields, json_kv("chain_id", v))
 	if title != "" do append(&fields, json_kv("title", title))
 	if desc != "" do append(&fields, json_kv("description", desc))
@@ -1465,7 +1468,12 @@ ctl_agentmode_task_update_params :: proc(tid: string, args: []string) -> string 
 	if deps, present := ctl_task_depends_on_flag(args, "--depends-on"); present do append(&fields, ctl_v2_json_string_array("depends_on", deps))
 	if has_flag(args, "--bridge") do append(&fields, json_kv("bridge_id", option_value(args, "--bridge", "")))
 	// brief fields are sent only when given; the hub merges them into the stored brief.
-	if brief, ok := ctl_task_brief_field(args); ok do append(&fields, brief)
+    if brief,replace,ok:=ctl_task_brief_value(args);ok {
+        sealed:=ctl_requirement_brief_sealed(brief,args)
+        encoded,_:=json.marshal(sealed,allocator=context.temp_allocator)
+        append(&fields,json_kv_raw("brief",string(encoded)))
+        if replace!=nil do append(&fields,`"replace_brief":true`)
+    }
 	return json_object_from_slice(fields[:])
 }
 
@@ -2039,8 +2047,8 @@ print_help_task :: proc() {
 	fmt.println("      key, and keys you leave out are kept. --replace-brief replaces the whole brief.")
 	fmt.println("      Reviewers are durable agent ids (agt_…); an inst_… id is refused.")
 	fmt.println("      --reviewer/--depends-on REPLACE the whole list (pass \"\" to clear); --bridge \"\" clears")
-	fmt.println("      the pin. While the task is leased only acceptance (plus priority, dependencies and")
-	fmt.println("      user approval) can change; a 409 names the refused fields.")
+	fmt.println("      the pin. Live goal/acceptance edits require --expected-requirements-revision <n>")
+	fmt.println("      and --reason <text>. Read the revision with task show; conflicts require a fresh read.")
 	fmt.println("  publish <task-id> [--chain <id>]        Publish one draft task (coordinator only). A 422")
 	fmt.println("                                          brief_incomplete lists the missing fields per task.")
 	fmt.println("  comment <task-id> --body <t>            Add a comment (the only way to comment).")
@@ -2215,10 +2223,7 @@ ctl_v2_lease :: proc(endpoint, token: string, tokens, args: []string) {
 		append(&fields, ctl_agent_cwd_field())
 		ctl_agent_call_task(endpoint, token, "agent.lease.next", json_object_from_slice(fields[:]), args)
 	case "heartbeat":
-		fields := make([dynamic]string)
-		if v := option_value(args, "--lease", ""); v != "" do append(&fields, json_kv("lease_id", v))
-		if v := option_value(args, "--note", ""); v != "" do append(&fields, json_kv("note", v))
-		ctl_agent_call(endpoint, token, "agent.lease.heartbeat", json_object_from_slice(fields[:]))
+		ctl_agent_call(endpoint, token, "agent.lease.heartbeat", ctl_v2_heartbeat_params(args))
 	case "submit":
 		ctl_v2_lease_submit(endpoint, token, args)
 	case "handoff":
@@ -2241,12 +2246,14 @@ print_help_lease :: proc() {
 	fmt.println("                             The response carries the task, the lease deadlines and the context pack.")
 	fmt.println("  heartbeat [--note <text>]  Extend the lease TTL (15 min, never past the hard cap). Any ham-ctl")
 	fmt.println("                             call already heartbeats implicitly; use --note to leave a progress note.")
+	fmt.println("      After reading refreshed TASK.md: --lease <id> --acknowledge-requirements-revision <n>.")
 	fmt.println("  submit --summary <s> [handoff flags] [--output-file <json>] [--artifacts-file <json>]")
 	fmt.println("                             Finish the attempt: the task goes to review (or done when no review")
 	fmt.println("                             roles). Commit first; report the checks you chose, the exact")
 	fmt.println("                             commands and their outcomes in the summary. The old --verify,")
 	fmt.println("                             --skip-verify, --skip-verify-reason and --auto flags are ignored")
 	fmt.println("                             with a warning.")
+	fmt.println("                             Changed requirements require --lease <id> --requirements-revision <n>.")
 	fmt.println("                             The bridge attaches your repo state (head, dirty, files).")
 	fmt.println("  handoff --summary <s> [handoff flags]")
 	fmt.println("                             Stop without finishing; the task returns to ready with your handoff")

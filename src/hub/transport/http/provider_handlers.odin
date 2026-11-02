@@ -31,6 +31,7 @@ Provider_Handlers :: struct {
 }
 
 Provider_Discovery_Item_Wire :: struct {
+	profile_id: string `json:"profile_id"`,
 	provider:     string `json:"provider"`,
 	binary_path:  string `json:"binary_path"`,
 	version_text: string `json:"version_text"`,
@@ -104,6 +105,10 @@ write_bridge_provider_view_json :: proc(
 		b,
 		"{\"provider\":\"",
 	); write_handler_json_string(b, view.catalog.provider)
+	strings.write_string(b, "\",\"profile_id\":\""); write_handler_json_string(b,view.profile_id)
+	strings.write_string(b, "\",\"profile_state\":\""); write_handler_json_string(b,view.profile_state)
+	strings.write_string(b, "\",\"label_enc\":\""); write_handler_json_string(b,view.label_enc)
+	strings.write_string(b, "\",\"accent\":\""); write_handler_json_string(b,view.accent)
 	strings.write_string(
 		b,
 		"\",\"display_name\":\"",
@@ -211,7 +216,7 @@ bridge_provider_status_response :: proc(
 			latest := true
 			for j in i + 1 ..< len(commands) {
 				if commands[j].kind == "install" &&
-				   commands[j].provider == command.provider {latest = false; break}
+				   commands[j].provider == command.provider && domain.profile_effective_id(command.provider,commands[j].profile_id)==domain.profile_effective_id(command.provider,command.profile_id) {latest = false; break}
 			}
 			if !latest do continue
 			if count > 0 do strings.write_byte(&b, ',')
@@ -259,13 +264,14 @@ bridge_provider_status_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	)
 }
 
-provider_discover_command_json :: proc(request_id: string, providers: []string) -> string {
+provider_discover_command_json :: proc(request_id: string, providers: []string,profile_id: string = "") -> string {
 	b := strings.builder_make()
 	strings.write_string(
 		&b,
 		"{\"type\":\"provider_discover\",\"request_id\":\"",
 	); write_handler_json_string(&b, request_id)
 	strings.write_string(&b, "\",\"command_id\":\""); write_handler_json_string(&b, request_id)
+	strings.write_string(&b, "\",\"profile_id\":\"");write_handler_json_string(&b,profile_id)
 	strings.write_string(&b, "\",\"timeout_ms\":10000,\"providers\":[")
 	for provider, i in providers {if i > 0 do strings.write_byte(&b, ','); strings.write_byte(
 			&b,
@@ -300,7 +306,8 @@ bridge_provider_discover_handler :: proc(ctx: rawptr, req: Request) -> Response 
 	providers := json_string_array(req.body, "providers")
 	defer {for provider in providers do delete(provider); delete(providers)}
 	request_id := fmt.tprintf("pdr_%d", time.to_unix_nanoseconds(time.now()))
-	command := provider_discover_command_json(request_id, providers)
+	profile_id:=json_string(req.body,"profile_id");defer delete(profile_id)
+	command := provider_discover_command_json(request_id, providers,profile_id)
 	defer delete(command)
 	reply, reply_ok, reply_err := bridge_runtime_service.send_runtime_command_wait(
 		h.bridge_runtime_registry,
@@ -353,6 +360,7 @@ bridge_provider_discover_handler :: proc(ctx: rawptr, req: Request) -> Response 
 		statuses[i] = domain.Bridge_Provider_Status {
 			bridge_id    = bridge.bridge_id,
 			provider     = item.provider,
+			profile_id = item.profile_id,
 			binary_path  = item.binary_path,
 			version_text = item.version_text,
 			state        = item.state,
@@ -382,18 +390,21 @@ bridge_provider_enable_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	enabled, enabled_ok := json_bool_literal(req.body, "enabled")
 	if !enabled_ok do return respond_error(domain.domain_error(.Validation_Failed, "enabled must be a JSON boolean"), req.request_id)
 	provider := path_part(req.path, 6)
+	profile_id:=json_string(req.body,"profile_id");defer delete(profile_id)
 	setting, saved, save_err := provider_service.set_bridge_provider_enabled(
 		h.providers,
 		bridge.bridge_id,
 		provider,
 		platform.clock_now(h.clock),
 		enabled,
+		profile_id,
 	)
 	if !saved do return respond_error(save_err, req.request_id)
 	publish_bridge_provider_status_changed(h.event_bus, string(bridge.owner_user_id), bridge.bridge_id, setting.provider)
 	b := strings.builder_make()
 	strings.write_string(&b, "{\"bridge_id\":\""); write_handler_json_string(&b, setting.bridge_id)
 	strings.write_string(&b, "\",\"provider\":\""); write_handler_json_string(&b, setting.provider)
+	strings.write_string(&b,"\",\"profile_id\":\"");write_handler_json_string(&b,domain.profile_effective_id(setting.provider,setting.profile_id))
 	strings.write_string(
 		&b,
 		"\",\"enabled\":",
@@ -406,6 +417,7 @@ write_provider_test_json :: proc(b: ^strings.Builder, run: provider_service.Prov
 	strings.write_string(b, "{\"run_id\":\""); write_handler_json_string(b, run.run_id)
 	strings.write_string(b, "\",\"bridge_id\":\""); write_handler_json_string(b, run.bridge_id)
 	strings.write_string(b, "\",\"provider\":\""); write_handler_json_string(b, run.provider)
+	strings.write_string(b,"\",\"profile_id\":\"");write_handler_json_string(b,domain.profile_effective_id(run.provider,run.profile_id))
 	strings.write_string(b, "\",\"model\":\""); write_handler_json_string(b, run.model)
 	strings.write_string(
 		b,
@@ -471,7 +483,8 @@ provider_test_start_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	defer domain.bridge_destroy(&bridge)
 	provider := json_string(req.body, "provider"); defer delete(provider)
 	model := json_string(req.body, "model"); defer delete(model)
-	if launch_err := provider_service.validate_launchable(h.providers, bridge.bridge_id, provider, model); launch_err.code != .None do return respond_error(launch_err, req.request_id)
+	profile_id:=json_string(req.body,"profile_id");defer delete(profile_id)
+	if launch_err := provider_service.validate_launchable(h.providers, bridge.bridge_id, provider, model,profile_id); launch_err.code != .None do return respond_error(launch_err, req.request_id)
 	if cleanup_err := provider_test_stop_superseded(h, auth_ctx, bridge.bridge_id); cleanup_err.code != .None do return respond_error(cleanup_err, req.request_id)
 	inst, launched, launch_err := agent_service.create_provider_test_instance(
 		h.agents,
@@ -479,9 +492,11 @@ provider_test_start_handler :: proc(ctx: rawptr, req: Request) -> Response {
 		bridge.bridge_id,
 		provider,
 		model,
+		profile_id,
 	)
 	if !launched do return respond_error(launch_err, req.request_id)
 	run := provider_service.Provider_Test_Run {
+		profile_id = domain.profile_effective_id(provider,profile_id),
 		run_id            = platform.generate_id(h.ids, "ptr_"),
 		owner_user_id     = auth_ctx.user_id,
 		bridge_id         = bridge.bridge_id,

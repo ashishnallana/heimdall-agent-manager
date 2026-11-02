@@ -12,6 +12,9 @@ Unit_Of_Work_Begin_Proc :: proc(ctx: rawptr) -> (Unit_Of_Work, bool, domain.Doma
 After_Commit_Hook :: struct {
 	ctx: rawptr,
 	run: proc(ctx: rawptr),
+	// Called exactly once instead of run when this transaction/savepoint rolls
+	// back. Runs under the transaction lock: cleanup only, never network I/O.
+	discard: proc(ctx: rawptr),
 }
 
 Unit_Of_Work_After_Commit_Proc :: proc(ctx: rawptr, hook: After_Commit_Hook) -> bool

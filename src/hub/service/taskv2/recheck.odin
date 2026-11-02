@@ -38,6 +38,7 @@ Recheck_Result :: struct {
 }
 
 task_recheck :: proc(svc: ^Service, task_in: domain.Task, actor: Actor) -> (Recheck_Result, bool, domain.Domain_Error) {
+	if guard:=task_control_precondition(svc,task_in,actor,"recheck");guard.code!=.None do return {},false,guard
 	u, uok, uerr := begin_uow(svc)
 	if !uok do return {}, false, uerr
 	res, ok, err := task_recheck_in_uow(svc, &u, task_in, actor)
@@ -162,7 +163,7 @@ task_recheck_in_uow :: proc(svc: ^Service, u: ^Uow, task_in: domain.Task, actor:
 
 // recheck_authorize: chain owner or its coordinator, like hold/release, but a
 // completed chain is allowed too (its done tasks may still owe a merge-back).
-@(private = "file")
+@(private = "package")
 recheck_authorize :: proc(svc: ^Service, owner: domain.User_ID, actor: Actor, chain_id: domain.Task_Chain_ID) -> (domain.Task_Chain, bool, domain.Domain_Error) {
 	chain, ok, err := iface.taskchain_get_chain(svc.repo, chain_id)
 	if !ok do return {}, false, err

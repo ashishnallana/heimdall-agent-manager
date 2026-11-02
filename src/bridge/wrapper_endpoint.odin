@@ -573,7 +573,7 @@ bridge_local_relay_rest_request :: proc(params: string, rec: Bridge_Local_Agent_
 		stall_timeout_ms = httpc.DEFAULT_STALL_TIMEOUT_MS,
 	}
 	if body != "" && method != .GET && method != .HEAD do req.body = httpc.relay_json_body(body)
-	resp, err := httpc.send(req)
+	resp, err := bridge_hub_http_send_alloc(req)
 	defer httpc.response_destroy(&resp)
 	return bridge_local_relay_result(resp, err)
 }

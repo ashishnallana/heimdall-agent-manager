@@ -11,7 +11,12 @@ package main
 // Before installing it classifies what is registered now:
 //   current        installed, usable, >= expected version, from this bundle
 //   other_bridge   installed, usable, >= expected, from another Heimdall Bridge's
-//                  bundle under this OS user (REQ-MB-5: left alone, no ping-pong)
+//                  bundle under this OS user (REQ-MB-5: left alone, no ping-pong);
+//                  when ours is the shared bundle, only a strictly newer one
+//   ninjy_bundle   installed, usable, from another Heimdall Bridge's bundle (a
+//                  profile's own copy or an older shared one) at most as new as
+//                  our shared bundle: moved to the shared root, so that no single
+//                  profile's uninstall can break it
 //   absent         nothing registered: plain install
 //   outdated       registered below the expected version
 //   broken         disabled, errored, unknown version, or half-installed
@@ -35,10 +40,12 @@ import "core:slice"
 import "core:strings"
 import "core:sync"
 import "core:time"
+import bridgesvc "odin_test:lib/bridgesvc"
 
 Bridge_Extension_Condition :: enum {
 	Current,
 	Other_Bridge,
+	Ninjy_Bundle,
 	Absent,
 	Outdated,
 	Broken,
@@ -49,6 +56,7 @@ Bridge_Extension_Condition :: enum {
 BRIDGE_EXTENSION_CONDITION_NAMES := [Bridge_Extension_Condition]string {
 	.Current      = "current",
 	.Other_Bridge = "other_bridge",
+	.Ninjy_Bundle = "ninjy_bundle",
 	.Absent       = "absent",
 	.Outdated     = "outdated",
 	.Broken       = "broken",
@@ -58,6 +66,8 @@ BRIDGE_EXTENSION_CONDITION_NAMES := [Bridge_Extension_Condition]string {
 
 // Where progress and discovery reports go: Hub frames, or setup events.
 Bridge_Extension_Sink :: struct {
+	profile: ^Provider_Profile,
+	env: []string,
 	data:     rawptr,
 	progress: proc(data: rawptr, stage: string, pct: int, message: string),
 	report:   proc(data: rawptr, results: []Bridge_Provider_Path),
@@ -75,9 +85,22 @@ Bridge_Extension_Result :: struct {
 Bridge_Extension_Bundle_Resolver :: proc(provider: string, allocator := context.allocator) -> string
 Bridge_Extension_Binary_Resolver :: proc(provider: string) -> (string, bool)
 
+Bridge_Extension_Other_Profiles :: proc() -> int
+
 // Local resolution only (F12); tests replace these.
 bridge_extension_bundle_resolver: Bridge_Extension_Bundle_Resolver = bridge_get_bundled_extension_path
 bridge_extension_binary_resolver: Bridge_Extension_Binary_Resolver = bridge_provider_resolve_path
+bridge_extension_other_profiles: Bridge_Extension_Other_Profiles = bridge_extension_count_other_profiles
+
+// bridge_extension_count_other_profiles counts the bridge profiles of this OS
+// user other than this bridge's own (its data dir is <data root>/<service>).
+// They share the provider registration, so it must outlive this profile.
+bridge_extension_count_other_profiles :: proc() -> int {
+	own := bridgesvc.pbase(strings.trim_space(bridge_config.data_dir))
+	n := 0
+	for name in bridgesvc.list_services(bridge_service_host()) do if name != own do n += 1
+	return n
+}
 
 BRIDGE_CLAUDE_MARKETPLACE :: "heimdall"
 BRIDGE_CODEX_MARKETPLACE :: "heimdall-codex"
@@ -160,13 +183,31 @@ bridge_extension_is_bridge_bundle :: proc(path: string) -> bool {
 	return strings.contains(strings.to_lower(p, context.temp_allocator), "/heimdall/bridges/")
 }
 
+// Every bridge profile (Ninjy account) of this OS user registers the provider
+// extensions from one profile-neutral root with one directory per release:
+// <data root>/.shared-extensions/<version>/extensions, next to the profiles'
+// data dirs (<data root>/<service>). The path still matches
+// bridge_extension_is_bridge_bundle, so bridges released before the shared root
+// leave a usable registration there alone.
+BRIDGE_SHARED_EXTENSIONS_DIR :: ".shared-extensions"
+
+bridge_extension_is_shared_bundle :: proc(path: string) -> bool {
+	p := strings.to_lower(bridge_extension_normalize_path(path), context.temp_allocator)
+	return strings.contains(p, "/heimdall/bridges/" + BRIDGE_SHARED_EXTENSIONS_DIR + "/")
+}
+
 // bridge_extension_classify is pure: discovery state/version, the expected
 // version, and where the provider's Heimdall marketplace points (if anywhere).
 bridge_extension_classify :: proc(state, version, expected: string, mp_registered: bool, mp_path, our_root: string) -> Bridge_Extension_Condition {
 	usable := state == "present" && version != "" && expected != "" &&
 		bridge_provider_extension_version_compare(version, expected) >= 0
 	if mp_registered && mp_path != "" && our_root != "" && !bridge_extension_same_path(mp_path, our_root) {
-		if usable && bridge_extension_is_bridge_bundle(mp_path) do return .Other_Bridge
+		if usable && bridge_extension_is_bridge_bundle(mp_path) {
+			// Newest wins: a strictly newer bundle is left alone, anything else
+			// moves to the shared root ours lives in.
+			if bridge_extension_is_shared_bundle(our_root) && bridge_provider_extension_version_compare(version, expected) <= 0 do return .Ninjy_Bundle
+			return .Other_Bridge
+		}
 		return .Foreign
 	}
 	if usable do return .Current
@@ -237,7 +278,7 @@ bridge_extension_unlock :: proc(prov, lock_path: string) {
 }
 
 bridge_extension_sink_progress :: proc(sink: Bridge_Extension_Sink, stage: string, pct: int, message: string) {
-	if sink.progress != nil do sink.progress(sink.data, stage, pct, message)
+	if sink.progress != nil do sink.progress(sink.data, stage, pct, profile_redact_text(message,sink.profile))
 }
 
 bridge_extension_fail_result :: proc(cond: Bridge_Extension_Condition, code, message: string) -> Bridge_Extension_Result {
@@ -255,6 +296,21 @@ bridge_extension_ensure :: proc(provider, ext_path, bin_path: string, deadline: 
 			fmt.tprintf("another Ninjy extension install for %s is still running for this OS user; retry when it finishes", prov))
 	}
 	defer bridge_extension_unlock(prov, lock_path)
+	// Runs before the unlock above: this bridge's own Codex plugin, enabled per
+	// launch only (provider_extension_codex_own.odin). Best effort; without it
+	// agents keep the shared release.
+	// A bridge uninstalled without cleaning up leaves its own marketplace with a
+	// deleted source, and Codex then fails every `plugin list`, including the
+	// shared registration's check below: drop those first.
+	if prov == "codex" && sink.profile == nil {
+		if healed, heal_msg := bridge_codex_own_heal_hook(); healed > 0 || heal_msg != "" {
+			bridge_extension_sink_progress(sink, "installing", 5, fmt.tprintf("Removed %d stale bridge Codex marketplace(s)%s%s", healed, "; " if heal_msg != "" else "", heal_msg))
+		}
+	}
+	defer if prov == "codex" && sink.profile == nil {
+		own_ok, own_msg := bridge_codex_own_ensure_hook(bin_path, install_deadline, sink.env)
+		bridge_extension_sink_progress(sink, "installing", 90, own_ok ? own_msg : fmt.tprintf("This bridge's own Codex plugin was not registered (%s); agents use the shared one", own_msg))
+	}
 	bundled_version := bridge_provider_extension_read_manifest_version(ext_path, prov)
 	required_version := bridge_extension_required_version(prov)
 	// Verification needs the newer of the bundled manifest and the catalog minimum.
@@ -272,7 +328,7 @@ bridge_extension_ensure :: proc(provider, ext_path, bin_path: string, deadline: 
 
 	// Inspect what is registered now.
 	pre_state, pre_version := "absent", ""
-	pre := bridge_extension_discover({prov})
+	pre := bridge_extension_discover_scoped(prov,sink)
 	for r in pre {
 		if r.provider != prov do continue
 		pre_state = strings.clone(r.extension_state, context.temp_allocator)
@@ -281,7 +337,7 @@ bridge_extension_ensure :: proc(provider, ext_path, bin_path: string, deadline: 
 	}
 	mp_path, mp_registered := "", false
 	if mp_name := bridge_extension_marketplace_name(prov); mp_name != "" {
-		out, _, listed := bridge_extension_install_step({bin_path, "plugin", "marketplace", "list", "--json"}, install_deadline)
+		out, _, listed := bridge_extension_install_step({bin_path, "plugin", "marketplace", "list", "--json"}, install_deadline, sink.env)
 		if listed do mp_path, mp_registered, _ = bridge_extension_parse_marketplace(out, mp_name)
 	}
 	cond := bridge_extension_classify(pre_state, pre_version, expected_version, mp_registered, mp_path, mp_root)
@@ -317,7 +373,7 @@ bridge_extension_ensure :: proc(provider, ext_path, bin_path: string, deadline: 
 			bridge_extension_sink_progress(sink, "installing", 20,
 				fmt.tprintf("Removing the existing %s extension registration (%s) before reinstalling from the bundle...", prov,
 					BRIDGE_EXTENSION_CONDITION_NAMES[cond] if attempt == 0 else last_code))
-			for argv in bridge_extension_cleanup_argvs(prov, bin_path) do _, _, _ = bridge_extension_install_step(argv, install_deadline)
+			for argv in bridge_extension_cleanup_argvs(prov, bin_path) do _, _, _ = bridge_extension_install_step(argv, install_deadline, sink.env)
 		}
 		code, message, installed := bridge_extension_install_once(prov, ext_path, bin_path, mp_root, install_deadline, sink)
 		if !installed {
@@ -326,7 +382,7 @@ bridge_extension_ensure :: proc(provider, ext_path, bin_path: string, deadline: 
 			return bridge_extension_fail_result(cond, code, message)
 		}
 		bridge_extension_sink_progress(sink, "installing", 80, "Verifying installed extension status...")
-		results := bridge_extension_discover({prov})
+		results := bridge_extension_discover_scoped(prov,sink)
 		if sink.report != nil do sink.report(sink.data, results[:])
 		verified := false
 		actual_state, actual_version := "absent", ""
@@ -368,14 +424,23 @@ bridge_extension_remove :: proc(provider, bin_path: string, deadline: time.Time,
 			fmt.tprintf("another Ninjy extension install for %s is still running for this OS user; retry when it finishes", prov))
 	}
 	defer bridge_extension_unlock(prov, lock_path)
+	// This bridge's own Codex plugin is never shared with another profile.
+	if prov == "codex" && sink.profile == nil do bridge_codex_own_remove_hook(bin_path, install_deadline, sink.env)
+	// The OS user's registration is shared by every profile of this OS user;
+	// removing it for one Ninjy account would break the others' agents. A
+	// per-account provider profile registers in its own config dir instead.
+	if others := bridge_extension_other_profiles(); sink.profile == nil && others > 0 {
+		return {ok = true, condition = .Unknown, action = "left",
+			message = fmt.tprintf("Provider extension for %s left installed: %d other Ninjy Bridge profile(s) on this OS user still use it", prov, others)}
+	}
 	bridge_extension_sink_progress(sink, "uninstalling", 20, fmt.tprintf("Removing the %s extension and its marketplace registration...", prov))
-	for argv in bridge_extension_cleanup_argvs(prov, bin_path) do _, _, _ = bridge_extension_install_step(argv, install_deadline)
+	for argv in bridge_extension_cleanup_argvs(prov, bin_path) do _, _, _ = bridge_extension_install_step(argv, install_deadline, sink.env)
 	bridge_extension_sink_progress(sink, "uninstalling", 80, "Verifying the extension is gone...")
 	// A marketplace source that survives `marketplace remove` (another config
 	// layer, a CLI that refused) would make the next install fail with "already
 	// added from a different source": name it instead of reporting success.
 	if mp_name := bridge_extension_marketplace_name(prov); mp_name != "" {
-		out, _, listed := bridge_extension_install_step({bin_path, "plugin", "marketplace", "list", "--json"}, install_deadline)
+		out, _, listed := bridge_extension_install_step({bin_path, "plugin", "marketplace", "list", "--json"}, install_deadline, sink.env)
 		if listed {
 			if mp_path, still, _ := bridge_extension_parse_marketplace(out, mp_name); still {
 				return bridge_extension_fail_result(.Unknown, "marketplace_remove_failed",
@@ -384,7 +449,7 @@ bridge_extension_remove :: proc(provider, bin_path: string, deadline: time.Time,
 			}
 		}
 	}
-	results := bridge_extension_discover({prov})
+	results := bridge_extension_discover_scoped(prov,sink)
 	if sink.report != nil do sink.report(sink.data, results[:])
 	state := "absent"
 	for r in results do if r.provider == prov do state = strings.clone(r.extension_state, context.temp_allocator)
@@ -402,23 +467,23 @@ bridge_extension_remove :: proc(provider, bin_path: string, deadline: time.Time,
 bridge_extension_install_once :: proc(prov, ext_path, bin_path, mp_root: string, install_deadline: time.Time, sink: Bridge_Extension_Sink) -> (code, message: string, ok: bool) {
 	if prov == "claude" || prov == "codex" {
 		bridge_extension_sink_progress(sink, "installing", 25, fmt.tprintf("Registering %s local plugin marketplace...", "Claude" if prov == "claude" else "Codex"))
-		_, msg, registered := bridge_extension_install_step({bin_path, "plugin", "marketplace", "add", mp_root}, install_deadline)
+		_, msg, registered := bridge_extension_install_step({bin_path, "plugin", "marketplace", "add", mp_root}, install_deadline, sink.env)
 		// Another source holds the name (e.g. an older Bridge's bundle): replace it
 		// here instead of depending on a second, possibly time-starved attempt.
 		if !registered && strings.contains(strings.to_lower(msg, context.temp_allocator), "different source") {
 			bridge_extension_sink_progress(sink, "installing", 30, "Replacing a marketplace registered from another source...")
-			_, _, _ = bridge_extension_install_step({bin_path, "plugin", "marketplace", "remove", bridge_extension_marketplace_name(prov)}, install_deadline)
-			_, msg, registered = bridge_extension_install_step({bin_path, "plugin", "marketplace", "add", mp_root}, install_deadline)
+			_, _, _ = bridge_extension_install_step({bin_path, "plugin", "marketplace", "remove", bridge_extension_marketplace_name(prov)}, install_deadline, sink.env)
+			_, msg, registered = bridge_extension_install_step({bin_path, "plugin", "marketplace", "add", mp_root}, install_deadline, sink.env)
 		}
 		if !registered do return "marketplace_add_failed", msg, false
 	}
 	bridge_extension_sink_progress(sink, "installing", 50, "Executing provider extension installation...")
 	argv := bridge_provider_extension_build_install_args(prov, bin_path, ext_path)
-	output, install_error, installed := bridge_extension_install_step(argv, install_deadline)
+	output, install_error, installed := bridge_extension_install_step(argv, install_deadline, sink.env)
 	if !installed do return "install_failed", install_error, false
 	if prov == "claude" && strings.contains(strings.to_lower(output, context.temp_allocator), "already installed") {
 		bridge_extension_sink_progress(sink, "installing", 65, "Updating existing Claude extension...")
-		_, msg, updated := bridge_extension_install_step({bin_path, "plugin", "update", BRIDGE_CLAUDE_PLUGIN_ID}, install_deadline)
+		_, msg, updated := bridge_extension_install_step({bin_path, "plugin", "update", BRIDGE_CLAUDE_PLUGIN_ID}, install_deadline, sink.env)
 		if !updated do return "update_failed", msg, false
 	}
 	return "", "", true
@@ -428,4 +493,9 @@ bridge_provider_paths_destroy_all :: proc(results: ^[dynamic]Bridge_Provider_Pat
 	for &result in results do bridge_provider_path_destroy(&result)
 	delete(results^)
 	results^ = nil
+}
+
+bridge_extension_discover_scoped :: proc(prov: string, sink: Bridge_Extension_Sink) -> [dynamic]Bridge_Provider_Path {
+	if sink.profile == nil do return bridge_extension_discover({prov})
+	return bridge_provider_discover_execute_profile({prov},sink.profile.profile_id)
 }

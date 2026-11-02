@@ -81,6 +81,23 @@ bridge_provider_directory_variants :: proc(provider: string, allocator := contex
 	return variants[:]
 }
 
+// bridge_get_profile_extension_path resolves a provider's extension for a
+// per-account provider profile: this profile's own <data_dir>/extensions copy,
+// else the general resolver. A provider profile's config dir belongs to this
+// profile alone, and the own copy keeps one path across updates, whereas any
+// profile's update may prune an older shared release.
+bridge_get_profile_extension_path :: proc(provider: string, allocator := context.allocator) -> string {
+	prov := strings.trim_space(provider)
+	if data_dir := strings.trim_space(bridge_config.data_dir); data_dir != "" && prov != "" {
+		base := path_join({expand_home_temp(data_dir, context.temp_allocator), "extensions"}, context.temp_allocator)
+		for variant in bridge_provider_directory_variants(prov, context.temp_allocator) {
+			candidate_path := path_join({base, variant}, context.temp_allocator)
+			if bridge_os_dir_exists(candidate_path) do return bridge_clean_abs_path(candidate_path, allocator)
+		}
+	}
+	return bridge_extension_bundle_resolver(provider, allocator)
+}
+
 @(private="file")
 bridge_bundled_extension_base_candidates :: proc(allocator := context.allocator) -> []string {
 	candidates := make([dynamic]string, allocator)
@@ -101,9 +118,13 @@ bridge_bundled_extension_base_candidates :: proc(allocator := context.allocator)
 		}
 	}
 
-	// 2. bridge_config.data_dir
+	// 2. bridge_config.data_dir: the newest shared release every profile of this
+	// OS user registers from, then the profile's own copy.
 	if data_dir := strings.trim_space(bridge_config.data_dir); data_dir != "" {
 		expanded := expand_home_temp(data_dir, allocator)
+		if shared := bridge_extensions_newest_shared(bridge_extensions_shared_root(expanded)); shared != "" {
+			append(&candidates, strings.clone(shared, allocator))
+		}
 		append(&candidates, path_join({expanded, "extensions"}, allocator))
 	}
 

@@ -781,7 +781,7 @@ bridge_lsp_handle_start :: proc(conn: ^ws.Connection, text: string) {
 	if detected_root != "" {
 		working_dir = detected_root
 	}
-	process, spawn_err := os.process_start(os.Process_Desc{
+	process, spawn_err := bridge_os_start_hidden(os.Process_Desc{
 		command     = argv[:],
 		stdin       = stdin_r,
 		stdout      = stdout_w,

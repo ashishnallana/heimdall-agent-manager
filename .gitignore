@@ -51,6 +51,8 @@ hub.db-wal
 dist-*/
 .ui-preview-session
 .dev-preview-session
+.dev-preview-url
+.ui-preview-url
 
 # Python bytecode from the test suites (tests/*.py)
 __pycache__/

@@ -49,6 +49,7 @@ package ws
 //   4. A TOTAL WRITE DEADLINE, shared with the client and TLS pipe writers.
 
 import "core:net"
+import "core:time"
 
 // WS_16BIT_MAX_PAYLOAD is the largest payload the 126/2-byte extended length can
 // describe, and therefore the hard bound on any channel whose reader stops there.
@@ -114,7 +115,7 @@ server_frame_header :: proc(out: []byte, n: int) -> int {
 
 // write_server_opcode_counted writes one frame with a specific opcode and reports
 // both how many bytes went out and the typed result.
-write_server_opcode_counted :: proc(socket: net.TCP_Socket, opcode: u8, text: string, allow_64bit: bool) -> (sent: int, res: Text_Write_Result) {
+write_server_opcode_counted :: proc(socket: net.TCP_Socket, opcode: u8, text: string, allow_64bit: bool, timeout:time.Duration=WRITE_DEADLINE) -> (sent: int, res: Text_Write_Result) {
 	n := len(text)
 	limit := WS_16BIT_MAX_PAYLOAD
 	if allow_64bit do limit = WS_MAX_SERVER_PAYLOAD
@@ -129,7 +130,7 @@ write_server_opcode_counted :: proc(socket: net.TCP_Socket, opcode: u8, text: st
 	copy(frame[header_len:], transmute([]byte)text)
 
 	ok: bool
-	sent, ok = send_socket_bytes(socket, frame)
+	sent, ok = send_socket_bytes(socket, frame,timeout)
 	if ok do return sent, .Ok
 	if sent == 0 do return 0, .Peer_Gone
 	return sent, .Desynchronised

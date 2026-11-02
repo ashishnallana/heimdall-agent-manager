@@ -50,14 +50,20 @@ def merge(texts):
     base_head, files, base_tail = split(texts[0][1], texts[0][0])
     version = field(base_head, 'version', texts[0][0])
     urls = {l.strip() for l in files if l.lstrip().startswith('- url: ')}
+    if len(urls) != sum(l.lstrip().startswith('- url: ') for l in files):
+        raise SystemExit(f'{texts[0][0]}: duplicate file entries')
     for name, text in texts[1:]:
         head, more, _ = split(text, name)
         if field(head, 'version', name) != version:
             raise SystemExit(f'{name}: version {field(head, "version", name)} != {version}')
-        clash = urls & {l.strip() for l in more if l.lstrip().startswith('- url: ')}
+        more_urls = {l.strip() for l in more if l.lstrip().startswith('- url: ')}
+        if len(more_urls) != sum(l.lstrip().startswith('- url: ') for l in more):
+            raise SystemExit(f'{name}: duplicate file entries')
+        clash = urls & more_urls
         if clash:
             raise SystemExit(f'{name}: duplicate file entries {sorted(clash)}')
         files += more
+        urls.update(more_urls)
     return '\n'.join(base_head + ['files:'] + files + base_tail) + '\n'
 
 

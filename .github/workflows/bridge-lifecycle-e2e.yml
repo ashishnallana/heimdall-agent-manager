@@ -46,7 +46,7 @@ jobs:
           # install real units, and the post-uninstall checks query that manager.
           - os: ubuntu-24.04
             service: '1'
-          - os: macos-14
+          - os: macos-15
             service: '1'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
@@ -76,6 +76,15 @@ jobs:
           echo "XDG_RUNTIME_DIR=/run/user/$uid" >> "$GITHUB_ENV"
           echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus" >> "$GITHUB_ENV"
           XDG_RUNTIME_DIR="/run/user/$uid" systemctl --user is-system-running || true
+          # A user service inherits the manager's environment, not this job's.
+          # The PTY socket fallback must resolve identically in the service and
+          # the test client; otherwise the client probes a healthy daemon in
+          # RUNNER_TEMP while systemd started it under /tmp.
+          echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          XDG_RUNTIME_DIR="/run/user/$uid" systemctl --user set-environment "TMPDIR=$RUNNER_TEMP"
+          manager_tmp="$(XDG_RUNTIME_DIR="/run/user/$uid" systemctl --user show-environment | sed -n 's/^TMPDIR=//p')"
+          test "$manager_tmp" = "$RUNNER_TEMP"
+          echo "Service scratch directory: $manager_tmp"
       - name: Unlocked default keychain (macOS)
         if: runner.os == 'macOS'
         shell: bash
@@ -97,9 +106,13 @@ jobs:
         run: |
           set -euo pipefail
           hub="$(nix build .#ham-hub --print-out-paths --no-link)"
-          bridge="$(nix build .#ham-bridge --print-out-paths --no-link)"
+          bridge="$(nix build .#release-ham-bridge --print-out-paths --no-link)"
+          pty="$(nix build .#release-ham-pty-host --print-out-paths --no-link)"
+          bundle="$RUNNER_TEMP/lifecycle-bundle"
+          mkdir -p "$bundle"
+          cp "$bridge/bin/ham-bridge" "$pty/bin/ham-pty-host" "$bundle/"
           echo "HEIMDALL_E2E_HUB_BIN=$hub/bin/ham-hub" >> "$GITHUB_ENV"
-          echo "HEIMDALL_E2E_BRIDGE_BIN=$bridge/bin/ham-bridge" >> "$GITHUB_ENV"
+          echo "HEIMDALL_E2E_BRIDGE_BIN=$bundle/ham-bridge" >> "$GITHUB_ENV"
       - name: Real enroll e2e
         run: node --import ./tests/helpers/vaultEndpointHarness.ts tests/e2e/bridge_real_enroll_e2e.mjs
       - name: Lifecycle e2e
@@ -149,7 +162,7 @@ jobs:
         shell: pwsh
         run: |
           $out = Join-Path $env:RUNNER_TEMP 'e2e-bin'
-          scripts/windows/build.ps1 -OutDir $out -Odin $env:ODIN -Components ham-bridge,ham-hub -CurlLibDir "$env:RUNNER_TEMP/libcurl-static/lib"
+          scripts/windows/build.ps1 -OutDir $out -Odin $env:ODIN -Components ham-bridge,ham-hub,ham-pty-host -CurlLibDir "$env:RUNNER_TEMP/libcurl-static/lib"
           "HEIMDALL_E2E_HUB_BIN=$(Join-Path $out 'ham-hub.exe')" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
           "HEIMDALL_E2E_BRIDGE_BIN=$(Join-Path $out 'ham-bridge.exe')" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
       - name: Real enroll + lifecycle e2e

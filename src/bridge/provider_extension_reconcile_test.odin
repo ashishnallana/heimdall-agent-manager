@@ -1,6 +1,8 @@
 package main
 
 import "core:fmt"
+import contracts "odin_test:contracts"
+import bridgesvc "odin_test:lib/bridgesvc"
 import "core:os"
 import "core:strings"
 import "base:runtime"
@@ -30,6 +32,109 @@ test_bridge_extension_classify :: proc(t: ^testing.T) {
 		got := bridge_extension_classify(c.state, c.version, "0.4.31", c.registered, c.mp, ours)
 		testing.expectf(t, got == c.want, "%v: got %v", c, got)
 	}
+}
+
+// Every profile of an OS user registers from the shared root; a registration
+// from a profile's own copy or an older shared release moves there, a strictly
+// newer Ninjy bundle is left alone (newest wins).
+@(test)
+test_bridge_extension_classify_shared_root :: proc(t: ^testing.T) {
+	ours := "/home/u/.local/share/heimdall/bridges/.shared-extensions/0.5.30/extensions"
+	older := "/home/u/.local/share/heimdall/bridges/.shared-extensions/0.5.29/extensions"
+	profile := "/home/u/.local/share/heimdall/bridges/heimdall-bridge-hub_work/extensions"
+	Case :: struct { version, mp: string, want: Bridge_Extension_Condition }
+	for c in ([]Case{
+		{"0.4.31", ours, .Current},
+		{"0.4.31", older, .Ninjy_Bundle},
+		{"0.4.31", profile, .Ninjy_Bundle},
+		{"0.4.32", profile, .Other_Bridge},
+		{"0.4.32", older, .Other_Bridge},
+		{"0.4.31", "/home/u/src/heimdall/extensions", .Foreign},
+	}) {
+		got := bridge_extension_classify("present", c.version, "0.4.31", true, c.mp, ours)
+		testing.expectf(t, got == c.want, "%v: got %v", c, got)
+	}
+	testing.expect(t, bridge_extension_is_shared_bundle(ours))
+	testing.expect(t, bridge_extension_is_bridge_bundle(ours), "bridges older than the shared root must leave it alone")
+	testing.expect(t, !bridge_extension_is_shared_bundle(profile))
+}
+
+// Two profiles publish to one shared root: a release is published once, the
+// newest release wins whichever profile installs last, and pruning keeps it.
+@(test)
+test_bridge_extensions_shared_root_publish :: proc(t: ^testing.T) {
+	base := test_install_path({os.get_env("TMPDIR", context.temp_allocator) if os.get_env("TMPDIR", context.temp_allocator) != "" else "/tmp",
+		fmt.tprintf("ham-shared-ext-%d", time.to_unix_nanoseconds(time.now()))})
+	defer _ = os.remove_all(base)
+	data_root := test_install_path({base, "heimdall", "bridges"})
+	a := test_install_path({data_root, "heimdall-bridge-hub"})
+	b := test_install_path({data_root, "heimdall-bridge-hub_work"})
+	for d in ([]string{a, b}) {
+		testing.expect(t, os.make_directory_all(test_install_path({d, "extensions", "claude-code"})) == nil)
+		testing.expect(t, os.write_entire_file(test_install_path({d, "extensions", "claude-code", "marker"}), transmute([]u8)d) == nil)
+	}
+	root := bridge_extensions_shared_root(a)
+	testing.expect_value(t, root, bridge_extensions_shared_root(b))
+	testing.expect_value(t, root, test_install_path({data_root, BRIDGE_SHARED_EXTENSIONS_DIR}))
+
+	shared, ok, msg := bridge_extensions_publish_shared(test_install_path({a, "extensions"}), a)
+	testing.expectf(t, ok, "publish a: %s", msg)
+	this := test_install_path({root, contracts.APP_VERSION, "extensions"})
+	testing.expect_value(t, shared, this)
+	// Profile b of the same release reuses a's published copy.
+	shared, ok, _ = bridge_extensions_publish_shared(test_install_path({b, "extensions"}), b)
+	testing.expect(t, ok)
+	testing.expect_value(t, shared, this)
+	marker, _ := os.read_entire_file(test_install_path({this, "claude-code", "marker"}), context.temp_allocator)
+	testing.expect_value(t, string(marker), a)
+
+	// A newer release published by another profile wins over ours.
+	newer := test_install_path({root, "999.0.0", "extensions"})
+	testing.expect(t, os.make_directory_all(newer) == nil)
+	shared, ok, _ = bridge_extensions_publish_shared(test_install_path({a, "extensions"}), a)
+	testing.expect_value(t, shared, newer)
+	bridge_extensions_prune_shared(newer)
+	testing.expect(t, os.is_dir(newer))
+	testing.expect(t, !os.is_dir(this), "older shared release pruned once every provider uses the newest")
+	// Uninstalling profile a (its whole data dir) leaves the shared root intact.
+	_ = os.remove_all(a)
+	testing.expect_value(t, bridge_extensions_newest_shared(root), newer)
+}
+
+// A per-account provider profile registers from its profile's own copy, so
+// another profile publishing a newer shared release and pruning the older one
+// leaves that registration's directory in place.
+@(test)
+test_bridge_extensions_profile_registration_survives_prune :: proc(t: ^testing.T) {
+	sync.mutex_lock(&bridge_test_config_mutex)
+	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	base := test_install_path({os.get_env("TMPDIR", context.temp_allocator) if os.get_env("TMPDIR", context.temp_allocator) != "" else "/tmp",
+		fmt.tprintf("ham-shared-ext-pp-%d-%d", os.get_pid(), time.to_unix_nanoseconds(time.now()))})
+	defer _ = os.remove_all(base)
+	data_root := test_install_path({base, "heimdall", "bridges"})
+	a := test_install_path({data_root, "heimdall-bridge-hub"})
+	testing.expect(t, os.make_directory_all(test_install_path({a, "extensions", "claude-code"})) == nil)
+	saved_data := bridge_config.data_dir
+	defer bridge_config.data_dir = saved_data
+	bridge_config.data_dir = a
+
+	// Release N is the newest shared release when the provider profile installs.
+	shared, ok, msg := bridge_extensions_publish_shared(test_install_path({a, "extensions"}), a)
+	testing.expectf(t, ok, "publish: %s", msg)
+	got := bridge_get_profile_extension_path("claude", context.temp_allocator)
+	testing.expect_value(t, got, test_install_path({a, "extensions", "claude-code"}))
+	testing.expect(t, !strings.has_prefix(got, bridgesvc.pdir(shared)), "provider profile must not register from a shared release")
+
+	// Another profile publishes N+1 and prunes N.
+	newer := test_install_path({bridge_extensions_shared_root(a), "999.0.0", "extensions"})
+	testing.expect(t, os.make_directory_all(newer) == nil)
+	bridge_extensions_prune_shared(newer)
+	testing.expect(t, !os.is_dir(shared), "release N pruned")
+	testing.expect(t, os.is_dir(got), "provider-profile registration still resolves after prune")
+
+	// Without its own copy a profile falls back to the general resolver.
+	_ = os.remove_all(test_install_path({a, "extensions"}))
+	testing.expect(t, !strings.has_prefix(bridge_get_profile_extension_path("claude", context.temp_allocator), a))
 }
 
 @(test)
@@ -360,6 +465,19 @@ test_bridge_extension_remove_uninstalls_and_verifies :: proc(t: ^testing.T) {
 	result = bridge_extension_remove("claude-code", "/fake/provider", time.time_add(time.now(), 30 * time.Second), {})
 	testing.expectf(t, result.ok, "%v", result)
 	if len(test_install_calls) > 0 do testing.expect_value(t, test_install_verb(test_install_calls[0]), "uninstall")
+
+	// Another Ninjy account's profile on this OS user still uses the shared
+	// registration: nothing is removed. A per-account provider profile's own
+	// config dir is not shared and is cleaned up.
+	test_install_reset(t, "remove-other-profile")
+	test_install_other_profiles = 1
+	result = bridge_extension_remove("codex", "/fake/provider", time.time_add(time.now(), 30 * time.Second), {})
+	testing.expectf(t, result.ok && result.action == "left", "%v", result)
+	testing.expect_value(t, len(test_install_calls), 0)
+	pp := Provider_Profile{}
+	result = bridge_extension_remove("codex", "/fake/provider", time.time_add(time.now(), 30 * time.Second), {profile = &pp})
+	testing.expectf(t, result.action != "left", "%v", result)
+	test_install_other_profiles = 0
 
 	// A marketplace that survives removal is named, not reported as success.
 	test_install_reset(t, "remove-marketplace-stuck")

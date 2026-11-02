@@ -16,7 +16,14 @@
 #   HEIMDALL_PREVIEW_PORT       port for reverse proxy (default: 5173)
 #   HEIMDALL_VITE_PORT          port for internal Vite (default: 5174)
 #   HEIMDALL_PREVIEW_CHAIN      file session under this chain (optional)
+#   HEIMDALL_PREVIEW_UPSTREAM   ham-dev-proxy for /api/v1 (default: the running
+#                               local-hub.sh instance, else dev-stack.sh's :8080;
+#                               see scripts/lib/dev-proxy-upstream.sh)
 #   HAM_CTL                     ham-ctl binary path (optional)
+#
+# Sign-in: the preview strips hub cookies, so ham-dev-proxy signs in on your behalf
+# (docs/auth-oidc.md, "Local development"). Nothing to configure: the relay vouches
+# for the preview origin (scripts/lib/preview-origin.mjs).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -31,8 +38,8 @@ PORT="${HEIMDALL_PREVIEW_PORT:-5173}"
 VITE_PORT="${HEIMDALL_VITE_PORT:-5174}"
 if [[ -z "${HAM_CTL:-}" ]]; then
   for candidate in \
-    "$REPO/.heimdall/bin/ham-ctl" \
-    /tmp/heimdall-bridge-local/instances/*/.heimdall/bin/ham-ctl \
+    "$REPO/bin/ham-ctl" \
+    /tmp/heimdall-bridge-local/instances/*/bin/ham-ctl \
     "$HOME/.nix-profile/bin/ham-ctl"; do
     if [[ -x "$candidate" ]]; then
       HAM_CTL="$candidate"
@@ -43,6 +50,10 @@ if [[ -z "${HAM_CTL:-}" ]]; then
 fi
 LABEL="heimdall-ui-live-preview"
 STATE="$REPO/.dev-preview-session"
+# dev-preview.mjs reads the session's preview_url here to trust the preview origin.
+URL_STATE="$REPO/.dev-preview-url"
+# shellcheck source=lib/dev-proxy-upstream.sh
+. "$SCRIPT_DIR/lib/dev-proxy-upstream.sh"
 
 log() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 die() { printf '\033[31merror: %s\033[0m\n' "$*" >&2; exit 1; }
@@ -57,7 +68,7 @@ if [[ "${1:-}" == "--stop" ]]; then
   [[ -f "$STATE" ]] || die "no session recorded in $STATE"
   sid="$(cat "$STATE")"
   "$HAM_CTL" shell kill "$sid" >/dev/null 2>&1 || true
-  rm -f "$STATE"
+  rm -f "$STATE" "$URL_STATE"
   log "killed session $sid"
   exit 0
 fi
@@ -79,7 +90,7 @@ for old in $prev $running_sids; do
     "$HAM_CTL" shell kill "$old" >/dev/null 2>&1 || true
   fi
 done
-rm -f "$STATE"
+rm -f "$STATE" "$URL_STATE"
 
 # Wait for port to clear
 for _ in $(seq 1 20); do
@@ -113,15 +124,14 @@ if [[ -n "$CHAIN" ]]; then
 fi
 
 
+# The API goes to a ham-dev-proxy, which brokers the OIDC sign-in. (The old probe
+# fell back to :8090, which is dev-stack.sh's mock OIDC provider, not a proxy.)
 UPSTREAM_FLAG=""
-if [[ -n "${HEIMDALL_PREVIEW_UPSTREAM:-}" ]]; then
-  UPSTREAM_FLAG="--upstream $HEIMDALL_PREVIEW_UPSTREAM"
-elif (exec 3<>"/dev/tcp/127.0.0.1/8080") 2>/dev/null; then
-  exec 3>&- 3<&-
-  UPSTREAM_FLAG="--upstream http://127.0.0.1:8080"
-elif (exec 3<>"/dev/tcp/127.0.0.1/8090") 2>/dev/null; then
-  exec 3>&- 3<&-
-  UPSTREAM_FLAG="--upstream http://127.0.0.1:8090"
+if UPSTREAM="$(dev_proxy_upstream)"; then
+  log "API upstream: ham-dev-proxy at $UPSTREAM"
+  UPSTREAM_FLAG="--upstream $UPSTREAM"
+else
+  log "WARN: no ham-dev-proxy found (start scripts/local-hub.sh or dev-stack.sh, or set HEIMDALL_PREVIEW_UPSTREAM); /api/v1 will 502"
 fi
 
 SID=""
@@ -150,6 +160,9 @@ for attempt in 0 1 2 3; do
 done
 
 [[ -n "$SID" ]] || die "shell start returned no session_id. Response was: $START_RESPONSE"
+# preview_url first: dev-preview.mjs reads it once it sees the session id.
+START_PREVIEW_URL="$(printf '%s' "$START_RESPONSE" | json 'print(d.get("data",{}).get("data",{}).get("session",{}).get("preview_url",""))' 2>/dev/null || true)"
+[[ -n "$START_PREVIEW_URL" ]] && printf '%s\n' "$START_PREVIEW_URL" > "$URL_STATE"
 echo "$SID" > "$STATE"
 
 log "started session $SID on port $PORT (PID $(printf '%s' "$START_RESPONSE" | json 'print(d.get("data",{}).get("data",{}).get("session",{}).get("pid","?"))'))"
@@ -177,6 +190,7 @@ fi
 # The Hub builds preview_url from its own config: <preview_origin>/p/<sid>/ or, in legacy
 # mode, <ui_origin>/api/v1/preview/<sid>/. Never construct it here; read it back.
 PREVIEW_URL="$("$HAM_CTL" shell show "$SID" | json 'print(d.get("data",{}).get("data",{}).get("session",{}).get("preview_url",""))' 2>/dev/null || true)"
+[[ -n "$PREVIEW_URL" ]] && printf '%s\n' "$PREVIEW_URL" > "$URL_STATE"
 EXPECTED_PREFIX="/api/v1/preview/$SID/"
 if [[ -n "$PREVIEW_URL" ]]; then
   EXPECTED_PREFIX="$(python3 -c 'import sys,urllib.parse; print(urllib.parse.urlsplit(sys.argv[1]).path)' "$PREVIEW_URL")"

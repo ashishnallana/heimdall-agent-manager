@@ -9,6 +9,7 @@ import contracts "odin_test:contracts"
 import project_service "odin_test:hub/service/project"
 import metrics "odin_test:lib/metrics"
 import ws "odin_test:lib/ws"
+import jsonx "odin_test:lib/jsonx"
 
 USER_WS_MAX_SLOTS :: 128
 
@@ -51,6 +52,8 @@ USER_WS_CLOSE_TRY_AGAIN_LATER :: 1013
 // up on a peer only shutdown(.Receive)s it to wake that reader, which then closes. That is
 // safe because the reader cannot close before detach, and detach waits for write_mutex.
 User_Event_Bus :: struct {
+	poll_mutex: sync.Mutex,
+	poll_slots: [64]Poll_Slot,
 	mutex: sync.Mutex,
 	write_mutexes: [USER_WS_MAX_SLOTS]sync.Mutex,
 	owner_user_ids: [USER_WS_MAX_SLOTS]string,
@@ -247,6 +250,9 @@ user_ws_refuse_full :: proc(socket: net.TCP_Socket) -> bool {
 
 publish_resource_changed :: proc(bus: ^User_Event_Bus, owner_user_id, resource, resource_id, change, summary_json: string) {
 	if bus == nil || owner_user_id == "" do return
+	chain_id:=resource_id
+	if resource!="task_chain" {chain_id=jsonx.extract_string(summary_json,"chain_id");defer delete(chain_id)}
+	poll_hint(bus, owner_user_id,chain_id)
 	seq := sync.atomic_add(&bus.event_seq, 1) + 1
 	event := resource_changed_json(seq, resource, resource_id, change, summary_json)
 	publish_owned(bus, owner_user_id, event)
@@ -281,6 +287,44 @@ publish_raw_to_user :: proc(bus: ^User_Event_Bus, owner_user_id, event_json: str
 	sync.mutex_unlock(&bus.mutex)
 	for target in targets[:n_targets] {
 		_deliver_to_slot(bus, target, event_json)
+	}
+}
+
+// Best-effort worker hint, with a budget for the ENTIRE fan-out. A busy socket
+// is skipped before taking a sequence number; no job data enters this stream.
+// The request broker's deadline remains authoritative if every hint is skipped.
+publish_mcp_worker_hint :: proc(bus:^User_Event_Bus,owner:string) {
+	if bus==nil do return
+	started:=time.tick_now()
+	targets:[USER_WS_MAX_SLOTS]User_WS_Handle
+	count:=0
+	sync.mutex_lock(&bus.mutex)
+	for i in 0..<bus.client_count do if bus.connected[i] && bus.owner_user_ids[i]==owner {targets[count]={i,bus.generations[i]};count+=1}
+	sync.mutex_unlock(&bus.mutex)
+	for target in targets[:count] {
+		if time.tick_since(started)>=100*time.Millisecond do return
+		i:=target.idx
+		if !sync.mutex_try_lock(&bus.write_mutexes[i]) do continue
+		sync.mutex_lock(&bus.mutex)
+		if !bus.connected[i] || bus.generations[i]!=target.generation {sync.mutex_unlock(&bus.mutex);sync.mutex_unlock(&bus.write_mutexes[i]);continue}
+		socket:=bus.sockets[i]
+		seq:=bus.stream_seqs[i]+1
+		epoch_buf:[48]byte
+		epoch:=_stream_epoch(epoch_buf[:],bus.boot_epoch,bus.stream_serials[i])
+		sync.mutex_unlock(&bus.mutex)
+		frame,_:=stamp_stream_event(epoch,seq,`{"type":"mcp_worker_available"}`)
+		remaining:=100*time.Millisecond-time.tick_since(started)
+		result:ws.Text_Write_Result
+		if remaining>0 {_,result=ws.write_server_opcode_counted(socket,0x1,frame,true,min(remaining,10*time.Millisecond))} else {result=.Peer_Gone}
+		delete(frame)
+		sync.mutex_lock(&bus.mutex)
+		if result==.Ok {bus.stream_seqs[i]=seq} else if result==.Desynchronised {
+			_user_ws_release_locked(bus,i)
+		}
+		sync.mutex_unlock(&bus.mutex)
+		// The reader owns close. Hold write_mutex until shutdown completes.
+		if result==.Desynchronised do _ = net.shutdown(net.Any_Socket(socket),.Receive)
+		sync.mutex_unlock(&bus.write_mutexes[i])
 	}
 }
 

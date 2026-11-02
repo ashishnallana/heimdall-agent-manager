@@ -12,6 +12,30 @@ ipcRenderer.on('heimdall-window:chrome-state', (_event: any, payload: any) => {
 });
 
 contextBridge.exposeInMainWorld('odinApi', {
+  desktopUpdates: {
+    schemaVersion: 1,
+    getState: () => ipcRenderer.invoke('heimdall-updates:get-state'),
+    check: () => ipcRenderer.invoke('heimdall-updates:check'),
+    retry: () => ipcRenderer.invoke('heimdall-updates:retry'),
+    restartAndInstall: () => ipcRenderer.invoke('heimdall-updates:restart'),
+    onState: (callback: (state: any) => void) => {
+      const listener = (_event: any, payload: any) => callback(payload);
+      ipcRenderer.on('heimdall-updates:state', listener);
+      return () => ipcRenderer.removeListener('heimdall-updates:state', listener);
+    },
+    // Fixed internal preparation handshake; no caller-supplied channels or paths.
+    onPrepare: (callback: (request: any) => void) => {
+      const listener = (_event: any, payload: any) => callback(payload);
+      ipcRenderer.on('heimdall-updates:prepare', listener);
+      return () => ipcRenderer.removeListener('heimdall-updates:prepare', listener);
+    },
+    onRelease: (callback: (request: any) => void) => {
+      const listener = (_event: any, payload: any) => callback(payload);
+      ipcRenderer.on('heimdall-updates:release', listener);
+      return () => ipcRenderer.removeListener('heimdall-updates:release', listener);
+    },
+    preparationResult: (result: { epoch: number; ready: boolean }) => ipcRenderer.invoke('heimdall-updates:preparation-result', result),
+  },
   windowChrome: {
     style: windowChromeStyle,
     getState: () => ({ fullscreen: windowFullscreen }),

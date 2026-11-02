@@ -1,3 +1,4 @@
+import { guardDesktopUpdateRequest } from '../utils/desktopUpdatePreparation';
 const DEFAULT_TIMEOUT_MS = 5000;
 
 type RequestOptions = {
@@ -40,6 +41,7 @@ type TaskAgentRequest = {
 
 async function requestJson(url: string, { method = 'GET', body, headers, timeoutMs = DEFAULT_TIMEOUT_MS }: RequestOptions = {}): Promise<any> {
 
+  guardDesktopUpdateRequest(method);
   const controller = new AbortController();
   const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -67,6 +69,7 @@ async function requestJson(url: string, { method = 'GET', body, headers, timeout
 }
 
 async function requestFormJson(url: string, { method = 'POST', body, headers, timeoutMs = DEFAULT_TIMEOUT_MS }: RequestOptions = {}): Promise<any> {
+  guardDesktopUpdateRequest(method);
   const controller = new AbortController();
   const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
   try {

@@ -20,6 +20,24 @@ import "core:thread"
 import "core:time"
 import ws "odin_test:lib/ws"
 
+@(test)
+test_mcp_worker_hint_skips_busy_socket_without_sequence_gap :: proc(t:^testing.T) {
+	context.allocator=context.temp_allocator
+	p:=make_pair(t);defer close_pair(&p)
+	bus:User_Event_Bus
+	i:=user_ws_add(&bus,"alice",p.hub)
+	defer user_ws_remove(&bus,i)
+	sync.mutex_lock(&bus.write_mutexes[i])
+	started:=time.tick_now()
+	publish_mcp_worker_hint(&bus,"alice")
+	sync.mutex_unlock(&bus.write_mutexes[i])
+	testing.expect(t,time.tick_since(started)<200*time.Millisecond && bus.stream_seqs[i]==0)
+	publish_mcp_worker_hint(&bus,"alice")
+	bytes:=drain(p.peer);defer delete(bytes)
+	frames,ok:=split_text_frames(bytes);defer delete(frames)
+	testing.expect(t,ok && len(frames)==1 && strings.contains(frames[0],"mcp_worker_available") && stream_seq_of(frames[0])==1)
+}
+
 @(private = "file")
 Pair :: struct {
 	listener: net.TCP_Socket,

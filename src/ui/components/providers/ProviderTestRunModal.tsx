@@ -5,7 +5,7 @@ import { type ProviderSetupResponse, type ProviderTestRunResponse, providerSetup
 // xterm stays out of the entry chunk until the test-run terminal mounts.
 const AgentPaneComposerPanel = lazy(() => import('../chat/AgentPaneComposerPanel'));
 
-export interface ProviderTestTarget { provider: string; providerLabel: string; modelId: string; modelLabel: string; binaryPath: string }
+export interface ProviderTestTarget { profileId?: string; provider: string; providerLabel: string; modelId: string; modelLabel: string; binaryPath: string }
 export interface ProviderTestRunModalProps { setup: ProviderSetupResponse; target: ProviderTestTarget; onClose: () => void }
 
 export function ProviderTestRunModal({ setup, target, onClose }: ProviderTestRunModalProps) {
@@ -15,11 +15,11 @@ export function ProviderTestRunModal({ setup, target, onClose }: ProviderTestRun
 
   useEffect(() => {
     let cancelled = false;
-    const key = `${setup.bridge.bridge_id}\u0000${target.provider}\u0000${target.modelId}`;
+    const key = `${setup.bridge.bridge_id}\u0000${target.provider}\u0000${target.profileId || target.provider}\u0000${target.modelId}`;
     if (!startRequestRef.current || startRequestRef.current.key !== key) {
       startRequestRef.current = {
         key,
-        promise: providerSetupApi.startTestRun(setup, target.provider, target.modelId),
+        promise: providerSetupApi.startTestRun(setup, target.provider, target.modelId, target.profileId),
       };
     }
     // React Strict Mode deliberately replays effects in development. Reuse the
@@ -30,7 +30,7 @@ export function ProviderTestRunModal({ setup, target, onClose }: ProviderTestRun
       (reason) => { if (!cancelled) setError(String(reason?.message || reason)); },
     );
     return () => { cancelled = true; };
-  }, [setup.bridge.bridge_id, target.modelId, target.provider]);
+  }, [setup.bridge.bridge_id, target.modelId, target.provider, target.profileId]);
 
   useEffect(() => {
     if (!run || ['stopped', 'failed', 'cancelled', 'expired'].includes(run.state)) return;
@@ -66,10 +66,13 @@ export function ProviderTestRunModal({ setup, target, onClose }: ProviderTestRun
             : state === 'stopped' ? <StatusPill tone="neutral">Stopped</StatusPill>
             : <StatusPill tone="danger">{state}</StatusPill>}
         </div>
+        <p className="text-sm text-muted" data-debug-id="provider-test-input-help">
+          Click the terminal to type, sign in, or configure this profile. Input is available when your plan permits terminal input and the bridge vault is unlocked. Configuration changes belong to this profile’s runtime directory.
+        </p>
         {run?.agent_instance_id ? (
           <div data-debug-id="provider-test-run-output" className="h-80 overflow-hidden rounded-xl border border-subtle bg-black">
             <Suspense fallback={null}>
-              <AgentPaneComposerPanel agentInstanceId={run.agent_instance_id} isExpanded isActiveTab runtimeStatus={state === 'detecting' ? 'running' : state} hideHeader className="h-full" />
+              <AgentPaneComposerPanel agentInstanceId={run.agent_instance_id} isExpanded isActiveTab runtimeStatus={state === 'detecting' || state === 'awaiting_validation' ? 'running' : state} hideHeader className="h-full" />
             </Suspense>
           </div>
         ) : <div className="flex h-80 items-center justify-center rounded-xl border border-subtle bg-black text-sm text-muted"><Spinner size="sm" />&nbsp; Waiting for bridge…</div>}

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """agentcall.py — speak the bridge's local JSONL v1 endpoint as an agent instance.
 
-    agentcall.py --shim <run_dir>/.heimdall/bin/ham-ctl <method> [params-json]
+    agentcall.py --shim <run_dir>/bin/ham-ctl <method> [params-json]
     agentcall.py --endpoint tcp:127.0.0.1:18082 --token hlat_... <method> [params-json]
 
 The shim the bridge materialises in every agent run_dir exports

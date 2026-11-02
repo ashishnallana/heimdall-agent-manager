@@ -4,14 +4,15 @@ import "core:strings"
 import contracts "odin_test:contracts"
 
 // The Hub authenticates users only with OIDC (its own session cookie or a bearer),
-// so this proxy no longer injects identity headers. Requests are forwarded
-// unchanged — cookies and `Authorization: Bearer ...` included — except for the
-// dev-user selector and legacy identity headers, which are always stripped so a
-// client can never smuggle them upstream.
+// so this proxy never injects identity headers. The dev-user selector and legacy
+// identity headers are always stripped so a client can never smuggle them upstream.
 //
-// The selected dev user is applied at SIGN-IN instead: the Hub's
-// /api/v1/auth/login redirect to the (mock) provider gets `login_hint=<user>`
-// appended (see rewrite_login_location), and tools/mock-oidc signs in as that user.
+// The selected dev user is applied through a real Hub session instead: with the
+// local mock provider the proxy signs in on the user's behalf and attaches that
+// session (broker.odin); requests carrying their own credential pass unchanged.
+// Against a real provider, or for a script running the sign-in itself, the Hub's
+// /api/v1/auth/login redirect gets `login_hint=<user>` appended
+// (rewrite_login_location) and tools/mock-oidc signs in as that user.
 rewrite_headers_for_hub :: proc(config: ^Dev_Proxy_Config, incoming: []contracts.HTTP_Header, cookie_header: string) -> ([]contracts.HTTP_Header, Dev_User, bool) {
 	user, ok := select_dev_user(config, incoming, cookie_header)
 	if !ok do return nil, {}, false

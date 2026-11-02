@@ -1,5 +1,11 @@
 @import '@xterm/xterm/css/xterm.css';
 @import './tokens.css';
+
+/* Design system: page titles, section headings and agent replies are set in the serif. */
+.text-display,
+.text-heading {
+  font-family: var(--font-display);
+}
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -17,7 +23,7 @@
   --fd-hairline: var(--color-border-subtle);
   --fd-hairline-soft: var(--color-border-subtle);
   --fd-success: var(--color-success);
-  --fd-font-body: Inter, 'Inter Variable', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --fd-font-body: 'IBM Plex Sans', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
 
   --fd-radius-xs: 4px;
   --fd-radius-sm: 6px;
@@ -625,7 +631,7 @@ body {
   border-radius: var(--fd-radius-sm);
   background: var(--color-neutral-soft);
   padding: 0.1rem 0.32rem;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
+  font-family: var(--font-mono);
   font-size: 0.86em;
 }
 
@@ -887,75 +893,64 @@ body {
   }
 }
 
-/* Agent activity bubbles: the push-only row of ham-ctl action indicators above
-   the chat composer, rendered in normal flow when active. Animations are intentionally
-   SUBTLE/low-contrast so the row reads as ambient presence, never an attention-grabbing toast:
-     - a NEW bubble (row already has bubbles) slides in from the left and EXPANDS
-       (max-width 0 -> full), which pushes the existing bubbles over to make room;
-     - the FIRST bubble (empty row) shows a small 3-dot indicator, then MORPHS into
-       the action pill (text fades in while the pill expands);
-     - exit collapses (fade + max-width -> 0) so neighbours reclaim the space.
-   box-sizing:border-box (Tailwind default) makes max-width:0 fully collapse the
-   pill incl. padding, so the expand/collapse cleanly moves siblings. */
-@keyframes agent-bubble-pill-in {
-  from { opacity: 0; max-width: 0; transform: translateX(-6px); }
-  to { opacity: 1; max-width: 240px; transform: translateX(0); }
+/* Working rings (WorkingRings.tsx): the logo's two rings draw in apart along its
+   26° axis, slide together to interlock, hold, then fade. 2.4s loop. */
+.working-rings-ring { stroke-dasharray: 29.6; stroke-dashoffset: 29.6; }
+.working-rings-a { animation: working-rings-a 2.4s cubic-bezier(0.65, 0, 0.35, 1) infinite; }
+.working-rings-b { animation: working-rings-b 2.4s cubic-bezier(0.65, 0, 0.35, 1) infinite; }
+.working-rings-over { opacity: 0; animation: working-rings-over 2.4s cubic-bezier(0.65, 0, 0.35, 1) infinite; }
+
+@keyframes working-rings-a {
+  0% { stroke-dashoffset: 29.6; transform: translate(-2.3px, -1.1px); opacity: 0.35; }
+  35% { stroke-dashoffset: 0; transform: translate(-2.3px, -1.1px); opacity: 1; }
+  58%, 86% { stroke-dashoffset: 0; transform: translate(0, 0); opacity: 1; }
+  100% { stroke-dashoffset: 0; transform: translate(0, 0); opacity: 0; }
+}
+@keyframes working-rings-b {
+  0%, 8% { stroke-dashoffset: 29.6; transform: translate(2.3px, 1.1px); opacity: 0.35; }
+  42% { stroke-dashoffset: 0; transform: translate(2.3px, 1.1px); opacity: 1; }
+  58%, 86% { stroke-dashoffset: 0; transform: translate(0, 0); opacity: 1; }
+  100% { stroke-dashoffset: 0; transform: translate(0, 0); opacity: 0; }
+}
+@keyframes working-rings-over {
+  0%, 52% { opacity: 0; }
+  60%, 86% { opacity: 1; }
+  100% { opacity: 0; }
 }
 
-@keyframes agent-bubble-morph {
-  /* Starts at the 3-dot indicator's end width (agent-bubble-dots-in) so the pill
-     expands smoothly out of the dots with no backward jump. */
-  from { opacity: 0.4; max-width: 40px; transform: scale(0.98); }
-  to { opacity: 1; max-width: 240px; transform: scale(1); }
+/* Agent activity row (AgentActivityBubbles.tsx): each action slides up in place of
+   the last; the detail shimmers while it shows; the last one collapses out. */
+@keyframes agent-action-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes agent-action-out {
+  from { opacity: 1; transform: translateY(0); }
+  to { opacity: 0; transform: translateY(-4px); }
+}
+@keyframes agent-action-shimmer {
+  0% { background-position: -160px 0; }
+  100% { background-position: 160px 0; }
+}
+.agent-action-in { animation: agent-action-in 320ms cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+.agent-action-exit { animation: agent-action-out 220ms ease-in both; }
+.agent-action-detail {
+  background: linear-gradient(90deg, var(--color-text-muted) 0%, var(--color-text-primary) 50%, var(--color-text-muted) 100%);
+  background-size: 160px 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: agent-action-shimmer 1.4s linear infinite;
 }
 
-@keyframes agent-bubble-dots-in {
-  from { opacity: 0; max-width: 0; }
-  to { opacity: 1; max-width: 40px; }
-}
-
-@keyframes agent-bubble-collapse-out {
-  from { opacity: 1; max-width: 240px; transform: translateX(0); }
-  to { opacity: 0; max-width: 0; transform: translateX(-4px); }
-}
-
-@keyframes agent-bubble-dot-bounce {
-  0%, 80%, 100% { opacity: 0.35; }
-  40% { opacity: 0.9; }
-}
-
-.agent-bubble-pill-in {
-  animation: agent-bubble-pill-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
-}
-
-.agent-bubble-morph {
-  animation: agent-bubble-morph 240ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
-}
-
-.agent-bubble-dots-in {
-  animation: agent-bubble-dots-in 160ms ease-out both;
-}
-
-.agent-bubble-exit {
-  animation: agent-bubble-collapse-out 220ms ease-in both;
-}
-
-.agent-bubble-dot {
-  animation: agent-bubble-dot-bounce 1s ease-in-out infinite;
-}
-
-/* Respect reduced-motion: plain fade only — no morph, slide, expand, or dot motion.
-   (The component also skips the 3-dot phase entirely under reduced-motion.) */
+/* Respect reduced-motion: still rings, plain fades, no shimmer. */
 @media (prefers-reduced-motion: reduce) {
-  @keyframes agent-bubble-pill-in { from { opacity: 0; } to { opacity: 1; } }
-  @keyframes agent-bubble-morph { from { opacity: 0; } to { opacity: 1; } }
-  @keyframes agent-bubble-dots-in { from { opacity: 0; } to { opacity: 1; } }
-  @keyframes agent-bubble-collapse-out { from { opacity: 1; } to { opacity: 0; } }
-  .agent-bubble-pill-in { animation: agent-bubble-pill-in 120ms linear both; }
-  .agent-bubble-morph { animation: agent-bubble-morph 120ms linear both; }
-  .agent-bubble-dots-in { animation: agent-bubble-dots-in 120ms linear both; }
-  .agent-bubble-exit { animation: agent-bubble-collapse-out 120ms linear both; }
-  .agent-bubble-dot { animation: none; opacity: 0.6; }
+  .working-rings-a, .working-rings-b, .working-rings-over { animation: none; opacity: 1; stroke-dashoffset: 0; transform: none; }
+  @keyframes agent-action-in { from { opacity: 0; } to { opacity: 1; } }
+  @keyframes agent-action-out { from { opacity: 1; } to { opacity: 0; } }
+  .agent-action-in { animation: agent-action-in 120ms linear both; }
+  .agent-action-exit { animation: agent-action-out 120ms linear both; }
+  .agent-action-detail { animation: none; background: none; color: var(--color-text-muted); }
 }
 
 /* Markdown Code Blocks / Shiki Highlighting (REQ-UI-MARKDOWN-ENHANCE) */

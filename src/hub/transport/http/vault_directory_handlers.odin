@@ -599,10 +599,13 @@ vault_revoke_bridge_credentials :: proc(bridges: ^bridge_service.Bridge_Service,
 		return err
 	}
 	if domain.bridge_is_pending(b) {
-		_, _, cerr := bridge_service.cancel_pending_enrollment(bridges, bridge_id)
+		// .Keep_Revoked: this is a credential kill, so a bridge the pending enrollment
+		// sunset stays revoked rather than coming back to life.
+		_, _, cerr := bridge_service.cancel_pending_enrollment(bridges, bridge_id, .Keep_Revoked)
 		return cerr
 	}
-	if b.status == .Revoked do return domain.Domain_Error{}
+	// A sunset bridge is already Revoked but still has rollback authority.
+	// Explicit vault revocation must invalidate that receipt even at the same clock tick.
 	_, ok, rerr := bridge_service.revoke_bridge(bridges, auth, bridge_id)
 	if !ok do return rerr if rerr.code != .None else domain.domain_error(.Internal_Error, "bridge credentials could not be revoked")
 	return domain.Domain_Error{}

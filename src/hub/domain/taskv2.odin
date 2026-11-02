@@ -62,6 +62,7 @@ LEASE_DELIVERY_INLINE :: "inline"
 // UNIQUE(task_id) WHERE kind='work'. Rows are DELETED on release; history lives
 // in task_events / task_attempts.
 Task_Lease :: struct {
+	provider_profile:string,
 	lease_id:           string,
 	task_id:            Task_ID,
 	chain_id:           Task_Chain_ID,

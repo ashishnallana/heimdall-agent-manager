@@ -9,15 +9,15 @@ description: Authoritative command reference for the ham-ctl agent CLI — every
 agent token (already configured) via the managed wrapper in your run directory:
 
 ```
-./.heimdall/bin/ham-ctl <group> <verb> [<positional-id>] [--flags]
+./bin/ham-ctl <group> <verb> [<positional-id>] [--flags]
 ```
 
 Conventions used below:
 - `<id>` positional args come right after the verb; most commands need only the
   positional id (task/chain ids are globally unique, so `--chain` is usually optional).
 - Each command prints a single JSON response line.
-- Run `./.heimdall/bin/ham-ctl <group> --help` for the built-in reference of any group;
-  `./.heimdall/bin/ham-ctl --help` lists all groups.
+- Run `./bin/ham-ctl <group> --help` for the built-in reference of any group;
+  `./bin/ham-ctl --help` lists all groups.
 
 Groups: `bridge`, `agents`, `task-chain`, `task`, `workflow`, `lease`, `review`, `issue`, `chat`, `memory`, `artifact`,
 `shell`, `extension`, `context`, `start-success`.
@@ -379,7 +379,7 @@ Write `questions.json` as a UTF-8 JSON **object**, not a bare array:
 }
 ```
 ```bash
-./.heimdall/bin/ham-ctl chat send --to user --body "Choose the release settings." --questions-file questions.json
+./bin/ham-ctl chat send --to user --body "Choose the release settings." --questions-file questions.json
 ```
 
 The CLI validates the file and vault-encrypts the body, question `text`, and option
@@ -664,3 +664,14 @@ caller's own agent. "Global" scope = omit the scope flags. Repeatable or comma-s
 
 ## start-success — startup signal
 - `start-success` — signal this instance is ready. Run once at startup; idempotent.
+
+## Live requirement revisions
+
+- `task show <task-id>` exposes `requirements_revision`, submitted revision/head, checkpoint state, acknowledgements and recent decrypted history when the signed detail capability is available.
+- `task update <task-id> --goal <text> --acceptance <text> --expected-requirements-revision <n> --reason <text>` amends native goal/acceptance with optimistic concurrency. Acceptance flags replace the whole list. Use the revision just read; on conflict reread and reconcile. Existing ownership, terminal-task and workflow-stage restrictions still apply.
+- `lease next` refreshes the context pack and `TASK.md`. After reading it, `lease heartbeat --lease <id> --acknowledge-requirements-revision <n>` acknowledges that exact revision on the caller's lease. Ordinary heartbeats do not acknowledge.
+- Submit/review evidence is revision-bound. Changes after submission require worker rework and fresh review; comments cannot substitute for a native amendment or acknowledgement.
+- UI: **Change requirements** edits goal/acceptance with a reason; task details show revision/read status and **Requirement changes** history.
+- MCP: `tasks.get` returns an opaque `revision`; pass it as `expected_revision` to `tasks.update`, with `reason` and `request_id`. This is distinct from the CLI's numeric `requirements_revision`. Replay identical arguments/request ID after an ambiguous response; reread on conflict. MCP cannot acknowledge another agent's lease or approve reviews.
+
+For significant changes to the objective/deliverable/approach, see the coordinator skill: record the decision on the original task and create a self-contained linked replacement, preserving the audit trail and required approvals.

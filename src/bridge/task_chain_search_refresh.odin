@@ -198,6 +198,7 @@ bridge_task_chain_search_parse_feed :: proc(body: string, kr: ^vault.Vault_Keyri
 }
 
 bridge_task_chain_search_refresh_once :: proc() {
+	if sync.atomic_load(&bridge_hub_traffic_stopped) do return
 	sync.mutex_lock(&bridge_task_chain_search_refresh_mutex)
 	if bridge_task_chain_search_refresh_running {
 		sync.mutex_unlock(&bridge_task_chain_search_refresh_mutex)
@@ -262,6 +263,7 @@ bridge_task_chain_search_refresh_async :: proc() {
 
 bridge_task_chain_search_refresh_worker :: proc() {
 	for {
+		if sync.atomic_load(&bridge_hub_traffic_stopped) do return
 		bridge_task_chain_search_refresh_once()
 		time.sleep(TASK_CHAIN_SEARCH_REFRESH_SECONDS * time.Second)
 	}

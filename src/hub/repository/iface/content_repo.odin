@@ -52,6 +52,8 @@ Content_Repository :: struct {
 	mark_messages_read: Content_Mark_Messages_Read_Proc,
 	save_artifact: Content_Save_Artifact_Proc,
 	get_artifact: Content_Get_Artifact_Proc,
+	get_artifact_bounded: proc(ctx:rawptr,id:string,owner:domain.User_ID,cap:int)->(domain.Artifact,int,bool,domain.Domain_Error),
+	update_artifact_metadata: proc(ctx:rawptr,id:string,owner:domain.User_ID,name,description,updated_at:string)->(bool,domain.Domain_Error),
 	list_artifacts: Content_List_Artifacts_Proc,
 	delete_artifact: Content_Delete_Artifact_Proc,
 	save_template: Content_Save_Template_Proc,

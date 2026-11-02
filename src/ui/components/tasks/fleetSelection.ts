@@ -12,11 +12,13 @@
 
 export interface FleetProviderModel {
   provider: string;
+  provider_profile?: string;
   model: string;
 }
 
 export interface FleetProviderCapability {
   provider: string;
+  profile_id?: string; label?: string; accent?: string;
   models: string[];
 }
 
@@ -27,11 +29,11 @@ export function resolvedFleetProviderModel(
 ): FleetProviderModel {
   if (selection.provider && selection.model) return { ...selection };
   for (const capability of capabilities) {
-    if (selection.provider && selection.provider !== capability.provider) continue;
+    if (selection.provider && (selection.provider !== capability.provider || (selection.provider_profile || selection.provider) !== (capability.profile_id || capability.provider))) continue;
     const model = selection.model
       ? capability.models.find((model) => model === selection.model)
       : capability.models[0];
-    if (model) return { provider: capability.provider, model };
+    if (model) return { provider: capability.provider, model, ...(capability.profile_id ? { provider_profile: capability.profile_id } : {}) };
   }
   return { ...selection };
 }
@@ -55,7 +57,7 @@ export function fleetProviderCapabilities(providersPayload: any): FleetProviderC
       const modelMap = entry.models && typeof entry.models === 'object' ? entry.models : {};
       models = Object.keys(modelMap).filter((model) => Boolean(modelMap[model]));
     }
-    list.push({ provider, models });
+    list.push({ provider, models, ...(entry.profile_id ? { profile_id: entry.profile_id, label: entry.label, accent: entry.accent } : {}) });
   }
   return list;
 }
@@ -109,6 +111,7 @@ export interface FleetPlacementDrafts {
 }
 
 export interface ChangedFleetEntry {
+  provider_profile?: string;
   bridgeModels?: Record<string, FleetProviderModel>;
   agentId: string;
   capacity: number;
@@ -125,7 +128,7 @@ function fleetAgentId(f: any): string {
 }
 
 function fleetProviderModel(f: any): FleetProviderModel {
-  return { provider: String(f?.provider || ''), model: String(f?.model || '') };
+  return { provider: String(f?.provider || ''), model: String(f?.model || ''), ...(f?.provider_profile ? { provider_profile: String(f.provider_profile) } : {}) };
 }
 
 function fleetBridgeId(f: any): string {
@@ -232,9 +235,9 @@ export function fleetRolesEqual(a: string[] | undefined | null, b: string[] | un
 }
 
 /** Model options offered by the selected provider; '' (Auto) provider has none. */
-export function modelOptionsForProvider(capabilities: FleetProviderCapability[], provider: string): string[] {
+export function modelOptionsForProvider(capabilities: FleetProviderCapability[], provider: string, profileId?: string): string[] {
   if (!provider) return [];
-  const cap = (capabilities || []).find((c) => c && c.provider === provider);
+  const cap = (capabilities || []).find((c) => c && c.provider === provider && (c.profile_id || c.provider) === (profileId || provider));
   return cap ? (cap.models || []).slice() : [];
 }
 
@@ -386,7 +389,7 @@ export function changedFleetEntries(
     const originalFleet = (rawFleets || []).find((f) => fleetAgentId(f) === aid);
     const bridgeChanged = perBridge && Object.entries(perBridge).some(([id, selection]) => {
       const original = originalFleet?.bridge_models?.[id] || origPT;
-      return selection.provider !== original.provider || selection.model !== original.model;
+      return selection.provider !== original.provider || (selection.provider_profile || selection.provider) !== (original.provider_profile || original.provider) || selection.model !== original.model;
     });
 
     const effectiveTopProvider = draftTopPT !== undefined
@@ -396,7 +399,8 @@ export function changedFleetEntries(
       ? draftTopPT.model
       : (perBridge ? origPT.model : draftPT ? draftPT.model : origPT.model);
 
-    const providerChanged = effectiveTopProvider !== origPT.provider;
+    const effectiveTopProfile = (draftTopPT || (perBridge ? origPT : draftPT) || origPT).provider_profile;
+    const providerChanged = effectiveTopProvider !== origPT.provider || (effectiveTopProfile || effectiveTopProvider) !== (origPT.provider_profile || origPT.provider);
     const tierChanged = effectiveTopModel !== origPT.model;
 
     const normalizedDraftRoles = draftRoles !== undefined ? normalizeFleetRoles(draftRoles) : undefined;
@@ -419,12 +423,13 @@ export function changedFleetEntries(
         agentId: aid,
         capacity: effectiveCapacity,
         provider: effectiveTopProvider,
+        ...(effectiveTopProfile ? { provider_profile: effectiveTopProfile } : {}),
         model: effectiveTopModel,
         ...(perBridge ? { bridgeModels: {
           ...originalFleet?.bridge_models,
           ...Object.fromEntries(Object.entries(perBridge).filter(([id, pt]) =>
             pt.provider && pt.model && (originalFleet?.bridge_models?.[id] ||
-              pt.provider !== origPT.provider || pt.model !== origPT.model)
+              pt.provider !== origPT.provider || (pt.provider_profile || pt.provider) !== (origPT.provider_profile || origPT.provider) || pt.model !== origPT.model)
           )),
         } } : {}),
       };
@@ -522,7 +527,7 @@ export function providerModelModified(
 ): boolean {
   const orig = getOriginalProviderModel(rawFleets, agentId);
   const topDraft = topLevelDraftPT?.[agentId];
-  if (topDraft && (topDraft.provider !== orig.provider || topDraft.model !== orig.model)) {
+  if (topDraft && (topDraft.provider !== orig.provider || (topDraft.provider_profile || topDraft.provider) !== (orig.provider_profile || orig.provider) || topDraft.model !== orig.model)) {
     return true;
   }
   const flat = flattenProviderModelDrafts(draftProviderModels, preferredBridgeId);
@@ -533,10 +538,10 @@ export function providerModelModified(
     const fleet = (rawFleets || []).find((f) => fleetAgentId(f) === agentId);
     return Object.entries(roleDraft).some(([id, pt]) => {
       const original = fleet?.bridge_models?.[id] || orig;
-      return pt.provider !== original.provider || pt.model !== original.model;
+      return pt.provider !== original.provider || (pt.provider_profile || pt.provider) !== (original.provider_profile || original.provider) || pt.model !== original.model;
     });
   }
-  return draft.provider !== orig.provider || draft.model !== orig.model;
+  return draft.provider !== orig.provider || (draft.provider_profile || draft.provider) !== (orig.provider_profile || orig.provider) || draft.model !== orig.model;
 }
 
 /**
@@ -559,6 +564,7 @@ export function restartAffectedEntries(
 }
 
 export interface FleetApplyRequest {
+  provider_profile?: string;
   bridgeModels?: Record<string, FleetProviderModel>;
   agentId: string;
   capacity: number;
@@ -589,6 +595,7 @@ export function fleetApplyRequests(
       provider: entry.provider,
       model: entry.model,
     };
+    if (entry.provider_profile !== undefined) request.provider_profile = entry.provider_profile;
     if (entry.bridgeModels) request.bridgeModels = entry.bridgeModels;
     if (entry.roles !== undefined) request.roles = entry.roles;
     if (entry.bridgeId !== undefined) request.bridgeId = entry.bridgeId;
@@ -799,7 +806,7 @@ export function detectLiveInstanceRuntimeMismatch(
     );
     let actualBridgeId = String(inst?.bridge_id || inst?.bridgeId || inst?.bridge || '');
     let actualProvider = String(
-      inst?.provider || inst?.runtime_provider || inst?.runtimeProvider || inst?.providerProfile || inst?.runtime?.provider || ''
+      inst?.provider_profile || inst?.provider || inst?.runtime_provider || inst?.runtimeProvider || inst?.providerProfile || inst?.runtime?.provider || ''
     );
     let actualModel = String(
       inst?.model || inst?.runtime_model || inst?.runtimeModel || inst?.model || inst?.runtime?.model || ''
@@ -816,7 +823,7 @@ export function detectLiveInstanceRuntimeMismatch(
     }
 
     // Determine target runtime for this instance on its bridge
-    let targetProvider = roleDefaultsMap[agentId]?.provider ?? '';
+    let targetProvider = roleDefaultsMap[agentId]?.provider_profile || roleDefaultsMap[agentId]?.provider || '';
     let targetModel = roleDefaultsMap[agentId]?.model ?? '';
     const expectedBridgeId = targetBridgeId || '';
 
@@ -825,7 +832,7 @@ export function detectLiveInstanceRuntimeMismatch(
       const bridgeOverride = actualBridgeId ? roleBridgeDrafts[actualBridgeId] : undefined;
       if (bridgeOverride) {
         if (bridgeOverride.provider !== undefined && bridgeOverride.provider !== '') {
-          targetProvider = bridgeOverride.provider;
+          targetProvider = bridgeOverride.provider_profile || bridgeOverride.provider;
         }
         if (bridgeOverride.model !== undefined && bridgeOverride.model !== '') {
           targetModel = bridgeOverride.model;
@@ -833,7 +840,7 @@ export function detectLiveInstanceRuntimeMismatch(
       } else if (!actualBridgeId && preferredBridge && roleBridgeDrafts[preferredBridge]) {
         const prefOverride = roleBridgeDrafts[preferredBridge];
         if (prefOverride.provider !== undefined && prefOverride.provider !== '') {
-          targetProvider = prefOverride.provider;
+          targetProvider = prefOverride.provider_profile || prefOverride.provider;
         }
         if (prefOverride.model !== undefined && prefOverride.model !== '') {
           targetModel = prefOverride.model;
@@ -841,7 +848,7 @@ export function detectLiveInstanceRuntimeMismatch(
       } else if (hasCustomRuntimeOverrides(roleBridgeDrafts)) {
         const anyOverride = Object.values(roleBridgeDrafts).find((pt) => Boolean(pt?.provider || pt?.model));
         if (anyOverride) {
-          if (anyOverride.provider) targetProvider = anyOverride.provider;
+          if (anyOverride.provider) targetProvider = anyOverride.provider_profile || anyOverride.provider;
           if (anyOverride.model) targetModel = anyOverride.model;
         }
       }

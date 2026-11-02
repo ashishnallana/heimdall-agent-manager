@@ -278,6 +278,8 @@ bridge_provider_catalog_handle_frame :: proc(conn: ^ws.Connection, frame_type, t
 			defer delete(request)
 			_ = bridge_hub_send(conn, request)
 		}
+		// The hub sends its catalog version on every connect: report profiles then.
+		bridge_send_provider_profiles_report(conn)
 		return true
 	}
 	if frame_type != "provider_catalog" do return false
@@ -289,6 +291,9 @@ bridge_provider_catalog_handle_frame :: proc(conn: ^ws.Connection, frame_type, t
 		// bridge_provider_catalog_save prints its own reason when the cache write
 		// is what failed; a silent false here means the body itself was bad.
 		fmt.println("bridge provider catalog rejected: malformed body, sha256 mismatch, or cache not persisted (see above)")
+	} else {
+		// A new catalog can turn a custom profile id into a slug clash.
+		bridge_send_provider_profiles_report(conn)
 	}
 	return true
 }

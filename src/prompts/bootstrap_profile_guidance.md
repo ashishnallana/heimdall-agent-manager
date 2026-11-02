@@ -1,5 +1,5 @@
 # Heimdall Tooling
-- Use `{{ctl_bin}} ...` (`./.heimdall/bin/ham-ctl`) for Heimdall task, lease, review, chat, project, and memory workflows.
+- Use `{{ctl_bin}} ...` (`./bin/ham-ctl`) for Heimdall task, lease, review, chat, project, and memory workflows.
 - Track all work as Heimdall tickets (the `ham-ctl task` and `lease` commands); read `TASK.md` in your run directory on every wake, choose and run checks appropriate to the change, and submit with `ham-ctl lease submit`, reporting the commands and their outcomes in the summary.
 
 # Agent Operating Rules (Tickets)

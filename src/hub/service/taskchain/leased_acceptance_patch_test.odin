@@ -12,7 +12,7 @@ import sqlite "odin_test:hub/repository/sqlite"
 import taskv2 "odin_test:hub/service/taskv2"
 import jsonx "odin_test:lib/jsonx"
 
-// While a task is leased only an acceptance patch may change its brief. The
+// While a task is leased goal/acceptance patches may change its requirements. The
 // removed verify keys are accepted and dropped (M2): a legacy `task update
 // --verify …` is no brief edit at all and never replaces the brief.
 @(test)
@@ -65,7 +65,6 @@ test_leased_task_acceptance_patch_preserves_scope_and_refreshes_lease :: proc(t:
 	_, aok, aerr := update_task(&svc, owner, task.task_id, Update_Task_Input{brief_json = `{"acceptance":["corrected again"],"verify":"true"}`})
 	testing.expectf(t, aok, "owner can correct acceptance: %s", aerr.message)
 	for input in ([]Update_Task_Input{
-		{brief_json = `{"goal":"changed scope","verify":"true"}`},
 		{title = "renamed"}, {has_reviewers = true, reviewer_agent_ids = []string{"agt_rev"}}, {has_assignee = true, assignee_agent_id = "other"},
 	}) {
 		_, bad_ok, bad_err := update_task(&svc, owner, task.task_id, input)

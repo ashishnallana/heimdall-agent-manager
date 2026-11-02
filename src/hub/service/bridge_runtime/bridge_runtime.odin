@@ -28,7 +28,26 @@ import "odin_test:contracts"
 // nothing about what production actually wires up — which, for a revocation
 // control, is the difference between a test and a reassurance.
 new_bridge_connection_closer :: proc(registry: ^project_service.Bridge_Runtime_Registry) -> bridge_service.Bridge_Connection_Closer {
-	return bridge_service.Bridge_Connection_Closer{ctx = rawptr(registry), close_bridge_connection = close_bridge_connection}
+	return bridge_service.Bridge_Connection_Closer{ctx = rawptr(registry), close_bridge_connection = close_bridge_connection, close_with_reason = close_bridge_connection_with_reason}
+}
+
+close_bridge_connection_with_reason :: proc(ctx: rawptr, bridge_id, code: string) -> bool {
+    registry := (^project_service.Bridge_Runtime_Registry)(ctx)
+    connection := project_service.bridge_runtime_connection_acquire(registry, bridge_id)
+    if connection == nil do return false
+    defer project_service.bridge_runtime_connection_release(registry, connection)
+    project_service.bridge_runtime_connection_lock_writer(connection)
+    defer sync.unlock(&connection.writer_mutex)
+    if sync.atomic_load(&connection.retired) || connection.socket == net.TCP_Socket(0) do return false
+    sync.atomic_store(&connection.credential_revoked, true)
+    payload, err := json.marshal(struct {
+        type: string,
+        payload: struct {code, message: string},
+    }{type = "bridge_error", payload = {code = code, message = "bridge retired; stop Hub traffic until explicitly activated"}}, allocator = context.temp_allocator)
+    if err == nil do _ = ws.write_server_text(connection.socket, string(payload), false)
+    // Only wake: the transport reader owns close on every exit path.
+    _ = net.shutdown(net.Any_Socket(connection.socket), .Both)
+    return true
 }
 
 // close_bridge_connection shuts down a live bridge control socket. See

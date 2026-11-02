@@ -270,3 +270,101 @@ test_status_state_words :: proc(t: ^testing.T) {
 	testing.expect_value(t, status_state(Status{installed = true, enrolled = true, running = true, connected = true}), "connected")
 	testing.expect_value(t, status_state(Status{installed = true, enrolled = true, running = true, connected = true, needs_reenrollment = true}), "needs_reenrollment")
 }
+
+// Two Ninjy accounts on one OS user and hub: the second account lands in its
+// own profile (never the first's), with its own service, state/data/bin dirs,
+// ham-ctl and ports. Uninstalling either one, in both orders, removes only its
+// own paths and leaves the other's install and the shared extensions root.
+@(test)
+test_separate_account_default_is_available_not_exhausted :: proc(t: ^testing.T) {
+	root := make_temp_root(t, "profile-selection")
+	defer os.remove_all(root)
+	host := Host{os = .Linux, home = root, uid = 1000}
+	_, hub, _ := canonical_hub("https://hub.example.com", context.temp_allocator)
+	selected, found := separate_account_profile(host, hub, "")
+	testing.expect(t, found, "a fresh install has an available default profile")
+	testing.expect_value(t, selected, "")
+	testing.expect_value(t, list_json([]Status{}, context.temp_allocator), `{"profiles":[]}`)
+	// Occupy the default and every automatic account slot. Only now is the
+	// empty selection an error; a new explicit name must still be available.
+	for n in 1 ..< 100 {
+		name := "" if n == 1 else fmt.tprintf("account-%d", n)
+		l := layout_for(host, service_name(hub, name, context.temp_allocator))
+		testing.expect(t, os.make_directory_all(l.state_dir) == nil)
+		testing.expect(t, os.write_entire_file_from_string(pjoin(l.state_dir, TOKEN_FILE), strings.concatenate({CREDENTIAL_HEADER, "secret brg_existing\n"}, context.temp_allocator)) == nil)
+	}
+	_, exhausted := separate_account_profile(host, hub, "")
+	testing.expect(t, !exhausted, "all automatic profiles are actually enrolled")
+	personal, personal_found := separate_account_profile(host, hub, "personal")
+	testing.expect(t, personal_found)
+	testing.expect_value(t, personal, "personal")
+}
+
+@(test)
+test_two_accounts_install_uninstall_both_orders :: proc(t: ^testing.T) {
+	_, hub_name, _ := canonical_hub("https://hub.example.com", context.temp_allocator)
+	for first in 0 ..< 2 {
+		home := make_temp_root(t, fmt.tprintf("accounts-%d", first))
+		defer os.remove_all(home)
+		host := Host{os = .Linux, home = home, uid = 1000}
+		free :: proc(port: int) -> bool {return false}
+
+		install :: proc(t: ^testing.T, host: Host, hub_name, profile: string, free: Port_Busy_Proc) -> (l: Layout, ports: [2]int) {
+			l = layout_for(host, service_name(hub_name, profile, context.temp_allocator))
+			for d in ([]string{l.state_dir, l.bin_dir, pjoin(l.data_dir, "extensions")}) do testing.expect(t, os.make_directory_all(d) == nil)
+			_ = os.write_entire_file_from_string(pjoin(l.bin_dir, "ham-ctl"), l.service_name)
+			ok: bool
+			ports, _, ok = allocate_ports(l.state_root, l.state_dir, free)
+			testing.expect(t, ok)
+			id := "brg_a" if profile == "" else "brg_b"
+			_ = os.write_entire_file_from_string(pjoin(l.state_dir, TOKEN_FILE), strings.concatenate({CREDENTIAL_HEADER, "secret ", id, "\n"}, context.temp_allocator))
+			return
+		}
+
+		// Account A takes the default profile; account B asks for it too.
+		selected_1, found_1 := separate_account_profile(host, hub_name, "")
+		testing.expect(t, found_1)
+		testing.expect_value(t, selected_1, "")
+		a, a_ports := install(t, host, hub_name, "", free)
+		b_profile, b_found := separate_account_profile(host, hub_name, "")
+		testing.expect(t, b_found)
+		testing.expect_value(t, b_profile, "account-2")
+		b, b_ports := install(t, host, hub_name, b_profile, free)
+		selected_2, found_2 := separate_account_profile(host, hub_name, "")
+		testing.expect(t, found_2)
+		testing.expect_value(t, selected_2, "account-3")
+		testing.expect(t, a.service_name != b.service_name && a.service_file != b.service_file)
+		testing.expect(t, a.state_dir != b.state_dir && a.data_dir != b.data_dir && a.bin_dir != b.bin_dir)
+		testing.expect(t, a_ports[0] != b_ports[0] && a_ports[1] != b_ports[1] && a_ports[0] != b_ports[1] && a_ports[1] != b_ports[0])
+		shared := pjoin(pdir(a.data_dir), ".shared-extensions", "1.0.0", "extensions")
+		testing.expect_value(t, pdir(a.data_dir), pdir(b.data_dir))
+		testing.expect(t, os.make_directory_all(shared) == nil)
+		testing.expect_value(t, len(list_services(host)), 2)
+
+		gone, kept := a, b
+		if first == 1 do gone, kept = b, a
+		kept_ports, _ := read_ports(kept.state_dir)
+		p := uninstall_paths(gone)
+		for group in ([][]string{p.extensions, p.caches, p.binaries, p.state, p.data}) {
+			for path in group {
+				for own in ([]string{kept.state_dir, kept.data_dir}) {
+					testing.expect(t, path != own && !strings.has_prefix(path, strings.concatenate({own, "/"}, context.temp_allocator)), path)
+				}
+				_ = os.remove_all(path)
+			}
+		}
+		names := list_services(host)
+		testing.expect_value(t, len(names), 1)
+		if len(names) == 1 do testing.expect_value(t, names[0], kept.service_name)
+		testing.expect(t, os.is_file(pjoin(kept.bin_dir, "ham-ctl")), "the other account keeps its ham-ctl")
+		testing.expect(t, os.is_dir(pjoin(kept.data_dir, "extensions")))
+		testing.expect(t, os.is_dir(shared), "the shared extensions root outlives any one profile")
+		testing.expect(t, profile_enrolled(host, kept.service_name))
+		after, _ := read_ports(kept.state_dir)
+		testing.expect_value(t, after, kept_ports)
+		// A reinstall of the removed account gets ports that do not collide.
+		re_profile := "" if gone.service_name == a.service_name else b_profile
+		_, re_ports := install(t, host, hub_name, re_profile, free)
+		testing.expect(t, re_ports[0] != after[0] && re_ports[1] != after[1])
+	}
+}

@@ -136,7 +136,7 @@ main :: proc() {
 	check(list_ok, "list RPC must find the published set")
 	check(strings.contains(list_json, "\"kind\":\"AGENTS_MD\"") && strings.contains(list_json, "\"relative_path\""), "list must expose kind + relative_path")
 	check(!strings.contains(list_json, "\"content\""), "list must NOT include content")
-	// ctl shim file_id is .heimdall/bin/ham-ctl with mode 0755 (493 decimal).
+	// ctl shim file_id is bin/ham-ctl with mode 0755 (493 decimal).
 	check(strings.contains(list_json, "\"mode\":493"), "ctl shim must be mode 0755")
 	// PROV-1: list must surface provider layout override values for the wrapper.
 	check(strings.contains(list_json, "\"layout\"") && strings.contains(list_json, "\"skill_dir\"") && strings.contains(list_json, "\"bootstrap_file_name\""), "list must expose provider layout override values")

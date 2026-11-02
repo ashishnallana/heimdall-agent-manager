@@ -91,7 +91,7 @@ main :: proc() {
 		hub := bridge_hub_url(api_base)
 		health := [?]string{"api", "v1", "health"}
 		target, _ := httpc.build_url(hub, health[:], allocator = context.temp_allocator)
-		resp, probe_err := httpc.send({method = .GET, url = hub, path = health[:]})
+		resp, probe_err := bridge_hub_http_send_alloc({method = .GET, url = hub, path = health[:]})
 		defer httpc.response_destroy(&resp)
 		if probe_err != .None {
 			fmt.eprintfln("probe-hub FAILED: no HTTP response from %s through libcurl %s (%s; CA: %s) after %v — %s (%s); check TLS trust (HAM_TLS_CA_FILE / SSL_CERT_FILE) and the network", target, httpc.libcurl_version(), httpc.libcurl_tls_version(), httpc.trust_summary(), time.since(started), httpc.error_string(probe_err), resp.detail)
@@ -159,7 +159,34 @@ main :: proc() {
 	// REQ-EA-4: finish or discard an atomic enrollment a crash left staged, BEFORE the
 	// credential is read: a committed one must start with its new credential, a
 	// rolled-back one must not leave its staging behind.
-    recovery_command := len(os.args) > 2 && os.args[1] == "recovery" && (os.args[2] == "resume-sync" || os.args[2] == "resume-refresh")
+    resume_sunset := len(os.args) > 2 && os.args[1] == "recovery" && os.args[2] == "resume-sunset"
+    recovery_command := resume_sunset || (len(os.args) > 2 && os.args[1] == "recovery" && (os.args[2] == "resume-sync" || os.args[2] == "resume-refresh"))
+    bridge_hub_traffic_config_path = cfg_lib.config_path_from_args(os.args)
+    if resume_sunset {
+        cfg := bridge_config_from_args(os.args)
+        if !bridge_hub_resume_sunset(cfg, bridge_hub_traffic_config_path) {
+            fmt.eprintln("sunset resume refused: stop the service first; only a matching temporary pause can resume")
+            os.exit(1)
+        }
+        fmt.println("temporary Hub traffic pause cleared locally; start the bridge service after confirming rollback")
+        return
+    }
+    // Check BEFORE atomic enrollment recovery, which may itself contact the Hub.
+    // Remain alive so service managers cannot restart into a network retry loop.
+    if !recovery_command {
+        if _, exists, _ := bridge_hub_pause_read(bridge_hub_traffic_config_path); exists {
+            pause_lock, locked := bridge_config_lock(bridge_hub_traffic_config_path)
+            if !locked do os.exit(0)
+            defer bridge_instance_unlock(pause_lock)
+            fmt.eprintln("bridge Hub traffic is paused; stop service, then use recovery resume-sunset after rollback, or enroll again")
+            for { time.sleep(30 * time.Second) }
+        }
+        startup_cfg := bridge_config_from_args(os.args)
+        if m, pending := bridge_reenroll_pending(bridge_hub_traffic_config_path, startup_cfg.daemon_id); pending {
+            bridge_config = startup_cfg
+            bridge_reenroll_park(bridge_hub_traffic_config_path, m)
+        }
+    }
     // Offline recovery must acquire exclusion before any durable-state repair.
     if !recovery_command do _ = bridge_enroll_atomic_recover(os.args)
 	bridge_config = bridge_config_from_args(os.args)
@@ -249,6 +276,7 @@ main :: proc() {
 	bridge_credential_refresh_start(bridge_config.credential_file)
 	bridge_task_chain_search_start()
 	bridge_action_scheduler_start()
+	bridge_auto_update_start()
 	if bridge_config.chunk_bytes <= 0 do bridge_config.chunk_bytes = contracts.BRIDGE_WS_DEFAULT_CHUNK_BYTES
 	_ = run_bridge_server(bridge_config)
 	bridge_telemetry_stop()
@@ -261,6 +289,7 @@ print_usage :: proc() {
 	fmt.println("enroll: ham-bridge enroll --hub https://hub.example.com [--bridge-token-file PATH] [--headless] [--json-progress] [--approval-base-url URL] [--reuse-bridge BRIDGE_ID | --new-bridge] [--replace-other-account]")
 	fmt.println("        opens the approval page when possible; --headless suppresses it; no enrollment token is needed")
 	fmt.println("        asks the approver to reuse this config's bridge id (or --reuse-bridge BRIDGE_ID); --new-bridge asks for a new one")
+	fmt.println("recovery: ham-bridge recovery resume-sunset --config PATH  (offline; stop service first; resume a temporary sunset after rollback)")
 	fmt.println("service: ham-bridge service start|stop|restart|status [--hub URL [--profile P] | --service NAME] [--json]")
 	fmt.println("status:  ham-bridge status [--json] [--hub URL [--profile P] | --service NAME]   (installed/enrolled/running/connected/vault/version; no token needed)")
 	fmt.println("setup:   ham-bridge setup --hub URL [--profile P] [--new-bridge | --reuse-bridge BRIDGE_ID] [--reenroll] [--headless] [--json-progress]   (transactional install from this bundle; see docs/bridge-setup-progress.md)")

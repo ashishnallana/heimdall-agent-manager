@@ -3,6 +3,7 @@ package vault
 import "core:crypto/ecdsa"
 import "core:crypto/sha2"
 import "core:encoding/json"
+import "core:mem"
 import "core:strconv"
 import "core:strings"
 import "core:unicode/utf8"
@@ -199,6 +200,20 @@ signature_text_from_value :: proc(v: json.Value, allocator := context.allocator)
 // grammar are checked here; the signature itself is verified by the caller against
 // wrap_statement. Strings are cloned with `allocator`.
 wrap_from_value :: proc(v: json.Value, allocator := context.allocator) -> (w: Keyring_Wrap, signature: string, ok: bool) {
+	return wrap_from_value_bound(v, "", allocator)
+}
+
+// Delegated recipients are not directory devices. The caller must already have
+// validated a signed grant for this EXACT recipient; no device authorization
+// follows from this parser. Native directory endpoints keep wrap_from_value,
+// which still requires a dev_ identity. All other grammar checks are shared.
+wrap_from_value_for_recipient :: proc(v: json.Value, recipient: string, allocator := context.allocator) -> (Keyring_Wrap, string, bool) {
+	if recipient == "" || len(recipient) > 256 || !valid_id_value(recipient) do return {}, "", false
+	return wrap_from_value_bound(v, recipient, allocator)
+}
+
+@(private = "file")
+wrap_from_value_bound :: proc(v: json.Value, recipient: string, allocator: mem.Allocator) -> (w: Keyring_Wrap, signature: string, ok: bool) {
 	obj, is_obj := v.(json.Object)
 	if !is_obj || len(obj) != 10 do return {}, "", false
 	ver, ver_ok := obj["v"].(json.Integer)
@@ -225,7 +240,10 @@ wrap_from_value :: proc(v: json.Value, allocator := context.allocator) -> (w: Ke
 	case .Unknown:
 		return {}, "", false
 	}
-	if !valid_device_id(rid) || !valid_device_id(by) do return {}, "", false
+	if !valid_device_id(by) do return {}, "", false
+	if recipient == "" {
+		if !valid_device_id(rid) do return {}, "", false
+	} else if rid != recipient do return {}, "", false
 	sig_v, has_sig := obj["signature"]
 	if !has_sig do return {}, "", false
 	sig_text, s_ok := signature_text_from_value(sig_v, allocator)

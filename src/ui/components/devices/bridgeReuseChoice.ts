@@ -63,15 +63,24 @@ export function bridgeApproveBody(
   vaultApproval: NonNullable<BridgeApprovalBody['vault_approval']>,
   target: ReusableBridge | null,
   newLabel: string,
+  sunsetBridgeId = '',
 ): BridgeApprovalBody {
   const base = { pair_lookup: pairLookup, approve: true, vault_approval: vaultApproval };
-  return target ? { ...base, target_bridge_id: target.bridge_id } : { ...base, new_bridge_label: newLabel };
+  if (target) {
+    // An attach takes no new plan slot, so there is nothing to sunset for; the hub
+    // refuses the pair, and so do we, before anything is sent.
+    if (sunsetBridgeId) throw new Error('A reused bridge identity cannot also sunset a bridge.');
+    return { ...base, target_bridge_id: target.bridge_id };
+  }
+  return sunsetBridgeId ? { ...base, new_bridge_label: newLabel, sunset_bridge_id: sunsetBridgeId } : { ...base, new_bridge_label: newLabel };
 }
 
-export function bridgeApprovedMessage(target: ReusableBridge | null, label: string, bridgeId: string): string {
+export function bridgeApprovedMessage(target: ReusableBridge | null, label: string, bridgeId: string, sunsetLabel = ''): string {
   const what = target
     ? `Reused bridge identity “${label}” (${bridgeId}); its old credentials are revoked`
-    : `Registered new bridge “${label}” (${bridgeId})`;
+    : sunsetLabel
+      ? `Registered new bridge “${label}” (${bridgeId}) and sunset “${sunsetLabel}”`
+      : `Registered new bridge “${label}” (${bridgeId})`;
   return `${what}. The vault key was delivered: the bridge restarts its service and comes online unsealed.`;
 }
 

@@ -22,7 +22,7 @@ create_instance_reconfiguration_handler :: proc(ctx: rawptr, req: Request) -> Re
 	object, is_object := value.(json.Object)
 	if parse_err != nil || !is_object do return respond_error(domain.domain_error(.Validation_Failed, "request must be a JSON object"), req.request_id)
 	for key, _ in object {
-		if key != "bridge_id" && key != "project_id" && key != "provider" && key != "model" && key != "idempotency_key" && key != "expected_revision" && key != "permission_mode" do return respond_error(domain.domain_error(.Validation_Failed, "unknown reconfiguration field"), req.request_id)
+		if key != "bridge_id" && key != "project_id" && key != "provider" && key != "model" && key != "idempotency_key" && key != "expected_revision" && key != "permission_mode" && key != "provider_profile" do return respond_error(domain.domain_error(.Validation_Failed, "unknown reconfiguration field"), req.request_id)
 	}
 	input: agent_service.Reconfigure_Operation_Input
 	if json.unmarshal_string(req.body, &input, .JSON, context.temp_allocator) != nil do return respond_error(domain.domain_error(.Validation_Failed, "invalid reconfiguration request"), req.request_id)

@@ -15,7 +15,8 @@ const appIcon = (() => {
 })();
 const bridgeManager = require('./bridgeManager.cjs');
 const { trustedIpcSender, allowedExternalUrl, desktopPairingOrigins, allowedPairingUrl, classifyNavigation, idpOriginFromAuthConfig, isAuthStartUrl, oidcWindowNavigationAllowed } = require('./externalUrl.cjs');
-const desktopUpdater = require('./desktopUpdater.cjs');
+const { installDesktopUpdates } = require('./desktopUpdatesMain.cjs');
+let desktopUpdates: any = null;
 const installChoice = require('./installChoice.cjs');
 const { installNotifications } = require('./notifications.cjs');
 const windowChrome = require('./windowChrome.cjs');
@@ -180,7 +181,9 @@ function createWindow() {
     },
   });
   mainWindow = win;
-  if (process.platform === 'win32') win.removeMenu();
+  // Alt opens the native update menu even when an older/offline Hub UI is loaded.
+  if (process.platform === 'win32') win.setAutoHideMenuBar(true);
+  desktopUpdates?.bindWindow(win);
   const taskbarDetails = windowsIdentity.taskbarDetails(
     process.platform, app.isPackaged, process.execPath,
     path.resolve(process.argv[1] || app.getAppPath()), path.join(__dirname, 'icon.ico'),
@@ -366,6 +369,7 @@ bridgeHandler('heimdall-bridge:get-config', () => ({
 }));
 // Changing the Hub is confirmed natively (outside the renderer) for the same reason.
 bridgeHandler('heimdall-bridge:set-hub-url', async (value: unknown) => {
+  if (desktopUpdates?.operationHeld()) return { ok: false, error: 'App update restart is preparing. Try again after it finishes.' };
   const requested = String(value || '');
   const next = requested ? bridgeManager.normalizeHubUrl(requested) : defaultHubApiBaseUrl();
   if (next && next !== configuredHubApiBaseUrl() && mainWindow && !mainWindow.isDestroyed()) {
@@ -379,17 +383,20 @@ bridgeHandler('heimdall-bridge:set-hub-url', async (value: unknown) => {
     });
     if (answer.response !== 0) return { ok: false, error: 'Hub change cancelled.' };
   }
+  if (desktopUpdates?.operationHeld()) return { ok: false, error: 'App update restart is preparing. Try again after it finishes.' };
   return { ok: true, hubUrl: saveHubApiBaseUrl(requested) };
 });
 bridgeHandler('heimdall-bridge:get-status', (target: unknown) => bridgeManager.getStatus(bridgeTarget(target)));
 bridgeHandler('heimdall-bridge:list', async () => ({ ok: true, profiles: await bridgeManager.listProfiles() }));
 bridgeHandler('heimdall-bridge:run', (kind: unknown, target: unknown, options: any) => {
+  if (desktopUpdates?.operationHeld()) return { ok: false, error: 'App update restart is preparing. Try again after it finishes.' };
   const operation = String(kind || '');
   if (!['setup', 'update', 'reenroll', 'uninstall'].includes(operation)) return { ok: false, error: `Unknown Bridge operation ${operation}.` };
   const clean = {
     bridgeId: typeof options?.bridgeId === 'string' ? options.bridgeId : '',
     purge: options?.purge === true,
     replaceOtherAccount: options?.replaceOtherAccount === true,
+    separateAccount: options?.separateAccount === true,
   };
   const inAppApproval = options?.inAppApproval === true;
   return bridgeManager.runOperation(operation, bridgeTarget(target), (payload: any) => sendBridgeEvent(payload, inAppApproval), clean);
@@ -426,6 +433,7 @@ function installAppMenu() {
     });
   }
   template.push(
+    { label: 'App updates', submenu: [{ label: 'Check for updates / restart to update…', click: () => { void desktopUpdates?.showMenu(); } }] },
     { role: 'editMenu' },
     { role: 'viewMenu' },
     { role: 'windowMenu' },
@@ -443,7 +451,8 @@ app.whenReady().then(async () => {
   app.setName(APP_DISPLAY_NAME);
   app.setAboutPanelOptions?.({ applicationName: APP_DISPLAY_NAME });
   installAppMenu();
-  desktopUpdater.start(desktopUpdater.supported(process.platform, app.isPackaged), () => undefined);
+  desktopUpdates = installDesktopUpdates({ app, ipcMain, dialog, getWindow: () => mainWindow,
+    trustedOrigins: trustedUiOrigins, bridgeBusy: () => bridgeManager.operationRunning() });
 
   // In dev the renderer runs at the Vite dev-server origin, and Vite's
   // `server.proxy` (see vite.config.js) forwards `/api/v1` to the local Hub.
@@ -471,7 +480,7 @@ app.whenReady().then(async () => {
     const { openWindow } = await installChoice.runFirstLaunch({
       markerPath: installChoiceMarker,
       showMessageBox: (options: any) => dialog.showMessageBox(options),
-      setupBridge: () => bridgeManager.runOperation('setup', bridgeTarget({}), sendBridgeEvent, {}),
+      setupBridge: () => bridgeManager.firstLaunchSetup(configuredHubApiBaseUrl(), sendBridgeEvent),
       packageKind: installChoice.packageKind(),
     });
     if (!openWindow) { app.quit(); return; }
@@ -489,6 +498,7 @@ app.whenReady().then(async () => {
 let bridgeQuitHold: '' | 'waiting' | 'released' = '';
 
 app.on('before-quit', (event: any) => {
+  if (desktopUpdates && !desktopUpdates.beforeQuit(event)) return;
   // A running Bridge operation is cancelled, and the quit is held (bounded by
   // TIMEOUTS.quit) until it settles, so a cancelled first install is rolled
   // back before the app exits. An installed Bridge service is never stopped by
@@ -501,8 +511,8 @@ app.on('before-quit', (event: any) => {
     return;
   }
   desktopNotifications.dispose();
-  desktopUpdater.stop();
 });
+app.on('will-quit', () => desktopUpdates?.stop());
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();

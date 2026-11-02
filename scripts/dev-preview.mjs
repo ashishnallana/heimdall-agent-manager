@@ -23,6 +23,7 @@ import fs from 'node:fs';
 import { spawn, execSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createPreviewOriginGate } from './lib/preview-origin.mjs';
 
 function argValue(name, fallback = '') {
   const idx = process.argv.indexOf(name);
@@ -48,6 +49,7 @@ function proxyApi(req, res, targetPath) {
     headers[key] = value;
   }
   headers.host = UPSTREAM.host;
+  originGate.rewrite(headers);
 
   const upstreamReq = http.request(
     {
@@ -105,38 +107,54 @@ function logRequest(req, res, targetUrl) {
 // whole module graph 404s (e.g. GET .../@react-refresh -> 404). So: read the
 // session's real preview_url and take its path.
 let discoveredPrefix = '';
+let discoveredPreviewUrl = '';
 
-/** Find this session's ID from ham-ctl shell list or state file */
-function discoverSessionId(port) {
-  const stateFile = path.join(ROOT, '.dev-preview-session');
-  if (fs.existsSync(stateFile)) {
-    try {
-      const sid = fs.readFileSync(stateFile, 'utf8').trim();
-      if (sid.startsWith('sh_')) return sid;
-    } catch {}
-  }
-
-  const hamCtlBins = [
+function hamCtlBins() {
+  return [
     argValue('--ham-ctl'),
     process.env.HAM_CTL,
     'ham-ctl',
-    '/usr/local/google/home/tanmayvijay/.nix-profile/bin/ham-ctl',
     path.join(process.env.HOME || '', '.nix-profile/bin/ham-ctl'),
   ].filter(Boolean);
+}
+
+/** Find this session's ID from ham-ctl shell list or state file */
+function discoverSessionId(port) {
+  // dev-preview.sh records the session (and, just before it, its preview_url) as
+  // soon as `shell start` returns, which can be before `shell list` reports it as
+  // running. Take the preview_url with it: without it Vite falls back to the legacy
+  // prefix, which a preview-origin Hub does not serve.
+  let stateSid = '';
+  try {
+    const sid = fs.readFileSync(path.join(ROOT, '.dev-preview-session'), 'utf8').trim();
+    if (sid.startsWith('sh_')) stateSid = sid;
+  } catch {}
+  if (stateSid) {
+    try {
+      const url = fs.readFileSync(path.join(ROOT, '.dev-preview-url'), 'utf8').trim();
+      if (url) {
+        discoveredPrefix = previewPathFrom(url);
+        discoveredPreviewUrl = url;
+        return stateSid;
+      }
+    } catch {}
+  }
+
   const bridgeFlag = process.env.HEIMDALL_BRIDGE_ID ? ` --bridge ${process.env.HEIMDALL_BRIDGE_ID}` : '';
-  for (const bin of hamCtlBins) {
+  for (const bin of hamCtlBins()) {
     try {
       const out = execSync(`${bin} shell list${bridgeFlag} --status running`, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'], timeout: 3000 });
       const data = JSON.parse(out);
       const sessions = data?.data?.data?.sessions || data?.data?.sessions || [];
-      const match = sessions.find((s) => s.server_port === port && s.status === 'running');
+      const match = sessions.find((s) => (stateSid ? s.session_id === stateSid : s.server_port === port) && s.status === 'running');
       if (match && match.session_id) {
         discoveredPrefix = previewPathFrom(match.preview_url);
+        discoveredPreviewUrl = match.preview_url || '';
         return match.session_id;
       }
     } catch {}
   }
-  return '';
+  return stateSid;
 }
 
 /** Path component of a preview_url, normalised to a trailing slash. */
@@ -269,6 +287,15 @@ const legacyPrefix = sessionId ? `/api/v1/preview/${sessionId}` : '';
 const prefixesIn = [basePrefix.replace(/\/$/, ''), legacyPrefix].filter(Boolean);
 console.log(`[dev-preview] browser base prefix: ${basePrefix}`);
 
+// The page's API calls carry Origin: <preview origin>; vouch for it so ham-dev-proxy
+// attaches its brokered hub session (see scripts/lib/preview-origin.mjs).
+const originGate = createPreviewOriginGate({
+  port: PORT,
+  previewUrl: argValue('--preview-url', process.env.HEIMDALL_PREVIEW_URL || process.env.HEIMDALL_PREVIEW_ORIGIN || discoveredPreviewUrl),
+  previewUrlFile: path.join(ROOT, '.dev-preview-url'),
+  hamCtl: hamCtlBins(),
+});
+
 /** Strip whichever known preview prefix the request arrived with. */
 function stripPrefix(urlPath) {
   for (const p of prefixesIn) {
@@ -382,6 +409,7 @@ server.on('upgrade', (req, clientSocket, head) => {
     for (const key of Object.keys(headers)) {
       if (key.toLowerCase().startsWith('x-authentik')) delete headers[key];
     }
+    originGate.rewrite(headers);
     const upstreamReq = http.request({
       protocol: UPSTREAM.protocol,
       hostname: UPSTREAM.hostname,

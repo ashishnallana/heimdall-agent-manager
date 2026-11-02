@@ -32,6 +32,44 @@ import "core:strings"
 import httpc "odin_test:lib/httpc"
 import jsonx "odin_test:lib/jsonx"
 
+ctl_requirements_revision_flag :: proc(args: []string, flag: string) -> int {
+    if !has_flag(args,flag) do return 0
+    value,ok:=strconv.parse_int(option_value(args,flag,""))
+    if !ok || value<1 do ctl_print_error_exit(strings.concatenate({flag," requires a positive revision"},context.temp_allocator))
+    return value
+}
+
+ctl_requirement_brief_sealed :: proc(value: json.Value, args: []string) -> json.Value {
+    object,ok:=value.(json.Object)
+    if !ok do return value
+    kr:=ctl_vault_keyring_for_write(args)
+    if goal,typed:=object["goal"].(json.String);typed && !is_vault_armored(string(goal)) {
+        if len(string(goal))>2000 || strings.trim_space(string(goal))=="" do ctl_print_error_exit("goal must contain 1..2000 bytes")
+        object["goal"]=json.String(ctl_seal_or_exit(string(goal),kr))
+    }
+    if acceptance,typed:=object["acceptance"].(json.Array);typed {
+        if len(acceptance)<1 || len(acceptance)>20 do ctl_print_error_exit("acceptance requires 1..20 items")
+        for item,i in acceptance {
+            if text,typed:=item.(json.String);typed && !is_vault_armored(string(text)) {
+                if len(string(text))>200 || strings.trim_space(string(text))=="" do ctl_print_error_exit("acceptance items must contain 1..200 bytes")
+                acceptance[i]=json.String(ctl_seal_or_exit(string(text),kr))
+            }
+        }
+    }
+    return object
+}
+
+ctl_v2_heartbeat_params :: proc(args: []string) -> string {
+    fields:=make([dynamic]string,context.temp_allocator)
+    if value:=option_value(args,"--lease","");value!="" do append(&fields,json_kv("lease_id",value))
+    if value:=option_value(args,"--note","");value!="" do append(&fields,json_kv("note",value))
+    if revision:=ctl_requirements_revision_flag(args,"--acknowledge-requirements-revision");revision>0 {
+        if option_value(args,"--lease","")=="" do ctl_print_error_exit("acknowledgement requires --lease from the context you read")
+        append(&fields,json_kv_raw("acknowledge_requirements_revision",fmt.tprintf("%d",revision)))
+    }
+    return json_object_from_slice(fields[:])
+}
+
 // ---- brief ------------------------------------------------------------------
 
 // ctl_collect_repeated gathers every value of the named flags WITHOUT splitting
@@ -455,6 +493,7 @@ ctl_v2_lease_submit_params :: proc(args: []string, handoff_json := "", output_js
 	fields := make([dynamic]string)
 	defer delete(fields)
 	append(&fields, json_kv("summary", summary))
+    if revision:=ctl_requirements_revision_flag(args,"--requirements-revision");revision>0 do append(&fields,json_kv_raw("requirements_revision",fmt.tprintf("%d",revision)))
 	if v := option_value(args, "--lease", ""); v != "" do append(&fields, json_kv("lease_id", v))
 	if handoff_json != "" do append(&fields, json_kv_raw("handoff", handoff_json))
 	if output_json != "" do append(&fields, json_kv_raw("output", output_json))
@@ -542,6 +581,10 @@ ctl_v2_review_post_params :: proc(tokens, args: []string, findings_json := "") -
 	defer delete(fields)
 	if v := option_value(args, "--task", option_value(args, "--task-id", pos(tokens, 1))); v != "" do append(&fields, json_kv("task_id", v))
 	append(&fields, json_kv("verdict", verdict))
+    if value:=option_value(args,"--lease","");value!="" do append(&fields,json_kv("lease_id",value))
+    if revision:=ctl_requirements_revision_flag(args,"--requirements-revision");revision>0 do append(&fields,json_kv_raw("requirements_revision",fmt.tprintf("%d",revision)))
+    if attempt:=ctl_requirements_revision_flag(args,"--expected-attempt");attempt>0 do append(&fields,json_kv_raw("expected_attempt_no",fmt.tprintf("%d",attempt)))
+    if has_flag(args,"--expected-head") do append(&fields,json_kv("expected_head",option_value(args,"--expected-head","")))
 	if findings_json != "" do append(&fields, json_kv_raw("findings", findings_json))
 	// --summary: the reason in words (enough on its own for request_changes;
 	// a rejected gate's re-plan reads it).
@@ -891,6 +934,8 @@ print_help_review :: proc() {
 	fmt.println("")
 	fmt.println("VERBS")
 	fmt.println("  post --verdict approve|request_changes [--summary <reason>] [--findings-file <json>] [--task <id>] [--on-behalf-of user]")
+	fmt.println("      Changed requirements: --lease <id> --requirements-revision <n> --expected-attempt <n> --expected-head <sha>.")
+	fmt.println("      Use the context you reviewed; user-proxy reviews omit --lease. Refresh after conflicts.")
 	fmt.println("      Record your verdict. --task defaults to the task your lease names. request_changes")
 	fmt.println("      needs --summary or findings. The")
 	fmt.println("      findings file is a JSON array of {path?, line?, severity?, text}.")

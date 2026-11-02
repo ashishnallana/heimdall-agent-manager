@@ -22,7 +22,7 @@
  * `prefers-reduced-motion` see a static dot.
  *
  * Tokens only: `tone` resolves to the semantic color tokens. `pending` shares the
- * warning hue (documented) until a pending token exists. No raw hex / px.
+ * info blue (queued / in flight), so warning keeps meaning "needs a person". No raw hex / px.
  *
  * Escape hatch: `className` merges onto the root `<span>`.
  */
@@ -36,7 +36,7 @@ const DOT_COLOR: Record<Tone, string> = {
   success: 'bg-success',
   warning: 'bg-warning',
   danger: 'bg-danger',
-  pending: 'bg-warning',
+  pending: 'bg-info',
 };
 
 /** Dot diameter per size. */

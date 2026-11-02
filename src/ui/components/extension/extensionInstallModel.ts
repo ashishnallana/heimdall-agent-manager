@@ -9,6 +9,7 @@ export interface ProviderExtensionCommand {
   command_id: string;
   bridge_id: string;
   provider: string;
+  profile_id?: string;
   /** Absent from older Hubs, which only ran installs. */
   kind?: ExtensionCommandKind;
   status: ExtensionInstallStatus;

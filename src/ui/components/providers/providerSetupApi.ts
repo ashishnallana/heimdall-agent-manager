@@ -8,6 +8,7 @@ export type ProviderTestRunState = 'starting' | 'detecting' | 'awaiting_validati
 
 export interface ProviderModelStatus { model_id: string; label: string; state: 'active' | 'deprecated'; resolved_model?: string }
 export interface BridgeProviderStatus extends ModelCatalogMetadata {
+  profile_id?: string; label_enc?: string; accent?: string; profile_state?: string;
   provider: 'claude' | 'codex' | 'copilot' | 'antigravity' | 'pi';
   display_name: string; icon_url: string; catalog_state: 'active' | 'deprecated';
   state: DetectionState; binary_path: string; version_text: string; checked_at: string | null;
@@ -28,6 +29,7 @@ export interface ProviderTestRunResponse {
 function normalizeStatus(raw: any): BridgeProviderStatus {
   return {
     provider: String(raw?.provider || '') as BridgeProviderStatus['provider'],
+    profile_id: String(raw?.profile_id || raw?.provider || ''), label_enc: String(raw?.label_enc || ''), accent: String(raw?.accent || ''), profile_state: String(raw?.profile_state || ''),
     display_name: String(raw?.display_name || raw?.provider || ''), icon_url: String(raw?.icon_url || ''),
     catalog_state: raw?.catalog_state === 'deprecated' ? 'deprecated' : 'active',
     state: raw?.state === 'present' ? 'present' : 'absent', binary_path: String(raw?.binary_path || ''),
@@ -50,7 +52,7 @@ async function bridgeDetails(bridgeId: string) {
 }
 
 export const providerSetupApi = {
-  async get(bridgeId: string): Promise<ProviderSetupResponse> {
+  async get(bridgeId: string, includeProfiles = false): Promise<ProviderSetupResponse> {
     if (!bridgeId) throw new Error('Bridge id is required.');
     const [status, bridge] = await Promise.all([
       cookieJsonFetch(`/bridges/${encodeURIComponent(bridgeId)}/provider-status`), bridgeDetails(bridgeId),
@@ -60,26 +62,26 @@ export const providerSetupApi = {
         machine_hostname: String(bridge?.machine_hostname || ''),
         status: String(bridge?.status || '').toLowerCase() === 'online' ? 'online' : 'offline' },
       discovery: { state: 'idle', requested_at: null, completed_at: null },
-      providers: (Array.isArray(status?.providers) ? status.providers : []).map(normalizeStatus),
+      providers: (Array.isArray(status?.providers) ? status.providers : []).filter((p: any) => includeProfiles || !p.profile_id || p.profile_id === p.provider).map(normalizeStatus),
     };
   },
   async discover(current: ProviderSetupResponse): Promise<ProviderSetupResponse> {
     const requestedAt = new Date().toISOString();
     const status = await cookieMutation(`/bridges/${encodeURIComponent(current.bridge.bridge_id)}/providers/discover`, 'POST', { stage: 'providers' });
     return { ...current, discovery: { state: 'complete', requested_at: requestedAt, completed_at: new Date().toISOString() },
-      providers: (Array.isArray(status?.providers) ? status.providers : []).map(normalizeStatus) };
+      providers: (Array.isArray(status?.providers) ? status.providers : []).filter((p: any) => !p.profile_id || p.profile_id === p.provider).map(normalizeStatus) };
   },
   /** Explicit second stage. Hub derives the present + enabled provider filter. */
   async refreshModels(current: ProviderSetupResponse): Promise<ProviderSetupResponse> {
     const status = await cookieMutation(`/bridges/${encodeURIComponent(current.bridge.bridge_id)}/providers/discover`, 'POST', { stage: 'models' });
-    return { ...current, providers: (Array.isArray(status?.providers) ? status.providers : []).map(normalizeStatus) };
+    return { ...current, providers: (Array.isArray(status?.providers) ? status.providers : []).filter((p: any) => !p.profile_id || p.profile_id === p.provider).map(normalizeStatus) };
   },
-  async setEnabled(current: ProviderSetupResponse, provider: string, enabled: boolean): Promise<ProviderSetupResponse> {
-    await cookieMutation(`/bridges/${encodeURIComponent(current.bridge.bridge_id)}/providers/${encodeURIComponent(provider)}`, 'PUT', { enabled });
+  async setEnabled(current: ProviderSetupResponse, provider: string, enabled: boolean, profileId?: string): Promise<ProviderSetupResponse> {
+    await cookieMutation(`/bridges/${encodeURIComponent(current.bridge.bridge_id)}/providers/${encodeURIComponent(provider)}`, 'PUT', { enabled, ...(profileId ? { profile_id: profileId } : {}) });
     return { ...current, providers: current.providers.map((entry) => entry.provider === provider ? { ...entry, enabled } : entry) };
   },
-  async startTestRun(current: ProviderSetupResponse, provider: string, model: string): Promise<ProviderTestRunResponse> {
-    return cookieMutation(`/bridges/${encodeURIComponent(current.bridge.bridge_id)}/provider-tests`, 'POST', { provider, model });
+  async startTestRun(current: ProviderSetupResponse, provider: string, model: string, profileId?: string): Promise<ProviderTestRunResponse> {
+    return cookieMutation(`/bridges/${encodeURIComponent(current.bridge.bridge_id)}/provider-tests`, 'POST', { provider, model, ...(profileId ? { profile_id: profileId } : {}) });
   },
   async getTestRun(runId: string): Promise<ProviderTestRunResponse> {
     return cookieJsonFetch(`/provider-tests/${encodeURIComponent(runId)}`);

@@ -44,6 +44,10 @@ parse_args :: proc(config: ^Dev_Proxy_Config) {
 			config.hub_url = strings.clone(os.args[i + 1]); i += 1
 		} else if arg == "--default-user" && i + 1 < len(os.args) {
 			config.default_user = strings.clone(os.args[i + 1]); i += 1
+		} else if arg == "--hub-ui-origin" && i + 1 < len(os.args) {
+			config.hub_ui_origin = strings.clone(strings.trim_right(os.args[i + 1], "/")); i += 1
+		} else if arg == "--trusted-origin" && i + 1 < len(os.args) {
+			append(&config.trusted_origins, strings.clone(strings.trim_right(os.args[i + 1], "/"))); i += 1
 		}
 	}
 }
@@ -70,12 +74,14 @@ run_dev_proxy_server :: proc(config: Dev_Proxy_Config, store: ^Dev_Proxy_Store) 
 	// task-1 store mutex guards writes to the users slice + active selection.
 	shared_config := new(Dev_Proxy_Config)
 	shared_config^ = config
+	broker := new(Dev_Session_Broker)
 	for {
 		client, _, accept_err := net.accept_tcp(listener)
 		if accept_err != nil do continue
 		ctx := new(Dev_Proxy_Client_Context)
 		ctx.config = shared_config
 		ctx.store = store
+		ctx.broker = broker
 		ctx.client = client
 		thread.run_with_poly_data(ctx, handle_dev_proxy_client)
 	}
@@ -84,6 +90,7 @@ run_dev_proxy_server :: proc(config: Dev_Proxy_Config, store: ^Dev_Proxy_Store) 
 Dev_Proxy_Client_Context :: struct {
 	config: ^Dev_Proxy_Config,
 	store: ^Dev_Proxy_Store,
+	broker: ^Dev_Session_Broker,
 	client: net.TCP_Socket,
 }
 
@@ -120,10 +127,13 @@ handle_dev_proxy_client :: proc(ctx: ^Dev_Proxy_Client_Context) {
 		write_response(client, 404, "Not Found", "text/plain", "not found")
 		return
 	}
-	forward_request(client, ctx.config, request, method, target)
+	forward_request(ctx, request, method, target)
 }
 
-forward_request :: proc(client: net.TCP_Socket, config: ^Dev_Proxy_Config, request, method, target: string) {
+forward_request :: proc(ctx: ^Dev_Proxy_Client_Context, request, method, target: string) {
+	client := ctx.client
+	config := ctx.config
+	broker := ctx.broker
 	incoming := parse_headers(request)
 	defer free_headers(incoming)
 	cookie := header_value(incoming, "Cookie")
@@ -133,35 +143,126 @@ forward_request :: proc(client: net.TCP_Socket, config: ^Dev_Proxy_Config, reque
 		return
 	}
 	defer free_headers(rewritten)
+	path, query := split_target_query(target)
+
+	// REQ-DEVAUTH-1: sign-in is brokered, not sent through the browser.
+	if path == "/api/v1/auth/login" && !broker_is_real_idp(broker) && is_browser_navigation(incoming) {
+		if handle_broker_login(client, config, broker, user.username, query) do return
+	}
+
+	// WebSocket detection: a client requesting `Connection: Upgrade` +
+	// `Upgrade: websocket` needs a persistent bidirectional tunnel, not the
+	// one-shot request/response copy.
+	is_ws := ascii_equal_fold(header_value(incoming, "Upgrade"), "websocket")
+	is_logout := path == "/api/v1/auth/logout"
+
+	// REQ-DEVAUTH-2: attach the dev user's brokered session (signing in first if
+	// needed) to trusted browser requests. The sign-in routes themselves are left
+	// alone (a script's callback carries its own login cookie), except sign-out,
+	// which never triggers a sign-in.
+	session := ""
+	brokerable := is_logout || !strings.has_prefix(path, "/api/v1/auth/")
+	if brokerable && !broker_is_real_idp(broker) && broker_request_trusted(config, incoming) {
+		session = broker_cached_session(broker, user.username) if is_logout else broker_session(broker, config, user.username)
+	}
+	body := request_body(request)
+	for attempt in 0 ..< 2 {
+		headers := rewritten
+		if session != "" do headers = broker_headers_for_hub(rewritten, session, broker_ui_origin(broker, config))
+		upstream, sent := send_upstream_request(client, config, method, target, headers, body, is_ws)
+		if session != "" do free_headers(headers)
+		if !sent do return
+		if is_ws {
+			proxy_tunnel_bidirectional(client, upstream)
+			net.close(upstream)
+			return
+		}
+		if path == "/api/v1/auth/login" {
+			// Provider-driven sign-in (a real provider, or a script running the flow
+			// itself): apply the dev user as login_hint.
+			proxy_copy_login_response(client, upstream, user.username)
+			net.close(upstream)
+			return
+		}
+		_ = net.set_option(upstream, .Receive_Timeout, 16 * time.Minute)
+		data, head_end, head_ok := read_response_head(upstream)
+		if !head_ok {
+			delete(data)
+			net.close(upstream)
+			write_response(client, 502, "Bad Gateway", "text/plain", "hub response incomplete")
+			return
+		}
+		head := string(data[:head_end])
+		status := response_status(head)
+		// The Hub rejected the brokered session (expired, hub DB reset): sign in
+		// again once and replay the request.
+		if status == 401 && session != "" && attempt == 0 && !is_logout {
+			delete(data)
+			net.close(upstream)
+			broker_invalidate(broker, user.username, session)
+			session = broker_session(broker, config, user.username)
+			continue
+		}
+		if session != "" {
+			head = strip_hub_auth_set_cookies(head)
+			// REQ-DEVAUTH-3: sign-out ends the brokered session too.
+			if is_logout && status < 400 do broker_sign_out(broker, user.username)
+		}
+		_, _ = net.send_tcp(client, transmute([]byte)head)
+		_, _ = net.send_tcp(client, transmute([]byte)string("\r\n\r\n"))
+		if len(data) > head_end + 4 do _, _ = net.send_tcp(client, data[head_end + 4:])
+		delete(data)
+		proxy_copy_response(client, upstream)
+		net.close(upstream)
+		return
+	}
+}
+
+// handle_broker_login answers /api/v1/auth/login by signing the dev user in to
+// the Hub and redirecting to the (local, relative) return_to, so the redirect
+// stays inside a preview prefix. Returns false when the provider is real and the
+// request should take the browser-driven path instead.
+handle_broker_login :: proc(client: net.TCP_Socket, config: ^Dev_Proxy_Config, broker: ^Dev_Session_Broker, username, query: string) -> bool {
+	_, err := broker_login(broker, config, username, true)
+	if err == .Real_Idp do return false
+	if err != .None {
+		message := broker_login_error_message(err)
+		fmt.eprintln(message)
+		write_response(client, 502, "Bad Gateway", "text/plain", message)
+		return true
+	}
+	location := safe_return_to(query_param(query, "return_to"))
+	write_response_with_headers(client, 302, "Found", "text/plain", "", []contracts.HTTP_Header{
+		{name = "Location", value = location},
+		{name = "Set-Cookie", value = EXPIRED_HUB_SESSION_COOKIE},
+		{name = "Cache-Control", value = "no-store"},
+	})
+	return true
+}
+
+// send_upstream_request dials the Hub and writes the request. On failure it has
+// already answered the client with a 502.
+send_upstream_request :: proc(client: net.TCP_Socket, config: ^Dev_Proxy_Config, method, target: string, headers: []contracts.HTTP_Header, body: string, is_ws: bool) -> (net.TCP_Socket, bool) {
 	hub_host, hub_port, hub_ok := parse_base_url(config.hub_url)
 	if !hub_ok {
 		write_response(client, 502, "Bad Gateway", "text/plain", "invalid hub_url")
-		return
+		return {}, false
 	}
 	upstream, dial_err := net.dial_tcp_from_hostname_with_port_override(hub_host, hub_port)
 	if dial_err != nil {
 		write_response(client, 502, "Bad Gateway", "text/plain", "hub unavailable")
-		return
+		return {}, false
 	}
-	defer net.close(upstream)
-
-	// WebSocket detection: a client requesting `Connection: Upgrade` +
-	// `Upgrade: websocket` needs a persistent bidirectional tunnel, not the
-	// one-shot request/response copy. We must FORWARD the upgrade headers to the
-	// hub (unlike normal requests, where Connection is stripped and forced to
-	// close), relay the `101`, then pump both directions with no read timeout
-	// until either side closes.
-	is_ws := ascii_equal_fold(header_value(incoming, "Upgrade"), "websocket")
-
-	body := request_body(request)
-	out := strings.builder_make()
+	// For WS we must FORWARD the upgrade headers to the hub (unlike normal
+	// requests, where Connection is stripped and forced to close), relay the
+	// `101`, then pump both directions with no read timeout.
+	out := strings.builder_make(context.temp_allocator)
 	strings.write_string(&out, method); strings.write_string(&out, " "); strings.write_string(&out, target); strings.write_string(&out, " HTTP/1.1\r\n")
 	strings.write_string(&out, "Host: "); strings.write_string(&out, hub_host); strings.write_string(&out, ":"); strings.write_string(&out, fmt.tprintf("%d", hub_port)); strings.write_string(&out, "\r\n")
-	for h in rewritten {
+	for h in headers {
 		if ascii_equal_fold(h.name, "Host") || ascii_equal_fold(h.name, "Content-Length") || ascii_equal_fold(h.name, "Connection") do continue
 		// For non-WS requests we drop any client-supplied Upgrade; for WS we keep
-		// the Sec-WebSocket-* headers (they pass through the loop below) and add
-		// our own Connection/Upgrade line explicitly.
+		// the Sec-WebSocket-* headers and add our own Connection/Upgrade line.
 		if is_ws && ascii_equal_fold(h.name, "Upgrade") do continue
 		strings.write_string(&out, h.name); strings.write_string(&out, ": "); strings.write_string(&out, h.value); strings.write_string(&out, "\r\n")
 	}
@@ -172,22 +273,12 @@ forward_request :: proc(client: net.TCP_Socket, config: ^Dev_Proxy_Config, reque
 		strings.write_string(&out, body)
 	}
 	out_req := strings.to_string(out)
-	_, send_err := net.send_tcp(upstream, transmute([]byte)out_req)
-	if send_err != nil {
+	if _, send_err := net.send_tcp(upstream, transmute([]byte)out_req); send_err != nil {
+		net.close(upstream)
 		write_response(client, 502, "Bad Gateway", "text/plain", "hub send failed")
-		return
+		return {}, false
 	}
-	if is_ws {
-		proxy_tunnel_bidirectional(client, upstream)
-		return
-	}
-	path, _ := split_target_query(target)
-	if path == "/api/v1/auth/login" {
-		// Sign-in redirect: apply the selected dev user as the provider login_hint.
-		proxy_copy_login_response(client, upstream, user.username)
-		return
-	}
-	proxy_copy_response(client, upstream)
+	return upstream, true
 }
 
 proxy_copy_login_response :: proc(client, upstream: net.TCP_Socket, username: string) {

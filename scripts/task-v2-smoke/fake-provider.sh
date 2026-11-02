@@ -32,7 +32,7 @@ echo $$ > "$WORK/agents/$inst.pid"
 } >> "$log"
 
 CTL="${HEIMDALL_CTL_BIN:-}"
-[ -n "$CTL" ] || CTL="$(pwd)/.heimdall/bin/ham-ctl"
+[ -n "$CTL" ] || CTL="$(pwd)/bin/ham-ctl"
 if [ ! -x "$CTL" ]; then
   echo "no ham-ctl shim at $CTL" >> "$log"
   CTL="ham-ctl"

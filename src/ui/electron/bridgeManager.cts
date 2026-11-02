@@ -37,6 +37,7 @@ type Platform = NodeJS.Platform;
 type BridgeProfile = { hub: string; profile?: string; service?: string };
 type OperationKind = 'setup' | 'update' | 'reenroll' | 'uninstall';
 type Emit = (event: any) => void;
+type OperationOptions = { bridgeId?: string; purge?: boolean; replaceOtherAccount?: boolean; separateAccount?: boolean; fetchImpl?: FetchLike };
 
 function supportedPlatform(platform: Platform = process.platform): boolean {
   return platform === 'darwin' || platform === 'win32' || platform === 'linux';
@@ -420,6 +421,26 @@ async function listProfiles(): Promise<any[]> {
   return Array.isArray(result?.profiles) ? result.profiles : [];
 }
 
+// hubProfiles are the listed profiles installed for `hub`.
+function hubProfiles(profiles: any[], hub: string): any[] {
+  const want = normalizeHubUrl(hub);
+  return (Array.isArray(profiles) ? profiles : []).filter((p) => p?.installed && normalizeHubUrl(String(p?.hub || '')) === want);
+}
+
+// createdProfile finds the profile a `setup --separate-account` installed or
+// enrolled: ham-bridge picks it (the requested one while unenrolled, else
+// account-N), so the app reads it back from `list` before and after. A profile
+// counts only when it is new, or its bridge id changed (a fresh enrollment).
+function createdProfile(before: any[], after: any[], hub: string): any | null {
+  const previous = new Map(hubProfiles(before, hub).map((p) => [String(p.service || ''), String(p.bridge_id || '')]));
+  return hubProfiles(after, hub).find((p) => {
+    const service = String(p.service || '');
+    if (!previous.has(service)) return true;
+    const bridgeId = String(p.bridge_id || '');
+    return Boolean(bridgeId) && bridgeId !== previous.get(service);
+  }) || null;
+}
+
 // getStatus reports one profile (`ham-bridge status --json`) plus what the app
 // can do about it. `state` is ham-bridge's single word for the UI.
 async function getStatus(target: BridgeProfile) {
@@ -449,12 +470,18 @@ async function getStatus(target: BridgeProfile) {
 let current: { kind: OperationKind; target: BridgeProfile; running: Running[]; wasInstalled: boolean; settled: Promise<unknown> } | null = null;
 let cancelRequested = false;
 
-function operationArgs(kind: OperationKind, target: BridgeProfile, options: { bridgeId?: string; purge?: boolean; bundleDir?: string; replaceOtherAccount?: boolean; stateDir?: string }): string[] {
+function operationArgs(kind: OperationKind, target: BridgeProfile, options: { bridgeId?: string; purge?: boolean; bundleDir?: string; replaceOtherAccount?: boolean; separateAccount?: boolean; stateDir?: string }): string[] {
   // setup and enroll name a profile by Hub (+ profile); the others also take --service.
   const select = profileArgs(target, kind === 'update' || kind === 'uninstall');
   switch (kind) {
     case 'setup':
-      return ['setup', ...select, '--headless', '--json-progress', ...(options.replaceOtherAccount ? ['--replace-other-account'] : [])];
+      // --separate-account installs into a profile no account has enrolled yet,
+      // so another account's running bridge is never touched. Replace is the
+      // explicit alternative; ham-bridge refuses both together.
+      if (options.separateAccount && options.replaceOtherAccount) throw new Error('Choose either a separate bridge or replacing the other account\'s bridge, not both.');
+      return ['setup', ...select, '--headless', '--json-progress',
+        ...(options.separateAccount ? ['--separate-account'] : []),
+        ...(options.replaceOtherAccount ? ['--replace-other-account'] : [])];
     case 'reenroll': {
       // `enroll` has no --profile: it names the profile's files explicitly
       // (state_dir from `status --json`), exactly as `setup` does.
@@ -487,7 +514,7 @@ function runOperation(
   kind: OperationKind,
   target: BridgeProfile,
   emit: Emit,
-  options: { bridgeId?: string; purge?: boolean; replaceOtherAccount?: boolean; fetchImpl?: FetchLike } = {},
+  options: OperationOptions = {},
 ): Promise<{ ok: boolean; error?: string }> {
   if (!supportedPlatform()) return Promise.resolve({ ok: false, error: 'This platform cannot run a Ninjy Bridge.' });
   if (current) return Promise.resolve({ ok: false, error: 'A Bridge operation is already running.' });
@@ -503,7 +530,7 @@ async function performOperation(
   kind: OperationKind,
   target: BridgeProfile,
   emit: Emit,
-  options: { bridgeId?: string; purge?: boolean; replaceOtherAccount?: boolean; fetchImpl?: FetchLike } = {},
+  options: OperationOptions = {},
 ): Promise<{ ok: boolean; error?: string }> {
   try { profileArgs(target, kind === 'update' || kind === 'uninstall'); } catch (error: any) { return { ok: false, error: String(error?.message || error) }; }
   // Claim the slot before the first await so a second call is refused.
@@ -533,10 +560,17 @@ async function performOperation(
     const pairing = !pairingSent && extractEnrollmentPairing(plain);
     if (pairing) { pairingSent = true; emit({ type: 'pairing', ...pairing }); }
   };
+  // A separate-account setup may land in another profile than `target`; the
+  // profiles listed before it tell which one it created (createdProfile).
+  const separate = kind === 'setup' && Boolean(options.separateAccount);
+  let listedBefore: any[] | null = null;
   try {
     before = await getStatus(target);
     // An unreadable status may hide an existing install; never roll that back.
     op.wasInstalled = Boolean(before.installed) || before.state === 'unknown';
+    if (separate) {
+      try { listedBefore = await listProfiles(); } catch (_err) { listedBefore = null; }
+    }
     let binary = '';
     let bundleDir = '';
     if (kind === 'setup' || kind === 'update') {
@@ -544,7 +578,7 @@ async function performOperation(
       binary = prepared.binary;
       bundleDir = path.dirname(binary).endsWith(`${path.sep}bin`) ? path.dirname(path.dirname(binary)) : path.dirname(binary);
     } else {
-      binary = kind === 'uninstall' ? uninstallBinary() : queryBinary();
+      binary = kind === 'uninstall' ? await uninstallBinary(register) : queryBinary();
       if (!binary) throw new Error('No installed Bridge was found on this machine.');
     }
     if (cancelRequested) throw Object.assign(new Error('Cancelled.'), { cancelled: true });
@@ -556,7 +590,12 @@ async function performOperation(
       // %TEMP% and its parent exits 0 at once, so the exit code alone proves
       // nothing: confirm the profile is really gone.
       if (kind === 'uninstall') await confirmUninstalled(target);
-      emit({ type: 'complete', status: await getStatus(target) });
+      let finalTarget = target;
+      if (separate && listedBefore) {
+        const created = createdProfile(listedBefore, await listProfiles().catch(() => []), target.hub);
+        if (created) finalTarget = { hub: target.hub, profile: String(created.profile || '') };
+      }
+      emit({ type: 'complete', status: await getStatus(finalTarget) });
       return { ok: true };
     }
     const reason = result.cancelled ? 'Cancelled.'
@@ -569,7 +608,17 @@ async function performOperation(
     // Cancel = rollback: ham-bridge setup undoes its own completed steps on a
     // failure; a first install that the user cancelled or that timed out is
     // also removed so the machine returns to "not installed".
-    if (kind === 'setup' && !op.wasInstalled && (cancelled || error?.timedOut)) {
+    // A separate-account setup only ever removes a profile that did not exist
+    // before it started, never the other account's.
+    if (separate && listedBefore && (cancelled || error?.timedOut)) {
+      const existing = new Set(hubProfiles(listedBefore, target.hub).map((p) => String(p.service || '')));
+      const partial = hubProfiles(await listProfiles().catch(() => []), target.hub).find((p) => !existing.has(String(p.service || '')));
+      if (partial && queryBinary()) {
+        emit({ type: 'progress', step: 'rollback', state: 'start', pct: 0, message: 'Removing the partial install…' });
+        const undo = await runCommand(queryBinary(), operationArgs('uninstall', { hub: target.hub, service: String(partial.service) }, { purge: true }), { timeoutMs: TIMEOUTS.uninstall, onLine });
+        rolledBack = undo.code === 0;
+      } else rolledBack = true;
+    } else if (kind === 'setup' && !separate && !op.wasInstalled && (cancelled || error?.timedOut)) {
       const after = await getStatus(target);
       if (after.installed && queryBinary()) {
         emit({ type: 'progress', step: 'rollback', state: 'start', pct: 0, message: 'Removing the partial install…' });
@@ -586,13 +635,48 @@ async function performOperation(
   }
 }
 
-// uninstallBinary prefers a ham-bridge outside the profile's bin/ (the one this
-// app prepared, or a cached release): run from there, Windows uninstall needs
-// no %TEMP% relocation and its exit code is the real result.
-function uninstallBinary(): string {
+// firstLaunchSetup (REQ-ENR-4) runs before anyone has signed in, so the app
+// cannot tell whose an installed bridge is: with none installed for this Hub it
+// sets up a separate-account bridge (which lands in the default profile, as no
+// account has enrolled one); with one installed it changes nothing and leaves
+// the choice to Settings > Bridges, where the signed-in account is known.
+async function firstLaunchSetup(hub: string, emit: Emit): Promise<{ ok: boolean; error?: string }> {
+  let installed: any[] = [];
+  try { installed = hubProfiles(await listProfiles(), hub); }
+  catch (error: any) { return { ok: false, error: `Unable to list the installed Bridges (${String(error?.message || error)}); nothing was changed.` }; }
+  if (installed.length) return { ok: false, error: 'A Ninjy Bridge is already installed on this machine, so nothing was changed. Sign in and set up your own from Settings > Bridges; the installed one keeps running.' };
+  return runOperation('setup', { hub, profile: '' }, emit, { separateAccount: true });
+}
+
+// Use this app's bundled lifecycle fixes even after restarting the app, when
+// preparedBinary is empty. An arbitrary recursive cache search can select a
+// much older release merely because its directory sorts first.
+async function uninstallBinary(register: (running: Running) => void = () => {}): Promise<string> {
   if (process.env.HEIMDALL_HAM_BRIDGE) return process.env.HEIMDALL_HAM_BRIDGE;
+  const platform = process.platform;
+  const version = bundledVersion(platform);
+  if (version) {
+    const extracted = path.join(cacheRoot(), `bundled-${version}`);
+    let binary = findBinary(extracted, platform);
+    const files = bundledResources(platform);
+    if (!binary && fs.existsSync(files.bundle) && fs.existsSync(files.checksums)) {
+      await verifyArchive(files.bundle, fs.readFileSync(files.checksums, 'utf8'), path.basename(files.bundle));
+      await extractArchive(files.bundle, extracted, register);
+      binary = findBinary(extracted, platform);
+      if (!binary) throw new Error(`The bundled Bridge does not contain ${binaryName(platform)}.`);
+    }
+    if (binary) return binary;
+  }
   if (preparedBinary && fs.existsSync(preparedBinary)) return preparedBinary;
-  return findBinary(cacheRoot(), process.platform, 4) || installedBinaries()[0] || '';
+  let entries: any[] = [];
+  try { entries = fs.readdirSync(cacheRoot(), { withFileTypes: true }); } catch (_err) { /* no cached release */ }
+  const releases = entries.filter((entry) => entry.isDirectory() && /^(?:bundled-)?v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(entry.name));
+  releases.sort((a, b) => compareVersions(b.name.replace(/^bundled-/, ''), a.name.replace(/^bundled-/, '')));
+  for (const release of releases) {
+    const binary = findBinary(path.join(cacheRoot(), release.name), platform, 4);
+    if (binary) return binary;
+  }
+  return installedBinaries()[0] || '';
 }
 
 // confirmUninstalled waits (bounded) for `status --json` to stop reporting
@@ -637,7 +721,9 @@ module.exports = {
   bundledVersion,
   cancelOperation,
   checksumFor,
+  createdProfile,
   extractEnrollmentPairing,
+  firstLaunchSetup,
   getStatus,
   latestRelease,
   compareVersions,
@@ -653,4 +739,5 @@ module.exports = {
   runOperation,
   stopOnQuit,
   supportedPlatform,
+  uninstallBinary,
 };

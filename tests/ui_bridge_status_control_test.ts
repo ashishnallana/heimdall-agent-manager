@@ -10,7 +10,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { desktopCapabilities, initialWizard, reduceWizard, startWizard, wizardStepFor } from '../src/ui/bridge/desktopBridge.ts';
+import { accountBridgeProfile, desktopCapabilities, desktopSetupPlan, initialWizard, otherAccountProfiles, reduceWizard, startWizard, wizardStepFor } from '../src/ui/bridge/desktopBridge.ts';
 import * as session from '../src/ui/bridge/desktopBridgeSession.ts';
 import bridgeManager from '../src/ui/electron/bridgeManager.cts';
 import externalUrl from '../src/ui/electron/externalUrl.cts';
@@ -19,7 +19,8 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const preloadSource = fs.readFileSync(path.join(ROOT, 'src/ui/electron/preload.cts'), 'utf8');
 const mainSource = fs.readFileSync(path.join(ROOT, 'src/ui/electron/main.cts'), 'utf8');
 const managerSource = fs.readFileSync(path.join(ROOT, 'src/ui/electron/bridgeManager.cts'), 'utf8');
-const updaterSource = fs.readFileSync(path.join(ROOT, 'src/ui/electron/desktopUpdater.cts'), 'utf8');
+const updaterSource = fs.readFileSync(path.join(ROOT, 'src/ui/electron/desktopUpdateController.cts'), 'utf8');
+const updaterMainSource = fs.readFileSync(path.join(ROOT, 'src/ui/electron/desktopUpdatesMain.cts'), 'utf8');
 const authGateSource = fs.readFileSync(path.join(ROOT, 'src/ui/components/ElectronDeviceAuthGate.tsx'), 'utf8');
 const builderSource = fs.readFileSync(path.join(ROOT, 'electron-builder.yml'), 'utf8');
 const windowsSocketSource = fs.readFileSync(path.join(ROOT, 'src/bridge/os_platform_windows.odin'), 'utf8');
@@ -29,10 +30,16 @@ const HUB = { hub: 'https://hub.example', profile: '' };
 
 type SpawnCall = { command: string; args: string[]; proc: any };
 
-// Fakes ham-bridge. `status` answers with `statusFor()`; any other command runs
+// Fakes ham-bridge. `status` answers with `statusFor(args)`, `list` with
+// `listFor()` (default: the one statusFor profile); any other command runs
 // `script(call)`, which may emit output and close the process (or leave it
 // running). process.kill is stubbed so a cancel never signals a real process.
-function fakeHamBridge(t: any, script: (call: SpawnCall) => void, statusFor: () => any = () => ({ installed: false, state: 'not_installed' })): SpawnCall[] {
+function fakeHamBridge(
+  t: any,
+  script: (call: SpawnCall) => void,
+  statusFor: (args: string[]) => any = () => ({ installed: false, state: 'not_installed' }),
+  listFor?: () => any[],
+): SpawnCall[] {
   const calls: SpawnCall[] = [];
   const previous = process.env.HEIMDALL_HAM_BRIDGE;
   process.env.HEIMDALL_HAM_BRIDGE = '/opt/fake/ham-bridge';
@@ -49,8 +56,11 @@ function fakeHamBridge(t: any, script: (call: SpawnCall) => void, statusFor: () 
     const call = { command, args, proc };
     calls.push(call);
     setImmediate(() => {
-      if (args[0] === 'status' || args[0] === 'list') {
-        const status = statusFor();
+      if (args[0] === 'list' && listFor) {
+        proc.stdout.emit('data', `${JSON.stringify({ profiles: listFor() })}\n`);
+        proc.emit('close', 0);
+      } else if (args[0] === 'status' || args[0] === 'list') {
+        const status = statusFor(args);
         // A string is printed as-is (e.g. garbage, so status --json is unreadable).
         proc.stdout.emit('data', typeof status === 'string' ? status : `${JSON.stringify(args[0] === 'list' ? { profiles: [status] } : status)}\n`);
         proc.emit('close', 0);
@@ -63,6 +73,16 @@ function fakeHamBridge(t: any, script: (call: SpawnCall) => void, statusFor: () 
     if (!proc) throw Object.assign(new Error('ESRCH'), { code: 'ESRCH' });
     setImmediate(() => proc.emit('close', null));
     return true;
+  });
+  // Windows cancellation uses taskkill instead of process.kill. Keep that
+  // branch inside the fake process table too; never signal a real host PID.
+  t.mock.method(childProcess, 'spawnSync', (command: string, args: string[]) => {
+    assert.equal(command, 'taskkill.exe');
+    const proc = procs.get(Number(args[args.indexOf('/PID') + 1]));
+    assert.ok(proc, 'taskkill must target a fake ham-bridge process');
+    assert.ok(args.includes('/T') && args.includes('/F'));
+    setImmediate(() => proc.emit('close', null));
+    return { status: 0 };
   });
   return calls;
 }
@@ -91,16 +111,15 @@ test('REQ-OIDC-DESKTOP-1: OIDC completion does not destroy its window inside a n
   assert.doesNotMatch(mainSource, /finishIfReturned[\s\S]*?authWindow\?\.close\(\)/);
 });
 
-test('REQ-WIN-UPDATE-1: unsigned Windows releases publish digest-protected updater metadata', () => {
-  assert.match(updaterSource, /require\('electron-updater'\)/);
-  assert.match(updaterSource, /autoUpdater\.allowPrerelease = false/);
-  assert.match(updaterSource, /autoUpdater\.checkForUpdates\(\)/);
-  assert.match(updaterSource, /autoUpdater\.quitAndInstall\(false, true\)/);
-  assert.match(mainSource, /desktopUpdater\.start\(desktopUpdater\.supported\(process\.platform, app\.isPackaged\)/);
-  assert.match(updaterSource, /platform === 'win32' \|\| platform === 'darwin'/);
+test('REQ-AU: updater delivery retains NSIS/version identity and enables publisher verification', () => {
+  assert.match(updaterMainSource, /require\('electron-updater'\)/);
+  assert.match(updaterSource, /updater\.allowPrerelease = false/);
+  assert.match(updaterSource, /updater\.autoInstallOnAppQuit = false/);
+  assert.match(updaterMainSource, /updater\.quitAndInstall\(false, true\)/);
+  assert.match(mainSource, /desktopUpdates = installDesktopUpdates/);
   assert.match(builderSource, /publish:\s+[\s\S]*provider: github[\s\S]*repo: heimdall-agent-manager/);
-  assert.match(builderSource, /verifyUpdateCodeSignature: false/);
-  assert.doesNotMatch(releaseWorkflowSource, /WINDOWS_CODE_SIGNING_PFX|signtool sign|forceCodeSigning=true/);
+  assert.match(builderSource, /verifyUpdateCodeSignature: true/);
+  assert.match(releaseWorkflowSource, /WIN_CSC_LINK/);
   assert.match(releaseWorkflowSource, /desktop-dist\/latest\.yml/);
   assert.match(
     releaseWorkflowSource,
@@ -491,6 +510,68 @@ test('REQ-ENR-6: the quit hold is bounded when the rollback hangs', async (t) =>
   assert.equal(await bridgeManager.stopOnQuit(10), undefined, 'nothing running resolves at once');
 });
 
+function uninstallCacheFixture(t: any) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'heimdall-uninstall-cache-'));
+  for (const [key, value] of Object.entries({ HEIMDALL_BRIDGE_CACHE: path.join(dir, 'cache'), HEIMDALL_BRIDGE_RESOURCES: path.join(dir, 'resources') })) {
+    const previous = process.env[key];
+    process.env[key] = value;
+    t.after(() => { if (previous === undefined) delete process.env[key]; else process.env[key] = previous; });
+    fs.mkdirSync(value, { recursive: true });
+  }
+  const override = process.env.HEIMDALL_HAM_BRIDGE;
+  delete process.env.HEIMDALL_HAM_BRIDGE;
+  t.after(() => { if (override !== undefined) process.env.HEIMDALL_HAM_BRIDGE = override; });
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const cacheBinary = (version: string) => {
+    const binary = path.join(dir, 'cache', version, 'bin', process.platform === 'win32' ? 'ham-bridge.exe' : 'ham-bridge');
+    fs.mkdirSync(path.dirname(binary), { recursive: true });
+    fs.writeFileSync(binary, 'fixture');
+    return binary;
+  };
+  return { dir, cacheBinary };
+}
+
+test('REQ-ENR-6: uninstall after app restart uses the current bundled CLI instead of the first old cache', async (t) => {
+  const { dir, cacheBinary } = uninstallCacheFixture(t);
+  cacheBinary('bundled-0.5.33');
+  const current = cacheBinary('bundled-0.5.35');
+  cacheBinary('v0.6.0');
+  fs.writeFileSync(path.join(dir, 'resources', 'METADATA.json'), JSON.stringify({ version: '0.5.35' }));
+  assert.equal(await bridgeManager.uninstallBinary(), current);
+});
+
+test('REQ-ENR-6: uninstall offline fallback selects cached releases by numeric version', async (t) => {
+  const { cacheBinary } = uninstallCacheFixture(t);
+  cacheBinary('bundled-0.5.33');
+  cacheBinary('v0.9.0');
+  const newest = cacheBinary('v0.10.0');
+  cacheBinary('unversioned');
+  assert.equal(await bridgeManager.uninstallBinary(), newest);
+});
+
+test('REQ-ENR-6: uninstall extracts the verified current bundle offline when only an old cache exists', async (t) => {
+  const { dir, cacheBinary } = uninstallCacheFixture(t);
+  cacheBinary('bundled-0.5.33');
+  const files = bridgeManager.bundledResources();
+  const bytes = Buffer.from('bundled archive fixture');
+  fs.writeFileSync(files.metadata, JSON.stringify({ version: '0.5.35' }));
+  fs.writeFileSync(files.bundle, bytes);
+  fs.writeFileSync(files.checksums, `${crypto.createHash('sha256').update(bytes).digest('hex')}  ${path.basename(files.bundle)}\n`);
+  const expected = path.join(dir, 'cache', 'bundled-0.5.35', 'bin', process.platform === 'win32' ? 'ham-bridge.exe' : 'ham-bridge');
+  t.mock.method(childProcess, 'spawn', (_command: string, args: string[]) => {
+    assert.equal(args[0], process.platform === 'win32' ? '-xf' : '-xzf');
+    assert.equal(args[1], files.bundle);
+    const proc: any = new EventEmitter();
+    proc.stdout = new EventEmitter(); proc.stderr = new EventEmitter(); proc.pid = 99990; proc.kill = () => true;
+    setImmediate(() => {
+      fs.mkdirSync(path.dirname(expected), { recursive: true }); fs.writeFileSync(expected, 'fixture');
+      proc.emit('close', 0);
+    });
+    return proc;
+  });
+  assert.equal(await bridgeManager.uninstallBinary(), expected);
+});
+
 // A real tar.gz release bundle containing bin/ham-bridge, plus its SHA256SUMS.
 function releaseFixture(t: any, version: string) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'heimdall-release-'));
@@ -660,7 +741,10 @@ test('F24: desktopCapabilities is the one desktop check; no odinApi.deviceAuth r
       if (!/\.tsx?$/.test(entry.name)) continue;
       const source = fs.readFileSync(full, 'utf8');
       assert.doesNotMatch(source, /odinApi\??\.deviceAuth/, full);
-      if (/\bodinApi\b/.test(source)) probes.push(path.relative(ROOT, full));
+      // The explicitly guarded dev demo installs a fixture preload; production
+      // capability probes still belong exclusively to desktopBridge.ts.
+      const relative = path.relative(ROOT, full).split(path.sep).join('/');
+      if (/\bodinApi\b/.test(source) && relative !== 'src/ui/dev/setupWizardDemo.tsx') probes.push(relative);
     }
   };
   walk(path.join(ROOT, 'src/ui'));
@@ -670,14 +754,15 @@ test('F24: desktopCapabilities is the one desktop check; no odinApi.deviceAuth r
   assert.equal(fs.existsSync(path.join(ROOT, 'src/ui/components/extension/ProviderExtensionInstallAction.tsx')), true);
 });
 
-test('F1/REQ-ENR-1: another account\'s enrollment is flagged for an explicit replace confirmation', () => {
+test('F1/REQ-ENR-1: another account\'s enrollment is flagged and setup keeps the accounts separate', () => {
   let model = startWizard();
   model = reduceWizard(model, { type: 'output', message: 'bridge enroll REFUSED: this machine is enrolled as brg_old by another Heimdall account; nothing was written.' });
   model = reduceWizard(model, { type: 'error', message: 'enrollment did not complete', step: 'enroll' });
   assert.equal(model.otherAccount, true);
   assert.equal(reduceWizard(startWizard(), { type: 'output', message: 'Open https://hub/api/v1/device/add' }).otherAccount, false);
-  const card = fs.readFileSync(path.join(ROOT, 'src/ui/components/settings/ThisMachineCard.tsx'), 'utf8');
-  assert.match(card, /settings-bridge-wizard-replace-account[\s\S]*replaceOtherAccount: true/);
+  const plan = desktopSetupPlan(null, 'https://hub.example', 'account-2');
+  assert.equal(plan.options.separateAccount, true);
+  assert.equal(plan.options.replaceOtherAccount, undefined, 'ordinary setup never replaces another account');
   assert.match(fs.readFileSync(path.join(ROOT, 'src/bridge/setup_cmd.odin'), 'utf8'), /has_flag\(s\.args, "--replace-other-account"\) do append\(&argv, "--replace-other-account"\)/);
 });
 
@@ -705,7 +790,7 @@ test('REQ-ENR-INAPP-1: setup pairing opens the in-app approval page with the cod
   session.setApprovalPageOpener(() => { opened += 1; });
   assert.equal(await session.runDesktopBridgeOperation(m.api, 'setup', { hub: 'h' }, { bridgeId: 'b1' }), '');
   assert.deepEqual(m.runs[0].options, { bridgeId: 'b1', inAppApproval: true });
-  assert.deepEqual(session.desktopBridgeSession().lastRun, { kind: 'setup', options: { bridgeId: 'b1' } }, 'Retry repeats the user options only');
+  assert.deepEqual(session.desktopBridgeSession().lastRun, { kind: 'setup', target: { hub: 'h' }, options: { bridgeId: 'b1' } }, 'Retry retains the selected target and user options');
   m.emit({ type: 'pairing', url: 'https://hub/api/v1/device/add', code: 'AAAA-BBBB-CCCC-DD' });
   assert.equal(opened, 1);
   assert.equal(session.takePendingApprovalCode(), 'AAAA-BBBB-CCCC-DD');
@@ -748,4 +833,116 @@ test('REQ-ENR-INAPP-1: the approval page never reads a code from the URL', () =>
   assert.match(page, /const handed = takePendingApprovalCode\(\);/);
   assert.match(page, /return subscribePendingApprovalCode\(take\);/);
   assert.doesNotMatch(page, /searchParams|location\.(hash|search)[^;]*code|getRouteSearch/);
+});
+
+// ---------------------------------------------------------------------------
+// Several Ninjy accounts on one machine: each account sees and sets up only
+// its own profile; a new account always installs with --separate-account.
+// ---------------------------------------------------------------------------
+
+const PROFILE_A = { installed: true, state: 'connected', hub: 'https://hub.example', profile: '', service: 'heimdall-bridge-hub-example', bridge_id: 'brg_a' };
+const PROFILE_B = { installed: true, state: 'connected', hub: 'https://hub.example/', profile: 'account-2', service: 'heimdall-bridge-hub-example_account-2', bridge_id: 'brg_b' };
+
+test('multi-account: setup passes --separate-account when asked, never together with replace', () => {
+  assert.deepEqual(bridgeManager.operationArgs('setup', HUB, { separateAccount: true }), ['setup', '--hub', 'https://hub.example', '--headless', '--json-progress', '--separate-account']);
+  assert.throws(() => bridgeManager.operationArgs('setup', HUB, { separateAccount: true, replaceOtherAccount: true }), /not both/);
+  // Only setup takes it: re-enrolling the account's own profile never moves it.
+  assert.ok(!bridgeManager.operationArgs('reenroll', HUB, { separateAccount: true, bridgeId: 'brg_a', stateDir: path.join(os.tmpdir(), 'state') } as any).includes('--separate-account'));
+});
+
+test('multi-account: the signed-in account sees only its own installed profile', () => {
+  const profiles = [PROFILE_A, PROFILE_B, { ...PROFILE_A, hub: 'https://other.example', bridge_id: 'brg_b', service: 'heimdall-bridge-other-example' }];
+  assert.equal(accountBridgeProfile(profiles as any, 'https://hub.example', ['brg_a'])?.service, PROFILE_A.service);
+  assert.equal(accountBridgeProfile(profiles as any, 'https://hub.example', ['brg_b', 'brg_old'])?.profile, 'account-2', 'matched by bridge id, not by being the default profile');
+  assert.equal(accountBridgeProfile(profiles as any, 'https://hub.example', ['brg_c']), null, 'a new account owns none');
+  assert.equal(accountBridgeProfile(profiles as any, 'https://hub.example', []), null);
+  assert.equal(accountBridgeProfile([{ ...PROFILE_A, installed: false }] as any, 'https://hub.example', ['brg_a']), null, 'an uninstalled profile is nobody\'s');
+  assert.deepEqual(otherAccountProfiles(profiles as any, 'https://hub.example', ['brg_b']).map((p) => p.bridge_id), ['brg_a']);
+});
+
+test('multi-account: setup targets the account\'s own profile, else a separate one (even for the first bridge)', () => {
+  assert.deepEqual(desktopSetupPlan(null, 'https://hub.example'), { target: { hub: 'https://hub.example', profile: '' }, options: { separateAccount: true } });
+  assert.deepEqual(desktopSetupPlan(null, 'https://hub.example', 'work'), { target: { hub: 'https://hub.example', profile: 'work' }, options: { separateAccount: true } });
+  assert.deepEqual(desktopSetupPlan(PROFILE_B as any, 'https://hub.example'), { target: { hub: 'https://hub.example', profile: 'account-2' }, options: {} }, 'never a second bridge for the same account');
+});
+
+test('multi-account: createdProfile finds the profile a separate-account setup installed or enrolled', () => {
+  assert.equal(bridgeManager.createdProfile([PROFILE_A], [PROFILE_A, PROFILE_B], 'https://hub.example')?.profile, 'account-2');
+  assert.equal(bridgeManager.createdProfile([], [PROFILE_A], 'https://hub.example')?.profile, '', 'first bridge: the default profile');
+  assert.equal(bridgeManager.createdProfile([{ ...PROFILE_A, bridge_id: '' }], [PROFILE_A], 'https://hub.example')?.bridge_id, 'brg_a', 'newly enrolled');
+  assert.equal(bridgeManager.createdProfile([PROFILE_A], [PROFILE_A], 'https://hub.example'), null);
+});
+
+test('multi-account: B installs next to A\'s running bridge; A is never stopped, replaced or uninstalled', async (t) => {
+  let listed = [PROFILE_A];
+  const calls = fakeHamBridge(t, ({ proc, args }) => {
+    assert.equal(args[0], 'setup');
+    listed = [PROFILE_A, PROFILE_B];
+    proc.stdout.emit('data', line({ step: 'setup', state: 'done', pct: 100, message: 'bridge installed, enrolled and running' }));
+    proc.emit('close', 0);
+  }, (args) => (args.includes('account-2') ? PROFILE_B : PROFILE_A), () => listed);
+  const events: any[] = [];
+  const result = await bridgeManager.runOperation('setup', HUB, (event: any) => events.push(event), { separateAccount: true });
+  assert.deepEqual(result, { ok: true });
+  const commands = calls.filter((c) => c.args[0] !== 'status' && c.args[0] !== 'list').map((c) => c.args.join(' '));
+  assert.deepEqual(commands, ['setup --hub https://hub.example --headless --json-progress --separate-account']);
+  assert.equal(events.at(-1).type, 'complete');
+  assert.equal(events.at(-1).status.bridge_id, 'brg_b', 'the completed status is B\'s new profile, not A\'s default one');
+  assert.ok(calls.some((c) => c.args[0] === 'status' && c.args.join(' ').endsWith('--profile account-2')));
+});
+
+test('multi-account: a cancelled separate-account setup removes only the profile it created', async (t) => {
+  let listed = [PROFILE_A];
+  const calls = fakeHamBridge(t, ({ proc, args }) => {
+    if (args[0] === 'setup') {
+      listed = [PROFILE_A, { ...PROFILE_B, state: 'not_enrolled', bridge_id: '' }];
+      proc.stdout.emit('data', line({ step: 'enroll', state: 'start', pct: 50 }));
+    } else if (args[0] === 'uninstall') {
+      listed = [PROFILE_A];
+      proc.emit('close', 0);
+    }
+  }, () => PROFILE_A, () => listed);
+  const events: any[] = [];
+  const result = await bridgeManager.runOperation('setup', HUB, (event: any) => {
+    events.push(event);
+    if (event.type === 'progress' && event.step === 'enroll') bridgeManager.cancelOperation();
+  }, { separateAccount: true });
+  assert.equal(result.ok, false);
+  assert.equal(events.find((e) => e.type === 'error').rolledBack, true);
+  const uninstalls = calls.filter((c) => c.args[0] === 'uninstall').map((c) => c.args.slice(0, 3).join(' '));
+  assert.deepEqual(uninstalls, ['uninstall --service heimdall-bridge-hub-example_account-2'], 'A\'s default profile is never uninstalled');
+});
+
+test('multi-account: first-launch setup (before sign-in) never touches an installed bridge', async (t) => {
+  const calls = fakeHamBridge(t, () => assert.fail('no setup may run'), () => PROFILE_A, () => [PROFILE_A]);
+  const result = await bridgeManager.firstLaunchSetup('https://hub.example', () => undefined);
+  assert.equal(result.ok, false);
+  assert.match(String(result.error), /already installed.*nothing was changed/);
+  assert.deepEqual(calls.map((c) => c.args[0]), ['list']);
+});
+
+test('multi-account: first-launch setup on a clean machine installs with --separate-account', async (t) => {
+  let listed: any[] = [];
+  const calls = fakeHamBridge(t, ({ proc }) => {
+    listed = [PROFILE_A];
+    proc.emit('close', 0);
+  }, () => (listed.length ? PROFILE_A : { installed: false, state: 'not_installed' }), () => listed);
+  const result = await bridgeManager.firstLaunchSetup('https://hub.example', () => undefined);
+  assert.deepEqual(result, { ok: true });
+  assert.deepEqual(calls.filter((c) => c.args[0] === 'setup').map((c) => c.args.at(-1)), ['--separate-account']);
+});
+
+test('multi-account: Settings uses the shared account-scoped detector and setup flow', () => {
+  assert.match(mainSource, /separateAccount: options\?\.separateAccount === true/);
+  assert.match(mainSource, /setupBridge: \(\) => bridgeManager\.firstLaunchSetup\(configuredHubApiBaseUrl\(\), sendBridgeEvent\)/);
+  const card = fs.readFileSync(path.join(ROOT, 'src/ui/components/settings/ThisMachineCard.tsx'), 'utf8');
+  assert.match(card, /useThisMachineBridge\(manager\)/);
+  assert.match(card, /<MachineSteps manager=\{manager\}/);
+  const detector = fs.readFileSync(path.join(ROOT, 'src/ui/bridge/useThisMachineBridge.ts'), 'utf8');
+  assert.match(detector, /accountBridgeProfile\(listed\.profiles, nextConfig\.hubUrl, accountBridgeIds\)/);
+  assert.match(detector, /verifiedMachineStatus\(own, nextStatus, nextConfig\.hubUrl\)/);
+  const flow = fs.readFileSync(path.join(ROOT, 'src/ui/components/bridge/LocalBridgeFlow.tsx'), 'utf8');
+  assert.match(flow, /desktopSetupPlan\(null, config\.hubUrl, profile\)/);
+  const panel = fs.readFileSync(path.join(ROOT, 'src/ui/components/settings/BridgesPanel.tsx'), 'utf8');
+  assert.match(panel, /<ThisMachineCard manager=\{manager\}/);
 });

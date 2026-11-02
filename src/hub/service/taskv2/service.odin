@@ -270,7 +270,7 @@ end_uow :: proc(svc: ^Service, u: ^Uow, ok: bool) -> (bool, domain.Domain_Error)
 			d := new(Deferred_Effects)
 			d.svc = svc
 			d.effects = u.effects
-			if iface.unit_of_work_after_commit(&u.tx, iface.After_Commit_Hook{ctx = rawptr(d), run = deferred_effects_run}) {
+			if iface.unit_of_work_after_commit(&u.tx, iface.After_Commit_Hook{ctx = rawptr(d), run = deferred_effects_run, discard=deferred_effects_discard}) {
 				u.effects = Effects{} // ownership moved
 			} else {
 				free(d)
@@ -349,6 +349,15 @@ deferred_effects_run :: proc(ctx: rawptr) {
 	d := (^Deferred_Effects)(ctx)
 	if d == nil do return
 	flush_effects(d.svc, &d.effects)
+	destroy_effects(&d.effects)
+	free(d)
+}
+
+@(private = "file")
+deferred_effects_discard :: proc(ctx:rawptr) {
+	d:=(^Deferred_Effects)(ctx)
+	if d==nil do return
+	cancel_reservations(d.svc,&d.effects)
 	destroy_effects(&d.effects)
 	free(d)
 }
@@ -940,6 +949,11 @@ release_task_blocks_in_uow :: proc(svc: ^Service, u: ^Uow, tasks: []domain.Task)
 after_chain_change :: proc(svc: ^Service, u: ^Uow, chain_id: domain.Task_Chain_ID, owner: domain.User_ID, trigger: Trigger) -> (bool, domain.Domain_Error) {
 	chain, ok, err := iface.taskchain_get_chain(svc.repo, chain_id)
 	if !ok do return false, err
+	requirement_tasks, req_err := iface.taskchain_list_tasks_by_chain(svc.repo, chain_id, owner)
+	if req_err.code != .None do return false, req_err
+	for task in requirement_tasks {
+		if rok, rerr := requirements_reconcile_in_uow(svc, u, task); !rok do return false, rerr
+	}
 	// Settle run/task dependencies together; a successful run can release
 	// another run or a ticket in this same transaction.
 	for pass := 0; pass < 130; pass += 1 {

@@ -210,8 +210,8 @@ function guideChatArgs() {
 
 export const chatEndpoints = heimdallApi.injectEndpoints({
   endpoints: (build) => ({
-    createLaunchConversation: build.mutation<any, { agentId: string; projectId?: string; bridgeId?: string; provider?: string; model?: string; body: string; artifactIds?: string[] }>({
-      queryFn: async ({ agentId, projectId, bridgeId, provider, model, body, artifactIds = [] }, api) => {
+    createLaunchConversation: build.mutation<any, { agentId: string; projectId?: string; bridgeId?: string; provider?: string; providerProfile?: string; model?: string; body: string; artifactIds?: string[] }>({
+      queryFn: async ({ agentId, projectId, bridgeId, provider, providerProfile, model, body, artifactIds = [] }, api) => {
         try {
           const state: any = api.getState();
           const isUnlocked = Boolean(state?.vault?.isUnlocked);
@@ -224,6 +224,7 @@ export const chatEndpoints = heimdallApi.injectEndpoints({
           if (projectId) payload.project_id = projectId;
           if (bridgeId) payload.bridge_id = bridgeId;
           if (provider) payload.provider = provider;
+          if (providerProfile) payload.provider_profile = providerProfile;
           if (model) payload.model = model;
           const conversation = await cookieMutation('/chats', 'POST', payload);
           let instance: any = {};

@@ -9,6 +9,7 @@ import "core:time"
 import "core:encoding/json"
 import httpc "odin_test:lib/httpc"
 import contracts "odin_test:contracts"
+import agent_runtime "odin_test:lib/agent_runtime"
 
 // All state belongs to one token issuance/launch, not to an extension session
 // (SessionStart can also occur after /clear). bridge_runtime_mutex owns it.
@@ -56,7 +57,7 @@ bridge_startup_worker_ensure_started :: proc() {
 }
 
 BRIDGE_STARTUP_RETRY_MS :: 1_000
-BRIDGE_STARTUP_INSTRUCTION :: "Run `./.heimdall/bin/ham-ctl agent start-success` now to confirm that this agent is ready."
+BRIDGE_STARTUP_INSTRUCTION :: "Run `" + agent_runtime.CTL_SHIM_INVOCATION + " agent start-success` now to confirm that this agent is ready."
 
 bridge_startup_event :: proc(ev: contracts.Ext_Event) -> bool {
 	// Unknown agent types and subagent identities cannot establish main readiness.
@@ -227,7 +228,7 @@ bridge_startup_relay :: proc(rec: Bridge_Local_Agent_Token_Record, timeout_ms: i
     credential := bridge_credential_snapshot()
     defer delete(credential)
     headers := [?]httpc.Header{httpc.bearer(credential), {name = "X-Heimdall-Instance-Token", value = rec.instance_token}}
-    resp, err := httpc.send({
+    resp, err := bridge_hub_http_send_alloc({
         method = .POST, url = bridge_hub_url(), path = {"api", "v1", "agent-actions", "start-success"},
         headers = headers[:], body = httpc.json_body(envelope), timeout_ms = bridge_deadline_ms(timeout_ms),
     })

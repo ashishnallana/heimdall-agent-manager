@@ -1,4 +1,4 @@
-import { ApiError } from '../api/cookieFetch';
+import { ApiError } from '../api/cookieFetch.ts';
 
 /**
  * Search key v2 (docs/plans/passwordless-vault.md §1): per epoch,

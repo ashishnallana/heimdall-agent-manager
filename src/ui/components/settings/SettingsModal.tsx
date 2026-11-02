@@ -1,13 +1,14 @@
 import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Icon } from '@ui';
+import { Icon, Text } from '@ui';
 import { useDialogA11y } from '../ui/composites/useDialogA11y';
 import { useFetchExperimentsQuery } from '../../api/endpoints/settings';
 import { withApiBase } from '../../api/apiBase';
 
 import AppearanceSettings from './AppearanceSettings';
+import DesktopUpdatesPanel from './DesktopUpdatesPanel';
 import NotificationsPanel from './NotificationsPanel';
-import { ProvidersPanel } from './ProvidersPanel';
+import { ProvidersPanel, type ProviderSettingsHeading } from './ProvidersPanel';
 import BridgesPanel from './BridgesPanel';
 import ExperimentalPanel from './ExperimentalPanel';
 import DevicesPanel from './DevicesPanel';
@@ -24,6 +25,7 @@ export interface SettingsCategory {
 }
 
 export const SETTINGS_CATEGORIES: SettingsCategory[] = [
+  { id: 'updates', label: 'App updates', title: 'App updates', description: 'Installed desktop version, automatic updates and restart controls.' },
   {
     id: 'account',
     label: 'Account',
@@ -44,9 +46,9 @@ export const SETTINGS_CATEGORIES: SettingsCategory[] = [
   },
   {
     id: 'models',
-    label: 'Models',
-    title: 'Models & Providers',
-    description: 'Configure AI model providers, API endpoints, tokens, and active reasoning models.',
+    label: 'Providers',
+    title: 'Providers',
+    description: 'Manage provider profiles and runtime settings on each bridge.',
   },
   {
     id: 'bridges',
@@ -118,6 +120,19 @@ export function SettingsModal({
   const [mobileSection, setMobileSection] = useState<string | null>(() => initialTab ? normalizeSettingsTab(initialTab) : null);
   const [currentUser, setCurrentUser] = useState<SettingsUser | null>(() => user || null);
 
+  const [bridgeHeading, setBridgeHeading] = useState<ProviderSettingsHeading | null>(null);
+  const [providerHeading, setProviderHeading] = useState<ProviderSettingsHeading | null>(null);
+  const surfaceHeading = normalizeSettingsTab(activeTab) === 'bridges' ? bridgeHeading : providerHeading;
+  const surfaceHeadingRef = useRef<HTMLElement>(null);
+  const previousSurfaceFocus = useRef<string | null>(null);
+  useEffect(() => {
+    const focusKey = ['models', 'bridges'].includes(normalizeSettingsTab(activeTab)) && open
+      ? surfaceHeading?.focusKey ?? null : null;
+    if (focusKey !== null && previousSurfaceFocus.current !== null
+      && focusKey !== previousSurfaceFocus.current) surfaceHeadingRef.current?.focus();
+    previousSurfaceFocus.current = focusKey;
+  }, [activeTab, open, surfaceHeading?.focusKey]);
+
   const close = useCallback(() => onOpenChange(false), [onOpenChange]);
   useDialogA11y(open, close, panelRef);
 
@@ -181,6 +196,13 @@ export function SettingsModal({
     };
   }, [activeTab, categories]);
 
+  const sharedSurfaceTab = ['models', 'bridges'].includes(normalizeSettingsTab(activeTab));
+  const selectCategory = (id: string) => {
+    setActiveTab(id);
+    setMobileSection(id);
+    if (normalizeSettingsTab(id) === 'models') window.location.hash = '#/settings/providers';
+  };
+
   if (!open) return null;
 
   function renderTabContent(tabId: string) {
@@ -198,9 +220,11 @@ export function SettingsModal({
         return <NotificationsPanel />;
       case 'models':
       case 'providers':
-        return <ProvidersPanel />;
+        return <ProvidersPanel onHeadingChange={setProviderHeading} />;
       case 'bridges':
-        return <BridgesPanel />;
+        return <BridgesPanel onHeadingChange={setBridgeHeading} />;
+      case 'updates':
+        return <DesktopUpdatesPanel />;
       case 'devices':
         return <DevicesPanel />;
       case 'lsp':
@@ -249,11 +273,13 @@ export function SettingsModal({
         {/* =============================================================== */}
         {/* 2. Desktop / Tablet 2-Pane Layout (md:flex)                     */}
         {/* =============================================================== */}
-        <div className="hidden md:flex flex-row w-full h-full overflow-hidden">
+        {/* Providers use one mounted content tree across breakpoints so resizing
+            never discards a draft or duplicates discovery requests. */}
+        <div className={`${sharedSurfaceTab && mobileSection !== null ? 'flex' : 'hidden md:flex'} flex-row w-full h-full overflow-hidden`}>
           {/* Left Navigation Pane (w-64 border-r border-subtle bg-surface-raised/40) */}
           <aside
             data-debug-id="settings-desktop-sidebar"
-            className="w-64 border-r border-subtle flex flex-col bg-surface-raised/40 shrink-0 h-full overflow-hidden"
+            className="hidden md:flex w-64 border-r border-subtle flex-col bg-surface-raised/40 shrink-0 h-full overflow-hidden"
             aria-label="Settings sidebar"
           >
             {/* Header: Settings */}
@@ -274,7 +300,7 @@ export function SettingsModal({
                       key={category.id}
                       type="button"
                       data-debug-id={`settings-nav-item-${category.id}`}
-                      onClick={() => setActiveTab(category.id)}
+                      onClick={() => selectCategory(category.id)}
                       className={`w-full flex items-center px-3 py-1.5 rounded-lg text-sm text-left transition-colors ${
                         isActive
                           ? 'bg-surface-raised text-primary font-medium shadow-sm'
@@ -326,18 +352,31 @@ export function SettingsModal({
           {/* Right Content Pane (flex-1 flex flex-col overflow-hidden bg-surface) */}
           <main
             data-debug-id="settings-desktop-content"
-            className="flex-1 flex flex-col overflow-hidden bg-surface h-full"
+            className="min-w-0 flex-1 flex flex-col overflow-hidden bg-surface h-full"
           >
             {/* Header: title, description, and Close button (X) */}
-            <div className="flex items-start justify-between px-8 pt-7 pb-4 shrink-0">
+            <div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-x-4 px-4 md:flex md:px-8 pt-4 md:pt-7 pb-4 shrink-0">
+              {sharedSurfaceTab ? <button type="button" data-debug-id="providers-settings-back" onClick={() => setMobileSection(null)} className="mb-2 col-span-2 inline-flex min-h-11 items-center rounded-[var(--radius-md)] px-2 text-sm text-accent focus-visible:outline-none focus-visible:shadow-focus md:hidden">← Settings</button> : null}
               <div className="min-w-0 flex-1">
-                <h2 className="text-xl font-semibold text-primary tracking-tight">
-                  {currentTabInfo.title}
-                </h2>
-                {currentTabInfo.description && (
-                  <p className="mt-1 text-sm text-muted">
-                    {currentTabInfo.description}
-                  </p>
+                {sharedSurfaceTab ? (
+                  <div className="space-y-2 break-words">
+                    {surfaceHeading?.breadcrumb ? <Text role="overline" tone="muted">{surfaceHeading.breadcrumb}</Text> : null}
+                    <Text ref={surfaceHeadingRef} as="h1" role="display" tabIndex={-1}>
+                      {surfaceHeading?.title || currentTabInfo.title}
+                    </Text>
+                    <Text role="body" tone="muted">{surfaceHeading?.description || currentTabInfo.description}</Text>
+                  </div>
+                ) : (
+                  <>
+                    <h2 className="text-xl font-semibold text-primary tracking-tight">
+                      {currentTabInfo.title}
+                    </h2>
+                    {currentTabInfo.description && (
+                      <p className="mt-1 text-sm text-muted">
+                        {currentTabInfo.description}
+                      </p>
+                    )}
+                  </>
                 )}
               </div>
               <button
@@ -353,7 +392,7 @@ export function SettingsModal({
             </div>
 
             {/* Body: scrollable container rendering the active tab content */}
-            <div className="flex-1 overflow-y-auto px-8 pb-8 pt-2">
+            <div className="min-w-0 flex-1 overflow-y-auto px-4 md:px-8 pb-8 pt-2">
               {renderTabContent(activeTab)}
             </div>
           </main>
@@ -362,7 +401,7 @@ export function SettingsModal({
         {/* =============================================================== */}
         {/* 3. Mobile Presentation (<768px): Full viewport Master-Detail    */}
         {/* =============================================================== */}
-        <div className="flex md:hidden flex-col w-full h-full overflow-hidden">
+        <div className={`${sharedSurfaceTab && mobileSection !== null ? 'hidden' : 'flex md:hidden'} flex-col w-full h-full overflow-hidden`}>
           {mobileSection === null ? (
             /* Master View: Full-screen list of all categories and projects */
             <div
@@ -393,8 +432,7 @@ export function SettingsModal({
                       type="button"
                       data-debug-id={`mobile-nav-item-${category.id}`}
                       onClick={() => {
-                        setActiveTab(category.id);
-                        setMobileSection(category.id);
+                        selectCategory(category.id);
                       }}
                       className="flex min-h-[44px] w-full items-center justify-between rounded-xl px-3 py-2.5 text-left text-sm font-medium text-primary hover:bg-surface-raised active:bg-surface-raised transition-colors"
                     >
@@ -463,7 +501,7 @@ export function SettingsModal({
 
               {/* Detail Content Body */}
               <div className="flex-1 overflow-y-auto p-4">
-                {renderTabContent(mobileSection)}
+                {normalizeSettingsTab(mobileSection) !== 'models' ? renderTabContent(mobileSection) : null}
               </div>
             </div>
           )}

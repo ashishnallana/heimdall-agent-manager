@@ -23,7 +23,7 @@ fleet_model_on_bridge :: proc(fleet: domain.Task_Chain_Fleet, bridge_id: string)
 // intersected with what the bridge supports. Catalog order is rank then id.
 // Explicit selections are preserved: an unavailable selection must fail rather
 // than silently launch a different provider or model. Caller owns the strings.
-resolve_launch_model :: proc(agent_service: ^agent.Agent_Service, bridge_id, provider, model: string) -> (string, string) {
+resolve_launch_model :: proc(agent_service: ^agent.Agent_Service, bridge_id, provider, model: string,provider_profile:string = "") -> (string, string) {
 	if provider != "" && model != "" do return strings.clone(provider), strings.clone(model)
 	if agent_service == nil || agent_service.providers == nil do return strings.clone(provider), strings.clone(model)
 	catalog, err := iface.provider_catalog_list(agent_service.providers)
@@ -31,10 +31,10 @@ resolve_launch_model :: proc(agent_service: ^agent.Agent_Service, bridge_id, pro
 	defer domain.provider_catalog_destroy(catalog)
 	for &entry in catalog {
 		if entry.state != "active" || (provider != "" && entry.provider != provider) do continue
-		if err := provider_service.apply_effective_models(agent_service.providers,bridge_id,&entry); err.code != .None do continue
+		if err := provider_service.apply_effective_models(agent_service.providers,bridge_id,&entry,provider_profile); err.code != .None do continue
 		for candidate in entry.models {
 			if candidate.state != "active" || (model != "" && candidate.model_id != model) do continue
-			_, ok, _ := agent.validate_provider_model_intersection(agent_service, bridge_id, entry.provider, candidate.model_id)
+			_, ok, _ := agent.validate_provider_model_intersection(agent_service, bridge_id, entry.provider, candidate.model_id,provider_profile)
 			if ok do return strings.clone(entry.provider), strings.clone(candidate.model_id)
 		}
 	}
@@ -44,10 +44,20 @@ resolve_launch_model :: proc(agent_service: ^agent.Agent_Service, bridge_id, pro
 // A provider override deliberately discards the instance's old model. Empty
 // provider/model together retain the catalog-default fleet inheritance rule.
 lease_launch_model :: proc(svc: ^Service, placement: Placement, inst: domain.Agent_Instance) -> (string, string) {
-	provider, model := resolve_launch_model(svc.agent_service, placement.bridge_id, placement.provider, placement.model)
+	provider, model := resolve_launch_model(svc.agent_service, placement.bridge_id, placement.provider, placement.model,placement.provider_profile)
 	if provider == "" { delete(provider); provider = strings.clone(inst.provider) }
 	if model == "" && placement.provider == "" {
 		delete(model); model = strings.clone(inst.model)
 	}
 	return provider, model
+}
+
+fleet_profile_on_bridge :: proc(fleet:domain.Task_Chain_Fleet,bridge_id:string) -> string {
+ if fleet.bridge_models_json!="" {
+  entries:map[string]domain.Fleet_Bridge_Model
+  if json.unmarshal_string(fleet.bridge_models_json,&entries,allocator=context.temp_allocator)==nil {
+   if selection,found:=entries[bridge_id];found do return domain.profile_effective_id(selection.provider,selection.provider_profile)
+  }
+ }
+ return domain.profile_effective_id(fleet.provider,fleet.provider_profile)
 }

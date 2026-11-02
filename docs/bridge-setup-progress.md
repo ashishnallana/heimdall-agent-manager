@@ -7,9 +7,44 @@ bootstraps drive it through the commands below and parse their JSON. Implementat
 `src/lib/bridgesvc` (naming, layout, ports, rendering, setup engine, lock) and
 `src/bridge/service_cmds.odin` / `src/bridge/setup_cmd.odin` (live side effects).
 
+## Safe service replacement
+
+Setup and update validate the saved Hub owner before stopping the selected profile.
+They stop and verify the old Bridge process before swapping binaries, then check
+actual port availability. An unrelated listener is never terminated; another free
+port pair is selected instead. A stop failure aborts the update before the swap.
+
+On Windows, a runtime PID is checked against the exact profile executable and its
+creation time. Identity verification and termination use the same process handle.
+An intentional stop exits successfully so Task Scheduler does not schedule a failure
+restart. PTY daemons and detached updaters inherit no Bridge log handles. Updates
+stop only the Bridge process, preserving live PTY sessions; uninstall explicitly
+shuts down the selected profile's PTY daemon before removing its files.
+
+A busy `bin.bak` is retained and the next update uses a unique `bin.bak-*` directory.
+Rollback restores the backup of its own transaction. If shutdown or binary restore
+fails, rollback stops and reports incomplete recovery rather than deleting live
+files or claiming success. Uninstall includes retained profile-local backups.
+
+Lifecycle regression coverage runs two updates (including a detached worker) and a
+service restart with a live PTY process, checking that its PID, the Bridge identity,
+and the profile's port pair remain stable. Native macOS service behavior is checked
+by the macOS lifecycle CI job; cross-target compilation alone does not prove it.
+
 ## Profiles, service names and ports
 
 A bridge **profile** is `(hub, optional profile name)`. Everything derives from it:
+
+Omitting `--profile` selects the valid unnamed default profile (shown in the UI
+as **Default (unnamed)**). It does not mean profile selection failed.
+`ham-bridge list` explicitly reports when no profiles are installed; its JSON
+contract remains `{"profiles":[]}`. The first-time wizard and Settings show this
+empty state separately from profiles not linked to the signed-in account.
+The wizard offers available slots and a named-profile option. Detected profiles
+show their names and account-link status. Only profiles linked to the signed-in
+account appear by default; **Show other local profiles** reveals the others.
+Only the signed-in account's matching Bridge is offered lifecycle controls.
+
 
 | Item | Value |
 |---|---|
@@ -33,8 +68,12 @@ place.
 
 ```bash
 ham-bridge setup --hub https://hub.example.com [--profile work] \
-  [--new-bridge | --reuse-bridge brg_...] [--reenroll] [--replace-other-account] [--headless] [--no-tray] [--json-progress]
+  [--new-bridge | --reuse-bridge brg_...] [--reenroll] [--separate-account | --replace-other-account] [--headless] [--no-tray] [--json-progress]
 ```
+
+`--separate-account` installs a second Ninjy account next to the one that owns the
+requested profile instead of replacing it (see
+[bridge-multi-account.md](bridge-multi-account.md)).
 
 Installs from the bundle the running `ham-bridge` ships in (the directory of the
 executable). Steps, in order:

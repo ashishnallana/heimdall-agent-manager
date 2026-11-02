@@ -100,6 +100,7 @@ build_pack_json :: proc(svc: ^Service, chain: domain.Task_Chain, task: domain.Ta
 	json_raw(&t, "brief", brief_raw)
 	json_raw(&o, "task", json_end(&t))
 	json_raw(&o, "brief", brief_raw)
+	json_raw(&o, "requirements", requirements_pack_json(svc, task, lease))
 
 	c := json_begin()
 	json_str(&c, "chain_id", string(chain.chain_id))
@@ -195,6 +196,14 @@ cap_pack_json_field_safe :: proc(pack_json: string, task_id: string, max_bytes: 
 		return pack_json
 	}
 	cur := pack_json
+	// Preserve revision/acknowledgement and checkpoint metadata while replacing
+	// optional inline history with its durable fetch reference.
+	if requirements, present := jsonx.extract_raw_object(cur, "requirements", true, context.temp_allocator); present {
+		requirements = replace_top_level_member_raw(requirements, "latest_change", "null")
+		requirements = replace_top_level_member_raw(requirements, "submitted_requirements", "null")
+		cur = replace_top_level_member_raw(cur, "requirements", requirements)
+		if len(cur) <= max_bytes do return cur
+	}
 	// Step 1: drop resolved input bodies, replacing with ham-ctl task fetch pointers
 	top_members := jsonx_top_level_members(cur)
 	if inputs_raw, has_inputs := top_members["inputs"]; has_inputs && strings.has_prefix(strings.trim_space(inputs_raw), "[") {

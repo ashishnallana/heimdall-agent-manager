@@ -12,6 +12,9 @@ Bridge_Provider_Setting_Upsert_Proc :: proc(ctx: rawptr, setting: domain.Bridge_
 Bridge_Provider_Setting_List_Proc :: proc(ctx: rawptr, bridge_id: string) -> ([dynamic]domain.Bridge_Provider_Setting, domain.Domain_Error)
 
 Provider_Repository :: struct {
+	list_profiles: proc(ctx: rawptr, bridge_id: string) -> ([dynamic]domain.Bridge_Provider_Profile, domain.Domain_Error),
+	reconcile_profiles: proc(ctx: rawptr, bridge_id: string, profiles: []domain.Bridge_Provider_Profile) -> domain.Domain_Error,
+	profile_references: proc(ctx: rawptr, bridge_id, profile_id: string) -> (string, domain.Domain_Error),
 	ctx:      rawptr,
 	upsert_models: proc(ctx: rawptr, value: domain.Bridge_Provider_Models) -> domain.Domain_Error,
 	list_models: proc(ctx: rawptr, bridge_id: string) -> ([dynamic]domain.Bridge_Provider_Models, domain.Domain_Error),

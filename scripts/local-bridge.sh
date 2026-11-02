@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # local-bridge.sh — run an isolated, named local bridge against an explicit hub.
 #
-# Usage: scripts/local-bridge.sh <start|enroll|stop|status|help> [options]
+# Usage: scripts/local-bridge.sh <start|enroll|reseed-auth|stop|status|help> [options]
 #
 #   --name NAME                 instance name (default: default). State lives in
 #                               $HEIMDALL_LOCAL_STATE_ROOT/bridges/NAME
@@ -21,6 +21,14 @@
 #   --build MODE                nix | odin | none (default nix)
 #   --bin-dir DIR               take ham-bridge/ham-ctl/ham-pty-host from DIR
 #   --pty-host-bin PATH         ham-pty-host to run agents with (default: built, else PATH)
+#   --shared-home               run providers with your real HOME (see "Provider home")
+#   --isolated-home             the default for a new instance on Linux (macOS: opt
+#                               in, not yet verified there); refused for an instance
+#                               recorded as shared, like --shared-home the other way
+#   --purge-home                with stop: purge this isolated instance's vault,
+#                               profiles/secrets and provider home
+#   --providers LIST            providers whose auth is seeded into an isolated home
+#                               (default: claude,codex,gemini,pi,git)
 #
 # `enroll` runs the device flow (`ham-bridge enroll --headless`) in the foreground. It
 # prints the hub's approval link and a pairing code; a trusted device of the hub's
@@ -30,20 +38,37 @@
 # `start --auto-enroll` let the seed approver do that instead. `start` without a
 # credential starts nothing unless --auto-enroll is given.
 #
-# Providers (claude, codex, ...) are the real installed CLIs: the bridge discovers
-# them with its normal probe when the hub asks, and agents inherit your real HOME so
-# provider logins keep working. Installed bridge credentials are never copied or
-# read; this bridge gets its own credential under its instance directory.
+# Provider home. Providers (claude, codex, ...) are the real installed CLIs, found
+# on your PATH. By default (Linux; on macOS only with --isolated-home, since the
+# Keychain-backed sign-ins have not been verified with a moved HOME) a new instance
+# runs the bridge and everything it starts
+# with HOME=<instance>/home (XDG dirs inside it; CLAUDE_CONFIG_DIR, CODEX_HOME,
+# GEMINI_CONFIG_DIR and HEIMDALL_HOME unset), so an extension installed from this
+# bridge's hub lands there, never in your ~/.claude or ~/.codex. On first use your
+# provider sign-in, onboarding/consent state and project trust are COPIED in
+# (scripts/local-runtime/provider-home.mjs; listed with checksums in
+# home/.heimdall-home-manifest.json); plugins, hooks, MCP servers, status-line and
+# notify commands, and history are not. Your real
+# home is only read. A copied OAuth session can expire or be rotated by either
+# side: sign in again normally and run `reseed-auth`. API keys and
+# CLAUDE_CODE_OAUTH_TOKEN in your environment pass through unchanged. The directory
+# picker stays on your real HOME. --shared-home keeps the old behaviour (agents use
+# your real HOME). The mode is fixed when an instance is created: an instance made
+# before isolation existed stays shared. Installed bridge credentials are never
+# copied or read; this bridge gets its own credential under its instance directory.
 set -euo pipefail
 LR_TAG=local-bridge
 # shellcheck source=local-runtime/lib.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/local-runtime/lib.sh"
 
-usage() { sed -n '2,34p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,56p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 CMD="${1:-help}"; [ $# -gt 0 ] && shift
 NAME=default HUB_URL="" HUB_NAME="" PORT="" EP_PORT="" AUTO=0 APPROVE_URL="" APPROVER_KEY="" APPROVE_USER="" APPROVAL_BASE_URL=""
-BUILD="${HEIMDALL_LOCAL_BUILD:-nix}" BIN_DIR="" PTY_BIN=""
+BUILD="${HEIMDALL_LOCAL_BUILD:-nix}" BIN_DIR="" PTY_BIN="" HOME_MODE="" PROVIDERS="" PURGE_HOME=0
+# Captured before anything can change HOME: the developer's real home, which seeds
+# an isolated provider home and stays the directory picker's root.
+REAL_HOME="$HOME"
 while [ $# -gt 0 ]; do
   case "$1" in
     --name) NAME="$2"; shift 2 ;;
@@ -57,16 +82,22 @@ while [ $# -gt 0 ]; do
     --build) BUILD="$2"; shift 2 ;;
     --bin-dir) BIN_DIR="$2"; BUILD=none; shift 2 ;;
     --pty-host-bin) PTY_BIN="$2"; shift 2 ;;
+    --shared-home) HOME_MODE=0; shift ;;
+    --isolated-home) HOME_MODE=1; shift ;;
+    --providers) PROVIDERS="$2"; shift 2 ;;
+    --purge-home) PURGE_HOME=1; shift ;;
     -h|--help) CMD=help; shift ;;
     *) lr_die "unknown option $1 (see: $0 help)" ;;
   esac
 done
+[ "$PURGE_HOME" = 0 ] || [ "$CMD" = stop ] || lr_die "--purge-home is only valid with stop"
 lr_valid_name "$NAME" || lr_die "invalid --name '$NAME' (lowercase letters, digits, dashes)"
 [ -z "$APPROVE_USER" ] || lr_valid_name "$APPROVE_USER" || lr_die "invalid --user '$APPROVE_USER'"
 DIR="$(lr_instance_dir bridge "$NAME")"
 ENV_FILE="$DIR/instance.env"
 CFG="$DIR/config.toml"
 TOKEN="$DIR/credentials/bridge-token"   # the refresh token is $TOKEN.refresh
+PHOME="$DIR/home"
 
 resolve() {
   HUB_NAME="${HUB_NAME:-$(lr_env_get "$ENV_FILE" HUB_NAME)}"
@@ -96,15 +127,57 @@ resolve() {
   rec="$(lr_env_get "$ENV_FILE" LOCAL_ENDPOINT_PORT)"
   [ -n "$rec" ] && [ -n "$EP_PORT" ] && [ "$EP_PORT" != "$rec" ] && lr_die "bridge '$NAME' is recorded with endpoint port $rec"
   EP_PORT="${EP_PORT:-${rec:-49428}}"
+  # The home mode is fixed at creation: the bridge's identity file lives under the
+  # HOME it ran with, so switching would orphan the enrollment. An instance created
+  # before ISOLATED_HOME was recorded used the real HOME.
+  rec="$(lr_env_get "$ENV_FILE" ISOLATED_HOME)"
+  [ -z "$rec" ] && [ -f "$ENV_FILE" ] && rec=0
+  if [ -n "$rec" ] && [ -n "$HOME_MODE" ] && [ "$HOME_MODE" != "$rec" ]; then
+    lr_die "bridge '$NAME' uses $([ "$rec" = 1 ] && echo "an isolated provider home" || echo "your real HOME (shared)"); use a new --name to change it"
+  fi
+  # macOS keeps sign-ins (the vault keyring, Claude OAuth) in the login Keychain;
+  # isolation stays opt-in there until it is verified with a moved HOME.
+  local default_mode=1
+  [ "$(uname -s)" = Darwin ] && default_mode=0
+  ISOLATED="${rec:-${HOME_MODE:-$default_mode}}"
+  if [ -z "$rec" ] && [ "$ISOLATED" = 1 ] && [ "$(uname -s)" = Darwin ]; then
+    lr_log "WARN: --isolated-home on macOS is not verified yet (Keychain sign-ins); use --shared-home if providers or enroll misbehave"
+  fi
+  PROVIDERS="${PROVIDERS:-$(lr_env_get "$ENV_FILE" PROVIDERS)}"
+  PROVIDERS="${PROVIDERS:-claude,codex,gemini,pi,git}"
+  ISO_ENV=()
+  if [ "$ISOLATED" = 1 ]; then
+    ISO_ENV=(-u CLAUDE_CONFIG_DIR -u CODEX_HOME -u GEMINI_CONFIG_DIR -u HEIMDALL_HOME
+      "HOME=$PHOME" "XDG_CONFIG_HOME=$PHOME/.config" "XDG_DATA_HOME=$PHOME/.local/share"
+      "XDG_STATE_HOME=$PHOME/.local/state" "XDG_CACHE_HOME=$PHOME/.cache")
+  fi
+}
+
+# seed_home: copy provider auth, consent and trust from the real home into the
+# isolated one (never the other way). Agents run under endpoint/ and agent-runs/.
+seed_home() {
+  node "$LR_HELPERS/provider-home.mjs" seed --real-home "$REAL_HOME" --home "$PHOME" --providers "$PROVIDERS" \
+    --trust-root "$DIR/endpoint" --trust-root "$DIR/agent-runs" | sed "s/^/[$LR_TAG] /"
+  return "${PIPESTATUS[0]}"
 }
 
 prepare() {
   mkdir -p "$DIR"/{bin,logs,run,data,credentials,agent-runs,endpoint,enroll-bin}
   chmod 700 "$DIR/credentials"
+  if [ "$ISOLATED" = 1 ]; then
+    node "$LR_HELPERS/profile-state.mjs" sync --instance "$DIR" --checkout "$LR_ROOT" || lr_die "extension sync failed"
+  fi
   lr_env_write "$ENV_FILE" "KIND=bridge" "NAME=$NAME" "HUB_URL=$HUB_URL" "HUB_NAME=$HUB_NAME" \
-    "BRIDGE_PORT=$PORT" "APPROVAL_BASE_URL=$APPROVAL_BASE_URL" "LOCAL_ENDPOINT_PORT=$EP_PORT" "CONFIG=$CFG" "TOKEN_FILE=$TOKEN" "CHECKOUT=$LR_ROOT"
+    "BRIDGE_PORT=$PORT" "APPROVAL_BASE_URL=$APPROVAL_BASE_URL" "LOCAL_ENDPOINT_PORT=$EP_PORT" "CONFIG=$CFG" "TOKEN_FILE=$TOKEN" "CHECKOUT=$LR_ROOT" \
+    "BIN_DIR=${BIN_DIR:-$DIR/bin}" "ISOLATED_HOME=$ISOLATED" "PROVIDERS=$PROVIDERS" "HOME_DIR=$([ "$ISOLATED" = 1 ] && echo "$PHOME" || echo "$REAL_HOME")"
+  local fs_args=()
+  [ "$ISOLATED" = 1 ] && fs_args=(--fs-root "$REAL_HOME")
   node "$LR_HELPERS/bridge-config.mjs" --template "$LR_ROOT/config.toml" --out "$CFG" \
-    --dir "$DIR" --hub-url "$HUB_URL" --port "$PORT" --name "$NAME"
+    --dir "$DIR" --hub-url "$HUB_URL" --port "$PORT" --name "$NAME" ${fs_args[@]+"${fs_args[@]}"}
+  if [ "$ISOLATED" = 1 ] && [ ! -f "$PHOME/.heimdall-home-manifest.json" ]; then
+    lr_log "seeding isolated provider home $PHOME from $REAL_HOME"
+    seed_home || lr_die "seeding the provider home failed"
+  fi
   BIN="${BIN_DIR:-$DIR/bin}"
   if [ -z "$BIN_DIR" ]; then
     local comps=(bridge ctl)
@@ -153,7 +226,8 @@ enroll_flow() {
   # Own session, so giving up reaches every process a wrapper started.
   local approval_args=()
   [ -z "$APPROVAL_BASE_URL" ] || approval_args=(--approval-base-url "$APPROVAL_BASE_URL")
-  setsid env -u PREFIX PATH="$DIR/enroll-bin:$PATH" "$BRIDGE_BIN" enroll --hub "$HUB_URL" --headless "${approval_args[@]}" \
+  # Same HOME as the running bridge, so the identity it writes is the one start finds.
+  setsid env -u PREFIX ${ISO_ENV[@]+"${ISO_ENV[@]}"} PATH="$DIR/enroll-bin:$PATH" "$BRIDGE_BIN" enroll --hub "$HUB_URL" --headless "${approval_args[@]}" \
     --config "$CFG" --bridge-token-file "$TOKEN" > "$log" 2>&1 &
   local pid=$! prompt="" i
   for i in $(seq 1 60); do
@@ -196,7 +270,7 @@ start() {
     enroll_flow "$AUTO"
   fi
   lr_log "starting bridge on 127.0.0.1:$PORT -> $HUB_URL"
-  lr_spawn "$DIR" bridge "$DIR/logs/bridge.log" env \
+  lr_spawn "$DIR" bridge "$DIR/logs/bridge.log" env ${ISO_ENV[@]+"${ISO_ENV[@]}"} \
     "HEIMDALL_HAM_CTL_BIN=$CTL_BIN" "HEIMDALL_BRIDGE_PTY_HOST=1" "HEIMDALL_HAM_PTY_HOST_BIN=$PTY_BIN" \
     "$BRIDGE_BIN" --config "$CFG" --bind-host 127.0.0.1 --port "$PORT" --hub "$HUB_URL" \
     --bridge-token-file "$TOKEN" --local-endpoint-port "$EP_PORT" --local-run-dir "$DIR/endpoint"
@@ -219,10 +293,38 @@ enroll() {
   enroll_flow "$AUTO"
 }
 
+reseed_auth() {
+  [ -f "$ENV_FILE" ] || lr_die "no bridge instance '$NAME'"
+  lr_lock "$DIR"
+  resolve
+  [ "$ISOLATED" = 1 ] || lr_die "bridge '$NAME' uses your real HOME (--shared-home); nothing to reseed"
+  seed_home || lr_die "reseeding the provider home failed"
+  lr_log "provider home reseeded; running agents pick it up on their next start"
+}
+
 stop() {
   [ -d "$DIR" ] || { lr_log "no instance '$NAME'"; return 0; }
   lr_lock "$DIR"
+  if [ "$PURGE_HOME" = 1 ] && [ "$(lr_env_get "$ENV_FILE" ISOLATED_HOME)" != 1 ]; then
+    lr_die "--purge-home requires a recorded isolated-home instance"
+  fi
   lr_stop_svc "$DIR" bridge
+  if [ "$PURGE_HOME" = 1 ]; then
+    resolve
+    local id bridge_bin stored_bin
+    id="$(sed -n 's/^daemon_id = "\(brg_[0-9a-f]*\)"$/\1/p' "$CFG" | head -1)"
+    if [ -n "$id" ]; then
+      stored_bin="$(lr_env_get "$ENV_FILE" BIN_DIR)"
+      bridge_bin="$(lr_bin "${BIN_DIR:-${stored_bin:-$DIR/bin}}" ham-bridge)"
+      env ${ISO_ENV[@]+"${ISO_ENV[@]}"} "$bridge_bin" vault prune --remove-scope "$id" --hub "$HUB_URL" \
+        || lr_die "vault purge failed; provider home kept"
+    fi
+    node "$LR_HELPERS/profile-state.mjs" purge --instance "$DIR" || lr_die "profile purge failed; provider home kept"
+    rm -rf "$PHOME"
+    # The home held this enrollment's identity. Require enrollment again.
+    rm -rf "$DIR/credentials"
+    lr_log "isolated vault, profiles, secrets and provider home purged"
+  fi
   lr_log "bridge '$NAME' stopped (state kept in $DIR)"
 }
 
@@ -233,6 +335,11 @@ status() {
   echo "  hub      : $(lr_env_get "$ENV_FILE" HUB_URL)"
   echo "  ports    : bridge $(lr_env_get "$ENV_FILE" BRIDGE_PORT), endpoint $(lr_env_get "$ENV_FILE" LOCAL_ENDPOINT_PORT)"
   if enrolled; then echo "  enrolled : yes"; else echo "  enrolled : no"; fi
+  if [ "$(lr_env_get "$ENV_FILE" ISOLATED_HOME)" = 1 ]; then
+    echo "  home     : $PHOME (isolated; seeded: $(node -e 'try{const m=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log(m.providers.join(",")||"none")}catch{console.log("not yet")}' "$PHOME/.heimdall-home-manifest.json"))"
+  else
+    echo "  home     : real HOME (shared)"
+  fi
   local paths="$DIR/data/bridge/provider_paths.json"
   if [ -f "$paths" ]; then
     echo "  providers: $(node -e 'const p=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).providers||[];console.log(p.map(x=>`${x.provider}=${x.state}`).join(" ")||"(none probed)")' "$paths" 2>/dev/null)"
@@ -244,6 +351,7 @@ status() {
 case "$CMD" in
   start) start ;;
   enroll) enroll ;;
+  reseed-auth) reseed_auth ;;
   stop) stop ;;
   status) status ;;
   help) usage ;;

@@ -416,12 +416,9 @@ reenroll_fixture_open :: proc(t: ^testing.T, f: ^Reenroll_Fixture, label: string
 	keys := test_pair_keys()
 	bridge_pairing_arm(&keys, bridge_now_unix_ms() + i64(vault.PAIR_CODE_TTL_SECONDS) * 1000)
 	vault.pair_keys_wipe(&keys)
-	if !bridge_reenroll_begin(f.config_path, REENROLL_TEST_HUB, f.bridge_id, f.token_file) {
-		testing.expect(t, false, "journal and back up the previous enrollment")
-		return false
-	}
-	if !bridge_unseal_identity_commit_enrollment(f.bridge_id, TEST_VAULT_USER_ID, true) {
-		testing.expect(t, false, "commit the re-enrollment's identity")
+	// No reuse hint or config lookup: the browser may choose the old ID after reinstall.
+	if !bridge_enroll_commit_identity(f.config_path, REENROLL_TEST_HUB, f.bridge_id, f.token_file, TEST_VAULT_USER_ID) {
+		testing.expect(t, false, "back up and replace the identity selected by approval")
 		return false
 	}
 	f.new_identity = bridge_identity_public_key_hex(f.bridge_id)
@@ -612,6 +609,12 @@ test_reenroll_identity_is_never_replaced_unasked_or_for_another_account :: proc(
 	testing.expect(t, !bridge_reenroll_begin(f.config_path, "https://hub.example.test", f.bridge_id, f.token_file), "an unresolved backup is never overwritten")
 	testing.expect(t, !bridge_unseal_identity_commit_enrollment(f.bridge_id, "usr_someone_else", true), "never replaced for another account")
 	testing.expect(t, bridge_reenroll_resolve(f.config_path, f.bridge_id, false), "the refused re-enrollment is rolled back")
+	testing.expect_value(t, reenroll_identity_now(f.bridge_id), old)
+	testing.expect_value(t, keystore_identity_backup_status(f.bridge_id), Keystore_Read_Status.Not_Found)
+	// REQ-ENROLL-REPLACE: the automatic path still rejects another owner and
+	// restores the backup made before that rejection.
+	pending()
+	testing.expect(t, !bridge_enroll_commit_identity(f.config_path, REENROLL_TEST_HUB, f.bridge_id, f.token_file, "usr_someone_else"))
 	testing.expect_value(t, reenroll_identity_now(f.bridge_id), old)
 	testing.expect_value(t, keystore_identity_backup_status(f.bridge_id), Keystore_Read_Status.Not_Found)
 }

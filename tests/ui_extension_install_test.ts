@@ -169,6 +169,7 @@ test('bridge update modal defaults extension updates on, sends explicit consent,
   const h = await surfaceHarness();
   try {
     await h.render(true);
+    await h.click('settings-bridge-card-bridge-1');
     await h.click('settings-bridge-update-btn-bridge-1');
     const checkbox = () => h.query('settings-bridge-update-extensions') as HTMLInputElement;
     assert.equal(checkbox().checked, true);

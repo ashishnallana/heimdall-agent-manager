@@ -34,12 +34,13 @@ bridge_extension_catalog_required_version :: proc(provider: string) -> string {
 BRIDGE_CLAUDE_PLUGIN_ID :: "heimdall@heimdall"
 BRIDGE_CODEX_PLUGIN_ID :: "heimdall@heimdall-codex"
 
-bridge_provider_extension_install_progress_json :: proc(command_id, provider, stage: string, progress_percent: int, message: string) -> string {
+bridge_provider_extension_install_progress_json :: proc(command_id, provider, stage: string, progress_percent: int, message: string, profile_id: string = "") -> string {
 	b := strings.builder_make()
 	strings.write_string(&b, "{\"type\":\"provider_extension_install_progress\",\"command_id\":\"")
 	bridge_runtime_write_json_string(&b, command_id)
 	strings.write_string(&b, "\",\"provider\":\"")
 	bridge_runtime_write_json_string(&b, provider)
+	strings.write_string(&b, "\",\"profile_id\":\""); bridge_runtime_write_json_string(&b,profile_effective_id(provider,profile_id))
 	strings.write_string(&b, "\",\"stage\":\"")
 	bridge_runtime_write_json_string(&b, stage)
 	strings.write_string(&b, "\",\"progress_percent\":")
@@ -55,8 +56,8 @@ bridge_provider_extension_install_progress_json :: proc(command_id, provider, st
 	return strings.to_string(b)
 }
 
-bridge_provider_extension_install_send_progress :: proc(conn: ^ws.Connection, command_id, provider, stage: string, progress_percent: int, message: string) -> bool {
-	frame := bridge_provider_extension_install_progress_json(command_id, provider, stage, progress_percent, message)
+bridge_provider_extension_install_send_progress :: proc(conn: ^ws.Connection, command_id, provider, stage: string, progress_percent: int, message: string, profile_id: string = "") -> bool {
+	frame := bridge_provider_extension_install_progress_json(command_id, provider, stage, progress_percent, message,profile_id)
 	defer delete(frame)
 	if conn == nil do return false
 	return bridge_hub_send(conn, frame)
@@ -151,6 +152,7 @@ bridge_provider_extension_read_manifest_version :: proc(ext_path, provider: stri
 }
 
 Bridge_Extension_Frame_Sink :: struct {
+	profile_id: string,
 	conn:       ^ws.Connection,
 	command_id: string,
 	provider:   string,
@@ -159,7 +161,7 @@ Bridge_Extension_Frame_Sink :: struct {
 @(private = "file")
 bridge_extension_frame_progress :: proc(data: rawptr, stage: string, pct: int, message: string) {
 	s := (^Bridge_Extension_Frame_Sink)(data)
-	_ = bridge_provider_extension_install_send_progress(s.conn, s.command_id, s.provider, stage, pct, message)
+	_ = bridge_provider_extension_install_send_progress(s.conn, s.command_id, s.provider, stage, pct, message,s.profile_id)
 }
 
 @(private = "file")
@@ -207,39 +209,52 @@ bridge_hub_handle_extension_install_command :: proc(conn: ^ws.Connection, text: 
 		return
 	}
 
+	profile_id := extract_json_string(text,"profile_id",""); defer delete(profile_id)
+	canonical := bridge_extension_canonical_provider(prov)
+	pp, profile_error := profile_lookup(canonical,profile_id)
+	if profile_error != .None {
+		bridge_extension_install_fail(conn,command_id,prov,profile_error_code(profile_error),"provider profile cannot be used",profile_id)
+		return
+	}
+	pp_ref: ^Provider_Profile = &pp if profile_id != "" || profile_runtime_configured(&pp) else nil
 	// action=uninstall shares this frame (and its per-provider ordering key).
 	action := extract_json_string(text, "action", "")
 	defer delete(action)
 	if action == "uninstall" {
-		bridge_hub_handle_extension_uninstall(conn, command_id, prov)
+		bridge_hub_handle_extension_uninstall(conn, command_id, prov,pp_ref)
 		return
 	}
 
-	_ = bridge_provider_extension_install_send_progress(conn, command_id, prov, "installing", 10, "Resolving provider extension assets...")
-	canonical := bridge_extension_canonical_provider(prov)
-	ext_path := bridge_extension_bundle_resolver(canonical)
+	_ = bridge_provider_extension_install_send_progress(conn, command_id, prov, "installing", 10, "Resolving provider extension assets...",profile_id)
+	// A provider profile registers from this profile's own copy, which no other profile prunes.
+	ext_path := bridge_get_profile_extension_path(canonical) if pp_ref != nil else bridge_extension_bundle_resolver(canonical)
 	defer delete(ext_path)
 	if ext_path == "" || !bridge_os_dir_exists(ext_path) {
 		bridge_extension_install_fail(conn, command_id, prov, "extension_not_found",
-			fmt.tprintf("bundled extension directory not found for provider %q", prov))
+			fmt.tprintf("bundled extension directory not found for provider %q", prov),profile_id)
 		return
 	}
-	bin_path, has_bin := bridge_extension_binary_resolver(canonical)
+	bin_path, has_bin := bridge_extension_resolve_profile_binary(canonical,pp_ref)
 	defer if has_bin do delete(bin_path)
 	if !has_bin || bin_path == "" {
-		bridge_extension_install_fail(conn, command_id, prov, "binary_not_found", fmt.tprintf("provider binary not found for %q", prov))
+		bridge_extension_install_fail(conn, command_id, prov, "binary_not_found", fmt.tprintf("provider binary not found for %q", prov),profile_id)
 		return
 	}
 
 	// Stay below the dispatcher's sixty-second cap.
-	sink_data := Bridge_Extension_Frame_Sink{conn = conn, command_id = command_id, provider = prov}
-	sink := Bridge_Extension_Sink{data = &sink_data, progress = bridge_extension_frame_progress, report = bridge_extension_frame_report}
+	sink_data := Bridge_Extension_Frame_Sink{conn = conn, command_id = command_id, provider = prov,profile_id = pp.profile_id}
+	sink := Bridge_Extension_Sink{data = &sink_data, progress = bridge_extension_frame_progress, report = bridge_extension_frame_report,profile = pp_ref}
+	if pp_ref != nil {
+		env_ok: bool
+		sink.env,env_ok = profile_child_env(pp_ref)
+		if !env_ok { bridge_extension_install_fail(conn,command_id,prov,"environment_unavailable","cannot read child environment",profile_id); return }
+	}
 	result := bridge_extension_ensure(canonical, ext_path, bin_path, time.time_add(time.now(), BRIDGE_EXTENSION_PROVIDER_TIMEOUT), sink)
 	if !result.ok {
-		bridge_extension_install_fail(conn, command_id, prov, result.code, result.message)
+		bridge_extension_install_fail(conn, command_id, prov, result.code, profile_redact_text(result.message,pp_ref),profile_id)
 		return
 	}
-	_ = bridge_provider_extension_install_send_progress(conn, command_id, prov, "succeeded", 100, result.message)
+	_ = bridge_provider_extension_install_send_progress(conn, command_id, prov, "succeeded", 100, profile_redact_text(result.message,pp_ref),profile_id)
 	if command_id != "" {
 		final := bridge_command_result_json(command_id, "succeeded", "installed")
 		defer delete(final)
@@ -248,23 +263,29 @@ bridge_hub_handle_extension_install_command :: proc(conn: ^ws.Connection, text: 
 	}
 }
 
-bridge_hub_handle_extension_uninstall :: proc(conn: ^ws.Connection, command_id, prov: string) {
-	_ = bridge_provider_extension_install_send_progress(conn, command_id, prov, "uninstalling", 10, "Resolving the provider CLI...")
+bridge_hub_handle_extension_uninstall :: proc(conn: ^ws.Connection, command_id, prov: string, pp: ^Provider_Profile = nil) {
+	profile_id := pp.profile_id if pp != nil else prov
+	_ = bridge_provider_extension_install_send_progress(conn, command_id, prov, "uninstalling", 10, "Resolving the provider CLI...",profile_id)
 	canonical := bridge_extension_canonical_provider(prov)
-	bin_path, has_bin := bridge_extension_binary_resolver(canonical)
+	bin_path, has_bin := bridge_extension_resolve_profile_binary(canonical,pp)
 	defer if has_bin do delete(bin_path)
 	if !has_bin || bin_path == "" {
-		bridge_extension_install_fail(conn, command_id, prov, "binary_not_found", fmt.tprintf("provider binary not found for %q", prov))
+		bridge_extension_install_fail(conn, command_id, prov, "binary_not_found", fmt.tprintf("provider binary not found for %q", prov),profile_id)
 		return
 	}
-	sink_data := Bridge_Extension_Frame_Sink{conn = conn, command_id = command_id, provider = prov}
-	sink := Bridge_Extension_Sink{data = &sink_data, progress = bridge_extension_frame_progress, report = bridge_extension_frame_report}
+	sink_data := Bridge_Extension_Frame_Sink{conn = conn, command_id = command_id, provider = prov,profile_id = pp.profile_id if pp != nil else prov}
+	sink := Bridge_Extension_Sink{data = &sink_data, progress = bridge_extension_frame_progress, report = bridge_extension_frame_report,profile = pp}
+	if pp != nil {
+		env_ok: bool
+		sink.env,env_ok = profile_child_env(pp)
+		if !env_ok { bridge_extension_install_fail(conn,command_id,prov,"environment_unavailable","cannot read child environment",profile_id); return }
+	}
 	result := bridge_extension_remove(canonical, bin_path, time.time_add(time.now(), BRIDGE_EXTENSION_PROVIDER_TIMEOUT), sink)
 	if !result.ok {
-		bridge_extension_install_fail(conn, command_id, prov, result.code, result.message)
+		bridge_extension_install_fail(conn, command_id, prov, result.code, profile_redact_text(result.message,pp),profile_id)
 		return
 	}
-	_ = bridge_provider_extension_install_send_progress(conn, command_id, prov, "succeeded", 100, result.message)
+	_ = bridge_provider_extension_install_send_progress(conn, command_id, prov, "succeeded", 100, profile_redact_text(result.message,pp),profile_id)
 	if command_id != "" {
 		final := bridge_command_result_json(command_id, "succeeded", "uninstalled")
 		defer delete(final)
@@ -273,8 +294,8 @@ bridge_hub_handle_extension_uninstall :: proc(conn: ^ws.Connection, command_id, 
 	}
 }
 
-bridge_extension_install_fail :: proc(conn: ^ws.Connection, command_id, provider, code, message: string) {
-	_ = bridge_provider_extension_install_send_progress(conn, command_id, provider, "failed", 0, message)
+bridge_extension_install_fail :: proc(conn: ^ws.Connection, command_id, provider, code, message: string, profile_id: string = "") {
+	_ = bridge_provider_extension_install_send_progress(conn, command_id, provider, "failed", 0, message,profile_id)
 	if command_id == "" do return
 	final := bridge_command_failed_json(command_id, bridge_cause_wire_error(code, message), "failed")
 	defer delete(final)
@@ -282,10 +303,17 @@ bridge_extension_install_fail :: proc(conn: ^ws.Connection, command_id, provider
 	if conn != nil do _ = bridge_hub_send(conn, final)
 }
 
-bridge_extension_install_step :: proc(argv: []string, deadline: time.Time) -> (output, error_message: string, ok: bool) {
+bridge_extension_install_step :: proc(argv: []string, deadline: time.Time, env: []string = nil) -> (output, error_message: string, ok: bool) {
 	remaining := time.diff(time.now(), deadline)
 	if remaining <= 0 do return "", "extension installation timed out", false
-	stdout, stderr, exit_code, ran, timed_out := bridge_extension_install_runner(argv, min(remaining, 25 * time.Second))
+	stdout, stderr: string
+	exit_code: int
+	ran,timed_out: bool
+	if env == nil {
+		stdout,stderr,exit_code,ran,timed_out = bridge_extension_install_runner(argv,min(remaining,25*time.Second))
+	} else {
+		stdout,stderr,exit_code,ran,timed_out = bridge_process_run_capture_status_env(argv,min(remaining,25*time.Second),env)
+	}
 	defer { delete(stdout); delete(stderr) }
 	if !ran {
 		message := strings.trim_space(stderr)
@@ -295,4 +323,18 @@ bridge_extension_install_step :: proc(argv: []string, deadline: time.Time) -> (o
 		return "", strings.clone(message, context.temp_allocator), false
 	}
 	return strings.concatenate({stdout, "\n", stderr}, context.temp_allocator), "", true
+}
+
+bridge_extension_resolve_profile_binary :: proc(provider: string, pp: ^Provider_Profile) -> (string,bool) {
+	if pp == nil do return bridge_extension_binary_resolver(provider)
+	env,ok := profile_child_env(pp)
+	if !ok do return "",false
+	binary := pp.config.binary_path
+	if binary == "" {
+		catalog,found := bridge_provider_catalog_profile(provider)
+		if !found || len(catalog.command) == 0 do return "",false
+		binary = catalog.command[0]
+	}
+	path := profile_resolve_binary(binary,env)
+	return path,path != ""
 }

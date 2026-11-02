@@ -18,6 +18,12 @@ Dev_Proxy_Config :: struct {
 	// Set in main() from the parsed --listen host; non-loopback binds get 404
 	// on every /_dev/ route so management is never exposed remotely.
 	management_enabled: bool,
+	// The Hub's --ui-origin, sent as Origin on brokered requests. Empty: learned
+	// from the redirect_uri of the Hub's sign-in redirect (broker.odin).
+	hub_ui_origin: string,
+	// Browser origins besides loopback that may use the brokered session, e.g. the
+	// Heimdall preview origin when the dev UI is viewed through a preview.
+	trusted_origins: [dynamic]string,
 }
 
 default_dev_proxy_config :: proc() -> Dev_Proxy_Config {

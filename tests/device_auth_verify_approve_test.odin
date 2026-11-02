@@ -322,6 +322,35 @@ main :: proc() {
 	assert_eq(conflict_err.code, domain.Error_Code.Validation_Failed, "conflicting identity choices -> validation error")
 	assert_eq(len(BRIDGE_MINT_CALLS), conflict_mints_before, "conflicting identity choices never reach the minter")
 
+	// REQ-3: sunset_bridge_id ("register new and retire that one") is only for a NEW
+	// bridge. With target_bridge_id it is refused before the minter, so neither the
+	// attach nor the sunset can happen.
+	sunset_conflict_ok, sunset_conflict_err := device_auth.approve(&svc, {
+		user_code = "2222222222222222222222222222222222222222222222222222222222222222",
+		approve = true,
+		target_bridge_id = "brg_existing",
+		sunset_bridge_id = "brg_retire_me",
+	}, "owner-conflict", "1.2.3.4", "UA")
+	assert_true(!sunset_conflict_ok, "target bridge and sunset bridge cannot be approved together")
+	assert_eq(sunset_conflict_err.code, domain.Error_Code.Validation_Failed, "attach + sunset -> validation error")
+	assert_eq(len(BRIDGE_MINT_CALLS), conflict_mints_before, "attach + sunset never reaches the minter")
+	// The refused grant is still pending; a new-bridge approval with a sunset passes
+	// the sunset through to the minter untouched (the bridge service re-checks it).
+	sunset_ok, sunset_err := device_auth.approve(&svc, {
+		user_code = "2222222222222222222222222222222222222222222222222222222222222222",
+		approve = true,
+		sunset_bridge_id = "brg_retire_me",
+	}, "owner-conflict", "1.2.3.4", "UA")
+	assert_true(sunset_ok, fmt.tprintf("new bridge + sunset approves: %s", sunset_err.message))
+	assert_eq(len(BRIDGE_MINT_CALLS), conflict_mints_before + 1, "new bridge + sunset reaches the minter once")
+	if len(BRIDGE_MINT_CALLS) > conflict_mints_before {
+		scall := BRIDGE_MINT_CALLS[len(BRIDGE_MINT_CALLS) - 1]
+		assert_eq(scall.sunset_bridge_id, "brg_retire_me", "minter got the sunset bridge id")
+		assert_eq(scall.target_bridge_id, "", "a sunset approval is a new-bridge approval")
+		assert_eq(scall.owner_user_id, "owner-conflict", "sunset minter owner from Auth_Context")
+	}
+	fmt.println("REQ-3 OK: sunset_bridge_id is exclusive with target_bridge_id and reaches the minter")
+
 	// --- a bridge grant with an unwired bridge minter FAILS; it must not fall
 	// back to the user minter. An unwired seam is a deployment bug, and
 	// degrading a machine enrollment into a user token would be a silent

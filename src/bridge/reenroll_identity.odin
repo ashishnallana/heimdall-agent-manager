@@ -139,6 +139,25 @@ keystore_identity_backup_drop :: proc(bridge_id: string) -> bool {
 
 // ===== The re-enrollment lifecycle =====
 
+// REQ-ENROLL-REPLACE: approval can select an existing identity even when this
+// install has no config/reuse hint. Caller holds the target's scope lock. Always
+// journal and back up an existing identity before attempting its replacement.
+bridge_enroll_commit_identity :: proc(config_path, hub_url, bridge_id, token_file, owner_user_id: string) -> bool {
+	existing: Bridge_Identity_Record
+	status := keystore_read_identity(bridge_id, &existing)
+	crypto.zero_explicit(&existing, size_of(existing))
+	replacing := status != .Not_Found
+	if replacing && !bridge_reenroll_begin(config_path, hub_url, bridge_id, token_file) {
+		fmt.eprintfln("bridge enroll FAILED: could not back up the previous identity of %s (or an earlier re-enrollment is unresolved). Nothing was written.", bridge_id)
+		return false
+	}
+	if !bridge_unseal_identity_commit_enrollment(bridge_id, owner_user_id, replacing) {
+		if replacing do _ = bridge_reenroll_resolve(config_path, bridge_id, false)
+		return false
+	}
+	return true
+}
+
 // bridge_reenroll_begin journals and backs up the previous enrollment of bridge_id
 // before its identity is replaced. On false nothing changed (no journal is left).
 bridge_reenroll_begin :: proc(config_path, hub_url, bridge_id, token_file: string) -> bool {

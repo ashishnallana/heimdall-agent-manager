@@ -76,6 +76,8 @@ Bridge_Config :: struct {
 	// enabled-by-default.
 	local_proxy_configured: bool,
 	local_proxy_enabled: bool,
+	auto_update_enabled: bool,
+	auto_update_configured: bool,
 }
 
 Role_Default_Agent_Config :: struct {
@@ -405,6 +407,8 @@ parse_bridge_key :: proc(key, value: string, cfg: ^Bridge_Config) {
 		cfg.pty_host_runtime = parse_bool(value)
 	case "local_proxy_enabled":
 		cfg.local_proxy_enabled = parse_bool(value); cfg.local_proxy_configured = true
+	case "auto_update_enabled":
+		cfg.auto_update_enabled = parse_bool(value); cfg.auto_update_configured = true
 	case:
 	}
 }

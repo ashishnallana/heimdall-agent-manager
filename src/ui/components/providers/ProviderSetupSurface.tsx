@@ -36,11 +36,17 @@ export interface ProviderSetupSurfaceProps {
    */
   variant?: 'full' | 'compact';
   onApply?: () => void;
+  /**
+   * Compact only: list each provider that was not found as its own row with an
+   * Install button. Installing provider CLIs from Ninjy is not supported yet, so the
+   * button is shown disabled (the first-run setup wizard).
+   */
+  missingAsRows?: boolean;
 }
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-export function ProviderSetupSurface({ bridgeId, mode, variant = 'full', onApply }: ProviderSetupSurfaceProps) {
+export function ProviderSetupSurface({ bridgeId, mode, variant = 'full', onApply, missingAsRows = false }: ProviderSetupSurfaceProps) {
   const dispatch = useDispatch();
   const activeBridge = useRef(bridgeId);
   activeBridge.current = bridgeId;
@@ -304,7 +310,21 @@ export function ProviderSetupSurface({ bridgeId, mode, variant = 'full', onApply
                 </li>
               ))}
             </ul>
-            {notFound ? (
+            {missingAsRows && notFound ? (
+              <div data-debug-id="provider-summary-missing" className="mt-2">
+                <ul className="divide-y divide-subtle rounded-xl border border-subtle">
+                  {providers.filter((provider) => provider.state !== 'present').map((provider) => (
+                    <li key={provider.provider} data-debug-id={`provider-summary-missing-${provider.provider}`} className="flex items-center gap-3 px-3 py-2">
+                      <img src={provider.icon_url} alt="" className="h-6 w-6 shrink-0 rounded-md opacity-60" />
+                      <span className="min-w-0 flex-1 truncate text-sm text-muted">{provider.display_name || provider.provider}</span>
+                      <StatusPill tone="neutral">Not found</StatusPill>
+                      <Button size="sm" variant="secondary" disabled title="Installing agents from Ninjy is coming soon" data-debug-id={`provider-summary-install-btn-${provider.provider}`}>Install</Button>
+                    </li>
+                  ))}
+                </ul>
+                <p className="mt-1 text-xs text-faint">Installing agents from Ninjy is coming soon. Install one yourself, then scan again.</p>
+              </div>
+            ) : notFound ? (
               <details data-debug-id="provider-summary-not-found" className="mt-2 text-xs text-faint">
                 <summary className="cursor-pointer">{notFound}</summary>
                 <p className="mt-1">Install a provider CLI in the bridge service PATH, then scan again from Settings → Providers.</p>

@@ -23,7 +23,7 @@
           import nixpkgs { inherit system; };
 
       # Keep appVersion in sync with src/contracts/protocol.odin APP_VERSION.
-      appVersion = "0.5.27";
+      appVersion = "0.5.36";
       npmDepsHash = "sha256-HK2Zpo2PckW5CxVrPr3OTiXVaJHzhRzofsesyXhxWAc=";
 
       # Every Odin binary that links src/lib/httpc links the ONE libcurl pinned
@@ -367,6 +367,7 @@
           # Web Push) goes through src/lib/httpc, i.e. the linked libcurl, so the
           # hub needs no TLS helper binaries on PATH any more.
           ham-hub = mkOdinPackageWithRuntime pkgs odin "ham-hub" "src/hub" [ pkgs.sqlite ];
+          ham-mcp-probe = mkOdinPackageWithRuntime pkgs odin "ham-mcp-probe" "src/mcp_probe" [ pkgs.sqlite ];
           # SOCAT-1: socat is the DEFAULT bridge->hub WebSocket (wss://) TLS
           # transport (HAM_TLS_BACKEND); openssl stays for the s_client fallback
           # and socat's OpenSSL engine. Outbound HTTPS uses the linked libcurl;

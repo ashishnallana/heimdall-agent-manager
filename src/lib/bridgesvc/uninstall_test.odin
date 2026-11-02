@@ -1,8 +1,30 @@
 package bridgesvc
 
 import "core:fmt"
+import "core:os"
 import "core:slice"
 import "core:testing"
+
+@(test)
+test_uninstall_includes_only_this_profiles_retained_binary_backups :: proc(t: ^testing.T) {
+	root := fmt.tprintf("%s/bridgesvc-retained-backups-%d", os.temp_dir(context.temp_allocator), os.get_pid())
+	defer os.remove_all(root)
+	host := Host{os = .Linux, home = root, uid = 1000}
+	l := layout_for(host, service_name("hub-example", "p1", context.temp_allocator))
+	other := layout_for(host, service_name("hub-example", "p2", context.temp_allocator))
+	retained := pjoin(l.data_dir, "bin.bak-123-456")
+	other_backup := pjoin(other.data_dir, "bin.bak-123-456")
+	testing.expect(t, os.make_directory_all(retained) == nil)
+	testing.expect(t, os.make_directory_all(other_backup) == nil)
+	p := uninstall_paths(l)
+	found, found_other := false, false
+	for item in p.binaries {
+		found = found || path_key(item) == path_key(retained)
+		found_other = found_other || path_key(item) == path_key(other_backup)
+	}
+	testing.expect(t, found)
+	testing.expect(t, !found_other)
+}
 
 // Simulated uninstall: `fail_step` fails `fail_times` times with `fail_with`.
 @(private = "file")

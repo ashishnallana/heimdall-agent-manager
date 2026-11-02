@@ -211,6 +211,10 @@ parse_args :: proc(config: ^app.Hub_Config) {
 			cidrs[0] = strings.clone(os.args[i + 1])
 			config.forwarded_for_trusted_cidrs = cidrs
 			i += 1
+		} else if arg == "--mcp-oauth-spike" {
+			config.mcp_oauth_spike = true
+		} else if arg == "--mcp-oauth-key-file" && i+1 < len(os.args) {
+			config.mcp_oauth_key_file = strings.clone(os.args[i+1]); i += 1
 		} else if arg == "--oidc-allow-insecure-localhost" {
 			config.oidc_allow_insecure_localhost = true
 		} else if arg == "--oidc-issuer" && i + 1 < len(os.args) {

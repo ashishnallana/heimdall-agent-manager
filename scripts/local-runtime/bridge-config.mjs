@@ -3,17 +3,20 @@
 //
 //   node scripts/local-runtime/bridge-config.mjs --template config.toml --out <cfg>
 //        --dir <instance-dir> --hub-url <url> --port <bridge-port> --name <instance>
+//        [--fs-root <abs-path>]
 //
 // Starts from the repo's config.toml and rewrites every path and endpoint the
 // bridge persists to so it points inside <instance-dir> and at <hub-url>. Keys the
 // bridge writes itself (daemon_id after enrollment) are preserved when <cfg>
 // already exists, so re-running never undoes an enrollment. [[peer]] blocks are
 // dropped: a local bridge federates with nothing. Shared by local-bridge.sh/.ps1.
+// --fs-root pins [bridge].fs_root (the directory picker's sandbox, which defaults to
+// $HOME): an isolated-home instance passes the real HOME so its projects stay visible.
 import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync, realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname } from 'node:path';
 
-export function renderBridgeConfig(template, { dir, hubUrl, port, name, existing = '' }) {
+export function renderBridgeConfig(template, { dir, hubUrl, port, name, existing = '', fsRoot = '' }) {
   const d = dir.replace(/\\/g, '/').replace(/\/+$/, '');
   const enrolledId = (existing.match(/^daemon_id\s*=\s*"([^"]*)"/m) || [])[1];
   const values = {
@@ -27,6 +30,7 @@ export function renderBridgeConfig(template, { dir, hubUrl, port, name, existing
     'wrapper.tmux_session': `"ham-local-${name}"`,
     'ctl.daemon_url': `"${hubUrl}"`,
   };
+  if (fsRoot) values['bridge.fs_root'] = JSON.stringify(fsRoot.replace(/\\/g, '/'));
   const seen = new Set();
   const out = [];
   let section = '';
@@ -39,7 +43,9 @@ export function renderBridgeConfig(template, { dir, hubUrl, port, name, existing
       if (inPeer) continue;
     }
     if (inPeer) continue;
-    const kv = line.match(/^(\s*)([a-z_]+)(\s*=\s*)(.*)$/);
+    // The template ships fs_root commented out; enable it when it is pinned.
+    const kv = line.match(/^(\s*)([a-z_]+)(\s*=\s*)(.*)$/)
+      || (fsRoot && section === 'bridge' && line.match(/^(\s*)# (fs_root)(\s*=\s*)(.*)$/));
     const key = kv && `${section}.${kv[2]}`;
     if (kv && key in values && !seen.has(key)) {
       seen.add(key);
@@ -61,7 +67,7 @@ function main(argv) {
   }
   const existing = existsSync(a.out) ? readFileSync(a.out, 'utf8') : '';
   const text = renderBridgeConfig(readFileSync(a.template, 'utf8'), {
-    dir: a.dir, hubUrl: a['hub-url'], port: a.port, name: a.name, existing,
+    dir: a.dir, hubUrl: a['hub-url'], port: a.port, name: a.name, existing, fsRoot: a['fs-root'] || '',
   });
   mkdirSync(dirname(a.out), { recursive: true });
   writeFileSync(`${a.out}.tmp`, text, { mode: 0o600 });

@@ -50,11 +50,11 @@ bridge_provider_extension_expected :: proc(profile: Bridge_Provider_Profile, dis
 	return false
 }
 
-bridge_provider_launch_extension_expected :: proc(profile: Bridge_Provider_Profile) -> bool {
+bridge_provider_launch_extension_expected :: proc(profile: Bridge_Provider_Profile, profile_id: string = "") -> bool {
 	state := ""
 	sync.rw_mutex_shared_lock(&bridge_provider_paths_mutex)
 	for p in bridge_provider_paths {
-		if p.provider == profile.name { state = p.extension_state; break }
+		if p.provider == profile.name && profile_effective_id(p.provider,p.profile_id) == profile_effective_id(profile.name,profile_id) { state = p.extension_state; break }
 	}
 	result := bridge_provider_extension_expected(profile, state)
 	sync.rw_mutex_shared_unlock(&bridge_provider_paths_mutex)
@@ -189,7 +189,7 @@ bridge_provider_extension_installed_manifest_version :: proc(plugin_id: string, 
 // owned version string. `ran` is false when the command failed, timed out, or was
 // skipped by the circuit breaker. When a plugin is listed more than once (one
 // entry per install scope), the most usable entry wins.
-bridge_provider_extension_evaluate :: proc(ext: Bridge_Catalog_Extension, output: string, ran: bool, allocator := context.allocator) -> (state: string, version: string) {
+bridge_provider_extension_evaluate :: proc(ext: Bridge_Catalog_Extension, output: string, ran: bool, allocator := context.allocator, env: []string = nil) -> (state: string, version: string) {
 	if !bridge_provider_extension_supported(ext) do return "unsupported", strings.clone("", allocator)
 	if !ran do return "error", strings.clone("", allocator)
 	// agy 1.2.16 emits this sentence instead of JSON for an empty inventory.
@@ -247,13 +247,13 @@ bridge_provider_extension_evaluate :: proc(ext: Bridge_Catalog_Extension, output
 		entry_version_val, has_version := object[version_key].(json.String)
 		entry_version := string(entry_version_val)
 		if using_antigravity_imports && (!has_version || entry_version == "") {
-			entry_version = bridge_provider_extension_installed_manifest_version(ext.plugin_id, context.temp_allocator)
+			entry_version = bridge_provider_extension_installed_manifest_version(ext.plugin_id, context.temp_allocator,bridge_extension_gemini_paths(env,ext.plugin_id,true))
 		}
 		enabled := true
 		if value, has := object[enabled_key].(json.Boolean); has {
 			enabled = bool(value)
 		} else if using_antigravity_imports {
-			agy_enabled, _ := bridge_antigravity_plugin_enabled_state(ext.plugin_id)
+			agy_enabled, _ := bridge_antigravity_plugin_enabled_state(ext.plugin_id,bridge_extension_gemini_paths(env,ext.plugin_id,false))
 			enabled = agy_enabled
 		}
 		has_errors := false
@@ -309,20 +309,37 @@ bridge_provider_extension_evaluate :: proc(ext: Bridge_Catalog_Extension, output
 // bridge_provider_extension_probe runs the detector after a present binary probe.
 // It shares the --version circuit-breaker pattern under its own key so a hung
 // `plugin list` cannot stall every later discovery.
-bridge_provider_extension_probe :: proc(binary_path: string, ext: Bridge_Catalog_Extension, timeout: time.Duration) -> (state: string, version: string) {
-	if !bridge_provider_extension_supported(ext) do return bridge_provider_extension_evaluate(ext, "", false)
+bridge_provider_extension_probe :: proc(binary_path: string, ext: Bridge_Catalog_Extension, timeout: time.Duration, env: []string = nil, profile_id: string = "") -> (state: string, version: string) {
+	if !bridge_provider_extension_supported(ext) do return bridge_provider_extension_evaluate(ext, "", false,env = env)
 	if binary_path == "" do return "absent", strings.clone("")
 	timeout := min(timeout, BRIDGE_PROVIDER_EXTENSION_TIMEOUT)
-	if timeout <= 0 do return bridge_provider_extension_evaluate(ext, "", false)
-	breaker_key := strings.concatenate({"provider-extension-probe:", binary_path})
+	if timeout <= 0 do return bridge_provider_extension_evaluate(ext, "", false,env = env)
+	breaker_key := strings.concatenate({"provider-extension-probe:",profile_id,":", binary_path})
 	defer delete(breaker_key)
-	if !bridge_dependency_breaker_allow(breaker_key) do return bridge_provider_extension_evaluate(ext, "", false)
+	if !bridge_dependency_breaker_allow(breaker_key) do return bridge_provider_extension_evaluate(ext, "", false,env = env)
 	argv := make([]string, len(ext.detect_argv) + 1)
 	defer delete(argv)
 	argv[0] = binary_path
 	copy(argv[1:], ext.detect_argv)
-	stdout, stderr, ok, _ := bridge_process_run_capture(argv, timeout)
+	stdout, stderr, _, ok, _ := bridge_process_run_capture_status_env(argv, timeout,env)
 	defer { delete(stdout); delete(stderr) }
 	bridge_dependency_breaker_record(breaker_key, ok)
-	return bridge_provider_extension_evaluate(ext, stdout, ok)
+	return bridge_provider_extension_evaluate(ext, stdout, ok,env = env)
+}
+
+// With a supplied child environment, never fall back to process-global paths.
+// An explicit GEMINI_CONFIG_DIR excludes the bridge HOME's other account.
+bridge_extension_gemini_paths :: proc(env: []string, plugin_id: string, manifest: bool) -> []string {
+	if env == nil do return nil
+	root := profile_env_value(env,"GEMINI_CONFIG_DIR")
+	if root == "" {
+		home := profile_env_value(env,"HOME")
+		when ODIN_OS == .Windows { if home == "" do home = profile_env_value(env,"USERPROFILE") }
+		if home != "" do root = profile_join(home,".gemini")
+	}
+	if root == "" { out := make([]string,1,context.temp_allocator); return out }
+	suffix := profile_join(profile_join("plugins",plugin_id),"plugin.json") if manifest else "config.json"
+	out := make([]string,2,context.temp_allocator)
+	out[0] = profile_join(root,suffix); out[1] = profile_join(profile_join(root,"config"),suffix)
+	return out
 }

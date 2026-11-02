@@ -7,8 +7,8 @@
  * color tokens and the `--color-*-soft` tint tokens. No raw hex / px / opacity
  * forks.
  *
- * `pending` shares the warning hue (the conventional in-progress amber) until a
- * dedicated pending token exists.
+ * `pending` (queued / in flight) shares the info blue, so warning keeps meaning
+ * "needs a person" (design system: Status tones).
  *
  * Internal to the primitives layer — NOT re-exported from the `@ui` barrel.
  */
@@ -21,7 +21,7 @@ export const TONE_STYLES: Record<Emphasis, Record<Tone, string>> = {
     success: 'bg-success-soft text-success border border-success-soft',
     warning: 'bg-warning-soft text-warning border border-warning-soft',
     danger: 'bg-danger-soft text-danger border border-danger-soft',
-    pending: 'bg-warning-soft text-warning border border-warning-soft',
+    pending: 'bg-info-soft text-info border border-info-soft',
   },
   outline: {
     neutral: 'text-muted border border-subtle',
@@ -29,15 +29,15 @@ export const TONE_STYLES: Record<Emphasis, Record<Tone, string>> = {
     success: 'text-success border border-success',
     warning: 'text-warning border border-warning',
     danger: 'text-danger border border-danger',
-    pending: 'text-warning border border-warning',
+    pending: 'text-info border border-info',
   },
   solid: {
     neutral: 'bg-strong text-primary',
     info: 'bg-info text-accent-fg',
     success: 'bg-success text-canvas',
     warning: 'bg-warning text-canvas',
-    danger: 'bg-danger text-primary',
-    pending: 'bg-warning text-canvas',
+    danger: 'bg-danger text-canvas',
+    pending: 'bg-info text-canvas',
   },
 };
 

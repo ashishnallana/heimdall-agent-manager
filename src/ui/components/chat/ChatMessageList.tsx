@@ -23,6 +23,7 @@ import ChatActionCard from './ChatActionCard';
 import { useIsMobile } from '../shell/responsive';
 import { Icon, Spinner } from '@ui';
 import { replaceVaultTokens } from '../../utils/vaultCrypto.ts';
+import WorkingRings from './WorkingRings';
 
 const EMPTY_TIMESTAMP: ChatTimestamp = { label: '', iso: '' };
 const EMPTY_DELIVERY: ChatDeliveryStatus = { glyph: '', label: '', tone: '' };
@@ -501,12 +502,8 @@ export default function ChatMessageList({
           })}
           {agentIsWorking && (
             <div data-debug-id={`${debugPrefix}-working-indicator`} className="msg flex min-w-0 max-w-full justify-start">
-              <div className="flex w-full flex-col items-start text-sm text-muted">
-                <div className="flex items-center gap-1.5 rounded-full border border-subtle bg-surface px-3 py-2 shadow-sm">
-                  <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-muted" style={{ animationDelay: '0ms' }} />
-                  <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-muted" style={{ animationDelay: '150ms' }} />
-                  <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-muted" style={{ animationDelay: '300ms' }} />
-                </div>
+              <div className="flex w-full flex-col items-start py-1">
+                <WorkingRings size={18} label="The agent is working" />
               </div>
             </div>
           )}

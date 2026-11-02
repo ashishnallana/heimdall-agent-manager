@@ -32,7 +32,7 @@
 # run_dir shim). The fake calls `ham-ctl agent start-success` + `lease next` and then
 # idles. The smoke drives submit/review AS that instance through the same
 # shim (scripts/task-v2-smoke/agentcall.py reads HEIMDALL_BRIDGE_ENDPOINT/TOKEN from
-# <run_dir>/.heimdall/bin/ham-ctl). When ham-ctl grows `lease submit` /
+# <run_dir>/bin/ham-ctl). When ham-ctl grows `lease submit` /
 # `review post` the smoke switches to the ctl verbs automatically (ctl is rebuilt on
 # every run and probed with `ham-ctl help lease`); until then the M2 verbs go through
 # the bridge's agent.rest.request relay to the hub agent-actions paths (same token).
@@ -110,7 +110,7 @@ api_ok() { # api + ok assertion
 }
 # agent calls (as an instance, through the bridge local endpoint)
 acall() { python3 "$HELPERS/agentcall.py" --shim "$1" "${@:2}"; }
-shim_of() { echo "$WORK/run-b/instances/$1/.heimdall/bin/ham-ctl"; }
+shim_of() { echo "$WORK/run-b/instances/$1/bin/ham-ctl"; }
 wait_for() { # wait_for <seconds> <desc> <cmd...>
   local deadline=$(( $(date +%s) + $1 )) desc="$2"; shift 2
   while :; do

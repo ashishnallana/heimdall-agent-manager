@@ -99,7 +99,14 @@ bridge_enroll_atomic_disarm :: proc() {
 	delete(g_enroll_atomic.token_file)
 	delete(g_enroll_atomic.config_path)
 	delete(g_enroll_atomic.api_base)
-	g_enroll_atomic = Bridge_Enroll_Atomic{}
+	// Keep the held mutex intact; resetting it before the deferred unlock
+	// corrupts Windows SRWLOCK state and hangs the next enrollment test.
+	g_enroll_atomic.active = false
+	g_enroll_atomic.state = .Waiting
+	g_enroll_atomic.cred = {}
+	g_enroll_atomic.token_file = ""
+	g_enroll_atomic.config_path = ""
+	g_enroll_atomic.api_base = ""
 }
 
 // bridge_enroll_atomic_state reports where the enrollment is.

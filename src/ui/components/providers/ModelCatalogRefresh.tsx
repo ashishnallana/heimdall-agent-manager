@@ -4,13 +4,13 @@ import { useListBridgeProvidersQuery, useRefreshBridgeModelsMutation } from '../
 import { modelCatalogSummary } from './modelCatalogStatus';
 
 /** Only this button starts probes. Mounting reads saved status only. */
-export default function ModelCatalogRefresh({ bridgeId, provider, online, disabled, debugPrefix }: {
-  bridgeId: string; provider?: string; online: boolean; disabled?: boolean; debugPrefix: string;
+export default function ModelCatalogRefresh({ bridgeId, provider, profileId, online, disabled, debugPrefix }: {
+  bridgeId: string; provider?: string; profileId?: string; online: boolean; disabled?: boolean; debugPrefix: string;
 }) {
   const [refresh, { isLoading }] = useRefreshBridgeModelsMutation();
   const status = useListBridgeProvidersQuery({ bridgeId }, { skip: !bridgeId });
   const [error, setError] = useState('');
-  const entry = status.currentData?.providers?.find((row: any) => row.provider === provider);
+  const entry = status.currentData?.providers?.find((row: any) => row.provider === provider && (row.profile_id || row.provider) === (profileId || provider));
   return <div className="space-y-1">
     <Button size="sm" variant="ghost" data-debug-id={`${debugPrefix}-model-refresh-btn`}
       disabled={disabled || !bridgeId || !online || isLoading}

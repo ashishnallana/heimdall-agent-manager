@@ -58,6 +58,7 @@ extension_test_sink :: proc(
 // Wire fixture for HTTP handler tests
 @(private = "file")
 extension_handler_fixture :: struct {
+	fixed_now:string,
 	db_path:       string,
 	conn:          sqlite.Conn,
 	pr_impl:       sqlite.Provider_Repo_SQLite,
@@ -91,6 +92,7 @@ extension_test_setup :: proc(
 	t: ^testing.T,
 	tag: string,
 	database_path: string = ":memory:",
+	fixed_now:string = "",
 ) -> ^extension_handler_fixture {
 	f := new(extension_handler_fixture)
 	f.db_path = database_path
@@ -110,6 +112,7 @@ extension_test_setup :: proc(
 	f.ag_repo = sqlite.new_agent_repository(&f.ag_impl, &f.conn)
 
 	f.clock = platform.real_clock()
+	if fixed_now!="" {f.fixed_now=fixed_now;f.clock=platform.Clock{ctx=rawptr(&f.fixed_now),now=profile_test_fixed_now}}
 	f.ids = http_test_id_generator()
 
 	f.sink_rec = Extension_Sink_Recorder{}
@@ -934,4 +937,139 @@ test_extension_uninstall_endpoint_dispatch_and_tracking :: proc(t: ^testing.T) {
 	statuses, _ := iface.bridge_provider_status_list(&f.pr_repo, f.bridge_id)
 	defer domain.bridge_provider_statuses_destroy(statuses)
 	for s in statuses do if s.provider == "codex" do testing.expect_value(t, s.extension_state, "absent")
+}
+
+// Profile transport tests share the real owner/auth/runtime fixture above.
+@(private="file")
+Profile_API_Job :: struct { fixture:^extension_handler_fixture, path,method,body:string, status:int, result:string }
+@(private="file")
+profile_api_test_worker :: proc(th:^thread.Thread) {
+ context.allocator=context.temp_allocator
+ job:=(^Profile_API_Job)(th.data)
+ req:=extension_test_request(job.fixture,job.path,job.body);req.method=job.method
+ response:=bridge_provider_profiles_handler(rawptr(&job.fixture.ph),req)
+ job.status=response.status
+ job.result=strings.clone(response.body,runtime.default_allocator())
+ free_all(context.temp_allocator)
+}
+@(test)
+test_profiles_opaque_relay_round_trip_all_operations :: proc(t:^testing.T) {
+ context.allocator=context.temp_allocator
+ f:=extension_test_setup(t,"profiles_relay",fixed_now="2026-10-30T12:00:00Z")
+ defer extension_test_teardown(f)
+ defer project_service.bridge_runtime_registry_destroy(&f.registry)
+ listener,listen_err:=net.listen_tcp(net.Endpoint{address=net.IP4_Loopback,port=0})
+ if !testing.expect(t,listen_err==nil) do return
+ defer net.close(listener)
+ endpoint,_:=net.bound_endpoint(listener)
+ client,dial_err:=net.dial_tcp(net.Endpoint{address=net.IP4_Loopback,port=endpoint.port})
+ if !testing.expect(t,dial_err==nil) do return
+ defer net.close(client)
+ hub,_,accept_err:=net.accept_tcp(listener)
+ if !testing.expect(t,accept_err==nil) do return
+ defer net.close(hub)
+ generation:=project_service.bridge_runtime_registry_generation(&f.registry,f.bridge_id)
+ project_service.bridge_runtime_registry_set_command_socket(&f.registry,f.bridge_id,hub,generation)
+ defer project_service.bridge_runtime_registry_mark_offline(&f.registry,f.bridge_id,generation)
+ sealed:="vault:v2:opaque:e7:UNCHANGED+/=ciphertext"
+ for route in ([]struct{method,suffix,op:string}{{"PUT","","upsert"},{"DELETE","","remove"},{"POST","/reset","reset"},{"POST","/get","get"}}) {
+  job:=Profile_API_Job{fixture=f,path=fmt.tprintf("/api/v1/bridges/%s/provider-profiles/claude_one%s",f.bridge_id,route.suffix),method=route.method,body=fmt.tprintf("{{\"sealed\":\"%s\"}}",sealed)}
+  worker:=thread.create(profile_api_test_worker);worker.data=rawptr(&job);thread.start(worker)
+  reader:=bridge_ws_reader_make(client)
+  frame,received,_:=bridge_ws_read_frame(&reader,5*time.Second);bridge_ws_reader_destroy(&reader)
+  if testing.expect(t,received,"relay dispatched opaque operation") {
+   testing.expect_value(t,json_string(frame,"type"),"provider_profile_op")
+   testing.expect_value(t,json_string(frame,"sealed"),sealed)
+   testing.expect_value(t,json_string(frame,"op"),route.op)
+   testing.expect_value(t,json_string(frame,"profile_id"),"claude_one")
+   id:=json_string(frame,"command_id")
+   reply:=fmt.tprintf("{{\"type\":\"provider_profile_op_result\",\"command_id\":\"%s\",\"ok\":true,\"error\":\"\",\"sealed\":\"vault:v2:opaque:e7:redacted-response\"}}",id)
+   testing.expect(t,bridge_runtime_service.runtime_command_result_for_connection(&f.registry,f.bridge_id,generation,id,reply))
+  } else {project_service.bridge_runtime_registry_mark_offline(&f.registry,f.bridge_id,generation)}
+  thread.join(worker);thread.destroy(worker)
+  testing.expect_value(t,job.status,200)
+  testing.expect(t,strings.contains(job.result,"vault:v2:opaque:e7:redacted-response"))
+  delete(job.result,runtime.default_allocator())
+ }
+}
+@(test)
+test_profiles_report_allowlist_authoritative_missing_and_in_use :: proc(t:^testing.T) {
+ context.allocator=context.temp_allocator
+ f:=extension_test_setup(t,"profiles_report",fixed_now="2026-10-30T12:00:00Z")
+ defer extension_test_teardown(f)
+ defer project_service.bridge_runtime_registry_destroy(&f.registry)
+ frame:="{\"type\":\"provider_profiles_report\",\"ok\":true,\"profiles\":[{\"profile_id\":\"claude_one\",\"provider\":\"claude\",\"enabled\":true,\"state\":\"ok\",\"env_count\":1,\"binary_path\":\"NEVER_STORE_PRIVATE_PATH\",\"environment\":[{\"name\":\"NEVER_STORE_ENV_NAME\",\"value\":\"NEVER_STORE_SECRET\"}],\"launch_args\":\"NEVER_STORE_ARGS\"}]}"
+ testing.expect_value(t,bridge_provider_profiles_frame(&f.bh,f.bridge_id,frame).code,domain.Error_Code.None)
+ req:=extension_test_request(f,fmt.tprintf("/api/v1/bridges/%s/provider-profiles",f.bridge_id));req.method="GET"
+ response:=bridge_provider_profiles_handler(rawptr(&f.ph),req)
+ testing.expect_value(t,response.status,200)
+ testing.expect(t,strings.contains(response.body,"claude_one"))
+ testing.expect(t,!strings.contains(response.body,"NEVER_STORE"))
+ profiles,_:=f.pr_repo.list_profiles(f.pr_repo.ctx,f.bridge_id)
+ found:=false
+ for p in profiles do if p.profile_id=="claude_one" do found=p.env_count==1
+ testing.expect(t,found)
+ _,saved,err:=iface.agent_save_instance(&f.ag_repo,domain.Agent_Instance{agent_instance_id="profile-live",owner_user_id=domain.User_ID(f.owner_user_id),agent_id="agent",bridge_id=f.bridge_id,provider="claude",provider_profile="claude_one",model="model",runtime_status="running"})
+ testing.expect(t,saved,err.message)
+ remove:=extension_test_request(f,fmt.tprintf("/api/v1/bridges/%s/provider-profiles/claude_one",f.bridge_id),"{\"sealed\":\"vault:v2:opaque:e1:test\"}");remove.method="DELETE"
+ denied:=bridge_provider_profiles_handler(rawptr(&f.ph),remove)
+ testing.expect_value(t,denied.status,409)
+ testing.expect(t,strings.contains(denied.body,"profile_in_use") && strings.contains(denied.body,"profile-live"))
+ testing.expect_value(t,bridge_provider_profiles_frame(&f.bh,f.bridge_id,"{\"ok\":false,\"profiles\":[]}").code,domain.Error_Code.Validation_Failed)
+ profiles,_=f.pr_repo.list_profiles(f.pr_repo.ctx,f.bridge_id)
+ for p in profiles do if p.profile_id=="claude_one" do testing.expect_value(t,p.state,"ok")
+ testing.expect_value(t,bridge_provider_profiles_frame(&f.bh,f.bridge_id,"{\"ok\":true,\"profiles\":[]}").code,domain.Error_Code.None)
+ profiles,_=f.pr_repo.list_profiles(f.pr_repo.ctx,f.bridge_id)
+ found=false
+ for p in profiles do if p.profile_id=="claude_one" do found=p.state=="missing"
+ testing.expect(t,found)
+}
+@(test)
+test_profiles_relay_auth_private_plaintext_and_offline_refused :: proc(t:^testing.T) {
+ context.allocator=context.temp_allocator
+ f:=extension_test_setup(t,"profiles_relay_boundary",fixed_now="2026-10-30T12:00:00Z")
+ defer extension_test_teardown(f)
+ defer project_service.bridge_runtime_registry_destroy(&f.registry)
+ req:=extension_test_request(f,fmt.tprintf("/api/v1/bridges/%s/provider-profiles/claude_one",f.bridge_id),"{\"sealed\":\"vault:v2:opaque:e1:test\",\"environment\":{\"TOKEN\":\"private\"}}");req.method="PUT"
+ result:=bridge_provider_profiles_handler(rawptr(&f.ph),req)
+ testing.expect_value(t,result.status,400)
+ req.headers=nil
+ result=bridge_provider_profiles_handler(rawptr(&f.ph),req)
+ testing.expect_value(t,result.status,401)
+ req.headers=f.user_headers;req.body="{\"sealed\":\"vault:v2:opaque:e1:test\"}"
+ generation:=project_service.bridge_runtime_registry_generation(&f.registry,f.bridge_id)
+ project_service.bridge_runtime_registry_mark_offline(&f.registry,f.bridge_id,generation)
+ result=bridge_provider_profiles_handler(rawptr(&f.ph),req)
+ testing.expect_value(t,result.status,409)
+}
+
+@(private="file")
+profile_test_fixed_now :: proc(ctx:rawptr) -> string {
+ return strings.clone((^string)(ctx)^)
+}
+
+@(test)
+test_profiles_extension_actions_and_update_reports_cannot_cross_accounts :: proc(t:^testing.T) {
+ context.allocator=context.temp_allocator
+ f:=extension_test_setup(t,"profiles_extension_scope",fixed_now="2026-10-30T12:00:00Z")
+ defer extension_test_teardown(f)
+ defer project_service.bridge_runtime_registry_destroy(&f.registry)
+ testing.expect_value(t,provider_service.apply_profiles_report(&f.pr_svc,f.bridge_id,[]domain.Bridge_Provider_Profile{{profile_id="claude_one",provider="claude",enabled=true,state="ok"},{profile_id="claude_two",provider="claude",enabled=true,state="ok"}}).code,domain.Error_Code.None)
+ for id in ([]string{"claude_one","claude_two"}) {
+  testing.expect_value(t,provider_service.apply_discovery_report(&f.pr_svc,f.bridge_id,[]domain.Bridge_Provider_Status{{bridge_id=f.bridge_id,provider="claude",profile_id=id,state="present",extension_state="outdated",extension_version="0.0.0"}}).code,domain.Error_Code.None)
+  body:=fmt.tprintf("{{\"profile_id\":\"%s\"}}",id)
+  req:=extension_test_request(f,fmt.tprintf("/api/v1/bridges/%s/providers/claude/extension-install",f.bridge_id),body)
+  response:=bridge_provider_extension_install_handler(rawptr(&f.ph),req)
+  testing.expect_value(t,response.status,202)
+  testing.expect_value(t,json_string(f.sink_rec.last_cmd.body_json,"profile_id"),id)
+ }
+ testing.expect_value(t,f.sink_rec.count,2)
+ // A default-account report cannot schedule an install into either custom
+ // account, even though both have cached outdated extension observations.
+ command:=domain.Provider_Extension_Command{command_id="cmd_ext_profiles_scan",bridge_id=f.bridge_id,kind="discovery",parent_id="profile-update",state="dispatched"}
+ report:="{\"request_id\":\"cmd_ext_profiles_scan\",\"providers\":[{\"provider\":\"claude\",\"profile_id\":\"claude\",\"state\":\"present\",\"extension_state\":\"outdated\",\"extension_version\":\"0.0.0\"}]}"
+ testing.expect_value(t,extension_apply_report(&f.bh,&command,report).code,domain.Error_Code.None)
+ testing.expect_value(t,f.sink_rec.count,2)
+ commands,_:=iface.provider_extension_command_list(&f.pr_repo,f.bridge_id)
+ for c in commands do testing.expect(t,c.parent_id!="profile-update","default report must not queue custom-profile followups")
 }

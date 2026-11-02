@@ -37,12 +37,16 @@ mkdir -p "$RUN_DIR/bridge"
 # Defaults are unchanged.
 HUB_ADDR="${HAM_DEV_HUB_ADDR:-127.0.0.1:8081}"
 PROXY_ADDR="${HAM_DEV_PROXY_ADDR:-127.0.0.1:8080}"
-# The hub's CSRF check compares a cookie-carrying request's Origin to this. Override
-# it when the browser reaches the stack through another origin, e.g. the Heimdall
-# preview (https://heimdall-preview.<domain>): the preview relay does not forward
-# Sec-Fetch-Site, so every PATCH/POST from the preview 403s with csrf_rejected
-# ("Origin does not match the UI origin") unless this names the preview origin.
-UI_ORIGIN="${HAM_DEV_UI_ORIGIN:-http://$PROXY_ADDR}"
+# The hub's --ui-origin: where its OIDC callback lands and the Origin its CSRF check
+# expects on cookie-carrying requests. It is the browser UI (Vite, `dev-stack.sh ui`),
+# not the proxy: the proxy brokers the sign-in (REQ-DEVAUTH) and sends this Origin to
+# the hub itself, so a login on localhost lands on the UI and cookie WebSockets pass.
+UI_ORIGIN="${HAM_DEV_UI_ORIGIN:-http://127.0.0.1:${HAM_DEV_UI_PORT:-5173}}"
+# Extra browser origins the dev proxy may attach the brokered session for, comma
+# separated (loopback origins always are). Only needed when a reverse proxy other
+# than scripts/dev-preview.mjs or scripts/preview-server.mjs fronts the stack; those
+# two rewrite the Heimdall preview origin themselves.
+TRUSTED_ORIGINS="${HAM_DEV_TRUSTED_ORIGINS:-}"
 # Mock OIDC provider (tools/mock-oidc): the only way to sign in to this local hub.
 MOCK_OIDC_PORT="${HAM_DEV_OIDC_PORT:-8090}"
 # shellcheck source=lib/hub-oidc-dev.sh
@@ -318,9 +322,13 @@ start() {
     exit 1
   fi
 
-  echo "[dev-stack] starting dev-proxy on $PROXY_ADDR -> hub"
+  echo "[dev-stack] starting dev-proxy on $PROXY_ADDR -> hub (brokers OIDC sign-in)"
+  local trusted_args=() origins=() origin
+  IFS=, read -ra origins <<<"$TRUSTED_ORIGINS"
+  for origin in ${origins[@]+"${origins[@]}"}; do [ -n "$origin" ] && trusted_args+=(--trusted-origin "$origin"); done
   nohup ./result-devproxy/bin/ham-dev-proxy \
     --listen "$PROXY_ADDR" --hub-url "http://$HUB_ADDR" \
+    --hub-ui-origin "$UI_ORIGIN" ${trusted_args[@]+"${trusted_args[@]}"} \
     --default-user tanmay \
     >"$RUN_DIR/dev-proxy.log" 2>&1 &
   echo $! > "$(_pidfile devproxy)"
@@ -375,9 +383,9 @@ status() {
 }
 
 ui() {
-  echo "[dev-stack] launching Vite + Electron dev UI (hub API -> local 8081, /api/v1 -> dev-proxy 8080)"
-  HEIMDALL_HUB_API_URL="http://127.0.0.1:8081" \
-  HEIMDALL_DEV_PROXY_URL="http://127.0.0.1:8080" \
+  echo "[dev-stack] launching Vite + Electron dev UI on $UI_ORIGIN (hub API -> $HUB_ADDR, /api/v1 -> dev-proxy $PROXY_ADDR)"
+  HEIMDALL_HUB_API_URL="http://$HUB_ADDR" \
+  HEIMDALL_DEV_PROXY_URL="http://$PROXY_ADDR" \
     npm run dev
 }
 

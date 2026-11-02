@@ -9,6 +9,8 @@ import React, {
   useState,
 } from 'react';
 import { useDispatch, useSelector, useStore } from 'react-redux';
+import { desktopUpdateFrozen, desktopUpdatePreparation } from '../../utils/desktopUpdatePreparation';
+import { writeClientStorageChecked, writeComposerDraftChecked } from '../../utils/clientPersistence';
 import {
   CommandPalette,
   Icon as UiIcon,
@@ -916,12 +918,14 @@ export function AgentChatPane({
 
   const [stagedBridgeId, setStagedBridgeId] = useState<string | null>(null);
   const [provider, setProvider] = useState('');
+  const [providerProfile, setProviderProfile] = useState('');
   const [model, setModel] = useState('');
   const [runtimeMenuOpen, setRuntimeMenuOpen] = useState(false);
   const editingRuntime =
     runtimeMenuOpen ||
     stagedBridgeId !== null ||
     Boolean(provider && provider !== instanceProvider) ||
+    Boolean(providerProfile && providerProfile !== (instance?.provider_profile || instanceProvider)) ||
     Boolean(model && model !== instanceModel);
   // Bridge status/update/revoke events patch or invalidate this list; opening the
   // runtime picker fetches only the selected bridge's provider status.
@@ -944,8 +948,11 @@ export function AgentChatPane({
   // Per-agent composer draft state isolated by routeInstanceId, with fallback to COMPOSER_DRAFT_KEY
   const loadedDraftAgentIdRef = useRef<string>(routeInstanceId);
   const [draft, setDraft] = useState<string>(() => readComposerDraft(routeInstanceId));
+  const updateDraftRef = useRef(draft);
+  updateDraftRef.current = draft;
 
   useEffect(() => {
+    if (desktopUpdateFrozen()) return;
     if (loadedDraftAgentIdRef.current !== routeInstanceId) {
       const nextDraft = readComposerDraft(routeInstanceId);
       loadedDraftAgentIdRef.current = routeInstanceId;
@@ -957,6 +964,8 @@ export function AgentChatPane({
 
   const updateDraft = useCallback(
     (value: string) => {
+      if (desktopUpdateFrozen()) return;
+      updateDraftRef.current = value;
       setDraft(value);
       if (loadedDraftAgentIdRef.current === routeInstanceId) {
         writeComposerDraft(routeInstanceId, value);
@@ -1045,6 +1054,19 @@ export function AgentChatPane({
   const [composerDockHeight, setComposerDockHeight] = useState(0);
   const [error, setError] = useState('');
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
+  const updateFilePickerPending = useRef(false);
+  const updateBlockers = useRef({ attachments, trayDraft, quotes, trayModeItem });
+  updateBlockers.current = { attachments, trayDraft, quotes, trayModeItem };
+  useEffect(() => desktopUpdatePreparation.register({
+    blocked: () => sendingRef.current || updateFilePickerPending.current || updateBlockers.current.attachments.length > 0
+      || updateBlockers.current.quotes.length > 0 || Boolean(updateBlockers.current.trayModeItem) || Boolean(updateBlockers.current.trayDraft.trim())
+      || [...quotedTrayDrafts.current.values()].some(value => Boolean(value.trim())),
+    flush: () => {
+      const latest = textareaRef.current?.value ?? updateDraftRef.current;
+      writeComposerDraftChecked(routeInstanceId, latest);
+      writeClientStorageChecked(COMPOSER_DRAFT_KEY, latest || null);
+    },
+  }), [routeInstanceId]);
   const [localMessages, setLocalMessages] = useState<Message[]>([]);
   useEffect(() => { setLocalMessages(current => current.filter(item => !(item as any).hasQuoteContext)); }, [quoteEpoch, quoteVaultKey]);
 
@@ -1216,6 +1238,12 @@ export function AgentChatPane({
   }]);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  useEffect(() => {
+    const input = fileInputRef.current;
+    const cancelled = () => { updateFilePickerPending.current = false; };
+    input?.addEventListener('cancel', cancelled);
+    return () => input?.removeEventListener('cancel', cancelled);
+  });
 
   const [renaming, setRenaming] = useState(false);
   const [titleDraft, setTitleDraft] = useState('');
@@ -1300,14 +1328,14 @@ export function AgentChatPane({
   }, [caps, instanceProvider]);
   const modelOptions = useMemo(() => {
     const selectedProvider = provider || instanceProvider || providerOptions[0] || '';
-    const cap = caps.find((c) => c.provider === selectedProvider);
+    const cap = caps.find((c) => c.provider === selectedProvider && (c.profile_id || c.provider) === (providerProfile || instance?.provider_profile || selectedProvider));
     const t = capModels(cap);
     const ordered = modelOrder
       .filter((x) => t.includes(x))
       .concat(t.filter((x) => !modelOrder.includes(x)));
     if (instanceModel && !ordered.includes(instanceModel)) ordered.unshift(instanceModel);
     return ordered;
-  }, [caps, provider, providerOptions, instanceProvider, instanceModel]);
+  }, [caps, provider, providerProfile, providerOptions, instanceProvider, instanceModel, instance?.provider_profile]);
 
   const chatMessages = useMemo(
     () =>
@@ -1358,9 +1386,9 @@ export function AgentChatPane({
   const instanceCatalogExtension = useMemo(
     () =>
       (instanceProvidersQuery.data?.providers || []).find(
-        (entry: any) => entry?.provider === instanceProvider,
+        (entry: any) => entry?.provider === instanceProvider && (entry?.profile_id || entry?.provider) === (instance?.provider_profile || instanceProvider),
       )?.extension ?? null,
-    [instanceProvidersQuery.data, instanceProvider],
+    [instanceProvidersQuery.data, instanceProvider, instance?.provider_profile],
   );
   const hasUploadingAttachments = attachments.some((item) => item.status === 'uploading');
   const hasFailedAttachments = attachments.some((item) => item.status === 'error');
@@ -1396,8 +1424,9 @@ export function AgentChatPane({
   useEffect(() => {
     if (settingsEditedRef.current) return;
     setProvider(instanceProvider);
+    setProviderProfile(String(instance?.provider_profile || instanceProvider));
     setModel(instanceModel);
-  }, [instanceProvider, instanceModel]);
+  }, [instanceProvider, instanceModel, instance?.provider_profile]);
   const observedOperationRef = useRef<InstanceReconfiguration | undefined>(undefined);
   useEffect(() => {
     observedOperationRef.current = undefined;
@@ -1405,6 +1434,7 @@ export function AgentChatPane({
     setStagedBridgeId(null);
     setAcceptedOperation(null);
     setProvider(instanceProvider);
+    setProviderProfile(String(instance?.provider_profile || instanceProvider));
     setModel(instanceModel);
     setReconfigStatus('');
   }, [agentInstanceId]);
@@ -1418,6 +1448,7 @@ export function AgentChatPane({
     settingsEditedRef.current = true;
     setStagedBridgeId(operation.destination.bridge_id);
     setProvider(operation.destination.provider);
+    setProviderProfile(operation.destination.provider_profile || operation.destination.provider);
     setModel(operation.destination.model);
   }, [operation?.operation_id, operation?.phase]);
   // React to an operation settling WHILE this pane watches it, never to a settled
@@ -1434,6 +1465,7 @@ export function AgentChatPane({
     settingsEditedRef.current = false;
     setStagedBridgeId(null);
     setProvider(operation.destination.provider);
+    setProviderProfile(operation.destination.provider_profile || operation.destination.provider);
     setModel(operation.destination.model);
   }, [operation?.operation_id, operation?.phase, operation?.failure_code]);
   useEffect(() => {
@@ -1488,12 +1520,15 @@ export function AgentChatPane({
     return () => window.removeEventListener(CONVERSATION_MESSAGES_READ_EVENT, onRead);
   }, [conversationId]);
 
+  const instanceProfile = String(instance?.provider_profile || instanceProvider);
+  const effectiveProfile = providerProfile || instanceProfile;
   const effectiveProvider = provider || instanceProvider;
   const effectiveModel = model || instanceModel;
   const selectionChangesConfig =
     Boolean(agentInstanceId) &&
     (destinationBridgeId !== instanceBridgeId ||
       (effectiveProvider && effectiveProvider !== instanceProvider) ||
+      effectiveProfile !== instanceProfile ||
       (effectiveModel && effectiveModel !== instanceModel));
   const validityInput = {
     instanceLoaded: Boolean(instance),
@@ -1507,6 +1542,7 @@ export function AgentChatPane({
     projectLoaded: Boolean(projectQuery.data),
     projectError: projectQuery.isError,
     provider: instanceProvider,
+    providerProfile: instanceProfile,
     model: instanceModel,
     capabilities: currentCaps,
     capabilitiesLoaded: !instanceBridge || instanceProviders.loaded,
@@ -1521,6 +1557,7 @@ export function AgentChatPane({
     projectLoaded: Boolean(destinationProjectQuery.data),
     projectError: destinationProjectQuery.isError,
     provider: effectiveProvider,
+    providerProfile: effectiveProfile,
     model: effectiveModel,
     capabilities: caps,
     capabilitiesLoaded: !destinationBridge || destination.loaded,
@@ -1635,6 +1672,7 @@ export function AgentChatPane({
   }
 
   async function uploadAttachment(file: File, existingLocalId = '') {
+    if (desktopUpdateFrozen()) return;
     if (configurationInputBlocked || sendingRef.current) return;
     const localId =
       existingLocalId || `att_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -1693,6 +1731,8 @@ export function AgentChatPane({
   }
 
   function handleAttachmentInput(event: any) {
+    updateFilePickerPending.current = false;
+    if (desktopUpdateFrozen()) return;
     if (configurationInputBlocked || sendingRef.current) return;
     const files = Array.from(event.target.files || []) as File[];
     event.target.value = '';
@@ -1700,7 +1740,11 @@ export function AgentChatPane({
   }
 
   function openAttachmentPicker() {
-    if (!configurationInputBlocked && !sendingRef.current) fileInputRef.current?.click();
+    if (desktopUpdateFrozen()) return;
+    if (!configurationInputBlocked && !sendingRef.current && fileInputRef.current) {
+      updateFilePickerPending.current = true;
+      fileInputRef.current.click();
+    }
   }
 
   function handleComposerPaste(event: ClipboardEvent<HTMLTextAreaElement>) {
@@ -1712,6 +1756,7 @@ export function AgentChatPane({
   }
 
   async function submitTrayMode() {
+    if (desktopUpdateFrozen()) return;
     if (!trayMode || !trayModeItem) return;
     const text = appendArtifactLinks(
       trayDraft.trim(),
@@ -1735,6 +1780,7 @@ export function AgentChatPane({
 
   async function submit(event: FormEvent) {
     event.preventDefault();
+    if (desktopUpdateFrozen()) return;
     if (sendDisabled || sendingRef.current) return;
     if (trayModeItem) {
       await submitTrayMode();
@@ -2152,6 +2198,7 @@ export function AgentChatPane({
         bridge_id: destinationBridgeId,
         project_id: destinationProjectId,
         provider: nextProvider,
+        provider_profile: effectiveProfile,
         model: nextModel,
         expected_revision: Number(instance?.configuration_revision || 0),
         idempotency_key:
@@ -2216,6 +2263,7 @@ export function AgentChatPane({
     settingsEditedRef.current = false;
     setStagedBridgeId(null);
     setProvider(instanceProvider);
+    setProviderProfile(String(instance?.provider_profile || instanceProvider));
     setModel(instanceModel);
     setReconfigStatus('');
   }
@@ -2328,13 +2376,14 @@ export function AgentChatPane({
       <RuntimeConfigurationOptions
         debugPrefix="conversation"
         bridges={bridges}
-        selection={{ bridgeId: destinationBridgeId, provider, model }}
+        selection={{ bridgeId: destinationBridgeId, provider, providerProfile: effectiveProfile, model }}
         requireReconfiguration
         disabled={runtimeActionBusy || operationBlocksInput || isStarting}
         onChange={(next) => {
           settingsEditedRef.current = true;
           setStagedBridgeId(next.bridgeId);
           setProvider(next.provider);
+          setProviderProfile(next.providerProfile || next.provider);
           setModel(next.model);
         }}
       />
@@ -2387,6 +2436,7 @@ export function AgentChatPane({
         value={trayModeItem ? trayDraft : draft}
         disabled={normalSendBusy || (trayModeItem ? false : configurationInputBlocked)}
         onChange={(e) => {
+          if (desktopUpdateFrozen()) return;
           if (trayModeItem) {
             setTrayDraft(e.target.value);
             return;

@@ -940,7 +940,7 @@ export function agentErrorText(err: unknown, fallback = 'Something went wrong'):
 
 export type InstanceConfiguration = {
   bridge_id: string; bridge_label: string; project_id: string; project_label: string;
-  project_path: string; provider: string; model: string;
+  project_path: string; provider: string; provider_profile?: string; model: string;
   /** Instance permission override: '' inherits the agent's mode. */
   permission_mode?: '' | 'yolo' | 'ask';
 };
@@ -952,7 +952,7 @@ export type InstanceReconfiguration = {
   failure_code: string; failure_message: string; revision: number; updated_at?: string;
 };
 export type ApplyInstanceConfigurationInput = {
-  instanceId: string; bridge_id: string; project_id: string; provider: string; model: string;
+  instanceId: string; bridge_id: string; project_id: string; provider: string; provider_profile?: string; model: string;
   idempotency_key: string; expected_revision: number;
   /** Optional: set this instance's permission mode (restarts it with/without yolo flags). */
   permission_mode?: 'yolo' | 'ask';

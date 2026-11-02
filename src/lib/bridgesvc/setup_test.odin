@@ -21,7 +21,11 @@ Fake :: struct {
 	undone:      [dynamic]Step,
 	events:      [dynamic]Event,
 	finished_ok: bool,
+	finished:    bool,
 	inject:      bool,
+	rollback_fail: bool,
+	rollback_fail_step: Step,
+	rollback_failed: bool,
 }
 
 @(private = "file")
@@ -44,8 +48,12 @@ fake_ops :: proc(f: ^Fake) -> Setup_Ops {
 		},
 		undo = proc(data: rawptr, step: Step) {
 			f := (^Fake)(data)
-			f.pending[step] = false
 			append(&f.undone, step)
+			if f.rollback_fail && step == f.rollback_fail_step {
+				f.rollback_failed = true
+				return
+			}
+			f.pending[step] = false
 		},
 		emit = proc(data: rawptr, ev: Event) {
 			f := (^Fake)(data)
@@ -53,6 +61,7 @@ fake_ops :: proc(f: ^Fake) -> Setup_Ops {
 		},
 		finish = proc(data: rawptr, ok: bool) {
 			f := (^Fake)(data)
+			f.finished = true
 			f.finished_ok = ok
 			if ok do f.live = "v2"
 		},
@@ -94,6 +103,37 @@ test_setup_fatal_failure_at_each_step_rolls_back :: proc(t: ^testing.T) {
 		testing.expect_value(t, f.undone[len(f.undone) - 1], Step.Lock)
 		testing.expect_value(t, len(f.remediated), 0)
 	}
+}
+
+@(test)
+test_setup_failed_undo_stops_destructive_rollback_and_reports_incomplete :: proc(t: ^testing.T) {
+	f := fake_make()
+	f.inject, f.fail_step, f.fail_with, f.fail_times = true, .Verify, .Fatal, 99
+	f.rollback_fail, f.rollback_fail_step = true, .Start
+	ops := fake_ops(&f)
+	ops.rollback_status = proc(data: rawptr) -> (bool, string) {
+		f := (^Fake)(data)
+		return !f.rollback_failed, "replacement process could not be stopped" if f.rollback_failed else ""
+	}
+	ok, failed := run_setup(ops)
+	testing.expect(t, !ok)
+	testing.expect_value(t, failed, Step.Verify)
+	testing.expect(t, f.finished && !f.finished_ok, "finish must still run to release the install lock")
+	testing.expect_value(t, len(f.undone), 2)
+	testing.expect_value(t, f.undone[0], Step.Verify)
+	testing.expect_value(t, f.undone[1], Step.Start)
+	testing.expect(t, f.pending[.Binaries], "failed process shutdown must prevent earlier binary rollback")
+	testing.expect(t, f.pending[.Stage], "rollback must not continue destroying staging after an undo failure")
+	warnings, false_restorations := 0, 0
+	for ev in f.events {
+		if ev.state == "warning" && strings.contains(ev.message, "rollback incomplete: replacement process could not be stopped") {
+			warnings += 1
+			testing.expect_value(t, ev.step, "start")
+		}
+		if ev.state == "rollback" && ev.step == "start" do false_restorations += 1
+	}
+	testing.expect_value(t, warnings, 1)
+	testing.expect_value(t, false_restorations, 0)
 }
 
 @(test)
@@ -313,4 +353,39 @@ test_render_service_files :: proc(t: ^testing.T) {
 	odd := Render_Input{hub = "https://h.example.com", bridge_port = 1, endpoint_port = 2, path_env = "/a&b%c"}
 	testing.expect(t, strings.contains(render_service_file(mac, layout_for(mac, name), odd), "/a&amp;b%c"))
 	testing.expect(t, strings.contains(render_service_file(linux, layout_for(linux, name), odd), "/a&b%%c"))
+}
+
+// The bridge execs HEIMDALL_HAM_CTL_BIN from every agent shim, so it must name the
+// ham-ctl binary setup installs, never the ham-ctl-<service> wrapper (which setup
+// once never wrote, leaving every agent shim pointing at a missing file).
+@(test)
+test_render_ctl_bin_and_wrapper :: proc(t: ^testing.T) {
+	in_ := Render_Input{hub = "https://hub.example.com", bridge_port = 49325, endpoint_port = 49326}
+	name := "heimdall-bridge-hub-example-com_work"
+	linux := Host{os = .Linux, home = "/home/u"}
+	l := layout_for(linux, name)
+	bin :: "/home/u/.local/share/heimdall/bridges/heimdall-bridge-hub-example-com_work/bin"
+	env := service_env(linux, l, in_)
+	found := false
+	for e in env do if strings.has_prefix(e, "HEIMDALL_HAM_CTL_BIN=") {
+		found = true
+		testing.expect_value(t, e, "HEIMDALL_HAM_CTL_BIN=" + bin + "/ham-ctl")
+	}
+	testing.expect(t, found, "service env sets HEIMDALL_HAM_CTL_BIN")
+
+	testing.expect_value(t, ctl_wrapper_path(linux, l), bin + "/ham-ctl-heimdall-bridge-hub-example-com_work")
+	sh := render_ctl_wrapper(linux, l, in_)
+	testing.expect(t, strings.has_prefix(sh, "#!/bin/sh\n"))
+	testing.expect(t, strings.contains(sh, `: "${HEIMDALL_BRIDGE_ENDPOINT:=tcp:127.0.0.1:49326}"`), "keeps a caller-set endpoint, else this profile's")
+	testing.expect(t, strings.contains(sh, "exec '" + bin + "/ham-ctl' --config '/home/u/.config/heimdall/bridges/heimdall-bridge-hub-example-com_work/config.toml' \"$@\"\n"))
+
+	win := Host{os = .Windows, appdata = "C:/R", local_appdata = "C:/L"}
+	wl := layout_for(win, name)
+	for e in service_env(win, wl, in_) do if strings.has_prefix(e, "HEIMDALL_HAM_CTL_BIN=") {
+		testing.expect(t, strings.has_suffix(e, "/bin/ham-ctl.exe"), e)
+	}
+	testing.expect(t, strings.has_suffix(ctl_wrapper_path(win, wl), "/bin/ham-ctl-heimdall-bridge-hub-example-com_work.cmd"))
+	cmd := render_ctl_wrapper(win, wl, in_)
+	testing.expect(t, strings.contains(cmd, "if not defined HEIMDALL_BRIDGE_ENDPOINT set \"HEIMDALL_BRIDGE_ENDPOINT=tcp:127.0.0.1:49326\"\r\n"))
+	testing.expect(t, strings.contains(cmd, "/bin/ham-ctl.exe\" --config \"C:/R/heimdall/bridges/heimdall-bridge-hub-example-com_work/config.toml\" %*\r\n"))
 }

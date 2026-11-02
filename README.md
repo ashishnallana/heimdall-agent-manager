@@ -316,7 +316,7 @@ directories, review records, and shared chain context.
 
 A managed directory on the Bridge for an agent instance's bootstrap and runtime context.
 Before a provider process starts, the Bridge recreates it and writes instructions, applicable
-memories/skills, a manifest, and `./.heimdall/bin/ham-ctl`.
+memories/skills, a manifest, and `./bin/ham-ctl`.
 
 A run directory is separate from the task's code checkout. Read `TASK.md` and use its
 Workdir for project edits, checks, and commits; do not put project changes in the bootstrap

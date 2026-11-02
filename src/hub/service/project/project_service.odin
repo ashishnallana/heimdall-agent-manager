@@ -64,6 +64,7 @@ Create_Project_Input :: struct {
 Update_Project_Input :: struct {
 	name, slug, description, repo_url, vcs_kind, default_path: string,
 	owner_user_id: string, // if present and different, rejected as immutable
+	has_repo_url,has_vcs_kind:bool,
 }
 Bridge_Path_Input :: struct { path: string }
 Validation_Result :: struct { path: domain.Project_Bridge_Path, effective_path: string }
@@ -152,8 +153,8 @@ update :: proc(service: ^Project_Service, auth: contracts.Auth_Context, project_
 	if input.name != "" do project.name = input.name
 	if input.slug != "" do project.slug = input.slug
 	if input.description != "" do project.description = input.description
-	if input.repo_url != "" do project.repo_url = input.repo_url
-	if input.vcs_kind != "" do project.vcs_kind = input.vcs_kind
+	if input.repo_url != "" || input.has_repo_url do project.repo_url = input.repo_url
+	if input.vcs_kind != "" || input.has_vcs_kind do project.vcs_kind = input.vcs_kind
 	if input.default_path != "" do project.default_path = input.default_path
 	project.updated_at = platform.clock_now(service.clock)
 	return iface.project_update(service.projects, project)

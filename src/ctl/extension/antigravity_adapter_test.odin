@@ -312,9 +312,9 @@ test_hook_run_antigravity_auto_approves_ham_ctl :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 
 	env := ENV
-	env.ctl_bin = "/home/tanmay/heimdall-agent-manager/.heimdall/bin/ham-ctl"
+	env.ctl_bin = "/home/tanmay/heimdall-agent-manager/bin/ham-ctl"
 
-	raw := `{"hookEventName":"PreToolUse","conversationId":"s1","permissionMode":"ask","toolCall":{"name":"run_command","args":{"CommandLine":"./.heimdall/bin/ham-ctl chat read","Cwd":"/home/tanmay/heimdall-agent-manager"}}}`
+	raw := `{"hookEventName":"PreToolUse","conversationId":"s1","permissionMode":"ask","toolCall":{"name":"run_command","args":{"CommandLine":"./bin/ham-ctl chat read","Cwd":"/home/tanmay/heimdall-agent-manager"}}}`
 	agy_fake_reset(`{"ok":true,"data":{"decision":"deny"}}`, true)
 
 	out := hook_run("antigravity", raw, env, agy_fake_send)
@@ -336,7 +336,7 @@ test_hook_run_antigravity_timeout_falls_back_to_ask :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 
 	env := ENV
-	env.ctl_bin = "/home/tanmay/heimdall-agent-manager/.heimdall/bin/ham-ctl"
+	env.ctl_bin = "/home/tanmay/heimdall-agent-manager/bin/ham-ctl"
 	env.permission_timeout_ms = 1_000 // Short timeout for test
 
 	raw := `{"hookEventName":"PreToolUse","conversationId":"s1","permissionMode":"ask","toolCall":{"name":"run_command","args":{"CommandLine":"rm -rf /tmp/test","Cwd":"/home/tanmay/heimdall-agent-manager"}}}`

@@ -127,7 +127,9 @@ router_dispatch_matched :: proc(router: ^Router, req: Request) -> (Response, str
 	if router == nil {
 		return respond_error(domain.domain_error(.Internal_Error, "router is not configured"), req.request_id), ROUTE_UNMATCHED
 	}
-	// Non-/api/v1 paths are CLOSED, with no exceptions. There was previously an
+	// Non-/api/v1 paths are CLOSED except exact GET-only MCP discovery metadata
+	// paths, whose handlers are registered only by the opt-in synthetic probe.
+	// There was previously an
 	// allowlist escape hatch here (PUBLIC_PAGE_PATHS, admitting /policy and /toc
 	// for Google's OAuth consent-screen verifier); the legal pages now live as
 	// static files on www.brolabs.ai/heimdall/{toc,privacy} and the allowlist,
@@ -139,7 +141,7 @@ router_dispatch_matched :: proc(router: ^Router, req: Request) -> (Response, str
 	// anonymous surface and is a security-significant change, not a routing
 	// convenience. The two upgrade dispatchers above keep their own
 	// unconditional /api/v1 gate regardless.
-	if !strings.has_prefix(req.path, contracts.API_V1_BASE_PATH) {
+	if !strings.has_prefix(req.path, contracts.API_V1_BASE_PATH) && !(req.method == "GET" && mcp_discovery_path(req.path)) {
 		return respond_error(domain.domain_error(.Not_Found, "route not found"), req.request_id), ROUTE_UNMATCHED
 	}
 	for route in router.routes {

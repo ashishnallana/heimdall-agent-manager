@@ -88,6 +88,7 @@ export function permissionToggleRequest(
     bridge_id: String(instance?.bridge_id || ''),
     project_id: String(instance?.project_id || ''),
     provider: String(instance?.provider || ''),
+    ...(instance?.provider_profile ? { provider_profile: String(instance.provider_profile) } : {}),
     model: String(instance?.model || ''),
     expected_revision: Number(instance?.configuration_revision || 0),
     idempotency_key: idempotencyKey,

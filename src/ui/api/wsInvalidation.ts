@@ -19,6 +19,7 @@ import { AGENT_BLOCKERS_CHANGE } from '../components/extension/blockersModel';
 import { upsertTaskInList, upsertTaskLogEvent } from './taskCache';
 import { attentionEventReceived } from '../store/attentionSlice';
 import { announcePaneVaultLocked } from '../utils/vaultLockedError';
+import { runMcpWorker } from '../services/mcpWorker';
 import { GUIDE_AGENT_ID, appendMessage, chatEventReceived, patchChatMessageStatus } from '../store/chatSlice';
 import { wsChainViewRefreshRequested } from '../store/chainViewSlice';
 import { wsRefreshRequested } from '../store/homeSlice';
@@ -1219,6 +1220,9 @@ export function handleUserWsEvent(dispatch: any, payload: any, ctx: WsCtx = {}) 
     case 'agent_lifecycle_changed':
     case 'agent_runtime_changed':
       handleAgentEvent(dispatch, payload, ctx);
+      return;
+    case 'mcp_worker_available':
+      void runMcpWorker();
       return;
     case 'resource_changed':
       handleResourceChanged(dispatch, payload, ctx);

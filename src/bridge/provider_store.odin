@@ -27,6 +27,7 @@ Bridge_Provider_Profile :: struct {
 	skill_dir: string,
 	bootstrap_file_name: string,
 	model_flag: string,
+	extra_args: []string, // provider profile args, or the default Codex profile's own-extension overrides; never from the catalog
 	startup_detection: cfg_lib.Startup_Detection_Config,
 	activity_detection: cfg_lib.Activity_Detection_Config,
 }
@@ -144,6 +145,7 @@ bridge_agent_runtime_profile :: proc(profile: Bridge_Provider_Profile) -> agent_
 		prompt_tmux_delay_ms = profile.prompt_tmux_delay_ms,
 		prompt_tmux_enter = profile.prompt_tmux_enter,
 		model_flag = profile.model_flag,
+		extra_args = profile.extra_args,
 		startup_detection = profile.startup_detection,
 		activity_detection = profile.activity_detection,
 	}

@@ -22,6 +22,9 @@ Connection :: struct {
 	curl_ws: httpc.WebSocket,
 	tls: tls.Stream,
 	connected: bool,
+	// Optional owner-level outbound fence. Atomic and monotonic for this connection.
+	// A writer already in transport I/O may finish; queued writers must refuse.
+	send_disabled: ^bool,
 	pending_texts: [dynamic]string,
 	// Opcode (0x1 text / 0x2 binary) of each pending_texts entry, same index.
 	pending_opcodes: [dynamic]u8,
@@ -208,6 +211,7 @@ poll_text :: proc(conn: ^Connection) -> (text: string, ok: bool) {
 // poll_frame returns the next complete data message and its opcode (0x1 text, 0x2 binary).
 // Binary payloads are returned as a string over the raw bytes — the caller transmutes.
 poll_frame :: proc(conn: ^Connection) -> (text: string, opcode: u8, ok: bool) {
+	if conn.send_disabled != nil && sync.atomic_load(conn.send_disabled) do return "", 0, false
 	if !conn.connected do return "", 0, false
 	if len(conn.pending_texts) > 0 {
 		text = conn.pending_texts[0]
@@ -221,6 +225,7 @@ poll_frame :: proc(conn: ^Connection) -> (text: string, opcode: u8, ok: bool) {
 	n := 0
 	if conn.curl_secure {
 		for control_count := 0; control_count < 16; control_count += 1 {
+			if conn.send_disabled != nil && sync.atomic_load(conn.send_disabled) do return "", 0, false
 			read_n, chunk, read_ok := httpc.websocket_receive(&conn.curl_ws, buf[:])
 			if !read_ok {
 				conn.connected = false
@@ -401,11 +406,13 @@ send_binary :: proc(conn: ^Connection, payload: []byte) -> bool {
 
 @(private)
 send_frame :: proc(conn: ^Connection, opcode: u8, text: string, timeout: time.Duration = WRITE_DEADLINE) -> bool {
+	if conn.send_disabled != nil && sync.atomic_load(conn.send_disabled) do return false
 	if !conn.connected do return false
 	n := len(text)
 	if n > WS_MAX_SERVER_PAYLOAD do return false
 	sync.mutex_lock(&conn.send_mu)
 	defer sync.mutex_unlock(&conn.send_mu)
+	if conn.send_disabled != nil && sync.atomic_load(conn.send_disabled) do return false
 	// Re-check under the lock: a writer that blocked here may have been waiting on a
 	// peer another writer has since found dead.
 	if !conn.connected do return false

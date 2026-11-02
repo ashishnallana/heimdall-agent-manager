@@ -1,4 +1,6 @@
 import { useWindowChrome } from '../../hooks/useWindowChrome';
+import { desktopUpdateFrozen, desktopUpdatePreparation } from '../../utils/desktopUpdatePreparation';
+import { flushWorkspaceForDesktopUpdate } from '../../utils/desktopUpdatePersistence';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { PaneVisibilityProvider } from '../workbench/paneVisibility';
 import { useDispatch, useSelector } from 'react-redux';
@@ -295,15 +297,25 @@ export function Workspace({ focusMessageId, isMobile = false, leading, leadingWi
 
   // 4. Persist split geometry + groups per id set (Jetski layout persistence).
   const prevActiveKeyRef = useRef<string | null>(null);
+  const updateLayout = useRef({ tree, auxPanesState, auxWidth, layoutReady });
+  updateLayout.current = { tree, auxPanesState, auxWidth, layoutReady };
+  useEffect(() => desktopUpdatePreparation.register({
+    blocked: () => !hydratedRef.current || !updateLayout.current.layoutReady,
+    flush: () => {
+      const latest = updateLayout.current;
+      flushWorkspaceForDesktopUpdate(latest.tree, latest.auxPanesState, latest.auxWidth);
+    },
+  }), []);
   useEffect(() => {
+    if (desktopUpdateFrozen()) return;
     if (lastSyncKeyRef.current === null) return; // layout not yet derived from the URL
     prevActiveKeyRef.current = persistSplitLayout(tree, prevActiveKeyRef.current);
   }, [tree]);
   useEffect(() => {
-    if (hydratedRef.current) writeAuxPanesState(auxPanesState);
+    if (!desktopUpdateFrozen() && hydratedRef.current) writeAuxPanesState(auxPanesState);
   }, [auxPanesState]);
   useEffect(() => {
-    if (hydratedRef.current) writeWorkspaceChromeState({ auxWidth });
+    if (!desktopUpdateFrozen() && hydratedRef.current) writeWorkspaceChromeState({ auxWidth });
   }, [auxWidth]);
 
   // 5. Seed the current strip (Jetski createDefaultPaneState) once the

@@ -92,6 +92,7 @@ Agent_Instance :: struct {
 	// display_name is the human-readable title for this instance (defaults to "<agent-name> #<n>").
 	display_name: string,
 	provider: string,
+	provider_profile: string,
 	model: string,
 	kind: string,
 	project_id: Project_ID,
@@ -173,6 +174,7 @@ agent_instance_destroy :: proc(inst: ^Agent_Instance) {
 	if len(inst.agent_id) > 0 do delete(inst.agent_id)
 	if len(inst.bridge_id) > 0 do delete(inst.bridge_id)
 	if len(inst.display_name) > 0 do delete(inst.display_name)
+	if len(inst.provider_profile)>0 do delete(inst.provider_profile)
 	if len(inst.provider) > 0 do delete(inst.provider)
 	if len(inst.model) > 0 do delete(inst.model)
 	if len(inst.kind) > 0 do delete(inst.kind)

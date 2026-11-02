@@ -521,6 +521,7 @@ bridge_action_scheduler_start :: proc() {
 
 bridge_action_scheduler_worker :: proc() {
 	for bridge_action_sched_state.running {
+		if sync.atomic_load(&bridge_hub_traffic_stopped) do return
 		bridge_action_scheduler_tick()
 		time.sleep(time.Duration(ACTION_SCHEDULER_TICK_INTERVAL_S) * time.Second)
 	}
@@ -828,7 +829,7 @@ bridge_action_scheduler_execute :: proc(action_id: string, next_target_run_at: s
 	}
 	payload := Execute_Body{target_run_at = next_target_run_at, instance_id = instance_id, last_spawned_instance_id = last_spawned_instance_id}
 	headers := [?]httpc.Header{httpc.bearer(credential)}
-	resp, err := httpc.send({
+	resp, err := bridge_hub_http_send_alloc({
 		method = .POST, url = bridge_hub_url(), path = {"api", "v1", "bridge", "actions", action_id, "execute"},
 		headers = headers[:], body = httpc.json_body(payload), timeout_ms = 10_000,
 	})
@@ -913,7 +914,7 @@ bridge_action_scheduler_resolve_or_launch_instance :: proc(due: Action_Queue_Ite
 	force_create := due.instance_strategy == "fresh_per_run"
 	if !force_create {
 		// 1. Check existing instances via GET /api/v1/agent-instances?agent_id=...
-		resp, list_err := httpc.send({
+		resp, list_err := bridge_hub_http_send_alloc({
 			method = .GET, url = bridge_hub_url(), path = {"api", "v1", "agent-instances"},
 			query = {{"agent_id", due.target_agent_id}}, headers = headers[:], timeout_ms = 10_000,
 		})
@@ -971,7 +972,7 @@ bridge_action_scheduler_resolve_or_launch_instance :: proc(due: Action_Queue_Ite
 		agent_id = due.target_agent_id, bridge_id = due.target_bridge_id, provider = due.target_provider,
 		model = due.target_model, project_id = due.target_project_id,
 	}
-	launch_resp, launch_err := httpc.send({
+	launch_resp, launch_err := bridge_hub_http_send_alloc({
 		method = .POST, url = bridge_hub_url(), path = {"api", "v1", "agent-instances"},
 		headers = headers[:], body = httpc.json_body(launch), timeout_ms = 10_000,
 	})
@@ -992,6 +993,7 @@ bridge_action_scheduler_resolve_or_launch_instance :: proc(due: Action_Queue_Ite
 }
 
 bridge_action_scheduler_tick :: proc(now_override: i64 = 0, fetch: Action_Scheduler_Fetch = bridge_hub_http_send, execute := bridge_action_scheduler_execute, resolve := bridge_action_scheduler_resolve_or_launch_instance, revalidate: proc(fetch: Action_Scheduler_Fetch) -> bool = bridge_action_scheduler_revalidate) -> int {
+	if sync.atomic_load(&bridge_hub_traffic_stopped) do return 0
 	now_ms := now_override if now_override > 0 else bridge_runtime_now_ms()
 	actions := 0
 

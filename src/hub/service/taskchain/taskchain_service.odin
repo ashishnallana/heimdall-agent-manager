@@ -1,5 +1,7 @@
 package taskchain
 
+import provider_service "odin_test:hub/service/provider"
+
 import "core:fmt"
 import "core:log"
 import "core:os"
@@ -143,11 +145,18 @@ Create_Task_Input :: struct {
 }
 
 Update_Task_Input :: struct {
+    require_requirements_context: bool,
+	// Public adapters supply the revision they read and a sealed change reason.
+	// Zero keeps trusted internal callers compatible; every route still records
+	// requirement history. It is not the broad MCP record revision.
+	expected_requirements_revision: i64,
+	requirements_reason: string,
+	requirements_request_id: string,
 	title: string,
 	description: string,
 	// brief_json is a top-level key merge into the stored brief (an explicit
 	// null removes a key); replace_brief swaps the whole brief instead. Keys
-	// outside taskv2.BRIEF_KEYS are rejected. While leased only acceptance may change.
+	// outside taskv2.BRIEF_KEYS are rejected. Live goal/acceptance edits are versioned.
 	brief_json: string,
 	replace_brief: bool,
 	assignee_agent_id: string,
@@ -174,6 +183,7 @@ Update_Task_Input :: struct {
 }
 
 Task_Comment_Input :: struct {
+	delegated_client_id,delegated_grant_id:string,
 	task_id: domain.Task_ID,
 	body: string,
 	notify: []string,
@@ -876,7 +886,7 @@ brief_publish_problems :: proc(service: ^Taskchain_Service, chain: domain.Task_C
 	return taskv2.brief_publish_missing(service.repo, chain, task.kind, task.brief_json)
 }
 
-@(private = "file")
+@(private = "package")
 publish_problems_error :: proc(problems: map[string][]string) -> domain.Domain_Error {
 	b := strings.builder_make(context.temp_allocator)
 	strings.write_string(&b, `{"code":"brief_incomplete","tasks":[`)
@@ -1115,8 +1125,13 @@ update_task_impl :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Conte
 		new_brief = applied
 	}
 	brief_keys := brief_changed_keys(task.brief_json, new_brief)
+    if input.require_requirements_context && taskv2.requirements_differ(task.brief_json, new_brief) {
+        if input.expected_requirements_revision < 1 || strings.trim_space(input.requirements_reason) == "" {
+            return {}, false, domain.domain_error(.Validation_Failed, "requirement edits require expected_requirements_revision and an explicit requirements_reason")
+        }
+    }
 
-	// Leased: only edits that leave the in-flight work unchanged are allowed.
+	// Leased: requirements may change, but assignment and execution settings may not.
 	if task_has_work_lease(service, task.task_id) {
 		offending := make([dynamic]string, context.temp_allocator)
 		if new_title != task.title do append(&offending, "title")
@@ -1141,6 +1156,20 @@ update_task_impl :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Conte
 			if k == "review_roles" do append(&changed, "review_roles")
 			if k == "reviewers" do append(&changed, "reviewers")
 		}
+	}
+	if task.publish_state == .Published && taskv2.requirements_differ(task.brief_json, new_brief) {
+		candidate := task
+		candidate.brief_json = new_brief
+		if missing := brief_publish_problems(service, chain, candidate); len(missing) > 0 {
+			problems := make(map[string][]string, context.temp_allocator)
+			problems[string(task.task_id)] = missing
+			return {}, false, publish_problems_error(problems)
+		}
+	}
+	if req_err := taskv2.requirements_record(service.repo, service.clock, task, new_brief,
+		engine_actor(auth), input.expected_requirements_revision,
+		input.requirements_reason, input.requirements_request_id); req_err.code != .None {
+		return {}, false, req_err
 	}
 	task.brief_json = new_brief
 	if input.has_requires_user_approval {
@@ -1193,6 +1222,7 @@ update_task_impl :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Conte
 publish_task_impl :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, task_id: domain.Task_ID) -> (domain.Task, bool, domain.Domain_Error) {
 	task, ok, err := get_task(service, auth, task_id)
 	if !ok do return domain.Task{}, false, err
+	if guard:=task_publish_precondition(service,auth,task);guard.code!=.None do return {},false,guard
 	if err := require_manual_task(task); err.code != .None do return {}, false, err
 	chain, chain_ok, chain_err := iface.taskchain_get_chain(service.repo, task.chain_id)
 	if !chain_ok do return domain.Task{}, false, chain_err
@@ -1372,7 +1402,8 @@ send_chain_level_wake :: proc(service: ^Taskchain_Service, chain: domain.Task_Ch
 // comment_task records a comment. Task System v2: a comment is an audit event
 // with no protocol meaning — nobody is woken by it (the pack carries the refs
 // an agent may fetch). The returned `notified` list is always empty.
-comment_task :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, input: Task_Comment_Input) -> (domain.Task_Comment, []string, bool, domain.Domain_Error) {
+comment_task_impl :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, input: Task_Comment_Input) -> (domain.Task_Comment, []string, bool, domain.Domain_Error) {
+	if (input.delegated_client_id!="" || input.delegated_grant_id!="") && auth.kind!=.Internal_User do return {},nil,false,domain.domain_error(.Forbidden,"delegated provenance requires internal user authorization")
 	if strings.trim_space(input.body) == "" do return domain.Task_Comment{}, nil, false, domain.domain_error(.Validation_Failed, "comment body is required")
 	task, ok, err := get_task(service, auth, input.task_id)
 	if !ok do return domain.Task_Comment{}, nil, false, err
@@ -1380,9 +1411,12 @@ comment_task :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, 
 	if auth.kind == .Instance_Token && auth.agent_instance_id == "" do return domain.Task_Comment{}, nil, false, domain.domain_error(.Forbidden, "instance token is required")
 	now := platform.clock_now(service.clock)
 	comment := domain.Task_Comment{comment_id = platform.generate_id(service.ids, "cmt_"), task_id = task.task_id, chain_id = task.chain_id, owner_user_id = task.owner_user_id, author_agent_instance_id = auth.agent_instance_id, body = input.body, created_at = now, updated_at = now}
+	comment.delegated_client_id=input.delegated_client_id;comment.delegated_grant_id=input.delegated_grant_id
 	saved, ok2, err2 := save_comment(service, comment)
 	if !ok2 do return saved, nil, ok2, err2
-	if service.engine != nil do _ = taskv2.task_comment(service.engine, task, engine_actor(auth), saved.comment_id)
+	if service.engine != nil {
+		if eerr:=taskv2.task_comment(service.engine, task, engine_actor(auth), saved.comment_id);eerr.code!=.None do return {},nil,false,eerr
+	}
 	return saved, nil, true, domain.Domain_Error{}
 }
 
@@ -1820,6 +1854,8 @@ remove_chain_directory :: proc(service: ^Taskchain_Service, auth: contracts.Auth
 // --- Fleet Management (REQ-FLEET-SCHEMA-1, REQ-FLEET-API-CLI-1, Task System v2 §4a) ---
 
 Upsert_Fleet_Input :: struct {
+	provider_profile: string,
+	has_provider_profile:bool,
 	bridge_models_json: string,
 	chain_id:         domain.Task_Chain_ID,
 	agent_id:         string,
@@ -1881,7 +1917,7 @@ upsert_fleet_impl :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Cont
 			bridge, found, _ := iface.bridge_get_bridge(service.agent_service.bridges, bridge_id)
 			if !found || bridge.owner_user_id != chain.owner_user_id do return {}, domain.domain_error(.Not_Found, "bridge not found")
 			if selection.provider == "" || selection.model == "" do return {}, domain.domain_error(.Validation_Failed, "bridge provider and model are required")
-			_, valid, validation_err := agent.validate_provider_model_intersection(service.agent_service, bridge_id, selection.provider, selection.model)
+			_, valid, validation_err := agent.validate_provider_model_intersection(service.agent_service, bridge_id, selection.provider, selection.model,selection.provider_profile)
 			if !valid do return {}, validation_err
 		}
 	}
@@ -1910,6 +1946,12 @@ upsert_fleet_impl :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Cont
 		if br_err := validate_task_bridge(service, chain.owner_user_id, input.bridge_id^); br_err.code != .None do return {}, br_err
 		bridge_id = input.bridge_id^
 	}
+ profile_id:=input.provider_profile
+ if profile_id=="" && !input.has_provider_profile && input.provider==existing.provider do profile_id=existing.provider_profile
+ if profile_id!="" && input.provider=="" do return {},domain.domain_error(.Validation_Failed,"profile requires a provider")
+ if profile_id!="" && profile_id!=input.provider && bridge_id!="" && service.agent_service!=nil {
+  if e:=provider_service.validate_profile(service.agent_service.providers,bridge_id,input.provider,profile_id);e.code!=.None do return {},e
+ }
 	now := platform.clock_now(service.clock)
 	fleet := domain.Task_Chain_Fleet{
 		bridge_models_json = bridge_models,
@@ -1918,6 +1960,7 @@ upsert_fleet_impl :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Cont
 		capacity         = capacity,
 		min_warm         = min_warm,
 		idle_ttl_seconds = idle_ttl,
+		provider_profile = domain.profile_effective_id(input.provider,profile_id),
 		provider         = input.provider,
 		model             = input.model,
 		roles_json       = roles_json,
@@ -1931,7 +1974,9 @@ upsert_fleet_impl :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Cont
 	if save_err.code != .None do return saved, save_err
 	// Editing a row never touches live leases; the next grant uses the new
 	// placement. The engine re-evaluates review gates and ready tasks.
-	if service.engine != nil do _ = taskv2.fleet_changed(service.engine, chain, trimmed_agent)
+	if service.engine != nil {
+		if eerr:=taskv2.fleet_changed(service.engine,chain,trimmed_agent);eerr.code!=.None do return {},eerr
+	}
 	return saved, domain.Domain_Error{}
 }
 
@@ -2065,10 +2110,10 @@ fleet_model_on_bridge :: proc(fleet: domain.Task_Chain_Fleet, bridge_id: string)
 // Catalog order is rank then id, matching the bridge provider-status UI.
 // Explicit selections are preserved: an unavailable selection must fail rather
 // than silently launch a different provider or model.
-resolve_fleet_launch_model :: proc(service: ^Taskchain_Service, bridge_id, provider, model: string) -> (string, string) {
+resolve_fleet_launch_model :: proc(service: ^Taskchain_Service, bridge_id, provider, model: string,provider_profile:string = "") -> (string, string) {
 	if provider != "" && model != "" do return strings.clone(provider), strings.clone(model)
 	if service == nil || service.agent_service == nil do return strings.clone(provider), strings.clone(model)
-	return taskv2.resolve_launch_model(service.agent_service, bridge_id, provider, model)
+	return taskv2.resolve_launch_model(service.agent_service, bridge_id, provider, model,provider_profile)
 }
 
 // Effective_Placement is the bridge / provider / model the matcher would apply
@@ -2076,6 +2121,7 @@ resolve_fleet_launch_model :: proc(service: ^Taskchain_Service, bridge_id, provi
 // the UI shows real values instead of "inherit" / "default". Strings are
 // temp-allocated.
 Effective_Placement :: struct {
+	provider_profile:string `json:"provider_profile"`,
 	bridge_id:     string `json:"bridge_id"`,
 	// task_pin | fleet | chain_directory | coordinator | none
 	bridge_source: string `json:"bridge_source"`,
@@ -2111,15 +2157,17 @@ effective_placement :: proc(service: ^Taskchain_Service, chain: domain.Task_Chai
 	}
 	if out.bridge_id == "" do return out
 	provider, model := fleet_model_on_bridge(fleet, out.bridge_id)
+	out.provider_profile=domain.profile_effective_id(provider,fleet_profile_on_bridge(fleet,out.bridge_id))
 	if provider != "" && model != "" {
 		out.provider, out.model = strings.clone(provider, context.temp_allocator), strings.clone(model, context.temp_allocator)
 		out.model_source = "fleet" if provider == fleet.provider && model == fleet.model else "bridge_override"
 		return out
 	}
-	rp, rm := resolve_fleet_launch_model(service, out.bridge_id, provider, model)
+	rp, rm := resolve_fleet_launch_model(service, out.bridge_id, provider, model,out.provider_profile)
 	defer delete(rp)
 	defer delete(rm)
 	if rp != "" && rm != "" {
+		out.provider_profile=domain.profile_effective_id(rp,out.provider_profile)
 		out.provider, out.model, out.model_source = strings.clone(rp, context.temp_allocator), strings.clone(rm, context.temp_allocator), "catalog_default"
 	}
 	return out
@@ -2150,6 +2198,13 @@ cancel_task_impl :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Conte
 // Each mutating verb runs entirely inside one unit of work; the *_impl bodies
 // are unchanged and the engine calls inside them nest as SAVEPOINTs.
 
+comment_task :: proc(service:^Taskchain_Service,auth:contracts.Auth_Context,input:Task_Comment_Input)->(domain.Task_Comment,[]string,bool,domain.Domain_Error) {
+	v:=verb_begin(service)
+	out,notified,ok,err:=comment_task_impl(service,auth,input)
+	if cerr:=verb_end(&v,ok);cerr.code!=.None do return {},nil,false,cerr
+	return out,notified,ok,err
+}
+
 publish_chain :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, chain_id: domain.Task_Chain_ID) -> (domain.Task_Chain, bool, domain.Domain_Error) {
 	v := verb_begin(service)
 	out, ok, err := publish_chain_impl(service, auth, chain_id)
@@ -2173,6 +2228,9 @@ create_task :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, i
 
 update_task :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, task_id: domain.Task_ID, input: Update_Task_Input) -> (domain.Task, bool, domain.Domain_Error) {
 	v := verb_begin(service)
+	if service.uow_factory != nil && !v.has {
+		return {}, false, domain.domain_error(.Internal_Error, "could not begin task update transaction")
+	}
 	out, ok, err := update_task_impl(service, auth, task_id, input)
 	if cerr := verb_end(&v, ok); cerr.code != .None do return domain.Task{}, false, cerr
 	return out, ok, err
@@ -2243,3 +2301,5 @@ complete_chain :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context
 	broadcast_chain_closed(service,auth,chain,.Completed)
 	return chain,true,domain.Domain_Error{}
 }
+
+fleet_profile_on_bridge :: taskv2.fleet_profile_on_bridge

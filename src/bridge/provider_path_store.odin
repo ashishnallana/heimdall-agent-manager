@@ -11,6 +11,7 @@ import "core:time"
 import ws "odin_test:lib/ws"
 
 Bridge_Provider_Path :: struct {
+	profile_id: string `json:"profile_id"`,
 	provider:      string `json:"provider"`,
 	resolved_path: string `json:"resolved_path"`,
 	version_text:  string `json:"version_text"`,
@@ -65,6 +66,7 @@ bridge_provider_probe_time :: proc() -> string {
 
 bridge_provider_path_clone :: proc(value: Bridge_Provider_Path, allocator := context.allocator) -> Bridge_Provider_Path {
 	return Bridge_Provider_Path{
+		profile_id = strings.clone(profile_effective_id(value.provider,value.profile_id),allocator),
 		provider = strings.clone(value.provider, allocator),
 		resolved_path = strings.clone(value.resolved_path, allocator),
 		version_text = strings.clone(value.version_text, allocator),
@@ -77,6 +79,7 @@ bridge_provider_path_clone :: proc(value: Bridge_Provider_Path, allocator := con
 
 bridge_provider_path_destroy :: proc(value: ^Bridge_Provider_Path, allocator := context.allocator) {
 	if value == nil do return
+	delete(value.profile_id, allocator)
 	delete(value.provider, allocator)
 	delete(value.resolved_path, allocator)
 	delete(value.version_text, allocator)
@@ -97,7 +100,7 @@ bridge_provider_probe_version :: proc(path: string) -> string {
 	return version
 }
 
-bridge_provider_probe_version_with_timeout :: proc(path: string, timeout: time.Duration) -> (string, bool) {
+bridge_provider_probe_version_with_timeout :: proc(path: string, timeout: time.Duration, env: []string = nil) -> (string, bool) {
 	if path == "" do return "", false
 	if !bridge_process_slot_try_acquire() do return "", false
 	defer bridge_process_slot_release()
@@ -105,7 +108,7 @@ bridge_provider_probe_version_with_timeout :: proc(path: string, timeout: time.D
 	stdout_r, stdout_w, pipe_err := os.pipe()
 	if pipe_err != nil do return "", false
 	defer os.close(stdout_r)
-	process, start_err := os.process_start(os.Process_Desc{command = argv, stdout = stdout_w, stderr = stdout_w})
+	process, start_err := bridge_os_start_hidden(os.Process_Desc{command = argv, stdout = stdout_w, stderr = stdout_w, env = env})
 	_ = os.close(stdout_w)
 	if start_err != nil do return "", false
 	state, wait_err := os.process_wait(process, timeout)
@@ -116,7 +119,7 @@ bridge_provider_probe_version_with_timeout :: proc(path: string, timeout: time.D
 	}
 	stdout, read_err := os.read_entire_file(stdout_r, context.allocator)
 	defer if len(stdout) > 0 do delete(stdout)
-	if read_err != nil || !state.success do return "", false
+	if read_err != nil || state.exit_code != 0 do return "", false
 	text := strings.trim_space(string(stdout))
 	if newline := strings.index_byte(text, '\n'); newline >= 0 do text = text[:newline]
 	if len(text) > 256 do text = text[:256]
@@ -129,26 +132,27 @@ bridge_provider_probe_one :: proc(provider, binary: string, extension: Bridge_Ca
 
 // extension_deadline bounds the extension detector (itself capped at 5s); a zero
 // deadline skips it, which reports an unsupported/absent/error state without running.
-bridge_provider_probe_one_with_timeout :: proc(provider, binary: string, timeout: time.Duration, extension: Bridge_Catalog_Extension = {}, extension_deadline: time.Time = {}) -> Bridge_Provider_Path {
-	path := bridge_runtime_find_on_path(binary)
+bridge_provider_probe_one_with_timeout :: proc(provider, binary: string, timeout: time.Duration, extension: Bridge_Catalog_Extension = {}, extension_deadline: time.Time = {}, env: []string = nil, profile_id: string = "") -> Bridge_Provider_Path {
+	path := profile_resolve_binary(binary,env) if env != nil else bridge_runtime_find_on_path(binary)
 	if path != "" && !bridge_provider_path_executable(path) {
 		delete(path)
 		path = ""
 	}
 	version := ""
 	if path != "" && timeout > 0 {
-		breaker_key := strings.concatenate({"provider-probe:", path})
+		breaker_key := strings.concatenate({"provider-probe:", profile_id, ":", path})
 		defer delete(breaker_key)
 		if bridge_dependency_breaker_allow(breaker_key) {
 			probe_ok := false
-			version, probe_ok = bridge_provider_probe_version_with_timeout(path, timeout)
+			version, probe_ok = bridge_provider_probe_version_with_timeout(path, timeout, env)
 			bridge_dependency_breaker_record(breaker_key, probe_ok)
 		}
 	}
 	extension_timeout: time.Duration = 0
 	if extension_deadline != {} do extension_timeout = time.diff(time.now(), extension_deadline)
-	extension_state, extension_version := bridge_provider_extension_probe(path, extension, extension_timeout)
+	extension_state, extension_version := bridge_provider_extension_probe(path, extension, extension_timeout, env, profile_id)
 	return Bridge_Provider_Path{
+		profile_id = strings.clone(profile_effective_id(provider,profile_id)),
 		provider = strings.clone(provider),
 		resolved_path = path,
 		version_text = version,
@@ -212,7 +216,7 @@ bridge_provider_paths_init :: proc() {
 	wire: Bridge_Provider_Path_Store_Wire
 	if decode_err := json.unmarshal(raw, &wire, json.DEFAULT_SPECIFICATION, runtime.default_allocator()); decode_err != nil do return
 	for item in wire.providers {
-		if bridge_provider_catalog_name_supported(item.provider) && (item.state == "present" || item.state == "absent") {
+		if bridge_provider_catalog_name_supported(item.provider) && (item.state == "present" || item.state == "absent" || item.state == "disabled" || item.state == "error") {
 			append(&bridge_provider_paths, item)
 		}
 	}
@@ -220,7 +224,7 @@ bridge_provider_paths_init :: proc() {
 
 bridge_provider_paths_upsert_unlocked :: proc(value: Bridge_Provider_Path) {
 	for i in 0..<len(bridge_provider_paths) {
-		if bridge_provider_paths[i].provider == value.provider {
+		if bridge_provider_paths[i].provider == value.provider && profile_effective_id(value.provider,bridge_provider_paths[i].profile_id) == profile_effective_id(value.provider,value.profile_id) {
 			bridge_provider_path_destroy(&bridge_provider_paths[i], runtime.default_allocator())
 			bridge_provider_paths[i] = value
 			return
@@ -262,6 +266,9 @@ bridge_provider_discovery_group_destroy :: proc(group: ^Bridge_Provider_Discover
 BRIDGE_PROVIDER_VERSION_PROBE_RESERVE :: 1 * time.Second
 
 bridge_provider_discover_execute :: proc(filter: []string) -> [dynamic]Bridge_Provider_Path {
+	return bridge_provider_discover_execute_profile(filter,"")
+}
+bridge_provider_discover_execute_profile :: proc(filter: []string, profile_id: string) -> [dynamic]Bridge_Provider_Path {
 	bridge_provider_paths_init()
 	if bridge_provider_discovery_test_delay > 0 do time.sleep(bridge_provider_discovery_test_delay)
 	targets := bridge_provider_probe_targets(filter)
@@ -281,7 +288,28 @@ bridge_provider_discover_execute :: proc(filter: []string) -> [dynamic]Bridge_Pr
 		// starve the --version probes still to come.
 		later := len(targets) - i - 1
 		extension_deadline := time.time_add(discovery_deadline, -time.Duration(later) * BRIDGE_PROVIDER_VERSION_PROBE_RESERVE)
-		append(&results, bridge_provider_probe_one_with_timeout(target.provider, target.binary, probe_timeout, target.extension, extension_deadline))
+		p, err := profile_lookup(target.provider,profile_id)
+		if err != .None {
+			append(&results, Bridge_Provider_Path{provider = strings.clone(target.provider), profile_id = strings.clone(profile_effective_id(target.provider,profile_id)),
+				state = strings.clone("disabled" if err == .Disabled else "error"), extension_state = strings.clone("disabled" if err == .Disabled else "error"), probed_at = bridge_provider_probe_time()})
+			continue
+		}
+		env, env_ok := profile_child_env(&p)
+		if !env_ok {
+			append(&results,Bridge_Provider_Path{provider = strings.clone(target.provider),profile_id = strings.clone(p.profile_id),state = strings.clone("error"),extension_state = strings.clone("error"),probed_at = bridge_provider_probe_time()})
+			continue
+		}
+		binary := p.config.binary_path if p.config.binary_path != "" else target.binary
+		result := bridge_provider_probe_one_with_timeout(target.provider, binary, probe_timeout, target.extension, extension_deadline, env,p.profile_id)
+		redacted := profile_redact_text(result.version_text,&p)
+		if redacted != result.version_text {
+			replacement := strings.clone(redacted); delete(result.version_text); result.version_text = replacement
+		}
+		redacted = profile_redact_text(result.extension_version,&p)
+		if redacted != result.extension_version {
+			replacement := strings.clone(redacted); delete(result.extension_version); result.extension_version = replacement
+		}
+		append(&results,result)
 	}
 
 	sync.rw_mutex_lock(&bridge_provider_paths_mutex)
@@ -291,8 +319,17 @@ bridge_provider_discover_execute :: proc(filter: []string) -> [dynamic]Bridge_Pr
 	return results
 }
 
-bridge_provider_discover :: proc(filter: []string) -> [dynamic]Bridge_Provider_Path {
-	key := bridge_provider_discovery_key(filter)
+bridge_provider_discover :: proc(filter: []string, profile_id: string = "") -> [dynamic]Bridge_Provider_Path {
+	filter := filter
+	if profile_id != "" && len(filter) == 0 {
+		provider := profile_provider_name(profile_id)
+		if provider == "" do return make([dynamic]Bridge_Provider_Path)
+		filter = make([]string,1,context.temp_allocator)
+		filter[0] = provider
+	}
+	filter_key := bridge_provider_discovery_key(filter)
+	defer delete(filter_key)
+	key := strings.clone(filter_key) if profile_id == "" else strings.concatenate({profile_id,"|",filter_key})
 	defer delete(key)
 	for {
 		sync.mutex_lock(&bridge_provider_discovery_mutex)
@@ -307,7 +344,7 @@ bridge_provider_discover :: proc(filter: []string) -> [dynamic]Bridge_Provider_P
 			bridge_provider_discovery_scan_count += 1
 			sync.mutex_unlock(&bridge_provider_discovery_mutex)
 
-			results := bridge_provider_discover_execute(filter)
+			results := bridge_provider_discover_execute_profile(filter,profile_id)
 			sync.mutex_lock(&bridge_provider_discovery_mutex)
 			group.results = bridge_provider_discovery_results_clone(results[:], alloc)
 			group.done = true
@@ -346,7 +383,8 @@ bridge_provider_discovery_report_json :: proc(request_id: string, results: []Bri
 	strings.write_string(&b, "\",\"providers\":[")
 	for result, i in results {
 		if i > 0 do strings.write_byte(&b, ',')
-		strings.write_string(&b, "{\"provider\":\""); bridge_runtime_write_json_string(&b, result.provider)
+		strings.write_string(&b, "{\"profile_id\":\""); bridge_runtime_write_json_string(&b,profile_effective_id(result.provider,result.profile_id))
+		strings.write_string(&b, "\",\"provider\":\""); bridge_runtime_write_json_string(&b, result.provider)
 		strings.write_string(&b, "\",\"binary_path\":\""); bridge_runtime_write_json_string(&b, result.resolved_path)
 		strings.write_string(&b, "\",\"version_text\":\""); bridge_runtime_write_json_string(&b, result.version_text)
 		strings.write_string(&b, "\",\"state\":\""); bridge_runtime_write_json_string(&b, result.state)
@@ -370,7 +408,8 @@ bridge_provider_handle_discover_frame :: proc(conn: ^ws.Connection, frame_type, 
 		for item in filter do delete(item)
 		delete(filter)
 	}
-	results := bridge_provider_discover(filter)
+	profile_id := extract_json_string(text,"profile_id",""); defer delete(profile_id)
+	results := bridge_provider_discover(filter,profile_id)
 	defer {
 		for &result in results do bridge_provider_path_destroy(&result)
 		delete(results)
@@ -385,7 +424,7 @@ bridge_provider_resolve_path :: proc(provider: string) -> (string, bool) {
 	bridge_provider_paths_init()
 	sync.rw_mutex_shared_lock(&bridge_provider_paths_mutex)
 	for item in bridge_provider_paths {
-		if item.provider == provider && item.state == "present" && bridge_provider_path_executable(item.resolved_path) {
+		if item.provider == provider && profile_effective_id(provider,item.profile_id) == provider && item.state == "present" && bridge_provider_path_executable(item.resolved_path) {
 			path := strings.clone(item.resolved_path)
 			sync.rw_mutex_shared_unlock(&bridge_provider_paths_mutex)
 			return path, true

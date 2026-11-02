@@ -531,7 +531,7 @@ INST_RUN=/tmp/hbt5-bridge-run/instances/$INST_ID   # if started with custom loca
 ls $INST_RUN
 # CLAUDE.md (or AGENTS.md for non-claude)  — the rendered bootstrap doc
 # .pi/skills/<slug>/SKILL.md               — static skill files
-# .heimdall/bin/ham-ctl                    — the ctl shim
+# bin/ham-ctl                             — the ctl shim
 # heimdall-bootstrap-manifest.json         — bridge-emitted manifest listing managed files
 # .heimdall-wrapper-placed                 — wrapper-owned stale-prune record (added BT-4)
 ```

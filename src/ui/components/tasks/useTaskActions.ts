@@ -12,6 +12,7 @@ import {
   useUserReviewTaskMutation,
 } from '../../api/endpoints/tasks';
 import type { TaskRecheckResult } from '../../api/endpoints/tasks';
+import type { TaskWire } from '../../api/taskWire';
 
 /** Readable text for a failed mutation (RTK error, hub envelope or thrown Error). */
 export function actionErrorMessage(err: any): string {
@@ -25,7 +26,7 @@ export function actionErrorMessage(err: any): string {
  * Every human action on one task, shared by the card row and its expanded
  * details so both show the same busy state and error.
  */
-export function useTaskActions(chainId: string, taskId: string, taskTitle = '') {
+export function useTaskActions(chainId: string, taskId: string, taskTitle = '', context?: TaskWire) {
   const [userReview, review] = useUserReviewTaskMutation();
   const [answerBlocker, answer] = useAnswerTaskBlockerMutation();
   const [reopenTask, reopen] = useReopenTaskMutation();
@@ -65,13 +66,13 @@ export function useTaskActions(chainId: string, taskId: string, taskTitle = '') 
       release.isLoading,
     // Titles let a brief_incomplete error name the task instead of its id.
     publish: () => run(() => publishTask({ chainId, taskId, taskTitles: taskTitle ? { [taskId]: taskTitle } : undefined }).unwrap()),
-    approve: () => run(() => userReview({ chainId, taskId, verdict: 'approve' }).unwrap()),
+    approve: () => run(() => userReview({ chainId, taskId, verdict: 'approve', requirementsRevision: context?.requirements?.revision, expectedAttemptNo: context?.attempt_no, expectedHead: context?.requirements?.submitted_head }).unwrap()),
     // The caller must supply findings; an empty request-changes is not sent.
     requestChanges: (findings: string) =>
       !findings.trim()
         ? Promise.resolve(false)
         : run(() =>
-            userReview({ chainId, taskId, verdict: 'request_changes', findings: [findings.trim()], summary: findings.trim() }).unwrap(),
+            userReview({ chainId, taskId, verdict: 'request_changes', findings: [findings.trim()], summary: findings.trim(), requirementsRevision: context?.requirements?.revision, expectedAttemptNo: context?.attempt_no, expectedHead: context?.requirements?.submitted_head }).unwrap(),
           ),
     answer: (note: string) => run(() => answerBlocker({ chainId, taskId, note }).unwrap()),
     reopen: () => run(() => reopenTask({ chainId, taskId }).unwrap()),

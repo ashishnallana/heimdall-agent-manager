@@ -317,3 +317,62 @@ are gone, and trusted-proxy auth must be re-enabled at the edge. Take a DB backu
 See `tools/mock-oidc/README.md` (a stdlib-only mock provider, the HAM_OIDC_* env it prints,
 and `HAM_OIDC_ALLOW_INSECURE_LOCALHOST=1`). `scripts/oidc-smoke/smoke.sh` runs a browser-less
 login → `/me` → logout check against the built UI.
+
+### Dev login through `ham-dev-proxy`
+
+The local stacks (`scripts/local-hub.sh`, `scripts/dev-stack.sh`) put `ham-dev-proxy` in
+front of the hub, and the browser UI (Vite, or a preview server) sends `/api/v1` and
+`/_dev` to it. A browser cannot always hold the hub session cookie: the Heimdall preview
+relay strips `__Host-heimdall_*` cookies and rewrites every `Set-Cookie` Path to the preview
+prefix, which a `__Host-` cookie may not carry. So the proxy signs in **on the browser's
+behalf**, after the relay. Hub auth is unchanged: the proxy runs the hub's real
+authorization-code flow.
+
+1. **Sign-in.** A page navigation to `/api/v1/auth/login?return_to=…` reaches the proxy,
+   which runs hub `/auth/login` → mock `/authorize` (`login_hint` = the selected dev user,
+   auto-approved) → hub `/auth/callback` without the browser, keeps the hub session in
+   memory per dev user, and answers `302` to the relative `return_to`. No hub cookie goes
+   to the browser. Script-driven sign-in (fetch-style requests, `seed.mjs`,
+   `tests/hub_oidc_login.py`) is not brokered: those requests get the provider redirect and
+   then carry their own session cookie, which the proxy forwards unchanged.
+2. **Requests.** A request without its own bearer or hub session cookie gets the brokered
+   session for its dev user (`ham_dev_user` cookie, else the active user), plus
+   `Origin: <hub --ui-origin>` for the hub's CSRF check. WebSocket upgrades are handled the
+   same way. When the hub answers 401, the proxy signs in again once and retries.
+3. **Who gets it.** Only a trusted browser origin: loopback, or a `--trusted-origin` the
+   proxy was started with. A request with `Sec-Fetch-Site` other than `same-origin`/`none`
+   never gets it. A foreign page the developer has open therefore cannot use the proxy as a
+   CSRF bypass.
+4. **Sign-out and switching.** `POST /api/v1/auth/logout` drops the cached session, and
+   until the next sign-in nothing is signed in automatically. `/_dev/login?user=<name>`
+   (or the `/_dev/` page) switches the dev user.
+5. **Real provider.** Brokering only engages when the hub's provider is a loopback mock.
+   Against a real provider the proxy keeps the browser-driven flow and only adds
+   `login_hint`.
+
+**Origins.** The hub's `--ui-origin` is always the local UI. That is Vite on
+`http://127.0.0.1:5173` for `dev-stack.sh` (override with `HAM_DEV_UI_ORIGIN` or
+`HAM_DEV_UI_PORT`), and `http://127.0.0.1:<--ui-port>` for `local-hub.sh`. Sign-in on
+localhost therefore lands on the UI, and cookie WebSockets pass CSRF. The proxy is started
+with `--hub-ui-origin` set to the same value.
+
+**Through a Heimdall preview.** `scripts/dev-preview.sh` (Vite with HMR) and
+`scripts/ui-preview.sh` (built bundle) need no configuration. They forward `/api/v1` to the
+running `local-hub.sh` instance's proxy (`$HEIMDALL_LOCAL_HUB`, default `default`), or else
+to `dev-stack.sh`'s `:8080` (`scripts/lib/dev-proxy-upstream.sh`). `HEIMDALL_PREVIEW_UPSTREAM`
+overrides that choice. Their relays (`dev-preview.mjs`, `preview-server.mjs`) learn the
+preview origin from the session's `preview_url`. A request whose `Origin` is exactly that
+origin is forwarded with the relay's own loopback origin, so the proxy trusts it
+(`scripts/lib/preview-origin.mjs`). Any other `Origin` passes through unchanged and gets no
+session.
+
+**Other reverse proxies** in front of the UI need their public origin trusted
+explicitly: `local-hub.sh start --public-origin https://dev.example`, or
+`HAM_DEV_TRUSTED_ORIGINS=https://dev.example` (comma separated) for `dev-stack.sh`.
+
+**Smoke.** `scripts/oidc-smoke/dev-login-smoke.sh [ham-hub] [ham-dev-proxy]` runs mock
+OIDC, the hub, the proxy and `preview-server.mjs` behind `scripts/oidc-smoke/relay.py`, a
+stand-in for the hub's preview relay (path prefix, no `Sec-Fetch-*`, hub cookies stripped,
+`Set-Cookie` paths rewritten). It then checks, from the preview origin: sign-in, `/me`, a
+CSRF-checked POST, the user WebSocket and logout. It also checks that foreign origins get
+no session.

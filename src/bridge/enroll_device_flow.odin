@@ -498,7 +498,7 @@ bridge_enroll_poll_once :: proc(
 	allocator := context.allocator,
 ) -> (Bridge_Enroll_Poll_Status, Bridge_Enroll_Credential, int) {
 	token_path := BRIDGE_ENROLL_TOKEN_PATH
-	resp, http_err := httpc.send({
+	resp, http_err := bridge_hub_http_send_alloc({
 		method = .POST, url = bridge_hub_url(api_base), path = token_path[:],
 		body = httpc.json_body(Bridge_Token_Request{device_code = device_code, code_verifier = code_verifier}),
 	})
@@ -777,6 +777,7 @@ bridge_credential_refresh_worker :: proc() {
     delay := BRIDGE_REFRESH_MIN_DELAY_SECONDS
     for {
         time.sleep(time.Duration(delay)*time.Second)
+        if sync.atomic_load(&bridge_hub_traffic_stopped) do return
         api_base := bridge_config.daemon_url
         bridge_id := strings.trim_space(bridge_config.daemon_id)
         key := fmt.aprintf("refresh:%s:%s", api_base, bridge_id)
@@ -812,6 +813,7 @@ bridge_credential_refresh_worker :: proc() {
             bridge_retry_reopen_retriable(key)
         }
         for {
+            if sync.atomic_load(&bridge_hub_traffic_stopped) do return
             now := bridge_runtime_now_ms()
             budget, reserved := bridge_retry_reserve(key, now)
             if !reserved {
@@ -847,6 +849,14 @@ bridge_credential_refresh_worker :: proc() {
                 }
             }
             delete(stored)
+            if sync.atomic_load(&bridge_hub_traffic_stopped) {
+                // Preserve the existing final-refresh cleanup. Temporary sunset
+                // and a late successful in-flight rotation retain their files.
+                if err.code == .Unauthenticated {
+                    bridge_refresh_apply_rejection(cfg_lib.config_path_from_args(os.args), api_base, bridge_id, g_bridge_credential_file, refresh_path, request_path, err)
+                }
+                return
+            }
             // An unknown outcome is NOT parked. It is retried, with the same request
             // id, inside the hub's retry window (BRIDGE_REFRESH_RETRY_GRACE_SECONDS).
             finished := bridge_retry_finish(key, bridge_runtime_now_ms(), success, err, base_ms = 5000)
@@ -869,12 +879,7 @@ bridge_credential_refresh_worker :: proc() {
                     bridge_refresh_pause(key, finished)
                     continue
                 }
-                if err.code == .Unauthenticated {
-                    _ = os.remove(refresh_path); _ = os.remove(g_bridge_credential_file); _ = os.remove(request_path)
-                    sync.mutex_lock(&g_bridge_credential_mu); bridge_config.bridge_token = ""; sync.mutex_unlock(&g_bridge_credential_mu)
-                    // F21: a stable state the next start parks on, not a crash loop.
-                    bridge_reenroll_mark(cfg_lib.config_path_from_args(os.args), api_base, bridge_id, .Refresh_Rejected)
-                }
+                bridge_refresh_apply_rejection(cfg_lib.config_path_from_args(os.args), api_base, bridge_id, g_bridge_credential_file, refresh_path, request_path, err)
                 fmt.eprintfln("bridge credential recovery stopped: state=%v attempts=%d code=%v class=%v", finished.state, finished.attempts, finished.code, finished.class)
                 return
             }
@@ -1164,8 +1169,8 @@ bridge_enroll_reuse_hint :: proc(args: []string, config_bridge_id: string) -> (h
 
 // bridge_enroll_result_line is the one-line outcome: whether the approver reused
 // the offered id (a re-enrollment) or registered a new bridge. Temp-allocated.
-bridge_enroll_result_line :: proc(reuse_hint, bridge_id: string) -> string {
-	if reuse_hint != "" && bridge_id == reuse_hint {
+bridge_enroll_result_line :: proc(reuse_hint, bridge_id: string, replacement := false) -> string {
+	if replacement || (reuse_hint != "" && bridge_id == reuse_hint) {
 		return strings.concatenate({"Re-enrolled existing bridge ", bridge_id}, context.temp_allocator)
 	}
 	return strings.concatenate({"Registered new bridge ", bridge_id}, context.temp_allocator)
@@ -1346,7 +1351,7 @@ bridge_enroll_device_command_run :: proc(args: []string) -> bool {
 		} else if has_flag(args, BRIDGE_ENROLL_NEW_FLAG) {
 			fmt.println("  registering a new bridge (--new-bridge): no previous bridge id is offered for reuse")
 		}
-		resp, authorize_err := httpc.send({method = .POST, url = hub, path = authorize_path[:], body = authorize_body})
+		resp, authorize_err := bridge_hub_http_send_alloc({method = .POST, url = hub, path = authorize_path[:], body = authorize_body})
 		defer httpc.response_destroy(&resp)
 		if authorize_err != .None {
 			fmt.eprintfln("bridge enroll FAILED: could not reach %s — check the URL and that the proxy is up (%s: %s)", api_base, httpc.error_string(authorize_err), resp.detail)
@@ -1440,9 +1445,13 @@ bridge_enroll_device_command_run :: proc(args: []string) -> bool {
 			switch status {
 			case .Approved:
 				token_file := bridge_enroll_token_file_from_args(args, api_base, cred.bridge_id)
-				// Reuse only counts when the approver chose the id this process offered: an id
-				// the hub returns unasked is a new bridge and never replaces anything here.
-				reenroll := reuse_hint != "" && cred.bridge_id == reuse_hint
+				// REQ-ENROLL-REPLACE: the approving user may choose an existing bridge
+				// even after a reinstall lost its config/reuse hint. Back up that
+				// scope's identity before replacing it on every platform.
+				existing_identity: Bridge_Identity_Record
+				existing_status := keystore_read_identity(cred.bridge_id, &existing_identity)
+				crypto.zero_explicit(&existing_identity, size_of(existing_identity))
+				reenroll := existing_status != .Not_Found || (reuse_hint != "" && cred.bridge_id == reuse_hint)
 				fmt.println("")
 				if reenroll {
 					fmt.printfln("Approved: re-enrolling existing bridge %s", cred.bridge_id)
@@ -1467,35 +1476,18 @@ bridge_enroll_device_command_run :: proc(args: []string) -> bool {
 				account_ok, _ := bridge_enroll_resolve_account(args, api_base, cfg_lib.config_path_from_args(args), replacing_bridge_id, cred)
 				if !account_ok do return false
 				config_path := cfg_lib.config_path_from_args(args)
-				// A re-enrollment replaces this machine's previous identity of that id only
-				// once it is journaled and backed up, so a rollback restores it.
-				replace_previous := false
-				// Held until the service restart: no other instance may run as this bridge
-				// while its identity is being replaced.
+				// Hold the approved scope until restart, including IDs selected only in the UI.
 				scope_lock_path := ""
 				defer if scope_lock_path != "" do bridge_instance_unlock(scope_lock_path)
-				if reenroll {
-					scope_locked := true
-					if name, scoped := keystore_scope_name(cred.bridge_id); scoped do scope_lock_path, scope_locked = bridge_scope_lock(name)
+				if name, scoped := keystore_scope_name(cred.bridge_id); scoped {
+					scope_locked: bool
+					scope_lock_path, scope_locked = bridge_scope_lock(name)
 					if !scope_locked {
 						fmt.eprintfln("bridge enroll FAILED: another ham-bridge instance runs as %s on this machine; stop it and enroll again. Nothing was written.", cred.bridge_id)
 						return false
 					}
-					existing: Bridge_Identity_Record
-					existing_status := keystore_read_identity(cred.bridge_id, &existing)
-					crypto.zero_explicit(&existing, size_of(existing))
-					if existing_status != .Not_Found {
-						if !bridge_reenroll_begin(config_path, api_base, cred.bridge_id, token_file) {
-							fmt.eprintfln("bridge enroll FAILED: could not back up the previous identity of %s (or an earlier re-enrollment is unresolved). Nothing was written.", cred.bridge_id)
-							return false
-						}
-						replace_previous = true
-					}
 				}
-				// Pin the identity and the enrolled owner under the new bridge id before
-				// anything else: the unseal that follows is checked against both.
-				if !bridge_unseal_identity_commit_enrollment(cred.bridge_id, cred.owner_user_id, replace_previous) {
-					if replace_previous do _ = bridge_reenroll_resolve(config_path, cred.bridge_id, false)
+				if !bridge_enroll_commit_identity(config_path, api_base, cred.bridge_id, token_file, cred.owner_user_id) {
 					if cred.owner_user_id == "" {
 						fmt.eprintln("bridge enroll FAILED: the hub did not report the approving account (owner_user_id); this bridge cannot pin its owner. Upgrade the hub and enroll again.")
 					} else {
@@ -1509,10 +1501,11 @@ bridge_enroll_device_command_run :: proc(args: []string) -> bool {
 					// A vault-key timeout here rolls everything back (F7): the previous
 					// credential, if any, stays usable and a plain re-run retries.
 					if !bridge_enroll_atomic_run(args, cred, token_file, config_path, api_base) do return false
-					if bridge_enroll_atomic_state() == .Committed do fmt.println(bridge_enroll_result_line(reuse_hint, cred.bridge_id))
+					if bridge_enroll_atomic_state() == .Committed do fmt.println(bridge_enroll_result_line(reuse_hint, cred.bridge_id, reenroll))
 					bridge_reenroll_clear(config_path)
+					if !bridge_hub_pause_clear_enrolled(config_path) do return false
 					bridge_instance_unlock(enroll_config_lock) // the restarted service takes it
-					if reenroll do bridge_instance_unlock_scope(cred.bridge_id)
+					bridge_instance_unlock_scope(cred.bridge_id)
 					restart_ok, restarted := bridge_enroll_restart_service(args)
 					if !restart_ok do return false
 					if restarted do fmt.println("  registered bridge service restarted with the new credential")
@@ -1527,7 +1520,7 @@ bridge_enroll_device_command_run :: proc(args: []string) -> bool {
 				_ = bridge_reenroll_resolve(config_path, cred.bridge_id, true)
 				fmt.println("")
 				fmt.printfln("bridge enroll SUCCESS: enrolled as bridge_id=%s", cred.bridge_id)
-				fmt.println(bridge_enroll_result_line(reuse_hint, cred.bridge_id))
+				fmt.println(bridge_enroll_result_line(reuse_hint, cred.bridge_id, reenroll))
 				if cred.approver_username != "" {
 					fmt.printfln("  approved by     {}", cred.approver_username)
 				} else {
@@ -1553,8 +1546,9 @@ bridge_enroll_device_command_run :: proc(args: []string) -> bool {
 				// Every successful enrollment clears a needs-reenrollment marker before the
 				// service restarts: one naming a reused bridge id would park it for good.
 				bridge_reenroll_clear(config_path)
+				if !bridge_hub_pause_clear_enrolled(config_path) do return false
 				bridge_instance_unlock(enroll_config_lock) // the restarted service takes it
-				if reenroll do bridge_instance_unlock_scope(cred.bridge_id)
+				bridge_instance_unlock_scope(cred.bridge_id)
 				restart_ok, restarted := bridge_enroll_restart_service(args)
 				if !restart_ok {
 					// The key (when delivered) was verified persisted above; a restart
@@ -1786,12 +1780,14 @@ bridge_credential_refresh_typed :: proc(api_base, refresh_token, request_id: str
     refresh_path := BRIDGE_ENROLL_REFRESH_PATH
     // One cumulative deadline over DNS, connect, TLS, send and every read; a
     // spent budget fails without I/O (may_have_sent false).
-    resp, http_err := httpc.send({
+    resp, http_err := bridge_hub_http_send_alloc({
         method = .POST, url = bridge_hub_url(api_base), path = refresh_path[:], headers = headers[:],
         body = httpc.json_body(struct{}{}), timeout_ms = bridge_deadline_ms(timeout_ms),
     })
     defer httpc.response_destroy(&resp)
-    return bridge_refresh_response_classify(resp, http_err == .None, api_base)
+    cred, ok, err, unknown := bridge_refresh_response_classify(resp, http_err == .None, api_base)
+    if err.code == .Unauthenticated do bridge_hub_stop_traffic(true)
+    return cred, ok, err, unknown
 }
 // bridge_refresh_response_classify -> (credential, ok, error, unknown_outcome).
 // unknown_outcome is true when the hub may have rotated the refresh token: a
@@ -1871,6 +1867,7 @@ bridge_refresh_recovery_step :: proc(
     budget: Bridge_Operation_Budget, timeout_ms: int,
     exchange := bridge_credential_refresh_typed, save_pending := bridge_refresh_pending_save, commit_pair := bridge_refresh_pair_commit,
 ) -> (bool, contracts.Wire_Error) {
+    if sync.atomic_load(&bridge_hub_traffic_stopped) do return false, contracts.wire_error(.Bridge_Offline)
     if !recovery.has_pair {
         cred, ok, err, unknown := exchange(api_base, stored, recovery.request_id, timeout_ms)
         recovery.unknown_outcome = unknown
@@ -1894,4 +1891,15 @@ bridge_refresh_adopt :: proc(cred: Bridge_Enroll_Credential) {
     key := bridge_action_scheduler_sync_key()
     defer delete(key)
     bridge_retry_credential_repaired(key)
+}
+
+// Only a final authentication refusal destroys persisted enrollment. A pending
+// sunset uses a retriable error and must survive the retry budget and a restart.
+bridge_refresh_apply_rejection :: proc(config_path, api_base, bridge_id, path, refresh_path, request_path: string, err: contracts.Wire_Error) -> bool {
+    if err.code != .Unauthenticated do return false
+    bridge_hub_stop_traffic(true)
+    _ = os.remove(refresh_path); _ = os.remove(path); _ = os.remove(request_path)
+    sync.mutex_lock(&g_bridge_credential_mu); bridge_config.bridge_token = ""; sync.mutex_unlock(&g_bridge_credential_mu)
+    bridge_reenroll_mark(config_path, api_base, bridge_id, .Refresh_Rejected)
+    return true
 }

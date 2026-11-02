@@ -22,6 +22,7 @@ package main
 
 import "core:os"
 import "core:strings"
+import agent_runtime "odin_test:lib/agent_runtime"
 
 // Bridge_Prespawn_Result carries the materialized run_dir plus the environment
 // the agent process must inherit. env is a slice of "KEY=VALUE" entries (the
@@ -118,7 +119,7 @@ bridge_prespawn_env :: proc(run_dir, bridge_endpoint, agent_token, instance_id: 
 // is materialized at (see bridge_bootstrap_write_ham_ctl_wrapper). Kept here so the
 // env map and the materializer agree on the path.
 bridge_prespawn_ctl_bin_path :: proc(run_dir: string) -> string {
-	return strings.concatenate({strings.trim_right(run_dir, "/"), "/.heimdall/bin/ham-ctl"})
+	return strings.concatenate({strings.trim_right(run_dir, "/"), "/", agent_runtime.CTL_SHIM_PATH})
 }
 
 // bridge_prespawn_result_delete frees an owned Bridge_Prespawn_Result.

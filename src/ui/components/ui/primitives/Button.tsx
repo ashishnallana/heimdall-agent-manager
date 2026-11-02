@@ -46,16 +46,16 @@ const BASE =
 
 const VARIANT_CLASSES: Record<ButtonVariant, string> = {
   primary: 'bg-accent text-accent-fg hover:brightness-110',
-  secondary: 'border border-subtle bg-surface-raised text-primary hover:brightness-125',
+  secondary: 'bg-strong text-primary hover:brightness-110',
   ghost: 'text-primary hover:bg-surface-raised',
-  danger: 'bg-danger text-primary hover:brightness-110',
+  danger: 'bg-danger-soft text-danger hover:brightness-125',
 };
 
 /**
  * Semantic-color actions whose meaning the 4 variants don't carry (a green
  * "Approve", an amber "Nudge"/"Run", a soft-red "Request changes"). `tone` paints
  * a SOFT tinted button and overrides the variant's coloring; leave it unset for
- * ordinary actions. (Distinct from `variant="danger"`, the SOLID destructive
+ * ordinary actions. (Distinct from `variant="danger"`, the destructive
  * button — `tone="danger"` is the low-emphasis soft-red variant.)
  */
 export type ButtonTone = 'success' | 'warning' | 'danger';

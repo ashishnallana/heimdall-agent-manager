@@ -78,9 +78,9 @@ export interface BridgeEnrollmentStatus {
  * Reads an enrollment's state. Resolves `null` when the hub no longer knows the
  * bridge: a new bridge's row is deleted when its enrollment is rolled back.
  */
-export async function fetchBridgeEnrollmentStatus(bridgeId: string): Promise<BridgeEnrollmentStatus | null> {
+export async function fetchBridgeEnrollmentStatus(bridgeId: string, signal?: AbortSignal): Promise<BridgeEnrollmentStatus | null> {
   try {
-    const res = await cookieJsonFetch(`/bridges/${encodeURIComponent(bridgeId)}/enrollment`);
+    const res = await cookieJsonFetch(`/bridges/${encodeURIComponent(bridgeId)}/enrollment`, signal ? { signal } : undefined);
     const data = ((res as any)?.data ?? res) as BridgeEnrollmentStatus;
     return data && typeof data === 'object' ? data : null;
   } catch (err: any) {
@@ -110,23 +110,27 @@ export interface PendingBridgeEnrollment {
   label: string;
   machine_hostname: string;
   enrollment_pending_until: string;
+  /** The existing bridge stays enrolled while its replacement is pending. */
+  replacing: boolean;
 }
 
 /**
- * The owner's pending enrollments. GET /bridges omits them unless asked, so no
- * picker offers a bridge that is not enrolled; only Settings asks.
+ * The owner's pending enrollments, including replacements of enrolled bridges.
+ * Opt-in enrollment_in_progress keeps ordinary bridge pickers unchanged. The
+ * enrollment_state fallback supports Hubs predating replacement discovery.
  */
 export async function fetchPendingBridgeEnrollments(): Promise<PendingBridgeEnrollment[]> {
   const res = await cookieJsonFetch('/bridges?include_pending=1');
   const body = (res as any)?.data ?? res;
   const rows: any[] = Array.isArray(body) ? body : Array.isArray(body?.bridges) ? body.bridges : [];
   return rows
-    .filter((row) => row?.enrollment_state === 'pending')
+    .filter((row) => row?.enrollment_state === 'pending' || row?.enrollment_in_progress === true)
     .map((row) => ({
       bridge_id: String(row.bridge_id || ''),
       label: String(row.label || ''),
       machine_hostname: String(row.machine_hostname || ''),
       enrollment_pending_until: String(row.enrollment_pending_until || ''),
+      replacing: row.enrollment_state === 'enrolled',
     }))
     .filter((row) => row.bridge_id !== '');
 }

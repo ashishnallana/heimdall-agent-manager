@@ -9,15 +9,15 @@ description: Authoritative command reference for the ham-ctl agent CLI — every
 agent token (already configured) via the managed wrapper in your run directory:
 
 ```
-./.heimdall/bin/ham-ctl <group> <verb> [<positional-id>] [--flags]
+./bin/ham-ctl <group> <verb> [<positional-id>] [--flags]
 ```
 
 Conventions used below:
 - `<id>` positional args come right after the verb; most commands need only the
   positional id (task/chain ids are globally unique, so `--chain` is usually optional).
 - Each command prints a single JSON response line.
-- Run `./.heimdall/bin/ham-ctl <group> --help` for the built-in reference of any group;
-  `./.heimdall/bin/ham-ctl --help` lists all groups.
+- Run `./bin/ham-ctl <group> --help` for the built-in reference of any group;
+  `./bin/ham-ctl --help` lists all groups.
 
 Groups: `bridge`, `agents`, `task-chain`, `task`, `issue`, `chat`, `memory`, `artifact`,
 `shell`, `context`, `start-success`.

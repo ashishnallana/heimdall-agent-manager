@@ -208,8 +208,8 @@ export default function NewConversationPage({ footer, onLaunched, launchIntent }
   if (hydrated && (!selectedBridge || selectedBridge.status !== 'online' || selectedBridge.runtime_connected !== true)) issues.push('Choose a connected bridge in Agent settings.');
   if (selectedBridge?.provider_status_error) issues.push('Provider availability could not be verified on this bridge. Refresh its connection.');
   if (selectedBridge && !selectedProviders.loaded) issues.push('Checking provider availability on the selected bridge…');
-  else if (selectedBridge && (!runtime.provider || !capabilities.some(c => c.provider === runtime.provider))) issues.push('Choose a provider available on the selected bridge.');
-  else if (selectedBridge && !capabilities.find(c => c.provider === runtime.provider)?.models.includes(runtime.model)) issues.push('Choose a model available for this provider on the selected bridge.');
+  else if (selectedBridge && (!runtime.provider || !capabilities.some(c => c.provider === runtime.provider && (c.profile_id || c.provider) === (runtime.providerProfile || runtime.provider)))) issues.push('Choose a provider available on the selected bridge.');
+  else if (selectedBridge && !capabilities.find(c => c.provider === runtime.provider && (c.profile_id || c.provider) === (runtime.providerProfile || runtime.provider))?.models.includes(runtime.model)) issues.push('Choose a model available for this provider on the selected bridge.');
   if (support.data?.entries?.some((row: any) => String(row.bridgeId || row.bridge_id) === runtime.bridgeId && row.enabled === false)) issues.push('This agent is disabled on the selected bridge. Choose another bridge.');
   if (!vaultUnlocked || !getActiveVaultKey()) issues.push("This device's vault keys are not installed yet.");
   const uploading = attachments.some(a => a.status === 'uploading');
@@ -246,7 +246,7 @@ export default function NewConversationPage({ footer, onLaunched, launchIntent }
       launchAnimation.current = composer.animate([{ transform: 'translateY(0)' }, { transform: `translateY(${distance}px)` }], { duration: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 420, easing: 'cubic-bezier(0.22, 1, 0.36, 1)', fill: 'forwards' });
     }
     try {
-      const result = await launch({ agentId, projectId: projectId || undefined, bridgeId: runtime.bridgeId, provider: runtime.provider, model: runtime.model, body: draft.trim() || 'Please review the attached files.', artifactIds: attachments.map(a => a.id!).filter(Boolean) }).unwrap();
+      const result = await launch({ agentId, projectId: projectId || undefined, bridgeId: runtime.bridgeId, provider: runtime.provider, providerProfile: runtime.providerProfile, model: runtime.model, body: draft.trim() || 'Please review the attached files.', artifactIds: attachments.map(a => a.id!).filter(Boolean) }).unwrap();
       const id = result.instance?.agent_instance_id || result.conversation?.agent_instance_id;
       if (!id) throw new Error('Launch did not return an agent instance ID.');
       await launchAnimation.current?.finished.catch(() => undefined);

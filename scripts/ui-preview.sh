@@ -6,9 +6,11 @@
 # ------------------
 # A real browser session against a REAL Hub API (not mocks, not fixtures): the
 # bundle talks to `/api/v1/...`, which this preview forwards to a `ham-dev-proxy`
-# in front of a running hub; you are whoever the hub session cookie says (users
-# sign in only with OIDC — locally via tools/mock-oidc). Anything you click WRITES
-# to that hub — point it at a throwaway or QA hub, never at production.
+# in front of a running hub. Users sign in only with OIDC (locally via
+# tools/mock-oidc); the preview strips hub cookies, so the proxy signs in on your
+# behalf and you are its selected dev user (docs/auth-oidc.md, "Local development").
+# Anything you click WRITES to that hub — point it at a throwaway or QA hub, never
+# at production.
 #
 # Why a built bundle and not `vite dev`
 # ------------------------------------
@@ -32,10 +34,12 @@
 #   scripts/ui-preview.sh --stop          # kill the session this script started
 #
 # Env:
-#   HEIMDALL_PREVIEW_UPSTREAM  ham-dev-proxy to forward /api/v1 to (default :8190)
+#   HEIMDALL_PREVIEW_UPSTREAM  ham-dev-proxy to forward /api/v1 to (default: the
+#                              running local-hub.sh instance, else dev-stack.sh's
+#                              :8080; see scripts/lib/dev-proxy-upstream.sh)
 #   HEIMDALL_PREVIEW_PORT      port the preview server binds       (default 45180)
 #   HEIMDALL_PREVIEW_DIR       build output dir                    (default dist-preview)
-#   HEIMDALL_PREVIEW_CHAIN     file the session under this task chain   (optional)
+#   HEIMDALL_PREVIEW_CHAIN     file the session under this task chain   (default: ham-ctl context)
 #   HEIMDALL_PREVIEW_PROJECT   file the session under this project      (optional)
 #   HAM_CTL                    ham-ctl binary (default: $HEIMDALL_CTL_BIN, else PATH)
 set -euo pipefail
@@ -43,12 +47,15 @@ set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO"
 
-UPSTREAM="${HEIMDALL_PREVIEW_UPSTREAM:-http://127.0.0.1:8190}"
+# shellcheck source=lib/dev-proxy-upstream.sh
+. "$REPO/scripts/lib/dev-proxy-upstream.sh"
 PORT="${HEIMDALL_PREVIEW_PORT:-45180}"
 DIST="${HEIMDALL_PREVIEW_DIR:-dist-preview}"
 HAM_CTL="${HAM_CTL:-${HEIMDALL_CTL_BIN:-ham-ctl}}"
 LABEL="ui-preview"
 STATE="$REPO/.ui-preview-session"
+# preview-server.mjs reads the session's preview_url here to trust the preview origin.
+URL_STATE="$REPO/.ui-preview-url"
 
 log() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 die() { printf '\033[31merror: %s\033[0m\n' "$*" >&2; exit 1; }
@@ -61,7 +68,7 @@ command -v python3 >/dev/null || die "python3 is required (used to read ham-ctl 
 if [[ "${1:-}" == "--stop" ]]; then
   [[ -f "$STATE" ]] || die "no session recorded in $STATE"
   sid="$(cat "$STATE")"
-  "$HAM_CTL" shell kill "$sid" >/dev/null && rm -f "$STATE"
+  "$HAM_CTL" shell kill "$sid" >/dev/null && rm -f "$STATE" "$URL_STATE"
   log "killed session $sid"
   exit 0
 fi
@@ -71,11 +78,14 @@ NO_BUILD=0
 
 # --- 1. upstream must be up before anything else ---------------------------
 # A preview whose API 502s is worse than no preview: it looks like the UI broke.
+UPSTREAM="$(dev_proxy_upstream)" \
+  || die "no ham-dev-proxy found. Start a local hub (scripts/local-hub.sh start) or set HEIMDALL_PREVIEW_UPSTREAM"
 log "checking upstream $UPSTREAM"
-code="$(curl -s -o /dev/null -w '%{http_code}' "$UPSTREAM/_dev/login?user=${HEIMDALL_PREVIEW_USER:-tanmay}" || true)"
-[[ "$code" == "2"* || "$code" == "3"* ]] \
-  || die "ham-dev-proxy at $UPSTREAM did not answer /_dev/login (got '$code'). Start one:
-    ham-dev-proxy --listen 127.0.0.1:8190 --hub-url http://127.0.0.1:8191 --default-user tanmay"
+# /_dev/api/users is answered by ham-dev-proxy only, so a hub or an unrelated service
+# on that port fails here instead of as a broken preview.
+code="$(curl -s -o /dev/null -w '%{http_code}' "$UPSTREAM/_dev/api/users" || true)"
+[[ "$code" == "2"* ]] \
+  || die "$UPSTREAM is not a ham-dev-proxy (GET /_dev/api/users -> '$code'). Start a local hub (scripts/local-hub.sh start) or set HEIMDALL_PREVIEW_UPSTREAM"
 
 # --- 2. build --------------------------------------------------------------
 # Separate outDir so a preview build never clobbers the real `dist/`.
@@ -99,7 +109,7 @@ prev=""
 if [[ -n "$prev" ]]; then
   log "killing previous session(s): $prev"
   for old in $prev; do "$HAM_CTL" shell kill "$old" >/dev/null 2>&1 || true; done
-  rm -f "$STATE"
+  rm -f "$STATE" "$URL_STATE"
 fi
 
 # The kill is asynchronous, and so is a previous run's own shutdown. Starting the
@@ -123,7 +133,9 @@ ENDPOINT_PORT="$("$HAM_CTL" bridge list --scope configured | json 'print(d["data
 # Optional: file the session under a chain/project so it shows up alongside the
 # work it belongs to in Heimdall's shells view.
 EXTRA=()
-[[ -n "${HEIMDALL_PREVIEW_CHAIN:-}" ]]   && EXTRA+=(--chain "$HEIMDALL_PREVIEW_CHAIN")
+# The Hub requires a chain for a server session; default to the caller's own.
+CHAIN="${HEIMDALL_PREVIEW_CHAIN:-$("$HAM_CTL" context 2>/dev/null | json 'print(d.get("data",{}).get("data",{}).get("chain_id",""))' 2>/dev/null || true)}"
+[[ -n "$CHAIN" ]] && EXTRA+=(--chain "$CHAIN")
 [[ -n "${HEIMDALL_PREVIEW_PROJECT:-}" ]] && EXTRA+=(--project "$HEIMDALL_PREVIEW_PROJECT")
 
 # The bridge runs --cmd as `sh -c "exec <cmd>"`. So the command must be a single
@@ -140,13 +152,14 @@ START_RESPONSE="$("$HAM_CTL" shell start \
   --port "$PORT" \
   --label "$LABEL" \
   --cwd "$REPO" \
-  --cmd "env HEIMDALL_PREVIEW_PORT=$PORT HEIMDALL_PREVIEW_UPSTREAM=$UPSTREAM node scripts/preview-server.mjs --dir $DIST")"
+  --cmd "env HEIMDALL_PREVIEW_PORT=$PORT HEIMDALL_PREVIEW_UPSTREAM=$UPSTREAM HEIMDALL_PREVIEW_URL_FILE=$URL_STATE HAM_CTL=$HAM_CTL node scripts/preview-server.mjs --dir $DIST")"
 SID="$(printf '%s' "$START_RESPONSE" | json 'print(d.get("data",{}).get("data",{}).get("session",{}).get("session_id",""))')"
 [[ -n "$SID" ]] || die "shell start returned no session_id. Response was:
 $START_RESPONSE"
 echo "$SID" > "$STATE"
 PREVIEW_URL="$(printf '%s' "$START_RESPONSE" | json 'print(d.get("data",{}).get("data",{}).get("session",{}).get("preview_url",""))')"
 [[ -n "$PREVIEW_URL" ]] || die "shell start returned no preview_url for $SID"
+printf '%s\n' "$PREVIEW_URL" > "$URL_STATE"
 
 BASE="http://127.0.0.1:$ENDPOINT_PORT/proxy/$SID"
 

@@ -59,7 +59,7 @@ Memory_Filter :: struct {
 	bridge_id:   string,
 	template_id: string,
 }
-Chat_Input :: struct { agent_id,agent_instance_id,chain_id,title,initial_body,artifact_ids_json,bridge_id,provider,model: string, project_id: domain.Project_ID }
+Chat_Input :: struct { agent_id,agent_instance_id,chain_id,title,initial_body,artifact_ids_json,bridge_id,provider,provider_profile,model: string, project_id: domain.Project_ID }
 Message_Input :: struct { body,artifact_ids_json,message_type,metadata_json: string }
 Pane_Capture_Input :: struct { width, settle_ms, line_limit: int }
 Pane_Capture_Result_Input :: struct { command_id,pane_capture_request_id,conversation_id,message_id,agent_instance_id,output,error_code,message: string, ok,truncated: bool, width,line_count: int }

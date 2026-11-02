@@ -19,6 +19,7 @@ import jsonx "odin_test:lib/jsonx"
 // directory on that bridge (first by created_at), or "" when the chain has no
 // directory there — it carries the ≤ 1 live work lease per directory rule.
 Placement :: struct {
+	provider_profile:string,
 	bridge_id:    string,
 	directory_id: string,
 	provider:     string,
@@ -77,6 +78,7 @@ grant_attempt_in_uow :: proc(svc: ^Service, u: ^Uow, req: Grant_Request) -> (dom
 		}
 	}
 	inst := req.instance
+	if busy,err:=iface.agent_runtime_busy(svc.agents,inst.agent_instance_id);err.code!=.None {return {},false,err} else if busy {return {},false,domain.domain_error(.Conflict,"instance has a pending runtime action")}
 	// Resolve the actual wake selection once, so lease history, runtime facets
 	// and the bridge command agree even when reusing an older warm instance.
 	provider, model := lease_launch_model(svc, req.placement, inst)
@@ -115,6 +117,7 @@ grant_attempt_in_uow :: proc(svc: ^Service, u: ^Uow, req: Grant_Request) -> (dom
 		kind = req.kind,
 		review_role = req.review_role,
 		bridge_id = req.placement.bridge_id,
+		provider_profile=domain.profile_effective_id(provider,req.placement.provider_profile) if req.delivery!=domain.LEASE_DELIVERY_INLINE else domain.profile_effective_id(inst.provider,inst.provider_profile),
 		provider = strings.clone(provider, context.temp_allocator),
 		model = strings.clone(model, context.temp_allocator),
 		granted_at = now,
@@ -136,6 +139,13 @@ grant_attempt_in_uow :: proc(svc: ^Service, u: ^Uow, req: Grant_Request) -> (dom
 	if req.kind == domain.LEASE_KIND_WORK && pre.last_release != .Handoff do attempt_no += 1
 	lease.attempt_no = attempt_no
 
+ if req.delivery!=domain.LEASE_DELIVERY_INLINE && (domain.profile_effective_id(inst.provider,inst.provider_profile)!=lease.provider_profile || inst.provider!=provider || inst.model!=model) {
+  updated:=inst
+  updated.provider=provider;updated.provider_profile=lease.provider_profile;updated.model=model
+  stored,changed,e:=iface.agent_save_instance(svc.agents,updated)
+  if !changed do return {},false,e
+  inst=stored
+ }
 	saved, ok, err := iface.taskchain_save_lease(svc.repo, lease)
 	if !ok do return {}, false, err
 	p := json_begin()
@@ -144,6 +154,7 @@ grant_attempt_in_uow :: proc(svc: ^Service, u: ^Uow, req: Grant_Request) -> (dom
 	json_str(&p, "instance_id", saved.holder_instance_id)
 	json_int(&p, "attempt_no", i64(saved.attempt_no))
 	json_str(&p, "bridge_id", saved.bridge_id)
+	json_str(&p,"provider_profile",saved.provider_profile)
 	json_str(&p, "provider", saved.provider)
 	json_str(&p, "model", saved.model)
 	json_str(&p, "delivery", saved.delivery)
@@ -180,6 +191,7 @@ grant_attempt_in_uow :: proc(svc: ^Service, u: ^Uow, req: Grant_Request) -> (dom
 		}
 		rt := json_begin()
 		json_str(&rt, "bridge_id", saved.bridge_id if saved.bridge_id != "" else inst.bridge_id)
+		json_str(&rt,"provider_profile",saved.provider_profile)
 		json_str(&rt, "provider", saved.provider)
 		json_str(&rt, "model", saved.model)
 		json_str(&rt, "started_at", now)

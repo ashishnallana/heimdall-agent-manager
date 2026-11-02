@@ -26,6 +26,9 @@ Bridge_Discovered_Model :: struct {
 }
 
 Bridge_Provider_Models :: struct {
+	observed_models_json: string `json:"observed_models_json"`,
+	custom_models: []string `json:"custom_models"`,
+	profile_id: string `json:"profile_id"`,
 	provider: string `json:"provider"`,
 	// Snapshot provenance belongs to the last successful result.
 	binary_path: string `json:"binary_path"`,
@@ -47,6 +50,10 @@ bridge_models_last_key: string
 bridge_models_last_completed: i64
 
 bridge_models_destroy :: proc(value: ^Bridge_Provider_Models, allocator := context.allocator) {
+	for id in value.custom_models do delete(id,allocator)
+	delete(value.custom_models,allocator)
+	delete(value.observed_models_json,allocator)
+	delete(value.profile_id,allocator)
 	delete(value.provider, allocator); delete(value.binary_path, allocator); delete(value.version_text, allocator)
 	delete(value.models_source, allocator); delete(value.models_checked_at, allocator)
 	delete(value.models_attempted_at, allocator); delete(value.models_state, allocator)
@@ -59,6 +66,10 @@ bridge_models_destroy :: proc(value: ^Bridge_Provider_Models, allocator := conte
 
 bridge_models_clone :: proc(value: Bridge_Provider_Models, allocator := context.allocator) -> Bridge_Provider_Models {
 	out := value
+	out.observed_models_json=strings.clone(value.observed_models_json,allocator)
+	out.custom_models=make([]string,len(value.custom_models),allocator)
+	for id,i in value.custom_models do out.custom_models[i]=strings.clone(id,allocator)
+	out.profile_id = strings.clone(profile_effective_id(value.provider,value.profile_id),allocator)
 	out.provider = strings.clone(value.provider, allocator)
 	out.binary_path = strings.clone(value.binary_path, allocator)
 	out.version_text = strings.clone(value.version_text, allocator)
@@ -96,11 +107,11 @@ bridge_models_load_locked :: proc() {
 	}
 }
 
-bridge_models_get :: proc(provider: string, allocator := context.allocator) -> Bridge_Provider_Models {
+bridge_models_get :: proc(provider: string, allocator := context.allocator, profile_id: string = "") -> Bridge_Provider_Models {
 	sync.mutex_lock(&bridge_models_mu); defer sync.mutex_unlock(&bridge_models_mu)
 	bridge_models_load_locked()
-	for value in bridge_models_cache do if value.provider == provider do return bridge_models_clone(value, allocator)
-	return Bridge_Provider_Models{provider = strings.clone(provider, allocator)}
+	for value in bridge_models_cache do if value.provider == provider && profile_effective_id(provider,value.profile_id) == profile_effective_id(provider,profile_id) do return bridge_models_clone(value, allocator)
+	return Bridge_Provider_Models{provider = strings.clone(provider, allocator),profile_id = strings.clone(profile_effective_id(provider,profile_id),allocator)}
 }
 
 bridge_models_save :: proc(value: Bridge_Provider_Models) {
@@ -109,7 +120,7 @@ bridge_models_save :: proc(value: Bridge_Provider_Models) {
 	alloc := runtime.default_allocator()
 	found := false
 	for &cached in bridge_models_cache {
-		if cached.provider != value.provider do continue
+		if cached.provider != value.provider || profile_effective_id(cached.provider,cached.profile_id) != profile_effective_id(value.provider,value.profile_id) do continue
 		bridge_models_destroy(&cached, alloc)
 		cached = bridge_models_clone(value, alloc)
 		found = true; break
@@ -235,7 +246,7 @@ bridge_models_write_request :: proc(input: ^os.File, body: string, framed: bool)
 
 // No prompts, threads, or inference turns are submitted. The only writes are
 // small metadata requests; stdout is drained while the child is alive.
-bridge_models_probe :: proc(provider, binary: string, timeout := BRIDGE_MODEL_PROBE_TIMEOUT, working_dir: string = "") -> (models: [dynamic]Bridge_Discovered_Model, state: string) {
+bridge_models_probe :: proc(provider, binary: string, timeout := BRIDGE_MODEL_PROBE_TIMEOUT, working_dir: string = "", child_env: []string = nil, launch_args: []string = nil) -> (models: [dynamic]Bridge_Discovered_Model, state: string) {
 	state = "error"
 	models = make([dynamic]Bridge_Discovered_Model)
 	if timeout <= 0 do return models, "timeout"
@@ -256,6 +267,7 @@ bridge_models_probe :: proc(provider, binary: string, timeout := BRIDGE_MODEL_PR
 	case "antigravity": append(&args, "models")
 	case: return models, "unsupported"
 	}
+	append(&args, ..launch_args)
 	if binary == "" do return models, "absent"
 	if !bridge_process_slot_try_acquire() do return models, "busy"
 	defer bridge_process_slot_release()
@@ -265,8 +277,12 @@ bridge_models_probe :: proc(provider, binary: string, timeout := BRIDGE_MODEL_PR
 	if out_err != nil { os.close(in_r); os.close(in_w); return }
 	defer os.close(in_w)
 	defer os.close(out_r)
-	env, env_err := os.environ(context.temp_allocator)
+	env := child_env
+	if env == nil {
+		env_err: os.Error
+		env,env_err = os.environ(context.temp_allocator)
 	if env_err != nil { os.close(in_r); os.close(out_w); return }
+	}
 	clean_env := make([dynamic]string, context.temp_allocator)
 	for e in env {
 		if strings.has_prefix(e, "CLAUDECODE=") || strings.has_prefix(e, "COPILOT_AUTO_UPDATE=") do continue
@@ -275,7 +291,7 @@ bridge_models_probe :: proc(provider, binary: string, timeout := BRIDGE_MODEL_PR
 	append(&clean_env, "COPILOT_AUTO_UPDATE=false")
 	path := bridge_models_path(); defer delete(path)
 	cwd := strings.clone(working_dir) if working_dir != "" else strings.concatenate({path, ".probe"}); defer delete(cwd)
-	if bridge_make_directory_all(cwd) != nil { os.close(in_r); os.close(out_w); return }
+	if err := bridge_make_directory_all(cwd); err != nil && !os.is_dir(cwd) { os.close(in_r); os.close(out_w); return }
 	process, started := bridge_model_process_start({command = args[:], stdin = in_r, stdout = out_w, env = clean_env[:], working_dir = cwd})
 	os.close(in_r); os.close(out_w)
 	if !started do return
@@ -299,7 +315,7 @@ bridge_models_probe :: proc(provider, binary: string, timeout := BRIDGE_MODEL_PR
 				bridge_model_process_kill(process)
 				status, wait_err := os.process_wait(process, 500 * time.Millisecond)
 				process = {}
-				if wait_err == nil && status.exited && status.success do return models, "success"
+				if wait_err == nil && status.exited && status.exit_code == 0 do return models, "success"
 			}
 			return
 		}
@@ -309,7 +325,7 @@ bridge_models_probe :: proc(provider, binary: string, timeout := BRIDGE_MODEL_PR
 		if read_err != nil || n == 0 {
 			if provider == "antigravity" && bridge_models_parse_agy(string(buffer[:]), &models) {
 				status, wait_err := os.process_wait(process, 0)
-				if wait_err == nil && status.exited && status.success {
+				if wait_err == nil && status.exited && status.exit_code == 0 {
 					// Already reaped: prevent cleanup from targeting a reused pid.
 					process = {}; return models, "success"
 				}
@@ -384,6 +400,7 @@ bridge_models_apply_probe :: proc(previous: ^Bridge_Provider_Models, models: []B
 Bridge_Model_Job :: struct {
 	provider, path, version, working_dir: string,
 	deadline_ns: i64,
+	profile: Provider_Profile,
 	previous, result: Bridge_Provider_Models,
 }
 bridge_models_refresh_worker :: proc(th: ^thread.Thread) {
@@ -393,38 +410,48 @@ bridge_models_refresh_worker :: proc(th: ^thread.Thread) {
 	previous := job.previous // consumes a heap-owned snapshot; returned in result
 	job.previous = {}
 	remaining := time.Duration(job.deadline_ns - time.to_unix_nanoseconds(time.now()))
-	models, state := bridge_models_probe(job.provider, job.path if bridge_provider_path_executable(job.path) else "", min(remaining, BRIDGE_MODEL_PROBE_TIMEOUT), job.working_dir)
+	env, env_ok := profile_child_env(&job.profile)
+	models := make([dynamic]Bridge_Discovered_Model)
+	state := "error"
+	if env_ok {
+		delete(models)
+		models,state = bridge_models_probe(job.provider, job.path if bridge_provider_path_executable(job.path) else "", min(remaining, BRIDGE_MODEL_PROBE_TIMEOUT), job.working_dir,env,profile_tokenize_args(job.profile.config.launch_args))
+	}
 	defer { for model in models { delete(model.model_id); delete(model.label); delete(model.resolved_model) }; delete(models) }
 	checked := bridge_provider_probe_time(); defer delete(checked)
 	bridge_models_apply_probe(&previous, models[:], state, job.path, job.version, checked)
 	job.result = previous
 }
 
-bridge_models_refresh :: proc(providers: []string, deadline_ns: i64 = 0, requested_ns: i64 = 0) -> [dynamic]Bridge_Provider_Models {
+bridge_models_refresh :: proc(providers: []string, deadline_ns: i64 = 0, requested_ns: i64 = 0, profile_id: string = "") -> [dynamic]Bridge_Provider_Models {
 	started := requested_ns if requested_ns > 0 else time.to_unix_nanoseconds(time.now())
 	out := make([dynamic]Bridge_Provider_Models)
 	// An absent/empty stage-2 filter means no enabled providers, never all.
-	if len(providers) == 0 || len(providers) > 16 do return out
+	if len(providers) == 0 || len(providers) > 16 do return bridge_models_profile_views(out,profile_id)
 	deadline_ns := deadline_ns
 	if deadline_ns == 0 do deadline_ns = started + i64(25*time.Second)
 	for !sync.mutex_try_lock(&bridge_models_refresh_mu) {
 		if time.to_unix_nanoseconds(time.now()) >= deadline_ns {
 			for provider in providers {
-				value := bridge_models_get(provider)
+				value := bridge_models_get(provider,profile_id = profile_id)
 				delete(value.models_state); value.models_state = strings.clone("busy")
 				delete(value.models_attempted_at); value.models_attempted_at = bridge_provider_probe_time()
 				append(&out, value)
 			}
-			return out
+			return bridge_models_profile_views(out,profile_id)
 		}
 		time.sleep(5*time.Millisecond)
 	}
 	defer sync.mutex_unlock(&bridge_models_refresh_mu)
 	bridge_provider_paths_init()
-	key := bridge_provider_discovery_key(providers); defer delete(key)
+	filter_key := bridge_provider_discovery_key(providers); defer delete(filter_key)
+	key := strings.clone(filter_key) if profile_id == "" else strings.concatenate({profile_id,"|",filter_key}); defer delete(key)
 	if key == bridge_models_last_key && bridge_models_last_completed > started {
-		for provider in providers do append(&out, bridge_models_get(provider))
-		return out
+		for provider in providers {
+			value := bridge_models_get(provider,profile_id = profile_id)
+			append(&out,value)
+		}
+		return bridge_models_profile_views(out,profile_id)
 	}
 	jobs := make([dynamic]Bridge_Model_Job)
 	defer delete(jobs)
@@ -433,15 +460,26 @@ bridge_models_refresh :: proc(providers: []string, deadline_ns: i64 = 0, request
 		duplicate := false
 		for job in jobs do if job.provider == provider do duplicate = true
 		if duplicate do continue
+		p, profile_error := profile_lookup(provider,profile_id)
+		if profile_error != .None {
+			value := bridge_models_get(provider,profile_id = profile_id)
+			delete(value.models_state); value.models_state = strings.clone("disabled" if profile_error == .Disabled else "error")
+			delete(value.models_attempted_at); value.models_attempted_at = bridge_provider_probe_time()
+			append(&out,value)
+			continue
+		}
 		// Stage 2 only reads Stage 1's detection snapshot. Path resolution here
 		// must not fall back to automatic version/extension probes.
 		path, version := "", ""
 		sync.rw_mutex_shared_lock(&bridge_provider_paths_mutex)
-		for entry in bridge_provider_paths do if entry.provider == provider && entry.state == "present" {
+		for entry in bridge_provider_paths do if entry.provider == provider && profile_effective_id(provider,entry.profile_id) == p.profile_id && entry.state == "present" {
 			path = strings.clone(entry.resolved_path); version = strings.clone(entry.version_text); break
 		}
 		sync.rw_mutex_shared_unlock(&bridge_provider_paths_mutex)
-		append(&jobs, Bridge_Model_Job{provider = provider, path = path, version = version, deadline_ns = deadline_ns, previous = bridge_models_get(provider, runtime.default_allocator())})
+		model_path := bridge_models_path()
+		working_dir := strings.concatenate({model_path,".probe-",p.profile_id},context.temp_allocator)
+		delete(model_path)
+		append(&jobs, Bridge_Model_Job{provider = provider, path = path, version = version, deadline_ns = deadline_ns, previous = bridge_models_get(provider, runtime.default_allocator(),profile_id), profile = p, working_dir = working_dir})
 	}
 	workers := make([dynamic]^thread.Thread); defer delete(workers)
 	for &job in jobs {
@@ -458,7 +496,7 @@ bridge_models_refresh :: proc(providers: []string, deadline_ns: i64 = 0, request
 	delete(bridge_models_last_key, runtime.default_allocator())
 	bridge_models_last_key = strings.clone(key, runtime.default_allocator())
 	bridge_models_last_completed = time.to_unix_nanoseconds(time.now())
-	return out
+	return bridge_models_profile_views(out,profile_id)
 }
 
 bridge_provider_handle_models_frame :: proc(conn: ^ws.Connection, frame_type, text: string) -> bool {
@@ -466,10 +504,42 @@ bridge_provider_handle_models_frame :: proc(conn: ^ws.Connection, frame_type, te
 	request_id := extract_json_string(text, "request_id", ""); defer delete(request_id)
 	providers, _ := bridge_provider_json_extract_string_array(text, "providers")
 	defer { for provider in providers do delete(provider); delete(providers) }
-	results := bridge_models_refresh(providers, bridge_command_worker_deadline_ns(conn), bridge_command_worker_enqueued_ns(conn))
+	profile_id := extract_json_string(text,"profile_id",""); defer delete(profile_id)
+	results := bridge_models_refresh(providers, bridge_command_worker_deadline_ns(conn), bridge_command_worker_enqueued_ns(conn),profile_id)
 	defer { for &result in results do bridge_models_destroy(&result); delete(results) }
 	report := struct { type: string `json:"type"`, request_id: string `json:"request_id"`, command_id: string `json:"command_id"`, providers: []Bridge_Provider_Models `json:"providers"` }{"provider_model_discovery_report", request_id, request_id, results[:]}
 	bytes, err := json.marshal(report)
 	if err == nil { defer delete(bytes); _ = bridge_hub_send(conn, string(bytes)) }
 	return true
+}
+
+// Merge owned outbound models without persisting custom settings into probe provenance.
+bridge_models_with_custom :: proc(value: Bridge_Provider_Models, custom: []string) -> Bridge_Provider_Models {
+	out := value
+	delete(out.observed_models_json)
+	observed,err:=json.marshal(value.models)
+	out.observed_models_json=string(observed) if err==nil else ""
+	for id in out.custom_models do delete(id)
+	delete(out.custom_models)
+	out.custom_models=make([]string,len(custom))
+	for id,i in custom do out.custom_models[i]=strings.clone(id)
+	models := make([dynamic]Bridge_Discovered_Model)
+	append(&models,..out.models)
+	delete(out.models)
+	for id in custom do _ = bridge_models_append(&models,id,id,"")
+	out.models = models[:]
+	return out
+}
+
+bridge_models_profile_views :: proc(values: [dynamic]Bridge_Provider_Models, profile_id: string) -> [dynamic]Bridge_Provider_Models {
+	for &value in values {
+		p,e := profile_lookup(value.provider,profile_id)
+		if e != .None {
+			delete(value.models_state)
+			value.models_state = strings.clone("disabled" if e == .Disabled else "error")
+		} else {
+			value = bridge_models_with_custom(value,p.config.custom_models)
+		}
+	}
+	return values
 }

@@ -6,6 +6,7 @@ package main
 // header line or body by hand.
 
 import httpc "odin_test:lib/httpc"
+import "core:sync"
 
 // Bridge_Hub_Fetch is the injectable hub transport (tests script it). The
 // production value is bridge_hub_http_send.
@@ -14,7 +15,29 @@ Bridge_Hub_Fetch :: #type proc(req: httpc.Request) -> (httpc.Response, httpc.Err
 // bridge_hub_http_send performs one request; the response is heap-allocated
 // (context.allocator) and must be released with httpc.response_destroy.
 bridge_hub_http_send :: proc(req: httpc.Request) -> (httpc.Response, httpc.Error) {
-	return httpc.send(req)
+	return bridge_hub_http_send_alloc(req)
+}
+
+bridge_hub_http_send_alloc :: proc(req: httpc.Request, allocator := context.allocator) -> (httpc.Response, httpc.Error) {
+    context.allocator = allocator
+    return bridge_hub_http_send_using(req)
+}
+
+bridge_hub_http_raw :: proc(req: httpc.Request) -> (httpc.Response, httpc.Error) {
+    return httpc.send(req)
+}
+
+bridge_hub_http_send_using :: proc(req: httpc.Request, fetch: Bridge_Hub_Fetch = bridge_hub_http_raw) -> (httpc.Response, httpc.Error) {
+    // Admission boundary: requests already admitted may complete after a pause.
+    // No later request (including retries and refreshes) reaches libcurl.
+    if sync.atomic_load(&bridge_hub_traffic_stopped) do return {}, .Aborted
+    resp, err := fetch(req)
+    if err == .None && resp.status >= 400 {
+        wire := bridge_operation_http_error(resp, true)
+        if wire.cause == "bridge_sunset_pending" do bridge_hub_stop_traffic(false)
+        if wire.cause == "bridge_credential_revoked" do bridge_hub_stop_traffic(true)
+    }
+    return resp, err
 }
 
 // bridge_hub_url parses a hub base URL (default: the configured hub) with

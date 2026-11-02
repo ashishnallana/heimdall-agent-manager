@@ -1,6 +1,7 @@
 package http
 
 import "core:fmt"
+import "core:crypto"
 import "core:mem/virtual"
 import "core:net"
 import "core:strconv"
@@ -10,6 +11,7 @@ import "core:time"
 import contracts "odin_test:contracts"
 import dbt "odin_test:hub/platform/dbtelemetry"
 import metrics "odin_test:lib/metrics"
+import ws "odin_test:lib/ws"
 
 // Allow 50 MiB artifact payloads plus multipart/base64 framing overhead.
 MAX_HTTP_REQUEST_BYTES :: 80 * 1024 * 1024
@@ -246,6 +248,7 @@ request_body :: proc(request: string) -> string {
 
 write_http_response :: proc(client: net.TCP_Socket, resp: Response) {
 	body := resp.body
+	defer if resp.sensitive && body!="" do crypto.zero_explicit(raw_data(body),len(body))
 	content_type := resp.content_type
 	if content_type == "" do content_type = "application/json"
 	b := strings.builder_make()
@@ -266,7 +269,8 @@ write_http_response :: proc(client: net.TCP_Socket, resp: Response) {
 	strings.write_string(&b, "\r\n")
 	strings.write_string(&b, body)
 	raw := strings.to_string(b)
-	_, _ = net.send_tcp(client, transmute([]byte)raw)
+	defer if resp.sensitive && raw!="" do crypto.zero_explicit(raw_data(raw),len(raw))
+	if resp.write_timeout_ms>0 {_,_=ws.send_socket_bytes(client,transmute([]byte)raw,time.Duration(resp.write_timeout_ms)*time.Millisecond)} else {_,_=net.send_tcp(client,transmute([]byte)raw)}
 }
 
 status_text :: proc(status: int) -> string {

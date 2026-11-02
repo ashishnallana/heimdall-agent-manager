@@ -488,6 +488,9 @@ Approve_Grant_Request :: struct {
 	// downstream against the Auth_Context owner.
 	target_bridge_id: string,
 	new_bridge_label: string,
+	// Optional "register new and sunset this bridge" choice; revoked atomically with
+	// the new bridge's creation and re-checked downstream like target_bridge_id.
+	sunset_bridge_id: string,
 	// Required for a bridge grant (the minter refuses without it).
 	vault_approval:   Maybe(Vault_Approval_Request),
 }
@@ -512,6 +515,7 @@ device_approve_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	input := device_auth.Approve_Input{
 		user_code = grant_key, approve = body.approve,
 		target_bridge_id = body.target_bridge_id, new_bridge_label = body.new_bridge_label,
+		sunset_bridge_id = body.sunset_bridge_id,
 	}
 	if va, has := body.vault_approval.?; has {
 		input.vault_approval = device_auth.Vault_Approval{present = true, statement = va.statement, signature = vault_sig_text(va.signature)}

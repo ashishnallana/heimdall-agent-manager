@@ -139,8 +139,9 @@ const BridgeRuntimeRow: React.FC<BridgeRuntimeRowProps> = ({
 
   const resolved = resolvedFleetProviderModel(draftPT, capabilities);
   const effectiveProvider = resolved.provider;
+  const effectiveProfile = resolved.provider_profile || resolved.provider;
   const effectiveModel = resolved.model;
-  const modelOptions = modelOptionsForProvider(capabilities, effectiveProvider);
+  const modelOptions = modelOptionsForProvider(capabilities, effectiveProvider, effectiveProfile);
   const bridgeInstances = (instancesQuery.data?.instances || []).filter(
     (instance: any) => String(instance.bridge_id || instance.bridgeId || '') === bId &&
       !['failed', 'terminated', 'stopped'].includes(String(instance.runtime_status || instance.runtimeStatus || ''))
@@ -179,7 +180,7 @@ const BridgeRuntimeRow: React.FC<BridgeRuntimeRowProps> = ({
           </span>
           <Select
             data-debug-id={`fleet-provider-select-${agentId}-${bId}`}
-            value={effectiveProvider}
+            value={effectiveProfile}
             onChange={(v) => onProviderChange(v, capabilities)}
             disabled={disabled}
             size="sm"
@@ -187,8 +188,8 @@ const BridgeRuntimeRow: React.FC<BridgeRuntimeRowProps> = ({
             aria-label={`Provider for ${roleName} on ${label}`}
             options={[
               ...(!effectiveProvider ? [{ value: '', label: 'Unavailable' }] :
-                capabilities.some((cap) => cap.provider === effectiveProvider) ? [] : [{ value: effectiveProvider, label: effectiveProvider }]),
-              ...capabilities.map((cap) => ({ value: cap.provider, label: cap.provider })),
+                capabilities.some((cap) => (cap.profile_id || cap.provider) === effectiveProfile) ? [] : [{ value: effectiveProfile, label: effectiveProfile }]),
+              ...capabilities.map((cap) => ({ value: cap.profile_id || cap.provider, label: cap.label || cap.profile_id || cap.provider })),
             ]}
           />
         </div>
@@ -199,7 +200,7 @@ const BridgeRuntimeRow: React.FC<BridgeRuntimeRowProps> = ({
           <Select
             data-debug-id={`fleet-model-select-${agentId}-${bId}`}
             value={effectiveModel}
-            onChange={(model) => { onProviderChange(effectiveProvider, capabilities); onModelChange(model); }}
+            onChange={(model) => { onProviderChange(effectiveProfile, capabilities); onModelChange(model); }}
             disabled={effectiveProvider === '' || disabled}
             size="sm"
             width="full"
@@ -212,7 +213,7 @@ const BridgeRuntimeRow: React.FC<BridgeRuntimeRowProps> = ({
           />
         </div>
       </div>
-      <ModelCatalogRefresh bridgeId={bId} provider={effectiveProvider} online={isOnline} disabled={disabled} debugPrefix={`fleet-${agentId}-${bId}`} />
+      <ModelCatalogRefresh bridgeId={bId} provider={effectiveProvider} profileId={effectiveProfile} online={isOnline} disabled={disabled} debugPrefix={`fleet-${agentId}-${bId}`} />
       {bridgeInstances.map((instance: any) => (
         <div key={instance.agent_instance_id || instance.agentInstanceId} className="text-[11px] text-muted">
           {instance.display_name || instance.displayName || instance.agent_instance_id || instance.agentInstanceId}: {instance.provider} / {instance.model}
@@ -442,17 +443,19 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
   }, []);
 
   const handleDraftTopLevelProviderChange = useCallback(
-    (agentId: string, provider: string) => {
+    (agentId: string, profileId: string) => {
+      const capability = bridgeCapabilities.find(c => (c.profile_id || c.provider) === profileId);
+      const provider = capability?.provider || profileId;
       setDraftTopLevelPT((prev) => {
         const currentModel = prev[agentId]?.model ?? '';
         const nextModel = provider
-          ? nextModelOnProviderChange(currentModel, provider, bridgeCapabilities) ||
-            modelOptionsForProvider(bridgeCapabilities, provider)[0] ||
+          ? modelOptionsForProvider(bridgeCapabilities, provider, profileId).find(m => m === currentModel) ||
+            modelOptionsForProvider(bridgeCapabilities, provider, profileId)[0] ||
             ''
           : '';
         return {
           ...prev,
-          [agentId]: { provider, model: nextModel },
+          [agentId]: { provider, provider_profile: profileId, model: nextModel },
         };
       });
       setErrorMsg('');
@@ -467,6 +470,7 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
       ...prev,
       [agentId]: {
         provider: prev[agentId]?.provider ?? '',
+        provider_profile: prev[agentId]?.provider_profile,
         model,
       },
     }));
@@ -498,7 +502,9 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
   }, []);
 
   const handleDraftBridgeProviderChange = useCallback(
-    (agentId: string, bId: string, provider: string, capabilities: FleetProviderCapability[]) => {
+    (agentId: string, bId: string, profileId: string, capabilities: FleetProviderCapability[]) => {
+      const capability = capabilities.find(c => (c.profile_id || c.provider) === profileId);
+      const provider = capability?.provider || profileId;
       setDraftProviderModels((prev) => {
         const roleDrafts = prev[agentId] || {};
         const currentModel = roleDrafts[bId]?.model ?? '';
@@ -508,7 +514,8 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
             ...roleDrafts,
             [bId]: {
               provider,
-              model: nextModelOnProviderChange(currentModel, provider, capabilities) || modelOptionsForProvider(capabilities, provider)[0] || '',
+              provider_profile: profileId,
+              model: modelOptionsForProvider(capabilities, provider, profileId).find(m => m === currentModel) || modelOptionsForProvider(capabilities, provider, profileId)[0] || '',
             },
           },
         };
@@ -530,6 +537,7 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
             ...roleDrafts,
             [bId]: {
               provider: roleDrafts[bId]?.provider || '',
+              provider_profile: roleDrafts[bId]?.provider_profile,
               model,
             },
           },
@@ -720,6 +728,7 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
               agentId: cf.agentId,
               capacity: cf.capacity,
               provider: cf.provider,
+              provider_profile: cf.provider_profile,
               model: cf.model,
               roles: cf.roles,
               bridgeId: cf.bridgeId,
@@ -925,9 +934,10 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
 
               const effectiveTopPT = draftTopLevelPT[agentId] ?? {
                 provider: fleet.provider ?? '',
+                provider_profile: fleet.provider_profile,
                 model: fleet.model ?? '',
               };
-              const topModelOptions = modelOptionsForProvider(bridgeCapabilities, effectiveTopPT.provider);
+              const topModelOptions = modelOptionsForProvider(bridgeCapabilities, effectiveTopPT.provider, effectiveTopPT.provider_profile);
 
               const effectiveMinWarm = draftMinWarms[agentId] ?? fleet.min_warm ?? fleet.minWarm ?? 0;
               const origMinWarm = getOriginalFleetMinWarm(rawFleets, agentId);
@@ -1140,7 +1150,7 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
                         </span>
                         <Select
                           data-debug-id={`fleet-default-provider-select-${agentId}`}
-                          value={effectiveTopPT.provider}
+                          value={effectiveTopPT.provider_profile || effectiveTopPT.provider}
                           onChange={(val) => handleDraftTopLevelProviderChange(agentId, val)}
                           disabled={isUpdating || isApplying}
                           size="sm"
@@ -1152,10 +1162,10 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
                               label: autoModel && (fleet as any).effective?.provider ? `${(fleet as any).effective.provider} (default)` : 'Bridge default',
                             },
                             ...(effectiveTopPT.provider &&
-                            !bridgeCapabilities.some((cap) => cap.provider === effectiveTopPT.provider)
-                              ? [{ value: effectiveTopPT.provider, label: effectiveTopPT.provider }]
+                            !bridgeCapabilities.some((cap) => (cap.profile_id || cap.provider) === (effectiveTopPT.provider_profile || effectiveTopPT.provider))
+                              ? [{ value: effectiveTopPT.provider_profile || effectiveTopPT.provider, label: effectiveTopPT.provider_profile || effectiveTopPT.provider }]
                               : []),
-                            ...bridgeCapabilities.map((cap) => ({ value: cap.provider, label: cap.provider })),
+                            ...bridgeCapabilities.map((cap) => ({ value: cap.profile_id || cap.provider, label: cap.label || cap.profile_id || cap.provider })),
                           ]}
                         />
                       </div>

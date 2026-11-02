@@ -57,6 +57,10 @@ test('Reuse sends target_bridge_id (no label); New sends new_bridge_label (no ta
   const body = choice.bridgeApproveBody('lk', VAULT_APPROVAL, fresh, 'Typed');
   assert.deepEqual(body, { pair_lookup: 'lk', approve: true, vault_approval: VAULT_APPROVAL, new_bridge_label: 'Typed' });
   assert.ok(!('target_bridge_id' in body));
+  // REQ-3: a new bridge can sunset one in the same approval; a reuse never can.
+  assert.deepEqual(choice.bridgeApproveBody('lk', VAULT_APPROVAL, null, 'Typed', 'brg_retire'), { pair_lookup: 'lk', approve: true, vault_approval: VAULT_APPROVAL, new_bridge_label: 'Typed', sunset_bridge_id: 'brg_retire' });
+  assert.throws(() => choice.bridgeApproveBody('lk', VAULT_APPROVAL, reuse, 'Typed', 'brg_retire'), /cannot also sunset/);
+  assert.ok(!('sunset_bridge_id' in body), 'no sunset field unless one was chosen');
   // A reuse target that is no longer listed resolves to nothing (the page refuses to approve).
   assert.equal(choice.reuseTarget(list, { mode: 'reuse', targetBridgeId: 'brg_gone' }), null);
 });
@@ -67,7 +71,8 @@ test('the reused bridge keeps its name in the signed approval; the done message 
   assert.equal(choice.approvalLabel({ ...live, label: '  ' }, 'Typed'), 'Typed');
   assert.equal(choice.approvalLabel(null, 'Typed'), 'Typed');
   assert.match(choice.bridgeApprovedMessage(live, 'Desk', 'brg_live'), /^Reused bridge identity “Desk” \(brg_live\)/);
-  assert.match(choice.bridgeApprovedMessage(null, 'New box', 'brg_new'), /^Registered new bridge “New box” \(brg_new\)/);
+  assert.match(choice.bridgeApprovedMessage(null, 'New box', 'brg_new'), /^Registered new bridge “New box” \(brg_new\)\. /);
+  assert.match(choice.bridgeApprovedMessage(null, 'New box', 'brg_new', 'Old box'), /^Registered new bridge “New box” \(brg_new\) and sunset “Old box”\./);
 });
 
 function render(i: any, c: { mode: 'new' | 'reuse'; targetBridgeId: string }): string {

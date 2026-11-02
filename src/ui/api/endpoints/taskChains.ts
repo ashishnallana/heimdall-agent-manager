@@ -29,7 +29,7 @@ export type UpdateTaskChainInput = {
 };
 
 export interface TaskChainFleet {
-  bridge_models?: Record<string, { provider: string; model: string }>;
+  bridge_models?: Record<string, { provider: string; provider_profile?: string; model: string }>;
   task_chain_id?: string;
   taskChainId?: string;
   agent_id: string;
@@ -41,6 +41,7 @@ export interface TaskChainFleet {
   minWarm?: number;
   idle_ttl_seconds?: number;
   idleTtlSeconds?: number;
+  provider_profile?: string;
   provider?: string;
   model?: string;
   roles?: string[];
@@ -105,6 +106,7 @@ export function normalizeFleet(f: any): TaskChainFleet {
     idle_ttl_seconds: typeof f?.idle_ttl_seconds === 'number' ? f.idle_ttl_seconds : (typeof f?.idleTtlSeconds === 'number' ? f.idleTtlSeconds : 600),
     idleTtlSeconds: typeof f?.idleTtlSeconds === 'number' ? f.idleTtlSeconds : (typeof f?.idle_ttl_seconds === 'number' ? f.idle_ttl_seconds : 600),
     provider: f?.provider || '',
+    provider_profile: f?.provider_profile || f?.provider || '',
     model: f?.model || '',
     roles,
     bridge_id: bridgeId,
@@ -205,6 +207,7 @@ export const taskChainsApi = heimdallApi.injectEndpoints({
       min_warm?: number;
       idleTtlSeconds?: number;
       idle_ttl_seconds?: number;
+      provider_profile?: string;
       provider?: string;
       model?: string;
       roles?: string[];
@@ -212,8 +215,8 @@ export const taskChainsApi = heimdallApi.injectEndpoints({
       bridge_id?: string;
       /** Ask the hub to relaunch this role's live instances with the new provider/model. */
       restartLiveInstances?: boolean;
-      bridgeModels?: Record<string, { provider: string; model: string }>;
-      bridge_models?: Record<string, { provider: string; model: string }>;
+      bridgeModels?: Record<string, { provider: string; provider_profile?: string; model: string }>;
+      bridge_models?: Record<string, { provider: string; provider_profile?: string; model: string }>;
     }>({
       queryFn: async ({
         chainId,
@@ -224,6 +227,7 @@ export const taskChainsApi = heimdallApi.injectEndpoints({
         idleTtlSeconds,
         idle_ttl_seconds,
         provider,
+        provider_profile,
         model,
         roles,
         bridgeId,
@@ -234,6 +238,7 @@ export const taskChainsApi = heimdallApi.injectEndpoints({
       }) => {
         try {
           const body: any = { capacity, provider: provider ?? '', model: model ?? '' };
+          if (provider_profile !== undefined) body.provider_profile = provider_profile;
           const resolvedBridgeModels = bridgeModels ?? bridge_models;
           if (resolvedBridgeModels !== undefined) body.bridge_models = resolvedBridgeModels;
           const resolvedMinWarm = minWarm ?? min_warm;

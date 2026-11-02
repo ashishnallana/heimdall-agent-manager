@@ -2,6 +2,7 @@ package main
 
 import "base:runtime"
 import "core:fmt"
+import "core:crypto"
 import "core:strings"
 import "core:sync"
 import "core:thread"
@@ -75,6 +76,7 @@ Bridge_Dispatch_Job :: struct {
 Bridge_Dispatch_Output :: struct {
 	text: string,
 	generation: i64,
+	sensitive: bool,
 }
 
 Bridge_Dispatch_Claim :: struct {
@@ -200,6 +202,7 @@ bridge_command_dispatch_drop_stale_queue_locked :: proc(queue: ^[dynamic]Bridge_
 		}
 		bridge_dispatch_owned_bytes -= job.owned_bytes
 		bridge_dispatch_queued_cost -= job.cost_units
+		if job.command_type=="mcp_transform" && job.text!="" do crypto.zero_explicit(raw_data(job.text),len(job.text))
 		delete(job.text, runtime.default_allocator())
 		delete(job.command_id, runtime.default_allocator())
 		delete(job.command_type, runtime.default_allocator())
@@ -240,10 +243,15 @@ bridge_command_spec :: proc(command_type: string) -> (Bridge_Command_Spec, bool)
 		return Bridge_Command_Spec{class = .Lifecycle, priority = .Interactive, key_kind = .Agent, queued = true, requires_id = true, timeout_ms = 30_000, cost_units = 8}, true
 	case "agent_pty_input", "agent_pty_resize":
 		return Bridge_Command_Spec{class = .Lifecycle, priority = .Interactive, key_kind = .Agent, queued = true, requires_id = true, timeout_ms = 5000, cost_units = 1}, true
-	case "bridge_unseal", "set_telemetry":
+	case "bridge_unseal", "set_telemetry", "auto_update_config":
 		return Bridge_Command_Spec{class = .Lifecycle, priority = .Interactive, key_kind = .Bridge, queued = true, requires_id = true, timeout_ms = 5000, cost_units = 2}, true
+	// REQ-PROF-3: sealed provider profile edit/read from the user's browser.
+	case "provider_profile_op":
+		return Bridge_Command_Spec{class = .Interactive, priority = .Interactive, key_kind = .Bridge, queued = true, requires_id = true, timeout_ms = 10_000, cost_units = 2}, true
 	case "task_chain_search":
 		return Bridge_Command_Spec{class = .Interactive, priority = .Interactive, key_kind = .Bridge, queued = true, requires_id = true, timeout_ms = 5000, cost_units = 2, retry_safe = true}, true
+	case "mcp_transform":
+		return Bridge_Command_Spec{class=.Interactive,priority=.Interactive,key_kind=.Bridge,queued=true,requires_id=true,timeout_ms=4000,cost_units=2},true
 	case "lsp_start":
 		return Bridge_Command_Spec{class = .Lifecycle, priority = .Interactive, key_kind = .LSP, queued = true, requires_id = true, timeout_ms = 15_000, cost_units = 4}, true
 	case "notify_agent_message", "notify_task_nudge", "notify_shell_run", "notify_title_nudge", "task_status_changed_notify", "capture_agent_pane", "get_agent_pane":
@@ -262,6 +270,8 @@ bridge_command_spec :: proc(command_type: string) -> (Bridge_Command_Spec, bool)
 		return Bridge_Command_Spec{class = .Exclusive, priority = .Interactive, key_kind = .Bridge, queued = true, requires_id = true, timeout_ms = 30_000, cost_units = 64}, true
 	case "bridge_uninstall":
 		return Bridge_Command_Spec{class = .Exclusive, priority = .Interactive, key_kind = .Bridge, queued = true, requires_id = true, timeout_ms = 15_000, cost_units = 64}, true
+	case "session_projects":
+		return Bridge_Command_Spec{class = .General_IO, priority = .Background, key_kind = .None, queued = true, requires_id = true, timeout_ms = 8000, cost_units = 4, retry_safe = true}, true
 	case "validate_project_path", "fs_list_dir", "fs_stat", "fs_read_file", "agent_run_dir_list", "agent_run_dir_read", "fs_find_files", "fs_grep":
 		return Bridge_Command_Spec{class = .General_IO, priority = .Background, key_kind = .None, queued = true, requires_id = true, timeout_ms = 15_000, cost_units = 4, retry_safe = true}, true
 	case "fs_make_dir", "fs_create_file", "fs_write_file", "fs_batch_write", "fs_move", "fs_delete":
@@ -320,7 +330,8 @@ bridge_command_ordering_key :: proc(command_type, text: string) -> string {
 		if prov != "" do return strings.concatenate({"provider-ext-install:", prov})
 		return strings.clone("provider-ext-install")
 	case "bridge_update", "bridge_uninstall": return strings.clone("bridge-update")
-	case "bridge_unseal", "set_telemetry": return strings.clone("bridge-control")
+	case "bridge_unseal", "set_telemetry", "auto_update_config": return strings.clone("bridge-control")
+	case "provider_profile_op": return strings.clone("provider-profiles")
 	case "fs_make_dir", "fs_create_file", "fs_write_file", "fs_batch_write", "fs_move", "fs_delete":
 		// Batch operations can touch several paths. A single filesystem mutation key
 		// is conservative but correct until canonical roots are part of the contract.
@@ -649,7 +660,8 @@ bridge_command_dispatch_finish :: proc(worker: ^Bridge_Dispatch_Worker, job: ^Br
 	if i := bridge_command_dispatch_claim_index_locked(job.command_id); i >= 0 {
 		bridge_dispatch_claims[i].state = .Completed
 		delete(bridge_dispatch_claims[i].result_json, runtime.default_allocator())
-		bridge_dispatch_claims[i].result_json = strings.clone(worker.last_result, runtime.default_allocator())
+		bridge_dispatch_claims[i].result_json=""
+		if job.command_type!="mcp_transform" do bridge_dispatch_claims[i].result_json = strings.clone(worker.last_result, runtime.default_allocator())
 	}
 	bridge_dispatch_owned_bytes -= job.owned_bytes
 	bridge_dispatch_queued_cost -= job.cost_units
@@ -668,6 +680,7 @@ bridge_command_dispatch_finish :: proc(worker: ^Bridge_Dispatch_Worker, job: ^Br
 	worker.started_ns = 0
 	worker.deadline_ns = 0
 	sync.mutex_unlock(&bridge_dispatch_mu)
+	if job.command_type=="mcp_transform" && job.text!="" do crypto.zero_explicit(raw_data(job.text),len(job.text))
 	delete(job.text, runtime.default_allocator())
 	delete(job.command_id, runtime.default_allocator())
 	delete(job.command_type, runtime.default_allocator())
@@ -754,10 +767,13 @@ bridge_command_worker_capture_send :: proc(conn: ^ws.Connection, text: string) -
 			bridge_dispatch_metrics.response_backpressure += 1
 		}
 		defer delete(fallback)
-		append(&bridge_dispatch_outputs, Bridge_Dispatch_Output{text = strings.clone(captured, runtime.default_allocator()), generation = worker.current_generation})
+		frame_type:=extract_json_string(captured,"type","")
+		sensitive:=frame_type=="mcp_transform_result"
+		delete(frame_type)
+		append(&bridge_dispatch_outputs, Bridge_Dispatch_Output{text = strings.clone(captured, runtime.default_allocator()), generation = worker.current_generation,sensitive=sensitive})
 		bridge_dispatch_outbox_bytes += len(captured)
 		delete(worker.last_result, runtime.default_allocator())
-		worker.last_result = strings.clone(captured, runtime.default_allocator())
+		if sensitive {worker.last_result=""} else {worker.last_result = strings.clone(captured, runtime.default_allocator())}
 		return true
 	}
 	return false
@@ -778,6 +794,7 @@ bridge_command_dispatch_drain :: proc(conn: ^ws.Connection, generation: i64) {
 		if !have do return
 		if output.generation == generation {
 			if !bridge_hub_send(conn, output.text) {
+				if output.sensitive && output.text!="" do crypto.zero_explicit(raw_data(output.text),len(output.text))
 				delete(output.text, runtime.default_allocator())
 				conn.connected = false
 				return
@@ -787,6 +804,7 @@ bridge_command_dispatch_drain :: proc(conn: ^ws.Connection, generation: i64) {
 			bridge_dispatch_metrics.stale_completions += 1
 			sync.mutex_unlock(&bridge_dispatch_mu)
 		}
+		if output.sensitive && output.text!="" do crypto.zero_explicit(raw_data(output.text),len(output.text))
 		delete(output.text, runtime.default_allocator())
 	}
 }

@@ -361,7 +361,10 @@ verify_access_token_scoped :: proc(service: ^Bridge_Service, token: string, scop
 	// Checked after the secret, like kind: the scope is not secret, but a mismatch
 	// must look exactly like a wrong token rather than confirm the row exists.
 	if row.scope != scope do return contracts.Auth_Context{}, "", false, invalid
-	if row.revoked_at != "" do return contracts.Auth_Context{}, "", false, domain.domain_error(.Forbidden, "bridge credential is revoked")
+	if row.revoked_at != "" {
+		if credential_revocation_is_recoverable(service, row.token_id) do return {}, "", false, pending_sunset_error()
+		return {}, "", false, revoked_credential_error("bridge credential is revoked")
+	}
 	now := platform.clock_now(service.clock)
 	if token_is_expired(row.expires_at, now) do return contracts.Auth_Context{}, "", false, domain.domain_error(.Unauthenticated, "bridge access token has expired")
 	if row.family_expires_at != "" && token_is_expired(row.family_expires_at, now) {
@@ -372,7 +375,10 @@ verify_access_token_scoped :: proc(service: ^Bridge_Service, token: string, scop
 	// A revoked BRIDGE and a revoked TOKEN are two separate records and both are
 	// checked: revoke_bridge stamps both, but a token row written before that change
 	// (or by a future path that forgets) must not outlive its bridge.
-	if bridge.status == .Revoked do return contracts.Auth_Context{}, "", false, domain.domain_error(.Forbidden, "bridge is revoked")
+	if bridge.status == .Revoked {
+		if credential_revocation_is_recoverable(service, row.token_id) do return {}, "", false, pending_sunset_error()
+		return {}, "", false, revoked_credential_error("bridge is revoked")
+	}
 	// First authentication with this access token: record it. It proves the reply
 	// that carried the token was delivered, which ends the retry grace of the
 	// refresh token it was minted from (family_descendant_delivered). Once per
@@ -415,6 +421,7 @@ access_token_session_credential :: proc(service: ^Bridge_Service, token: string)
 // Session_Credential_State is the outcome of re-checking a live session's token row.
 Session_Credential_State :: enum {
 	Valid,
+	Pending_Sunset,
 	Revoked,
 	Expired,
 }
@@ -427,11 +434,17 @@ session_credential_state :: proc(service: ^Bridge_Service, token_id: string) -> 
 	row, ok, _ := iface.bridge_get_token(service.repo, token_id)
 	if !ok do return .Revoked
 	defer domain.bridge_token_destroy(&row)
-	if row.revoked_at != "" do return .Revoked
+	if row.revoked_at != "" {
+		if credential_revocation_is_recoverable(service, token_id) do return .Pending_Sunset
+		return .Revoked
+	}
 	bridge, bridge_ok, _ := iface.bridge_get_bridge(service.repo, row.bridge_id)
 	if !bridge_ok do return .Revoked
 	defer domain.bridge_destroy(&bridge)
-	if bridge.status == .Revoked do return .Revoked
+	if bridge.status == .Revoked {
+		if credential_revocation_is_recoverable(service, token_id) do return .Pending_Sunset
+		return .Revoked
+	}
 	now := platform.clock_now(service.clock)
 	// token_is_expired applies BRIDGE_TOKEN_CLOCK_SKEW_SECONDS, exactly as
 	// verify_access_token does, so the re-check never ends a session that verify
@@ -477,7 +490,10 @@ refresh_bridge_token :: proc(service: ^Bridge_Service, presented: string, reques
 	if row.scope != BRIDGE_TOKEN_SCOPE do return Bridge_Token_Pair{}, false, invalid_grant
 	// From here the caller has PROVEN possession of this exact refresh token, so the
 	// remaining branches may act on the family without being an oracle.
-	if row.revoked_at != "" do return Bridge_Token_Pair{}, false, invalid_grant
+	if row.revoked_at != "" {
+		if credential_revocation_is_recoverable(service, row.token_id) do return {}, false, pending_sunset_error()
+		return {}, false, invalid_grant
+	}
 	now := platform.clock_now(service.clock)
 	if token_is_expired(row.expires_at, now) do return Bridge_Token_Pair{}, false, invalid_grant
 	if row.family_expires_at != "" && token_is_expired(row.family_expires_at, now) do return Bridge_Token_Pair{}, false, invalid_grant
@@ -563,7 +579,10 @@ rotate_from :: proc(service: ^Bridge_Service, row: domain.Bridge_Token, now: str
 	// minting so a revoked bridge cannot renew its way back in.
 	bridge, bridge_ok, _ := iface.bridge_get_bridge(service.repo, row.bridge_id)
 	if !bridge_ok do return Bridge_Token_Pair{}, false, invalid_grant
-	if bridge.status == .Revoked do return Bridge_Token_Pair{}, false, invalid_grant
+	if bridge.status == .Revoked {
+		if credential_revocation_is_recoverable(service, row.token_id) do return {}, false, pending_sunset_error()
+		return {}, false, invalid_grant
+	}
 
 	if !revoke_newer_generations {
 		// SPEND IT FIRST, and let the database decide the winner. `mark_token_rotated`
@@ -580,10 +599,21 @@ rotate_from :: proc(service: ^Bridge_Service, row: domain.Bridge_Token, now: str
 			if !hash_ok do return Bridge_Token_Pair{}, false, domain.domain_error(.Provider_Unavailable, "secure random source unavailable; no bridge credential was issued, retry")
 			request_hash = hashed
 		}
-		defer if request_hash != "" do delete(request_hash)
+		// hash_credential_secret returns temp-allocated bytes.
 		changed, mark_err := iface.bridge_mark_token_rotated(service.repo, row.token_id, now, request_hash)
 		if mark_err.code != .None do return Bridge_Token_Pair{}, false, mark_err
 		if !changed {
+			state, state_err := iface.bridge_credential_revocation(service.repo, row.token_id)
+			if state_err.code != .None || state == .Pending_Sunset do return {}, false, pending_sunset_error()
+			// Rollback may have completed between the rejected spend and this
+			// read. An unspent token is not evidence of a second holder.
+			current, current_ok, current_err := iface.bridge_get_token(service.repo, row.token_id)
+			if current_err.code != .None do return {}, false, current_err
+			if current_ok {
+				unspent := current.rotated_at == ""
+				domain.bridge_token_destroy(&current)
+				if unspent do return {}, false, pending_sunset_error()
+			}
 			_, _, _ = revoke_token_family(service, row.family_id, now)
 			_ = close_bridge_connection(service, row.bridge_id)
 			return Bridge_Token_Pair{}, false, invalid_grant
@@ -627,9 +657,20 @@ rotate_from :: proc(service: ^Bridge_Service, row: domain.Bridge_Token, now: str
 				// Nothing was written; the claim is untouched, so a retry can succeed.
 				return Bridge_Token_Pair{}, false, regrant_err if regrant_err.code != .None else domain.domain_error(.Internal_Error, "the bridge credential re-grant failed; retry")
 			case .Lost:
+				// A sunset can reject the CAS and roll back before we classify
+				// it. An unchanged claim is a retry, not proof of token theft.
+				current, current_ok, current_err := iface.bridge_get_token(service.repo, row.token_id)
+				if current_err.code != .None do return {}, false, current_err
+				if current_ok {
+					unchanged := current.regrant_claim == row.regrant_claim
+					domain.bridge_token_destroy(&current)
+					if unchanged do return {}, false, pending_sunset_error()
+				}
 				claim_ok = false
 			}
 		}
+		state, state_err := iface.bridge_credential_revocation(service.repo, row.token_id)
+		if state_err.code != .None || state == .Pending_Sunset do return {}, false, pending_sunset_error()
 		// A lost claim is a second holder of the token: theft. This also revokes the
 		// pair the winner just received; see docs/bounded-action-recovery.md.
 		_, _, _ = revoke_token_family(service, row.family_id, now)
@@ -670,4 +711,27 @@ free_bridge_tokens :: proc(tokens: []domain.Bridge_Token) {
 		domain.bridge_token_destroy(&t)
 	}
 	if tokens != nil do delete(tokens)
+}
+
+// A sunset receipt is a durable suspension, not a permanent credential rejection.
+// Use the existing retriable wire error (500), understood by installed bridges:
+// they retain both credential files and retry with the same rotation request id.
+// Current bridges recognize the cause and park without polling; the retriable
+// envelope keeps older bridges from destroying recoverable credentials.
+// Do not turn a lookup failure or a stale revoked read racing rollback into a 401.
+pending_sunset_error :: proc() -> domain.Domain_Error {
+	err := domain.domain_error(.Internal_Error, "bridge retirement is pending enrollment; retain credentials and explicitly resume after rollback")
+	err.cause = "bridge_sunset_pending"
+	return err
+}
+
+credential_revocation_is_recoverable :: proc(service: ^Bridge_Service, token_id: string) -> bool {
+	state, err := iface.bridge_credential_revocation(service.repo, token_id)
+	return err.code != .None || state != .Final
+}
+
+revoked_credential_error :: proc(message: string) -> domain.Domain_Error {
+    err := domain.domain_error(.Forbidden, message)
+    err.cause = "bridge_credential_revoked"
+    return err
 }

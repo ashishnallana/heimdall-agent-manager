@@ -11,6 +11,11 @@ on:
         required: false
         default: ''
         type: string
+      build_darwin_x64:
+        description: 'Build and publish Intel macOS (Darwin x64) binaries'
+        required: false
+        default: false
+        type: boolean
       publish_release:
         description: 'Create/update the GitHub Release after building artifacts'
         required: true
@@ -63,11 +68,19 @@ jobs:
       version: ${{ steps.prepare.outputs.version }}
       clean_version: ${{ steps.prepare.outputs.clean_version }}
       commit_sha: ${{ steps.prepare.outputs.commit_sha }}
+      build_matrix: ${{ steps.matrix.outputs.matrix }}
     steps:
       - name: Checkout release source
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Select release targets
+        id: matrix
+        env:
+          # Tag pushes have no inputs: Intel macOS is manual opt-in only.
+          BUILD_DARWIN_X64: ${{ github.event_name == 'workflow_dispatch' && inputs.build_darwin_x64 == true }}
+        run: echo "matrix=$(python3 scripts/release/local-build-matrix.py)" >> "$GITHUB_OUTPUT"
 
       - name: Resolve and commit release version
         id: prepare
@@ -140,29 +153,7 @@ jobs:
     needs: prepare
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - target: linux-amd64
-            runner: ubuntu-24.04
-            nix_system: x86_64-linux
-          - target: linux-arm64
-            runner: ubuntu-24.04-arm
-            nix_system: aarch64-linux
-          # T12 termux-arm64 is TEMPORARILY DISABLED: release-termux-ham-bridge
-          # fails to link (musl has no backtrace/backtrace_symbols_fd, used by
-          # crashlog.odin). Restore the entry below once that is fixed, along
-          # with the other termux-arm64 lines disabled in this file and in
-          # promote-release.yml.
-          #   - target: termux-arm64
-          #     runner: ubuntu-24.04-arm
-          #     nix_system: aarch64-linux
-          #     odin_attr_prefix: release-termux-
-          - target: darwin-amd64
-            runner: macos-15-intel
-            nix_system: x86_64-darwin
-          - target: darwin-arm64
-            runner: macos-14
-            nix_system: aarch64-darwin
+      matrix: ${{ fromJSON(needs.prepare.outputs.build_matrix) }}
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout clean source
@@ -486,6 +477,7 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          HEIMDALL_DESKTOP_SIGNED_RELEASE: '1'
         run: |
           set -euo pipefail
           [ -n "$APPLE_ID" ] && [ -n "$APPLE_APP_SPECIFIC_PASSWORD" ] && [ -n "$APPLE_TEAM_ID" ] || {
@@ -506,11 +498,15 @@ jobs:
           # has no contents:write token.
           # zip: what electron-updater installs (F14); dmg: what people download.
           npx electron-builder --mac dmg zip "$arch" --publish never \
-            -c.extraMetadata.version="${{ needs.prepare.outputs.clean_version }}"
+            -c.extraMetadata.version="${{ needs.prepare.outputs.clean_version }}" \
+            -c.forceCodeSigning=true
           # Each arch writes its own latest-mac.yml; the release job merges them.
           mv desktop-dist/latest-mac.yml "desktop-dist/latest-mac-${{ matrix.target }}.yml"
           # REQ-ENR-4: App / Bridge / both .pkg from the signed, notarized .app.
           app_bundle="$(find desktop-dist -maxdepth 2 -name Ninjy.app -type d | head -n 1)"
+          codesign --verify --deep --strict "$app_bundle"
+          spctl --assess --type execute "$app_bundle"
+          xcrun stapler validate "$app_bundle"
           pkg="desktop-dist/Ninjy-${{ needs.prepare.outputs.clean_version }}-${arch#--}.pkg"
           scripts/release/build-macos-pkg.sh "$app_bundle" release-assets/bridge \
             "${{ needs.prepare.outputs.version }}" "${arch#--}" "$pkg"
@@ -717,6 +713,10 @@ jobs:
 
       - name: Build Ninjy installer (Windows)
         shell: pwsh
+        env:
+          HEIMDALL_WINDOWS_PUBLISHER_NAME: ${{ vars.WINDOWS_UPDATE_PUBLISHER_NAME }}
+          CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
         run: |
           scripts/release/stage-windows-desktop-resources.ps1 `
             -Bundle dist/heimdall-local-windows-amd64.zip `
@@ -728,10 +728,23 @@ jobs:
           if ($LASTEXITCODE) { throw "npm ci failed with exit code $LASTEXITCODE" }
           npm run build
           if ($LASTEXITCODE) { throw "npm run build failed with exit code $LASTEXITCODE" }
+          $signing = @()
+          if ($env:HEIMDALL_WINDOWS_PUBLISHER_NAME) {
+            if (-not $env:CSC_LINK -or -not $env:CSC_KEY_PASSWORD) { throw 'Windows signed updates require WIN_CSC_LINK and WIN_CSC_KEY_PASSWORD' }
+            $env:HEIMDALL_DESKTOP_SIGNED_RELEASE = '1'
+            $signing = @('--config.forceCodeSigning=true', "--config.win.publisherName=$($env:HEIMDALL_WINDOWS_PUBLISHER_NAME)")
+          }
           npx electron-builder --win nsis --x64 --publish never `
-            --config.extraMetadata.version="${{ needs.prepare.outputs.clean_version }}"
+            --config.extraMetadata.version="${{ needs.prepare.outputs.clean_version }}" @signing
           if ($LASTEXITCODE) { throw "electron-builder failed with exit code $LASTEXITCODE" }
           $installer = Get-Item desktop-dist/Ninjy-*-x64.exe
+          if ($env:HEIMDALL_DESKTOP_SIGNED_RELEASE -eq '1') {
+            $signature = Get-AuthenticodeSignature $installer.FullName
+            if ($signature.Status -ne 'Valid' -or -not $signature.SignerCertificate) { throw 'Installer Authenticode validation failed' }
+            $publisher = $signature.SignerCertificate.GetNameInfo([System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false)
+            if ($env:HEIMDALL_WINDOWS_PUBLISHER_NAME -match '(^|,)\s*CN=') { $publisher = $signature.SignerCertificate.Subject }
+            if ($publisher -ne $env:HEIMDALL_WINDOWS_PUBLISHER_NAME) { throw 'Installer publisher does not match configured update publisher' }
+          }
           if (-not (Test-Path desktop-dist/latest.yml)) { throw 'electron-builder did not produce latest.yml' }
 
       # A separate artifact, like the macOS DMG: upload-artifact@v4 roots each
@@ -750,20 +763,10 @@ jobs:
 
   verify-storeless:
     name: Execute release binaries without Nix (${{ matrix.target }})
-    needs: build
+    needs: [prepare, build]
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - target: linux-amd64
-            runner: ubuntu-24.04
-          - target: linux-arm64
-            runner: ubuntu-24.04-arm
-          # termux-arm64 temporarily disabled (see the build matrix).
-          - target: darwin-amd64
-            runner: macos-15-intel
-          - target: darwin-arm64
-            runner: macos-14
+      matrix: ${{ fromJSON(needs.prepare.outputs.build_matrix) }}
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Download release artifacts
@@ -813,6 +816,8 @@ jobs:
           merge-multiple: true
 
       - name: Verify tarballs and create SHA256SUMS
+        env:
+          BUILD_DARWIN_X64: ${{ github.event_name == 'workflow_dispatch' && inputs.build_darwin_x64 == true }}
         shell: bash
         run: |
           set -euo pipefail
@@ -831,11 +836,13 @@ jobs:
           }
           expected=(
             heimdall-local-darwin-arm64.tar.gz
-            heimdall-local-darwin-amd64.tar.gz
             heimdall-local-linux-amd64.tar.gz
             heimdall-local-linux-arm64.tar.gz
             # heimdall-local-termux-arm64.tar.gz  (temporarily disabled)
           )
+          if [ "$BUILD_DARWIN_X64" = "true" ]; then
+            expected+=(heimdall-local-darwin-amd64.tar.gz)
+          fi
           versioned=()
           for tarball in "${expected[@]}"; do
             require_file "$tarball"
@@ -866,7 +873,11 @@ jobs:
           versioned+=("heimdall-local-windows-amd64-${version}.zip")
           sha256sum "${versioned[@]}" > SHA256SUMS
           clean="${{ needs.prepare.outputs.clean_version }}"
-          for arch in arm64 x64; do
+          mac_arches=(arm64)
+          if [ "$BUILD_DARWIN_X64" = "true" ]; then
+            mac_arches+=(x64)
+          fi
+          for arch in "${mac_arches[@]}"; do
             require_file "Ninjy-$clean-$arch.dmg"
             require_file "Ninjy-$clean-$arch.zip"
             require_file "Ninjy-$clean-$arch.pkg"
@@ -880,13 +891,21 @@ jobs:
           require_file latest.yml
           require_file latest-linux.yml
           require_file latest-linux-arm64.yml
-          # F14: one latest-mac.yml naming both arches' zips (electron-updater
-          # picks the arm64 entry on Apple silicon, the other one on Intel).
+          # Default metadata advertises only Apple Silicon. Opt-in Intel runs
+          # retain the legacy x64 base while merging both architectures.
           require_file latest-mac-darwin-arm64.yml
-          require_file latest-mac-darwin-amd64.yml
-          python3 "$GITHUB_WORKSPACE/scripts/release/merge-latest-mac.py" \
-            latest-mac-darwin-amd64.yml latest-mac-darwin-arm64.yml > latest-mac.yml
+          if [ "$BUILD_DARWIN_X64" = "true" ]; then
+            require_file latest-mac-darwin-amd64.yml
+            python3 "$GITHUB_WORKSPACE/scripts/release/merge-latest-mac.py" \
+              latest-mac-darwin-amd64.yml latest-mac-darwin-arm64.yml > latest-mac.yml
+          else
+            cp latest-mac-darwin-arm64.yml latest-mac.yml
+          fi
           rm latest-mac-darwin-*.yml
+          mac_update_arches=(--arch arm64)
+          if [ -f "Ninjy-$clean-x64.zip" ]; then mac_update_arches+=(--arch x64); fi
+          python3 "$GITHUB_WORKSPACE/scripts/release/validate-desktop-updates.py" . --version "$clean" --platform mac "${mac_update_arches[@]}"
+          python3 "$GITHUB_WORKSPACE/scripts/release/validate-desktop-updates.py" . --version "$clean" --platform windows --arch x64
           sha256sum Ninjy-*.dmg Ninjy-*.zip Ninjy-*.pkg Ninjy-*.AppImage Ninjy-*.deb Ninjy-*.exe >> SHA256SUMS
 
       - name: Create or update GitHub Release
@@ -894,6 +913,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_COMMIT: ${{ needs.prepare.outputs.commit_sha }}
           VERSION: ${{ needs.prepare.outputs.version }}
+          BUILD_DARWIN_X64: ${{ github.event_name == 'workflow_dispatch' && inputs.build_darwin_x64 == true }}
           # Via env, never inlined into the script: it is free-form user text.
           EXTRA_NOTES: ${{ inputs.notes || '' }}
         shell: bash
@@ -914,19 +934,23 @@ jobs:
 
           Artifacts:
           - heimdall-local-darwin-arm64-$VERSION.tar.gz
-          - heimdall-local-darwin-amd64-$VERSION.tar.gz
           - heimdall-local-linux-amd64-$VERSION.tar.gz
           - heimdall-local-linux-arm64-$VERSION.tar.gz
           - heimdall-local-windows-amd64-$VERSION.zip (scripts/install.ps1)
           - Ninjy-${{ needs.prepare.outputs.clean_version }}-arm64.dmg (signed + notarized macOS app with Bridge)
-          - Ninjy-${{ needs.prepare.outputs.clean_version }}-x64.dmg (signed + notarized macOS app with Bridge)
-          - Ninjy-${{ needs.prepare.outputs.clean_version }}-arm64.pkg / -x64.pkg (macOS installer: App, Bridge, or both)
+          - Ninjy-${{ needs.prepare.outputs.clean_version }}-arm64.pkg (macOS installer: App, Bridge, or both)
           - Ninjy-${{ needs.prepare.outputs.clean_version }}-x64.exe (unsigned Windows installer: App, Bridge, or both)
           - Ninjy-${{ needs.prepare.outputs.clean_version }}-x86_64.AppImage / -arm64.AppImage, -amd64.deb / -arm64.deb (Linux app; App, Bridge, or both on first launch)
           - Ninjy-*.zip, latest.yml, latest-mac.yml, latest-linux*.yml and the Windows block map (desktop auto-update metadata)
           - SHA256SUMS
           - install.sh, install.ps1 (bootstraps: download + verify + ham-bridge setup)
           NOTES
+          if [ "$BUILD_DARWIN_X64" = "true" ]; then
+            printf '%s\n' \
+              "- heimdall-local-darwin-amd64-$VERSION.tar.gz" \
+              "- Ninjy-${{ needs.prepare.outputs.clean_version }}-x64.dmg (signed + notarized Intel macOS app)" \
+              "- Ninjy-${{ needs.prepare.outputs.clean_version }}-x64.pkg (Intel macOS installer)" >> "$notes_file"
+          fi
           release_flags=()
           if [ "${{ inputs.draft || false }}" = "true" ]; then release_flags+=(--draft); fi
           # Tag pushes have no inputs; they are candidates too (see the prerelease input).
@@ -937,6 +961,23 @@ jobs:
           # resolve the newest promoted release, so any copy works.
           cp scripts/install.sh scripts/install.ps1 dist/
           if gh release view "$VERSION" >/dev/null 2>&1; then
+            if [ "$BUILD_DARWIN_X64" != "true" ]; then
+              # --clobber replaces matching names but leaves assets omitted by
+              # this run. Remove only this version's optional Intel macOS set;
+              # otherwise its old assets would outlive their checksum entries.
+              gh release view "$VERSION" --json assets --jq '.assets[].name' > "$RUNNER_TEMP/existing-release-assets.txt"
+              for asset in \
+                "heimdall-local-darwin-amd64-$VERSION.tar.gz" \
+                "Ninjy-${{ needs.prepare.outputs.clean_version }}-x64.dmg" \
+                "Ninjy-${{ needs.prepare.outputs.clean_version }}-x64.dmg.blockmap" \
+                "Ninjy-${{ needs.prepare.outputs.clean_version }}-x64.zip" \
+                "Ninjy-${{ needs.prepare.outputs.clean_version }}-x64.zip.blockmap" \
+                "Ninjy-${{ needs.prepare.outputs.clean_version }}-x64.pkg"; do
+                if grep -Fxq "$asset" "$RUNNER_TEMP/existing-release-assets.txt"; then
+                  gh release delete-asset "$VERSION" "$asset" --yes
+                fi
+              done
+            fi
             gh release upload "$VERSION" dist/heimdall-local-*-"$VERSION".tar.gz dist/heimdall-local-*-"$VERSION".zip dist/Ninjy-*.dmg dist/Ninjy-*.zip dist/Ninjy-*.zip.blockmap dist/Ninjy-*.pkg dist/Ninjy-*.AppImage dist/Ninjy-*.deb dist/Ninjy-*.exe dist/Ninjy-*.exe.blockmap dist/latest.yml dist/latest-mac.yml dist/latest-linux.yml dist/latest-linux-arm64.yml dist/SHA256SUMS dist/install.sh dist/install.ps1 --clobber
             gh release edit "$VERSION" --notes-file "$notes_file"
           else

@@ -29,6 +29,7 @@ import "core:path/filepath"
 import "core:strconv"
 import "core:strings"
 import "core:time"
+import agent_runtime "odin_test:lib/agent_runtime"
 
 HOOK_INPUT_MAX :: 16 * 1024 * 1024
 
@@ -189,7 +190,7 @@ hook_run :: proc(provider, raw: string, env: Hook_Env, send: Send_Proc) -> strin
 // invocation of an allowlisted, side-effect-bounded verb, so it can be approved
 // without asking the user.
 //   - Program: only the bridge-issued ctl_bin (HEIMDALL_CTL_BIN), written as its
-//     absolute path, as $HEIMDALL_CTL_BIN, or as ./.heimdall/bin/ham-ctl when that
+//     absolute path, as $HEIMDALL_CTL_BIN, or as ./bin/ham-ctl (the run-dir shim) when that
 //     resolves (against the hook's cwd) to ctl_bin. A bare `ham-ctl` goes through
 //     PATH and never matches; nothing matches when ctl_bin is unknown.
 //   - Shape: no chaining, pipe, background, subshell, substitution, redirect,
@@ -250,7 +251,7 @@ ham_ctl_head_is_ctl_bin :: proc(head, ctl_bin, cwd: string) -> bool {
 	switch head {
 	case "$HEIMDALL_CTL_BIN", "\"$HEIMDALL_CTL_BIN\"":
 		return true
-	case "./.heimdall/bin/ham-ctl", ".heimdall/bin/ham-ctl":
+	case agent_runtime.CTL_SHIM_INVOCATION, agent_runtime.CTL_SHIM_PATH:
 		if strings.trim_space(cwd) == "" do return false
 		joined, _ := filepath.join({cwd, head}, context.temp_allocator)
 		clean_bin, _ := filepath.clean(ctl_bin, context.temp_allocator)

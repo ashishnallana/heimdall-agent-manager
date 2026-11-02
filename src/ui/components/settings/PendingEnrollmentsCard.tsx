@@ -6,14 +6,14 @@ import {
   type PendingBridgeEnrollment,
 } from '../../api/endpoints/bridges';
 
-/** Re-read while something is enrolling, so a commit or rollback shows up. */
+/** Detect enrollments started elsewhere, and observe commit or rollback. */
 const PENDING_REFRESH_MS = 10_000;
 
 /**
  * REQ-EA-6: bridges approved but not enrolled yet. A bridge is enrolled only once
  * its vault key is delivered; until then it is listed here as "Enrolling…" and
- * nowhere else. Renders nothing when there are none, and polls only while there
- * are some.
+ * nowhere else. Replacements remain usable while their pending attempt is shown.
+ * Poll even from an empty list so attempts started elsewhere become visible.
  */
 export default function PendingEnrollmentsCard({ refreshKey }: { refreshKey?: unknown }) {
   const [pending, setPending] = useState<PendingBridgeEnrollment[]>([]);
@@ -33,10 +33,9 @@ export default function PendingEnrollmentsCard({ refreshKey }: { refreshKey?: un
   }, [load, refreshKey]);
 
   useEffect(() => {
-    if (pending.length === 0) return undefined;
     const timer = setInterval(() => void load(), PENDING_REFRESH_MS);
     return () => clearInterval(timer);
-  }, [pending.length, load]);
+  }, [load]);
 
   const cancel = useCallback(
     async (bridgeId: string) => {
@@ -70,7 +69,7 @@ export default function PendingEnrollmentsCard({ refreshKey }: { refreshKey?: un
           >
             <div className="min-w-0">
               <div className="truncate text-sm font-medium text-primary">
-                {p.label || p.machine_hostname || p.bridge_id} — Enrolling…
+                {p.label || p.machine_hostname || p.bridge_id} — {p.replacing ? 'Re-enrolling…' : 'Enrolling…'}
               </div>
               <div className="text-xs text-muted">
                 Waiting for your vault key to be delivered from the approval page. It is rolled back

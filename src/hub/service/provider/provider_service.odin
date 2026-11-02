@@ -10,6 +10,7 @@ import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
 
 Provider_Test_Run :: struct {
+	profile_id:string,
 	run_id,
 	owner_user_id,
 	bridge_id,
@@ -34,6 +35,10 @@ Provider_Catalog_Result :: struct {
 }
 
 Bridge_Provider_View :: struct {
+	profile_id: string,
+	profile_state: string,
+	label_enc: string,
+	accent: string,
 	catalog:         domain.Provider_Catalog_Entry,
 	models_source, models_checked_at, models_attempted_at, models_state: string,
 	models_binary_path, models_version_text: string,
@@ -50,6 +55,7 @@ Bridge_Provider_View :: struct {
 }
 
 bridge_provider_view_destroy :: proc(value: Bridge_Provider_View) {
+	delete(value.profile_id); delete(value.profile_state); delete(value.label_enc); delete(value.accent)
 	domain.provider_catalog_entry_destroy(value.catalog)
 	delete(value.models_source); delete(value.models_checked_at); delete(value.models_attempted_at); delete(value.models_state)
 	delete(value.models_binary_path); delete(value.models_version_text)
@@ -75,6 +81,7 @@ provider_test_run_clone :: proc(
 	allocator := context.allocator,
 ) -> Provider_Test_Run {
 	return Provider_Test_Run {
+		profile_id=strings.clone(domain.profile_effective_id(run.provider,run.profile_id),allocator),
 		run_id = strings.clone(run.run_id, allocator),
 		owner_user_id = strings.clone(run.owner_user_id, allocator),
 		bridge_id = strings.clone(run.bridge_id, allocator),
@@ -89,6 +96,7 @@ provider_test_run_clone :: proc(
 
 provider_test_run_destroy :: proc(run: ^Provider_Test_Run) {
 	if run == nil do return
+	delete(run.profile_id)
 	delete(
 		run.run_id,
 	); delete(run.owner_user_id); delete(run.bridge_id); delete(run.provider); delete(run.model); delete(run.agent_instance_id); delete(run.state); delete(run.expires_at); delete(run.error)
@@ -205,19 +213,21 @@ provider_test_mark_instance_ready :: proc(service: ^Provider_Service, instance_i
 validate_launchable :: proc(
 	service: ^Provider_Service,
 	bridge_id, provider, model: string,
+	profile_id: string = "",
 ) -> domain.Domain_Error {
+	if e:=validate_profile(service.repo,bridge_id,provider,profile_id);e.code!=.None do return e
 	entry, found, err := iface.provider_catalog_get(service.repo, provider)
 	if err.code != .None do return err
 	if !found || entry.state != "active" do return domain.domain_error(.Unprocessable_Entity, "provider is unknown or deprecated")
 	defer domain.provider_catalog_entry_destroy(entry)
-	if model_err := apply_effective_models(service.repo, bridge_id, &entry); model_err.code != .None do return model_err
+	if model_err := apply_effective_models(service.repo, bridge_id, &entry,profile_id); model_err.code != .None do return model_err
 	model_ok := false
 	for candidate in entry.models {if candidate.model_id == model && candidate.state == "active" {model_ok = true; break}}
 	if !model_ok do return domain.domain_error(.Unprocessable_Entity, "model is unknown or deprecated for provider")
 	views, view_err := list_bridge_providers(service, bridge_id)
 	if view_err.code != .None do return view_err
 	defer bridge_provider_views_destroy(views)
-	for view in views {if view.catalog.provider == provider && view.enabled && view.detection_state == "present" do return {}}
+	for view in views {if view.catalog.provider == provider && view.profile_id==domain.profile_effective_id(provider,profile_id) && view.enabled && view.detection_state == "present" do return {}}
 	return domain.domain_error(.Conflict, "provider is not enabled and present on this bridge")
 }
 
@@ -346,73 +356,56 @@ get_icon :: proc(
 	return icon, true, {}
 }
 
-list_bridge_providers :: proc(
-	service: ^Provider_Service,
-	bridge_id: string,
-) -> (
-	[dynamic]Bridge_Provider_View,
-	domain.Domain_Error,
-) {
-	catalog, catalog_err := iface.provider_catalog_list(service.repo)
-	if catalog_err.code != .None do return nil, catalog_err
-	statuses, status_err := iface.bridge_provider_status_list(service.repo, bridge_id)
-	if status_err.code != .None {domain.provider_catalog_destroy(catalog); return nil, status_err}
-	defer domain.bridge_provider_statuses_destroy(statuses)
-	settings, settings_err := iface.bridge_provider_setting_list(service.repo, bridge_id)
-	if settings_err.code !=
-	   .None {domain.provider_catalog_destroy(catalog); return nil, settings_err}
-	defer domain.bridge_provider_settings_destroy(settings)
-
-	views := make([dynamic]Bridge_Provider_View)
-	for entry, entry_index in catalog {
-		view := Bridge_Provider_View {
-			catalog         = entry,
-			bridge_id       = strings.clone(bridge_id),
-			binary_path     = strings.clone(""),
-			version_text    = strings.clone(""),
-			detection_state = strings.clone("absent"),
-			checked_at      = strings.clone(""),
-			extension_state      = strings.clone(""),
-			extension_version    = strings.clone(""),
-			extension_checked_at = strings.clone(""),
-		}
-		for status in statuses {
-			if status.provider == entry.provider {
-				delete(view.binary_path); view.binary_path = strings.clone(status.binary_path)
-				delete(view.version_text); view.version_text = strings.clone(status.version_text)
-				delete(view.detection_state); view.detection_state = strings.clone(status.state)
-				delete(view.checked_at); view.checked_at = strings.clone(status.checked_at)
-				delete(view.extension_state); view.extension_state = strings.clone(status.extension_state)
-				delete(view.extension_version); view.extension_version = strings.clone(status.extension_version)
-				delete(view.extension_checked_at); view.extension_checked_at = strings.clone(status.extension_checked_at)
-				break
-			}
-		}
-		observation, observation_err := effective_model_observation(service.repo, bridge_id, &view.catalog)
-		if observation_err.code != .None {
-			bridge_provider_view_destroy(view)
-			bridge_provider_views_destroy(views)
-			// Entries not moved to views still belong to catalog.
-			for remaining in catalog[entry_index+1:] do domain.provider_catalog_entry_destroy(remaining)
-			delete(catalog)
-			return nil, observation_err
-		}
-		view.models_source = strings.clone(observation.models_source if observation.has_snapshot else "static_fallback")
-		view.models_checked_at = strings.clone(observation.models_checked_at)
-		view.models_attempted_at = strings.clone(observation.models_attempted_at)
-		view.models_state = strings.clone(observation.models_state if observation.models_state != "" else "not_checked")
-		view.models_binary_path = strings.clone(observation.binary_path)
-		view.models_version_text = strings.clone(observation.version_text)
-		view.models_has_snapshot = observation.has_snapshot
-		domain.bridge_provider_models_destroy(observation)
-		for setting in settings {
-			if setting.provider == entry.provider {view.enabled = setting.enabled; break}
-		}
-		append(&views, view)
-	}
-	// Entries moved into views; release only the dynamic-array backing store.
-	delete(catalog)
-	return views, {}
+list_bridge_providers :: proc(service: ^Provider_Service, bridge_id: string) -> ([dynamic]Bridge_Provider_View,domain.Domain_Error) {
+ catalog,err:=iface.provider_catalog_list(service.repo)
+ if err.code!=.None do return nil,err
+ defer domain.provider_catalog_destroy(catalog)
+ profiles,perr:=list_profiles(service.repo,bridge_id)
+ if perr.code!=.None do return nil,perr
+ defer domain.bridge_provider_profiles_destroy(profiles)
+ identities:=make([dynamic]domain.Bridge_Provider_Profile,context.temp_allocator)
+ append(&identities,..profiles[:])
+ for e in catalog {
+  occupied:=false
+  for p in profiles do if p.profile_id==e.provider do occupied=true
+  if !occupied do append(&identities,domain.Bridge_Provider_Profile{profile_id=e.provider,provider=e.provider,enabled=true,state="ok"})
+ }
+ statuses,serr:=iface.bridge_provider_status_list(service.repo,bridge_id)
+ if serr.code!=.None do return nil,serr
+ defer domain.bridge_provider_statuses_destroy(statuses)
+ settings,seterr:=iface.bridge_provider_setting_list(service.repo,bridge_id)
+ if seterr.code!=.None do return nil,seterr
+ defer domain.bridge_provider_settings_destroy(settings)
+ views:=make([dynamic]Bridge_Provider_View)
+ for p in identities {
+  entry,found,eerr:=iface.provider_catalog_get(service.repo,p.provider)
+  if eerr.code!=.None { bridge_provider_views_destroy(views);return nil,eerr }
+  if !found do continue
+  v:=Bridge_Provider_View{catalog=entry,bridge_id=strings.clone(bridge_id),profile_id=strings.clone(p.profile_id),profile_state=strings.clone(p.state),label_enc=strings.clone(p.label_enc),accent=strings.clone(p.accent),enabled=p.enabled && p.profile_id!=p.provider,binary_path=strings.clone(""),version_text=strings.clone(""),detection_state=strings.clone("absent"),checked_at=strings.clone(""),extension_state=strings.clone(""),extension_version=strings.clone(""),extension_checked_at=strings.clone("")}
+  for status in statuses {
+   if status.provider!=p.provider || domain.profile_effective_id(status.provider,status.profile_id)!=p.profile_id do continue
+   delete(v.binary_path);v.binary_path=strings.clone(status.binary_path)
+   delete(v.version_text);v.version_text=strings.clone(status.version_text)
+   delete(v.detection_state);v.detection_state=strings.clone(status.state)
+   delete(v.checked_at);v.checked_at=strings.clone(status.checked_at)
+   delete(v.extension_state);v.extension_state=strings.clone(status.extension_state)
+   delete(v.extension_version);v.extension_version=strings.clone(status.extension_version)
+   delete(v.extension_checked_at);v.extension_checked_at=strings.clone(status.extension_checked_at)
+   break
+  }
+  for setting in settings do if setting.provider==p.provider && domain.profile_effective_id(setting.provider,setting.profile_id)==p.profile_id {v.enabled=setting.enabled;break}
+  v.enabled=v.enabled && p.enabled && p.state!="missing"
+  observation,oerr:=effective_model_observation(service.repo,bridge_id,&v.catalog,p.profile_id)
+  if oerr.code!=.None {bridge_provider_view_destroy(v);bridge_provider_views_destroy(views);return nil,oerr}
+  v.models_source=strings.clone(observation.models_source if observation.has_snapshot else "static_fallback")
+  v.models_checked_at=strings.clone(observation.models_checked_at)
+  v.models_attempted_at=strings.clone(observation.models_attempted_at)
+  v.models_state=strings.clone(observation.models_state if observation.models_state!="" else "not_checked")
+  v.models_binary_path=strings.clone(observation.binary_path);v.models_version_text=strings.clone(observation.version_text);v.models_has_snapshot=observation.has_snapshot
+  domain.bridge_provider_models_destroy(observation)
+  append(&views,v)
+ }
+ return views,{}
 }
 
 apply_discovery_report :: proc(
@@ -422,7 +415,7 @@ apply_discovery_report :: proc(
 ) -> domain.Domain_Error {
 	for status in statuses {
 		if status.bridge_id != bridge_id do return domain.domain_error(.Forbidden, "discovery report bridge does not match the authenticated connection")
-		if status.state != "present" && status.state != "absent" do return domain.domain_error(.Validation_Failed, "provider discovery state must be present or absent")
+		if status.state != "present" && status.state != "absent" && status.state != "disabled" && status.state != "error" do return domain.domain_error(.Validation_Failed, "provider discovery state must be present or absent")
 		if !extension_state_valid(status.extension_state) do return domain.domain_error(.Validation_Failed, "provider extension state must be present, disabled, outdated, absent, error or unsupported")
 		entry, found, get_err := iface.provider_catalog_get(service.repo, status.provider)
 		if get_err.code != .None do return get_err
@@ -430,6 +423,8 @@ apply_discovery_report :: proc(
 		has_extension := entry.extension_json != ""
 		domain.provider_catalog_entry_destroy(entry)
 		stored := status
+		if status.profile_id!="" do stored.binary_path=""
+		if e:=validate_report_profile(service.repo,bridge_id,status.provider,status.profile_id);e.code!=.None do return e
 		// The catalog, not the Bridge, decides whether an extension exists. A report
 		// from a Bridge older than REQ-EXT-DET-1 carries no state and stays "".
 		if !has_extension && stored.extension_state != "" {
@@ -459,6 +454,7 @@ set_bridge_provider_enabled :: proc(
 	service: ^Provider_Service,
 	bridge_id, provider, updated_at: string,
 	enabled: bool,
+	profile_id: string = "",
 ) -> (
 	domain.Bridge_Provider_Setting,
 	bool,
@@ -474,11 +470,12 @@ set_bridge_provider_enabled :: proc(
 		if status_err.code != .None do return {}, false, status_err
 		defer domain.bridge_provider_statuses_destroy(statuses)
 		present := false
-		for status in statuses {if status.provider == provider &&
+		for status in statuses {if status.provider == provider && domain.profile_effective_id(provider,status.profile_id)==domain.profile_effective_id(provider,profile_id) &&
 			   status.state == "present" {present = true; break}}
 		if !present do return {}, false, domain.domain_error(.Conflict, "provider is not present on this bridge")
 	}
 	setting := domain.Bridge_Provider_Setting {
+		profile_id = domain.profile_effective_id(provider,profile_id),
 		bridge_id  = bridge_id,
 		provider   = provider,
 		enabled    = enabled,

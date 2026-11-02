@@ -163,7 +163,7 @@ function AttentionTaskReviewCard({
   task: any;
   onVoteSuccess?: () => void;
 }) {
-  const taskId = String(task.taskId || task.id || '');
+  const taskId = String(task.task_id || task.taskId || task.id || '');
   const { data: detailData, isLoading: isDetailLoading } = useFetchChainTaskDetailQuery(
     { chainId, taskId },
     { skip: !chainId || !taskId }
@@ -226,6 +226,9 @@ function AttentionTaskReviewCard({
         taskId,
         verdict,
         findings,
+        requirementsRevision: fullTask.requirements?.revision,
+        expectedAttemptNo: fullTask.attempt_no,
+        expectedHead: fullTask.requirements?.submitted_head,
         summary: verdict === 'request_changes' ? voteComment.trim() || undefined : undefined,
       }).unwrap();
       onVoteSuccess?.();

@@ -130,7 +130,7 @@ bridge_release_http_get :: proc(url: string) -> (body: string, ok: bool, detail:
 		max_redirects = BRIDGE_UPDATE_DOWNLOAD_MAX_REDIRECTS,
 		headers = {httpc.accept("application/vnd.github+json"), httpc.user_agent("ham-bridge")},
 	}
-	resp, err := httpc.send(req, context.temp_allocator)
+	resp, err := bridge_hub_http_send_alloc(req, context.temp_allocator)
 	if err != .None do return "", false, httpc.error_string(err)
 	if resp.status != 200 do return "", false, fmt.tprintf("HTTP %d", resp.status)
 	return string(resp.body), true, ""

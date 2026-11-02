@@ -28,6 +28,8 @@ new_taskchain_repository :: proc(impl: ^Taskchain_Repo_SQLite, conn: ^Conn) -> i
 		task_counts_by_chain = task_counts_by_chain_sqlite,
 		save_comment = task_comment_save_sqlite,
 		list_comments_by_task = task_comment_list_by_task_sqlite,
+		list_comments_page = task_comment_page_sqlite,
+		get_comment = task_comment_get_sqlite,
 		comment_summary_by_task = task_comment_summary_sqlite,
 		list_recent_comments_by_task = task_comment_list_recent_sqlite,
 		save_member = taskchain_save_member_sqlite,
@@ -212,7 +214,7 @@ task_list_by_chain_sqlite :: proc(ctx: rawptr, chain_id: domain.Task_Chain_ID, o
 task_comment_save_sqlite :: proc(ctx: rawptr, comment: domain.Task_Comment) -> (domain.Task_Comment, bool, domain.Domain_Error) {
 	impl := (^Taskchain_Repo_SQLite)(ctx)
 	stmt: sqlite3_stmt = nil
-	query := "INSERT INTO task_comments (comment_id, task_id, chain_id, owner_user_id, author_agent_instance_id, body, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(comment_id) DO UPDATE SET body=excluded.body, updated_at=excluded.updated_at;"
+	query := "INSERT INTO task_comments (comment_id, task_id, chain_id, owner_user_id, author_agent_instance_id, body, created_at, updated_at, delegated_client_id, delegated_grant_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(comment_id) DO UPDATE SET body=excluded.body, updated_at=excluded.updated_at;"
 	if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return domain.Task_Comment{}, false, domain.domain_error(.Internal_Error, "failed to prepare task comment save")
 	defer sqlite3_finalize(stmt)
 	bind_comment(stmt, comment)
@@ -229,7 +231,7 @@ task_comment_save_sqlite :: proc(ctx: rawptr, comment: domain.Task_Comment) -> (
 task_comment_list_by_task_sqlite :: proc(ctx: rawptr, task_id: domain.Task_ID, owner_user_id: domain.User_ID) -> ([]domain.Task_Comment, domain.Domain_Error) {
 	impl := (^Taskchain_Repo_SQLite)(ctx)
 	stmt: sqlite3_stmt = nil
-	query := "SELECT comment_id, task_id, chain_id, owner_user_id, author_agent_instance_id, body, created_at, updated_at FROM task_comments WHERE task_id = ? AND owner_user_id = ? ORDER BY created_at ASC;"
+	query := "SELECT comment_id, task_id, chain_id, owner_user_id, author_agent_instance_id, body, created_at, updated_at, delegated_client_id, delegated_grant_id FROM task_comments WHERE task_id = ? AND owner_user_id = ? ORDER BY created_at ASC;"
 	if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return nil, domain.domain_error(.Internal_Error, "failed to prepare task comment list")
 	defer sqlite3_finalize(stmt)
 	bind_text(stmt, 1, string(task_id)); bind_text(stmt, 2, string(owner_user_id))
@@ -319,7 +321,7 @@ task_comment_list_recent_sqlite :: proc(ctx: rawptr, task_id: domain.Task_ID, ow
 	stmt: sqlite3_stmt = nil
 	// newest N by created_at, then re-sort ascending so the caller sees chrono
 	// order. LIMIT is a validated non-negative int (int_s), safe to inline.
-	query := strings.concatenate({"SELECT comment_id, task_id, chain_id, owner_user_id, author_agent_instance_id, body, created_at, updated_at FROM (SELECT * FROM task_comments WHERE task_id = ? AND owner_user_id = ? ORDER BY created_at DESC, comment_id DESC LIMIT ", int_s(last), ") ORDER BY created_at ASC, comment_id ASC;"})
+	query := strings.concatenate({"SELECT comment_id, task_id, chain_id, owner_user_id, author_agent_instance_id, body, created_at, updated_at, delegated_client_id, delegated_grant_id FROM (SELECT * FROM task_comments WHERE task_id = ? AND owner_user_id = ? ORDER BY created_at DESC, comment_id DESC LIMIT ", int_s(last), ") ORDER BY created_at ASC, comment_id ASC;"})
 	if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return nil, domain.domain_error(.Internal_Error, "failed to prepare recent comment list")
 	defer sqlite3_finalize(stmt)
 	bind_text(stmt, 1, string(task_id)); bind_text(stmt, 2, string(owner_user_id))
@@ -486,6 +488,7 @@ fleet_from_stmt :: proc(stmt: sqlite3_stmt) -> domain.Task_Chain_Fleet {
 		roles_json       = column_text(stmt, 10),
 		bridge_id        = column_text(stmt, 11),
 		paused_roles_json = column_text(stmt, 12),
+		provider_profile = column_text(stmt,13),
 	}
 }
 
@@ -497,7 +500,7 @@ fleet_roles_or_default :: proc(roles_json: string) -> string {
 taskchain_upsert_fleet_sqlite :: proc(ctx: rawptr, fleet: domain.Task_Chain_Fleet) -> (domain.Task_Chain_Fleet, domain.Domain_Error) {
 	impl := (^Taskchain_Repo_SQLite)(ctx)
 	stmt: sqlite3_stmt = nil
-	query := "INSERT INTO task_chain_fleets (task_chain_id, agent_id, capacity, min_warm, idle_ttl_seconds, provider, model, created_at, updated_at, bridge_models_json, roles_json, bridge_id, paused_roles_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(task_chain_id, agent_id) DO UPDATE SET capacity=excluded.capacity, min_warm=excluded.min_warm, idle_ttl_seconds=excluded.idle_ttl_seconds, provider=excluded.provider, model=excluded.model, updated_at=excluded.updated_at, bridge_models_json=excluded.bridge_models_json, roles_json=excluded.roles_json, bridge_id=excluded.bridge_id, paused_roles_json=excluded.paused_roles_json;"
+	query := "INSERT INTO task_chain_fleets (task_chain_id, agent_id, capacity, min_warm, idle_ttl_seconds, provider, model, created_at, updated_at, bridge_models_json, roles_json, bridge_id, paused_roles_json, provider_profile) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(task_chain_id, agent_id) DO UPDATE SET capacity=excluded.capacity, min_warm=excluded.min_warm, idle_ttl_seconds=excluded.idle_ttl_seconds, provider_profile=excluded.provider_profile, provider=excluded.provider, model=excluded.model, updated_at=excluded.updated_at, bridge_models_json=excluded.bridge_models_json, roles_json=excluded.roles_json, bridge_id=excluded.bridge_id, paused_roles_json=excluded.paused_roles_json;"
 	if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return domain.Task_Chain_Fleet{}, domain.domain_error(.Internal_Error, "failed to prepare fleet upsert")
 	defer sqlite3_finalize(stmt)
 	bind_text(stmt, 1, string(fleet.task_chain_id))
@@ -512,7 +515,7 @@ taskchain_upsert_fleet_sqlite :: proc(ctx: rawptr, fleet: domain.Task_Chain_Flee
 	bind_text(stmt, 10, fleet.bridge_models_json if fleet.bridge_models_json != "" else "{}")
 	bind_text(stmt, 11, fleet_roles_or_default(fleet.roles_json))
 	bind_text(stmt, 12, fleet.bridge_id)
-	bind_text(stmt, 13, fleet.paused_roles_json)
+	bind_text(stmt, 13, fleet.paused_roles_json); bind_text(stmt,14,domain.profile_effective_id(fleet.provider,fleet.provider_profile))
 	if sqlite3_step(stmt) != SQLITE_DONE do return domain.Task_Chain_Fleet{}, domain.domain_error(.Conflict, "fleet could not be saved")
 	return fleet, domain.Domain_Error{}
 }
@@ -520,7 +523,7 @@ taskchain_upsert_fleet_sqlite :: proc(ctx: rawptr, fleet: domain.Task_Chain_Flee
 taskchain_ensure_fleet_sqlite :: proc(ctx: rawptr, fleet: domain.Task_Chain_Fleet) -> domain.Domain_Error {
 	impl := (^Taskchain_Repo_SQLite)(ctx)
 	stmt: sqlite3_stmt = nil
-	query := "INSERT INTO task_chain_fleets (task_chain_id, agent_id, capacity, min_warm, idle_ttl_seconds, provider, model, created_at, updated_at, bridge_models_json, roles_json, bridge_id, paused_roles_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(task_chain_id, agent_id) DO NOTHING;"
+	query := "INSERT INTO task_chain_fleets (task_chain_id, agent_id, capacity, min_warm, idle_ttl_seconds, provider, model, created_at, updated_at, bridge_models_json, roles_json, bridge_id, paused_roles_json, provider_profile) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(task_chain_id, agent_id) DO NOTHING;"
 	if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return domain.domain_error(.Internal_Error, "failed to prepare fleet ensure")
 	defer sqlite3_finalize(stmt)
 	bind_text(stmt, 1, string(fleet.task_chain_id))
@@ -535,7 +538,7 @@ taskchain_ensure_fleet_sqlite :: proc(ctx: rawptr, fleet: domain.Task_Chain_Flee
 	bind_text(stmt, 10, fleet.bridge_models_json if fleet.bridge_models_json != "" else "{}")
 	bind_text(stmt, 11, fleet_roles_or_default(fleet.roles_json))
 	bind_text(stmt, 12, fleet.bridge_id)
-	bind_text(stmt, 13, fleet.paused_roles_json)
+	bind_text(stmt, 13, fleet.paused_roles_json); bind_text(stmt,14,domain.profile_effective_id(fleet.provider,fleet.provider_profile))
 	if sqlite3_step(stmt) != SQLITE_DONE do return domain.domain_error(.Conflict, "fleet could not be ensured")
 	return domain.Domain_Error{}
 }
@@ -543,7 +546,7 @@ taskchain_ensure_fleet_sqlite :: proc(ctx: rawptr, fleet: domain.Task_Chain_Flee
 taskchain_list_fleets_by_chain_sqlite :: proc(ctx: rawptr, chain_id: domain.Task_Chain_ID, owner_user_id: domain.User_ID) -> ([]domain.Task_Chain_Fleet, domain.Domain_Error) {
 	impl := (^Taskchain_Repo_SQLite)(ctx)
 	stmt: sqlite3_stmt = nil
-	query := "SELECT f.task_chain_id, f.agent_id, f.capacity, f.min_warm, f.idle_ttl_seconds, f.provider, f.model, f.created_at, f.updated_at, f.bridge_models_json, f.roles_json, f.bridge_id, f.paused_roles_json FROM task_chain_fleets f JOIN task_chains tc ON f.task_chain_id = tc.chain_id WHERE f.task_chain_id = ? AND (tc.owner_user_id = ? OR ? = '') ORDER BY f.created_at ASC, f.agent_id ASC;"
+	query := "SELECT f.task_chain_id, f.agent_id, f.capacity, f.min_warm, f.idle_ttl_seconds, f.provider, f.model, f.created_at, f.updated_at, f.bridge_models_json, f.roles_json, f.bridge_id, f.paused_roles_json, f.provider_profile FROM task_chain_fleets f JOIN task_chains tc ON f.task_chain_id = tc.chain_id WHERE f.task_chain_id = ? AND (tc.owner_user_id = ? OR ? = '') ORDER BY f.created_at ASC, f.agent_id ASC;"
 	if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return nil, domain.domain_error(.Internal_Error, "failed to prepare fleet list")
 	defer sqlite3_finalize(stmt)
 	bind_text(stmt, 1, string(chain_id))
@@ -596,6 +599,7 @@ bind_task :: proc(stmt: sqlite3_stmt, task: domain.Task) {
 
 bind_comment :: proc(stmt: sqlite3_stmt, comment: domain.Task_Comment) {
 	bind_text(stmt, 1, comment.comment_id); bind_text(stmt, 2, string(comment.task_id)); bind_text(stmt, 3, string(comment.chain_id)); bind_text(stmt, 4, string(comment.owner_user_id)); bind_text(stmt, 5, comment.author_agent_instance_id); bind_text(stmt, 6, comment.body); bind_text(stmt, 7, comment.created_at); bind_text(stmt, 8, comment.updated_at)
+	bind_text(stmt,9,comment.delegated_client_id);bind_text(stmt,10,comment.delegated_grant_id)
 }
 
 chain_from_stmt :: proc(stmt: sqlite3_stmt) -> domain.Task_Chain {
@@ -639,7 +643,7 @@ task_from_stmt :: proc(stmt: sqlite3_stmt) -> domain.Task {
 }
 
 task_comment_from_stmt :: proc(stmt: sqlite3_stmt) -> domain.Task_Comment {
-	return domain.Task_Comment{comment_id = column_text(stmt, 0), task_id = domain.Task_ID(column_text(stmt, 1)), chain_id = domain.Task_Chain_ID(column_text(stmt, 2)), owner_user_id = domain.User_ID(column_text(stmt, 3)), author_agent_instance_id = column_text(stmt, 4), body = column_text(stmt, 5), created_at = column_text(stmt, 6), updated_at = column_text(stmt, 7)}
+	return domain.Task_Comment{comment_id = column_text(stmt, 0), task_id = domain.Task_ID(column_text(stmt, 1)), chain_id = domain.Task_Chain_ID(column_text(stmt, 2)), owner_user_id = domain.User_ID(column_text(stmt, 3)), author_agent_instance_id = column_text(stmt, 4), body = column_text(stmt, 5), created_at = column_text(stmt, 6), updated_at = column_text(stmt, 7), delegated_client_id=column_text(stmt,8),delegated_grant_id=column_text(stmt,9)}
 }
 
 member_from_stmt :: proc(stmt: sqlite3_stmt) -> domain.Task_Chain_Member {

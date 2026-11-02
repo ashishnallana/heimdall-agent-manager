@@ -13,6 +13,10 @@ Response :: struct {
 	content_type: string,
 	body:         string,
 	headers:      []contracts.HTTP_Header,
+	// Request-owned MCP plaintext: wipe body and writer copy after forwarding.
+	sensitive:    bool,
+	// Optional bounded send budget for MCP; other transports retain their policy.
+	write_timeout_ms: int,
 }
 
 respond_success :: proc(data_json: string, request_id, server_time: string, status := 200) -> Response {

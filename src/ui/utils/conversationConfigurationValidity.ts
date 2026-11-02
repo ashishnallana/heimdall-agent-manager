@@ -10,8 +10,9 @@ export type ConfigurationValidityInput = {
   projectError: boolean;
   project?: { state?: string; status?: string };
   provider: string;
+  providerProfile?: string;
   model: string;
-  capabilities: { provider: string; models: string[] }[];
+  capabilities: { provider: string; profile_id?: string; models: string[] }[];
   /** Provider status for `bridge` has answered; omitted means it arrived with the bridge. */
   capabilitiesLoaded?: boolean;
 };
@@ -32,7 +33,7 @@ export function conversationConfigurationIssues(input: ConfigurationValidityInpu
     else if (input.bridge.provider_status_error) issues.push('Provider availability could not be verified on this bridge. Refresh its provider status.');
     else if (input.capabilitiesLoaded === false) issues.push('Checking provider availability on this bridge before allowing messages.');
     else {
-      const capability = input.capabilities.find(item => item.provider === input.provider);
+      const capability = input.capabilities.find(item => item.provider === input.provider && (item.profile_id || item.provider) === (input.providerProfile || input.provider));
       if (!input.provider || !capability) issues.push(`Provider${input.provider ? ` “${input.provider}”` : ''} is unavailable, disabled, or archived on this bridge. Choose an active provider.`);
       else if (!input.model || !capability.models.includes(input.model)) issues.push(`Model/tier${input.model ? ` “${input.model}”` : ''} is unavailable or archived for “${input.provider}”. Choose an active model/tier.`);
     }

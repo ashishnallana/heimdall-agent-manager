@@ -7,7 +7,7 @@ Heimdall incorporates a federated, multi-tier memory and skill bootstrapping sys
 The memory subsystem is distributed across three operational tiers:
 1. **The Heimdall Hub**: The central orchestrator and source of truth. It manages the relational database (SQLite), performs multi-dimensional targeting resolution, implements strict Human-in-the-Loop (HITL) authorization gates, and compiles customized bootstrap payloads for launching agents.
 2. **The Heimdall Bridge**: The host-level daemon that manages local agent execution. It executes the physical bootstrap handshake (`bridge_bootstrap_fetch_and_materialize`), caches content-addressed blobs, writes configuration files (`AGENTS.md`/`CLAUDE.md`), materializes skills into the agent's workspace, injects authenticated CLI wrappers, and tracks managed state via an immutable manifest.
-3. **The Agent CLI (`ham-ctl`)**: The operational interface available within an agent's run directory (`./.heimdall/bin/ham-ctl`). It allows agents to discover active memories, inspect historical context, and propose new durable learnings back to the Hub through authenticated RPC envelopes.
+3. **The Agent CLI (`ham-ctl`)**: The operational interface available within an agent's run directory (`./bin/ham-ctl`). It allows agents to discover active memories, inspect historical context, and propose new durable learnings back to the Hub through authenticated RPC envelopes.
 
 ```
                       +---------------------------------------+
@@ -35,7 +35,7 @@ The memory subsystem is distributed across three operational tiers:
                       |      Agent Instance Run Directory     |
                       | - AGENTS.md / CLAUDE.md               |
                       | - .agents/skills/<name>/SKILL.md      |
-                      | - .heimdall/bin/ham-ctl (CLI shim)    |
+                      | - bin/ham-ctl (CLI shim)              |
                       | - heimdall-bootstrap-manifest.json    |
                       +---------------------------------------+
 ```
@@ -219,7 +219,7 @@ Threading `bridge_id` into the cache key guarantees that bridge-scoped memories 
 Agents propose memories using the managed wrapper script:
 
 ```bash
-./.heimdall/bin/ham-ctl memory propose \
+./bin/ham-ctl memory propose \
   --type fact \
   --title "Odin collection build flag" \
   --body "Always specify -collection:odin_test=src when running odin test." \
@@ -310,7 +310,7 @@ When an agent instance is launched or restarted, the Bridge and Hub perform a ti
         |
         | 4. Materialize AGENTS.md / CLAUDE.md
         | 5. Materialize .agents/skills/<name>/SKILL.md
-        | 6. Inject .heimdall/bin/ham-ctl (CLI shim with tokens)
+        | 6. Inject bin/ham-ctl (CLI shim with tokens)
         | 7. Write heimdall-bootstrap-manifest.json
         v
  [Agent Process Spawn]
@@ -376,8 +376,8 @@ Upon receiving the bootstrap response, the Bridge unpacks the payload directly i
    - For each entry, resolves its relative target path (`.agents/skills/<skill-name>/SKILL.md`).
    - Creates directories and writes the skill file (`bridge_bootstrap_write_skill_file`).
 3. **CLI Wrapper Shim (`bridge_bootstrap_write_ham_ctl_wrapper`)**:
-   - Creates directory `run_dir/.heimdall/bin`.
-   - Generates an executable shell script at `.heimdall/bin/ham-ctl`:
+   - Creates directory `run_dir/bin`.
+   - Generates an executable shell script at `bin/ham-ctl`:
      ```sh
      #!/bin/sh
      export HEIMDALL_BRIDGE_ENDPOINT="unix:/tmp/bridge.sock" # or http host
@@ -394,7 +394,7 @@ Upon receiving the bootstrap response, the Bridge unpacks the payload directly i
        "agent_instance_id": "inst_18dbaae8be265355",
        "managed_files": [
          {"relative_path": "AGENTS.md", "kind": "AGENTS_MD"},
-         {"relative_path": ".heimdall/bin/ham-ctl", "kind": "CTL_WRAPPER"},
+         {"relative_path": "bin/ham-ctl", "kind": "CTL_WRAPPER"},
          {"relative_path": ".agents/skills/worker-task-management/SKILL.md", "kind": "SKILL"},
          {"relative_path": ".agents/skills/ham-ctl-reference/SKILL.md", "kind": "SKILL"}
        ]
@@ -409,32 +409,32 @@ Upon receiving the bootstrap response, the Bridge unpacks the payload directly i
 
 ```bash
 # List all active memories applying to the current agent
-./.heimdall/bin/ham-ctl memory list --status active
+./bin/ham-ctl memory list --status active
 
 # List memories filtered by type
-./.heimdall/bin/ham-ctl memory list --type fact
-./.heimdall/bin/ham-ctl memory list --type habit
-./.heimdall/bin/ham-ctl memory list --type skill
+./bin/ham-ctl memory list --type fact
+./bin/ham-ctl memory list --type habit
+./bin/ham-ctl memory list --type skill
 
 # Inspect memory details and evidence
-./.heimdall/bin/ham-ctl memory show mem_18dbaae8...
+./bin/ham-ctl memory show mem_18dbaae8...
 
 # Output raw body of a memory
-./.heimdall/bin/ham-ctl memory content mem_18dbaae8...
+./bin/ham-ctl memory content mem_18dbaae8...
 ```
 
 ### 6.2 Proposing Scoped Memories
 
 ```bash
 # Propose a project-scoped habit memory
-./.heimdall/bin/ham-ctl memory propose \
+./bin/ham-ctl memory propose \
   --type habit \
   --title "Always run unit tests before task handoff" \
   --body "Run odin test src/hub -collection:odin_test=src before submitting in_validation." \
   --project-ids proj_18c6879e443756f1
 
 # Propose a template-scoped skill memory
-./.heimdall/bin/ham-ctl memory propose \
+./bin/ham-ctl memory propose \
   --type skill \
   --title "automated-performance-benchmarking" \
   --body "---\nname: automated-performance-benchmarking\ndescription: Run benchmark suites\n---\n# Automated Benchmarking\n..." \
@@ -455,7 +455,7 @@ grep -A 20 "## Applicable Memories" AGENTS.md
 ls -la .agents/skills/
 
 # Verify CLI wrapper execution
-./.heimdall/bin/ham-ctl context get
+./bin/ham-ctl context get
 ```
 
 ---

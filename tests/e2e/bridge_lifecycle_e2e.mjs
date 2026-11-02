@@ -25,7 +25,11 @@
 //   HEIMDALL_E2E_HUB_BIN=<ham-hub> HEIMDALL_E2E_BRIDGE_BIN=<ham-bridge> \
 //   node --import ./tests/helpers/vaultEndpointHarness.ts tests/e2e/bridge_lifecycle_e2e.mjs
 
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn as nodeSpawn, spawnSync as nodeSpawnSync } from 'node:child_process';
+
+// These are background probes, including on a developer's Windows desktop.
+const spawn = (command, args, options = {}) => nodeSpawn(command, args, { ...options, windowsHide: true });
+const spawnSync = (command, args, options = {}) => nodeSpawnSync(command, args, { ...options, windowsHide: true });
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import net from 'node:net';
@@ -39,7 +43,8 @@ import { hubLogin, sessionHeaders, startMockOidc } from './hubOidc.mjs';
 import { refuseLegacyInstall, scrubHeimdallEnv } from './realHomeGuard.mjs';
 import { verifyDirectory } from '../../src/ui/utils/vaultDirectoryVerify.ts';
 import { openVerifiedWrap } from '../../src/ui/utils/vaultKeyringWrap.ts';
-import { serializeKeyringBytes } from '../../src/ui/utils/vaultKeyring.ts';
+import { importKeyring, serializeKeyringBytes } from '../../src/ui/utils/vaultKeyring.ts';
+import { encryptVaultText } from '../../src/ui/utils/vaultCrypto.ts';
 import { deliverKeyringToBridge } from '../../src/ui/utils/vaultBridgeDelivery.ts';
 import { bridgeUnsealTargetFromRecord } from '../../src/ui/utils/vaultBridgeUnseal.ts';
 import { buildBridgeApproval, buildGenesis, checkBridgeCodeInfo } from '../../src/ui/utils/vaultDeviceFlows.ts';
@@ -92,6 +97,7 @@ if (WITH_SERVICE && WIN && (!ENV.APPDATA || !ENV.LOCALAPPDATA)) throw new Error(
 if (REAL_HOME) refuseLegacyInstall(HOME);
 const children = [];
 const CREATED = []; // every bridge id this run enrolled
+const SCOPES = new Map();
 
 // One bridge profile for the whole run: `--hub <hub> --profile PROFILE_NAME`, the
 // profile `ham-bridge setup/update` resolve (bridgesvc.profile_from). Its service name
@@ -127,6 +133,43 @@ function initProfile(hub) {
   EL = profileLayout(hub, ELECTRON_PROFILE_NAME);
 }
 const hubProfileArgs = (hub) => ['--hub', hub.base, '--profile', PROFILE_NAME];
+
+// Match the daemon socket derived from the installed service's own run dir.
+function profilePtySocket(bridgeId) {
+  const data = WIN ? `${ENV.LOCALAPPDATA}/heimdall/bridges/${SERVICE}` : PROFILE.data;
+  const intended = `${data}/run/pty-host-${bridgeId}.sock`;
+  if (Buffer.byteLength(intended) <= 103) return intended;
+  let hash = 14695981039346656037n;
+  for (const b of Buffer.from(intended)) hash = BigInt.asUintN(64, (hash ^ BigInt(b)) * 1099511628211n);
+  const tmp = WIN ? os.tmpdir() : ENV.TMPDIR?.startsWith('/') ? ENV.TMPDIR.replace(/\/+$/, '') : '/tmp';
+  return `${tmp}/${WIN ? 'heimdall-run' : `heimdall-${process.getuid()}`}/${hash.toString(16).padStart(16, '0')}.sock`;
+}
+
+async function startRestartProbe(acct, bridgeId) {
+  const sessionId = `sh_${crypto.randomBytes(16).toString('hex')}`;
+  const pub = await http(acct, 'GET', `/api/v1/bridges/${bridgeId}/public-key`);
+  const keyring = await importKeyring(Uint8Array.from(acct.keyringBytes), acct.userId);
+  const enc_spec = await encryptVaultText(JSON.stringify({ cmd: '', cwd: HOME, timestamp: Date.now(), nonce: crypto.randomBytes(16).toString('hex'),
+    bridge_id: bridgeId, session_id: sessionId, kind: 'shell', boot_id: pub.data.unseal_boot_id }), keyring);
+  const created = await http(acct, 'POST', `/api/v1/bridges/${bridgeId}/shells`, { body: { session_id: sessionId, kind: 'shell', enc_spec } });
+  expect(created.status === 201 || created.status === 200, `live PTY shell accepted (${created.status}${created.status >= 400 ? ` ${created.raw}` : ''})`);
+  const ptyBin = path.join(path.dirname(BRIDGE_BIN), WIN ? 'ham-pty-host.exe' : 'ham-pty-host');
+  const socket = profilePtySocket(bridgeId);
+  children.push({ kill: () => spawnSync(ptyBin, ['--socket', socket, 'stop'], { env: ENV, timeout: 5000 }) });
+  const pid = () => {
+    const listed = spawnSync(ptyBin, ['--socket', socket, 'list'], { env: ENV, encoding: 'utf8', timeout: 5000 });
+    const row = String(listed.stdout || '').split('\n').find((l) => l.startsWith(sessionId));
+    return listed.status === 0 && row?.includes('alive') ? Number(/pid=(\d+)/.exec(row)?.[1] || 0) : 0;
+  };
+  let originalPid = 0;
+  for (const deadline = Date.now() + 30_000; !(originalPid = pid()); await sleep(200)) {
+    if (Date.now() > deadline) throw new CheckFailed(`shell did not start on the service's PTY daemon (${socket})`);
+  }
+  return { originalPid, pid, close: async () => {
+    await http(acct, 'DELETE', `/api/v1/shells/${sessionId}`);
+    spawnSync(ptyBin, ['--socket', socket, 'stop'], { env: ENV, timeout: 5000 });
+  } };
+}
 
 async function startHub(label) {
   const bin = process.env.HEIMDALL_E2E_HUB_BIN;
@@ -181,7 +224,7 @@ const profileArgs = (port) => ['--config', PROFILE.config, '--bridge-token-file'
 
 // `ham-bridge enroll` into the profile; the approval runs like /device/add (code typed
 // once, signed vault approval, first unseal with pair_mac). reuse: approve onto that id.
-async function enroll(hub, acct, { extra = [], reuse = '' } = {}) {
+async function enroll(hub, acct, { extra = [], reuse = '', cancelAfterApproval = false } = {}) {
   fs.mkdirSync(PROFILE.dir, { recursive: true });
   let out = '';
   const child = spawn(BRIDGE_BIN, ['enroll', '--hub', hub.base, '--headless', ...extra, ...profileArgs(await freePort())], { cwd: ROOT, env: ENV, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -191,7 +234,7 @@ async function enroll(hub, acct, { extra = [], reuse = '' } = {}) {
   const exited = new Promise((r) => child.once('exit', (code) => r(code)));
   try {
     const code = () => (/^\s+([A-Z2-7]{4}-[A-Z2-7]{4}-[A-Z2-7]{4}-[A-Z2-7]{2})\s*$/m.exec(out) || [])[1] ?? null;
-    return await approveEnrollment(hub, acct, { exited, code, out: () => out, reuse, config: PROFILE.config, label: SERVICE });
+    return await approveEnrollment(hub, acct, { exited, code, out: () => out, reuse, config: PROFILE.config, label: SERVICE, cancelAfterApproval });
   } catch (err) {
     await stop(child);
     throw err;
@@ -200,7 +243,7 @@ async function enroll(hub, acct, { extra = [], reuse = '' } = {}) {
 
 // exited: resolves with the enrolling process's exit code (or {ok} for a bridgeManager
 // operation); code(): the pairing code shown so far, or null.
-async function approveEnrollment(hub, acct, { exited, code: codeOf, out: output, reuse, config, label }) {
+async function approveEnrollment(hub, acct, { exited, code: codeOf, out: output, reuse, config, label, cancelAfterApproval = false }) {
   let code = null;
   let out = output();
   for (const deadline = Date.now() + 60_000; !code; await sleep(100)) {
@@ -223,11 +266,23 @@ async function approveEnrollment(hub, acct, { exited, code: codeOf, out: output,
   const bridgeId = appr.data?.hub_observed?.bridge_id;
   expect(appr.status === 200 && bridgeId, `approved -> ${bridgeId} (${appr.status} ${appr.status === 200 ? '' : appr.raw})`);
   if (!CREATED.includes(bridgeId)) CREATED.push(bridgeId);
+  SCOPES.set(bridgeId, `${bridgeId}_${crypto.createHash('sha256').update(`heimdall-bridge-scope/v1|${hub.base}|${bridgeId}`).digest('hex').slice(0, 32)}`);
+  const pendingList = await http(acct, 'GET', '/api/v1/bridges?include_pending=1');
+  const pendingRows = Array.isArray(pendingList.data) ? pendingList.data : pendingList.data?.bridges || [];
+  expect(pendingRows.filter((row) => row.bridge_id === bridgeId && row.enrollment_in_progress).length === 1,
+    'the approved enrollment appears exactly once in Settings, including replacement of an enrolled bridge');
   let target = null;
   for (const deadline = Date.now() + 30_000; ; await sleep(250)) {
     const pk = await http(acct, 'GET', `/api/v1/bridges/${bridgeId}/public-key?enrollment=1`);
     if (pk.status === 200 && pk.data?.unseal_key_signature) { target = bridgeUnsealTargetFromRecord(bridgeId, pk.data); break; }
     if (Date.now() > deadline) throw new CheckFailed(`the enrolling bridge never connected:\n${output()}`);
+  }
+  if (cancelAfterApproval) {
+    const cancelled = await http(acct, 'POST', `/api/v1/bridges/${bridgeId}/enrollment/cancel`, { body: {} });
+    expect(cancelled.status === 200 && cancelled.data?.rolled_back === true, 'the pending replacement is cancelled on the hub');
+    const exitCode = await Promise.race([exited, sleep(30_000).then(() => 'timeout')]);
+    expect(typeof exitCode === 'number' && exitCode !== 0, `the cancelled enrollment exits without committing (${exitCode})`);
+    return { bridgeId, out: output(), cancelled: true };
   }
   const after = await acct.chain();
   const pairMac = await pairApproveMac(keys, statement, after.rootSignPub);
@@ -289,7 +344,7 @@ function secretItems(bridgeId) {
   if (MAC) {
     const found = [];
     for (const svc of ['vault-keyring', 'vault-identity', 'vault-epoch-floor', 'vault-identity-previous', 'vault-epoch-floor-previous']) {
-      const r = spawnSync('security', ['find-generic-password', '-s', `works.earendil.heimdall-bridge.${svc}`, '-a', bridgeId], { encoding: 'utf8' });
+      const r = spawnSync('security', ['find-generic-password', '-s', `works.earendil.heimdall-bridge.${svc}`, '-a', SCOPES.get(bridgeId) || bridgeId], { encoding: 'utf8' });
       if (r.status === 0) found.push(`${svc}:${bridgeId}`);
     }
     return found;
@@ -333,6 +388,35 @@ async function main() {
     expect(r.ok, 'the re-enrolled runtime connects');
     await stop(r.child);
   });
+  await step('3a approval replaces a saved identity when the CLI offered no reuse hint', async () => {
+    // --new-bridge suppresses the hint, as a reinstall with no saved config does.
+    // The approving owner is still allowed to select the existing bridge.
+    const again = await enroll(hub, A, { reuse: S.first.bridgeId, extra: ['--new-bridge'] });
+    expect(again.bridgeId === S.first.bridgeId, 'approval selected the existing bridge without a CLI hint');
+    const r = await runtime(online(A, S.first.bridgeId));
+    expect(r.ok, 'the replacement runtime connects after approval without a reuse hint');
+    await stop(r.child);
+  });
+  await step('3b first-run recovery with only old OS keys: cancel then retry', async () => {
+    // Simulate a removed setup: these are this throwaway profile's own files.
+    // Leave its OS identity/floor/keyring intact, as older uninstallers could.
+    const retainedIdentity = () => WIN || MAC
+      ? secretItems(S.first.bridgeId).some((item) => item.includes('vault-identity:'))
+      : bridgeSecretFiles(S.first.bridgeId).some((file) => file.endsWith('/identity_key'));
+    expect(retainedIdentity(), 'the old OS identity exists');
+    for (const file of [PROFILE.config, PROFILE.token, `${PROFILE.token}.refresh`]) {
+      if (fs.existsSync(file)) fs.unlinkSync(file);
+    }
+    const cancelled = await enroll(hub, A, { reuse: S.first.bridgeId, cancelAfterApproval: true });
+    expect(cancelled.cancelled, 'approval with no saved config reaches cancellation');
+    expect(!fs.existsSync(PROFILE.token), 'a cancelled first-run attempt saves no credential');
+    expect(retainedIdentity(), 'cancellation preserves the previous OS identity');
+    const again = await enroll(hub, A, { reuse: S.first.bridgeId });
+    expect(again.bridgeId === S.first.bridgeId, 'a fresh first-run attempt reuses the retained identity scope');
+    const r = await runtime(online(A, S.first.bridgeId));
+    expect(r.ok, 'the recovered bridge reconnects after retry');
+    await stop(r.child);
+  });
   await step('4 replace with account B: A revoked on the hub, A secrets wiped', async () => {
     S.b = await enroll(hub, B, { extra: ['--replace-other-account'] });
     expect(S.b.bridgeId !== S.first.bridgeId, `account B got its own bridge ${S.b.bridgeId}`);
@@ -356,13 +440,33 @@ async function main() {
     for (const deadline = Date.now() + 60_000; !(await online(B, S.b.bridgeId)()); await sleep(500)) {
       if (Date.now() > deadline) throw new CheckFailed('the installed service never connected');
     }
-    const upd = spawnSync(BRIDGE_BIN, ['update', '--bundle', bundle, ...hubProfileArgs(hub), '--json-progress'], { env: ENV, encoding: 'utf8', timeout: 300_000 });
-    expect(upd.status === 0, `ham-bridge update --bundle exits 0 (exit ${upd.status})\n${upd.stdout}${upd.stderr}`);
-    for (const deadline = Date.now() + 60_000; !(await online(B, S.b.bridgeId)()); await sleep(500)) {
-      if (Date.now() > deadline) throw new CheckFailed('the updated service never reconnected');
-    }
-    const active = (await bridgesOf(B)).filter(isActive);
-    expect(active.length === 1 && active[0].bridge_id === S.b.bridgeId, `setup/update kept one active bridge for B (${active.map((b) => b.bridge_id)})`);
+    const live = await startRestartProbe(B, S.b.bridgeId);
+    const portsBefore = fs.readFileSync(path.join(PROFILE.dir, 'ports.json'), 'utf8');
+    try {
+      // The second pass exercises the detached worker path used for self-updates,
+      // with the first backup still pinned by the original live PTY daemon.
+      for (let pass = 0; pass < 2; pass += 1) {
+        const before = JSON.parse(fs.readFileSync(path.join(PROFILE.dir, 'runtime-status.json'), 'utf8'));
+        const updateEnv = pass ? { ...ENV, HEIMDALL_BRIDGE_SERVICE_NAME: SERVICE } : ENV;
+        const upd = spawnSync(BRIDGE_BIN, ['update', '--bundle', bundle, ...hubProfileArgs(hub), '--json-progress'], { env: updateEnv, encoding: 'utf8', timeout: 300_000 });
+        expect(upd.status === 0, `update ${pass + 1} accepted (exit ${upd.status})\n${upd.stdout}${upd.stderr}`);
+        for (const deadline = Date.now() + 90_000; ; await sleep(500)) {
+          const after = JSON.parse(fs.readFileSync(path.join(PROFILE.dir, 'runtime-status.json'), 'utf8'));
+          if (after.pid !== before.pid && after.connected && await online(B, S.b.bridgeId)()) break;
+          if (Date.now() > deadline) throw new CheckFailed(`update ${pass + 1} never connected as a new Bridge process`);
+        }
+        expect(fs.readFileSync(path.join(PROFILE.dir, 'ports.json'), 'utf8') === portsBefore, 'update reused the released ports of its own profile');
+        expect(live.pid() === live.originalPid, `live PTY process survived update ${pass + 1}`);
+      }
+      const restarted = spawnSync(BRIDGE_BIN, ['service', 'restart', ...hubProfileArgs(hub), '--json'], { env: ENV, encoding: 'utf8', timeout: 30_000 });
+      expect(restarted.status === 0, `explicit service restart succeeded: ${restarted.stdout}${restarted.stderr}`);
+      for (const deadline = Date.now() + 60_000; !(await online(B, S.b.bridgeId)()); await sleep(500)) {
+        if (Date.now() > deadline) throw new CheckFailed('the restarted service never reconnected');
+      }
+      expect(live.pid() === live.originalPid, 'live PTY process survived explicit service restart');
+      const active = (await bridgesOf(B)).filter(isActive);
+      expect(active.length === 1 && active[0].bridge_id === S.b.bridgeId, 'both updates kept the same enrolled Bridge identity');
+    } finally { await live.close(); }
   }, { skip: WITH_SERVICE ? '' : 'needs a service manager; set HEIMDALL_E2E_SERVICE=1 (CI runners)' });
   await step('6 uninstall --purge leaves no files, secrets or service; the hub row is kept', async () => {
     const un = spawnSync(BRIDGE_BIN, ['uninstall', '--service', SERVICE, '--purge', '--yes', '--headless', '--json-progress'], { env: ENV, encoding: 'utf8', timeout: 120_000 });
@@ -439,6 +543,22 @@ async function electronPhase(hub, A, B) {
       if (Date.now() > deadline) throw new CheckFailed('the service never connected as account A');
     }
   });
+  await step('7a Electron: first-run setup reuses keys left by an old setup', async () => {
+    const stopped = spawnSync(BRIDGE_BIN, ['service', 'stop', '--service', EL.service], { env: ENV, encoding: 'utf8', timeout: 60_000 });
+    expect(stopped.status === 0, 'stop only this test profile before simulating its removed setup');
+    for (const deadline = Date.now() + 30_000; (await status()).running; await sleep(250)) {
+      if (Date.now() > deadline) throw new CheckFailed('the test profile service did not stop');
+    }
+    for (const file of [EL.config, EL.token, `${EL.token}.refresh`]) {
+      if (fs.existsSync(file)) fs.unlinkSync(file);
+    }
+    const again = await run('setup', A, { separateAccount: true }, S.first.bridgeId);
+    expect(again.bridgeId === S.first.bridgeId, 'the first-run wizard recovered the selected existing bridge');
+    expect(again.events.some((event) => event.type === 'complete'), 'the wizard received completion after recovery');
+    for (const deadline = Date.now() + 60_000; !(await online(A, S.first.bridgeId)()); await sleep(500)) {
+      if (Date.now() > deadline) throw new CheckFailed('the recovered wizard service never reconnected');
+    }
+  });
   await step('8 Electron: re-enroll as the same account reuses the bridge', async () => {
     const again = await run('reenroll', A, { bridgeId: S.first.bridgeId }, S.first.bridgeId);
     expect(again.bridgeId === S.first.bridgeId, `reused ${S.first.bridgeId} (got ${again.bridgeId})`);
@@ -479,7 +599,7 @@ function cleanupSecrets() {
   for (const id of CREATED) {
     for (const item of secretItems(id)) {
       if (WIN) spawnSync('cmdkey', [`/delete:${item}`]);
-      else if (MAC) { const [svc] = item.split(':'); spawnSync('security', ['delete-generic-password', '-s', `works.earendil.heimdall-bridge.${svc}`, '-a', id]); }
+      else if (MAC) { const [svc] = item.split(':'); spawnSync('security', ['delete-generic-password', '-s', `works.earendil.heimdall-bridge.${svc}`, '-a', SCOPES.get(id) || id]); }
       else { const kid = item.trim().split(/\s+/)[0]; spawnSync('keyctl', ['unlink', `0x${kid}`, '@u']); }
     }
   }

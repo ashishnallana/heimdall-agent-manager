@@ -39,6 +39,8 @@ Bridge_Service :: struct {
 Bridge_Connection_Closer :: struct {
 	ctx: rawptr,
 	close_bridge_connection: proc(ctx: rawptr, bridge_id: string) -> bool,
+	// Production sends a typed retirement notice before waking the socket reader.
+	close_with_reason: proc(ctx: rawptr, bridge_id, code: string) -> bool,
 }
 
 // with_connection_closer attaches the F6 socket teardown. Called by app wiring once
@@ -48,9 +50,11 @@ with_connection_closer :: proc(service: ^Bridge_Service, closer: Bridge_Connecti
 }
 
 // close_bridge_connection invokes the seam, or reports false when none is wired.
-close_bridge_connection :: proc(service: ^Bridge_Service, bridge_id: string) -> bool {
-	if service == nil || service.connection_closer.close_bridge_connection == nil do return false
+close_bridge_connection :: proc(service: ^Bridge_Service, bridge_id: string, code := "bridge_credential_revoked") -> bool {
+	if service == nil do return false
 	if bridge_id == "" do return false
+	if service.connection_closer.close_with_reason != nil do return service.connection_closer.close_with_reason(service.connection_closer.ctx, bridge_id, code)
+	if service.connection_closer.close_bridge_connection == nil do return false
 	return service.connection_closer.close_bridge_connection(service.connection_closer.ctx, bridge_id)
 }
 
@@ -104,6 +108,48 @@ list_pending_bridges :: proc(service: ^Bridge_Service, auth: contracts.Auth_Cont
 	}
 	delete(rows)
 	return out[:]
+}
+
+// REQ-ENROLL-PENDING: replacement enrollments have no pending bridge row.
+// Include their enroll-scoped credential families without changing the durable
+// target or removing the still-working bridge from ordinary discovery.
+list_pending_enrollments :: proc(service: ^Bridge_Service, auth: contracts.Auth_Context) -> ([]domain.Bridge, domain.Domain_Error) {
+	owner, ok, err := ownership.owner_from_auth(auth)
+	if !ok do return nil, err
+	tokens, token_err := iface.bridge_list_live_tokens_by_scope(service.repo, BRIDGE_ENROLL_TOKEN_SCOPE)
+	if token_err.code != .None do return nil, token_err
+	defer free_bridge_tokens(tokens)
+	rows, row_err := iface.bridge_list_pending(service.repo)
+	if row_err.code != .None do return nil, row_err
+	out := make([dynamic]domain.Bridge)
+	seen := make(map[string]bool)
+	defer delete(seen)
+	for &r in rows {
+		if r.owner_user_id == owner {
+			append(&out, r)
+			seen[r.bridge_id] = true
+		} else {
+			domain.bridge_destroy(&r)
+		}
+	}
+	delete(rows)
+	for token in tokens {
+		if seen[token.bridge_id] do continue
+		r, found, get_err := iface.bridge_get_bridge(service.repo, token.bridge_id)
+		if get_err.code != .None {
+			for &b in out do domain.bridge_destroy(&b)
+			delete(out)
+			return nil, get_err
+		}
+		if !found do continue
+		if r.owner_user_id == owner && r.status != .Revoked {
+			append(&out, r)
+			seen[r.bridge_id] = true
+		} else {
+			domain.bridge_destroy(&r)
+		}
+	}
+	return out[:], domain.Domain_Error{}
 }
 
 // get_bridge is the owner-scoped lookup behind every user-facing bridge operation,
@@ -990,6 +1036,10 @@ send_bridge_update :: proc(
 	effective_version := target_version
 	if effective_version == "" || effective_version == "latest" {
 		effective_version = info.latest_version
+	} else if strings.trim_prefix(effective_version, "v") != strings.trim_prefix(info.latest_version, "v") {
+		// A Settings modal may predate a newly promoted release. Never dispatch
+		// the new bundle/hash under the modal's old version label.
+		return "", false, domain.domain_error(.Validation_Failed, "update catalog changed; refresh bridge update information and retry")
 	}
 	download_url := info.download_url
 	sha256 := info.sha256

@@ -110,7 +110,7 @@ bridge_vault_prune_command :: proc(args: []string) -> bool {
 	verdict := Prune_Verdict.No_Token
 	if strings.trim_space(cfg.bridge_token) != "" {
 		headers := [?]httpc.Header{httpc.bearer(cfg.bridge_token)}
-		resp, err := httpc.send({method = .GET, url = bridge_hub_url(cfg.daemon_url), path = {"api", "v1", "bridge", "actions"}, headers = headers[:]}, context.temp_allocator)
+		resp, err := bridge_hub_http_send_alloc({method = .GET, url = bridge_hub_url(cfg.daemon_url), path = {"api", "v1", "bridge", "actions"}, headers = headers[:]}, context.temp_allocator)
 		verdict = bridge_prune_verdict(err == .None, resp.status)
 	}
 	fmt.printfln("\n%s (hub %s, scope %s): %s", bridge_id, bridge_keystore_hub(), scope, prune_verdict_string(verdict))

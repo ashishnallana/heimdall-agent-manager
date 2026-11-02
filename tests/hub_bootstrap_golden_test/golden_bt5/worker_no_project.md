@@ -27,8 +27,8 @@ This agent is associated with a project. You run in your own managed working dir
 
 ## Communicating with the user (REQUIRED)
 Messages from the user arrive through Heimdall, NOT your terminal. Read them with
-`./.heimdall/bin/ham-ctl chat read`; ALWAYS reply with
-`./.heimdall/bin/ham-ctl chat send --to user --body "<your reply>"`. Text you print to
+`./bin/ham-ctl chat read`; ALWAYS reply with
+`./bin/ham-ctl chat send --to user --body "<your reply>"`. Text you print to
 the terminal is never delivered to the user. Load the `heimdall-ctl-communication` skill
 for the full messaging workflow (agent-to-agent messages).
 

@@ -218,6 +218,10 @@ bridge_proxy_close_frame :: proc(proxy_id, reason: string) -> string {
 // tunnel-specific behaviour, and it is already drained by the runtime loop on every
 // tick, so proxy frames need no second drain site and cannot race a different writer.
 bridge_proxy_enqueue :: proc(frame_json: string) {
+	if sync.atomic_load(&bridge_hub_traffic_stopped) {
+		delete(frame_json, runtime.heap_allocator())
+		return
+	}
 	sync.mutex_lock(&bridge_runtime_mutex)
 	append(&bridge_tunnel_data_outgoing, Bridge_Tunnel_Data_Outgoing{json = frame_json})
 	sync.mutex_unlock(&bridge_runtime_mutex)
@@ -554,6 +558,7 @@ bridge_local_proxy_serve_tcp :: proc(client: net.TCP_Socket, head_in: string) {
 	// Client→hub watch: block until the local caller disconnects.
 	buf: [4096]byte
 	for {
+		if sync.atomic_load(&bridge_hub_traffic_stopped) do break
 		n, err := net.recv_tcp(client, buf[:])
 		// A timeout is a periodic wake, not a disconnect: core:net reports a graceful
 		// close as (0, nil), so `n <= 0` alone cannot tell them apart.
@@ -592,6 +597,7 @@ bridge_local_proxy_serve_unix :: proc(client: local_socket.Socket, head_in: stri
 
 	buf: [4096]byte
 	for {
+		if sync.atomic_load(&bridge_hub_traffic_stopped) do break
 		n, err := local_socket.recv_ex(client, buf[:])
 		if err == .Would_Block {
 			if !bridge_proxy_stream_registered(proxy_id) do break

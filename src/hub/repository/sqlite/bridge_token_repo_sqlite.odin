@@ -29,7 +29,7 @@ bridge_save_token_sqlite :: proc(ctx: rawptr, token: domain.Bridge_Token) -> (do
 	// written: a save that could rewrite a token's hash or move it between families
 	// would let a bug relabel a credential instead of issuing one, and rotation
 	// already works by INSERTing the next generation rather than mutating this row.
-	query := "INSERT INTO bridge_tokens (" + BRIDGE_TOKEN_COLUMNS + ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(token_id) DO UPDATE SET expires_at=excluded.expires_at, rotated_at=excluded.rotated_at, revoked_at=excluded.revoked_at, rotation_request_hash=CASE WHEN excluded.rotation_request_hash != '' THEN excluded.rotation_request_hash ELSE bridge_tokens.rotation_request_hash END;"
+	query := "INSERT INTO bridge_tokens (" + BRIDGE_TOKEN_COLUMNS + ") SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM bridges WHERE bridge_id = ?2 AND status != 'revoked' AND revoked_at = '') OR EXISTS (SELECT 1 FROM bridge_tokens WHERE token_id = ?1) ON CONFLICT(token_id) DO UPDATE SET expires_at=excluded.expires_at, rotated_at=excluded.rotated_at, revoked_at=excluded.revoked_at, rotation_request_hash=CASE WHEN excluded.rotation_request_hash != '' THEN excluded.rotation_request_hash ELSE bridge_tokens.rotation_request_hash END;"
 	if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return domain.Bridge_Token{}, false, domain.domain_error(.Internal_Error, "failed to prepare bridge token save")
 	defer sqlite3_finalize(stmt)
 	bind_text(stmt, 1, token.token_id)
@@ -50,7 +50,11 @@ bridge_save_token_sqlite :: proc(ctx: rawptr, token: domain.Bridge_Token) -> (do
 	// compare-and-set statements; a save never moves them (the UPDATE half omits them).
 	bind_text(stmt, 14, token.first_used_at)
 	bind_text(stmt, 15, token.regrant_claim)
-	if sqlite3_step(stmt) != SQLITE_DONE do return domain.Bridge_Token{}, false, domain.domain_error(.Conflict, "bridge token could not be saved")
+	step_rc, changed := step_changes(impl.conn.db, stmt)
+	if step_rc != SQLITE_DONE do return domain.Bridge_Token{}, false, domain.domain_error(.Conflict, "bridge token could not be saved")
+	// A refresh can race admission after reading a live bridge. Refuse its new
+	// rows under SQLite's write lock; the client retains the old pair and retries.
+	if changed == 0 do return {}, false, domain.domain_error(.Internal_Error, "bridge retirement interrupted credential issuance; retry")
 	return token, true, domain.Domain_Error{}
 }
 
@@ -93,13 +97,37 @@ bridge_list_tokens_by_family_sqlite :: proc(ctx: rawptr, family_id: string) -> (
 bridge_revoke_token_family_sqlite :: proc(ctx: rawptr, family_id, revoked_at: string) -> (int, bool, domain.Domain_Error) {
 	impl := (^Bridge_Repo_SQLite)(ctx)
 	if family_id == "" || revoked_at == "" do return 0, false, domain.domain_error(.Validation_Failed, "family_id and revoked_at are required")
+	if impl.commit != nil {
+		sync.mutex_lock(&impl.commit.mutex)
+		defer sync.mutex_unlock(&impl.commit.mutex)
+		return bridge_revoke_family_with_receipts_on(&impl.commit.conn, family_id, revoked_at)
+	}
+	return bridge_revoke_family_with_receipts_on(impl.conn, family_id, revoked_at)
+}
+
+bridge_revoke_family_with_receipts_on :: proc(conn: ^Conn, family_id, revoked_at: string) -> (int, bool, domain.Domain_Error) {
+	if !exec(conn, "BEGIN IMMEDIATE;") do return 0, false, domain.domain_error(.Internal_Error, "failed to begin family revocation")
+	committed := false
+	defer if !committed do _ = exec(conn, "ROLLBACK;")
+	if ok, _ := sunset_exec(conn, "DELETE FROM bridge_sunset_receipt_tokens WHERE token_id IN (SELECT token_id FROM bridge_tokens WHERE family_id = ?1);", family_id); !ok {
+		return 0, false, domain.domain_error(.Internal_Error, "failed to invalidate sunset family credentials")
+	}
+	n, ok, err := bridge_revoke_token_family_on(conn, family_id, revoked_at)
+	if !ok do return n, false, err
+	if !exec(conn, "COMMIT;") do return 0, false, domain.domain_error(.Internal_Error, "failed to commit family revocation")
+	committed = true
+	return n, true, {}
+}
+
+bridge_revoke_token_family_on :: proc(conn: ^Conn, family_id, revoked_at: string) -> (int, bool, domain.Domain_Error) {
+	if family_id == "" || revoked_at == "" do return 0, false, domain.domain_error(.Validation_Failed, "family_id and revoked_at are required")
 	stmt: sqlite3_stmt = nil
 	query := "UPDATE bridge_tokens SET revoked_at = ? WHERE family_id = ? AND revoked_at = '';"
-	if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return 0, false, domain.domain_error(.Internal_Error, "failed to prepare bridge token family revoke")
+	if sqlite3_prepare_v2(conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return 0, false, domain.domain_error(.Internal_Error, "failed to prepare bridge token family revoke")
 	defer sqlite3_finalize(stmt)
 	bind_text(stmt, 1, revoked_at)
 	bind_text(stmt, 2, family_id)
-	step_rc, row_changes := step_changes(impl.conn.db, stmt)
+	step_rc, row_changes := step_changes(conn.db, stmt)
 	if step_rc != SQLITE_DONE do return 0, false, domain.domain_error(.Internal_Error, "bridge token family could not be revoked")
 	return row_changes, true, domain.Domain_Error{}
 }
@@ -130,13 +158,42 @@ bridge_revoke_token_family_in_scope_sqlite :: proc(ctx: rawptr, family_id, scope
 bridge_revoke_tokens_for_bridge_sqlite :: proc(ctx: rawptr, bridge_id, revoked_at: string) -> (int, bool, domain.Domain_Error) {
 	impl := (^Bridge_Repo_SQLite)(ctx)
 	if bridge_id == "" || revoked_at == "" do return 0, false, domain.domain_error(.Validation_Failed, "bridge_id and revoked_at are required")
+	if impl.commit != nil {
+		sync.mutex_lock(&impl.commit.mutex)
+		defer sync.mutex_unlock(&impl.commit.mutex)
+		return bridge_revoke_with_receipts_on(&impl.commit.conn, bridge_id, revoked_at)
+	}
+	return bridge_revoke_with_receipts_on(impl.conn, bridge_id, revoked_at)
+}
+
+// Explicit revocation invalidates rollback authority under the SAME write lock as
+// the credential mutation. Even a re-revoke at the identical clock tick is final.
+bridge_revoke_with_receipts_on :: proc(conn: ^Conn, bridge_id, revoked_at: string) -> (int, bool, domain.Domain_Error) {
+	if !exec(conn, "BEGIN IMMEDIATE;") do return 0, false, domain.domain_error(.Internal_Error, "failed to begin bridge revocation")
+	committed := false
+	defer if !committed do _ = exec(conn, "ROLLBACK;")
+	if ok, _ := sunset_exec(conn, "DELETE FROM bridge_sunset_receipt_tokens WHERE replacement_bridge_id IN (SELECT replacement_bridge_id FROM bridge_sunset_receipts WHERE sunset_bridge_id = ?1);", bridge_id); !ok {
+		return 0, false, domain.domain_error(.Internal_Error, "failed to invalidate sunset credentials")
+	}
+	if ok, _ := sunset_exec(conn, "DELETE FROM bridge_sunset_receipts WHERE sunset_bridge_id = ?1;", bridge_id); !ok {
+		return 0, false, domain.domain_error(.Internal_Error, "failed to invalidate bridge sunset")
+	}
+	n, ok, err := bridge_revoke_tokens_for_bridge_on(conn, bridge_id, revoked_at)
+	if !ok do return n, false, err
+	if !exec(conn, "COMMIT;") do return 0, false, domain.domain_error(.Internal_Error, "failed to commit bridge revocation")
+	committed = true
+	return n, true, {}
+}
+
+bridge_revoke_tokens_for_bridge_on :: proc(conn: ^Conn, bridge_id, revoked_at: string) -> (int, bool, domain.Domain_Error) {
+	if bridge_id == "" || revoked_at == "" do return 0, false, domain.domain_error(.Validation_Failed, "bridge_id and revoked_at are required")
 	stmt: sqlite3_stmt = nil
 	query := "UPDATE bridge_tokens SET revoked_at = ? WHERE bridge_id = ? AND revoked_at = '';"
-	if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return 0, false, domain.domain_error(.Internal_Error, "failed to prepare bridge token revoke")
+	if sqlite3_prepare_v2(conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return 0, false, domain.domain_error(.Internal_Error, "failed to prepare bridge token revoke")
 	defer sqlite3_finalize(stmt)
 	bind_text(stmt, 1, revoked_at)
 	bind_text(stmt, 2, bridge_id)
-	step_rc, row_changes := step_changes(impl.conn.db, stmt)
+	step_rc, row_changes := step_changes(conn.db, stmt)
 	if step_rc != SQLITE_DONE do return 0, false, domain.domain_error(.Internal_Error, "bridge tokens could not be revoked")
 	return row_changes, true, domain.Domain_Error{}
 }
@@ -263,7 +320,7 @@ bridge_mark_token_rotated_sqlite :: proc(ctx: rawptr, token_id, rotated_at, requ
 	impl := (^Bridge_Repo_SQLite)(ctx)
 	if token_id == "" || rotated_at == "" do return false, domain.domain_error(.Validation_Failed, "token_id and rotated_at are required")
 	stmt: sqlite3_stmt = nil
-	query := "UPDATE bridge_tokens SET rotated_at = ?, rotation_request_hash = ? WHERE token_id = ? AND rotated_at = '';"
+	query := "UPDATE bridge_tokens SET rotated_at = ?, rotation_request_hash = ? WHERE token_id = ? AND rotated_at = '' AND revoked_at = '';"
 	if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return false, domain.domain_error(.Internal_Error, "failed to prepare bridge token rotate")
 	defer sqlite3_finalize(stmt)
 	bind_text(stmt, 1, rotated_at)
@@ -281,7 +338,8 @@ bridge_mark_token_rotated_sqlite :: proc(ctx: rawptr, token_id, rotated_at, requ
 //      it a compare-and-set: a revoked or already-promoted family changes 0 rows.
 //   2. attach: revoke every OTHER live family of the bridge (the old device);
 //      new bridge: clear enrollment_pending_until, so the sweep never deletes a row
-//      whose credential is now live.
+//      whose credential is now live, and drop its sunset receipt (REQ-3), which
+//      makes the sunset of the bridge it replaced final.
 //
 // Either both happen or neither does. A 0-row promote is told apart: a family that
 // is already live in to_scope is a duplicate result (Already_Committed, nothing
@@ -363,6 +421,10 @@ bridge_commit_enrollment_on :: proc(conn: ^Conn, bridge_id, family_id, from_scop
 		}
 		if sqlite3_step(stmt) != SQLITE_DONE do return fail("the enrollment swap failed; nothing was committed")
 	}
+	// A new bridge that sunset another (REQ-3) makes that sunset final here, in the
+	// commit transaction: with its receipt gone, no later rollback path can revive the
+	// sunset bridge next to the now-live replacement.
+	if !attach && !bridge_drop_sunset_receipt(conn, bridge_id) do return fail("the enrollment's sunset receipt could not be dropped; nothing was committed")
 	if !exec(conn, "COMMIT;") do return fail("failed to commit the enrollment")
 	committed = true
 	return .Committed, true, domain.Domain_Error{}

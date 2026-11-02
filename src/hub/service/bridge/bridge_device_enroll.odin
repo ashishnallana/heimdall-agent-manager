@@ -63,6 +63,13 @@ Device_Enroll_Input :: struct {
 	// before touching anything -- see that proc.
 	target_bridge_id:       string,
 	new_bridge_label:       string,
+	// sunset_bridge_id is the approver's "register this machine as NEW and retire
+	// that one" choice (a full plan's way to make room). It is retired in the same
+	// repository transaction that creates the new row (see iface.Bridge_Sunset), so
+	// the approver never ends up with the old bridge gone and no new one. Only valid
+	// for a new bridge: attach (target_bridge_id) keeps the slot count unchanged, so
+	// the two together are refused.
+	sunset_bridge_id:       string,
 	// pending is true when the approving owner has a vault (REQ-EA-1): the
 	// enrollment then does not count until the hub observes the vault key reach the
 	// bridge (commit_pending_enrollment). The credential is minted in
@@ -89,7 +96,11 @@ enroll_bridge_from_device_grant :: proc(service: ^Bridge_Service, input: Device_
 	if input.bridge_public_key == "" {
 		return Enroll_Bridge_Result{}, false, domain.domain_error(.Validation_Failed, "bridge_public_key is required")
 	}
+	sunset_bridge_id := strings.trim_space(input.sunset_bridge_id)
 	if strings.trim_space(input.target_bridge_id) != "" {
+		if sunset_bridge_id != "" {
+			return Enroll_Bridge_Result{}, false, domain.domain_error(.Validation_Failed, "sunset_bridge_id is only valid when creating a new bridge")
+		}
 		return rotate_bridge_for_device_grant(service, owner, input)
 	}
 	entitlements, entitlement_err := domain.lookup_entitlements(service.entitlements, owner)
@@ -144,7 +155,12 @@ enroll_bridge_from_device_grant :: proc(service: ^Bridge_Service, input: Device_
 		bridge.enrollment_pending_until = pending_until
 		scope = BRIDGE_ENROLL_TOKEN_SCOPE
 	}
-	saved, ok, err := iface.bridge_create_limited(service.repo, bridge, entitlements.max_bridges)
+	// The sunset (if any) is revoked inside the admission transaction, before the
+	// plan count, so its slot is the one this bridge takes; a refusal anywhere in
+	// that transaction leaves the sunset bridge untouched. For a pending bridge the
+	// same transaction stores a durable receipt, so every later rollback of this
+	// enrollment (rollback_pending_enrollment) gives the sunset bridge back.
+	saved, ok, err := iface.bridge_create_limited_with_sunset(service.repo, bridge, entitlements.max_bridges, iface.Bridge_Sunset{bridge_id = sunset_bridge_id, revoked_at = now})
 	if !ok {
 		// The repository enforces the count atomically; add account metadata only
 		// after its transaction releases the commit mutex.
@@ -158,6 +174,12 @@ enroll_bridge_from_device_grant :: proc(service: ^Bridge_Service, input: Device_
 		}
 		return Enroll_Bridge_Result{}, false, err
 	}
+	if sunset_bridge_id != "" {
+		// Same last step as revoke_bridge: its credentials are already dead, so this
+		// only drops a socket that can no longer authenticate anything.
+		code := "bridge_sunset_pending" if input.pending else "bridge_credential_revoked"
+		_ = close_bridge_connection(service, sunset_bridge_id, code)
+	}
 	// Fail closed when the OS entropy source is unavailable (settled 8): 503 with a
 	// retry hint, never a weaker credential and never `.Internal_Error`. The bridge
 	// row survives an entropy failure; the human approves again and that approval
@@ -165,8 +187,9 @@ enroll_bridge_from_device_grant :: proc(service: ^Bridge_Service, input: Device_
 	pair, pair_ok, pair_err := issue_bridge_token_pair(service, saved.bridge_id, scope)
 	if !pair_ok {
 		// A pending row with no credential can never be committed; remove it now
-		// rather than leave it for the sweep (REQ-EA-3).
-		if input.pending do _, _ = iface.bridge_delete_pending(service.repo, saved.bridge_id)
+		// rather than leave it for the sweep (REQ-EA-3). The same transaction gives
+		// back a bridge this approval sunset.
+		if input.pending do _, _ = delete_pending_restoring_sunset(service, saved.bridge_id)
 		return Enroll_Bridge_Result{}, false, pair_err
 	}
 	return Enroll_Bridge_Result{

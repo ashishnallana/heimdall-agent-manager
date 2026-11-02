@@ -27,7 +27,9 @@ lr_instance_dir() { printf '%s/%ss/%s\n' "$(lr_state_root)" "$1" "$2"; }
 # lr_env_get <instance.env> <KEY> prints the recorded value ('' when absent).
 lr_env_get() {
   [ -f "$1" ] || return 0
-  grep -E "^$2=" "$1" | tail -1 | cut -d= -f2-
+  # A missing key is not an error: grep's exit 1 would fail the caller under
+  # `set -o pipefail` (and silently exit it under `set -e`).
+  { grep -E "^$2=" "$1" || true; } | tail -1 | cut -d= -f2-
 }
 
 # lr_env_write <file> KEY=VALUE... writes the record atomically.

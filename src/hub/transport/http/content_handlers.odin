@@ -121,7 +121,7 @@ create_chat_handler :: proc(ctx:rawptr, req:Request)->Response{
 		if h.agents==nil do return respond_error(domain.domain_error(.Internal_Error,"agent service is not configured"),req.request_id)
 		initial:=content_service.Message_Input{body=input.initial_body,artifact_ids_json=input.artifact_ids_json}
 		if strings.trim_space(input.initial_body)!="" { if msg_ok,msg_err:=content_service.validate_initial_message(h.content,auth,initial); !msg_ok do return respond_error(msg_err,req.request_id) }
-		inst,created,create_err:=agent_service.create_instance(h.agents,auth,agent_service.Create_Instance_Input{agent_id=input.agent_id,bridge_id=input.bridge_id,provider=input.provider,model=input.model,project_id=input.project_id,chain_id=input.chain_id})
+		inst,created,create_err:=agent_service.create_instance(h.agents,auth,agent_service.Create_Instance_Input{agent_id=input.agent_id,bridge_id=input.bridge_id,provider=input.provider,provider_profile=input.provider_profile,model=input.model,project_id=input.project_id,chain_id=input.chain_id})
 		if !created do return respond_error(create_err,req.request_id)
 		c,found,find_err:=content_service.get_conversation_by_instance(h.content,auth,inst.agent_instance_id)
 		if !found do return respond_error(find_err,req.request_id)
@@ -380,7 +380,7 @@ memory_update_input :: proc(body: string) -> (content_service.Memory_Update_Inpu
 
 	return input, has_any
 }
-chat_input :: proc(body:string)->content_service.Chat_Input{ return content_service.Chat_Input{agent_id=json_string(body,"agent_id"),agent_instance_id=json_string(body,"agent_instance_id"),chain_id=json_string(body,"chain_id"),project_id=domain.Project_ID(json_string(body,"project_id")),title=json_string(body,"title"),initial_body=json_object_string(body,"initial_message","body"),artifact_ids_json=json_array_raw(body,"artifact_ids"),bridge_id=json_string(body,"bridge_id"),provider=json_string(body,"provider"),model=json_string(body,"model")} }
+chat_input :: proc(body:string)->content_service.Chat_Input{ return content_service.Chat_Input{agent_id=json_string(body,"agent_id"),agent_instance_id=json_string(body,"agent_instance_id"),chain_id=json_string(body,"chain_id"),project_id=domain.Project_ID(json_string(body,"project_id")),title=json_string(body,"title"),initial_body=json_object_string(body,"initial_message","body"),artifact_ids_json=json_array_raw(body,"artifact_ids"),bridge_id=json_string(body,"bridge_id"),provider=json_string(body,"provider"),provider_profile=json_string(body,"provider_profile"),model=json_string(body,"model")} }
 message_input :: proc(body:string)->content_service.Message_Input{ return content_service.Message_Input{body=json_string(body,"body"),artifact_ids_json=json_array_raw(body,"artifact_ids")} }
 pane_capture_input :: proc(body:string)->content_service.Pane_Capture_Input{ return content_service.Pane_Capture_Input{width=json_body_int(body,"width",80),settle_ms=json_body_int(body,"settle_ms",3000),line_limit=json_body_int(body,"line_limit",120)} }
 artifact_input :: proc(body:string)->content_service.Artifact_Input{

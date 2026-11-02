@@ -26,6 +26,7 @@ jobs:
     name: Promote ${{ inputs.version }}
     runs-on: ubuntu-24.04
     steps:
+      - uses: actions/checkout@v4
       - name: Verify the release is a complete candidate
         env:
           GH_TOKEN: ${{ github.token }}
@@ -34,7 +35,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || {
+          [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
             echo "invalid release tag: $VERSION" >&2; exit 2; }
           gh release view "$VERSION" --json isDraft,isPrerelease,assets > release.json
           if [ "$(jq -r .isDraft release.json)" = "true" ]; then
@@ -47,29 +48,38 @@ jobs:
           # release-local-binaries.yml "Verify tarballs and create SHA256SUMS").
           missing=0
           # termux-arm64 temporarily disabled (see release-local-binaries.yml build matrix).
-          for target in darwin-arm64 darwin-amd64 linux-amd64 linux-arm64; do
+          for target in darwin-arm64 linux-amd64 linux-arm64; do
             name="heimdall-local-$target-$VERSION.tar.gz"
             jq -e --arg n "$name" '.assets | any(.name == $n)' release.json >/dev/null || {
               echo "missing asset: $name" >&2; missing=1; }
           done
-          # windows-amd64 (a zip for scripts/install.ps1) exists only for releases
-          # built since it was added: required when the release's SHA256SUMS lists
-          # it (the release job wrote it, so it must have been uploaded), and the
-          # asset must never be present without a checksum line.
-          name="heimdall-local-windows-amd64-$VERSION.zip"
+          # Intel macOS is opt-in. Windows was absent from older candidates.
+          # Either optional asset must agree with the published checksum manifest:
+          # listed-but-missing and present-but-unlisted both fail promotion.
           gh release download "$VERSION" --pattern SHA256SUMS --output sums.txt --clobber
-          listed=0
-          awk -v n="$name" '{ sub(/^\*/, "", $2) } $2 == n { found = 1 } END { exit !found }' sums.txt && listed=1
-          present=0
-          jq -e --arg n "$name" '.assets | any(.name == $n)' release.json >/dev/null && present=1
-          if [ "$listed" = 1 ] && [ "$present" = 0 ]; then
-            echo "missing asset: $name (listed in SHA256SUMS)" >&2; missing=1
-          elif [ "$listed" = 0 ] && [ "$present" = 1 ]; then
-            echo "asset $name has no SHA256SUMS line" >&2; missing=1
-          fi
+          for name in "heimdall-local-darwin-amd64-$VERSION.tar.gz" "heimdall-local-windows-amd64-$VERSION.zip"; do
+            listed=0
+            awk -v n="$name" '{ sub(/^\*/, "", $2) } $2 == n { found = 1 } END { exit !found }' sums.txt && listed=1
+            present=0
+            jq -e --arg n "$name" '.assets | any(.name == $n)' release.json >/dev/null && present=1
+            if [ "$listed" = 1 ] && [ "$present" = 0 ]; then
+              echo "missing asset: $name (listed in SHA256SUMS)" >&2; missing=1
+            elif [ "$listed" = 0 ] && [ "$present" = 1 ]; then
+              echo "asset $name has no SHA256SUMS line" >&2; missing=1
+            fi
+          done
           jq -e '.assets | any(.name == "SHA256SUMS")' release.json >/dev/null || {
             echo "missing asset: SHA256SUMS" >&2; missing=1; }
           [ "$missing" = 0 ]
+          mkdir -p desktop-candidate
+          gh release download "$VERSION" --dir desktop-candidate \
+            --pattern latest.yml --pattern latest-mac.yml \
+            --pattern 'Ninjy-*.zip' --pattern 'Ninjy-*.zip.blockmap' \
+            --pattern 'Ninjy-*.exe' --pattern 'Ninjy-*.exe.blockmap'
+          python3 scripts/release/validate-desktop-updates.py desktop-candidate \
+            --version "${VERSION#v}" --platform mac --arch arm64 --assets release.json
+          python3 scripts/release/validate-desktop-updates.py desktop-candidate \
+            --version "${VERSION#v}" --platform windows --arch x64 --assets release.json
 
       - name: Mark as the stable Latest release
         env:

@@ -56,6 +56,11 @@ Bridge_Mint_Request :: struct {
 	// Operator-chosen display label for a NEW bridge. Empty falls back to the
 	// host-asserted hostname. Invalid when target_bridge_id is also present.
 	new_bridge_label:       string,
+	// sunset_bridge_id is the approver's bridge to retire in the same unit of work
+	// that creates the NEW one (a full plan's "register new and sunset one"). Like
+	// target_bridge_id it is not an ownership assertion: the bridge service re-checks
+	// it. Invalid when target_bridge_id is also present.
+	sunset_bridge_id:       string,
 	// Passwordless vault: the bridge's persistent identity key (from the grant) and
 	// the approving device's signed vault approval (from the approve body). The
 	// minter validates the approval BEFORE minting and commits it with the mint.
@@ -309,11 +314,17 @@ pending_bridge_pair_salts :: proc(service: ^Device_Auth_Service, limit: int) -> 
 // owner_user_id actually owns this bridge before touching it, the same way
 // every other bridge-id-by-string input in this codebase is re-checked rather
 // than trusted.
+//
+// sunset_bridge_id is the "register new and sunset this one" choice: the named bridge
+// is revoked atomically with the new bridge's creation (never before it), so a
+// refused or failed approval leaves it running. Mutually exclusive with
+// target_bridge_id — an attach consumes no new slot, so there is nothing to sunset for.
 Approve_Input :: struct {
 	user_code:        string,
 	approve:          bool,
 	target_bridge_id: string,
 	new_bridge_label: string,
+	sunset_bridge_id: string,
 	vault_approval:   Vault_Approval,
 }
 
@@ -327,6 +338,9 @@ approve :: proc(service: ^Device_Auth_Service, input: Approve_Input, owner_user_
 	if input.user_code == "" do return false, GENERIC_UNKNOWN_CODE_ERROR()
 	if strings.trim_space(input.target_bridge_id) != "" && strings.trim_space(input.new_bridge_label) != "" {
 		return false, domain.domain_error(.Validation_Failed, "new_bridge_label is only valid when creating a new bridge")
+	}
+	if strings.trim_space(input.target_bridge_id) != "" && strings.trim_space(input.sunset_bridge_id) != "" {
+		return false, domain.domain_error(.Validation_Failed, "sunset_bridge_id is only valid when creating a new bridge")
 	}
 	if len(strings.trim_space(input.new_bridge_label)) > 128 {
 		return false, domain.domain_error(.Validation_Failed, "new_bridge_label must be 128 characters or fewer")
@@ -371,6 +385,7 @@ approve :: proc(service: ^Device_Auth_Service, input: Approve_Input, owner_user_
 				app_version = grant.app_version,
 				target_bridge_id = input.target_bridge_id,
 				new_bridge_label = input.new_bridge_label,
+				sunset_bridge_id = input.sunset_bridge_id,
 				bridge_identity_public_key = grant.bridge_identity_public_key,
 				vault_approval = input.vault_approval,
 			})

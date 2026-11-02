@@ -217,7 +217,7 @@ session_runner_thread :: proc(data: rawptr) {
 // connect opens a real bridge session with `token` and returns once bridge_ready
 // arrived (its text in `ready`).
 @(private = "file")
-session_connect :: proc(t: ^testing.T, f: ^Session_Fixture, socks: ^Session_Socks, runner: ^Session_Runner, stream: ^Session_Stream, token: string) -> (^thread.Thread, string) {
+session_connect :: proc(t: ^testing.T, f: ^Session_Fixture, socks: ^Session_Socks, runner: ^Session_Runner, stream: ^Session_Stream, token: string, expected := "bridge_ready") -> (^thread.Thread, string) {
 	headers := make([]contracts.HTTP_Header, 2, context.temp_allocator)
 	headers[0] = {name = "Authorization", value = fmt.tprintf("Bearer %s", token)}
 	headers[1] = {name = "Sec-WebSocket-Key", value = "dGhlIHNhbXBsZSBub25jZQ=="}
@@ -238,10 +238,126 @@ session_connect :: proc(t: ^testing.T, f: ^Session_Fixture, socks: ^Session_Sock
 	for _ in 0 ..< 10 {
 		text, ok := session_stream_next(stream, 2 * time.Second)
 		if !ok do break
-		if strings.contains(text, `"bridge_ready"`) do return th, text
+		if strings.contains(text, expected) do return th, text
 		delete(text)
 	}
-	testing.fail_now(t, "no bridge_ready")
+	testing.fail_now(t, "no expected bridge session frame")
+}
+
+@(test)
+test_sunset_and_revoke_notify_live_sessions_and_refuse_stale_startup :: proc(t: ^testing.T) {
+    f := setup_session_fixture(t)
+    defer teardown_session_fixture(f)
+    replacement: bridge_service.Enroll_Bridge_Result
+    {
+        socks := session_socks(t)
+        runner: Session_Runner
+        stream := Session_Stream{sock = socks.client}
+        th, ready := session_connect(t, f, &socks, &runner, &stream, f.enrolled.bridge_token)
+        defer session_finish(&socks, th, &stream)
+        delete(ready)
+        enrolled, ok, err := bridge_service.enroll_bridge_from_device_grant(&f.br_svc, {
+            owner_user_id = f.owner_user_id, bridge_public_key = "04aabb",
+            pending = true, sunset_bridge_id = f.enrolled.bridge.bridge_id,
+        })
+        if !testing.expect(t, ok, err.message) do return
+        replacement = enrolled
+        found, frames := session_wait_for(&stream, BRIDGE_WS_SUNSET_PENDING_CODE, time.Second)
+        defer free_frames(frames)
+        testing.expect(t, found, "production closer sends temporary notice immediately, before its 60s recheck")
+        for frame in frames do testing.expect(t, !strings.contains(frame, BRIDGE_WS_CREDENTIAL_REVOKED_CODE))
+    }
+    // Offline/restarting bridge learns suspension from the real admission path.
+    {
+        socks := session_socks(t)
+        runner: Session_Runner
+        stream := Session_Stream{sock = socks.client}
+        th, refusal := session_connect(t, f, &socks, &runner, &stream, f.enrolled.bridge_token, BRIDGE_WS_SUNSET_PENDING_CODE)
+        defer session_finish(&socks, th, &stream)
+        defer delete(refusal)
+        testing.expect(t, !strings.contains(refusal, BRIDGE_WS_CREDENTIAL_REVOKED_CODE))
+    }
+    _, removed, rollback_err := bridge_service.rollback_pending_enrollment(&f.br_svc, replacement.bridge.bridge_id, replacement.family_id)
+    if !testing.expect(t, removed && rollback_err.code == .None) do return
+    {
+        socks := session_socks(t)
+        runner: Session_Runner
+        stream := Session_Stream{sock = socks.client}
+        th, ready := session_connect(t, f, &socks, &runner, &stream, f.enrolled.bridge_token)
+        defer session_finish(&socks, th, &stream)
+        delete(ready)
+        _, revoked, err := bridge_service.revoke_bridge(&f.br_svc, {kind = .Session, user_id = f.owner_user_id}, f.enrolled.bridge.bridge_id)
+        testing.expect(t, revoked, err.message)
+        found, frames := session_wait_for(&stream, BRIDGE_WS_CREDENTIAL_REVOKED_CODE, time.Second)
+        defer free_frames(frames)
+        testing.expect(t, found, "explicit revocation notifies before terminating the reader")
+    }
+    {
+        socks := session_socks(t)
+        runner: Session_Runner
+        stream := Session_Stream{sock = socks.client}
+        th, refusal := session_connect(t, f, &socks, &runner, &stream, f.enrolled.bridge_token, BRIDGE_WS_CREDENTIAL_REVOKED_CODE)
+        defer session_finish(&socks, th, &stream)
+        defer delete(refusal)
+        testing.expect(t, !strings.contains(refusal, "bridge_ready"))
+    }
+}
+
+@(test)
+test_sunset_reauth_ends_session_without_waiting_for_revalidation :: proc(t: ^testing.T) {
+    f := setup_session_fixture(t)
+    defer teardown_session_fixture(f)
+    // Model revocation on another Hub process: this session is not proactively
+    // notified, and its normal 60s revalidation has not become due.
+    f.br_svc.connection_closer = {}
+    socks := session_socks(t)
+    runner: Session_Runner
+    stream := Session_Stream{sock = socks.client}
+    th, ready := session_connect(t, f, &socks, &runner, &stream, f.enrolled.bridge_token)
+    defer session_finish(&socks, th, &stream)
+    delete(ready)
+    _, ok, err := bridge_service.enroll_bridge_from_device_grant(&f.br_svc, {
+        owner_user_id = f.owner_user_id, bridge_public_key = "04aabb",
+        pending = true, sunset_bridge_id = f.enrolled.bridge.bridge_id,
+    })
+    if !testing.expect(t, ok, err.message) do return
+    session_send(socks.client, fmt.tprintf(`{{"type":"bridge_reauth","access_token":"%s"}}`, f.enrolled.bridge_token))
+    found, frames := session_wait_for(&stream, BRIDGE_WS_SUNSET_PENDING_CODE, time.Second)
+    defer free_frames(frames)
+    testing.expect(t, found)
+    started := time.tick_now()
+    for !sync.atomic_load(&runner.returned) && time.tick_since(started) < time.Second { time.sleep(time.Millisecond) }
+    testing.expect(t, sync.atomic_load(&runner.returned), "failed reauth retires immediately, including already-buffered inbound work")
+    // Directly assert the per-frame fence with a recheck deadline in the future.
+    c := project_service.Bridge_Runtime_Connection{credential_revoked = true}
+    next := time.tick_add(time.tick_now(), time.Hour)
+    testing.expect_value(t, bridge_ws_session_check(&f.bh, &c, f.enrolled.bridge.bridge_id, socks.hub, &next), Bridge_WS_Disconnect_Reason.Credential_Revoked)
+}
+
+@(test)
+test_bridge_admission_failure_only_parks_authoritative_credentials :: proc(t: ^testing.T) {
+    cases := []struct {err: domain.Domain_Error, expected: string}{
+        {domain.domain_error(.Internal_Error, "storage unavailable"), ""},
+        {domain.domain_error(.Unauthenticated, "bridge access token has expired"), BRIDGE_WS_TOKEN_EXPIRED_CODE},
+        {domain.domain_error(.Forbidden, "bridge credential is revoked"), BRIDGE_WS_CREDENTIAL_REVOKED_CODE},
+        {{code = .Internal_Error, cause = BRIDGE_WS_SUNSET_PENDING_CODE, message = "pending"}, BRIDGE_WS_SUNSET_PENDING_CODE},
+    }
+    for c in cases {
+        socks := session_socks(t)
+        stream := Session_Stream{sock = socks.client}
+        bridge_ws_auth_error(socks.hub, c.err)
+        frame, got := session_stream_next(&stream, time.Second)
+        testing.expect(t, got)
+        if c.expected != "" {
+            testing.expect(t, strings.contains(frame, c.expected))
+        } else {
+            testing.expect(t, !strings.contains(frame, BRIDGE_WS_CREDENTIAL_REVOKED_CODE))
+            testing.expect(t, !strings.contains(frame, BRIDGE_WS_SUNSET_PENDING_CODE))
+        }
+        delete(frame)
+        delete(stream.pending)
+        net.close(socks.hub); net.close(socks.client); net.close(socks.listener)
+    }
 }
 
 @(private = "file")
@@ -552,4 +668,75 @@ test_bridge_self_revoke_uses_the_bridges_own_access_token :: proc(t: ^testing.T)
 	// Already revoked: refused (the bridge client counts 401/403 as "revoked").
 	again := self_revoke(f, f.enrolled.bridge_token)
 	testing.expectf(t, again.status == 401 || again.status == 403, "a revoked token is refused (got %d)", again.status)
+}
+
+// Force the existing session to observe suspension via periodic revalidation,
+// rather than admission's immediate socket closer. This is also the multi-hub path.
+@(test)
+test_pending_sunset_session_recheck_is_recoverable_and_rollback_reconnects :: proc(t: ^testing.T) {
+    f := setup_session_fixture(t)
+    defer teardown_session_fixture(f)
+    old_interval := bridge_ws_revalidate_interval
+    bridge_ws_revalidate_interval = 50 * time.Millisecond
+    defer { bridge_ws_revalidate_interval = old_interval }
+    f.br_svc.connection_closer = {}
+    replacement: bridge_service.Enroll_Bridge_Result
+    {
+        socks := session_socks(t)
+        runner: Session_Runner
+        stream := Session_Stream{sock = socks.client}
+        th, ready := session_connect(t, f, &socks, &runner, &stream, f.enrolled.bridge_token)
+        defer session_finish(&socks, th, &stream)
+        delete(ready)
+        enrolled, ok, err := bridge_service.enroll_bridge_from_device_grant(&f.br_svc, {
+            owner_user_id = f.owner_user_id, bridge_public_key = "04aabb",
+            pending = true, sunset_bridge_id = f.enrolled.bridge.bridge_id,
+        })
+        if !testing.expect(t, ok, err.message) do return
+        replacement = enrolled
+        found, frames := session_wait_for(&stream, `"bridge_sunset_pending"`, 3 * time.Second)
+        defer free_frames(frames)
+        testing.expect(t, found, "temporary retirement has a recoverable session code")
+        for frame in frames do testing.expect(t, !strings.contains(frame, BRIDGE_WS_CREDENTIAL_REVOKED_CODE), "no terminal revocation frame")
+    }
+    _, removed, rollback_err := bridge_service.rollback_pending_enrollment(&f.br_svc, replacement.bridge.bridge_id, replacement.family_id)
+    if !testing.expect(t, removed && rollback_err.code == .None) do return
+    socks := session_socks(t)
+    runner: Session_Runner
+    stream := Session_Stream{sock = socks.client}
+    th, ready := session_connect(t, f, &socks, &runner, &stream, f.enrolled.bridge_token)
+    defer session_finish(&socks, th, &stream)
+    defer delete(ready)
+    testing.expect(t, strings.contains(ready, "bridge_ready"), "same credential reconnects after rollback")
+}
+
+
+// Exercise the helper used by the signed vault-device revoke handler. A durable
+// sunset receipt must not turn an explicit credential kill back into suspension.
+@(test)
+test_vault_revoke_sunset_bridge_cannot_be_restored_by_replacement_rollback :: proc(t: ^testing.T) {
+	f := setup_session_fixture(t)
+	defer teardown_session_fixture(f)
+	replacement, enrolled_ok, enroll_err := bridge_service.enroll_bridge_from_device_grant(&f.br_svc, {
+		owner_user_id = f.owner_user_id, bridge_public_key = "04ccdd",
+		pending = true, sunset_bridge_id = f.enrolled.bridge.bridge_id,
+	})
+	if !testing.expect(t, enrolled_ok, enroll_err.message) do return
+	_, suspended_ok, suspended_err := bridge_service.verify_bridge_token(&f.br_svc, f.enrolled.bridge_token)
+	testing.expect(t, !suspended_ok && suspended_err.code == .Internal_Error, "receipt initially suspends credentials")
+	auth := contracts.Auth_Context{kind = .Internal_User, user_id = f.owner_user_id}
+	revoke_err := vault_revoke_bridge_credentials(&f.br_svc, auth, f.enrolled.bridge.bridge_id)
+	if !testing.expect(t, revoke_err.code == .None, revoke_err.message) do return
+	// The fake clock never advanced: this also catches same-second revocation.
+	again := vault_revoke_bridge_credentials(&f.br_svc, auth, f.enrolled.bridge.bridge_id)
+	testing.expect(t, again.code == .None, "explicit revocation is idempotent")
+	_, removed, rollback_err := bridge_service.rollback_pending_enrollment(&f.br_svc, replacement.bridge.bridge_id, replacement.family_id)
+	if !testing.expect(t, removed && rollback_err.code == .None, rollback_err.message) do return
+	old, found, get_err := iface.bridge_get_bridge(&f.br_repo, f.enrolled.bridge.bridge_id)
+	defer if found do domain.bridge_destroy(&old)
+	testing.expect(t, found && get_err.code == .None && old.status == .Revoked, "vault-revoked bridge stays revoked")
+	_, access_ok, access_err := bridge_service.verify_bridge_token(&f.br_svc, f.enrolled.bridge_token)
+	testing.expect(t, !access_ok && access_err.code == .Forbidden, "old access credential remains finally revoked")
+	_, refresh_ok, refresh_err := bridge_service.refresh_bridge_token(&f.br_svc, f.enrolled.refresh_token)
+	testing.expect(t, !refresh_ok && refresh_err.code == .Unauthenticated, "old refresh credential cannot resume")
 }

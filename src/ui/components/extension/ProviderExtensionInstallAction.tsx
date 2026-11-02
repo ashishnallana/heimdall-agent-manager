@@ -20,15 +20,17 @@ import {
 interface Props {
   bridgeId: string;
   provider: string;
+  profileId?: string;
   extension: ProviderExtensionStatus | null;
   online: boolean;
   disabled?: boolean;
+  layout?: 'row' | 'editor';
   onComplete: () => void;
   onRetryDiscovery: () => Promise<void>;
 }
 
 /** Tracks manual and automatic installs, including commands recovered after navigation. */
-export default function ProviderExtensionInstallAction({ bridgeId, provider, extension, online, disabled, onComplete, onRetryDiscovery }: Props) {
+export default function ProviderExtensionInstallAction({ bridgeId, provider, profileId, extension, online, disabled, layout = 'row', onComplete, onRetryDiscovery }: Props) {
   // RTK shares this subscription across every provider card on the bridge.
   const statusQuery = useListBridgeProvidersQuery({ bridgeId }, {
     pollingInterval: 5000,
@@ -38,7 +40,7 @@ export default function ProviderExtensionInstallAction({ bridgeId, provider, ext
   // The Hub lists commands oldest first; the newest install/uninstall of this provider wins.
   const latest = [...((statusQuery.currentData?.extension_commands as ProviderExtensionCommand[] | undefined) || [])]
     .reverse()
-    .find((entry) => entry.bridge_id === bridgeId && entry.provider === provider
+    .find((entry) => entry.bridge_id === bridgeId && entry.provider === provider && (entry.profile_id || entry.provider) === (profileId || provider)
       && (!entry.kind || entry.kind === 'install' || entry.kind === 'uninstall'));
   const [submitted, setSubmitted] = useState<ProviderExtensionCommand | null>(null);
   const [requestError, setRequestError] = useState('');
@@ -46,11 +48,11 @@ export default function ProviderExtensionInstallAction({ bridgeId, provider, ext
   const [uninstall, uninstallRequest] = useUninstallProviderExtensionMutation();
   const [confirmUninstall, setConfirmUninstall] = useState(false);
   const inScope = (entry: ProviderExtensionCommand | null | undefined) =>
-    entry?.bridge_id === bridgeId && entry.provider === provider ? entry : null;
+    entry?.bridge_id === bridgeId && entry.provider === provider && (entry.profile_id || entry.provider) === (profileId || provider) ? entry : null;
   const command = inScope(submitted) || latest;
   const [terminalId, setTerminalId] = useState('');
   const commandQuery = useGetProviderExtensionInstallQuery({
-    bridgeId, provider, commandId: command?.command_id || '', kind: extensionCommandKind(command),
+    bridgeId, provider, profileId, commandId: command?.command_id || '', kind: extensionCommandKind(command),
   }, {
     skip: !command,
     pollingInterval: command && terminalId !== command.command_id ? 1000 : 0,
@@ -81,7 +83,7 @@ export default function ProviderExtensionInstallAction({ bridgeId, provider, ext
   async function start() {
     setRequestError('');
     try {
-      setSubmitted(await install({ bridgeId, provider }).unwrap());
+      setSubmitted(await install({ bridgeId, provider, profileId }).unwrap());
     } catch (error) {
       setRequestError(apiErrorText(error, 'Unable to start extension installation.'));
     }
@@ -91,7 +93,7 @@ export default function ProviderExtensionInstallAction({ bridgeId, provider, ext
     setConfirmUninstall(false);
     setRequestError('');
     try {
-      setSubmitted(await uninstall({ bridgeId, provider }).unwrap());
+      setSubmitted(await uninstall({ bridgeId, provider, profileId }).unwrap());
     } catch (error) {
       setRequestError(apiErrorText(error, 'Unable to start extension uninstall.'));
     }
@@ -111,7 +113,7 @@ export default function ProviderExtensionInstallAction({ bridgeId, provider, ext
   const failed = tracked?.status === 'failed' || tracked?.status === 'cancelled';
 
   return (
-    <div className="space-y-2 px-4 pb-3 sm:pl-[4.75rem]" data-debug-id={`provider-extension-action-${provider}`}>
+    <div className={layout === 'editor' ? 'flex min-w-0 flex-wrap items-center gap-2 [&>p]:w-full [&>div]:w-full' : 'space-y-2 px-4 pb-3 sm:pl-[4.75rem]'} data-debug-id={`provider-extension-action-${provider}`}>
       {canRetryDiscovery ? (
         <Button
           size="sm"

@@ -21,6 +21,7 @@ package main
 // mapping helper the subscriber will call.
 
 import local_socket "odin_test:lib/local_socket"
+import agent_runtime "odin_test:lib/agent_runtime"
 import "base:runtime"
 import crypto_hash "core:crypto/hash"
 import "core:encoding/hex"
@@ -267,7 +268,7 @@ bridge_pty_host_ensure_daemon :: proc() -> (string, bool) {
 	cmd := []string{bin, "daemon", "--socket", socket}
 	// env = nil => the daemon inherits the bridge's environment. The per-agent
 	// HEIMDALL_* env is delivered in each Spawn request, not the daemon's env.
-	proc_handle, err := os.process_start(os.Process_Desc{command = cmd})
+	proc_handle, err := bridge_os_start_daemon(cmd)
 	if err != nil {
 		fmt.eprintln("bridge pty-host: failed to start daemon:", bin, err)
 		blog_error(.pty_host_spawn_failed, blog_sym(.stage, .exec))
@@ -314,18 +315,49 @@ bridge_pty_host_ping :: proc(socket: string) -> bool {
 // the resolved provider startup-detection JSON (stored verbatim; HOST-2 parses).
 // Returns ok=false when the provider has no runnable command. Caller owns the
 // returned request's heap slices (free with bridge_pty_host_spawn_request_delete).
-bridge_pty_host_build_spawn :: proc(instance_id, run_dir, provider, model, agent_token: string, env: []string, display_name := "", timeout_seconds: u64 = 0, permission_mode := "") -> (Pty_Host_Spawn_Request, bool) {
+//
+// pp is the resolved provider profile (REQ-PROF-4), nil for the default profile:
+// its binary replaces the discovered path, its args follow the model flag, and its
+// env layer goes before env (so the HEIMDALL_* variables always win).
+bridge_pty_host_build_spawn :: proc(instance_id, run_dir, provider, model, agent_token: string, env: []string, display_name := "", timeout_seconds: u64 = 0, permission_mode := "", pp: ^Provider_Profile = nil) -> (Pty_Host_Spawn_Request, bool) {
 	if strings.trim_space(provider) == "" || strings.trim_space(model) == "" do return {}, false
-	if !bridge_provider_catalog_has_model(provider, model) do return {}, false
+	if pp != nil {
+		if !profile_has_model(pp,provider,model) do return {},false
+	} else if !bridge_provider_catalog_has_model(provider,model) { return {},false }
 	profile, profile_ok := bridge_provider_catalog_profile(provider)
 	if !profile_ok do return {}, false
-	resolved_path, path_ok := bridge_provider_resolve_path(provider)
-	if !path_ok do return {}, false
+	resolved_path: string
+	if pp != nil && pp.config.binary_path != "" {
+		resolved_path = strings.clone(pp.config.binary_path)
+	} else {
+		path_ok: bool
+		resolved_path, path_ok = bridge_provider_resolve_path(provider)
+		if !path_ok do return {}, false
+	}
 	defer delete(resolved_path)
 	profile.command = []string{resolved_path}
-	profile.extension_expected = bridge_provider_launch_extension_expected(profile)
+	full_env := env
+	if pp != nil {
+		profile.extra_args = profile_tokenize_args(pp.config.launch_args)
+		plan := profile_env_plan(pp)
+		layered := make([dynamic]string, context.temp_allocator)
+		for kv in plan.set do append(&layered, strings.concatenate({kv[0], "=", kv[1]}, context.temp_allocator))
+		append(&layered, ..env)
+		full_env = layered[:]
+	} else {
+		profile.extra_args = bridge_pty_host_default_profile_args(provider)
+	}
+	profile.extension_expected = bridge_provider_launch_extension_expected(profile,pp.profile_id if pp != nil else "")
 	bridge_startup_set_expectation(instance_id, agent_token, profile.extension_expected)
-	return bridge_pty_host_build_spawn_for_profile(instance_id, run_dir, profile, model, agent_token, env, display_name, timeout_seconds, permission_mode)
+	return bridge_pty_host_build_spawn_for_profile(instance_id, run_dir, profile, model, agent_token, full_env, display_name, timeout_seconds, permission_mode)
+}
+
+// Args of a launch without a provider profile: for Codex, the overrides that load
+// this bridge's own extension instead of the shared newest release. Claude and
+// the other providers get none.
+bridge_pty_host_default_profile_args :: proc(provider: string) -> []string {
+	if bridge_extension_canonical_provider(provider) != "codex" do return nil
+	return bridge_codex_own_launch_args()
 }
 
 // Assemble the launch from the already resolved, immutable catalog profile.
@@ -626,7 +658,7 @@ bridge_pty_host_deliver_shell_resize :: proc{
 bridge_pty_host_message_notice :: proc(sender: string, sender_display_name: string = "") -> string {
 	s := sender_display_name if strings.trim_space(sender_display_name) != "" else sender
 	if strings.trim_space(s) == "" do s = "user"
-	return strings.concatenate({"New message from ", s, " \u2014 run './.heimdall/bin/ham-ctl chat read' to view."})
+	return strings.concatenate({"New message from ", s, " \u2014 run '" + agent_runtime.CTL_SHIM_INVOCATION + " chat read' to view."})
 }
 
 // bridge_pty_host_task_nudge_notice renders the task-nudge notice text (pure).
@@ -637,9 +669,9 @@ bridge_pty_host_task_nudge_notice :: proc(task_id, target_role: string, task_tit
 	if strings.trim_space(role) == "" do role = "participant"
 	title := strings.trim_space(task_title)
 	if title != "" {
-		return strings.concatenate({"Nudge: you have been nudged on \"", title, "\" (", tid, ") (", role, "). Run './.heimdall/bin/ham-ctl task list' and complete your assignment."})
+		return strings.concatenate({"Nudge: you have been nudged on \"", title, "\" (", tid, ") (", role, "). Run '" + agent_runtime.CTL_SHIM_INVOCATION + " task list' and complete your assignment."})
 	}
-	return strings.concatenate({"Nudge: you have been nudged on ", tid, " (", role, "). Run './.heimdall/bin/ham-ctl task list' and complete your assignment."})
+	return strings.concatenate({"Nudge: you have been nudged on ", tid, " (", role, "). Run '" + agent_runtime.CTL_SHIM_INVOCATION + " task list' and complete your assignment."})
 }
 
 // bridge_shell_run_notice renders the line an agent sees when one of its BACKGROUND
@@ -663,9 +695,9 @@ bridge_shell_run_notice :: proc(session_id, status, exit_code: string) -> string
 	if st == "" do st = "exited"
 	code := strings.trim_space(exit_code)
 	if code != "" {
-		return strings.concatenate({"Shell run ", sid, " ", st, " (exit ", code, "). Run './.heimdall/bin/ham-ctl shell log ", sid, "' to read its output."})
+		return strings.concatenate({"Shell run ", sid, " ", st, " (exit ", code, "). Run '" + agent_runtime.CTL_SHIM_INVOCATION + " shell log ", sid, "' to read its output."})
 	}
-	return strings.concatenate({"Shell run ", sid, " ", st, ". Run './.heimdall/bin/ham-ctl shell log ", sid, "' to read its output."})
+	return strings.concatenate({"Shell run ", sid, " ", st, ". Run '" + agent_runtime.CTL_SHIM_INVOCATION + " shell log ", sid, "' to read its output."})
 }
 
 // bridge_pty_host_deliver_message renders the same notice the wrapper produced for

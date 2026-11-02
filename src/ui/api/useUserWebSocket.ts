@@ -1,4 +1,5 @@
 import { apiAbsoluteUrl } from './apiBase';
+import { refreshMcpWorkerRegistration, setMcpWorkerEnabled } from '../services/mcpWorker';
 import { authenticatedStreamUrl } from './userStreamUrl';
 import { useEffect } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
@@ -164,6 +165,7 @@ export function startUserWsConnection(env: UserWsConnectionEnv): () => void {
       if (!socket || socket.readyState !== 1 /* OPEN */) return;
       try {
         socket.send(JSON.stringify({ type: 'client_heartbeat', at: Date.now() }));
+        void refreshMcpWorkerRegistration();
       } catch (_err) {
         try { socket.close(); } catch { /* ignore */ }
       }
@@ -231,6 +233,7 @@ export function startUserWsConnection(env: UserWsConnectionEnv): () => void {
         return;
       }
       if (payload?.type === 'user_ws_ready') {
+        void refreshMcpWorkerRegistration();
         // Ready, not open, is "subscribed": the hub registers the socket and then sends
         // ready, so every event after it is delivered.
         ready = true;
@@ -251,6 +254,7 @@ export function startUserWsConnection(env: UserWsConnectionEnv): () => void {
     };
 
     socket.onclose = (event) => {
+      void setMcpWorkerEnabled(false).catch(() => {});
       clearHeartbeat();
       clearStableTimer();
       socket = null;
@@ -292,6 +296,7 @@ export function startUserWsConnection(env: UserWsConnectionEnv): () => void {
     clearStableTimer();
     clearHeartbeat();
     if (socket) {
+      void setMcpWorkerEnabled(false).catch(() => {});
       socket.onclose = null;
       socket.onerror = null;
       socket.onmessage = null;

@@ -187,6 +187,7 @@ wrap_open :: proc(w: ^Keyring_Wrap, user_id: string, recipient_ecdh_priv: ^ecdh.
 		defer aes.reset_gcm(&gcm)
 		if !aes.open_gcm(&gcm, plain[:len(ct)], iv[:], transmute([]byte)aad, ct, tag) do return {}, false
 		parsed, p_ok := keyring_parse(plain[:len(ct)], user_id)
+		defer keyring_wipe(&parsed)
 		if !p_ok do return {}, false
 		if parsed.current_epoch != w.current_epoch {
 			keyring_wipe(&parsed)

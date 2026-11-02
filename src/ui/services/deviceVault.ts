@@ -42,6 +42,7 @@ import { openVerifiedWrap } from '../utils/vaultKeyringWrap';
 import { serializeKeyringBytes } from '../utils/vaultKeyring';
 import { trustedRecoveryKeys } from '../utils/vaultDirectoryVerify';
 import { kindPolicy } from '../utils/vaultStatements';
+import { buildConnectorEpochWraps, type ConnectorRecipient, type ConnectorEpochDelivery } from '../utils/mcpEpochDelivery';
 import { deliverKeyringToBridges, type BridgeDeliveryDeps, type BridgeFanoutResult } from '../utils/vaultBridgeDelivery';
 import {
   deviceVaultBusy,
@@ -52,6 +53,7 @@ import {
   type DeviceVaultReset,
   type PendingDeviceSummary,
   bridgeKeyDeliveryReported,
+  mcpKeyDeliveryReported,
 } from '../store/deviceVaultSlice';
 import { keyringCleared, keyringInstalled } from '../store/vaultSlice';
 
@@ -59,6 +61,7 @@ type Dispatch = (action: unknown) => unknown;
 type VaultApi = typeof vaultApi;
 
 export interface DeviceVaultDeps {
+  connectors: { list: () => Promise<ConnectorRecipient[]>; deliver: (body: ConnectorEpochDelivery) => Promise<unknown>; resource: () => string } | null;
   kv: DeviceKeyValueStore;
   api: VaultApi;
   /** Bridge transport for unseal delivery (null: bridges are not re-unsealed). */
@@ -95,6 +98,7 @@ export function configureDeviceVault(next: Partial<DeviceVaultDeps>): void {
 
 function defaultDeps(): DeviceVaultDeps {
   return {
+    connectors: null,
     kv: undefined as unknown as DeviceKeyValueStore, // created lazily (IndexedDB may be absent)
     api: vaultApi,
     bridges: null,
@@ -929,6 +933,7 @@ export async function rotateKeys(): Promise<{ outcome: RotateOutcome; bridges: B
       await refreshDeviceVault('rotated');
       bridges = await unsealApprovedBridges();
       ctx?.dispatch(bridgeKeyDeliveryReported(bridges));
+      await refreshConnectorEpochs();
     },
   });
   return { outcome, bridges };
@@ -954,10 +959,41 @@ export async function revokeDevice(targetId: string): Promise<{ outcome: RevokeO
       await refreshDeviceVault('rotated');
       bridges = await unsealApprovedBridges();
       ctx?.dispatch(bridgeKeyDeliveryReported(bridges));
+      await refreshConnectorEpochs();
     },
   });
   if (outcome.kind === 'already-revoked') await refreshDeviceVault('already-revoked');
   return { outcome, bridges };
+}
+
+/** Delivery follows the signed directory commit. A gap is fail-closed in the
+ * hosted reader; retrying this operation needs no connector reconnect. */
+export async function refreshConnectorEpochs(): Promise<void> {
+  const c = ctx;
+  const transport = d().connectors;
+  if (!transport || !c?.identity) return;
+  try {
+    if (c.staleHead) throw new Error('Fresh directory required');
+    let rows: ConnectorRecipient[];
+    try { rows = await transport.list(); }
+    catch (err) { if (isStatus(err, 404)) return; throw err; }
+    if (!rows.length) { c.dispatch(mcpKeyDeliveryReported('')); return; }
+    const { chain } = await fetchVerifiedChain();
+    if (ctx !== c || c.staleHead) return;
+    await ensureKeyringCurrent(chain);
+    await withKeyringBytes(async (bytes) => {
+      const deliveries = await buildConnectorEpochWraps(c.identity!, chain, rows, bytes, transport.resource());
+      for (const body of deliveries) {
+        if (ctx !== c || !getKeyringSession()) throw new Error('Device session ended');
+        await transport.deliver(body);
+      }
+    }, chain);
+    if (ctx === c) c.dispatch(mcpKeyDeliveryReported(''));
+  } catch {
+    // The rotation may already be committed. Preserve that outcome and surface
+    // a repair action instead of implying the directory operation rolled back.
+    if (ctx === c) c.dispatch(mcpKeyDeliveryReported('Some AI connections need updated decryption keys. Retry delivery from this approved device.'));
+  }
 }
 
 /** Make sure the installed keyring matches `chain` (another device may have rotated). */

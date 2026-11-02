@@ -12,7 +12,7 @@ import project_service "odin_test:hub/service/project"
 import jsonx "odin_test:lib/jsonx"
 
 Reconfigure_Operation_Input :: struct {
-	bridge_id, project_id, provider, model, idempotency_key: string,
+	bridge_id, project_id, provider, model, idempotency_key, provider_profile: string,
 	expected_revision: int,
 	// permission_mode optionally overrides the instance's permission mode
 	// ("yolo" | "ask"); "" keeps the instance's current override. A change that
@@ -35,7 +35,7 @@ reconfiguration_destination_permission_mode :: proc(auth: contracts.Auth_Context
 // reconfiguration_same_destination reports whether an existing operation (same
 // idempotency key) targets exactly the requested destination.
 reconfiguration_same_destination :: proc(existing: domain.Instance_Reconfiguration, input: Reconfigure_Operation_Input, permission_mode: string) -> bool {
-	return existing.destination.bridge_id == input.bridge_id && existing.destination.project_id == input.project_id && existing.destination.provider == input.provider && existing.destination.model == input.model && domain.agent_instance_permission_mode_normalize(existing.destination.permission_mode) == permission_mode
+	return existing.destination.bridge_id == input.bridge_id && existing.destination.project_id == input.project_id && existing.destination.provider == input.provider && domain.profile_effective_id(existing.destination.provider,existing.destination.provider_profile)==domain.profile_effective_id(input.provider,input.provider_profile) && existing.destination.model == input.model && domain.agent_instance_permission_mode_normalize(existing.destination.permission_mode) == permission_mode
 }
 
 instance_assertion_token :: proc(inst: domain.Agent_Instance) -> string {
@@ -64,7 +64,7 @@ reconfiguration_bridge_supported :: proc(bridge: domain.Bridge) -> bool {
 }
 
 configuration_snapshot :: proc(service: ^Agent_Service, inst: domain.Agent_Instance) -> domain.Instance_Configuration {
-	config := domain.Instance_Configuration{bridge_id = inst.bridge_id, project_id = string(inst.project_id), project_path = inst.project_path, provider = inst.provider, model = inst.model, permission_mode = domain.agent_instance_permission_mode_normalize(inst.permission_mode)}
+	config := domain.Instance_Configuration{bridge_id = inst.bridge_id, project_id = string(inst.project_id), project_path = inst.project_path, provider = inst.provider, provider_profile=inst.provider_profile, model = inst.model, permission_mode = domain.agent_instance_permission_mode_normalize(inst.permission_mode)}
 	if bridge, found, _ := iface.bridge_get_bridge(service.bridges, inst.bridge_id); found {
 		config.bridge_label = bridge.label
 		if config.bridge_label == "" do config.bridge_label = bridge.machine_hostname
@@ -85,7 +85,7 @@ reconfiguration_require_idle :: proc(service: ^Agent_Service, instance_id: strin
 	return true, {}
 }
 
-begin_instance_reconfiguration :: proc(service: ^Agent_Service, auth: contracts.Auth_Context, instance_id: string, input: Reconfigure_Operation_Input) -> (domain.Instance_Reconfiguration, bool, domain.Domain_Error) {
+begin_instance_reconfiguration :: proc(service: ^Agent_Service, auth: contracts.Auth_Context, instance_id: string, input: Reconfigure_Operation_Input, guard_ctx:rawptr=nil, guard:proc(ctx:rawptr)->domain.Domain_Error=nil) -> (domain.Instance_Reconfiguration, bool, domain.Domain_Error) {
 	inst, found, err := get_instance(service, auth, instance_id)
 	if !found do return {}, false, err
 	defer domain.agent_instance_destroy(&inst)
@@ -115,7 +115,7 @@ begin_instance_reconfiguration :: proc(service: ^Agent_Service, auth: contracts.
 	if !reconfiguration_bridge_supported(source_bridge) || !reconfiguration_bridge_supported(destination_bridge) do return {}, false, domain.domain_error(.Conflict, "update source and destination bridges before applying configuration changes")
 	next := inst
 	next.bridge_id = input.bridge_id; next.project_id = domain.Project_ID(input.project_id)
-	next.provider = input.provider; next.model = input.model; next.project_path = ""
+	next.provider_profile=domain.profile_effective_id(input.provider,input.provider_profile); next.provider = input.provider; next.model = input.model; next.project_path = ""
 	next.permission_mode = permission_mode
 	_, provider_ok, provider_err := validate_pinned_provider_model(service, auth, next, input.provider, input.model)
 	if !provider_ok do return {}, false, provider_err
@@ -156,6 +156,9 @@ begin_instance_reconfiguration :: proc(service: ^Agent_Service, auth: contracts.
 	lock_tok := dbt.timed_lock(&service.reconfiguration_mutex, .Reconfig)
 	defer dbt.timed_unlock(&service.reconfiguration_mutex, .Reconfig, lock_tok)
 	defer project_service.bridge_runtime_instance_cancel_reservation(service.bridge_runtime_registry, next.bridge_id, generation, next.agent_instance_id)
+	// Delegated callers may revoke authorization while remote path preflight is
+	// waiting. Recheck at the native acceptance boundary before persisting/sending.
+	if guard!=nil {if err:=guard(guard_ctx);err.code!=.None do return {},false,err}
 	if existing, exists, _ := iface.instance_reconfiguration_get(service.agents, string(inst.owner_user_id), instance_id, input.idempotency_key); exists {
 		if !reconfiguration_same_destination(existing, input, permission_mode) {
 			domain.instance_reconfiguration_destroy(&existing)
@@ -243,7 +246,7 @@ reconfiguration_launch_destination :: proc(service: ^Agent_Service, op: domain.I
 	if !found do return
 	defer domain.agent_instance_destroy(&inst)
 	next := inst; next.bridge_id = op.destination.bridge_id; next.project_id = domain.Project_ID(op.destination.project_id); next.project_path = op.destination.project_path
-	next.provider = op.destination.provider; next.model = op.destination.model
+	next.provider_profile=domain.profile_effective_id(op.destination.provider,op.destination.provider_profile);next.provider = op.destination.provider; next.model = op.destination.model
 	// The commit trigger applies the destination override; launch with it now.
 	next.permission_mode = domain.agent_instance_permission_mode_normalize(op.destination.permission_mode)
 	generation, admitted, _ := reserve_runtime_launch(service, next)
@@ -401,9 +404,10 @@ reconfiguration_json :: proc(op: domain.Instance_Reconfiguration) -> string {
 	return string(data)
 }
 
-retry_instance_reconfiguration :: proc(service: ^Agent_Service, auth: contracts.Auth_Context, instance_id, key: string, expected_revision: int) -> (domain.Instance_Reconfiguration, bool, domain.Domain_Error) {
+retry_instance_reconfiguration :: proc(service: ^Agent_Service, auth: contracts.Auth_Context, instance_id, key: string, expected_revision: int, guard_ctx:rawptr=nil, guard:proc(ctx:rawptr)->domain.Domain_Error=nil) -> (domain.Instance_Reconfiguration, bool, domain.Domain_Error) {
 	lock_tok := dbt.timed_lock(&service.reconfiguration_mutex, .Reconfig)
 	defer dbt.timed_unlock(&service.reconfiguration_mutex, .Reconfig, lock_tok)
+	if guard!=nil {if err:=guard(guard_ctx);err.code!=.None do return {},false,err}
 	inst, found, err := get_instance(service, auth, instance_id)
 	if !found do return {}, false, err
 	defer domain.agent_instance_destroy(&inst)
@@ -413,7 +417,7 @@ retry_instance_reconfiguration :: proc(service: ^Agent_Service, auth: contracts.
 	if op.failure_code == "force_stopping" do return {}, false, domain.domain_error(.Conflict, "Force stop must be confirmed before retrying")
 	if op.phase != .Recovery_Required || op.revision != expected_revision do return {}, false, domain.domain_error(.Conflict, "operation changed; refresh before retrying")
 	if valid, validity_err := reconfiguration_validate_live_destination(service, op); !valid do return {}, false, validity_err
-	destination := inst; destination.bridge_id = op.destination.bridge_id; destination.provider = op.destination.provider; destination.model = op.destination.model
+	destination := inst; destination.bridge_id = op.destination.bridge_id; destination.provider_profile=domain.profile_effective_id(op.destination.provider,op.destination.provider_profile); destination.provider = op.destination.provider; destination.model = op.destination.model
 	_, valid, validation_err := validate_pinned_provider_model(service, auth, destination, destination.provider, destination.model)
 	if !valid do return {}, false, validation_err
 	if !op.source_stopped {
@@ -474,7 +478,7 @@ reconfiguration_validate_live_destination :: proc(service: ^Agent_Service, op: d
 		if !path_found do return false, path_err
 		if path != op.destination.project_path do return false, domain.domain_error(.Conflict, "destination project path changed after preflight; recovery needs the original validated path")
 	}
-	_, valid, validation_err := validate_provider_model_intersection(service, op.destination.bridge_id, op.destination.provider, op.destination.model)
+	_, valid, validation_err := validate_provider_model_intersection(service, op.destination.bridge_id, op.destination.provider, op.destination.model,op.destination.provider_profile)
 	return valid, validation_err
 }
 

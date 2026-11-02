@@ -12,10 +12,11 @@
 #   --oidc-port N      mock OIDC provider port (default 18090; DEV ONLY, see
 #                      tools/mock-oidc/README.md)
 #   --public-origin URL  origin the browser uses when the UI is reached through a
-#                      reverse proxy (e.g. https://heimdall-preview.example), as
-#                      scheme://host[:port] with no path. The hub trusts it for
-#                      CSRF instead of the local UI origin. Recorded and reused on
-#                      restart; pass --public-origin local to drop it.
+#                      reverse proxy (e.g. https://hub-dev.example), as
+#                      scheme://host[:port] with no path. The dev proxy attaches the
+#                      brokered session for it as for the local UI. Not needed for a
+#                      Heimdall preview (dev-preview.sh, ui-preview.sh). Recorded and
+#                      reused on restart; pass --public-origin local to drop it.
 #   --user NAME        dev user the browser signs in as (default: $USER): the dev
 #                      proxy passes it to the mock OIDC provider as login_hint
 #   --build MODE       nix | odin | none       (default: nix; none = use --bin-dir as is)
@@ -30,9 +31,11 @@
 # Accounts: the dev proxy signs in as --user, which stays on the free plan.
 # Seeding also creates the dev proxy user "paid" on the hobbyist plan (set in
 # hub.db by local-runtime/plans.mjs), with its own sample data and seed approver.
-# Switch accounts in the browser with /_dev/login?user=paid (or the /_dev/ page),
-# then sign out and sign in again: users authenticate only with OIDC, here against
-# the bundled mock provider (tools/mock-oidc), which signs in as the selected user.
+# Switch accounts in the browser with /_dev/login?user=paid (or the /_dev/ page).
+# Users authenticate only with OIDC, here against the bundled mock provider
+# (tools/mock-oidc). The dev proxy signs in on the browser's behalf as the selected
+# user and keeps the hub session itself (docs/auth-oidc.md, "Local development"),
+# so sign-in also works through a Heimdall preview, which strips hub cookies.
 #
 # Seeding also creates the hub user's vault with a SEED APPROVER device whose key
 # stays in approver/device.json (0600) of this instance. It lets
@@ -51,7 +54,7 @@ LR_TAG=local-hub
 # shellcheck source=local-runtime/lib.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/local-runtime/lib.sh"
 
-usage() { sed -n '2,43p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,46p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 CMD="${1:-help}"; [ $# -gt 0 ] && shift
 NAME=default HUB_PORT="" PROXY_PORT="" UI_PORT="" OIDC_PORT="" PUBLIC_ORIGIN="" DEV_USER="${USER:-local}"
@@ -154,10 +157,11 @@ start() {
     local) PUBLIC_ORIGIN="" ;;
     "") PUBLIC_ORIGIN="$(lr_env_get "$ENV_FILE" PUBLIC_ORIGIN)" ;;
   esac
-  # The hub enforces exactly one browser origin for CSRF (csrf_decide). Behind a
-  # proxy that is the public one; the local UI then still works for REST (browsers
-  # send Sec-Fetch-Site: same-origin) but not for cookie WebSockets.
-  local csrf_origin="${PUBLIC_ORIGIN:-$ui_origin}"
+  # The hub enforces exactly one browser origin for CSRF (csrf_decide): the local UI.
+  # Browsers never talk to the hub with their own session: the dev proxy brokers the
+  # sign-in and sends this Origin itself, for the local UI and for any origin it
+  # trusts (loopback, --public-origin, and the preview relays' rewritten origin).
+  local csrf_origin="$ui_origin"
   # The seed/approver helpers sign in like browsers and must send this Origin.
   export HEIMDALL_LOCAL_UI_ORIGIN="$csrf_origin"
   # Bridges pair against the hub API URL and browsers against their page origin;
@@ -205,7 +209,8 @@ start() {
 
   lr_log "starting dev proxy on 127.0.0.1:$PROXY_PORT as user '$DEV_USER'"
   lr_spawn "$DIR" proxy "$DIR/logs/dev-proxy.log" "${iso[@]}" "$proxy_bin" \
-    --listen "127.0.0.1:$PROXY_PORT" --hub-url "http://127.0.0.1:$HUB_PORT" --default-user "$DEV_USER"
+    --listen "127.0.0.1:$PROXY_PORT" --hub-url "http://127.0.0.1:$HUB_PORT" --default-user "$DEV_USER" \
+    --hub-ui-origin "$csrf_origin" ${PUBLIC_ORIGIN:+--trusted-origin "$PUBLIC_ORIGIN"}
   if ! lr_wait_http "http://127.0.0.1:$PROXY_PORT/api/v1/health" 15; then
     tail -20 "$DIR/logs/dev-proxy.log" >&2 || true
     stop_all; lr_die "dev proxy did not come up"

@@ -547,7 +547,7 @@ fs_run_dir_prevalidated_list_and_blocks_escape :: proc(t: ^testing.T) {
 	run_dir := fs_test_make_root(t, "rundir_list")
 	defer fs_test_cleanup(run_dir)
 	fs_test_seed_file(t, run_dir, "AGENTS.md", "hello")
-	fs_test_seed_file(t, run_dir, ".heimdall/bin/ham-ctl", "wrapper")
+	fs_test_seed_file(t, run_dir, "bin/ham-ctl", "wrapper")
 
 	// Prevalidated root lists the run dir even though it is passed directly (the
 	// call path that a run dir OUTSIDE bridge_fs_root would take). Hidden shown.

@@ -2,6 +2,7 @@
 package main
 
 import "core:fmt"
+import agent_runtime "odin_test:lib/agent_runtime"
 import "core:os"
 import "core:strings"
 import "core:sync"
@@ -72,9 +73,10 @@ bridge_prespawn_clean_slate_removes_stale_files :: proc(t: ^testing.T) {
 	bridge_prespawn_rmdir_all(dir)
 
 	// Simulate a prior run's placement: a stale bootstrap file, a nested skill,
-	// and the ham-ctl shim under .heimdall/bin.
+	// the ham-ctl shim under bin/, and a shim left at the pre-bin/ location.
 	bridge_prespawn_test_write(t, dir, "CLAUDE.md", "stale")
-	bridge_prespawn_test_write(t, dir, ".heimdall/bin/ham-ctl", "old shim")
+	bridge_prespawn_test_write(t, dir, "bin/ham-ctl", "old shim")
+	bridge_prespawn_test_write(t, dir, ".heimdall/bin/ham-ctl", "legacy shim")
 	bridge_prespawn_test_write(t, dir, "skills/old-skill/SKILL.md", "old skill")
 
 	// A simulated relaunch clean-slates the dir.
@@ -82,7 +84,8 @@ bridge_prespawn_clean_slate_removes_stale_files :: proc(t: ^testing.T) {
 
 	// Nothing stale survives: the dir exists but is empty.
 	bridge_prespawn_test_absent(t, dir, "CLAUDE.md", "stale CLAUDE.md must be gone after relaunch")
-	bridge_prespawn_test_absent(t, dir, ".heimdall/bin/ham-ctl", "stale ham-ctl shim must be gone after relaunch")
+	bridge_prespawn_test_absent(t, dir, "bin/ham-ctl", "stale ham-ctl shim must be gone after relaunch")
+	bridge_prespawn_test_absent(t, dir, ".heimdall/bin/ham-ctl", "legacy-location ham-ctl shim must be gone after relaunch")
 	bridge_prespawn_test_absent(t, dir, "skills/old-skill/SKILL.md", "stale skill must be gone after relaunch")
 
 	fd, oerr := os.open(dir)
@@ -103,18 +106,18 @@ bridge_prespawn_env_has_all_heimdall_vars :: proc(t: ^testing.T) {
 	testing.expect(t, bridge_prespawn_test_env_has(env, "HEIMDALL_BRIDGE_ENDPOINT=unix:/tmp/bridge.sock"), "endpoint entry")
 	testing.expect(t, bridge_prespawn_test_env_has(env, "HEIMDALL_AGENT_TOKEN=hlat_tok_1"), "token entry")
 	testing.expect(t, bridge_prespawn_test_env_has(env, "HEIMDALL_AGENT_INSTANCE_ID=inst_abc"), "instance entry")
-	testing.expect(t, bridge_prespawn_test_env_has(env, "HEIMDALL_CTL_BIN=/tmp/run/inst_abc/.heimdall/bin/ham-ctl"), "ctl bin entry")
+	testing.expect(t, bridge_prespawn_test_env_has(env, "HEIMDALL_CTL_BIN=/tmp/run/inst_abc/bin/ham-ctl"), "ctl bin entry")
 }
 
 @(test)
 bridge_prespawn_ctl_bin_path_is_run_dir_relative :: proc(t: ^testing.T) {
 	p1 := bridge_prespawn_ctl_bin_path("/tmp/run/inst_abc")
 	defer delete(p1)
-	testing.expect_value(t, p1, "/tmp/run/inst_abc/.heimdall/bin/ham-ctl")
+	testing.expect_value(t, p1, "/tmp/run/inst_abc/bin/ham-ctl")
 	// Trailing slash on run_dir must not double up.
 	p2 := bridge_prespawn_ctl_bin_path("/tmp/run/inst_abc/")
 	defer delete(p2)
-	testing.expect_value(t, p2, "/tmp/run/inst_abc/.heimdall/bin/ham-ctl")
+	testing.expect_value(t, p2, "/tmp/run/inst_abc/bin/ham-ctl")
 }
 
 @(test)
@@ -137,7 +140,7 @@ bridge_prespawn_env_omits_vault_key :: proc(t: ^testing.T) {
 	testing.expect(t, bridge_prespawn_test_env_has(env, "HEIMDALL_BRIDGE_ENDPOINT=unix:/tmp/bridge.sock"), "endpoint entry")
 	testing.expect(t, bridge_prespawn_test_env_has(env, "HEIMDALL_AGENT_TOKEN=hlat_tok_1"), "token entry")
 	testing.expect(t, bridge_prespawn_test_env_has(env, "HEIMDALL_AGENT_INSTANCE_ID=inst_abc"), "instance entry")
-	testing.expect(t, bridge_prespawn_test_env_has(env, "HEIMDALL_CTL_BIN=/tmp/run/inst_abc/.heimdall/bin/ham-ctl"), "ctl bin entry")
+	testing.expect(t, bridge_prespawn_test_env_has(env, "HEIMDALL_CTL_BIN=/tmp/run/inst_abc/bin/ham-ctl"), "ctl bin entry")
 
 	// No HEIMDALL_VAULT_KEY entry under any value: assert on the NAME, so the test
 	// still catches a re-added bake that uses a different key.
@@ -257,7 +260,7 @@ bridge_bootstrap_written_wrapper_omits_vault_key :: proc(t: ^testing.T) {
 	testing.expect(t, ok, "wrapper must be written")
 	if !ok do return
 
-	wrapper_path := fmt.aprintf("%s/.heimdall/bin/ham-ctl", run_dir)
+	wrapper_path := fmt.aprintf("%s/bin/ham-ctl", run_dir)
 	defer delete(wrapper_path)
 	data, err := os.read_entire_file(wrapper_path, context.allocator)
 	testing.expect(t, err == nil, "wrapper must be readable")
@@ -273,6 +276,12 @@ bridge_bootstrap_written_wrapper_omits_vault_key :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(script, "HEIMDALL_BRIDGE_ENDPOINT="), "wrapper keeps the endpoint")
 	testing.expect(t, strings.contains(script, "HEIMDALL_AGENT_TOKEN="), "wrapper keeps the agent token")
 	testing.expect(t, strings.contains(script, "HEIMDALL_AGENT_INSTANCE_ID="), "wrapper keeps the instance id")
+
+	// The starter prompt must name exactly the shim the bridge just wrote.
+	prompt := agent_runtime.render_starter_prompt_for_agent(agent_runtime.Agent_Profile{starter_prompt = "Run {ctl_bin} start-success."}, "", "hlat_tok_1", "inst_abc")
+	defer delete(prompt)
+	testing.expect(t, strings.contains(prompt, "Run ./bin/ham-ctl agent start-success."), "starter prompt points at the written shim")
+	testing.expect(t, strings.contains(prompt, "use `./bin/ham-ctl` for CLI actions"), "runtime footer points at the written shim")
 }
 
 // ---- REQ-37: wake_agent / scheduler launch descriptor round-trip ----

@@ -243,6 +243,13 @@ export interface BridgeApprovalBody {
   /** Reuse this existing bridge identity. Mutually exclusive with `new_bridge_label`. */
   target_bridge_id?: string;
   new_bridge_label?: string;
+  /**
+   * New bridge only: retire this bridge of yours in the same hub transaction that
+   * registers the new one (a full plan's "register new and sunset one"). If the
+   * approval is refused or rolled back, it keeps working. Never sent with
+   * `target_bridge_id`.
+   */
+  sunset_bridge_id?: string;
 }
 
 /** Bridge approvals go through the device-auth flow with the signed vault approval attached. */

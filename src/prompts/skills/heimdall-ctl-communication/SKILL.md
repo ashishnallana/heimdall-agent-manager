@@ -5,35 +5,35 @@ description: How an agent communicates through Heimdall with ham-ctl — signal 
 
 # Heimdall CLI communication
 
-Use the managed Heimdall CLI wrapper from your agent run directory for all Heimdall communication: `./.heimdall/bin/ham-ctl`.
+Use the managed Heimdall CLI wrapper from your agent run directory for all Heimdall communication: `./bin/ham-ctl`.
 
 Messages from the user arrive through Heimdall, NOT your terminal. Text printed to stdout/stderr is NOT delivered to the user. You MUST use `ham-ctl` to read incoming messages and to send responses.
 
 ## 1. Startup signaling
 - Once your agent instance is initialized, dependencies are confirmed, and you are fully ready to work, signal startup readiness:
-  `./.heimdall/bin/ham-ctl start-success`
+  `./bin/ham-ctl start-success`
 
 ## 2. Reading messages & inbox
 - Read unread inbound messages:
-  `./.heimdall/bin/ham-ctl chat read`
+  `./bin/ham-ctl chat read`
 - Read full history or transcript:
-  `./.heimdall/bin/ham-ctl chat read --transcript [--limit N] [--since <timestamp>]`
+  `./bin/ham-ctl chat read --transcript [--limit N] [--since <timestamp>]`
 - Include previously read messages:
-  `./.heimdall/bin/ham-ctl chat read --include-read [--limit N]`
+  `./bin/ham-ctl chat read --include-read [--limit N]`
 
 ## 3. Sending messages
 - **To the user**:
-  `./.heimdall/bin/ham-ctl chat send --to user --body "<your message>"`
+  `./bin/ham-ctl chat send --to user --body "<your message>"`
   - ALWAYS communicate status, answers, and completion to the user via this command.
   - Keep replies concise, concrete, and actionable: state what you did/found, exact results (commands run, files/paths, commit hashes), blockers, and next steps. Avoid dumping large raw logs inline.
 - **To another agent instance (agent-to-agent)**:
-  `./.heimdall/bin/ham-ctl chat send --to <agent-instance-id> --body "<message>"`
+  `./bin/ham-ctl chat send --to <agent-instance-id> --body "<message>"`
   - Use exact instance IDs (e.g. `inst_...`), not display names or slugs.
 
 ### Asking questions
 - For a set of questions, send one grouped message:
   ```bash
-  ./.heimdall/bin/ham-ctl chat send --to user --body "Choose the release settings." --questions-file questions.json
+  ./bin/ham-ctl chat send --to user --body "Choose the release settings." --questions-file questions.json
   ```
   The file is a UTF-8 JSON object with `version: 1` and a `questions` array. Each question has `id`, `text`, `options` (objects with `id` and `label`), and optional `selection_mode` (`single` by default, or `multiple`). See `ham-ctl-reference` for a complete example, validation limits, and the delivered `multi_question_answer` contract.
 - Each question accepts selections or a typed custom answer instead. Selecting an option does not send a message; the user answers every question and explicitly submits the group.

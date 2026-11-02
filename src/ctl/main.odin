@@ -99,7 +99,7 @@ main :: proc() {
 	}
 
 	// Agent API v2: when running inside a Bridge-launched agent (local endpoint +
-	// token exported by the managed .heimdall/bin/ham-ctl), the agent-facing
+	// token exported by the managed run-dir bin/ham-ctl shim), the agent-facing
 	// groups dispatch through agent mode WITHOUT the `agent` prefix. This takes
 	// priority over the legacy user-mode task/task-chain commands.
 	agent_ctx := agent_mode_endpoint(os.args) != "" && agent_mode_token(os.args) != ""

@@ -33,7 +33,9 @@ import domain "odin_test:hub/domain"
 // revoked all return 401 `invalid_grant`. The bridge's correct response to all four
 // is identical — stop, wipe both tokens, require re-enrollment, do not loop — so
 // distinguishing them would add an enumeration oracle and no capability. The server
-// log distinguishes them.
+// log distinguishes them. A pending sunset is a recoverable suspension: it returns
+// a retriable 500 until enrollment commits or rolls back, so installed bridges keep
+// their on-disk credentials.
 //
 // A SUCCESSFUL RESPONSE CARRIES BOTH NEW PLAINTEXTS AND NO TIMESTAMPS. expires_in
 // and refresh_expires_in are DURATIONS: a bridge with a wrong clock must still

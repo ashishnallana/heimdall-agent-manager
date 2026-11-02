@@ -11,7 +11,7 @@ provider_extension_command_create_sqlite :: proc(
 	impl := (^Provider_Repo_SQLite)(ctx)
 	if !provider_repo_ready(impl) do return false, domain.domain_error(.Internal_Error, "sqlite repository is not open")
 	stmt: sqlite3_stmt
-	query := "INSERT INTO provider_extension_commands(command_id,bridge_id,kind,provider,parent_id,state,message,target_version,target_commit,source_version,source_commit,update_extensions,progress) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING;"
+	query := "INSERT INTO provider_extension_commands(command_id,bridge_id,kind,provider,parent_id,state,message,target_version,target_commit,source_version,source_commit,update_extensions,progress,profile_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING;"
 	if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return false, domain.domain_error(.Internal_Error, "failed to prepare extension command")
 	defer sqlite3_finalize(stmt)
 	bind_text(
@@ -34,7 +34,7 @@ provider_extension_command_create_sqlite :: proc(
 		stmt,
 		12,
 		1 if value.update_extensions else 0,
-	); sqlite3_bind_int(stmt, 13, i32(value.progress))
+	); sqlite3_bind_int(stmt, 13, i32(value.progress)); bind_text(stmt,14,domain.profile_effective_id(value.provider,value.profile_id) if value.kind=="install" || value.kind=="uninstall" else value.profile_id)
 	rc, changed := step_changes(impl.conn.db, stmt)
 	if rc != SQLITE_DONE do return false, domain.domain_error(.Internal_Error, "failed to create extension command")
 	return changed > 0, {}
@@ -68,7 +68,7 @@ provider_extension_command_list_sqlite :: proc(
 	impl := (^Provider_Repo_SQLite)(ctx)
 	if !provider_repo_ready(impl) do return nil, domain.domain_error(.Internal_Error, "sqlite repository is not open")
 	stmt: sqlite3_stmt
-	query := "SELECT command_id,bridge_id,kind,provider,parent_id,state,message,target_version,target_commit,source_version,source_commit,update_extensions,progress FROM provider_extension_commands WHERE bridge_id=? ORDER BY rowid;"
+	query := "SELECT command_id,bridge_id,kind,provider,parent_id,state,message,target_version,target_commit,source_version,source_commit,update_extensions,progress,profile_id FROM provider_extension_commands WHERE bridge_id=? ORDER BY rowid;"
 	if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return nil, domain.domain_error(.Internal_Error, "failed to prepare extension command list")
 	defer sqlite3_finalize(stmt)
 	bind_text(stmt, 1, bridge_id)
@@ -96,6 +96,7 @@ provider_extension_command_list_sqlite :: proc(
 				source_commit = column_text(stmt, 10),
 				update_extensions = column_text_unowned(stmt, 11) == "1",
 				progress = provider_rank_from_stmt(stmt, 12),
+				profile_id = column_text(stmt,13),
 			},
 		)
 	}

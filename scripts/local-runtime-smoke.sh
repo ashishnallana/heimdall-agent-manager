@@ -48,7 +48,7 @@ ok "bash -n"
 "$HUB" help | grep -q 'start|stop|status|approve-device|help' || fail "hub help"
 "$BRIDGE" help | grep -q -- '--auto-enroll' || fail "bridge help"
 ok "help output"
-node --test "$ROOT/scripts/local-runtime/helpers.test.mjs" > "$TMP/node-test.log" 2>&1 || { cat "$TMP/node-test.log"; fail "node helper tests"; }
+node --test "$ROOT/scripts/local-runtime/helpers.test.mjs" "$ROOT/scripts/local-runtime/profile-state.test.mjs" > "$TMP/node-test.log" 2>&1 || { cat "$TMP/node-test.log"; fail "node helper tests"; }
 ok "node helper tests ($(grep -c '^✔' "$TMP/node-test.log") passed)"
 
 # --- lib.sh: ownership and ports -----------------------------------------------
@@ -131,14 +131,15 @@ grep -q 'approver init: created' "$TMP/hub1.log" || { cat "$TMP/hub1.log"; fail 
 ok "seed approver rooted the hub vault (key 0600 in the instance dir)"
 curl -s -m 5 "$api/api/v1/agents?limit=200" | grep -q '"active_instance_count":[1-9]' && fail "a seeded agent was launched"
 ok "no seeded agent was launched"
-# A state-changing request through the UI as the preview proxy forwards it: the
-# public Origin and no Sec-Fetch-Site. It must pass CSRF; a foreign origin must not.
+# A state-changing request through the UI as a reverse proxy forwards it: the
+# public Origin, no Sec-Fetch-Site, no cookie. The dev proxy trusts --public-origin,
+# so it signs in and sends the hub its UI origin; a foreign origin gets neither.
 csrf() { curl -s -m 5 -X POST -H "Origin: $1" -H 'Content-Type: application/json' -d '{}' "http://127.0.0.1:$((PB + 3))/api/v1/device/pair-salts"; }
 out="$(csrf "$PUB")"; grep -q csrf_rejected <<<"$out" && fail "public origin rejected: $out"
 grep -q candidates <<<"$out" || fail "public-origin request did not reach the hub: $out"
 grep -q csrf_rejected <<<"$(csrf https://evil.test)" || fail "foreign origin accepted"
 grep -q "public  : $PUB" <<<"$("$HUB" status --name smoke)" || fail "status does not show the public origin"
-ok "hub trusts --public-origin (preview) for CSRF and still refuses foreign origins"
+ok "dev proxy trusts --public-origin and the hub still refuses foreign origins"
 "$HUB" stop --name smoke >/dev/null
 timeout 300 "$HUB" start --name smoke "${src[@]}" > "$TMP/hub2.log" 2>&1 || { cat "$TMP/hub2.log"; fail "hub restart"; }
 grep -q 'seed: 0 created' "$TMP/hub2.log" || fail "restart re-seeded"
@@ -153,9 +154,29 @@ BD="$HEIMDALL_LOCAL_STATE_ROOT/bridges/smoke"
 grep -q 'bridge hub runtime ready' "$BD/logs/bridge.log" || fail "bridge not connected"
 grep -q 'approver bridge: approved and unsealed' "$TMP/bridge.log" || fail "seed approver did not approve the bridge"
 grep -q 'bridge enroll SUCCESS' "$BD/logs/enroll.log" || fail "ham-bridge enroll did not report SUCCESS"
-grep -q 'skipped installed-service call: systemctl --user restart heimdall-bridge' "$BD/logs/enroll-shims.log" || fail "installed service restart was not intercepted"
+# An isolated provider home (the default) hides the installed service unit from
+# enroll, so it restarts nothing; a shared-home bridge tries, and the shim catches it.
+if [ "$(grep '^ISOLATED_HOME=' "$BD/instance.env" | cut -d= -f2)" = 1 ]; then
+  grep -q 'no registered bridge service was found' "$BD/logs/enroll.log" || fail "isolated enroll looked for the installed service"
+  [ ! -s "$BD/logs/enroll-shims.log" ] || fail "isolated enroll called the service manager: $(cat "$BD/logs/enroll-shims.log")"
+  [ -f "$BD/home/.heimdall-home-manifest.json" ] || fail "isolated provider home was not seeded"
+  [ -f "$BD/data/extensions/claude-code/.claude-plugin/plugin.json" ] || fail "checkout extensions not synced"
+  ok "bridge runs with an isolated, seeded provider home and checkout extension snapshot"
+else
+  grep -q 'skipped installed-service call: systemctl --user restart heimdall-bridge' "$BD/logs/enroll-shims.log" || fail "installed service restart was not intercepted"
+fi
 ok "bridge enrolled via pairing code + seed approver, connected, installed service untouched"
-"$BRIDGE" stop --name smoke >/dev/null; "$HUB" stop --name smoke >/dev/null
+"$BRIDGE" stop --name smoke >/dev/null
+if [ "$(grep '^ISOLATED_HOME=' "$BD/instance.env" | cut -d= -f2)" = 1 ]; then
+  mkdir -p "$BD/data/bridge/profile-secrets"
+  printf '{"version":2,"profiles":[]}\n' > "$BD/data/bridge/provider_profiles.json"
+  printf 'smoke-profile-secret\n' > "$BD/data/bridge/profile-secrets/smoke.bin"
+  "$BRIDGE" stop --name smoke --purge-home >/dev/null || fail "isolated purge"
+  [ ! -e "$BD/home" ] && [ ! -e "$BD/data/bridge/provider_profiles.json" ] && [ ! -e "$BD/data/bridge/profile-secrets" ] || fail "purge left profile state"
+  [ ! -e "$BD/credentials/bridge-token" ] || fail "purge left unusable enrollment credentials"
+  ok "purge removed isolated vault scope, profiles, secrets, home and enrollment credentials"
+fi
+"$HUB" stop --name smoke >/dev/null
 for p in 1 2 3 4 5; do (exec 3<>"/dev/tcp/127.0.0.1/$((PB + p))") 2>/dev/null && fail "port $((PB + p)) still bound after stop"; done
 ok "stop released every port"
 echo "PASS ($PASS checks including real fresh-stack smoke)"

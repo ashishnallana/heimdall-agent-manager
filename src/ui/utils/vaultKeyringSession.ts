@@ -25,6 +25,11 @@ interface SessionState {
 
 let session: SessionState | null = null;
 let generation = 0;
+const sessionListeners = new Set<() => void>();
+export function subscribeKeyringSession(listener: () => void): () => void {
+  sessionListeners.add(listener);
+  return () => { sessionListeners.delete(listener); };
+}
 
 /** Open `wrap` for `identity` against `chain`. Returned entry keys must be zeroed by the caller. */
 export async function openDeviceWrap(identity: DeviceIdentity, wrap: unknown, chain: VerifiedChain): Promise<ParsedKeyringBytes> {
@@ -53,6 +58,7 @@ export async function installKeyringFromWrap(identity: DeviceIdentity, wrap: unk
     const searchKey = await deriveTaskChainSearchKey(searchRaw, parsed.currentEpoch); // zeroes its copy
     generation += 1;
     session = { identity, wrap: wrap as SignedKeyringWrap, chain, keyring };
+    for (const listener of sessionListeners) listener();
     setActiveVaultKey(keyring); // clears the previous search key
     setActiveTaskChainSearchKey(searchKey);
     return keyring;
@@ -67,6 +73,7 @@ export async function installKeyringFromWrap(identity: DeviceIdentity, wrap: unk
 export function clearKeyringSession(): void {
   generation += 1;
   session = null;
+  for (const listener of sessionListeners) listener();
   setActiveVaultKey(null);
 }
 

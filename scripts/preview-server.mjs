@@ -21,25 +21,36 @@
 // server answers files from `dist/` and forwards `/api/v1` upstream.
 //
 // AUTH IS NOT WEAKENED. This process injects no identity. Users authenticate only
-// with OIDC: requests carry the hub's own session cookie (from the sign-in flow,
-// locally against tools/mock-oidc), forwarded unchanged through `ham-dev-proxy`,
-// exactly as in `npm run dev`. Legacy `X-authentik-*` headers mean nothing to the
-// hub any more; they are still stripped here so nothing pretends otherwise.
+// with OIDC: `ham-dev-proxy` signs in on the dev user's behalf (locally against
+// tools/mock-oidc) and attaches the hub session after this hop, exactly as in
+// `npm run dev`; the preview relay strips hub cookies, so the browser never holds
+// one. The one thing changed here is the Origin: the preview origin is forwarded
+// as this server's loopback origin so the proxy trusts it (scripts/lib/preview-origin.mjs);
+// any other Origin passes unchanged. Legacy `X-authentik-*` headers mean nothing to
+// the hub any more; they are still stripped here so nothing pretends otherwise.
 //
 // Usage:
 //   HEIMDALL_PREVIEW_PORT=45180 \
 //   HEIMDALL_PREVIEW_UPSTREAM=http://127.0.0.1:8110 \
+//   [HEIMDALL_PREVIEW_URL=<preview_url> | HEIMDALL_PREVIEW_URL_FILE=<path>] [HAM_CTL=ham-ctl] \
 //   node scripts/preview-server.mjs [--dir dist]
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createPreviewOriginGate } from './lib/preview-origin.mjs';
 
 const ROOT = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
 const PORT = Number(process.env.HEIMDALL_PREVIEW_PORT || 45180);
 const UPSTREAM = new URL(process.env.HEIMDALL_PREVIEW_UPSTREAM || 'http://127.0.0.1:8110');
 const dirArg = process.argv.indexOf('--dir');
 const DIST = path.resolve(ROOT, dirArg > -1 ? process.argv[dirArg + 1] : 'dist');
+const originGate = createPreviewOriginGate({
+  port: PORT,
+  previewUrl: process.env.HEIMDALL_PREVIEW_URL || process.env.HEIMDALL_PREVIEW_ORIGIN || '',
+  previewUrlFile: process.env.HEIMDALL_PREVIEW_URL_FILE || '',
+  hamCtl: [process.env.HAM_CTL, 'ham-ctl'],
+});
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -92,6 +103,7 @@ function proxyApi(req, res) {
     headers[key] = value;
   }
   headers.host = UPSTREAM.host;
+  originGate.rewrite(headers);
 
   const upstreamReq = http.request(
     {
@@ -224,6 +236,7 @@ server.on('upgrade', (req, clientSocket, head) => {
   for (const key of Object.keys(headers)) {
     if (key.toLowerCase().startsWith('x-authentik')) delete headers[key];
   }
+  originGate.rewrite(headers);
   const upstreamReq = http.request({
     protocol: UPSTREAM.protocol,
     hostname: UPSTREAM.hostname,

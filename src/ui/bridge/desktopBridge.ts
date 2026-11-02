@@ -47,6 +47,8 @@ export interface DesktopBridgeOperationOptions {
   bridgeId?: string;
   purge?: boolean;
   replaceOtherAccount?: boolean;
+  /** `setup --separate-account`: install into a profile no Ninjy account has enrolled yet. */
+  separateAccount?: boolean;
   /** The renderer opens /device/add itself for the pairing code (no external browser). */
   inAppApproval?: boolean;
 }
@@ -90,6 +92,7 @@ const BRIDGE_MANAGER_METHODS = ['getConfig', 'setHubUrl', 'getStatus', 'list', '
 export interface DesktopCapabilities {
   /** Running inside the Heimdall desktop app (the preload API is present). */
   desktop: boolean;
+  desktopUpdates: DesktopUpdatesApi | null;
   bridgeManager: DesktopBridgeManagerApi | null;
   /**
    * The desktop app's preload exposes an older bridgeManager (<= v0.5.21:
@@ -112,6 +115,8 @@ export function desktopCapabilities(): DesktopCapabilities {
   const current = Boolean(manager) && BRIDGE_MANAGER_METHODS.every((name) => typeof manager[name] === 'function');
   return {
     desktop: Boolean(api),
+    desktopUpdates: api?.desktopUpdates?.schemaVersion === 1 && ['getState', 'check', 'retry', 'restartAndInstall', 'onState', 'onPrepare', 'onRelease', 'preparationResult']
+      .every(name => typeof api.desktopUpdates[name] === 'function') ? api.desktopUpdates : null,
     bridgeManager: current ? manager as DesktopBridgeManagerApi : null,
     legacyBridgeManager: Boolean(manager) && !current,
     notifications: api?.notifications || null,
@@ -121,8 +126,91 @@ export function desktopCapabilities(): DesktopCapabilities {
   };
 }
 
+export interface DesktopUpdateState {
+  schemaVersion: 1;
+  phase: 'disabled' | 'idle' | 'checking' | 'available' | 'downloading' | 'downloaded' | 'up-to-date' | 'error' | 'preparing-restart';
+  currentVersion: string; targetVersion: string; supported: boolean; reason: string;
+  channel: 'stable'; message: string; errorCode: string; retryable: boolean;
+  percent: number | null; transferred: number | null; total: number | null; lastCheckedAt: string | null;
+}
+export interface DesktopUpdatesApi {
+  schemaVersion: 1;
+  getState(): Promise<DesktopUpdateState>;
+  check(): Promise<DesktopUpdateState>;
+  retry(): Promise<DesktopUpdateState>;
+  restartAndInstall(): Promise<{ ok: boolean; error?: string }>;
+  onState(callback: (state: DesktopUpdateState) => void): () => void;
+  onPrepare(callback: (request: { epoch: number }) => void): () => void;
+  onRelease(callback: (request: { epoch: number }) => void): () => void;
+  preparationResult(result: { epoch: number; ready: boolean }): Promise<{ ok: boolean }>;
+}
+
 export function desktopBridgeManager(): DesktopBridgeManagerApi | null {
   return desktopCapabilities().bridgeManager;
+}
+
+function hubOrigin(value: string | undefined): string {
+  try { return new URL(String(value || '').trim()).origin; } catch (_err) { return ''; }
+}
+
+/** Installed slots for this Hub, including unenrolled slots. An empty list is
+ * different from profiles installed for accounts other than the signed-in one. */
+export function installedHubProfiles(profiles: DesktopBridgeStatus[] | undefined, hubUrl: string): DesktopBridgeStatus[] {
+  const hub = hubOrigin(hubUrl);
+  return (profiles || []).filter((p) => p?.installed && hubOrigin(p.hub) === hub);
+}
+
+export function bridgeProfileLabel(profile: string | undefined): string {
+  return profile || 'Default (unnamed)';
+}
+
+export function bridgeProfileError(profile: string): string {
+  return profile === '' || /^[a-z0-9][a-z0-9-]{0,30}$/.test(profile)
+    ? '' : 'Use 1–31 lowercase letters, digits or dashes, starting with a letter or digit.';
+}
+
+/**
+ * The installed profile for `hubUrl` that belongs to the signed-in Ninjy
+ * account: its bridge id is one of the account's bridges on the Hub. Several
+ * accounts can share this machine and OS user with one profile each, so "the
+ * default profile" may be someone else's bridge.
+ */
+export function accountBridgeProfile(
+  profiles: DesktopBridgeStatus[] | undefined,
+  hubUrl: string,
+  accountBridgeIds: Iterable<string>,
+): DesktopBridgeStatus | null {
+  const own = new Set(Array.from(accountBridgeIds).filter(Boolean));
+  const hub = hubOrigin(hubUrl);
+  return (profiles || []).find((p) => p?.installed && hubOrigin(p.hub) === hub && own.has(String(p.bridge_id || ''))) || null;
+}
+
+/** Installed profiles for `hubUrl` that are not the signed-in account's. */
+export function otherAccountProfiles(
+  profiles: DesktopBridgeStatus[] | undefined,
+  hubUrl: string,
+  accountBridgeIds: Iterable<string>,
+): DesktopBridgeStatus[] {
+  const own = new Set(Array.from(accountBridgeIds).filter(Boolean));
+  const hub = hubOrigin(hubUrl);
+  return (profiles || []).filter((p) => p?.installed && hubOrigin(p.hub) === hub && !own.has(String(p.bridge_id || '')));
+}
+
+/**
+ * How "Set up this machine" runs for the signed-in account. Its own installed
+ * profile is targeted as is (never a second bridge for the same account);
+ * otherwise setup always passes --separate-account, even for the first
+ * bridge, so another account's running bridge is never replaced, stopped or
+ * reconfigured. ham-bridge then uses `profile` (default: the default profile)
+ * while no account has enrolled it, else the next free account-N profile.
+ */
+export function desktopSetupPlan(
+  own: DesktopBridgeStatus | null,
+  hubUrl: string,
+  profile = '',
+): { target: DesktopBridgeTarget; options: DesktopBridgeOperationOptions } {
+  if (own) return { target: { hub: hubUrl, profile: String(own.profile || '') }, options: {} };
+  return { target: { hub: hubUrl, profile }, options: { separateAccount: true } };
 }
 
 export type BridgeStatusTone = 'success' | 'warning' | 'danger' | 'muted';

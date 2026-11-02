@@ -15,12 +15,23 @@ startup_prompt_preserves_bootstrap_and_runtime :: proc(t: ^testing.T) {
 	}
 }
 
+// A Hub older than its bridge renders the pre-bin/ shim path; the known sentence is
+// still stripped when the extension reports readiness itself.
+@(test)
+startup_prompt_strips_legacy_rendered_instruction :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	profile := Agent_Profile{starter_prompt = "First, run: ./.heimdall/bin/ham-ctl agent start-success. Then read AGENTS.md for context.", extension_expected = true}
+	out := render_starter_prompt_for_agent(profile, "", "tok", "inst")
+	testing.expect(t, !strings.contains(out, "First, run:"), "legacy sentence removed")
+	testing.expect(t, strings.contains(out, "Then read AGENTS.md for context."), "keep bootstrap")
+}
+
 @(test)
 startup_prompt_unknown_extension_keeps_instruction :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	profile := Agent_Profile{starter_prompt = "First, run: {ctl_bin} agent start-success. Then read AGENTS.md for context."}
 	out := render_starter_prompt_for_agent(profile, "", "tok", "inst")
-	testing.expect(t, strings.contains(out, "First, run: ./.heimdall/bin/ham-ctl agent start-success."), "absent/unknown extension keeps command")
+	testing.expect(t, strings.contains(out, "First, run: ./bin/ham-ctl agent start-success."), "absent/unknown extension keeps command")
 	testing.expect(t, strings.contains(out, "Then read AGENTS.md for context."), "keep bootstrap")
 }
 

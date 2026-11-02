@@ -15,55 +15,34 @@ import {
 } from '../../utils/vaultContent';
 import { selectActiveVaultKey } from '../../store/vaultSlice';
 import { replaceVaultTokens } from '../../utils/vaultCrypto.ts';
+import WorkingRings from './WorkingRings';
+import { agentActionLine } from './agentActionLabels';
 
-// Push-only, ephemeral row of small "activity bubbles" rendered in a reserved,
-// fixed-height gutter just above the chat composer, for the CURRENTLY-VIEWED
-// instance only. Each bubble shows a short, human-readable, id-free summary of a
-// ham-ctl action the agent just performed (composed hub-side in P1, buffered in
-// the transient slice in P2).
+// Push-only, ephemeral activity row rendered just above the chat composer, for the
+// CURRENTLY-VIEWED instance only. It shows the agent's latest ham-ctl action the way
+// a tool call is shown (LiveToolActivity): the working rings, a verb in the accent
+// colour and the rest of the hub's id-free summary (composed hub-side in P1,
+// buffered in the transient slice in P2; verbs in agentActionLabels.ts).
 //
-// Animation model (polish): the gutter is ALWAYS reserved so the composer never
-// shifts; bubbles sit on ONE clipped line. The FIRST bubble (empty row) shows a
-// 3-dot indicator for DOTS_MS then morphs into the pill; SUBSEQUENT bubbles slide
-// in from the left and expand, pushing existing bubbles over to make room. Exit
-// collapses. Under prefers-reduced-motion we skip the dots and fall back to a plain
-// fade (see styles.css). Lifetime is owned HERE (not redux): each bubble lives
-// BUBBLE_LIFETIME_MS. On mount/open (Q2: open-conversation replay ONLY) we replay
-// buffered actions <5min old, staggered at REPLAY_STAGGER_MS, "as if just arrived".
+// Animation: one line; each new action slides up in place of the previous one
+// (keyed by action id), and the last one collapses out when its lifetime ends.
+// Under prefers-reduced-motion it is a plain fade (see styles.css). Lifetime is
+// owned HERE (not redux): each action lives BUBBLE_LIFETIME_MS. On mount/open (Q2:
+// open-conversation replay ONLY) we replay buffered actions <5min old, staggered at
+// REPLAY_STAGGER_MS, "as if just arrived".
 
 const BUBBLE_LIFETIME_MS = 4000;
 const REPLAY_STAGGER_MS = 400;
-// 3-dot indicator duration before the first bubble morphs into its pill.
-const DOTS_MS = 200;
-// Matches the CSS .agent-bubble-exit duration — how long an exiting bubble stays
+// Matches the CSS .agent-action-exit duration — how long an exiting row stays
 // mounted so the collapse/fade can play before removal.
 const EXIT_ANIM_MS = 220;
 // Guard: never surface a "live" buffer entry already older than one lifetime.
 const LIVE_FRESHNESS_MS = BUBBLE_LIFETIME_MS + 1000;
 
-type BubblePhase = 'dots' | 'pill' | 'exiting';
-type VisibleBubble = AgentActionItem & {
-  phase: BubblePhase;
-  // True once a first-bubble 'dots' entry has morphed into its pill (drives the
-  // morph animation vs the plain slide-in used by subsequent bubbles).
-  morphed?: boolean;
-};
+type BubblePhase = 'shown' | 'exiting';
+type VisibleBubble = AgentActionItem & { phase: BubblePhase };
 
-function prefersReducedMotion(): boolean {
-  return (
-    typeof window !== 'undefined' &&
-    typeof window.matchMedia === 'function' &&
-    window.matchMedia('(prefers-reduced-motion: reduce)').matches
-  );
-}
-
-function ActivityBubbleItem({
-  bubble,
-  sharedClassName,
-}: {
-  bubble: VisibleBubble;
-  sharedClassName: string;
-}) {
+function ActivityBubbleItem({ bubble }: { bubble: VisibleBubble }) {
   const activeKey = useSelector(selectActiveVaultKey);
   const [summary, setSummary] = useState(bubble.summary);
 
@@ -93,29 +72,21 @@ function ActivityBubbleItem({
     };
   }, [bubble.summary, activeKey]);
 
-  const inner = bubble.phase === 'dots' ? (
-    <span data-debug-id="conversation-activity-bubble-dots" className="inline-flex items-center gap-0.5">
-      <span className="agent-bubble-dot h-1 w-1 rounded-full bg-muted" style={{ animationDelay: '0ms' }} />
-      <span className="agent-bubble-dot h-1 w-1 rounded-full bg-muted" style={{ animationDelay: '150ms' }} />
-      <span className="agent-bubble-dot h-1 w-1 rounded-full bg-muted" style={{ animationDelay: '300ms' }} />
-    </span>
-  ) : (
-    <span className="truncate">{summary}</span>
-  );
-
-  // A bubble is never clickable. Exactly one action ever was — the background-job
+  const line = agentActionLine(bubble.action, summary);
+  // A row is never clickable. Exactly one action ever was — the background-job
   // report, which opened a jobs panel — and REQ-SHELL-7 deleted that whole stack; the
   // panel it opened had already been unmounted before then. Shell sessions are
-  // surfaced by the shells UI (REQ-SHELL-6), not by a chat bubble.
+  // surfaced by the shells UI (REQ-SHELL-6), not by an activity row.
   return (
-    <span
-      key={bubble.id}
+    <div
       data-debug-id={`conversation-activity-bubble-${bubble.action || 'action'}`}
       title={summary}
-      className={sharedClassName}
+      className={`flex w-full min-w-0 items-center gap-2 overflow-hidden whitespace-nowrap text-xs ${bubble.phase === 'exiting' ? 'agent-action-exit' : 'agent-action-in'}`}
     >
-      {inner}
-    </span>
+      <WorkingRings size={16} />
+      <span className="shrink-0 font-medium text-accent">{line.verb}</span>
+      {line.detail ? <span className="agent-action-detail min-w-0 flex-1 truncate text-muted">{line.detail}</span> : null}
+    </div>
   );
 }
 
@@ -141,13 +112,9 @@ export default function AgentActivityBubbles({ instanceId }: { instanceId: strin
   const seenIdsRef = useRef<Set<string>>(new Set());
   // All pending timers, cleared on unmount / instance switch.
   const timersRef = useRef<number[]>([]);
-  // How many bubbles currently occupy the row (incl. exiting). Lets us decide, at
-  // push time, whether an arriving bubble is the "first" (empty row → dots morph).
-  const liveCountRef = useRef(0);
 
   const removeBubble = useCallback((id: string) => {
     setVisible((prev) => prev.filter((b) => b.id !== id));
-    liveCountRef.current = Math.max(0, liveCountRef.current - 1);
   }, []);
 
   // Show one bubble now and schedule its fade-out (exiting) + removal after its
@@ -159,27 +126,14 @@ export default function AgentActivityBubbles({ instanceId }: { instanceId: strin
     // (user switched away mid-stagger) stay replayable, while anything shown once
     // is excluded from future replays.
     dispatch(agentActionSurfaced({ instanceId, id: item.id, ts: item.ts }));
-    // "First bubble" = the row is currently empty; play the 3-dot morph, unless
-    // the user prefers reduced motion (then no dots — a plain fade-in pill).
-    const isFirst = liveCountRef.current === 0 && !prefersReducedMotion();
-    liveCountRef.current += 1;
-    const phase: BubblePhase = isFirst ? 'dots' : 'pill';
-    // Prepend so the newest bubble slides in at the left and the rest slide over.
-    setVisible((prev) => (prev.some((b) => b.id === item.id) ? prev : [{ ...item, phase }, ...prev]));
+    // Prepend so the newest action is first; only the newest is drawn.
+    setVisible((prev) => (prev.some((b) => b.id === item.id) ? prev : [{ ...item, phase: 'shown' }, ...prev]));
 
-    let lifeDelay = 0;
-    if (isFirst) {
-      lifeDelay = DOTS_MS;
-      const morph = window.setTimeout(() => {
-        setVisible((prev) => prev.map((b) => (b.id === item.id ? { ...b, phase: 'pill', morphed: true } : b)));
-      }, DOTS_MS);
-      timersRef.current.push(morph);
-    }
     const hide = window.setTimeout(() => {
       setVisible((prev) => prev.map((b) => (b.id === item.id ? { ...b, phase: 'exiting' } : b)));
       const remove = window.setTimeout(() => removeBubble(item.id), EXIT_ANIM_MS);
       timersRef.current.push(remove);
-    }, lifeDelay + BUBBLE_LIFETIME_MS);
+    }, BUBBLE_LIFETIME_MS);
     timersRef.current.push(hide);
   }, [dispatch, instanceId, removeBubble]);
 
@@ -196,7 +150,6 @@ export default function AgentActivityBubbles({ instanceId }: { instanceId: strin
 
     clearAllTimers();
     seenIdsRef.current = new Set();
-    liveCountRef.current = 0;
     setVisible([]);
 
     selectReplayableActions(buffer, Date.now(), shownIdsRef.current).forEach((item, index) => {
@@ -225,32 +178,17 @@ export default function AgentActivityBubbles({ instanceId }: { instanceId: strin
     }
   }, [buffer, pushVisible]);
 
-  if (visible.length === 0) return null;
+  // One line: the newest action still showing, else the last one on its way out.
+  const current = visible.find((b) => b.phase !== 'exiting') || visible[0];
+  if (!current) return null;
 
   return (
     <div
       data-debug-id="conversation-activity-bubbles"
       aria-hidden="true"
-      className="mb-1 flex h-6 items-center gap-1.5 overflow-hidden whitespace-nowrap px-1"
+      className="mb-1 flex h-6 items-center overflow-hidden px-1"
     >
-      {visible.map((bubble) => {
-        const animClass =
-          bubble.phase === 'exiting'
-            ? 'agent-bubble-exit'
-            : bubble.phase === 'dots'
-              ? 'agent-bubble-dots-in'
-              : bubble.morphed
-                ? 'agent-bubble-morph'
-                : 'agent-bubble-pill-in';
-        const sharedClassName = `inline-flex max-w-[240px] shrink-0 items-center overflow-hidden rounded-full border border-subtle bg-surface px-2.5 py-1 text-caption leading-none text-muted ${animClass}`;
-        return (
-          <ActivityBubbleItem
-            key={bubble.id}
-            bubble={bubble}
-            sharedClassName={sharedClassName}
-          />
-        );
-      })}
+      <ActivityBubbleItem key={current.id} bubble={current} />
     </div>
   );
 }

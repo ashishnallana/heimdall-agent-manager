@@ -61,6 +61,10 @@ bridge_process_drain_pipe :: proc(file: ^os.File, output: ^[dynamic]byte) -> (re
 // code of -1 means the child could not be started or did not produce an exit
 // status before it was killed.
 bridge_process_run_capture_status :: proc(args: []string, timeout: time.Duration) -> (stdout, stderr: string, exit_code: int, ok, timed_out: bool) {
+	return bridge_process_run_capture_status_env(args,timeout,nil)
+}
+
+bridge_process_run_capture_status_env :: proc(args: []string, timeout: time.Duration, env: []string) -> (stdout, stderr: string, exit_code: int, ok, timed_out: bool) {
 	exit_code = -1
 	if len(args) == 0 || timeout <= 0 do return "", "", exit_code, false, false
 	if !bridge_process_slot_try_acquire() do return "", "", exit_code, false, false
@@ -75,7 +79,7 @@ bridge_process_run_capture_status :: proc(args: []string, timeout: time.Duration
 	}
 	defer os.close(stderr_r)
 
-	process, start_err := os.process_start(os.Process_Desc{command = args, stdout = stdout_w, stderr = stderr_w})
+	process, start_err := bridge_os_start_hidden(os.Process_Desc{command = args, stdout = stdout_w, stderr = stderr_w, env = env})
 	_ = os.close(stdout_w)
 	_ = os.close(stderr_w)
 	if start_err != nil do return "", "", exit_code, false, false

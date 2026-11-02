@@ -11,12 +11,73 @@ import "core:sync"
 import "core:testing"
 import "core:time"
 import domain "odin_test:hub/domain"
+import contracts "odin_test:contracts"
 import platform "odin_test:hub/platform"
 import iface "odin_test:hub/repository/iface"
 import sqlite "odin_test:hub/repository/sqlite"
 
 @(private = "file")
 pending_test_counter: int
+
+// REQ-ENROLL-PENDING: a replacement has no pending row, but must be listed
+// exactly once and cancellable without disturbing the old runtime credential.
+@(test)
+test_pending_list_includes_replacement_and_cancel_preserves_existing_bridge :: proc(t: ^testing.T) {
+	f := pending_fixture_open(t, "visible_attach")
+	defer pending_fixture_close(f)
+	first, ok, err := enroll_bridge_from_device_grant(&f.svc, enroll_input("", "ea-old", false))
+	testing.expect(t, ok, err.message)
+	bridge_id := strings.clone(first.bridge.bridge_id, context.temp_allocator)
+	old_family := strings.clone(first.family_id, context.temp_allocator)
+	attach, attached, attach_err := enroll_bridge_from_device_grant(&f.svc, enroll_input(bridge_id, "", true))
+	testing.expect(t, attached, attach_err.message)
+	new_family := strings.clone(attach.family_id, context.temp_allocator)
+	auth := contracts.Auth_Context{kind = .Internal_User, user_id = "ea-owner"}
+	rows, list_err := list_pending_enrollments(&f.svc, auth)
+	testing.expect_value(t, list_err.code, domain.Error_Code.None)
+	testing.expect_value(t, len(rows), 1)
+	if len(rows) == 1 {
+		testing.expect_value(t, rows[0].bridge_id, bridge_id)
+		testing.expect(t, !domain.bridge_is_pending(rows[0]), "existing bridge remains enrolled")
+	}
+	for &row in rows do domain.bridge_destroy(&row)
+	delete(rows)
+	others, other_err := list_pending_enrollments(&f.svc, contracts.Auth_Context{kind = .Internal_User, user_id = "someone-else"})
+	testing.expect_value(t, other_err.code, domain.Error_Code.None)
+	testing.expect_value(t, len(others), 0)
+	for &row in others do domain.bridge_destroy(&row)
+	delete(others)
+	rolled, removed, cancel_err := cancel_pending_enrollment(&f.svc, bridge_id)
+	testing.expect_value(t, cancel_err.code, domain.Error_Code.None)
+	testing.expect(t, rolled && !removed, "only the replacement is cancelled")
+	testing.expect_value(t, live_scope_count(f, old_family, BRIDGE_TOKEN_SCOPE), 2)
+	testing.expect_value(t, live_scope_count(f, new_family, BRIDGE_ENROLL_TOKEN_SCOPE), 0)
+	after, after_err := list_pending_enrollments(&f.svc, auth)
+	testing.expect_value(t, after_err.code, domain.Error_Code.None)
+	testing.expect_value(t, len(after), 0)
+	for &row in after do domain.bridge_destroy(&row)
+	delete(after)
+}
+
+@(test)
+test_pending_list_deduplicates_new_bridge_token_pair_and_reports_read_failure :: proc(t: ^testing.T) {
+	f := pending_fixture_open(t, "visible_new")
+	defer pending_fixture_close(f)
+	_, ok, err := enroll_bridge_from_device_grant(&f.svc, enroll_input("", "ea-new", true))
+	testing.expect(t, ok, err.message)
+	auth := contracts.Auth_Context{kind = .Internal_User, user_id = "ea-owner"}
+	rows, list_err := list_pending_enrollments(&f.svc, auth)
+	testing.expect_value(t, list_err.code, domain.Error_Code.None)
+	testing.expect_value(t, len(rows), 1)
+	for &row in rows do domain.bridge_destroy(&row)
+	delete(rows)
+	broken := f.repo
+	broken.list_live_tokens_by_scope = failing_list_scope
+	f.svc.repo = &broken
+	failed, failed_err := list_pending_enrollments(&f.svc, auth)
+	testing.expect(t, failed_err.code != .None, "a failed read is not an empty list")
+	testing.expect_value(t, len(failed), 0)
+}
 
 @(private = "file")
 Pending_Fixture :: struct {

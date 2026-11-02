@@ -2,6 +2,7 @@ import { refreshBridgeProviderCatalog } from '../../components/providers/provide
 import { normalizeModelCatalog } from '../../components/providers/modelCatalogStatus';
 import * as daemonApi from '../daemonApi';
 import { heimdallApi, withSessionQuery } from '../heimdallApi';
+import { profileLabel } from '../../components/providers/providerProfiles';
 import { useMemo } from 'react';
 import { cookieJsonFetch, cookieMutation, customQueryError } from '../cookieFetch';
 import { type ExtensionCommandKind, type ProviderExtensionCommand, isExtensionInstallTerminal } from '../../components/extension/extensionInstallModel';
@@ -37,6 +38,9 @@ export interface Bridge {
   /** REQ-T13-2: false when the latest release ships no bundle for `target` (e.g. termux-arm64). */
   update_artifact_available?: boolean;
   latest_version?: string;
+  latest_source?: 'promoted' | 'override' | 'manifest';
+  update_warning?: string;
+  update_fallback_reason?: string;
   latest_commit_sha?: string;
   update_status?: 'idle' | 'downloading' | 'validating' | 'restarting' | 'healthy' | 'complete' | 'failed' | string;
   update_message?: string;
@@ -105,6 +109,7 @@ export function normalizeBridgeEventsPage(raw: any): BridgeEventsPage {
 
 export type BridgeCapability = {
   provider: string;
+  profile_id?: string; label?: string; accent?: string;
   models: string[];
 };
 
@@ -120,7 +125,7 @@ export function normalizeBridgeCapabilities(raw: any): BridgeCapability[] {
   return source.map((entry: any) => {
     if (typeof entry === 'string') return { provider: entry, models: [] };
     const models = Array.isArray(entry?.models) ? entry.models.map((model: any) => String(model)).filter(Boolean) : [];
-    return { provider: String(entry?.provider || entry?.name || ''), models };
+    return { provider: String(entry?.provider || entry?.name || ''), models, ...(entry?.profile_id ? { profile_id: String(entry.profile_id), label: String(entry.label || entry.profile_id), accent: String(entry.accent || '') } : {}) };
   }).filter((entry: BridgeCapability) => Boolean(entry.provider));
 }
 
@@ -308,10 +313,10 @@ export const bridgeSupportApi = heimdallApi.injectEndpoints({
       },
       invalidatesTags: (_result, _error, { bridgeId }) => [{ type: 'Bridges' as const, id: 'LIST' }, { type: 'Bridges' as const, id: bridgeId }],
     }),
-    installProviderExtension: build.mutation<ProviderExtensionCommand, { bridgeId: string; provider: string }>({
-      queryFn: async ({ bridgeId, provider }) => {
+    installProviderExtension: build.mutation<ProviderExtensionCommand, { bridgeId: string; provider: string; profileId?: string }>({
+      queryFn: async ({ bridgeId, provider, profileId }) => {
         try {
-          const data = await cookieMutation(`/bridges/${encodeURIComponent(bridgeId)}/providers/${encodeURIComponent(provider)}/extension-install`, 'POST', {});
+          const data = await cookieMutation(`/bridges/${encodeURIComponent(bridgeId)}/providers/${encodeURIComponent(provider)}/extension-install`, 'POST', profileId ? { profile_id: profileId } : {});
           return { data };
         } catch (error: any) {
           return { error: customQueryError(error) as any };
@@ -319,10 +324,10 @@ export const bridgeSupportApi = heimdallApi.injectEndpoints({
       },
       invalidatesTags: (_result, _error, { bridgeId }) => [{ type: 'BridgeProviders' as const, id: bridgeId }],
     }),
-    uninstallProviderExtension: build.mutation<ProviderExtensionCommand, { bridgeId: string; provider: string }>({
-      queryFn: async ({ bridgeId, provider }) => {
+    uninstallProviderExtension: build.mutation<ProviderExtensionCommand, { bridgeId: string; provider: string; profileId?: string }>({
+      queryFn: async ({ bridgeId, provider, profileId }) => {
         try {
-          const data = await cookieMutation(`/bridges/${encodeURIComponent(bridgeId)}/providers/${encodeURIComponent(provider)}/extension-uninstall`, 'POST', {});
+          const data = await cookieMutation(`/bridges/${encodeURIComponent(bridgeId)}/providers/${encodeURIComponent(provider)}/extension-uninstall`, 'POST', profileId ? { profile_id: profileId } : {});
           return { data };
         } catch (error: any) {
           return { error: customQueryError(error) as any };
@@ -330,11 +335,11 @@ export const bridgeSupportApi = heimdallApi.injectEndpoints({
       },
       invalidatesTags: (_result, _error, { bridgeId }) => [{ type: 'BridgeProviders' as const, id: bridgeId }],
     }),
-    getProviderExtensionInstall: build.query<ProviderExtensionCommand, { bridgeId: string; provider: string; commandId: string; kind?: ExtensionCommandKind }>({
-      queryFn: async ({ bridgeId, provider, commandId, kind }) => {
+    getProviderExtensionInstall: build.query<ProviderExtensionCommand, { bridgeId: string; provider: string; commandId: string; profileId?: string; kind?: ExtensionCommandKind }>({
+      queryFn: async ({ bridgeId, provider, commandId, kind, profileId }) => {
         try {
           const verb = kind === 'uninstall' ? 'extension-uninstall' : 'extension-install';
-          const data = await cookieJsonFetch(`/bridges/${encodeURIComponent(bridgeId)}/providers/${encodeURIComponent(provider)}/${verb}/${encodeURIComponent(commandId)}`);
+          const data = await cookieJsonFetch(`/bridges/${encodeURIComponent(bridgeId)}/providers/${encodeURIComponent(provider)}/${verb}/${encodeURIComponent(commandId)}${profileId ? "?profile_id=" + encodeURIComponent(profileId) : ""}`);
           return { data };
         } catch (error: any) {
           return { error: customQueryError(error) as any };
@@ -367,9 +372,10 @@ export const bridgeSupportApi = heimdallApi.injectEndpoints({
         if (!bridgeId) return { data: { bridge_id: '', providers: [] } };
         try {
           const data = await cookieJsonFetch(`/bridges/${encodeURIComponent(bridgeId)}/provider-status`);
-          const providers = (Array.isArray(data?.providers) ? data.providers : [])
+          const providers = await Promise.all((Array.isArray(data?.providers) ? data.providers : [])
             .filter((entry: any) => entry?.enabled && entry?.state === 'present' && entry?.catalog_state === 'active')
-            .map((entry: any) => ({
+            .map(async (entry: any) => ({
+              ...(entry?.profile_id ? { profile_id: String(entry.profile_id), label: await profileLabel(entry, entry.profile_id === entry.provider ? entry.display_name : ''), accent: String(entry.accent || '') } : {}),
               provider: String(entry?.provider || ''),
               enabled: true,
               models: (Array.isArray(entry?.models) ? entry.models : [])
@@ -380,7 +386,7 @@ export const bridgeSupportApi = heimdallApi.injectEndpoints({
               // (null when the provider ships no extension).
               extension: entry?.extension ?? null,
               ...normalizeModelCatalog(entry),
-            }));
+            })));
           return { data: { bridge_id: data?.bridge_id || bridgeId, providers,
             extension_commands: Array.isArray(data?.extension_commands) ? data.extension_commands : [] } };
         } catch (error: any) {

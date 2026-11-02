@@ -24,6 +24,8 @@ Chain_Task_Rollup :: struct {
 Task_Count_By_Chain_Proc :: proc(ctx: rawptr, owner_user_id: domain.User_ID) -> (map[string]Chain_Task_Rollup, domain.Domain_Error)
 Task_Comment_Save_Proc :: proc(ctx: rawptr, comment: domain.Task_Comment) -> (domain.Task_Comment, bool, domain.Domain_Error)
 Task_Comment_List_By_Task_Proc :: proc(ctx: rawptr, task_id: domain.Task_ID, owner_user_id: domain.User_ID) -> ([]domain.Task_Comment, domain.Domain_Error)
+Task_Comment_Page_Proc :: proc(ctx:rawptr,task_id:domain.Task_ID,owner:domain.User_ID,after_created,after_id:string,limit,max_body_bytes,max_page_bytes:int)->([]domain.Task_Comment_Page_Item,domain.Domain_Error)
+Task_Comment_Get_Proc :: proc(ctx:rawptr,comment_id:string,owner:domain.User_ID)->(domain.Task_Comment,bool,domain.Domain_Error)
 // Cheap comment rollup for a task (COUNT + newest row), so list/show/context can
 // embed a summary without loading every comment body.
 Task_Comment_Summary_Proc :: proc(ctx: rawptr, task_id: domain.Task_ID, owner_user_id: domain.User_ID) -> (domain.Task_Comment_Summary, domain.Domain_Error)
@@ -66,6 +68,8 @@ Taskchain_Repository :: struct {
 	task_counts_by_chain: Task_Count_By_Chain_Proc,
 	save_comment: Task_Comment_Save_Proc,
 	list_comments_by_task: Task_Comment_List_By_Task_Proc,
+	list_comments_page:Task_Comment_Page_Proc,
+	get_comment:Task_Comment_Get_Proc,
 	comment_summary_by_task: Task_Comment_Summary_Proc,
 	list_recent_comments_by_task: Task_Comment_List_Recent_Proc,
 	save_member: Task_Chain_Member_Save_Proc,

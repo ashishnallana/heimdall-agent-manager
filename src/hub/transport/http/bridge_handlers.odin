@@ -46,6 +46,7 @@ Bridge_Handlers :: struct {
 	projects: ^project_service.Project_Service,
 	event_bus: ^events.User_Event_Bus,
 	bridge_runtime_registry: ^project_service.Bridge_Runtime_Registry,
+	mcp_control: ^MCP_Control_Handlers,
 	actions: rawptr,
 	scheduled_prompts: rawptr,
 	// experiments gates explorer relays (domain.PROJECT_VCS_EXPERIMENT_KEY) and Actions
@@ -78,23 +79,32 @@ list_bridges_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	bridges, err := bridge_service.list_bridges(h.bridges, auth_ctx)
 	if err.code != .None do return respond_error(err, req.request_id)
 	// REQ-EA-1: list_bridges returns enrolled bridges only. ?include_pending=1 (the
-	// Settings view) also returns the owner's pending enrollments, marked
-	// enrollment_state:"pending", after them. Opt-in, so a picker, an agent or an
-	// older client never offers a bridge that is not enrolled yet.
+	// Settings view) includes enrollment_in_progress for pending replacements as
+	// well as new pending rows. Existing targets retain enrollment_state:"enrolled"
+	// and appear once; ordinary pickers keep their working bridge available.
 	pending: []domain.Bridge
-	if query_bool(req.query, "include_pending", false) do pending = bridge_service.list_pending_bridges(h.bridges, auth_ctx)
+	if query_bool(req.query, "include_pending", false) {
+		pending_err: domain.Domain_Error
+		pending, pending_err = bridge_service.list_pending_enrollments(h.bridges, auth_ctx)
+		if pending_err.code != .None do return respond_error(pending_err, req.request_id)
+	}
 	defer { for &p in pending do domain.bridge_destroy(&p); delete(pending) }
 	b := strings.builder_make()
 	strings.write_byte(&b, '[')
 	n := 0
 	for bridge in bridges {
 		if n > 0 do strings.write_byte(&b, ',')
-		write_bridge_json(&b, bridge, h.agents, h.bridges.catalog)
+		in_progress := false
+		for p in pending do if p.bridge_id == bridge.bridge_id { in_progress = true; break }
+		write_bridge_json(&b, bridge, h.agents, h.bridges.catalog, in_progress)
 		n += 1
 	}
 	for bridge in pending {
+		already_listed := false
+		for enrolled in bridges do if enrolled.bridge_id == bridge.bridge_id { already_listed = true; break }
+		if already_listed do continue
 		if n > 0 do strings.write_byte(&b, ',')
-		write_bridge_json(&b, bridge, h.agents, h.bridges.catalog)
+		write_bridge_json(&b, bridge, h.agents, h.bridges.catalog, true)
 		n += 1
 	}
 	strings.write_byte(&b, ']')
@@ -278,6 +288,13 @@ bridge_fs_command_json :: proc(command_type, command_id, path: string) -> string
 	strings.write_string(&b, "\",\"path\":\""); write_handler_json_string(&b, path)
 	strings.write_string(&b, "\"}")
 	return strings.to_string(b)
+}
+
+list_bridge_session_projects_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Bridge_Handlers)(ctx)
+	result, ok, err := bridge_fs_relay(h, req, path_part(req.path, 4), "session_projects", "")
+	if !ok do return respond_error(err, req.request_id)
+	return respond_success(result, req.request_id, auth_ctx_server_time(req))
 }
 
 list_bridge_dir_handler :: proc(ctx: rawptr, req: Request) -> Response {
@@ -1717,7 +1734,7 @@ bridge_ws_upgrade_handler :: proc(ctx: rawptr, req: Request, client: net.TCP_Soc
 		}
 	}
 	// Unauthenticated attempts carry no trustworthy bridge_id: they share one series.
-	if !auth_ok { bridge_metrics_connect_result(BRIDGE_ID_UNKNOWN, "auth_failed"); _ = write_ws_text_frame(client, bridge_ws_error_payload(auth_err.message)); return }
+	if !auth_ok { bridge_metrics_connect_result(BRIDGE_ID_UNKNOWN, "auth_failed"); bridge_ws_auth_error(client, auth_err); return }
 	admitted_bridge, found, lookup_err := iface.bridge_get_bridge(h.bridges.repo, bridge_auth.bridge_id)
 	if !found { bridge_metrics_connect_result(BRIDGE_ID_UNKNOWN, "auth_failed"); _ = write_ws_text_frame(client, bridge_ws_error_payload(lookup_err.message)); return }
 	defer domain.bridge_destroy(&admitted_bridge)
@@ -2011,6 +2028,10 @@ bridge_ws_runtime_loop :: proc(
 	last_frame := time.tick_now()
 	next_revalidate := time.tick_add(time.tick_now(), bridge_ws_revalidate_interval)
 	for {
+		if connection != nil && sync.atomic_load(&connection.credential_revoked) {
+			reason = .Credential_Revoked
+			return
+		}
 		// 120s read deadline decoupled from the bridge's idle heartbeat cadence
 		// (BRIDGE_HEARTBEAT_INTERVAL_SECONDS = 45s): a single delayed/dropped heartbeat
 		// still leaves a full extra beat of margin before we treat the bridge as
@@ -2093,6 +2114,7 @@ bridge_ws_revalidate_interval := 60 * time.Second
 // credential. Sent as bridge_error.payload.code and as the WS close reason.
 BRIDGE_WS_TOKEN_EXPIRED_CODE :: "bridge_token_expired"
 BRIDGE_WS_CREDENTIAL_REVOKED_CODE :: "bridge_credential_revoked"
+BRIDGE_WS_SUNSET_PENDING_CODE :: "bridge_sunset_pending"
 
 // bridge_ws_session_check enforces the session credential bound: expired (wall
 // clock against the bound recorded at upgrade or bridge_reauth), or revoked /
@@ -2101,6 +2123,7 @@ BRIDGE_WS_CREDENTIAL_REVOKED_CODE :: "bridge_credential_revoked"
 // reason; the caller returns and the reader closes the socket.
 bridge_ws_session_check :: proc(h: ^Bridge_Handlers, connection: ^project_service.Bridge_Runtime_Connection, bridge_id: string, client: net.TCP_Socket, next_revalidate: ^time.Tick) -> Bridge_WS_Disconnect_Reason {
 	if connection == nil do return .None
+	if sync.atomic_load(&connection.credential_revoked) do return .Credential_Revoked
 	if project_service.bridge_runtime_connection_auth_expired(connection) {
 		bridge_ws_end_session(h, bridge_id, client, BRIDGE_WS_TOKEN_EXPIRED_CODE, "bridge access token has expired; reconnect with the refreshed credential")
 		return .Credential_Expired
@@ -2120,6 +2143,9 @@ bridge_ws_session_check :: proc(h: ^Bridge_Handlers, connection: ^project_servic
 	case .Expired:
 		bridge_ws_end_session(h, bridge_id, client, BRIDGE_WS_TOKEN_EXPIRED_CODE, "bridge access token has expired; reconnect with the refreshed credential")
 		return .Credential_Expired
+	case .Pending_Sunset:
+		bridge_ws_end_session(h, bridge_id, client, BRIDGE_WS_SUNSET_PENDING_CODE, "bridge retirement is pending enrollment; retain credentials and explicitly resume after rollback")
+		return .Credential_Revoked
 	case .Revoked:
 		bridge_ws_end_session(h, bridge_id, client, BRIDGE_WS_CREDENTIAL_REVOKED_CODE, "bridge credential is revoked")
 		return .Credential_Revoked
@@ -2209,10 +2235,16 @@ bridge_ws_try_reauth :: proc(h: ^Bridge_Handlers, connection: ^project_service.B
 	} else {
 		message := err.message if !ok else "the credential does not belong to this bridge"
 		result.payload = {ok = false, code = BRIDGE_WS_CREDENTIAL_REVOKED_CODE if err.code == .Forbidden else BRIDGE_WS_TOKEN_EXPIRED_CODE, message = message}
+		if err.cause == BRIDGE_WS_SUNSET_PENDING_CODE do result.payload.code = BRIDGE_WS_SUNSET_PENDING_CODE
 		fmt.printfln("ham-hub bridge reauth refused bridge=%s: %s", bridge_id, message)
 	}
 	if data, merr := json.marshal(result, allocator = context.temp_allocator); merr == nil {
 		_ = write_ws_text_frame_locked(h, bridge_id, client, string(data))
+	}
+	if !cred_ok && (result.payload.code == BRIDGE_WS_CREDENTIAL_REVOKED_CODE || result.payload.code == BRIDGE_WS_SUNSET_PENDING_CODE) {
+		bridge_ws_end_session(h, bridge_id, client, result.payload.code, result.payload.message)
+		if connection != nil do sync.atomic_store(&connection.credential_revoked, true)
+		_ = net.shutdown(net.Any_Socket(client), .Receive)
 	}
 	return true
 }
@@ -2445,7 +2477,11 @@ bridge_ws_process_frame :: proc(h: ^Bridge_Handlers, bridge_id: string, connecti
 		}
 		delete(stage)
 		delete(message)
-	case "command_result", "project_path_validation_result", "provider_discovery_report", "provider_model_discovery_report", "fs_list_dir_result", "fs_stat_result", "fs_make_dir_result", "fs_read_file_result", "fs_create_file_result", "fs_write_file_result", "fs_batch_write_result", "fs_move_result", "fs_delete_result", "vcs_capabilities_result", "vcs_status_result", "vcs_files_result", "vcs_diff_result", "vcs_log_result", "vcs_commit_diff_result", "vcs_show_file_result", "vcs_workspaces_result", "vcs_stage_result", "vcs_unstage_result", "vcs_revert_result", "vcs_save_file_result", "vcs_commit_result", "vcs_upload_result", "vcs_sync_result", "fs_find_files_result", "fs_grep_result", "shell_start_result", "shell_restart_result", "shell_list_result", "shell_logs_result", "shell_capture_result", "shell_set_port_result", "bridge_unseal_result", "task_chain_search_result", "taskv2_merge_worktree_result":
+	case "mcp_transform_result":
+		mcp_bridge_result(h,bridge_id,text,connection_generation)
+	case "provider_profiles_report":
+		if err:=bridge_provider_profiles_frame(h,bridge_id,text);err.code!=.None do fmt.eprintln("provider profiles report:",err.message)
+	case "session_projects_result", "auto_update_config_result", "provider_profile_op_result", "command_result", "project_path_validation_result", "provider_discovery_report", "provider_model_discovery_report", "fs_list_dir_result", "fs_stat_result", "fs_make_dir_result", "fs_read_file_result", "fs_create_file_result", "fs_write_file_result", "fs_batch_write_result", "fs_move_result", "fs_delete_result", "vcs_capabilities_result", "vcs_status_result", "vcs_files_result", "vcs_diff_result", "vcs_log_result", "vcs_commit_diff_result", "vcs_show_file_result", "vcs_workspaces_result", "vcs_stage_result", "vcs_unstage_result", "vcs_revert_result", "vcs_save_file_result", "vcs_commit_result", "vcs_upload_result", "vcs_sync_result", "fs_find_files_result", "fs_grep_result", "shell_start_result", "shell_restart_result", "shell_list_result", "shell_logs_result", "shell_capture_result", "shell_set_port_result", "bridge_unseal_result", "task_chain_search_result", "taskv2_merge_worktree_result":
 		if ext_err := bridge_extension_frame(h, bridge_id, type, text); ext_err.code != .None do fmt.eprintln("extension command result:", ext_err.message)
 		command_id := json_string(text, "command_id")
 		_ = bridge_runtime_service.runtime_command_result_for_connection(h.bridge_runtime_registry, bridge_id, connection_generation, command_id, text)
@@ -3041,8 +3077,9 @@ suffix_after :: proc(value, prefix: string) -> string {
 	return ""
 }
 
-write_bridge_json :: proc(b: ^strings.Builder, br: domain.Bridge, agents: ^agent_service.Agent_Service, catalog: ^bridge_service.Bridge_Update_Catalog = nil) {
-	strings.write_string(b, "{\"bridge_id\":\""); write_handler_json_string(b, br.bridge_id)
+write_bridge_json :: proc(b: ^strings.Builder, br: domain.Bridge, agents: ^agent_service.Agent_Service, catalog: ^bridge_service.Bridge_Update_Catalog = nil, enrollment_in_progress := false) {
+	strings.write_string(b, "{\"enrollment_in_progress\":"); strings.write_string(b, "true" if enrollment_in_progress || domain.bridge_is_pending(br) else "false")
+	strings.write_string(b, ",\"bridge_id\":\""); write_handler_json_string(b, br.bridge_id)
 	strings.write_string(b, "\",\"label\":\""); write_handler_json_string(b, br.label)
 	strings.write_string(b, "\",\"label_is_user_customized\":"); strings.write_string(b, "true" if br.label_is_user_customized else "false")
 	strings.write_string(b, ",\"machine_hostname\":\""); write_handler_json_string(b, br.machine_hostname)
@@ -3073,6 +3110,9 @@ write_bridge_json :: proc(b: ^strings.Builder, br: domain.Bridge, agents: ^agent
 	// REQ-T13-2: false when the latest release ships no bundle for `target`.
 	strings.write_string(b, ",\"update_artifact_available\":"); strings.write_string(b, "true" if update_info.artifact_available else "false")
 	strings.write_string(b, ",\"latest_version\":\""); write_handler_json_string(b, update_info.latest_version)
+	strings.write_string(b, "\",\"latest_source\":\""); write_handler_json_string(b, update_info.latest_source)
+	strings.write_string(b, "\",\"update_warning\":\""); write_handler_json_string(b, update_info.warning)
+	strings.write_string(b, "\",\"update_fallback_reason\":\""); write_handler_json_string(b, update_info.fallback_reason)
 	strings.write_string(b, "\",\"latest_commit_sha\":\""); write_handler_json_string(b, update_info.latest_commit_sha)
 	strings.write_string(b, "\",\"telemetry_enabled\":\""); write_handler_json_string(b, br.telemetry_enabled if br.telemetry_enabled != "" else "inherit")
 	// REQ-BVS-2: emitted VERBATIM, with no default substitution. A bridge that has
@@ -3771,6 +3811,10 @@ bridge_ws_plan_error_payload :: proc(err: domain.Domain_Error) -> string {
 // Plan refusals have an application close code as well as the diagnostic frame.
 // These calls happen before registering a command socket, so there is one writer.
 bridge_ws_domain_error :: proc(client: net.TCP_Socket, err: domain.Domain_Error) {
+	if err.cause == BRIDGE_WS_SUNSET_PENDING_CODE || err.cause == BRIDGE_WS_CREDENTIAL_REVOKED_CODE || err.code == .Bridge_Revoked {
+		bridge_ws_auth_error(client, err)
+		return
+	}
 	if err.code != .Plan_Limit_Reached {
 		_ = write_ws_text_frame(client, bridge_ws_error_payload(err.message))
 		return
@@ -3783,4 +3827,18 @@ bridge_ws_domain_error :: proc(client: net.TCP_Socket, err: domain.Domain_Error)
 	frame[3] = 0x32
 	copy(frame[4:], "plan_limit_reached")
 	_, _ = net.send_tcp(client, frame[:])
+}
+
+// Used only after verifying a bridge bearer, never for unrelated authorization.
+// Expiry can be refreshed; invalid/revoked credentials require explicit enrollment.
+bridge_ws_auth_error :: proc(client: net.TCP_Socket, err: domain.Domain_Error) {
+    if err.cause != BRIDGE_WS_SUNSET_PENDING_CODE && err.code != .Unauthenticated && err.code != .Forbidden && err.code != .Bridge_Revoked {
+        // A transient admission failure is not authoritative revocation.
+        _ = write_ws_text_frame(client, bridge_ws_error_payload(err.message))
+        return
+    }
+    code := BRIDGE_WS_CREDENTIAL_REVOKED_CODE
+    if err.cause == BRIDGE_WS_SUNSET_PENDING_CODE do code = BRIDGE_WS_SUNSET_PENDING_CODE
+    else if err.code == .Unauthenticated && strings.contains(err.message, "expired") do code = BRIDGE_WS_TOKEN_EXPIRED_CODE
+    _ = write_ws_text_frame(client, bridge_ws_session_error_payload(code, err.message, context.temp_allocator))
 }

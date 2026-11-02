@@ -158,6 +158,13 @@ async function approver(api, key) {
   return { userId, identity, signed, keyringBytes, chain: () => chainOf(api, userId) };
 }
 
+// Integration tools use the same verified seed-device/keyring path as bridge
+// approvals. Local throwaway hubs only; caller must wipe keyringBytes.
+export async function openSeedApprover({ api, key, user = '' }) {
+  devUser = user;
+  return approver(api, key);
+}
+
 // As the approval page does: stretch the code against every pending salt of `kind`
 // and let the hub resolve the one lookup that matches.
 async function lookUp(api, code, kind, userId) {

@@ -48,7 +48,7 @@ async function stream(ticket = true) {
   return {socket, local};
 }
 function localCtl(args) {
-  const executable = `${state}/bridges/tool-stream-18e13baf/endpoint/instances/${setup.instance_id}/.heimdall/bin/ham-ctl`;
+  const executable = `${state}/bridges/tool-stream-18e13baf/endpoint/instances/${setup.instance_id}/bin/ham-ctl`;
   const child = spawn(executable, args, {stdio: ['ignore', 'pipe', 'pipe']});
   let output = ''; let error = '';
   child.stdout.on('data', data => output += data);

@@ -33,7 +33,7 @@ import type { Emphasis, RootClassNameProps, Tone } from '../types';
 import { toneClasses } from './toneStyles';
 
 const BASE =
-  'inline-flex items-center gap-1 rounded-pill px-2 py-0.5 ' +
+  'inline-flex items-center gap-1 rounded-[var(--radius-sm)] px-2 py-0.5 ' +
   'text-[length:var(--text-caption-size)] font-medium leading-none whitespace-nowrap';
 
 export interface BadgeProps

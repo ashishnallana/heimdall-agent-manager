@@ -499,13 +499,13 @@ test_hook_run_unknown_provider_is_noop :: proc(t: ^testing.T) {
 test_is_ham_ctl_command_accepts_only_a_lone_allowlisted_invocation :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	defer free_all(context.temp_allocator)
-	BIN :: "/home/dev/run/.heimdall/bin/ham-ctl"
+	BIN :: "/home/dev/run/bin/ham-ctl"
 	CWD :: "/home/dev/run"
 	for cmd in ([]string{
-		"./.heimdall/bin/ham-ctl chat read",
-		"./.heimdall/bin/ham-ctl task show task_1",
-		"  ./.heimdall/bin/ham-ctl chat send --to user --body 'hi there'  ",
-		".heimdall/bin/ham-ctl lease heartbeat",
+		"./bin/ham-ctl chat read",
+		"./bin/ham-ctl task show task_1",
+		"  ./bin/ham-ctl chat send --to user --body 'hi there'  ",
+		"bin/ham-ctl lease heartbeat",
 		"$HEIMDALL_CTL_BIN lease submit --summary done",
 		BIN + " memory propose --title x",
 		BIN + " agent start-success",
@@ -576,8 +576,9 @@ test_is_ham_ctl_command_accepts_only_a_lone_allowlisted_invocation :: proc(t: ^t
 		testing.expectf(t, !is_ham_ctl_command(cmd, BIN, CWD), "should NOT match: %q", cmd)
 	}
 	// The relative wrapper only counts when it resolves to ctl_bin.
-	testing.expect(t, !is_ham_ctl_command("./.heimdall/bin/ham-ctl chat read", BIN, "/tmp/evil"), "relative path from another cwd")
-	testing.expect(t, !is_ham_ctl_command("./.heimdall/bin/ham-ctl chat read", BIN, ""), "relative path without cwd")
+	testing.expect(t, !is_ham_ctl_command("./bin/ham-ctl chat read", BIN, "/tmp/evil"), "relative path from another cwd")
+	testing.expect(t, !is_ham_ctl_command("./bin/ham-ctl chat read", BIN, ""), "relative path without cwd")
+	testing.expect(t, !is_ham_ctl_command("./.heimdall/bin/ham-ctl chat read", BIN, CWD), "the pre-bin/ shim path is not the issued ctl_bin")
 	testing.expect(t, !is_ham_ctl_command("$HEIMDALL_CTL_BIN chat read", "", CWD), "nothing matches without ctl_bin")
 }
 
@@ -586,15 +587,15 @@ test_hook_run_auto_approves_ham_ctl_bash_without_bridge :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	defer free_all(context.temp_allocator)
 	env := ENV
-	env.ctl_bin = "/home/dev/run/.heimdall/bin/ham-ctl"
-	raw := `{"session_id":"s1","cwd":"/home/dev/run","hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"./.heimdall/bin/ham-ctl chat read"}}`
+	env.ctl_bin = "/home/dev/run/bin/ham-ctl"
+	raw := `{"session_id":"s1","cwd":"/home/dev/run","hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"./bin/ham-ctl chat read"}}`
 	fake_reset(`{"ok":true,"data":{"decision":"deny"}}`, true)
 	out := hook_run("claude", raw, env, fake_send)
 	testing.expect_value(t, out, claude_permission_output("allow", ""))
 	testing.expect_value(t, fake_calls, 0)
 
 	// shell run through ham-ctl still goes to the bridge relay.
-	shell := `{"session_id":"s1","cwd":"/home/dev/run","hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"./.heimdall/bin/ham-ctl shell run --cmd 'rm -rf ~'"}}`
+	shell := `{"session_id":"s1","cwd":"/home/dev/run","hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"./bin/ham-ctl shell run --cmd 'rm -rf ~'"}}`
 	fake_reset(`{"ok":true,"data":{"decision":"deny"}}`, true)
 	out = hook_run("claude", shell, env, fake_send)
 	testing.expect_value(t, fake_calls, 1)

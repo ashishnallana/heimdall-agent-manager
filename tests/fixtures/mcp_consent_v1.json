@@ -1,0 +1,87 @@
+{
+  "synthetic_fixture": true,
+  "now_ms": 1793430000000,
+  "request": {
+    "owner": "usr_fixture",
+    "client": "client-fixture",
+    "redirect": "https://client.example/callback",
+    "resource": "https://hub.example/api/v1/mcp",
+    "scope": "mcp:chains",
+    "grant": "grant-fixture",
+    "family": "family-fixture",
+    "revision": 1,
+    "expires_ms": 1793430300000
+  },
+  "directory": {
+    "version": 1,
+    "current_epoch": 1,
+    "root_device_id": "dev_1009a9ffb22d83ce4260f51b8d9b373b",
+    "head_hash": "8a7a64d01f5f48695e9c4aabca135c209dbb2c460ec226a1d551c37a67c4895a",
+    "log": [
+      {
+        "seq": 1,
+        "statement": "heimdall-vault-statement/v2\ntype=genesis\nuser_id=usr_fixture\nseq=1\nprev_hash=\nissuer_device_id=dev_1009a9ffb22d83ce4260f51b8d9b373b\nissued_at_ms=1793446200966\nsubject_device_id=dev_1009a9ffb22d83ce4260f51b8d9b373b\nsubject_kind=browser\nsubject_sign_pub=04af2ce06a1296bc93df6e03ab90947c427037ff29928fb0acbeb2394806dc8c560879ca2482b9d48656f2a701816f7a957a84881f0f11ee36f572656f53df9bd6\nsubject_ecdh_pub=0422127fc9a8a8467728467869261e551d43b90a58ddb440ca82e6fdb6b1a669a251f48a87e7e6d3db2022833539c16d59e8917a2dc894571f005aefdbe16f3f3a\nsubject_sign_alg=ecdsa-p256-sha256\nsubject_wrap_alg=ecdh-p256-hkdf-sha256-aes256gcm\nsubject_label_b64=Um9vdCBicm93c2Vy\nepoch=1\nepoch_commit=a21af1fa2f1f86006f4c3fd1f9bd9c2efe5d356fa63ec62d250450bf4a31ab4d\nwrap_sha256=85364c3ec64015da4337be75f4d7041a583a88c87e8b3d29ec3640504d267a22",
+        "signature": {
+          "alg": "ecdsa-p256-sha256",
+          "sig": "1a245955d1ccdc2e50e3201df528eb77b81c48b2393326e07e7f8cb27c6b17dce227cc6c4d921587e53f82da9fc6b6f461e197fd32564ffd9289e416a7e0304a"
+        }
+      }
+    ],
+    "devices": [
+      {
+        "device_id": "dev_1009a9ffb22d83ce4260f51b8d9b373b",
+        "kind": "browser",
+        "label": "Root browser",
+        "fingerprint": "f2a4 df48 9a81 5c69",
+        "status": "approved",
+        "sign_alg": "ecdsa-p256-sha256",
+        "wrap_alg": "ecdh-p256-hkdf-sha256-aes256gcm",
+        "sign_public_key": "04af2ce06a1296bc93df6e03ab90947c427037ff29928fb0acbeb2394806dc8c560879ca2482b9d48656f2a701816f7a957a84881f0f11ee36f572656f53df9bd6",
+        "ecdh_public_key": "0422127fc9a8a8467728467869261e551d43b90a58ddb440ca82e6fdb6b1a669a251f48a87e7e6d3db2022833539c16d59e8917a2dc894571f005aefdbe16f3f3a"
+      }
+    ],
+    "retired_hints": [],
+    "reset": null
+  },
+  "hosted": {
+    "request": "fixture-ticket",
+    "consent": "{\"v\":1,\"owner\":\"usr_fixture\",\"vault_id\":\"1009a9ffb22d83ce\",\"client\":\"client-fixture\",\"resource\":\"https://hub.example/api/v1/mcp\",\"scope\":\"mcp:chains\",\"grant\":\"grant-fixture\",\"family\":\"family-fixture\",\"revision\":1,\"mode\":\"hosted\",\"recipient\":\"mcp_3db8f93c-2b44-4974-b53d-580735e3c6a4\",\"recipient_public_key\":\"04da0f47cfa800ff74ef4c529e86f15a3e9756b28cd0faccef5882830cb5f1a999a00e1b6e2cbe8a6226baa10a25ff57fb255f4dc9aec70c66d7b66d3eb5166fd8\",\"approver\":\"dev_1009a9ffb22d83ce4260f51b8d9b373b\",\"directory_version\":1,\"directory_head\":\"8a7a64d01f5f48695e9c4aabca135c209dbb2c460ec226a1d551c37a67c4895a\",\"epoch\":1,\"issued_ms\":1793430000000,\"wrap_sha256\":\"e5696b1bde497b36031476f55ecb3b933a389245a0a5fa2b799993f6e7d5f020\"}",
+    "signature": "{\"alg\":\"ecdsa-p256-sha256\",\"sig\":\"3bdba934329934446f0bb448fbf35437d96d83248fd51077cba0aa035034fad60c0a4631fb93d35a264304fd4981897ffa8053002fc727c69d8e85f0e00ba9ae\"}",
+    "wrap_json": "{\"v\":1,\"alg\":\"ecdh-p256-hkdf-sha256-aes256gcm\",\"recipient_device_id\":\"mcp_3db8f93c-2b44-4974-b53d-580735e3c6a4\",\"directory_version\":1,\"current_epoch\":1,\"ephemeral_public_key\":\"0462b903b2a5b8badfd215b80152951793c3e431a01200fbb1a205c0410e36c6d468ed5e57f83f2dec6efffe35ba81126e63f0a4306fdd22b5bd9d374452e79f9e\",\"iv\":\"d5c2544c75d4c7e0b64077c3\",\"ciphertext\":\"f5d8a2469020dc1eca42a6398c5583f8eedf87753c33dad18b21979ccc91c4af555dc87a811aca999f3d73fb8031bdc1f1d544d7a8df704100e0614b915417e5fbf3cb10f3522868808286ec1af0e384a737e9\",\"wrapped_by_device_id\":\"dev_1009a9ffb22d83ce4260f51b8d9b373b\",\"signature\":{\"alg\":\"ecdsa-p256-sha256\",\"sig\":\"c1c703ff0f9bc81656e7b6b84fc207fec5ed4f7da12d0c40557f824a1f1f49004f0d216a504ce197c32e0f09d028d523f147fa793cb00996d23f5065e13ec11e\"}}",
+    "private_capability": "32a3901171918f0b5d410801336856a0454f64aa354c8daf7b1fcc476d3c5aba"
+  },
+  "device": {
+    "request": "fixture-ticket",
+    "consent": "{\"v\":1,\"owner\":\"usr_fixture\",\"vault_id\":\"1009a9ffb22d83ce\",\"client\":\"client-fixture\",\"resource\":\"https://hub.example/api/v1/mcp\",\"scope\":\"mcp:chains\",\"grant\":\"grant-fixture\",\"family\":\"family-fixture\",\"revision\":1,\"mode\":\"device\",\"recipient\":\"\",\"recipient_public_key\":\"\",\"approver\":\"dev_1009a9ffb22d83ce4260f51b8d9b373b\",\"directory_version\":1,\"directory_head\":\"8a7a64d01f5f48695e9c4aabca135c209dbb2c460ec226a1d551c37a67c4895a\",\"epoch\":1,\"issued_ms\":1793430000000,\"wrap_sha256\":\"\"}",
+    "signature": "{\"alg\":\"ecdsa-p256-sha256\",\"sig\":\"9ede01f23201bf00aa2ed7a891decce31baf4c309921a8057958ec8f3bcd006c5517842393f97e58bc8e001827bdb03fb87bcda88b0581049373b3562fd905b7\"}",
+    "wrap_json": "",
+    "private_capability": ""
+  },
+  "consent_body": "{\"request\":\"fixture-ticket\",\"consent\":\"{\\\"v\\\":1,\\\"owner\\\":\\\"usr_fixture\\\",\\\"vault_id\\\":\\\"1009a9ffb22d83ce\\\",\\\"client\\\":\\\"client-fixture\\\",\\\"resource\\\":\\\"https://hub.example/api/v1/mcp\\\",\\\"scope\\\":\\\"mcp:chains\\\",\\\"grant\\\":\\\"grant-fixture\\\",\\\"family\\\":\\\"family-fixture\\\",\\\"revision\\\":1,\\\"mode\\\":\\\"hosted\\\",\\\"recipient\\\":\\\"mcp_3db8f93c-2b44-4974-b53d-580735e3c6a4\\\",\\\"recipient_public_key\\\":\\\"04da0f47cfa800ff74ef4c529e86f15a3e9756b28cd0faccef5882830cb5f1a999a00e1b6e2cbe8a6226baa10a25ff57fb255f4dc9aec70c66d7b66d3eb5166fd8\\\",\\\"approver\\\":\\\"dev_1009a9ffb22d83ce4260f51b8d9b373b\\\",\\\"directory_version\\\":1,\\\"directory_head\\\":\\\"8a7a64d01f5f48695e9c4aabca135c209dbb2c460ec226a1d551c37a67c4895a\\\",\\\"epoch\\\":1,\\\"issued_ms\\\":1793430000000,\\\"wrap_sha256\\\":\\\"e5696b1bde497b36031476f55ecb3b933a389245a0a5fa2b799993f6e7d5f020\\\"}\",\"signature\":\"{\\\"alg\\\":\\\"ecdsa-p256-sha256\\\",\\\"sig\\\":\\\"3bdba934329934446f0bb448fbf35437d96d83248fd51077cba0aa035034fad60c0a4631fb93d35a264304fd4981897ffa8053002fc727c69d8e85f0e00ba9ae\\\"}\",\"wrap_json\":\"{\\\"v\\\":1,\\\"alg\\\":\\\"ecdh-p256-hkdf-sha256-aes256gcm\\\",\\\"recipient_device_id\\\":\\\"mcp_3db8f93c-2b44-4974-b53d-580735e3c6a4\\\",\\\"directory_version\\\":1,\\\"current_epoch\\\":1,\\\"ephemeral_public_key\\\":\\\"0462b903b2a5b8badfd215b80152951793c3e431a01200fbb1a205c0410e36c6d468ed5e57f83f2dec6efffe35ba81126e63f0a4306fdd22b5bd9d374452e79f9e\\\",\\\"iv\\\":\\\"d5c2544c75d4c7e0b64077c3\\\",\\\"ciphertext\\\":\\\"f5d8a2469020dc1eca42a6398c5583f8eedf87753c33dad18b21979ccc91c4af555dc87a811aca999f3d73fb8031bdc1f1d544d7a8df704100e0614b915417e5fbf3cb10f3522868808286ec1af0e384a737e9\\\",\\\"wrapped_by_device_id\\\":\\\"dev_1009a9ffb22d83ce4260f51b8d9b373b\\\",\\\"signature\\\":{\\\"alg\\\":\\\"ecdsa-p256-sha256\\\",\\\"sig\\\":\\\"c1c703ff0f9bc81656e7b6b84fc207fec5ed4f7da12d0c40557f824a1f1f49004f0d216a504ce197c32e0f09d028d523f147fa793cb00996d23f5065e13ec11e\\\"}}\",\"private_capability\":\"32a3901171918f0b5d410801336856a0454f64aa354c8daf7b1fcc476d3c5aba\"}",
+  "consent_headers": {
+    "X-Heimdall-Device-Id": "dev_1009a9ffb22d83ce4260f51b8d9b373b",
+    "X-Heimdall-Device-Ts": "1793430000000",
+    "X-Heimdall-Device-Nonce": "n11111111111111111111111111111111",
+    "X-Heimdall-Device-Sig": "{\"alg\":\"ecdsa-p256-sha256\",\"sig\":\"290e076f365872fe314b7d380f9bec5b1bd2a8d9e067b6167521a7597ec3e4169a813180ba4b4e7f4d9a65e927d2814239584a49391bbe249a9d5a660ca1beef\"}"
+  },
+  "disconnect_body": "{\"grant\":\"grant-fixture\"}",
+  "disconnect_headers": {
+    "X-Heimdall-Device-Id": "dev_1009a9ffb22d83ce4260f51b8d9b373b",
+    "X-Heimdall-Device-Ts": "1793430000000",
+    "X-Heimdall-Device-Nonce": "n22222222222222222222222222222222",
+    "X-Heimdall-Device-Sig": "{\"alg\":\"ecdsa-p256-sha256\",\"sig\":\"153536a49ad7f3f88ee351c15a3623dbbe7d060fa3a09f6846b1c2e2ea406e5e1f98394ce172ed5408844b0c0697693944681783bd420eddd45b39fb0aaed1ee\"}"
+  },
+  "delivery_body": "{\"grant\":\"grant-fixture\",\"revision\":1,\"directory_version\":1,\"directory_head\":\"8a7a64d01f5f48695e9c4aabca135c209dbb2c460ec226a1d551c37a67c4895a\",\"wrap_json\":\"{\\\"v\\\":1,\\\"alg\\\":\\\"ecdh-p256-hkdf-sha256-aes256gcm\\\",\\\"recipient_device_id\\\":\\\"mcp_3db8f93c-2b44-4974-b53d-580735e3c6a4\\\",\\\"directory_version\\\":1,\\\"current_epoch\\\":1,\\\"ephemeral_public_key\\\":\\\"0462b903b2a5b8badfd215b80152951793c3e431a01200fbb1a205c0410e36c6d468ed5e57f83f2dec6efffe35ba81126e63f0a4306fdd22b5bd9d374452e79f9e\\\",\\\"iv\\\":\\\"d5c2544c75d4c7e0b64077c3\\\",\\\"ciphertext\\\":\\\"f5d8a2469020dc1eca42a6398c5583f8eedf87753c33dad18b21979ccc91c4af555dc87a811aca999f3d73fb8031bdc1f1d544d7a8df704100e0614b915417e5fbf3cb10f3522868808286ec1af0e384a737e9\\\",\\\"wrapped_by_device_id\\\":\\\"dev_1009a9ffb22d83ce4260f51b8d9b373b\\\",\\\"signature\\\":{\\\"alg\\\":\\\"ecdsa-p256-sha256\\\",\\\"sig\\\":\\\"c1c703ff0f9bc81656e7b6b84fc207fec5ed4f7da12d0c40557f824a1f1f49004f0d216a504ce197c32e0f09d028d523f147fa793cb00996d23f5065e13ec11e\\\"}}\"}",
+  "delivery_headers": {
+    "X-Heimdall-Device-Id": "dev_1009a9ffb22d83ce4260f51b8d9b373b",
+    "X-Heimdall-Device-Ts": "1793430000000",
+    "X-Heimdall-Device-Nonce": "n33333333333333333333333333333333",
+    "X-Heimdall-Device-Sig": "{\"alg\":\"ecdsa-p256-sha256\",\"sig\":\"9c80caabab976d2678f620672e06a00c2940212e0386c6867d32193fc6a485191686cb8de6bb4a84179decf7553f7d4042db9c527c8f96d309de7799d8dc35df\"}"
+  },
+  "recipients_headers": {
+    "X-Heimdall-Device-Id": "dev_1009a9ffb22d83ce4260f51b8d9b373b",
+    "X-Heimdall-Device-Ts": "1793430000000",
+    "X-Heimdall-Device-Nonce": "n44444444444444444444444444444444",
+    "X-Heimdall-Device-Sig": "{\"alg\":\"ecdsa-p256-sha256\",\"sig\":\"02f67730711bcba1ba2c899370ed72992f34acec4fcc1819eca74924fb5bdfc99cd9a0840f275fe0212ccffc3abcaaa160e63884c6f12844c3c118512b38c946\"}"
+  }
+}

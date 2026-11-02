@@ -771,6 +771,12 @@ is a fully separate bridge:
 | Binaries, data, extensions | `~/.local/share/heimdall/bridges/heimdall-bridge-hub-example-com/` | `~/.local/share/heimdall/bridges/heimdall-bridge-hub-example-com_bob/` |
 | CLI wrapper | `<data dir>/bin/ham-ctl-heimdall-bridge-hub-example-com` | `<data dir>/bin/ham-ctl-heimdall-bridge-hub-example-com_bob` |
 
+The CLI wrapper is for you: it runs `<data dir>/bin/ham-ctl` with that profile's
+config and endpoint, and `ham-bridge setup` rewrites it on every install and
+update. Agents never use it: the service sets `HEIMDALL_HAM_CTL_BIN` to
+`<data dir>/bin/ham-ctl` itself, and the bridge falls back to the `ham-ctl`
+next to `ham-bridge` if that variable names a missing file.
+
 Each profile also gets its own loopback port pair, its own bridge id and
 credential, and its own vault key (keyed by bridge id, see 2.1). The profile is
 recorded in `<config dir>/profile`, and the systemd unit's `Description` ends in
@@ -952,6 +958,24 @@ delivered) restores them. `--reuse-bridge <brg_id>` offers another of your bridg
 the outcome as `Re-enrolled existing bridge <id>` or `Registered new bridge <id>`.
 `ham-bridge enroll --hub <url>` keeps the config so the previous id is offered, and
 `ham-bridge enroll --hub <url> --new-bridge` registers a new bridge.
+
+Selecting an existing bridge on the approval page also works after reinstalling,
+when the local config no longer contains its ID. On every platform, a saved local
+identity for the selected bridge is backed up before replacement and restored if
+enrollment fails, is cancelled, or expires. A successful commit removes the backup.
+The saved identity must belong to the approving account.
+
+Settings → Bridges detects pending new enrollments and replacements every ten
+seconds and offers **Cancel**. A replacement's existing bridge remains available
+until the replacement commits. The approval page also offers **Cancel enrollment**
+while waiting for the enrolling process. Cancellation preserves the old enrollment;
+if commit already won the race, the completed enrollment is kept.
+
+For API clients, `GET /api/v1/bridges?include_pending=1` adds
+`enrollment_in_progress: true` to enrolled bridges with a pending replacement and
+includes pending new bridges once. Replacement targets retain
+`enrollment_state: "enrolled"`; new pending bridges use `"pending"`. Cancel an attempt
+with `POST /api/v1/bridges/{id}/enrollment/cancel` and respect its `rolled_back` verdict.
 
 **Credential shapes, because the distinction is a security decision and not a naming
 detail:** `hba_` is the expiring access credential and the only shape that
@@ -1174,6 +1198,18 @@ There is no separate update script: setup's transaction is the update.
   it hosts), then runs the staged `ham-bridge update --bundle <stage> --service <name>
   --detach`. The PTY host is found through its socket's peer process, and only a
   process whose image is `ham-pty-host` is signalled (SIGTERM, then SIGKILL).
+  The Hub catalog follows the newest promoted GitHub release (excluding drafts and
+  prereleases) with this target's bundle and a valid entry in `SHA256SUMS`, using
+  the same release list as the desktop app. Lookups are cached for five minutes.
+  An explicit operator `override_version` remains a pin; Settings warns if it is
+  older than the promoted release. A pin matching the manifest version retains
+  that manifest's target artifact. Other explicit pins may select prereleases,
+  but still require a verified target artifact; drafts are excluded. Failed pin
+  lookups report why the artifact is unavailable.
+  If GitHub cannot be reached or decoded, the Hub
+  falls back to `HEIMDALL_UPDATE_MANIFEST_PATH` and reports the reason. Bridge info
+  includes `latest_version`, `latest_source` (`promoted`, `override`, or `manifest`),
+  `update_warning`, and `update_fallback_reason`.
 - **From the command line.**
 
   ```bash
@@ -1349,8 +1385,9 @@ cannot restart.
   in its hello, and the Hub stores it as `os: termux`, `arch: arm64`. A `linux-*` build
   that finds itself under Termux also reports `termux-<arch>`, but it **refuses**
   self-update: reinstall it with `install.sh`.
-- **Hub catalog.** The Hub resolves updates from the manifest at
-  `HEIMDALL_UPDATE_MANIFEST_PATH`. Add a `termux-arm64` entry under `targets` that
+- **Hub catalog.** The Hub selects a promoted release with a verified `termux-arm64`
+  bundle. For the offline fallback manifest at `HEIMDALL_UPDATE_MANIFEST_PATH`, add
+  a `termux-arm64` entry under `targets` that
   points to `heimdall-local-termux-arm64-<tag>.tar.gz` and gives its `SHA256SUMS`
   digest:
 
@@ -1377,3 +1414,7 @@ cannot restart.
   On a failed health check it rolls back and runs `sv up` again.
 - **`ham-bridge update --version`.** Resolves the `termux-arm64` asset of the release
   and refuses a release that has none, or whose `SHA256SUMS` does not list it.
+
+## Provider accounts and local isolation
+
+See [Provider profiles and isolated local homes](docs/provider-profiles.md) for per-bridge account configuration, redacted secret editing, storage/trust boundaries, and the end-to-end isolation smoke.

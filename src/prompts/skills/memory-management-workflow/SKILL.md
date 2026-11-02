@@ -7,7 +7,7 @@ description: How an agent proposes and reads durable Heimdall memories with ham-
 
 Use Heimdall memory management for managing long-term agent knowledge, project scopes, habits, facts, and expertise.
 
-All commands use the managed wrapper from your run directory: `./.heimdall/bin/ham-ctl`.
+All commands use the managed wrapper from your run directory: `./bin/ham-ctl`.
 
 ## Scope Selection Rules
 Scope is set by FOUR id-list dimensions on `memory propose` — there is NO `--scope`
@@ -43,10 +43,10 @@ Template targeting is available through the `--template` scope flag; template is
 
 ## CLI Usage Examples (ham-ctl, agent mode)
 - **Propose a memory** (project + agent scope):
-  `./.heimdall/bin/ham-ctl memory propose --type fact --title "Build Rule" --body "Always run tests before committing." --project-ids <project-id> --agent-ids <agent-id>`
+  `./bin/ham-ctl memory propose --type fact --title "Build Rule" --body "Always run tests before committing." --project-ids <project-id> --agent-ids <agent-id>`
 - **Propose a template-scoped memory**:
-  `./.heimdall/bin/ham-ctl memory propose --type habit --title "Reviewer checklist" --body "..." --template-ids <template-id>`
+  `./bin/ham-ctl memory propose --type habit --title "Reviewer checklist" --body "..." --template-ids <template-id>`
 - **List memories**:
-  `./.heimdall/bin/ham-ctl memory list [--status active|pending] [--type <type>]`
+  `./bin/ham-ctl memory list [--status active|pending] [--type <type>]`
 - **Show memory details / read the body**:
-  `./.heimdall/bin/ham-ctl memory show <memory-id>` · `./.heimdall/bin/ham-ctl memory content <memory-id>`
+  `./bin/ham-ctl memory show <memory-id>` · `./bin/ham-ctl memory content <memory-id>`

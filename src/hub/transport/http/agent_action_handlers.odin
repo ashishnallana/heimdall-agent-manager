@@ -85,7 +85,7 @@ agent_action_lease_heartbeat_handler :: proc(ctx: rawptr, req: Request) -> Respo
 	if !ok do return resp
 	if h.task_engine == nil do return respond_error(domain.domain_error(.Internal_Error, "task engine is not configured"), req.request_id)
 	params := json_object_raw(req.body, "params")
-	lease, hok, err := taskv2.lease_heartbeat(h.task_engine, auth, taskv2.Lease_Heartbeat_Input{lease_id = json_string(params, "lease_id"), note = json_string(params, "note")})
+	lease, hok, err := taskv2.lease_heartbeat(h.task_engine, auth, taskv2.Lease_Heartbeat_Input{lease_id = json_string(params, "lease_id"), note = json_string(params, "note"), acknowledge_requirements_revision = i64(jsonx.extract_int(params, "acknowledge_requirements_revision", 0, true))})
 	if !hok do return respond_error(err, req.request_id)
 	data, _ := json.marshal(make_lease_wire(lease), JSON_MARSHAL_OPT, allocator = context.temp_allocator)
 	return respond_success(fmt.tprintf("{{\"lease\":%s}}", string(data)), req.request_id, auth_ctx_server_time(req), 200)
@@ -109,6 +109,7 @@ agent_action_lease_submit_handler :: proc(ctx: rawptr, req: Request) -> Response
 	// (never through a parse → marshal round trip).
 	params := verbatim_params(req.body)
 	res, sok, err := taskv2.lease_submit(h.task_engine, auth, taskv2.Submit_Input{
+		requirements_revision = i64(jsonx.extract_int(params, "requirements_revision", 0, true)),
 		lease_id = json_string(params, "lease_id"), summary = json_string(params, "summary"),
 		handoff_json = verbatim_field(params, "handoff"), output_json = verbatim_field(params, "output"),
 		vcs_json = verbatim_field(params, "vcs"), artifacts_json = verbatim_field(params, "artifacts"),
@@ -173,7 +174,11 @@ agent_action_review_post_handler :: proc(ctx: rawptr, req: Request) -> Response 
 	if !ok do return resp
 	if h.task_engine == nil do return respond_error(domain.domain_error(.Internal_Error, "task engine is not configured"), req.request_id)
 	params := verbatim_params(req.body)
-	res, rok, err := taskv2.review_post(h.task_engine, auth, taskv2.Review_Input{task_id = json_string(params, "task_id"), verdict = json_string(params, "verdict"), findings_json = verbatim_field(params, "findings"), on_behalf_of = json_string(params, "on_behalf_of"), summary = json_string(params, "summary")})
+	res, rok, err := taskv2.review_post(h.task_engine, auth, taskv2.Review_Input{task_id = json_string(params, "task_id"), verdict = json_string(params, "verdict"), findings_json = verbatim_field(params, "findings"), on_behalf_of = json_string(params, "on_behalf_of"), summary = json_string(params, "summary"),
+		lease_id = json_string(params, "lease_id"),
+		requirements_revision = i64(jsonx.extract_int(params, "requirements_revision", 0, true)),
+		expected_attempt_no = jsonx.extract_int(params, "expected_attempt_no", 0, true),
+		expected_head = json_string(params, "expected_head")})
 	if !rok do return respond_error(err, req.request_id)
 	publish_agent_action(h, inst, "review_post", fmt.tprintf("reviewed %s: %s", res.task.task_id, json_string(params, "verdict")))
 	publish_task_event(h.event_bus, string(res.task.owner_user_id), string(res.task.task_id), string(res.task.chain_id), "updated")
@@ -884,6 +889,10 @@ agent_action_task_update_handler :: proc(ctx: rawptr, req: Request) -> Response 
 	if actor_err.code != .None do return respond_error(actor_err, req.request_id)
 	brief_json, _ := jsonx.extract_raw_object(params, "brief", top_level_only = true, allocator = context.temp_allocator)
 	task, updated, err := taskchain_service.update_task(h.taskchains, auth, task_id, taskchain_service.Update_Task_Input{
+        require_requirements_context = true,
+        expected_requirements_revision = i64(jsonx.extract_int(params, "expected_requirements_revision", 0, true)),
+        requirements_reason = json_string(params, "requirements_reason"),
+        requirements_request_id = json_string(params, "request_id"),
 		title = json_string(params, "title"),
 		description = json_string(params, "description"),
 		brief_json = brief_json,
@@ -949,7 +958,9 @@ agent_action_artifact_create_handler :: proc(ctx: rawptr, req: Request) -> Respo
 		dec, _ := internal_b64.decode(b64, allocator = context.temp_allocator)
 		if len(dec) > 0 do content = string(dec)
 	}
-	artifact, saved, err := content_service.create_artifact(h.content, auth, content_service.Artifact_Input{kind = json_string(params, "kind"), name = json_string(params, "name"), description = json_string(params, "description"), content_type = json_string(params, "content_type"), content = content, filename = json_string(params, "filename"), agent_id = inst.agent_id, agent_instance_id = inst.agent_instance_id, chain_id = inst.chain_id, project_id = inst.project_id})
+	// Task attribution comes from the authenticated instance's native lease
+	// binding, never a caller-supplied task/chain or actor override.
+	artifact, saved, err := content_service.create_artifact(h.content, auth, content_service.Artifact_Input{kind = json_string(params, "kind"), name = json_string(params, "name"), description = json_string(params, "description"), content_type = json_string(params, "content_type"), content = content, filename = json_string(params, "filename"), agent_id = inst.agent_id, agent_instance_id = inst.agent_instance_id, chain_id = inst.chain_id, task_id = string(inst.current_task_id), project_id = inst.project_id})
 	if !saved do return respond_error(err, req.request_id)
 	publish_agent_action(h, inst, "artifact_create", fmt.tprintf("created artifact \"%s\"", artifact.name))
 	b := strings.builder_make()

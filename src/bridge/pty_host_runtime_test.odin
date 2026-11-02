@@ -65,7 +65,7 @@ pty_host_env_pairs_splits_on_first_eq :: proc(t: ^testing.T) {
 		"HEIMDALL_AGENT_TOKEN=hlat_a=b=c", // value contains '='
 		"NO_EQUALS_SKIPPED",
 		"=leading-eq-skipped",
-		"HEIMDALL_CTL_BIN=/run/.heimdall/bin/ham-ctl",
+		"HEIMDALL_CTL_BIN=/run/bin/ham-ctl",
 	}
 	pairs := bridge_pty_host_env_pairs(env)
 	defer { for kv in pairs { delete(kv[0]); delete(kv[1]) }; delete(pairs) }
@@ -77,18 +77,18 @@ pty_host_env_pairs_splits_on_first_eq :: proc(t: ^testing.T) {
 	testing.expect_value(t, pairs[1][0], "HEIMDALL_AGENT_TOKEN")
 	testing.expect_value(t, pairs[1][1], "hlat_a=b=c")
 	testing.expect_value(t, pairs[2][0], "HEIMDALL_CTL_BIN")
-	testing.expect_value(t, pairs[2][1], "/run/.heimdall/bin/ham-ctl")
+	testing.expect_value(t, pairs[2][1], "/run/bin/ham-ctl")
 }
 
 @(test)
 pty_host_message_notice_rendering :: proc(t: ^testing.T) {
 	m := bridge_pty_host_message_notice("inst_sender")
 	defer delete(m)
-	testing.expect_value(t, m, "New message from inst_sender \u2014 run './.heimdall/bin/ham-ctl chat read' to view.")
+	testing.expect_value(t, m, "New message from inst_sender \u2014 run './bin/ham-ctl chat read' to view.")
 	// sender_display_name preferred when provided
 	m_dn := bridge_pty_host_message_notice("inst_sender", "Alice")
 	defer delete(m_dn)
-	testing.expect_value(t, m_dn, "New message from Alice \u2014 run './.heimdall/bin/ham-ctl chat read' to view.")
+	testing.expect_value(t, m_dn, "New message from Alice \u2014 run './bin/ham-ctl chat read' to view.")
 	// blank sender defaults to "user"
 	m2 := bridge_pty_host_message_notice("  ")
 	defer delete(m2)
@@ -99,11 +99,11 @@ pty_host_message_notice_rendering :: proc(t: ^testing.T) {
 pty_host_task_nudge_notice_rendering :: proc(t: ^testing.T) {
 	n := bridge_pty_host_task_nudge_notice("task_123", "assignee")
 	defer delete(n)
-	testing.expect_value(t, n, "Nudge: you have been nudged on task_123 (assignee). Run './.heimdall/bin/ham-ctl task list' and complete your assignment.")
+	testing.expect_value(t, n, "Nudge: you have been nudged on task_123 (assignee). Run './bin/ham-ctl task list' and complete your assignment.")
 	// with task title
 	n_title := bridge_pty_host_task_nudge_notice("task_123", "assignee", "Fix the bug")
 	defer delete(n_title)
-	testing.expect_value(t, n_title, "Nudge: you have been nudged on \"Fix the bug\" (task_123) (assignee). Run './.heimdall/bin/ham-ctl task list' and complete your assignment.")
+	testing.expect_value(t, n_title, "Nudge: you have been nudged on \"Fix the bug\" (task_123) (assignee). Run './bin/ham-ctl task list' and complete your assignment.")
 	// blank defaults
 	n2 := bridge_pty_host_task_nudge_notice("", "")
 	defer delete(n2)
@@ -428,7 +428,7 @@ pty_host_build_spawn_from_profile :: proc(t: ^testing.T) {
 	// none is runnable in this build/test env, skip (the assembly logic is still
 	// covered by the codec's Spawn tests).
 	bridge_provider_store_init()
-	env := []string{"HEIMDALL_AGENT_TOKEN=hlat_x", "HEIMDALL_CTL_BIN=/run/.heimdall/bin/ham-ctl"}
+	env := []string{"HEIMDALL_AGENT_TOKEN=hlat_x", "HEIMDALL_CTL_BIN=/run/bin/ham-ctl"}
 	req, ok := bridge_pty_host_build_spawn("inst_test", "/tmp/run/inst_test", "", "", "hlat_x", env, "test-agent #1")
 	if !ok do return // no runnable provider in this environment; nothing to assert
 	defer bridge_pty_host_spawn_request_delete(req)
@@ -753,13 +753,13 @@ pty_stream_worker_detach_deregisters_immediately :: proc(t: ^testing.T) {
 bridge_shell_run_notice_rendering :: proc(t: ^testing.T) {
 	n := bridge_shell_run_notice("sh_123", "exited", "0")
 	defer delete(n)
-	testing.expect_value(t, n, "Shell run sh_123 exited (exit 0). Run './.heimdall/bin/ham-ctl shell log sh_123' to read its output.")
+	testing.expect_value(t, n, "Shell run sh_123 exited (exit 0). Run './bin/ham-ctl shell log sh_123' to read its output.")
 
 	// A kill reports as killed, and an unknown exit code is simply omitted rather than
 	// fabricated as 0 — the agent must be able to tell "no code" from "exit 0".
 	killed := bridge_shell_run_notice("sh_456", "killed", "")
 	defer delete(killed)
-	testing.expect_value(t, killed, "Shell run sh_456 killed. Run './.heimdall/bin/ham-ctl shell log sh_456' to read its output.")
+	testing.expect_value(t, killed, "Shell run sh_456 killed. Run './bin/ham-ctl shell log sh_456' to read its output.")
 
 	// Blank defaults, matching the task-nudge notice's behaviour above: render
 	// something truthful rather than an empty sentence.

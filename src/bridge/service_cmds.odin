@@ -76,18 +76,57 @@ bridge_service_resolve :: proc(host: bridgesvc.Host, args: []string) -> (name: s
 }
 
 bridge_service_exec :: proc(argv: []string) -> (ok: bool, output: string) {
-	state, stdout, stderr, err := os.process_exec(os.Process_Desc{command = argv}, context.temp_allocator)
-	out := strings.trim_space(strings.concatenate({string(stdout), string(stderr)}, context.temp_allocator))
-	// core:os on Windows reports success for every exited process (dev-2026-09/10
-	// _process_wait sets success = true), so the exit code decides.
-	return err == nil && state.success && state.exit_code == 0, out
+	when ODIN_OS == .Windows {
+		stdout, stderr, success, _ := bridge_process_run_capture(argv, 30*time.Second)
+		defer { delete(stdout); delete(stderr) }
+		return success, strings.trim_space(strings.concatenate({stdout, stderr}, context.temp_allocator))
+	} else {
+		state, stdout, stderr, err := os.process_exec(os.Process_Desc{command = argv}, context.temp_allocator)
+		out := strings.trim_space(strings.concatenate({string(stdout), string(stderr)}, context.temp_allocator))
+		return err == nil && state.success && state.exit_code == 0, out
+	}
 }
 
-// bridge_service_running asks the supervisor whether the service is up.
+// A scheduled task can be Ready after its launcher exits while its Bridge is
+// still alive. Trust only the process image of this exact profile and reject a
+// PID reused since the runtime record was written.
+bridge_service_runtime_matches :: proc(rt: bridgesvc.Runtime_Status, own_pid: int, started: i64, image, expected: string, image_known: bool) -> bool {
+	return rt.pid > 0 && rt.pid != own_pid && image_known && started > 0 && started <= rt.updated_at && bridgesvc.path_key(image) == bridgesvc.path_key(expected)
+}
+
+bridge_service_runtime_pid :: proc(host: bridgesvc.Host, l: bridgesvc.Layout) -> int {
+	rt, read_ok := bridgesvc.read_runtime_status(l.state_dir)
+	if !read_ok || !bridge_os_pid_alive(rt.pid) do return 0
+	started, image, image_known := bridge_os_process_lstart_and_command(rt.pid)
+	expected := bridgesvc.pjoin(l.bin_dir, bridgesvc.exe_name(host, "ham-bridge"))
+	if host.os != .Windows {
+		// ps supplies a command line, rather than the Windows executable path.
+		// Match the complete expected path before considering its arguments.
+		if image == expected || strings.has_prefix(image, strings.concatenate({expected, " "}, context.temp_allocator)) || strings.has_prefix(image, fmt.tprintf("\"%s\" ", expected)) {
+			image = expected
+		} else {
+			image_known = false
+		}
+	}
+	if bridge_service_runtime_matches(rt, os.get_pid(), started, image, expected, image_known) do return rt.pid
+	return 0
+}
+
+bridge_service_wait_stopped :: proc(host: bridgesvc.Host, l: bridgesvc.Layout, old_pid: int) -> (bool, string) {
+	deadline := time.time_add(time.now(), 5 * time.Second)
+	for {
+		if (old_pid <= 0 || !bridge_os_pid_alive(old_pid)) && !bridge_service_running(host, l) do return true, "service and Bridge process stopped"
+		if time.diff(time.now(), deadline) <= 0 do return false, "the previous Bridge process or service is still running; update was not started"
+		time.sleep(100 * time.Millisecond)
+	}
+}
+
+// bridge_service_running asks the supervisor, with a verified Windows runtime
+// fallback when the task launcher has already exited.
 bridge_service_running :: proc(host: bridgesvc.Host, l: bridgesvc.Layout) -> bool {
 	if l.backend == .Schtasks {
 		ok, out := bridge_service_exec(bridgesvc.windows_task_state_argv(l))
-		return ok && out == "Running"
+		return (ok && out == "Running") || bridge_service_runtime_pid(host, l) > 0
 	}
 	argv := bridgesvc.service_argv(host, l, .Status)
 	if argv == nil do return false
@@ -107,10 +146,30 @@ bridge_service_action :: proc(host: bridgesvc.Host, name: string, action: bridge
 	argv := bridgesvc.service_argv(host, l, action)
 	if argv == nil do return false, "no supported service manager on this platform"
 	if l.backend == .Launchd && action == .Restart do return bridge_launchd_reload(host, l)
-	ok, msg = bridge_service_exec(argv)
-	if l.backend == .Schtasks && action == .Restart {
-		ok, msg = bridge_service_exec(bridgesvc.service_argv(host, l, .Start))
+	if l.backend == .Schtasks && (action == .Stop || action == .Restart) {
+		old_pid := bridge_service_runtime_pid(host, l)
+		if old_pid > 0 {
+			// Stop only the verified Bridge, not the task's descendant tree: its
+			// PTY daemon hosts live sessions that must survive an update.
+			rt, read_ok := bridgesvc.read_runtime_status(l.state_dir)
+			expected := bridgesvc.pjoin(l.bin_dir, bridgesvc.exe_name(host, "ham-bridge"))
+			if !read_ok || rt.pid != old_pid do return false, "Bridge process changed while stopping; retry the operation"
+			if !bridge_os_stop_service_process(old_pid, rt.updated_at, expected) && bridge_os_pid_alive(old_pid) do return false, "could not stop this profile's verified Bridge process"
+		} else {
+			ok, msg = bridge_service_exec(bridgesvc.service_argv(host, l, .Stop))
+			if !ok {
+				known, state := bridge_service_exec(bridgesvc.windows_task_state_argv(l))
+				if !known || state != "Ready" do return false, msg
+			}
+		}
+		ok, msg = bridge_service_wait_stopped(host, l, old_pid)
+		if !ok do return
+		if action == .Restart do return bridge_service_exec(bridgesvc.service_argv(host, l, .Start))
+		return
 	}
+	old_pid := bridge_service_runtime_pid(host, l) if action == .Stop else 0
+	ok, msg = bridge_service_exec(argv)
+	if ok && action == .Stop do return bridge_service_wait_stopped(host, l, old_pid)
 	// launchd: bootstrap of an already-loaded agent fails; reload it instead.
 	if !ok && l.backend == .Launchd && action == .Start do return bridge_launchd_reload(host, l)
 	return ok, msg
@@ -122,13 +181,20 @@ bridge_service_action :: proc(host: bridgesvc.Host, name: string, action: bridge
 // returns before the job is fully unloaded, so bootstrap is retried briefly;
 // kickstart is the last resort for a job that will not unload.
 bridge_launchd_reload :: proc(host: bridgesvc.Host, l: bridgesvc.Layout) -> (ok: bool, msg: string) {
-	_, _ = bridge_service_exec(bridgesvc.service_argv(host, l, .Stop))
+	old_pid := bridge_service_runtime_pid(host, l)
+	stopped, stop_message := bridge_service_exec(bridgesvc.service_argv(host, l, .Stop))
+	if !stopped {
+		loaded, status_message := bridge_service_exec(bridgesvc.service_argv(host, l, .Status))
+		missing := strings.contains(status_message, "Could not find service")
+		if loaded || !missing || (old_pid > 0 && bridge_os_pid_alive(old_pid)) do return false, stop_message
+	}
+	if stopped, why := bridge_service_wait_stopped(host, l, old_pid); !stopped do return false, why
 	for attempt in 0 ..< 10 {
 		if attempt > 0 do time.sleep(300 * time.Millisecond)
 		ok, msg = bridge_service_exec(bridgesvc.service_argv(host, l, .Start))
 		if ok do return
 	}
-	return bridge_service_exec(bridgesvc.service_argv(host, l, .Restart))
+	return false, msg
 }
 
 // since / stale_pid: see bridgesvc.gather_status (setup's Verify after a restart).
@@ -214,9 +280,10 @@ bridge_list_command :: proc(args: []string) -> bool {
 		fmt.println(bridgesvc.list_json(statuses, context.temp_allocator))
 		return true
 	}
-	if len(statuses) == 0 do fmt.println("no bridge profiles installed for this user")
+	if len(statuses) == 0 do fmt.println("No bridge profiles installed for this OS user. Run ham-bridge setup --hub <url> [--profile <name>] to install one.")
 	for s in statuses {
-		fmt.printfln("%-48s %-36s running=%v connected=%v vault=%s", s.service, s.hub, s.running, s.connected, s.vault)
+		profile := s.profile if s.profile != "" else "default (unnamed)"
+		fmt.printfln("profile=%s service=%s hub=%s running=%v connected=%v vault=%s", profile, s.service, s.hub, s.running, s.connected, s.vault)
 	}
 	return true
 }
