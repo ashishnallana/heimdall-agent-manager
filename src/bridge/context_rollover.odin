@@ -68,6 +68,10 @@ Bridge_Rollover_State :: struct {
 	stall_alerted:     bool, // restarting: idle timeout already alerted
 	cooldown_until_ms: i64,
 	queued_notices:    [dynamic]string, // senders of user notices held during the rollover
+	// Source of the latest idle withheld during the rollover ("" = none, or the
+	// agent went active since). Re-reported when the rollover ends without a
+	// restart so the hub does not keep showing an idle agent as active.
+	withheld_idle_source: string,
 }
 
 Bridge_Rollover_Action_Kind :: enum {
@@ -75,6 +79,7 @@ Bridge_Rollover_Action_Kind :: enum {
 	Restart,
 	Alert,
 	Deliver_Notice,
+	Report_Idle,
 }
 
 Bridge_Rollover_Action :: struct {
@@ -91,6 +96,7 @@ Bridge_Rollover_Effects :: struct {
 	persist:        proc(rec: Bridge_Local_Agent_Token_Record, request_id, body, metadata: string) -> Bridge_Local_Relay_Result,
 	restart:        proc(instance_id: string) -> bool,
 	alert:          proc(instance_id, coordinator_id, text: string),
+	report_idle:    proc(instance_id, source: string),
 }
 
 bridge_rollover_mutex: sync.Mutex
@@ -175,6 +181,11 @@ bridge_rollover_finish_locked :: proc(s: ^Bridge_Rollover_State, now: i64, actio
 	s.restart_requested = false
 	s.stall_alerted = false
 	s.cooldown_until_ms = now + BRIDGE_ROLLOVER_COOLDOWN_MS
+	if s.withheld_idle_source != "" {
+		append(actions, Bridge_Rollover_Action{kind = .Report_Idle, instance_id = strings.clone(s.agent_instance_id), text = strings.clone(s.withheld_idle_source)})
+		delete(s.withheld_idle_source, bridge_rollover_heap())
+		s.withheld_idle_source = ""
+	}
 	for sender in s.queued_notices {
 		append(actions, Bridge_Rollover_Action{kind = .Deliver_Notice, instance_id = strings.clone(s.agent_instance_id), text = strings.clone(sender)})
 		delete(sender, bridge_rollover_heap())
@@ -317,6 +328,10 @@ bridge_rollover_decide_start_success :: proc(instance_id: string, now: i64) -> (
 	defer sync.mutex_unlock(&bridge_rollover_mutex)
 	s := bridge_rollover_state_locked(instance_id, create = false)
 	if s == nil || s.phase != .Restarting || !s.restart_requested do return
+	// The relaunch reports its own status at readiness; the old process's
+	// withheld idle is stale.
+	delete(s.withheld_idle_source, bridge_rollover_heap())
+	s.withheld_idle_source = ""
 	bridge_rollover_finish_locked(s, now, &actions)
 	completed = true
 	return
@@ -332,14 +347,19 @@ bridge_rollover_launch_prompt_line :: proc(instance_id: string) -> string {
 	return BRIDGE_ROLLOVER_RESTART_PROMPT_LINE
 }
 
-// bridge_rollover_filter_activity withholds idle while a rollover is in progress.
-bridge_rollover_filter_activity :: proc(instance_id, activity: string) -> string {
-	if activity != "idle" do return activity
+// bridge_rollover_filter_activity withholds idle while a rollover is in
+// progress (reported as active) and remembers it for bridge_rollover_finish_locked.
+bridge_rollover_filter_activity :: proc(instance_id, activity: string, source := "") -> string {
 	sync.mutex_lock(&bridge_rollover_mutex)
 	defer sync.mutex_unlock(&bridge_rollover_mutex)
 	s := bridge_rollover_state_locked(instance_id, create = false)
-	if s != nil && bridge_rollover_phase_in_progress(s.phase) do return "active"
-	return activity
+	if s == nil || !bridge_rollover_phase_in_progress(s.phase) do return activity
+	heap := bridge_rollover_heap()
+	delete(s.withheld_idle_source, heap)
+	s.withheld_idle_source = ""
+	if activity != "idle" do return activity
+	s.withheld_idle_source = strings.clone(source if source != "" else "agent_extension", heap)
+	return "active"
 }
 
 // bridge_rollover_queue_notice holds a user message notice during a rollover.
@@ -380,7 +400,7 @@ bridge_rollover_forget :: proc(instance_id: string) {
 	for s, i in bridge_rollover_states {
 		if s.agent_instance_id != instance_id do continue
 		heap := bridge_rollover_heap()
-		delete(s.agent_instance_id, heap); delete(s.coordinator_id, heap)
+		delete(s.agent_instance_id, heap); delete(s.coordinator_id, heap); delete(s.withheld_idle_source, heap)
 		for q in s.queued_notices do delete(q, heap)
 		delete(s.queued_notices)
 		unordered_remove(&bridge_rollover_states, i)
@@ -502,6 +522,9 @@ bridge_rollover_execute :: proc(actions: [dynamic]Bridge_Rollover_Action) {
 		case .Deliver_Notice:
 			deliver := bridge_rollover_effects.deliver_notice if bridge_rollover_effects.deliver_notice != nil else bridge_rollover_deliver_notice_default
 			_ = deliver(a.instance_id, a.text)
+		case .Report_Idle:
+			report := bridge_rollover_effects.report_idle if bridge_rollover_effects.report_idle != nil else bridge_rollover_report_idle_default
+			report(a.instance_id, a.text)
 		}
 	}
 }
@@ -512,6 +535,10 @@ bridge_rollover_deliver_line_default :: proc(instance_id, text: string) -> bool 
 	socket, ok := bridge_pty_host_ensure_daemon()
 	if !ok do return false
 	return bridge_pty_host_deliver_line(socket, instance_id, text)
+}
+
+bridge_rollover_report_idle_default :: proc(instance_id, source: string) {
+	bridge_runtime_note_activity_signal(instance_id, "idle", source)
 }
 
 bridge_rollover_deliver_notice_default :: proc(instance_id, sender: string) -> bool {

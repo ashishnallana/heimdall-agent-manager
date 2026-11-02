@@ -2955,7 +2955,7 @@ bridge_runtime_note_agent_activity :: proc(instance_id, activity_status, activit
 	if source == "pane_diff" do bridge_blockers_note_pane_activity(instance_id, activity_status)
 	// T6: idle is withheld (reported active) while a context rollover is in
 	// progress, so the hub's idle grace cannot expire the lease mid-handoff.
-	activity := bridge_rollover_filter_activity(instance_id, bridge_runtime_normalize_activity_status(activity_status))
+	activity := bridge_rollover_filter_activity(instance_id, bridge_runtime_normalize_activity_status(activity_status), source)
 	bridge_runtime_note_activity_signal(instance_id, activity, source)
 }
 

@@ -20,6 +20,7 @@ Roll_Recorder :: struct {
 	persists:   [dynamic]string, // "<instance>|<request_id>|<body>|<metadata>"
 	restarts:   [dynamic]string,
 	alerts:     [dynamic]string, // "<instance>|<coordinator>|<text>"
+	idles:      [dynamic]string, // "<instance>|<source>"
 	persist_ok: bool,
 	restart_ok: bool,
 }
@@ -47,6 +48,9 @@ roll_begin :: proc() {
 		restart = proc(id: string) -> bool {
 			append(&roll_rec.restarts, strings.clone(id, context.temp_allocator)); return roll_rec.restart_ok
 		},
+		report_idle = proc(id, source: string) {
+			append(&roll_rec.idles, strings.concatenate({id, "|", source}, context.temp_allocator))
+		},
 		alert = proc(id, coordinator, text: string) {
 			append(&roll_rec.alerts, strings.concatenate({id, "|", coordinator, "|", text}, context.temp_allocator))
 		},
@@ -59,7 +63,7 @@ roll_end :: proc(ids: ..string) {
 	bridge_rollover_effects = {}
 	bridge_rollover_sync_effects = false
 	delete(roll_rec.requests); delete(roll_rec.notices); delete(roll_rec.persists)
-	delete(roll_rec.restarts); delete(roll_rec.alerts)
+	delete(roll_rec.restarts); delete(roll_rec.alerts); delete(roll_rec.idles)
 	roll_rec = {}
 	sync.mutex_unlock(&roll_test_mutex)
 }
@@ -198,6 +202,7 @@ test_rollover_timeout_retries_once_then_alerts_and_cools_down :: proc(t: ^testin
 	now := i64(5_000_000)
 	roll_event(id, 88, true, now)
 	testing.expect_value(t, len(roll_rec.requests), 1)
+	testing.expect_value(t, bridge_rollover_filter_activity(id, "idle", "claude_extension"), "active")
 
 	roll_tick(now + BRIDGE_ROLLOVER_REQUEST_TIMEOUT_MS - 1)
 	testing.expect_value(t, len(roll_rec.requests), 1)
@@ -214,6 +219,9 @@ test_rollover_timeout_retries_once_then_alerts_and_cools_down :: proc(t: ^testin
 	testing.expect(t, strings.has_prefix(roll_rec.alerts[0], strings.concatenate({id, "|inst_coord_1|Context rollover for agent `", id, "` stalled"}, context.temp_allocator)), roll_rec.alerts[0])
 	testing.expect_value(t, len(roll_rec.restarts), 0)
 	testing.expect_value(t, bridge_rollover_phase_of(id), Bridge_Rollover_Phase.Normal)
+	// The idle withheld during the rollover is reported now that it is over.
+	testing.expect_value(t, len(roll_rec.idles), 1)
+	testing.expect_value(t, roll_rec.idles[0], strings.concatenate({id, "|claude_extension"}, context.temp_allocator))
 	roll_tick(t2 + BRIDGE_ROLLOVER_REQUEST_TIMEOUT_MS)
 	testing.expect_value(t, len(roll_rec.alerts), 1)
 
@@ -285,6 +293,7 @@ test_rollover_withholds_idle_and_queues_notices :: proc(t: ^testing.T) {
 	roll_event(id, 85, true, 2)
 	testing.expect_value(t, bridge_rollover_filter_activity(id, "idle"), "active")
 	testing.expect_value(t, bridge_rollover_filter_activity(id, "waiting_user"), "waiting_user")
+	testing.expect_value(t, bridge_rollover_filter_activity(id, "idle", "pane_diff"), "active")
 	testing.expect(t, bridge_rollover_queue_notice(id, "User"))
 	testing.expect(t, bridge_rollover_queue_notice(id, "User")) // de-duplicated
 	_, _ = roll_self_send(id, "h")
@@ -298,6 +307,7 @@ test_rollover_withholds_idle_and_queues_notices :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(roll_rec.notices), 2)
 	testing.expect_value(t, roll_rec.notices[0], strings.concatenate({id, "|User"}, context.temp_allocator))
 	testing.expect_value(t, roll_rec.notices[1], strings.concatenate({id, "|inst_peer"}, context.temp_allocator))
+	testing.expect_value(t, len(roll_rec.idles), 0) // the relaunch reports its own readiness
 	testing.expect_value(t, bridge_rollover_filter_activity(id, "idle"), "idle")
 }
 
