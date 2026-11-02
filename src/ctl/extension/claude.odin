@@ -8,6 +8,8 @@ package extension
 //   PreToolUse          → tool.start
 //   PostToolUse         → tool.end (+ file.edit for Edit / MultiEdit / Write)
 //   PostToolUseFailure  → tool.end {status:error}
+//                         (every tool.end carries pre-clip metrics; tool.end and
+//                         Stop carry transcript usage when readable)
 //   SubagentStart/Stop  → subagent.start / subagent.stop
 //   Stop                → activity {state:idle}
 //   Notification        → notification
@@ -147,6 +149,7 @@ claude_map_hook :: proc(raw: string, ts: string, permission_timeout_ms := 0, per
 		}
 		pb_int(&p, "background_running", running)
 		eb := ext_event_begin("activity", ts, root, CLAUDE_PROVIDER, CLAUDE_EXT_VERSION)
+		ext_event_usage(&eb, claude_transcript_usage(json_get_string(root, "transcript_path")))
 		append(&out.events, ext_event_end(&eb, pb_done(&p)))
 
 	case .Pre_Tool_Use:
@@ -165,6 +168,8 @@ claude_map_hook :: proc(raw: string, ts: string, permission_timeout_ms := 0, per
 
 	case .Post_Tool_Use:
 		tool := json_get_string(root, "tool_name")
+		// Measured on the native values, before clipping and dropped keys.
+		metrics := tool_metrics(root["tool_input"], root["tool_response"])
 		input := json_clip(root["tool_input"], CLAUDE_TOOL_STRING_MAX)
 		// Whole-file fields duplicate the diff; drop them from tool.response.
 		response := json_clip(root["tool_response"], CLAUDE_TOOL_STRING_MAX,
@@ -180,10 +185,15 @@ claude_map_hook :: proc(raw: string, ts: string, permission_timeout_ms := 0, per
 		}
 		eb := ext_event_begin("tool.end", ts, root, CLAUDE_PROVIDER, CLAUDE_EXT_VERSION)
 		ext_event_tool(&eb, root, input, response)
+		ext_event_metrics(&eb, metrics)
+		ext_event_usage(&eb, claude_transcript_usage(json_get_string(root, "transcript_path")))
 		append(&out.events, ext_event_end(&eb, pb_done(&p)))
 		if ev, ok := claude_file_edit_event(root, ts); ok do append(&out.events, ev)
 
 	case .Post_Tool_Use_Failure:
+		// A failed call has no tool_response; the error text is what the
+		// model receives instead.
+		metrics := tool_metrics(root["tool_input"], root["error"])
 		input := json_clip(root["tool_input"], CLAUDE_TOOL_STRING_MAX)
 		p := pb_make()
 		pb_str(&p, "status", "error")
@@ -191,6 +201,8 @@ claude_map_hook :: proc(raw: string, ts: string, permission_timeout_ms := 0, per
 		if json_get_bool(root, "is_interrupt") do pb_bool(&p, "is_interrupt", true)
 		eb := ext_event_begin("tool.end", ts, root, CLAUDE_PROVIDER, CLAUDE_EXT_VERSION)
 		ext_event_tool(&eb, root, input, nil)
+		ext_event_metrics(&eb, metrics)
+		ext_event_usage(&eb, claude_transcript_usage(json_get_string(root, "transcript_path")))
 		append(&out.events, ext_event_end(&eb, pb_done(&p)))
 
 	case .Subagent_Start:

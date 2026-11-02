@@ -35,6 +35,8 @@ codex_map_hook :: proc(raw, ts: string, permission_timeout_ms := 0, permission_b
 	p := pb_make()
 	pb_str_nonempty(&p, "turn_id", json_get_string(root, "turn_id"))
 	tool_input, tool_response: json.Value
+	has_metrics, has_usage := false, false
+	metrics: Tool_Metrics
 	switch name {
 	case "SessionStart":
 		hello := pb_make()
@@ -65,6 +67,7 @@ codex_map_hook :: proc(raw, ts: string, permission_timeout_ms := 0, permission_b
 		event = "activity"
 		pb_str(&p, "state", "idle")
 		pb_str(&p, "reason", "interrupt" if name == "Interrupt" else "stop")
+		has_usage = true
 		// No background_running:0: a main turn ending does not end its children.
 	case "SubagentStart", "SubagentStop":
 		if json_get_string(root, "agent_id") == "" do return out, .Malformed_Json
@@ -75,6 +78,9 @@ codex_map_hook :: proc(raw, ts: string, permission_timeout_ms := 0, permission_b
 		// Never forward prompts or encrypted child instructions.
 		tool_input = json_clip(root["tool_input"], 4096, {"message", "prompt"})
 		if name == "PostToolUse" {
+			// Native sizes, before clipping and before the image is dropped.
+			metrics = tool_metrics(root["tool_input"], root["tool_response"])
+			has_metrics, has_usage = true, true
 			// Image bytes are not activity metadata. Do not clone, clip, or forward
 			// the native data URL; the paired tool identity is sufficient.
 			if json_get_string(root, "tool_name") != "view_image" {
@@ -101,6 +107,8 @@ codex_map_hook :: proc(raw, ts: string, permission_timeout_ms := 0, permission_b
 		// Identity must survive even when no input/response metadata is retained.
 		ext_event_tool(&eb, root, tool_input, tool_response)
 	}
+	if has_metrics do ext_event_metrics(&eb, metrics)
+	if has_usage do ext_event_usage(&eb, codex_transcript_usage(json_get_string(root, "transcript_path")))
 	append(&out.events, ext_event_end(&eb, pb_done(&p)))
 	if name == "PostToolUse" && json_get_string(root, "tool_name") == "apply_patch" {
 		for edit in codex_patch_events(root, ts) do append(&out.events, edit)

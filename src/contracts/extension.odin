@@ -6,7 +6,15 @@ package contracts
 //
 //   {schema:"ham.ext.v1", provider, ext_version, event, ts, session_id,
 //    transcript_path?, agent:{id?,type?}, tool?:{name,use_id?,input?,response?},
+//    metrics?:{input_bytes,response_bytes,est_tokens},
+//    usage?:{context_tokens,output_tokens_total?,context_window?,source},
 //    payload}
+//
+// metrics (tool.end only) sizes the NATIVE tool input/response before any
+// clipping; est_tokens = ceil((input_bytes+response_bytes)/4). usage is the
+// provider's own context figure read from the session transcript tail; it is
+// omitted whenever the transcript cannot be read. Both are optional, so events
+// from older extensions still parse.
 //
 // Provider-specific translation lives in the ctl/extension layer; nothing here
 // may know about a particular harness.
@@ -67,6 +75,34 @@ Ext_Event :: struct {
 	session_phase:     string, // session only (payload.phase)
 	notification_type: string, // notification only (payload.type | payload.notification_type)
 	capabilities:      [dynamic]string, // hello only (payload.capabilities)
+	has_metrics:       bool,
+	metrics:           Ext_Tool_Metrics,
+	has_usage:         bool,
+	usage:             Ext_Usage,
+}
+
+// Ext_Tool_Metrics is the pre-clip size of one tool call (event.metrics).
+Ext_Tool_Metrics :: struct {
+	input_bytes:    i64,
+	response_bytes: i64,
+	est_tokens:     i64,
+}
+
+// Ext_Usage is the provider-reported context usage (event.usage). Zero
+// output_tokens_total / context_window mean "not reported" (has_* = false).
+Ext_Usage :: struct {
+	context_tokens:          i64,
+	output_tokens_total:     i64,
+	has_output_tokens_total: bool,
+	context_window:          i64,
+	has_context_window:      bool,
+	source:                  string, // owned
+}
+
+// ext_est_tokens is the byte→token heuristic shared by producer and consumers.
+ext_est_tokens :: proc(input_bytes, response_bytes: i64) -> i64 {
+	total := max(input_bytes, 0) + max(response_bytes, 0)
+	return (total + 3) / 4
 }
 
 ext_event_kind_name :: proc(k: Ext_Event_Kind) -> string {
@@ -109,7 +145,7 @@ ext_event_destroy :: proc(ev: ^Ext_Event) {
 	delete(ev.provider); delete(ev.ext_version); delete(ev.ts); delete(ev.session_id)
 	delete(ev.transcript_path); delete(ev.agent_id); delete(ev.agent_type); delete(ev.tool_name)
 	delete(ev.tool_use_id); delete(ev.file_path); delete(ev.activity_state); delete(ev.notification_type)
-	delete(ev.session_phase)
+	delete(ev.session_phase); delete(ev.usage.source)
 	for c in ev.capabilities do delete(c)
 	delete(ev.capabilities)
 	ev^ = {}
@@ -138,6 +174,20 @@ json_int_text :: proc(n: i64) -> string {
 	for u > 0 { i -= 1; buf[i] = u8('0' + u % 10); u /= 10 }
 	if neg { i -= 1; buf[i] = '-' }
 	return strings.clone_from_bytes(buf[i:], context.temp_allocator)
+}
+
+// ext_obj_int reads a non-negative integral number; ok=false when absent,
+// non-numeric, negative or fractional.
+@(private = "file")
+ext_obj_int :: proc(obj: json.Object, key: string) -> (i64, bool) {
+	if obj == nil do return 0, false
+	#partial switch x in obj[key] {
+	case json.Integer:
+		if i64(x) >= 0 do return i64(x), true
+	case json.Float:
+		if f64(x) >= 0 && f64(x) == f64(i64(x)) do return i64(x), true
+	}
+	return 0, false
 }
 
 @(private = "file")
@@ -185,6 +235,28 @@ ext_parse_event :: proc(raw: string) -> (ev: Ext_Event, err: Ext_Error) {
 	ev.tool_name = ext_obj_string(tool, "name")
 	ev.tool_use_id = ext_obj_string(tool, "use_id")
 	payload := ext_obj_object(root, "payload")
+
+	// Optional size/usage blocks: a malformed block is ignored, never fatal.
+	if m := ext_obj_object(root, "metrics"); m != nil {
+		in_b, in_ok := ext_obj_int(m, "input_bytes")
+		out_b, out_ok := ext_obj_int(m, "response_bytes")
+		if in_ok && out_ok {
+			ev.has_metrics = true
+			ev.metrics.input_bytes = in_b
+			ev.metrics.response_bytes = out_b
+			est, est_ok := ext_obj_int(m, "est_tokens")
+			ev.metrics.est_tokens = est if est_ok else ext_est_tokens(in_b, out_b)
+		}
+	}
+	if u := ext_obj_object(root, "usage"); u != nil {
+		if ctx, ok := ext_obj_int(u, "context_tokens"); ok {
+			ev.has_usage = true
+			ev.usage.context_tokens = ctx
+			ev.usage.output_tokens_total, ev.usage.has_output_tokens_total = ext_obj_int(u, "output_tokens_total")
+			ev.usage.context_window, ev.usage.has_context_window = ext_obj_int(u, "context_window")
+			ev.usage.source = ext_obj_string(u, "source")
+		}
+	}
 
 	#partial switch kind {
 	case .Session:

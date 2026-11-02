@@ -332,6 +332,7 @@ antigravity_map_hook :: proc(raw: string, ts: string, permission_timeout_ms := 0
 		if tool_resp == nil do tool_resp = root["tool_response"]
 		if tool_resp == nil do tool_resp = root["tool_result"]
 
+		metrics := tool_metrics(tool_args, tool_resp) // native sizes, pre-clip
 		input := json_clip(tool_args, ANTIGRAVITY_TOOL_STRING_MAX)
 		response := json_clip(tool_resp, ANTIGRAVITY_TOOL_STRING_MAX)
 
@@ -365,6 +366,7 @@ antigravity_map_hook :: proc(raw: string, ts: string, permission_timeout_ms := 0
 		else if d, ok := json_get_int(root, "duration_ms"); ok do pb_int(&p, "duration_ms", d)
 		eb := ext_event_begin("tool.end", ts, root, ANTIGRAVITY_PROVIDER, ANTIGRAVITY_EXT_VERSION)
 		ext_event_tool(&eb, root, input, response)
+		ext_event_metrics(&eb, metrics)
 		append(&out.events, ext_event_end(&eb, pb_done(&p)))
 
 		if status_str != "error" {
