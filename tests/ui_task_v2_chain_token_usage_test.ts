@@ -1,0 +1,102 @@
+// Task chain overview token usage (T10): normalization of
+// GET /task-chains/{id}/token-usage, the per-agent rows (lifetime total, current
+// context %), per-instance rows, the chain total, the empty state, and that
+// token_usage_changed on a chain instance refreshes the chain's usage.
+//
+// RUN: node --import ./tests/helpers/vaultEndpointHarness.ts --test tests/ui_task_v2_chain_token_usage_test.ts
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import { fileURLToPath } from 'node:url';
+
+const model = await import('../src/ui/components/taskchain/chainTokenUsageModel.ts');
+const view = await import('../src/ui/components/taskchain/ChainTokenUsage.tsx');
+
+const fig = (ctx: number, tool: number, out: number, runs: number) => ({ total_tokens: ctx + out, context_tokens: ctx, est_tool_tokens: tool, output_tokens: out, runs });
+
+const PAYLOAD = {
+  chain_id: 'chain_a', has_data: true, instances: 4, instances_with_data: 3, warn_pct: 60, rollover_pct: 80,
+  total: fig(530000, 7840, 4920, 5),
+  agents: [
+    {
+      agent_id: 'agt_worker', agent_name: 'Worker', has_data: true, live_instances: 2,
+      lifetime: fig(510000, 7800, 4920, 4),
+      context: { pct: 85, tokens: 170000, window: 200000, agent_instance_id: 'inst_w1' },
+      instances: [
+        { agent_instance_id: 'inst_w1', display_name: 'worker #1', runtime_status: 'running', live: true, has_data: true, snapshot_counted: false, lifetime: fig(430000, 7500, 4900, 3), run_count: 3, context_pct: 85, context_tokens: 170000, context_window: 200000, window_source: 'config' },
+        { agent_instance_id: 'inst_w2', display_name: 'worker #2', runtime_status: 'stopped', live: false, has_data: true, snapshot_counted: true, lifetime: fig(80000, 300, 20, 1), run_count: 4, context_pct: 25 },
+        { agent_instance_id: 'inst_w3', display_name: '', runtime_status: 'idle', live: true, has_data: false, snapshot_counted: false, lifetime: fig(0, 0, 0, 0) },
+      ],
+    },
+    {
+      agent_id: 'agt_coord', agent_name: '', has_data: true, live_instances: 0,
+      lifetime: fig(20000, 40, 0, 1),
+      instances: [{ agent_instance_id: 'inst_c1', display_name: 'coord', runtime_status: 'stopped', live: false, has_data: true, snapshot_counted: false, lifetime: fig(20000, 40, 0, 1), run_count: 1 }],
+    },
+  ],
+};
+
+async function render(element: any): Promise<string> {
+  const React = await import('react');
+  const { renderToStaticMarkup } = await import('react-dom/server');
+  return renderToStaticMarkup(React.createElement(React.Fragment, null, element));
+}
+
+test('normalizes the payload (and its {data} envelope); per-agent and per-instance figures', () => {
+  const u = model.normalizeChainTokenUsage(PAYLOAD)!;
+  assert.ok(u.hasData);
+  assert.equal(u.agents.length, 2);
+  assert.deepEqual(u.total, { totalTokens: 534920, contextTokens: 530000, estToolTokens: 7840, outputTokens: 4920, runs: 5 });
+  const w = u.agents[0];
+  assert.equal(w.name, 'Worker');
+  assert.equal(w.context!.pct, 85);
+  assert.equal(w.context!.tone, 'danger');
+  assert.equal(w.context!.instanceId, 'inst_w1');
+  assert.equal(w.instances[0].context!.tone, 'danger');
+  // A stopped instance never shows a "current" context %, even if one is sent.
+  assert.equal(w.instances[1].context, null);
+  assert.equal(w.instances[2].hasData, false);
+  // Unnamed agent falls back to its id; no live instance -> no context.
+  assert.equal(u.agents[1].name, 'agt_coord');
+  assert.equal(u.agents[1].context, null);
+  assert.equal(model.shareOfTotal(w.lifetime, u.total), 96);
+  assert.deepEqual(model.normalizeChainTokenUsage({ data: PAYLOAD }), u);
+});
+
+test('missing / malformed data yields the empty state, never a crash', async () => {
+  for (const raw of [undefined, null, 'x', [], {}, { has_data: false, agents: [] }, { has_data: true, agents: [{ agent_id: 'a', has_data: false, instances: [] }] }]) {
+    const u = model.normalizeChainTokenUsage(raw);
+    assert.ok(!u || !u.hasData, JSON.stringify(raw));
+    const html = await render(view.ChainTokenUsageView({ usage: u }));
+    assert.match(html, /data-debug-id="chain-token-usage-empty"/);
+    assert.match(html, /No token usage reported yet/);
+  }
+  // Partial figures default to 0, total derived from context + output.
+  assert.deepEqual(model.normalizeFigures({ context_tokens: 10, output_tokens: 5 }), { totalTokens: 15, contextTokens: 10, estToolTokens: 0, outputTokens: 5, runs: 0 });
+  assert.deepEqual(model.normalizeFigures({ context_tokens: -3, runs: 'x' }), { totalTokens: 0, contextTokens: 0, estToolTokens: 0, outputTokens: 0, runs: 0 });
+});
+
+test('renders per-agent rows (lifetime + context %), instance rows and the chain total', async () => {
+  const html = await render(view.ChainTokenUsageView({ usage: model.normalizeChainTokenUsage(PAYLOAD) }));
+  assert.match(html, /data-debug-id="chain-token-usage-table"/);
+  assert.match(html, /data-debug-id="chain-token-usage-agent-agt_worker"/);
+  assert.match(html, /data-debug-id="chain-token-usage-agent-total-agt_worker"[^>]*>514K</);
+  assert.match(html, /data-debug-id="chain-token-usage-agent-context-agt_worker" data-context-tone="danger"/);
+  assert.match(html, />85%</);
+  assert.match(html, /96% of chain/);
+  assert.match(html, /data-debug-id="chain-token-usage-agent-context-agt_coord"[^>]*>—</);
+  assert.match(html, /data-debug-id="chain-token-usage-instance-inst_w1"/);
+  assert.match(html, /data-debug-id="chain-token-usage-instance-inst_w3"/);
+  assert.match(html, /data-debug-id="chain-token-usage-total-value"[^>]*>534K</);
+  assert.match(html, /Chain total/);
+  assert.match(html, /warn 60%, rollover 80%/);
+});
+
+test('overview mounts the section; token_usage_changed refreshes the chain usage tag', () => {
+  const read = (rel: string) => fs.readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8');
+  assert.match(read('../src/ui/components/taskchain/TaskChainOverview.tsx'), /footerSlot=\{<ChainTokenUsageSection chainId=\{chainId\} \/>\}/);
+  const ws = read('../src/ui/api/wsInvalidation.ts');
+  assert.match(ws, /change === 'token_usage_changed' \|\| change === 'created'[\s\S]{0,120}type: 'ChainTokenUsage', id: tokenChainId/);
+  assert.match(read('../src/ui/api/endpoints/taskChains.ts'), /\/task-chains\/\$\{encodeURIComponent\(chainId\)\}\/token-usage/);
+});

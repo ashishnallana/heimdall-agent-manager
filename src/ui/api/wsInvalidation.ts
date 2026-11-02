@@ -902,6 +902,12 @@ function handleInstanceChanged(dispatch: any, payload: any, ctx: WsCtx, instance
   if (change === 'token_usage_changed' && instanceId) {
     queueInvalidation(dispatch, [{ type: 'AgentInstances', id: instanceId }, { type: 'AgentInstances', id: 'LIST' }]);
   }
+  // The chain overview's per-agent token usage (T10) aggregates the chain's
+  // instances: refresh it on their token updates and when one joins the chain.
+  const tokenChainId = String(summary?.chain_id || '');
+  if (tokenChainId && (change === 'token_usage_changed' || change === 'created')) {
+    queueInvalidation(dispatch, [{ type: 'ChainTokenUsage', id: tokenChainId }]);
+  }
   // Legacy caches + the "identity missing from the catalogue" check (agents.ts).
   handleAgentEvent(dispatch, { ...payload, type: 'agent_update', agent_instance_id: instanceId, summary }, ctx);
 }

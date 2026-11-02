@@ -66,6 +66,7 @@ export const HEIMDALL_TAG_TYPES = [
   'Issue',
   'IssueComments',
   'TaskChainFleets',
+  'ChainTokenUsage',
 ] as const;
 
 type QueryError = {

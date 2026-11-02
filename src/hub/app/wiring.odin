@@ -833,6 +833,7 @@ register_routes :: proc(graph: ^App_Graph) {
 	http.router_add(&graph.router, "POST", "/api/v1/task-chains/search/relay", rawptr(&graph.bridge_handlers), http.task_chain_search_relay_handler)
 	http.router_add(&graph.router, "GET", "/api/v1/task-chains/*", rawptr(&graph.taskchain_handlers), http.task_chain_detail_handler)
 	http.router_add(&graph.router, "GET", "/api/v1/task-chains/*/summary", rawptr(&graph.taskchain_handlers), http.get_task_chain_summary_handler)
+	http.router_add(&graph.router, "GET", "/api/v1/task-chains/*/token-usage", rawptr(&graph.taskchain_handlers), http.task_chain_token_usage_handler)
 	http.router_add(&graph.router, "GET", "/api/v1/task-chains/*/conversation", rawptr(&graph.taskchain_handlers), http.get_task_chain_conversation_handler)
 	http.router_add(&graph.router, "PUT", "/api/v1/task-chains/*/summary", rawptr(&graph.taskchain_handlers), http.put_task_chain_summary_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/task-chains/*/propose", rawptr(&graph.taskchain_handlers), http.propose_task_chain_handler)
