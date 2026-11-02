@@ -16,7 +16,7 @@ const view = await import('../src/ui/components/taskchain/ChainTokenUsage.tsx');
 const fig = (ctx: number, tool: number, out: number, runs: number) => ({ total_tokens: ctx + out, context_tokens: ctx, est_tool_tokens: tool, output_tokens: out, runs });
 
 const PAYLOAD = {
-  chain_id: 'chain_a', has_data: true, instances: 4, instances_with_data: 3, warn_pct: 60, rollover_pct: 80,
+  chain_id: 'chain_a', has_data: true, instances: 4, instances_with_data: 3, warn_pct: 40, rollover_pct: 70,
   total: fig(530000, 7840, 4920, 5),
   agents: [
     {
@@ -90,7 +90,7 @@ test('renders per-agent rows (lifetime + context %), instance rows and the chain
   assert.match(html, /data-debug-id="chain-token-usage-instance-inst_w3"/);
   assert.match(html, /data-debug-id="chain-token-usage-total-value"[^>]*>534K</);
   assert.match(html, /Chain total/);
-  assert.match(html, /warn 60%, rollover 80%/);
+  assert.match(html, /warn 40%, rollover 70%/);
 });
 
 test('overview mounts the section; token_usage_changed refreshes the chain usage tag', () => {

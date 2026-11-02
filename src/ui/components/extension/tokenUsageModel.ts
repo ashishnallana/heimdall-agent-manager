@@ -8,9 +8,9 @@
 //   token_totals {total_context_tokens, total_est_tool_tokens, total_output_tokens,
 //                 runs_counted, last_run_counted}  (added at each hub stop/restart)
 
-/** Thresholds shared with the bridge's shipped config. */
-export const CONTEXT_WARN_PCT = 60;
-export const CONTEXT_ROLLOVER_PCT = 80;
+/** Thresholds shared with the bridge's shipped config (src/bridge/context_windows.json) and the hub. */
+export const CONTEXT_WARN_PCT = 40;
+export const CONTEXT_ROLLOVER_PCT = 70;
 
 export type ContextTone = 'neutral' | 'warning' | 'danger';
 export type WindowSource = 'override' | 'config' | 'default' | '';
@@ -79,7 +79,7 @@ export function normalizeTokenTotals(raw: unknown): TokenTotals | null {
   };
 }
 
-/** amber at >= 60 % (warn), red at >= 80 % (rollover threshold). */
+/** amber at >= CONTEXT_WARN_PCT (40 %), red at >= CONTEXT_ROLLOVER_PCT (70 %). Display only: nothing is sent to the agent. */
 export function contextTone(pct: number): ContextTone {
   if (pct >= CONTEXT_ROLLOVER_PCT) return 'danger';
   if (pct >= CONTEXT_WARN_PCT) return 'warning';

@@ -59,11 +59,13 @@ test('formatting and state normalization', () => {
   ] })!;
   assert.deepEqual(s.windows.map((w) => w.model), ['opus', 'gpt-5'], 'malformed rows dropped, sorted by provider/model');
   assert.equal(s.default_window, 200_000);
+  assert.equal(s.warn_pct, 40, 'missing thresholds fall back to the shared 40/70');
+  assert.equal(s.rollover_pct, 70);
   assert.equal(s.windows[0].resolved_model, 'claude-opus-4');
 });
 
 function bridgeState(windows: any[]) {
-  return { type: 'context_window_op_result', ok: true, default_window: 200000, min_window: 100000, max_window: 100000000, warn_pct: 60, rollover_pct: 80, entries: [], overrides: [], windows };
+  return { type: 'context_window_op_result', ok: true, default_window: 200000, min_window: 100000, max_window: 100000000, warn_pct: 40, rollover_pct: 70, entries: [], overrides: [], windows };
 }
 
 const INITIAL = [
@@ -128,7 +130,8 @@ test('lists each provider/model with its source badge and highlights default (mi
       assert.match(gemini.className, /warning/, 'default entries are highlighted');
       assert.doesNotMatch(row(dom, 'sonnet').className, /warning/);
       assert.match(dom.window.document.body.textContent || '', /1 model is not in the shipped config/);
-      assert.match(dom.window.document.body.textContent || '', /60%.*80%/);
+      assert.match(dom.window.document.body.textContent || '', /amber at 40% of the window \(display only; nothing is sent to the agent\), and at 70% the agent rolls over: it restarts with a fresh context/);
+      assert.doesNotMatch(dom.window.document.body.textContent || '', /get a warning/);
     } finally {
       await act(async () => root.unmount());
     }

@@ -13,9 +13,11 @@ import "core:strings"
 // Upper bound for any counter; larger (or negative/non-integer) values are
 // rejected so a misbehaving bridge cannot poison the lifetime totals.
 AGENT_TOKEN_USAGE_MAX :: 1_000_000_000_000
-// Thresholds shared with the bridge's shipped config (warn / rollover %).
-AGENT_TOKEN_WARN_PCT :: 60
-AGENT_TOKEN_ROLLOVER_PCT :: 80
+// Thresholds shared with the bridge's shipped config (src/bridge/context_windows.json)
+// and the UI (tokenUsageModel.ts): warn = amber meter only, rollover = restart
+// with a fresh context.
+AGENT_TOKEN_WARN_PCT :: 40
+AGENT_TOKEN_ROLLOVER_PCT :: 70
 
 Agent_Token_Usage :: struct {
 	tool_calls:          i64,

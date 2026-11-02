@@ -101,7 +101,7 @@ export default function BridgeContextWindows({ bridgeId, online }: { bridgeId: s
       Context windows{!online ? ' (connect to view or change)' : state === null && !loadError ? ' (loading…)' : ''}
     </Text>
     {state ? <Text as="p" role="caption" tone="muted">
-      Agents get a warning at {state.warn_pct}% and roll over to a fresh context at {state.rollover_pct}% of the window.
+      The context meter turns amber at {state.warn_pct}% of the window (display only; nothing is sent to the agent), and at {state.rollover_pct}% the agent rolls over: it restarts with a fresh context.
       {missing > 0 ? ` ${missing} model${missing === 1 ? ' is' : 's are'} not in the shipped config and use${missing === 1 ? 's' : ''} the ${formatContextWindow(state.default_window)} default.` : ''}
     </Text> : null}
     {loadError ? <p role="alert" className="text-caption text-danger">{loadError}</p> : null}

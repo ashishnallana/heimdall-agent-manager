@@ -133,8 +133,8 @@ bridge_context_window_parse_config :: proc(text: string, out: ^Bridge_Context_Wi
 	wire: Bridge_Context_Window_Config_Wire
 	if json.unmarshal_string(text, &wire, allocator = context.temp_allocator) != nil do return false
 	out.default_window = wire.default_window if wire.default_window >= BRIDGE_CONTEXT_WINDOW_MIN else BRIDGE_CONTEXT_WINDOW_FALLBACK
-	out.warn_pct = wire.warn_pct if wire.warn_pct > 0 && wire.warn_pct <= 100 else 60
-	out.rollover_pct = wire.rollover_pct if wire.rollover_pct > 0 && wire.rollover_pct <= 100 else 80
+	out.warn_pct = wire.warn_pct if wire.warn_pct > 0 && wire.warn_pct <= 100 else 40
+	out.rollover_pct = wire.rollover_pct if wire.rollover_pct > 0 && wire.rollover_pct <= 100 else 70
 	out.entries = make([dynamic]Bridge_Context_Window_Entry, allocator)
 	for e in wire.entries {
 		provider := strings.trim_space(e.provider)
@@ -174,7 +174,7 @@ ctxwin_config_load_locked :: proc() {
 	bridge_ctxwin_config_loaded = true
 	if !bridge_context_window_parse_config(BRIDGE_CONTEXT_WINDOWS_EMBEDDED, &bridge_ctxwin_config, ctxwin_allocator()) {
 		fmt.eprintln("bridge context windows: shipped config unreadable; using the 200000 default")
-		bridge_ctxwin_config = {default_window = BRIDGE_CONTEXT_WINDOW_FALLBACK, warn_pct = 60, rollover_pct = 80}
+		bridge_ctxwin_config = {default_window = BRIDGE_CONTEXT_WINDOW_FALLBACK, warn_pct = 40, rollover_pct = 70}
 	}
 }
 

@@ -39,7 +39,7 @@ launch (`src/bridge/context_window.odin`) from, in order:
    context_window}` entries, first match wins, the regex anchored to the whole
    id, tried against the configured model (which may be an alias such as
    `default`) and then the `resolved_model` from model discovery; it also
-   ships `warn_pct` 60 and `rollover_pct` 80;
+   ships `warn_pct` 40 and `rollover_pct` 70;
 3. the 200000 default.
 
 The hub drives overrides with the `context_window_op` frame

@@ -1,6 +1,6 @@
 // Per-instance token usage (chain T3r): normalization of the instance JSON's
-// token_usage / token_totals, the list badge thresholds (amber >= 60 %, red >=
-// 80 %), the Runtime card's context meter and lifetime totals, and that every
+// token_usage / token_totals, the list badge thresholds (amber >= 40 %, red >=
+// 70 %), the Runtime card's context meter and lifetime totals, and that every
 // piece renders nothing when the data is absent.
 //
 // RUN: node --import ./tests/helpers/vaultEndpointHarness.ts --test tests/ui_extension_token_usage_test.ts
@@ -42,11 +42,13 @@ test('normalizes the snapshot and totals; rejects absent or malformed data', () 
   for (const raw of [undefined, null, {}, { runs_counted: 0 }]) assert.equal(model.normalizeTokenTotals(raw), null);
 });
 
-test('badge tone: neutral below 60 %, amber at 60 %, red at 80 %', () => {
-  assert.equal(model.contextTone(59), 'neutral');
-  assert.equal(model.contextTone(60), 'warning');
-  assert.equal(model.contextTone(79), 'warning');
-  assert.equal(model.contextTone(80), 'danger');
+test('badge tone: neutral below 40 %, amber at 40 %, red at 70 %', () => {
+  assert.equal(model.CONTEXT_WARN_PCT, 40);
+  assert.equal(model.CONTEXT_ROLLOVER_PCT, 70);
+  assert.equal(model.contextTone(39), 'neutral');
+  assert.equal(model.contextTone(40), 'warning');
+  assert.equal(model.contextTone(69), 'warning');
+  assert.equal(model.contextTone(70), 'danger');
   assert.equal(model.contextTone(100), 'danger');
   const badge = model.contextBadge({ token_usage: { ...SNAPSHOT, context_tokens: 164000, context_pct: 82 } })!;
   assert.equal(badge.tone, 'danger');

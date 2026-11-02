@@ -40,8 +40,8 @@ test_ctxwin_shipped_config_parses_every_entry :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(c.entries), 5) // no shipped regex may fail to compile
 	testing.expect_value(t, c.default_window, i64(200_000))
 	testing.expect_value(t, c.default_window, i64(BRIDGE_EXT_TOKEN_DEFAULT_WINDOW))
-	testing.expect_value(t, c.warn_pct, 60)
-	testing.expect_value(t, c.rollover_pct, 80)
+	testing.expect_value(t, c.warn_pct, 40)
+	testing.expect_value(t, c.rollover_pct, 70)
 }
 
 @(test)
@@ -85,8 +85,8 @@ test_ctxwin_custom_config_first_match_wins_and_bad_regex_skipped :: proc(t: ^tes
 	testing.expect_value(t, len(c.entries), 2)
 	testing.expect_value(t, c.entries[0].context_window, i64(111111))
 	testing.expect_value(t, c.default_window, i64(300000))
-	testing.expect_value(t, c.warn_pct, 60) // out-of-range thresholds fall back
-	testing.expect_value(t, c.rollover_pct, 80)
+	testing.expect_value(t, c.warn_pct, 40) // out-of-range thresholds fall back
+	testing.expect_value(t, c.rollover_pct, 70)
 	bad: Bridge_Context_Window_Config
 	testing.expect(t, !bridge_context_window_parse_config("not json", &bad))
 }
@@ -193,8 +193,8 @@ test_ctxwin_op_frame_list_set_clear :: proc(t: ^testing.T) {
 	testing.expect_value(t, root["type"].(json.String), "context_window_op_result")
 	testing.expect_value(t, root["command_id"].(json.String), "cmd_1")
 	testing.expect_value(t, root["ok"].(json.Boolean), true)
-	testing.expect_value(t, root["warn_pct"].(json.Integer), 60)
-	testing.expect_value(t, root["rollover_pct"].(json.Integer), 80)
+	testing.expect_value(t, root["warn_pct"].(json.Integer), 40)
+	testing.expect_value(t, root["rollover_pct"].(json.Integer), 70)
 	testing.expect_value(t, root["default_window"].(json.Integer), 200000)
 	testing.expect_value(t, root["min_window"].(json.Integer), 100000)
 	testing.expect_value(t, len(root["entries"].(json.Array)), 5)

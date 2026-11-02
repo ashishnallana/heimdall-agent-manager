@@ -738,7 +738,7 @@ context_window_roundtrip :: proc(t: ^testing.T, tag: string, req_in: Request, re
 	return response, command, peer.correlated
 }
 
-CTXWIN_TEST_STATE :: `"default_window":200000,"min_window":100000,"max_window":100000000,"warn_pct":60,"rollover_pct":80,"entries":[],"overrides":[{{"provider":"claude","model":"opus","context_window":500000}}],"windows":[{{"provider":"claude","model":"opus","context_window":500000,"source":"override"}},{{"provider":"codex","model":"gpt-5","context_window":200000,"source":"default"}}]`
+CTXWIN_TEST_STATE :: `"default_window":200000,"min_window":100000,"max_window":100000000,"warn_pct":40,"rollover_pct":70,"entries":[],"overrides":[{{"provider":"claude","model":"opus","context_window":500000}}],"windows":[{{"provider":"claude","model":"opus","context_window":500000,"source":"override"}},{{"provider":"codex","model":"gpt-5","context_window":200000,"source":"default"}}]`
 
 @(test)
 test_context_window_relay_set_roundtrip :: proc(t: ^testing.T) {
