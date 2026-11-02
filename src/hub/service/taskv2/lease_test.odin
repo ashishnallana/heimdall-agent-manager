@@ -469,10 +469,11 @@ test_idle_ttl_stops_stranded_instance :: proc(t: ^testing.T) {
 	_ = publish_task(t, fx, chain, "task_1")
 	lease, held := lease_of(fx, "inst_w1")
 	if !testing.expect(t, held, "leased") do return
-	// submit: holder stopped for fresh context; the stop is in the release wake
+	// submit: task_1 has no review roles, so it goes straight to done and the
+	// holder is stopped by task completion (T8), not by the submit itself.
 	wake_log_reset(log)
 	submit_via_release(t, fx, lease)
-	testing.expect(t, wake_log_has_stop(log, "inst_w1"), "submit stops the holder")
+	testing.expect(t, wake_log_has_stop(log, "inst_w1"), "task completion stops the holder")
 	// Simulate the bridge not honouring it (instance still live) → idle_ttl fires a stop again.
 	wake_log_reset(log)
 	fixture_advance(fx, 121)

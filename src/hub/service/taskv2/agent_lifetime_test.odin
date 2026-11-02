@@ -238,3 +238,121 @@ test_t8_bridge_hello_keeps_worker_waiting_for_review :: proc(t: ^testing.T) {
 	_ = fire_due(&fx.svc, now_ms(&fx.clock))
 	testing.expect(t, !wake_log_has_stop(log, "inst_w1"), "idle TTL spares a worker waiting for review")
 }
+
+// A review checkpoint (`lease handoff` after a requirements change) releases
+// the reviewer's lease without stopping it; its next review grant is a nudge
+// to the same generation, not a relaunch.
+@(test)
+test_t8_review_checkpoint_keeps_reviewer :: proc(t: ^testing.T) {
+	fx, log, ok := lease_fixture(t, "t8_checkpoint")
+	defer lease_fixture_close(fx, log)
+	if !ok do return
+	chain := seed_live_chain(t, fx, "chain_t8_checkpoint")
+	seed_fleet(fx, chain, "agt_w")
+	seed_agent(fx, "agt_r2")
+	seed_fleet(fx, chain, "agt_r", roles = `["reviewer"]`)
+	seed_fleet(fx, chain, "agt_r2", roles = `["reviewer"]`)
+	seed_instance(fx, chain, "inst_w1", "agt_w", "br_1", "idle")
+	seed_instance(fx, chain, "inst_r1", "agt_r", "br_1", "idle")
+	seed_instance(fx, chain, "inst_r2", "agt_r2", "br_1", "idle")
+	_ = publish_task(t, fx, chain, "task_1", brief = `{"goal":"g","acceptance":["a"],"review_roles":["reviewer"]}`)
+	confirm_holder(fx, "inst_w1")
+	_, submitted, _ := lease_submit(&fx.svc, inst_auth("inst_w1"), {summary = "v1", vcs_json = `{"head":"h1"}`})
+	if !testing.expect(t, submitted, "submit") do return
+	_, approved, _ := review_post(&fx.svc, inst_auth("inst_r1"), {verdict = "approve"})
+	testing.expect(t, approved, "first reviewer approves")
+	confirm_holder(fx, "inst_r2")
+	requirements_test_change(t, fx, "task_1", `{"goal":"g2","acceptance":["a","new"],"review_roles":["reviewer"]}`, 1)
+	review_lease, still := lease_of(fx, "inst_r2")
+	if !testing.expect(t, still && review_lease.kind == domain.LEASE_KIND_REVIEW, "reviewer still holds its review lease") do return
+	fresh, read, _ := lease_next(&fx.svc, inst_auth("inst_r2"), {})
+	testing.expect(t, read && strings.contains(fresh.pack_json, `"review_checkpoint_required":true`), "checkpoint requested")
+	r_gen := run_count_of(fx, "inst_r2")
+
+	wake_log_reset(log)
+	_, checkpointed, cerr := lease_handoff(&fx.svc, inst_auth("inst_r2"), {summary = "checkpoint obsolete review"})
+	if !testing.expectf(t, checkpointed, "checkpoint: %s", cerr.message) do return
+	_, r2_held := lease_of(fx, "inst_r2")
+	testing.expect(t, !r2_held, "checkpoint released the review lease")
+	testing.expect(t, !wake_log_has_stop(log, "inst_r2"), "review checkpoint does not stop the reviewer")
+	testing.expect_value(t, run_count_of(fx, "inst_r2"), r_gen)
+
+	next, has_work := lease_of(fx, "inst_w1")
+	if !testing.expect(t, has_work && next.attempt_no == 2, "rework gets a fresh attempt") do return
+	confirm_holder(fx, "inst_w1")
+	_, _, _ = lease_next(&fx.svc, inst_auth("inst_w1"), {})
+	_, _, _ = requirements_test_ack(fx, "inst_w1", 2)
+	wake_log_reset(log)
+	_, s2, serr := lease_submit(&fx.svc, inst_auth("inst_w1"), {lease_id = next.lease_id, summary = "v2", requirements_revision = 2, vcs_json = `{"head":"h2"}`})
+	if !testing.expectf(t, s2, "resubmit: %s", serr.message) do return
+	again, regranted := lease_of(fx, "inst_r2")
+	testing.expect(t, regranted && again.kind == domain.LEASE_KIND_REVIEW, "the checkpointed reviewer owes a fresh review")
+	expect_nudged(t, log, "inst_r2", r_gen, "review re-grant after checkpoint")
+}
+
+// A request_changes drops the other reviewers' leases (reason
+// changes_requested) without stopping them or refusing their next pull; an
+// expiry for any other reason still stops the holder.
+@(test)
+test_t8_changes_requested_expiry_keeps_other_reviewer :: proc(t: ^testing.T) {
+	fx, log, ok := lease_fixture(t, "t8_cr_expiry")
+	defer lease_fixture_close(fx, log)
+	if !ok do return
+	chain := seed_live_chain(t, fx, "chain_t8_cr_expiry")
+	seed_fleet(fx, chain, "agt_w")
+	seed_agent(fx, "agt_r2")
+	seed_fleet(fx, chain, "agt_r", roles = `["reviewer"]`)
+	seed_fleet(fx, chain, "agt_r2", roles = `["reviewer"]`)
+	seed_instance(fx, chain, "inst_w1", "agt_w", "br_1", "idle")
+	seed_instance(fx, chain, "inst_r1", "agt_r", "br_1", "idle")
+	seed_instance(fx, chain, "inst_r2", "agt_r2", "br_1", "idle")
+	_ = publish_task(t, fx, chain, "task_1", brief = `{"goal":"g","acceptance":["a"],"review_roles":["reviewer"]}`)
+	confirm_holder(fx, "inst_w1")
+	_, submitted, _ := lease_submit(&fx.svc, inst_auth("inst_w1"), {summary = "v1", vcs_json = `{"head":"h1"}`})
+	if !testing.expect(t, submitted, "submit") do return
+	_, a_held := lease_of(fx, "inst_r1")
+	b_lease, b_held := lease_of(fx, "inst_r2")
+	if !testing.expect(t, a_held && b_held, "both reviewers hold review leases") do return
+	confirm_holder(fx, "inst_r1")
+	confirm_holder(fx, "inst_r2")
+	b_gen := run_count_of(fx, "inst_r2")
+
+	wake_log_reset(log)
+	_, rok, rerr := review_post(&fx.svc, inst_auth("inst_r1"), {verdict = "request_changes", findings_json = `[{"path":"a.odin","line":1,"severity":"major","text":"fix"}]`})
+	if !testing.expectf(t, rok, "request_changes: %s", rerr.message) do return
+	if b_now, still := lease_of(fx, "inst_r2"); still {
+		testing.expect(t, b_now.lease_id != b_lease.lease_id, "B's review lease was dropped")
+	}
+	testing.expect(t, strings.contains(last_event_payload(fx, "task_1", EV_LEASE_EXPIRED), `"reason":"changes_requested"`), "B expired with reason changes_requested")
+	testing.expect(t, !wake_log_has_stop(log, "inst_r2"), "changes_requested expiry does not stop B")
+	testing.expect(t, !wake_log_has_stop(log, "inst_r1"), "review post does not stop A")
+	testing.expect_value(t, run_count_of(fx, "inst_r2"), b_gen)
+	testing.expect(t, !recently_expired(&fx.svc, "inst_r2", now_ms(&fx.clock)), "B may pull again at once")
+
+	// Any other expiry reason still stops the holder.
+	for reason in ([]string{EXPIRE_TTL, EXPIRE_HARD_CAP, EXPIRE_INSTANCE_LOST, EXPIRE_UNCONFIRMED, EXPIRE_REPLACED, EXPIRE_DEP_ADDED, EXPIRE_CHAIN_CLOSED, EXPIRE_CANCELLED, EXPIRE_USER_STOPPED}) {
+		testing.expectf(t, expiry_stops_holder(reason), "%s expiry stops the holder", reason)
+	}
+	testing.expect(t, !expiry_stops_holder(EXPIRE_IDLE), "idle expiry keeps the holder")
+	testing.expect(t, !expiry_stops_holder(EXPIRE_CHANGES_REQUESTED), "changes_requested expiry keeps the holder")
+	// Behaviourally: the reworking worker's lease hits the hard cap → stopped.
+	if _, w_held := lease_of(fx, "inst_w1"); !testing.expect(t, w_held, "worker re-granted for rework") do return
+	confirm_holder(fx, "inst_w1")
+	w_gen := run_count_of(fx, "inst_w1")
+	wake_log_reset(log)
+	for _ in 0..<((LEASE_HARD_CAP_SECONDS / 300) + 1) {
+		fixture_advance(fx, 300)
+		touch_instance(&fx.svc, "inst_w1")
+		_ = fire_due(&fx.svc, now_ms(&fx.clock))
+		if count_events(fx, "task_1", EV_LEASE_EXPIRED) >= 2 do break
+	}
+	testing.expect(t, strings.contains(last_event_payload(fx, "task_1", EV_LEASE_EXPIRED), `"reason":"hard_cap"`), "worker lease hit the hard cap")
+	// The stop and the same-UoW re-grant fold into a relaunch (new generation,
+	// full bootstrap); either way the old process is ended, never nudged.
+	if entry := wake_log_run_entry(log, "inst_w1"); entry != "" {
+		testing.expectf(t, !strings.contains(entry, `"deliver":"nudge"`), "hard-cap re-grant relaunches, not nudges (%s)", entry)
+		testing.expect_value(t, run_count_of(fx, "inst_w1"), w_gen + 1)
+	} else {
+		testing.expect(t, wake_log_has_stop(log, "inst_w1"), "hard-cap expiry stops the holder")
+	}
+}
