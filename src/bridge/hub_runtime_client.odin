@@ -3360,8 +3360,9 @@ bridge_instance_status_json :: proc(instance_id: string) -> string {
 	strings.write_string(&b, "\"")
 	bridge_runtime_write_instance_error(&b, inst)
 	// Optional small snapshot (extension_token_usage.odin); hubs that predate it
-	// ignore the unknown members.
-	bridge_ext_token_usage_field(&b, inst.agent_instance_id, bridge_agent_instance_run_count(inst.agent_instance_id))
+	// ignore the unknown members. Every caller sends the frame it builds, so a
+	// pending token change piggybacks here instead of costing its own frame.
+	bridge_ext_token_usage_field(&b, inst.agent_instance_id, bridge_agent_instance_run_count(inst.agent_instance_id), bridge_runtime_now_ms())
 	strings.write_string(&b, "}")
 	return strings.to_string(b)
 }

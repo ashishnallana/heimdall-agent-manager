@@ -4,6 +4,7 @@
 import React from 'react';
 import { ProgressBar, StatusPill, Text } from '@ui';
 import { useGetTaskChainTokenUsageQuery } from '../../api/endpoints/taskChains';
+import { retainChainTokenUsageView } from '../../api/chainTokenUsageRefresh';
 import { formatTokens } from '../extension/tokenUsageModel';
 import {
   normalizeChainTokenUsage,
@@ -139,8 +140,18 @@ export function ChainTokenUsageView({ usage }: { usage: ChainTokenUsage | null }
 
 /** The overview section: fetches the chain's token usage and renders the view. */
 export function ChainTokenUsageSection({ chainId }: { chainId: string }) {
-  const { data, error, isLoading } = useGetTaskChainTokenUsageQuery({ chainId }, { skip: !chainId });
+  const { data, error, isLoading, isFetching, refetch } = useGetTaskChainTokenUsageQuery({ chainId }, { skip: !chainId });
   const usage = React.useMemo(() => normalizeChainTokenUsage(data), [data]);
+  // Token events refresh this card only while it is mounted (T14,
+  // api/chainTokenUsageRefresh.ts). Changes missed while it was hidden mark the
+  // chain stale: refetch once on mount unless a fetch is already under way.
+  const fetchingRef = React.useRef(isFetching);
+  fetchingRef.current = isFetching;
+  React.useEffect(() => {
+    const view = retainChainTokenUsageView(chainId);
+    if (view.stale && !fetchingRef.current) refetch();
+    return view.release;
+  }, [chainId]);
   return (
     <section data-debug-id="chain-token-usage" className="min-w-0 rounded-xl border border-subtle bg-surface p-4 text-left">
       <Text as="h3" role="overline" tone="faint" className="mb-2 uppercase">Token usage</Text>

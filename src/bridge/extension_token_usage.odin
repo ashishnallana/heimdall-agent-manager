@@ -177,14 +177,18 @@ bridge_ext_token_enqueue_due :: proc(now: i64, only_id: string = "") -> int {
 // `,"token_usage_final":{…,"run_count":N}` until a newer run's final replaces
 // it, so the hub adds each run to its lifetime totals exactly once even when a
 // frame is lost or replayed (the hub de-duplicates by run_count).
-bridge_ext_token_usage_field :: proc(b: ^strings.Builder, instance_id: string, run_count := 0) {
+// sent_at_ms > 0 means the frame is being sent now (T14): a pending change rides
+// along on it and counts as pushed, so the throttle does not follow it with a
+// usage-only status frame carrying the same snapshot.
+bridge_ext_token_usage_field :: proc(b: ^strings.Builder, instance_id: string, run_count := 0, sent_at_ms: i64 = 0) {
 	sync.mutex_lock(&bridge_ext_mutex)
 	defer sync.mutex_unlock(&bridge_ext_mutex)
-	for s in bridge_ext_states {
+	for &s in bridge_ext_states {
 		if s.agent_instance_id != instance_id do continue
 		if s.token_usage.updated_at_ms != 0 {
 			strings.write_string(b, ",\"token_usage\":")
 			bridge_ext_token_usage_write_json(b, s.token_usage, run_count)
+			if sent_at_ms > 0 && s.token_usage.dirty do bridge_ext_token_mark_pushed(&s.token_usage, sent_at_ms)
 		}
 		if s.token_final_run > 0 {
 			strings.write_string(b, ",\"token_usage_final\":")

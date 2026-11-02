@@ -97,6 +97,7 @@ test('overview mounts the section; token_usage_changed refreshes the chain usage
   const read = (rel: string) => fs.readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8');
   assert.match(read('../src/ui/components/taskchain/TaskChainOverview.tsx'), /footerSlot=\{<ChainTokenUsageSection chainId=\{chainId\} \/>\}/);
   const ws = read('../src/ui/api/wsInvalidation.ts');
-  assert.match(ws, /change === 'token_usage_changed' \|\| change === 'created'[\s\S]{0,120}type: 'ChainTokenUsage', id: tokenChainId/);
+  // T14: paced per viewed chain (chainTokenUsageRefresh.ts), not one refetch per event.
+  assert.match(ws, /tokenChanged \|\| change === 'created'[\s\S]{0,200}requestChainTokenUsageRefresh\(tokenChainId[\s\S]{0,120}type: 'ChainTokenUsage', id \}/);
   assert.match(read('../src/ui/api/endpoints/taskChains.ts'), /\/task-chains\/\$\{encodeURIComponent\(chainId\)\}\/token-usage/);
 });

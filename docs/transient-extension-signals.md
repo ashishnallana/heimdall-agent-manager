@@ -22,6 +22,19 @@ are bounded to one per instance per 10 seconds, or sooner when context moves by
 5 percentage points of the window, and only when the snapshot changed.
 `ham-ctl extension status` shows the same object locally.
 
+Hub traffic budget (T14). A status frame sent for any other reason carries a
+pending change and counts as its push, so no usage-only frame follows it. The
+hub writes the snapshot only when it differs from the stored one; an unchanged
+snapshot (every status frame repeats it) causes no row write and no event. A
+frame produces at most one `agent_instance` event: a token change on a frame
+that also changed status rides on `status_changed` (`summary.token_changed`)
+instead of a second `token_usage_changed`. Instance event summaries carry
+`token_usage`, `token_usage_updated_at` and `token_totals`, so the UI patches its
+cached instance and instance list without refetching. The chain overview's token
+card (a hub aggregate) refetches only while it is shown, at most once per
+15 seconds per chain (`src/ui/api/chainTokenUsageRefresh.ts`); a chain whose
+events arrived while hidden refetches once when shown.
+
 ## Context window
 
 Each snapshot also carries `context_window`, `window_source`

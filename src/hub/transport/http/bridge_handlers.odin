@@ -2418,11 +2418,9 @@ bridge_ws_process_frame :: proc(h: ^Bridge_Handlers, bridge_id: string, connecti
 		activity_status := json_string(text, "activity_status")
 		if h.agents != nil {
 			error_json, _ := jsonx.extract_raw_object(text, "error", true, context.temp_allocator)
-			if inst, applied, _ := bridge_apply_validated_status(h, bridge_id, connection_generation, instance_id, state_seq, runtime_status, activity_status, json_string(text, "launch_epoch", context.temp_allocator), error_json); applied {
-				publish_instance_changed(h.event_bus, inst, "status_changed")
-				domain.agent_instance_destroy(&inst)
-			}
-			bridge_apply_token_usage_members(h, bridge_id, instance_id, text)
+			inst, applied, _ := bridge_apply_validated_status(h, bridge_id, connection_generation, instance_id, state_seq, runtime_status, activity_status, json_string(text, "launch_epoch", context.temp_allocator), error_json)
+			token_changed := bridge_apply_token_usage_members(h, bridge_id, instance_id, text)
+			bridge_publish_status_frame_change(h, instance_id, &inst, applied, token_changed)
 		}
 		if h.agents != nil do agent_service.reconcile_instance_reconfigurations(h.agents, bridge_id)
 		current_runtime, current_activity, current_seq, got := bridge_runtime_service.runtime_instance_status(h.bridge_runtime_registry, bridge_id, connection_generation, instance_id)
@@ -2703,8 +2701,9 @@ Bridge_Agent_Status_Report :: struct {
 // bridge_apply_token_usage_members persists the optional token_usage snapshot
 // and adds a token_usage_final (the bridge's frozen usage of a run the hub
 // stopped or restarted) to the instance's lifetime totals once per run (T3r).
-// A change is announced so open agent views refetch.
-bridge_apply_token_usage_members :: proc(h: ^Bridge_Handlers, bridge_id, instance_id, text: string) {
+// Reports whether anything was written: an unchanged snapshot (every status
+// frame repeats it) writes no row and announces nothing (T14).
+bridge_apply_token_usage_members :: proc(h: ^Bridge_Handlers, bridge_id, instance_id, text: string) -> (changed: bool) {
 	if h.agents == nil || instance_id == "" do return
 	usage_raw, _ := jsonx.extract_raw_object(text, "token_usage", true, context.temp_allocator)
 	final_raw, _ := jsonx.extract_raw_object(text, "token_usage_final", true, context.temp_allocator)
@@ -2714,9 +2713,25 @@ bridge_apply_token_usage_members :: proc(h: ^Bridge_Handlers, bridge_id, instanc
 		fmt.eprintln("token usage:", err.message)
 		return
 	}
-	if !res.snapshot_saved && !res.totals_added do return
+	return res.snapshot_saved || res.totals_added
+}
+
+// bridge_publish_status_frame_change announces one agent_instance_status frame
+// with at most ONE event (T14 coalescing). A status change publishes
+// status_changed; a token change on the same frame rides on it (summary
+// token_changed:true) instead of a second token_usage_changed event. The summary
+// carries the token snapshot and totals, so clients patch their caches from the
+// event rather than refetching. status_inst (owned, may be zero) is destroyed.
+bridge_publish_status_frame_change :: proc(h: ^Bridge_Handlers, instance_id: string, status_inst: ^domain.Agent_Instance, status_applied, token_changed: bool) {
+	defer if status_applied do domain.agent_instance_destroy(status_inst)
+	if !token_changed {
+		if status_applied do publish_instance_changed(h.event_bus, status_inst^, "status_changed")
+		return
+	}
+	// The status write's row predates the token write: re-read for the summary.
+	if h.agents == nil do return
 	if inst, found, _ := iface.agent_get_instance(h.agents.agents, instance_id); found {
-		publish_instance_changed(h.event_bus, inst, "token_usage_changed")
+		publish_instance_changed(h.event_bus, inst, "status_changed" if status_applied else "token_usage_changed", token_changed = true)
 		domain.agent_instance_destroy(&inst)
 	}
 }

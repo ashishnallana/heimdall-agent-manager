@@ -261,3 +261,29 @@ test_ext_tokens_absent_without_signals :: proc(t: ^testing.T) {
 	defer delete(status)
 	testing.expect(t, strings.contains(status, `"token_usage":null`))
 }
+
+// T14: a status frame sent for another reason carries a pending token change and
+// counts as its push, so no usage-only frame with the same snapshot follows; an
+// unchanged snapshot never produces a frame.
+@(test)
+test_ext_tokens_piggyback_on_status_frame :: proc(t: ^testing.T) {
+	id := "inst_test_ext_tokens_piggyback"
+	bridge_runtime_mark_start_success(id)
+	_ = tok_take_queued(id)
+	now := bridge_runtime_now_ms()
+
+	tok_ingest(t, id, tok_event("tool.end", "sess-pig", tok_metrics("10"), tok_usage("20000")), now)
+	testing.expect(t, tok_take_queued(id), "first snapshot pushed at once")
+	// A small change inside the interval is held back (dirty, not queued)...
+	tok_ingest(t, id, tok_event("tool.end", "sess-pig", tok_metrics("10")), now + 1000)
+	testing.expect(t, !tok_take_queued(id), "throttled inside 10 s")
+	// ...then a status frame goes out for another reason and carries it.
+	frame := bridge_instance_status_json(id)
+	defer delete(frame)
+	testing.expect(t, strings.contains(frame, `"tool_calls":2`), "pending change rides on the status frame")
+	// The sweep after the interval has nothing left to send.
+	testing.expect_value(t, bridge_ext_token_enqueue_due(now + 60_000, id), 0)
+	testing.expect(t, !tok_take_queued(id), "no usage-only frame after the piggyback")
+	// Unchanged snapshot: still nothing, however long the interval.
+	testing.expect_value(t, bridge_ext_token_enqueue_due(now + 600_000, id), 0)
+}
