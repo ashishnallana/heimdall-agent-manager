@@ -33,7 +33,7 @@ Xh :: struct {
 }
 
 @(private = "file")
-xh_dir :: proc(user: rawptr, owner: string) -> (^vault.Verified_Directory, bool) {
+xh_dir :: proc(user: rawptr, owner, grant_id: string) -> (^vault.Verified_Directory, bool) {
 	return &(^Xh)(user).dir, owner == "user_a"
 }
 @(private = "file")

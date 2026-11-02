@@ -49,7 +49,7 @@ Xfr_Fixture :: struct {
 }
 
 @(private = "file")
-fixture_dir :: proc(user: rawptr, owner: string) -> (^vault.Verified_Directory, bool) {
+fixture_dir :: proc(user: rawptr, owner, grant_id: string) -> (^vault.Verified_Directory, bool) {
 	f := (^Xfr_Fixture)(user)
 	if owner != "user_a" && owner != "user_b" do return nil, false
 	return &f.dir, true

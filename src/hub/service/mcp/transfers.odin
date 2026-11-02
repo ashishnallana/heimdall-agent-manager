@@ -24,8 +24,10 @@ import os_random "odin_test:lib/os_random"
 TRANSFER_TOKEN_PREFIX :: "hxt_"
 
 // Transfer_Directory_Proc returns the owner's verified device directory (vault id,
-// current epoch, trusted devices). It carries public keys only.
-Transfer_Directory_Proc :: proc(user: rawptr, owner: string) -> (^vault.Verified_Directory, bool)
+// current epoch, trusted devices) as seen through the transfer's grant; production
+// wiring uses verified_grant_directory (hosted.odin) and must also fail for a
+// revoked grant. It carries public keys only.
+Transfer_Directory_Proc :: proc(user: rawptr, owner, grant_id: string) -> (^vault.Verified_Directory, bool)
 
 Transfer_Service :: struct {
 	repo:          ^iface.Transfer_Repository,
@@ -150,9 +152,9 @@ kind_ok :: proc(kind: string) -> bool {
 }
 
 @(private = "file")
-current_vault :: proc(s: ^Transfer_Service, owner: string) -> (vault_id: string, epoch: u32, dir: ^vault.Verified_Directory, ok: bool) {
+current_vault :: proc(s: ^Transfer_Service, owner, grant_id: string) -> (vault_id: string, epoch: u32, dir: ^vault.Verified_Directory, ok: bool) {
 	if s.directory == nil do return "", 0, nil, false
-	d, found := s.directory(s.directory_ctx, owner)
+	d, found := s.directory(s.directory_ctx, owner, grant_id)
 	if !found || d == nil || d.current_epoch == 0 do return "", 0, nil, false
 	buf: [vault.VAULT_ID_HEX_CHARS]byte
 	return strings.clone(vault.vault_id_hex(d.vault_id, buf[:]), context.temp_allocator), d.current_epoch, d, true
@@ -173,7 +175,7 @@ transfer_upload_begin :: proc(s: ^Transfer_Service, who: Transfer_Caller, in_: U
 	} else if found {
 		return replay_begin(s, prior, in_.request_digest)
 	}
-	vid, epoch, _, vok := current_vault(s, who.owner)
+	vid, epoch, _, vok := current_vault(s, who.owner, who.grant_id)
 	if !vok do return {}, "", fail(.Validation_Failed, "vault_required")
 	active, staged, uerr := s.repo.owner_usage(s.repo.ctx, who.owner, domain.MCP_TRANSFER_UPLOAD)
 	if uerr.code != .None do return {}, "", fail(.Internal_Error, "internal")
@@ -216,7 +218,7 @@ transfer_download_begin :: proc(s: ^Transfer_Service, who: Transfer_Caller, requ
 	} else if found {
 		return replay_begin(s, prior, request_digest)
 	}
-	if _, _, _, vok := current_vault(s, who.owner); !vok do return {}, "", fail(.Validation_Failed, "vault_required")
+	if _, _, _, vok := current_vault(s, who.owner, who.grant_id); !vok do return {}, "", fail(.Validation_Failed, "vault_required")
 	active, _, uerr := s.repo.owner_usage(s.repo.ctx, who.owner, domain.MCP_TRANSFER_DOWNLOAD)
 	if uerr.code != .None do return {}, "", fail(.Internal_Error, "internal")
 	if active >= contracts.ARTIFACT_TRANSFER_MAX_DOWNLOADS_PER_OWNER {
@@ -386,7 +388,7 @@ small_token_ok :: proc(tok: string, vault_id: string, epoch: u32, max_plain: int
 // against the transfer row and the CURRENT verified directory.
 @(private = "file")
 staged_check :: proc(s: ^Transfer_Service, x: domain.Mcp_Transfer, in_: Seal_Input) -> (ciphertext_sha256: string, f: Transfer_Fail) {
-	vid, epoch, dir, vok := current_vault(s, x.owner_user_id)
+	vid, epoch, dir, vok := current_vault(s, x.owner_user_id, x.grant_id)
 	if !vok do return "", fail(.Validation_Failed, "vault_required")
 	hc: Hash_Check
 	sha2.init_256(&hc.h)
@@ -533,7 +535,7 @@ transfer_opened :: proc(s: ^Transfer_Service, x: domain.Mcp_Transfer, statement,
 	if x.state != domain.MCP_TRANSFER_READY do return {}, fail(.Conflict, x.state)
 	r, ok := vault.transfer_open_receipt_parse(statement)
 	if !ok do return {}, fail(.Validation_Failed, "receipt_invalid")
-	vid, _, dir, vok := current_vault(s, x.owner_user_id)
+	vid, _, dir, vok := current_vault(s, x.owner_user_id, x.grant_id)
 	if !vok do return {}, fail(.Validation_Failed, "vault_required")
 	if r.owner_user_id != x.owner_user_id || r.vault_id != vid || r.vault_id != x.vault_id || i64(r.epoch) != x.epoch ||
 	   r.transfer_id != x.transfer_id || r.artifact_id != x.artifact_id || r.device_id != device_id ||
