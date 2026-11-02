@@ -369,6 +369,19 @@ All of the following element types must have `data-debug-id`:
 | `PermissionCards` | `conversation-permission-cards`, `permission-card-${id}`, `permission-card-countdown-${id}`, `permission-card-status-${id}`, `permission-card-input-${id}`, `permission-card-diff-toggle-${id}`, `permission-card-diff-${id}`, `permission-card-error-${id}`, `permission-card-allow-btn-${id}`, `permission-card-deny-btn-${id}`, `permission-card-expired-${id}`, `terminal-prompt-card-${id}`, `terminal-prompt-open-btn-${id}` (`${id}` = blocker_id) |
 | `LiveToolActivity` | `live-tool-activity`, `live-tools-row`, `live-tools-summary`, `live-tools-duration`, `live-tools-agent`, `live-tools-shell-${sessionId}` (clickable shell row) |
 
+### Placement recovery controls
+
+`PlacementRecovery` registers `attention-placement` and, for each stable
+`<phase>-<agentId-or-unassigned>-<role>`, the prefix
+`attention-placement-<phase>-<agentId-or-unassigned>-<role>` with suffixes
+`-effective`, `-cause`, `-bridge`, `-identity`, `-fleet`, `-coordinator`,
+`-refresh`, `-select`, `-scope`, `-affected`, `-confirmation`, `-review`,
+`-apply`, `-cancel`, `-error`, `-configuration`, `-affected-list`, and
+`-affected-<taskId>`. Selects have associated labels and
+target-specific accessible names. `fleet-drawer-recovery-role` identifies the
+failed role context in the native fleet editor. Attachment removal in
+`AttentionComposer` uses `<debugId>-remove-<localId>`.
+
 ### Shared component: SearchableSelect
 
 `SearchableSelect` is the scalable single-select used where option lists can be large (10–50+), e.g. the New chat agent/project pickers. It requires a `debugId` and derives child IDs: `${debugId}` (trigger button), `${debugId}-popover`, `${debugId}-search-input`, `${debugId}-list`, `${debugId}-option-${value}`, `${debugId}-empty`, `${debugId}-loading`, and `${debugId}-count`. Each option renders title + optional tag + subtitle + monospace id, and search matches title/tag/subtitle/id/keywords. Current callers: `new-convo-agent-select`, `new-convo-project-select`.

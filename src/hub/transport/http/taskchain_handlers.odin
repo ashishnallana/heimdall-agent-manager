@@ -1771,6 +1771,24 @@ hold_task_handler :: proc(ctx: rawptr, req: Request) -> Response {
 // review requirements, readiness, dispatch and a done task's merge-back; never
 // approves, never touches a live lease, and a repeat call is a no-op. The
 // response lists what changed (`actions`) and why the rest holds (`reasons`).
+recover_task_placement_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Taskchain_Handlers)(ctx)
+	auth, ok, resp := require_auth(h.auth, req)
+	if !ok do return resp
+	task_id := domain.Task_ID(path_part(req.path, 4))
+	if path_part(req.path, 3) != "tasks" {
+		task_id = domain.Task_ID(path_part(req.path, 6))
+		if matched, mismatch := require_task_path_scope(h, auth, domain.Task_Chain_ID(path_part(req.path, 4)), task_id, req); !matched do return mismatch
+	}
+	input, err := placement_recovery_input(req.body)
+	if err.code != .None do return respond_error(err, req.request_id)
+	task, repaired, rerr := taskchain_service.recover_placement(h.taskchains, auth, task_id, input)
+	if !repaired do return respond_error(rerr, req.request_id)
+	b := strings.builder_make()
+	write_task_json(&b, task)
+	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req))
+}
+
 recheck_task_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Taskchain_Handlers)(ctx)
 	auth_ctx, ok, auth_resp := require_auth_any(h.auth, req)

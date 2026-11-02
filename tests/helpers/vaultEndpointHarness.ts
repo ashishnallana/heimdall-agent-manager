@@ -147,7 +147,7 @@ export function installFetchCapture(): FetchCapture {
   };
 }
 
-export async function makeVaultStore(options: { extraMiddleware?: any[] } = {}): Promise<any> {
+export async function makeVaultStore(options: { extraMiddleware?: any[]; extraReducers?: Record<string, any> } = {}): Promise<any> {
   const { configureStore } = await import(
     `${REPO_ROOT}/node_modules/@reduxjs/toolkit/dist/redux-toolkit.modern.mjs`
   );
@@ -156,6 +156,7 @@ export async function makeVaultStore(options: { extraMiddleware?: any[] } = {}):
 
   return configureStore({
     reducer: {
+      ...options.extraReducers,
       vault: vaultReducer,
       chat: (s: any = { session: { daemonUrl: 'http://127.0.0.1:7777', clientToken: 'tok_test' } }) => s,
       [heimdallApi.reducerPath]: heimdallApi.reducer,

@@ -139,7 +139,7 @@ test_recheck_reports_fleet_full :: proc(t: ^testing.T) {
 }
 
 // An offline bridge is a reason, not a silent wait; when the bridge is back
-// the re-check clears the bridge_offline block and dispatches.
+// the re-check reconciles placement and dispatches.
 @(test)
 test_recheck_offline_bridge_reason_then_dispatch :: proc(t: ^testing.T) {
 	fx, log, ok := lease_fixture(t, "recheck_offline")
@@ -157,14 +157,14 @@ test_recheck_offline_bridge_reason_then_dispatch :: proc(t: ^testing.T) {
 	testing.expect(t, recheck_reasons_contain(res, "offline"), fmt.tprintf("%v", res.reasons))
 	testing.expect(t, strings.contains(res.message, "offline"), res.message)
 
-	// The bridge returns but its hello was missed: re-check answers the block.
+	// The bridge returns but its hello was missed: re-check dispatches.
 	set_bridge_status(fx, "br_1", true)
 	back, bok, berr := task_recheck(&fx.svc, get_task(fx, "task_1"), owner)
 	if !testing.expect(t, bok, fmt.tprintf("recheck: %s", berr.message)) do return
 	testing.expect(t, back.changed, "bridge back: re-check acted")
 	_, leased := lease_of(fx, "inst_w1")
 	testing.expect(t, leased, "dispatched once the bridge is online")
-	testing.expect(t, strings.contains(back.message, "block cleared"), back.message)
+	testing.expect(t, strings.contains(back.message, "dispatched: work lease"), back.message)
 }
 
 // A leased task is left to its holder: no event, no lease change, no attempt.

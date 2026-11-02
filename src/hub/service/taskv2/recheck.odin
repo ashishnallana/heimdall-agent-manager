@@ -74,6 +74,7 @@ task_recheck_in_uow :: proc(svc: ^Service, u: ^Uow, task_in: domain.Task, actor:
 		return {}, false, terr
 	}
 	before := task
+	before_publishes := len(u.effects.publishes)
 	before_events := recheck_event_count(svc, task)
 	before_leases, lerr := iface.taskchain_list_leases_by_task(svc.repo, task.task_id)
 	if lerr.code != .None do return {}, false, lerr
@@ -126,10 +127,16 @@ task_recheck_in_uow :: proc(svc: ^Service, u: ^Uow, task_in: domain.Task, actor:
 		}
 	}
 	if !ok do return {}, false, err
+	// A live reviewer does not prevent diagnosis of other owed targets.
+	if pok, perr := reconcile_placement_in_uow(svc, u, chain); !pok do return {}, false, perr
+	placement_changed := false
+	for p in u.effects.publishes[before_publishes:] {
+		if p.facet_kind == FACET_PLACEMENT do placement_changed = true
+	}
 
 	after, _, _ := iface.taskchain_get_task(svc.repo, task.task_id)
 	after_leases, _ := iface.taskchain_list_leases_by_task(svc.repo, task.task_id)
-	changed := merge_requeued != "" || recheck_event_count(svc, after) != before_events || len(after_leases) != len(before_leases) ||
+	changed := placement_changed || merge_requeued != "" || recheck_event_count(svc, after) != before_events || len(after_leases) != len(before_leases) ||
 		after.state != before.state || after.blocked_on_json != before.blocked_on_json || after.attempt_no != before.attempt_no
 	if after.state != before.state {
 		append(&actions, fmt.tprintf("state: %s → %s", domain.task_state_string(before.state), domain.task_state_string(after.state)))
@@ -145,6 +152,7 @@ task_recheck_in_uow :: proc(svc: ^Service, u: ^Uow, task_in: domain.Task, actor:
 		}
 	}
 	if merge_requeued != "" do append(&actions, merge_requeued)
+	if placement_changed do append(&actions, "placement failures reconciled")
 	if changed && len(actions) == 0 do append(&actions, "task events were re-evaluated")
 
 	// Whatever still holds the task, described against its state after this re-check.
