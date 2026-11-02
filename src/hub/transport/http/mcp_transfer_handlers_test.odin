@@ -65,6 +65,7 @@ xh_open :: proc(t: ^testing.T, f: ^Xh) -> bool {
 
 @(private = "file")
 xh_close :: proc(f: ^Xh) {
+	mcp.transfer_limits_destroy(&f.svc)
 	ecdsa.private_key_clear(&f.priv)
 	sqlite.close(&f.conn)
 	os.remove(f.path)

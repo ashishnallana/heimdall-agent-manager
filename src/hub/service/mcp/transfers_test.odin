@@ -86,6 +86,7 @@ fixture_open :: proc(t: ^testing.T, f: ^Xfr_Fixture, name: string) -> bool {
 
 @(private = "file")
 fixture_close :: proc(f: ^Xfr_Fixture) {
+	transfer_limits_destroy(&f.svc)
 	ecdsa.private_key_clear(&f.priv)
 	sqlite.close(&f.conn)
 	os.remove(f.path)
@@ -357,6 +358,20 @@ test_transfer_rejections_and_limits :: proc(t: ^testing.T) {
 	testing.expect(t, transfer_owner_get_acquire(&f.svc, "user_b"))
 	transfer_owner_get_release(&f.svc, "user_a")
 	testing.expect(t, transfer_owner_get_acquire(&f.svc, "user_a"))
+	// Bounded maps: zero-count owners are dropped, stale grant windows pruned.
+	transfer_owner_get_release(&f.svc, "user_b")
+	_, b_present := f.svc.owner_gets["user_b"]
+	testing.expect(t, !b_present, "zero-count owner is pruned")
+	testing.expect(t, transfer_rate_allow(&f.svc, "grant_other", false))
+	transfer_rate_prune(&f.svc)
+	_, other_kept := f.svc.grant_windows["grant_other"]
+	testing.expect(t, other_kept, "a current window is kept")
+	windows := len(f.svc.grant_windows)
+	saved_now := g_now
+	g_now += 3_600_000
+	testing.expect_value(t, transfer_rate_prune(&f.svc), windows)
+	testing.expect_value(t, len(f.svc.grant_windows), 0)
+	g_now = saved_now
 
 	// Global semaphores: full -> busy, nothing touched.
 	f.svc.data_path_max = 1

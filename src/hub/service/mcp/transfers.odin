@@ -9,6 +9,7 @@ package mcp
 // token length, SHA-256 of the ciphertext, and a device-signed receipt. A static
 // test (transfers_test.odin) scans this file for forbidden references.
 
+import "base:runtime"
 import "core:crypto/sha2"
 import "core:encoding/base64"
 import "core:fmt"
@@ -60,7 +61,7 @@ TRANSFER_MAX_GETS_PER_OWNER   :: 2
 transfer_rate_allow :: proc(s: ^Transfer_Service, grant_id: string, begin: bool) -> bool {
 	now := now_ms(s)
 	sync.mutex_lock(&s.limits_mu); defer sync.mutex_unlock(&s.limits_mu)
-	if s.grant_windows == nil do s.grant_windows = make(map[string]Transfer_Rate_Window)
+	if s.grant_windows == nil do s.grant_windows = make(map[string]Transfer_Rate_Window, runtime.heap_allocator())
 	w, found := s.grant_windows[grant_id]
 	if begin {
 		if now - w.begin_hour_start >= 3_600_000 { w.begin_hour_start = now; w.begins = 0 }
@@ -72,23 +73,58 @@ transfer_rate_allow :: proc(s: ^Transfer_Service, grant_id: string, begin: bool)
 		w.data_requests += 1
 	}
 	if found do s.grant_windows[grant_id] = w
-	else do s.grant_windows[strings.clone(grant_id)] = w
+	else do s.grant_windows[strings.clone(grant_id, runtime.heap_allocator())] = w // outlives the request
 	return true
 }
 
 // transfer_owner_get_acquire admits at most 2 concurrent ciphertext GETs per owner.
 transfer_owner_get_acquire :: proc(s: ^Transfer_Service, owner: string) -> bool {
 	sync.mutex_lock(&s.limits_mu); defer sync.mutex_unlock(&s.limits_mu)
-	if s.owner_gets == nil do s.owner_gets = make(map[string]int)
+	if s.owner_gets == nil do s.owner_gets = make(map[string]int, runtime.heap_allocator())
 	n, found := s.owner_gets[owner]
 	if n >= TRANSFER_MAX_GETS_PER_OWNER do return false
 	if found do s.owner_gets[owner] = n + 1
-	else do s.owner_gets[strings.clone(owner)] = 1
+	else do s.owner_gets[strings.clone(owner, runtime.heap_allocator())] = 1 // outlives the request
 	return true
 }
 transfer_owner_get_release :: proc(s: ^Transfer_Service, owner: string) {
 	sync.mutex_lock(&s.limits_mu); defer sync.mutex_unlock(&s.limits_mu)
-	if n, found := s.owner_gets[owner]; found && n > 0 do s.owner_gets[owner] = n - 1
+	n, found := s.owner_gets[owner]
+	if !found do return
+	if n > 1 {
+		s.owner_gets[owner] = n - 1
+		return
+	}
+	// Zero-count owners are dropped so the map holds only owners with a live GET.
+	key, _ := delete_key(&s.owner_gets, owner)
+	delete(key, runtime.heap_allocator())
+}
+
+// transfer_limits_destroy frees the in-memory limit maps (service shutdown/tests).
+transfer_limits_destroy :: proc(s: ^Transfer_Service) {
+	sync.mutex_lock(&s.limits_mu); defer sync.mutex_unlock(&s.limits_mu)
+	for k in s.owner_gets do delete(k, runtime.heap_allocator())
+	for k in s.grant_windows do delete(k, runtime.heap_allocator())
+	delete(s.owner_gets); delete(s.grant_windows)
+	s.owner_gets = nil; s.grant_windows = nil
+}
+
+// transfer_rate_prune drops per-grant windows whose begin-hour and data-minute
+// windows have both elapsed (they would reset on next use anyway), so the map
+// stays bounded by grants active in the last hour.
+transfer_rate_prune :: proc(s: ^Transfer_Service) -> (pruned: int) {
+	now := now_ms(s)
+	sync.mutex_lock(&s.limits_mu); defer sync.mutex_unlock(&s.limits_mu)
+	stale := make([dynamic]string, context.temp_allocator)
+	for k, w in s.grant_windows {
+		if now - w.begin_hour_start >= 3_600_000 && now - w.data_minute_start >= 60_000 do append(&stale, k)
+	}
+	for k in stale {
+		key, _ := delete_key(&s.grant_windows, k)
+		delete(key, runtime.heap_allocator())
+		pruned += 1
+	}
+	return
 }
 
 rate_limited :: proc() -> Transfer_Fail {
@@ -652,6 +688,7 @@ transfer_janitor :: proc(s: ^Transfer_Service) -> (expired, purged: int) {
 	now := now_ms(s)
 	expired, _ = s.repo.expire(s.repo.ctx, transfer_time(now), transfer_time(now - contracts.ARTIFACT_TRANSFER_IDLE_TTL_MS))
 	purged, _ = s.repo.purge(s.repo.ctx, transfer_time(now - contracts.ARTIFACT_TRANSFER_TERMINAL_KEEP_MS))
+	transfer_rate_prune(s)
 	return
 }
 
