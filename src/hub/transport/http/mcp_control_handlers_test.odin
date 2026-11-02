@@ -161,7 +161,11 @@ test_mcp_control_hosted_four_tools_ownership_creation_and_stateless_restart :: p
 	again:=mcp_control_request(&restarted,f.token,`{"jsonrpc":"2.0","id":"new-conversation","method":"tools/call","params":{"name":"chains.get","arguments":{"chain_id":"chain_fixture"}}}`)
 	testing.expect(t,strings.contains(again.body,"usr_alice_fixture secret"))
 	unauthorized:=mcp_control_request(&f.h,"hut_wrong",`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)
-	testing.expect(t,unauthorized.status==401 && strings.contains(header_value(unauthorized.headers,"WWW-Authenticate"),"resource_metadata"))
+	testing.expect(t,unauthorized.status==401)
+	// The challenge advertises every supported scope so spec-following clients
+	// request (and the consent page offers) all capabilities.
+	testing.expect_value(t,header_value(unauthorized.headers,"WWW-Authenticate"),mcp_join("Bearer resource_metadata=\"",f.delegation.origin,"/.well-known/oauth-protected-resource/api/v1/mcp\", scope=\"",strings.join(mcp.supported_scopes()," ",context.temp_allocator),"\""))
+	testing.expect(t,strings.contains(header_value(unauthorized.headers,"WWW-Authenticate"),"scope=\"mcp:chains mcp:tasks:read "))
 }
 MCP_Wait_Run :: struct {h:^MCP_Control_Handlers,token,body,result:string,status:int}
 mcp_wait_run :: proc(ctx:rawptr) {

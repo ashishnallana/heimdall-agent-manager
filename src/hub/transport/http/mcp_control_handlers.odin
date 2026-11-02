@@ -136,7 +136,7 @@ mcp_tool_result :: proc(id:json.Value,text:string,is_error:bool)->Response {
 mcp_unauthorized :: proc(h:^MCP_Control_Handlers)->Response {
 	resp:=mcp_oauth_error("invalid_token",401)
 	headers:=make([]contracts.HTTP_Header,len(resp.headers)+1,context.temp_allocator);copy(headers,resp.headers)
-	headers[len(resp.headers)]={"WWW-Authenticate",mcp_join("Bearer resource_metadata=\"",h.delegation.origin,"/.well-known/oauth-protected-resource/api/v1/mcp\", scope=\"",mcp.DELEGATION_SCOPE,"\"")}
+	headers[len(resp.headers)]={"WWW-Authenticate",mcp_join("Bearer resource_metadata=\"",h.delegation.origin,"/.well-known/oauth-protected-resource/api/v1/mcp\", scope=\"",mcp.supported_scope_string(),"\"")}
 	resp.headers=headers;return resp
 }
 mcp_control_handler :: proc(ctx:rawptr,req:Request)->(response:Response) {
