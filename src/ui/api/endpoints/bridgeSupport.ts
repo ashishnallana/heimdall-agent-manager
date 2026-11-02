@@ -4,7 +4,7 @@ import * as daemonApi from '../daemonApi';
 import { heimdallApi, heimdallApiDispatch, withSessionQuery } from '../heimdallApi';
 import { profileLabel } from '../../components/providers/providerProfiles';
 import { useMemo } from 'react';
-import { cookieJsonFetch, cookieMutation, customQueryError } from '../cookieFetch';
+import { ApiError, cookieJsonFetch, cookieMutation, customQueryError } from '../cookieFetch';
 import { type ExtensionCommandKind, type ProviderExtensionCommand, isExtensionInstallTerminal } from '../../components/extension/extensionInstallModel';
 
 export type AgentBridgeSupportEntry = {
@@ -193,6 +193,14 @@ export async function readBridgeRows(options: ReadBridgeRowsOptions = {}): Promi
   try {
     const data = await request.unwrap();
     return Array.isArray(data?.bridges) ? data.bridges : [];
+  } catch (error: any) {
+    // unwrap() rejects with the queryFn's plain CUSTOM_ERROR object (no .message).
+    // Rebuild the ApiError that cookieJsonFetch threw, so callers see the same
+    // shape (message, status, code) as on the no-store path.
+    if (error?.status === 'CUSTOM_ERROR') {
+      throw new ApiError(error.error, error.originalStatus, error.code, undefined, undefined, error.details);
+    }
+    throw error;
   } finally {
     request.unsubscribe();
   }

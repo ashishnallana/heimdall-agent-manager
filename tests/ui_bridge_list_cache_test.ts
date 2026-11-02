@@ -10,6 +10,7 @@ import assert from 'node:assert/strict';
 import { configureStore } from '@reduxjs/toolkit';
 
 const { heimdallApi, setupHeimdallApiListeners } = await import('../src/ui/api/heimdallApi.ts');
+const { ApiError } = await import('../src/ui/api/cookieFetch.ts');
 const { bridgeSupportApi, readBridgeRows } = await import('../src/ui/api/endpoints/bridgeSupport.ts');
 const bridgesEndpoints = await import('../src/ui/api/endpoints/bridges.ts');
 const { providerSetupApi } = await import('../src/ui/components/providers/providerSetupApi.ts');
@@ -28,13 +29,16 @@ const ROWS = [
   { bridge_id: 'brg_unpaired', status: 'offline', vault_status: 'unpaired' },
 ];
 
-function mockHub(): { reads: string[]; restore: () => void } {
+function mockHub(options: { failBridges?: boolean } = {}): { reads: string[]; restore: () => void } {
   const reads: string[] = [];
   const original = globalThis.fetch;
   globalThis.fetch = (async (input: any, init: any = {}) => {
     const url = new URL(String(input), 'https://hub.example.test');
     const method = init.method || 'GET';
     reads.push(`${method} ${url.pathname}${url.search}`);
+    if (url.pathname === '/api/v1/bridges' && options.failBridges) {
+      return Response.json({ error: { code: 'hub_unavailable', message: 'Hub is restarting' } }, { status: 503 });
+    }
     if (url.pathname === '/api/v1/bridges') {
       const rows = url.searchParams.get('include_pending')
         ? [...ROWS, { bridge_id: 'brg_new', enrollment_state: 'pending', label: 'New' }]
@@ -109,6 +113,26 @@ test('pending enrollments use their own include_pending cache entry, read fresh 
       ['GET /api/v1/bridges', 'GET /api/v1/bridges?include_pending=1', 'GET /api/v1/bridges?include_pending=1']);
     const plain = bridgeSupportApi.endpoints.listBridges.select(undefined)(store.getState() as any);
     assert.equal(plain.data?.bridges.some((b: any) => b.bridge_id === 'brg_new'), false, 'pending rows never leak into ordinary pickers');
+  } finally {
+    hub.restore();
+  }
+});
+
+test('a failed GET /bridges rejects with the same ApiError on the cache path as a raw fetch', async () => {
+  const hub = mockHub({ failBridges: true });
+  const assertHubError = (error: any) => {
+    assert.ok(error instanceof ApiError, `expected ApiError, got ${Object.prototype.toString.call(error)}`);
+    assert.equal(error.message, 'Hub is restarting');
+    assert.equal(error.status, 503);
+    assert.equal(error.code, 'hub_unavailable');
+    return true;
+  };
+  try {
+    await assert.rejects(readBridgeRows(), assertHubError);
+    await assert.rejects(readBridgeRows({ fresh: true, includePending: true }), assertHubError);
+    await assert.rejects(providerSetupApi.get('brg_locked'), assertHubError);
+    const result: any = await store.dispatch(agentsApi.endpoints.enableBridgeSupport.initiate({ agentId: 'agt_1' }) as any);
+    assert.equal(result.error?.error, 'Hub is restarting', 'the mutation error carries the hub sentence, not [object Object]');
   } finally {
     hub.restore();
   }
