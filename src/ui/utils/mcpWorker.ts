@@ -1,4 +1,4 @@
-import { resourceSpecs, resourceToolKinds, sealResourceFields } from './mcpResourceFields.ts';
+import { mcpJobPayloadMax, resourceSpecs, resourceToolKinds, sealResourceFields } from './mcpResourceFields.ts';
 import { mcpConsentVersion, mcpConsentDomain, validMcpScopes } from './mcpCapabilities.ts';
 import type { DeviceIdentity } from './deviceIdentity.ts';
 import type { VerifiedChain } from './vaultDirectoryVerify.ts';
@@ -39,7 +39,7 @@ export function mcpJobScopeAllowed(scope: string, tool: string | undefined, oper
  * against this device's independently pinned, freshly verified directory. */
 export async function verifyMcpWorkerJob(j: McpWorkerJob, identity: DeviceIdentity, chain: VerifiedChain, resource: string, now = Date.now()): Promise<void> {
   const id = (s: unknown) => typeof s === 'string' && /^[A-Za-z0-9_.:-]{1,256}$/.test(s);
-  if (!id(j.request_id) || !id(j.generation) || j.owner !== identity.userId || j.owner !== chain.userId || j.resource !== resource || j.head !== chain.headHash || j.epoch !== chain.currentEpoch || !Number.isSafeInteger(j.deadline_ms) || j.deadline_ms <= now || j.deadline_ms > now + 5000 || typeof j.payload !== 'string' || j.payload.length > 4 * 1024 * 1024 || !['read', 'seal', 'seal_comment', 'seal_task', 'seal_agent', 'seal_resource'].includes(j.operation) || j.digest !== await mcpJobDigest(j)) throw new Error('Stale or mismatched MCP request');
+  if (!id(j.request_id) || !id(j.generation) || j.owner !== identity.userId || j.owner !== chain.userId || j.resource !== resource || j.head !== chain.headHash || j.epoch !== chain.currentEpoch || !Number.isSafeInteger(j.deadline_ms) || j.deadline_ms <= now || j.deadline_ms > now + 5000 || typeof j.payload !== 'string' || j.payload.length > mcpJobPayloadMax(j.operation, j.tool) || !['read', 'seal', 'seal_comment', 'seal_task', 'seal_agent', 'seal_resource'].includes(j.operation) || j.digest !== await mcpJobDigest(j)) throw new Error('Stale or mismatched MCP request');
   const me = chain.trusted.get(identity.deviceId);
   if (!me || !kindPolicy(me.kind).receivesWrap) throw new Error('Approved device required');
   const c = JSON.parse(j.consent);

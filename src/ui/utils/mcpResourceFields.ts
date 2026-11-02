@@ -1,5 +1,25 @@
 import type { VaultKeyring } from './vaultKeyring.ts';
 import { encryptVaultText } from './vaultContent.ts';
+import { encryptVaultBytes } from './vaultCrypto.ts';
+import { HTML_BUNDLE_LIMITS, readHtmlBundle } from './htmlBundle.ts';
+
+/** base64 of the 15 MiB html-bundle archive (artifacts.create content_base64). */
+export const MCP_ARTIFACT_BUNDLE_BASE64_MAX = Math.floor((HTML_BUNDLE_LIMITS.archiveBytes + 2) / 3) * 4;
+/** Matches vault.control_job_payload_max: bundle seal jobs only, all others 4 MiB. */
+export function mcpJobPayloadMax(operation: string, tool?: string): number {
+  return operation === 'seal_resource' && tool === 'artifacts.create' ? MCP_ARTIFACT_BUNDLE_BASE64_MAX + 1024 * 1024 : 4 * 1024 * 1024;
+}
+
+/** Canonical standard base64 only (padded, no whitespace), as the Odin sealer requires. */
+function decodeCanonicalBase64(text: string): Uint8Array {
+  if (text.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(text)) throw new Error('Invalid bundle encoding');
+  const binary = atob(text);
+  const bytes = Uint8Array.from(binary, c => c.charCodeAt(0));
+  let again = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) again += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  if (btoa(again) !== text) throw new Error('Invalid bundle encoding');
+  return bytes;
+}
 
 export const resourceSpecs: Record<string, { fields: string[]; text: string[] }> = {
   artifact: { fields: ["artifact_id", "name", "description", "kind", "content_type", "mime", "ext", "size_bytes", "stored_bytes", "agent_id", "agent_instance_id", "chain_id", "task_id", "project_id", "link", "created_at", "updated_at", "revision", "content", "content_error"], text: ["name", "description", "content"] },
@@ -14,7 +34,20 @@ export async function sealResourceFields(tool: string, input: unknown, keyring: 
   if (!kind || !input || typeof input !== 'object' || Array.isArray(input)) throw new Error('Invalid resource fields');
   const allowed = kind === 'issue_comment' ? ['body'] : kind === 'project' || tool === 'artifacts.update' ? ['name', 'description'] : resourceSpecs[kind].text;
   const output: Record<string, string> = {};
+  if ('content_base64' in input) {
+    if (tool !== 'artifacts.create' || 'content' in input) throw new Error('Invalid resource fields');
+  }
   for (const [key, value] of Object.entries(input)) {
+    if (key === 'content_base64') {
+      // Hub-packed html-bundle: re-validate before sealing the exact archive bytes.
+      if (typeof value !== 'string' || value.length > MCP_ARTIFACT_BUNDLE_BASE64_MAX) throw new Error('Invalid bundle');
+      const archive = decodeCanonicalBase64(value);
+      if (archive.length === 0 || archive.length > HTML_BUNDLE_LIMITS.archiveBytes) throw new Error('Invalid bundle');
+      await readHtmlBundle(archive);
+      output[key] = await encryptVaultBytes(archive, keyring);
+      archive.fill(0);
+      continue;
+    }
     const limit = key === 'title' || key === 'name' ? 500 : (kind === 'memory' && key === 'body' || kind === 'artifact' && key === 'content') ? 65536 : 20000;
     if (!allowed.includes(key) || typeof value !== 'string' || value.includes('\0') || value !== new TextDecoder('utf-8', { fatal: true }).decode(new TextEncoder().encode(value)) || new TextEncoder().encode(value).length > limit || (['name', 'title', 'body'].includes(key) && !value.trim())) throw new Error('Invalid resource text');
     output[key] = await encryptVaultText(value, keyring);

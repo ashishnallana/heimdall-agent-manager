@@ -58,3 +58,25 @@ test('artifact reads decrypt native content and preserve task links without path
   assert.equal(metadata.records[0].content_error, 'unsupported_content_type');
   assert.equal(metadata.records[0].content, undefined);
 });
+
+// Hub-packed html-bundle (artifacts.create entry/files) relayed as content_base64.
+const BUNDLE_B64 = 'UEsDBBQAAAAAAFW3Yl2UKFEnLwAAAC8AAAAWAAAAaGVpbWRhbGwtYXJ0aWZhY3QuanNvbnsiZm9ybWF0X3ZlcnNpb24iOjEsImVudHJ5cG9pbnQiOiJpbmRleC5odG1sIn0KUEsDBBQAAAAAAFW3Yl07wbBJIQAAACEAAAAKAAAAaW5kZXguaHRtbDwhZG9jdHlwZSBodG1sPjxpbWcgc3JjPWxvZ28ucG5nPlBLAwQUAAAAAABVt2JdVoDwEwcAAAAHAAAACAAAAGxvZ28ucG5niVBORwD/gFBLAQIUAxQAAAAAAFW3Yl2UKFEnLwAAAC8AAAAWAAAAAAAAAAAAAACAAQAAAABoZWltZGFsbC1hcnRpZmFjdC5qc29uUEsBAhQDFAAAAAAAVbdiXTvBsEkhAAAAIQAAAAoAAAAAAAAAAAAAAIABYwAAAGluZGV4Lmh0bWxQSwECFAMUAAAAAABVt2JdVoDwEwcAAAAHAAAACAAAAAAAAAAAAAAAgAGsAAAAbG9nby5wbmdQSwUGAAAAAAMAAwCyAAAA2QAAAAAA';
+test('artifact workers re-validate and seal a relayed html-bundle byte-exact', async () => {
+  const f = await mcpWorkerFixture(Date.now(), scope);
+  const job = { ...f.job, tool: 'artifacts.create', operation: 'seal_resource' as const, payload: JSON.stringify({ name: 'Site', content_base64: BUNDLE_B64 }) };
+  job.digest = await mcpJobDigest(job);
+  await verifyMcpWorkerJob(job, f.identity, f.chain, job.resource, f.now);
+  const output = JSON.parse(await transformMcpWorkerJob(job, f.keyring));
+  const opened = await decryptVaultBytes(output.content_base64, f.keyring);
+  assert.equal(opened.status, 'ok');
+  if (opened.status === 'ok') assert.equal(Buffer.from(opened.bytes).toString('base64'), BUNDLE_B64);
+  const notBundle = Buffer.from([1, 2, 3, 4]).toString('base64');
+  for (const fields of [{ name: 'x', content_base64: notBundle }, { name: 'x', content_base64: 'eB==' }, { name: 'x', content_base64: `${BUNDLE_B64}\n` }, { name: 'x', content_base64: BUNDLE_B64, content: 'x' }]) {
+    await assert.rejects(transformMcpWorkerJob({ ...job, payload: JSON.stringify(fields) }, f.keyring));
+  }
+  await assert.rejects(transformMcpWorkerJob({ ...job, tool: 'artifacts.update', payload: JSON.stringify({ content_base64: BUNDLE_B64 }) }, f.keyring));
+  // The raised payload bound is artifact-create only.
+  const big = { ...f.job, tool: 'memories.create', operation: 'seal_resource' as const, payload: 'x'.repeat(4 * 1024 * 1024 + 1) };
+  big.digest = await mcpJobDigest(big);
+  await assert.rejects(verifyMcpWorkerJob(big, f.identity, f.chain, big.resource, f.now));
+});
