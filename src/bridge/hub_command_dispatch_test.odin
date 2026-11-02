@@ -140,7 +140,7 @@ bridge_command_registry_covers_every_reader_command :: proc(t: ^testing.T) {
 		"launch_agent", "launch_provider_test", "stop_agent", "wake_agent", "agent_pty_input", "agent_pty_resize", "bridge_unseal", "set_telemetry", "lsp_start", "lsp_stop",
 		"notify_agent_message", "notify_task_nudge", "notify_shell_run", "notify_title_nudge", "task_status_changed_notify", "capture_agent_pane", "get_agent_pane",
 		"provider_discover", "shell_stream_attach", "bridge_update",
-		"fs_list_dir", "fs_stat", "fs_make_dir", "fs_read_file", "agent_run_dir_list", "agent_run_dir_read", "fs_create_file", "fs_write_file", "fs_batch_write", "fs_move", "fs_delete", "fs_find_files", "fs_grep",
+		"session_projects", "fs_list_dir", "fs_stat", "fs_make_dir", "fs_read_file", "agent_run_dir_list", "agent_run_dir_read", "fs_create_file", "fs_write_file", "fs_batch_write", "fs_move", "fs_delete", "fs_find_files", "fs_grep",
 		"vcs_capabilities", "vcs_status", "vcs_files", "vcs_diff", "vcs_stage", "vcs_unstage", "vcs_revert", "vcs_save_file", "vcs_commit", "vcs_upload", "vcs_push", "vcs_sync", "vcs_pull", "vcs_log", "vcs_commit_diff", "vcs_workspaces",
 		"get_shell_output", "shell_pty_input", "shell_pty_resize", "shell_stream_detach", "shell_start", "shell_background", "shell_kill", "shell_signal", "shell_restart", "shell_set_port", "shell_list", "shell_logs", "shell_capture", "shell_get_pane",
 	}
@@ -323,7 +323,7 @@ HUB_TO_BRIDGE_RUNTIME_FRAME_TYPES := []string{
 	// tunnels / preview proxy
 	"tunnel_open", "tunnel_data", "tunnel_close", "proxy_data", "proxy_close",
 	// filesystem
-	"validate_project_path", "fs_list_dir", "fs_stat", "fs_read_file", "fs_make_dir", "fs_create_file",
+	"session_projects", "validate_project_path", "fs_list_dir", "fs_stat", "fs_read_file", "fs_make_dir", "fs_create_file",
 	"fs_write_file", "fs_batch_write", "fs_move", "fs_delete", "fs_find_files", "fs_grep",
 	"agent_run_dir_list", "agent_run_dir_read",
 	// vcs

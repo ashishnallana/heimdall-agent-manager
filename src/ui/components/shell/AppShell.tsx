@@ -68,6 +68,7 @@ import { desktopCapabilities } from '../../bridge/desktopBridge';
 import { setupSeen } from '../setup/setupWizardModel';
 import { VaultResetBanner } from '../devices/VaultResetBanner';
 import { bootDeviceVault, autoUnsealLockedBridges } from '../../services/deviceVault';
+import { analytics } from '../../analytics/analytics';
 import { setTheme } from '../../store/themeSlice';
 import ProjectLaunchModal from '../projects/ProjectLaunchModal';
 import HomePage from '../home/HomePage';
@@ -390,6 +391,7 @@ function routeBreadcrumbs(path: string, conversations: ConversationSummary[] = [
     const rest = path.slice('/settings/providers/'.length);
     if (rest === 'new') return [{ label: 'Settings', href: '/settings/bridges' }, { label: 'Providers', href: '/settings/providers' }, { label: 'New Provider' }];
     if (rest.endsWith('/edit')) return [{ label: 'Settings', href: '/settings/bridges' }, { label: 'Providers', href: '/settings/providers' }, { label: decodeSegment(rest.slice(0, -'/edit'.length)) }, { label: 'Edit' }];
+    return [{ label: 'Settings', href: '/settings/bridges' }, { label: 'Providers', href: '/settings/providers' }, { label: decodeSegment(rest) }];
   }
   if (path.startsWith('/settings/')) {
     const key = path.slice('/settings/'.length).split('/')[0] || 'bridges';
@@ -479,6 +481,8 @@ function installApiAuthObserver() {
 // Sign out: the Hub deletes the session and expires the cookie, then the browser
 // continues to the provider's end-session URL (or "/").
 async function signOut(): Promise<void> {
+  // REQ-PH-4: drop the analytics identity before leaving (no-op without a PostHog key).
+  analytics.reset();
   const next = await postLogout(window.fetch.bind(window), apiUrl('/auth/logout'));
   window.location.assign(next);
 }
@@ -973,7 +977,13 @@ function AuthGate() {
           const previousUserId = lastSeenUserRef.current || readLastSeenUserId();
           if (nextUserId && previousUserId && previousUserId !== nextUserId) {
             clearPriorUserClientState(dispatch, nextUserId);
+            // A different user than the one last seen on this device (switch across page
+            // loads): drop the previous analytics identity too, so the two are never merged.
+            analytics.reset();
           }
+          // REQ-PH-4: the Hub user id only. identify() resets first on an in-page account
+          // switch and sends `app_login` once per user.
+          if (nextUserId) analytics.identify(nextUserId);
           if (nextUserId) {
             writeLastSeenUserId(nextUserId);
             lastSeenUserRef.current = nextUserId;
@@ -1294,6 +1304,8 @@ function RouteOutlet({
           <ProviderEditorPage />
         ) : path.startsWith('/settings/providers/') && path.endsWith('/edit') ? (
           <ProviderEditorPage providerName={decodeSegment(path.slice('/settings/providers/'.length, -'/edit'.length))} />
+        ) : path.startsWith('/settings/providers/') ? (
+          <ProvidersPanel bridgeId={decodeSegment(path.slice('/settings/providers/'.length))} />
         ) : path === '/settings/projects' ? (
           <ProjectsPanel />
         ) : path === '/settings/templates' ? (

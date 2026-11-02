@@ -13,7 +13,7 @@ import metrics "odin_test:lib/metrics"
 
 // DB latency telemetry (plan §4.3). These tests flip the process-global
 // telemetry mode and assert exact counter deltas on shared series, so they
-// only run single-threaded in their own binary: verify-db-telemetry.sh passes
+// only run single-threaded in their own binary: build the package with
 // -define:DBT_TESTS=true -define:ODIN_TEST_THREADS=1. In a plain package run
 // they are skipped (concurrent tests would move the shared counters).
 DBT_TESTS :: #config(DBT_TESTS, false)
@@ -490,7 +490,7 @@ test_waiters_max_scrape_reset :: proc(t: ^testing.T) {
 
 // test_db_telemetry_bench is the §4.1 overhead gate: ns per wrapped call, off
 // vs basic, for step (with site) and prepare+finalize. Prints, never asserts
-// (timing on shared hosts is noisy); verify-db-telemetry.sh reports the lines.
+// (timing on shared hosts is noisy); read the lines from the test output.
 @(test)
 test_db_telemetry_bench :: proc(t: ^testing.T) {
 	if !DBT_TESTS do return

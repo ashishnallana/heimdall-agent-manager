@@ -372,8 +372,11 @@ test('mounted wizard validates identity, environment never reveals stored secret
       await tick();
     });
     await act(tick);
+    assert.ok(q('profiles-list'), 'bridge opens on its provider list');
     await click('profile-add');
-    assert.match(q('profile-wizard-step').textContent, /● Provider/);
+    assert.equal(q('profiles-list'), null, 'editor has no adjacent provider switcher');
+    assert.equal(q('profile-wizard-step').querySelector('[aria-current="step"]')?.textContent, '1ProviderCurrent step');
+    assert.equal(q('profile-wizard-step').querySelectorAll('li').length, 3);
     await click('profile-next');
     assert.match(q('profile-id').value, /^claude_[a-z2-7]{4}$/);
     await click('profile-next');
@@ -393,9 +396,13 @@ test('mounted wizard validates identity, environment never reveals stored secret
     await click('profile-env-add');
     await change('profile-env-name-0', 'WORK_TOKEN');
     await change('profile-env-value-0', 'secret-after-save');
+    assert.equal(q('profile-enabled').textContent, 'Disable profile');
+    await click('profile-enabled');
+    assert.equal(q('profile-enabled').textContent, 'Enable profile');
     await click('profile-save');
     await act(tick);
     assert.ok(savedProfile, 'wizard saved through the real sealed API');
+    assert.equal(savedProfile.enabled, false, 'prominent enablement action persists through the sealed save');
     assert.equal(savedProfile.config.config_dir, wizardRandomPath.replace(/^~/, '/bridge/home'));
     assert.equal(
       q('profile-config-dir-mode').value,
@@ -411,6 +418,49 @@ test('mounted wizard validates identity, environment never reveals stored secret
     );
     assert.match(q('profile-env-value-0').placeholder, /Stored secret/);
     assert.ok(!dom.window.document.body.innerHTML.includes('secret-after-save'));
+    assert.equal(q('profiles-list'), null, 'saved editor remains full width');
+    // Reopen with configured=false/runtime=true. Runtime must never seed the draft.
+    await click('profile-back-to-list');
+    await click('profile-select-' + savedProfile.profile_id);
+    const assertEnablement = (configured: boolean, runtime: boolean, pending: boolean) => {
+      assert.equal(q('profile-enabled').getAttribute('aria-pressed'), String(configured));
+      assert.equal(q('profile-enabled').textContent, configured ? 'Disable profile' : 'Enable profile');
+      assert.equal(q('profile-enablement').textContent.includes('Pending save'), pending);
+      assert.equal(q('profile-runtime-availability').textContent, 'Runtime availability: ' + (runtime ? 'Enabled' : 'Disabled'));
+    };
+    assertEnablement(false, true, false);
+    await click('profile-enabled');
+    assertEnablement(true, true, true);
+    await click('profile-enabled');
+    assertEnablement(false, true, false);
+    await click('profile-enabled');
+    await click('profile-save');
+    await act(tick);
+    assert.equal(savedProfile.enabled, true, 'enable action restores launch availability after save');
+    // Reopen with the inverse mismatch, configured=true/runtime=false.
+    status.find((p) => p.profile_id === savedProfile.profile_id)!.enabled = false;
+    await click('profile-back-to-list');
+    await click('profiles-refresh');
+    await act(tick);
+    await click('profile-select-' + savedProfile.profile_id);
+    assertEnablement(true, false, false);
+    await click('profile-enabled');
+    assertEnablement(false, false, true);
+    await click('profile-enabled');
+    assertEnablement(true, false, false);
+    // An unrelated edit must keep configured enablement in the sealed payload.
+    await change('profile-label', 'Updated work account');
+    await click('profile-save');
+    await act(tick);
+    assert.equal(savedProfile.enabled, true, 'runtime mismatch cannot silently disable a saved profile');
+    assertEnablement(true, false, false);
+    assert.equal(q('profile-test').disabled, true, 'configured enablement does not imply runtime availability');
+    status.find((p) => p.profile_id === savedProfile.profile_id)!.enabled = true;
+    await click('profile-back-to-list');
+    await click('profiles-refresh');
+    await act(tick);
+    await click('profile-select-' + savedProfile.profile_id);
+    discoveryRequests.length = 0;
     await click('profile-discover');
     assert.deepEqual(discoveryRequests, [
       { stage: 'providers', providers: ['claude'], profile_id: savedProfile.profile_id },

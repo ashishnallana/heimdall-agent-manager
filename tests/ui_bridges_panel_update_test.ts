@@ -235,19 +235,24 @@ test('web BridgesPanel lists installed bridges with Update only (no This machine
     assert.ok(query('settings-bridges-panel'));
     assert.equal(query('settings-this-machine-card'), null, 'no This machine card on the web');
     assert.equal(doc.querySelector('[data-debug-id^="settings-bridge-wizard"]'), null);
-    assert.match(query('settings-bridges-list')!.textContent || '', /Installed bridges \(2\)/);
-    assert.match(query('settings-bridge-row-bridge-online')!.textContent || '', /Catalog: v0\.4\.31 \(override\)/);
-    assert.match(query('settings-bridge-row-bridge-online')!.textContent || '', /Operator pin 0\.4\.31 is older than promoted release 0\.4\.32/);
-    assert.match(query('settings-bridge-row-bridge-offline')!.textContent || '', /Catalog: v0\.4\.31 \(manifest\)/);
-    assert.match(query('settings-bridge-row-bridge-offline')!.textContent || '', /Release lookup: cannot resolve promoted releases: HTTP 503/);
+    assert.match(query('settings-bridges-list')!.textContent || '', /Your bridges \(2\)/);
+    assert.ok(query('settings-bridges-global-telemetry'));
     for (const bridge of bridges) {
       const id = bridge.bridge_id;
-      assert.ok(query(`settings-bridge-row-${id}`), `row for ${id}`);
-      assert.ok(query(`settings-bridge-update-btn-${id}`), `Update for ${id}`);
-      assert.ok(query(`settings-bridge-rename-btn-${id}`), `Rename for ${id}`);
+      assert.ok(query(`settings-bridge-card-${id}`), `card for ${id}`);
+      await act(async () => query(`settings-bridge-card-${id}`)!.click());
+      assert.ok(query(`settings-bridge-row-${id}`), `detail for ${id}`);
+      assert.ok(query(`settings-bridge-update-btn-${id}`));
+      assert.equal((query(`settings-bridge-update-btn-${id}`) as HTMLButtonElement).disabled, id === 'bridge-offline');
+      assert.ok(query(`settings-bridge-rename-btn-${id}`));
+      assert.match(query(`settings-bridge-row-${id}`)!.textContent || '', id === 'bridge-online'
+        ? /Operator pin 0\.4\.31 is older than promoted release 0\.4\.32/
+        : /Release lookup: cannot resolve promoted releases: HTTP 503/);
+      assert.equal(query('settings-bridges-global-telemetry'), null, 'global configuration stays on overview');
+      assert.equal(doc.querySelector('[data-debug-id^="settings-bridge-uninstall-"]'), null, 'no Uninstall / Revoke on the web');
+      assert.equal(doc.querySelector('[data-debug-id^="settings-bridge-archive-"]'), null);
+      await act(async () => query('settings-bridges-back')!.click());
     }
-    assert.equal(doc.querySelector('[data-debug-id^="settings-bridge-uninstall-"]'), null, 'no Uninstall / Revoke on the web');
-    assert.equal(doc.querySelector('[data-debug-id^="settings-bridge-archive-"]'), null, 'Archive was removed');
     assert.equal(requests.filter((r) => r.method !== 'GET').length, 0);
   } finally {
     await act(async () => root.unmount());
@@ -269,6 +274,12 @@ test('web BridgesPanel lists installed bridges with Update only (no This machine
 
 test('ThisMachineCard retries a failed Re-enroll as Re-enroll and labels the failure by operation', async () => {
   const { default: ThisMachineCard } = await import('../src/ui/components/settings/ThisMachineCard.tsx');
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = (async () => Response.json({ data: { bridges: [{ bridge_id: 'brg_this' }] } })) as typeof fetch;
+  const store = configureStore({ reducer: { [heimdallApi.reducerPath]: heimdallApi.reducer },
+    middleware: (defaults) => defaults().concat(heimdallApi.middleware), enhancers: (defaults) => defaults({ autoBatch: false }) });
+  const renderCard = (props: any) => React.createElement(Provider, { store, children: React.createElement(ThisMachineCard, props) });
+
   const dom = new JSDOM('<div id="root"></div>', { url: 'https://hub.example.test/', pretendToBeVisual: true });
   const saved = new Map<string, PropertyDescriptor | undefined>();
   for (const [key, value] of Object.entries({
@@ -283,7 +294,7 @@ test('ThisMachineCard retries a failed Re-enroll as Re-enroll and labels the fai
   const manager: any = {
     getConfig: async () => ({ ok: true, supported: true, platform: 'linux', hubUrl: 'https://hub.example.test', defaultHubUrl: 'https://hub.example.test', bundledVersion: '' }),
     setHubUrl: async () => ({ ok: true }),
-    getStatus: async () => ({ supported: true, busy: false, operation: '', installed: true, state: 'connected', bridge_id: 'brg_this', error: '' }),
+    getStatus: async () => ({ hub: 'https://hub.example.test', profile: '', supported: true, busy: false, operation: '', installed: true, state: 'connected', bridge_id: 'brg_this', error: '' }),
     list: async () => ({ ok: true, profiles: [{ installed: true, state: 'connected', hub: 'https://hub.example.test', profile: '', bridge_id: 'brg_this' }] }),
     run: async (kind: string, _target: any, options: any) => { runs.push({ kind, options }); return { ok: true }; },
     cancel: async () => ({ ok: true }),
@@ -299,7 +310,7 @@ test('ThisMachineCard retries a failed Re-enroll as Re-enroll and labels the fai
     await act(async () => { element!.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
   };
   try {
-    await act(async () => { root.render(React.createElement(ThisMachineCard, { manager, accountBridgeIds: ['brg_this'] })); });
+    await act(async () => { root.render(renderCard({ manager })); });
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
     await click('settings-this-machine-reenroll-btn');
     await click('settings-this-machine-confirm-ok');
@@ -312,6 +323,9 @@ test('ThisMachineCard retries a failed Re-enroll as Re-enroll and labels the fai
     assert.deepEqual(runs[1], { kind: 'reenroll', options: { bridgeId: 'brg_this', inAppApproval: true } }, 'Retry repeats the re-enroll, not an update');
   } finally {
     await act(async () => root.unmount());
+    store.dispatch(heimdallApi.util.resetApiState());
+    globalThis.fetch = previousFetch;
+    (await import('../src/ui/bridge/desktopBridgeSession.ts')).resetDesktopBridgeSessionForTests();
     dom.window.close();
     for (const [key, descriptor] of saved) {
       if (descriptor) Object.defineProperty(globalThis, key, descriptor);
@@ -322,6 +336,12 @@ test('ThisMachineCard retries a failed Re-enroll as Re-enroll and labels the fai
 
 test('ThisMachineCard: account B detects account A\'s profile but cannot manage it', async () => {
   const { default: ThisMachineCard } = await import('../src/ui/components/settings/ThisMachineCard.tsx');
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = (async () => Response.json({ data: { bridges: [{ bridge_id: 'brg_this' }] } })) as typeof fetch;
+  const store = configureStore({ reducer: { [heimdallApi.reducerPath]: heimdallApi.reducer },
+    middleware: (defaults) => defaults().concat(heimdallApi.middleware), enhancers: (defaults) => defaults({ autoBatch: false }) });
+  const renderCard = (props: any) => React.createElement(Provider, { store, children: React.createElement(ThisMachineCard, props) });
+
   // The run session is module state; start without the previous test's run.
   (await import('../src/ui/bridge/desktopBridgeSession.ts')).resetDesktopBridgeSessionForTests();
   const dom = new JSDOM('<div id="root"></div>', { url: 'https://hub.example.test/', pretendToBeVisual: true });
@@ -350,28 +370,28 @@ test('ThisMachineCard: account B detects account A\'s profile but cannot manage 
   const doc = dom.window.document;
   const query = (id: string) => doc.querySelector(`[data-debug-id="${id}"]`) as HTMLElement | null;
   try {
-    // While the account's bridges load, setup cannot start (it could duplicate the account's own bridge).
-    await act(async () => { root.render(React.createElement(ThisMachineCard, { manager, accountBridgeIds: null })); });
+    globalThis.fetch = (async () => Response.json({ data: { bridges: [{ bridge_id: 'brg_b_elsewhere' }] } })) as typeof fetch;
+    await act(async () => { root.render(renderCard({ manager })); });
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
-    assert.equal((query('settings-this-machine-setup-btn') as HTMLButtonElement | null)?.disabled, true);
-
-    await act(async () => { root.render(React.createElement(ThisMachineCard, { manager, accountBridgeIds: ['brg_b_elsewhere'] })); });
-    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
-    assert.deepEqual(statusTargets, [], 'A\'s profile status is never queried for B');
-    assert.equal(query('settings-this-machine-update-btn'), null, 'B cannot update A\'s bridge');
-    assert.equal(query('settings-this-machine-uninstall-btn'), null, 'B cannot uninstall A\'s bridge');
+    assert.deepEqual(statusTargets, [], "A's profile status is never queried for B");
+    assert.equal(query('settings-this-machine-update-btn'), null);
+    assert.equal(query('settings-this-machine-uninstall-btn'), null);
     assert.doesNotMatch(doc.body.textContent || '', /brg_a/);
-    assert.equal(query('settings-detected-profiles-p1'), null, 'other accounts are hidden by default');
-    await act(async () => { query('settings-detected-profiles-show-others')!.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
-    assert.match(query('settings-detected-profiles-p1')!.textContent || '', /p1.*Not linked to this account/);
-    assert.equal(query('settings-this-machine-uninstall-btn'), null, 'revealing a profile does not grant lifecycle controls');
-    assert.match(query('settings-this-machine-other-accounts')!.textContent || '', /Another Ninjy account has a bridge on this machine/);
-    await act(async () => { query('settings-this-machine-open-setup-btn')!.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+    await act(async () => query('settings-this-machine-open-setup-btn')!.click());
     assert.equal(dom.window.location.hash, '#/setup', 'the wizard can be reopened after the first-run flag was remembered');
-    await act(async () => { query('settings-this-machine-setup-btn')!.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
-    assert.deepEqual(runs, [{ kind: 'setup', target: { hub: 'https://hub.example.test', profile: '' }, options: { separateAccount: true, inAppApproval: true } }]);
+    await act(async () => query('settings-this-machine-setup-btn')!.click());
+    assert.equal(query('settings-detected-profiles-p1'), null, 'other accounts are hidden by default');
+    await act(async () => query('settings-detected-profiles-show-others')!.click());
+    assert.match(query('settings-detected-profiles-p1')!.textContent || '', /p1.*Not linked to this account/);
+    assert.equal(query('settings-this-machine-uninstall-btn'), null, 'revealing inventory does not grant lifecycle controls');
+    assert.equal(dom.window.location.hash, '#/setup', 'Install opens the full wizard for profile selection');
+    assert.equal(query('settings-local-bridge-flow'), null);
+    assert.deepEqual(runs, [], 'opening the wizard does not start installation');
   } finally {
     await act(async () => root.unmount());
+    store.dispatch(heimdallApi.util.resetApiState());
+    globalThis.fetch = previousFetch;
+    (await import('../src/ui/bridge/desktopBridgeSession.ts')).resetDesktopBridgeSessionForTests();
     dom.window.close();
     for (const [key, descriptor] of saved) {
       if (descriptor) Object.defineProperty(globalThis, key, descriptor);

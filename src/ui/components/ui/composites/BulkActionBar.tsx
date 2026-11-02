@@ -14,8 +14,7 @@
  * verbs appeared somewhere off screen. Measured through the live app: Projects put
  * the bar at y=1084 in an 814px viewport, Memory at y=7050. Type-clean, invisible in
  * a short list, and caught only by measuring the bar's rect after a real click
- * (`scripts/ui-interaction-harness.mjs`, predicate "bulk bar sits above the bottom
- * chrome"). Fixed positioning has no such dependency on an ancestor's height.
+ * (predicate "bulk bar sits above the bottom chrome"). Fixed positioning has no such dependency on an ancestor's height.
  *
  * Because a fixed bar is out of flow, the component also renders an in-flow SPACER
  * of its own measured height, so the last row of a list is never hidden underneath

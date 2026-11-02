@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import type { ProviderSettingsHeading } from '../settings/ProvidersPanel';
 import { useDispatch, useSelector } from 'react-redux';
-import { Button, Spinner } from '@ui';
+import { Badge, Button, Panel, Spinner, StatusPill, Text } from '@ui';
 import { heimdallApi } from '../../api/heimdallApi';
 import { apiErrorText, cookieMutation } from '../../api/cookieFetch';
 import { selectIsVaultUnlocked } from '../../store/vaultSlice';
@@ -25,12 +26,15 @@ import ProviderExtensionInstallAction from '../extension/ProviderExtensionInstal
 import ProviderTestRunModal, { type ProviderTestTarget } from './ProviderTestRunModal';
 
 const fieldClass =
-  'w-full rounded-lg border border-subtle bg-surface px-3 py-2 text-sm text-primary disabled:opacity-50';
+  'min-w-0 w-full rounded-[var(--radius-md)] border border-subtle bg-[var(--color-border-subtle)] px-3 py-2 text-sm text-primary focus-visible:outline-none focus-visible:border-accent focus-visible:shadow-focus disabled:opacity-50';
+const runtimeFieldClass = fieldClass + ' font-[family-name:var(--font-mono)]';
+// Profile accents are serialized hex values, independent of the active theme.
+const defaultAccent = '#9c9c9c';
 const newProfile = (provider: string, used: string[]): ProviderProfile => ({
   profile_id: generateProfileId(provider, used),
   provider,
   label_enc: '',
-  accent: '#7c6af7',
+  accent: defaultAccent,
   enabled: true,
   environment: [],
   config: {},
@@ -58,7 +62,7 @@ export function ProfileRuntimeEditor({
     <label className="block space-y-1">
       <span className="text-sm font-medium">{label}</span>
       <input
-        className={fieldClass}
+        className={runtimeFieldClass}
         data-debug-id={'profile-config-' + key}
         type={secret ? 'password' : 'text'}
         autoComplete="off"
@@ -140,16 +144,16 @@ export function ProfileRuntimeEditor({
       environment: profile.environment.map((e, i) => (i === index ? { ...e, ...patch } : e)),
     });
   return (
-    <fieldset disabled={disabled} className="space-y-5">
+    <fieldset disabled={disabled} className="min-w-0 space-y-6">
       <section className="space-y-3">
-        <h3 className="font-semibold">Runtime</h3>
+        <Text as="h2" role="heading">Runtime</Text>
         {row('binary_path', 'Binary', 'Optional executable name or absolute path on this bridge.')}
         {profile.provider === 'claude' ? (
           <div className="space-y-2">
             <label className="block space-y-1">
               <span className="text-sm font-medium">Config directory</span>
               <select
-                className={fieldClass}
+                className={runtimeFieldClass}
                 data-debug-id="profile-config-dir-mode"
                 value={directoryMode}
                 onChange={(e) => changeDirectoryMode(e.target.value as ConfigDirectoryMode)}
@@ -173,7 +177,7 @@ export function ProfileRuntimeEditor({
                     : 'Custom directory on bridge'}
                 </span>
                 <input
-                  className={fieldClass}
+                  className={runtimeFieldClass}
                   data-debug-id="profile-config-config_dir"
                   autoComplete="off"
                   readOnly={directoryMode === 'random'}
@@ -213,7 +217,7 @@ export function ProfileRuntimeEditor({
             <label className="block text-sm">
               Authentication
               <select
-                className={fieldClass}
+                className={runtimeFieldClass}
                 data-debug-id="profile-auth-method"
                 value={profile.config.auth_method || ''}
                 onChange={(e) => config('auth_method', e.target.value)}
@@ -245,7 +249,7 @@ export function ProfileRuntimeEditor({
                 <input
                   aria-label={'Argument ' + (i + 1)}
                   data-debug-id={'profile-arg-' + i}
-                  className={fieldClass}
+                  className={runtimeFieldClass}
                   value={arg}
                   onChange={(e) => changeArgs(args.map((a, j) => (j === i ? e.target.value : a)))}
                 />
@@ -272,7 +276,7 @@ export function ProfileRuntimeEditor({
         )}
       </section>
       <section className="space-y-3">
-        <h3 className="font-semibold">Environment</h3>
+        <Text as="h2" role="heading">Environment</Text>
         {profile.environment.map((entry, i) => (
           <div
             key={i}
@@ -282,7 +286,7 @@ export function ProfileRuntimeEditor({
             <div className="grid gap-2 sm:grid-cols-2">
               <input
                 aria-label={'Variable name ' + (i + 1)}
-                className={fieldClass}
+                className={runtimeFieldClass}
                 data-debug-id={'profile-env-name-' + i}
                 value={entry.name}
                 disabled={disabled || Boolean(entry.value_redacted)}
@@ -292,7 +296,7 @@ export function ProfileRuntimeEditor({
                 aria-label={'Variable value ' + (i + 1)}
                 type={entry.sensitive ? 'password' : 'text'}
                 autoComplete="off"
-                className={fieldClass}
+                className={runtimeFieldClass}
                 data-debug-id={'profile-env-value-' + i}
                 placeholder={
                   entry.value_redacted ? 'Stored secret, enter a new value to replace' : 'Value'
@@ -358,11 +362,11 @@ export function ProfileRuntimeEditor({
       </section>
       {profile.provider !== 'antigravity' ? (
         <section className="space-y-2">
-          <h3 className="font-semibold">Models</h3>
+          <Text as="h2" role="heading">Models</Text>
           <label className="block text-sm">
             Custom model IDs
             <textarea
-              className={fieldClass}
+              className={runtimeFieldClass}
               rows={3}
               data-debug-id="profile-custom-models"
               value={(profile.config.custom_models || []).join('\n')}
@@ -378,10 +382,15 @@ export function ProfileRuntimeEditor({
   );
 }
 
-export default function ProviderProfilesSurface({ bridge }: { bridge: any }) {
+export default function ProviderProfilesSurface({ bridge, onHeadingChange }: {
+  bridge: any;
+  onHeadingChange?: (heading: ProviderSettingsHeading) => void;
+}) {
   const bridgeId = String(bridge?.bridge_id || bridge?.id || '');
   const unlocked = useSelector(selectIsVaultUnlocked);
   const editable = unlocked && bridge?.status === 'online' && bridge?.vault_status === 'unlocked';
+  const editableRef = useRef(editable);
+  editableRef.current = editable;
   const dispatch = useDispatch();
   const [profiles, setProfiles] = useState<ProfileMetadata[]>([]);
   const [statuses, setStatuses] = useState<BridgeProviderStatus[]>([]);
@@ -395,7 +404,7 @@ export default function ProviderProfilesSurface({ bridge }: { bridge: any }) {
   const [error, setError] = useState('');
   const [runtimeError, setRuntimeError] = useState('');
   const [confirmDelete, setConfirmDelete] = useState(false);
-  const [savedDraft, setSavedDraft] = useState('');
+  const [savedDraft, setSavedDraft] = useState<ProviderProfile | null>(null);
   const [savedLabel, setSavedLabel] = useState('');
   const [testModelId, setTestModelId] = useState('');
   const [testTarget, setTestTarget] = useState<ProviderTestTarget | null>(null);
@@ -466,15 +475,10 @@ export default function ProviderProfilesSurface({ bridge }: { bridge: any }) {
     setStep(null);
     try {
       const full = await providerProfilesApi.operate(bridgeId, p.profile_id, 'get');
-      if (full) {
-        const loadedProfile = {
-          ...full,
-          enabled:
-            statuses.find((s) => (s.profile_id || s.provider) === p.profile_id)?.enabled ??
-            p.enabled,
-        };
-        setDraft(loadedProfile);
-        setSavedDraft(JSON.stringify(loadedProfile));
+      if (full && editableRef.current) {
+        // Edit persisted configuration; runtime availability is an independent projection.
+        setDraft(full);
+        setSavedDraft(full);
         setSavedLabel(labels[p.profile_id] || p.profile_id);
         setLabel(labels[p.profile_id] || p.profile_id);
       }
@@ -553,9 +557,9 @@ export default function ProviderProfilesSurface({ bridge }: { bridge: any }) {
       const id = saved.profile_id;
       // Fetch a redacted view after save so replacement secrets leave React state.
       const full = await providerProfilesApi.operate(bridgeId, id, 'get');
-      if (full) {
+      if (full && editableRef.current) {
         setDraft(full);
-        setSavedDraft(JSON.stringify(full));
+        setSavedDraft(full);
         const savedName = await profileLabel(full);
         setLabel(savedName);
         setSavedLabel(savedName);
@@ -616,17 +620,30 @@ export default function ProviderProfilesSurface({ bridge }: { bridge: any }) {
   const testModels = (currentStatus?.models || []).filter((m) => m.state === 'active');
   const testModel = testModels.find((m) => m.model_id === testModelId) || testModels[0];
   const draftChanged = Boolean(
-    draft && (JSON.stringify(draft) !== savedDraft || label !== savedLabel),
+    draft && (JSON.stringify(draft) !== JSON.stringify(savedDraft) || label !== savedLabel),
   );
+  const editing = Boolean(draft || selected || step !== null);
+  const bridgeName = String(bridge?.label || bridge?.machine_hostname || bridgeId);
+  const title = editing ? step !== null ? 'Add provider' : label || selected : bridgeName;
+  const description = editing ? `Provider profile and runtime settings on ${bridgeName}.`
+    : 'Provider profiles and runtime settings on this bridge.';
+  const breadcrumb = editing ? bridgeName + ' / ' + (draft?.provider || selected) : 'Settings / Providers';
+  const focusKey = bridgeId + '/' + (editing ? step !== null ? 'new' : selected : 'list');
+  useLayoutEffect(() => {
+    onHeadingChange?.({ title, description, breadcrumb, focusKey });
+  }, [onHeadingChange, title, description, breadcrumb, focusKey]);
+  const closeEditor = () => {
+    setDraft(null);
+    setLabel('');
+    setStep(null);
+    setSelected('');
+    setConfirmDelete(false);
+    setRuntimeError('');
+  };
   return (
-    <div data-debug-id="provider-profiles" className="space-y-4">
-      <div className="flex items-center justify-between gap-2">
-        <div>
-          <h2 className="text-lg font-semibold">Provider profiles</h2>
-          <p className="text-sm text-muted">
-            Separate accounts and runtime settings on this bridge.
-          </p>
-        </div>
+    <div data-debug-id="provider-profiles" className="min-w-0 w-full space-y-6">
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        {editing ? <Button variant="secondary" data-debug-id="profile-back-to-list" disabled={busy} onClick={closeEditor}>← Back to providers</Button> : (
         <Button
           data-debug-id="profile-add"
           disabled={!editable || busy || !drivers.length}
@@ -640,11 +657,19 @@ export default function ProviderProfilesSurface({ bridge }: { bridge: any }) {
             setSelected('');
             setStep(0);
             setError('');
+            setRuntimeError('');
+            setConfirmDelete(false);
           }}
         >
           Add provider
         </Button>
+        )}
       </div>
+      {!editing ? <div className="flex flex-wrap items-center gap-3">
+        <StatusPill tone={bridge?.status === 'online' ? 'success' : 'neutral'}>{bridge?.status === 'online' ? 'Online' : 'Offline'}</StatusPill>
+        <StatusPill>Vault {bridge?.vault_status || 'unknown'}</StatusPill>
+        <Text role="code" tone="muted">{bridge?.machine_hostname || bridgeId}</Text>
+      </div> : null}
       {!editable ? (
         <p
           className="rounded-lg bg-neutral-soft p-3 text-sm text-muted"
@@ -659,13 +684,14 @@ export default function ProviderProfilesSurface({ bridge }: { bridge: any }) {
         </p>
       ) : null}
       {!loaded ? <Spinner size="sm" /> : null}
-      <div className="grid gap-4 md:grid-cols-[minmax(12rem,1fr)_minmax(0,2fr)]">
-        <aside className="space-y-3">
-          {drivers.map((driver) => (
-            <section key={driver}>
-              <h3 className="mb-2 text-xs font-semibold uppercase text-muted">{driver}</h3>
-              {profiles
-                .filter((p) => p.provider === driver)
+      <div className="min-w-0">
+        {!editing ? <div className="space-y-4" data-debug-id="profiles-list">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <Text as="h2" role="heading">Provider profiles</Text>
+            <Button variant="secondary" size="sm" data-debug-id="profiles-refresh" disabled={!editable || busy} onClick={() => void discover('providers')}>Scan providers</Button>
+          </div>
+          <Panel padding="none" className="overflow-hidden">
+          {drivers.flatMap((driver) => profiles.filter((p) => p.provider === driver))
                 .map((p) => {
                   const s = statuses.find((s) => (s.profile_id || s.provider) === p.profile_id);
                   return (
@@ -674,55 +700,78 @@ export default function ProviderProfilesSurface({ bridge }: { bridge: any }) {
                       type="button"
                       data-debug-id={'profile-select-' + p.profile_id}
                       disabled={!editable || busy}
-                      aria-pressed={selected === p.profile_id}
                       onClick={() => void edit(p)}
                       className={
-                        'mb-2 block w-full rounded-xl border p-3 text-left ' +
-                        (selected === p.profile_id ? 'border-accent bg-accent/10' : 'border-subtle')
+                        'flex w-full flex-wrap items-center gap-3 border-b border-subtle p-4 text-left last:border-b-0 hover:bg-neutral-soft focus-visible:outline-none focus-visible:shadow-focus disabled:cursor-not-allowed disabled:opacity-50'
                       }
                     >
-                      <span className="flex items-center gap-2">
+                      <span className="flex min-w-0 flex-1 items-center gap-3">
                         <span
                           className="h-2 w-2 rounded-full"
-                          style={{ backgroundColor: p.accent || '#888888' }}
+                          style={{ backgroundColor: p.accent || 'var(--color-text-muted)' }}
                         />
-                        <span className="font-medium">{labels[p.profile_id] || p.profile_id}</span>
-                      </span>
-                      <span className="block text-xs text-muted">
+                        <span className="min-w-0 break-words">
+                        <Text as="span" role="title" className="block">{labels[p.profile_id] || p.profile_id}</Text>
+                        <span className="block text-xs text-muted">
                         {p.enabled && s?.enabled ? 'Enabled' : 'Disabled'} ·{' '}
                         {p.state && p.state !== 'ok' ? p.state : s?.state || 'Not checked'}
                         {s?.version_text ? ' · ' + s.version_text : ''}
+                        </span>
+                        </span>
                       </span>
+                      {p.profile_id === p.provider ? <Badge>Default</Badge> : <Text role="code" tone="muted" className="break-all">{p.profile_id}</Text>}
+                      <span className="text-sm text-accent">Edit →</span>
                     </button>
                   );
                 })}
-            </section>
-          ))}
-          <Button
-            variant="secondary"
-            size="sm"
-            data-debug-id="profiles-refresh"
-            disabled={!editable || busy}
-            onClick={() => void discover('providers')}
-          >
-            Scan providers
-          </Button>
-        </aside>
-        <main>
+          {loaded && !profiles.length ? <Text role="body" tone="muted" className="p-4">No provider profiles reported. Scan providers when this bridge is connected and unlocked.</Text> : null}
+          </Panel>
+          <Text role="body-sm" tone="muted">Edit a default provider to change its overrides, or add a profile for a separate account. Default providers can be reset; additional profiles can be deleted.</Text>
+        </div> : null}
+        {editing ? <div className="min-w-0">
           {draft ? (
             <div
-              className="space-y-5 rounded-xl border border-subtle p-4"
+              className="min-w-0 space-y-6 rounded-[var(--radius-lg)] border border-subtle bg-surface-raised p-4 sm:p-6"
               data-debug-id="profile-editor"
             >
               {step !== null ? (
-                <div className="text-sm font-medium" data-debug-id="profile-wizard-step">
-                  {['Provider', 'Identity', 'Config']
-                    .map((s, i) => (i === step ? '● ' : '') + s)
-                    .join(' → ')}
-                </div>
+                <nav aria-label="Add provider progress" data-debug-id="profile-wizard-step">
+                  <ol className="grid grid-cols-3 gap-2">
+                    {['Provider', 'Identity', 'Config'].map((name, index) => (
+                      <li key={name} aria-current={index === step ? 'step' : undefined}
+                        className={'flex min-w-0 flex-col gap-2 rounded-lg p-3 text-sm sm:flex-row sm:items-center ' +
+                          (index === step ? 'bg-neutral-soft text-primary' : 'text-muted')}>
+                        <span aria-hidden="true" className={'flex h-7 w-7 shrink-0 items-center justify-center rounded-full border text-xs font-medium ' +
+                          (index < step ? 'border-success text-success' : index === step ? 'border-accent text-accent' : 'border-subtle')}>{index + 1}</span>
+                        <span className="min-w-0">
+                          <span className="block font-medium">{name}</span>
+                          <span className="block text-xs text-muted">{index < step ? 'Completed' : index === step ? 'Current step' : 'Upcoming'}</span>
+                        </span>
+                      </li>
+                    ))}
+                  </ol>
+                </nav>
               ) : (
-                <h3 className="font-semibold">{labels[draft.profile_id] || draft.profile_id}</h3>
+                <Text as="h2" role="heading">Identity</Text>
               )}
+              {step !== 0 ? (
+                <Panel className="flex flex-wrap items-center justify-between gap-4" data-debug-id="profile-enablement">
+                  <div className="min-w-0">
+                    <Text role="title">Profile availability</Text>
+                    <Text role="body-sm" tone="muted">Configure whether this profile allows new launches. Save profile to apply changes.</Text>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-3">
+                    <Text role="caption" tone="muted" data-debug-id="profile-runtime-availability">Runtime availability: {currentStatus ? currentStatus.enabled ? 'Enabled' : 'Disabled' : 'Not reported'}</Text>
+                    <StatusPill tone={draft.enabled ? 'success' : 'neutral'}>{draft.enabled ? 'Enabled' : 'Disabled'}</StatusPill>
+                    {step !== null || savedDraft?.enabled !== draft.enabled
+                      ? <Text role="caption" tone="muted">Pending save</Text> : null}
+                    <Button variant="secondary" data-debug-id="profile-enabled" aria-pressed={draft.enabled}
+                      disabled={busy || !editable} onClick={() => setDraft({ ...draft, enabled: !draft.enabled })}>
+                      {draft.enabled ? 'Disable profile' : 'Enable profile'}
+                    </Button>
+                  </div>
+                </Panel>
+              ) : null}
               {step === 0 ? (
                 <label className="block text-sm">
                   Provider
@@ -762,7 +811,7 @@ export default function ProviderProfilesSurface({ bridge }: { bridge: any }) {
                   <label className="block text-sm">
                     Profile ID
                     <input
-                      className={fieldClass}
+                      className={runtimeFieldClass}
                       data-debug-id="profile-id"
                       value={draft.profile_id}
                       disabled={step === null || busy}
@@ -772,25 +821,16 @@ export default function ProviderProfilesSurface({ bridge }: { bridge: any }) {
                       The profile ID is visible to the hub; the label is encrypted.
                     </span>
                   </label>
-                  <label className="block text-sm">
-                    Accent
+                  <label className="flex flex-wrap items-center gap-3 text-sm">
+                    <span>Accent</span>
                     <input
                       type="color"
+                      className="h-10 w-16 shrink-0 cursor-pointer rounded-lg border border-subtle bg-surface-raised p-1 focus-visible:outline-none focus-visible:shadow-focus disabled:opacity-50"
                       data-debug-id="profile-accent"
                       disabled={busy}
-                      value={draft.accent || '#7c6af7'}
+                      value={draft.accent || defaultAccent}
                       onChange={(e) => setDraft({ ...draft, accent: e.target.value })}
                     />
-                  </label>
-                  <label className="flex items-center gap-2 text-sm">
-                    <input
-                      type="checkbox"
-                      data-debug-id="profile-enabled"
-                      disabled={busy}
-                      checked={draft.enabled}
-                      onChange={(e) => setDraft({ ...draft, enabled: e.target.checked })}
-                    />
-                    Enabled for new launches
                   </label>
                 </div>
               ) : null}
@@ -805,7 +845,7 @@ export default function ProviderProfilesSurface({ bridge }: { bridge: any }) {
                   />
                   {step === null ? (
                     <section className="space-y-2">
-                      <h3 className="font-semibold">Status / Setup</h3>
+                      <Text as="h2" role="heading">Status and setup</Text>
                       <p className="text-sm text-muted">
                         {currentStatus?.state || 'Not checked'} ·{' '}
                         {currentStatus?.version_text || 'No version reported'}
@@ -814,7 +854,7 @@ export default function ProviderProfilesSurface({ bridge }: { bridge: any }) {
                         Sign in with the provider CLI using this profile’s runtime directory. Then
                         scan again.
                       </p>
-                      <div className="flex gap-2">
+                      <div className="flex flex-wrap gap-2">
                         <Button
                           size="sm"
                           variant="secondary"
@@ -887,6 +927,7 @@ export default function ProviderProfilesSurface({ bridge }: { bridge: any }) {
                         </p>
                       </div>
                       <ProviderExtensionInstallAction
+                        layout="editor"
                         bridgeId={bridgeId}
                         provider={draft.provider}
                         profileId={draft.profile_id}
@@ -901,11 +942,11 @@ export default function ProviderProfilesSurface({ bridge }: { bridge: any }) {
                 </>
               ) : null}
               <div className="flex flex-wrap items-center gap-2 border-t border-subtle pt-3">
-                {step !== null && step > 0 ? (
+                {step !== null ? (
                   <Button
                     variant="secondary"
                     data-debug-id="profile-back"
-                    disabled={busy}
+                    disabled={busy || step === 0}
                     onClick={() => setStep(step - 1)}
                   >
                     Back
@@ -945,13 +986,7 @@ export default function ProviderProfilesSurface({ bridge }: { bridge: any }) {
                   variant="secondary"
                   data-debug-id="profile-cancel"
                   disabled={busy}
-                  onClick={() => {
-                    setDraft(null);
-                    setLabel('');
-                    setStep(null);
-                    setSelected('');
-                    setConfirmDelete(false);
-                  }}
+                  onClick={closeEditor}
                 >
                   Cancel
                 </Button>
@@ -997,7 +1032,7 @@ export default function ProviderProfilesSurface({ bridge }: { bridge: any }) {
               {busy ? 'Loading profile…' : 'Choose a profile to edit its runtime and environment.'}
             </p>
           )}
-        </main>
+        </div> : null}
       </div>
       {testTarget ? (
         <ProviderTestRunModal

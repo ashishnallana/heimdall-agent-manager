@@ -1,5 +1,5 @@
 import { useEntitlements } from '../../hooks/useEntitlements';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useState } from 'react';
 import {
   type Bridge,
   useBridgeProviderStatus,
@@ -11,13 +11,14 @@ import {
   useUpdateBridgeTelemetryMutation,
 } from '../../api/endpoints/bridgeSupport';
 import { desktopCapabilities } from '../../bridge/desktopBridge';
+import BridgeOperationRail from '../bridge/BridgeOperationRail';
 import ThisMachineCard from './ThisMachineCard';
 import BridgeAutoUpdateToggle from './BridgeAutoUpdateToggle';
 import {
   useFetchTelemetryDefaultEnabledQuery,
   useSaveTelemetryDefaultEnabledMutation,
 } from '../../api/endpoints/settings';
-import { Button, FormField, Icon, Input, PageShell, StatusDot, Text, Modal, ModalBody, ModalFooter, Spinner, Toggle } from '@ui';
+import { Button, FormField, Icon, Input, PageShell, Badge, Select, StatusPill, StatusDot, Text, Modal, ModalBody, ModalFooter, Spinner, Toggle } from '@ui';
 import type { Tone } from '@ui';
 import {
   bridgeReady as checkBridgeReady,
@@ -39,9 +40,11 @@ import PendingEnrollmentsCard from './PendingEnrollmentsCard';
 // Update / Re-enroll / Uninstall) and the other bridges with Update and
 // Uninstall (a live bridge uninstalls itself via bridge_uninstall; an offline
 // one can only be revoked). Web app: the installed bridges with Update only.
-export default function BridgesPanel() {
+export interface BridgeSettingsHeading { title: string; description: string; breadcrumb: string; focusKey: string }
+export default function BridgesPanel({ onHeadingChange }: { onHeadingChange?: (heading: BridgeSettingsHeading) => void } = {}) {
   const desktop = useMemo(() => desktopCapabilities(), []);
   const manager = desktop.bridgeManager;
+  const [selectedId, setSelectedId] = useState('');
   const [localBridgeId, setLocalBridgeId] = useState('');
   const [uninstallBridge] = useUninstallBridgeMutation();
   const [uninstallConfirmId, setUninstallConfirmId] = useState('');
@@ -51,8 +54,9 @@ export default function BridgesPanel() {
   const [updateBridgeTelemetry] = useUpdateBridgeTelemetryMutation();
   const [revokeBridge] = useRevokeBridgeMutation();
   const [updateBridge] = useUpdateBridgeMutation();
-  const { data: globalTelemetryData } = useFetchTelemetryDefaultEnabledQuery();
-  const [saveGlobalTelemetry] = useSaveTelemetryDefaultEnabledMutation();
+  const globalTelemetryQuery = useFetchTelemetryDefaultEnabledQuery();
+  const globalTelemetryData = globalTelemetryQuery.data;
+  const [saveGlobalTelemetry, globalTelemetrySave] = useSaveTelemetryDefaultEnabledMutation();
 
   const [renamingId, setRenamingId] = useState('');
   const [renameValue, setRenameValue] = useState('');
@@ -66,18 +70,12 @@ export default function BridgesPanel() {
   const [updateBusy, setUpdateBusy] = useState(false);
   const [updateError, setUpdateError] = useState('');
 
-  // The signed-in account's bridge ids (revoked ones included: a revoked bridge
-  // is still this account's to re-enroll), or null until the Hub answers. This
-  // machine's card shows only the profile enrolled as one of them.
-  const accountBridgeIds = useMemo(() => (bridgesQuery.data
-    ? (bridgesQuery.data.bridges || []).map((b: Bridge) => String(b?.bridge_id || b?.bridgeId || b?.id || '')).filter(Boolean)
-    : null), [bridgesQuery.data]);
   const refetchBridges = useCallback(() => { void bridgesQuery.refetch(); }, [bridgesQuery.refetch]);
 
   const bridges: Bridge[] = (bridgesQuery.data?.bridges || [])
-    .filter((b: Bridge) => String(b?.status || b?.runtime_status || '').toLowerCase() !== 'revoked')
-    // The desktop app shows its own machine in the "This machine" card.
-    .filter((b: Bridge) => !localBridgeId || String(b?.bridge_id || b?.bridgeId || b?.id || '') !== localBridgeId);
+    .filter((b: Bridge) => String(b?.status || b?.runtime_status || '').toLowerCase() !== 'revoked');
+  const selectedBridge = bridges.find((b) => String(b.bridge_id || b.bridgeId || b.id || '') === selectedId);
+  const nameOf = (b: Bridge) => b.label || b.machine_hostname || b.hostname || String(b.bridge_id || b.id || 'Bridge');
 
   function bridgeOnline(bridge: Bridge): boolean {
     const status = String(bridge?.status || bridge?.runtime_status || '').toLowerCase();
@@ -127,6 +125,7 @@ export default function BridgesPanel() {
   }
 
   async function handleToggleGlobalTelemetry(enabled: boolean) {
+    setActionError('');
     try {
       await saveGlobalTelemetry({ enabled }).unwrap();
     } catch (err: any) {
@@ -163,15 +162,17 @@ export default function BridgesPanel() {
     }
   }
 
-  return (
-    <PageShell
-      title="Bridges"
-      description={manager
-        ? 'Set up this machine and manage every bridge: update, re-enroll or uninstall.'
-        : 'Your installed bridges. Set up or uninstall a bridge from the Ninjy desktop app or with ham-bridge on that machine.'}
-    >
+  const title = selectedBridge ? nameOf(selectedBridge) : 'Bridges';
+  const description = selectedBridge ? 'Updates, provider availability and connection settings for this bridge.'
+    : 'Manage the machines that run your agents. Open a bridge for updates, provider availability and connection settings.';
+  useLayoutEffect(() => { onHeadingChange?.({ title, description, breadcrumb: selectedId ? 'Settings / Bridges' : '', focusKey: selectedId || 'overview' }); },
+    [onHeadingChange, title, description, selectedId]);
+  const content = (
       <div data-debug-id="settings-bridges-panel" className="min-w-0">
-      {manager ? <ThisMachineCard manager={manager} accountBridgeIds={accountBridgeIds} onBridgeId={setLocalBridgeId} onSetupComplete={refetchBridges} /> : null}
+      {selectedId ? <Button variant="ghost" size="sm" data-debug-id="settings-bridges-back" onClick={() => { setSelectedId(''); setRenamingId(''); setUninstallConfirmId(''); }}>Back to Bridges</Button> : null}
+      <div className={selectedId && selectedId !== localBridgeId ? 'hidden' : ''}>
+      {manager ? <ThisMachineCard manager={manager} onBridgeId={setLocalBridgeId} onSetupComplete={refetchBridges} /> : null}
+      </div>
       {desktop.legacyBridgeManager ? (
         <div data-debug-id="settings-bridges-desktop-outdated" className="mt-3 rounded-xl border border-warning/30 bg-warning-soft px-3 py-2 text-sm text-warning">
           This desktop app is too old to set up or manage this machine's Bridge from here. Update the desktop app to the latest version, or run ham-bridge on this machine.
@@ -180,37 +181,46 @@ export default function BridgesPanel() {
       {bridgesQuery.isError ? <div data-debug-id="settings-bridges-load-error" className="mt-3 rounded-xl border border-danger/30 bg-danger-soft px-3 py-2 text-sm text-danger">Unable to load bridges. Check that you are signed in and the Hub is reachable.</div> : null}
       {actionError ? <div data-debug-id="settings-bridges-error" className="mt-3 rounded-xl border border-danger/30 bg-danger-soft px-3 py-2 text-sm text-danger">{actionError}</div> : null}
 
-      {/* Global Telemetry Setting */}
-      <div data-debug-id="settings-bridges-global-telemetry" className="mt-4 rounded-xl border border-subtle bg-surface-raised/40 p-3.5 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-        <div className="min-w-0">
-          <div className="text-sm font-medium text-primary">Global Bridge Telemetry</div>
-          <div className="text-xs text-muted">Enable telemetry across all bridges by default unless overridden per-bridge.</div>
-        </div>
-        <div className="flex items-center gap-2">
-          <Toggle
-            data-debug-id="settings-global-telemetry-toggle"
-            checked={globalTelemetryData?.enabled ?? true}
-            onChange={(checked) => void handleToggleGlobalTelemetry(checked)}
-          />
-          <span className="text-xs text-muted font-medium w-16">
-            {(globalTelemetryData?.enabled ?? true) ? 'Enabled' : 'Disabled'}
-          </span>
-        </div>
-      </div>
-
       {/* Approved bridges whose vault key has not been delivered yet (REQ-EA-6) */}
-      <PendingEnrollmentsCard refreshKey={bridgesQuery.fulfilledTimeStamp} />
+      {!selectedId ? <PendingEnrollmentsCard refreshKey={bridgesQuery.fulfilledTimeStamp} /> : null}
 
       {/* Bridge list */}
-      <div data-debug-id="settings-bridges-list" className="mt-4">
-        <Text as="div" role="overline" tone="muted" className="mb-2">{manager ? 'Other bridges' : 'Installed bridges'} ({bridges.length})</Text>
+      <div data-debug-id="settings-bridges-list" className="mt-6">
+        {!selectedId ? <>
+        <Text as="div" role="overline" tone="muted" className="mb-2">{'Your bridges'} ({bridges.length})</Text>
         <p data-debug-id="settings-bridges-usage" className="mb-2 text-xs text-muted">{bridges.filter((b) => !b.plan_disabled_at).length} of {entitlements.max_bridges < 0 ? 'unlimited' : entitlements.max_bridges} bridges enabled</p>
+        </> : null}
         {bridgesQuery.isFetching && bridges.length === 0 ? <div className="text-sm text-muted">Loading bridges…</div> : null}
         {bridges.length === 0 && !bridgesQuery.isFetching ? (
           <div data-debug-id="settings-bridges-empty" className="rounded-xl border border-dashed border-subtle bg-surface-raised/30 p-4 text-center text-sm text-muted">No active bridges.</div>
         ) : (
-          <div className="space-y-2">
-            {bridges.map((bridge: Bridge) => {
+          <div className={!selectedId ? "grid grid-cols-1 gap-3" : "space-y-4"}>
+            {!selectedId ? bridges.map((bridge) => {
+              const id = String(bridge.bridge_id || bridge.bridgeId || bridge.id || '');
+              const online = bridgeOnline(bridge);
+              return <button key={id} type="button" data-debug-id={`settings-bridge-card-${id}`} onClick={() => setSelectedId(id)}
+                className="min-w-0 space-y-4 rounded-xl border border-subtle bg-surface p-4 text-left transition-colors hover:bg-surface-raised focus-visible:outline-none focus-visible:shadow-focus">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div className="min-w-0 break-words"><Text as="h2" role="heading">{nameOf(bridge)}</Text><Text role="code" tone="muted" className="break-all">{bridge.machine_hostname || bridge.hostname || id}</Text></div>
+                  <StatusPill tone={statusTone(bridge)}>{statusLabel(bridge)}</StatusPill>
+                </div>
+                <div className="flex flex-wrap gap-x-4 gap-y-2 text-sm text-muted">
+                  <span>{bridge.machine_os || bridge.os || 'Unknown OS'} · {bridge.machine_arch || bridge.arch || 'Unknown architecture'}</span>
+                  <span>{getActiveTaskCount(bridge)} active agents</span><span className="font-mono">{formatBridgeVersion(bridge) || 'Unknown version'}</span>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {localBridgeId === id ? <Badge data-debug-id="settings-bridge-local-badge">This machine</Badge> : null}
+                  {isBridgeUpdating(bridge) ? <StatusPill tone="info">{bridgeUpdateStatusLabel(bridge)}</StatusPill>
+                    : bridge.update_available ? <Badge>{updateAvailabilityLabel(bridge)}</Badge> : null}
+                  <Badge>Vault: {online ? '' : 'last reported: '}{bridge.vault_status || 'unknown'}</Badge>
+                </div>
+                <div className="flex flex-wrap justify-between gap-2 border-t border-subtle pt-3 text-xs text-muted">
+                  <span>{online ? 'Connected' : 'Last reported state'}{bridge.last_seen_at ? ` · Last seen ${new Date(bridge.last_seen_at).toLocaleString()}` : ''}</span>
+                  <span className="font-medium text-accent">Manage bridge</span>
+                </div>
+              </button>;
+            }) : null}
+            {bridges.filter((bridge) => String(bridge.bridge_id || bridge.bridgeId || bridge.id || '') === selectedId).map((bridge: Bridge) => {
               const id = String(bridge?.bridge_id || bridge?.bridgeId || bridge?.id || '');
               const isRenaming = renamingId === id;
               const isUninstalling = uninstallConfirmId === id;
@@ -224,8 +234,8 @@ export default function BridgesPanel() {
               const updateUnavailable = isUpdateUnavailableForTarget(bridge);
 
               return (
-                <div key={id} data-debug-id={`settings-bridge-row-${id}`} className="rounded-xl border border-subtle bg-surface-raised/30 p-3 sm:px-3 sm:py-2.5">
-                  <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between sm:gap-2">
+                <div key={id} data-debug-id={`settings-bridge-row-${id}`} className="min-w-0 rounded-xl border border-subtle bg-surface p-4">
+                  <div className="flex min-w-0 flex-col gap-4">
                     <div className="min-w-0 flex-1">
                       <div className="flex flex-wrap items-center gap-1.5 sm:gap-2">
                         <StatusDot data-debug-id={`settings-bridge-status-${id}`} tone={statusTone(bridge)} label={statusLabel(bridge)} />
@@ -301,7 +311,7 @@ export default function BridgesPanel() {
                           </span>
                         ) : null}
 
-                        <BridgeNoProvidersBadge bridge={bridge} id={id} /><a data-debug-id={`settings-bridge-profiles-${id}`} className="text-xs text-accent underline" href={`#/settings/providers?bridge=${encodeURIComponent(id)}`}>Provider profiles</a>
+                        <BridgeNoProvidersBadge bridge={bridge} id={id} /><a data-debug-id={`settings-bridge-profiles-${id}`} className="text-xs text-accent underline" href={`#/settings/providers/${encodeURIComponent(id)}`}>Provider profiles</a>
                       </div>
                       <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-caption text-muted">
                         <span>status: <span data-debug-id={`settings-bridge-status-label-${id}`} className="text-primary">{statusLabel(bridge)}</span></span>
@@ -316,7 +326,7 @@ export default function BridgesPanel() {
                         <span className="text-muted font-medium">Telemetry:</span>
                         <div
                           data-debug-id={`settings-bridge-telemetry-toggle-${id}`}
-                          className="inline-flex rounded-lg border border-subtle bg-surface p-0.5"
+                          className="inline-flex max-w-full flex-wrap gap-1 rounded-lg border border-subtle bg-surface p-0.5"
                           role="group"
                           aria-label={`Bridge ${id} Telemetry`}
                         >
@@ -374,7 +384,7 @@ export default function BridgesPanel() {
                         </>
                       ) : (
                         <>
-                          <Button
+                          {id !== localBridgeId ? <Button
                             variant={bridge?.update_available && !updateUnavailable ? 'primary' : 'secondary'}
                             size="sm"
                             data-debug-id={`settings-bridge-update-btn-${id}`}
@@ -389,9 +399,9 @@ export default function BridgesPanel() {
                             }}
                           >
                             Update
-                          </Button>
+                          </Button> : null}
                           <Button variant="secondary" size="sm" data-debug-id={`settings-bridge-rename-btn-${id}`} onClick={() => { setRenamingId(id); setRenameValue(bridge?.label || ''); }}>Rename</Button>
-                          {manager ? (
+                          {manager && id !== localBridgeId ? (
                             <Button
                               variant="danger"
                               size="sm"
@@ -405,6 +415,14 @@ export default function BridgesPanel() {
                         </>
                       )}
                     </div>
+                    <section className="space-y-3 border-t border-subtle pt-4" aria-label="Bridge defaults">
+                      <Text as="h2" role="heading">Configuration</Text>
+                      <div className="grid gap-4 sm:grid-cols-2">
+                        <FormField label="Default provider"><Select value="" onChange={() => {}} disabled aria-label="Default provider"><option value="">Not configured</option></Select></FormField>
+                        <FormField label="Default model"><Select value="" onChange={() => {}} disabled aria-label="Default model"><option value="">Not configured</option></Select></FormField>
+                      </div>
+                      <Text role="body-sm" tone="muted">Bridge-wide defaults cannot be saved yet. Configure provider profiles and their runtime settings from Providers.</Text>
+                    </section>
                     <BridgeRecentErrorsCard bridgeId={id} />
                   </div>
                 </div>
@@ -414,6 +432,20 @@ export default function BridgesPanel() {
         )}
       </div>
 
+
+      {!selectedId ? <section id="global-configuration" data-debug-id="settings-bridges-global-telemetry" className="mt-6 space-y-4 rounded-xl border border-subtle bg-surface p-4" aria-labelledby="global-configuration-title">
+        <Text as="h2" role="heading" id="global-configuration-title">Global Configuration</Text>
+        <div className="flex items-center justify-between gap-4">
+          <div className="min-w-0">
+            <label htmlFor="settings-global-telemetry" className="text-sm font-medium text-primary">Enable telemetry</label>
+            <p id="settings-global-telemetry-help" className="mt-1 text-xs text-muted">Applies to bridges using the global default. Individual bridge overrides remain in effect.</p>
+          </div>
+          <Toggle id="settings-global-telemetry" aria-label="Enable telemetry" aria-describedby="settings-global-telemetry-help" data-debug-id="settings-global-telemetry-toggle"
+            disabled={!globalTelemetryData || globalTelemetryQuery.isError || globalTelemetrySave.isLoading}
+            checked={globalTelemetryData?.enabled ?? false} onChange={(checked) => void handleToggleGlobalTelemetry(checked)} />
+        </div>
+        {globalTelemetryQuery.isError ? <p role="alert" className="text-sm text-danger">Unable to load global telemetry settings.</p> : null}
+      </section> : null}
 
       {/* Update Bridge Modal */}
       {updateModalBridge ? (
@@ -425,6 +457,11 @@ export default function BridgesPanel() {
           data-debug-id="settings-bridge-update-modal"
         >
           <ModalBody className="space-y-4">
+            <BridgeOperationRail label="Bridge update" debugId="settings-remote-update-rail" items={[
+              { id: 'review', label: 'Review', state: updateBusy ? 'done' : 'current' },
+              { id: 'update', label: 'Update', state: updateBusy ? 'current' : 'todo' },
+              { id: 'result', label: 'Result', state: 'todo' },
+            ]} />
             <div className="flex flex-col gap-2 rounded-xl border border-subtle bg-surface-raised/40 p-3 text-xs">
               <div className="flex items-center justify-between">
                 <span className="text-muted">Current Version:</span>
@@ -524,8 +561,8 @@ export default function BridgesPanel() {
       ) : null}
 
       </div>
-    </PageShell>
   );
+  return onHeadingChange ? content : <PageShell title={title} description={description}>{content}</PageShell>;
 }
 
 // Provider status is per bridge (GET /bridges/{id}/provider-status), fetched for the
@@ -535,7 +572,7 @@ function BridgeNoProvidersBadge({ bridge, id }: { bridge: Bridge; id: string }) 
   if (!loaded || capabilities.length > 0) return null;
   return (
     <a
-      href={`#settings/providers?bridge=${encodeURIComponent(id)}`}
+      href={`#/settings/providers/${encodeURIComponent(id)}`}
       data-debug-id={`settings-bridge-no-providers-${id}`}
       className="inline-flex items-center gap-1 rounded-full border border-subtle bg-surface-raised/40 px-2 py-0.5 text-[10px] text-muted hover:border-accent hover:text-accent transition-colors whitespace-nowrap"
     >

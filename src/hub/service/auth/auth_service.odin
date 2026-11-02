@@ -62,7 +62,7 @@ Auth_Service :: struct {
 // because the old name claimed the opposite of what the line now means: it used
 // to record "enforcement WOULD have denied this, and we allowed it anyway", and
 // it now records an actual rejection. Nothing outside this package and its tests
-// matched on the old string. Runbook greps live in `scripts/dev-stack-usage.md`.
+// matched on the old string.
 
 // bridge_auth_denied_hook, when non-nil, receives each audit event instead of
 // the default stdout logger. Tests set it to capture and assert the emitted fields.

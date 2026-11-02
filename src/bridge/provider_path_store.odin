@@ -108,7 +108,7 @@ bridge_provider_probe_version_with_timeout :: proc(path: string, timeout: time.D
 	stdout_r, stdout_w, pipe_err := os.pipe()
 	if pipe_err != nil do return "", false
 	defer os.close(stdout_r)
-	process, start_err := os.process_start(os.Process_Desc{command = argv, stdout = stdout_w, stderr = stdout_w, env = env})
+	process, start_err := bridge_os_start_hidden(os.Process_Desc{command = argv, stdout = stdout_w, stderr = stdout_w, env = env})
 	_ = os.close(stdout_w)
 	if start_err != nil do return "", false
 	state, wait_err := os.process_wait(process, timeout)

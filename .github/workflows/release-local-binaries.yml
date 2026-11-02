@@ -506,7 +506,7 @@ jobs:
           app_bundle="$(find desktop-dist -maxdepth 2 -name Ninjy.app -type d | head -n 1)"
           codesign --verify --deep --strict "$app_bundle"
           spctl --assess --type execute "$app_bundle"
-          xcrun stapler validate "$app_bundle"
+          scripts/release/staple-with-retry.sh --validate "$app_bundle"
           pkg="desktop-dist/Ninjy-${{ needs.prepare.outputs.clean_version }}-${arch#--}.pkg"
           scripts/release/build-macos-pkg.sh "$app_bundle" release-assets/bridge \
             "${{ needs.prepare.outputs.version }}" "${arch#--}" "$pkg"
@@ -518,7 +518,7 @@ jobs:
               --team-id "$APPLE_TEAM_ID" \
               --wait
             scripts/release/staple-with-retry.sh "$pkg"
-            xcrun stapler validate "$pkg"
+            scripts/release/staple-with-retry.sh --validate "$pkg"
           fi
           for dmg in desktop-dist/*.dmg; do
             codesign --verify --strict --verbose=2 "$dmg"
@@ -528,7 +528,7 @@ jobs:
               --team-id "$APPLE_TEAM_ID" \
               --wait
             scripts/release/staple-with-retry.sh "$dmg"
-            xcrun stapler validate "$dmg"
+            scripts/release/staple-with-retry.sh --validate "$dmg"
           done
 
       - name: Upload Ninjy DMG, zip and pkg (macOS)
@@ -960,12 +960,58 @@ jobs:
           # The thin bootstraps ship as assets too; they are self-contained and
           # resolve the newest promoted release, so any copy works.
           cp scripts/install.sh scripts/install.ps1 dist/
-          if gh release view "$VERSION" >/dev/null 2>&1; then
+          # Every gh call goes through retry_transient: the release API has failed
+          # this job with a transient "HTTP 403: Resource not accessible by
+          # integration" despite contents: write (run 41329637092).
+          # shellcheck source=scripts/release/gh-retry.sh
+          source "$GITHUB_WORKSPACE/scripts/release/gh-retry.sh"
+          list_release_assets() {
+            gh release view "$VERSION" --json assets --jq '.assets[].name' > "$RUNNER_TEMP/existing-release-assets.txt"
+          }
+          upload_release_assets() {
+            gh release upload "$VERSION" dist/heimdall-local-*-"$VERSION".tar.gz dist/heimdall-local-*-"$VERSION".zip dist/Ninjy-*.dmg dist/Ninjy-*.zip dist/Ninjy-*.zip.blockmap dist/Ninjy-*.pkg dist/Ninjy-*.AppImage dist/Ninjy-*.deb dist/Ninjy-*.exe dist/Ninjy-*.exe.blockmap dist/latest.yml dist/latest-mac.yml dist/latest-linux.yml dist/latest-linux-arm64.yml dist/SHA256SUMS dist/install.sh dist/install.ps1 --clobber
+          }
+          # Idempotent create: a retry first re-checks for the release, since a
+          # failed attempt may still have created it (gh creates a draft, then
+          # uploads, then publishes). Found -> fall through to upload + edit.
+          create_attempted=false
+          recovered_partial_create=false
+          create_release_if_missing() {
+            local rc=0
+            if [ "$create_attempted" = true ]; then
+              gh_release_exists "$VERSION" || rc=$?
+              case "$rc" in
+                0) echo "Release $VERSION exists after a failed create attempt; switching to upload + edit."
+                   recovered_partial_create=true
+                   return 0 ;;
+                1) ;;
+                *) return "$rc" ;;
+              esac
+            fi
+            create_attempted=true
+            gh release create "$VERSION" dist/heimdall-local-*-"$VERSION".tar.gz dist/heimdall-local-*-"$VERSION".zip dist/Ninjy-*.dmg dist/Ninjy-*.zip dist/Ninjy-*.zip.blockmap dist/Ninjy-*.pkg dist/Ninjy-*.AppImage dist/Ninjy-*.deb dist/Ninjy-*.exe dist/Ninjy-*.exe.blockmap dist/latest.yml dist/latest-mac.yml dist/latest-linux.yml dist/latest-linux-arm64.yml dist/SHA256SUMS dist/install.sh dist/install.ps1 \
+              --title "$VERSION" \
+              --target "$RELEASE_COMMIT" \
+              --notes-file "$notes_file" \
+              "${release_flags[@]}"
+          }
+          exists_rc=0
+          retry_transient "Look up release $VERSION" gh_release_exists "$VERSION" || exists_rc=$?
+          case "$exists_rc" in
+            0) release_exists=true ;;
+            1) release_exists=false ;;
+            *) echo "Could not determine whether release $VERSION exists." >&2; exit 1 ;;
+          esac
+          if [ "$release_exists" = false ]; then
+            retry_transient "Create release $VERSION" create_release_if_missing || {
+              echo "Creating release $VERSION failed; see the attempts above." >&2; exit 1; }
+          fi
+          if [ "$release_exists" = true ] || [ "$recovered_partial_create" = true ]; then
             if [ "$BUILD_DARWIN_X64" != "true" ]; then
               # --clobber replaces matching names but leaves assets omitted by
               # this run. Remove only this version's optional Intel macOS set;
               # otherwise its old assets would outlive their checksum entries.
-              gh release view "$VERSION" --json assets --jq '.assets[].name' > "$RUNNER_TEMP/existing-release-assets.txt"
+              retry_transient "List assets of release $VERSION" list_release_assets
               for asset in \
                 "heimdall-local-darwin-amd64-$VERSION.tar.gz" \
                 "Ninjy-${{ needs.prepare.outputs.clean_version }}-x64.dmg" \
@@ -974,16 +1020,24 @@ jobs:
                 "Ninjy-${{ needs.prepare.outputs.clean_version }}-x64.zip.blockmap" \
                 "Ninjy-${{ needs.prepare.outputs.clean_version }}-x64.pkg"; do
                 if grep -Fxq "$asset" "$RUNNER_TEMP/existing-release-assets.txt"; then
-                  gh release delete-asset "$VERSION" "$asset" --yes
+                  retry_transient "Delete stale asset $asset" gh_release_delete_asset_if_present "$VERSION" "$asset"
                 fi
               done
             fi
-            gh release upload "$VERSION" dist/heimdall-local-*-"$VERSION".tar.gz dist/heimdall-local-*-"$VERSION".zip dist/Ninjy-*.dmg dist/Ninjy-*.zip dist/Ninjy-*.zip.blockmap dist/Ninjy-*.pkg dist/Ninjy-*.AppImage dist/Ninjy-*.deb dist/Ninjy-*.exe dist/Ninjy-*.exe.blockmap dist/latest.yml dist/latest-mac.yml dist/latest-linux.yml dist/latest-linux-arm64.yml dist/SHA256SUMS dist/install.sh dist/install.ps1 --clobber
-            gh release edit "$VERSION" --notes-file "$notes_file"
-          else
-            gh release create "$VERSION" dist/heimdall-local-*-"$VERSION".tar.gz dist/heimdall-local-*-"$VERSION".zip dist/Ninjy-*.dmg dist/Ninjy-*.zip dist/Ninjy-*.zip.blockmap dist/Ninjy-*.pkg dist/Ninjy-*.AppImage dist/Ninjy-*.deb dist/Ninjy-*.exe dist/Ninjy-*.exe.blockmap dist/latest.yml dist/latest-mac.yml dist/latest-linux.yml dist/latest-linux-arm64.yml dist/SHA256SUMS dist/install.sh dist/install.ps1 \
-              --title "$VERSION" \
-              --target "$RELEASE_COMMIT" \
-              --notes-file "$notes_file" \
-              "${release_flags[@]}"
+            retry_transient "Upload assets to release $VERSION" upload_release_assets
+            edit_flags=(--notes-file "$notes_file")
+            if [ "$recovered_partial_create" = true ]; then
+              # Restore what the interrupted create would have set: gh leaves an
+              # interrupted create as a draft.
+              is_draft=false; is_prerelease=false
+              for flag in "${release_flags[@]}"; do
+                case "$flag" in
+                  --draft) is_draft=true ;;
+                  --prerelease) is_prerelease=true ;;
+                esac
+              done
+              edit_flags+=(--title "$VERSION" --target "$RELEASE_COMMIT" \
+                --draft="$is_draft" --prerelease="$is_prerelease")
+            fi
+            retry_transient "Update notes of release $VERSION" gh release edit "$VERSION" "${edit_flags[@]}"
           fi

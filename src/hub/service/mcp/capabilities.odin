@@ -8,8 +8,10 @@ scope_subset :: vault.control_scope_subset
 consent_version :: vault.control_consent_version
 
 // OAuth scope order is immaterial; normalize before putting it in signed data.
+// An omitted scope requests every supported capability so the consent page can
+// offer all of them; the user's selection there decides what is granted.
 canonical_scopes :: proc(raw:string)->(string,bool) {
-	if raw=="" do return DELEGATION_SCOPE,true
+	if raw=="" do return supported_scope_string(),true
 	if len(raw)>1024 do return "",false
 	parts:=strings.split(raw," ",context.temp_allocator)
 	seen:=make(map[string]bool,context.temp_allocator)
@@ -31,6 +33,11 @@ supported_scopes :: proc()->[]string {
 	out[0]=DELEGATION_SCOPE
 	for value,i in vault.CONTROL_SCOPE_CAPABILITIES do out[i+1]=value
 	return out
+}
+// Space-separated supported_scopes(), DELEGATION_SCOPE first: the canonical
+// form of a request for every capability.
+supported_scope_string :: proc()->string {
+	return strings.join(supported_scopes()," ",context.temp_allocator)
 }
 // Authorization is independent of the tool catalog: defining a capability
 // never advertises or activates an unimplemented operation.
