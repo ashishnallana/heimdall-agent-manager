@@ -33,12 +33,51 @@ Server_Config :: struct {
 
 // Pre_Body_Verdict: status 0 admits the request; any other status is written as the
 // response without reading the body. held means admit took a slot that release must
-// return after the response is written.
+// return after the response is written. stream means the body is NOT buffered: the
+// handler receives Request.body_stream and reads it in bounded windows.
 Pre_Body_Verdict :: struct {
 	status: int,
 	body:   string,
 	headers: []contracts.HTTP_Header,
 	held:   bool,
+	stream: bool,
+}
+
+// Body_Stream is an unbuffered request body: the bytes that arrived with the head
+// (prefix) followed by at most `remaining` more bytes from the socket. Tests and other
+// transports build one over an in-memory body with body_stream_from_bytes.
+Body_Stream :: struct {
+	client:    net.TCP_Socket,
+	prefix:    []byte,
+	total:     int, // declared Content-Length
+	remaining: int, // bytes not yet returned by body_stream_read
+	from_socket: bool,
+}
+
+body_stream_from_bytes :: proc(body: []byte) -> Body_Stream {
+	return Body_Stream{prefix = body, total = len(body), remaining = len(body)}
+}
+
+// body_stream_read fills buf as far as possible (up to remaining). It returns the
+// number of bytes written; ok=false means the peer closed or failed before the
+// declared length was reached (the returned bytes are still valid).
+body_stream_read :: proc(s: ^Body_Stream, buf: []byte) -> (n: int, ok: bool) {
+	want := min(len(buf), s.remaining)
+	for n < want {
+		if len(s.prefix) > 0 {
+			k := copy(buf[n:want], s.prefix)
+			s.prefix = s.prefix[k:]
+			n += k
+			s.remaining -= k
+			continue
+		}
+		if !s.from_socket do return n, false
+		got, err := net.recv_tcp(s.client, buf[n:want])
+		if err != nil || got <= 0 do return n, false
+		n += got
+		s.remaining -= got
+	}
+	return n, true
 }
 
 Pre_Body_Gate :: struct {
@@ -128,6 +167,14 @@ handle_client :: proc(client: net.TCP_Socket, source: net.Endpoint, router: ^Rou
 		remote_addr = net.address_to_string_allocator(source.address),
 		headers = headers,
 		admitted = verdict.held,
+	}
+	stream: Body_Stream
+	if verdict.stream {
+		prefix := transmute([]byte)body
+		declared := content_length(request[:max(len(request) - len(body) - 4, 0)])
+		stream = Body_Stream{client = client, prefix = prefix, total = declared, remaining = declared, from_socket = true}
+		req_obj.body = ""
+		req_obj.body_stream = &stream
 	}
 	// The preview origin is a separate security boundary. Dispatch it before
 	// OPTIONS and every router path so no Hub API can ever be reached by Host.
@@ -227,6 +274,9 @@ read_http_request_gated :: proc(client: net.TCP_Socket, gate: ^Pre_Body_Gate) ->
 					path, _ := split_target_query(target)
 					verdict = gate.admit(gate.ctx, method, path, cl)
 					if verdict.status != 0 do return "", false, verdict
+					// Streamed body: return the head plus whatever body bytes already
+					// arrived (never more than declared); the handler reads the rest.
+					if verdict.stream do return strings.clone(raw[:min(len(raw), idx + 4 + cl)]), true, verdict
 				}
 			}
 		}

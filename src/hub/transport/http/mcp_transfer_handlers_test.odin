@@ -4,9 +4,11 @@ import "core:crypto/ecdsa"
 import "core:crypto/sha2"
 import "core:encoding/json"
 import "core:fmt"
+import "core:net"
 import "core:os"
 import "core:strings"
 import "core:testing"
+import "core:thread"
 import "core:time"
 import contracts "odin_test:contracts"
 import domain "odin_test:hub/domain"
@@ -40,8 +42,9 @@ xh_dir :: proc(user: rawptr, owner, grant_id: string) -> (^vault.Verified_Direct
 xh_live :: proc(ctx: rawptr, x: domain.Mcp_Transfer) -> bool { return (^Xh)(ctx).live }
 
 @(private = "file")
-xh_open :: proc(t: ^testing.T, f: ^Xh) -> bool {
-	f.path = fmt.aprintf("%s/.cache/heimdall-tests/xfr_http_%d.db", os.get_env("HOME", context.temp_allocator), os.get_pid())
+// tag keeps parallel tests in this file on separate databases.
+xh_open :: proc(t: ^testing.T, f: ^Xh, tag := "") -> bool {
+	f.path = fmt.aprintf("%s/.cache/heimdall-tests/xfr_http%s_%d.db", os.get_env("HOME", context.temp_allocator), tag, os.get_pid())
 	os.remove(f.path)
 	ok: bool
 	f.conn, ok, _ = sqlite.open(f.path)
@@ -216,4 +219,138 @@ test_transfer_http_data_path :: proc(t: ^testing.T) {
 @(private = "file")
 mcp_test_now_ms :: proc() -> i64 {
 	return time.time_to_unix_nano(time.now()) / 1_000_000
+}
+
+@(private = "file")
+Stream_Server :: struct {
+	router: ^Router,
+	config: Server_Config,
+	socket: net.TCP_Socket,
+	source: net.Endpoint,
+}
+
+@(private = "file")
+stream_server_thread :: proc(data: rawptr) {
+	s := (^Stream_Server)(data)
+	handle_client(s.socket, s.source, s.router, s.config)
+}
+
+// stream_put sends `head` and then body_parts over a real loopback socket to the real
+// server loop (handle_client with the transfer pre-body gate). Between parts it waits
+// until `between` reports true (or 5 s). With close_early the client stops sending
+// after the parts (shutdown of its send side) although Content-Length promised more.
+@(private = "file")
+stream_put :: proc(t: ^testing.T, f: ^Xh, head: string, body_parts: []string, between: proc(f: ^Xh, i: int) -> bool, close_early: bool) -> string {
+	router := new_router()
+	defer router_free(&router)
+	mcp_transfer_register_routes(&router, &f.h)
+	gate := Pre_Body_Gate{ctx = &f.h, admit = mcp_transfer_pre_body, release = mcp_transfer_pre_body_release}
+	listener, listen_err := net.listen_tcp(net.Endpoint{address = net.IP4_Loopback, port = 0})
+	if listen_err != nil do testing.fail_now(t, "could not listen on loopback")
+	defer net.close(listener)
+	endpoint, _ := net.bound_endpoint(listener)
+	client, dial_err := net.dial_tcp(endpoint)
+	if dial_err != nil do testing.fail_now(t, "could not dial loopback")
+	_ = net.set_option(client, .Receive_Timeout, 10 * time.Second)
+	server_socket, source, accept_err := net.accept_tcp(listener)
+	if accept_err != nil do testing.fail_now(t, "could not accept loopback")
+	state := Stream_Server{router = &router, config = Server_Config{pre_body = &gate}, socket = server_socket, source = source}
+	worker := thread.create_and_start_with_data(rawptr(&state), stream_server_thread)
+	_, _ = net.send_tcp(client, transmute([]byte)head)
+	for part, i in body_parts {
+		_, _ = net.send_tcp(client, transmute([]byte)part)
+		if between != nil {
+			deadline := time.tick_now()
+			for !between(f, i) && time.tick_since(deadline) < 5 * time.Second do time.sleep(5 * time.Millisecond)
+		}
+	}
+	if close_early do _ = net.shutdown(client, .Send)
+	out := strings.builder_make(context.temp_allocator)
+	buf: [4096]byte
+	for {
+		n, err := net.recv_tcp(client, buf[:])
+		if err != nil || n <= 0 do break
+		strings.write_bytes(&out, buf[:n])
+	}
+	net.close(client)
+	thread.join(worker); thread.destroy(worker)
+	return strings.to_string(out)
+}
+
+@(private = "file")
+stream_offset :: proc(f: ^Xh, id: string) -> i64 {
+	x, _, _ := f.repo.get(f.repo.ctx, id)
+	return x.received_bytes
+}
+
+@(private = "file")
+stream_watch_id: string
+@(private = "file")
+stream_saw_window: bool
+
+// Design §7: an admitted transfer PUT is never buffered. Over a real socket the
+// server appends 1 MiB windows to staging WHILE the body is still arriving, every
+// staged row is <= 1 MiB, the slot is returned afterwards, and a body cut short keeps
+// what was appended so HEAD reports the resume offset.
+@(test)
+test_transfer_put_body_is_streamed_in_1_mib_windows :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	f: Xh
+	if !xh_open(t, &f, "_stream") do return
+	defer xh_close(&f)
+	who := mcp.Transfer_Caller{owner = "user_a", client_id = "c", grant_id = "g", family_id = "fam"}
+	W :: contracts.ARTIFACT_TRANSFER_STORE_CHUNK_BYTES
+
+	pt := make([]byte, 2_400_000) // token ~3.2 MB: four 1 MiB windows
+	for i in 0 ..< len(pt) do pt[i] = byte(i * 7)
+	tok, _ := vault.seal_with_key(pt, f.key[:], f.dir.vault_id, 3)
+	testing.expect(t, len(tok) > 3 * W && len(tok) < 4 * W)
+
+	x, token, bf := mcp.transfer_upload_begin(&f.svc, who, {request_id = "s1", request_digest = "d", kind = "file", content_type = "application/octet-stream"})
+	testing.expect_value(t, bf.reason, "")
+	ct := fmt.tprintf("%s/%s/ciphertext", MCP_TRANSFERS_PATH, x.transfer_id)
+	head := fmt.tprintf("PUT %s HTTP/1.1\r\nHost: hub.example\r\nAuthorization: Bearer %s\r\nContent-Length: %d\r\n\r\n", ct, token, len(tok))
+	// Part 0 is one window plus 10 bytes. The server must have staged the first
+	// window before part 1 is sent: a buffering reader would still be waiting.
+	stream_watch_id = x.transfer_id
+	stream_saw_window = false
+	watch :: proc(f: ^Xh, i: int) -> bool {
+		if i == 0 && stream_offset(f, stream_watch_id) == W do stream_saw_window = true
+		return i != 0 || stream_saw_window
+	}
+	resp := stream_put(t, &f, head, {tok[:W + 10], tok[W + 10:]}, watch, false)
+	testing.expect(t, stream_saw_window, "first 1 MiB window was staged while the rest of the body was still unsent")
+	testing.expectf(t, strings.has_prefix(resp, "HTTP/1.1 200"), "streamed PUT: %q", resp[:min(len(resp), 200)])
+	testing.expect(t, strings.contains(resp, fmt.tprintf(`"received_bytes":%d`, len(tok))))
+	testing.expect_value(t, stream_offset(&f, x.transfer_id), i64(len(tok)))
+	rows := sqlite.debug_query_text(&f.conn, fmt.tprintf("SELECT COUNT(*) FROM mcp_transfer_chunks WHERE transfer_id='%s';", x.transfer_id))
+	testing.expect_value(t, rows, fmt.tprintf("%d", (len(tok) + W - 1) / W))
+	biggest := sqlite.debug_query_text(&f.conn, fmt.tprintf("SELECT MAX(LENGTH(bytes)) FROM mcp_transfer_chunks WHERE transfer_id='%s';", x.transfer_id))
+	testing.expect_value(t, biggest, fmt.tprintf("%d", W))
+	joined := sqlite.debug_query_text(&f.conn, fmt.tprintf("SELECT CAST(group_concat(bytes,'') AS TEXT) FROM (SELECT bytes FROM mcp_transfer_chunks WHERE transfer_id='%s' ORDER BY byte_offset);", x.transfer_id))
+	testing.expect(t, joined == tok, "staged rows concatenate to the streamed token")
+	testing.expect_value(t, f.svc.data_path_in_flight, i64(0))
+
+	y, ytoken, _ := mcp.transfer_upload_begin(&f.svc, who, {request_id = "s2", request_digest = "d", kind = "file", content_type = "application/octet-stream"})
+	yct := fmt.tprintf("%s/%s/ciphertext", MCP_TRANSFERS_PATH, y.transfer_id)
+	yhead := fmt.tprintf("PUT %s HTTP/1.1\r\nHost: hub.example\r\nAuthorization: Bearer %s\r\nContent-Length: %d\r\n\r\n", yct, ytoken, len(tok))
+	// Short body: 1.5 MiB sent, then the client stops. One full window plus the
+	// partial one are kept; the response and HEAD report the resume offset.
+	half := W + W / 2
+	short := stream_put(t, &f, yhead, {tok[:half]}, nil, true)
+	testing.expectf(t, strings.has_prefix(short, "HTTP/1.1 400") && strings.contains(short, "incomplete_body"), "short PUT: %q", short[:min(len(short), 200)])
+	testing.expect_value(t, stream_offset(&f, y.transfer_id), i64(half))
+	testing.expect_value(t, hdr(call(&f, "HEAD", yct, ytoken, ""), "Upload-Offset"), fmt.tprintf("%d", half))
+	// Resume from the reported offset (PATCH, streamed the same way when served).
+	done := call(&f, "PATCH", yct, ytoken, tok[half:], contracts.HTTP_Header{"Upload-Offset", fmt.tprintf("%d", half)})
+	testing.expect_value(t, done.status, 200)
+	testing.expect_value(t, stream_offset(&f, y.transfer_id), i64(len(tok)))
+	testing.expect_value(t, f.svc.data_path_in_flight, i64(0))
+
+	// Auth is decided before any body byte: a wrong bearer with a large declared
+	// body is answered without the client sending the body.
+	bad := fmt.tprintf("PUT %s HTTP/1.1\r\nHost: hub.example\r\nAuthorization: Bearer hxt_wrong\r\nContent-Length: %d\r\n\r\n", yct, len(tok))
+	r401 := stream_put(t, &f, bad, {}, nil, false)
+	testing.expectf(t, strings.has_prefix(r401, "HTTP/1.1 401") || strings.has_prefix(r401, "HTTP/1.1 404"), "bad bearer: %q", r401[:min(len(r401), 200)])
+	testing.expect_value(t, f.svc.data_path_in_flight, i64(0))
 }

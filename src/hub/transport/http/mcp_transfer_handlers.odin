@@ -49,8 +49,8 @@ xfr_browser_owner :: proc(h: ^MCP_Transfer_Handlers, req: Request) -> (string, b
 // mcp_transfer_pre_body is the server's pre-body gate for transfer routes (§7): the
 // declared Content-Length is bounded per method BEFORE the body is read (413), and a
 // data-path request (PUT/PATCH/GET .../ciphertext) takes its global slot BEFORE the
-// body is read (503 + Retry-After when full). Only admitted requests are buffered, so
-// in-flight transfer bodies are bounded by slots x per-method bound. A missing
+// body is read (503 + Retry-After when full). Admitted PUT/PATCH bodies are streamed
+// (Request.body_stream), so in-flight transfer bodies are bounded by slots x 1 MiB. A missing
 // Content-Length counts as 0 (the reader then stops at the header terminator).
 mcp_transfer_pre_body :: proc(ctx: rawptr, method, path: string, content_length: int) -> Pre_Body_Verdict {
 	h := (^MCP_Transfer_Handlers)(ctx)
@@ -68,7 +68,9 @@ mcp_transfer_pre_body :: proc(ctx: rawptr, method, path: string, content_length:
 			b := busy_response()
 			return {status = b.status, body = b.body, headers = b.headers}
 		}
-		return {held = true}
+		// PUT/PATCH bodies are streamed (never buffered): the handler appends them
+		// to staging in <= 1 MiB windows, so a slot holds <= 1 MiB of body.
+		return {held = true, stream = method == "PUT" || method == "PATCH"}
 	}
 	return {}
 }
@@ -187,6 +189,40 @@ parse_single_range :: proc(v: string, total: i64) -> (start, end: i64, ok: bool)
 	return s, min(e, total - 1), true
 }
 
+// xfr_body is the request body as a stream: the server's unbuffered socket stream when
+// the pre-body gate asked for one, else the (already bounded) buffered body.
+@(private = "file")
+xfr_body :: proc(req: Request) -> ^Body_Stream {
+	if req.body_stream != nil do return req.body_stream
+	s := new(Body_Stream, context.temp_allocator)
+	s^ = body_stream_from_bytes(transmute([]byte)req.body)
+	return s
+}
+
+// xfr_append_stream appends an upload body to staging one <= 1 MiB window at a time
+// (design §7: a data-path slot never holds more than one window). All checks on the
+// transfer (auth, liveness, direction, offset) already ran before the first body byte
+// is read. A body cut short keeps every window already appended, so HEAD reports the
+// resume offset; the partial last window is appended too (it is ciphertext at the
+// right offset), then 400 incomplete_body.
+@(private = "file")
+xfr_append_stream :: proc(h: ^MCP_Transfer_Handlers, x: domain.Mcp_Transfer, offset: i64, src: ^Body_Stream) -> Response {
+	window := make([]byte, contracts.ARTIFACT_TRANSFER_STORE_CHUNK_BYTES, context.temp_allocator)
+	cur := x
+	pos := offset
+	for src.remaining > 0 {
+		n, complete := body_stream_read(src, window)
+		if n > 0 {
+			next, f := mcp.transfer_append(h.svc, cur, pos, window[:n])
+			if !mcp.transfer_ok(f) do return fail_response(f)
+			pos = next
+			cur.received_bytes = next
+		}
+		if !complete do return xfr_json(400, struct {error: string, received_bytes: i64}{"incomplete_body", pos}, contracts.HTTP_Header{"Upload-Offset", fmt.tprintf("%d", pos)})
+	}
+	return xfr_json(200, struct {received_bytes: i64}{pos}, contracts.HTTP_Header{"Upload-Offset", fmt.tprintf("%d", pos)})
+}
+
 mcp_transfer_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^MCP_Transfer_Handlers)(ctx)
 	if h == nil || h.svc == nil do return xfr_error(503, "unavailable")
@@ -249,18 +285,17 @@ mcp_transfer_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	case sub == "ciphertext" && req.method == "PUT":
 		if x.direction != domain.MCP_TRANSFER_UPLOAD do return xfr_error(405, "wrong_direction")
 		if x.received_bytes != 0 do return fail_response({code = .Conflict, reason = "offset_mismatch", offset = x.received_bytes})
-		if len(req.body) > TRANSFER_PUT_MAX_BYTES do return xfr_error(413, "ciphertext_too_large")
-		n, f := mcp.transfer_append(h.svc, x, 0, transmute([]byte)req.body)
-		if !mcp.transfer_ok(f) do return fail_response(f)
-		return xfr_json(200, struct {received_bytes: i64}{n}, contracts.HTTP_Header{"Upload-Offset", fmt.tprintf("%d", n)})
+		src := xfr_body(req)
+		if src.total > TRANSFER_PUT_MAX_BYTES do return xfr_error(413, "ciphertext_too_large")
+		if src.total == 0 do return xfr_error(422, "empty_body")
+		return xfr_append_stream(h, x, 0, src)
 	case sub == "ciphertext" && req.method == "PATCH":
 		if x.direction != domain.MCP_TRANSFER_UPLOAD do return xfr_error(405, "wrong_direction")
-		if len(req.body) == 0 || len(req.body) > TRANSFER_PATCH_MAX_BYTES do return xfr_error(413, "chunk_size")
+		src := xfr_body(req)
+		if src.total == 0 || src.total > TRANSFER_PATCH_MAX_BYTES do return xfr_error(413, "chunk_size")
 		off, ook := strconv.parse_i64(header_value(req.headers, "Upload-Offset"))
 		if !ook || off < 0 do return xfr_error(400, "upload_offset_required")
-		n, f := mcp.transfer_append(h.svc, x, off, transmute([]byte)req.body)
-		if !mcp.transfer_ok(f) do return fail_response(f)
-		return xfr_json(200, struct {received_bytes: i64}{n}, contracts.HTTP_Header{"Upload-Offset", fmt.tprintf("%d", n)})
+		return xfr_append_stream(h, x, off, src)
 	case sub == "ciphertext" && req.method == "GET":
 		if x.direction != domain.MCP_TRANSFER_DOWNLOAD do return xfr_error(405, "wrong_direction")
 		start, end := i64(0), x.ciphertext_bytes - 1
