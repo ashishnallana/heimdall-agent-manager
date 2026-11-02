@@ -98,8 +98,11 @@ codex_map_hook :: proc(raw, ts: string, permission_timeout_ms := 0, permission_b
 		if permission_timeout_ms > 0 do pb_int(&p, "timeout_ms", permission_timeout_ms)
 		pb_str_nonempty(&p, "blocker_id", permission_blocker_id)
 		pb_str_nonempty(&p, "permission_mode", json_get_string(root, "permission_mode"))
+	case "PreCompact", "PostCompact":
+		// No activity transition; the bridge resets context accounting on it.
+		append(&out.events, ext_compaction_event(ts, root, CODEX_PROVIDER, CODEX_EXT_VERSION, "pre" if name == "PreCompact" else "post"))
+		return out, .None
 	case:
-		// Compact callbacks do not imply an activity transition.
 		return out, .None
 	}
 	eb := ext_event_begin(event, ts, root, CODEX_PROVIDER, CODEX_EXT_VERSION)

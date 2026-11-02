@@ -14,6 +14,7 @@ package extension
 //   Stop                → activity {state:idle}
 //   Notification        → notification
 //   PermissionRequest   → permission.request (sent with agent.extension.permission)
+//   PreCompact          → compaction {phase:pre, trigger}
 //
 // Payload facts come from the T1 spike against Claude Code 2.1.295: every hook
 // fired inside a subagent carries top-level agent_id/agent_type; SubagentStart
@@ -50,6 +51,7 @@ Claude_Hook :: enum {
 	Stop,
 	Notification,
 	Permission_Request,
+	Pre_Compact,
 }
 
 claude_hook_from_name :: proc(name: string) -> Claude_Hook {
@@ -65,6 +67,7 @@ claude_hook_from_name :: proc(name: string) -> Claude_Hook {
 	case "Stop":               return .Stop
 	case "Notification":       return .Notification
 	case "PermissionRequest":  return .Permission_Request
+	case "PreCompact":         return .Pre_Compact
 	}
 	return .Unknown
 }
@@ -204,6 +207,9 @@ claude_map_hook :: proc(raw: string, ts: string, permission_timeout_ms := 0, per
 		ext_event_metrics(&eb, metrics)
 		ext_event_usage(&eb, claude_transcript_usage(json_get_string(root, "transcript_path")))
 		append(&out.events, ext_event_end(&eb, pb_done(&p)))
+
+	case .Pre_Compact:
+		append(&out.events, ext_compaction_event(ts, root, CLAUDE_PROVIDER, CLAUDE_EXT_VERSION, "pre"))
 
 	case .Subagent_Start:
 		eb := ext_event_begin("subagent.start", ts, root, CLAUDE_PROVIDER, CLAUDE_EXT_VERSION)

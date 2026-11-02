@@ -10,6 +10,12 @@ package contracts
 //    usage?:{context_tokens,output_tokens_total?,context_window?,source},
 //    payload}
 //
+// compaction {payload:{phase:"pre"|"post", trigger?}} marks the provider
+// compacting its context window (Claude PreCompact; Codex PreCompact and
+// PostCompact). Consumers reset context accounting on it instead of guessing
+// from a drop in usage.context_tokens. Bridges that predate it reject it as an
+// unknown event, which is harmless: the hook never surfaces bridge errors.
+//
 // metrics (tool.end only) sizes the NATIVE tool input/response before any
 // clipping; est_tokens = ceil((input_bytes+response_bytes)/4). usage is the
 // provider's own context figure read from the session transcript tail; it is
@@ -45,6 +51,7 @@ Ext_Event_Kind :: enum {
 	File_Edit,
 	Permission_Request,
 	Notification,
+	Compaction,
 }
 
 Ext_Error :: enum {
@@ -60,25 +67,27 @@ Ext_Error :: enum {
 // Ext_Event is the flattened, validated view of one ham.ext.v1 event. All
 // strings are owned (cloned); release with ext_event_destroy.
 Ext_Event :: struct {
-	kind:              Ext_Event_Kind,
-	provider:          string,
-	ext_version:       string,
-	ts:                string,
-	session_id:        string,
-	transcript_path:   string,
-	agent_id:          string,
-	agent_type:        string,
-	tool_name:         string,
-	tool_use_id:       string,
-	file_path:         string, // file.edit only
-	activity_state:    string, // activity only (payload.state)
-	session_phase:     string, // session only (payload.phase)
-	notification_type: string, // notification only (payload.type | payload.notification_type)
-	capabilities:      [dynamic]string, // hello only (payload.capabilities)
-	has_metrics:       bool,
-	metrics:           Ext_Tool_Metrics,
-	has_usage:         bool,
-	usage:             Ext_Usage,
+	kind:               Ext_Event_Kind,
+	provider:           string,
+	ext_version:        string,
+	ts:                 string,
+	session_id:         string,
+	transcript_path:    string,
+	agent_id:           string,
+	agent_type:         string,
+	tool_name:          string,
+	tool_use_id:        string,
+	file_path:          string, // file.edit only
+	activity_state:     string, // activity only (payload.state)
+	session_phase:      string, // session only (payload.phase)
+	notification_type:  string, // notification only (payload.type | payload.notification_type)
+	compaction_phase:   string, // compaction only (payload.phase: "pre" | "post")
+	compaction_trigger: string, // compaction only (payload.trigger, e.g. "manual" | "auto")
+	capabilities:       [dynamic]string, // hello only (payload.capabilities)
+	has_metrics:        bool,
+	metrics:            Ext_Tool_Metrics,
+	has_usage:          bool,
+	usage:              Ext_Usage,
 }
 
 // Ext_Tool_Metrics is the pre-clip size of one tool call (event.metrics).
@@ -117,6 +126,7 @@ ext_event_kind_name :: proc(k: Ext_Event_Kind) -> string {
 	case .File_Edit:          return "file.edit"
 	case .Permission_Request: return "permission.request"
 	case .Notification:       return "notification"
+	case .Compaction:         return "compaction"
 	}
 	return ""
 }
@@ -146,6 +156,7 @@ ext_event_destroy :: proc(ev: ^Ext_Event) {
 	delete(ev.transcript_path); delete(ev.agent_id); delete(ev.agent_type); delete(ev.tool_name)
 	delete(ev.tool_use_id); delete(ev.file_path); delete(ev.activity_state); delete(ev.notification_type)
 	delete(ev.session_phase); delete(ev.usage.source)
+	delete(ev.compaction_phase); delete(ev.compaction_trigger)
 	for c in ev.capabilities do delete(c)
 	delete(ev.capabilities)
 	ev^ = {}
@@ -275,6 +286,9 @@ ext_parse_event :: proc(raw: string) -> (ev: Ext_Event, err: Ext_Error) {
 			delete(ev.notification_type)
 			ev.notification_type = ext_obj_string(payload, "notification_type")
 		}
+	case .Compaction:
+		ev.compaction_phase = ext_obj_string(payload, "phase")
+		ev.compaction_trigger = ext_obj_string(payload, "trigger")
 	case .Hello:
 		if payload != nil {
 			if caps, ok := payload["capabilities"].(json.Array); ok {

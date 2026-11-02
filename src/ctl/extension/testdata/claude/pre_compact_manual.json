@@ -1,0 +1,8 @@
+{
+ "session_id": "f2e44f82-9d3d-4735-9114-708882c87b12",
+ "transcript_path": "/home/dev/.claude/projects/-home-dev--cache-heimdall-spike-work/f2e44f82-9d3d-4735-9114-708882c87b12.jsonl",
+ "cwd": "/home/dev/.cache/heimdall-spike/work",
+ "hook_event_name": "PreCompact",
+ "trigger": "manual",
+ "custom_instructions": "keep the SECRET_NOTE about the migration"
+}
