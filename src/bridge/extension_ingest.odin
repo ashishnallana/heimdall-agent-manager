@@ -104,15 +104,22 @@ bridge_ext_ingest :: proc(rec: Bridge_Local_Agent_Token_Record, params: string, 
 		}
 		defer contracts.ext_event_destroy(&ev)
 		bridge_tool_live_event(rec, ev, raw)
-		if bridge_startup_event(ev) do bridge_startup_accept(rec, now)
+		if bridge_startup_event(ev) {
+			// A launch's first readiness completes a context rollover restart (T6).
+			if _, newly_ready := bridge_startup_accept(rec, now); newly_ready do bridge_rollover_on_start_success(instance_id)
+		}
 
 		// A later event proves a permission prompt was answered in the terminal.
 		tool_input := ""
 		if ev.kind == .Tool_Start || ev.kind == .Tool_End do tool_input = bridge_ext_raw_tool_input(raw)
 		_ = bridge_blockers_on_extension_event(instance_id, ev, now, tool_input)
-		if status, ok := contracts.ext_activity_for_event(ev); ok {
-			bridge_runtime_note_agent_activity(instance_id, status, bridge_ext_activity_source(ev.provider))
-		}
+		activity, has_activity := contracts.ext_activity_for_event(ev)
+		// Activity is reported after the accumulator and the context rollover
+		// (context_rollover.odin) saw the event: a Stop that starts a rollover
+		// must already be withheld as active, never reported idle.
+		main_agent := ev.agent_id == "" && (ev.agent_type == "" || ev.agent_type == "main")
+		defer if has_activity do bridge_runtime_note_agent_activity(instance_id, activity, bridge_ext_activity_source(ev.provider))
+		defer if main_agent do bridge_rollover_on_ext_event(instance_id, has_activity && activity == "idle", now)
 
 		sync.mutex_lock(&bridge_ext_mutex)
 		s := bridge_ext_state_locked(instance_id)
@@ -301,4 +308,22 @@ bridge_ext_context_window_for :: proc(instance_id: string) -> (window: i64, sour
 		return bridge_ext_token_usage_window(s.token_usage), s.token_usage.window_source, bridge_ext_token_usage_context_pct(s.token_usage)
 	}
 	return BRIDGE_EXT_TOKEN_DEFAULT_WINDOW, .Default, -1
+}
+
+// bridge_ext_token_usage_reset_instance zeroes an instance's token counters (a
+// context rollover restart starts a fresh context) and queues the snapshot.
+bridge_ext_token_usage_reset_instance :: proc(instance_id: string) {
+	context.allocator = bridge_ext_allocator()
+	sync.mutex_lock(&bridge_ext_mutex)
+	found := false
+	for &s in bridge_ext_states {
+		if s.agent_instance_id != instance_id do continue
+		bridge_ext_token_usage_reset(&s.token_usage, "")
+		s.token_usage.updated_at_ms = bridge_runtime_now_ms()
+		s.token_usage.dirty = true
+		found = true
+		break
+	}
+	sync.mutex_unlock(&bridge_ext_mutex)
+	if found do bridge_ext_token_enqueue_due(bridge_runtime_now_ms(), instance_id)
 }

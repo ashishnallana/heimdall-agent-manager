@@ -1087,7 +1087,9 @@ bridge_hub_handle_command :: proc(conn: ^ws.Connection, text: string) {
 		sender_id := extract_json_string(text, "sender_agent_instance_id", sender_user)
 		defer delete(sender_id)
 		sender := sender_dn if sender_dn != "" else sender_id
-		ok := bridge_pty_host_deliver_to_agent(instance_id, "message", sender, "", "")
+		// T6: during a context rollover the notice (which presses ESC) would
+		// interrupt the handoff; it is queued and delivered after the restart.
+		ok := bridge_rollover_queue_notice(instance_id, sender) || bridge_pty_host_deliver_to_agent(instance_id, "message", sender, "", "")
 		if !ok do fmt.println("bridge notification pending/no-agent-subscription", instance_id, command_id)
 		if command_id != "" {
 			res := bridge_command_result_json(command_id, "succeeded" if ok else "accepted", "")
@@ -2564,6 +2566,8 @@ bridge_runtime_launch_agent :: proc(command_id, command_json: string, deadline_n
 	defer delete(permission_mode)
 	provider_profile := extract_json_string(command_json, "provider_profile", "")
 	defer delete(provider_profile)
+	// T6: the chain coordinator is alerted when a context rollover stalls.
+	bridge_rollover_note_launch(instance_id, descriptor.coordinator_id)
 	return bridge_runtime_launch_agent_pty_host(command_id, instance_id, run_dir, endpoint, provider, model, agent_issue.plaintext_token, descriptor.display_name, 0, descriptor.project_path, permission_mode, provider_profile)
 }
 
@@ -2949,7 +2953,10 @@ bridge_runtime_note_agent_activity :: proc(instance_id, activity_status, activit
 	if source == "" do source = "agent_extension"
 	// Screen detection drives the terminal_prompt blocker fallback (REQ-EXT-BLK-5).
 	if source == "pane_diff" do bridge_blockers_note_pane_activity(instance_id, activity_status)
-	bridge_runtime_note_activity_signal(instance_id, bridge_runtime_normalize_activity_status(activity_status), source)
+	// T6: idle is withheld (reported active) while a context rollover is in
+	// progress, so the hub's idle grace cannot expire the lease mid-handoff.
+	activity := bridge_rollover_filter_activity(instance_id, bridge_runtime_normalize_activity_status(activity_status))
+	bridge_runtime_note_activity_signal(instance_id, activity, source)
 }
 
 bridge_runtime_note_activity_signal :: proc(instance_id, activity_status, activity_source: string) {

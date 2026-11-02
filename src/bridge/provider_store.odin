@@ -153,7 +153,10 @@ bridge_agent_runtime_profile :: proc(profile: Bridge_Provider_Profile) -> agent_
 
 bridge_runtime_agent_argv_for_profile :: proc(profile: Bridge_Provider_Profile, model, agent_token, agent_instance_id: string, permission_mode := agent_runtime.PERMISSION_MODE_YOLO) -> []string {
 	if strings.trim_space(model) == "" do return nil
-	return agent_runtime.build_agent_command(bridge_agent_runtime_profile(profile), model, bridge_config.daemon_url, agent_token, agent_instance_id, permission_mode)
+	rp := bridge_agent_runtime_profile(profile)
+	// T6: a context rollover restart tells the agent to read its previous_context.
+	rp.starter_prompt_suffix = bridge_rollover_launch_prompt_line(agent_instance_id)
+	return agent_runtime.build_agent_command(rp, model, bridge_config.daemon_url, agent_token, agent_instance_id, permission_mode)
 }
 
 bridge_runtime_shell_command_for_profile :: proc(profile: Bridge_Provider_Profile, model, agent_token, agent_instance_id: string) -> string {

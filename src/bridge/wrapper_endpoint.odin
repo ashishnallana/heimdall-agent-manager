@@ -465,8 +465,9 @@ bridge_local_handle_agent_method :: proc(request_id, method, params: string, rec
 		return bridge_local_response_data(request_id, relay.body)
 	}
 	if method == "agent.start_success" {
-		accepted, _ := bridge_startup_accept(rec, bridge_runtime_now_ms())
+		accepted, newly_ready := bridge_startup_accept(rec, bridge_runtime_now_ms())
 		if !accepted do return bridge_local_response_error(request_id, "stale_launch", "Startup signal does not belong to an active launch")
+		if newly_ready do bridge_rollover_on_start_success(rec.agent_instance_id)
 		bridge_startup_worker_ensure_started()
 		key := bridge_startup_receipt_key(rec)
         defer delete(key)
@@ -475,6 +476,12 @@ bridge_local_handle_agent_method :: proc(request_id, method, params: string, rec
             return bridge_local_response_error(request_id, "startup_reconciliation_stopped", fmt.tprintf("Startup reconciliation %v after %d attempts (code=%v class=%v)", budget.state, budget.attempts, budget.code, budget.class))
         }
         return bridge_local_response_data(request_id, fmt.tprintf("{{\"accepted\":true,\"reconcile\":\"%v\",\"attempts\":%d}}", budget.state, budget.attempts))
+	}
+
+	if method == "agent.chat.send" {
+		// T6: during a context rollover the agent's self-addressed send is its
+		// previous_context handoff; it is persisted (T5), never relayed as chat.
+		if response, handled := bridge_rollover_intercept_chat_send(request_id, params, rec); handled do return response
 	}
 
 	// Agent API v2: everything else resolves through the single route table.
