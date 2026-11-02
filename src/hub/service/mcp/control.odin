@@ -183,11 +183,12 @@ control_hosted_transform :: proc(ctx:rawptr,kr:^vault.Vault_Keyring)->(string,bo
 	if op.resource_fields!=nil do return vault.control_seal_resource_fields(kr,op.tool,op.resource_fields)
 	if op.agent_fields!=nil do return vault.control_seal_agent_fields(kr,op.agent_fields)
 	if op.task_fields!=nil do return vault.control_seal_task_fields(kr,op.task_fields)
-	if op.tool=="tasks.comment" {
+	if op.tool=="tasks.comment" || op.tool=="chains.message" {
 		payload,err:=json.marshal(struct {body:string}{op.body},allocator=context.temp_allocator)
 		if err!=nil do return "",false
 		defer if len(payload)>0 do crypto.zero_explicit(raw_data(payload),len(payload))
-		return vault.control_job_transform({operation="seal_comment",payload=string(payload)},kr)
+		operation:="seal_comment";if op.tool=="chains.message" do operation="seal_message"
+		return vault.control_job_transform({operation=operation,payload=string(payload)},kr)
 	}
 	if !op.seal {
 		if !vault.control_catalog_data_ok(op.tool,op.data) do return "",false

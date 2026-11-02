@@ -9,7 +9,7 @@ import { decryptVaultBytes, encryptVaultText, findVaultTokens, replaceVaultToken
 
 export interface McpWorkerJob {
   request_id: string; generation: string; owner: string; resource: string; grant: string; head: string;
-  operation: 'read' | 'seal' | 'seal_comment' | 'seal_task' | 'seal_agent' | 'seal_resource'; payload: string; digest: string; revision: number; deadline_ms: number;
+  operation: 'read' | 'seal' | 'seal_comment' | 'seal_message' | 'seal_task' | 'seal_agent' | 'seal_resource'; payload: string; digest: string; revision: number; deadline_ms: number;
   tool?: string;
   epoch: number; consent: string; signature: string; directory: Record<string, unknown>;
 }
@@ -33,13 +33,14 @@ export function mcpJobScopeAllowed(scope: string, tool: string | undefined, oper
   if (tool === 'chains.create') return operation === 'seal';
   if (['tasks.list', 'tasks.get'].includes(tool)) return operation === 'read' && scope.split(' ').includes('mcp:tasks:read');
   if (['tasks.create', 'tasks.update', 'tasks.control'].includes(tool)) return operation === 'seal_task' && scope.split(' ').includes('mcp:tasks:write');
+  if (tool === 'chains.message') return operation === 'seal_message' && scope.split(' ').includes('mcp:chains:message');
   return tool === 'tasks.comment' && operation === 'seal_comment' && scope.split(' ').includes('mcp:tasks:write');
 }
 /** No worker gets an OAuth token. Verify the original approver's signed grant
  * against this device's independently pinned, freshly verified directory. */
 export async function verifyMcpWorkerJob(j: McpWorkerJob, identity: DeviceIdentity, chain: VerifiedChain, resource: string, now = Date.now()): Promise<void> {
   const id = (s: unknown) => typeof s === 'string' && /^[A-Za-z0-9_.:-]{1,256}$/.test(s);
-  if (!id(j.request_id) || !id(j.generation) || j.owner !== identity.userId || j.owner !== chain.userId || j.resource !== resource || j.head !== chain.headHash || j.epoch !== chain.currentEpoch || !Number.isSafeInteger(j.deadline_ms) || j.deadline_ms <= now || j.deadline_ms > now + 5000 || typeof j.payload !== 'string' || j.payload.length > 4 * 1024 * 1024 || !['read', 'seal', 'seal_comment', 'seal_task', 'seal_agent', 'seal_resource'].includes(j.operation) || j.digest !== await mcpJobDigest(j)) throw new Error('Stale or mismatched MCP request');
+  if (!id(j.request_id) || !id(j.generation) || j.owner !== identity.userId || j.owner !== chain.userId || j.resource !== resource || j.head !== chain.headHash || j.epoch !== chain.currentEpoch || !Number.isSafeInteger(j.deadline_ms) || j.deadline_ms <= now || j.deadline_ms > now + 5000 || typeof j.payload !== 'string' || j.payload.length > 4 * 1024 * 1024 || !['read', 'seal', 'seal_comment', 'seal_message', 'seal_task', 'seal_agent', 'seal_resource'].includes(j.operation) || j.digest !== await mcpJobDigest(j)) throw new Error('Stale or mismatched MCP request');
   const me = chain.trusted.get(identity.deviceId);
   if (!me || !kindPolicy(me.kind).receivesWrap) throw new Error('Approved device required');
   const c = JSON.parse(j.consent);
@@ -117,8 +118,9 @@ export async function transformMcpWorkerJob(job: McpWorkerJob, keyring: VaultKey
     }
     return JSON.stringify(sealed);
   }
-  if (job.operation === 'seal_comment') {
-    if (typeof input.body !== 'string' || input.body.length < 1 || new TextEncoder().encode(input.body).length > 20000) throw new Error('Invalid comment body');
+  if (job.operation === 'seal_comment' || job.operation === 'seal_message') {
+    if (job.operation === 'seal_message' && (Object.keys(input).length !== 1 || !Object.hasOwn(input, 'body'))) throw new Error('Invalid message fields');
+    if (typeof input.body !== 'string' || input.body.length < 1 || (job.operation === 'seal_message' && !input.body.trim()) || new TextEncoder().encode(input.body).length > 20000) throw new Error('Invalid message or comment body');
     return JSON.stringify({ body: await encryptVaultText(input.body, keyring) });
   }
   if (job.operation === 'seal') {

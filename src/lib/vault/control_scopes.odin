@@ -5,7 +5,7 @@ import "core:strings"
 CONTROL_SCOPE_BASE :: "mcp:chains"
 // Fixed order is part of the signed v2 consent. No wildcard or implication:
 // write does not silently add read, runtime control or approval authority.
-CONTROL_SCOPE_CAPABILITIES :: [14]string{
+CONTROL_SCOPE_CAPABILITIES :: [15]string{
 	"mcp:tasks:read", "mcp:tasks:write",
 	"mcp:agents:read", "mcp:agents:write",
 	"mcp:instances:read", "mcp:instances:control",
@@ -13,12 +13,13 @@ CONTROL_SCOPE_CAPABILITIES :: [14]string{
 	"mcp:projects:read", "mcp:projects:write",
 	"mcp:issues:read", "mcp:issues:write",
 	"mcp:artifacts:read", "mcp:artifacts:write",
+	"mcp:chains:message",
 }
 control_scopes_valid :: proc(scope:string)->bool {
 	if scope==CONTROL_SCOPE_BASE do return true
 	if len(scope)>1024 || !strings.has_prefix(scope,CONTROL_SCOPE_BASE+" ") do return false
 	parts:=strings.split(scope," ",context.temp_allocator)
-	if len(parts)<2 || len(parts)>15 do return false
+	if len(parts)<2 || len(parts)>len(CONTROL_SCOPE_CAPABILITIES)+1 do return false
 	previous:=-1
 	for part in parts[1:] {
 		index:=-1

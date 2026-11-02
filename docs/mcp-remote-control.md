@@ -15,6 +15,7 @@ identity. Native APIs retain their existing approved-device gates.
 | `chains.list` | Optional `limit` 1–100 (default 50), offset `cursor` | Readable owned chains, optional next cursor |
 | `chains.get` | `chain_id` | Readable chain, tasks, current-attempt review verdict metadata and comments |
 | `chains.create` | Required `title` (1–500 bytes), `coordinator_agent_id` (`agt_...`), `bridge_id` (`brg_...`); optional `description` (up to 20,000 bytes), `provider`, `provider_profile`, `model` | Encrypted draft chain and fresh coordinator instance; launches on the selected bridge |
+| `chains.message` | Required `chain_id`, stable `request_id`, nonblank `body` (up to 20,000 UTF-8 bytes) | Accepted user message; coordinator instance, conversation and message IDs; optional delivery warning |
 | `events.wait` | `chain_id`, optional `timeout_ms` | `status`, transient `event`, `refresh_required`, fresh `state` |
 
 Pagination is a current-state offset, not a snapshot or replay cursor. A get is
@@ -125,3 +126,32 @@ revocation, default-mode unavailability, proved browser replies, cache exclusion
 and an actual URL-only HTTP round trip. Real Claude read/create/wait, a new
 conversation and a cold deployed-process restart remain deployment acceptance
 checks; local tests do not mean the public real-data service is live.
+
+
+## Messages to coordinators
+
+Request the explicit `mcp:chains:message` consent capability and reconnect to
+approve it. This permission sends messages as the connected user and can wake
+the coordinator on an owned machine; task-write and instance-control scopes do
+not imply it. Legacy grants cannot list or invoke `chains.message`.
+
+The tool routes through the current canonical coordinator membership of the
+owned chain. It never chooses a coordinator from the mirror column or accepts a
+caller-selected sender/conversation. Text is sealed in hosted and device modes
+and appears in normal chat as a user message. Message, encrypted conversation
+preview and idempotency receipt commit together before owner UI events, attention
+updates, native stopped-session restart and user notice delivery.
+
+Reuse `request_id` with the same chain and body after ambiguous results.
+An identical retry returns the original target/message, even if the coordinator
+has changed, and does not notify it twice. Different arguments with the same
+request ID return `idempotency_conflict`. A sealing device must still be
+available for device-mode calls, including retries.
+
+`status: "accepted"` means durable persistence, not agent readiness or execution.
+A post-commit runtime failure returns `delivery_warning: "bridge_offline"` or
+`"delivery_unavailable"` with the saved IDs. The message remains readable in chat.
+Retries do not resend its notification; repair the session through normal
+controls if needed. No new durable delivery queue or background replay is added.
+The tool does not return the message body, attachments, review controls, or
+general chat access.

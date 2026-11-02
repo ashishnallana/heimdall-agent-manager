@@ -47,7 +47,7 @@ control_job_digest :: proc(job:Control_Job)->string {
 	return sha256_hex(string(encoded))
 }
 control_job_verify :: proc(job:Control_Job,owner,resource,device_id:string,kr:^Vault_Keyring,now:i64,root_pin:^Root_Pin=nil)->bool {
-	if job.owner!=owner || job.resource!=resource || job.request_id=="" || !valid_id_value(job.request_id) || job.generation=="" || !valid_id_value(job.generation) || job.deadline_ms<=now || job.deadline_ms>now+5000 || len(job.payload)>4*1024*1024 || job.digest!=control_job_digest(job) || (job.operation!="read" && job.operation!="seal" && job.operation!="seal_comment" && job.operation!="seal_task" && job.operation!="seal_agent" && job.operation!="seal_resource") do return false
+	if job.owner!=owner || job.resource!=resource || job.request_id=="" || !valid_id_value(job.request_id) || job.generation=="" || !valid_id_value(job.generation) || job.deadline_ms<=now || job.deadline_ms>now+5000 || len(job.payload)>4*1024*1024 || job.digest!=control_job_digest(job) || (job.operation!="read" && job.operation!="seal" && job.operation!="seal_comment" && job.operation!="seal_message" && job.operation!="seal_task" && job.operation!="seal_agent" && job.operation!="seal_resource") do return false
 	c:Control_Consent
 	if json.unmarshal_string(job.consent,&c,.JSON,context.temp_allocator)!=nil do return false
 	if !control_job_scope_ok(c.scope,job.tool,job.operation) do return false
@@ -132,7 +132,15 @@ control_job_transform :: proc(job:Control_Job,kr:^Vault_Keyring)->(string,bool) 
 		if err!=nil || !typed do return "",false
 		return control_seal_task_fields(kr,fields)
 	}
-	if job.operation=="seal_comment" {
+	if job.operation=="seal_comment" || job.operation=="seal_message" {
+		if job.operation=="seal_message" {
+			value,err:=json.parse_string(job.payload,parse_integers=true,allocator=context.temp_allocator)
+			defer control_wipe_value(value)
+			obj,typed:=value.(json.Object)
+			if err!=nil || !typed || len(obj)!=1 do return "",false
+			body,is_text:=obj["body"].(json.String)
+			if !is_text || strings.trim_space(string(body))=="" do return "",false
+		}
 		input:struct {body:string}
 		if json.unmarshal_string(job.payload,&input,.JSON,context.temp_allocator)!=nil do return "",false
 		defer if input.body!="" do crypto.zero_explicit(raw_data(input.body),len(input.body))

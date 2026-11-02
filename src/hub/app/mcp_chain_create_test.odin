@@ -14,7 +14,7 @@ import http "odin_test:hub/transport/http"
 
 @(test)
 test_mcp_chain_create_native_coordinator_atomic_launch :: proc(t:^testing.T) {
-	mcp_task_test_fixture(t,#load("../../../tests/fixtures/mcp_runtime_v2.json",string),true,false,false,false,true)
+	mcp_task_test_fixture(t,#load("../../../tests/fixtures/mcp_runtime_v2.json",string),true,chain_creation=true)
 }
 
 mcp_chain_create_test :: proc(t:^testing.T,g:^App_Graph,h:^http.MCP_Control_Handlers,headers:[]contracts.HTTP_Header,view:mcp.Access_View,raw:string) {

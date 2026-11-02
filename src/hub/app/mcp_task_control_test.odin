@@ -94,11 +94,12 @@ test_mcp_resource_native_lifecycle_approval_paging_and_retries :: proc(t:^testin
 	mcp_task_test_fixture(t,#load("../../../tests/fixtures/mcp_resources_v2.json",string),true,false,true)
 }
 
-mcp_task_test_fixture :: proc(t:^testing.T,vector:string,catalog:bool,runtime:bool=false,resources:bool=false,artifacts:bool=false,chain_creation:bool=false) {
+mcp_task_test_fixture :: proc(t:^testing.T,vector:string,catalog:bool,runtime:bool=false,resources:bool=false,artifacts:bool=false,messages:bool=false,message_device:bool=false,chain_creation:bool=false) {
 	context.allocator=context.temp_allocator
 	g:=new(App_Graph,context.temp_allocator)
 	v:MCP_Task_Test_Vector
 	if !testing.expect(t,json.unmarshal_string(vector,&v,.JSON,context.temp_allocator)==nil) do return
+	if messages && message_device {extra:struct {device:mcp.Consent_Input};json.unmarshal_string(vector,&extra,.JSON,context.temp_allocator);v.hosted=extra.device}
 	repo,rerr:=sqlite.open_mcp_repository(&g.mcp_repository_impl,":memory:")
 	if !testing.expect(t,rerr.code==.None) do return
 	defer sqlite.close(&g.mcp_repository_impl.conn)
@@ -148,6 +149,14 @@ mcp_task_test_fixture :: proc(t:^testing.T,vector:string,catalog:bool,runtime:bo
 	_,cok,_:=iface.taskchain_save_chain(&g.repos.taskchains,{chain_id="chain_comment",owner_user_id=domain.User_ID(v.request.owner),title="Synthetic",kind="mixed_work",status=.Active,created_at=now,updated_at=now})
 	_,tok,_:=iface.taskchain_save_task(&g.repos.taskchains,{task_id="task_comment",chain_id="chain_comment",owner_user_id=domain.User_ID(v.request.owner),title="Synthetic",publish_state=.Published,state=.In_Review,brief_json="{}",created_at=now,updated_at=now})
 	if !testing.expect(t,cok && tok) do return
+	if messages {
+        g.auth.clock=&g.clock
+        delegation:=http.MCP_Delegation_Handlers{auth=&g.auth,service=&g.mcp_delegation,directory=&directory,grant_directory=&directory,origin=g.mcp_delegation.issuer}
+        h:=http.MCP_Control_Handlers{delegation=&delegation,control={chains=&g.taskchains},create_ctx=g,message=mcp_send_chain_message}
+        headers:=[]contracts.HTTP_Header{{"Authorization",strings.concatenate({"Bearer ",var_tokens.access_token},context.temp_allocator)},{"Content-Type","application/json"}}
+        mcp_chain_message_test(t,g,&h,headers,view,var_tokens.access_token)
+        return
+    }
 	op:=mcp.Control_Transform{tool="tasks.comment",body="private synthetic comment"}
 	sealed:=mcp.hosted_with_access(&g.mcp_delegation,&directory,var_tokens.access_token,view.client,mcp.control_hosted_transform,&op)
 	input:struct {body:string}

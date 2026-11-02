@@ -39,6 +39,7 @@ scope_allows_tool :: proc(scope,tool:string)->bool {
 	capability:string
 	switch tool {
 	case "chains.list","chains.get","events.wait":capability=DELEGATION_SCOPE
+	case "chains.message":capability="mcp:chains:message"
 	case "tasks.list","tasks.get":capability="mcp:tasks:read"
 	case "tasks.create","tasks.update","tasks.comment","tasks.control","chains.configure":capability="mcp:tasks:write"
 	case "agents.list","agents.get":capability="mcp:agents:read"
