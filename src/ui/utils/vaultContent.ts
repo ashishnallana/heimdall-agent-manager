@@ -13,6 +13,7 @@ export {
   base64ToBytes,
   resolveKeyring,
   encryptVaultText,
+  encryptVaultBytes,
   decryptVaultText,
   decryptVaultBytes,
   type VaultBytesResult,

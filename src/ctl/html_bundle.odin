@@ -12,6 +12,7 @@ import "core:os"
 import "core:slice"
 import "core:strings"
 import "core:unicode/utf8"
+import "odin_test:contracts"
 
 // ── Static HTML bundle artifacts (REQ-BUNDLE-1/2/5) ─────────────────────────
 // An html-bundle artifact is a ZIP holding a static site plus the reserved manifest
@@ -27,10 +28,13 @@ HTML_BUNDLE_KIND           :: "html-bundle"
 HTML_BUNDLE_CONTENT_TYPE   :: "application/zip"
 HTML_BUNDLE_MANIFEST       :: "heimdall-artifact.json"
 HTML_BUNDLE_FORMAT_VERSION :: 1
-HTML_BUNDLE_MAX_ARCHIVE    :: 10 * 1024 * 1024
+// The archive is the artifact content, so its limit IS the artifact content limit:
+// 15 MB = 15 MiB = 15,728,640 bytes (contracts.ARTIFACT_MAX_CONTENT_BYTES, REQ-ART-1).
+// Expanded size, entry count and per-member size bound decompression work separately.
+HTML_BUNDLE_MAX_ARCHIVE    :: contracts.ARTIFACT_MAX_CONTENT_BYTES
 HTML_BUNDLE_MAX_EXPANDED   :: 50 * 1024 * 1024
 HTML_BUNDLE_MAX_ENTRIES    :: 1000
-HTML_BUNDLE_MAX_MEMBER     :: 10 * 1024 * 1024
+HTML_BUNDLE_MAX_MEMBER     :: contracts.ARTIFACT_MAX_CONTENT_BYTES
 HTML_BUNDLE_MAX_MANIFEST   :: 64 * 1024
 HTML_BUNDLE_MAX_PATH       :: 1024
 
@@ -65,6 +69,34 @@ Html_Bundle_Archive :: struct {
 html_bundle_is_html :: proc(path: string) -> bool {
 	lower := strings.to_lower(path, context.temp_allocator)
 	return strings.has_suffix(lower, ".html") || strings.has_suffix(lower, ".htm")
+}
+
+// HTML_BUNDLE_ALLOWED_EXTENSIONS is the member type allowlist (lowercase, without the
+// dot), shared with the viewer's HTML_BUNDLE_ALLOWED_EXTENSIONS. Pages, stylesheets,
+// images and fonts render; scripts (.js/.mjs) and data files are accepted but inert: the
+// viewer never executes or loads them. Anything else is rejected.
+HTML_BUNDLE_ALLOWED_EXTENSIONS :: [?]string{
+	"html", "htm", "css",
+	"js", "mjs", "json", "map", "txt", "md", "xml", "csv", "webmanifest",
+	"png", "jpg", "jpeg", "gif", "webp", "avif", "bmp", "ico", "svg",
+	"woff", "woff2", "ttf", "otf", "eot",
+}
+
+// html_bundle_member_type_allowed reports whether a file member's extension is on the
+// allowlist (case-insensitive). Files without an extension are rejected.
+html_bundle_member_type_allowed :: proc(path: string) -> bool {
+	base := path
+	if slash := strings.last_index_byte(path, '/'); slash >= 0 do base = path[slash + 1:]
+	dot := strings.last_index_byte(base, '.')
+	if dot <= 0 || dot == len(base) - 1 do return false
+	ext := strings.to_lower(base[dot + 1:], context.temp_allocator)
+	allowed := HTML_BUNDLE_ALLOWED_EXTENSIONS
+	for candidate in allowed do if ext == candidate do return true
+	return false
+}
+
+html_bundle_unsupported_type_error :: proc(path: string) -> string {
+	return fmt.tprintf("member %q has an unsupported file type; allowed: .html .htm .css .js .mjs .json .map .txt .md .xml .csv .webmanifest .png .jpg .jpeg .gif .webp .avif .bmp .ico .svg .woff .woff2 .ttf .otf .eot", path)
 }
 
 // html_bundle_is_nested_archive rejects archives inside the bundle by name; the
@@ -139,7 +171,7 @@ le32 :: proc(b: []byte, off: int) -> u32 { v, _ := endian.get_u32(b[off:], .Litt
 html_bundle_parse_zip :: proc(data: []byte) -> (archive: Html_Bundle_Archive, err: string) {
 	archive.data = data
 	archive.members = make([dynamic]Html_Bundle_Member, context.temp_allocator)
-	if len(data) > HTML_BUNDLE_MAX_ARCHIVE do return archive, fmt.tprintf("archive is %d bytes; the limit is %d (10 MiB)", len(data), HTML_BUNDLE_MAX_ARCHIVE)
+	if len(data) > HTML_BUNDLE_MAX_ARCHIVE do return archive, fmt.tprintf("archive is %d bytes; the limit is %d (15 MB = 15 MiB)", len(data), HTML_BUNDLE_MAX_ARCHIVE)
 	if len(data) < ZIP_EOCD_SIZE do return archive, "not a ZIP archive (too short)"
 	eocd := -1
 	lowest := max(0, len(data) - ZIP_EOCD_SIZE - 0xffff)
@@ -190,7 +222,8 @@ html_bundle_parse_zip :: proc(data: []byte) -> (archive: Html_Bundle_Archive, er
 		is_dir := strings.has_suffix(name, "/")
 		if is_dir && usize != 0 do return archive, fmt.tprintf("directory member %q has content", name)
 		if !is_dir && html_bundle_is_nested_archive(name) do return archive, fmt.tprintf("member %q is a nested archive; nested archives are not allowed", name)
-		if usize > HTML_BUNDLE_MAX_MEMBER do return archive, fmt.tprintf("member %q declares %d bytes; the per-member limit is %d (10 MiB)", name, usize, HTML_BUNDLE_MAX_MEMBER)
+		if !is_dir && !html_bundle_member_type_allowed(name) do return archive, html_bundle_unsupported_type_error(name)
+		if usize > HTML_BUNDLE_MAX_MEMBER do return archive, fmt.tprintf("member %q declares %d bytes; the per-member limit is %d (15 MiB)", name, usize, HTML_BUNDLE_MAX_MEMBER)
 		if method == 0 && csize != usize do return archive, fmt.tprintf("stored member %q has mismatched sizes", name)
 		total += usize
 		if total > HTML_BUNDLE_MAX_EXPANDED do return archive, fmt.tprintf("archive expands past %d bytes (50 MiB)", HTML_BUNDLE_MAX_EXPANDED)
@@ -492,7 +525,7 @@ html_bundle_from_zip :: proc(data: []byte, flag_entry: string, allocator := cont
 	} else {
 		manifest := html_bundle_manifest_json(entry, context.temp_allocator)
 		result.zip = html_bundle_append_manifest(&archive, transmute([]byte)manifest, allocator)
-		if len(result.zip) > HTML_BUNDLE_MAX_ARCHIVE do return result, fmt.tprintf("archive with manifest is %d bytes; the limit is %d (10 MiB)", len(result.zip), HTML_BUNDLE_MAX_ARCHIVE)
+		if len(result.zip) > HTML_BUNDLE_MAX_ARCHIVE do return result, fmt.tprintf("archive with manifest is %d bytes; the limit is %d (15 MB = 15 MiB)", len(result.zip), HTML_BUNDLE_MAX_ARCHIVE)
 	}
 	return result, ""
 }
@@ -525,11 +558,12 @@ html_bundle_collect :: proc(root, rel: string, files: ^[dynamic]Html_Bundle_File
 		}
 		if reason := html_bundle_validate_path(child); reason != "" do return fmt.tprintf("%s: %q", reason, child)
 		if html_bundle_is_nested_archive(child) do return fmt.tprintf("%q is an archive; nested archives are not allowed", child)
-		if st.size > HTML_BUNDLE_MAX_MEMBER do return fmt.tprintf("%q is %d bytes; the per-member limit is %d (10 MiB)", child, st.size, HTML_BUNDLE_MAX_MEMBER)
+		if !html_bundle_member_type_allowed(child) do return html_bundle_unsupported_type_error(child)
+		if st.size > HTML_BUNDLE_MAX_MEMBER do return fmt.tprintf("%q is %d bytes; the per-member limit is %d (15 MiB)", child, st.size, HTML_BUNDLE_MAX_MEMBER)
 		if len(files) + 1 > HTML_BUNDLE_MAX_ENTRIES do return fmt.tprintf("directory has more than %d files", HTML_BUNDLE_MAX_ENTRIES)
 		data, data_err := os.read_entire_file(info.fullpath, context.temp_allocator)
 		if data_err != nil do return fmt.tprintf("cannot read %q", child)
-		if len(data) > HTML_BUNDLE_MAX_MEMBER do return fmt.tprintf("%q is %d bytes; the per-member limit is %d (10 MiB)", child, len(data), HTML_BUNDLE_MAX_MEMBER)
+		if len(data) > HTML_BUNDLE_MAX_MEMBER do return fmt.tprintf("%q is %d bytes; the per-member limit is %d (15 MiB)", child, len(data), HTML_BUNDLE_MAX_MEMBER)
 		total^ += len(data)
 		if total^ > HTML_BUNDLE_MAX_EXPANDED do return fmt.tprintf("directory content exceeds %d bytes (50 MiB)", HTML_BUNDLE_MAX_EXPANDED)
 		append(files, Html_Bundle_File{path = child, data = data})
@@ -568,7 +602,7 @@ html_bundle_from_directory :: proc(root, flag_entry: string, allocator := contex
 	append(&packed, Html_Bundle_File{path = HTML_BUNDLE_MANIFEST, data = transmute([]byte)html_bundle_manifest_json(entry, context.temp_allocator)})
 	append(&packed, ..content_files[:])
 	result.zip = html_bundle_write_zip(packed[:], allocator)
-	if len(result.zip) > HTML_BUNDLE_MAX_ARCHIVE do return result, fmt.tprintf("packed bundle is %d bytes; the limit is %d (10 MiB, stored without compression)", len(result.zip), HTML_BUNDLE_MAX_ARCHIVE)
+	if len(result.zip) > HTML_BUNDLE_MAX_ARCHIVE do return result, fmt.tprintf("packed bundle is %d bytes; the limit is %d (15 MB = 15 MiB, stored without compression)", len(result.zip), HTML_BUNDLE_MAX_ARCHIVE)
 	result.entry = entry
 	result.files = len(content_files)
 	for p in paths do if html_bundle_is_html(p) do result.pages += 1
@@ -598,7 +632,7 @@ html_bundle_package_from_args :: proc(args: []string, allocator := context.alloc
 		st, st_err := os.stat(file, context.temp_allocator)
 		if st_err != nil || st.type != .Regular do return result, fmt.tprintf("cannot read --file %q", file)
 		size := st.size
-		if size > HTML_BUNDLE_MAX_ARCHIVE do return result, fmt.tprintf("--file %q is %d bytes; the limit is %d (10 MiB)", file, size, HTML_BUNDLE_MAX_ARCHIVE)
+		if size > HTML_BUNDLE_MAX_ARCHIVE do return result, fmt.tprintf("--file %q is %d bytes; the limit is %d (15 MB = 15 MiB)", file, size, HTML_BUNDLE_MAX_ARCHIVE)
 		data, read_err := os.read_entire_file(file, context.temp_allocator)
 		if read_err != nil do return result, fmt.tprintf("cannot read --file %q", file)
 		return html_bundle_from_zip(data, entry, allocator)

@@ -83,7 +83,7 @@ export default function HtmlBundlePreview({ blob, locked, lockReason = 'locked' 
     try {
       return { ...status.renderer.compilePage(location.page), error: '' };
     } catch (err) {
-      return { html: '', missing: [] as string[], error: String((err as Error)?.message || err) };
+      return { html: '', missing: [] as string[], inertScripts: 0, error: String((err as Error)?.message || err) };
     }
   }, [status, location.page]);
 
@@ -198,6 +198,11 @@ export default function HtmlBundlePreview({ blob, locked, lockReason = 'locked' 
       {compiled && compiled.missing.length > 0 ? (
         <div data-debug-id="artifact-viewer-html-bundle-resource-warning" className="rounded-xl border border-warning/30 bg-warning-soft px-4 py-2 text-xs text-warning">
           {compiled.missing.length} resource{compiled.missing.length === 1 ? '' : 's'} could not be loaded (missing, remote or unsupported): {compiled.missing.slice(0, 5).join(', ')}{compiled.missing.length > 5 ? ', …' : ''}
+        </div>
+      ) : null}
+      {compiled && compiled.inertScripts > 0 ? (
+        <div data-debug-id="artifact-viewer-html-bundle-scripts-inert" className="rounded-xl border border-subtle bg-surface-raised px-4 py-2 text-xs text-muted">
+          JavaScript does not run in the preview ({compiled.inertScripts} script{compiled.inertScripts === 1 ? '' : 's'} on this page). Scripts stay in the downloaded ZIP but are never executed here.
         </div>
       ) : null}
       <iframe

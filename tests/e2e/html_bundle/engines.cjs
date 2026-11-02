@@ -25,7 +25,7 @@ const TALL = '<div style="height:3000px"></div>';
 const V1 = zip([
   MANIFEST,
   ['index.html', `<!doctype html><html><head><title>Home</title><link rel="stylesheet" href="assets/style.css">
-<script>parent.document.title='pwned'</script></head><body onload="parent.document.title='pwned-onload'">
+<script>parent.document.title='pwned'</script><script src="assets/app.js"></script></head><body onload="parent.document.title='pwned-onload'">
 <nav><a id="home" href="index.html">Home</a> <a id="details" href="docs/details.html">Details</a> <a id="jump" href="#s2">Jump</a>
 <a id="xfrag" href="docs/details.html#end">Details end</a> <a id="forged" href="#hb-page=docs/details.html">Forged</a>
 <a id="kbd" href="./docs/details.html">Keyboard</a> <a id="external" href="https://example.com/">External</a></nav>
@@ -38,6 +38,8 @@ ${TALL}<h2 id="s2">Section</h2>${TALL}</body></html>`],
   ['other.html', '<!doctype html><html><body><h1 id="title">Other</h1><a id="home" href="index.html">Home</a></body></html>'],
   ['assets/style.css', 'body{color:rgb(0,0,255)} h1{text-transform:uppercase}'],
   ['assets/chart.png', PNG],
+  // REQ-ART-2: bundled JS is an accepted member but inert (never loaded or run).
+  ['assets/app.js', "parent.document.title='pwned-js-asset'"],
 ]);
 // A later version of the same artifact: same paths, different content, no other.html.
 const V2 = zip([
