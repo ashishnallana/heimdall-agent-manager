@@ -234,6 +234,17 @@ export function getTaskStatusLines(task: TaskWire, _chainFleets?: any[], nowMs: 
   if (state === 'in_review') {
     const roles = task.brief?.review_roles || [];
     const rolesStr = roles.join(', ');
+    // An agent holding a review lease is named; the role-only text stays for
+    // when no review lease exists yet.
+    const reviewing = reviewLeaseHolders(task, nowMs)
+      .map((h) => `${(h.instanceId && names.instance(h.instanceId)) || 'An agent'} ${reviewingSentenceRest(h.role, h.leftMins)}`)
+      .join('; ');
+    if (reviewing) {
+      return [
+        task.requires_user_approval ? `${reviewing}; then you` : reviewing,
+        `Attempt ${task.attempt_no || 1} submitted · review in progress`,
+      ];
+    }
     if (task.requires_user_approval) {
       return [
         roles.length > 0
@@ -291,6 +302,14 @@ export function getTaskStatusLines(task: TaskWire, _chainFleets?: any[], nowMs: 
   return ['Cancelled', 'Ticket was cancelled'];
 }
 
+/** An instance holding one of the task's review leases. */
+export interface TaskReviewHolder {
+  instanceId: string;
+  // The review role the lease is for ('' when the hub sent none).
+  role: string;
+  expiresAt: string;
+}
+
 export interface TaskPeople {
   // assignee: brief.assignee — the worker agent TEMPLATE the task is pinned to
   // ('' = any worker in the fleet). The matcher resolves it to an instance.
@@ -307,6 +326,8 @@ export interface TaskPeople {
   reviewersByRole: { role: string; agents: string[] }[];
   // holder: instance currently holding the work lease ('' when none).
   holder: string;
+  // reviewHolders: instances holding a review lease right now, one per lease.
+  reviewHolders: TaskReviewHolder[];
   userApproval: boolean;
 }
 
@@ -357,6 +378,11 @@ export function getTaskPeople(task: TaskWire, chainFleets: any[] = []): TaskPeop
     reviewers: Array.from(new Set(reviewers)),
     reviewersByRole,
     holder: String(work?.holder_instance_id || ''),
+    reviewHolders: reviewLeases(task).map((l) => ({
+      instanceId: String(l.holder_instance_id),
+      role: String(l.review_role || ''),
+      expiresAt: String(l.expires_at || ''),
+    })),
     userApproval: Boolean(task.requires_user_approval),
   };
 }
@@ -420,6 +446,28 @@ export function workLeaseHolder(task: TaskWire, nowMs: number = Date.now()): { i
   if (!lease?.holder_instance_id) return null;
   const expiresMs = lease.expires_at ? new Date(lease.expires_at).getTime() : nowMs + 15 * 60000;
   return { instanceId: String(lease.holder_instance_id), leftMins: Math.max(0, Math.round((expiresMs - nowMs) / 60000)) };
+}
+
+/** "is reviewing (security), 4m left": the in-review sentence after the holder's name. */
+export function reviewingSentenceRest(role: string, leftMins: number): string {
+  return `is reviewing${role ? ` (${role})` : ''}, ${leftMins}m left`;
+}
+
+/** The task's review leases that name a holder, in wire order. */
+export function reviewLeases(task: TaskWire): TaskLeaseWire[] {
+  return (task.leases || []).filter((l) => l?.kind === 'review' && l.holder_instance_id);
+}
+
+/**
+ * The review-lease holders of an in-review task with their role and minutes
+ * left, so a view can render each with <HolderName>. [] outside in_review.
+ */
+export function reviewLeaseHolders(task: TaskWire, nowMs: number = Date.now()): { instanceId: string; role: string; leftMins: number }[] {
+  if (normalizeTaskState(task.state) !== 'in_review') return [];
+  return reviewLeases(task).map((l) => {
+    const expiresMs = l.expires_at ? new Date(l.expires_at).getTime() : nowMs + 15 * 60000;
+    return { instanceId: String(l.holder_instance_id), role: String(l.review_role || ''), leftMins: Math.max(0, Math.round((expiresMs - nowMs) / 60000)) };
+  });
 }
 
 /**

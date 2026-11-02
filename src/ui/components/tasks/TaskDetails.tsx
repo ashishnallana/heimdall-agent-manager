@@ -266,14 +266,25 @@ export const TaskDetails: React.FC<TaskDetailsProps> = ({
   const hold = taskHold(task);
   const pendingReviewers = people.reviewers.filter((id) => voteFor(votes, id, names) !== 'approve');
   const vote = (id: string) => <ReviewerVote key={id} id={id} names={names} verdict={voteFor(votes, id, names)} />;
+  // The instance holding a review lease right now, like the Assignee row's
+  // "now <holder>". A role the brief does not list still shows on its own.
+  const reviewing = (h: { instanceId: string; role: string }, i: number) => (
+    <span key={`reviewing-${h.instanceId}-${h.role}-${i}`} data-debug-id={`task-detail-reviewing-${h.instanceId}`} className="text-muted">
+      now <HolderName instanceId={h.instanceId} names={names} />
+      {h.role ? ` (${h.role})` : ''}
+    </span>
+  );
+  const briefRoles = new Set(people.reviewersByRole.map(({ role }) => role));
   const reviewerGroups: React.ReactNode[] = [
     ...(people.named.length ? [<span key="named" className="inline-flex flex-wrap gap-x-2">{people.named.map(vote)}</span>] : []),
     ...people.reviewersByRole.map(({ role, agents }) => (
       <span key={`role-${role}`} className="inline-flex flex-wrap items-center gap-x-2">
         <span className="text-muted">{role} role:</span>
         {agents.length ? agents.map(vote) : <span className="text-muted">nobody holds it</span>}
+        {people.reviewHolders.filter((h) => h.role === role).map(reviewing)}
       </span>
     )),
+    ...people.reviewHolders.filter((h) => !briefRoles.has(h.role)).map(reviewing),
     ...extraVoters.map((id) => <ReviewerVote key={id} id={id} names={names} verdict={voteFor(votes, id, names)} />),
     ...(task.requires_user_approval || votes.has('user') ? [<ReviewerVote key="user" id="user" names={names} label="you" verdict={votes.get('user')} />] : []),
   ];
