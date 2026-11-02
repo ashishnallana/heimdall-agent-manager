@@ -52,6 +52,25 @@ models, launched instances, overrides and the pair named in the request. A set
 or clear re-resolves running instances; the new window goes up with their next
 snapshot.
 
+The hub relays this frame and stores nothing
+(`src/hub/transport/http/bridge_context_window_handlers.odin`, owner-checked,
+10 s timeout):
+
+| Method | Path | Op |
+| --- | --- | --- |
+| `GET` | `/api/v1/bridges/{id}/context-windows` | `list` |
+| `PUT` | `/api/v1/bridges/{id}/context-windows` body `{provider, model, context_window}` | `set` |
+| `DELETE` | `/api/v1/bridges/{id}/context-windows?provider=&model=` (or the same JSON body) | `clear` |
+
+The hub rejects a missing provider/model and a `context_window` that is not a
+whole JSON number or is outside 100000..100000000 before relaying. A bridge
+`ok:false` becomes an API error (`validation_failed`, or `internal_error` for
+`persist_failed`) with `details.bridge_error` set to the bridge's code. The
+bridge management view in Settings shows the list (`BridgeContextWindows.tsx`)
+with a source badge per row, highlights `default` rows (missing from the
+shipped config), and offers 200K / 500K / 1M presets, a custom value (min 100K,
+checked before sending) and clearing an override.
+
 ## Open conversations
 
 The UI sends version 2 subscription views containing a parent conversation ID
