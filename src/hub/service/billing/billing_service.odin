@@ -72,6 +72,8 @@ account_view :: proc(service: ^Service, user_id: string) -> (Account_View, domai
 	invalidate_entitlements(service, user_id)
 	entitlements := account.entitlements
 	if !plan_limits_enabled(service.config) do entitlements = domain.unlimited_entitlements()
+	// The only lookup that reconciles bridges: a settings refresh outside any UoW.
+	// It takes bridge enrollment commit.mutex; never call it while holding that mutex.
 	if service.on_entitlements != nil {
 		if reconcile_err := service.on_entitlements(service.plan_change_ctx, user_id, entitlements); reconcile_err.code != .None do return {}, reconcile_err
 	}

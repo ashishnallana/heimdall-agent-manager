@@ -11,8 +11,9 @@ reconcile_bridge_entitlements :: proc(ctx: rawptr, user_id: string, entitlements
 }
 
 // Startup follows migrations; webhook changes and the reaper use the same sweep.
-// Cache fills reconcile configured accounts at most once per 30s; the reaper also
-// observes raw SQL overrides and past_due grace expiry without a browser request.
+// This sweep owns bridges.plan_disabled_at: entitlement lookups never reconcile,
+// so launch gates only read the flag. The reaper also observes raw SQL overrides
+// and past_due grace expiry without a browser request.
 reconcile_bridge_plans :: proc(ctx: rawptr) -> domain.Domain_Error {
 	graph := (^App_Graph)(ctx)
 	if graph.repos.bridges.list_owners == nil do return {}
@@ -24,18 +25,16 @@ reconcile_bridge_plans :: proc(ctx: rawptr) -> domain.Domain_Error {
 	}
 	failures := 0
 	for owner in owners {
+		// Disabled enforcement is deliberately unlimited, including old suspensions.
 		entitlements, lookup_err := billing_service.effective_entitlements(&graph.billing, owner)
 		if lookup_err.code != .None {
 			fmt.eprintfln("hub: bridge plan reconciliation for owner %s failed: %s", owner, lookup_err.message)
 			failures += 1
 			continue
 		}
-		// Disabled enforcement is deliberately unlimited, including old suspensions.
-		if !billing_service.plan_limits_enabled(graph.billing.config) {
-			if reconcile_err := bridge_service.reconcile_plan_limits(&graph.bridges, owner, entitlements.max_bridges); reconcile_err.code != .None {
-				fmt.eprintfln("hub: bridge plan reconciliation for owner %s failed: %s", owner, reconcile_err.message)
-				failures += 1
-			}
+		if reconcile_err := bridge_service.reconcile_plan_limits(&graph.bridges, owner, entitlements.max_bridges); reconcile_err.code != .None {
+			fmt.eprintfln("hub: bridge plan reconciliation for owner %s failed: %s", owner, reconcile_err.message)
+			failures += 1
 		}
 	}
 	if failures > 0 do return domain.domain_error(.Internal_Error, fmt.tprintf("bridge plan reconciliation failed for %d owner(s); reaper will retry", failures))
