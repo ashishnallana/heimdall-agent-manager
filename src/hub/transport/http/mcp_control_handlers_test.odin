@@ -81,7 +81,7 @@ mcp_control_fixture :: proc(t:^testing.T,use_device:=false)->^MCP_Control_Fixtur
 	f.trepo=sqlite.new_taskchain_repository(&f.timpl,&f.impl.conn)
 	f.ids=platform.real_id_generator()
 	f.chains=tc.new_taskchain_service(&f.trepo,nil,&f.base.clock,&f.ids)
-	f.h={delegation=&f.delegation,control={chains=&f.chains},bus=&f.bus,create_ctx=f,create=mcp_control_test_create}
+	f.h={delegation=&f.delegation,control={chains=&f.chains},bus=&f.bus}
 	title,_:=vectors.alice.content["title"].(json.String);description,_:=vectors.alice.content["description"].(json.String)
 	_,chain_ok,chain_err:=iface.taskchain_save_chain(&f.trepo,{chain_id="chain_fixture",owner_user_id=domain.User_ID(v.request.owner),title=string(title),description=string(description),status=.Active,kind="mixed_work",defaults_json="{}",created_at=mcp_test_now(nil),updated_at=mcp_test_now(nil)})
 	testing.expectf(t,chain_ok && chain_err.code==.None,"seed chain: %s",chain_err.message)
@@ -90,15 +90,6 @@ mcp_control_fixture :: proc(t:^testing.T,use_device:=false)->^MCP_Control_Fixtur
 	_,comment_ok,comment_err:=iface.taskchain_save_comment(&f.trepo,{comment_id="cmt_fixture",task_id="task_fixture",chain_id="chain_fixture",owner_user_id=domain.User_ID(v.request.owner),body=string(title),created_at=mcp_test_now(nil),updated_at=mcp_test_now(nil)})
 	testing.expectf(t,comment_ok && comment_err.code==.None,"seed comment: %s",comment_err.message)
 	return f
-}
-mcp_control_test_create :: proc(ctx:rawptr,owner,title,description:string)->(string,bool) {
-	f:=(^MCP_Control_Fixture)(ctx)
-	c,ok,err:=tc.create_chain(&f.chains,mcp.control_auth(owner),{title=title,description=description})
-	return string(c.chain_id),ok && err.code==.None
-}
-mcp_control_test_fail_create :: proc(ctx:rawptr,owner,title,description:string)->(string,bool) {
-	id,_:=mcp_control_test_create(ctx,owner,title,description)
-	return id,false
 }
 mcp_control_close :: proc(f:^MCP_Control_Fixture) {mcp.worker_registrations_free(&f.h.registrations);vd.service_free(&f.directory);sqlite.close(&f.impl.conn);sqlite.close(&f.base.conn)}
 mcp_control_request :: proc(h:^MCP_Control_Handlers,token,body:string)->Response {
@@ -113,7 +104,7 @@ test_mcp_control_hosted_four_tools_ownership_creation_and_stateless_restart :: p
 	init:=mcp_control_request(&f.h,f.token,`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}`)
 	testing.expect(t,init.status==200 && strings.contains(init.body,"2025-06-18"))
 	list:=mcp_control_request(&f.h,f.token,`{"jsonrpc":"2.0","id":2,"method":"tools/list"}`)
-	testing.expect(t,strings.contains(list.body,"chains.list") && strings.contains(list.body,"chains.get") && strings.contains(list.body,"chains.create") && strings.contains(list.body,"events.wait") && !strings.contains(list.body,"lease.next"))
+	testing.expect(t,strings.contains(list.body,"chains.list") && strings.contains(list.body,"chains.get") && !strings.contains(list.body,"chains.create") && strings.contains(list.body,"events.wait") && !strings.contains(list.body,"lease.next"))
 	testing.expect(t,!strings.contains(list.body,"tasks.get") && !strings.contains(list.body,"tasks.create") && !strings.contains(list.body,"chains.configure"))
 	for name in ([]string{"agents.list","instances.list","bridges.list","providers.list","instances.create","instances.start","instances.stop","instances.reconfigure","instances.operations"}) do testing.expect(t,!strings.contains(list.body,name))
 	for call in ([]string{
@@ -145,17 +136,10 @@ test_mcp_control_hosted_four_tools_ownership_creation_and_stateless_restart :: p
 	testing.expect(t,strings.contains(other_owner.body,"not_found") && !strings.contains(other_owner.body,"other owner secret"))
 	listing:=mcp_control_request(&f.h,f.token,`{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"chains.list","arguments":{"limit":1}}}`)
 	testing.expect(t,strings.contains(listing.body,"chain_fixture") && !strings.contains(listing.body,"other owner secret"))
-	created:=mcp_control_request(&f.h,f.token,`{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"chains.create","arguments":{"title":"new private chain","description":"private description"}}}`)
-	testing.expectf(t,created.status==200 && strings.contains(created.body,"new private chain"),"create response: %s",created.body)
+	created:=mcp_control_request(&f.h,f.token,`{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"chains.create","arguments":{"title":"new private chain","coordinator_agent_id":"agt_fixture","bridge_id":"brg_fixture"}}}`)
+	testing.expect(t,strings.contains(created.body,"scope_missing"))
 	rows,rerr:=iface.taskchain_list_chains_by_owner(&f.trepo,domain.User_ID(f.state.vector.request.owner))
-	testing.expect(t,rerr.code==.None && len(rows)==2)
-	for c in rows do if c.chain_id!="chain_fixture" {testing.expect(t,vault.is_armored(c.title) && vault.is_armored(c.description));testing.expect(t,c.coordinator_agent_instance_id=="" && c.publish_state==.Draft)}
-	f.h.create=mcp_control_test_fail_create
-	failed:=mcp_control_request(&f.h,f.token,`{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"chains.create","arguments":{"title":"rolled back private chain"}}}`)
-	testing.expect(t,strings.contains(failed.body,"request_failed"))
-	rolled_back,_:=iface.taskchain_list_chains_by_owner(&f.trepo,domain.User_ID(f.state.vector.request.owner))
-	testing.expect(t,len(rolled_back)==2,"creation and grant check share one rollback boundary")
-	f.h.create=mcp_control_test_create
+	testing.expect(t,rerr.code==.None && len(rows)==1,"legacy delegation cannot launch coordinators")
 	// Fresh handler process state requires neither pairing nor an initialize/session cache.
 	restarted:=MCP_Control_Handlers{delegation=&f.delegation,control={chains=&f.chains},bus=&f.bus}
 	again:=mcp_control_request(&restarted,f.token,`{"jsonrpc":"2.0","id":"new-conversation","method":"tools/call","params":{"name":"chains.get","arguments":{"chain_id":"chain_fixture"}}}`)

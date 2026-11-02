@@ -4,8 +4,9 @@ import "core:testing"
 
 @(test)
 capabilities_legacy_and_explicit_rights :: proc(t:^testing.T) {
-	for tool in ([]string{"chains.list","chains.get","chains.create","events.wait"}) do testing.expect(t,scope_allows_tool(DELEGATION_SCOPE,tool))
-	for tool in ([]string{"tasks.comment","tasks.review","agents.create","instances.start","memories.approve","artifacts.get","messages.send","lease.next","unknown"}) do testing.expect(t,!scope_allows_tool(DELEGATION_SCOPE,tool),tool)
+	for tool in ([]string{"chains.list","chains.get","events.wait"}) do testing.expect(t,scope_allows_tool(DELEGATION_SCOPE,tool))
+	for tool in ([]string{"chains.create","tasks.comment","tasks.review","agents.create","instances.start","memories.approve","artifacts.get","messages.send","lease.next","unknown"}) do testing.expect(t,!scope_allows_tool(DELEGATION_SCOPE,tool),tool)
+	testing.expect(t,scope_allows_tool("mcp:chains mcp:instances:control","chains.create"))
 	scope:="mcp:chains mcp:tasks:read mcp:artifacts:write"
 	testing.expect(t,scope_allows_tool(scope,"tasks.get"))
 	testing.expect(t,scope_allows_tool(scope,"artifacts.create"))

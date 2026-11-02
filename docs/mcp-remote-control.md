@@ -1,6 +1,6 @@
 # Remote MCP chain control
 
-This implements the four-tool remote control plane. It does not activate a
+This documents the core remote chain control tools. It does not activate a
 deployment. The separate synthetic OAuth probe is not a real-data endpoint.
 
 Configure the integrated Hub using [mcp-delegated-oauth.md](mcp-delegated-oauth.md),
@@ -14,7 +14,7 @@ identity. Native APIs retain their existing approved-device gates.
 | --- | --- | --- |
 | `chains.list` | Optional `limit` 1–100 (default 50), offset `cursor` | Readable owned chains, optional next cursor |
 | `chains.get` | `chain_id` | Readable chain, tasks, current-attempt review verdict metadata and comments |
-| `chains.create` | Plain `title` (1–500 bytes), optional `description` (up to 20,000 bytes) | Encrypted draft chain; no assignment or agent launch |
+| `chains.create` | Required `title` (1–500 bytes), `coordinator_agent_id` (`agt_...`), `bridge_id` (`brg_...`); optional `description` (up to 20,000 bytes), `provider`, `provider_profile`, `model` | Encrypted draft chain and fresh coordinator instance; launches on the selected bridge |
 | `events.wait` | `chain_id`, optional `timeout_ms` | `status`, transient `event`, `refresh_required`, fresh `state` |
 
 Pagination is a current-state offset, not a snapshot or replay cursor. A get is
@@ -33,6 +33,20 @@ current vault/epoch. The final credential/grant/directory check and persistence
 share one SQLite transaction and connection; failure rolls back the write. A
 transport failure can still hide a committed creation. Never automatically retry
 an ambiguous `chains.create` call.
+
+Creation requires the existing `mcp:instances:control` consent capability because
+it launches an agent. Legacy `mcp:chains` connections retain reads but cannot
+create chains; reconnect with instance-control consent to enable creation.
+Choose an owned active durable agent and an owned online bridge. An instance ID
+is not accepted as `coordinator_agent_id`; an existing running instance is not
+required. Provider settings use the same defaults as native instance creation.
+
+Chain, conversation, instance, and canonical coordinator membership are prepared
+in one transaction. Launch dispatch occurs after commit. The response reports
+`status: "draft"`, `chain_id`, and `coordinator_agent_instance_id`. A
+`coordinator_launch_unconfirmed` error includes committed identifiers: inspect
+that instance before taking a recovery action. Do not resend creation to recover
+a launch; doing so creates another chain and coordinator.
 
 ## Decryption modes
 

@@ -13,7 +13,6 @@ import mcp "odin_test:hub/service/mcp"
 import auth_service "odin_test:hub/service/auth"
 import vd "odin_test:hub/service/vault_directory"
 import vault "odin_test:lib/vault"
-import tc "odin_test:hub/service/taskchain"
 
 configure_mcp_delegation :: proc(graph: ^App_Graph) -> (bool, string) {
 	data, err := os.read_entire_file(graph.config.mcp_oauth_key_file, context.temp_allocator)
@@ -63,16 +62,6 @@ configure_mcp_delegation :: proc(graph: ^App_Graph) -> (bool, string) {
 	graph.mcp_control_handlers.control.resource_page=sqlite.mcp_resource_refs
 	valid=true
 	return true,""
-}
-
-mcp_create_chain :: proc(ctx:rawptr,owner,title,description:string)->(string,bool) {
-	graph:=(^App_Graph)(ctx)
-	impl:sqlite.Taskchain_Repo_SQLite
-	repo:=sqlite.new_taskchain_repository(&impl,&graph.mcp_repository_impl.conn)
-	service:=graph.taskchains
-	service.repo=&repo
-	chain,ok,err:=tc.create_chain(&service,mcp.control_auth(owner),{title=title,description=description})
-	return string(chain.chain_id),ok && err.code==.None
 }
 
 mcp_account_authority :: proc(ctx: rawptr, grant: domain.MCP_Record) -> (bool, domain.Domain_Error) {

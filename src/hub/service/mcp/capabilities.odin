@@ -38,13 +38,13 @@ scope_allows_tool :: proc(scope,tool:string)->bool {
 	if !scopes_valid(scope) do return false
 	capability:string
 	switch tool {
-	case "chains.list","chains.get","chains.create","events.wait":capability=DELEGATION_SCOPE
+	case "chains.list","chains.get","events.wait":capability=DELEGATION_SCOPE
 	case "tasks.list","tasks.get":capability="mcp:tasks:read"
 	case "tasks.create","tasks.update","tasks.comment","tasks.control","chains.configure":capability="mcp:tasks:write"
 	case "agents.list","agents.get":capability="mcp:agents:read"
 	case "agents.create","agents.update","agents.archive":capability="mcp:agents:write"
 	case "instances.list","instances.get","instances.operations","bridges.list","providers.list":capability="mcp:instances:read"
-	case "instances.create","instances.start","instances.stop","instances.reconfigure":capability="mcp:instances:control"
+	case "chains.create","instances.create","instances.start","instances.stop","instances.reconfigure":capability="mcp:instances:control"
 	case "memories.list","memories.get":capability="mcp:memories:read"
 	case "memories.create","memories.update","memories.archive":capability="mcp:memories:write"
 	case "projects.list","projects.get":capability="mcp:projects:read"

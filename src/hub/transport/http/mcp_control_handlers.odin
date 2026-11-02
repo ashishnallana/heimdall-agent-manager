@@ -78,6 +78,15 @@ mcp_arguments :: proc(name:string,value:json.Value)->(mcp.Control_Arguments,bool
 		case "title":
 			s,typed:=v.(json.String);if !typed || name!="chains.create" || len(s)<1 || len(s)>500 || strings.trim_space(string(s))=="" do return {},false
 			args.title=string(s)
+		case "coordinator_agent_id","bridge_id","provider","provider_profile","model":
+			s,typed:=v.(json.String);if !typed || name!="chains.create" || len(s)>256 || strings.trim_space(string(s))!=string(s) do return {},false
+			switch key {
+			case "coordinator_agent_id":args.coordinator_agent_id=string(s)
+			case "bridge_id":args.bridge_id=string(s)
+			case "provider":args.provider=string(s)
+			case "provider_profile":args.provider_profile=string(s)
+			case "model":args.model=string(s)
+			}
 		case "task_id":
 			s,typed:=v.(json.String);if !typed || (name!="tasks.comment" && name!="tasks.get") || len(s)<=5 || len(s)>256 || !strings.has_prefix(string(s),"task_") || !vault.valid_id_value(string(s)) do return {},false
 			args.task_id=string(s)
@@ -123,7 +132,7 @@ mcp_arguments :: proc(name:string,value:json.Value)->(mcp.Control_Arguments,bool
 	case "tasks.list":return args,args.chain_id!=""
 	case "tasks.comment":return args,args.chain_id!="" && args.task_id!="" && args.request_id!="" && args.body!=""
 	case "chains.get","events.wait":return args,args.chain_id!=""
-	case "chains.create":return args,args.title!=""
+	case "chains.create":return args,args.title!="" && mcp.control_coordinator_arguments_ok(args)
 	case "chains.list":return args,true
 	}
 	return {},false
@@ -174,7 +183,7 @@ mcp_control_handler :: proc(ctx:rawptr,req:Request)->(response:Response) {
 		if !ok do return mcp_rpc_error(id,-32602,"Invalid initialization")
 		protocol:="2025-11-25"
 		if requested=="2025-03-26" || requested=="2025-06-18" || requested=="2024-11-05" do protocol=string(requested)
-		return mcp_rpc_result(id,json.Object{"protocolVersion"=json.String(protocol),"capabilities"=json.Object{"tools"=json.Object{}},"serverInfo"=json.Object{"name"=json.String("heimdall-control"),"version"=json.String("0.2.0")},"instructions"=json.String("Act as the connected user within the tools and permissions advertised by tools/list. Task and runtime writes can dispatch work on owned machines. Reuse a stable request_id with identical arguments after ambiguous task/runtime-write results; refresh tasks.get or instances.get revision, or chains.get configuration_revision before a new update. Runtime acceptance is not readiness; poll instances.operations. Hold and checkpoint active task leases before lifecycle changes. No messaging, external leases or review approval authority. Poll events.wait only while actively monitoring with a stopping condition and budget; no background wake or durable replay. Never automatically retry an ambiguous chains.create result. Default decryption requires an approved unlocked device; hosted decryption requires explicit connection consent.")})
+		return mcp_rpc_result(id,json.Object{"protocolVersion"=json.String(protocol),"capabilities"=json.Object{"tools"=json.Object{}},"serverInfo"=json.Object{"name"=json.String("heimdall-control"),"version"=json.String("0.2.0")},"instructions"=json.String("Act as the connected user within the tools and permissions advertised by tools/list. Task and runtime writes can dispatch work on owned machines. Reuse a stable request_id with identical arguments after ambiguous task/runtime-write results; refresh tasks.get or instances.get revision, or chains.get configuration_revision before a new update. Runtime acceptance is not readiness; poll instances.operations. Hold and checkpoint active task leases before lifecycle changes. Chain creation launches a fresh coordinator on an explicitly selected bridge. No messaging, external leases or review approval authority. Poll events.wait only while actively monitoring with a stopping condition and budget; no background wake or durable replay. Never automatically retry an ambiguous chains.create result. Default decryption requires an approved unlocked device; hosted decryption requires explicit connection consent.")})
 	case "ping":return mcp_rpc_result(id,json.Object{})
 	case "tools/list":
 		tools,err:=json.parse_string(#load("mcp_tools.json",string),parse_integers=true,allocator=context.temp_allocator)
@@ -197,7 +206,10 @@ mcp_control_handler :: proc(ctx:rawptr,req:Request)->(response:Response) {
 		for text in ([]string{args.task_write.title,args.task_write.description,args.task_write.goal,args.task_write.reason}) do if text!="" do crypto.zero_explicit(raw_data(text),len(text))
 		for text in args.task_write.acceptance do if text!="" do crypto.zero_explicit(raw_data(text),len(text))
 	}
-	if !nok || !args_ok do return mcp_rpc_error(id,-32602,"Unknown tool or invalid arguments")
+	if !nok || !args_ok {
+		if nok && string(name)=="chains.create" do return mcp_rpc_error(id,-32602,"chains.create requires title, coordinator_agent_id (agt_...), bridge_id (brg_...) and valid optional provider settings")
+		return mcp_rpc_error(id,-32602,"Unknown tool or invalid arguments")
+	}
 	if !mcp.scope_allows_tool(view.scope,string(name)) do return mcp_tool_result(id,"scope_missing",true)
 	args.include_configuration=mcp.scope_allows_tool(view.scope,"chains.configure")
 	encoded_id,_:=json.marshal(id,allocator=context.temp_allocator)
@@ -271,12 +283,13 @@ mcp_control_handler :: proc(ctx:rawptr,req:Request)->(response:Response) {
 		if !sealed_ok do return mcp_tool_result(id,"decryption_unavailable",true)
 		// No remote retry: this single owner-authorized write may have committed
 		// even if the client disconnects before receiving its result.
-		chain_id,code:=mcp.control_create(h.delegation.service,h.delegation.grant_directory,raw,view,title,description,h.create,h.create_ctx)
+		if h.create==nil do return mcp_tool_result(id,"request_failed",true)
+		chain_id,instance_id,code:=h.create(h.create_ctx,raw,view,args,title,description)
 		if code=="invalid_token" do return mcp_unauthorized(h)
-		if code!="" do return mcp_tool_result(id,code,true)
-		encoded,_:=json.marshal(struct {chain_id:string,title,description:string,status:string}{chain_id,args.title,args.description,"active"},allocator=context.temp_allocator)
+		if code!="" && chain_id=="" do return mcp_tool_result(id,code,true)
+		encoded,_:=json.marshal(struct {chain_id,title,description,status,coordinator_agent_id,coordinator_agent_instance_id,error:string}{chain_id,args.title,args.description,"draft",args.coordinator_agent_id,instance_id,code},allocator=context.temp_allocator)
 		defer if len(encoded)>0 do crypto.zero_explicit(raw_data(encoded),len(encoded))
-		return mcp_tool_result(id,string(encoded),false)
+		return mcp_tool_result(id,string(encoded),code!="")
 	}
 	if !mcp.control_result_ok(data,result.response) do return mcp_tool_result(id,"decryption_unavailable",true)
 	if string(name)=="events.wait" {
