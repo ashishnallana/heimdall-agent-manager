@@ -35,6 +35,12 @@ transfer_directory_tx :: proc(tx: iface.MCP_Transaction, ctx: rawptr) -> domain.
 	g, found, err := tx.get(tx.ctx, "grant", op.grant_id)
 	if err.code != .None do return err
 	if !found || g.owner != op.owner || g.revoked do return {}
+	// Full delegation liveness (design §9): the grant's family and client must
+	// not be revoked (refresh-theft revokes only the family) and the account
+	// authority must still hold, else every data-path request fails 401.
+	live, lerr := mcp.delegation_live(&op.graph.mcp_delegation, tx, mcp.grant_claim_bindings(g))
+	if lerr.code != .None do return lerr
+	if !live do return {}
 	dir, verified, verr := mcp.verified_grant_directory(&op.graph.mcp_vault_view, g)
 	if verr.code != .None || !verified do return {}
 	op.dir = new_clone(dir, context.temp_allocator)
@@ -52,8 +58,9 @@ mcp_transfer_directory :: proc(user: rawptr, owner, grant_id: string) -> (^vault
 	return op.dir, op.ok
 }
 
-// mcp_transfer_grant_live: the transfer's grant still exists for its owner, is not
-// revoked and its directory still verifies.
+// mcp_transfer_grant_live: the transfer's grant still exists for its owner, its
+// grant/family/client are unrevoked, the account authority holds and its
+// directory still verifies.
 mcp_transfer_grant_live :: proc(ctx: rawptr, x: domain.Mcp_Transfer) -> bool {
 	_, ok := mcp_transfer_directory(ctx, x.owner_user_id, x.grant_id)
 	return ok
