@@ -5,6 +5,7 @@ import "core:strings"
 import "core:sync"
 import contracts "odin_test:contracts"
 import domain "odin_test:hub/domain"
+import dbt "odin_test:hub/platform/dbtelemetry"
 import iface "odin_test:hub/repository/iface"
 import platform "odin_test:hub/platform"
 import agent "odin_test:hub/service/agent"
@@ -911,10 +912,6 @@ event_exists :: proc(svc: ^Service, task: domain.Task, kind: string) -> bool {
 	return false
 }
 
-// after_chain_change is the one place every chain mutation funnels through
-// inside its UoW: refold the chain's projections, materialise ready workflow
-// stages, trigger on_output workflow spawns, rebuild the mechanical chain
-// summary on task transitions, then run the matcher.
 // release_task_blocks_in_uow clears a `blocked_on {kind: "task", ref}` badge
 // once the referenced task is done: the hub records `answered` on the agent's
 // behalf, so the task is ready again without a human. Covers both a ref that
@@ -946,30 +943,54 @@ release_task_blocks_in_uow :: proc(svc: ^Service, u: ^Uow, tasks: []domain.Task)
 	return released, true, domain.Domain_Error{}
 }
 
+// after_chain_change is the one place every chain mutation funnels through
+// inside its UoW: refold the chain's projections, materialise ready workflow
+// stages, trigger on_output workflow spawns, rebuild the mechanical chain
+// summary on task transitions, then run the matcher.
+//
+// Each phase's in-transaction time and statement count is recorded
+// (heimdall_db_phase_*, and the db_slow_request / db_slow_scope breakdown),
+// including on an early error return.
 after_chain_change :: proc(svc: ^Service, u: ^Uow, chain_id: domain.Task_Chain_ID, owner: domain.User_ID, trigger: Trigger) -> (bool, domain.Domain_Error) {
+	phases: dbt.Phase_Set
+	defer dbt.phase_flush(&phases)
 	chain, ok, err := iface.taskchain_get_chain(svc.repo, chain_id)
 	if !ok do return false, err
+	mark := dbt.phase_mark()
 	requirement_tasks, req_err := iface.taskchain_list_tasks_by_chain(svc.repo, chain_id, owner)
-	if req_err.code != .None do return false, req_err
+	if req_err.code != .None { dbt.phase_record(&phases, .Requirements, mark); return false, req_err }
 	for task in requirement_tasks {
-		if rok, rerr := requirements_reconcile_in_uow(svc, u, task); !rok do return false, rerr
+		if rok, rerr := requirements_reconcile_in_uow(svc, u, task); !rok { dbt.phase_record(&phases, .Requirements, mark); return false, rerr }
 	}
+	dbt.phase_record(&phases, .Requirements, mark)
 	// Settle run/task dependencies together; a successful run can release
 	// another run or a ticket in this same transaction.
 	for pass := 0; pass < 130; pass += 1 {
+		mark = dbt.phase_mark()
 		tasks, rok, rerr := refold_chain(svc, u, chain)
+		dbt.phase_record(&phases, .Refold, mark)
 		if !rok do return false, rerr
+		mark = dbt.phase_mark()
 		_, uok, uerr := release_task_blocks_in_uow(svc, u, tasks)
-		if !uok do return false, uerr
-		if tok, terr := trigger_on_output_workflows_in_uow(svc, u, chain, tasks); !tok do return false, terr
+		if !uok { dbt.phase_record(&phases, .Release_Workflow, mark); return false, uerr }
+		if tok, terr := trigger_on_output_workflows_in_uow(svc, u, chain, tasks); !tok { dbt.phase_record(&phases, .Release_Workflow, mark); return false, terr }
 		changed, wok, werr := workflow_reconcile_chain(svc, u, chain)
+		dbt.phase_record(&phases, .Release_Workflow, mark)
 		if !wok do return false, werr
 		if !changed do break
 	}
-	if _, ok, err := refold_chain(svc, u, chain); !ok do return false, err
+	mark = dbt.phase_mark()
+	_, rok, rerr := refold_chain(svc, u, chain)
+	dbt.phase_record(&phases, .Refold, mark)
+	if !rok do return false, rerr
 	#partial switch trigger {
 	case .Lease_Released, .Lease_Expired, .Review_Posted, .Task_Reopened, .Task_Cancelled, .Chain_Published, .Task_Published:
+		mark = dbt.phase_mark()
 		rebuild_chain_summary_in_uow(svc, u, chain)
+		dbt.phase_record(&phases, .Summary, mark)
 	}
-	return match_chain_in_uow(svc, u, chain, trigger)
+	mark = dbt.phase_mark()
+	mok, merr := match_chain_in_uow(svc, u, chain, trigger)
+	dbt.phase_record(&phases, .Match, mark)
+	return mok, merr
 }

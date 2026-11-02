@@ -23,9 +23,11 @@ test_start_agent_card_failure_preserves_block_and_retry_dispatches :: proc(t: ^t
 	h.engine.uow_factory = &uow
 	h.engine.attention = &h.svc.attention_notifier
 	h.svc.uow_factory = &uow
-	_, _, _ = iface.bridge_save_bridge(&bridges, domain.Bridge{bridge_id = "br_anr", owner_user_id = PH_OWNER, status = .Offline})
+	// Offline placement has its own card. Start agent is reserved for process
+	// failure/explicit-stop consent, separate from placement outages.
+	_, _, _ = iface.bridge_save_bridge(&bridges, domain.Bridge{bridge_id = "br_anr", owner_user_id = PH_OWNER, status = .Online})
 	_, _ = iface.taskchain_upsert_fleet(&h.tasks, domain.Task_Chain_Fleet{task_chain_id = PH_CHAIN, agent_id = "agt_anr", bridge_id = "br_anr", capacity = 1, roles_json = "[\"worker\"]"})
-	_, _, _ = iface.agent_save_instance(&h.agents, domain.Agent_Instance{agent_instance_id = "inst_anr", agent_id = "agt_anr", owner_user_id = PH_OWNER, chain_id = string(PH_CHAIN), bridge_id = "br_anr", provider = "claude", model = "claude-opus-5-5", runtime_status = "stopped"})
+	_, _, _ = iface.agent_save_instance(&h.agents, domain.Agent_Instance{agent_instance_id = "inst_anr", agent_id = "agt_anr", owner_user_id = PH_OWNER, chain_id = string(PH_CHAIN), bridge_id = "br_anr", provider = "claude", model = "claude-opus-5-5", runtime_status = "stopped", stopped_by = "user"})
 	task := ph_task("task_anr", .In_Progress, "2026-10-01T02:00:00Z")
 	task.brief_json = "{\"goal\":\"g\",\"review_roles\":[]}"
 	task.state = .Backlog
@@ -41,13 +43,6 @@ test_start_agent_card_failure_preserves_block_and_retry_dispatches :: proc(t: ^t
 	testing.expect(t, !accepted && acc_err.code == .Forbidden, "agent cannot execute user's Start action")
 	_, accepted, acc_err = accept_card(&h.svc, auth, cid, Card_Decision{expected_block = "stale"})
 	testing.expect(t, !accepted && acc_err.code == .Conflict, "stale browser block rejected")
-	_, accepted, acc_err = accept_card(&h.svc, auth, cid)
-	testing.expect(t, !accepted && strings.contains(acc_err.message, "offline"), "failed start returned to UI")
-	c, _ = ph_card(t, &h, cid)
-	testing.expect(t, c.status == domain.CARD_STATUS_PENDING && strings.contains(c.rationale, "offline"), "failure keeps actionable card with reason")
-	bridge, _, _ := iface.bridge_get_bridge(&bridges, "br_anr")
-	bridge.status = .Online
-	_, _, _ = iface.bridge_save_bridge(&bridges, bridge)
 	h.engine.bridge_command_sink = project.Bridge_Command_Sink{send_runtime_command = proc(ctx: rawptr, cmd: project.Runtime_Command) -> (bool, domain.Domain_Error) {
 		return false, domain.domain_error(.Internal_Error, "bridge launch refused")
 	}}

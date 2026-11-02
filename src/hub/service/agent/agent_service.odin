@@ -2604,15 +2604,18 @@ bootstrap_memory_applies_agent :: proc(m: domain.Memory, agent: domain.Agent, ow
 
 
 // A disabled bridge retains its running agents but accepts no new launches.
-// Entitlement refresh can clear a suspension; read the current flag afterwards.
+// Callers may hold the main write UoW (taskv2 JIT launch), so the gate reads only
+// the current plan_disabled_at in that transaction. Startup, billing webhooks and
+// the reaper own the flag (app/bridge_plans.odin); billing is consulted only to
+// describe an existing suspension, and that lookup is read-only.
 require_launch_bridge_enabled :: proc(service: ^Agent_Service, bridge: domain.Bridge) -> domain.Domain_Error {
-	if service.entitlements.lookup == nil && bridge.plan_disabled_at == "" do return {}
-	entitlements, err := domain.lookup_entitlements(service.entitlements, string(bridge.owner_user_id))
-	if err.code != .None do return err
+	if service.entitlements.lookup == nil && bridge.plan_disabled_at == "" do return {} // isolated services have no plan policy
 	current, found, current_err := iface.bridge_get_bridge(service.bridges, bridge.bridge_id)
 	if !found do return current_err
 	defer domain.bridge_destroy(&current)
 	if current.plan_disabled_at == "" do return {}
+	entitlements, err := domain.lookup_entitlements(service.entitlements, string(bridge.owner_user_id))
+	if err.code != .None do return err
 	count, count_err := iface.bridge_count_active_by_owner(service.bridges, bridge.owner_user_id)
 	if count_err.code != .None do return count_err
 	return domain.entitlement_limit_error(service.entitlements, string(bridge.owner_user_id), "max_bridges", entitlements.max_bridges, count)

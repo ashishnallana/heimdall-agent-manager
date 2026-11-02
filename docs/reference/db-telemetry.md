@@ -62,6 +62,8 @@ Disjoint per-thread intervals: `app_lock_wait`, `conn_wait` and `exec` never ove
 | `heimdall_db_scope_seconds_total` | counter | `scope, component` | DB time per scope by disjoint component |
 | `heimdall_http_request_db_seconds_total` | counter | `route, component` | The same for plain HTTP dispatch, by route **pattern** |
 | `heimdall_db_slow_log_dropped_total` | counter | `reason=slow\|sample` | Records dropped by the rate limiter |
+| `heimdall_db_phase_seconds` | histogram (hold buckets) | `phase` | In-transaction time of one taskv2 `after_chain_change` phase, observed once per phase per call (refold sums its settle passes). Contains the phase's waits and execution; never add to the components. |
+| `heimdall_db_phase_statements_total` | counter | `phase` | Statement executions (same definition as `heimdall_sqlite_statements_total`) inside that phase |
 
 Label enums:
 
@@ -73,6 +75,24 @@ Label enums:
 - **`scope`:** `http ws timer merge bridge_log shell scrape other`.
 - **`rw`:** `read write`. A UoW counts as `write` if it executed an insert, update or delete step.
 - **`outcome`:** `commit rollback commit_failed begin_failed`.
+- **`phase`:** `requirements refold release_workflow summary match` (see §2a).
+
+### 2a. taskv2 write phases
+
+Every chain write (`tasks/create`, `lease/submit`, review, publish, fleet change, …) runs `after_chain_change` (`src/hub/service/taskv2/service.odin`) inside its write UoW, so its cost is `uow_tx` hold time. The phases are:
+
+| `phase` | Code |
+|---|---|
+| `requirements` | `taskchain_list_tasks_by_chain` + `requirements_reconcile_in_uow` per task |
+| `refold` | every `refold_chain` call: the settle-loop passes and the final pass |
+| `release_workflow` | `release_task_blocks_in_uow`, `trigger_on_output_workflows_in_uow`, `workflow_reconcile_chain` per settle pass |
+| `summary` | `rebuild_chain_summary_in_uow` (only on the triggers that rebuild it) |
+| `match` | `match_chain_in_uow` |
+
+- A phase is observed only when it ran, also on an early error return. `calls` (slow line) counts how many times it ran; `refold` usually runs 2–3 times.
+- The statement count is the delta of the thread's statement counter between the phase's start and end, so no SQL is added; the timer is the same vDSO clock. A `Phase_Set` lives on the caller's stack: no allocation. In `off` mode the marks are untimed and nothing is recorded.
+- A phase that triggers a nested `after_chain_change` on the same thread contains the nested call's time and statements, and the nested call observes its own phases too.
+- Phases do not cover everything in the UoW (the verb's own event writes, `begin`/`commit`): compare their sum with `heimdall_db_lock_hold_seconds{lock="uow_tx"}`.
 
 The HTTP request histogram gains one bound (`le="0.0025"`) in `basic` mode, and all legacy bounds are kept. Never compute a `histogram_quantile` across that layout change.
 
@@ -89,6 +109,7 @@ Series are created lazily: only exercised label sets exist.
 | tx | ~8 live × 13 ≈ 104 |
 | site counters | ≤ 3 × 261 |
 | http db | routes × ≤ 3 non-zero components |
+| phase | 5 × 13 + 5 = 70 |
 
 That totals well under the plan's 5 000-series budget (smaller than the plan's estimate because of the 10-bucket layouts). Post-deploy check (read-only):
 
@@ -102,6 +123,14 @@ curl -s localhost:9464/metrics | grep -c '^heimdall_db_\|^heimdall_sqlite_exec\|
 db_slow_request reason=slow|sample route="<pattern>" method=GET status=2xx request_ns=… app_lock_wait_ns=… conn_wait_ns=… exec_ns=… busy_wait_ns=0 steps=… statements=… tx_count=… tx_hold_ns=… busy_errors=… dropped_since_last=… request_id=<≤64 chars [A-Za-z0-9_.:-]> top1=<conn>/<op>/<file>.odin:<line>/exec_ns=…/wait_ns=… …
 db_slow_scope reason=… scope=timer|merge|bridge_log|shell|scrape elapsed_ns=… (same component fields)
 ```
+
+When the request or scope ran `after_chain_change`, each phase that ran is appended (same fields for both record kinds):
+
+```text
+… phase_requirements=ns=…/statements=…/calls=1 phase_refold=ns=…/statements=…/calls=3 phase_release_workflow=… phase_summary=… phase_match=…
+```
+
+Phase totals overlap `exec_ns`, the waits and `tx_hold_ns`; read them as the split of the UoW, not as extra time.
 
 - Records never include SQL text, parameters, query strings, bodies, path parameters or user/agent ids.
 - `request_id` is client-supplied: it is a correlation hint only, and is filtered and truncated.
@@ -150,6 +179,10 @@ sum by (op) (rate(heimdall_sqlite_vm_steps_total{conn="main"}[5m])) / sum by (op
 sum(topk(3, sum by (site) (increase(heimdall_sqlite_site_exec_seconds_total{conn="main"}[1h]))))
   / sum(increase(heimdall_sqlite_site_exec_seconds_total{conn="main"}[1h]))
 topk(10, sum by (site) (increase(heimdall_sqlite_site_fullscan_steps_total{conn="main"}[1h])))
+
+# taskv2 write phases: p95 per phase, and mean statements per call
+histogram_quantile(0.95, sum by (le, phase) (rate(heimdall_db_phase_seconds_bucket[5m])))
+sum by (phase) (rate(heimdall_db_phase_statements_total[5m])) / sum by (phase) (rate(heimdall_db_phase_seconds_count[5m]))
 
 # Busy/locked errors and IO proxy
 sum by (conn, code) (rate(heimdall_sqlite_errors_total{code=~"busy.*|locked"}[5m]))
