@@ -236,6 +236,12 @@ test_transfer_hub_blind_15_mib_round_trip :: proc(t: ^testing.T) {
 	testing.expect_value(t, of.reason, "")
 	testing.expect_value(t, del.state, domain.MCP_TRANSFER_DELIVERED)
 	testing.expect(t, !del.open_verified)
+
+	// Artifact deletion removes its receipt and ends the download transfer (410).
+	query_text(&f, strings.concatenate({"DELETE FROM artifacts WHERE artifact_id='", x.artifact_id, "';"}, context.temp_allocator))
+	testing.expect_value(t, query_text(&f, "SELECT COUNT(*) FROM artifact_transfer_receipts;"), "0")
+	gone, _ := transfer_authenticate(&f.svc, dbearer, d.transfer_id)
+	testing.expect_value(t, transfer_fetch_begin(&f.svc, gone).reason, "artifact_gone")
 }
 
 @(private = "file")

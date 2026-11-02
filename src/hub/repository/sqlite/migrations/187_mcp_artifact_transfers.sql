@@ -42,3 +42,8 @@ CREATE TABLE IF NOT EXISTS artifact_transfer_receipts (
   attestation_token TEXT NOT NULL, ciphertext_sha256 TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
+-- The receipt row is deleted with its artifact (every delete path, §11).
+CREATE TRIGGER IF NOT EXISTS artifact_transfer_receipts_on_artifact_delete AFTER DELETE ON artifacts
+BEGIN
+  DELETE FROM artifact_transfer_receipts WHERE artifact_id = old.artifact_id;
+END;
