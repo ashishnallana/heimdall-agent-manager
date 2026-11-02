@@ -21,6 +21,7 @@ Bridge_Ext_Instance_State :: struct {
 	last_event_at_ms:  i64,
 	events_accepted:   int,
 	events_dropped:    int,
+	token_usage:       Bridge_Ext_Token_Usage, // extension_token_usage.odin
 }
 
 Bridge_Ext_Ingest_Result :: struct {
@@ -127,7 +128,10 @@ bridge_ext_ingest :: proc(rec: Bridge_Local_Agent_Token_Record, params: string, 
 		}
 		s.last_event_at_ms = now
 		s.events_accepted += 1
+		token_changed := bridge_ext_token_usage_apply(&s.token_usage, ev, now)
 		sync.mutex_unlock(&bridge_ext_mutex)
+		// Only the throttled snapshot goes upstream (agent_instance_status.token_usage).
+		if token_changed do bridge_ext_token_enqueue_due(now, instance_id)
 		res.accepted += 1
 	}
 	return
@@ -160,6 +164,7 @@ bridge_ext_status_json :: proc(instance_id: string) -> string {
 	last: i64
 	accepted, dropped, queued: int
 	caps := make([dynamic]string, context.temp_allocator)
+	tokens_json, session_id: string
 	for s in bridge_ext_states {
 		if s.agent_instance_id != instance_id do continue
 		provider = strings.clone(s.provider, context.temp_allocator)
@@ -168,6 +173,10 @@ bridge_ext_status_json :: proc(instance_id: string) -> string {
 		accepted = s.events_accepted
 		dropped = s.events_dropped
 		for c in s.capabilities do append(&caps, strings.clone(c, context.temp_allocator))
+		tb := strings.builder_make(context.temp_allocator)
+		bridge_ext_token_usage_write_json(&tb, s.token_usage)
+		tokens_json = strings.to_string(tb)
+		session_id = strings.clone(s.token_usage.session_id, context.temp_allocator)
 		break
 	}
 	sync.mutex_unlock(&bridge_ext_mutex)
@@ -186,7 +195,12 @@ bridge_ext_status_json :: proc(instance_id: string) -> string {
 	}
 	strings.write_string(&b, ",\"activity_status\":\""); bridge_local_write_json_string(&b, activity)
 	strings.write_string(&b, "\",\"activity_source\":\""); bridge_local_write_json_string(&b, source)
-	strings.write_string(&b, "\"}")
+	// token_usage is null until the instance sent any event; session_id is the
+	// provider session its counters belong to (local only, never sent upstream).
+	strings.write_string(&b, "\",\"session_id\":\""); bridge_local_write_json_string(&b, session_id)
+	strings.write_string(&b, "\",\"token_usage\":")
+	strings.write_string(&b, tokens_json if tokens_json != "" else "null")
+	strings.write_string(&b, "}")
 	return strings.to_string(b)
 }
 

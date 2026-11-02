@@ -80,6 +80,7 @@ Ext_Event :: struct {
 	file_path:          string, // file.edit only
 	activity_state:     string, // activity only (payload.state)
 	session_phase:      string, // session only (payload.phase)
+	session_source:     string, // session only (payload.source: startup|resume|clear|compact)
 	notification_type:  string, // notification only (payload.type | payload.notification_type)
 	compaction_phase:   string, // compaction only (payload.phase: "pre" | "post")
 	compaction_trigger: string, // compaction only (payload.trigger, e.g. "manual" | "auto")
@@ -155,7 +156,7 @@ ext_event_destroy :: proc(ev: ^Ext_Event) {
 	delete(ev.provider); delete(ev.ext_version); delete(ev.ts); delete(ev.session_id)
 	delete(ev.transcript_path); delete(ev.agent_id); delete(ev.agent_type); delete(ev.tool_name)
 	delete(ev.tool_use_id); delete(ev.file_path); delete(ev.activity_state); delete(ev.notification_type)
-	delete(ev.session_phase); delete(ev.usage.source)
+	delete(ev.session_phase); delete(ev.session_source); delete(ev.usage.source)
 	delete(ev.compaction_phase); delete(ev.compaction_trigger)
 	for c in ev.capabilities do delete(c)
 	delete(ev.capabilities)
@@ -272,6 +273,7 @@ ext_parse_event :: proc(raw: string) -> (ev: Ext_Event, err: Ext_Error) {
 	#partial switch kind {
 	case .Session:
 		ev.session_phase = ext_obj_string(payload, "phase")
+		ev.session_source = ext_obj_string(payload, "source")
 	case .File_Edit:
 		ev.file_path = ext_obj_string(payload, "file_path")
 		if ev.file_path == "" {

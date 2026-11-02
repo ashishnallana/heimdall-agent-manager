@@ -8,6 +8,20 @@ or forward raw events. No lifecycle or
 completion event has a durable exception. The local instance metadata cache is
 bounded to 256 instances; native tool state retains its existing bounded reducer.
 
+## Token usage snapshot
+
+The one derived value that goes upstream from extension events is a per-instance
+token snapshot (`src/bridge/extension_token_usage.odin`): tool calls, the sum of
+`tool.end` `metrics.est_tokens`, the latest provider `usage.context_tokens` with
+its source (and window, when reported), `output_tokens_total`, a compaction count
+(a context drop of 50% or more) and its update time. Counters reset on a session
+start (except `source: compact`) and on a new provider session id. It rides as an
+optional `token_usage` member of `agent_instance_status`, which older hubs ignore;
+a dedicated frame type would be refused by them as `unknown_frame_type`. Pushes
+are bounded to one per instance per 10 seconds, or sooner when context moves by
+5 percentage points of the window (200k when unreported), and only when the
+snapshot changed. `ham-ctl extension status` shows the same object locally.
+
 ## Open conversations
 
 The UI sends version 2 subscription views containing a parent conversation ID

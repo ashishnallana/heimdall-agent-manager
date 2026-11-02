@@ -757,6 +757,8 @@ bridge_hub_runtime_loop :: proc(conn: ^ws.Connection) {
 		// Flush any status transitions applied on background threads (e.g. a
 		// pty-host ChildExited) so "stopped"/"unreachable" reaches the hub now,
 		// not on the next heartbeat.
+		// Token snapshots held back by the 10 s interval go out once it passes.
+		_ = bridge_ext_token_enqueue_due(bridge_runtime_now_ms())
 		bridge_runtime_drain_status_pushes(conn)
 		bridge_blockers_drain_outgoing(conn)
 		bridge_credential_reauth_drain(conn)
@@ -3274,6 +3276,9 @@ bridge_instance_status_json :: proc(instance_id: string) -> string {
 	bridge_runtime_write_json_string(&b, inst.activity_source)
 	strings.write_string(&b, "\"")
 	bridge_runtime_write_instance_error(&b, inst)
+	// Optional small snapshot (extension_token_usage.odin); hubs that predate it
+	// ignore the unknown member.
+	bridge_ext_token_usage_field(&b, inst.agent_instance_id)
 	strings.write_string(&b, "}")
 	return strings.to_string(b)
 }
