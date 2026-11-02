@@ -39,6 +39,60 @@ Transfer_Service :: struct {
 	data_path_max:       i64,  // 0 = contracts default
 	commit_max:          i64,
 	staged_global_max:   i64,
+	// In-memory per-owner / per-grant limits (§7); lost on restart, which only resets
+	// the windows.
+	limits_mu:     sync.Mutex,
+	owner_gets:    map[string]int,
+	grant_windows: map[string]Transfer_Rate_Window,
+}
+
+Transfer_Rate_Window :: struct {
+	begin_hour_start, data_minute_start: i64,
+	begins, data_requests: int,
+}
+
+TRANSFER_BEGINS_PER_HOUR      :: 10
+TRANSFER_DATA_PER_MINUTE      :: 60
+TRANSFER_MAX_GETS_PER_OWNER   :: 2
+
+// transfer_rate_allow counts one *_begin (begin=true) or one data-path request for a
+// grant and reports whether it is within the per-grant window.
+transfer_rate_allow :: proc(s: ^Transfer_Service, grant_id: string, begin: bool) -> bool {
+	now := now_ms(s)
+	sync.mutex_lock(&s.limits_mu); defer sync.mutex_unlock(&s.limits_mu)
+	if s.grant_windows == nil do s.grant_windows = make(map[string]Transfer_Rate_Window)
+	w, found := s.grant_windows[grant_id]
+	if begin {
+		if now - w.begin_hour_start >= 3_600_000 { w.begin_hour_start = now; w.begins = 0 }
+		if w.begins >= TRANSFER_BEGINS_PER_HOUR do return false
+		w.begins += 1
+	} else {
+		if now - w.data_minute_start >= 60_000 { w.data_minute_start = now; w.data_requests = 0 }
+		if w.data_requests >= TRANSFER_DATA_PER_MINUTE do return false
+		w.data_requests += 1
+	}
+	if found do s.grant_windows[grant_id] = w
+	else do s.grant_windows[strings.clone(grant_id)] = w
+	return true
+}
+
+// transfer_owner_get_acquire admits at most 2 concurrent ciphertext GETs per owner.
+transfer_owner_get_acquire :: proc(s: ^Transfer_Service, owner: string) -> bool {
+	sync.mutex_lock(&s.limits_mu); defer sync.mutex_unlock(&s.limits_mu)
+	if s.owner_gets == nil do s.owner_gets = make(map[string]int)
+	n, found := s.owner_gets[owner]
+	if n >= TRANSFER_MAX_GETS_PER_OWNER do return false
+	if found do s.owner_gets[owner] = n + 1
+	else do s.owner_gets[strings.clone(owner)] = 1
+	return true
+}
+transfer_owner_get_release :: proc(s: ^Transfer_Service, owner: string) {
+	sync.mutex_lock(&s.limits_mu); defer sync.mutex_unlock(&s.limits_mu)
+	if n, found := s.owner_gets[owner]; found && n > 0 do s.owner_gets[owner] = n - 1
+}
+
+rate_limited :: proc() -> Transfer_Fail {
+	return {code = .Rate_Limited, reason = "rate_limited", retryable = true, retry_after_ms = contracts.ARTIFACT_TRANSFER_RETRY_AFTER_MS}
 }
 
 // Transfer_Fail is a stable, machine-readable failure. reason is the MCP/HTTP error
@@ -177,6 +231,7 @@ transfer_upload_begin :: proc(s: ^Transfer_Service, who: Transfer_Caller, in_: U
 	}
 	vid, epoch, _, vok := current_vault(s, who.owner, who.grant_id)
 	if !vok do return {}, "", fail(.Validation_Failed, "vault_required")
+	if !transfer_rate_allow(s, who.grant_id, true) do return {}, "", rate_limited()
 	active, staged, uerr := s.repo.owner_usage(s.repo.ctx, who.owner, domain.MCP_TRANSFER_UPLOAD)
 	if uerr.code != .None do return {}, "", fail(.Internal_Error, "internal")
 	if active >= contracts.ARTIFACT_TRANSFER_MAX_UPLOADS_PER_OWNER || staged >= contracts.ARTIFACT_TRANSFER_STAGED_MAX_PER_OWNER {
@@ -219,6 +274,7 @@ transfer_download_begin :: proc(s: ^Transfer_Service, who: Transfer_Caller, requ
 		return replay_begin(s, prior, request_digest)
 	}
 	if _, _, _, vok := current_vault(s, who.owner, who.grant_id); !vok do return {}, "", fail(.Validation_Failed, "vault_required")
+	if !transfer_rate_allow(s, who.grant_id, true) do return {}, "", rate_limited()
 	active, _, uerr := s.repo.owner_usage(s.repo.ctx, who.owner, domain.MCP_TRANSFER_DOWNLOAD)
 	if uerr.code != .None do return {}, "", fail(.Internal_Error, "internal")
 	if active >= contracts.ARTIFACT_TRANSFER_MAX_DOWNLOADS_PER_OWNER {

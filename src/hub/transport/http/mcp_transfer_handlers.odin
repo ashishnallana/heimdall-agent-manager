@@ -163,6 +163,8 @@ mcp_transfer_handler :: proc(ctx: rawptr, req: Request) -> Response {
 		mcp.transfer_fail_for_revocation(h.svc, x)
 		return xfr_error(401, "revoked")
 	}
+	// Per-grant data-path rate limit (429 + Retry-After) applies before the work.
+	if !mcp.transfer_rate_allow(h.svc, x.grant_id, false) do return fail_response(mcp.rate_limited())
 
 	switch {
 	case sub == "" && req.method == "GET":
@@ -202,6 +204,8 @@ mcp_transfer_handler :: proc(ctx: rawptr, req: Request) -> Response {
 			if !rok do return xfr_error(416, "range_not_satisfiable", contracts.HTTP_Header{"Content-Range", fmt.tprintf("bytes */%d", x.ciphertext_bytes)})
 			start, end, status = s, e, 206
 		}
+		if !mcp.transfer_owner_get_acquire(h.svc, x.owner_user_id) do return fail_response(mcp.rate_limited())
+		defer mcp.transfer_owner_get_release(h.svc, x.owner_user_id)
 		if f := mcp.transfer_fetch_begin(h.svc, x); !mcp.transfer_ok(f) do return fail_response(f)
 		// Assembled from <= 1 MiB substr() windows; never a full-value SQLite copy.
 		body := make([]byte, int(end - start + 1), context.temp_allocator)

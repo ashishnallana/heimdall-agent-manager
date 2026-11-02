@@ -342,6 +342,17 @@ test_transfer_rejections_and_limits :: proc(t: ^testing.T) {
 	testing.expect_value(t, q3.reason, "quota_exceeded")
 	testing.expect(t, q3.retryable)
 
+	// Per-grant begin rate limit (10/hour) and per-owner concurrent GETs (2).
+	for i in 0 ..< TRANSFER_BEGINS_PER_HOUR + 1 {
+		ok := transfer_rate_allow(&f.svc, "grant_rl", true)
+		testing.expectf(t, ok == (i < TRANSFER_BEGINS_PER_HOUR), "begin %d", i)
+	}
+	testing.expect(t, transfer_owner_get_acquire(&f.svc, "user_a") && transfer_owner_get_acquire(&f.svc, "user_a"))
+	testing.expect(t, !transfer_owner_get_acquire(&f.svc, "user_a"))
+	testing.expect(t, transfer_owner_get_acquire(&f.svc, "user_b"))
+	transfer_owner_get_release(&f.svc, "user_a")
+	testing.expect(t, transfer_owner_get_acquire(&f.svc, "user_a"))
+
 	// Global semaphores: full -> busy, nothing touched.
 	f.svc.data_path_max = 1
 	testing.expect(t, transfer_data_path_acquire(&f.svc))
