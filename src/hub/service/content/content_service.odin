@@ -14,7 +14,28 @@ import agent_service "odin_test:hub/service/agent"
 import project_service "odin_test:hub/service/project"
 import jsonx "odin_test:lib/jsonx"
 
-ARTIFACT_MAX_BYTES :: 50 * 1024 * 1024
+// ARTIFACT_MAX_BYTES is the decoded artifact content limit (contracts.ARTIFACT_MAX_CONTENT_BYTES,
+// 15 MiB). A vault-sealed value is checked against the armored storage bound of that
+// plaintext instead; see validate_artifact_content_size.
+ARTIFACT_MAX_BYTES :: contracts.ARTIFACT_MAX_CONTENT_BYTES
+
+// artifact_content_limit_bytes is the byte limit enforced on stored content: the
+// decoded limit for plain text/binary, or the armored budget of a 15 MiB plaintext
+// when the value is a vault v2 envelope (the Hub cannot see the plaintext length).
+artifact_content_limit_bytes :: proc(content: string) -> int {
+	return domain.text_cap_limit_bytes(content, ARTIFACT_MAX_BYTES)
+}
+
+// validate_artifact_content_size rejects content above the limit with an error that
+// names the actual size and the exact limit in bytes.
+validate_artifact_content_size :: proc(content: string) -> domain.Domain_Error {
+	limit := artifact_content_limit_bytes(content)
+	if len(content) <= limit do return {}
+	if domain.is_vault_armored(content) {
+		return domain.domain_error(.Validation_Failed, fmt.tprintf("artifact is too large: %d encrypted bytes, limit %d (encrypted form of %s of content)", len(content), limit, contracts.ARTIFACT_MAX_CONTENT_LABEL))
+	}
+	return domain.domain_error(.Validation_Failed, fmt.tprintf("artifact is too large: %d bytes, maximum is %s", len(content), contracts.ARTIFACT_MAX_CONTENT_LABEL))
+}
 
 // Built-in template content lives in domain (builtin_templates.odin) so the
 // template API and the agent bootstrap share one compiled-in source.
@@ -330,7 +351,7 @@ mark_read_with_receipts :: proc(s:^Content_Service, auth:contracts.Auth_Context,
 }
 message_body_for_response :: proc(s:^Content_Service, m:domain.Chat_Message)->string{ if artifact_refs_have_missing(s,m.owner_user_id,m.artifact_ids_json) do return strings.concatenate({m.body,"\n[artifact unavailable/deleted]"}); return m.body }
 
-create_artifact :: proc(s:^Content_Service, auth:contracts.Auth_Context,input:Artifact_Input)->(domain.Artifact,bool,domain.Domain_Error){ owner,ok,err:=ownership.owner_from_auth(auth); if !ok do return {},false,err; if len(input.content)>ARTIFACT_MAX_BYTES do return {},false,domain.domain_error(.Validation_Failed,fmt.tprintf("artifact is too large; maximum size is %d MB", ARTIFACT_MAX_BYTES/(1024*1024))); if ok_ctx,ctx_err:=artifact_context_owned(s,owner,input); !ok_ctx do return {},false,ctx_err; name:=input.name; if name=="" do name=input.filename; if name=="" do name="artifact"; kind:=input.kind; if kind=="" do kind="file"; now:=platform.clock_now(s.clock); a:=domain.Artifact{artifact_id=platform.generate_id(s.ids,"art_"),owner_user_id=owner,kind=kind,name=name,description=input.description,content_type=input.content_type,size_bytes=len(input.content),content=input.content,mime=input.mime,ext=input.ext,sha256=input.sha256,origin_kind=input.origin_kind,origin_ref=input.origin_ref,agent_id=input.agent_id,agent_instance_id=input.agent_instance_id,chain_id=input.chain_id,task_id=input.task_id,project_id=input.project_id,created_at=now,updated_at=now}; return iface.content_save_artifact(s.content,a) }
+create_artifact :: proc(s:^Content_Service, auth:contracts.Auth_Context,input:Artifact_Input)->(domain.Artifact,bool,domain.Domain_Error){ owner,ok,err:=ownership.owner_from_auth(auth); if !ok do return {},false,err; if size_err:=validate_artifact_content_size(input.content); size_err.code!=.None do return {},false,size_err; if ok_ctx,ctx_err:=artifact_context_owned(s,owner,input); !ok_ctx do return {},false,ctx_err; name:=input.name; if name=="" do name=input.filename; if name=="" do name="artifact"; kind:=input.kind; if kind=="" do kind="file"; now:=platform.clock_now(s.clock); a:=domain.Artifact{artifact_id=platform.generate_id(s.ids,"art_"),owner_user_id=owner,kind=kind,name=name,description=input.description,content_type=input.content_type,size_bytes=len(input.content),content=input.content,mime=input.mime,ext=input.ext,sha256=input.sha256,origin_kind=input.origin_kind,origin_ref=input.origin_ref,agent_id=input.agent_id,agent_instance_id=input.agent_instance_id,chain_id=input.chain_id,task_id=input.task_id,project_id=input.project_id,created_at=now,updated_at=now}; return iface.content_save_artifact(s.content,a) }
 list_artifacts :: proc(s: ^Content_Service, auth: contracts.Auth_Context, filter: domain.Artifact_List_Filter) -> ([]domain.Artifact, domain.Domain_Error) {
 	owner, ok, err := ownership.owner_from_auth(auth)
 	if !ok do return nil, err

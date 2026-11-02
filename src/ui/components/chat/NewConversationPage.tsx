@@ -12,7 +12,7 @@ import { buildRouteHash, getRouteSearch, getRoutePathname } from '../../utils/ap
 import { apiErrorText } from '../../api/cookieFetch';
 import { artifactKindForFile, artifactLinkFromResponse, artifactMimeForFile, artifactUploadName, clipboardFilesFromEvent } from '../../utils/artifactUpload';
 import { isVaultArmored, getActiveVaultKey } from '../../utils/vaultContent';
-import { MAX_UPLOAD_BYTES } from '../ArtifactUpload';
+import { MAX_UPLOAD_BYTES, UPLOAD_TOO_LARGE_ERROR } from '../ArtifactUpload';
 import { useIsMobile } from '../shell/responsive';
 import { useAuthUser } from '../auth/AuthUserContext';
 import { VaultText } from '../vault/VaultText';
@@ -226,7 +226,7 @@ export default function NewConversationPage({ footer, onLaunched, launchIntent }
   async function upload(file: File, localId: string = crypto.randomUUID()) {
     const name = artifactUploadName(file, 'conversation-attachment');
     const tooLarge = file.size > MAX_UPLOAD_BYTES;
-    setAttachments(rows => [...rows.filter(a => a.localId !== localId), { localId, file, name, status: tooLarge ? 'error' : 'uploading', error: tooLarge ? 'File exceeds the upload size limit.' : undefined }]);
+    setAttachments(rows => [...rows.filter(a => a.localId !== localId), { localId, file, name, status: tooLarge ? 'error' : 'uploading', error: tooLarge ? UPLOAD_TOO_LARGE_ERROR : undefined }]);
     if (tooLarge) return;
     try {
       const result = await createArtifact({ file, name, mime: artifactMimeForFile(file), kind: artifactKindForFile(file), originKind: 'conversation_chat', projectId, agentId }).unwrap();

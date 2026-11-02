@@ -96,7 +96,7 @@ ham-ctl artifact create --name design-doc --kind html-bundle --directory ./site 
 ```
 
 Optional context flags: `--task <id>`, `--chain <id>`, `--project <id>`, `--description <t>`.
-The JSON reply carries `data.artifact_id` (`art_…`); keep it. Uploads are capped at 50 MiB.
+The JSON reply carries `data.artifact_id` (`art_…`); keep it. Artifact content is capped at 15 MB: exactly 15 MiB = 15,728,640 bytes of the file or text before encryption (ham-ctl checks this before sealing; encryption and base64 overhead are budgeted separately). MCP `artifacts.create`/`get` carry at most 64 KiB of text inline; use `ham-ctl artifact create --file` for anything larger.
 Never use `--content` for large or binary payloads; use `--file`.
 
 ## 4. Verify before you deliver

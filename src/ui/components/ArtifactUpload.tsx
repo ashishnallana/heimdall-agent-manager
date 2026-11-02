@@ -14,7 +14,12 @@ const ARTIFACT_UPLOAD_SPECS = [
 ] as const;
 export const ARTIFACT_UPLOAD_ACCEPT = ARTIFACT_UPLOAD_SPECS.flatMap((spec) => [...spec.exts, spec.mime]).join(',');
 const SUPPORTED_FILE_ERROR = 'Unsupported file. Upload a supported artifact (.md, .png, .jpg, .jpeg, .csv, .html, or .htm).';
-export const MAX_UPLOAD_BYTES = 50 * 1024 * 1024; // Mirror Hub artifact payload guardrail for friendlier client-side errors.
+// Mirrors the Hub's artifact content limit (contracts.ARTIFACT_MAX_CONTENT_BYTES): 15 MB means
+// exactly 15 MiB = 15,728,640 bytes of the file as selected (before vault encryption, which the
+// Hub budgets separately). Checked client-side for a friendlier error before upload.
+export const MAX_UPLOAD_BYTES = 15 * 1024 * 1024;
+export const MAX_UPLOAD_LABEL = '15 MB';
+export const UPLOAD_TOO_LARGE_ERROR = `File is too large. Maximum upload size is ${MAX_UPLOAD_LABEL}.`;
 
 type ArtifactKindMime = { kind: string; mime: string };
 export type ClipboardUploadResult = { handled: boolean; link: string | null };
@@ -115,7 +120,7 @@ export function useArtifactUpload(context: ArtifactUploadContext = {}): UseArtif
   const uploadArtifact = useCallback(async ({ file, name, kind, mime, projectId, originKind, originRef }: UploadArtifactParams): Promise<string | null> => {
     if (!file) return null;
     if (file.size > MAX_UPLOAD_BYTES) {
-      setError(`File is too large. Maximum upload size is ${Math.round(MAX_UPLOAD_BYTES / (1024 * 1024))} MB.`);
+      setError(UPLOAD_TOO_LARGE_ERROR);
       return null;
     }
     if (!hasArtifactUploadAuth(session)) {

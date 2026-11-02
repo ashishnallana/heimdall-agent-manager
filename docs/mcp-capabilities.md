@@ -52,6 +52,17 @@ to 65,536 bytes. All three prose fields are sealed under the verified current
 vault epoch. The native record's `size_bytes` describes stored bytes, including
 encryption overhead; it is not a plaintext size promise.
 
+The artifact content limit itself is **15 MB, meaning exactly 15 MiB =
+15,728,640 bytes of decoded content** (raw file bytes or UTF-8 text, before
+encryption) for every channel: `POST /api/v1/artifacts`, agent-action
+`artifacts/create`, `ham-ctl artifact create` and web UI uploads. A vault-sealed
+value is checked against the armored size of a 15 MiB plaintext, and HTTP
+request framing (base64 inside JSON, multipart, metadata) is bounded separately,
+so encryption or transport overhead never shrinks or stretches the 15 MiB. The
+MCP 65,536-byte inline `content` window and 128 KiB stored read window are
+narrower transport bounds of this connector, not a different artifact limit;
+create larger or binary artifacts with `ham-ctl artifact create --file`.
+
 Optional owned `project_id`, `chain_id`, `task_id`, `agent_id` and
 `agent_instance_id` establish native associations. Native consistency checks
 apply to task/chain and instance/agent/project combinations. When only a task is
