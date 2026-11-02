@@ -1,6 +1,7 @@
 #+feature dynamic-literals
 package app
 
+import "core:encoding/base64"
 import "core:encoding/json"
 import "core:testing"
 import "core:strings"
@@ -59,6 +60,7 @@ mcp_artifact_test :: proc(t:^testing.T,g:^App_Graph,h:^http.MCP_Control_Handlers
 	json_result:=mcp_task_test_output(t,mcp_resource_heap_call(h,headers,"artifacts.create",json_input));if json_result==nil do return
 	json_row:=mcp_resource_first(t,h,headers,"artifacts.get",json.Object{"artifact_id"=json_result["resource_id"]});if json_row!=nil do testing.expect(t,json_row["content"].(json.String)==`{"ok":true,"label":"π"}`)
 	mcp_artifact_security_test(t,g,h,headers,view,raw,create)
+	mcp_artifact_bundle_test(t,g,h,headers,view)
 	del:=json.Object{"artifact_id"=id,"request_id"=json.String("artifact_delete"),"expected_revision"=row["revision"]}
 	deleted:=mcp_resource_heap_call(h,headers,"artifacts.delete",del);if mcp_task_test_output(t,deleted)==nil do return
 	_,found,_=iface.content_get_artifact(&g.repos.content,string(id));testing.expect(t,!found,"native artifact delete is permanent")
@@ -130,4 +132,45 @@ mcp_artifact_security_test :: proc(t:^testing.T,g:^App_Graph,h:^http.MCP_Control
 	for th in threads {thread.join(th);thread.destroy(th)}
 	context.allocator=allocator
 	for job in jobs do testing.expect(t,job.ok && job.len==jobs[0].len && job.result==jobs[0].result)
+}
+
+// Claude-style entry/files JSON -> MCP handler -> pack -> relay seal -> vault store.
+mcp_artifact_bundle_test :: proc(t:^testing.T,g:^App_Graph,h:^http.MCP_Control_Handlers,headers:[]contracts.HTTP_Header,view:mcp.Access_View) {
+	png:=[]byte{0x89,'P','N','G',0x0d,0x0a,0x1a,0x0a,0x00,0xff};png64,_:=base64.encode(png,allocator=context.temp_allocator)
+	files:=json.Object{"index.html"=json.Object{"text"=json.String("<!doctype html><link rel=stylesheet href=styles.css><img src=logo.png>")},"styles.css"=json.Object{"text"=json.String("body {color:red}")},"logo.png"=json.Object{"base64"=json.String(png64),"type"=json.String("image/png")}}
+	create:=json.Object{"request_id"=json.String("bundle_create"),"name"=json.String("Site"),"description"=json.String("Static site"),"entry"=json.String("index.html"),"files"=files,"task_id"=json.String("task_comment")}
+	response:=mcp_resource_heap_call(h,headers,"artifacts.create",create);result:=mcp_task_test_output(t,response);if result==nil do return
+	id:=string(result["resource_id"].(json.String))
+	testing.expect(t,response.body==mcp_resource_heap_call(h,headers,"artifacts.create",create).body,"bundle create replays its receipt")
+	native,found,_:=iface.content_get_artifact(&g.repos.content,id)
+	testing.expect(t,found && native.kind=="html-bundle" && native.content_type=="application/zip" && native.ext=="zip" && strings.has_prefix(native.content,"vault:v2:") && strings.has_prefix(native.name,"vault:v2:") && native.chain_id=="chain_comment")
+	testing.expect(t,!strings.contains(native.content,"color:red") && !strings.contains(native.content,"doctype"),"stored content is ciphertext only")
+	row:=mcp_resource_first(t,h,headers,"artifacts.get",json.Object{"artifact_id"=json.String(id)})
+	if row!=nil do testing.expect(t,row["kind"].(json.String)=="html-bundle" && row["name"].(json.String)=="Site")
+	// Changed input under the same request_id is a conflict, not a silent replay.
+	files["styles.css"]=json.Object{"text"=json.String("body {color:blue}")}
+	testing.expect(t,strings.contains(mcp_resource_heap_call(h,headers,"artifacts.create",create).body,"idempotency_conflict"))
+	// Validation errors name the reason and store nothing.
+	for bad in ([]json.Object{
+		json.Object{"../x.html"=json.Object{"text"=json.String("x")}},
+		json.Object{"index.html"=json.Object{"text"=json.String("x"),"base64"=json.String("eA==")}},
+		json.Object{"index.html"=json.Object{"text"=json.String("x")},"a.png"=json.Object{"base64"=json.String("%%%")}},
+		json.Object{"index.html"=json.Object{"text"=json.String("x")},"a.exe"=json.Object{"base64"=json.String("eA==")}},
+		json.Object{"other.html"=json.Object{"text"=json.String("x")}},
+	}) {
+		body:=mcp_resource_heap_call(h,headers,"artifacts.create",json.Object{"request_id"=json.String("bundle_bad"),"name"=json.String("Bad"),"entry"=json.String("index.html"),"files"=bad}).body
+		testing.expectf(t,strings.contains(body,"invalid_bundle"),"expected invalid_bundle, got %s",body)
+	}
+	for bad in ([]json.Object{
+		json.Object{"request_id"=json.String("b"),"name"=json.String("B"),"entry"=json.String("index.html")},
+		json.Object{"request_id"=json.String("b"),"name"=json.String("B"),"files"=files},
+		json.Object{"request_id"=json.String("b"),"name"=json.String("B"),"entry"=json.String("index.html"),"files"=files,"content"=json.String("x"),"content_type"=json.String("text/plain")},
+		json.Object{"request_id"=json.String("b"),"name"=json.String("B"),"entry"=json.String("index.html"),"files"=files,"content_type"=json.String("text/plain")},
+		json.Object{"request_id"=json.String("b"),"name"=json.String("B"),"content"=json.String("x"),"content_type"=json.String("application/zip")},
+		json.Object{"request_id"=json.String("b"),"name"=json.String("B"),"entry"=json.String("index.html"),"files"=json.Array{}},
+	}) {_,valid:=http.mcp_arguments("artifacts.create",bad);testing.expect(t,!valid)}
+	// Only artifacts.create with files may exceed the 512 KiB control body.
+	big:=strings.concatenate({`{"jsonrpc":"2.0","id":77,"method":"tools/call","params":{"name":"memories.list","arguments":{"cursor":"`,strings.repeat("x",600*1024,context.temp_allocator),`"}}}`},context.temp_allocator)
+	refused:=http.mcp_control_handler(h,{method="POST",path="/api/v1/mcp",headers=headers,body=big})
+	testing.expect(t,strings.contains(refused.body,"request_too_large"))
 }

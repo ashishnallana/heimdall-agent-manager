@@ -35,6 +35,11 @@ MCP_Control_Handlers :: struct {
 // 64KiB agent instructions may expand sixfold when JSON-escaped; typed tool
 // field limits remain stricter than this bounded transport envelope.
 MCP_CONTROL_MAX_BODY_BYTES :: 512*1024
+// artifacts.create with entry/files only: 15 MiB of decoded bundle content as
+// base64 (x4/3) or JSON-escaped text, plus metadata. Every other method/tool is
+// still refused above MCP_CONTROL_MAX_BODY_BYTES after the parse.
+MCP_CONTROL_MAX_ARTIFACT_BODY_BYTES :: 48*1024*1024
+#assert(MCP_CONTROL_MAX_ARTIFACT_BODY_BYTES<=MAX_HTTP_REQUEST_BYTES)
 mcp_control_register_routes :: proc(r:^Router,h:^MCP_Control_Handlers) {
 	router_add(r,"ANY",MCP_PATH,h,mcp_control_handler)
 	router_add(r,"GET",MCP_OAUTH+"/jobs",h,mcp_worker_handler)
@@ -150,7 +155,7 @@ mcp_control_handler :: proc(ctx:rawptr,req:Request)->(response:Response) {
 	view,valid:=mcp.access_view(h.delegation.service,h.delegation.grant_directory,raw)
 	if !valid do return mcp_unauthorized(h)
 	if req.method!="POST" do return plain_response(405,"method not allowed",{"Allow","POST"})
-	if len(req.body)>MCP_CONTROL_MAX_BODY_BYTES || !strings.has_prefix(header_value(req.headers,"Content-Type"),"application/json") do return mcp_oauth_error("invalid_request")
+	if len(req.body)>MCP_CONTROL_MAX_ARTIFACT_BODY_BYTES || !strings.has_prefix(header_value(req.headers,"Content-Type"),"application/json") do return mcp_oauth_error("invalid_request")
 	defer if req.body!="" do crypto.zero_explicit(raw_data(req.body),len(req.body))
 	rpc,parsed:=mcp_parse_object(req.body)
 	defer vault.control_wipe_value(rpc)
@@ -191,6 +196,11 @@ mcp_control_handler :: proc(ctx:rawptr,req:Request)->(response:Response) {
 	case:return mcp_rpc_error(id,-32601,"Method not found")
 	}
 	name,nok:=params["name"].(json.String)
+	if len(req.body)>MCP_CONTROL_MAX_BODY_BYTES {
+		files,has_files:=params["arguments"].(json.Object)["files"]
+		_,files_object:=files.(json.Object)
+		if !nok || string(name)!="artifacts.create" || !has_files || !files_object do return mcp_rpc_error(id,-32602,"request_too_large: only artifacts.create with entry/files accepts more than 512 KiB")
+	}
 	args,args_ok:=mcp_arguments(string(name),params["arguments"])
 	defer {
 		for text in ([]string{args.catalog.name,args.catalog.slug,args.catalog.instructions}) do if text!="" do crypto.zero_explicit(raw_data(text),len(text))

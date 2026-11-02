@@ -1,9 +1,12 @@
 package http
 
+import "core:encoding/base64"
 import "core:encoding/json"
+import "core:strings"
 import "core:crypto"
 import "core:time"
 import mcp "odin_test:hub/service/mcp"
+import hb "odin_test:lib/html_bundle"
 
 mcp_resource_write_call :: proc(h:^MCP_Control_Handlers,id:json.Value,raw:string,view:mcp.Access_View,tool:string,a:mcp.Resource_Arguments,handle:mcp.Request_Handle,started:time.Tick)->Response {
 	if h.mutate_resource==nil do return mcp_tool_result(id,"request_failed",true)
@@ -20,14 +23,33 @@ mcp_resource_write_call :: proc(h:^MCP_Control_Handlers,id:json.Value,raw:string
 		if read_only,_:=row["read_only"].(json.Boolean);bool(read_only) do return mcp_tool_result(id,"read_only",true)
 	}
 	sealed:=make(json.Object,context.temp_allocator)
-	if len(a.fields)>0 {
-		op:=mcp.Control_Transform{tool=tool,resource_fields=a.fields};result:mcp.Delegation_Result
+	fields:=a.fields
+	// Function-scope wipes: the packed archive and its base64 live until sealed.
+	archive:[]byte;archive64:string
+	defer if len(archive)>0 do crypto.zero_explicit(raw_data(archive),len(archive))
+	defer if len(archive64)>0 do crypto.zero_explicit(raw_data(archive64),len(archive64))
+	if tool=="artifacts.create" && a.files!=nil {
+		// Existing relay trust model: the Hub sees the plaintext tool input, packs the
+		// html-bundle and relays only the archive to the device/hosted sealer, which
+		// re-validates it before sealing the exact bytes (vault content_base64).
+		bundle,bundle_err:=hb.html_bundle_from_entry_files(a.entry,a.files,context.temp_allocator)
+		if bundle_err!="" do return mcp_tool_result(id,strings.concatenate({"invalid_bundle: ",bundle_err},context.temp_allocator),true)
+		archive=bundle.zip
+		encode_err:base64.Error
+		archive64,encode_err=base64.encode(archive,allocator=context.temp_allocator)
+		if encode_err!=nil do return mcp_tool_result(id,"request_failed",true)
+		fields=make(json.Object,context.temp_allocator)
+		for key,value in a.fields do fields[key]=value
+		fields["content_base64"]=json.String(archive64)
+	}
+	if len(fields)>0 {
+		op:=mcp.Control_Transform{tool=tool,resource_fields=fields};result:mcp.Delegation_Result
 		if view.mode=="hosted" {result=mcp.hosted_with_access(h.delegation.service,h.delegation.grant_directory,raw,view.client,mcp.control_hosted_transform,&op)} else {result=mcp_device_transform(h,view,&op,handle,started)}
 		defer if result.response!="" do crypto.zero_explicit(raw_data(result.response),len(result.response))
 		if result.error=="invalid_token" do return mcp_unauthorized(h)
 		if result.error!="" do return mcp_tool_result(id,result.error,true)
 		value,err:=json.parse_string(result.response,parse_integers=true,allocator=context.temp_allocator)
-		obj,typed:=value.(json.Object);if err!=nil || !typed || !mcp_task_sealed_fields(view,a.fields,obj) do return mcp_tool_result(id,"decryption_unavailable",true)
+		obj,typed:=value.(json.Object);if err!=nil || !typed || !mcp_task_sealed_fields(view,fields,obj) do return mcp_tool_result(id,"decryption_unavailable",true)
 		sealed=obj
 	}
 	if time.tick_since(started)>=30*time.Second || mcp.request_cancelled(&h.requests,handle) do return mcp_tool_result(id,"cancelled",true)

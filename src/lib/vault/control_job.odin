@@ -46,6 +46,8 @@ control_job_payload_max :: proc(operation,tool:string)->int {
 	if operation=="seal_resource" && tool=="artifacts.create" do return CONTROL_JOB_ARTIFACT_PAYLOAD_MAX
 	return CONTROL_JOB_PAYLOAD_MAX
 }
+// Reply bound: a bundle seal returns the armored archive token (~base64 size).
+control_reply_max :: proc(operation,tool:string)->int {return control_job_payload_max(operation,tool)}
 control_job_digest :: proc(job:Control_Job)->string {
 	// Include EVERY authority/operation field and public directory snapshot.
 	j:=job;j.digest=""
