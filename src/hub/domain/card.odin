@@ -16,6 +16,7 @@ CARD_SCOPE_AGENT   :: "agent"
 CARD_SCOPE_TASK    :: "task"
 
 CARD_PROVIDER_TASK_VALIDATION :: "task_validation"
+CARD_PROVIDER_TASK_PLACEMENT  :: "task_placement"
 CARD_PROVIDER_MEMORY_PROPOSAL :: "memory_proposal"
 CARD_PROVIDER_CURATOR_LLM     :: "curator_llm"
 // CARD_PROVIDER_MESSAGE_OPTIONS: the latest unread agent message that offers
@@ -35,6 +36,7 @@ CARD_KIND_MEMORY   :: "memory"
 card_kind_for_provider :: proc(provider: string) -> string {
 	switch provider {
 	case CARD_PROVIDER_TASK_VALIDATION: return CARD_KIND_TASK
+	case CARD_PROVIDER_TASK_PLACEMENT: return CARD_KIND_TASK
 	case CARD_PROVIDER_MEMORY_PROPOSAL: return CARD_KIND_MEMORY
 	case CARD_PROVIDER_MESSAGE_OPTIONS: return CARD_KIND_MESSAGE
 	}
