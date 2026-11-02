@@ -1065,6 +1065,8 @@ bridge_hub_handle_command :: proc(conn: ^ws.Connection, text: string) {
 		defer delete(instance_id)
 		ok, restored := bridge_runtime_stop_or_restore(instance_id, extract_json_bool(text, "force", false))
 		defer delete(restored)
+		// The run's final token usage rides on the status report below (T3r).
+		if ok do _ = bridge_ext_token_capture_final(instance_id, bridge_agent_instance_run_count(instance_id))
 		st_json := bridge_instance_status_json(instance_id)
 		defer delete(st_json)
 		_ = bridge_hub_send(conn, st_json)
@@ -2395,7 +2397,7 @@ bridge_hub_handle_wake_agent :: proc(conn: ^ws.Connection, text: string) {
 			if strings.trim_space(id) == "" do continue
 			if coordinator_ids[id] do continue
 			if launch, has := bridge_runtime_get_launch(id); has && launch.role == "coordinator" do continue
-			bridge_runtime_stop_agent(id)
+			if bridge_runtime_stop_agent(id) do _ = bridge_ext_token_capture_final(id, bridge_agent_instance_run_count(id))
 			fmt.println("bridge wake_agent: stopped instance", id)
 		}
 	}
@@ -2582,6 +2584,10 @@ bridge_runtime_launch_agent :: proc(command_id, command_json: string, deadline_n
 	}
 	// A genuine (re)launch supersedes any prior stop intent for this instance id.
 	bridge_runtime_clear_stop_intent(instance_id)
+	// A hub restart arrives as a launch with a newer run_count (no stop_agent):
+	// freeze the previous run's token usage as its final and start the new run
+	// from zero (T3r). The local token record still carries the old generation.
+	_ = bridge_ext_token_capture_final(instance_id, bridge_agent_instance_run_count(instance_id), reset_live = true, now = bridge_runtime_now_ms())
 	// Agents always run in their own managed run dir (never the project path).
 	// The project path/description is provided to the agent via AGENTS.md instead,
 	// so the agent decides when/how to work against the project checkout.
@@ -3354,8 +3360,8 @@ bridge_instance_status_json :: proc(instance_id: string) -> string {
 	strings.write_string(&b, "\"")
 	bridge_runtime_write_instance_error(&b, inst)
 	// Optional small snapshot (extension_token_usage.odin); hubs that predate it
-	// ignore the unknown member.
-	bridge_ext_token_usage_field(&b, inst.agent_instance_id)
+	// ignore the unknown members.
+	bridge_ext_token_usage_field(&b, inst.agent_instance_id, bridge_agent_instance_run_count(inst.agent_instance_id))
 	strings.write_string(&b, "}")
 	return strings.to_string(b)
 }

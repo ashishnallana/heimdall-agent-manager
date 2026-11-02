@@ -2422,6 +2422,7 @@ bridge_ws_process_frame :: proc(h: ^Bridge_Handlers, bridge_id: string, connecti
 				publish_instance_changed(h.event_bus, inst, "status_changed")
 				domain.agent_instance_destroy(&inst)
 			}
+			bridge_apply_token_usage_members(h, bridge_id, instance_id, text)
 		}
 		if h.agents != nil do agent_service.reconcile_instance_reconfigurations(h.agents, bridge_id)
 		current_runtime, current_activity, current_seq, got := bridge_runtime_service.runtime_instance_status(h.bridge_runtime_registry, bridge_id, connection_generation, instance_id)
@@ -2699,6 +2700,27 @@ Bridge_Agent_Status_Report :: struct {
 // Serialize durable status writes with retirement. New connections do not finish
 // admission until the old state writer has drained; a delayed old frame cannot
 // save over the new generation's durable state.
+// bridge_apply_token_usage_members persists the optional token_usage snapshot
+// and adds a token_usage_final (the bridge's frozen usage of a run the hub
+// stopped or restarted) to the instance's lifetime totals once per run (T3r).
+// A change is announced so open agent views refetch.
+bridge_apply_token_usage_members :: proc(h: ^Bridge_Handlers, bridge_id, instance_id, text: string) {
+	if h.agents == nil || instance_id == "" do return
+	usage_raw, _ := jsonx.extract_raw_object(text, "token_usage", true, context.temp_allocator)
+	final_raw, _ := jsonx.extract_raw_object(text, "token_usage_final", true, context.temp_allocator)
+	if usage_raw == "" && final_raw == "" do return
+	res, err := agent_service.apply_bridge_token_usage(h.agents, bridge_id, instance_id, usage_raw, final_raw)
+	if err.code != .None {
+		fmt.eprintln("token usage:", err.message)
+		return
+	}
+	if !res.snapshot_saved && !res.totals_added do return
+	if inst, found, _ := iface.agent_get_instance(h.agents.agents, instance_id); found {
+		publish_instance_changed(h.event_bus, inst, "token_usage_changed")
+		domain.agent_instance_destroy(&inst)
+	}
+}
+
 bridge_apply_validated_status :: proc(h: ^Bridge_Handlers, bridge_id: string, generation: int, id: string, seq: int, status, activity: string, launch_epoch: string = "", error_json: string = "", changed: ^bool = nil) -> (domain.Agent_Instance, bool, domain.Domain_Error) {
 	c := project_service.bridge_runtime_connection_acquire(h.bridge_runtime_registry, bridge_id, generation)
 	if c == nil do return {}, false, domain.domain_error(.Bridge_Offline, "stale bridge generation")

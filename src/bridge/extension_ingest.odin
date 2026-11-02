@@ -22,6 +22,10 @@ Bridge_Ext_Instance_State :: struct {
 	events_accepted:   int,
 	events_dropped:    int,
 	token_usage:       Bridge_Ext_Token_Usage, // extension_token_usage.odin
+	// Frozen usage of the last run the hub stopped or restarted (T3r), sent as
+	// agent_instance_status.token_usage_final; token_final_run = 0 means none.
+	token_final:       Bridge_Ext_Token_Usage,
+	token_final_run:   int,
 	// From the launch command (context_window.odin resolves the window from
 	// these). Empty when the bridge has no launch record for the instance.
 	launch_provider:   string,
@@ -235,6 +239,45 @@ bridge_ext_handle_rpc :: proc(request_id, method, params: string, rec: Bridge_Lo
 
 Bridge_Ext_Context_Window_Instance :: struct {
 	agent_instance_id, provider, model, provider_profile, resolved_model: string,
+}
+
+// bridge_ext_token_capture_final freezes instance_id's current token snapshot
+// as the final usage of run run_count, at a hub-requested stop (stop_agent,
+// wake_agent stop list) or restart (a genuine relaunch). reset_live also zeroes
+// the live counters (keeping the resolved window) so the finished run's figures
+// never leak into the next run; the zeroed snapshot still goes upstream so the
+// hub's latest snapshot restarts too. A status push is queued when a final was
+// captured. Returns whether one was. run_count <= 0 (no hub generation known)
+// captures nothing: the hub could not de-duplicate it.
+bridge_ext_token_capture_final :: proc(instance_id: string, run_count: int, reset_live := false, now: i64 = 0) -> bool {
+	context.allocator = bridge_ext_allocator()
+	if strings.trim_space(instance_id) == "" || run_count <= 0 do return false
+	captured := false
+	sync.mutex_lock(&bridge_ext_mutex)
+	for &s in bridge_ext_states {
+		if s.agent_instance_id != instance_id do continue
+		if s.token_usage.updated_at_ms == 0 do break
+		// A later run's final is never overwritten by an older generation.
+		if run_count >= s.token_final_run {
+			bridge_ext_token_usage_destroy(&s.token_final)
+			s.token_final = bridge_ext_token_usage_clone(s.token_usage)
+			s.token_final_run = run_count
+			captured = true
+		}
+		if reset_live {
+			bridge_ext_token_usage_reset(&s.token_usage, "")
+			s.token_usage.updated_at_ms = now if now > 0 else max(s.token_final.updated_at_ms, 1)
+			s.token_usage.dirty = true
+		}
+		break
+	}
+	sync.mutex_unlock(&bridge_ext_mutex)
+	if captured {
+		sync.mutex_lock(&bridge_runtime_mutex)
+		bridge_runtime_enqueue_status_push_locked(instance_id)
+		sync.mutex_unlock(&bridge_runtime_mutex)
+	}
+	return captured
 }
 
 // bridge_ext_note_launch records an instance's provider/model/profile at launch

@@ -171,17 +171,37 @@ bridge_ext_token_enqueue_due :: proc(now: i64, only_id: string = "") -> int {
 
 // bridge_ext_token_usage_field writes `,"token_usage":{…}` for instance_id when
 // it has a token snapshot; nothing otherwise, so the frame is unchanged for
-// instances without extension token signals.
-bridge_ext_token_usage_field :: proc(b: ^strings.Builder, instance_id: string) {
+// instances without extension token signals. run_count (the bridge's launch
+// generation for the instance; 0 = unknown, omitted) tags the snapshot with its
+// run. A frozen final snapshot of a finished run (T3r) follows as
+// `,"token_usage_final":{…,"run_count":N}` until a newer run's final replaces
+// it, so the hub adds each run to its lifetime totals exactly once even when a
+// frame is lost or replayed (the hub de-duplicates by run_count).
+bridge_ext_token_usage_field :: proc(b: ^strings.Builder, instance_id: string, run_count := 0) {
 	sync.mutex_lock(&bridge_ext_mutex)
 	defer sync.mutex_unlock(&bridge_ext_mutex)
 	for s in bridge_ext_states {
 		if s.agent_instance_id != instance_id do continue
-		if s.token_usage.updated_at_ms == 0 do return
-		strings.write_string(b, ",\"token_usage\":")
-		bridge_ext_token_usage_write_json(b, s.token_usage)
+		if s.token_usage.updated_at_ms != 0 {
+			strings.write_string(b, ",\"token_usage\":")
+			bridge_ext_token_usage_write_json(b, s.token_usage, run_count)
+		}
+		if s.token_final_run > 0 {
+			strings.write_string(b, ",\"token_usage_final\":")
+			bridge_ext_token_usage_write_json(b, s.token_final, s.token_final_run)
+		}
 		return
 	}
+}
+
+// bridge_ext_token_usage_clone copies the snapshot counters (owned strings,
+// context.allocator) without the upstream throttle state.
+bridge_ext_token_usage_clone :: proc(u: Bridge_Ext_Token_Usage) -> Bridge_Ext_Token_Usage {
+	out := u
+	out.session_id = strings.clone(u.session_id)
+	out.context_source = strings.clone(u.context_source)
+	out.dirty, out.has_pushed, out.last_push_at_ms, out.last_push_context = false, false, 0, 0
+	return out
 }
 
 bridge_ext_token_mark_pushed :: proc(u: ^Bridge_Ext_Token_Usage, now: i64) {
@@ -194,8 +214,8 @@ bridge_ext_token_mark_pushed :: proc(u: ^Bridge_Ext_Token_Usage, now: i64) {
 // bridge_ext_token_usage_write_json writes the snapshot object. context_tokens,
 // context_source, context_pct and output_tokens_total are omitted until
 // reported; context_window and window_source (override|config|default) are
-// always present.
-bridge_ext_token_usage_write_json :: proc(b: ^strings.Builder, u: Bridge_Ext_Token_Usage) {
+// always present. run_count > 0 is written as the run the counters belong to.
+bridge_ext_token_usage_write_json :: proc(b: ^strings.Builder, u: Bridge_Ext_Token_Usage, run_count := 0) {
 	strings.write_string(b, fmt.tprintf("{{\"tool_calls\":%d,\"est_tokens_total\":%d", u.tool_calls, u.est_tokens_total))
 	if u.has_context {
 		strings.write_string(b, fmt.tprintf(",\"context_tokens\":%d,\"context_source\":\"", u.context_tokens))
@@ -205,5 +225,6 @@ bridge_ext_token_usage_write_json :: proc(b: ^strings.Builder, u: Bridge_Ext_Tok
 	strings.write_string(b, fmt.tprintf(",\"context_window\":%d,\"window_source\":\"%s\"", bridge_ext_token_usage_window(u), bridge_context_window_source_name(u.window_source)))
 	if pct := bridge_ext_token_usage_context_pct(u); pct >= 0 do strings.write_string(b, fmt.tprintf(",\"context_pct\":%d", pct))
 	if u.has_output_total do strings.write_string(b, fmt.tprintf(",\"output_tokens_total\":%d", u.output_tokens_total))
+	if run_count > 0 do strings.write_string(b, fmt.tprintf(",\"run_count\":%d", run_count))
 	strings.write_string(b, fmt.tprintf(",\"compactions\":%d,\"updated_at_ms\":%d}}", u.compactions, u.updated_at_ms))
 }
